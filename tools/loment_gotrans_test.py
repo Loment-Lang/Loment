@@ -144,6 +144,25 @@ def _go_run(td: Path, go: str, src: Path) -> int:
     return r.returncode
 
 
+def _build_text(td: Path, text: str, name: str = "l_side") -> Path:
+    """把一段 **Loment 源**（不是 Potato 文档）编成 ELF，补一个 `_start` 出来。
+
+    `gotrans.translate` 只发声明本身（`module` 行是另一层的），这里补上。
+    """
+    p = td / f"{name}.lomt"
+    p.write_text(f"module {name}\n\n" + text
+                 + "\nfn _start() {\n    syscall4(60, entry() as u64, 0, 0);\n}\n",
+                 encoding="utf-8", newline="\n")
+    mod = lomentc.load(p)
+    deps = lomentc.resolve_deps(mod, ROOT, p.parent, entry=p)
+    errs = lomentc.check(mod, deps=deps)
+    assert not errs, f"翻译出来的 Loment 检查不过: {errs[:3]}"
+    blob, _info = lomelf.compile_ll(lomentc.emit_llvm(mod, ROOT, deps), [])
+    exe = td / f"{name}.elf"
+    exe.write_bytes(blob)
+    return exe
+
+
 def _build_loment(td: Path, doc: dict) -> Path:
     text, skipped = lomt_from.emit_lomt(doc, impl=True)
     assert not skipped, f"发的时候跳过了东西: {skipped[:3]}"
@@ -262,6 +281,56 @@ def test_statement_forms_others_reject_are_taken_here():
         else:
             raise AssertionError("花括号族把 `i++` 收下了 —— 那边 `++` 是有值的表达式")
     print("      `i++` / `+=` 这一门收（Go 里是语句）；C / Java 那两门拒（那边是表达式）")
+
+
+@test
+def test_block_scope_is_compensated_like_the_brace_family():
+    """块里的遮蔽声明要**改名**，出块后外层那个还回来（`#235` / `#237` 实例 1）。
+
+    Go 有块作用域，本语言没有（`docs/188` §0.1.1）。不补这一层，同一个程序在
+    `grammar go` 下读 50、`grammar c` 下读 10 —— 「表层语法只决定拼法，不决定语义」
+    这条就断了。判据钉的是翻译产物：块里那次 `y := 5` 必须换成另一个名字，
+    函数末尾读的仍是外层那个 `y`。**未修时红**（那时产物里是两条 `let y`）。
+    """
+    src = ("package main\n\nfunc entry() int {\n"
+           "\ty := 1\n\tc := 1\n"
+           "\tif c > 0 {\n\t\ty := 5\n\t\ty = y + 0\n\t}\n"
+           "\treturn y * 10\n}\n")
+    out = gotrans.translate(src)
+    assert "let y: i64 = 1;" in out, out
+    assert "let y_go__" in out, out              # 块里的遮蔽改了名
+    assert "return (y * 10);" in out, out        # 末尾读的是外层那个
+    assert "let y: i64 = 5;" not in out, out     # 没有把外层 y 覆盖掉
+
+
+@test
+def test_a_negative_literal_comparison_stays_true_after_translation():
+    """`if -1 < 0` 在 Go 里为真，翻成 Loment 之后也得为真（`#237` 第二处根）。
+
+    两侧都没有声明类型时，参考实现原先在**两处**都错了，同一个 `-1 < 0` 叠着两个错：
+
+    1. `want` 被当成定宽期望 —— 这里的期望类型是 `bool`，于是比较在 **`i1`** 上做；
+    2. 常量算术默认 `u32` —— 于是助记符是 `icmp ult`。
+
+    合起来 `if -1 < 0` 为**假**。C / Go / Python / Rust 都说真，所以这是"同一份程序
+    换个拼法答案就变"（`#237`）。判据三方对：Go 自己编出来是多少、翻译出来的 Loment
+    跑出来是多少、独立推的期望值是多少 —— 两个数相等不算证据。
+    """
+    src = ("package main\n\nfunc entry() int {\n"
+           "\tif -1 < 0 {\n\t\treturn 7\n\t}\n\treturn 0\n}\n")
+    go = _go()
+    if not go or not _wsl():
+        print("      SKIP: 需要 go + WSL")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        gsrc = td / "NegLit.go"
+        gsrc.write_text(src, encoding="utf-8", newline="\n")
+        go_rc = _go_run(td, go, gsrc)
+        l_rc = _run(_build_text(td, gotrans.translate(src), "neg_lit"))
+    assert go_rc == 7, f"go 那边就不对: {go_rc}（语料或期望值错了）"
+    assert l_rc == 7, f"`-1 < 0` 在翻译出来的 Loment 里是假 ({l_rc}) —— 无类型常量算术落回 u32"
+    print(f"      go -> {go_rc}，翻译成 Loment -> {l_rc}（`-1 < 0` 为真）")
 
 
 @test

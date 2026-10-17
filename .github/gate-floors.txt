@@ -31,7 +31,7 @@ loment_potato_emit_test 6
 loment_grammar_test 20
 loment_tools_test 49
 loment_p7_test 8
-loment_p8_test 31
+loment_p8_test 32
 loment_p9_test 2
 loment_gc_surface_test 3
 loment_gc_why_test 4

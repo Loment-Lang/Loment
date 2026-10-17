@@ -5811,6 +5811,11 @@ fn run(mem: ptr) -> u32 {
     let total: u32 = 0;
     if nshared != 0 {
         tlen = emit_dyn_tail(tab, inb, txt, tlen, dlen, cell(tab, C_BSS));
+        // **尾部那几张表也算进文本段**（上面那道 `OUT_CAP` 检查在它之前跑的）——
+        // 数据段钉在 `TEXT_VADDR + OUT_CAP`，超了就会盖上去，而**盖上去不报错**。
+        if tlen > OUT_CAP {
+            let _f: u32 = fail("文本段+动态表超过 OUT_CAP — 抬 OUT_CAP (loment/tools/lomelf.lomt) 与 tools/lomelf.py 的 TEXT_CAP/ELF_DATA_VADDR");
+        }
         total = build_elf_dynamic(tab, ob, txt, tlen, gb, dlen, cell(tab, C_BSS));
     } else if pe == 1 {
         let idata: ptr = ptr_add(tab, TB_IDATA);

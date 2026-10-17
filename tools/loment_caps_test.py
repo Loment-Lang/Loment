@@ -47,8 +47,13 @@ def test(fn):
 #: `DIR_CAP` / `SUBP_CAP` / `EXT_CAP`，都是静默截断）。另外新增 `EXPLAINED`：筛子判它
 #: 沉默、而**来路已写明**的那几条（见 `tools/loment_caps.py` 那张表，逐条带理由）。
 #: **两个数只许往「更好」的方向动**：条数变是信号，沉默数变小是好事。
-CAPACITY_SITES = 225
-SILENT_SITES = 164
+#:
+#: 2026-10-17（`#360` V2）：`lomelf.lomt` 加了动态链接那三处 —— `EXP_MAX` / `IMP_MAX`
+#: 都有守卫（"有话"），`X_SIZE` 是**导出表那一格的步长**（12 字节），与 `SYM_STRIDE` /
+#: `ARG_STEP` 同形：它不是上界，越过它的是 `EXP_MAX`。所以条数 225 → **228**、
+#: 沉默 164 → **165**（多的是 `X_SIZE` 这一个名字）。
+CAPACITY_SITES = 228
+SILENT_SITES = 165
 
 #: 越界时**说不出话**的那些名字（`--silent` 去重、按字节序）。138 个。
 #: ⚠ 这里按**筛子**的口径（`not speaks`），所以那 6 条"来路已写明"的也在内 ——
@@ -191,6 +196,7 @@ SILENT_NAMES = frozenset((
     "VAL_REC",
     "VIM_CAP",
     "W_EACH",
+    "X_SIZE",
     "ZERO_CAP",
 ))
 

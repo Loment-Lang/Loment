@@ -108,6 +108,16 @@ def _go() -> str | None:
 
 
 def _wsl() -> bool:
+    """"能不能在这台机器上跑 ELF" —— **不是**"有没有 WSL 这个程序"。
+
+    Linux 上恒真（原生跑），Windows 上才要经 WSL。原先是"先查 `which wsl`"，
+    于是 CI 的 Linux 容器里它恒假：这个文件里每一条走 ELF 的判据在 CI 上都**跳过**了
+    （`test_translation_runs_same_as_go` 由 `gate-skips.txt` 登记着，看不出问题；
+    2026-10-17 新加的那条没登记，门禁当场判「跳过了而没登记」）。与
+    `loment_p8_test._wsl` 同一个形状。
+    """
+    if sys.platform.startswith("linux"):
+        return True
     if not shutil.which("wsl"):
         return False
     try:
@@ -119,6 +129,8 @@ def _wsl() -> bool:
 
 def _wsl_path(p: Path) -> str:
     s = str(p.resolve()).replace("\\", "/")
+    if sys.platform.startswith("linux"):
+        return s          # 原生路径；`/mnt/x/...` 那一层只属于 Windows -> WSL
     return "/mnt/" + s[0].lower() + s[2:]
 
 

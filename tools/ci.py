@@ -148,6 +148,9 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  # LVM 的 T2（`docs/259`）：基线编译 —— 原生/T0/T2 三者逐字节同、
                  # 剖面在换引擎后逐字节同、**执行期解码次数为 0**（确定性）、T2 比 T0 快（判符号）。
                  "lvm_t2_test",
+                 # LVM 的紧凑形（`docs/250`）：文本/紧凑形逐字节同（含剖面）、体积变小、
+                 # 加载更快、错形点名拒。
+                 "lvm_compact_test",
                  # LVM 的 T3（`docs/261`）：守卫特化 + 去优化 —— 语料不变、夹具恰好去优化
                  # 一次且副作用只发生一次、反例零去优化。
                  "lvm_t3_test",
@@ -293,6 +296,8 @@ SHARD_COST = {
     "loment_libl_test": 3.0,
     # 实测: 4 条; `lumtui_demo` 在 T0 上要 6.2s×3（判据 D 的 A/B），合计 ~40s。
     "lvm_t2_test": 45.0,
+    # 实测: 4 条; 语料 9 份各编一次紧凑形（`lumtui_demo` 那份解码/编码最重）。
+    "lvm_compact_test": 30.0,
     # 实测: 3 条; 语料 9 份各记一趟值再跑一趟 T3，另两份夹具。
     "lvm_t3_test": 60.0,
     # 实测: 8 条; 每条各编一个原生探针 (参考编译器 IR + lomelf), 端到端那条还起一个

@@ -179,6 +179,7 @@ REPOS: dict[str, dict] = {
             # 参考解释器与两条判据把 `lvm`/`lvm_test` 拉进了门禁闭包，而它们不在清单里）。
             "tools/lvm.py", "tools/lvm_test.py", "tools/lvm_twin_test.py",
             "tools/lvm_profile_test.py",
+            "tools/lvm_t2.py", "tools/lvm_t2_test.py",
             # **L0 契约的对照物**（见文件顶部 `COUNTERPARTS` 的说明）。整目录收不得：
             # `kernel/` 其余是 FujoOS 内核（几 MB 的 Rust），`sdk/` 其余是 ISO/字库/驱动。
             # 这 8 条是判据真正读的那些，一条一条点名。

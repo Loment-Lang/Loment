@@ -252,6 +252,8 @@ tools/lvm.py
 tools/lvm_test.py
 tools/lvm_twin_test.py
 tools/lvm_profile_test.py
+tools/lvm_t2.py
+tools/lvm_t2_test.py
 tools/loment_net_test.py
 tools/lomt_from.py
 tools/loment_multisyntax_test.py

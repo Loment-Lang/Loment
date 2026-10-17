@@ -706,17 +706,27 @@ class Executor(Vm):
 # ---------------------------------------------------------------- 前门
 
 def run_ir(text: str, out, profile: Profile | None = None,
-           argv: list[str] | None = None) -> int:
+           argv: list[str] | None = None, tier: str = "t0") -> int:
     """IR 文本 -> 跑完 -> 进程该退的码。**入口就是 `_start`**（`docs/243` §3.5）。
 
     `profile` 传一个 `Profile` 就记账（T1，`docs/247`）；传 `None`（默认）不记 ——
     **关掉时不写任何字节**，而且被记录程序的行为逐字节不变（判据 D）。
+
+    `tier` 选**哪一格**跑（`docs/232` §4.4）：`"t0"`（默认）是逐条解释，`"t2"` 先用
+    `tools/lvm_t2.py` 把整份 IR 编译一次再跑。**两档给同一个答案**（判据 A/B 各钉一半），
+    默认仍是 t0 —— 换引擎不许悄悄改掉既有判据量到的东西。
 
     `argv` 是**被解释程序自己的**命令行（`docs/243` §3.4）：它读 `/proc/self/cmdline`
     时看到的就是这个。默认 `["<ir>"]` —— 进程内调用手里没有"那个程序叫什么"，
     就不编一个像路径的东西出来；要真名字的调用方自己传（`lvm_test` 传的就是它
     喂给原生产物的同一个名字，好让两边逐字节可比）。
     """
+    if tier == "t2":
+        import lvm_t2                                       # noqa: PLC0415
+
+        return lvm_t2.run_ir_t2(text, out, profile, argv)
+    if tier != "t0":
+        raise LvmError(f"没有这一档: {tier!r}（只有 t0 / t2）")
     globals_, funcs, externs = lomelf.parse_ll(text)
     if profile is not None:
         profile.bind(funcs)
@@ -732,7 +742,7 @@ def run_ir(text: str, out, profile: Profile | None = None,
 
 
 def run_source(src: Path, root: Path, out=None, profile: Profile | None = None,
-               argv: list[str] | None = None) -> int:
+               argv: list[str] | None = None, tier: str = "t0") -> int:
     """与 `lomelf` 同一条前门：`.lomt` -> IR -> 跑。"""
     if argv is None:
         argv = [str(src)]
@@ -744,7 +754,7 @@ def run_source(src: Path, root: Path, out=None, profile: Profile | None = None,
     if errs:
         raise LvmError(f"检查不过: {errs[:2]}")
     return run_ir(lomentc.emit_llvm(mod, root, deps),
-                  out if out is not None else sys.stdout, profile, argv)
+                  out if out is not None else sys.stdout, profile, argv, tier)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -755,6 +765,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("entry", help=".lomt 入口，或 --ir 时是 .ll")
     ap.add_argument("--ir", action="store_true", help="直接吃 IR 文本（跳过前端）")
     ap.add_argument("--root", default=".", help="解析 use 的根（默认当前目录）")
+    ap.add_argument("--tier", choices=("t0", "t2"), default="t0",
+                    help="跑哪一格（docs/232 §4.4）：t0 逐条解释（默认）、t2 编译一次再跑")
     ap.add_argument("--profile-out", metavar="PATH", default=None,
                     help="T1：把反馈剖面写到 PATH（`docs/247`）。不写就不记，一个字节都不写")
     a = ap.parse_args(argv)
@@ -765,9 +777,10 @@ def main(argv: list[str] | None = None) -> int:
         # `--entry` 那段文本**原样**当被解释程序的 argv[0] —— 与自举镜像同一处规矩：
         # "VM 被指到的那个输入路径"（`docs/243` §3.4）。
         if a.ir:
-            rc = run_ir(Path(a.entry).read_text(encoding="utf-8"), buf, prof, [a.entry])
+            rc = run_ir(Path(a.entry).read_text(encoding="utf-8"), buf, prof, [a.entry],
+                        a.tier)
         else:
-            rc = run_source(Path(a.entry).resolve(), root, buf, prof, [a.entry])
+            rc = run_source(Path(a.entry).resolve(), root, buf, prof, [a.entry], a.tier)
     except (LvmError, lomelf.ElfError, lomelf.Unsupported) as e:
         sys.stdout.buffer.write(buf.getvalue())
         print(f"lvm: {e}", file=sys.stderr)

@@ -179,6 +179,7 @@ GLOBS = [
     # LVM 的 T0（`docs/243`）：那份 IR 的**第四个读者**（解释器）+ 它那条判据
     # （同一批程序，原生产物与 VM 比 stdout 字节 + 退出码）。**两处清单插入同一位置**。
     "tools/lvm.py", "tools/lvm_test.py", "tools/lvm_twin_test.py", "tools/lvm_profile_test.py",
+    "tools/lvm_t2.py", "tools/lvm_t2_test.py",
     # `lom/net.lom` 那条 L0 契约的判据 (docs/229): 四处对账 + 自证会红。
     # **位置与自举那份 `lomrel.lomt` 对齐**（两份清单的顺序就是它们的顺序）。
     "tools/loment_net_test.py",

@@ -383,9 +383,19 @@ jobs:
           fi
 
       # 全量取 —— 改号那一步要在前一个 main 上看号（见下面「改号」）。
+      #
+      # **`persist-credentials: false` 是这条链推不推得动 main 的关键**：`actions/checkout`
+      # 默认把 workflow token 写进 `http.https://github.com/.extraheader` 的一条
+      # `AUTHORIZATION` 头，而**它会盖过**下面推送 URL 里的 `x-access-token:<MANIFEST_TOKEN>`
+      # —— 于是推的身份是 `github-actions[bot]`（这个 job 只有 `contents: read`），403，
+      # 而重试循环把它误报成「main 又动了」，连试三轮之后红。
+      #
+      # 实测（2026-10-17）：main 上**从没有过**一笔 `loment-artifacts` 的提交 —— 这条推送
+      # 路一直是坏的，上一次「成功」恰好是"生成物本来就是最新的、什么都不用推"。
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -465,8 +475,14 @@ jobs:
               echo "推上去了：$(git log --oneline -1)"
               exit 0
             fi
-            echo "::warning::推被拒了（main 又动了）—— 重新落在最新的 main 上再算一轮"
             redact "$log"
+            # **权限被拒 ≠ main 动了**。前者重试三轮也不会变好，而日志原先一律说
+            # "main 又动了" —— 那会把一个配置错误伪装成并发，正是这个仓最不肯让的形状。
+            if grep -qiE 'denied to |Permission to |" ?403|401 Unauthorized|Bad credentials|Authentication failed' "$log"; then
+              echo "::error::推被**权限**拒了，不是 main 动了 —— 检查两件事：① secret MANIFEST_TOKEN 是细粒度 PAT、对该仓有 Contents: Read and write、没过期；② 这个 job 的 checkout 有 persist-credentials: false（否则 checkout 写的 extraheader 会盖过 PAT，推的身份变成 github-actions[bot]）。上面是 git 的原文。"
+              exit 1
+            fi
+            echo "::warning::推被拒了（main 又动了）—— 重新落在最新的 main 上再算一轮"
             attempt=$((attempt + 1))
           done
           echo "::error::连试 3 轮都没推上去（main 一直在动）—— 这一轮生成物没刷新"

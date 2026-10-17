@@ -670,7 +670,12 @@ fn needs_space(src: ptr, t: ptr, pp: u32, prev: u32, i: u32, mg: u32) -> bool {
 
 fn cmt_add(mem: ptr, line: u32, st: u32, n: u32, kind: u32) {
     let c: u32 = load32(mem, S_CN);
-    if c < CMT_CAP {
+    // **满了就拒绝，不许悄悄丢**（`#45` 的口径）：一张装不下的注释表如果只是不再收，
+    // 格式化出来的文件就少了几条注释 —— 那正是这个工具要消灭的形状。`fail` 里是
+    // `die(1)`，**不会返回**，所以它下面那句 `store32` 够不着。
+    if c >= CMT_CAP {
+        let _g: u32 = fail("this source has more comments than the formatter can hold (4096) -- split the file");
+    } else {
         let o: u32 = OFF_CMT + c * 16;
         store32(mem, o, line);
         store32(mem, o + 4, st);

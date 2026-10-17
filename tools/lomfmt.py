@@ -114,6 +114,12 @@ def _is_comment_line(s: str) -> bool:
     return t.startswith("//") or t.startswith("/*") or t.startswith("*")
 
 
+#: 注释表的格数。**与孪生同一个数**：`lomfmt.lomt` 那张表落在 `MEM_CAP` 顶上那 64 KiB
+#: （`OFF_CMT`），一格 16 字节，所以 4096。满了**两边都拒**（`#45`：悄悄少几条注释
+#: 正是这个工具要消灭的形状），只是参考实现走的是它文档里那条"读取或词法错误"（退 2）。
+COMMENT_CAP = 4096
+
+
 def _scan_comments(src: str) -> tuple[dict[int, list[str]], dict[int, str]]:
     """注释从源码里**单独扫一遍**（`#45`）。
 
@@ -126,6 +132,7 @@ def _scan_comments(src: str) -> tuple[dict[int, list[str]], dict[int, str]]:
     own: dict[int, list[str]] = {}
     trail: dict[int, str] = {}
     i, n, line = 0, len(src), 1
+    total = 0
     line_has_code = False
     while i < n:
         ch = src[i]
@@ -157,6 +164,11 @@ def _scan_comments(src: str) -> tuple[dict[int, list[str]], dict[int, str]]:
             if j < 0:
                 j = n
             text = src[i:j].rstrip()
+            total += 1
+            if total > COMMENT_CAP:
+                raise ValueError(
+                    f"this source has more comments than the formatter can hold "
+                    f"({COMMENT_CAP}) -- split the file")
             if line_has_code:
                 trail[line] = text
             else:
@@ -167,6 +179,11 @@ def _scan_comments(src: str) -> tuple[dict[int, list[str]], dict[int, str]]:
             j = src.find("*/", i + 2)
             j = n if j < 0 else j + 2
             text = src[i:j]
+            total += 1
+            if total > COMMENT_CAP:
+                raise ValueError(
+                    f"this source has more comments than the formatter can hold "
+                    f"({COMMENT_CAP}) -- split the file")
             if line_has_code:
                 trail[line] = text
             else:

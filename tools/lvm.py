@@ -706,7 +706,8 @@ class Executor(Vm):
 # ---------------------------------------------------------------- 前门
 
 def run_ir(text: str, out, profile: Profile | None = None,
-           argv: list[str] | None = None, tier: str = "t0") -> int:
+           argv: list[str] | None = None, tier: str = "t0",
+           values=None, deopts=None) -> int:
     """IR 文本 -> 跑完 -> 进程该退的码。**入口就是 `_start`**（`docs/243` §3.5）。
 
     `profile` 传一个 `Profile` 就记账（T1，`docs/247`）；传 `None`（默认）不记 ——
@@ -724,9 +725,13 @@ def run_ir(text: str, out, profile: Profile | None = None,
     if tier == "t2":
         import lvm_t2                                       # noqa: PLC0415
 
-        return lvm_t2.run_ir_t2(text, out, profile, argv)
+        return lvm_t2.run_ir_t2(text, out, profile, argv, values)
+    if tier == "t3":
+        import lvm_t3                                       # noqa: PLC0415
+
+        return lvm_t3.run_ir_t3(text, out, profile, argv, values, deopts)
     if tier != "t0":
-        raise LvmError(f"没有这一档: {tier!r}（只有 t0 / t2）")
+        raise LvmError(f"没有这一档: {tier!r}（只有 t0 / t2 / t3）")
     globals_, funcs, externs = lomelf.parse_ll(text)
     if profile is not None:
         profile.bind(funcs)
@@ -742,7 +747,8 @@ def run_ir(text: str, out, profile: Profile | None = None,
 
 
 def run_source(src: Path, root: Path, out=None, profile: Profile | None = None,
-               argv: list[str] | None = None, tier: str = "t0") -> int:
+               argv: list[str] | None = None, tier: str = "t0",
+               values=None, deopts=None) -> int:
     """与 `lomelf` 同一条前门：`.lomt` -> IR -> 跑。"""
     if argv is None:
         argv = [str(src)]
@@ -754,7 +760,8 @@ def run_source(src: Path, root: Path, out=None, profile: Profile | None = None,
     if errs:
         raise LvmError(f"检查不过: {errs[:2]}")
     return run_ir(lomentc.emit_llvm(mod, root, deps),
-                  out if out is not None else sys.stdout, profile, argv, tier)
+                  out if out is not None else sys.stdout, profile, argv, tier,
+                  values, deopts)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -765,28 +772,58 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("entry", help=".lomt 入口，或 --ir 时是 .ll")
     ap.add_argument("--ir", action="store_true", help="直接吃 IR 文本（跳过前端）")
     ap.add_argument("--root", default=".", help="解析 use 的根（默认当前目录）")
-    ap.add_argument("--tier", choices=("t0", "t2"), default="t0",
-                    help="跑哪一格（docs/232 §4.4）：t0 逐条解释（默认）、t2 编译一次再跑")
+    ap.add_argument("--tier", choices=("t0", "t2", "t3"), default="t0",
+                    help="跑哪一格（docs/232 §4.4）：t0 逐条解释（默认）、t2 编译一次再跑、"
+                         "t3 再按值观察做守卫特化（docs/261）")
+    ap.add_argument("--values-out", metavar="PATH", default=None,
+                    help="T3 的**值观察**：把每个调用点第一个实参的观察写成 PATH（需要 --tier t2）")
+    ap.add_argument("--values-in", metavar="PATH", default=None,
+                    help="T3：读进值观察并按它特化（需要 --tier t3）")
+    ap.add_argument("--deopt-out", metavar="PATH", default=None,
+                    help="T3：把去优化记录写到 PATH（不写就不记）")
     ap.add_argument("--profile-out", metavar="PATH", default=None,
                     help="T1：把反馈剖面写到 PATH（`docs/247`）。不写就不记，一个字节都不写")
     a = ap.parse_args(argv)
     root = Path(a.root).resolve()
     buf = io.BytesIO()
     prof = Profile() if a.profile_out else None
+    values = None
+    deopts = None
+    if a.values_out is not None:
+        if a.tier != "t2":
+            print("lvm: --values-out 只在 --tier t2 下记（那条路才有调用点的下标）",
+                  file=sys.stderr)
+            return 2
+        import lvm_t3                                       # noqa: PLC0415
+        values = lvm_t3.Values()
+        prof = prof if prof is not None else Profile()       # 记值要那条带下标的路径
+    if a.tier == "t3":
+        import lvm_t3                                       # noqa: PLC0415
+        if a.values_in is not None:
+            values = lvm_t3.Values.parse(Path(a.values_in).read_text(encoding="utf-8"))
+        if a.deopt_out is not None:
+            deopts = lvm_t3.DeoptLog()
     try:
         # `--entry` 那段文本**原样**当被解释程序的 argv[0] —— 与自举镜像同一处规矩：
         # "VM 被指到的那个输入路径"（`docs/243` §3.4）。
         if a.ir:
             rc = run_ir(Path(a.entry).read_text(encoding="utf-8"), buf, prof, [a.entry],
-                        a.tier)
+                        a.tier, values, deopts)
         else:
-            rc = run_source(Path(a.entry).resolve(), root, buf, prof, [a.entry], a.tier)
+            rc = run_source(Path(a.entry).resolve(), root, buf, prof, [a.entry], a.tier,
+                            values, deopts)
     except (LvmError, lomelf.ElfError, lomelf.Unsupported) as e:
         sys.stdout.buffer.write(buf.getvalue())
         print(f"lvm: {e}", file=sys.stderr)
         return 2
     sys.stdout.buffer.write(buf.getvalue())
-    if prof is not None:
+    if values is not None and a.values_out is not None:
+        with Path(a.values_out).open("w", encoding="utf-8", newline="\n") as f:
+            f.write(values.text())
+    if deopts is not None and a.deopt_out is not None:
+        with Path(a.deopt_out).open("w", encoding="utf-8", newline="\n") as f:
+            f.write(deopts.text())
+    if prof is not None and a.profile_out is not None:
         # `newline="\n"`：本机 `write_text` 会写成 CRLF，而剖面要跨平台逐字节可比。
         with Path(a.profile_out).open("w", encoding="utf-8", newline="\n") as f:
             f.write(prof.text())

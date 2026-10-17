@@ -151,6 +151,9 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  # LVM 的紧凑形（`docs/250`）：文本/紧凑形逐字节同（含剖面）、体积变小、
                  # 加载更快、错形点名拒。
                  "lvm_compact_test",
+                 # LVM 的 T3（`docs/261`）：守卫特化 + 去优化 —— 语料不变、夹具恰好去优化
+                 # 一次且副作用只发生一次、反例零去优化。
+                 "lvm_t3_test",
                  # `lom/net.lom` 那条 L0 契约 (docs/228): 号 → 面的单源, 四面对账
                  "loment_net_test",
                  # FFI 第 1 阶段 (docs/173): 外部目标文件 + C ABI + lomelf 单独链接, 跑出结果
@@ -295,6 +298,8 @@ SHARD_COST = {
     "lvm_t2_test": 45.0,
     # 实测: 4 条; 语料 9 份各编一次紧凑形（`lumtui_demo` 那份解码/编码最重）。
     "lvm_compact_test": 30.0,
+    # 实测: 3 条; 语料 9 份各记一趟值再跑一趟 T3，另两份夹具。
+    "lvm_t3_test": 60.0,
     # 实测: 8 条; 每条各编一个原生探针 (参考编译器 IR + lomelf), 端到端那条还起一个
     # 真 http.server。本机 6.9s。
     "loment_internet_test": 10.0,

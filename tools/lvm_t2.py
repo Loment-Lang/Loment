@@ -375,8 +375,11 @@ class T2Executor(lvm.Executor):
     """T0 的执行体 + 一个**编译档**的 `run`。系统调用 / 内存 / 剖面**全用 T0 那一份**。"""
 
     def __init__(self, globals_: list, funcs: list, externs: list, out,
-                 profile=None, argv: list[str] | None = None) -> None:
+                 profile=None, argv: list[str] | None = None, values=None) -> None:
         super().__init__(globals_, funcs, externs, out, profile, argv)
+        #: T3 的**值观察**（`docs/248` §3.2 的 B1 要"值"，而剖面只记次数）。
+        #: 只在开着剖面时才记（那一条路本来就有指令下标 `j`）—— 见 `_OP_CALL` 那一支。
+        self.values = values
         # ⚠ **必须在 `super().__init__` 之后**：那里才调 `_place_globals` 给
         # `Global.addr` 赋值，而编译期要拿那个地址去编每个 `@global` 操作数。
         self.prog = Program(globals_, funcs, externs)
@@ -415,6 +418,8 @@ class T2Executor(lvm.Executor):
                         _, cname, a_ops, d = op
                         args = [_rd(vals, o) for o in a_ops]
                         prof.call_site((name, labels[bi], j), cname)
+                        if self.values is not None and args:
+                            self.values.observe((name, labels[bi], j), args[0])
                         v = self.call_t2(self.prog.cfunc(cname), args)
                         if d >= 0:
                             vals[d] = v
@@ -600,12 +605,15 @@ def _run_value(vm: T2Executor, vals: list, op: tuple) -> None:
 
 
 # ---------------------------------------------------------------- 前门
-def run_ir_t2(text: str, out, profile=None, argv: list[str] | None = None) -> int:
+def run_ir_t2(text: str, out, profile=None, argv: list[str] | None = None,
+              values=None) -> int:
     """IR 文本 -> **编译一次** -> 跑完 -> 退出码。与 `lvm.run_ir` 同一个契约。"""
     globals_, funcs, externs = lomelf.parse_ll(text)
     if profile is not None:
         profile.bind(funcs)
-    vm = T2Executor(globals_, funcs, externs, out, profile, argv)
+    if values is not None:
+        values.bind(funcs)                  # 没有它 `text()` 不知道按什么顺序输出
+    vm = T2Executor(globals_, funcs, externs, out, profile, argv, values)
     if "_start" not in vm.prog.funcs:
         raise lvm.LvmError("这份 IR 里没有 `_start`")
     start = vm.prog.cfunc("_start")

@@ -63,7 +63,15 @@ import loment_p8_test as H  # noqa: E402  # 复用已验过的构建/运行夹�
 # 2026-10-14 真线程 `thread_spawn`（M84, `docs/245`）落地: **102/104**。五条 ——
 # 入口不是字面量、入口在本单元里查不到、入口形参不是一个、元数不对、实参类型不对。
 # 这一族是"**直接调用**买到的东西"（入口是编译期的名字），所以三条语义都判得了。
-BUDGET = 102
+# 2026-10-15 LMS 第 1 级检查器 `E028`（`docs/253` §5.1，字面量下标越过定长数组的界）：
+# 两套实现都补齐 ⇒ **103/105**。这一条**只有这张表抓得住** —— 孪生判据
+# (`loment_p8_test` / `loment_potato_emit_test`) 的语料里没有一个用 `lms_open`，
+# 所以"参考侧拒、自举侧不拒"在那两条判据下照样绿。
+# ⚠ 补这一条时**当场抓到一个真 bug**：加 `lms` 那一维时自举侧 `chk_core_dim` 的
+# "不是核心维"哨兵没跟着从 5 挪到 6，于是 `choose lms_open` 被当成**未定义的开关**
+# 报 E022 —— 码是错的、理由也是错的，而别的判据全绿。**这就是这张表存在的理由。**
+# 2026-10-15 同日 `E029`（用完再放）也补齐 ⇒ **104/106**。两条各一个探针，两边码集相等。
+BUDGET = 104
 
 # --------------------------------------------------------------------------- 案例表
 #
@@ -326,6 +334,19 @@ _CASES: list[tuple[str, str]] = [
     ("thread-arg-type",
      "module m\n\nfn worker(a: u64) -> u32 {\n    return 0;\n}\n\n"
      "fn f() -> i64 {\n    return thread_spawn(\"worker\", true, 1, 2);\n}\n"),
+    # ---- LMS 第 1 级检查器 (E028) ------------------------------------------
+    # `docs/253` §5.1：`lms` 开着时，**字面量下标越过定长数组的界**是编译期的一个诊断。
+    # ⚠ **这一条为什么必须进这张表**：孪生判据**看不见**这个分歧 ——
+    # `loment_p8_test` / `loment_potato_emit_test` 的语料里没有一个用 `lms_open`，
+    # 所以"参考侧拒、自举侧不拒"在那两条判据下**照样绿**（孪生只证一致，不证对）。
+    # 只有这张表会让同一个 `choose lms_open` 源**两边各跑一遍、比码集**。
+    ("lms-e028-literal-index-over-a-fixed-array",
+     "module m\n\nchoose lms_open\n\nfn f() -> u32 {\n"
+     "    let a: [u32; 4] = [1, 2, 3, 4];\n    let x: u32 = a[10];\n    return x;\n}\n"),
+    ("lms-e029-use-after-free",
+     "module m\n\nchoose runtime\nchoose lms_open\n\nfn f() -> u32 {\n"
+     "    let p: ptr = alloc(8);\n    free(p);\n"
+     "    let x: u32 = load8(p, 0);\n    return x;\n}\n"),
     # ---- 语句起点的"这不是表达式" (issue #49) ---------------------------------
     # `@` 在**词法上是合法 punct**（L0 的布局语法用它），L1 里却不是任何表达式的开头。
     # 参考实现自 2026-09-09 起就报 E019；自举侧原先**一条都不报** —— 编译通过、退出码 0、
@@ -353,6 +374,26 @@ _CASES: list[tuple[str, str]] = [
      "module m\n\nfn f() -> u32 {\n    let x = 1;\n    return x;\n}\n"),
     ("f64-in-annotation",
      "module m\n\nfn f() -> u32 {\n    let a: f64 = 1.0;\n    return 0;\n}\n"),
+    # `#323` 的另一半：**类型位上的未知名**是 E030，两侧都要是。上面那条压根到不了类型表
+    # （`1.0` 里的 `.` 在解析期就被拒成 E019）；这两条才量到 E030 本身。
+    # 第二条尤其要紧：在 `check_type` 补上 `[` 的递归之前，自举侧**一条都不报** ——
+    # 数组/切片的元素类型从来没被检查过，也就是**静默放行一个不存在的类型**。
+    ("unknown-type-let",
+     "module m\n\nfn f() -> u32 {\n    let a: f64 = 0;\n    return 0;\n}\n"),
+    ("unknown-type-array-element",
+     "module m\n\nfn f() -> u32 {\n    let a: [f64; 4] = [0, 0, 0, 0];\n    return 0;\n}\n"),
+    # `#33` / `#36`：字符串里的**未知转义**。参考实现在词法期就拒（E019）；自举词法器没有
+    # 失败通道，所以同一件事落在 `chk_syntax_prepass` —— 两边的**码**必须一样。
+    ("unknown-string-escape",
+     "module m\n\nfn f() -> u32 {\n    let s: str = \"a\\qb\";\n    return 0;\n}\n"),
+    # `#48`：`loment check` 对**编不过**的源退出 0、零输出。两条都是"自举侧没有解析器，
+    # 于是这种语法错在它眼里根本不存在"：块没闭合、语句之间少一个 `;`。参考实现在解析期
+    # 各报一条 E019，自举侧原先**一条都不报** —— 于是 check 说"没事"。
+    ("unclosed-brace",
+     "module m\n\nfn f() -> u32 {\n    let v: u32 = 1;\n"),
+    ("missing-semicolon",
+     "module m\n\nfn f() -> u32 {\n    let v: u32 = 1\n    let w: u32 = 2;\n"
+     "    return v;\n}\n"),
     ("bin-literal",
      "module m\n\nfn f() -> u32 {\n    let v: u32 = 0b1010;\n    return v;\n}\n"),
     # ---- 自举侧"死给你看"的两条 (issue #335 / #44) --------------------------------

@@ -121,8 +121,21 @@ fn write_all(fd: u64, p: ptr, n: u64) -> u64 {
     return off;
 }
 
+/// 面向用户的失败消息: `loment: <msg>` 换行。前缀是 **`loment`**(用户敲的那个命令),
+/// 不是 `fujofmt`/`lomfmt`(这个包里的格式化器组件名) —— issue #8。
 fn fail(msg: str) -> u32 {
+    write_all(2, str_ptr("loment: "), str_len("loment: ") as u64);
     write_all(2, str_ptr(msg), str_len(msg) as u64);
+    write_all(2, str_ptr("\n"), str_len("\n") as u64);
+    return die(1);
+}
+
+/// 同 `fail`, 消息后面接一段**已经量好的字节** (路径)。
+fn failp(msg: str, tail: ptr, n: u32) -> u32 {
+    write_all(2, str_ptr("loment: "), str_len("loment: ") as u64);
+    write_all(2, str_ptr(msg), str_len(msg) as u64);
+    write_all(2, tail, n as u64);
+    write_all(2, str_ptr("\n"), str_len("\n") as u64);
     return die(1);
 }
 
@@ -244,13 +257,10 @@ fn val_eq(src: ptr, t: ptr, i: u32, tbl: str, off: u32, len: u32) -> bool {
         if c == 92 && j + 1 < e {
             let x: u32 = load8(src, j + 1);
             c = x;                  // Python: _ESCAPES.get(x, x) —— 引号/反斜杠/未知都取原字符
-            if x == 110 {
-                c = 10;
-            } else {
-                if x == 116 {
-                    c = 9;
-                }
-            }
+            if x == 110 { c = 10; }
+            if x == 116 { c = 9; }
+            if x == 114 { c = 13; }   // `#36`: `\r` 原先不在表里, 被吃成字母 `r`
+            if x == 48 { c = 0; }     // `#33`: `\0` 仓库自己在用 (`proc.lomt` 的 "/bin/sh\0")
             j = j + 2;
         } else {
             j = j + 1;
@@ -522,13 +532,10 @@ fn emit_tok(mem: ptr, src: ptr, t: ptr, i: u32, mg: u32) -> u32 {
         if c == 92 && j + 1 < e {
             let x: u32 = load8(src, j + 1);
             c = x;                  // Python: _ESCAPES.get(x, x)
-            if x == 110 {
-                c = 10;
-            } else {
-                if x == 116 {
-                    c = 9;
-                }
-            }
+            if x == 110 { c = 10; }
+            if x == 116 { c = 9; }
+            if x == 114 { c = 13; }   // `#36`
+            if x == 48 { c = 0; }     // `#33`
             j = j + 2;
         } else {
             j = j + 1;
@@ -836,7 +843,7 @@ fn _start() -> u32 {
     let argv_buf: u64 = sys_alloc(65536);
     let scrv: u64 = sys_alloc(8192);
     if memv == 0 || srcv == 0 || tokv == 0 || argv_buf == 0 || scrv == 0 {
-        return fail("fujofmt: brk failed\n");
+        return fail("out of memory (brk failed)");
     }
     let mem: ptr = memv as ptr;
     let src: ptr = srcv as ptr;
@@ -844,13 +851,13 @@ fn _start() -> u32 {
     let scr: ptr = scrv as ptr;
     let av: u64 = argv1(argv_buf as ptr, 65536, scr);
     if av == 0 {
-        return fail("fujofmt: 用法: fujofmt <文件.lomt>\n");
+        return fail("usage: loment fmt <file.lomt>");
     }
     let ap: ptr = ptr_add(argv_buf as ptr, (av >> 32) as u32);
     let an: u32 = (av % 4294967296) as u32;
     let fd: i64 = open_ro(ap, an, scr);
     if fd < 0 {
-        return fail("fujofmt: 打不开输入文件\n");
+        return failp("cannot open the input file: ", ap, an);
     }
     let raw: u64 = read_all(fd as u64, src, SRC_CAP as u64);
     syscall4(3, fd as u64, 0, 0);
@@ -861,8 +868,7 @@ fn _start() -> u32 {
     // `--write` 是**原地写回**：声明那一行一旦被当成正文重排，前门会把它抹成等长空白，
     // 那一行上的函数跟着消失，而这里照旧退 0 —— 用户的源就这么被改坏了。
     if foreign_grammar(src, toks, cnt) == 1 {
-        return fail("lomfmt: 这是用别的写法写的 Loment（文件头有 `choose write grammar`）—— lomfmt 只处理**原生**写法。这份源要交给编译器：`loment check <文件>`（docs/211 / docs/182 §1.9）。
-");
+        return fail("this source is written in another grammar (its header has `choose write grammar`) and this formatter takes the native spelling only -- hand the file to the compiler instead: `loment check <file>`");
     }
     let m: u32 = format_src(src, toks, cnt, mem);
     write_all(1, ptr_add(mem, OFF_OUT), m as u64);

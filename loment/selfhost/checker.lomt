@@ -4,7 +4,7 @@ choose runtime
 // M81 (子集): Loment 版类型/符号检查 —— 消费 M79 token 流, 判定程序是否合法。
 // 覆盖规则 (与 Python 版 lomentc.check 的判定对照):
 //   E-DUP-NAME    : 顶层名字重复 (fn/struct/enum/const) + 字段/变体/形参重名
-//   E-UNKNOWN-TYPE: 声明里的类型未声明 (参数/返回/字段/变体载荷/let)
+//   E-UTYPE       : 类型位置上的**未知名** (参数/返回/字段/变体载荷/数组元素/let) —— E030
 //   E-UNKNOWN-FN  : 调用未声明的函数
 //   E-ARITY       : 实参个数与声明/内建签名不符
 //   E-DEF         : 类型名为基类型 / 结构体或枚举为空
@@ -50,7 +50,11 @@ const K_METHOD: u32 = 6;   // impl 方法: 名字与接收者类型一起构成�
 // 自举 checker 与参考实现的对照判据 = 两边**码集相等**, 所以码值必须取自同一张表 ——
 // 以前这里自定义 1..4, 与 loment_diag 的分类对不上 (E_DUP=1 vs E013=13 之类)。
 const E_DUP: u32 = 13;     // E013 重名
-const E_TYPE: u32 = 2;     // E002 符号未声明 (含"类型未声明"/"未定义的函数")
+const E_TYPE: u32 = 2;     // E002 符号未声明 (变量 / 函数)
+// E030 **类型位置上的未知名**（`#323`）。与 E_TYPE 分开的理由与参考实现同一条
+// （`lomentc._no_such_type`）：E002 的修法是"声明那个名字"，这一条的修法是"这门语言
+// 没有这个类型"—— 最常撞的是 `f64`，而 Loment 没有浮点。
+const E_UTYPE: u32 = 30;
 const E_FN: u32 = 2;
 const E_ARITY: u32 = 3;    // E003 实参数量不符
 const E_CAP: u32 = 4;      // E004 能力域非法
@@ -67,6 +71,7 @@ const E_Q: u32 = 10;       // E010 `?` 误用
 const E_MOVE: u32 = 6;     // E006 移动后使用
 const E_DANGLE: u32 = 12;  // E012 悬垂借用 (返回局部变量的借用)
 const E_MODE: u32 = 22;    // E022 项目模式 `choose` 用法不对 (docs/143 §3.2)
+const E_RT: u32 = 31;      // E031 这一档是 `no_runtime`，而这个构造要运行期 (issue #321)
 const E_PARSE: u32 = 19;   // E019 期望表达式 —— 参考实现 `parse_primary` 的口径 (issue #49)
 const E_DEEP: u32 = 23;    // E023 源码太深 —— 嵌套超过 64 层 (issue #44)
 
@@ -80,6 +85,14 @@ pub const RT_N_SITES: u32 = 4100;
 // 都发 E_CAP，而参考侧同一条消息归类成 5，码集对不上（`loment_rule_parity` 里没有探针，
 // 所以一直没露头）。2026-10-11 加"行为轴"那一条时一并分开。
 const E_EXCL: u32 = 5;
+// E028 = **LMS 第 1 级检查器**（`docs/253` §5.1）：`lms` 开着时，**字面量下标越过定长
+// 数组的界**是编译期的一个诊断，不是运行期的一种可能。
+// ⚠ 码值取自 `loment_diag.RULES` 的数字部分（与上面那批同一条纪律），现行最高是 E027
+// ⇒ 这条是 **28**。**码号比行号硬**：`docs/253` 初稿按旧检出写的 E024–E026 全被占了。
+const E_BOUND: u32 = 28;
+// E029 = **LMS 第 1 级检查器**（`docs/253` §5.1）：**用完再放**（use-after-free）——
+// `free(p)` 之后再用 `p`。与 E006（已被移动）**分开**：移走是所有权的事，释放是合法性的事。
+const E_BOUND_FREE: u32 = 29;
 
 // 类型编码 (批次 2): 一个 u32 —— 0 = 未知, 其它按 (kind << TY_KIND_SHIFT) + payload。
 //   kind 1 = 基类型 (payload = 1..11 的内码)
@@ -454,7 +467,11 @@ fn chk_core_dim(src: ptr, t: ptr, k: u32) -> u32 {
     if chk_tok_is(src, t, k, "vm") || chk_tok_is(src, t, k, "no_vm") {
         return 4;
     }
-    return 5;
+    // 第六维（`docs/253`，用户 2026-10-15）：`lms`。与 `gc` **正交**。
+    if chk_tok_is(src, t, k, "lms_close") || chk_tok_is(src, t, k, "lms_open") {
+        return 5;
+    }
+    return 6;
 }
 
 /// token `i` 是不是**会把运行期拖进产物**的构造（`docs/217`）。1 = 是。
@@ -543,6 +560,13 @@ fn chk_core_val(src: ptr, t: ptr, k: u32) -> u32 {
         return 1;
     }
     if chk_tok_is(src, t, k, "no_vm") {
+        return 2;
+    }
+    // 第六维（`docs/253`）：`lms_close` / `lms_open`。
+    if chk_tok_is(src, t, k, "lms_close") {
+        return 1;
+    }
+    if chk_tok_is(src, t, k, "lms_open") {
         return 2;
     }
     return 0;
@@ -686,10 +710,18 @@ fn declare(src: ptr, t: ptr, s: ptr, n: u32, name_tok: u32, ka: u32,
     return ((n + 1) as u64) * 4294967296 + (o as u64);
 }
 
-/// 类型位置检查: 支持 [T]/[T; N]/mut [T] 或已声明名字; 未声明 -> E-TYPE。
+/// 类型位置检查: 支持 [T]/[T; N]/mut [T] 或已声明名字; 未知名 -> E-UTYPE。
+///
+/// **`[` 要钻进去**（`#323`）：原先见到 `[` 就**直接返回**，于是 `[f64; 4]` 这类
+/// **元素类型**从来没被检查过 —— 参考实现会报（`_type_ok` 对数组/切片是递归的），
+/// 自举侧一条不报，也就是**静默放行**一个不存在的类型。
 fn check_type(src: ptr, t: ptr, s: ptr, n: u32, i: u32, p: ptr, o: u32) -> u64 {
-    if chk_tok_is(src, t, i, "[") || chk_tok_is(src, t, i, "mut") {
-        return (i as u64) * 4294967296 + (o as u64);
+    if chk_tok_is(src, t, i, "mut") {
+        return check_type(src, t, s, n, i + 1, p, o);
+    }
+    if chk_tok_is(src, t, i, "[") {
+        // `[T]` 与 `[T; N]` 同形: `[` 后面第一个 token 就是元素类型, 长度在 `;` 之后。
+        return check_type(src, t, s, n, i + 1, p, o);
     }
     if is_base_type(src, t, i) {
         return (i as u64) * 4294967296 + (o as u64);
@@ -699,7 +731,7 @@ fn check_type(src: ptr, t: ptr, s: ptr, n: u32, i: u32, p: ptr, o: u32) -> u64 {
             return (i as u64) * 4294967296 + (o as u64);
         }
     }
-    return (i as u64) * 4294967296 + (sym_pub(src, t, p, o, E_TYPE, i) as u64);
+    return (i as u64) * 4294967296 + (sym_pub(src, t, p, o, E_UTYPE, i) as u64);
 }
 
 /// 从 i 起找下一个 '(' 的下标 (处理泛型 `<T>` 前缀)。
@@ -1220,6 +1252,58 @@ fn chk_env_add(t: ptr, env: ptr, envc: u32, name_tok: u32, ty: u32) -> u32 {
     return envc + 1;
 }
 
+/// 一个 **number** token 的整数值（十进制 / `0x` 十六进制）。**与 `codegen.lomt` 的
+/// `tok_int` 同口径，但本模块不依赖它** —— `checker.lomt` 是零依赖模块，与
+/// `switches.lomt` 的 `sw_tok_is` 同一条理由。
+fn chk_tok_int(src: ptr, t: ptr, i: u32) -> u32 {
+    let st: u32 = load32(t, i * 20 + 4);
+    let n: u32 = load32(t, i * 20 + 8);
+    if n >= 2 && load8(src, st) == 48 && (load8(src, st + 1) == 120 || load8(src, st + 1) == 88) {
+        let v: u32 = 0;
+        let k: u32 = 2;
+        while k < n {
+            let c: u32 = load8(src, st + k);
+            let d: u32 = 0;
+            if c >= 48 && c <= 57 {
+                d = c - 48;
+            } else if c >= 97 && c <= 102 {
+                d = c - 87;
+            } else if c >= 65 && c <= 70 {
+                d = c - 55;
+            }
+            v = v * 16 + d;
+            k = k + 1;
+        }
+        return v;
+    }
+    let r: u32 = 0;
+    let j: u32 = 0;
+    while j < n {
+        r = r * 10 + (load8(src, st + j) - 48);
+        j = j + 1;
+    }
+    return r;
+}
+
+/// `lms` 开着吗（`docs/253`） —— 第 1 级检查器（E028）的开关。
+///
+/// **扫 token 流**，与 `codegen.lomt` 的 `gc_alpha_tier` 同一个形状（那边扫
+/// `choose gc_auto_alpha`）—— 两边读的都是**根单元源码里那个词**，那是同一条纪律。
+///
+/// ⚠ **为什么在这里自己扫一遍，而不是让调用方传进来**：`chk_tex` 已经有八个参数，
+/// 再加一个要把**所有递归调用点**都改一遍。而这个判断只在「**定长数组 + 裸字面量下标**」
+/// 那一格才被问到 —— 那是稀有形状，一遍扫描的代价落在那里可以接受。
+fn chk_lms_on(src: ptr, t: ptr) -> u32 {
+    let i: u32 = 0;
+    while chk_tok_kind(t, i) != 4 {
+        if chk_tok_is(src, t, i, "choose") && chk_tok_is(src, t, i + 1, "lms_open") {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 /// 名字对应的类型: 局部环境优先, 再看顶层符号表 (模块级常量在函数体内可见,
 /// 参考实现是 `scope = dict(const_scope)` 起手)。
 fn chk_name_ty(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32, name_tok: u32) -> u32 {
@@ -1534,6 +1618,28 @@ fn chk_tex(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                               chk_lh(idx_at + 1, br), tyt, p, oc);
         if it != 0 && chk_ty_is_int(it) == 0 {
             chk_pub(src, t, oc, p, E_TMISMATCH, idx_at);   // 下标类型，应为整型
+        }
+        // **E028**：**字面量下标越过定长数组的界**当场拒。
+        //
+        // **2026-10-16 起它不再看 `lms`**（issue #18）。原先只在 `choose lms_open` 时发，
+        // 而 `lms` 是**开发通道的中间态**（`docs/253` §14.2：不进发行版）—— 发行版的用户
+        // 拿不到。可它本来就不是一条 LMS 检查：`docs/205` §1.1 C5 早把「越界访问在
+        // **字面量**时编译期拒」写成语言规则，那一格只覆盖 `guard`（`docs/146` §3：
+        // `guard cap(9)` 对域 `[0..4]` 是编译错误）。同一个"字面量越界"两个答案，正是
+        // issue #18 点名的那处不一致。参考实现那一侧同步改了（`_walk_expr` 的 Index 支）。
+        //
+        // 实测来路（`docs/253` §4.4）：`a[10]` 配 `[u32; 4]` 发出来的是
+        // `getelementptr inbounds ... i32 10`，而 `inbounds` 在 LLVM IR 里恰是"越界即 UB"。
+        // 两条收窄，缺一不可：
+        //   * 只对**定长数组**（`chk_ty_is_arr` 排除了切片 —— 后者的长度是运行期的；
+        //     那一半见 `docs/205` §1.1 C5：默认档不检查，用 `slice_len` + 一个 `if` 自己挡）；
+        //   * 下标必须是**裸字面量**（`[ N ]` 恰好三个 token）—— 与参考实现判 `IntLit`
+        //     同口径；写成 `[10 + 0]` 就不报，两边一致。
+        if chk_ty_is_arr(tyt, ot) == 1 && chk_match_bracket(src, t, idx_at) == idx_at + 2
+                && chk_tok_kind(t, idx_at + 1) == 1 {
+            if chk_tok_int(src, t, idx_at + 1) >= chk_ty_b(tyt, ot) {
+                chk_pub(src, t, oc, p, E_BOUND, idx_at);
+            }
         }
         if chk_ty_is_arr(tyt, ot) == 1 || chk_ty_is_slc(tyt, ot) == 1 {
             return chk_ty_a(tyt, ot);
@@ -2473,6 +2579,80 @@ fn chk_mv_add(src: ptr, t: ptr, tyt: ptr, name_tok: u32) {
     }
 }
 
+// ------------------------------------------------ E029 已释放表（`docs/253` §5.1）
+//
+// **与 `moved` 分开的第二张表**：移走是**所有权**的事（E006），释放是**合法性**的事
+// （E029）—— 两回事，两张表同构（条数 + 8 字节一条的名字 token）。
+//
+// ⚠ **偏移 2048 是挑出来的**：`tyt` 块 4112 字节（`chk_arena_tyt` / `chk_arena_bytes`），
+// 而 `moved` 那族从 3520 起；类型表用 0..1028（128 条）。**1028..3520 这一段是空的** ——
+// 新表放中间最安全（离两头都远，将来任一张表扩容都不会撞上）。
+// ⚠ **它必须与类型表一起按函数清零**（见 `check_arena` 里 `chk_body` 之前那三行）——
+// 不清就是整单元单调 bump。
+const CHK_FR_ON: u32 = 2044;   // 0 = 还没算, 1 = `lms` 开着, 2 = 关着 (缓存)
+const CHK_FR_N: u32 = 2048;    // 条数
+const CHK_FR_T: u32 = 2056;    // 表项起始
+
+fn chk_fr_has(src: ptr, t: ptr, tyt: ptr, name_tok: u32) -> u32 {
+    let n: u32 = load32(tyt, CHK_FR_N);
+    let i: u32 = 0;
+    while i < n {
+        if same(src, t, load32(tyt, CHK_FR_T + i * 8), name_tok) {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn chk_fr_add(src: ptr, t: ptr, tyt: ptr, name_tok: u32) {
+    if chk_fr_has(src, t, tyt, name_tok) == 0 {
+        let n: u32 = load32(tyt, CHK_FR_N);
+        if n < 63 {
+            store32(tyt, CHK_FR_T + n * 8, name_tok);
+            store32(tyt, CHK_FR_N, n + 1);
+        }
+    }
+}
+
+/// 重新绑定（`let` / 赋值）= 这个名字不再指那块死掉的块 ⇒ 从表里拿掉。
+/// **与参考实现同口径**（那边是 `freed.discard`，`tools/lomentc.py` 的 `_move_check`）——
+/// 少了它，"`free` 之后重新 `alloc` 再读"会**假阳性**，而假阳性正是这张表最该避免的
+/// （`loment_rule_parity` 判 `EXTRA`）。
+///
+/// 用"最后一个补上这一格"删 —— 顺序对这张表不重要（它只做成员判定）。
+/// ⚠ **不用裸 `return`**：Loment 的 `return` 必须带表达式。
+fn chk_fr_del(src: ptr, t: ptr, tyt: ptr, name_tok: u32) {
+    let n: u32 = load32(tyt, CHK_FR_N);
+    let i: u32 = 0;
+    let done: u32 = 0;
+    while i < n && done == 0 {
+        if same(src, t, load32(tyt, CHK_FR_T + i * 8), name_tok) {
+            store32(tyt, CHK_FR_T + i * 8, load32(tyt, CHK_FR_T + (n - 1) * 8));
+            store32(tyt, CHK_FR_N, n - 1);
+            done = 1;
+        }
+        i = i + 1;
+    }
+}
+
+/// `lms` 开着吗（`docs/253`）—— **带缓存**：`chk_use` 会对每一个标识符问一次，
+/// 每次都扫一遍 token 流是 O(n²)。算一次存在 `CHK_FR_ON`，按函数清零。
+fn chk_lms_c(src: ptr, t: ptr, tyt: ptr) -> u32 {
+    let v: u32 = load32(tyt, CHK_FR_ON);
+    if v == 0 {
+        v = 2;
+        if chk_lms_on(src, t) == 1 {
+            v = 1;
+        }
+        store32(tyt, CHK_FR_ON, v);
+    }
+    if v == 1 {
+        return 1;
+    }
+    return 0;
+}
+
 /// 局部环境里第 idx 个名字 (0 = 不在; 否则 下标+1)。
 fn chk_env_idx(src: ptr, t: ptr, env: ptr, envc: u32, name_tok: u32) -> u32 {
     let i: u32 = 0;
@@ -2521,6 +2701,9 @@ fn chk_use(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             }
             if borrowed == 0 && chk_mv_has(src, t, tyt, j) == 1 {
                 chk_pub(src, t, oc, p, E_MOVE, j);      // 变量 X 已被移动, 不能再用
+            } else if borrowed == 0 && chk_fr_has(src, t, tyt, j) == 1
+                    && chk_lms_c(src, t, tyt) == 1 {
+                chk_pub(src, t, oc, p, E_BOUND_FREE, j);   // 指向的块已经被 `free`, 不能再用
             }
         }
         j = j + 1;
@@ -2564,6 +2747,8 @@ fn chk_moves(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                     chk_mark_call_moves(src, t, syms, n, env, envc, tyt, eq + 1, semi);
                 }
             }
+            // **E029**：`let` 重新绑定这个名字 ⇒ 它不再指那块死掉的块（参考实现同口径）。
+            chk_fr_del(src, t, tyt, j + 1);
             if semi <= e {
                 j = semi + 1;
             } else {
@@ -2622,6 +2807,12 @@ fn chk_moves(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 } else {
                     chk_mark_call_moves(src, t, syms, n, env, envc, tyt, eq2 + 1, semi2);
                 }
+                // **E029**：给这个名字**重新赋值** ⇒ 它不再指那块死掉的块 —— 从"已释放"
+                // 表里拿掉（与参考实现的 `freed.discard` 同口径）。少了它，
+                // "`free` 之后重新 `alloc` 又读"会**假阳性**。
+                if eq2 == j + 1 && chk_tok_kind(t, j) == 0 {
+                    chk_fr_del(src, t, tyt, j);
+                }
             } else {
                 chk_use(src, t, syms, n, env, envc, chk_lh(j, semi2), tyt, p, oc);
                 chk_mark_call_moves(src, t, syms, n, env, envc, tyt, j, semi2);
@@ -2659,6 +2850,15 @@ fn chk_mark_call_moves(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             }
         }
         k = k + 1;
+    }
+    // **E029**（`docs/253` §5.1）：`free(p)` 之后 `p` 指向的块没了 —— 记进"已释放"表。
+    // ⚠ **放在这里而不是调用方**：调用顺序是 `chk_use` 先跑（"用"的检查）、本函数后跑 ——
+    // 而 `free` 自己那个实参**是一次合法的用**，先登记就会把 `free(p)` 本身报成
+    // "用了已经释放的块"。
+    if chk_tok_kind(t, lo) == 0 && chk_tok_is(src, t, lo, "free")
+            && chk_tok_is(src, t, lo + 1, "(") && chk_tok_kind(t, lo + 2) == 0
+            && chk_lms_c(src, t, tyt) == 1 {
+        chk_fr_add(src, t, tyt, lo + 2);
     }
 }
 
@@ -3091,13 +3291,27 @@ fn chk_syntax_prepass(src: ptr, t: ptr, out: ptr, o: u32) -> u32 {
     let depth: u32 = 0;
     let deep_done: u32 = 0;
     while chk_tok_kind(t, i) != 4 {
+        // **裸块不是语句**（`#44`）：Loment 没有"单独一层花括号"这回事，参考实现在解析期
+        // 就在**第一个**这种 `{` 上报 E019（`期望表达式，得到 '{'`）。合法块的开头永远跟着
+        // `)`、标识符（`else` / `struct S` / `match x` …）、`]`、`=>`、`to`，**不会是**
+        // `{` / `}` / `;`。不判这一条的话，下面那道深度上限会先开火，于是同一份源两边给出
+        // **不同的码**（参考 19 / 自举 23）—— 400 层裸块那正是 issue #44 的复现。
+        // `o == 0`：参考实现是"**第一个**解析错就中止"，所以只报第一条 —— 400 层裸块
+        // 若每层都报，用户会看到几十条一模一样的诊断。
+        if chk_tok_is(src, t, i, "{") && i > 0 && o == 0
+                && (chk_tok_is(src, t, i - 1, "{") || chk_tok_is(src, t, i - 1, "}")
+                    || chk_tok_is(src, t, i - 1, ";")) {
+            o = sym_pub(src, t, out, o, E_PARSE, i);
+        }
         // **太深了要当场说**（issue #44）：参考实现在解析期就设 64 层的上限并报 E023；自举侧
         // 原先一路走到 codegen 才在递归里把栈用穿 —— **段错误、零输出**。这一趟跑到 codegen
         // 之前，报出来就整趟不跑，正好把那边的段错误也挡在门外。
         // 只报**第一次**越界：再往上每层都报一遍对读者没意义（参考实现也只报一条）。
+        // **已经报过语法错就不再报它**：参考实现是"第一个解析错就中止"，两条一起报会让
+        // 码集比它多一个。
         if chk_tok_is(src, t, i, "{") {
             depth = depth + 1;
-            if depth > 64 && deep_done == 0 {
+            if depth > 64 && deep_done == 0 && o == 0 {
                 o = sym_pub(src, t, out, o, E_DEEP, i);
                 deep_done = 1;
             }
@@ -3111,6 +3325,27 @@ fn chk_syntax_prepass(src: ptr, t: ptr, out: ptr, o: u32) -> u32 {
         if chk_tok_kind(t, i) == 0 && chk_tok_is(src, t, i, "return")
                 && chk_tok_is(src, t, i + 1, ";") {
             o = sym_pub(src, t, out, o, E_PARSE, i + 1);
+        }
+        // **字符串里的未知转义**（`#33` / `#36`）：参考实现在**词法期**就拒，而自举词法器没有
+        // 失败通道 —— 那一档并进这一趟，码与它一致（E019），且"报了就不再往下跑"。
+        // 认的六个与 `lomc._ESCAPES` 同一份：`n` `t` `r` `0` `\\` `"`。原先的兜底是"取原
+        // 字符"，于是 `"\r"` 静默变成字母 `r`、`"\x41"` 静默变成 `x41` 三个字符。
+        if chk_tok_kind(t, i) == 2 {
+            let est: u32 = load32(t, i * 20 + 4);
+            let eln: u32 = load32(t, i * 20 + 8);
+            let ek: u32 = 1;
+            while ek + 1 < eln {
+                if load8(src, est + ek) == 92 {
+                    let ee: u32 = load8(src, est + ek + 1);
+                    if !(ee == 110 || ee == 116 || ee == 114 || ee == 48
+                         || ee == 92 || ee == 34) {
+                        o = sym_pub(src, t, out, o, E_PARSE, i);
+                    }
+                    ek = ek + 2;
+                } else {
+                    ek = ek + 1;
+                }
+            }
         }
         if chk_tok_kind(t, i) == 0 && chk_tok_is(src, t, i, "let")
                 && !(i > 0 && (chk_tok_is(src, t, i - 1, "if")
@@ -3135,7 +3370,36 @@ fn chk_syntax_prepass(src: ptr, t: ptr, out: ptr, o: u32) -> u32 {
         if chk_bad_num_suffix(src, t, i) {
             o = sym_pub(src, t, out, o, E_PARSE, i);
         }
+        // **语句之间少一个 `;`**（`#48`）：`let` 只能**起头** —— 前面是 `{` `}` `;` `if`
+        // `comefor` `else` `=>`。前面是个**值**（标识符 / 字面量 / `)` / `]`）就说明上一句
+        // 没写完；参考实现在解析期报「期望 ;」，而自举侧原先**一声不吭**，于是
+        // `loment check` 退出 0、零输出。
+        // **例外**：`command c` / `foruse py` 之后那个词是**语言名**，紧跟的 `let c {` 是
+        // 外部代码块声明（`loment/extblock/evil.lomt` 就是这一格），不是变量绑定 —— 全仓
+        // 扫过，这是唯一一处。
+        if chk_tok_kind(t, i) == 0 && chk_tok_is(src, t, i, "let") && i > 0 && o == 0 {
+            let ok: u32 = 0;
+            if chk_tok_is(src, t, i - 1, "{") || chk_tok_is(src, t, i - 1, "}")
+                    || chk_tok_is(src, t, i - 1, ";") || chk_tok_is(src, t, i - 1, "if")
+                    || chk_tok_is(src, t, i - 1, "comefor")
+                    || chk_tok_is(src, t, i - 1, "else")
+                    || chk_tok_is(src, t, i - 1, "=>") {
+                ok = 1;
+            }
+            if i >= 2 && (chk_tok_is(src, t, i - 2, "command")
+                          || chk_tok_is(src, t, i - 2, "foruse")) {
+                ok = 1;
+            }
+            if ok == 0 {
+                o = sym_pub(src, t, out, o, E_PARSE, i);
+            }
+        }
         i = i + 1;
+    }
+    // **块没闭合**（`#48`）：参考实现在解析期就报「的块没闭合」；自举侧原先一路数到结束、
+    // 一声不吭 —— `loment check` 于是退出 0、零输出。
+    if depth != 0 && o == 0 {
+        o = sym_pub(src, t, out, o, E_PARSE, i);
     }
     return o;
 }
@@ -3166,6 +3430,9 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     let nch_rt: u32 = 0;
     let nch_port: u32 = 0;
     let nch_vm: u32 = 0;        // 第五维（`docs/231`）：执行模型
+    let nch_lms: u32 = 0;       // 第六维（`docs/253`）：内存安全 —— ⚠ **只数重复**：
+                                // `lms` 今天**没有冲突对**（它不引入运行期组件，`docs/253` §11.2），
+                                // 所以不像上面五维那样还要 `v_*` / `ln_*` 来判冲突。
     // 生效的取值（0 = 没写），用来判"两档不能同时选"（`docs/175` §3.4 ⚠）。
     // **要等这一遍走完才判** —— 两行谁先写是不定的。
     let v_mode: u32 = 0;        // 1 = std, 2 = no_std
@@ -3372,6 +3639,12 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                 if nch_vm > 1 {
                     o = sym_pub(src, t, out, o, E_MODE, i);
                 }
+            } else if dim == 5 {
+                // 第六维（`docs/253`）：`lms`。**只有重复要判** —— 它没有冲突对。
+                nch_lms = nch_lms + 1;
+                if nch_lms > 1 {
+                    o = sym_pub(src, t, out, o, E_MODE, i);
+                }
             } else {
                 // 不是核心模式的取值 —— 与改之前那条同形
                 // (锚在 `choose` 上而不是取值上: 参考实现也是报 choose_lines 那一行)。
@@ -3423,8 +3696,13 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
         o = sym_pub(src, t, out, o, E_MODE, later_line(ln_gc, ln_rt));
     }
     // ---- **运行期维的强保证**（`docs/217`）：`no_runtime`（默认）说"产物里没有运行期"，
-    // 所以凡是会把那段运行期拖进产物的构造，在**这一档下**编译期点名拒（E022 —— 按
-    // "码按修法分"，这一条的修法与 `choose` 那几条同族：去写一行 `choose runtime`）。
+    // 所以凡是会把那段运行期拖进产物的构造，在**这一档下**编译期点名拒。
+    //
+    // **码是 E031，不是 E022**（issue #321，2026-10-16 改判）：原先并进 E022，理由是
+    // "码按修法分，这一条也要去改 `choose`"。实测那条理由数错了读者 —— 报的是用户写的
+    // **那个构造**，而他那一行 `choose` 是对的；而 E022 的标题说的正是"`choose` 写错了"。
+    // 码是用户最先读到的那个词，指错子系统就是误导。参考实现那一侧同步改了
+    // （`tools/loment_diag.py` 的 `RULES`）。
     // **锚在第一个这样的 token 上**，与参考实现 `_runtime_sites` 取首项同判。
     if eff_rt == 2 {
         let jr: u32 = 0;
@@ -3443,7 +3721,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
         // 报文的"这一类构造本单元另有 N 处"用它（issue #321）。
         store32(tyt, RT_N_SITES, nsites);
         if nsites > 0 {
-            o = sym_pub(src, t, out, o, E_MODE, hit);
+            o = sym_pub(src, t, out, o, E_RT, hit);
         }
     }
     // (gc, port)：混合档的 L2 是前沿回卷，C 库手里的指针在 Loment 的栈之外（`docs/219` §6.1）。
@@ -3586,6 +3864,10 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                 let envc: u32 = chk_env_params(src, t, syms, n, env, 0, lp2, fbra, oc);
                 store32(oc, 0, o);
                 store32(tyt, 0, 0);          // 类型表按**函数**清零 (见 chk_arena_tyt)
+                // E029 的"已释放"表与 `lms` 档的缓存 —— **也必须按函数清零**：
+                // 不清就是整单元单调 bump，而这张表的容量只有 63（`CHK_FR_N`）。
+                store32(tyt, CHK_FR_N, 0);
+                store32(tyt, CHK_FR_ON, 0);
                 store32(tyt, 3528, envc);    // 形参数 (E012 判"局部 vs 形参")
                 store32(tyt, 3520, envc);
                 chk_body(src, t, syms, n, env, envc,

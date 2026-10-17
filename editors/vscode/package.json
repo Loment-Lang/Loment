@@ -7,7 +7,7 @@
   "license": "Loment-Open",
   "repository": {
     "type": "git",
-    "url": "https://github.com/FujoJTOP/loment.git"
+    "url": "https://github.com/Loment-Lang/loment.git"
   },
   "icon": "loment-icon.png",
   "engines": {

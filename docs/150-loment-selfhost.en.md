@@ -1,5 +1,5 @@
 <!-- translated-from: docs/150-loment-selfhost.md -->
-<!-- source-sha256: 0a2dbbedac821f97321dd1de817ce02db00687fa8f70a7accaa7ba87872fe8df -->
+<!-- source-sha256: a6f9a3d47a7ad73cfb2bb2041fc41550ce09a17addba2ecd230259aaeffbed8e -->
 
 # 150 · Loment self-hosting (P8, M79–M88)
 
@@ -67,8 +67,11 @@ corpus"):
 
 - the dump rule for the `else` branch (when there is exactly one If, **no** leading space) → see the previous section;
 - the convention for string literals: the reference's `tok.val` is the content **after unescaping**, and the
-  dump must re-escape by (backslash -> quote -> newline), with unknown escapes (`\q` -> `q`) and tab falling
-  back per `_ESCAPES`;
+  dump must re-escape by (backslash -> quote -> newline), with tab falling back per `_ESCAPES`;
+  NOTE **since 2026-10-16 there is no "unknown escape takes the character itself" fallback** (`#33` / `#36`):
+  the table is `n t r 0 \ "`, and anything outside it is **E019**. The old fallback turned `""` into the
+  letter `r` and `"A"` into the three characters `x41`. The self-host lexer has no failure channel, so the
+  refusal lands in `chk_syntax_prepass` (the same pass as "a parse error aborts");
 - a type name is a **normalised string** (`mut [u32]` / `[u32; 4]` / `Name<A, B>`); reading it token by token
   would split `mut [u32]` into several "formals";
 - `&mut x` / `&x` are **unary** operators (op = `&mut`/`&`), not the binary `&`;

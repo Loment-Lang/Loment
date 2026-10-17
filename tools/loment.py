@@ -41,7 +41,11 @@ def _load(file: str):
     # **唯一入口**（`docs/182` §1.10）：预扫 → 装载 → 解析依赖。
     # 这一处原先自己拼 `load` + `resolve_deps` —— 少了预扫那一趟 `addin` 就白写，
     # 实测加 `addin` 之后当场红（"未定义的开关" + `addin` 目标根本没进单元）。
-    mod, deps = lomentc.load_unit(p, ROOT)
+    try:
+        mod, deps = lomentc.load_unit(p, ROOT)
+    except OSError as e:
+        # 与 `lomentc.main` 那条同源（`issue #8`）：文件这一层的失败不再甩 Python 栈。
+        raise SystemExit(f"loment: 读不了输入文件 {p}: {e.strerror or e}")
     errs = lomentc.check(mod, deps=deps)
     if errs:
         for e in errs:

@@ -181,6 +181,8 @@ tools/potato_llm_arm.py
 tools/potato_assert.py
 tools/loment.py
 tools/lomfmt.py
+tools/lomf.py
+loment/patches/*.lomf
 tools/lomdoc.py
 tools/lompkg.py
 tools/lomlib.py
@@ -192,6 +194,8 @@ tools/loment_os_test.py
 tools/loment_thread_test.py
 tools/loment_lumtui_test.py
 tools/loment_cli_test.py
+tools/loment_caps.py
+tools/loment_caps_test.py
 tools/loment_err_test.py
 lompi/*.lomt
 lompi/store/std/0.1.0/*
@@ -223,6 +227,8 @@ tools/loment_gc_why_test.py
 tools/loment_syscalls.py
 tools/loment_manual.py
 tools/ci.py
+tools/loment_invariant_test.py
+tools/loment_suite.py
 tools/vscode_ext.py
 tools/vscode_ext_test.py
 tools/loment_dap.py
@@ -327,6 +333,7 @@ loment/cpptrans/*.cpp
 loment/gotrans/*.go
 loment/nltrans/*.nl
 loment/nltrans/*.lomt
+loment/invariants/*.lomt
 loment/examples/*.lomt
 loment/selfhost/*.lomt
 loment/corpus.json

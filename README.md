@@ -3,15 +3,15 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/FujoJTOP/loment/actions/workflows/gate.yml"><img src="https://github.com/FujoJTOP/loment/actions/workflows/gate.yml/badge.svg" alt="gate"></a>
-  <a href="https://github.com/FujoJTOP/loment/releases/latest"><img src="https://img.shields.io/github/v/release/FujoJTOP/loment?label=release&amp;color=4c6ef5" alt="latest release"></a>
+  <a href="https://github.com/Loment-Lang/loment/actions/workflows/gate.yml"><img src="https://github.com/Loment-Lang/loment/actions/workflows/gate.yml/badge.svg" alt="gate"></a>
+  <a href="https://github.com/Loment-Lang/loment/releases/latest"><img src="https://img.shields.io/github/v/release/Loment-Lang/loment?label=release&amp;color=4c6ef5" alt="latest release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Loment--Open-4c6ef5" alt="license: Loment-Open"></a>
   <a href="https://discord.gg/rGw7NRNU"><img src="https://img.shields.io/badge/Discord-join%20chat-5865F2?logo=discord&amp;logoColor=white" alt="Discord"></a>
 </p>
 
 <p align="center">
-  <a href="https://fujojtop.github.io/loment-site/">Website</a> ·
-  <a href="https://github.com/FujoJTOP/loment/releases/tag/v0.1.4.5-quickfix">Download 0.1.4.5</a> ·
+  <a href="https://loment-lang.github.io/loment-site/">Website</a> ·
+  <a href="https://github.com/Loment-Lang/loment/releases/tag/v0.1.4.5-quickfix">Download 0.1.4.5</a> ·
   <a href="QUICKSTART.md">Quick start</a> ·
   <a href=".claude/skills/loment/SKILL.md">Language guide</a> ·
   <a href="standard/LLS.md">Standard</a> ·
@@ -64,7 +64,7 @@ hello from Loment
 
 ## Getting help
 
-Ask in an [issue](https://github.com/FujoJTOP/loment/issues), on
+Ask in an [issue](https://github.com/Loment-Lang/loment/issues), on
 [Discord](https://discord.gg/rGw7NRNU) or on [Mastodon](https://mastodon.social/@Loment).
 Questions are as welcome as bug reports.
 

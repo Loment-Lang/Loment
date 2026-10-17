@@ -221,6 +221,13 @@ fn emit_val(s: ptr, out: ptr, lvl: u32) -> u32 {
 
 // ---------------------------------------------------------------- 类型
 
+//: 类型记号里的哨兵: `0` = 未知 (调用方落到**期望类型**)、`4294967295` = unit (`void`)。
+//: **`4294967294` = `bool`** —— 源里不一定有 `bool` 那个词可以指 (`(a < 0)` 就没有),
+//: 而参考实现 `expr_type(Bin)` 对比较/逻辑**直接返回 `"bool"`** (`tools/lomentc.py`)。
+//: 少这个记号, 自举侧只能拿操作数的类型顶上去 —— `(a<0) != (b<0)` 于是发成 `icmp ne i64`,
+//: 而那两个操作数其实是 `i1` (`#316`)。
+const CG_TY_BOOL: u32 = 4294967294;
+
 fn emit_ty(s: ptr, out: ptr, src: ptr, toks: ptr, tt: u32) -> u32 {
     let stt: u32 = subst_tok(s, src, toks, tt);   // 泛型实例: 类型参数 -> 具体类型
     if stt != tt {
@@ -228,6 +235,9 @@ fn emit_ty(s: ptr, out: ptr, src: ptr, toks: ptr, tt: u32) -> u32 {
     }
     if tt == 4294967295 {   // UNIT: 无 `-> T` 的函数
         return emit_str(s, out, "void");
+    }
+    if tt == CG_TY_BOOL {
+        return emit_str(s, out, "i1");
     }
     if tt == 0 {
         return emit_str(s, out, "i32");
@@ -366,9 +376,48 @@ fn sub_expr_type(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
     return expr_type(s, src, toks, j);
 }
 
-/// [j+1, rp) 这一段按参考实现的 `expr_type(Bin) = lt or rt` 取类型: 先取第一个操作数,
-/// 为空再取某个**顶层**二元运算符右侧的操作数。操作数一律交给 `sub_expr_type`。
+/// [j+1, rp) 这一段按参考实现的 `expr_type(Bin)` 取类型: **先看算子** —— 这一段的
+/// **最深那个**算子 (`op_prec` 最小者, 与 `expr_bin` 的取法同一条规则) 若是比较/逻辑
+/// (`&&` `||` `==` `!=` `<` `<=` `>` `>=`, 即 `op_code` 的 1..8), 那这一段就是 `bool`,
+/// **不看操作数是谁**; 其余情形才是 `lt or rt`: 先取第一个操作数, 为空再取某个
+/// **顶层**二元运算符右侧的操作数。操作数一律交给 `sub_expr_type`。
+///
+/// 少了"算子优先"那一步, `(a < 0)` 会被顶成 `a` 的类型 (i64), 而它的值其实是 `i1` ——
+/// 于是 `(a<0) != (b<0)` 发成 `icmp ne i64`, 两个操作数却是 `i1` (`#316`)。
+///
+/// 扫的时候**多记号算子整条跳掉** (`k0 = k0 + op_toks(c0)`): `>>` 是两个 `>` 记号,
+/// 而单独一个 `>` 会被 `op_code` 读成比较 (7) —— 不跳的话
+/// `(w[i] >> (i % 32)) & 1` 会被误判成 bool, 发成 `and i1` (实测踩到, 在 `potato.lomt`
+/// 的 IR 里现形)。取"最深那个"而不是"见到就算", 是因为算术比比较**紧**:
+/// `a & b == c` 的顶层是 `==` 而 `a >> b` 的顶层是 `>>`。
 fn operand_bin_type(s: ptr, src: ptr, toks: ptr, j: u32, rp: u32) -> u32 {
+    let k0: u32 = j + 1;
+    let d0: u32 = 0;
+    let best: u32 = 0;
+    while k0 < rp {
+        if tok_is(src, toks, k0, "(") || tok_is(src, toks, k0, "[") {
+            d0 = d0 + 1;
+            k0 = k0 + 1;
+        } else if tok_is(src, toks, k0, ")") || tok_is(src, toks, k0, "]") {
+            d0 = d0 - 1;
+            k0 = k0 + 1;
+        } else {
+            let c0: u32 = op_code(src, toks, k0);
+            if c0 == 0 {
+                k0 = k0 + 1;
+            } else {
+                if d0 == 0 {
+                    if best == 0 || op_prec(c0) < op_prec(best) {
+                        best = c0;
+                    }
+                }
+                k0 = k0 + op_toks(c0);
+            }
+        }
+    }
+    if best >= 1 && best <= 8 {
+        return CG_TY_BOOL;
+    }
     let t: u32 = sub_expr_type(s, src, toks, j + 1);
     if t != 0 {
         return t;
@@ -684,7 +733,10 @@ fn expr_type(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
         if tok_is(src, toks, rp2 + 1, "as") {
             return rp2 + 2;
         }
-        return expr_type(s, src, toks, j + 1);
+        // 括号**透明**, 但里面那一段要按 `expr_type(Bin)` 判 (算子优先, 见
+        // `operand_bin_type`): 直接递归到 `j+1` 会把 `(a < 0)` 判成 `a` 的类型,
+        // 而它的值是 `bool` (`#316`)。
+        return operand_bin_type(s, src, toks, j, rp2);
     }
     if tok_is(src, toks, j, "-") || tok_is(src, toks, j, "!") {
         return expr_type(s, src, toks, j + 1);
@@ -1897,11 +1949,18 @@ fn emit_str_lit_bytes(s: ptr, out: ptr, src: ptr, toks: ptr, i: u32) -> u32 {
         let b: u32 = load8(src, st + k);
         if b == 92 {
             let e: u32 = load8(src, st + k + 1);
+            // 转义表与 `lomc._ESCAPES` 同一份（`#33` / `#36`）：`\n` `\t` `\r` `\0`；其余
+            // （`\\` `\"` 以及未知）取那个字符本身。**未知那一档由 checker 报 E019** ——
+            // 自举词法器没有失败通道，所以拒绝落在检查期。
             let d: u32 = e;
             if e == 110 {
                 d = 10;
             } else if e == 116 {
                 d = 9;
+            } else if e == 114 {
+                d = 13;
+            } else if e == 48 {
+                d = 0;
             }
             emit_hex_byte(s, out, d);
             k = k + 2;
@@ -5279,8 +5338,22 @@ fn count_args(src: ptr, toks: ptr, lp: u32) -> u32 {
 /// 却没有任何全局可引用 —— **实测**：一份只用整数除法（于是 `@__loment_` 出现、
 /// 运行期被发出）而不用 `alloc` 的单元，编译期直接报
 /// `use of undefined value '@__loment_freehead'`。文本与 `lomentc._IR_HEAP` 同序。
-fn emit_heap(s: ptr, out: ptr) -> u32 {
-    return emit_str(s, out, "; ---- 分配器（docs/175 §3.4 的 `gc_manual`）------------------------------------
+fn emit_heap(s: ptr, out: ptr, lms: u32) -> u32 {
+    // **LMS 第 3 级入口 A**（`docs/253` §5.3）：`lms` 开着时，`alloc` 分配不出**先收一次
+    // 再试**，还不行才 abort。这段文本与 `lomentc._IR_HEAP_LMS` **逐字节同源** ——
+    // 四处增量与参考那一侧的四处改写一一对应：
+    //   ① 全局声明（`@__loment_lms_retry`）；② `floop` 的 phi 多一条入边；
+    //   ③ `boom` 换成 `rescue`/`dead`；④ **两条成功返回前**各清一次重试标记。
+    // ⚠ **④ 不能省**：不清的话"这一次"用掉的唯一一次重试会**留给下一次分配** ——
+    // 那是**假的能力**（第二次真耗尽时它不救了）。
+    // ⚠ 上面那句"脚本从它生成"是**旧注释**：树里**没有**那个脚本，这一段是手维护的。
+    let o: u32 = 0;
+    if lms == 1 {
+        o = emit_str(s, out, "@__loment_lms_retry = internal global i1 false");
+        o = emit_str(s, out, "
+");
+    }
+    o = emit_str(s, out, "; ---- 分配器（docs/175 §3.4 的 `gc_manual`）------------------------------------
 ;
 ; 这里以前是**纯 bump**（`@__loment_off` 只涨不落），而 `free` 是个**占位** ——
 ; 写它编得过、跑起来什么都不发生。`docs/175` §3.4 把那种形状点名叫「**允诺却不兑现**」，
@@ -5297,7 +5370,9 @@ fn emit_heap(s: ptr, out: ptr) -> u32 {
 ;
 ; 三条规则，各有它要挡的东西：
 ;   * **第一次适配 + 拆分**：空闲块大到有余（余量 ≥ 16）就切一块出来，余下的还回链上。
-;     不拆的话一次大分配会把整个链表吃光。
+;     不拆的话一次大分配会把整个链表吃光。**记录尺寸永远等于这块的实际跨度** ——
+;     不拆的时候**不把 size 改小**（余量不足 16 字节，改小它换不来可用空间，
+;     只让按 size 走的遍历掉进块内部，`FujoJTOP/loment#368`）。
 ;   * **地址序**：链表按地址升序，`free` 线性找插入点。顺序让「前沿回退」可判。
 ;   * **前沿回退**：释放的那一块**正好顶到 bump 前沿**时，直接把前沿退回去。
 ;     这是 LIFO（分配—释放—再分配）不涨内存的原因；没有它，`free` 只是把块挂起来，
@@ -5317,9 +5392,17 @@ entry:
   %head = load i32, ptr @__loment_freehead
   br label %floop
 floop:
-  %cur = phi i32 [ %head, %entry ], [ %nxt, %fnext ]
+");
+    if lms == 1 {
+        o = emit_str(s, out, "  %cur = phi i32 [ %head, %entry ], [ %nxt, %fnext ], [ %head2, %rescue ]
+  %prev = phi i32 [ 0, %entry ], [ %cur, %fnext ], [ 0, %rescue ]
+");
+    } else {
+        o = emit_str(s, out, "  %cur = phi i32 [ %head, %entry ], [ %nxt, %fnext ]
   %prev = phi i32 [ 0, %entry ], [ %cur, %fnext ]
-  %fend = icmp eq i32 %cur, 0
+");
+    }
+    o = emit_str(s, out, "  %fend = icmp eq i32 %cur, 0
   br i1 %fend, label %bump, label %fit
 fit:
   %hp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %cur
@@ -5339,14 +5422,25 @@ take:
   %rest = load i32, ptr %tpp
   br i1 %cansplit, label %split, label %nosplit
 split:
+  ; **块的记录尺寸只在「真拆了」的时候才改小**（`FujoJTOP/loment#368`）——
+  ; 原来这句在 `taken:` 里无条件执行，于是**不拆分**那条路（余量 < 16 字节，
+  ; 块还是那么大，只是没切）也会把 size 改成 `need`。后果有两层：
+  ;   * 按 `size` 往前走的每一趟（`__loment_alloc` 的首次适配、`__loment_sweep`、
+  ;     `__loment_propagate`、以及收集器的两步）都会从 `cur + need` 继续，
+  ;     而那已经不是下一块了 —— 它掉进**块的内部**，把载荷当尺寸读；
+  ;   * 载荷里的字节多半是 0 ⇒ `i += 0` ⇒ **死循环**（实测：2 分钟不返回）。
+  ; 判据：`loment_elf_test::test_a_reused_block_keeps_its_recorded_extent`。
   %so = add i32 %cur, %need
   %spp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %so
   store i32 %slack, ptr %spp
   %so4 = add i32 %so, 4
   %spp4 = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %so4
   store i32 %rest, ptr %spp4
+  store i32 %need, ptr %hp
   br label %relink
 nosplit:
+  ; 不拆：**尺寸原样留着**（就是 `%bsz`）—— 那几十字节的余量仍然在块里，
+  ; 只是不足以另立一块。改小它不会让那点余量变得可用，只会让遍历失步。
   br label %relink
 relink:
   %newhead = phi i32 [ %so, %split ], [ %rest, %nosplit ]
@@ -5361,22 +5455,43 @@ setprev:
   store i32 %newhead, ptr %ppp
   br label %taken
 taken:
-  store i32 %need, ptr %hp
   %t4b = add i32 %cur, 4
   %tppb = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %t4b
   store i32 -1, ptr %tppb
   %ko = add i32 %cur, 8
   %kp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %ko
-  ret ptr %kp
+");
+    if lms == 1 {
+        o = emit_str(s, out, "  store i1 false, ptr @__loment_lms_retry
+");
+    }
+    o = emit_str(s, out, "  ret ptr %kp
 bump:
   %off = load i32, ptr @__loment_off
   %nxtoff = add i32 %off, %need
   %fits = icmp ule i32 %nxtoff, 65536
   br i1 %fits, label %bok, label %boom
 boom:
+");
+    if lms == 1 {
+        o = emit_str(s, out, "  ; ---- LMS 第 3 级入口 A（docs/253 §5.3）：先拉回，拉不回来才死 ----
+  %lmsdone = load i1, ptr @__loment_lms_retry
+  br i1 %lmsdone, label %dead, label %rescue
+rescue:
+  store i1 true, ptr @__loment_lms_retry
+  call void @__loment_collect()
+  %head2 = load i32, ptr @__loment_freehead
+  br label %floop
+dead:
   call void @__loment_abort()
   unreachable
-bok:
+");
+    } else {
+        o = emit_str(s, out, "  call void @__loment_abort()
+  unreachable
+");
+    }
+    o = emit_str(s, out, "bok:
   store i32 %nxtoff, ptr @__loment_off
   %wp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %off
   store i32 %need, ptr %wp
@@ -5385,7 +5500,12 @@ bok:
   store i32 -1, ptr %wp4
   %bo = add i32 %off, 8
   %bp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %bo
-  ret ptr %bp
+");
+    if lms == 1 {
+        o = emit_str(s, out, "  store i1 false, ptr @__loment_lms_retry
+");
+    }
+    o = emit_str(s, out, "  ret ptr %bp
 }
 
 define internal void @__loment_free(ptr %p) {
@@ -5464,6 +5584,7 @@ setprev:
 @__loment_freehead = internal global i32 0
 
 ");
+    return o;
 }
 
 /// **`hosted` 那一份分配器**（`docs/228` 的 A = `docs/219` §8b 的 **S1e**）——
@@ -5494,8 +5615,20 @@ setprev:
 /// 产物自己说出来：`; loment-heap: ffi 1048576`。
 /// **`gc_auto_alpha` 除外**（那一档的收集器是直接寻址 arena 的，见 `emit_llvm`）——
 /// 它留在 64 KiB 并说出 `; loment-heap: static 65536`。
-fn emit_heap_indirect(s: ptr, out: ptr, statik: u32) -> u32 {
+///
+/// **LMS 第 3 级入口 A**（`docs/253` §5.3）：`lms` 开着**且**这份产物里有收集器时，
+/// `alloc` 分配不出**先收一次再试**，还不行才 `__loment_abort`。文本与参考实现那一侧的
+/// `_heap_with_lms_rescue(_IR_HEAP_HOSTED)` / `(_IR_HEAP_FFI)` **逐字节同源** ——
+/// 那一侧是**同一个变换**套在这两条 IR 上的，所以这里两版（`statik` 0/1）也要一样地套。
+/// ⚠ 四处增量与 `emit_heap` 那四处一一对应：全局声明 / `floop` 的 phi 多一条入边 /
+/// `boom` 换成 `rescue`·`dead` / **两条成功返回前**各清一次重试标记。
+fn emit_heap_indirect(s: ptr, out: ptr, statik: u32, lms: u32) -> u32 {
     let d: u32 = 0;
+    if lms == 1 {
+        d = d + emit_str(s, out, "@__loment_lms_retry = internal global i1 false");
+        d = d + emit_str(s, out, "
+");
+    }
     d = d + emit_str(s, out, "; ---- 分配器（`docs/228`：arena 从**外面**来的那一份；`docs/175` §3.4）--------------------
 ;
 ; 与 `_IR_HEAP` 同序、同一条空闲链表，只换两件事：arena 从**外面**来
@@ -5552,9 +5685,17 @@ entry:
   %head = load i32, ptr @__loment_freehead
   br label %floop
 floop:
-  %cur = phi i32 [ %head, %entry ], [ %nxt, %fnext ]
+");
+    if lms == 1 {
+        d = d + emit_str(s, out, "  %cur = phi i32 [ %head, %entry ], [ %nxt, %fnext ], [ %head2, %rescue ]
+  %prev = phi i32 [ 0, %entry ], [ %cur, %fnext ], [ 0, %rescue ]
+");
+    } else {
+        d = d + emit_str(s, out, "  %cur = phi i32 [ %head, %entry ], [ %nxt, %fnext ]
   %prev = phi i32 [ 0, %entry ], [ %cur, %fnext ]
-  %fend = icmp eq i32 %cur, 0
+");
+    }
+    d = d + emit_str(s, out, "  %fend = icmp eq i32 %cur, 0
   br i1 %fend, label %bump, label %fit
 fit:
   %hp = getelementptr i8, ptr %hb, i32 %cur
@@ -5574,14 +5715,18 @@ take:
   %rest = load i32, ptr %tpp
   br i1 %cansplit, label %split, label %nosplit
 split:
+  ; **块的记录尺寸只在「真拆了」的时候才改小**（`FujoJTOP/loment#368`）—— 理由见
+  ; `_IR_HEAP` 同一条（这段与那一份逐字同源，只换 arena 的来处与寻址）。
   %so = add i32 %cur, %need
   %spp = getelementptr i8, ptr %hb, i32 %so
   store i32 %slack, ptr %spp
   %so4 = add i32 %so, 4
   %spp4 = getelementptr i8, ptr %hb, i32 %so4
   store i32 %rest, ptr %spp4
+  store i32 %need, ptr %hp
   br label %relink
 nosplit:
+  ; 不拆：**尺寸原样留着**（就是 `%bsz`）。
   br label %relink
 relink:
   %newhead = phi i32 [ %so, %split ], [ %rest, %nosplit ]
@@ -5596,22 +5741,43 @@ setprev:
   store i32 %newhead, ptr %ppp
   br label %taken
 taken:
-  store i32 %need, ptr %hp
   %t4b = add i32 %cur, 4
   %tppb = getelementptr i8, ptr %hb, i32 %t4b
   store i32 -1, ptr %tppb
   %ko = add i32 %cur, 8
   %kp = getelementptr i8, ptr %hb, i32 %ko
-  ret ptr %kp
+");
+    if lms == 1 {
+        d = d + emit_str(s, out, "  store i1 false, ptr @__loment_lms_retry
+");
+    }
+    d = d + emit_str(s, out, "  ret ptr %kp
 bump:
   %off = load i32, ptr @__loment_off
   %nxtoff = add i32 %off, %need
   %fits = icmp ule i32 %nxtoff, 1048576
   br i1 %fits, label %bok, label %boom
 boom:
+");
+    if lms == 1 {
+        d = d + emit_str(s, out, "  ; ---- LMS 第 3 级入口 A（docs/253 §5.3）：先拉回，拉不回来才死 ----
+  %lmsdone = load i1, ptr @__loment_lms_retry
+  br i1 %lmsdone, label %dead, label %rescue
+rescue:
+  store i1 true, ptr @__loment_lms_retry
+  call void @__loment_collect()
+  %head2 = load i32, ptr @__loment_freehead
+  br label %floop
+dead:
   call void @__loment_abort()
   unreachable
-bok:
+");
+    } else {
+        d = d + emit_str(s, out, "  call void @__loment_abort()
+  unreachable
+");
+    }
+    d = d + emit_str(s, out, "bok:
   store i32 %nxtoff, ptr @__loment_off
   %wp = getelementptr i8, ptr %hb, i32 %off
   store i32 %need, ptr %wp
@@ -5620,7 +5786,12 @@ bok:
   store i32 -1, ptr %wp4
   %bo = add i32 %off, 8
   %bp = getelementptr i8, ptr %hb, i32 %bo
-  ret ptr %bp
+");
+    if lms == 1 {
+        d = d + emit_str(s, out, "  store i1 false, ptr @__loment_lms_retry
+");
+    }
+    d = d + emit_str(s, out, "  ret ptr %bp
 }
 
 define internal void @__loment_free(ptr %p) {
@@ -5706,6 +5877,55 @@ setprev:
     // 一直是绿的）。
     d = d + emit_str(s, out, "\n");
     return d;
+}
+
+
+
+
+
+
+/// **自动回收**（`choose gc_auto`）—— 文本与 `lomentc._IR_GC` **逐字节同源**
+/// （下面的字面量是脚本从 `_IR_GC` 切的，不手抄）。
+///
+/// 它必须**排在 `emit_heap` 之后**：收集器引用 `@__loment_heap` / `@__loment_off` /
+/// `@__loment_free` / `@__loment_freehead`，而那几个全局在堆那一段里。
+/// 只在 `gc_auto` 档追加（槽 576），另外两档的产物因此逐字节不变。
+///
+/// **为什么要切成 6 段**：一整条（5.2 KB）的字符串字面量会让自举侧编出来的产物
+/// **在运行期段错误**（0xC0000005，实测；堆那一条 4.6 KB 是好的）。
+///
+/// **Loment 的多行字面量不吞任何字符**：它的值就是引号之间的内容原样（量法：写一条
+/// 收尾换行的字面量，看发出来的全局长度）。所以段与段之间**不带**换行，只有最后
+/// 一段多带一个 —— 那是参考实现把各段 `join` 起来时 `_IR_GC` 之后那个分隔符，
+/// 与 `emit_heap` 尾巴上那一个同一个道理。
+/// **自动回收**（`choose gc_auto`）—— 文本与 `lomentc._IR_GC` **逐字节同源**
+/// （下面的字面量是脚本从 `_IR_GC` 生成的，不手抄）。
+///
+/// 它必须**排在 `emit_heap` 之后**：收集器引用 `@__loment_heap` / `@__loment_off` /
+/// `@__loment_free` / `@__loment_freehead`，而那几个全局在堆那一段里。
+/// 只在 `gc_auto` 档追加（槽 576），另外两档的产物因此逐字节不变。
+///
+/// 尾部多一个换行：Loment 的多行字面量**不吞**任何字符（值就是引号之间原样），
+/// 而这一个换行是参考实现把各段 `join` 起来时 `_IR_GC` 之后那个分隔符 ——
+/// 与 `emit_heap` 尾巴上那一个同一个道理。
+/// 本单元要不要**收集器与根表**（`docs/210` §2.1）：`gc_auto`（576）**或** `gc_auto_alpha`
+/// （572）。此前只有 `gc_auto` —— alpha 的 L3 残差没人收（只有分配器）；这一步给 alpha
+/// 也配上收集器（它的触发是自适应那支，见 `emit_gc_trigger`）。
+/// `lms` 开着吗（`docs/253`）—— **第 3 级入口 A** 的开关。**扫 token 流**，与
+/// `gc_alpha_tier` 同一个形状（那边扫 `choose gc_auto_alpha`）。
+///
+/// ⚠ **它只是这个开关的一半** —— 另一半是"**这份产物里真的有收集器**"
+/// （`gc_any(s)`）。两个条件缺一不可：`gc_manual` 下没有东西可收，
+/// "拉回"在那里是一句空话（`docs/253` §5.3 明写的边界）。
+fn lms_open_tier(src: ptr, toks: ptr) -> u32 {
+    let i: u32 = 0;
+    while tok_kind(toks, i) != 4 {
+        if tok_is(src, toks, i, "choose") && tok_is(src, toks, i + 1, "lms_open") {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
 }
 
 
@@ -6268,8 +6488,7 @@ done:
 }
 
 ; **全量回收的四趟**：清标记 → 扫根 → 传播到定点 → 清扫，一趟不少（`docs/210` §2.4）。
-");
-    let _r2: u32 = emit_str(s, out, "define internal void @__loment_collect() {
+define internal void @__loment_collect() {
 entry:
   %hb = call ptr @__loment_arena()
   br label %cl
@@ -6478,24 +6697,27 @@ out:
 ; 判据（退回去了就说明死块都在顶端，正是小回收该干的事），而年轻代的**大小**不是。
 define internal void @__loment_maybe_collect(i32 %sz) {
 entry:
+  ; **时钟 = 分配器真正吃掉多少字节**（`(sz + 15) & -8`），不是载荷请求 —— 与固定档同一条
+  ; 理由（见 `_IR_GC_TRIGGER_FIXED`）。空间触发那一格原先写成 `off + sz + 8`：**多算了那
+  ; 个 8**（块头早被 `& -8` 那条并进去了），于是它报的「下一块落在哪儿」比实际偏后。
+  %r0 = add i32 %sz, 15
+  %need = and i32 %r0, -8
   %b = load i32, ptr @__loment_gcbytes
-  %b2 = add i32 %b, %sz
+  %b2 = add i32 %b, %need
   store i32 %b2, ptr @__loment_gcbytes
   %t = load i32, ptr @__loment_thresh
   %big = icmp ugt i32 %b2, %t
   %off = load i32, ptr @__loment_off
-  %n1 = add i32 %off, %sz
-  %n2 = add i32 %n1, 8
-  %near = icmp ugt i32 %n2, 64512
+  %n1 = add i32 %off, %need
+  %near = icmp ugt i32 %n1, 64512
   %go = or i1 %big, %near
   br i1 %go, label %do, label %out
 do:
   store i32 0, ptr @__loment_gcbytes
   call void @__loment_minor()
   %of2 = load i32, ptr @__loment_off
-  %m1 = add i32 %of2, %sz
-  %m2 = add i32 %m1, 8
-  %still = icmp ugt i32 %m2, 64512
+  %m1 = add i32 %of2, %need
+  %still = icmp ugt i32 %m1, 64512
   br i1 %still, label %maj, label %tune
 maj:
   call void @__loment_major()
@@ -6554,8 +6776,14 @@ done:
     }
     return emit_str(s, out, "define internal void @__loment_maybe_collect(i32 %sz) {
 entry:
+  ; **时钟 = 分配器真正吃掉多少字节**（`__loment_alloc` 自己那两行 `(sz + 15) & -8`），
+  ; 不是「载荷请求多少」—— 少了块头那 8 字节，小块程序的时钟就比消耗慢：8 字节载荷的
+  ; 块消耗 16、时钟只走 8，慢一倍 ⇒ 计数越过阈值的那一刻，arena 已经装满了（实测：
+  ; 纯拼接 3000 轮、计数 24000 < 32768，**一次都没收**，到 4096 轮 arena 满而 abort）。
+  %r0 = add i32 %sz, 15
+  %need = and i32 %r0, -8
   %b = load i32, ptr @__loment_gcbytes
-  %b2 = add i32 %b, %sz
+  %b2 = add i32 %b, %need
   store i32 %b2, ptr @__loment_gcbytes
   %big = icmp ugt i32 %b2, 32768
   br i1 %big, label %go, label %out
@@ -6590,7 +6818,7 @@ fn root_count(s: ptr, src: ptr, toks: ptr, k: u32, nl: u32) -> u32 {
     let j: u32 = 0;
     while j < nl {
         if root_ty_tok(src, toks, load32(s, CG_LOCAL + j * 8 + 4)) == 1 {
-            n = n + 1;
+            n = n + root_slots(s, src, toks, load32(s, CG_LOCAL + j * 8));
         }
         j = j + 1;
     }
@@ -6640,6 +6868,67 @@ fn emit_root_slot(s: ptr, out: ptr, src: ptr, toks: ptr, n0: u32, c: u32,
     return emit_str(s, out, "\n");
 }
 
+/// 这个名字是不是"L0 提升过"的：是就回它的**字节数**，不是回 0。
+///
+/// **两道闸与 `emit_l0_buf` 同一份**：非 alpha 档（槽 572 为 0）L0 表根本不建 —— 而
+/// `l0_size` 自己不看旗标，所以这里必须看；合成的名字（≥ 2^31）也不是提升对象。
+fn l0_bytes(s: ptr, src: ptr, toks: ptr, nm: u32) -> u32 {
+    if load32(s, 572) == 0 || nm >= 2147483648 {
+        return 0;
+    }
+    return l0_size(s, src, toks, nm);
+}
+
+/// 这个名字占几格根表：**L0 提升过的缓冲按它的字数算**（`FujoJTOP/loment#362`），其余一格。
+fn root_slots(s: ptr, src: ptr, toks: ptr, nm: u32) -> u32 {
+    let n: u32 = l0_bytes(s, src, toks, nm);
+    if n == 0 {
+        return 1;
+    }
+    return (n + 7) / 8;
+}
+
+/// 登记 L0 缓冲里的**一个字**（`FujoJTOP/loment#362`）：那一格存的是**栈**地址
+/// （`%NAME.buf + 8j` 的地址），根扫读它就知道缓冲里那个字像不像堆内地址。
+/// 三条 temp 的次序与 `emit_root_slot` 一致（`idx` / `gp` / `bp` / `v`）。
+fn emit_root_word(s: ptr, out: ptr, src: ptr, toks: ptr, n0: u32, c: u32,
+                  nm: u32, j: u32, kw: u32) -> u32 {
+    let idx: u32 = alloc_temp(s);
+    emit_str(s, out, "  ");
+    emit_temp_ref(s, out, idx);
+    emit_str(s, out, " = add i32 ");
+    emit_temp_ref(s, out, n0);
+    emit_str(s, out, ", ");
+    emit_dec(s, out, c);
+    emit_str(s, out, "\n");
+    let gp: u32 = alloc_temp(s);
+    emit_str(s, out, "  ");
+    emit_temp_ref(s, out, gp);
+    emit_str(s, out, " = getelementptr [1024 x i64], ptr @__loment_roots, i32 0, i32 ");
+    emit_temp_ref(s, out, idx);
+    emit_str(s, out, "\n");
+    let bp: u32 = alloc_temp(s);
+    emit_str(s, out, "  ");
+    emit_temp_ref(s, out, bp);
+    emit_str(s, out, " = getelementptr [");
+    emit_dec(s, out, kw);
+    emit_str(s, out, " x i64], ptr %");
+    emit_local_name(s, out, src, toks, nm);
+    emit_str(s, out, ".buf, i32 0, i32 ");
+    emit_dec(s, out, j);
+    emit_str(s, out, "\n");
+    let v: u32 = alloc_temp(s);
+    emit_str(s, out, "  ");
+    emit_temp_ref(s, out, v);
+    emit_str(s, out, " = ptrtoint ptr ");
+    emit_temp_ref(s, out, bp);
+    emit_str(s, out, " to i64\n  store i64 ");
+    emit_temp_ref(s, out, v);
+    emit_str(s, out, ", ptr ");
+    emit_temp_ref(s, out, gp);
+    return emit_str(s, out, "\n");
+}
+
 /// `gc_auto`：把本帧"持有指针的槽"登记进根表（`docs/210` §4.2）。表满
 /// （1024 格，递归深了才可能）**点名拒**，不静默写穿 —— 溢出分支与参考侧同形。
 ///
@@ -6667,8 +6956,22 @@ fn roots_push(s: ptr, out: ptr, src: ptr, toks: ptr, k: u32, nl: u32) -> u32 {
     let j: u32 = 0;
     while j < nl {
         if root_ty_tok(src, toks, load32(s, CG_LOCAL + j * 8 + 4)) == 1 {
-            emit_root_slot(s, out, src, toks, n0, c, load32(s, CG_LOCAL + j * 8), 0);
-            c = c + 1;
+            let lnm: u32 = load32(s, CG_LOCAL + j * 8);
+            let lsz: u32 = l0_bytes(s, src, toks, lnm);
+            if lsz == 0 {
+                emit_root_slot(s, out, src, toks, n0, c, lnm, 0);
+                c = c + 1;
+            } else {
+                // **L0 提升的缓冲：一个字一格**（`FujoJTOP/loment#362`）。槽里存的是栈地址，
+                // 根扫拿它减堆基址得到巨大的无符号数 ⇒ 整块缓冲从来没人扫。
+                let kw: u32 = (lsz + 7) / 8;
+                let w: u32 = 0;
+                while w < kw {
+                    emit_root_word(s, out, src, toks, n0, c, lnm, w, kw);
+                    c = c + 1;
+                    w = w + 1;
+                }
+            }
         }
         j = j + 1;
     }
@@ -6932,7 +7235,7 @@ fn gc_auto_tier(src: ptr, toks: ptr) -> u32 {
 ///
 /// 与 `gc_alpha_tier` 同形：codegen 不知道档位，但整条 token 流在手，而核心模式只由
 /// **根单元**声明，扫那一行就够。`no_runtime` 那一半（"一定不带"）**不在这里** ——
-/// 它在检查器里拒（`checker.lomt` 的 E022），发射器只管"带"。
+/// 它在检查器里拒（`checker.lomt` 的 E031），发射器只管"带"。
 fn rt_tier(src: ptr, toks: ptr) -> u32 {
     let i: u32 = 0;
     while tok_kind(toks, i) != 4 {
@@ -7285,6 +7588,12 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
     // 仓库里没有"间接寻址的 alpha"这份先例。所以这一档留在 64 KiB —— 与改之前逐字节相同，
     // 并且**说出来**（`; loment-heap: static 65536`，"不静默"）。
     // 与参考实现 `_ffi_heap` / `_ffi_grown` 同一条规则。
+    // **LMS 第 3 级入口 A**（`docs/253` §5.3）：两个条件缺一不可 —— `lms` 开着
+    // **且** 这份产物里有收集器（`gc_any`）。三支共用同一个判断，见 `lms_open_tier`。
+    let lms_rescue: u32 = 0;
+    if lms_open_tier(src, toks) == 1 && gc_any(s) == 1 {
+        lms_rescue = 1;
+    }
     let indirect: u32 = 0;
     if load32(s, 516) == 1 {
         if contains_ident(src, toks, "hosted") == 1 {
@@ -7292,17 +7601,17 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
             if extern_named(s, src, toks, "malloc") == 0 {
                 emit_str(s, out, "declare ptr @malloc(i64)\n");
             }
-            emit_heap_indirect(s, out, 0);
+            emit_heap_indirect(s, out, 0, lms_rescue);
             indirect = 1;
         } else if load32(s, 544) == 1 && load32(s, 572) != 1 {
             emit_str(s, out, "; loment-heap: ffi 1048576\n");
-            emit_heap_indirect(s, out, 1);
+            emit_heap_indirect(s, out, 1, lms_rescue);
             indirect = 1;
         } else {
             if load32(s, 544) == 1 {
                 emit_str(s, out, "; loment-heap: static 65536\n");
             }
-            emit_heap(s, out);
+            emit_heap(s, out, lms_rescue);
         }
     }
     if gc_any(s) == 1 {

@@ -19,8 +19,18 @@
 #
 # 包默认是**私有**的，而**外部贡献者从 fork 提的 PR 拿不到私有包** ⇒ 它们的门禁会在
 # "拉镜像"这一步就死。所以第一次推上去之后要把包改成 **public**：
-#   https://github.com/users/<owner>/packages/container/loment-ci/settings
+#   https://github.com/orgs/<owner>/packages/container/loment-ci/settings
 # 公开包不需要凭据就能拉，本仓自己的 PR 与 fork 的 PR 于是走同一条路。
+#
+# **2026-10-17 搬到 `Loment-Lang` 时实测的两条坑**：
+#   * 包可见性那一项可能被**组织策略**锁住，页面上直接写 "Setting is disabled by
+#     organization administrators"。开关**不在仓设置里**，在**组织**设置的
+#     `Code, planning, and automation → Packages → Package Creation` —— 那里要允许创建
+#     public 包。REST API 改不了它（未知字段被静默忽略，仍回 200）。
+#   * **包一旦公开就改不回私有** —— GitHub 明写的单向门。
+# 判"到底公没公开"最快的办法是**匿名**要一次 token（不是裸 curl，那个必然 401）：
+#   curl -s "https://ghcr.io/token?service=ghcr.io&scope=repository:<owner>/loment-ci:pull"
+# 私有包拿不到 token。
 
 name: ci-image
 
@@ -54,7 +64,7 @@ jobs:
             | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       # **ghcr 的仓库名必须全小写**（Docker 的硬要求），而 `github.repository_owner`
-      # 是本仓的大小写原样 —— `FujoJTOP`。第一次就是这么红的（`repository name must be
+      # 是本仓的大小写原样 —— `Loment-Lang`。第一次就是这么红的（`repository name must be
       # lowercase`）。同时它就是 `gate.yml` 里那个字符串，两边必须一样（见文件头）。
       - name: 算镜像名（全小写）
         run: |

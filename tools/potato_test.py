@@ -18,6 +18,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import potato  # noqa: E402
 
 # `lomentc` / `lomelf` **只**用来把孪生编出来（S1 第十五格）—— **判合法与否一次都不经过
@@ -871,17 +872,7 @@ def test_lompotato_twin_selfhost_compiles():
 
 
 def main() -> int:
-    failed = []
-    for name, fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {name}")
-        except Exception as e:  # noqa: BLE001
-            failed.append((name, e))
-            print(f"  FAIL  {name}: {type(e).__name__}: {e}")
-    print(f"\npotato_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过 "
-          f"(反例 {len(MUTATORS)} 条)")
-    return 1 if failed else 0
+    return loment_suite.run(TESTS, "potato_test")
 
 
 if __name__ == "__main__":

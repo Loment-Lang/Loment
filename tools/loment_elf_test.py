@@ -34,6 +34,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import lomentc           # noqa: E402
 import lomelf            # noqa: E402
 import loment_ffi_test as ffitest   # noqa: E402  (共用 FFI 那份 C 夹具与 Loment 源码)
@@ -97,15 +98,17 @@ NOT_RUN: dict[str, tuple[str, str]] = {
 #: 这不是"放宽判据": `test_lomelf_selfhost_matches_reference` 会拿这条表**反向核**一遍 ——
 #: 表里每一份都必须**仍然链不过**。哪天它链过了, 判据红, 逼你把它挪回语料。
 #: 表只许变短。
-MIRROR_GAP: dict[str, tuple[str, str]] = {
-    "tour": ("SIGILL (rc=132)",
-             "镜像在**模块级 `i64` 全局**上崩掉（元素类型 64 位 + 初值不是 zeroinitializer）——"
-             "`@__loment_caps` 正是那个形状。参考实现链得过, 所以这是镜像的缺口, 不是 IR 的问题。"
-             "见 **issue #102**"),
-    "native_match_full": ("回填表满了 (rc=1)",
-                          "镜像的回填表容量上限 (TB_FIX_MAX=32768)。它是**点名拒**的, "
-                          "参考实现没有这个上限 —— 属容量, 不属缺陷"),
-}
+#:
+#: **2026-10-16 起是空的**。原先那两份是同一件事的两张脸, 成因各在 `lomelf.lomt` 的一处:
+#:   * `tour` —— `one_global` 用 u32 的 `pow256` 做除法, 元素宽度 ≥ 5 时 `256^b` 回绕成 0,
+#:     `v / 0` 当场 SIGILL; 而且它根本不认聚合初值。`@__loment_caps` 正是那个形状,
+#:     所以**凡是用能力域的程序都链不出来**（issue #102）。
+#:   * `native_match_full` —— `do_switch` 的 case 表跨行时 `q` 停在换行上, `next_label`
+#:     找不到 `label` 退回 `(0,0)`, 于是 `q` 被赋成 **0**: 从头重来, 每绕一圈发一条回填,
+#:     32768 圈后报"回填表满了"。**空 case 表也复现**, 所以那不是容量问题, 是死循环
+#:     （issue #2 / #10 —— 原先把这条记成"属容量, 不属缺陷", 是错的）。
+#: 两个形状各有一条点名判据: `test_mirror_links_the_shapes_that_used_to_take_it_down`。
+MIRROR_GAP: dict[str, tuple[str, str]] = {}
 
 TESTS: list[tuple[str, object]] = []
 
@@ -565,6 +568,74 @@ def test_mirror_phi_is_simultaneous():
     print("      phi 同时赋值: 参考得 2, 自举侧逐字节相同")
 
 
+#: `#313`：GEP 的下标是**符号扩展**的（LLVM LangRef）。`@g[6] - 4` 该落在 `@g[2]`；
+#: 零扩展让它落到 `@g[6] + 4294967292` —— 4 GiB 之外，读它就是 SIGSEGV（139，零输出）。
+#: 程序把 42 写在 `@g[2]`，再从那个负偏移读回来当退出码：**修好得 42，没修得 139**。
+_NEG_GEP_IR = """\
+@g = internal global [8 x i8] zeroinitializer
+
+define i32 @_start() {
+entry:
+  %g2 = getelementptr [8 x i8], ptr @g, i32 0, i32 2
+  store i8 42, ptr %g2
+  %p = getelementptr [8 x i8], ptr @g, i32 0, i32 6
+  %q = getelementptr i8, ptr %p, i32 -4
+  %v = load i8, ptr %q
+  %z = zext i8 %v to i32
+  %c = zext i32 %z to i64
+  %r = call i64 asm sideeffect "syscall", "={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}"(i64 60, i64 %c, i64 0, i64 0)
+  ret i32 0
+}
+"""
+
+
+@test
+def test_a_negative_gep_index_is_sign_extended():
+    """负的 `i32` 下标**不许被零扩展**（`#313`）—— 两半都要，缺哪一半都会漏一种错法。
+
+    **Why**：`Emitter.get` 的契约是"零扩展到 64 位，符号语义在用到的地方显式 `sext`"
+    （它自己的 docstring 就这么写）—— 而 GEP 的下标**恰好就是要符号的那一处**，那里却
+    调了 `get`。`-4` 于是变成 `+4294967292`：地址跑到 4 GiB 之外，撞了就是 SIGSEGV。
+    结构体那条路不受影响（`field_offset` + `alu_ri`，那条本来就符号扩展），所以这是
+    **同一个函数里两条路打架**，不是设计如此。
+
+    **How to apply**：
+      * **行为那一半**（参考实现）：编出来跑，退出码该是 **42**；没修是 **139**。
+      * **孪生那一半**（`loment/tools/lomelf.lomt`）：同一份 IR 过自举镜像，与参考
+        **逐字节相同**。少了这一半，只修 Python 那一侧也照样绿 —— 而两份实现打架正是
+        这个仓最不该出现的东西（比**文本**的那类判据抓不到它）。
+    """
+    if not _wsl():
+        print("      SKIP: 无 WSL")
+        return
+    want_elf, _info = lomelf.compile_ll(_NEG_GEP_IR)
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        nat = td / "neggep.native"
+        nat.write_bytes(want_elf)
+        rc, _out = _run_bin(nat, "neggep", td, timeout=20)
+    assert rc == 42, (
+        f"负数 GEP 下标没被符号扩展：退出码 {rc}（期望 42；139 = SIGSEGV，即地址跑到 4 GiB 外）。"
+        "查 `tools/lomelf.py` 的 `_gep` 是不是还在用 `self.get` 而不是 `self.get_signed`")
+    if not _clang():
+        print("      参考侧: 负下标符号扩展 (得 42)；自举侧: 无 clang, 跳过字节比对")
+        return
+    mir = _mirror()
+    llrepo = ROOT / "loment" / "build" / "_neggep.ll"
+    elfrepo = ROOT / "loment" / "build" / "_neggep.elf"
+    try:
+        llrepo.write_text(_NEG_GEP_IR, encoding="utf-8", newline="\n")
+        rcm, err = _mirror_run(mir, "loment/build/_neggep.ll", "loment/build/_neggep.elf")
+        assert rcm == 0, f"镜像退出 {rcm}: {err[-200:]}"
+        natm = elfrepo.read_bytes()
+    finally:
+        elfrepo.unlink(missing_ok=True)
+        llrepo.unlink(missing_ok=True)
+    assert natm == want_elf, (
+        f"两份实现不同 ({len(natm)}B vs {len(want_elf)}B) —— 自举侧多半还在零扩展那个负下标")
+    print("      负 GEP 下标: 参考得 42, 自举侧逐字节相同")
+
+
 @test
 def test_gc_manual_free_list_recycles():
     """`gc_manual` 的**空闲链表真的被复用**（不只是前沿回退）—— 判据是**一对**程序。
@@ -676,27 +747,30 @@ def test_gc_auto_collects_while_manual_exhausts():
           f"manual 耗尽 (rc={got[1]}) —— 自动回收是真的")
 
 
-#: `#367` 的语料：**一次 `alloc` 都不写**，只靠 `str_concat` 分配。6000 次拼接 × 56 字节
-#: （44 的请求取整成 56）≈ 336 KB，**远远**过 64 KiB arena。
+#: `#367` 的语料：**一次 `alloc` 都不写**，只靠 `str_concat` 分配。6000 次拼接 × 16 字节
+#: （8 的请求取整成 16）≈ 94 KB，**远远**过 64 KiB arena。
 #:
-#: **后缀为什么是 40 字节而不是 4**：`gc_auto` 的触发按**请求字节**计，而堆按**块字节**
-#: 消耗（请求 + 8 字节头、再向上取整到 8）。4 字节后缀那个比值是 2，于是计数器攒到 32768
-#: 的那一刻 arena 也正好满 —— 掐在临界上，`gc_auto` 那边会**先耗尽后收集**，判据变成
-#: 在测那个比值而不是在测触发。40 字节后缀把比值压到 56/44 ≈ 1.27，触发稳稳先到。
-#: （`gc_auto_alpha` 两种都一样过 —— 它另有一条**空间触发**，不靠这个计数器。）
+#: **后缀为什么是 4 字节、而不是当年那个 40**：这一格原先是 40 字节，用来**绕开**时钟的
+#: 缺陷 —— 触发按**请求字节**计，而堆按**块字节**消耗（请求 + 8 字节头、再向上取整到 8）；
+#: 4 字节后缀那个比值是 2，于是计数器攒到 32768 的那一刻 arena 也正好满，`gc_auto` 会
+#: **先耗尽后收集**，判据变成在测那个比值而不是在测触发。**时钟修好之后**（它算的就是分配器
+#: 真正吃掉的那两行 `(sz + 15) & -8`）那个绕开不再需要，于是回到 4 字节 —— 这一版才
+#: **钉得住**这个修复：把时钟改回只数载荷，`gc_auto` 那一只立刻变 132。
+#: （`gc_auto_alpha` 两种后缀都一样过 —— 它另有一条**空间触发**，不靠这个计数器。）
 _CONCAT_ONLY_SRC = (
     "module concatonly\n%s\nchoose runtime\n\n"
     "fn _start() {\n"
     "    let s: str = \"abcd\";\n"
     "    let i: u64 = 0;\n"
     "    while i < 6000 {\n"
-    "        let t: str = str_concat(s, \"0123456789012345678901234567890123456789\");\n"
+    "        let t: str = str_concat(s, \"efgh\");\n"
     "        i = i + 1;\n"
     "    }\n"
     "    syscall4(60, 7, 0, 0);\n"
     "}\n")
 
 
+@test
 def test_a_concat_only_program_still_collects():
     """只靠 `str_concat` 分配的程序也**必须**触发收集（`#367`）—— 两档各一只，退出码 7。
 
@@ -741,6 +815,268 @@ def test_a_concat_only_program_still_collects():
         "成因：`str_concat` 的分配不计入触发计数")
     print(f"      gc_auto 触发调用 {calls['gc_auto']} 次 / gc_auto_alpha {calls['gc_auto_alpha']} 次，"
           "两档都跑完（无 `alloc` 的语料）")
+
+
+@test
+def test_collection_keeps_blocks_that_were_already_free():
+    """**回收必须留住"回收之前就已经空闲"的块**（`FujoJTOP/loment#366`）—— 判据是**三只**。
+
+    **Why**：`test_gc_auto_collects_while_manual_exhausts` 只测"垃圾能被收回来"。回收那一趟在
+    收垃圾之前会**把空闲链表清空**（`__loment_collect` 与 `__loment_minor` 原先各一句
+    `store i32 0, ptr @__loment_freehead`），指望清扫把每一块**重新挂回去**。而清扫走的是
+    `__loment_free`，它有一条守卫：**只在块头 `next` 是负数（借出态）时才链接**（`#164`）——
+    已经空闲的块头里存的正是链表后继，守卫直接返回。于是"清空 + 重挂"只重挂了这一趟
+    **新死**的块，**上一趟之前就空闲的块从此谁都找不着**：既不在链表上、也不在前沿里。
+    （落地时那两行是**直接删掉**的 —— 既然守卫本身已经挡住了双重插入，重置就只剩下丢块这一件事。
+    另一条判据 `test_a_collection_keeps_the_free_list` 直接量那件事，本条量的是它的**后果**。）
+
+    **How to apply**：循环里只握一块活块（`p`），每圈分配一块新的、再把**上一块** `free` 掉 ——
+    被 `free` 的那一块在回收发生时**没有任何根指着它**（槽 `p` 已经改指新块），所以它正是
+    "已经空闲、应当留在链上"的那一类。每圈 8008 字节，跑 300 圈 = 2.4 MB，而 arena 只有 64 KiB：
+      * `gc_auto` **+ `free`** → **跑完**（rc = 7）：链表在回收之后仍在，分配一直命中它；
+      * `gc_manual` + `free` → **跑完**（rc = 7）：这一只钉住"程序本身是能跑的" —— 少了它，
+        第一只红了会分不清是"回收吃掉了链表"还是"这份程序本来就装不下"；
+      * `gc_manual` + **不 `free`** → **必须崩**（rc = 132）：这一半是**证伪** —— 它证明 arena
+        确实装不下 2.4 MB，所以上面两只的 7 不是"反正都跑得通"。
+
+    实测（2026-10-15）：修之前第一只是 **rc = 132**（约八次回收就把 64 KiB 丢光）。
+    """
+    if not _wsl():
+        print("      SKIP: 无 WSL")
+        return
+    body = ("module freesurvive\n%s\nchoose runtime\n\nfn _start() {\n"
+            "    let p: ptr = alloc(8000);\n"
+            "    store8(p, 0, 9);\n"
+            "    let i: u32 = 0;\n"
+            "    while i < 300 {\n"
+            "        let q: ptr = alloc(8000);\n"
+            "        store8(q, 0, 9);\n"
+            "        %s"
+            "        p = q;\n"
+            "        i = i + 1;\n"
+            "    }\n"
+            "    if load8(p, 0) == 9 {\n        syscall4(60, 7, 0, 0);\n    }\n"
+            "    syscall4(60, 3, 0, 0);\n}\n")
+    cases = (("auto", "choose gc_auto", "free(p);\n        "),
+             ("manual", "choose gc_manual", "free(p);\n        "),
+             ("manual_nofree", "choose gc_manual", ""))
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = []
+        for tag, tier, extra in cases:
+            src = td / f"{tag}.lomt"
+            src.write_text(body % (tier, extra), encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"{tag}.native"
+            nat.write_bytes(blob)
+            got.append(_run_bin(nat, f"freesurvive_{tag}", td, timeout=60)[0])
+    assert got[0] == 7, (
+        f"`gc_auto` 那一只没跑完：退出码 {got[0]}（期望 7）。回收把**已经空闲的块**丢了 ——"
+        "列表在进清扫之前被清空，而清扫只有'重新挂'那一半才补得回来")
+    assert got[1] == 7, (
+        f"`gc_manual` 那一只没跑完：退出码 {got[1]}（期望 7）—— 这一只不收集，它的失败"
+        "说明这份程序本身就装不下，下面那条对 `gc_auto` 的判断不成立")
+    assert got[2] != 7, (
+        f"**不 `free` 的那一只也跑通了**（退出码 {got[2]}）—— 那这条判据测不出什么："
+        "arena 装得下 2.4 MB，前两只的 7 是'反正都跑得通'")
+    print(f"      auto 跑通 (rc={got[0]})；manual 跑通 (rc={got[1]})；"
+          f"manual 不 free 耗尽 (rc={got[2]}) —— 回收没吃掉空闲链表")
+
+
+@test
+def test_every_alloc_site_arms_the_collector():
+    """**`str_concat` 的分配点也要问一句"该收了没有"**（`FujoJTOP/loment#367`）—— 判据是**一对**。
+
+    **Why**：触发（`@__loment_maybe_collect`）原先只挂在 `alloc` 这个**内建**的发射点上，
+    而 `str_concat` 走的是同一个分配函数、却不经过那个点 —— 于是一份**只拼字符串**、自己
+    从不 `alloc` 的程序，`@__loment_gcbytes` 永远是 0，**收集器一次都不会被叫醒**，arena 撑爆。
+    要钉的就是"每个分配点都得问"。
+
+    **How to apply**：每圈 `str_concat(a, a)` 拼出一条 32 字节的新串、结果覆盖旧值（旧串立刻成
+    垃圾），活集恒为 32 字节。跑 10000 圈 = 320 KB 请求，arena 64 KiB：
+      * `gc_auto` → **跑完**（rc = 7）；
+      * `gc_manual` → **必须崩**（rc = 132）：这一半是**证伪**，证明 320 KB 确实装不下。
+
+    端到端：IR 过的是**包内镜像链接器**（`lomelf.compile_ll`）。实测（2026-10-15）：
+    修之前 `gc_auto` 那只也是 **rc = 132** —— 一份 `alloc` 一次都不调的程序，
+    收集器从头到尾没被叫醒过。
+    """
+    if not _wsl():
+        print("      SKIP: 无 WSL")
+        return
+    body = ("module concatgc\n%s\nchoose runtime\n\nfn _start() {\n"
+            "    let a: str = \"0123456789abcdef\";\n"
+            "    let s: str = str_concat(a, a);\n"
+            "    let i: u32 = 0;\n"
+            "    while i < 10000 {\n"
+            "        s = str_concat(a, a);\n"
+            "        i = i + 1;\n"
+            "    }\n"
+            "    if str_len(s) == 32 {\n        syscall4(60, 7, 0, 0);\n    }\n"
+            "    syscall4(60, 3, 0, 0);\n}\n")
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = []
+        for tag, tier in (("auto", "choose gc_auto"), ("manual", "choose gc_manual")):
+            src = td / f"{tag}.lomt"
+            src.write_text(body % tier, encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"{tag}.native"
+            nat.write_bytes(blob)
+            got.append(_run_bin(nat, f"concatgc_{tag}", td, timeout=60)[0])
+    assert got[0] == 7, (
+        f"`gc_auto` 那一只没跑完：退出码 {got[0]}（期望 7）。这份程序一次 `alloc` 都不调，"
+        "只有 `str_concat` 在分配 —— 它的分配点没问'该收了没有'，收集器就不会跑")
+    assert got[1] != 7, (
+        f"**`gc_manual` 那一只也跑通了**（退出码 {got[1]}）—— 那这条判据测不出回收："
+        "arena 没被耗尽，说明它比 320 KB 大得多")
+    print(f"      auto 跑通 (rc={got[0]}，320 KB 请求过 64 KiB arena)；"
+          f"manual 耗尽 (rc={got[1]}) —— 拼接也在触发")
+
+
+@test
+def test_a_recycled_block_does_not_derail_the_walks():
+    """**复用一块空闲块之后，块头的"记录尺寸"必须仍是它的实际跨度**（`FujoJTOP/loment#368`）。
+
+    **Why**：`__loment_alloc` 的 `take` 原先在 `taken:` 里**无条件**把块头的 size 写成
+    `%need`。真拆了的时候那是对的（余下那截在 `cur + need` 处另立了一块），**不拆**的时候
+    就是错的：块的跨度仍是 `%bsz`，记录尺寸却小了 `%bsz - %need`（< 16 字节，所以没拆）。
+    于是**每一趟按 size 往前走的遍历**（首次适配、清扫、传播、收集器清标记那两趟）都从
+    `cur + need` 继续 —— 那不是下一块，是**块的内部**。载荷里那些字多半是 0 ⇒ `i += 0`
+    ⇒ **死循环**（实测：2 分钟不返回；`perf` 的样本全落在收集器清标记那一趟的小循环里）。
+    那几十个字节也从此谁都找不到（既不在链上、也不在前沿里）。
+
+    **How to apply**：语料取自 `#368` —— 每圈拼一条 8 字节的串（分配后立刻 `free`），再分配
+    一块 16 字节的；被 `free` 的那一块随后会被**复用**，而 `24 - 16 = 8 < 16` 正好走**不拆**
+    那条路。跑 4097 圈，两次回收之后遍历就会失步。
+      * `gc_auto` → **跑完**（rc = 7）；修之前它**在第二次回收上不返回**（rc = 124，被 timeout
+        杀掉 —— 所以这里的超时是判据的一部分，不是保险丝）；
+      * `gc_manual` → **必须崩**（rc = 132）：这一半是**证伪** —— 它证明这份程序确实有约
+        98 KB 的请求要过 64 KiB 的 arena，跑通不是"反正都跑得通"。
+
+    端到端：IR 过的是**包内镜像链接器**（`lomelf.compile_ll`）。
+    """
+    if not _wsl():
+        print("      SKIP: 无 WSL")
+        return
+    body = ("module reuseextent\n%s\nchoose runtime\n\nconst SZ: u32 = 16;\n\n"
+            "fn _start() {\n"
+            "    let s: str = \"abcd\";\n"
+            "    let esc: ptr = alloc(SZ);\n"
+            "    store8(esc, 0, 1);\n"
+            "    let i: u64 = 0;\n"
+            "    while i < 4097 {\n"
+            "        let t: str = str_concat(s, \"efgh\");\n"
+            "        free(str_ptr(t));\n"
+            "        let q: ptr = alloc(SZ);\n"
+            "        store8(q, 0, 2);\n"
+            "        esc = q;\n"
+            "        i = i + 1;\n"
+            "    }\n"
+            "    syscall4(60, 7, 0, 0);\n}\n")
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = []
+        for tag, tier in (("auto", "choose gc_auto"), ("manual", "choose gc_manual")):
+            src = td / f"{tag}.lomt"
+            src.write_text(body % tier, encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"{tag}.native"
+            nat.write_bytes(blob)
+            got.append(_run_bin(nat, f"reuseextent_{tag}", td, timeout=30)[0])
+    assert got[0] == 7, (
+        f"`gc_auto` 那一只没跑完：退出码 {got[0]}（期望 7）。124 = 被 timeout 杀掉，也就是"
+        "**在第二次回收上不返回** —— 有一块被复用之后记录尺寸与实际跨度对不上，"
+        "收集器清标记那一趟掉进块内部、读到 size=0 就原地打转")
+    assert got[1] != 7, (
+        f"**`gc_manual` 那一只也跑通了**（退出码 {got[1]}）—— 那这条判据测不出什么："
+        "arena 装得下这约 98 KB 请求，上面那只的 7 不是回收换来的")
+    print(f"      auto 跑通 (rc={got[0]})；manual 耗尽 (rc={got[1]}) —— 复用没有让遍历失步")
+
+
+@test
+def test_a_promoted_buffer_is_scanned():
+    """**L0 提升到栈上的那块缓冲，里面的字也要被根扫看到**（`FujoJTOP/loment#362`）。
+
+    **Why**：`choose gc_auto_alpha` 的 L0 把 `let NAME: ptr = alloc(<字面量>)` 提到栈上，
+    于是那个局部槽里存的是**栈**地址。根扫是这么判的：`rdo = 槽里的值 − @__loment_heap`，
+    `ult 65536` 才当堆内地址 —— 栈地址减出来是个巨大的无符号数，**直接跳过**。
+    而 `__loment_propagate` 只在堆里走。两者合起来：**那块缓冲的内容从来没人扫**。
+
+    而 L0 的规则**并不禁止**缓冲里装堆指针：`_ptr_only_uses` 会把"只解引用"的用户函数
+    （这里就是 `wr64`）吸收进安全集，于是它能把任意 u64 写进缓冲 —— 那正是容器会做的事。
+    只被缓冲里那 8 个字节指着的对象，于是被当垃圾收掉，块还被复用，程序读回的是别人的字节。
+
+    **How to apply**：语料取自 `#362`。`hold` 是 L0 候选（`alloc(8)` 字面量、只经由 `wr64`
+    解引用）；目标 `t` 唯一的引用就是写进 `hold` 的那 8 个字节；末尾那个 `alloc(32)`
+    （块长 40 B，全程序只有目标用这个尺寸）是**探测块** —— 对象真被收了，它就一定落在
+    目标那块上、把载荷盖成 200。三只同源程序：
+      * `alpha` + 写进去 → **跑完**（rc = 7）；修之前是 **rc = 3**（读回 200）；
+      * `alpha` + **不写** → **必须不是 7**：这一半是**证伪** —— 没有那 8 个字节，对象本就
+        该被收，探测块就该盖掉它。少了这一半，"跑完"可能只是探测块什么也没盖到；
+      * `auto` + 写进去 → **跑完**（rc = 7）：那一档没有 L0，堆块照常被扫，
+        是 issue 里那一对里的另一半。
+
+    端到端：IR 过的是**包内镜像链接器**（`lomelf.compile_ll`）。
+    """
+    if not _wsl():
+        print("      SKIP: 无 WSL")
+        return
+    body = ("module l0hole\n%s\nchoose runtime\n\n"
+            "fn junk() -> u64 {\n"
+            "    let p: u64 = alloc(16) as u64;\n"
+            "    store8(p as ptr, 0, 200);\n"
+            "    return p;\n}\n\n"
+            "fn wr64(p: ptr, o: u32, v: u64) -> u32 {\n"
+            "    store8(p, o, (v & 255) as u8);\n"
+            "    store8(p, o + 1, ((v >> 8) & 255) as u8);\n"
+            "    store8(p, o + 2, ((v >> 16) & 255) as u8);\n"
+            "    store8(p, o + 3, ((v >> 24) & 255) as u8);\n"
+            "    store8(p, o + 4, ((v >> 32) & 255) as u8);\n"
+            "    store8(p, o + 5, ((v >> 40) & 255) as u8);\n"
+            "    store8(p, o + 6, ((v >> 48) & 255) as u8);\n"
+            "    store8(p, o + 7, ((v >> 56) & 255) as u8);\n"
+            "    return 0;\n}\n\n"
+            "fn _start() {\n"
+            "    let hold: ptr = alloc(8);\n"
+            "    let t: u64 = alloc(32) as u64;\n"
+            "    store8(t as ptr, 0, 7);\n"
+            "%s"
+            "    let i: u32 = 0;\n"
+            "    while i < 4000 { let _a: u64 = junk(); i = i + 1; }\n"
+            "    let probe: u64 = alloc(32) as u64;\n"
+            "    store8(probe as ptr, 0, 200);\n"
+            "    if load8(t as ptr, 0) == 7 { syscall4(60, 7, 0, 0); }\n"
+            "    syscall4(60, 3, 0, 0);\n}\n")
+    cases = (("alpha", "choose gc_auto_alpha", "    wr64(hold, 0, t);\n"),
+             ("alpha_nowrite", "choose gc_auto_alpha", ""),
+             ("auto", "choose gc_auto", "    wr64(hold, 0, t);\n"))
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = []
+        for tag, tier, extra in cases:
+            src = td / f"{tag}.lomt"
+            src.write_text(body % (tier, extra), encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"{tag}.native"
+            nat.write_bytes(blob)
+            got.append(_run_bin(nat, f"l0hole_{tag}", td, timeout=30)[0])
+    assert got[0] == 7, (
+        f"`gc_auto_alpha` 那一只读到 {got[0]}（期望 7）—— 目标被收了。提升后的缓冲是一块"
+        "**栈**内存，它的槽里存的是栈地址，根扫按'减堆基址、小于 arena'判，于是整块缓冲"
+        "从来没人扫；只被它指着的对象就成了垃圾")
+    assert got[1] != 7, (
+        f"**不写那 8 个字节的那一只也跑通了**（退出码 {got[1]}）—— 那这条判据测不出什么："
+        "没有那 8 个字节，对象本来就该被收，探测块就该盖掉它")
+    assert got[2] == 7, (
+        f"`gc_auto` 那一只读到 {got[2]}（期望 7）—— 那一档没有 L0，堆块照常被扫，"
+        "不该在这里出问题（issue 里的另一半正是它）")
+    print(f"      alpha 跑通 (rc={got[0]})；alpha 不写就不保 (rc={got[1]})；"
+          f"auto 跑通 (rc={got[2]}) —— 提升缓冲的字在根扫里")
 
 
 @test
@@ -1608,7 +1944,7 @@ def test_lomelf_selfhost_reports_oversized_input():
         rc, err = _mirror_run(mir, _wsl_path(big), "/tmp/lomelf_oversized.probe")
         assert rc != 0, (f"{big.stat().st_size} B 的输入被接受了 (rc={rc}, 上限 {cap}) —— "
                          f"截断是静默的, 产出的二进制跑起来才会崩")
-        assert "上限" in err, f"拒了, 但没说清是上限的事: {err[:200]!r}"
+        assert "does not fit" in err, f"拒了, 但没说清是上限的事: {err[:200]!r}"
         print(f"      超限 {big.stat().st_size} B 的 .ll 被拒（上限 {cap} B, 从源码读的）")
 
 
@@ -1679,10 +2015,10 @@ def test_lomelf_selfhost_matches_reference():
     这格的规格书, 能替用户干活的是自举侧那份。链条里 clang 只出现在"种子 -> stage1"
     一步 (genesis, docs/167 §5 记账)。
 
-    语料是 `CORPUS` 减去 `MIRROR_GAP`（镜像还链不了的那两份, 各带理由）。
-    把语料从 4 份放宽到"能跑的每一份"时, 这条**立刻抓到两个缺口** —— 一个是容量上限
-    （点名拒的）, 一个是崩（issue #102）。`MIRROR_GAP` 的执行方式是**只许变短**:
-    表里每一份每轮都要**真的再链一次**, 链过了就红。
+    语料是 `CORPUS` 减去 `MIRROR_GAP`（镜像还链不了的那几份, 各带理由; 2026-10-16 起为空）。
+    把语料从 4 份放宽到"能跑的每一份"时, 这条**立刻抓到两个缺口** —— 一个是崩
+    （issue #102）, 一个是回填表满（当时记成容量, 实为 `do_switch` 的死循环）。
+    `MIRROR_GAP` 的执行方式是**只许变短**: 表里每一份每轮都要**真的再链一次**, 链过了就红。
     """
     if not (_clang() and _wsl()):
         print("      SKIP: 无 clang/WSL")
@@ -1736,6 +2072,94 @@ def test_lomelf_selfhost_matches_reference():
                           + " / ".join(gone))
     print(f"      {total} 个程序: 自举镜像与参考逐字节相同; "
           f"另有 {len(MIRROR_GAP)} 份记在 MIRROR_GAP 里, 已反向核实仍然链不过")
+
+
+#: 手写 IR 夹具: **两个各自独立把镜像打下来过**的形状（issue #1 的两个真成因）。
+#: 这是**形状**不是程序 —— 哪一条回退, 判据直接点名, 不用再把 `tour` 二分一遍。
+#: 参考实现两条都编得过, 所以期望值是 `lomelf.compile_ll` 现算的。
+_MIRROR_SHAPE_IR: dict[str, tuple[str, str]] = {
+    "i64_global": (
+        "64 位全局 + 非零初值（含聚合）。旧 `one_global` 用 u32 的 `pow256` 做除法: "
+        "b=4 时 `256^b` 回绕成 0, 除零当场 SIGILL。`@__loment_caps` 就是这形状, "
+        "所以能力域程序全都链不出来（issue #102）。",
+        """@scalar = internal global i64 7
+@big = internal global i64 4294967296
+@neg = internal global i64 -1
+@arr = internal global [2 x i64] [i64 1, i64 2]
+@i32s = internal global i32 8
+@caps = internal constant [1 x { i64, i64, i64, i64 }] [{ i64, i64, i64, i64 } { i64 1163935908, i64 0, i64 4, i64 1 }]
+@blob = private unnamed_addr constant [4 x i8] c"ab\\00c"
+
+define void @_start() {
+  ret void
+}
+"""),
+    "multiline_switch": (
+        "case 表跨行的 `switch`（自举 codegen 发出来的就是这种）。旧 `do_switch` 的 `q` 停在"
+        "换行上, `next_label` 找不到 `label` 退回 `(0,0)`, 于是 `q` 被赋成 0 —— 从头重来, "
+        "每绕一圈发一条回填, 32768 圈后报\"回填表满了\"。第二个函数是**空 case 表**（只把 `]` "
+        "写到下一行）, 一条回填都不需要, 照样打满 —— 这就是它不是容量问题的证据"
+        "（issue #2 / #10）。",
+        """define i32 @f(i32 %x) {
+entry:
+  switch i32 %x, label %e [
+      i32 0, label %a
+      i32 1, label %b
+    ]
+a:
+  ret i32 1
+b:
+  ret i32 2
+e:
+  ret i32 3
+}
+define i32 @g(i32 %x) {
+entry:
+  switch i32 %x, label %z [
+    ]
+z:
+  ret i32 0
+}
+define void @_start() {
+  ret void
+}
+"""),
+}
+
+
+@test
+def test_mirror_links_the_shapes_that_used_to_take_it_down():
+    """镜像对这两个形状的产物与参考**逐字节相同**。
+
+    **Why**: issue #1 说的是"自带的 `tour` 示例编不出来, 而且一声不吭"。它有两个**互相
+    独立**的成因, 都在 `loment/tools/lomelf.lomt` 里, 而**语料一份都没覆盖它们** ——
+    `loment/examples/switch.lomt` 名字叫 switch, 里面**一条 `switch` 都没有**。
+    修完把形状单独钉住: 回退时这条点名, 而不是只剩 `tour` 那条泛泛地红。
+
+    **未修时的实测**（2026-10-16）: `i64_global` → SIGILL (rc=132);
+    `multiline_switch` → `lomelf: 回填表满了 … (TB_FIX_MAX)` (rc=1)。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    mir = _mirror()
+    done = []
+    for name, (why, text) in sorted(_MIRROR_SHAPE_IR.items()):
+        want, _info = lomelf.compile_ll(text)
+        llrepo = ROOT / "loment" / "build" / f"_shape_{name}.ll"
+        elfrepo = ROOT / "loment" / "build" / f"_shape_{name}.elf"
+        try:
+            llrepo.write_text(text, encoding="utf-8", newline="\n")
+            rc, err = _mirror_run(mir, f"loment/build/_shape_{name}.ll",
+                                  f"loment/build/_shape_{name}.elf")
+            assert rc == 0, f"[{name}] 镜像退出 {rc}: {err[-200:]} —— {why}"
+            got = elfrepo.read_bytes()
+        finally:
+            llrepo.unlink(missing_ok=True)
+            elfrepo.unlink(missing_ok=True)
+        assert got == want, (f"[{name}] 镜像与参考不同 ({len(got)}B vs {len(want)}B) —— {why}")
+        done.append(name)
+    print(f"      {len(done)} 个形状: 镜像与参考逐字节相同 ({', '.join(done)})")
 
 
 @test
@@ -2223,6 +2647,7 @@ _FREE_LIST_SRC = (
     "    syscall4(60, 3, 0, 0);\n}\n")
 
 
+@test
 def test_a_collection_keeps_the_free_list():
     """一次收集**不许**把当前空闲块丢掉（`#366`）—— 两档各一只，退出码 7 = 拿回了那片区域。
 
@@ -2262,17 +2687,147 @@ def test_a_collection_keeps_the_free_list():
           " —— 两档收集之后都还拿得回那片空闲区")
 
 
+def _time_bin(elf: Path, name: str, td: Path, runs: int = 5, timeout: int = 120) -> int:
+    """**一次 shell 里跑 `runs` 遍、取最小**，回微秒。
+
+    **为什么不是每遍起一次**（`docs/210` §7 实录过、`docs/226` 也记着）：一次 `wsl` 启动就够
+    把被测的那点时间淹掉 —— 第一版每遍起一次，量出来 303/284 ms，而程序本身只有 15 ms；
+    同一支二进制两次量到 275/481 ms 也是这么来的。最小值的意义是"这一遍没有被打断"。
+    """
+    binn = f"{_T}lomelf_{name}.bin"
+    script = (f"rm -f {binn} && cp {_wsl_path(elf)} {binn} && chmod +x {binn} && "
+              f"best=999999999999; for i in $(seq {runs}); do "
+              f"s=$(date +%s%N); {binn} >/dev/null 2>&1; e=$(date +%s%N); "
+              f"d=$(( (e - s) / 1000 )); "
+              f"if [ $d -lt $best ]; then best=$d; fi; done; echo -n $best")
+    r = _sh(script, timeout, text=True)
+    try:
+        return int(r.stdout.strip())
+    except ValueError:
+        return -1
+
+
+@test
+def test_the_generational_barrier_has_a_measured_cost():
+    """**分代写屏障的墙钟代价**（`FujoJTOP/loment#365`，`docs/210` §2.7/§7）—— 有上界的测量。
+
+    **Why**：`docs/210` §2.7 说写屏障是分代那一档的价钱（**每个 `store8` 站点一次调用**），
+    §7 一直写着"墙钟没量"：唯一一次尝试被机器噪声淹掉（同一支 `gc_auto` 二进制在同一时段量到
+    275 ms 与 481 ms —— 1.75 倍，而要看的东西比它小）。确定性的那一半已经有了：写重的负载上
+    alpha 档的 **IR 是 auto 档的 1.37 倍**，而这个比值由站点数钉住、不会漂。缺的是墙钟。
+
+    **How to apply**：同一份**写重、几乎不分配**的工作量（每圈 8 个 `store8` 打在同一块上，
+    循环里一次 `alloc` 都没有 ⇒ 两个档的差别**只有**屏障那一次调用，没有收集器掺进来），
+    编两遍 —— `choose gc_auto`（**不发**屏障）与 `choose gc_auto_alpha`（每站发一次）——
+    各自**一次 shell 里跑 5 遍取最小**（见 `_time_bin`：一次 `wsl` 启动就能淹掉被测时间）。
+    三个断言，而**确定性的那个才是这条判据的意图**：
+
+      * 两只**都跑完**（rc = 7）—— 否则"更快"可能只是崩得早；
+      * `gc_auto` 的 IR 里**一条屏障都没有**（那一档不发）；
+      * `gc_auto_alpha` 的 IR 里屏障函数定义 **1** 次、**调用次数 == 源里 `store8` 站点数**
+        （每站一次）。这三条与机器快慢无关，抓的正是"形状变了"：每字一次会让调用数变成
+        8 倍，跟着堆大小走则会随负载漂。
+
+    **墙钟只报不判**（`FujoJTOP/loment#442`）：同一个比值在判据作者那台是 3.2×、本机 4.13×、
+    CI runner 5.4×（两次相差 0.5%，不是抖动），而界原先定在 5.0 —— **分开的是机器，不是形状**：
+    它在 CI 上恒红、在别的机器上恒绿，与那棵树对不对无关。要让它重新变成门禁，得让它跟
+    **同一次运行里、紧接着的对照**比，而不是跟一个绝对比值比。比值仍打印出来，供 `docs/210` §7 记数。
+    """
+    if not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    body = ("module barriercost\n%s\nchoose runtime\n\n"
+            "fn mk(n: u32) -> ptr {\n"          # 指针**逃逸**：不这么写它会落到 L0/L1，
+            "    return alloc(n);\n}\n\n"        # 那块内存根本不上堆，屏障也就不会发
+            "fn _start() {\n"
+            "    let p: ptr = mk(4096);\n"
+            "    let i: u32 = 0;\n"
+            "    while i < 1000000 {\n"
+            "        store8(p, 0, 1);\n"
+            "        store8(p, 1, 2);\n"
+            "        store8(p, 2, 3);\n"
+            "        store8(p, 3, 4);\n"
+            "        store8(p, 4, 5);\n"
+            "        store8(p, 5, 6);\n"
+            "        store8(p, 6, 7);\n"
+            "        store8(p, 7, 8);\n"
+            "        i = i + 1;\n"
+            "    }\n"
+            "    syscall4(60, 7, 0, 0);\n}\n")
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = {}
+        irs: dict[str, str] = {}
+        for tag, tier in (("auto", "choose gc_auto"), ("alpha", "choose gc_auto_alpha")):
+            src = td / f"{tag}.lomt"
+            src.write_text(body % tier, encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            irs[tag] = ll.read_text(encoding="utf-8")
+            blob, _info = lomelf.compile_ll(irs[tag])
+            nat = td / f"{tag}.native"
+            nat.write_bytes(blob)
+            rc, _out = _run_bin(nat, f"barrier_rc_{tag}", td, timeout=60)
+            assert rc == 7, f"`{tier}` 那一只没跑完：rc={rc}（比时间之前先确认它真的跑完了）"
+            got[tag] = _time_bin(nat, f"barrier_{tag}", td, runs=5)
+
+    # **形状**：数 IR 就够了，与机器快慢无关（`#442` —— 原先唯一的断言是个绝对墙钟比值，
+    # 而它在本机 4.13×、CI runner 5.4×、作者那台 3.2×，界 5.0 落在三者的散布里）。
+    sites = body.count("store8(")
+    assert "__loment_wb" not in irs["auto"], (
+        "`choose gc_auto` 的 IR 里出现了写屏障 —— 那一档**不发**屏障，这是形状变了")
+    n_def = irs["alpha"].count("define internal void @__loment_wb")
+    assert n_def == 1, f"`choose gc_auto_alpha` 里屏障函数定义了 {n_def} 次（应为 1 次）"
+    n_call = irs["alpha"].count("call void @__loment_wb")
+    assert n_call == sites, (
+        f"屏障调用 {n_call} 处，而源里 `store8` 站点 {sites} 个 —— 屏障应当**每站一次**"
+        "（每字一次会让它变成 8 倍，跟着堆大小走则会随负载漂）")
+
+    a, b = got["auto"], got["alpha"]
+    assert a > 0 and b > 0, f"计时没拿到数：auto={a} alpha={b}（微秒）"
+    ratio = b / a
+    print(f"      写屏障：auto {a / 1000:.1f} ms / alpha {b / 1000:.1f} ms = {ratio:.2f}×"
+          f"（auto 的 IR {len(irs['auto'].splitlines())} 行、无屏障；"
+          f"alpha {len(irs['alpha'].splitlines())} 行、{n_call} 处调用 / {sites} 个站点）"
+          "（各一次 shell 里 5 遍取最小；比值只报不判，见 docstring）")
+
+
+@test
+def test_the_runtime_guard_does_not_need_a_windows_binary():
+    """**这一族的闸门是"能不能跑 Linux ELF"，不是"有没有 `wsl` 这个二进制"**（`FujoJTOP/loment#371`）。
+
+    **Why**：`_wsl()` 原先只是 `shutil.which("wsl")`。必需检查跑在 ubuntu runner 上，而那儿
+    **没有**这个二进制（它不是 apt 包，镜像里也没有垫片）—— 于是本文件里**每一条要跑产物的
+    判据**都在 `SKIP: 无 clang/WSL` 那条早退路上返回，而早退在运行器里是一次**正常返回**
+    ⇒ 记成 PASS ⇒ 门禁报 `31/31 通过`。也就是说：**改收集器、改分配器、改两个链接器的产物形状，
+    都能在一条运行期判据都没跑过的情况下过掉必需检查**。跳过的那一族不是抽样，它就是这一族。
+
+    （`#374` 让每一行带上 `N SKIP`、`#382` 让 Linux 上原生跑 —— 这一条钉的是**别再把闸门写回
+    "某个二进制在不在"**：机制改回去了，上面那两件事的账就又会静默。）
+
+    **How to apply**：把 `wsl` 从 `shutil.which` 里藏掉（正是 issue 里那份复现），再看 `_wsl()`：
+      * Linux 上**必须仍然为真** —— 产物本来就是 Linux ELF，该原生跑；
+      * 其它平台上**必须为假** —— 藏掉之后本机确实跑不了，那是实话。
+    两个方向都钉住：只钉 Linux 那一半的话，一个恒真的 `_wsl()` 也能过。
+    这一条**自己不 SKIP** —— 它测的是"闸门怎么判"，两个平台上都判得了。
+    """
+    real = shutil.which
+    try:
+        shutil.which = lambda n: None if n == "wsl" else real(n)
+        got = _wsl()
+    finally:
+        shutil.which = real
+    if sys.platform.startswith("linux"):
+        assert got is True, (
+            "Linux 上把 `wsl` 藏起来之后 `_wsl()` 应当仍为真 —— 否则 runner 上这一族全被"
+            "跳过、而门禁照样报满（`FujoJTOP/loment#371`）")
+    else:
+        assert got is False, (
+            f"非 Linux 上把 `wsl` 藏起来之后 `_wsl()` 应当是假，得到 {got!r} —— 一个恒真的"
+            "闸门会把'跑不了'变成'假装跑过了'，而那正是 `FujoJTOP/loment#371` 的形状")
+
+
 def main() -> int:
-    failed = []
-    for name, fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {name}")
-        except Exception as e:  # noqa: BLE001
-            failed.append((name, e))
-            print(f"  FAIL  {name}: {type(e).__name__}: {e}")
-    print(f"\nloment_elf_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-    return 1 if failed else 0
+    return loment_suite.run(TESTS, "loment_elf_test")
 
 
 if __name__ == "__main__":

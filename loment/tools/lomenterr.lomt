@@ -193,7 +193,7 @@ const S_CANDS: u32 = 36;         // E018: `./deps` 里最接近的名字
 const S_CANDS_NONE: u32 = 37;    // E018: `./deps` 在，但没有接近的
 const S_NOOPEN: u32 = 34;
 // 结尾的 explain 指针：抄 rustc 的「For more information about an error, try
-// `rustc --explain E0308`.」—— 它把「这一条还有详解」变成一条**能敲的命令**。
+// `rustc --explain E0318`.」—— 它把「这一条还有详解」变成一条**能敲的命令**。
 // 子代理实测：8 门语言里**没有一门**在给人看的输出里给出可点的文档入口
 // （rustc 只给命令，C# 的 helpUri 只进 SARIF），所以这一格是照最好的那个抄的。
 const S_MORE: u32 = 53;          // more: loment explain
@@ -1107,8 +1107,14 @@ fn h_loc(ctx: ptr, o: u32, line: u32, col: u32, w: u32, plen: u32) -> u32 {
         o = em_byte(ctx, o, load8(ctx, C_PATH + k));
         k = k + 1;
     }
-    o = em_byte(ctx, o, COLON);
-    o = em_u32(ctx, o, line);
+    // **`line == 0` = 编译器没有位置可指**（文件读不到 / 写不出去 / 单元太大 ——
+    // `E031`..`E033` 那几条）。那时**连冒号都不印** —— `file:` 后面空着的样子比
+    // `file:0` 更像坏了。与本文件 `h_snip` 的 `col == 0` 同一条口径：
+    // **只印确实知道的那部分**。
+    if line > 0 {
+        o = em_byte(ctx, o, COLON);
+        o = em_u32(ctx, o, line);
+    }
     if col > 0 {
         o = em_byte(ctx, o, COLON);
         o = em_u32(ctx, o, col);
@@ -1949,8 +1955,13 @@ fn rec_short(ctx: ptr, line: u32, col: u32, mlen: u32, plen: u32, clen: u32) -> 
         o = em_byte(ctx, o, load8(ctx, C_PATH + k));
         k = k + 1;
     }
-    o = em_byte(ctx, o, COLON);
-    o = em_u32(ctx, o, line);
+    // `line == 0` = 编译器没有位置（`E031`..`E033`：文件读不到 / 写不出去 / 单元太大）。
+    // 那时只印文件名 —— `x.lomt:0: error[...]` 里那个 0 会被编辑器当成第 0 行。
+    // 与 `h_loc` 同一条口径。
+    if line > 0 {
+        o = em_byte(ctx, o, COLON);
+        o = em_u32(ctx, o, line);
+    }
     // `col == 0` = 编译器只给了行号（`check()` 的语义诊断都是这样）。**那时不印列** ——
     // 与 `h_loc` 同一条纪律：`x.lomt:9:0:` 会让编辑器按第 0 列跳，那是编出来的位置。
     if col > 0 {
@@ -2612,7 +2623,7 @@ fn h_cands(ctx: ptr, o: u32, w: u32, dn: ptr, hp: ptr, hn: u32) -> u32 {
 }
 
 /// 结尾那一行 explain 指针（抄 rustc 的「For more information about an error, try
-/// `rustc --explain E0308`.」）。
+/// `rustc --explain E0318`.」）。
 ///
 /// **它把"这一条还有详解"变成一条能敲的命令** —— 而且这条命令是真的：`loment explain E4`
 /// 早就在 `lomcli` 里（23 个码各有一句话说清"要你做什么"）。所以这一行不是画饼，
@@ -2802,10 +2813,17 @@ fn _start() -> u32 {
                         let o: u32 = h_head(ctx, 0, cnum, clen);
                         let o2: u32 = h_loc(ctx, o, line, col, w, plen);
                         let o3: u32 = o2;
-                        if have == 1 {
-                            o3 = h_snip(ctx, o2, sr, load32(ctx, C_SRCLEN), line, col, w, mlen);
-                        } else {
-                            o3 = h_nosrc(ctx, o2, w, plen);
+                        // **没有位置就没有源码那一段**（`E031`..`E033` 全是这一类）。
+                        // 三条都不要：不去源里找第 0 行 —— 那会印 "(no such line in the
+                        // source file)"，读者会以为源码有问题；也不印 "(cannot read the
+                        // source file)" —— `E032`/`E033` 的 `file` 正是一个**不该**被当成
+                        // 源码读的产物路径。位置确实知道时才去源里切。
+                        if line > 0 {
+                            if have == 1 {
+                                o3 = h_snip(ctx, o2, sr, load32(ctx, C_SRCLEN), line, col, w, mlen);
+                            } else {
+                                o3 = h_nosrc(ctx, o2, w, plen);
+                            }
                         }
                         let o4: u32 = h_msg(ctx, o3, C_MSG, mlen, w);
                         // **外源那条提示顶到卡片前面，而且卡片整块不渲染**（`#29`）。

@@ -1,0 +1,55 @@
+# 允许**跳过**的判据（一行 `套件 判据名`；`*` = 整条套件被跳过）。
+#
+# 纪律（与 `.github/gate-baseline.txt` 同一套）：
+#   * 实际跳过必须是这里的**子集** —— 多出来一条，门禁就红。挡的是 `CONTRIBUTING.md`
+#     明令禁止的那种做法：**给一条既有判据加个环境门让它不跑**（"不许为了让判据过而放宽它"），
+#     或者新写一条永远跳过的判据。
+#   * **只许变短**：哪一条能在这台机器上跑起来了就删掉它。CI 里没跳的会被 `::notice` 点名。
+#   * 每条写清为什么这台机器上跑不了（`环境`），或者为什么它还没做完（`仓库`）。
+#   * 判据名里**不能有空格**：这一行的格式就是「两列」（`套件 判据名`），名字带空格
+#     会被判成格式错。新写的跳过请起不带空格的名字（`签PE`，不是 `签 PE`）。
+#
+# 这份表是**从 runner 上量出来的**（本机有 clang/WSL，看到的只是子集）：
+# `tools/ci.py` 判预算失败时，每一条都打出一行可以直接粘进来的文本；原因那一列由
+# 那份量取脚本从套件源码里抽（`gate.out` 每条只留最后一行，带不出原因）。
+loment_cstrans_test test_a_byte_only_unit_runs_and_proves_it_is_unsigned  # 环境: 需要 dotnet + WSL
+loment_cstrans_test test_translation_runs_same_as_dotnet  # 环境: 需要 dotnet + WSL
+loment_ctrans_test test_translation_runs_same_as_clang  # 环境: 需要 clang + WSL
+loment_dap_test test_breakpoint_stops_on_the_right_line  # 环境: 需要 WSL + Windows 侧 clang
+loment_dap_test test_next_crosses_a_call  # 环境: 需要 WSL + Windows 侧 clang
+loment_dap_test test_step_in_moves_to_another_line  # 环境: 需要 WSL + Windows 侧 clang
+loment_dap_test test_unplaceable_breakpoint_is_reported  # 环境: 需要 WSL + Windows 侧 clang
+loment_dist_test Windows安装脚本  # 环境: 见该判据打的 SKIP 行
+loment_ffi_test test_go_via_process_bridge  # 环境: 需要 WSL
+loment_ffi_test test_java_via_process_bridge  # 环境: 需要 WSL
+loment_ffi_test test_lua_via_process_bridge  # 环境: 需要 WSL
+loment_ffi_test test_rust_end_to_end  # 环境: 需要 rustc + x86_64-unknown-none + clang + WSL
+loment_ffi_test test_zig_end_to_end  # 环境: 需要 WSL
+loment_filetype_test test_plan_covers_both_extensions  # 环境: 非 Windows —— 登记的是 HKCU 注册表，别的平台没有对应物
+loment_filetype_test test_registered_state_matches_plan  # 环境: 非 Windows
+loment_gotrans_test test_translation_runs_same_as_go  # 环境: 需要 go + WSL
+loment_hosted_test test_csharp_nativeaot_library_is_callable  # 环境: 这一侧没有 dotnet (CI 镜像故意不含; 见 docs/222 §8)
+loment_jtrans_test test_bits_translation_runs_same_as_javac  # 环境: 需要 javac + java + WSL
+loment_jtrans_test test_translation_runs_same_as_javac  # 环境: 需要 javac + java + WSL
+loment_lompi_test test_dev_copy_and_repo_copy_do_not_silently_drift  # 环境: 见该判据打的 SKIP 行
+loment_lumtui_test test_font_metrics_match_freetype  # 环境: 无 WSL
+loment_lumtui_test test_glyph_raster_matches_freetype  # 环境: 无 WSL
+loment_multilang_test test_three_syntaxes_feed_one_program  # 环境: 需要 clang + WSL
+loment_multisyntax_test rust_10_leg  # 环境: 见该判据打的 SKIP 行
+loment_p7_test test_m67_m78_boot_programs  # 环境: 无 QEMU 或内核镜像
+loment_pe_test test_pe_and_elf_agree_on_net_programs  # 环境: 非 Windows 或无 WSL
+loment_pe_test test_pe_builds_and_runs_without_clang_or_wsl  # 环境: 非 Windows
+loment_pe_test test_pe_links_capability_programs  # 环境: 非 Windows
+loment_pe_test test_pe_runs_natively_matches_linux_behavior  # 环境: 非 Windows 或无 clang/WSL
+loment_pe_test test_pe_runs_the_loment_toolchain_natively  # 环境: 非 Windows
+loment_pe_test test_pe_runs_the_selfhost_compiler_natively  # 环境: 非 Windows
+loment_pe_test test_pe_selfhost_mirror_matches_reference  # 环境: 无 clang/WSL
+loment_sign_test 分离签名  # 环境: 见该判据打的 SKIP 行
+loment_sign_test 签PE  # 环境: 见该判据打的 SKIP 行
+loment_state_test test_real_repo_state_is_coherent  # 环境: 这个检出没有 origin/main（tarball 检出？）
+loment_tools_test test_m30_bare_metal_object_and_link  # 环境: 无 clang
+lompi_sync lompi_sync[指南]  # 环境: 见该判据打的 SKIP 行
+lompi_sync lompi_sync[标准库]  # 环境: 见该判据打的 SKIP 行
+lompi_sync lompi_sync[源码]  # 环境: 见该判据打的 SKIP 行
+vscode_ext_test test_vscode_ext_manifest_and_grammar  # 环境: 打包前置: 没装 node_modules (npm install --omit=dev 于 editors/vscode) —— 干净检出/别的机器上如此,
+vscode_ext_test test_vscode_vsix_structure  # 环境: 尚未打包 (python tools/vscode_ext.py --emit …)

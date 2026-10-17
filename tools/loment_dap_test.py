@@ -31,6 +31,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+import loment_suite
 
 ROOT = Path(__file__).resolve().parent.parent
 EXAMPLE = ROOT / "loment" / "examples" / "user_hello.lomt"
@@ -301,16 +302,7 @@ def test_unplaceable_breakpoint_is_reported():
 
 
 def main(argv: list[str] | None = None) -> int:
-    failed: list[str] = []
-    for fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {fn.__name__}")
-        except Exception as e:  # noqa: BLE001
-            failed.append(fn.__name__)
-            print(f"  FAIL  {fn.__name__}: {type(e).__name__}: {e}")
-    print(f"\nloment_dap_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-    return 1 if failed else 0
+    return loment_suite.run(TESTS, "loment_dap_test", only=(argv[0] if argv else None))
 
 
 if __name__ == "__main__":

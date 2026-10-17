@@ -46,6 +46,9 @@ loment/build/** linguist-generated
 *.lom  text eol=lf
 # 包清单 (.lomp, docs/168 §3.2): 也是 Loment 源码, 同样必须 LF
 *.lomp text eol=lf
+# 修改件 (.lomf, docs/254): **按逐字节片段定位**, 所以换行必须钉住 —— 检出成 CRLF 之后
+# 它在 Windows 上就对不上 LF 的源, 而那条判据（"树里的补丁必须已套用"）会红得莫名其妙。
+*.lomf text eol=lf
 # 同类: 被工具/构建/外部校验器逐字节或逐行读的工件与源码。CRLF 在这些地方是真的坏 ——
 # sha256sum -c 会把 \r 当文件名的一部分、IR 逐字节比较会假红、Cargo 每次都重写锁文件。
 *.ll     text eol=lf
@@ -74,7 +77,8 @@ loment/build/** linguist-generated
 *.go     text eol=lf
 # 自然语言写法 (docs/197) 的语料: 同为"源码语言那一侧写出来的普通源文件"。
 # **这一门尤其**: 它的句界就是**换行**(没有分号), 所以"检出换行不漂"对它是实打实的
-# —— CRLF 会让词法器多出一个 `` 记号, 而那个记号不属于任何一句。
+# —— CRLF 会让词法器多出一个 `
+# ` 记号, 而那个记号不属于任何一句。
 *.nl     text eol=lf
 *.fuc    text eol=lf
 *.sha256 text eol=lf

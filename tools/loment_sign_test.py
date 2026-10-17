@@ -113,7 +113,7 @@ def strip_signature(data: bytes) -> bytes:
 
 def test_sign_pe(tmp: Path) -> None:
     if os.name != "nt":
-        print("  SKIP  签 PE (非 Windows 没有 Authenticode)")
+        print("  SKIP  签PE: 非 Windows 没有 Authenticode")
         return
     if loment_sign.keygen(TEST_CN) != 0:
         check("--keygen 生成自签证书", False, "keygen 失败")
@@ -122,7 +122,7 @@ def test_sign_pe(tmp: Path) -> None:
 
     setups = sorted(loment_dist.OUT.glob("*-setup.exe"))
     if not setups:
-        print("  SKIP  签 PE (loment/dist 里没有 setup.exe; 先跑 loment_dist --emit)")
+        print("  SKIP  签PE: loment/dist 里没有 setup.exe; 先跑 loment_dist --emit")
         return
     work = Path(tempfile.mkdtemp(prefix="loment-sign-"))
     src_bytes = setups[0].read_bytes()
@@ -136,7 +136,7 @@ def test_sign_pe(tmp: Path) -> None:
             check("剥掉签名的 PE 被验出无签名",
                   loment_sign.verify_pe([str(naked)], strict=False) == 1)
         except AssertionError as e:      # 正式产物本来就没签过 (没跑 --sign)
-            print(f"  SKIP  无签名负例 ({e})")
+            print(f"  SKIP  无签名负例: {e}")
 
         # 正例: 签一份拷贝
         copy = work / "copy.exe"
@@ -176,7 +176,7 @@ def _args():
 def test_sums(tmp: Path) -> None:
     real = loment_dist.OUT / "SHA256SUMS"
     if not real.exists():
-        print("  SKIP  分离签名 (没有 loment/dist/SHA256SUMS)")
+        print("  SKIP  分离签名: 没有 loment/dist/SHA256SUMS")
         return
     # 在临时目录里做: 测试用的是自己的密钥, 绝不能把临时密钥的公钥/签名写进正式产物目录
     work = Path(tempfile.mkdtemp(prefix="loment-sign-sums-"))

@@ -1,0 +1,142 @@
+lomf 1
+mod   0003-capacities-speak
+about 编译器**前端**那几处固定容量：越界时**说出来**，不再静默截断（issue #345 采纳的 (a)）。
+about 
+about #345 的选项里，**(a)「给每个固定容量补一条失败路径」是唯一既安全、又不动那条招牌的一条**
+about （它自己写的），而它的第一档是**能验、能守住**的一条线：**用户一份源文件推得动的那些
+about 容量，越界必须有话**。(b) 让编译器链运行期、(c) 让 `alloc` 变成真正的分配器、(d) 把
+about `no_runtime` 的说法收窄 —— 三条都比这一笔大，理由记在 `docs/258`。
+about 
+about 这一笔落的四处都在 `driver.lomt`，症状都是**静默截断**（不是写穿）：
+about   * `SLOT` —— 源文件不小于 512 KiB 时读满槽，截断后的源会给出一串**与被截断位置无关**的解析错；
+about   * `DIR_CAP` / `SUBP_CAP` —— 路径拼装截断，于是 `openat` 去找一个不存在的路径，
+about     用户看到的是「这个 `use` 找不到」；
+about   * `EXT_CAP` —— `loment.conf` 的源后缀截断，而截断出来的后缀**可能正好又叫中另一个词法档**。
+about 
+about 顺带把 `codegen` 那两张表共用的那一格**点全名**：发射器对 `CG_MAXFN` 与 `CG_MAXENUM` 都只
+about `return 0`，从驱动这一端看不出是哪一张撞的 —— 原先只写函数数，于是枚举爆掉时用户会去删函数。
+about 
+about **2026-10-17 重写过一次**（不是新事，是同一件事的第二次落）：`#440` 把驱动器里所有面向用户的
+about 消息改成了英文 + `wdiag_file`，并删掉了 `fujoc-s:` 这个内部名（用户敲的是 `loment`）。
+about 这一笔那四条消息跟着改成同一口径 —— 两条改动撞在同一段文本上，所以 `expect` 与两块都重写了。
+about 
+about 棘轮：`loment_caps_test::test_the_front_end_has_no_silent_capacity` 把「前端缺口 0」钉住，
+about `EXPLAINED` 逐条写清每一处排除的来路（见 `tools/loment_caps.py`）。
+
+edit loment/selfhost/driver.lomt expect 1
+old <<<
+    let raw_n: u64 = read_all(fd as u64, slot, SLOT as u64);
+    syscall4(3, fd as u64, 0, 0);
+    let nb: u32 = strip_cr(slot, raw_n as u32);
+>>>
+new <<<
+    let raw_n: u64 = read_all(fd as u64, slot, SLOT as u64);
+    syscall4(3, fd as u64, 0, 0);
+    // **读满了槽 ≠ 文件就这么大**（`#345` 的 (a)：每一个固定容量越界时都要**有话**）。
+    // 槽原先静默截断：一份大于 512 KiB 的源会**少一截**，用户看到的是一串与被截断位置
+    // 无关的解析错 —— 那是本仓最不肯让的形状（`docs/188` 的"宁拒勿猜"）。
+    // 判据只需一次比较：读满 `SLOT` 就说明**至少**这么大，下面那句把这个事实说出来。
+    if raw_n >= SLOT as u64 {
+        return fail("this source file is 512 KiB or larger -- the per-file slot cannot hold it, and cutting it short yields parse errors unrelated to where it was cut: split the facade") as u64;
+    }
+    let nb: u32 = strip_cr(slot, raw_n as u32);
+>>>
+
+edit loment/selfhost/driver.lomt expect 1
+old <<<
+fn subdirs_of(dirp: ptr, dl: u32, dst: ptr, scr: ptr) -> u32 {
+    let dent: ptr = ptr_add(scr, DENT_OFF);
+    let i: u32 = 0;
+    while i < dl && i < DIR_CAP - 1 {
+        store8(scr, i, load8(dirp, i) as u8);
+        i = i + 1;
+    }
+    store8(scr, i, 0 as u8);
+>>>
+new <<<
+fn subdirs_of(dirp: ptr, dl: u32, dst: ptr, scr: ptr) -> u32 {
+    let dent: ptr = ptr_add(scr, DENT_OFF);
+    // **目录路径比槽大 ⇒ 说出来**（`#345` 的 (a)）。原来这条循环只是**停**：截断过的路径
+    // 会去 `openat` 一个不存在的目录，用户看到的是"这个 `use` 找不到"（`docs/188` 的
+    // "宁拒勿猜"：宁可报错，也不要让一个截断过的输入伪装成一个查无此物）。
+    if dl >= DIR_CAP - 1 {
+        return fail("a directory path is longer than 1024 bytes (the project root / tool dir / version-name limit) -- move the project closer to the filesystem root");
+    }
+    let i: u32 = 0;
+    while i < dl && i < DIR_CAP - 1 {
+        store8(scr, i, load8(dirp, i) as u8);
+        i = i + 1;
+    }
+    store8(scr, i, 0 as u8);
+>>>
+
+edit loment/selfhost/driver.lomt expect 1
+old <<<
+    while j < 200 && e < SUBP_CAP - 1 && load8(dent, nm + j) != 0 {
+        store8(w, e, load8(dent, nm + j) as u8);
+        e = e + 1;
+        j = j + 1;
+    }
+    store8(w, e, 0 as u8);
+>>>
+new <<<
+    while j < 200 && e < SUBP_CAP - 1 && load8(dent, nm + j) != 0 {
+        store8(w, e, load8(dent, nm + j) as u8);
+        e = e + 1;
+        j = j + 1;
+    }
+    // 循环是三个条件里哪一个停的？**`e` 撞上沿**就是路径被截断 —— 那时下面这次 `openat`
+    // 找的是一个不存在的路径，而调用方只知道"这个名字不是目录"（`#345` 的 (a)）。
+    if e >= SUBP_CAP - 1 && load8(dent, nm + j) != 0 {
+        return fail("a subpath is longer than 1472 bytes (one slot per source level) -- shorten the path");
+    }
+    store8(w, e, 0 as u8);
+>>>
+
+edit loment/selfhost/driver.lomt expect 1
+old <<<
+    while q < sl - 2 && q < EXT_CAP - 1 {
+        let ch: u8 = load8(buf, st + 1 + q) as u8;
+        if ch == 92 {
+            bad = 1;                          // 带转义的也拒 (见下)
+        }
+        store8(dst, q, ch);
+        q = q + 1;
+    }
+    store8(dst, q, 0 as u8);
+>>>
+new <<<
+    while q < sl - 2 && q < EXT_CAP - 1 {
+        let ch: u8 = load8(buf, st + 1 + q) as u8;
+        if ch == 92 {
+            bad = 1;                          // 带转义的也拒 (见下)
+        }
+        store8(dst, q, ch);
+        q = q + 1;
+    }
+    // 同 `SUBP_CAP` 那条：`q` 撞上沿而字符串里还有字节 ⇒ 后缀被截断（`#345` 的 (a)）。
+    // 静默截断的后果比"配错了"更难查：截出来的后缀**可能正好又叫中另一个词法档**。
+    if q >= EXT_CAP - 1 && q < sl - 2 {
+        return fail("the source extension in loment.conf is longer than 256 bytes");
+    }
+    store8(dst, q, 0 as u8);
+>>>
+
+edit loment/selfhost/driver.lomt expect 1
+old <<<
+    let m: u32 = emit_module(unit, toks2, ir, cg);
+    if m == 0 {
+        let msg: str = "more functions than the codegen table holds -- split the facade";
+        wdiag_file(dfd, scr, ap, an, 33, str_ptr(msg), str_len(msg));
+        return fail(msg);
+>>>
+new <<<
+    let m: u32 = emit_module(unit, toks2, ir, cg);
+    if m == 0 {
+        // **两张表共用这一格，所以两张都点名**（`#345` 的 (a)）：发射器对 `CG_MAXFN` 与
+        // `CG_MAXENUM` 都只 `return 0`，从驱动这一端看不出是哪一张撞的 —— 那就别猜，
+        // 把两个名字一起写出来（原先只写函数数，于是枚举爆掉时用户会去删函数）。
+        let msg: str = "more functions (or more enum variants) than the codegen tables hold -- split the facade";
+        wdiag_file(dfd, scr, ap, an, 33, str_ptr(msg), str_len(msg));
+        return fail(msg);
+>>>

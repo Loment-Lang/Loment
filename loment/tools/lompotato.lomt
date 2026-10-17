@@ -580,6 +580,11 @@ fn is_top_key(ver: u32, kp: ptr, kl: u32) -> u32 {
     if ver >= 13 && eq_lit(kp, kl, "vm") == 1 {
         return 1;
     }
+    // v15 = v14 + **内存安全**（`docs/253`，用户 2026-10-15 定第六维）：`lms_close` / `lms_open`。
+    // 与 `gc` **正交** —— 同一张图上相反的两个方向（`docs/210` §6.2）。
+    if ver >= 15 && eq_lit(kp, kl, "lms") == 1 {
+        return 1;
+    }
     return 0;
 }
 
@@ -1554,6 +1559,23 @@ fn chk_v1(mem: ptr, doc: u32, ver: u32) -> u32 {
             let _v13: u32 = bad(mem);
         }
     }
+    if ver >= 15 {
+        // v15（`docs/253`）：`lms`。⚠ **刻意不写与 `no_runtime` 的冲突** —— LMS 的四格落的
+        // 都是**指令**（一条 `cmp` / 一个 `llvm.trap`）、**不发运行期组件**，所以
+        // `lms_open` + `no_runtime` 不矛盾（`docs/253` §11.2）。多写一条反而把结论说反。
+        let lm: u32 = jget(mem, doc, "lms");
+        let lok: u32 = 0;
+        if lm != NOTFOUND && jkind(mem, lm) == 3 {
+            let ll: u32 = jstr(mem, lm, ptr_add(mem, M_SB), 4096);
+            if eq_lit(ptr_add(mem, M_SB), ll, "lms_close") == 1
+                    || eq_lit(ptr_add(mem, M_SB), ll, "lms_open") == 1 {
+                lok = 1;
+            }
+        }
+        if lok == 0 {
+            let _v15: u32 = bad(mem);
+        }
+    }
     if ver >= 6 {
         let gr: u32 = jget(mem, doc, "grammar");
         let gok: u32 = 0;
@@ -1650,6 +1672,9 @@ fn validate(mem: ptr, tot: u32) -> u32 {
         }
         if eq_lit(t, l, "v14") == 1 {
             ver = 14;
+        }
+        if eq_lit(t, l, "v15") == 1 {
+            ver = 15;
         }
     }
     if ver == NOTFOUND {

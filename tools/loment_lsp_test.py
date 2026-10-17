@@ -22,6 +22,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import lomentc  # noqa: E402
 import loment_lsp as PY_LSP  # noqa: E402
 
@@ -505,17 +506,210 @@ def test_python_lsp_definition_survives_grammar_declaration():
     print("      带 grammar 声明的文件: definition 请求返回 null 而不是抛出 LomError")
 
 
+#: `#27` 的探针源: 一个未知类型（E030）在**已知的一列**上, 一个名字在**已知的一列**上。
+RANGE_SRC = ("module t\n"
+             "\n"
+             "struct Point {\n"
+             "    x: u32,\n"
+             "    y: u32,\n"
+             "}\n"
+             "\n"
+             "fn area(p: Point) -> u32 {\n"
+             "    return p.x + p.y;\n"
+             "}\n"
+             "\n"
+             "fn _start() {\n"
+             "    let w: f64 = 0;\n"
+             "    syscall4(60, 0, 0, 0);\n"
+             "}\n")
+
+
+def _want_span(word: str, line0: int) -> dict:
+    """从源文本里算出 `word` 在 `line0` 上的跨度 —— 判据**不写死列号**, 免得改源就过期。"""
+    col = RANGE_SRC.splitlines()[line0].index(word)
+    return {"start": {"line": line0, "character": col},
+            "end": {"line": line0, "character": col + len(word)}}
+
+
+@test
+def test_lsp_ranges_name_the_token_and_not_the_line():
+    """`#27`：range 要指在**那个符号**上，不是常量 `0 → 200`。
+
+    原先每一条 range 的两端都是常量列 `0` 与 `200`：一条 14 字符的行与一条 300 字符的行
+    回来的是同一对数字，编辑器于是把**整行**画成波浪线，指不到出问题的那一格。`definition`
+    同理，回的是 `{line, 0} → {line, 200}`，光标只能落到行首。
+
+    判据不满足于"不再等于 200"：它把**期望的跨度**从源文本里算出来（那个 token 在哪一列、
+    多长），要求逐字相等。顺手也钉住了 `#323` 的新码在语言服务这一侧是通的。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    uri = "file:///range.lomt"
+    dl = RANGE_SRC.splitlines().index("    let w: f64 = 0;")
+    fl = RANGE_SRC.splitlines().index("fn area(p: Point) -> u32 {")
+    msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"method": "textDocument/didOpen",
+             "params": {"textDocument": {"uri": uri, "text": RANGE_SRC}}},
+            {"jsonrpc": "2.0", "id": 2, "method": "textDocument/definition",
+             "params": {"textDocument": {"uri": uri},
+                        "position": {"line": fl,
+                                     "character": RANGE_SRC.splitlines()[fl].index("Point") + 1}}},
+            {"jsonrpc": "2.0", "id": 3, "method": "shutdown", "params": {}},
+            {"method": "exit"}]
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        frames, rc, err = Batch(_build(td), td).run(msgs)
+    assert rc == 0, f"LSP 退出码 {rc}: {err[-300:]}"
+    dg = frames[1]["params"]["diagnostics"]
+    want = _want_span("f64", dl)
+    assert any(d["range"] == want for d in dg), (want, dg)
+    got = frames[2]["result"]
+    assert got is not None, frames[2]
+    assert got["range"] == _want_span("Point", 2), (got, _want_span("Point", 2))
+    print(f"      诊断 range == `f64` 的跨度 {want['start']['character']}.."
+          f"{want['end']['character']}；definition == 声明里那个名字的跨度")
+
+
+@test
+def test_python_lsp_ranges_are_not_placeholders_either():
+    """同一件事的 **Python 参考实现**那一侧（`tools/loment_lsp.py`）—— 与上面那条成对。
+
+    两边能给的精度**不一样**，判据也据此分开，不假装它们一样：
+
+    * **解析期**那一支有真列（`lomc.LomError` 带 `col`），所以要求它给**精确**跨度；
+    * **检查期**的消息只带**行**（`12: …`，`#5` 记的就是"列从来没算过"），这一层拿不到列 ——
+      于是要求它给**那一行第一个 token** 的跨度：落在对的那一行上，且**不再是**常量。
+
+    `definition` 两边都能给准：行与名字都是已知的，只是要把它找出来。
+    """
+    uri = "file:///range.lomt"
+    docs = {uri: RANGE_SRC}
+    dg = PY_LSP.handle({"method": "textDocument/didOpen",
+                        "params": {"textDocument": {"uri": uri, "text": RANGE_SRC}}},
+                       docs)[0]["params"]["diagnostics"]
+    dl = RANGE_SRC.splitlines().index("    let w: f64 = 0;")
+    first = RANGE_SRC.splitlines()[dl].index("let")
+    assert any(d["range"] == {"start": {"line": dl, "character": first},
+                              "end": {"line": dl, "character": first + 3}} for d in dg), dg
+    # 解析期那一支：列要**精确**到词法器的 `col`，不是 0。
+    bad = "module t\n\nfn f() -> u32 {\n    let a: u32 = 1 @ 2;\n    return a;\n}\n"
+    perr = PY_LSP.handle({"method": "textDocument/didOpen",
+                          "params": {"textDocument": {"uri": "file:///bad.lomt", "text": bad}}},
+                         {"file:///bad.lomt": bad})[0]["params"]["diagnostics"]
+    assert perr and perr[0]["range"]["start"]["character"] > 0, perr
+    fl = RANGE_SRC.splitlines().index("fn area(p: Point) -> u32 {")
+    got = PY_LSP.handle({"jsonrpc": "2.0", "id": 2, "method": "textDocument/definition",
+                         "params": {"textDocument": {"uri": uri},
+                                    "position": {"line": fl,
+                                                 "character":
+                                                     RANGE_SRC.splitlines()[fl].index("Point")
+                                                     + 1}}},
+                        docs)[0]["result"]
+    assert got is not None and got["range"] == _want_span("Point", 2), got
+    print("      检查期落在对的**那一行**上；解析期给到**真列**；definition 给到名字的跨度")
+
+
 def main() -> int:
-    failed = []
-    for name, fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {name}")
-        except Exception as e:  # noqa: BLE001
-            failed.append((name, e))
-            print(f"  FAIL  {name}: {type(e).__name__}: {e}")
-    print(f"\nloment_lsp_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-    return 1 if failed else 0
+    return loment_suite.run(TESTS, "loment_lsp_test")
+
+
+#: `#262` 的探针源：一份**编得过**的 python 语法文件（前门会把它翻成 Loment）。
+FOREIGN_SRC = ("choose write grammar python\n"
+               "\n"
+               "module t\n"
+               "\n"
+               "def f(v):\n"
+               "    return v + 1\n")
+
+
+#: `#28` 的探针源：光标停在 `q.` 后面（`Point` 的两个字段应该回来）。
+MEMBER_SRC = ("module demo\n"
+              "\n"
+              "struct Point {\n"
+              "    x: u32,\n"
+              "    y: u32,\n"
+              "}\n"
+              "\n"
+              "fn area(p: Point) -> u32 {\n"
+              "    return p.x + p.y;\n"
+              "}\n"
+              "\n"
+              "fn _start() {\n"
+              "    let q: Point = Point { x: 1, y: 2 };\n"
+              "    let v: u32 = q.\n"
+              "    syscall4(60, 0, 0, 0);\n"
+              "}\n")
+
+
+def _member_pos() -> tuple[int, int]:
+    """`q.` 之后那个位置（0 起的行列）。"""
+    lines = MEMBER_SRC.splitlines()
+    ln = lines.index("    let v: u32 = q.")
+    return ln, lines[ln].index("q.") + 2
+
+
+@test
+def test_completion_after_a_dot_lists_the_struct_fields():
+    """`#28`：`q.` 之后回来的是 `Point` 的**字段**，不是一屏关键字。
+
+    这条 issue 的另一半（"广告了 `.` / `:` 触发字符却什么都不给"）在更早的一次改动里已经
+    修掉 —— 触发字符不再广告。剩下的正题是**补全本身不看位置**，所以这一条量的是"给了什么"：
+    两个语言服务各判一次，字段集合必须**正好**是 `{x, y}`。
+    """
+    uri = "file:///member.lomt"
+    ln, ch = _member_pos()
+    req = {"jsonrpc": "2.0", "id": 2, "method": "textDocument/completion",
+           "params": {"textDocument": {"uri": uri},
+                      "position": {"line": ln, "character": ch}}}
+    got = PY_LSP.handle(req, {uri: MEMBER_SRC})[0]["result"]["items"]
+    assert {i["label"] for i in got} == {"x", "y"}, got
+    if not (_clang() and _wsl()):
+        print("      自举侧 SKIP: 无 clang/WSL（Python 侧已判）")
+        return
+    msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"method": "textDocument/didOpen",
+             "params": {"textDocument": {"uri": uri, "text": MEMBER_SRC}}},
+            dict(req),
+            {"jsonrpc": "2.0", "id": 3, "method": "shutdown", "params": {}},
+            {"method": "exit"}]
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        frames, rc, err = Batch(_build(td), td).run(msgs)
+    assert rc == 0, f"LSP 退出码 {rc}: {err[-300:]}"
+    items = frames[2]["result"]["items"]
+    assert {i["label"] for i in items} == {"x", "y"}, items
+    print("      两个语言服务：`q.` 之后正好回来 Point 的 {x, y}")
+
+
+@test
+def test_a_foreign_grammar_file_gets_one_info_and_no_fake_errors():
+    """`#262`：`choose write grammar python` 的源**编得过**，所以拿 Loment 的规则去查它，
+    报出来的全是**假错** —— 用户会去改一份本来就对的源。
+
+    两个语言服务各判一条，要求一样：**一条 Info（severity 3），一条 Error（severity 1）都没有**。
+    判"没有 Error"比判"有几条"更要紧 —— 假错正是这条 issue 说的东西。
+    """
+    uri = "file:///foreign.lomt"
+    pdg = PY_LSP.handle({"method": "textDocument/didOpen",
+                         "params": {"textDocument": {"uri": uri, "text": FOREIGN_SRC}}},
+                        {uri: FOREIGN_SRC})[0]["params"]["diagnostics"]
+    assert pdg and all(d["severity"] == 3 for d in pdg), pdg
+    if not (_clang() and _wsl()):
+        print("      自举侧 SKIP: 无 clang/WSL（Python 侧已判）")
+        return
+    msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"method": "textDocument/didOpen",
+             "params": {"textDocument": {"uri": uri, "text": FOREIGN_SRC}}},
+            {"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": {}},
+            {"method": "exit"}]
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        frames, rc, err = Batch(_build(td), td).run(msgs)
+    assert rc == 0, f"LSP 退出码 {rc}: {err[-300:]}"
+    dg = frames[1]["params"]["diagnostics"]
+    assert dg and all(d["severity"] == 3 for d in dg), dg
+    print("      两个语言服务：假错 0 条，各一条 Info 说明这份源是 python 语法")
 
 
 if __name__ == "__main__":

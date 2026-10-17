@@ -244,7 +244,11 @@ def main(argv: list[str] | None = None) -> int:
     for pair in prs:
         if not pair["src"].is_dir():
             # 正本不在本机（CI / 别人的机器）。**说清楚**，别让人以为查过了。
-            print(f"lompi_sync[{pair['label']}]: 正本不在本机 ({pair['src']}) —— 跳过比对")
+            # 行首写成 `SKIP` 是给**门禁**看的（`#371`）：这一行原先虽然明说，但机器认不出来
+            # —— `count_skips` 只数行首是 SKIP 的，于是"这一组没比"在预算里是一笔糊涂账。
+            # 带名字（`<组名>: <原因>`）之后它进得了 `gate-skips.txt`，谁在哪台机器上跳过
+            # 得掉就一清二楚。
+            print(f"SKIP  lompi_sync[{pair['label']}]: 正本不在本机 ({pair['src']}) —— 跳过比对")
             continue
         diff, only_dev, only_repo = _compare(pair)
         if not (diff or only_dev or only_repo):

@@ -28,6 +28,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import lomentc  # noqa: E402
 import lvm  # noqa: E402
 import loment_elf_test as ELF  # noqa: E402
@@ -270,16 +271,7 @@ TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 
 def main() -> int:
-    failed = []
-    for fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {fn.__name__}")
-        except Exception as e:  # noqa: BLE001
-            failed.append(fn.__name__)
-            print(f"  FAIL  {fn.__name__}: {type(e).__name__}: {e}")
-    print(f"\nlvm_twin_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-    return 1 if failed else 0
+    return loment_suite.run(TESTS, "lvm_twin_test")
 
 
 if __name__ == "__main__":

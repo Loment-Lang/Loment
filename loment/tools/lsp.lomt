@@ -38,8 +38,9 @@ const S_NERR: u32 = 8;
 const S_NSYM: u32 = 12;
 const DOCS_URI: u32 = 4096;         // N_DOC * URI_CAP
 const DOCS_TXT: u32 = 8192;         // N_DOC * DOC_CAP
-const SYM_OFF: u32 = 1056768;       // 256 * 72
-const SYM_STRIDE: u32 = 72;
+const SYM_OFF: u32 = 1056768;       // = DOCS_TXT + N_DOC * DOC_CAP（文档正文区之后）
+// 一条符号记录: 名字 ≤60B + NUL @0..61 | kind @64 | line @68 | **col @72**（`#27`）。
+const SYM_STRIDE: u32 = 80;
 const SYM_MAX: u32 = 256;
 const OUT_OFF: u32 = 1240000;       // 出站缓冲 (BODY_OFF 起才是 body)
 const SCR_OFF: u32 = 1536000;       // 行/临时缓冲
@@ -384,14 +385,32 @@ fn publish(mem: ptr, toks: ptr, uri: ptr, un: u32, errs: ptr, ne: u32) -> u32 {
         let code: u32 = load32(errs, i * 8);
         let tk: u32 = load32(errs, i * 8 + 4);
         let line: u32 = load32(toks, tk * 20 + 12);
+        // `#27`：范围要**指在那个符号上**。原先两端的列是常量 0 与 200 —— 一条 14 字符的行
+        // 和一条 300 字符的行回来的是同一对常量，编辑器于是把**整行**画成波浪线，指不到
+        // 出问题的那一格。token 里本来就有 `col` 与 `len`（`lexer.lomt` 顶部那张表），
+        // `--check` 那一侧早就在用它们打 `行:列`：这里只是把同一份数据接上。
+        let col: u32 = load32(toks, tk * 20 + 16);
+        let tlen: u32 = load32(toks, tk * 20 + 8);
+        let sp: u32 = 0;
+        if col > 0 {
+            sp = col - 1;                     // LSP 的列是 0 起，词法器的 `col` 是 1 起
+        }
+        let ep: u32 = sp + 1;
+        if tlen > 0 {
+            ep = sp + tlen;
+        }                                     // len 为 0（EOF 那种）时给一格，免得零宽
         if i > 0 {
             o = json_emit_lit(b, o, ", ");
         }
         o = json_emit_lit(b, o, "{\"range\": {\"start\": {\"line\": ");
         o = json_emit_u32(b, o, line - 1);
-        o = json_emit_lit(b, o, ", \"character\": 0}, \"end\": {\"line\": ");
+        o = json_emit_lit(b, o, ", \"character\": ");
+        o = json_emit_u32(b, o, sp);
+        o = json_emit_lit(b, o, "}, \"end\": {\"line\": ");
         o = json_emit_u32(b, o, line - 1);
-        o = json_emit_lit(b, o, ", \"character\": 200}}, \"severity\": 1, \"source\": \"loment\", \"code\": \"E");
+        o = json_emit_lit(b, o, ", \"character\": ");
+        o = json_emit_u32(b, o, ep);
+        o = json_emit_lit(b, o, "}}, \"severity\": 1, \"source\": \"loment\", \"code\": \"E");
         o = emit_e0(b, o, code);
         o = json_emit_lit(b, o, "\", \"message\": ");
         // 消息文本 = "E0NN <标题>": 先拼进暂存, 再**整体**做一次 JSON 转义
@@ -420,9 +439,76 @@ fn publish(mem: ptr, toks: ptr, uri: ptr, un: u32, errs: ptr, ne: u32) -> u32 {
     return o;
 }
 
+/// `#262`：文件头写着 `choose write grammar <别名>` 而别名**不是** `loment` / `rust` 时，
+/// 返回别名 token 的下标；否则 0。
+///
+/// **为什么这一层要拦**：那样一份源**编得过**（前门会把它翻成 Loment），可用 Loment 的规则
+/// 去查它，报出来的是**一屏假错** —— 用户会去改一份本来就对的源。
+/// 返回**别名在源里的跨度**（`(起点 << 32) | 长度`），0 = 没声明或者声明的是原生语法。
+/// 回**跨度**而不是 token 下标：这一趟要跑在 `switchify` **之前**（`apply_switches` 会把
+/// `choose write grammar …` 那一行当开关声明吃掉），之后下标就全移位了。
+fn lsc_foreign(src: ptr, t: ptr, nt: u32) -> u64 {
+    let i: u32 = 0;
+    while i + 3 < nt {
+        if byte_is(src, load32(t, i * 20 + 4), load32(t, i * 20 + 8), "choose")
+                && byte_is(src, load32(t, (i + 1) * 20 + 4), load32(t, (i + 1) * 20 + 8), "write")
+                && byte_is(src, load32(t, (i + 2) * 20 + 4),
+                           load32(t, (i + 2) * 20 + 8), "grammar")
+                && load32(t, (i + 3) * 20) == 0 {
+            let as_st: u32 = load32(t, (i + 3) * 20 + 4);
+            let as_ln: u32 = load32(t, (i + 3) * 20 + 8);
+            if byte_is(src, as_st, as_ln, "loment") || byte_is(src, as_st, as_ln, "rust") {
+                return 0;
+            }
+            return ((as_st as u64) * 4294967296) + (as_ln as u64);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// **一条 Info，不是一屏 Error**：这份源不是 Loment 写的，这一层没有它的规则。说清楚
+/// "为什么这里安静"比编一堆错有用 —— 静默会让人以为服务挂了。
+fn publish_foreign(mem: ptr, text: ptr, uri: ptr, un: u32, as_st: u32, as_ln: u32) -> u32 {
+    let b: ptr = out_body(mem);
+    let o: u32 = BODY_OFF;
+    o = json_emit_lit(b, o, "{\"jsonrpc\": \"2.0\", \"method\": \"textDocument/publishDiagnostics\", \"params\": {\"uri\": ");
+    o = json_emit_str(b, o, uri, un);
+    o = json_emit_lit(b, o, ", \"diagnostics\": [{\"range\": {\"start\": {\"line\": 0, \"character\": 0}, \"end\": {\"line\": 0, \"character\": 1}}, \"severity\": 3, \"source\": \"loment\", \"message\": ");
+    let mb: ptr = ptr_add(mem, SCR_OFF + 6144);
+    let mo: u32 = 0;
+    let pre: str = "这份源写的是 ";
+    let q: u32 = 0;
+    while q < str_len(pre) {
+        store8(mb, mo, str_byte(pre, q) as u8);
+        mo = mo + 1;
+        q = q + 1;
+    }
+    let st: u32 = as_st;
+    let ln: u32 = as_ln;
+    q = 0;
+    while q < ln && mo < 200 {
+        store8(mb, mo, load8(text, st + q) as u8);
+        mo = mo + 1;
+        q = q + 1;
+    }
+    let suf: str = " 语法 —— 语言服务只查 Loment，所以这里不报诊断；要真诊断就 `loment build`。";
+    q = 0;
+    while q < str_len(suf) && mo < 400 {
+        store8(mb, mo, str_byte(suf, q) as u8);
+        mo = mo + 1;
+        q = q + 1;
+    }
+    o = json_emit_str(b, o, mb, mo);
+    o = json_emit_lit(b, o, "}]}}");
+    out_done(mem, o);
+    send_pending(mem);
+    return o;
+}
+
 // ---------------------------------------------------------------- 符号表
 
-fn sym_add(mem: ptr, name: ptr, n: u32, kind: u32, line: u32) -> u32 {
+fn sym_add(mem: ptr, name: ptr, n: u32, kind: u32, line: u32, col: u32) -> u32 {
     let c: u32 = load32(mem, S_NSYM);
     if c >= SYM_MAX {
         return 0;
@@ -440,6 +526,9 @@ fn sym_add(mem: ptr, name: ptr, n: u32, kind: u32, line: u32) -> u32 {
     store8(e, nn, 0 as u8);
     store32(e, 64, kind);
     store32(e, 68, line);
+    // `#27`：**名字那一格**的列。跳转原先回 `{line, character: 0}` —— 编辑器只能把光标
+    // 扔到行首，而声明往往缩进着。名字的长度用 `sym_len`（名字以 0 收尾），不必另存。
+    store32(e, 72, col);
     store32(mem, S_NSYM, c + 1);
     return 1;
 }
@@ -548,7 +637,8 @@ fn scan_syms(mem: ptr, text: ptr, toks: ptr, nt: u32) -> u32 {
                                 if i + 1 < nt {
                                     sym_add(mem, ptr_add(text, load32(toks, (i + 1) * 20 + 4)),
                                             load32(toks, (i + 1) * 20 + 8),
-                                            decl_kind(text, s, n), ln);
+                                            decl_kind(text, s, n), ln,
+                                            load32(toks, (i + 1) * 20 + 16));
                                 }
                                 i = i + 1;
                             } else {
@@ -584,7 +674,8 @@ fn add_method(mem: ptr, text: ptr, toks: ptr, i: u32, ty: u32) -> u32 {
         o = o + 1;
         q = q + 1;
     }
-    return sym_add(mem, buf, o, 3, load32(toks, i * 20 + 12));
+    return sym_add(mem, buf, o, 3, load32(toks, (i + 1) * 20 + 12),
+                   load32(toks, (i + 1) * 20 + 16));
 }
 
 fn skip_to_brace(text: ptr, toks: ptr, i: u32, nt: u32) -> u32 {
@@ -1015,7 +1106,17 @@ fn on_change(mem: ptr, src: ptr, arena: ptr, root: u32, toks: ptr, chk: ptr,
     let text: ptr = doc_text(mem, idx);
     let tn2: u32 = doc_txtlen(mem, idx);
     let nt: u32 = lex(text, tn2, toks);
+    // `#262`：声明了**非原生**语法就先别查 —— 用 Loment 的规则读别的语言，报出来全是假错。
+    // **必须在 `switchify` 之前**：`apply_switches` 会把 `choose write grammar …` 那一行
+    // 当开关声明吃掉，之后 token 流里就找不到它了（下标也会整体移位）。
+    let fg: u64 = lsc_foreign(text, toks, nt);
     let nt: u32 = switchify(mem, text, toks, nt);
+    if fg != 0 {
+        store32(mem, S_NERR, 0);
+        scan_syms(mem, text, toks, nt);
+        return publish_foreign(mem, text, ubuf, un,
+                               (fg / 4294967296) as u32, (fg % 4294967296) as u32);
+    }
     let ne: u32 = run_check(text, toks, errs, chk);
     store32(mem, S_NERR, ne);
     scan_syms(mem, text, toks, nt);
@@ -1028,6 +1129,34 @@ fn on_completion(mem: ptr, src: ptr, arena: ptr, root: u32, id: u32, toks: ptr) 
     let idx: u32 = doc_find(mem, ubuf, un);
     let b: ptr = out_body(mem);
     let o: u32 = resp_prefix(mem, src, arena, id);
+    // `#28`：`p.` 之后要给 `Point` 的**字段**，不是一屏关键字。算不出类型就原样走通用补全 ——
+    // 覆盖了 `b` 里已经写下的那一段（`o` 之后重写即可）。
+    if idx != 4294967295 {
+        let params: u32 = json_get(src, arena, root, "params");
+        let pos: u32 = json_get(src, arena, params, "position");
+        let ln: u32 = json_as_u32(src, arena, json_get(src, arena, pos, "line"));
+        let ch: u32 = json_as_u32(src, arena, json_get(src, arena, pos, "character"));
+        let text: ptr = doc_text(mem, idx);
+        let tn: u32 = doc_txtlen(mem, idx);
+        let rc: u64 = lsc_member_recv(text, ln, ch);
+        if rc != 0 {
+            let nt: u32 = lex(text, tn, toks);
+            let nt: u32 = switchify(mem, text, toks, nt);
+            let tp: u64 = lsc_local_type(text, toks, nt, (rc / 4294967296) as u32,
+                                         (rc % 4294967296) as u32, ln + 1);
+            if tp != 0 {
+                let o2: u32 = json_emit_lit(b, o, "{\"isIncomplete\": false, \"items\": [");
+                let o3: u32 = lsc_emit_fields(mem, text, toks, nt, (tp / 4294967296) as u32,
+                                              (tp % 4294967296) as u32, o2);
+                if o3 != 4294967295 {
+                    let o4: u32 = json_emit_lit(b, o3, "]}}");
+                    out_done(mem, o4);
+                    send_pending(mem);
+                    return 0;
+                }
+            }
+        }
+    }
     let o2: u32 = json_emit_lit(b, o, "{\"isIncomplete\": false, \"items\": [");
     let o3: u32 = emit_words(mem, o2);
     let o4: u32 = emit_syms(mem, o3, idx, toks);
@@ -1130,6 +1259,112 @@ fn emit_syms(mem: ptr, o: u32, idx: u32, toks: ptr) -> u32 {
     return o2;
 }
 
+// ---------------------------------------------------------------- 成员补全（`#28`）
+
+/// 光标前是不是 `recv.` —— 是就返回 `recv` 的跨度 `(起点<<32)|长度`，否则 0。
+///
+/// 认 `p.` 与 `p.x` 的前半截；`p[i].` / `a.b.` 不追（回 0 就走通用补全）。
+/// **宁可少给，不给错的** —— 补错一项比少补一项更打扰人。
+fn lsc_member_recv(text: ptr, line: u32, ch: u32) -> u64 {
+    let lstart: u32 = line_start(text, line);
+    let c: u32 = lstart + ch;
+    let e: u32 = c;
+    while e > lstart && is_wordc(load8(text, e - 1)) {
+        e = e - 1;
+    }
+    if e == 0 || load8(text, e - 1) != 46 {
+        return 0;
+    }
+    let s: u32 = e - 1;
+    let st: u32 = s;
+    while st > lstart && is_wordc(load8(text, st - 1)) {
+        st = st - 1;
+    }
+    if st == s {
+        return 0;
+    }
+    return ((st as u64) * 4294967296) + ((s - st) as u64);
+}
+
+/// `recv` 在**光标之前**被声明成什么类型（`let x: T` 或形参 `x: T`）—— 返回类型名的跨度。
+///
+/// 取**最后**一处：光标在后面的函数里时，那一处通常就在同一个函数体里。这一层**不做**
+/// 作用域分析（真正的块作用域是 `#364` 的事）—— 名字在两处都出现时会取靠后那处。
+fn lsc_local_type(text: ptr, toks: ptr, nt: u32, rs: u32, rl: u32, line: u32) -> u64 {
+    let best: u64 = 0;
+    let i: u32 = 2;
+    while i + 2 < nt {
+        if load32(toks, i * 20) == 0
+                && load32(toks, i * 20 + 8) == rl
+                && same_bytes(ptr_add(text, load32(toks, i * 20 + 4)), ptr_add(text, rs), rl)
+                && byte_is(text, load32(toks, (i + 1) * 20 + 4),
+                           load32(toks, (i + 1) * 20 + 8), ":")
+                && load32(toks, (i + 2) * 20) == 0
+                && load32(toks, i * 20 + 12) < line {
+            // 前面必须是 `let` / `(` / `,` —— 否则 `struct S { x: u32 }` 那种字段声明
+            // 也会被当成"变量 x 的类型"，然后在别处补出它自己的字段（指错地方）。
+            if byte_is(text, load32(toks, (i - 1) * 20 + 4),
+                       load32(toks, (i - 1) * 20 + 8), "let")
+                    || byte_is(text, load32(toks, (i - 1) * 20 + 4),
+                               load32(toks, (i - 1) * 20 + 8), "(")
+                    || byte_is(text, load32(toks, (i - 1) * 20 + 4),
+                               load32(toks, (i - 1) * 20 + 8), ",") {
+                best = ((load32(toks, (i + 2) * 20 + 4) as u64) * 4294967296)
+                       + (load32(toks, (i + 2) * 20 + 8) as u64);
+            }
+        }
+        i = i + 1;
+    }
+    return best;
+}
+
+/// `struct <名字>` 的字段做成补全项，追加到 `o`；**这个名字不是 struct** 就返回
+/// 4294967295（调用方据此回退到通用补全）。
+fn lsc_emit_fields(mem: ptr, text: ptr, toks: ptr, nt: u32, ns: u32, nl: u32,
+                   o: u32) -> u32 {
+    let b: ptr = out_body(mem);
+    let i: u32 = 0;
+    let body: u32 = 4294967295;
+    while i + 2 < nt {
+        if byte_is(text, load32(toks, i * 20 + 4), load32(toks, i * 20 + 8), "struct")
+                && load32(toks, (i + 1) * 20) == 0
+                && load32(toks, (i + 1) * 20 + 8) == nl
+                && same_bytes(ptr_add(text, load32(toks, (i + 1) * 20 + 4)),
+                              ptr_add(text, ns), nl) {
+            body = i + 2;
+            i = nt;
+        } else {
+            i = i + 1;
+        }
+    }
+    if body == 4294967295 {
+        return 4294967295;
+    }
+    // `{` 之后是 `字段 : 类型 ,` 的重复
+    let j: u32 = body + 1;
+    let first: u32 = 1;
+    let o2: u32 = o;
+    while j + 2 < nt && !byte_is(text, load32(toks, j * 20 + 4),
+                                 load32(toks, j * 20 + 8), "}") {
+        if load32(toks, j * 20) == 0
+                && byte_is(text, load32(toks, (j + 1) * 20 + 4),
+                           load32(toks, (j + 1) * 20 + 8), ":") {
+            if first == 0 {
+                o2 = json_emit_lit(b, o2, ", ");
+            }
+            first = 0;
+            o2 = json_emit_lit(b, o2, "{\"label\": ");
+            o2 = json_emit_str(b, o2, ptr_add(text, load32(toks, j * 20 + 4)),
+                               load32(toks, j * 20 + 8));
+            o2 = json_emit_lit(b, o2, ", \"kind\": 5}");
+            j = j + 3;
+        } else {
+            j = j + 1;
+        }
+    }
+    return o2;
+}
+
 fn on_definition(mem: ptr, src: ptr, arena: ptr, root: u32, id: u32, toks: ptr) -> u32 {
     let un: u32 = take_uri(mem, src, arena, root);
     let ubuf: ptr = ptr_add(mem, SCR_OFF + 2048);
@@ -1168,14 +1403,26 @@ fn on_definition(mem: ptr, src: ptr, arena: ptr, root: u32, id: u32, toks: ptr) 
         return 0;
     }
     let hl: u32 = load32(sym_name(mem, hit), 68) - 1;
+    // `#27`：范围 = **声明里那个名字**本身，不是那一整行。列与长度都从符号记录里拿 ——
+    // 名字以 0 收尾，所以长度走 `sym_len`，不必另存一份。
+    let hc: u32 = load32(sym_name(mem, hit), 72);
+    let hs: u32 = 0;
+    if hc > 0 {
+        hs = hc - 1;
+    }
+    let he: u32 = hs + sym_len(mem, hit);
     let o2: u32 = json_emit_lit(b, o, "{\"uri\": ");
     let o3: u32 = json_emit_str(b, o2, ubuf, un);
     let o4: u32 = json_emit_lit(b, o3, ", \"range\": {\"start\": {\"line\": ");
     let o5: u32 = json_emit_u32(b, o4, hl);
-    let o6: u32 = json_emit_lit(b, o5, ", \"character\": 0}, \"end\": {\"line\": ");
-    let o7: u32 = json_emit_u32(b, o6, hl);
-    let o8: u32 = json_emit_lit(b, o7, ", \"character\": 200}}}}");
-    out_done(mem, o8);
+    let o6: u32 = json_emit_lit(b, o5, ", \"character\": ");
+    let o6b: u32 = json_emit_u32(b, o6, hs);
+    let o7: u32 = json_emit_lit(b, o6b, "}, \"end\": {\"line\": ");
+    let o8: u32 = json_emit_u32(b, o7, hl);
+    let o9: u32 = json_emit_lit(b, o8, ", \"character\": ");
+    let o10: u32 = json_emit_u32(b, o9, he);
+    let o11: u32 = json_emit_lit(b, o10, "}}}}");
+    out_done(mem, o11);
     send_pending(mem);
     return 0;
 }

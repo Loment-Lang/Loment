@@ -1,0 +1,10 @@
+// `#335`：裸 `return;`。今天**有声**拒绝（这是它该有的样子）。
+module bare_return
+
+fn f() {
+    return;
+}
+
+fn _start() {
+    syscall4(60, 7, 0, 0);
+}

@@ -74,6 +74,21 @@ RULES = [
      "**没有名字规则**；后端的 `native M23`（struct 字段暂只支持标量）也还没放行它们。"
      "**换一种写法绕开**（改成编译器认得名字的形状）；绕不开就报告（附上这条消息）。"
      "进度见 `docs/147` §2「命名层」与 `docs/145` 的里程碑表。"),
+    # E030 = **类型位置上的未知名**（`#323`）。**与 E002 分开**，理由与上面那条 E024/E025/E026
+    # 同一条：码按**修法**分。E002 的修法是"先声明这个名字 / 改拼写 / 补 `use`"；而
+    # `let a: f64 = 1;` 里用户要被告知的是"**这门语言没有浮点**"（`loment types` 只列
+    # `u8..u64 i8..i64 bool ptr str` 与聚合）—— 那是"这门语言没有"，不是"你写错了"。
+    #
+    # **0.1.4.5 的实测形状**：`error[E002]: undeclared name` + 一张讲"没有类型推断 /
+    # 先定义后使用 / 跨模块要 `pub`"的建议表，三条一条都不适用。用户会去找拼写错误。
+    #
+    # **排在最前**（在 E002 之前）：本码的字面就是"未知类型"，比 E002 的 `类型 .*未声明`
+    # 更专有 —— 按"更专有的排前面"的老规矩放这里，将来谁给 E002 加分支也不会把它抢走。
+    ("E030", r"未知类型 ",
+     "未知类型",
+     "把类型换成语言真有的一个（`loment types` 列全部）。**最常撞的是浮点**：Loment "
+     "没有 `f32` / `f64` —— 要么把标度放大成整数（`let x: u32 = 314;` 表示 3.14），"
+     "要么把值留在 C ABI 那边用 `extern fn` 传（`docs/173`）。"),
     # E002 必须排在 E001 前面: `载荷类型 Foo 未声明` / `结构体 S.a 类型 Foo 未声明` 里
     # 既有"类型"又有"未声明" —— 用户要做的事是"先声明 Foo"(E002), 不是"检查两侧类型"。
     ("E002", r"未定义的函数|未声明的变量|未声明$|未知结构体|未知枚举|类型 .*未声明|没有方法",
@@ -153,14 +168,30 @@ RULES = [
     #   * "只能声明一次" -> "**这一维**只能声明一次"（有两维之后，"哪一维"必须说出来）；
     #   * 多一条"两档不能同时选"（`no_std` + `gc_auto`）。
     # 2026-10-09 `runtime` 维**兑现**（`docs/217`）：这一维从"只声明"变成"有保证"，
-    # 多出两条消息，**并进 E022 而不是开一个新码** —— 按"码按修法分"的口径，
-    # 这一条的修法与既有那几条同族：**去改那一行 `choose`**（写 `choose runtime`），
-    # 或者把那个拖运行期的构造换掉。开一个新码就还要多一张 zh/en 说明卡、一行自举码表、
-    # 四条"键集相等"的判据，而用户要做的事一个字没变。
+    # 多出两条消息，当时**并进 E022 而不是开一个新码** —— 理由是"码按修法分"，
+    # 这一条的修法与既有那几条同族：**去改那一行 `choose`**（写 `choose runtime`）。
+    #
+    # 2026-10-16 **改判**（issue #321）：那两条**移出去**，另立 **E030**。原先那条理由
+    # 数错了读者：报的是用户写的**那个构造**（`/`、`alloc` …），而他那一行 `choose`
+    # **没有问题** —— 而 E022 的标题说的正是"`choose` / `addin` 写错了"。于是码把人
+    # **指向错的子系统**：他去看 `choose`，翻来翻去都是对的。实测（issue #321）：
+    # `message: /` 之外，`why:` 要先读完三条无关的（核心模式 / 开关 / 声明规则）才轮到
+    # 适用的那一条。**码是用户最先读到的那个词，指错地方就是误导，不是简短。**
+    # 代价当初列得很准（一张 zh/en 说明卡、一行自举码表、四条"键集相等"的判据），
+    # 照付。
+    ("E031", r"声明了 `no_runtime`|用了会把运行期拖进产物的构造",
+     "这一档是 `no_runtime`，而这个构造要运行期",
+     "这一段会被编成**运行期的一部分**（除法与取模要一个除零陷阱、`alloc` 与 `free` 要"
+     "分配器和堆全局、`str_concat` 与 `str_eq` 要它们的运行期辅助、`panic` 要一个 abort、"
+     "`guard` 要域检查），"
+     "而这一档声明的是「**产物里没有运行期**」—— 那不是一句期望，是一条保证"
+     "（`docs/217`）。**修法二选一**：在**根单元**写一行 `choose runtime`（产物从此带上"
+     "那段运行期），或者把这个构造换掉。"
+     "**注意：报的是那个构造和它的位置** —— 你写的 `choose` 那一行没有问题。"),
     ("E022", r"核心模式只能声明一次|核心模式这一维只能声明一次|模式只能是|"
              r"不能同时选|库不许 `choose`|未定义的开关|"
              r"发行版不含 VM|发行版不含对外端口|"
-             r"声明了 `no_runtime`|依赖 `.*` 要求 |依赖 `.*` 用了会把运行期拖进产物的构造|"
+             r"依赖 `.*` 要求 |"
              r"开关 .* 写了两次|`choose` 有 .* 条, 超过上限|`addin` 有 .* 条, 超过上限|"
              r"不许写在另一个开关体里|库不许 `addin`|`addin` 单元不许声明核心模式|"
              r"`addin` 嵌套超过|`addin` 拉进来的单元里只能写 choose 相关代码|"
@@ -187,13 +218,11 @@ RULES = [
      "**开关**（`set choose <名字> { … }` + `choose <名字>` / "
      "`choose close <名字>`）可以有很多（上限见 `MAX_CHOOSE`），但**同名只许写一次**，"
      "而且取值前要先用 `set choose` 定义。"
-     "**`runtime` 维是一句保证**（`docs/217`）：`no_runtime`（默认）说的是"
-     "「产物里没有运行期」，所以凡是会把那段运行期拖进产物的构造（除法、`alloc`、"
-     "`str_concat`、`panic`、`guard` …）在**这一档下编译期点名拒** —— "
-     "要运行期就在**根单元**写一行 "
-     "`choose runtime`。**库**可以声明它的需求（`choose runtime`），但根的取值必须与它一致；"
-     "库用了拖运行期的构造却什么都没写，也要报 —— 库该声明它的**需求**"
-     "（`docs/168`），由项目决定。见 `docs/143` §3.2、`docs/182` §1 与 `docs/217`。\n"
+     "**`runtime` 维**（`docs/217`）：`no_runtime`（默认）是一句**保证**；"
+     "**库**可以声明它的需求（`choose runtime`），但根的取值必须与它一致 —— "
+     "库该声明它的**需求**（`docs/168`），由项目决定。"
+     "**用了会拖运行期的构造报的是 E030，不是这一码。**"
+     "见 `docs/143` §3.2、`docs/182` §1 与 `docs/217`。\n"
      "**`addin <名字>`** 是同一个语法的另一半（`docs/182` §1.4）：它拉进来的**不是库**，"
      "而是**一份开关设定** —— 所以那里面**正是**要写 `choose`，反过来**别的一律不许**"
      "（`fn`/`struct`/`use` 都拒），而且只有**根单元**能写 `addin`（库和 addin 单元都不行）。"
@@ -214,8 +243,30 @@ RULES = [
      "控制流：可能从末尾掉出去",
      "让每条路径都 `return`（末尾补一个，或把收尾写成两支都返回的 `if`）。"
      "走到没有 `return` 的那条路是**非法指令**（SIGILL），不是返回一个默认值。"),
+    # E028 = **LMS 第 1 级检查器**（`docs/253` §5.1）。⚠ **码号从 E028 起**：本文初稿
+    # 写的 E024–E026 是按**旧树**读的，而 origin/main 上那三个码已被命令声明那批占了
+    # （`docs/223`），现行最高是 E027。
+    ("E028", r"越过定长数组的界",
+     "越界：字面量下标越过定长数组的界",
+     "这个下标是**字面量**，而数组的长度是**编译期已知**的 —— 所以「越界」在这里是一个"
+     "**编译期事实**，不是运行期的一种可能（`docs/253` §5.1）。改下标，或把数组声明改长。"
+     "⚠ `lms` 关着时这一条**不发** —— 那时它要么是 UB（走 clang），要么静默踩相邻字节"
+     "（走 `lomelf`），正是 `docs/253` §4.4 实测出来的那一格。"),
+    # E029 = **LMS 第 1 级检查器**（`docs/253` §5.1）：**用完再放**（use-after-free）。
+    # 与 E006（已被移动）**分开**：移走是**所有权**的事，释放是**合法性**的事 ——
+    # 两回事、两条诊断。⚠ `docs/210` §2.8 给 `free` 加的那五条检查管的是 **`free` 自己
+    # 那一端**（这块是不是真块、有没有重复释放），管不了"**之后再用**"。
+    ("E029", r"指向的块已经被 `free`",
+     "用完再放：这块内存已经被 `free`，不能再用",
+     "`free(p)` 之后 `p` 指向的块已经还回去了，再用它就是 use-after-free —— "
+     "而它**不一定会崩**：块可能还留着旧字节、直到被复用（`docs/253` §5.1）。"
+     "要么别 `free`（让 LGC 管），要么在 `free` 之后把 `p` 重新赋值或不再碰它。"
+     "⚠ `lms` 关着时这一条**不发**。"),
     ("E019", r"期望 .*得到|期望表达式|非法字符|顶层只允许|未知顶层关键字|"
              r"pub 之后需要一项声明|数组长度必须为正|第一个参数必须是 self|"
+             # `#33` / `#36`：字符串里的**未知转义**。它原先在词法期**不报**（兜底取原字符），
+             # 现在报了 —— 新增的词法期消息必须并进这一码，否则会落到 E999「请报告」。
+             r"未知转义|"
              r"`set choose` 后面要跟一个块|的块没闭合",
      "语法错误（词法/解析期）",
      "按消息给的 `行:列` 改那一行的写法。常见三种: `match` 的臂体要**块**（`=> { … }`，"
@@ -255,7 +306,41 @@ RULES = [
      "所以两者必须成对：有 `command_main` 却没有命令声明，它就是**死代码**（不会被调用）；"
      "只有声明而没有 `command_main`，生成的入口就没有东西可调（链接时才炸，所以在这里拒）；"
      "签名不对则生成的入口调不动它 —— 入口固定是 "
-     "`fn command_main(argv: ptr, argc: u32) -> u32`（`docs/223` §3.2）。"),
+     "`fn command_main(argv: ptr, argc: u32) -> u32`（`docs/223` §3.2）。"),# ---- E031..E033（issue #8，2026-10-16）：**没有源码位置的失败**。
+    #
+    # 上面那些码全是"源码里哪一行写错了"。这三条不是 —— 它们说的是"**文件**／**产物**
+    # 这一层出的事"：读不到输入、写不了输出、这台编译器装不下这个单元。所以它们的记录
+    # `line` 是 **0**（= 没有位置，`lomenterr` 的 `num_raw` 就是这个口径），渲染器据此
+    # **不印 `:行号`**、也不去源里切那两行。
+    #
+    # ⚠ **号是 31 起，不是 28**：E028/E029 已经被 LMS 第 1 级检查器占了（`docs/253` §5.1，
+    # 定长数组越界 / use-after-free）。合并 main 时撞的号，按"已落地的那份不改"顺延。
+    #
+    # **为什么各占一个码、而不是并进某一条**：按本仓那条老规矩 —— **码按修法分**。
+    # 这三件事用户要做的**动作完全不同**：查路径 / 建目录或换 `-o` / 把单元拆小。
+    # 并进任何一条都会给出"照着建议改却没解决"的消息。
+    #
+    # **为什么排在最后**：`RULES` 是**有序**的，第一个命中就赢。这三条的模式都偏宽
+    # （`cannot open` / `打不开` 这类），插在中间会抢走上面那些更精确的模式。
+    #
+    # **它们与参考实现的关系**：参考实现在这几处**一句话都没有** —— 读不到文件是没接住的
+    # `FileNotFoundError`，写不了输出是没接住的 `OSError`，两者都直接甩 Python 栈。自举侧
+    # 一直在报，只是报的话给不了用户。这一轮两边都补：自举侧吐结构化记录，参考侧改吐一句话。
+    ("E031", r"cannot read |cannot open |打不开输入文件|读不了输入文件|是目录, 不是源文件"
+             r"|入口是空文件",
+     "输入文件读不了",
+     "编译器要读的那份源没拿到：可能是路径不存在、是个目录、没有读权限，或者是**空文件**。"
+     "这与\"你的源码写错了\"是两件事 —— 源码一个字符都还没被看，所以没有行号可指。"),
+    ("E032", r"cannot write the output file|写不了输出文件|写不了输出",
+     "输出文件写不了",
+     "链接器把产物写到你给的那个 `-o` 路径上时失败了。**最常见的起因是那个目录不存在** —— "
+     "`loment build a.lomt -o build/a` 而 `build/` 还没建。也与\"你的源码写错了\"无关。"),
+    ("E033", r"unit is too large|out of memory|单元太大|表容量|does not fit in the input buffer"
+             r"|超过 4 MiB 上限",
+     "这个单元超出编译器装得下的量",
+     "这套工具链是**自举**的：词法缓冲、符号表、codegen 表、回填表都是**固定容量**"
+     "（它们开在程序映像里，而不是按需增长）。单元大过那些格就报这一条。"
+     "它不是\"你的源码错了\" —— 同一份源码换个更小的形状就编得过。"),
 ]
 
 
@@ -301,6 +386,15 @@ ASCII_ONE_LINER: dict[int, str] = {
     25: "two process entries: `_start` and `command_main`",
     26: "a command declaration and `command_main` come in pairs (one missing, or a wrong signature)",
     27: "a non-() function may fall off the end of its body - every path must return",
+    28: "index past the end of a fixed-size array - the index is a literal and the length "
+        "is known at compile time",
+    29: "use after free - this block was already passed to `free`",
+    31: "this construct would drag the runtime in, but this tier is `no_runtime`",
+    30: "unknown type - no type by that name; Loment has no floating point",
+    31: "cannot read the input file - missing, a directory, unreadable, or empty",
+    32: "cannot write the output file - its directory is missing, or it is not writable",
+    33: "the unit is too large for this compiler's fixed buffers - split the facade",
+    29: "use after free - this block was already passed to `free`",
 }
 
 
@@ -342,6 +436,14 @@ TITLE_EN: dict[int, str] = {
     25: "two process entries",
     26: "`command_main` without a matching declaration",
     27: "control flow: this function may fall off the end of its body",
+    28: "index past the end of a fixed-size array",
+    29: "use after free",
+    31: "this construct needs the runtime",
+    30: "unknown type",
+    31: "cannot read this input file",
+    32: "cannot write the output file",
+    33: "this unit is too large for the compiler",
+    29: "use after free",
 }
 
 
@@ -669,21 +771,18 @@ CARDS: dict[int, Card] = {
             "② **开关**是“打开才编进去的代码”，"
             "可以有很多条，但**同名只许写一次**、**取值前必须先 `set choose` 定义**。"
             "库不许 `choose` —— 库要表达需要就声明**能力需求**，由项目决定开不开。"
-            "③ **`runtime` 那一维是一句保证**（`docs/227`）：`no_runtime`（默认）说的是"
-            "“产物里没有运行期”，所以凡是会把那段运行期拖进产物的构造（除法、`alloc`、"
-            "`str_concat`、`panic`、`guard` …）在**这一档下**编译期点名拒。",
+            "③ `runtime` 那一维**不在这里**：用了会拖运行期的构造（除法、`alloc` …）报的是 "
+            "**E030**（`docs/227`）—— 那一码说的是那个构造，这一码说的是 `choose` 自己。",
         fixes=(
             "核心模式**每一维只写一次**，而且只在入口那一份：`choose std` / `choose gc_auto` / "
             "`choose runtime` / `choose hosted` / `choose no_vm`（五维各自独立，不写就是那一维的默认档）。",
-            "报的是 `no_runtime`：要运行期就在**根单元**写一行 `choose runtime`（产品里就带上那段）；"
-            "不要就把那个构造换掉。",
             "开关先定义再取值：`set choose verbose { … }` 然后 `choose verbose`（或 `choose close verbose`）。",
             "定义在别的单元就把它拉进来：入口写 `addin chooseset`，那份 `chooseset.lomt` 里写 `set choose`。",
             "报的是“依赖要求 X 而根不满足”：在根单元写一行同样的 `choose X` —— 依赖的声明是**需求**。",
             "声明别嵌在另一个开关体里 —— 预扫看不见它，那会让“开没开”变成鸡生蛋。",
         ),
         yes="五维核心模式（`mode` / `gc` / `runtime` / `port` / `vm`），每维取值见上；单文件最多 500 条开关；`addin` 跨文件带开关设定（只有根单元能写）；空体开关（只驱动编译器行为）；库声明能力域；库声明核心模式（视作需求，根须满足）",
-        no="同一维写两次、或写在根单元之外不一致；两维取值互相矛盾（`gc_auto` 与 `no_runtime`）；发行版里写 `choose vm`、或让路径带对外端口（渠道闸）；取值前没定义；同名两个取值；嵌套声明；库用了会拖运行期的构造却不声明；**默认档**下用除法/`alloc`/`str_concat` 而不写 `choose runtime`",
+        no="同一维写两次、或写在根单元之外不一致；两维取值互相矛盾（`gc_auto` 与 `no_runtime`）；发行版里写 `choose vm`、或让路径带对外端口（渠道闸）；取值前没定义；同名两个取值；嵌套声明；库用了会拖运行期的构造却不声明",
     ),
     23: Card(
         what="你写的东西语法和语义都对 —— 是**这一版的编译器后端还没做这块**。",
@@ -769,6 +868,136 @@ CARDS: dict[int, Card] = {
         ),
         yes="末尾是 `return`；末尾是带 `else` 的 `if`、两支都返回；末尾是每条臂都返回的 `match`",
         no="末尾是 `while` / `for`（会正常结束）、末尾是表达式语句、末尾是**没有** `else` 的 `if`",
+    ),
+    28: Card(
+        what="一个字面量下标越过了**定长数组**的界（声明是 `[u32; 4]`，却写了 `a[10]`）。",
+        why="这里两边的数**都是编译期已知的** —— 所以它不是一个「运行期的一种可能」，"
+            "而是**一个编译期事实**，`docs/205` §1.1 C5 把这条写成了语言规则："
+            "「越界访问在**字面量**时编译期拒」。**它不看 `lms`**（2026-10-16 起，"
+            "issue #18）—— 在这个日子之前它只在 `choose lms_open` 时发，而 `lms` 是"
+            "开发通道的中间态、不进发行版，于是发行版的用户拿不到这条。同一件事在"
+            "`guard` 那一格早就是编译错误（`docs/146` §3），两个构造两个答案正是那个"
+            "issue 点名的不一致。说死它值当：实测（`docs/253` §4.4）不拒的时候走 clang "
+            "是 UB（IR 里直接长出 `getelementptr inbounds … i32 10`），走仓内 `lomelf` "
+            "是静默踩相邻字节。",
+        fixes=(
+            "把下标改回 `0..len-1` 之内。",
+            "数组确实该更长的话，把**声明**改长（`[u32; 16]` 之类）。",
+            "下标是**算出来的**（不是字面量）时这条发不出来 —— 那种情况自己挡：定长数组"
+            "配一个显式的 `if i >= 4 { … }`，切片用 `slice_len(x)`（运行期的下标默认不检查，"
+            "见下面 `no` 那一行）。",
+            "想让它自动挡（开发通道）：根单元写一行 `choose lms_open` —— 那时保障器会按站点"
+            "发内联界检查（`docs/253` §5.2）。它不进发行版。",
+        ),
+        yes="下标是字面量、且落在界内",
+        no="下标是变量或表达式（这一条只能在编译期判已知的两个数，算出来的界不是它能管的）；"
+           "切片 `[T]` 的下标（长度是运行期的）",
+    ),
+    29: Card(
+        what="一个变量指向的块**已经被 `free`**，之后又用到了它。",
+        why="`free(p)` 之后那块内存已经还回分配器，再用 `p` 就是 use-after-free。"
+            "它**不一定会崩** —— 块可能还留着旧字节，一直到最后被下一次 `alloc` 复用"
+            "（`docs/253` §5.1），所以症状是那种「上线很久、某次分配把它盖掉」才炸的问题。"
+            "`docs/210` §2.8 给 `free` 加的那五条检查管的是 **`free` 自己那一端**"
+            "（是不是真块、有没有重复释放），管不了「之后再用」。与 E006 分开："
+            "移走是**所有权**的事，释放是**合法性**的事。",
+        fixes=(
+            "别 `free` —— 让 LGC 管这块（`gc_auto` / `gc_auto_alpha` 下 `alloc` 发的块"
+            "本来就由回收器管）。",
+            "确实要提前还：`free(p)` 之后把 `p` 重新赋成新块，别再用旧值。",
+            "把 `free` 挪到**最后一个使用点之后** —— 也就是 `p` 的生命周期真结束的地方。",
+        ),
+        yes="`free(p)` 之后没有再读/写 `p`；`free` 之后 `p` 被重新赋值",
+        no="`free` 之前的使用；`free` 之后重新赋值再使用",
+    ),
+    31: Card(
+        what="用了一个**会把运行期拖进产物**的构造，而这一档是 `no_runtime`（默认档）。",
+        why="`no_runtime` 说的不是「我们希望产物里没有运行期」，而是「**产物里没有运行期**」"
+            "（`docs/217`）—— 一条**保证**，不是一句期望。所以凡是会把它拖进去的构造都在"
+            "编译期点名拒。名单是**具体的那几个**：除法 `/` 与取模 `%`（要一个除零陷阱）、"
+            "`alloc` 与 `free`（要分配器与堆全局）、`str_concat` 与 `str_eq`（要它们的运行期"
+            "辅助）、`panic`（要一个 abort）、`guard`（要域检查）。"
+            "**这一条与你写的 `choose` 无关** —— 报的是那个构造和它的位置。"
+            "（分码的来路见 `#321`：从前它并进 E022「`choose` 写错了」，而用户那一行 "
+            "`choose` 是对的。）",
+        fixes=(
+            "要运行期：在**根单元**（入口那一份）写一行 `choose runtime` —— 产物从此带上那段"
+            "运行期，所有这一类构造一起放行。",
+            "不要运行期：把那个构造换掉 —— 比如把 `/ 2` 写成一次 `>> 1`（仅当除数是 2 的幂"
+            "且被除数无符号），把 `alloc` 换成一块固定大小的栈数组。",
+            "是**依赖**报了这条：那个库要用运行期，就在**根单元**写 `choose runtime`；"
+            "不想让你这个程序带上运行期，就换一个不拖运行期的库。",
+            "拿不准是哪一处：看报文的行号 —— 它锚在**第一个**这样的构造成员上，"
+            "消息里还会写「这一类构造本单元另有 N 处」。",
+        ),
+        yes="`choose runtime` 的单元里用 `/`、`%`、`alloc`、`free`、`str_concat`、`str_eq`、"
+            "`panic`、`guard`；`runtime` + `gc_manual`（要运行期、内存自己管的合法档）",
+        no="默认档（不写 `runtime`）下用上面那八个构造；依赖用了却不声明 `choose runtime`",
+    ),
+    30: Card(
+        what="一个**类型位置**上写了这门语言没有的类型（`let x: f64`、形参、返回类型、"
+             "结构体字段、枚举载荷、数组/切片元素都算）。",
+        why="Loment 的类型表是**固定的**：`u8`..`u64`、`i8`..`i64`、`bool`、`ptr`、`str`、"
+            "`()`，加上你声明的 `struct` / `enum` 与它们的数组/切片 —— 没有泛型容器，"
+            "**也没有浮点**（`loment types` 打出来就是全部）。所以这一条说的不是"
+            "\"这个名字没声明\"，而是\"**这门语言没有这种类型**\"。"
+            "它与 E002 分开的理由也在这里：E002 的修法是声明那个名字，这一条的修法是"
+            "换一个真有的类型。",
+        fixes=(
+            "把类型换成表里真有的一个（`loment types` 列全部；最常要换掉的是 `f32`/`f64`）。",
+            "要表示小数就**放大成整数**：`let x: u32 = 314;` 表示 3.14，"
+            "定点运算自己做（`docs/228`）。",
+            "非得用浮点：把那个值留在 C ABI 那一侧，用 `extern fn` 传进传出（`docs/173`）—— "
+            "ABI 上浮点是合法的，语言里的类型不是。",
+        ),
+        yes="`u32` / `i64` / `bool` / `ptr` / `str` / `()`；你声明的 `struct`/`enum` 名；"
+            "它们的数组与切片 `[T; N]` / `[T]`",
+        no="`f32` / `f64`（没有浮点）；泛型容器名；不是类型的标识符（如变量名）",
+    ),
+    31: Card(
+        what="编译器要读的那份源文件没拿到。**还没有看源码一个字符** —— 所以这条没有行号。",
+        why="装载是编译的第一趟，而这一条发生在它之前。「文件读不到」与「文件里的源码写错了」"
+            "是两件不同的事：前者无论如何改源码都解决不了，所以它单独一个码、"
+            "而且**不是**语法错（E019）。空文件也落在这里 —— 那不是「写错了」，是「没得读」。",
+        fixes=(
+            "核对路径：`loment check <file>` 里的 `<file>` 要真的是那个文件"
+            "（相对路径是相对**当前目录**，不是相对别的什么）。",
+            "给的是目录就换成文件：目录本身不是源。想看一个目录里有什么，用 `loment ls <目录>`。",
+            "文件是空的就把源码写进去；另外确认它有读权限（`chmod +r`）。",
+            "路径太长或带了通配符（`*`）也会落到这里 —— shell 没展开时编译器看到的是那个字面量。",
+        ),
+        yes="路径存在、是普通文件、非空、可读",
+        no="写错的路径；目录；0 字节的文件；没有读权限的文件",
+    ),
+    32: Card(
+        what="链接器把产物写到你给的 `-o` 路径上时失败了。",
+        why="产物是编译的**最后一步**，所以这条与源码无关 —— 源码全对也可能写不出去。"
+            "最常见的原因是**父目录不存在**：`loment build a.lomt -o out/a` 而 `out/` 还没建。"
+            "其次是权限，或者那个路径上已经有别的进程占着（Windows 上改了正在运行的 exe 就是这样）。",
+        fixes=(
+            "先建目录：`mkdir -p out` 再 `loment build a.lomt -o out/a`。",
+            "换个落点：`-o a`（不写目录）会落在当前目录。",
+            "确认那个目录你能写（`touch out/x` 试一下就知道了），必要时换个目录。",
+            "Windows 上「写不了」有时是**那个 exe 正在运行** —— 先关掉它再编。",
+        ),
+        yes="`-o` 的父目录存在且可写",
+        no="不存在的目录；只读目录；正在运行的 exe 占着的路径",
+    ),
+    33: Card(
+        what="这个单元超出了这套编译器**固定容量**的那几张表（词法缓冲 / 符号表 / "
+             "codegen 表 / 回填表）。",
+        why="这套工具链是**自举**的，没有优化器也没有动态容器：那几张表开在程序映像里，"
+            "大小是编译期常量。单元大到装不下时，宁可**当场报错**也不静默截断 —— 截断的话"
+            "后面的代码会凭空消失，而那种错要等到运行时才现形（`docs/158` §5 记着这条纪律）。"
+            "所以这条不是「你的源码错了」，是「这一份的形状对这台编译器来说太大了」。",
+        fixes=(
+            "把门面拆小：一个 `use` 拉进来的东西太多就分几层（`loment/lib/` 里那些就是样板）。",
+            "`use` 条数也有上限（一个文件 310 条）—— 超过就是这条。",
+            "声明那么多函数/类型的话，把单元切成几个模块，各自有自己的表。",
+            "确实切不动就拿这事开个 issue：上限是常量，抬它有账可查（`docs/158` 记着每次抬高的实测）。",
+        ),
+        yes="单元在词法缓冲 / 符号表 / codegen 表 / 回填表的容量之内",
+        no="单个源文件里塞一整个库；几百个 `use`；几百个顶层声明",
     ),
 }
 
@@ -1209,16 +1438,13 @@ CARDS_EN: dict[int, Card] = {
             "when it is on\". There can be many switches, but **one name may be written once**, "
             "and a value may only be set after `set choose` declared it. A library may not "
             "`choose`: to express a need, a library declares a **capability requirement** and the "
-            "project decides. (3) **The `runtime` dimension is a guarantee** (`docs/227`): "
-            "`no_runtime` (the default) says \"this artifact carries no runtime\", so every "
-            "construct that would drag that runtime in - division, `alloc`, `str_concat`, `panic`, "
-            "`guard` ... - is refused at compile time **in that tier**.",
+            "project decides. (3) The `runtime` dimension is **not** managed here: a construct "
+            "that would drag the runtime in (division, `alloc`, ...) is reported as **E030** "
+            "(`docs/227`) - that code is about the construct, this one is about `choose` itself.",
         fixes=(
             "Write **each dimension** of the core mode once, in the entry unit only: `choose std` / "
             "`choose gc_auto` / `choose runtime` / `choose hosted` / `choose no_vm` (the five are "
             "independent; omitting one leaves it at that dimension's default).",
-            "If the message names `no_runtime`: write `choose runtime` in the **root unit** (the "
-            "artifact then carries that runtime), or replace the construct it named.",
             "Declare a switch before setting it: `set choose verbose { ... }` then `choose "
             "verbose` (or `choose close verbose`).",
             "The declaration lives in another unit: pull it in with `addin chooseset` in the entry "
@@ -1237,8 +1463,7 @@ CARDS_EN: dict[int, Card] = {
            "values contradict (`gc_auto` with `no_runtime`); `choose vm`, or a path carrying an "
            "outward port, in a release build (the channel gate); setting a value before declaring "
            "it; two settings for one name; nested declarations; a library that uses a "
-           "runtime-dragging construct without declaring it; division / `alloc` / `str_concat` in "
-           "the **default tier** without `choose runtime`",
+           "runtime-dragging construct without declaring it",
     ),
     23: Card(
         what="What you wrote is syntactically and semantically right - **this version of the "
@@ -1365,6 +1590,180 @@ CARDS_EN: dict[int, Card] = {
             "return; a `match` whose every arm returns",
         no="the last statement is `while` / `for` (these end normally), an expression "
            "statement, or an `if` **without** an `else`",
+    ),
+    28: Card(
+        what="A literal index runs past the end of a **fixed-size array** (declared "
+             "`[u32; 4]`, written `a[10]`).",
+        why="Both numbers here are **known at compile time**, so this is not \"one "
+            "possible runtime outcome\" - it is **a compile-time fact**, and `docs/205` "
+            "section 1.1 C5 makes it a language rule: \"an out-of-range access is "
+            "refused at compile time **when the index is a literal**\". **It does not "
+            "look at `lms`** (since 2026-10-16, issue #18) - before that date it only "
+            "fired under `choose lms_open`, and `lms` is a development-channel "
+            "intermediate that does not ship, so a released user never got it. The same "
+            "mistake on a capability domain has always been a compile error "
+            "(`docs/146` section 3); two constructs giving two answers is exactly the "
+            "inconsistency that issue names. Saying it here is worth it: when it is not "
+            "refused, clang gets UB (`docs/253` section 4.4 - the IR literally grows a "
+            "`getelementptr inbounds ... i32 10`) and the in-repo `lomelf` silently "
+            "writes into the neighbouring bytes.",
+        fixes=(
+            "Put the index back inside `0..len-1`.",
+            "If the array really should be longer, lengthen the **declaration** "
+            "(`[u32; 16]`).",
+            "When the index is **computed** rather than a literal this rule cannot fire - "
+            "guard it yourself: a fixed-size array plus an explicit `if i >= 4 { ... }`, "
+            "and `slice_len(x)` for slices (a runtime index is not checked by default - "
+            "see the `no` line below).",
+            "To have it checked automatically (development channel): write `choose "
+            "lms_open` in the root unit and the guarantor emits an inline bounds check "
+            "per site (`docs/253` section 5.2). It does not ship.",
+        ),
+        yes="the index is a literal and is inside the bounds",
+        no="the index is a variable or an expression (this rule can only compare two "
+           "compile-time-known numbers); an index into a slice `[T]` (its length is a "
+           "runtime value)",
+    ),
+    29: Card(
+        what="A variable points at a block that **was already passed to `free`**, and is "
+             "used again afterwards.",
+        why="After `free(p)` that block has gone back to the allocator, so using `p` again "
+            "is a use-after-free. It **does not necessarily crash** - the block may keep "
+            "its old bytes until some later `alloc` reuses it (`docs/253` section 5.1), "
+            "so it is the kind of bug that ships quietly and then blows up when an "
+            "allocation finally lands on it. The five checks `free` gained in `docs/210` "
+            "section 2.8 cover **`free`'s own end** (is this really a block, was it "
+            "already freed); they cannot cover \"used again afterwards\". Separate from "
+            "E006: moving is an **ownership** matter, freeing is a **legality** one.",
+        fixes=(
+            "Do not `free` it - let LGC own the block (under `gc_auto` / `gc_auto_alpha` "
+            "the blocks `alloc` hands out are the collector's anyway).",
+            "If you really must release early: after `free(p)` assign `p` a new block and "
+            "stop using the old value.",
+            "Move the `free` to **after the last use** - i.e. where `p`'s lifetime "
+            "actually ends.",
+        ),
+        yes="`p` is not read or written after `free(p)`; `p` is reassigned after the "
+            "`free`",
+        no="use before the `free`; reassignment followed by use after the `free`",
+    ),
+    31: Card(
+        what="A construct that would **drag the runtime into the artifact** is used, and this "
+             "tier is `no_runtime` (the default).",
+        why="`no_runtime` does not say \"we hope the artifact carries no runtime\", it says "
+            "**\"the artifact carries no runtime\"** (`docs/217`) - a **guarantee**, not a "
+            "hope. So every construct that would drag one in is refused at compile time. The "
+            "list is those specific ones: division `/` and remainder `%` (they need a "
+            "divide-by-zero trap), `alloc` / `free` (the allocator and the heap globals), "
+            "`str_concat` / `str_eq` (their runtime helpers), `panic` (an abort), `guard` (a "
+            "domain check). **This has nothing to do with the `choose` you wrote** - what is "
+            "reported is the construct and where it is. (Why it has its own code: see `#321` - "
+            "it used to be folded into E022 \"bad `choose`\", while the user's `choose` line "
+            "was correct.)",
+        fixes=(
+            "You want the runtime: write `choose runtime` in the **root unit** (the entry "
+            "one) - the artifact then carries that runtime and all of these are let through.",
+            "You do not want it: replace the construct - e.g. write `/ 2` as `>> 1` (only "
+            "when the divisor is a power of two and the dividend is unsigned), or replace an "
+            "`alloc` with a fixed-size array on the stack.",
+            "It is a **dependency** that reported this: that library needs the runtime, so "
+            "write `choose runtime` in the **root unit**; if you would rather your program "
+            "carry no runtime, use a library that does not drag one in.",
+            "Not sure which site it is: read the line in the message - it is anchored on the "
+            "**first** such construct, and the message also says \"this unit has N more of "
+            "this kind\".",
+        ),
+        yes="the eight constructs inside a unit that wrote `choose runtime`; `runtime` + "
+            "`gc_manual` (a legal tier: runtime on, memory managed by you)",
+        no="any of those eight in the default tier (no `runtime` written); a dependency using "
+           "them without declaring `choose runtime`",
+    ),
+    30: Card(
+        what="A **type position** names a type this language does not have - a `let` "
+             "annotation, a parameter, a return type, a struct field, an enum payload, or an "
+             "array/slice element.",
+        why="Loment's type table is **fixed**: `u8`..`u64`, `i8`..`i64`, `bool`, `ptr`, "
+            "`str`, `()`, plus the `struct` / `enum` you declare and arrays/slices of those "
+            "- no generic containers, and **no floating point** (`loment types` prints the "
+            "whole list). So this is not \"that name was not declared\"; it is \"**this "
+            "language has no such type**\". That is also why it is separate from E002: E002 "
+            "is fixed by declaring the name, this one by naming a type that exists.",
+        fixes=(
+            "Name a type that is in the table (`loment types` prints all of them - the one "
+            "people reach for is `f32`/`f64`).",
+            "To carry a fraction, **scale to integers**: `let x: u32 = 314;` for 3.14, with "
+            "the point handled by arithmetic you write (`docs/228`).",
+            "If you truly need floating point, keep the value on the C ABI side and pass it "
+            "through `extern fn` (`docs/173`) - floats are legal in the ABI, not in the "
+            "language's type table.",
+        ),
+        yes="`u32` / `i64` / `bool` / `ptr` / `str` / `()`; a `struct`/`enum` you declared; "
+            "arrays and slices of those, `[T; N]` / `[T]`",
+        no="`f32` / `f64` (there is no floating point); a generic container name; an "
+           "identifier that is not a type (a variable name, say)",
+    ),
+    31: Card(
+        what="The compiler did not get the source file it was told to read. **Not one "
+             "character of the source has been looked at** - so this one has no line number.",
+        why="Loading is the compiler's first pass, and this happens before it. \"The file "
+            "cannot be read\" and \"the source in it is wrong\" are two different things: no "
+            "edit to the source can fix the first, so it gets its own code and is **not** a "
+            "syntax error (E019). An empty file lands here too - that is not \"written "
+            "wrongly\", it is \"nothing to read\".",
+        fixes=(
+            "Check the path: the `<file>` in `loment check <file>` has to be that file (a "
+            "relative path is relative to the **current directory**, nothing else).",
+            "If you handed it a directory, hand it a file: a directory is not source. To see "
+            "what a directory holds, use `loment ls <dir>`.",
+            "If the file is empty, write the source into it; and check you can read it "
+            "(`chmod +r`).",
+            "A path that is too long, or carries a wildcard (`*`) the shell did not expand, "
+            "also lands here - the compiler sees the literal text.",
+        ),
+        yes="the path exists, is a regular file, is not empty, and is readable",
+        no="a misspelt path; a directory; a 0-byte file; a file you may not read",
+    ),
+    32: Card(
+        what="The linker failed to write the artifact to the `-o` path you gave it.",
+        why="The artifact is the compiler's **last step**, so this has nothing to do with "
+            "your source - the source can be perfect and the write still fail. The most "
+            "common cause is a **missing parent directory**: `loment build a.lomt -o out/a` "
+            "when `out/` does not exist yet. Next comes permissions, or the path being held "
+            "by another process (on Windows, replacing an exe that is running does this).",
+        fixes=(
+            "Create the directory first: `mkdir -p out`, then "
+            "`loment build a.lomt -o out/a`.",
+            "Pick another landing spot: `-o a` (no directory) writes into the current "
+            "directory.",
+            "Check you can write in that directory (`touch out/x` settles it); if not, use "
+            "another one.",
+            "On Windows a failed write is sometimes **the exe you are overwriting still "
+            "running** - close it and build again.",
+        ),
+        yes="the parent directory of `-o` exists and is writable",
+        no="a directory that does not exist; a read-only directory; a path held by a running exe",
+    ),
+    33: Card(
+        what="This unit outgrew the compiler's **fixed-capacity** tables (the lexer buffer, "
+             "the symbol table, the codegen table, the backfill table).",
+        why="This toolchain is **self-hosted**: it has no optimiser and no dynamic "
+            "containers, and those tables live inside the program image with a size fixed at "
+            "compile time. When a unit does not fit, it reports **on the spot** rather than "
+            "truncating silently - truncation would make code vanish, and that kind of bug "
+            "only shows up at run time. So this is not \"your source is wrong\"; it is \"this "
+            "unit is too big for this compiler\".",
+        fixes=(
+            "Split the facade: if one `use` pulls in too much, break it into layers (the "
+            "files under `loment/lib/` are the model).",
+            "`use` also has a per-file limit (310 lines) - over that is this code.",
+            "If it is the number of declarations, cut the unit into modules so each has its "
+            "own tables.",
+            "If it genuinely cannot be cut, open an issue: the limits are constants, and "
+            "raising one has a paper trail.",
+        ),
+        yes="the unit fits the lexer buffer / symbol table / codegen table / backfill table",
+        no="a whole library in one source file; hundreds of `use`; hundreds of top-level "
+           "declarations",
     ),
 }
 

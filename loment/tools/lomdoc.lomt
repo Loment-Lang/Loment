@@ -75,8 +75,21 @@ fn write_all(fd: u64, p: ptr, n: u64) -> u64 {
     return off;
 }
 
+/// 面向用户的失败消息: `loment: <msg>` 换行。前缀是 **`loment`**(用户敲的那个命令),
+/// 不是 `lomdoc`(这个包里的文档器组件名) —— issue #8。
 fn fail(msg: str) -> u32 {
+    write_all(2, str_ptr("loment: "), str_len("loment: ") as u64);
     write_all(2, str_ptr(msg), str_len(msg) as u64);
+    write_all(2, str_ptr("\n"), str_len("\n") as u64);
+    return die(1);
+}
+
+/// 同 `fail`, 消息后面接一段**已经量好的字节** (路径)。
+fn failp(msg: str, tail: ptr, n: u32) -> u32 {
+    write_all(2, str_ptr("loment: "), str_len("loment: ") as u64);
+    write_all(2, str_ptr(msg), str_len(msg) as u64);
+    write_all(2, tail, n as u64);
+    write_all(2, str_ptr("\n"), str_len("\n") as u64);
     return die(1);
 }
 
@@ -953,17 +966,28 @@ fn skip_generics(src: ptr, t: ptr, i: u32, n: u32) -> u32 {
 }
 
 /// 函数: 顶层 fn + impl 方法 (折叠名 `<类型>_<方法>`, 首参 `__self: <类型>`)。
+///
+/// `register <名字> { … }` (`docs/223` 形态 A) 里的那个函数**也是顶层函数** ——
+/// 块那层壳语义上是透明的 (参考实现按 AST 收, 根本没有这一层), 但对**按深度走**
+/// 的这里它是可见的: 不单独认出来, 块里的函数就整个看不见 (#399)。
 fn sec_funcs(mem: ptr, src: ptr, len: u32, t: ptr, n: u32) -> u32 {
     let i: u32 = 0;
     let depth: u32 = 0;
     let cnt: u32 = 0;
     let impl_ty: u32 = 0;
     let impl_depth: u32 = 0;
+    let reg_depth: u32 = 0;            // register 块那一层的深度 (不在块里就是 0)
     while i < n && tk_kind(t, i) != 4 {
         if tk_is(src, t, i, "{") {
+            let d0: u32 = depth;
             depth = depth + 1;
             if impl_ty != 0 && impl_depth == 0 {
                 impl_depth = depth;
+            }
+            // 块 `{` 前面两格正好是 `register` `<名字>` —— 形状由 `_reg_one_fn` 钉死
+            // (块里恰好一个函数)。`fn register(…)` 那种的 `{` 前面是 `)`, 不会误认。
+            if d0 == 0 && reg_depth == 0 && i >= 2 && tk_is(src, t, i - 2, "register") {
+                reg_depth = depth;
             }
             i = i + 1;
         } else {
@@ -974,6 +998,9 @@ fn sec_funcs(mem: ptr, src: ptr, len: u32, t: ptr, n: u32) -> u32 {
                 if impl_ty != 0 && depth < impl_depth {
                     impl_ty = 0;
                     impl_depth = 0;
+                }
+                if reg_depth != 0 && depth < reg_depth {
+                    reg_depth = 0;
                 }
                 i = i + 1;
             } else {
@@ -1008,6 +1035,9 @@ fn sec_funcs(mem: ptr, src: ptr, len: u32, t: ptr, n: u32) -> u32 {
                         }
                         let is_free: u32 = 0;
                         if depth == 0 && tk_is(src, t, i, "fn") {
+                            is_free = 1;
+                        }
+                        if reg_depth != 0 && depth == reg_depth && tk_is(src, t, i, "fn") {
                             is_free = 1;
                         }
                         if is_method == 1 || is_free == 1 {
@@ -1167,7 +1197,7 @@ fn _start() -> u32 {
     let scrv: u64 = sys_alloc(SCR_CAP as u64);
     let swv: u64 = sys_alloc(SW_BYTES as u64);
     if memv == 0 || srcv == 0 || tokv == 0 || argv_buf == 0 || scrv == 0 || swv == 0 {
-        return fail("lomdoc: brk failed\n");
+        return fail("out of memory (brk failed)");
     }
     let mem: ptr = memv as ptr;
     let src: ptr = srcv as ptr;
@@ -1176,13 +1206,13 @@ fn _start() -> u32 {
     let sw: ptr = swv as ptr;
     let av: u64 = argv1(argv_buf as ptr, 65536, scr);
     if av == 0 {
-        return fail("lomdoc: 用法: lomdoc <文件.lomt>\n");
+        return fail("usage: loment doc <file.lomt>");
     }
     let ap: ptr = ptr_add(argv_buf as ptr, (av >> 32) as u32);
     let an: u32 = (av % 4294967296) as u32;
     let fd: i64 = open_ro(ap, an, scr);
     if fd < 0 {
-        return fail("lomdoc: 打不开输入文件\n");
+        return failp("cannot open the input file: ", ap, an);
     }
     let raw: u64 = read_all(fd as u64, src, SRC_CAP as u64);
     syscall4(3, fd as u64, 0, 0);
@@ -1195,8 +1225,7 @@ fn _start() -> u32 {
     // **别的写法在这里拦住**（`#144`）—— 必须在**看词法流之前**，因为声明那一行
     // 一旦被 `apply_switches` 吃掉，下文就全是"照着译文读原文"的错位。
     if foreign_grammar(src, toks, ntok0) == 1 {
-        return fail("lomdoc: 这是用别的写法写的 Loment（文件头有 `choose write grammar`）—— lomdoc 只处理**原生**写法。这份源要交给编译器：`loment check <文件>`（docs/211 / docs/182 §1.9）。
-");
+        return fail("this source is written in another grammar (its header has `choose write grammar`) and this documentation generator takes the native spelling only -- hand the file to the compiler instead: `loment check <file>`");
     }
     let ntok: u32 = apply_switches(src, toks, ntok0, sw);
     let m: u32 = render(mem, src, len, toks, ntok, ap, an);

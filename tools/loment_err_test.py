@@ -28,6 +28,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import loment  # noqa: E402  (build_lomenterr: 报错器在这里编一次, 全测复用)
 import lomentc  # noqa: E402
 
@@ -1066,7 +1067,7 @@ def test_json_suggestions_are_machine_applicable():
 
 @test
 def test_the_tail_points_at_loment_explain():
-    """结尾一行 `more: loment explain E002` —— 抄 rustc 的 `try 'rustc --explain E0308'`。
+    """结尾一行 `more: loment explain E002` —— 抄 rustc 的 `try 'rustc --explain E0318'`。
 
     子代理实测 8 门语言：**没有一门**在给人看的输出里给出能点的文档入口（rustc 只给命令，
     C# 的 `helpUri` 只进 SARIF）。所以照最好的那个抄，落点在最末一行。
@@ -1664,24 +1665,42 @@ def test_err_twin_selfhost_compiles():
     print(f"      种子自举链编译 lomerrcheck.lomt 成功 ({len(rr.stdout)}B IR)")
 
 
+@test
+def test_a_position_less_record_carries_no_line_number():
+    """`line == 0` = 编译器**没有位置可指**（`E031`..`E033`：文件读不到 / 写不出去 /
+    单元太大，`issue #8`）。三条一起立：
+
+      * `--> <file>` 后面**不带行号** —— `file:0` 看着像第 0 行，编辑器会照着跳；
+      * **不印 `(no such line in the source file)`** —— 那会让读者以为源码有问题，
+        而这几个码的 `file` 常常根本不是源码（`E032` 那个是一条**还不存在**的产物路径）；
+      * `--short` 那一路同理：`file: error[E031]` 而不是 `file:0:`。
+    """
+    with tempfile.TemporaryDirectory(prefix="lomenterr-nopos-") as td:
+        d = Path(td) / "nopos.jsonl"
+        d.write_text(json.dumps({
+            "file": "nosuch.lomt", "line": 0, "col": 0, "code": "E031",
+            "message": "cannot open this file",
+        }) + "\n", encoding="utf-8", newline="\n")
+        rc, out = _render(d)
+        assert rc == 1, (rc, out[:300])
+        assert "E031" in out and "cannot read this input file" in out, out[:300]
+        assert "--> nosuch.lomt\n" in out, f"位置那一行没只印文件: {out[:400]!r}"
+        assert "nosuch.lomt:0" not in out, f"`-->` 后面带了行号: {out[:400]!r}"
+        assert "no such line" not in out, f"去源里找了第 0 行: {out[:400]!r}"
+        rc, out = _render(d, "--short")
+        assert rc == 1, (rc, out[:300])
+        assert "nosuch.lomt: error[E031]" in out, out[:300]
+        assert "nosuch.lomt:0" not in out, out[:300]
+    print("      没有位置的记录：`--> 文件` 不带行号、不去源里找第 0 行，--short 同")
+
+
 # ---------------------------------------------------------------- 入口
 
 
 def main() -> int:
     print(f"loment_err_test: {len(TESTS)} 条\n")
     bad = 0
-    for name, fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {name}")
-        except AssertionError as e:
-            bad += 1
-            print(f"  FAIL  {name}: {e}")
-        except Exception as e:                                   # noqa: BLE001
-            bad += 1
-            print(f"  ERR   {name}: {type(e).__name__}: {e}")
-    print(f"\nloment_err_test: {len(TESTS) - bad}/{len(TESTS)} 通过")
-    return 1 if bad else 0
+    return loment_suite.run(TESTS, "loment_err_test")
 
 
 if __name__ == "__main__":

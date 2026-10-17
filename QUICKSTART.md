@@ -10,7 +10,7 @@ only about getting a program to run.
 ## 0. Get it
 
 **0.1.4 is packaged** — download it from
-[Releases](https://github.com/FujoJTOP/loment/releases/tag/v0.1.4):
+[Releases](https://github.com/Loment-Lang/loment/releases/tag/v0.1.4):
 
 | Platform | File | How |
 |---|---|---|
@@ -26,7 +26,7 @@ and the installer checks `SHA256SUMS` before it writes anything. Then jump to
 **Or work from a checkout** — needed if you want to change the language itself:
 
 ```
-$ git clone https://github.com/FujoJTOP/loment.git
+$ git clone https://github.com/Loment-Lang/loment.git
 $ cd loment
 ```
 
@@ -314,5 +314,5 @@ not `E::A => 0,`. `loment cheat` lists these first, in the order they bite.
 | `docs/manual/` | The specifications, plus a page per example. |
 | `loment/examples/` | 34 example programs; `loment example NAME` prints one. |
 | `docs/158-loment-freeze.md` | What is frozen, and what changing it costs. |
-| [FujoJTOP/lompi](https://github.com/FujoJTOP/lompi) | The package manager. |
+| [Loment-Lang/lompi](https://github.com/Loment-Lang/lompi) | The package manager. |
 | [Discord](https://discord.gg/rGw7NRNU) | Where to ask, and where to say what broke. |

@@ -287,7 +287,16 @@ jobs:
     # "一条外部命令都不碰"** —— 哪天往 `EXCLUSIVE_STATIC` 里加一条要用工具链的，
     # 它在这里会直接因为缺命令而红（那是能看见的，不是静默）。
     steps:
+      # **`fetch-depth: 0`（2026-10-16 起）**：`lom_audit` 的 M93/M95 要问一句
+      # "自手册/台账上次被写出以来，哪些路径动过" —— 那是它们**滞后容差**的那一半
+      # （容差为什么必须有，见 `.github/workflows/manifest.yml` 文件头那节）。
+      # `actions/checkout` 默认是 `fetch-depth: 1`，`git log` 就只看得到 HEAD，
+      # 那样问出来的答案是"什么都没动"⇒ 这两个判据会把每个 PR 都判红。
+      # 拿不到历史时它们**不静默放行**，会报一条指名要这个参数的账。
+      # 这个仓的 pack 是 ~32 MiB / 1400 多个提交，全取一次是秒级，换得起。
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # 先自述环境 —— 这样"红"才有归因: 是仓库的问题，还是**这一台**上缺了那个命令。
       # 这一片跑在 **runner** 上（不拉镜像，见上面那段），所以这里列的就是 runner 自带的
@@ -323,6 +332,25 @@ jobs:
             grep ':: \[static\]' gate.out || echo "（无）"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # 判据预算（`#371`）—— 与各分片那一步同一个理由（那里有完整说明）：`ci.py` 在
+      # **每条判据都 PASS** 时也可能判失败，而那种失败不在 `:: [static] … FAIL` 里。
+      - name: 判据预算（#371）
+        if: ${{ always() }}
+        run: |
+          set +e
+          if grep -q 'fujoci: 判据预算对不上' gate.out; then
+            {
+              echo "## 判据预算对不上（#371）"
+              echo ""
+              echo '```'
+              sed -n '/fujoci: 判据预算对不上/,$p' gate.out
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::判据预算对不上 —— 每一条失败行都带着可以直接粘进预算文件的行"
+            exit 1
+          fi
+          echo "判据预算: OK"
 
       - name: 对照基线（这一片的新红，单跑确认）
         if: ${{ always() }}
@@ -394,7 +422,11 @@ jobs:
     if: ${{ always() && github.event.inputs.suite == '' && github.event.inputs.only == '' && github.event.inputs.diagnose_twin != 'true' }}
     needs: [static-exclusive]
     container:
-      image: ghcr.io/fujojtop/loment-ci:5
+      # **路径里带着属主名**（`docs/255` §2）：库一换组织，这一行就得跟着换，而它**不是**
+      # 算出来的 —— `ci-image.yml` 那边是 `github.repository_owner` 转小写，两边靠人看着对齐。
+      # 顺序是硬的：先在新属主下把 tag 建出来、**再把它设成 public**（包默认私有，而 fork 的
+      # PR 拿不到私有包 ⇒ 它们会死在"拉镜像"这一步）、**最后**才改这里。反了就是每一片都拉不到。
+      image: ghcr.io/loment-lang/loment-ci:5
     strategy:
       fail-fast: false
       matrix:
@@ -405,7 +437,10 @@ jobs:
           - { shard: 5, total: 6 }
           - { shard: 6, total: 6 }
     steps:
+      # 同 `static-exclusive`：`lom_audit` 的 M93/M95 要历史（见那一处的注释）。
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: 环境自述
         run: |
@@ -452,6 +487,32 @@ jobs:
             grep ':: \[static\]' gate.out | sort -k3 -rn | head -8
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # 判据预算（`#371`）—— **必须单独认，否则它是个隐形的失败**。
+      #
+      # `ci.py` 在**每条判据都 PASS** 的情况下也可能判失败：只要有人漏登记了一条跳过、
+      # 或者动了地板。那种失败**不会**出现在 `:: [static] … FAIL` 里（没有任何一条套件
+      # 失败），而下面"对照基线"那一步只读那些 FAIL 行；只看退出码又分不清"预算对不上"
+      # 与"某条套件红"（后者要按"先单跑一遍"的规矩处理）。所以这里认那句原话。
+      #
+      # 落这一版时实测过一次：`gate-skips.txt` 空着、若少了这一步，预算不符的那几片
+      # 会**报绿**（每条套件都写着 PASS），而这一整版就是冲着"没跑不算通过"来的。
+      - name: 判据预算（#371）
+        if: ${{ always() }}
+        run: |
+          set +e
+          if grep -q 'fujoci: 判据预算对不上' gate.out; then
+            {
+              echo "## 判据预算对不上（#371）"
+              echo ""
+              echo '```'
+              sed -n '/fujoci: 判据预算对不上/,$p' gate.out
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::判据预算对不上 —— 每一条失败行都带着可以直接粘进预算文件的行"
+            exit 1
+          fi
+          echo "判据预算: OK"
 
       # 门那一半：**只对"基线之外的红"报红**，而且**先单跑一遍再判**。
       #
@@ -514,9 +575,13 @@ jobs:
     timeout-minutes: 180
     if: ${{ github.event.inputs.suite != '' || github.event.inputs.only != '' || github.event.inputs.diagnose_twin == 'true' }}
     container:
-      image: ghcr.io/fujojtop/loment-ci:5
+      # 与 `static-shard` 同一条镜像，理由与那句"顺序是硬的"见上面。
+      image: ghcr.io/loment-lang/loment-ci:5
     steps:
+      # 同 `static-exclusive`：`lom_audit` 的 M93/M95 要历史（见那一处的注释）。
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: 环境自述
         run: |
@@ -693,6 +758,67 @@ jobs:
             echo "::error::门禁：新红 $n_bad 条 —— $(paste -sd ' ' confirmed.txt)"
             exit 1
           fi
+
+      # 基线**只许变短**（文件头那条纪律）—— 此前它只靠人自觉。把一条新红登记进基线，
+      # 门禁从此对那条视而不见，而 summary 上那段"基线该变短了"是 **notice**、不判失败：
+      # 于是"加一条"这条路一直开着，正是本 PR 要堵的那类洞。
+      #
+      # **为什么不在分片里做**：那一片只看得到自己片内的红，比出来的"新增"是假的
+      # （别的片跑到绿的条目，在它眼里根本不在"我这一轮的红"里）。全表的对照面只有这里
+      # 够得着 —— 与"基线该变短了"必须在这儿算，是同一个理由。
+      #
+      # **对照面从哪儿来**：本地树里没有基线的前一版（`actions/checkout` 默认只取一个
+      # 提交），所以要**显式取一次**：PR 取 base 分支，push 取 `event.before`。
+      # 取不到就**判失败**（fail closed）—— 与 `lom-door` 那条"列不出文件列表就按失败算"
+      # 同一套：一个取不到对照面的棘轮会**静默失效**，而它正是为此存在的。
+      - name: 基线只许变短
+        if: ${{ always() }}
+        run: |
+          set +e
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.base_ref }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          case "$base" in
+            ""|0000000000000000000000000000000000000000)
+              echo "::warning::拿不到对照面（新分支的首次 push）—— 这一条跳过，其余照常"
+              exit 0 ;;
+          esac
+          if ! git fetch --no-tags --depth=1 origin "$base" > fetch.log 2>&1; then
+            echo "::error::取对照面失败（$base）—— 门禁不猜，按失败处理"
+            tail -20 fetch.log
+            exit 1
+          fi
+          if ! git show FETCH_HEAD:.github/gate-baseline.txt > old-baseline.txt 2> show.log \
+             || [ ! -s old-baseline.txt ]; then
+            echo "::error::对照面（$base）里读不到 .github/gate-baseline.txt —— 门禁不猜，按失败处理"
+            tail -20 show.log
+            exit 1
+          fi
+          # 基线是"套件名 [加说明]"的行；只比第一列，注释与空行不算
+          norm() { grep -v '^[[:space:]]*#' "$1" | awk 'NF {print $1}' | sort -u; }
+          norm old-baseline.txt > old.txt
+          norm .github/gate-baseline.txt > new.txt
+          comm -13 old.txt new.txt > added.txt
+          if [ -s added.txt ]; then
+            {
+              echo "## 基线**变长了**（不许）"
+              echo ""
+              echo "基线是**实测出来的已知红**，只许变短：哪一条修好了，就在**同一个 PR 里**"
+              echo "删掉它。往基线里**加**一条，等于把一条新红登记成合法 —— 门禁从此对那条"
+              echo "视而不见。"
+              echo ""
+              echo "该做的是把那条红修掉；修不动就先开 issue，别登记进基线。"
+              echo ""
+              echo '```'
+              cat added.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::基线多了 $(wc -l < added.txt | tr -d ' ') 条 —— $(paste -sd ' ' added.txt)"
+            exit 1
+          fi
+          echo "基线只许变短: OK（比对照面少了 $(comm -23 old.txt new.txt | wc -l | tr -d ' ') 条）"
 
       # 分片那边红了，这一道必须**跟着红**。`needs` 的默认行为是"依赖失败就跳过"，
       # 而跳过**不算失败** —— 保护规则会当成"还没报"而永远等下去。所以这里显式看结果。

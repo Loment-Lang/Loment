@@ -1,0 +1,99 @@
+lomf 1
+mod   0002-literal-index-is-a-language-rule
+about **字面量下标越过定长数组的界**这条从 LMS 第 1 级**升成语言规则**（issue #18）。
+about 
+about 原先它只在 `choose lms_open` 时发，而 `lms` 是**开发通道的中间态、不进发行版**
+about （`docs/253` §14.2）—— 发行版的用户根本拿不到它。可它本来就不是一条 LMS 检查：
+about `docs/205` §1.1 C5 早把「越界访问在**字面量**时编译期拒」写成语言规则，只是那一格
+about **只覆盖 `guard`**（`docs/146` §3：`guard cap(9)` 对域 `[0..4]` 是编译错误）。
+about 同一个「字面量越界」、两个构造两个答案 —— 那正是 issue #18 点名的不一致。
+about 
+about **为什么这一格值得拒**（`docs/253` §4.4 实测）：不拒的时候发出来的是
+about `getelementptr inbounds [4 x i32], ptr %a.addr, i32 0, i32 10`，而 `inbounds` 在
+about LLVM IR 里**恰是「越界即 UB」的标记**（走仓内 `lomelf` 则静默踩相邻字节）。
+about 
+about 这一笔以修改件落的理由：**两个实现各有一份同一条判据** —— 参考实现的
+about `_walk_expr` 与自举检查器的那段 `if`。两边一起改、而且必须逐字同判（只对定长数组、
+about 只对裸字面量），正是这份格式要站的那个岗。
+about 
+about 附带：`_walk_expr` 的 `lms` 形参随之下线（那是普通改动 —— 它不是一个片段、
+about 25 处调用点也各不同，按 `docs/257` §4 落成普通 diff）。
+
+edit loment/selfhost/checker.lomt expect 1
+old <<<
+        // **E028**（`docs/253` §5.1）：`lms` 开着时，**字面量下标越过定长数组的界**当场拒。
+        // 这一格今天**没有任何东西管** —— 实测（`docs/253` §4.4）：`a[10]` 配 `[u32; 4]`
+        // 发出来的是 `getelementptr inbounds ... i32 10`，而 `inbounds` 在 LLVM IR 里
+        // 恰是"越界即 UB"的标记。⇒ 这不是新需求：`docs/205` §1.1 C5 早就写下了，
+        // 只是**它只覆盖 `guard` 那一格**。
+        // 三条收窄，缺一不可：
+        //   * 只对**定长数组**（`chk_ty_is_arr` 排除了切片 —— 后者的长度是运行期的）；
+        //   * 下标必须是**裸字面量**（`[ N ]` 恰好三个 token）—— 与参考实现判 `IntLit`
+        //     同口径；写成 `[10 + 0]` 就不报，两边一致；
+        //   * ⚠ **只在 `lms` 开着时** —— 默认档一个字的检查都不加（`docs/253` §14.2）。
+        if chk_ty_is_arr(tyt, ot) == 1 && chk_match_bracket(src, t, idx_at) == idx_at + 2
+                && chk_tok_kind(t, idx_at + 1) == 1 && chk_lms_on(src, t) == 1 {
+>>>
+new <<<
+        // **E028**：**字面量下标越过定长数组的界**当场拒。
+        //
+        // **2026-10-16 起它不再看 `lms`**（issue #18）。原先只在 `choose lms_open` 时发，
+        // 而 `lms` 是**开发通道的中间态**（`docs/253` §14.2：不进发行版）—— 发行版的用户
+        // 拿不到。可它本来就不是一条 LMS 检查：`docs/205` §1.1 C5 早把「越界访问在
+        // **字面量**时编译期拒」写成语言规则，那一格只覆盖 `guard`（`docs/146` §3：
+        // `guard cap(9)` 对域 `[0..4]` 是编译错误）。同一个"字面量越界"两个答案，正是
+        // issue #18 点名的那处不一致。参考实现那一侧同步改了（`_walk_expr` 的 Index 支）。
+        //
+        // 实测来路（`docs/253` §4.4）：`a[10]` 配 `[u32; 4]` 发出来的是
+        // `getelementptr inbounds ... i32 10`，而 `inbounds` 在 LLVM IR 里恰是"越界即 UB"。
+        // 两条收窄，缺一不可：
+        //   * 只对**定长数组**（`chk_ty_is_arr` 排除了切片 —— 后者的长度是运行期的；
+        //     那一半见 `docs/205` §1.1 C5：默认档不检查，用 `slice_len` + 一个 `if` 自己挡）；
+        //   * 下标必须是**裸字面量**（`[ N ]` 恰好三个 token）—— 与参考实现判 `IntLit`
+        //     同口径；写成 `[10 + 0]` 就不报，两边一致。
+        if chk_ty_is_arr(tyt, ot) == 1 && chk_match_bracket(src, t, idx_at) == idx_at + 2
+                && chk_tok_kind(t, idx_at + 1) == 1 {
+>>>
+
+edit tools/lomentc.py expect 1
+old <<<
+        # **E028**（`docs/253` §5.1）：`lms` 开着时，**字面量下标越过定长数组的界**当场拒。
+        # 这一格今天**没有任何东西管** —— 实测（`docs/253` §4.4）：`let x: u32 = a[10]`
+        # 配 `[u32; 4]` 发出来的是 `getelementptr inbounds [4 x i32], ptr %a.addr,
+        # i32 0, i32 10`，而 `inbounds` 在 LLVM IR 里**恰是"越界即 UB"的标记**。
+        # ⇒ **不是新需求**：`docs/205` §1.1 C5 那句「越界访问在**字面量**时编译期拒」
+        #   早就写下了 —— 它只是**只覆盖 `guard` 那一格**。
+        # ⚠ **码号是 E028，不是 E024**：`docs/253` 初稿按旧检出写的 E024–E026，
+        #   而 origin/main 上那三个已被命令声明那批占了（`docs/223`），现行最高 E027。
+        # 只对**定长数组**成立：切片 `[T]` 的长度是运行期的，界不是编译期常量。
+        if lms and ot is not None and _is_array(ot) and isinstance(e.idx, IntLit):
+            n = _array_len(ot)
+            if e.idx.value >= n:
+                errs.append(f"{e.line}: E028: 下标 {e.idx.value} 越过定长数组的界"
+                            f"（{ot} 的长度是 {n}）")
+>>>
+new <<<
+        # **E028**：**字面量下标越过定长数组的界**当场拒。
+        #
+        # **2026-10-16 起它不再看 `lms`**（issue #18）。原先这条只在 `choose lms_open`
+        # 时发 —— 而 `lms` 那一维是**开发通道的中间态**（`docs/253` §14.2：不进发行版），
+        # 于是发行版里的用户拿不到它。可它本来就不是一条 LMS 检查：`docs/205` §1.1 C5
+        # 早就把「越界访问在**字面量**时编译期拒」写成语言规则，只是那一格**只覆盖
+        # `guard`**（`docs/146` §3：`guard cap(9)` 对域 `[0..4]` 是编译错误）。
+        # 同一个"字面量越界"，两个构造两个答案 —— 那正是 issue #18 点名的那处不一致。
+        # 于是它升成语言规则：**默认档也拒**（`docs/253` §14.2 那条"默认档一个字的检查都
+        # 不加"说的是 LMS 那几级，与这条语言规则不是一回事）。
+        #
+        # 为什么这一格值得拒：实测（`docs/253` §4.4）：`let x: u32 = a[10]` 配 `[u32; 4]`
+        # 发出来的是 `getelementptr inbounds [4 x i32], ptr %a.addr, i32 0, i32 10`，
+        # 而 `inbounds` 在 LLVM IR 里**恰是"越界即 UB"的标记**。
+        #
+        # 只对**定长数组**成立：切片 `[T]` 的长度是运行期的，界不是编译期常量 ——
+        # 那一半的裁决见 `docs/205` §1.1 C5（`lms_open` 按站点发内联界检查；默认档
+        # 不检查，用 `slice_len` + 一个显式的 `if` 自己挡）。
+        if ot is not None and _is_array(ot) and isinstance(e.idx, IntLit):
+            n = _array_len(ot)
+            if e.idx.value >= n:
+                errs.append(f"{e.line}: E028: 下标 {e.idx.value} 越过定长数组的界"
+                            f"（{ot} 的长度是 {n}）")
+>>>

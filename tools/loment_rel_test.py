@@ -26,7 +26,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import re
 
@@ -39,6 +38,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import lomentc  # noqa: E402
 import loment_release  # noqa: E402
 
@@ -49,7 +49,6 @@ _T = f"/tmp/loment-{os.getpid()}-"
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "loment" / "tools" / "lomrel.lomt"
-MANIFEST = ROOT / "loment" / "build" / "release-manifest.json"
 TESTS: list[tuple[str, object]] = []
 
 
@@ -164,13 +163,17 @@ def test_manifest_order_is_platform_independent():
     ⇒ PR 永远 BLOCKED（`docs/` 里记着这条坑，2026-09-25 又踩了一次）。
 
     **How to apply**：按 `GLOBS` 把清单**分组**，逐组核"组内是字节序"（组与组之间是
-    `GLOBS` 的手写序，那是刻意的，不核）。期望值在这儿**独立算**（`sorted(key=str)`）
-    而不是调 `build()` —— 调它就成了同义反复。旧写法（`sorted(Path)` 在 Windows 上按
-    normcase 折叠）会让 `loment/build/genesis/lomelf-linux-x64.elf` 排在
-    `.../SHA256SUMS` 前面，这条当场红（实测两种次序确实相反）。
+    `GLOBS` 的手写序，那是刻意的，不核）。期望值在这儿**独立算**（`sorted(key=str)`）。
+    旧写法（`sorted(Path)` 在 Windows 上按 normcase 折叠）会让
+    `loment/build/genesis/lomelf-linux-x64.elf` 排在 `.../SHA256SUMS` 前面，
+    这条当场红（实测两种次序确实相反）。
+
+    **量的是生成器的输出，不是仓库里那份台账**（2026-10-16 改）。台账从这一天起由
+    `main` 上的单一写者刷新（`.github/workflows/manifest.yml` 的 `emit-main`），
+    所以**在一棵 PR 的树上它是落后的** —— 拿它判，一个新增了文件的 PR 会看到
+    `got` 与 `want` 错位，报出来的却是"次序错了"，那是**假红**。
     """
-    doc = json.loads(MANIFEST.read_text(encoding="utf-8"))
-    got = [x["path"] for x in doc["files"]]
+    got = [x["path"] for x in loment_release.build()["files"]]
     pos = 0
     for g in loment_release.GLOBS:
         want = sorted(p.relative_to(ROOT).as_posix()
@@ -264,7 +267,6 @@ def test_lomrel_emit_writes_same_bytes():
     if not (_clang() and _wsl()):
         print("      SKIP: 无 clang/WSL")
         return
-    orig = MANIFEST.read_bytes()
     out = ROOT / f"loment/build/_rel_manifest-{os.getpid()}.json"
     out_rel = out.relative_to(ROOT).as_posix()
     try:
@@ -279,10 +281,12 @@ def test_lomrel_emit_writes_same_bytes():
             assert (rc, _norm(po), _norm(pe)) == (gr, go, ge), (
                 f"stdout 不一致:\n  py {po!r} {pe!r}\n  sh {go!r} {ge!r}")
             assert py_bytes == sh_bytes, f"落盘不同: {len(py_bytes)}B vs {len(sh_bytes)}B"
-            assert py_bytes == orig, "两边写出的清单与仓库里的不同 (不该)"
+            # **不再与仓库里那份比**（2026-10-16 撤掉）：台账由 `main` 上的单一写者刷新，
+            # PR 的树上它就是落后的，拿它判等于在每一个 PR 上判红。这条判据要证的是
+            # **两个独立实现给出同一份清单** —— 上面那一行就是它。
     finally:
         out.unlink(missing_ok=True)
-    print("      --emit: 清单字节 + 输出行一致 (与仓库现有清单相同)")
+    print("      --emit: 清单字节 + 输出行一致 (两个实现逐字节相同)")
 
 
 @test
@@ -361,11 +365,13 @@ def test_seed_fits_lomrel_normalization_buffer():
 
 
 def _manifest_paths() -> list[str]:
-    """清单里点名的相对路径（**从清单里读**，与 `lomrel` 看的是同一份数据）。"""
-    import json  # noqa: PLC0415
-    d = json.loads(MANIFEST.read_text(encoding="utf-8"))
-    files = d["files"] if isinstance(d, dict) and "files" in d else d
-    return [f["path"] for f in files] if isinstance(files, list) else list(files)
+    """清单里点名的相对路径 —— **问生成器要**，不读仓库里那份台账。
+
+    2026-10-16 起台账由 `main` 上的单一写者刷新，PR 的树上它是落后的；容量那一条
+    （下面 `test_..._fits_...`）量的正是"最大工件有没有超 `lomrel` 的归一化上限"，
+    读一份落后的台账会让**新加的大文件**漏过这一条，直到 `main` 刷过一轮。
+    """
+    return [x["path"] for x in loment_release.build()["files"]]
 
 
 @test
@@ -396,16 +402,7 @@ def test_lomrel_selfhost_compiles():
 
 
 def main() -> int:
-    failed = []
-    for name, fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {name}")
-        except Exception as e:  # noqa: BLE001
-            failed.append((name, e))
-            print(f"  FAIL  {name}: {type(e).__name__}: {e}")
-    print(f"\nloment_rel_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-    return 1 if failed else 0
+    return loment_suite.run(TESTS, "loment_rel_test")
 
 
 if __name__ == "__main__":

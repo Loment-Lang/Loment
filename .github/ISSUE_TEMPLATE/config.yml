@@ -1,11 +1,11 @@
 blank_issues_enabled: true
 contact_links:
   - name: Get a toolchain first
-    url: https://github.com/FujoJTOP/loment/blob/main/QUICKSTART.md
+    url: https://github.com/Loment-Lang/loment/blob/main/QUICKSTART.md
     about: Nothing is published as a package yet — QUICKSTART.md is how you get from a checkout to a running program.
   - name: How this repository works
-    url: https://github.com/FujoJTOP/loment/blob/main/CONTRIBUTING.md
+    url: https://github.com/Loment-Lang/loment/blob/main/CONTRIBUTING.md
     about: Who writes it, the one closed door, the gate, and the house rules for a change.
   - name: A suspected vulnerability
-    url: https://github.com/FujoJTOP/loment/security/advisories/new
+    url: https://github.com/Loment-Lang/loment/security/advisories/new
     about: Report privately, please — not as a public issue. SECURITY.md says what counts as one here.

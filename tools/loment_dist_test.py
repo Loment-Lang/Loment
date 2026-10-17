@@ -455,7 +455,8 @@ def test_windows_installer(zipf: Path) -> None:
         # PowerShell**（所以原先那道 `if not ps` 守卫拦不住），但没有 `cmd` —— 会走到
         # 一半才炸 `FileNotFoundError: 'cmd'`。按本文件对 Windows 专属判据的既有写法
         # 整条跳过，并写明这一半在 CI 上**不覆盖**。
-        print("      SKIP: 非 Windows —— Windows 安装脚本在 CI 上不覆盖（要覆盖得用 Windows runner）")
+        print("  SKIP  Windows安装脚本: 非 Windows —— 这一半在 CI 上不覆盖"
+              "（要覆盖得用 Windows runner）")
         return
     work = loment_dist.STAGE / "it-win"
     if work.exists():
@@ -467,7 +468,7 @@ def test_windows_installer(zipf: Path) -> None:
     ps1 = root / "install.ps1"
     ps = shutil.which("powershell") or shutil.which("pwsh")
     if not ps:
-        print("  SKIP  install.ps1 -DryRun (没有 powershell)")
+        print("  SKIP  install.ps1 -DryRun: 没有 powershell")
         return
     r = subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps1),
                         "-DryRun"], capture_output=True, text=True, shell=False,
@@ -492,7 +493,7 @@ def test_windows_installer(zipf: Path) -> None:
         check("setup.exe 是 PE 且非空", head == b"MZ" and exe.stat().st_size > 100000,
               f"head={head!r} size={exe.stat().st_size}")
     else:
-        print("  SKIP  setup.exe 存在性 (本次 --emit 用了 --no-exe)")
+        print("  SKIP  setup.exe 存在性: 本次 --emit 用了 --no-exe")
 
     # 先把**静态形状**钉住 —— 这条跨平台, 门禁 (ubuntu) 跑得到。
     # 下面那条真跑只在 Windows 上做, 而 CI 里没有 Windows runner, 所以只靠它的话
@@ -520,7 +521,7 @@ def test_windows_installer(zipf: Path) -> None:
     #   这条判据就永远测不到东西。
     ie = shutil.which("iexpress") or r"C:\Windows\System32\iexpress.exe"
     if os.name != "nt" or not Path(ie).exists():
-        print("  SKIP  wextract 真跑一遍 (非 Windows / 没有 iexpress)")
+        print("  SKIP  wextract 真跑一遍: 非 Windows / 没有 iexpress")
     else:
         run_dir = loment_dist.STAGE / "exe-run"
         if run_dir.exists():
@@ -529,7 +530,7 @@ def test_windows_installer(zipf: Path) -> None:
         landed = run_dir / "landed.txt"
         if not str(landed).isascii():
             # install.cmd 是 ASCII 脚本 (docs/157 §3.4), 塞不进非 ASCII 路径
-            print("  SKIP  wextract 真跑一遍 (临时目录路径含非 ASCII)")
+            print("  SKIP  wextract 真跑一遍: 临时目录路径含非 ASCII")
         else:
             (run_dir / "install.cmd").write_bytes(
                 b"@echo off\r\necho landed > \"" + str(landed).encode("ascii") + b"\"\r\n")
@@ -818,11 +819,11 @@ def test_opt_driver_runs() -> None:
     """
     cc = loment_dist.clang_path()
     if cc is None:
-        print("  SKIP  没有 clang —— 驱动 --opt 这条要真编一次才作数")
+        print("  SKIP  驱动 --opt: 没有 clang —— 这条要真编一次才作数")
         return
     # Windows 上交叉编出的是 Linux ELF, 本机跑不了, 得借 WSL (与 `wsl()` 同一条分流)。
     if sys.platform == "win32" and not shutil.which("wsl"):
-        print("  SKIP  没有 WSL —— 交叉编出来的 ELF 在本机跑不了")
+        print("  SKIP  驱动 --opt: 没有 WSL —— 交叉编出来的 ELF 在本机跑不了")
         return
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)

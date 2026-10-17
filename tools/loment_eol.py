@@ -98,7 +98,10 @@ def main(argv: list[str] | None = None) -> int:
 
     bad = offenders()
     if bad is None:
-        print("loment_eol: SKIP —— 不是 git 工作树 (行尾契约由 .gitattributes 与检出共同保证)")
+        # 行首写成 `SKIP`，**不带名字**：这是**整条检查**没跑（不是某一条判据跳过），
+        # 门禁按"整条套件级跳过"认它，于是要在 `gate-skips.txt` 里登记一行 `<套件> *`。
+        # 原先这行是 `loment_eol: SKIP —— …`，行首不是 SKIP，机器一条都数不到。
+        print("SKIP  不是 git 工作树 (行尾契约由 .gitattributes 与检出共同保证)")
         return 2
     if a.fix:
         return fix(bad)

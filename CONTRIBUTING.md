@@ -205,38 +205,53 @@ together.
 
 ### Generated files get their own commit
 
-Several tracked files are produced from others: the self-host seed
-(`loment/build/selfhost_driver.ll`), `loment/tools/surface_data.lomt`,
-`loment/build/release-manifest.json`, `loment/build/SHA256SUMS`, `docs/manual/`. Put them in a
-**separate commit whose message says it is only generated output**, so a reviewer can look at the
-hand-written change by itself. The seed has been 93% of a diff's lines — which is precisely the
-problem that separation solves.
+Several tracked files are produced from others. They split in two, and the split is the point:
 
-**You normally do not have to produce them yourself** (since 2026-09-24). The `manifest` workflow
-recomputes all five on every push to a branch — in the order their inputs require — and pushes the
-result back as a `[生成物] …` commit of its own. Let it, even when you could run the commands:
-it works on a clean checkout of exactly one commit, which is what the manifest *describes*, while
-a regeneration on your machine globs your **working tree** and will happily bake in whatever a
-concurrent session has left uncommitted.
+* **Tied to your change** — the self-host seed `loment/build/selfhost_driver.ll` (it follows
+  `loment/selfhost/*.lomt`) and `loment/tools/surface_data.lomt` (the builtin/diagnostic table).
+  The `manifest` workflow recomputes these two on every push to a branch and pushes them back as
+  its own `[生成物] …` commit. Put them in a **separate commit whose message says it is only
+  generated output**, so a reviewer can look at the hand-written change by itself — the seed has
+  been 93% of a diff's lines, which is precisely what that separation solves.
+* **Tied to the whole tree** — `loment/build/release-manifest.json`, `loment/build/SHA256SUMS`
+  and `docs/manual/`. **Do not produce these, and CI will not produce them on your branch.**
+  Their every line belongs to some other file, so a pull request that carries them collides with
+  every other open pull request that carries them too: two people adding different docs write
+  *adjacent lines of the same ledger* (the `docs/` entries are one contiguous run) and git's
+  merge context is three lines. They are recomputed **on `main`, after every merge**, by a job
+  that runs alongside the gate and pushes the result straight to `main`. Background, the
+  measurement, and the alternatives that were rejected:
+  [docs/254](docs/254-the-artifacts-are-not-a-shared-register.md).
 
-Do it by hand in three cases only:
+The two that stay yours change exactly when the source they are derived from changes — so a
+conflict on them is a real overlap between two changes, not an artefact of a shared file.
 
-* a **fork** pull request whose head touched `tools/`, or one that was opened without "Allow edits
-  by maintainers" — the workflow will not run an untrusted generator with a write token;
-* you want to see the result before you push;
-* the workflow is down.
-
-`loment_release.GLOBS` is the list of inputs; it includes `tools/*.py`, `loment/tools/*.lomt`,
-`loment/lib/*.lomt` and `docs/*.md`. **The order below is required** — each command feeds a file
-that the ones after it hash:
+If you do need to regenerate by hand, the order is required, because each command feeds a file the
+ones after it hash:
 
 ```
 python tools/loment_seed.py --emit
 python tools/loment_diag.py --dump-surface loment/tools/surface_data.lomt
+```
+
+Those are the two your branch carries. To reproduce the whole-tree three (usually only worth it to
+see them before `main` does), continue with:
+
+```
 python tools/loment_manual.py --emit docs/manual
 python tools/loment_release.py --emit
 python tools/loment_release.py --checksums loment/build/SHA256SUMS
 ```
+
+Reasons to do any of this by hand: a **fork** pull request whose head touched `tools/`, or one
+opened without "Allow edits by maintainers" — the workflow will not run an untrusted generator with
+a write token; you want to see the result before you push; the workflow is down. Otherwise let the
+workflow do it: it works on a clean checkout of exactly one commit, which is what the manifest
+*describes*, while a regeneration on your machine globs your **working tree** and will happily bake
+in whatever a concurrent session has left uncommitted.
+
+`loment_release.GLOBS` is the list of inputs; it includes `tools/*.py`, `loment/tools/*.lomt`,
+`loment/lib/*.lomt` and `docs/*.md`.
 
 The seed is regenerated, never hand-merged — and note that `--emit` is not `--bootstrap`: the
 first re-derives the file from the reference implementation (seconds, no clang), the second runs

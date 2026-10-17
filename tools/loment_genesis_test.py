@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import loment_genesis  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -158,6 +159,41 @@ def test_seed_fits_lomelf_table_caps():
 
 
 @test
+def test_the_text_window_is_the_same_number_on_both_sides():
+    """文本段窗口：两个实现必须用**同一个数**（`docs/200` §9）。
+
+    数据段钉在 `TEXT_VADDR + <代码缓冲容量>`（2026-10-16 起，原先钉在 `0x600000` 那 2 MiB）。
+    两边要是**各抄一个数**，产物就不再逐字节相同 —— 而症状是 `loment_elf_test` 里那一堆
+    "镜像与参考不同（8216B vs 8216B）"：**字节数一样**，内容不同，最难读的一类红。
+    所以在这里把两个数**对起来**，红了就直接说清是哪一边飘了。
+    """
+    src = LOMELF.read_text(encoding="utf-8")
+    m = re.search(r"const OUT_CAP: u32 = (\d+);", src)
+    assert m, "在 lomelf.lomt 里找不到 `const OUT_CAP: u32 = <数>;`"
+    out_cap = int(m.group(1))
+    m = re.search(r"const DATA_VADDR: u32 = (\d+);", src)
+    assert m, "在 lomelf.lomt 里找不到 `const DATA_VADDR: u32 = <数>;`"
+    data_vaddr = int(m.group(1))
+    m = re.search(r"const TEXT_VADDR: u32 = (\d+);", src)
+    assert m, "在 lomelf.lomt 里找不到 `const TEXT_VADDR: u32 = <数>;`"
+    text_vaddr = int(m.group(1))
+    ref = (ROOT / "tools" / "lomelf.py").read_text(encoding="utf-8")
+    m = re.search(r"^TEXT_CAP = (\d+)", ref, re.M)
+    assert m, "在 tools/lomelf.py 里找不到 `TEXT_CAP = <数>`"
+    py_cap = int(m.group(1))
+    m = re.search(r"^ELF_DATA_VADDR = ELF_TEXT_VADDR \+ TEXT_CAP", ref, re.M)
+    assert m, "tools/lomelf.py 的 `ELF_DATA_VADDR` 不是 `ELF_TEXT_VADDR + TEXT_CAP` 了"
+    assert out_cap == py_cap, (
+        f"代码缓冲容量两边不是一个数：lomelf.lomt 的 OUT_CAP={out_cap}，"
+        f"tools/lomelf.py 的 TEXT_CAP={py_cap}")
+    assert data_vaddr == text_vaddr + out_cap, (
+        f"数据段不在代码缓冲之后：DATA_VADDR={data_vaddr}，"
+        f"TEXT_VADDR+OUT_CAP={text_vaddr + out_cap}（docs/200 §9）")
+    print(f"      两边同一个数：代码缓冲 {out_cap}，"
+          f"数据段钉在 0x{data_vaddr:x}（文本段可用 {out_cap}）")
+
+
+@test
 def test_bootstrap_needs_no_clang():
     """把 clang 从 PATH 拿掉, `sh loment/bootstrap.sh` 仍要跑通四条证明。"""
     if not _wsl():
@@ -185,16 +221,7 @@ def test_bootstrap_needs_no_clang():
 
 
 def main() -> int:
-    failed = []
-    for name, fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {name}")
-        except Exception as e:  # noqa: BLE001
-            failed.append((name, e))
-            print(f"  FAIL  {name}: {type(e).__name__}: {e}")
-    print(f"\nloment_genesis_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-    return 1 if failed else 0
+    return loment_suite.run(TESTS, "loment_genesis_test")
 
 
 if __name__ == "__main__":

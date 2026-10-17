@@ -68,6 +68,10 @@ const M_AR: u32 = 22028288;        // 4 MiB 归档暂存
 const ARENA: u64 = 26222592;
 
 const IN_CAP: u32 = 4194304;
+//: `--diag-out PATH` 的落点：**argv 暂存块的最后 1 KiB**（`pbuf` 一共 64 KiB，
+//: 它的 0..65536 是路径区，再往后才是代码缓冲）。给启动器传进来的那条诊断文件路径用,
+//: 免得与输入 / 输出 / `--link` 三个落点抢 —— 那三块都是按 argv 长度算出来的。
+const DIAGB_OFF: u32 = 64512;
 const OUT_CAP: u32 = 4194304;
 const GB_CAP: u32 = 1048576;
 const OBJ_CAP: u32 = 4194304;
@@ -223,7 +227,17 @@ const TB_MEM: u32 = 2653984;       // stride 8 × MEM_MAX: (在 M_AR 里的起�
 // ---------------------------------------------------------------- 常量
 
 const TEXT_VADDR: u32 = 4194304;   // 0x400000
-const DATA_VADDR: u32 = 6291456;   // 0x600000
+// **数据段在代码缓冲之后**（`docs/253`，2026-10-16）。原先钉在 `0x600000`，文本段于是
+// 只有 `0x400000..0x600000` 这 2 MiB 可用 —— 而**越界不报错**：多出来的代码盖在数据段上，
+// 产物一启动就段错误（0 字节输出），看起来像编译器坏了。实测 2026-10-15：`main` 自己
+// 已占 2 084 579 / 2 097 152（99.4%），任何一笔中等改动都会顶破它。
+//
+// 现在钉在 `TEXT_VADDR + OUT_CAP`：那个间隔**就是代码缓冲本身的容量**，不是拍出来的数。
+// 于是文本段的容量变成了 `OUT_CAP`，而它**有守卫**（驱动里那段，与 `TB_LBL_MAX` 那几个
+// 同一个纪律：满了就点名退出，不往下写）。
+// **必须与 `tools/lomelf.py` 的 `TEXT_CAP` / `ELF_DATA_VADDR` 同一个数** —— 两边产物要
+// 逐字节相同（`loment_elf_test` 的镜像那几格钉着）。
+const DATA_VADDR: u32 = 8388608;   // 0x800000 = TEXT_VADDR + OUT_CAP
 const NO: u32 = 4294967295;
 const PHI: u64 = 4294967296;
 
@@ -303,18 +317,98 @@ fn wstr(fd: u64, s: str) -> u64 {
     return write_all(fd, str_ptr(s), str_len(s) as u64);
 }
 
+/// 面向用户的失败消息: `loment: <msg>` 换行。**前缀是 `loment`, 不是 `lomelf`** ——
+/// 用户敲的是 `loment build/run`; `lomelf` 是这个包里的链接器组件名, 对他说不指向任何
+/// 他手上的东西 (issue #8)。
 fn fail(msg: str) -> u32 {
-    wstr(2, "lomelf: ");
+    wstr(2, "loment: ");
     wstr(2, msg);
     wstr(2, "\n");
     return die(1);
 }
 
-fn fail_line(t: ptr, ls: u32, le: u32) -> u32 {
-    wstr(2, "lomelf: 不支持: ");
-    write_all(2, ptr_add(t, ls), (le - ls) as u64);
+/// 同 `fail`, 消息后面接一段**已经量好的字节** (token 原文)。
+fn faill(msg: str, tail: ptr, n: u32) -> u32 {
+    wstr(2, "loment: ");
+    wstr(2, msg);
+    write_all(2, tail, n as u64);
     wstr(2, "\n");
     return die(1);
+}
+
+/// 同 `fail`, 消息后面接一个 **NUL 结尾**的路径 (`--link` 那一批拿到的都是 cstr)。
+fn failc(msg: str, cpath: ptr) -> u32 {
+    wstr(2, "loment: ");
+    wstr(2, msg);
+    write_cstr(2, cpath, 0);
+    wstr(2, "\n");
+    return die(1);
+}
+
+fn fail_line(t: ptr, ls: u32, le: u32) -> u32 {
+    return faill("this instruction is not supported: ", ptr_add(t, ls), le - ls);
+}
+
+/// 一个字节的低 8 位按**小写十六进制两位**写出去（JSON 里写 `\u00XX` 要用）。
+fn whex2(fd: u64, v: u32) -> u64 {
+    let t: ptr = sys_alloc(2) as ptr;
+    let hi: u32 = (v / 16) % 16;
+    let lo: u32 = v % 16;
+    if hi > 9 {
+        store8(t, 0, (87 + hi) as u8);
+    } else {
+        store8(t, 0, (48 + hi) as u8);
+    }
+    if lo > 9 {
+        store8(t, 1, (87 + lo) as u8);
+    } else {
+        store8(t, 1, (48 + lo) as u8);
+    }
+    return write_all(fd, t, 2);
+}
+
+/// 把 `p[0..n]` 按 **JSON 字符串**写出（含两侧引号）。
+///
+/// 路径里完全可能有 `\`（Windows 就是这样）或控制字节 —— 不转义写出来的就不是合法
+/// JSON，下游 `lomenterr` 会整行解析失败，而那种失败**看起来像没有诊断**。
+fn wjson_str(fd: u64, p: ptr, n: u32) -> u64 {
+    let _q: u64 = wstr(fd, "\"");
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = load8(p, i) as u32;
+        if c == 34 {
+            let _a: u64 = wstr(fd, "\\\"");
+        } else if c == 92 {
+            let _b: u64 = wstr(fd, "\\\\");
+        } else if c < 32 {
+            let _c: u64 = wstr(fd, "\\u00");
+            let _d: u64 = whex2(fd, c);
+        } else {
+            let _e: u64 = write_all(fd, ptr_add(p, i), 1);
+        }
+        i = i + 1;
+    }
+    return wstr(fd, "\"");
+}
+
+/// 写不了产物时的**结构化诊断**: 一行 JSON，与编译器 `--diag-out` 同一种记录
+/// （`file` / `line` / `col` / `code` / `message`）。`line` 是 0 —— 这条诊断不属于
+/// 源码的哪一行，报错器据此不印 `:行号`、也不去源里切那两行。
+///
+/// `dp` 是启动器给的诊断文件路径（NUL 结尾）；`outp[0..outn)` 是写不出去的那条路径。
+fn emit_wfail(dp: ptr, outp: ptr, outn: u32) -> u64 {
+    let fd: i64 = open_wo(dp);
+    if fd < 0 {
+        return 0;
+    }
+    let u: u64 = fd as u64;
+    let _a: u64 = wstr(u, "{\"file\":");
+    let _b: u64 = wjson_str(u, outp, outn);
+    let _c: u64 = wstr(u, ",\"line\":0,\"col\":0,\"code\":\"E032\",\"message\":");
+    let _d: u64 = wjson_str(u, outp, outn);
+    let _e: u64 = wstr(u, "}\n");
+    syscall4(3, u, 0, 0);
+    return 1;
 }
 
 /// 第 n 个 argv (0 = 程序名) 的 (起点 << 32) | 长度。
@@ -871,7 +965,7 @@ fn lbl_add(tab: ptr, noff: u32, nlen: u32, boff: u32, blen: u32, addr: u32) {
     // 就踩进下一张表 —— 症状离现场很远（2026-09-20 实测: 全局表越界 38 条, 报出来的是
     // "未定义的标签: "，空白名字, 因为标签表被写坏了)。与 `IN_CAP` 那条守卫同一个纪律。
     if k >= TB_LBL_MAX {
-        let _f: u32 = fail("标签表满了 — 抬高 TB_LBL 的容量 (loment/tools/lomelf.lomt 的 TB_LBL_MAX)");
+        let _f: u32 = fail("the label table is full -- raise TB_LBL_MAX in loment/tools/lomelf.lomt");
     }
     let base: u32 = TB_LBL + k * 24;
     store32(tab, base + L_NOFF, noff);
@@ -899,7 +993,7 @@ fn lbl_find(tab: ptr, t: ptr, noff: u32, nlen: u32, boff: u32, blen: u32) -> u32
 fn fix_add(tab: ptr, site: u32, kind: u32, noff: u32, nlen: u32, boff: u32, blen: u32) {
     let k: u32 = cell(tab, C_NFIX);
     if k >= TB_FIX_MAX {
-        let _f: u32 = fail("回填表满了 — 抬高 TB_FIX 的容量 (loment/tools/lomelf.lomt 的 TB_FIX_MAX)");
+        let _f: u32 = fail("the backfill table is full -- raise TB_FIX_MAX in loment/tools/lomelf.lomt");
     }
     let base: u32 = TB_FIX + k * 28;
     store32(tab, base + F_SITE, site);
@@ -934,7 +1028,7 @@ fn slot_has(tab: ptr, t: ptr, noff: u32, nlen: u32) -> u32 {
 fn slot_put(tab: ptr, noff: u32, nlen: u32, off: u32) {
     let k: u32 = cell(tab, C_NSLOT);
     if k >= TB_SLOT_MAX {
-        let _f: u32 = fail("槽表满了 — 抬高 TB_SLOT 的容量 (loment/tools/lomelf.lomt 的 TB_SLOT_MAX)");
+        let _f: u32 = fail("the slot table is full -- raise TB_SLOT_MAX in loment/tools/lomelf.lomt");
     }
     let base: u32 = TB_SLOT + k * 16;
     store32(tab, base + S_NOFF, noff);
@@ -959,7 +1053,7 @@ fn alloc_find(tab: ptr, t: ptr, noff: u32, nlen: u32) -> u32 {
 fn alloc_put(tab: ptr, noff: u32, nlen: u32, off: u32, size: u32) {
     let k: u32 = cell(tab, C_NALLOC);
     if k >= TB_ALLOC_MAX {
-        let _f: u32 = fail("alloca 表满了 (单个函数) — 抬高 TB_ALLOC 的容量 (loment/tools/lomelf.lomt 的 TB_ALLOC_MAX)");
+        let _f: u32 = fail("the alloca table is full (one function) -- raise TB_ALLOC_MAX in loment/tools/lomelf.lomt");
     }
     let base: u32 = TB_ALLOC + k * 16;
     store32(tab, base + A_NOFF, noff);
@@ -1261,7 +1355,7 @@ fn emit_get_ptr(tab: ptr, out: ptr, c: u32, t: ptr, vo: u32, vl: u32, reg: u32) 
     if load8(t, vo) == 64 {
         return em_mov_abs(out, c, tab, reg, vo, vl);
     }
-    wstr(2, "lomelf: 指针值查不到: ");
+    wstr(2, "loment: this pointer value cannot be resolved: ");
     write_all(2, ptr_add(t, vo), vl as u64);
     wstr(2, " @fn=");
     write_all(2, ptr_add(t, cell(tab, C_FNO)), cell(tab, C_FNL) as u64);
@@ -1471,6 +1565,280 @@ fn binop_ty(t: ptr, i: u32, n: u32, op: str) -> u32 {
 
 // ---------------------------------------------------------------- 全局收集
 
+/// 从 `i` 起跳过**含换行**的空白。
+///
+/// `skip_sp` 只吃空格/制表/回车 —— 它按行工作。跨行的东西（自举 codegen 的 `switch`
+/// 就是多行的）里必须用这一个, 否则指针停在 `\n` 上不动。
+fn ws_after(t: ptr, i: u32, n: u32) -> u32 {
+    let j: u32 = i;
+    let go: u32 = 1;
+    while j < n && go == 1 {
+        let c: u32 = load8(t, j);
+        if c == 32 || c == 9 || c == 13 || c == 10 {
+            j = j + 1;
+        } else {
+            go = 0;
+        }
+    }
+    return j;
+}
+
+/// 跳过空白（含换行）-> 吃掉一个逗号 -> 再跳过空白（含换行）。
+fn ws_after_comma(t: ptr, i: u32, n: u32) -> u32 {
+    let j: u32 = ws_after(t, i, n);
+    if j < n && load8(t, j) == 44 {
+        j = ws_after(t, j + 1, n);
+    }
+    return j;
+}
+
+/// `[a, e)` 去掉尾随空白（含换行）之后的末端。
+fn trim_end(t: ptr, a: u32, e: u32) -> u32 {
+    let z: u32 = e;
+    let go: u32 = 1;
+    while z > a && go == 1 {
+        let c: u32 = load8(t, z - 1);
+        if c == 32 || c == 9 || c == 13 || c == 10 {
+            z = z - 1;
+        } else {
+            go = 0;
+        }
+    }
+    return z;
+}
+
+/// `[i, e)` 里**顶层**（`{`/`[`/`(` 深度 0）那个逗号的位置; 没有就到 `e`。
+/// 用来把一个聚合初值切成一项一项。
+fn item_end(t: ptr, i: u32, e: u32) -> u32 {
+    let d: i32 = 0;
+    let k: u32 = i;
+    let stop: u32 = 0;
+    while k < e && stop == 0 {
+        let c: u32 = load8(t, k);
+        if c == 123 || c == 91 || c == 40 {
+            d = d + 1;
+        }
+        if c == 125 || c == 93 || c == 41 {
+            d = d - 1;
+        }
+        if c == 44 && d == 0 {
+            stop = 1;
+        } else {
+            k = k + 1;
+        }
+    }
+    return k;
+}
+
+/// 十进制整数, 按 **64 位**累计。
+///
+/// `num_at` 用不了: 它的累加器是 u32, 值 ≥ 2^32 会被静默截断, 而全局初值里有
+/// `4294967296` 这种（issue #102 那张表）。负数按 2^64 取补, 与参考实现的 `n & mask` 同。
+fn num64(t: ptr, i: u32, n: u32) -> u64 {
+    let j: u32 = ws_after(t, i, n);
+    let neg: u32 = 0;
+    if j < n && load8(t, j) == 45 {
+        neg = 1;
+        j = j + 1;
+    }
+    let v: u64 = 0;
+    let go: u32 = 1;
+    while j < n && go == 1 {
+        let c: u32 = load8(t, j);
+        if c >= 48 && c <= 57 {
+            v = v * 10 + ((c - 48) as u64);
+            j = j + 1;
+        } else {
+            go = 0;
+        }
+    }
+    if neg == 1 {
+        return 0 - v;
+    }
+    return v;
+}
+
+/// 从 `a` 起写零到 `e`（不含）。
+fn zero_fill(gb: ptr, a: u32, e: u32) {
+    let k: u32 = a;
+    while k < e {
+        store8(gb, k, 0);
+        k = k + 1;
+    }
+}
+
+/// 结构体第 `idx` 个字段的**类型文本**跨度; 越界返回 `pk16(NO, 0)`。
+/// 与 `field_off` 同一次遍历, 只是一个要字节偏移、一个要类型文本。
+fn field_span(t: ptr, off: u32, len: u32, idx: u32) -> u64 {
+    let i: u32 = off + 1;
+    let end: u32 = off + len - 1;
+    let k: u32 = 0;
+    let go: u32 = 1;
+    while i < end && go == 1 {
+        let j: u32 = skip_sp(t, i, end);
+        if j >= end {
+            go = 0;
+        } else {
+            if load8(t, j) == 44 {
+                j = j + 1;
+            }
+            let fs: u64 = type_span(t, j, end);
+            if k == idx {
+                return fs;
+            }
+            k = k + 1;
+            i = hi32(fs) + lo32(fs);
+        }
+    }
+    return pk16(NO, 0);
+}
+
+/// 按**类型**把全局初值文本写成字节, 返回写出的字节数。
+///
+/// 与参考实现 `tools/lomelf.py` 的 `_parse_init` **同判** —— 两边产物必须逐字节同,
+/// 判据是 `loment_elf_test.py` 那条镜像对拍。
+///
+/// 为什么不是原来那种"取一个数、按类型宽度铺开"（issue #102）:
+///   1. 它用 `pow256(b)` 做除法, 而 `pow256` 是 u32 —— 宽度 ≥ 5 时 `256^b` 回绕成 0,
+///      `v / 0` 当场 trap（SIGILL）。元素类型 64 位的全局正好走这条, 而能力域表
+///      `@__loment_caps` 就是那个形状: 于是**凡是用能力域的程序都链不出来**。
+///   2. 它**不认聚合初值**: 数组/结构体只拿到 `num_at` 在 `[` 上读出的 0, 也就是错编译。
+fn emit_init(t: ptr, gb: ptr, at: u32, tyo: u32, tyl: u32, io: u32, il: u32) -> u32 {
+    let end: u32 = io + il;
+    let sz: u32 = ty_size(t, tyo, tyl);
+    let p: u32 = io;
+    if io < end {
+        p = ws_after(t, io, end);
+    }
+    // ---- `c"..."`
+    if p + 1 < end && load8(t, p) == 99 && load8(t, p + 1) == 34 {
+        let o1: u32 = at;
+        let q1: u32 = p + 2;
+        while q1 < end && load8(t, q1) != 34 {
+            if load8(t, q1) == 92 {
+                store8(gb, o1, (hexv(load8(t, q1 + 1)) * 16 + hexv(load8(t, q1 + 2))) as u8);
+                o1 = o1 + 1;
+                q1 = q1 + 3;
+            } else {
+                store8(gb, o1, load8(t, q1) as u8);
+                o1 = o1 + 1;
+                q1 = q1 + 1;
+            }
+        }
+        return o1 - at;
+    }
+    // ---- 全零（或压根没写初值 —— `@x = external global i32` 这种声明）
+    if io >= end || lit_at(t, p, end, "zeroinitializer") == 1 {
+        zero_fill(gb, at, at + sz);
+        return sz;
+    }
+    // ---- 值文本: 剥掉可能带的类型前缀
+    let v: u32 = p;
+    if span_eq(t, tyo, tyl, v, tyl) == 1 {
+        v = ws_after(t, v + tyl, end);
+    }
+    let tyc: u32 = load8(t, tyo);
+    if tyc == 91 {
+        // 数组 `[a, b, c]` —— 每一项自己带类型
+        if v >= end || load8(t, v) != 91 {
+            let _f: u32 = fail("数组初值不以 `[` 开头 —— 自举镜像链接器链不了这份 IR");
+        }
+        let last: u32 = trim_end(t, v + 1, end) - 1;
+        let it: u32 = v + 1;
+        let o2: u32 = at;
+        while it < last {
+            let ie: u32 = item_end(t, it, last);
+            let es: u64 = type_span(t, it, ie);
+            let eo: u32 = hi32(es);
+            let el: u32 = lo32(es);
+            o2 = o2 + emit_init(t, gb, o2, eo, el, eo + el, ie - (eo + el));
+            if ie < last {
+                it = ws_after(t, ie + 1, last);
+            } else {
+                it = last;
+            }
+        }
+        if o2 - at != sz {
+            let _f: u32 = fail("数组初值长度与类型不符 —— 自举镜像链接器链不了这份 IR");
+        }
+        return sz;
+    }
+    if tyc == 123 {
+        // 结构体 `{a, b}`。字段类型**以 ty 为准**（`_fields` 那一侧的判据）; 值文本自带
+        // 类型前缀时以它为准 —— 与参考实现同一句 `rest` 判断。
+        if v >= end || load8(t, v) != 123 {
+            let _f: u32 = fail("结构体初值不以 `{` 开头 —— 自举镜像链接器链不了这份 IR");
+        }
+        let last2: u32 = trim_end(t, v + 1, end) - 1;
+        let it2: u32 = v + 1;
+        let fi: u32 = 0;
+        let o3: u32 = at;
+        while it2 < last2 {
+            let ie2: u32 = item_end(t, it2, last2);
+            let foff: u32 = field_off(t, tyo, tyl, fi);
+            let fs: u64 = field_span(t, tyo, tyl, fi);
+            if foff == NO || hi32(fs) == NO {
+                let _f: u32 = fail("结构体初值字段数超过类型 —— 自举镜像链接器链不了这份 IR");
+            }
+            while o3 < at + foff {
+                store8(gb, o3, 0);        // 字段间的对齐空洞 LLVM 不写, 自己补
+                o3 = o3 + 1;
+            }
+            let ip: u32 = ws_after(t, it2, ie2);
+            let vt: u64 = type_span(t, ip, ie2);
+            let vo: u32 = hi32(vt);
+            let vl: u32 = lo32(vt);
+            let rest: u32 = ws_after(t, vo + vl, ie2);
+            if rest < ie2 {
+                o3 = o3 + emit_init(t, gb, o3, vo, vl, rest, ie2 - rest);
+            } else {
+                o3 = o3 + emit_init(t, gb, o3, hi32(fs), lo32(fs), it2, ie2 - it2);
+            }
+            fi = fi + 1;
+            if ie2 < last2 {
+                it2 = ws_after(t, ie2 + 1, last2);
+            } else {
+                it2 = last2;
+            }
+        }
+        zero_fill(gb, o3, at + sz);        // 尾随填充
+        return sz;
+    }
+    // ---- 标量
+    if sz == 0 {
+        let _f: u32 = fail("标量初值遇上了不认识的类型 —— 自举镜像链接器链不了这份 IR");
+    }
+    // 只吃 `-?[0-9]+`, 与参考实现同。别的一律**点名拒** —— `null` / `true` / `undef`
+    // 这类在这个子集里没有值可言, 静默按 0 写就是错编译（"报错, 不要错编译"）。
+    let d0: u32 = v;
+    if d0 < end && load8(t, d0) == 45 {
+        d0 = d0 + 1;
+    }
+    let ndig: u32 = 0;
+    while d0 < end && load8(t, d0) >= 48 && load8(t, d0) <= 57 {
+        d0 = d0 + 1;
+        ndig = ndig + 1;
+    }
+    if ndig == 0 || ws_after(t, d0, end) < end {
+        let _f: u32 = fail("标量初值不是十进制整数 —— 自举镜像链接器链不了这份 IR");
+    }
+    let nv: u64 = num64(t, v, end);
+    let lo: u32 = lo32(nv);
+    let hi: u32 = hi32(nv);
+    let b: u32 = 0;
+    while b < sz {
+        let byte: u32 = 0;
+        if b < 4 {
+            byte = (lo / pow256(b)) % 256;
+        } else {
+            byte = (hi / pow256(b - 4)) % 256;
+        }
+        store8(gb, at + b, byte as u8);
+        b = b + 1;
+    }
+    return sz;
+}
+
 /// 收集一个全局声明 (行 [ls,le)); 返回其数据字节数, 并把数据写进 gb。
 fn one_global(tab: ptr, t: ptr, gb: ptr, ls: u32, le: u32) -> u32 {
     let noff: u32 = ls;                       // 含前导 '@' —— 与参考实现的 g.name 同名
@@ -1494,45 +1862,18 @@ fn one_global(tab: ptr, t: ptr, gb: ptr, ls: u32, le: u32) -> u32 {
     let ts: u64 = type_span(t, j, le);
     let to: u32 = hi32(ts);
     let tl: u32 = lo32(ts);
-    let sz: u32 = ty_size(t, to, tl);
+    let tysz: u32 = ty_size(t, to, tl);
     let k: u32 = skip_sp(t, to + tl, le);
-    let kt: u32 = load8(t, k);
     let doff: u32 = align_to(cell(tab, C_GB), 8);
     let zero: u32 = 0;
-    if kt == 99 && load8(t, k + 1) == 34 {
-        // c"..."
-        let q: u32 = k + 2;
-        let o: u32 = doff;
-        while q < le && load8(t, q) != 34 {
-            if load8(t, q) == 92 {
-                let h1: u32 = hexv(load8(t, q + 1));
-                let h2: u32 = hexv(load8(t, q + 2));
-                store8(gb, o, (h1 * 16 + h2) as u8);
-                o = o + 1;
-                q = q + 3;
-            } else {
-                store8(gb, o, load8(t, q) as u8);
-                o = o + 1;
-                q = q + 1;
-            }
-        }
-        sz = o - doff;
-    } else {
-        if lit_at(t, k, le, "zeroinitializer") == 1 {
-            sz = ty_size(t, to, tl);
-        } else {
-            let nv: u64 = num_at(t, k, le);
-            let v: u32 = lo32(nv);
-            let o: u32 = doff;
-            let b: u32 = 0;
-            while b < sz {
-                store8(gb, o + b, ((v / pow256(b)) % 256) as u8);
-                b = b + 1;
-            }
-        }
-    }
-    // 全零 -> bss (与参考实现一致: 判据是**内容**, 不是 zeroinitializer 关键字)
+    let sz: u32 = emit_init(t, gb, doff, to, tl, k, le - k);
+    // 全零 -> bss。与参考实现同判: 判据是**内容长度 + 内容**, 不是 `zeroinitializer`
+    // 关键字（`if g.data != b"\0" * size_of(g.ty)`）—— 长度不等于类型大小的一律进 data,
+    // 例如 `c"..."` 比它那个数组类型短的时候。
     let nz: u32 = 0;
+    if sz != tysz {
+        nz = 1;
+    }
     let q: u32 = 0;
     while q < sz {
         if load8(gb, doff + q) != 0 {
@@ -1547,7 +1888,7 @@ fn one_global(tab: ptr, t: ptr, gb: ptr, ls: u32, le: u32) -> u32 {
     }
     let gi: u32 = cell(tab, C_NG);
     if gi >= TB_G_MAX {
-        let _f: u32 = fail("全局表满了 — 抬高 TB_G 的容量 (loment/tools/lomelf.lomt 的 TB_G_MAX)");
+        let _f: u32 = fail("the global table is full -- raise TB_G_MAX in loment/tools/lomelf.lomt");
     }
     let gbase: u32 = TB_G + gi * 32;
     store32(tab, gbase + G_NOFF, noff);
@@ -1845,8 +2186,11 @@ fn do_gep(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen: 
         let vl: u32 = load32(tab, C_VLLEN);
         let to: u32 = load32(tab, C_TYOFF);
         let tl: u32 = load32(tab, C_TYLEN);
-        // 参考实现: 先无条件取下标值 (结构体那条也会发这一句)
-        d = emit_get(tab, out, d, t, to, tl, vo, vl, RCX);
+        // GEP 的下标是**符号扩展**的 (`#313`) —— `emit_get` 按设计零扩展, 所以这里用
+        // `emit_get_signed`: `getelementptr i8, ptr %p, i32 -4` 要的是 `%p - 4`,
+        // 零扩展会把它变成 `%p + 4294967292`。结构体那条路不受影响 (`field_off` +
+        // `em_alu_ri` 本来就符号扩展)。**与参考实现同形**, 否则 ELF 不逐字节同。
+        d = emit_get_signed(tab, out, d, t, to, tl, vo, vl, RCX);
         if load8(t, cur_o) == 91 {
             let es: u64 = arr_elem(t, cur_o, cur_l);
             let step: u32 = ty_size(t, hi32(es), lo32(es));
@@ -2198,7 +2542,7 @@ fn do_call_asm(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, d
         k = k + 1;
     }
     if p3 == 0 || p4 == 0 {
-        return fail("内联汇编的约束串解析不了");
+        return fail("the inline-assembly constraint string cannot be parsed");
     }
     let pr: u64 = arg_parens(t, p4, le);
     let lp: u32 = hi32(pr);
@@ -2286,7 +2630,7 @@ fn do_call_asm(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, d
 fn do_call_spawn(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32,
                  doff: u32, dlen: u32) -> u32 {
     if cell(tab, C_PE) == 1 {
-        return fail("thread_spawn 只在 ELF 目标可用 — Windows 没有 clone (docs/245)");
+        return fail("thread_spawn is for ELF targets only -- Windows has no clone");
     }
     // asm 名字: 第 1、2 个引号之间 = `thread_spawn @入口`
     let nq: u32 = 0;
@@ -2307,7 +2651,7 @@ fn do_call_spawn(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32,
     }
     let eo: u32 = q1 + 15;                       // 引号(1) + "thread_spawn"(12) + 空格(1) + "@"(1)
     if q2 <= eo || q2 >= le {
-        return fail("thread_spawn 的 asm 名字里没有入口");
+        return fail("the assembly given to thread_spawn has no entry label in it");
     }
     // 操作数表: 约束串里没有括号, 所以第 2 个引号之后的**第一个** `(` 就是它
     let pr: u64 = arg_parens(t, q2, le);
@@ -2482,7 +2826,7 @@ fn plan_frame(tab: ptr, t: ptr, fs: u32, fe: u32) {
             if lit_at(t, dd2, le, "phi ") == 1 {
                 let k: u32 = cell(tab, C_NPHI);
                 if k >= TB_PHI_MAX {
-                    let _f: u32 = fail("phi 表满了 (单个函数) — 抬高 TB_PHI 的容量 (loment/tools/lomelf.lomt 的 TB_PHI_MAX)");
+                    let _f: u32 = fail("the phi table is full (one function) -- raise TB_PHI_MAX in loment/tools/lomelf.lomt");
                 }
                 let pb: u32 = TB_PHI + k * 16;
                 store32(tab, pb + PH_BOFF, cbo);
@@ -2696,7 +3040,7 @@ fn dsec_at(raw: ptr, k: u32) -> u32 {
 /// "先来的为准"挡掉、指到**第一个对象的节**上（静默算错地址）。参考实现同一条理由。
 fn put_secname(t: ptr, at: u32, oi: u32, shndx: u32) -> u32 {
     if at + 4 >= IN_CAP {
-        return fail("输入缓冲没有空间放节符号名");
+        return fail("the input buffer has no room left for section symbol names");
     }
     store8(t, at, 36 as u8);              // '$'
     store8(t, at + 1, oi as u8);
@@ -2834,10 +3178,10 @@ fn c_arg_reg(k: u32) -> u32 {
 fn do_call_extern(tab: ptr, out: ptr, c: u32, t: ptr, lp: u32, rp: u32, nargs: u32,
                   cs: u32, ce: u32, flags: u32) -> u32 {
     if nargs > 6 {
-        return fail("extern 调用: 第 1 阶段最多 6 个实参 (docs/173 §3)");
+        return fail("extern call: stage 1 takes at most 6 arguments");
     }
     if flags % 4 >= 2 {
-        return fail("extern 调用: 第 1 阶段不接受聚合返回值");
+        return fail("extern call: stage 1 does not take an aggregate return value");
     }
     let d: u32 = c;
     let q: u32 = nargs;
@@ -2848,7 +3192,7 @@ fn do_call_extern(tab: ptr, out: ptr, c: u32, t: ptr, lp: u32, rp: u32, nargs: u
         let to: u32 = hi32(ts);
         let tl: u32 = lo32(ts);
         if is_agg(t, to, tl) == 1 {
-            return fail("extern 调用: 第 1 阶段不接受聚合实参");
+            return fail("extern call: stage 1 does not take an aggregate argument");
         }
         let vs: u32 = skip_sp(t, to + tl, rp);
         let ve: u32 = word_end(t, vs, rp);
@@ -2913,24 +3257,15 @@ fn is_rela_to_lay(raw: ptr, k: u32, ns: u32) -> u32 {
 fn read_link_file(path: ptr, buf: ptr, cap: u32) -> u32 {
     let fd: i64 = open_ro(path);
     if fd < 0 {
-        wstr(2, "lomelf: 打不开外部目标文件: ");
-        write_cstr(2, path, 0);
-        wstr(2, "\n");
-        return die(1);
+        return failc("cannot open the foreign object file: ", path);
     }
     let rn: u64 = read_all(fd as u64, buf, cap as u64);
     syscall4(3, fd as u64, 0, 0);
     if rn == 0 {
-        wstr(2, "lomelf: 外部目标文件为空: ");
-        write_cstr(2, path, 0);
-        wstr(2, "\n");
-        return die(1);
+        return failc("the foreign object file is empty: ", path);
     }
     if rn >= (cap as u64) {
-        wstr(2, "lomelf: 外部目标文件超过 4 MiB 上限: ");
-        write_cstr(2, path, 0);
-        wstr(2, "\n");
-        return die(1);
+        return failc("the foreign object file is larger than the 4 MiB limit: ", path);
     }
     return lo32(rn);
 }
@@ -2959,22 +3294,13 @@ fn is_archive(mem: ptr, n: u32) -> u32 {
 fn check_obj(path: ptr, mem: ptr) -> u32 {
     if load8(mem, 0) != 127 || load8(mem, 1) != 69 || load8(mem, 2) != 76
         || load8(mem, 3) != 70 || load8(mem, 4) != 2 || load8(mem, 5) != 1 {
-        wstr(2, "lomelf: 不是 ELF64 小端目标文件: ");
-        write_cstr(2, path, 0);
-        wstr(2, "\n");
-        return die(1);
+        return failc("not an ELF64 little-endian object file: ", path);
     }
     if rd16(mem, 16) != 1 {
-        wstr(2, "lomelf: 不是可重定位目标文件 (ET_REL): ");
-        write_cstr(2, path, 0);
-        wstr(2, "\n");
-        return die(1);
+        return failc("not a relocatable object file (ET_REL): ", path);
     }
     if has_code(mem) == 0 {
-        wstr(2, "lomelf: 没有代码节 (.text / .text.*): ");
-        write_cstr(2, path, 0);
-        wstr(2, "\n");
-        return die(1);
+        return failc("the object file has no code section (.text / .text.*): ", path);
     }
     return 0;
 }
@@ -3141,10 +3467,18 @@ fn link_object_mem(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, ap: u3
     // 调起来的独立工具），所以"默认拒 + 启动器显式开"这条形状不变 —— 变的是启动器**两个
     // 渠道都传那面旗**（`tools/loment_dist.py`）。与参考实现同一条口径。
     if ap == 0 && np != 0 {
-        wstr(2, "lomelf: 外源对象带了未定义符号（通向世界的端口），而链接器默认不收。\n");
-        wstr(2, "链接器不知道渠道，所以默认永远是拒；启动器在两个渠道都传 --allow-ports。\n");
-        wstr(2, "自己调链接器时要它就得显式写 --allow-ports；\n");
-        wstr(2, "自闭合的对象（没有未定义符号）不受这条影响。\n");
+        wstr(2, "loment: this foreign object carries undefined symbols (ports to the outside world),
+");
+        wstr(2, "and the linker does not take those by default. The linker does not know the channel
+");
+        wstr(2, "(it is a standalone tool the launcher calls), so the default is always to refuse;
+");
+        wstr(2, "both channels' launchers pass --allow-ports (docs/222 sec 4.5, opened 2026-10-17).
+");
+        wstr(2, "Calling this linker directly needs the flag. A self-contained object (one with no
+");
+        wstr(2, "undefined symbols) is unaffected.
+");
         return die(1);
     }
     // 重定位**只记不应用** (docs/173 阶段 2): 应用要等所有对象都摆好、标签都立好 ——
@@ -3160,7 +3494,7 @@ fn link_object_mem(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, ap: u3
                 in_data = 1;                                  // 落在数据节上: 写 gb
             } else if tgt >= ns || sh_type(mem, tgt) != 1
                 || is_code_sec(mem, sec_name(mem, tgt)) == 0 {
-                wstr(2, "lomelf: 重定位指向非代码节 (docs/173 §3)\n");
+                wstr(2, "loment: a relocation points at a section that is neither code nor data\n");
                 return die(1);
             }
             let tsecat: u32 = sec_at(mem, tgt);
@@ -3183,7 +3517,7 @@ fn link_object_mem(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, ap: u3
                 let ty: u32 = lo32(rinfo);
                 let si: u32 = hi32(rinfo);
                 if ty != 1 && ty != 2 && ty != 4 && ty != 10 && ty != 11 && ty != 24 {
-                    wstr(2, "lomelf: 不认识的重定位类型 (docs/173 §3)\n");
+                    wstr(2, "loment: unknown relocation type (docs/173 section 3)\n");
                     return die(1);
                 }
                 let symoff: u32 = symoff0 + si * 24;
@@ -3250,7 +3584,7 @@ fn need_add(tab: ptr, t: ptr, noff: u32, nlen: u32) {
     if k >= NEED_MAX {
         // 点名拒（"超限报错退出，绝不静默丢"）。真库的需要集是几十个量级；到这里说明
         // 来的不是"一个库"，那也不该悄悄少挑几个成员。
-        let _f: u32 = fail("lomelf: 需要集超过上限 (NEED_MAX)");
+        let _f: u32 = fail("more needed symbols than the table holds (NEED_MAX) -- the object file is too large for this linker");
     }
     let base: u32 = TB_NEED + k * 8;
     store32(tab, base + E_NOFF, noff);
@@ -3398,7 +3732,7 @@ fn ar_member(mem: ptr, pos: u32, n: u32) -> u64 {
         return 0;
     }
     if load8(mem, pos + 58) != 96 || load8(mem, pos + 59) != 10 {
-        let _f: u32 = fail("lomelf: 归档成员头损坏（不以 `\\n 收尾）");
+        let _f: u32 = fail("the archive member header is corrupt (it does not end with a newline)");
     }
     // 长度格是十进制文本，填法是空格；**两边的空格都跳**（GNU 右填、别的实现左填），
     // 与参考实现的 `int(s.strip())` 同一个宽容度。
@@ -3416,7 +3750,7 @@ fn ar_member(mem: ptr, pos: u32, n: u32) -> u64 {
         d = d + 1;
     }
     if nd == 0 {
-        let _f: u32 = fail("lomelf: 归档成员长度不是数字");
+        let _f: u32 = fail("the archive member length is not a number");
     }
     // 数据按**偶数**对齐：奇数长度补一个字节（ar 的规定，不是我们挑的）。
     // 打包：高 32 位 = **下一成员头**的位置，低 32 位 = 成员长度（不含那个填充字节）。
@@ -3451,7 +3785,7 @@ fn link_archive(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, objs: ptr, arb: ptr
                         // 成员拷进 `M_OBJ` 再扫 —— 那一整套 ELF 助手都按"对象在缓冲起点"
                         // 写的，参数化它们要动几十处调用点。
                         if dlen >= OBJ_CAP {
-                            let _f: u32 = fail("lomelf: 归档成员超过 4 MiB 上限");
+                            let _f: u32 = fail("an archive member is larger than the 4 MiB limit");
                         }
                         copy_n(objs, 0, arb, doff, dlen);
                         if obj_usable(objs) == 1 {
@@ -3470,7 +3804,7 @@ fn link_archive(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, objs: ptr, arb: ptr
     // **空归档**是错（参考实现：`归档里没有成员`），而"一个都没挑中"**不是** ——
     // 那说明这份归档里没有这个程序要的东西，后面按"未定义的标签"报出来，方向才对。
     if seen == 0 {
-        wstr(2, "lomelf: 归档里没有成员\n");
+        wstr(2, "loment: the archive holds no members\n");
         return die(1);
     }
     // ---- 按**挑中的次序**摆（`TB_MEM` 里登记的就是那个次序）。
@@ -3482,7 +3816,7 @@ fn link_archive(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, objs: ptr, arb: ptr
         let doff2: u32 = load32(tab, base + E_NOFF);
         let dlen2: u32 = load32(tab, base + E_NLEN);
         if dlen2 >= OBJ_CAP {
-            let _f: u32 = fail("lomelf: 归档成员超过 4 MiB 上限");
+            let _f: u32 = fail("an archive member is larger than the 4 MiB limit");
         }
         copy_n(objs, 0, arb, doff2, dlen2);
         nd = link_object_mem(tab, t, txt, gb, nd, objs, ap);
@@ -3518,7 +3852,7 @@ fn ar_taken(tab: ptr, doff: u32) -> u32 {
 fn ar_take(tab: ptr, doff: u32, dlen: u32) {
     let k: u32 = cell(tab, C_NMEM);
     if k >= MEM_MAX {
-        let _f: u32 = fail("lomelf: 归档挑中的成员超过上限 (MEM_MAX)");
+        let _f: u32 = fail("the archive members picked exceed the limit (MEM_MAX) -- the archive is too large for this linker");
     }
     let base: u32 = TB_MEM + k * 8;
     store32(tab, base + E_NOFF, doff);
@@ -3542,10 +3876,10 @@ fn apply_relocs(tab: ptr, t: ptr, txt: ptr, gb: ptr) -> u32 {
         if target == NO {
             // **到链接结束才判"没人定义"**: 这是"多目标文件 C 库"与"引用 libc"的分界线 ——
             // 前者由另一个对象提供, 后者到链接结束都空着。
-            wstr(2, "lomelf: 引用了未定义的符号 ");
+            wstr(2, "loment: undefined symbol ");
             write_all(2, ptr_add(t, load32(tab, base + F2_NOFF)),
                       load32(tab, base + F2_NLEN) as u64);
-            wstr(2, " —— 到链接结束都没人提供它 (第 2 阶段仍不链 libc, docs/173 §3)\n");
+            wstr(2, " -- nothing provides it by the end of the link (this stage still does not link libc)\n");
             return die(1);
         }
         // **两条路**（`docs/219` §8b 第 1 条）：`F2_IN` 说这条重定位的**落点**在哪 ——
@@ -3599,7 +3933,7 @@ fn copy_local_name(tab: ptr, t: ptr, p: ptr, off: u32, oi: u32) -> u32 {
     let cur: u32 = cell(tab, C_EXTN);
     let n: u32 = cstr_len(p, off);
     if cur + n + LOCAL_PREFIX >= IN_CAP {
-        return fail("输入缓冲没有空间放外部符号名");
+        return fail("the input buffer has no room left for external symbol names");
     }
     store8(t, cur, 36 as u8);
     store8(t, cur + 1, (oi % 256) as u8);
@@ -3619,7 +3953,7 @@ fn copy_name(tab: ptr, t: ptr, p: ptr, off: u32) -> u32 {
     let cur: u32 = cell(tab, C_EXTN);
     let n: u32 = cstr_len(p, off);
     if cur + n >= IN_CAP {
-        return fail("输入缓冲没有空间放外部符号名");
+        return fail("the input buffer has no room left for external symbol names");
     }
     let k: u32 = 0;
     while k < n {
@@ -3662,7 +3996,7 @@ fn resolve_fixups(tab: ptr, t: ptr, txt: ptr) -> u32 {
         let addr: u32 = lbl_find(tab, t, no, nl, load32(tab, base + F_BOFF),
                                  load32(tab, base + F_BLEN));
         if addr == NO {
-            wstr(2, "lomelf: 未定义的标签: ");
+            wstr(2, "loment: undefined label: ");
             write_all(2, ptr_add(t, no), nl as u64);
             wstr(2, "\n");
             return die(1);
@@ -4716,7 +5050,15 @@ fn do_switch(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32) -> u32 {
         }
         k2 = k2 + 1;
     }
-    let q: u32 = lb + 1;
+    // 逐条 case。**case 表可以跨行** —— 自举 codegen 的 `switch` 就是多行的, 而进来的 `le`
+    // 是 `logical_end`（跨行指令的末端）。所以这里的空白跳过必须吃 `\n`; `skip_sp` 不吃,
+    // 它按行工作。
+    //
+    // 2026-10-16 之前这里用的是 `skip_sp` / `skip_comma`: `q` 停在换行上, `next_label`
+    // 找不到 `label` 退回 `(0,0)`, 于是 `q = skip_comma(t, 0, rb)` = **0** —— 从头重来。
+    // 每绕一圈发一条回填, 32768 圈之后报"回填表满了", 看起来像容量问题。不是: **空 case
+    // 表**（只把 `]` 写到下一行）一条回填都不需要, 照样打满。见 issue #2 / #10。
+    let q: u32 = ws_after(t, lb + 1, rb);
     while q < rb {
         let cts: u64 = type_span(t, q, rb);
         let co: u32 = hi32(cts);
@@ -4725,13 +5067,22 @@ fn do_switch(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32) -> u32 {
         let nx: u64 = num_at(t, ns, rb);
         let num: u32 = lo32(nx);
         let L: u64 = next_label(t, hi32(nx), rb);
-        d = em_alu_ri(out, d, CMP, RAX, num);
-        let jsite: u32 = em_jcc_raw(out, d, 5);
-        d = jsite + 4;
-        d = emit_phis(tab, out, d, t, le, hi32(L), lo32(L));
-        d = em_jmp_blk(out, d, tab, cell(tab, C_FNO), cell(tab, C_FNL), hi32(L), lo32(L));
-        w32(out, jsite, d - (jsite + 4));
-        q = skip_comma(t, hi32(L) + lo32(L), rb);
+        let qn: u32 = 0;
+        if hi32(L) == 0 {
+            qn = rb;                       // 没有下一条 case 了 —— 停, 不能回到 0
+        } else {
+            d = em_alu_ri(out, d, CMP, RAX, num);
+            let jsite: u32 = em_jcc_raw(out, d, 5);
+            d = jsite + 4;
+            d = emit_phis(tab, out, d, t, le, hi32(L), lo32(L));
+            d = em_jmp_blk(out, d, tab, cell(tab, C_FNO), cell(tab, C_FNL), hi32(L), lo32(L));
+            w32(out, jsite, d - (jsite + 4));
+            qn = ws_after_comma(t, hi32(L) + lo32(L), rb);
+            if qn <= q {
+                qn = rb;                   // 没前进就停 —— 死循环的兜底
+            }
+        }
+        q = qn;
     }
     return jump_to(tab, out, d, t, le, hi32(D), lo32(D));
 }
@@ -5023,7 +5374,7 @@ fn put_name(t: ptr, at: u32, s: str) -> u32 {
     // 与 `copy_name` 同一条守卫: 名字池住在**输入缓冲**里，越界就踩到下一张缓冲 ——
     // **响亮地退出**，不静默写坏（与 `IN_CAP` 那条同一个纪律）。
     if at + n >= IN_CAP {
-        return fail("输入缓冲没有空间放收编面的名字");
+        return fail("the input buffer has no room left for the conscripted names");
     }
     let i: u32 = 0;
     while i < n {
@@ -5096,7 +5447,7 @@ fn emit_conscript(tab: ptr, out: ptr, c: u32, t: ptr) -> u32 {
 fn emit_all(tab: ptr, out: ptr, c: u32, t: ptr, n: u32, tlsn: u32, tls: u32) -> u32 {
     let ss: u32 = find_start(t, n);
     if ss == NO {
-        return fail("没有 _start 入口");
+        return fail("the unit has no `_start` entry point -- declare `fn _start()`, or `command_main` together with a command declaration");
     }
     let d: u32 = c;
     if cell(tab, C_PE) == 1 {
@@ -5167,7 +5518,7 @@ fn wdec(fd: u64, tmp: ptr, v: u32) -> u64 {
 fn _start() -> u32 {
     let mem: ptr = sys_alloc(ARENA) as ptr;
     if mem as u64 == 0 {
-        return fail("oom (brk 失败)");
+        return fail("out of memory (brk failed)");
     }
     let rc: u32 = run(mem);
     return die(rc as u64);
@@ -5178,7 +5529,7 @@ fn run(mem: ptr) -> u32 {
     let a1: u64 = argv_n(ab, 8192, 1);
     let o1: u64 = argv_n(ab, 8192, 2);
     if a1 == 0 || o1 == 0 {
-        wstr(2, "用法: lomelf IN.ll OUT\n");
+        wstr(2, "loment: usage: loment-lomelf IN.ll OUT [--diag-out PATH] [--link OBJ ...] (normally reached through `loment build`)\n");
         return die(2);
     }
     // 多出来的实参只可能是启动器透传的 `--link FILE.o` (docs/173 FFI)。**必须解析**:
@@ -5198,6 +5549,8 @@ fn run(mem: ptr) -> u32 {
     // `--allow-ports`（`docs/222` §4 的端口门）：默认**不收**带未定义符号的外源对象。
     // 开发通道与判据显式写它；发行版启动器永不写（`tools/loment_dist.py`）。
     let ap: u32 = 0;
+    // 启动器给的 `--diag-out` 路径（0 = 没给）。写不了产物时那一份结构化诊断就写到它里面。
+    let dg: u32 = 0;
     let obase: u32 = lo32(a1) + 8 + lo32(o1) + 8;   // 与下面的 pout 对齐
     let ok: u32 = 3;
     let go: u32 = 1;
@@ -5215,12 +5568,12 @@ fn run(mem: ptr) -> u32 {
             } else if lo32(av) == 6 && lit_at(ab, hi32(av), hi32(av) + 6, "--link") == 1 {
                 let pv: u64 = argv_n(ab, 8192, ok + 1);
                 if lo32(pv) == 0 {
-                    wstr(2, "lomelf: --link 缺文件名\n");
+                    wstr(2, "loment: --link needs a file name\n");
                     return die(2);
                 }
                 let dst: u32 = obase + nlink * 1024;
-                if dst + 1024 >= 65536 {
-                    wstr(2, "lomelf: --link 的文件太多\n");
+                if dst + 1024 > DIAGB_OFF {
+                    wstr(2, "loment: too many --link files\n");
                     return die(2);
                 }
                 let j: u32 = 0;
@@ -5231,8 +5584,25 @@ fn run(mem: ptr) -> u32 {
                 store8(pbuf, dst + lo32(pv), 0 as u8);
                 nlink = nlink + 1;
                 ok = ok + 2;
+            } else if lo32(av) == 10
+                    && lit_at(ab, hi32(av), hi32(av) + 10, "--diag-out") == 1 {
+                // 启动器给的那条诊断文件。**路径存在 pbuf 的最后 1 KiB**（`DIAGB_OFF`），
+                // 与输入/输出/`--link` 那三个按 argv 长度算出来的落点不抢。
+                let pv: u64 = argv_n(ab, 8192, ok + 1);
+                if lo32(pv) == 0 {
+                    wstr(2, "loment: --diag-out needs a file name\n");
+                    return die(2);
+                }
+                let j0: u32 = 0;
+                while j0 < lo32(pv) {
+                    store8(pbuf, DIAGB_OFF + j0, load8(ab, hi32(pv) + j0) as u8);
+                    j0 = j0 + 1;
+                }
+                store8(pbuf, DIAGB_OFF + lo32(pv), 0 as u8);
+                dg = 1;
+                ok = ok + 2;
             } else {
-                wstr(2, "lomelf: unknown option ");
+                wstr(2, "loment: unknown option ");
                 write_all(2, ptr_add(ab, hi32(av)), lo32(av) as u64);
                 wstr(2, "\n");
                 return die(2);
@@ -5261,12 +5631,12 @@ fn run(mem: ptr) -> u32 {
     store8(pbuf, pout + ol, 0 as u8);
     let fd: i64 = open_ro(ptr_add(pbuf, pin));
     if fd < 0 {
-        return fail("打不开输入");
+        return fail("cannot open the input file");
     }
     let n: u64 = read_all(fd as u64, inb, IN_CAP as u64);
     syscall4(3, fd as u64, 0, 0);
     if n == 0 {
-        return fail("输入为空");
+        return fail("the input file is empty");
     }
     // **读满上限 = 文件还有剩** —— `read_all` 读够 `cap` 就停，它不知道文件多长。
     // 不检查的后果不是"少几条指令"：`.ll` 是逐行语法，截断点之后的函数定义凭空消失，
@@ -5275,7 +5645,7 @@ fn run(mem: ptr) -> u32 {
     // 责任就在这一行。与 `copy_name` 那条守卫、与驱动程序里 `MAX_USE` / `MAX_ADDIN`
     // 的注解是同一条纪律：**超限报错退出，绝不静默丢**。
     if n >= IN_CAP as u64 {
-        return fail("lomelf: 输入 .ll 超过输入缓冲上限 (装不下; 见 docs/192)");
+        return fail("the input .ll does not fit in the input buffer (it is too large for this linker)");
     }
     let tab: ptr = ptr_add(mem, M_TAB);
     let gb: ptr = ptr_add(mem, M_GB);
@@ -5296,7 +5666,7 @@ fn run(mem: ptr) -> u32 {
         }
     }
     if nlink != 0 && pe == 1 {
-        wstr(2, "lomelf: --link 目前只支持 ELF 目标 (docs/173 §3)\n");
+        wstr(2, "loment: --link takes ELF objects only for now\n");
         return die(2);
     }
     setcell(tab, C_PE, pe);
@@ -5404,6 +5774,14 @@ fn run(mem: ptr) -> u32 {
             got = got + 1;
         }
     }
+    // **文本段满了就点名退出**（`docs/253`，2026-10-16）。数据段钉在 `TEXT_VADDR + OUT_CAP`，
+    // 所以文本一旦超过 `OUT_CAP` 就会盖到数据段上 —— 而原先**盖上去不报错**：产物一启动
+    // 就段错误（0 字节输出），看起来像编译器坏了。与 `TB_LBL_MAX` / `TB_FIX_MAX` / `IN_CAP`
+    // 那几条守卫同一个纪律：**满了就说出来，不往下写**。参考实现 `tools/lomelf.py` 的
+    // `compile_ll` 末尾同一条、同一个数（那边的常量叫 `TEXT_CAP`）。
+    if tlen > OUT_CAP {
+        let _f: u32 = fail("文本段满了 — 抬 OUT_CAP (loment/tools/lomelf.lomt) 与 tools/lomelf.py 的 TEXT_CAP/ELF_DATA_VADDR");
+    }
     // **bss 的地址与标签必须等到这里**（`docs/219` §8b 第 1 条）—— 位置见 `place_bss`。
     // **TLS 块**（`docs/219` S2）：接在对象数据之后、与参考实现同一处、同样 256 字节。
     // 必须在 `place_bss` **之前** —— bss 的地址是按数据段当前长度算的。
@@ -5447,9 +5825,17 @@ fn run(mem: ptr) -> u32 {
     } else {
         total = build_elf(tab, ob, txt, tlen, gb, dlen, cell(tab, C_BSS));
     }
+    // **点名那个写不出去的文件**: 说"写不了输出"而不说是哪个, 读者手上唯一有用的
+    // 那条信息(路径)就没了 —— 而这条最常撞上的起因正是"输出目录不存在", 一看路径就明白
+    // (issue #8 的第二条评论)。
     let ofd: i64 = open_wo(ptr_add(pbuf, pout));
     if ofd < 0 {
-        return fail("写不了输出");
+        // 结构化那一份先落地（有 `--diag-out` 才写），再由 `failc` 打那一行给人看 ——
+        // 两个受众都要，理由与驱动程序那边同一条。
+        if dg == 1 {
+            let _g: u64 = emit_wfail(ptr_add(pbuf, DIAGB_OFF), ptr_add(pbuf, pout), ol);
+        }
+        return failc("cannot write the output file: ", ptr_add(pbuf, pout));
     }
     write_all(ofd as u64, ob, total as u64);
     syscall4(3, ofd as u64, 0, 0);

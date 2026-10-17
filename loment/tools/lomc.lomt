@@ -637,7 +637,8 @@ fn p_int(mem: ptr, src: ptr, toks: ptr) -> u64 {
     return v_pack(neg, (mag % 4294967296) as u32, (mag / 4294967296) as u32);
 }
 
-/// 字符串字面量 (解码转义) -> 池 (off,len)。_ESCAPES: n/t/"/\ 其余取原字符。
+/// 字符串字面量 (解码转义) -> 池 (off,len)。转义表与 `lomc._ESCAPES` 同一份:
+/// `n` `t` `r` `0`；其余 (`\\` `\"` 以及**未知** —— 后者由 checker 报 E019) 取原字符。
 fn p_string(mem: ptr, src: ptr, toks: ptr) -> u64 {
     let i: u32 = cur(mem);
     if tk_kind(toks, i) != 2 {
@@ -657,6 +658,8 @@ fn p_string(mem: ptr, src: ptr, toks: ptr) -> u64 {
             let d: u32 = e;
             if e == 110 { d = 10; }
             if e == 116 { d = 9; }
+            if e == 114 { d = 13; }
+            if e == 48 { d = 0; }
             store8(tmp, o, d as u8);
             o = o + 1;
             k = k + 2;

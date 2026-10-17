@@ -42,6 +42,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 
 import lomelf  # noqa: E402
 import lomentc  # noqa: E402
@@ -314,22 +315,7 @@ def test_cli_without_lang_reads_a_source_file_not_json():
 
 
 def main() -> int:
-    failed: list[str] = []
-    for fn in TESTS:
-        try:
-            fn()
-        except AssertionError as e:
-            failed.append(fn.__name__)
-            print(f"  FAIL  {fn.__name__}: {e}")
-        except Exception as e:  # noqa: BLE001
-            failed.append(fn.__name__)
-            print(f"  ERROR {fn.__name__}: {type(e).__name__}: {e}")
-    print()
-    if failed:
-        print(f"loment_lomtfrom_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-        return 1
-    print(f"loment_lomtfrom_test: {len(TESTS)}/{len(TESTS)} 通过")
-    return 0
+    return loment_suite.run(TESTS, "loment_lomtfrom_test")
 
 
 if __name__ == "__main__":

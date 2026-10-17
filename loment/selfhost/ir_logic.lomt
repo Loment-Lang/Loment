@@ -17,3 +17,23 @@ fn guard3(a: u32, b: u32, c: u32) -> bool {
 fn mixed(a: u32, b: u32) -> bool {
     return a > 1 && (b > 1 || a == b);
 }
+
+// `#316`: 比较的**操作数是另一个比较** —— 那个操作数的值是 `bool`, 而"取第一个操作数的
+// 类型"那条规则会把它顶成 i64 (`(a < 0) != (b < 0)` → `icmp ne i64`, 而两个操作数其实
+// 是 `i1`)。参考实现的 `expr_type(Bin)` 里**算子优先**: 比较/逻辑一律 `"bool"`。
+// 下面四只: 裸的、`&&` 里的、`||` 里的, 以及 u32 一侧的对照。
+fn ne_of_cmps(a: i64, b: i64) -> bool {
+    return (a < 0) != (b < 0);
+}
+
+fn and_ne_of_cmps(sgn: u32, a: i64, b: i64) -> bool {
+    return sgn == 1 && (a < 0) != (b < 0);
+}
+
+fn or_ne_of_cmps(sgn: u32, a: i64, b: i64) -> bool {
+    return sgn == 1 || (a < 0) != (b < 0);
+}
+
+fn eq_of_cmps_u32(a: u32, b: u32) -> bool {
+    return (a > 1) == (b > 1);
+}

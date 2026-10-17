@@ -31,6 +31,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import lomentc  # noqa: E402
 import lomelf  # noqa: E402
 
@@ -398,23 +399,7 @@ def test_pe_refuses_thread_spawn():
 # ---------------------------------------------------------------- 入口
 
 def main(argv: list[str] | None = None) -> int:
-    only = argv[0] if argv else None
-    failed = []
-    for name, fn in TESTS:
-        if only and only not in name:
-            continue
-        try:
-            fn()
-            print(f"  PASS  {name}")
-        except AssertionError as e:
-            failed.append(name)
-            print(f"  FAIL  {name}: {e}")
-        except Exception as e:                                       # noqa: BLE001
-            failed.append(name)
-            print(f"  FAIL  {name}: {type(e).__name__}: {e}")
-    n = len([x for x, _ in TESTS if not only or only in x])
-    print(f"\nloment_thread_test: {n - len(failed)}/{n} 通过")
-    return 1 if failed else 0
+    return loment_suite.run(TESTS, "loment_thread_test", only=(argv[0] if argv else None))
 
 
 if __name__ == "__main__":

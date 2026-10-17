@@ -303,13 +303,13 @@ fn _start() {
 
 Running it should print `42 10 9 6 2 3` and `TOUR RESULT: PASS`.
 
-> **On a machine with only the package, `tour` does not link today** - and the reason is **not**
-> the one this note used to give. By-value `struct` / `enum` arguments compile and run fine now
-> (measured: a two-field struct passed by value builds and returns the right answer). What stops
-> it is the **`capability` declaration**: a unit that declares a capability fails in
-> `loment-lomelf` with `Illegal instruction`, while `loment check` and `loment ir` pass. That is
-> a defect in the linker, not a rule of the language, and it means the one feature Loment adds
-> cannot currently produce an executable (6.3).
+> **`tour` links and runs on the packaged toolchain** (measured 2026-10-16, `0.1.4.5-quickfix`:
+> `loment build tour.lomt`, then run the ELF) - it prints `42 10 9 6 2 3` and
+> `TOUR RESULT: PASS`, exit 0. Two linker defects used to stop it: a 64-bit global crashed
+> `loment-lomelf` with `Illegal instruction`, and a multi-line case table made the backfill table
+> spin until it reported a "capacity" error. Both are fixed, and each has its own criterion. On
+> an **older** package `check` and `ir` pass and the build still fails - that is the old build,
+> not your program.
 >
 > **The `hello` skeleton above uses scalars, a string and syscalls only, so it runs inside the
 > package** - use it to confirm your environment before going further.
@@ -636,7 +636,7 @@ fn _start() {
 | `host` | The host side (needs syscalls): files, directories, argv, stat, logging | `fs` `io` `dir` `argv` `stat` `log` |
 
 - **One name-form `use` per unit is the limit today** - a second one fails, with a message that
-  names no file and no line (6.3.22). To pull in several modules, use the **path** form
+  names no file and no line (6.3.20). To pull in several modules, use the **path** form
   (`use "<prefix>/share/lompi/store/std/0.1.0/text.lomt"`), which has no such limit. **Take the
   modules one at a time; do not write a facade.**
 - `use std` exists but drags all 127 modules into **one unit**, and measured today it takes
@@ -733,7 +733,8 @@ are different things, and it is worth knowing which one you are looking at.
 
 1. **A `match` arm body is a block, not an expression.** `Kind::A => 0,` is not accepted; write
    `Kind::A => { return 0; }`. (At this commit the *checker* no longer rejects the expression
-   form, and what you get instead is a build failure from an unrelated linker limit - see 6.3.21.)
+   form, and what you get instead is a build failure from the linker - it stops on the value the
+   codegen emits for it, not on the `match`. Both implementations refuse it; write the block.)
 2. **Generic enum patterns use the monomorphised name.** When the matched value is
    `Result<i64, u32>`, `Result::Ok(v)` gives `E8 与主体枚举 Result_i64_u32 不符` (*does not match
    the subject enum*); the answer is **`Result_i64_u32::Ok(v)`**. Non-generic enums are written
@@ -784,31 +785,46 @@ are different things, and it is worth knowing which one you are looking at.
     the buffer instead of stopping at the headers. **Write protocol bytes one at a time**:
     `store8(p, o, 13 as u8); store8(p, o + 1, 10 as u8);`.
 
-14. **The bump heap is 64 KiB, `free` does nothing, and running out aborts the process.** `alloc`
-    returns a bare `ptr`: no null, no error, no `Result`. Measured: `alloc(65536)` succeeds and
-    `alloc(64)` right after it **kills the process with SIGILL** (exit code 132) - nothing is
-    printed and the program has no way to notice. Because `free` is a no-op, a long-running
-    program only ever grows: a service that allocates ~900 bytes per request dies after **about
-    72 requests**, and one request asking for `n = 60000` kills it outright. If you are writing
-    something that serves, this is the first constraint to design around.
+14. **The heap is a fixed 64 KiB, and running out aborts the process.** `alloc` returns a bare
+    `ptr`: no null, no error, no `Result`. Measured: `alloc(65536)` succeeds and `alloc(64)` right
+    after it **kills the process with SIGILL** (exit code 132) - nothing is printed and the
+    program has no way to notice. **The ceiling is the constraint, not the reclamation**: `free`
+    does reclaim (a bump pointer plus an address-ordered free list, `docs/210` section 2.8) - what
+    it cannot do is grow past 64 KiB, and it does not coalesce. So a service that allocates ~900
+    bytes **and never frees** dies after about 72 requests, and one request asking for `n = 60000`
+    kills it outright. Two ways out: free as you go, or bring in a host - under `choose hosted`
+    the arena comes from the host's `malloc` and is 1 MiB. If you are writing something that
+    serves, this is the first constraint to design around.
 
-15. **There is no bounds checking.** `xs[i]` compiles straight to an address computation, and it
-    is unchecked at every level:
-    - a **literal** index out of range passes `loment check` and reads whatever is next in memory
-      (`xs[5]` on `[u32; 3]` returned `0` rather than an error);
-    - a runtime index a little out of range writes elsewhere with no trap;
-    - `xs[100000] = 1` **segfaults** the process.
+15. **A runtime index is not bounds-checked. A literal one is now a compile error.** The two
+    halves have different answers, and it matters which one you are holding:
+    - **Literal index, out of range, fixed-size array** - `xs[5]` on `[u32; 3]` - is
+      **refused by `check` (E028)**, at compile time, in the default tier. (Before 2026-10-16
+      it was accepted and read whatever was next in memory; the refusal used to be reachable
+      only under `choose lms_open`, which does not ship. This is `docs/205` section 1.1 C5,
+      which had only ever covered `guard` - see section 5.)
+    - **Any other index** - a variable, an expression, or anything into a slice `[T]` - is
+      **unchecked at runtime**: a little out of range writes elsewhere with no trap, and
+      `xs[100000] = 1` **segfaults** the process.
 
     An index that comes from outside your program - a request, a file, a length field - is
-    therefore a memory-safety question, and the language will not raise it for you. Compare with
-    `guard`, which does reject a literal out of range at compile time (section 5): the same
-    mistake is caught for capability domains and not for arrays.
+    therefore a memory-safety question, and the language will not raise it for you. **Guard it
+    yourself**: a fixed-size array has a compile-time length, so write `if i >= 3 { … }`; a
+    slice carries its own length, so `slice_len(x)` gives it to you. (Automatic per-site inline
+    bounds checks exist as `choose lms_open` in the root unit - it is a development-channel
+    intermediate and does not ship, `docs/253` section 14.2.)
 
-16. **Integer arithmetic wraps silently, there is no checked arithmetic, and division by zero
-    kills the process.** `4294967295 + 1` is `0`; `0 - 1` is `4294967295`; nothing traps and
-    nothing warns, so a length or a size computed from untrusted input can be quietly wrong.
-    `a / b` and `a % b` with `b == 0` **abort the process** (SIGILL, exit code 132). The builtin
-    table has no `checked_add` or `checked_mul` to reach for.
+16. **Integer arithmetic is defined to wrap, there is no checked arithmetic, and division by
+    zero kills the process.** The wrap is a **rule, not an accident**: `4294967295 + 1` is `0`
+    and `0 - 1` is `4294967295`, on purpose, and the emitted IR never carries LLVM's
+    `nsw`/`nuw` - so this is defined behaviour, not the undefined behaviour C leaves you with.
+    Nothing traps and nothing warns, so a length or a size computed from untrusted input can be
+    quietly wrong. There is no `checked_add` / `checked_mul` to reach for; write the guard
+    yourself, *before* the arithmetic, e.g. `if a > 4294967295 - b` for `a + b` on `u32`.
+    `a / b` and `a % b` with `b == 0` **abort the process** (SIGILL, exit code 132) - the
+    compiler emits the trap, so it is a defined abort rather than whatever the CPU happens to do;
+    check the divisor first if a zero can reach you. (Both rules are settled in `docs/144`
+    section 3 - the note there used to read "the rule must be settled before M2".)
 
 17. **A non-`()` function that can fall off its end is refused by `check` (E027).** Write
     `fn f() -> u32 { … }`, forget the final `return <expr>;`, and `loment check` says so - before
@@ -841,29 +857,20 @@ are different things, and it is worth knowing which one you are looking at.
 These are defects rather than language rules, and each one is here because meeting it without
 knowing costs half a day.
 
-20. **A `capability` declaration alone stops `loment build`.** `check` passes, `ir` passes, and
-    the build fails inside `loment-lomelf` with `Illegal instruction` and no diagnostic of its
-    own. Measured on a five-line file whose only content is `module` + `capability slots :
-    disk[0..4] revocable` + a trivial `_start`. This is why the `tour` example in section 1 does
-    not link.
-21. **`lomelf`'s backfill table overflows on small programs**, with a message that tells the
-    reader to edit the compiler source: `lomelf: 回填表满了 — 抬高 TB_FIX 的容量
-    (loment/tools/lomelf.lomt 的 TB_FIX_MAX)` (*the backfill table is full - raise TB_FIX's
-    capacity*). A twelve-line enum plus `match` is enough to hit it.
-22. **A unit can carry only one name-form `use`.** The second one fails with
-    `fujoc-s: 打不开 <garbage>` (*cannot open …*) where the "path" is a fragment of your own
+20. **A unit can carry only one name-form `use`.** The second one fails with
+    `loment: cannot open <garbage>` where the "path" is a fragment of your own
     source - exit 1, no file name, no line. The path form `use "…/text.lomt"` has no such limit,
     so that is the workaround. A unit that carries imports also loses most of its string-literal
     capacity: measured, **eight ~34-byte literals** are enough to bring the compiler down with
     the same message, while a unit with no imports takes forty of them. The length of the store
     path matters too (five imports compile from a 90-character store root and fail at 91).
-23. **About 400 levels of nested blocks crash the compiler** with SIGSEGV and print nothing (200
+21. **About 400 levels of nested blocks crash the compiler** with SIGSEGV and print nothing (200
     levels are fine; the same file flattened into 400 sequential statements, which is bigger,
     compiles). A generated parser table or a long `if`/`else if` chain can reach that by accident.
-24. **A `.lomt` file with no `module` declaration crashes the compiler driver** with SIGSEGV and
+22. **A `.lomt` file with no `module` declaration crashes the compiler driver** with SIGSEGV and
     no diagnostic. (A *missing* file, by contrast, gets a clear message - it is the broken unit
     that gets the silent crash.)
-25. **`use std` takes 18 minutes and then dies.** See 3.1.
+23. **`use std` takes 18 minutes and then dies.** See 3.1.
 
 ## 7. Two openings: your own extension, your own `loment` command
 

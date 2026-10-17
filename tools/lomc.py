@@ -74,7 +74,14 @@ class Tok:
 
 
 _PUNCT = "{}()[]:;=@,.+-*/%<>!&|^?"
-_ESCAPES = {"n": "\n", "t": "\t", '"': '"', "\\": "\\"}
+#: 字符串转义表。**2026-10-16 补上 `\r` 与 `\0`**（`#33` / `#36`）：
+#: `\r` 原先不在表里，于是走"未知转义"那条兜底，**反斜杠被吃掉**、值变成字母 `r` —— 用户写
+#: 回车得到一个 r，而且编译器什么都不说。`\0` 仓库自己在用（`loment/lib/proc.lomt` 的
+#: `"/bin/sh\0"`），却一直靠同一条静默兜底在跑。
+#:
+#: 表外的转义**是错误**（见 `lex` 里那个 `raise`），不再"取原字符" —— 那条兜底正是这两个
+#: issue 的共同成因：`"\x41"` 曾经静默变成 `x41` 三个字符。
+_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "0": "\0", '"': '"', "\\": "\\"}
 
 
 def _starts_ext_block(toks: list, depth: int, declared: set) -> bool:
@@ -129,7 +136,11 @@ def lex(text: str) -> list[Tok]:
             j, buf = i + 1, []
             while j < n and text[j] != '"':
                 if text[j] == "\\" and j + 1 < n:
-                    buf.append(_ESCAPES.get(text[j + 1], text[j + 1]))
+                    c2 = text[j + 1]
+                    if c2 not in _ESCAPES:
+                        raise LomError(line, col + (j - i),
+                                       f"未知转义 \\{c2} —— 只认 \\n \\t \\r \\0 \\\\ \\\"")
+                    buf.append(_ESCAPES[c2])
                     j += 2
                 else:
                     buf.append(text[j])

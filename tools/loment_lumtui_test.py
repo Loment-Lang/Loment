@@ -32,6 +32,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import lomentc   # noqa: E402
 import lomelf    # noqa: E402
 import lomc      # noqa: E402
@@ -869,17 +870,7 @@ def test_demo_runs_and_renders():
 
 def main() -> int:
     ok = 0
-    for fn in TESTS:
-        print(f"[TEST] {fn.__name__}")
-        try:
-            fn()
-            ok += 1
-        except AssertionError as e:
-            print(f"      FAIL: {e}")
-        except Exception as e:  # noqa: BLE001
-            print(f"      ERROR: {type(e).__name__}: {e}")
-    print(f"{ok}/{len(TESTS)} passed")
-    return 0 if ok == len(TESTS) else 1
+    return loment_suite.run(TESTS, "loment_lumtui_test")
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import lomelf  # noqa: E402
 import loment_publish  # noqa: E402
 import lomentc  # noqa: E402
@@ -142,7 +143,11 @@ def test_help_and_refresh():
         rc, out, _ = _run("--refresh", "--outlet", str(outlet))
         assert rc == 0, f"--refresh 退出 {rc}"
         assert "git clone" in out and "git -C" in out, out
-        assert "https://github.com/FujoJTOP/lompi" in out, out
+        # **从发布清单推导，不写死**：这里原来写着一个字面量地址，于是换组织时它红了
+        # （源里那处地址已经跟着 `loment_publish.ORG` 改了）。同一个地址的第二个真源
+        # 就是下一个会忘的地方 —— 上面 `test_outlet_url_matches_the_publish_list`
+        # 那一条盯的正是"源码里那处字面量与发布清单一致"。
+        assert "https://github.com/" + loment_publish.REPOS["lompi"]["repo"] in out, out
         assert str(outlet) in out, out
 
 
@@ -212,16 +217,7 @@ def test_default_outlet_comes_from_argv0():
 
 
 def main() -> int:
-    failed = []
-    for name, fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {name}")
-        except Exception as e:  # noqa: BLE001
-            failed.append((name, e))
-            print(f"  FAIL  {name}: {type(e).__name__}: {e}")
-    print(f"\nlompicheck_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-    return 1 if failed else 0
+    return loment_suite.run(TESTS, "lompicheck_test")
 
 
 if __name__ == "__main__":

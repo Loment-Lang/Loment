@@ -12,6 +12,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import lomc  # noqa: E402
 import loment_diag  # noqa: E402
 import lomentc  # noqa: E402
@@ -292,10 +293,67 @@ def test_field_access_on_non_struct_rejected():
     assert any("非结构体" in x for x in e), e
 
 
+#: `#323`：类型位置上的未知名 —— 六个位置各一份（第三项是消息里该出现的**定位**）。
+#: 它们原先**全走 E002「符号未声明」**，用户拿到的建议是"改拼写 / 补 `use` / 补类型标注"，
+#: 三条一条都不适用（`f64` 不是拼错，是这门语言没有浮点）。
+#: `array-elem` 那一格还额外量到**自举侧一条都不报**（`check_type` 见到 `[` 直接返回）。
+_UNTYPED_SITES: tuple[tuple[str, str, str], ...] = (
+    ("let", "module m\nfn f() -> u32 {\n    let a: f64 = 0;\n    return 0;\n}\n",
+     "let a 的类型"),
+    ("param", "module m\nfn f(p: f64) -> u32 {\n    return 0;\n}\n", "参数 p 的类型"),
+    ("return", "module m\nfn f() -> f64 {\n    return 0;\n}\n", "返回类型"),
+    ("field", "module m\nstruct S {\n    x: f64,\n}\n\nfn f() -> u32 {\n    return 0;\n}\n",
+     "结构体 S.x 的字段类型"),
+    ("payload", "module m\nenum E {\n    A(f64),\n}\n\nfn f() -> u32 {\n    return 0;\n}\n",
+     "枚举 E::A 的载荷类型"),
+    ("array-elem", "module m\nfn f() -> u32 {\n    let a: [f64; 4] = [0, 0, 0, 0];\n"
+                   "    return 0;\n}\n", "[f64; 4]"),
+)
+
+
 @test
-def test_unknown_type_in_signature_rejected():
-    e = errs('module m\nfn f(p: Foo) -> u32 { return 0; }\n')
-    assert any("未声明" in x for x in e), e
+def test_an_unknown_type_is_not_reported_as_an_undeclared_name():
+    """`#323`：`let a: f64 = 0;` 要说「**未知类型**」，不是「符号未声明」。
+
+    **为什么值得一个独立的码**（E030，理由写在 `loment_diag` 那张表的那一条上）：按
+    "码按修法分"，E002 的修法是"声明那个名字 / 改拼写 / 补 `use`"，而这一条的修法是
+    "**这门语言没有这个类型**"。0.1.4.5 把两者并成一个码，于是最常撞的那一格（浮点）
+    拿到的是三条一条都不适用的建议 —— 用户会去找一个不存在的拼写错误。
+
+    判据量的是**参考实现的形状**（码 + 那句定位）。"两边码集相等"由
+    `loment_rule_parity` 的同名探针管 —— 那一条只证**一致**，这一条证**对**。
+    """
+    for name, src, role in _UNTYPED_SITES:
+        e = errs(src)
+        codes = {loment_diag.classify(x)[0] for x in e}
+        assert codes == {"E030"}, (name, e)
+        assert any("未知类型" in x and role in x for x in e), (name, e)
+
+
+@test
+def test_the_runtime_refusal_names_the_construct_and_the_reason():
+    """`#321`：默认档（`no_runtime`）拒用运行期构造时，正文要**说清是哪一格、为什么**。
+
+    0.1.4.5 给的是 `message: /` —— 正文是一个 token。用户读到的码是 ``E022 bad `choose` ``，
+    而他的 `choose` 一行都没写错；真正的原因（`runtime` 那一维是一句**保证**）排在六条
+    `why` 的第三条，要读完才知道。修好之后正文是一句话，本判据钉住那句话里必须有三样：
+
+    * 那份保证的来历（`no_runtime`）；
+    * 被拒的**构造本身**（``除法 `/` `` / ``取模 `%` `` / `` `alloc` ``）；
+    * 以及"为什么"（`保证` —— 产物里不许出现那段运行期）。
+
+    **这一条此前根本不存在**：措辞的修复（PR #398）只被"两边码集相等"盖着，而码集相等
+    既看不出正文是 token 还是句子，也看不出它有没有说错话。
+    """
+    for src, site in (
+        ("module m\nfn f() -> u32 {\n    let a: u32 = 10;\n    return a / 2;\n}\n", "除法 `/`"),
+        ("module m\nfn f() -> u32 {\n    let a: u32 = 10;\n    return a % 3;\n}\n", "取模 `%`"),
+        ("module m\nfn f() -> ptr {\n    return alloc(8);\n}\n", "`alloc`"),
+    ):
+        e = errs(src)
+        hit = [x for x in e if "no_runtime" in x and site in x]
+        assert hit, (site, e)
+        assert all("保证" in x and len(x) > 60 for x in hit), (site, hit)
 
 
 @test
@@ -463,7 +521,7 @@ def test_payload_type_mismatch_rejected():
 @test
 def test_unknown_payload_type_rejected():
     e = errs("module m\nenum S { C(Foo) }\nfn f() -> u32 { return 0; }\n")
-    assert any("载荷类型 Foo 未声明" in x for x in e), e
+    assert any("未知类型 Foo（枚举 S::C 的载荷类型）" in x for x in e), e
 
 
 @test
@@ -1215,6 +1273,182 @@ def test_p4_guard_bounds():
     assert any("越界" in x for x in errs(bad)), errs(bad)
     e = errs("module m\nchoose runtime\nfn f() -> u32 { guard nope(0); return 0; }\n")
     assert any("未声明的能力" in x for x in e), e
+
+
+@test
+def test_e028_literal_index_over_a_fixed_array():
+    """**字面量下标越过定长数组的界**是**编译期**的一个诊断，不是运行期的一种可能。
+
+    **2026-10-16 改判（issue #18）**：这一条**不再看 `lms`**。原先它只在
+    `choose lms_open` 时发，而 `lms` 是**开发通道的中间态、不进发行版**（`docs/253` §14.2）
+    —— 于是发行版的用户根本拿不到它。可它本来就不是一条 LMS 检查：`docs/205` §1.1 C5
+    早把「越界访问在**字面量**时编译期拒」写成语言规则，只是那一格**只覆盖 `guard`**
+    （`docs/146` §3：`guard cap(9)` 对域 `[0..4]` 是编译错误）。同一个"字面量越界"、
+    两个构造两个答案 —— 那正是 issue #18 点名的不一致。
+
+    **为什么这一格值得拒**（`docs/253` §4.4 实测）：不拒的时候发出来的是
+    `getelementptr inbounds [4 x i32], ptr %a.addr, i32 0, i32 10`，而 `inbounds`
+    在 LLVM IR 里**恰是"越界即 UB"的标记**（走仓内 `lomelf` 则静默踩相邻字节）。
+    """
+    body = "fn f() -> u32 { let a: [u32; 4] = [1, 2, 3, 4]; let x: u32 = a[10]; return x; }\n"
+    # **默认档也拒**（这正是这一笔改的东西：从前这一行是 `assert errs(off) == []`）
+    off = "module m\n" + body
+    assert any("E028" in x for x in errs(off)), errs(off)
+    # `lms` 开着也一样拒，而且**只报一条** —— 两条路都在的时候不许数出两条诊断
+    on = "module m\nchoose lms_open\n" + body
+    assert len([x for x in errs(on) if "E028" in x]) == 1, errs(on)
+    # **边界**：正好在界内的那个下标**不报** —— 否则这条会把"越界"读成"下标 >= 0 就报"
+    edge = "module m\n" + body.replace("a[10]", "a[3]")
+    assert errs(edge) == [], errs(edge)
+    # **只对定长数组**：切片 `[T]` 的长度是运行期的，界不是编译期常量 ⇒ 这一格不报
+    sl = "module m\nfn g(xs: [u32]) -> u32 { return xs[10]; }\n"
+    assert errs(sl) == [], errs(sl)
+    # **只对字面量**：算出来的下标同样不报（这一条只能在编译期比两个已知的数）
+    var = "module m\nfn h(i: u32) -> u32 { let a: [u32; 4] = [1, 2, 3, 4]; return a[i]; }\n"
+    assert errs(var) == [], errs(var)
+    # **写一侧也是同一个界**：`a[10] = 7;` 同判
+    w = "module m\nfn k() -> u32 { let a: [u32; 4] = [1, 2, 3, 4]; a[10] = 7; return a[0]; }\n"
+    assert any("E028" in x for x in errs(w)), errs(w)
+
+
+@test
+def test_e030_the_runtime_refusal_names_its_own_subsystem():
+    """默认档下用了会拖运行期的构造 ⇒ **自有码 E031**，四段正文齐，正文是那句话不是那个 token。
+
+    **Why（issue #321）**：这条诊断原先**并进 E022**「`choose` / `addin` 用法不对」，
+    理由是"码按修法分，修法同族（去写一行 `choose runtime`）"。那条理由**数错了读者**：
+    报的是用户写的**那个构造**（`/`、`alloc`…），而他那一行 `choose` **没有问题** ——
+    实测原样的输出是 `error[E022]: bad `choose` / `addin`` 配 `message: /`，用户去看
+    `choose` 翻来覆去都是对的，还得读完 `why:` 里三条无关的才轮到适用的那一条。
+    **码是用户最先读到的那个词，指错子系统就是误导，不是简短。**
+
+    **How to apply**：四件事一起钉 —— ① 码是 E031（不是 E022）；② 正文**是那句话**
+    （「除法 `/`」），不是那一格 token 原文；③ 说明卡四段齐、`fixes` 至少三条；④ 库那一侧
+    （"依赖用了却没声明"）走**同一个码**，因为对用户是同一件事。
+    """
+    import loment_diag
+    src = "module m\n\nfn f() -> u32 {\n    let a: u32 = 10;\n    return a / 2;\n}\n"
+    got = errs(src)
+    assert got, "默认档下 `a / 2` 应当被拒"
+    codes = {loment_diag.classify(m)[0] for m in got}
+    assert codes == {"E031"}, f"码不是 E031：{codes} —— {got}"
+    # ② 正文是那句话：里面有"除法 `/`"，而不是只有那一格 token
+    assert "除法 `/`" in got[0], got
+    # ③ 说明卡四段齐（两张表都写），fixes 至少三条
+    for tbl in (loment_diag.CARDS[30], loment_diag.CARDS_EN[30]):
+        assert tbl.what and tbl.why and tbl.yes and tbl.no, tbl
+        assert len(tbl.fixes) >= 3, tbl
+    assert loment_diag.ASCII_ONE_LINER[30], "`loment codes` 那一行要有"
+    assert loment_diag.TITLE_EN[30], "英文标题要有"
+    # ④ 六个构造走同一个码（名单是 `_RUNTIME_SITES`），这里抽三个代表：两个内建 + 取模
+    for one, want in (("fn f() -> u32 {\n    let p: ptr = alloc(8);\n    return 0;\n}\n",
+                       "`alloc`"),
+                      ("fn f() -> u32 {\n    panic(1);\n    return 0;\n}\n", "`panic`"),
+                      ("fn f(a: u32, b: u32) -> u32 {\n    return a % b;\n}\n", "取模 `%`")):
+        e = errs("module m\n\nchoose no_runtime\n\n" + one)
+        assert e and {loment_diag.classify(m)[0] for m in e} == {"E031"}, (want, e)
+        assert want in e[0], (want, e)
+    # 库那一半：依赖用了却没声明 —— 同一件事，同一个码
+    dep = ("module dep\n\npub fn dep_div(x: u32) -> u32 {\n    return x / 2;\n}\n")
+    root = ("module m\nuse \"dep.lomt\"\n\nfn f() -> u32 {\n    return dep_div(4);\n}\n")
+    with tempfile.TemporaryDirectory() as t:
+        d = Path(t)
+        (d / "dep.lomt").write_text(dep, encoding="utf-8")
+        rp = d / "m.lomt"
+        rp.write_text(root, encoding="utf-8")
+        mod = lomentc.load(rp)
+        deps = lomentc.resolve_deps(mod, ROOT, rp.parent, entry=rp)
+        e = lomentc.check(mod, None, deps)
+    assert e and {loment_diag.classify(m)[0] for m in e} == {"E031"}, e
+    print("      E031 自有码：构造自己是它的位置，库那一半同码")
+
+
+@test
+def test_a_literal_led_expression_keeps_its_width():
+    """以**整数字面量开头**的表达式**不掉位宽**（issue #19 第 2 条）。
+
+    **Why**：这一条曾经是**静默算错**：`let alllit: u64 = 4294967296 * 2;` 发出的是
+    `mul i32`，结果是 `0`；而同一个式子让变量在左（`n * 2`）就是对的。同一件算术，
+    两个答案，`check` 全绿 —— 那是"下一个 `alloc` 的尺寸"的直接输入。
+    `lompi/lpi_sha.lomt` 因此留下过一条**写法纪律**（"所有算术都让变量在左"），
+    它是这个缺口的存在证明（那一份在另一个仓里，跟着一起改）。
+
+    **How to apply**：整型字面量在 `expr_type` 里是 `None`（"由上下文定宽"），于是
+    **上下文**（绑定的类型 / 形参类型）说了算 —— 这条把四种形状一起钉住：字面量在左、
+    字面量在右、两个都是字面量、以及通过实参传进去。**任何一种退化成 32 位都要红。**
+    """
+    src = "module m\n\n" + (
+        "fn a() -> u64 {\n    let v: u64 = 4294967296 * 2;\n    return v;\n}\n\n"
+        "fn b() -> u64 {\n    let v: u64 = 2 * 4294967296;\n    return v;\n}\n\n"
+        "fn c() -> u64 {\n    let v: u64 = 4294967296 * 4294967296;\n    return v;\n}\n\n"
+        "fn callee(u: u64) -> u64 {\n    return u;\n}\n\n"
+        "fn d() -> u64 {\n    return callee(4294967296 * 2);\n}\n\n"
+        "fn e() -> u64 {\n    let v: u64 = 4294967296 + 1;\n    return v;\n}\n")
+    out = lomentc.emit_llvm(parse(src), ROOT, [])
+    # a / b / c / d 各一条 `mul i64 4294967296 …`（d 那条是实参里的同一个式子）
+    assert out.count("mul i64 4294967296") + out.count("mul i64 2, 4294967296") == 4, out
+    assert "mul i32" not in out, out                # 任何一种退化成 32 位都要红
+    assert "add i64 4294967296, 1" in out, out
+    print("      字面量开头的宽算术留在 64 位（四种形状）")
+
+
+@test
+def test_arithmetic_is_defined_to_wrap_never_undefined():
+    """`+` / `-` / `*` 是**定义好的回绕**，不是 UB（issue #19 第 1 条的落地）。
+
+    **Why**：`docs/144` §35 写着"除零/溢出语义与 Rust 路径不同（LLVM 是 UB，Rust 是
+    panic）：M0 不处理，**规则必须在 M2 前定**"。规则在这里定下来，而且是**能机械核**的
+    那一种：**发射出来的 IR 里不许出现 `nsw` / `nuw`**。LLVM 的 `add`/`sub`/`mul` 不带
+    这两个标记时**默认就是按模回绕**（定义好的），带上它们才是"溢出即 UB"。所以这一条
+    同时钉住两件事：语义是"回绕"（用户读得到的那一半写进 `SKILL.md` §6.2 的陷阱表），
+    以及**实现没有偷偷把定义好的行为换成 UB**。
+
+    **How to apply**：加新的算术指令（或换后端）时跑这条 —— 谁顺手加上 `nsw`，
+    就是把一个已定义的行为换成未定义的行为，而 IR 看着仍然"很正常"。
+    除零那一半（`b == 0` 走 trap）由 `test_m18_wrap_and_divzero` 钉着，两条一起才是规则。
+    """
+    src = ("module m\nchoose runtime\n\nfn f(a: u32, b: u32) -> u32 {\n"
+           "    let x: u32 = a + b;\n    let y: u32 = x - b;\n"
+           "    let z: u32 = y * a;\n    return z / b % b;\n}\n")
+    ir = lomentc.emit_llvm(parse(src), ROOT, [])
+    assert " add i32 " in ir and " sub i32 " in ir and " mul i32 " in ir, ir
+    assert "nsw" not in ir and "nuw" not in ir, (
+        "IR 里出现了 `nsw`/`nuw` —— 那是「溢出即 UB」，而规则定的是**回绕**：" + ir)
+    print("      算术不带 nsw/nuw：回绕是定义好的语义")
+
+
+@test
+def test_e029_use_after_free():
+    """LMS 第 1 级（`docs/253` §5.1）：**用完再放** —— `free(p)` 之后再用 `p`。
+
+    与 E006（已被移动）**分开**：移走是**所有权**的事，释放是**合法性**的事。
+    ⚠ `docs/210` §2.8 给 `free` 加的那五条检查管的是 **`free` 自己那一端**
+    （这块是不是真块、有没有重复释放），管不了"**之后再用**" —— 那正是这一格。
+
+    这一对同样是"同一份源，加不加 `choose lms_open` 判决相反"。
+    """
+    head = "module m\nchoose runtime\n%s\n"
+
+    def body(use_after: bool) -> str:
+        if use_after:
+            return ("fn f() -> u32 {\n    let p: ptr = alloc(8);\n    free(p);\n"
+                    "    let x: u32 = load8(p, 0);\n    return x;\n}\n")
+        return ("fn f() -> u32 {\n    let p: ptr = alloc(8);\n"
+                "    let x: u32 = load8(p, 0);\n    free(p);\n    return x;\n}\n")
+
+    # 关着（默认）：use-after-free 一个字的检查都没有
+    assert errs(head % "" + body(True)) == [], errs(head % "" + body(True))
+    # 开着：编译期拒
+    on = head % "choose lms_open" + body(True)
+    assert any("E029" in x for x in errs(on)), errs(on)
+    # **先读后 free** 合法 —— 这一半挡住"见过 free 就报"那种过头实现
+    ok = head % "choose lms_open" + body(False)
+    assert errs(ok) == [], errs(ok)
+    # **free 之后重新赋值** = 这个名字不再指那块死掉的块 ⇒ 不报（与自举侧 `chk_fr_del` 同口径）
+    re = head % "choose lms_open" + (
+        "fn f() -> u32 {\n    let p: ptr = alloc(8);\n    free(p);\n"
+        "    p = alloc(8);\n    return load8(p, 0);\n}\n")
+    assert errs(re) == [], errs(re)
 
 
 @test
@@ -2048,8 +2282,12 @@ def test_l0_rule_pair():
     assert a_calls == L0_ALPHA_ALLOC_LEFT, f"alpha 的分配点应为 {L0_ALPHA_ALLOC_LEFT}，得到 {a_calls}"
     # 两个数都非平凡：不然"全都提升"与"一个都不提升"都能让上面两条同时成立
     assert 0 < L0_ALPHA_ALLOC_LEFT < L0_ALLOC_SITES, "这一对里两种走向都要有"
-    # 缓冲的 `[... x i64]` 计数（每格两行：alloca + store）钉住"尺寸取整"没被改坏
-    assert alpha_ll.count(".buf") == 2 * sum(len(v) for v in L0_WANT.values()), alpha_ll.count(".buf")
+    # 缓冲的 `[... x i64]` 计数钉住"尺寸取整"没被改坏。每格现在有 **2 + 字数** 处：
+    # `alloca`、那条 `store ptr %N.buf`，以及**根登记的每一个字**
+    # （`FujoJTOP/loment#362`：提升缓冲的每个 8 字节字各占一格根表）。
+    want_buf = sum(2 + (sz + 7) // 8
+                   for per in L0_WANT.values() for sz in per.values())
+    assert alpha_ll.count(".buf") == want_buf, alpha_ll.count(".buf")
     assert ".buf" not in manual_ll
     # 两份源**只差那一行** —— 不然"差别来自档位"这个说法就不成立
     assert L0_ALPHA_SRC.replace("choose gc_auto_alpha", "X") == \
@@ -2886,6 +3124,74 @@ def _gc_emit(src: str) -> str:
     return lomentc.emit_llvm(mod, ROOT)
 
 
+#: 触发挂点该挂在**哪儿**（issue #367）：三份源只差"分配走哪条路"，外加默认档那一格。
+_GC_TRIGGER_ALLOC_SRC = """module trigalloc
+@@CHOOSE@@
+choose runtime
+
+fn _start() {
+    let p: ptr = alloc(32);
+    store8(p, 0, 1);
+    syscall4(60, load8(p, 0) as u64, 0, 0);
+}
+"""
+_GC_TRIGGER_CONCAT_SRC = """module trigconcat
+@@CHOOSE@@
+choose runtime
+
+fn _start() {
+    let s: str = "abcd";
+    let t: str = str_concat(s, "efgh");
+    syscall4(60, str_len(t) as u64, 0, 0);
+}
+"""
+_GC_TRIGGER_BOTH_SRC = """module trigboth
+@@CHOOSE@@
+choose runtime
+
+fn _start() {
+    let p: ptr = alloc(8);
+    store8(p, 0, 1);
+    let s: str = "abcd";
+    let t: str = str_concat(s, "efgh");
+    syscall4(60, (str_len(t) + load8(p, 0)) as u64, 0, 0);
+}
+"""
+
+
+@test
+def test_gc_trigger_is_attached_where_the_bytes_are_asked_for():
+    """触发挂点挂在**真向堆要字节的那一处**（issue #367）—— 而不是挂在它某个调用点上。
+
+    **Why**：触发量的是"这次向堆要了多少字节"，所以报账的地方只能是**真向堆要字节的那一处**
+    （参考侧 `alloc_ir` / 自举侧 `emit_alloc_seq`）。原先它挂在 `alloc` 那一支上，而
+    `str_concat` 是同一个 `alloc_ir` 的**另一个**调用点 ⇒ 拼接分配的字节从不进计数 ⇒
+    **纯拼接的程序一次都不收**，64 KiB 填满就 `abort`。拼接是语言的主字符串操作，所以这
+    不是边角：文本处理那类程序在自动档下**从第一次分配起就在超支**。
+
+    **这一半只钉"挂点有几条"**（便宜、不跑程序）。"真的收得回来"是动态那一半的活
+    （`loment_elf_test::test_gc_alpha_collects_a_concat_only_program`），两者缺一不可 ——
+    挂点齐了而收集器是空函数，这条照样绿。
+
+    **反证**：把触发挪回 `alloc` 那一支，第二、三格立刻变 0（实测）。
+    """
+    n = "call void @__loment_maybe_collect(i32 "
+    alloc_only = _gc_emit(_GC_TRIGGER_ALLOC_SRC.replace("@@CHOOSE@@", "choose gc_auto"))
+    concat_only = _gc_emit(_GC_TRIGGER_CONCAT_SRC.replace("@@CHOOSE@@", "choose gc_auto"))
+    both = _gc_emit(_GC_TRIGGER_BOTH_SRC.replace("@@CHOOSE@@", "choose gc_auto"))
+    manual = _gc_emit(_GC_TRIGGER_BOTH_SRC.replace("@@CHOOSE@@", "choose gc_manual"))
+    assert alloc_only.count(n) == 1, (
+        f"只走 `alloc` 的源该有 1 条挂点，得到 {alloc_only.count(n)}")
+    assert concat_only.count(n) == 1, (
+        f"只走 `str_concat` 的源也该有 1 条挂点，得到 {concat_only.count(n)} —— "
+        "挂点漏在拼接那条路上，程序会一次都不收，直到 arena 耗尽")
+    assert both.count(n) == 2, (
+        f"两条分配路各一处，该有 2 条挂点，得到 {both.count(n)}")
+    assert manual.count(n) == 0, (
+        f"`gc_manual` 不该有挂点（默认档一行都不动），得到 {manual.count(n)} —— "
+        "挂点的门跟收集器是同一条 `gc_any`")
+
+
 @test
 def test_gc_auto_collector_text():
     """`choose gc_auto` 的收集器**只在这一档**追加（`docs/210` §2.1）—— 三档的文本。
@@ -3609,7 +3915,49 @@ _TIER_CHOOSES = (
     ("gc_auto_alpha/sealed", "choose gc_auto_alpha\nchoose runtime"),
     ("gc_manual/hosted", "choose hosted\nchoose runtime"),
     ("gc_auto/hosted", "choose hosted\nchoose gc_auto\nchoose runtime"),
+    # **LMS 第 3 级入口 A**（`docs/253` §5.3）：`alloc` 分配不出时先收一次再试。
+    # ⚠ 这两格是**故意**加进来的 —— 那一支 IR（`boom` 改成 `rescue`/`dead`、`floop`
+    # 的 phi 多一条入边）是本项目里**手写 IR 最容易写错**的一类，而孪生判据看不出来
+    # （两处实现一起错时它照样绿）。**只有过一遍 clang 才知道它是不是合法 LLVM。**
+    ("gc_auto/lms", "choose gc_auto\nchoose runtime\nchoose lms_open"),
+    ("gc_auto_alpha/lms", "choose gc_auto_alpha\nchoose runtime\nchoose lms_open"),
 )
+
+
+@test
+def test_lms_entry_a_rescue_needs_both_lms_and_a_collector():
+    """LMS 第 3 级入口 A（`docs/253` §5.3）：`alloc` 分配不出时**先收一次再试**。
+
+    **两个条件缺一不可** —— `lms` 开着（它属于 LMS 第 3 级）**而且**这份产物里真有
+    收集器（`gc_auto` / `gc_auto_alpha`）。`gc_manual` 下**没有东西可收**，
+    "拉回"在那里是一句空话 —— 所以那一格**必须一个字都不加**。这是这一级明写的边界。
+
+    网格：{gc_manual, gc_auto, gc_auto_alpha} × {关着, 开着}。
+    """
+    # ⚠ **尺寸必须走 `const` 名，不能是字面量**：`gc_auto_alpha` 会把
+    # `let p: ptr = alloc(<字面量>)` **静态提升到栈上**（L0），于是这份产物**根本不需要堆**
+    # —— `__loment_alloc` 一个字节都不发，"分配不出"也就无从谈起。
+    # 第一版探针就是栽在这儿的：alpha 那一格**静默为空**，看起来像"入口 A 没生效"，
+    # 实际是**测的那件事不在场**（`docs/210` §2.2 那条诊断教训的又一实例）。
+    # 走 `const` 名（或加一次 `as u64`）就取消提升资格。
+    probe = ("module m\nchoose runtime\nconst N: u32 = 64;\n%s\n\n"
+             "fn main() -> i32 {\n    let p: ptr = alloc(N);\n"
+             "    return load8(p, 0) as i32;\n}\n")
+
+    def ir(chooses: str) -> str:
+        return lomentc.emit_llvm(parse(probe % chooses), ROOT, [])
+
+    for gc in ("gc_manual", "gc_auto", "gc_auto_alpha"):
+        off = ir(f"choose {gc}")
+        assert "__loment_lms_retry" not in off, (gc, "关着时不许有")
+        on = ir(f"choose {gc}\nchoose lms_open")
+        if gc == "gc_manual":
+            assert "__loment_lms_retry" not in on, (gc, "没有收集器 ⇒ 没有东西可拉回")
+        else:
+            assert "__loment_lms_retry" in on, (gc, "开着且要收 ⇒ 该有")
+            # **只许重来一次**：重试标记在**每一条成功返回前**都要清掉。
+            # 不清的话"这一次"用掉的重试会留给下一次分配 —— 那是**假的能力**。
+            assert on.count("store i1 false, ptr @__loment_lms_retry") == 2, on
 
 
 @test
@@ -3663,16 +4011,7 @@ def test_every_tier_emits_ir_clang_accepts():
 
 
 def main() -> int:
-    failed = []
-    for name, fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {name}")
-        except Exception as e:  # noqa: BLE001
-            failed.append((name, e))
-            print(f"  FAIL  {name}: {type(e).__name__}: {e}")
-    print(f"\nlomentc_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-    return 1 if failed else 0
+    return loment_suite.run(TESTS, "lomentc_test")
 
 
 if __name__ == "__main__":

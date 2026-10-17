@@ -1,0 +1,102 @@
+lomf 1
+mod   0001-runtime-refusal-is-its-own-code
+about 默认档下"用了会拖运行期的构造"这条诊断**换了自己的码**（E022 → E031，issue #321）。
+about
+about 原先它并进 E022「`choose` / `addin` 写法不对」，理由是"码按修法分：这一条也要去改那一行
+about `choose`"。那条理由**数错了读者** —— 报的是用户写的**那个构造**（`/`、`alloc`…），
+about 而他那一行 `choose` 是对的。实测原样的输出是 `error[E022]: bad `choose` / `addin``
+about 配 `message: /`，用户去看 `choose` 翻来覆去都是对的，还得读完 `why:` 里三条无关的
+about 才轮到适用的那一条。**码是用户最先读到的那个词，指错子系统就是误导，不是简短。**
+about
+about 两个实现一起改：检查器发 E031（不再借 `E_MODE`），驱动器按新码分派，结构化诊断里
+about 的 `"code"` 跟着改。参考侧的 `loment_diag.RULES` / `CARDS` / `ASCII_ONE_LINER` /
+about `TITLE_EN` 与 `lomentc.py` 那两条正则各自改动（那不是"同一段文本的多个副本"，
+about 按普通改动落，见 `docs/257` §4）。
+about
+about 这一笔以修改件落的理由：**自举侧那几处是"同一段文本、两个实现各一份"** ——
+about 驱动器里 `code == 22` 那一处必须与检查器发的码同步改，改漏一处的症状是
+about "结构化诊断里写 E022、人看的那行写那句话"（半对半错，比全错更难查）。
+
+edit loment/selfhost/checker.lomt expect 1
+old <<<
+const E_MODE: u32 = 22;    // E022 项目模式 `choose` 用法不对 (docs/143 §3.2)
+const E_PARSE: u32 = 19;   // E019 期望表达式 —— 参考实现 `parse_primary` 的口径 (issue #49)
+>>>
+new <<<
+const E_MODE: u32 = 22;    // E022 项目模式 `choose` 用法不对 (docs/143 §3.2)
+const E_RT: u32 = 31;      // E031 这一档是 `no_runtime`，而这个构造要运行期 (issue #321)
+const E_PARSE: u32 = 19;   // E019 期望表达式 —— 参考实现 `parse_primary` 的口径 (issue #49)
+>>>
+
+edit loment/selfhost/checker.lomt expect 1
+old <<<
+    // ---- **运行期维的强保证**（`docs/217`）：`no_runtime`（默认）说"产物里没有运行期"，
+    // 所以凡是会把那段运行期拖进产物的构造，在**这一档下**编译期点名拒（E022 —— 按
+    // "码按修法分"，这一条的修法与 `choose` 那几条同族：去写一行 `choose runtime`）。
+    // **锚在第一个这样的 token 上**，与参考实现 `_runtime_sites` 取首项同判。
+    if eff_rt == 2 {
+>>>
+new <<<
+    // ---- **运行期维的强保证**（`docs/217`）：`no_runtime`（默认）说"产物里没有运行期"，
+    // 所以凡是会把那段运行期拖进产物的构造，在**这一档下**编译期点名拒。
+    //
+    // **码是 E031，不是 E022**（issue #321，2026-10-16 改判）：原先并进 E022，理由是
+    // "码按修法分，这一条也要去改 `choose`"。实测那条理由数错了读者 —— 报的是用户写的
+    // **那个构造**，而他那一行 `choose` 是对的；而 E022 的标题说的正是"`choose` 写错了"。
+    // 码是用户最先读到的那个词，指错子系统就是误导。参考实现那一侧同步改了
+    // （`tools/loment_diag.py` 的 `RULES`）。
+    // **锚在第一个这样的 token 上**，与参考实现 `_runtime_sites` 取首项同判。
+    if eff_rt == 2 {
+>>>
+
+edit loment/selfhost/checker.lomt expect 1
+old <<<
+            o = sym_pub(src, t, out, o, E_MODE, hit);
+>>>
+new <<<
+            o = sym_pub(src, t, out, o, E_RT, hit);
+>>>
+
+edit loment/selfhost/driver.lomt expect 1
+old <<<
+/// 要逐字节一致。不是那八个之一就回空串：调用方据此判断"这条 E022 是不是运行期那一类"
+/// （E022 还有别的起因，不能一律改写）。
+>>>
+new <<<
+/// 要逐字节一致。不是那八个之一就回空串（**判据**：那说明这一格的 token 不在名单里，
+/// 报文才退回 token 原文；`E031` 这一档的正常输入永远命得中）。
+>>>
+
+edit loment/selfhost/driver.lomt expect 1
+old <<<
+/// 运行期那一类 E022 的**结构化**诊断 —— 正文是**一句话**，不是 token（issue #321）。
+>>>
+new <<<
+/// `E031`（默认档下用了会拖运行期的构造）的**结构化**诊断 —— 正文是**一句话**，不是
+/// token（issue #321）。与参考实现 `check()` 里那条 f-string 逐字节同形：
+>>>
+
+edit loment/selfhost/driver.lomt expect 1
+old <<<
+    let _e: u64 = wstr(fd, ",\"col\":0,\"code\":\"E022\",\"message\":\"");
+>>>
+new <<<
+    let _e: u64 = wstr(fd, ",\"col\":0,\"code\":\"E031\",\"message\":\"");
+>>>
+
+edit loment/selfhost/driver.lomt expect 1
+old <<<
+            // 运行期那一类的 E022：正文写成**那句话**，不是那一格 token（issue #321）。
+            // `rt_phrase` 回空串就说明这条 E022 是别的起因，照旧走 token。
+            let ph: str = rt_phrase(unit, toks2, tk);
+            let isrt: u32 = 0;
+            if code == 22 && str_len(ph) > 0 {
+>>>
+new <<<
+            // `E031`（这一档是 `no_runtime`，而这个构造要运行期）：正文写成**那句话**，
+            // 不是那一格 token（issue #321）。码是**专属**的（不再与 `choose` 共用 E022），
+            // `str_len(ph) > 0` 只是"那格 token 在名单里"的兜底，照旧走 token 原文。
+            let ph: str = rt_phrase(unit, toks2, tk);
+            let isrt: u32 = 0;
+            if code == 31 && str_len(ph) > 0 {
+>>>

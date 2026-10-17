@@ -2,10 +2,15 @@
 
 > 2026-09-15 用户定 · 工具 `tools/loment_publish.py` · 判据（门禁模式）`--check`
 > · 上游：`docs/162`（发行包）、`docs/170`（lompi 随包）
+>
+> ⚠️ **归属已变（2026-10-17）**：三个库都搬进了 `Loment-Lang` 组织，
+> `tools/loment_publish.py` 的 `ORG` 已改成它。**下面正文里的 `FujoJTOP` 是当时的记录，
+> 不是现状** —— 现状与搬迁的三条坑（站点 URL、门禁镜像、Actions secret）见 `docs/255`。
 
 ## 0. 一句话
 
-**开发在 `FujoJTOP/loment`（2026-09-17 起），发布口在各自的库。**
+**开发在 `Loment-Lang/loment`（2026-10-17 起；此前是 `FujoJTOP/loment`），
+发布口在各自的库。**
 
 | 库 | 地址 | 可见性 | 装什么 |
 |---|---|---|---|

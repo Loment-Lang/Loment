@@ -32,7 +32,7 @@
 | C6 | Loment 版格式化器与 Python 版**逐字节相同** | `loment_fmt_test.py` | 全绿（语料 + 边界 + 幂等） |
 | C7 | 示例集与交叉编译目标 | `loment_p9_test.py` | 全绿（示例编译；aarch64 目标发射并可反汇编） |
 | C8 | 编辑器宿主与 LSP 往返（无头） | `vscode_ext_test.py` | 全绿 |
-| C9 | 发布工件 **sha256 可复现** | `loment_release.py --check` | 工件数 N/N 一致（件数由它打印） |
+| C9 | 发布清单**可复现**（两个独立实现给出同一份） | `loment_rel_test.py` | stdout / 落盘字节 / 退出码逐字节相同。**量尺 2026-10-16 换过**（原为 `loment_release.py --check` = "入库台账 == 当前树"）；台账与**树**的一致性改由 `lom_audit` 的 M95 按**滞后容差**判 —— `docs/254` |
 | C10 | 账本不是手改的 | `loment_status.py --check` | 状态矩阵与 `docs/145` 一致 |
 | C11 | **LSP 去 Python**（Loment 版语言服务：补全/跳转/诊断/`--check`） | `loment_lsp_test.py` | 全绿（真二进制往返 + 码/行号 + `--check`） |
 | C12 | 工具链等价（格式化器/文档生成器与 Python 版逐字节相同） | `loment_doc_test.py` | 全绿 |

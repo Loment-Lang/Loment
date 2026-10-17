@@ -258,7 +258,7 @@ fn _start() -> u32 {
                              o1, st, "");
     rep("test_overconsumption_is_rejected", ok5, "宏体多吃没被拒", ct);
     let ok6: u32 = rejected("./driver bad_not_top.lomt 2>&1; r=$?; echo; echo -n \"|rc=$r\"",
-                             o1, st, "顶层");
+                             o1, st, "top level");
     rep("test_definition_must_be_top_level", ok6, "块里的定义没被拒", ct);
     let ok7: u32 = rejected("./driver bad_entry_params.lomt 2>&1; r=$?; echo; echo -n \"|rc=$r\"",
                              o1, st, "");

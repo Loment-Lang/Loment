@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -21,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lomc  # noqa: E402
 import loment_comefor  # noqa: E402
 import lomentc  # noqa: E402
+import potato_from  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 KEYWORDS = ["fn", "let", "if", "else", "while", "for", "in", "match", "struct", "enum",
             "trait", "impl", "const", "return", "mut", "pub", "use", "module",
@@ -58,25 +60,100 @@ def _parse(text: str):
     return mod
 
 
+def _line_span(text: str, line1: int) -> tuple[int, int]:
+    """那一行**第一个 token** 的跨界 `(起列, 止列)`（都 0 起）。**不是**"猜哪个符号错了"。
+
+    `#27`：这一层的 range 原先两端是常量 `0 → 200` —— 一条 14 字符的行与一条 300 字符的
+    行回来的是同一对数字，编辑器于是把**整行**画成波浪线，指不到出问题的那一格。
+
+    **能给到什么就给到什么**：参考实现的 `check()` 只报**行**（消息形如 `12: …`），列从来
+    没有算过（`#5` 记的就是这件事）—— 所以这一层**拿不到**真正的列。但拿不到不等于编一个：
+    这里退到"这一行的第一个 token"，那是词法器真算出来的位置，且**确定落在对的那一行**上。
+
+    **为什么不按消息里的符号名去行里找**：那是在猜，而"指到假的地方去"比"指得粗"更坏
+    （`lomc.LomError` 那段注释：编一个 `1:1:` 是撒谎）。猜错的代价由读者付，粗的代价只是
+    少一点信息。
+    """
+    for t in lomc.lex(text):
+        if t.line == line1:
+            return max(0, t.col - 1), max(0, t.col - 1) + max(1, t.len)
+    return 0, 1
+
+
+def _foreign_grammar(text: str) -> tuple[str, str | None] | None:
+    """`#262`：文件头声明了 `choose write grammar <别名>` 时，`(规范名, 声明本身的错)`。
+
+    没有声明、或者声明的是**原生**语法（`loment` / `rust`，见 `potato_from.NATIVE_GRAMMARS`）
+    就返回 `None` —— 那种源该照常查。
+
+    **为什么要在查之前拦下来**：一份 `choose write grammar python` 的文件**编得过**（前门会把
+    它翻成 Loment），可语言服务拿 Loment 的规则去读它，报出来的是**一屏假错** —— 而"编得过
+    但编辑器报错"比"两边都报错"更糟：用户会去改一份本来就对的源。
+    """
+    lang, err, has = potato_from.read_grammar_decl(text)
+    if err:
+        return lang, err
+    if has and lang not in potato_from.NATIVE_GRAMMARS:
+        return lang, None
+    return None
+
+
 def _diagnostics(text: str, path: str) -> list[dict]:
+    fg = _foreign_grammar(text)
+    if fg is not None:
+        lang, derr = fg
+        if derr:
+            return [{"range": {"start": {"line": 0, "character": 0},
+                               "end": {"line": 0, "character": 1}},
+                     "severity": 1, "source": "loment", "message": derr}]
+        # **一条 Info，不是一屏 Error**：这份源不是 Loment 写的，这一层没有它的规则。说清楚
+        # "为什么这里安静"，比编一堆错更有用 —— 静默会让人以为服务挂了。
+        return [{"range": {"start": {"line": 0, "character": 0},
+                           "end": {"line": 0, "character": 1}},
+                 "severity": 3, "source": "loment",
+                 "message": f"这份源写的是 {lang} 语法（`choose write grammar {lang}`）——"
+                            f" 语言服务只查 Loment，所以这里不报诊断；要真诊断就 `loment build`。"}]
     try:
         mod = _parse(text)
         errs = lomentc.check(mod)
     except lomc.LomError as e:
-        return [{"range": {"start": {"line": max(0, e.line - 1), "character": 0},
-                           "end": {"line": max(0, e.line - 1), "character": 200}},
+        # **解析期**这一支有真列（`LomError` 带 `col`），所以给得比 `_line_span` 更准；
+        # `line <= 0` = 这一档指不出位置（见 `LomError` 的注释），那就别编。
+        ln = max(0, e.line - 1) if e.line > 0 else 0
+        c0 = max(0, e.col - 1) if e.line > 0 else 0
+        return [{"range": {"start": {"line": ln, "character": c0},
+                           "end": {"line": ln, "character": c0 + 1}},
                  "severity": 1, "source": "loment", "message": str(e)}]
     out = []
     for msg in errs:
-        line = 0
+        line1 = 0
         head = msg.split(":", 1)[0]
         if head.strip().isdigit():
-            line = max(0, int(head.strip()) - 1)
+            line1 = int(head.strip())
             msg = msg.split(":", 1)[1].strip()
-        out.append({"range": {"start": {"line": line, "character": 0},
-                              "end": {"line": line, "character": 200}},
+        c0, c1 = _line_span(text, line1) if line1 > 0 else (0, 1)
+        ln = max(0, line1 - 1)
+        out.append({"range": {"start": {"line": ln, "character": c0},
+                              "end": {"line": ln, "character": c1}},
                     "severity": 1, "source": "loment", "message": msg})
     return out
+
+
+def _name_span(text: str, line0: int, word: str) -> tuple[int, int]:
+    """声明那一行里 `word` 占哪几列。**行与名字都是已知的**，这里只是把它找出来。
+
+    `#27`：跳转原先回 `{line, character: 0} → {line, character: 200}`，编辑器只能把光标
+    扔到行首，而声明通常缩进着。这不是猜"哪个符号错了"（`_line_span` 那段说的那件事）——
+    名字是调用方传进来的、行是符号表里存的，两边都确定。
+    """
+    lines = text.splitlines()
+    if not (0 <= line0 < len(lines)):
+        return 0, 0
+    import re as _re
+    m = _re.search(rf"\b{_re.escape(word)}\b", lines[line0])
+    if not m:
+        return 0, 0
+    return m.start(), m.end()
 
 
 def _decls(text: str) -> dict[str, dict]:
@@ -96,6 +173,66 @@ def _decls(text: str) -> dict[str, dict]:
     for c in mod.caps:
         syms[c.name] = {"kind": "capability", "line": c.line - 1}
     return syms
+
+
+def _member_receiver(text: str, line: int, ch: int) -> str | None:
+    """光标前是 `recv.` 的话返回 `recv`（`#28`）。认 `p.` 与 `p.x` 的前半截。
+
+    `p[i].` / `a.b.` 暂不认 —— 返回 None，走通用补全。**宁可少给，不给错的**：补错一项
+    比少补一项更打扰人（`#27` 那条"指到假的地方去比指得粗更坏"是同一个判断）。
+    """
+    lines = text.splitlines()
+    if not (0 <= line < len(lines)):
+        return None
+    prefix = lines[line][:max(0, ch)]
+    m = re.search(r"([A-Za-z_]\w*)\.[A-Za-z0-9_]*$", prefix)
+    if not m:
+        return None
+    start = m.start(1)
+    if start > 0 and (prefix[start - 1].isalnum() or prefix[start - 1] in "_."):
+        return None
+    return m.group(1)
+
+
+def _lets_of(node, out: list) -> None:
+    """把 `node` 底下所有 `Let` 收进 `out`（含块内的）。"""
+    if isinstance(node, lomentc.Let):
+        out.append(node)
+    elif isinstance(node, list):
+        for x in node:
+            _lets_of(x, out)
+    elif hasattr(node, "__dataclass_fields__"):
+        for k in node.__dataclass_fields__:
+            _lets_of(getattr(node, k, None), out)
+
+
+def _member_items(text: str, recv: str, line1: int) -> list[dict] | None:
+    """`recv` 在 `line1`（1 起）那一处是什么类型；是 `struct` 就回它的字段，否则 None。"""
+    try:
+        mod = _parse(text)
+    except Exception:  # noqa: BLE001  编辑中的语法错不影响补全
+        return None
+    f = None
+    for g in mod.funcs:
+        if g.line <= line1 and (f is None or g.line > f.line):
+            f = g
+    if f is None:
+        return None
+    ty = None
+    for p in f.params:
+        if p.name == recv:
+            ty = p.type
+    lets: list = []
+    _lets_of(f.body, lets)
+    for s in lets:
+        if s.name == recv and s.line < line1:
+            ty = s.type
+    if not ty:
+        return None
+    st = next((s for s in mod.structs if s.name == ty.strip()), None)
+    if st is None:
+        return None
+    return [{"label": fn, "kind": 5, "detail": ft} for fn, ft in st.fields]
 
 
 def handle(msg: dict, docs: dict[str, str]) -> list[dict]:
@@ -150,11 +287,21 @@ def handle(msg: dict, docs: dict[str, str]) -> list[dict]:
             sym = None
         if not sym:
             return [{"jsonrpc": "2.0", "id": rid, "result": None}]
+        s0, s1 = _name_span(text, sym["line"], word)
         return [{"jsonrpc": "2.0", "id": rid, "result": {
-            "uri": uri, "range": {"start": {"line": sym["line"], "character": 0},
-                                  "end": {"line": sym["line"], "character": 200}}}}]
+            "uri": uri, "range": {"start": {"line": sym["line"], "character": s0},
+                                  "end": {"line": sym["line"], "character": s1}}}}]
     if method == "textDocument/completion":
         uri = (params.get("textDocument") or {}).get("uri", "")
+        # `#28`：`p.` 之后要给 `Point` 的字段，不是一屏关键字。
+        pos = params.get("position") or {}
+        recv = _member_receiver(docs.get(uri, ""), pos.get("line", 0),
+                                pos.get("character", 0))
+        if recv is not None:
+            got = _member_items(docs.get(uri, ""), recv, pos.get("line", 0) + 1)
+            if got is not None:
+                return [{"jsonrpc": "2.0", "id": rid,
+                         "result": {"isIncomplete": False, "items": got}}]
         items = [{"label": k, "kind": 14} for k in KEYWORDS]
         items += [{"label": t, "kind": 6} for t in TYPE_KEYWORDS]
         try:

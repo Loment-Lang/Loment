@@ -157,6 +157,18 @@ pub fn sw_is_core(unit: ptr, toks: ptr, k: u32) -> bool {
     if sw_tok_is(unit, toks, k, "no_vm") {
         return true;
     }
+    // 第六维（`docs/253`，用户 2026-10-15）：`lms_close` / `lms_open` —— **要不要内存安全**。
+    // 与 `gc` **正交**（同一张图上相反的两个方向，`docs/210` §6.2）。**取值带维名前缀**
+    // （照 `gc_manual` 的先例）—— `open` / `close` 单独太泛。
+    // ⚠ 上面那段第五维的教训**同样适用**：漏了这里，`choose lms_open` 会被当成**开关**
+    // 去查开关表 ⇒ 报 E022「未定义的开关」（码对、理由错），而 `loment_rule_parity`
+    // 只比码集、判绿。
+    if sw_tok_is(unit, toks, k, "lms_close") {
+        return true;
+    }
+    if sw_tok_is(unit, toks, k, "lms_open") {
+        return true;
+    }
     return false;
 }
 

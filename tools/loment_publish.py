@@ -8,7 +8,7 @@
 #     只是**由这里发**，不是在那边写的。
 #   * **发布是整体覆盖**（force-push 成 `main`）：**别在那边直接提交**，一定被下次发布盖掉。
 #     那边的 `README.md` 与 `.gitattributes` 也是本工具直出的（见 §cmd_push），不是手写的。
-#   * 名字与可见性：`FujoJTOP/loment` 与 `FujoJTOP/lompi`，**两个都公开**
+#   * 名字与可见性：`Loment-Lang/loment` 与 `Loment-Lang/lompi`，**两个都公开**
 #     （Loment 是用户 2026-09-16 定的；lompi 是 2026-09-17 定的 —— 见各自 spec 里的注解）。
 #     可见性写进 spec 而不是手敲 `gh repo edit`，因为手敲的只生效一次，换台机器就丢。
 #
@@ -39,7 +39,7 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-ORG = "FujoJTOP"
+ORG = "Loment-Lang"
 
 #: L0 契约的**对照物** —— 契约对面那一侧的源码，判据拿它们做逐字段对账。
 #:
@@ -195,7 +195,7 @@ REPOS: dict[str, dict] = {
         "description": "Loment — a systems programming language with a Rust-flavored syntax "
                        "and capability domains; artifacts are sealed (no runtime, no libc) by "
                        "default, hosted on request",
-        "homepage": "https://fujojtop.github.io/loment-site/",
+        "homepage": "https://loment-lang.github.io/loment-site/",
         "topics": ["programming-language", "compiler", "rust", "self-hosted",
                    "systems-programming", "capability-security", "no-std"],
         #: 写进仓库根的 `.gitattributes`（与 README 同一种做法：发布工具直出，不靠手敲）。
@@ -234,11 +234,11 @@ syntax is Rust-flavored, and the same program can be written in six more: C, C++
 or Python.
 
 **[Quick start](QUICKSTART.md)** ·
-[Project site](https://fujojtop.github.io/loment-site/) ·
+[Project site](https://loment-lang.github.io/loment-site/) ·
 [Manual](docs/manual/index.md) ·
 [Language guide](.claude/skills/loment/SKILL.md) ·
 [Examples](loment/examples/) ·
-[Issues](https://github.com/FujoJTOP/loment/issues)
+[Issues](https://github.com/Loment-Lang/loment/issues)
 
 ## Status
 
@@ -295,7 +295,7 @@ below.
 | `docs/143-l1-loment-v0.md` · `docs/146` · `docs/158` | The specification, capability semantics, and what is frozen. |
 | `docs/173` · `docs/188` | The two capabilities in the table above. |
 | `docs/` | Design and measurement records, numbered by document. Most are written in Chinese. |
-| [FujoJTOP/lompi](https://github.com/FujoJTOP/lompi) | The package manager. |
+| [Loment-Lang/lompi](https://github.com/Loment-Lang/lompi) | The package manager. |
 
 ## Repository layout
 
@@ -312,7 +312,7 @@ below.
 
 ## Getting help and contributing
 
-Ask in an [issue](https://github.com/FujoJTOP/loment/issues) — questions are as welcome as
+Ask in an [issue](https://github.com/Loment-Lang/loment/issues) — questions are as welcome as
 bug reports. Loment is developed in this repository, and the working conventions are in
 `AGENTS.md`.
 
@@ -332,14 +332,14 @@ you may build a different language from this source without `.lomt` or `.lom`. S
         "floor": 30,
         # **公开** (用户 2026-09-17 定)。原先 2026-09-16 是私有的, 理由是"用户只说了开源
         # Loment 本体"; 但 Loment 开发树离不开 `lompi/` (`loment_dist.py:67` 拿它构建随包
-        # 发行的 lompi 工具), 而 `FujoJTOP/loment` 是开发口且公开 —— 两边可见性必须一致,
+        # 发行的 lompi 工具), 而 `Loment-Lang/loment` 是开发口且公开 —— 两边可见性必须一致,
         # 否则要么公开库缺件、要么开发口得转私有。用户选了"lompi 也开源"。
         "visibility": "public",
         # 简介与正文一律英文（2026-10-12 用户定）：这两个库都是 public，读者不一定是
         # 中文使用者；仓里其它对外文字（README / 发布说明 / issue）也已经是英文。
         "description": "lompi — the package manager for Loment libraries "
                        "(a library is a directory, its identity is a content hash)",
-        "homepage": "https://fujojtop.github.io/FujoOSwebsite/loment/lompi/",
+        "homepage": "https://loment-lang.github.io/loment-site/",
         "topics": ["package-manager", "loment"],
         "readme": """# lompi
 
@@ -352,7 +352,7 @@ run `lompi` directly.
 
 ## Building it
 
-You need the Loment toolchain first (<https://github.com/FujoJTOP/loment>), then **from this
+You need the Loment toolchain first (<https://github.com/Loment-Lang/loment>), then **from this
 directory**:
 
 ```
@@ -386,7 +386,7 @@ the **exit code as the verdict**.
 ## What this repository is
 
 **It is the publish outlet of the Loment repository, not a development tree.** Development
-happens in <https://github.com/FujoJTOP/loment>, under `lompi/`; this repository is regenerated
+happens in <https://github.com/Loment-Lang/loment>, under `lompi/`; this repository is regenerated
 from it by that repository's `tools/loment_publish.py`. **Do not commit here** — the next
 publish overwrites it.
 

@@ -33,6 +33,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import lomelf                                                       # noqa: E402
 import lomentc                                                      # noqa: E402
 
@@ -1764,18 +1765,83 @@ _LIB6_CANDIDATES = ("/usr/lib/x86_64-linux-gnu/libc.so.6", "/usr/lib64/libc.so.6
 def main() -> int:
     failed = []
     for fn in TESTS:
+
         try:
-            fn()
-            print(f"  PASS  {fn.__name__}")
-        except Exception as e:                                      # noqa: BLE001
-            failed.append((fn.__name__, e))
-            print(f"  FAIL  {fn.__name__}: {type(e).__name__}: {e}")
-    print()
-    if failed:
-        print(f"loment_ffi_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-        return 1
-    print(f"loment_ffi_test: {len(TESTS)}/{len(TESTS)} 通过")
-    return 0
+            p = Path(cand)
+            if p.is_file():
+                b = p.read_bytes()
+                if b[:8] == b"!<arch>\n":
+                    data = b
+                    break
+        except OSError:
+            pass
+    if data is None:
+        for cand in LIBZ_CANDIDATES:
+            try:
+                r = subprocess.run([*_WSLCMD, "bash", "-lc", f"cat {cand}"],
+                                   capture_output=True, timeout=300, shell=False)
+            except OSError:            # 另一条腿不存在（没装 WSL）：**取不到**，不是挂掉
+                return None
+            if r.returncode == 0 and r.stdout[:8] == b"!<arch>\n":
+                data = r.stdout
+                break
+    if data is None:
+        return None
+    dst.write_bytes(data)
+    return dst if dst.read_bytes()[:8] == b"!<arch>\n" else None
+
+
+@test
+def test_a_real_static_library_round_trips():
+    """真 `libz.a` 经**我们自己的链接器**：`compress → uncompress → 原文`。
+
+    **Why**：这是 `docs/183` §4 的 **V1** 验收格，也是 `docs/219` §8b 那条线一直盯着的
+    "第一个真库"。它与 `loment_hosted_test` 那条**看着像**，其实是**另一个方向**：那条走
+    `choose hosted`（产物由 C 工具链链、库是 `.so`、堆问宿主要），这条走 `sealed`（产物由
+    `lomelf` 自己链、库是 `.a`、堆**封在产物里**）。两条都绿才叫"能调真库在两个方向上都成立"。
+
+    **它测的是插件面之外的东西**：真库是个 **`ar` 归档**（16 个成员，成员之间互相引用），
+    所以这条判据同时钉住**固定点成员选择**（不整包收 —— 整包收会把 `gz*` 那些成员的
+    `fopen`/`printf` 一起拖进来，整个库就被端口门拒了）与 arena 够不够大（`deflateInit`
+    要 256–512 KiB，见 `lomentc.FFI_ARENA_BYTES`）。
+
+    **证伪**：见 `ZLIB_STATIC_FALSIFIER_SRC` —— 比对方向写反的那一份必须报 40。
+    """
+    clang = _clang()
+    if not clang or not _wsl():
+        print("      SKIP: 需要 clang + WSL")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        ark = _system_libz(ROOT / "loment" / "build" / "_libz_probe.a")
+        if ark is None:
+            print("      SKIP: 这台机器上没有 libz.a（要 zlib1g-dev）—— 这一格测不了")
+            return
+        try:
+            # 先量"这条判据真的踩在归档上" —— 不然它测的是别的什么
+            fo = lomelf.load_foreign(ark)
+            n_mem = len(fo.members)
+            assert n_mem >= 8, f"libz.a 只有 {n_mem} 个成员？这不是真库"
+            for tag, src, want in (("roundtrip", ZLIB_STATIC_SRC, 0),
+                                   ("falsifier", ZLIB_STATIC_FALSIFIER_SRC, 40)):
+                (td / f"{tag}.lomt").write_text(src, encoding="utf-8", newline="\n")
+                rc, err = build_and_run(td, td / f"{tag}.lomt", [ark], want)
+                assert rc == want, (
+                    f"[{tag}] rc={rc}（期望 {want}）err={err[-300:]!r}")
+            # 选出来的是**该要的那几个成员**，不是整包（整包会被端口门拒 —— 那正是
+            # "不整包收"存在的理由）
+            picked = lomelf.Archive(ark).select({"compress", "uncompress"})
+            names = [o.name for o in picked]
+            assert len(picked) < n_mem, f"把整个归档都收进来了: {n_mem} 个成员"
+            assert any("compress" in n or "deflate" in n for n in names), names
+            print(f"      真 libz.a（{n_mem} 个成员）→ 挑出 {len(picked)} 个 → "
+                  f"compress/uncompress 逐字节回原文 (rc=0)；证伪件报 40")
+        finally:
+            ark.unlink(missing_ok=True)
+
+
+def main() -> int:
+    return loment_suite.run(TESTS, "loment_ffi_test")
 
 
 if __name__ == "__main__":

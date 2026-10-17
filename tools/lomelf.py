@@ -32,7 +32,15 @@ import struct
 import sys
 from pathlib import Path
 
-ELF_TEXT_VADDR, ELF_DATA_VADDR = 0x400000, 0x600000
+#: **文本段的容量**（`docs/253`，2026-10-16）。与自举侧 `lomelf.lomt` 的 `OUT_CAP`
+#: **同一个数** —— 那边就是代码缓冲的大小。数据段钉在它后面（见 `ELF_DATA_VADDR`），
+#: 所以这个数一旦被文本超过，数据段就会被压住（**不报错**，产物一启动就段错误）。
+#: 越过它的情形由 `compile_ll` 末尾那条判据点名拒 —— 原先没有这条，地板是**没标注的**。
+TEXT_CAP = 4194304                 # 4 MiB = 0x400000
+ELF_TEXT_VADDR = 0x400000
+#: 数据段在**代码缓冲之后**：文本段可用 `0x400000..0x800000`，正好是 `TEXT_CAP`。
+#: 原先钉 `0x600000`（2 MiB 窗口），实测 2026-10-15 `main` 自己已占 99.4%。
+ELF_DATA_VADDR = ELF_TEXT_VADDR + TEXT_CAP
 TEXT_VADDR, DATA_VADDR = ELF_TEXT_VADDR, ELF_DATA_VADDR   # 当前目标的活动值, PE 目标会改
 SCALAR_SIZE = {"i1": 1, "i8": 1, "i16": 2, "i32": 4, "i64": 8, "ptr": 8}
 
@@ -850,7 +858,11 @@ class Emitter:
         cur = ty
         for p in parts[1:]:
             ity, ival = parse_operand(p)
-            self.get(ity, ival, RCX)
+            # **GEP 的下标是**符号扩展的（LLVM LangRef）—— `get` 按设计零扩展，所以这里
+            # 必须走 `get_signed`：`getelementptr i8, ptr %p, i32 -4` 要的是 `%p - 4`，
+            # 零扩展把它变成 `%p + 4294967292`（4 GiB 之外，撞了就是 SIGSEGV）。
+            # 结构体那条路不受影响：它走 `field_offset` + `alu_ri`，那条本来就符号扩展。
+            self.get_signed(ity, ival, RCX)
             if cur.startswith("["):
                 et = elem_of(cur)
                 step = size_of(et)
@@ -5859,6 +5871,18 @@ def compile_ll(text: str, objects: list | None = None,
         text = em.asm.finalize() + text_tail
     else:
         text = em.asm.finalize()
+
+    # **文本段的容量是明写的**（`docs/253`）：数据段钉在 `TEXT_VADDR + TEXT_CAP`，
+    # 所以文本一旦超过 `TEXT_CAP` 就会盖到数据段上 —— 而**盖上去不报错**，产物一启动就
+    # 段错误（0 字节输出），看起来像编译器坏了。实测 2026-10-15：`main` 自己已占
+    # 2 084 579 / 2 097 152（99.4%），任何一笔中等改动都会顶破。所以这里**点名拒**。
+    # 自举侧 `lomelf.lomt` 同一处、同一个数（那边是 `OUT_CAP`）。
+    if len(text) > TEXT_CAP:
+        raise Unsupported(
+            f"文本段 {len(text)} 字节超过 {TEXT_CAP} —— 链接器把数据段钉在"
+            f" `TEXT_VADDR + {TEXT_CAP}`，再长就会盖住数据段，产物一跑就段错误。"
+            f" 抬 `loment/tools/lomelf.lomt` 的 `OUT_CAP`、和 `tools/lomelf.py` 的"
+            f" `TEXT_CAP` / `ELF_DATA_VADDR`（两个实现同一个数）")
     entry = em.asm.labels["__entry"]
     if dyn_info is not None:
         blob = build_elf_dynamic(text, bytes(data), bss, entry, tail=tail, **dyn_info)
@@ -5924,9 +5948,16 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if out is None:
         out = str(src.with_suffix(".exe" if target == "pe" else ""))
-    Path(out).write_bytes(blob)
+    # **写不出去要说话，而且要说清是哪个路径**（`issue #8`）。这里原先是一句**裸写**：
+    # 目录不存在就是没接住的 `OSError`，用户拿到 Python 栈 —— 而"父目录没建"这条
+    # 看一眼路径就明白。自举侧那一半（`loment/tools/lomelf.lomt`）同一条口径，码是 E029。
     import os
-    os.chmod(out, 0o755)
+    try:
+        Path(out).write_bytes(blob)
+        os.chmod(out, 0o755)
+    except OSError as e:
+        print(f"[ERR] 写不了输出文件 {out}: {e.strerror or e}", file=sys.stderr)
+        return 1
     print(f"[OK] {src} -> {out} ({len(blob)} B, text {info['text']} B, data {info['data']} B)")
     return 0
 

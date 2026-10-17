@@ -23,6 +23,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import lomentc  # noqa: E402
 import lomelf  # noqa: E402
 import lomc  # noqa: E402  (边界操作那条判据的**独立**尺子: 参考实现真正的词法器)
@@ -802,7 +803,7 @@ def test_both_launchers_forward_the_renderer_output_modes():
     # bash: 两处参数扫描（check/ir 一处、build/run 一处）都要认，且都要转交
     assert sh.count("--short|--json) om=$1; shift ;;") == 2, \
         "bash 启动器不是两处参数扫描都认 --short/--json"
-    assert sh.count('"$nc $om"') == 2, "bash 启动器没把输出模式转交给 report_diags"
+    assert sh.count('"$nc $om"') == 3, "bash 启动器没把输出模式转交给 report_diags"
     assert '"$(tool lomenterr)" $rflags "$dfile"' in sh, \
         "renderer 的开关没有一起(word-split)传给 lomenterr"
     # `--max N` / `--max=N`：两个拼法都要转交，而且**带上它的值**（这个词的两个拼法各一条）
@@ -819,8 +820,11 @@ def test_both_launchers_forward_the_renderer_output_modes():
     # 累加式的写法出现在两处：check 那路的 `:scan_om`，与 build/run 那路的 `--max=N` 落点
     assert cmd.count('set "com=%com% %~1"') == 2, "cmd: 没把这个开关累加进 com"
     assert cmd.count('set "com=%~1"') == 1, "cmd: build/run 那路没记下这个开关"
-    assert cmd.count('"%cnc% %com%"') == 3, \
-        "cmd: 三处 report_diags 调用没有都带上输出模式"
+    # 五处：check/ir 一处、build 的驱动与链接器各一处、run 的驱动与链接器各一处。
+    # 链接器那两处是 `issue #8` 加上的 —— lomelf 现在也有自己的 `--diag-out`，
+    # 写不了产物时它吐一条 E029，由同一个 report_diags 渲染。
+    assert cmd.count('"%cnc% %com%"') == 5, \
+        "cmd: 每处 report_diags 调用都要带上输出模式 (driver ×2 + lomelf ×2 + check ×1)"
     # `--max` 在 cmd 里是**两**个词，而 check 那路是 `for` 扫全命令行 —— 必须记住
     # "下一个词是它的值"并跳过，否则 `--max 0` 会把 `0` 当成源文件名。
     assert cmd.count('if /I "%~1"=="--max" goto scan_max') == 1, "cmd: check 不认 --max"
@@ -1337,16 +1341,7 @@ def test_cli_twin_selfhost_compiles():
 
 
 def main() -> int:
-    failed = []
-    for name, fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {name}")
-        except Exception as e:  # noqa: BLE001
-            failed.append((name, e))
-            print(f"  FAIL  {name}: {type(e).__name__}: {e}")
-    print(f"\nloment_cli_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-    return 1 if failed else 0
+    return loment_suite.run(TESTS, "loment_cli_test")
 
 
 if __name__ == "__main__":

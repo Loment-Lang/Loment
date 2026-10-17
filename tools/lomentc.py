@@ -172,7 +172,9 @@ _IR_HEAP = '''; ---- 分配器（docs/175 §3.4 的 `gc_manual`）--------------
 ;
 ; 三条规则，各有它要挡的东西：
 ;   * **第一次适配 + 拆分**：空闲块大到有余（余量 ≥ 16）就切一块出来，余下的还回链上。
-;     不拆的话一次大分配会把整个链表吃光。
+;     不拆的话一次大分配会把整个链表吃光。**记录尺寸永远等于这块的实际跨度** ——
+;     不拆的时候**不把 size 改小**（余量不足 16 字节，改小它换不来可用空间，
+;     只让按 size 走的遍历掉进块内部，`FujoJTOP/loment#368`）。
 ;   * **地址序**：链表按地址升序，`free` 线性找插入点。顺序让「前沿回退」可判。
 ;   * **前沿回退**：释放的那一块**正好顶到 bump 前沿**时，直接把前沿退回去。
 ;     这是 LIFO（分配—释放—再分配）不涨内存的原因；没有它，`free` 只是把块挂起来，
@@ -214,14 +216,25 @@ take:
   %rest = load i32, ptr %tpp
   br i1 %cansplit, label %split, label %nosplit
 split:
+  ; **块的记录尺寸只在「真拆了」的时候才改小**（`FujoJTOP/loment#368`）——
+  ; 原来这句在 `taken:` 里无条件执行，于是**不拆分**那条路（余量 < 16 字节，
+  ; 块还是那么大，只是没切）也会把 size 改成 `need`。后果有两层：
+  ;   * 按 `size` 往前走的每一趟（`__loment_alloc` 的首次适配、`__loment_sweep`、
+  ;     `__loment_propagate`、以及收集器的两步）都会从 `cur + need` 继续，
+  ;     而那已经不是下一块了 —— 它掉进**块的内部**，把载荷当尺寸读；
+  ;   * 载荷里的字节多半是 0 ⇒ `i += 0` ⇒ **死循环**（实测：2 分钟不返回）。
+  ; 判据：`loment_elf_test::test_a_reused_block_keeps_its_recorded_extent`。
   %so = add i32 %cur, %need
   %spp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %so
   store i32 %slack, ptr %spp
   %so4 = add i32 %so, 4
   %spp4 = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %so4
   store i32 %rest, ptr %spp4
+  store i32 %need, ptr %hp
   br label %relink
 nosplit:
+  ; 不拆：**尺寸原样留着**（就是 `%bsz`）—— 那几十字节的余量仍然在块里，
+  ; 只是不足以另立一块。改小它不会让那点余量变得可用，只会让遍历失步。
   br label %relink
 relink:
   %newhead = phi i32 [ %so, %split ], [ %rest, %nosplit ]
@@ -236,7 +249,6 @@ setprev:
   store i32 %newhead, ptr %ppp
   br label %taken
 taken:
-  store i32 %need, ptr %hp
   %t4b = add i32 %cur, 4
   %tppb = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %t4b
   store i32 -1, ptr %tppb
@@ -450,14 +462,18 @@ take:
   %rest = load i32, ptr %tpp
   br i1 %cansplit, label %split, label %nosplit
 split:
+  ; **块的记录尺寸只在「真拆了」的时候才改小**（`FujoJTOP/loment#368`）—— 理由见
+  ; `_IR_HEAP` 同一条（这段与那一份逐字同源，只换 arena 的来处与寻址）。
   %so = add i32 %cur, %need
   %spp = getelementptr i8, ptr %hb, i32 %so
   store i32 %slack, ptr %spp
   %so4 = add i32 %so, 4
   %spp4 = getelementptr i8, ptr %hb, i32 %so4
   store i32 %rest, ptr %spp4
+  store i32 %need, ptr %hp
   br label %relink
 nosplit:
+  ; 不拆：**尺寸原样留着**（就是 `%bsz`）。
   br label %relink
 relink:
   %newhead = phi i32 [ %so, %split ], [ %rest, %nosplit ]
@@ -472,7 +488,6 @@ setprev:
   store i32 %newhead, ptr %ppp
   br label %taken
 taken:
-  store i32 %need, ptr %hp
   %t4b = add i32 %cur, 4
   %tppb = getelementptr i8, ptr %hb, i32 %t4b
   store i32 -1, ptr %tppb
@@ -710,6 +725,25 @@ def _type_ok(t: str, known: set[str]) -> bool:
     if _is_slice(t):
         return _type_ok(_slice_elem(t), known)
     return False
+
+
+#: 类型位置上的未知名 —— **一条独立的诊断**（`#323`），消息形如
+#: `未知类型 f64（let a 的类型）`，分类进 **E030**。
+#:
+#: **为什么不并进 E002**：按 `loment_diag` 那张表"码按修法分"的口径，两边的修法根本不是
+#: 一件事。E002 的修法是"先声明这个名字 / 改拼写 / 补 `use`"；而 `f64` 在类型位上，用户
+#: 要做的是"**这门语言没有这个类型**"（Loment 没有浮点，`loment types` 只列整型与聚合）。
+#: 并进去的代价实测过：0.1.4.5 给的是 `error[E002]: undeclared name` + 一张讲"没有类型推断、
+#: 先定义后使用、跨模块要 `pub`"的建议表 —— 三条都不适用，用户会去找一个不存在的拼写错误。
+#:
+#: **消息里为什么带那段括号**：同一个码在六处触发（字段 / 载荷 / 返回 / 形参 / let / 数组
+#: 元素），而渲染器只给 `--> file:line`，丢了角色就只剩一个光秃秃的类型名。角色是**事实**，
+#: 不是建议，所以它并进消息不违反上面的分工。
+#:
+#: **那六处为什么把字面文本写在各自的 f-string 里，不共用一个助手函数**：判据
+#: `loment_err_test::test_every_message_the_compiler_can_print_has_a_code` 是**扫模板**的 ——
+#: 它把 `errs.append(...)` 的参数取出来，非字面量的占位代成 `1` 再送 `classify()`。助手函数
+#: 会让模板退化成 `1: 1`，那条判据当场红。这里重复六遍字面量是**判据要求的**，不是疏忽。
 
 
 def _extern_ty_ok(t: str) -> bool:
@@ -1328,7 +1362,8 @@ MAXDEPTH = 8
 #:   * `gc`      —— `gc_manual` / `gc_auto` / `gc_auto_alpha`：回收由谁做（`docs/175` §3.4）；
 #:   * `runtime` —— `runtime` / `no_runtime`：产物里**有没有运行期**（`docs/175` §3.6）；
 #:   * `port`    —— `sealed` / `hosted`：产物**通不通着世界**（`docs/222` §4）；
-#:   * `vm`      —— `vm` / `no_vm`：**要哪种执行模型**（`docs/231`）。
+#:   * `vm`      —— `vm` / `no_vm`：**要哪种执行模型**（`docs/231`）；
+#:   * `lms`     —— `close` / `open`：**要不要内存安全**（`docs/253`）。
 #:
 #: `runtime` 的取值**刻意只说"有没有"**，不说"里面装了什么"：装的东西会随年份长
 #: （今天是收集器，明天可能是线程、宿主服务），把它钉进值名里，两年后加能力就得回头
@@ -1357,17 +1392,33 @@ CORE_DIMS: dict[str, tuple[str, ...]] = {
     # **它今天不提供任何东西**（没有字节码、没有解释器，`docs/231` §1.3），所以被**渠道闸**
     # 关在发行版外面（`_vm_gate` 那一段）：写得出、却什么也拿不到，比写不出来更坏。
     "vm": ("vm", "no_vm"),
+    # **内存安全**（`docs/253`，用户 2026-10-15 定第六维）。与 `gc` **正交** ——
+    # `gc` 管"谁归还"（生命周期的**内向可达**），这一维管"谁能碰"（许可的**外向**）；
+    # `docs/210` §6.2 那句"箭头反了"说的就是这两条是同一张图上的相反方向。
+    #
+    # `lms_close`（关）= 今天的形状，也是**默认** —— 默认档不许改变任何现有程序的行为。
+    # `lms_open`（开）= 检查器发 E024–E026，保障器**按站点分配**发内联界检查。
+    #
+    # **它不引入运行期组件**（`docs/253` §11.2）：四格落的都是**指令**
+    # （一条 `cmp` / 一个 `llvm.trap`），没有表、没有位图 —— 所以它与 `no_runtime`
+    # **不冲突**，`CORE_CONFLICTS` 里因此没有它。
+    # 取值**刻意不带机制名**：今天是边界检查，明天可能是派生指针追踪 ——
+    # 与 `runtime` / `vm` 同一条纪律，装的东西不进值名。
+    # **但带维名前缀**（`lms_*`，照 `gc_manual`/`gc_auto` 的先例）：`open` / `close`
+    # 单独太泛，而 `CORE_WORDS` 还兼管表层语法的 `choose` 行摘取。
+    "lms": ("lms_close", "lms_open"),
 }
 #: 冲突**两两查**时的维序。**写死的** —— 报错文本里两个取值的先后由它决定，
 #: 而两个实现比的是字节，所以它不能是集合迭代顺序。
-CORE_DIM_ORDER: tuple[str, ...] = ("mode", "gc", "runtime", "port", "vm")
+#: `lms` 排在最后：它**没有冲突对**，追加在尾部不会改动任何既有配对的先后。
+CORE_DIM_ORDER: tuple[str, ...] = ("mode", "gc", "runtime", "port", "vm", "lms")
 #: 所有核心模式的取值 —— "这一个 `choose` 是核心模式还是开关"就看它在不在这里面。
 CORE_WORDS = frozenset(w for _ws in CORE_DIMS.values() for w in _ws)
 #: 取值 → 属于哪一维（报错要说清是**哪一维**写了两次）。
 CORE_DIM_OF = {w: d for d, ws in CORE_DIMS.items() for w in ws}
 #: 每一维**不写**时的取值 —— 默认档，且默认**不改变任何现有程序的行为**。
 CORE_DEFAULTS = {"mode": "std", "gc": "gc_manual", "runtime": "no_runtime",
-                 "port": "sealed", "vm": "no_vm"}
+                 "port": "sealed", "vm": "no_vm", "lms": "lms_close"}
 #: 维的**人话**名字。报错要说清是**哪一维**写了两次 —— `gc` 对用户不是一个词，
 #: 而"核心模式只能声明一次"在有两维之后就**说不清是哪一维**了。
 CORE_DIM_ZH = {
@@ -1376,6 +1427,7 @@ CORE_DIM_ZH = {
     "runtime": "运行期（`runtime` / `no_runtime`）",
     "port": "对外端口（`sealed` / `hosted`）",
     "vm": "执行模型（`vm` / `no_vm`）",
+    "lms": "内存安全（`lms_close` / `lms_open`）",
 }
 #: **互相冲突的取值对**（`docs/175` §3.4 ⚠）。键是取值，值 = (和它冲突的取值, 为什么)。
 #: 报错要**点名这两档为什么冲突**，不能泛泛说"非法组合"（判据见 `docs/175` §3.4）。
@@ -2958,7 +3010,12 @@ def _check_borrows(args: list, line: int, errs: list[str]) -> None:
 
 def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[str, Struct],
                errs: list[str], enums: dict[str, EnumDecl] | None = None) -> None:
-    """结构性问题 (未声明变量 / 未知函数 / 结构体字段 / 枚举变体) 的递归报告。"""
+    """结构性问题 (未声明变量 / 未知函数 / 结构体字段 / 枚举变体) 的递归报告。
+
+    **这里没有档参数**（2026-10-16）：`lms` 曾经只喂 `Index` 那一支的 E028，而那条
+    已经**升成语言规则**（`docs/205` §1.1 C5：字面量越界编译期拒）—— 见下面那一段的注解。
+    另一个第 1 级检查（E029 用完再放）在 `_move_check` 里，它自己的参数自己带。
+    """
     enums = enums or {}
     if isinstance(e, (IntLit, BoolLit, StrLit)):
         return
@@ -3142,6 +3199,29 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
         it = expr_type(e.idx, scope, funcs, structs)
         if it is not None and it not in INT_TYPES:
             errs.append(f"{e.line}: 下标类型 {it}，应为整型")
+        # **E028**：**字面量下标越过定长数组的界**当场拒。
+        #
+        # **2026-10-16 起它不再看 `lms`**（issue #18）。原先这条只在 `choose lms_open`
+        # 时发 —— 而 `lms` 那一维是**开发通道的中间态**（`docs/253` §14.2：不进发行版），
+        # 于是发行版里的用户拿不到它。可它本来就不是一条 LMS 检查：`docs/205` §1.1 C5
+        # 早就把「越界访问在**字面量**时编译期拒」写成语言规则，只是那一格**只覆盖
+        # `guard`**（`docs/146` §3：`guard cap(9)` 对域 `[0..4]` 是编译错误）。
+        # 同一个"字面量越界"，两个构造两个答案 —— 那正是 issue #18 点名的那处不一致。
+        # 于是它升成语言规则：**默认档也拒**（`docs/253` §14.2 那条"默认档一个字的检查都
+        # 不加"说的是 LMS 那几级，与这条语言规则不是一回事）。
+        #
+        # 为什么这一格值得拒：实测（`docs/253` §4.4）：`let x: u32 = a[10]` 配 `[u32; 4]`
+        # 发出来的是 `getelementptr inbounds [4 x i32], ptr %a.addr, i32 0, i32 10`，
+        # 而 `inbounds` 在 LLVM IR 里**恰是"越界即 UB"的标记**。
+        #
+        # 只对**定长数组**成立：切片 `[T]` 的长度是运行期的，界不是编译期常量 ——
+        # 那一半的裁决见 `docs/205` §1.1 C5（`lms_open` 按站点发内联界检查；默认档
+        # 不检查，用 `slice_len` + 一个显式的 `if` 自己挡）。
+        if ot is not None and _is_array(ot) and isinstance(e.idx, IntLit):
+            n = _array_len(ot)
+            if e.idx.value >= n:
+                errs.append(f"{e.line}: E028: 下标 {e.idx.value} 越过定长数组的界"
+                            f"（{ot} 的长度是 {n}）")
         return
     if isinstance(e, Un):
         _walk_expr(e.expr, scope, funcs, structs, errs, enums)
@@ -3875,8 +3955,29 @@ def _unit_where(m: Module) -> str:
     return f"`{m.src.as_posix()}`" if m.src is not None else f"`{m.name}`"
 
 
+#: `#226`：一个约 250 项的**扁平表达式**会让 `check` 死在 Python 的 `RecursionError` 上 ——
+#: 三千行 traceback，一个字都不是诊断。两件事一起做：
+#:
+#: * 上限抬到 8000：普通程序（含这一档）本来就不该撞上；
+#: * 真撞上了转成 **E023**（消息里有"嵌套超过"，分类器按修法归到那一码），而不是把
+#:   traceback 甩给用户 —— 与 `#369` 那条不变量同源：**Python 的 traceback 不是诊断**。
+#:
+#: 抬上限不会变成段错误：CPython 3.11 起自己也会在 C 栈见底前抛 `RecursionError`。
+_RECURSION_FLOOR = 8000
+
+
 def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
           deps: list[Module] | None = None, _dep_pass: bool = False) -> list[str]:
+    if sys.getrecursionlimit() < _RECURSION_FLOOR:
+        sys.setrecursionlimit(_RECURSION_FLOOR)
+    try:
+        return _check(mod, ext_funcs=ext_funcs, deps=deps, _dep_pass=_dep_pass)
+    except RecursionError:
+        raise LomError(0, 0, "嵌套超过编译器的递归上限 —— 把这段拆成几个函数，或把表达式拆开") from None
+
+
+def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
+           deps: list[Module] | None = None, _dep_pass: bool = False) -> list[str]:
     # **依赖的正文也查** (`#149`, 2026-10-09 补)。原先只把 `deps` 的**导出符号**入表
     # (M12: 仅 pub 可见), 正文不验 —— 于是 `pub fn f(p: ptr) -> u32 { return p; }` 这样的库
     # **当依赖时一路绿**, 只有当**入口**查才报。后果: 一个库可以带着正文类型错发布, 而每一个
@@ -3884,6 +3985,12 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     # (`_dep_pass` 挡住递归)。
     mod, deps = prepare(mod, deps)  # M6 单态化
     errs: list[str] = []
+    # **LMS（`docs/253`）**：第 1 级检查器开不开。⚠ **只取根单元**的取值 —— 与 Potato 里
+    # 那个 `lms` 字段、以及自举侧扫 token 的那一支 **同一个来源**。
+    # 它管**合法性**（外向许可），与 `gc_*`（生命周期、内向可达）**正交**（`docs/210` §6.2）。
+    # ⚠ 这一条**长在检查器里，不长在发射器里**：自举侧的 `codegen.lomt` **根本没有报错
+    #   通道**（那边所有编译错误都出自 `checker.lomt`）—— 放到发射器里两边就不同构了。
+    lms = mod.chooses.get("lms", CORE_DEFAULTS["lms"]) == "lms_open"
     funcs = dict(ext_funcs or {})
     deps = deps or []
 
@@ -4198,11 +4305,11 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     for s in mod.structs:
         for fn, ft in s.fields:
             if not _type_ok(ft, known):
-                errs.append(f"{s.line}: 结构体 {s.name}.{fn} 类型 {ft} 未声明")
+                errs.append(f"{s.line}: 未知类型 {ft}（结构体 {s.name}.{fn} 的字段类型）")
     for e in mod.enums:
         for v, pt in e.payloads.items():
             if not _type_ok(pt, known):
-                errs.append(f"{e.line}: 枚举 {e.name}::{v} 载荷类型 {pt} 未声明")
+                errs.append(f"{e.line}: 未知类型 {pt}（枚举 {e.name}::{v} 的载荷类型）")
 
     # 常量 (仅整型)
     seen_const: set[str] = set()
@@ -4276,13 +4383,13 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
 
     for f in mod.funcs:
         if not _type_ok(f.ret, known):
-            errs.append(f"{f.line}: 函数 {f.name} 返回类型 {f.ret} 未声明")
+            errs.append(f"{f.line}: 未知类型 {f.ret}（函数 {f.name} 的返回类型）")
         scope: dict[str, str] = dict(const_scope)  # 模块级常量在函数体内可见
         for p in f.params:
             if p.name in scope:
                 errs.append(f"{f.line}: 函数 {f.name} 参数 {p.name} 重复")
             if not _type_ok(p.type, known):
-                errs.append(f"{f.line}: 参数 {p.name} 类型 {p.type} 未声明")
+                errs.append(f"{f.line}: 未知类型 {p.type}（参数 {p.name} 的类型）")
             scope[p.name] = p.type
 
         def walk(stmts: list, fscope: dict[str, str]) -> None:
@@ -4290,7 +4397,7 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                 if isinstance(s, Let):
                     _walk_expr(s.expr, fscope, funcs, structs, errs, enums)
                     if not _type_ok(s.type, known):
-                        errs.append(f"{s.line}: let {s.name} 类型 {s.type} 未声明")
+                        errs.append(f"{s.line}: 未知类型 {s.type}（let {s.name} 的类型）")
                     if _is_array(s.type) and isinstance(s.expr, ArrayLit):
                         want = _array_len(s.type)
                         if want != len(s.expr.items):
@@ -4399,7 +4506,7 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                     _walk_expr(s.expr, fscope, funcs, structs, errs, enums)
 
         walk(f.body, scope)
-        errs.extend(_move_check(f, funcs, structs, enums))  # M13 移动检查
+        errs.extend(_move_check(f, funcs, structs, enums, lms))  # M13 移动检查 + E029
         # **非 `()` 的函数不许从末尾掉出去**（`#22`）。`check` 通过 = "这份程序不会 trap"
         # 是这条命令给人的唯一保证，而"掉出末尾"在发射之后是一条**非法指令**
         # （`SIGILL`）—— 只在**真走到那一支**时才发生，所以静态检查是唯一能在事前说这句
@@ -4469,16 +4576,25 @@ def _is_copy_type(t: str, structs: dict, enums: dict) -> bool:
     return not (t in structs or _is_array(t))
 
 
-def _move_check(f: Func, funcs: dict, structs: dict, enums: dict) -> list[str]:
+def _move_check(f: Func, funcs: dict, structs: dict, enums: dict,
+                lms: bool = False) -> list[str]:
     errs: list[str] = []
     scope: dict[str, str] = {p.name: p.type for p in f.params}
     params = {p.name for p in f.params}
     moved: set[str] = set()
+    #: **已经 `free` 过的块**（`docs/253` §5.1 的 E029）。**与 `moved` 分开两张表**：
+    #: 移走是**所有权**的事（E006），释放是**合法性**的事（E029）—— 两回事。
+    #: ⚠ 这一格今天**没有任何东西管**：`docs/210` §2.8 给 `free` 加的那五条检查管的是
+    #: **`free` 自己那一端**（这块是不是真块、有没有重复释放），管不了"**之后再用**"——
+    #: 那正是 use-after-free 的经典形状。
+    freed: set[str] = set()
 
     def use(e) -> None:
         if isinstance(e, Ident):
             if e.name in moved:
                 errs.append(f"{e.line}: 变量 {e.name} 已被移动, 不能再用")
+            elif lms and e.name in freed:
+                errs.append(f"{e.line}: E029: 变量 {e.name} 指向的块已经被 `free`，不能再用")
         elif isinstance(e, Bin):
             use(e.left)
             use(e.right)
@@ -4503,6 +4619,11 @@ def _move_check(f: Func, funcs: dict, structs: dict, enums: dict) -> list[str]:
                     moved.add(a.name)  # 非 Copy 传参 = 移动
                 else:
                     use(a)
+            # **E029**：`free(p)` 之后 `p` 指向的块没了 —— 记下来，之后再用到 `p` 就报。
+            # ⚠ **登记放在循环之后**：`use(a)` 在上面已经把 `free` 自己那个实参走过一遍了，
+            # 而**那一次是合法的**（清掉再报就成了"`free` 自己都不能调"）。
+            if lms and e.name == "free" and e.args and isinstance(e.args[0], Ident):
+                freed.add(e.args[0].name)
         elif isinstance(e, Index):
             use(e.obj)
             use(e.idx)
@@ -4526,11 +4647,13 @@ def _move_check(f: Func, funcs: dict, structs: dict, enums: dict) -> list[str]:
                         and not _is_copy_type(sc[s.expr.name], structs, enums):
                     moved.add(s.expr.name)
                 sc[s.name] = s.type
+                freed.discard(s.name)      # 重新绑定 = 这个名字不再指那块死掉的块
             elif isinstance(s, Assign):
                 use(s.expr)
                 if isinstance(s.target, Ident):
                     if s.target.name in moved:
                         errs.append(f"{s.line}: 变量 {s.target.name} 已被移动, 不能赋值")
+                    freed.discard(s.target.name)   # 重新赋值同理
                     if isinstance(s.expr, Ident) and s.expr.name in sc \
                             and not _is_copy_type(sc[s.expr.name], structs, enums):
                         moved.add(s.expr.name)
@@ -5295,7 +5418,7 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # 是编译错误，所以发行版发的对象里 `vm` **恒为** `no_vm`。
         # v14 = v13 + **联网站点的宽度组成** `net_ladder`（`docs/237`）：四档各领走几个站点。
         # 与 `gc_ladder` 同形，多一条交叉：`total_net` 必须等于 `surfaces.net`。
-        "potato": "v14",
+        "potato": "v15",
         "unit": mod.name,
         "language": "loment",
         # **表层语法**（`docs/188` §2）—— 与 `language` 分工不同, 别混:
@@ -5324,6 +5447,10 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # 空白的第一格）。发行版里它恒为 `no_vm`（渠道闸）。**它今天不承诺性能**：
         # 没有字节码、没有解释器，`choose vm` 的产物与 `no_vm` **逐字节相同**。
         "vm": mod.chooses.get("vm", CORE_DEFAULTS["vm"]),
+        # **内存安全**（`docs/253`，用户 2026-10-15 定第六维）：`close` / `open`。
+        # 与 `gc` **正交** —— 同一张图上相反的两个方向（`docs/210` §6.2）。同一条纪律：
+        # **必填**，于是"这份产物开没开内存安全"是**不读源码可判的**。
+        "lms": mod.chooses.get("lms", CORE_DEFAULTS["lms"]),
         # 开关取值 (用户 2026-09-17: **"开关的取值是要进 Potato 的"**, docs/182 §1)。
         # **永远是显式的数组**（可为空）—— 与 `mode` 同一条纪律: 不存在"缺这项"的形态,
         # 所以"这台机器上这个开关开没开"是**可回放**的, 不是"看当时的源码猜"。
@@ -5429,6 +5556,65 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
 #: 一份"有根没堆"的单元（典型的：alpha 把 `alloc` 全 L0 提走、只剩下指针局部）会发出
 #: **引用未定义全局**的产物（实测：`gc_auto` 只带一个 `fn f(p: ptr)` 也会）。所以根表
 #: **跟着 `gc_any` 发**，收集器**跟着堆发** —— 两件事不再绑死。
+# ---------------------------------------------------------------- LMS 第 3 级入口 A
+#
+# `docs/253` §5.3 的**入口 A**（内存用尽）：「`alloc` 真的分配不出时，**先试着拉回**，
+# 拉不回来才死」。今天 `_IR_HEAP` 的 `boom` 是**直接 `abort`** —— 那是"运行期灾难"；
+# 本文要的是"**先收一次再试**"。
+#
+# **为什么是变换、不是另抄一份**：那 200 行分配器在两处实现里必须同源。`hosted` 那一份
+# 就是这么来的（`_arena_indirect`，见 `_IR_GC_HOSTED`）—— 手抄必漂。
+# 三处**局部**改写，每一处都先 `assert` 命中：改不动就**当场炸**，不静默漂。
+_LMS_RETRY_DECL = "@__loment_lms_retry = internal global i1 false\n"
+
+
+def _heap_with_lms_rescue(text: str) -> str:
+    lines = text.split("\n")
+    i = next(k for k, l in enumerate(lines)
+             if l.startswith("define internal ptr @__loment_alloc"))
+    j = next(k for k in range(i + 1, len(lines)) if lines[k] == "}")
+    body = lines[i:j + 1]
+    # (1) `floop` 的两个 phi 各加一条入边（从 `rescue` 回来）。**只改这一个函数体**
+    # —— 同一个文件里的 `__loment_free` 也有一个同名形状的 phi 循环，碰不得。
+    k = body.index("floop:")
+    assert body[k + 1] == "  %cur = phi i32 [ %head, %entry ], [ %nxt, %fnext ]"
+    assert body[k + 2] == "  %prev = phi i32 [ 0, %entry ], [ %cur, %fnext ]"
+    body[k + 1] = "  %cur = phi i32 [ %head, %entry ], [ %nxt, %fnext ], [ %head2, %rescue ]"
+    body[k + 2] = "  %prev = phi i32 [ 0, %entry ], [ %cur, %fnext ], [ 0, %rescue ]"
+    # (2) `boom` 不再直接 abort。**只许重来一次** —— 否则一份没有垃圾的程序会
+    # 收了又收、永远出不去。
+    k = body.index("boom:")
+    assert body[k + 1] == "  call void @__loment_abort()"
+    assert body[k + 2] == "  unreachable"
+    body[k + 1:k + 3] = [
+        "  ; ---- LMS 第 3 级入口 A（docs/253 §5.3）：先拉回，拉不回来才死 ----",
+        "  %lmsdone = load i1, ptr @__loment_lms_retry",
+        "  br i1 %lmsdone, label %dead, label %rescue",
+        "rescue:",
+        "  store i1 true, ptr @__loment_lms_retry",
+        "  call void @__loment_collect()",
+        "  %head2 = load i32, ptr @__loment_freehead",
+        "  br label %floop",
+        "dead:",
+        "  call void @__loment_abort()",
+        "  unreachable",
+    ]
+    # (3) **每一条成功返回**前清掉重试标记（`_IR_HEAP` 两条、`_IR_HEAP_HOSTED` 三条）。
+    # 不清的话，"这一次"用掉的那一次重试会留给下一次分配 —— 那是**假的能力**。
+    idx = [k for k, l in enumerate(body) if l.startswith("  ret ptr ")]
+    assert len(idx) >= 2, idx
+    for k in reversed(idx):
+        body.insert(k, "  store i1 false, ptr @__loment_lms_retry")
+    return _LMS_RETRY_DECL + "\n".join(lines[:i] + body + lines[j + 1:])
+
+
+_IR_HEAP_LMS = _heap_with_lms_rescue(_IR_HEAP)
+_IR_HEAP_LMS_HOSTED = _heap_with_lms_rescue(_IR_HEAP_HOSTED)
+#: **`extern fn` 那一份也要救**（`docs/253` §5.3）。`_ffi_grown` 只是"**不是** alpha"，
+#: 所以它可以与 `gc_auto` 同时成立 —— 那一档下产物里有收集器，第 3 级入口 A 就有东西
+#: 可拉。漏掉这一份，`extern fn` + `gc_auto` + `lms_open` 会**静默没有**先拉回这一步。
+_IR_HEAP_LMS_FFI = _heap_with_lms_rescue(_IR_HEAP_FFI)
+
 _IR_ROOTS = '''; ---- 自动回收（`choose gc_auto`）---------------------------------------------------
 @__loment_roots = internal global [1024 x i64] zeroinitializer
 @__loment_rootn = internal global i32 0'''
@@ -5699,8 +5885,14 @@ roots:
 #: `gc_auto` 的触发：**按累计请求量**记 —— 过了 32 KiB 就收一次并清零。
 _IR_GC_TRIGGER_FIXED = '''define internal void @__loment_maybe_collect(i32 %sz) {
 entry:
+  ; **时钟 = 分配器真正吃掉多少字节**（`__loment_alloc` 自己那两行 `(sz + 15) & -8`），
+  ; 不是「载荷请求多少」—— 少了块头那 8 字节，小块程序的时钟就比消耗慢：8 字节载荷的
+  ; 块消耗 16、时钟只走 8，慢一倍 ⇒ 计数越过阈值的那一刻，arena 已经装满了（实测：
+  ; 纯拼接 3000 轮、计数 24000 < 32768，**一次都没收**，到 4096 轮 arena 满而 abort）。
+  %r0 = add i32 %sz, 15
+  %need = and i32 %r0, -8
   %b = load i32, ptr @__loment_gcbytes
-  %b2 = add i32 %b, %sz
+  %b2 = add i32 %b, %need
   store i32 %b2, ptr @__loment_gcbytes
   %big = icmp ugt i32 %b2, 32768
   br i1 %big, label %go, label %out
@@ -5905,24 +6097,27 @@ out:
 ; 判据（退回去了就说明死块都在顶端，正是小回收该干的事），而年轻代的**大小**不是。
 define internal void @__loment_maybe_collect(i32 %sz) {
 entry:
+  ; **时钟 = 分配器真正吃掉多少字节**（`(sz + 15) & -8`），不是载荷请求 —— 与固定档同一条
+  ; 理由（见 `_IR_GC_TRIGGER_FIXED`）。空间触发那一格原先写成 `off + sz + 8`：**多算了那
+  ; 个 8**（块头早被 `& -8` 那条并进去了），于是它报的「下一块落在哪儿」比实际偏后。
+  %r0 = add i32 %sz, 15
+  %need = and i32 %r0, -8
   %b = load i32, ptr @__loment_gcbytes
-  %b2 = add i32 %b, %sz
+  %b2 = add i32 %b, %need
   store i32 %b2, ptr @__loment_gcbytes
   %t = load i32, ptr @__loment_thresh
   %big = icmp ugt i32 %b2, %t
   %off = load i32, ptr @__loment_off
-  %n1 = add i32 %off, %sz
-  %n2 = add i32 %n1, 8
-  %near = icmp ugt i32 %n2, 64512
+  %n1 = add i32 %off, %need
+  %near = icmp ugt i32 %n1, 64512
   %go = or i1 %big, %near
   br i1 %go, label %do, label %out
 do:
   store i32 0, ptr @__loment_gcbytes
   call void @__loment_minor()
   %of2 = load i32, ptr @__loment_off
-  %m1 = add i32 %of2, %sz
-  %m2 = add i32 %m1, 8
-  %still = icmp ugt i32 %m2, 64512
+  %m1 = add i32 %of2, %need
+  %still = icmp ugt i32 %m1, 64512
   br i1 %still, label %maj, label %tune
 maj:
   call void @__loment_major()
@@ -7108,7 +7303,13 @@ class _Ir:
         """
         if not self.gc_any:
             return
-        self.rootk = sum(1 for ty, _ in self.vars.values() if self._root_ty(ty))
+
+        def slots(name: str) -> int:
+            """这个名字占几格根表：L0 提升过的缓冲按它的**字数**算，其余各占一格。"""
+            n = self.l0.get(name)
+            return (n + 7) // 8 if n else 1
+
+        self.rootk = sum(slots(nm) for nm, (ty, _) in self.vars.items() if self._root_ty(ty))
         if self.rootk == 0:
             return
         n0 = self.t()
@@ -7116,6 +7317,29 @@ class _Ir:
         i = 0
         for name, (ty, slot) in self.vars.items():
             if not self._root_ty(ty):
+                continue
+            sz = self.l0.get(name)
+            if sz:
+                # **L0 提升的缓冲：它的每一个 8 字节字各占一格**（`FujoJTOP/loment#362`）。
+                # 那个槽里存的是**栈**地址（`%NAME.buf`），而根扫拿槽里的值去减堆基址，
+                # 得到一个巨大的无符号数、`ult 65536` 为假 —— 于是整块缓冲**从来没人扫**。
+                # 而 L0 的规则**不禁止**缓冲里装堆指针：`_ptr_only_uses` 会把"只解引用"
+                # 的函数（如 `wr64`）吸收进安全集，于是那种函数可以把任意 u64 写进缓冲。
+                # 只登记**字**的地址就够了 —— 根扫本来就是"读那一格、看它像不像堆内地址"，
+                # 收集器一侧一个字都不用改。
+                k = (sz + 7) // 8
+                for j in range(k):
+                    idx = self.t()
+                    self.w(f"{idx} = add i32 {n0}, {i}")
+                    gp = self.t()
+                    self.w(f"{gp} = getelementptr [1024 x i64], ptr @__loment_roots,"
+                           f" i32 0, i32 {idx}")
+                    bp = self.t()
+                    self.w(f"{bp} = getelementptr [{k} x i64], ptr %{name}.buf, i32 0, i32 {j}")
+                    v = self.t()
+                    self.w(f"{v} = ptrtoint ptr {bp} to i64")
+                    self.w(f"store i64 {v}, ptr {gp}")
+                    i += 1
                 continue
             idx = self.t()
             self.w(f"{idx} = add i32 {n0}, {i}")
@@ -8215,6 +8439,13 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # **`gc_auto`**：自动那一档（`docs/210` §2.1 / §2.4）—— 编译器发精确根表 + 在每个分配点
     # 问一句"该收了没有"，收集器在运行期里。与 `gc_alpha` **互斥**（两档不同时成立）。
     gc_auto = mod.chooses.get("gc", CORE_DEFAULTS["gc"]) == "gc_auto"
+    # **LMS 第 3 级入口 A**（`docs/253` §5.3）：`alloc` 分配不出时**先收一次再试**，
+    # 而不是直接 abort。⚠ **两个条件缺一不可**：
+    #   * `lms` 开着 —— 它属于 LMS 第 3 级，不是回收档的事；
+    #   * **这份产物里真的有收集器**（`gc_auto` / `gc_auto_alpha`）—— `gc_manual` 下
+    #     没有东西可收，"拉回"在那里是一句空话。这是这一级**明写的边界**。
+    _lms_rescue = (mod.chooses.get("lms", CORE_DEFAULTS["lms"]) == "lms_open"
+                   and (gc_auto or gc_alpha))
     # **运行期维**（`docs/217` / `docs/175` §3.6）。两个方向各一句话：
     #   * `runtime`    ⇒ 产物里**一定**有那段运行期 —— 这里的 `rt_on` 无条件发 `_IR_RUNTIME`；
     #   * `no_runtime` ⇒ 产物里**一定没有** —— 那条**不在这里**：它在 `check()` 里拒
@@ -8358,15 +8589,15 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
             out.append(f"; loment-heap: platform {HOSTED_ARENA_BYTES}")
             if "malloc" not in seen_ext:  # 用户自己 `declare` 过就让他那份说了算
                 out.append("declare ptr @malloc(i64)")
-            out.append(_IR_HEAP_HOSTED)
+            out.append(_IR_HEAP_LMS_HOSTED if _lms_rescue else _IR_HEAP_HOSTED)
         elif _ffi_grown:
             out.append(f"; loment-heap: ffi {FFI_ARENA_BYTES}")
-            out.append(_IR_HEAP_FFI)
+            out.append(_IR_HEAP_LMS_FFI if _lms_rescue else _IR_HEAP_FFI)
         else:
             if _ffi_heap:
                 # 上面那个例外：说了才不是静默。
                 out.append("; loment-heap: static 65536")
-            out.append(_IR_HEAP)
+            out.append(_IR_HEAP_LMS if _lms_rescue else _IR_HEAP)
     # **根表跟着 `gc_any` 发**（见 `_IR_ROOTS`）：`gc_auto` / `gc_auto_alpha` 只要函数里有
     # 指针槽就会往根表写 —— 而收集器**跟着堆发**。两件事解绑，才能让"有根没堆"的单元
     # （alpha 把 alloc 全 L0 提走那种）不至于发出引用未定义全局的产物。**次序是 HEAP→ROOTS→GC**。
@@ -8586,8 +8817,21 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[ERR] {path}: {e}", file=sys.stderr)
         # 位置指不出来的那一档（`line == 0`，例如"前门拒了这份源"）**不写**结构化诊断 ——
         # 写进去就等于给它编了一个行号，而那个行号会被渲染器当真。
+        #
+        # **`E028`..`E030` 那几条不受这条管**（`issue #8`）：它们说的就是"这条诊断不属于
+        # 某一行"（文件读不到、产物写不出去、单元太大），所以它们**写**，`line` 明写 **0**。
+        # 渲染器那边认得 0 = 没有位置，既不印 `:0`、也不去源里切那两行。
         if e.line > 0:
             write_diags(args.diag_out, [diag_record(path, e.line, e.col, e.msg)])
+        return 1
+    except OSError as e:
+        # **文件这一层的失败**（`issue #8`）：路径不存在、给的是目录、没有读权限。
+        # 这一路原先**一句话都没有** —— `Path.read_text` 抛 `FileNotFoundError` /
+        # `PermissionError` / `IsADirectoryError`，用户拿到的是 Python 栈。它与"源码写错了"
+        # 是两件事（源码一个字符都还没看），所以它有自己的码，`line` 是 0。
+        msg = f"读不了输入文件 {path}: {e.strerror or e}"
+        print(f"[ERR] {path}: {msg}", file=sys.stderr)
+        write_diags(args.diag_out, [diag_record(path, 0, 0, msg)])
         return 1
 
     errs = check(mod, deps=deps)

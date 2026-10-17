@@ -5,7 +5,7 @@ language whose native surface syntax is Rust-flavoured, and whose semantics can 
 in **six other surface grammars** (C, C++, Java, C#, Go, Python). It compiles to native executables
 with its own backend, and the compiler is written in Loment itself.
 
-Source and toolchain: <https://github.com/FujoJTOP/loment>
+Source and toolchain: <https://github.com/Loment-Lang/loment>
 
 > **This extension ships no compiler.** The language server, the build/run/check commands and the
 > debugger all go through a Loment checkout in your workspace (`tools/loment_lsp.py`, `lomentc.py`,

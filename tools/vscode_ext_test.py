@@ -23,6 +23,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import vscode_ext  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -1026,17 +1027,7 @@ def test_vscode_doctor_names_same_name_other_publisher():
 
 
 def main(argv: list[str] | None = None) -> int:
-    passed = 0
-    for name, fn in TESTS:
-        try:
-            fn()
-        except AssertionError as e:
-            print(f"  FAIL  {name}: {e}")
-        else:
-            print(f"  PASS  {name}")
-            passed += 1
-    print(f"\nvscode_ext_test: {passed}/{len(TESTS)} 通过")
-    return 0 if passed == len(TESTS) else 1
+    return loment_suite.run(TESTS, "vscode_ext_test", only=(argv[0] if argv else None))
 
 
 if __name__ == "__main__":

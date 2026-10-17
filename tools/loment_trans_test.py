@@ -42,6 +42,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 
 import cpptrans  # noqa: E402
 import cstrans  # noqa: E402
@@ -544,22 +545,7 @@ def test_lomtrans_twin_selfhost_compiles():
 
 
 def main() -> int:
-    failed: list[str] = []
-    for fn in TESTS:
-        try:
-            fn()
-        except AssertionError as e:
-            failed.append(fn.__name__)
-            print(f"  FAIL  {fn.__name__}: {e}")
-        except Exception as e:  # noqa: BLE001
-            failed.append(fn.__name__)
-            print(f"  ERROR {fn.__name__}: {type(e).__name__}: {e}")
-    print()
-    if failed:
-        print(f"loment_trans_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-        return 1
-    print(f"loment_trans_test: {len(TESTS)}/{len(TESTS)} 通过")
-    return 0
+    return loment_suite.run(TESTS, "loment_trans_test")
 
 
 if __name__ == "__main__":

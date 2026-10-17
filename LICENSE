@@ -32,7 +32,7 @@ carry a readable statement of where it came from — naming Loment and the FujoO
 Project. Put it somewhere a reader will find it, such as a NOTICE file or the
 README:
 
-    Based on Loment (FujoOS Project) — https://github.com/FujoJTOP/loment
+    Based on Loment (FujoOS Project) — https://github.com/Loment-Lang/loment
 
 Keep that statement in every source distribution of the derived work.
 Attribution is the whole of this condition. It does not oblige you to use the

@@ -333,6 +333,7 @@ case "${1:-help}" in
         need loment-lomelf loment-lomelf
         tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
         rc=0
+        lrc=0
         "$(tool loment-driver)" "$(to_posix "$src")" --diag-out "$tmp/d.jsonl" > "$tmp/a.ll" 2>"$tmp/e.txt" || rc=$?
         if [ $rc -ne 0 ]; then
             report_diags "$tmp/d.jsonl" "$tmp/e.txt" "$nc $om"
@@ -415,13 +416,22 @@ LOMENT_LIBCALLS_EOF
             else
                 echo "loment: --opt: no clang found, falling back to the unoptimized lomelf backend" >&2
                 # shellcheck disable=SC2086
-                "$(tool loment-lomelf)" "$tmp/a.ll" "$out" $linkargs $portarg || exit 1
+                "$(tool loment-lomelf)" "$tmp/a.ll" "$out" --diag-out "$tmp/d.jsonl" $linkargs $portarg 2>"$tmp/e2.txt" || lrc=$?
             fi
         elif [ ${#links[@]} -gt 0 ]; then
             # shellcheck disable=SC2086
-            "$(tool loment-lomelf)" "$tmp/a.ll" "$out" $linkargs $portarg || exit 1
+            "$(tool loment-lomelf)" "$tmp/a.ll" "$out" --diag-out "$tmp/d.jsonl" $linkargs $portarg 2>"$tmp/e2.txt" || lrc=$?
         else
-            "$(tool loment-lomelf)" "$tmp/a.ll" "$out" || exit 1
+            "$(tool loment-lomelf)" "$tmp/a.ll" "$out" --diag-out "$tmp/d.jsonl" 2>"$tmp/e2.txt" || lrc=$?
+        fi
+        # The linker gets its OWN --diag-out, into the same file: when it can put a code on
+        # (the `-o` directory not existing is the common one) it writes a record there and
+        # report_diags renders it with the title, the why and the fixes; when it writes no
+        # record its plain line is shown as is, never silently lost. Reusing the driver's
+        # file is safe - on success the driver wrote nothing into it.
+        if [ $lrc -ne 0 ]; then
+            report_diags "$tmp/d.jsonl" "$tmp/e2.txt" "$nc $om"
+            exit 1
         fi
         if [ "$mode" = run ]; then
             chmod 755 "$out"
@@ -663,8 +673,14 @@ mkdir "%tmp%" >nul 2>nul
 set "drc=%ERRORLEVEL%"
 if not "%drc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e.txt" "%cnc% %com%"
 if not "%drc%"=="0" goto fail
-"%here%loment-lomelf.exe" "%tmp%\a.ll" "%out%.exe" %linkargs% %portarg%
-if not "%ERRORLEVEL%"=="0" goto fail
+rem The linker gets its OWN --diag-out, into the same file (on success the driver wrote
+rem nothing into it). When it can put a code on - the `-o` directory not existing is the
+rem common one - :report_diags renders it with the title, the why and the fixes; when it
+rem writes no record its plain line is shown as is, never silently lost.
+"%here%loment-lomelf.exe" "%tmp%\a.ll" "%out%.exe" --diag-out "%tmp%\d.jsonl" %linkargs% %portarg% 2>"%tmp%\e2.txt"
+set "lrc=%ERRORLEVEL%"
+if not "%lrc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e2.txt" "%cnc% %com%"
+if not "%lrc%"=="0" goto fail
 goto done
 
 :run_go
@@ -674,8 +690,10 @@ mkdir "%tmp%" >nul 2>nul
 set "drc=%ERRORLEVEL%"
 if not "%drc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e.txt" "%cnc% %com%"
 if not "%drc%"=="0" goto fail
-"%here%loment-lomelf.exe" "%tmp%\a.ll" "%tmp%\a.exe" %linkargs% %portarg%
-if not "%ERRORLEVEL%"=="0" goto fail
+"%here%loment-lomelf.exe" "%tmp%\a.ll" "%tmp%\a.exe" --diag-out "%tmp%\d.jsonl" %linkargs% %portarg% 2>"%tmp%\e2.txt"
+set "lrc=%ERRORLEVEL%"
+if not "%lrc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e2.txt" "%cnc% %com%"
+if not "%lrc%"=="0" goto fail
 "%tmp%\a.exe"
 set "rc=%ERRORLEVEL%"
 del /q "%tmp%\a.ll" "%tmp%\a.exe" >nul 2>nul
@@ -694,7 +712,7 @@ rem that as signed -- so `if errorlevel 1` reads it as success, we fall through 
 rem and print "loment: <out>.exe" while nothing was written. Proven 2026-09-15:
 rem `loment build tour.lomt -o tour` exited 0 with no tour.exe on disk.
 :fail
-del /q "%tmp%\a.ll" "%tmp%\a.exe" "%tmp%\d.jsonl" "%tmp%\e.txt" >nul 2>nul
+del /q "%tmp%\a.ll" "%tmp%\a.exe" "%tmp%\d.jsonl" "%tmp%\e.txt" "%tmp%\e2.txt" >nul 2>nul
 rmdir "%tmp%" >nul 2>nul
 echo loment: failed -- nothing was produced 1>&2
 exit /b 1

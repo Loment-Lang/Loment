@@ -690,7 +690,7 @@ fn lpc_run(r1: ptr, r1n: u32, r2: ptr, r2n: u32, stale: bool) -> u32 {
     lpc_ws(FD_OUT, "  The outlet is written whole by `tools/loment_publish.py --push lompi`\n");
     lpc_ws(FD_OUT, "  from a loment checkout -- nobody edits it, and nothing in your tree\n");
     lpc_ws(FD_OUT, "  can fix it. Please open an issue so the maintainers notice:\n");
-    lpc_ws(FD_OUT, "      https://github.com/FujoJTOP/lompi/issues/new\n");
+    lpc_ws(FD_OUT, "      https://github.com/Loment-Lang/lompi/issues/new\n");
     return 1;
 }
 
@@ -814,7 +814,7 @@ fn lpc_put_lit(dst: ptr, lit: str) -> u32 {
 /// `tools/lompicheck_test.py` 有一条判据把这两处钉在一起（写死在源码里是没办法：
 /// 这个程序引不了 Python 的发布清单，而且 Loment **没有字符串常量**，只能写成函数）。
 fn lpc_outlet_url() -> str {
-    return "https://github.com/FujoJTOP/lompi";
+    return "https://github.com/Loment-Lang/lompi";
 }
 
 /// 写一行帮助。**纯 ASCII 英文**：与 `loment` / `lompi` 两个 CLI 同一条规矩
@@ -889,7 +889,9 @@ fn lpc_home_len(b: ptr, off: u32, n: u32) -> u32 {
 
 /// 三个"家目录"标记之一在 `p[off..]` 处的话返回它的长度，否则 0。
 fn lpc_marker_len(p: ptr, off: u32, rem: u32) -> u32 {
-    let a: u32 = lpc_prefix_lit(p, off, rem, "\Users\\");
+    // `\\Users\\`（`#33`）：原先写的是 `"\Users\\"`，靠"未知转义取原字符"的兜底在跑 ——
+    // 它的值其实是 `Users\`，**少了开头那个反斜杠**，所以这个标记从来没匹配对过。
+    let a: u32 = lpc_prefix_lit(p, off, rem, "\\Users\\");
     if a > 0 {
         return a;
     }

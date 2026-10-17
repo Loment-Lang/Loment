@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -22,6 +23,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lomc  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def _git(*args: str) -> str:
+    """跑一条 git，返回 stdout（**失败回空串**）。只有 M93/M95 的滞后容差用它 ——
+    "自这些东西上次被写出以来动过哪些路径"问的就是 git。判不了（浅克隆 / 不是 git 树）
+    时回空串，调用方按"判不了"处理而**不是**当成"没动过"（见那一处的注释）。
+    """
+    r = subprocess.run(["git", *args], cwd=str(ROOT), capture_output=True,
+                       text=True, errors="replace", shell=False)
+    return r.stdout.strip() if r.returncode == 0 else ""
 LOM_FUAI = ROOT / "lom" / "fuai.lom"
 LOM_FUC = ROOT / "lom" / "fuc.lom"
 LOM_FUJR = ROOT / "lom" / "fujr.lom"
@@ -463,24 +474,66 @@ def audit_l1(diffs: list[str]) -> None:
         elif sh_obj.read_text(encoding="utf-8") != want_sh:
             diffs.append(f"[l1         ] {sh_obj.relative_to(ROOT)} 与 selfhost 源码不一致")
 
-    # M93/M95/M99: 手册站点与发布清单必须与当前工件一致
+    # M93/M95: 手册站点与发布清单必须与当前工件一致 —— **按滞后容差判** (2026-10-16)。
+    #
+    # 这两条原来是"逐字节等于**当前树**"。那时全树生成物由**每个 PR** 提交，所以那句话在
+    # 每个 PR 上都为真；代价是那两个文件是**全树台账**（每一行都是别人的文件），两个并发 PR
+    # 写相邻行 ⇒ **必冲突**（实测见 `.github/workflows/manifest.yml` 文件头那节）。
+    #
+    # 现在全树生成物由 `main` 上的单一写者刷新（同一个 workflow 的 `emit-main`），
+    # 于是**在一棵还没被刷新的树上，落后是预期的** —— 拿它判红就是拿排队现象当缺陷。
+    #
+    # 所以改成：对**自这些东西上次被写出以来没动过的路径**要求相等。
+    #   * 动过 = 还没轮到写者刷新 ⇒ 容忍（那是设计，不是漂）
+    #   * 没动 = 它必须对得上 ⇒ 抓**真正错的**台账（手工改过的、生成器写错的）
+    # 这比原来那条**更强**：原写法在"仓库里的和生成的一起过期"时照样绿
+    # （`docs/162` 记过那个形状：四次都是这么漏掉的）。
+    #
+    # **判不了就不判"绿"，判"红"**：浅克隆（`actions/checkout` 默认 `fetch-depth: 1`）
+    # 里 `git log` 只看得到 HEAD，"自上次写出以来动过什么"问不出来 —— 那时退回严格比较
+    # 会把每个 PR 都判红，而**静默放行**会让这条判据在 CI 上形同不存在。两种都不行，
+    # 所以这里直接报一条能照着修的账（门禁的分片 checkout 要 `fetch-depth: 0`）。
+    def _changed_since(rel: str) -> set[str] | None:
+        """自 `rel` 上次被写出以来动过的路径；拿不到历史就 None。"""
+        if _git("rev-parse", "--is-shallow-repository") == "true":
+            return None
+        last = _git("log", "-1", "--format=%H", "--", rel)
+        if not last:
+            return None
+        # **与工作树比，不与 `HEAD` 比**（`git diff <sha>` 省掉第二个参数就是这个意思）：
+        # `last..HEAD` 看不见**未提交**的改动，于是本机带着改动跑一次，就会把刚改的那几个
+        # 文件报成"台账对不上"（实测：6 处）。CI 上树是干净的，两种写法等价。
+        out = _git("diff", "--name-only", last)
+        return {ln.strip() for ln in out.splitlines() if ln.strip()}
+
+    man_stale = _changed_since("docs/manual")
+    rel_stale = _changed_since("loment/build/release-manifest.json")
+
     import loment_manual
     import loment_release
-    for rel, text in loment_manual.build().items():
-        p = ROOT / "docs" / "manual" / rel
-        if not p.exists() or p.read_text(encoding="utf-8") != text:
-            diffs.append(f"[l1         ] docs/manual/{rel} 与编译器版本不一致 (M93)")
-            break
-    man = ROOT / "loment" / "build" / "release-manifest.json"
-    want_rel = {x["path"]: x["sha256"] for x in loment_release.build()["files"]}
-    if not man.exists():
-        diffs.append(f"[l1         ] {man.relative_to(ROOT)} 缺失 (M95)")
+    if man_stale is None or rel_stale is None:
+        diffs.append("[l1         ] M93/M95 判不了：拿不到 git 历史"
+                     "（浅克隆？门禁的分片 checkout 要 fetch-depth: 0）")
     else:
-        got_rel = {x["path"]: x["sha256"]
-                   for x in json.loads(man.read_text(encoding="utf-8")).get("files", [])}
-        bad = [k for k in want_rel if got_rel.get(k) != want_rel[k]]
-        if bad or set(got_rel) != set(want_rel):
-            diffs.append(f"[l1         ] release-manifest.json 与工件不一致 (M95): {bad[:2]}")
+        for rel, text in loment_manual.build().items():
+            p = ROOT / "docs" / "manual" / rel
+            if f"docs/manual/{rel}" in man_stale:
+                continue
+            if not p.exists() or p.read_text(encoding="utf-8") != text:
+                diffs.append(f"[l1         ] docs/manual/{rel} 与生成的页面不一致 (M93)")
+                break
+        man = ROOT / "loment" / "build" / "release-manifest.json"
+        want_rel = {x["path"]: x["sha256"] for x in loment_release.build()["files"]}
+        if not man.exists():
+            diffs.append(f"[l1         ] {man.relative_to(ROOT)} 缺失 (M95)")
+        else:
+            got_rel = {x["path"]: x["sha256"]
+                       for x in json.loads(man.read_text(encoding="utf-8")).get("files", [])}
+            bad = [k for k in want_rel if got_rel.get(k) != want_rel[k] and k not in rel_stale]
+            extra = [k for k in got_rel if k not in want_rel and k not in rel_stale]
+            if bad or extra:
+                diffs.append(f"[l1         ] release-manifest.json 与工件不一致 (M95): "
+                             f"{(bad + extra)[:2]}")
 
 
 def emit() -> int:

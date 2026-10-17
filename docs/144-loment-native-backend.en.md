@@ -1,5 +1,5 @@
 <!-- translated-from: docs/144-loment-native-backend.md -->
-<!-- source-sha256: 6397a2932ed4e5eef1949d46c8c866ea3a389cac1d215b3c549df4e8665b97dd -->
+<!-- source-sha256: 7a63b48cf70cf59c4dc73806d22a06186fd2a3257a78445f80a068302aca8718 -->
 
 # 144 · An extra-long task: the Loment native backend → self-hosting
 
@@ -40,8 +40,18 @@ routing through something else.
   is UB.
 - **Signed/unsigned instruction choice follows the declared type**: `icmp slt/ult`, `sdiv/udiv`, `ashr/lshr`,
   `srem/urem`.
-- **Division-by-zero/overflow semantics differ from the Rust path** (LLVM is UB, Rust panics): M0 does not
-  handle it, and a rule must be fixed before M2.
+- **Division-by-zero / overflow semantics**: **settled on 2026-10-16** (items 1 and 3 of
+  issue #19; this line used to read "M0 does not handle it, and a rule must be fixed before
+  M2"):
+  * **Overflow wraps modulo 2^n**, and that is **defined** behaviour, not UB: the emitted
+    `add` / `sub` / `mul` **never carry `nsw` / `nuw`** (carrying them is what makes overflow
+    UB), and `lomentc_test::test_arithmetic_is_defined_to_wrap_never_undefined` pins it. The
+    language has no `checked_add`-style builtin; write the guard **before** the arithmetic.
+  * **Division / modulo by zero is a trap**: when `b == 0` the emitter branches to a block
+    that calls `void @__loment_abort()` (`__loment_abort` = `llvm.trap` + `unreachable`), so
+    it is a **defined abort** rather than whatever the CPU happens to do
+    (`test_m18_wrap_and_divzero` pins the IR shape).
+  * Both are in the table users read (`SKILL.md` section 6.2, items 15 and 16).
 
 ## 4. Verification method
 

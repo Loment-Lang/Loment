@@ -20,6 +20,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import lomentc  # noqa: E402
 import lomelf  # noqa: E402
 import lompi_sync  # noqa: E402
@@ -978,7 +979,7 @@ def test_selfhost_refuses_a_file_over_the_use_limit():
         r = subprocess.run([str(s), str(hi)], cwd=str(proj), capture_output=True, timeout=300)
         err = r.stderr.decode("utf-8", "replace")
         assert r.returncode != 0, f"{n} 条 use 应当报错, 却过了"
-        assert "超过上限" in err, err[-300:]
+        assert "`use` lines in one file" in err, err[-300:]
 
 
 # ---------------------------------------------------------------- 与正本的一致性
@@ -997,16 +998,7 @@ def test_dev_copy_and_repo_copy_do_not_silently_drift():
 
 
 def main() -> int:
-    failed = []
-    for name, fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {name}")
-        except Exception as e:  # noqa: BLE001
-            failed.append((name, e))
-            print(f"  FAIL  {name}: {type(e).__name__}: {e}")
-    print(f"\nloment_lompi_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-    return 1 if failed else 0
+    return loment_suite.run(TESTS, "loment_lompi_test")
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import lomc  # noqa: E402
 import loment_comefor  # noqa: E402
 import lomentc  # noqa: E402
@@ -350,7 +351,7 @@ def _py_report() -> str:
     """用 **Python 的 `loment_comefor`** 跑与孪生**同名的那 7 项**检查, 打同一份报告。
 
     孪生只能走驱动的命令面（退出码 + 诊断），所以这一侧也按"看产物"的规则算。
-    **负例大多只判"被拒 + 有一句诊断"**（`use` / `byuse` / `顶层` 三条另收关键词）：
+    **负例大多只判"被拒 + 有一句诊断"**（`use` / `byuse` / `top level` 三条另收关键词）：
     两侧的措辞本来就不同（参考: "`byuse 'nope'` 收的不是任何在用的方言" / 自举:
     "byuse 收的不是任何在用的方言"）—— 把措辞变成判据是错的, 两个方向都错。
     """
@@ -396,6 +397,11 @@ def _py_report() -> str:
         rejected("bad_unknown_byuse.lomt", "byuse"), "byuse 收错名字没被拒")
     rep("test_overconsumption_is_rejected",
         rejected("bad_overconsume.lomt", ""), "宏体多吃没被拒")
+    # 关键词**各侧查各自实现的原话**：这一侧查的是**参考实现**（`loment_comefor.expand`，
+    # 消息保持中文），孪生那一侧查的是**自举驱动**（`FujoJTOP/loment#8` 之后是纯 ASCII
+    # 英文的 `comefor must be written at the top level`）。关键词不进报告（报告只有
+    # PASS/FAIL 与失败原因），所以两边仍然逐字节相同 —— 实测把这个词写死成一种语言，
+    # 就是"报告与 Python 版不同：py 6/7 / loment 7/7"。
     rep("test_definition_must_be_top_level",
         rejected("bad_not_top.lomt", "顶层"), "块里的定义没被拒")
     rep("test_entry_takes_no_params",
@@ -530,16 +536,7 @@ def test_comefor_twin_selfhost_compiles():
 
 
 def main() -> int:
-    failed: list[str] = []
-    for name, fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {name}")
-        except Exception as e:  # noqa: BLE001
-            failed.append(name)
-            print(f"  FAIL  {name}: {type(e).__name__}: {e}")
-    print(f"\nloment_comefor_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-    return 1 if failed else 0
+    return loment_suite.run(TESTS, "loment_comefor_test")
 
 
 if __name__ == "__main__":

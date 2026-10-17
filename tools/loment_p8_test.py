@@ -609,11 +609,19 @@ def test_m81_falling_off_the_end_is_refused():
     跑到就是 Illegal instruction"）：一条静态检查的通过不意味着"不会 trap", 那正是这里的洞。
 
     规则是**结构**的(不做数据流): 末尾是 `return`、是带 `else` 的 `if` 且两支都返回、是
-    **每条臂都返回**的 `match`。**四种合法收尾在下面当正例钉着** —— 只钉"该拒的拒了"
+    **每条臂都返回**的 `match`。**每一种合法收尾都在下面当正例钉着** —— 只钉"该拒的拒了"
     很容易把规矩收严到误报合法程序。跑遍本仓语料时这条规则一条都不误报。
 
-    自举 checker 还没这条(`loment_rule_parity` 里那两条探针登记成 MISSING), 所以这一条
-    只钉参考实现 —— 与 `test_m81_two_units_with_the_same_module_name` 同一个口径。
+    最后那个正例（trait 里只有签名的方法）是**实测抓到的误报**：自举侧的
+    `chk_find_brace` 取的是"往后第一个 `{`"，签名式方法会拿到后面 `struct` 的 `{`，
+    于是 `chk_falls` 在一个根本不属于它的体上判"掉出末尾"—— 本仓
+    `loment/examples/native_trait.lomt` 就是这么被误报的。钉住它，别让
+    `chk_fn_has_body` 那道闸门被后来的改动放空。
+
+    2026-10-17 起**两边都钉**：这条规则搬进了自举 checker（`checker.lomt` 的 `chk_falls`），
+    `loment_rule_parity` 里 `falloff-if` / `falloff-match-arm` 从 MISSING 变成 EQUAL，预算
+    跟着 104 → 121。所以这里除了参考实现，还要把**同一个** checker 建出来跑一遍 ——
+    否则 #22 的用户可见症状（`loment check` 放行、产物 SIGILL）不会被任何判据挡住。
     '''
     bad = {
         "if-no-else": "module m\n\nfn pick(x: u32) -> u32 {\n    if x > 0 {\n        return 1;\n    }\n}\n",
@@ -625,6 +633,8 @@ def test_m81_falling_off_the_end_is_refused():
         "if-else-both": "module m\n\nfn pick(x: u32) -> u32 {\n    if x > 0 {\n        return 1;\n    } else {\n        return 2;\n    }\n}\n",
         "match-all-arms": "module m\n\nenum E {\n    A,\n    B,\n}\n\nfn pick(e: E) -> u32 {\n    match e {\n        E::A => {\n            return 1;\n        }\n        _ => {\n            return 2;\n        }\n    }\n}\n",
         "void-falls-fine": "module m\n\nfn log(x: u32) {\n    let v: u32 = x;\n}\n",
+        "else-if-chain": "module m\n\nfn pick(x: u32) -> u32 {\n    if x > 0 {\n        return 1;\n    } else if x < 0 {\n        return 2;\n    } else {\n        return 3;\n    }\n}\n",
+        "trait-signature": "module m\n\ntrait Measurable {\n    fn measure(self) -> u32;\n}\n\nstruct Small {\n    v: u32,\n}\n\nimpl Measurable for Small {\n    fn measure(self) -> u32 {\n        return self.v;\n    }\n}\n",
     }
     with tempfile.TemporaryDirectory() as tds:
         d = Path(tds)
@@ -639,7 +649,20 @@ def test_m81_falling_off_the_end_is_refused():
             f.write_text(src, encoding="utf-8", newline="\n")
             errs = lomentc.check(lomentc.load(f))
             assert not errs, f"{tag}: 合法收尾被误拒: {errs}"
-        print(f"      掉出末尾: {len(bad)} 种非法形状都拒(E027), {len(good)} 种合法收尾都放行")
+        # 自举 checker：**同一批**输入再跑一遍。这是 #22 的用户可见那一半 ——
+        # 用户手上的 `loment check` 走的就是这个 checker。
+        if not _clang():
+            print("      SKIP 自举侧: 无 clang")
+        else:
+            exe = _build_checker(str(d))
+            for tag in bad:
+                got, det = _loment_codes(exe, d / (tag + ".lomt"))
+                assert got == [27], f"[自举] {tag}: 期望码 [27]，得到 {got} {det}"
+            for tag in good:
+                got, det = _loment_codes(exe, d / (tag + ".lomt"))
+                assert got == [], f"[自举] {tag}: 合法收尾被误拒 {got} {det}"
+        print(f"      掉出末尾: {len(bad)} 种非法形状都拒(E027), {len(good)} 种合法收尾都放行"
+              f"（参考实现 + 自举 checker 各一遍）")
 
 
 @test
@@ -774,7 +797,10 @@ def test_m81_loment_checker_matches_python():
     pos = [ROOT / "loment" / "selfhost" / "pos" / "ok.lomt",
            ROOT / "loment" / "examples" / "mathutil.lomt",
            ROOT / "loment" / "examples" / "bytes.lomt",
-           ROOT / "loment" / "examples" / "native.lomt"]
+           ROOT / "loment" / "examples" / "native.lomt",
+           # trait 里**只有签名**的方法: 自举侧 E027 第一版就是在这份文件上误报的
+           # (拿后面 `struct` 的 `{` 当函数体), 所以它必须在正例里当钉子。
+           ROOT / "loment" / "examples" / "native_trait.lomt"]
     with tempfile.TemporaryDirectory() as td:
         exe = _build_checker(td)
         exact = 0

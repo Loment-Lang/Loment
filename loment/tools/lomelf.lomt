@@ -3135,12 +3135,15 @@ fn link_object_mem(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, ap: u3
     }
     // **端口门**：这个对象带端口、而调用方没有显式放开 ⇒ **点名拒**（不是静默丢掉那些
     // 符号 —— 丢掉会在回填时报一句"引用了未定义的符号"，用户看到的是"符号找不到"而不是
-    // "这扇门关着"，方向完全错了）。放开只有一条路：`--allow-ports`，开发通道与判据用它，
-    // 启动器只在 dev 传它（`tools/loment_dist.py`）。与参考实现同一条口径。
+    // "这扇门关着"，方向完全错了）。放开只有一条路：`--allow-ports`。
+    //
+    // **`#406` 开闸（2026-10-17）之后默认仍然是拒**：链接器不知道渠道（它是一只被启动器
+    // 调起来的独立工具），所以"默认拒 + 启动器显式开"这条形状不变 —— 变的是启动器**两个
+    // 渠道都传那面旗**（`tools/loment_dist.py`）。与参考实现同一条口径。
     if ap == 0 && np != 0 {
         wstr(2, "lomelf: 外源对象带了未定义符号（通向世界的端口），而链接器默认不收。\n");
-        wstr(2, "真 libc / 真共享库那条路还没完工（docs/222 §4 / docs/219 §8b 的 S2），\n");
-        wstr(2, "0.1.4.5 里它是关着的。开发通道要它得显式写 --allow-ports；\n");
+        wstr(2, "链接器不知道渠道，所以默认永远是拒；启动器在两个渠道都传 --allow-ports。\n");
+        wstr(2, "自己调链接器时要它就得显式写 --allow-ports；\n");
         wstr(2, "自闭合的对象（没有未定义符号）不受这条影响。\n");
         return die(1);
     }
@@ -3676,6 +3679,643 @@ fn resolve_fixups(tab: ptr, t: ptr, txt: ptr) -> u32 {
         i = i + 1;
     }
     return 0;
+}
+
+// ---------------------------------------------------------------- V2 共享对象 (docs/183 §4)
+//
+// 与参考实现 (tools/lomelf.py 的 `SharedObject` / `build_dynamic_tables` /
+// `build_elf_dynamic`) **逐条镜像** —— 判据是产物逐字节相同。
+//
+// `.so` 的字节**一个也不进产物**: 我们只读它的**导出表**, 产物里留下 `DT_NEEDED` 与
+// PLT; 跑起来的时候由系统的 loader 把 `.so` 映射进来、按名字解析、把地址填进 GOT。
+
+const EXP_MAX: u32 = 8192;         // 导出表条数上限
+const TB_EXP: u32 = 2662176;       // stride 12 × EXP_MAX: (名字池起点, 长度, 标志)
+const X_NOFF: u32 = 0;
+const X_NLEN: u32 = 4;
+const X_FLAG: u32 = 8;             // bit0 = 默认版本 / bit1 = 数据符号
+const X_SIZE: u32 = 12;
+const IMP_MAX: u32 = 1024;         // 导入表条数上限
+const TB_IMP: u32 = 2760480;       // stride 8 × IMP_MAX: (名字池起点, 长度)
+
+const C_NSHARED: u32 = 120;        // 0/1 —— 这一版一次只能链一个 `.so`
+const C_SONOFF: u32 = 124;         // SONAME 在名字池里的起点与长度
+const C_SONLEN: u32 = 128;
+const C_NEXP: u32 = 132;           // 导出表条数
+const C_NIMP: u32 = 136;           // 导入表条数
+const C_PLTA: u32 = 140;           // PLT 起点 (vaddr)
+const C_INTERP: u32 = 144;         // `.interp` 的 vaddr
+const C_GOTA: u32 = 148;           // `.got.plt` 的 vaddr
+const C_DYNA: u32 = 152;           // `.dynamic` 的 vaddr
+const C_TAILV: u32 = 156;          // 尾部那一段 (GOT + .dynamic) 的 vaddr
+const C_DYNSTRA: u32 = 160;        // `.dynstr` / `.dynsym` / `.hash` / `.gnu.hash` /
+const C_DSLEN: u32 = 164;          //   `.rela.plt` 的 vaddr 与 `.dynstr` 长度
+const C_SYMA: u32 = 168;
+const C_HASHA: u32 = 172;
+const C_GNUA: u32 = 176;
+const C_RELAA: u32 = 180;
+const C_NEEDOFF: u32 = 184;        // DT_NEEDED 的值 = SONAME 在 `.dynstr` 里的偏移
+
+fn is_shared(mem: ptr, n: u32) -> u32 {
+    if n < 64 {
+        return 0;
+    }
+    if load8(mem, 0) != 127 || load8(mem, 1) != 69 || load8(mem, 2) != 76
+        || load8(mem, 3) != 70 || load8(mem, 4) != 2 || load8(mem, 5) != 1 {
+        return 0;
+    }
+    if rd16(mem, 16) == 3 {
+        return 1;
+    }
+    return 0;
+}
+
+fn put_lit(p: ptr, at: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        store8(p, at + i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    return at + n;
+}
+
+/// 把 `src[off..off+len)` 写进 `dst` 的 `at`，返回新游标。`cap` 是**目标缓冲**的上限
+/// —— 名字池住在输入缓冲里，越界就踩到下一张缓冲（与 `put_name` 同一条纪律）。
+fn put_bytes(dst: ptr, at: u32, src: ptr, off: u32, len: u32, cap: u32) -> u32 {
+    if at + len >= cap {
+        let _f: u32 = fail("缓冲没有空间放共享对象的名字");
+    }
+    let i: u32 = 0;
+    while i < len {
+        store8(dst, at + i, load8(src, off + i) as u8);
+        i = i + 1;
+    }
+    return at + len;
+}
+
+/// 记一条导出。同名可能有多条（不同版本）：**默认版本优先**，非默认的不覆盖它 ——
+/// 与参考实现的 `SharedObject.__init__` 同一条规则。
+fn exp_add(tab: ptr, t: ptr, src: ptr, off: u32, len: u32, typ: u32, hidden: u32) -> u32 {
+    let n: u32 = cell(tab, C_NEXP);
+    let k: u32 = 0;
+    while k < n {
+        let base: u32 = TB_EXP + k * X_SIZE;
+        if nm_eq(t, load32(tab, base + X_NOFF), load32(tab, base + X_NLEN), src, off, len) == 1 {
+            let f: u32 = load32(tab, base + X_FLAG);
+            if f % 2 == 0 && hidden == 0 {
+                store32(tab, base + X_FLAG, f - f % 2 + 1);
+            }
+            return 0;
+        }
+        k = k + 1;
+    }
+    if n >= EXP_MAX {
+        let _f2: u32 = fail("共享对象导出表满了 — 抬高 EXP_MAX");
+    }
+    let cur: u32 = cell(tab, C_EXTN);
+    let nx: u32 = put_bytes(t, cur, src, off, len, IN_CAP);
+    setcell(tab, C_EXTN, nx);
+    let base2: u32 = TB_EXP + n * X_SIZE;
+    store32(tab, base2 + X_NOFF, cur);
+    store32(tab, base2 + X_NLEN, len);
+    let isdef: u32 = 1 - hidden;
+    let isobj: u32 = 0;
+    if typ == 1 {
+        isobj = 1;
+    }
+    store32(tab, base2 + X_FLAG, isdef + isobj * 2);
+    setcell(tab, C_NEXP, n + 1);
+    return 0;
+}
+
+/// 查一个导出：返回 `标志 + 1`（0 = 没有这个名字）—— 加一是为了把"找到了但标志是 0"
+/// 与"没找到"分开。
+fn exp_find(tab: ptr, t: ptr, noff: u32, nlen: u32) -> u32 {
+    let n: u32 = cell(tab, C_NEXP);
+    let k: u32 = 0;
+    while k < n {
+        let base: u32 = TB_EXP + k * X_SIZE;
+        if span_eq(t, load32(tab, base + X_NOFF), load32(tab, base + X_NLEN), noff, nlen) == 1 {
+            return load32(tab, base + X_FLAG) + 1;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+/// 读一个 `.so` 的**导出表**与 SONAME。**不搬它的任何字节**。
+fn so_load(tab: ptr, t: ptr, mem: ptr, n: u32, pname: ptr) -> u32 {
+    let phoff: u32 = load32(mem, 32);
+    let phen: u32 = rd16(mem, 54);
+    let phn: u32 = rd16(mem, 56);
+    let dyno: u32 = NO;
+    let dynl: u32 = 0;
+    let k: u32 = 0;
+    while k < phn {
+        let o: u32 = phoff + k * phen;
+        if load32(mem, o) == 2 {
+            dyno = load32(mem, o + 8);
+            dynl = load32(mem, o + 32);
+        }
+        k = k + 1;
+    }
+    if dyno == NO {
+        wstr(2, "lomelf: 共享对象没有 PT_DYNAMIC: ");
+        write_cstr(2, pname, 0);
+        wstr(2, "\n");
+        return die(1);
+    }
+    // `.dynamic` 里我们只要两样：SONAME 与 STRTAB 的 vaddr。
+    let strv: u32 = 0;
+    let sono: u32 = NO;
+    let p: u32 = dyno;
+    let dend: u32 = dyno + dynl;
+    while p + 16 <= dend {
+        let tag: u32 = load32(mem, p);
+        let val: u32 = load32(mem, p + 8);
+        if tag == 0 {
+            p = dend;
+        } else {
+            if tag == 5 {
+                strv = val;
+            }
+            if tag == 14 {
+                sono = val;
+            }
+            p = p + 16;
+        }
+    }
+    // vaddr -> 文件偏移（落在哪个 PT_LOAD 里）。与参考实现 `voff` 同一条。
+    let sto: u32 = NO;
+    k = 0;
+    while k < phn {
+        let o2: u32 = phoff + k * phen;
+        if load32(mem, o2) == 1 {
+            let va: u32 = load32(mem, o2 + 16);
+            let fs: u32 = load32(mem, o2 + 32);
+            let fo: u32 = load32(mem, o2 + 8);
+            if strv >= va && strv < va + fs {
+                sto = fo + (strv - va);
+            }
+        }
+        k = k + 1;
+    }
+    if strv != 0 && sto == NO {
+        wstr(2, "lomelf: 共享对象的 .dynamic 里有个地址落在任何 PT_LOAD 之外: ");
+        write_cstr(2, pname, 0);
+        wstr(2, "\n");
+        return die(1);
+    }
+    // SONAME：没有就用**文件名**（loader 按那个找）。
+    let son_o: u32 = cell(tab, C_EXTN);
+    if sono == NO {
+        let bn: u32 = 0;
+        let q: u32 = 0;
+        while load8(pname, q) != 0 {
+            if load8(pname, q) == 47 {
+                bn = q + 1;
+            }
+            q = q + 1;
+        }
+        setcell(tab, C_EXTN, put_bytes(t, son_o, pname, bn, q - bn, IN_CAP));
+        setcell(tab, C_SONOFF, son_o);
+        setcell(tab, C_SONLEN, q - bn);
+    } else {
+        let sl: u32 = cstr_len(mem, sto + sono);
+        setcell(tab, C_EXTN, put_bytes(t, son_o, mem, sto + sono, sl, IN_CAP));
+        setcell(tab, C_SONOFF, son_o);
+        setcell(tab, C_SONLEN, sl);
+    }
+    // 节头：`.dynsym`(11) / `.gnu.version`(0x6FFFFFFF)，`.dynstr` 就是 `.dynsym` 的
+    // `sh_link`（与参考实现 `byname[".dynstr"]` 指同一节）。
+    let shn: u32 = sh_num(mem);
+    let dsi: u32 = NO;
+    let vsi: u32 = NO;
+    k = 0;
+    while k < shn {
+        let ty: u32 = sh_type(mem, k);
+        if ty == 11 {
+            dsi = k;
+        }
+        if ty == 1879048191 {
+            vsi = k;
+        }
+        k = k + 1;
+    }
+    if dsi == NO {
+        wstr(2, "lomelf: 共享对象没有 .dynsym（被 strip 掉了?）—— 这一版只读带节头的 .so: ");
+        write_cstr(2, pname, 0);
+        wstr(2, "\n");
+        return die(1);
+    }
+    let dso: u32 = sh_off(mem, dsi);
+    let dsn: u32 = sh_size(mem, dsi) / 24;
+    let dstr: u32 = sh_off(mem, sh_link(mem, dsi));
+    let vso: u32 = 0;
+    let vsn: u32 = 0;
+    if vsi != NO {
+        vso = sh_off(mem, vsi);
+        vsn = sh_size(mem, vsi) / 2;
+    }
+    k = 1;
+    while k < dsn {
+        let o3: u32 = dso + k * 24;
+        let noff: u32 = load32(mem, o3);
+        let info: u32 = load8(mem, o3 + 4) as u32;
+        let shndx: u32 = rd16(mem, o3 + 6);
+        // `shndx == 0` 是**它自己的依赖**（如 libc.so.6），不是它能给人的东西。
+        if shndx != 0 && noff != 0 {
+            let bind: u32 = info / 16;
+            let typ: u32 = info % 16;
+            if bind == 1 || bind == 2 {
+                if typ == 1 || typ == 2 {
+                    let nl: u32 = cstr_len(mem, dstr + noff);
+                    let hid: u32 = 0;
+                    if k < vsn {
+                        if rd16(mem, vso + k * 2) >= 32768 {
+                            hid = 1;
+                        }
+                    }
+                    let _a: u32 = exp_add(tab, t, mem, dstr + noff, nl, typ, hid);
+                }
+            }
+        }
+        k = k + 1;
+    }
+    if cell(tab, C_NEXP) == 0 {
+        wstr(2, "lomelf: 共享对象没有可用的导出（GLOBAL/WEAK 的 FUNC/OBJECT）: ");
+        write_cstr(2, pname, 0);
+        wstr(2, "\n");
+        return die(1);
+    }
+    return 0;
+}
+
+fn imp_has(tab: ptr, t: ptr, noff: u32, nlen: u32) -> u32 {
+    let n: u32 = cell(tab, C_NIMP);
+    let k: u32 = 0;
+    while k < n {
+        let base: u32 = TB_IMP + k * 8;
+        if span_eq(t, load32(tab, base), load32(tab, base + 4), noff, nlen) == 1 {
+            return 1;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+fn imp_add(tab: ptr, noff: u32, nlen: u32) {
+    let n: u32 = cell(tab, C_NIMP);
+    if n >= IMP_MAX {
+        let _f: u32 = fail("导入表满了 — 抬高 IMP_MAX");
+    }
+    store32(tab, TB_IMP + n * 8, noff);
+    store32(tab, TB_IMP + n * 8 + 4, nlen);
+    setcell(tab, C_NIMP, n + 1);
+}
+
+/// 字节序比较（两个字串都在 `t` 里）。**只要"小于"这一个谓词** —— 自举侧的负数与
+/// 布尔比较那两格有别扭（issue #224 / #316），别去碰。
+fn nm_less(t: ptr, a: u32, al: u32, b: u32, bl: u32) -> u32 {
+    let k: u32 = 0;
+    while k < al && k < bl {
+        let x: u32 = load8(t, a + k) as u32;
+        let y: u32 = load8(t, b + k) as u32;
+        if x < y {
+            return 1;
+        }
+        if x > y {
+            return 0;
+        }
+        k = k + 1;
+    }
+    if al < bl {
+        return 1;
+    }
+    return 0;
+}
+
+/// 插入排序 —— **参考实现是 `sorted(...)`**：导入的次序决定 PLT 桩与符号号的分配，
+/// 所以这里必须给出同一个次序（字节序）。
+fn imp_sort(tab: ptr, t: ptr) {
+    let n: u32 = cell(tab, C_NIMP);
+    let i: u32 = 1;
+    while i < n {
+        let j: u32 = i;
+        let go: u32 = 1;
+        while go == 1 && j > 0 {
+            let pa: u32 = TB_IMP + (j - 1) * 8;
+            let pb: u32 = TB_IMP + j * 8;
+            if nm_less(t, load32(tab, pb), load32(tab, pb + 4),
+                       load32(tab, pa), load32(tab, pa + 4)) == 1 {
+                let to: u32 = load32(tab, pa);
+                let tl: u32 = load32(tab, pa + 4);
+                store32(tab, pa, load32(tab, pb));
+                store32(tab, pa + 4, load32(tab, pb + 4));
+                store32(tab, pb, to);
+                store32(tab, pb + 4, tl);
+                j = j - 1;
+            } else {
+                go = 0;
+            }
+        }
+        i = i + 1;
+    }
+}
+
+/// 把**没有定义**的标签挑成导入，查导出表（查不到就**点名拒** —— 不留给运行时崩），
+/// 排序，然后给每个导入立一个 PLT 桩的标签。返回 PLT 起点（没有共享对象时返回 0）。
+fn collect_imports(tab: ptr, t: ptr, tlen: u32) -> u32 {
+    if cell(tab, C_NSHARED) == 0 {
+        return 0;
+    }
+    let n: u32 = cell(tab, C_NFIX);
+    let i: u32 = 0;
+    while i < n {
+        let base: u32 = TB_FIX + i * 28;
+        let no: u32 = load32(tab, base + F_NOFF);
+        let nl: u32 = load32(tab, base + F_NLEN);
+        let bo: u32 = load32(tab, base + F_BOFF);
+        let bl: u32 = load32(tab, base + F_BLEN);
+        if lbl_find(tab, t, no, nl, bo, bl) == NO {
+            if imp_has(tab, t, no, nl) == 0 {
+                let f: u32 = exp_find(tab, t, no, nl);
+                if f == 0 {
+                    wstr(2, "lomelf: 共享对象里没有导出 ");
+                    write_all(2, ptr_add(t, no), nl as u64);
+                    wstr(2, " —— 动态链接只在导出表里找名字\n");
+                    return die(1);
+                }
+                let fl: u32 = f - 1;
+                if fl % 2 == 0 {
+                    wstr(2, "lomelf: 只以非默认版本导出 ");
+                    write_all(2, ptr_add(t, no), nl as u64);
+                    wstr(2, " —— 未加版本的引用绑不上它（docs/183 §4 V2）\n");
+                    return die(1);
+                }
+                if (fl / 2) % 2 == 1 {
+                    wstr(2, "lomelf: 那是数据符号 ");
+                    write_all(2, ptr_add(t, no), nl as u64);
+                    wstr(2, " —— 数据导入要 GOT 间接，这一版只做函数导入\n");
+                    return die(1);
+                }
+                imp_add(tab, no, nl);
+            }
+        }
+        i = i + 1;
+    }
+    imp_sort(tab, t);
+    let cnt: u32 = cell(tab, C_NIMP);
+    let plt_at: u32 = align_to(TEXT_VADDR + tlen, 16);
+    let k: u32 = 0;
+    while k < cnt {
+        let b2: u32 = TB_IMP + k * 8;
+        lbl_add(tab, load32(tab, b2), load32(tab, b2 + 4), 0, 0, plt_at + 16 * (k + 1));
+        k = k + 1;
+    }
+    setcell(tab, C_PLTA, plt_at);
+    return plt_at;
+}
+
+/// 把 PLT 与那几张表接在代码后面（`txt`），把每个 vaddr/长度记进 cells 交给
+/// `build_elf_dynamic`。布局与参考实现 `build_dynamic_tables` **逐字节相同**。
+fn emit_dyn_tail(tab: ptr, t: ptr, txt: ptr, tlen: u32, dlen: u32, bss: u32) -> u32 {
+    let n: u32 = cell(tab, C_NIMP);
+    let plt_at: u32 = cell(tab, C_PLTA);
+    let tail_v: u32 = align_to(DATA_VADDR + dlen + bss, 4096);
+    let got_at: u32 = tail_v;
+    let interp_at: u32 = plt_at + 16 * (n + 1);
+    let dynstr_at: u32 = interp_at + 28;
+    let dsl: u32 = 0;
+    let k: u32 = 0;
+    while k < n {
+        dsl = dsl + load32(tab, TB_IMP + k * 8 + 4) + 1;
+        k = k + 1;
+    }
+    // 1(开头的 0) + 各导入 + SONAME + 结尾那个 0
+    let dslen: u32 = 1 + dsl + cell(tab, C_SONLEN) + 1 + 1;
+    let dynsym_at: u32 = align_to(dynstr_at + dslen, 8);
+    let hash_at: u32 = align_to(dynsym_at + 24 * (n + 1), 8);
+    let gnu_at: u32 = align_to(hash_at + 12 + 4 * (n + 1), 8);
+    let rela_at: u32 = align_to(gnu_at + 28, 8);
+    let tail_end: u32 = rela_at + 24 * n;
+    let p0: u32 = plt_at - TEXT_VADDR;
+    pad_zero(txt, tlen, p0);
+    // ---- PLT：16 字节一格。PLT0 + 每个导入一格。rip 相对位移相对**指令末尾**。
+    store8(txt, p0, 255 as u8);
+    store8(txt, p0 + 1, 53 as u8);
+    w32(txt, p0 + 2, (got_at + 8) - (plt_at + 6));
+    store8(txt, p0 + 6, 255 as u8);
+    store8(txt, p0 + 7, 37 as u8);
+    w32(txt, p0 + 8, (got_at + 16) - (plt_at + 12));
+    store8(txt, p0 + 12, 15 as u8);
+    store8(txt, p0 + 13, 31 as u8);
+    store8(txt, p0 + 14, 64 as u8);
+    store8(txt, p0 + 15, 0 as u8);
+    k = 0;
+    while k < n {
+        let sa: u32 = p0 + 16 * (k + 1);
+        store8(txt, sa, 255 as u8);
+        store8(txt, sa + 1, 37 as u8);
+        w32(txt, sa + 2, (got_at + 8 * (k + 3)) - (plt_at + 16 * (k + 1) + 6));
+        store8(txt, sa + 6, 104 as u8);
+        w32(txt, sa + 7, k);
+        store8(txt, sa + 11, 233 as u8);
+        w32(txt, sa + 12, p0 - (sa + 16));
+        k = k + 1;
+    }
+    // ---- `.interp`
+    let ip: u32 = interp_at - TEXT_VADDR;
+    let ip2: u32 = put_lit(txt, ip, "/lib64/ld-linux-x86-64.so.2");
+    store8(txt, ip2, 0 as u8);
+    // ---- `.dynstr`：0 号空串, 然后每个导入, 然后 SONAME, 再补一个 0。
+    let dp: u32 = dynstr_at - TEXT_VADDR;
+    store8(txt, dp, 0 as u8);
+    let dcur: u32 = dp + 1;
+    k = 0;
+    while k < n {
+        let b2: u32 = TB_IMP + k * 8;
+        dcur = put_bytes(txt, dcur, t, load32(tab, b2), load32(tab, b2 + 4), OUT_CAP);
+        store8(txt, dcur, 0 as u8);
+        dcur = dcur + 1;
+        k = k + 1;
+    }
+    dcur = put_bytes(txt, dcur, t, cell(tab, C_SONOFF), cell(tab, C_SONLEN), OUT_CAP);
+    store8(txt, dcur, 0 as u8);
+    store8(txt, dcur + 1, 0 as u8);
+    dcur = dcur + 2;
+    // ---- `.dynsym`：0 号空符号, 然后每个导入一个 STB_GLOBAL|STT_FUNC、shndx = 0。
+    let sy: u32 = dynsym_at - TEXT_VADDR;
+    pad_zero(txt, dcur, sy);
+    let nm2: u32 = 1;
+    k = 0;
+    while k < n {
+        let sa2: u32 = sy + 24 * (k + 1);
+        w32(txt, sa2, nm2);
+        store8(txt, sa2 + 4, 18 as u8);
+        store8(txt, sa2 + 5, 0 as u8);
+        store8(txt, sa2 + 6, 0 as u8);
+        store8(txt, sa2 + 7, 0 as u8);
+        w64(txt, sa2 + 8, 0 as u64);
+        w64(txt, sa2 + 16, 0 as u64);
+        nm2 = nm2 + load32(tab, TB_IMP + k * 8 + 4) + 1;
+        k = k + 1;
+    }
+    // ---- SysV `.hash`：我们不导出任何符号, 表是退化的（1 个桶、链全 0）。
+    let ha: u32 = hash_at - TEXT_VADDR;
+    let ga: u32 = gnu_at - TEXT_VADDR;
+    pad_zero(txt, sy + 24 * (n + 1), ga);
+    w32(txt, ha, 1);
+    w32(txt, ha + 4, 1 + n);
+    w32(txt, ha + 8, 0);
+    // ---- GNU hash：同样退化（symoffset = nsyms, 一张 bloom, 一个空桶）。
+    w32(txt, ga, 1);
+    w32(txt, ga + 4, 1 + n);
+    w32(txt, ga + 8, 1);
+    w32(txt, ga + 12, 6);
+    w64(txt, ga + 16, 0 as u64);
+    w32(txt, ga + 24, 0);
+    // ---- `.rela.plt`：`r_info = (符号号 << 32) | R_X86_64_JUMP_SLOT(7)`。
+    let ra: u32 = rela_at - TEXT_VADDR;
+    pad_zero(txt, ga + 28, ra);
+    k = 0;
+    while k < n {
+        w64(txt, ra + 24 * k, (got_at + 8 * (k + 3)) as u64);
+        let ri: u64 = (k + 1) as u64 * PHI + 7 as u64;
+        w64(txt, ra + 24 * k + 8, ri);
+        w64(txt, ra + 24 * k + 16, 0 as u64);
+        k = k + 1;
+    }
+    setcell(tab, C_INTERP, interp_at);
+    setcell(tab, C_GOTA, got_at);
+    setcell(tab, C_DYNA, got_at + 8 * (3 + n));
+    setcell(tab, C_TAILV, tail_v);
+    setcell(tab, C_DYNSTRA, dynstr_at);
+    setcell(tab, C_DSLEN, dslen);
+    setcell(tab, C_NEEDOFF, 1 + dsl);
+    setcell(tab, C_SYMA, dynsym_at);
+    setcell(tab, C_HASHA, hash_at);
+    setcell(tab, C_GNUA, gnu_at);
+    setcell(tab, C_RELAA, rela_at);
+    return tail_end - TEXT_VADDR;
+}
+
+fn phdr_t(ob: ptr, at: u32, typ: u32, flags: u32, off: u32, vaddr: u32,
+          fsz: u32, msz: u32, al: u32) {
+    w32(ob, at, typ);
+    w32(ob, at + 4, flags);
+    w64(ob, at + 8, off as u64);
+    w64(ob, at + 16, vaddr as u64);
+    w64(ob, at + 24, vaddr as u64);
+    w64(ob, at + 32, fsz as u64);
+    w64(ob, at + 40, msz as u64);
+    w64(ob, at + 48, al as u64);
+}
+
+/// 组装**动态链接**的 ELF：六条程序头（INTERP + 三个 LOAD + DYNAMIC + GNU_STACK）。
+///
+/// **第一个 `PT_LOAD` 必须从文件偏移 0 起**：内核用
+/// `AT_PHDR = (首个 PT_LOAD 的 p_vaddr - p_offset) + e_phoff` 告诉 loader 程序头在哪；
+/// 这一页不进 LOAD 的话, `AT_PHDR` 就落在未映射的地址上, loader 连一行 `LD_DEBUG`
+/// 都来不及打就没了（实测）。
+///
+/// **尾部那一段（`.got.plt` + `.dynamic`）单开一条 RW LOAD, 落在 BSS 之后** ——
+/// 紧接着 `data` 的是 BSS, 里面是运行时自己的全局（FFI 的 arena 就是 1 MiB）；GOT 摆
+/// 在那里, 程序第一次往全局里写就把它覆盖了（实测 GOT 里被写成了输入数据）。
+fn build_elf_dynamic(tab: ptr, ob: ptr, txt: ptr, tlen: u32, gb: ptr, dlen: u32,
+                     bss: u32) -> u32 {
+    let text_off: u32 = 4096;
+    let data_off: u32 = align_to(text_off + tlen, 4096);
+    let tail_off: u32 = align_to(data_off + dlen, 4096);
+    let tail_v: u32 = cell(tab, C_TAILV);
+    let dyn_a: u32 = cell(tab, C_DYNA);
+    let dyn_l: u32 = 208;
+    let tail_l: u32 = (dyn_a - tail_v) + dyn_l;
+    let total: u32 = tail_off + tail_l;
+    store8(ob, 0, 127 as u8);
+    store8(ob, 1, 69 as u8);
+    store8(ob, 2, 76 as u8);
+    store8(ob, 3, 70 as u8);
+    store8(ob, 4, 2 as u8);
+    store8(ob, 5, 1 as u8);
+    store8(ob, 6, 1 as u8);
+    store8(ob, 7, 0 as u8);
+    let z: u32 = 8;
+    while z < 16 {
+        store8(ob, z, 0 as u8);
+        z = z + 1;
+    }
+    store8(ob, 16, 2 as u8);
+    store8(ob, 17, 0 as u8);
+    store8(ob, 18, 62 as u8);
+    store8(ob, 19, 0 as u8);
+    w32(ob, 20, 1);
+    w64(ob, 24, TEXT_VADDR as u64);
+    w64(ob, 32, 64);
+    w64(ob, 40, 0);
+    w32(ob, 48, 0);
+    store8(ob, 52, 64 as u8);
+    store8(ob, 53, 0 as u8);
+    store8(ob, 54, 56 as u8);
+    store8(ob, 55, 0 as u8);
+    store8(ob, 56, 6 as u8);
+    store8(ob, 57, 0 as u8);
+    let z2: u32 = 58;
+    while z2 < 64 {
+        store8(ob, z2, 0 as u8);
+        z2 = z2 + 1;
+    }
+    phdr_t(ob, 64, 3, 4, text_off + (cell(tab, C_INTERP) - TEXT_VADDR),
+           cell(tab, C_INTERP), 28, 28, 1);
+    phdr_t(ob, 120, 1, 5, 0, TEXT_VADDR - text_off, text_off + tlen,
+           text_off + tlen, 4096);
+    phdr_t(ob, 176, 1, 6, data_off, DATA_VADDR, dlen, dlen + bss, 4096);
+    phdr_t(ob, 232, 1, 6, tail_off, tail_v, tail_l, tail_l, 4096);
+    phdr_t(ob, 288, 2, 6, tail_off + (dyn_a - tail_v), dyn_a, dyn_l, dyn_l, 4096);
+    phdr_t(ob, 344, 1685382481, 6, 0, 0, 0, 0, 16);
+    copy_n(ob, text_off, txt, 0, tlen);
+    copy_n(ob, data_off, gb, 0, dlen);
+    // ---- `.got.plt`（尾部段的开头）
+    let n: u32 = cell(tab, C_NIMP);
+    let plt_at: u32 = cell(tab, C_PLTA);
+    w64(ob, tail_off, dyn_a as u64);
+    w64(ob, tail_off + 8, 0 as u64);
+    w64(ob, tail_off + 16, 0 as u64);
+    let k: u32 = 0;
+    while k < n {
+        w64(ob, tail_off + 8 * (k + 3), (plt_at + 16 * (k + 1) + 6) as u64);
+        k = k + 1;
+    }
+    // ---- `.dynamic`
+    let d: u32 = tail_off + 8 * (3 + n);
+    w64(ob, d, 1 as u64);
+    w64(ob, d + 8, cell(tab, C_NEEDOFF) as u64);
+    w64(ob, d + 16, 4 as u64);
+    w64(ob, d + 24, cell(tab, C_HASHA) as u64);
+    w64(ob, d + 32, 1879047925 as u64);
+    w64(ob, d + 40, cell(tab, C_GNUA) as u64);
+    w64(ob, d + 48, 5 as u64);
+    w64(ob, d + 56, cell(tab, C_DYNSTRA) as u64);
+    w64(ob, d + 64, 10 as u64);
+    w64(ob, d + 72, cell(tab, C_DSLEN) as u64);
+    w64(ob, d + 80, 6 as u64);
+    w64(ob, d + 88, cell(tab, C_SYMA) as u64);
+    w64(ob, d + 96, 11 as u64);
+    w64(ob, d + 104, 24 as u64);
+    w64(ob, d + 112, 3 as u64);
+    w64(ob, d + 120, cell(tab, C_GOTA) as u64);
+    w64(ob, d + 128, 23 as u64);
+    w64(ob, d + 136, cell(tab, C_RELAA) as u64);
+    w64(ob, d + 144, 2 as u64);
+    w64(ob, d + 152, (24 * n) as u64);
+    w64(ob, d + 160, 20 as u64);
+    w64(ob, d + 168, 7 as u64);
+    w64(ob, d + 176, 30 as u64);
+    w64(ob, d + 184, 8 as u64);
+    w64(ob, d + 192, 0 as u64);
+    w64(ob, d + 200, 0 as u64);
+    return total;
 }
 
 /// 组装 ELF: 头 + 两个 PT_LOAD。返回文件总长。
@@ -4662,6 +5302,38 @@ fn run(mem: ptr) -> u32 {
     setcell(tab, C_PE, pe);
     // 外部符号名池的游标: 从输入文本的**末尾**开始, 见 copy_name。
     setcell(tab, C_EXTN, n as u32);
+    // **阶段 0（V2，`docs/183` §4）**：先扫一遍 `--link` 的文件里有没有共享对象。
+    // 这一步必须**在入口桩之前**，因为"要不要自己装 TLS"取决于它：
+    //   * 静态链外部 `.o` 时**要装**（`fs:0x28` 得落在一块可读写的 TLS 里）；
+    //   * 动态链时**不能装** —— `fs` 归 `ld.so` 管，指向 glibc 的整块 TLS
+    //     （`errno`/`tcache`/栈金丝雀都在里面）。再 `arch_prctl(ARCH_SET_FS)` 一次就把
+    //     它顶掉了，症状是 zlib 一路调到 libc 的 `malloc` 时读到垃圾线程指针。
+    let nobj: u32 = 0;
+    let nshared: u32 = 0;
+    if nlink != 0 && pe == 0 {
+        let s0: u32 = 0;
+        while s0 < nlink {
+            let p0: ptr = ptr_add(pbuf, obase + s0 * 1024);
+            let ln0: u32 = read_link_file(p0, ptr_add(mem, M_OBJ), OBJ_CAP);
+            if is_shared(ptr_add(mem, M_OBJ), ln0) == 1 {
+                if nshared != 0 {
+                    wstr(2, "lomelf: 一次只能链一个共享对象\n");
+                    return die(1);
+                }
+                if ap == 0 {
+                    wstr(2, "lomelf: 这份产物带了通向世界的端口（共享对象），链接器默认不收。\n");
+                    wstr(2, "lomelf: 开发通道要它得显式写 --allow-ports；发行版里这条路是关着的（docs/219 §8c）\n");
+                    return die(1);
+                }
+                let _r: u32 = so_load(tab, inb, ptr_add(mem, M_OBJ), ln0, p0);
+                nshared = 1;
+            } else {
+                nobj = nobj + 1;
+            }
+            s0 = s0 + 1;
+        }
+        setcell(tab, C_NSHARED, nshared);
+    }
     collect_globals(tab, inb, n as u32, gb);
     collect_externs(tab, inb, n as u32);
     place_globals(tab, inb);
@@ -4669,7 +5341,7 @@ fn run(mem: ptr) -> u32 {
     // TLS 块摆好（在对象之后）才立 —— 回填在最后一步，所以中间这段时间"有名无址"是对的。
     let tlsn: u32 = cell(tab, C_EXTN);
     let tls: u32 = 0;
-    if nlink != 0 {
+    if nobj != 0 && nshared == 0 {
         setcell(tab, C_EXTN, put_name(inb, tlsn, "__loment_tls"));
         tls = 1;
     }
@@ -4679,7 +5351,7 @@ fn run(mem: ptr) -> u32 {
     // `tools/lomelf.py` 的 `compile_ll` 同一处判断、同一段字节（`loment_elf_test` 的自举
     // 镜像那格逐字节钉）。**顺序与那边一致**：我们的代码 -> 收编面 -> 外部对象。
     let tlen: u32 = tlen0;
-    if nlink != 0 {
+    if nobj != 0 {
         tlen = emit_conscript(tab, txt, tlen, inb);
     }
     // 外部目标文件 (docs/173): 代码节接在我们自己的代码之后, **数据节接在数据段之后**,
@@ -4700,8 +5372,11 @@ fn run(mem: ptr) -> u32 {
             let p0: ptr = ptr_add(pbuf, obase + got * 1024);
             let ln0: u32 = read_link_file(p0, tobj, OBJ_CAP);
             if is_archive(tobj, ln0) == 0 {
-                check_obj(p0, tobj);          // 不是归档就得是能用的 `.o`（否则拒在这里）
-                let _u: u32 = obj_syms(tab, inb, tobj, 1);
+                // **共享对象不参与布局**（V2）：它的字节一个也不进产物，这里只跳过。
+                if is_shared(tobj, ln0) == 0 {
+                    check_obj(p0, tobj);      // 不是归档就得是能用的 `.o`（否则拒在这里）
+                    let _u: u32 = obj_syms(tab, inb, tobj, 1);
+                }
             }
             got = got + 1;
         }
@@ -4711,8 +5386,10 @@ fn run(mem: ptr) -> u32 {
             let p0: ptr = ptr_add(pbuf, obase + got * 1024);
             let ln1: u32 = read_link_file(p0, tobj, OBJ_CAP);
             if is_archive(tobj, ln1) == 0 {
-                check_obj(p0, tobj);
-                tlen = link_object_mem(tab, inb, txt, gb, tlen, tobj, ap);
+                if is_shared(tobj, ln1) == 0 {
+                    check_obj(p0, tobj);
+                    tlen = link_object_mem(tab, inb, txt, gb, tlen, tobj, ap);
+                }
             }
             got = got + 1;
         }
@@ -4730,7 +5407,7 @@ fn run(mem: ptr) -> u32 {
     // **bss 的地址与标签必须等到这里**（`docs/219` §8b 第 1 条）—— 位置见 `place_bss`。
     // **TLS 块**（`docs/219` S2）：接在对象数据之后、与参考实现同一处、同样 256 字节。
     // 必须在 `place_bss` **之前** —— bss 的地址是按数据段当前长度算的。
-    if nlink != 0 {
+    if nobj != 0 && nshared == 0 {
         let t0: u32 = align_to(cell(tab, C_GB), 16);
         pad_zero(gb, cell(tab, C_GB), t0);
         pad_zero(gb, t0, t0 + 256);
@@ -4743,13 +5420,21 @@ fn run(mem: ptr) -> u32 {
     if rr != 0 {
         return rr;
     }
+    // **导入**（V2）：所有标签都立好了才挑得出"谁还没定义"。每个导入立一个 PLT 桩的
+    // 标签，于是 `resolve_fixups` 把它们指到桩上（而不是报"未定义的标签"）。
+    if nshared != 0 {
+        let _pa: u32 = collect_imports(tab, inb, tlen);
+    }
     let r: u32 = resolve_fixups(tab, inb, txt);
     if r != 0 {
         return r;
     }
     let dlen: u32 = align_to(cell(tab, C_GB), 8);
     let total: u32 = 0;
-    if pe == 1 {
+    if nshared != 0 {
+        tlen = emit_dyn_tail(tab, inb, txt, tlen, dlen, cell(tab, C_BSS));
+        total = build_elf_dynamic(tab, ob, txt, tlen, gb, dlen, cell(tab, C_BSS));
+    } else if pe == 1 {
         let idata: ptr = ptr_add(tab, TB_IDATA);
         let dd: u32 = 0;
         let rn: u32 = n_idata();

@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -34,9 +35,9 @@ SEED = loment_seed.SEED
 PROBE_VM = "module probe_vm\n\nchoose vm\n\nfn f() -> u32 {\n    return 1;\n}\n"
 #: 对照组：同样一份、**不声明** `choose vm` —— 两个驱动器都必须收。
 PROBE_PLAIN = "module probe_plain\n\nfn f() -> u32 {\n    return 1;\n}\n"
-#: 探针：`choose hosted`（`docs/222` §4）。**发行版里同样非法** —— 那扇门要的是真 libc /
-#: 真共享库，而那条路还没完工（`docs/219` §8b 的 S2；动态那一半是 `#360`）。2026-10-12 用户定：
-#: 0.1.4.5 里 libc 不可调用。与 `vm` 那条同一个闸、同一个理由。
+#: 探针：`choose hosted`（`docs/222` §4）。**2026-10-17 起发行版必须收它**（`#406` 开闸：
+#: V1 静态 `.a`（`#359`）与 V2 运行期 `.so`（`#360`）两半都落齐了）。与 `use libl` 那条
+#: 同一个棘轮做法：探针**留着**、期望**反转** —— 删掉等于把"这道闸曾经存在"一起删掉。
 #: 入口写 `fn main`（`docs/222` §4.3：hosted 产物由 C 运行期起）—— 这一条只看驱动器收不收。
 PROBE_HOSTED = "module probe_hosted\n\nchoose hosted\n\nfn main() -> u32 {\n    return 1;\n}\n"
 #: 探针：一份 `use libl` 的最小单元。**2026-10-15 起发行版必须收它**（`#358` 放开闸，
@@ -153,12 +154,14 @@ def test_dist_builds_with_the_release_seed():
 
 
 @test
-def test_the_python_checker_refuses_hosted_in_the_release_channel():
-    """参考实现的**端口闸**（`docs/222` §4）：`loment_channel.RELEASE` 为真时
-    `choose hosted` 报错、为假时不报。
+def test_the_python_checker_accepts_hosted_in_both_channels():
+    """参考实现的**端口闸已放开**（`#406`，2026-10-17）：`choose hosted` 在两个渠道都收。
+
+    **这条判据是反转过来的老闸**：它原来要求"发行版拒"。期望改了就把期望反过来 ——
+    探针留着，这样"这道闸曾经存在、某天被打开"在判据里是有痕迹的。
 
     **不需要 clang** —— 这一条只走 `load` + `check`，所以它在哪儿都能跑。两端都测：
-    只测"拒"的话，一个"什么都拒"的检查器也能绿。
+    只测一边的话，"什么都拒"或"什么都收"的检查器都能绿。
     """
     import lomentc  # noqa: PLC0415
     import loment_channel  # noqa: PLC0415
@@ -176,19 +179,21 @@ def test_the_python_checker_refuses_hosted_in_the_release_channel():
             rel = lomentc.check(mod, deps=deps)
         finally:
             loment_channel.RELEASE = old
-    assert not dev, f"开发通道也拒了 `choose hosted` —— 那这一维就永远是死的：{dev}"
-    assert rel, "发行版收下了 `choose hosted` —— 端口闸没生效（`docs/222` §4）"
-    assert any("端口" in e for e in rel), rel
-    print("      Python 检查器：dev 收 / 发行版拒 `choose hosted` —— 两端都核过")
+    assert not dev, f"开发通道拒了 `choose hosted` —— 那这一维就永远是死的：{dev}"
+    assert not rel, f"发行版**拒**了 `choose hosted` —— 开闸（`#406`）没落地：{rel}"
+    print("      Python 检查器：dev 收 / 发行版也收 `choose hosted` —— 两端都核过")
 
 
 @test
-def test_the_release_launcher_shuts_the_port_door():
-    """发行版启动器（`docs/222` §4）：`--hosted` **点名拒**，且**永不**给链接器
-    `--allow-ports`。
+def test_both_launchers_open_the_port_door():
+    """启动器（`docs/222` §4）：**两个渠道都给链接器 `--allow-ports`**（`#406` 开闸）。
 
-    两层一起才成立：链接器的默认是"拒"，而"发行版不传那面旗"这件事靠启动器里的
-    `@CHANNEL@` 替换 —— 替换错了、或者哪次改动让那条 `dev` 分支活过来，这一条就红。
+    **这条判据是反转过来的老闸**：它原来要求"发行版永不传那面旗、并把 `--hosted` 点名
+    拒掉"。现在两半都落齐了，两个渠道必须**都传**；而且发行版**不许**再有那个点名拒的
+    分支（留着的话，命令行 `--hosted -lz` 在包里仍然进不去）。
+
+    链接器的默认仍然是"拒"（它不知道渠道）—— 所以这面旗必须**真的**在启动器里出现，
+    而不是靠哪条默许。
     """
     import loment_dist  # noqa: PLC0415
 
@@ -196,36 +201,25 @@ def test_the_release_launcher_shuts_the_port_door():
                       ("launcher.cmd", loment_dist.LAUNCHER_CMD)):
         dev = loment_dist._subst(tpl, "dev")
         rel = loment_dist._subst(tpl, "release")
-        if name.endswith(".sh"):
-            # 开发版：条件是 `"dev" = "dev"` ⇒ **活的**（`portarg` 真的被设上）。
-            assert '[ "dev" = "dev" ]' in dev, name
-            # 发行版：左边操作数换成 release ⇒ **死的** ⇒ `portarg` 恒为空 ⇒ 链接器默认生效。
-            assert '[ "release" = "dev" ]' in rel, (
-                f"{name}: 发行版启动器里那条 dev 分支还活着 —— 它会把 `--allow-ports` "
-                "传给链接器，于是包里的 libc 又可调用了")
-        else:
-            assert '"dev"=="dev"' in dev, name
-            assert '"release"=="dev"' in rel, (
-                f"{name}: 发行版启动器里那条 dev 分支还活着 —— 它会把 `--allow-ports` "
-                "传给链接器，于是包里的 libc 又可调用了")
-    # sh 那一份还多一道**点名的门**：`--hosted`（或源码里的端口标记）在发行版里直接拒。
-    sh_rel = loment_dist._subst(loment_dist.LAUNCHER_SH, "release")
-    assert "-n \"$hosted\"" in sh_rel and "release build" in sh_rel, (
-        "发行版启动器没有把 `--hosted` 点名拒掉 —— 那扇门就只剩编译器那道闸"
-        "（源码里写 `choose hosted` 会被拒，但命令行 `--hosted` 绕过编译器）")
-    assert "--hosted" in loment_dist.LAUNCHER_SH, "开发版启动器必须留着 `--hosted`"
-    print("      两份启动器：dev 传 `--allow-ports` / 发行版不传且点名拒 `--hosted`")
+        for label, text in (("dev", dev), ("release", rel)):
+            assert "--allow-ports" in text, (
+                f"{name}/{label}: 启动器没给链接器 `--allow-ports` —— 包里的 libc 就还是"
+                "调不动（`#406`）")
+        assert "release build" not in rel, (
+            f"{name}: 发行版启动器里还留着 `--hosted` 的点名拒 —— 开闸没落地")
+    assert "--hosted" in loment_dist.LAUNCHER_SH, "启动器必须留着 `--hosted`"
+    print("      两份启动器：两个渠道都传 `--allow-ports`，发行版不再点名拒 `--hosted`")
 
 
 @test
 def test_release_driver_refuses_channel_gated_constructs():
     """**判据 D**：发行版驱动器拒**被渠道闸关住的东西**，dev 驱动器收 —— 两端都要测。
 
-    今天**两关一放**，机制同一条（读同一个渠道常量）：
+    今天**一关两放**，机制同一条（读同一个渠道常量）：
 
     * **`choose vm`** —— 一维核心模式，闸在 `check()`（`docs/231` §2）。**发行版拒**；
-    * **`choose hosted`** —— 另一维核心模式，闸与 `vm` 同处、**共用同一个 `let`**
-      （`docs/222` §4.5，同一天用户的话：「锁掉 LibC … 因为这尚未完工」）。**发行版拒**；
+    * **`choose hosted`** —— 另一维核心模式。**2026-10-17 放开**（`#406`：V1 与 V2 两半
+      都落齐了）：探针留着、期望反转，发行版现在必须**收**它；
     * **`use libl`** —— 一个**名字**，闸在**名字解析**处。**2026-10-15 放开**（`#358`）：
       探针**留着**、期望**反转**，发行版现在必须**收**它。棘轮规矩是**替换**不是删掉；
       放开的条件写在 `docs/232` §1.3 那份承诺里。
@@ -250,7 +244,7 @@ def test_release_driver_refuses_channel_gated_constructs():
     probes = [("plain", PROBE_PLAIN, False),
               ("vm", PROBE_VM, True),
               ("libl", PROBE_LIBL, False),
-              ("hosted", PROBE_HOSTED, True)]
+              ("hosted", PROBE_HOSTED, False)]
     made: list[Path] = []
     try:
         for tag, src, _refuse in probes:
@@ -273,10 +267,99 @@ def test_release_driver_refuses_channel_gated_constructs():
                         f"（`docs/231` §2 / `docs/222` §4.5）")
                 else:
                     assert rc == 0, f"对照组在发行版里被拒了：{err[-200:]}"
-        print("      dev 收 / 发行版拒：vm · hosted；发行版**收** libl（已放开的旧闸）")
+        print("      dev 收 / 发行版拒：vm；发行版**收** libl 与 hosted（已放开的旧闸）")
     finally:
         for p in made:
             p.unlink(missing_ok=True)
+
+
+#: `choose hosted` + 运行期的最小产品：`alloc` 会把宿主的 `malloc` 拉成导入，`abs` 是我们
+#: 自己要的那个名字。退出码 7 = `abs(-7)` —— 任何一个环节错都到不了这个数。
+PROBE_RELEASE_LIBC = """module probe_release_libc
+choose runtime
+choose hosted
+
+extern fn abs(v: i32) -> i32;
+
+fn _start() {
+    let p: ptr = alloc(8);
+    store8(p, 0, 65 as u8);
+    let v: i32 = abs(0 as i32 - 7);
+    syscall4(60, v as u64, 0, 0);
+}
+"""
+
+
+@test
+def test_a_release_build_links_the_real_libc_end_to_end():
+    """**开闸之后，发行版真的能链真 libc 并跑起来**（`#406` 第一条）。
+
+    在这之前发行版里 `choose hosted` 是编译错误 —— 于是"能链真库"是开发通道的事实，
+    不是用户拿得到的能力。这一格把两半接上：渠道常量翻成 `release` 之后
+
+      * `check()` **收** `choose hosted`（编译器的门开了）；
+      * 链接器拿着启动器会给的那面旗（`--allow-ports`），把 `libc.so.6` 链成动态产物；
+      * 产物在 Linux 上跑出 7（`abs(-7)`），而 `malloc` 那条导入是**运行期**从 glibc 解析的。
+
+    **另一半是"仍然关着"**（`#406` 第三条）：同一个产品里写一个谁都没有的名字
+    （既不在收编面里、也不在链上的 `.so` 的导出表里）⇒ **链接期点名拒**。
+    开闸开的是"真库可以进来"，不是"名字随便写"。
+    """
+    import loment_ffi_test as ffitest  # noqa: PLC0415
+    import loment_channel  # noqa: PLC0415
+    import lomelf  # noqa: PLC0415
+    import lomentc  # noqa: PLC0415
+
+    if not P8._wsl():
+        print("      SKIP: 需要 WSL（或 Linux）跑 ELF")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        probe = tdp / "release_libc.lomt"
+        probe.write_text(PROBE_RELEASE_LIBC, encoding="utf-8", newline="\n")
+        libc = ffitest._system_so(tdp / "libc.so.6", ffitest._LIB6_CANDIDATES)
+        if libc is None:
+            print("      SKIP: 这台机器上没有 libc.so.6 —— 这一格测不了")
+            return
+        old = loment_channel.RELEASE
+        try:
+            loment_channel.RELEASE = True
+            mod = lomentc.load(probe)
+            deps = lomentc.resolve_deps(mod, ROOT, tdp, entry=probe)
+            errs = lomentc.check(mod, deps=deps)
+            assert not errs, f"发行版拒了 `choose hosted` —— 开闸没落地：{errs[:1]}"
+            ir = lomentc.emit_llvm(mod, ROOT, deps)
+            blob, info = lomelf.compile_ll(ir, [lomelf.load_foreign(libc)],
+                                           allow_ports=True)
+            assert info["shared"] == ["libc.so.6"], info
+            assert "abs" in info["imports"] and "malloc" in info["imports"], info
+            exe = tdp / "release_libc.elf"
+            exe.write_bytes(blob)
+            r = subprocess.run([*P8._WSLCMD, "bash", "-lc",
+                                f"chmod +x {P8._wsl_path(exe)} && {P8._wsl_path(exe)}"],
+                               capture_output=True, text=True, timeout=120, shell=False)
+            assert r.returncode == 7, (
+                f"发行版产物跑出 {r.returncode}（期望 7）：{r.stderr[-300:]!r}")
+            # ---- 仍然关着的那条：谁都没有的名字 ⇒ 链接期点名拒
+            bad = probe.with_name("release_bad.lomt")
+            bad_src = PROBE_RELEASE_LIBC.replace(
+                "extern fn abs(v: i32) -> i32;",
+                "extern fn abs(v: i32) -> i32;\n"
+                "extern fn loment_nobody_provides(v: i32) -> i32;", 1).replace(
+                "let v: i32 = abs(0 as i32 - 7);",
+                "let v: i32 = abs(0 as i32 - 7) + loment_nobody_provides(0 as i32);", 1)
+            bad.write_text(bad_src, encoding="utf-8", newline="\n")
+            mod2 = lomentc.load(bad)
+            deps2 = lomentc.resolve_deps(mod2, ROOT, tdp, entry=bad)
+            ir2 = lomentc.emit_llvm(mod2, ROOT, deps2)
+            try:
+                lomelf.compile_ll(ir2, [lomelf.load_foreign(libc)], allow_ports=True)
+                raise AssertionError("没人提供的名字居然链过去了 —— 开闸开过头了")
+            except lomelf.Unsupported as e:
+                assert "没有导出" in str(e), str(e)
+        finally:
+            loment_channel.RELEASE = old
+    print("      发行版 + 真 libc.so.6：链成动态产物、跑出 7；没人提供的名字仍然点名拒")
 
 
 def main() -> int:

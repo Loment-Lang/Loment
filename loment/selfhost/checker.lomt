@@ -3488,15 +3488,10 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
             o = sym_pub(src, t, out, o, E_MODE, ln_vm);
         }
     }
-    // ---- **渠道闸（对外端口）**：`hosted` 要的是**真 libc / 真共享库**（`docs/222` §4），
-    // 而那条路还没完工（`docs/219` §8b 的 S2；静态那一半已落，动态那一半是 #360）——
-    // 承诺。与上面 `vm` 那条同形、同一个闸、同一个理由。
-    // **次序**：排在那条**之后** —— 参考实现 `tools/lomentc.py` 里两条闸的先后就是这个次序。
-    if eff_port == 2 {
-        if rel == 1 {
-            o = sym_pub(src, t, out, o, E_MODE, ln_port);
-        }
-    }
+    // ---- **对外端口那一维 2026-10-17 放开**（`#406`）：静态（`#359`）与运行期（`#360`）
+    // 两半都落齐了，所以发行版里 `choose hosted` 不再是"一句拿不到的承诺"，闸拆掉。
+    // 用户 2026-10-12 那句「锁掉 LibC … 因为这尚未完工」的前提**已经不成立**。
+    // **`vm` 那条照旧**（引擎还没写，承诺仍然落空）—— 两扇门是**两件事**，只开这一扇。
     // ---- 第一遍半: 能力表判错 (等 caps 与 excluded 都收齐, 顺序无关)
     o = chk_caps_verify(src, t, ctab, load32(nc, 0), exs, nexs, out, o);
     // ---- 第二遍: 函数体里的调用检查

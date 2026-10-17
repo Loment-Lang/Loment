@@ -2053,6 +2053,71 @@ def test_lomelf_selfhost_links_a_real_archive():
 
 
 @test
+def test_lomelf_selfhost_links_a_real_shared_object():
+    """**自举链接器链真 `.so`**（`docs/183` §4 的 V2，`#360`）。
+
+    与参考那一半（`loment_ffi_test.test_a_real_shared_library_is_bound_at_run_time`）
+    **同一份 Loment 源**：真 `libz.so` → 镜像 + `--link` → 产物与参考**逐字节相同** →
+    跑出 `compress → uncompress → 原文`。`.so` 的字节一个也不进产物 —— 这条量的是
+    "同一个答案，两种实现"。
+
+    **端口门**也在这一格里量**否定**的那一半：同一个 `.so`、不给 `--allow-ports`，
+    镜像必须拒（发行通道里这条路是关着的）。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    mir = _mirror()
+    bld = ROOT / "loment" / "build"
+    bld.mkdir(parents=True, exist_ok=True)
+    so = ffitest._system_so(bld / "_mirror_libz.so.1", ffitest.LIBZ_SO_CANDIDATES)
+    if so is None:
+        print("      SKIP: 这台机器上没有 libz.so（要 zlib1g）—— 这一格测不了")
+        return
+    rel_so = "loment/build/_mirror_libz.so.1"
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        try:
+            for tag, src_text, want_rc in (("zso", ffitest.ZLIB_STATIC_SRC, 0),
+                                           ("zsor", ffitest.ZLIB_STATIC_FALSIFIER_SRC, 40)):
+                src = td / f"{tag}.lomt"
+                src.write_text(src_text, encoding="utf-8", newline="\n")
+                ll = _ref_ir(src, td)
+                want, info = lomelf.compile_ll(ll.read_text(encoding="utf-8"),
+                                               [lomelf.load_foreign(so)], allow_ports=True)
+                assert info["shared"] == ["libz.so.1"], info
+                llrepo = bld / f"_mirror_{tag}.ll"
+                elfrepo = bld / f"_mirror_{tag}.elf"
+                try:
+                    llrepo.write_bytes(ll.read_bytes())
+                    rc, err = _mirror_run(mir, f"loment/build/_mirror_{tag}.ll",
+                                          f"loment/build/_mirror_{tag}.elf", (rel_so,))
+                    assert rc == 0, f"[{tag}] 镜像 + --link .so 退出 {rc}: {err[-300:]}"
+                    nat = elfrepo.read_bytes()
+                    assert nat == want, (
+                        f"[{tag}] 镜像的动态产物与参考不同 ({len(nat)}B vs {len(want)}B)")
+                    got, out = _run_bin(elfrepo, f"zso_{tag}", td)
+                    assert got == want_rc, (
+                        f"[{tag}] 跑出的结果不对: rc={got}（期望 {want_rc}）{out[:120]!r}")
+                finally:
+                    elfrepo.unlink(missing_ok=True)
+                    if tag == "zsor":
+                        llrepo.unlink(missing_ok=True)
+            # 端口门（否定那一半）：同一份 `.ll` + 同一个 `.so`，不给开关必须拒。
+            rc2, err2 = _mirror_run(mir, "loment/build/_mirror_zso.ll",
+                                    "loment/build/_mirror_zso_gate.elf", (rel_so,),
+                                    ports=False)
+            assert rc2 != 0, "发行通道居然收下了共享对象"
+            assert "--allow-ports" in err2, f"拒的理由没说到开关: {err2[-300:]!r}"
+        finally:
+            (bld / "_mirror_zso.ll").unlink(missing_ok=True)
+            (bld / "_mirror_zso_gate.elf").unlink(missing_ok=True)
+            so.unlink(missing_ok=True)
+    print("      镜像 + 真 libz.so: 产物与参考逐字节相同, compress/uncompress 回原文 (rc=0)"
+          "；证伪件报 40；不给 --allow-ports 就拒")
+
+
+@test
 def test_the_mirror_linker_refuses_ports_without_the_dev_flag():
     """自举链接器的**端口门**（`docs/222` §4）：同一份带端口的外源对象，不给
     `--allow-ports` 就**必须拒**。

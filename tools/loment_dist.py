@@ -191,8 +191,7 @@ Loment @DISPLAY@  (@VERSION@)
   loment build FILE [-o OUT] [--link OBJ...] [--opt] [--hosted [-L DIR] [-l LIB] [--cc-arg X]]
                               compile and link; --link adds a foreign object (FFI)
                               --opt: optimize with clang -O2 when it is installed (ELF)
-                              --hosted: link against the host's real libraries (docs/222);
-                                        dev channel only -- a release build refuses it
+                              --hosted: link against the host's real libraries (docs/222)
   loment run FILE [--opt] [--hosted [-L DIR] [-l LIB] [--cc-arg X]]
                               compile, link and run
   loment fmt FILE             format (prints the formatted text)
@@ -364,20 +363,13 @@ case "${1:-help}" in
         if [ -z "$hosted" ] && grep -q '^; loment-port: hosted' "$tmp/a.ll" 2>/dev/null; then
             hosted=1
         fi
-        # ---- channel (@CHANNEL@, docs/222 sec 4). A release build has no open ports: real
-        # libc and real shared libraries are **not available in 0.1.4.5** - that path is not
-        # finished (docs/222 sec 4, docs/219 sec 8b), and a promise nobody can keep is worse
-        # than a refusal. So refuse by name here, and pass no port flag to the linker below:
-        # its own default is "refuse a ported object", which is what makes the lock hold.
-        portarg=
-        if [ "@CHANNEL@" = "dev" ]; then portarg=--allow-ports; fi
-        if [ "@CHANNEL@" = "release" ] && [ -n "$hosted" ]; then
-            echo "loment: this is a release build: open ports to the world (real libc, real" >&2
-            echo "        shared libraries) are not available - that path is unfinished and is" >&2
-            echo "        not part of 0.1.4.5 (docs/222 sec 4, docs/219 sec 8b)." >&2
-            echo "        To work on it, use the toolchain in the repository." >&2
-            exit 2
-        fi
+        # ---- port door (@CHANNEL@, docs/222 sec 4): **open in both channels since 2026-10-17**
+        # (#406). Both halves of LibC are done - static (docs/183 V1, real libz.a) and run-time
+        # (V2, the system libz.so) - so a promise of "real libraries" is now keepable and there
+        # is nothing left to lock. The linker still refuses a ported object by default (it does
+        # not know the channel); this flag is what opens it, and it is passed in both channels
+        # so that which build you run no longer decides whether a real library can be linked.
+        portarg=--allow-ports
         # Naming a host library is a claim that this product HAS ports to the world. In a
         # sealed build (the default) that claim cannot be honoured - lomelf has no libc - so
         # say it instead of silently dropping the flags (docs/222 sec 4.1).
@@ -580,11 +572,10 @@ set "src=%~2"
 if "%src%"=="" goto usage
 set "out="
 set "linkargs="
-rem Channel (@CHANNEL@, docs/222 sec 4): in a release build the world-port door is shut, so
-rem nothing extra is passed and lomelf's own default - refuse an object that carries
-rem undefined symbols - is what holds. `dev` passes the flag that opens it.
-set "portarg="
-if "@CHANNEL@"=="dev" set "portarg=--allow-ports"
+rem Port door (@CHANNEL@, docs/222 sec 4): open in both channels since 2026-10-17 (#406) -
+rem LibC's static and run-time halves are both done. lomelf still refuses a ported object by
+rem default; this flag is what opens it, and it is passed in both channels.
+set "portarg=--allow-ports"
 set "cnc="
 set "com="
 shift
@@ -747,8 +738,7 @@ echo                               --max N: render at most N (default 20; 0 = al
 echo   loment build FILE [-o OUT] [--link OBJ...] [--opt] [--hosted]
 echo                               compile and link; --link adds a foreign object (FFI)
 echo                               --opt: optimize with clang -O2 (ELF only)
-echo                               --hosted: link the host's real libraries (ELF only;
-echo                                        dev channel only -- a release build refuses it)
+echo                               --hosted: link the host's real libraries (ELF only)
 echo   loment run FILE [--opt] [--hosted]
 echo                               compile, link and run
 echo   loment fmt FILE             format (prints the formatted text)

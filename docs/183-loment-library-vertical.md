@@ -85,7 +85,7 @@ choose 也是硬写法"），所以它是**核心语法**的一个新开关名�
 |---|---|---|---|
 | **V0** | **结构**：外部库在库系统里有位置 | `deps/<名字>/` 能放"接口单元 + 二进制"；`lompi` 能取/锁/校验它 | 一个**手工搭的**外部库目录，`use <名字>` 能解析、能链、能跑。**后端仍是玩具**（自包含 freestanding），所以这一步不动链接器 |
 | **V1** | **静态 libc** | 带 libc 依赖的**真实 C 库** | `loment run` 调 **zlib** 的 `compress`/`uncompress`，解压回原文。zlib 是 `.a` + 依赖 `malloc/free/memcpy` |
-| **V2** | **动态库装载**（`docs/173` 阶段 3） | "装好的 `.so`" | `loment run` 调**系统装的** `libz.so`（不静态链），自己解 `PT_DYNAMIC` + 重定位 |
+| **V2** ✅ **2026-10-17**（`#360`） | **动态库装载**（`docs/173` 阶段 3） | "装好的 `.so`" | `loment run` 调**系统装的** `libz.so`（不静态链），自己解 `PT_DYNAMIC` + 重定位。**已兑现**：两个链接器都读 `ET_DYN` 的导出表、发 `PT_INTERP`/`DT_NEEDED`/PLT/GOT；产物 20 KB、`compress → uncompress → 原文` rc=0，两侧逐字节相同 |
 | **V3** | **运行期嵌入**（阶段 4） | Python / Java **的 API** | `loment run` 调 **`numpy`** 算一个数组的和。要 `libpython` + CPython C-API 胶水 |
 | **V4** | **语法层解真实源** | 从**真实库**生成声明面 | 喂 **`zlib.h`**（typedef / 函数式宏 / `unsigned long` / `Bytef*`）→ 接口单元 → V1 那条跑通。今天 C 前端是**轻量正则**，`zlib.h` 会当场碎 |
 | **V5** | **`choose` 解禁开关** | 二进制从**全局禁**变成**每程序可开** | `choose <开关>` 的程序能链二进制；**不写就编译不过**（且报错说清为什么） |

@@ -7078,11 +7078,21 @@ def _l2_ok(toks: list, at: int, end: int, fend: int, l0: dict[str, int],
         if ndecl != 1:
             return False
         # **只查体之后** [end, fend)：体**之前**不可能用到体里声明的那个名字（作用域），
-        # 所以那里出现同名不构成逃逸。这一条把"同函数里另一个循环也叫 p"的行数减半，
-        # 但减不完 —— 见 §7：真正的解法是作用域解析，而那是 L1 的活。
+        # 所以那里出现同名不构成逃逸。
+        #
+        # **而且扫到下一次同名 `let` 就停**（`#364` 的第三条边界）。语言**没有块作用域**
+        # （`docs/228` 的根），所以一个名字被**新的** `let` 重新声明之后，后面那些出现就
+        # 属于**新的**那个变量，不再证明这一块出体了。停下是 **sound** 的：在那一处之前
+        # 的每一次出现都还指这一块。
+        #
+        # 只认 `let` 这一种重声明形状（这个语言里也只有它）：认不出来的形状一律**按没重
+        # 声明处理**（照旧取消），所以这条规则只可能**少**放宽、不会多放宽。
         for k in range(end, fend):
-            if ident(k) and toks[k].val == name:
-                return False               # 出体了
+            if not (ident(k) and toks[k].val == name):
+                continue
+            if word(k - 1, "let"):
+                break                      # 换了主人：后面属于新声明的那个
+            return False                   # 出体了
     if nlive == 0:
         return False                       # 体内的分配都提到栈上了 -> 没什么可归还的
     return nalloc == ncand                 # 有认不出来的分配 -> 整格取消

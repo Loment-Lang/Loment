@@ -313,24 +313,33 @@ def test_a_negative_literal_comparison_stays_true_after_translation():
     2. 常量算术默认 `u32` —— 于是助记符是 `icmp ult`。
 
     合起来 `if -1 < 0` 为**假**。C / Go / Python / Rust 都说真，所以这是"同一份程序
-    换个拼法答案就变"（`#237`）。判据三方对：Go 自己编出来是多少、翻译出来的 Loment
-    跑出来是多少、独立推的期望值是多少 —— 两个数相等不算证据。
+    换个拼法答案就变"（`#237`）。
+
+    **这条不依赖 `go`**：判据的主体是"翻译出来的 Loment 跑出来是 7"，而它只要
+    参考编译器 + `lomelf`（CI 上原生跑 ELF）。有 `go` 时**再加**一列对照 ——
+    Go 自己编出来是多少，三方对；没有 `go` 就少那一列，不算跳过（登记一条跳过等于
+    让这条判据在 CI 上从不跑，而 `#237` 正是在 CI 上要守的那个数）。
     """
+    if not _wsl():
+        print("      SKIP: 无 WSL（Windows 上跑 ELF 要经它；Linux 上恒真）")
+        return
     src = ("package main\n\nfunc entry() int {\n"
            "\tif -1 < 0 {\n\t\treturn 7\n\t}\n\treturn 0\n}\n")
-    go = _go()
-    if not go or not _wsl():
-        print("      SKIP: 需要 go + WSL")
-        return
     with tempfile.TemporaryDirectory() as t:
         td = Path(t)
-        gsrc = td / "NegLit.go"
-        gsrc.write_text(src, encoding="utf-8", newline="\n")
-        go_rc = _go_run(td, go, gsrc)
         l_rc = _run(_build_text(td, gotrans.translate(src), "neg_lit"))
-    assert go_rc == 7, f"go 那边就不对: {go_rc}（语料或期望值错了）"
+        go_rc = None
+        go = _go()
+        if go:
+            gsrc = td / "NegLit.go"
+            gsrc.write_text(src, encoding="utf-8", newline="\n")
+            go_rc = _go_run(td, go, gsrc)
     assert l_rc == 7, f"`-1 < 0` 在翻译出来的 Loment 里是假 ({l_rc}) —— 无类型常量算术落回 u32"
-    print(f"      go -> {go_rc}，翻译成 Loment -> {l_rc}（`-1 < 0` 为真）")
+    if go_rc is not None:
+        assert go_rc == 7, f"go 那边就不对: {go_rc}（语料或期望值错了）"
+        print(f"      go -> {go_rc}，翻译成 Loment -> {l_rc}（`-1 < 0` 为真）")
+    else:
+        print(f"      翻译成 Loment -> {l_rc}（`-1 < 0` 为真；本机无 go，少一列对照）")
 
 
 @test

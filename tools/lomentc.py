@@ -2407,6 +2407,24 @@ def _fnv1a32(s: str) -> int:
     return h
 
 
+_WIDTHS = {"u8": 8, "u16": 16, "u32": 32, "u64": 64,
+           "i8": 8, "i16": 16, "i32": 32, "i64": 64}
+
+
+def _common_type(a: str, b: str) -> str | None:
+    """a 与 b 的**公共类型**：两个值都装得下、且不改变任何一个值的那个类型。
+
+    没有就返回 None —— 那才是"要写 `as`"的场合。
+    """
+    if a not in _WIDTHS or b not in _WIDTHS:
+        return None
+    sa, sb = a in _SIGNED, b in _SIGNED
+    if sa == sb:
+        return a if _WIDTHS[a] >= _WIDTHS[b] else b
+    u, s = (a, b) if not sa else (b, a)
+    return s if _WIDTHS[u] < _WIDTHS[s] else None
+
+
 def _bit_width(t: str) -> int:
     if t == "bool":
         return 1
@@ -2966,7 +2984,16 @@ def expr_type(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[st
         rt = expr_type(e.right, scope, funcs, structs)
         if e.op in ("&&", "||", "==", "!=", "<", "<=", ">", ">="):
             return "bool"
-        return lt or rt
+        # **移位量不是参与运算的值**：`<<`/`>>` 的右操作数只是个位数，任何整型都收
+        # （C、C++、Rust 都这样），结果类型只看左操作数。少了这一条，C++ 写法里
+        # 最常见的 `unsigned row >> int i` 会变成"没有公共类型"，而那是完全正常的 C++。
+        if e.op in ("<<", ">>"):
+            return lt or rt
+        # **算术/位运算出的是两侧的公共类型**（`_common_type`），不是左操作数 ——
+        # 发射器按同一个函数定型（`Emitter.binop`），两边必须是同一条规则，否则
+        # `(x:i32 + y:i64) > 0` 里的加法在 64 位、外层比较又退回 32 位（`#133`）。
+        # 有一侧是字面量（None）时维持原样：它按上下文定宽。
+        return _common_type(lt, rt) or lt or rt
     return None
 
 
@@ -3233,6 +3260,18 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
     if isinstance(e, Bin):
         _walk_expr(e.left, scope, funcs, structs, errs, enums)
         _walk_expr(e.right, scope, funcs, structs, errs, enums)
+        # **两个整型操作数必须有一个公共类型**（`_common_type`）。没有就点名报 ——
+        # 让发射器"挑一个"就是替用户改数：`#133` 里原先挑的是**左操作数**的类型，
+        # 于是 `x:i32 + y:i64` 在 32 位里算，同一个子表达式一处等于 2³¹、一处为负。
+        # 字面量的类型是 None（按上下文定宽），不参与这条 —— `x:u64 + 1` 照旧。
+        lt = expr_type(e.left, scope, funcs, structs)
+        rt = expr_type(e.right, scope, funcs, structs)
+        if lt in INT_TYPES and rt in INT_TYPES and e.op not in ("<<", ">>") \
+                and _common_type(lt, rt) is None:
+            errs.append(
+                f"{e.line}: 表达式类型 {lt} 与 {rt} 没有公共类型 —— 两个都装不下对方"
+                f"（`{lt}` 装不下 `{rt}` 的全部取值，反过来也一样）。"
+                f"写 `as` 说清这一处用哪一个：`… as {lt}` 或 `… as {rt}`")
         return
 
 
@@ -6231,6 +6270,47 @@ IR_TYPES = {
 }
 _SIGNED = ("i8", "i16", "i32", "i64")
 
+#: 整型的**值域**：位宽 + 有没有符号。下面那条规则只用这两样。
+_WIDTHS = {"u8": 8, "u16": 16, "u32": 32, "u64": 64,
+           "i8": 8, "i16": 16, "i32": 32, "i64": 64}
+
+
+def _common_type(a: str, b: str) -> str | None:
+    """两个整型的**公共类型**：一个两个值都装得下、且**不改变任何一个值**的类型。
+
+    ## 这条规则（`docs/233`）
+
+    **不会改变值的转换自动发生；会改变值的转换必须写 `as`。** 就这一句。
+
+    * 同符号：取宽的那个（`u32` 与 `u64` ⇒ `u64`；`i32` 与 `i64` ⇒ `i64`）。
+    * 一宽一窄、一有符号一无符号：**只有窄的那个是无符号**才有解
+      （`u32` 与 `i64` ⇒ `i64`，因为 `i64` 装得下 0..2³²-1）；
+      反过来（`u64` 与 `i32`、`u32` 与 `i32`）**没有公共类型** ——
+      `u64` 装不下 -1，`i32` 装不下 2³²-1，两边谁都不肯，于是要写 `as`。
+
+    取这个形状的理由（用户 2026-10-16 的裁定："简单，安全，方便，快捷，吸取
+    Rust/C 和 py 的优势"）：
+
+    * **安全**（Rust 那一半）：隐式转换**永远不会改变一个值**，所以不存在"编得过、
+      跑得出、数不对"。C 在这里恰恰相反 —— 它的"无符号赢"会把 `-1` 变成一个
+      极大的正数，那条坑这条规则进不来。
+    * **方便**（C 那一半）：常见的混宽写法（`v >> (8 * i)`、`len + 1`）不用加 `as`。
+    * **简单**（Python 那一半）：一句话，一张两行的表；不是 C 那张十几行的
+      "寻常算术转换"，也没有"先提升到 int"那一步。
+    * **快捷**：纯粹是编译期的定型；运行时那一步是 `zext`/`sext`，没有成本。
+
+    没有公共类型就是**编译期错误**（E001），不是"挑一个"—— 挑不出来的时候，
+    任何选择都是在替用户改数（这正是 `#133`：原先取**左操作数**的类型，
+    `x:i32 + y:i64` 于是在 32 位里算，同一个子表达式一处等于 2³¹、一处为负）。
+    """
+    if a not in _WIDTHS or b not in _WIDTHS:
+        return None
+    sa, sb = a in _SIGNED, b in _SIGNED
+    if sa == sb:
+        return a if _WIDTHS[a] >= _WIDTHS[b] else b
+    u, s = (a, b) if not sa else (b, a)
+    return s if _WIDTHS[u] < _WIDTHS[s] else None
+
 
 def _ir_t(t: str) -> str:
     if t not in IR_TYPES:
@@ -7582,6 +7662,24 @@ class _Ir:
             return e.enum, b
         raise LomError(getattr(e, "line", 1), 1, f"native 后端不支持该表达式: {type(e).__name__}")
 
+    def upcast(self, v: str, frm: str | None, to: str) -> str:
+        """把 `v`（类型 `frm`）抬到公共类型 `to`；已经同型就原样返回。
+
+        **只会是 `zext`/`sext`，永远不会 `trunc`** —— 公共类型按定义装得下两个值
+        （`_common_type`），收窄的那一侧轮不到：真没有公共类型时，checker 已经
+        报 E001 了，发射器走不到这儿。
+
+        与 `expr()` 里 `Cast` 那一支同一套算法（`si == di` 那条短路也在那儿）：
+        `u64` 与 `i64` 在 LLVM 里是**同一个类型**，再 cast 一次是非法 IR。"""
+        if frm not in INT_TYPES or to not in INT_TYPES or frm == to:
+            return v
+        si, di = self.ll(frm), self.ll(to)
+        if si == di:
+            return v
+        r = self.t()
+        self.w(f"{r} = {'sext' if frm in _SIGNED else 'zext'} {si} {v} to {di}")
+        return r
+
     def binop(self, e: Bin, want: str | None) -> tuple[str, str]:
         scope = self.type_scope()
         lt = expr_type(e.left, scope, self.funcs, {})
@@ -7602,7 +7700,16 @@ class _Ir:
             r = self.t()
             self.w(f"{r} = getelementptr inbounds i8, ptr {a}, i64 {n}")
             return "ptr", r
-        ty = (lt or rt or want or "u32")
+        # 结果的宽度 = 两侧的**公共类型**（`_common_type`），**不是左操作数** ——
+        # `#133` 就是这一处：`x:i32 + y:i64` 原先按左边的 i32 定型，右边那个 i64 值
+        # 没转就塞进 `add i32`，于是同一个子表达式一处等于 2³¹、一处为负。
+        # 有一侧是字面量（类型 None）时维持原样：它按上下文定宽，公共类型取另一侧。
+        # **移位除外**：`<<`/`>>` 的右操作数是移位量，任何整型都收，结果类型只看左边
+        # （与 `expr_type` 那一支同一条）。
+        ct = None
+        if lt in INT_TYPES and rt in INT_TYPES and e.op not in ("<<", ">>"):
+            ct = _common_type(lt, rt)
+        ty = (ct or lt or rt or want or "u32")
         it = _ir_t(ty)
         signed = ty in _SIGNED
         op = e.op
@@ -7626,8 +7733,10 @@ class _Ir:
             r = self.t()
             self.w(f"{r} = phi i1 [ {b}, %{rhs_pred} ], [ {short_v}, %{short_l} ]")
             return "bool", r
-        _, a = self.expr(e.left, ty)
-        _, b = self.expr(e.right, ty)
+        la, a = self.expr(e.left, ty)
+        a = self.upcast(a, la, ty)
+        rb, b = self.expr(e.right, ty)
+        b = self.upcast(b, rb, ty)
         r = self.t()
         if op in ("==", "!="):
             self.w(f"{r} = icmp {'eq' if op == '==' else 'ne'} {it} {a}, {b}")

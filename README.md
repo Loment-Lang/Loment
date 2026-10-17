@@ -15,12 +15,16 @@
   <a href="QUICKSTART.md">Quick start</a> ·
   <a href=".claude/skills/loment/SKILL.md">Language guide</a> ·
   <a href="standard/LLS.md">Standard</a> ·
-  <a href="CONTRIBUTING.md">Contributing</a>
+  <a href="CONTRIBUTING.md">Contributing</a> ·
+  <a href="README.zh-CN.md">简体中文</a>
 </p>
 
-This is the main source code repository for Loment. It contains the compiler, the standard
-library and the toolchain. It ships as a package — Linux `tar.gz`, Windows `zip`, Windows
-installer — and running it needs no Python, no clang and no WSL.
+This is the source for Loment: the compiler, the standard library and the toolchain. **Development,
+issues and pull requests are on GitHub**; GitLab, Gitee, Codeberg and Bitbucket carry
+**read-only mirrors** — anything opened there goes unseen.
+
+It ships as a package — Linux `tar.gz`, Windows `zip`, Windows installer — and running it needs no
+Python, no clang and no WSL.
 
 ## Why Loment?
 

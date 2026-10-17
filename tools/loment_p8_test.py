@@ -1968,7 +1968,7 @@ def test_m85_codegen_table_capacity():
     cur_base = cst("CG_CUR")                          # 当前函数参数替换表
     enum_base, enum_stride = cst("CG_ENUM"), 80
     local_base = cst("CG_LOCAL")                      # 枚举表的上界 = 局部表基址
-    param_base, param_stride = cst("CG_PARAM"), 80
+    param_base, param_stride = cst("CG_PARAM"), 160   # `#265`: 20 槽 x 8
     bytes_total = cst("CG_BYTES")
     # 守卫必须用**同一个**常量, 否则表放大了守卫还卡在旧数 (或反过来写穿)
     assert f"n >= CG_MAXFN" in src, "函数表的守卫没和容量常量同源"
@@ -2047,17 +2047,18 @@ def test_m85_heap_budget():
 
 @test
 def test_m85_codegen_arg_arity_is_loud():
-    """实参上限 (10) 必须**响亮地失败**, 不能静默截断。
+    """实参上限 (**20**) 必须**响亮地失败**, 不能静默截断。
 
-    自举 codegen 的形参类型表步长 80 = 10 槽 x 8 字节 (加宽会撞 40960 的枚举表), 所以
-    实参/形参上限是 10。批次 2 里第一次出现 11 个实参的调用时它**静默丢了最后一个**
-    (IR 少一个实参), 参考实现照发 -> 逐字节判据报"两个编译器不一致", 但定位成本很高。
-    现在超限会 `panic(10)`; 这条测试同时钉住两边: ① 驱动源码里仍有那道闸门;
-    ② 语料里没有任何函数超过 10 个形参 (否则把闸门"修好"就等于让它再次静默)。
+    上限由**形参类型表**的槽数决定: 步长 160 = 20 槽 x 8 字节 (`#265` 从 10 槽加宽,
+    原先第 11 个形参写进下一条记录, 于是 11 形参的函数编出来的产物运行期 SIGILL)。
+    批次 2 里第一次出现 11 个实参的调用时它**静默丢了最后一个** (IR 少一个实参),
+    参考实现照发 -> 逐字节判据报"两个编译器不一致", 但定位成本很高。
+    现在超限会 `panic(20)`; 这条测试同时钉住两边: ① 驱动源码里仍有那道闸门;
+    ② 语料里没有任何函数超过 20 个形参 (否则把闸门"修好"就等于让它再次静默)。
     """
     src = (ROOT / "loment" / "selfhost" / "codegen.lomt").read_text(encoding="utf-8")
-    assert "panic(10);" in src, "自举 codegen 的实参超限闸门不见了"
-    assert "a < 10" in src, "实参上限常量变了: 请同步形参表步长与这条测试"
+    assert "panic(20);" in src, "自举 codegen 的实参超限闸门不见了"
+    assert "a < 20" in src, "实参上限常量变了: 请同步形参表步长与这条测试"
     worst = 0
     worst_fn = ""
     for target in sorted(list((ROOT / "loment" / "examples").glob("*.lomt"))
@@ -2069,8 +2070,8 @@ def test_m85_codegen_arg_arity_is_loud():
         for f in mod.funcs:
             if len(f.params) > worst:
                 worst, worst_fn = len(f.params), f"{target.name}:{f.name}"
-    assert worst <= 10, f"语料里有 {worst} 个形参的函数 ({worst_fn}), 超过 self-hosted codegen 的 10 槽上限"
-    print(f"      实参上限: 闸门存在; 语料最大形参数 {worst} ({worst_fn}) <= 10")
+    assert worst <= 20, f"语料里有 {worst} 个形参的函数 ({worst_fn}), 超过 self-hosted codegen 的 20 槽上限"
+    print(f"      实参上限: 闸门存在; 语料最大形参数 {worst} ({worst_fn}) <= 20")
 
 
 @test

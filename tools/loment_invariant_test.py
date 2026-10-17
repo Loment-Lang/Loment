@@ -217,14 +217,13 @@ def boundary_cases() -> dict[str, str]:
 #:     Python `RecursionError`：退出码非零、stderr 上 195 KB，而那是**回溯不是诊断**
 #:     —— 编译器自己炸了，没说你哪里不对。自举驱动那边反而编得出来（`rc=0`），
 #:     于是这一格又是两份实现**朝另一半方向**分岔。边界在 100 与 250 之间。
-KNOWN_GAPS: set[tuple[str, str]] = {
-    ("eleven-params", "stage1"),
-    ("boundary-params-11", "stage1"),
-    ("struct-literal-no-trailing-comma", "stage1"),
+    # `eleven-params` / `boundary-params-11` **已划掉**：`#265` 在这个 PR 里修好了（形参类型表
+    # 10 槽 → 20 槽）。一个 11 形参的程序现在编得出来，跑起来返回第 11 个形参的值。
+    # `struct-literal-no-trailing-comma` **已划掉**：`#11` 修好了（字段表的步长不再假设尾逗号）。
     # `flat-250-terms` / `boundary-terms-250` **已划掉**：`#226` 在这个 PR 里修好了（递归上限
     # 抬到 8000，真撞上转成 E023），参考实现不再炸 `RecursionError`。账**只许变短**，所以
     # 修好的那一格必须在同一个 PR 里删掉 —— 否则这条判据会点名"这一格已经绿了"。
-}
+KNOWN_GAPS: set[tuple[str, str]] = set()
 
 
 @test

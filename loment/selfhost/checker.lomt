@@ -186,6 +186,44 @@ fn chk_ty_is_int(v: u32) -> u32 {
     return 0;
 }
 
+/// 基类型内码 -> 位宽 (内码 1..4 = u8..u64, 5..8 = i8..i64; `chk_ty_is_int` 保证了
+/// 进来的都在 1..8 里)。
+fn chk_int_bits(c: u32) -> u32 {
+    if c == 1 || c == 5 { return 8; }
+    if c == 2 || c == 6 { return 16; }
+    if c == 3 || c == 7 { return 32; }
+    return 64;
+}
+
+/// 两个整型编码的**公共类型**: 一个装得下两个值、且**不改变任何一个值**的类型。
+/// 0 = 没有 (要写 `as`)。**与参考实现的 `lomentc._common_type`、自举 codegen 的
+/// `bin_common` 是同一条规则** —— 三处必须是同一张表, 推理写在 `tools/lomentc.py`。
+/// 返回值一定是两个入参之一。
+fn chk_common_ty(a: u32, b: u32) -> u32 {
+    if chk_ty_is_int(a) == 0 || chk_ty_is_int(b) == 0 {
+        return 0;
+    }
+    let ca: u32 = a % (1 << TY_KIND_SHIFT);
+    let cb: u32 = b % (1 << TY_KIND_SHIFT);
+    let sa: u32 = 0;
+    let sb: u32 = 0;
+    if ca >= 5 { sa = 1; }
+    if cb >= 5 { sb = 1; }
+    let wa: u32 = chk_int_bits(ca);
+    let wb: u32 = chk_int_bits(cb);
+    if sa == sb {
+        if wa >= wb { return a; }
+        return b;
+    }
+    // 一有符号一无符号: 只有**无符号那个更窄**才有解 (宽的有符号装得下它全部取值)。
+    if sa == 1 {
+        if wb < wa { return a; }
+        return 0;
+    }
+    if wa < wb { return b; }
+    return 0;
+}
+
 // ---------------------------------------------------------------- 复合类型表 (TY_ARRAY/TY_SLICE)
 //
 // 数组/切片没法内联进 u32 (要带元素类型与长度/可变性两个分量), 所以指向一张小表:
@@ -1514,17 +1552,44 @@ fn chk_tex(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
         chk_tex_sub(src, t, syms, n, env, envc, chk_lh(lo, hi), tyt, p, oc);
         return (1 << TY_KIND_SHIFT) + 9;
     }
-    // ---- 算术/位运算 -> 最左操作数 (`as` 若排在后面就属于右操作数)
+    // ---- 算术/位运算 -> 两侧的**公共类型** (`#133`; `as` 若排在后面就属于右操作数)。
+    // 参考实现那一侧是 `expr_type(Bin) = _common_type(lt, rt)`: `_common_type` 是格上的
+    // 并 (交换/结合/等幂), 所以"按第一个顶层运算符切成两半、递归下去"折出来的类型
+    // 与它按语法树折的是同一个 —— 不需要在这里重建优先级。
     if bin_at != 0 && (as_at == 0 || bin_at < as_at) {
         let roff: u32 = 1;
         if (chk_tok_is(src, t, bin_at, "<") && chk_tok_is(src, t, bin_at + 1, "<"))
                 || (chk_tok_is(src, t, bin_at, ">") && chk_tok_is(src, t, bin_at + 1, ">")) {
             roff = 2;
         }
+        // 左边那半按定义没有顶层运算符, 所以 `chk_tex_sub` 在这儿是空的; 右边那半整段
+        // 交给 `chk_tex` —— 它自己会递归, 再叫一次 `chk_tex_sub` 会把同一段走两遍、
+        // 同一处诊断发两次 (`chk_pub` 不去重)。
         chk_tex_sub(src, t, syms, n, env, envc, chk_lh(lo, bin_at), tyt, p, oc);
-        chk_tex_sub(src, t, syms, n, env, envc, chk_lh(bin_at + roff, hi), tyt, p, oc);
-        return chk_tex(src, t, syms, n, env, envc,
-                       chk_lh(lo, bin_at), tyt, p, oc);
+        let lt: u32 = chk_tex(src, t, syms, n, env, envc,
+                              chk_lh(lo, bin_at), tyt, p, oc);
+        let rt: u32 = chk_tex(src, t, syms, n, env, envc,
+                              chk_lh(bin_at + roff, hi), tyt, p, oc);
+        // **移位量不参与公共类型** (`<<` / `>>`) —— 它只是个位数, 任何整型都收,
+        // 结果类型只看左操作数 (C/C++/Rust 都这样; `tools/lomentc.py` 同一条)。
+        let is_sh: u32 = 0;
+        if chk_tok_is(src, t, bin_at, "<") || chk_tok_is(src, t, bin_at, ">") {
+            is_sh = 1;
+        }
+        let ct: u32 = 0;
+        if is_sh == 0 {
+            ct = chk_common_ty(lt, rt);
+        }
+        if ct != 0 {
+            return ct;
+        }
+        if is_sh == 0 && chk_ty_is_int(lt) == 1 && chk_ty_is_int(rt) == 1 {
+            chk_pub(src, t, oc, p, E_TMISMATCH, bin_at);   // 没有公共类型 -> 要写 `as`
+        }
+        if lt != 0 {
+            return lt;
+        }
+        return rt;
     }
     // ---- `as T`: 目标合法性 + 左操作数类型 (参考实现 1810-1821)
     if as_at != 0 && as_at > lo {

@@ -4010,6 +4010,53 @@ def test_every_tier_emits_ir_clang_accepts():
           f"（另有已登记缺口 {len(_KNOWN_ILLEGAL_TIERS)} 个: {', '.join(sorted(_KNOWN_ILLEGAL_TIERS))}）")
 
 
+@test
+def test_mixed_width_arithmetic_has_a_common_type():
+    """`#289`: two integer operands must have a common type; widen the narrow one, refuse if none.
+
+    Both sides were wrong before, and in **opposite** directions: the reference widened only the
+    left operand and left the right at its own width, so `a: u32 == b: u8` emitted
+    `icmp eq i32 %a, %b` with `%b` an `i8` - **invalid IR**, which clang rejects on sight; the
+    self-host truncated the left one instead, which disagrees with the reference on
+    `load8(...) == x: u8` and is a **wrong answer** in general (`docs/158` section 4 item 11).
+
+    **Both sides were wrong together**, so the twin criteria stayed green - agreement is not
+    correctness.
+
+    Measures three things: the direction of the widening (`zext` to the wider one, never a
+    truncation), whether the product is legal LLVM, and that the pair which cannot hold the other
+    (`u32` vs `i32`) is refused.
+    """
+    import shutil
+    import subprocess
+
+    def ir_of(lines: list[str]) -> str:
+        return lomentc.emit_llvm(parse(chr(10).join(lines) + chr(10)), ROOT, [])
+
+    ir = ir_of(["module m", "", "fn eq(a: u32, b: u8) -> bool { return a == b; }"])
+    assert "zext i8" in ir and "icmp eq i32" in ir, ir
+    ir = ir_of(["module m", "", "fn add(a: i64, b: u32) -> i64 { return a + b; }"])
+    assert "zext i32" in ir and "add i64" in ir, ir
+    e = errs("module m" + chr(10) + chr(10)
+             + "fn bad(a: u32, b: i32) -> u32 { return a + b; }" + chr(10))
+    assert any("没有公共类型" in x and "as" in x for x in e), e
+    clang = shutil.which("clang") or (
+        r"C:\Program Files\LLVM\bin\clang.exe"
+        if Path(r"C:\Program Files\LLVM\bin\clang.exe").exists() else None)
+    if not clang:
+        print("      SKIP: no clang (widening direction and the refusal were still measured)")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        ll = Path(td) / "mw.ll"
+        ll.write_text(ir_of(["module m", "",
+                             "fn eq(a: u32, b: u8) -> bool { return a == b; }"]),
+                      encoding="utf-8", newline=chr(10))
+        r = subprocess.run([clang, "-c", str(ll), "-o", str(Path(td) / "mw.o")],
+                           capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, r.stderr[-300:]
+    print("      narrow side widened (zext), irreconcilable pair refused, product passes clang")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "lomentc_test")
 

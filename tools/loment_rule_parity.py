@@ -384,6 +384,11 @@ _CASES: list[tuple[str, str]] = [
      "module m\n\nfn f() -> u32 {\n    let a: [f64; 4] = [0, 0, 0, 0];\n    return 0;\n}\n"),
     # `#33` / `#36`：字符串里的**未知转义**。参考实现在词法期就拒（E019）；自举词法器没有
     # 失败通道，所以同一件事落在 `chk_syntax_prepass` —— 两边的**码**必须一样。
+    # `#289`: two integer operands with no common type. The reference names the pair and says
+    # which `as` to write; the self-host reports E001 at the operator. Same code, and the
+    # widening half is pinned by `lomentc_test::test_mixed_width_arithmetic_has_a_common_type`.
+    ("mixed-width-no-common",
+     "module m\n\nfn bad(a: u32, b: i32) -> u32 { return a + b; }\n"),
     ("unknown-string-escape",
      "module m\n\nfn f() -> u32 {\n    let s: str = \"a\\qb\";\n    return 0;\n}\n"),
     # `#48`：`loment check` 对**编不过**的源退出 0、零输出。两条都是"自举侧没有解析器，

@@ -101,6 +101,79 @@ def _corpus() -> list[Path]:
 
 
 @test
+def test_fmt_preserves_the_token_sequence_on_the_whole_corpus():
+    """**格式化一个字都不许动**（`#640`）—— 整份语料重新词法一遍，序列必须相同。
+
+    判据不比文本、比 token：格式化器要改的只有空白与换行，token 序列是它的不变量。
+
+    **未修时红**：参考实现按 `tok.val` 判 `{` `}` `;` `,`，于是内容正好是这四个字符的
+    字符串字面量被当标点铺开、**引号丢掉** —— `g(a, "{")` 变成 `g(a, {)`，括号失衡。
+    57 份语料里中 8 份（`checker` / `codegen` / `driver` / `interp` / `lexer` / `parser` /
+    `potato` / `lomfmt` 自己）。孪生与它**同错**，所以等价那条判据一直是绿的。
+    """
+    bad = []
+    files = _corpus()
+    for f in files:
+        src = f.read_text(encoding="utf-8")
+        out = lomfmt.format_source(src)
+        a = [(t.kind, t.val) for t in lomc.lex(src) if t.kind != "eof"]
+        b = [(t.kind, t.val) for t in lomc.lex(out) if t.kind != "eof"]
+        if a != b:
+            i = next((k for k in range(min(len(a), len(b))) if a[k] != b[k]),
+                     min(len(a), len(b)))
+            bad.append(f"{f.name}: {len(a)} -> {len(b)} 个 token，"
+                       f"第 {i} 个起 {a[i:i + 1]} != {b[i:i + 1]}")
+    assert not bad, "; ".join(bad[:4])
+    # 四个字面量各钉一条：它们分别会开块、闭块、结句、分参
+    src = ('module x\n\nfn f(a: u32) -> bool {\n'
+           '    return g(a, ";") && g(a, ",") && g(a, "{") && g(a, "}");\n}\n\n'
+           'fn g(a: u32, s: str) -> bool {\n    return true;\n}\n')
+    out = lomfmt.format_source(src)
+    for lit in ('";"', '","', '"{"', '"}"'):
+        assert lit in out, f"字面量 {lit} 被当成标点了 —— {out!r}"
+    assert out.count("{") == out.count("}"), f"括号失衡: {out!r}"
+    print(f"      {len(files)} 个语料格式化前后 token 序列一字未变")
+
+
+@test
+def test_fmt_keeps_every_comment():
+    """**注释要活下来**（`#45`）—— 至少 `///`，它是语言的一部分（`loment doc` 靠它）。
+
+    这条**不靠与 Python 版等价**：两个实现可以一起把注释丢掉，等价判据照绿。
+    所以它直接数 —— 源里扫出来的注释按行序逐个在输出里出现，一条不少、一条不多。
+    """
+    bad = []
+    files = _corpus()
+    for f in files:
+        src = f.read_text(encoding="utf-8")
+        out = lomfmt.format_source(src)
+        a, b = lomfmt._scan_comments(src), lomfmt._scan_comments(out)
+        la = [t for k in sorted(a[0]) for t in a[0][k]] + [a[1][k] for k in sorted(a[1])]
+        lb = [t for k in sorted(b[0]) for t in b[0][k]] + [b[1][k] for k in sorted(b[1])]
+        if la != lb:
+            i = next((k for k in range(min(len(la), len(lb))) if la[k] != lb[k]),
+                     min(len(la), len(lb)))
+            bad.append(f"{f.name}: {len(la)} -> {len(lb)} 条注释，"
+                       f"第 {i} 条起 {la[i:i + 1]} != {lb[i:i + 1]}")
+    assert not bad, "; ".join(bad[:4])
+
+    # 报告里那份原文：两种注释都得在，`///` 还得**紧挨着**它注释的那条声明
+    # ——`loment doc` 抽的就是它上面那一块。
+    src = ("// module banner comment\nmodule docfmt\n\n"
+           "/// Adds one to an unsigned value.\n"
+           "/// Wraps at the u32 boundary.\n"
+           "pub fn bump(v: u32) -> u32 {\n    return v + 1; // 行尾注释\n}\n")
+    out = lomfmt.format_source(src).split("\n")
+    assert "// module banner comment" in out, out
+    k = next((i for i, s in enumerate(out) if s.startswith("pub fn bump")), None)
+    assert k is not None, out
+    assert out[k - 2:k] == ["/// Adds one to an unsigned value.",
+                            "/// Wraps at the u32 boundary."], out
+    assert any(s.endswith("// 行尾注释") for s in out), out
+    print(f"      {len(files)} 个语料注释一条未丢；`///` 仍紧挨着它注释的声明")
+
+
+@test
 def test_fmt_preserves_dialect_tokens():
     """**格式化不改变 token 序列** —— 于是方言区被格式化了也无所谓（`docs/184` §9 S4.3）。
 

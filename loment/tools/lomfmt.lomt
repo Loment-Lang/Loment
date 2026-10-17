@@ -45,6 +45,17 @@ const S_STOP: u32 = 36;            // 块类型栈顶
 // `#46`: 这一行**到现在为止**的记号是不是全是声明行首的修饰词
 //（`pub` / `extern`）。下一个顶层关键字要接在它后面，不另起一行。
 const S_LHEAD: u32 = 40;
+// `#45`: 注释表。词法器把注释跳过了，所以从**源码**单独扫一遍、按行号插回去。
+const S_CN: u32 = 44;              // 注释条目数
+const S_CNX: u32 = 48;             // 下一条待吐的**独占行**注释
+const S_CBLK: u32 = 52;            // 最近一块独占行注释在输出里的起点 (0 = 没有)
+const S_LLINE: u32 = 56;           // 上一个处理过的 token 的源码行
+// 缓冲行**已经带了行尾注释**（1 = 是）。注释一去这一行就到此为止：再往上追加 token
+// 就会被 `//` 吞掉。源码里两行各带一条行尾注释、而格式化把它们并成一行不是假想 ——
+// `codegen.lomt` 那个 `while` 条件就是（实测吞掉了 `|| tok_is(… "free")) {`）。
+const S_LCMT: u32 = 60;
+const CMT_CAP: u32 = 4096;         // 注释条目上限 (每条 16 字节)
+const OFF_CMT: u32 = 3080192;      // MEM_CAP - 65536: 行/起/长/种类 四格
 
 // ---------------------------------------------------------------- 成员表
 // 每个集合用 "\n" 分隔。L1 的 `const` 只收**整数字面量** (parse_const 走 int_lit),
@@ -430,6 +441,7 @@ fn line_tok(mem: ptr, i: u32) {
 
 /// Python 的 flush(): 有内容就按当前深度缩进输出一行。
 fn flush_line(mem: ptr) -> u32 {
+    store32(mem, S_LCMT, 0);
     let n: u32 = load32(mem, S_LLEN);
     if n == 0 {
         return 0;
@@ -454,13 +466,28 @@ fn flush_line(mem: ptr) -> u32 {
     store32(mem, S_NL, load32(mem, S_NL) + 1);
     store32(mem, S_LLEN, 0);
     store32(mem, S_LTN, 0);
+    store32(mem, S_CBLK, 0);      // 代码行落地 -> 最近的注释块不再"紧挨着下一行"
     return 1;
 }
 
-/// Python 的 out.append("")。
+/// Python 的 out.append("")。**但紧挨着的是一块注释时，空行插到那整块之前**
+/// （`#45`）：`///` 注释的是它**下面**那条声明，插在中间会把两者拆开。
 fn out_blank(mem: ptr) {
-    out_push_byte(mem, 10);
-    store32(mem, S_LBLANK, 1);
+    let cb: u32 = load32(mem, S_CBLK);
+    if cb > 0 {
+        let olen: u32 = load32(mem, S_OLEN);
+        let q: u32 = olen;
+        while q > cb {
+            store8(mem, OFF_OUT + q, load8(mem, OFF_OUT + q - 1) as u8);
+            q = q - 1;
+        }
+        store8(mem, OFF_OUT + cb, 10 as u8);
+        store32(mem, S_OLEN, olen + 1);
+        store32(mem, S_LBLANK, 0);
+    } else {
+        out_push_byte(mem, 10);
+        store32(mem, S_LBLANK, 1);
+    }
 }
 
 // ---------------------------------------------------------------- 块类型栈
@@ -593,6 +620,17 @@ fn needs_space(src: ptr, t: ptr, pp: u32, prev: u32, i: u32, mg: u32) -> bool {
     }
     let pi: u32 = enc_idx(prev);
     let pm: u32 = enc_mg(prev);
+    // 值表只对**标点**有意义：字符串的值是内容（`#640`），`"}"` 的值就是 `}`，
+    // 拿它去查"前不留空格"会把 `f(a, "}")` 排成 `f(a,"}")`。
+    if tk_kind(t, i) == 2 {
+        return true;
+    }
+    if tk_kind(t, pi) == 2 {
+        if v_in(src, t, i, mg, T_NSB()) {
+            return false;
+        }
+        return true;
+    }
     if v_in(src, t, i, mg, T_NSB()) {
         return false;
     }
@@ -628,6 +666,197 @@ fn needs_space(src: ptr, t: ptr, pp: u32, prev: u32, i: u32, mg: u32) -> bool {
 
 // ---------------------------------------------------------------- 主流程
 
+// ---------------------------------------------------------------- 注释 (`#45`)
+
+fn cmt_add(mem: ptr, line: u32, st: u32, n: u32, kind: u32) {
+    let c: u32 = load32(mem, S_CN);
+    if c < CMT_CAP {
+        let o: u32 = OFF_CMT + c * 16;
+        store32(mem, o, line);
+        store32(mem, o + 4, st);
+        store32(mem, o + 8, n);
+        store32(mem, o + 12, kind);
+        store32(mem, S_CN, c + 1);
+    }
+}
+
+/// 从**源码**里扫注释（词法流里没有它们）。kind: 0 = 独占一行, 1 = 行尾。
+/// 字符串里的 `//` 不算 —— 扫到 `"` 就跳到配对的 `"`（认 `\` 转义）。
+fn scan_comments(src: ptr, mem: ptr) {
+    let i: u32 = 0;
+    let line: u32 = 1;
+    let hascode: u32 = 0;
+    while i < SRC_CAP && load8(src, i) != 0 {
+        let c: u32 = load8(src, i);
+        if c == 10 {
+            line = line + 1;
+            hascode = 0;
+            i = i + 1;
+        } else if c == 32 || c == 9 || c == 13 {
+            i = i + 1;
+        } else if c == 34 {              // 字符串
+            i = i + 1;
+            hascode = 1;
+            let go: u32 = 1;
+            while i < SRC_CAP && go == 1 && load8(src, i) != 0 {
+                let d: u32 = load8(src, i);
+                if d == 92 {
+                    i = i + 2;
+                } else if d == 34 {
+                    i = i + 1;
+                    go = 0;
+                } else {
+                    // 字符串里的换行**不计数**：词法器 (`lomc.lex`) 就是这样，数了就会
+                    // 与 `tk_line` 整体错开（实测 codegen.lomt 差 6 行）。
+                    i = i + 1;
+                }
+            }
+        } else if c == 47 && i + 1 < SRC_CAP && load8(src, i + 1) == 47 {   // //
+            let j: u32 = i;
+            while j < SRC_CAP && load8(src, j) != 10 && load8(src, j) != 0 {
+                j = j + 1;
+            }
+            let e: u32 = j;
+            while e > i && (load8(src, e - 1) == 32 || load8(src, e - 1) == 9 || load8(src, e - 1) == 13) {
+                e = e - 1;
+            }
+            let kd: u32 = 0;
+            if hascode == 1 {
+                kd = 1;
+            }
+            cmt_add(mem, line, i, e - i, kd);
+            i = j;
+        } else if c == 47 && i + 1 < SRC_CAP && load8(src, i + 1) == 42 {   // /*
+            let l0: u32 = line;
+            let j: u32 = i + 2;
+            let go: u32 = 1;
+            while j + 1 < SRC_CAP && go == 1 && load8(src, j) != 0 {
+                if load8(src, j) == 42 && load8(src, j + 1) == 47 {
+                    j = j + 2;
+                    go = 0;
+                } else {
+                    if load8(src, j) == 10 {
+                        line = line + 1;
+                    }
+                    j = j + 1;
+                }
+            }
+            if go == 1 {
+                j = SRC_CAP;
+            }
+            let kd: u32 = 0;
+            if hascode == 1 {
+                kd = 1;
+            }
+            cmt_add(mem, l0, i, j - i, kd);
+            i = j;
+        } else {
+            hascode = 1;
+            i = i + 1;
+        }
+    }
+}
+
+/// 吐一条独占行注释（按当前深度缩进；块注释原文照抄）。
+fn emit_cmt_one(mem: ptr, src: ptr, ci: u32) {
+    let o: u32 = OFF_CMT + ci * 16;
+    let st: u32 = load32(mem, o + 4);
+    let n: u32 = load32(mem, o + 8);
+    if load32(mem, S_CBLK) == 0 {
+        store32(mem, S_CBLK, load32(mem, S_OLEN));
+    }
+    let d: u32 = load32(mem, S_DEPTH);
+    let q: u32 = 0;
+    while q < d * 4 {
+        out_push_byte(mem, 32);
+        q = q + 1;
+    }
+    out_push(mem, ptr_add(src, st), n);
+    out_push_byte(mem, 10);
+    store32(mem, S_LBLANK, 0);
+    store32(mem, S_LBRACE, 0);
+    store32(mem, S_NL, load32(mem, S_NL) + 1);
+}
+
+/// 还有没有 line < `tl` 的独占行注释没吐? (调用方据此先 flush 再吐)
+fn own_before(mem: ptr, tl: u32) -> u32 {
+    let c: u32 = load32(mem, S_CN);
+    let k: u32 = 0;
+    while k < c {
+        let o: u32 = OFF_CMT + k * 16;
+        if load32(mem, o + 12) == 0 && load32(mem, o) < tl {
+            return 1;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+/// 第一条还没吐的、line < `tl` 的独占行注释的源码行（0 = 没有）。
+fn first_own_line(mem: ptr, tl: u32) -> u32 {
+    let c: u32 = load32(mem, S_CN);
+    let k: u32 = 0;
+    while k < c {
+        let o: u32 = OFF_CMT + k * 16;
+        if load32(mem, o + 12) == 0 && load32(mem, o) < tl {
+            return load32(mem, o);
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+/// 按源码顺序吐出所有 line < `tl` 的独占行注释（各条用 kind=2 记账）。
+fn emit_own_upto(mem: ptr, src: ptr, tl: u32) {
+    let c: u32 = load32(mem, S_CN);
+    let k: u32 = 0;
+    while k < c {
+        let o: u32 = OFF_CMT + k * 16;
+        if load32(mem, o + 12) == 0 && load32(mem, o) < tl {
+            emit_cmt_one(mem, src, k);
+            store32(mem, o + 12, 2);
+        }
+        k = k + 1;
+    }
+}
+
+/// 把 `line` 那一行的行尾注释补到上一行末尾（Python: 追加到 line 或 out[-1]）。
+fn emit_trail(mem: ptr, src: ptr, line: u32) -> u32 {
+    let c: u32 = load32(mem, S_CN);
+    let k: u32 = 0;
+    let found: u32 = 0;
+    while k < c && found == 0 {
+        let o: u32 = OFF_CMT + k * 16;
+        if load32(mem, o) == line && load32(mem, o + 12) == 1 {
+            found = 1;
+        } else {
+            k = k + 1;
+        }
+    }
+    if found == 0 {
+        return 0;
+    }
+    let o: u32 = OFF_CMT + k * 16;
+    let st: u32 = load32(mem, o + 4);
+    let n: u32 = load32(mem, o + 8);
+    if load32(mem, S_LLEN) > 0 {
+        line_push_byte(mem, 32);
+        line_push(mem, ptr_add(src, st), n);
+        store32(mem, S_LCMT, 1);
+    } else {
+        let olen: u32 = load32(mem, S_OLEN);
+        if olen > 0 && load8(mem, OFF_OUT + olen - 1) == 10 {
+            store32(mem, S_OLEN, olen - 1);
+        }
+        out_push_byte(mem, 32);
+        out_push(mem, ptr_add(src, st), n);
+        out_push_byte(mem, 10);
+        store32(mem, S_LBLANK, 0);
+    }
+    store32(mem, o + 12, 2);
+    return 1;
+}
+
 /// 格式化: 返回输出长度 (输出在 mem + OFF_OUT)。
 pub fn format_src(src: ptr, t: ptr, n: u32, mem: ptr) -> u32 {
     store32(mem, S_DEPTH, 0);
@@ -641,10 +870,47 @@ pub fn format_src(src: ptr, t: ptr, n: u32, mem: ptr) -> u32 {
     store32(mem, S_LBRACE, 0);
     store32(mem, S_STOP, 0);
     store32(mem, S_LHEAD, 0);
+    store32(mem, S_CN, 0);
+    store32(mem, S_CNX, 0);
+    store32(mem, S_CBLK, 0);
+    store32(mem, S_LLINE, 0);
+    store32(mem, S_LCMT, 0);
+    scan_comments(src, mem);
     let i: u32 = 0;
     let pp: u32 = 0;
     let prev: u32 = 0;
     while i < n && tk_kind(t, i) != 4 {
+        // ---- 注释（`#45`）：行尾的补上一行，独占行的**先 flush 缓冲行再吐**
+        let tl: u32 = tk_line(t, i);
+        if load32(mem, S_LLINE) != 0 && tl > load32(mem, S_LLINE) {
+            let _tr: u32 = emit_trail(mem, src, load32(mem, S_LLINE));
+        }
+        // 行尾注释把这一行封住了 —— 再追加 token 就会被 `//` 吞掉。
+        if load32(mem, S_LCMT) == 1 {
+            flush_line(mem);
+        }
+        if own_before(mem, tl) == 1 {
+            // 缓冲行与注释的先后**按源码行号定**（与 Python 版同一条）：
+            // `module`（第 2 行）缓冲着、`///`（第 3 行）到了 ⇒ 行先出；
+            // `syscall4(...)`（第 6 行）缓冲着、注释在第 4-5 行 ⇒ 注释先出。
+            let fl: u32 = first_own_line(mem, tl);
+            let lstart: u32 = 0;
+            if load32(mem, S_LTN) > 0 {
+                lstart = tk_line(t, load32(mem, OFF_LTOK));
+            }
+            let line_first: u32 = 0;
+            if lstart != 0 && lstart < fl {
+                line_first = 1;
+            }
+            if line_first == 1 {
+                flush_line(mem);
+            }
+            emit_own_upto(mem, src, tl);
+            if line_first == 0 {
+                flush_line(mem);
+            }
+        }
+        store32(mem, S_LLINE, tl);
         let mg: u32 = merg_id(src, t, i, n);
         let step: u32 = 1;
         if mg != 0 {
@@ -693,16 +959,24 @@ pub fn format_src(src: ptr, t: ptr, n: u32, mem: ptr) -> u32 {
         let is_close: u32 = 0;
         let is_semi: u32 = 0;
         let is_comma: u32 = 0;
-        if v_in(src, t, i, mg, T_LBRACE()) {
+        // **先看 kind，再看值**（`#640`）：字符串字面量的值是**不带引号的内容**，所以
+        // `"{"` 的值就是 `{`。只比值得话下面四支会把字面量当标点铺开 —— 引号一去，
+        // `lex_tok_is(src, toks, j, "{")` 就成了 `lex_tok_is(src, toks, j, {)`：
+        // 括号失衡、解析不了，而退出码是 0。语料里 8 份中了（含本文件自己）。
+        let is_str: u32 = 0;
+        if tk_kind(t, i) == 2 {
+            is_str = 1;
+        }
+        if is_str == 0 && v_in(src, t, i, mg, T_LBRACE()) {
             is_brace = 1;
         } else {
-            if v_in(src, t, i, mg, T_RBRACE()) {
+            if is_str == 0 && v_in(src, t, i, mg, T_RBRACE()) {
                 is_close = 1;
             } else {
-                if v_in(src, t, i, mg, T_SEMI()) {
+                if is_str == 0 && v_in(src, t, i, mg, T_SEMI()) {
                     is_semi = 1;
                 } else {
-                    if v_in(src, t, i, mg, T_COMMA()) {
+                    if is_str == 0 && v_in(src, t, i, mg, T_COMMA()) {
                         is_comma = 1;
                     }
                 }
@@ -776,7 +1050,14 @@ pub fn format_src(src: ptr, t: ptr, n: u32, mem: ptr) -> u32 {
         }
         i = i + step;
     }
+    if load32(mem, S_LLINE) != 0 {
+        let _tr: u32 = emit_trail(mem, src, load32(mem, S_LLINE));
+    }
     flush_line(mem);
+    // 文件末尾还留着的独占行注释
+    if own_before(mem, 4294967295) == 1 {
+        emit_own_upto(mem, src, 4294967295);
+    }
     // Python: while out and out[-1] == "": out.pop() —— 只清尾部的空行
     let olen: u32 = load32(mem, S_OLEN);
     let cut: u32 = olen;

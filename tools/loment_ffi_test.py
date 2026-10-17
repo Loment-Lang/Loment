@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -1533,6 +1534,232 @@ def test_a_real_static_library_round_trips():
                   f"compress/uncompress 逐字节回原文 (rc=0)；证伪件报 40")
         finally:
             ark.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------- V2：运行期绑定的共享对象
+
+#: 系统**共享** zlib 的几个常见落点（V2 读 `.so`，V1 读同名的 `.a`）。
+#: `/usr/lib/.../libz.so` 在 Debian 系是链接脚本（ASCII），下面按 **ET_DYN** 校验会把它滤掉。
+LIBZ_SO_CANDIDATES = ("/usr/lib/x86_64-linux-gnu/libz.so.1", "/usr/lib64/libz.so.1",
+                      "/usr/lib/libz.so.1", "/usr/lib/x86_64-linux-gnu/libz.so")
+
+
+def _system_so(dst: Path, candidates: tuple[str, ...]) -> Path | None:
+    """把系统的一份 `.so` 取到仓库里，取不到返回 None。两条腿与 `_system_libz` 同源。
+
+    **校验 `\\x7fELF` + `e_type == ET_DYN`**（不是只看前缀）：`libz.so` 这种名字在
+    Debian 系可能是链接脚本，半个 `.so` 会让判据在错的东西上跑，而它红起来与"真缺陷"
+    长得一样。
+    """
+    def ok(b: bytes) -> bool:
+        return (len(b) > 20 and b[:4] == b"\x7fELF"
+                and struct.unpack_from("<H", b, 16)[0] == 3)
+
+    data: bytes | None = None
+    for cand in candidates:
+        try:
+            p = Path(cand)
+            if p.is_file():
+                b = p.read_bytes()
+                if ok(b):
+                    data = b
+                    break
+        except OSError:
+            pass
+    if data is None:
+        for cand in candidates:
+            try:
+                r = subprocess.run([*_WSLCMD, "bash", "-lc", f"cat {cand}"],
+                                   capture_output=True, timeout=300, shell=False)
+            except OSError:            # 另一条腿不存在（没装 WSL）：**取不到**，不是挂掉
+                return None
+            if r.returncode == 0 and ok(r.stdout):
+                data = r.stdout
+                break
+    if data is None:
+        return None
+    dst.write_bytes(data)
+    return dst if ok(dst.read_bytes()) else None
+
+
+def _dynamic_facts(blob: bytes) -> dict:
+    """从**我们自己产出**的 ELF 里读动态链接那几样 —— 没有节头，只能走程序头 + `.dynamic`。"""
+    e_phoff, = struct.unpack_from("<Q", blob, 32)
+    e_phnum, = struct.unpack_from("<H", blob, 56)
+    loads: list[tuple[int, int, int]] = []
+    dyn: tuple[int, int] | None = None
+    interp_at = None
+    for k in range(e_phnum):
+        o = e_phoff + k * 56
+        pt, _fl, poff, pva, _pa, pfsz, _ms, _al = struct.unpack_from("<IIQQQQQQ", blob, o)
+        if pt == 1:
+            loads.append((pva, poff, pfsz))
+        elif pt == 2:
+            dyn = (poff, pfsz)
+        elif pt == 3:
+            interp_at = (poff, pfsz)
+    assert dyn is not None, "产物没有 PT_DYNAMIC —— 这不是动态链接的产物"
+
+    def foff(va: int) -> int:
+        for v, o, sz in loads:
+            if v <= va < v + sz:
+                return o + (va - v)
+        raise AssertionError(f"动态段里的地址 0x{va:x} 不在任何 PT_LOAD 里")
+
+    entries: dict[int, int] = {}
+    o, end = dyn[0], dyn[0] + dyn[1]
+    while o + 16 <= end:
+        tag, val = struct.unpack_from("<QQ", blob, o)
+        o += 16
+        if tag == 0:
+            break
+        entries.setdefault(tag, val)
+    strtab = foff(entries[5])                      # DT_STRTAB
+    needed: list[str] = []
+    o = dyn[0]
+    while o + 16 <= end:
+        tag, val = struct.unpack_from("<QQ", blob, o)
+        o += 16
+        if tag == 0:
+            break
+        if tag == 1:                               # DT_NEEDED
+            e = blob.index(b"\x00", strtab + val)
+            needed.append(blob[strtab + val:e].decode())
+    interp = None
+    if interp_at is not None:
+        e = blob.index(b"\x00", interp_at[0])
+        interp = blob[interp_at[0]:e].decode()
+    return {"interp": interp, "needed": needed, "dyn": entries}
+
+
+def _build_dynamic(td: Path, src: str, so: Path) -> tuple[bytes, dict]:
+    """Loment 源码 -> IR -> (**带一个 `.so` 的**) ELF。开发通道那条路，所以 `allow_ports`。"""
+    p = td / "v2.lomt"
+    p.write_text(src, encoding="utf-8", newline="\n")
+    mod = lomentc.load(p)
+    errs = lomentc.check(mod)
+    assert not errs, errs
+    ir = lomentc.emit_llvm(mod, ROOT)
+    return lomelf.compile_ll(ir, [lomelf.load_foreign(so)], allow_ports=True)
+
+
+def _run_elf(td: Path, blob: bytes) -> tuple[int, str]:
+    exe = td / "v2.elf"
+    exe.write_bytes(blob)
+    r = subprocess.run([*_WSLCMD, "bash", "-lc",
+                        f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}"],
+                       capture_output=True, text=True, timeout=120, shell=False)
+    return r.returncode, r.stderr
+
+
+@test
+def test_a_real_shared_library_is_bound_at_run_time():
+    """`docs/183` §4 的 **V2**（#360）：链系统 `libz.so`（**不链** `libz.a`），跑回原文。
+
+    **"库真的被用上了"必须单独证明** —— 静态链也能让行为判据变绿，那样这条就什么都没说。
+    所以这里同时量三件静态链做不到的事：
+
+      * 产物里有 `PT_INTERP`，`DT_NEEDED` 里写着 `libz.so.1`（静态产物两样都没有）；
+      * 产物里**没有 zlib 的报错串**（`invalid distance too far back` / `incorrect header
+        check`）—— 那些字节只在库里；搬进产物才会有（V1 那份链 `libz.a` 的产物有，正是
+        这两条判据合起来的意思）；
+      * 体积：动态产物 < 64 KiB（V1 那份是 200 KiB 量级）。
+
+    **三条失败模式都必须是命名错误，不是运行期崩**：缺 `.so`、库里没有这个名字、名字只以
+    **非默认版本**导出 / 是**数据**符号。前两条对着 `libz.so` 量；后两条对着 `libc.so.6`
+    量 —— libz 没有非默认版本导出、也没有真的数据导出（这一点本身也是量出来的，不是假设）。
+
+    **端口门**：发行通道（`allow_ports=False`）必须拒收动态依赖 —— 这是 `docs/219` S3。
+    """
+    if not _wsl():
+        print("      SKIP: 需要 WSL（或 Linux）跑 ELF")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        so = _system_so(ROOT / "loment" / "build" / "_libz_probe.so.1", LIBZ_SO_CANDIDATES)
+        if so is None:
+            print("      SKIP: 这台机器上没有 libz.so（要 zlib1g）—— 这一格测不了")
+            return
+        try:
+            blob = b""
+            for tag, src, want in (("roundtrip", ZLIB_STATIC_SRC, 0),
+                                   ("falsifier", ZLIB_STATIC_FALSIFIER_SRC, 40)):
+                blob, info = _build_dynamic(td, src, so)
+                assert info["shared"] == ["libz.so.1"], info
+                assert info["imports"] == ["compress", "uncompress"], info
+                rc, err = _run_elf(td, blob)
+                assert rc == want, f"[{tag}] rc={rc}（期望 {want}）err={err[-300:]!r}"
+
+            facts = _dynamic_facts(blob)
+            assert facts["interp"] == "/lib64/ld-linux-x86-64.so.2", facts["interp"]
+            assert facts["needed"] == ["libz.so.1"], facts["needed"]
+            # 没有把库的代码搬进来：zlib 的报错串在库里，不在我们的产物里。
+            lib = so.read_bytes()
+            for needle in (b"invalid distance too far back", b"incorrect header check"):
+                assert needle in lib, f"取回来的 libz.so 里没有 {needle!r}？取错文件了"
+                assert needle not in blob, (
+                    f"产物里出现了 zlib 的 {needle!r} —— 库的 .rodata 被搬进来了，"
+                    f"那就不是动态链接")
+            assert len(blob) < 64 * 1024, f"动态产物 {len(blob)} 字节，太大 —— 像是静态链的"
+
+            # ---- 失败模式一：缺 `.so`（打不开 = 命名错误，不是崩）
+            try:
+                lomelf.load_foreign(td / "no-such-library.so.1")
+                raise AssertionError("缺共享对象居然没报错")
+            except lomelf.Unsupported as e:
+                assert "打不开" in str(e), str(e)
+
+            # ---- 失败模式二：库里没有这个名字（**走完整条链**，不是只调 resolve）
+            missing = ZLIB_STATIC_SRC.replace(
+                "extern fn compress(dst: ptr, dstlen: ptr, src: ptr, srclen: u64) -> i32;",
+                "extern fn loment_not_exported(dst: ptr, dstlen: ptr, src: ptr, srclen: u64) -> i32;",
+                1).replace(
+                "if compress(comp, clen, src, NSRC as u64) != 0",
+                "if loment_not_exported(comp, clen, src, NSRC as u64) != 0", 1)
+            assert missing != ZLIB_STATIC_SRC and "loment_not_exported" in missing
+            try:
+                _build_dynamic(td, missing, so)
+                raise AssertionError("库里没有的符号居然链过去了")
+            except lomelf.Unsupported as e:
+                assert "没有导出" in str(e), str(e)
+
+            # ---- 失败模式三/四：非默认版本、数据符号（对着 libc.so.6 量）
+            libc = _system_so(td / "libc.so.6", _LIB6_CANDIDATES)
+            if libc is None:
+                print("      （这台上没有 libc.so.6：版本/数据符号那两条失败模式测不了）")
+            else:
+                probe = lomelf.load_foreign(libc)
+                try:
+                    probe.resolve("xdecrypt")          # 只以 GLIBC_2.2.5（非默认）导出
+                    raise AssertionError("非默认版本的导出居然能绑")
+                except lomelf.Unsupported as e:
+                    assert "非默认版本" in str(e) and "GLIBC_" in str(e), str(e)
+                try:
+                    probe.resolve("stdin")             # 数据符号：要 GOT 间接，这一版不做
+                    raise AssertionError("数据符号居然能绑")
+                except lomelf.Unsupported as e:
+                    assert "数据" in str(e), str(e)
+
+            # ---- 端口门：发行通道（默认）必须拒收
+            p = td / "v2.lomt"
+            mod = lomentc.load(p)
+            ir = lomentc.emit_llvm(mod, ROOT)
+            try:
+                lomelf.compile_ll(ir, [lomelf.load_foreign(so)], allow_ports=False)
+                raise AssertionError("发行通道收下了一个通向世界的端口")
+            except lomelf.Unsupported as e:
+                assert "--allow-ports" in str(e), str(e)
+
+            print(f"      真 libz.so（{len(lib)} B）→ DT_NEEDED=libz.so.1、产物 {len(blob)} B、"
+                  f"compress/uncompress 逐字节回原文 (rc=0)；证伪件 40；"
+                  f"四条失败模式都是命名错误；发行通道拒收")
+        finally:
+            so.unlink(missing_ok=True)
+
+
+#: `libc.so.6` 的几个常见落点（只有"失败模式"那两条用它 —— 那是**符号表**的样本）。
+_LIB6_CANDIDATES = ("/usr/lib/x86_64-linux-gnu/libc.so.6", "/usr/lib64/libc.so.6",
+                    "/lib/x86_64-linux-gnu/libc.so.6", "/usr/lib/libc.so.6")
 
 
 def main() -> int:

@@ -693,7 +693,7 @@ fn help_of(mem: ptr, fd: u64, cmd: ptr, n: u32) -> u32 {
         return 0;
     }
     if eq_cstr(cmd, n, "build") {
-        usage_line(mem, fd, "build", "FILE [-o NAME] [--link OBJ...] [--opt]", "Compile and link to an executable.\n  -o takes a name WITHOUT an extension: -o hi gives hi.exe on Windows, hi on Linux.\n  --link OBJ adds a foreign ELF object (FFI): give the .o you compiled yourself.\n  A self-contained object needs nothing else. An object that carries undefined symbols is\n  refused by default -- that door (real libc / shared libraries) is not finished and is\n  shut in a release build (docs/222 sec 4.5); the dev channel opens it with --allow-ports.\n  --opt hands the IR to clang -O2 when clang is installed (ELF) -- the same optimizer C\n  and Rust use; without clang it says so and falls back to the self-hosted lomelf linker.");
+        usage_line(mem, fd, "build", "FILE [-o NAME] [--link OBJ...] [--opt]", "Compile and link to an executable.\n  -o takes a name WITHOUT an extension: -o hi gives hi.exe on Windows, hi on Linux.\n  --link OBJ adds a foreign ELF object (FFI): give the .o you compiled yourself.\n  A self-contained object needs nothing else. An object that carries undefined symbols is\n  refused by default; the launcher passes --allow-ports in both channels (open since\n  2026-10-17, docs/222 sec 4.5). Calling the self-hosted lomelf directly needs that flag.\n  --opt hands the IR to clang -O2 when clang is installed (ELF) -- the same optimizer C\n  and Rust use; without clang it says so and falls back to the self-hosted lomelf linker.");
         return 0;
     }
     if eq_cstr(cmd, n, "run") {

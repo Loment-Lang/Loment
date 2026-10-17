@@ -114,7 +114,7 @@ FFI 与三条既有承诺冲突，逐条收窄而不是推翻（原文都留着�
 | 构建管线 `loment build --link FILE.o`（两个启动器） | ✅ |
 | 端到端判据 | ✅ `loment_ffi_test` **29/29**（已进静态门禁）+ `loment_elf_test` 的自举镜像那格（8/8） |
 | **自举链接器 `loment/tools/lomelf.lomt`** | ✅ **已镜像**（产品路径走它）—— 含重定位**与 `ar` 归档的固定点成员选择**（2026-10-15，`#405`），与参考**逐字节相同** |
-| 动态库 / libc（阶段 3） | ⛔ 未开始 |
+| **动态库 / libc（阶段 3）** | ✅ **2026-10-17**（`#360`）：读 `ET_DYN` 的**导出表**（`.dynsym`/`.dynstr`/`.gnu.version`，含默认版本判定），产物发 `PT_INTERP` + `PT_DYNAMIC`、`DT_NEEDED`、`.dynstr`/`.dynsym`/`.hash`/`.gnu.hash`/`.rela.plt` 与 PLT/GOT；**参考与自举两侧逐字节相同**，链的是系统 `libz.so`（`DT_NEEDED=libz.so.1`，产物 20 KB） |
 | PE 侧 FFI | ⛔ 未开始（`--link` 配 `--target pe` 明确拒绝） |
 
 ### 已经能被调到的语言（这台机器上真跑通的）

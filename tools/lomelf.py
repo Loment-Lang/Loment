@@ -1478,6 +1478,208 @@ def build_elf(text: bytes, data: bytes, bss_size: int, entry: int) -> bytes:
     return bytes(out)
 
 
+#: Linux x86-64 的系统 loader。`PT_INTERP` 指的就是它 —— **由它**把 `.so` 映射进来、
+#: 按名字解析、写 GOT。我们只负责把"要什么"写清楚（`docs/173` 阶段 3 / `docs/183` V2）。
+ELF_INTERP = b"/lib64/ld-linux-x86-64.so.2\x00"
+
+#: `DT_*` 号（`docs/183` V2）。只取这一版用得到的。
+DT_NEEDED, DT_PLTGOT, DT_HASH, DT_STRTAB, DT_SYMTAB = 1, 3, 4, 5, 6
+DT_STRSZ, DT_SYMENT, DT_PLTREL, DT_JMPREL, DT_PLTRELSZ = 10, 11, 20, 23, 2
+#: `DT_RELA`/`DT_RELASZ`/`DT_RELAENT` —— 这一版没有 `.rela.dyn`（非 PIE，代码里的地址全是
+#: 链接期定死的），但 **`DT_RELAENT` 必须发**：缺了它 glibc 会跳过**整个** PLT 重定位表
+#: （`readelf` 的原话是 `missing or corrupt dynamic tag: DT_RELAENT`），GOT 全是 0，
+#: 第一次走 PLT 就跳 NULL —— 实测就是这么崩的（`si_addr = NULL`）。
+DT_RELA, DT_RELASZ, DT_RELAENT = 7, 8, 9
+DT_GNU_HASH = 0x6FFFFEF5
+DT_FLAGS = 30              # DF_BIND_NOW = 8：GOT 在加载时一次填满，不走惰性绑定
+DF_BIND_NOW = 8
+PT_LOAD, PT_DYNAMIC, PT_INTERP, PT_GNU_STACK = 1, 2, 3, 0x6474E551
+
+
+def build_elf_dynamic(text: bytes, data: bytes, bss_size: int, entry: int, *,
+                      tail: bytes, interp_vaddr: int, interp_len: int,
+                      dyn_vaddr: int, dyn_len: int, tail_vaddr: int) -> bytes:
+    """产出一个**动态链接**的 ELF 可执行文件（`docs/183` V2）。
+
+    与 `build_elf` 的差别是"多了三条程序头、多了一段、文件头那一页也在 LOAD 里"：
+
+    * `PT_INTERP` 指向 `.interp` 字符串（**文件偏移** —— 内核按偏移读它，不看 vaddr）；
+      vaddr 仍要在某个 `PT_LOAD` 里，因为段是整块映射的；
+    * `PT_DYNAMIC` 指向 `.dynamic`（在尾部那一小段里，可写 —— loader 会往里写 `DT_DEBUG`）；
+    * 尾部段（`.got.plt` + `.dynamic`）**单独一条 RW `PT_LOAD`**，落在 BSS 之后
+      （理由见 `build_dynamic_tables`）。
+
+    再补一条 `PT_GNU_STACK`（RW、不可执行）：没有它，旧内核会给一个可执行栈并告警。
+    """
+    text_off = 0x1000
+    data_off = align_up(text_off + len(text), 0x1000)
+    tail_off = align_up(data_off + len(data), 0x1000)
+    tail_len = (dyn_vaddr - tail_vaddr) + dyn_len
+
+    def phdr(typ, flags, off, vaddr, filesz, memsz, align=0x1000):
+        return struct.pack("<IIQQQQQQ", typ, flags, off, vaddr, vaddr, filesz, memsz, align)
+
+    # **第一个 `PT_LOAD` 必须从文件偏移 0 起**：内核用
+    # `AT_PHDR = (首个 PT_LOAD 的 p_vaddr - p_offset) + e_phoff` 告诉 loader
+    # 程序头在哪。若这一页不进任何 LOAD，`AT_PHDR` 就落在未映射的地址上，
+    # loader 连一行 `LD_DEBUG` 都来不及打就没了。
+    phs = (
+        phdr(PT_INTERP, 4, text_off + (interp_vaddr - TEXT_VADDR), interp_vaddr,
+             interp_len, interp_len, 1)
+        + phdr(PT_LOAD, 5, 0, TEXT_VADDR - text_off, text_off + len(text), text_off + len(text))
+        + phdr(PT_LOAD, 6, data_off, DATA_VADDR, len(data), len(data) + bss_size)
+        + phdr(PT_LOAD, 6, tail_off, tail_vaddr, tail_len, tail_len)
+        + phdr(PT_DYNAMIC, 6, tail_off + (dyn_vaddr - tail_vaddr), dyn_vaddr, dyn_len, dyn_len)
+        + phdr(PT_GNU_STACK, 6, 0, 0, 0, 0, 0x10)
+    )
+    ehdr = bytearray()
+    ehdr += b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 8
+    ehdr += struct.pack("<HHIQQQIHHHHHH", 2, 0x3E, 1, entry, 64, 0, 0, 64, 56, 6, 0, 0, 0)
+
+    out = bytearray(ehdr + phs)
+    out += b"\x00" * (text_off - len(out))
+    out += text
+    out += b"\x00" * (data_off - len(out))
+    out += data
+    out += b"\x00" * (tail_off - len(out))
+    out += tail
+    assert len(out) == tail_off + tail_len, (len(out), tail_off + tail_len)
+    return bytes(out)
+
+
+def build_dynamic_tables(base_text_vaddr: int, text_len: int, tail_vaddr: int,
+                         imports: list[str], soname: str):
+    """把动态链接要的那几张表算出来：**PLT / .dynstr / .dynsym / .hash / .rela.plt**
+    （接在代码后面）与 **.got.plt / .dynamic**（单独一段，接在 BSS 之后）。
+
+    返回 `(text_tail, data_tail, labels, info)`：
+
+    * `text_tail` **必须恰好接在** `text_len` 后面，`data_tail` 从 `tail_vaddr` 起；
+    * `labels`：导入名 -> **PLT 桩的 vaddr**（调用点要指到桩上，不是库函数）；
+    * `info`：`.interp` / `.dynamic` / 尾部段 的 vaddr 与长度，喂给 `build_elf_dynamic`。
+
+    **`.got.plt` 不能接在 `data` 后面**：紧接着 `data` 的是 **BSS**，而 BSS 里放着运行时
+    自己的全局（FFI 的 arena 就是 1 MiB）。GOT 摆在那里，程序第一次往全局里写就把
+    GOT 覆盖了 —— 症状是 `jmp *GOT[i]` 跳进垃圾地址（实测 GOT 里是被覆盖成了输入数据）。
+    所以这一段单开一条 `PT_LOAD`，落在 `DATA_VADDR + len(data) + bss` 之后。
+
+    **`DF_BIND_NOW`**：GOT 在加载时一次填满。惰性绑定那条路（`push idx; jmp PLT0`）照样发，
+    但永远不会走到 —— 少一条"运行到一半才解析"的路径。
+    """
+    text_base = base_text_vaddr + text_len
+    plt_at = align_up(text_base, 16)
+    n = len(imports)
+    text_tail = bytearray(b"\x00" * (plt_at - text_base))
+
+    got_at = tail_vaddr
+    got_n = 3 + n
+    got = bytearray(8 * got_n)
+
+    interp_at = plt_at + 16 * (n + 1)
+    dynstr_at = interp_at + len(ELF_INTERP)
+    ds = bytearray(b"\x00")                     # 0 号必须是空串（st_name == 0 是"没有名字"）
+    name_off: dict[str, int] = {}
+    for nm in list(imports) + [soname]:
+        name_off[nm] = len(ds)
+        ds += nm.encode() + b"\x00"
+    ds += b"\x00"
+    dynsym_at = align_up(dynstr_at + len(ds), 8)
+    dynsym = bytearray(24)                       # 0 号是保留的空符号
+    for nm in imports:
+        # STB_GLOBAL(1)<<4 | STT_FUNC(2)；st_shndx = 0（未定义 —— 由 loader 解析）
+        dynsym += struct.pack("<IBBHQQ", name_off[nm], (1 << 4) | 2, 0, 0, 0, 0)
+    hash_at = align_up(dynsym_at + len(dynsym), 8)
+    nbucket, nchain = 1, 1 + n
+    h = bytearray(struct.pack("<II", nbucket, nchain))
+    h += struct.pack("<I", 0)                    # buckets：我们没有要导出的符号
+    h += struct.pack("<" + "I" * nchain, *([0] * nchain))   # chains：全是 0（链尾）
+    hashb = bytes(h)
+    # **GNU hash**（`DT_GNU_HASH`）：这一版的产物**不导出任何符号**（只有一个空符号 +
+    # 若干未定义的导入），所以表是退化的：`symoffset = nsyms`（没有一个符号落在桶链里）、
+    # 一张 1 格的 bloom、一个全 0 的桶、空链。发它的理由不是"好看"：现代 glibc 编出来的
+    # 每个对象都有它，而只有 SysV `.hash` 的对象在 `do_lookup_x` 那里走的是另一条老路 ——
+    # 与一个**能跑**的对照件（gcc 出的）逐项比过之后，这是剩下唯一的结构差别。
+    gnu_at = align_up(hash_at + len(hashb), 8)
+    nsyms = 1 + n
+    gnu = bytearray(struct.pack("<IIII", 1, nsyms, 1, 6))   # nbuckets, symoffset, bloom_size, shift
+    gnu += struct.pack("<Q", 0)                              # bloom
+    gnu += struct.pack("<I", 0)                              # buckets[0]
+    gnub = bytes(gnu)
+    rela_at = align_up(gnu_at + len(gnub), 8)
+    rela = bytearray()
+    for i, nm in enumerate(imports):
+        # `r_info = (符号号 << 32) | 类型` —— 类型是 **R_X86_64_JUMP_SLOT = 7**（把解析到的
+        # 函数地址写进 GOT[i+3]，由 loader 做）。第一版把符号号塞进了低 32 位，于是 readelf
+        # 读成 `R_X86_64_64`/`R_X86_64_PC32`，glibc 照那个错类型去处理，GOT 仍是 0。
+        rela += struct.pack("<QQq", got_at + 8 * (i + 3), ((1 + i) << 32) | 7, 0)
+
+    # ---- PLT：16 字节一格。PLT0 + 每个导入一格。
+    #
+    # ⚠ x86 的 `rip` 相对位移是**相对指令末尾**算的，不是相对指令开头 —— 按开头算会差 4 字节，
+    # 读到的 GOT 槽是错的那个，桩一跳就撞 NULL（V2 第一版实测：`si_addr = NULL`）。
+    # 所以这里每个 `_rel32(指令起点, 指令长度, 目标)` 都把长度也传进去。
+    def _rel32(at: int, size: int, target: int) -> bytes:
+        return struct.pack("<i", target - (at + size))
+
+    plt = bytearray()
+    p0 = plt_at
+    plt += b"\xff\x35" + _rel32(p0, 6, got_at + 8)           # push [GOT+8]  (link_map)
+    plt += b"\xff\x25" + _rel32(p0 + 6, 6, got_at + 16)      # jmp  [GOT+16] (resolver)
+    plt += b"\x0f\x1f\x40\x00"                               # nop
+    labels = {}
+    for i, nm in enumerate(imports):
+        at = plt_at + 16 * (i + 1)
+        labels[nm] = at
+        plt += b"\xff\x25" + _rel32(at, 6, got_at + 8 * (i + 3))     # jmp *GOT[i+3]
+        plt += b"\x68" + struct.pack("<I", i)                        # push i
+        plt += b"\xe9" + _rel32(at + 11, 5, p0)                      # jmp PLT0
+        got[8 * (i + 3):8 * (i + 4)] = struct.pack("<Q", at + 6)     # 惰性那条路的落点
+
+    # ---- `.dynamic`：放在 `.got.plt` 之后（同在数据段，可写）。
+    dyn_at = got_at + len(got)
+    entries = [
+        (DT_NEEDED, name_off[soname]),
+        (DT_HASH, hash_at),
+        (DT_GNU_HASH, gnu_at),
+        (DT_STRTAB, dynstr_at),
+        (DT_STRSZ, len(ds)),
+        (DT_SYMTAB, dynsym_at),
+        (DT_SYMENT, 24),
+        (DT_PLTGOT, got_at),
+        (DT_JMPREL, rela_at),
+        (DT_PLTRELSZ, len(rela)),
+        (DT_PLTREL, 7),                           # 7 = DT_RELA
+        # **不发 `DT_RELA` / `DT_RELASZ`**：我们的代码是位置相关的，一条非 PLT 重定位
+        # 都没有。发了它（哪怕 `RELASZ=0`）等于向 loader 声明"这里有一张静态重定位表"，
+        # 而那张表的位置只是 `.rela.plt` 的别名 —— "空表"与"没有这张表"不是一回事。
+        (DT_FLAGS, DF_BIND_NOW),
+        (0, 0),
+    ]
+    dynb = b"".join(struct.pack("<QQ", t, v) for t, v in entries)
+    got[0:8] = struct.pack("<Q", dyn_at)          # GOT[0] = &_DYNAMIC（惯例）
+
+    tail = bytearray()
+    tail += b"\x00" * (interp_at - (plt_at + len(plt)))   # 对齐填充（PLT 之后到 .interp）
+    tail += ELF_INTERP
+    tail += ds
+    tail += b"\x00" * (dynsym_at - (dynstr_at + len(ds)))
+    tail += dynsym
+    tail += b"\x00" * (hash_at - (dynsym_at + len(dynsym)))
+    tail += hashb
+    tail += b"\x00" * (gnu_at - (hash_at + len(hashb)))
+    tail += gnub
+    tail += b"\x00" * (rela_at - (gnu_at + len(gnub)))
+    tail += rela
+    text_tail += plt
+    text_tail += tail
+
+    data_tail = bytearray(got)
+    data_tail += dynb
+    info = {"interp_vaddr": interp_at, "interp_len": len(ELF_INTERP),
+            "dyn_vaddr": dyn_at, "dyn_len": len(dynb), "tail_vaddr": tail_vaddr}
+    return bytes(text_tail), bytes(data_tail), labels, info
+
+
 # ------------------------------------------------------------------ PE 目标 (Windows, x86-64)
 #
 # 同一份 IR 的第二个目标：PE64 控制台程序。为了**去掉 WSL** —— 原来的 Windows 路径要
@@ -5236,14 +5438,186 @@ class Archive:
         return got
 
 
+class SharedObject:
+    """一个**共享对象**（`.so`）—— `docs/183` §4 的 **V2**，`docs/173` 阶段 3。
+
+    与 `ForeignObject` 是两件事，别混：
+
+    * `.o` 是**可重定位目标文件**（`ET_REL`）：我们把它**读进来**、摆进产物、应用重定位；
+    * `.so` 是**共享对象**（`ET_DYN`）：我们**只读它的导出表**，产物里**一个字节也不摆**
+      —— 跑起来的时候由系统的 loader 把 `.so` 映射进来，符号在**它**那边解析。
+
+    所以"能跑通"这件事在这里证明不了什么：静态链也能跑通。判据另外量**产物里有没有
+    `DT_NEEDED`、有没有把库的代码搬进来**（`loment_ffi_test` 那条 V2 判据）。
+
+    **只按导出表找名字**：`.dynsym` 里 `SHN_UNDEF` 的是它自己的依赖（如 `libc.so.6`），
+    不是它能给人的东西 —— 拿它去满足我们的引用就是**错绑**。
+    """
+
+    #: `DT_*` 的号（只取这里用得上的）。
+    DT_NEEDED, DT_HASH, DT_STRTAB, DT_SYMTAB, DT_STRSZ, DT_SYMENT, DT_SONAME = 1, 4, 5, 6, 10, 11, 14
+
+    def __init__(self, path: Path):
+        raw = path.read_bytes()
+        self.path, self.name, self.raw = path, path.name, raw
+        if raw[:4] != b"\x7fELF" or raw[4] != 2 or raw[5] != 1:
+            raise Unsupported(f"{path.name}: 不是 ELF64 小端共享对象")
+        if struct.unpack_from("<H", raw, 16)[0] != 3:            # e_type != ET_DYN
+            raise Unsupported(f"{path.name}: 不是共享对象 (ET_DYN)")
+        e_phoff, = struct.unpack_from("<Q", raw, 32)
+        e_phentsize, e_phnum = struct.unpack_from("<HH", raw, 54)
+        e_shoff, = struct.unpack_from("<Q", raw, 40)
+        e_shentsize, e_shnum, e_shstrndx = struct.unpack_from("<HHH", raw, 58)
+        loads: list[tuple[int, int, int]] = []
+        dyn: tuple[int, int] | None = None
+        for k in range(e_phnum):
+            o = e_phoff + k * e_phentsize
+            p_type, _fl, p_off, p_vaddr, _pa, p_filesz, _m, _al = \
+                struct.unpack_from("<IIQQQQQQ", raw, o)
+            if p_type == 1:
+                loads.append((p_vaddr, p_off, p_filesz))
+            elif p_type == 2:
+                dyn = (p_off, p_filesz)
+        if dyn is None:
+            raise Unsupported(f"{path.name}: 共享对象没有 PT_DYNAMIC")
+
+        def voff(vaddr: int) -> int:
+            for v, off, sz in loads:
+                if v <= vaddr < v + sz:
+                    return off + (vaddr - v)
+            raise Unsupported(
+                f"{path.name}: 动态表里的地址 0x{vaddr:x} 落在任何 PT_LOAD 之外")
+
+        dt: dict[int, int] = {}
+        o = dyn[0]
+        while o + 16 <= dyn[0] + dyn[1]:
+            tag, val = struct.unpack_from("<QQ", raw, o)
+            o += 16
+            if tag == 0:
+                break
+            dt.setdefault(tag, val)
+        strtab_off = voff(dt[self.DT_STRTAB])
+        strsz = dt[self.DT_STRSZ]
+        strtab = raw[strtab_off:strtab_off + strsz]
+
+        def dstr(off: int) -> str:
+            end = strtab.index(b"\x00", off)
+            return strtab[off:end].decode("utf-8", "replace")
+
+        # 没有 SONAME 的共享对象，`DT_NEEDED` 得写**它本来的文件名**（loader 按那个找）。
+        self.soname = dstr(dt[self.DT_SONAME]) if self.DT_SONAME in dt else path.name
+        if e_shnum == 0:
+            # 条数能从 `DT_HASH` 拿，但**版本表**在节头里；被 strip 掉的 `.so` 这一版还不读。
+            raise Unsupported(
+                f"{path.name}: 共享对象被 strip 掉了节头 —— 这一版只读带节头的 `.so`")
+
+        secs = []
+        for k in range(e_shnum):
+            so = e_shoff + k * e_shentsize
+            nameoff, typ, _fl2, _addr, off, size, link, info, _a2, entsize = \
+                struct.unpack_from("<IIQQQQIIQQ", raw, so)
+            secs.append({"nameoff": nameoff, "type": typ, "off": off, "size": size,
+                         "link": link, "info": info, "entsize": entsize, "name": ""})
+        shstr = secs[e_shstrndx]
+        for s in secs:
+            end = raw.index(b"\x00", shstr["off"] + s["nameoff"])
+            s["name"] = raw[shstr["off"] + s["nameoff"]:end].decode("utf-8", "replace")
+        byname = {s["name"]: s for s in secs}
+
+        dynsym = byname.get(".dynsym")
+        if dynsym is None or ".dynstr" not in byname:
+            raise Unsupported(f"{path.name}: 共享对象没有 .dynsym/.dynstr")
+        dstrtab = raw[byname[".dynstr"]["off"]:
+                      byname[".dynstr"]["off"] + byname[".dynstr"]["size"]]
+
+        #: 版本号 -> 名字（`.gnu.version_d` 的 `vd_aux` 链）—— 只为了**把话说清楚**。
+        vnames: dict[int, str] = {}
+        verd = byname.get(".gnu.version_d")
+        if verd is not None:
+            vo = verd["off"]
+            # `Elf64_Verdef` 的字段序是 version(0) flags(2) ndx(4) **cnt(6)** hash(8)
+            # aux(12) next(16)。`cnt` 在 6，不在 2 —— 第一版读到的是 `flags`，于是
+            # 每个版本的 `vd_next` 链只走了第一步，`vnames` 里永远是空的，
+            # 报错信息里那个版本名就一直是 `?`。
+            while True:
+                _ver, _flags, vidx, _cnt, _hash, aux, nxt = \
+                    struct.unpack_from("<HHHHIII", raw, vo)
+                adx, = struct.unpack_from("<I", raw, vo + aux)
+                vnames[vidx & 0x7FFF] = dstr(adx)
+                if nxt == 0:
+                    break
+                vo += nxt
+        #: `.gnu.version` 与 `.dynsym` 一一对应：bit 15 是**隐藏位**（`@@` 默认版本没有它，
+        #: `@` 非默认版本有）。未加版本的引用只能绑到**没有隐藏位**的那一个。
+        versym: list[int] = []
+        vs = byname.get(".gnu.version")
+        if vs is not None:
+            versym = list(struct.unpack_from("<" + "H" * (vs["size"] // 2), raw, vs["off"]))
+
+        #: 导出表：名字 -> (kind, 是不是**默认**版本)。
+        self.exports: dict[str, tuple[str, bool]] = {}
+        self.versions: dict[str, str] = {}
+        n = dynsym["size"] // 24
+        for k in range(1, n):
+            so2 = dynsym["off"] + k * 24
+            st_name, st_info, _other, st_shndx, _value, _size = \
+                struct.unpack_from("<IBBHQQ", raw, so2)
+            if st_shndx == 0 or st_name == 0:                   # 它自己的依赖，不是它的导出
+                continue
+            bind, typ = st_info >> 4, st_info & 0x0F
+            if bind not in (1, 2) or typ not in (1, 2):         # GLOBAL/WEAK 的 OBJECT/FUNC
+                continue
+            end = dstrtab.index(b"\x00", st_name)
+            nm = dstrtab[st_name:end].decode("utf-8", "replace")
+            hidden = bool(versym[k] & 0x8000) if k < len(versym) else False
+            # 同名可能有多条（不同版本）：**默认版本优先**，非默认的不覆盖它。
+            if nm not in self.exports or (self.exports[nm][1] is False and not hidden):
+                self.exports[nm] = ("func" if typ == 2 else "object", not hidden)
+            if k < len(versym) and (versym[k] & 0x7FFF) > 1:
+                self.versions.setdefault(nm, vnames.get(versym[k] & 0x7FFF, "?"))
+        if not self.exports:
+            raise Unsupported(f"{self.soname}: 没有可用的导出（GLOBAL/WEAK 的 FUNC/OBJECT）")
+
+    def resolve(self, name: str) -> str:
+        """这个名字能不能绑到一份**可用的**导出上；绑不上就**点名拒**（不留给运行时崩）。
+
+        三种"绑不上"与 `docs/183` §4 V2 要的三条失败模式一一对应：库里没有这个名字、
+        只有**非默认版本**（未加版本的引用绑不上它，loader 会把它当未定义）、以及**数据**
+        符号（数据导入要 GOT 间接，而 Loment 的代码直接取址 —— 这一版只做函数导入）。
+        """
+        e = self.exports.get(name)
+        if e is None:
+            raise Unsupported(
+                f"{self.soname}: 没有导出 {name} —— 动态链接只在导出表里找名字，"
+                f"库里没有这个名字，产物一定加载不起来")
+        kind, is_default = e
+        if not is_default:
+            raise Unsupported(
+                f"{self.soname}: {name} 只以**非默认版本**导出（{self.versions.get(name, '?')}）"
+                f" —— 未加版本的引用绑不上它；本链接器还不发版本化引用（`docs/183` §4 V2）")
+        if kind == "object":
+            raise Unsupported(
+                f"{self.soname}: {name} 是**数据**符号 —— 数据导入要 GOT 间接，而 Loment 的"
+                f"代码直接取址（`getelementptr`/`load`），这一版只做函数导入")
+        return kind
+
+
 def load_foreign(path: Path):
     """按**内容**分流 (不看扩展名): `!<arch>\\n` 是归档, `\\x7fELF` 是目标文件。
 
     看内容而不是后缀: `.a` / `.o` / `.lib` / 无后缀在各家工具链里并不统一, 而两种格式的
     魔数都极短且不可能互串。
     """
-    if path.read_bytes()[:8] == b"!<arch>\n":
+    try:
+        raw = path.read_bytes()
+    except OSError as e:
+        # **命名的错误，不是崩**（`#360` 的失败模式之一）：共享对象不在就是"打不开"，
+        # 与自举侧 `read_link_file` 的那条同形。
+        raise Unsupported(f"打不开外部目标文件：{path}（{e.strerror or e}）") from None
+    if raw[:8] == b"!<arch>\n":
         return Archive(path)
+    if raw[:4] == b"\x7fELF" and len(raw) >= 20 and struct.unpack_from("<H", raw, 16)[0] == 3:
+        return SharedObject(path)                  # `.so`：V2 的那条腿（docs/173 阶段 3）
     return ForeignObject(path)
 
 
@@ -5300,17 +5674,27 @@ def compile_ll(text: str, objects: list | None = None,
     #
     # 判据是 `objects` 里那批对象的 `undefined`（归档在这一步之前已经按定点挑完成员，
     # 所以挑中的成员也在这里面）。名字排序只为**报文稳定**，与谁提供什么无关。
+    # 共享对象**不参与布局**（`docs/183` V2）：没人把 `.so` 的字节搬进产物 —— 它只提供
+    # "这些名字在运行期由谁给"，产物里留下的是 `DT_NEEDED` 与 PLT。布局那几趟只看 `.o`。
+    shared = [o for o in objects if isinstance(o, SharedObject)]
+    objects = [o for o in objects if not isinstance(o, SharedObject)]
     if not allow_ports:
         ported = sorted({nm for o in objects for nm in o.undefined})
-        if ported:
-            shown = ", ".join(ported[:6]) + ("…" if len(ported) > 6 else "")
+        if ported or shared:
+            # 一条共享对象本身就是"这份产物要在运行期往外要东西"—— 比带未定义符号的 `.o` 更明确。
+            shown = ", ".join(ported[:6]) + ("…" if len(ported) > 6 else "") \
+                if ported else "（共享对象：" + ", ".join(s.soname for s in shared) + "）"
             raise Unsupported(
-                f"外源对象带了未定义符号（通向世界的端口）：{shown} —— 链接器默认不收。"
-                f"真 libc / 真共享库那条路还没完工（`docs/222` §4 的机制在，"
-                f"`docs/219` §8b 的 S2：静态那一半落齐了，动态那一半是 #360），"
-                f"0.1.4.5 里它是关着的。"
-                f"开发通道要它得显式写 `--allow-ports`；"
-                f"自闭合的对象（没有未定义符号）不受这条影响")
+                f"这份产物带了通向世界的端口：{shown} —— 链接器默认不收。"
+                f"**链接器不知道渠道**（它是一只被启动器调起来的独立工具），所以默认永远是拒；"
+                f"启动器在两个渠道都传 `--allow-ports`（`#406` 开闸，2026-10-17）。"
+                f"自己调链接器时要它就得显式写 `--allow-ports`；"
+                f"自闭合的对象（没有未定义符号、不链共享对象）不受这条影响")
+    if len(shared) > 1:
+        # 多个 `.so` 要各自的 `DT_NEEDED` 与顺序规则（谁先满足谁）—— 这一版先只做**一个**，
+        # 而不是"先写进去再说"。
+        raise Unsupported(
+            "一次只能链**一个**共享对象：" + ", ".join(s.soname for s in shared))
     # 全局布局: bytes 在 data, 全零在 bss
     data = bytearray()
     bss = 0
@@ -5341,7 +5725,7 @@ def compile_ll(text: str, objects: list | None = None,
     # 这块只要**存在且可读写**就够了。**谁都不该调到 `__stack_chk_fail`** —— 调到了说明
     # 栈真被踩了，那时响亮地死（`ud2`）才对。
     tls_addr = 0
-    if objects:
+    if objects and not shared:
         while len(data) % 16:
             data.append(0)
         tls_addr = DATA_VADDR + len(data)
@@ -5364,11 +5748,22 @@ def compile_ll(text: str, objects: list | None = None,
     em = Emitter(globals_, {x for x in externs if not x.startswith("llvm.")})
     for g in globals_:
         em.asm.labels[g.name] = g.addr
-    if objects:
+    # **TLS 只在"没有 loader 替我们管"的时候才自己装**。
+    #
+    # 静态链外部 `.o` 时确实得自己装（`docs/219` S2 那条教训）：系统里的库多半是
+    # `-fstack-protector` 编的，第一件事就是读 `fs:0x28`；不把 `fs` 指过去，读的就是
+    # 地址 0x28，一进去就段错误。
+    #
+    # **但动态链接时正好相反**：`fs` 这时归 `ld.so` 管，指向 glibc 的整块 TLS
+    # （`errno`、`tcache`、栈金丝雀都在里面）。我们再 `arch_prctl(ARCH_SET_FS)` 一次，
+    # 就把 glibc 的 TLS 顶掉了 —— 症状不是"金丝雀不对"，是 zlib 一路调到 libc 的
+    # `malloc` 时读到垃圾的线程指针（实测崩在 libc 里，`fs_base` 指着我们那块）。
+    has_foreign = bool(objects) and not shared
+    if has_foreign:
         em.asm.labels["__loment_tls"] = tls_addr
     if not any(f.name == "_start" for f in funcs):
         raise Unsupported("没有 _start 入口（原生产物 v0 需要一个用户态入口）")
-    em.emit_entry_stub("_start", tls=bool(objects))
+    em.emit_entry_stub("_start", tls=has_foreign)
     for f in funcs:
         em.emit_func(f)
     # **收编面**（`docs/219` §6）：链里带了外部对象，就把"可闭合"那几个名字提供出来，
@@ -5451,7 +5846,32 @@ def compile_ll(text: str, objects: list | None = None,
             else:                                          # REL_32 / REL_32S
                 struct.pack_into("<I", data, site, val & 0xFFFFFFFF)
             applied += 1
-    text = em.asm.finalize()
+    # ---- V2（`docs/183` §4）：链了共享对象 ⇒ 产物是**动态链接**的。
+    #
+    # 此时"未定义的标签"不是错：它们要是共享对象的导出，就变成**导入** —— 我们发一个 PLT 桩，
+    # 桩的地址就是那个标签的地址，运行期由 loader 把真实的函数地址填进 GOT。
+    # 名字**不在导出表里**才报错，而且**报到链接期**（不是留给运行时崩）。
+    dyn_info = None
+    imported: list[str] = []
+    if shared:
+        so = shared[0]
+        # 标签 -> 是不是"我们自己的"（`em.asm.labels` 里有的就是定义）。
+        imports = sorted({lbl for _site, lbl, _w, _k in em.asm.fixups
+                          if lbl not in em.asm.labels})
+        for nm in imports:
+            so.resolve(nm)
+        # PLT 接在**代码之后**：`finalize()` 只回填、不改长度，所以现在就能算出桩的地址并
+        # 登记成标签（回填因此能指到桩上），finalize 之后再按同一长度把它接上。
+        tail_vaddr = align_up(DATA_VADDR + len(data) + bss, 0x1000)
+        text_tail, tail, plt_labels, dyn_info = build_dynamic_tables(
+            TEXT_VADDR, len(em.asm.buf), tail_vaddr, imports, so.soname)
+        for nm, at in plt_labels.items():
+            em.asm.labels[nm] = at
+        imported = imports
+        text = em.asm.finalize() + text_tail
+    else:
+        text = em.asm.finalize()
+
     # **文本段的容量是明写的**（`docs/253`）：数据段钉在 `TEXT_VADDR + TEXT_CAP`，
     # 所以文本一旦超过 `TEXT_CAP` 就会盖到数据段上 —— 而**盖上去不报错**，产物一启动就
     # 段错误（0 字节输出），看起来像编译器坏了。实测 2026-10-15：`main` 自己已占
@@ -5464,10 +5884,15 @@ def compile_ll(text: str, objects: list | None = None,
             f" 抬 `loment/tools/lomelf.lomt` 的 `OUT_CAP`、和 `tools/lomelf.py` 的"
             f" `TEXT_CAP` / `ELF_DATA_VADDR`（两个实现同一个数）")
     entry = em.asm.labels["__entry"]
-    return build_elf(text, bytes(data), bss, entry), {
+    if dyn_info is not None:
+        blob = build_elf_dynamic(text, bytes(data), bss, entry, tail=tail, **dyn_info)
+    else:
+        blob = build_elf(text, bytes(data), bss, entry)
+    return blob, {
         "text": len(text), "data": len(data), "bss": bss, "entry": entry,
         "funcs": [f.name for f in funcs], "objects": [o.name for o in objects],
         "linked": appended, "relocs": applied,
+        "shared": [s.soname for s in shared], "imports": imported,
     }
 
 

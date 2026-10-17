@@ -5977,6 +5977,11 @@ setprev:
     return d;
 }
 
+
+
+
+
+
 /// **自动回收**（`choose gc_auto`）—— 文本与 `lomentc._IR_GC` **逐字节同源**
 /// （下面的字面量是脚本从 `_IR_GC` 切的，不手抄）。
 ///

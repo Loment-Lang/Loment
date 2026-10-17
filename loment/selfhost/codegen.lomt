@@ -1383,10 +1383,20 @@ pub fn l2_ok_at(src: ptr, toks: ptr, at: u32, end: u32, fat: u32, fend: u32,
                     return 0;
                 }
                 // **只查体之后** —— 体之前不可能用到体里声明的那个名字（作用域）
+                // **而且扫到下一次同名 `let` 就停**（#364 的第三条边界）：语言没有块作用域
+                // （docs/228 的根），一个名字被新的 `let` 重新声明之后，后面那些出现就属于
+                // 新的那个变量，不再证明这一块出体了。停在那一处之前是 sound 的 —— 之前
+                // 每一次出现都还指这一块。只认 `let` 这一种形状（这里也只有它），认不出来
+                // 的一律按没重声明处理（照旧取消）⇒ 只可能少放宽、不会多放宽。
                 let q: u32 = end;
-                while q < fend {
+                let stopq: u32 = 0;
+                while q < fend && stopq == 0 {
                     if tok_kind(toks, q) == 0 && tok_eq(src, toks, q, nm) {
-                        return 0;                 // 出体了
+                        if q > 0 && tok_is(src, toks, q - 1, "let") {
+                            stopq = 1;                // 换了主人：再往后不属于这一块
+                        } else {
+                            return 0;                 // 出体了
+                        }
                     }
                     q = q + 1;
                 }

@@ -2861,8 +2861,10 @@ L2_MANUAL_SRC = L2_EPOCH_SRC.replace("@@CHOOSE@@", "choose gc_manual")
 #: 每个函数里**按出现顺序**数到的循环，各自的"能不能在末尾批量归还"。每一格的"为什么"：
 #: `f_escape` 把指针赋给体外 / `f_strcat` 有 `str_concat` / `f_free` 体内有 `free` /
 #: `f_l0` 尺寸是字面量（L0 已经提到栈上，没什么可归还）/ `f_inline` 是认不出来的分配（整格
-#: 取消）/ `f_call` 把它交给了用户函数 / `f_rettp` 从体内 `return p` / `f_two` 的第一格被
-#: **后面那个同名循环**挡掉（诚实的保守，见 §7）。
+#: 取消）/ `f_call` 把它交给了用户函数 / `f_rettp` 从体内 `return p`。
+#: `f_two` 是**同名循环互相挡**那一格 —— `#364` 之后这条边界过掉了：体之后的扫描**扫到
+#: 下一次同名 `let` 就停**（那之后名字换了主人；语言没有块作用域，`let` 是唯一的重声明
+#: 形状），于是两个兄弟循环**各自都开纪元**。
 #: `f_bodyret` 是**终止**那一格：体在 `return` 处结束 —— 仍然开纪元，只是那条路不回退。
 #: `f_after` 是**只查体之后**那一格：体之前的同名使用不算逃逸。
 L2_WANT = {
@@ -2877,7 +2879,7 @@ L2_WANT = {
     "f_bodyret": [True],
     "f_rettp": [False],
     "f_nested": [True, True],
-    "f_two": [False, True],
+    "f_two": [True, True],
     "f_after": [True],
     "f_multi": [True],
     "f_both": [True],

@@ -2465,10 +2465,79 @@ fn arg1(s: ptr, out: ptr, src: ptr, toks: ptr, k: u32, lvl: u32) -> u32 {
     return r;
 }
 
+/// 目标整数类型的位宽 (token 下标 `want`); 0 = 不环绕。
+/// 0 (无 want) 按 i32 —— 与参考实现的 `want or "i32"` 同序。
+/// **只覆盖 <= 32 位**: 64 位的越界字面量 (>2^64) 是既有缺口, 不在本修范围。
+fn lit_bits(src: ptr, toks: ptr, want: u32) -> u32 {
+    if want == 0 {
+        return 32;
+    }
+    if tok_is(src, toks, want, "u8") || tok_is(src, toks, want, "i8") {
+        return 8;
+    }
+    if tok_is(src, toks, want, "u16") || tok_is(src, toks, want, "i16") {
+        return 16;
+    }
+    if tok_is(src, toks, want, "u32") || tok_is(src, toks, want, "i32") {
+        return 32;
+    }
+    if tok_is(src, toks, want, "bool") {
+        return 1;
+    }
+    return 0;
+}
+
 /// 整数字面量的十进制文本写进第 lvl 层, 返回位数。
 /// 十进制原样 (去前导 0); 十六进制走**长乘 16 加**转十进制 —— 支持 > u32 的字面量
 /// (`0x100000000` 这类; lomentc 用 Python 大整数, 这里用十进制数字缓冲 672..704)。
-fn set_int_lit(s: ptr, lvl: u32, src: ptr, toks: ptr, i: u32) -> u32 {
+///
+/// `want` 是**期望类型** (token 下标, 0 = 无): 给定时按它环绕 —— Loment 的整数语义是
+/// 环绕, 所以 `let v: u8 = 300;` 的字面量要印成 `44`, 而不是 `300` (`store i8 300`
+/// 不是合法 LLVM; 参考实现同一处也按 `_wrap_int` 环绕)。
+///
+/// **只做 <= 32 位** (`lit_bits` 对 u64/i64 返回 0 = 原样): 64 位那条要用 u64 解析
+/// 与 20 位十进制回写, 会把种子推过 `#441` 记的那道容量墙。>2^64 的字面量因此仍是
+/// 既有缺口 —— 与本条要修的形状 (`let v: u8 = 300;`) 无关。
+fn set_int_lit(s: ptr, lvl: u32, src: ptr, toks: ptr, i: u32, want: u32) -> u32 {
+    // **名字带 `wr` 前缀**: 这门语言没有块作用域 (docs/228), 下面十六进制那段的
+    // `let v` 与本段同处一个函数作用域 —— 撞名会静默改写类型, 自举自己编自己时报 E1。
+    let wrb: u32 = lit_bits(src, toks, want);
+    if wrb > 0 {
+        // 低 32 位: `tok_int` 本身就是 u32 自然环绕, 再按目标位宽掩码。
+        let wrs: u32 = tok_int(src, toks, i);
+        let wrm: u32 = 4294967295;
+        if wrb < 32 {
+            wrm = ((1 as u32) << wrb) - 1;
+        }
+        let wrv: u32 = wrs & wrm;
+        let wrneg: u32 = 0;
+        // 有符号: 无 want 时参考落 `i32` (有符号); 有 want 时看类型 token 首字节
+        // 是不是 'i' (105)。bool 首字节 'b', 不走这支。
+        let wrsgn: u32 = 0;
+        if want == 0 {
+            wrsgn = 1;
+        } else if load8(src, load32(toks, want * 20 + 4)) == 105 {
+            wrsgn = 1;
+        }
+        if wrsgn == 1 {
+            let wrh: u32 = (1 as u32) << (wrb - 1);
+            if wrv >= wrh {
+                wrv = (wrm - wrv) + 1;
+                wrneg = 1;
+            }
+        }
+        let wrd: u32 = set_dec_val(s, lvl, wrv);
+        if wrneg == 1 {          // 给 '-' 让一位 (原地右移)
+            let wrq: u32 = wrd;
+            while wrq > 0 {
+                store8(s, btxt(s, lvl) + wrq, load8(s, btxt(s, lvl) + wrq - 1) as u8);
+                wrq = wrq - 1;
+            }
+            store8(s, btxt(s, lvl), 45 as u8);
+            store32(s, blen(s, lvl), wrd + 1);
+        }
+        return wrd + wrneg;
+    }
     let st: u32 = load32(toks, i * 20 + 4);
     let n: u32 = load32(toks, i * 20 + 8);
     if !(n >= 2 && load8(src, st) == 48 && (load8(src, st + 1) == 120 || load8(src, st + 1) == 88)) {
@@ -2656,7 +2725,14 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
         return j + 1;
     }
     if tok_kind(toks, j) == 1 {
-        set_int_lit(s, lvl, src, toks, j);   // 十进制/十六进制都按十进制内联 (支持 > u32)
+        // `字面量 as T`: 操作数按**无期望类型**求值 (参考实现 Cast 分支对内部一律传
+        // `want=None`, 于是落 i32 定宽) —— 不这么做, `18446744073709551615 as u64`
+        // 会拿外层的 u64 当期望而不环绕, 与参考发出的 `zext i32 -1 to i64` 分叉。
+        let wl: u32 = want;
+        if tok_is(src, toks, j + 1, "as") {
+            wl = 0;
+        }
+        set_int_lit(s, lvl, src, toks, j, wl);   // 十进制/十六进制都按十进制内联 (支持 > u32)
         let e0: u32 = j + 1;
         if tok_is(src, toks, e0, "as") {
             apply_cast(s, out, src, toks, 0, e0 + 1, lvl);
@@ -3410,7 +3486,10 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
     // 模块级常量: 生成期内联成十进制字面量 (优先于变量查找, 与 lomentc 同序)
     let cvt: u32 = find_const(src, toks, j);
     if cvt != 0 {
-        set_int_lit(s, lvl, src, toks, cvt);
+        // 常量按**它自己的声明类型**环绕 (find_const 返回值 token; `const N : T = V`
+        // 的 token 次序是 const N : T = V, 所以 `cvt - 2` 是 T) —— 与参考实现
+        // `self.consts[name]` 带类型内联同序。
+        set_int_lit(s, lvl, src, toks, cvt, cvt - 2);
         let ce: u32 = j + 1;
         if tok_is(src, toks, ce, "as") {
             apply_cast(s, out, src, toks, 0, ce + 1, lvl);
@@ -3668,8 +3747,15 @@ fn expr_bin(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, minp: u32, lvl: u32, 
     if want_is_int(src, toks, want) == 1 {
         w = want;
     }
+    // **字面量本身**按声明类型环绕 (bool 也算): `let v: bool = 300;` 的字面量要印成 0。
+    // 二元运算的定宽仍然只用 `w` (整数) —— 把 bool 灌进算术正是 want_is_int 那条注释
+    // 记的旧缺陷 (`add i1`)。这里只在**单字面量**时把原始 want 递下去。
+    let aw: u32 = w;
+    if tok_kind(toks, j) == 1 {
+        aw = want;
+    }
     let cur: u32 = sub_expr_type(s, src, toks, j);
-    let e: u32 = expr_unary(s, out, src, toks, j, lvl, w);
+    let e: u32 = expr_unary(s, out, src, toks, j, lvl, aw);
     let i: u32 = e;
     let go: u32 = 1;
     while go == 1 {

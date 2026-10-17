@@ -6268,6 +6268,23 @@ IR_TYPES = {
     "u8": "i8", "u16": "i16", "u32": "i32", "u64": "i64",
     "i8": "i8", "i16": "i16", "i32": "i32", "i64": "i64", "bool": "i1",
 }
+
+
+def _wrap_int(v: int, ty: str) -> int:
+    """把整型字面量按 `ty` 的位宽环绕, 负值取补码。
+
+    发射器必须印**装得下这个类型**的值: `store i8 300` 不是合法 LLVM (i8 常量装不下
+    300), 包内链接器自己截断才让它"碰巧"跑对, clang 会拒。所以 `let v: u8 = 300;`
+    要印成 44 —— 也就是运行时真正取到的那个值, 不做 Rust 那种编译期拒收 (那不符合
+    本语言的语义; `docs/144` §"除零/溢出语义" 记着这层规则由 M2 定)。
+    """
+    n = 1 if ty == "bool" else int(ty[1:])
+    v &= (1 << n) - 1
+    if ty[:1] == "i" and v >> (n - 1):
+        v -= 1 << n
+    return v
+
+
 _SIGNED = ("i8", "i16", "i32", "i64")
 
 #: 整型的**值域**：位宽 + 有没有符号。下面那条规则只用这两样。
@@ -7481,12 +7498,17 @@ class _Ir:
         if isinstance(e, IntLit):
             if want == "ptr":  # M73: 空指针字面量
                 return "ptr", "null"
-            return (want or "i32"), str(e.value)
+            ty = want or "i32"
+            if ty in INT_TYPES or ty == "bool":
+                return ty, str(_wrap_int(e.value, ty))
+            return ty, str(e.value)
         if isinstance(e, BoolLit):
             return "i1", ("1" if e.value else "0")
         if isinstance(e, Ident):
             if e.name in self.consts:  # 常量在生成期内联
                 ty, val = self.consts[e.name]
+                if ty in INT_TYPES or ty == "bool":
+                    val = _wrap_int(val, ty)
                 return ty, str(val)
             if e.name not in self.vars:
                 raise LomError(e.line, 1, f"native M0: 未解析的变量 {e.name}")

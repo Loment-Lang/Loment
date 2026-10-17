@@ -68,6 +68,35 @@ def test_int_literal_as_ptr_is_legal_and_lowers_to_inttoptr():
 
 
 @test
+def test_out_of_range_literal_wraps_instead_of_emitting_an_invalid_constant():
+    """超范围的字面量**按目标类型环绕**, 不能把写出来的数原样塞进 IR (#529)。
+
+    `let v: u8 = 300;` 在运行时取到的就是 44 —— Loment 的整数是环绕的, 所以发射器要印
+    44。印 300 得到的 `store i8 300` **不是合法 LLVM** (i8 常量装不下 300), 只是包内
+    链接器自己截断才让它"碰巧"跑对; 换成 clang 会拒。**这是发射侧的缺陷, 不是检查侧**:
+    照 Rust 那样在 `check` 直接拒收不符合 Loment 的语义, 所以这里钉的是 IR 的形状。
+    """
+    NL = chr(10)
+    src = NL.join([
+        "module m", "choose runtime", "",
+        "fn _start() {",
+        "    let a: u8 = 300;",
+        "    let b: i8 = 200;",
+        "    let c: u16 = 65536;",
+        "    syscall4(60, 0, 0, 0);",
+        "}", "",
+    ])
+    assert errs(src) == [], errs(src)
+    ir = lomentc.emit_llvm(parse(src), ROOT, [])
+    assert "store i8 44," in ir, ir
+    assert "store i8 -56," in ir, ir
+    assert "store i16 0," in ir, ir
+    # 反例: 任何一个"写出来的原值"出现在 iN 常量位置, 都是非法 IR
+    for bad in ("store i8 300", "store i8 200", "store i16 65536"):
+        assert bad not in ir, f"{bad!r} 不是合法 LLVM ({ir})"
+
+
+@test
 def test_demo_parses_and_checks():
     mod = lomentc.load(DEMO)
     deps = lomentc.resolve_deps(mod, ROOT, DEMO.parent, entry=DEMO)

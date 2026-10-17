@@ -108,6 +108,16 @@ def _go() -> str | None:
 
 
 def _wsl() -> bool:
+    """"能不能在这台机器上跑 ELF" —— **不是**"有没有 WSL 这个程序"。
+
+    Linux 上恒真（原生跑），Windows 上才要经 WSL。原先是"先查 `which wsl`"，
+    于是 CI 的 Linux 容器里它恒假：这个文件里每一条走 ELF 的判据在 CI 上都**跳过**了
+    （`test_translation_runs_same_as_go` 由 `gate-skips.txt` 登记着，看不出问题；
+    2026-10-17 新加的那条没登记，门禁当场判「跳过了而没登记」）。与
+    `loment_p8_test._wsl` 同一个形状。
+    """
+    if sys.platform.startswith("linux"):
+        return True
     if not shutil.which("wsl"):
         return False
     try:
@@ -119,6 +129,8 @@ def _wsl() -> bool:
 
 def _wsl_path(p: Path) -> str:
     s = str(p.resolve()).replace("\\", "/")
+    if sys.platform.startswith("linux"):
+        return s          # 原生路径；`/mnt/x/...` 那一层只属于 Windows -> WSL
     return "/mnt/" + s[0].lower() + s[2:]
 
 
@@ -142,6 +154,25 @@ def _go_run(td: Path, go: str, src: Path) -> int:
     r = subprocess.run([str(exe)], cwd=str(td), capture_output=True, text=True,
                        timeout=300)
     return r.returncode
+
+
+def _build_text(td: Path, text: str, name: str = "l_side") -> Path:
+    """把一段 **Loment 源**（不是 Potato 文档）编成 ELF，补一个 `_start` 出来。
+
+    `gotrans.translate` 只发声明本身（`module` 行是另一层的），这里补上。
+    """
+    p = td / f"{name}.lomt"
+    p.write_text(f"module {name}\n\n" + text
+                 + "\nfn _start() {\n    syscall4(60, entry() as u64, 0, 0);\n}\n",
+                 encoding="utf-8", newline="\n")
+    mod = lomentc.load(p)
+    deps = lomentc.resolve_deps(mod, ROOT, p.parent, entry=p)
+    errs = lomentc.check(mod, deps=deps)
+    assert not errs, f"翻译出来的 Loment 检查不过: {errs[:3]}"
+    blob, _info = lomelf.compile_ll(lomentc.emit_llvm(mod, ROOT, deps), [])
+    exe = td / f"{name}.elf"
+    exe.write_bytes(blob)
+    return exe
 
 
 def _build_loment(td: Path, doc: dict) -> Path:
@@ -262,6 +293,65 @@ def test_statement_forms_others_reject_are_taken_here():
         else:
             raise AssertionError("花括号族把 `i++` 收下了 —— 那边 `++` 是有值的表达式")
     print("      `i++` / `+=` 这一门收（Go 里是语句）；C / Java 那两门拒（那边是表达式）")
+
+
+@test
+def test_block_scope_is_compensated_like_the_brace_family():
+    """块里的遮蔽声明要**改名**，出块后外层那个还回来（`#235` / `#237` 实例 1）。
+
+    Go 有块作用域，本语言没有（`docs/188` §0.1.1）。不补这一层，同一个程序在
+    `grammar go` 下读 50、`grammar c` 下读 10 —— 「表层语法只决定拼法，不决定语义」
+    这条就断了。判据钉的是翻译产物：块里那次 `y := 5` 必须换成另一个名字，
+    函数末尾读的仍是外层那个 `y`。**未修时红**（那时产物里是两条 `let y`）。
+    """
+    src = ("package main\n\nfunc entry() int {\n"
+           "\ty := 1\n\tc := 1\n"
+           "\tif c > 0 {\n\t\ty := 5\n\t\ty = y + 0\n\t}\n"
+           "\treturn y * 10\n}\n")
+    out = gotrans.translate(src)
+    assert "let y: i64 = 1;" in out, out
+    assert "let y_go__" in out, out              # 块里的遮蔽改了名
+    assert "return (y * 10);" in out, out        # 末尾读的是外层那个
+    assert "let y: i64 = 5;" not in out, out     # 没有把外层 y 覆盖掉
+
+
+@test
+def test_a_negative_literal_comparison_stays_true_after_translation():
+    """`if -1 < 0` 在 Go 里为真，翻成 Loment 之后也得为真（`#237` 第二处根）。
+
+    两侧都没有声明类型时，参考实现原先在**两处**都错了，同一个 `-1 < 0` 叠着两个错：
+
+    1. `want` 被当成定宽期望 —— 这里的期望类型是 `bool`，于是比较在 **`i1`** 上做；
+    2. 常量算术默认 `u32` —— 于是助记符是 `icmp ult`。
+
+    合起来 `if -1 < 0` 为**假**。C / Go / Python / Rust 都说真，所以这是"同一份程序
+    换个拼法答案就变"（`#237`）。
+
+    **这条不依赖 `go`**：判据的主体是"翻译出来的 Loment 跑出来是 7"，而它只要
+    参考编译器 + `lomelf`（CI 上原生跑 ELF）。有 `go` 时**再加**一列对照 ——
+    Go 自己编出来是多少，三方对；没有 `go` 就少那一列，不算跳过（登记一条跳过等于
+    让这条判据在 CI 上从不跑，而 `#237` 正是在 CI 上要守的那个数）。
+    """
+    if not _wsl():
+        print("      SKIP: 无 WSL（Windows 上跑 ELF 要经它；Linux 上恒真）")
+        return
+    src = ("package main\n\nfunc entry() int {\n"
+           "\tif -1 < 0 {\n\t\treturn 7\n\t}\n\treturn 0\n}\n")
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        l_rc = _run(_build_text(td, gotrans.translate(src), "neg_lit"))
+        go_rc = None
+        go = _go()
+        if go:
+            gsrc = td / "NegLit.go"
+            gsrc.write_text(src, encoding="utf-8", newline="\n")
+            go_rc = _go_run(td, go, gsrc)
+    assert l_rc == 7, f"`-1 < 0` 在翻译出来的 Loment 里是假 ({l_rc}) —— 无类型常量算术落回 u32"
+    if go_rc is not None:
+        assert go_rc == 7, f"go 那边就不对: {go_rc}（语料或期望值错了）"
+        print(f"      go -> {go_rc}，翻译成 Loment -> {l_rc}（`-1 < 0` 为真）")
+    else:
+        print(f"      翻译成 Loment -> {l_rc}（`-1 < 0` 为真；本机无 go，少一列对照）")
 
 
 @test

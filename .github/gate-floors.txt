@@ -23,7 +23,7 @@ loment_pytrans_test 4
 loment_jtrans_test 4
 loment_cstrans_test 6
 loment_cpptrans_test 5
-loment_gotrans_test 5
+loment_gotrans_test 7
 loment_nltrans_test 19
 loment_lomtfrom_test 4
 loment_trans_test 8
@@ -31,12 +31,12 @@ loment_potato_emit_test 6
 loment_grammar_test 20
 loment_tools_test 49
 loment_p7_test 8
-loment_p8_test 31
+loment_p8_test 32
 loment_p9_test 2
 loment_gc_surface_test 3
 loment_gc_why_test 4
 loment_seed_test 4
-loment_fmt_test 6
+loment_fmt_test 8
 loment_doc_test 3
 loment_channel_test 8
 loment_json_test 4

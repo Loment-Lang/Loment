@@ -602,9 +602,23 @@ fn op_toks(c: u32) -> u32 {
     return 1;
 }
 
-/// 写指令助记符 (比较类带有无符号)。
-fn emit_mnemonic(s: ptr, out: ptr, src: ptr, toks: ptr, c: u32, tt: u32) -> u32 {
+/// `k` 起是不是一个**负字面量** (`-` 紧跟整数字面量)?
+/// 与参考侧 `_const_int` 同一条规则：两侧都没有声明类型时，负字面量参与比较/取模/移位
+/// 要按**有符号**定宽（`#237` 第二处根；`if -1 < 0` 以前落 `icmp ult`，C/Go/Python/Rust
+/// 都说真）。**故意只认这一种形状**，两边因此可证明一致。
+fn neg_lit_at(src: ptr, toks: ptr, k: u32) -> u32 {
+    if tok_is(src, toks, k, "-") && tok_kind(toks, k + 1) == 1 {
+        return 1;
+    }
+    return 0;
+}
+
+/// 写指令助记符 (比较类带有无符号)。`sgn` = 1 时强制按有符号（无类型 + 负字面量）。
+fn emit_mnemonic(s: ptr, out: ptr, src: ptr, toks: ptr, c: u32, tt: u32, sgn: u32) -> u32 {
     let sg: u32 = is_signed(src, toks, tt);
+    if sgn == 1 {
+        sg = 1;
+    }
     if c == 3 {
         return emit_str(s, out, "icmp eq");
     }
@@ -663,8 +677,11 @@ fn emit_mnemonic(s: ptr, out: ptr, src: ptr, toks: ptr, c: u32, tt: u32) -> u32 
 }
 
 /// 除法/取模助记符 (c: 14=`/`, 15=`%`)。
-fn emit_div_mnemonic(s: ptr, out: ptr, src: ptr, toks: ptr, c: u32, tt: u32) -> u32 {
+fn emit_div_mnemonic(s: ptr, out: ptr, src: ptr, toks: ptr, c: u32, tt: u32, sgn: u32) -> u32 {
     let sg: u32 = is_signed(src, toks, tt);
+    if sgn == 1 {
+        sg = 1;
+    }
     if c == 14 {
         if sg == 1 {
             return emit_str(s, out, "sdiv");
@@ -3833,6 +3850,10 @@ fn expr_bin(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, minp: u32, lvl: u32, 
             if tt3 == 0 {
                 tt3 = w;         // 两个操作数都没有类型 -> 落期望类型
             }
+            let sgn3: u32 = 0;
+            if tt3 == 0 && (neg_lit_at(src, toks, j) == 1 || neg_lit_at(src, toks, i + 1) == 1) {
+                sgn3 = 1;        // 无类型 + 负字面量 -> 有符号 (#237)
+            }
             emit_upcast(s, out, src, toks, lvl, lt3, tt3);
             let r3: u32 = expr_bin(s, out, src, toks, i + 1, op_prec(c) + 1, lvl + 1, tt3);
             emit_upcast(s, out, src, toks, lvl + 1, rt3, tt3);
@@ -3861,7 +3882,7 @@ fn expr_bin(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, minp: u32, lvl: u32, 
             emit_str(s, out, "  ");
             emit_temp_ref(s, out, n3);
             emit_str(s, out, " = ");
-            emit_div_mnemonic(s, out, src, toks, c, tt3);
+            emit_div_mnemonic(s, out, src, toks, c, tt3, sgn3);
             emit_str(s, out, " ");
             emit_ty(s, out, src, toks, tt3);
             emit_str(s, out, " ");
@@ -3891,13 +3912,18 @@ fn expr_bin(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, minp: u32, lvl: u32, 
             if tt == 0 {
                 tt = w;          // 两个操作数都没有类型 -> 落期望类型
             }
+            let sgn: u32 = 0;
+            if tt == 0 && (neg_lit_at(src, toks, j) == 1
+                    || neg_lit_at(src, toks, i + op_toks(c)) == 1) {
+                sgn = 1;         // 无类型 + 负字面量 -> 有符号 (#237)
+            }
             emit_upcast(s, out, src, toks, lvl, lt, tt);
             let r: u32 = expr_bin(s, out, src, toks, i + op_toks(c), np, lvl + 1, tt);
             emit_upcast(s, out, src, toks, lvl + 1, rt, tt);
             emit_str(s, out, "  ");
             let n: u32 = new_temp(s, out);
             emit_str(s, out, " = ");
-            emit_mnemonic(s, out, src, toks, c, tt);
+            emit_mnemonic(s, out, src, toks, c, tt, sgn);
             emit_str(s, out, " ");
             emit_ty(s, out, src, toks, tt);
             emit_str(s, out, " ");

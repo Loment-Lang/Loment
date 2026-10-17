@@ -2905,6 +2905,21 @@ def prepare(mod: Module, deps: list[Module] | None = None) -> tuple[Module, list
 
 # ---------------------------------------------------------------- 语义检查
 
+def _const_int(e) -> int | None:
+    """`-字面量` 的值, 否则 None。
+
+    只用来判一件事：两侧都没有声明类型时，**负字面量**是不是在参与比较/取模/移位
+    —— 是就按有符号定宽（`#237` 第二处根）。**故意只认 `- <IntLit>` 这一种形状**：
+    自举那侧只扫两个 token 就能判同一个条件，两边因此可证明一致；更复杂的常量式
+    （`(0 - 1) < 0`）退回原来的 u32 缺省，不在这里悄悄改变语义。
+    """
+    if isinstance(e, IntLit):
+        return e.value
+    if isinstance(e, Un) and e.op == "-" and isinstance(e.expr, IntLit):
+        return -e.expr.value
+    return None
+
+
 def expr_type(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[str, Struct]) -> str | None:
     if isinstance(e, IntLit):
         return None  # 整型字面量: 由上下文定宽
@@ -7741,7 +7756,16 @@ class _Ir:
         ct = None
         if lt in INT_TYPES and rt in INT_TYPES and e.op not in ("<<", ">>"):
             ct = _common_type(lt, rt)
-        ty = (ct or lt or rt or want or "u32")
+        # `want` 只在**是整数类型**时才算定宽期望：bool/str/ptr 上下文里的字面量算术
+        # 落 1 位或 {ptr,i64} 运算是灾难（自举侧 `want_is_int` 的注释记着同一条）。
+        w = want if want in INT_TYPES else None
+        ty = (ct or lt or rt or w)
+        if ty is None:
+            # 两侧都没有类型：常量算术里出现**负值**时按有符号定宽。
+            # `if -1 < 0 {…}` 以前落 `icmp ult i32 -1, 0`（假），而 C/Go/Python/Rust
+            # 都说真 —— #237 的第二处根。字面量本身是负的就该按 i32 读。
+            lv, rv = _const_int(e.left), _const_int(e.right)
+            ty = "i32" if ((lv is not None and lv < 0) or (rv is not None and rv < 0)) else "u32"
         it = _ir_t(ty)
         signed = ty in _SIGNED
         op = e.op

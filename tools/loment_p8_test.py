@@ -2072,6 +2072,41 @@ def test_m85_heap_budget():
 
 
 @test
+def test_the_std_facade_is_refused_not_killed():
+    """`use std` 这一行不能再以**信号**收场（`#38`，伞在 `#343`）。
+
+    2026-10-14 实测（0.1.4.5）：**18 分钟**之后 SIGILL，stdout / stderr 都是 0 字节 ——
+    用户手里只有一个 132，分不出是源码写错还是编译器崩了。
+
+    现在它两秒内退 1，说清是检查器符号表装不下这个门面、该拆。判据钉的是**用户看得见
+    的那三条**，不钉措辞：不是信号、stderr 有话、退出码非 0。
+
+    **不钉墙钟**：两秒是今天的数，单元放大或换机器就变；钉时间只会得到一条会漂的判据。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    probe = ROOT / "loment" / "build" / "facade_std_u.lomt"
+    probe.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with probe.open("w", encoding="utf-8", newline="\n") as f:
+            f.write("module u\nuse std\nfn _start() { syscall4(60, 0, 0, 0); }\n")
+        rel = probe.relative_to(ROOT).as_posix()
+        with tempfile.TemporaryDirectory() as td:
+            elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_facade")
+            rc, _out, err = _run_driver_raw(elf, rel, td, "facade_std")
+    finally:
+        probe.unlink(missing_ok=True)
+    assert rc > 0, f"`use std` 居然编过了 (rc={rc}) —— 门面不该一路到底"
+    assert rc != 132, ("`use std` 还是被信号打断的 (SIGILL) —— 要的是**有话**，"
+                       f"不是 132: {err[-300:]}")
+    assert err.strip(), "`use std` 退非 0 却一句话都没说 —— 那正是 #343 这一类"
+    assert "Illegal instruction" not in err, err[-300:]
+    print(f"      `use std` 拒绝: rc={rc}，stderr {len(err.strip())} 字节 —— "
+          f"{err.strip().splitlines()[-1][:72]}")
+
+
+@test
 def test_m85_codegen_arg_arity_is_loud():
     """实参上限 (**20**) 必须**响亮地失败**, 不能静默截断。
 

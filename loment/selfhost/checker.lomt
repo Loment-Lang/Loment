@@ -3099,6 +3099,168 @@ fn chk_match(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
     return eb;
 }
 
+// ---------------------------------------------------------------- 末尾掉出（issue #22）
+
+/// **非 `()` 的函数不许从末尾掉出去**（issue #22）。规则是**纯结构**的，与参考实现
+/// `lomentc._falls_through` 同一条：末尾是 `return`；或末尾是带 `else` 的 `if` 且
+/// **每一支**都不掉；或末尾是 `match` 且**每条臂**都不掉。别的形状一律算会掉。
+///
+/// 为什么必须有：`check` 通过 = "这份程序不会 trap" 是这条命令唯一的保证，而掉出末尾
+/// 在发射之后是一条**非法指令**（SIGILL）—— 只在真走到那一支时才发生，多半是"上线很久、
+/// 错误分支被新输入踩到"才炸。参考实现早就报了（E027），这里是把它搬到自举侧：
+/// `loment_rule_parity` 里 `falloff-if` / `falloff-match-arm` 两条一直登记成 MISSING。
+const E_FALL: u32 = 27;
+
+/// 这个 `fn` 有没有函数体？1 = 有。
+///
+/// 必须有这一条：trait 里那种**只有签名**的 `fn m(self) -> u32;` 没有体，而
+/// `chk_find_brace` 会一路扫到**后面** `struct` / `impl` 的 `{` —— 拿它当体来判
+/// "掉出末尾"，报的就是一句凭空捏造的错（实测 `loment/examples/native_trait.lomt`）。
+/// 扫到第一个 `{` 或 `;` 为止；`[u32; 3]` 里的 `;` 要先跳过方括号才不算数。
+fn chk_fn_has_body(src: ptr, t: ptr, i: u32) -> u32 {
+    let pd: u32 = 0;
+    let bd: u32 = 0;
+    let j: u32 = i + 1;
+    while chk_tok_kind(t, j) != 4 {
+        if chk_tok_is(src, t, j, "(") { pd = pd + 1; }
+        if chk_tok_is(src, t, j, ")") { if pd > 0 { pd = pd - 1; } }
+        if chk_tok_is(src, t, j, "[") { bd = bd + 1; }
+        if chk_tok_is(src, t, j, "]") { if bd > 0 { bd = bd - 1; } }
+        if pd == 0 && bd == 0 {
+            if chk_tok_is(src, t, j, "{") { return 1; }
+            if chk_tok_is(src, t, j, ";") { return 0; }
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+
+/// 从形参括号 `(` 到函数体 `{` 之间，返回类型是不是 `()`（没写 `->` 也算）。
+///
+/// 不看 `ret` 的类型编码：那是 `(kind << 28) + payload`，而**复合类型一律记 0 = 未知**
+/// （见本文件顶部），用 0 当"是 unit"会把 `-> [u32; 3]` 也当成 unit 放过去。
+fn chk_ret_unit(src: ptr, t: ptr, from: u32, to: u32) -> u32 {
+    let j: u32 = from;
+    while j < to && chk_tok_kind(t, j) != 4 {
+        // 词法器把 `->` 切成**两个** token（`-` 与 `>`），不是一体 —— 本文件别处
+        // 读返回类型时也是分开比的。
+        if chk_tok_is(src, t, j, "-") && chk_tok_is(src, t, j + 1, ">") {
+            let k: u32 = j + 2;
+            if chk_tok_is(src, t, k, "(") && chk_tok_is(src, t, k + 1, ")") {
+                return 1;
+            }
+            return 0;
+        }
+        j = j + 1;
+    }
+    return 1;
+}
+
+/// `[cur, e)` 里**一条语句**结束之后的位置（指向下一条语句的第一个 token）。
+/// 控制语句没有结尾 `;`：跳到它（含 `else` 链）的块尾之后。
+fn chk_stmt_end(src: ptr, t: ptr, cur: u32, e: u32) -> u32 {
+    if chk_tok_is(src, t, cur, "if") || chk_tok_is(src, t, cur, "while")
+            || chk_tok_is(src, t, cur, "for") || chk_tok_is(src, t, cur, "match") {
+        let k0: u32 = chk_skip_body(src, t, cur);
+        let k: u32 = k0;
+        while k < e && chk_tok_is(src, t, k, "else") {
+            k = chk_skip_body(src, t, k + 1);
+        }
+        return k;
+    }
+    // 普通语句：找顶层 `;`。按花括号深度算 —— 结构体字面量里的逗号不是语句分隔符，
+    // 而 `{ ... }` 里的 `;` 也不该提前截断。
+    let d: u32 = 0;
+    let j: u32 = cur;
+    while j < e && chk_tok_kind(t, j) != 4 {
+        if chk_tok_is(src, t, j, "{") {
+            d = d + 1;
+        }
+        if chk_tok_is(src, t, j, "}") {
+            d = d - 1;
+        }
+        if d == 0 && chk_tok_is(src, t, j, ";") {
+            return j + 1;
+        }
+        j = j + 1;
+    }
+    return e;
+}
+
+/// 块 `[b..e]`（`b` = `{`，`e` = 它的 `}`）**可能**从末尾掉出去吗？1 = 会。
+fn chk_falls(src: ptr, t: ptr, b: u32, e: u32) -> u32 {
+    let last: u32 = 0;
+    let cur: u32 = b + 1;
+    while cur < e {
+        last = cur;
+        cur = chk_stmt_end(src, t, cur, e);
+    }
+    if last == 0 {
+        return 0;                      // 空块：与参考实现一致，不判
+    }
+    if chk_tok_is(src, t, last, "return") {
+        return 0;
+    }
+    if chk_tok_is(src, t, last, "if") {
+        let lb: u32 = chk_find_at(src, t, last + 1, e, "{");
+        if lb >= e {
+            return 1;
+        }
+        let le: u32 = chk_skip_body(src, t, lb) - 1;
+        let nb: u32 = le + 1;
+        if !chk_tok_is(src, t, nb, "else") {
+            return 1;                  // 没有 else ⇒ 条件为假时掉出去
+        }
+        if chk_falls(src, t, lb, le) == 1 {
+            return 1;
+        }
+        let k: u32 = nb;
+        while k < e && chk_tok_is(src, t, k, "else") {
+            let eb: u32 = chk_find_at(src, t, k + 1, e, "{");
+            if eb >= e {
+                return 1;
+            }
+            let ee: u32 = chk_skip_body(src, t, eb) - 1;
+            if chk_falls(src, t, eb, ee) == 1 {
+                return 1;
+            }
+            k = ee + 1;
+        }
+        return 0;
+    }
+    if chk_tok_is(src, t, last, "match") {
+        let lb2: u32 = chk_find_at(src, t, last + 1, e, "{");
+        if lb2 >= e {
+            return 1;
+        }
+        let le2: u32 = chk_skip_body(src, t, lb2) - 1;
+        let j: u32 = lb2 + 1;
+        let arms: u32 = 0;
+        while j < le2 {
+            // `=>` 与 `->` 一样是**两个** token；这一处按两 token 比。
+            if chk_tok_is(src, t, j, "=") && chk_tok_is(src, t, j + 1, ">") {
+                let ab: u32 = chk_find_at(src, t, j + 2, le2, "{");
+                if ab >= le2 {
+                    return 1;
+                }
+                let ae: u32 = chk_skip_body(src, t, ab) - 1;
+                arms = arms + 1;
+                if chk_falls(src, t, ab, ae) == 1 {
+                    return 1;
+                }
+                j = ae + 1;
+            } else {
+                j = j + 1;
+            }
+        }
+        if arms == 0 {
+            return 1;
+        }
+        return 0;
+    }
+    return 1;
+}
+
 /// 语句级检查 (批次 2/3): let / return / 赋值 / if / while / for / match。
 ///
 /// 形参压到 10 个: 自举 codegen 的实参上限是 10 (形参类型表步长 80 = 10 槽), 超限会
@@ -3945,6 +4107,17 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                 store32(tyt, 3576, 0);
                 chk_moves(src, t, syms, n, env, load32(tyt, 3520), fbra, fend, out, oc);
                 o = load32(oc, 0);
+                // 非 `()` 的函数不许从末尾掉出去（issue #22）—— 与参考实现同一条规则。
+                // 放在 chk_body/chk_moves 之后：那两趟可能已经写过诊断，`o` 得先回读。
+                // `fend` 是 `chk_skip_body` 的约定 —— 指向 `}` **之后**；`chk_falls` 要的是
+                // `}` 自己的下标，所以减一。
+                // `chk_fn_has_body` 先过一遍：`fbra` 是"往后扫到的第一个 `{`"，对**只有
+                // 签名**的方法它不是自己的体（见那个函数的注释），不能拿它来判。
+                if chk_fn_has_body(src, t, i) == 1
+                        && chk_ret_unit(src, t, lp2, fbra) == 0
+                        && chk_falls(src, t, fbra, fend - 1) == 1 {
+                    o = sym_pub(src, t, out, o, E_FALL, i);
+                }
                 i = fend;
             } else {
                 i = i + 1;

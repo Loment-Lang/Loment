@@ -71,7 +71,7 @@ import loment_p8_test as H  # noqa: E402  # 复用已验过的构建/运行夹�
 # "不是核心维"哨兵没跟着从 5 挪到 6，于是 `choose lms_open` 被当成**未定义的开关**
 # 报 E022 —— 码是错的、理由也是错的，而别的判据全绿。**这就是这张表存在的理由。**
 # 2026-10-15 同日 `E029`（用完再放）也补齐 ⇒ **104/106**。两条各一个探针，两边码集相等。
-BUDGET = 104
+BUDGET = 121
 
 # --------------------------------------------------------------------------- 案例表
 #
@@ -259,10 +259,11 @@ _CASES: list[tuple[str, str]] = [
     ("switch-undef", "module m\n\nchoose nope\n\nfn f() -> u32 {\n    return 1;\n}\n"),
     ("switch-dup", "module m\n\nset choose feat {\n}\n\nchoose feat\nchoose close feat\n\n"
                    "fn f() -> u32 {\n    return 1;\n}\n"),
-    # ---- 控制流: 非 () 的函数可能从末尾掉出去 (E024, `#22`) --------------
+    # ---- 控制流: 非 () 的函数可能从末尾掉出去 (E027, `#22`) --------------
     # 这张表只收负例(参考实现必须报错, 否则记 NOPY) —— 所以合法的收尾不在这里,
     # 它们由 `loment_p8_test` 的正例钉子管。
-    # 自举 checker 还没这条规则 ⇒ 它是 MISSING(允许; 补完再把 BUDGET 调上去)。
+    # 自举侧 2026-10-17 补上了这条(`checker.lomt` 的 `chk_falls`)，两条从 MISSING 变
+    # EQUAL，预算随之从 104 抬到 121。
     ("falloff-if", "module m\n\nfn pick(x: u32) -> u32 {\n    if x > 0 {\n        return 1;\n    }\n}\n"),
     ("falloff-match-arm", "module m\n\nenum E {\n    A,\n    B,\n}\n\nfn pick(e: E) -> u32 {\n    match e {\n        E::A => {\n            return 1;\n        }\n        _ => {\n            let v: u32 = 2;\n        }\n    }\n}\n"),
     # ---- 命令声明 (E024/E025/E026, docs/223) --------------------------------

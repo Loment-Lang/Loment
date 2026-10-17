@@ -66,8 +66,8 @@ OUT = ROOT / "loment" / "build" / "release-manifest.json"
 # **工具链本身一个字没动**（那八个二进制与 0.1.4.5 逐字节相同），所以这是补丁不是新版。
 # tag = `v0.1.4.5-quickfix`（`release.yml` 只对 `-pre` 结尾的 tag 整条跳过；这一版带产物，
 # 与那种"只发通知"的宣告版不是一回事）。
-RELEASE = "0.1.4.5-quickfix"
-RELEASE_NAME = "0.1.4.5 QuickFix"  # 人读显示名 (发行包/文档用同一个真源)
+RELEASE = "0.1.4.6"
+RELEASE_NAME = "0.1.4.6"  # 人读显示名 (发行包/文档用同一个真源)
 
 # 报错器 (`lomenterr`) **自己的版本号** —— 与语言版本是**两条线** (2026-10-13 用户定)。
 #

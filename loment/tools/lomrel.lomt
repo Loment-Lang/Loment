@@ -726,7 +726,7 @@ fn emit_json(mem: ptr, n: u32, out: ptr) -> u32 {
     k = put_str(k, out, " \"release\": \"");
     // 与 tools/loment_release.py 的 RELEASE 必须**逐字节一致** —— 版本名有两个实现,
     // 这里是自举镜像那一份; 判据 loment_rel_test 会对着比。
-    k = put_str(k, out, "0.1.4.5-quickfix");
+    k = put_str(k, out, "0.1.4.6");
     k = put_str(k, out, "\",\n");
     k = put_str(k, out, " \"files\": [\n");
     let i: u32 = 0;

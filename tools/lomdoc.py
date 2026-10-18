@@ -56,16 +56,21 @@ def render(mod: lomentc.Module, src: str, name: str) -> str:
         out += ["## 类型", ""]
         for s in mod.structs:
             out += [f"### `struct {s.name}`", "", doc_of(lines, s.line), "",
-                    "| 字段 | 类型 |", "|---|---|"]
-            out += [f"| `{fn}` | `{ft}` |" for fn, ft in s.fields]
+                    "| 字段 | 类型 | 说明 |", "|---|---|---|"]
+            for idx, (fn, ft) in enumerate(s.fields):
+                # 行号只对**源码里读出来的**声明有效（预置/合成的没有）；0 = 没有注释。
+                ln = s.field_lines[idx] if idx < len(s.field_lines) else 0
+                out.append(f"| `{fn}` | `{ft}` | {doc_of(lines, ln) if ln else ''} |")
             out.append("")
     if mod.enums:
         out += ["## 枚举", ""]
         for e in mod.enums:
             out += [f"### `enum {e.name}`", "", doc_of(lines, e.line), ""]
-            for v in e.variants:
+            for idx, v in enumerate(e.variants):
                 payload = f" ({e.payloads[v]})" if v in e.payloads else ""
-                out.append(f"- `{e.name}::{v}`{payload}")
+                ln = e.variant_lines[idx] if idx < len(e.variant_lines) else 0
+                doc = doc_of(lines, ln) if ln else ""
+                out.append(f"- `{e.name}::{v}`{payload}" + (f" — {doc}" if doc else ""))
             out.append("")
     if mod.traits:
         out += ["## trait", ""]

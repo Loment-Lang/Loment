@@ -2125,44 +2125,51 @@ fn rec_json(ctx: ptr, cnum: u32, clen: u32, line: u32, col: u32, mlen: u32, plen
     // 形状抄 rustc 的 `--error-format=json`：`message` 说这是什么、`replacement` 给换成什么、
     // `byte_start`/`byte_end` 圈住换哪儿、`applicability` 说这个建议有多可信
     // （`MaybeIncorrect` = 按编辑距离猜的，与 rustc 对同类建议的判定同名同义）。
-    o = em(ctx, o, ",\"suggestions\":[");
+    //
+    // **没有建议时整个字段缺席，不写一个空数组**（`#51`）：`[]` 与"这件东西还没做"
+    // 在消费者眼里是同一条消息（"没有可应用的修改"），而**一条都没有**是两个不同的
+    // 事实。字段缺席 = "这个码今天不产建议"；字段在且非空 = "这里有能直接套用的修改"。
+    // 与 `byte_start`/`byte_end` 只在指得准时出现是同一条纪律。
     let cn: u32 = load32(ctx, C_CANDN);
-    let k: u32 = 0;
-    while k < cn {
-        if k > 0 {
-            o = em_byte(ctx, o, COMMA);
+    if cn > 0 {
+        o = em(ctx, o, ",\"suggestions\":[");
+        let k: u32 = 0;
+        while k < cn {
+            if k > 0 {
+                o = em_byte(ctx, o, COMMA);
+            }
+            o = em_byte(ctx, o, LBRACE);
+            o = em(ctx, o, "\"message\":");
+            o = em_byte(ctx, o, QUOTE);
+            o = json_add(ctx, o, ui(ctx, S_SUG_ONE_A));
+            o = json_add(ctx, o, kind_name(ctx, load32(ctx, C_CANDKD + k * 4)));
+            o = json_add(ctx, o, ui(ctx, S_SUG_ONE_B));
+            o = em_byte(ctx, o, QUOTE);
+            o = em(ctx, o, ",\"kind\":");
+            o = json_str(ctx, o, kind_key(load32(ctx, C_CANDKD + k * 4)));
+            // **换成什么**：只有位置（`byte_*`）没有内容，编辑器没法应用 —— 它得知道往那片字节里
+            // 写什么。这一格与 `byte_*` 是一对（rustc 那边叫 `suggested_replacement`）。
+            o = em(ctx, o, ",\"replacement\":");
+            o = json_span(ctx, o, ptr_add(ctx, C_CAND + k * SUG_NAME),
+                          load32(ctx, C_CANDNL + k * 4));
+            o = em(ctx, o, ",\"line\":");
+            o = em_u32(ctx, o, load32(ctx, C_CANDLN + k * 4));
+            // **字节偏移只在那个词于本文件里全局唯一时才给**：给一个指错位置的偏移，
+            // 编辑器会照着它去改用户的代码 —— 那比不给坏得多。字段缺席 = "这一条别自动应用"，
+            // 与 rustc 那边 `applicability: Unspecified` 是同一个意思。
+            if cn == 1 && load32(ctx, C_TOKOFF) != 4294967295 {
+                o = em(ctx, o, ",\"byte_start\":");
+                o = em_u32(ctx, o, load32(ctx, C_TOKOFF));
+                o = em(ctx, o, ",\"byte_end\":");
+                o = em_u32(ctx, o, load32(ctx, C_TOKOFF) + load32(ctx, C_TOKLEN));
+            }
+            o = em(ctx, o, ",\"applicability\":");
+            o = json_str(ctx, o, "MaybeIncorrect");
+            o = em_byte(ctx, o, RBRACE);
+            k = k + 1;
         }
-        o = em_byte(ctx, o, LBRACE);
-        o = em(ctx, o, "\"message\":");
-        o = em_byte(ctx, o, QUOTE);
-        o = json_add(ctx, o, ui(ctx, S_SUG_ONE_A));
-        o = json_add(ctx, o, kind_name(ctx, load32(ctx, C_CANDKD + k * 4)));
-        o = json_add(ctx, o, ui(ctx, S_SUG_ONE_B));
-        o = em_byte(ctx, o, QUOTE);
-        o = em(ctx, o, ",\"kind\":");
-        o = json_str(ctx, o, kind_key(load32(ctx, C_CANDKD + k * 4)));
-        // **换成什么**：只有位置（`byte_*`）没有内容，编辑器没法应用 —— 它得知道往那片字节里
-        // 写什么。这一格与 `byte_*` 是一对（rustc 那边叫 `suggested_replacement`）。
-        o = em(ctx, o, ",\"replacement\":");
-        o = json_span(ctx, o, ptr_add(ctx, C_CAND + k * SUG_NAME),
-                      load32(ctx, C_CANDNL + k * 4));
-        o = em(ctx, o, ",\"line\":");
-        o = em_u32(ctx, o, load32(ctx, C_CANDLN + k * 4));
-        // **字节偏移只在那个词于本文件里全局唯一时才给**：给一个指错位置的偏移，
-        // 编辑器会照着它去改用户的代码 —— 那比不给坏得多。字段缺席 = "这一条别自动应用"，
-        // 与 rustc 那边 `applicability: Unspecified` 是同一个意思。
-        if cn == 1 && load32(ctx, C_TOKOFF) != 4294967295 {
-            o = em(ctx, o, ",\"byte_start\":");
-            o = em_u32(ctx, o, load32(ctx, C_TOKOFF));
-            o = em(ctx, o, ",\"byte_end\":");
-            o = em_u32(ctx, o, load32(ctx, C_TOKOFF) + load32(ctx, C_TOKLEN));
-        }
-        o = em(ctx, o, ",\"applicability\":");
-        o = json_str(ctx, o, "MaybeIncorrect");
-        o = em_byte(ctx, o, RBRACE);
-        k = k + 1;
+        o = em_byte(ctx, o, RBRACK);
     }
-    o = em_byte(ctx, o, RBRACK);
     // 同一条理由，机器那一侧要的是**字段**而不是一句话（`#485`）。
     if mtr == 1 {
         o = em(ctx, o, ",\"truncated\":true");

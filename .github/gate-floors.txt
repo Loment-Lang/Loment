@@ -37,7 +37,7 @@ loment_gc_surface_test 3
 loment_gc_why_test 4
 loment_seed_test 4
 loment_fmt_test 8
-loment_doc_test 4
+loment_doc_test 5
 loment_channel_test 8
 loment_json_test 4
 loment_pkg_test 3
@@ -67,8 +67,8 @@ loment_door_test 6
 loment_admit_test 8
 loment_zwframe_test 7
 loment_lib_test 15
-loment_cli_test 44
-loment_err_test 41
+loment_cli_test 47
+loment_err_test 44
 loment_std_test 4
 loment_libl_test 2
 loment_internet_test 11

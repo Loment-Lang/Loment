@@ -104,8 +104,10 @@ Two more diagnostic outlets are switches on `loment check FILE` (each also turns
 - `--short` - **one line per diagnostic** (`file:line:col: error[code]: message`), for grep and
   CI logs. Note that the column is reported as `0` today;
 - `--json` - **one object per line**, carrying `title`/`what`/`why`/`fixes`/`yes`/`no` as well as
-  the code and position, plus `suggestions` an editor can **apply directly** (`replacement` with
-  `byte_start`/`byte_end`), or count by code.
+  the code and position. When the reporter has an applicable fix, the object also carries a
+  non-empty `suggestions` array an editor can **apply directly** (`replacement` with
+  `byte_start`/`byte_end`). The key is **absent** when there is no suggestion - an empty array
+  would read as "no fix available", which is a different claim.
 
 Two more switches cap and capture the same stream:
 
@@ -421,10 +423,12 @@ language does not force it.
 **`sealed` is what makes the artifact checkable.** An undefined symbol is an error, not a
 warning, so a sealed artifact provably has no ports to the world. `hosted` is the other path: a
 C-runtime program whose entry point is `fn main() -> u32` rather than `_start`, declared as
-allowed to link real libc and shared libraries. **It is not finished, and a release build
-refuses it by name** - `choose hosted` is a compile error there, the launcher refuses `--hosted`
-too, and an object that carries undefined symbols is refused by the linker
-(`docs/222` section 4.5, `docs/219` section 8c). The development channel is where it is built.
+allowed to link real libc and shared libraries. **The door opened on 2026-10-17**: both release
+and development launchers pass `--allow-ports` to the linker, which links real ELF shared
+objects (`.so`) and lets the system loader map and bind them (`docs/183` V2, `docs/219` section
+8c). Remaining limits: ELF only (no PE import path), one shared object on the self-hosted
+linker, function symbols only, and a host `ld.so`/glibc must be present. When you call
+`loment-lomelf` directly rather than through `loment`, add `--allow-ports` yourself.
 
 ### 2.2 Switches `set choose` / `choose` / `addin`
 
@@ -971,15 +975,17 @@ applied, several objects may reference each other, and archives (`.a`) are expan
 that works. The boundary is the **port gate** (meeting it produces an **error**, not a guess):
 
 - an object that carries **undefined symbols** (`printf`/`malloc` being the typical ones) is
-  **refused by default**. That door - real libc, real shared libraries - is unfinished, and a
-  release build keeps it shut (`docs/222` section 4.5, `docs/219` section 8c). The development
-  channel opens it explicitly (`--allow-ports`), and there the closed-off names it can supply
-  itself are `memcpy` / `memset` / `memcmp` / `malloc` / `free` / `__stack_chk_fail`.
-- so in a release build: compile the other side freestanding
-  (`-ffreestanding -fno-stack-protector`) and let it call only itself.
-- dynamic libraries (`.so`/`.dll`) **do not exist yet** on this path, and neither does FFI on
-  the PE target. Reaching a real system library is what `choose hosted` opens (section 2.1) -
-  and that dimension is itself **not available in a release build** right now.
+  **refused by the linker by default**. The launchers pass `--allow-ports` in **both** channels
+  since 2026-10-17 (`docs/219` section 8c); calling `loment-lomelf` directly means adding it
+  yourself. With the door open the linker can also supply `memcpy` / `memset` / `memcmp` /
+  `malloc` / `free` / `__stack_chk_fail` from its own runtime.
+- or keep the other side freestanding (`-ffreestanding -fno-stack-protector`) so it calls only
+  itself - still the right choice when you do not want a runtime dependency.
+- dynamic libraries (`.so`) **work on ELF since 2026-10-17**: the product carries
+  `PT_INTERP`/`PT_DYNAMIC`/`DT_NEEDED` and a PLT/GOT, and the host's loader (`ld.so`) performs
+  the mapping and relocation binding. Limits today: ELF only (PE FFI is not implemented), one
+  shared object on the self-hosted linker, and function symbols (not data symbols) are
+  imported. `choose hosted` (section 2.1) is what allows the artifact to reach them.
 - several `--link` flags may be given at once; they are appended in order.
 - the other side's `.o` **may not exceed 4 MiB** (over that is an error, never a truncated build).
 

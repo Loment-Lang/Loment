@@ -218,7 +218,8 @@ def test_release_driver_refuses_channel_gated_constructs():
 
     今天**一关两放**，机制同一条（读同一个渠道常量）：
 
-    * **`choose vm`** —— 一维核心模式，闸在 `check()`（`docs/231` §2）。**发行版拒**；
+    * **`choose vm`** —— 一维核心模式，闸在 `check()`（`docs/231` §2）。**2026-10-17 放开**
+      （用户裁决，LVM 完成一大半）：探针留着、期望反转，发行版现在必须**收**它；
     * **`choose hosted`** —— 另一维核心模式。**2026-10-17 放开**（`#406`：V1 与 V2 两半
       都落齐了）：探针留着、期望反转，发行版现在必须**收**它；
     * **`use libl`** —— 一个**名字**，闸在**名字解析**处。**2026-10-15 放开**（`#358`）：
@@ -243,7 +244,7 @@ def test_release_driver_refuses_channel_gated_constructs():
     #: 关键字、不是被闸关住的模式名 —— 它们报文的文本由 `loment_diag` 那张 E022 卡负责，
     #: 已由上面那条 Python 判据守着。原来那一栏只服务 `use libl` 那条点名闸，闸放开了。
     probes = [("plain", PROBE_PLAIN, False),
-              ("vm", PROBE_VM, True),
+              ("vm", PROBE_VM, False),
               ("libl", PROBE_LIBL, False),
               ("hosted", PROBE_HOSTED, False)]
     made: list[Path] = []
@@ -268,7 +269,7 @@ def test_release_driver_refuses_channel_gated_constructs():
                         f"（`docs/231` §2 / `docs/222` §4.5）")
                 else:
                     assert rc == 0, f"对照组在发行版里被拒了：{err[-200:]}"
-        print("      dev 收 / 发行版拒：vm；发行版**收** libl 与 hosted（已放开的旧闸）")
+        print("      两个渠道都收：plain / vm / libl / hosted（四道闸都已放开）")
     finally:
         for p in made:
             p.unlink(missing_ok=True)

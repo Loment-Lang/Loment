@@ -22,7 +22,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lomc  # noqa: E402
-import loment_channel  # noqa: E402
 
 Tok = lomc.Tok
 LomError = lomc.LomError
@@ -4148,14 +4147,10 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     #
     # **次序**：排在运行期那条**之后** —— 自举侧的合并结果就是这个次序
     # （`checker.lomt` 的强保证块在 `eff_vm` 那块之前），两边报文次序才对得上。
-    if _eff["vm"] == "vm" and loment_channel.RELEASE:
-        _ln = next((l for _d, _w, l in reversed(mod.choose_lines) if _w == "vm"), 1)
-        errs.append(
-            f"{_ln}: 发行版不含 VM —— `choose vm` 只在**开发通道**可用。"
-            f"这一档今天还没有引擎：字节码与解释器都还没写（`docs/231` §1.3），"
-            f"所以发行版里它只能是一句拿不到的承诺。"
-            f"**修法二选一**：删掉这一行（回到默认的 `no_vm`），"
-            f"或者改用本仓的工具链来开发它（`python tools/loment.py …`）")
+    # **`vm` 那条闸 2026-10-17 放开**（用户裁决，LVM 完成一大半）：发行版接受 `choose vm`。
+    # 放开之后这个维**今天仍是声明**，不是保证 —— 解释器是仓侧的 `tools/lvm.py` 那一族
+    # （Python），发行包里没有它，产物也不走字节码。这一句是这一维的**明写边界**，
+    # 与 `no_runtime` 那类维同一个口径：声明先于兑现，但承诺的字面意思不许含糊。
 
     # **对外端口那一维 2026-10-17 放开**（`#406`）：V1（静态 `.a`，`#359`）与 V2（运行期
     # `.so`，`#360`）两半都落齐了，所以发行版里 `choose hosted` 不再是"一句拿不到的承诺"，

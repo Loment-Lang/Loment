@@ -237,6 +237,61 @@ def test_vscode_lsp_reports_type_errors():
     assert got[0]["range"]["start"]["line"] == 3, f"应当定位到第 4 行: {got[0]}"
 
 
+@test
+def test_vscode_check_command_runs_on_a_default_install():
+    """`#713`：「Loment: Check (current file)」在**默认安装**（没配 `loment.serverCommand`）
+    下必须真的跑得起来。
+
+    默认路径是 `python tools/loment_lsp.py --check <file>`；而那个脚本原先的 argparse
+    只认 `--demo`，于是命令面板里点下去得到 `unrecognized arguments: --check`（rc=2）——
+    只有把 `serverCommand` 指到 Loment 版服务才碰巧能用。
+
+    判据**跑到入口函数**：激活扩展、调用 `loment.checkFile` 的真 handler，拿它交给
+    `tasks.executeTask` 的 argv 去跑真脚本（不是只检查清单里有这条命令）。
+    """
+    if not _node():
+        print("      SKIP: 无 node")
+        return
+    probe = ROOT / "loment" / "build" / "vscode_check_probe.lomt"
+    probe.parent.mkdir(parents=True, exist_ok=True)
+    probe.write_text("module t\n\nfn main() -> u32 {\n    return missing_fn();\n}\n",
+                     encoding="utf-8", newline="\n")
+    try:
+        r = _activate({"enableLsp": False, "toolCommand": "loment"}, [],
+                      run_cmd="loment.checkFile", active=str(probe))
+        assert r.returncode == 0, f"激活脚手架挂了: {r.stderr[-300:]}"
+        got = json.loads(r.stdout)
+        assert got.get("ok"), f"`activate()` 抛了: {got.get('error', '')[:400]}"
+        assert got.get("execs"), f"`loment.checkFile` 没有起任务: {got.get('reg')}"
+        ex = got["execs"][-1]
+        assert Path(ex["args"][0]).name == "loment_lsp.py", ex
+        assert "--check" in ex["args"], ex
+
+        exe = _python() if Path(ex["cmd"]).name.lower().startswith("python") else ex["cmd"]
+        rr = subprocess.run([exe, *ex["args"]], cwd=ex.get("cwd") or str(ROOT),
+                            capture_output=True, text=True, timeout=60, shell=False)
+        assert rr.returncode == 1, (
+            f"默认安装的 `--check` 应当对错误文件 rc=1, 实得 {rr.returncode}: "
+            f"{rr.stdout[-200:]!r} {rr.stderr[-300:]!r}")
+        # **与扩展清单里的 problemMatcher 同一条正则**：文件名:行:列: E0NN 消息。
+        pat = re.compile(r"^(.+?):(\d+):(\d+): (E\d{3}) (.+)$")
+        hits = [ln for ln in rr.stdout.splitlines() if pat.match(ln)]
+        assert hits, f"输出对不上 problemMatcher: {rr.stdout!r}"
+        assert hits[0].startswith("loment/build/vscode_check_probe.lomt:"), hits[0]
+
+        # 干净文件：同一条 argv 应当 rc=0、无输出。
+        clean = "loment/examples/mathutil.lomt"
+        rr2 = subprocess.run([exe, ex["args"][0], "--check", clean],
+                             cwd=ex.get("cwd") or str(ROOT), capture_output=True,
+                             text=True, timeout=60, shell=False)
+        assert rr2.returncode == 0 and rr2.stdout.strip() == "", (
+            f"干净文件应当 rc=0 且无输出, 实得 {rr2.returncode}: {rr2.stdout!r}")
+    finally:
+        probe.unlink(missing_ok=True)
+    print("      默认安装：`loment.checkFile` 的 argv = python …--check <file>，"
+          "错误文件 rc=1 且逐行对得上 problemMatcher，干净文件 rc=0")
+
+
 # ---------------------------------------------------------------- 4. VSIX
 
 @test
@@ -404,7 +459,7 @@ const ROOT = process.argv[3];
 
 const reg = [];
 const dis = () => ({ dispose() {} });
-const file = ROOT + '/loment/examples/user_hello.lomt';
+const file = process.argv[6] || (ROOT + '/loment/examples/user_hello.lomt');
 const SETTINGS = JSON.parse(process.argv[4] || '{}');
 //: 要"打开"的文档: [{path, lang}]。语言提示那一路是**事件驱动**的（开文档 / 文件头改动），
 //: 所以这里得把真的开文档事件喂进去，而不是只检查订阅建没建。
@@ -460,14 +515,22 @@ const vscode = {
     showTextDocument: async () => ({}),
   },
   commands: {
-    registerCommand: (id) => { reg.push('cmd:' + id); return dis(); },
+    registerCommand: (id, fn) => {
+      reg.push('cmd:' + id); vscode.__cmds[id] = fn; return dis();
+    },
     executeCommand: () => {},
   },
   tasks: {
     registerTaskProvider: (t, p) => {
       reg.push('taskProvider:' + t); vscode.__provider = p; return dis();
     },
-    executeTask: async () => {},
+    // 记下命令真的起了什么任务 —— 「检查」那条命令的判据要拿它的 argv 去跑真脚本。
+    executeTask: async (t) => {
+      (vscode.__execs || (vscode.__execs = [])).push({
+        cmd: t.exec.cmd, args: t.exec.args,
+        cwd: t.exec.opts && t.exec.opts.cwd,
+      });
+    },
   },
   debug: {
     registerDebugAdapterDescriptorFactory: (t, f) => {
@@ -483,6 +546,8 @@ const vscode = {
   Uri: { file: (p) => ({ fsPath: p }) },
   DebugAdapterExecutable: function (c, a) { this.cmd = c; this.args = a; },
 };
+
+vscode.__cmds = {};
 
 const load = Module._load;
 Module._load = function (req) {
@@ -524,6 +589,16 @@ Module._load = function (req) {
     await new Promise((r) => setTimeout(r, 30));
     out.docs = docs.map((d) => ({ path: d.uri.fsPath, lang: d.languageId }));
     out.langs = langs;
+    // 可选：跑一条命令的**真入口函数**（`process.argv[7]` = 命令 id）。
+    // 「检查」那条的 bug 不在清单、也不在注册，而在它起的 argv 跑不起来 —— 所以要把
+    // 真的 handler 调一遍，再拿它交给 `executeTask` 的 argv 去跑真脚本。
+    if (process.argv[7]) {
+      const fn = vscode.__cmds[process.argv[7]];
+      if (!fn) { throw new Error('command not registered: ' + process.argv[7]); }
+      await fn();
+      await new Promise((r) => setTimeout(r, 30));
+    }
+    out.execs = vscode.__execs || [];
   } catch (e) {
     out.error = String((e && e.stack) || e);
   }
@@ -533,11 +608,13 @@ Module._load = function (req) {
 """
 
 
-def _activate(settings: dict, docs: list[dict]) -> subprocess.CompletedProcess:
+def _activate(settings: dict, docs: list[dict], run_cmd: str = "",
+              active: str = "") -> subprocess.CompletedProcess:
     """跑一遍**真的 `activate()`**（假 `vscode` 由 `_ACTIVATE_HARNESS` 注入）。
 
     `docs` 是"要打开的文档" `[{path, lang}]` —— 语言提示那一路是事件驱动的，所以判据
     必须把开文档事件派进去，而不是只检查订阅建没建。
+    `run_cmd` = 激活后再跑一遍**那条命令的真 handler**；`active` = 假的活动编辑器文件。
     """
     node = _node()
     with tempfile.TemporaryDirectory() as td:
@@ -545,7 +622,7 @@ def _activate(settings: dict, docs: list[dict]) -> subprocess.CompletedProcess:
         h.write_text(_ACTIVATE_HARNESS, encoding="utf-8")
         return subprocess.run(
             [node, str(h), str(EXT / "src" / "extension.js"), str(ROOT),
-             json.dumps(settings), json.dumps(docs)],
+             json.dumps(settings), json.dumps(docs), active, run_cmd],
             capture_output=True, text=True, shell=False)
 
 

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """渠道判据（`docs/231` §2、§5 判据 D 与 F）。
 
-**这一条为什么必须存在**：`choose vm` 在**发行版**里是编译错误、"只在 dev 通道可用"
+**这一条为什么必须存在**：`choose vm` 曾经在**发行版**里是编译错误、"只在 dev 通道可用"
 （用户 2026-10-11 定）。而"发行版"不是一个命令，是**这条流水线**（`loment_dist.py`）——
 它把自举侧那一行渠道常量翻成 `1` 再建包。**没有判据的话，那一步悄悄失效谁也不知道**，
 表现恰好是最坏的一种：发行版里 `choose vm` 又能编过了，而文档还写着它非法。
+（**2026-10-18 它真的放开了** —— 于是这一条按棘轮**反转期望**，而不是删掉：见判据 D。）
 
 两半：
 
@@ -32,7 +33,8 @@ import loment_seed  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 SEED = loment_seed.SEED
 
-#: 探针：一份**声明了 `choose vm`** 的最小单元。它只在 dev 通道合法。
+#: 探针：一份**声明了 `choose vm`** 的最小单元。**2026-10-18 起两个通道都合法**
+#: （`#355`）—— 探针留着、期望反转，与 `libl` / `hosted` 同一条棘轮。
 PROBE_VM = "module probe_vm\n\nchoose vm\n\nfn f() -> u32 {\n    return 1;\n}\n"
 #: 对照组：同样一份、**不声明** `choose vm` —— 两个驱动器都必须收。
 PROBE_PLAIN = "module probe_plain\n\nfn f() -> u32 {\n    return 1;\n}\n"
@@ -112,7 +114,7 @@ def test_release_seed_differs_only_in_the_channel_constant():
         f"两个种子长度不同（dev {len(dev)}B vs release {len(rel)}B）—— 注入改的"
         "**不止那个常量**（`docs/231` §2.3）")
     diff = [i for i in range(len(dev)) if dev[i] != rel[i]]
-    assert diff, "两个种子一模一样 —— 渠道注入**根本没生效**（发行版会照收 `choose vm`）"
+    assert diff, "两个种子一模一样 —— 渠道注入**根本没生效**"
     assert len(diff) == CHANNEL_READ_SITES, (
         f"两个种子差 {len(diff)} 处（第 {diff[:5]} 个字符），而钉住的是 "
         f"{CHANNEL_READ_SITES} 处 —— 渠道常量被读到的**处数变了**。"
@@ -218,7 +220,9 @@ def test_release_driver_refuses_channel_gated_constructs():
 
     今天**一关两放**，机制同一条（读同一个渠道常量）：
 
-    * **`choose vm`** —— 一维核心模式，闸在 `check()`（`docs/231` §2）。**发行版拒**；
+    * **`choose vm`** —— 一维核心模式，闸在 `check()`（`docs/231` §2）。**2026-10-18 放开**
+      （`#355`，`docs/263`）：引擎 T0–T3 与去优化落齐、失败面有判据、`loment-lvm` 随包发
+      —— 探针留着、期望**反转**，发行版现在必须**收**它；
     * **`choose hosted`** —— 另一维核心模式。**2026-10-17 放开**（`#406`：V1 与 V2 两半
       都落齐了）：探针留着、期望反转，发行版现在必须**收**它；
     * **`use libl`** —— 一个**名字**，闸在**名字解析**处。**2026-10-15 放开**（`#358`）：
@@ -243,7 +247,7 @@ def test_release_driver_refuses_channel_gated_constructs():
     #: 关键字、不是被闸关住的模式名 —— 它们报文的文本由 `loment_diag` 那张 E022 卡负责，
     #: 已由上面那条 Python 判据守着。原来那一栏只服务 `use libl` 那条点名闸，闸放开了。
     probes = [("plain", PROBE_PLAIN, False),
-              ("vm", PROBE_VM, True),
+              ("vm", PROBE_VM, False),
               ("libl", PROBE_LIBL, False),
               ("hosted", PROBE_HOSTED, False)]
     made: list[Path] = []
@@ -268,7 +272,7 @@ def test_release_driver_refuses_channel_gated_constructs():
                         f"（`docs/231` §2 / `docs/222` §4.5）")
                 else:
                     assert rc == 0, f"对照组在发行版里被拒了：{err[-200:]}"
-        print("      dev 收 / 发行版拒：vm；发行版**收** libl 与 hosted（已放开的旧闸）")
+        print("      dev / 发行版**都收**：vm、libl、hosted（三扇旧闸都放开了，探针留着）")
     finally:
         for p in made:
             p.unlink(missing_ok=True)

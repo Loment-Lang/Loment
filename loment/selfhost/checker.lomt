@@ -3826,15 +3826,16 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     // 线性扫（`docs/225` §3.3），而那条 60s 护栏本来就只剩 ~1% 余量（实测 59.33s）。
     // 实测同条件 A/B：加函数那版 62.9s（红）、纯净树 58.24s（过）。
     let rel: u32 = LOMENT_CHANNEL;
-    if eff_vm == 1 {
-        if rel == 1 {
-            o = sym_pub(src, t, out, o, E_MODE, ln_vm);
-        }
-    }
+    // ---- **`vm` 那一扇 2026-10-18 放开**（`#355`，`docs/263`）：引擎落齐了（T0–T3 +
+    // 去优化，`docs/259` / `docs/261`），失败面有判据（`docs/262`），**而且 `loment-lvm`
+    // 随包发**（`loment_dist.TOOLS`）—— 发行版里 `choose vm` 不再是"一句拿不到的承诺"。
+    // **探针留着、期望反转**（`loment_channel_test` 判据 D），与 `use libl`（`#358`）/
+    // `choose hosted`（`#406`）同一条棘轮：**替换，不删掉**。
+    // ⚠ `rel` **仍然要被读到一次**：`loment_channel_test` 钉着"dev / release 两个种子
+    // 只差一处"，而下面 `lspe` 那条闸还在用它。**别把那个 `let` 一起删了。**
     // ---- **对外端口那一维 2026-10-17 放开**（`#406`）：静态（`#359`）与运行期（`#360`）
     // 两半都落齐了，所以发行版里 `choose hosted` 不再是"一句拿不到的承诺"，闸拆掉。
     // 用户 2026-10-12 那句「锁掉 LibC … 因为这尚未完工」的前提**已经不成立**。
-    // **`vm` 那条照旧**（引擎还没写，承诺仍然落空）—— 两扇门是**两件事**，只开这一扇。
     // ---- 第一遍半: 能力表判错 (等 caps 与 excluded 都收齐, 顺序无关)
     o = chk_caps_verify(src, t, ctab, load32(nc, 0), exs, nexs, out, o);
     // ---- 第二遍: 函数体里的调用检查

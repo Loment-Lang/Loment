@@ -4133,14 +4133,10 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     #
     # **次序**：排在运行期那条**之后** —— 自举侧的合并结果就是这个次序
     # （`checker.lomt` 的强保证块在 `eff_vm` 那块之前），两边报文次序才对得上。
-    if _eff["vm"] == "vm" and loment_channel.RELEASE:
-        _ln = next((l for _d, _w, l in reversed(mod.choose_lines) if _w == "vm"), 1)
-        errs.append(
-            f"{_ln}: 发行版不含 VM —— `choose vm` 只在**开发通道**可用。"
-            f"这一档今天还没有引擎：字节码与解释器都还没写（`docs/231` §1.3），"
-            f"所以发行版里它只能是一句拿不到的承诺。"
-            f"**修法二选一**：删掉这一行（回到默认的 `no_vm`），"
-            f"或者改用本仓的工具链来开发它（`python tools/loment.py …`）")
+    # **`choose vm` 2026-10-18 放开**（`#355`，`docs/263`）：引擎 T0–T3 与去优化都落了
+    # （`docs/259` / `docs/261`），失败面有判据（`docs/262`），`loment-lvm` 随包发。
+    # 发行版里它不再是"一句拿不到的承诺"。**探针留着、期望反转**
+    # （`loment_channel_test` 判据 D）：替换，不删掉。
 
     # **对外端口那一维 2026-10-17 放开**（`#406`）：V1（静态 `.a`，`#359`）与 V2（运行期
     # `.so`，`#360`）两半都落齐了，所以发行版里 `choose hosted` 不再是"一句拿不到的承诺"，

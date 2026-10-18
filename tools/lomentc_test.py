@@ -3964,11 +3964,11 @@ def test_hosted_heap_comes_from_the_platform_and_sealed_is_untouched():
     assert "declare ptr @malloc(i64)" in hosted, "没向宿主声明分配器"
     assert "; loment-heap: platform 1048576" in hosted, "没把这件事写进产物"
     # 声明在**用之前**（LLVM 对未声明的调用是 `use of undefined value`，实测）
-    assert hosted.index("declare ptr @malloc(i64)") < hosted.index("call ptr @malloc(i64 1048576)")
+    assert hosted.index("declare ptr @malloc(i64)") < hosted.index("call ptr @malloc(i64 1048592)")
 
     # A1：同一份源去掉那一行 ⇒ 逐字节还是原来那一段（闸门真的在 `port` 上）
     assert "@__loment_heap = internal global [65536 x i8] zeroinitializer" in sealed
-    assert "malloc" not in sealed, "sealed 的产物里出现了宿主符号"
+    assert "@malloc" not in sealed, "sealed 的产物里出现了宿主符号"
     assert "loment-heap" not in sealed, "sealed 的产物里出现了 A 的标记"
     # 两份唯一的差别就是 arena 那一段 —— 偏移模型、空闲链表、前沿回退**共用**
     assert "icmp ule i32 %nxtoff, 1048576" in hosted
@@ -4019,7 +4019,7 @@ def test_hosted_gc_auto_grows_too_and_gets_the_hosted_collector():
     sealed = _heap_ir(HEAP_SEALED_GC_AUTO_SRC)
     assert "@__loment_mark = internal global [1024 x i8]" in sealed
     assert "@__loment_heap = internal global [65536 x i8] zeroinitializer" in sealed
-    assert "malloc" not in sealed
+    assert "@malloc" not in sealed
 
 
 #: `docs/219` §8b 的 **S2**（V1 剩下的最后一件）那一份：根开了运行期、**声明了外部函数**，
@@ -4069,11 +4069,13 @@ def test_ffi_artifacts_get_an_arena_big_enough_for_a_real_library():
     # ① `extern fn` 那一档：arena 封在产物里、给够 1 MiB、寻址走基址指针
     assert f"; loment-heap: ffi {lomentc.FFI_ARENA_BYTES}" in ffi, \
         "没把 arena 这件事写进产物（构建那一侧不该去读源码来知道它）"
-    assert "[1048576 x i8] zeroinitializer" in ffi, "arena 还是那块 64 KiB 的数组"
+    # 块比 arena 多 16 字节：`#620` 的取整余量（基址对齐到 16 之后那一小截仍在块内）。
+    assert f"[{lomentc.FFI_ARENA_BYTES + 16} x i8] zeroinitializer" in ffi, (
+        "arena 还是那块 64 KiB 的数组")
     assert "getelementptr [65536 x i8], ptr @__loment_heap" not in ffi, "还在直接寻址"
     assert "%hb = call ptr @__loment_arena()" in ffi, "分配器没用基址指针"
-    assert "ret ptr @__loment_arena_block" in ffi, "arena 不是产物里那块静态的"
-    assert "malloc" not in ffi, "sealed 的产物里出现了宿主符号"
+    assert "ptrtoint ptr @__loment_arena_block to i64" in ffi, "arena 不是产物里那块静态的"
+    assert "@malloc" not in ffi, "sealed 的产物里出现了宿主符号"
     # ② 对照：**没有** `extern fn` 的那一份一个字节没动
     assert "[65536 x i8] zeroinitializer" in sealed
     assert "loment-heap" not in sealed, "没链外源库的产物也被改大了 —— 那是 sealed 那条保证"

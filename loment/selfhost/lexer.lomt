@@ -152,20 +152,42 @@ pub fn lex_cap(src: ptr, len: u32, out: ptr, cap: u32) -> u32 {
         } else if c == 34 {
             let s: u32 = i;
             let lc: u32 = col;
+            let lline: u32 = line;      // token 的**起始**行（字符串里的换行只影响后面）
             i = i + 1;
             col = col + 1;
             while i < len && load8(src, i) != 34 {
                 if load8(src, i) == 92 && i + 1 < len {
+                    // 转义：两个字节都不算换行 —— 除非第二个字节本身就是换行（`\` 后面
+                    // 跟一个真换行），参考侧是按**原始字节里的换行数**数的。
+                    if load8(src, i + 1) == 10 {
+                        line = line + 1;
+                        col = 1;
+                    } else {
+                        col = col + 2;
+                    }
                     i = i + 2;
-                    col = col + 2;
                 } else {
+                    let b: u32 = load8(src, i);
+                    if b == 10 {
+                        // **字符串里的换行也要走行号**（`#481`）：参考侧 `lomc.lex` 已经这样，
+                        // 这边原来是"列 +1"地越过它，于是多行字符串之后的行号整体少一行。
+                        line = line + 1;
+                        col = 1;
+                    } else {
+                        // **列数码点，不数字节**（与参考侧一致）：字符串里的中文一个字占
+                        // 3 字节，按字节加列会让同一条长行上的后续 token 列号越走越偏，
+                        // 而格式化器的换行判断读的正是列号（`#482` 那轮之后 `loment_fmt`
+                        // 在 `codegen.lomt` 上分叉，就是这一处）。
+                        if (b & 192) != 128 {
+                            col = col + 1;
+                        }
+                    }
                     i = i + 1;
-                    col = col + 1;
                 }
             }
             i = i + 1;
             col = col + 1;
-            emit(out, n, cap, 2, s, i - s, line, lc);
+            emit(out, n, cap, 2, s, i - s, lline, lc);
             n = n + 1;
         } else if is_digit(c) {
             let s: u32 = i;

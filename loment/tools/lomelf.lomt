@@ -3219,9 +3219,9 @@ fn do_call_extern(tab: ptr, out: ptr, c: u32, t: ptr, lp: u32, rp: u32, nargs: u
     // `tools/lomelf.py` 的 `_call` 同一处、同三条、同序。不修的话，**任何用到 16 字节 SSE
     // 存的 C 函数当场 `#GP`**（`si_code=SI_KERNEL`、`si_addr=NULL` —— 那不是段越界，是
     // **对不齐**）：实测 zlib 的 `compress` 就死在 `movaps %xmm0,-0x70(%rbp)` 上
-    // （`FujoJTOP/loment#359`）。用 RBX 存原 rsp：SysV 的**被调方保存**寄存器，C 返回时
+    // （`FujoJTOP/loment#359`）。用 `RBX` 存原 rsp：SysV 的**被调方保存**寄存器，C 返回时
     // 仍是原值；而 Loment 生成的代码不用 rbx。⚠ 正因为它被调方保存，**我们自己必须先
-    // 保存调用方的 RBX**（`#626`）：C → Loment 回调再走一次 extern 调用时，上层 C 帧
+    // 保存调用方的 `RBX`（`#626`）：C → Loment 回调再走一次 extern 调用时，上层 C 帧
     // 读到的才是它自己的 RBX，而不是我们的栈指针 —— 与参考实现同一对 push/pop。
     d = em_push(out, d, RBX);
     d = em_mov_rr(out, d, RBX, RSP, 1);

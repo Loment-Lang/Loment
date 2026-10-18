@@ -157,6 +157,11 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  # LVM 的 T3（`docs/261`）：守卫特化 + 去优化 —— 语料不变、夹具恰好去优化
                  # 一次且副作用只发生一次、反例零去优化。
                  "lvm_t3_test",
+                 # LVM 的失败面（`docs/262`）：三档都不挂死、五种拒绝都点名、上限写在纸上。
+                 "lvm_stability_test",
+                 # LVM 的性能护栏（`docs/226` §2.2）：绝对天花板 + 只判符号，外加"账上真有这张表"。
+                 # ⚠ 挂在独占那一片之外：它跑 T0 的重的那份（~7s），但**不写仓库共享位置**。
+                 "lvm_perf_test",
                  # `lom/net.lom` 那条 L0 契约 (docs/228): 号 → 面的单源, 四面对账
                  "loment_net_test",
                  # FFI 第 1 阶段 (docs/173): 外部目标文件 + C ABI + lomelf 单独链接, 跑出结果
@@ -358,7 +363,9 @@ SHARD_COST = {
     "lompi_sync": 0.0,
     "lompicheck_test": 1.1,
     "lvm_compact_test": 51.3,
+    "lvm_perf_test": 25.0,
     "lvm_profile_test": 22.9,
+    "lvm_stability_test": 10.0,
     "lvm_t2_test": 138.6,
     "lvm_t3_test": 24.7,
     "lvm_test": 20.3,
@@ -366,7 +373,7 @@ SHARD_COST = {
     "potato_cross": 0.0,
     "potato_test": 9.5,
     "vscode_ext_test": 1.2,
-}  # 89 条 = `len(STATIC_CHECKS)`；`unpriced_checks()` 钉住这条等式。
+}  # 91 条 = `len(STATIC_CHECKS)`；`unpriced_checks()` 钉住这条等式。
 
 #: 不参与均分、也**不需要** `SHARD_COST` 条目的判据。**今天是空的** —— 89 条全有实测值。
 #: 留着这个集合是为了让"新判据还没量过"有一个**明确**的落脚处：放进来的代价是它按

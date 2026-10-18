@@ -266,11 +266,16 @@ class T3Executor(lvm_t2.T2Executor):
         blocks, labels, name = cf.blocks, cf.labels, cf.name
         frame = [base]                       # 帧的 bump 游标（`alloca` 每执行一次就往上走）
         bi, prev = 0, -1
+        steps = 0
         while True:
             blk = blocks[bi]
             if prof is not None:
                 prof.block(name, labels[bi])
             for j, op in enumerate(blk):
+                steps += 1
+                if steps > lvm.STEP_CAP:
+                    raise lvm.LvmError(
+                        f"步数上限 {lvm.STEP_CAP}：{name} 的块 {labels[bi]}，第 {j} 条")
                 code = op[0]
 
                 if code == _OP_GUARDED_CALL:              # noqa: SLF001

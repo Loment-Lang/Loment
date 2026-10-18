@@ -33,6 +33,17 @@ FRAME_SIZE = 4096
 #: 每个标量占 8 字节（与 `lomelf` 的栈槽模型同口径，`SCALAR_SIZE`）。
 SLOT = 8
 
+#: **步数上限**（`docs/262`，issue #353）。镜像（`loment/tools/lvm.lomt`）一直有 `STEP_CAP`，
+#: 参考实现**没有** —— 于是"挂死"与"慢程序"在参考那侧根本分不开。数的是**一次函数调用里
+#: 执行的指令条数**（与镜像同口径），撞上就点名报函数 / 块 / 第几条，而不是等下去。
+STEP_CAP = 50_000_000
+
+#: **调用深度上限**（`docs/262`，issue #353）。不设的话，地址空间算出来能放 ~4080 层，
+#: 而**宿主 Python 的栈**在 ~200 层就先炸 —— 于是程序死在一个 `RecursionError` 上，
+#: 那不是 VM 的话，也不是使用者看得懂的话。取 128：**比镜像的 `MAX_DEPTH = 32` 宽松**
+#: （孪生那边不会因此更严），又远低于宿主栈。语料实测最大深度 **10**。
+MAX_DEPTH = 128
+
 #: **合成文件**的 fd 从这儿起（`docs/243` §3.4）。解释器没有真的文件描述符，
 #: 所以真 fd 与合成 fd 不会撞；这个数两边实现**必须一样**（自举镜像里也写 1000）。
 VFD_BASE = 1000
@@ -487,6 +498,8 @@ class Executor(Vm):
         # 用同一段地址**，被调者的 `alloca` 覆盖了调用者的槽，返回后读回来全是 0 ——
         # 症状是"凡是算数再打印的程序全错"，而 `user_hello`（值在调用**前**就按值传走）
         # 照样对，所以一开始没露。
+        if self.depth + 1 > MAX_DEPTH:
+            raise LvmError(f"栈溢出（调用深度上限 {MAX_DEPTH}）")
         self.depth += 1
         base = STACK_TOP - self.depth * FRAME_SIZE
         if base <= self.mem.heap:
@@ -509,6 +522,7 @@ class Executor(Vm):
         label = fn.blocks[0].label
         prev = None
         ret = 0
+        steps = 0
         while True:
             blk = next((b for b in fn.blocks if b.label == label), None)
             if blk is None:
@@ -518,6 +532,11 @@ class Executor(Vm):
             for idx, ins in enumerate(blk.instrs):
                 if self.profile is not None:
                     self.site = (fn.name, blk.label, idx)
+                steps += 1
+                if steps > STEP_CAP:
+                    raise LvmError(
+                        f"步数上限 {STEP_CAP}：{fn.name} 的块 {blk.label}，"
+                        f"第 {idx} 条 —— {ins.text[:60]}")
                 if ins.text.startswith("phi "):
                     if ins.dest:
                         fr.vals[ins.dest] = self._phi(fr, ins.text, prev)

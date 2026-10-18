@@ -183,6 +183,8 @@ GLOBS = [
     "tools/lvm_compact.py", "tools/lvm_compact_test.py",
     "tools/loment_store_twin_test.py",
     "tools/lvm_t3.py", "tools/lvm_t3_test.py",
+    "tools/lvm_stability_test.py",
+    "tools/lvm_perf_test.py",
     # `lom/net.lom` 那条 L0 契约的判据 (docs/229): 四处对账 + 自证会红。
     # **位置与自举那份 `lomrel.lomt` 对齐**（两份清单的顺序就是它们的顺序）。
     "tools/loment_net_test.py",

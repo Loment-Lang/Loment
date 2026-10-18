@@ -369,6 +369,31 @@ def test_overlong_record_says_it_was_cut():
     assert "error[E019]" in out, "截断之前那部分还是要印出来的"
     print("      超长记录: 明说被截断, 不静默少印")
 
+
+@test
+def test_a_cut_message_says_so_in_every_channel():
+    """**消息本身**被截断时，三个出口都要说（`#485`）。
+
+    与上一条不同：那条是**渲染**撞上缓冲，这条是消息在拷进来的时候就封顶了。
+    `--json` / `--short` 原先一个字都不说 —— 下游读到的是一条"看起来完整"的短句，
+    而它其实是半句话；CI 按消息内容做判断的会把半个句子当真。
+    """
+    long_msg = "x" * 20013
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td) / "long.jsonl"
+        d.write_text(json.dumps({"file": "a.lomt", "line": 1, "col": 1,
+                                 "code": "E002", "message": long_msg}) + "\n",
+                     encoding="utf-8", newline="\n")
+        _, full = _render(d)
+        rc_s, short = _run_in(Path(td), d, "--short", color=False)
+        rc_j, js = _run_in(Path(td), d, "--json", color=False)
+    assert "truncated" in full, f"完整模式没说截断: {full[-200:]!r}"
+    assert rc_s == 1 and "[truncated]" in short, f"--short 没说截断: {short[-200:]!r}"
+    assert rc_j == 1, (rc_j, js[:200])
+    obj = json.loads([l for l in js.splitlines() if l.strip()][0])
+    assert obj.get("truncated") is True, f"--json 里没有 truncated 字段: {list(obj)[:8]}"
+    print("      被截断的消息: full / --short / --json 三个出口都说了")
+
 # ---------------------------------------------------------------- 外源语言 (docs/188 §7.1)
 
 @test
@@ -876,6 +901,36 @@ def test_json_mode_carries_the_whole_card_and_parses():
     assert first["file"] == "a.lomt" and first["line"] == 3 and first["col"] == 7
     assert "\x1b" not in out, "--json 不该上色"
     print("      --json: 每行可解析 + 卡片字段齐全 + 转义正确 + 不掺汇总行")
+
+
+@test
+def test_json_mode_keeps_a_corrupt_line_inside_the_stream():
+    """一行坏 JSON 进去，`--json` 出来的**每一行仍然可解析**（`#478`）。
+
+    原先那行是两行纯文本（`[lomenterr] this line …` + 原文），插在 JSONL 中间 ——
+    下游解析器当场坏，而它正在处理的恰恰是"诊断文件里有坏数据"这件事。
+    形状与诊断对象**不同**（`broken: true` + `text`）：那条记录唯一的事实就是
+    "这一行读不懂"，硬造一个 `E999` 会让它看起来像一条真诊断（而 explain 讲不出来，
+    那正是 `#487` 刚清掉的东西）。
+    """
+    with tempfile.TemporaryDirectory(prefix="lomenterr-broken-") as td:
+        d = Path(td) / "d.jsonl"
+        good1 = json.dumps({"file": "a.lomt", "line": 1, "col": 1,
+                            "code": "E001", "message": "a"})
+        good2 = json.dumps({"file": "b.lomt", "line": 2, "col": 1,
+                            "code": "E002", "message": "b"})
+        d.write_text(good1 + "\nnot json at all <<<\n" + good2 + "\n",
+                     encoding="utf-8", newline="\n")
+        rc, out = _run_in(Path(td), d, "--json", color=True)
+    assert rc == 1, (rc, out[:200])
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    assert len(lines) == 3, f"坏行要变成**一个**对象，不能是两行文本: {out!r}"
+    objs = [json.loads(ln) for ln in lines]      # 每一行都必须可解析
+    broken = [o for o in objs if o.get("broken") is True]
+    assert len(broken) == 1 and broken[0]["text"] == "not json at all <<<", broken
+    codes = [o.get("code") for o in objs if "code" in o]
+    assert codes == ["E001", "E002"], codes
+    print("      --json: 坏行变成 {broken:true,text:…}，流仍是合法 JSONL")
 
 
 # ---------------------------------------------------------------- 拼写建议 (§14)

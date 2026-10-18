@@ -1421,20 +1421,30 @@ pub fn l2_ok_at(src: ptr, toks: ptr, at: u32, end: u32, fat: u32, fend: u32,
                     return 0;
                 }
                 // **只查体之后** —— 体之前不可能用到体里声明的那个名字（作用域）
-                // **而且扫到下一次同名 `let` 就停**（#364 的第三条边界）：语言没有块作用域
-                // （docs/228 的根），一个名字被新的 `let` 重新声明之后，后面那些出现就属于
-                // 新的那个变量，不再证明这一块出体了。停在那一处之前是 sound 的 —— 之前
-                // 每一次出现都还指这一块。只认 `let` 这一种形状（这里也只有它），认不出来
-                // 的一律按没重声明处理（照旧取消）⇒ 只可能少放宽、不会多放宽。
+                // **而且扫到同一层下一次同名 `let` 就停**（#364 的第三条边界）：语言没有
+                // 块作用域（docs/228 的根），一个名字被新的 `let` 重新声明之后，后面那些
+                // 出现就属于新的那个变量，不再证明这一块出体了。停在那一处之前是 sound 的
+                // —— 之前每一次出现都还指这一块。
+                // **另一个块里的同名 `let` 不算"换主人"**（#714）：它可能藏在一条没跑的
+                // 分支里（体后面一个不成立的 `if { let NAME = … }`），那之后名字没有换主人，
+                // 后面的出体使用仍指这一块。静态上认不出那条路跑没跑 ⇒ 整格取消（保守）。
+                // 深度用 `{`/`}` 数：`q` 从体自己的 `}` 起步，同层 = 0，嵌进块 = 1，外层 < 0。
+                let ld: i32 = 1;
                 let q: u32 = end;
-                let stopq: u32 = 0;
-                while q < fend && stopq == 0 {
+                while q < fend {
                     if tok_kind(toks, q) == 0 && tok_eq(src, toks, q, nm) {
                         if q > 0 && tok_is(src, toks, q - 1, "let") {
-                            stopq = 1;                // 换了主人：再往后不属于这一块
+                            if ld != 0 {
+                                return 0;             // 另一个块里的重声明: 那条路可能没跑
+                            }
+                            q = fend;                 // 同一层的重声明: 换了主人
                         } else {
                             return 0;                 // 出体了
                         }
+                    } else if tok_is(src, toks, q, "{") {
+                        ld = ld + 1;
+                    } else if tok_is(src, toks, q, "}") {
+                        ld = ld - 1;
                     }
                     q = q + 1;
                 }
@@ -2326,6 +2336,15 @@ fn bit_width(tt: u32, src: ptr, toks: ptr) -> u32 {
     return 64;
 }
 
+/// `as` 的目标是不是**整数**类型（u8..i64）—— 镜像 `lomentc` 的 `e.type in INT_TYPES`
+/// (#694)。`bool`/`ptr` 不算：它们的转型各有单独的分支。
+fn is_int_ty(src: ptr, toks: ptr, tt: u32) -> bool {
+    return tok_is(src, toks, tt, "u8") || tok_is(src, toks, tt, "u16")
+        || tok_is(src, toks, tt, "u32") || tok_is(src, toks, tt, "u64")
+        || tok_is(src, toks, tt, "i8") || tok_is(src, toks, tt, "i16")
+        || tok_is(src, toks, tt, "i32") || tok_is(src, toks, tt, "i64");
+}
+
 /// `as T` 后缀: 按位宽与符号性选 trunc/sext/zext (与 lomentc 同规则)。
 fn apply_cast(s: ptr, out: ptr, src: ptr, toks: ptr, from_t: u32, to_t: u32, lvl: u32) -> u32 {
     // from_t == 0 时按 u32 处理 (镜像 lomentc 的 `st or "u32"`: 打印与位宽都用 i32)
@@ -2797,15 +2816,20 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
         return j + 1;
     }
     if tok_kind(toks, j) == 1 {
-        // `字面量 as T`: 操作数按**无期望类型**求值 (参考实现 Cast 分支对内部一律传
-        // `want=None`, 于是落 i32 定宽) —— 不这么做, `18446744073709551615 as u64`
-        // 会拿外层的 u64 当期望而不环绕, 与参考发出的 `zext i32 -1 to i64` 分叉。
+        // **`字面量 as 整数类型`：直接按目标宽度发这个字面量** (#694)。先按 i32 定宽再
+        // zext 会把 `253402300800 as i64` 截成 4294197632 (参考实现同一处一起改)。
+        // 非整数目标 (ptr / bool) 照旧走下面那条"无期望类型求值 + apply_cast"的路 ——
+        // 参考 Cast 分支对非整数目标仍传 `want=None`, 两边保持逐字节同形。
+        let e0: u32 = j + 1;
+        if tok_is(src, toks, e0, "as") && is_int_ty(src, toks, e0 + 1) {
+            set_int_lit(s, lvl, src, toks, j, e0 + 1);
+            return e0 + 2;
+        }
         let wl: u32 = want;
-        if tok_is(src, toks, j + 1, "as") {
+        if tok_is(src, toks, e0, "as") {
             wl = 0;
         }
         set_int_lit(s, lvl, src, toks, j, wl);   // 十进制/十六进制都按十进制内联 (支持 > u32)
-        let e0: u32 = j + 1;
         if tok_is(src, toks, e0, "as") {
             apply_cast(s, out, src, toks, 0, e0 + 1, lvl);
             return e0 + 2;

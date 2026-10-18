@@ -558,7 +558,13 @@ fn operand_bin_type_from(s: ptr, src: ptr, toks: ptr, j0: u32, rp: u32) -> u32 {
                     if best == 0 || op_prec(c) < op_prec(best) {
                         best = c;
                     }
-                    let t2: u32 = sub_expr_type(s, src, toks, k + op_toks(c));
+                    // **只看右操作数的 atom 类型**，不再整段递归：`1 + 1 + …`（250 项）
+                    // 上那条递归会展开成指数级（每个算子都把剩下的链再型一遍），
+                    // 自举编一份 250 项的字面量加法会跑过任何超时（`#226` 的
+                    // `flat-250-terms` 实测 >120 秒）。公共类型是格上的并
+                    // （交换/结合/等幂，见 `bin_common` 的注释），从左往右折与
+                    // `common(lt, rt)` 的递归展开结果相同。
+                    let t2: u32 = expr_type_atom(s, src, toks, k + op_toks(c));
                     if acc == 0 {
                         acc = t2;
                     } else if op_shift(c) == 0 && t2 != 0 {

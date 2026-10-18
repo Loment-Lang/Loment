@@ -284,7 +284,11 @@ def _wsl() -> bool:
 
 
 def _wsl_path(p: Path) -> str:
+    # Linux（CI 的 runner）上 `_WSLCMD` 是空的，路径就是它本身 —— 不要再套 `/mnt/<盘>`，
+    # 那会把 `/tmp/x` 变成 `/mnt//tmp/x`（`#382` 之后判据在 Linux 上原生跑）。
     s = str(p.resolve()).replace("\\", "/")
+    if sys.platform.startswith("linux"):
+        return s
     return "/mnt/" + s[0].lower() + s[2:]
 
 
@@ -415,20 +419,22 @@ def test_issue_repros_run_like_clang():
     `test_comparison_operands_are_pinned_to_a_signed_width` 钉住。
     `#121`（`use` 被静默丢）在 `loment_multisyntax_test` 里（转写期就报出来）。
     """
-    if not _clang() or not _wsl():
-        print("      SKIP: 需要 clang + WSL")
-        return
+    # 期望值 `want` 是 clang 那边**记录下来的**（开发时逐条跑出来的）。这条判据要在
+    # CI 上跑（新增跳过是禁区，`#418`）：那里没有 clang，所以只跑译文那一侧，与记录值比。
+    # 有 clang 时再多一比 —— C 侧现在仍然是这个数。
+    have_clang = _clang() is not None and _wsl()
     with tempfile.TemporaryDirectory() as t:
         for label, src, want in _ISSUE_REPROS:
             td = Path(t) / label.replace("-", "_")
             td.mkdir()
             doc, rep = potato_from.from_c(src, label + ".c", "strict")
             assert not rep.skipped, (label, rep.skipped[:3])
-            c_rc = _run(_build_c(td, src))
             l_rc = _run(_build_loment(td, doc))
-            assert c_rc == want, f"{label}: clang 那边就不对: {c_rc} != {want}"
-            assert l_rc == c_rc, f"{label}: 译文与 clang 不同: {l_rc} != {c_rc}"
-            print(f"      {label}: clang -> {c_rc}，翻译成 Loment -> {l_rc}（相等）")
+            assert l_rc == want, f"{label}: 译文算出来 {l_rc}，clang 记录的是 {want}"
+            if have_clang:
+                c_rc = _run(_build_c(td, src))
+                assert c_rc == want, f"{label}: clang 那边现在也不对: {c_rc} != {want}"
+            print(f"      {label}: 翻译成 Loment -> {l_rc}（期望 {want}）")
 
 
 @test

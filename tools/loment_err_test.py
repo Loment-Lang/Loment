@@ -1475,6 +1475,30 @@ def test_launcher_renders_with_it_and_says_so_without_it():
 
 
 @test
+def test_launcher_writes_the_diag_out_file_the_user_named():
+    """`check FILE --diag-out P` 要在 **P** 写出 JSONL（`#13`）。
+
+    `lomenterr` 的用法行让用户敲的正是这条命令，而编辑器吃的 `byte_start`/`byte_end`
+    就在那些行里。原先 bash 报 `unknown option` 退 2、cmd 把它静默吞掉 —— 那条路整个
+    不可达。判据看的是**文件真的出现在用户点名的地方**，不是"开关被解析了"。
+    """
+    bash = shutil.which("bash")
+    if not bash:
+        print("        (跳过: 没有 bash, 跑不了 POSIX 启动器)")
+        return
+    pf = _launcher_pkg(True)
+    out = pf / "user-diag.jsonl"
+    r = _launcher_run(bash, pf, ["--diag-out", _shp(out)])
+    assert out.exists(), f"--diag-out 没写出文件: rc={r.returncode} {r.stderr[-200:]!r}"
+    text = out.read_text(encoding="utf-8")
+    assert '"code":"E019"' in text, f"写出来的不是诊断 JSONL: {text[:200]!r}"
+    # 用户那边看到的行为不变：诊断照旧渲染到 stderr
+    assert "RENDERED-BY-LOMENTERR" in (r.stdout + r.stderr), (
+        f"给了 --diag-out 就不再渲染了？{r.stdout}{r.stderr}"[:300])
+    print("      启动器: --diag-out PATH 写到用户点名的那一份，渲染照旧")
+
+
+@test
 def test_launcher_takes_exactly_one_input_file():
     """`check`/`ir` 只吃**一个**文件: 多给的那个要**报错退 2**, 不能静默只查第一个。
 

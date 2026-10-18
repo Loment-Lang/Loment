@@ -824,8 +824,9 @@ def test_both_launchers_forward_the_renderer_output_modes():
     assert cmd.count('if /I "%~1"=="--short" goto barg_om') == 1, "cmd: build/run 不认 --short"
     assert cmd.count('if /I "%~1"=="--json" goto barg_om') == 1, "cmd: build/run 不认 --json"
     assert ':barg_om' in cmd and ':scan_om' in cmd, "cmd: 两个分支缺一个落点"
-    # 累加式的写法出现在两处：check 那路的 `:scan_om`，与 build/run 那路的 `--max=N` 落点
-    assert cmd.count('set "com=%com% %~1"') == 2, "cmd: 没把这个开关累加进 com"
+    # 累加式的写法出现在三处：check 那路的 `:scan_om`、`--max` 的值（`:scan_max_val`，
+    # 见 `test_both_launchers_honour_diag_out`），与 build/run 那路的 `--max=N` 落点
+    assert cmd.count('set "com=%com% %~1"') == 3, "cmd: 没把这个开关累加进 com"
     assert cmd.count('set "com=%~1"') == 1, "cmd: build/run 那路没记下这个开关"
     # 五处：check/ir 一处、build 的驱动与链接器各一处、run 的驱动与链接器各一处。
     # 链接器那两处是 `issue #8` 加上的 —— lomelf 现在也有自己的 `--diag-out`，
@@ -839,6 +840,38 @@ def test_both_launchers_forward_the_renderer_output_modes():
     assert cmd.count('if not defined cskip goto scan_arg_go') == 1, \
         "cmd: 跳过一个词的机制不在（--max 的值会被当成源文件）"
     assert cmd.count('set "com=%com% --max %~2"') == 1, "cmd: build/run 没带上 --max 的值"
+
+
+@test
+def test_both_launchers_honour_diag_out():
+    """`--diag-out PATH` 要把**驱动**写诊断的位置改到那里（`#13`）。
+
+    它不是一个渲染器开关：`lomenterr` 的用法行让用户敲的正是这条命令，而编辑器吃的
+    `byte_start`/`byte_end` 就在那些 JSON 行里。原先 bash 报 `unknown option` 退 2，
+    cmd 的 check 路把它静默吞掉 —— 两条路都到不了"文件真的出现"。
+
+    顺带钉住 cmd 侧那个**值**：`:scan_max` 只记了 `--max` 本身、把值跳过就丢了，
+    于是 `lomenterr --max d.jsonl` 把诊断文件当成了上限、打自己的用法。
+    """
+    import loment_dist
+    sh, cmd = loment_dist.LAUNCHER_SH, loment_dist.LAUNCHER_CMD
+
+    assert sh.count("--diag-out) dout=${2:-}; shift 2 ;;") == 1, \
+        "bash: --diag-out PATH 没被认"
+    assert sh.count("--diag-out=*) dout=${1#--diag-out=}; shift ;;") == 1, \
+        "bash: --diag-out=PATH 没被认"
+    assert '--diag-out "$(to_posix "$dpath")"' in sh, \
+        "bash: 驱动拿到的不是 dpath —— 文件写不到用户要的地方"
+    assert sh.count('report_diags "$dpath"') == 1, "bash: 渲染器读的还不是那一份"
+
+    assert cmd.count('if /I "%~1"=="--diag-out" goto scan_dout') == 1, \
+        "cmd: check 路不认 --diag-out"
+    assert 'set "cdout=%ss:~11%"' in cmd, "cmd: --diag-out=PATH 那个拼法没被认"
+    assert ':scan_max_val' in cmd and ':scan_out_val' in cmd, \
+        "cmd: 两个带值的开关都没把值收下"
+    assert cmd.count('set "dpath=%cdout%"') == 1, "cmd: 驱动写的位置没换成用户的"
+    assert cmd.count('--diag-out "%dpath%"') == 2, \
+        "cmd: ir / check 两条路都要写到 dpath"
 
 
 @test

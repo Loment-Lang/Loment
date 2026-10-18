@@ -2795,12 +2795,12 @@ setprev:
 @.str.pt_lspe.38 = private unnamed_addr constant [8 x i8] c"\70\65\72\5F\6B\69\6E\64"
 @.str.pt_lspe.39 = private unnamed_addr constant [2 x i8] c"\7B\7D"
 @.str.pt_lspe.40 = private unnamed_addr constant [2 x i8] c"\7B\0A"
-@.str.pt_lspe.41 = private unnamed_addr constant [5 x i8] c"\67\75\61\72\64"
+@.str.pt_lspe.41 = private unnamed_addr constant [10 x i8] c"\47\75\61\72\64\48\6F\6C\64\73"
 @.str.pt_lspe.42 = private unnamed_addr constant [1 x i8] c"\22"
 @.str.pt_lspe.43 = private unnamed_addr constant [1 x i8] c"\2F"
 @.str.pt_lspe.44 = private unnamed_addr constant [1 x i8] c"\22"
 @.str.pt_lspe.45 = private unnamed_addr constant [2 x i8] c"\2C\0A"
-@.str.pt_lspe.46 = private unnamed_addr constant [5 x i8] c"\69\6E\64\65\78"
+@.str.pt_lspe.46 = private unnamed_addr constant [8 x i8] c"\49\6E\42\6F\75\6E\64\73"
 @.str.pt_lspe.47 = private unnamed_addr constant [1 x i8] c"\22"
 @.str.pt_lspe.48 = private unnamed_addr constant [1 x i8] c"\2F"
 @.str.pt_lspe.49 = private unnamed_addr constant [1 x i8] c"\22"
@@ -84790,9 +84790,9 @@ L14_else:
 L16_then:
   %t346 = load ptr, ptr %out.addr
   %t347 = load i32, ptr %o.addr
-  %t348 = getelementptr inbounds [5 x i8], ptr @.str.pt_lspe.41, i64 0, i64 0
+  %t348 = getelementptr inbounds [10 x i8], ptr @.str.pt_lspe.41, i64 0, i64 0
   %t349 = insertvalue { ptr, i64 } undef, ptr %t348, 0
-  %t350 = insertvalue { ptr, i64 } %t349, i64 5, 1
+  %t350 = insertvalue { ptr, i64 } %t349, i64 10, 1
   %t351 = call i32 @pt_key(ptr %t346, i32 %t347, i32 3, { ptr, i64 } %t350)
   store i32 %t351, ptr %o.addr
   %t352 = load ptr, ptr %out.addr
@@ -84853,9 +84853,9 @@ L18_end:
 L22_then:
   %t390 = load ptr, ptr %out.addr
   %t391 = load i32, ptr %o.addr
-  %t392 = getelementptr inbounds [5 x i8], ptr @.str.pt_lspe.46, i64 0, i64 0
+  %t392 = getelementptr inbounds [8 x i8], ptr @.str.pt_lspe.46, i64 0, i64 0
   %t393 = insertvalue { ptr, i64 } undef, ptr %t392, 0
-  %t394 = insertvalue { ptr, i64 } %t393, i64 5, 1
+  %t394 = insertvalue { ptr, i64 } %t393, i64 8, 1
   %t395 = call i32 @pt_key(ptr %t390, i32 %t391, i32 3, { ptr, i64 } %t394)
   store i32 %t395, ptr %o.addr
   %t396 = load ptr, ptr %out.addr

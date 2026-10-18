@@ -2703,13 +2703,13 @@ def test_the_mirror_linker_refuses_ports_without_the_dev_flag():
 #:     —— 否则 L0 会把 `alloc(<字面量>)` 提到栈上、L2 会把循环体里那份回卷，测到的就
 #:     不是清扫了；
 #:   * 逼出**两次**收集：`#366` 丢块发生在**第二次**（第一次时链表是空的，丢了也看不出来）。
-#: 触发用的请求是 `BIG`（208 字节），**装不进**刻出来的 72 字节块 —— 于是那段空闲区
+#: 触发用的请求是 `BIG`（208 字节），**装不进**刻出来的 80 字节块 —— 于是那段空闲区
 #: 在两次收集之间不会被顺手动到，"它还在不在"这个问题才是干净的。
 _FREE_LIST_SRC = (
     "module freelist\n%s\nchoose runtime\n\n"
     "const N: u64 = 200;\n"
     "const SZ: u32 = 64;\n"
-    "const STRIDE: u64 = 72;\n"
+    "const STRIDE: u64 = 80;\n"
     "const BIG: u32 = 200;\n\n"
     "fn carve_k(k: u64) -> u64 {\n"
     "    let first: u64 = 0;\n"

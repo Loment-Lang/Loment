@@ -373,6 +373,17 @@ pub fn ip_v6_parse(d: ptr, o: u32, n: u32, out: ptr) -> u32 {
         rightn = n - (dc + 2);
         ro = dc + 2;
     }
+    // RFC 4291 §2.2: 内嵌的点分四段**只能落在最后 32 位**。有 `::` 时左半边出现 `.`
+    // 就意味着四段在压缩之前 (`1.2.3.4::`) —— CPython 的 `ipaddress` 拒, 这里也拒 (#677)。
+    if dc != IPP_NO {
+        let dot: u32 = 0;
+        while dot < leftn {
+            if load8(d, o + dot) == 46 {
+                return 0;
+            }
+            dot = dot + 1;
+        }
+    }
     let lg: u32 = ipp_count(d, o, leftn);
     let rg: u32 = ipp_count(d, ro, rightn);
     if dc == IPP_NO {

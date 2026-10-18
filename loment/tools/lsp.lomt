@@ -4,8 +4,8 @@
 // 现在可以 spawn 本程序 (Windows 上经 WSL 跑, 见 docs/157 §3.5)。
 //
 // 协议: LSP over stdio (JSON-RPC 2.0, `Content-Length: N\r\n\r\n` 分帧), 实现
-//   initialize / initialized / didOpen / didChange / completion / definition /
-//   shutdown / exit。诊断用**自举 checker**(与参考实现规则等价 63/63), 消息文本用
+//   initialize / initialized / didOpen / didChange / didSave / didClose /
+//   completion / definition / shutdown / exit。诊断用**自举 checker**(与参考实现规则等价 63/63), 消息文本用
 //   `loment_diag.RULES` 的**标题** (码按修法分, 码即 E0NN, 与 checker 的数字码同号)。
 //
 // 边界 (诚实说明): 本版**不提供 formatting** (不声明 documentFormattingProvider, 编辑器
@@ -23,8 +23,8 @@ use switches
 // ---------------------------------------------------------------- 尺寸与布局
 
 const IN_CAP: u32 = 4194304;        // 单条入站消息
-const DOC_CAP: u32 = 262144;        // 一个文档的文本
-const N_DOC: u32 = 4;
+const DOC_CAP: u32 = 262144;        // 一个文档的文本（含 16B 尾部：长度 + NUL）
+const N_DOC: u32 = 64;              // 编辑器同时打开的标签页数（`#706`）
 const URI_CAP: u32 = 512;
 const BODY_OFF: u32 = 8192;         // 出站 body 在出站缓冲内的起点 (前 8KB 给数字缓冲)
 const ARENA_CAP: u32 = 65536;       // JSON DOM
@@ -36,19 +36,19 @@ const S_OLEN: u32 = 0;
 const S_NDOC: u32 = 4;
 const S_NERR: u32 = 8;
 const S_NSYM: u32 = 12;
-const DOCS_URI: u32 = 4096;         // N_DOC * URI_CAP
-const DOCS_TXT: u32 = 8192;         // N_DOC * DOC_CAP
-const SYM_OFF: u32 = 1056768;       // = DOCS_TXT + N_DOC * DOC_CAP（文档正文区之后）
+const DOCS_URI: u32 = 4096;         // N_DOC * URI_CAP (64 * 512 = 32768)
+const DOCS_TXT: u32 = 40960;        // N_DOC * DOC_CAP (64 * 262144 = 16777216)
+const SYM_OFF: u32 = 16818176;      // = DOCS_TXT + N_DOC * DOC_CAP（文档正文区之后）
 // 一条符号记录: 名字 ≤60B + NUL @0..61 | kind @64 | line @68 | **col @72**（`#27`）。
 const SYM_STRIDE: u32 = 80;
 const SYM_MAX: u32 = 256;
-const OUT_OFF: u32 = 1240000;       // 出站缓冲 (BODY_OFF 起才是 body)
-const SCR_OFF: u32 = 1536000;       // 行/临时缓冲
+const OUT_OFF: u32 = 17001408;      // 出站缓冲 (BODY_OFF 起才是 body)
+const SCR_OFF: u32 = 17297408;      // 行/临时缓冲
 // 开关表 (`docs/182` §1): `switches.apply_switches` 要 `SW_BYTES` 字节的暂存。
 // **放在 mem 块末尾并显式撑大 `MEM_CAP`** —— 塞进 `SCR_OFF` 那段会和行缓冲/路径缓冲
 // 抢地方, 越界是**静默改坏**而不是报错 (本仓在这一类上栽过)。
-const SW_OFF: u32 = 1650000;        // = 旧 MEM_CAP, 表从这儿起
-const MEM_CAP: u32 = 1658008;       // SW_OFF + switches.SW_BYTES (8008)
+const SW_OFF: u32 = 17417408;       // = SCR_OFF + 120000, 表从这儿起
+const MEM_CAP: u32 = 17425416;      // SW_OFF + switches.SW_BYTES (8008)
 
 // ---------------------------------------------------------------- 系统调用
 
@@ -284,15 +284,16 @@ fn doc_find(mem: ptr, uri: ptr, un: u32) -> u32 {
     return hit;
 }
 
+/// 存一份文档；**表满时返回 4294967295**（`#706`：原先悄悄复用最后一格，把第 4 份文档
+/// 换成第 5 份 —— 客户端完全看不出来）。调用方必须把"满了"报给客户端，而不是继续。
 fn doc_put(mem: ptr, uri: ptr, un: u32, text: ptr, tn: u32) -> u32 {
     let idx: u32 = doc_find(mem, uri, un);
     if idx == 4294967295 {
         idx = load32(mem, S_NDOC);
         if idx >= N_DOC {
-            idx = N_DOC - 1;
-        } else {
-            store32(mem, S_NDOC, idx + 1);
+            return 4294967295;
         }
+        store32(mem, S_NDOC, idx + 1);
     }
     let ucap: u32 = URI_CAP - 16;
     let un2: u32 = un;
@@ -320,6 +321,48 @@ fn doc_put(mem: ptr, uri: ptr, un: u32, text: ptr, tn: u32) -> u32 {
     store8(tp, tn2, 0 as u8);
     store32(mem, DOCS_URI + idx * URI_CAP + URI_CAP - 8, tn2);
     return idx;
+}
+
+/// 把 `src` 那一格整份搬到 `dst`（`didClose` 用：拿最后一格填洞，表保持连续）。
+fn doc_move(mem: ptr, dst: u32, src: u32) {
+    let un: u32 = doc_urilen(mem, src);
+    let up: ptr = doc_uri(mem, dst);
+    let sp: ptr = doc_uri(mem, src);
+    let i: u32 = 0;
+    while i < un {
+        store8(up, i, load8(sp, i) as u8);
+        i = i + 1;
+    }
+    store32(mem, DOCS_URI + dst * URI_CAP + URI_CAP - 4, un);
+    let tn: u32 = doc_txtlen(mem, src);
+    let tp: ptr = doc_text(mem, dst);
+    let qp: ptr = doc_text(mem, src);
+    let q: u32 = 0;
+    while q < tn {
+        store8(tp, q, load8(qp, q) as u8);
+        q = q + 1;
+    }
+    store8(tp, tn, 0 as u8);
+    store32(mem, DOCS_URI + dst * URI_CAP + URI_CAP - 8, tn);
+}
+
+/// `textDocument/didClose`：**释放那一格**（`#706`）。先前根本没处理这个通知 ——
+/// 关掉的文档永远占着位置，开着新文档时还会被当成"第 N 份"。
+fn doc_remove(mem: ptr, uri: ptr, un: u32) -> u32 {
+    let idx: u32 = doc_find(mem, uri, un);
+    if idx == 4294967295 {
+        return 0;
+    }
+    let n: u32 = load32(mem, S_NDOC);
+    if n == 0 {
+        return 0;
+    }
+    let last: u32 = n - 1;
+    if idx != last {
+        doc_move(mem, idx, last);
+    }
+    store32(mem, S_NDOC, last);
+    return 1;
 }
 
 // ---------------------------------------------------------------- 诊断
@@ -374,13 +417,19 @@ fn emit_e0(b: ptr, o: u32, code: u32) -> u32 {
 }
 
 /// publishDiagnostics 通知。
-fn publish(mem: ptr, toks: ptr, uri: ptr, un: u32, errs: ptr, ne: u32) -> u32 {
+///
+/// `note`（`#710` / `#706`）：0 = 没有；1 = 文档被截断（只分析了前半部分）；
+/// 2 = 文档表已满、这份文档没有被分析。**追加在 checker 诊断之后**，用 severity 3
+/// （Info）：它不是源码的错，却必须让客户端看见 —— "没查全"不能装成"干净"。
+fn publish(mem: ptr, toks: ptr, uri: ptr, un: u32, errs: ptr, ne: u32,
+           note: u32) -> u32 {
     let b: ptr = out_body(mem);
     let o: u32 = BODY_OFF;
     o = json_emit_lit(b, o, "{\"jsonrpc\": \"2.0\", \"method\": \"textDocument/publishDiagnostics\", \"params\": {\"uri\": ");
     o = json_emit_str(b, o, uri, un);
     o = json_emit_lit(b, o, ", \"diagnostics\": [");
     let i: u32 = 0;
+    let emitted: u32 = 0;
     while i < ne && i < 64 {
         let code: u32 = load32(errs, i * 8);
         let tk: u32 = load32(errs, i * 8 + 4);
@@ -399,7 +448,7 @@ fn publish(mem: ptr, toks: ptr, uri: ptr, un: u32, errs: ptr, ne: u32) -> u32 {
         if tlen > 0 {
             ep = sp + tlen;
         }                                     // len 为 0（EOF 那种）时给一格，免得零宽
-        if i > 0 {
+        if emitted > 0 {
             o = json_emit_lit(b, o, ", ");
         }
         o = json_emit_lit(b, o, "{\"range\": {\"start\": {\"line\": ");
@@ -432,6 +481,19 @@ fn publish(mem: ptr, toks: ptr, uri: ptr, un: u32, errs: ptr, ne: u32) -> u32 {
         o = json_emit_str(b, o, mb, mo);
         o = json_emit_lit(b, o, "}");
         i = i + 1;
+        emitted = emitted + 1;
+    }
+    if note != 0 {
+        if emitted > 0 {
+            o = json_emit_lit(b, o, ", ");
+        }
+        o = json_emit_lit(b, o, "{\"range\": {\"start\": {\"line\": 0, \"character\": 0}, \"end\": {\"line\": 0, \"character\": 1}}, \"severity\": 3, \"source\": \"loment\", \"message\": ");
+        if note == 1 {
+            o = json_emit_lit(b, o, "\"文档超过本服务的分析上限，只检查了前一部分 —— 后面的错误可能没有报出来。\"");
+        } else {
+            o = json_emit_lit(b, o, "\"打开的文档数已达本服务上限：这份文档没有被分析；请关闭一些已打开的文档后重新打开。\"");
+        }
+        o = json_emit_lit(b, o, "}");
     }
     o = json_emit_lit(b, o, "]}}");
     out_done(mem, o);
@@ -957,7 +1019,9 @@ fn _start() -> u32 {
     let arenav: u64 = sys_alloc(ARENA_CAP as u64);
     let chkv: u64 = sys_alloc(chk_arena_bytes() as u64 + 4096);
     let errv: u64 = sys_alloc(4096);
-    let srcv: u64 = sys_alloc(DOC_CAP as u64);       // --check 的源缓冲
+    // `--check` 的源缓冲；LSP 模式下同一块当**入站文档的暂存区**（`#710`：
+    // 必须能装下整个 `DOC_CAP`，不能挤在 `SCR_OFF` 的小缓冲里）。两个模式不会同时跑。
+    let srcv: u64 = sys_alloc(DOC_CAP as u64);
     if memv == 0 || inv == 0 || tokv == 0 || arenav == 0 || chkv == 0 || errv == 0
             || srcv == 0 {
         return die(1);
@@ -994,7 +1058,7 @@ fn _start() -> u32 {
                 let m: u32 = json_get(inb, arena, root, "method");
                 if m != 4294967295 {
                     let id: u32 = json_get(inb, arena, root, "id");
-                    handle(mem, inb, arena, root, m, id, toks, chk, errs);
+                    handle(mem, inb, arena, root, m, id, toks, chk, errs, srcb);
                     if method_eq(inb, arena, m, "exit") {
                         go = 0;
                     }
@@ -1006,13 +1070,18 @@ fn _start() -> u32 {
 }
 
 fn handle(mem: ptr, src: ptr, arena: ptr, root: u32, m: u32, id: u32,
-          toks: ptr, chk: ptr, errs: ptr) -> u32 {
+          toks: ptr, chk: ptr, errs: ptr, txb: ptr) -> u32 {
     let b: ptr = out_body(mem);
     if method_eq(src, arena, m, "initialize") {
         let o: u32 = resp_prefix(mem, src, arena, id);
         // `completionProvider: {}` = 支持补全、但**没有触发字符**（`#28`：原先登着 `.` 与 `:`，
         // 而补全不看位置 —— 每敲一个点就弹一屏关键字。两处实现一起改：`tools/loment_lsp.py`）
-        let o2: u32 = json_emit_lit(b, o, "{\"capabilities\": {\"textDocumentSync\": 1, \"definitionProvider\": true, \"completionProvider\": {}}, \"serverInfo\": {\"name\": \"loment-lsp\", \"version\": \"0.3\"}}");
+        //
+        // `positionEncoding: "utf-8"`（`#707`）：本服务里的列全是**UTF-8 字节偏移**
+        // （词法器的 `col` 逐字节走，`word_at` / `lsc_member_recv` 也按字节加），
+        // 而 LSP 3.17 的默认是 UTF-16。不声明 = 客户端按 UTF-16 发位置 = 含非 ASCII 的行
+        // 上补全/跳转整体错位。如实声明，比悄悄换成 UTF-16 少一层换算、也不会漂。
+        let o2: u32 = json_emit_lit(b, o, "{\"capabilities\": {\"positionEncoding\": \"utf-8\", \"textDocumentSync\": 1, \"definitionProvider\": true, \"completionProvider\": {}}, \"serverInfo\": {\"name\": \"loment-lsp\", \"version\": \"0.3\"}}");
         // 注意: 上面这段以 `"0.3"}}` 收尾 = 关掉 serverInfo 与 result; **外层对象还要一个 `}`**
         let o2b: u32 = json_emit_lit(b, o2, "}");
         out_done(mem, o2b);
@@ -1030,9 +1099,21 @@ fn handle(mem: ptr, src: ptr, arena: ptr, root: u32, m: u32, id: u32,
         return 0;
     }
     if method_eq(src, arena, m, "textDocument/didOpen")
-            || method_eq(src, arena, m, "textDocument/didChange")
-            || method_eq(src, arena, m, "textDocument/didSave") {
-        return on_change(mem, src, arena, root, toks, chk, errs);
+            || method_eq(src, arena, m, "textDocument/didChange") {
+        return on_change(mem, src, arena, root, toks, chk, errs, txb);
+    }
+    if method_eq(src, arena, m, "textDocument/didSave") {
+        // `#705`：**保存不是编辑**。真实客户端的 didSave 不带 `text` / `contentChanges`
+        // （本服务声明 `textDocumentSync: 1`、也没声明 `save.includeText`），原先让它走
+        // `on_change` 的后果是 `tn = 0` -> 文档被存成空串，保存一次就把内存里的源擦掉，
+        // 直到下一次编辑为止补全/跳转/诊断全都在描述一个空文件。
+        // 保存只是"磁盘上那份变了"的通知：不改文档，也不重新分析。
+        return 0;
+    }
+    if method_eq(src, arena, m, "textDocument/didClose") {
+        let un: u32 = take_uri(mem, src, arena, root);
+        let ubuf: ptr = ptr_add(mem, SCR_OFF + 2048);
+        return doc_remove(mem, ubuf, un);
     }
     if method_eq(src, arena, m, "textDocument/completion") {
         return on_completion(mem, src, arena, root, id, toks);
@@ -1067,7 +1148,7 @@ fn take_uri(mem: ptr, src: ptr, arena: ptr, root: u32) -> u32 {
 }
 
 fn on_change(mem: ptr, src: ptr, arena: ptr, root: u32, toks: ptr, chk: ptr,
-             errs: ptr) -> u32 {
+             errs: ptr, txb: ptr) -> u32 {
     let params: u32 = json_get(src, arena, root, "params");
     if params == 4294967295 {
         return 0;
@@ -1078,12 +1159,18 @@ fn on_change(mem: ptr, src: ptr, arena: ptr, root: u32, toks: ptr, chk: ptr,
     }
     let un: u32 = take_uri(mem, src, arena, root);
     let ubuf: ptr = ptr_add(mem, SCR_OFF + 2048);
-    let tbuf: ptr = ptr_add(mem, SCR_OFF + 3072);
-    let cap: u32 = 200000;
-    let tn: u32 = 0;
+    // `#710`：**暂存区按文档上限开**（`txb` 是 `_start` 里单独分配的另一块 `DOC_CAP`）。
+    // 原先这里既把 cap 写成 200000（小于 DOC_CAP = 262144，等于悄悄丢掉尾部），
+    // 又把暂存放进 `SCR_OFF` 里一段只有 120000 字节的小缓冲 —— cap 按 DOC_CAP 一改就会
+    // 越界改坏别的区。两处一起改：容量对齐，缓冲独立。
+    //
+    // 截断**必须报出来**：`tn_full == DOC_CAP` 说明 JSON 字符串在满容量处停下（还有更多
+    // 没读）；`tn_full + 16 > DOC_CAP` 则连存储都放不下。两种都只分析了前 262128 字节，
+    // 不能把结果当"干净"发出去。
+    let tn_full: u32 = 0;
     let tx1: u32 = json_get(src, arena, td, "text");
     if tx1 != 4294967295 {
-        tn = json_str_into(src, arena, tx1, tbuf, cap);
+        tn_full = json_str_into(src, arena, tx1, txb, DOC_CAP);
     } else {
         let arr: u32 = json_get(src, arena, params, "contentChanges");
         if arr != 4294967295 {
@@ -1097,12 +1184,20 @@ fn on_change(mem: ptr, src: ptr, arena: ptr, root: u32, toks: ptr, chk: ptr,
             if last != 0 {
                 let tx2: u32 = json_get(src, arena, last, "text");
                 if tx2 != 4294967295 {
-                    tn = json_str_into(src, arena, tx2, tbuf, cap);
+                    tn_full = json_str_into(src, arena, tx2, txb, DOC_CAP);
                 }
             }
         }
     }
-    let idx: u32 = doc_put(mem, ubuf, un, tbuf, tn);
+    let truncated: u32 = 0;
+    if tn_full + 16 > DOC_CAP {
+        truncated = 1;
+    }
+    let idx: u32 = doc_put(mem, ubuf, un, txb, tn_full);
+    if idx == 4294967295 {
+        // `#706`：表满了 —— **不驱逐**任何一份已打开的文档，并把"这份没被分析"告诉客户端。
+        return publish(mem, toks, ubuf, un, errs, 0, 2);
+    }
     let text: ptr = doc_text(mem, idx);
     let tn2: u32 = doc_txtlen(mem, idx);
     let nt: u32 = lex(text, tn2, toks);
@@ -1120,7 +1215,7 @@ fn on_change(mem: ptr, src: ptr, arena: ptr, root: u32, toks: ptr, chk: ptr,
     let ne: u32 = run_check(text, toks, errs, chk);
     store32(mem, S_NERR, ne);
     scan_syms(mem, text, toks, nt);
-    return publish(mem, toks, ubuf, un, errs, ne);
+    return publish(mem, toks, ubuf, un, errs, ne, truncated);
 }
 
 fn on_completion(mem: ptr, src: ptr, arena: ptr, root: u32, id: u32, toks: ptr) -> u32 {

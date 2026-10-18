@@ -9,9 +9,11 @@
 //     把"存下来"和"还原"做成一进一出的一对。
 //
 // 结构体 (x86-64 Linux 内核的那份, 不是 glibc 的):
-//   termios 60 字节: iflag u32(0) | oflag u32(4) | cflag u32(8) | lflag u32(12) |
+//   termios 36 字节: iflag u32(0) | oflag u32(4) | cflag u32(8) | lflag u32(12) |
 //                    line u8(16) | cc[19](17..35) —— `VMIN` 在 cc 第 6 位 (偏移 23),
-//                    `VTIME` 在第 5 位 (偏移 22)。
+//                    `VTIME` 在第 5 位 (偏移 22)。**36 是内核的大小**: glibc 那份 60 字节,
+//                    多出来的是它自己的包装字段, `TCGETS` 一个字节都不写 (issue #701 —
+//                    填 0xAA 之后只有 0..35 变了)。
 //   winsize 8 字节: row u16(0) | col u16(2) | xpixel u16(4) | ypixel u16(6)。
 //
 // 边界: 号是 x86-64 Linux 的; PE 上没有 ioctl, 这几个函数在那边一律失败。
@@ -32,8 +34,8 @@ pub const TTY_ISIG: u32 = 1;
 pub const TTY_ICANON: u32 = 2;
 pub const TTY_ECHO: u32 = 8;
 
-/// `termios` / `winsize` 的字节数。
-pub const TTY_TERMIOS_BYTES: u32 = 60;
+/// `termios` / `winsize` 的字节数 (termios 是**内核的** 36 字节, 不是 glibc 的 60)。
+pub const TTY_TERMIOS_BYTES: u32 = 36;
 pub const TTY_WINSIZE_BYTES: u32 = 8;
 
 const TTY_CC_VMIN: u32 = 23;
@@ -65,7 +67,7 @@ pub fn tty_rows(ws: ptr) -> u32 {
     return load8(ws, 0) | (load8(ws, 1) << 8);
 }
 
-/// 取属性 (`TCGETS`) 写进 t (60 字节)。
+/// 取属性 (`TCGETS`) 写进 t (36 字节)。
 pub fn tty_get_attr(fd: u64, t: ptr) -> i64 {
     return syscall4(TTY_SYS_IOCTL, fd, TTY_TCGETS, t as u64);
 }
@@ -112,7 +114,7 @@ fn test_tty_raw_clears_flags() -> bool {
     store8(saved, 12, 11 as u8);
     store8(saved, 13, 4 as u8);
     let n: u32 = tty_raw_into(saved, raw);
-    return n == 60 && load8(raw, 12) == 0 && load8(raw, 13) == 4
+    return n == 36 && load8(raw, 12) == 0 && load8(raw, 13) == 4
         && load8(raw, TTY_CC_VMIN) == 1 && load8(raw, TTY_CC_VTIME) == 0;
 }
 

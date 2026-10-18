@@ -1728,6 +1728,15 @@ fn arith(a: ptr, m: ptr, fr: u32, io: u32, il: u32, k: u32) -> u64 {
     let a2: u64 = operand(a, m, fr, hi32(ts), lo32(ts),
                           hi32(trim_span(a, p2, e)), lo32(trim_span(a, p2, e)));
     let bits: u32 = bits_of(a, hi32(ts), lo32(ts));
+    // issue #717：移位量按**指令上写的宽度**读成有符号数 —— 负数不是值，是一个错。
+    // 参考实现那边抛 `LvmError("移位量是负数")`；这里报同一句话（`fail` 退 2）。
+    // 以前 `-1` 在这里是 u64 的最大值，于是静默返回一个值（`ashr` 走符号位那支），
+    // 而参考实现抛一条 Python traceback —— 三种实现三种答案。
+    if k == K_SHL || k == K_LSHR || k == K_ASHR {
+        if (a2 & ((1 as u64) << ((bits - 1) as u64))) != 0 {
+            return fail("移位量是负数") as u64;
+        }
+    }
     if k == K_ASHR {
         return mask_bits(ashr64(a1, a2, bits), bits);
     }
@@ -2224,7 +2233,8 @@ fn do_call(a: ptr, m: ptr, io: u32, il: u32, caller: u32, do_: u32, dl: u32) -> 
     let k: u32 = 0;
     while k < npar {
         if ap >= rp {
-            fail("实参比形参少");
+            // issue #716：实参个数与形参不符**是错**，三种实现用同一句话拒。
+            fail("实参个数与形参不符");
         }
         let ae: u32 = seg_end(a, ap, rp);
         let pnm: u64 = pspan(a, fp + k, 2);
@@ -2232,6 +2242,10 @@ fn do_call(a: ptr, m: ptr, io: u32, il: u32, caller: u32, do_: u32, dl: u32) -> 
         vput(a, m, fr, hi32(pnm), lo32(pnm), av);
         ap = seg_next(a, ae, rp);
         k = k + 1;
+    }
+    // 多出来的实参同样是错（以前这里只是**不读**它们 —— 与参考实现的 `zip` 一样静默）。
+    if ap < rp {
+        fail("实参个数与形参不符");
     }
     let r: u64 = exec_body(a, m, fi, fr, caller, do_, dl);
     ctx_set(a, C_DEPTH, d - 1);

@@ -34,6 +34,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -52,6 +53,31 @@ BAD_LENGTH = "bad-length"
 BAD_MAGIC = "bad-magic"
 BAD_KIND = "bad-kind"
 RESERVED_NONZERO = "reserved-nonzero"
+
+#: 十进制 v. `dec_span`（Loment 侧）：可选 `+`、至少一位 ASCII 数字、前导零允许、
+#: 值域 0..2^63-1。**两边用同一个接受集**，否则同一份用例会被一份收下、另一份拒掉
+#: （issue #698/#699）。
+MAX_DEC = (1 << 63) - 1
+_DEC = re.compile(r"\+?[0-9]+\Z")
+#: 字段间空白 —— Loment 侧 `is_space` 只认 space/TAB/CR/LF（不认 \x0b/\x0c）。
+_WS = re.compile(r"[ \t\r]+")
+
+
+def parse_dec(tok: str) -> int:
+    """与 `loment/tools/lomzwframe.lomt` 的 `dec_span` 逐条对应。
+
+    先剥前导零再 `int()`：CPython 对超长十进制串有自己的 4300 位上限，而那会
+    让"一千个 0 加一个 1"在 Python 侧变成错误、在 Loment 侧还能读 —— 两边又漂了。
+    """
+    if not _DEC.fullmatch(tok):
+        raise ValueError(tok)
+    digits = (tok[1:] if tok[0] == "+" else tok).lstrip("0") or "0"
+    if len(digits) > 19:                       # 2^63-1 是 19 位
+        raise ValueError(tok)
+    v = int(digits, 10)
+    if v > MAX_DEC:
+        raise ValueError(tok)
+    return v
 
 
 def make_frame(kind: int, artifact_hash: bytes, proof: bytes) -> bytes:
@@ -80,18 +106,20 @@ def parse_frame(buf: bytes) -> tuple[str, dict]:
 def run_cases(text: str) -> tuple[int, str, str]:
     """整份用例进，`(退出码, stdout, stderr)` 出。**两侧共用这一套结论与这一套措辞。**"""
     out: list[str] = []
-    for n, raw in enumerate(text.splitlines(), 1):
-        line = raw.strip()
+    # 行切分与空白集合同 Loment 侧: 只按 `\n` 切, 只把 space/TAB/CR 当空白
+    # (`str.splitlines()` 还会在 \x0b/\x0c/ 等处切, 那会让两侧"同一份输入"不同形)。
+    for n, raw in enumerate(text.split("\n"), 1):
+        line = raw.strip(" \t\r")
         if not line:
             continue
-        f = line.split()
+        f = _WS.split(line)
         if f[0] == "make":
             if len(f) != 4:
                 return 1, "", f"line {n}: make needs <kind> <hash32hex> <digest32hex>\n"
             try:
-                kind = int(f[1], 10)
+                kind = parse_dec(f[1])
             except ValueError:
-                return 1, "", f"line {n}: bad kind\n"
+                return 1, "", f"line {n}: {BAD_KIND}\n"
             try:
                 h = bytes.fromhex(f[2])
                 d = bytes.fromhex(f[3])
@@ -114,7 +142,8 @@ def run_cases(text: str) -> tuple[int, str, str]:
             out.append(f"ok kind={det['kind']} len={det['len']}" if verdict == "ok"
                        else f"reject why={det['why']}")
         else:
-            return 1, "", f"line {n}: unknown action {f[0]!r}\n"
+            # 不回 repr: Loment 侧回显的是原样的 token (issue #699)
+            return 1, "", f"line {n}: unknown action {f[0]}\n"
     return 0, "".join(x + "\n" for x in out), ""
 
 

@@ -91,15 +91,19 @@ pub fn http_status_line(d: ptr, o: u32, n: u32, out_code: ptr) -> u32 {
         || load8(d, o + 3) != 80 || load8(d, o + 4) != 47 {
         return 0;
     }
-    let sp: u32 = 0;
-    let i: u32 = 5;
-    while i < n && load8(d, o + i) != 32 {
-        i = i + 1;
-    }
-    if i >= n {
+    // RFC 9112 §4: `HTTP-version = HTTP-name "/" DIGIT "." DIGIT`。原来从第 5 字节扫到
+    // 第一个空格、**不看跳过的是什么**，于是 `HTTP/ 200`、`HTTP/x 200`、`HTTP/2 200`
+    // 都被当成正常状态行 (#685)。
+    let maj: u32 = load8(d, o + 5);
+    let dot: u32 = load8(d, o + 6);
+    let min: u32 = load8(d, o + 7);
+    if maj < 48 || maj > 57 || dot != 46 || min < 48 || min > 57 {
         return 0;
     }
-    sp = i + 1;
+    if load8(d, o + 8) != 32 {
+        return 0;
+    }
+    let sp: u32 = 9;
     if sp + 3 > n {
         return 0;
     }
@@ -166,6 +170,20 @@ pub fn http_hdr_find(d: ptr, ho: u32, hn: u32, name: str, out_off: ptr, out_len:
                 while ve > vs && (load8(d, ho + ve - 1) == 32 || load8(d, ho + ve - 1) == 9) {
                     ve = ve - 1;
                 }
+                // RFC 9110 §5.5: 字段值里的 NUL / CR / LF 必须拒（或换成 SP）。
+                // 原来只记偏移与长度，于是 `X: ab\0\0` 会把 NUL 原样交给调用方 (#686)。
+                let bad: u32 = 0;
+                let x: u32 = vs;
+                while x < ve {
+                    let cv: u32 = load8(d, ho + x);
+                    if cv == 0 || cv == HTTPP_CR || cv == HTTPP_LF {
+                        bad = 1;
+                    }
+                    x = x + 1;
+                }
+                if bad == 1 {
+                    return 0;
+                }
                 let oo: u32 = ho + vs;
                 store8(out_off, 0, oo as u8);
                 store8(out_off, 1, (oo >> 8) as u8);
@@ -230,8 +248,14 @@ pub fn http_req_build(out: ptr, cap: u32, method: str, target: str, host: str,
     if keep_alive != 0 {
         conn = 22;                            // "Connection: keep-alive"
     }
+    // 端口那一项按**真实位数**算。原来固定写 6（按 65535 估），于是 `port=1000000`
+    // 起就写到 `cap` 之外 —— 端口是公开的 `u32`，调用方不必先查 65535 (#681)。
+    let ps: u32 = 0;
+    if port != 80 && port != 0 {
+        ps = 1 + httpp_digits(port);
+    }
     let need: u32 = str_len(method) + 1 + str_len(target) + 1 + 8 + 2
-                  + 6 + str_len(host) + 6 + 2
+                  + ps + str_len(host) + 6 + 2
                   + conn + 2 + 2;
     if need > cap {
         return HTTP_NO;
@@ -257,6 +281,17 @@ pub fn http_req_build(out: ptr, cap: u32, method: str, target: str, host: str,
     w = httpp_crlf(out, w);
     w = httpp_crlf(out, w);
     return w;
+}
+
+/// 十进制位数（`httpp_dec` 会写几个字节）。容量估算必须与它**同一口径**。
+fn httpp_digits(v: u32) -> u32 {
+    let n: u32 = 1;
+    let t: u32 = v;
+    while t >= 10 {
+        t = t / 10;
+        n = n + 1;
+    }
+    return n;
 }
 
 fn httpp_dec(out: ptr, o: u32, v: u32) -> u32 {

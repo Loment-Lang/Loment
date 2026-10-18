@@ -13,7 +13,8 @@ choose runtime
 
 // ---------------------------------------------------------------- 内存布局（说明用, 缓冲都走 sys_alloc）
 //
-//   256 KiB 用例文件 · 256 KiB 输出 · 8 KiB argv · 4 KiB 路径暂存 · 4 KiB 帧工作区
+//   256 KiB 用例文件 · 256 KiB 输出 (**不够就翻倍**, 见 `grow_out`) · 8 KiB argv
+//   4 KiB 路径暂存 · 512 B 帧工作区 · 16 B 十进制暂存
 
 const CASES_CAP: u32 = 262144;
 const OUT_CAP: u32 = 262144;
@@ -67,25 +68,25 @@ fn put_lit(out: ptr, o: u32, s: str) -> u32 {
     return o + n;
 }
 
-fn put_dec(out: ptr, o: u32, v: u32) -> u32 {
-    if v == 0 {
-        store8(out, o, 48 as u8);
-        return o + 1;
-    }
-    let tmp: ptr = alloc(16);
-    let n: u32 = 0;
-    let x: u32 = v;
-    while x > 0 {
-        store8(tmp, 15 - n, (48 + (x % 10)) as u8);
-        n = n + 1;
-        x = x / 10;
+/// 十进制, 无前导零 (Python 那侧是 `f"{v}"`)。
+/// **不用 `alloc`**: 那个 bump heap 只有 64 KiB, 每条用例几次 `alloc(16)` 就会在
+/// 几百条时耗尽, 然后 `llvm.trap` (issue #697) —— 这里直接写进输出缓冲。
+fn put_dec(out: ptr, o: u32, v: u64) -> u32 {
+    let nd: u32 = 1;
+    let t: u64 = v;
+    while t >= 10 {
+        t = t / 10;
+        nd = nd + 1;
     }
     let i: u32 = 0;
-    while i < n {
-        store8(out, o + i, load8(tmp, 16 - n + i) as u8);
+    let x: u64 = v;
+    while i < nd {
+        let d: u32 = (x % 10) as u32;
+        store8(out, o + (nd - 1 - i), (48 + d) as u8);
+        x = x / 10;
         i = i + 1;
     }
-    return o + n;
+    return o + nd;
 }
 
 fn is_space(c: u32) -> u32 {
@@ -100,6 +101,30 @@ fn is_digit(c: u32) -> u32 {
         return 1;
     }
     return 0;
+}
+
+// 小端 32/64 位读写 —— 语言没有 `load64`/`store64`, 拆成两个 u32 (同 `lumtui.lomt`)。
+
+fn ld32(p: ptr, off: u32) -> u32 {
+    return (load8(p, off) as u32) + (load8(p, off + 1) as u32) * 256
+         + (load8(p, off + 2) as u32) * 65536 + (load8(p, off + 3) as u32) * 16777216;
+}
+
+fn st32(p: ptr, off: u32, v: u32) -> u32 {
+    store8(p, off, (v % 256) as u8);
+    store8(p, off + 1, ((v / 256) % 256) as u8);
+    store8(p, off + 2, ((v / 65536) % 256) as u8);
+    store8(p, off + 3, ((v / 16777216) % 256) as u8);
+    return off + 4;
+}
+
+fn st64(p: ptr, off: u32, v: u64) -> u32 {
+    let _a: u32 = st32(p, off, (v % 4294967296) as u32);
+    return st32(p, off + 4, (v / 4294967296) as u32);
+}
+
+fn ld64(p: ptr, off: u32) -> u64 {
+    return (ld32(p, off) as u64) + (ld32(p, off + 4) as u64) * 4294967296;
 }
 
 fn hexval(c: u32) -> u32 {
@@ -129,24 +154,36 @@ fn streq(p: ptr, off: u32, n: u32, s: str) -> u32 {
     return 1;
 }
 
-/// 十进制（全是数字才认），成功返回 `(值, 位数)` 打包 —— 调用处解包。
-fn dec_span(p: ptr, off: u32, n: u32) -> u64 {
-    if n == 0 || n > 9 {
-        return 18446744073709551615;
+/// 十进制: 可选 `+` 前缀, 至少一位 ASCII 数字, 前导零允许, 值域 0..2^63-1。
+/// **与 Python 侧的 `parse_dec` 同一个接受集** (issue #698/#699) —— 成功返回 1 并把值
+/// 写进 `out` (8 字节); 不成返回 0。
+fn dec_span(p: ptr, off: u32, n: u32, out: ptr) -> u32 {
+    let i: u32 = 0;
+    if n > 0 && load8(p, off) == 43 {
+        i = 1;                                     // 一个可选的 `+`
+    }
+    if i >= n {
+        return 0;
     }
     let v: u64 = 0;
-    let i: u32 = 0;
     while i < n {
         let c: u32 = load8(p, off + i) as u32;
         if is_digit(c) == 0 {
-            return 18446744073709551615;
+            return 0;
+        }
+        if v > 922337203685477580 {
+            return 0;
         }
         // **必须显式转**：`v * 10 + (c - 48)` 是 u64 加 u32，参考实现的检查器放行、
         // 发出来的 IR 却是 `add i64 ..., <i32>`（clang 当场拒）—— 见 issue #289。
         v = v * 10 + ((c - 48) as u64);
+        if v > 9223372036854775807 {
+            return 0;
+        }
         i = i + 1;
     }
-    return v;
+    let _x: u32 = st64(out, 0, v);
+    return 1;
 }
 
 /// 十六进制 `[off, off+n)` 解进 `out`（每两个字符一个字节）。成功返回**字节数**；
@@ -228,6 +265,31 @@ fn slurp(p: ptr, n: u32, buf: ptr, cap: u32, scr: ptr) -> u32 {
     let got: u64 = read_all(fd as u64, buf, cap as u64);
     let _c: i64 = syscall4(3, fd as u64, 0, 0);
     return got as u32;
+}
+
+/// 输出缓冲不够 `need` 字节就**翻倍** (`sys_alloc` 拿新块、把旧内容拷过去);
+/// 新指针写进 `slot` (8 字节)。返回新容量, 0 = 拿不到内存。
+///
+/// 原先是写穿 256 KiB 缓冲然后 SIGSEGV (issue #696: 1900 行用例, 退出 139、零输出) ——
+/// 输出量随输入行数增长, 所以这里**长**而不是拒: 输入仍受 `CASES_CAP` 约束, 输出没有
+/// 一个拍出来的上限。
+fn grow_out(slot: ptr, out: ptr, olen: u32, cap: u32, need: u32) -> u32 {
+    let ncap: u32 = cap;
+    while ncap < need {
+        ncap = ncap * 2;
+    }
+    let nv: u64 = sys_alloc(ncap as u64);
+    if nv == 0 {
+        return 0;
+    }
+    let np: ptr = nv as ptr;
+    let i: u32 = 0;
+    while i < olen {
+        store8(np, i, load8(out, i) as u8);
+        i = i + 1;
+    }
+    let _x: u32 = st64(slot, 0, nv);
+    return ncap;
 }
 
 /// 把一行切成字段, 起点写进 fo、长度写进 fl, 返回字段数。
@@ -350,8 +412,9 @@ fn _start() -> u32 {
     let fov: u64 = sys_alloc(64);
     let flv: u64 = sys_alloc(64);
     let kk: u64 = sys_alloc(16);
+    let gv: u64 = sys_alloc(8);
     if cv == 0 || ov == 0 || av == 0 || scv == 0 || frv == 0 || b1v == 0 || b2v == 0
-            || fov == 0 || flv == 0 || kk == 0 {
+            || fov == 0 || flv == 0 || kk == 0 || gv == 0 {
         return die(2);
     }
     let cases: ptr = cv as ptr;
@@ -364,6 +427,8 @@ fn _start() -> u32 {
     let fo: ptr = fov as ptr;
     let fl: ptr = flv as ptr;
     let kout: ptr = kk as ptr;
+    let gslot: ptr = gv as ptr;
+    let outcap: u32 = OUT_CAP;
 
     // ---- argv[1]
     let afd: i64 = open_ro(str_ptr("/proc/self/cmdline"), str_len("/proc/self/cmdline"), scr);
@@ -428,6 +493,16 @@ fn _start() -> u32 {
                 fend = fend - 1;
             }
             if fend > fstart {
+                // 一行的输出上界: **行本身的字节数** (报错要回显 token) + 固定开销。
+                let need: u32 = olen + (fend - fstart) + 256;
+                if need > outcap {
+                    let nc: u32 = grow_out(gslot, out, olen, outcap, need);
+                    if nc == 0 {
+                        return die(2);
+                    }
+                    outcap = nc;
+                    out = ld64(gslot, 0) as ptr;
+                }
                 let k: u32 = split_fields(cases, fstart, fend, fo, fl);
                 let action: u32 = 0;              // 1 = make, 2 = parse, 0 = 不认识
                 if k >= 1 && streq(cases, fo_at(fo, 0), fl_at(fl, 0), "make") == 1 {
@@ -438,70 +513,74 @@ fn _start() -> u32 {
                 }
                 if action == 0 {
                     let b: u32 = put_lit(out, 0, "line ");
-                    b = put_dec(out, b, lineno);
+                    b = put_dec(out, b, lineno as u64);
                     b = put_lit(out, b, ": unknown action ");
                     b = put_span(out, b, cases, fo_at(fo, 0), fl_at(fl, 0));
                     store8(out, b, 10 as u8);
-                    let _w: u64 = write_all(2, out, b as u64);
+                    let _w: u64 = write_all(2, out, (b + 1) as u64);
                     return die(1);
                 }
                 if action == 1 {
                     if k != 4 {
                         let b: u32 = put_lit(out, 0, "line ");
-                        b = put_dec(out, b, lineno);
+                        b = put_dec(out, b, lineno as u64);
                         b = put_lit(out, b, ": make needs <kind> <hash32hex> <digest32hex>");
                         store8(out, b, 10 as u8);
-                        let _w: u64 = write_all(2, out, b as u64);
+                        let _w: u64 = write_all(2, out, (b + 1) as u64);
                         return die(1);
                     }
-                    let kindv: u64 = dec_span(cases, fo_at(fo, 1), fl_at(fl, 1));
-                    if kindv == 18446744073709551615 {
+                    // **顺序与 Python 侧逐条对齐**: 先解数字 (`bad-kind`), 再解十六进制
+                    // (`bad-hex`), 然后才是种类范围 (`bad-kind`) 与长度 (`bad-length`) ——
+                    // Python 那边 `make_frame` 在 `bytes.fromhex` **之后**才看种类。
+                    let kok: u32 = dec_span(cases, fo_at(fo, 1), fl_at(fl, 1), kout);
+                    let kindv: u64 = ld64(kout, 0);
+                    if kok == 0 {
                         let b: u32 = put_lit(out, 0, "line ");
-                        b = put_dec(out, b, lineno);
-                        b = put_lit(out, b, ": bad kind");
+                        b = put_dec(out, b, lineno as u64);
+                        b = put_lit(out, b, ": bad-kind");
                         store8(out, b, 10 as u8);
-                        let _w: u64 = write_all(2, out, b as u64);
+                        let _w: u64 = write_all(2, out, (b + 1) as u64);
                         return die(1);
                     }
-                    let kind: u32 = kindv as u32;
                     let hn: u32 = hex_decode(cases, fo_at(fo, 2), fl_at(fl, 2), b1, 128);
                     let dn: u32 = hex_decode(cases, fo_at(fo, 3), fl_at(fl, 3), b2, 128);
                     if hn == 4294967295 || dn == 4294967295 {
                         let b: u32 = put_lit(out, 0, "line ");
-                        b = put_dec(out, b, lineno);
+                        b = put_dec(out, b, lineno as u64);
                         b = put_lit(out, b, ": bad-hex");
                         store8(out, b, 10 as u8);
-                        let _w: u64 = write_all(2, out, b as u64);
+                        let _w: u64 = write_all(2, out, (b + 1) as u64);
+                        return die(1);
+                    }
+                    if kindv != 1 && kindv != 2 {
+                        let b: u32 = put_lit(out, 0, "line ");
+                        b = put_dec(out, b, lineno as u64);
+                        b = put_lit(out, b, ": bad-kind");
+                        store8(out, b, 10 as u8);
+                        let _w: u64 = write_all(2, out, (b + 1) as u64);
                         return die(1);
                     }
                     if hn == 4294967294 || dn == 4294967294 {
                         // 超容量 ⇒ 长度必然 ≠ 32 ⇒ 与 Python 那侧的 `bad-length` 同一条
                         let b: u32 = put_lit(out, 0, "line ");
-                        b = put_dec(out, b, lineno);
+                        b = put_dec(out, b, lineno as u64);
                         b = put_lit(out, b, ": bad-length");
                         store8(out, b, 10 as u8);
-                        let _w: u64 = write_all(2, out, b as u64);
+                        let _w: u64 = write_all(2, out, (b + 1) as u64);
                         return die(1);
                     }
-                    if kind != 1 && kind != 2 {
-                        let b: u32 = put_lit(out, 0, "line ");
-                        b = put_dec(out, b, lineno);
-                        b = put_lit(out, b, ": bad-kind");
-                        store8(out, b, 10 as u8);
-                        let _w: u64 = write_all(2, out, b as u64);
-                        return die(1);
-                    }
+                    let kind: u32 = kindv as u32;
                     if hn != HASH_LEN || dn != DIGEST_LEN {
                         let b: u32 = put_lit(out, 0, "line ");
-                        b = put_dec(out, b, lineno);
+                        b = put_dec(out, b, lineno as u64);
                         b = put_lit(out, b, ": bad-length");
                         store8(out, b, 10 as u8);
-                        let _w: u64 = write_all(2, out, b as u64);
+                        let _w: u64 = write_all(2, out, (b + 1) as u64);
                         return die(1);
                     }
                     let _fl2: u32 = make_frame(fr, kind, b1, b2);
                     olen = put_lit(out, olen, "ok kind=");
-                    olen = put_dec(out, olen, kind);
+                    olen = put_dec(out, olen, kind as u64);
                     olen = put_lit(out, olen, " len=72 frame=");
                     olen = hex_encode(out, olen, fr, FRAME_LEN);
                     store8(out, olen, 10 as u8);
@@ -509,10 +588,10 @@ fn _start() -> u32 {
                 } else {
                     if k != 2 {
                         let b: u32 = put_lit(out, 0, "line ");
-                        b = put_dec(out, b, lineno);
+                        b = put_dec(out, b, lineno as u64);
                         b = put_lit(out, b, ": parse needs <hex>");
                         store8(out, b, 10 as u8);
-                        let _w: u64 = write_all(2, out, b as u64);
+                        let _w: u64 = write_all(2, out, (b + 1) as u64);
                         return die(1);
                     }
                     let bn: u32 = hex_decode(cases, fo_at(fo, 1), fl_at(fl, 1), fr, FRAME_CAP);
@@ -533,9 +612,9 @@ fn _start() -> u32 {
                         let code: u32 = parse_frame(fr, bn, kout);
                         if code == 0 {
                             olen = put_lit(out, olen, "ok kind=");
-                            olen = put_dec(out, olen, load8(kout, 0) as u32);
+                            olen = put_dec(out, olen, (load8(kout, 0) as u32) as u64);
                             olen = put_lit(out, olen, " len=");
-                            olen = put_dec(out, olen, bn);
+                            olen = put_dec(out, olen, bn as u64);
                             store8(out, olen, 10 as u8);
                             olen = olen + 1;
                         } else {

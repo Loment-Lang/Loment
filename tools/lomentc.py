@@ -7095,19 +7095,31 @@ def _l2_ok(toks: list, at: int, end: int, fend: int, l0: dict[str, int],
         # **只查体之后** [end, fend)：体**之前**不可能用到体里声明的那个名字（作用域），
         # 所以那里出现同名不构成逃逸。
         #
-        # **而且扫到下一次同名 `let` 就停**（`#364` 的第三条边界）。语言**没有块作用域**
-        # （`docs/228` 的根），所以一个名字被**新的** `let` 重新声明之后，后面那些出现就
-        # 属于**新的**那个变量，不再证明这一块出体了。停下是 **sound** 的：在那一处之前
+        # **扫到同一层下一次同名 `let` 就停**（`#364` 的第三条边界）。语言**没有块作用
+        # 域**（`docs/228` 的根），所以一个名字被**新的** `let` 重新声明之后，后面那些出现
+        # 就属于**新的**那个变量，不再证明这一块出体了。停下是 **sound** 的：在那一处之前
         # 的每一次出现都还指这一块。
+        #
+        # **另一个块里的同名 `let` 不能当成"换了主人"**（#714）：它可能藏在一条**没跑**
+        # 的分支里（体后面一个不成立的 `if { let NAME = … }`），那之后名字**没有**换主人，
+        # 后面的出体使用仍然指这一块。静态上认不出那条路跑没跑 ⇒ 整格取消（保守）。
+        # 深度用 `{`/`}` 数：`end` 是体自己的 `}`，扫过它之后**同一层**是 -1，嵌进一个块
+        # 是 0，落回外层是 <= -2。
         #
         # 只认 `let` 这一种重声明形状（这个语言里也只有它）：认不出来的形状一律**按没重
         # 声明处理**（照旧取消），所以这条规则只可能**少**放宽、不会多放宽。
+        depth = 0
         for k in range(end, fend):
-            if not (ident(k) and toks[k].val == name):
-                continue
-            if word(k - 1, "let"):
-                break                      # 换了主人：后面属于新声明的那个
-            return False                   # 出体了
+            if ident(k) and toks[k].val == name:
+                if word(k - 1, "let"):
+                    if depth != -1:
+                        return False       # 另一个块里的重声明: 那条路可能没跑
+                    break                  # 同一层的重声明: 换了主人
+                return False               # 出体了
+            if word(k, "{"):
+                depth += 1
+            elif word(k, "}"):
+                depth -= 1
     if nlive == 0:
         return False                       # 体内的分配都提到栈上了 -> 没什么可归还的
     return nalloc == ncand                 # 有认不出来的分配 -> 整格取消
@@ -7568,6 +7580,13 @@ class _Ir:
             self.w(f"{v2} = insertvalue {{ ptr, i64 }} {v}, i64 {len(b)}, 1")
             return "str", v2
         if isinstance(e, Cast):  # 整数/布尔转换
+            # **整数字面量 `as iN`：字面量的值就是值**（#694）。不能再走下面
+            # `self.expr(e.expr, None)` 那条"无期望类型 ⇒ 按 i32 定宽"的路：
+            # `253402300800 as i64` 会先被截成 32 位（-769664）再 zext，得到
+            # 4294197632。按目标宽度直接发，值才是原文写的那个。自举侧
+            # `expr_atom` 的整数字面量分支同一处一起改，IR 要保持逐字节相同。
+            if isinstance(e.expr, IntLit) and e.type in INT_TYPES:
+                return e.type, str(_wrap_int(e.expr.value, e.type))
             st = expr_type(e.expr, self.type_scope(), self.funcs, {})
             _, v = self.expr(e.expr, None)
             if st == e.type:

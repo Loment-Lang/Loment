@@ -30,14 +30,16 @@ old <<<
     let nb: u32 = strip_cr(slot, raw_n as u32);
 >>>
 new <<<
-    let raw_n: u64 = read_all(fd as u64, slot, SLOT as u64);
+    let sunit: u32 = SLOT - 44224;
+    let raw_n: u64 = read_all(fd as u64, slot, sunit as u64);
     syscall4(3, fd as u64, 0, 0);
     // **读满了槽 ≠ 文件就这么大**（`#345` 的 (a)：每一个固定容量越界时都要**有话**）。
-    // 槽原先静默截断：一份大于 512 KiB 的源会**少一截**，用户看到的是一串与被截断位置
+    // 槽原先静默截断：一份大于上限的源会**少一截**，用户看到的是一串与被截断位置
     // 无关的解析错 —— 那是本仓最不肯让的形状（`docs/188` 的"宁拒勿猜"）。
-    // 判据只需一次比较：读满 `SLOT` 就说明**至少**这么大，下面那句把这个事实说出来。
-    if raw_n >= SLOT as u64 {
-        return fail("this source file is 512 KiB or larger -- the per-file slot cannot hold it, and cutting it short yields parse errors unrelated to where it was cut: split the facade") as u64;
+    // 等价的写法，但把 `SLOT` **写在比较里**：容量盘点（`tools/loment_caps.py`）认的是
+    // "容量名出现在一条序关系比较里"，`raw_n >= sunit` 里那个名字被别名藏起来了。
+    if raw_n + 44224 as u64 >= SLOT as u64 {
+        return fail("this source file is 480 KiB or larger -- the per-file slot cannot hold it (its tail keeps this file's path and use lists), and cutting it short yields parse errors unrelated to where it was cut: split the facade") as u64;
     }
     let nb: u32 = strip_cr(slot, raw_n as u32);
 >>>

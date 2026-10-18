@@ -56,8 +56,12 @@ def test(fn):
 #: 2026-10-17（`#45`）：`lomfmt.lomt` 的格式化器现在从源码里**单独扫注释**，注释表
 #: `CMT_CAP = 4096`（落在 `MEM_CAP` 顶上那 64 KiB）是一条新容量 —— 条数 228 → **229**。
 #: 它**有话**（满了 `fail` 退 1，不许悄悄少几条注释），所以沉默仍是 **165**、名单不动。
-CAPACITY_SITES = 229
-SILENT_SITES = 165
+#:
+#: 2026-10-17（0.1.4.7）：`lomadmit` 的用例表重排（#697/#698 把 `seq/hits/held` 换成
+#: u64 并去掉那 9 个 `C_*` 常量）⇒ 条数 229 → **220**、沉默 165 → **156**，名单少那
+#: 9 个名字。**只往"更好"的方向动**：没有新增的沉默名（判据会盯着）。
+CAPACITY_SITES = 220
+SILENT_SITES = 156
 
 #: 越界时**说不出话**的那些名字（`--silent` 去重、按字节序）。138 个。
 #: ⚠ 这里按**筛子**的口径（`not speaks`），所以那 6 条"来路已写明"的也在内 ——
@@ -75,16 +79,7 @@ SILENT_NAMES = frozenset((
     "CTX_CAP",
     "CUR_CAP",
     "CW",
-    "C_ASKED",
     "C_CAND",
-    "C_HELD",
-    "C_HITS",
-    "C_PLEN",
-    "C_POFF",
-    "C_PREV",
-    "C_SEQ",
-    "C_SLEN",
-    "C_SOFF",
     "DECL_KW",
     "DELIM_CAP",
     "DEPS_CAP",

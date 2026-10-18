@@ -268,9 +268,20 @@ pub fn uri_parse(d: ptr, o: u32, n: u32, rec: ptr) -> u32 {
             urip_set(rec, 5, c2 - h0 - 1);
             urip_set(rec, 13, URI_F_AUTH | URI_F_V6);
             h1 = c2 + 1;
+            // `]` 之后只允许 `:port` 或直接结束。原来不查，于是 `http://[::1]junk/x`
+            // 把 `junk` 静默吃掉、还报成功 —— 两个程序会对同一条 URI 有不同看法 (#680)。
+            if h1 < a1 && load8(d, o + h1) != 58 {
+                return 0;
+            }
         } else {
             let c3: u32 = h0;
             while c3 < a1 && load8(d, o + c3) != 58 {
+                // 方括号只属于 IP-literal；非括号分支里出现 `[`/`]` 不是 reg-name 的字符
+                // (`http://a[b]/` 被 CPython 拒, `#680`)。
+                let hb: u32 = load8(d, o + c3);
+                if hb == 91 || hb == 93 {
+                    return 0;
+                }
                 c3 = c3 + 1;
             }
             urip_set(rec, 4, h0);
@@ -278,21 +289,29 @@ pub fn uri_parse(d: ptr, o: u32, n: u32, rec: ptr) -> u32 {
             h1 = c3;
         }
         if h1 < a1 && load8(d, o + h1) == 58 {
+            // RFC 3986 `port = *DIGIT`：**语法上没有范围**（#687）。65535 的界属于
+            // 拨号那一侧；这里只要求"全是数字"。装不进 u32 时按缺席处理（URI_NO）——
+            // 记录是 u32，回绕是更坏的一种答案。
             let ps: u32 = h1 + 1;
             let pv: u32 = 0;
+            let over: u32 = 0;
             let q: u32 = ps;
             while q < a1 {
                 let c4: u32 = load8(d, o + q);
                 if c4 < 48 || c4 > 57 {
                     return 0;
                 }
-                pv = pv * 10 + (c4 - 48);
-                if pv > 65535 {
-                    return 0;
+                if over == 0 {
+                    let dv: u32 = c4 - 48;
+                    if pv > 429496729 || (pv == 429496729 && dv > 5) {
+                        over = 1;
+                    } else {
+                        pv = pv * 10 + dv;
+                    }
                 }
                 q = q + 1;
             }
-            if q > ps {
+            if q > ps && over == 0 {
                 urip_set(rec, 6, pv);
             }
         }

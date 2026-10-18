@@ -68,8 +68,6 @@ pub const THR_MUTEX_BYTES: u32 = 8;
 
 /// 自旋多少轮之后才去睡 (睡是要发系统调用的, 短临界区不值得)。
 const THRP_SPIN: u32 = 64;
-/// 睡醒最多多少轮 —— 不是超时, 是"别把主线程永远钉在这"。
-const THRP_ROUNDS: u32 = 1000000;
 
 const THRP_SYS_MMAP: u64 = 9;
 const THRP_SYS_MUNMAP: u64 = 11;
@@ -155,13 +153,18 @@ pub fn thread_wake(addr: ptr, n: u32) -> i64 {
 ///
 /// 快路先自旋 `THRP_SPIN` 轮 (短临界区里一个系统调用都不发), 之后就睡在 `serving` 上
 /// —— 值变了才回来看一眼。`thread_wait` 的 `-EAGAIN` 在这里不是错: 它意味着"号已经轮到
-/// 你了", 回去读一次就出去了。
+/// 你了"或者"值又变了, 再读一次", 回去读就对了。
+///
+/// 这个循环**没有轮数上限** (issue #695): 以前有一个 `THRP_ROUNDS` 的封顶, 到点之后
+/// 函数**返回 0 —— 和成功同一个值** —— 而锁还在别人手里。互斥静默退化成不互斥, 比死锁
+/// 坏得多。契约是"等到拿到", 那就等到底; 真出了永不释放的锁, 表现是阻塞 (可诊断), 不是
+/// 两个线程同时进临界区 (不可诊断)。
 pub fn thread_lock(m: ptr) -> u32 {
     let me: u32 = atomic_add(m, 1);              // 取号 (返回旧值 = 我的号)
     let sp: ptr = ptr_add(m, THR_M_SERVING);
     let i: u32 = 0;
     let go: u32 = 1;
-    while go == 1 && i < THRP_ROUNDS {
+    while go == 1 {
         let cur: u32 = thrp_rd32(sp, 0);
         if cur == me {
             go = 0;
@@ -232,10 +235,13 @@ pub fn thread_join(done: ptr) -> u32 {
 ///
 /// **被叫醒的人负责把唤醒传下去**: 产物那段尾声只叫**一个**等待者 (它不知道有几个人在
 /// 等), 所以这里醒来之后再广播一次 —— 否则第二个 join 的人会一直睡着。
+///
+/// 与 `thread_lock` 同一个契约: **没有轮数上限** (issue #695 的同一条)。`done` 在到 `n`
+/// 之前一直在变 (`-EAGAIN` 风暴) 时, 旧的封顶会让人"等够了轮数"就返回一个**小于 n** 的
+/// 值 —— 那等于 join 提前放手。等到就是等到。
 pub fn thread_join_all(done: ptr, n: u32) -> u32 {
-    let i: u32 = 0;
     let go: u32 = 1;
-    while go == 1 && i < THRP_ROUNDS {
+    while go == 1 {
         let cur: u32 = thrp_rd32(done, 0);
         if cur >= n {
             go = 0;
@@ -243,7 +249,6 @@ pub fn thread_join_all(done: ptr, n: u32) -> u32 {
             let _w: i64 = thread_wait(done, cur);
             let _b: i64 = thread_wake(done, 2147483647);   // 把唤醒传给别的等待者
         }
-        i = i + 1;
     }
     return thrp_rd32(done, 0);
 }

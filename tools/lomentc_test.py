@@ -3754,6 +3754,57 @@ def test_runtime_dep_must_declare_and_agree():
     # ③ 根满足它 ⇒ **不许**报（"合法的那一对不许拒"）
     e = run(lib_rt, "module root" + NL + "choose runtime" + tail)
     assert e == [], e
+
+
+@test
+def test_a_sibling_dependency_is_not_every_units_requirement():
+    """#726：体检一个依赖时，**它的兄弟**不是它的依赖。
+
+    闭包 = 根的全部传递依赖。从前 `_check` 的"依赖重查"那一趟给每个单元递的是
+    **整份闭包减自己** —— 于是闭包里有一个写 `choose runtime` 的兄弟，任何没写这一行
+    的单元都会被判"根是 `no_runtime`、依赖要求 `runtime`"。实测：根 `use` 一个
+    `std/f64conv`（它 → `f64` → `f64bits`/`wide`/`mem`）时，一条 `use` 都没有的
+    `f64bits` 会收到四条这种话，而它自己干干净净。
+
+    这一条钉三件事：兄弟不算（①）、**真依赖仍然算**（②）、两边的可接受集与自举一致
+    （`loment_store_twin_test` 那 148/156 是另一处证据，不在这里重复）。
+    """
+    import tempfile
+    NL = chr(10)
+    tail = NL
+
+    def run(files: dict[str, str], root: str) -> list[str]:
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            for name, text in files.items():
+                (d / name).write_text(text, encoding="utf-8")
+            rp = d / "root.lomt"
+            rp.write_text(root, encoding="utf-8")
+            m = lomentc.load(rp)
+            deps = lomentc.resolve_deps(m, ROOT, rp.parent, entry=rp)
+            return lomentc.check(m, None, deps)
+
+    plain = "module a" + NL + NL + "pub fn f() -> u32 { return 1; }" + NL
+    needs = ("module b" + NL + "choose runtime" + NL + NL
+             + "pub fn g(x: u32) -> u32 { return x / 2; }" + NL)
+    root = ("module root" + NL + "choose runtime" + NL
+            + 'use "a.lomt"' + NL + 'use "b.lomt"' + NL + tail
+            + "fn _start() { syscall4(60, 0, 0, 0); }" + NL)
+    # ① 兄弟组合法：a 没有 use、b 要求 runtime，根满足它 ⇒ 一个字都不许报
+    e = run({"a.lomt": plain, "b.lomt": needs}, root)
+    assert e == [], ("兄弟单元被当成了 `a` 的依赖（#726）：" + repr(e))
+
+    # ② 真依赖的体检**不许**被这条放宽掉：mid 用了 rt（要求 runtime）却没自己声明
+    mid = ("module mid" + NL + 'use "rt.lomt"' + NL + NL
+           + "pub fn h(x: u32) -> u32 { return rt_half(x); }" + NL)
+    rt = ("module rt" + NL + "choose runtime" + NL + NL
+          + "pub fn rt_half(x: u32) -> u32 { return x / 2; }" + NL)
+    root2 = ("module root" + NL + "choose runtime" + NL
+             + 'use "mid.lomt"' + NL + tail
+             + "fn _start() { syscall4(60, 0, 0, 0); }" + NL)
+    e = run({"mid.lomt": mid, "rt.lomt": rt}, root2)
+    assert any("mid" in x and "runtime" in x for x in e), (
+        "真依赖的要求没有生效 —— 修 #726 修过头了：" + repr(e))
 #: `@__loment_heap`（间接寻址那一份）的**初值写法** —— 语义上是全零指针，但必须写成
 #: `zeroinitializer` 而不是 `null`：**我们自己的两个链接器**（`tools/lomelf.py` 与
 #: `loment/tools/lomelf.lomt`）的 IR 子集只有零初始化这一种写法，`ptr null` 会让它们

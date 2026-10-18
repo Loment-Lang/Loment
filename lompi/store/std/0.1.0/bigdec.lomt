@@ -219,10 +219,23 @@ pub fn bigdec_mul(r: ptr, cap: u32, a: ptr, c: ptr, t: ptr, tcap: u32) {
 
 /// r = a / d (d 是小的正整数), 保留 a 的 scale。余数向零丢 (即**截断**)。
 /// 需要更少的小数位时接着用 bigdec_round_to —— 截断与舍入分开, 免得一个函数有两种意思。
-pub fn bigdec_div_small(r: ptr, cap: u32, a: ptr, d: u32, t: ptr, tcap: u32) {
-    bigint_divmod_small(t, tcap, bd_coef(a), d);
+///
+/// **`d == 0` 不碰信号**: 结果写成 0 并返回 `BIG_DIV0`（`4294967295`，与
+/// `bigint_divmod_small` 同一个哨兵）。原来它把 0 直接转给 `bigint_divmod_small` —— 那条
+/// 路径是语言的运行时中止（`ud2`），进程收到 `SIGILL`，一个字都打不出来（issue #722）。
+pub fn bigdec_div_small(r: ptr, cap: u32, a: ptr, d: u32, t: ptr, tcap: u32) -> u32 {
+    if d == 0 {
+        bigdec_zero(r, cap);
+        return BIG_DIV0;
+    }
+    let rem: u32 = bigint_divmod_small(t, tcap, bd_coef(a), d);
+    if rem == BIG_DIV0 {          // 不该发生（d 已非零），照同一条路收口
+        bigdec_zero(r, cap);
+        return BIG_DIV0;
+    }
     bigint_copy(bd_coef(r), cap, t);
     bd_set(r, bigdec_scale(a), bigdec_sign(a));
+    return 0;
 }
 
 /// 换标度: 只允许**放大** (scale 变大时补零, 精确); 缩小时会丢位, 用 round_to。
@@ -577,7 +590,11 @@ fn test_bigdec_div_small() -> bool {
     bigdec_from_u64(a, 16, 100, 2);
     bigdec_div_small(r, 16, a, 3, t, 16);
     let n2: u32 = bigdec_to_dec(out, 0, r, tmp, 16);
-    return ok1 && n2 == 4 && bd_eq(out, 4, "0.33");
+    // d == 0: **返回哨兵、结果成 0**，不是 SIGILL（#722）
+    bigdec_from_u64(a, 16, 100, 2);
+    let r0: u32 = bigdec_div_small(r, 16, a, 0, t, 16);
+    let ok0: bool = r0 == 4294967295 && bigdec_is_zero(r);
+    return ok1 && n2 == 4 && bd_eq(out, 4, "0.33") && ok0;
 }
 
 fn test_bigdec_round_to_even() -> bool {

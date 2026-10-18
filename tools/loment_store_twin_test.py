@@ -86,28 +86,17 @@ KNOWN_GAPS: dict[str, str] = {
         "#719：64 位字面量的环绕（自举侧只做到 32 位；`9223372036854775808` 没折成负数）",
     "std/0.1.0/std.lomt":
         "#719：门面太大，自举侧检查器的符号表装不下（参考实现无上限）",
-    "std/0.1.0/f64.lomt":
-        "#719：依赖的 `choose runtime` 是**需求**，自举侧还没强制（参考拒、自举收）",
-    "std/0.1.0/f64conv.lomt":
-        "#719：同上（依赖的 `choose runtime` 需求）",
     "std/0.1.0/f64fmt.lomt":
-        "#719：同上（依赖的 `choose runtime` 需求）",
-    "std/0.1.0/mathf.lomt":
-        "#719：同上（依赖的 `choose runtime` 需求）",
+        "#719：链式转型只做第一层 —— `x as i32 as i64` 缺了第二条 `sext`（自举发 "
+        "`store i64 %i32值`，是非法 IR）",
     "std/0.1.0/libl.lomt":
-        "#719：同上（依赖的 `choose runtime` 需求）",
-    "std/0.1.0/round.lomt":
-        "#719：同上（依赖的 `choose runtime` 需求）",
+        "#719：L0 的安全被调集合比参考**大**：自举把 `bsearch` 的首参判成不外逃、"
+        "参考判成外逃 —— 于是 `bsearch_u32` 的 `alloc(4)` 自举提到栈上（`slot.buf`）、"
+        "参考留在堆上。测试面里 `bsearch` 不接收它，但这一格两边必须同集合",
     "std/0.1.0/stdio.lomt":
-        "#719：同上（依赖的 `choose runtime` 需求）",
+        "#719：同 `libl`（经 `stdlib` 的 `bsearch_u32` 进来：`alloc(4)` 提栈 / 留堆）",
     "std/0.1.0/stdlib.lomt":
-        "#719：同上（依赖的 `choose runtime` 需求）",
-    "std/0.1.0/text.lomt":
-        "#719：同上（依赖的 `choose runtime` 需求）",
-    "std/0.1.0/trim.lomt":
-        "#719：同上（依赖的 `choose runtime` 需求）",
-    "std/0.1.0/word.lomt":
-        "#719：同上（依赖的 `choose runtime` 需求）",
+        "#719：同 `libl`（`bsearch_u32` 的 `alloc(4)`：自举 L0 提栈、参考留堆）",
 }
 
 

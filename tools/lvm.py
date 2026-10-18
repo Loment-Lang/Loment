@@ -781,6 +781,13 @@ def run_source(src: Path, root: Path, out=None, profile: Profile | None = None,
     """与 `lomelf` 同一条前门：`.lomt` -> IR -> 跑。"""
     if argv is None:
         argv = [str(src)]
+    return run_ir(compile_source(src, root),
+                  out if out is not None else sys.stdout, profile, argv, tier,
+                  values, deopts)
+
+
+def compile_source(src: Path, root: Path) -> str:
+    """源 -> IR 文本（前端那三步）。`run_source` 与 `--compact-out` 共用。"""
     import lomentc  # noqa: PLC0415
 
     mod = lomentc.load(src)
@@ -788,9 +795,7 @@ def run_source(src: Path, root: Path, out=None, profile: Profile | None = None,
     errs = lomentc.check(mod, deps=deps)
     if errs:
         raise LvmError(f"检查不过: {errs[:2]}")
-    return run_ir(lomentc.emit_llvm(mod, root, deps),
-                  out if out is not None else sys.stdout, profile, argv, tier,
-                  values, deopts)
+    return lomentc.emit_llvm(mod, root, deps)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -798,7 +803,7 @@ def main(argv: list[str] | None = None) -> int:
     import io  # noqa: PLC0415
 
     ap = argparse.ArgumentParser(prog="lvm", description="LVM T0：那份 IR 的第四个读者（docs/243）")
-    ap.add_argument("entry", help=".lomt 入口，或 --ir 时是 .ll")
+    ap.add_argument("entry", nargs="?", help=".lomt 入口，或 --ir 时是 .ll；--compact 时省略")
     ap.add_argument("--ir", action="store_true", help="直接吃 IR 文本（跳过前端）")
     ap.add_argument("--root", default=".", help="解析 use 的根（默认当前目录）")
     ap.add_argument("--tier", choices=("t0", "t2", "t3"), default="t0",
@@ -810,9 +815,23 @@ def main(argv: list[str] | None = None) -> int:
                     help="T3：读进值观察并按它特化（需要 --tier t3）")
     ap.add_argument("--deopt-out", metavar="PATH", default=None,
                     help="T3：把去优化记录写到 PATH（不写就不记）")
+    ap.add_argument("--compact-out", metavar="PATH", default=None,
+                    help="把入口编成**紧凑形**写进 PATH，不运行（docs/250）")
+    ap.add_argument("--compact", metavar="PATH", default=None,
+                    help="直接跑一份紧凑形产物（与 entry 二选一）")
     ap.add_argument("--profile-out", metavar="PATH", default=None,
                     help="T1：把反馈剖面写到 PATH（`docs/247`）。不写就不记，一个字节都不写")
     a = ap.parse_args(argv)
+    # `lvm_compact` 会经 `lvm_t2` 反过来 import 本模块 —— 只能在 `main()` 里、模块装完之后拿。
+    import lvm_compact  # noqa: PLC0415
+
+    if a.compact is not None and a.compact_out is not None:
+        print("lvm: --compact 与 --compact-out 不能同时给", file=sys.stderr)
+        return 2
+    if a.entry is None and a.compact is None:
+        print("lvm: 需要一个入口（.lomt / --ir 的 .ll），或 --compact PATH",
+              file=sys.stderr)
+        return 2
     root = Path(a.root).resolve()
     buf = io.BytesIO()
     prof = Profile() if a.profile_out else None
@@ -835,13 +854,23 @@ def main(argv: list[str] | None = None) -> int:
     try:
         # `--entry` 那段文本**原样**当被解释程序的 argv[0] —— 与自举镜像同一处规矩：
         # "VM 被指到的那个输入路径"（`docs/243` §3.4）。
-        if a.ir:
+        if a.compact_out is not None:
+            # 只编不跑：入口 -> IR -> 紧凑形。这是 docs/250 那条"写进文件"的路。
+            ir = (Path(a.entry).read_text(encoding="utf-8") if a.ir
+                  else compile_source(Path(a.entry).resolve(), root))
+            Path(a.compact_out).write_bytes(lvm_compact.encode_ir(ir))
+            return 0
+        if a.compact is not None:
+            rc = lvm_compact.run_compact(Path(a.compact).read_bytes(), buf, prof,
+                                         [a.compact])
+        elif a.ir:
             rc = run_ir(Path(a.entry).read_text(encoding="utf-8"), buf, prof, [a.entry],
                         a.tier, values, deopts)
         else:
             rc = run_source(Path(a.entry).resolve(), root, buf, prof, [a.entry], a.tier,
                             values, deopts)
-    except (LvmError, lomelf.ElfError, lomelf.Unsupported) as e:
+    except (LvmError, lomelf.ElfError, lomelf.Unsupported,
+            lvm_compact.CompactError) as e:
         sys.stdout.buffer.write(buf.getvalue())
         print(f"lvm: {e}", file=sys.stderr)
         return 2

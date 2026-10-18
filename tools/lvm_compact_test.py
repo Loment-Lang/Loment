@@ -152,6 +152,66 @@ def test_form_is_recorded_and_a_wrong_form_is_refused() -> None:
     print("      文件头：魔数 / 版本 / 形态；文本与错版本都点名拒")
 
 
+def test_the_cli_writes_and_reads_a_compact_file() -> None:
+    """判（#723）：`tools/lvm.py` 自己会写、会读紧凑形 —— 它不再只是"自己判据的玩具"。
+
+    走的全是**真入口**（子进程跑 `lvm.py`）：写出来的文件与文本路跑出的 stdout/退出码相同，
+    文本文件喂给 `--compact` 要点名拒，两个开关不能同时给。
+    """
+    import os  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
+
+    rel = "loment/examples/user_hello.lomt"
+    cli = [sys.executable, str(ROOT / "tools" / "lvm.py")]
+    env = {**os.environ, "PYTHONUTF8": "1"}
+    with tempfile.TemporaryDirectory() as td:
+        blob = Path(td) / "user_hello.lvmb"
+        w = subprocess.run(cli + [rel, "--compact-out", str(blob)],
+                           capture_output=True, cwd=str(ROOT), env=env)
+        assert w.returncode == 0, w.stderr.decode("utf-8", "replace")
+        assert blob.read_bytes()[:4] == lvm_compact.MAGIC, blob.read_bytes()[:4]
+        assert w.stdout == b"", "--compact-out 只编不跑，不该有程序输出"
+
+        a = subprocess.run(cli + [rel], capture_output=True, cwd=str(ROOT), env=env)
+        b = subprocess.run(cli + ["--compact", str(blob)], capture_output=True,
+                           cwd=str(ROOT), env=env)
+        assert a.returncode == 0, a.stderr.decode("utf-8", "replace")
+        assert (a.stdout, a.returncode) == (b.stdout, b.returncode), (
+            f"文本路与紧凑路不同：{a.stdout!r}/{a.returncode} vs "
+            f"{b.stdout!r}/{b.returncode}")
+
+        c = subprocess.run(cli + ["--compact", rel], capture_output=True, cwd=str(ROOT),
+                           env=env)
+        assert c.returncode != 0 and b"LVMC" in c.stderr, (
+            f"把文本喂给 --compact 没点名拒：rc={c.returncode} {c.stderr!r}")
+
+        d = subprocess.run(cli + ["--compact", rel, "--compact-out", str(blob)],
+                           capture_output=True, cwd=str(ROOT), env=env)
+        assert d.returncode == 2, f"两个开关同时给居然过了：rc={d.returncode}"
+    print("      CLI：--compact-out 写出 LVMC 文件，--compact 跑出逐字节相同的结果；"
+          "错形与互斥开关都拒")
+
+
+def test_the_mirror_is_still_deferred() -> None:
+    """判（#724）：镜像那一半**还没落** —— 这条是棘轮，落地时它会红。
+
+    见 `docs/158` 已知口子第 13 条：`loment/tools/lvm.lomt` 里没有紧凑形，所以
+    `docs/250` §3 E 的孪生判据对它**不适用**。谁把紧凑形写进镜像，就得
+    按 §5 四条一起走，并删掉这条判据。
+    """
+    src = (ROOT / "loment" / "tools" / "lvm.lomt").read_text(encoding="utf-8")
+    hits = [w for w in ("compact", "COMPACT", "LVMC", "FORM_") if w in src]
+    assert not hits, (
+        f"`loment/tools/lvm.lomt` 里出现了紧凑形（{hits}）—— 镜像开工了："
+        f"按 docs/158 §5 四条把两个实现一起改完，删掉这条判据，"
+        f"再给 docs/250 §3 E 补上逐字节对拍")
+    doc = (ROOT / "docs" / "158-loment-freeze.md").read_text(encoding="utf-8")
+    assert "紧凑形 / T2 没有自举镜像" in doc, (
+        "docs/158 里那条推迟记录不见了 —— 没有它，读者会把紧凑形的全绿当成孪生过了")
+    print("      镜像：`lvm.lomt` 里没有紧凑形（推迟记录在 docs/158 第 13 条）")
+
+
 def _reencode(blob: bytes) -> bytes:
     """decode 之后再 encode 一遍（`run_compact` 内部的那条路，不跑程序）。"""
     import lvm_t2  # noqa: PLC0415

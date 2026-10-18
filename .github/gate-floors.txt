@@ -42,7 +42,7 @@ loment_channel_test 8
 loment_json_test 4
 loment_pkg_test 3
 loment_lomc_test 4
-loment_lsp_test 16
+loment_lsp_test 19
 loment_elf_test 55
 loment_pe_test 16
 loment_genesis_test 5
@@ -55,7 +55,7 @@ loment_ports_test 26
 loment_hosted_test 14
 loment_rel_test 8
 loment_editors_test 3
-vscode_ext_test 17
+vscode_ext_test 18
 loment_filetype_test 4
 loment_dap_test 4
 loment_eol_test 3

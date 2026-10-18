@@ -60,6 +60,25 @@ def _parse(text: str):
     return mod
 
 
+def _utf8_to_index(s: str, col: int) -> int:
+    """LSP 的 `character`（UTF-8 字节偏移）-> Python str 下标（码点）。
+
+    `initialize` 里声明了 `positionEncoding: "utf-8"`（`#707`）：本服务对外用**字节**
+    列（词法器的 `col` 逐字节走）。Python 的字符串下标按码点走 —— 含非 ASCII 的行不换算
+    就会整体错位。落在多字节字符中间时退到该字符之前（不劈开一个字符）。
+    """
+    if col <= 0:
+        return 0
+    return len(s.encode("utf-8")[:col].decode("utf-8", "ignore"))
+
+
+def _index_to_utf8(s: str, idx: int) -> int:
+    """Python str 下标（码点）-> UTF-8 字节偏移。"""
+    if idx <= 0:
+        return 0
+    return len(s[:idx].encode("utf-8"))
+
+
 def _line_span(text: str, line1: int) -> tuple[int, int]:
     """那一行**第一个 token** 的跨界 `(起列, 止列)`（都 0 起）。**不是**"猜哪个符号错了"。
 
@@ -74,9 +93,14 @@ def _line_span(text: str, line1: int) -> tuple[int, int]:
     （`lomc.LomError` 那段注释：编一个 `1:1:` 是撒谎）。猜错的代价由读者付，粗的代价只是
     少一点信息。
     """
+    lines = text.splitlines()
+    cur = lines[line1 - 1] if 0 <= line1 - 1 < len(lines) else ""
     for t in lomc.lex(text):
         if t.line == line1:
-            return max(0, t.col - 1), max(0, t.col - 1) + max(1, t.len)
+            c0 = max(0, t.col - 1)
+            c1 = c0 + max(1, t.len)
+            # 词法器的列是**码点**（Python 字符串下标），对外要给 UTF-8 字节列（`#707`）。
+            return _index_to_utf8(cur, c0), _index_to_utf8(cur, c1)
     return 0, 1
 
 
@@ -120,9 +144,14 @@ def _diagnostics(text: str, path: str) -> list[dict]:
         # **解析期**这一支有真列（`LomError` 带 `col`），所以给得比 `_line_span` 更准；
         # `line <= 0` = 这一档指不出位置（见 `LomError` 的注释），那就别编。
         ln = max(0, e.line - 1) if e.line > 0 else 0
-        c0 = max(0, e.col - 1) if e.line > 0 else 0
+        lines = text.splitlines()
+        cur = lines[ln] if ln < len(lines) else ""
+        ci = max(0, e.col - 1) if e.line > 0 else 0
+        # `LomError.col` 是码点列；对外是 UTF-8 字节列（`#707`）。
+        c0 = _index_to_utf8(cur, ci)
+        c1 = _index_to_utf8(cur, ci + 1)
         return [{"range": {"start": {"line": ln, "character": c0},
-                           "end": {"line": ln, "character": c0 + 1}},
+                           "end": {"line": ln, "character": c1}},
                  "severity": 1, "source": "loment", "message": str(e)}]
     out = []
     for msg in errs:
@@ -153,7 +182,8 @@ def _name_span(text: str, line0: int, word: str) -> tuple[int, int]:
     m = _re.search(rf"\b{_re.escape(word)}\b", lines[line0])
     if not m:
         return 0, 0
-    return m.start(), m.end()
+    # 对外是 UTF-8 字节列（`#707`）；`re` 给的是码点下标。
+    return _index_to_utf8(lines[line0], m.start()), _index_to_utf8(lines[line0], m.end())
 
 
 def _decls(text: str) -> dict[str, dict]:
@@ -184,7 +214,8 @@ def _member_receiver(text: str, line: int, ch: int) -> str | None:
     lines = text.splitlines()
     if not (0 <= line < len(lines)):
         return None
-    prefix = lines[line][:max(0, ch)]
+    # `ch` 是 LSP 的 UTF-8 字节列（`#707`），切片要码点下标。
+    prefix = lines[line][:_utf8_to_index(lines[line], ch)]
     m = re.search(r"([A-Za-z_]\w*)\.[A-Za-z0-9_]*$", prefix)
     if not m:
         return None
@@ -247,8 +278,12 @@ def handle(msg: dict, docs: dict[str, str]) -> list[dict]:
         # （`p.` 后面回来的还是一屏关键字）——于是每敲一个点就弹一屏没用的东西，
         # 读起来就是坏的。成员补全没实现之前，**不广告触发字符**才是诚实的那一半
         # （issue 自己指的那条路）。手动 Ctrl+Space 照旧可用。
+        # `positionEncoding: "utf-8"`（`#707`）：列是 UTF-8 字节偏移，而 LSP 3.17 的默认
+        # 是 UTF-16。不声明 = 客户端按 UTF-16 发位置 = 含非 ASCII 的行整体错位。
+        # 与 `loment/tools/lsp.lomt` 同一份声明（两处实现保持一致）。
         return [{"jsonrpc": "2.0", "id": rid, "result": {
-            "capabilities": {"textDocumentSync": 1,
+            "capabilities": {"positionEncoding": "utf-8",
+                             "textDocumentSync": 1,
                              "definitionProvider": True,
                              "documentFormattingProvider": True,
                              "completionProvider": {}},
@@ -263,6 +298,14 @@ def handle(msg: dict, docs: dict[str, str]) -> list[dict]:
             docs[uri] = text
         return [{"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
                  "params": {"uri": uri, "diagnostics": _diagnostics(docs.get(uri, ""), uri)}}]
+    if method == "textDocument/didSave":
+        # `#705`：didSave **不是编辑**。真实客户端不带正文；把它当 didChange 会把内存里的
+        # 文档存成空串。保存只是磁盘通知 —— 不改文档。
+        return []
+    if method == "textDocument/didClose":
+        # `#706`：关掉就释放（`loment/tools/lsp.lomt` 的表也这么清）。
+        docs.pop((params.get("textDocument") or {}).get("uri", ""), None)
+        return []
     if method == "textDocument/definition":
         uri = (params.get("textDocument") or {}).get("uri", "")
         pos = params.get("position") or {}
@@ -274,7 +317,8 @@ def handle(msg: dict, docs: dict[str, str]) -> list[dict]:
             import re
             # 光标可能落在词中间 (编辑器就是这样报的): 先向左扩到词首, 再取整词
             line = lines[ln]
-            ch = pos.get("character", 0)
+            # `character` 是 UTF-8 字节列（`#707`），扩词要在码点下标上走。
+            ch = _utf8_to_index(line, pos.get("character", 0))
             start = min(max(ch, 0), len(line))
             while start > 0 and (line[start - 1].isalnum() or line[start - 1] == "_"):
                 start -= 1

@@ -207,6 +207,19 @@ need() {
     return 0
 }
 
+# L0 layout files (`.lom`) are a different language from L1 source. The L1 commands used to
+# accept them and answer in L1 terms (check invented E002s, fmt printed nothing) - a file the
+# user cannot fix from the message they got (#57). Refuse at the door, name the language.
+reject_l0() {
+    case "$1" in
+        *.lom|*.LOM)
+            echo "loment: $2 reads L1 source (.lomt); $1 is an L0 layout file (.lom)" >&2
+            echo "        L0 files are consumed by the firmware build, not by the L1 toolchain." >&2
+            exit 2 ;;
+    esac
+    return 0
+}
+
 case "${1:-help}" in
     version|-v|--version)
         cat "$share/version" ;;
@@ -251,6 +264,7 @@ case "${1:-help}" in
             esac
         done
         [ -n "$src" ] || { usage >&2; exit 2; }
+        reject_l0 "$src" "$mode"
         need loment-driver loment-driver
         tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
         dpath=$tmp/d.jsonl
@@ -274,10 +288,12 @@ case "${1:-help}" in
         exit 0 ;;
     fmt)
         [ $# -eq 2 ] || { usage >&2; exit 2; }
+        reject_l0 "$2" fmt
         need loment-fmt loment-fmt
         exec "$(tool loment-fmt)" "$(to_posix "$2")" ;;
     doc)
         [ $# -eq 2 ] || { usage >&2; exit 2; }
+        reject_l0 "$2" doc
         need loment-doc loment-doc
         exec "$(tool loment-doc)" "$(to_posix "$2")" ;;
     lsp)
@@ -302,6 +318,7 @@ case "${1:-help}" in
         mode=$1; shift
         [ $# -ge 1 ] || { usage >&2; exit 2; }
         src=$1; shift
+        reject_l0 "$src" "$mode"
         out=
         links=()
         nc=

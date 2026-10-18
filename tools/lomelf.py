@@ -6394,7 +6394,11 @@ def compile_ll(text: str, objects: list | None = None,
         # **按 `--link` 顺序解析**（`#596`）：第一个导出这个名字的共享对象提供它。
         # 每个导入都做完整检查（版本、数据符号）；一个都没有就报到链接期，不是运行期。
         for nm in imports:
-            owner = next((so for so in shared if nm in so.exports), None)
+            # **hidden 也是"这个库里有这个名字"**（`#642`）：选 owner 时把它算进来，
+            # 好让 `resolve()` 给出"它藏着，loader 不会跨对象绑定"那句 —— 否则用户拿到
+            # 的是"没有导出"，方向完全指错（名字明明在 `.dynsym` 里）。
+            owner = next((so for so in shared
+                          if nm in so.exports or nm in so.hidden), None)
             if owner is None:
                 raise Unsupported(
                     ", ".join(so.soname for so in shared)

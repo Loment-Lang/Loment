@@ -332,9 +332,13 @@ def _minimal_shared_object() -> tuple[bytearray, dict[str, int]]:
     offs["empty"] = len(dstr)                  # `#641`：指向一个空串
     dstr += b"\x00"
     shstr_off = dstr_off + len(dstr)
-    shstr = b"\x00.dynsym\x00.dynstr\x00.shstrtab\x00"
-    shoff = (shstr_off + len(shstr) + 7) // 8 * 8
-    total = shoff + 4 * 64
+    # `.text` 是真的（`#643` 要求 FUNC 的 `st_value` 落在**可执行**节/段里）：
+    # 每个导出给一个字节，符号按 `st_shndx=4` 指过来。
+    shstr = b"\x00.dynsym\x00.dynstr\x00.shstrtab\x00.text\x00"
+    text_off = shstr_off + len(shstr)
+    total_text = len(syms)
+    shoff = (text_off + total_text + 7) // 8 * 8
+    total = shoff + 5 * 64
     b = bytearray(total)
     b[0:8] = b"\x7fELF\x02\x01\x01\x00"
     struct.pack_into("<H", b, 16, 3)           # ET_DYN
@@ -346,8 +350,8 @@ def _minimal_shared_object() -> tuple[bytearray, dict[str, int]]:
     struct.pack_into("<H", b, 54, 56)
     struct.pack_into("<H", b, 56, phnum)
     struct.pack_into("<H", b, 58, 64)
-    struct.pack_into("<H", b, 60, 4)
-    struct.pack_into("<H", b, 62, 3)
+    struct.pack_into("<H", b, 60, 5)           # e_shnum
+    struct.pack_into("<H", b, 62, 3)           # e_shstrndx = .shstrtab
     # PT_LOAD：vaddr 0 恒等映射整个文件，R|X。PT_DYNAMIC 指进中间那张表。
     struct.pack_into("<IIQQQQQQ", b, phoff, 1, 5, 0, 0, 0, total, total, 0x1000)
     struct.pack_into("<IIQQQQQQ", b, phoff + 56, 2, 6, dyn_off, dyn_off,
@@ -356,12 +360,11 @@ def _minimal_shared_object() -> tuple[bytearray, dict[str, int]]:
                                     (6, dynsym_off), (11, 24),
                                     (14, offs["libfixture.so.1"]), (0, 0))):
         struct.pack_into("<QQ", b, dyn_off + i * 16, tag, val)
-    value = dynsym_off + 24
-    for i, nm in enumerate(syms, start=1):
-        struct.pack_into("<IBBHQQ", b, dynsym_off + i * 24, offs[nm],
-                         (1 << 4) | 2, 0, 1, value + i * 8, 8)
     b[dstr_off:dstr_off + len(dstr)] = dstr
     b[shstr_off:shstr_off + len(shstr)] = shstr
+    for i, nm in enumerate(syms, start=1):
+        struct.pack_into("<IBBHQQ", b, dynsym_off + i * 24, offs[nm],
+                         (1 << 4) | 2, 0, 4, text_off + i - 1, 1)
 
     def sec(idx, nameoff, typ, flags, off, size, link, info, align, ent):
         struct.pack_into("<IIQQQQIIQQ", b, shoff + idx * 64, nameoff, typ,
@@ -370,6 +373,7 @@ def _minimal_shared_object() -> tuple[bytearray, dict[str, int]]:
     sec(1, 1, 11, 2, dynsym_off, dynsym_size, 2, 1, 8, 24)   # .dynsym
     sec(2, 9, 3, 2, dstr_off, len(dstr), 0, 0, 1, 0)         # .dynstr
     sec(3, 17, 3, 0, shstr_off, len(shstr), 0, 0, 1, 0)      # .shstrtab
+    sec(4, 27, 1, 6, text_off, total_text, 0, 0, 16, 0)      # .text ALLOC|EXEC
     return b, {"sym": dynsym_off + 24, "soname": dyn_off + 4 * 16,
                "empty": offs["empty"]}
 
@@ -539,12 +543,12 @@ def test_unusable_archive_member_is_named_when_its_symbol_is_needed():
     """`#628`：归档成员解析失败被**静默丢掉**，失败最后以"未定义的符号 f"报给调用方。
 
     旧注释写着"真需要它的符号时后面会报到"—— 它从来没报过。判据要求消息里出现
-    **成员名**、它**定义的名字**、以及**用不了的原因**（这里是重定位类型 42），
+    **成员名**、它**定义的名字**、以及**用不了的原因**（这里是重定位类型 3），
     否则用户永远不知道符号其实在库里。
     """
     with tempfile.TemporaryDirectory() as t:
         ar = Path(t) / "libbroken.a"
-        ar.write_bytes(_archive("broken.o", _reloc_object(42)))
+        ar.write_bytes(_archive("broken.o", _reloc_object(3)))
         try:
             lomelf.compile_ll(_IR_CALLS_F, [lomelf.load_foreign(ar)],
                               allow_ports=True)
@@ -554,7 +558,7 @@ def test_unusable_archive_member_is_named_when_its_symbol_is_needed():
             raise AssertionError("坏成员被静默丢掉，符号却解析成功？（夹具或链接器有问题）")
         assert "broken.o" in msg, msg
         assert "defines f" in msg, msg
-        assert "42" in msg, msg
+        assert "3" in msg, msg
         print(f"      {msg}")
 
 

@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://loment-lang.github.io/loment-site/">Website</a> ·
-  <a href="https://github.com/Loment-Lang/loment/releases/tag/v0.1.4.5-quickfix">Download 0.1.4.5</a> ·
+  <a href="https://github.com/Loment-Lang/loment/releases/tag/v0.1.4.6">Download 0.1.4.6</a> ·
   <a href="QUICKSTART.md">Quick start</a> ·
   <a href=".claude/skills/loment/SKILL.md">Language guide</a> ·
   <a href="standard/LLS.md">Standard</a> ·

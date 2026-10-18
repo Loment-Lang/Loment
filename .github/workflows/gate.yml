@@ -90,6 +90,14 @@ env:
   #: 连条目都没有）；10 片让六个均分片的预测和降到 ~394s, 与长尾（173.6 / 92.8 / 63.9）
   #: 同量级。量的方法与原始数据见 `tools/ci.py:SHARD_COST` 与 `docs/213` §10。
   GATE_SHARDS: "10"
+  #: **判定每一笔的镜像摘要**（`#890`）。`image:` 那一格不支持表达式，所以两个 job 里
+  #: 写的是同一个字面量；这里再记一份，聚合那一步把它写进 `env.txt` 与工件里 ——
+  #: 于是"哪个环境判的"有答案，而不是只有工作流文件里那一行。
+  #: 换镜像 = 改这三处（两处 `image:` + 这一行）**和** `ci-image.yml` 的 tag，同一个 PR。
+  CI_IMAGE_DIGEST: "sha256:3053138c2a1f1dc664ab98b60e41665a4a0ed66715847b4a448384e8a60e5c53"
+  #: 这个摘要是从哪个 tag 解析出来的 —— 与 `ci-image.yml` 的 `TAG` 必须相等。
+  #: 摘要本身不可读，**人和判据都靠这一行**知道"换的是哪一版镜像"。
+  CI_IMAGE_TAG: "5"
   #: **容器里的 git 要靠这一条才肯干活。** 工作区是 runner 的用户 checkout 的（UID 不是
   #: 容器里的 root），git 于是拿 "dubious ownership" 拒绝 `ls-files` / `rev-parse` /
   #: `check-attr` / `check-ignore` —— 而好几条判据正是靠这几个子命令的。2026-10-10 换上
@@ -298,7 +306,7 @@ jobs:
       # 那样问出来的答案是"什么都没动"⇒ 这两个判据会把每个 PR 都判红。
       # 拿不到历史时它们**不静默放行**，会报一条指名要这个参数的账。
       # 这个仓的 pack 是 ~32 MiB / 1400 多个提交，全取一次是秒级，换得起。
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
           fetch-depth: 0
 
@@ -389,7 +397,7 @@ jobs:
           fi
           echo "独占片: 没有新红"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         if: ${{ always() }}
         with:
           name: gate-log-1
@@ -431,7 +439,7 @@ jobs:
       # 算出来的 —— `ci-image.yml` 那边是 `github.repository_owner` 转小写，两边靠人看着对齐。
       # 顺序是硬的：先在新属主下把 tag 建出来、**再把它设成 public**（包默认私有，而 fork 的
       # PR 拿不到私有包 ⇒ 它们会死在"拉镜像"这一步）、**最后**才改这里。反了就是每一片都拉不到。
-      image: ghcr.io/loment-lang/loment-ci:5
+      image: ghcr.io/loment-lang/loment-ci@sha256:3053138c2a1f1dc664ab98b60e41665a4a0ed66715847b4a448384e8a60e5c53
     strategy:
       fail-fast: false
       matrix:
@@ -447,7 +455,7 @@ jobs:
           - { shard: 10, total: 10 }
     steps:
       # 同 `static-exclusive`：`lom_audit` 的 M93/M95 要历史（见那一处的注释）。
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
           fetch-depth: 0
 
@@ -561,7 +569,7 @@ jobs:
           fi
           echo "片 ${{ matrix.shard }}: 没有新红"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         if: ${{ always() }}
         with:
           name: gate-log-${{ matrix.shard }}
@@ -585,10 +593,10 @@ jobs:
     if: ${{ github.event.inputs.suite != '' || github.event.inputs.only != '' || github.event.inputs.diagnose_twin == 'true' }}
     container:
       # 与 `static-shard` 同一条镜像，理由与那句"顺序是硬的"见上面。
-      image: ghcr.io/loment-lang/loment-ci:5
+      image: ghcr.io/loment-lang/loment-ci@sha256:3053138c2a1f1dc664ab98b60e41665a4a0ed66715847b4a448384e8a60e5c53
     steps:
       # 同 `static-exclusive`：`lom_audit` 的 M93/M95 要历史（见那一处的注释）。
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
           fetch-depth: 0
 
@@ -685,9 +693,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           # **`#443`：`gate-log-[0-9]*`，不带 `gate-log-merged`。** `gate-log-merged`
           # 是本 job 上一次 attempt 自己上传的**全量副本** —— `gh run rerun --failed`
@@ -896,11 +904,26 @@ jobs:
           echo "::error::独占片 = ${{ needs.static-exclusive.result }}，分片 = ${{ needs.static-shard.result }} —— 门禁不通过"
           exit 1
 
-      - uses: actions/upload-artifact@v4
+      # **判定这一笔的是哪个镜像**（`#890`）：写进工件，也写进 step summary。
+      # 没有这一行，"绿"就只连着工作流文件里那个可变 tag；有了它，绿连着一个摘要。
+      - name: 记下判定这一笔的镜像摘要
+        if: ${{ always() }}
+        run: |
+          {
+            echo "ci-image: ghcr.io/loment-lang/loment-ci@${CI_IMAGE_DIGEST}"
+            echo "run: ${GITHUB_RUN_ID}"
+            echo "sha: ${GITHUB_SHA}"
+            echo "ref: ${GITHUB_REF}"
+          } > env.txt
+          cat env.txt
+          { echo '### 门禁环境'; echo '```'; cat env.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         if: ${{ always() }}
         with:
           name: gate-log-merged
           path: |
+            env.txt
             gate.out
             red.txt
             base.txt

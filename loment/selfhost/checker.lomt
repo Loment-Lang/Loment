@@ -32,9 +32,10 @@ use switches
 //
 //: 0 = 开发版（默认）；1 = 发行版。**打包期由 `loment_dist.py` 替换这一行。**
 //
-//: **`pub` 是因为渠道闸现在有两处**（2026-10-12）：`vm` 那条在本文件（`check()` 读它），
-//: `libl` 那条在**名字解析**处（`driver.lomt` 的 `use <名字>` 分支），那在另一个模块里 ——
-//: 它 `use checker`，要读得到这条常量就得是 `pub`。
+//: **`pub` 是历史**：2026-10-12 时 `libl` 那道闸在**名字解析**处（`driver.lomt` 的
+//: `use <名字>` 分支），它在另一个模块里、要 `use checker` 读这条常量。那道闸 2026-10-15
+//: 放开（`#358`），**今天没有模块再读它**；`pub` 留着是为了不为此改动产物（改可见性会
+//: 改种子字节），撤掉它属于拆渠道那次改动。
 //: **"一行常量"这条形状没变**：打包仍只替换这一行的文本（`tools/loment_seed.py` 的
 //: `CHANNEL_LINE_DEV`/`CHANNEL_LINE_RELEASE` 跟着这一行走），判据 F 照旧成立。
 pub const LOMENT_CHANNEL: u32 = 0;
@@ -509,7 +510,12 @@ fn chk_core_dim(src: ptr, t: ptr, k: u32) -> u32 {
     if chk_tok_is(src, t, k, "lms_close") || chk_tok_is(src, t, k, "lms_open") {
         return 5;
     }
-    return 6;
+    // 第七维（`docs/262`，用户 2026-10-18）：`lspe`。与其它六维正交 ——
+    // 它不改变任何判决，只决定"放行有没有来源"的台账在不在。
+    if chk_tok_is(src, t, k, "lspe_open_admin") || chk_tok_is(src, t, k, "lspe_close_admin") {
+        return 6;
+    }
+    return 7;
 }
 
 /// token `i` 是不是**会把运行期拖进产物**的构造（`docs/217`）。1 = 是。
@@ -3099,6 +3105,168 @@ fn chk_match(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
     return eb;
 }
 
+// ---------------------------------------------------------------- 末尾掉出（issue #22）
+
+/// **非 `()` 的函数不许从末尾掉出去**（issue #22）。规则是**纯结构**的，与参考实现
+/// `lomentc._falls_through` 同一条：末尾是 `return`；或末尾是带 `else` 的 `if` 且
+/// **每一支**都不掉；或末尾是 `match` 且**每条臂**都不掉。别的形状一律算会掉。
+///
+/// 为什么必须有：`check` 通过 = "这份程序不会 trap" 是这条命令唯一的保证，而掉出末尾
+/// 在发射之后是一条**非法指令**（SIGILL）—— 只在真走到那一支时才发生，多半是"上线很久、
+/// 错误分支被新输入踩到"才炸。参考实现早就报了（E027），这里是把它搬到自举侧：
+/// `loment_rule_parity` 里 `falloff-if` / `falloff-match-arm` 两条一直登记成 MISSING。
+const E_FALL: u32 = 27;
+
+/// 这个 `fn` 有没有函数体？1 = 有。
+///
+/// 必须有这一条：trait 里那种**只有签名**的 `fn m(self) -> u32;` 没有体，而
+/// `chk_find_brace` 会一路扫到**后面** `struct` / `impl` 的 `{` —— 拿它当体来判
+/// "掉出末尾"，报的就是一句凭空捏造的错（实测 `loment/examples/native_trait.lomt`）。
+/// 扫到第一个 `{` 或 `;` 为止；`[u32; 3]` 里的 `;` 要先跳过方括号才不算数。
+fn chk_fn_has_body(src: ptr, t: ptr, i: u32) -> u32 {
+    let pd: u32 = 0;
+    let bd: u32 = 0;
+    let j: u32 = i + 1;
+    while chk_tok_kind(t, j) != 4 {
+        if chk_tok_is(src, t, j, "(") { pd = pd + 1; }
+        if chk_tok_is(src, t, j, ")") { if pd > 0 { pd = pd - 1; } }
+        if chk_tok_is(src, t, j, "[") { bd = bd + 1; }
+        if chk_tok_is(src, t, j, "]") { if bd > 0 { bd = bd - 1; } }
+        if pd == 0 && bd == 0 {
+            if chk_tok_is(src, t, j, "{") { return 1; }
+            if chk_tok_is(src, t, j, ";") { return 0; }
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+
+/// 从形参括号 `(` 到函数体 `{` 之间，返回类型是不是 `()`（没写 `->` 也算）。
+///
+/// 不看 `ret` 的类型编码：那是 `(kind << 28) + payload`，而**复合类型一律记 0 = 未知**
+/// （见本文件顶部），用 0 当"是 unit"会把 `-> [u32; 3]` 也当成 unit 放过去。
+fn chk_ret_unit(src: ptr, t: ptr, from: u32, to: u32) -> u32 {
+    let j: u32 = from;
+    while j < to && chk_tok_kind(t, j) != 4 {
+        // 词法器把 `->` 切成**两个** token（`-` 与 `>`），不是一体 —— 本文件别处
+        // 读返回类型时也是分开比的。
+        if chk_tok_is(src, t, j, "-") && chk_tok_is(src, t, j + 1, ">") {
+            let k: u32 = j + 2;
+            if chk_tok_is(src, t, k, "(") && chk_tok_is(src, t, k + 1, ")") {
+                return 1;
+            }
+            return 0;
+        }
+        j = j + 1;
+    }
+    return 1;
+}
+
+/// `[cur, e)` 里**一条语句**结束之后的位置（指向下一条语句的第一个 token）。
+/// 控制语句没有结尾 `;`：跳到它（含 `else` 链）的块尾之后。
+fn chk_stmt_end(src: ptr, t: ptr, cur: u32, e: u32) -> u32 {
+    if chk_tok_is(src, t, cur, "if") || chk_tok_is(src, t, cur, "while")
+            || chk_tok_is(src, t, cur, "for") || chk_tok_is(src, t, cur, "match") {
+        let k0: u32 = chk_skip_body(src, t, cur);
+        let k: u32 = k0;
+        while k < e && chk_tok_is(src, t, k, "else") {
+            k = chk_skip_body(src, t, k + 1);
+        }
+        return k;
+    }
+    // 普通语句：找顶层 `;`。按花括号深度算 —— 结构体字面量里的逗号不是语句分隔符，
+    // 而 `{ ... }` 里的 `;` 也不该提前截断。
+    let d: u32 = 0;
+    let j: u32 = cur;
+    while j < e && chk_tok_kind(t, j) != 4 {
+        if chk_tok_is(src, t, j, "{") {
+            d = d + 1;
+        }
+        if chk_tok_is(src, t, j, "}") {
+            d = d - 1;
+        }
+        if d == 0 && chk_tok_is(src, t, j, ";") {
+            return j + 1;
+        }
+        j = j + 1;
+    }
+    return e;
+}
+
+/// 块 `[b..e]`（`b` = `{`，`e` = 它的 `}`）**可能**从末尾掉出去吗？1 = 会。
+fn chk_falls(src: ptr, t: ptr, b: u32, e: u32) -> u32 {
+    let last: u32 = 0;
+    let cur: u32 = b + 1;
+    while cur < e {
+        last = cur;
+        cur = chk_stmt_end(src, t, cur, e);
+    }
+    if last == 0 {
+        return 0;                      // 空块：与参考实现一致，不判
+    }
+    if chk_tok_is(src, t, last, "return") {
+        return 0;
+    }
+    if chk_tok_is(src, t, last, "if") {
+        let lb: u32 = chk_find_at(src, t, last + 1, e, "{");
+        if lb >= e {
+            return 1;
+        }
+        let le: u32 = chk_skip_body(src, t, lb) - 1;
+        let nb: u32 = le + 1;
+        if !chk_tok_is(src, t, nb, "else") {
+            return 1;                  // 没有 else ⇒ 条件为假时掉出去
+        }
+        if chk_falls(src, t, lb, le) == 1 {
+            return 1;
+        }
+        let k: u32 = nb;
+        while k < e && chk_tok_is(src, t, k, "else") {
+            let eb: u32 = chk_find_at(src, t, k + 1, e, "{");
+            if eb >= e {
+                return 1;
+            }
+            let ee: u32 = chk_skip_body(src, t, eb) - 1;
+            if chk_falls(src, t, eb, ee) == 1 {
+                return 1;
+            }
+            k = ee + 1;
+        }
+        return 0;
+    }
+    if chk_tok_is(src, t, last, "match") {
+        let lb2: u32 = chk_find_at(src, t, last + 1, e, "{");
+        if lb2 >= e {
+            return 1;
+        }
+        let le2: u32 = chk_skip_body(src, t, lb2) - 1;
+        let j: u32 = lb2 + 1;
+        let arms: u32 = 0;
+        while j < le2 {
+            // `=>` 与 `->` 一样是**两个** token；这一处按两 token 比。
+            if chk_tok_is(src, t, j, "=") && chk_tok_is(src, t, j + 1, ">") {
+                let ab: u32 = chk_find_at(src, t, j + 2, le2, "{");
+                if ab >= le2 {
+                    return 1;
+                }
+                let ae: u32 = chk_skip_body(src, t, ab) - 1;
+                arms = arms + 1;
+                if chk_falls(src, t, ab, ae) == 1 {
+                    return 1;
+                }
+                j = ae + 1;
+            } else {
+                j = j + 1;
+            }
+        }
+        if arms == 0 {
+            return 1;
+        }
+        return 0;
+    }
+    return 1;
+}
+
 /// 语句级检查 (批次 2/3): let / return / 赋值 / if / while / for / match。
 ///
 /// 形参压到 10 个: 自举 codegen 的实参上限是 10 (形参类型表步长 80 = 10 槽), 超限会
@@ -3498,6 +3666,9 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     let nch_lms: u32 = 0;       // 第六维（`docs/253`）：内存安全 —— ⚠ **只数重复**：
                                 // `lms` 今天**没有冲突对**（它不引入运行期组件，`docs/253` §11.2），
                                 // 所以不像上面五维那样还要 `v_*` / `ln_*` 来判冲突。
+    let nch_lspe: u32 = 0;      // 第七维（`docs/262`）：安全审计 —— 同样**只数重复**。
+                                // 它不改变任何判决，所以没有冲突对。
+    let ln_lspe: u32 = 0;       // 那一行 —— 渠道闸要指到它
     // 生效的取值（0 = 没写），用来判"两档不能同时选"（`docs/175` §3.4 ⚠）。
     // **要等这一遍走完才判** —— 两行谁先写是不定的。
     let v_mode: u32 = 0;        // 1 = std, 2 = no_std
@@ -3710,6 +3881,13 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                 if nch_lms > 1 {
                     o = sym_pub(src, t, out, o, E_MODE, i);
                 }
+            } else if dim == 6 {
+                // 第七维（`docs/262`）：`lspe`。**只有重复要判** —— 它没有冲突对。
+                nch_lspe = nch_lspe + 1;
+                ln_lspe = i;
+                if nch_lspe > 1 {
+                    o = sym_pub(src, t, out, o, E_MODE, i);
+                }
             } else {
                 // 不是核心模式的取值 —— 与改之前那条同形
                 // (锚在 `choose` 上而不是取值上: 参考实现也是报 choose_lines 那一行)。
@@ -3801,41 +3979,32 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     // 它读的是**源码里用没用到运行期构造**，这一层只有 token 流判不了。少写一条判不了的
     // 冲突，比写一条判不准的强（`docs/188` 的"宁拒勿猜"）。
     //
-    // ---- **渠道闸**（`docs/231` §2）：发行版里 `choose vm` 与 `choose hosted` 都是编译错误。
-    // 用户 2026-10-11（vm）：「不要在发行版 Loment 里被调用，所有调用 VM 的都是非法的，
-    // 只能 dev 可以被调用，直到第一个可使用的 LVM 诞生」。2026-10-12（libc）：
-    // 「锁掉 LibC，在 0.1.4.5（即将发布）中不可调用 LibC，因为这尚未完工」。
+    // ---- **渠道**（`docs/231` §2）：这一行常量是**打包期的注入点**，今天没有闸读它。
+    // 它曾守着四道闸：`vm`（用户 2026-10-11：「只能 dev 可以被调用，直到第一个可使用的
+    // LVM 诞生」）、`choose hosted` 与端口（2026-10-12：「锁掉 LibC …」）、`use libl`。
+    // **四道全部放开**：`use libl` 2026-10-15（`#358`）、端口与 `hosted` 2026-10-17（`#406`）、
+    // `vm` 2026-10-17（用户裁决，LVM 完成一大半）—— 发行版现在四样都收。
     // `LOMENT_CHANNEL` 就是**本文件顶上那一行常量** —— 打包期只换那一行，
     // 于是"包里除那一行之外逐字节等于仓库"仍可判（`docs/231` §5 判据 F）。
     // （⚠ 第一版曾把它做成独立模块 `channel.lomt`；那样会往语料里塞一份**空单元**，
     // 而空单元的 IR 收尾两个实现本来就不同 —— 改回一行常量，见 `docs/231` §2.2。）
     //
-    // ⚠ **两个闸共用这一个局部量**（不是各写一个 `let`）：常量在 IR 里是**按使用点内联**的，
-    // 每多一处使用，发行版种子与 dev 种子就多差一个字节 —— 而 `loment_channel_test` 那条
-    // "两个种子只差**一处**"正是拿这个当判据的（`docs/231` §5 判据 F）。各写一个是错的：
+    // ⚠ **只留这一个读取点**：常量在 IR 里是**按使用点内联**的，每多一处使用，发行版种子
+    // 与 dev 种子就多差一个字节 —— 而 `loment_channel_test` 那条"两个种子只差**一处**"
+    // 正是拿这个当判据的（`docs/231` §5 判据 F）。**再加闸时别各写一个 `let`**：
     // 判据会红，且红的原因看起来像"注入改歪了"。
     //
-    // **先落到一个局部变量，再比** —— 直接写 `if LOMENT_CHANNEL == 1` 两边都是
-    // **字面量**，那会踩到 **issue #224**：`tools/lomentc.py` 把上下文的 `bool` 期望
-    // 类型渗进整数运算，参考实现发 `icmp eq i1 0, 1`、自举侧发 `icmp eq i32 0, 1` ——
-    // 差**恰好一个字符**，`loment_p8_test` 的语料对照当场红 1 字节。
-    // **那不是自举侧的错，是参考实现已登记的缺陷**（故不在这里顺手修）；
-    // 过一次局部变量，操作数就不是字面量了，两个实现于是又逐字节一致。
-    //
-    // **不再包成一个函数**：这一层加函数会**真的**慢下去 —— 自举编译器的符号查找是
-    // 线性扫（`docs/225` §3.3），而那条 60s 护栏本来就只剩 ~1% 余量（实测 59.33s）。
-    // 实测同条件 A/B：加函数那版 62.9s（红）、纯净树 58.24s（过）。
+    // **为什么还留着**：渠道是"下一个还没兑现的维"的注入点（`loment_channel.py` 的
+    // docstring），拆掉渠道是另一次改动；上面那条判据就钉在这一行上。
     let rel: u32 = LOMENT_CHANNEL;
-    // ---- **`vm` 那一扇 2026-10-18 放开**（`#355`，`docs/263`）：引擎落齐了（T0–T3 +
-    // 去优化，`docs/259` / `docs/261`），失败面有判据（`docs/262`），**而且 `loment-lvm`
-    // 随包发**（`loment_dist.TOOLS`）—— 发行版里 `choose vm` 不再是"一句拿不到的承诺"。
-    // **探针留着、期望反转**（`loment_channel_test` 判据 D），与 `use libl`（`#358`）/
-    // `choose hosted`（`#406`）同一条棘轮：**替换，不删掉**。
-    // ⚠ `rel` **仍然要被读到一次**：`loment_channel_test` 钉着"dev / release 两个种子
-    // 只差一处"，而下面 `lspe` 那条闸还在用它。**别把那个 `let` 一起删了。**
-    // ---- **对外端口那一维 2026-10-17 放开**（`#406`）：静态（`#359`）与运行期（`#360`）
-    // 两半都落齐了，所以发行版里 `choose hosted` 不再是"一句拿不到的承诺"，闸拆掉。
-    // 用户 2026-10-12 那句「锁掉 LibC … 因为这尚未完工」的前提**已经不成立**。
+    // **LSPE 渠道闸（0.1.4.7）**：第一部分（维度 + 台账 + 站点普查）还没兑现 ——
+    // 发行版里 `choose lspe_*` 是编译错误。这与 LVM 当初同一条形状（用户 2026-10-18 定）：
+    // **写得出、却什么也拿不到，比写不出来更坏**。dev 通道照常收。
+    // 放开的时候把 `loment_channel_test` 那条探针**反过来**，别删 —— 删掉等于把
+    // "这道闸曾经存在"一起删掉（与 `use libl` / `choose hosted` / `choose vm` 同一条棘轮）。
+    if rel == 1 && nch_lspe > 0 {
+        o = sym_pub(src, t, out, o, E_MODE, ln_lspe);
+    }
     // ---- 第一遍半: 能力表判错 (等 caps 与 excluded 都收齐, 顺序无关)
     o = chk_caps_verify(src, t, ctab, load32(nc, 0), exs, nexs, out, o);
     // ---- 第二遍: 函数体里的调用检查
@@ -3946,6 +4115,17 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                 store32(tyt, 3576, 0);
                 chk_moves(src, t, syms, n, env, load32(tyt, 3520), fbra, fend, out, oc);
                 o = load32(oc, 0);
+                // 非 `()` 的函数不许从末尾掉出去（issue #22）—— 与参考实现同一条规则。
+                // 放在 chk_body/chk_moves 之后：那两趟可能已经写过诊断，`o` 得先回读。
+                // `fend` 是 `chk_skip_body` 的约定 —— 指向 `}` **之后**；`chk_falls` 要的是
+                // `}` 自己的下标，所以减一。
+                // `chk_fn_has_body` 先过一遍：`fbra` 是"往后扫到的第一个 `{`"，对**只有
+                // 签名**的方法它不是自己的体（见那个函数的注释），不能拿它来判。
+                if chk_fn_has_body(src, t, i) == 1
+                        && chk_ret_unit(src, t, lp2, fbra) == 0
+                        && chk_falls(src, t, fbra, fend - 1) == 1 {
+                    o = sym_pub(src, t, out, o, E_FALL, i);
+                }
                 i = fend;
             } else {
                 i = i + 1;
@@ -4125,12 +4305,15 @@ fn chk_command(src: ptr, t: ptr, out: ptr, o: u32, scr: ptr) -> u32 {
 /// arena 一块里的分段布局 (驱动按这几个常量切片; 单位: 字节)。
 /// 顺序与 `check_arena` 的形参顺序一致, 驱动侧一个 `sys_alloc(CHK_ARENA)` 就够。
 /// syms 从 8192 涨到 10240 是批次 2 第二段: 符号表条目加了一格 aux (stride 20)。
+/// **2026-10-18 再涨到 5200 条**（`#719`）：`std` 门面把整个标准库并进一个单元，闭包
+/// 有 4956 个顶层名字（实测按函数/常量/结构/枚举/impl 方法数），4600 条的旧上限会写穿
+/// 到 `scr` 区 —— 没有越界报错，只是把后面的段改坏。5200 条留 244 条余量。
 pub fn chk_arena_syms() -> u32 { return 0; }
-pub fn chk_arena_scr() -> u32 { return 92000; }
-pub fn chk_arena_ctab() -> u32 { return 93024; }
-pub fn chk_arena_nc() -> u32 { return 93536; }
-pub fn chk_arena_exs() -> u32 { return 93552; }
-pub fn chk_arena_env() -> u32 { return 93808; }
+pub fn chk_arena_scr() -> u32 { return 104000; }
+pub fn chk_arena_ctab() -> u32 { return 105024; }
+pub fn chk_arena_nc() -> u32 { return 105536; }
+pub fn chk_arena_exs() -> u32 { return 105552; }
+pub fn chk_arena_env() -> u32 { return 105808; }
 /// 类型表块: [0..3584) = 复合类型表 (表头 4 字节条数 + 8 字节/条, **每函数开头清零**),
 /// [3584..4096) = 借用检查的名字表, [4096..4112) = 诊断偏移格 (chk_pub 写进这里,
 /// 免得每层递归都回传偏移)。
@@ -4139,8 +4322,8 @@ pub fn chk_arena_env() -> u32 { return 93808; }
 /// 登记元素/切片类型 —— 一个 150 条 let 的函数能开出几百条。不清零就会写穿到后面的
 /// 区 (静默改坏别人), 所以条数是"每函数上限"而不是"整单元上限"。
 /// 448 条/函数对语料最重的函数 (152 let) 仍有 3 倍余量。
-pub fn chk_arena_tyt() -> u32 { return 95856; }
-pub fn chk_arena_bytes() -> u32 { return 99968; }
+pub fn chk_arena_tyt() -> u32 { return 107856; }
+pub fn chk_arena_bytes() -> u32 { return 111968; }
 
 // 原先这里有个 `check(src, t, out)` 薄包装 (自己开 arena)。**去掉了**: arena 现在 ~100 KB,
 // 语言自带的 64 KiB bump 堆放不下, 而"在调用方进程里改 brk"这条路对 C 夹具是**危险**的

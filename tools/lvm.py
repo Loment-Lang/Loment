@@ -121,6 +121,48 @@ _ICMP = {
 }
 _SIGNED_CMP = ("sgt", "sge", "slt", "sle")
 
+
+def arith(op: str, a: int, b: int, ty: str) -> int:
+    """一条算术/位运算 —— **T0 与 T2 共用这一份**（issue #717）。
+
+    移位量按指令上写的宽度读成**有符号**数：负数不是一个值，是一个错。Python 的
+    `<<`/`>>` 对负数抛的是 `ValueError: negative shift count`（一条 traceback，不是诊断），
+    而自举镜像把位串读成 u64 后静默返回一个值 —— 三种行为里没有一种是"同一个答案"。
+    这里统一成 `LvmError`；T2 的两条执行路径也走这里，镜像照同一句话拒。
+
+    ⚠ 正的越界移位量**不动**：三种实现已经在"先移位再按宽度截断"上一致
+    （`shl`/`lshr` → 0，`ashr` → 符号位），那不是这一条要改的事。
+    """
+    if op in ("shl", "lshr", "ashr") and signed(b, ty) < 0:
+        raise LvmError("移位量是负数")
+    if op == "ashr":
+        return mask(signed(a, ty) >> b, ty)
+    return mask(_ARITH[op](a, b), ty)
+
+
+def gep_offset(ty: str, idxs: list[int], text: str = "") -> int:
+    """`getelementptr` 的下标游走 —— **T0 与 T2 的同一份实现**（issue #715）。
+
+    第 0 步是"把指针挪过整个基类型"，之后数组脱一层、结构体按字段偏移。结构体那一步
+    **一直**是运行期算的（`lomelf.field_offset`）—— 所以非恒定下标在 T0 里不是错误；
+    T2 静态走不动时退到这里，两边因此同义。
+    """
+    off, cur = 0, ty
+    for k, idx in enumerate(idxs):
+        if k == 0:
+            off += idx * lomelf.size_of(cur)
+            continue
+        if cur.startswith("["):
+            # `array_parts` 返回 **(个数, 元素)** —— 个数在前，别取 `[0]`。
+            cur = lomelf.array_parts(cur)[1]
+            off += idx * lomelf.size_of(cur)
+        elif cur.startswith("{"):
+            o, cur = lomelf.field_offset(cur, idx)
+            off += o
+        else:
+            raise LvmError(f"GEP 的这一步 T0 没实现: {text!r}")
+    return off
+
 _CALL_ASM = lomelf.CALL_ASM_RE
 #: `CALL_ASM_RE` 的分组: 1 = 返回类型, **2 = asm 名字, 3 = 约束串, 4 = 实参表**。
 #: 2026-10-14（`docs/245`）之前只有 1/2/3 —— 名字是写死在模式里的 `"syscall"`。加
@@ -440,6 +482,11 @@ class Executor(Vm):
         fn = self.funcs.get(name)
         if fn is None:
             raise LvmError(f"没有这个函数: {name}")
+        # issue #716：实参个数与形参不符**是错**，三种实现用同一句话拒。以前这里是
+        # `zip(fn.params, argtexts)` —— 多出来的实参被**静默丢掉**、少给的形参留 0，
+        # 于是"少一个实参"的程序照样跑完。
+        if len(args) != len(fn.params):
+            raise LvmError("实参个数与形参不符")
         if self.profile is not None and self.site is not None:
             self.profile.call_site(self.site, name)
         return self.run(fn, args, fr)
@@ -579,11 +626,7 @@ class Executor(Vm):
             op, ty, a_s, b_s = m.groups()
             _t, a = self.operand(fr, ty + " " + a_s)
             _t2, b = self.operand(fr, ty + " " + b_s)
-            if op == "ashr":
-                v = signed(a, ty) >> b
-            else:
-                v = _ARITH[op](a, b)
-            return mask(v, ty)
+            return arith(op, a, b, ty)
         raise LvmError(f"这个指令 T0 没实现: {text!r}")
 
     def _gep(self, fr: Frame, text: str) -> int:
@@ -595,22 +638,8 @@ class Executor(Vm):
         # （它按逗号切、不跳过空段）—— 所以先把这个逗号吃掉。
         parts = lomelf.split_top(body[i:].lstrip(", "))
         _bty, base = self.operand(fr, parts[0])
-        off, cur = 0, ty
-        for k, idx_s in enumerate(parts[1:]):
-            _ity, idx = self.operand(fr, idx_s)
-            if k == 0:
-                off += idx * lomelf.size_of(cur)
-                continue
-            if cur.startswith("["):
-                # `array_parts` 返回 **(个数, 元素)** —— 个数在前，别取 `[0]`。
-                cur = lomelf.array_parts(cur)[1]
-                off += idx * lomelf.size_of(cur)
-            elif cur.startswith("{"):
-                off += lomelf.field_offset(cur, idx)[0]
-                cur = lomelf.field_offset(cur, idx)[1]
-            else:
-                raise LvmError(f"GEP 的这一步 T0 没实现: {text!r}")
-        return base + off
+        idxs = [self.operand(fr, s)[1] for s in parts[1:]]
+        return base + gep_offset(ty, idxs, text)
 
     def _extractvalue(self, fr: Frame, text: str):
         ty, i = lomelf.parse_type(text[len("extractvalue "):])
@@ -771,6 +800,13 @@ def run_source(src: Path, root: Path, out=None, profile: Profile | None = None,
     """与 `lomelf` 同一条前门：`.lomt` -> IR -> 跑。"""
     if argv is None:
         argv = [str(src)]
+    return run_ir(compile_source(src, root),
+                  out if out is not None else sys.stdout, profile, argv, tier,
+                  values, deopts)
+
+
+def compile_source(src: Path, root: Path) -> str:
+    """源 -> IR 文本（前端那三步）。`run_source` 与 `--compact-out` 共用。"""
     import lomentc  # noqa: PLC0415
 
     mod = lomentc.load(src)
@@ -778,9 +814,7 @@ def run_source(src: Path, root: Path, out=None, profile: Profile | None = None,
     errs = lomentc.check(mod, deps=deps)
     if errs:
         raise LvmError(f"检查不过: {errs[:2]}")
-    return run_ir(lomentc.emit_llvm(mod, root, deps),
-                  out if out is not None else sys.stdout, profile, argv, tier,
-                  values, deopts)
+    return lomentc.emit_llvm(mod, root, deps)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -788,7 +822,7 @@ def main(argv: list[str] | None = None) -> int:
     import io  # noqa: PLC0415
 
     ap = argparse.ArgumentParser(prog="lvm", description="LVM T0：那份 IR 的第四个读者（docs/243）")
-    ap.add_argument("entry", help=".lomt 入口，或 --ir 时是 .ll")
+    ap.add_argument("entry", nargs="?", help=".lomt 入口，或 --ir 时是 .ll；--compact 时省略")
     ap.add_argument("--ir", action="store_true", help="直接吃 IR 文本（跳过前端）")
     ap.add_argument("--root", default=".", help="解析 use 的根（默认当前目录）")
     ap.add_argument("--tier", choices=("t0", "t2", "t3"), default="t0",
@@ -800,9 +834,23 @@ def main(argv: list[str] | None = None) -> int:
                     help="T3：读进值观察并按它特化（需要 --tier t3）")
     ap.add_argument("--deopt-out", metavar="PATH", default=None,
                     help="T3：把去优化记录写到 PATH（不写就不记）")
+    ap.add_argument("--compact-out", metavar="PATH", default=None,
+                    help="把入口编成**紧凑形**写进 PATH，不运行（docs/250）")
+    ap.add_argument("--compact", metavar="PATH", default=None,
+                    help="直接跑一份紧凑形产物（与 entry 二选一）")
     ap.add_argument("--profile-out", metavar="PATH", default=None,
                     help="T1：把反馈剖面写到 PATH（`docs/247`）。不写就不记，一个字节都不写")
     a = ap.parse_args(argv)
+    # `lvm_compact` 会经 `lvm_t2` 反过来 import 本模块 —— 只能在 `main()` 里、模块装完之后拿。
+    import lvm_compact  # noqa: PLC0415
+
+    if a.compact is not None and a.compact_out is not None:
+        print("lvm: --compact 与 --compact-out 不能同时给", file=sys.stderr)
+        return 2
+    if a.entry is None and a.compact is None:
+        print("lvm: 需要一个入口（.lomt / --ir 的 .ll），或 --compact PATH",
+              file=sys.stderr)
+        return 2
     root = Path(a.root).resolve()
     buf = io.BytesIO()
     prof = Profile() if a.profile_out else None
@@ -825,13 +873,23 @@ def main(argv: list[str] | None = None) -> int:
     try:
         # `--entry` 那段文本**原样**当被解释程序的 argv[0] —— 与自举镜像同一处规矩：
         # "VM 被指到的那个输入路径"（`docs/243` §3.4）。
-        if a.ir:
+        if a.compact_out is not None:
+            # 只编不跑：入口 -> IR -> 紧凑形。这是 docs/250 那条"写进文件"的路。
+            ir = (Path(a.entry).read_text(encoding="utf-8") if a.ir
+                  else compile_source(Path(a.entry).resolve(), root))
+            Path(a.compact_out).write_bytes(lvm_compact.encode_ir(ir))
+            return 0
+        if a.compact is not None:
+            rc = lvm_compact.run_compact(Path(a.compact).read_bytes(), buf, prof,
+                                         [a.compact])
+        elif a.ir:
             rc = run_ir(Path(a.entry).read_text(encoding="utf-8"), buf, prof, [a.entry],
                         a.tier, values, deopts)
         else:
             rc = run_source(Path(a.entry).resolve(), root, buf, prof, [a.entry], a.tier,
                             values, deopts)
-    except (LvmError, lomelf.ElfError, lomelf.Unsupported) as e:
+    except (LvmError, lomelf.ElfError, lomelf.Unsupported,
+            lvm_compact.CompactError) as e:
         sys.stdout.buffer.write(buf.getvalue())
         print(f"lvm: {e}", file=sys.stderr)
         return 2

@@ -22,7 +22,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lomc  # noqa: E402
-import loment_channel  # noqa: E402
 
 Tok = lomc.Tok
 LomError = lomc.LomError
@@ -1316,6 +1315,14 @@ class Module:
     #: 那让 `loment dbg`（M75）报的"源码级符号化"指不到源，也让断点无从对起 ——
     #: **调试器就是被这一条挡住的**。
     src: "Path | None" = None
+    #: **直接依赖的单元身份**（`resolve_deps` 填，`_unit_id` 的取值）。“依赖体检那一趟”
+    #: 要用它：每个单元**只拿自己的依赖**再接一遍，而不是整份闭包（#726）。
+    #:
+    #: **为什么这不是"更窄所以更危险"**：闭包里的**兄弟单元**会被当成它的依赖 —— 于是
+    #: `f64bits`（没有一条 `use`）会收到"依赖 `mem` 要求 `runtime`"这种话，而它不是
+    #: 根的依赖、只是**根的另一个依赖的依赖**。`check()` 里那句"传给整份闭包只会漏报、
+    #: 不会误报"就是从这儿被证伪的。
+    dep_ids: list = field(default_factory=list)
     #: 本模块的**词法流**（`load()` 填，已在开关/`comefor` 之后）。L0/L1/L2 的判据都
     #: 定义在 token 流上，而"跨函数 deref-only"那次放宽（`docs/210` §7）让分析**不能在
     #: `parse()` 里做**了 —— 安全表要 root + deps 一起算，那只有 `emit_*` 那一层够得着，
@@ -1407,18 +1414,26 @@ CORE_DIMS: dict[str, tuple[str, ...]] = {
     # **但带维名前缀**（`lms_*`，照 `gc_manual`/`gc_auto` 的先例）：`open` / `close`
     # 单独太泛，而 `CORE_WORDS` 还兼管表层语法的 `choose` 行摘取。
     "lms": ("lms_close", "lms_open"),
+    # **安全审计**（`docs/262`，用户 2026-10-18 定第七维）。与其它六维**正交**：
+    # 它不改变任何判决，只决定"放行有没有来源"的记录在不在。
+    # `lspe_open_admin`（开）= 默认；`lspe_close_admin`（关）= **关审计，不关检查** ——
+    # LMS / LGC / runtime / 能力域的判决一条不少，关掉的只是"凭什么放行"的台账。
+    # **关闭带 `_admin`**：关关键系统是一次管理动作（`docs/262` §10.1）。
+    # 取值**带维名前缀**（`lspe_*`），理由同 `lms_*`：`open` / `close` 单独太泛。
+    "lspe": ("lspe_open_admin", "lspe_close_admin"),
 }
 #: 冲突**两两查**时的维序。**写死的** —— 报错文本里两个取值的先后由它决定，
 #: 而两个实现比的是字节，所以它不能是集合迭代顺序。
 #: `lms` 排在最后：它**没有冲突对**，追加在尾部不会改动任何既有配对的先后。
-CORE_DIM_ORDER: tuple[str, ...] = ("mode", "gc", "runtime", "port", "vm", "lms")
+CORE_DIM_ORDER: tuple[str, ...] = ("mode", "gc", "runtime", "port", "vm", "lms", "lspe")
 #: 所有核心模式的取值 —— "这一个 `choose` 是核心模式还是开关"就看它在不在这里面。
 CORE_WORDS = frozenset(w for _ws in CORE_DIMS.values() for w in _ws)
 #: 取值 → 属于哪一维（报错要说清是**哪一维**写了两次）。
 CORE_DIM_OF = {w: d for d, ws in CORE_DIMS.items() for w in ws}
 #: 每一维**不写**时的取值 —— 默认档，且默认**不改变任何现有程序的行为**。
 CORE_DEFAULTS = {"mode": "std", "gc": "gc_manual", "runtime": "no_runtime",
-                 "port": "sealed", "vm": "no_vm", "lms": "lms_close"}
+                 "port": "sealed", "vm": "no_vm", "lms": "lms_close",
+                 "lspe": "lspe_open_admin"}
 #: 维的**人话**名字。报错要说清是**哪一维**写了两次 —— `gc` 对用户不是一个词，
 #: 而"核心模式只能声明一次"在有两维之后就**说不清是哪一维**了。
 CORE_DIM_ZH = {
@@ -1428,6 +1443,7 @@ CORE_DIM_ZH = {
     "port": "对外端口（`sealed` / `hosted`）",
     "vm": "执行模型（`vm` / `no_vm`）",
     "lms": "内存安全（`lms_close` / `lms_open`）",
+    "lspe": "安全审计（`lspe_open_admin` / `lspe_close_admin`）",
 }
 #: **互相冲突的取值对**（`docs/175` §3.4 ⚠）。键是取值，值 = (和它冲突的取值, 为什么)。
 #: 报错要**点名这两档为什么冲突**，不能泛泛说"非法组合"（判据见 `docs/175` §3.4）。
@@ -2905,6 +2921,21 @@ def prepare(mod: Module, deps: list[Module] | None = None) -> tuple[Module, list
 
 # ---------------------------------------------------------------- 语义检查
 
+def _const_int(e) -> int | None:
+    """`-字面量` 的值, 否则 None。
+
+    只用来判一件事：两侧都没有声明类型时，**负字面量**是不是在参与比较/取模/移位
+    —— 是就按有符号定宽（`#237` 第二处根）。**故意只认 `- <IntLit>` 这一种形状**：
+    自举那侧只扫两个 token 就能判同一个条件，两边因此可证明一致；更复杂的常量式
+    （`(0 - 1) < 0`）退回原来的 u32 缺省，不在这里悄悄改变语义。
+    """
+    if isinstance(e, IntLit):
+        return e.value
+    if isinstance(e, Un) and e.op == "-" and isinstance(e.expr, IntLit):
+        return -e.expr.value
+    return None
+
+
 def expr_type(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[str, Struct]) -> str | None:
     if isinstance(e, IntLit):
         return None  # 整型字面量: 由上下文定宽
@@ -3247,7 +3278,10 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
         if ot is not None and _is_array(ot) and isinstance(e.idx, IntLit):
             n = _array_len(ot)
             if e.idx.value >= n:
-                errs.append(f"{e.line}: E028: 下标 {e.idx.value} 越过定长数组的界"
+                # **码不写进正文**（`#486`）：渲染器在头一行已经印了 `error[E028]`，
+                # 正文再写一次就是同一件事印两遍。分类靠的是这句话本身
+                # （`loment_diag.RULES` 匹配的是"越过定长数组的界"），不是前缀。
+                errs.append(f"{e.line}: 下标 {e.idx.value} 越过定长数组的界"
                             f"（{ot} 的长度是 {n}）")
         return
     if isinstance(e, Un):
@@ -3871,10 +3905,14 @@ def resolve_deps(mod: Module, root: Path, base: Path, entry: Path | None = None,
             if rp in stack:
                 raise LomError(1, 1, f"循环导入: {imp}")
             if rp in seen:
+                # 边**先记**在 `seen` 之前那道 `continue` 上：同一份文件被两个单元
+                # `use`，第二个单元的依赖图里也得有这条边，否则它的体检会少看见它。
+                m.dep_ids.append(rp)
                 continue
             seen.add(rp)
             stack.add(rp)
             sub = load(rp, sw=sw)
+            m.dep_ids.append(_unit_id(sub))
             if is_addin:
                 sub.from_addin = True
             visit(sub, rp.parent, depth + 1)
@@ -4006,17 +4044,20 @@ _RECURSION_FLOOR = 8000
 
 
 def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
-          deps: list[Module] | None = None, _dep_pass: bool = False) -> list[str]:
+          deps: list[Module] | None = None, _dep_pass: bool = False,
+          lspe_mode: str = "full") -> list[str]:
     if sys.getrecursionlimit() < _RECURSION_FLOOR:
         sys.setrecursionlimit(_RECURSION_FLOOR)
     try:
-        return _check(mod, ext_funcs=ext_funcs, deps=deps, _dep_pass=_dep_pass)
+        return _check(mod, ext_funcs=ext_funcs, deps=deps, _dep_pass=_dep_pass,
+                      lspe_mode=lspe_mode)
     except RecursionError:
         raise LomError(0, 0, "嵌套超过编译器的递归上限 —— 把这段拆成几个函数，或把表达式拆开") from None
 
 
 def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
-           deps: list[Module] | None = None, _dep_pass: bool = False) -> list[str]:
+           deps: list[Module] | None = None, _dep_pass: bool = False,
+           lspe_mode: str = "full") -> list[str]:
     # **依赖的正文也查** (`#149`, 2026-10-09 补)。原先只把 `deps` 的**导出符号**入表
     # (M12: 仅 pub 可见), 正文不验 —— 于是 `pub fn f(p: ptr) -> u32 { return p; }` 这样的库
     # **当依赖时一路绿**, 只有当**入口**查才报。后果: 一个库可以带着正文类型错发布, 而每一个
@@ -4133,10 +4174,10 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     #
     # **次序**：排在运行期那条**之后** —— 自举侧的合并结果就是这个次序
     # （`checker.lomt` 的强保证块在 `eff_vm` 那块之前），两边报文次序才对得上。
-    # **`choose vm` 2026-10-18 放开**（`#355`，`docs/263`）：引擎 T0–T3 与去优化都落了
-    # （`docs/259` / `docs/261`），失败面有判据（`docs/262`），`loment-lvm` 随包发。
-    # 发行版里它不再是"一句拿不到的承诺"。**探针留着、期望反转**
-    # （`loment_channel_test` 判据 D）：替换，不删掉。
+    # **`vm` 那条闸 2026-10-17 放开**（用户裁决，LVM 完成一大半）：发行版接受 `choose vm`。
+    # 放开之后这个维**今天仍是声明**，不是保证 —— 解释器是仓侧的 `tools/lvm.py` 那一族
+    # （Python），发行包里没有它，产物也不走字节码。这一句是这一维的**明写边界**，
+    # 与 `no_runtime` 那类维同一个口径：声明先于兑现，但承诺的字面意思不许含糊。
 
     # **对外端口那一维 2026-10-17 放开**（`#406`）：V1（静态 `.a`，`#359`）与 V2（运行期
     # `.so`，`#360`）两半都落齐了，所以发行版里 `choose hosted` 不再是"一句拿不到的承诺"，
@@ -4569,13 +4610,41 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     # 把根因埋掉 (与 `pytrans` 的 `pp_uns`、`check` 里那条 `dup_unit` 同一条纪律)。
     # 改完入口再跑一次, 依赖那层的错自然浮上来。
     if not _dep_pass and deps and not errs:
+        _by_id = {_unit_id(x): x for x in deps}
         for d in deps:
-            others = [x for x in deps if _unit_id(x) != _unit_id(d)]
+            # **只给它自己的闭包**（#726）。从前这里传的是**整份** `deps` 减自己 ——
+            # 于是兄弟单元被当成它的依赖：`f64bits` 没有一条 `use`，却因为闭包里
+            # 还有 `mem`/`wide`/`f64`（都声明了 `choose runtime`）而被报"依赖要求
+            # runtime，而根是 no_runtime"。被体检的单元**不是根**，它的"根"是它自己 ——
+            # 而"依赖的声明是需求"这条只该对着**真正的依赖图**说。
+            _reach: set = set()
+            _todo = list(d.dep_ids)
+            while _todo:
+                _k = _todo.pop()
+                if _k in _reach or _k == _unit_id(d):
+                    continue
+                _reach.add(_k)
+                _u = _by_id.get(_k)
+                if _u is not None:
+                    _todo.extend(_u.dep_ids)
+            others = [x for x in deps if _unit_id(x) in _reach]
             sub = check(d, ext_funcs=ext_funcs, deps=others, _dep_pass=True)
             if sub:
                 # 消息前面点出**哪个单元**的错 —— 不然用户不知道去改哪个文件。
                 where = _unit_where(d)
                 errs.extend(f"{where}: {e}" for e in sub)
+    # ---- LSPE（`docs/262`）：Q1 来源问与站点对账。
+    # ⚠ **只在根单元、只在审计开**。默认档只把无来源站点记进台账的 `undecided`；
+    # 只有 `lspe_mode == "strict"` 才把它们升级成 E034 —— 这是"温柔"那条的落点。
+    if (not _dep_pass
+            and mod.chooses.get("lspe", CORE_DEFAULTS["lspe"]) == "lspe_open_admin"):
+        for s in getattr(mod, "lspe_sites", []):
+            if s.get("kind") not in ("guard", "index"):
+                errs.append(f"{s.get('line', 0)}: LSPE 台账里有未登记的站点种类"
+                            f" {s.get('kind')!r}")
+        if lspe_mode == "strict":
+            for line in getattr(mod, "lspe_unsourced_lines", []):
+                errs.append(f"{line}: LSPE 未能为这次放行给出来源（未标注的放行）")
     return errs
 
 
@@ -4629,7 +4698,8 @@ def _move_check(f: Func, funcs: dict, structs: dict, enums: dict,
             if e.name in moved:
                 errs.append(f"{e.line}: 变量 {e.name} 已被移动, 不能再用")
             elif lms and e.name in freed:
-                errs.append(f"{e.line}: E029: 变量 {e.name} 指向的块已经被 `free`，不能再用")
+                # 同上（`#486`）：码在头一行，正文不再重复。
+                errs.append(f"{e.line}: 变量 {e.name} 指向的块已经被 `free`，不能再用")
         elif isinstance(e, Bin):
             use(e.left)
             use(e.right)
@@ -5416,6 +5486,21 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
                            "（`Box<[u8; 4]>` / `Box<[u32]>` / `Box<*mut u8>`）**没有名字规则**，"
                            "而且**后端**（`native M23`：struct 字段暂只支持标量）先把它们挡住了 "
                            "—— 所以现在没有东西需要那个名字。见 `docs/147` §2「命名层」")
+    # ---- LSPE 台账的计数（`docs/262` §8）。`lspe_close_admin` 下**关审计**：
+    # 站点普查不算，台账只写状态与 `set_by`。这与"关的是警察、不是法律"一致。
+    _lspe_state = mod.chooses.get("lspe", CORE_DEFAULTS["lspe"])
+    _lspe_sites = ([] if _lspe_state == "lspe_close_admin"
+                   else getattr(mod, "lspe_sites", []))
+    _lspe_by_kind: dict[str, list[int]] = {}
+    for _s in _lspe_sites:
+        _pair = _lspe_by_kind.setdefault(_s["kind"], [0, 0])
+        _pair[0] += 1
+        if _s["proved"]:
+            _pair[1] += 1
+    _lspe_n = len(_lspe_sites)
+    _lspe_proved = sum(1 for _s in _lspe_sites if _s["proved"])
+    _lspe_undecided = _lspe_n - _lspe_proved
+    _lspe_per_kind = {k: f"{v[1]}/{v[0]}" for k, v in sorted(_lspe_by_kind.items()) if v[0]}
     doc = {
         # v3 = v2 + **开关取值** (docs/182 §1)。**升版本而不是往 v2 加字段**, 与 v1->v2
         # 那条同一个理由: 新字段是必填的 (删掉它校验器必须红), 而往旧版加必填字段会让
@@ -5453,7 +5538,9 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # 是编译错误，所以发行版发的对象里 `vm` **恒为** `no_vm`。
         # v14 = v13 + **联网站点的宽度组成** `net_ladder`（`docs/237`）：四档各领走几个站点。
         # 与 `gc_ladder` 同形，多一条交叉：`total_net` 必须等于 `surfaces.net`。
-        "potato": "v15",
+        # v16 = v15 + **LSPE 台账** `lspe`（`docs/262`）：审计状态 + 站点/义务计数 +
+        # 地板明细 + 不变量。它是**另一个字段**，按 `gc_ladder` 的先例单独升一版。
+        "potato": "v16",
         "unit": mod.name,
         "language": "loment",
         # **表层语法**（`docs/188` §2）—— 与 `language` 分工不同, 别混:
@@ -5486,6 +5573,32 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # 与 `gc` **正交** —— 同一张图上相反的两个方向（`docs/210` §6.2）。同一条纪律：
         # **必填**，于是"这份产物开没开内存安全"是**不读源码可判的**。
         "lms": mod.chooses.get("lms", CORE_DEFAULTS["lms"]),
+        # **安全审计**（`docs/262`，用户 2026-10-18 定第七维）：台账是 LSPE 的第四件。
+        # `state` 是开关值；`set_by` 说这一档是**谁定的**（今天只有 default / source）。
+        # 计数在 0.1.5 先全为 0，0.1.5.1 起由 QIR/普查/来源问填真值 —— 但**字段必须现在就在**，
+        # 否则"这份产物有没有被审计"仍然读不出来。
+        "lspe": {
+            "state": _lspe_state,
+            "set_by": ("source" if "lspe" in mod.chooses else "default"),
+            "mode": "full",
+            "level": 3,
+            "sites": _lspe_n,
+            "obligations": _lspe_n,
+            "proved": _lspe_proved,
+            "undecided": _lspe_undecided,
+            "deferred": 0,
+            "refused": 0,
+            "floors": 0,
+            "floor_detail": {"assumed": 0, "stale_wf": 0, "budget": 0, "drop_honest": 0},
+            "per_kind": _lspe_per_kind,
+            # I1 = 站点对账（今天只对"种类都认识"这一半；跨组件那份在 #761）。
+            "invariants": {
+                "i1": ("ok" if all(s["kind"] in ("guard", "index") for s in _lspe_sites)
+                       else "fail"),
+                "i2": "not_run", "i3": "not_run", "i4": "not_run", "i5": "not_run",
+            },
+            "acked": 0,
+        },
         # 开关取值 (用户 2026-09-17: **"开关的取值是要进 Potato 的"**, docs/182 §1)。
         # **永远是显式的数组**（可为空）—— 与 `mode` 同一条纪律: 不存在"缺这项"的形态,
         # 所以"这台机器上这个开关开没开"是**可回放**的, 不是"看当时的源码猜"。
@@ -7081,19 +7194,31 @@ def _l2_ok(toks: list, at: int, end: int, fend: int, l0: dict[str, int],
         # **只查体之后** [end, fend)：体**之前**不可能用到体里声明的那个名字（作用域），
         # 所以那里出现同名不构成逃逸。
         #
-        # **而且扫到下一次同名 `let` 就停**（`#364` 的第三条边界）。语言**没有块作用域**
-        # （`docs/228` 的根），所以一个名字被**新的** `let` 重新声明之后，后面那些出现就
-        # 属于**新的**那个变量，不再证明这一块出体了。停下是 **sound** 的：在那一处之前
+        # **扫到同一层下一次同名 `let` 就停**（`#364` 的第三条边界）。语言**没有块作用
+        # 域**（`docs/228` 的根），所以一个名字被**新的** `let` 重新声明之后，后面那些出现
+        # 就属于**新的**那个变量，不再证明这一块出体了。停下是 **sound** 的：在那一处之前
         # 的每一次出现都还指这一块。
+        #
+        # **另一个块里的同名 `let` 不能当成"换了主人"**（#714）：它可能藏在一条**没跑**
+        # 的分支里（体后面一个不成立的 `if { let NAME = … }`），那之后名字**没有**换主人，
+        # 后面的出体使用仍然指这一块。静态上认不出那条路跑没跑 ⇒ 整格取消（保守）。
+        # 深度用 `{`/`}` 数：`end` 是体自己的 `}`，扫过它之后**同一层**是 -1，嵌进一个块
+        # 是 0，落回外层是 <= -2。
         #
         # 只认 `let` 这一种重声明形状（这个语言里也只有它）：认不出来的形状一律**按没重
         # 声明处理**（照旧取消），所以这条规则只可能**少**放宽、不会多放宽。
+        depth = 0
         for k in range(end, fend):
-            if not (ident(k) and toks[k].val == name):
-                continue
-            if word(k - 1, "let"):
-                break                      # 换了主人：后面属于新声明的那个
-            return False                   # 出体了
+            if ident(k) and toks[k].val == name:
+                if word(k - 1, "let"):
+                    if depth != -1:
+                        return False       # 另一个块里的重声明: 那条路可能没跑
+                    break                  # 同一层的重声明: 换了主人
+                return False               # 出体了
+            if word(k, "{"):
+                depth += 1
+            elif word(k, "}"):
+                depth -= 1
     if nlive == 0:
         return False                       # 体内的分配都提到栈上了 -> 没什么可归还的
     return nalloc == ncand                 # 有认不出来的分配 -> 整格取消
@@ -7554,6 +7679,13 @@ class _Ir:
             self.w(f"{v2} = insertvalue {{ ptr, i64 }} {v}, i64 {len(b)}, 1")
             return "str", v2
         if isinstance(e, Cast):  # 整数/布尔转换
+            # **整数字面量 `as iN`：字面量的值就是值**（#694）。不能再走下面
+            # `self.expr(e.expr, None)` 那条"无期望类型 ⇒ 按 i32 定宽"的路：
+            # `253402300800 as i64` 会先被截成 32 位（-769664）再 zext，得到
+            # 4294197632。按目标宽度直接发，值才是原文写的那个。自举侧
+            # `expr_atom` 的整数字面量分支同一处一起改，IR 要保持逐字节相同。
+            if isinstance(e.expr, IntLit) and e.type in INT_TYPES:
+                return e.type, str(_wrap_int(e.expr.value, e.type))
             st = expr_type(e.expr, self.type_scope(), self.funcs, {})
             _, v = self.expr(e.expr, None)
             if st == e.type:
@@ -7737,7 +7869,16 @@ class _Ir:
         ct = None
         if lt in INT_TYPES and rt in INT_TYPES and e.op not in ("<<", ">>"):
             ct = _common_type(lt, rt)
-        ty = (ct or lt or rt or want or "u32")
+        # `want` 只在**是整数类型**时才算定宽期望：bool/str/ptr 上下文里的字面量算术
+        # 落 1 位或 {ptr,i64} 运算是灾难（自举侧 `want_is_int` 的注释记着同一条）。
+        w = want if want in INT_TYPES else None
+        ty = (ct or lt or rt or w)
+        if ty is None:
+            # 两侧都没有类型：常量算术里出现**负值**时按有符号定宽。
+            # `if -1 < 0 {…}` 以前落 `icmp ult i32 -1, 0`（假），而 C/Go/Python/Rust
+            # 都说真 —— #237 的第二处根。字面量本身是负的就该按 i32 读。
+            lv, rv = _const_int(e.left), _const_int(e.right)
+            ty = "i32" if ((lv is not None and lv < 0) or (rv is not None and rv < 0)) else "u32"
         it = _ir_t(ty)
         signed = ty in _SIGNED
         op = e.op
@@ -8774,6 +8915,86 @@ pub enum Result<T, E> { Ok(T), Err(E) }
 """
 
 
+#: `[` 前面出现这些关键字时，它是**类型方括号 / 数组字面量**，不是下标。
+_LSPE_BRACKET_KW = frozenset({
+    "return", "if", "while", "match", "let", "const", "in", "else", "for",
+    "fn", "struct", "enum", "impl", "trait", "pub", "use", "module", "choose",
+    "capability", "excluded", "guard", "as", "mut",
+})
+
+
+def _lspe_census(toks: list, unit: str) -> tuple[list[dict], list[int]]:
+    """P0 的站点普查（`docs/262` §5.1）：guard 语句 + 下标表达式。
+
+    口径是**词法的**，且两套实现用**同一条规则** —— 参考侧吃 `lomc.lex` 的 token，
+    自举侧吃驱动器的 token 数组。这样 twin 的计数不会因为 AST 形状不同而漂。
+
+    * `guard` 关键字 = 一个 guard 站点，来源 `capability`；
+    * `[` 且前一个 token 是**非关键字标识符 / `)` / `]`** = 一个 index 站点；
+      下标是**裸字面量**（`[ N ]` 三个 token）时来源 `lms(g0)`，否则无来源。
+    """
+    sites: list[dict] = []
+    unsourced: list[int] = []
+    seen: dict[str, int] = {}
+
+    def _id(kind: str, key: str) -> str:
+        # 内容寻址：键是站点的 token 文本，重复序数只区分**完全相同**的表达式。
+        # 不用行号（会漂），也不用全局序号（在前面插一个站点会把后面全部重编号）。
+        occ = seen.get(key, 0)
+        seen[key] = occ + 1
+        return f"{unit}:{kind}:{_fnv1a32(key + '#' + str(occ)):08x}"
+
+    n = len(toks)
+    for i, t in enumerate(toks):
+        if t.kind == "ident" and t.val == "guard":
+            cap = toks[i + 1].val if i + 1 < n else ""
+            sites.append({"id": _id("guard", f"guard:{cap}"), "kind": "guard",
+                          "claim": "allow", "obligation": "GuardHolds",
+                          "evidence": "capability",
+                          "source": "capability", "line": t.line, "proved": True})
+            continue
+        if t.kind != "punct" or t.val != "[" or i == 0:
+            continue
+        prev = toks[i - 1]
+        indexish = ((prev.kind == "ident" and prev.val not in _LSPE_BRACKET_KW)
+                    or (prev.kind == "punct" and prev.val in (")", "]")))
+        if not indexish:
+            continue
+        # 能力域声明 `capability d : disk[0..8]` 的 `[` 不是下标 —— 里面有 `..`
+        # （词法器把它拆成两个 `.` token）。
+        if (i + 3 < n and toks[i + 1].kind == "number"
+                and toks[i + 2].kind == "punct" and toks[i + 2].val == "."
+                and toks[i + 3].kind == "punct" and toks[i + 3].val == "."):
+            continue
+        literal = (i + 2 < n and toks[i + 1].kind == "number"
+                   and toks[i + 2].kind == "punct" and toks[i + 2].val == "]")
+        # 站点内容 = LHS 的最近几个 token + 方括号里的 token 文本；空格/注释/换行不进键。
+        depth = 0
+        j = i + 1
+        inner: list[str] = []
+        while j < n:
+            if toks[j].kind == "punct" and toks[j].val == "[":
+                depth += 1
+            elif toks[j].kind == "punct" and toks[j].val == "]":
+                if depth == 0:
+                    break
+                depth -= 1
+            inner.append(toks[j].val)
+            j += 1
+        # 只用**紧邻的前一个 token** 作 LHS。往前多抓几个 token 会把上一条语句
+        # （`;`、`return` …）也卷进键里 —— 插入一个无关站点就会让 id 变。
+        lhs = prev.val
+        sites.append({"id": _id("index", f"index:{lhs}[{''.join(inner)}]"),
+                      "kind": "index",
+                      "claim": "allow", "obligation": "InBounds",
+                      "evidence": ("lms(g0)" if literal else "none"),
+                      "source": ("lms(g0)" if literal else None),
+                      "line": t.line, "proved": literal})
+        if not literal:
+            unsourced.append(t.line)
+    return sites, unsourced
+
+
 def load(path: Path, sw: SwitchTable | None = None) -> Module:
     # **前门**（`docs/188` §7.2）：读法由**声明**决定，不由后缀或嗅探。
     # 一份 `choose write grammar python` 的 `.lomt` 按 `docs/188` §0 **仍然是 Loment**，
@@ -8812,6 +9033,9 @@ def load(path: Path, sw: SwitchTable | None = None) -> Module:
 
     tt, _dias = loment_comefor.expand(tt, text)
     mod = Parser(tt, text).parse()
+    # LSPE 的站点普查（`docs/262` §5.1）：在**最终 token 流**上算一次。
+    # 与自举侧 `potato.lomt` 的 `pt_lspe` 同一条规则 —— twin 的计数不能漂。
+    mod.lspe_sites, mod.lspe_unsourced_lines = _lspe_census(tt, mod.name)
     # 方言清单挂在模块上，供 Potato v4 用（`docs/184` §9 S4.3）。**定义那一段已经被
     # 抹掉了**，所以这是唯一还记得"这份源用了哪些自定义语法"的地方。
     mod.dialects = _dias

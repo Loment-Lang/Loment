@@ -151,6 +151,9 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  # LVM 的紧凑形（`docs/250`）：文本/紧凑形逐字节同（含剖面）、体积变小、
                  # 加载更快、错形点名拒。
                  "lvm_compact_test",
+                 # `lompi/store/**` 的孪生（#679 / #719）：每一份当根单元，两边的接受集
+                 # 相同、IR 逐字节相同；已知缺口是一张只许变短的棘轮。
+                 "loment_store_twin_test",
                  # LVM 的 T3（`docs/261`）：守卫特化 + 去优化 —— 语料不变、夹具恰好去优化
                  # 一次且副作用只发生一次、反例零去优化。
                  "lvm_t3_test",
@@ -303,6 +306,8 @@ SHARD_COST = {
     "lvm_t2_test": 45.0,
     # 实测: 4 条; 语料 9 份各编一次紧凑形（`lumtui_demo` 那份解码/编码最重）。
     "lvm_compact_test": 30.0,
+    # 实测: 1 条; 种子链成 stage1（纯 Python 链接）+ 156 个模块各编一次。
+    "loment_store_twin_test": 120.0,
     # 实测: 3 条; 语料 9 份各记一趟值再跑一趟 T3，另两份夹具。
     "lvm_t3_test": 60.0,
     # 实测: 3 条; 死循环三档 + 五种拒绝 + 读一页文档，秒级。

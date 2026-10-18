@@ -45,7 +45,10 @@ _BOUND = r"(?<![<>=])(?:>=|<=|>|<)(?![<>=])"
 #: **中文词**，改完就一条都认不出来了 —— 而守卫**照旧在报**（`wstr(2, "loment: …")`
 #: 之后 `die(1)`）。加这一条不是放宽判据，是**把新形状补进词汇表**；实测它只让那三条
 #: 恢复（`DIAGB_OFF` / `MAX_ADDIN` / `MAX_USE`），沉默总数不动。
-SPEAKS = ("fail(", "sym_pub(", "err_", "E0", "loment: ", "太大", "非法", "超", "越界")
+#: `failp(` 是 2026-10-17 补的：`fail` 的变体（消息 + 一段字节），同样走
+#: `loment: …` + `die(1)`。少了它，新写的"读满槽"那条守卫（用 `failp` 报路径）会被
+#: 判成沉默 —— 那是词汇表不全，不是守卫不在。
+SPEAKS = ("fail(", "failp(", "sym_pub(", "err_", "E0", "loment: ", "太大", "非法", "超", "越界")
 
 #: 守卫分支往后看几行算"同一处"。
 LOOKAHEAD = 8
@@ -70,6 +73,10 @@ EXPLAINED: dict[tuple[str, str], str] = {
         "越界**由调用方报**：守卫这里 `return 0`，驱动器 `fail(\"…codegen 表容量…\")` 说得出来",
     ("loment/selfhost/codegen.lomt", "CG_MAXENUM"):
         "越界**由调用方报**：同 `CG_MAXFN`（一句话点名两张表）",
+    ("loment/tools/lomenterr.lomt", "MSG_CAP"):
+        "**检测点，不是写入点**（`#485`）：`if mlen >= MSG_CAP` 判的是「这条消息有没有"
+        "被拷满」，判到了就印 `truncated` / 写 `\"truncated\": true`。越界在这里不是"
+        "写穿，而是这条判据要回答的问题",
     ("loment/selfhost/lexer.lomt", "MAX_LANG"):
         "**有守卫**（`dn < MAX_LANG`，不写穿）：它静默**丢**的是第 17 条语言声明 —— "
         "那是 (a) 里「丢」那一半，**本笔没做**。留着的理由写在这里而不是抹掉：参考实现"

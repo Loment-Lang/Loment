@@ -300,10 +300,11 @@ Compile-time only, today. Rendering a **trap** — a division by zero, a capabil
 going out of range — from a copy of the reporter linked into your program is designed but
 not implemented; `docs/182-lomenterr-and-choose-switches.md` §10.4 says what it waits on.
 
-Two traps are worth knowing before your first real program, because neither is a compile
-error: a non-void function that falls off its end crashes at run time (the last statement
-must be a `return`), and every `match` arm body must be a block — `E::A => { return 0; }`,
-not `E::A => 0,`. `loment cheat` lists these first, in the order they bite.
+Two traps are worth knowing before your first real program. Every `match` arm body must be a
+block — `E::A => { return 0; }`, not `E::A => 0,` — and that one is not a compile error. A
+non-void function that can fall off its end used to be the same kind of trap; `check` refuses it
+now (E027), so every path must end in a `return`. `loment cheat` lists these first, in the order
+they bite.
 
 ## Where to go next
 

@@ -202,7 +202,10 @@ def test_m79_loment_lexer_matches_python():
              # 放在 `loment/lex/` 而不是 `examples/`：**它是夹具不是 API** ——
              # `examples/` 按定义全部进手册（`loment_manual.py` 直接 glob 它），
              # 一份词法语料进去会平白长出一页"公开 API"。
-             ROOT / "loment" / "lex" / "multiline_str.lomt"]
+             ROOT / "loment" / "lex" / "multiline_str.lomt",
+             # **块注释之后的列**（#708）：同一行里 `/* … */` 之后的 token。两个词法器
+             # 原来一边加 2、一边不加 —— 语料里没有这个形状，所以孪生判据一直看不出来。
+             ROOT / "loment" / "lex" / "block_comment_col.lomt"]
     with tempfile.TemporaryDirectory() as td:
         exe = _build(td)
         for f in files:
@@ -609,11 +612,19 @@ def test_m81_falling_off_the_end_is_refused():
     跑到就是 Illegal instruction"）：一条静态检查的通过不意味着"不会 trap", 那正是这里的洞。
 
     规则是**结构**的(不做数据流): 末尾是 `return`、是带 `else` 的 `if` 且两支都返回、是
-    **每条臂都返回**的 `match`。**四种合法收尾在下面当正例钉着** —— 只钉"该拒的拒了"
+    **每条臂都返回**的 `match`。**每一种合法收尾都在下面当正例钉着** —— 只钉"该拒的拒了"
     很容易把规矩收严到误报合法程序。跑遍本仓语料时这条规则一条都不误报。
 
-    自举 checker 还没这条(`loment_rule_parity` 里那两条探针登记成 MISSING), 所以这一条
-    只钉参考实现 —— 与 `test_m81_two_units_with_the_same_module_name` 同一个口径。
+    最后那个正例（trait 里只有签名的方法）是**实测抓到的误报**：自举侧的
+    `chk_find_brace` 取的是"往后第一个 `{`"，签名式方法会拿到后面 `struct` 的 `{`，
+    于是 `chk_falls` 在一个根本不属于它的体上判"掉出末尾"—— 本仓
+    `loment/examples/native_trait.lomt` 就是这么被误报的。钉住它，别让
+    `chk_fn_has_body` 那道闸门被后来的改动放空。
+
+    2026-10-17 起**两边都钉**：这条规则搬进了自举 checker（`checker.lomt` 的 `chk_falls`），
+    `loment_rule_parity` 里 `falloff-if` / `falloff-match-arm` 从 MISSING 变成 EQUAL，预算
+    跟着 104 → 121。所以这里除了参考实现，还要把**同一个** checker 建出来跑一遍 ——
+    否则 #22 的用户可见症状（`loment check` 放行、产物 SIGILL）不会被任何判据挡住。
     '''
     bad = {
         "if-no-else": "module m\n\nfn pick(x: u32) -> u32 {\n    if x > 0 {\n        return 1;\n    }\n}\n",
@@ -625,6 +636,8 @@ def test_m81_falling_off_the_end_is_refused():
         "if-else-both": "module m\n\nfn pick(x: u32) -> u32 {\n    if x > 0 {\n        return 1;\n    } else {\n        return 2;\n    }\n}\n",
         "match-all-arms": "module m\n\nenum E {\n    A,\n    B,\n}\n\nfn pick(e: E) -> u32 {\n    match e {\n        E::A => {\n            return 1;\n        }\n        _ => {\n            return 2;\n        }\n    }\n}\n",
         "void-falls-fine": "module m\n\nfn log(x: u32) {\n    let v: u32 = x;\n}\n",
+        "else-if-chain": "module m\n\nfn pick(x: u32) -> u32 {\n    if x > 0 {\n        return 1;\n    } else if x < 0 {\n        return 2;\n    } else {\n        return 3;\n    }\n}\n",
+        "trait-signature": "module m\n\ntrait Measurable {\n    fn measure(self) -> u32;\n}\n\nstruct Small {\n    v: u32,\n}\n\nimpl Measurable for Small {\n    fn measure(self) -> u32 {\n        return self.v;\n    }\n}\n",
     }
     with tempfile.TemporaryDirectory() as tds:
         d = Path(tds)
@@ -639,7 +652,20 @@ def test_m81_falling_off_the_end_is_refused():
             f.write_text(src, encoding="utf-8", newline="\n")
             errs = lomentc.check(lomentc.load(f))
             assert not errs, f"{tag}: 合法收尾被误拒: {errs}"
-        print(f"      掉出末尾: {len(bad)} 种非法形状都拒(E027), {len(good)} 种合法收尾都放行")
+        # 自举 checker：**同一批**输入再跑一遍。这是 #22 的用户可见那一半 ——
+        # 用户手上的 `loment check` 走的就是这个 checker。
+        if not _clang():
+            print("      SKIP 自举侧: 无 clang")
+        else:
+            exe = _build_checker(str(d))
+            for tag in bad:
+                got, det = _loment_codes(exe, d / (tag + ".lomt"))
+                assert got == [27], f"[自举] {tag}: 期望码 [27]，得到 {got} {det}"
+            for tag in good:
+                got, det = _loment_codes(exe, d / (tag + ".lomt"))
+                assert got == [], f"[自举] {tag}: 合法收尾被误拒 {got} {det}"
+        print(f"      掉出末尾: {len(bad)} 种非法形状都拒(E027), {len(good)} 种合法收尾都放行"
+              f"（参考实现 + 自举 checker 各一遍）")
 
 
 @test
@@ -774,7 +800,10 @@ def test_m81_loment_checker_matches_python():
     pos = [ROOT / "loment" / "selfhost" / "pos" / "ok.lomt",
            ROOT / "loment" / "examples" / "mathutil.lomt",
            ROOT / "loment" / "examples" / "bytes.lomt",
-           ROOT / "loment" / "examples" / "native.lomt"]
+           ROOT / "loment" / "examples" / "native.lomt",
+           # trait 里**只有签名**的方法: 自举侧 E027 第一版就是在这份文件上误报的
+           # (拿后面 `struct` 的 `{` 当函数体), 所以它必须在正例里当钉子。
+           ROOT / "loment" / "examples" / "native_trait.lomt"]
     with tempfile.TemporaryDirectory() as td:
         exe = _build_checker(td)
         exact = 0
@@ -1054,7 +1083,10 @@ def test_m89_l2_epoch_is_byte_identical():
                          # `if` 的两支那一格（`docs/210` §2.3）：孪生那边的支跨度是
                          # `skip_block` **现算**的 —— 差一格这一条就红。
                          ("ifalpha", lomentc_test.L2_IF_ALPHA_SRC),
-                         ("ifmanual", lomentc_test.L2_IF_MANUAL_SRC)):
+                         ("ifmanual", lomentc_test.L2_IF_MANUAL_SRC),
+                         # `#714`：体之后另一个块里的同名 `let`。孪生两边各有一份
+                         # `_l2_ok`/`l2_ok_at`，判错一格这一条就红。
+                         ("shadow", lomentc_test.L2_SHADOW_SRC)):
             target = Path(td) / f"gc_l2_{tag}.lomt"
             target.write_text(src, encoding="utf-8", newline="\n")
             want = _unit_ll(target)
@@ -1069,6 +1101,54 @@ def test_m89_l2_epoch_is_byte_identical():
     # 不许空转：alpha 那一份必须**真的**多出前沿的存取（每开一格多一条读、一条写）
     assert outs["alpha"].count("@__loment_off") > outs["manual"].count("@__loment_off"), \
         "alpha 那一份没有多出前沿的存取 —— 这条判据在空转"
+
+
+#: `#694`：整数字面量 `as iN` 直接按目标宽度发。两个实现曾经一起错（都是先 i32 再
+#: `zext`），所以孪生判据看不出——这里把这一形状**同时**钉在两边：先核参考 IR 里的值，
+#: 再核自举 codegen 的产物与它逐字节相同。
+_LITERAL_CAST_SRC = """module literal_cast
+choose runtime
+
+fn _start() {
+    let a: i64 = 253402300800 as i64;
+    let b: u64 = 253402300800 as u64;
+    let d: i64 = 4294967296 as i64;
+    let e: i64 = 9223372036854775807 as i64;
+    let g: u64 = 18446744073709551615 as u64;
+    let h: u8 = 300 as u8;
+    let i: i32 = 4294967296 as i32;
+    syscall4(60, 0, 0, 0);
+}
+"""
+
+
+@test
+def test_int_literal_cast_is_byte_identical():
+    """`#694`：`253402300800 as i64` 在**两个实现**上都必须是那个值，且 IR 逐字节相同。
+
+    **为什么非要有这一条**：缺陷本身是"两边一起错"——参考与自举都发
+    `zext i32 -769664 to i64`，所以任何只比"两边是否一致"的判据都绿。这里先核**值**
+    （独立于另一侧：`store i64 253402300800` 必须出现、`zext i32` 不许出现），再核一致。
+    """
+    if not _clang():
+        print("      SKIP: 无 clang")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        exe = _build_codegen(td)
+        target = Path(td) / "literal_cast.lomt"
+        target.write_text(_LITERAL_CAST_SRC, encoding="utf-8", newline="\n")
+        want = _unit_ll(target)
+        got = _run_codegen(exe, target, td)
+        for tag, ir in (("python", want), ("loment", got)):
+            for needle in ("store i64 253402300800", "store i64 4294967296",
+                           "store i64 9223372036854775807",
+                           "store i64 18446744073709551615"):
+                assert needle in ir, f"{tag} 缺少 {needle!r}（#694 的值没有进去）: {ir[:400]}"
+            assert "zext i32 -769664" not in ir, f"{tag} 仍然先截成 32 位: {ir[:400]}"
+            assert "store i8 44," in ir, f"{tag} 窄目标没有环绕: {ir[:400]}"
+        assert got == want, (
+            "整数字面量转型的 IR 两个实现不同:\n"
+            f" loment {got[:300]!r}\n python {want[:300]!r}")
 
 
 @test
@@ -1969,14 +2049,18 @@ def test_m85_codegen_table_capacity():
     enum_base, enum_stride = cst("CG_ENUM"), 80
     local_base = cst("CG_LOCAL")                      # 枚举表的上界 = 局部表基址
     param_base, param_stride = cst("CG_PARAM"), 160   # `#265`: 20 槽 x 8
+    const_base, const_stride = cst("CG_CONST"), 8     # `#719`: 常量表紧跟安全名表
+    const_cap = cst("CG_MAXCONST")
     bytes_total = cst("CG_BYTES")
     # 守卫必须用**同一个**常量, 否则表放大了守卫还卡在旧数 (或反过来写穿)
     assert f"n >= CG_MAXFN" in src, "函数表的守卫没和容量常量同源"
     assert f"en >= CG_MAXENUM" in src, "枚举表的守卫没和容量常量同源"
+    assert f"kn >= CG_MAXCONST" in src, "常量表的守卫没和容量常量同源"
     # 容量 = 每张表在"下一张表开始时"之前能放多少个。
     cap_fn = (fk_base - fn_base) // fn_stride          # fk 表紧跟函数表
     cap_fk = (cur_base - fk_base) // fk_stride         # 参数替换表紧跟 fk 表
-    cap_param = (bytes_total - param_base) // param_stride
+    cap_param = (const_base - param_base) // param_stride   # 常量表紧跟形参类型表
+    cap_const = (bytes_total - const_base) // const_stride
     cap_enum = (local_base - enum_base) // enum_stride  # 枚举表上界 = 局部表基址
     cap = min(cap_fn, cap_fk, cap_param)
     # 最大单元 = driver.lomt 的整单元 (lexer+codegen+checker+driver)。
@@ -1987,10 +2071,13 @@ def test_m85_codegen_table_capacity():
     nfns = sum(1 for tk in unit_toks if tk.kind == "ident" and tk.val == "fn")
     assert nfns <= cap, (f"最大单元有 {nfns} 个函数, 超过 codegen 表容量 {cap} "
                          f"(fn {cap_fn} / fk {cap_fk} / 形参 {cap_param}) —— 请重排布局")
+    nconst = sum(1 for tk in unit_toks if tk.kind == "ident" and tk.val == "const")
+    assert nconst <= cap_const, (f"最大单元有 {nconst} 个常量, 超过常量表容量 {cap_const}")
     nenum = sum(1 for tk in unit_toks if tk.kind == "ident" and tk.val == "enum")
     assert nenum <= cap_enum, f"最大单元有 {nenum} 个枚举, 超过枚举表容量 {cap_enum}"
     print(f"      codegen 表容量: {cap} 个函数 (fn {cap_fn}/fk {cap_fk}/形参 {cap_param}), "
-          f"最大单元 {nfns} 个; 枚举表 {cap_enum} 格, 单元里 {nenum} 个")
+          f"最大单元 {nfns} 个; 枚举表 {cap_enum} 格, 单元里 {nenum} 个; "
+          f"常量表 {cap_const} 格, 单元里 {nconst} 个")
 
 
 @test
@@ -2043,6 +2130,41 @@ def test_m85_heap_budget():
         f"调小 UNIT_CAP/IR_CAP/TOKS_CAP 或抬高 lomelf.py 的 WS_HEAP")
     print(f"      预算: 语言堆不用 (checker/codegen 都走 brk); 固定 brk 块 {total}B "
           f"< PE 垫片堆 {ws_heap}B (余 {ws_heap - total}B, 还要放单元的词法缓冲)")
+
+
+@test
+def test_the_std_facade_is_refused_not_killed():
+    """`use std` 这一行不能再以**信号**收场（`#38`，伞在 `#343`）。
+
+    2026-10-14 实测（0.1.4.5）：**18 分钟**之后 SIGILL，stdout / stderr 都是 0 字节 ——
+    用户手里只有一个 132，分不出是源码写错还是编译器崩了。
+
+    现在它两秒内退 1，说清是检查器符号表装不下这个门面、该拆。判据钉的是**用户看得见
+    的那三条**，不钉措辞：不是信号、stderr 有话、退出码非 0。
+
+    **不钉墙钟**：两秒是今天的数，单元放大或换机器就变；钉时间只会得到一条会漂的判据。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    probe = ROOT / "loment" / "build" / "facade_std_u.lomt"
+    probe.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with probe.open("w", encoding="utf-8", newline="\n") as f:
+            f.write("module u\nuse std\nfn _start() { syscall4(60, 0, 0, 0); }\n")
+        rel = probe.relative_to(ROOT).as_posix()
+        with tempfile.TemporaryDirectory() as td:
+            elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_facade")
+            rc, _out, err = _run_driver_raw(elf, rel, td, "facade_std")
+    finally:
+        probe.unlink(missing_ok=True)
+    assert rc > 0, f"`use std` 居然编过了 (rc={rc}) —— 门面不该一路到底"
+    assert rc != 132, ("`use std` 还是被信号打断的 (SIGILL) —— 要的是**有话**，"
+                       f"不是 132: {err[-300:]}")
+    assert err.strip(), "`use std` 退非 0 却一句话都没说 —— 那正是 #343 这一类"
+    assert "Illegal instruction" not in err, err[-300:]
+    print(f"      `use std` 拒绝: rc={rc}，stderr {len(err.strip())} 字节 —— "
+          f"{err.strip().splitlines()[-1][:72]}")
 
 
 @test

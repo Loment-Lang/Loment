@@ -189,6 +189,11 @@ def cmd_test(a) -> int:
 
 
 def cmd_bench(a) -> int:
+    # 负的迭代次数没有意义，而它会被原样拼进 `let n = -5u32;` —— 于是用户看到的是
+    # **rustc** 的报错（`#507`），不是我们的用法错误。在入口挡住。
+    if a.n < 0:
+        print("[ERR] --n 必须是非负整数", file=sys.stderr)
+        return 2
     p, mod, deps = _load(a.file)
     benches = _picked(mod, "bench_")
     if not benches:
@@ -372,6 +377,40 @@ def cmd_dbg(a) -> int:
     return 0
 
 
+def cmd_lspe_state(a) -> int:
+    """`loment lspe state FILE` —— 打印这份单元的 LSPE 台账（`docs/262` §8）。"""
+    import json
+    p = Path(a.file)
+    mod = lomentc.load(p)
+    deps = lomentc.resolve_deps(mod, ROOT, p.parent, entry=p)
+    errs = lomentc.check(mod, deps=deps)
+    if errs:
+        for e in errs:
+            print(f"[ERR] {e}", file=sys.stderr)
+        return 1
+    doc = json.loads(lomentc.emit_potato(mod, ROOT, deps))
+    lp = doc["lspe"]
+    print(json.dumps(lp, ensure_ascii=False, indent=2))
+    if lp["state"] == "lspe_close_admin":
+        print("[LSPE] the audit is closed (lspe_close_admin): the checks still ran; "
+              "only the ledger is off.", file=sys.stderr)
+    return 0
+
+
+def cmd_lspe_why(a) -> int:
+    """派生树在 0.1.5.2 落地；今天只有计数，所以这里明说而不是假装答得出来。"""
+    print("[LSPE] `lspe why` lands in 0.1.5.2 (derivation trees). "
+          "Today the ledger is counts only.", file=sys.stderr)
+    return 2
+
+
+def cmd_lspe_verify(a) -> int:
+    """证明哈希与 `.lspe` 旁挂在 0.1.5.2 落地。"""
+    print("[LSPE] `lspe verify` lands in 0.1.5.2 (proof hashes and the .lspe sidecar).",
+          file=sys.stderr)
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="loment", description="Loment 工具链")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -400,6 +439,19 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--fn", dest="func", default=None, help="按函数列出源行")
     g.add_argument("--addr", default=None, help="地址 -> 源行")
     g.set_defaults(fn=cmd_dbg)
+    lp = sub.add_parser("lspe")
+    lsub = lp.add_subparsers(dest="lspe_cmd", required=True)
+    lps = lsub.add_parser("state")
+    lps.add_argument("file")
+    lps.set_defaults(fn=cmd_lspe_state)
+    lpw = lsub.add_parser("why")
+    lpw.add_argument("site")
+    lpw.add_argument("file", nargs="?")
+    lpw.set_defaults(fn=cmd_lspe_why)
+    lpv = lsub.add_parser("verify")
+    lpv.add_argument("artifact")
+    lpv.add_argument("sidecar", nargs="?")
+    lpv.set_defaults(fn=cmd_lspe_verify)
     for name in ("build", "pkg", "lsp", "lib"):
         s = sub.add_parser(name)
         s.add_argument("rest", nargs=argparse.REMAINDER)

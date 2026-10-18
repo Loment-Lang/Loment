@@ -218,6 +218,75 @@ def test_malformed_cases_report_the_same_line():
 
 
 @test
+def test_a_large_case_file_does_not_exhaust_the_fixed_heap():
+    """#697: 700 条用例 ≈ 34 KB —— 原先每条 5 次 `alloc(16)`, 64 KiB bump heap 耗尽后
+    `llvm.trap` (SIGILL, 132), 两条流 0 字节。工具头写着支持 256 KiB 的用例文件。
+
+    这条**两侧逐字节比** 700 条记录; 重点是 rc == 0 —— 一个 33 KB 输入不许用信号结束进程。
+    """
+    if _skip():
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        elf = _build(td)
+        cf = td / "many.txt"
+        lines = "".join(f"{i} aaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbb 0 w0 w0 0\n"
+                        for i in range(1, 701))
+        cf.write_text(lines, encoding="utf-8", newline="\n")
+        assert len(lines.encode()) < 262144
+        rc, out, err = _pair(elf, td, "many", [str(cf)], [_wsl_path(cf)])
+        assert rc == 0, (rc, err[-200:])
+        assert out.count("\n") == 700, out.count("\n")
+        assert out.startswith("seq=1 self=aaaaaaaaaaaaaaaa peer=bbbbbbbbbbbbbbbb "), out[:80]
+        assert out.splitlines()[-1].startswith("seq=700 "), out.splitlines()[-1][:40]
+
+
+@test
+def test_numbers_match_on_plus_leading_zeros_and_range():
+    """#698: `+5`、前导零、u32 之外的值 —— 两侧**同一个接受集与同一个值**。
+
+    值域钉在 0..2^63-1 (Loment `dec_span` 用 u64 累加), 越界两侧都报 `BAD_SEQ`。
+    """
+    # 单测: 值的形状
+    for text, want in [
+        ("+5 a b 0 w0 w0 0\n", "seq=5 "),
+        ("00000000001 a b 0 w0 w0 0\n", "seq=1 "),
+        ("0" * 5000 + "9 a b 0 w0 w0 0\n", "seq=9 "),
+        ("4294967296 a b 0 w0 w0 0\n", "seq=4294967296 "),
+        ("1 a b 4294967296 w0 w0 0\n", "earned=w3 "),
+        ("1 a b 0 w0 w0 4294967296\n", "held=4294967297 "),
+    ]:
+        rc, out, _e = loment_admit.run_cases(text)
+        assert rc == 0 and want in out, (text, rc, out)
+    for bad in ("9223372036854775808", "-1", "1_0", "1.0", "+"):
+        rc, out, e = loment_admit.run_cases(f"{bad} a b 0 w0 w0 0\n")
+        assert rc == 1 and out == "" and e == loment_admit.BAD_SEQ.format(n=1) + "\n", \
+            (bad, rc, out, e)
+    if _skip():
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        elf = _build(td)
+        good = ("+5 a b 0 w0 w0 0\n"
+                "00000000001 a b 0 w0 w0 0\n"
+                + "0" * 5000 + "9 a b 0 w0 w0 0\n"
+                "4294967296 a b 0 w0 w0 0\n"
+                "1 a b 4294967296 w0 w0 0\n"
+                "1 a b 0 w0 w0 4294967296\n")
+        cf = td / "numbers.txt"
+        cf.write_text(good, encoding="utf-8", newline="\n")
+        rc, out, err = _pair(elf, td, "numbers", [str(cf)], [_wsl_path(cf)])
+        assert rc == 0 and out.count("\n") == 6, (rc, out[:200], err[:100])
+        # 越界的那些: 两侧同一句话、同一个退出码
+        for i, bad in enumerate(("9223372036854775808", "-1", "1_0", "1.0", "+")):
+            cf = td / f"bad{i}.txt"
+            cf.write_text(f"{bad} a b 0 w0 w0 0\n", encoding="utf-8", newline="\n")
+            rc, out, err = _pair(elf, td, f"bad{i}", [str(cf)], [_wsl_path(cf)])
+            assert rc == 1 and out == "", (bad, rc, out[:100])
+            assert err == loment_admit.BAD_SEQ.format(n=1) + "\n", (bad, err)
+
+
+@test
 def test_widen_needs_a_window_and_shrink_is_immediate():
     """那条不对称（`docs/218` §2 第 3 条）：**收窄即时，放宽要窗口**。
 

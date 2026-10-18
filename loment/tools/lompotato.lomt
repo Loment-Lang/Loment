@@ -301,6 +301,57 @@ fn jstr_field_is(mem: ptr, doc: u32, key: str, s: str) -> u32 {
     return 0;
 }
 
+/// `obj[key]` 是不是**非负整数**。v16 的台账计数用它（`docs/262` §8）。
+/// 与 Python 的 `isinstance(v, int) and not isinstance(v, bool) and v >= 0` 对齐：
+/// `jkind` 对 bool 另有一类，所以 `!= 4` 已经把它挡掉了。
+fn jkey_nonneg(mem: ptr, obj: u32, key: str) -> u32 {
+    let n: u32 = jget(mem, obj, key);
+    if n == NOTFOUND || jkind(mem, n) != 4 {
+        return 0;
+    }
+    if jint_signed(mem, n) < 0 {
+        return 0;
+    }
+    return 1;
+}
+
+/// `lspe` / `floor_detail` / `invariants` 是**封闭**对象：未知键必须报。
+fn is_lspe_key(kp: ptr, kl: u32) -> u32 {
+    if eq_lit(kp, kl, "state") == 1 { return 1; }
+    if eq_lit(kp, kl, "set_by") == 1 { return 1; }
+    if eq_lit(kp, kl, "mode") == 1 { return 1; }
+    if eq_lit(kp, kl, "level") == 1 { return 1; }
+    if eq_lit(kp, kl, "sites") == 1 { return 1; }
+    if eq_lit(kp, kl, "obligations") == 1 { return 1; }
+    if eq_lit(kp, kl, "proved") == 1 { return 1; }
+    if eq_lit(kp, kl, "undecided") == 1 { return 1; }
+    if eq_lit(kp, kl, "deferred") == 1 { return 1; }
+    if eq_lit(kp, kl, "refused") == 1 { return 1; }
+    if eq_lit(kp, kl, "floors") == 1 { return 1; }
+    if eq_lit(kp, kl, "floor_detail") == 1 { return 1; }
+    if eq_lit(kp, kl, "per_kind") == 1 { return 1; }
+    if eq_lit(kp, kl, "invariants") == 1 { return 1; }
+    if eq_lit(kp, kl, "acked") == 1 { return 1; }
+    return 0;
+}
+
+fn is_floor_key(kp: ptr, kl: u32) -> u32 {
+    if eq_lit(kp, kl, "assumed") == 1 { return 1; }
+    if eq_lit(kp, kl, "stale_wf") == 1 { return 1; }
+    if eq_lit(kp, kl, "budget") == 1 { return 1; }
+    if eq_lit(kp, kl, "drop_honest") == 1 { return 1; }
+    return 0;
+}
+
+fn is_inv_key(kp: ptr, kl: u32) -> u32 {
+    if eq_lit(kp, kl, "i1") == 1 { return 1; }
+    if eq_lit(kp, kl, "i2") == 1 { return 1; }
+    if eq_lit(kp, kl, "i3") == 1 { return 1; }
+    if eq_lit(kp, kl, "i4") == 1 { return 1; }
+    if eq_lit(kp, kl, "i5") == 1 { return 1; }
+    return 0;
+}
+
 /// 结点里的字符串**解码**进 buf（去引号、解转义），返回长度。
 fn jstr(mem: ptr, n: u32, buf: ptr, cap: u32) -> u32 {
     return json_str_into(ptr_add(mem, M_IN), ptr_add(mem, M_ARENA), n, buf, cap);
@@ -583,6 +634,11 @@ fn is_top_key(ver: u32, kp: ptr, kl: u32) -> u32 {
     // v15 = v14 + **内存安全**（`docs/253`，用户 2026-10-15 定第六维）：`lms_close` / `lms_open`。
     // 与 `gc` **正交** —— 同一张图上相反的两个方向（`docs/210` §6.2）。
     if ver >= 15 && eq_lit(kp, kl, "lms") == 1 {
+        return 1;
+    }
+    // v16 = v15 + **LSPE 台账**（`docs/262`，用户 2026-10-18 定第七维）：`lspe` 对象。
+    // 它是 LSPE 的第四件 —— 没有它，"这份产物有没有被审计"读不出来。
+    if ver >= 16 && eq_lit(kp, kl, "lspe") == 1 {
         return 1;
     }
     return 0;
@@ -1576,6 +1632,129 @@ fn chk_v1(mem: ptr, doc: u32, ver: u32) -> u32 {
             let _v15: u32 = bad(mem);
         }
     }
+    if ver >= 16 {
+        // v16（`docs/262`）：LSPE 台账。与 Python 的 `potato.validate` 逐条对齐 ——
+        // 连错的条数都要一致。P0 只判**骨架字段**：state / set_by / mode / level /
+        // 八个计数 / floor_detail 的自洽 / per_kind 与 invariants 的存在。
+        let lp: u32 = jget(mem, doc, "lspe");
+        if lp == NOTFOUND || jkind(mem, lp) != 1 {
+            let _v16: u32 = bad(mem);
+        } else {
+            // 封闭对象：`lspe` 里出现不认识的键 -> 一次错。
+            let km: u32 = jfirst(mem, lp);
+            while km != NOTFOUND {
+                let kn: u32 = jmkey(mem, km);
+                let kl: u32 = jstr(mem, kn, ptr_add(mem, M_SB2), 4096);
+                if is_lspe_key(ptr_add(mem, M_SB2), kl) == 0 {
+                    let _uk: u32 = bad(mem);
+                }
+                km = jsib(mem, km);
+            }
+            let sok: u32 = 0;
+            if jstr_field_is(mem, lp, "state", "lspe_open_admin") == 1
+                    || jstr_field_is(mem, lp, "state", "lspe_close_admin") == 1 {
+                sok = 1;
+            }
+            if sok == 0 {
+                let _a: u32 = bad(mem);
+            }
+            let bok: u32 = 0;
+            if jstr_field_is(mem, lp, "set_by", "default") == 1
+                    || jstr_field_is(mem, lp, "set_by", "source") == 1
+                    || jstr_field_is(mem, lp, "set_by", "policy") == 1 {
+                bok = 1;
+            }
+            if bok == 0 {
+                let _b: u32 = bad(mem);
+            }
+            let mok: u32 = 0;
+            if jstr_field_is(mem, lp, "mode", "full") == 1
+                    || jstr_field_is(mem, lp, "mode", "quiet") == 1
+                    || jstr_field_is(mem, lp, "mode", "strict") == 1 {
+                mok = 1;
+            }
+            if mok == 0 {
+                let _c: u32 = bad(mem);
+            }
+            let lv: u32 = jget(mem, lp, "level");
+            let lok: u32 = 0;
+            if lv != NOTFOUND && jkind(mem, lv) == 4 {
+                let n: i64 = jint_signed(mem, lv);
+                if n >= 0 && n <= 4 {
+                    lok = 1;
+                }
+            }
+            if lok == 0 {
+                let _d: u32 = bad(mem);
+            }
+            if jkey_nonneg(mem, lp, "sites") == 0 { let _e1: u32 = bad(mem); }
+            if jkey_nonneg(mem, lp, "obligations") == 0 { let _e2: u32 = bad(mem); }
+            if jkey_nonneg(mem, lp, "proved") == 0 { let _e3: u32 = bad(mem); }
+            if jkey_nonneg(mem, lp, "undecided") == 0 { let _e4: u32 = bad(mem); }
+            if jkey_nonneg(mem, lp, "deferred") == 0 { let _e5: u32 = bad(mem); }
+            if jkey_nonneg(mem, lp, "refused") == 0 { let _e6: u32 = bad(mem); }
+            if jkey_nonneg(mem, lp, "floors") == 0 { let _e7: u32 = bad(mem); }
+            if jkey_nonneg(mem, lp, "acked") == 0 { let _e8: u32 = bad(mem); }
+            let fd: u32 = jget(mem, lp, "floor_detail");
+            if fd == NOTFOUND || jkind(mem, fd) != 1 {
+                let _f: u32 = bad(mem);
+            } else {
+                let fm: u32 = jfirst(mem, fd);
+                while fm != NOTFOUND {
+                    let fkn: u32 = jmkey(mem, fm);
+                    let flk: u32 = jstr(mem, fkn, ptr_add(mem, M_SB2), 4096);
+                    if is_floor_key(ptr_add(mem, M_SB2), flk) == 0 {
+                        let _uf: u32 = bad(mem);
+                    }
+                    fm = jsib(mem, fm);
+                }
+                let fa: u32 = jkey_nonneg(mem, fd, "assumed");
+                let fb: u32 = jkey_nonneg(mem, fd, "stale_wf");
+                let fc: u32 = jkey_nonneg(mem, fd, "budget");
+                let fdd: u32 = jkey_nonneg(mem, fd, "drop_honest");
+                if fa == 0 { let _g1: u32 = bad(mem); }
+                if fb == 0 { let _g2: u32 = bad(mem); }
+                if fc == 0 { let _g3: u32 = bad(mem); }
+                if fdd == 0 { let _g4: u32 = bad(mem); }
+                if fa == 1 && fb == 1 && fc == 1 && fdd == 1 {
+                    let fl: u32 = jget(mem, lp, "floors");
+                    if fl != NOTFOUND && jkind(mem, fl) == 4 {
+                        let s1: i64 = jint_signed(mem, jget(mem, fd, "assumed"));
+                        let s2: i64 = jint_signed(mem, jget(mem, fd, "stale_wf"));
+                        let s3: i64 = jint_signed(mem, jget(mem, fd, "budget"));
+                        let s4: i64 = jint_signed(mem, jget(mem, fd, "drop_honest"));
+                        let sum: i64 = s1 + s2 + s3 + s4;
+                        if jint_signed(mem, fl) != sum {
+                            let _h: u32 = bad(mem);
+                        }
+                    }
+                }
+            }
+            let pk: u32 = jget(mem, lp, "per_kind");
+            if pk == NOTFOUND || jkind(mem, pk) != 1 {
+                let _i: u32 = bad(mem);
+            }
+            let inv: u32 = jget(mem, lp, "invariants");
+            if inv == NOTFOUND || jkind(mem, inv) != 1 {
+                let _j: u32 = bad(mem);
+            } else {
+                let im: u32 = jfirst(mem, inv);
+                while im != NOTFOUND {
+                    let inn: u32 = jmkey(mem, im);
+                    let ilk: u32 = jstr(mem, inn, ptr_add(mem, M_SB2), 4096);
+                    if is_inv_key(ptr_add(mem, M_SB2), ilk) == 0 {
+                        let _ui: u32 = bad(mem);
+                    }
+                    im = jsib(mem, im);
+                }
+                if jget(mem, inv, "i1") == NOTFOUND { let _k1: u32 = bad(mem); }
+                if jget(mem, inv, "i2") == NOTFOUND { let _k2: u32 = bad(mem); }
+                if jget(mem, inv, "i3") == NOTFOUND { let _k3: u32 = bad(mem); }
+                if jget(mem, inv, "i4") == NOTFOUND { let _k4: u32 = bad(mem); }
+                if jget(mem, inv, "i5") == NOTFOUND { let _k5: u32 = bad(mem); }
+            }
+        }
+    }
     if ver >= 6 {
         let gr: u32 = jget(mem, doc, "grammar");
         let gok: u32 = 0;
@@ -1675,6 +1854,9 @@ fn validate(mem: ptr, tot: u32) -> u32 {
         }
         if eq_lit(t, l, "v15") == 1 {
             ver = 15;
+        }
+        if eq_lit(t, l, "v16") == 1 {
+            ver = 16;
         }
     }
     if ver == NOTFOUND {

@@ -9,11 +9,11 @@
 #
 # 重新量：`python tools/ci.py --static-only`，每行 `:: [static] <套件> … <p>/<n> 通过` 里的 n。
 # 13 个 driver 脚本（`lom_audit` / `lompi_sync` / `loment_publish` …）没有 `TESTS`，不在这里。
-# 合计 933 条判据 / 79 个套件。
+# 合计 951 条判据 / 78 个套件。
 
 lomc_test 25
-lomentc_test 158
-potato_test 11
+lomentc_test 167
+potato_test 12
 loment_ct_test 2
 loment_comefor_test 12
 loment_extblock_test 7
@@ -23,32 +23,32 @@ loment_pytrans_test 4
 loment_jtrans_test 4
 loment_cstrans_test 6
 loment_cpptrans_test 5
-loment_gotrans_test 5
+loment_gotrans_test 7
 loment_nltrans_test 19
 loment_lomtfrom_test 4
 loment_trans_test 8
-loment_potato_emit_test 6
+loment_potato_emit_test 7
 loment_grammar_test 20
-loment_tools_test 49
+loment_tools_test 52
 loment_p7_test 8
-loment_p8_test 31
+loment_p8_test 33
 loment_p9_test 2
 loment_gc_surface_test 3
 loment_gc_why_test 4
 loment_seed_test 4
-loment_fmt_test 6
-loment_doc_test 3
+loment_fmt_test 8
+loment_doc_test 4
 loment_channel_test 8
 loment_json_test 4
 loment_pkg_test 3
 loment_lomc_test 4
-loment_lsp_test 12
-loment_elf_test 44
+loment_lsp_test 16
+loment_elf_test 45
 loment_pe_test 16
 loment_genesis_test 5
 loment_status_test 4
-lvm_test 4
-lvm_twin_test 3
+lvm_test 6
+lvm_twin_test 4
 loment_net_test 3
 loment_ffi_test 30
 loment_ports_test 9
@@ -64,11 +64,11 @@ loment_capasserts_test 4
 loment_i18n_test 2
 loment_docs_test 7
 loment_door_test 6
-loment_admit_test 6
-loment_zwframe_test 4
+loment_admit_test 8
+loment_zwframe_test 7
 loment_lib_test 15
-loment_cli_test 42
-loment_err_test 36
+loment_cli_test 43
+loment_err_test 40
 loment_std_test 4
 loment_libl_test 2
 loment_internet_test 11
@@ -83,8 +83,9 @@ loment_multisyntax_projects_test 3
 loment_megaproject_test 8
 loment_state_test 8
 lvm_profile_test 4
-lvm_t2_test 4
-lvm_compact_test 4
+lvm_t2_test 7
+lvm_compact_test 11
+loment_store_twin_test 2
 lvm_t3_test 3
 lvm_stability_test 3
 lvm_perf_test 3

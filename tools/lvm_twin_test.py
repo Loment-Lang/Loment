@@ -267,6 +267,127 @@ def test_usage_is_refused() -> None:
     print("      没有实参 / 读不了输入 ⇒ 都是 rc=2")
 
 
+def _ref_cli(ll: Path) -> tuple[int, bytes, bytes]:
+    """参考实现走**真前门**（`lvm --ir`）—— 退出码与 stderr 由此才是 CLI 的产物，
+    可以和镜像那侧逐字节比。"""
+    import io  # noqa: PLC0415
+    so = io.TextIOWrapper(io.BytesIO(), encoding="utf-8", newline="\n", write_through=True)
+    se = io.TextIOWrapper(io.BytesIO(), encoding="utf-8", newline="\n", write_through=True)
+    real = sys.stdout, sys.stderr
+    sys.stdout, sys.stderr = so, se
+    try:
+        rc = lvm.main(["--ir", str(ll)])
+        so.flush()
+        se.flush()
+        return rc, so.buffer.getvalue(), se.buffer.getvalue()
+    finally:
+        sys.stdout, sys.stderr = real
+
+
+def _run_mirror_full(mir: Path, ll: Path, timeout: int = 180) -> tuple[int, bytes, bytes]:
+    """跑镜像 -> `(退出码, stdout, **stderr**)`。`_run_mirror` 不往回带 stderr，
+    而这一条判据要比的正是那句错话。"""
+    if sys.platform != "win32":
+        r = subprocess.run([str(mir), str(ll)], capture_output=True,
+                           timeout=timeout, shell=False)
+        return r.returncode, r.stdout, r.stderr
+    tag = f"/tmp/lvm_err_{os.getpid()}"
+    script = (f"rm -f {tag}.bin {tag}.ll {tag}.out {tag}.err; "
+              f"cp {ELF._wsl_path(mir)} {tag}.bin && cp {ELF._wsl_path(ll)} {tag}.ll && "
+              f"chmod +x {tag}.bin && cd /tmp && "
+              f"timeout {timeout} {tag}.bin {tag}.ll > {tag}.out 2> {tag}.err; echo -n $?")
+    r = subprocess.run([*_WSLCMD, "bash", "-lc", script],
+                       capture_output=True, timeout=timeout + 180, shell=False)
+    import base64  # noqa: PLC0415
+    out = _build([*_WSLCMD, "bash", "-lc",
+                  f"base64 -w0 {tag}.out 2>/dev/null || true"]).stdout
+    err = _build([*_WSLCMD, "bash", "-lc",
+                  f"base64 -w0 {tag}.err 2>/dev/null || true"]).stdout
+    try:
+        rc = int(r.stdout.decode().strip())
+    except ValueError:
+        rc = -1
+    return (rc,
+            base64.b64decode(out) if out.strip() else b"",
+            base64.b64decode(err) if err.strip() else b"")
+
+
+#: 三份**报错**的 IR（issue #716 / #717）与一份**成功**的 IR（issue #715）。
+#: 它们钉的是"同一份输入 -> 同一句诊断 / 同一个答案"，而不是"能跑"。
+_PARITY_CASES = {
+    "arity_few": """define void @f(i32 %a, i32 %b) {
+entry:
+  ret void
+}
+define i32 @_start() {
+entry:
+  call void @f(i32 1)
+  ret i32 0
+}
+""",
+    "arity_extra": """define void @f(i32 %a, i32 %b) {
+entry:
+  ret void
+}
+define i32 @_start() {
+entry:
+  call void @f(i32 1, i32 2, i32 %zzz)
+  ret i32 0
+}
+""",
+    "neg_shift": """define i32 @_start() {
+entry:
+  %q = shl i32 5, -1
+  %r = trunc i32 %q to i32
+  ret i32 %r
+}
+""",
+    "dyn_gep": """define i32 @_start() {
+entry:
+  %p = alloca {i32,i32}
+  %f1 = getelementptr {i32,i32}, ptr %p, i32 0, i32 1
+  store i32 22, ptr %f1
+  %i = add i32 1, 0
+  %q = getelementptr {i32,i32}, ptr %p, i32 0, i32 %i
+  %v = load i32, ptr %q
+  %c = icmp eq i32 %v, 22
+  br i1 %c, label %ok, label %bad
+ok:
+  ret i32 0
+bad:
+  unreachable
+}
+""",
+}
+
+
+def test_twin_error_parity() -> None:
+    """判 F（issue #715 / #716 / #717）：同一份 IR 喂参考与镜像，**退出码 + stdout +
+    stderr 逐字节相同**。
+
+    这是孪生唯一能比"诊断"的一处：两边都是 `lvm: <一句话>` 再退 2。三种错以前各说各的
+    （T0 容忍 / T2 另一句 / 镜像第三种），这条判据把它们钉成一个答案。
+    动态下标的成功样例一并比 —— 它证明镜像那条路本来就能算，是参考的 T2 在拒。
+    """
+    if not (_clang() and (sys.platform != "win32" or _wsl())):
+        print("      SKIP: 没有 clang（这条判据要它把种子编成 stage1）")
+        return
+    mir = _mirror()
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        for name, ir in _PARITY_CASES.items():
+            ll = td / f"{name}.ll"
+            with ll.open("w", encoding="utf-8", newline="\n") as f:
+                f.write(ir)
+            ref = _ref_cli(ll)
+            got = _run_mirror_full(mir, ll)
+            assert ref == got, (
+                f"[{name}] 参考与镜像对不上：参考 rc={ref[0]} out={ref[1][:40]!r} "
+                f"err={ref[2][:60]!r} / 镜像 rc={got[0]} out={got[1][:40]!r} "
+                f"err={got[2][:60]!r}")
+    print(f"      四份 IR 的退出码 / stdout / stderr 逐字节相同（{', '.join(_PARITY_CASES)}）")
+
+
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 

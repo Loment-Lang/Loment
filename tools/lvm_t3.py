@@ -169,6 +169,8 @@ def _remap_op(op: tuple, smap: dict[int, int]) -> tuple:
         return (code, op[1], o(op[2]), o(op[3]))
     if code == lvm_t2._OP_GEP:                  # noqa: SLF001
         return (code, o(op[1]), op[2], [(o(a), b) for (a, b) in op[3]], slot(op[4]))
+    if code == lvm_t2._OP_GEP_DYN:              # noqa: SLF001
+        return (code, o(op[1]), op[2], [o(a) for a in op[3]], op[4], slot(op[5]))
     if code == lvm_t2._OP_EXTRACT:              # noqa: SLF001
         return (code, o(op[1]), op[2], op[3], slot(op[4]))
     if code == lvm_t2._OP_INSERT:               # noqa: SLF001
@@ -178,7 +180,7 @@ def _remap_op(op: tuple, smap: dict[int, int]) -> tuple:
     if code == lvm_t2._OP_DIV:                  # noqa: SLF001
         return (code, op[1], op[2], o(op[3]), o(op[4]), slot(op[5]))
     if code == lvm_t2._OP_ARITH:                # noqa: SLF001
-        return (code, op[1], op[2], op[3], o(op[4]), o(op[5]), slot(op[6]))
+        return (code, op[1], op[2], o(op[3]), o(op[4]), slot(op[5]))
     if code == lvm_t2._OP_CAST:                 # noqa: SLF001
         return (code, op[1], op[2], op[3], o(op[4]), slot(op[5]))
     if code == lvm_t2._OP_CALL:                 # noqa: SLF001
@@ -345,8 +347,12 @@ class T3Executor(lvm_t2.T2Executor):
             frame[0] += size
         elif code == lvm_t2._OP_CALL:                            # noqa: SLF001
             _, cname, a_ops, d = op
+            cf = self.prog.cfunc(cname)
+            # 与 T2 那两处同一条规矩（issue #716）：**先判个数、再求值实参**。
+            if len(a_ops) != len(cf.params):
+                raise lvm.LvmError("实参个数与形参不符")
             args = [_rd(vals, o) for o in a_ops]
-            v = self.call_t2(self.prog.cfunc(cname), args)
+            v = self.call_t2(cf, args)
             if d >= 0:
                 vals[d] = v
         elif code == lvm_t2._OP_RET:                             # noqa: SLF001

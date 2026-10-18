@@ -363,11 +363,13 @@ def test_install_sh(tar: Path) -> None:
     check("loment build --opt 产出可运行二进制",
           r.returncode == 0, (r.stderr or "")[-200:])
     # `build` does not set the exec bit (only `run` chmods -- pre-existing, both backends),
-    # so set it before running.
-    wsl("chmod", "755", o_bin)
-    rr = wsl(o_bin)
-    check("build --opt 的产物跑得起来",
-          rr.returncode == 0 and rr.stdout.strip() != "", (rr.stderr or "")[-160:])
+    # so set it before running. **只在产物真的存在时**才 chmod：那条 `check` 已经在失败时
+    # 记录了 `--opt` 的 stderr，这里再无条件 chmod 只会用 FileNotFoundError 盖掉真正的原因。
+    if r.returncode == 0:
+        wsl("chmod", "755", o_bin)
+        rr = wsl(o_bin)
+        check("build --opt 的产物跑得起来",
+              rr.returncode == 0 and rr.stdout.strip() != "", (rr.stderr or "")[-160:])
     has_clang = wsl("sh", "-c", "command -v clang >/dev/null && echo y || echo n").stdout.strip() == "y"
     if has_clang:
         check("有 clang 时 --opt 走优化路径（不说 fallback）",
@@ -655,20 +657,37 @@ def test_windows_installer(zipf: Path) -> None:
           r2b.returncode == 0 and "Compile and link to an executable" in (r2b.stdout or ""),
           (r2b.stdout or r2b.stderr or "")[:140])
 
-    # issue #13: 未知开关要被**拒绝**，不能当成源文件、也不能静默忽略。
-    # `--diag-out` 是**驱动**的开关（docs/182 §5），`loment check` 上并没有这一条 ——
-    # 所以这里要的不是"支持它"，而是"别装作支持"：原先它会落到 :scan_arg 里
-    # "第一个非开关词就是源文件"那一支，于是被无声吞掉（bash 侧同形状退 2）。
-    stray = work / "should_not_exist.jsonl"
+    # issue #13（2026-10-18 修）：`--diag-out PATH` 是**驱动**那一层的开关，`check` 现在
+    # 真的把它转交过去 —— 文件要出现在用户点名的地方（干净的单元也要留一个空文件，
+    # 否则"没有文件"与"开关没生效"分不开）。原先这条钉的是"被拒、不写文件"（当时的已知
+    # 缺陷），按棘轮规矩**反转**，不是删掉。
+    stray = work / "diag-out.jsonl"
     ex_src = pfx / "share/loment/examples/user_hello.lomt"
-    r_unknown = subprocess.run(
+    r_dout = subprocess.run(
         ["cmd", "/c", str(cmd), "check", str(ex_src), "--diag-out", str(stray)],
         capture_output=True, text=True, shell=False, encoding="utf-8",
         errors="replace", timeout=180)
-    check("装完后 `loment check FILE --diag-out P` 被拒 (未知开关, 退 2, 不写文件)",
-          r_unknown.returncode == 2 and "unknown option" in (r_unknown.stderr or "")
-          and not stray.exists(),
-          f"rc={r_unknown.returncode} err={(r_unknown.stderr or '')[:90]}")
+    check("装完后 `loment check FILE --diag-out P` 写出那份文件",
+          r_dout.returncode == 0 and stray.exists(),
+          f"rc={r_dout.returncode} exists={stray.exists()} "
+          f"err={(r_dout.stderr or '')[:90]}")
+
+    # 同一条 issue 的另一半：`--max N` 的**值**必须跟着开关一起到渲染器。cmd 侧原先
+    # 只记了 `--max` 本身、把下一个词当"源文件"跳过，于是 `lomenterr --max d.jsonl`
+    # 把文件当成了上限、打自己的用法 —— 用户要的诊断一条都看不到。
+    bad_max = work / "bad_max.lomt"
+    bad_max.write_text("module m\nfn _start() {\n    let a: u32 = zz;\n"
+                       "    let b: u32 = yy;\n    syscall4(60, 0, 0, 0);\n}\n",
+                       encoding="utf-8", newline="\n")
+    r_max = subprocess.run(
+        ["cmd", "/c", str(cmd), "check", str(bad_max), "--max", "1"],
+        capture_output=True, text=True, shell=False, encoding="utf-8",
+        errors="replace", timeout=180)
+    blob_max = (r_max.stderr or "") + (r_max.stdout or "")
+    check("装完后 `loment check FILE --max 1` 是截断，不是用法错",
+          r_max.returncode == 1 and "usage: lomenterr" not in blob_max
+          and "error[E002]" in blob_max,
+          f"rc={r_max.returncode} err={blob_max[:120]}")
 
     # ★ 全链判据: `loment run` 在本机编出 PE 并跑起来 —— 这才是"去 WSL"的意义
     ex = pfx / "share/loment/examples/user_hello.lomt"
@@ -1036,6 +1055,7 @@ def main() -> int:
     print("loment_dist_test —— 发行包判据 (docs/162)")
     for name, fn in (("driver 的来源：种子 == 参考实现", test_driver_seed_matches_reference),
                      ("--opt 编出来的驱动自己跑得起来", test_opt_driver_runs),
+                     ("包里那个 VM 真跑一份程序", test_lvm_ships_and_runs_a_program),
                      ("布局与脚本卫生", test_layout), ("归档内容与确定性", test_archives),
                      ("安装脚本点名更靠前的同名命令", test_installers_name_an_earlier_lompi),
                      ("--check 的新鲜度", test_check_detects_staleness),

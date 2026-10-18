@@ -119,6 +119,102 @@ def _compile_elf(src: str, td: Path, name: str) -> Path:
     return exe
 
 
+def _run_pty(exe: Path, timeout: int = 60) -> subprocess.CompletedProcess:
+    """在**真 pty** 里跑探针（`script -qec … /dev/null`）—— `TCGETS` 只对终端有意义。"""
+    inner = f"script -qec '{_lx(exe)}' /dev/null"
+    return _run_linux(["bash", "-lc", inner], timeout=timeout)
+
+
+#: `os/tty` 的结构体大小与 VMIN/VTIME 偏移判据（issue #701）。
+#:
+#: 内核的 `struct termios` 是 **36** 字节（glibc 的 60 字节里多出来的是包装字段）：
+#: 填 0xAA 之后 `TCGETS` 只写 0..35。这条同时钉住两件事 ——
+#:   * `TTY_TERMIOS_BYTES` 不是 60：`tty_raw_into` 回来必须是 36，尾部哨兵不许被抄；
+#:   * `VMIN` / `VTIME` 在 36 字节布局里仍是 23 / 22（cc[19] 从 17 起）。
+_TTY_SRC = """
+module os_tty_probe
+choose runtime
+use tty
+
+fn tp_w(s: str) -> u32 {
+    return syscall4(1, 1, str_ptr(s) as u64, str_len(s) as u64) as u32;
+}
+
+fn tp_dec(v: u32) -> u32 {
+    let b: ptr = alloc(24);
+    let n: u32 = 0;
+    let x: u32 = v;
+    if x == 0 {
+        store8(b, 0, 48 as u8);
+        n = 1;
+    }
+    while x > 0 {
+        store8(b, n, (48 + x % 10) as u8);
+        x = x / 10;
+        n = n + 1;
+    }
+    let i: u32 = 0;
+    while i < n / 2 {
+        let lo: u8 = load8(b, i) as u8;
+        store8(b, i, load8(b, n - 1 - i) as u8);
+        store8(b, n - 1 - i, lo);
+        i = i + 1;
+    }
+    return syscall4(1, 1, b as u64, n as u64) as u32;
+}
+
+fn tp_line(tag: str, v: u32) -> u32 {
+    let _a: u32 = tp_w(tag);
+    let _b: u32 = tp_w("|");
+    let _c: u32 = tp_dec(v);
+    return tp_w("\\n");
+}
+
+fn _start() {
+    let b: ptr = alloc(64);
+    let i: u32 = 0;
+    while i < 64 {
+        store8(b, i, 170 as u8);
+        i = i + 1;
+    }
+    let r: i64 = tty_get_attr(0, b);
+    let _x: u32 = tp_line("get_attr_ok", (0 - r) as u32);
+    // 内核只该写 0..35 —— 36..63 的 0xAA 一个都不许少。
+    let tail: u32 = 0;
+    i = 36;
+    while i < 64 {
+        if load8(b, i) == 170 {
+            tail = tail + 1;
+        }
+        i = i + 1;
+    }
+    let _y: u32 = tp_line("tail_untouched", tail);
+    let raw: ptr = alloc(64);
+    i = 0;
+    while i < 64 {
+        store8(raw, i, 204 as u8);
+        i = i + 1;
+    }
+    let n: u32 = tty_raw_into(b, raw);
+    let _z: u32 = tp_line("raw_bytes", n);
+    let rtail: u32 = 0;
+    i = 36;
+    while i < 64 {
+        if load8(raw, i) == 204 {
+            rtail = rtail + 1;
+        }
+        i = i + 1;
+    }
+    let _p: u32 = tp_line("raw_tail_untouched", rtail);
+    let _q: u32 = tp_line("vmin", load8(raw, 23));
+    let _s: u32 = tp_line("vtime", load8(raw, 22));
+    let rr: i64 = tty_set_attr(0, b);
+    let _t: u32 = tp_line("set_attr_ok", (0 - rr) as u32);
+    syscall4(60, 0, 0, 0);
+}
+"""
+
+
 def _lit(s: str) -> str:
     assert all(32 <= ord(c) < 127 and c not in '"\\' for c in s), f"字面量有要转义的字符: {s!r}"
     return '"' + s + '"'
@@ -352,6 +448,8 @@ def test_os_matches_python():
         ref = td / "ref.py"
         ref.write_text(_ref_src(base_lx), encoding="utf-8", newline="\n")
         got_r = _run_linux(["python3", _lx(ref)], timeout=60)
+        tty_exe = _compile_elf(_TTY_SRC, td, "os_tty_probe")
+        tty_p = _run_pty(tty_exe, timeout=60)
     assert got_r.returncode == 0, f"CPython 参考自己没过: {got_r.stderr[-400:]}"
     got, want = _kv(got_p.stdout), _kv(got_r.stdout)
     assert got, f"探针没打出任何东西 (退出码 {got_p.returncode}): {got_p.stderr[-300:]}"
@@ -366,7 +464,22 @@ def test_os_matches_python():
     assert skew <= 120, f"墙上时钟与 CPython 差了 {skew}s (容忍 120s)"
     assert int(got["sigignore_ok"]) == 1, "rt_sigaction 忽略 SIGPIPE 失败"
     assert int(got["sigpipe_alive"]) == 1, "忽略 SIGPIPE 之后发给自己, 进程还是死了"
+
+    # ---- tty: 内核的 termios 是 36 字节 (issue #701)
+    tv = _kv(tty_p.stdout)
+    assert tty_p.returncode == 0, f"tty 探针没跑完: {tty_p.stderr[-300:]}"
+    assert tv.get("get_attr_ok") == "0", f"pty 上 TCGETS 失败: {tty_p.stdout!r}"
+    assert tv.get("tail_untouched") == "28", (
+        f"内核只该写 termios 的 0..35, 36..63 应原样: {tv}")
+    assert tv.get("raw_bytes") == "36", (
+        f"tty_raw_into 应只抄内核的 36 字节, 实际 {tv.get('raw_bytes')!r} (issue #701)")
+    assert tv.get("raw_tail_untouched") == "28", (
+        f"tty_raw_into 抄过了结构体尾巴: {tv}")
+    assert tv.get("vmin") == "1" and tv.get("vtime") == "0", (
+        f"VMIN/VTIME 不在 23/22: {tv}")
+    assert tv.get("set_attr_ok") == "0", f"TCSETS 还原失败: {tv}"
     print(f"      os: {len(BYTE_KEYS)} 项与 CPython 逐字节一致 + 5 项谓词 (pid/单调钟/时钟/信号)")
+    print("      os/tty: termios=36 字节, 尾部哨兵保留, VMIN/VTIME=23/22")
 
 
 #: `os/thread` 的真跑探针（`docs/245` §8 阶段 2）。
@@ -474,6 +587,228 @@ fn _start() {{
 """
 
 
+#: `thread_lock` 的"等到拿到"判据（issue #695）。
+#:
+#: 复现的是**旧封顶**（`THRP_ROUNDS = 1000000`）的失效形态：`serving` 在等待期间一直变
+#: （每次 `futex_wait` 都 `-EAGAIN`），旧代码数满 100 万轮就 `return 0` —— 与成功同值 ——
+#: 而 `serving` 还不是工作线程的号。这里让主线程把 `serving` 从 100 起一直往上写（永远
+#: 不等于工作线程的号 1），轮数足够之后再把号交给它：
+#:   * 旧代码：`worker_saw` 是一个 ≥100 的号（没拿到锁就返回了）；
+#:   * 新代码：`worker_saw` 必须是 1（拿到锁时 `serving` 正好是自己的号）。
+#: 600 万次是为了在任何调度比例下都越过 100 万轮（本机实测约 1 轮 / 4.5 次变更）。
+_LOCK_ROUNDS_SRC = """
+module os_lock_rounds_probe
+choose runtime
+use thread
+
+const BUMP: u32 = 6000000;
+
+fn lk_w(s: str) -> u32 {
+    return syscall4(1, 1, str_ptr(s) as u64, str_len(s) as u64) as u32;
+}
+
+fn lk_rd32(p: ptr) -> u32 {
+    return load8(p, 0) | (load8(p, 1) << 8) | (load8(p, 2) << 16) | (load8(p, 3) << 24);
+}
+
+fn lk_wr32(p: ptr, v: u32) {
+    store8(p, 0, (v & 255) as u8);
+    store8(p, 1, ((v >> 8) & 255) as u8);
+    store8(p, 2, ((v >> 16) & 255) as u8);
+    store8(p, 3, ((v >> 24) & 255) as u8);
+}
+
+fn lk_dec(v: u32) -> u32 {
+    let b: ptr = alloc(24);
+    let n: u32 = 0;
+    let x: u32 = v;
+    if x == 0 {
+        store8(b, 0, 48 as u8);
+        n = 1;
+    }
+    while x > 0 {
+        store8(b, n, (48 + x % 10) as u8);
+        x = x / 10;
+        n = n + 1;
+    }
+    let i: u32 = 0;
+    while i < n / 2 {
+        let lo: u8 = load8(b, i) as u8;
+        store8(b, i, load8(b, n - 1 - i) as u8);
+        store8(b, n - 1 - i, lo);
+        i = i + 1;
+    }
+    return syscall4(1, 1, b as u64, n as u64) as u32;
+}
+
+fn lk_line(tag: str, v: u32) -> u32 {
+    let _a: u32 = lk_w(tag);
+    let _b: u32 = lk_w("|");
+    let _c: u32 = lk_dec(v);
+    return lk_w("\\n");
+}
+
+fn worker(arg: u64) -> u32 {
+    let m: ptr = arg as ptr;
+    let r: u32 = thread_lock(m);
+    let sp: ptr = ptr_add(m, 4);
+    lk_wr32(ptr_add(m, 8), lk_rd32(sp));      // 返回时看到的 serving
+    lk_wr32(ptr_add(m, 12), 1);               // 工作线程走完
+    return r;
+}
+
+fn _start() {
+    let m: ptr = alloc(32);
+    let i: u32 = 0;
+    while i < 32 {
+        store8(m, i, 0 as u8);
+        i = i + 1;
+    }
+    let _l: u32 = thread_lock(m);             // 主线程号 0, 工作线程号 1
+    let done: ptr = alloc(8);
+    lk_wr32(done, 0);
+    let st: ptr = thread_stack(262144);
+    let _t: i64 = thread_spawn("worker", st as u64, m as u64, done as u64);
+    let sp: ptr = ptr_add(m, 4);
+    let k: u32 = 0;
+    let s: u32 = 100;
+    while k < BUMP {
+        lk_wr32(sp, s);
+        let _w: i64 = thread_wake(sp, 2147483647);
+        let _y: i64 = thread_yield();
+        s = s + 1;
+        if s > 4000000000 {
+            s = 100;
+        }
+        k = k + 1;
+    }
+    lk_wr32(sp, 1);                           // 现在轮到工作线程的号
+    let _f: i64 = thread_wake(sp, 2147483647);
+    let spin: u32 = 0;
+    while lk_rd32(ptr_add(m, 12)) == 0 && spin < 200000000 {
+        spin = spin + 1;
+    }
+    let _a: u32 = lk_line("lock_saw", lk_rd32(ptr_add(m, 8)));
+    let _b: u32 = lk_line("lock_flag", lk_rd32(ptr_add(m, 12)));
+    syscall4(60, 0, 0, 0);
+}
+"""
+
+
+#: `thread_join_all` 的同一条判据（issue #695 的第二半）。
+#:
+#: `done` 从 0 一路加到 `N = 6000000`；旧封顶让 join 在数满 100 万轮时返回一个
+#: **小于 N** 的已到值（本机实测约 450 万），也就是"提前放手"。新代码必须等满 N。
+_JOIN_ROUNDS_SRC = """
+module os_join_rounds_probe
+choose runtime
+use thread
+
+const N: u32 = 6000000;
+
+fn jn_w(s: str) -> u32 {
+    return syscall4(1, 1, str_ptr(s) as u64, str_len(s) as u64) as u32;
+}
+
+fn jn_rd32(p: ptr) -> u32 {
+    return load8(p, 0) | (load8(p, 1) << 8) | (load8(p, 2) << 16) | (load8(p, 3) << 24);
+}
+
+fn jn_wr32(p: ptr, v: u32) {
+    store8(p, 0, (v & 255) as u8);
+    store8(p, 1, ((v >> 8) & 255) as u8);
+    store8(p, 2, ((v >> 16) & 255) as u8);
+    store8(p, 3, ((v >> 24) & 255) as u8);
+}
+
+fn jn_wr64(p: ptr, v: u64) {
+    let i: u32 = 0;
+    while i < 8 {
+        store8(p, i, ((v >> ((i * 8) as u32)) & 255) as u8);
+        i = i + 1;
+    }
+}
+
+fn jn_rd64(p: ptr) -> u64 {
+    let v: u64 = 0;
+    let i: u32 = 0;
+    while i < 8 {
+        v = v | ((load8(p, i) as u64) << ((i * 8) as u32));
+        i = i + 1;
+    }
+    return v;
+}
+
+fn jn_dec(v: u32) -> u32 {
+    let b: ptr = alloc(24);
+    let n: u32 = 0;
+    let x: u32 = v;
+    if x == 0 {
+        store8(b, 0, 48 as u8);
+        n = 1;
+    }
+    while x > 0 {
+        store8(b, n, (48 + x % 10) as u8);
+        x = x / 10;
+        n = n + 1;
+    }
+    let i: u32 = 0;
+    while i < n / 2 {
+        let lo: u8 = load8(b, i) as u8;
+        store8(b, i, load8(b, n - 1 - i) as u8);
+        store8(b, n - 1 - i, lo);
+        i = i + 1;
+    }
+    return syscall4(1, 1, b as u64, n as u64) as u32;
+}
+
+fn jn_line(tag: str, v: u32) -> u32 {
+    let _a: u32 = jn_w(tag);
+    let _b: u32 = jn_w("|");
+    let _c: u32 = jn_dec(v);
+    return jn_w("\\n");
+}
+
+/// rec: [joined u32 @0 | flag u32 @4 | done 指针 u64 @8]
+fn worker(arg: u64) -> u32 {
+    let rec: ptr = arg as ptr;
+    let done: ptr = jn_rd64(ptr_add(rec, 8)) as ptr;
+    let got: u32 = thread_join_all(done, N);
+    jn_wr32(rec, got);
+    jn_wr32(ptr_add(rec, 4), 1);
+    return 0;
+}
+
+fn _start() {
+    let done: ptr = alloc(8);
+    jn_wr32(done, 0);
+    let rec: ptr = alloc(32);
+    jn_wr32(rec, 0);
+    jn_wr32(ptr_add(rec, 4), 0);
+    jn_wr64(ptr_add(rec, 8), done as u64);
+    let st: ptr = thread_stack(262144);
+    let child_done: ptr = alloc(8);
+    jn_wr32(child_done, 0);
+    let _t: i64 = thread_spawn("worker", st as u64, rec as u64, child_done as u64);
+    let k: u32 = 0;
+    while k < N {
+        let _a: u32 = atomic_add(done, 1);
+        let _w: i64 = thread_wake(done, 2147483647);
+        let _y: i64 = thread_yield();
+        k = k + 1;
+    }
+    let _z: i64 = thread_wake(done, 2147483647);
+    let spin: u32 = 0;
+    while jn_rd32(ptr_add(rec, 4)) == 0 && spin < 200000000 {
+        spin = spin + 1;
+    }
+    let _b: u32 = jn_line("join_got", jn_rd32(rec));
+    let _c: u32 = jn_line("join_flag", jn_rd32(ptr_add(rec, 4)));
+    syscall4(60, 0, 0, 0);
+}
+"""
+
+
 @test
 def test_os_thread_mutex_serializes_writers():
     """`os/thread` 的取号锁**真的把临界区串起来了** —— 这一条的对照物是**没有锁的结果**。
@@ -484,6 +819,11 @@ def test_os_thread_mutex_serializes_writers():
 
     它同时钉住 `thread_stack`（栈是 mmap 出来的，`thread_spawn` 要的正是那个栈顶）与
     完成通知（工作线程里没有一句"喊一声"，`thread_join_all` 却等到了 N）。
+
+    后半段是 issue #695 的两条契约：`thread_lock` / `thread_join_all` **没有轮数上限**。
+    旧实现的 `THRP_ROUNDS = 1000000` 会在 `-EAGAIN` 风暴里数满就返回 —— 锁返回的是
+    **和成功同值的 0**，join 返回的是 **小于 n** 的已到值。探针让计数值一直变、越过 100
+    万轮，再检查"返回时真的拿到了吗 / 真的等到 n 了吗"。
     """
     if not _have_linux():
         print("      SKIP: 无 WSL/Linux")
@@ -505,7 +845,27 @@ def test_os_thread_mutex_serializes_writers():
                           if ln.startswith("stk|"))]
     assert len(stk) == N_THREADS, f"栈地址没打印全 ({len(stk)} 条): {got_p.stdout!r}"
     assert len(set(stk)) == N_THREADS, f"两条线程共用了同一块栈: {stk}"
+
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        lock_exe = _compile_elf(_LOCK_ROUNDS_SRC, td, "os_lock_rounds_probe")
+        lock_p = _run_linux([_lx(lock_exe)], timeout=300)
+        join_exe = _compile_elf(_JOIN_ROUNDS_SRC, td, "os_join_rounds_probe")
+        join_p = _run_linux([_lx(join_exe)], timeout=300)
+    lk = _kv(lock_p.stdout)
+    assert lock_p.returncode == 0, f"锁轮数探针没跑完: {lock_p.stderr[-300:]}"
+    assert lk.get("lock_flag") == "1", f"锁轮数探针没走完: {lock_p.stdout!r}"
+    assert lk.get("lock_saw") == "1", (
+        "thread_lock 在 serving 还是 %s 时就返回了 —— 它没拿到锁 (issue #695)"
+        % lk.get("lock_saw"))
+    jn = _kv(join_p.stdout)
+    assert join_p.returncode == 0, f"join 轮数探针没跑完: {join_p.stderr[-300:]}"
+    assert jn.get("join_flag") == "1", f"join 轮数探针没走完: {join_p.stdout!r}"
+    assert jn.get("join_got") == "6000000", (
+        "thread_join_all 在 done=%s 时就返回了 —— 没等到 n=6000000 (issue #695)"
+        % jn.get("join_got"))
     print(f"      os/thread: {N_THREADS} 个线程 {want} 次临界区 + join 到齐 + 栈各不同")
+    print("      os/thread: 轮数越过 1e6 后 lock 真拿到、join 真等到 n (issue #695)")
 
 
 # ---------------------------------------------------------------- 入口

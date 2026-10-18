@@ -97,6 +97,43 @@ def test_out_of_range_literal_wraps_instead_of_emitting_an_invalid_constant():
 
 
 @test
+def test_int_literal_cast_keeps_the_literal_value():
+    """**整数字面量 `as iN` 的值就是字面量本身**（#694）—— 不许先按 i32 截断再放宽。
+
+    `253402300800 as i64` 曾经发成 `zext i32 -769664 to i64` = 4294197632：
+    值的低 32 位看着"像个数"，所以两个实现一致时没有任何孪生判据看得见。直接赋值那条
+    路一直是 64 位的 —— 坏的正好只是转型那一支。
+
+    **窄目标照旧环绕**（Loment 的整数语义）：`300 as u8` 是 44，不是 300。所以这条判据
+    同时钉住两半：宽目标不被截、窄目标仍环绕。
+    """
+    NL = chr(10)
+    src = NL.join([
+        "module m", "choose runtime", "",
+        "fn _start() {",
+        "    let a: i64 = 253402300800 as i64;",
+        "    let b: u64 = 253402300800 as u64;",
+        "    let d: i64 = 4294967296 as i64;",
+        "    let e: i64 = 9223372036854775807 as i64;",
+        "    let g: u64 = 18446744073709551615 as u64;",
+        "    let h: u8 = 300 as u8;",
+        "    let i: i32 = 4294967296 as i32;",
+        "    syscall4(60, 0, 0, 0);",
+        "}", "",
+    ])
+    assert errs(src) == [], errs(src)
+    ir = lomentc.emit_llvm(parse(src), ROOT, [])
+    for want in ("store i64 253402300800", "store i64 4294967296",
+                 "store i64 9223372036854775807",
+                 "store i64 18446744073709551615"):
+        assert want in ir, f"缺少 {want!r}: {ir}"
+    assert "zext i32 -769664" not in ir, ir
+    # 窄目标仍然按位宽环绕（这一半别在修 #694 时弄丢）
+    assert "store i8 44," in ir, ir
+    assert "store i32 0," in ir, ir
+
+
+@test
 def test_demo_parses_and_checks():
     mod = lomentc.load(DEMO)
     deps = lomentc.resolve_deps(mod, ROOT, DEMO.parent, entry=DEMO)
@@ -1322,10 +1359,12 @@ def test_e028_literal_index_over_a_fixed_array():
     body = "fn f() -> u32 { let a: [u32; 4] = [1, 2, 3, 4]; let x: u32 = a[10]; return x; }\n"
     # **默认档也拒**（这正是这一笔改的东西：从前这一行是 `assert errs(off) == []`）
     off = "module m\n" + body
-    assert any("E028" in x for x in errs(off)), errs(off)
+    # **码从分类器拿，不在消息正文里找**（`#486`）：正文不再自带 `E028:` 前缀 ——
+    # 渲染器的头一行已经印了码，正文再写一次就是同一件事印两遍。
+    assert any(loment_diag.classify(x)[0] == "E028" for x in errs(off)), errs(off)
     # `lms` 开着也一样拒，而且**只报一条** —— 两条路都在的时候不许数出两条诊断
     on = "module m\nchoose lms_open\n" + body
-    assert len([x for x in errs(on) if "E028" in x]) == 1, errs(on)
+    assert len([x for x in errs(on) if loment_diag.classify(x)[0] == "E028"]) == 1, errs(on)
     # **边界**：正好在界内的那个下标**不报** —— 否则这条会把"越界"读成"下标 >= 0 就报"
     edge = "module m\n" + body.replace("a[10]", "a[3]")
     assert errs(edge) == [], errs(edge)
@@ -1337,7 +1376,7 @@ def test_e028_literal_index_over_a_fixed_array():
     assert errs(var) == [], errs(var)
     # **写一侧也是同一个界**：`a[10] = 7;` 同判
     w = "module m\nfn k() -> u32 { let a: [u32; 4] = [1, 2, 3, 4]; a[10] = 7; return a[0]; }\n"
-    assert any("E028" in x for x in errs(w)), errs(w)
+    assert any(loment_diag.classify(x)[0] == "E028" for x in errs(w)), errs(w)
 
 
 @test
@@ -1469,7 +1508,7 @@ def test_e029_use_after_free():
     assert errs(head % "" + body(True)) == [], errs(head % "" + body(True))
     # 开着：编译期拒
     on = head % "choose lms_open" + body(True)
-    assert any("E029" in x for x in errs(on)), errs(on)
+    assert any(loment_diag.classify(x)[0] == "E029" for x in errs(on)), errs(on)
     # **先读后 free** 合法 —— 这一半挡住"见过 free 就报"那种过头实现
     ok = head % "choose lms_open" + body(False)
     assert errs(ok) == [], errs(ok)
@@ -2891,9 +2930,11 @@ L2_MANUAL_SRC = L2_EPOCH_SRC.replace("@@CHOOSE@@", "choose gc_manual")
 #: `f_escape` 把指针赋给体外 / `f_strcat` 有 `str_concat` / `f_free` 体内有 `free` /
 #: `f_l0` 尺寸是字面量（L0 已经提到栈上，没什么可归还）/ `f_inline` 是认不出来的分配（整格
 #: 取消）/ `f_call` 把它交给了用户函数 / `f_rettp` 从体内 `return p`。
-#: `f_two` 是**同名循环互相挡**那一格 —— `#364` 之后这条边界过掉了：体之后的扫描**扫到
-#: 下一次同名 `let` 就停**（那之后名字换了主人；语言没有块作用域，`let` 是唯一的重声明
-#: 形状），于是两个兄弟循环**各自都开纪元**。
+#: `f_two` 是**同名循环互相挡**那一格 —— `#364` 之后体之后的扫描**扫到同一层下一次同名
+#: `let` 就停**（那之后名字换了主人；语言没有块作用域，`let` 是唯一的重声明形状）。
+#: **`#714` 之后第一格变回 `False`**：第二个循环的 `let p` 在**另一个块**里，静态上认不
+#: 出那个块跑没跑（`if` 的分支就可能没跑），所以第一个循环**整格取消**；第二个循环体之后
+#: 没有同名出现，照旧开。`s_shadow` 那条判据钉的就是这个保守方向。
 #: `f_bodyret` 是**终止**那一格：体在 `return` 处结束 —— 仍然开纪元，只是那条路不回退。
 #: `f_after` 是**只查体之后**那一格：体之前的同名使用不算逃逸。
 L2_WANT = {
@@ -2908,7 +2949,7 @@ L2_WANT = {
     "f_bodyret": [True],
     "f_rettp": [False],
     "f_nested": [True, True],
-    "f_two": [True, True],
+    "f_two": [False, True],
     "f_after": [True],
     "f_multi": [True],
     "f_both": [True],
@@ -2993,6 +3034,83 @@ def test_l2_block_epoch_rule():
     # 两份源只差那一行
     assert L2_ALPHA_SRC.replace("choose gc_auto_alpha", "X") == \
         L2_MANUAL_SRC.replace("choose gc_manual", "X")
+
+
+#: `#714`：体**之后**另一个块里的同名 `let` 不能当作"名字换了主人"。
+#:
+#: 形状就是 issue 里那三只（`p15_shadow0` / `p16_noshadow` / `p17_shadow1`）的静态版：
+#: 循环体分配 `c`，体之后有一个**可能没跑**的 `if` 重新声明 `c`，最后那次 `load8(c, 0)`
+#: 仍然指循环里那块 ⇒ 前沿**不能**退。旧规则在 `if` 里那个 `let` 处 `break`，把后面
+#: 那次出体使用一起跳过去了，于是发出 `store i32 %tN, ptr @__loment_off`，活块被回收。
+L2_SHADOW_SRC = """module gc_l2_shadow
+choose gc_auto_alpha
+choose runtime
+
+fn s_shadow(cond: u32, n: u32) -> u32 {
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i < 4 {
+        let c: ptr = alloc(n);
+        store8(c, 0, 3);
+        s = s + load8(c, 0);
+        i = i + 1;
+    }
+    if cond != 0 {
+        let c: ptr = alloc(8);
+        store8(c, 0, 9);
+        s = s + load8(c, 0);
+    }
+    return s + load8(c, 0);
+}
+
+fn s_noshadow(cond: u32, n: u32) -> u32 {
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i < 4 {
+        let c: ptr = alloc(n);
+        store8(c, 0, 3);
+        s = s + load8(c, 0);
+        i = i + 1;
+    }
+    return s;
+}
+
+fn s_shadow_only(cond: u32, n: u32) -> u32 {
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i < 4 {
+        let c: ptr = alloc(n);
+        store8(c, 0, 3);
+        s = s + load8(c, 0);
+        i = i + 1;
+    }
+    if cond != 0 {
+        let c: ptr = alloc(8);
+        store8(c, 0, 9);
+        s = s + load8(c, 0);
+    }
+    return s;
+}
+"""
+
+
+@test
+def test_l2_shadow_in_another_block_cancels_the_epoch():
+    """`#714`：体之后**另一个块**里的同名 `let` 结束时末的整格退回（保守），不能用它当
+    "名字换主人"的证据 —— 那条分支可能根本没跑。
+
+    三格：
+      * `s_shadow` —— issue 的复现形状：`if` 里同名 `let` + 之后仍用循环那块 ⇒ **False**
+        （旧规则给出 True，于是活块被回收；这是这条判据的"红"）；
+      * `s_shadow_only` —— 同一个 `if`、但体之后没有再用 ⇒ **False**。这是**保守**的代价：
+        静态上分不出 `if` 跑没跑，宁可少开一格；
+      * `s_noshadow` —— 对照组：去掉那个 `if` ⇒ **True**（规则没有被一刀切死）。
+    """
+    assert _l2_flags(L2_SHADOW_SRC) == {
+        "s_shadow": [False],
+        "s_shadow_only": [False],
+        "s_noshadow": [True],
+    }, _l2_flags(L2_SHADOW_SRC)
 
 
 #: `if` 的两支开纪元那一格（`docs/210` §2.3 / §7）。**源只有一份** —— 这条真值表判据与
@@ -3638,6 +3756,57 @@ def test_runtime_dep_must_declare_and_agree():
     # ③ 根满足它 ⇒ **不许**报（"合法的那一对不许拒"）
     e = run(lib_rt, "module root" + NL + "choose runtime" + tail)
     assert e == [], e
+
+
+@test
+def test_a_sibling_dependency_is_not_every_units_requirement():
+    """#726：体检一个依赖时，**它的兄弟**不是它的依赖。
+
+    闭包 = 根的全部传递依赖。从前 `_check` 的"依赖重查"那一趟给每个单元递的是
+    **整份闭包减自己** —— 于是闭包里有一个写 `choose runtime` 的兄弟，任何没写这一行
+    的单元都会被判"根是 `no_runtime`、依赖要求 `runtime`"。实测：根 `use` 一个
+    `std/f64conv`（它 → `f64` → `f64bits`/`wide`/`mem`）时，一条 `use` 都没有的
+    `f64bits` 会收到四条这种话，而它自己干干净净。
+
+    这一条钉三件事：兄弟不算（①）、**真依赖仍然算**（②）、两边的可接受集与自举一致
+    （`loment_store_twin_test` 那 148/156 是另一处证据，不在这里重复）。
+    """
+    import tempfile
+    NL = chr(10)
+    tail = NL
+
+    def run(files: dict[str, str], root: str) -> list[str]:
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            for name, text in files.items():
+                (d / name).write_text(text, encoding="utf-8")
+            rp = d / "root.lomt"
+            rp.write_text(root, encoding="utf-8")
+            m = lomentc.load(rp)
+            deps = lomentc.resolve_deps(m, ROOT, rp.parent, entry=rp)
+            return lomentc.check(m, None, deps)
+
+    plain = "module a" + NL + NL + "pub fn f() -> u32 { return 1; }" + NL
+    needs = ("module b" + NL + "choose runtime" + NL + NL
+             + "pub fn g(x: u32) -> u32 { return x / 2; }" + NL)
+    root = ("module root" + NL + "choose runtime" + NL
+            + 'use "a.lomt"' + NL + 'use "b.lomt"' + NL + tail
+            + "fn _start() { syscall4(60, 0, 0, 0); }" + NL)
+    # ① 兄弟组合法：a 没有 use、b 要求 runtime，根满足它 ⇒ 一个字都不许报
+    e = run({"a.lomt": plain, "b.lomt": needs}, root)
+    assert e == [], ("兄弟单元被当成了 `a` 的依赖（#726）：" + repr(e))
+
+    # ② 真依赖的体检**不许**被这条放宽掉：mid 用了 rt（要求 runtime）却没自己声明
+    mid = ("module mid" + NL + 'use "rt.lomt"' + NL + NL
+           + "pub fn h(x: u32) -> u32 { return rt_half(x); }" + NL)
+    rt = ("module rt" + NL + "choose runtime" + NL + NL
+          + "pub fn rt_half(x: u32) -> u32 { return x / 2; }" + NL)
+    root2 = ("module root" + NL + "choose runtime" + NL
+             + 'use "mid.lomt"' + NL + tail
+             + "fn _start() { syscall4(60, 0, 0, 0); }" + NL)
+    e = run({"mid.lomt": mid, "rt.lomt": rt}, root2)
+    assert any("mid" in x and "runtime" in x for x in e), (
+        "真依赖的要求没有生效 —— 修 #726 修过头了：" + repr(e))
 #: `@__loment_heap`（间接寻址那一份）的**初值写法** —— 语义上是全零指针，但必须写成
 #: `zeroinitializer` 而不是 `null`：**我们自己的两个链接器**（`tools/lomelf.py` 与
 #: `loment/tools/lomelf.lomt`）的 IR 子集只有零初始化这一种写法，`ptr null` 会让它们
@@ -4086,6 +4255,145 @@ def test_mixed_width_arithmetic_has_a_common_type():
                            capture_output=True, text=True, shell=False)
         assert r.returncode == 0, r.stderr[-300:]
     print("      narrow side widened (zext), irreconcilable pair refused, product passes clang")
+
+
+@test
+def test_lspe_dimension_defaults_open():
+    """第七维：不写 `choose` 就是 `lspe_open_admin`，台账随产物一起发出（v16）。"""
+    doc = json.loads(lomentc.emit_potato(lomentc.load(DEMO), ROOT))
+    assert doc["potato"] == "v16"
+    lp = doc["lspe"]
+    assert lp["state"] == "lspe_open_admin"
+    assert lp["set_by"] == "default"
+    assert lp["mode"] == "full" and lp["level"] == 3
+    # demo 里有下标表达式；普查至少给出一条，且四个计数自洽。
+    assert lp["sites"] >= 1
+    assert lp["obligations"] == lp["sites"]
+    assert lp["sites"] == lp["proved"] + lp["undecided"]
+    assert "index" in lp["per_kind"]
+    assert lp["floors"] == 0
+    assert lp["floor_detail"] == {"assumed": 0, "stale_wf": 0, "budget": 0, "drop_honest": 0}
+    assert lp["invariants"]["i1"] == "ok"
+    assert potato.validate(doc) == []
+    # QIR 骨架：每个站点有 Site / Claim / Obligation / Evidence 四格。
+    s0 = lomentc.load(DEMO).lspe_sites[0]
+    assert s0["claim"] == "allow"
+    assert s0["obligation"] in ("GuardHolds", "InBounds")
+    assert s0["evidence"] == (s0["source"] or "none")
+
+
+@test
+def test_lspe_close_admin_is_recorded():
+    """`lspe_close_admin` 关的是审计，不是检查；`set_by` 必须说清是源码定的。"""
+    src = "module lspe_close\n\nchoose lspe_close_admin\n\nfn f() -> u32 { return 0; }\n"
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "close.lomt"
+        p.write_text(src, encoding="utf-8", newline=chr(10))
+        doc = json.loads(lomentc.emit_potato(lomentc.load(p), ROOT))
+    assert doc["potato"] == "v16"
+    assert doc["lspe"]["state"] == "lspe_close_admin"
+    assert doc["lspe"]["set_by"] == "source"
+    # 关审计：普查不算，计数全零。
+    assert doc["lspe"]["sites"] == 0 and doc["lspe"]["per_kind"] == {}
+    assert potato.validate(doc) == []
+
+
+@test
+def test_lspe_q1_provenance_and_strict_e034():
+    """Q1 来源问：guard 与裸字面量下标有来源；非字面量下标没有 —— strict 下是 E034。"""
+    src = ("module lspe_q1\n\n"
+           "choose runtime\n\n"
+           "capability d : disk[0..8]\n\n"
+           "fn f(a: [u32; 4], i: u32) -> u32 {\n"
+           "    guard d(i);\n"
+           "    let x: u32 = a[0];\n"
+           "    return a[i];\n"
+           "}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "q1.lomt"
+        p.write_text(src, encoding="utf-8", newline=chr(10))
+        assert lomentc.check(lomentc.load(p), deps=[]) == []
+        errs = lomentc.check(lomentc.load(p), deps=[], lspe_mode="strict")
+        assert any("未标注的放行" in e for e in errs), errs
+        doc = json.loads(lomentc.emit_potato(lomentc.load(p), ROOT))
+    lp = doc["lspe"]
+    assert lp["sites"] == 3, lp
+    assert lp["proved"] == 2 and lp["undecided"] == 1, lp
+    assert lp["per_kind"] == {"guard": "1/1", "index": "1/2"}, lp
+    assert potato.validate(doc) == []
+
+
+@test
+def test_lspe_e035_rejects_an_unregistered_site_kind():
+    """站点对账（I1 的第一半）：普查里出现一个没登记的种类 ⇒ E035。"""
+    mod = lomentc.load(DEMO)
+    mod.lspe_sites = list(getattr(mod, "lspe_sites", [])) + [
+        {"id": "demo:bogus:0", "kind": "bogus", "source": None,
+         "line": 1, "proved": False},
+    ]
+    errs = lomentc.check(mod, deps=[])
+    assert any("未登记的站点" in e for e in errs), errs
+
+
+@test
+def test_lspe_census_agrees_with_the_ast():
+    """独立对照：token 普查的 guard/index 数必须等于 AST 的 Guard/Index 节点数。
+
+    twin 只证一致 —— 两边用同一条 token 规则，同错时它照样绿（`docs/253` §5.1.1）。
+    这一条是那条教训的独立那一腿。
+    """
+    from dataclasses import fields, is_dataclass
+
+    def walk(x, out):
+        if isinstance(x, lomentc.Guard):
+            out["guard"] = out.get("guard", 0) + 1
+        if isinstance(x, lomentc.Index):
+            out["index"] = out.get("index", 0) + 1
+        if is_dataclass(x):
+            for f in fields(x):
+                v = getattr(x, f.name)
+                if isinstance(v, list):
+                    for y in v:
+                        walk(y, out)
+                elif is_dataclass(v):
+                    walk(v, out)
+
+    checked = 0
+    bad = []
+    for p in sorted((ROOT / "loment" / "examples").glob("*.lomt")):
+        try:
+            mod = lomentc.load(p)
+        except lomc.LomError:
+            continue
+        ast: dict[str, int] = {}
+        walk(mod, ast)
+        tok: dict[str, int] = {}
+        for s in getattr(mod, "lspe_sites", []):
+            tok[s["kind"]] = tok.get(s["kind"], 0) + 1
+        checked += 1
+        if ast != tok:
+            bad.append((p.name, ast, tok))
+    assert checked >= 30, checked
+    assert not bad, bad
+
+
+@test
+def test_lspe_site_ids_are_content_addressed():
+    """前面插一个无关站点，已有站点的 id 不变（#794）。"""
+    src1 = "module m\n\nfn f(a: [u32; 4]) -> u32 {\n    return a[0];\n}\n"
+    src2 = ("module m\n\nfn f(a: [u32; 4], b: [u32; 4]) -> u32 {\n"
+            "    let x: u32 = b[1];\n    return a[0];\n}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p1 = Path(td) / "a.lomt"
+        p1.write_text(src1, encoding="utf-8", newline=chr(10))
+        p2 = Path(td) / "b.lomt"
+        p2.write_text(src2, encoding="utf-8", newline=chr(10))
+        m1 = lomentc.load(p1)
+        m2 = lomentc.load(p2)
+    ids1 = [s["id"] for s in m1.lspe_sites if s["kind"] == "index"]
+    ids2 = [s["id"] for s in m2.lspe_sites if s["kind"] == "index"]
+    assert len(ids1) == 1 and len(ids2) == 2, (ids1, ids2)
+    assert ids1[0] in ids2, (ids1, ids2)
 
 
 def main() -> int:

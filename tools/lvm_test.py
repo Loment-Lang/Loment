@@ -279,6 +279,97 @@ def test_no_start_is_refused() -> None:
     raise AssertionError("没有 _start 却跑起来了")
 
 
+_CALLEE = """define void @f(i32 %a, i32 %b) {
+entry:
+  ret void
+}
+"""
+
+
+def _refusal(ir: str) -> str:
+    """跑一份 IR，返回 `LvmError` 的文本；没被拒就是这个判据红。"""
+    try:
+        lvm.run_ir(ir, io.BytesIO())
+    except lvm.LvmError as e:
+        return str(e)
+    raise AssertionError(f"这份 IR 跑起来了，而它应当被拒：{ir!r}")
+
+
+def test_arity_mismatch_is_refused() -> None:
+    """判 H（issue #716）：实参个数与形参不符**是错**，T0 不许静默容忍。
+
+    证伪很直接：旧的 `zip(fn.params, argtexts)` 对"少给一个实参"什么都不说（形参留 0），
+    对"多给一个"直接丢掉 —— 上面两个反例都会**跑完**。多出来的那个实参故意写成
+    未定义的 `%zzz`：个数这条错必须**先**报出来。
+    """
+    few = _CALLEE + """define i32 @_start() {
+entry:
+  call void @f(i32 1)
+  ret i32 0
+}
+"""
+    extra = _CALLEE + """define i32 @_start() {
+entry:
+  call void @f(i32 1, i32 2, i32 %zzz)
+  ret i32 0
+}
+"""
+    ok = _CALLEE + """define i32 @_start() {
+entry:
+  call void @f(i32 1, i32 2)
+  ret i32 0
+}
+"""
+    for name, ir in (("少一个实参", few), ("多一个实参", extra)):
+        got = _refusal(ir)
+        assert got == "实参个数与形参不符", f"{name}: 报的是 {got!r}"
+    b = io.BytesIO()
+    assert lvm.run_ir(ok, b) == 0 and b.getvalue() == b"", "个数正确的调用被误拒了"
+    print("      实参个数不符（多/少）⇒ 同一句话拒；个数正确的照常跑")
+
+
+_SHIFT_OK = """define i32 @_start() {
+entry:
+  %a = shl i32 5, 40
+  %b = lshr i32 5, 40
+  %c = ashr i32 -8, 40
+  %d = add i32 %a, %b
+  %e = add i32 %d, %c
+  %z = add i32 %e, 1
+  %f = icmp eq i32 %z, 0
+  br i1 %f, label %ok, label %bad
+ok:
+  ret i32 0
+bad:
+  unreachable
+}
+"""
+
+
+def test_negative_shift_is_named_error() -> None:
+    """判 I（issue #717）：负移位量是**具名** `LvmError`，不是一条 Python traceback。
+
+    两半都可证伪：负的那三份必须抛 `LvmError`（旧代码抛 `ValueError: negative shift
+    count`，连类型都不对）；**正的越界**那三份必须照旧给出同一个值（那是已有一致的行为，
+    不许被这一条顺手改掉）。
+    """
+    for op in ("shl", "lshr", "ashr"):
+        ir = f"""define i32 @_start() {{
+entry:
+  %q = {op} i32 5, -1
+  %r = trunc i32 %q to i32
+  ret i32 %r
+}}
+"""
+        got = _refusal(ir)
+        assert got == "移位量是负数", f"{op}: 报的是 {got!r}"
+    b = io.BytesIO()
+    rc = lvm.run_ir(_SHIFT_OK, b)
+    assert (rc, b.getvalue()) == (0, b""), (
+        f"正的越界移位（shl/lshr→0、ashr→全 1）应当照旧成立，得到 rc={rc} {b.getvalue()!r}")
+    print("      负移位量 ⇒ `移位量是负数`；正的越界照旧（shl/lshr=0、ashr=全 1）")
+
+
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 

@@ -23,8 +23,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import loment_suite  # noqa: E402
 import loment_json_test as J                                          # noqa: E402
+import lomentc  # noqa: E402
+import lomelf  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
+STD_PKG = ROOT / "lompi" / "store" / "std" / "0.1.0"
+IS_WIN = sys.platform == "win32"
 
 
 #: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
@@ -183,11 +187,238 @@ def _expected() -> str:
     return out.getvalue()
 
 
+# ---------------------------------------------------------------- store/std 的边界 (parse / bigint)
+
+#: `parse_i64` / `parse_i64_ok` 的用例（issue #720）。最后三个是"前缀"与"空"的语义。
+_PARSE_I64_CASES = [
+    "9223372036854775807",
+    "9223372036854775808",
+    "18446744073709551615",
+    "-9223372036854775808",
+    "-9223372036854775809",
+    "-42",
+    "+7",
+    "12ab",
+    "",
+]
+
+
+def _py_parse_i64(s: str) -> tuple[bool, int]:
+    """Python 侧独立算的期望：**有符号**范围 + 饱和；前缀语义与库一致。"""
+    import re as _re
+    neg = False
+    body = s
+    if body[:1] in ("+", "-"):
+        neg = body[0] == "-"
+        body = body[1:]
+    digits = _re.match(r"[0-9]*", body).group(0)
+    v = int(digits) if digits else 0
+    if neg:
+        v = -v
+    ok = bool(digits) and len(digits) == len(body) and -(2 ** 63) <= v <= 2 ** 63 - 1
+    sat = max(-(2 ** 63), min(2 ** 63 - 1, v))
+    return ok, sat
+
+
+def _edge_probe() -> str:
+    body = []
+    for i, s in enumerate(_PARSE_I64_CASES):
+        body.append(f'    let s{i}: str = "{s}";')
+        body.append(f'    ep_ok("p{i}_ok", parse_i64_ok(str_ptr(s{i}), 0, str_len(s{i})));')
+        body.append(f'    ep_line_i("p{i}_v", parse_i64(str_ptr(s{i}), 0, str_len(s{i})));')
+    return """
+module std_edge_probe
+choose runtime
+use parse
+use bigint
+use bigdec
+
+fn ep_w(s: str) -> u32 {
+    return syscall4(1, 1, str_ptr(s) as u64, str_len(s) as u64) as u32;
+}
+
+fn ep_dec(v: u64) -> u32 {
+    let b: ptr = alloc(32);
+    let n: u32 = 0;
+    let x: u64 = v;
+    if x == 0 {
+        store8(b, 0, 48 as u8);
+        n = 1;
+    }
+    while x > 0 {
+        store8(b, n, (48 + (x % 10) as u32) as u8);
+        x = x / 10;
+        n = n + 1;
+    }
+    let i: u32 = 0;
+    while i < n / 2 {
+        let lo: u8 = load8(b, i) as u8;
+        store8(b, i, load8(b, n - 1 - i) as u8);
+        store8(b, n - 1 - i, lo);
+        i = i + 1;
+    }
+    return syscall4(1, 1, b as u64, n as u64) as u32;
+}
+
+fn ep_line(tag: str, v: u64) -> u32 {
+    let _a: u32 = ep_w(tag);
+    let _b: u32 = ep_w("|");
+    let _c: u32 = ep_dec(v);
+    return ep_w("\\n");
+}
+
+fn ep_flag(b: bool) -> u64 {
+    if b {
+        return 1;
+    }
+    return 0;
+}
+
+fn ep_ok(tag: str, b: bool) -> u32 {
+    return ep_line(tag, ep_flag(b));
+}
+
+fn ep_line_i(tag: str, v: i64) -> u32 {
+    let _a: u32 = ep_w(tag);
+    let _b: u32 = ep_w("|");
+    let m: u64 = v as u64;
+    if v < 0 {
+        let _s: u32 = ep_w("-");
+        m = (0 as u64) - (v as u64);
+    }
+    let _c: u32 = ep_dec(m);
+    return ep_w("\\n");
+}
+
+fn _start() {
+""" + "\n".join(body) + """
+    let a: ptr = alloc(64);
+    let q: ptr = alloc(64);
+    bigint_from_u64(a, 8, 1000000007);
+    bigint_from_u64(q, 8, 777);
+    let r: u32 = bigint_divmod_small(q, 8, a, 0);
+    let _d0: u32 = ep_line("div0_ret", r as u64);
+    let _d1: u32 = ep_line("div0_qlen", bigint_len(q) as u64);
+    let _d2: u32 = ep_line("div0_q", bigint_to_u64(q));
+    let r2: u32 = bigint_divmod_small(q, 8, a, 10);
+    let _d3: u32 = ep_line("div10_ret", r2 as u64);
+    let _d4: u32 = ep_line("div10_q", bigint_to_u64(q));
+    let b: ptr = alloc(64);
+    let q2: ptr = alloc(64);
+    bigint_from_u64(b, 8, 18446744073709551615);
+    let r3: u32 = bigint_divmod_small(q2, 8, b, 7);
+    let _d5: u32 = ep_line("big_ret", r3 as u64);
+    let _d6: u32 = ep_line("big_q", bigint_to_u64(q2));
+    // #722: bigdec 的零除数 —— 返回哨兵、结果成 0，不是 SIGILL。
+    let bd: ptr = alloc(bigdec_bytes(16));
+    let bdr: ptr = alloc(bigdec_bytes(16));
+    let bdt: ptr = alloc(bigint_dec_tmp_bytes(16));
+    bigdec_from_u64(bd, 16, 100, 2);
+    let rb: u32 = bigdec_div_small(bdr, 16, bd, 0, bdt, 16);
+    let _e0: u32 = ep_line("bd_div0_ret", rb as u64);
+    let bz: u32 = 0;
+    if bigdec_is_zero(bdr) {
+        bz = 1;
+    }
+    let _e1: u32 = ep_line("bd_div0_zero", bz as u64);
+    syscall4(60, 0, 0, 0);
+}
+"""
+
+
+def _have_linux() -> bool:
+    return (not IS_WIN) or shutil.which("wsl") is not None
+
+
+def _lx(p: Path) -> str:
+    s = p.resolve().as_posix()
+    if IS_WIN and len(s) > 1 and s[1] == ":":
+        s = "/mnt/" + s[0].lower() + s[2:]
+    return s
+
+
+def _compile_elf(src: str, td: Path, name: str) -> Path:
+    """用**仓内**参考编译器 + `lomelf` 出 ELF —— 这条路不需要 clang。"""
+    probe = ROOT / "loment" / "build" / "std_edge_probe.lomt"
+    probe.parent.mkdir(parents=True, exist_ok=True)
+    with probe.open("w", encoding="utf-8", newline="\n") as f:
+        f.write(src)
+    try:
+        mod = lomentc.load(probe)
+        deps = lomentc.resolve_deps(mod, ROOT, probe.parent, entry=probe)
+        errs = lomentc.check(mod, deps=deps, _dep_pass=True)
+        assert not errs, f"std 边界探针检查不过: {errs[:3]}"
+        ll = lomentc.emit_llvm(mod, ROOT, deps)
+    finally:
+        probe.unlink(missing_ok=True)
+    exe = td / f"{name}.elf"
+    exe.write_bytes(lomelf.compile_ll(ll)[0])
+    exe.chmod(0o755)
+    return exe
+
+
+def _run_linux(exe: Path, timeout: int = 120) -> subprocess.CompletedProcess:
+    argv = [str(exe)] if not IS_WIN else [*_WSLCMD, _lx(exe)]
+    return subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", shell=False, timeout=timeout)
+
+
+def _edge_expected() -> str:
+    out: list[str] = []
+    for i, s in enumerate(_PARSE_I64_CASES):
+        ok, v = _py_parse_i64(s)
+        out.append(f"p{i}_ok|{1 if ok else 0}")
+        out.append(f"p{i}_v|{v}")
+    out += [
+        f"div0_ret|{2 ** 32 - 1}",
+        "div0_qlen|1",
+        "div0_q|777",
+        "div10_ret|7",
+        "div10_q|100000000",
+        f"big_ret|{(2 ** 64 - 1) % 7}",
+        f"big_q|{(2 ** 64 - 1) // 7}",
+        "bd_div0_ret|4294967295",
+        "bd_div0_zero|1",
+    ]
+    return "\n".join(out) + "\n"
+
+
+def _check_store_std_edges() -> None:
+    """`lompi/store/std` 的 parse / bigint 边界：与 Python 独立算的期望逐字节比。
+
+    * issue #720：`parse_i64_ok` 的界必须是**有符号**的；`parse_i64` 饱和、绝不反号。
+    * issue #721：`bigint_divmod_small(..., 0)` 返回 `BIG_DIV0`、商不动，不是 `ud2`。
+    """
+    if not _have_linux():
+        print("      SKIP: 无 WSL/Linux (store/std 边界)")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        exe = _compile_elf(_edge_probe(), td, "std_edge_probe")
+        r = _run_linux(exe, timeout=120)
+    assert r.returncode == 0, f"std 边界探针没跑完 (退出码 {r.returncode}): {r.stderr[-300:]}"
+    want = _edge_expected()
+    if r.stdout != want:
+        g, w = r.stdout.splitlines(), want.splitlines()
+        first = next((i for i in range(max(len(g), len(w)))
+                      if (g[i] if i < len(g) else None) != (w[i] if i < len(w) else None)), None)
+        raise AssertionError(
+            f"store/std 边界与 Python 不一致 @ 第 {first} 行: "
+            f"Loment={g[first] if first is not None and first < len(g) else '<无>'!r} "
+            f"Python={w[first] if first is not None and first < len(w) else '<无>'!r}")
+    print(f"      parse/bigint: {len(want.splitlines())} 项与 Python 一致 (issue #720/#721)")
+
+
 @test
 def test_std_modules_match_python():
-    """std 核的 mem / num 两模块: Loment 算的和 Python 算的**逐字节相同**。"""
+    """std 核的 mem / num 两模块: Loment 算的和 Python 算的**逐字节相同**。
+
+    同时量 `lompi/store/std` 的 parse / bigint 边界（issue #720 / #721）—— 那一条走
+    仓内 `lomelf`，不需要 clang。
+    """
+    _check_store_std_edges()
     if not (J._clang() and J._wsl()):
-        print("      SKIP: 无 clang/WSL")
+        print("      SKIP: mem/num 无 clang/WSL")
         return
     probe = ROOT / "loment" / "build" / "std_probe.lomt"
     probe.parent.mkdir(parents=True, exist_ok=True)

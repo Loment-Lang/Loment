@@ -590,7 +590,9 @@ def test_codes_lists_every_code_in_the_table():
     import loment_diag
     rc, out, _ = _run(["codes"] + _no_color())
     assert rc == 0
-    missing = [c for c in sorted(loment_diag.ASCII_ONE_LINER) if f"E{c} " not in out]
+    # 表里印的是**三位补零**的 `E001`（`#9`，与诊断正文的 `error[E001]` 同一种拼法），
+    # 所以这里也按那个拼法找 —— `E1 ` 在 `E001` 里不是前缀，旧写法会整片报缺。
+    missing = [c for c in sorted(loment_diag.ASCII_ONE_LINER) if f"E{c:03d} " not in out]
     assert not missing, f"错误码表里没有 E{missing}"
     # 说明文字也要是表里那一份, 不是另写的
     for c, desc in loment_diag.ASCII_ONE_LINER.items():
@@ -602,6 +604,10 @@ def test_explain_accepts_three_spellings_and_rejects_junk():
     for spelling in ("E4", "e4", "4"):
         rc, out, _ = _run(["explain", spelling] + _no_color())
         assert rc == 0 and "Capability domain" in out, (spelling, out[:120])
+        # **标题与诊断正文同一种拼法**（`#9`）：正文印 `error[E004]`，标题却印 `E4` ——
+        # 用户从正文里抄一个码过来，得到的标题和抄过去的不一样。三种输入拼法指向同一个
+        # 码，所以标题只有一种拼法。
+        assert "  E004" in out, f"{spelling}: 标题没补零: {out[:120]!r}"
     # **上界从真源推导, 不写死**。原先这里写 "E1..E23", 于是每加一个码就得手改这个测试 ——
     # 漏改时的症状是"判据红了但源码没错"; 而更糟的一种改法是把断言放宽, 从此再也不测边界。
     # 真实的契约是"explain 接受到表里最后一个码为止", 那就照它测。
@@ -611,7 +617,8 @@ def test_explain_accepts_three_spellings_and_rejects_junk():
     assert rc == 2, err[:120]
     for c in (top, top - 1, top - 2):
         rc, out, _ = _run(["explain", f"E{c}"] + _no_color())
-        assert rc == 0 and f"E{c}" in out, (c, rc, out[:120])
+        # 标题是三位补零的（与 `error[E023]` 一致），所以这里也按那个拼法找。
+        assert rc == 0 and f"E{c:03d}" in out, (c, rc, out[:120])
     rc, _, _ = _run(["explain"] + _no_color())
     assert rc == 2
 
@@ -817,8 +824,9 @@ def test_both_launchers_forward_the_renderer_output_modes():
     assert cmd.count('if /I "%~1"=="--short" goto barg_om') == 1, "cmd: build/run 不认 --short"
     assert cmd.count('if /I "%~1"=="--json" goto barg_om') == 1, "cmd: build/run 不认 --json"
     assert ':barg_om' in cmd and ':scan_om' in cmd, "cmd: 两个分支缺一个落点"
-    # 累加式的写法出现在两处：check 那路的 `:scan_om`，与 build/run 那路的 `--max=N` 落点
-    assert cmd.count('set "com=%com% %~1"') == 2, "cmd: 没把这个开关累加进 com"
+    # 累加式的写法出现在三处：check 那路的 `:scan_om`、`--max` 的值（`:scan_max_val`，
+    # 见 `test_both_launchers_honour_diag_out`），与 build/run 那路的 `--max=N` 落点
+    assert cmd.count('set "com=%com% %~1"') == 3, "cmd: 没把这个开关累加进 com"
     assert cmd.count('set "com=%~1"') == 1, "cmd: build/run 那路没记下这个开关"
     # 五处：check/ir 一处、build 的驱动与链接器各一处、run 的驱动与链接器各一处。
     # 链接器那两处是 `issue #8` 加上的 —— lomelf 现在也有自己的 `--diag-out`，
@@ -832,6 +840,38 @@ def test_both_launchers_forward_the_renderer_output_modes():
     assert cmd.count('if not defined cskip goto scan_arg_go') == 1, \
         "cmd: 跳过一个词的机制不在（--max 的值会被当成源文件）"
     assert cmd.count('set "com=%com% --max %~2"') == 1, "cmd: build/run 没带上 --max 的值"
+
+
+@test
+def test_both_launchers_honour_diag_out():
+    """`--diag-out PATH` 要把**驱动**写诊断的位置改到那里（`#13`）。
+
+    它不是一个渲染器开关：`lomenterr` 的用法行让用户敲的正是这条命令，而编辑器吃的
+    `byte_start`/`byte_end` 就在那些 JSON 行里。原先 bash 报 `unknown option` 退 2，
+    cmd 的 check 路把它静默吞掉 —— 两条路都到不了"文件真的出现"。
+
+    顺带钉住 cmd 侧那个**值**：`:scan_max` 只记了 `--max` 本身、把值跳过就丢了，
+    于是 `lomenterr --max d.jsonl` 把诊断文件当成了上限、打自己的用法。
+    """
+    import loment_dist
+    sh, cmd = loment_dist.LAUNCHER_SH, loment_dist.LAUNCHER_CMD
+
+    assert sh.count("--diag-out) dout=${2:-}; shift 2 ;;") == 1, \
+        "bash: --diag-out PATH 没被认"
+    assert sh.count("--diag-out=*) dout=${1#--diag-out=}; shift ;;") == 1, \
+        "bash: --diag-out=PATH 没被认"
+    assert '--diag-out "$(to_posix "$dpath")"' in sh, \
+        "bash: 驱动拿到的不是 dpath —— 文件写不到用户要的地方"
+    assert sh.count('report_diags "$dpath"') == 1, "bash: 渲染器读的还不是那一份"
+
+    assert cmd.count('if /I "%~1"=="--diag-out" goto scan_dout') == 1, \
+        "cmd: check 路不认 --diag-out"
+    assert 'set "cdout=%ss:~11%"' in cmd, "cmd: --diag-out=PATH 那个拼法没被认"
+    assert ':scan_max_val' in cmd and ':scan_out_val' in cmd, \
+        "cmd: 两个带值的开关都没把值收下"
+    assert cmd.count('set "dpath=%cdout%"') == 1, "cmd: 驱动写的位置没换成用户的"
+    assert cmd.count('--diag-out "%dpath%"') == 2, \
+        "cmd: ir / check 两条路都要写到 dpath"
 
 
 @test
@@ -1029,7 +1069,9 @@ def _cli_fixtures(root: Path) -> None:
     import loment_diag  # noqa: E402
     # `explain E99` 那条要一个**表外**的码 —— 表长到 99 就该改这里, 所以先钉住
     assert max(loment_diag.ASCII_ONE_LINER) < 99, "错误码表到 99 了, 换一个表外的码"
-    _w(root / "codes.txt", "".join(f"E{c} {d}\n"
+    # 码的拼法是**三位补零**（`#9`）：`loment codes` 与 `explain` 的标题都印 `E001`，
+    # 与诊断正文的 `error[E001]` 一致。夹具照那个拼法写，否则第 18 项会假红。
+    _w(root / "codes.txt", "".join(f"E{c:03d} {d}\n"
                                    for c, d in sorted(loment_diag.ASCII_ONE_LINER.items())))
 
 

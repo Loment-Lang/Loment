@@ -129,7 +129,13 @@ def lex(text: str) -> list[Tok]:
             j = text.find("*/", i + 2)
             if j < 0:
                 raise LomError(line, col, "未闭合的块注释")
-            line += text[i:j].count("\n")
+            seg = text[i:j + 2]
+            nl = seg.count("\n")
+            if nl:                      # 跨行: 列回到最后那个换行之后 (#708)
+                line += nl
+                col = len(seg) - seg.rfind("\n")
+            else:                       # 单行: 列前进整个注释的长度 (#708)
+                col += len(seg)
             i = j + 2
             continue
         if c == '"':

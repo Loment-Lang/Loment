@@ -198,6 +198,83 @@ def test_the_corpus_matches_python_and_the_frame_cannot_carry_payload():
 
 
 @test
+def test_large_output_is_grown_not_written_past_the_buffer():
+    """#696: 1900 行 `make` 输出 319,200 B (> `OUT_CAP` = 262,144)。
+
+    原先没有容量检查: 1600 行写穿缓冲 6,656 B, 1900 行直接 SIGSEGV、两条流都是 0 字节。
+    这条用例**两侧逐字节比** (存量 319,200 B) —— "长大了"与"拒了"都行, 但**不许丢**。
+    顺带把**报错那一路**也压到大 token 上: 那一行的 stderr 比 `OUT_CAP` 还长。
+    """
+    if not _ready():
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        elf = _build(td)
+        cf = td / "many.txt"
+        cf.write_text(f"make 1 {H32} {D32}\n" * 1900, encoding="utf-8", newline="\n")
+        rc, out, err = _pair(elf, td, "many", [str(cf)], [_wsl_path(cf)])
+        assert rc == 0, (rc, err[-200:])
+        assert out.count("\n") == 1900, out.count("\n")
+        assert len(out) == 1900 * 168 > 262144, len(out)
+
+        # 报错行把整条 token 原样回显: 262,000 B 的 token ⇒ stderr 也超过 OUT_CAP。
+        big = "q" * 262000
+        cf2 = td / "bigtok.txt"
+        cf2.write_text(big + "\n", encoding="utf-8", newline="\n")
+        rc2, out2, err2 = _pair(elf, td, "bigtok", [str(cf2)], [_wsl_path(cf2)])
+        assert (rc2, out2) == (1, ""), (rc2, out2[:100])
+        assert err2 == f"line 1: unknown action {big}\n", (len(err2), err2[:60])
+
+
+@test
+def test_plus_sign_and_error_wording_match_the_twin():
+    """#699: `+1` 收下; 拒绝语的措辞与 Python 侧逐字相同 (`bad-kind`, 不用 repr)。"""
+    if not _ready():
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        elf = _build(td)
+        cases = [
+            ("plus", f"make +1 {H32} {D32}\n", 0, ""),
+            ("neg", f"make -1 {H32} {D32}\n", 1, "line 1: bad-kind\n"),
+            ("other", f"make 3 {H32} {D32}\n", 1, "line 1: bad-kind\n"),
+            ("wide", f"make 9999999999 {H32} {D32}\n", 1, "line 1: bad-kind\n"),
+            # 前导零多到会踩 CPython 的 4300 位 int() 上限 —— 两侧必须都读成 1。
+            ("zeros", f"make {'0' * 5000}1 {H32} {D32}\n", 0, ""),
+            # **判定顺序**也要一致: Python 先解十六进制、再在 `make_frame` 里看种类。
+            ("kind-vs-hex", f"make 3 {'z' * 64} {D32}\n", 1, "line 1: bad-hex\n"),
+            ("kind-vs-len", f"make 3 {'a' * 300} {D32}\n", 1, "line 1: bad-kind\n"),
+            ("action", "foo bar\n", 1, "line 1: unknown action foo\n"),
+        ]
+        plus_out = ""
+        for name, text, want_rc, want_err in cases:
+            cf = td / f"{name}.txt"
+            cf.write_text(text, encoding="utf-8", newline="\n")
+            rc, out, err = _pair(elf, td, name, [str(cf)], [_wsl_path(cf)])
+            assert rc == want_rc, (name, rc, out[:100], err[:100])
+            assert err == want_err, (name, err, want_err)
+            if name == "plus":
+                plus_out = out
+        # `+1` 就是 1: 帧与不带 `+` 的那条逐字节相同。
+        assert f"frame={Z.make_frame(1, bytes.fromhex(H32), bytes.fromhex(D32)).hex()}" in plus_out
+
+
+@test
+def test_parse_dec_is_the_same_closed_set_as_the_loment_side():
+    """Python 侧的解码器**不借 `int()` 的宽容**: `1_0` / `-1` / 空 / 裸 `+` 一律不认。"""
+    assert Z.parse_dec("+1") == 1
+    assert Z.parse_dec("00000000001") == 1
+    assert Z.parse_dec("0") == 0
+    assert Z.parse_dec("0" * 5000 + "1") == 1
+    for bad in ("", "+", "-1", "1_0", "0x10", " 1", "1 ", "١٢"):
+        try:
+            Z.parse_dec(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"parse_dec({bad!r}) 应拒绝")
+
+
+@test
 def test_the_frame_is_fixed_size_with_no_length_or_payload_field():
     """**规则本身**（不依赖另一份实现）：定长、两个定长摘要、保留位必须全 0。
 

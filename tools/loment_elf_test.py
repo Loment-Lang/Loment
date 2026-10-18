@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import os
 import re
+import struct
 
 import shutil
 import subprocess
@@ -2474,6 +2475,119 @@ def test_lomelf_selfhost_links_a_real_archive():
             ark.unlink(missing_ok=True)
     print("      镜像 + 真 libz.a: 产物与参考逐字节相同, compress/uncompress 回原文 (rc=0)"
           "；证伪件报 40")
+
+
+@test
+def test_a_corrupt_shared_object_is_a_diagnostic_not_a_traceback():
+    """改坏**一个字段**的 `.so` 要报 `Unsupported`，不是 Python 栈，也不是转圈（`#592`、`#603`）。
+
+    四个探针与 issue 里那批同一形状：`e_shoff` 越界、`e_shnum` 过大、文件截断一半，
+    外加一个 `.gnu.version_d` 的 `vd_next` **自环** —— 最后那一刀在没有界的那一版里是
+    死循环（100% CPU、一句话都不说），所以这条判据同时钉住"不会转圈"。
+
+    `Unsupported` 是链接器对"这个输入我处理不了"的唯一口径（`ForeignObject` 那边一直
+    如此，见 `#167`）。改成它意味着：**用户拿到的是文件名 + 哪张表越界**，而不是
+    `struct.error: unpack_from requires a buffer of at least …`。
+    """
+    src = next((Path(c) for c in ffitest.LIBZ_SO_CANDIDATES if Path(c).is_file()), None)
+    if src is None:
+        print("      SKIP: 这台机器上没有 libz.so（要 zlib1g）")
+        return
+    good = src.read_bytes()
+    if len(good) < 64 or good[:4] != b"\x7fELF":
+        print("      SKIP: libz.so 不是 ELF64")
+        return
+
+    def with_u(off: int, fmt: str, val: int) -> bytes:
+        b = bytearray(good)
+        struct.pack_into(fmt, b, off, val)
+        return bytes(b)
+
+    cases = {
+        "e_shoff 越界": with_u(40, "<Q", 0xFFFFFF0),
+        "e_shnum 过大": with_u(60, "<H", 60000),
+        "文件截断一半": good[: len(good) // 2],
+    }
+
+    # 版本表自环：自己读一遍节头找到 `.gnu.version_d`，把第一条的 `vd_next` 写成 0
+    # （`vo += 0` ⇒ 原地打转）。这一段用独立的最小读法，不借被测代码 —— 否则一个读错
+    # 会把夹具也一起读错，两边一致地错。
+    e_shoff, = struct.unpack_from("<Q", good, 40)
+    e_shentsize, e_shnum, e_shstrndx = struct.unpack_from("<HHH", good, 58)
+    secs = []
+    for k in range(e_shnum):
+        _no, _ty, _fl, _ad, off, size, _li, _in, _a2, _en = \
+            struct.unpack_from("<IIQQQQIIQQ", good, e_shoff + k * e_shentsize)
+        secs.append((_no, off, size))
+    sbase = secs[e_shstrndx][1]
+    verd = None
+    for nameoff, off, size in secs:
+        end = good.index(b"\x00", sbase + nameoff)
+        if good[sbase + nameoff:end] == b".gnu.version_d":
+            verd = (off, size)
+            break
+    # ⚠ `vd_next == 0` **不是**自环：那条链以 0 结尾，它是"到此为止"。真正的危险是
+    # 两种走法：一步跳出这一节（大 nxt），或者一步只走 1 字节、永远踩不到 0。
+    if verd is not None:
+        b = bytearray(good)
+        struct.pack_into("<I", b, verd[0] + 16, 0x00FFFFFF)   # vd_next 跳出这一节
+        cases["版本定义链跳出这一节"] = bytes(b)
+        b2 = bytearray(good)
+        struct.pack_into("<I", b2, verd[0] + 16, 1)           # 每一步只走 1 字节
+        cases["版本定义链走不完"] = bytes(b2)
+
+    with tempfile.TemporaryDirectory(prefix="so-mut-") as td:
+        for name, data in cases.items():
+            p = Path(td) / "m.so"
+            p.write_bytes(data)
+            try:
+                lomelf.SharedObject(p)
+            except lomelf.Unsupported as e:
+                assert "m.so" in str(e), f"{name}: 报错里没有文件名: {e}"
+            except Exception as e:                       # noqa: BLE001
+                raise AssertionError(
+                    f"{name}: 抛了 {type(e).__name__}，不是 Unsupported: {e}")
+            else:
+                raise AssertionError(f"{name}: 改坏的 .so 被当成好的收了")
+    print(f"      {len(cases)} 种改坏的 .so 都报 Unsupported"
+          f"（含版本表跳出/走不完，不再转圈）")
+
+    # **镜像那一侧**（`#593` / `#594`）：包里跑的就是它。它的 `so_load` 把文件长度 `n`
+    # 收进形参、一次也没用过 —— 176 字节的坏文件能读到 32 MiB 外（SIGSEGV），或者读到
+    # 上一个 `--link` 文件留下的字节（诊断指错方向）；DT_STRTAB 缺了还会把 ELF 头那几个
+    # 字节当成 SONAME 写进 `DT_NEEDED`。两半都要**退出非零并说一句话**。
+    if not (_clang() and _wsl()):
+        print("      SKIP 镜像侧: 无 clang/WSL")
+        return
+    mir = _mirror()
+    bld = ROOT / "loment" / "build"
+    bld.mkdir(parents=True, exist_ok=True)
+    llrepo = bld / "_mirror_so_mut.ll"
+    outrepo = bld / "_mirror_so_mut.elf"
+    sorepo = bld / "_mirror_so_mut.so"
+    with tempfile.TemporaryDirectory(prefix="so-mut-mir-") as tdm:
+        src = Path(tdm) / "m.lomt"
+        src.write_text("module m\n\nextern fn compress(a: ptr, b: u32) -> i32;\n\n"
+                       "fn _start() -> u32 {\n    return 0;\n}\n",
+                       encoding="utf-8", newline="\n")
+        llrepo.write_bytes(_ref_ir(src, Path(tdm)).read_bytes())
+    # 版本定义链那两刀是**参考侧独有**的：镜像是按**节类型**找 `.dynsym` / `.gnu.version`，
+    # 从来不读 `.gnu.version_d`（它不需要"版本名的说法"，那份只用于参考的错误消息）。
+    # 它压根不碰那一段，所以改那一段它没反应——**留着会是一条测不到东西的断言**。
+    mir_cases = {k: v for k, v in cases.items() if "版本定义链" not in k}
+    try:
+        for name, data in mir_cases.items():
+            sorepo.write_bytes(data)
+            rc, err = _mirror_run(mir, "loment/build/_mirror_so_mut.ll",
+                                  "loment/build/_mirror_so_mut.elf",
+                                  ("loment/build/_mirror_so_mut.so",))
+            assert rc != 0, f"[镜像] {name}: 改坏的 .so 被收下了 (rc=0)"
+            assert "共享对象" in err, (
+                f"[镜像] {name}: 没说出是共享对象（信号？）rc={rc} {err[-200:]!r}")
+    finally:
+        for f in (llrepo, outrepo, sorepo):
+            f.unlink(missing_ok=True)
+    print(f"      镜像侧：{len(mir_cases)} 种改坏的 .so 都退出非零并点名")
 
 
 @test

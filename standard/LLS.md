@@ -1,6 +1,6 @@
 # Loment Language Standard
 
-**LLS** · **0.1.4.5** · Edition 1
+**LLS** · **0.1.4.6** · Edition 1
 
 > **Status.** The language surface this document defines is **frozen**: changing it costs the
 > procedure in §6.2, and nothing else does. What is *not* frozen — the implementations, the
@@ -373,7 +373,7 @@ what to build. The normative references in §2 are mostly **Chinese** — that i
 the project and it is stated here rather than discovered. Where the two disagree, §5.4 and §2
 apply: the file is right, and this document is a pointer to it.
 
-**How to cite.** *LLS 0.1.4.5*, or *Loment Language Standard 0.1.4.5*.
+**How to cite.** *LLS 0.1.4.6*, or *Loment Language Standard 0.1.4.6*.
 
 **How to change it.** This document carries no rules of its own. It changes when the things it
 points at change, in the same commit, under §6.2 — and if a change to this document would alter

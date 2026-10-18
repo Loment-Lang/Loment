@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://loment-lang.github.io/loment-site/">官网</a> ·
-  <a href="https://github.com/Loment-Lang/loment/releases/tag/v0.1.4.5-quickfix">下载 0.1.4.5</a> ·
+  <a href="https://github.com/Loment-Lang/loment/releases/tag/v0.1.4.6">下载 0.1.4.6</a> ·
   <a href="QUICKSTART.md">快速上手</a> ·
   <a href=".claude/skills/loment/SKILL.md">语言指南</a> ·
   <a href="standard/LLS.md">标准</a> ·

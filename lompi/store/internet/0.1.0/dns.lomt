@@ -84,7 +84,8 @@ pub fn dns_name_encode(name: str, out: ptr, cap: u32) -> u32 {
             }
             // **先算容量再写** —— 写完才查的话, cap 小的调用方拿到的是 DNS_NO 加一块越界写。
             // `pos + 1 + sn + 1` 是长度前缀 + 标签内容 + 结尾那个 0。
-            if sn > 63 || pos + 1 + sn + 1 > cap {
+            // 255 是 RFC 1035 §3.1 的名字上限（含结尾 0），不是调用方的容量 (#684)。
+            if sn > 63 || pos + 1 + sn + 1 > cap || pos + 1 + sn + 1 > 255 {
                 return DNS_NO;
             }
             let w: u32 = dnsp_label(name, s, sn, out, pos);
@@ -100,7 +101,7 @@ pub fn dns_name_encode(name: str, out: ptr, cap: u32) -> u32 {
     // 原来这里会拿一个空标签去编码, 于是文档说允许的写法反而被拒。`sn > 63` 同上。
     if s < n {
         let sn: u32 = n - s;
-        if sn > 63 || pos + 1 + sn + 1 > cap {
+        if sn > 63 || pos + 1 + sn + 1 > cap || pos + 1 + sn + 1 > 255 {
             return DNS_NO;
         }
         let w: u32 = dnsp_label(name, s, sn, out, pos);
@@ -119,6 +120,7 @@ pub fn dns_name_decode(msg: ptr, msg_n: u32, off: u32, out: ptr, cap: u32) -> u3
     let w: u32 = 0;
     let p: u32 = off;
     let jumps: u32 = 0;
+    let lbls: u32 = 0;
     while p < msg_n {
         let c: u32 = load8(msg, p);
         if c == 0 {
@@ -127,7 +129,10 @@ pub fn dns_name_decode(msg: ptr, msg_n: u32, off: u32, out: ptr, cap: u32) -> u3
             }
             return w;
         }
-        if c >= 192 && c <= 223 {
+        // RFC 1035 §4.1.4: 头两位是 11 的**任何**字节都是指针（0xC0..0xFF），偏移 14 位。
+        // 原来只认 0xC0..0xDF（偏移 < 8192），于是超过 8 KiB 的应答（TCP DNS 的常态）
+        // 悄悄丢掉压缩名 (#682)。
+        if c >= 192 {
             if p + 1 >= msg_n {
                 return DNS_NO;
             }
@@ -155,6 +160,12 @@ pub fn dns_name_decode(msg: ptr, msg_n: u32, off: u32, out: ptr, cap: u32) -> u3
                 return DNS_NO;
             }
             if w + c > cap {
+                return DNS_NO;
+            }
+            // RFC 1035 §3.1: 一个域名（展开后）上限 255 字节 —— 文本长度 + 每个标签的
+            // 长度前缀 + 结尾 0。原来只在编码侧没有总长检查，解码侧也没有 (#684)。
+            lbls = lbls + 1;
+            if w + c + lbls + 1 > 255 {
                 return DNS_NO;
             }
             let i: u32 = 0;
@@ -237,11 +248,11 @@ fn dnsp_skip_name(msg: ptr, msg_n: u32, off: u32) -> u32 {
         if c == 0 {
             return p + 1;
         }
-        if c >= 192 && c <= 223 {
-            return p + 2;                        // 0xC0..0xDF 才是指针
+        if c >= 192 {
+            return p + 2;                        // 0xC0..0xFF 都是指针 (RFC 1035 §4.1.4, #682)
         }
         if c > 63 {
-            return DNS_NO;                       // 64..191 / 0xE0..0xFF 都是保留值
+            return DNS_NO;                       // 64..191 是保留的标签长度
         }
         p = p + 1 + c;
     }
@@ -273,14 +284,19 @@ pub fn dns_resp_find(msg: ptr, n: u32, qtype: u32, out: ptr, cap: u32) -> u32 {
             return DNS_NO;
         }
         let rtype: u32 = dnsp_be16(msg, nx2);
+        // CLASS 在 TYPE 与 TTL 之间。这个模块只做 IN；别的 CLASS 的 RDATA 不是同一个
+        // 名字空间里的东西，照着返回等于把一条别的记录当成 IN (#688)。
+        let rclass: u32 = dnsp_be16(msg, nx2 + 2);
         let rdlen: u32 = dnsp_be16(msg, nx2 + 8);
         let rdo: u32 = nx2 + 10;
         if rdo + rdlen > n {
             return DNS_NO;
         }
-        if rtype == qtype {
+        if rtype == qtype && rclass == DNS_IN {
             if qtype == DNS_CNAME || qtype == DNS_NS {
-                return dns_name_decode(msg, n, rdo, out, cap);
+                // 名字必须**落在自己的 RDATA 里**：给整条报文长度的版本会把下一条记录的
+                // 0 终结符当成这一条的结尾 —— 经典的缓存投毒形状 (#683)。
+                return dns_name_decode(msg, rdo + rdlen, rdo, out, cap);
             }
             if qtype == DNS_A && rdlen == 4 {
                 if cap < 4 {

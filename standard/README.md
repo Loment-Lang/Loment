@@ -22,7 +22,7 @@ read `docs/146`; the standard will not tell you, on purpose.
 
 ## The one number
 
-The standard's version **is** the version of the language surface it defines — today `0.1.4.5`.
+The standard's version **is** the version of the language surface it defines — today `0.1.4.6`.
 There is no separate edition axis, because that would require a table mapping standard editions to
 language versions, and that table would be a second source of truth. `LLS.md` §6.4 says so in
 full.

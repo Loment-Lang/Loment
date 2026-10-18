@@ -1504,6 +1504,18 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
     }
     seen_add(seen, snc, path, n);
     let slot: ptr = ptr_add(out, UNIT_CAP - (depth + 1) * SLOT);
+    // **本文件路径的私有副本**（槽顶 1 KiB）。`path` / `n` 往下一律指这里：
+    // 名字形式的 `use` 在收集阶段会调用 `resolve_use_name`，它用的候选缓冲
+    // （`scr + NAMTMP_OFF`）**正是** `fix_rel` 读作"父文件路径"的那块 —— 依赖文件
+    // 的 path 一旦指在 NAMTMP 上，一个 `use numfmt` 就会把后面的 `use "io.lomt"`
+    // 的基准改掉。根文件不会撞（它的 path 是命令行参数），所以这个缺陷只在
+    // **作为依赖被装载**时出现（#679：`host/host.lomt` 打不开 `io.lomt`）。
+    let pcap: u32 = 1024;
+    if n >= pcap {
+        let dm: str = "this file's path is longer than the loader's 1024-byte private copy -- shorten the checkout path";
+        failp(dm, path, n);
+        die(1);
+    }
     let fd: i64 = open_ro(path, n, scr);
     if fd < 0 {
         // 就地报路径: 再晚一点 slot 的读就会把这块内存盖掉。
@@ -1520,16 +1532,39 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
         failp("cannot open ", path, n);
         die(1);
     }
-    let raw_n: u64 = read_all(fd as u64, slot, SLOT as u64);
+    // **每个文件的尾区都在本层槽内、从 `nb` 之后开始**:
+    //   [nb, nb+19200)                 名字形式解析出的路径 (既有布局)
+    //   [nb+19200, nb+38400)           addin 路径 (既有布局)
+    //   [nb+38400, nb+40800)           本文件的 use 清单
+    //   [nb+40800, nb+43200)           本文件的 addin 清单
+    //   [nb+43200, nb+44224)           本文件路径的私有副本
+    // **清单必须按文件各一份**: 它们原来放在共享的 `scr` 里, 而递归装载会把父文件的
+    // 清单覆盖掉 —— 一份有两个 `use` 的文件, 第二个名字读出来是源里的中文注释
+    // (实测 #679: `f64fmt` 装载 `bigint.lomt` 时打不开一串乱码)。
+    let sunit: u32 = SLOT - 44224;
+    let raw_n: u64 = read_all(fd as u64, slot, sunit as u64);
     syscall4(3, fd as u64, 0, 0);
     // **读满了槽 ≠ 文件就这么大**（`#345` 的 (a)：每一个固定容量越界时都要**有话**）。
-    // 槽原先静默截断：一份大于 512 KiB 的源会**少一截**，用户看到的是一串与被截断位置
+    // 槽原先静默截断：一份大于上限的源会**少一截**，用户看到的是一串与被截断位置
     // 无关的解析错 —— 那是本仓最不肯让的形状（`docs/188` 的"宁拒勿猜"）。
-    // 判据只需一次比较：读满 `SLOT` 就说明**至少**这么大，下面那句把这个事实说出来。
-    if raw_n >= SLOT as u64 {
-        return fail("this source file is 512 KiB or larger -- the per-file slot cannot hold it, and cutting it short yields parse errors unrelated to where it was cut: split the facade") as u64;
+    if raw_n >= sunit as u64 {
+        return fail("this source file is 480 KiB or larger -- the per-file slot cannot hold it (its tail keeps this file's path and use lists), and cutting it short yields parse errors unrelated to where it was cut: split the facade") as u64;
     }
     let nb: u32 = strip_cr(slot, raw_n as u32);
+    // 路径副本: 之后一律指这里 —— 名字形式的候选缓冲 (`scr + NAMTMP_OFF`) 不再能把它改掉。
+    let pcap: u32 = 1024;
+    if n >= pcap {
+        let dm: str = "this file's path is longer than the loader's 1024-byte private copy -- shorten the checkout path";
+        failp(dm, path, n);
+        die(1);
+    }
+    let pbuf: ptr = ptr_add(slot, nb + 43200);
+    let pi: u32 = 0;
+    while pi < n {
+        store8(pbuf, pi, load8(path, pi) as u8);
+        pi = pi + 1;
+    }
+    path = pbuf;
     // 声明说的是"**怎么读**"，不是那份源的一部分 —— **在 `lex` 之前抹掉**（`docs/188` §1）。
     // 与参考实现的 `potato_from.strip_grammar_decl` 同一件事；放在这儿（而不是 token 层）
     // 是为了让 lexer / parser **一行都不动** —— 也就不必为它重生成种子。
@@ -1540,8 +1575,8 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
     if from_addin == 1 {
         check_chooseset(slot, toks, ntf, path, n, scr);
     }
-    let uses: ptr = ptr_add(scr, USE_OFF);
-    let addins: ptr = ptr_add(scr, ADDIN_OFF);
+    let uses: ptr = ptr_add(slot, nb + 38400);
+    let addins: ptr = ptr_add(slot, nb + 40800);
     let nu: u32 = 0;
     let na: u32 = 0;
     // **归属** (与参考实现 `lomentc.resolve_name` 的 §归属 同一条): 本文件住在商店的包里

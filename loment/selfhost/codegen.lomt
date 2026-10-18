@@ -234,6 +234,12 @@ const CG_TY_BOOL: u32 = 4294967294;
 //: 自举侧原先只能落 0 (缺省 i32/有符号), 于是同一个比较印 `-1` (#679 shape 2)。
 const CG_WANT_U32: u32 = 4294967293;
 
+//: **`4294967292` = "源是内建返回的 ptr"** —— 只给 `cast_src_type` / `apply_cast`
+//: 用。`expr_type` 对 `ptr_add(...)` 这类内建调用没有词可以指 (源里不一定出现 `ptr`
+//: 这个词), 于是 `(ptr_add(cur, 1)) as u64` 原来按 u32 发 `zext` —— 操作数是 ptr,
+//: 非法 IR, 且与参考实现的 `ptrtoint` 分叉 (#679)。
+const CG_CAST_PTR: u32 = 4294967292;
+
 fn emit_ty(s: ptr, out: ptr, src: ptr, toks: ptr, tt: u32) -> u32 {
     if tt == CG_WANT_U32 {
         return emit_str(s, out, "i32");
@@ -442,6 +448,21 @@ fn emitted_name(s: ptr, out: ptr, src: ptr, toks: ptr, tt: u32) -> u32 {
 /// 两个位置在 token 上长得**一模一样**, 只能靠"谁在调用"区分。
 fn operand_type(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
     return operand_bin_type(s, src, toks, j, skip_parens(src, toks, j));
+}
+
+/// 转型左侧的类型: 普通表达式走 `operand_type`; 指向**内建 ptr 返回**的那四个名字
+/// (`alloc` / `str_ptr` / `ptr_add` / `ptr_sub`) 时给 `CG_CAST_PTR`。跳过外层括号,
+/// 因为 `(ptr_add(x, 1)) as u64` 的第一个 token 是 `(`。
+fn cast_src_type(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
+    let k: u32 = j;
+    while tok_is(src, toks, k, "(") {
+        k = k + 1;
+    }
+    if tok_is(src, toks, k, "alloc") || tok_is(src, toks, k, "str_ptr")
+            || tok_is(src, toks, k, "ptr_add") || tok_is(src, toks, k, "ptr_sub") {
+        return CG_CAST_PTR;
+    }
+    return operand_type(s, src, toks, j);
 }
 
 /// 子表达式在 j 处的类型 —— 括号透明, 且**认它自己的 `as`**。
@@ -2328,6 +2349,19 @@ fn bit_width(tt: u32, src: ptr, toks: ptr) -> u32 {
 
 /// `as T` 后缀: 按位宽与符号性选 trunc/sext/zext (与 lomentc 同规则)。
 fn apply_cast(s: ptr, out: ptr, src: ptr, toks: ptr, from_t: u32, to_t: u32, lvl: u32) -> u32 {
+    if from_t == CG_CAST_PTR {          // 内建返回的 ptr: 只可能是 ptr -> 整数
+        if tok_is(src, toks, to_t, "u64") || tok_is(src, toks, to_t, "i64") {
+            emit_str(s, out, "  ");
+            let np0: u32 = new_temp(s, out);
+            emit_str(s, out, " = ptrtoint ptr ");
+            emit_val(s, out, lvl);
+            emit_str(s, out, " to i64
+");
+            set_temp_val(s, lvl, np0);
+            return 1;
+        }
+        return 0;
+    }
     // from_t == 0 时按 u32 处理 (镜像 lomentc 的 `st or "u32"`: 打印与位宽都用 i32)
     let sw: u32 = 32;
     if from_t != 0 {
@@ -2824,10 +2858,10 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
         let e: u32 = expr_bin(s, out, src, toks, j + 1, 1, lvl, pwant);
         let e1: u32 = e + 1;
         if tok_is(src, toks, e1, "as") {
-            // from 侧的类型要用**括号里那个表达式**的类型 (`operand_type`), 不是
+            // from 侧的类型要用**括号里那个表达式**的类型 (`cast_src_type`), 不是
             // 整个转型表达式的类型 —— 后者在 `(v / 256) as u8` 上会直接给出 u8,
             // 于是 `as u8` 被当成同宽转型整个丢掉 (自举驱动第一次踩到)
-            apply_cast(s, out, src, toks, operand_type(s, src, toks, j), e1 + 1, lvl);
+            apply_cast(s, out, src, toks, cast_src_type(s, src, toks, j), e1 + 1, lvl);
             return e1 + 2;
         }
         return e1;
@@ -3353,6 +3387,13 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
             emit_str(s, out, ")
 ");
             set_temp_val(s, lvl, sc);
+            // `syscall4(...) as u32` 的后缀：结果的类型是 **i64**（内核返回值），
+            // 原来这里直接返回，把 `as u32` 整段跳过 —— 参考实现发 `trunc i64 … to i32`，
+            // 自举侧发 `ret i32 %t`（操作数是 i64），两个实现分叉且 IR 非法 (#679)。
+            if tok_is(src, toks, ka + 1, "as") {
+                apply_cast_b(s, out, src, toks, 4, 1, ka + 2, lvl);
+                return ka + 2;
+            }
             return ka;
         }
         if tok_is(src, toks, j, "slice_len") {   // M3: 切片取长度 (数组用字面量长度)
@@ -4744,7 +4785,8 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         // （早先那版为此要按 token 次序给站点编号，还得当心别把 `CG_CUR` 那张
         // **当前函数形参替换表** 踩掉 —— 实测：踩掉之后同一个单元里的枚举 `load` 会从
         // `{ i32, i64 }` 变成 `i32`，m88 当场红）。
-        if tok_is(src, toks, ty, "ptr") && tok_is(src, toks, eq + 1, "alloc")
+        if load32(s, 572) == 1
+                && tok_is(src, toks, ty, "ptr") && tok_is(src, toks, eq + 1, "alloc")
                 && tok_is(src, toks, eq + 2, "(") {
             let k: u32 = slot_mask_at(src, toks, j + 1, load32(s, 564), load32(s, 568),
                                       load32(s, 12), ptr_add(s, CG_CUR), ptr_add(s, CG_SAFE));

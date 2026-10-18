@@ -6433,9 +6433,13 @@ def compile_ll(text: str, objects: list | None = None,
         imports.update(nm for o in objects for nm in o.undefined
                        if nm not in em.asm.labels)
         # 弱未定义引用只有在 `.so` **确实导出**它时才绑过去；否则按 `#617` 写 0。
+        exports_any = {n for so in shared for n in so.exports}
         imports.update(nm for o in objects for nm in o.weak_undefined
                        if nm not in em.asm.labels and nm in exports_any)
-        exports_any = {n for so in shared for n in so.exports}
+        # 入口桩在 V2 走 `exit(3)`（`#605`）时那条调用的 kind 不是 `ext` —— 显式补进来，
+        # 否则它会以"未定义的标签"落空（`tests` 抓到的 `${exit}`）。
+        if call_exit:
+            imports.add("exit")
         imports = sorted(imports)
         for nm in imports:
             # **hidden 也是"这个库里有这个名字"**（`#642`）：选 owner 时把它算进来，
@@ -6457,6 +6461,12 @@ def compile_ll(text: str, objects: list | None = None,
         for nm, at in plt_labels.items():
             em.asm.labels[nm] = at
         imported = imports
+    # **GOT 槽的内容 = 符号地址**（`#609`）。槽的**地址**在布局时就定了，内容要等所有
+    # 标签立完才知道 —— 所以填在这里、重定位应用之前。（合并 #618–#620 那一轮时这条
+    # 被漏掉过：PIC 产物照样链接、跑起来在第一条 `mov [rip+GOT]` 上段错误。）
+    for nm, at in got_addr.items():
+        if nm in em.asm.labels:
+            struct.pack_into("<Q", data, at - DATA_VADDR, em.asm.labels[nm])
     applied = 0
 
     def reloc_value(ty: int, val: int, here: int, where: str) -> bytes:
@@ -6501,6 +6511,23 @@ def compile_ll(text: str, objects: list | None = None,
                     f"{obj.name}: 引用了未定义的符号 {nm} —— 到链接结束都没人提供它"
                     f" (第 2 阶段仍不链 libc, docs/173 §3)")
             val = target + add                            # 公式里的 S + A
+            # **GOTPCREL**（`#609`）：值是 GOT 槽相对 PC 的偏移，不是 S+A-P。
+            if ty in (REL_GOTPCREL, REL_GOTPCRELX, REL_REX_GOTPCRELX):
+                rel = got_addr[nm] + add - here
+                if not -2 ** 31 <= rel < 2 ** 31:
+                    raise Unsupported(f"{obj.name}: GOTPCREL 重定位溢出 ({nm})")
+                em.asm.buf[site:site + 4] = struct.pack("<i", rel)
+                applied += 1
+                continue
+            # **TLS**（`#610`）：`S + A - TP`，TP 是 TLS 块尾（variant II），所以是负值。
+            if ty == REL_TPOFF32:
+                em.asm.buf[site:site + 4] = struct.pack("<i", val - tls_addr)
+                applied += 1
+                continue
+            if ty == REL_TPOFF64:
+                em.asm.buf[site:site + 8] = struct.pack("<q", val - tls_addr)
+                applied += 1
+                continue
             raw = reloc_value(ty, val, here, f"{obj.name}: {nm}")
             em.asm.buf[site:site + len(raw)] = raw
             applied += 1

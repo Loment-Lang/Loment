@@ -98,6 +98,11 @@ TOOLS: list[tuple[str, str, str]] = [
     # Loment 写的、由同一条自举链编出来的。源码的**正本在开发者的工作区** (`lompi/` 这份
     # 是随包发布的快照), 两边靠 tools/lompi_sync.py 校验, 见 docs/170。
     ("lompi", "lompi/lompi.lomt", "lompi"),
+    # **VM（`choose vm` 的执行体）** —— `#355`，`docs/263`。2026-10-18 起随包发：
+    # 引擎 T0–T3 与去优化都落了（`docs/259`/`docs/261`），失败面有判据（`docs/262`）。
+    # ⚠ 它是**镜像**（Loment 写的那份），走同一条自举链；`docs/231` §2 的渠道闸也同日放开，
+    # 所以"发行版可以调 VM"这句话现在有东西可调，不是一句声明。
+    ("loment-lvm", "loment/tools/lvm.lomt", "."),
 ]
 #: 随包发的示例。`tour.lomt` 是**一个文件过完整门语言**的导览 —— 纯包用户没有仓库里的
 #: 其它示例, 所以它比 hello 更该在包里 (agent 指南 §1 讲的就是这一份, 三者同源)。

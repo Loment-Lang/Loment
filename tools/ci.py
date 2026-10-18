@@ -157,6 +157,11 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  # LVM 的 T3（`docs/261`）：守卫特化 + 去优化 —— 语料不变、夹具恰好去优化
                  # 一次且副作用只发生一次、反例零去优化。
                  "lvm_t3_test",
+                 # LVM 的失败面（`docs/262`）：三档都不挂死、五种拒绝都点名、上限写在纸上。
+                 "lvm_stability_test",
+                 # LVM 的性能护栏（`docs/226` §2.2）：绝对天花板 + 只判符号，外加"账上真有这张表"。
+                 # ⚠ 挂在独占那一片之外：它跑 T0 的重的那份（~7s），但**不写仓库共享位置**。
+                 "lvm_perf_test",
                  # `lom/net.lom` 那条 L0 契约 (docs/228): 号 → 面的单源, 四面对账
                  "loment_net_test",
                  # FFI 第 1 阶段 (docs/173): 外部目标文件 + C ABI + lomelf 单独链接, 跑出结果
@@ -305,6 +310,10 @@ SHARD_COST = {
     "loment_store_twin_test": 120.0,
     # 实测: 3 条; 语料 9 份各记一趟值再跑一趟 T3，另两份夹具。
     "lvm_t3_test": 60.0,
+    # 实测: 3 条; 死循环三档 + 五种拒绝 + 读一页文档，秒级。
+    "lvm_stability_test": 10.0,
+    # 实测: 3 条; 四档各跑一趟 lumtui_demo（T0 那份 ~7s），合计 ~12s。
+    "lvm_perf_test": 25.0,
     # 实测: 8 条; 每条各编一个原生探针 (参考编译器 IR + lomelf), 端到端那条还起一个
     # 真 http.server。本机 6.9s。
     "loment_internet_test": 10.0,

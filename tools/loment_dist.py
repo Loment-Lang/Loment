@@ -228,12 +228,20 @@ case "${1:-help}" in
         src=
         nc=
         om=
+        dout=
         while [ $# -gt 0 ]; do
             case "$1" in
                 -C|--no-color) nc=$1; shift ;;
                 --short|--json) om=$1; shift ;;
                 --max) om="$om --max ${2:-}"; shift 2 ;;
                 --max=*) om="$om $1"; shift ;;
+                # `--diag-out PATH` is NOT a renderer switch: it names the file the DRIVER
+                # writes its structured records to. `lomenterr`'s own usage tells users to
+                # spell exactly this, and those JSON lines carry the byte_start/byte_end
+                # that editors consume - so it has to reach the driver, and the renderer
+                # then reads that file instead of the temporary one (#13).
+                --diag-out) dout=${2:-}; shift 2 ;;
+                --diag-out=*) dout=${1#--diag-out=}; shift ;;
                 -*) echo "loment: unknown option $1" >&2; exit 2 ;;
                 *) [ -z "$src" ] || {
                        echo "loment: $mode accepts exactly one input file" >&2
@@ -245,14 +253,21 @@ case "${1:-help}" in
         [ -n "$src" ] || { usage >&2; exit 2; }
         need loment-driver loment-driver
         tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+        dpath=$tmp/d.jsonl
+        if [ -n "$dout" ]; then
+            dpath=$dout
+            # Create it even when the unit is clean: the user asked for a file, and
+            # "no file appeared" is indistinguishable from "the flag did nothing" (#13).
+            : > "$dpath" || { echo "loment: cannot write the diagnostics file $dout" >&2; exit 2; }
+        fi
         rc=0
         if [ "$mode" = ir ]; then
-            "$(tool loment-driver)" "$(to_posix "$src")" --diag-out "$tmp/d.jsonl" 2>"$tmp/e.txt" || rc=$?
+            "$(tool loment-driver)" "$(to_posix "$src")" --diag-out "$(to_posix "$dpath")" 2>"$tmp/e.txt" || rc=$?
         else
-            "$(tool loment-driver)" "$(to_posix "$src")" --diag-out "$tmp/d.jsonl" >/dev/null 2>"$tmp/e.txt" || rc=$?
+            "$(tool loment-driver)" "$(to_posix "$src")" --diag-out "$(to_posix "$dpath")" >/dev/null 2>"$tmp/e.txt" || rc=$?
         fi
         if [ $rc -ne 0 ]; then
-            report_diags "$tmp/d.jsonl" "$tmp/e.txt" "$nc $om"
+            report_diags "$dpath" "$tmp/e.txt" "$nc $om"
             exit 1
         fi
         [ -s "$tmp/e.txt" ] && cat "$tmp/e.txt" >&2
@@ -516,6 +531,7 @@ set "csrc="
 set "cnc="
 set "com="
 set "cbad="
+set "cdout="
 for %%A in (%*) do call :scan_arg "%%~A"
 rem :scan_arg runs inside a `for ... do call`, so it cannot end the script itself: it
 rem records the bad option and this is where the run stops with the same status bash uses.
@@ -523,16 +539,22 @@ if defined cbad exit /b 2
 if not defined csrc goto usage
 set "dtmp=%TEMP%\loment-d%RANDOM%%RANDOM%"
 mkdir "%dtmp%" >nul 2>nul
+rem `--diag-out PATH`: the driver writes THERE instead of the temp file, and the file is
+rem created even when the unit is clean (issue #13: "no file" looked like "flag ignored").
+set "dpath=%dtmp%\d.jsonl"
+if defined cdout set "dpath=%cdout%"
+if defined cdout type nul > "%dpath%"
 if "%cmode%"=="i" goto compile_only_ir
-"%here%loment-driver.exe" "%csrc%" --diag-out "%dtmp%\d.jsonl" >nul 2>"%dtmp%\e.txt"
+"%here%loment-driver.exe" "%csrc%" --diag-out "%dpath%" >nul 2>"%dtmp%\e.txt"
 goto compile_only_done
 :compile_only_ir
-"%here%loment-driver.exe" "%csrc%" --diag-out "%dtmp%\d.jsonl" 2>"%dtmp%\e.txt"
+"%here%loment-driver.exe" "%csrc%" --diag-out "%dpath%" 2>"%dtmp%\e.txt"
 :compile_only_done
 set "crc=%ERRORLEVEL%"
-if not "%crc%"=="0" call :report_diags "%dtmp%\d.jsonl" "%dtmp%\e.txt" "%cnc% %com%"
+if not "%crc%"=="0" call :report_diags "%dpath%" "%dtmp%\e.txt" "%cnc% %com%"
 if "%crc%"=="0" if exist "%dtmp%\e.txt" type "%dtmp%\e.txt" 1>&2
-del /q "%dtmp%\d.jsonl" "%dtmp%\e.txt" >nul 2>nul
+if not defined cdout del /q "%dtmp%\d.jsonl" >nul 2>nul
+del /q "%dtmp%\e.txt" >nul 2>nul
 rmdir "%dtmp%" >nul 2>nul
 exit /b %crc%
 
@@ -800,6 +822,18 @@ rem in cskip and drop it, otherwise `--max 0` would leave `0` to be mistaken for
 :scan_arg
 if not defined cskip goto scan_arg_go
 set "cskip="
+if defined cwantmax goto scan_max_val
+if defined cwantout goto scan_out_val
+exit /b 0
+:scan_max_val
+set "cwantmax="
+rem The value has to travel WITH the flag: `lomenterr --max d.jsonl` takes the diagnostics
+rem file as the cap and then prints its usage instead of the user's errors (issue #13).
+set "com=%com% %~1"
+exit /b 0
+:scan_out_val
+set "cwantout="
+set "cdout=%~1"
 exit /b 0
 :scan_arg_go
 if /I "%~1"=="ir" exit /b 0
@@ -809,8 +843,10 @@ if /I "%~1"=="-C" goto scan_nc
 if /I "%~1"=="--short" goto scan_om
 if /I "%~1"=="--json" goto scan_om
 if /I "%~1"=="--max" goto scan_max
+if /I "%~1"=="--diag-out" goto scan_dout
 set "ss=%~1"
 if "%ss:~0,6%"=="--max=" goto scan_om
+if "%ss:~0,11%"=="--diag-out=" goto scan_out_v
 rem An option that is not one of the above is REJECTED, not taken for the source file.
 rem This path scans the WHOLE command line (both `check FILE --no-color` and
 rem `check --no-color FILE` have to work), so the leading dash is the only thing that
@@ -837,8 +873,16 @@ set "cnc=--no-color"
 exit /b 0
 :scan_max
 set "cskip=1"
+set "cwantmax=1"
 :scan_om
 set "com=%com% %~1"
+exit /b 0
+:scan_dout
+set "cskip=1"
+set "cwantout=1"
+exit /b 0
+:scan_out_v
+set "cdout=%ss:~11%"
 exit /b 0
 '''
 

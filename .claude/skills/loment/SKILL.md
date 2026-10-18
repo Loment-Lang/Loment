@@ -107,9 +107,12 @@ Two more diagnostic outlets are switches on `loment check FILE` (each also turns
   the code and position, plus `suggestions` an editor can **apply directly** (`replacement` with
   `byte_start`/`byte_end`), or count by code.
 
-**Two switches in the launcher's help do not work today**: `--max N` and `--diag-out PATH`.
-`--max N` currently prints **no diagnostics at all** rather than capping them, and `--diag-out`
-does not write its file. They are known defects, not features you are using wrong.
+Two more switches cap and capture the same stream:
+
+- `--max N` - render at most `N` diagnostics (`0` = all) and say how many were withheld;
+- `--diag-out PATH` - write the raw JSONL records to `PATH` (the file is created even when the
+  unit is clean). That file is what the reporter reads, and it is where the `byte_start` /
+  `byte_end` autofix fields live.
 
 The reporter's own text is **English by default**; to have the whole report in Chinese, put an
 `errconfig` in the **project root**:

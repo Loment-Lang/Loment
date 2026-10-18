@@ -64,8 +64,14 @@ def test(fn):
 #: 2026-10-18（`#719`）：`codegen.lomt` 加了常量表 `CG_MAXCONST = 1024`（`find_const` 不再
 #: 扫全单元）。它**有话**（满了 `emit_module` 返回 0，驱动点名"functions/constants/enums"），
 #: 所以沉默仍是 **156**、名单不动 —— 只加一条容量，条数 220 → **221**。
-CAPACITY_SITES = 221
-SILENT_SITES = 156
+#:
+#: 2026-10-18（`#485`）：`lomenterr.lomt` 也新用了一处 `MSG_CAP` —— `if mlen >= MSG_CAP`
+#: 判的是"这条消息有没有被拷满"，判到了就印 `truncated` / 写 `"truncated": true`。
+#: 它不是在写，是在**报**，所以来路写进 `loment_caps.EXPLAINED`（`gaps()` 仍是 0）；
+#: 但按筛子的口径它仍算"沉默"一格（没有 `fail` 路径），于是沉默 156 → **157**、
+#: 条数再 +1 → **222**。**只往"更好"的方向动**：这是一处检测点，不是新的写穿点。
+CAPACITY_SITES = 222
+SILENT_SITES = 157
 
 #: 越界时**说不出话**的那些名字（`--silent` 去重、按字节序）。138 个。
 #: ⚠ 这里按**筛子**的口径（`not speaks`），所以那 6 条"来路已写明"的也在内 ——
@@ -139,6 +145,7 @@ SILENT_NAMES = frozenset((
     "MW",
     "M_AUX",
     "M_CAP",
+    "MSG_CAP",
     "NAMEE",
     "NAMES_CAP",
     "NAME_MAX",

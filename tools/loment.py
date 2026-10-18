@@ -189,6 +189,11 @@ def cmd_test(a) -> int:
 
 
 def cmd_bench(a) -> int:
+    # 负的迭代次数没有意义，而它会被原样拼进 `let n = -5u32;` —— 于是用户看到的是
+    # **rustc** 的报错（`#507`），不是我们的用法错误。在入口挡住。
+    if a.n < 0:
+        print("[ERR] --n 必须是非负整数", file=sys.stderr)
+        return 2
     p, mod, deps = _load(a.file)
     benches = _picked(mod, "bench_")
     if not benches:

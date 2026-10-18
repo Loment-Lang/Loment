@@ -169,6 +169,9 @@ const S_TRUNC: u32 = 30;         // 这一条太长被截断
 const S_NERR: u32 = 31;          // " 条错误"（跟在数字后面）
 const S_SUM: u32 = 32;           // " 条错误："（汇总行的头）
 const S_SUM_X: u32 = 33;         // 汇总里 " x2" 那个 x
+const S_SUM1: u32 = 57;          // 同上，但只有**一条**（英文要单数，`#487`）
+const S_BADLINE_J: u32 = 58;     // `--json` 里那条坏行的 note（`#478`）
+const S_CUT: u32 = 59;           // `--short` / `--json` 的截断标记（`#485`）
 // 候选**是什么** —— 抄 rustc 的 "a local variable with a similar name exists"。
 // 只说一个名字，用户还得自己去找它在哪、是干什么的；说了种类，一眼就知道该不该照它改。
 const S_KIND_FN: u32 = 38;
@@ -256,6 +259,9 @@ fn ui_en(k: u32) -> str {
     if k == 31 { return " errors\n"; }
     if k == 32 { return " errors: "; }
     if k == 33 { return " x"; }
+    if k == 57 { return " error: "; }
+    if k == 58 { return "this line in the diagnostics file is not valid JSON"; }
+    if k == 59 { return " [truncated]"; }
     if k == 34 { return "lomenterr: cannot open the diagnostics file\n"; }
     if k == 35 { return "there is no `./deps` directory here, so layer 1 cannot find anything: layer 1 is `<project root>/deps/<name>/<name>.lomt`. Create that file, or name the location with the path form `use \"./x.lomt\"`.\n"; }
     if k == 36 { return "`./deps` is here; the closest names in it are:\n"; }
@@ -317,6 +323,9 @@ fn ui_zh(k: u32) -> str {
     if k == 31 { return " 条错误\n"; }
     if k == 32 { return " 条错误："; }
     if k == 33 { return " ×"; }
+    if k == 57 { return " 条错误："; }   // 中文不分数，与 k == 32 相同
+    if k == 58 { return "诊断文件里的这一行不是合法 JSON"; }
+    if k == 59 { return " [已截断]"; }
     if k == 34 { return "lomenterr: 打不开诊断文件\n"; }
     if k == 35 { return "这里没有 `./deps` 目录 —— 第 1 层找的是「项目根」下的 `deps/<名字>/<名字>.lomt`，所以它找不到任何东西。补那个文件，或者用路径形式 `use \"./x.lomt\"` 指明位置。\n"; }
     if k == 36 { return "`./deps` 在这里，里面最接近的名字有:\n"; }
@@ -1948,7 +1957,7 @@ fn em_code(ctx: ptr, o: u32, cnum: u32) -> u32 {
 /// `--short`：**一行一条**，形状 `file:line:col: error[E002]: message` —— 与 GCC / clang
 /// 那一族同一个惯例，所以编辑器不用任何配置就能按 `文件:行:列` 跳过去。
 /// 消息里的换行**折成一个空格**：不折的话一条诊断变成两三行，"一行一条"这个承诺就破了。
-fn rec_short(ctx: ptr, line: u32, col: u32, mlen: u32, plen: u32, clen: u32) -> u32 {
+fn rec_short(ctx: ptr, line: u32, col: u32, mlen: u32, plen: u32, clen: u32, mtr: u32) -> u32 {
     let o: u32 = 0;
     let k: u32 = 0;
     while k < plen {
@@ -1985,12 +1994,17 @@ fn rec_short(ctx: ptr, line: u32, col: u32, mlen: u32, plen: u32, clen: u32) -> 
         }
         m = m + 1;
     }
+    // **截断不许无声**（`#485`）：消息在拷进缓冲时就已经到顶了，这里只剩一小截 ——
+    // 不说的话，CI 读到的是一条"看起来完整"的短句，而它其实是半句话。
+    if mtr == 1 {
+        o = em(ctx, o, ui(ctx, S_CUT));
+    }
     return em_byte(ctx, o, NL);
 }
 
 /// `--json`：**一行一个对象**（JSONL，与编译器 `--diag-out` 吐进来的形状同族，只是多了
 /// 卡片那几个字段）。逐行而不是一个大数组：调用方可以流式读，也不必为逗号记账。
-fn rec_json(ctx: ptr, cnum: u32, clen: u32, line: u32, col: u32, mlen: u32, plen: u32) -> u32 {
+fn rec_json(ctx: ptr, cnum: u32, clen: u32, line: u32, col: u32, mlen: u32, plen: u32, mtr: u32) -> u32 {
     let o: u32 = em(ctx, 0, "{\"code\":");
     o = json_span(ctx, o, ptr_add(ctx, C_CODE), clen);
     o = em(ctx, o, ",\"title\":");
@@ -2063,6 +2077,10 @@ fn rec_json(ctx: ptr, cnum: u32, clen: u32, line: u32, col: u32, mlen: u32, plen
         k = k + 1;
     }
     o = em_byte(ctx, o, RBRACK);
+    // 同一条理由，机器那一侧要的是**字段**而不是一句话（`#485`）。
+    if mtr == 1 {
+        o = em(ctx, o, ",\"truncated\":true");
+    }
     o = em_byte(ctx, o, RBRACE);
     return em_byte(ctx, o, NL);
 }
@@ -2128,7 +2146,13 @@ fn sum_print(ctx: ptr, total: u32) -> u32 {
     }
     let o: u32 = em_u32(ctx, 0, total);
     let o1: u32 = em_col(ctx, o, "1;31");
-    let o2: u32 = em(ctx, o1, ui(ctx, S_SUM));
+    // 一条就写单数（`#487`）：`1 errors:` 是英文里最便宜的那种破绽。
+    // 中文不分数，`ui_zh` 把两个键映到同一句。
+    let sumk: u32 = S_SUM;
+    if total == 1 {
+        sumk = S_SUM1;
+    }
+    let o2: u32 = em(ctx, o1, ui(ctx, sumk));
     // 复位在**展开明细之前**：明细是要拿去比的（`E002` 与条数），整段染红会把它们压得
     // 看不清 —— 上色只给"总数"那一下。
     let head: u32 = em_rst(ctx, o2);
@@ -2636,13 +2660,33 @@ fn h_more(ctx: ptr) -> u32 {
     if n == 0 {
         return 0;
     }
+    // **只指路到真讲得出来的码**（`#487`）：编译器可以吐出表面数据表里没有的码
+    // （旧报错器遇上新编译器、或别的工具写进来的 E999），而 `loment explain` 对它只会
+    // 回一句 `(unknown code)` —— 那种指针比不说更坏。表里有卡片的判据是
+    // `code_nfix > 0`，与 `h_card` 同一条。
+    let known: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        if code_nfix(load32(ctx, C_SUMK + i * 4)) > 0 {
+            known = known + 1;
+        }
+        i = i + 1;
+    }
+    if known == 0 {
+        return 0;
+    }
     let acc: u32 = em(ctx, 0, ui(ctx, S_MORE));
     let k: u32 = 0;
+    let drawn: u32 = 0;
     while k < n {
-        if k > 0 {
-            acc = em_byte(ctx, acc, SP);
+        let c: u32 = load32(ctx, C_SUMK + k * 4);
+        if code_nfix(c) > 0 {
+            if drawn > 0 {
+                acc = em_byte(ctx, acc, SP);
+            }
+            acc = em_code(ctx, acc, c);
+            drawn = drawn + 1;
         }
-        acc = em_code(ctx, acc, load32(ctx, C_SUMK + k * 4));
         k = k + 1;
     }
     return em_byte(ctx, acc, NL);
@@ -2736,14 +2780,28 @@ fn _start() -> u32 {
                 // **不静默**: 解析不了就原样吐出来 —— 悄悄跳过会让"报错器什么都没说"
                 // 看起来像"没有错误"。
                 broken = broken + 1;
-                let o1: u32 = em(ctx, 0, ui(ctx, S_BADLINE));
-                let k: u32 = s;
-                let o2: u32 = o1;
-                while k < e {
-                    o2 = em_byte(ctx, o2, load8(dg, k));
-                    k = k + 1;
+                if load32(ctx, C_MODE) == 2 {
+                    // **`--json` 的流必须是合法 JSONL**（`#478`）：一行坏数据进去，
+                    // 出来仍然是一个可解析的对象。形状与诊断对象**明显不同** —— 没有
+                    // code / line / col，因为这条记录唯一的事实就是"这一行读不懂"；
+                    // 硬造一个 E999 会让下游把它当成一条真诊断（`loment explain` 也
+                    // 讲不出来，而那正是 `#487` 刚清掉的东西）。
+                    let j: u32 = em(ctx, 0, "{\"broken\":true,\"text\":");
+                    j = json_span(ctx, j, ptr_add(dg, s), e - s);
+                    j = em(ctx, j, ",\"note\":");
+                    j = json_str(ctx, j, ui(ctx, S_BADLINE_J));
+                    j = em_byte(ctx, j, 125);      // '}'
+                    write_all(2, ctx, em_byte(ctx, j, NL) as u64);
+                } else {
+                    let o1: u32 = em(ctx, 0, ui(ctx, S_BADLINE));
+                    let k: u32 = s;
+                    let o2: u32 = o1;
+                    while k < e {
+                        o2 = em_byte(ctx, o2, load8(dg, k));
+                        k = k + 1;
+                    }
+                    write_all(2, ctx, em(ctx, o2, "\n") as u64);
                 }
-                write_all(2, ctx, em(ctx, o2, "\n") as u64);
             } else {
                 let clen: u32 = str_field(js, ar, json_get(js, ar, root, "code"),
                                           ctx, C_CODE, CODE_CAP);
@@ -2752,6 +2810,14 @@ fn _start() -> u32 {
                 let col: u32 = num_raw(js, ar, json_get(js, ar, root, "col"));
                 let mlen: u32 = str_field(js, ar, json_get(js, ar, root, "message"),
                                           ctx, C_MSG, MSG_CAP);
+                // **消息在拷进 `C_MSG` 时就封顶了**（`#485`）。装满 MSG_CAP 就是它被
+                // 截过的凭据 —— 消息由编译器生成、正常几十到几百字节，正好 16 KiB 的
+                // 真消息不存在；为它再走一遍解码只是为了把这件事说得更精确，而代价是
+                // 第二份"转义怎么数"的实现（那正是本仓反复踩的漂移源）。
+                let mtr: u32 = 0;
+                if mlen >= MSG_CAP {
+                    mtr = 1;
+                }
                 let plen: u32 = str_field(js, ar, json_get(js, ar, root, "file"),
                                           ctx, C_PATH, PATH_CAP);
                 // **建议与位置都在模式分岔之前算**：`--json` 也要它们（编辑器要的是能直接
@@ -2803,13 +2869,13 @@ fn _start() -> u32 {
                 if mode == 1 {
                     // 一行一条：**不读源文件**（短输出只用到码/路径/消息），
                     // 所以 CI 里几万条诊断也不会有额外 I/O。
-                    write_all(2, ctx, rec_short(ctx, line, col, mlen, plen, clen) as u64);
+                    write_all(2, ctx, rec_short(ctx, line, col, mlen, plen, clen, mtr) as u64);
                 } else {
                     if mode == 2 {
-                        write_all(2, ctx, rec_json(ctx, cnum, clen, line, col, mlen, plen) as u64);
+                        write_all(2, ctx, rec_json(ctx, cnum, clen, line, col, mlen, plen, mtr) as u64);
                     } else {
                         let w: u32 = dig_w(line);
-                        store32(ctx, C_TRUNC, 0);
+                        store32(ctx, C_TRUNC, mtr);
                         let o: u32 = h_head(ctx, 0, cnum, clen);
                         let o2: u32 = h_loc(ctx, o, line, col, w, plen);
                         let o3: u32 = o2;
@@ -2868,7 +2934,9 @@ fn _start() -> u32 {
             }
         }
     }
-    if broken > 0 {
+    // `--json` 里不打这一行：它是给人看的一句话，而 JSONL 出口**一行一个对象**是
+    // 对下游的承诺（`#478`）。坏行本身已经以 `{"broken":true,...}` 出现过，信息没丢。
+    if broken > 0 && load32(ctx, C_MODE) != 2 {
         let o: u32 = em(ctx, 0, "lomenterr: ");
         let o2: u32 = em_u32(ctx, o, broken);
         write_all(2, ctx, em(ctx, o2, ui(ctx, S_BROKEN)) as u64);

@@ -73,6 +73,10 @@ EXPLAINED: dict[tuple[str, str], str] = {
         "越界**由调用方报**：守卫这里 `return 0`，驱动器 `fail(\"…codegen 表容量…\")` 说得出来",
     ("loment/selfhost/codegen.lomt", "CG_MAXENUM"):
         "越界**由调用方报**：同 `CG_MAXFN`（一句话点名两张表）",
+    ("loment/tools/lomenterr.lomt", "MSG_CAP"):
+        "**检测点，不是写入点**（`#485`）：`if mlen >= MSG_CAP` 判的是「这条消息有没有"
+        "被拷满」，判到了就印 `truncated` / 写 `\"truncated\": true`。越界在这里不是"
+        "写穿，而是这条判据要回答的问题",
     ("loment/selfhost/lexer.lomt", "MAX_LANG"):
         "**有守卫**（`dn < MAX_LANG`，不写穿）：它静默**丢**的是第 17 条语言声明 —— "
         "那是 (a) 里「丢」那一半，**本笔没做**。留着的理由写在这里而不是抹掉：参考实现"

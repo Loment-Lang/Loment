@@ -1359,10 +1359,12 @@ def test_e028_literal_index_over_a_fixed_array():
     body = "fn f() -> u32 { let a: [u32; 4] = [1, 2, 3, 4]; let x: u32 = a[10]; return x; }\n"
     # **默认档也拒**（这正是这一笔改的东西：从前这一行是 `assert errs(off) == []`）
     off = "module m\n" + body
-    assert any("E028" in x for x in errs(off)), errs(off)
+    # **码从分类器拿，不在消息正文里找**（`#486`）：正文不再自带 `E028:` 前缀 ——
+    # 渲染器的头一行已经印了码，正文再写一次就是同一件事印两遍。
+    assert any(loment_diag.classify(x)[0] == "E028" for x in errs(off)), errs(off)
     # `lms` 开着也一样拒，而且**只报一条** —— 两条路都在的时候不许数出两条诊断
     on = "module m\nchoose lms_open\n" + body
-    assert len([x for x in errs(on) if "E028" in x]) == 1, errs(on)
+    assert len([x for x in errs(on) if loment_diag.classify(x)[0] == "E028"]) == 1, errs(on)
     # **边界**：正好在界内的那个下标**不报** —— 否则这条会把"越界"读成"下标 >= 0 就报"
     edge = "module m\n" + body.replace("a[10]", "a[3]")
     assert errs(edge) == [], errs(edge)
@@ -1374,7 +1376,7 @@ def test_e028_literal_index_over_a_fixed_array():
     assert errs(var) == [], errs(var)
     # **写一侧也是同一个界**：`a[10] = 7;` 同判
     w = "module m\nfn k() -> u32 { let a: [u32; 4] = [1, 2, 3, 4]; a[10] = 7; return a[0]; }\n"
-    assert any("E028" in x for x in errs(w)), errs(w)
+    assert any(loment_diag.classify(x)[0] == "E028" for x in errs(w)), errs(w)
 
 
 @test
@@ -1506,7 +1508,7 @@ def test_e029_use_after_free():
     assert errs(head % "" + body(True)) == [], errs(head % "" + body(True))
     # 开着：编译期拒
     on = head % "choose lms_open" + body(True)
-    assert any("E029" in x for x in errs(on)), errs(on)
+    assert any(loment_diag.classify(x)[0] == "E029" for x in errs(on)), errs(on)
     # **先读后 free** 合法 —— 这一半挡住"见过 free 就报"那种过头实现
     ok = head % "choose lms_open" + body(False)
     assert errs(ok) == [], errs(ok)

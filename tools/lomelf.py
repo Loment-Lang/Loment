@@ -5460,6 +5460,23 @@ class SharedObject:
     def __init__(self, path: Path):
         raw = path.read_bytes()
         self.path, self.name, self.raw = path, path.name, raw
+        n = len(raw)
+
+        def need(off: int, size: int, what: str) -> None:
+            """**每一次读之前都问一句：这一段在文件里吗**（`#592`）。
+
+            这是 `.so` 那一侧的 `#167`（`.o` / `.a` 的同一课）。一个截断的、或者被改坏
+            一个字段的共享对象，不该让用户拿到 `struct.error` / `ValueError` / `KeyError`
+            —— 那是**我们内部炸了**，不是"这个库我读不了"。所以统一成 `Unsupported`，
+            消息里说清要的区间与文件长度。
+            """
+            if off < 0 or size < 0 or off + size > n:
+                raise Unsupported(
+                    f"{path.name}: 共享对象是截断或损坏的 —— {what} 要文件里的 "
+                    f"[{off}, {off + size})，而文件只有 {n} 字节")
+
+        if n < 64:
+            raise Unsupported(f"{path.name}: 不是一个 ELF64 共享对象（只有 {n} 字节）")
         if raw[:4] != b"\x7fELF" or raw[4] != 2 or raw[5] != 1:
             raise Unsupported(f"{path.name}: 不是 ELF64 小端共享对象")
         if struct.unpack_from("<H", raw, 16)[0] != 3:            # e_type != ET_DYN
@@ -5470,6 +5487,9 @@ class SharedObject:
         e_shentsize, e_shnum, e_shstrndx = struct.unpack_from("<HHH", raw, 58)
         loads: list[tuple[int, int, int]] = []
         dyn: tuple[int, int] | None = None
+        if e_phnum and e_phentsize < 56:
+            raise Unsupported(f"{path.name}: 程序头条目只有 {e_phentsize} 字节（要 ≥ 56）")
+        need(e_phoff, e_phnum * e_phentsize, "程序头表")
         for k in range(e_phnum):
             o = e_phoff + k * e_phentsize
             p_type, _fl, p_off, p_vaddr, _pa, p_filesz, _m, _al = \
@@ -5489,6 +5509,7 @@ class SharedObject:
                 f"{path.name}: 动态表里的地址 0x{vaddr:x} 落在任何 PT_LOAD 之外")
 
         dt: dict[int, int] = {}
+        need(dyn[0], dyn[1], "PT_DYNAMIC")
         o = dyn[0]
         while o + 16 <= dyn[0] + dyn[1]:
             tag, val = struct.unpack_from("<QQ", raw, o)
@@ -5496,12 +5517,21 @@ class SharedObject:
             if tag == 0:
                 break
             dt.setdefault(tag, val)
+        if self.DT_STRTAB not in dt or self.DT_STRSZ not in dt:
+            raise Unsupported(f"{path.name}: 动态表里没有 DT_STRTAB / DT_STRSZ")
         strtab_off = voff(dt[self.DT_STRTAB])
         strsz = dt[self.DT_STRSZ]
+        need(strtab_off, strsz, "字符串表 (DT_STRTAB)")
         strtab = raw[strtab_off:strtab_off + strsz]
 
         def dstr(off: int) -> str:
-            end = strtab.index(b"\x00", off)
+            # 偏移越界 / 没有结尾 NUL 都是一个改坏的字段，`strtab.index` 会抛 ValueError。
+            if off < 0 or off >= len(strtab):
+                raise Unsupported(
+                    f"{path.name}: 字符串表里的偏移 {off} 越界（表长 {len(strtab)}）")
+            end = strtab.find(b"\x00", off)
+            if end < 0:
+                raise Unsupported(f"{path.name}: 字符串表里偏移 {off} 之后没有结尾的 NUL")
             return strtab[off:end].decode("utf-8", "replace")
 
         # 没有 SONAME 的共享对象，`DT_NEEDED` 得写**它本来的文件名**（loader 按那个找）。
@@ -5512,21 +5542,37 @@ class SharedObject:
                 f"{path.name}: 共享对象被 strip 掉了节头 —— 这一版只读带节头的 `.so`")
 
         secs = []
+        if e_shentsize < 64:
+            raise Unsupported(f"{path.name}: 节头条目只有 {e_shentsize} 字节（要 ≥ 64）")
+        need(e_shoff, e_shnum * e_shentsize, "节头表")
         for k in range(e_shnum):
             so = e_shoff + k * e_shentsize
             nameoff, typ, _fl2, _addr, off, size, link, info, _a2, entsize = \
                 struct.unpack_from("<IIQQQQIIQQ", raw, so)
             secs.append({"nameoff": nameoff, "type": typ, "off": off, "size": size,
                          "link": link, "info": info, "entsize": entsize, "name": ""})
+        if e_shstrndx >= len(secs):
+            raise Unsupported(
+                f"{path.name}: e_shstrndx={e_shstrndx} 越界（只有 {len(secs)} 个节头）")
         shstr = secs[e_shstrndx]
+        need(shstr["off"], shstr["size"], "节名字符串表 (.shstrtab)")
+        sbase, send = shstr["off"], shstr["off"] + shstr["size"]
         for s in secs:
-            end = raw.index(b"\x00", shstr["off"] + s["nameoff"])
-            s["name"] = raw[shstr["off"] + s["nameoff"]:end].decode("utf-8", "replace")
+            at = sbase + s["nameoff"]
+            if at >= send:
+                raise Unsupported(
+                    f"{path.name}: 节名字偏移 {s['nameoff']} 越出 .shstrtab")
+            end = raw.find(b"\x00", at, send)
+            if end < 0:
+                raise Unsupported(f"{path.name}: .shstrtab 里这个节名没有结尾的 NUL")
+            s["name"] = raw[at:end].decode("utf-8", "replace")
         byname = {s["name"]: s for s in secs}
 
         dynsym = byname.get(".dynsym")
         if dynsym is None or ".dynstr" not in byname:
             raise Unsupported(f"{path.name}: 共享对象没有 .dynsym/.dynstr")
+        need(dynsym["off"], dynsym["size"], ".dynsym")
+        need(byname[".dynstr"]["off"], byname[".dynstr"]["size"], ".dynstr")
         dstrtab = raw[byname[".dynstr"]["off"]:
                       byname[".dynstr"]["off"] + byname[".dynstr"]["size"]]
 
@@ -5534,31 +5580,48 @@ class SharedObject:
         vnames: dict[int, str] = {}
         verd = byname.get(".gnu.version_d")
         if verd is not None:
+            need(verd["off"], verd["size"], ".gnu.version_d")
             vo = verd["off"]
+            # `vd_next` 是文件里的一个 u32：**成环只要两处 4 字节编辑**（`#603`）。
+            # 所以这条链有两个界 —— 走不出这一节，以及走不出一节能容纳的条数。
+            # 没有它们，链接器在 100% CPU 上转圈，用户连一句话都拿不到。
+            vend = verd["off"] + verd["size"]
+            seen = 0
             # `Elf64_Verdef` 的字段序是 version(0) flags(2) ndx(4) **cnt(6)** hash(8)
             # aux(12) next(16)。`cnt` 在 6，不在 2 —— 第一版读到的是 `flags`，于是
             # 每个版本的 `vd_next` 链只走了第一步，`vnames` 里永远是空的，
             # 报错信息里那个版本名就一直是 `?`。
             while True:
+                need(vo, 20, "版本定义 (.gnu.version_d)")
                 _ver, _flags, vidx, _cnt, _hash, aux, nxt = \
                     struct.unpack_from("<HHHHIII", raw, vo)
+                need(vo + aux, 4, "版本定义的辅助链 (.gnu.version_d)")
                 adx, = struct.unpack_from("<I", raw, vo + aux)
                 vnames[vidx & 0x7FFF] = dstr(adx)
                 if nxt == 0:
                     break
                 vo += nxt
+                seen += 1
+                if vo < verd["off"] or vo + 20 > vend or seen > verd["size"] // 20:
+                    raise Unsupported(
+                        f"{path.name}: .gnu.version_d 的链成环或越界"
+                        f"（第 {seen} 步走到 {vo}，这一节是 "
+                        f"[{verd['off']}, {vend})）")
         #: `.gnu.version` 与 `.dynsym` 一一对应：bit 15 是**隐藏位**（`@@` 默认版本没有它，
         #: `@` 非默认版本有）。未加版本的引用只能绑到**没有隐藏位**的那一个。
         versym: list[int] = []
         vs = byname.get(".gnu.version")
         if vs is not None:
+            need(vs["off"], vs["size"] // 2 * 2, ".gnu.version")
             versym = list(struct.unpack_from("<" + "H" * (vs["size"] // 2), raw, vs["off"]))
 
         #: 导出表：名字 -> (kind, 是不是**默认**版本)。
         self.exports: dict[str, tuple[str, bool]] = {}
         self.versions: dict[str, str] = {}
-        n = dynsym["size"] // 24
-        for k in range(1, n):
+        # ⚠ 别叫 `n`：上面那个 `n` 是**文件长度**，`need()` 闭包读的正是它。
+        # 这里覆盖掉的话，越界检查会拿"符号条数"去比文件长度 —— 检查还在，但比错了东西。
+        nsym = dynsym["size"] // 24
+        for k in range(1, nsym):
             so2 = dynsym["off"] + k * 24
             st_name, st_info, _other, st_shndx, _value, _size = \
                 struct.unpack_from("<IBBHQQ", raw, so2)
@@ -5567,7 +5630,11 @@ class SharedObject:
             bind, typ = st_info >> 4, st_info & 0x0F
             if bind not in (1, 2) or typ not in (1, 2):         # GLOBAL/WEAK 的 OBJECT/FUNC
                 continue
-            end = dstrtab.index(b"\x00", st_name)
+            end = dstrtab.find(b"\x00", st_name)
+            if st_name >= len(dstrtab) or end < 0:
+                raise Unsupported(
+                    f"{path.name}: .dynsym 第 {k} 项的 st_name={st_name} 越出 .dynstr "
+                    f"（表长 {len(dstrtab)}）")
             nm = dstrtab[st_name:end].decode("utf-8", "replace")
             hidden = bool(versym[k] & 0x8000) if k < len(versym) else False
             # 同名可能有多条（不同版本）：**默认版本优先**，非默认的不覆盖它。

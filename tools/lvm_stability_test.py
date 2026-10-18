@@ -184,7 +184,7 @@ def test_limits_are_on_paper() -> None:
         assert const in text, f"docs/263 没有点名 {const}"
     assert "MAX_DEPTH" in text, "docs/263 没有点名镜像那一侧的 MAX_DEPTH"
     # 实测最大值要跟着常量写（"语料最大"这几列），不能只有常量表
-    assert re.search(r"语料.*最大|最大.*语料", text), "docs/262 没有语料实测的最大值"
+    assert re.search(r"语料.*最大|最大.*语料", text), "docs/263 没有语料实测的最大值"
     print("      docs/263：常量逐个点名，语料实测最大值在旁边")
 
 

@@ -27,7 +27,7 @@
 module surface_data
 choose runtime
 
-pub fn n_codes() -> u32 { return 33; }
+pub fn n_codes() -> u32 { return 35; }
 
 /// 报错器自己的版本（`lomenterr version` 打的就是它）。真源：`tools/loment_release.py`。
 pub fn lomenterr_version() -> str { return "0.1.2"; }
@@ -100,6 +100,10 @@ pub fn code_title(c: u32, lang: u32) -> str {
     if k == 65 { return "输出文件写不了"; }
     if k == 66 { return "this unit is too large for the compiler"; }
     if k == 67 { return "这个单元超出编译器装得下的量"; }
+    if k == 68 { return "an allow with no provenance (LSPE)"; }
+    if k == 69 { return "这次放行没有来源"; }
+    if k == 70 { return "the LSPE ledger has an unregistered site kind"; }
+    if k == 71 { return "台账里有未登记的站点"; }
     return "";
 }
 
@@ -171,6 +175,10 @@ pub fn code_what(c: u32, lang: u32) -> str {
     if k == 65 { return "链接器把产物写到你给的 `-o` 路径上时失败了。"; }
     if k == 66 { return "This unit outgrew the compiler's **fixed-capacity** tables (the lexer buffer, the symbol table, the codegen table, the backfill table)."; }
     if k == 67 { return "这个单元超出了这套编译器**固定容量**的那几张表（词法缓冲 / 符号表 / codegen 表 / 回填表）。"; }
+    if k == 68 { return "LSPE allowed an access but cannot name a source: no capability domain, no guard, no type, and no assumption supplied by a person."; }
+    if k == 69 { return "LSPE 放行了一次访问，却说不出来源 —— 没有能力域、没有 guard、没有类型、也没有人标的假设。"; }
+    if k == 70 { return "The LSPE site census produced a kind the ledger does not know."; }
+    if k == 71 { return "LSPE 的站点普查枚举出一个种类，而台账不认识它。"; }
     return "";
 }
 
@@ -242,6 +250,10 @@ pub fn code_why(c: u32, lang: u32) -> str {
     if k == 65 { return "产物是编译的**最后一步**，所以这条与源码无关 —— 源码全对也可能写不出去。最常见的原因是**父目录不存在**：`loment build a.lomt -o out/a` 而 `out/` 还没建。其次是权限，或者那个路径上已经有别的进程占着（Windows 上改了正在运行的 exe 就是这样）。"; }
     if k == 66 { return "This toolchain is **self-hosted**: it has no optimiser and no dynamic containers, and those tables live inside the program image with a size fixed at compile time. When a unit does not fit, it reports **on the spot** rather than truncating silently - truncation would make code vanish, and that kind of bug only shows up at run time. So this is not \"your source is wrong\"; it is \"this unit is too big for this compiler\"."; }
     if k == 67 { return "这套工具链是**自举**的，没有优化器也没有动态容器：那几张表开在程序映像里，大小是编译期常量。单元大到装不下时，宁可**当场报错**也不静默截断 —— 截断的话后面的代码会凭空消失，而那种错要等到运行时才现形（`docs/158` §5 记着这条纪律）。所以这条不是「你的源码错了」，是「这一份的形状对这台编译器来说太大了」。"; }
+    if k == 68 { return "LSPE's promise is not \"no bugs\"; it is \"no silent allow\". The default tier only records the site as `undecided` in the ledger. Only `--lspe-mode=strict` turns it into an error."; }
+    if k == 69 { return "LSPE 的承诺不是“没有漏洞”，是“没有未被标注的放行”。默认档只把它记进台账的 `undecided`；只有 `--lspe-mode=strict` 才会把它变成一条错误。"; }
+    if k == 70 { return "This is the auditor's own inconsistency, not a defect in the user's code. It is in the same family as E036 (an unrecorded question): the auditor must audit itself."; }
+    if k == 71 { return "这是**审计器自己的**不一致，不是用户代码的错误。与 E036（反问未记账）同族：审计者必须先能审自己。"; }
     return "";
 }
 
@@ -313,6 +325,10 @@ pub fn code_yes(c: u32, lang: u32) -> str {
     if k == 65 { return "`-o` 的父目录存在且可写"; }
     if k == 66 { return "the unit fits the lexer buffer / symbol table / codegen table / backfill table"; }
     if k == 67 { return "单元在词法缓冲 / 符号表 / codegen 表 / 回填表的容量之内"; }
+    if k == 68 { return "an allow with a source; an `assumption` label; a visible `undecided` in the ledger"; }
+    if k == 69 { return "有来源的放行；带 `assumption` 的标注；台账里可见的 `undecided`"; }
+    if k == 70 { return "the registered `guard` / `index` kinds"; }
+    if k == 71 { return "guard / index 两种已登记的站点"; }
     return "";
 }
 
@@ -384,6 +400,10 @@ pub fn code_no(c: u32, lang: u32) -> str {
     if k == 65 { return "不存在的目录；只读目录；正在运行的 exe 占着的路径"; }
     if k == 66 { return "a whole library in one source file; hundreds of `use`; hundreds of top-level declarations"; }
     if k == 67 { return "单个源文件里塞一整个库；几百个 `use`；几百个顶层声明"; }
+    if k == 68 { return "an allow with neither a source nor a ledger entry"; }
+    if k == 69 { return "无来源、也不在台账里的放行"; }
+    if k == 70 { return "an unknown site kind"; }
+    if k == 71 { return "未知的站点种类"; }
     return "";
 }
 
@@ -421,6 +441,8 @@ pub fn code_ascii(c: u32) -> str {
     if c == 31 { return "cannot read the input file - missing, a directory, unreadable, or empty"; }
     if c == 32 { return "cannot write the output file - its directory is missing, or it is not writable"; }
     if c == 33 { return "the unit is too large for this compiler's fixed buffers - split the facade"; }
+    if c == 34 { return "an allow with no provenance - LSPE could not say why it was allowed"; }
+    if c == 35 { return "the LSPE ledger has a site kind the census did not register"; }
     return "";
 }
 
@@ -673,6 +695,18 @@ pub fn code_fix(c: u32, i: u32, lang: u32) -> str {
     if k == 531 { return "`use` 条数也有上限（一个文件 310 条）—— 超过就是这条。"; }
     if k == 533 { return "声明那么多函数/类型的话，把单元切成几个模块，各自有自己的表。"; }
     if k == 535 { return "确实切不动就拿这事开个 issue：上限是常量，抬它有账可查（`docs/158` 记着每次抬高的实测）。"; }
+    if k == 544 { return "Give the access a source: a capability domain, a `guard`, a constant index, or an explicit assumption."; }
+    if k == 546 { return "If it genuinely cannot be proved, leave it in the ledger - a recorded hole, not a silent allow."; }
+    if k == 548 { return "For a hard CI gate, use `--lspe-mode=strict`; the default tier will not reject it."; }
+    if k == 545 { return "给这次访问一个来源：能力域、`guard`、常量下标，或一条显式的假设。"; }
+    if k == 547 { return "如果确实证不出来，就让它留在台账里 —— 那是**被记录的洞**，不是静默放行。"; }
+    if k == 549 { return "要 CI 硬拦就开 `--lspe-mode=strict`；默认档不会替你拒绝。"; }
+    if k == 560 { return "This is a compiler defect: report the unit together with the site table in docs/262."; }
+    if k == 562 { return "Do not work around it in user code - that hides the auditor's inconsistency in the source."; }
+    if k == 564 { return "Run `loment lspe state <file>` first to see which kind is unregistered, and include that in the report."; }
+    if k == 561 { return "这是编译器缺陷：把这份单元和 `docs/262` 的站点表一起报上来。"; }
+    if k == 563 { return "不要靠改用户代码绕过它 —— 那会把审计器的不一致藏进源码。"; }
+    if k == 565 { return "先用 `loment lspe state <file>` 看台账里到底是哪个种类没登记，再一并报上来。"; }
     return "";
 }
 
@@ -712,6 +746,8 @@ pub fn code_nfix(c: u32) -> u32 {
     if c == 31 { return 4; }
     if c == 32 { return 4; }
     if c == 33 { return 4; }
+    if c == 34 { return 3; }
+    if c == 35 { return 3; }
     return 0;
 }
 

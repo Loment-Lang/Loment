@@ -1534,11 +1534,12 @@ def test_gate_workflow_keeps_the_required_check_name():
 
 @test
 def test_gate_workflow_aggregation_fails_closed():
-    """聚合那两步里各有一条"不许静默变绿"，以及两处"基线不见了就判失败"。
+    """聚合那几步里各有一条"不许静默变绿"，以及两处"基线不见了就判失败"。
 
     堵的是两个**静默通过**的形状：
 
-    * 少一片就少几条判据，而门禁照样绿 —— 所以聚合要**数**条数并对不上就红；
+    * 少一片就少几条判据，而门禁照样绿 —— 合成那一步要对不上就红（`#443` 之后
+      这件事由 `ci.py --merge-shards` 做，见 `test_gate_workflow_merges_shard_logs_by_name`）；
     * `needs` 的默认行为是"依赖失败就**跳过**"，而跳过不算失败 —— 保护规则会一直
       等下去。所以那里必须显式看 `needs.*.result`。
 
@@ -1546,8 +1547,6 @@ def test_gate_workflow_aggregation_fails_closed():
     """
     wf = _gate_workflow()
     agg = _job_block(wf, "static")
-    assert "len(ci.STATIC_CHECKS)" in agg, "聚合那步没拿 STATIC_CHECKS 的条数当基准"
-    assert 'if [ "$got" != "$want" ]' in agg, "聚合那步没在条数对不上时判失败"
     assert "needs.static-exclusive.result != 'success'" in agg, (
         "少了分片红就是红那一步 —— 依赖失败会跳过，而跳过不算失败，"
         "保护规则会一直等")
@@ -1573,6 +1572,155 @@ def test_gate_workflow_aggregation_fails_closed():
     assert "comm -13 old.txt new.txt" in agg, "棘轮没在算'新增'（comm -13 那一列）"
     assert "norm .github/gate-baseline.txt > new.txt" in agg, "棘轮比的不是树里那份基线"
     print("      聚合的两条防静默 + 两处基线缺失守卫 + 基线棘轮都在")
+
+
+@test
+def test_every_static_check_has_a_measured_shard_cost():
+    """`#435`：分片表必须覆盖 `STATIC_CHECKS` 全表 —— 漏掉的一条按 8 秒静默算。
+
+    这一条就是 `loment_elf_test` 把 6/6 拖成 30 分钟那件事的判据。它只断言**覆盖**：
+    每个名字要么有实测条目、要么在 `SHARD_COST_EXEMPT` 里明确豁免。数字准不准量不
+    出来（墙钟会漂），但"有没有量过"能钉 —— 而那正是当时漏掉的那一件。
+
+    后半段是**反向自检**：把 `loment_elf_test` 从表里拿掉，`unpriced_checks()` 必须
+    点名它。没有这一半，这条判据只证明"今天恰好没漏"，证明不了它抓得住漏。
+    """
+    import ci
+
+    missing = ci.unpriced_checks()
+    assert not missing, (
+        f"这些判据没有实测耗时：{missing} —— 量一次填进 SHARD_COST，或者放进 "
+        f"SHARD_COST_EXEMPT 并写清理由。没登记的会按 {ci.SHARD_DEFAULT_S}s 静默算，"
+        f"一条重判据（`loment_elf_test` 曾 245～617s）就能把一片拖到几十分钟")
+    assert ci.SHARD_COST_EXEMPT <= set(ci.STATIC_CHECKS), (
+        f"SHARD_COST_EXEMPT 里有 STATIC_CHECKS 之外的名字: "
+        f"{sorted(ci.SHARD_COST_EXEMPT - set(ci.STATIC_CHECKS))}")
+    overlap = ci.SHARD_COST_EXEMPT & set(ci.SHARD_COST)
+    assert not overlap, f"这些名字既在实测表里又在豁免名单里: {sorted(overlap)}"
+
+    saved = dict(ci.SHARD_COST)
+    try:
+        del ci.SHARD_COST["loment_elf_test"]
+        assert "loment_elf_test" in ci.unpriced_checks(), (
+            "把一条重判据从表里拿掉之后 `unpriced_checks()` 没点名 —— 这条判据抓不住漏")
+    finally:
+        ci.SHARD_COST.clear()
+        ci.SHARD_COST.update(saved)
+    print(f"      {len(ci.SHARD_COST)} 条实测耗时覆盖 {len(ci.STATIC_CHECKS)} 条判据"
+          f"（明确豁免 {len(ci.SHARD_COST_EXEMPT)} 条）")
+
+
+@test
+def test_gate_budget_only_tightens_against_the_base():
+    """`#418`：预算与**对照面**比 —— 地板只许升，跳过表只许变短。
+
+    树内那两条棘轮（`check_budget`）比的是同一份提交里的两个数，所以"删一条判据 +
+    把地板改小"与"加一条跳过 + 把它登记进来"都能绿。这条判据钉住缺的那一半。
+    """
+    import ci
+
+    base_f = {"a": 5, "b": 2}
+    base_s = {("a", "t1")}
+    same = ci.check_budget_against_base(base_f, base_s, dict(base_f), set(base_s))
+    assert same == [], f"一模一样的预算不该判失败：{same}"
+
+    lower = ci.check_budget_against_base(base_f, base_s, {"a": 4, "b": 2}, set(base_s))
+    assert any(b.startswith("a:") for b in lower), f"地板降了（5 -> 4）没被判失败：{lower}"
+    gone = ci.check_budget_against_base(base_f, base_s, {"a": 5}, set(base_s))
+    assert any(b.startswith("b:") for b in gone), f"整条套件消失没被判失败：{gone}"
+    added = ci.check_budget_against_base(base_f, base_s, dict(base_f),
+                                         {("a", "t1"), ("b", "t2")})
+    assert any("t2" in b for b in added), f"新增跳过没被判失败：{added}"
+
+    # 收紧必须放过：加新套件、加条数、删跳过 —— 否则棘轮没法用。
+    tighter = ci.check_budget_against_base(base_f, base_s, {"a": 6, "b": 2, "c": 1}, set())
+    assert tighter == [], f"收紧预算被判失败（那会让棘轮没法用）：{tighter}"
+    print("      地板降 / 套件消失 / 新增跳过 = 红；加套件、加条数、删跳过 = 绿")
+
+
+@test
+def test_gate_workflow_checks_the_budget_against_the_base():
+    """`#418` 的接线：聚合 job 里要有一步把两份预算与对照面比，取不到就 fail closed。"""
+    wf = _gate_workflow()
+    agg = _job_block(wf, "static")
+    assert re.search(r"^\s*- name: 判据预算只许收紧（#418）$", agg, re.M), (
+        "聚合 job 里没有与对照面比预算的那一步 —— 树内两条棘轮是同一份提交里的两个数，"
+        "一起改就绿了")
+    assert "tools/ci.py --budget-vs old-gate-floors.txt old-gate-skips.txt" in agg, (
+        "那一步没把两份对照面文件喂给 `ci.py --budget-vs`")
+    assert 'git show "FETCH_HEAD:.github/$f"' in agg, (
+        "没从对照面里取预算文件 —— 比的必须是 base 分支那一份，不是工作树里的")
+    # fail closed：取不到对照面、读不到文件时都要 `::error::`。基线那一步各有一处，
+    # 预算这一步也要有 —— 按整个 `static` job 数，"取对照面失败"应是 2 处。
+    assert agg.count("取对照面失败") == 2, (
+        f"`取对照面失败` 出现 {agg.count('取对照面失败')} 处，应为 2"
+        "（基线 / 预算各一处）—— 少一处就是那条棘轮静默失效")
+    assert agg.count("里读不到 .github/$f") == 1, (
+        "预算检查没在对照面缺文件时 fail closed")
+    print("      预算棘轮接在聚合 job 上，对照面取不到时 fail closed")
+
+
+@test
+def test_shard_merge_ignores_the_merged_artifact_and_dedupes():
+    """`#443`：合成按**判据名**取并集，`gate-log-merged` 不算数。
+
+    复现的就是那件事：一次 `gh run rerun --failed` 之后，聚合 job 上一次 attempt
+    上传的 `gate-log-merged`（全量副本）还躺在 artifact 里，而 `cat gate-log-*/*.out`
+    把它也读了进去 —— 每条判据出现两遍，174 = 2×87。合成函数必须只认
+    `gate-log-<片号>`，并且同名判据**后者覆盖前者**（新 attempt 赢）。
+    """
+    import ci
+
+    def shard(root: Path, name: str, text: str) -> None:
+        d = root / name
+        d.mkdir(parents=True)
+        (d / "gate.out").write_text(text, encoding="utf-8")
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        shard(root, "gate-log-1",
+              ":: [static] alpha          PASS     1.0s   ok\n"
+              ":: [static] beta           FAIL     2.0s   bad\n")
+        # 重跑的那一片：同一条 beta 这次绿了 —— 后者必须赢。
+        shard(root, "gate-log-2",
+              ":: [static] beta           PASS     1.5s   ok\n"
+              ":: [static] gamma          PASS     0.1s   ok\n")
+        # 上一次 attempt 的全量副本：不认它，否则 alpha/beta/gamma 各出现两遍。
+        shard(root, "gate-log-merged",
+              ":: [static] alpha          PASS     1.0s   dup\n"
+              ":: [static] beta           PASS     1.5s   dup\n"
+              ":: [static] gamma          PASS     0.1s   dup\n")
+        text, bad = ci.merge_shard_logs(root, ("alpha", "beta", "gamma"))
+        assert bad == [], f"正常的三片被判失败：{bad}"
+        lines = text.splitlines()
+        assert len(lines) == 3, f"应恰好 3 条（每条判据一次），得到 {len(lines)}：{text!r}"
+        assert ":: [static] beta           PASS" in text, (
+            f"重跑那一片的 PASS 没覆盖旧的 FAIL：{text!r}")
+        assert "dup" not in text, "`gate-log-merged` 被算进来了（#443 就是这一条）"
+
+        # 少一条（有一片没跑完）与多一条（STATIC_CHECKS 之外的东西）要分开报。
+        _, missing = ci.merge_shard_logs(root, ("alpha", "beta", "gamma", "delta"))
+        assert any("delta" in b for b in missing), f"少一条没点名：{missing}"
+        _, extra = ci.merge_shard_logs(root, ("alpha", "beta"))
+        assert any("gamma" in b for b in extra), f"多一条没点名：{extra}"
+    print("      合成只认 gate-log-<片号>：merged 不算、同名后者覆盖、少/多分开报")
+
+
+@test
+def test_gate_workflow_merges_shard_logs_by_name():
+    """`#443` 的接线：聚合不再 `cat gate-log-*`，而是走 `--merge-shards`。"""
+    wf = _gate_workflow()
+    agg = _job_block(wf, "static")
+    assert "tools/ci.py --merge-shards shards > gate.out" in agg, (
+        "聚合那一步没走 `ci.py --merge-shards` —— 行数检查分不清"
+        "'少一片'与'一片跑了两遍'")
+    assert "pattern: gate-log-[0-9]*" in agg, (
+        "下载 artifact 的 pattern 还是 `gate-log-*` —— 它会把 `gate-log-merged`"
+        "（上次 attempt 的全量副本）也拉下来，`--failed` 重跑就双重计数（#443）")
+    assert "cat shards/gate-log-*/*.out" not in agg, (
+        "还在 `cat gate-log-*` —— 见上一条：那个通配符把全量副本也算进来")
+    assert "if [ $rc -ne 0 ]" in agg, "合成失败（rc 非零）时没判失败"
+    print("      聚合走 --merge-shards（不再按行数数）")
 
 
 @test

@@ -175,6 +175,20 @@ _EXTRA: list[tuple[str, str, object, str, dict]] = [
      ctrans.C, ".c", {}),
     ("c_same_scope_redecl",
      "int f() { int x = 1; int x = 2; return x; }\n", ctrans.C, ".c", {}),
+    # **遮蔽 + 初值引用被遮蔽的那个名**（`#234`）：初值要在声明生效**之前**发射，
+    # 否则右边也跟着改名 —— `let x__1 = (x__1 + 100)` 是一条自引用声明。
+    ("c_shadow_self_init",
+     "int f(int c) { int x = 10; if (c) { int x = x + 100; } return x; }\n",
+     ctrans.C, ".c", {}),
+    ("c_for_shadow_self_init",
+     "int f() { int x = 5; for (int x = x + 1; x < 7; x = x + 1) { } return x; }\n",
+     ctrans.C, ".c", {}),
+    # `#131` 最后一行：正的 2147483648 不在 i32 里，取负之后在 —— 先并负号再发。
+    ("c_neg_lit_min",
+     "int f(int a) { return ((-2147483648) < a); }\n", ctrans.C, ".c", {}),
+    ("cpp_shadow_self_init",
+     "int f(int c) { int x = 10; if (c) { int x = x + 100; } return x; }\n",
+     cpptrans.CPP, ".cpp", {}),
 
     # ---- 语句位的调用也要过"本单元没有"那道闸（`#147`）
     ("c_call_stmt_position",

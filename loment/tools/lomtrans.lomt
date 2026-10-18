@@ -3323,6 +3323,35 @@ fn pin_ex(mem: ptr, e: u32, t: u32, buf: ptr, o: u32) -> u32 {
         let o5: u32 = pin_ty(mem, t, buf, o4);
         return app(buf, o5, ")");
     }
+    if k == NK_UN {
+        // `-2147483648`（`#131` 那张表的最后一行）：**正的** 2147483648 不在 i32 里，
+        // 可整个式子（取负之后）在。`raw_ex` 的字面量分支只认**正**字面量，于是会
+        // 误拒 —— 先把负号并进常量再发。只在**有符号**那一侧这么做（与上游
+        // `pinned` 同一条；无符号场合照旧拒，那是另一条未建的规则）。
+        //
+        // 码 `1` 是 `UN_SUB`（常量声明在文件后段，而本语言要求先定义后使用）。
+        let c: u32 = nd_get(mem, e, ND_A);
+        let ch: u32 = nd_get(mem, e, ND_B);
+        if c == 1 && nd_get(mem, ch, ND_KIND) == NK_LIT
+                && nd_get(mem, ch, ND_B) == 0 {
+            let v: u32 = nd_get(mem, ch, ND_A);
+            let signed: u32 = 0;
+            if t == 0 || t == 1 || t == 3 || t == 5 || t == 7 {
+                signed = 1;          // 0 = 方言默认（`i32`）；1/3/5/7 = i8/i16/i32/i64
+            }
+            if signed == 1 && v <= 2147483648 {
+                let o2: u32 = app(buf, o, "(");
+                let o3: u32 = o2;
+                if v != 0 {
+                    o3 = app(buf, o2, "-");
+                }
+                let o4: u32 = appu(mem, buf, o3, v);
+                let o5: u32 = app(buf, o4, " as ");
+                let o6: u32 = pin_ty(mem, t, buf, o5);
+                return app(buf, o6, ")");
+            }
+        }
+    }
     if k == NK_BIN {
         // `&&` / `||`（码 17 / 18）**不钉** —— 它们出 bool，宽度无关。
         let c: u32 = nd_get(mem, e, ND_A);

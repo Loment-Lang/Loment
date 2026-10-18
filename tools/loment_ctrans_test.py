@@ -557,6 +557,10 @@ def test_comparison_operands_are_pinned_to_a_signed_width():
     for label, src, want_txt in (
             ("负数比较", "int f(int a) { return ((0 - 1) < a); }\n", "(0 as i32) - (1 as i32)"),
             ("字面量对字面量", "int f() { return (0 - 1) < 0; }\n", "(0 as i32) - (1 as i32)"),
+            # `#131` 那张表最后一行：正的 2147483648 不在 i32 里，**取负之后**在 ——
+            # 先把负号并进常量再发，否则 `_lit32` 会拿那个正字面量误拒。
+            ("最小负数", "int f(int a) { return ((-2147483648) < a); }\n",
+             "(-2147483648 as i32)"),
     ):
         out = ctrans.translate(src)
         assert want_txt in out, f"{label}: 没钉住宽度:\n{out}"

@@ -1155,6 +1155,17 @@ class Emitter:
             # **括号自己带上**（与 `ex` 里那处 `as` 同一个理由）：`(0 as i32) < (1 as i32)`
             # 里的 `i32 <` 否则会被 parser 当成**泛型实参**的开头。
             return f"({e.v} as {ty})"
+        if (isinstance(e, Un) and e.op == "-" and isinstance(e.e, Lit)
+                and not e.e.b):
+            # `-2147483648`（`#131` 那张表的最后一行）：**正的** 2147483648 不在 i32 里，
+            # 可整个式子（取负之后）在。`_lit32` 看的是那个正字面量，于是会误拒 ——
+            # 先把负号并进常量再发，既过得了那道闸、又保住了有符号比较（C 给 1）。
+            #
+            # 只在**有符号**那一侧这么做：C 里十进制常量 `2147483648` 是 `long`，
+            # 取负仍是 `long`；把它塞进无符号场合是另一条（未建）的规则，照旧拒。
+            v = -e.e.v
+            if ty in ("i8", "i16", "i32", "i64") and -(2 ** 31) <= v < 2 ** 31:
+                return f"({v} as {ty})"
         if isinstance(e, Bin) and e.op not in ("&&", "||"):
             op, _want, _b = self.d.bin[e.op]
             return f"({self.pinned(e.l, ty)} {op} {self.pinned(e.r, ty)})"

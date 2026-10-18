@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -121,26 +122,50 @@ def record(rec: dict) -> str:
 
 #: 形状错时的报错行 —— **两侧逐字相同**（判据比它）。`<几>` 是 1 开始的行号。
 BAD_FIELDS = "line {n}: expected 7 fields, got {k}"
-BAD_SEQ = "line {n}: seq/hits/held must be non-negative integers"
+BAD_SEQ = "line {n}: seq/hits/held must be non-negative integers below 2^63"
 BAD_RUNG = "line {n}: asked/granted must be one of w0..w3"
+
+#: `seq/hits/held` 的值域：0..2^63-1。**两边同一个界** —— Loment 侧用 u64 累加
+#: （`dec_span`），Python 的 `int` 本来无界，不设界两边就永远对不上（issue #698）。
+MAX_COUNT = (1 << 63) - 1
+_DEC = re.compile(r"\+?[0-9]+\Z")
+#: 字段间空白 —— Loment 侧 `is_space` 只认 space/TAB/CR/LF（不认 \x0b/\x0c）。
+_WS = re.compile(r"[ \t\r]+")
+
+
+def parse_count(tok: str) -> int:
+    """与 `loment/tools/lomadmit.lomt` 的 `dec_span` 逐条对应：可选 `+`、至少一位
+    ASCII 数字、前导零允许、值域 0..2^63-1。
+
+    先剥前导零再 `int()` —— CPython 的 4300 位字符串上限会让超长前导零只在 Python
+    侧报错，而 Loment 侧照读（两侧又漂）。
+    """
+    if not _DEC.fullmatch(tok):
+        raise ValueError(tok)
+    digits = (tok[1:] if tok[0] == "+" else tok).lstrip("0") or "0"
+    if len(digits) > 19:                       # 2^63-1 是 19 位
+        raise ValueError(tok)
+    v = int(digits, 10)
+    if v > MAX_COUNT:
+        raise ValueError(tok)
+    return v
 
 
 def run_cases(text: str) -> tuple[int, str, str]:
     """整份用例进，`(退出码, stdout, stderr)` 出。**两侧共用这一套判定与这一套报错。**"""
     out: list[str] = []
-    for n, raw in enumerate(text.splitlines(), 1):
-        line = raw.strip()
+    # 行切分与空白集合同 Loment 侧: 只按 `\n` 切, 只把 space/TAB/CR 当空白。
+    for n, raw in enumerate(text.split("\n"), 1):
+        line = raw.strip(" \t\r")
         if not line:
             continue
-        f = line.split()
+        f = _WS.split(line)
         if len(f) != 7:
             return 1, "", BAD_FIELDS.format(n=n, k=len(f)) + "\n"
         seq, selfh, peer, hits, asked, prev, held = f
         try:
-            seq_i, hits_i, held_i = int(seq), int(hits), int(held)
+            seq_i, hits_i, held_i = parse_count(seq), parse_count(hits), parse_count(held)
         except ValueError:
-            return 1, "", BAD_SEQ.format(n=n) + "\n"
-        if seq_i < 0 or hits_i < 0 or held_i < 0:
             return 1, "", BAD_SEQ.format(n=n) + "\n"
         if asked not in RUNGS or prev not in RUNGS:
             return 1, "", BAD_RUNG.format(n=n) + "\n"

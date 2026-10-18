@@ -95,29 +95,25 @@
 # 1. **PR 路径只在分支上跑**（`emit` 的 `if` 排掉 `refs/heads/main`）。`main` 只收 PR 合并，
 #    而每个 PR 分支都被本 workflow 修过 ⇒ `main` 自然是对的。`main` 那一路走 `emit-main`。
 #
-# 2. **`pull_request_target` 只用来覆盖 fork 的 PR**（原来没有这一路）。理由见下面那段。
+# 2. **只有 `push`**：fork 的 PR 没有 `push` 事件，因而它们不进这条流水线
+#    （原因见下面 `#420` 那一节）。
 #
 # 3. **只提交"生成物白名单"里的路径，别的一律拒绝**（两个 job 各有一个 guard）。
 #    如果生成物命令动了白名单之外的文件，说明**那条命令坏了**，那时应该**红**，
 #    而不是把一个来历不明的改动当作"生成物"提交上去。
 #
-# ## fork 的 PR：为什么是 `pull_request_target`，以及它换来了什么风险
+# ## 2026-10-18：fork 的 PR 不再走这里（`#420`）
 #
-# fork 的 PR 推的是**人家那个仓**，本仓因此不会收到 `push` 事件 —— 上面那条够不到它们。
-# 结果是外部贡献者的 PR 永远带一份过期清单，而 `loment_release` 是门禁里的一条判据，
-# 于是只能由维护者在**自己的机器上**补一笔。`pull_request_target` 是唯一能在本仓上下文里
-# 拿到写权限 token、又知道 PR 头的入口（它跑的是**默认分支上的这份文件**，所以 PR 改不动它）。
+# `pull_request_target` 曾经让 fork 的 PR 也能自动重算，代价是**用本仓的写权限 token
+# 执行别人树上的 `tools/*.py`**。唯一的护栏是"PR 文件列表里没有 `tools/`"：
 #
-# **风险要说清楚，不藏在注释里**：这一路由"别人的树 + 本仓的写权限 token"组成，
-# 所以它只做一件事 —— 用**可信的生成器**处理**不可信的数据**：
+#   * 文件列表走 API 读，checkout 又按 `refs/pull/<n>/head` 重新取 —— 两者之间可以插一次
+#     push（TOCTOU），被检查的树与被执行的不是同一棵；
+#   * 该 endpoint 最多返回 3000 个文件，超过就能把 `tools/` 的改动藏过去。
 #
-#   * 检出的树是 PR 的（不可信），但真正**被执行**的只有生成器（`tools/*.py`）；
-#     `loment/**` 全是**读进来算哈希/解析**的数据，不执行。
-#   * 所以第一道护栏是：**PR 一碰 `tools/` 就整条路跳过**。那时我们要执行的正是别人改过的
-#     代码，而"拿写权限 token 跑别人的代码"是这一整套设计里唯一不能做的事。
-#   * 第二道：**推回之前仍走白名单 guard**（与本地那条同一个）。
-#   * 还有一条**不是漏洞、是限制**：fork PR 必须勾了 "Allow edits by maintainers"
-#     （`maintainer_can_modify`），否则推不回去 —— 那就跳过，走本地那条老路。
+# **文件列表不是安全边界**，所以整条路撤掉：本 workflow 只跑 `push`（本仓的分支）。
+# fork 的 PR 由贡献者在本地跑 `--emit`（`CONTRIBUTING` 本来就是这么要求的），
+# 或由维护者在合并前补一笔。少一次自动重算，不换一次"别人的代码拿我们的写 token"。
 #
 # ## 边界
 #
@@ -132,13 +128,10 @@ on:
   # 所以打 tag 不会触发这里 —— 那是 `release.yml` 的事。
   push:
     branches: ['**']
-  # 见上面「fork 的 PR」。`types` 里不放 `closed` —— 合并完再修没有意义。
-  pull_request_target:
-    types: [opened, synchronize, reopened]
   workflow_dispatch:
 
-# 每个 job 自己声明要什么 —— 两条路的权限面**不一样**：`emit` 走的是**不可信的 PR 树**
-# （fork 那一路），`emit-main` 走的是本仓的默认分支。把权限写宽在顶层会让前者白拿一份
+# 每个 job 自己声明要什么 —— 两条路的权限面**不一样**：`emit` 只处理本仓分支的 push，
+# `emit-main` 走的是本仓的默认分支。把权限写宽在顶层会让不需要的 job 白拿一份
 # `pull-requests: write`，那是不必要的暴露面。
 permissions:
   contents: read
@@ -147,114 +140,42 @@ jobs:
   # ---------------------------------------------------------------- PR / 分支路径
   emit:
     # **回环守卫**：本 workflow 自己推的那一笔不再触发它自己。
-    # 用 `GITHUB_TOKEN` 推时 actor 就是 `github-actions[bot]`，所以这一条足够
-    # （推回 fork 之后同样会来一次 `synchronize`，也被这一条挡掉）。
+    # 用 `GITHUB_TOKEN` 推时 actor 就是 `github-actions[bot]`，所以这一条足够。
     # 刻意**不用** `[skip ci]`：那样连 `gate` 也会被跳过，而**我们要 `gate` 去验这一笔**。
     #
-    # 第二条：`push: main` 那一路归下面的 `emit-main`，这里排掉。
-    # **判断要带上事件名** —— `pull_request_target` 下 `github.ref` 是**基分支**，
-    # 也就是 `refs/heads/main`；单看 ref 会把 fork 的 PR 一起排掉，而那正是这一路要管的。
-    #
-    # 第三条：`pull_request_target` **对本仓自己的 PR 也会触发**，而那些 PR 上面那条 `push`
-    # 已经在管了。按 `head.repo.fork` 分出来，省一次重复的重算。
-    # 顺带堵一个边角：fork 被删掉之后 `head.repo` 是 null，这一条会让 job 直接跳过
-    # （推不回去，本来也没得推），而不是拿一个空的 remote 去 `git push` 然后红。
+    # 只处理本仓分支的 `push`；`push: main` 归下面的 `emit-main`。**没有
+    # `pull_request_target`** —— fork 的树永远不进这个带写权限 token 的 job（`#420`）。
     if: >-
       github.actor != 'github-actions[bot]' &&
-      !(github.event_name == 'push' && github.ref == 'refs/heads/main') &&
-      (github.event_name != 'pull_request_target' ||
-       github.event.pull_request.head.repo.fork == true)
+      !(github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: write
-      pull-requests: read
-    # 同一个分支/PR 上串行 —— 两次并发重算会互相覆盖，而且会产生一条推不上去的提交。
+    # 同一个分支上串行 —— 两次并发重算会互相覆盖，而且会产生一条推不上去的提交。
     concurrency:
-      group: manifest-${{ github.event.pull_request.number || github.ref_name }}
+      group: manifest-${{ github.ref_name }}
       cancel-in-progress: false
     steps:
-      # 这一路两种事件合流：普通 push 推回**本仓**的分支，fork 的 PR 推回**人家**的分支。
       # 值一律走 `env` 传进来、不进 shell 源码 —— 分支名里 `"` 是合法的 git ref 字符，
       # 直接插进 `run:` 就是一条注入面。
       - name: 这是谁的树、推回哪里
         id: t
         env:
-          EVENT: ${{ github.event_name }}
-          PR: ${{ github.event.pull_request.number }}
-          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
           REPO: ${{ github.repository }}
           REF_NAME: ${{ github.ref_name }}
         run: |
           set -eu
-          if [ "$EVENT" = "pull_request_target" ]; then
-            echo "fork=true" >> "$GITHUB_OUTPUT"
-            printf 'ref=refs/pull/%s/head\n' "$PR" >> "$GITHUB_OUTPUT"
-            printf 'remote=github.com/%s\n' "$HEAD_REPO" >> "$GITHUB_OUTPUT"
-            printf 'branch=%s\n' "$HEAD_REF" >> "$GITHUB_OUTPUT"
-          else
-            echo "fork=false" >> "$GITHUB_OUTPUT"
-            printf 'ref=%s\n' "$REF_NAME" >> "$GITHUB_OUTPUT"
-            printf 'remote=github.com/%s\n' "$REPO" >> "$GITHUB_OUTPUT"
-            printf 'branch=%s\n' "$REF_NAME" >> "$GITHUB_OUTPUT"
-          fi
+          printf 'ref=%s\n' "$REF_NAME" >> "$GITHUB_OUTPUT"
+          printf 'remote=github.com/%s\n' "$REPO" >> "$GITHUB_OUTPUT"
+          printf 'branch=%s\n' "$REF_NAME" >> "$GITHUB_OUTPUT"
 
-      # fork 的两道前置条件，只有它们都过了才 `ok=true`，后面的步骤才跑。
-      - name: fork 的护栏（碰了 `tools/` 就不跑）
-        id: guard
-        if: steps.t.outputs.fork == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
-          CAN_MODIFY: ${{ github.event.pull_request.maintainer_can_modify }}
-        run: |
-          set -euo pipefail
-          if [ "$CAN_MODIFY" != "true" ]; then
-            echo "ok=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::fork PR 没勾 'Allow edits by maintainers' —— 推不回去，跳过（走本地重算那条老路）"
-            exit 0
-          fi
-          # **列不出来就按"不跑"算**（与 `gate.yml` 的 lom-door 同一个形状，方向相反）：
-          # 拿不到文件列表时下面的 grep 会空手而归、于是**放行** —— 那是最坏的失败形状。
-          # 这里 fail closed 的代价只是一条要人补的红，不是一次误判。
-          err=$(mktemp)
-          if ! files=$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[].filename' 2>"$err"); then
-            echo "ok=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::列改动文件失败 —— 不重算（不拿写权限 token 赌）"
-            cat "$err"
-            exit 0
-          fi
-          bad=$(printf '%s\n' "$files" | grep -E '^tools/' || true)
-          if [ -n "$bad" ]; then
-            echo "ok=false" >> "$GITHUB_OUTPUT"
-            {
-              echo "## fork PR：跳过生成物重算"
-              echo ""
-              echo '这个 PR 改了 `tools/`，而本 job 要执行的正是 PR 树上的 `tools/`。'
-              echo '拿本仓的写权限 token 去跑**别人改过的生成器**，是这条路上唯一不能做的事。'
-              echo ""
-              echo '请自己在本地跑一遍（CONTRIBUTING「Run the gate before you open a pull request」），'
-              echo '或者在合并前由维护者补一笔。'
-              echo '```'
-              echo "$bad"
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          echo "ok=true" >> "$GITHUB_OUTPUT"
-
-      # `refs/pull/<n>/head` 在本仓就有（不必加 fork 的 remote 去取）。
       - uses: actions/checkout@v4
-        if: steps.t.outputs.fork != 'true' || steps.guard.outputs.ok == 'true'
         with:
           ref: ${{ steps.t.outputs.ref }}
-          # 浅克隆推回 fork 有额外麻烦（新提交的父就是 fork 的头），全量取一次最省事，仓不大。
           fetch-depth: 0
 
       - uses: actions/setup-python@v5
-        if: steps.t.outputs.fork != 'true' || steps.guard.outputs.ok == 'true'
         with:
           python-version: "3.11"
 
@@ -263,7 +184,6 @@ jobs:
       # 别人的文件，放在这里就是**每个 PR 的固定税 + 并发必冲突**。
       # 顺序：改号排在最前（它改的是**文件名**，而 `surface_data.lomt` 与种子都按路径记账）。
       - name: 重算生成物（只算与这个 PR 一一对应的）
-        if: steps.t.outputs.fork != 'true' || steps.guard.outputs.ok == 'true'
         run: |
           set -e
           git fetch -q origin main || true
@@ -290,7 +210,6 @@ jobs:
       # `docs/NNN-slug.md` 那一支是**改号**用的：撞号时 `--fix` 把**新增的那一份**换个号，
       # 于是这里会出现**新路径**。刻意收窄到"带号的 .md" —— 别的文档改动仍判成 stray。
       - name: 白名单守卫（只许动生成物）
-        if: steps.t.outputs.fork != 'true' || steps.guard.outputs.ok == 'true'
         run: |
           set -e
           stray=$(git diff HEAD --name-only | cut -c1- \
@@ -303,7 +222,6 @@ jobs:
           echo "只动了允许的那几处。"
 
       - name: 变了就单独提交一笔（消息写明"只有生成物"）
-        if: steps.t.outputs.fork != 'true' || steps.guard.outputs.ok == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REMOTE: ${{ steps.t.outputs.remote }}
@@ -321,8 +239,7 @@ jobs:
           # 白名单守卫已经把可动的路径钉死了。
           git add loment/build/selfhost_driver.ll loment/tools/surface_data.lomt docs
           git commit -m "[生成物] 只有生成物：种子 + surface_data（CI 自动重算；撞号的 docs 会被改号）"
-          # 推回的目标由上面那一步决定：普通 push 是本仓的分支，fork 的 PR 是**人家**的分支
-          # （后者要求 PR 勾了 "Allow edits by maintainers"，已在 guard 里查过）。
+          # 只推回本仓的同名分支。fork 的 PR 根本不进这个 job（`#420`）。
           git push "https://x-access-token:${GH_TOKEN}@${REMOTE}.git" "HEAD:${BRANCH}"
   # ---------------------------------------------------------------- main 上的单一写者
   #
@@ -343,7 +260,7 @@ jobs:
   # **它凭什么推得动 `main`**：分支保护里 `enforce_admins` 是 `false`（2026-10-16 用 API
   # 核实过），所以**属主 PAT** 能绕过必需检查。`GITHUB_TOKEN` 不行（它不是 admin）——
   # 那正是上面那条替代路走不通的第二个理由。用 `secrets.MANIFEST_TOKEN`，**且只有这个 job
-  # 引用它**：`emit` 那一路跑在 `pull_request_target` 上（树是别人的），既拿不到也不需要它。
+  # 引用它**：`emit` 那一路只处理本仓分支的 `push`，既拿不到也不需要它。
   emit-main:
     name: main 上的生成物（单一写者）
     # **回环守卫**：这个 job 自己推上去的那一笔会再来一次 `push: main`，而那时树本来就是
@@ -351,8 +268,7 @@ jobs:
     # `github-actions[bot]`，所以按 actor 判的老守卫在这里**不成立**。
     #
     # `workflow_dispatch` 也收（手动点一次 = "现在就把 main 上的生成物对齐"）；
-    # `pull_request_target` 不收 —— 那个事件的 `github.ref` **恰好也是**
-    # `refs/heads/main`，而它检出的树是**别人的**，拿它去写生成物是错的。
+    # PR 事件不收 —— 它们检出的是**别人的**树，拿它去写生成物是错的。
     if: >-
       github.ref == 'refs/heads/main' &&
       !startsWith(github.event.head_commit.message, '[生成物]') &&

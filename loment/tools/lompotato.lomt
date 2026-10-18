@@ -315,6 +315,43 @@ fn jkey_nonneg(mem: ptr, obj: u32, key: str) -> u32 {
     return 1;
 }
 
+/// `lspe` / `floor_detail` / `invariants` 是**封闭**对象：未知键必须报。
+fn is_lspe_key(kp: ptr, kl: u32) -> u32 {
+    if eq_lit(kp, kl, "state") == 1 { return 1; }
+    if eq_lit(kp, kl, "set_by") == 1 { return 1; }
+    if eq_lit(kp, kl, "mode") == 1 { return 1; }
+    if eq_lit(kp, kl, "level") == 1 { return 1; }
+    if eq_lit(kp, kl, "sites") == 1 { return 1; }
+    if eq_lit(kp, kl, "obligations") == 1 { return 1; }
+    if eq_lit(kp, kl, "proved") == 1 { return 1; }
+    if eq_lit(kp, kl, "undecided") == 1 { return 1; }
+    if eq_lit(kp, kl, "deferred") == 1 { return 1; }
+    if eq_lit(kp, kl, "refused") == 1 { return 1; }
+    if eq_lit(kp, kl, "floors") == 1 { return 1; }
+    if eq_lit(kp, kl, "floor_detail") == 1 { return 1; }
+    if eq_lit(kp, kl, "per_kind") == 1 { return 1; }
+    if eq_lit(kp, kl, "invariants") == 1 { return 1; }
+    if eq_lit(kp, kl, "acked") == 1 { return 1; }
+    return 0;
+}
+
+fn is_floor_key(kp: ptr, kl: u32) -> u32 {
+    if eq_lit(kp, kl, "assumed") == 1 { return 1; }
+    if eq_lit(kp, kl, "stale_wf") == 1 { return 1; }
+    if eq_lit(kp, kl, "budget") == 1 { return 1; }
+    if eq_lit(kp, kl, "drop_honest") == 1 { return 1; }
+    return 0;
+}
+
+fn is_inv_key(kp: ptr, kl: u32) -> u32 {
+    if eq_lit(kp, kl, "i1") == 1 { return 1; }
+    if eq_lit(kp, kl, "i2") == 1 { return 1; }
+    if eq_lit(kp, kl, "i3") == 1 { return 1; }
+    if eq_lit(kp, kl, "i4") == 1 { return 1; }
+    if eq_lit(kp, kl, "i5") == 1 { return 1; }
+    return 0;
+}
+
 /// 结点里的字符串**解码**进 buf（去引号、解转义），返回长度。
 fn jstr(mem: ptr, n: u32, buf: ptr, cap: u32) -> u32 {
     return json_str_into(ptr_add(mem, M_IN), ptr_add(mem, M_ARENA), n, buf, cap);
@@ -1603,6 +1640,16 @@ fn chk_v1(mem: ptr, doc: u32, ver: u32) -> u32 {
         if lp == NOTFOUND || jkind(mem, lp) != 1 {
             let _v16: u32 = bad(mem);
         } else {
+            // 封闭对象：`lspe` 里出现不认识的键 -> 一次错。
+            let km: u32 = jfirst(mem, lp);
+            while km != NOTFOUND {
+                let kn: u32 = jmkey(mem, km);
+                let kl: u32 = jstr(mem, kn, ptr_add(mem, M_SB2), 4096);
+                if is_lspe_key(ptr_add(mem, M_SB2), kl) == 0 {
+                    let _uk: u32 = bad(mem);
+                }
+                km = jsib(mem, km);
+            }
             let sok: u32 = 0;
             if jstr_field_is(mem, lp, "state", "lspe_open_admin") == 1
                     || jstr_field_is(mem, lp, "state", "lspe_close_admin") == 1 {
@@ -1652,6 +1699,15 @@ fn chk_v1(mem: ptr, doc: u32, ver: u32) -> u32 {
             if fd == NOTFOUND || jkind(mem, fd) != 1 {
                 let _f: u32 = bad(mem);
             } else {
+                let fm: u32 = jfirst(mem, fd);
+                while fm != NOTFOUND {
+                    let fkn: u32 = jmkey(mem, fm);
+                    let flk: u32 = jstr(mem, fkn, ptr_add(mem, M_SB2), 4096);
+                    if is_floor_key(ptr_add(mem, M_SB2), flk) == 0 {
+                        let _uf: u32 = bad(mem);
+                    }
+                    fm = jsib(mem, fm);
+                }
                 let fa: u32 = jkey_nonneg(mem, fd, "assumed");
                 let fb: u32 = jkey_nonneg(mem, fd, "stale_wf");
                 let fc: u32 = jkey_nonneg(mem, fd, "budget");
@@ -1682,6 +1738,15 @@ fn chk_v1(mem: ptr, doc: u32, ver: u32) -> u32 {
             if inv == NOTFOUND || jkind(mem, inv) != 1 {
                 let _j: u32 = bad(mem);
             } else {
+                let im: u32 = jfirst(mem, inv);
+                while im != NOTFOUND {
+                    let inn: u32 = jmkey(mem, im);
+                    let ilk: u32 = jstr(mem, inn, ptr_add(mem, M_SB2), 4096);
+                    if is_inv_key(ptr_add(mem, M_SB2), ilk) == 0 {
+                        let _ui: u32 = bad(mem);
+                    }
+                    im = jsib(mem, im);
+                }
                 if jget(mem, inv, "i1") == NOTFOUND { let _k1: u32 = bad(mem); }
                 if jget(mem, inv, "i2") == NOTFOUND { let _k2: u32 = bad(mem); }
                 if jget(mem, inv, "i3") == NOTFOUND { let _k3: u32 = bad(mem); }

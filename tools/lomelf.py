@@ -27,6 +27,7 @@ br/switch/phi；直接 call（<= 6 实参）；内联汇编 syscall；atomicrmw 
 
 from __future__ import annotations
 
+import os
 import re
 import struct
 import sys
@@ -569,10 +570,16 @@ class Asm:
         self.emit(b"\x0F" + bytes([0x80 + CC[cc]]) + b"\x00\x00\x00\x00")
         self.fixups.append((at + 2, lbl, 4, "rel"))
 
-    def call(self, lbl: str) -> None:
+    def call(self, lbl: str, extern: bool = False) -> None:
+        """`extern=True` 标记"这条 call 走的是 C ABI 那条路"（`#630`）。
+
+        动态链接只许把这类 fixup 变成导入；没写 `declare` 的调用留在 `rel`，
+        到 `finalize()` 仍按"未定义的标签"报错 —— 否则它会被绑到 PLT 桩上，
+        而调用点发的是 Loment 的栈约定，C 那头读到的实参全是垃圾。
+        """
         at = self.here()
         self.emit(b"\xE8\x00\x00\x00\x00")
-        self.fixups.append((at + 1, lbl, 4, "rel"))
+        self.fixups.append((at + 1, lbl, 4, "ext" if extern else "rel"))
 
     def mov_abs(self, reg: int, lbl: str) -> None:
         self.emit(mov_ri(reg, 0))
@@ -1127,14 +1134,17 @@ class Emitter:
             # `movaps %xmm0,-0x70(%rbp)` 上（`si_code=SI_KERNEL`、`si_addr=NULL` —— 那不是
             # 段越界，是**对不齐**）。
             #
-            # 用 **RBX** 存原 rsp：它是 SysV 的**被调方保存**寄存器，C 返回时一定还是原值；
-            # 而 Loment 生成的代码**不用 rbx**（`docs/173` 那条"状态基址放 rbx"的注解就是靠
-            # 这一点）。这三条之间**只有这一次 C 调用**（实参早已求值完、压弹已平衡），
-            # 所以嵌套调用也踩不到它 —— 顺序不能反：对齐必须是 `call` 前的最后一步。
+            # 用 **RBX** 存原 rsp：它是 SysV 的**被调方保存**寄存器，C 返回时一定还是原值。
+            # ⚠ 正因为它被调方保存，**我们自己必须先保存调用方的 RBX**（`#626`）：C 的
+            # 帧里 RBX 可能是它的局部数据，而我们把它改成了自己的栈指针、还不还原 ——
+            # C → Loment 回调（zlib 的 zalloc/zfree、qsort 的比较函数）再走一次 extern
+            # 调用时，上层 C 帧读到的就是 rsp。push/pop 这一对让序列"来去一样"。
+            self.asm.emit(push_r(RBX))
             self.asm.emit(mov_rr(RBX, RSP))
             self.asm.emit(alu_ri(AND_, RSP, -16))
-            self.asm.call(callee[1:])
+            self.asm.call(callee[1:], extern=True)
             self.asm.emit(mov_rr(RSP, RBX))
+            self.asm.emit(pop_r(RBX))
             # **返回值照旧落回目标槽** —— 与内部调用同一步。少了这一句, 调用结果**丢掉**,
             # 后面读到的是那个槽的旧值: 症状是"程序能跑、结果是假 0" (实测第一版就是这样:
             # `c_add(3,4) + c_mul(5,6)` 退出码 0 而不是 37)。
@@ -1333,7 +1343,21 @@ class Emitter:
                 self.lower(ins)
         self.cur = None
 
-    def emit_entry_stub(self, start_name: str, tls: bool = False) -> None:
+    def _call_stub_slot(self, skip_label: str) -> None:
+        """调 `[rbx]` 指向的函数；空槽与 `-1` 哨兵跳过（`#611`）。
+
+        `.ctors`/`.dtors` 在 GNU 老 ABI 里以 `-1`（表头）或 `0`（表尾）收尾 —— 那些不是
+        函数指针。不跳过就会 `call -1`，产物一启动就崩，而根因离现场很远。
+        """
+        self.asm.emit(b"\x48\x8B\x03")          # mov rax, [rbx]
+        self.asm.emit(b"\x48\x85\xC0")          # test rax, rax
+        self.asm.jcc("e", skip_label)           # jz skip
+        self.asm.emit(b"\x48\x83\xF8\xFF")      # cmp rax, -1
+        self.asm.jcc("e", skip_label)           # je skip
+        self.asm.emit(b"\xFF\xD0")              # call rax
+
+    def emit_entry_stub(self, start_name: str, tls: bool = False,
+                        ctors: int = 0, finis: int = 0, call_exit: bool = False) -> None:
         self.asm.label("__entry")
         if tls:
             # `arch_prctl(ARCH_SET_FS = 0x1002, &__loment_tls)` —— 让 `fs:0x28`
@@ -1342,10 +1366,44 @@ class Emitter:
             self.asm.emit(b"\xBF" + struct.pack("<I", 0x1002))    # mov edi, ARCH_SET_FS
             self.asm.mov_abs(RSI, "__loment_tls")                 # movabs rsi, &tls
             self.asm.emit(b"\x0F\x05")                            # syscall
+        # **构造函数先跑**（`#611`）：每个表是一串 8 字节函数指针，先后顺序就是表里的顺序。
+        # 用 `rbx` 走游标、`r12` 存表尾；两个都是 SysV 的被调方保存寄存器，构造函数不会
+        # 偷改它们（改了我们也不依赖 —— 每次循环都从内存里重新取）。
+        for j in range(ctors):
+            self.asm.mov_abs(RBX, f"__loment_ctor_{j}")
+            self.asm.mov_abs(R12, f"__loment_ctor_end_{j}")
+            self.asm.label(f"__ctor_loop_{j}")
+            self.asm.emit(b"\x4C\x39\xE3")                        # cmp rbx, r12
+            self.asm.jcc("ae", f"__ctor_done_{j}")
+            self._call_stub_slot(f"__ctor_next_{j}")
+            self.asm.label(f"__ctor_next_{j}")
+            self.asm.emit(b"\x48\x83\xC3\x08")                    # add rbx, 8
+            self.asm.jmp(f"__ctor_loop_{j}")
+            self.asm.label(f"__ctor_done_{j}")
         self.asm.call(start_name)
-        self.asm.emit(mov_ri32(RAX, 60))  # exit(0)
-        self.asm.emit(mov_ri32(RDI, 0))
-        self.asm.emit(b"\x0F\x05")
+        # **析构表逆序跑**（`#611`）：C++ 的 `.fini_array` 语义就是"构造的逆序"。
+        for j in range(finis):
+            self.asm.mov_abs(RBX, f"__loment_fini_end_{j}")
+            self.asm.mov_abs(R12, f"__loment_fini_{j}")
+            self.asm.label(f"__fini_loop_{j}")
+            self.asm.emit(b"\x4C\x39\xE3")                        # cmp rbx, r12
+            self.asm.jcc("be", f"__fini_done_{j}")
+            self.asm.emit(b"\x48\x83\xEB\x08")                    # sub rbx, 8
+            self._call_stub_slot(f"__fini_next_{j}")
+            self.asm.label(f"__fini_next_{j}")
+            self.asm.jmp(f"__fini_loop_{j}")
+            self.asm.label(f"__fini_done_{j}")
+        if call_exit:
+            # **链了 libc 就走 `exit(3)`**（`#605`）：`syscall(60)` 不刷 stdio、不跑
+            # `atexit`，用户 `printf` 的输出就那样丢了 —— 程序还安静地退出 0。
+            self.asm.emit(mov_ri32(RDI, 0))
+            self.asm.call("exit")
+        else:
+            # **密封产物保持裸系统调用**：没有 libc 可调，这是唯一正确的出口，
+            # 行为与这条规则出现之前完全一样。
+            self.asm.emit(mov_ri32(RAX, 60))  # exit(0)
+            self.asm.emit(mov_ri32(RDI, 0))
+            self.asm.emit(b"\x0F\x05")
 
     def emit_conscript(self, defined: set[str]) -> None:
         """**收编面**（`docs/219` §6 第 1 条）：C 世界里那几个"**可闭合**"的名字，由**我们**提供。
@@ -1454,14 +1512,47 @@ def align_up(n: int, a: int) -> int:
     return (n + a - 1) // a * a
 
 
+#: 节类型 / 段类型（只用得到的几个）。
+SHT_NULL, SHT_PROGBITS, SHT_STRTAB, SHT_RELA = 0, 1, 3, 4
+SHT_DYNAMIC, SHT_NOBITS, SHT_DYNSYM = 6, 8, 11
+PT_GNU_RELRO = 0x6474E552
+
+
+def _shdr(nameoff, typ, flags, addr, off, size, link=0, info=0, align=1, entsize=0) -> bytes:
+    return struct.pack("<IIQQQQIIQQ", nameoff, typ, flags, addr, off, size,
+                       link, info, align, entsize)
+
+
+def _shstrtab(*names: str) -> tuple[bytes, dict[str, int]]:
+    """按给定顺序拼 `.shstrtab`，返回 (字节, 名字 -> 偏移)。0 号永远是空串。"""
+    out = bytearray(b"\x00")
+    at: dict[str, int] = {}
+    for nm in names:
+        at[nm] = len(out)
+        out += nm.encode() + b"\x00"
+    return bytes(out), at
+
+
 def build_elf(text: bytes, data: bytes, bss_size: int, entry: int) -> bytes:
+    """静态产物的 ELF：两个 `PT_LOAD` + 一张**节头表**（`#606`）。
+
+    节头表放在**不加载的文件尾部**：执行不需要它，但 `objdump -d` / `readelf -r` /
+    `strip` 全都按节头找 `.text`。没有它时 `objdump -d` 只打一行文件格式，用户手上
+    没有自己程序的反汇编。几百字节的代价换回整套 binutils。
+    """
     text_off = 0x1000
     data_off = align_up(text_off + len(text), 0x1000)
     file_end = data_off + len(data)
 
+    shstr, sname = _shstrtab(".text", ".data", ".bss", ".shstrtab")
+    shstr_off = file_end
+    shoff = align_up(shstr_off + len(shstr), 8)
+    shnum, shstrndx = 5, 4
+
     ehdr = bytearray()
     ehdr += b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 8
-    ehdr += struct.pack("<HHIQQQIHHHHHH", 2, 0x3E, 1, entry, 64, 0, 0, 64, 56, 2, 0, 0, 0)
+    ehdr += struct.pack("<HHIQQQIHHHHHH", 2, 0x3E, 1, entry, 64, shoff, 0,
+                        64, 56, 2, 64, shnum, shstrndx)
 
     def phdr(flags, off, vaddr, filesz, memsz):
         return struct.pack("<IIQQQQQQ", 1, flags, off, vaddr, vaddr, filesz, memsz, 0x1000)
@@ -1475,12 +1566,58 @@ def build_elf(text: bytes, data: bytes, bss_size: int, entry: int) -> bytes:
     out += b"\x00" * (data_off - len(out))
     out += data
     assert len(out) == file_end, (len(out), file_end)
+    out += shstr
+    out += b"\x00" * (shoff - len(out))
+    out += _shdr(0, SHT_NULL, 0, 0, 0, 0, align=0)
+    out += _shdr(sname[".text"], SHT_PROGBITS, 0x6, TEXT_VADDR, text_off,
+                 len(text), align=16)
+    out += _shdr(sname[".data"], SHT_PROGBITS, 0x3, DATA_VADDR, data_off,
+                 len(data), align=16)
+    out += _shdr(sname[".bss"], SHT_NOBITS, 0x3, DATA_VADDR + len(data),
+                 data_off + len(data), bss_size, align=8)
+    out += _shdr(sname[".shstrtab"], SHT_STRTAB, 0, 0, shstr_off, len(shstr))
     return bytes(out)
 
 
 #: Linux x86-64 的系统 loader。`PT_INTERP` 指的就是它 —— **由它**把 `.so` 映射进来、
 #: 按名字解析、写 GOT。我们只负责把"要什么"写清楚（`docs/173` 阶段 3 / `docs/183` V2）。
 ELF_INTERP = b"/lib64/ld-linux-x86-64.so.2\x00"
+
+#: **loader 的候选落点**（`#604`）。原先那条路径是写死的 glibc 路径：在 musl 发行版
+#: （Alpine 等）上链接照样成功，`execve` 却 `No such file or directory` —— 一句话都没有。
+#: 顺序是"经典 glibc 优先，再补救", 第一个在**链接机上**存在的胜出。
+#: Windows 上交叉链接时这些路径没有意义（目标不是本机），退回经典路径；要指定就
+#: `--interp PATH` 或环境变量 `LOMENT_INTERP`。
+_INTERP_CANDIDATES = (
+    "/lib64/ld-linux-x86-64.so.2",
+    "/lib/ld-linux-x86-64.so.2",
+    "/usr/lib/ld-linux-x86-64.so.2",
+    "/lib/ld-musl-x86_64.so.1",
+)
+
+
+def resolve_interp(override: str | None = None) -> bytes:
+    """选 `PT_INTERP` 的那条路径（`#604`）。返回带结尾 NUL 的字节串。
+
+    优先级：显式参数 `--interp` -> `LOMENT_INTERP` -> 链接机上的候选 -> 经典路径。
+    **在 Linux 上找不到任何候选就点名报错**，不把一个必然启动不了的产物交给用户；
+    非 Linux 主机的交叉链接没有"本机 loader"可言，保留经典路径（用 `--interp` 覆盖）。
+    """
+    if override:
+        return override.encode() + b"\x00"
+    env = os.environ.get("LOMENT_INTERP")
+    if env:
+        return env.encode() + b"\x00"
+    if sys.platform.startswith("linux"):
+        for cand in _INTERP_CANDIDATES:
+            if Path(cand).exists():
+                return cand.encode() + b"\x00"
+        raise Unsupported(
+            "找不到程序解释器（PT_INTERP）：试过 " + ", ".join(_INTERP_CANDIDATES)
+            + " —— 用 `--interp PATH` 指定目标系统的 loader（`docs/183` §4）")
+    # 非 Linux 主机（Windows / macOS）是在**交叉链接**：本机路径与目标无关，
+    # 保留经典 glibc 路径，要换就 `--interp`。
+    return ELF_INTERP
 
 #: `DT_*` 号（`docs/183` V2）。只取这一版用得到的。
 DT_NEEDED, DT_PLTGOT, DT_HASH, DT_STRTAB, DT_SYMTAB = 1, 3, 4, 5, 6
@@ -1490,6 +1627,7 @@ DT_STRSZ, DT_SYMENT, DT_PLTREL, DT_JMPREL, DT_PLTRELSZ = 10, 11, 20, 23, 2
 #: （`readelf` 的原话是 `missing or corrupt dynamic tag: DT_RELAENT`），GOT 全是 0，
 #: 第一次走 PLT 就跳 NULL —— 实测就是这么崩的（`si_addr = NULL`）。
 DT_RELA, DT_RELASZ, DT_RELAENT = 7, 8, 9
+DT_DEBUG = 21
 DT_GNU_HASH = 0x6FFFFEF5
 DT_FLAGS = 30              # DF_BIND_NOW = 8：GOT 在加载时一次填满，不走惰性绑定
 DF_BIND_NOW = 8
@@ -1498,16 +1636,28 @@ PT_LOAD, PT_DYNAMIC, PT_INTERP, PT_GNU_STACK = 1, 2, 3, 0x6474E551
 
 def build_elf_dynamic(text: bytes, data: bytes, bss_size: int, entry: int, *,
                       tail: bytes, interp_vaddr: int, interp_len: int,
-                      dyn_vaddr: int, dyn_len: int, tail_vaddr: int) -> bytes:
+                      dyn_vaddr: int, dyn_len: int, tail_vaddr: int,
+                      dynstr_vaddr: int, dynstr_len: int, dynsym_vaddr: int,
+                      nsyms: int, rela_vaddr: int, rela_len: int,
+                      got_vaddr: int, got_len: int) -> bytes:
     """产出一个**动态链接**的 ELF 可执行文件（`docs/183` V2）。
 
-    与 `build_elf` 的差别是"多了三条程序头、多了一段、文件头那一页也在 LOAD 里"：
+    与 `build_elf` 的差别是"多了几条程序头、多了一段、文件头那一页也在 LOAD 里"：
 
     * `PT_INTERP` 指向 `.interp` 字符串（**文件偏移** —— 内核按偏移读它，不看 vaddr）；
       vaddr 仍要在某个 `PT_LOAD` 里，因为段是整块映射的；
     * `PT_DYNAMIC` 指向 `.dynamic`（在尾部那一小段里，可写 —— loader 会往里写 `DT_DEBUG`）；
     * 尾部段（`.got.plt` + `.dynamic`）**单独一条 RW `PT_LOAD`**，落在 BSS 之后
       （理由见 `build_dynamic_tables`）。
+
+    **文件头那一页单开一条只读 LOAD**（`#608`）：原先它和代码同一条 R|X 段，
+    于是 ELF 头与程序头表落在一个**可执行**页里。gcc 的产物也是把这一页单独放成 R。
+    第一个 `PT_LOAD` 仍从文件偏移 0 起 —— `AT_PHDR` 靠的就是
+    `首个 PT_LOAD 的 p_vaddr - p_offset`。
+
+    **`PT_GNU_RELRO`**（`#608`）：尾部段的 `.got.plt` / `.dynamic` 在加载器做完重定位后
+    必须变成只读。`DF_BIND_NOW` 已经发了，所以这些槽之后不会再被写；把整段罩进 RELRO
+    是安全的。GOT 可写是漏洞链的第一个原语，而这个产物本来就完全有资格被利用。
 
     再补一条 `PT_GNU_STACK`（RW、不可执行）：没有它，旧内核会给一个可执行栈并告警。
     """
@@ -1523,18 +1673,28 @@ def build_elf_dynamic(text: bytes, data: bytes, bss_size: int, entry: int, *,
     # `AT_PHDR = (首个 PT_LOAD 的 p_vaddr - p_offset) + e_phoff` 告诉 loader
     # 程序头在哪。若这一页不进任何 LOAD，`AT_PHDR` 就落在未映射的地址上，
     # loader 连一行 `LD_DEBUG` 都来不及打就没了。
+    # 这一页只放 ELF 头 + 程序头，所以**只要 R**；代码从下一页起单独 R|X。
     phs = (
         phdr(PT_INTERP, 4, text_off + (interp_vaddr - TEXT_VADDR), interp_vaddr,
              interp_len, interp_len, 1)
-        + phdr(PT_LOAD, 5, 0, TEXT_VADDR - text_off, text_off + len(text), text_off + len(text))
+        + phdr(PT_LOAD, 4, 0, TEXT_VADDR - text_off, text_off, text_off)
+        + phdr(PT_LOAD, 5, text_off, TEXT_VADDR, len(text), len(text))
         + phdr(PT_LOAD, 6, data_off, DATA_VADDR, len(data), len(data) + bss_size)
         + phdr(PT_LOAD, 6, tail_off, tail_vaddr, tail_len, tail_len)
         + phdr(PT_DYNAMIC, 6, tail_off + (dyn_vaddr - tail_vaddr), dyn_vaddr, dyn_len, dyn_len)
+        + phdr(PT_GNU_RELRO, 4, tail_off, tail_vaddr, tail_len, tail_len, 1)
         + phdr(PT_GNU_STACK, 6, 0, 0, 0, 0, 0x10)
     )
+    shstr, sname = _shstrtab(".text", ".data", ".bss", ".interp", ".dynstr",
+                             ".dynsym", ".rela.plt", ".got.plt", ".dynamic", ".shstrtab")
+    shstr_off = tail_off + tail_len
+    shoff = align_up(shstr_off + len(shstr), 8)
+    shnum, shstrndx = 11, 10
+
     ehdr = bytearray()
     ehdr += b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 8
-    ehdr += struct.pack("<HHIQQQIHHHHHH", 2, 0x3E, 1, entry, 64, 0, 0, 64, 56, 6, 0, 0, 0)
+    ehdr += struct.pack("<HHIQQQIHHHHHH", 2, 0x3E, 1, entry, 64, shoff, 0,
+                        64, 56, 8, 64, shnum, shstrndx)
 
     out = bytearray(ehdr + phs)
     out += b"\x00" * (text_off - len(out))
@@ -1544,11 +1704,35 @@ def build_elf_dynamic(text: bytes, data: bytes, bss_size: int, entry: int, *,
     out += b"\x00" * (tail_off - len(out))
     out += tail
     assert len(out) == tail_off + tail_len, (len(out), tail_off + tail_len)
+    out += shstr
+    out += b"\x00" * (shoff - len(out))
+    out += _shdr(0, SHT_NULL, 0, 0, 0, 0, align=0)
+    out += _shdr(sname[".text"], SHT_PROGBITS, 0x6, TEXT_VADDR, text_off, len(text), align=16)
+    out += _shdr(sname[".data"], SHT_PROGBITS, 0x3, DATA_VADDR, data_off, len(data), align=16)
+    out += _shdr(sname[".bss"], SHT_NOBITS, 0x3, DATA_VADDR + len(data),
+                 data_off + len(data), bss_size, align=8)
+    out += _shdr(sname[".interp"], SHT_PROGBITS, 0x2, interp_vaddr,
+                 text_off + (interp_vaddr - TEXT_VADDR), interp_len)
+    out += _shdr(sname[".dynstr"], SHT_STRTAB, 0x2, dynstr_vaddr,
+                 text_off + (dynstr_vaddr - TEXT_VADDR), dynstr_len)
+    out += _shdr(sname[".dynsym"], SHT_DYNSYM, 0x2, dynsym_vaddr,
+                 text_off + (dynsym_vaddr - TEXT_VADDR), 24 * nsyms,
+                 link=5, info=1, align=8, entsize=24)
+    out += _shdr(sname[".rela.plt"], SHT_RELA, 0x2, rela_vaddr,
+                 text_off + (rela_vaddr - TEXT_VADDR), rela_len,
+                 link=6, info=8, align=8, entsize=24)
+    out += _shdr(sname[".got.plt"], SHT_PROGBITS, 0x3, got_vaddr,
+                 tail_off + (got_vaddr - tail_vaddr), got_len, align=8)
+    out += _shdr(sname[".dynamic"], SHT_DYNAMIC, 0x3, dyn_vaddr,
+                 tail_off + (dyn_vaddr - tail_vaddr), dyn_len,
+                 link=5, align=8, entsize=16)
+    out += _shdr(sname[".shstrtab"], SHT_STRTAB, 0, 0, shstr_off, len(shstr))
     return bytes(out)
 
 
 def build_dynamic_tables(base_text_vaddr: int, text_len: int, tail_vaddr: int,
-                         imports: list[str], soname: str):
+                         imports: list[str], sonames: list[str],
+                         interp: bytes = ELF_INTERP):
     """把动态链接要的那几张表算出来：**PLT / .dynstr / .dynsym / .hash / .rela.plt**
     （接在代码后面）与 **.got.plt / .dynamic**（单独一段，接在 BSS 之后）。
 
@@ -1576,10 +1760,11 @@ def build_dynamic_tables(base_text_vaddr: int, text_len: int, tail_vaddr: int,
     got = bytearray(8 * got_n)
 
     interp_at = plt_at + 16 * (n + 1)
-    dynstr_at = interp_at + len(ELF_INTERP)
+    dynstr_at = interp_at + len(interp)
     ds = bytearray(b"\x00")                     # 0 号必须是空串（st_name == 0 是"没有名字"）
     name_off: dict[str, int] = {}
-    for nm in list(imports) + [soname]:
+    # 导入名在前、SONAME 在后；多个共享对象按 `--link` 顺序各占一个 `DT_NEEDED`（`#596`）。
+    for nm in list(imports) + list(sonames):
         name_off[nm] = len(ds)
         ds += nm.encode() + b"\x00"
     ds += b"\x00"
@@ -1638,7 +1823,7 @@ def build_dynamic_tables(base_text_vaddr: int, text_len: int, tail_vaddr: int,
     # ---- `.dynamic`：放在 `.got.plt` 之后（同在数据段，可写）。
     dyn_at = got_at + len(got)
     entries = [
-        (DT_NEEDED, name_off[soname]),
+        *((DT_NEEDED, name_off[so]) for so in sonames),
         (DT_HASH, hash_at),
         (DT_GNU_HASH, gnu_at),
         (DT_STRTAB, dynstr_at),
@@ -1653,6 +1838,9 @@ def build_dynamic_tables(base_text_vaddr: int, text_len: int, tail_vaddr: int,
         # 都没有。发了它（哪怕 `RELASZ=0`）等于向 loader 声明"这里有一张静态重定位表"，
         # 而那张表的位置只是 `.rela.plt` 的别名 —— "空表"与"没有这张表"不是一回事。
         (DT_FLAGS, DF_BIND_NOW),
+        # `DT_DEBUG`（`#607`）：loader 会往这里写 `r_debug`，调试器靠它走已加载对象链。
+        # 非 PIE 产物没有别的通道，缺了它 `gdb` 的 `info sharedlibrary` 就是空的。
+        (DT_DEBUG, 0),
         (0, 0),
     ]
     dynb = b"".join(struct.pack("<QQ", t, v) for t, v in entries)
@@ -1660,7 +1848,7 @@ def build_dynamic_tables(base_text_vaddr: int, text_len: int, tail_vaddr: int,
 
     tail = bytearray()
     tail += b"\x00" * (interp_at - (plt_at + len(plt)))   # 对齐填充（PLT 之后到 .interp）
-    tail += ELF_INTERP
+    tail += interp
     tail += ds
     tail += b"\x00" * (dynsym_at - (dynstr_at + len(ds)))
     tail += dynsym
@@ -1675,8 +1863,12 @@ def build_dynamic_tables(base_text_vaddr: int, text_len: int, tail_vaddr: int,
 
     data_tail = bytearray(got)
     data_tail += dynb
-    info = {"interp_vaddr": interp_at, "interp_len": len(ELF_INTERP),
-            "dyn_vaddr": dyn_at, "dyn_len": len(dynb), "tail_vaddr": tail_vaddr}
+    info = {"interp_vaddr": interp_at, "interp_len": len(interp),
+            "dyn_vaddr": dyn_at, "dyn_len": len(dynb), "tail_vaddr": tail_vaddr,
+            "dynstr_vaddr": dynstr_at, "dynstr_len": len(ds),
+            "dynsym_vaddr": dynsym_at, "nsyms": nsyms,
+            "rela_vaddr": rela_at, "rela_len": len(rela),
+            "got_vaddr": got_at, "got_len": len(got)}
     return bytes(text_tail), bytes(data_tail), labels, info
 
 
@@ -5174,10 +5366,34 @@ def compile_pe(text: str) -> tuple[bytes, dict]:
 REL_64 = 1        # S + A
 REL_PC32 = 2      # S + A - P
 REL_PLT32 = 4     # 同 PC32 —— 静态链接里没有 PLT, 两者等价 (GNU ld 也这么处理)
+REL_GOTPCREL = 9  # G + A - P：`-fPIC` 的对象按 GOT 槽取地址（`#609`）
 REL_32 = 10       # (S + A) 的低 32 位, 无符号
 REL_32S = 11      # 同上, 有符号 (x86-64 上 addrmode 的绝对值走这条)
+REL_TPOFF64 = 18  # S + A - TP：TLS 变量相对线程指针的 64 位偏移（`#610`）
+REL_TPOFF32 = 23  # 同上，32 位
 REL_PC64 = 24     # S + A - P, 64 位
-SUPPORTED_RELOCS = (REL_64, REL_PC32, REL_PLT32, REL_32, REL_32S, REL_PC64)
+REL_GOTPCRELX = 41      # 同 GOTPCREL，允许把 `mov` 松弛成 `lea`；不松弛也正确
+REL_REX_GOTPCRELX = 42  # 带 REX 前缀的 GOTPCRELX
+SUPPORTED_RELOCS = (REL_64, REL_PC32, REL_PLT32, REL_GOTPCREL, REL_32, REL_32S,
+                    REL_TPOFF64, REL_TPOFF32, REL_PC64, REL_GOTPCRELX,
+                    REL_REX_GOTPCRELX)
+
+#: 重定位类型名（只为了**把话说清楚**）。`#610` / `#609` 之前，不认识的类型只报一个
+#: 数字 —— 用户拿着 "不认识的重定位类型 23" 什么也做不了。名字让这条消息可行动。
+RELOC_NAMES = {
+    3: "R_X86_64_GOT32", 5: "R_X86_64_COPY", 6: "R_X86_64_GLOB_DAT",
+    7: "R_X86_64_JUMP_SLOT", 8: "R_X86_64_RELATIVE", 9: "R_X86_64_GOTPCREL",
+    12: "R_X86_64_16", 13: "R_X86_64_PC16", 14: "R_X86_64_8",
+    15: "R_X86_64_PC8", 16: "R_X86_64_DTPMOD64", 17: "R_X86_64_DTPOFF64",
+    18: "R_X86_64_TPOFF64", 19: "R_X86_64_TLSGD", 20: "R_X86_64_TLSLD",
+    21: "R_X86_64_DTPOFF32", 22: "R_X86_64_GOTTPOFF", 23: "R_X86_64_TPOFF32",
+    25: "R_X86_64_GOTOFF64", 26: "R_X86_64_GOTPC32", 41: "R_X86_64_GOTPCRELX",
+    42: "R_X86_64_REX_GOTPCRELX",
+}
+
+
+def reloc_name(ty: int) -> str:
+    return RELOC_NAMES.get(ty, f"#{ty}")
 
 #: 我们**不摆**、丢掉也无害的节: 展开信息与调试信息。代码引用不到它们, 所以针对它们的重定位
 #: 是空转 —— **跳过而不是报错**。
@@ -5210,7 +5426,13 @@ class ForeignObject:
     def from_bytes(cls, path: Path, name: str, raw: bytes) -> "ForeignObject":
         """从**内存里的字节**构造 —— 归档成员没有自己的文件 (`docs/173` 阶段 2)。"""
         self = cls.__new__(cls)
-        self._load(path, name, raw)
+        try:
+            self._load(path, name, raw)
+        except Unsupported as e:
+            # 解析失败时**符号表可能已经读出来了**（重定位那一趟才炸）。把这份半成品挂到
+            # 异常上：归档那一侧靠它说清"这个成员定义了 f，但用不了：原因"（`#628`）。
+            e.partial = self
+            raise
         return self
 
     def _load(self, path: Path, name: str, raw: bytes) -> None:
@@ -5229,7 +5451,7 @@ class ForeignObject:
                 struct.unpack_from("<IIQQQQIIQQ", raw, o)
             secs.append({"nameoff": nameoff, "type": typ, "flags": flags, "off": off,
                          "size": size, "link": link, "info": info, "entsize": entsize,
-                         "name": ""})
+                         "align": align, "name": ""})
         shstr = secs[e_shstrndx]
         for s in secs:
             end = raw.index(b"\x00", shstr["off"] + s["nameoff"])
@@ -5242,9 +5464,14 @@ class ForeignObject:
         # 符号地址 = 该节偏移 + 符号的段内值 (16 对齐, 与函数对齐要求一致)。
         code: list[dict] = []
         buf = bytearray()
+        text_align = 16
         for s in secs:
             if s["type"] == 1 and (s["name"] == ".text" or s["name"].startswith(".text.")):
-                while len(buf) % 16:
+                # `sh_addralign` 是节的一部分（`#612`）：`.text` 要求 32/64 时也得摆对，
+                # 否则 AVX 指令取指/取常数会 #GP。原先这里硬写 16。
+                a = max(16, s["align"] or 1)
+                text_align = max(text_align, a)
+                while len(buf) % a:
                     buf.append(0)
                 s["at"] = len(buf)
                 buf += raw[s["off"]:s["off"] + s["size"]]
@@ -5252,6 +5479,7 @@ class ForeignObject:
         if not code:
             raise Unsupported(f"{name}: 没有代码节 (.text / .text.*)")
         self.text = bytes(buf)
+        self.text_align = text_align
         self.sec_at = {k: s["at"] for k, s in enumerate(secs) if "at" in s}
         # **数据节**（`docs/219` S2 的前置，§8b 第 1 条）：`SHF_ALLOC` 的 `.rodata*` /
         # `.data*` / `.bss`。真实 C 库的**字符串常量、常量表、结构体**都在这里。
@@ -5261,31 +5489,91 @@ class ForeignObject:
         # 代码节里的符号 ⇒ 它会以"引用了未定义的符号 .L.str"的面目报出来（实测），
         # 一句"不支持的节"都看不到。所以这一步是**真实库的门槛**。
         #
-        # 收 `SHF_ALLOC`(0x2) 且类型是 `SHT_PROGBITS`(1) 或 `SHT_NOBITS`(8) 的；`.text*`
-        # 已经在上面那一趟收走；元数据节（`.eh_frame`/`.debug`/`.comment`/`.note`）**不收**
-        # —— 代码引用不到它们（`_META_SEC` 同一条理由）。
+        # 收 `SHF_ALLOC`(0x2) 且类型是 `SHT_PROGBITS`(1) / `SHT_NOBITS`(8)（以及后面
+        # 那三种函数指针数组）的；`.text*` 已经在上面那一趟收走；元数据节
+        # （`.eh_frame`/`.debug`/`.comment`/`.note`）**不收** —— 代码引用不到它们
+        # （`_META_SEC` 同一条理由）。
         #
         # `.bss`(NOBITS) 这里**按零字节摆进 DATA**（不是单独一段）：小、且省掉一条"段内
         # 符号落在 bss"的路径。**代价**：带大 `.bss` 的库会把零字节写进文件 —— 这是本档
         # 明写的边界，不是疏忽。
+        #
+        # **TLS**（`#610`）单独摆：`SHF_TLS`(0x400) 的 `.tdata*` / `.tbss*` 不进普通数据段，
+        # 它们要按 TLS 块布局（`TPOFF` 重定位算的是"相对线程指针"）。`.tbss` 同样按零字节摆。
+        #
+        # **构造函数表**（`#611`）：`.init_array`(SHT_INIT_ARRAY=14) / `.preinit_array`(16) /
+        # `.ctors` 是**函数指针数组**，不是普通数据。它们要被摆进数据段（重定位才落得下），
+        # 并由入口桩在 `_start` 之前逐个调用。只认 `.ctors` 是不够的：那是老工具的写法，
+        # 现在 gcc/clang 默认发 `.init_array`，而它原先被当成"非代码节"硬拒。
         dbuf = bytearray()
+        tbuf = bytearray()
+        data_align = 16
+        tls_align = 16
+        ctors: list[tuple[int, int]] = []
+        finis: list[tuple[int, int]] = []
         for s in secs:
             if s["name"] == ".text" or s["name"].startswith(".text."):
                 continue
             if s["name"].startswith(_META_SEC) or s["size"] == 0:
                 continue
-            if s["type"] not in (1, 8) or not (s["flags"] & 0x2):   # SHF_ALLOC
+            if not (s["flags"] & 0x2):                      # SHF_ALLOC
                 continue
-            while len(dbuf) % 16:
+            if s["flags"] & 0x400:                          # SHF_TLS
+                if s["type"] not in (1, 8):
+                    continue
+                a = max(1, s["align"] or 1)
+                tls_align = max(tls_align, a)
+                while len(tbuf) % a:
+                    tbuf.append(0)
+                s["tlsat"] = len(tbuf)
+                tbuf += raw[s["off"]:s["off"] + s["size"]] if s["type"] == 1 else bytes(s["size"])
+                continue
+            is_ctor = (s["type"] in (14, 16) or s["name"] == ".ctors"
+                       or s["name"].startswith(".ctors."))
+            # `.fini_array`(SHT_FINI_ARRAY=15) / `.dtors` 是同一件事的另一头（`#611`）：
+            # 也要摆进数据段、由入口桩在 `_start` 之后**逆序**调用。
+            is_fini = (s["type"] == 15 or s["name"] == ".dtors"
+                       or s["name"].startswith(".dtors."))
+            if s["type"] not in (1, 8) and not is_ctor and not is_fini:
+                continue
+            # 与代码节同一条口径：至少 16（历史布局），要求更大就按更大的来。
+            a = max(16, s["align"] or 1)
+            data_align = max(data_align, a)
+            while len(dbuf) % a:
                 dbuf.append(0)
             s["dat"] = len(dbuf)
-            dbuf += raw[s["off"]:s["off"] + s["size"]] if s["type"] == 1 else bytes(s["size"])
+            # 14/15/16 是 `Elf64_Addr` 数组，与 PROGBITS 一样按原字节摆；8(NOBITS) 补零。
+            dbuf += raw[s["off"]:s["off"] + s["size"]] if s["type"] in (1, 14, 15, 16) \
+                else bytes(s["size"])
+            if is_ctor:
+                ctors.append((s["dat"], s["size"]))
+            elif is_fini:
+                finis.append((s["dat"], s["size"]))
         self.data = bytes(dbuf)
+        self.data_align = data_align
+        self.tls = bytes(tbuf)
+        self.tls_align = tls_align
+        self.ctors = ctors
+        self.finis = finis
         self.dsec_at = {k: s["dat"] for k, s in enumerate(secs) if "dat" in s}
-        # 符号: 定义在代码节里的全局/弱符号进 `syms`; 未定义的只记名 (`undefined`)
+        # 符号: 定义在代码节里的符号进 `syms`（**含局部**，见 `#613`）; 数据节里的进
+        # `dsyms`; 绝对符号进 `absyms`。未定义的只记名 —— 强引用进 `undefined`，
+        # **弱引用进 `weak_undefined`**（`#617`：它不该是硬需求，解析不到就写 0）。
         syms: dict[str, int] = {}
         dsyms: dict[str, int] = {}      #: 数据节里的符号（**含局部**）
+        tsyms: dict[str, int] = {}      #: TLS 块里的符号（**含局部**，`#610`）
+        absyms: dict[str, int] = {}     #: `SHN_ABS` 定义的符号（地址就是 `st_value`）
+        binds: dict[str, int] = {}      #: 定义符号的绑定（0 LOCL / 1 GLOB / 2 WEAK）
         undefined: list[str] = []
+        weak_undefined: list[str] = []
+        #: `SHT_SYMTAB_SHNDX`（18）: symtab 节号 -> (数据偏移, 条数)。`SHN_XINDEX` 的
+        #: 真实节号在这张伴随表里（`#619`）。
+        xindex: dict[int, tuple[int, int]] = {}
+        for si, s in enumerate(secs):
+            if s["type"] == 18:
+                if s["link"] >= len(secs) or s["off"] + s["size"] > len(raw):
+                    raise Unsupported(f"{name}: .symtab_shndx 损坏或越界")
+                xindex[s["link"]] = (s["off"], s["size"] // 4)
         #: (symtab 节号, 符号下标) -> 名字 —— 重定位按**下标**引用符号, 靠它回查名字
         name_of: dict[tuple[int, int], str] = {}
         for si, s in enumerate(secs):
@@ -5295,6 +5583,12 @@ class ForeignObject:
             for k in range(s["size"] // 24):
                 o = s["off"] + k * 24
                 nameoff, info, other, shndx, value, size = struct.unpack_from("<IBBHQQ", raw, o)
+                if shndx == 0xFFFF:                        # SHN_XINDEX
+                    xi = xindex.get(si)
+                    if xi is None or k >= xi[1]:
+                        raise Unsupported(
+                            f"{name}: 第 {k} 个符号用 SHN_XINDEX 却没有 .symtab_shndx")
+                    shndx, = struct.unpack_from("<I", raw, xi[0] + k * 4)
                 if nameoff == 0:
                     # **节符号**（`STT_SECTION`）：`st_name` 就是 0，名字靠 `shndx` 认。
                     # clang 对"指向 `.rodata` 里某个常量"的重定位就是引用它 —— 实测
@@ -5309,9 +5603,15 @@ class ForeignObject:
                         if "at" in s0:
                             name_of[(si, k)] = synth
                             syms[synth] = s0["at"] + value
+                            binds[synth] = 0
                         elif "dat" in s0:
                             name_of[(si, k)] = synth
                             dsyms[synth] = s0["dat"] + value
+                            binds[synth] = 0
+                        elif "tlsat" in s0:
+                            name_of[(si, k)] = synth
+                            tsyms[synth] = s0["tlsat"] + value
+                            binds[synth] = 0
                     continue
                 end = raw.index(b"\x00", strt["off"] + nameoff)
                 nm = raw[strt["off"] + nameoff:end].decode("utf-8", "replace")
@@ -5336,22 +5636,54 @@ class ForeignObject:
                     nm = f"${name}${nm}"
                 name_of[(si, k)] = nm
                 if shndx == 0:
-                    if bind in (1, 2):                     # GLOBAL / WEAK
+                    # 强引用是硬需求；**弱引用不是**（`#617`）—— C 的语义是解析不到就绑 0，
+                    # `if (opt) opt();` 正是为它写的。它也不能进端口门或归档需求集。
+                    if bind == 1:                          # GLOBAL
                         undefined.append(nm)
-                # **shndx 可以是保留值** (SHN_ABS=0xfff1 / SHN_COMMON=0xfff2 / SHN_XINDEX=0xffff)
-                # —— 它们比节表长度大, 直接拿去索引会 IndexError (实测第一版就崩在这)。
+                    elif bind == 2:                        # WEAK
+                        weak_undefined.append(nm)
+                # **shndx 可以是保留值** (`SHN_ABS`=0xfff1 / `SHN_COMMON`=0xfff2；
+                # `SHN_XINDEX`=0xffff 已在上面换成真实节号)。以前这里只把它们排除在
+                # `IndexError` 之外、没写语义分支，于是"自己的对象定义了它"被报成未定义
+                # （`#619`）。
+                elif shndx == 0xFFF1:                      # SHN_ABS: 值就是绝对地址
+                    absyms[nm] = value
+                    binds[nm] = bind
+                elif shndx == 0xFFF2:                      # SHN_COMMON: 在这块 .bss 里划出来
+                    al = max(value, 1)
+                    while len(dbuf) % al:
+                        dbuf.append(0)
+                    dsyms[nm] = len(dbuf)
+                    dbuf += bytes(size)
+                    binds[nm] = bind
                 elif shndx < len(secs):
                     tgt = secs[shndx]
-                    if "at" in tgt and bind in (1, 2):           # 代码节里的 GLOBAL/WEAK
+                    if "at" in tgt and bind in (0, 1, 2):
+                        # **局部也算定义**（`#613`）：`-ffunction-sections` 下 `helper` 是
+                        # `STB_LOCAL`，名字上面已经按对象改过，登记它才有东西可解析。
+                        # 自举镜像一直是这么做的；只收 GLOBAL/WEAK 会拒绝同一份对象。
                         syms[nm] = tgt["at"] + value
+                        binds[nm] = bind
                     elif "dat" in tgt:
                         # **数据节里的符号一律收（含局部）**：`.L.str` 就是 `bind=0` 的
                         # `STT_OBJECT`（实测），只收 GLOBAL/WEAK 会把它漏掉，于是代码里那条
                         # `lea rdi, [rip + .L.str]` 找不到标签、以"未定义的符号"报出来。
                         dsyms[nm] = tgt["dat"] + value
+                        binds[nm] = bind
+                    elif "tlsat" in tgt:
+                        # TLS 的 `st_value` 是**节内偏移**，不是地址（`#610`）。真正的
+                        # 地址要等 TLS 块落到数据段里才知道（`compile_ll` 里加上块基址）。
+                        tsyms[nm] = tgt["tlsat"] + value
+                        binds[nm] = bind
         self.syms = syms
         self.dsyms = dsyms
+        self.tsyms = tsyms
+        self.absyms = absyms
+        self.binds = binds
         self.undefined = sorted(set(undefined))
+        self.weak_undefined = sorted(set(weak_undefined))
+        #: SHN_COMMON 可能往 `dbuf` 追加过存储。
+        self.data = bytes(dbuf)
         # 重定位: (目标节号, 节内偏移, 类型, 目标符号名, 加数)。**两条路** ——
         # 落在**代码节**上的进 `relocs`(写进代码缓冲), 落在**数据节**上的进 `drelocs`
         # (写进数据段)。两者都在"所有对象都摆好"之后才应用。
@@ -5372,11 +5704,20 @@ class ForeignObject:
                 r_off, r_info, r_add = struct.unpack_from("<QQq", raw, o)
                 ty, sym_i = r_info & 0xFFFFFFFF, r_info >> 32
                 if ty not in SUPPORTED_RELOCS:
-                    raise Unsupported(f"{name}: 不认识的重定位类型 {ty} (docs/173 §3)")
+                    raise Unsupported(
+                        f"{name}: 不认识的重定位类型 {ty} ({reloc_name(ty)}, docs/173 §3)")
                 nm = name_of.get((s["link"], sym_i))
                 if nm is None:
                     raise Unsupported(f"{name}: 重定位引用了下标记号外的符号 {sym_i}")
                 (self.drelocs if into_data else self.relocs).append((tgt, r_off, ty, nm, r_add))
+
+    @property
+    def defined(self) -> set[str]:
+        """这个对象**定义了**的名字 —— 归档挑选与端口门都看这一张（`#614`）。
+
+        数据节里的定义与代码节里的同等重要：真实库的版本串/查找表就住在 `.rodata`。
+        """
+        return set(self.syms) | set(self.dsyms) | set(self.absyms)
 
 
 class Archive:
@@ -5419,6 +5760,10 @@ class Archive:
         # 因为它们的名字格式在各家 ar 实现里并不一致。
         pool = [(n, d) for n, d in self.members if d[:4] == b"\x7fELF"]
         got: list[ForeignObject] = []
+        #: (成员名, 失败原因, 它定义的名字)。**旧的注释说"后面会报到"，但它从来没被报过**
+        #: （`#628`）：成员被静默丢掉，用户只看到"未定义的符号"，指向**调用方**而不是
+        #: 那个本可以提供它的成员。这里留住它，固定点走完再对一次账。
+        skipped: list[tuple[str, str, set[str]]] = []
         changed = True
         while changed:
             changed = False
@@ -5426,15 +5771,42 @@ class Archive:
             for name, data in pool:
                 try:
                     fo = ForeignObject.from_bytes(self.path, name, data)
-                except Unsupported:
-                    continue        # 这个成员我们用不了: 放着; 真需要它的符号时后面会报到
-                if set(fo.syms) & needed:
+                except Unsupported as e:
+                    part = getattr(e, "partial", None)
+                    defs: set[str] = set()
+                    if part is not None:
+                        # `$...` 是按对象改名的局部/节符号（见 `ForeignObject._load`），
+                        # 永远不会是别人的需求名。
+                        defs = {n for n in (*getattr(part, "syms", {}),
+                                            *getattr(part, "dsyms", {}))
+                                if not n.startswith("$")}
+                    skipped.append((name, str(e), defs))
+                    continue
+                # **数据节里的定义也算数**（`#614`）：`set(fo.syms)` 只看得见代码节，
+                # 于是 `.rodata` 里的版本串/查找表永远选不中成员。
+                hit = fo.defined & needed
+                if hit:
                     got.append(fo)
+                    # 只有**强定义**才把名字闭合。弱定义留在需求集里，后面的强定义
+                    # 仍然会被收进来 —— 收完两边在标签表里再由"强盖弱"定胜负（`#618`）。
+                    needed -= {nm for nm in hit if fo.binds.get(nm, 1) != 2}
                     needed |= set(fo.undefined)
                     changed = True
                 else:
                     rest.append((name, data))
             pool = rest
+        if skipped:
+            # 固定点结束后仍然"需要"（`needed` 只增不减，所以再减掉已收成员提供的）
+            # 且由某个被丢掉的成员定义的名字，才是这条诊断的靶子。
+            provided = {n for fo in got for n in (*fo.syms, *fo.dsyms)}
+            unresolved = set(needed) - provided
+            for name, why, defs in skipped:
+                hit = sorted(defs & unresolved)
+                if hit:
+                    raise Unsupported(
+                        f"{self.path.name}: archive member {name} defines "
+                        f"{', '.join(hit)} but could not be used: {why} —— the "
+                        f"symbol is in the archive; it was not absent")
         return got
 
 
@@ -5456,6 +5828,9 @@ class SharedObject:
 
     #: `DT_*` 的号（只取这里用得上的）。
     DT_NEEDED, DT_HASH, DT_STRTAB, DT_SYMTAB, DT_STRSZ, DT_SYMENT, DT_SONAME = 1, 4, 5, 6, 10, 11, 14
+    #: `EM_X86_64`。`EI_CLASS`/`EI_DATA` 说"64 位小端"，每一个交叉目标都满足它 ——
+    #: 只有 `e_machine` 分得开 x86-64 与别的架构（`#629`）。
+    EM_X86_64 = 62
 
     def __init__(self, path: Path):
         raw = path.read_bytes()
@@ -5481,29 +5856,41 @@ class SharedObject:
             raise Unsupported(f"{path.name}: 不是 ELF64 小端共享对象")
         if struct.unpack_from("<H", raw, 16)[0] != 3:            # e_type != ET_DYN
             raise Unsupported(f"{path.name}: 不是共享对象 (ET_DYN)")
+        e_machine, = struct.unpack_from("<H", raw, 18)
+        if e_machine != self.EM_X86_64:
+            # **`e_machine` 是唯一分得开架构的字段**（`#629`）。放过去只有两种结局：
+            # loader 拒掉它，或者机器上恰好装了一份**同名**的原生库 —— 于是产物悄悄
+            # 绑到了另一份库上，而 V2 唯一的保证（"导出表证明名字存在"）就没了。
+            raise Unsupported(
+                f"{path.name}: e_machine={e_machine} is not EM_X86_64 "
+                f"({self.EM_X86_64}) —— this shared object is built for another "
+                f"architecture; the loader would reject it or bind a different library")
         e_phoff, = struct.unpack_from("<Q", raw, 32)
         e_phentsize, e_phnum = struct.unpack_from("<HH", raw, 54)
         e_shoff, = struct.unpack_from("<Q", raw, 40)
         e_shentsize, e_shnum, e_shstrndx = struct.unpack_from("<HHH", raw, 58)
-        loads: list[tuple[int, int, int]] = []
+        # (vaddr, 文件内偏移, p_filesz, p_memsz, p_flags)。`voff` 用前三个把**文件**
+        # 读出来；导出扫描用 vaddr + **p_memsz** 判"这个 st_value 在映像里吗" ——
+        # `.bss` 里的数据符号只在 memsz 里（实测 libc 的 `rpc_createerr` 就在那儿）。
+        loads: list[tuple[int, int, int, int, int]] = []
         dyn: tuple[int, int] | None = None
         if e_phnum and e_phentsize < 56:
             raise Unsupported(f"{path.name}: 程序头条目只有 {e_phentsize} 字节（要 ≥ 56）")
         need(e_phoff, e_phnum * e_phentsize, "程序头表")
         for k in range(e_phnum):
             o = e_phoff + k * e_phentsize
-            p_type, _fl, p_off, p_vaddr, _pa, p_filesz, _m, _al = \
+            p_type, p_flags, p_off, p_vaddr, _pa, p_filesz, p_memsz, _al = \
                 struct.unpack_from("<IIQQQQQQ", raw, o)
             if p_type == 1:
-                loads.append((p_vaddr, p_off, p_filesz))
+                loads.append((p_vaddr, p_off, p_filesz, p_memsz, p_flags))
             elif p_type == 2:
                 dyn = (p_off, p_filesz)
         if dyn is None:
             raise Unsupported(f"{path.name}: 共享对象没有 PT_DYNAMIC")
 
         def voff(vaddr: int) -> int:
-            for v, off, sz in loads:
-                if v <= vaddr < v + sz:
+            for v, off, sz, _mem, _fl in loads:
+                if v <= vaddr < v + sz:                       # 文件里的部分：p_filesz
                     return off + (vaddr - v)
             raise Unsupported(
                 f"{path.name}: 动态表里的地址 0x{vaddr:x} 落在任何 PT_LOAD 之外")
@@ -5535,7 +5922,18 @@ class SharedObject:
             return strtab[off:end].decode("utf-8", "replace")
 
         # 没有 SONAME 的共享对象，`DT_NEEDED` 得写**它本来的文件名**（loader 按那个找）。
-        self.soname = dstr(dt[self.DT_SONAME]) if self.DT_SONAME in dt else path.name
+        # **`DT_SONAME` 存在但为空是一个独立的坏形态**（`#641`）：原先只分"有没有这个
+        # tag"，于是 `DT_NEEDED=""` 被写进产物 —— loader 匹配不上任何库，构建却报成功。
+        if self.DT_SONAME in dt:
+            soname = dstr(dt[self.DT_SONAME])
+            if not soname:
+                raise Unsupported(
+                    f"{path.name}: DT_SONAME is present but empty —— DT_NEEDED would be "
+                    f"an empty string, which the loader cannot match to any library; "
+                    f"rebuild it with -Wl,-soname,libfoo.so.1")
+            self.soname = soname
+        else:
+            self.soname = path.name
         if e_shnum == 0:
             # 条数能从 `DT_HASH` 拿，但**版本表**在节头里；被 strip 掉的 `.so` 这一版还不读。
             raise Unsupported(
@@ -5547,10 +5945,11 @@ class SharedObject:
         need(e_shoff, e_shnum * e_shentsize, "节头表")
         for k in range(e_shnum):
             so = e_shoff + k * e_shentsize
-            nameoff, typ, _fl2, _addr, off, size, link, info, _a2, entsize = \
+            nameoff, typ, flags, _addr, off, size, link, info, _a2, entsize = \
                 struct.unpack_from("<IIQQQQIIQQ", raw, so)
-            secs.append({"nameoff": nameoff, "type": typ, "off": off, "size": size,
-                         "link": link, "info": info, "entsize": entsize, "name": ""})
+            secs.append({"nameoff": nameoff, "type": typ, "flags": flags, "off": off,
+                         "size": size, "link": link, "info": info, "entsize": entsize,
+                         "name": ""})
         if e_shstrndx >= len(secs):
             raise Unsupported(
                 f"{path.name}: e_shstrndx={e_shstrndx} 越界（只有 {len(secs)} 个节头）")
@@ -5618,17 +6017,23 @@ class SharedObject:
         #: 导出表：名字 -> (kind, 是不是**默认**版本)。
         self.exports: dict[str, tuple[str, bool]] = {}
         self.versions: dict[str, str] = {}
+        #: 名字 -> `hidden` / `internal` —— 在 `.dynsym` 里，但 loader **不会**给外人绑定。
+        #: 单独记一份，只为了 `resolve()` 被问到时能说出原因（`#642`）。
+        self.hidden: dict[str, str] = {}
         # ⚠ 别叫 `n`：上面那个 `n` 是**文件长度**，`need()` 闭包读的正是它。
         # 这里覆盖掉的话，越界检查会拿"符号条数"去比文件长度 —— 检查还在，但比错了东西。
         nsym = dynsym["size"] // 24
         for k in range(1, nsym):
             so2 = dynsym["off"] + k * 24
-            st_name, st_info, _other, st_shndx, _value, _size = \
+            st_name, st_info, st_other, st_shndx, st_value, _size = \
                 struct.unpack_from("<IBBHQQ", raw, so2)
             if st_shndx == 0 or st_name == 0:                   # 它自己的依赖，不是它的导出
                 continue
             bind, typ = st_info >> 4, st_info & 0x0F
-            if bind not in (1, 2) or typ not in (1, 2):         # GLOBAL/WEAK 的 OBJECT/FUNC
+            # GLOBAL/WEAK 的 OBJECT(1) / FUNC(2) / IFUNC(10)。**IFUNC 必须算函数导出**：
+            # glibc 的 `strlen` / `memcpy` 就是 IFUNC（`STT_GNU_IFUNC`），loader 的
+            # `JUMP_SLOT` 解析会调它的 resolver 拿到实现 —— 对它来说与普通函数没差别。
+            if bind not in (1, 2) or typ not in (1, 2, 10):
                 continue
             end = dstrtab.find(b"\x00", st_name)
             if st_name >= len(dstrtab) or end < 0:
@@ -5636,10 +6041,43 @@ class SharedObject:
                     f"{path.name}: .dynsym 第 {k} 项的 st_name={st_name} 越出 .dynstr "
                     f"（表长 {len(dstrtab)}）")
             nm = dstrtab[st_name:end].decode("utf-8", "replace")
+            # **可见性**（`#642`）：`STV_HIDDEN` / `STV_INTERNAL` 的符号也在 `.dynsym` 里，
+            # 但 loader 只允许本对象内部绑定。把它们当成导出，构建会成功、加载时却
+            # `undefined symbol`。`STV_PROTECTED`(3) 仍然可以跨对象绑定，照收。
+            vis = st_other & 0x3
+            if vis in (1, 2):
+                self.hidden[nm] = "hidden" if vis == 2 else "internal"
+                continue
+            # **st_value 必须落在映像里**（`#643`）：导出表证明"这个名字存在"，但没证明
+            # "它指向一段被映射的内存" —— 越界的值绑上去，第一条 call 就跳到未映射地址。
+            # SHN_ABS 的 **OBJECT** 是版本标记（`ZLIB_1.2.2` / `GLIBC_2.10`，value=0），
+            # 合法且不在任何段里；ABS 的 FUNC 仍然要过下面的地址检查。
+            if not (st_shndx == 0xFFF1 and typ == 1):
+                if st_shndx >= len(secs):
+                    raise Unsupported(
+                        f"{path.name}: export {nm} has st_shndx={st_shndx}, which is "
+                        f"not a section of this object")
+                sec = secs[st_shndx]
+                if not (sec["flags"] & 0x2):                  # SHF_ALLOC
+                    raise Unsupported(
+                        f"{path.name}: export {nm} is defined in section "
+                        f"{sec['name'] or st_shndx}, which is not allocated at run time")
+                if not any(v <= st_value < v + mem
+                           for v, _off, _fs, mem, _fl in loads):
+                    raise Unsupported(
+                        f"{path.name}: export {nm} has st_value=0x{st_value:x}, which is "
+                        f"outside every PT_LOAD —— calling it would jump to an unmapped "
+                        f"address")
+                if typ == 2 and not any(v <= st_value < v + mem and (fl & 0x1)
+                                        for v, _off, _fs, mem, fl in loads):
+                    raise Unsupported(
+                        f"{path.name}: function export {nm} has st_value="
+                        f"0x{st_value:x} in a non-executable segment —— calling it "
+                        f"would fault")
             hidden = bool(versym[k] & 0x8000) if k < len(versym) else False
             # 同名可能有多条（不同版本）：**默认版本优先**，非默认的不覆盖它。
             if nm not in self.exports or (self.exports[nm][1] is False and not hidden):
-                self.exports[nm] = ("func" if typ == 2 else "object", not hidden)
+                self.exports[nm] = ("func" if typ in (2, 10) else "object", not hidden)
             if k < len(versym) and (versym[k] & 0x7FFF) > 1:
                 self.versions.setdefault(nm, vnames.get(versym[k] & 0x7FFF, "?"))
         if not self.exports:
@@ -5654,6 +6092,11 @@ class SharedObject:
         """
         e = self.exports.get(name)
         if e is None:
+            if name in self.hidden:
+                raise Unsupported(
+                    f"{self.soname}: {name} is in .dynsym but has "
+                    f"{self.hidden[name]} visibility —— the loader does not bind it "
+                    f"from outside the object, so this import would fail at load time")
             raise Unsupported(
                 f"{self.soname}: 没有导出 {name} —— 动态链接只在导出表里找名字，"
                 f"库里没有这个名字，产物一定加载不起来")
@@ -5712,56 +6155,33 @@ _TLS_SIZE = 256
 
 
 def compile_ll(text: str, objects: list | None = None,
-               allow_ports: bool = False) -> tuple[bytes, dict]:
+               allow_ports: bool = False, interp: str | None = None) -> tuple[bytes, dict]:
     objects = objects or []
     global TEXT_VADDR, DATA_VADDR
     TEXT_VADDR, DATA_VADDR = ELF_TEXT_VADDR, ELF_DATA_VADDR   # PE 目标会改这两个全局
     globals_, funcs, externs = parse_ll(text)
+    # **先把三种输入分开**（`#616`）：归档要展开、共享对象只提供导出表、其余才是要摆的
+    # `.o`。以前这一步先做归档展开、后滤共享对象 —— 而展开时要读 `o.undefined`，
+    # `SharedObject` 没有那个字段，于是 `--link libz.so --link libfoo.a` 直接抛
+    # `AttributeError`（用户看到 Python 栈，不是诊断）。
+    shared = [o for o in objects if isinstance(o, SharedObject)]
+    archives = [o for o in objects if isinstance(o, Archive)]
+    direct = [o for o in objects if not isinstance(o, (Archive, SharedObject))]
     # 归档展开 (docs/173 阶段 2): 先算出"当前需要的符号", 再让每个归档按固定点挑成员。
     # 需求有两个来源: ① 我们自己 `declare` 的外部符号; ② 直接给的 `.o` 里未定义的符号。
     # 两者都要, 因为真实库里常常是"我的 a.o 引用 ar 成员里的 b"。
-    if any(isinstance(o, Archive) for o in objects):
+    objects = list(direct)
+    if archives:
         need = {x for x in externs if not x.startswith("llvm.")}
-        direct = [o for o in objects if not isinstance(o, Archive)]
         for o in direct:
             need |= set(o.undefined)
-        flat = list(direct)
-        for a in objects:
-            if isinstance(a, Archive):
-                flat += a.select(need)
-        objects = flat
-    # **端口门**（2026-10-12 用户定：0.1.4.5 里 libc 不可调用）。带**未定义符号**的外源
-    # 对象就是"这份产物有通向世界的端口"（`docs/222` §4 那一维的价），而那条路 —— 真 libc /
-    # 真共享库 —— **还没完工**（`docs/219` §8b 的 S2：静态那一半 2026-10-15 落齐了，
-    # 动态那一半是 #360），所以链接器**默认不收**，
-    # 只有显式 `--allow-ports` 才收（开发通道与判据用它；启动器只在 dev 传它）。
-    #
-    # **自闭合的对象不受影响**：没有未定义符号 ⇒ 走不过这一条。那正是 `docs/173` 一直在发
-    # 的 FFI 形状，`docs/177` 那 10 个语言全在它上面 —— 这扇门关的是 libc，不是 FFI。
-    #
-    # 判据是 `objects` 里那批对象的 `undefined`（归档在这一步之前已经按定点挑完成员，
-    # 所以挑中的成员也在这里面）。名字排序只为**报文稳定**，与谁提供什么无关。
-    # 共享对象**不参与布局**（`docs/183` V2）：没人把 `.so` 的字节搬进产物 —— 它只提供
-    # "这些名字在运行期由谁给"，产物里留下的是 `DT_NEEDED` 与 PLT。布局那几趟只看 `.o`。
-    shared = [o for o in objects if isinstance(o, SharedObject)]
-    objects = [o for o in objects if not isinstance(o, SharedObject)]
-    if not allow_ports:
-        ported = sorted({nm for o in objects for nm in o.undefined})
-        if ported or shared:
-            # 一条共享对象本身就是"这份产物要在运行期往外要东西"—— 比带未定义符号的 `.o` 更明确。
-            shown = ", ".join(ported[:6]) + ("…" if len(ported) > 6 else "") \
-                if ported else "（共享对象：" + ", ".join(s.soname for s in shared) + "）"
-            raise Unsupported(
-                f"这份产物带了通向世界的端口：{shown} —— 链接器默认不收。"
-                f"**链接器不知道渠道**（它是一只被启动器调起来的独立工具），所以默认永远是拒；"
-                f"启动器在两个渠道都传 `--allow-ports`（`#406` 开闸，2026-10-17）。"
-                f"自己调链接器时要它就得显式写 `--allow-ports`；"
-                f"自闭合的对象（没有未定义符号、不链共享对象）不受这条影响")
-    if len(shared) > 1:
-        # 多个 `.so` 要各自的 `DT_NEEDED` 与顺序规则（谁先满足谁）—— 这一版先只做**一个**，
-        # 而不是"先写进去再说"。
-        raise Unsupported(
-            "一次只能链**一个**共享对象：" + ", ".join(s.soname for s in shared))
+        for a in archives:
+            objects += a.select(need)
+    # **端口门**在**所有标签立完之后**判（`#615`）：那时"还剩什么解析不到"才是真正的
+    # 端口。判在展开这一步会把"a.o 调 g、b.o 定义 g"这种自闭合组合也拒掉。
+    # **多个共享对象**（`#596`）：每个一个 `DT_NEEDED`，导入按 `--link` 顺序解析
+    # （第一个导出它的库胜出）。`docs/219` 让用户同时链 `libz.so.1` 与 `libc.so.6`
+    # 拿 `malloc`/`printf`，原先那条命令必然失败。
     # 全局布局: bytes 在 data, 全零在 bss
     data = bytearray()
     bss = 0
@@ -5776,13 +6196,30 @@ def compile_ll(text: str, objects: list | None = None,
     # **外部对象的数据节**（`docs/219` §8b 第 1 条）：接在我们自己的全局**之后**、
     # bss **之前**。顺序不能换 —— bss 的地址是在这一趟**之后**才算的
     # （`len(data) + bss`），先算 bss 再追加数据会让两者撞在一起。
-    # 16 对齐：取各节自己对齐要求的上界，简单且安全（多出来的零字节是代价，不是错）。
+    # 每个对象的数据块按它**自己的对齐要求**（`sh_addralign` 的上界，至少 16）落位。
+    # 只对齐到 16 是不够的：对象里那个 `.rodata.cst32` 相对块首是 32 对齐，而块首
+    # 落在 `16 (mod 32)` 时它就成了 `16 (mod 32)` —— AVX 的 `vmovdqa` 当场 #GP（`#612`）。
     dbases: list[int] = []
     for obj in objects:
-        while len(data) % 16:
+        a = max(16, getattr(obj, "data_align", 16))
+        while len(data) % a:
             data.append(0)
         dbases.append(len(data))
         data += obj.data
+    # **静态 GOT**（`#609`）：`-fPIC` 对象用 `GOTPCREL` / `*_GOTPCRELX` 说"地址在这个
+    # GOT 槽里，相对 PC"。我们在数据段里造这些槽，内容就是符号地址；不做 `mov`->`lea`
+    # 的松弛也**仍然正确** —— 多一次取存，少一条路径。
+    got_names: list[str] = []
+    for obj in objects:
+        for _sec, _off, ty, nm, _add in obj.relocs:
+            if ty in (REL_GOTPCREL, REL_GOTPCRELX, REL_REX_GOTPCRELX) \
+                    and nm not in got_names:
+                got_names.append(nm)
+    got_names.sort()
+    got_off = align_up(len(data), 8)
+    got_addr = {nm: DATA_VADDR + got_off + 8 * k for k, nm in enumerate(got_names)}
+    if got_names:
+        data += bytes(8 * len(got_names))
     # **TLS 块**（`docs/219` S2）：`-fstack-protector` 编出来的库（发行版的 zlib 就是）
     # 会读 **`fs:0x28`** 取栈金丝雀。我们**没有 TLS**，`fs` 是 0 —— 那就是去读地址 `0x28`，
     # 未映射 ⇒ **一进去就段错误**。所以带外部对象时给一小块 TLS，入口用
@@ -5791,12 +6228,48 @@ def compile_ll(text: str, objects: list | None = None,
     # 金丝雀**不需要是随机数**：函数入口把它存到栈上、出口比一次，中间没人改 ⇒ 永远相等。
     # 这块只要**存在且可读写**就够了。**谁都不该调到 `__stack_chk_fail`** —— 调到了说明
     # 栈真被踩了，那时响亮地死（`ud2`）才对。
+    #
+    # **有 `SHF_TLS` 节时**（`#610`）块要按真正的 TLS 布局来：`.tdata` 在前、`.tbss` 在后，
+    # 线程指针（`fs`）指**块尾**（x86-64 的 variant II —— `TPOFF` 因此是负偏移），块尾之后
+    # 留 0x40 字节给 TCB / `fs:0x28` 的栈金丝雀。`TPOFF32/64` 的重定位就落在这个布局上。
     tls_addr = 0
+    tls_base = 0
+    tls_bases: list[int] = []
+    has_tls = any(obj.tls for obj in objects)
+    if has_tls and shared:
+        # 动态链接时 `fs` 归 loader 管，我们不再装自己的 TLS 块；此时给 `.o` 里的
+        # `TPOFF` 算偏移就没有"我们的线程指针"可指 —— 宁可点名拒，不静默算错。
+        raise Unsupported(
+            "带 TLS 的外部 `.o` 与共享对象一起链 —— 这一版的 TLS 块只在自立产物里安装，"
+            "动态链接时 `fs` 归 loader 管（`#610`）")
     if objects and not shared:
-        while len(data) % 16:
-            data.append(0)
-        tls_addr = DATA_VADDR + len(data)
-        data += bytes(_TLS_SIZE)
+        if has_tls:
+            a = max(16, max(obj.tls_align for obj in objects))
+            while len(data) % a:
+                data.append(0)
+            tls_base = DATA_VADDR + len(data)
+            cur = 0
+            parts = bytearray()
+            for obj in objects:
+                a2 = max(1, obj.tls_align)
+                while cur % a2:
+                    parts.append(0)
+                    cur += 1
+                tls_bases.append(cur)
+                parts += obj.tls
+                cur += len(obj.tls)
+            # TP 要 16 对齐（TCB 的 SSE 状态按这个假设放）；补零只影响内存布局。
+            while cur % 16:
+                parts.append(0)
+                cur += 1
+            data += parts
+            tls_addr = tls_base + cur          # TP = 块尾（variant II）
+            data += bytes(0x40)                # TCB + fs:0x28 的金丝雀槽
+        else:
+            while len(data) % 16:
+                data.append(0)
+            tls_addr = DATA_VADDR + len(data)
+            data += bytes(_TLS_SIZE)
     # **数据长度要 8 对齐再往下算**：自举侧是 `align_to(cell(tab, C_GB), 8)`，
     # 它按那个长度放 bss、也按那个长度写段大小 —— 这里不对齐就会在"bss 的地址"与
     # "数据段字节数"两处各差一截（实测差 2 字节：`filesz=22` vs `24`）。
@@ -5830,7 +6303,27 @@ def compile_ll(text: str, objects: list | None = None,
         em.asm.labels["__loment_tls"] = tls_addr
     if not any(f.name == "_start" for f in funcs):
         raise Unsupported("没有 _start 入口（原生产物 v0 需要一个用户态入口）")
-    em.emit_entry_stub("_start", tls=has_foreign)
+    # 构造函数表的位置（`#611`）：表本身已经摆在 `data` 里，这里只把首尾地址立成标签，
+    # 入口桩按它们走表。一个对象都没有时 `ctor_ranges` 为空，桩里一条指令都不多。
+    ctor_ranges: list[tuple[int, int]] = []
+    fini_ranges: list[tuple[int, int]] = []
+    for i, obj in enumerate(objects):
+        for doff, size in obj.ctors:
+            ctor_ranges.append((DATA_VADDR + dbases[i] + doff, size))
+        for doff, size in obj.finis:
+            fini_ranges.append((DATA_VADDR + dbases[i] + doff, size))
+    for j, (cstart, csize) in enumerate(ctor_ranges):
+        em.asm.labels[f"__loment_ctor_{j}"] = cstart
+        em.asm.labels[f"__loment_ctor_end_{j}"] = cstart + csize
+    for j, (fstart, fsize) in enumerate(fini_ranges):
+        em.asm.labels[f"__loment_fini_{j}"] = fstart
+        em.asm.labels[f"__loment_fini_end_{j}"] = fstart + fsize
+    # **出口**：链了共享对象、而它导出了 `exit` 时走 libc（`#605`）；否则保持 `syscall(60)`。
+    # 用"导出表里有没有 `exit`"而不是"有没有共享对象"：只有 libz 的产物没有 stdio 要刷，
+    # 也就不该凭空多出一条导入。
+    call_exit = any("exit" in so.exports for so in shared)
+    em.emit_entry_stub("_start", tls=has_foreign, ctors=len(ctor_ranges),
+                       finis=len(fini_ranges), call_exit=call_exit)
     for f in funcs:
         em.emit_func(f)
     # **收编面**（`docs/219` §6）：链里带了外部对象，就把"可闭合"那几个名字提供出来，
@@ -5847,97 +6340,218 @@ def compile_ll(text: str, objects: list | None = None,
     # 调用点照旧走现有的 `call`/fixup 机制 (唯一多出来的是"参数进寄存器", 见 `Emitter._call`)。
     bases: list[int] = []
     appended: list[str] = []
+    #: 对象提供的定义来自哪个绑定（0 LOCL / 1 GLOB / 2 WEAK）。`em.asm.labels` 里没有它
+    #: 就说明那个名字是我们自己的（IR/收编面）—— 那是**不可覆盖**的。
+    obj_binds: dict[str, int] = {}
+
+    def place(nm: str, addr: int, bind: int, owner: str) -> None:
+        """登记一个对象符号，同时执行**强盖弱 + 双强报错**（`#618`）。"""
+        if nm in em.asm.labels:
+            prev = obj_binds.get(nm)
+            if prev is None:
+                return              # 我们自己的标签/收编面优先（docs/219 §6）
+            if prev == 2 and bind != 2:
+                em.asm.labels[nm] = addr       # 强定义盖过先来的弱定义
+                obj_binds[nm] = bind
+                appended.append(nm)
+            elif prev != 2 and bind != 2:
+                raise Unsupported(
+                    f"{owner}: 符号 {nm} 重复定义 —— 已经有一个强定义来自别的对象")
+            # 弱 + 弱 / 强 + 弱: 先来的为准
+            return
+        em.asm.labels[nm] = addr
+        obj_binds[nm] = bind
+        appended.append(nm)
+
     for i, obj in enumerate(objects):
-        while len(em.asm.buf) % 16:
+        a = max(16, getattr(obj, "text_align", 16))
+        while len(em.asm.buf) % a:
             em.asm.buf.append(0)
         bases.append(len(em.asm.buf))
+        seen: set[str] = set()
         for nm, val in obj.syms.items():
-            if nm in em.asm.labels:
-                continue          # 我们 (或先摆的那个对象) 已经有它: 以先来的为准
-            em.asm.labels[nm] = TEXT_VADDR + bases[-1] + val
-            appended.append(nm)
+            if nm in seen:
+                continue
+            seen.add(nm)
+            place(nm, TEXT_VADDR + bases[-1] + val, obj.binds.get(nm, 1), obj.name)
+        # `SHN_ABS` 的定义：地址就是 `st_value`，与段基址无关（`#619`）。
+        for nm, val in obj.absyms.items():
+            if nm in seen:
+                continue
+            seen.add(nm)
+            place(nm, val, obj.binds.get(nm, 1), obj.name)
         # 数据节里的符号（含**局部**，见 `ForeignObject._load`）：地址落在 DATA 段。
         for nm, val in obj.dsyms.items():
-            if nm in em.asm.labels:
+            if nm in seen:
                 continue
-            em.asm.labels[nm] = DATA_VADDR + dbases[i] + val
-            appended.append(nm)
+            seen.add(nm)
+            place(nm, DATA_VADDR + dbases[i] + val, obj.binds.get(nm, 1), obj.name)
+        # TLS 符号：地址 = TLS 块基址 + 该对象在块里的起点 + 节内偏移（`#610`）。
+        if has_tls:
+            for nm, val in obj.tsyms.items():
+                if nm in em.asm.labels:
+                    continue
+                em.asm.labels[nm] = tls_base + tls_bases[i] + val
+                appended.append(nm)
         em.asm.buf += obj.text
+    # **端口门**（2026-10-12 用户定：0.1.4.5 里 libc 不可调用）。
+    #
+    # ⚠ 判的是**解析之后还剩什么**（`#615`）：以前拿每个对象自己的 `undefined` 清单来判，
+    # 于是 `a.o` 调 `g`、`b.o` 定义 `g` 的普通组合也被当成"通向世界"；对象调
+    # `memcpy`/`malloc`（收编面会提供）同样被冤枉。现在只有**标签表里仍然没有**的名字
+    # 才算端口 —— 与"最后会不会变成导入/未定义"是同一件事。
+    if not allow_ports:
+        ported = sorted({nm for o in objects for nm in o.undefined
+                         if nm not in em.asm.labels})
+        if ported or shared:
+            # 一条共享对象本身就是"这份产物要在运行期往外要东西"—— 比带未定义符号的 `.o` 更明确。
+            shown = ", ".join(ported[:6]) + ("…" if len(ported) > 6 else "") \
+                if ported else "（共享对象：" + ", ".join(s.soname for s in shared) + "）"
+            raise Unsupported(
+                f"这份产物带了通向世界的端口：{shown} —— 链接器默认不收。"
+                f"**链接器不知道渠道**（它是一只被启动器调起来的独立工具），所以默认永远是拒；"
+                f"启动器在两个渠道都传 `--allow-ports`（`#406` 开闸，2026-10-17）。"
+                f"自己调链接器时要它就得显式写 `--allow-ports`；"
+                f"自闭合的对象（没有未定义符号、不链共享对象）不受这条影响")
+    # ---- V2（`docs/183` §4）：链了共享对象 ⇒ 产物是**动态链接**的。
+    #
+    # 此时"未定义的标签"不是错：它们要是共享对象的导出，就变成**导入** —— 我们发一个 PLT 桩，
+    # 桩的地址就是那个标签的地址，运行期由 loader 把真实的函数地址填进 GOT。
+    # 名字**不在导出表里**才报错，而且**报到链接期**（不是留给运行时崩）。
+    #
+    # **导入集合必须在应用对象重定位之前立好**（`#627`）：`helper.o` 的重定位指向
+    # `libz.so` 的导出时，那个标签只有 PLT 桩能提供；先应用重定位就会以"未定义的符号"失败。
+    dyn_info = None
+    imported: list[str] = []
+    if shared:
+        # ① 我们自己 IR 里**走 extern 路径**发出的 call（`#630`）：只有这些该变成导入。
+        #    没有 `declare` 的调用留在 `rel`，finalize 仍按"未定义的标签"报错 —— 它发的是
+        #    Loment 的栈约定，绑到 PLT 上等于让 C 读垃圾实参。
+        imports = {lbl for _site, lbl, _w, k in em.asm.fixups
+                   if k == "ext" and lbl not in em.asm.labels}
+        # ② 外部对象自己的未定义引用（`#627`）。对象是 C 代码，按定义就是 C ABI。
+        imports.update(nm for o in objects for nm in o.undefined
+                       if nm not in em.asm.labels)
+        # 弱未定义引用只有在 `.so` **确实导出**它时才绑过去；否则按 `#617` 写 0。
+        exports_any = {n for so in shared for n in so.exports}
+        imports.update(nm for o in objects for nm in o.weak_undefined
+                       if nm not in em.asm.labels and nm in exports_any)
+        # 入口桩在 V2 走 `exit(3)`（`#605`）时那条调用的 kind 不是 `ext` —— 显式补进来，
+        # 否则它会以"未定义的标签"落空（`tests` 抓到的 `${exit}`）。
+        if call_exit:
+            imports.add("exit")
+        imports = sorted(imports)
+        for nm in imports:
+            # **hidden 也是"这个库里有这个名字"**（`#642`）：选 owner 时把它算进来，
+            # 好让 `resolve()` 给出"它藏着，loader 不会跨对象绑定"那句 —— 否则用户拿到
+            # 的是"没有导出"，方向完全指错（名字明明在 `.dynsym` 里）。
+            owner = next((so for so in shared
+                          if nm in so.exports or nm in so.hidden), None)
+            if owner is None:
+                raise Unsupported(
+                    ", ".join(so.soname for so in shared)
+                    + f": 没有导出 {nm} —— 运行期没人能提供它")
+            owner.resolve(nm)
+        # PLT 接在**代码之后**：`finalize()` 只回填、不改长度，所以现在就能算出桩的地址并
+        # 登记成标签（重定位与回填因此能指到桩上），finalize 之后再按同一长度把它接上。
+        tail_vaddr = align_up(DATA_VADDR + len(data) + bss, 0x1000)
+        text_tail, tail, plt_labels, dyn_info = build_dynamic_tables(
+            TEXT_VADDR, len(em.asm.buf), tail_vaddr, imports,
+            [so.soname for so in shared], resolve_interp(interp))
+        for nm, at in plt_labels.items():
+            em.asm.labels[nm] = at
+        imported = imports
+    # **GOT 槽的内容 = 符号地址**（`#609`）。槽的**地址**在布局时就定了，内容要等所有
+    # 标签立完才知道 —— 所以填在这里、重定位应用之前。（合并 #618–#620 那一轮时这条
+    # 被漏掉过：PIC 产物照样链接、跑起来在第一条 `mov [rip+GOT]` 上段错误。）
+    for nm, at in got_addr.items():
+        if nm in em.asm.labels:
+            struct.pack_into("<Q", data, at - DATA_VADDR, em.asm.labels[nm])
     applied = 0
+
+    def reloc_value(ty: int, val: int, here: int, where: str) -> bytes:
+        """把一个重定位的**结果**编成要写进去的字节（`S + A` / `S + A - P`）。"""
+        if ty in (REL_PC32, REL_PLT32):
+            rel = val - here
+            if not -2 ** 31 <= rel < 2 ** 31:
+                raise Unsupported(f"{where}: PC32 重定位溢出")
+            return struct.pack("<i", rel)
+        if ty == REL_PC64:
+            return struct.pack("<q", val - here)
+        if ty == REL_64:
+            return struct.pack("<Q", val & 0xFFFFFFFFFFFFFFFF)
+        return struct.pack("<I", val & 0xFFFFFFFF)     # REL_32 / REL_32S
+
+    def zero_fixup(ty: int) -> bytes:
+        """弱未定义引用解析不到时的值：0（`#617`）。"""
+        if ty in (REL_PC32, REL_PLT32):
+            return struct.pack("<i", 0)
+        if ty == REL_PC64:
+            return struct.pack("<q", 0)
+        if ty == REL_64:
+            return struct.pack("<Q", 0)
+        return struct.pack("<I", 0)
+
     for i, obj in enumerate(objects):
         base = TEXT_VADDR + bases[i]
         for sec, r_off, ty, nm, add in obj.relocs:
             target = em.asm.labels.get(nm)
+            site = bases[i] + obj.sec_at[sec] + r_off     # 写进缓冲的位置 (缓冲内偏移)
+            here = base + obj.sec_at[sec] + r_off         # 公式里的 P (绝对地址)
             if target is None:
+                # **弱引用不是错误**：C 的语义是绑 0（`#617`）。强引用才是"没人定义"。
+                if nm in obj.weak_undefined:
+                    raw = zero_fixup(ty)
+                    em.asm.buf[site:site + len(raw)] = raw
+                    applied += 1
+                    continue
                 # **到这一步才判"没人定义"**: 这是多目标文件 C 库与"引用 libc"的分界线 ——
                 # 前者由另一个对象提供, 后者到链接结束都空着。
                 raise Unsupported(
                     f"{obj.name}: 引用了未定义的符号 {nm} —— 到链接结束都没人提供它"
                     f" (第 2 阶段仍不链 libc, docs/173 §3)")
-            site = bases[i] + obj.sec_at[sec] + r_off     # 写进缓冲的位置 (缓冲内偏移)
-            here = base + obj.sec_at[sec] + r_off         # 公式里的 P (绝对地址)
             val = target + add                            # 公式里的 S + A
-            if ty in (REL_PC32, REL_PLT32):
-                rel = val - here
+            # **GOTPCREL**（`#609`）：值是 GOT 槽相对 PC 的偏移，不是 S+A-P。
+            if ty in (REL_GOTPCREL, REL_GOTPCRELX, REL_REX_GOTPCRELX):
+                rel = got_addr[nm] + add - here
                 if not -2 ** 31 <= rel < 2 ** 31:
-                    raise Unsupported(f"{obj.name}: PC32 重定位溢出 ({nm})")
-                struct.pack_into("<i", em.asm.buf, site, rel)
-            elif ty == REL_PC64:
-                struct.pack_into("<q", em.asm.buf, site, val - here)
-            elif ty == REL_64:
-                struct.pack_into("<Q", em.asm.buf, site, val & 0xFFFFFFFFFFFFFFFF)
-            else:                                          # REL_32 / REL_32S
-                struct.pack_into("<I", em.asm.buf, site, val & 0xFFFFFFFF)
+                    raise Unsupported(f"{obj.name}: GOTPCREL 重定位溢出 ({nm})")
+                em.asm.buf[site:site + 4] = struct.pack("<i", rel)
+                applied += 1
+                continue
+            # **TLS**（`#610`）：`S + A - TP`，TP 是 TLS 块尾（variant II），所以是负值。
+            if ty == REL_TPOFF32:
+                em.asm.buf[site:site + 4] = struct.pack("<i", val - tls_addr)
+                applied += 1
+                continue
+            if ty == REL_TPOFF64:
+                em.asm.buf[site:site + 8] = struct.pack("<q", val - tls_addr)
+                applied += 1
+                continue
+            raw = reloc_value(ty, val, here, f"{obj.name}: {nm}")
+            em.asm.buf[site:site + len(raw)] = raw
             applied += 1
     # **落在数据节上的重定位**：算的是同一套 `S + A` / `S + A - P`，只是**写进 DATA**
     # 而不是代码缓冲（`.data.rel.ro` 里的函数指针表、指向字符串的 `const char *` 都是这一类）。
     for i, obj in enumerate(objects):
         for sec, r_off, ty, nm, add in obj.drelocs:
             target = em.asm.labels.get(nm)
+            site = dbases[i] + obj.dsec_at[sec] + r_off
+            here = DATA_VADDR + site
             if target is None:
+                if nm in obj.weak_undefined:
+                    raw = zero_fixup(ty)
+                    data[site:site + len(raw)] = raw
+                    applied += 1
+                    continue
                 raise Unsupported(
                     f"{obj.name}: 引用了未定义的符号 {nm} —— 到链接结束都没人提供它"
                     f" (第 2 阶段仍不链 libc, docs/173 §3)")
-            site = dbases[i] + obj.dsec_at[sec] + r_off
-            here = DATA_VADDR + site
             val = target + add
-            if ty in (REL_PC32, REL_PLT32):
-                rel = val - here
-                if not -2 ** 31 <= rel < 2 ** 31:
-                    raise Unsupported(f"{obj.name}: 数据节的 PC32 重定位溢出 ({nm})")
-                struct.pack_into("<i", data, site, rel)
-            elif ty == REL_PC64:
-                struct.pack_into("<q", data, site, val - here)
-            elif ty == REL_64:
-                struct.pack_into("<Q", data, site, val & 0xFFFFFFFFFFFFFFFF)
-            else:                                          # REL_32 / REL_32S
-                struct.pack_into("<I", data, site, val & 0xFFFFFFFF)
+            raw = reloc_value(ty, val, here, f"{obj.name}: 数据节的 {nm}")
+            data[site:site + len(raw)] = raw
             applied += 1
-    # ---- V2（`docs/183` §4）：链了共享对象 ⇒ 产物是**动态链接**的。
-    #
-    # 此时"未定义的标签"不是错：它们要是共享对象的导出，就变成**导入** —— 我们发一个 PLT 桩，
-    # 桩的地址就是那个标签的地址，运行期由 loader 把真实的函数地址填进 GOT。
-    # 名字**不在导出表里**才报错，而且**报到链接期**（不是留给运行时崩）。
-    dyn_info = None
-    imported: list[str] = []
-    if shared:
-        so = shared[0]
-        # 标签 -> 是不是"我们自己的"（`em.asm.labels` 里有的就是定义）。
-        imports = sorted({lbl for _site, lbl, _w, _k in em.asm.fixups
-                          if lbl not in em.asm.labels})
-        for nm in imports:
-            so.resolve(nm)
-        # PLT 接在**代码之后**：`finalize()` 只回填、不改长度，所以现在就能算出桩的地址并
-        # 登记成标签（回填因此能指到桩上），finalize 之后再按同一长度把它接上。
-        tail_vaddr = align_up(DATA_VADDR + len(data) + bss, 0x1000)
-        text_tail, tail, plt_labels, dyn_info = build_dynamic_tables(
-            TEXT_VADDR, len(em.asm.buf), tail_vaddr, imports, so.soname)
-        for nm, at in plt_labels.items():
-            em.asm.labels[nm] = at
-        imported = imports
-        text = em.asm.finalize() + text_tail
-    else:
-        text = em.asm.finalize()
+    text = em.asm.finalize() + (text_tail if dyn_info is not None else b"")
 
     # **文本段的容量是明写的**（`docs/253`）：数据段钉在 `TEXT_VADDR + TEXT_CAP`，
     # 所以文本一旦超过 `TEXT_CAP` 就会盖到数据段上 —— 而**盖上去不报错**，产物一启动就
@@ -5969,6 +6583,7 @@ def main(argv: list[str] | None = None) -> int:
         return dump_win_shim(argv[1])
     out, check, target = None, False, "elf"
     allow_ports = False
+    interp = None
     files: list[str] = []
     link: list[Path] = []
     i = 0
@@ -5977,6 +6592,10 @@ def main(argv: list[str] | None = None) -> int:
         if a in ("-o", "--out"):
             i += 1
             out = argv[i]
+        elif a == "--interp":
+            # 目标系统的 loader 路径（`#604`）：musl / Nix / 非标准布局靠它。
+            i += 1
+            interp = argv[i]
         elif a == "--target":
             i += 1
             target = argv[i]
@@ -5993,7 +6612,7 @@ def main(argv: list[str] | None = None) -> int:
         i += 1
     if len(files) != 1 or target not in ("elf", "pe"):
         print("用法: lomelf.py IN.ll [-o OUT] [--target elf|pe] [--check]"
-              " [--link OBJ.o ...] [--allow-ports]", file=sys.stderr)
+              " [--link OBJ.o ...] [--allow-ports] [--interp PATH]", file=sys.stderr)
         return 2
     if link and target == "pe":
         print("[ERR] --link 目前只支持 ELF 目标 (docs/173 §3)", file=sys.stderr)
@@ -6003,7 +6622,7 @@ def main(argv: list[str] | None = None) -> int:
         objs = [load_foreign(p) for p in link]
         blob, info = (compile_pe if target == "pe" else compile_ll)(
             src.read_text(encoding="utf-8"),
-            *(() if target == "pe" else (objs, allow_ports)))
+            *(() if target == "pe" else (objs, allow_ports, interp)))
     except Unsupported as e:
         print(f"[ERR] {e}", file=sys.stderr)
         return 1
@@ -6018,7 +6637,6 @@ def main(argv: list[str] | None = None) -> int:
     # **写不出去要说话，而且要说清是哪个路径**（`issue #8`）。这里原先是一句**裸写**：
     # 目录不存在就是没接住的 `OSError`，用户拿到 Python 栈 —— 而"父目录没建"这条
     # 看一眼路径就明白。自举侧那一半（`loment/tools/lomelf.lomt`）同一条口径，码是 E029。
-    import os
     try:
         Path(out).write_bytes(blob)
         os.chmod(out, 0o755)

@@ -2703,13 +2703,13 @@ def test_the_mirror_linker_refuses_ports_without_the_dev_flag():
 #:     —— 否则 L0 会把 `alloc(<字面量>)` 提到栈上、L2 会把循环体里那份回卷，测到的就
 #:     不是清扫了；
 #:   * 逼出**两次**收集：`#366` 丢块发生在**第二次**（第一次时链表是空的，丢了也看不出来）。
-#: 触发用的请求是 `BIG`（208 字节），**装不进**刻出来的 72 字节块 —— 于是那段空闲区
+#: 触发用的请求是 `BIG`（208 字节），**装不进**刻出来的 80 字节块 —— 于是那段空闲区
 #: 在两次收集之间不会被顺手动到，"它还在不在"这个问题才是干净的。
 _FREE_LIST_SRC = (
     "module freelist\n%s\nchoose runtime\n\n"
     "const N: u64 = 200;\n"
     "const SZ: u32 = 64;\n"
-    "const STRIDE: u64 = 72;\n"
+    "const STRIDE: u64 = 80;\n"
     "const BIG: u32 = 200;\n\n"
     "fn carve_k(k: u64) -> u64 {\n"
     "    let first: u64 = 0;\n"
@@ -2938,6 +2938,501 @@ def test_the_runtime_guard_does_not_need_a_windows_binary():
         assert got is False, (
             f"非 Linux 上把 `wsl` 藏起来之后 `_wsl()` 应当是假，得到 {got!r} —— 一个恒真的"
             "闸门会把'跑不了'变成'假装跑过了'，而那正是 `FujoJTOP/loment#371` 的形状")
+
+
+# ---------------------------------------------------------------- 产物格式 (#604–#612)
+
+#: 节头 / 程序头解析的小工具。判据要钉的是**产物里的确切字段**，不是"能跑" ——
+#: 所以这里不借 `readelf`：`readelf` 的输出格式会漂，而字段偏移不会。
+
+
+def _elf_phdrs(blob: bytes) -> list[dict]:
+    e_phoff, = struct.unpack_from("<Q", blob, 32)
+    e_phentsize, e_phnum = struct.unpack_from("<HH", blob, 54)
+    out = []
+    for k in range(e_phnum):
+        o = e_phoff + k * e_phentsize
+        typ, flags, off, vaddr, paddr, filesz, memsz, align = \
+            struct.unpack_from("<IIQQQQQQ", blob, o)
+        out.append({"type": typ, "flags": flags, "off": off, "vaddr": vaddr,
+                    "filesz": filesz, "memsz": memsz, "align": align})
+    return out
+
+
+def _elf_sections(blob: bytes) -> list[dict]:
+    """读节头表。`e_shnum == 0` 时返回空表 —— **旧产物就是这个形状**（`#606`）。"""
+    e_shoff, = struct.unpack_from("<Q", blob, 40)
+    e_shentsize, e_shnum, e_shstrndx = struct.unpack_from("<HHH", blob, 58)
+    if e_shnum == 0:
+        return []
+    secs = []
+    for k in range(e_shnum):
+        o = e_shoff + k * e_shentsize
+        nameoff, typ, flags, addr, off, size, link, info, align, entsize = \
+            struct.unpack_from("<IIQQQQIIQQ", blob, o)
+        secs.append({"nameoff": nameoff, "type": typ, "flags": flags, "addr": addr,
+                     "off": off, "size": size, "link": link, "info": info,
+                     "align": align, "entsize": entsize, "name": ""})
+    base = secs[e_shstrndx]["off"]
+    for s in secs:
+        end = blob.index(b"\x00", base + s["nameoff"])
+        s["name"] = blob[base + s["nameoff"]:end].decode("utf-8", "replace")
+    return secs
+
+
+def _elf_dynamic(blob: bytes) -> list[tuple[int, int]]:
+    dyn = next(p for p in _elf_phdrs(blob) if p["type"] == 2)
+    out = []
+    o = dyn["off"]
+    while o + 16 <= dyn["off"] + dyn["filesz"]:
+        tag, val = struct.unpack_from("<QQ", blob, o)
+        o += 16
+        if tag == 0:
+            break
+        out.append((tag, val))
+    return out
+
+
+def _dt_needed(blob: bytes) -> list[str]:
+    byname = {s["name"]: s for s in _elf_sections(blob)}
+    dynstr = byname[".dynstr"]
+    out = []
+    for tag, val in _elf_dynamic(blob):
+        if tag == 1:
+            e = blob.index(b"\x00", dynstr["off"] + val)
+            out.append(blob[dynstr["off"] + val:e].decode())
+    return out
+
+
+def _build_src(td: Path, name: str, text: str, objs: tuple[Path, ...] = (),
+               interp: str | None = None) -> tuple[bytes, dict]:
+    """Loment 源 -> IR -> 产物。判据用，所以 `allow_ports` 一直开着（开发通道）。"""
+    src = td / f"{name}.lomt"
+    src.write_text(text, encoding="utf-8", newline="\n")
+    mod = lomentc.load(src)
+    errs = lomentc.check(mod)
+    assert not errs, errs
+    ir = lomentc.emit_llvm(mod, ROOT)
+    kw = {"allow_ports": True}
+    if interp is not None:                 # 老实现没有这个参数；默认路径不要碰到它
+        kw["interp"] = interp
+    return lomelf.compile_ll(ir, [lomelf.load_foreign(p) for p in objs], **kw)
+
+
+@test
+def test_products_carry_a_section_table_that_names_code_and_data():
+    """**产物有节头表**（`#606`）：`objdump -d` / `readelf -r` / `strip` 靠它干活。
+
+    原先 `e_shoff = e_shnum = e_shstrndx = 0`：执行合法，但 `objdump -d` 只打一行文件格式，
+    `readelf -r` 说"没有静态重定位"，`strip` 连文件都不肯碰。用户链了一个库、程序崩了，
+    第一步想反汇编自己的程序 —— 那时手上什么都没有。
+
+    判据直接读字段：静态产物要有 `.text` / `.data` / `.bss` / `.shstrtab`，且 `.text` 的
+    `sh_addr/sh_offset/sh_size` 与 `PT_LOAD` 里的那一段一致；动态产物还要有 `.dynstr` /
+    `.dynsym` / `.rela.plt`，且 `.rela.plt` 的 `sh_link` 指回 `.dynsym`。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        ll = _ref_ir(ROOT / "loment/examples/user_hello.lomt", td)
+        static, _ = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+        secs = _elf_sections(static)
+        names = [s["name"] for s in secs]
+        assert names[:1] == [""], f"0 号节不是空节: {names[:1]}"
+        for want in (".text", ".data", ".bss", ".shstrtab"):
+            assert want in names, f"静态产物缺节 {want}: {names}"
+        byname = {s["name"]: s for s in secs}
+        assert byname[".text"]["addr"] == 0x400000, byname[".text"]
+        assert byname[".text"]["off"] == 0x1000, byname[".text"]
+        assert byname[".text"]["flags"] & 0x4, "`.text` 没有 SHF_EXECINSTR"
+        assert byname[".data"]["addr"] == 0x800000, byname[".data"]
+
+        # 动态产物：binutils 的重定位视图（`readelf -r`）要有 `.rela.plt`。
+        so = ffitest._system_so(td / "libz.so.1", ffitest.LIBZ_SO_CANDIDATES)
+        if so is None:
+            print("      SKIP 动态那一半: 这台上没有 libz.so")
+            return
+        dyn, _ = _build_src(td, "sec", ffitest.ZLIB_STATIC_SRC, (so,))
+        secs = _elf_sections(dyn)
+        names = [s["name"] for s in secs]
+        for want in (".text", ".data", ".bss", ".dynstr", ".dynsym", ".rela.plt", ".shstrtab"):
+            assert want in names, f"动态产物缺节 {want}: {names}"
+        byname = {s["name"]: s for s in secs}
+        idx = {s["name"]: k for k, s in enumerate(secs)}
+        assert byname[".rela.plt"]["link"] == idx[".dynsym"], (
+            f".rela.plt 的 sh_link={byname['.rela.plt']['link']}，应当指向 .dynsym"
+            f"（{idx['.dynsym']}）")
+        assert byname[".rela.plt"]["info"] == idx[".got.plt"], (
+            ".rela.plt 的 sh_info 应当指向 .got.plt")
+    print("      静态/动态产物都有节头表：.text/.data/.bss/.shstrtab（动态再加动态表），"
+          "偏移与尺寸对得上")
+
+
+@test
+def test_the_dynamic_product_hardens_the_header_page_and_relro():
+    """**文件头页不可执行、GOT 加载后只读**（`#608`）。
+
+    原先第一个 `PT_LOAD` 是 R|X 且从偏移 0 起 —— ELF 头与程序头表就落在可执行页里；
+    也没有 `PT_GNU_RELRO`，`.got.plt` 一直可写。GOT 覆写是漏洞链的标准第一原语，而
+    `DF_BIND_NOW` 已经发了，把 GOT 封成只读在构造上就是安全的。
+
+    判据：第一个 LOAD 从偏移 0 起且**没有 X 位**；代码另有一条 R|X LOAD；存在
+    `PT_GNU_RELRO`，范围覆盖 `DT_PLTGOT` 指向的 GOT；`DT_FLAGS` 里 BIND_NOW 仍然在。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        so = ffitest._system_so(td / "libz.so.1", ffitest.LIBZ_SO_CANDIDATES)
+        if so is None:
+            print("      SKIP: 这台上没有 libz.so（要 zlib1g）")
+            return
+        blob, _info = _build_src(td, "relro", ffitest.ZLIB_STATIC_SRC, (so,))
+        phs = _elf_phdrs(blob)
+        loads = [p for p in phs if p["type"] == 1]
+        assert loads and loads[0]["off"] == 0, "第一个 PT_LOAD 不从文件偏移 0 起"
+        assert not (loads[0]["flags"] & 0x1), (
+            f"文件头那一页仍然可执行（flags={loads[0]['flags']}）—— ELF 头不该在 R|X 段里")
+        assert any(p["flags"] & 0x1 and p["vaddr"] == 0x400000 for p in loads), (
+            "代码段不见了：找不到 vaddr=0x400000 的可执行 PT_LOAD")
+        relro = [p for p in phs if p["type"] == 0x6474E552]
+        assert relro, "没有 PT_GNU_RELRO —— GOT/.dynamic 加载后仍然可写"
+        r = relro[0]
+        entries = dict(_elf_dynamic(blob))
+        got = entries[3]                                   # DT_PLTGOT
+        assert r["vaddr"] <= got < r["vaddr"] + r["memsz"], (
+            f"RELRO [{r['vaddr']:#x}, {r['vaddr'] + r['memsz']:#x}) 没罩住 GOT {got:#x}")
+        assert entries.get(30, 0) & 8, "DT_FLAGS 里的 DF_BIND_NOW 不见了"
+    print("      第一个 LOAD 只读（文件头页不再可执行）；PT_GNU_RELRO 罩住 GOT，BIND_NOW 仍在")
+
+
+@test
+def test_dynamic_products_carry_dt_debug():
+    """**`.dynamic` 里有 `DT_DEBUG`**（`#607`）。
+
+    loader 把 `r_debug` 写进这个槽，调试器靠它走已加载对象链。非 PIE 产物没有别的通道，
+    缺了它 `gdb` 的 `info sharedlibrary` 就是空的 —— 链了库却看不见库。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        so = ffitest._system_so(td / "libz.so.1", ffitest.LIBZ_SO_CANDIDATES)
+        if so is None:
+            print("      SKIP: 这台上没有 libz.so（要 zlib1g）")
+            return
+        blob, _info = _build_src(td, "dbg", ffitest.ZLIB_STATIC_SRC, (so,))
+        tags = dict(_elf_dynamic(blob))
+        assert 21 in tags, f"没有 DT_DEBUG：动态标签 {sorted(tags)}"
+        assert tags[21] == 0, f"链接期 DT_DEBUG 应当是 0（loader 运行期填），得到 {tags[21]}"
+    print("      `.dynamic` 带 DT_DEBUG（链接期值为 0），调试器有 r_debug 通道")
+
+
+@test
+def test_a_v2_product_flushes_stdio_through_libc_exit():
+    """**链了 libc，出口就走 `exit(3)`**（`#605`）。
+
+    `syscall(60)` 不刷 stdio、不跑 `atexit`：用户 `printf` 的输出安安静静地丢了，
+    进程还退出 0 —— 这是链上 libc 之后第一个会撞上的坑。判据让程序打印 `42` 后**返回**，
+    由入口桩收尾；stdout 必须一个字节不差地出来。
+
+    密封产物不受影响：没有 libc 时入口桩仍然是裸 `syscall(60)`（现有那一整族静态产物
+    判据就是它的回归网）。
+    """
+    if not _wsl():
+        print("      SKIP: 需要 WSL（或 Linux）跑 ELF")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        libc = ffitest._system_so(td / "libc.so.6", ffitest._LIB6_CANDIDATES)
+        if libc is None:
+            print("      SKIP: 这台上没有 libc.so.6")
+            return
+        src = ('module p\n\n'
+               'extern fn printf(fmt: ptr, v: i32) -> i32;\n\n'
+               'fn _start() {\n'
+               '    printf(str_ptr("42\\n"), 42 as i32);\n'
+               '}\n')
+        blob, info = _build_src(td, "pf", src, (libc,))
+        assert "exit" in info["imports"], (
+            f"入口桩没有导入 libc 的 exit：imports={info['imports']}")
+        exe = td / "pf.elf"
+        exe.write_bytes(blob)
+        rc, out = _run_bin(exe, "printf_exit", td)
+        assert rc == 0, f"退出码 {rc}"
+        assert out == b"42\n", (
+            f"stdout 是 {out!r} —— libc 的 stdio 没被 flush，入口桩还在走 syscall(60)")
+    print("      printf 的输出经 libc 的 exit(3) flush 到 stdout（'42\\n'，rc=0）")
+
+
+@test
+def test_the_program_interpreter_can_be_overridden():
+    """**`PT_INTERP` 可以指定**（`#604`）：musl / Nix / 非标准布局不再被写死的 glibc 路径挡住。
+
+    原先那条路径是两边实现里的字面量：在 Alpine 上链接照样成功，`execve` 却
+    `No such file or directory`，一句话都没有。判据用 `LOMENT_INTERP` 指一个自定义
+    loader，产物里的 `PT_INTERP` 必须逐字节是它；`compile_ll(interp=...)` 那条显式通道
+    也核一遍。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        so = ffitest._system_so(td / "libz.so.1", ffitest.LIBZ_SO_CANDIDATES)
+        if so is None:
+            print("      SKIP: 这台上没有 libz.so（要 zlib1g）")
+            return
+        custom = "/opt/musl/lib/ld-musl-x86_64.so.1"
+
+        def interp_of(blob: bytes) -> str:
+            p = next(p for p in _elf_phdrs(blob) if p["type"] == 3)
+            return blob[p["off"]:p["off"] + p["filesz"]].rstrip(b"\x00").decode()
+
+        old = os.environ.get("LOMENT_INTERP")
+        os.environ["LOMENT_INTERP"] = custom
+        try:
+            blob, _ = _build_src(td, "env", ffitest.ZLIB_STATIC_SRC, (so,))
+        finally:
+            if old is None:
+                os.environ.pop("LOMENT_INTERP", None)
+            else:
+                os.environ["LOMENT_INTERP"] = old
+        assert interp_of(blob) == custom, (
+            f"LOMENT_INTERP 被忽略了，PT_INTERP 仍是 {interp_of(blob)!r}")
+
+        src = td / "kw.lomt"
+        src.write_text(ffitest.ZLIB_STATIC_SRC, encoding="utf-8", newline="\n")
+        mod = lomentc.load(src)
+        ir = lomentc.emit_llvm(mod, ROOT)
+        blob, _ = lomelf.compile_ll(ir, [lomelf.load_foreign(so)], allow_ports=True,
+                                    interp="/custom/ld.so")
+        assert interp_of(blob) == "/custom/ld.so", interp_of(blob)
+    print(f"      PT_INTERP 可覆盖：环境变量与 `compile_ll(interp=...)` 都写进产物")
+
+
+@test
+def test_section_alignment_from_the_object_is_honoured():
+    """**对象要求的 32/64 字节对齐真的被摆对**（`#612`）。
+
+    `gcc -mavx2` 把常数放进 `.rodata.cst32`（`sh_addralign = 32`），用
+    `vmovdqa ymm, [rip + .LC0]` 读 —— 地址只要 `% 32 == 16`，第一次取数就 #GP。
+    原先布局把每节硬按 16 摆，第二个数据节正好落在那半边。
+
+    判据让 C 函数把那个 32 对齐常量的地址低位返回，程序以它为退出码：必须是 0。
+    """
+    clang = _clang()
+    if not clang or not _wsl():
+        print("      SKIP: 需要 clang + WSL")
+        return
+    # `volatile` 指针是在**量链接器**：编译器知道 `v32` 声明为 32 对齐，直接写
+    # `v32 & 31` 会被常量折成 0 —— 那条判据就什么都没测。地址必须从 `.data` 里
+    # **读**出来（重定位由链接器填），再掩低位。
+    csrc = ('const char pad8[8] __attribute__((section(".rodata.a8"), aligned(8), used))'
+            ' = "abcdefg";\n'
+            'const char v32[32] __attribute__((section(".rodata.cst32"), aligned(32), used))'
+            ' = "0123456789abcdefghijklmnopqrstu";\n'
+            'const char *volatile vp = v32;\n'
+            'int align_of32(void) { return (int)((unsigned long)vp & 31); }\n')
+    lsrc = ('module a\n\n'
+            'extern fn align_of32() -> i32;\n\n'
+            'fn _start() {\n'
+            '    syscall4(60, align_of32() as u64, 0, 0);\n'
+            '}\n')
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        (td / "a.c").write_text(csrc, encoding="utf-8", newline="\n")
+        assert ffitest.compile_c(clang, td / "a.c", td / "a.o") == 0, "C 编译失败"
+        blob, _ = _build_src(td, "align", lsrc, (td / "a.o",))
+        exe = td / "align.elf"
+        exe.write_bytes(blob)
+        rc, _out = _run_bin(exe, "align32", td)
+        assert rc == 0, f"32 字节常量的地址低 5 位是 {rc}（应当 0）—— 节对齐被丢掉了"
+    print("      `.rodata.cst32` 落在 32 字节边界（运行时地址 & 31 == 0）")
+
+
+@test
+def test_constructors_run_before_start():
+    """**构造函数在 `_start` 之前真的被调用**（`#611`）。
+
+    两种写法都要认：gcc/clang 默认的 `.init_array`（`SHT_INIT_ARRAY`，原先被当成
+    "非代码节"硬拒），以及老工具链的 `.ctors`（原先**静默摆进去却永远不调用** ——
+    库的静态状态没初始化，程序拿到 0，一句诊断都没有）。
+
+    判据：构造函数把全局写成 99，`_start` 把 `get()` 当退出码返回。两种写法都必须是 99。
+    """
+    clang = _clang()
+    if not clang or not _wsl():
+        print("      SKIP: 需要 clang + WSL")
+        return
+    # 值那一半：构造函数把全局写成 99，`_start` 显式 `syscall(60, g)` 把值交出来。
+    csrc = ('static int g;\n'
+            '__attribute__((constructor)) static void init(void) { g = 99; }\n'
+            'int get(void) { return g; }\n')
+    lsrc = ('module c\n\n'
+            'extern fn get() -> i32;\n\n'
+            'fn _start() {\n'
+            '    syscall4(60, get() as u64, 0, 0);\n'
+            '}\n')
+    # 顺序那一半：构造写 "C"、析构写 "F"，`_start` 正常返回 —— 入口桩必须按
+    # **C 然后 F** 的顺序跑完再退出。写用裸 `syscall(1)`，不依赖 libc。
+    life_c = ('static long wr(const char *p, long n) {\n'
+              '    long r;\n'
+              '    __asm__ volatile("syscall" : "=a"(r)\n'
+              '                     : "a"(1L), "D"(1L), "S"(p), "d"(n)\n'
+              '                     : "rcx", "r11", "memory");\n'
+              '    return r;\n'
+              '}\n'
+              '__attribute__((constructor)) static void init(void) { wr("C", 1); }\n'
+              '__attribute__((destructor)) static void fini(void) { wr("F", 1); }\n'
+              'int get(void) { return 0; }\n')
+    life_l = ('module cl\n\n'
+              'extern fn get() -> i32;\n\n'
+              'fn _start() {\n'
+              '    let _v: i32 = get();\n'
+              '}\n')
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        # `-O0`：`-O1` 会把"构造函数把 g 写成 99、get 读 g"折成 `get` 直接返回 99，
+        # 那样这个对象里**根本没有构造函数**，判据（和缺陷）一起消失。
+        for tag, extra in (("init_array", ("-O0",)),
+                           ("ctors", ("-O0", "-fno-use-init-array"))):
+            (td / f"{tag}.c").write_text(csrc, encoding="utf-8", newline="\n")
+            obj = td / f"{tag}.o"
+            assert ffitest.compile_c(clang, td / f"{tag}.c", obj, extra) == 0, \
+                f"[{tag}] C 编译失败"
+            blob, _ = _build_src(td, tag, lsrc, (obj,))
+            exe = td / f"{tag}.elf"
+            exe.write_bytes(blob)
+            rc, _out = _run_bin(exe, f"ctor_{tag}", td)
+            assert rc == 99, (
+                f"[{tag}] 构造函数没跑：get() 返回 {rc}（期望 99）")
+
+            (td / f"{tag}_life.c").write_text(life_c, encoding="utf-8", newline="\n")
+            obj2 = td / f"{tag}_life.o"
+            assert ffitest.compile_c(clang, td / f"{tag}_life.c", obj2, extra) == 0, \
+                f"[{tag}] 生命周期 C 编译失败"
+            blob, _ = _build_src(td, f"{tag}_life", life_l, (obj2,))
+            exe2 = td / f"{tag}_life.elf"
+            exe2.write_bytes(blob)
+            rc, out = _run_bin(exe2, f"life_{tag}", td)
+            assert (rc, out) == (0, b"CF"), (
+                f"[{tag}] 构造/析构没按 C→F 跑：rc={rc} stdout={out!r}")
+    print("      .init_array/.ctors 在 _start 之前跑（rc=99）；.fini_array/.dtors 之后逆序跑（输出 CF）")
+
+
+@test
+def test_tls_relocations_against_the_linkers_tls_block():
+    """**TLS 变量能用**（`#610`）：`R_X86_64_TPOFF32` 落在链接器自己的 TLS 块上。
+
+    原先这一类以裸数字拒绝（"不认识的重定位类型 23"），而链接器**已经**为
+    `-fstack-protector` 装了一块 TLS 并把 `fs` 指过去 —— 只差把 `.tdata/.tbss` 按真实
+    TLS 布局摆进去、把 `TPOFF` 算成"相对线程指针"。判据跑一个 `__thread int t = 5` 的
+    C 对象，退出码必须是 5。
+
+    另外核一条**否定**：仍不支持的类型（全局动态模型发的 `TLSGD`）必须**报出名字**，
+    不是一个用户没法行动的数字。
+    """
+    clang = _clang()
+    if not clang or not _wsl():
+        print("      SKIP: 需要 clang + WSL")
+        return
+    csrc = '__thread int t = 5;\nint get_t(void) { return t; }\n'
+    lsrc = ('module tl\n\n'
+            'extern fn get_t() -> i32;\n\n'
+            'fn _start() {\n'
+            '    syscall4(60, get_t() as u64, 0, 0);\n'
+            '}\n')
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        (td / "t.c").write_text(csrc, encoding="utf-8", newline="\n")
+        assert ffitest.compile_c(clang, td / "t.c", td / "t.o") == 0, "C 编译失败"
+        blob, _ = _build_src(td, "tls", lsrc, (td / "t.o",))
+        exe = td / "tls.elf"
+        exe.write_bytes(blob)
+        rc, _out = _run_bin(exe, "tls", td)
+        assert rc == 5, f"TLS 变量读出来是 {rc}（期望 5）"
+
+        # 否定：-fPIC 的默认 TLS 模型是 global-dynamic（TLSGD），还没做 —— 但要说名字。
+        assert ffitest.compile_c(clang, td / "t.c", td / "tp.o",
+                                 ("-fPIC", "-O2")) == 0, "C 编译失败"
+        try:
+            _build_src(td, "tlsgd", lsrc, (td / "tp.o",))
+        except lomelf.Unsupported as e:
+            assert "R_X86_64_TLSGD" in str(e), f"拒绝理由没点名类型：{e}"
+        else:
+            raise AssertionError("global-dynamic TLS 居然链过去了 —— 这一档还没实现")
+    print("      __thread 变量读回 5（TPOFF32 落在自有 TLS 块）；未支持的 TLSGD 报出名字")
+
+
+@test
+def test_pic_objects_link_through_a_static_got():
+    """**`-fPIC` 对象能链**（`#609`）：`GOTPCREL` / `*_GOTPCRELX` 由数据段里的静态 GOT 顶上。
+
+    `-fPIC` 是构建共享库的常规方式（CMake 的 `POSITION_INDEPENDENT_CODE`、Debian 的
+    hardening flags 都默认开），而原先整类被拒 —— 用户拿到的是 "不认识的重定位类型 42"。
+    判据跑一个 `-fPIC -O2` 的对象，`f()` 必须读回全局的 7。
+    """
+    clang = _clang()
+    if not clang or not _wsl():
+        print("      SKIP: 需要 clang + WSL")
+        return
+    csrc = 'int g = 7;\nint f(void) { return g; }\n'
+    lsrc = ('module pc\n\n'
+            'extern fn f() -> i32;\n\n'
+            'fn _start() {\n'
+            '    syscall4(60, f() as u64, 0, 0);\n'
+            '}\n')
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        (td / "p.c").write_text(csrc, encoding="utf-8", newline="\n")
+        assert ffitest.compile_c(clang, td / "p.c", td / "p.o",
+                                 ("-fPIC", "-O2")) == 0, "C 编译失败"
+        blob, _ = _build_src(td, "pic", lsrc, (td / "p.o",))
+        exe = td / "pic.elf"
+        exe.write_bytes(blob)
+        rc, _out = _run_bin(exe, "pic", td)
+        assert rc == 7, f"PIC 对象读回 {rc}（期望 7）"
+    print("      -fPIC 对象经静态 GOT 取到全局（rc=7）")
+
+
+@test
+def test_two_shared_objects_link_in_order():
+    """**一次可以链两个共享对象**（`#596`）：`libz` 的 `compress` + `libc` 的 `strlen`。
+
+    `docs/219` 让用户同时链 `libz.so.1` 和 `libc.so.6` 拿 `malloc`/`printf`，而原先那条
+    命令必然失败（"一次只能链一个共享对象"），这个限制还不在任何文档里。判据把两件事
+    一起量：`DT_NEEDED` 两个都在且按 `--link` 顺序，程序跑起来两个库的函数都用上了。
+    """
+    if not _wsl():
+        print("      SKIP: 需要 WSL（或 Linux）跑 ELF")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        libz = ffitest._system_so(td / "libz.so.1", ffitest.LIBZ_SO_CANDIDATES)
+        libc = ffitest._system_so(td / "libc.so.6", ffitest._LIB6_CANDIDATES)
+        if libz is None or libc is None:
+            print("      SKIP: 这台上没有 libz.so / libc.so.6")
+            return
+        src = ('module two\n'
+               'choose runtime\n\n'
+               'extern fn strlen(s: ptr) -> u64;\n'
+               'extern fn compress(dst: ptr, dstlen: ptr, src: ptr, srclen: u64) -> i32;\n\n'
+               'fn _start() -> u32 {\n'
+               '    let s: ptr = alloc(8);\n'
+               '    store8(s, 0, 65);\n'
+               '    store8(s, 1, 0);\n'
+               '    if strlen(s) != 1 { return 11; }\n'
+               '    let d: ptr = alloc(64);\n'
+               '    let l: ptr = alloc(8);\n'
+               '    store8(l, 0, 64);\n'
+               '    store8(l, 1, 0);\n'
+               '    store8(l, 2, 0);\n'
+               '    store8(l, 3, 0);\n'
+               '    if compress(d, l, s, 1) != 0 { return 12; }\n'
+               '    return 0;\n'
+               '}\n')
+        blob, info = _build_src(td, "two", src, (libz, libc))
+        assert info["shared"] == ["libz.so.1", "libc.so.6"], info["shared"]
+        assert set(info["imports"]) >= {"compress", "strlen"}, info["imports"]
+        assert _dt_needed(blob) == ["libz.so.1", "libc.so.6"], _dt_needed(blob)
+        exe = td / "two.elf"
+        exe.write_bytes(blob)
+        rc, _out = _run_bin(exe, "two_so", td)
+        assert rc == 0, f"两个共享对象一起跑的退出码是 {rc}（期望 0）"
+    print("      两个 .so 同时链上：DT_NEEDED 按 --link 顺序，两个库的函数都跑通 (rc=0)")
 
 
 def main() -> int:

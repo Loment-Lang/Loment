@@ -1382,6 +1382,44 @@ def test_cli_twin_selfhost_compiles():
     print(f"      种子自举链编译 lomclicheck.lomt 成功 ({len(rr.stdout)}B IR)")
 
 
+@test
+def test_l1_commands_refuse_an_l0_layout_file():
+    """`#57`：`check` / `fmt` / `doc` / `build` / `run` 收到 `.lom` 要**点名拒绝**。
+
+    这些命令读的是 L1 源（`.lomt`）。原先它们把 `.lom`（L0 布局，另一门语言）当 L1 源解析：
+    `check` 编出两条 E002、`fmt` 一个字都不打、退出码还是 0 —— 用户照着修不了任何东西。
+    """
+    import loment_dist  # noqa: PLC0415
+    bash = shutil.which("bash")
+    if not bash:
+        print("         (跳过: 没有 bash, 跑不了 POSIX 启动器)")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        t = Path(td)
+        pf = t / "pf"
+        (pf / "bin").mkdir(parents=True)
+        (pf / "share" / "loment").mkdir(parents=True)
+        (pf / "share" / "loment" / "version").write_bytes(b"FAKE" + bytes([10]))
+        lom = pf / "bin" / "loment"
+        lom.write_bytes(loment_dist._subst(loment_dist.LAUNCHER_SH).encode("utf-8"))
+        lom.chmod(0o755)
+        (t / "x.lom").write_bytes(b"layout x {" + bytes([10]) + b"}" + bytes([10]))
+
+        def shp(p: Path) -> str:
+            q = str(p).replace("\\", "/")
+            return f"/{q[0].lower()}{q[2:]}" if len(q) > 2 and q[1] == ":" else q
+
+        env = dict(os.environ)
+        env["PATH"] = f"{shp(pf / 'bin')}:{env.get('PATH', '')}"
+        for cmd in ("check", "fmt", "doc", "build", "run"):
+            r = subprocess.run([bash, shp(lom), cmd, "x.lom"], cwd=str(t), env=env,
+                               capture_output=True, text=True, timeout=60)
+            out = (r.stdout or "") + (r.stderr or "")
+            assert r.returncode == 2, f"{cmd} 没有拒绝 .lom（rc={r.returncode}）: {out[:200]}"
+            assert "L0 layout file" in out, f"{cmd} 的拒绝话没点名 L0：{out[:200]}"
+    print("      check/fmt/doc/build/run 对 .lom 一律 exit 2 并点名 'L0 layout file'")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_cli_test")
 

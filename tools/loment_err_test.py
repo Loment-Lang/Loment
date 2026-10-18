@@ -145,29 +145,32 @@ def test_render_carries_the_whole_card():
 def test_both_error_channels_render_differently():
     """两条**报错通道**都要有输出, 而且位置那条要如实地分岔。
 
-    这两个源走的是**不同的代码路径** (check() 与 raise LomError), 落进 --diag-out 时形状也
-    不同: check() 只给行号 (`col = 0`), LomError 给 `行:列`。所以渲染必须**如实分岔**:
-    有列时插入符落在那一列, 没列时划整行的可见部分 —— 而不是给一个"猜的列"。
-    只测一条通道的话, 另一条的缺口就是静默的 (docs/182 §5.1 那个判据自己犯过)。
+    这两个源走的是**不同的代码路径** (check() 与 raise LomError)。落到 --diag-out 时
+    两条都带列号，但**来源不同**：LomError 的列是词法器给的（可信）；check() 的列是
+    `diag_record` 从消息里**推断**的（`#5`：消息里恰好一个名字在那一行恰好出现一次）。
+    推断不出来时仍是 `col = 0`，渲染划整行的可见部分 —— 不是给一个"猜的列"。
+    只测一条通道的话，另一条的缺口就是静默的 (docs/182 §5.1 那个判据自己犯过)。
     """
-    _, ds = _check(SEMANTIC)     # check()  -> col = 0
-    _, dp = _check(PARSE)        # LomError -> col = 1
+    _, ds = _check(SEMANTIC)     # check()  -> 推断列
+    _, dp = _check(PARSE)        # LomError -> 词法器列
 
     rcs, outs = _render(ds, lang=ZH)
     rcp, outp = _render(dp, lang=ZH)
     assert rcs == 1 and rcp == 1
 
-    # 语义错: 只给行号 -> **不写列**, 且划整行 (源行 `    return z;` 的可见部分)
-    assert ":4\n" in outs, f"check() 那条不该写列号: {outs[:200]}"
-    assert "^^^^^^^^^" in outs, f"没有划整行的可见部分: {outs[:200]}"
-    # 解析错: 给了 1:1 -> 写列, 插入符只有一格 (`@@@` 的第一个字符)
+    # 语义错: 推断出 `z` 的列（12），插入符只有一格
+    assert ":4:12" in outs, f"check() 那条该带推断出来的列号: {outs[:200]}"
+    cl = [ln for ln in outs.splitlines() if "^" in ln][0]
+    assert cl.count("^") == 1 and cl.split("|", 1)[1].strip() == "^", (
+        f"插入符该落在 z 上: {cl!r}")
+    # 解析错: 词法器的 1:1 -> 写列，插入符只有一格 (`@@@` 的第一个字符)
     assert ":6:1" in outp, f"LomError 那条该写 行:列: {outp[:200]}"
-    assert "| ^\n" in outp, f"插入符该落在第 1 列、只有一格: {outp[:200]}"
+    assert "| ^" + chr(10) in outp, f"插入符该落在第 1 列、只有一格: {outp[:200]}"
     assert "^^^^^" not in outp, "解析错那条不该划整行"
 
     # 位置形状不同 => 两条通道确实都渲染过, 不是同一个模板打出来的
     assert outs != outp
-    print("      两条通道都渲染, 且位置形状如实分岔 (有列/无列)")
+    print("      两条通道都渲染, 且位置来源如实分岔 (推断列 / 词法器列)")
 
 
 @test
@@ -1808,6 +1811,50 @@ def test_a_position_less_record_carries_no_line_number():
 
 
 # ---------------------------------------------------------------- 入口
+
+
+@test
+def test_the_caret_lands_under_the_offending_character_after_wide_text():
+    """`#477`：caret 按**显示宽度**排，不是按码点数空格。
+
+    `col` 数码点，终端按列排 —— 字符串里一个汉字占两列。原先 `h_snip` 印 `col-1` 个
+    空格，于是 `"日本語テキスト"` 之后的 `@` 被指到字符串中间（byte offset 26 处）。
+    制表符是同一个形状（终端按 8 对齐）。
+
+    这里直接量：渲染出来的 caret 前缀空格数 == 源码行前缀的**终端宽度**。
+    """
+    import unicodedata
+
+    def width(text: str) -> int:
+        w = 0
+        for ch in text:
+            if ch == "	":
+                w += 8 - (w % 8)
+            elif unicodedata.combining(ch):
+                pass
+            elif unicodedata.east_asian_width(ch) in ("W", "F"):
+                w += 2
+            else:
+                w += 1
+        return w
+
+    src = ('module m' + chr(10) + 'fn f() -> u32 {' + chr(10)
+           + '  let s: str = "日本語テキスト"; @ return 0;' + chr(10) + '}' + chr(10))
+    _f, d = _check(src)
+    rc, out = _render(d, lang=ZH)
+    lines = out.splitlines()
+    caret = [ln for ln in lines if "^" in ln]
+    assert caret, out
+    row = [ln for ln in lines if "日本語" in ln]
+    assert row, out
+    bar = row[0].index("|")
+    body = row[0][bar + 2:]
+    upto = body.index("@")
+    caret_body = caret[0][caret[0].index("|") + 2:]
+    lead = len(caret_body) - len(caret_body.lstrip(" "))
+    assert lead == width(body[:upto]), (
+        f"caret 前缀 {lead} 列，源码前缀显示宽度 {width(body[:upto])} 列")
+    print("      CJK 前缀之后：caret 落在 `@` 下（按显示宽度对齐）")
 
 
 def main() -> int:

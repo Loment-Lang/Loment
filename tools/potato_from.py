@@ -2100,6 +2100,12 @@ def front_door(path: Path, lang: str = "auto", mode: str = "strict") -> FrontUni
     **编译器要求显式，前端工具可以先猜**。
     """
     src = path.read_text(encoding="utf-8", errors="replace")
+    # **UTF-8 BOM 不是源的一部分**（`#482`）：Windows 的记事本、PowerShell 的 `>`
+    # 都会写它。留着它，词法器在 1:1 报一句"非法字符 '﻿'"，把真正的错盖掉。
+    # 只去**一个**、只在**文件头** —— 这正是 BOM 的定义；行号不受影响，第 1 行的列
+    # 号少一格，而那一格本来就没显示。
+    if src.startswith("﻿"):
+        src = src[1:]
     if lang == "auto" and path.suffix in LOMENT_EXT:
         # Loment 的源文件：**只信声明**（缺 = Loment），**不嗅探** —— 见上面那一段
         g, err, declared = read_grammar_decl(src)

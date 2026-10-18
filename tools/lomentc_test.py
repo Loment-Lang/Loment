@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -3963,11 +3964,11 @@ def test_hosted_heap_comes_from_the_platform_and_sealed_is_untouched():
     assert "declare ptr @malloc(i64)" in hosted, "没向宿主声明分配器"
     assert "; loment-heap: platform 1048576" in hosted, "没把这件事写进产物"
     # 声明在**用之前**（LLVM 对未声明的调用是 `use of undefined value`，实测）
-    assert hosted.index("declare ptr @malloc(i64)") < hosted.index("call ptr @malloc(i64 1048576)")
+    assert hosted.index("declare ptr @malloc(i64)") < hosted.index("call ptr @malloc(i64 1048592)")
 
     # A1：同一份源去掉那一行 ⇒ 逐字节还是原来那一段（闸门真的在 `port` 上）
     assert "@__loment_heap = internal global [65536 x i8] zeroinitializer" in sealed
-    assert "malloc" not in sealed, "sealed 的产物里出现了宿主符号"
+    assert "@malloc" not in sealed, "sealed 的产物里出现了宿主符号"
     assert "loment-heap" not in sealed, "sealed 的产物里出现了 A 的标记"
     # 两份唯一的差别就是 arena 那一段 —— 偏移模型、空闲链表、前沿回退**共用**
     assert "icmp ule i32 %nxtoff, 1048576" in hosted
@@ -4018,7 +4019,7 @@ def test_hosted_gc_auto_grows_too_and_gets_the_hosted_collector():
     sealed = _heap_ir(HEAP_SEALED_GC_AUTO_SRC)
     assert "@__loment_mark = internal global [1024 x i8]" in sealed
     assert "@__loment_heap = internal global [65536 x i8] zeroinitializer" in sealed
-    assert "malloc" not in sealed
+    assert "@malloc" not in sealed
 
 
 #: `docs/219` §8b 的 **S2**（V1 剩下的最后一件）那一份：根开了运行期、**声明了外部函数**，
@@ -4068,11 +4069,13 @@ def test_ffi_artifacts_get_an_arena_big_enough_for_a_real_library():
     # ① `extern fn` 那一档：arena 封在产物里、给够 1 MiB、寻址走基址指针
     assert f"; loment-heap: ffi {lomentc.FFI_ARENA_BYTES}" in ffi, \
         "没把 arena 这件事写进产物（构建那一侧不该去读源码来知道它）"
-    assert "[1048576 x i8] zeroinitializer" in ffi, "arena 还是那块 64 KiB 的数组"
+    # 块比 arena 多 16 字节：`#620` 的取整余量（基址对齐到 16 之后那一小截仍在块内）。
+    assert f"[{lomentc.FFI_ARENA_BYTES + 16} x i8] zeroinitializer" in ffi, (
+        "arena 还是那块 64 KiB 的数组")
     assert "getelementptr [65536 x i8], ptr @__loment_heap" not in ffi, "还在直接寻址"
     assert "%hb = call ptr @__loment_arena()" in ffi, "分配器没用基址指针"
-    assert "ret ptr @__loment_arena_block" in ffi, "arena 不是产物里那块静态的"
-    assert "malloc" not in ffi, "sealed 的产物里出现了宿主符号"
+    assert "ptrtoint ptr @__loment_arena_block to i64" in ffi, "arena 不是产物里那块静态的"
+    assert "@malloc" not in ffi, "sealed 的产物里出现了宿主符号"
     # ② 对照：**没有** `extern fn` 的那一份一个字节没动
     assert "[65536 x i8] zeroinitializer" in sealed
     assert "loment-heap" not in sealed, "没链外源库的产物也被改大了 —— 那是 sealed 那条保证"
@@ -4394,6 +4397,186 @@ def test_lspe_site_ids_are_content_addressed():
     ids2 = [s["id"] for s in m2.lspe_sites if s["kind"] == "index"]
     assert len(ids1) == 1 and len(ids2) == 2, (ids1, ids2)
     assert ids1[0] in ids2, (ids1, ids2)
+
+
+@test
+def test_line_numbers_do_not_drift_after_a_multiline_string():
+    """`#481`：字符串字面量里的换行也要走行号。
+
+    原先词法器只把**列**往前推，`line` 停在开引号那一行 —— 之后每条诊断都比真实位置
+    少掉字符串里的换行数。实测：`"a<换行>b"` 之后的那行类型错报在 4，而它在 5。
+    """
+    src = ('module m' + chr(10) + 'fn f() -> i32 {' + chr(10)
+           + '  let s: str = "a' + chr(10) + 'b";' + chr(10)
+           + '  let x: u32 = true;' + chr(10) + '  return 0;' + chr(10) + '}' + chr(10))
+    toks = lomc.lex(src)
+    lets = [t for t in toks if t.val == "let"]
+    assert [t.line for t in lets] == [3, 5], [(t.val, t.line) for t in lets]
+    assert any(t.val == "b" for t in toks) is False  # 换行是字面量正文，不是 token
+    e = errs(src)
+    assert e and e[0].startswith("5:"), e
+    print("      多行字符串之后：第二个 let 在第 5 行、诊断也在第 5 行（不再漂）")
+
+
+@test
+def test_load_errors_point_at_the_use_line_not_at_module():
+    """`#480`：装载期的报错指到**那条 `use` 自己的行**，不是 `1:1`。
+
+    原先 `resolve_name` / `resolve_deps` 一律 `LomError(1, 1, …)` —— `loment.py diag`
+    的 caret 落在 `module m` 上，而 `use` 在几十行之外，用户照着 caret 改不到任何东西。
+    三种都钉：名字形式找不到、路径形式不存在、`use` 条数越界（指到**越界的第一条**）。
+    """
+    import os as _os
+    NL = chr(10)
+
+    def load_err(src: str) -> tuple[int, int, str]:
+        with tempfile.TemporaryDirectory() as t:
+            p = Path(t) / "root.lomt"
+            p.write_text(src, encoding="utf-8")
+            m = lomentc.load(p)
+            try:
+                lomentc.resolve_deps(m, ROOT, p.parent, entry=p)
+            except lomc.LomError as e:
+                return e.line, e.col, e.msg
+            raise AssertionError("装载期没有报错")
+
+    ln, col, msg = load_err("module m" + NL + NL + "use no_such_module_xyz" + NL
+                            + "fn f() -> u32 { return 0; }" + NL)
+    assert (ln, col) == (3, 1), (ln, col, msg)
+    assert "no_such_module_xyz" in msg, msg
+
+    ln, col, msg = load_err("module m" + NL + NL + 'use "nope.lomt"' + NL
+                            + "fn f() -> u32 { return 0; }" + NL)
+    assert (ln, col) == (3, 1), (ln, col, msg)
+
+    uses = "".join(f'use "f{i}.lomt"' + NL for i in range(301))
+    ln, col, msg = load_err("module m" + NL + uses + "fn f() -> u32 { return 0; }" + NL)
+    assert (ln, col) == (302, 1), (ln, col, msg)      # 第 1 行 module，301 条从第 2 行起
+    assert "301" in msg, msg
+    print("      装载期三种报错都指到那条 use 行（3:1 / 3:1 / 302:1）")
+
+
+@test
+def test_refusals_do_not_leak_milestone_ids_or_mangled_names():
+    """`#484`：给用户看的拒绝话里没有内部里程碑号，也没有 mangled 实例名。
+
+    原先 `Box<[u32]>` 这一格报的是 `native M23: struct Box_[u32] 字段类型 …` —— `M23`
+    是仓库内部的里程碑号，`Box_[u32]` 是拼给形式对象看的实例名；用户两样都不该看到。
+    现在：`Box<u32>`（人写的类型）与"字段类型目前只支持标量"（真正的卡点）。
+    """
+    p = ROOT / "loment" / "examples" / "arg_shape" / "main.lomt"
+    mod = lomentc.load(p)
+    deps = lomentc.resolve_deps(mod, ROOT, p.parent, entry=p)
+    assert not lomentc.check(mod, deps=deps), "夹具本身要能过检查"
+    # ① 形式对象那一层：写出来的泛型形状，不是拼出来的实例名
+    try:
+        lomentc.emit_potato(mod, ROOT, deps)
+    except Exception as e:  # noqa: BLE001
+        msg = str(e)
+    else:
+        raise AssertionError("参考实现居然发出来了？这一格要重判")
+    assert "Box<[u32]>" in msg, msg[:200]
+    for leak in ("native M", "M23", "Box_["):
+        assert leak not in msg, f"用户可见的拒绝话里漏了内部记号 {leak!r}: {msg[:200]}"
+    # ② 原生 IR 那一层：人写的类型 + 真正的卡点
+    try:
+        lomentc.emit_llvm(mod, ROOT, deps)
+    except lomc.LomError as e:
+        msg2 = e.msg
+    else:
+        raise AssertionError("IR 后端居然发出来了？这一格要重判")
+    assert "Box<u32>" in msg2 and "只支持标量" in msg2, msg2[:200]
+    for leak in ("native M", "M23", "Box_["):
+        assert leak not in msg2, f"IR 侧拒绝话里漏了内部记号 {leak!r}: {msg2[:200]}"
+    print("      两条拒绝话：写出来的类型 + 真正的卡点，无里程碑号 / mangled 名")
+
+
+@test
+def test_null_pointer_literal_is_accepted_in_argument_position():
+    """`#373`：`0 as ptr` 在**实参位置**也要判成 ptr。
+
+    原先 `expr_type(Cast)` 对"字面量 -> ptr"给 None，于是实参检查把它当整型字面量拒；
+    而 `let pin: ptr = 0 as ptr;` 与 `if pin != (0 as ptr)` 都过 —— 同一个写法两个裁决。
+    自举侧一直是接受的那一边（同一份 `lpi_cli.lomt` 由它编出来）。
+    """
+    head = "module m" + chr(10) + "fn s(p: ptr) -> u32 { return 0; }" + chr(10)
+    ok = head + "fn f() -> u32 { return s(0 as ptr); }" + chr(10)
+    assert errs(ok) == [], errs(ok)
+    # 非零字面量不是"空指针"：没有类型、也不是 ptr，照旧拒（别把它一起松开）
+    bad = head.replace("module m", "module m") + "fn f() -> u32 { return s(5 as ptr); }" + chr(10)
+    e = errs(bad)
+    assert e and "ptr" in e[0], e
+    print("      `0 as ptr` 在实参位置接受；`5 as ptr` 仍拒")
+
+
+@test
+def test_machine_diagnostics_carry_a_column_when_unambiguous():
+    """`#5`：`--json` / `--short` 的列号不再是**永远 0**。
+
+    `check()` 只给行；能从消息里**无歧义**定出名字时补列（名字在那一行恰好出现一次）。
+    定不出的（`函数 f 参数 K 重复`）仍是 0 —— 少给一列比给一列错的强。
+    """
+    import json as _json
+
+    src = ("module t2" + chr(10) + "fn _start() {" + chr(10)
+           + "    let zz: u32 = 1;" + chr(10) + "    let y: u32 = nosuchv;" + chr(10)
+           + "    syscall4(60, zz, y, 0);" + chr(10) + "}" + chr(10))
+    with tempfile.TemporaryDirectory() as t:
+        p = Path(t) / "col.lomt"
+        p.write_text(src, encoding="utf-8", newline=chr(10))
+        d = Path(t) / "d.jsonl"
+        r = subprocess.run([sys.executable, str(ROOT / "tools" / "lomentc.py"),
+                            str(p), "--check", "--diag-out", str(d)],
+                           capture_output=True, text=True, encoding="utf-8")
+        assert r.returncode == 1, r.stderr[-200:]
+        recs = [json.loads(x) for x in d.read_text(encoding="utf-8").splitlines() if x]
+    hit = [x for x in recs if "nosuchv" in x["message"]]
+    assert hit and hit[0]["col"] == 18, recs
+    print("      `nosuchv` 的诊断带列号 18（不是 0）")
+
+
+@test
+def test_a_use_cycle_is_one_diagnostic_at_the_use_line():
+    """`#31`：循环 `use` 报在**那一行**、码是 E018（装载期），不是 E013 指到文件末尾之外。"""
+    NL = chr(10)
+    with tempfile.TemporaryDirectory() as t:
+        d = Path(t)
+        (d / "a.lomt").write_text("module a" + NL + 'use "b.lomt"' + NL
+                                  + "fn fa() -> u32 { return 1; }" + NL, encoding="utf-8")
+        (d / "b.lomt").write_text("module b" + NL + 'use "a.lomt"' + NL
+                                  + "fn fb() -> u32 { return 2; }" + NL, encoding="utf-8")
+        out = d / "d.jsonl"
+        r = subprocess.run([sys.executable, str(ROOT / "tools" / "lomentc.py"),
+                            str(d / "a.lomt"), "--check", "--diag-out", str(out)],
+                           capture_output=True, text=True, encoding="utf-8")
+        recs = [json.loads(x) for x in out.read_text(encoding="utf-8").splitlines() if x]
+    assert r.returncode == 1 and len(recs) == 1, (r.returncode, recs)
+    assert recs[0]["line"] == 2 and recs[0]["col"] == 1, recs
+    assert recs[0]["code"] == "E018", recs
+    print("      循环 use：E018 @ 2:1（那一行，不是 EOF 之外）")
+
+
+@test
+def test_one_undeclared_call_target_is_one_diagnostic():
+    """`#6`：一个未声明的被调只报一次（原先 `--json` 里同一个对象出现两遍）。"""
+    src = ("module cat1" + chr(10) + "fn _start() {" + chr(10)
+           + '    let a: str = "ab";' + chr(10) + '    let b: str = "cd";' + chr(10)
+           + "    let c: str = str_cat(a, b);" + chr(10) + "}" + chr(10))
+    e = errs(src)
+    hits = [x for x in e if "str_cat" in x]
+    assert len(hits) == 1, e
+    print("      未声明的被调：一条诊断")
+
+
+@test
+def test_a_parameter_may_shadow_a_module_const():
+    """`#217`：形参与模块级常量同名**不是** E013（形参遮蔽常量，合法）。"""
+    src = ("module v3" + chr(10) + "pub const K: i64 = 3;" + chr(10)
+           + "pub fn f(K: i64) -> i64 { return K * 2; }" + chr(10))
+    assert errs(src) == [], errs(src)
+    dup = ("module v3" + chr(10) + "fn f(K: i64, K: i64) -> i64 { return K; }" + chr(10))
+    assert any("重复" in x for x in errs(dup)), errs(dup)
+    print("      形参遮蔽常量：接受；真重名：仍然报")
 
 
 def main() -> int:

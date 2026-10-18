@@ -706,13 +706,23 @@ fn scan_comments(src: ptr, mem: ptr) {
             while i < SRC_CAP && go == 1 && load8(src, i) != 0 {
                 let d: u32 = load8(src, i);
                 if d == 92 {
+                    // 转义对里的第二个字节若是真换行，它也算一行（`lomc.lex` 按**原始
+                    // 字节里的换行数**数，`#481`）。
+                    if i + 1 < SRC_CAP && load8(src, i + 1) == 10 {
+                        line = line + 1;
+                    }
                     i = i + 2;
                 } else if d == 34 {
                     i = i + 1;
                     go = 0;
                 } else {
-                    // 字符串里的换行**不计数**：词法器 (`lomc.lex`) 就是这样，数了就会
-                    // 与 `tk_line` 整体错开（实测 codegen.lomt 差 6 行）。
+                    // **字符串里的换行也要计数**（`#481`）：`lomc.lex` 已经这样。原先这里
+                    // 明写"不计数"，那与旧词法器一致；词法器改了之后两边就整体错开 ——
+                    // 注释按行号挂，错位表现为注释被挪到别的语句上（`loment_fmt_test`
+                    // 在 `codegen.lomt` 上少 36 条注释）。
+                    if d == 10 {
+                        line = line + 1;
+                    }
                     i = i + 1;
                 }
             }

@@ -154,9 +154,11 @@ def _scan_comments(src: str) -> tuple[dict[int, list[str]], dict[int, str]]:
                 if src[i] == '"':
                     i += 1
                     break
-                # **字符串里的换行不计数** —— 词法器就是这么做的（`lomc.lex` 的 `"` 分支
-                # 只扫到配对的引号，不碰 `line`）。这里若数了，行号会与 token 的行号整体
-                # 错开，注释就会插到别的语句中间（实测 codegen.lomt 差 6 行）。
+                # **字符串里的换行要计数**（`#481`）：`lomc.lex` 现在按原始字节里的换行
+                # 数推进 `line`。这里原先明写"不计数"（与旧词法器一致）—— 词法器改了之后
+                # 两边整体错开，注释会插到别的语句中间（`codegen.lomt` 少 36 条）。
+                if src[i] == chr(10):
+                    line += 1
                 i += 1
             continue
         if ch == "/" and i + 1 < n and src[i + 1] == "/":

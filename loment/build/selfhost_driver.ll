@@ -105246,9 +105246,9 @@ L12_end:
   %t88 = load i64, ptr %fd.addr
   %t89 = call i64 asm sideeffect "syscall", "={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}"(i64 3, i64 %t88, i64 0, i64 0)
   %t90 = load i64, ptr %raw_n.addr
-  %t91 = load i32, ptr %sunit.addr
-  %t92 = zext i32 %t91 to i64
-  %t93 = icmp uge i64 %t90, %t92
+  %t91 = add i64 %t90, 44224
+  %t92 = zext i32 524288 to i64
+  %t93 = icmp uge i64 %t91, %t92
   br i1 %t93, label %L13_then, label %L14_else
 L13_then:
   %t94 = getelementptr inbounds [211 x i8], ptr @.str.load_file.6, i64 0, i64 0

@@ -8078,7 +8078,7 @@ L27_end:
   %t71 = load i32, ptr %c.addr
   %t72 = call i32 @op_toks(i32 %t71)
   %t73 = add i32 %t70, %t72
-  %t74 = call i32 @sub_expr_type(ptr %t67, ptr %t68, ptr %t69, i32 %t73)
+  %t74 = call i32 @expr_type_atom(ptr %t67, ptr %t68, ptr %t69, i32 %t73)
   store i32 %t74, ptr %t2.addr
   %t75 = load i32, ptr %acc.addr
   %t76 = icmp eq i32 %t75, 0

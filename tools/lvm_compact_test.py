@@ -152,6 +152,161 @@ def test_form_is_recorded_and_a_wrong_form_is_refused() -> None:
     print("      文件头：魔数 / 版本 / 形态；文本与错版本都点名拒")
 
 
+def _reencode(blob: bytes) -> bytes:
+    """decode 之后再 encode 一遍（`run_compact` 内部的那条路，不跑程序）。"""
+    import lvm_t2  # noqa: PLC0415
+
+    g, f, e, c = lvm_compact.decode(blob)
+    vm = lvm_t2.T2Executor(g, f, e, io.BytesIO())
+    vm.prog.cfuncs.update(c)
+    return lvm_compact.encode_program(vm.prog, g, e)
+
+
+def test_a_zero_filled_global_keeps_its_length_under_round_trip() -> None:
+    """#689：`encode(decode(encode(x)))` 与 `encode(x)` 逐字节相同。
+
+    `zeroinitializer` 记的是 `tag=0, len`；解码成 `None` 之后若再编码写 0，
+    64 字节的堆就悄悄变成 0 字节 —— 而 stdout 全对，只有这条看得见。
+    """
+    src = ("@__loment_heap = global [64 x i8] zeroinitializer\n"
+           "define i32 @_start() {\nentry:\n  ret i32 0\n}\n")
+    one = lvm_compact.encode_ir(src)
+    two = _reencode(one)
+    if one != two:
+        k = next(i for i in range(min(len(one), len(two))) if one[i] != two[i])
+        raise AssertionError(
+            f"零全局往返不稳定：第 {k} 字节 {one[k]:#04x} -> {two[k]:#04x}"
+            f"（{len(one)}B vs {len(two)}B）")
+    print(f"      零全局 [64 x i8] 往返稳定（{len(one)}B）")
+
+
+def test_counts_taken_from_the_stream_do_not_drive_allocations() -> None:
+    """#690：流里的 `ln` 与 `nslots` 都**不许**直接拿去分配。
+
+    34 字节的产物曾让 `ln=10^8` 吃掉 100 MB、`nslots=10^8` 吃掉 816 MB。
+    """
+    def blob_with(body) -> bytes:
+        out = bytearray(lvm_compact.MAGIC)
+        out.append(lvm_compact.VERSION)
+        out.append(lvm_compact.FORM_COMPACT)
+        lvm_compact._put_u(out, 2)              # 池：两条
+        for s in ("g", "i8"):
+            raw = s.encode()
+            lvm_compact._put_u(out, len(raw))
+            out += raw
+        body(out)
+        return bytes(out)
+
+    def huge_zero_run(out):
+        lvm_compact._put_u(out, 1)              # 一个全局
+        lvm_compact._put_u(out, 0)              # 名字 = 池[0]
+        lvm_compact._put_u(out, 1)              # 类型 = 池[1]（i8）
+        lvm_compact._put_u(out, 0)              # tag 0 = 全零
+        lvm_compact._put_u(out, 10 ** 8)        # 长度 100 MB（而 i8 只该是 1）
+        lvm_compact._put_u(out, 0)              # externs
+        lvm_compact._put_u(out, 0)              # funcs
+
+    def huge_nslots(out):
+        lvm_compact._put_u(out, 0)              # 无全局
+        lvm_compact._put_u(out, 0)              # externs
+        lvm_compact._put_u(out, 1)              # 一个函数
+        lvm_compact._put_u(out, 0)              # 名字 = 池[0]
+        lvm_compact._put_u(out, 10 ** 8)        # nslots
+        lvm_compact._put_u(out, 0)              # nparams
+        lvm_compact._put_u(out, 0)              # nblocks
+
+    for tag, fn in (("全零长度", huge_zero_run), ("nslots", huge_nslots)):
+        try:
+            lvm_compact.decode(blob_with(fn))
+        except lvm_compact.CompactError as e:
+            assert tag in str(e) or "不可信" in str(e) or "全零" in str(e), e
+        else:
+            raise AssertionError(f"流里声称的 {tag} 被直接信了（会按声称值分配）")
+    print("      流里的 `ln` / `nslots` 都被拒，没有按声称值分配")
+
+
+def test_trailing_bytes_are_refused() -> None:
+    """#691：这一形没有校验和，长度是它唯一的身份 —— 多一个字节就是另一个产物。"""
+    one = lvm_compact.encode_ir(_ir("loment/examples/user_hello.lomt"))
+    for extra in (b"x", b"\x00" * 100):
+        blob = one + extra
+        try:
+            lvm_compact.decode(blob)
+        except lvm_compact.CompactError as e:
+            assert str(len(extra)) in str(e), e
+        else:
+            raise AssertionError(f"尾部多 {len(extra)} 字节却收下了")
+    # 两份完整产物连在一起也不行
+    try:
+        lvm_compact.decode(one + one)
+    except lvm_compact.CompactError:
+        pass
+    else:
+        raise AssertionError("两份产物连在一起却收下了")
+    print("      尾部垃圾 / 两份拼接：都点名拒")
+
+
+def test_every_truncation_is_a_compact_error_that_names_the_section() -> None:
+    """#692：任意前缀都是 `CompactError`，且说得出被截断的是哪一段。
+
+    改之前：0–5 字节是 `CompactError`，**6 字节往上全是 `IndexError`**；
+    5 字节时那句拒绝还拿同一个值跟自己比（“不是 b'LVMC'”）。
+    """
+    one = lvm_compact.encode_ir(_ir("loment/examples/user_hello.lomt"))
+    for cut in range(len(one)):
+        try:
+            lvm_compact.decode(one[:cut])
+        except lvm_compact.CompactError as e:
+            msg = str(e)
+            assert "IndexError" not in msg
+            if cut == 5:
+                assert "b'LVMC'" not in msg, msg
+        except Exception as e:                  # noqa: BLE001
+            raise AssertionError(
+                f"截到 {cut} 字节时抛的是 {type(e).__name__}：{e}") from None
+        else:
+            if cut < len(one):
+                raise AssertionError(f"截到 {cut} 字节却解出来了")
+
+    # 池里有一段不是 UTF-8 -> CompactError，不是 UnicodeDecodeError
+    bad = bytearray(lvm_compact.MAGIC)
+    bad.append(lvm_compact.VERSION)
+    bad.append(lvm_compact.FORM_COMPACT)
+    lvm_compact._put_u(bad, 1)                  # 一条池
+    lvm_compact._put_u(bad, 1)                  # 长 1
+    bad += b"\xff"
+    lvm_compact._put_u(bad, 0)                  # 无全局
+    lvm_compact._put_u(bad, 0)                  # externs
+    lvm_compact._put_u(bad, 0)                  # funcs
+    try:
+        lvm_compact.decode(bytes(bad))
+    except lvm_compact.CompactError as e:
+        assert "UTF-8" in str(e), e
+    else:
+        raise AssertionError("池里不是 UTF-8 却收下了")
+    print(f"      全部 {len(one)} 个前缀 + 非 UTF-8 池：都是 CompactError")
+
+
+def test_the_encodable_set_is_pinned() -> None:
+    """#693：紧凑形**序列化整份程序**，所以它比解释器窄一档 —— 这一档必须被钉住。
+
+    T0/T2 是**懒编译**：走不到的坏代码不编译。`encode_ir` 不懒（不静默丢函数），
+    于是"有个函数用了 T2 没实现的指令"在解释器里能跑、在编码时点名拒。
+    这条判据把那条边界写成可证伪的两半：解释器收，编码器拒且**点出那条指令**。
+    """
+    src = ("define void @dead() {\nentry:\n  %x = fadd double 1.0, 2.0\n  ret void\n}\n"
+           "define i32 @_start() {\nentry:\n  ret i32 0\n}\n")
+    out = io.StringIO()
+    assert lvm.run_ir(src, out) == 0, "解释器本来应当懒编译、跑得到 _start"
+    try:
+        lvm_compact.encode_ir(src)
+    except lvm.LvmError as e:
+        assert "fadd" in str(e), f"拒绝了，但没点出那条指令：{e}"
+    else:
+        raise AssertionError("T2 没实现的指令被静默编进了紧凑形")
+    print("      懒编译边界：解释器收 / encode_ir 点名拒（fadd）")
+
+
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 

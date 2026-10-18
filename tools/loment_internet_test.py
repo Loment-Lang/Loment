@@ -223,7 +223,10 @@ _IP_V4 = ["0.0.0.0", "1.2.3.4", "255.255.255.255", "255.1.0.9", "192.168.1.1",
 _IP_V6 = ["::", "::1", "1::", "2001:db8::1", "2001:0:0:1:0:0:0:1",
           "1:2:3:4:5:6:7:8", "::ffff:1.2.3.4", "1:2:3:4:5:6:1.2.3.4",
           "1::2::3", "1:2:3:4:5:6:7:8:9", "fe80::a:b:c:d", "2001:DB8::1",
-          "0:0:0:0:0:0:0:0", "::ffff:0:0", "1:2:3:4:5:6:7"]
+          "0:0:0:0:0:0:0:0", "::ffff:0:0", "1:2:3:4:5:6:7",
+          # #677: 点分四段只能落在最后 32 位 —— 压缩之前出现 `.` 一律拒。
+          "1.2.3.4::", "1.2.3.4::1", "1.2.3.4:5::", "::1.2.3.4::",
+          "1:2:3:4:5:6:1.2.3.4::", "1.2.3.4:1:2:3:4:5:6:7"]
 _IN_NET = [("10.1.2.3", "10.0.0.0", 8), ("10.1.2.3", "10.1.0.0", 16),
            ("10.1.2.3", "10.1.2.0", 24), ("10.1.2.3", "11.0.0.0", 8),
            ("192.168.5.9", "192.168.0.0", 16), ("1.2.3.4", "0.0.0.0", 0),
@@ -844,13 +847,52 @@ fn _start() {
     let tot: u32 = putl(m, a3 + 4, "TAIL");
     w("HDR_LF|"); wd(http_hdr_end(m, 0, tot));
     w("|"); wd(http_body_start(m, 0, tot)); w("\\n");
+
+    // #685 状态行版本只认 `HTTP/<digit>.<digit>` + 空格。
+    let st: ptr = alloc(64);
+    let co: ptr = alloc(4);
+    let s1: u32 = putl(st, 0, "HTTP/ 200 OK");
+    store8(st, s1, 13 as u8); store8(st, s1 + 1, 10 as u8);
+    w("ST_NOSPACE|"); wd(http_status_line(st, 0, s1 + 2, co)); w("\\n");
+    let s2: u32 = putl(st, 0, "HTTP/x 200 OK");
+    store8(st, s2, 13 as u8); store8(st, s2 + 1, 10 as u8);
+    w("ST_X|"); wd(http_status_line(st, 0, s2 + 2, co)); w("\\n");
+    let s3: u32 = putl(st, 0, "HTTP/2 200 OK");
+    store8(st, s3, 13 as u8); store8(st, s3 + 1, 10 as u8);
+    w("ST_2|"); wd(http_status_line(st, 0, s3 + 2, co)); w("\\n");
+    let s4: u32 = putl(st, 0, "HTTP/1.1 200 OK");
+    store8(st, s4, 13 as u8); store8(st, s4 + 1, 10 as u8);
+    w("ST_OK|"); wd(http_status_line(st, 0, s4 + 2, co)); w("|");
+    wd(load8(co, 0) | (load8(co, 1) << 8) | (load8(co, 2) << 16) | (load8(co, 3) << 24));
+    w("\\n");
+
+    // #686 字段值里的 NUL 必须拒 (RFC 9110 §5.5)。
+    let hb: ptr = alloc(128);
+    fillv(hb, 128, 0);
+    let he: u32 = putl(hb, 0, "X: ab");
+    store8(hb, he + 2, 13 as u8); store8(hb, he + 3, 10 as u8);
+    store8(hb, he + 4, 13 as u8); store8(hb, he + 5, 10 as u8);
+    let fo: ptr = alloc(4);
+    let fl: ptr = alloc(4);
+    w("HDR_NUL|"); wd(http_hdr_find(hb, 0, he + 6, "X", fo, fl)); w("\\n");
+
+    // #681 端口位数：真实长度 63，旧估算 61 —— cap=62 时旧代码写到第 63 字节。
+    let rq: ptr = alloc(256);
+    fillv(rq, 256, 170);
+    w("REQ_BIG|"); wd(http_req_build(rq, 62, "GET", "/x", "h.example", 1000000, 0));
+    w("|"); wd(changed(rq, 256, 170)); w("\\n");
+    let rq2: ptr = alloc(256);
+    fillv(rq2, 256, 170);
+    w("REQ_FIT|"); wd(http_req_build(rq2, 63, "GET", "/x", "h.example", 1000000, 0)); w("\\n");
     syscall4(60, 0, 0, 0);
 }
 """
 
 
 def _hardening_dns_probe() -> str:
-    return _hard_head("use dns") + """
+    #: 四个 63 字节标签 = 文本 255 字符 / 线格式 257 字节 —— RFC 1035 §3.1 的上限之外。
+    big = ".".join(ch * 63 for ch in "abcd")
+    return (_hard_head("use dns") + """
 fn _start() {
     // #285 一个 63 字节的标签 + cap=8: 必须拒, 而且**一个字节都不写**
     // (修之前写 64 字节, 然后才返回 DNS_NO)。
@@ -883,12 +925,22 @@ fn _start() {
     let out: ptr = alloc(256);
     w("DEC_LEN100|"); wd(dns_name_decode(m2, 102, 0, out, 256)); w("\\n");
 
-    // #297 0xE0..0xFF 不是指针 (是保留值), 指针只能往回指。
+    // #682 0xE0..0xFF **是**指针（14 位偏移）。这一条报文里的指针指向前方 -> 仍然拒；
+    // 下一段证明偏移 8192 的**合法**指针能用。
     let m3: ptr = alloc(64);
     fillv(m3, 64, 0);
     store8(m3, 0, 224 as u8);
     store8(m3, 1, 0 as u8);
     w("DEC_E0|"); wd(dns_name_decode(m3, 64, 0, out, 256)); w("\\n");
+
+    // #682 名字在 8192、指针在 8999（0xE0 0x00 = 偏移 8192）。修之前 8192 以上一律拒。
+    let big: ptr = alloc(9001);
+    fillv(big, 9001, 0);
+    store8(big, 8192, 1 as u8);
+    store8(big, 8193, 97 as u8);
+    store8(big, 8999, 224 as u8);
+    store8(big, 9000, 0 as u8);
+    w("DEC_E0_BACK|"); wd(dns_name_decode(big, 9001, 8999, out, 256)); w("\\n");
     let m4: ptr = alloc(64);
     fillv(m4, 64, 0);
     store8(m4, 0, 192 as u8);
@@ -900,9 +952,43 @@ fn _start() {
     store8(m5, n5, 192 as u8);
     store8(m5, n5 + 1, 0 as u8);
     w("DEC_BACK|"); wd(dns_name_decode(m5, n5 + 2, n5, out, 256)); w("\\n");
+
+    // #684 RFC 1035 §3.1: 名字上限 255 字节（含结尾 0）。四个 63 字节标签 = 257 -> 拒。
+    let nm: ptr = alloc(512);
+    w("ENC_255|"); wd(dns_name_encode(BIG_NAME, nm, 512)); w("\\n");
+    let wb: ptr = alloc(512);
+    fillv(wb, 512, 97);
+    let wo: u32 = 0;
+    let li: u32 = 0;
+    while li < 4 {
+        store8(wb, wo, 63 as u8);
+        wo = wo + 64;
+        li = li + 1;
+    }
+    store8(wb, wo, 0 as u8);
+    w("DEC_255|"); wd(dns_name_decode(wb, wo + 1, 0, out, 512)); w("\\n");
+
+    // #683 CNAME 的 RDATA 只有 2 字节 (`[1]['a']`)，终结符在 RDATA 之外。
+    // 修之前 `dns_name_decode` 拿到整条报文长度，会把下一条记录的 0 当成结尾。
+    let rp: ptr = alloc(64);
+    fillv(rp, 64, 0);
+    store8(rp, 7, 1 as u8);                  // ANCOUNT = 1
+    store8(rp, 12, 0 as u8);                 // 根名字
+    store8(rp, 14, 5 as u8);                 // TYPE = CNAME (13..14)
+    store8(rp, 16, 1 as u8);                 // CLASS = IN (15..16)
+    store8(rp, 22, 2 as u8);                 // RDLENGTH = 2 (21..22)
+    store8(rp, 23, 1 as u8);                 // RDATA: [1]['a']
+    store8(rp, 24, 97 as u8);
+    store8(rp, 25, 0 as u8);                 // 终结符在 RDATA 之外
+    w("RES_RDLEN|"); wd(dns_resp_find(rp, 26, DNS_CNAME, out, 256)); w("\\n");
+
+    // #688 CLASS 不是 IN 的记录不是同一个名字空间里的东西。
+    store8(rp, 15, 3 as u8);
+    store8(rp, 16, 3 as u8);
+    w("RES_CLASS|"); wd(dns_resp_find(rp, 26, DNS_CNAME, out, 256)); w("\\n");
     syscall4(60, 0, 0, 0);
 }
-"""
+""").replace("BIG_NAME", _lit(big))
 
 
 def _hardening_uri_probe() -> str:
@@ -920,6 +1006,25 @@ fn _start() {
     w("PART0|"); wd(uri_part(rec, 0, oo, ol)); w("\\n");
     w("PART4|"); wd(uri_part(rec, 4, oo, ol)); w("\\n");
     w("PART5|"); wd(uri_part(rec, 5, oo, ol)); w("\\n");
+
+    // #680 `]` 之后只许 `:port` 或直接结束；非括号主机里不许出现方括号。
+    let u1: ptr = alloc(64);
+    let n1: u32 = putl(u1, 0, "http://[::1]junk/x");
+    w("U6_JUNK|"); wd(uri_parse(u1, 0, n1, rec)); w("\\n");
+    let u2: ptr = alloc(64);
+    let n2: u32 = putl(u2, 0, "http://[::1]x:80/");
+    w("U6_X|"); wd(uri_parse(u2, 0, n2, rec)); w("\\n");
+    let u3: ptr = alloc(64);
+    let n3: u32 = putl(u3, 0, "http://a[b]/");
+    w("U_BRACKET|"); wd(uri_parse(u3, 0, n3, rec)); w("\\n");
+
+    // #687 RFC 3986 `port = *DIGIT`：语法上没有范围，65535 的界属于拨号那一侧。
+    let u4: ptr = alloc(64);
+    let n4: u32 = putl(u4, 0, "http://host:65536/");
+    w("U_PORT65536|"); wd(uri_parse(u4, 0, n4, rec)); w("|"); wd(uri_port(rec)); w("\\n");
+    let u5: ptr = alloc(64);
+    let n5: u32 = putl(u5, 0, "http://host:70000/");
+    w("U_PORT70000|"); wd(uri_parse(u5, 0, n5, rec)); w("|"); wd(uri_port(rec)); w("\\n");
     syscall4(60, 0, 0, 0);
 }
 """
@@ -939,6 +1044,13 @@ def test_http_parser_hardening():
         "CL_BIG|4294967295",            # 99999999999 不再读成 1215752191
         "CL_OK|42",                     # 正常值照收
         "HDR_LF|20|22",                 # LF 结束的头: 20 与 22, 不是 body 里的 26 与 30
+        "ST_NOSPACE|0",                 # #685 版本里没有数字
+        "ST_X|0",                       # #685 版本里不是数字
+        "ST_2|0",                       # #685 少一个 `.digit`
+        "ST_OK|1|200",                  # 正常版本照收
+        "HDR_NUL|0",                    # #686 值里有 NUL -> 拒
+        "REQ_BIG|4294967295|0",         # #681 cap=62 < 真实长度 63 -> 拒, 一个字节都不写
+        "REQ_FIT|63",                   # 同一个请求, cap 给足 -> 63
     ])
     diff = _first_diff(got, want)
     assert not diff, f"http 防守用例不一致 @ {diff}"
@@ -961,9 +1073,14 @@ def test_dns_parser_hardening():
         "HC_OOR|0",                 # which=8 -> 0 (不再读头之外)
         "HC_OK|0",                  # which=1 且报文全 0 -> 0
         "DEC_LEN100|4294967295",    # 保留标签长度 100 -> 拒
-        "DEC_E0|4294967295",        # 0xE0 不是指针 -> 拒
+        "DEC_E0|4294967295",        # 0xE0 现在是指针，但这条指出界外 -> 拒
+        "DEC_E0_BACK|1",            # #682 偏移 8192 的合法指针 -> 1 ("a")
         "DEC_FWD|4294967295",       # 往前指的指针 -> 拒
         "DEC_BACK|11",              # 往回指的指针照收 -> "example.com"
+        "ENC_255|4294967295",       # #684 四个 63 字节标签 = 257 字节 -> 拒
+        "DEC_255|4294967295",       # #684 解码侧同一个上限
+        "RES_RDLEN|4294967295",     # #683 名字不落在自己的 RDATA 里 -> 拒
+        "RES_CLASS|4294967295",     # #688 CLASS 不是 IN -> 跳过
     ])
     diff = _first_diff(got, want)
     assert not diff, f"dns 防守用例不一致 @ {diff}"
@@ -980,6 +1097,11 @@ def test_uri_parser_hardening():
         "PART0|1",      # scheme 在场
         "PART4|0",      # query 缺席
         "PART5|1",      # fragment 在场
+        "U6_JUNK|0",        # #680 `]` 后面的尾随字节
+        "U6_X|0",           # #680 同上
+        "U_BRACKET|0",      # #680 主机里的方括号
+        "U_PORT65536|1|65536",   # #687 端口没有语法范围
+        "U_PORT70000|1|70000",
     ])
     diff = _first_diff(got, want)
     assert not diff, f"uri 防守用例不一致 @ {diff}"

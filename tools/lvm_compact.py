@@ -60,15 +60,24 @@ def _put_u(buf: bytearray, n: int) -> None:
             return
 
 
-def _get_u(blob: bytes, i: int) -> tuple[int, int]:
+def _get_u(blob: bytes, i: int, where: str = "") -> tuple[int, int]:
+    """读 LEB128。**到头就是 `CompactError`，不是 `IndexError`**（#692）。
+
+    `where` 是调用处给的那一段的名字（字符串池 / 全局 / 指令……），错误里点名它，
+    否则一个截断的产物只能说"越界了"，说不出是**哪儿**被截断的。
+    """
     n, shift = 0, 0
     while True:
+        if i >= len(blob):
+            raise CompactError(f"紧凑形在{where or '这里'}处被截断（变长整数读到末尾）")
         b = blob[i]
         i += 1
         n |= (b & 0x7F) << shift
         if not b & 0x80:
             return n, i
         shift += 7
+        if shift > 63:
+            raise CompactError(f"紧凑形在{where or '这里'}处有一个过长的变长整数")
 
 
 def _put_i(buf: bytearray, n: int) -> None:
@@ -76,8 +85,8 @@ def _put_i(buf: bytearray, n: int) -> None:
     _put_u(buf, (n << 1) if n >= 0 else ((-n) << 1) - 1)
 
 
-def _get_i(blob: bytes, i: int) -> tuple[int, int]:
-    zz, i = _get_u(blob, i)
+def _get_i(blob: bytes, i: int, where: str = "") -> tuple[int, int]:
+    zz, i = _get_u(blob, i, where)
     return ((zz >> 1) if not zz & 1 else -((zz + 1) >> 1)), i
 
 
@@ -245,10 +254,18 @@ def encode_program(prog, globals_: list, externs: list) -> bytes:
     for g in globals_:
         _put_u(body, pool.add(g.name))
         _put_u(body, pool.add(g.ty))
-        data = g.data or b""
         # ⚠ **全零的全局按"零"记，不按字节记**。`@__loment_heap` 是 64 KiB 的
         # `zeroinitializer` —— 文本里几个字符，照字节写就把整个紧凑形撑大 64 KB
         # （第一版实测：`tour` 21.5KB 文本 -> 70.9KB 紧凑形，比原文件还大三倍）。
+        #
+        # ⚠ **`data is None` 的长度是 `size_of(ty)`，不是 0**：解码器把全零恢复成 `None`
+        # （不物化那段零），再编码时若写 0，`encode(decode(encode(x)))` 就丢了长度 ——
+        # 这正是 #689：一个 64 字节的 `zeroinitializer` 读写成 0 字节。
+        if g.data is None:
+            _put_u(body, 0)                  # 0 = 全零
+            _put_u(body, lomelf.size_of(g.ty))
+            continue
+        data = g.data
         if not data.strip(b"\x00"):
             _put_u(body, 0)                  # 0 = 全零
             _put_u(body, len(data))
@@ -313,33 +330,45 @@ class _Reader:
     def __init__(self, blob: bytes) -> None:
         self.b = blob
         self.i = 0
+        #: 正在读的**那一段**的名字，只进错误消息（#692：截断要说清在哪儿）。
+        self.where = "文件头"
 
     def u8(self) -> int:
+        if self.i >= len(self.b):
+            raise CompactError(f"紧凑形在{self.where}处被截断（读单字节时到头）")
         v = self.b[self.i]
         self.i += 1
         return v
 
     def u(self) -> int:
-        v, self.i = _get_u(self.b, self.i)
+        v, self.i = _get_u(self.b, self.i, self.where)
         return v
 
     def i_(self) -> int:
-        v, self.i = _get_i(self.b, self.i)
+        v, self.i = _get_i(self.b, self.i, self.where)
         return v
 
     def raw(self, n: int) -> bytes:
-        v = self.b[self.i:self.i + n]
-        self.i += n
+        end = self.i + n
+        if n < 0 or end > len(self.b):
+            raise CompactError(
+                f"紧凑形在{self.where}处被截断（要 {n} 字节，只剩 {len(self.b) - self.i}）")
+        v = self.b[self.i:end]
+        self.i = end
         return v
 
 
 def decode(blob: bytes):
     """字节 -> `(globals, funcs, externs, cfuncs)`。**不读任何文本**。"""
-    if len(blob) < 6 or blob[:4] != MAGIC:
+    if len(blob) < 4 or blob[:4] != MAGIC:
         head = blob[:4]
         raise CompactError(
             f"这不是紧凑形（头四个字节是 {head!r}，不是 {MAGIC!r}）—— "
             "别把它当文本硬解（`docs/250` §2.1）")
+    if len(blob) < 6:
+        raise CompactError(
+            f"紧凑形的文件头被截断（有魔数，但只有 {len(blob)} 字节，"
+            f"连版本与形两字节都放不下）")
     r = _Reader(blob)
     r.i = 4
     ver = r.u8()
@@ -349,33 +378,48 @@ def decode(blob: bytes):
     if form != FORM_COMPACT:
         raise CompactError(f"文件头说这是形 {form}，不是紧凑形（{FORM_COMPACT}）")
 
+    r.where = "字符串池"
     n = r.u()
     pool = []
     for _ in range(n):
         ln = r.u()
-        pool.append(r.raw(ln).decode("utf-8"))
+        try:
+            pool.append(r.raw(ln).decode("utf-8"))
+        except UnicodeDecodeError as e:
+            raise CompactError(f"紧凑形的字符串池里有一段不是 UTF-8：{e}") from None
 
     def s() -> str:
-        return pool[r.u()]
+        raw = r.u()
+        if raw >= len(pool):
+            raise CompactError(
+                f"紧凑形在{r.where}处引用字符串池的第 {raw} 条，池里只有 {len(pool)} 条")
+        return pool[raw]
 
+    r.where = "全局"
     globals_ = []
     for _ in range(r.u()):
         name, ty = s(), s()
         tag = r.u()
         ln = r.u()
         if tag == 0:
-            raw = r.raw(0)
-            # 全零：给 `None`（`_place_globals` 会按 `size_of(ty)` 补零）。
-            # 万一那个大小与文本里的长度不一致，就显式给一段零，别让它算出别的地址。
-            data = None if lomelf.size_of(ty) == ln else (b"\x00" * ln)
+            # 全零只按声明的大小合法（#690）：不信流里那个长度就分配 ——
+            # 34 字节的输入曾让 `ln=10^8` 直接吃掉 100 MB。
+            want = lomelf.size_of(ty)
+            if ln != want:
+                raise CompactError(
+                    f"紧凑形里全局 {name} 声明为 {ty}（{want} 字节），"
+                    f"却写了一段 {ln} 字节的全零")
+            data = None            # `_place_globals` 按 `size_of(ty)` 补零
         elif tag == 1:
             data = r.raw(ln)
         else:
             raise CompactError(f"全局 {name} 的数据标记 {tag} 不认识")
         globals_.append(lomelf.Global(name, ty, data))
 
+    r.where = "外部符号"
     externs = [s() for _ in range(r.u())]
 
+    r.where = "函数表"
     cfuncs = {}
     funcs = []
     for _ in range(r.u()):
@@ -387,8 +431,22 @@ def decode(blob: bytes):
         cf = lvm_t2._CFunc(fname)                        # noqa: SLF001
         cf.nslots, cf.params = nslots, params
         for _ in range(nblocks):
+            r.where = f"函数 {fname} 的块表"
             cf.labels.append(s())
+            r.where = f"函数 {fname} 的指令"
             cf.blocks.append([_decode_op(r, s) for _ in range(r.u())])
+        # **不信 `nslots`**（#690）：编译器的槽只来自形参与各指令的目的，
+        # 所以合法程序里 `nslots <= 形参数 + 指令条数`。不查的话，
+        # 一个 34 字节的产物就能让 `call_t2` 去分配 816 MB。
+        total_ops = sum(len(b) for b in cf.blocks)
+        if nslots > nparams + total_ops:
+            raise CompactError(
+                f"函数 {fname} 声称有 {nslots} 个槽，而它只有 {nparams} 个形参、"
+                f"{total_ops} 条指令 —— 这个数不可信")
+        for p in params:
+            if p >= nslots:
+                raise CompactError(
+                    f"函数 {fname} 的形参槽 {p} 越界（只有 {nslots} 个槽）")
         cfuncs[fname] = cf
         fn = lomelf.Func(fname, None, [], False)
         # ⚠ 块里的**指令条数**要让 `Profile.text()` 能按 (块, 下标) 遍历 —— 它不看指令内容，
@@ -398,6 +456,12 @@ def decode(blob: bytes):
         for blk, ops in zip(fn.blocks, cf.blocks):
             blk.instrs = [lomelf.Instr(None, "") for _ in ops]
         funcs.append(fn)
+    # 这一形**没有校验和**（`docs/250` §4.3），长度是它唯一的身份：
+    # 多出来的字节不许默默丢掉（#691）—— 那是"这份产物是什么"读错的第一步。
+    if r.i != len(blob):
+        raise CompactError(
+            f"紧凑形读完了还有 {len(blob) - r.i} 字节没用到 —— "
+            "要么粘了垃圾，要么是两份产物连在了一起")
     return globals_, funcs, externs, cfuncs
 
 

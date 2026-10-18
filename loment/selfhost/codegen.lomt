@@ -228,7 +228,16 @@ fn emit_val(s: ptr, out: ptr, lvl: u32) -> u32 {
 //: 而那两个操作数其实是 `i1` (`#316`)。
 const CG_TY_BOOL: u32 = 4294967294;
 
+//: **`4294967293` = "u32, 但源里没有那个词可以指"** —— 两侧都没有类型的二元运算
+//: (常量 vs 字面量) 里, 参考实现把它落成 `u32` (无符号 32 位): `DIR_ERR(u32) ==
+//: 4294967295` 的两个操作数都印 `4294967295`, 而 `-1 < 0` 那种带负字面量的才落 i32。
+//: 自举侧原先只能落 0 (缺省 i32/有符号), 于是同一个比较印 `-1` (#679 shape 2)。
+const CG_WANT_U32: u32 = 4294967293;
+
 fn emit_ty(s: ptr, out: ptr, src: ptr, toks: ptr, tt: u32) -> u32 {
+    if tt == CG_WANT_U32 {
+        return emit_str(s, out, "i32");
+    }
     let stt: u32 = subst_tok(s, src, toks, tt);   // 泛型实例: 类型参数 -> 具体类型
     if stt != tt {
         return emit_ty(s, out, src, toks, stt);
@@ -288,6 +297,9 @@ fn emit_ty(s: ptr, out: ptr, src: ptr, toks: ptr, tt: u32) -> u32 {
 }
 
 fn is_signed(src: ptr, toks: ptr, tt: u32) -> u32 {
+    if tt == CG_WANT_U32 {
+        return 0;
+    }
     if tok_is(src, toks, tt, "i8") || tok_is(src, toks, tt, "i16")
         || tok_is(src, toks, tt, "i32") || tok_is(src, toks, tt, "i64") {
         return 1;
@@ -297,6 +309,9 @@ fn is_signed(src: ptr, toks: ptr, tt: u32) -> u32 {
 
 /// 整型的位宽 (非整型 / 未定型 = 0)。`u32` 与 `i32` 同宽 —— LLVM 里也是同一个类型。
 fn ty_bits(src: ptr, toks: ptr, tt: u32) -> u32 {
+    if tt == CG_WANT_U32 {
+        return 32;
+    }
     if tok_is(src, toks, tt, "u8") || tok_is(src, toks, tt, "i8") { return 8; }
     if tok_is(src, toks, tt, "u16") || tok_is(src, toks, tt, "i16") { return 16; }
     if tok_is(src, toks, tt, "u32") || tok_is(src, toks, tt, "i32") { return 32; }
@@ -337,7 +352,13 @@ fn bin_common(src: ptr, toks: ptr, a: u32, b: u32) -> u32 {
 /// 已经同宽就什么都不发 —— 与 `lomentc.Emitter.upcast` 逐字节同形 (含临时量编号顺序)。
 fn emit_upcast(s: ptr, out: ptr, src: ptr, toks: ptr, lvl: u32, frm: u32, to: u32) {
     let wf: u32 = ty_bits(src, toks, frm);
-    let wt: u32 = ty_bits(src, toks, to);
+    // `to == 0` = 类型未知, 参考实现落到 `u32` (32 位无符号) 再发指令 —— 这里必须
+    // 按同一口径抬, 否则 `DIR_O_DIRECTORY(u64) == 65536` 少了参考那边的
+    // `zext i64 65536 to i32`, 两个实现的 IR 不再逐字节相同 (#679)。
+    let wt: u32 = 32;
+    if to != 0 {
+        wt = ty_bits(src, toks, to);
+    }
     if wf != 0 && wt != 0 && wf != wt {
         emit_str(s, out, "  ");
         let n: u32 = new_temp(s, out);
@@ -2486,7 +2507,7 @@ fn arg1(s: ptr, out: ptr, src: ptr, toks: ptr, k: u32, lvl: u32) -> u32 {
 /// 0 (无 want) 按 i32 —— 与参考实现的 `want or "i32"` 同序。
 /// **只覆盖 <= 32 位**: 64 位的越界字面量 (>2^64) 是既有缺口, 不在本修范围。
 fn lit_bits(src: ptr, toks: ptr, want: u32) -> u32 {
-    if want == 0 {
+    if want == 0 || want == CG_WANT_U32 {
         return 32;
     }
     if tok_is(src, toks, want, "u8") || tok_is(src, toks, want, "i8") {
@@ -2516,12 +2537,24 @@ fn lit_bits(src: ptr, toks: ptr, want: u32) -> u32 {
 /// 与 20 位十进制回写, 会把种子推过 `#441` 记的那道容量墙。>2^64 的字面量因此仍是
 /// 既有缺口 —— 与本条要修的形状 (`let v: u8 = 300;`) 无关。
 fn set_int_lit(s: ptr, lvl: u32, src: ptr, toks: ptr, i: u32, want: u32) -> u32 {
+    // 模块级常量可以是**负字面量** (`const X: i64 = -11;`): `find_const` 交回来的是
+    // `-` 那个 token, 值在它后面。参考实现在解析期就把符号折进值里; 原来这里只把
+    // `-` 的文本抄出去, 于是 IR 里是 `icmp eq i64 %t1, -` —— 不是数字错, 是**非法 IR**
+    // (#678)。先取绝对值再按类型环绕, 才是 `const X: i8 = -200;` 也对的写法。
+    let wneg: u32 = 0;
+    if tok_is(src, toks, i, "-") {
+        wneg = 1;
+        i = i + 1;
+    }
     // **名字带 `wr` 前缀**: 这门语言没有块作用域 (docs/228), 下面十六进制那段的
     // `let v` 与本段同处一个函数作用域 —— 撞名会静默改写类型, 自举自己编自己时报 E1。
     let wrb: u32 = lit_bits(src, toks, want);
     if wrb > 0 {
         // 低 32 位: `tok_int` 本身就是 u32 自然环绕, 再按目标位宽掩码。
         let wrs: u32 = tok_int(src, toks, i);
+        if wneg == 1 {
+            wrs = 0 - wrs;             // 二补数; 下面的掩码与符号位检查照旧
+        }
         let wrm: u32 = 4294967295;
         if wrb < 32 {
             wrm = ((1 as u32) << wrb) - 1;
@@ -2533,6 +2566,8 @@ fn set_int_lit(s: ptr, lvl: u32, src: ptr, toks: ptr, i: u32, want: u32) -> u32 
         let wrsgn: u32 = 0;
         if want == 0 {
             wrsgn = 1;
+        } else if want == CG_WANT_U32 {
+            wrsgn = 0;                 // 虚拟 u32: 无符号, 不按符号位折成负数
         } else if load8(src, load32(toks, want * 20 + 4)) == 105 {
             wrsgn = 1;
         }
@@ -2566,6 +2601,16 @@ fn set_int_lit(s: ptr, lvl: u32, src: ptr, toks: ptr, i: u32, want: u32) -> u32 
         while k + c0 < n {
             store8(s, btxt(s, lvl) + c0, load8(src, st + k + c0) as u8);
             c0 = c0 + 1;
+        }
+        if wneg == 1 {               // 负字面量: 右移一位让 '-' 的位置
+            let cq: u32 = c0;
+            while cq > 0 {
+                store8(s, btxt(s, lvl) + cq, load8(s, btxt(s, lvl) + cq - 1) as u8);
+                cq = cq - 1;
+            }
+            store8(s, btxt(s, lvl), 45 as u8);
+            store32(s, blen(s, lvl), c0 + 1);
+            return c0 + 1;
         }
         store32(s, blen(s, lvl), c0);
         return c0;
@@ -2602,6 +2647,16 @@ fn set_int_lit(s: ptr, lvl: u32, src: ptr, toks: ptr, i: u32, want: u32) -> u32 
     while q < nd {
         store8(s, btxt(s, lvl) + q, (48 + load8(s, 672 + nd - 1 - q)) as u8);
         q = q + 1;
+    }
+    if wneg == 1 {                   // 负字面量（十六进制那支）: 同上
+        let hq: u32 = nd;
+        while hq > 0 {
+            store8(s, btxt(s, lvl) + hq, load8(s, btxt(s, lvl) + hq - 1) as u8);
+            hq = hq - 1;
+        }
+        store8(s, btxt(s, lvl), 45 as u8);
+        store32(s, blen(s, lvl), nd + 1);
+        return nd + 1;
     }
     store32(s, blen(s, lvl), nd);
     return nd;
@@ -3701,6 +3756,14 @@ fn expr_unary(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32
         let neg: u32 = tok_is(src, toks, j, "-") as u32;
         let inner: u32 = expr_unary(s, out, src, toks, j + 1, lvl, want);
         let tt: u32 = expr_type(s, src, toks, j + 1);
+        // 参考实现的 `Un` 把 `want` 交给内层表达式；内层是**整数字面量**时，
+        // 它的类型就是 want（`sock_retry(-11)` 的参数是 i64 ⇒ `sub i64 0, 11`）。
+        // 自举侧原来只看字面量的缺省类型（i32），于是同一个实参发成 `sub i32`。
+        // 只对字面量这么做：标识符的类型来自它自己，不是调用点的期望。
+        if neg == 1 && want != 0 && tok_kind(toks, j + 1) == 1
+                && want_is_int(src, toks, want) == 1 {
+            tt = want;
+        }
         emit_str(s, out, "  ");
         let n: u32 = new_temp(s, out);
         if neg == 1 {
@@ -3730,7 +3793,7 @@ fn expr_unary(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32
 /// 类型是 u64) 照常落 i64, 而 bool/ptr/str/切片/结构这些非整数落回 i32 缺省。
 /// 0 (无 want) 按整数处理。
 fn want_is_int(src: ptr, toks: ptr, want: u32) -> u32 {
-    if want == 0 {
+    if want == 0 || want == CG_WANT_U32 {
         return 1;
     }
     if tok_is(src, toks, want, "u8") || tok_is(src, toks, want, "i8") {
@@ -3759,6 +3822,25 @@ fn want_is_int(src: ptr, toks: ptr, want: u32) -> u32 {
 /// 运算符的 `tt` —— 参考实现那条左结合链 (`expr_type(Bin) = _common_type(lt, rt)`)
 /// 展开出来就是这个。窄的一侧按 `emit_upcast` 抬到 `tt`, 顺序与参考实现一致:
 /// 先抬左、再发右、再抬右、最后出指令。
+/// 操作数**实际发出来的类型**: 静态类型未知 (0) 且它是个名字时, 按模块级常量的
+/// **声明类型**算。参考实现的 `expr(Ident)` 对常量返回 `self.consts[name]` 的类型,
+/// 而 binop 的静态 `expr_type` 看不到常量 —— 两套类型在参考那边分工, 这里照抄:
+/// 发的宽度看静态类型, 抬的类型看实际操作数。少了这一半, `DIR_O_DIRECTORY(u64) ==
+/// 65536` 就少了参考那边的 `zext i64 65536 to i32` (#679 shape 2)。
+fn operand_ty(s: ptr, src: ptr, toks: ptr, k: u32, fallback: u32) -> u32 {
+    if fallback != 0 {
+        return fallback;
+    }
+    if tok_kind(toks, k) != 0 {      // 字面量没有"声明类型", 不必找
+        return 0;
+    }
+    let cvt: u32 = find_const(src, toks, k);
+    if cvt != 0 {
+        return cvt - 2;
+    }
+    return 0;
+}
+
 fn expr_bin(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, minp: u32, lvl: u32, want: u32) -> u32 {
     let w: u32 = 0;
     if want_is_int(src, toks, want) == 1 {
@@ -3854,9 +3936,13 @@ fn expr_bin(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, minp: u32, lvl: u32, 
             if tt3 == 0 && (neg_lit_at(src, toks, j) == 1 || neg_lit_at(src, toks, i + 1) == 1) {
                 sgn3 = 1;        // 无类型 + 负字面量 -> 有符号 (#237)
             }
-            emit_upcast(s, out, src, toks, lvl, lt3, tt3);
+            if tt3 == 0 && sgn3 == 0 {
+                tt3 = CG_WANT_U32;   // 两侧都无类型且无负字面量 -> 参考实现落 u32
+            }
+            emit_upcast(s, out, src, toks, lvl, operand_ty(s, src, toks, j, lt3), tt3);
             let r3: u32 = expr_bin(s, out, src, toks, i + 1, op_prec(c) + 1, lvl + 1, tt3);
-            emit_upcast(s, out, src, toks, lvl + 1, rt3, tt3);
+            emit_upcast(s, out, src, toks, lvl + 1,
+                        operand_ty(s, src, toks, i + 1, rt3), tt3);
             let n3: u32 = alloc_temp(s);   // lomentc 先占 r 再占 z
             let z3: u32 = alloc_temp(s);
             let w3: u32 = load32(s, 480) + 1;
@@ -3917,9 +4003,13 @@ fn expr_bin(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, minp: u32, lvl: u32, 
                     || neg_lit_at(src, toks, i + op_toks(c)) == 1) {
                 sgn = 1;         // 无类型 + 负字面量 -> 有符号 (#237)
             }
-            emit_upcast(s, out, src, toks, lvl, lt, tt);
+            if tt == 0 && sgn == 0 {
+                tt = CG_WANT_U32;    // 两侧都无类型且无负字面量 -> 参考实现落 u32
+            }
+            emit_upcast(s, out, src, toks, lvl, operand_ty(s, src, toks, j, lt), tt);
             let r: u32 = expr_bin(s, out, src, toks, i + op_toks(c), np, lvl + 1, tt);
-            emit_upcast(s, out, src, toks, lvl + 1, rt, tt);
+            emit_upcast(s, out, src, toks, lvl + 1,
+                        operand_ty(s, src, toks, i + op_toks(c), rt), tt);
             emit_str(s, out, "  ");
             let n: u32 = new_temp(s, out);
             emit_str(s, out, " = ");

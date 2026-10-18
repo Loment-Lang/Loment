@@ -120,6 +120,11 @@ def main(argv: list[str] | None = None) -> int:
         Path(a.out).write_text(text, encoding="utf-8", newline="\n")
         print(f"[OK] {p} -> {a.out}")
     else:
+        # **两个出口必须逐字节相同**（`#506`）：Windows 的文本模式会把 `\n` 翻成 `\r\n`，
+        # 于是同一份输入 `>` 出去是 CRLF、`--out` 出去是 LF —— 而"文档要跨平台可比"
+        # 正是这个模块存在的理由。`newline=""` 关掉翻译，原样写出。
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(newline="")
         sys.stdout.write(text)
     return 0
 

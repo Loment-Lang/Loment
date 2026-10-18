@@ -772,6 +772,40 @@ def test_summary_groups_by_code_worst_first():
     print("      汇总按码分组、条数多的先出 (4 errors: E019 x3, E002 x1)")
 
 
+@test
+def test_summary_is_singular_and_points_only_at_codes_that_exist():
+    """一条写 `1 error`，而且 `more:` 那一行**只指真讲得出来的码**（`#487`）。
+
+    两件都在同一行汇总上：
+      * **单数** —— `1 errors:` 是英文里最便宜的那种破绽，而它是用户读到的最后一句；
+      * **不指空** —— 编译器可以吐出表面数据表里没有的码（旧报错器遇上新编译器，
+        或者别的工具写进来的 `E999`）。那种码点开是 `(unknown code)`，比不指更坏：
+        用户会以为是自己抄错了码。
+    """
+    with tempfile.TemporaryDirectory(prefix="lomenterr-one-") as td:
+        d = Path(td) / "one.jsonl"
+        d.write_text(json.dumps({"file": "x.lomt", "line": 1, "col": 1,
+                                 "code": "E999", "message": "a"}) + "\n",
+                     encoding="utf-8", newline="\n")
+        rc, out = _render(d)
+        assert rc == 1, (rc, out[:200])
+        assert "1 error: E999 x1" in out, f"单数没生效: {out[-200:]!r}"
+        assert "more: loment explain" not in out, \
+            f"指了一个不存在的码: {[l for l in out.splitlines() if 'more:' in l]!r}"
+
+        # 一真一假：真那个要指，假那个不许带出来。
+        d2 = Path(td) / "mixed.jsonl"
+        d2.write_text("\n".join(json.dumps(r) for r in (
+            {"file": "x.lomt", "line": 1, "col": 1, "code": "E999", "message": "a"},
+            {"file": "x.lomt", "line": 1, "col": 1, "code": "E001", "message": "b"},
+        )) + "\n", encoding="utf-8", newline="\n")
+        rc, out = _render(d2)
+        assert rc == 1, (rc, out[:200])
+        more = [l for l in out.splitlines() if "more:" in l]
+        assert more and "E001" in more[0] and "E999" not in more[0], f"more 行不对: {more!r}"
+    print("      汇总: 一条用单数，more 只指表里有的码 (E001 指，E999 不指)")
+
+
 # ---------------------------------------------------------------- --short / --json (§15)
 
 @test

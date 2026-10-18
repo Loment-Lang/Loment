@@ -602,6 +602,43 @@ def test_m62_bench_table():
 
 
 @test
+def test_bench_refuses_a_negative_iteration_count():
+    """`--n -5` 是**用法错误**，不是 rustc 的事（`#507`）。
+
+    负数会被原样拼进 `let n = -5u32;`，于是用户看到的是 Rust 的报错 —— 一个他没写过的
+    语言，指着一个临时文件。入口挡住，退 2（与"没有 bench_*() 函数"同一个码）。
+    """
+    import loment
+    with tempfile.TemporaryDirectory(prefix="loment-bench-neg-") as td:
+        f = Path(td) / "b.lomt"
+        f.write_text("module b\n\nfn bench_x() -> u32 {\n    return 1;\n}\n",
+                     encoding="utf-8", newline="\n")
+        assert loment.main(["bench", str(f), "--n", "-5"]) == 2
+
+
+@test
+def test_diag_reports_an_unreadable_input_as_e031():
+    """`loment diag /nope` 要报 **E031**，不是一段 Python 栈（`#483`）。
+
+    `lomentc` 自己的入口早就接住了这一层（`E031` 那条规则就是为它写的），`diag` 这个
+    入口漏了 —— 同一个失败两个入口两种表现，而用户只知道"工具炸了"。
+    """
+    import contextlib
+    import io
+    import loment_diag
+    with tempfile.TemporaryDirectory(prefix="loment-diag-missing-") as td:
+        missing = Path(td) / "nope.lomt"
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = loment_diag.main([str(missing), "--json"])
+        # 有诊断就是 1（与别的 linter 同一个约定）；这里要的是**不是栈**，而是一条 E031。
+        assert rc == 1, f"有诊断时该退 1，得到 {rc}"
+        got = json.loads(buf.getvalue())
+    codes = [d["code"] for d in got["diagnostics"]]
+    assert codes == ["E031"], f"期望 E031，得到 {codes}"
+
+
+@test
 def test_m63_coverage():
     import loment
     assert loment.main(["cov", str(TOOLCHAIN), "--call", "cov_main"]) == 0

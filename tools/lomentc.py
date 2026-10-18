@@ -3269,7 +3269,10 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
         if ot is not None and _is_array(ot) and isinstance(e.idx, IntLit):
             n = _array_len(ot)
             if e.idx.value >= n:
-                errs.append(f"{e.line}: E028: 下标 {e.idx.value} 越过定长数组的界"
+                # **码不写进正文**（`#486`）：渲染器在头一行已经印了 `error[E028]`，
+                # 正文再写一次就是同一件事印两遍。分类靠的是这句话本身
+                # （`loment_diag.RULES` 匹配的是"越过定长数组的界"），不是前缀。
+                errs.append(f"{e.line}: 下标 {e.idx.value} 越过定长数组的界"
                             f"（{ot} 的长度是 {n}）")
         return
     if isinstance(e, Un):
@@ -4671,7 +4674,8 @@ def _move_check(f: Func, funcs: dict, structs: dict, enums: dict,
             if e.name in moved:
                 errs.append(f"{e.line}: 变量 {e.name} 已被移动, 不能再用")
             elif lms and e.name in freed:
-                errs.append(f"{e.line}: E029: 变量 {e.name} 指向的块已经被 `free`，不能再用")
+                # 同上（`#486`）：码在头一行，正文不再重复。
+                errs.append(f"{e.line}: 变量 {e.name} 指向的块已经被 `free`，不能再用")
         elif isinstance(e, Bin):
             use(e.left)
             use(e.right)

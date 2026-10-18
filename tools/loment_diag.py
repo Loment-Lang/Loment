@@ -2390,6 +2390,11 @@ def main(argv: list[str] | None = None) -> int:
         errs = lomentc.check(mod, deps=deps)
     except lomentc.LomError as e:
         errs = [str(e)]
+    except OSError as e:
+        # 文件这一层的失败（`#483`）：路径不存在 / 是目录 / 没有读权限。原先它一路漏到
+        # Python 栈 —— `lomentc` 自己的 `main()` 早就把这一句接住了（见 `E031` 那条规则），
+        # `diag` 这个入口忘了。措辞与那边**同一句**：分类器认的是"读不了输入文件"。
+        errs = [f"读不了输入文件 {p}: {e.strerror or e}"]
     diags = diagnose(errs)
     note = foreign_note(p, errs)
     if a.json:

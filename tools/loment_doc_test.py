@@ -147,6 +147,32 @@ def test_loment_lomdoc_matches_python():
         print(f"      {n} 个语料逐字节相同")
 
 
+@test
+def test_stdout_and_out_are_byte_identical():
+    """`loment doc F > a` 与 `loment doc F --out b` 必须**逐字节相同**（`#506`）。
+
+    Windows 的文本模式把 `\\n` 翻成 `\\r\\n`，而 `--out` 明确写 LF —— 同一份输入两个
+    出口不一样，而"文档跨平台可比"正是这个模块存在的理由。**比字节，不比文本**：
+    两边都翻译过之后文本比较是一样的，那正是这条洞藏起来的地方。
+    """
+    f = ROOT / "loment" / "examples" / "native_trait.lomt"
+    assert f.exists(), f"缺语料 {f}"
+    with tempfile.TemporaryDirectory(prefix="lomdoc-crlf-") as td:
+        a = Path(td) / "a.md"
+        b = Path(td) / "b.md"
+        with open(a, "wb") as fh:
+            r = subprocess.run([sys.executable, str(ROOT / "tools" / "lomdoc.py"), str(f)],
+                               stdout=fh, stderr=subprocess.PIPE, shell=False)
+        assert r.returncode == 0, r.stderr[-300:]
+        r2 = subprocess.run([sys.executable, str(ROOT / "tools" / "lomdoc.py"), str(f),
+                             "--out", str(b)], capture_output=True, shell=False)
+        assert r2.returncode == 0, r2.stderr[-300:]
+        ba, bb = a.read_bytes(), b.read_bytes()
+    assert ba == bb, f"两个出口不一致: stdout {len(ba)}B vs --out {len(bb)}B"
+    assert b"\r\n" not in ba, "stdout 里出现了 CRLF"
+    print(f"      `>` 与 `--out` 逐字节相同 ({len(ba)}B, 无 CRLF)")
+
+
 EDGE_CASE = '''module lomdoc_edge
 
 /// 能力域文档: 可撤销的写权限

@@ -169,6 +169,7 @@ const S_TRUNC: u32 = 30;         // 这一条太长被截断
 const S_NERR: u32 = 31;          // " 条错误"（跟在数字后面）
 const S_SUM: u32 = 32;           // " 条错误："（汇总行的头）
 const S_SUM_X: u32 = 33;         // 汇总里 " x2" 那个 x
+const S_SUM1: u32 = 57;          // 同上，但只有**一条**（英文要单数，`#487`）
 // 候选**是什么** —— 抄 rustc 的 "a local variable with a similar name exists"。
 // 只说一个名字，用户还得自己去找它在哪、是干什么的；说了种类，一眼就知道该不该照它改。
 const S_KIND_FN: u32 = 38;
@@ -256,6 +257,7 @@ fn ui_en(k: u32) -> str {
     if k == 31 { return " errors\n"; }
     if k == 32 { return " errors: "; }
     if k == 33 { return " x"; }
+    if k == 57 { return " error: "; }
     if k == 34 { return "lomenterr: cannot open the diagnostics file\n"; }
     if k == 35 { return "there is no `./deps` directory here, so layer 1 cannot find anything: layer 1 is `<project root>/deps/<name>/<name>.lomt`. Create that file, or name the location with the path form `use \"./x.lomt\"`.\n"; }
     if k == 36 { return "`./deps` is here; the closest names in it are:\n"; }
@@ -317,6 +319,7 @@ fn ui_zh(k: u32) -> str {
     if k == 31 { return " 条错误\n"; }
     if k == 32 { return " 条错误："; }
     if k == 33 { return " ×"; }
+    if k == 57 { return " 条错误："; }   // 中文不分数，与 k == 32 相同
     if k == 34 { return "lomenterr: 打不开诊断文件\n"; }
     if k == 35 { return "这里没有 `./deps` 目录 —— 第 1 层找的是「项目根」下的 `deps/<名字>/<名字>.lomt`，所以它找不到任何东西。补那个文件，或者用路径形式 `use \"./x.lomt\"` 指明位置。\n"; }
     if k == 36 { return "`./deps` 在这里，里面最接近的名字有:\n"; }
@@ -2128,7 +2131,13 @@ fn sum_print(ctx: ptr, total: u32) -> u32 {
     }
     let o: u32 = em_u32(ctx, 0, total);
     let o1: u32 = em_col(ctx, o, "1;31");
-    let o2: u32 = em(ctx, o1, ui(ctx, S_SUM));
+    // 一条就写单数（`#487`）：`1 errors:` 是英文里最便宜的那种破绽。
+    // 中文不分数，`ui_zh` 把两个键映到同一句。
+    let sumk: u32 = S_SUM;
+    if total == 1 {
+        sumk = S_SUM1;
+    }
+    let o2: u32 = em(ctx, o1, ui(ctx, sumk));
     // 复位在**展开明细之前**：明细是要拿去比的（`E002` 与条数），整段染红会把它们压得
     // 看不清 —— 上色只给"总数"那一下。
     let head: u32 = em_rst(ctx, o2);
@@ -2636,13 +2645,33 @@ fn h_more(ctx: ptr) -> u32 {
     if n == 0 {
         return 0;
     }
+    // **只指路到真讲得出来的码**（`#487`）：编译器可以吐出表面数据表里没有的码
+    // （旧报错器遇上新编译器、或别的工具写进来的 E999），而 `loment explain` 对它只会
+    // 回一句 `(unknown code)` —— 那种指针比不说更坏。表里有卡片的判据是
+    // `code_nfix > 0`，与 `h_card` 同一条。
+    let known: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        if code_nfix(load32(ctx, C_SUMK + i * 4)) > 0 {
+            known = known + 1;
+        }
+        i = i + 1;
+    }
+    if known == 0 {
+        return 0;
+    }
     let acc: u32 = em(ctx, 0, ui(ctx, S_MORE));
     let k: u32 = 0;
+    let drawn: u32 = 0;
     while k < n {
-        if k > 0 {
-            acc = em_byte(ctx, acc, SP);
+        let c: u32 = load32(ctx, C_SUMK + k * 4);
+        if code_nfix(c) > 0 {
+            if drawn > 0 {
+                acc = em_byte(ctx, acc, SP);
+            }
+            acc = em_code(ctx, acc, c);
+            drawn = drawn + 1;
         }
-        acc = em_code(ctx, acc, load32(ctx, C_SUMK + k * 4));
         k = k + 1;
     }
     return em_byte(ctx, acc, NL);

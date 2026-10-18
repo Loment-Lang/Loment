@@ -1249,24 +1249,27 @@ fn do_color(mem: ptr, ab: ptr, argc: u32) -> u32 {
 
 // ---------------------------------------------------------------- 错误码
 
-/// 一列: `  E22   <ASCII 一行说明>`。码这一列宽 5、左对齐 —— 与旧的手抄 `codrow` 同形,
+/// `E` + **三位数**（`E001`）。诊断正文就是这么印的（`error[E001]`），表与 explain 的
+/// 标题却印 `E1` —— 用户从正文里抄一个码去 explain，拿到的标题和抄过去的不一样（`#9`）。
+fn wcode3(mem: ptr, fd: u64, c: u32) {
+    wstr(fd, "E");
+    if c < 10 {
+        wstr(fd, "00");
+    } else {
+        if c < 100 {
+            wstr(fd, "0");
+        }
+    }
+    wdec(mem, fd, c);
+}
+
+/// 一列: `  E022   <ASCII 一行说明>`。码这一列宽 5、左对齐（`E001` + 一个空格）,
 /// 只是码由数字拼出来 (表里存的是数, 见 surface_data 的注解)。
 fn codrow_n(mem: ptr, fd: u64, c: u32, desc: str) {
     wstr(fd, "  ");
     yellow(mem, fd);
-    wstr(fd, "E");
-    wdec(mem, fd, c);
-    let d: u32 = 1;
-    let x: u32 = c;
-    while x >= 10 {
-        x = x / 10;
-        d = d + 1;
-    }
-    let k: u32 = 0;
-    while 1 + d + k < 5 {
-        wstr(fd, " ");
-        k = k + 1;
-    }
+    wcode3(mem, fd, c);
+    wstr(fd, " ");
     colr(mem, fd);
     wstr(fd, desc);
     wstr(fd, "\n");
@@ -1290,7 +1293,7 @@ fn do_codes(mem: ptr, ab: ptr, argc: u32) -> u32 {
     wstr(1, "  ");
     gray(mem, 1);
     wstr(1, "Codes are grouped by WHAT TO DO, not by wording. The compiler prints e.g.");
-    wstr(1, "\n    `E2 @13 line 4: x`  -  E2 is E002, @13 is the 13th token.");
+    wstr(1, "\n    `error[E002] @13 line 4: x`  -  @13 is the 13th token.");
     colr(mem, 1);
     wstr(1, "\n\n");
     // **不手抄**: 表在 surface_data (由 tools/loment_diag.py --dump-surface 生成; 唯一真源
@@ -1350,8 +1353,7 @@ fn do_explain(mem: ptr, ab: ptr, argc: u32) -> u32 {
     }
     wstr(1, "\n  ");
     yellow(mem, 1);
-    wstr(1, "E");
-    wdec(mem, 1, code);
+    wcode3(mem, 1, code);
     colr(mem, 1);
     wstr(1, "\n\n  ");
     // **每个码都先给一行真话**：原先的长文只覆盖 8/23 个码，其余落进一个通用兜底 ——

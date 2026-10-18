@@ -590,7 +590,9 @@ def test_codes_lists_every_code_in_the_table():
     import loment_diag
     rc, out, _ = _run(["codes"] + _no_color())
     assert rc == 0
-    missing = [c for c in sorted(loment_diag.ASCII_ONE_LINER) if f"E{c} " not in out]
+    # 表里印的是**三位补零**的 `E001`（`#9`，与诊断正文的 `error[E001]` 同一种拼法），
+    # 所以这里也按那个拼法找 —— `E1 ` 在 `E001` 里不是前缀，旧写法会整片报缺。
+    missing = [c for c in sorted(loment_diag.ASCII_ONE_LINER) if f"E{c:03d} " not in out]
     assert not missing, f"错误码表里没有 E{missing}"
     # 说明文字也要是表里那一份, 不是另写的
     for c, desc in loment_diag.ASCII_ONE_LINER.items():
@@ -602,6 +604,10 @@ def test_explain_accepts_three_spellings_and_rejects_junk():
     for spelling in ("E4", "e4", "4"):
         rc, out, _ = _run(["explain", spelling] + _no_color())
         assert rc == 0 and "Capability domain" in out, (spelling, out[:120])
+        # **标题与诊断正文同一种拼法**（`#9`）：正文印 `error[E004]`，标题却印 `E4` ——
+        # 用户从正文里抄一个码过来，得到的标题和抄过去的不一样。三种输入拼法指向同一个
+        # 码，所以标题只有一种拼法。
+        assert "  E004" in out, f"{spelling}: 标题没补零: {out[:120]!r}"
     # **上界从真源推导, 不写死**。原先这里写 "E1..E23", 于是每加一个码就得手改这个测试 ——
     # 漏改时的症状是"判据红了但源码没错"; 而更糟的一种改法是把断言放宽, 从此再也不测边界。
     # 真实的契约是"explain 接受到表里最后一个码为止", 那就照它测。
@@ -611,7 +617,8 @@ def test_explain_accepts_three_spellings_and_rejects_junk():
     assert rc == 2, err[:120]
     for c in (top, top - 1, top - 2):
         rc, out, _ = _run(["explain", f"E{c}"] + _no_color())
-        assert rc == 0 and f"E{c}" in out, (c, rc, out[:120])
+        # 标题是三位补零的（与 `error[E023]` 一致），所以这里也按那个拼法找。
+        assert rc == 0 and f"E{c:03d}" in out, (c, rc, out[:120])
     rc, _, _ = _run(["explain"] + _no_color())
     assert rc == 2
 
@@ -1029,7 +1036,9 @@ def _cli_fixtures(root: Path) -> None:
     import loment_diag  # noqa: E402
     # `explain E99` 那条要一个**表外**的码 —— 表长到 99 就该改这里, 所以先钉住
     assert max(loment_diag.ASCII_ONE_LINER) < 99, "错误码表到 99 了, 换一个表外的码"
-    _w(root / "codes.txt", "".join(f"E{c} {d}\n"
+    # 码的拼法是**三位补零**（`#9`）：`loment codes` 与 `explain` 的标题都印 `E001`，
+    # 与诊断正文的 `error[E001]` 一致。夹具照那个拼法写，否则第 18 项会假红。
+    _w(root / "codes.txt", "".join(f"E{c:03d} {d}\n"
                                    for c, d in sorted(loment_diag.ASCII_ONE_LINER.items())))
 
 

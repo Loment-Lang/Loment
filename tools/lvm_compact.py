@@ -185,12 +185,14 @@ def encode_ops(ops_bytes: bytearray, op: tuple, pool: _Pool) -> None:
         operand(op[4])
         _put_i(ops_bytes, op[5])
     elif code == lvm_t2._OP_ARITH:                          # noqa: SLF001
-        stridx(_arith_name(op[1]))
-        _put_u(ops_bytes, 1 if op[2] else 0)
-        stridx(op[3])
+        # op 形状（#717 之后）：`(code, 算子名, 类型, 左, 右, dest)` —— 算子名本身就是
+        # "ashr"/"lshr"/"shl"，所以线上那一格 ashr 位由名字推出来，**字节格式不变**。
+        stridx(op[1])
+        _put_u(ops_bytes, 1 if op[1] == "ashr" else 0)
+        stridx(op[2])
+        operand(op[3])
         operand(op[4])
-        operand(op[5])
-        _put_i(ops_bytes, op[6])
+        _put_i(ops_bytes, op[5])
     elif code == lvm_t2._OP_CAST:                           # noqa: SLF001
         stridx(op[1])
         stridx(op[2])
@@ -503,12 +505,9 @@ def _decode_op(r: _Reader, s) -> tuple:
         return (code, s(), s(), operand(), operand(), r.i_())
     if code == lvm_t2._OP_ARITH:                         # noqa: SLF001
         op = s()
-        fn = lvm._ARITH.get(op)                          # noqa: SLF001
-        if fn is None:
-            raise CompactError(f"不认识的算术算子: {op}")
-        ashr = r.u() != 0
+        r.u()                                            # 旧格式里的 ashr 位（名字已带）
         ty = s()
-        return (code, fn, ashr, ty, operand(), operand(), r.i_())
+        return (code, op, ty, operand(), operand(), r.i_())
     if code == lvm_t2._OP_CAST:                          # noqa: SLF001
         return (code, s(), s(), s(), operand(), r.i_())
     if code == lvm_t2._OP_CALL:                          # noqa: SLF001

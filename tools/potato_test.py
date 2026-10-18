@@ -456,6 +456,16 @@ MUTATORS_V16 = [
     ("lspe.state 非法", lambda d: d["lspe"].__setitem__("state", "open"), "lspe.state"),
     ("lspe.sites 负数", lambda d: d["lspe"].__setitem__("sites", -1), "lspe.sites"),
     ("lspe.floors 与明细不一致", lambda d: d["lspe"].__setitem__("floors", 1), "floors"),
+    # v16 也要验 v13/v14 的字段（版本门是累积的）—— Python 原先是精确匹配，
+    # v15/v16 直接跳过；这两条把那个缺口钉住。
+    ("v16 跳过 net_ladder", lambda d: d.pop("net_ladder"), "net_ladder"),
+    ("v16 坏 vm", lambda d: d.__setitem__("vm", "bad"), "vm"),
+    # 台账是**封闭**对象：未知键必须报，不能静默扩展。
+    ("lspe 未知键", lambda d: d["lspe"].__setitem__("bogus", 1), "不认识的键"),
+    ("floor_detail 未知键",
+     lambda d: d["lspe"]["floor_detail"].__setitem__("bogus", 1), "不认识的键"),
+    ("invariants 未知键",
+     lambda d: d["lspe"]["invariants"].__setitem__("i6", "ok"), "不认识的键"),
 ]
 
 

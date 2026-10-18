@@ -183,6 +183,12 @@ LSPE_INVARIANTS = ("i1", "i2", "i3", "i4", "i5")
 LSPE_COUNTS = ("sites", "obligations", "proved", "undecided",
                "deferred", "refused", "floors", "acked")
 LSPE_FLOOR_KEYS = ("assumed", "stale_wf", "budget", "drop_honest")
+#: `lspe` 是一个**封闭**对象：未知键必须报，不能静默扩展（与 `gc_ladder` 同一条纪律）。
+LSPE_KEYS = frozenset({
+    "state", "set_by", "mode", "level", "sites", "obligations", "proved",
+    "undecided", "deferred", "refused", "floors", "floor_detail", "per_kind",
+    "invariants", "acked",
+})
 #: **核心模式的全部取值**（`docs/182` §1.3 的"核心语法硬写法"）：各维的取值并起来。
 #:
 #: 放在这里是因为**两个模块都要它**：编译器用它判"这一条 `choose` 是核心模式还是开关"，
@@ -530,7 +536,7 @@ def validate(doc: object) -> list[str]:
                         errs.append(f"surfaces.total_sites 是 {tot}, 但 boundary.syscalls 是"
                                     f" {bnd['syscalls']}（两者数的是同一批机调用站点）")
 
-    if ver in ("v14",):
+    if ver in ("v14", "v15", "v16"):
         # **必填**（`docs/237`）—— 与 `boundary` / `gc_ladder` / `surfaces` / `runtime` 同一条
         # 纪律。`net_ladder` 是**四档宽度 → 站点数** + 一个保留键 `total_net`；四档**恒在**
         # （哪怕为 0），键的集合固定，读者与校验器都不用猜。
@@ -568,7 +574,7 @@ def validate(doc: object) -> list[str]:
             if extra:
                 errs.append(f"net_ladder 里有不认识的键: {extra}")
 
-    if ver in ("v13",):
+    if ver in ("v13", "v14", "v15", "v16"):
         # **必填**（`docs/231`）—— 与 `mode` / `gc` / `runtime` / `port` 同一条纪律：
         # 不存在"缺这项"的形态。于是"这份产物是给 VM 的还是原生的"是**不读源码可判**的。
         # **这里没有冲突可判**：`vm` 与 `runtime` 今天确实合不来（VM 要用运行期），但那条
@@ -597,6 +603,8 @@ def validate(doc: object) -> list[str]:
         if not isinstance(lp, dict):
             errs.append(f"{ver}: lspe 必须是对象（审计台账），得到 {lp!r}")
         else:
+            for k in sorted(set(lp) - LSPE_KEYS):
+                errs.append(f"{ver}: lspe 里有不认识的键 {k!r}")
             st = lp.get("state")
             if st not in LSPE_STATES:
                 errs.append(f"{ver}: lspe.state 必须是 {LSPE_STATES} 之一，得到 {st!r}")
@@ -617,6 +625,8 @@ def validate(doc: object) -> list[str]:
             if not isinstance(fd, dict):
                 errs.append(f"{ver}: lspe.floor_detail 必须是对象，得到 {fd!r}")
             else:
+                for k in sorted(set(fd) - set(LSPE_FLOOR_KEYS)):
+                    errs.append(f"{ver}: lspe.floor_detail 里有不认识的键 {k!r}")
                 for k in LSPE_FLOOR_KEYS:
                     v = fd.get(k)
                     if not isinstance(v, int) or isinstance(v, bool) or v < 0:
@@ -636,6 +646,8 @@ def validate(doc: object) -> list[str]:
             if not isinstance(inv, dict):
                 errs.append(f"{ver}: lspe.invariants 必须是对象，得到 {inv!r}")
             else:
+                for k in sorted(set(inv) - set(LSPE_INVARIANTS)):
+                    errs.append(f"{ver}: lspe.invariants 里有不认识的键 {k!r}")
                 for k in LSPE_INVARIANTS:
                     if k not in inv:
                         errs.append(f"{ver}: lspe.invariants 缺键 {k}")

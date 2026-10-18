@@ -862,6 +862,55 @@ def test_opt_driver_runs() -> None:
               f"{len(got['0'][1])}B vs {len(got['2'][1])}B")
 
 
+#: 给"包里那个 VM 真能跑"用的一份最小程序：`exit(42)`。
+_VM_PROG = """define void @_start() {
+entry:
+  %x = call i64 asm sideeffect "syscall", "={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}"(i64 60, i64 42, i64 0, i64 0)
+  ret void
+}
+"""
+
+
+def test_lvm_ships_and_runs_a_program() -> None:
+    """`loment-lvm` 随包发，而且**包里那个二进制真的能跑一份程序**（`docs/264`，`#355`）。
+
+    ⚠ 这一条**刻意不是清单断言**：`#355` 的第三半原话是 "a packaged-build test that runs
+    one, **not just a manifest assertion**"。所以它在这里**真编一次**
+    （`build_tools({"lvm"})` —— 与打包那一步同一份工具链），再把那份 ELF 拿去跑一份 `.ll`。
+
+    没有 clang 就 SKIP：`build_tools` 要先由种子造 stage1，那一步要 clang。
+    """
+    check("loment-lvm 在 TOOLS 里",
+          any(n == "loment-lvm" for (n, _e, _c) in loment_dist.TOOLS))
+    if loment_dist.clang_path() is None:
+        print("  SKIP  loment-lvm: 没有 clang —— 要真编一次 stage1 才作数")
+        return
+    if sys.platform == "win32" and not shutil.which("wsl"):
+        print("  SKIP  loment-lvm: 没有 WSL —— 交叉编出来的 ELF 在本机跑不了")
+        return
+    built = loment_dist.build_tools({"lvm"})
+    if "loment-lvm" not in built:
+        check("loment-lvm 编出来了", False, f"build_tools 只给了 {sorted(built)}")
+        return
+    check("loment-lvm 编出来了", len(built["loment-lvm"][0]) > 1000,
+          f"{len(built['loment-lvm'][0])}B")
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        exe = td / "lvm.bin"
+        exe.write_bytes(built["loment-lvm"][0])
+        prog = td / "prog.ll"
+        prog.write_text(_VM_PROG, encoding="utf-8", newline="\n")
+        tag = f"{_T}lvm_ship.bin"
+        r = wsl("sh", "-c",
+                f"rm -f {tag} {tag}.ll && cp {wsl_path(exe)} {tag} && chmod +x {tag} && "
+                f"cp {wsl_path(prog)} {tag}.ll && timeout 60 {tag} {tag}.ll; echo -n $?")
+        try:
+            rc = int(r.stdout.strip())
+        except ValueError:
+            rc = -1
+    check("包里那份 loment-lvm 跑一份程序，退出码是 42", rc == 42, f"rc={rc}")
+
+
 def test_check_detects_staleness() -> None:
     """`--check` 必须能发现"归档里那份来源文件不是当前源码"。
 

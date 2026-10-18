@@ -4273,6 +4273,11 @@ def test_lspe_dimension_defaults_open():
     assert lp["floor_detail"] == {"assumed": 0, "stale_wf": 0, "budget": 0, "drop_honest": 0}
     assert lp["invariants"]["i1"] == "ok"
     assert potato.validate(doc) == []
+    # QIR 骨架：每个站点有 Site / Claim / Obligation / Evidence 四格。
+    s0 = lomentc.load(DEMO).lspe_sites[0]
+    assert s0["claim"] == "allow"
+    assert s0["obligation"] in ("GuardHolds", "InBounds")
+    assert s0["evidence"] == (s0["source"] or "none")
 
 
 @test

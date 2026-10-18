@@ -8936,6 +8936,8 @@ def _lspe_census(toks: list, unit: str) -> tuple[list[dict], list[int]]:
     for i, t in enumerate(toks):
         if t.kind == "ident" and t.val == "guard":
             sites.append({"id": f"{unit}:guard:{ordn['guard']}", "kind": "guard",
+                          "claim": "allow", "obligation": "GuardHolds",
+                          "evidence": "capability",
                           "source": "capability", "line": t.line, "proved": True})
             ordn["guard"] += 1
             continue
@@ -8955,6 +8957,8 @@ def _lspe_census(toks: list, unit: str) -> tuple[list[dict], list[int]]:
         literal = (i + 2 < n and toks[i + 1].kind == "number"
                    and toks[i + 2].kind == "punct" and toks[i + 2].val == "]")
         sites.append({"id": f"{unit}:index:{ordn['index']}", "kind": "index",
+                      "claim": "allow", "obligation": "InBounds",
+                      "evidence": ("lms(g0)" if literal else "none"),
                       "source": ("lms(g0)" if literal else None),
                       "line": t.line, "proved": literal})
         ordn["index"] += 1

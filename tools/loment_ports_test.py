@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -298,6 +299,263 @@ def test_the_linkers_conscript_surface_is_inside_the_rulers_provide_set():
           f"都在尺子的 PROVIDE（{len(loment_ports.PROVIDE)} 个）里")
     print(f"      表上尚未实现（S1c 的活）："
           f"{sorted(loment_ports.PROVIDE - have)[:6]} …")
+
+
+# ---------------------------------------------------------------- 导入器的拒绝面
+#
+# `#628` / `#629` / `#641` / `#642` / `#643` 五条是同一个形状：**构建报成功，产物跑起来
+# 才死**。它们都住在 `lomelf` 的导入路径上，而症状却指向别处（"undefined symbol"、
+# 段错误、加载器拒绑）。所以每条判据都要求链接器**当场点名拒绝**，且理由在消息里。
+#
+# 夹具**全部手搭**（一个最小 `.so`、一个带坏重定位的 `.o`、一个 ar 归档），不经 clang：
+# 量的是"坏输入会不会被拒"，而真工具链根本不肯产出这种坏输入。这也让这五条**永不 SKIP**。
+
+
+def _minimal_shared_object() -> tuple[bytearray, dict[str, int]]:
+    """最小可用的 ELF64 `.so`：一个 R|X 的 `PT_LOAD` + `PT_DYNAMIC` + `.dynsym`。
+
+    导出 `add_two` 与 `keepalive` 两个函数（`st_value` 落在 `PT_LOAD` 里）。返回的偏移表
+    指向**要改坏的那几个字段**：符号项、`DT_SONAME` 的值、字符串表里的空串。
+    """
+    phoff, phnum = 64, 2
+    dyn_off = phoff + phnum * 56
+    dynsz = 6 * 16
+    dynsym_off = dyn_off + dynsz
+    syms = ("add_two", "keepalive")
+    dynsym_size = 24 * (1 + len(syms))
+    dstr_off = dynsym_off + dynsym_size
+    dstr = b"\x00"
+    offs: dict[str, int] = {}
+    for nm in (*syms, "libfixture.so.1"):
+        offs[nm] = len(dstr)
+        dstr += nm.encode() + b"\x00"
+    offs["empty"] = len(dstr)                  # `#641`：指向一个空串
+    dstr += b"\x00"
+    shstr_off = dstr_off + len(dstr)
+    shstr = b"\x00.dynsym\x00.dynstr\x00.shstrtab\x00"
+    shoff = (shstr_off + len(shstr) + 7) // 8 * 8
+    total = shoff + 4 * 64
+    b = bytearray(total)
+    b[0:8] = b"\x7fELF\x02\x01\x01\x00"
+    struct.pack_into("<H", b, 16, 3)           # ET_DYN
+    struct.pack_into("<H", b, 18, 62)          # EM_X86_64
+    struct.pack_into("<I", b, 20, 1)
+    struct.pack_into("<Q", b, 32, phoff)
+    struct.pack_into("<Q", b, 40, shoff)
+    struct.pack_into("<H", b, 52, 64)
+    struct.pack_into("<H", b, 54, 56)
+    struct.pack_into("<H", b, 56, phnum)
+    struct.pack_into("<H", b, 58, 64)
+    struct.pack_into("<H", b, 60, 4)
+    struct.pack_into("<H", b, 62, 3)
+    # PT_LOAD：vaddr 0 恒等映射整个文件，R|X。PT_DYNAMIC 指进中间那张表。
+    struct.pack_into("<IIQQQQQQ", b, phoff, 1, 5, 0, 0, 0, total, total, 0x1000)
+    struct.pack_into("<IIQQQQQQ", b, phoff + 56, 2, 6, dyn_off, dyn_off,
+                     dyn_off, dynsz, dynsz, 8)
+    for i, (tag, val) in enumerate(((5, dstr_off), (10, len(dstr)),
+                                    (6, dynsym_off), (11, 24),
+                                    (14, offs["libfixture.so.1"]), (0, 0))):
+        struct.pack_into("<QQ", b, dyn_off + i * 16, tag, val)
+    value = dynsym_off + 24
+    for i, nm in enumerate(syms, start=1):
+        struct.pack_into("<IBBHQQ", b, dynsym_off + i * 24, offs[nm],
+                         (1 << 4) | 2, 0, 1, value + i * 8, 8)
+    b[dstr_off:dstr_off + len(dstr)] = dstr
+    b[shstr_off:shstr_off + len(shstr)] = shstr
+
+    def sec(idx, nameoff, typ, flags, off, size, link, info, align, ent):
+        struct.pack_into("<IIQQQQIIQQ", b, shoff + idx * 64, nameoff, typ,
+                         flags, 0, off, size, link, info, align, ent)
+
+    sec(1, 1, 11, 2, dynsym_off, dynsym_size, 2, 1, 8, 24)   # .dynsym
+    sec(2, 9, 3, 2, dstr_off, len(dstr), 0, 0, 1, 0)         # .dynstr
+    sec(3, 17, 3, 0, shstr_off, len(shstr), 0, 0, 1, 0)      # .shstrtab
+    return b, {"sym": dynsym_off + 24, "soname": dyn_off + 4 * 16,
+               "empty": offs["empty"]}
+
+
+#: 调共享对象里的 `add_two` 的最小 IR —— 走 `resolve()` 那一步（`#642` 在那里才拒）。
+_IR_CALLS_ADD_TWO = """declare i32 @add_two(i32)
+define i32 @_start() {
+entry:
+  %r = call i32 @add_two(i32 1)
+  ret i32 %r
+}
+"""
+
+
+def _mutated_so(td: Path, mutate) -> Path:
+    """先确认**未改的**夹具能被读进来，再落一份改坏的 —— 免得判据测的是"夹具本身就坏"。"""
+    raw, off = _minimal_shared_object()
+    good = td / "libfixture.so.1"
+    good.write_bytes(bytes(raw))
+    so = lomelf.load_foreign(good)
+    assert "add_two" in so.exports, so.exports
+    mutate(raw, off)
+    bad = td / "libbroken.so.1"
+    bad.write_bytes(bytes(raw))
+    return bad
+
+
+@test
+def test_so_export_outside_every_load_is_refused():
+    """`#643`：导出表的 `st_value` 落在所有 `PT_LOAD` 之外。
+
+    旧代码收下它，第一条 call 跳到未映射地址（实测 SIGSEGV，rc=139）。**"名字在导出表里"
+    只证明名字存在，不证明它指向一段被映射的内存** —— 这一条把后半句补上。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        bad = _mutated_so(Path(t), lambda raw, off:
+                          struct.pack_into("<Q", raw, off["sym"] + 8, 0x7F0000000))
+        try:
+            lomelf.load_foreign(bad)
+        except lomelf.Unsupported as e:
+            msg = str(e)
+        else:
+            raise AssertionError("st_value 在 PT_LOAD 之外的导出被收下了 —— 调它会跳到未映射地址")
+        assert "add_two" in msg and "PT_LOAD" in msg and "st_value" in msg, msg
+        print(f"      {msg}")
+
+
+@test
+def test_hidden_export_is_not_bound_from_outside():
+    """`#642`：`STV_HIDDEN` 的符号在 `.dynsym` 里，但 loader 不会跨对象绑定它。
+
+    旧代码只看绑定/类型/`st_shndx`，于是链接期说"库里有这个名字"，加载期说
+    `undefined symbol`。判据走 `compile_ll`（`resolve()` 在那一步被调用）——
+    只 `load_foreign` 的话新旧代码都绿，测不到东西。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        bad = _mutated_so(Path(t), lambda raw, off: raw.__setitem__(off["sym"] + 5, 2))
+        try:
+            lomelf.compile_ll(_IR_CALLS_ADD_TWO, [lomelf.load_foreign(bad)],
+                              allow_ports=True)
+        except lomelf.Unsupported as e:
+            msg = str(e)
+        else:
+            raise AssertionError("hidden 导出被当成可绑定 —— 加载期会报 undefined symbol")
+        assert "add_two" in msg and "hidden" in msg and "visibility" in msg, msg
+        print(f"      {msg}")
+
+
+@test
+def test_so_with_empty_soname_is_refused():
+    """`#641`：`DT_SONAME` 存在但为空。
+
+    旧代码把"有 tag"与"tag 有内容"混为一谈，写出 `DT_NEEDED=""`；loader 匹配不上任何库，
+    构建却报成功。空名字不是"没有名字" —— 没有名字时回落到文件名，空名字只能拒。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        bad = _mutated_so(Path(t), lambda raw, off:
+                          struct.pack_into("<Q", raw, off["soname"] + 8, off["empty"]))
+        try:
+            lomelf.load_foreign(bad)
+        except lomelf.Unsupported as e:
+            msg = str(e)
+        else:
+            raise AssertionError("空 DT_SONAME 被收下了 —— 产物会带着 DT_NEEDED=\"\"")
+        assert "DT_SONAME" in msg and "empty" in msg, msg
+        print(f"      {msg}")
+
+
+@test
+def test_foreign_architecture_shared_object_is_refused():
+    """`#629`：`e_machine` 不是 x86-64 的 `ET_DYN`。
+
+    `EI_CLASS`/`EI_DATA` 每个 64 位小端交叉目标都满足；只有 `e_machine` 分得开架构。
+    放过去的两种结局都很糟：loader 拒掉，或者机器上恰有同名原生库 —— 产物悄悄绑到
+    **另一份库**上，V2 的"导出表证明名字存在"当场失效。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        bad = _mutated_so(Path(t), lambda raw, off:
+                          struct.pack_into("<H", raw, 18, 183))    # AArch64
+        try:
+            lomelf.load_foreign(bad)
+        except lomelf.Unsupported as e:
+            msg = str(e)
+        else:
+            raise AssertionError("别的架构的 ET_DYN 被当成可用的共享对象")
+        assert "e_machine=183" in msg and "EM_X86_64" in msg, msg
+        print(f"      {msg}")
+
+
+def _reloc_object(reloc_type: int) -> bytes:
+    """一个 `ET_REL` 目标文件：`.text` 里一个 `ret`，`.symtab` 定义 `f`，
+    `.rela.text` 里一条 `reloc_type` 的重定位。用来让成员**符号读得出来、重定位读不了**。"""
+    text_off, sym_off, sym_size = 64, 72, 48
+    str_off = sym_off + sym_size
+    strtab = b"\x00f\x00"
+    rela_off = (str_off + len(strtab) + 7) // 8 * 8
+    shstr_off = rela_off + 24
+    shstr = b"\x00.text\x00.symtab\x00.strtab\x00.rela.text\x00.shstrtab\x00"
+    shoff = (shstr_off + len(shstr) + 7) // 8 * 8
+    b = bytearray(shoff + 6 * 64)
+    b[0:8] = b"\x7fELF\x02\x01\x01\x00"
+    struct.pack_into("<H", b, 16, 1)           # ET_REL
+    struct.pack_into("<H", b, 18, 62)
+    struct.pack_into("<I", b, 20, 1)
+    struct.pack_into("<Q", b, 40, shoff)
+    struct.pack_into("<H", b, 52, 64)
+    struct.pack_into("<H", b, 54, 64)
+    struct.pack_into("<H", b, 58, 64)
+    struct.pack_into("<H", b, 60, 6)
+    struct.pack_into("<H", b, 62, 5)
+    b[text_off] = 0xC3
+    struct.pack_into("<IBBHQQ", b, sym_off + 24, 1, 0x12, 0, 1, 0, 1)   # f
+    b[str_off:str_off + len(strtab)] = strtab
+    struct.pack_into("<QQq", b, rela_off, 0, (1 << 32) | reloc_type, 0)
+    b[shstr_off:shstr_off + len(shstr)] = shstr
+
+    def sec(idx, nameoff, typ, flags, off, size, link, info, align, ent):
+        struct.pack_into("<IIQQQQIIQQ", b, shoff + idx * 64, nameoff, typ,
+                         flags, 0, off, size, link, info, align, ent)
+
+    sec(1, 1, 1, 6, text_off, 1, 0, 0, 16, 0)              # .text  ALLOC|EXEC
+    sec(2, 7, 2, 0, sym_off, sym_size, 3, 1, 8, 24)        # .symtab
+    sec(3, 15, 3, 0, str_off, len(strtab), 0, 0, 1, 0)     # .strtab
+    sec(4, 23, 4, 0, rela_off, 24, 2, 1, 8, 24)            # .rela.text
+    sec(5, 34, 3, 0, shstr_off, len(shstr), 0, 0, 1, 0)    # .shstrtab
+    return bytes(b)
+
+
+def _archive(member: str, data: bytes) -> bytes:
+    hdr = (member.encode().ljust(16) + b"0".ljust(12) + b"0".ljust(6)
+           + b"0".ljust(6) + b"644".ljust(8)
+           + str(len(data)).encode().ljust(10) + b"`\n")
+    return b"!<arch>\n" + hdr + data + (b"\n" if len(data) & 1 else b"")
+
+
+_IR_CALLS_F = """declare i32 @f(i32)
+define i32 @_start() {
+entry:
+  %r = call i32 @f(i32 1)
+  ret i32 %r
+}
+"""
+
+
+@test
+def test_unusable_archive_member_is_named_when_its_symbol_is_needed():
+    """`#628`：归档成员解析失败被**静默丢掉**，失败最后以"未定义的符号 f"报给调用方。
+
+    旧注释写着"真需要它的符号时后面会报到"—— 它从来没报过。判据要求消息里出现
+    **成员名**、它**定义的名字**、以及**用不了的原因**（这里是重定位类型 42），
+    否则用户永远不知道符号其实在库里。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        ar = Path(t) / "libbroken.a"
+        ar.write_bytes(_archive("broken.o", _reloc_object(42)))
+        try:
+            lomelf.compile_ll(_IR_CALLS_F, [lomelf.load_foreign(ar)],
+                              allow_ports=True)
+        except lomelf.Unsupported as e:
+            msg = str(e)
+        else:
+            raise AssertionError("坏成员被静默丢掉，符号却解析成功？（夹具或链接器有问题）")
+        assert "broken.o" in msg, msg
+        assert "defines f" in msg, msg
+        assert "42" in msg, msg
+        print(f"      {msg}")
 
 
 def main() -> int:

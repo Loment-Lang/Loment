@@ -5210,7 +5210,13 @@ class ForeignObject:
     def from_bytes(cls, path: Path, name: str, raw: bytes) -> "ForeignObject":
         """从**内存里的字节**构造 —— 归档成员没有自己的文件 (`docs/173` 阶段 2)。"""
         self = cls.__new__(cls)
-        self._load(path, name, raw)
+        try:
+            self._load(path, name, raw)
+        except Unsupported as e:
+            # 解析失败时**符号表可能已经读出来了**（重定位那一趟才炸）。把这份半成品挂到
+            # 异常上：归档那一侧靠它说清"这个成员定义了 f，但用不了：原因"（`#628`）。
+            e.partial = self
+            raise
         return self
 
     def _load(self, path: Path, name: str, raw: bytes) -> None:
@@ -5419,6 +5425,10 @@ class Archive:
         # 因为它们的名字格式在各家 ar 实现里并不一致。
         pool = [(n, d) for n, d in self.members if d[:4] == b"\x7fELF"]
         got: list[ForeignObject] = []
+        #: (成员名, 失败原因, 它定义的名字)。**旧的注释说"后面会报到"，但它从来没被报过**
+        #: （`#628`）：成员被静默丢掉，用户只看到"未定义的符号"，指向**调用方**而不是
+        #: 那个本可以提供它的成员。这里留住它，固定点走完再对一次账。
+        skipped: list[tuple[str, str, set[str]]] = []
         changed = True
         while changed:
             changed = False
@@ -5426,8 +5436,17 @@ class Archive:
             for name, data in pool:
                 try:
                     fo = ForeignObject.from_bytes(self.path, name, data)
-                except Unsupported:
-                    continue        # 这个成员我们用不了: 放着; 真需要它的符号时后面会报到
+                except Unsupported as e:
+                    part = getattr(e, "partial", None)
+                    defs: set[str] = set()
+                    if part is not None:
+                        # `$...` 是按对象改名的局部/节符号（见 `ForeignObject._load`），
+                        # 永远不会是别人的需求名。
+                        defs = {n for n in (*getattr(part, "syms", {}),
+                                            *getattr(part, "dsyms", {}))
+                                if not n.startswith("$")}
+                    skipped.append((name, str(e), defs))
+                    continue
                 if set(fo.syms) & needed:
                     got.append(fo)
                     needed |= set(fo.undefined)
@@ -5435,6 +5454,18 @@ class Archive:
                 else:
                     rest.append((name, data))
             pool = rest
+        if skipped:
+            # 固定点结束后仍然"需要"（`needed` 只增不减，所以再减掉已收成员提供的）
+            # 且由某个被丢掉的成员定义的名字，才是这条诊断的靶子。
+            provided = {n for fo in got for n in (*fo.syms, *fo.dsyms)}
+            unresolved = set(needed) - provided
+            for name, why, defs in skipped:
+                hit = sorted(defs & unresolved)
+                if hit:
+                    raise Unsupported(
+                        f"{self.path.name}: archive member {name} defines "
+                        f"{', '.join(hit)} but could not be used: {why} —— the "
+                        f"symbol is in the archive; it was not absent")
         return got
 
 
@@ -5456,6 +5487,9 @@ class SharedObject:
 
     #: `DT_*` 的号（只取这里用得上的）。
     DT_NEEDED, DT_HASH, DT_STRTAB, DT_SYMTAB, DT_STRSZ, DT_SYMENT, DT_SONAME = 1, 4, 5, 6, 10, 11, 14
+    #: `EM_X86_64`。`EI_CLASS`/`EI_DATA` 说"64 位小端"，每一个交叉目标都满足它 ——
+    #: 只有 `e_machine` 分得开 x86-64 与别的架构（`#629`）。
+    EM_X86_64 = 62
 
     def __init__(self, path: Path):
         raw = path.read_bytes()
@@ -5481,29 +5515,41 @@ class SharedObject:
             raise Unsupported(f"{path.name}: 不是 ELF64 小端共享对象")
         if struct.unpack_from("<H", raw, 16)[0] != 3:            # e_type != ET_DYN
             raise Unsupported(f"{path.name}: 不是共享对象 (ET_DYN)")
+        e_machine, = struct.unpack_from("<H", raw, 18)
+        if e_machine != self.EM_X86_64:
+            # **`e_machine` 是唯一分得开架构的字段**（`#629`）。放过去只有两种结局：
+            # loader 拒掉它，或者机器上恰好装了一份**同名**的原生库 —— 于是产物悄悄
+            # 绑到了另一份库上，而 V2 唯一的保证（"导出表证明名字存在"）就没了。
+            raise Unsupported(
+                f"{path.name}: e_machine={e_machine} is not EM_X86_64 "
+                f"({self.EM_X86_64}) —— this shared object is built for another "
+                f"architecture; the loader would reject it or bind a different library")
         e_phoff, = struct.unpack_from("<Q", raw, 32)
         e_phentsize, e_phnum = struct.unpack_from("<HH", raw, 54)
         e_shoff, = struct.unpack_from("<Q", raw, 40)
         e_shentsize, e_shnum, e_shstrndx = struct.unpack_from("<HHH", raw, 58)
-        loads: list[tuple[int, int, int]] = []
+        # (vaddr, 文件内偏移, p_filesz, p_memsz, p_flags)。`voff` 用前三个把**文件**
+        # 读出来；导出扫描用 vaddr + **p_memsz** 判"这个 st_value 在映像里吗" ——
+        # `.bss` 里的数据符号只在 memsz 里（实测 libc 的 `rpc_createerr` 就在那儿）。
+        loads: list[tuple[int, int, int, int, int]] = []
         dyn: tuple[int, int] | None = None
         if e_phnum and e_phentsize < 56:
             raise Unsupported(f"{path.name}: 程序头条目只有 {e_phentsize} 字节（要 ≥ 56）")
         need(e_phoff, e_phnum * e_phentsize, "程序头表")
         for k in range(e_phnum):
             o = e_phoff + k * e_phentsize
-            p_type, _fl, p_off, p_vaddr, _pa, p_filesz, _m, _al = \
+            p_type, p_flags, p_off, p_vaddr, _pa, p_filesz, p_memsz, _al = \
                 struct.unpack_from("<IIQQQQQQ", raw, o)
             if p_type == 1:
-                loads.append((p_vaddr, p_off, p_filesz))
+                loads.append((p_vaddr, p_off, p_filesz, p_memsz, p_flags))
             elif p_type == 2:
                 dyn = (p_off, p_filesz)
         if dyn is None:
             raise Unsupported(f"{path.name}: 共享对象没有 PT_DYNAMIC")
 
         def voff(vaddr: int) -> int:
-            for v, off, sz in loads:
-                if v <= vaddr < v + sz:
+            for v, off, sz, _mem, _fl in loads:
+                if v <= vaddr < v + sz:                       # 文件里的部分：p_filesz
                     return off + (vaddr - v)
             raise Unsupported(
                 f"{path.name}: 动态表里的地址 0x{vaddr:x} 落在任何 PT_LOAD 之外")
@@ -5535,7 +5581,18 @@ class SharedObject:
             return strtab[off:end].decode("utf-8", "replace")
 
         # 没有 SONAME 的共享对象，`DT_NEEDED` 得写**它本来的文件名**（loader 按那个找）。
-        self.soname = dstr(dt[self.DT_SONAME]) if self.DT_SONAME in dt else path.name
+        # **`DT_SONAME` 存在但为空是一个独立的坏形态**（`#641`）：原先只分"有没有这个
+        # tag"，于是 `DT_NEEDED=""` 被写进产物 —— loader 匹配不上任何库，构建却报成功。
+        if self.DT_SONAME in dt:
+            soname = dstr(dt[self.DT_SONAME])
+            if not soname:
+                raise Unsupported(
+                    f"{path.name}: DT_SONAME is present but empty —— DT_NEEDED would be "
+                    f"an empty string, which the loader cannot match to any library; "
+                    f"rebuild it with -Wl,-soname,libfoo.so.1")
+            self.soname = soname
+        else:
+            self.soname = path.name
         if e_shnum == 0:
             # 条数能从 `DT_HASH` 拿，但**版本表**在节头里；被 strip 掉的 `.so` 这一版还不读。
             raise Unsupported(
@@ -5547,10 +5604,11 @@ class SharedObject:
         need(e_shoff, e_shnum * e_shentsize, "节头表")
         for k in range(e_shnum):
             so = e_shoff + k * e_shentsize
-            nameoff, typ, _fl2, _addr, off, size, link, info, _a2, entsize = \
+            nameoff, typ, flags, _addr, off, size, link, info, _a2, entsize = \
                 struct.unpack_from("<IIQQQQIIQQ", raw, so)
-            secs.append({"nameoff": nameoff, "type": typ, "off": off, "size": size,
-                         "link": link, "info": info, "entsize": entsize, "name": ""})
+            secs.append({"nameoff": nameoff, "type": typ, "flags": flags, "off": off,
+                         "size": size, "link": link, "info": info, "entsize": entsize,
+                         "name": ""})
         if e_shstrndx >= len(secs):
             raise Unsupported(
                 f"{path.name}: e_shstrndx={e_shstrndx} 越界（只有 {len(secs)} 个节头）")
@@ -5618,12 +5676,15 @@ class SharedObject:
         #: 导出表：名字 -> (kind, 是不是**默认**版本)。
         self.exports: dict[str, tuple[str, bool]] = {}
         self.versions: dict[str, str] = {}
+        #: 名字 -> `hidden` / `internal` —— 在 `.dynsym` 里，但 loader **不会**给外人绑定。
+        #: 单独记一份，只为了 `resolve()` 被问到时能说出原因（`#642`）。
+        self.hidden: dict[str, str] = {}
         # ⚠ 别叫 `n`：上面那个 `n` 是**文件长度**，`need()` 闭包读的正是它。
         # 这里覆盖掉的话，越界检查会拿"符号条数"去比文件长度 —— 检查还在，但比错了东西。
         nsym = dynsym["size"] // 24
         for k in range(1, nsym):
             so2 = dynsym["off"] + k * 24
-            st_name, st_info, _other, st_shndx, _value, _size = \
+            st_name, st_info, st_other, st_shndx, st_value, _size = \
                 struct.unpack_from("<IBBHQQ", raw, so2)
             if st_shndx == 0 or st_name == 0:                   # 它自己的依赖，不是它的导出
                 continue
@@ -5636,6 +5697,39 @@ class SharedObject:
                     f"{path.name}: .dynsym 第 {k} 项的 st_name={st_name} 越出 .dynstr "
                     f"（表长 {len(dstrtab)}）")
             nm = dstrtab[st_name:end].decode("utf-8", "replace")
+            # **可见性**（`#642`）：`STV_HIDDEN` / `STV_INTERNAL` 的符号也在 `.dynsym` 里，
+            # 但 loader 只允许本对象内部绑定。把它们当成导出，构建会成功、加载时却
+            # `undefined symbol`。`STV_PROTECTED`(3) 仍然可以跨对象绑定，照收。
+            vis = st_other & 0x3
+            if vis in (1, 2):
+                self.hidden[nm] = "hidden" if vis == 2 else "internal"
+                continue
+            # **st_value 必须落在映像里**（`#643`）：导出表证明"这个名字存在"，但没证明
+            # "它指向一段被映射的内存" —— 越界的值绑上去，第一条 call 就跳到未映射地址。
+            # SHN_ABS 的 **OBJECT** 是版本标记（`ZLIB_1.2.2` / `GLIBC_2.10`，value=0），
+            # 合法且不在任何段里；ABS 的 FUNC 仍然要过下面的地址检查。
+            if not (st_shndx == 0xFFF1 and typ == 1):
+                if st_shndx >= len(secs):
+                    raise Unsupported(
+                        f"{path.name}: export {nm} has st_shndx={st_shndx}, which is "
+                        f"not a section of this object")
+                sec = secs[st_shndx]
+                if not (sec["flags"] & 0x2):                  # SHF_ALLOC
+                    raise Unsupported(
+                        f"{path.name}: export {nm} is defined in section "
+                        f"{sec['name'] or st_shndx}, which is not allocated at run time")
+                if not any(v <= st_value < v + mem
+                           for v, _off, _fs, mem, _fl in loads):
+                    raise Unsupported(
+                        f"{path.name}: export {nm} has st_value=0x{st_value:x}, which is "
+                        f"outside every PT_LOAD —— calling it would jump to an unmapped "
+                        f"address")
+                if typ == 2 and not any(v <= st_value < v + mem and (fl & 0x1)
+                                        for v, _off, _fs, mem, fl in loads):
+                    raise Unsupported(
+                        f"{path.name}: function export {nm} has st_value="
+                        f"0x{st_value:x} in a non-executable segment —— calling it "
+                        f"would fault")
             hidden = bool(versym[k] & 0x8000) if k < len(versym) else False
             # 同名可能有多条（不同版本）：**默认版本优先**，非默认的不覆盖它。
             if nm not in self.exports or (self.exports[nm][1] is False and not hidden):
@@ -5654,6 +5748,11 @@ class SharedObject:
         """
         e = self.exports.get(name)
         if e is None:
+            if name in self.hidden:
+                raise Unsupported(
+                    f"{self.soname}: {name} is in .dynsym but has "
+                    f"{self.hidden[name]} visibility —— the loader does not bind it "
+                    f"from outside the object, so this import would fail at load time")
             raise Unsupported(
                 f"{self.soname}: 没有导出 {name} —— 动态链接只在导出表里找名字，"
                 f"库里没有这个名字，产物一定加载不起来")

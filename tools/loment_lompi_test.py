@@ -418,6 +418,165 @@ def test_fetch_prints_the_plan_for_https_and_hostnames():
     assert "resolver" in out2, f"主机名那条没说清是解析器缺: {out2[:300]!r}"
 
 
+def _fetch_ready(url: str, extra: list[str] | None = None) -> tuple[int, str]:
+    """跑一次 `fetch`，照它自己打出来的 `mkdir -p` 提示把目录建好，再跑一次。
+
+    PE 上没有 `mkdir`（`sys_can_mkdir()` 恒假），而判据**不猜** lompi 的 root 规则 ——
+    落点一律由 lompi 自己报。这与 `test_fetch_pulls_the_registry_over_http_itself`
+    用的是同一条路，只是抽出来给下面几条复用。
+    """
+    args = ["fetch", "--registry", url, *(extra or [])]
+    _, out0 = _run(args)
+    for line in out0.splitlines():
+        if line.startswith("lompi: make it first:"):
+            Path(line.split("mkdir -p ", 1)[1].strip()).mkdir(parents=True, exist_ok=True)
+    return _run(args)
+
+
+def _cache_dest(out: str) -> Path | None:
+    for line in out.splitlines():
+        if line.startswith("lompi: registry fetched into "):
+            return Path(line.split("into ", 1)[1].strip())
+    return None
+
+
+@test
+def test_fetch_pins_the_index_hash_out_of_band():
+    """#377：`--registry-sha256` 是**带外**的信任根，且拿得到那个钉子。
+
+    三件事一起钉：
+      * 没给钉子时，fetch 的输出里**有**获取钉子的做法（不只是旗子的说明里提一句）；
+      * 对得上 → 照常下载；对不上 → **硬失败**（退出码非 0，不退回"打印计划"）；
+      * 形状不对（不是 64 个十六进制字符）→ 当场拒。大小写都收。
+    """
+    import hashlib
+    if _build() is None:
+        print(f"      SKIP: {_skip}")
+        return
+    f1 = (b"module mathutil\n"
+          b"\n"
+          b"pub fn twice(x: u64) -> u64 {\n"
+          b"    return x * 2;\n"
+          b"}\n")
+    h1 = hashlib.sha256(f1).hexdigest()
+    index = f"# registry (pin test)\nmathutil 0.1.0 mathutil/0.1.0/mathutil.lomt {h1}\n"
+    with tempfile.TemporaryDirectory(prefix="pin-") as td:
+        reg = Path(td)
+        httpd, port = _serve_registry(reg, index,
+                                     {"mathutil/0.1.0/mathutil.lomt": f1})
+        try:
+            url = f"http://127.0.0.1:{port}"
+            rc, out = _fetch_ready(url)
+            assert rc == 0 and "sha256 ok" in out, out[:400]
+            assert "(not pinned; hashes arrived over the same channel)" in out, out[:400]
+            # 读到这句话的人要能当场知道怎么钉 —— 过程在 fetch 的输出里
+            assert "sha256sum" in out and "--registry-sha256" in out, out[:500]
+
+            pin = hashlib.sha256(index.encode("utf-8")).hexdigest()
+            rc, out = _fetch_ready(url, ["--registry-sha256", pin])
+            assert rc == 0 and "index matches the pinned sha256" in out, out[:400]
+            assert "sha256 ok" in out, f"钉住之后没有照常下载: {out[:400]}"
+
+            # 大小写都收（内部规整成小写再比）
+            rc, out = _fetch_ready(url, ["--registry-sha256", pin.upper()])
+            assert rc == 0 and "index matches the pinned sha256" in out, out[:400]
+
+            # 对不上：退出码非 0，而且**不许**退回打印计划
+            rc, out = _run(["fetch", "--registry", url, "--registry-sha256", "0" * 64])
+            assert rc != 0, f"钉子对不上却成功了: {out[:400]!r}"
+            assert "does not match --registry-sha256" in out, out[:400]
+            assert "# registry:" not in out, (
+                f"钉子对不上时退回了打印计划 —— 把拒绝装成了成功: {out[:400]!r}")
+
+            # 形状不对
+            rc, out = _run(["fetch", "--registry", url, "--registry-sha256", "abc"])
+            assert rc != 0 and "64 hex" in out, out[:300]
+            rc, out = _run(["fetch", "--registry", url, "--registry-sha256", "x" * 64])
+            assert rc != 0 and "64 hex" in out, out[:300]
+        finally:
+            httpd.shutdown()
+
+    # 帮助面也提到它 —— 旗子不是唯一知道它存在的地方
+    rc, out = _run(["help"])
+    assert rc == 0 and "--registry-sha256" in out and "docs/236" in out, out[:600]
+
+
+@test
+def test_the_pin_procedure_is_documented():
+    """#377 的文档那一半：`docs/236` 要**明写**钉子从别处来，并给出可照做的例子。"""
+    txt = (ROOT / "docs" / "236-lompi-020-network.md").read_text(encoding="utf-8")
+    assert "--registry-sha256" in txt
+    assert "sha256sum" in txt, "文档没给获取钉子的办法"
+    assert "curl" in txt, "文档没给一个可照做的例子"
+    assert "带外" in txt, "文档没说清这个钉子要从另一条通道拿"
+
+
+@test
+def test_fetch_marks_a_complete_cache_only_when_it_is():
+    """#378：标记有**消费方**，而且一次失败会把旧标记作废。
+
+    语义（`docs/236` §7.2）：文件名只负责存在，**内容**才是状态 ——
+    `lompi-fetch 1 complete\\n` = 完成；0 字节 = 上一次没走完；不存在 = 不完整。
+    """
+    import hashlib
+    if _build() is None:
+        print(f"      SKIP: {_skip}")
+        return
+    f1 = (b"module mathutil\n"
+          b"\n"
+          b"pub fn twice(x: u64) -> u64 {\n"
+          b"    return x * 2;\n"
+          b"}\n")
+    h1 = hashlib.sha256(f1).hexdigest()
+    index = f"# registry (marker test)\nmathutil 0.1.0 mathutil/0.1.0/mathutil.lomt {h1}\n"
+    with tempfile.TemporaryDirectory(prefix="mark-") as td:
+        reg = Path(td)
+        httpd, port = _serve_registry(reg, index,
+                                     {"mathutil/0.1.0/mathutil.lomt": f1})
+        try:
+            url = f"http://127.0.0.1:{port}"
+            rc, out = _fetch_ready(url)
+            assert rc == 0, out[:400]
+            dest = _cache_dest(out)
+            assert dest and dest.is_dir(), out[:400]
+            marker = dest / "lompi-fetch-complete"
+            assert marker.read_bytes() == b"lompi-fetch 1 complete\n", (
+                f"成功后标记内容不对: {marker.read_bytes()!r}")
+
+            # 消费方 1: install 从缓存取包 —— 完成标记在，放行
+            rc, out = _run(["install", "mathutil", "--registry", url])
+            assert rc == 0 and "(cached registry)" in out, out[:500]
+
+            # 消费方 2: 没有标记 = 不完整，install 拒绝
+            marker.unlink()
+            rc, out = _run(["install", "mathutil", "--registry", url])
+            assert rc != 0 and "incomplete" in out, out[:400]
+
+            # fetch 自己也认这个状态，并说出口（目录已经建好，一次就够）
+            rc, out = _run(["fetch", "--registry", url])
+            assert rc == 0 and "INCOMPLETE" in out, out[:400]
+            assert marker.read_bytes() == b"lompi-fetch 1 complete\n"
+
+            # 第二次取到一半失败：旧标记必须作废（0 字节），而不是继续声称完成
+            bad = index.replace(h1, "0" * 64)
+            (reg / "lompi-index.txt").write_text(bad, encoding="utf-8", newline=chr(10))
+            rc, out = _run(["fetch", "--registry", url])
+            assert "sha256 mismatch" in out, out[:400]
+            assert marker.exists(), "失败后标记被删掉了？PE 上没有 unlink，应当是截断"
+            assert marker.read_bytes() == b"", (
+                f"一次失败之后旧标记还在说'完成': {marker.read_bytes()!r}")
+            rc, out = _run(["install", "mathutil", "--registry", url])
+            assert rc != 0 and "incomplete" in out, out[:400]
+
+            # 再成功一次就恢复完成
+            (reg / "lompi-index.txt").write_text(index, encoding="utf-8", newline=chr(10))
+            rc, out = _fetch_ready(url)
+            assert rc == 0, out[:400]
+            assert marker.read_bytes() == b"lompi-fetch 1 complete\n"
+        finally:
+            httpd.shutdown()
+
+
 @test
 def test_paths_use_the_platform_separator():
     """路径必须是**平台原生**形状（`docs/236` §6）：PE 上全 `\\`，POSIX 上全 `/`。

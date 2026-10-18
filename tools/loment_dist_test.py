@@ -907,7 +907,9 @@ def test_lvm_ships_and_runs_a_program() -> None:
     if sys.platform == "win32" and not shutil.which("wsl"):
         print("  SKIP  loment-lvm: 没有 WSL —— 交叉编出来的 ELF 在本机跑不了")
         return
-    built = loment_dist.build_tools({"lvm"})
+    # ⚠ `build_tools(only)` 按**全名**过滤（`--only` 的短名映射在 CLI 那层）——
+    # 传 `{"lvm"}` 会一条都匹配不到、静默返回 {}，判据于是红在"没编出东西"上。
+    built = loment_dist.build_tools({"loment-lvm"})
     if "loment-lvm" not in built:
         check("loment-lvm 编出来了", False, f"build_tools 只给了 {sorted(built)}")
         return

@@ -374,6 +374,63 @@ def test_translation_runs_same_as_clang():
             print(f"      {name}: clang -> {c_rc}，翻译成 Loment -> {l_rc}（相等）")
 
 
+#: 每条都是某个 issue 的**最小复现**（`#120` / `#123` / `#125` / `#131` / `#133`）。
+#: 两边真编真跑再与一个**推出来的**退出码对一次 —— 只比"两边相等"的话，
+#: 翻译器与 clang 一起错成同一副样子也会被放过去。
+_ISSUE_REPROS = [
+    # #120：块里那个 x 出了块就没了（C 给 1；不保块作用域时给 2）
+    ("120-if", "int f(int c) { int x = 1; if (c) { int x = 2; } return x; }\n"
+               "int main() { return f(1); }\n", 1),
+    ("120-while", "int f() { int x = 1; int i = 0; while (i < 1) {"
+                  " int x = 5; i = i + 1; } return x; }\n"
+                  "int main() { return f(); }\n", 1),
+    # #123：`int` 与 `unsigned` 见面时按 C 的寻常算术转换提升（`-1` 变 4294967295）
+    ("123-cmp", "int main() { int a = -1; unsigned b = 0;"
+                " if (a > b) { return 7; } return 8; }\n", 7),
+    ("123-arith", "int main() { int a = -1; unsigned b = 0;"
+                  " if (a + b > 100) return 7; return 8; }\n", 7),
+    # #125：返回位置的隐式整型转换（u32 -> i32）
+    ("125-ret", "int f(unsigned int v) { return v; }\n"
+                "int main() { return f(7); }\n", 7),
+    # #131：负字面量 / 减法 / 移位 / -2^31 的比较都是**有符号**的
+    ("131-lit", "int main(void) { return (-1 < 0); }\n", 1),
+    ("131-sub", "int main(void) { return ((0 - 1) < 0); }\n", 1),
+    ("131-shift", "int main(void) { return ((1 << 31) < 0); }\n", 1),
+    ("131-min", "int main(void) { return ((-2147483648) < 0); }\n", 1),
+    # #133：`int` + `long` 的加法与**随后的比较**都提升到 64 位
+    ("133-long", "int main(void) { int x = 1; long y = 2147483647;"
+                 " return (x + y > 0); }\n", 1),
+]
+
+
+@test
+def test_issue_repros_run_like_clang():
+    """`#120` / `#123` / `#125` / `#131` / `#133` 的最小复现，**两边跑出来的数一样**。
+
+    这几条在 `widths.c` / `blockscope.c` 两份语料里已有覆盖，但语料写的是"一个面"；
+    这里逐条放的是**issue 正文里那段最小程序** —— 将来谁把某条修回去，失败信息里能
+    直接看到 issue 号，而不是"某份 60 行的语料差了一个数"。
+
+    `#132`（超 32 位字面量）不在这里：它现在的答案是**拒**，由
+    `test_comparison_operands_are_pinned_to_a_signed_width` 钉住。
+    `#121`（`use` 被静默丢）在 `loment_multisyntax_test` 里（转写期就报出来）。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 需要 clang + WSL")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        for label, src, want in _ISSUE_REPROS:
+            td = Path(t) / label.replace("-", "_")
+            td.mkdir()
+            doc, rep = potato_from.from_c(src, label + ".c", "strict")
+            assert not rep.skipped, (label, rep.skipped[:3])
+            c_rc = _run(_build_c(td, src))
+            l_rc = _run(_build_loment(td, doc))
+            assert c_rc == want, f"{label}: clang 那边就不对: {c_rc} != {want}"
+            assert l_rc == c_rc, f"{label}: 译文与 clang 不同: {l_rc} != {c_rc}"
+            print(f"      {label}: clang -> {c_rc}，翻译成 Loment -> {l_rc}（相等）")
+
+
 @test
 def test_shadowing_declaration_reads_the_outer_name_in_its_initializer():
     """**遮蔽 + 初值引用被遮蔽的那个名**（`#234`）。

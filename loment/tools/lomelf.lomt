@@ -2995,6 +2995,13 @@ fn sh_flags(raw: ptr, k: u32) -> u32 {
     return load32(raw, sec_hdr(raw, k) + 8);
 }
 
+/// `sh_addralign`（`#612`）：节的对齐要求。原先这里没有它，所有节一律按 16 摆 ——
+/// 一个要求 32/64 对齐的 `.rodata.cst32` 就会落在 `16 (mod 32)` 上，AVX 的
+/// `vmovdqa` 第一次取常数就 #GP。参考实现同一条。
+fn sh_align(raw: ptr, k: u32) -> u32 {
+    return load32(raw, sec_hdr(raw, k) + 48);
+}
+
 /// **元数据节**（`.eh_frame` / `.debug*` / `.comment` / `.note*`）：代码引用不到它们，
 /// 丢掉无损。**与参考实现 `_META_SEC` 同一份名单** —— "摆哪些节"两边必须一致，
 /// 否则同一次链接两侧产物不同（镜像判据逐字节比）。
@@ -3018,18 +3025,22 @@ fn is_data_sec(raw: ptr, k: u32) -> u32 {
     return 1;
 }
 
-/// 第 k 节在该对象**数据块**里的起点（数据节按节表顺序拼接、每节 16 对齐）。
-/// 与 `sec_at` 同一形状，只是筛的是 `is_data_sec`。
+/// 第 k 节在该对象**数据块**里的起点（数据节按节表顺序拼接、每节按自己的
+/// `sh_addralign` 对齐，至少 16）。与 `sec_at` 同一形状，只是筛的是 `is_data_sec`。
 fn dsec_at(raw: ptr, k: u32) -> u32 {
     let cur: u32 = 0;
     let i: u32 = 0;
     while i < k {
         if is_data_sec(raw, i) == 1 {
-            cur = align_to(cur, 16) + sh_size(raw, i);
+            let al: u32 = sh_align(raw, i);
+            if al < 16 { al = 16; }
+            cur = align_to(cur, al) + sh_size(raw, i);
         }
         i = i + 1;
     }
-    return align_to(cur, 16);
+    let al2: u32 = sh_align(raw, k);
+    if al2 < 16 { al2 = 16; }
+    return align_to(cur, al2);
 }
 
 /// 把节符号的**合成名**写进名字池：`$` + 对象号 + `.` + 节号（四个字节，**不是**文本）。
@@ -3318,9 +3329,18 @@ fn link_object_mem(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, ap: u3
     // 之前那两段 (未定义就报错 / 见重定位就报错) 是在没有重定位能力时的硬拒; 现在两条都
     // 换成了**真的去做**, 做不出来才报 —— 免得从"硬拒"退化成"静默忽略重定位"(那是错编)。
     let ns: u32 = sh_num(mem);
-    // 接在我们自己的代码之后 (16 对齐)。**先拼字节, 再立标签** —— 标签地址 = 起点 + 节错
-    // + 符号值, 所以要先把每节的起点算出来。
-    let at0: u32 = align_to(d, 16);
+    // 接在我们自己的代码之后（按对象代码节的**最大对齐要求**，至少 16；`#612`）。
+    // **先拼字节, 再立标签** —— 标签地址 = 起点 + 节错 + 符号值, 所以要先把每节的起点算出来。
+    let tmax: u32 = 16;
+    let iq: u32 = 0;
+    while iq < ns {
+        if sh_type(mem, iq) == 1 && is_code_sec(mem, sec_name(mem, iq)) == 1 {
+            let al: u32 = sh_align(mem, iq);
+            if al > tmax { tmax = al; }
+        }
+        iq = iq + 1;
+    }
+    let at0: u32 = align_to(d, tmax);
     pad_zero(txt, d, at0);
     // 记下这个对象的代码在缓冲里的起点 —— 重定位要按它算 `S + A - P`, 而**应用**要等到
     // 所有对象都摆好 (见 apply_relocs)。
@@ -3331,7 +3351,9 @@ fn link_object_mem(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, ap: u3
     let i3: u32 = 0;
     while i3 < ns {
         if sh_type(mem, i3) == 1 && is_code_sec(mem, sec_name(mem, i3)) == 1 {
-            let nd: u32 = align_to(dd, 16);
+            let al3: u32 = sh_align(mem, i3);
+            if al3 < 16 { al3 = 16; }
+            let nd: u32 = align_to(dd, al3);
             pad_zero(txt, dd, nd);
             dd = nd;
             copy_n(txt, dd, mem, sh_off(mem, i3), sh_size(mem, i3));
@@ -3344,13 +3366,24 @@ fn link_object_mem(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, ap: u3
     // `lea rdi, [rip + .L.str]` 就没有标签可指（症状是"引用了未定义的符号 .L.str"，
     // 一句"不支持的节"都看不到 ⇒ 这是**读得进来**的门槛，不是摆放的门槛）。
     // `.bss`(NOBITS) 按零字节摆进数据段（与参考实现同一取舍，代价是文件变大）。
-    let gb0: u32 = align_to(cell(tab, C_GB), 16);
+    let dmax: u32 = 16;
+    let iq2: u32 = 0;
+    while iq2 < ns {
+        if is_data_sec(mem, iq2) == 1 {
+            let al4: u32 = sh_align(mem, iq2);
+            if al4 > dmax { dmax = al4; }
+        }
+        iq2 = iq2 + 1;
+    }
+    let gb0: u32 = align_to(cell(tab, C_GB), dmax);
     pad_zero(gb, cell(tab, C_GB), gb0);
     let db: u32 = gb0;
     let i6: u32 = 0;
     while i6 < ns {
         if is_data_sec(mem, i6) == 1 {
-            let nd2: u32 = align_to(db, 16);
+            let al5: u32 = sh_align(mem, i6);
+            if al5 < 16 { al5 = 16; }
+            let nd2: u32 = align_to(db, al5);
             pad_zero(gb, db, nd2);
             db = nd2;
             if sh_type(mem, i6) == 1 {
@@ -3965,6 +3998,26 @@ fn copy_name(tab: ptr, t: ptr, p: ptr, off: u32) -> u32 {
 }
 
 // ---------------------------------------------------------------- 落盘与回填
+
+fn w16(p: ptr, off: u32, v: u32) {
+    store8(p, off, (v % 256) as u8);
+    store8(p, off + 1, ((v / 256) % 256) as u8);
+}
+
+/// 写一条 64 字节的 `Elf64_Shdr`（`#606`）。字段偏移与 `sec_hdr` 的注释同一张表。
+fn shdr_out(ob: ptr, at: u32, noff: u32, typ: u32, flags: u32, addr: u32,
+            off: u32, size: u32, link: u32, info: u32, al: u32, entsize: u32) {
+    w32(ob, at, noff);
+    w32(ob, at + 4, typ);
+    w64(ob, at + 8, flags as u64);
+    w64(ob, at + 16, addr as u64);
+    w64(ob, at + 24, off as u64);
+    w64(ob, at + 32, size as u64);
+    w32(ob, at + 40, link);
+    w32(ob, at + 44, info);
+    w64(ob, at + 48, al as u64);
+    w64(ob, at + 56, entsize as u64);
+}
 
 fn w32(p: ptr, off: u32, v: u32) {
     store8(p, off, (v % 256) as u8);
@@ -4638,7 +4691,9 @@ fn phdr_t(ob: ptr, at: u32, typ: u32, flags: u32, off: u32, vaddr: u32,
     w64(ob, at + 48, al as u64);
 }
 
-/// 组装**动态链接**的 ELF：六条程序头（INTERP + 三个 LOAD + DYNAMIC + GNU_STACK）。
+/// 组装**动态链接**的 ELF：八条程序头（INTERP + 四个 LOAD + DYNAMIC + GNU_RELRO +
+/// GNU_STACK）。文件头那一页单开一条**只读** LOAD（`#608`）—— 原先它和代码同一条 R|X，
+/// 于是 ELF 头与程序头表落在可执行页里。
 ///
 /// **第一个 `PT_LOAD` 必须从文件偏移 0 起**：内核用
 /// `AT_PHDR = (首个 PT_LOAD 的 p_vaddr - p_offset) + e_phoff` 告诉 loader 程序头在哪；
@@ -4648,6 +4703,8 @@ fn phdr_t(ob: ptr, at: u32, typ: u32, flags: u32, off: u32, vaddr: u32,
 /// **尾部那一段（`.got.plt` + `.dynamic`）单开一条 RW LOAD, 落在 BSS 之后** ——
 /// 紧接着 `data` 的是 BSS, 里面是运行时自己的全局（FFI 的 arena 就是 1 MiB）；GOT 摆
 /// 在那里, 程序第一次往全局里写就把它覆盖了（实测 GOT 里被写成了输入数据）。
+/// 同一段罩进 **`PT_GNU_RELRO`**（`#608`）：`DF_BIND_NOW` 已发，加载器做完重定位后
+/// 把 GOT/.dynamic 变成只读。
 fn build_elf_dynamic(tab: ptr, ob: ptr, txt: ptr, tlen: u32, gb: ptr, dlen: u32,
                      bss: u32) -> u32 {
     let text_off: u32 = 4096;
@@ -4655,9 +4712,14 @@ fn build_elf_dynamic(tab: ptr, ob: ptr, txt: ptr, tlen: u32, gb: ptr, dlen: u32,
     let tail_off: u32 = align_to(data_off + dlen, 4096);
     let tail_v: u32 = cell(tab, C_TAILV);
     let dyn_a: u32 = cell(tab, C_DYNA);
-    let dyn_l: u32 = 208;
+    // 14 条 `DT_*`（多出来的那条是 `DT_DEBUG`，`#607`）× 16 字节。
+    let dyn_l: u32 = 224;
     let tail_l: u32 = (dyn_a - tail_v) + dyn_l;
-    let total: u32 = tail_off + tail_l;
+    let file_end: u32 = tail_off + tail_l;
+    // 节头表在**不加载的尾部**（`#606`），与参考实现同序同字节。
+    let shstr_off: u32 = file_end;
+    let shstr_len: u32 = 80;
+    let shoff: u32 = align_to(shstr_off + shstr_len, 8);
     store8(ob, 0, 127 as u8);
     store8(ob, 1, 69 as u8);
     store8(ob, 2, 76 as u8);
@@ -4678,27 +4740,30 @@ fn build_elf_dynamic(tab: ptr, ob: ptr, txt: ptr, tlen: u32, gb: ptr, dlen: u32,
     w32(ob, 20, 1);
     w64(ob, 24, TEXT_VADDR as u64);
     w64(ob, 32, 64);
-    w64(ob, 40, 0);
+    w64(ob, 40, shoff as u64);
     w32(ob, 48, 0);
     store8(ob, 52, 64 as u8);
     store8(ob, 53, 0 as u8);
     store8(ob, 54, 56 as u8);
     store8(ob, 55, 0 as u8);
-    store8(ob, 56, 6 as u8);
+    // e_phnum = 8（多出来的是文件头那页的只读 LOAD 与 GNU_RELRO，`#608`）
+    store8(ob, 56, 8 as u8);
     store8(ob, 57, 0 as u8);
-    let z2: u32 = 58;
-    while z2 < 64 {
-        store8(ob, z2, 0 as u8);
-        z2 = z2 + 1;
-    }
+    // e_shentsize = 64, e_shnum = 11, e_shstrndx = 10（`#606`）
+    w16(ob, 58, 64);
+    w16(ob, 60, 11);
+    w16(ob, 62, 10);
+    // 程序头：INTERP / LOAD(R, 文件头页) / LOAD(RX) / LOAD(RW data) / LOAD(RW tail) /
+    // DYNAMIC / GNU_RELRO / GNU_STACK。第一个 LOAD 仍从偏移 0 起（`AT_PHDR` 靠它）。
     phdr_t(ob, 64, 3, 4, text_off + (cell(tab, C_INTERP) - TEXT_VADDR),
            cell(tab, C_INTERP), 28, 28, 1);
-    phdr_t(ob, 120, 1, 5, 0, TEXT_VADDR - text_off, text_off + tlen,
-           text_off + tlen, 4096);
-    phdr_t(ob, 176, 1, 6, data_off, DATA_VADDR, dlen, dlen + bss, 4096);
-    phdr_t(ob, 232, 1, 6, tail_off, tail_v, tail_l, tail_l, 4096);
-    phdr_t(ob, 288, 2, 6, tail_off + (dyn_a - tail_v), dyn_a, dyn_l, dyn_l, 4096);
-    phdr_t(ob, 344, 1685382481, 6, 0, 0, 0, 0, 16);
+    phdr_t(ob, 120, 1, 4, 0, TEXT_VADDR - text_off, text_off, text_off, 4096);
+    phdr_t(ob, 176, 1, 5, text_off, TEXT_VADDR, tlen, tlen, 4096);
+    phdr_t(ob, 232, 1, 6, data_off, DATA_VADDR, dlen, dlen + bss, 4096);
+    phdr_t(ob, 288, 1, 6, tail_off, tail_v, tail_l, tail_l, 4096);
+    phdr_t(ob, 344, 2, 6, tail_off + (dyn_a - tail_v), dyn_a, dyn_l, dyn_l, 4096);
+    phdr_t(ob, 400, 1685382482, 4, tail_off, tail_v, tail_l, tail_l, 1);
+    phdr_t(ob, 456, 1685382481, 6, 0, 0, 0, 0, 16);
     copy_n(ob, text_off, txt, 0, tlen);
     copy_n(ob, data_off, gb, 0, dlen);
     // ---- `.got.plt`（尾部段的开头）
@@ -4738,16 +4803,71 @@ fn build_elf_dynamic(tab: ptr, ob: ptr, txt: ptr, tlen: u32, gb: ptr, dlen: u32,
     w64(ob, d + 168, 7 as u64);
     w64(ob, d + 176, 30 as u64);
     w64(ob, d + 184, 8 as u64);
-    w64(ob, d + 192, 0 as u64);
+    // `DT_DEBUG`（`#607`）：loader 往这里写 `r_debug`，调试器靠它看已加载的共享对象。
+    w64(ob, d + 192, 21 as u64);
     w64(ob, d + 200, 0 as u64);
-    return total;
+    w64(ob, d + 208, 0 as u64);
+    w64(ob, d + 216, 0 as u64);
+    // ---- `.shstrtab`（顺序与参考实现一致）
+    store8(ob, shstr_off, 0 as u8);
+    let sn: u32 = put_lit(ob, shstr_off + 1, ".text");
+    store8(ob, sn, 0 as u8);
+    sn = put_lit(ob, sn + 1, ".data");
+    store8(ob, sn, 0 as u8);
+    sn = put_lit(ob, sn + 1, ".bss");
+    store8(ob, sn, 0 as u8);
+    sn = put_lit(ob, sn + 1, ".interp");
+    store8(ob, sn, 0 as u8);
+    sn = put_lit(ob, sn + 1, ".dynstr");
+    store8(ob, sn, 0 as u8);
+    sn = put_lit(ob, sn + 1, ".dynsym");
+    store8(ob, sn, 0 as u8);
+    sn = put_lit(ob, sn + 1, ".rela.plt");
+    store8(ob, sn, 0 as u8);
+    sn = put_lit(ob, sn + 1, ".got.plt");
+    store8(ob, sn, 0 as u8);
+    sn = put_lit(ob, sn + 1, ".dynamic");
+    store8(ob, sn, 0 as u8);
+    sn = put_lit(ob, sn + 1, ".shstrtab");
+    store8(ob, sn, 0 as u8);
+    // ---- 节头表（11 条 × 64 字节）。0 号是保留的空节。
+    pad_zero(ob, shstr_off + shstr_len, shoff);
+    pad_zero(ob, shoff, shoff + 64);
+    let ip: u32 = cell(tab, C_INTERP);
+    let ds: u32 = cell(tab, C_DYNSTRA);
+    let sy: u32 = cell(tab, C_SYMA);
+    let ra: u32 = cell(tab, C_RELAA);
+    let ga: u32 = cell(tab, C_GOTA);
+    shdr_out(ob, shoff + 64, 1, 1, 6, TEXT_VADDR, text_off, tlen, 0, 0, 16, 0);
+    shdr_out(ob, shoff + 128, 7, 1, 3, DATA_VADDR, data_off, dlen, 0, 0, 16, 0);
+    shdr_out(ob, shoff + 192, 13, 8, 3, DATA_VADDR + dlen, data_off + dlen,
+             bss, 0, 0, 8, 0);
+    shdr_out(ob, shoff + 256, 18, 1, 2, ip, text_off + (ip - TEXT_VADDR),
+             28, 0, 0, 1, 0);
+    shdr_out(ob, shoff + 320, 26, 3, 2, ds, text_off + (ds - TEXT_VADDR),
+             cell(tab, C_DSLEN), 0, 0, 1, 0);
+    shdr_out(ob, shoff + 384, 34, 11, 2, sy, text_off + (sy - TEXT_VADDR),
+             24 * (n + 1), 5, 1, 8, 24);
+    shdr_out(ob, shoff + 448, 42, 4, 2, ra, text_off + (ra - TEXT_VADDR),
+             24 * n, 6, 8, 8, 24);
+    shdr_out(ob, shoff + 512, 52, 1, 3, ga, tail_off + (ga - tail_v),
+             8 * (3 + n), 0, 0, 8, 0);
+    shdr_out(ob, shoff + 576, 61, 6, 3, dyn_a, tail_off + (dyn_a - tail_v),
+             dyn_l, 5, 0, 8, 16);
+    shdr_out(ob, shoff + 640, 70, 3, 0, 0, shstr_off, shstr_len, 0, 0, 1, 0);
+    return shoff + 704;
 }
 
 /// 组装 ELF: 头 + 两个 PT_LOAD。返回文件总长。
 fn build_elf(tab: ptr, ob: ptr, txt: ptr, tlen: u32, gb: ptr, dlen: u32, bss: u32) -> u32 {
     let text_off: u32 = 4096;
     let data_off: u32 = align_to(text_off + tlen, 4096);
-    let total: u32 = data_off + dlen;
+    let file_end: u32 = data_off + dlen;
+    // 节头表放在**不加载的尾部**（`#606`）：执行不需要，`objdump -d` / `readelf -r` /
+    // `strip` 全按它找 `.text`。`.shstrtab` 的内容与顺序必须与参考实现逐字节一致。
+    let shstr_off: u32 = file_end;
+    let shstr_len: u32 = 28;
+    let shoff: u32 = align_to(shstr_off + shstr_len, 8);
     // e_ident
     store8(ob, 0, 127 as u8);
     store8(ob, 1, 69 as u8);
@@ -4772,8 +4892,8 @@ fn build_elf(tab: ptr, ob: ptr, txt: ptr, tlen: u32, gb: ptr, dlen: u32, bss: u3
     w64(ob, 24, TEXT_VADDR as u64);
     // e_phoff = 64
     w64(ob, 32, 64);
-    // e_shoff = 0
-    w64(ob, 40, 0);
+    // e_shoff = 节头表起点
+    w64(ob, 40, shoff as u64);
     // e_flags = 0
     w32(ob, 48, 0);
     // e_ehsize = 64
@@ -4785,13 +4905,10 @@ fn build_elf(tab: ptr, ob: ptr, txt: ptr, tlen: u32, gb: ptr, dlen: u32, bss: u3
     // e_phnum = 2
     store8(ob, 56, 2 as u8);
     store8(ob, 57, 0 as u8);
-    // e_shentsize/e_shnum/e_shstrndx = 0
-    store8(ob, 58, 0 as u8);
-    store8(ob, 59, 0 as u8);
-    store8(ob, 60, 0 as u8);
-    store8(ob, 61, 0 as u8);
-    store8(ob, 62, 0 as u8);
-    store8(ob, 63, 0 as u8);
+    // e_shentsize = 64, e_shnum = 5, e_shstrndx = 4
+    w16(ob, 58, 64);
+    w16(ob, 60, 5);
+    w16(ob, 62, 4);
     // phdr 0: text (R+X)
     phdr(ob, 64, 5, text_off, TEXT_VADDR, tlen, tlen);
     // phdr 1: data (R+W)
@@ -4799,7 +4916,25 @@ fn build_elf(tab: ptr, ob: ptr, txt: ptr, tlen: u32, gb: ptr, dlen: u32, bss: u3
     // 拷文本与数据
     copy_n(ob, text_off, txt, 0, tlen);
     copy_n(ob, data_off, gb, 0, dlen);
-    return total;
+    // ---- `.shstrtab`：0 号空串, 然后按节表顺序的名字。
+    store8(ob, shstr_off, 0 as u8);
+    let sn: u32 = put_lit(ob, shstr_off + 1, ".text");
+    store8(ob, sn, 0 as u8);
+    sn = put_lit(ob, sn + 1, ".data");
+    store8(ob, sn, 0 as u8);
+    sn = put_lit(ob, sn + 1, ".bss");
+    store8(ob, sn, 0 as u8);
+    sn = put_lit(ob, sn + 1, ".shstrtab");
+    store8(ob, sn, 0 as u8);
+    // ---- 节头表（5 条 × 64 字节）。0 号是保留的空节。
+    pad_zero(ob, shstr_off + shstr_len, shoff);
+    pad_zero(ob, shoff, shoff + 64);
+    shdr_out(ob, shoff + 64, 1, 1, 6, TEXT_VADDR, text_off, tlen, 0, 0, 16, 0);
+    shdr_out(ob, shoff + 128, 7, 1, 3, DATA_VADDR, data_off, dlen, 0, 0, 16, 0);
+    shdr_out(ob, shoff + 192, 13, 8, 3, DATA_VADDR + dlen, data_off + dlen,
+             bss, 0, 0, 8, 0);
+    shdr_out(ob, shoff + 256, 18, 3, 0, 0, shstr_off, shstr_len, 0, 0, 1, 0);
+    return shoff + 320;
 }
 
 // ---------------------------------------------------------------- PE 写出

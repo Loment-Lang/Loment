@@ -4302,20 +4302,17 @@ fn so_load(tab: ptr, t: ptr, mem: ptr, n: u32, pname: ptr) -> u32 {
         wstr(2, "\n");
         return die(1);
     }
-    // SONAME：没有就用**文件名**（loader 按那个找）。
+    // SONAME：没有就记**命令行给的那个路径**（GNU ld 同一条，#595）。只记 basename
+    // 的话，`--link /tmp/mylibs/libadd.so` 的产物会去找 `libadd.so`，loader 找不到。
     let son_o: u32 = cell(tab, C_EXTN);
     if sono == NO {
-        let bn: u32 = 0;
         let q: u32 = 0;
         while load8(pname, q) != 0 {
-            if load8(pname, q) == 47 {
-                bn = q + 1;
-            }
             q = q + 1;
         }
-        setcell(tab, C_EXTN, put_bytes(t, son_o, pname, bn, q - bn, IN_CAP));
+        setcell(tab, C_EXTN, put_bytes(t, son_o, pname, 0, q, IN_CAP));
         setcell(tab, C_SONOFF, son_o);
-        setcell(tab, C_SONLEN, q - bn);
+        setcell(tab, C_SONLEN, q);
     } else {
         // `sto + sono` 要么回绕、要么越界 —— 两种都不能拿去当偏移（`#594`）。
         let son_at: u32 = sto + sono;
@@ -4401,7 +4398,10 @@ fn so_load(tab: ptr, t: ptr, mem: ptr, n: u32, pname: ptr) -> u32 {
             let bind: u32 = info / 16;
             let typ: u32 = info % 16;
             if bind == 1 || bind == 2 {
-                if typ == 1 || typ == 2 {
+                // NOTYPE(0) / OBJECT(1) / FUNC(2) / IFUNC(10)：与参考实现
+                // `SharedObject.__init__` 同一条（#590/#591）。IFUNC 是 glibc 的
+                // `strlen`/`memcpy` 的形态，NOTYPE 是没有 `.type` 的汇编导出。
+                if typ == 0 || typ == 1 || typ == 2 || typ == 10 {
                     // 名字相对 `.dynstr` 的起点：**两端都要在那一节里面**（`#593`）。
                     let npos: u32 = dstr + noff;
                     if npos < dstr || npos >= dstr + dstrsz {
@@ -5663,11 +5663,15 @@ fn emit_conscript(tab: ptr, out: ptr, c: u32, t: ptr) -> u32 {
     let a3: u32 = put_name(t, a2, "malloc");             // 6
     let a4: u32 = put_name(t, a3, "free");               // 4
     setcell(tab, C_EXTN, a4);
+    // **宿主版堆不包壳**（#631）：`choose hosted` 的分配器自己 `declare` 了 `@malloc`
+    // 并向宿主要 arena；这里再定义 `malloc` 就会指回壳自身（无限递归，实测栈溢出）。
+    // 判据与参考实现 `Emitter.emit_conscript` 同一条：IR 自己 declare 过的名字留给
+    // `.so` 的导出表 —— 自举侧就是 `ext_has`。
     let dd: u32 = d;
-    if lbl_find(tab, t, hn, 14, 0, 0) != NO {
+    if ext_has(tab, t, a2, 6) == 0 && lbl_find(tab, t, hn, 14, 0, 0) != NO {
         dd = emit_abi_wrapper(tab, out, dd, t, a2, 6, hn, 14);
     }
-    if lbl_find(tab, t, a1, 13, 0, 0) != NO {
+    if ext_has(tab, t, a3, 4) == 0 && lbl_find(tab, t, a1, 13, 0, 0) != NO {
         dd = emit_abi_wrapper(tab, out, dd, t, a3, 4, a1, 13);
     }
     return dd;
@@ -5945,12 +5949,14 @@ fn run(mem: ptr) -> u32 {
         tls = 1;
     }
     let tlen0: u32 = emit_all(tab, txt, 0, inb, n as u32, tlsn, tls);
-    // **收编面**（`docs/219` §6）：链里带了外部对象，就把"可闭合"那几个名字提供出来，
-    // 于是它们不再是未定义符号 —— 从表上划掉。粒度是"有没有外部对象"，与参考实现
-    // `tools/lomelf.py` 的 `compile_ll` 同一处判断、同一段字节（`loment_elf_test` 的自举
-    // 镜像那格逐字节钉）。**顺序与那边一致**：我们的代码 -> 收编面 -> 外部对象。
+    // **收编面**（`docs/219` §6）：链里带了**任何外部输入**（`.o` 或 `.so`），就把
+    // "可闭合"那几个名字提供出来，于是它们不再是未定义符号 —— 从表上划掉。粒度与参考
+    // 实现 `tools/lomelf.py` 的 `compile_ll` 同一处判断、同一段字节（`loment_elf_test`
+    // 的自举镜像那格逐字节钉）。**顺序与那边一致**：我们的代码 -> 收编面 -> 外部对象。
+    // `.so` 也要发（#631）：否则只链 `.so` 时 memcpy 一族只能落到导出表上，而 glibc
+    // 把 memcpy 发成 IFUNC/非默认版本，一个都落不下。
     let tlen: u32 = tlen0;
-    if nobj != 0 {
+    if nobj != 0 || nshared != 0 {
         tlen = emit_conscript(tab, txt, tlen, inb);
     }
     // 外部目标文件 (docs/173): 代码节接在我们自己的代码之后, **数据节接在数据段之后**,

@@ -375,6 +375,65 @@ def test_translation_runs_same_as_clang():
 
 
 @test
+def test_shadowing_declaration_reads_the_outer_name_in_its_initializer():
+    """**遮蔽 + 初值引用被遮蔽的那个名**（`#234`）。
+
+    块里 `int x = x + 100;` 要发成 `let x__1: i32 = (x + 100);` —— 右边那个 `x`
+    是**外层**那个。原先先 `decl_bind` 再发初值，右边也跟着改成 `x__1`，于是产物是
+    `let x__1: i32 = (x__1 + 100);`：一条**自引用**声明，check 报"使用未声明的变量
+    x__1"（用户从没写过这个名字）。
+
+    C 在这里严格说是未定义行为（新 `x` 的作用域从声明符之后就开始了），但本语言连
+    "读一个正在声明的名字"都写不出来；外层有同名时读外层是**确定且保义**的选择
+    （`#234` 的期望），外层没有那个名字就照旧响亮报"用了没声明过的"。
+
+    `for (int x = x + 1; …)` 是同一处的第二个入口（循环变量也改名外提）。
+    """
+    src_if = ("int entry() { int x = 10; if (x > 0) { int x = x + 100;"
+              " if (x > 100) { x = 7; } } return x; }\n")
+    out = ctrans.translate(src_if)
+    assert "let x__1: i32 = (x + 100);" in out, out
+    assert "x__1 + 100" not in out, f"初值读到了刚改名的那个（自引用）:\n{out}"
+    assert "if (x__1 > (100 as i32)) {" in out, out
+
+    src_for = ("int f() { int x = 5; for (int x = x + 1; x < 7; x = x + 1) { }"
+               " return x; }\n")
+    out_for = ctrans.translate(src_for)
+    assert "let x__1: i32 = (x + 1);" in out_for, out_for
+    # 步进那一行**本来就该**写改名后的 `x__1`（那是循环变量），所以只看 `let` 那行
+    assert "let x__1: i32 = (x__1 + 1);" not in out_for, (
+        f"for 初值读到了刚改名的那个（自引用）:\n{out_for}")
+
+    # 外层**没有**那个名字：照旧响亮拒（不能拿一个不存在的初值去编）
+    try:
+        ctrans.translate("int f() { int x = x + 1; return x; }\n")
+    except trans_core.Unsupported as e:
+        assert "没声明过" in str(e), e
+    else:
+        raise AssertionError("自引用初值（外层没有同名）没被拒")
+
+    # 产物要**真编得过**，并且跑出来与 C 一样（那个 if 程序 C 给 10）
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        with_main = src_if + "int main() { return entry(); }\n"
+        doc, _rep = potato_from.from_c(with_main, "nest.c", "strict")
+        if _clang() and _wsl():
+            c_rc = _run(_build_c(td, with_main))
+            l_rc = _run(_build_loment(td, doc))
+            assert c_rc == 10, f"clang 那边就不对: {c_rc} != 10"
+            assert l_rc == c_rc, f"译文与 clang 不同: {l_rc} != {c_rc}"
+            print(f"      遮蔽 + 自引用初值：clang -> {c_rc}，翻译 -> {l_rc}（相等）")
+        else:
+            text, _ = lomt_from.emit_lomt(doc, impl=True)
+            p = td / "nest.lomt"
+            p.write_text(text + _L_ENTRY, encoding="utf-8", newline="\n")
+            mod = lomentc.load(p)
+            deps = lomentc.resolve_deps(mod, ROOT, p.parent, entry=p)
+            assert not lomentc.check(mod, deps=deps), "翻译出来的 Loment 检查不过"
+            print("      遮蔽 + 自引用初值：产物可检查（无 clang/WSL，未跑数值）")
+
+
+@test
 def test_body_is_byte_faithful():
     """Potato 里 `functions[i].body` 是**原文逐字节**，不是重新拼出来的。
 

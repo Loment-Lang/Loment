@@ -3492,7 +3492,6 @@ fn emit_stmt(mem: ptr, s: u32, depth: u32) -> u32 {
         }
         let o0: u32 = ld32(nmb, 0);
         let ln: u32 = ld32(nmb, 4);
-        let _vd: u32 = var_decl(mem, no, nl, o0, ln, tid);
         let o: u32 = app(eb, 0, "let ");
         let o2: u32 = appn(eb, o, ptr_add(mem, M_VB), o0, ln);
         let o3: u32 = app(eb, o2, ": ");
@@ -3504,8 +3503,12 @@ fn emit_stmt(mem: ptr, s: u32, depth: u32) -> u32 {
             // 见文件头 §语义选择 1：C 的未初始化在这里变成确定的零值
             o6 = app(eb, o5, "0");
         } else {
+            // **初值在声明生效之前发射**（`#234`，与上游 `stmt(Decl)` 同序）：
+            // 块里遮蔽外层的 `int x = x + 100;` 右边那个 `x` 是外层的 ——
+            // 先 `var_decl` 的话它会解析成刚改名的 `x__1`，发出一条自引用声明。
             o6 = sink(mem, e - 1, tid, eb, o5);
         }
+        let _vd: u32 = var_decl(mem, no, nl, o0, ln, tid);
         let o7: u32 = app(eb, o6, ";");
         return line_put(mem, o7, depth, 0);
     }
@@ -3619,7 +3622,6 @@ fn emit_for(mem: ptr, s: u32, depth: u32) -> u32 {
         }
         let o0: u32 = ld32(st, E_VBC);
         let ln: u32 = fresh(mem, vno, vnl);
-        let _vd: u32 = var_decl(mem, vno, vnl, o0, ln, tid);
         let o: u32 = app(eb, 0, "let ");
         let o2: u32 = appn(eb, o, ptr_add(mem, M_VB), o0, ln);
         let o3: u32 = app(eb, o2, ": ");
@@ -3630,8 +3632,11 @@ fn emit_for(mem: ptr, s: u32, depth: u32) -> u32 {
         if ie == 0 {
             o6 = app(eb, o5, "0");
         } else {
+            // **初值在循环变量生效之前发射**（`#234`，与上游 `emit_for` 同序）：
+            // `for (int x = x + 1; …)` 右边那个 `x` 是外层的那个。
             o6 = sink(mem, ie - 1, tid, eb, o5);
         }
+        let _vd: u32 = var_decl(mem, vno, vnl, o0, ln, tid);
         let o7: u32 = app(eb, o6, ";");
         let _l: u32 = line_put(mem, o7, depth, 0);
     } else {

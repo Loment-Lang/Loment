@@ -50,7 +50,15 @@ import lvm
     _OP_ALLOCA, _OP_LOAD, _OP_STORE, _OP_GEP, _OP_EXTRACT, _OP_INSERT,
     _OP_ICMP, _OP_DIV, _OP_ARITH, _OP_CAST, _OP_CALL, _OP_ASM, _OP_RMW,
     _OP_PHI, _OP_BR, _OP_SWITCH, _OP_RET, _OP_UNREACH,
-) = range(1, 19)
+    #: 编译期就失败的指令（issue #715）。**错误延迟到执行到这一条时才发** ——
+    #: T0 只在**走到**一条坏指令时报错，不可达块里的坏代码不是错。
+    _OP_ERROR,
+    #: 结构体下标不是常数的 `getelementptr`（issue #715）。静态走不动类型链，
+    #: 退到与 T0 共用的 `lvm.gep_offset`（**运行期**算，和 T0 同义）。
+    _OP_GEP_DYN,
+    #: 终结指令之后的指令（或坏指令之后那一段）—— T0 永远走不到，占位而已。
+    _OP_DEAD,
+) = range(1, 22)
 
 #: 一个**没被写过**的槽。T0 读到它时抛"读未定义的值"，T2 用同一个哨兵复刻那个行为
 #: （**不是**默认 0 —— 默认 0 会把"逻辑漏了一条指令"变成"算出来是 0"，那是最坏的一种）。
@@ -147,9 +155,28 @@ def _compile(fn, prog: Program) -> _CFunc:
 
     for blk in fn.blocks:
         ops: list[tuple] = []
+        #: 已经不可能再执行到的位置：坏指令之后、或终结指令之后的那一段。
+        dead = False
         for ins in blk.instrs:
             dest = slot_of(ins.dest) if ins.dest else -1
-            ops.append(_compile_instr(ins.text, dest, block_of, enc, prog))
+            if dead:
+                ops.append((_OP_DEAD,))
+                continue
+            try:
+                ops.append(_compile_instr(ins.text, dest, block_of, enc, prog))
+            except Exception as e:  # noqa: BLE001 —— 见下
+                # ⚠ **不在编译期发出这个错**（issue #715）。T0 只有**执行到**一条
+                # 解不了的指令时才报；而 T2 编译的是整块，包括**走不到**的部分
+                # （`dead:` 块、终结指令之后）。把错误做成一条 op、到执行期走到它
+                # 才抛，接受集合就与 T0 一致；在此之前 T2 会把不可达代码当硬错误。
+                # 这里接 `Exception` 而不是只接 `LvmError`：T0 那条路对同样的垃圾
+                # 也可能抛 `ElfError`/`ValueError`（都是一条错），接受集合才是要
+                # 对齐的那个量。
+                ops.append((_OP_ERROR, f"{type(e).__name__}: {e}"))
+                dead = True
+                continue
+            if ins.text.startswith(("br ", "switch ", "ret", "unreachable")):
+                dead = True                 # 终结指令之后：T0 执行不到
         cf.blocks.append(ops)
 
     cf.nslots = len(slots)
@@ -283,8 +310,9 @@ def _compile_instr(text: str, dest: int, block_of: dict, enc, prog: Program) -> 
     m = _ARITH_RE.match(text)
     if m and m.group(1) in lvm._ARITH:
         op, ty, a_s, b_s = m.groups()
-        return (_OP_ARITH, lvm._ARITH[op], op == "ashr", ty,
-                enc(ty + " " + a_s), enc(ty + " " + b_s), dest)
+        # 存**算子名**而不是那一格的 lambda：执行期要走 `lvm.arith`（issue #717 的
+        # 负移位量检查在那里），T0 与 T2 因此是同一份算术语义。
+        return (_OP_ARITH, op, ty, enc(ty + " " + a_s), enc(ty + " " + b_s), dest)
 
     raise lvm.LvmError(f"这个指令 T2 没实现: {text!r}")
 
@@ -310,9 +338,12 @@ def _compile_gep(text: str, dest: int, enc) -> tuple:
         elif cur.startswith("{"):
             _ty, v = lomelf.parse_operand(idx_s)
             if not v.lstrip("-").isdigit():
-                # 结构体下标不是常数 ⇒ 后面每一步的"当前类型"都随值变。**点名拒**，
-                # 不静默算错（T0 那条路在这一格里没有对应物）。
-                raise lvm.LvmError(f"结构体下标必须是常数（GEP）: {text!r}")
+                # 结构体下标不是常数 ⇒ 后面每一步的"当前类型"都随值变，静态走不动。
+                # ⚠ **T0 在这条路上有对应物**：`lvm.py::_gep` 一直在**运行期**用
+                # `lomelf.field_offset` 走类型链（LLVM 不允许非恒定结构体下标，但
+                # T0 与自举镜像都跑得动这种 IR）。所以这里不是"T0 没有对应物"，
+                # 而是把整条 GEP 退到与 T0 共用的 `lvm.gep_offset`（issue #715）。
+                return (_OP_GEP_DYN, base, ty, [enc(p) for p in parts[1:]], text, dest)
             off, cur = lomelf.field_offset(cur, int(v))
             const += off
         else:
@@ -386,6 +417,10 @@ class T2Executor(lvm.Executor):
 
     # ------------------------------------------------------------ 调用
     def call_t2(self, cf: _CFunc, args: list, entry: bool = False):
+        # 兜底（T3 也会从这里过）：`_body` 那两处已经**在求值之前**判过个数，
+        # 这里再判一次只是为了任何新调用点都不会绕过 issue #716 的那个答案。
+        if not entry and len(cf.params) != len(args):
+            raise lvm.LvmError("实参个数与形参不符")
         self.depth += 1
         base = lvm.STACK_TOP - self.depth * lvm.FRAME_SIZE
         if base <= self.mem.heap:
@@ -416,11 +451,16 @@ class T2Executor(lvm.Executor):
 
                     if code == _OP_CALL:
                         _, cname, a_ops, d = op
+                        cf = self.prog.cfunc(cname)
+                        # issue #716：**先判个数、再求值实参** —— 多出来的那个实参若是
+                        # 未定义的值，T0 报的是"实参个数与形参不符"，不是"读未定义的值"。
+                        if len(a_ops) != len(cf.params):
+                            raise lvm.LvmError("实参个数与形参不符")
                         args = [_rd(vals, o) for o in a_ops]
                         prof.call_site((name, labels[bi], j), cname)
                         if self.values is not None and args:
                             self.values.observe((name, labels[bi], j), args[0])
-                        v = self.call_t2(self.prog.cfunc(cname), args)
+                        v = self.call_t2(cf, args)
                         if d >= 0:
                             vals[d] = v
                         continue
@@ -469,9 +509,8 @@ class T2Executor(lvm.Executor):
                     code = op[0]
 
                     if code == _OP_ARITH:
-                        _, fn, is_ashr, ty, a_op, b_op, d = op
-                        a, b = _rd(vals, a_op), _rd(vals, b_op)
-                        vals[d] = lvm.mask(lvm.signed(a, ty) >> b if is_ashr else fn(a, b), ty)
+                        _, opn, ty, a_op, b_op, d = op
+                        vals[d] = lvm.arith(opn, _rd(vals, a_op), _rd(vals, b_op), ty)
                         continue
                     if code == _OP_LOAD:
                         _, ty, a_op, d = op
@@ -502,8 +541,10 @@ class T2Executor(lvm.Executor):
                         break
                     if code == _OP_CALL:
                         _, cname, a_ops, d = op
-                        v = self.call_t2(self.prog.cfunc(cname),
-                                         [_rd(vals, o) for o in a_ops])
+                        cf = self.prog.cfunc(cname)
+                        if len(a_ops) != len(cf.params):
+                            raise lvm.LvmError("实参个数与形参不符")
+                        v = self.call_t2(cf, [_rd(vals, o) for o in a_ops])
                         if d >= 0:
                             vals[d] = v
                         continue
@@ -540,10 +581,15 @@ def _run_value(vm: T2Executor, vals: list, op: tuple) -> None:
     语义相同，判据 B 钉的就是这件事。
     """
     code = op[0]
+    if code == _OP_ERROR:
+        # 编译期就解不了的一条指令（issue #715）—— 只有**执行到**这里才是一个错。
+        raise lvm.LvmError(op[1])
+    if code == _OP_DEAD:
+        # 逻辑上走不到（`_OP_ERROR` 在它前面，或块已经 `br`/`ret` 走了）。
+        raise lvm.LvmError("执行到不可达的位置")
     if code == _OP_ARITH:
-        _, fn, is_ashr, ty, a_op, b_op, d = op
-        a, b = _rd(vals, a_op), _rd(vals, b_op)
-        vals[d] = lvm.mask(lvm.signed(a, ty) >> b if is_ashr else fn(a, b), ty)
+        _, opn, ty, a_op, b_op, d = op
+        vals[d] = lvm.arith(opn, _rd(vals, a_op), _rd(vals, b_op), ty)
     elif code == _OP_LOAD:
         _, ty, a_op, d = op
         vals[d] = vm.load(ty, _rd(vals, a_op))
@@ -556,6 +602,11 @@ def _run_value(vm: T2Executor, vals: list, op: tuple) -> None:
         for (i_op, size) in stages:
             off += _rd(vals, i_op) * size
         vals[d] = _rd(vals, base_op) + off
+    elif code == _OP_GEP_DYN:
+        # 非恒定结构体下标：静态类型链走不动，退到与 T0 共用的那一份（issue #715）。
+        _, base_op, ty, i_ops, text, d = op
+        vals[d] = _rd(vals, base_op) + lvm.gep_offset(
+            ty, [_rd(vals, o) for o in i_ops], text)
     elif code == _OP_ICMP:
         _, fn, sg, ty, a_op, b_op, d = op
         a, b = _rd(vals, a_op), _rd(vals, b_op)

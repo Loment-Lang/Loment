@@ -110,6 +110,48 @@ _ICMP = {
 }
 _SIGNED_CMP = ("sgt", "sge", "slt", "sle")
 
+
+def arith(op: str, a: int, b: int, ty: str) -> int:
+    """一条算术/位运算 —— **T0 与 T2 共用这一份**（issue #717）。
+
+    移位量按指令上写的宽度读成**有符号**数：负数不是一个值，是一个错。Python 的
+    `<<`/`>>` 对负数抛的是 `ValueError: negative shift count`（一条 traceback，不是诊断），
+    而自举镜像把位串读成 u64 后静默返回一个值 —— 三种行为里没有一种是"同一个答案"。
+    这里统一成 `LvmError`；T2 的两条执行路径也走这里，镜像照同一句话拒。
+
+    ⚠ 正的越界移位量**不动**：三种实现已经在"先移位再按宽度截断"上一致
+    （`shl`/`lshr` → 0，`ashr` → 符号位），那不是这一条要改的事。
+    """
+    if op in ("shl", "lshr", "ashr") and signed(b, ty) < 0:
+        raise LvmError("移位量是负数")
+    if op == "ashr":
+        return mask(signed(a, ty) >> b, ty)
+    return mask(_ARITH[op](a, b), ty)
+
+
+def gep_offset(ty: str, idxs: list[int], text: str = "") -> int:
+    """`getelementptr` 的下标游走 —— **T0 与 T2 的同一份实现**（issue #715）。
+
+    第 0 步是"把指针挪过整个基类型"，之后数组脱一层、结构体按字段偏移。结构体那一步
+    **一直**是运行期算的（`lomelf.field_offset`）—— 所以非恒定下标在 T0 里不是错误；
+    T2 静态走不动时退到这里，两边因此同义。
+    """
+    off, cur = 0, ty
+    for k, idx in enumerate(idxs):
+        if k == 0:
+            off += idx * lomelf.size_of(cur)
+            continue
+        if cur.startswith("["):
+            # `array_parts` 返回 **(个数, 元素)** —— 个数在前，别取 `[0]`。
+            cur = lomelf.array_parts(cur)[1]
+            off += idx * lomelf.size_of(cur)
+        elif cur.startswith("{"):
+            o, cur = lomelf.field_offset(cur, idx)
+            off += o
+        else:
+            raise LvmError(f"GEP 的这一步 T0 没实现: {text!r}")
+    return off
+
 _CALL_ASM = lomelf.CALL_ASM_RE
 #: `CALL_ASM_RE` 的分组: 1 = 返回类型, **2 = asm 名字, 3 = 约束串, 4 = 实参表**。
 #: 2026-10-14（`docs/245`）之前只有 1/2/3 —— 名字是写死在模式里的 `"syscall"`。加
@@ -429,6 +471,11 @@ class Executor(Vm):
         fn = self.funcs.get(name)
         if fn is None:
             raise LvmError(f"没有这个函数: {name}")
+        # issue #716：实参个数与形参不符**是错**，三种实现用同一句话拒。以前这里是
+        # `zip(fn.params, argtexts)` —— 多出来的实参被**静默丢掉**、少给的形参留 0，
+        # 于是"少一个实参"的程序照样跑完。
+        if len(args) != len(fn.params):
+            raise LvmError("实参个数与形参不符")
         if self.profile is not None and self.site is not None:
             self.profile.call_site(self.site, name)
         return self.run(fn, args, fr)
@@ -560,11 +607,7 @@ class Executor(Vm):
             op, ty, a_s, b_s = m.groups()
             _t, a = self.operand(fr, ty + " " + a_s)
             _t2, b = self.operand(fr, ty + " " + b_s)
-            if op == "ashr":
-                v = signed(a, ty) >> b
-            else:
-                v = _ARITH[op](a, b)
-            return mask(v, ty)
+            return arith(op, a, b, ty)
         raise LvmError(f"这个指令 T0 没实现: {text!r}")
 
     def _gep(self, fr: Frame, text: str) -> int:
@@ -576,22 +619,8 @@ class Executor(Vm):
         # （它按逗号切、不跳过空段）—— 所以先把这个逗号吃掉。
         parts = lomelf.split_top(body[i:].lstrip(", "))
         _bty, base = self.operand(fr, parts[0])
-        off, cur = 0, ty
-        for k, idx_s in enumerate(parts[1:]):
-            _ity, idx = self.operand(fr, idx_s)
-            if k == 0:
-                off += idx * lomelf.size_of(cur)
-                continue
-            if cur.startswith("["):
-                # `array_parts` 返回 **(个数, 元素)** —— 个数在前，别取 `[0]`。
-                cur = lomelf.array_parts(cur)[1]
-                off += idx * lomelf.size_of(cur)
-            elif cur.startswith("{"):
-                off += lomelf.field_offset(cur, idx)[0]
-                cur = lomelf.field_offset(cur, idx)[1]
-            else:
-                raise LvmError(f"GEP 的这一步 T0 没实现: {text!r}")
-        return base + off
+        idxs = [self.operand(fr, s)[1] for s in parts[1:]]
+        return base + gep_offset(ty, idxs, text)
 
     def _extractvalue(self, fr: Frame, text: str):
         ty, i = lomelf.parse_type(text[len("extractvalue "):])

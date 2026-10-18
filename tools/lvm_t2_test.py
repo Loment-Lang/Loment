@@ -185,6 +185,149 @@ def test_t2_is_faster() -> None:
           f"⇒ {a / b:.2f}×（倍数只记账，不做门禁）")
 
 
+_DEAD_CODE = {
+    "不可达块里的坏跳转": """define i32 @_start() {
+entry:
+  ret i32 0
+dead:
+  br label %nope
+}
+""",
+    "不可达块里的坏指令": """define i32 @_start() {
+entry:
+  ret i32 0
+dead:
+  %x = frobnicate i32 1
+  ret i32 0
+}
+""",
+    "终结指令之后的坏指令": """define i32 @_start() {
+entry:
+  ret i32 0
+  %x = frobnicate i32 1
+}
+""",
+}
+
+
+def test_t2_acceptance_matches_t0_on_dead_code() -> None:
+    """判 E（issue #715）：**走不到**的代码不参与拒绝。
+
+    T0 是执行到一条解不了的指令才报错；T2 编译整块，所以它以前把不可达块里的坏跳转/
+    坏指令当硬错误。现在这些错误**延迟到执行到那一条**才发 —— 三份 IR 在 T0 与 T2
+    下必须给出同一个 `(rc, stdout)`，而不是一边跑完、一边拒绝。
+
+    反向那一半同样断言：**可达**的坏指令仍要拒（否则这条判据会退化成"什么都不检查"）。
+    """
+    for name, ir in _DEAD_CODE.items():
+        b0, b2 = io.BytesIO(), io.BytesIO()
+        r0, r2 = lvm.run_ir(ir, b0), lvm_t2.run_ir_t2(ir, b2)
+        assert (r0, b0.getvalue()) == (r2, b2.getvalue()), (
+            f"[{name}] T0 / T2 对不上：T0 rc={r0} {b0.getvalue()!r} / "
+            f"T2 rc={r2} {b2.getvalue()!r}")
+    live = """define i32 @_start() {
+entry:
+  %x = frobnicate i32 1
+  ret i32 0
+}
+"""
+    for name, fn in (("T0", lvm.run_ir), ("T2", lvm_t2.run_ir_t2)):
+        try:
+            fn(live, io.BytesIO())
+        except lvm.LvmError:
+            pass
+        else:
+            raise AssertionError(f"[{name}] 可达的坏指令被放过去了")
+    print(f"      不可达 / 终结之后的坏代码：T0 与 T2 同为 rc=0（{len(_DEAD_CODE)} 份）；"
+          "可达的坏指令仍被拒")
+
+
+_DYN_GEP = """define i32 @_start() {
+entry:
+  %p = alloca {i32,i32}
+  %f0 = getelementptr {i32,i32}, ptr %p, i32 0, i32 0
+  store i32 11, ptr %f0
+  %f1 = getelementptr {i32,i32}, ptr %p, i32 0, i32 1
+  store i32 22, ptr %f1
+  %i = add i32 1, 0
+  %q = getelementptr {i32,i32}, ptr %p, i32 0, i32 %i
+  %v = load i32, ptr %q
+  %c = icmp eq i32 %v, 22
+  br i1 %c, label %ok, label %bad
+ok:
+  ret i32 0
+bad:
+  unreachable
+}
+"""
+
+
+def test_t2_runs_dynamic_struct_index_gep() -> None:
+    """判 F（issue #715）：结构体下标**不是常数**时 T2 也跑得对。
+
+    LLVM 不允许这种下标，但 T0 一直在**运行期**用 `field_offset` 走类型链，自举镜像
+    也一样 —— 所以 T2 静态走不动时必须退到同一份实现，而不是点名拒。
+    证伪是**取值**：`%i` = 1 时读到的必须是第二个字段（22）；读错会走到 `unreachable`。
+    """
+    b0, b2 = io.BytesIO(), io.BytesIO()
+    r0, r2 = lvm.run_ir(_DYN_GEP, b0), lvm_t2.run_ir_t2(_DYN_GEP, b2)
+    assert (r0, b0.getvalue()) == (0, b""), f"T0 自己没跑对：rc={r0} {b0.getvalue()!r}"
+    assert (r2, b2.getvalue()) == (r0, b0.getvalue()), (
+        f"T2 与 T0 对不上：T0 rc={r0} {b0.getvalue()!r} / T2 rc={r2} {b2.getvalue()!r}")
+    print("      非恒定结构体下标：T0 / T2 都读到第二个字段，rc=0")
+
+
+_CALLEE = """define void @f(i32 %a, i32 %b) {
+entry:
+  ret void
+}
+"""
+
+
+def _message(fn, ir: str) -> str:
+    try:
+        fn(ir, io.BytesIO())
+    except lvm.LvmError as e:
+        return str(e)
+    raise AssertionError(f"这份 IR 跑起来了，而它应当被拒：{ir!r}")
+
+
+def test_t2_arity_and_negative_shift_match_t0() -> None:
+    """判 G（issue #716 / #717）：两种错在 T0 与 T2 下是**同一句话**。
+
+    * 少一个实参、多一个（未定义值的）实参 ⇒ `实参个数与形参不符` —— T2 以前对
+      多出来的那个报"读未定义的值"，连"这是个数问题"都看不出来；
+    * 负移位量 ⇒ `移位量是负数` —— 以前两边都抛 `ValueError: negative shift count`，
+      是一条 traceback，不是诊断。
+    """
+    few = _CALLEE + """define i32 @_start() {
+entry:
+  call void @f(i32 1)
+  ret i32 0
+}
+"""
+    extra = _CALLEE + """define i32 @_start() {
+entry:
+  call void @f(i32 1, i32 2, i32 %zzz)
+  ret i32 0
+}
+"""
+    for name, ir in (("少一个实参", few), ("多一个实参", extra)):
+        m0, m2 = _message(lvm.run_ir, ir), _message(lvm_t2.run_ir_t2, ir)
+        assert m0 == m2 == "实参个数与形参不符", f"[{name}] T0 {m0!r} / T2 {m2!r}"
+    for op in ("shl", "lshr", "ashr"):
+        ir = f"""define i32 @_start() {{
+entry:
+  %q = {op} i32 5, -1
+  %r = trunc i32 %q to i32
+  ret i32 %r
+}}
+"""
+        m0, m2 = _message(lvm.run_ir, ir), _message(lvm_t2.run_ir_t2, ir)
+        assert m0 == m2 == "移位量是负数", f"[{op}] T0 {m0!r} / T2 {m2!r}"
+    print("      实参个数不符 / 负移位量：T0 与 T2 报同一句话")
+
+
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 

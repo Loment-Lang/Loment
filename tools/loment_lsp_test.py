@@ -712,5 +712,297 @@ def test_a_foreign_grammar_file_gets_one_info_and_no_fake_errors():
     print("      两个语言服务：假错 0 条，各一条 Info 说明这份源是 python 语法")
 
 
+@test
+def test_lsp_did_save_does_not_erase_the_document():
+    """`#705`：didSave **不带正文**，不能当成一次空编辑把内存里的文档擦掉。
+
+    真实客户端（vscode-languageclient）的 `didSave` 只有 `textDocument.uri`（本服务声明
+    `textDocumentSync: 1`，也没有 `save.includeText`）。原先它走 `on_change`，`tn = 0`，
+    文档被存成空串 —— 保存一次之后补全/跳转描述的都是一个空文件，直到下一次编辑。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    uri = "file:///save.lomt"
+    cline = GOOD.splitlines().index("    return helper();")
+    msgs = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        {"method": "textDocument/didOpen",
+         "params": {"textDocument": {"uri": uri, "text": GOOD}}},
+        {"jsonrpc": "2.0", "id": 2, "method": "textDocument/completion",
+         "params": {"textDocument": {"uri": uri},
+                    "position": {"line": cline, "character": 12}}},
+        # 保存通知：**没有 text / contentChanges**（就是客户端真实发的形状）
+        {"method": "textDocument/didSave", "params": {"textDocument": {"uri": uri}}},
+        {"jsonrpc": "2.0", "id": 3, "method": "textDocument/completion",
+         "params": {"textDocument": {"uri": uri},
+                    "position": {"line": cline, "character": 12}}},
+        {"jsonrpc": "2.0", "id": 4, "method": "textDocument/definition",
+         "params": {"textDocument": {"uri": uri},
+                    "position": {"line": cline, "character": 12}}},
+        {"jsonrpc": "2.0", "id": 5, "method": "shutdown", "params": {}},
+        {"method": "exit"},
+    ]
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        frames, rc, err = Batch(_build(td), td).run(msgs)
+    assert rc == 0, f"LSP 退出码 {rc}: {err[-300:]}"
+    by_id = {f["id"]: f for f in frames if "id" in f}
+    for rid in (2, 3):
+        labels = {it["label"] for it in by_id[rid]["result"]["items"]}
+        assert {"helper", "main"} <= labels, (rid, sorted(labels)[:30])
+    hline = GOOD.splitlines().index("fn helper() -> u32 {")
+    d = by_id[4]["result"]
+    assert d is not None and d["range"]["start"]["line"] == hline, d
+
+    # Python 版同一件事：didSave 不改 docs。
+    docs = {uri: GOOD}
+    out = PY_LSP.handle({"method": "textDocument/didSave",
+                         "params": {"textDocument": {"uri": uri}}}, docs)
+    assert out == [] and docs[uri] == GOOD, (out, docs.get(uri))
+    print("      didSave 后补全仍含 helper+main、跳转仍落在声明行（文档没被擦掉）")
+
+
+#: `#706` 的探针源：每份文档定义一个**只属于自己的**函数，`definition` 按文档各查各的
+#: （补全的符号表是"最后分析的那份"，不适合当"哪个文档还在"的判据）。
+def _many_src(i: int) -> str:
+    return f"module t{i}\n\nfn f{i}() -> u32 {{\n    return {i};\n}}\n"
+
+
+def _decl_pos(src: str, name: str) -> tuple[int, int]:
+    lines = src.splitlines()
+    ln = lines.index(f"fn {name}() -> u32 {{")
+    return ln, lines[ln].index(name) + 1
+
+
+@test
+def test_lsp_keeps_64_documents_and_frees_on_close():
+    """`#706`：文档表原先只有 4 格，第 5 份**悄悄**顶掉第 4 份；didClose 又从不释放。
+
+    现在：64 份各归各位；`didClose` 真的释放（关掉的那份 `definition` 回 null）；
+    第 65 份**不被静默驱逐** —— 服务回一条 Info 明说"这份没被分析"，且先前那份仍然可用。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    n_doc = 64          # 与 `loment/tools/lsp.lomt` 的 `N_DOC` 对齐
+    uri = lambda i: f"file:///many{i}.lomt"  # noqa: E731
+    srcs = [_many_src(i) for i in range(n_doc)]
+    msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}]
+    for i in range(n_doc):
+        msgs.append({"method": "textDocument/didOpen",
+                     "params": {"textDocument": {"uri": uri(i), "text": srcs[i]}}})
+    ln0, ch0 = _decl_pos(srcs[0], "f0")
+    ln3, ch3 = _decl_pos(srcs[3], "f3")
+    msgs += [
+        # 关之前：doc0 在
+        {"jsonrpc": "2.0", "id": 2, "method": "textDocument/definition",
+         "params": {"textDocument": {"uri": uri(0)},
+                    "position": {"line": ln0, "character": ch0}}},
+        {"method": "textDocument/didClose", "params": {"textDocument": {"uri": uri(0)}}},
+        # 关之后：doc0 必须查不到（原先 didClose 没处理，这里仍是旧内容）
+        {"jsonrpc": "2.0", "id": 3, "method": "textDocument/definition",
+         "params": {"textDocument": {"uri": uri(0)},
+                    "position": {"line": ln0, "character": ch0}}},
+        # 关掉一格后，再开一份**应当成功**（槽位被释放了）
+        {"method": "textDocument/didOpen",
+         "params": {"textDocument": {"uri": uri(n_doc), "text": _many_src(n_doc)}}},
+        {"jsonrpc": "2.0", "id": 4, "method": "textDocument/definition",
+         "params": {"textDocument": {"uri": uri(n_doc)},
+                    "position": {"line": _decl_pos(_many_src(n_doc), f"f{n_doc}")[0],
+                                 "character": _decl_pos(_many_src(n_doc), f"f{n_doc}")[1]}}},
+        # 表又满了：第 65 份**不能被静默驱逐**，要报给客户端
+        {"method": "textDocument/didOpen",
+         "params": {"textDocument": {"uri": uri(n_doc + 1),
+                                     "text": _many_src(n_doc + 1)}}},
+        # 而且先前那份（doc3）仍然在
+        {"jsonrpc": "2.0", "id": 5, "method": "textDocument/definition",
+         "params": {"textDocument": {"uri": uri(3)},
+                    "position": {"line": ln3, "character": ch3}}},
+        {"jsonrpc": "2.0", "id": 6, "method": "shutdown", "params": {}},
+        {"method": "exit"},
+    ]
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        frames, rc, err = Batch(_build(td), td).run(msgs)
+    assert rc == 0, f"LSP 退出码 {rc}: {err[-300:]}"
+    by_id = {f["id"]: f for f in frames if "id" in f}
+    assert by_id[2]["result"] is not None, by_id[2]
+    assert by_id[3]["result"] is None, "didClose 没有释放槽位（关掉的文档还能跳转）"
+    assert by_id[4]["result"] is not None and by_id[4]["result"]["uri"] == uri(n_doc), by_id[4]
+    assert by_id[5]["result"] is not None and by_id[5]["result"]["uri"] == uri(3), \
+        "第 65 份文档把先前的文档挤掉了（静默驱逐）"
+    diag = {}
+    for f in frames:
+        if f.get("method") == "textDocument/publishDiagnostics":
+            diag[f["params"]["uri"]] = f["params"]["diagnostics"]
+    last = diag.get(uri(n_doc + 1), [])
+    assert any("上限" in d["message"] and d["severity"] == 3 for d in last), \
+        f"第 65 份文档应当回一条 Info 说明它没被分析, 实得 {last}"
+    print(f"      {n_doc} 份各归各位；didClose 释放槽位；第 {n_doc + 1} 份得到"
+          f"「已达上限」Info 且没有驱逐任何已打开文档")
+
+
+#: `#707`：同一行里 CJK 字面量把后面的列整体推后 —— UTF-16 与 UTF-8 在这里不同。
+#: 用**字符串字面量**装 CJK（词法器逐字节推进，列是字节；这正是 issue 里量的那形状）。
+UTF8_MEMBER = ("module demo\n"
+               "\n"
+               "struct Point {\n"
+               "    x: u32,\n"
+               "    y: u32,\n"
+               "}\n"
+               "\n"
+               "struct AB {\n"
+               "    x: u32,\n"
+               "}\n"
+               "\n"
+               "fn _start() {\n"
+               "    let s: str = \"中文\"; let q: Point = Point { x: 1, y: 2 };\n"
+               "    let s3: str = \"中文\"; let z: AB = 2;\n"
+               # 编辑态 `q.` 后面紧跟 `syscall4`：解析器把它读成 `q.syscall4(...)`，
+               # 所以 `_member_items` 的 `_parse` 不会失败（既有 MEMBER_SRC 用的是同一招）。
+               "    let s2: str = \"中文\"; let v: u32 = q. // 成员\n"
+               "    syscall4(60, 0, 0, 0);\n"
+               "}\n")
+
+#: 诊断探针（与 issue #707 量到的那一行同形）：UTF-16 说 30..33，UTF-8 是 34..37。
+UTF8_BAD = ("module t\n"
+            "\n"
+            "fn _start() {\n"
+            "    let s: str = \"中文\"; let w: f64 = 0;\n"
+            "    syscall4(60, 0, 0, 0);\n"
+            "}\n")
+
+
+def _u8_col(line: str, ch_index: int) -> int:
+    return len(line[:ch_index].encode("utf-8"))
+
+
+@test
+def test_lsp_declares_utf8_positions_and_honours_them():
+    """`#707`：位置是 UTF-8 字节偏移，而 LSP 3.17 默认 UTF-16、`positionEncoding` 从未声明。
+
+    最省事又诚实的修法是**声明** `positionEncoding: "utf-8"`。这条判据同时扮演客户端：
+    它读 initialize 的能力，然后**按 utf-8 计算** `character`（含非 ASCII 的行），
+    要求补全/诊断真的落在那个位置 —— 声明与行为必须一致。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    uri = "file:///utf8.lomt"
+    lines = UTF8_MEMBER.splitlines()
+    ml = lines.index("    let s2: str = \"中文\"; let v: u32 = q. // 成员")
+    mch = _u8_col(lines[ml], lines[ml].index("q.") + 2)
+    # 定义跳转的**输入**也在 CJK 之后：`AB` 在同一行更早出现了 CJK 字面量。
+    # 按 UTF-16 解释这个字节列会落到 `AB` 后面 4 个字（`= 2`）上，跳转就指错。
+    ul = lines.index("    let s3: str = \"中文\"; let z: AB = 2;")
+    a0 = _u8_col(lines[ul], lines[ul].index("AB") + 1)
+    dln = lines.index("struct AB {")
+    want_def = {"start": {"line": dln, "character": 7},
+                "end": {"line": dln, "character": 9}}
+    dl = UTF8_BAD.splitlines().index("    let s: str = \"中文\"; let w: f64 = 0;")
+    dline = UTF8_BAD.splitlines()[dl]
+    f0 = _u8_col(dline, dline.index("f64"))
+    msgs = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        {"method": "textDocument/didOpen",
+         "params": {"textDocument": {"uri": uri, "text": UTF8_MEMBER}}},
+        {"jsonrpc": "2.0", "id": 2, "method": "textDocument/completion",
+         "params": {"textDocument": {"uri": uri},
+                    "position": {"line": ml, "character": mch}}},
+        {"jsonrpc": "2.0", "id": 3, "method": "textDocument/definition",
+         "params": {"textDocument": {"uri": uri},
+                    "position": {"line": ul, "character": a0}}},
+        {"method": "textDocument/didOpen",
+         "params": {"textDocument": {"uri": "file:///utf8bad.lomt", "text": UTF8_BAD}}},
+        {"jsonrpc": "2.0", "id": 4, "method": "shutdown", "params": {}},
+        {"method": "exit"},
+    ]
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        frames, rc, err = Batch(_build(td), td).run(msgs)
+    assert rc == 0, f"LSP 退出码 {rc}: {err[-300:]}"
+    caps = frames[0]["result"]["capabilities"]
+    assert caps.get("positionEncoding") == "utf-8", caps
+    by_id = {f["id"]: f for f in frames if "id" in f}
+    assert {i["label"] for i in by_id[2]["result"]["items"]} == {"x", "y"}, by_id[2]
+    got_def = by_id[3]["result"]
+    assert got_def is not None and got_def["range"] == want_def, (want_def, got_def)
+    dg = [f["params"]["diagnostics"] for f in frames
+          if f.get("method") == "textDocument/publishDiagnostics"][-1]
+    want = {"start": {"line": dl, "character": f0},
+            "end": {"line": dl, "character": f0 + 3}}
+    assert any(d["range"] == want for d in dg), (want, dg)
+
+    # Python 版：同一份声明；输入按 UTF-8 字节列给；输出也用字节列。
+    py_caps = PY_LSP.handle({"id": 1, "method": "initialize", "params": {}}, {})[0][
+        "result"]["capabilities"]
+    assert py_caps.get("positionEncoding") == "utf-8", py_caps
+    got = PY_LSP.handle({"jsonrpc": "2.0", "id": 2, "method": "textDocument/completion",
+                         "params": {"textDocument": {"uri": uri},
+                                    "position": {"line": ml, "character": mch}}},
+                        {uri: UTF8_MEMBER})[0]["result"]["items"]
+    assert {i["label"] for i in got} == {"x", "y"}, got
+    pdef = PY_LSP.handle({"jsonrpc": "2.0", "id": 3, "method": "textDocument/definition",
+                          "params": {"textDocument": {"uri": uri},
+                                     "position": {"line": ul, "character": a0}}},
+                         {uri: UTF8_MEMBER})[0]["result"]
+    assert pdef is not None and pdef["range"] == want_def, (want_def, pdef)
+    pdg = PY_LSP.handle({"method": "textDocument/didOpen",
+                         "params": {"textDocument": {"uri": "file:///u8bad.lomt",
+                                                     "text": UTF8_BAD}}},
+                        {"file:///u8bad.lomt": UTF8_BAD})[0]["params"]["diagnostics"]
+    assert any(d["range"]["start"]["line"] == dl for d in pdg), pdg
+    print(f"      声明 positionEncoding=utf-8；CJK 行上 `q.` 补全、AB 跳转与诊断列"
+          f"（{f0}..{f0 + 3}）都按字节对齐（两个实现）")
+
+
+@test
+def test_lsp_reports_a_truncated_analysis():
+    """`#710`：`on_change` 原先把 cap 写成 200000（< DOC_CAP = 262144）且**一声不吭**。
+
+    末尾有错的长文档于是被报成"干净"的。现在：装得下的文档（250KB）要照常报错；
+    装不下的（270KB）必须多一条 Info 明说"只检查了前一部分"。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+
+    def long_src(n: int) -> str:
+        tail = "module t\n\nfn main() -> u32 {\n    return missing_fn();\n}\n"
+        pad = "// " + "x" * n + "\n"
+        return pad + tail
+
+    fits = long_src(250000)      # < 262128：完整分析，末尾 E002 必须报出来
+    over = long_src(270000)      # > DOC_CAP：截断，必须报"没查全"
+    assert 200000 < len(fits) < 262128 and len(over) > 262144, (len(fits), len(over))
+    uri_f = "file:///fits.lomt"
+    uri_o = "file:///over.lomt"
+    eline = fits.splitlines().index("    return missing_fn();")
+    msgs = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        {"method": "textDocument/didOpen",
+         "params": {"textDocument": {"uri": uri_f, "text": fits}}},
+        {"method": "textDocument/didOpen",
+         "params": {"textDocument": {"uri": uri_o, "text": over}}},
+        {"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": {}},
+        {"method": "exit"},
+    ]
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        frames, rc, err = Batch(_build(td), td).run(msgs)
+    assert rc == 0, f"LSP 退出码 {rc}: {err[-300:]}"
+    diag = {f["params"]["uri"]: f["params"]["diagnostics"] for f in frames
+            if f.get("method") == "textDocument/publishDiagnostics"}
+    df = diag.get(uri_f, [])
+    assert any(d.get("code") == "E002" and d["range"]["start"]["line"] == eline for d in df), \
+        f"250KB 文档在旧的 200000 上限处被截断，末尾 E002 丢了: {df}"
+    assert not any("上限" in d["message"] for d in df), df
+    do = diag.get(uri_o, [])
+    assert any("上限" in d["message"] and d["severity"] == 3 for d in do), \
+        f"截断的分析不能装成干净文件, 实得 {do}"
+    print(f"      {len(fits)}B 完整分析（E002 @{eline}）；{len(over)}B 截断并报出 Info")
+
+
 if __name__ == "__main__":
     sys.exit(main())

@@ -94,6 +94,15 @@ choose 也是硬写法"），所以它是**核心语法**的一个新开关名�
 最强的那条腿）；V2/V3 是 `docs/173` 的阶段 3/4；V4 让 V1–V3 的声明面**不必手写**；
 V5 是纪律面，放在最后是因为它要等"二进制真的能用"才有意义。
 
+**V2 的 loader 与多库**（`#604` / `#596`，**参考链接器 `tools/lomelf.py`**）：
+`PT_INTERP` 不再写死 —— 链接时按 `--interp PATH` → `LOMENT_INTERP` → 链接机上的候选
+（glibc 两个常见落点、musl）解析，Windows 上交叉链接仍默认
+`/lib64/ld-linux-x86-64.so.2`（目标不是本机，用 `--interp` 覆盖）。`--link` 可以给多个
+`.so`：每个一个 `DT_NEEDED`，导入按 `--link` 顺序解析（第一个导出它的库胜出）——
+`docs/219` 那条"同时要 `libz` 与 `libc`"的组合因此可用。自举镜像
+（`loment/tools/lomelf.lomt`）在这一版仍只做单库、且不接受 `--interp`；两边产物在
+现有语料上逐字节相同。
+
 ## 5. 代价与风险（如实记，不粉饰）
 
 1. **V3 是另一个量级。** CPython C-API 的胶水（引用计数、GIL、`PyObject*` 的生命周期）

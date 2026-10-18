@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""lvm_stability_test.py — 稳定化：**失败面**（`docs/262`，issue #353）。
+"""lvm_stability_test.py — 稳定化：**失败面**（`docs/263`，issue #353）。
 
 T0 从第一天起就有步数上限、每一处内存访问的边界检查、以及对"不支持"的点名拒绝 ——
 **但一条判据都没有**：上限在，没人断言它会响；边界检查在，没人断言它说的是什么话；
@@ -12,7 +12,7 @@ T0 从第一天起就有步数上限、每一处内存访问的边界检查、�
   三档（t0 / t2 / t3）都要验：护栏不能只有一层有。
 * **B 不会静默算错** —— 五种拒绝各来一次，断言程序**响亮地失败**而不是继续：
   不认识的系统调用 / 不支持的指令 / 写越界 / 读越界 / 栈溢出。
-* **C 上限写在纸上** —— `docs/262` 逐个点名常量，并给出语料实测的最大值。
+* **C 上限写在纸上** —— `docs/263` 逐个点名常量，并给出语料实测的最大值。
 
 ⚠ **B 的夹具是手写 IR**，而本仓的规矩是"夹具要用真实现的产物"。这里是有意的例外：
 **编译器发不出这些输入**（它不会发 `select`、不会发越界指针）—— 那条规矩防的是
@@ -176,16 +176,16 @@ def test_refusals_are_loud() -> None:
 
 
 def test_limits_are_on_paper() -> None:
-    """判 C：`docs/262` 逐个点名上限常量，且写着语料的实测最大值。"""
-    doc = ROOT / "docs" / "262-lvm-limits.md"
-    assert doc.exists(), "docs/262-lvm-limits.md 不在 —— 上限只活在代码里"
+    """判 C：`docs/263` 逐个点名上限常量，且写着语料的实测最大值。"""
+    doc = ROOT / "docs" / "263-lvm-limits.md"
+    assert doc.exists(), "docs/263-lvm-limits.md 不在 —— 上限只活在代码里"
     text = doc.read_text(encoding="utf-8")
     for const in ("MEM_SIZE", "GLOBAL_BASE", "FRAME_SIZE", "SLOT", "STEP_CAP"):
-        assert const in text, f"docs/262 没有点名 {const}"
-    assert "MAX_DEPTH" in text, "docs/262 没有点名镜像那一侧的 MAX_DEPTH"
+        assert const in text, f"docs/263 没有点名 {const}"
+    assert "MAX_DEPTH" in text, "docs/263 没有点名镜像那一侧的 MAX_DEPTH"
     # 实测最大值要跟着常量写（"语料最大"这几列），不能只有常量表
     assert re.search(r"语料.*最大|最大.*语料", text), "docs/262 没有语料实测的最大值"
-    print("      docs/262：常量逐个点名，语料实测最大值在旁边")
+    print("      docs/263：常量逐个点名，语料实测最大值在旁边")
 
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

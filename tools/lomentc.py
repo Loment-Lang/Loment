@@ -160,14 +160,17 @@ _IR_HEAP = '''; ---- 分配器（docs/175 §3.4 的 `gc_manual`）--------------
 ; 写它编得过、跑起来什么都不发生。`docs/175` §3.4 把那种形状点名叫「**允诺却不兑现**」，
 ; 所以这一版把它兑现：**bump + 地址序空闲链表**。
 ;
-; 块的形状（8 字节头，8 字节对齐）：
-;   +0  i32  size   —— 这一块的**总长**（含头）
+; 块的形状（8 字节头，**载荷 16 字节对齐**）：
+;   +0  i32  size   —— 这一块的**总长**（含头），永远是 16 的倍数
 ;   +4  i32  next   —— 下一块**空闲**块的偏移；0 = 链尾（所以偏移 0 永远不是块）
 ;                    **负数 = 这块正借在外面**（`alloc` 发的）—— `free` 看**符号**挡双重释放。
 ;                    值是 `-(mask + 2)`，`mask` 是**块内槽掩码**（`docs/210` §2.9）：
 ;                    `-1`（恰好是原先那个数）⇒ 块内**整块保守扫**；`≤ -2` ⇒ 块内精确。
 ;                    掩码**不进任何表** —— 它就是这个字本身。
 ; 载荷从 +8 开始。整个 arena 是 `@__loment_heap`，偏移从 0 起算。
+; **头仍是 8 字节，但 `%need` 按 16 向上取整**：块起点恒为 8 (mod 16)，载荷（+8）因此
+; 落在 16 的倍数上。C 的 `malloc` 契约要求 `max_align_t` (16) 对齐，`-mavx2` 的
+; `vmovdqa` 直接依赖它（`#620`）。
 ;
 ; 三条规则，各有它要挡的东西：
 ;   * **第一次适配 + 拆分**：空闲块大到有余（余量 ≥ 16）就切一块出来，余下的还回链上。
@@ -188,8 +191,8 @@ _IR_HEAP = '''; ---- 分配器（docs/175 §3.4 的 `gc_manual`）--------------
 ; 而且它是收集器那一层的活（`docs/175` §3.4 的 `gc_auto`）。
 define internal ptr @__loment_alloc(i32 %size) {
 entry:
-  %need0 = add i32 %size, 15
-  %need = and i32 %need0, -8
+  %need0 = add i32 %size, 23
+  %need = and i32 %need0, -16
   %head = load i32, ptr @__loment_freehead
   br label %floop
 floop:
@@ -388,6 +391,9 @@ _IR_HEAP_HOSTED_HEAD = '''; ---- 分配器（`docs/228`：arena 从**外面**来
 '''
 
 #: `@__loment_arena()` 的**宿主版**：向宿主要一块（`malloc`）。
+#:
+#: 返回值**按 16 向上取整**（`#620`）：载荷从 `基址 + 8` 开始，基址必须 16 对齐才让
+#: `malloc` 满足 `max_align_t`。多要 16 字节是为了取整后那一小截仍在块内。
 _IR_ARENA_HOST = '''; **宿主版**：向宿主要一块（`malloc`），惰性（第一次 `alloc` 才要）。
 define internal ptr @__loment_arena() {
 entry:
@@ -395,7 +401,7 @@ entry:
   %nul = icmp eq ptr %h, null
   br i1 %nul, label %ask, label %have
 ask:
-  %m = call ptr @malloc(i64 @ARENA@)
+  %m = call ptr @malloc(i64 @ARENA16@)
   %bad = icmp eq ptr %m, null
   br i1 %bad, label %oom, label %set
 oom:
@@ -406,7 +412,11 @@ set:
   br label %have
 have:
   %r = phi ptr [ %h, %entry ], [ %m, %set ]
-  ret ptr %r
+  %ri = ptrtoint ptr %r to i64
+  %ra = add i64 %ri, 15
+  %rm = and i64 %ra, -16
+  %al = inttoptr i64 %rm to ptr
+  ret ptr %al
 }
 '''
 
@@ -422,11 +432,17 @@ have:
 #:
 #: **谁走这一版**：根开了运行期、声明了 `extern fn`、且**不是** `hosted` 的单元
 #: （见 `emit_llvm` 里那个门）。判据落在**产物自己说出来**的 `; loment-heap: ffi <N>` 上。
-_IR_ARENA_STATIC = '''@__loment_arena_block = internal global [@ARENA@ x i8] zeroinitializer
+_IR_ARENA_STATIC = '''@__loment_arena_block = internal global [@ARENA16@ x i8] zeroinitializer
 
 define internal ptr @__loment_arena() {
 entry:
-  ret ptr @__loment_arena_block
+  ; **按 16 向上取整**（`#620`）：块的载荷在 `基址 + 8`，基址 16 对齐之后 `malloc`
+  ; 才满足 C 的 `max_align_t`。多出的 16 字节保证取整后的尾端仍在数组内。
+  %i = ptrtoint ptr @__loment_arena_block to i64
+  %ia = add i64 %i, 15
+  %im = and i64 %ia, -16
+  %r = inttoptr i64 %im to ptr
+  ret ptr %r
 }
 '''
 
@@ -434,8 +450,8 @@ entry:
 _IR_HEAP_HOSTED_BODY = '''define internal ptr @__loment_alloc(i32 %size) {
 entry:
   %hb = call ptr @__loment_arena()
-  %need0 = add i32 %size, 15
-  %need = and i32 %need0, -8
+  %need0 = add i32 %size, 23
+  %need = and i32 %need0, -16
   %head = load i32, ptr @__loment_freehead
   br label %floop
 floop:
@@ -599,7 +615,7 @@ def _heap_indirect(arena: str, nbytes: int) -> str:
     状态、块的形状都是同一份文本，因为那才是"换 arena 不该动的东西"。
     """
     return (_IR_HEAP_HOSTED_HEAD + arena + "\n" + _IR_HEAP_HOSTED_BODY).replace(
-        "@ARENA@", str(nbytes))
+        "@ARENA16@", str(nbytes + 16)).replace("@ARENA@", str(nbytes))
 
 
 _IR_HEAP_HOSTED = _heap_indirect(_IR_ARENA_HOST, HOSTED_ARENA_BYTES)
@@ -6033,12 +6049,13 @@ roots:
 #: `gc_auto` 的触发：**按累计请求量**记 —— 过了 32 KiB 就收一次并清零。
 _IR_GC_TRIGGER_FIXED = '''define internal void @__loment_maybe_collect(i32 %sz) {
 entry:
-  ; **时钟 = 分配器真正吃掉多少字节**（`__loment_alloc` 自己那两行 `(sz + 15) & -8`），
+  ; **时钟 = 分配器真正吃掉多少字节**（`__loment_alloc` 自己那两行 `(sz + 23) & -16`），
   ; 不是「载荷请求多少」—— 少了块头那 8 字节，小块程序的时钟就比消耗慢：8 字节载荷的
-  ; 块消耗 16、时钟只走 8，慢一倍 ⇒ 计数越过阈值的那一刻，arena 已经装满了（实测：
+  ; 块消耗 32、时钟只走 8，慢一倍 ⇒ 计数越过阈值的那一刻，arena 已经装满了（实测：
   ; 纯拼接 3000 轮、计数 24000 < 32768，**一次都没收**，到 4096 轮 arena 满而 abort）。
-  %r0 = add i32 %sz, 15
-  %need = and i32 %r0, -8
+  ; （16 而不是 8：载荷要 16 对齐，见 `#620` —— 这块时钟必须跟着分配器的步长走。）
+  %r0 = add i32 %sz, 23
+  %need = and i32 %r0, -16
   %b = load i32, ptr @__loment_gcbytes
   %b2 = add i32 %b, %need
   store i32 %b2, ptr @__loment_gcbytes
@@ -6245,11 +6262,11 @@ out:
 ; 判据（退回去了就说明死块都在顶端，正是小回收该干的事），而年轻代的**大小**不是。
 define internal void @__loment_maybe_collect(i32 %sz) {
 entry:
-  ; **时钟 = 分配器真正吃掉多少字节**（`(sz + 15) & -8`），不是载荷请求 —— 与固定档同一条
+  ; **时钟 = 分配器真正吃掉多少字节**（`(sz + 23) & -16`），不是载荷请求 —— 与固定档同一条
   ; 理由（见 `_IR_GC_TRIGGER_FIXED`）。空间触发那一格原先写成 `off + sz + 8`：**多算了那
-  ; 个 8**（块头早被 `& -8` 那条并进去了），于是它报的「下一块落在哪儿」比实际偏后。
-  %r0 = add i32 %sz, 15
-  %need = and i32 %r0, -8
+  ; 个 8**（块头早被 `& -16` 那条并进去了），于是它报的「下一块落在哪儿」比实际偏后。
+  %r0 = add i32 %sz, 23
+  %need = and i32 %r0, -16
   %b = load i32, ptr @__loment_gcbytes
   %b2 = add i32 %b, %need
   store i32 %b2, ptr @__loment_gcbytes

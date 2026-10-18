@@ -3209,12 +3209,15 @@ fn do_call_extern(tab: ptr, out: ptr, c: u32, t: ptr, lp: u32, rp: u32, nargs: u
     // 存的 C 函数当场 `#GP`**（`si_code=SI_KERNEL`、`si_addr=NULL` —— 那不是段越界，是
     // **对不齐**）：实测 zlib 的 `compress` 就死在 `movaps %xmm0,-0x70(%rbp)` 上
     // （`FujoJTOP/loment#359`）。用 RBX 存原 rsp：SysV 的**被调方保存**寄存器，C 返回时
-    // 仍是原值；而 Loment 生成的代码不用 rbx。这三条之间只有这一次 C 调用（实参早已求值完、
-    // 压弹已平衡），所以嵌套调用踩不到它 —— **对齐必须是 `call` 前的最后一步**。
+    // 仍是原值；而 Loment 生成的代码不用 rbx。⚠ 正因为它被调方保存，**我们自己必须先
+    // 保存调用方的 RBX**（`#626`）：C → Loment 回调再走一次 extern 调用时，上层 C 帧
+    // 读到的才是它自己的 RBX，而不是我们的栈指针 —— 与参考实现同一对 push/pop。
+    d = em_push(out, d, RBX);
     d = em_mov_rr(out, d, RBX, RSP, 1);
     d = em_alu_ri(out, d, AND_, RSP, 4294967280);
     d = em_call_lbl(out, d, tab, cs + 1, ce - cs - 1);
     d = em_mov_rr(out, d, RSP, RBX, 1);
+    d = em_pop(out, d, RBX);
     // **返回值照旧落回目标槽** —— 与内部调用同一步。少了这一句, 调用结果**丢掉**, 后面
     // 读到的是那个槽的旧值: 症状是"程序能跑、结果是假 0" (参考侧实测第一版就是这样:
     // `c_add(3,4) + c_mul(5,6)` 退出码 0 而不是 37)。

@@ -569,10 +569,16 @@ class Asm:
         self.emit(b"\x0F" + bytes([0x80 + CC[cc]]) + b"\x00\x00\x00\x00")
         self.fixups.append((at + 2, lbl, 4, "rel"))
 
-    def call(self, lbl: str) -> None:
+    def call(self, lbl: str, extern: bool = False) -> None:
+        """`extern=True` 标记"这条 call 走的是 C ABI 那条路"（`#630`）。
+
+        动态链接只许把这类 fixup 变成导入；没写 `declare` 的调用留在 `rel`，
+        到 `finalize()` 仍按"未定义的标签"报错 —— 否则它会被绑到 PLT 桩上，
+        而调用点发的是 Loment 的栈约定，C 那头读到的实参全是垃圾。
+        """
         at = self.here()
         self.emit(b"\xE8\x00\x00\x00\x00")
-        self.fixups.append((at + 1, lbl, 4, "rel"))
+        self.fixups.append((at + 1, lbl, 4, "ext" if extern else "rel"))
 
     def mov_abs(self, reg: int, lbl: str) -> None:
         self.emit(mov_ri(reg, 0))
@@ -1127,14 +1133,17 @@ class Emitter:
             # `movaps %xmm0,-0x70(%rbp)` 上（`si_code=SI_KERNEL`、`si_addr=NULL` —— 那不是
             # 段越界，是**对不齐**）。
             #
-            # 用 **RBX** 存原 rsp：它是 SysV 的**被调方保存**寄存器，C 返回时一定还是原值；
-            # 而 Loment 生成的代码**不用 rbx**（`docs/173` 那条"状态基址放 rbx"的注解就是靠
-            # 这一点）。这三条之间**只有这一次 C 调用**（实参早已求值完、压弹已平衡），
-            # 所以嵌套调用也踩不到它 —— 顺序不能反：对齐必须是 `call` 前的最后一步。
+            # 用 **RBX** 存原 rsp：它是 SysV 的**被调方保存**寄存器，C 返回时一定还是原值。
+            # ⚠ 正因为它被调方保存，**我们自己必须先保存调用方的 RBX**（`#626`）：C 的
+            # 帧里 RBX 可能是它的局部数据，而我们把它改成了自己的栈指针、还不还原 ——
+            # C → Loment 回调（zlib 的 zalloc/zfree、qsort 的比较函数）再走一次 extern
+            # 调用时，上层 C 帧读到的就是 rsp。push/pop 这一对让序列"来去一样"。
+            self.asm.emit(push_r(RBX))
             self.asm.emit(mov_rr(RBX, RSP))
             self.asm.emit(alu_ri(AND_, RSP, -16))
-            self.asm.call(callee[1:])
+            self.asm.call(callee[1:], extern=True)
             self.asm.emit(mov_rr(RSP, RBX))
+            self.asm.emit(pop_r(RBX))
             # **返回值照旧落回目标槽** —— 与内部调用同一步。少了这一句, 调用结果**丢掉**,
             # 后面读到的是那个槽的旧值: 症状是"程序能跑、结果是假 0" (实测第一版就是这样:
             # `c_add(3,4) + c_mul(5,6)` 退出码 0 而不是 37)。
@@ -5282,10 +5291,23 @@ class ForeignObject:
             dbuf += raw[s["off"]:s["off"] + s["size"]] if s["type"] == 1 else bytes(s["size"])
         self.data = bytes(dbuf)
         self.dsec_at = {k: s["dat"] for k, s in enumerate(secs) if "dat" in s}
-        # 符号: 定义在代码节里的全局/弱符号进 `syms`; 未定义的只记名 (`undefined`)
+        # 符号: 定义在代码节里的符号进 `syms`（**含局部**，见 `#613`）; 数据节里的进
+        # `dsyms`; 绝对符号进 `absyms`。未定义的只记名 —— 强引用进 `undefined`，
+        # **弱引用进 `weak_undefined`**（`#617`：它不该是硬需求，解析不到就写 0）。
         syms: dict[str, int] = {}
         dsyms: dict[str, int] = {}      #: 数据节里的符号（**含局部**）
+        absyms: dict[str, int] = {}     #: `SHN_ABS` 定义的符号（地址就是 `st_value`）
+        binds: dict[str, int] = {}      #: 定义符号的绑定（0 LOCL / 1 GLOB / 2 WEAK）
         undefined: list[str] = []
+        weak_undefined: list[str] = []
+        #: `SHT_SYMTAB_SHNDX`（18）: symtab 节号 -> (数据偏移, 条数)。`SHN_XINDEX` 的
+        #: 真实节号在这张伴随表里（`#619`）。
+        xindex: dict[int, tuple[int, int]] = {}
+        for si, s in enumerate(secs):
+            if s["type"] == 18:
+                if s["link"] >= len(secs) or s["off"] + s["size"] > len(raw):
+                    raise Unsupported(f"{name}: .symtab_shndx 损坏或越界")
+                xindex[s["link"]] = (s["off"], s["size"] // 4)
         #: (symtab 节号, 符号下标) -> 名字 —— 重定位按**下标**引用符号, 靠它回查名字
         name_of: dict[tuple[int, int], str] = {}
         for si, s in enumerate(secs):
@@ -5295,6 +5317,12 @@ class ForeignObject:
             for k in range(s["size"] // 24):
                 o = s["off"] + k * 24
                 nameoff, info, other, shndx, value, size = struct.unpack_from("<IBBHQQ", raw, o)
+                if shndx == 0xFFFF:                        # SHN_XINDEX
+                    xi = xindex.get(si)
+                    if xi is None or k >= xi[1]:
+                        raise Unsupported(
+                            f"{name}: 第 {k} 个符号用 SHN_XINDEX 却没有 .symtab_shndx")
+                    shndx, = struct.unpack_from("<I", raw, xi[0] + k * 4)
                 if nameoff == 0:
                     # **节符号**（`STT_SECTION`）：`st_name` 就是 0，名字靠 `shndx` 认。
                     # clang 对"指向 `.rodata` 里某个常量"的重定位就是引用它 —— 实测
@@ -5309,9 +5337,11 @@ class ForeignObject:
                         if "at" in s0:
                             name_of[(si, k)] = synth
                             syms[synth] = s0["at"] + value
+                            binds[synth] = 0
                         elif "dat" in s0:
                             name_of[(si, k)] = synth
                             dsyms[synth] = s0["dat"] + value
+                            binds[synth] = 0
                     continue
                 end = raw.index(b"\x00", strt["off"] + nameoff)
                 nm = raw[strt["off"] + nameoff:end].decode("utf-8", "replace")
@@ -5336,22 +5366,48 @@ class ForeignObject:
                     nm = f"${name}${nm}"
                 name_of[(si, k)] = nm
                 if shndx == 0:
-                    if bind in (1, 2):                     # GLOBAL / WEAK
+                    # 强引用是硬需求；**弱引用不是**（`#617`）—— C 的语义是解析不到就绑 0，
+                    # `if (opt) opt();` 正是为它写的。它也不能进端口门或归档需求集。
+                    if bind == 1:                          # GLOBAL
                         undefined.append(nm)
-                # **shndx 可以是保留值** (SHN_ABS=0xfff1 / SHN_COMMON=0xfff2 / SHN_XINDEX=0xffff)
-                # —— 它们比节表长度大, 直接拿去索引会 IndexError (实测第一版就崩在这)。
+                    elif bind == 2:                        # WEAK
+                        weak_undefined.append(nm)
+                # **shndx 可以是保留值** (`SHN_ABS`=0xfff1 / `SHN_COMMON`=0xfff2；
+                # `SHN_XINDEX`=0xffff 已在上面换成真实节号)。以前这里只把它们排除在
+                # `IndexError` 之外、没写语义分支，于是"自己的对象定义了它"被报成未定义
+                # （`#619`）。
+                elif shndx == 0xFFF1:                      # SHN_ABS: 值就是绝对地址
+                    absyms[nm] = value
+                    binds[nm] = bind
+                elif shndx == 0xFFF2:                      # SHN_COMMON: 在这块 .bss 里划出来
+                    al = max(value, 1)
+                    while len(dbuf) % al:
+                        dbuf.append(0)
+                    dsyms[nm] = len(dbuf)
+                    dbuf += bytes(size)
+                    binds[nm] = bind
                 elif shndx < len(secs):
                     tgt = secs[shndx]
-                    if "at" in tgt and bind in (1, 2):           # 代码节里的 GLOBAL/WEAK
+                    if "at" in tgt and bind in (0, 1, 2):
+                        # **局部也算定义**（`#613`）：`-ffunction-sections` 下 `helper` 是
+                        # `STB_LOCAL`，名字上面已经按对象改过，登记它才有东西可解析。
+                        # 自举镜像一直是这么做的；只收 GLOBAL/WEAK 会拒绝同一份对象。
                         syms[nm] = tgt["at"] + value
+                        binds[nm] = bind
                     elif "dat" in tgt:
                         # **数据节里的符号一律收（含局部）**：`.L.str` 就是 `bind=0` 的
                         # `STT_OBJECT`（实测），只收 GLOBAL/WEAK 会把它漏掉，于是代码里那条
                         # `lea rdi, [rip + .L.str]` 找不到标签、以"未定义的符号"报出来。
                         dsyms[nm] = tgt["dat"] + value
+                        binds[nm] = bind
         self.syms = syms
         self.dsyms = dsyms
+        self.absyms = absyms
+        self.binds = binds
         self.undefined = sorted(set(undefined))
+        self.weak_undefined = sorted(set(weak_undefined))
+        #: SHN_COMMON 可能往 `dbuf` 追加过存储。
+        self.data = bytes(dbuf)
         # 重定位: (目标节号, 节内偏移, 类型, 目标符号名, 加数)。**两条路** ——
         # 落在**代码节**上的进 `relocs`(写进代码缓冲), 落在**数据节**上的进 `drelocs`
         # (写进数据段)。两者都在"所有对象都摆好"之后才应用。
@@ -5377,6 +5433,14 @@ class ForeignObject:
                 if nm is None:
                     raise Unsupported(f"{name}: 重定位引用了下标记号外的符号 {sym_i}")
                 (self.drelocs if into_data else self.relocs).append((tgt, r_off, ty, nm, r_add))
+
+    @property
+    def defined(self) -> set[str]:
+        """这个对象**定义了**的名字 —— 归档挑选与端口门都看这一张（`#614`）。
+
+        数据节里的定义与代码节里的同等重要：真实库的版本串/查找表就住在 `.rodata`。
+        """
+        return set(self.syms) | set(self.dsyms) | set(self.absyms)
 
 
 class Archive:
@@ -5428,8 +5492,14 @@ class Archive:
                     fo = ForeignObject.from_bytes(self.path, name, data)
                 except Unsupported:
                     continue        # 这个成员我们用不了: 放着; 真需要它的符号时后面会报到
-                if set(fo.syms) & needed:
+                # **数据节里的定义也算数**（`#614`）：`set(fo.syms)` 只看得见代码节，
+                # 于是 `.rodata` 里的版本串/查找表永远选不中成员。
+                hit = fo.defined & needed
+                if hit:
                     got.append(fo)
+                    # 只有**强定义**才把名字闭合。弱定义留在需求集里，后面的强定义
+                    # 仍然会被收进来 —— 收完两边在标签表里再由"强盖弱"定胜负（`#618`）。
+                    needed -= {nm for nm in hit if fo.binds.get(nm, 1) != 2}
                     needed |= set(fo.undefined)
                     changed = True
                 else:
@@ -5717,46 +5787,23 @@ def compile_ll(text: str, objects: list | None = None,
     global TEXT_VADDR, DATA_VADDR
     TEXT_VADDR, DATA_VADDR = ELF_TEXT_VADDR, ELF_DATA_VADDR   # PE 目标会改这两个全局
     globals_, funcs, externs = parse_ll(text)
+    # **先把三种输入分开**（`#616`）：归档要展开、共享对象只提供导出表、其余才是要摆的
+    # `.o`。以前这一步先做归档展开、后滤共享对象 —— 而展开时要读 `o.undefined`，
+    # `SharedObject` 没有那个字段，于是 `--link libz.so --link libfoo.a` 直接抛
+    # `AttributeError`（用户看到 Python 栈，不是诊断）。
+    shared = [o for o in objects if isinstance(o, SharedObject)]
+    archives = [o for o in objects if isinstance(o, Archive)]
+    direct = [o for o in objects if not isinstance(o, (Archive, SharedObject))]
     # 归档展开 (docs/173 阶段 2): 先算出"当前需要的符号", 再让每个归档按固定点挑成员。
     # 需求有两个来源: ① 我们自己 `declare` 的外部符号; ② 直接给的 `.o` 里未定义的符号。
     # 两者都要, 因为真实库里常常是"我的 a.o 引用 ar 成员里的 b"。
-    if any(isinstance(o, Archive) for o in objects):
+    objects = list(direct)
+    if archives:
         need = {x for x in externs if not x.startswith("llvm.")}
-        direct = [o for o in objects if not isinstance(o, Archive)]
         for o in direct:
             need |= set(o.undefined)
-        flat = list(direct)
-        for a in objects:
-            if isinstance(a, Archive):
-                flat += a.select(need)
-        objects = flat
-    # **端口门**（2026-10-12 用户定：0.1.4.5 里 libc 不可调用）。带**未定义符号**的外源
-    # 对象就是"这份产物有通向世界的端口"（`docs/222` §4 那一维的价），而那条路 —— 真 libc /
-    # 真共享库 —— **还没完工**（`docs/219` §8b 的 S2：静态那一半 2026-10-15 落齐了，
-    # 动态那一半是 #360），所以链接器**默认不收**，
-    # 只有显式 `--allow-ports` 才收（开发通道与判据用它；启动器只在 dev 传它）。
-    #
-    # **自闭合的对象不受影响**：没有未定义符号 ⇒ 走不过这一条。那正是 `docs/173` 一直在发
-    # 的 FFI 形状，`docs/177` 那 10 个语言全在它上面 —— 这扇门关的是 libc，不是 FFI。
-    #
-    # 判据是 `objects` 里那批对象的 `undefined`（归档在这一步之前已经按定点挑完成员，
-    # 所以挑中的成员也在这里面）。名字排序只为**报文稳定**，与谁提供什么无关。
-    # 共享对象**不参与布局**（`docs/183` V2）：没人把 `.so` 的字节搬进产物 —— 它只提供
-    # "这些名字在运行期由谁给"，产物里留下的是 `DT_NEEDED` 与 PLT。布局那几趟只看 `.o`。
-    shared = [o for o in objects if isinstance(o, SharedObject)]
-    objects = [o for o in objects if not isinstance(o, SharedObject)]
-    if not allow_ports:
-        ported = sorted({nm for o in objects for nm in o.undefined})
-        if ported or shared:
-            # 一条共享对象本身就是"这份产物要在运行期往外要东西"—— 比带未定义符号的 `.o` 更明确。
-            shown = ", ".join(ported[:6]) + ("…" if len(ported) > 6 else "") \
-                if ported else "（共享对象：" + ", ".join(s.soname for s in shared) + "）"
-            raise Unsupported(
-                f"这份产物带了通向世界的端口：{shown} —— 链接器默认不收。"
-                f"**链接器不知道渠道**（它是一只被启动器调起来的独立工具），所以默认永远是拒；"
-                f"启动器在两个渠道都传 `--allow-ports`（`#406` 开闸，2026-10-17）。"
-                f"自己调链接器时要它就得显式写 `--allow-ports`；"
-                f"自闭合的对象（没有未定义符号、不链共享对象）不受这条影响")
+        for a in archives:
+            objects += a.select(need)
     if len(shared) > 1:
         # 多个 `.so` 要各自的 `DT_NEEDED` 与顺序规则（谁先满足谁）—— 这一版先只做**一个**，
         # 而不是"先写进去再说"。
@@ -5847,97 +5894,173 @@ def compile_ll(text: str, objects: list | None = None,
     # 调用点照旧走现有的 `call`/fixup 机制 (唯一多出来的是"参数进寄存器", 见 `Emitter._call`)。
     bases: list[int] = []
     appended: list[str] = []
+    #: 对象提供的定义来自哪个绑定（0 LOCL / 1 GLOB / 2 WEAK）。`em.asm.labels` 里没有它
+    #: 就说明那个名字是我们自己的（IR/收编面）—— 那是**不可覆盖**的。
+    obj_binds: dict[str, int] = {}
+
+    def place(nm: str, addr: int, bind: int, owner: str) -> None:
+        """登记一个对象符号，同时执行**强盖弱 + 双强报错**（`#618`）。"""
+        if nm in em.asm.labels:
+            prev = obj_binds.get(nm)
+            if prev is None:
+                return              # 我们自己的标签/收编面优先（docs/219 §6）
+            if prev == 2 and bind != 2:
+                em.asm.labels[nm] = addr       # 强定义盖过先来的弱定义
+                obj_binds[nm] = bind
+                appended.append(nm)
+            elif prev != 2 and bind != 2:
+                raise Unsupported(
+                    f"{owner}: 符号 {nm} 重复定义 —— 已经有一个强定义来自别的对象")
+            # 弱 + 弱 / 强 + 弱: 先来的为准
+            return
+        em.asm.labels[nm] = addr
+        obj_binds[nm] = bind
+        appended.append(nm)
+
     for i, obj in enumerate(objects):
         while len(em.asm.buf) % 16:
             em.asm.buf.append(0)
         bases.append(len(em.asm.buf))
+        seen: set[str] = set()
         for nm, val in obj.syms.items():
-            if nm in em.asm.labels:
-                continue          # 我们 (或先摆的那个对象) 已经有它: 以先来的为准
-            em.asm.labels[nm] = TEXT_VADDR + bases[-1] + val
-            appended.append(nm)
+            if nm in seen:
+                continue
+            seen.add(nm)
+            place(nm, TEXT_VADDR + bases[-1] + val, obj.binds.get(nm, 1), obj.name)
+        # `SHN_ABS` 的定义：地址就是 `st_value`，与段基址无关（`#619`）。
+        for nm, val in obj.absyms.items():
+            if nm in seen:
+                continue
+            seen.add(nm)
+            place(nm, val, obj.binds.get(nm, 1), obj.name)
         # 数据节里的符号（含**局部**，见 `ForeignObject._load`）：地址落在 DATA 段。
         for nm, val in obj.dsyms.items():
-            if nm in em.asm.labels:
+            if nm in seen:
                 continue
-            em.asm.labels[nm] = DATA_VADDR + dbases[i] + val
-            appended.append(nm)
+            seen.add(nm)
+            place(nm, DATA_VADDR + dbases[i] + val, obj.binds.get(nm, 1), obj.name)
         em.asm.buf += obj.text
-    applied = 0
-    for i, obj in enumerate(objects):
-        base = TEXT_VADDR + bases[i]
-        for sec, r_off, ty, nm, add in obj.relocs:
-            target = em.asm.labels.get(nm)
-            if target is None:
-                # **到这一步才判"没人定义"**: 这是多目标文件 C 库与"引用 libc"的分界线 ——
-                # 前者由另一个对象提供, 后者到链接结束都空着。
-                raise Unsupported(
-                    f"{obj.name}: 引用了未定义的符号 {nm} —— 到链接结束都没人提供它"
-                    f" (第 2 阶段仍不链 libc, docs/173 §3)")
-            site = bases[i] + obj.sec_at[sec] + r_off     # 写进缓冲的位置 (缓冲内偏移)
-            here = base + obj.sec_at[sec] + r_off         # 公式里的 P (绝对地址)
-            val = target + add                            # 公式里的 S + A
-            if ty in (REL_PC32, REL_PLT32):
-                rel = val - here
-                if not -2 ** 31 <= rel < 2 ** 31:
-                    raise Unsupported(f"{obj.name}: PC32 重定位溢出 ({nm})")
-                struct.pack_into("<i", em.asm.buf, site, rel)
-            elif ty == REL_PC64:
-                struct.pack_into("<q", em.asm.buf, site, val - here)
-            elif ty == REL_64:
-                struct.pack_into("<Q", em.asm.buf, site, val & 0xFFFFFFFFFFFFFFFF)
-            else:                                          # REL_32 / REL_32S
-                struct.pack_into("<I", em.asm.buf, site, val & 0xFFFFFFFF)
-            applied += 1
-    # **落在数据节上的重定位**：算的是同一套 `S + A` / `S + A - P`，只是**写进 DATA**
-    # 而不是代码缓冲（`.data.rel.ro` 里的函数指针表、指向字符串的 `const char *` 都是这一类）。
-    for i, obj in enumerate(objects):
-        for sec, r_off, ty, nm, add in obj.drelocs:
-            target = em.asm.labels.get(nm)
-            if target is None:
-                raise Unsupported(
-                    f"{obj.name}: 引用了未定义的符号 {nm} —— 到链接结束都没人提供它"
-                    f" (第 2 阶段仍不链 libc, docs/173 §3)")
-            site = dbases[i] + obj.dsec_at[sec] + r_off
-            here = DATA_VADDR + site
-            val = target + add
-            if ty in (REL_PC32, REL_PLT32):
-                rel = val - here
-                if not -2 ** 31 <= rel < 2 ** 31:
-                    raise Unsupported(f"{obj.name}: 数据节的 PC32 重定位溢出 ({nm})")
-                struct.pack_into("<i", data, site, rel)
-            elif ty == REL_PC64:
-                struct.pack_into("<q", data, site, val - here)
-            elif ty == REL_64:
-                struct.pack_into("<Q", data, site, val & 0xFFFFFFFFFFFFFFFF)
-            else:                                          # REL_32 / REL_32S
-                struct.pack_into("<I", data, site, val & 0xFFFFFFFF)
-            applied += 1
+    # **端口门**（2026-10-12 用户定：0.1.4.5 里 libc 不可调用）。
+    #
+    # ⚠ 判的是**解析之后还剩什么**（`#615`）：以前拿每个对象自己的 `undefined` 清单来判，
+    # 于是 `a.o` 调 `g`、`b.o` 定义 `g` 的普通组合也被当成"通向世界"；对象调
+    # `memcpy`/`malloc`（收编面会提供）同样被冤枉。现在只有**标签表里仍然没有**的名字
+    # 才算端口 —— 与"最后会不会变成导入/未定义"是同一件事。
+    if not allow_ports:
+        ported = sorted({nm for o in objects for nm in o.undefined
+                         if nm not in em.asm.labels})
+        if ported or shared:
+            # 一条共享对象本身就是"这份产物要在运行期往外要东西"—— 比带未定义符号的 `.o` 更明确。
+            shown = ", ".join(ported[:6]) + ("…" if len(ported) > 6 else "") \
+                if ported else "（共享对象：" + ", ".join(s.soname for s in shared) + "）"
+            raise Unsupported(
+                f"这份产物带了通向世界的端口：{shown} —— 链接器默认不收。"
+                f"**链接器不知道渠道**（它是一只被启动器调起来的独立工具），所以默认永远是拒；"
+                f"启动器在两个渠道都传 `--allow-ports`（`#406` 开闸，2026-10-17）。"
+                f"自己调链接器时要它就得显式写 `--allow-ports`；"
+                f"自闭合的对象（没有未定义符号、不链共享对象）不受这条影响")
     # ---- V2（`docs/183` §4）：链了共享对象 ⇒ 产物是**动态链接**的。
     #
     # 此时"未定义的标签"不是错：它们要是共享对象的导出，就变成**导入** —— 我们发一个 PLT 桩，
     # 桩的地址就是那个标签的地址，运行期由 loader 把真实的函数地址填进 GOT。
     # 名字**不在导出表里**才报错，而且**报到链接期**（不是留给运行时崩）。
+    #
+    # **导入集合必须在应用对象重定位之前立好**（`#627`）：`helper.o` 的重定位指向
+    # `libz.so` 的导出时，那个标签只有 PLT 桩能提供；先应用重定位就会以"未定义的符号"失败。
     dyn_info = None
     imported: list[str] = []
     if shared:
         so = shared[0]
-        # 标签 -> 是不是"我们自己的"（`em.asm.labels` 里有的就是定义）。
-        imports = sorted({lbl for _site, lbl, _w, _k in em.asm.fixups
-                          if lbl not in em.asm.labels})
+        # ① 我们自己 IR 里**走 extern 路径**发出的 call（`#630`）：只有这些该变成导入。
+        #    没有 `declare` 的调用留在 `rel`，finalize 仍按"未定义的标签"报错 —— 它发的是
+        #    Loment 的栈约定，绑到 PLT 上等于让 C 读垃圾实参。
+        imports = {lbl for _site, lbl, _w, k in em.asm.fixups
+                   if k == "ext" and lbl not in em.asm.labels}
+        # ② 外部对象自己的未定义引用（`#627`）。对象是 C 代码，按定义就是 C ABI。
+        imports.update(nm for o in objects for nm in o.undefined
+                       if nm not in em.asm.labels)
+        # 弱未定义引用只有在 `.so` **确实导出**它时才绑过去；否则按 `#617` 写 0。
+        imports.update(nm for o in objects for nm in o.weak_undefined
+                       if nm not in em.asm.labels and nm in so.exports)
+        imports = sorted(imports)
         for nm in imports:
             so.resolve(nm)
         # PLT 接在**代码之后**：`finalize()` 只回填、不改长度，所以现在就能算出桩的地址并
-        # 登记成标签（回填因此能指到桩上），finalize 之后再按同一长度把它接上。
+        # 登记成标签（重定位与回填因此能指到桩上），finalize 之后再按同一长度把它接上。
         tail_vaddr = align_up(DATA_VADDR + len(data) + bss, 0x1000)
         text_tail, tail, plt_labels, dyn_info = build_dynamic_tables(
             TEXT_VADDR, len(em.asm.buf), tail_vaddr, imports, so.soname)
         for nm, at in plt_labels.items():
             em.asm.labels[nm] = at
         imported = imports
-        text = em.asm.finalize() + text_tail
-    else:
-        text = em.asm.finalize()
+    applied = 0
+
+    def reloc_value(ty: int, val: int, here: int, where: str) -> bytes:
+        """把一个重定位的**结果**编成要写进去的字节（`S + A` / `S + A - P`）。"""
+        if ty in (REL_PC32, REL_PLT32):
+            rel = val - here
+            if not -2 ** 31 <= rel < 2 ** 31:
+                raise Unsupported(f"{where}: PC32 重定位溢出")
+            return struct.pack("<i", rel)
+        if ty == REL_PC64:
+            return struct.pack("<q", val - here)
+        if ty == REL_64:
+            return struct.pack("<Q", val & 0xFFFFFFFFFFFFFFFF)
+        return struct.pack("<I", val & 0xFFFFFFFF)     # REL_32 / REL_32S
+
+    def zero_fixup(ty: int) -> bytes:
+        """弱未定义引用解析不到时的值：0（`#617`）。"""
+        if ty in (REL_PC32, REL_PLT32):
+            return struct.pack("<i", 0)
+        if ty == REL_PC64:
+            return struct.pack("<q", 0)
+        if ty == REL_64:
+            return struct.pack("<Q", 0)
+        return struct.pack("<I", 0)
+
+    for i, obj in enumerate(objects):
+        base = TEXT_VADDR + bases[i]
+        for sec, r_off, ty, nm, add in obj.relocs:
+            target = em.asm.labels.get(nm)
+            site = bases[i] + obj.sec_at[sec] + r_off     # 写进缓冲的位置 (缓冲内偏移)
+            here = base + obj.sec_at[sec] + r_off         # 公式里的 P (绝对地址)
+            if target is None:
+                # **弱引用不是错误**：C 的语义是绑 0（`#617`）。强引用才是"没人定义"。
+                if nm in obj.weak_undefined:
+                    raw = zero_fixup(ty)
+                    em.asm.buf[site:site + len(raw)] = raw
+                    applied += 1
+                    continue
+                # **到这一步才判"没人定义"**: 这是多目标文件 C 库与"引用 libc"的分界线 ——
+                # 前者由另一个对象提供, 后者到链接结束都空着。
+                raise Unsupported(
+                    f"{obj.name}: 引用了未定义的符号 {nm} —— 到链接结束都没人提供它"
+                    f" (第 2 阶段仍不链 libc, docs/173 §3)")
+            val = target + add                            # 公式里的 S + A
+            raw = reloc_value(ty, val, here, f"{obj.name}: {nm}")
+            em.asm.buf[site:site + len(raw)] = raw
+            applied += 1
+    # **落在数据节上的重定位**：算的是同一套 `S + A` / `S + A - P`，只是**写进 DATA**
+    # 而不是代码缓冲（`.data.rel.ro` 里的函数指针表、指向字符串的 `const char *` 都是这一类）。
+    for i, obj in enumerate(objects):
+        for sec, r_off, ty, nm, add in obj.drelocs:
+            target = em.asm.labels.get(nm)
+            site = dbases[i] + obj.dsec_at[sec] + r_off
+            here = DATA_VADDR + site
+            if target is None:
+                if nm in obj.weak_undefined:
+                    raw = zero_fixup(ty)
+                    data[site:site + len(raw)] = raw
+                    applied += 1
+                    continue
+                raise Unsupported(
+                    f"{obj.name}: 引用了未定义的符号 {nm} —— 到链接结束都没人提供它"
+                    f" (第 2 阶段仍不链 libc, docs/173 §3)")
+            val = target + add
+            raw = reloc_value(ty, val, here, f"{obj.name}: 数据节的 {nm}")
+            data[site:site + len(raw)] = raw
+            applied += 1
+    text = em.asm.finalize() + (text_tail if dyn_info is not None else b"")
 
     # **文本段的容量是明写的**（`docs/253`）：数据段钉在 `TEXT_VADDR + TEXT_CAP`，
     # 所以文本一旦超过 `TEXT_CAP` 就会盖到数据段上 —— 而**盖上去不报错**，产物一启动就

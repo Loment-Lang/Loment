@@ -1275,15 +1275,23 @@ def test_object_with_undefined_symbol_is_rejected():
         print("      没人提供的符号: 链接期硬拒 (第 2 阶段仍不链 libc)")
 
 
+#: **真正的端口**：`time` 不在收编面里，链接器提供不出来。
+C_PORT_SOURCE = "extern long time(long *);\nlong c_now(void) { return time(0); }\n"
+
+
 @test
 def test_the_port_gate_refuses_by_default_and_the_dev_channel_opens_it():
-    """**端口门**（`docs/222` §4，2026-10-12 用户定）：带**未定义符号**的外源对象默认被拒 ——
-    这就是"0.1.4.5 里 libc 不可调用"在**链接器**这一侧的落点（另一侧是编译器那条渠道闸：
-    发行版不收 `choose hosted`）。
+    """**端口门**（`docs/222` §4，2026-10-12 用户定）：解析之后**仍然悬空**的外源符号
+    默认被拒 —— 这就是"0.1.4.5 里 libc 不可调用"在**链接器**这一侧的落点（另一侧是
+    编译器那条渠道闸：发行版不收 `choose hosted`）。
 
     **两端都要测**：只测"拒"的话，一个"什么外源对象都拒"的链接器也能绿；只测"收"的话，
-    门什么时候被悄悄拆掉谁也不知道。夹具用**收编面**那一份 —— 它的未定义符号就是
-    `memcpy`/`memset`/`memcmp` 三个，正是真 C 库要吃的名字。
+    门什么时候被悄悄拆掉谁也不知道。
+
+    ⚠ `#615` 之后"拒"那一端换了一个夹具：收编面那几个名字（`memcpy`/`memset`/`memcmp`）
+    现在是链接器自己提供的、解析之后不再悬空，**不该**再触发这扇门 —— 拿它们测门等于
+    把"提过一个名字"当成"通向世界"。所以用 `time`（没人提供）测拒，收编面那一份反过来
+    钉"默认就该收"。
     """
     clang = _clang()
     if not clang:
@@ -1293,24 +1301,37 @@ def test_the_port_gate_refuses_by_default_and_the_dev_channel_opens_it():
         td = Path(t)
         (td / "cons.c").write_text(C_CONSCRIPT_SOURCE, encoding="utf-8", newline="\n")
         assert compile_c(clang, td / "cons.c", td / "cons.o") == 0
+        (td / "port.c").write_text(C_PORT_SOURCE, encoding="utf-8", newline="\n")
+        assert compile_c(clang, td / "port.c", td / "port.o") == 0
         (td / "m.lomt").write_text(LOMENT_CONSCRIPT_SOURCE, encoding="utf-8", newline="\n")
         mod = lomentc.load(td / "m.lomt")
         deps = lomentc.resolve_deps(mod, ROOT, td, entry=td / "m.lomt")
         assert not lomentc.check(mod, deps=deps), lomentc.check(mod, deps=deps)
         ir = lomentc.emit_llvm(mod, ROOT, deps)
-        fo = lomelf.load_foreign(td / "cons.o")
-        assert set(fo.undefined) >= {"memcpy"}, fo.undefined
+        cons = lomelf.load_foreign(td / "cons.o")
+        port = lomelf.load_foreign(td / "port.o")
+        assert set(cons.undefined) >= {"memcpy"}, cons.undefined
+        assert "time" in port.undefined, port.undefined
+        # 收编面提供得出来 ⇒ 不是端口（`#615` 的正面）。
+        blob, _info = lomelf.compile_ll(ir, [cons])
+        assert len(blob) > 0
+        # 真正没人提供的名字 ⇒ 默认拒。
         try:
-            lomelf.compile_ll(ir, [fo])
+            lomelf.compile_ll(ir, [port])
         except lomelf.Unsupported as e:
             assert "端口" in str(e), str(e)
         else:
             raise AssertionError(
                 "带端口的对象**默认竟然收下了** —— 发行版里 libc 就是可调用的了"
                 "（`docs/222` §4 那扇门被拆了）")
-        blob, _info = lomelf.compile_ll(ir, [fo], allow_ports=True)
-        assert len(blob) > 0
-        print("      默认拒（发行版）/ `allow_ports` 收（开发通道）—— 两端都核过")
+        # 开发通道打开这扇门：之后报到的是"没人定义"，**不再是端口门**。
+        try:
+            lomelf.compile_ll(ir, [port], allow_ports=True)
+        except lomelf.Unsupported as e:
+            assert "端口" not in str(e) and "未定义" in str(e), str(e)
+        else:
+            raise AssertionError("静态链没人提供的符号居然成功了")
+        print("      收编面默认收；真端口默认拒 / `allow_ports` 放行到未定义符号诊断")
 
 
 @test

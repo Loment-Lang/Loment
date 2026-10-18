@@ -2707,6 +2707,7 @@ setprev:
 @.str.pt_lspe_kw.19 = private unnamed_addr constant [8 x i8] c"\65\78\63\6C\75\64\65\64"
 @.str.pt_lspe_kw.20 = private unnamed_addr constant [5 x i8] c"\67\75\61\72\64"
 @.str.pt_lspe_kw.21 = private unnamed_addr constant [2 x i8] c"\61\73"
+@.str.pt_lspe_kw.22 = private unnamed_addr constant [3 x i8] c"\6D\75\74"
 @.str.pt_lspe_guard_total.0 = private unnamed_addr constant [5 x i8] c"\67\75\61\72\64"
 @.str.pt_lspe_index_total.0 = private unnamed_addr constant [1 x i8] c"\5B"
 @.str.pt_lspe_index_total.1 = private unnamed_addr constant [1 x i8] c"\29"
@@ -82491,6 +82492,20 @@ L64_then:
 L65_else:
   br label %L66_end
 L66_end:
+  %t177 = load ptr, ptr %unit.addr
+  %t178 = load ptr, ptr %t.addr
+  %t179 = load i32, ptr %i.addr
+  %t180 = getelementptr inbounds [3 x i8], ptr @.str.pt_lspe_kw.22, i64 0, i64 0
+  %t181 = insertvalue { ptr, i64 } undef, ptr %t180, 0
+  %t182 = insertvalue { ptr, i64 } %t181, i64 3, 1
+  %t183 = call i1 @pt_tis(ptr %t177, ptr %t178, i32 %t179, { ptr, i64 } %t182)
+  %t184 = icmp eq i1 %t183, 1
+  br i1 %t184, label %L67_then, label %L68_else
+L67_then:
+  ret i32 1
+L68_else:
+  br label %L69_end
+L69_end:
   ret i32 0
 }
 ; pt_lspe_guard_total -> u32

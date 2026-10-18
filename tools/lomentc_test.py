@@ -4333,6 +4333,67 @@ def test_lspe_e035_rejects_an_unregistered_site_kind():
     assert any("未登记的站点" in e for e in errs), errs
 
 
+@test
+def test_lspe_census_agrees_with_the_ast():
+    """独立对照：token 普查的 guard/index 数必须等于 AST 的 Guard/Index 节点数。
+
+    twin 只证一致 —— 两边用同一条 token 规则，同错时它照样绿（`docs/253` §5.1.1）。
+    这一条是那条教训的独立那一腿。
+    """
+    from dataclasses import fields, is_dataclass
+
+    def walk(x, out):
+        if isinstance(x, lomentc.Guard):
+            out["guard"] = out.get("guard", 0) + 1
+        if isinstance(x, lomentc.Index):
+            out["index"] = out.get("index", 0) + 1
+        if is_dataclass(x):
+            for f in fields(x):
+                v = getattr(x, f.name)
+                if isinstance(v, list):
+                    for y in v:
+                        walk(y, out)
+                elif is_dataclass(v):
+                    walk(v, out)
+
+    checked = 0
+    bad = []
+    for p in sorted((ROOT / "loment" / "examples").glob("*.lomt")):
+        try:
+            mod = lomentc.load(p)
+        except lomc.LomError:
+            continue
+        ast: dict[str, int] = {}
+        walk(mod, ast)
+        tok: dict[str, int] = {}
+        for s in getattr(mod, "lspe_sites", []):
+            tok[s["kind"]] = tok.get(s["kind"], 0) + 1
+        checked += 1
+        if ast != tok:
+            bad.append((p.name, ast, tok))
+    assert checked >= 30, checked
+    assert not bad, bad
+
+
+@test
+def test_lspe_site_ids_are_content_addressed():
+    """前面插一个无关站点，已有站点的 id 不变（#794）。"""
+    src1 = "module m\n\nfn f(a: [u32; 4]) -> u32 {\n    return a[0];\n}\n"
+    src2 = ("module m\n\nfn f(a: [u32; 4], b: [u32; 4]) -> u32 {\n"
+            "    let x: u32 = b[1];\n    return a[0];\n}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p1 = Path(td) / "a.lomt"
+        p1.write_text(src1, encoding="utf-8", newline=chr(10))
+        p2 = Path(td) / "b.lomt"
+        p2.write_text(src2, encoding="utf-8", newline=chr(10))
+        m1 = lomentc.load(p1)
+        m2 = lomentc.load(p2)
+    ids1 = [s["id"] for s in m1.lspe_sites if s["kind"] == "index"]
+    ids2 = [s["id"] for s in m2.lspe_sites if s["kind"] == "index"]
+    assert len(ids1) == 1 and len(ids2) == 2, (ids1, ids2)
+    assert ids1[0] in ids2, (ids1, ids2)
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "lomentc_test")
 

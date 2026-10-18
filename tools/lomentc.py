@@ -8915,7 +8915,7 @@ pub enum Result<T, E> { Ok(T), Err(E) }
 _LSPE_BRACKET_KW = frozenset({
     "return", "if", "while", "match", "let", "const", "in", "else", "for",
     "fn", "struct", "enum", "impl", "trait", "pub", "use", "module", "choose",
-    "capability", "excluded", "guard", "as",
+    "capability", "excluded", "guard", "as", "mut",
 })
 
 
@@ -8931,15 +8931,23 @@ def _lspe_census(toks: list, unit: str) -> tuple[list[dict], list[int]]:
     """
     sites: list[dict] = []
     unsourced: list[int] = []
-    ordn = {"guard": 0, "index": 0}
+    seen: dict[str, int] = {}
+
+    def _id(kind: str, key: str) -> str:
+        # 内容寻址：键是站点的 token 文本，重复序数只区分**完全相同**的表达式。
+        # 不用行号（会漂），也不用全局序号（在前面插一个站点会把后面全部重编号）。
+        occ = seen.get(key, 0)
+        seen[key] = occ + 1
+        return f"{unit}:{kind}:{_fnv1a32(key + '#' + str(occ)):08x}"
+
     n = len(toks)
     for i, t in enumerate(toks):
         if t.kind == "ident" and t.val == "guard":
-            sites.append({"id": f"{unit}:guard:{ordn['guard']}", "kind": "guard",
+            cap = toks[i + 1].val if i + 1 < n else ""
+            sites.append({"id": _id("guard", f"guard:{cap}"), "kind": "guard",
                           "claim": "allow", "obligation": "GuardHolds",
                           "evidence": "capability",
                           "source": "capability", "line": t.line, "proved": True})
-            ordn["guard"] += 1
             continue
         if t.kind != "punct" or t.val != "[" or i == 0:
             continue
@@ -8956,12 +8964,28 @@ def _lspe_census(toks: list, unit: str) -> tuple[list[dict], list[int]]:
             continue
         literal = (i + 2 < n and toks[i + 1].kind == "number"
                    and toks[i + 2].kind == "punct" and toks[i + 2].val == "]")
-        sites.append({"id": f"{unit}:index:{ordn['index']}", "kind": "index",
+        # 站点内容 = LHS 的最近几个 token + 方括号里的 token 文本；空格/注释/换行不进键。
+        depth = 0
+        j = i + 1
+        inner: list[str] = []
+        while j < n:
+            if toks[j].kind == "punct" and toks[j].val == "[":
+                depth += 1
+            elif toks[j].kind == "punct" and toks[j].val == "]":
+                if depth == 0:
+                    break
+                depth -= 1
+            inner.append(toks[j].val)
+            j += 1
+        # 只用**紧邻的前一个 token** 作 LHS。往前多抓几个 token 会把上一条语句
+        # （`;`、`return` …）也卷进键里 —— 插入一个无关站点就会让 id 变。
+        lhs = prev.val
+        sites.append({"id": _id("index", f"index:{lhs}[{''.join(inner)}]"),
+                      "kind": "index",
                       "claim": "allow", "obligation": "InBounds",
                       "evidence": ("lms(g0)" if literal else "none"),
                       "source": ("lms(g0)" if literal else None),
                       "line": t.line, "proved": literal})
-        ordn["index"] += 1
         if not literal:
             unsourced.append(t.line)
     return sites, unsourced

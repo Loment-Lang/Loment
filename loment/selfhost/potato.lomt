@@ -2118,6 +2118,7 @@ fn pt_lspe_kw(unit: ptr, t: ptr, i: u32) -> u32 {
     if pt_tis(unit, t, i, "excluded") == 1 { return 1; }
     if pt_tis(unit, t, i, "guard") == 1 { return 1; }
     if pt_tis(unit, t, i, "as") == 1 { return 1; }
+    if pt_tis(unit, t, i, "mut") == 1 { return 1; }
     return 0;
 }
 

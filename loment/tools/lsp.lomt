@@ -421,7 +421,18 @@ fn emit_e0(b: ptr, o: u32, code: u32) -> u32 {
 /// `note`（`#710` / `#706`）：0 = 没有；1 = 文档被截断（只分析了前半部分）；
 /// 2 = 文档表已满、这份文档没有被分析。**追加在 checker 诊断之后**，用 severity 3
 /// （Info）：它不是源码的错，却必须让客户端看见 —— "没查全"不能装成"干净"。
-fn publish(mem: ptr, toks: ptr, uri: ptr, un: u32, errs: ptr, ne: u32,
+/// token 在**源里**的 UTF-8 字节列（`#707`）：LSP 对外声明 `positionEncoding: utf-8`，
+/// 而词法器的 `col` 数的是**码点**（与 `tools/lomc.py` 的 `lomc.lex` 同一套，`#481`）。
+/// 两者在含 CJK 的行上不等 —— 直接拿 `col` 当初 `character` 会少算字节。
+fn byte_col(text: ptr, off: u32) -> u32 {
+    let s: u32 = off;
+    while s > 0 && load8(text, s - 1) != 10 {
+        s = s - 1;
+    }
+    return off - s;
+}
+
+fn publish(mem: ptr, text: ptr, toks: ptr, uri: ptr, un: u32, errs: ptr, ne: u32,
            note: u32) -> u32 {
     let b: ptr = out_body(mem);
     let o: u32 = BODY_OFF;
@@ -436,14 +447,12 @@ fn publish(mem: ptr, toks: ptr, uri: ptr, un: u32, errs: ptr, ne: u32,
         let line: u32 = load32(toks, tk * 20 + 12);
         // `#27`：范围要**指在那个符号上**。原先两端的列是常量 0 与 200 —— 一条 14 字符的行
         // 和一条 300 字符的行回来的是同一对常量，编辑器于是把**整行**画成波浪线，指不到
-        // 出问题的那一格。token 里本来就有 `col` 与 `len`（`lexer.lomt` 顶部那张表），
-        // `--check` 那一侧早就在用它们打 `行:列`：这里只是把同一份数据接上。
-        let col: u32 = load32(toks, tk * 20 + 16);
+        // 出问题的那一格。token 里本来就有 `off` 与 `len`（`lexer.lomt` 顶部那张表），
+        // 从这里推列：`--check` 那一侧用同一份数据打 `行:列`。
+        let off: u32 = load32(toks, tk * 20 + 4);
         let tlen: u32 = load32(toks, tk * 20 + 8);
-        let sp: u32 = 0;
-        if col > 0 {
-            sp = col - 1;                     // LSP 的列是 0 起，词法器的 `col` 是 1 起
-        }
+        // 列从 token 的**字节偏移**推：LSP 的列 0 起，`token.off` 是文件内字节偏移。
+        let sp: u32 = byte_col(text, off);
         let ep: u32 = sp + 1;
         if tlen > 0 {
             ep = sp + tlen;
@@ -1196,7 +1205,7 @@ fn on_change(mem: ptr, src: ptr, arena: ptr, root: u32, toks: ptr, chk: ptr,
     let idx: u32 = doc_put(mem, ubuf, un, txb, tn_full);
     if idx == 4294967295 {
         // `#706`：表满了 —— **不驱逐**任何一份已打开的文档，并把"这份没被分析"告诉客户端。
-        return publish(mem, toks, ubuf, un, errs, 0, 2);
+        return publish(mem, txb, toks, ubuf, un, errs, 0, 2);
     }
     let text: ptr = doc_text(mem, idx);
     let tn2: u32 = doc_txtlen(mem, idx);
@@ -1215,7 +1224,7 @@ fn on_change(mem: ptr, src: ptr, arena: ptr, root: u32, toks: ptr, chk: ptr,
     let ne: u32 = run_check(text, toks, errs, chk);
     store32(mem, S_NERR, ne);
     scan_syms(mem, text, toks, nt);
-    return publish(mem, toks, ubuf, un, errs, ne, truncated);
+    return publish(mem, text, toks, ubuf, un, errs, ne, truncated);
 }
 
 fn on_completion(mem: ptr, src: ptr, arena: ptr, root: u32, id: u32, toks: ptr) -> u32 {

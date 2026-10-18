@@ -436,8 +436,18 @@ def test_foreign_file_gets_a_language_section():
     # 一屏不适用的"修法"把一份好 C 改坏，翻到底才看见那句"这个文件不是 Loment"。
     for label in ("错了什么:", "为什么错:", "怎么改:", "支持:", "不支持:"):
         assert label not in out, f"外源文件不该给 Loment 的说明卡（{label}）: {out[-400:]!r}"
+    # **它是整条报告的起点**（`#29`）：第一行就该是那句语言提示，而不是
+    # `error[E019]`/`error[E002]` —— 解析器在错的语言上看到的东西一条都不该先出来
+    # （"`_start` 明明在下一行声明着"那种误导最伤）。
+    body = [ln for ln in out.splitlines() if ln.strip()]
+    assert body, out
+    assert "不是 Loment" in body[0], (
+        f"第一条不是语言提示: {body[:3]!r}")
+    assert not any(ln.lstrip().startswith("error[") for ln in out.splitlines()), (
+        f"外源文件还在印 Loment 的错误头: {out[:300]!r}")
+    assert "E002" not in out, f"还在用 E002（undeclared name）说一份 C 源: {out[-300:]!r}"
     print("      外源文件: 认出语言 + 三条路 + 边界, 且语言以 --lang auto 为准；"
-          "提示顶在前面，Loment 的说明卡不再出现")
+          "它顶到最前，Loment 的错误头与说明卡都不再出现")
 
 
 @test

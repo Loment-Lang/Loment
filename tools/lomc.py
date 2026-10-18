@@ -154,7 +154,17 @@ def lex(text: str) -> list[Tok]:
             if j >= n:
                 raise LomError(line, col, "未闭合的字符串")
             toks.append(Tok("string", "".join(buf), line, col, i, j + 1 - i))
-            i, col = j + 1, col + (j + 1 - i)
+            # **字符串里的换行也要走行号**（`#481`）：原来只把列往前推，`line` 停在
+            # 开引号那一行 —— 之后的每一条诊断都比真实位置**少**掉字符串里的换行数。
+            # 一个多行字符串（开引号与闭引号之间夹着换行）之后，`let x: u32 = true;`
+            # 报在第 4 行而不是第 5 行，用户看到的 caret 落在 `b";` 上。
+            _nl = text.count("\n", i, j + 1)
+            if _nl:
+                line += _nl
+                col = (j + 1) - text.rfind("\n", i, j + 1)
+            else:
+                col += j + 1 - i
+            i = j + 1
             continue
         m = re.match(r"0[xX][0-9A-Fa-f]+|\d+", text[i:])
         if m:

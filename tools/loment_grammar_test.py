@@ -987,6 +987,28 @@ def test_a_bom_does_not_hide_the_declaration():
 
 
 @test
+def test_a_bom_on_a_native_file_does_not_hide_the_real_error():
+    """`#482`：BOM 后面那份**原生** Loment 的真错要浮出来。
+
+    上一條只管"声明还认不认得"；原生文件（没有声明）原先更糟：BOM 留着，词法器在
+    1:1 报 `非法字符 '﻿'`，真正的类型错一个字都到不了用户眼前。带 BOM 与
+    不带 BOM 的文件，诊断必须**一样**。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        p = Path(t) / "bom.lomt"
+        p.write_bytes(bytes([0xEF, 0xBB, 0xBF])
+                      + b"module m\n\nfn f() -> u32 { return true; }\n")
+        mod = lomentc.load(p)
+        deps = lomentc.resolve_deps(mod, ROOT, p.parent, entry=p)
+        errs = lomentc.check(mod, deps=deps)
+        assert errs, "带 BOM 的文件没报错"
+        assert any("bool" in e and "u32" in e for e in errs), (
+            f"真正的类型错没浮出来（BOM 把词法器挡在 1:1）：{errs[:3]}")
+        assert not any("非法字符" in e for e in errs), errs[:3]
+    print("      带 BOM 的原生文件：类型错浮出来，不是 '非法字符' 停在 1:1")
+
+
+@test
 def test_a_misspelled_declaration_is_refused_not_guessed_past():
     """**关键词写错 / 词序不对**要报，不能"当成没有声明"悄悄读成 Loment。
 

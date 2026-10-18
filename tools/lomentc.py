@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1239,6 +1240,9 @@ class Module:
     uses: list[str] = field(default_factory=list)      # use "*.lom"  (L0 布局; 只有路径形式)
     imports: list[str] = field(default_factory=list)   # use "*.lomt" (L1 模块; 路径形式)
     name_imports: list[str] = field(default_factory=list)   # use <名字>  (L1 模块; 名字形式)
+    #: 每条 `use` 写在第几行（`(文本, 行)`，两种写法都记）。`#480`：装载期的每一条
+    #: 报错原来都钉在 `1:1`，caret 落在 `module m` 上 —— 而 `use` 在几十行之外。
+    use_lines: list[tuple[str, int]] = field(default_factory=list)
     caps: list[Capability] = field(default_factory=list)
     structs: list[Struct] = field(default_factory=list)
     enums: list[EnumDecl] = field(default_factory=list)
@@ -1887,9 +1891,12 @@ class Parser:
                 #   use bytes                          名字形式 (后缀见 resolve_name)
                 nxt = self.peek()
                 if nxt.kind == "ident":
-                    mod.name_imports.append(self.next().val)
+                    _nm = self.next()
+                    mod.name_imports.append(_nm.val)
+                    mod.use_lines.append((_nm.val, t.line))
                 else:
                     p = self.expect("string", None, "（.lom 或源文件路径）").val
+                    mod.use_lines.append((p, t.line))
                     # **L0 只有 `.lom` 一种后缀**, 别的任何后缀都算 L1 源 —— 后缀不是
                     # 语言的一部分, 只是习惯 (用户 2026-09-16: "Loment 也可以作为其他
                     # 文件名后缀的诞生地")。别把这条改回"等于 .lomt 才算 L1": 那样
@@ -2472,6 +2479,19 @@ def _generic_parts(t: str) -> tuple[str, list[str]]:
     return base.strip(), args
 
 
+def _display_ty(t: str) -> str:
+    """实例名回成**人写的样子**：`Box_[u32]` -> `Box<[u32]>`（`#484`）。
+
+    只认"基名 + `_[…]`"这一种形状 —— 它正是**没有名字规则**的那些实参拼出来的，
+    所以只在给用户看的消息里出现。别的实例名（`Outer_Inner__u32`）原样返回：
+    拆回去要靠泛型表，而消息里已经有 `it["of"]` / `it["args"]` 可以直接拼。
+    """
+    m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)_\[(.*)\]$", t)
+    if m:
+        return f"{m.group(1)}<{m.group(2)}>"
+    return t
+
+
 def _mangle_name(t: str, depth: int = 0) -> str:
     """泛型类型 -> **实例名**（规则见 `docs/147` §「实例命名」）。
 
@@ -2953,6 +2973,12 @@ def expr_type(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[st
         return funcs[e.name].ret if e.name in funcs else None
     if isinstance(e, Cast):
         st = expr_type(e.expr, scope, funcs, structs)
+        # **空指针字面量**（`0 as ptr`）的类型就是 ptr（`#373`）。漏了这一条，它在
+        # **实参位置**被判成"整型字面量"而拒，而 `let pin: ptr = 0 as ptr;` 与
+        # `if pin != (0 as ptr)` 又过 —— 同一句只因为位置不同得到两个裁决。
+        # 只认字面量 0：发射器对字面量的 ptr 期望印 `null`，非零字面量没有这个含义。
+        if e.type == "ptr" and isinstance(e.expr, IntLit) and e.expr.value == 0:
+            return "ptr"
         if st == "ptr" and e.type in ("u64", "i64"):  # M67
             return e.type
         if e.type == "ptr" and st in INT_TYPES:  # M83: 整数 -> 指针 (brk/mmap 取内存)
@@ -3878,19 +3904,31 @@ def resolve_deps(mod: Module, root: Path, base: Path, entry: Path | None = None,
                                  f"拆掉一层中间门面; 上限与自举同值")
         n_use = len(m.imports) + len(m.name_imports)
         if n_use > MAX_USE:
-            raise LomError(1, 1, f"模块 {m.name} 的 use 有 {n_use} 条, 超过上限 "
-                                 f"{MAX_USE} —— 门面拆小, 别把整库塞进一个文件")
+            # 指到**第 MAX_USE+1 条** `use` 那一行：那条正是越界的第一条。
+            _ln = m.use_lines[MAX_USE][1] if len(m.use_lines) > MAX_USE else 1
+            raise LomError(_ln, 1, f"模块 {m.name} 的 use 有 {n_use} 条, 超过上限 "
+                                   f"{MAX_USE} —— 门面拆小, 别把整库塞进一个文件")
+        # **每条报错指到那条 `use` 自己的行**（`#480`）：原先一律 `1:1`，caret 落在
+        # `module m` 上，而 `use` 可能在几十行之外 —— 用户照着 caret 改不到东西。
+        def use_line(text: str) -> int:
+            for _t, _ln in m.use_lines:
+                if _t == text:
+                    return _ln
+            return 1
         # 名字形式先落到绝对路径, 之后与路径形式走同一条流水线 (去重/循环/先序)
         # `is_addin` 跟着走 —— 它决定 `check()` 里那份模块算"库"还是算"开关设定"。
-        paths: list[tuple[str, bool]] = (
-            [(p, False) for p in m.imports]
-            + [(str(resolve_name(n, root, proj, tool_dir, ext, importer=cur_base)), False)
-               for n in m.name_imports])
+        paths: list[tuple[str, bool, str]] = [(p, False, p) for p in m.imports]
+        for _n in m.name_imports:
+            try:
+                _rp = str(resolve_name(_n, root, proj, tool_dir, ext, importer=cur_base))
+            except LomError as _e:
+                raise LomError(use_line(_n), 1, _e.msg) from None
+            paths.append((_rp, False, _n))
         if depth == 0 and addin_paths:
             # `addin` 目标**只在根单元这一层**展开：`addin` 是根单元专属语法，库里的
             # `addin` 已被 `check()` 拒（写了也不会生效 —— 报出来，不静默）。
-            paths += [(str(p), True) for p in addin_paths]
-        for imp, is_addin in paths:
+            paths += [(str(p), True, m.addin_lines[0][0] if m.addin_lines else "") for p in addin_paths]
+        for imp, is_addin, _src in paths:
             p = Path(imp)
             cand = p if p.is_absolute() else None
             if cand is None or not cand.exists():
@@ -3900,10 +3938,11 @@ def resolve_deps(mod: Module, root: Path, base: Path, entry: Path | None = None,
                         cand = q
                         break
             if cand is None or not cand.exists():
-                raise LomError(1, 1, f"导入的 .lomt 不存在: {imp}")
+                raise LomError(use_line(_src) if _src else 1, 1,
+                               f"导入的 .lomt 不存在: {imp}")
             rp = cand.resolve()
             if rp in stack:
-                raise LomError(1, 1, f"循环导入: {imp}")
+                raise LomError(use_line(_src) if _src else 1, 1, f"循环导入: {imp}")
             if rp in seen:
                 # 边**先记**在 `seen` 之前那道 `continue` 上：同一份文件被两个单元
                 # `use`，第二个单元的依赖图里也得有这条边，否则它的体检会少看见它。
@@ -4461,9 +4500,13 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
         if not _type_ok(f.ret, known):
             errs.append(f"{f.line}: 未知类型 {f.ret}（函数 {f.name} 的返回类型）")
         scope: dict[str, str] = dict(const_scope)  # 模块级常量在函数体内可见
+        # **形参之间**重名才算 E013（`#217`）：`scope` 一开始装着模块级常量，拿它判重
+        # 会把"形参与常量同名"（合法，形参遮蔽常量）报成"参数重复" —— 两次误报一次也没挡住。
+        _pnames: set[str] = set()
         for p in f.params:
-            if p.name in scope:
+            if p.name in _pnames:
                 errs.append(f"{f.line}: 函数 {f.name} 参数 {p.name} 重复")
+            _pnames.add(p.name)
             if not _type_ok(p.type, known):
                 errs.append(f"{f.line}: 未知类型 {p.type}（参数 {p.name} 的类型）")
             scope[p.name] = p.type
@@ -5480,11 +5523,12 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
     # 它出界的是**形式对象**那一层）。
     for it in instances:
         if not it["name"].isidentifier():
+            _disp = f"{it['of']}<{', '.join(it['args'])}>"
             raise LomError(1, 1,
-                           f"泛型实参的形状这一格不收: {it['args']!r}（实例名拼成 {it['name']!r}，"
-                           "不是标识符）—— 收的是基类型名与嵌套泛型。数组/切片/指针当泛型实参"
+                           f"泛型实参的形状这一格不收: `{_disp}` —— 收的是基类型名与嵌套泛型。"
+                           "数组/切片/指针当泛型实参"
                            "（`Box<[u8; 4]>` / `Box<[u32]>` / `Box<*mut u8>`）**没有名字规则**，"
-                           "而且**后端**（`native M23`：struct 字段暂只支持标量）先把它们挡住了 "
+                           "而且这个后端先把它们挡住了（结构体的字段类型目前只支持标量）"
                            "—— 所以现在没有东西需要那个名字。见 `docs/147` §2「命名层」")
     # ---- LSPE 台账的计数（`docs/262` §8）。`lspe_close_admin` 下**关审计**：
     # 站点普查不算，台账只写状态与 `set_by`。这与"关的是警察、不是法律"一致。
@@ -6440,7 +6484,7 @@ def _common_type(a: str, b: str) -> str | None:
 
 def _ir_t(t: str) -> str:
     if t not in IR_TYPES:
-        raise LomError(1, 1, f"native M0 只支持标量类型，遇到 {t!r}")
+        raise LomError(1, 1, f"这个后端只支持标量类型，遇到 {_display_ty(t)}")
     return IR_TYPES[t]
 
 
@@ -6457,13 +6501,13 @@ def _ll_type(t: str, structs: dict, enums: dict) -> str:
     if _is_slice(t):
         et = _slice_elem(t)
         if et not in IR_TYPES:
-            raise LomError(1, 1, f"native M3: 切片元素 {et} 暂只支持标量")
+            raise LomError(1, 1, f"切片的元素类型 {_display_ty(et)} 目前只支持标量")
         return "{ ptr, i64 }"  # 元素指针 + 元素个数
     if t in structs:
         s = structs[t]
         for _, ft in s.fields:
             if ft not in IR_TYPES:
-                raise LomError(s.line, 1, f"native M23: struct {t} 字段类型 {ft} 暂只支持标量")
+                raise LomError(s.line, 1, f"结构体 {_display_ty(t)} 的字段类型 {_display_ty(ft)} 目前只支持标量")
         return "{ " + ", ".join(IR_TYPES[ft] for _, ft in s.fields) + " }"
     if t in enums:
         e = enums[t]
@@ -6471,12 +6515,12 @@ def _ll_type(t: str, structs: dict, enums: dict) -> str:
             return "i32"
         for pt in e.payloads.values():
             if pt not in IR_TYPES:
-                raise LomError(e.line, 1, f"native M25: 枚举 {t} 载荷类型 {pt} 暂只支持标量")
+                raise LomError(e.line, 1, f"枚举 {_display_ty(t)} 的载荷类型 {_display_ty(pt)} 目前只支持标量")
         return "{ i32, i64 }"
     if _is_array(t):
         et = _array_elem(t)
         if et not in IR_TYPES:
-            raise LomError(1, 1, f"native M24: 数组元素 {et} 暂只支持标量")
+            raise LomError(1, 1, f"数组的元素类型 {_display_ty(et)} 目前只支持标量")
         return f"[{_array_len(t)} x {IR_TYPES[et]}]"
     raise LomError(1, 1, f"native 后端不支持类型 {t!r}")
 
@@ -7632,7 +7676,7 @@ class _Ir:
                     val = _wrap_int(val, ty)
                 return ty, str(val)
             if e.name not in self.vars:
-                raise LomError(e.line, 1, f"native M0: 未解析的变量 {e.name}")
+                raise LomError(e.line, 1, f"未解析的变量 {e.name} —— 后端拿到的单元不完整")
             ty, ptr = self.vars[e.name]
             r = self.t()
             self.w(f"{r} = load {self.ll(ty)}, ptr {ptr}")
@@ -7730,9 +7774,9 @@ class _Ir:
         if isinstance(e, Call):
             fn = self.funcs.get(e.name)
             if fn is None:
-                raise LomError(e.line, 1, f"native M0: 未知函数 {e.name}")
+                raise LomError(e.line, 1, f"未知函数 {e.name} —— 后端拿到的单元不完整")
             if len(e.args) != len(fn.params):
-                raise LomError(e.line, 1, f"native M0: {e.name} 实参个数不符")
+                raise LomError(e.line, 1, f"{e.name} 的实参个数不符")
             args = []
             for a, p in zip(e.args, fn.params):
                 _, av = self.expr(a, p.type)
@@ -7745,14 +7789,14 @@ class _Ir:
             return fn.ret, r
         if isinstance(e, FieldAccess):
             if not isinstance(e.obj, Ident):
-                raise LomError(e.line, 1, "native M23: 只支持变量取字段")
+                raise LomError(e.line, 1, "这个后端只支持从变量上取字段")
             ty, ptr = self.vars[e.obj.name]
             st = self.structs.get(ty)
             if st is None:
-                raise LomError(e.line, 1, f"native M23: {ty} 不是 struct")
+                raise LomError(e.line, 1, f"{_display_ty(ty)} 不是结构体")
             idx = next((i for i, (fn, _) in enumerate(st.fields) if fn == e.name), None)
             if idx is None:
-                raise LomError(e.line, 1, f"native M23: struct {ty} 无字段 {e.name}")
+                raise LomError(e.line, 1, f"结构体 {_display_ty(ty)} 没有字段 {e.name}")
             ft = st.fields[idx][1]
             gp = self.t()
             self.w(f"{gp} = getelementptr inbounds {self.ll(ty)}, ptr {ptr}, i32 0, i32 {idx}")
@@ -7775,7 +7819,7 @@ class _Ir:
                 self.w(f"{r} = load {self.ll(et)}, ptr {g}")
                 return et, r
             if not _is_array(ty):
-                raise LomError(e.line, 1, f"native M24: {ty} 不是数组")
+                raise LomError(e.line, 1, f"{_display_ty(ty)} 不是数组")
             et = _array_elem(ty)
             # **下标按它自己的类型发**，不写死 `i32`。`self.expr` 对 `Ident` 返回的是变量
             # **自己的**类型（`want` 只管字面量），所以 `i: u64` 的 `a[i]` 拿到的是一个
@@ -7791,7 +7835,7 @@ class _Ir:
         if isinstance(e, EnumPath):
             ed = self.enums.get(e.enum)
             if ed is None or e.variant not in ed.variants:
-                raise LomError(e.line, 1, f"native M25: 未知枚举变体 {e.enum}::{e.variant}")
+                raise LomError(e.line, 1, f"未知枚举变体 {e.enum}::{e.variant}")
             idx = ed.variants.index(e.variant)
             if not ed.payloads:
                 return e.enum, str(idx)
@@ -7802,10 +7846,10 @@ class _Ir:
         if isinstance(e, EnumCtor):
             ed = self.enums.get(e.enum)
             if ed is None or e.variant not in ed.variants:
-                raise LomError(e.line, 1, f"native M25: 未知枚举变体 {e.enum}::{e.variant}")
+                raise LomError(e.line, 1, f"未知枚举变体 {e.enum}::{e.variant}")
             pt = ed.payloads.get(e.variant)
             if pt is None:
-                raise LomError(e.line, 1, f"native M25: {e.enum}::{e.variant} 无载荷")
+                raise LomError(e.line, 1, f"{e.enum}::{e.variant} 没有载荷")
             et = self.ll(e.enum)
             _, pv = self.expr(e.arg, pt)
             a = self.t()
@@ -7940,7 +7984,7 @@ class _Ir:
             ins = "shl" if op == "<<" else ("ashr" if signed else "lshr")
             self.w(f"{r} = {ins} {it} {a}, {b}")
             return ty, r
-        raise LomError(e.line, 1, f"native M0 不支持的运算符 {op}")
+        raise LomError(e.line, 1, f"这个后端不支持运算符 {op}")
 
     # -- 内建 (M1/M2)
     def alloc_ir(self, size_var: str) -> str:
@@ -8213,7 +8257,7 @@ class _Ir:
         if isinstance(s, Let) and isinstance(s.expr, StructLit):
             st = self.structs.get(s.type)
             if st is None:
-                raise LomError(s.line, 1, f"native M23: {s.type} 不是 struct")
+                raise LomError(s.line, 1, f"{_display_ty(s.type)} 不是结构体")
             ptr = self.vars[s.name][1]
             inits = dict(s.expr.inits)
             for i, (fn, ft) in enumerate(st.fields):
@@ -8224,7 +8268,7 @@ class _Ir:
             return
         if isinstance(s, Let) and isinstance(s.expr, ArrayLit):
             if not _is_array(s.type):
-                raise LomError(s.line, 1, f"native M24: {s.type} 不是数组")
+                raise LomError(s.line, 1, f"{_display_ty(s.type)} 不是数组")
             et = _array_elem(s.type)
             ptr = self.vars[s.name][1]
             for i, it in enumerate(s.expr.items):
@@ -8240,7 +8284,7 @@ class _Ir:
             ty, ptr = self.vars[base.name]
             if _is_slice(ty):
                 if not _is_mut_slice(ty):
-                    raise LomError(s.line, 1, f"native M4: {ty} 是只读切片，不能写")
+                    raise LomError(s.line, 1, f"{_display_ty(ty)} 是只读切片，不能写")
                 et = _slice_elem(ty)
                 _, sv = self.expr(base, ty)
                 p = self.t()
@@ -8252,7 +8296,7 @@ class _Ir:
                 self.w(f"store {self.ll(et)} {v}, ptr {gp}")
                 return
             if not _is_array(ty):
-                raise LomError(s.line, 1, f"native M24: {ty} 不是数组")
+                raise LomError(s.line, 1, f"{_display_ty(ty)} 不是数组")
             et = _array_elem(ty)
             it, iv = self.expr(s.target.idx)       # 同上：下标按它自己的类型发
             gp = self.t()
@@ -8264,7 +8308,7 @@ class _Ir:
             sty, sv = self.expr(s.subject, None)
             ed = self.enums.get(sty)
             if ed is None:
-                raise LomError(s.line, 1, f"native M26: match 主体 {sty} 不是枚举")
+                raise LomError(s.line, 1, f"match 的主体 {_display_ty(sty)} 不是枚举")
             if ed.payloads:
                 tag = self.t()
                 self.w(f"{tag} = extractvalue {self.ll(sty)} {sv}, 0")
@@ -8340,7 +8384,7 @@ class _Ir:
             return
         if isinstance(s, Assign):
             if not isinstance(s.target, Ident):
-                raise LomError(s.line, 1, "native M0 只支持变量赋值（数组元素待 M1）")
+                raise LomError(s.line, 1, "这个后端只支持给变量赋值（数组元素暂不支持）")
             ty, ptr = self.vars[s.target.name]
             _, v = self.expr(s.expr, ty)
             self.w(f"store {self.ll(ty)} {v}, ptr {ptr}")
@@ -8441,7 +8485,7 @@ class _Ir:
         if isinstance(s, ExprStmt):
             self.expr(s.expr, None)
             return
-        raise LomError(getattr(s, "line", 1), 1, f"native M0 不支持该语句: {type(s).__name__}")
+        raise LomError(getattr(s, "line", 1), 1, f"这个后端不支持这条语句: {type(s).__name__}")
 
 
 #: 程序入口（`docs/189` §3：入口是 `fn _start()`，不是 `main`）。ELF 那条路靠
@@ -9112,6 +9156,40 @@ def _leading_line(msg: str) -> int:
     return int(head) if sep and head.isdigit() else 0
 
 
+#: 不是"消息点名的那个名字"的词：关键字、内建类型、以及消息里常见的动词。
+#: 推断列号时一律跳过 —— 少给一列比给一列**错的**好（与渲染器"只印确实知道的那部分"同一条）。
+_COL_STOP = frozenset("""
+fn let mut return if else while for match use module pub const struct enum impl trait
+capability guard as true false and or not
+u8 u16 u32 u64 i8 i16 i32 i64 bool ptr str void
+syscall4 syscall6 syscall7
+""".split())
+
+
+def _col_from_msg(text: str, line: int, msg: str) -> int:
+    """语义错只带行号（`check()` 的约定）；**能从消息里无歧义地定出列**时补上（`#5`）。
+
+    规则保守：消息里出现的标识符，必须**恰好一个**不是关键字、且在那一行里**恰好出现
+    一次** —— 才用它的列。`使用未声明的变量 nosuchv` 定得出；`函数 f 参数 K 重复`
+    定不出（`f` 与 `K` 都在行里），那就回 0，让调用方沿用"整行"的旧行为。
+    """
+    if line <= 0 or not msg:
+        return 0
+    rows = text.split(chr(10))
+    if line > len(rows):
+        return 0
+    row = rows[line - 1]
+    hits: list[int] = []
+    seen: set[str] = set()
+    for name in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", msg):
+        if name in _COL_STOP or name in seen:
+            continue
+        seen.add(name)
+        if len(re.findall(r"(?<![A-Za-z0-9_])" + re.escape(name) + r"(?![A-Za-z0-9_])", row)) == 1:
+            hits.append(row.index(name) + 1)
+    return hits[0] if len(hits) == 1 else 0
+
+
 def diag_record(src: Path, line: int, col: int, msg: str) -> dict:
     """一条裸消息 -> 一条结构化诊断。**分类复用 `loment_diag.RULES`，不新造一份**
     （两份分类表必然漂，见 `docs/179` §8.1 第 4 条那个"同一批字段被查两遍"的教训）。
@@ -9201,8 +9279,11 @@ def main(argv: list[str] | None = None) -> int:
         for e in errs:
             print("  " + e, file=sys.stderr)
         # `check()` 的消息带行不带列，所以要切一次前缀（见 `_leading_line`）。
+        # `check()` 只给行；能无歧义定出列时补上（`_col_from_msg`，`#5`）。
+        _text = path.read_text(encoding="utf-8", errors="replace")
         write_diags(args.diag_out,
-                    [diag_record(path, _leading_line(e), 0, e) for e in errs])
+                    [diag_record(path, _l, _col_from_msg(_text, _l, e), e)
+                     for e in errs for _l in (_leading_line(e),)])
         return 1
 
     if args.print_command:

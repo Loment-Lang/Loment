@@ -1137,6 +1137,53 @@ fn h_loc(ctx: ptr, o: u32, line: u32, col: u32, w: u32, plen: u32) -> u32 {
     return em(ctx, o, "\n");
 }
 
+/// 一个 UTF-8 码点在终端上占几列。返回 `(字节数 << 32) | 列宽`。
+///
+/// **为什么需要它**（`#477`）：`col` 数的是**码点**，而终端按显示宽度排版。字符串里
+/// 一个汉字占两列，原来按 `col-1` 印空格，caret 就少走一半；制表符同理。已知未覆盖的
+/// 只有零宽连接符/旗帜这类复杂 emoji 序列 —— 单码点宽度足够把 CJK 与 tab 这两类
+/// 实测到的错位修掉。
+///
+/// 制表符回 `8`，调用方按"对齐到下一个 8 的倍数"处理（与终端一致）。
+fn utf8_cell(sr: ptr, i: u32, avail: u32) -> u64 {
+    let b0: u32 = load8(sr, i) as u32;
+    if b0 == 9 {
+        return 4294967296 as u64 + 8;
+    }
+    if b0 < 128 {
+        return 4294967296 as u64 + 1;
+    }
+    let nb: u32 = 1;
+    let cp: u32 = b0;
+    if b0 >= 240 && avail >= 4 {
+        nb = 4;
+        cp = ((b0 & 7) << 18) | (((load8(sr, i + 1) as u32) & 63) << 12)
+            | (((load8(sr, i + 2) as u32) & 63) << 6) | ((load8(sr, i + 3) as u32) & 63);
+    } else {
+        if b0 >= 224 && avail >= 3 {
+            nb = 3;
+            cp = ((b0 & 15) << 12) | (((load8(sr, i + 1) as u32) & 63) << 6)
+                | ((load8(sr, i + 2) as u32) & 63);
+        } else {
+            if b0 >= 192 && avail >= 2 {
+                nb = 2;
+                cp = ((b0 & 31) << 6) | ((load8(sr, i + 1) as u32) & 63);
+            }
+        }
+    }
+    let w: u32 = 1;
+    if cp >= 768 && cp <= 879 {
+        w = 0;                                   // 组合记号：不占列
+    } else {
+        if (cp >= 4352 && cp <= 4447) || (cp >= 11904 && cp <= 42191)
+                || (cp >= 44032 && cp <= 55203) || (cp >= 63744 && cp <= 64255)
+                || (cp >= 65280 && cp <= 65519) || (cp >= 127744 && cp <= 129791) {
+            w = 2;                               // 东亚宽 / 全角 / emoji
+        }
+    }
+    return (nb as u64) * 4294967296 as u64 + (w as u64);
+}
+
 /// 源码那两行。`col == 0` 表示**编译器只给了行号** (check() 的语义诊断都是这样):
 /// 那时划整行的可见部分 —— 位置确实就是"这一行", 不是猜一个列出来。
 fn h_snip(ctx: ptr, o: u32, sr: ptr, srl: u32, line: u32, col: u32, w: u32, mlen: u32) -> u32 {
@@ -1157,13 +1204,52 @@ fn h_snip(ctx: ptr, o: u32, sr: ptr, srl: u32, line: u32, col: u32, w: u32, mlen
     o = em(ctx, o, "\n");
     o = em_gut(ctx, o, w);
     if col > 0 {
+        // 按**显示宽度**铺空格（`#477`）：`col` 数码点，终端按列排。制表符按 8 对齐，
+        // 汉字/全角/emoji 占两列 —— 两者原来都让 caret 落在错的字符下。
         let t: u32 = 1;
-        while t < col {
+        let x: u32 = 0;
+        let wcol: u32 = 0;
+        while t < col && x < ln {
+            let r: u64 = utf8_cell(sr, st + x, ln - x);
+            let nb: u32 = (r / 4294967296) as u32;
+            let wd: u32 = (r % 4294967296) as u32;
+            if nb == 0 {
+                t = col;                         // 防御：坏字节不前进就别再转
+            } else {
+                x = x + nb;
+                if wd == 8 {
+                    wcol = wcol + (8 - wcol % 8);
+                } else {
+                    wcol = wcol + wd;
+                }
+                t = t + 1;
+            }
+        }
+        let s: u32 = 0;
+        while s < wcol {
             o = em_byte(ctx, o, SP);
-            t = t + 1;
+            s = s + 1;
         }
         o = em_col(ctx, o, "1;31");
         o = em(ctx, o, "^");
+        // 列号指着**一个名字的开头**时，整段名字都划上（`#5` 把列号补进 JSONL 之后）：
+        // 只点一个字符会让"点名的符号"变难认。往后吃掉连续的标识符字节即可 ——
+        // 不读消息文本，所以不会像旧实现那样把括号里的提示词（`pub`）当成目标。
+        let e2: u32 = st + x + 1;   // 第一个 `^` 已经画了首字符
+        while e2 < st + ln {
+            let b2: u32 = load8(sr, e2) as u32;
+            let idc: u32 = 0;
+            if (b2 >= 65 && b2 <= 90) || (b2 >= 97 && b2 <= 122) || (b2 >= 48 && b2 <= 57)
+                    || b2 == 95 {
+                idc = 1;
+            }
+            if idc == 1 {
+                o = em(ctx, o, "^");
+                e2 = e2 + 1;
+            } else {
+                e2 = st + ln;                    // 不是标识符：一个 caret 就够
+            }
+        }
         o = em_rst(ctx, o);
         return em(ctx, o, "\n");
     }

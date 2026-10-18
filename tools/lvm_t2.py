@@ -386,6 +386,8 @@ class T2Executor(lvm.Executor):
 
     # ------------------------------------------------------------ 调用
     def call_t2(self, cf: _CFunc, args: list, entry: bool = False):
+        if self.depth + 1 > lvm.MAX_DEPTH:
+            raise lvm.LvmError(f"栈溢出（调用深度上限 {lvm.MAX_DEPTH}）")
         self.depth += 1
         base = lvm.STACK_TOP - self.depth * lvm.FRAME_SIZE
         if base <= self.mem.heap:
@@ -407,11 +409,16 @@ class T2Executor(lvm.Executor):
         blocks, labels, name = cf.blocks, cf.labels, cf.name
         nxt = base
         bi, prev = 0, -1
+        steps = 0                       # **整个调用**共用一个计数（跨块也算）—— 与镜像同口径
         while True:
             blk = blocks[bi]
             if prof is not None:
                 prof.block(name, labels[bi])
                 for j, op in enumerate(blk):
+                    steps += 1
+                    if steps > lvm.STEP_CAP:
+                        raise lvm.LvmError(
+                            f"步数上限 {lvm.STEP_CAP}：{name} 的块 {labels[bi]}，第 {j} 条")
                     code = op[0]
 
                     if code == _OP_CALL:
@@ -465,7 +472,11 @@ class T2Executor(lvm.Executor):
                     _run_value(self, vals, op)
             else:
                 # **热路径**：没有剖面时，整条链上每一步都只碰整数。
-                for op in blk:
+                for j, op in enumerate(blk):
+                    steps += 1
+                    if steps > lvm.STEP_CAP:
+                        raise lvm.LvmError(
+                            f"步数上限 {lvm.STEP_CAP}：{name} 的块 {labels[bi]}，第 {j} 条")
                     code = op[0]
 
                     if code == _OP_ARITH:

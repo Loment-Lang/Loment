@@ -895,7 +895,7 @@ def test_lvm_ships_and_runs_a_program() -> None:
 
     ⚠ 这一条**刻意不是清单断言**：`#355` 的第三半原话是 "a packaged-build test that runs
     one, **not just a manifest assertion**"。所以它在这里**真编一次**
-    （`build_tools({"lvm"})` —— 与打包那一步同一份工具链），再把那份 ELF 拿去跑一份 `.ll`。
+    （`build_tools({"loment-lvm"})` —— 与打包那一步同一份工具链），再把那份 ELF 拿去跑一份 `.ll`。
 
     没有 clang 就 SKIP：`build_tools` 要先由种子造 stage1，那一步要 clang。
     """

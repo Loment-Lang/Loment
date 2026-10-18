@@ -28,6 +28,11 @@ pub const BIG_MASK: u64 = 4294967295;
 pub const BIG_DEC_GROUP: u32 = 9;
 /// 10^9。
 pub const BIG_GROUP_BASE: u32 = 1000000000;
+/// 除数为 0 的哨兵: `bigint_divmod_small` 返回它, 商不动 (issue #721)。
+///
+/// 为什么它不会和合法余数撞: 余数严格小于除数, 而除数是 u32 —— 合法余数最大
+/// `4294967294`, 所以 `4294967295` (u32::MAX) 永远是"没算"。
+pub const BIG_DIV0: u32 = 4294967295;
 
 fn bi_nl(b: ptr) -> u32 {
     return mem_load32(b, 0);
@@ -247,7 +252,14 @@ pub fn bigint_add_small(r: ptr, cap: u32, a: ptr, k: u32) -> u32 {
 }
 
 /// q = a / d, **返回余数** (d 是单个 32 位)。
+///
+/// `d == 0` 时**不碰 q**, 返回 `BIG_DIV0` (4294967295)。以前这里直接做 `cur / 0` ——
+/// 那是语言的运行时中止路径 (`ud2`), 进程收到 `SIGILL`, 一个字都打不出来 (issue #721)。
+/// 除数是程序数据是常态, 库函数必须有一条能看的失败路径。
 pub fn bigint_divmod_small(q: ptr, cap: u32, a: ptr, d: u32) -> u32 {
+    if d == 0 {
+        return BIG_DIV0;
+    }
     let na: u32 = bi_nl(a);
     let rem: u64 = 0;
     let i: u32 = na;
@@ -682,6 +694,16 @@ fn test_bigint_divmod_small() -> bool {
     bigint_from_u64(a, 8, 1000000007);
     let r: u32 = bigint_divmod_small(q, 8, a, 10);
     return bigint_to_u64(q) == 100000000 && r == 7;
+}
+
+fn test_bigint_divmod_small_zero_divisor() -> bool {
+    // issue #721: 除数为 0 不许走 `ud2`。返回哨兵, 商原样留着。
+    let a: ptr = alloc(64);
+    let q: ptr = alloc(64);
+    bigint_from_u64(a, 8, 1234567890);
+    bigint_from_u64(q, 8, 777);
+    let r: u32 = bigint_divmod_small(q, 8, a, 0);
+    return r == BIG_DIV0 && bigint_to_u64(q) == 777 && bigint_len(q) == 1;
 }
 
 fn test_bigint_shl_bits_2pow100() -> bool {

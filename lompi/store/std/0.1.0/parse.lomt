@@ -12,6 +12,11 @@
 // 溢出: `parse_dec` 与语言里的 `+ *` 一样按回绕算; 要安全就用 `parse_dec_ok` 先判。
 // 保持同一套算术规则, 免得同一门语言里两种语义。
 //
+// 有符号那一半 (issue #720): `parse_dec_ok` 的界是**无符号**的 `0..2^64-1`, 拿它判
+// 有符号十进制会把 2^63..2^64-1 放过去。所以 `parse_i64_ok` 自己按符号判界
+// (`-2^63..2^63-1`), 而 `parse_i64` **饱和**到端点 —— 超出范围时宁可停在 i64::MAX /
+// i64::MIN, 也绝不回绕成反号的值 (一个正数变成负数, 静默且离谱)。
+//
 // 命名: 公开一律 parse_*, 内部一律 ps_*。自检 test_parse_*。
 
 module parse
@@ -108,6 +113,9 @@ pub fn parse_hex_ok(p: ptr, o: u32, n: u32) -> bool {
 }
 
 /// 有符号十进制 (允许前导 - / +)。同样只解析前缀。
+///
+/// 超出 i64 范围时**饱和**到端点, 不回绕: `2^63` -> i64::MAX, `2^64-1` -> i64::MAX,
+/// `-2^63-1` -> i64::MIN。要判"这段到底合不合法"用 `parse_i64_ok`。
 pub fn parse_i64(p: ptr, o: u32, n: u32) -> i64 {
     let neg: u32 = 0;
     let s: u32 = o;
@@ -125,23 +133,85 @@ pub fn parse_i64(p: ptr, o: u32, n: u32) -> i64 {
             }
         }
     }
-    let v: u64 = parse_dec(p, s, m);
+    let limit: u64 = 9223372036854775807;
     if neg == 1 {
+        limit = 9223372036854775808;
+    }
+    let v: u64 = 0;
+    let sat: u32 = 0;
+    let k: u32 = parse_dec_len(p, s, m);
+    let i: u32 = 0;
+    while i < k {
+        let d: u64 = (load8(p, s + i) - 48) as u64;
+        if sat == 0 {
+            if v > 922337203685477580 {
+                sat = 1;
+                v = limit;
+            } else {
+                let t: u64 = v * 10;
+                if t > limit - d {
+                    sat = 1;
+                    v = limit;
+                } else {
+                    v = t + d;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    if neg == 1 {
+        if v >= 9223372036854775808 {
+            let maxi: i64 = 9223372036854775807;
+            return (0 - maxi) - 1;
+        }
         return 0 - (v as i64);
     }
     return v as i64;
 }
 
-/// 整段是否是合法有符号十进制 (符号可选, 其余必须是数字)。
+/// 整段是否是合法有符号十进制 (符号可选, 其余必须是数字, 且在 `-2^63..2^63-1` 里)。
+///
+/// **不要**把它写成 `parse_dec_ok`: 那个谓词的界是 `0..2^64-1` (无符号), 见文件头。
 pub fn parse_i64_ok(p: ptr, o: u32, n: u32) -> bool {
     if n == 0 {
         return false;
     }
+    let neg: u32 = 0;
+    let s: u32 = o;
+    let m: u32 = n;
     let c: u32 = load8(p, o);
-    if c == 45 || c == 43 {
-        return parse_dec_ok(p, o + 1, n - 1);
+    if c == 45 {
+        neg = 1;
+        s = o + 1;
+        m = n - 1;
+    } else {
+        if c == 43 {
+            s = o + 1;
+            m = n - 1;
+        }
     }
-    return parse_dec_ok(p, o, n);
+    if m == 0 || parse_dec_len(p, s, m) != m {
+        return false;
+    }
+    let limit: u64 = 9223372036854775807;
+    if neg == 1 {
+        limit = 9223372036854775808;
+    }
+    let v: u64 = 0;
+    let i: u32 = 0;
+    while i < m {
+        let d: u64 = (load8(p, s + i) - 48) as u64;
+        if v > 922337203685477580 {
+            return false;
+        }
+        let t: u64 = v * 10;
+        if t > limit - d {
+            return false;
+        }
+        v = t + d;
+        i = i + 1;
+    }
+    return true;
 }
 
 fn ps_hex_digit(c: u32) -> u32 {
@@ -272,4 +342,68 @@ fn test_parse_i64_bad() -> bool {
     let b: ptr = alloc(32);
     store8(b, 0, 45 as u8);
     return !parse_i64_ok(b, 0, 1) && !parse_i64_ok(b, 0, 0);
+}
+
+fn test_parse_i64_range() -> bool {
+    // issue #720: `parse_i64_ok` 的界是**有符号**的, 不是 parse_dec_ok 的无符号界。
+    let b: ptr = alloc(32);
+    let a: str = "9223372036854775807";      // i64::MAX
+    let c: str = "9223372036854775808";      // MAX+1
+    let d: str = "18446744073709551615";     // 2^64-1
+    let e: str = "-9223372036854775808";     // i64::MIN
+    let f: str = "-9223372036854775809";     // MIN-1
+    let i: u32 = 0;
+    while i < str_len(a) {
+        store8(b, i, str_byte(a, i) as u8);
+        i = i + 1;
+    }
+    let ok_max: bool = parse_i64_ok(b, 0, str_len(a));
+    i = 0;
+    while i < str_len(c) {
+        store8(b, i, str_byte(c, i) as u8);
+        i = i + 1;
+    }
+    let ok_p63: bool = parse_i64_ok(b, 0, str_len(c));
+    i = 0;
+    while i < str_len(d) {
+        store8(b, i, str_byte(d, i) as u8);
+        i = i + 1;
+    }
+    let ok_u64: bool = parse_i64_ok(b, 0, str_len(d));
+    i = 0;
+    while i < str_len(e) {
+        store8(b, i, str_byte(e, i) as u8);
+        i = i + 1;
+    }
+    let ok_min: bool = parse_i64_ok(b, 0, str_len(e));
+    i = 0;
+    while i < str_len(f) {
+        store8(b, i, str_byte(f, i) as u8);
+        i = i + 1;
+    }
+    let ok_below: bool = parse_i64_ok(b, 0, str_len(f));
+    return ok_max && !ok_p63 && !ok_u64 && ok_min && !ok_below;
+}
+
+fn test_parse_i64_saturates() -> bool {
+    // 超出范围时停在端点, **不回绕成反号**。
+    let b: ptr = alloc(40);
+    let a: str = "9223372036854775808";      // 2^63 -> MAX
+    let c: str = "-9223372036854775809";     // MIN-1 -> MIN
+    let i: u32 = 0;
+    while i < str_len(a) {
+        store8(b, i, str_byte(a, i) as u8);
+        i = i + 1;
+    }
+    let v1: i64 = parse_i64(b, 0, str_len(a));
+    i = 0;
+    while i < str_len(c) {
+        store8(b, i, str_byte(c, i) as u8);
+        i = i + 1;
+    }
+    let v2: i64 = parse_i64(b, 0, str_len(c));
+    // -9223372036854775808 的写法要绕开"负字面量直接写"的编译面。
+    let maxi: i64 = 9223372036854775807;
+    let mini: i64 = (0 - maxi) - 1;
+    return v1 == maxi && v2 == mini;
 }

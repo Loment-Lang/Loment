@@ -71,7 +71,7 @@ import loment_p8_test as H  # noqa: E402  # 复用已验过的构建/运行夹�
 # "不是核心维"哨兵没跟着从 5 挪到 6，于是 `choose lms_open` 被当成**未定义的开关**
 # 报 E022 —— 码是错的、理由也是错的，而别的判据全绿。**这就是这张表存在的理由。**
 # 2026-10-15 同日 `E029`（用完再放）也补齐 ⇒ **104/106**。两条各一个探针，两边码集相等。
-BUDGET = 121
+BUDGET = 125
 
 # --------------------------------------------------------------------------- 案例表
 #
@@ -413,6 +413,21 @@ _CASES: list[tuple[str, str]] = [
       + "".join("    if x > 0 {\n" for _ in range(100))
       + "".join("    }\n" for _ in range(100))
       + "    return x;\n}\n")),
+    # ---- LSPE（`docs/262`）：第七维的错误面 --------------------------------
+    # 参考与自举对"同名核心维写两遍"必须给同一个码。这几条是"新维真的进了
+    # `chk_core_dim` 与 `sw_is_core` 两处"的独立证词 —— 漏一处时，症状是
+    # `choose lspe_*` 被当成**开关**去查开关表（码对、理由错），孪生判据看不见。
+    ("lspe-duplicate-open",
+     "module m\n\nchoose lspe_open_admin\nchoose lspe_open_admin\n\n"
+     "fn f() -> u32 {\n    return 1;\n}\n"),
+    ("lspe-duplicate-mixed",
+     "module m\n\nchoose lspe_open_admin\nchoose lspe_close_admin\n\n"
+     "fn f() -> u32 {\n    return 1;\n}\n"),
+    ("lspe-unknown-value",
+     "module m\n\nchoose lspe\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    ("lspe-duplicate-close",
+     "module m\n\nchoose lspe_close_admin\nchoose lspe_close_admin\n\n"
+     "fn f() -> u32 {\n    return 1;\n}\n"),
 ]
 
 

@@ -53,6 +53,11 @@ PROBE_HOSTED = "module probe_hosted\n\nchoose hosted\n\nfn main() -> u32 {\n    
 #: 测到的就不是渠道闸了。
 PROBE_LIBL = ("module probe_libl\n\nchoose runtime\n\nuse libl\n\n"
               "fn f() -> u32 {\n    return 1;\n}\n")
+#: 探针：`choose lspe_open_admin`（`docs/262`）。**0.1.4.7 起发行版必须拒它** ——
+#: LSPE 第一部分（维度 + 台账 + 普查）还没兑现，与 LVM 当初同一条渠道闸。
+#: dev 必须收。放开时把这条期望**反转**，别删（棘轮）。
+PROBE_LSPE = ("module probe_lspe\n\nchoose lspe_open_admin\n\n"
+              "fn f() -> u32 {\n    return 1;\n}\n")
 
 #: 渠道常量在源码里被**读到**的处数 —— 也就是 dev/release 两个种子该差几处。
 #:
@@ -219,7 +224,7 @@ def test_both_launchers_open_the_port_door():
 def test_release_driver_refuses_channel_gated_constructs():
     """**判据 D**：发行版驱动器拒**被渠道闸关住的东西**，dev 驱动器收 —— 两端都要测。
 
-    今天**一关两放**，机制同一条（读同一个渠道常量）：
+    今天**四放一关**，机制同一条（读同一个渠道常量）：
 
     * **`choose vm`** —— 一维核心模式，闸在 `check()`（`docs/231` §2）。**2026-10-17 放开**
       （用户裁决，LVM 完成一大半）：探针留着、期望反转，发行版现在必须**收**它；
@@ -249,7 +254,9 @@ def test_release_driver_refuses_channel_gated_constructs():
     probes = [("plain", PROBE_PLAIN, False),
               ("vm", PROBE_VM, False),
               ("libl", PROBE_LIBL, False),
-              ("hosted", PROBE_HOSTED, False)]
+              ("hosted", PROBE_HOSTED, False),
+              # 0.1.4.7：唯一还关着的一道 —— LSPE 第一部分没兑现，发行版说"不"。
+              ("lspe", PROBE_LSPE, True)]
     made: list[Path] = []
     try:
         for tag, src, _refuse in probes:
@@ -272,7 +279,7 @@ def test_release_driver_refuses_channel_gated_constructs():
                         f"（`docs/231` §2 / `docs/222` §4.5）")
                 else:
                     assert rc == 0, f"对照组在发行版里被拒了：{err[-200:]}"
-        print("      两个渠道都收：plain / vm / libl / hosted（四道闸都已放开）")
+        print("      dev 都收；发行版只拒 lspe（其余四道闸已放开）")
     finally:
         for p in made:
             p.unlink(missing_ok=True)

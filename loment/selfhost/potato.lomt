@@ -2041,6 +2041,297 @@ fn pt_lms(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
     return pt_qs(out, o, "lms_close");
 }
 
+/// v16（`docs/262`，用户 2026-10-18 定第七维）：LSPE 台账。**必填**，紧跟在 `lms` 之后 ——
+/// ⚠ **次序是判据**：参考实现那边 `"lspe"` 紧跟在 `"lms"` 之后，两串字节逐字节比。
+/// P0 的骨架里计数全 0、不变量 `not_run` —— 这是**明说的未运行**，不是假 `ok`。
+fn pt_lspe_found(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+    let d: u32 = 0;
+    let i: u32 = lo;
+    while i < hi && pt_kind(t, i) != 4 {
+        let k: u32 = pt_kind(t, i);
+        if k == 3 {
+            let c: u32 = load8(unit, pt_off(t, i)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                d = d + 1;
+            }
+            if (c == 125 || c == 41 || c == 93) && d > 0 {
+                d = d - 1;
+            }
+        } else if d == 0 && pt_tis(unit, t, i, "choose")
+                && (pt_tis(unit, t, i + 1, "lspe_open_admin")
+                    || pt_tis(unit, t, i + 1, "lspe_close_admin")) {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// `lspe` 的取值：1 = open，2 = close，0 = 没写（默认 open）。
+fn pt_lspe_val(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+    let d: u32 = 0;
+    let i: u32 = lo;
+    while i < hi && pt_kind(t, i) != 4 {
+        let k: u32 = pt_kind(t, i);
+        if k == 3 {
+            let c: u32 = load8(unit, pt_off(t, i)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                d = d + 1;
+            }
+            if (c == 125 || c == 41 || c == 93) && d > 0 {
+                d = d - 1;
+            }
+        } else if d == 0 && pt_tis(unit, t, i, "choose")
+                && pt_tis(unit, t, i + 1, "lspe_open_admin") {
+            return 1;
+        } else if d == 0 && pt_tis(unit, t, i, "choose")
+                && pt_tis(unit, t, i + 1, "lspe_close_admin") {
+            return 2;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// `[` 前面出现这些关键字时，它是**类型方括号 / 数组字面量**，不是下标。
+/// 与参考实现的 `_LSPE_BRACKET_KW` **逐字同表** —— 两份普查的计数不能漂。
+fn pt_lspe_kw(unit: ptr, t: ptr, i: u32) -> u32 {
+    if pt_tis(unit, t, i, "return") == 1 { return 1; }
+    if pt_tis(unit, t, i, "if") == 1 { return 1; }
+    if pt_tis(unit, t, i, "while") == 1 { return 1; }
+    if pt_tis(unit, t, i, "match") == 1 { return 1; }
+    if pt_tis(unit, t, i, "let") == 1 { return 1; }
+    if pt_tis(unit, t, i, "const") == 1 { return 1; }
+    if pt_tis(unit, t, i, "in") == 1 { return 1; }
+    if pt_tis(unit, t, i, "else") == 1 { return 1; }
+    if pt_tis(unit, t, i, "for") == 1 { return 1; }
+    if pt_tis(unit, t, i, "fn") == 1 { return 1; }
+    if pt_tis(unit, t, i, "struct") == 1 { return 1; }
+    if pt_tis(unit, t, i, "enum") == 1 { return 1; }
+    if pt_tis(unit, t, i, "impl") == 1 { return 1; }
+    if pt_tis(unit, t, i, "trait") == 1 { return 1; }
+    if pt_tis(unit, t, i, "pub") == 1 { return 1; }
+    if pt_tis(unit, t, i, "use") == 1 { return 1; }
+    if pt_tis(unit, t, i, "module") == 1 { return 1; }
+    if pt_tis(unit, t, i, "choose") == 1 { return 1; }
+    if pt_tis(unit, t, i, "capability") == 1 { return 1; }
+    if pt_tis(unit, t, i, "excluded") == 1 { return 1; }
+    if pt_tis(unit, t, i, "guard") == 1 { return 1; }
+    if pt_tis(unit, t, i, "as") == 1 { return 1; }
+    if pt_tis(unit, t, i, "mut") == 1 { return 1; }
+    return 0;
+}
+
+/// guard 站点数 = `guard` 关键字数。每个 guard 都点名一个能力，所以**全部有来源**。
+fn pt_lspe_guard_total(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+    let n: u32 = 0;
+    let i: u32 = lo;
+    while i < hi && pt_kind(t, i) != 4 {
+        if pt_kind(t, i) == 0 && pt_tis(unit, t, i, "guard") == 1 {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// index 站点数：`[` 且前一个 token 是**非关键字标识符 / `)` / `]`**。
+fn pt_lspe_index_total(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+    let n: u32 = 0;
+    let i: u32 = lo;
+    while i < hi && pt_kind(t, i) != 4 {
+        if pt_kind(t, i) == 3 && pt_tis(unit, t, i, "[") == 1 && i > lo {
+            let ok: u32 = 0;
+            if pt_kind(t, i - 1) == 0 && pt_lspe_kw(unit, t, i - 1) == 0 {
+                ok = 1;
+            }
+            if pt_kind(t, i - 1) == 3
+                    && (pt_tis(unit, t, i - 1, ")") == 1
+                        || pt_tis(unit, t, i - 1, "]") == 1) {
+                ok = 1;
+            }
+            // 能力域声明 `capability d : disk[0..8]` 的 `[` 不是下标 —— 里面有 `..`
+            // （词法器把它拆成两个 `.` token）。
+            if ok == 1 && i + 3 < hi && pt_kind(t, i + 1) == 1
+                    && pt_tis(unit, t, i + 2, ".") == 1
+                    && pt_tis(unit, t, i + 3, ".") == 1 {
+                ok = 0;
+            }
+            if ok == 1 {
+                n = n + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 有来源的 index 站点：下标是**裸字面量**（`[ N ]` 三个 token），来源 `lms(g0)`。
+fn pt_lspe_index_proved(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+    let n: u32 = 0;
+    let i: u32 = lo;
+    while i < hi && pt_kind(t, i) != 4 {
+        if pt_kind(t, i) == 3 && pt_tis(unit, t, i, "[") == 1 && i > lo && i + 2 < hi {
+            let ok: u32 = 0;
+            if pt_kind(t, i - 1) == 0 && pt_lspe_kw(unit, t, i - 1) == 0 {
+                ok = 1;
+            }
+            if pt_kind(t, i - 1) == 3
+                    && (pt_tis(unit, t, i - 1, ")") == 1
+                        || pt_tis(unit, t, i - 1, "]") == 1) {
+                ok = 1;
+            }
+            // 能力域声明 `capability d : disk[0..8]` 的 `[` 不是下标 —— 里面有 `..`
+            // （词法器把它拆成两个 `.` token）。
+            if ok == 1 && i + 3 < hi && pt_kind(t, i + 1) == 1
+                    && pt_tis(unit, t, i + 2, ".") == 1
+                    && pt_tis(unit, t, i + 3, ".") == 1 {
+                ok = 0;
+            }
+            if ok == 1 && pt_kind(t, i + 1) == 1 && pt_tis(unit, t, i + 2, "]") == 1 {
+                n = n + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+fn pt_lspe_state(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+    if pt_lspe_val(unit, t, lo, hi) == 2 {
+        return pt_qs(out, o, "lspe_close_admin");
+    }
+    return pt_qs(out, o, "lspe_open_admin");
+}
+
+fn pt_lspe(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+    let closed: u32 = 0;
+    if pt_lspe_val(unit, t, lo, hi) == 2 {
+        closed = 1;
+    }
+    let gt: u32 = 0;
+    let it: u32 = 0;
+    let ip: u32 = 0;
+    if closed == 0 {
+        gt = pt_lspe_guard_total(unit, t, lo, hi);
+        it = pt_lspe_index_total(unit, t, lo, hi);
+        ip = pt_lspe_index_proved(unit, t, lo, hi);
+    }
+    let nsite: u32 = gt + it;
+    let nproved: u32 = gt + ip;
+    let nund: u32 = nsite - nproved;
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 2, "state");
+    o = pt_lspe_state(out, o, unit, t, lo, hi);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "set_by");
+    if pt_lspe_found(unit, t, lo, hi) == 1 {
+        o = pt_qs(out, o, "source");
+    } else {
+        o = pt_qs(out, o, "default");
+    }
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "mode");
+    o = pt_qs(out, o, "full");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "level");
+    o = pt_dec(out, o, 3 as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "sites");
+    o = pt_dec(out, o, nsite as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "obligations");
+    o = pt_dec(out, o, nsite as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "proved");
+    o = pt_dec(out, o, nproved as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "undecided");
+    o = pt_dec(out, o, nund as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "deferred");
+    o = pt_dec(out, o, 0 as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "refused");
+    o = pt_dec(out, o, 0 as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "floors");
+    o = pt_dec(out, o, 0 as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "floor_detail");
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 3, "assumed");
+    o = pt_dec(out, o, 0 as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "stale_wf");
+    o = pt_dec(out, o, 0 as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "budget");
+    o = pt_dec(out, o, 0 as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "drop_honest");
+    o = pt_dec(out, o, 0 as u64);
+    o = pt_str(out, o, "\n");
+    o = pt_ind(out, o, 2);
+    o = pt_str(out, o, "}");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "per_kind");
+    if gt == 0 && it == 0 {
+        o = pt_str(out, o, "{}");
+    } else {
+        o = pt_str(out, o, "{\n");
+        if gt > 0 {
+            o = pt_key(out, o, 3, "guard");
+            o = pt_str(out, o, "\"");
+            o = pt_dec(out, o, gt as u64);
+            o = pt_str(out, o, "/");
+            o = pt_dec(out, o, gt as u64);
+            o = pt_str(out, o, "\"");
+            if it > 0 {
+                o = pt_str(out, o, ",\n");
+            }
+        }
+        if it > 0 {
+            o = pt_key(out, o, 3, "index");
+            o = pt_str(out, o, "\"");
+            o = pt_dec(out, o, ip as u64);
+            o = pt_str(out, o, "/");
+            o = pt_dec(out, o, it as u64);
+            o = pt_str(out, o, "\"");
+        }
+        o = pt_str(out, o, "\n");
+        o = pt_ind(out, o, 2);
+        o = pt_str(out, o, "}");
+    }
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "invariants");
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 3, "i1");
+    o = pt_qs(out, o, "ok");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "i2");
+    o = pt_qs(out, o, "not_run");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "i3");
+    o = pt_qs(out, o, "not_run");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "i4");
+    o = pt_qs(out, o, "not_run");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "i5");
+    o = pt_qs(out, o, "not_run");
+    o = pt_str(out, o, "\n");
+    o = pt_ind(out, o, 2);
+    o = pt_str(out, o, "}");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "acked");
+    o = pt_dec(out, o, 0 as u64);
+    o = pt_str(out, o, "\n");
+    o = pt_ind(out, o, 1);
+    o = pt_str(out, o, "}");
+    return o;
+}
+
 /// `capabilities`。形状是**定长**的(检查器也是照这个形状读的):
 /// `capability NAME : SPACE [ LO .. HI ] (revocable)?`
 /// 即 NAME=i+1, `:`=i+2, SPACE=i+3, `[`=i+4, LO=i+5, `..`=i+6,i+7, HI=i+8, `]`=i+9,
@@ -5088,7 +5379,7 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     // v15 = v14 + **内存安全**（`docs/253`，用户 2026-10-15 定第六维）：`lms_close` / `lms_open`。
     // 它在**最后** —— 与前面几维同形，且"这份产物开没开内存安全"是**不读源码可判**的。
     o = pt_key(out, o, 1, "potato");
-    o = pt_qs(out, o, "v15");
+    o = pt_qs(out, o, "v16");
     o = pt_str(out, o, ",\n");
     // `unit` 是**根**那份源的 `module` 名 —— 依赖在前, 所以它是根那个标记后面的名字
     // (不是第 1 个 token: 那是第一个依赖的名字)。
@@ -5132,6 +5423,11 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     // ⚠ **次序是判据**：参考实现那边 `"lms"` 紧跟在 `"vm"` 之后，两串字节逐字节比。
     o = pt_key(out, o, 1, "lms");
     o = pt_lms(out, o, unit, t, lo, hi);
+    o = pt_str(out, o, ",\n");
+    // v16（`docs/262`）：LSPE 台账。**必填**，紧跟在 `lms` 之后 ——
+    // ⚠ **次序是判据**：参考实现那边 `"lspe"` 紧跟在 `"lms"` 之后，两串字节逐字节比。
+    o = pt_key(out, o, 1, "lspe");
+    o = pt_lspe(out, o, unit, t, lo, hi);
     o = pt_str(out, o, ",\n");
     o = pt_key(out, o, 1, "switches");
     o = pt_aopen(out, o, ndf);

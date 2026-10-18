@@ -3668,6 +3668,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                                 // 所以不像上面五维那样还要 `v_*` / `ln_*` 来判冲突。
     let nch_lspe: u32 = 0;      // 第七维（`docs/262`）：安全审计 —— 同样**只数重复**。
                                 // 它不改变任何判决，所以没有冲突对。
+    let ln_lspe: u32 = 0;       // 那一行 —— 渠道闸要指到它
     // 生效的取值（0 = 没写），用来判"两档不能同时选"（`docs/175` §3.4 ⚠）。
     // **要等这一遍走完才判** —— 两行谁先写是不定的。
     let v_mode: u32 = 0;        // 1 = std, 2 = no_std
@@ -3883,6 +3884,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
             } else if dim == 6 {
                 // 第七维（`docs/262`）：`lspe`。**只有重复要判** —— 它没有冲突对。
                 nch_lspe = nch_lspe + 1;
+                ln_lspe = i;
                 if nch_lspe > 1 {
                     o = sym_pub(src, t, out, o, E_MODE, i);
                 }
@@ -3995,6 +3997,14 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     // **为什么还留着**：渠道是"下一个还没兑现的维"的注入点（`loment_channel.py` 的
     // docstring），拆掉渠道是另一次改动；上面那条判据就钉在这一行上。
     let rel: u32 = LOMENT_CHANNEL;
+    // **LSPE 渠道闸（0.1.4.7）**：第一部分（维度 + 台账 + 站点普查）还没兑现 ——
+    // 发行版里 `choose lspe_*` 是编译错误。这与 LVM 当初同一条形状（用户 2026-10-18 定）：
+    // **写得出、却什么也拿不到，比写不出来更坏**。dev 通道照常收。
+    // 放开的时候把 `loment_channel_test` 那条探针**反过来**，别删 —— 删掉等于把
+    // "这道闸曾经存在"一起删掉（与 `use libl` / `choose hosted` / `choose vm` 同一条棘轮）。
+    if rel == 1 && nch_lspe > 0 {
+        o = sym_pub(src, t, out, o, E_MODE, ln_lspe);
+    }
     // ---- 第一遍半: 能力表判错 (等 caps 与 excluded 都收齐, 顺序无关)
     o = chk_caps_verify(src, t, ctab, load32(nc, 0), exs, nexs, out, o);
     // ---- 第二遍: 函数体里的调用检查

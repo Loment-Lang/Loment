@@ -4282,12 +4282,15 @@ fn chk_command(src: ptr, t: ptr, out: ptr, o: u32, scr: ptr) -> u32 {
 /// arena 一块里的分段布局 (驱动按这几个常量切片; 单位: 字节)。
 /// 顺序与 `check_arena` 的形参顺序一致, 驱动侧一个 `sys_alloc(CHK_ARENA)` 就够。
 /// syms 从 8192 涨到 10240 是批次 2 第二段: 符号表条目加了一格 aux (stride 20)。
+/// **2026-10-18 再涨到 5200 条**（`#719`）：`std` 门面把整个标准库并进一个单元，闭包
+/// 有 4956 个顶层名字（实测按函数/常量/结构/枚举/impl 方法数），4600 条的旧上限会写穿
+/// 到 `scr` 区 —— 没有越界报错，只是把后面的段改坏。5200 条留 244 条余量。
 pub fn chk_arena_syms() -> u32 { return 0; }
-pub fn chk_arena_scr() -> u32 { return 92000; }
-pub fn chk_arena_ctab() -> u32 { return 93024; }
-pub fn chk_arena_nc() -> u32 { return 93536; }
-pub fn chk_arena_exs() -> u32 { return 93552; }
-pub fn chk_arena_env() -> u32 { return 93808; }
+pub fn chk_arena_scr() -> u32 { return 104000; }
+pub fn chk_arena_ctab() -> u32 { return 105024; }
+pub fn chk_arena_nc() -> u32 { return 105536; }
+pub fn chk_arena_exs() -> u32 { return 105552; }
+pub fn chk_arena_env() -> u32 { return 105808; }
 /// 类型表块: [0..3584) = 复合类型表 (表头 4 字节条数 + 8 字节/条, **每函数开头清零**),
 /// [3584..4096) = 借用检查的名字表, [4096..4112) = 诊断偏移格 (chk_pub 写进这里,
 /// 免得每层递归都回传偏移)。
@@ -4296,8 +4299,8 @@ pub fn chk_arena_env() -> u32 { return 93808; }
 /// 登记元素/切片类型 —— 一个 150 条 let 的函数能开出几百条。不清零就会写穿到后面的
 /// 区 (静默改坏别人), 所以条数是"每函数上限"而不是"整单元上限"。
 /// 448 条/函数对语料最重的函数 (152 let) 仍有 3 倍余量。
-pub fn chk_arena_tyt() -> u32 { return 95856; }
-pub fn chk_arena_bytes() -> u32 { return 99968; }
+pub fn chk_arena_tyt() -> u32 { return 107856; }
+pub fn chk_arena_bytes() -> u32 { return 111968; }
 
 // 原先这里有个 `check(src, t, out)` 薄包装 (自己开 arena)。**去掉了**: arena 现在 ~100 KB,
 // 语言自带的 64 KiB bump 堆放不下, 而"在调用方进程里改 brk"这条路对 C 夹具是**危险**的

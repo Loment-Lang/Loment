@@ -85,7 +85,7 @@ loment_state_test 8
 lvm_profile_test 4
 lvm_t2_test 7
 lvm_compact_test 11
-loment_store_twin_test 1
+loment_store_twin_test 2
 lvm_t3_test 3
 loment_invariant_test 1
 loment_caps_test 5

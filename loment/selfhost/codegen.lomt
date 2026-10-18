@@ -47,7 +47,19 @@ const CG_PARAM: u32 = 135168;      // 每函数形参类型 (160 B/条 = 20 槽 
 // **名字 token 下标**。由 `compute_safe` 在 `emit_module` 里算（`compute_safe` 也 `pub`，
 // 于是 `potato.lomt` 用同一支扫描、只是写进它自己的表 —— **同一份源，两边算出的集合相同**）。
 const CG_SAFE: u32 = 871168;       // 安全名表 (1 + CG_MAXFN 个 u32) = CG_PARAM + CG_MAXFN*160
-const CG_BYTES: u32 = 889572;      // 整块大小 (驱动器按这个数从 brk 开；含上面的安全名表)
+//: **常量表**（`#719`）：`find_const` 原来每次**扫全单元 token**。`std` 门面（~50 万
+//: token、几万次标识符求值）因此是 O(n²)，自举编它要十几分钟（参考 15 秒）。一趟扫完
+//: 存 `(name_tok, type_tok)`，查找就只是 540 条以内的小表。
+//: **`match` 各臂的标签表**（最多 12 臂）。曾经直接写在 `560 + arms*4` —— 于是
+//: 第 1 臂就压到 `564/568`（当前函数体的 token 跨度）、第 3 臂压到 `572`
+//: （`gc_auto_alpha` 档位）、第 4 臂压到 `576`（`gc_auto`）…… 一个 4 臂的 `match`
+//: 会把 572 写成标签号（通常是 1），于是**非 alpha 档**的单元被当成 alpha：
+//: 那个四字节 `alloc` 被提到栈上（`slot.buf`）、与参考实现分叉（#719，`stdlib` 的
+//: `sd_key_cmp` 抓到）。这一格是 ABI 级的静默串写，别改回贴着标量的地址。
+const CG_ARM: u32 = 7680;          // 7680..8192: 能力域表之后、值栈之前的那 512 字节
+const CG_CONST: u32 = 889572;      // 常量表 (8 B/条) 紧跟安全名表
+const CG_MAXCONST: u32 = 1024;
+const CG_BYTES: u32 = 897764;      // 整块大小 = CG_CONST + CG_MAXCONST*8
 use bytes
 use lexer
 
@@ -132,6 +144,13 @@ fn emit_tok(s: ptr, out: ptr, src: ptr, toks: ptr, i: u32) -> u32 {
 /// 之后的函数全被改名成 `<接收者>_<方法>`, 与参考实现逐字节不一致。
 /// 参考实现没有这个坑是因为它的 parser 用 `at(kind, val)` 一起判 kind。
 pub fn tok_is(src: ptr, toks: ptr, i: u32, text: str) -> bool {
+    // **虚拟类型哨兵不是 token 下标**（`CG_WANT_U32` / `CG_TY_BOOL` / `CG_CAST_PTR`
+    // 都在 2^31 以上）。少了这道门，`is_signed(哨兵)` 会按 `i*20` 算出个野地址去读 ——
+    // 自举镜像的内存里"碰巧"读得到，clang 编出来的独立 codegen 直接 0xC0000005
+    // （`loment_p8_test` 的 `driver.lomt` 那格抓到）。
+    if i >= 2147483648 {
+        return false;
+    }
     if load32(toks, i * 20) == 2 {   // string: 只比原文会与关键字/类型名撞车
         return false;
     }
@@ -149,6 +168,9 @@ pub fn tok_is(src: ptr, toks: ptr, i: u32, text: str) -> bool {
 }
 
 fn tok_kind(toks: ptr, i: u32) -> u32 {
+    if i >= 2147483648 {
+        return 4;                    // 哨兵按 EOF 算：扫描循环当场停，不会读野地址
+    }
     return load32(toks, i * 20);
 }
 
@@ -392,6 +414,17 @@ fn emit_upcast(s: ptr, out: ptr, src: ptr, toks: ptr, lvl: u32, frm: u32, to: u3
 /// 泛型实例在参考实现里是被 `_rewrite_types` 改名成 `Pair_u32` 的字面串, 这里等价地
 /// 按 `基名_实参1_实参2` 折叠 (docs/156 §3: 结构体名与枚举名同样参与改名)。
 fn emitted_name(s: ptr, out: ptr, src: ptr, toks: ptr, tt: u32) -> u32 {
+    // **虚拟类型哨兵**（内置返回/期望类型的编码）没有 token 原文可印 —— 与
+    // `emit_ty` 同一口径先翻译掉，别让它们走到下面按 `tt*20` 读 token 的路。
+    if tt == CG_WANT_U32 {
+        return emit_str(s, out, "u32");
+    }
+    if tt == CG_TY_BOOL {
+        return emit_str(s, out, "bool");
+    }
+    if tt == CG_CAST_PTR {
+        return emit_str(s, out, "ptr");
+    }
     let stn: u32 = subst_tok(s, src, toks, tt);   // 泛型实例: 注释里也要用具体类型
     if stn != tt {
         return emitted_name(s, out, src, toks, stn);
@@ -477,7 +510,7 @@ fn sub_expr_type(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
     if tok_is(src, toks, j, "(") {
         let rp: u32 = skip_parens(src, toks, j);
         if tok_is(src, toks, rp + 1, "as") {
-            return rp + 2;
+            return as_chain_end(src, toks, rp + 2);
         }
         return operand_bin_type(s, src, toks, j, rp);
     }
@@ -500,9 +533,14 @@ fn sub_expr_type(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
 /// 扫的时候**多记号算子整条跳掉**（`k = k + op_toks(c)`）：`>>` 是两个 `>` 记号，单看一个
 /// `>` 会被 `op_code` 读成比较（7）—— 不跳的话 `(w[i] >> (i % 32)) & 1` 会被误判成 bool。
 fn operand_bin_type(s: ptr, src: ptr, toks: ptr, j: u32, rp: u32) -> u32 {
-    let acc: u32 = sub_expr_type(s, src, toks, j + 1);
+    return operand_bin_type_from(s, src, toks, j + 1, rp);
+}
+
+/// 同上，但**第一个操作数从 `j0` 起**（不带括号的那些表达式用这一支）。
+fn operand_bin_type_from(s: ptr, src: ptr, toks: ptr, j0: u32, rp: u32) -> u32 {
+    let acc: u32 = expr_type_atom(s, src, toks, j0);
     let best: u32 = 0;
-    let k: u32 = j + 1;
+    let k: u32 = j0;
     let depth: u32 = 0;
     while k < rp {
         if tok_is(src, toks, k, "(") || tok_is(src, toks, k, "[") {
@@ -794,11 +832,114 @@ fn param_type(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
     return 0;
 }
 
-/// 表达式类型推断 (镜像 lomentc.expr_type 的标量子集); 0 = 未知。
+/// `as T as U …` 的**最后一环的类型 token**（`t` 是某一环的目标）。
+///
+/// 参考实现的 `Cast` 是嵌套节点，所以链可以任意长；自举侧按 token 走，每个 atom
+/// 只吃**第一环**。剩下的环由 `expr_bin` 补（见那里的 `while tok_is(... "as")`）。
+/// 类型推断这边跟着走完，否则 `0 as u64 as ptr` 会被判成 `u64`（#719）。
+fn as_chain_end(src: ptr, toks: ptr, t: u32) -> u32 {
+    let r: u32 = t;
+    while tok_is(src, toks, r + 1, "as") {
+        r = r + 2;
+    }
+    return r;
+}
+
+/// 表达式类型推断 —— **二元表达式先看算子**（镜像 `lomentc.expr_type(Bin)`）。
+///
+/// 少了这一层，`5 * j` 这种右操作数的类型被算成 0（未知），于是 `acc >> (35 - 5 * j)`
+/// 里那个减法落成 `sub i64`（外层移位的期望类型），而参考实现给出 `sub i32` + 一次
+/// `zext` —— 两边分叉，且 `sub i64 %i32值` 是非法 IR（#719，`base32` 抓到）。
 fn expr_type(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
+    let t: u32 = expr_type_atom(s, src, toks, j);
+    if t != 0 {
+        return t;                        // 第一个操作数自己带了类型：旧行为，够用
+    }
+    let c0: u32 = op_code(src, toks, j + 1);
+    // 比较/逻辑不是"字面量开头的算术链"的一部分：`4 == j` / `4 && …` 里那个 `4`
+    // 自己没有类型（参考实现的 `expr_type(IntLit)` 就是 None）。少了这道门，
+    // `let ok: bool = k == 4 + 9 + 4 && …` 里最后的 `4` 会一路扫到 `&&`，
+    // 被判成 `bool`，进而发 `add i1 4, 9`。
+    if c0 != 0 && op_prec(c0) >= 5 {
+        let end: u32 = operand_end(s, src, toks, j);
+        return operand_bin_type_from(s, src, toks, j, end);
+    }
+    return 0;
+}
+
+/// 表达式到哪个 token 为止（不含）：深度 0 的 `;` `,` `)` `]` `}` 或 EOF。
+fn operand_end(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
+    let k: u32 = j;
+    let d: u32 = 0;
+    let fp: u32 = 0;                 // 这一段里第一个深度 0 算子的优先级
+    while tok_kind(toks, k) != 4 {
+        if tok_is(src, toks, k, "(") || tok_is(src, toks, k, "[") {
+            d = d + 1;
+            k = k + 1;
+        } else if tok_is(src, toks, k, ")") || tok_is(src, toks, k, "]")
+                || tok_is(src, toks, k, "}") || tok_is(src, toks, k, "{") {
+            // `{` 是**块的开头**，不是表达式的一部分：`while … && q < C - 1 {` 的
+            // 条件在 `{` 处结束。当成开括号会一路扫进循环体，把体里的 `==` 折进
+            // 条件里 —— 于是那个字面量开头的 `C - 1` 被判成 `bool`，发 `sub i1`
+            // （自举自编译 driver.lomt 的 `cfg_source_ext` 抓到的 1 字节分叉）。
+            if d == 0 {
+                return k;
+            }
+            d = d - 1;
+            k = k + 1;
+        } else if d == 0 && (tok_is(src, toks, k, ";") || tok_is(src, toks, k, ",")) {
+            return k;
+        } else {
+            let c: u32 = op_code(src, toks, k);
+            if d == 0 && c != 0 {
+                // **优先级更低就算下一段了**：`4 + 9 + 4 && …` 里 `&&` 不是
+                // `4 + 9 + 4` 的一部分 —— 少了这条，字面量开头的操作数会被判成
+                // `bool`（`&&` 是 1..8 档），`add i1 4, 9` 就从这儿来。
+                if fp != 0 && op_prec(c) < fp {
+                    return k;
+                }
+                if fp == 0 {
+                    fp = op_prec(c);
+                }
+                k = k + op_toks(c);
+            } else {
+                k = k + 1;
+            }
+        }
+    }
+    return k;
+}
+
+
+/// 内建调用的**返回类型**（镜像 `lomentc.BUILTINS` 的第三格）。
+///
+/// 少了它，`load8(b, 0) == 18 && ...` 里 `==` 的两个操作数都没有类型，公共类型落到
+/// **期望类型**上 —— 在 `return` 位置那是 `bool`，于是自举发 `icmp eq i1 %t, 18`
+/// （参考发 `i32`）：两边分叉且 IR 非法（#719，`libl`/`stdio`/`stdlib` 抓到）。
+///
+/// 只回**有虚拟 token 的那两种**：u32 用 `CG_WANT_U32`、bool 用 `CG_TY_BOOL`。
+/// `ptr` / `i64` 返回的内建（`alloc`/`str_ptr`/`ptr_add`/`ptr_sub`/`syscall*`/
+/// `thread_spawn`）没有哨兵，回 0 —— 与改动前同一条"未知"的路，下游按需要兜。
+/// `u8` 的那两个（`get_bits`/`set_bits`）同理。
+fn builtin_ret(src: ptr, toks: ptr, j: u32) -> u32 {
+    if tok_is(src, toks, j, "str_eq") {
+        return CG_TY_BOOL;
+    }
+    if tok_is(src, toks, j, "str_len") || tok_is(src, toks, j, "str_byte")
+            || tok_is(src, toks, j, "panic") || tok_is(src, toks, j, "free")
+            || tok_is(src, toks, j, "load8") || tok_is(src, toks, j, "store8")
+            || tok_is(src, toks, j, "atomic_add") || tok_is(src, toks, j, "inb")
+            || tok_is(src, toks, j, "outb") || tok_is(src, toks, j, "slice_len") {
+        return CG_WANT_U32;
+    }
+    return 0;
+}
+
+/// atom 的类型（标量子集）; 0 = 未知。
+fn expr_type_atom(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
     if tok_kind(toks, j) == 1 {
         if tok_is(src, toks, j + 1, "as") {   // 字面量的 `as T`
-            return j + 2;
+            return as_chain_end(src, toks, j + 2);
         }
         return 0;
     }
@@ -807,7 +948,7 @@ fn expr_type(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
             return j;
         }
         if tok_is(src, toks, j + 1, "as") {   // `x as T`
-            return j + 2;
+            return as_chain_end(src, toks, j + 2);
         }
         if tok_is(src, toks, j + 1, ".") {   // M23: 字段类型
             let vt: u32 = var_type(s, src, toks, j);
@@ -826,7 +967,11 @@ fn expr_type(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
         if tok_is(src, toks, j + 1, "(") {   // 调用 (可能带 `as T` 后缀)
             let cp: u32 = skip_parens(src, toks, j + 1);
             if tok_is(src, toks, cp + 1, "as") {
-                return cp + 2;
+                return as_chain_end(src, toks, cp + 2);
+            }
+            let br: u32 = builtin_ret(src, toks, j);
+            if br != 0 {
+                return br;
             }
             let fi: u32 = find_fn(s, src, toks, j);
             if fi != 4294967295 {
@@ -845,7 +990,7 @@ fn expr_type(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
     if tok_is(src, toks, j, "(") {
         let rp2: u32 = skip_parens(src, toks, j);
         if tok_is(src, toks, rp2 + 1, "as") {
-            return rp2 + 2;
+            return as_chain_end(src, toks, rp2 + 2);
         }
         // 括号**透明**, 但里面那一段要按 `expr_type(Bin)` 判 (算子优先, 见
         // `operand_bin_type`): 直接递归到 `j+1` 会把 `(a < 0)` 判成 `a` 的类型,
@@ -2345,6 +2490,12 @@ fn emit_caps_table(s: ptr, out: ptr, src: ptr, toks: ptr) -> u32 {
 // ---------------------------------------------------------------- 表达式
 
 fn bit_width(tt: u32, src: ptr, toks: ptr) -> u32 {
+    if tt == CG_WANT_U32 {
+        return 32;
+    }
+    if tt == CG_TY_BOOL {
+        return 1;
+    }
     if tok_is(src, toks, tt, "bool") || tok_is(src, toks, tt, "true")
         || tok_is(src, toks, tt, "false") {
         return 1;
@@ -2649,7 +2800,44 @@ fn set_int_lit(s: ptr, lvl: u32, src: ptr, toks: ptr, i: u32, want: u32) -> u32 
     }
     let st: u32 = load32(toks, i * 20 + 4);
     let n: u32 = load32(toks, i * 20 + 8);
+    // **64 位目标**（`#719`）：`lit_bits` 对 u64/i64 回 0（上面的 32 位环绕走不到），
+    // 而原样抄文本在**有符号**类型上是错的 —— `let m: i64 = 9223372036854775808;`
+    // 参考实现按 `_wrap_int` 折成 `-9223372036854775808`，自举抄的是 2^63。
+    // 十六进制那条路已经用长除法转十进制（> u32 也支持），这里只管十进制。
     if !(n >= 2 && load8(src, st) == 48 && (load8(src, st + 1) == 120 || load8(src, st + 1) == 88)) {
+        let wr64: u32 = 0;
+        if want != 0 && want != CG_WANT_U32 {
+            if tok_is(src, toks, want, "u64") || tok_is(src, toks, want, "i64") {
+                wr64 = 1;
+            }
+        }
+        if wr64 == 1 {
+            let w64: u64 = tok_u64(src, toks, i);
+            let wrv64: u64 = w64;
+            if wneg == 1 {
+                wrv64 = 0 as u64 - w64;      // 二补数; 与参考的掩码+补码同义
+            }
+            let wrneg64: u32 = 0;
+            let wrsgn64: u32 = 0;
+            if load8(src, load32(toks, want * 20 + 4)) == 105 {
+                wrsgn64 = 1;                 // 类型 token 的首字节 'i'
+            }
+            if wrsgn64 == 1 && wrv64 >= (9223372036854775808 as u64) {
+                wrv64 = 0 as u64 - wrv64;
+                wrneg64 = 1;
+            }
+            let wrd64: u32 = set_dec_val64(s, lvl, wrv64);
+            if wrneg64 == 1 {
+                let wrq64: u32 = wrd64;
+                while wrq64 > 0 {
+                    store8(s, btxt(s, lvl) + wrq64, load8(s, btxt(s, lvl) + wrq64 - 1) as u8);
+                    wrq64 = wrq64 - 1;
+                }
+                store8(s, btxt(s, lvl), 45 as u8);
+                store32(s, blen(s, lvl), wrd64 + 1);
+            }
+            return wrd64 + wrneg64;
+        }
         let k: u32 = 0;
         while k + 1 < n && load8(src, st + k) == 48 {
             k = k + 1;
@@ -2750,6 +2938,42 @@ fn tok_int(src: ptr, toks: ptr, i: u32) -> u32 {
     return r;
 }
 
+/// 十进制 token -> u64（自然环绕，与参考实现的 `v &= 2^64-1` 同义）。
+fn tok_u64(src: ptr, toks: ptr, i: u32) -> u64 {
+    let st: u32 = load32(toks, i * 20 + 4);
+    let n: u32 = load32(toks, i * 20 + 8);
+    let r: u64 = 0;
+    let k: u32 = 0;
+    while k < n {
+        r = r * (10 as u64) + ((load8(src, st + k) - 48) as u64);
+        k = k + 1;
+    }
+    return r;
+}
+
+/// `set_dec_val` 的 64 位版（最多 20 位）。
+fn set_dec_val64(s: ptr, lvl: u32, v: u64) -> u32 {
+    let tmp: ptr = scratch_buf(s);
+    let d: u32 = 0;
+    let x: u64 = v;
+    if x == 0 {
+        store8(tmp, 0, 48 as u8);
+        d = 1;
+    }
+    while x > 0 {
+        store8(tmp, d, (48 + (x % 10) as u32) as u8);
+        x = x / 10;
+        d = d + 1;
+    }
+    let q: u32 = 0;
+    while q < d {
+        store8(s, btxt(s, lvl) + q, load8(tmp, d - 1 - q) as u8);
+        q = q + 1;
+    }
+    store32(s, blen(s, lvl), d);
+    return d;
+}
+
 /// 把十进制值写进第 lvl 层 (字面量与常量内联共用), 返回位数。
 fn set_dec_val(s: ptr, lvl: u32, v: u32) -> u32 {
     let tmp: ptr = scratch_buf(s);
@@ -2775,24 +2999,22 @@ fn set_dec_val(s: ptr, lvl: u32, v: u32) -> u32 {
 
 /// 模块级常量查找: 命中返回**值 token** 下标, 否则 0。
 /// 形态: [`pub`] `const` NAME `:` TYPE `=` VALUE `;` —— 名字恒在 `const` 之后一个。
-fn find_const(src: ptr, toks: ptr, name_tok: u32) -> u32 {
+fn find_const(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
     let i: u32 = 0;
-    while tok_kind(toks, i) != 4 {
-        if tok_is(src, toks, i, "const") {
-            let nt: u32 = i + 1;
-            if load32(toks, nt * 20 + 8) == load32(toks, name_tok * 20 + 8) {
-                let k: u32 = 0;
-                let ok: u32 = 1;
-                while k < load32(toks, name_tok * 20 + 8) {
-                    if load8(src, load32(toks, nt * 20 + 4) + k)
-                            != load8(src, load32(toks, name_tok * 20 + 4) + k) {
-                        ok = 0;
-                    }
-                    k = k + 1;
+    while i < load32(s, 644) {
+        let nt: u32 = load32(s, CG_CONST + i * 8);
+        if load32(toks, nt * 20 + 8) == load32(toks, name_tok * 20 + 8) {
+            let k: u32 = 0;
+            let ok: u32 = 1;
+            while k < load32(toks, name_tok * 20 + 8) {
+                if load8(src, load32(toks, nt * 20 + 4) + k)
+                        != load8(src, load32(toks, name_tok * 20 + 4) + k) {
+                    ok = 0;
                 }
-                if ok == 1 {
-                    return i + 5;
-                }
+                k = k + 1;
+            }
+            if ok == 1 {
+                return load32(s, CG_CONST + i * 8 + 4) + 2;
             }
         }
         i = i + 1;
@@ -3625,7 +3847,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
         return ev;
     }
     // 模块级常量: 生成期内联成十进制字面量 (优先于变量查找, 与 lomentc 同序)
-    let cvt: u32 = find_const(src, toks, j);
+    let cvt: u32 = find_const(s, src, toks, j);
     if cvt != 0 {
         // 常量按**它自己的声明类型**环绕 (find_const 返回值 token; `const N : T = V`
         // 的 token 次序是 const N : T = V, 所以 `cvt - 2` 是 T) —— 与参考实现
@@ -3903,7 +4125,7 @@ fn operand_ty(s: ptr, src: ptr, toks: ptr, k: u32, fallback: u32) -> u32 {
     if tok_kind(toks, k) != 0 {      // 字面量没有"声明类型", 不必找
         return 0;
     }
-    let cvt: u32 = find_const(src, toks, k);
+    let cvt: u32 = find_const(s, src, toks, k);
     if cvt != 0 {
         return cvt - 2;
     }
@@ -3925,6 +4147,24 @@ fn expr_bin(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, minp: u32, lvl: u32, 
     let cur: u32 = sub_expr_type(s, src, toks, j);
     let e: u32 = expr_unary(s, out, src, toks, j, lvl, aw);
     let i: u32 = e;
+    // **链式转型**（#719）：atom 只吃**第一环**，余下的在这里补上 —— 每一环的 from
+    // 就是上一环的目标。参考实现是嵌套的 `Cast` 节点，所以链可以任意长；自举侧按
+    // token 走，`0 as u64 as ptr` 原来只发 `zext`、没有 `inttoptr`，`x as i32 as i64`
+    // 少一条 `sext`（发成 `store i64 %i32值`，非法 IR）。
+    if tok_is(src, toks, i, "as") {
+        let f: u32 = cast_src_type(s, src, toks, j);
+        if i >= 2 {
+            if tok_is(src, toks, i - 2, "as") {
+                f = i - 1;               // atom 吃过一环：当前值的类型就是那一环的目标
+            }
+        }
+        while tok_is(src, toks, i, "as") {
+            apply_cast(s, out, src, toks, f, i + 1, lvl);
+            f = i + 1;
+            i = i + 2;
+        }
+        cur = f;
+    }
     let go: u32 = 1;
     while go == 1 {
         let c: u32 = op_code(src, toks, i);
@@ -5126,7 +5366,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
             }
             let lb: u32 = load32(s, 480) + 1;
             store32(s, 480, lb);
-            store32(s, 560 + arms * 4, lb);
+            store32(s, CG_ARM + arms * 4, lb);
             if iswild == 1 {
                 wild = lb;
             }
@@ -5168,7 +5408,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
                 emit_str(s, out, "      i32 ");
                 emit_dec(s, out, vi2);
                 emit_str(s, out, ", label %L");
-                emit_dec(s, out, load32(s, 560 + a2 * 4));
+                emit_dec(s, out, load32(s, CG_ARM + a2 * 4));
                 emit_str(s, out, "_m");
                 emit_tok(s, out, src, toks, k2 + 3);
                 emit_str(s, out, "\n");
@@ -5190,7 +5430,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
                 }
                 p3 = p3 + 1;
             }
-            let lab3: u32 = load32(s, 560 + a3 * 4);
+            let lab3: u32 = load32(s, CG_ARM + a3 * 4);
             let be3: u32 = skip_block(src, toks, p3 + 2);   // 臂体范围 (两个分支共用)
             if isw3 == 1 {
                 store32(s, 476, 0);
@@ -5442,6 +5682,9 @@ fn let_array_lit(s: ptr, out: ptr, src: ptr, toks: ptr, name: u32, ty: u32, i: u
 
 /// 两个 token 的文本是否相同 (逐字节)。
 fn tok_eq(src: ptr, toks: ptr, a: u32, b: u32) -> bool {
+    if a >= 2147483648 || b >= 2147483648 {
+        return false;
+    }
     if load32(toks, a * 20 + 8) != load32(toks, b * 20 + 8) {
         return false;
     }
@@ -7710,6 +7953,11 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
     store32(s, 0, 0);
     store32(s, 4, 0);
     store32(s, 12, 0);
+    // **替换表的计数必须显式清零**：`sub_clear` 没人调用，这个格原来靠"调用方给的内存
+    // 是零"成立 —— brk（真驱动）是零，而夹具里的 `malloc` 在 900 KB 这一档会拿到**脏页**
+    // （`loment_p8_test` 的 C 夹具实测：`subst_tok` 读出一个 11 万多的表长，按 `i*8`
+    // 走出状态块，0xC0000005）。发射器自己的初始化不该依赖分配器给什么。
+    store32(s, 16, 0);
     store32(s, 640, 0);   // 函数个数
     store32(s, 476, 0);   // terminated
     store32(s, 480, 0);   // label 计数
@@ -7824,6 +8072,22 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
         i = i + 1;
     }
     store32(s, 640, n);
+    // 常量表（`#719`）：一趟扫完，`find_const` 别再扫全单元。
+    let kn: u32 = 0;
+    i = 0;
+    while tok_kind(toks, i) != 4 {
+        if tok_is(src, toks, i, "const") && tok_kind(toks, i + 1) == 0
+                && tok_is(src, toks, i + 2, ":") {
+            if kn >= CG_MAXCONST {
+                return 0;            // 与函数表同一个口径：超了**报错**，不写穿
+            }
+            store32(s, CG_CONST + kn * 8, i + 1);
+            store32(s, CG_CONST + kn * 8 + 4, i + 3);
+            kn = kn + 1;
+        }
+        i = i + 1;
+    }
+    store32(s, 644, kn);
     // **跨函数 deref-only 安全表**（`docs/210` §7）：函数表登记完就能算 —— 它只读 token 流。
     // 放在这里（不是发射前逐个）：`l0_safe_callee` 在发射**每个** `alloc` 候选时都要查它。
     let _sft: u32 = compute_safe(src, toks, ptr_add(s, CG_SAFE));

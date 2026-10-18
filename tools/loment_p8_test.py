@@ -202,7 +202,10 @@ def test_m79_loment_lexer_matches_python():
              # 放在 `loment/lex/` 而不是 `examples/`：**它是夹具不是 API** ——
              # `examples/` 按定义全部进手册（`loment_manual.py` 直接 glob 它），
              # 一份词法语料进去会平白长出一页"公开 API"。
-             ROOT / "loment" / "lex" / "multiline_str.lomt"]
+             ROOT / "loment" / "lex" / "multiline_str.lomt",
+             # **块注释之后的列**（#708）：同一行里 `/* … */` 之后的 token。两个词法器
+             # 原来一边加 2、一边不加 —— 语料里没有这个形状，所以孪生判据一直看不出来。
+             ROOT / "loment" / "lex" / "block_comment_col.lomt"]
     with tempfile.TemporaryDirectory() as td:
         exe = _build(td)
         for f in files:
@@ -1080,7 +1083,10 @@ def test_m89_l2_epoch_is_byte_identical():
                          # `if` 的两支那一格（`docs/210` §2.3）：孪生那边的支跨度是
                          # `skip_block` **现算**的 —— 差一格这一条就红。
                          ("ifalpha", lomentc_test.L2_IF_ALPHA_SRC),
-                         ("ifmanual", lomentc_test.L2_IF_MANUAL_SRC)):
+                         ("ifmanual", lomentc_test.L2_IF_MANUAL_SRC),
+                         # `#714`：体之后另一个块里的同名 `let`。孪生两边各有一份
+                         # `_l2_ok`/`l2_ok_at`，判错一格这一条就红。
+                         ("shadow", lomentc_test.L2_SHADOW_SRC)):
             target = Path(td) / f"gc_l2_{tag}.lomt"
             target.write_text(src, encoding="utf-8", newline="\n")
             want = _unit_ll(target)
@@ -1095,6 +1101,54 @@ def test_m89_l2_epoch_is_byte_identical():
     # 不许空转：alpha 那一份必须**真的**多出前沿的存取（每开一格多一条读、一条写）
     assert outs["alpha"].count("@__loment_off") > outs["manual"].count("@__loment_off"), \
         "alpha 那一份没有多出前沿的存取 —— 这条判据在空转"
+
+
+#: `#694`：整数字面量 `as iN` 直接按目标宽度发。两个实现曾经一起错（都是先 i32 再
+#: `zext`），所以孪生判据看不出——这里把这一形状**同时**钉在两边：先核参考 IR 里的值，
+#: 再核自举 codegen 的产物与它逐字节相同。
+_LITERAL_CAST_SRC = """module literal_cast
+choose runtime
+
+fn _start() {
+    let a: i64 = 253402300800 as i64;
+    let b: u64 = 253402300800 as u64;
+    let d: i64 = 4294967296 as i64;
+    let e: i64 = 9223372036854775807 as i64;
+    let g: u64 = 18446744073709551615 as u64;
+    let h: u8 = 300 as u8;
+    let i: i32 = 4294967296 as i32;
+    syscall4(60, 0, 0, 0);
+}
+"""
+
+
+@test
+def test_int_literal_cast_is_byte_identical():
+    """`#694`：`253402300800 as i64` 在**两个实现**上都必须是那个值，且 IR 逐字节相同。
+
+    **为什么非要有这一条**：缺陷本身是"两边一起错"——参考与自举都发
+    `zext i32 -769664 to i64`，所以任何只比"两边是否一致"的判据都绿。这里先核**值**
+    （独立于另一侧：`store i64 253402300800` 必须出现、`zext i32` 不许出现），再核一致。
+    """
+    if not _clang():
+        print("      SKIP: 无 clang")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        exe = _build_codegen(td)
+        target = Path(td) / "literal_cast.lomt"
+        target.write_text(_LITERAL_CAST_SRC, encoding="utf-8", newline="\n")
+        want = _unit_ll(target)
+        got = _run_codegen(exe, target, td)
+        for tag, ir in (("python", want), ("loment", got)):
+            for needle in ("store i64 253402300800", "store i64 4294967296",
+                           "store i64 9223372036854775807",
+                           "store i64 18446744073709551615"):
+                assert needle in ir, f"{tag} 缺少 {needle!r}（#694 的值没有进去）: {ir[:400]}"
+            assert "zext i32 -769664" not in ir, f"{tag} 仍然先截成 32 位: {ir[:400]}"
+            assert "store i8 44," in ir, f"{tag} 窄目标没有环绕: {ir[:400]}"
+        assert got == want, (
+            "整数字面量转型的 IR 两个实现不同:\n"
+            f" loment {got[:300]!r}\n python {want[:300]!r}")
 
 
 @test

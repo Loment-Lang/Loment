@@ -97,6 +97,43 @@ def test_out_of_range_literal_wraps_instead_of_emitting_an_invalid_constant():
 
 
 @test
+def test_int_literal_cast_keeps_the_literal_value():
+    """**整数字面量 `as iN` 的值就是字面量本身**（#694）—— 不许先按 i32 截断再放宽。
+
+    `253402300800 as i64` 曾经发成 `zext i32 -769664 to i64` = 4294197632：
+    值的低 32 位看着"像个数"，所以两个实现一致时没有任何孪生判据看得见。直接赋值那条
+    路一直是 64 位的 —— 坏的正好只是转型那一支。
+
+    **窄目标照旧环绕**（Loment 的整数语义）：`300 as u8` 是 44，不是 300。所以这条判据
+    同时钉住两半：宽目标不被截、窄目标仍环绕。
+    """
+    NL = chr(10)
+    src = NL.join([
+        "module m", "choose runtime", "",
+        "fn _start() {",
+        "    let a: i64 = 253402300800 as i64;",
+        "    let b: u64 = 253402300800 as u64;",
+        "    let d: i64 = 4294967296 as i64;",
+        "    let e: i64 = 9223372036854775807 as i64;",
+        "    let g: u64 = 18446744073709551615 as u64;",
+        "    let h: u8 = 300 as u8;",
+        "    let i: i32 = 4294967296 as i32;",
+        "    syscall4(60, 0, 0, 0);",
+        "}", "",
+    ])
+    assert errs(src) == [], errs(src)
+    ir = lomentc.emit_llvm(parse(src), ROOT, [])
+    for want in ("store i64 253402300800", "store i64 4294967296",
+                 "store i64 9223372036854775807",
+                 "store i64 18446744073709551615"):
+        assert want in ir, f"缺少 {want!r}: {ir}"
+    assert "zext i32 -769664" not in ir, ir
+    # 窄目标仍然按位宽环绕（这一半别在修 #694 时弄丢）
+    assert "store i8 44," in ir, ir
+    assert "store i32 0," in ir, ir
+
+
+@test
 def test_demo_parses_and_checks():
     mod = lomentc.load(DEMO)
     deps = lomentc.resolve_deps(mod, ROOT, DEMO.parent, entry=DEMO)
@@ -2891,9 +2928,11 @@ L2_MANUAL_SRC = L2_EPOCH_SRC.replace("@@CHOOSE@@", "choose gc_manual")
 #: `f_escape` 把指针赋给体外 / `f_strcat` 有 `str_concat` / `f_free` 体内有 `free` /
 #: `f_l0` 尺寸是字面量（L0 已经提到栈上，没什么可归还）/ `f_inline` 是认不出来的分配（整格
 #: 取消）/ `f_call` 把它交给了用户函数 / `f_rettp` 从体内 `return p`。
-#: `f_two` 是**同名循环互相挡**那一格 —— `#364` 之后这条边界过掉了：体之后的扫描**扫到
-#: 下一次同名 `let` 就停**（那之后名字换了主人；语言没有块作用域，`let` 是唯一的重声明
-#: 形状），于是两个兄弟循环**各自都开纪元**。
+#: `f_two` 是**同名循环互相挡**那一格 —— `#364` 之后体之后的扫描**扫到同一层下一次同名
+#: `let` 就停**（那之后名字换了主人；语言没有块作用域，`let` 是唯一的重声明形状）。
+#: **`#714` 之后第一格变回 `False`**：第二个循环的 `let p` 在**另一个块**里，静态上认不
+#: 出那个块跑没跑（`if` 的分支就可能没跑），所以第一个循环**整格取消**；第二个循环体之后
+#: 没有同名出现，照旧开。`s_shadow` 那条判据钉的就是这个保守方向。
 #: `f_bodyret` 是**终止**那一格：体在 `return` 处结束 —— 仍然开纪元，只是那条路不回退。
 #: `f_after` 是**只查体之后**那一格：体之前的同名使用不算逃逸。
 L2_WANT = {
@@ -2908,7 +2947,7 @@ L2_WANT = {
     "f_bodyret": [True],
     "f_rettp": [False],
     "f_nested": [True, True],
-    "f_two": [True, True],
+    "f_two": [False, True],
     "f_after": [True],
     "f_multi": [True],
     "f_both": [True],
@@ -2993,6 +3032,83 @@ def test_l2_block_epoch_rule():
     # 两份源只差那一行
     assert L2_ALPHA_SRC.replace("choose gc_auto_alpha", "X") == \
         L2_MANUAL_SRC.replace("choose gc_manual", "X")
+
+
+#: `#714`：体**之后**另一个块里的同名 `let` 不能当作"名字换了主人"。
+#:
+#: 形状就是 issue 里那三只（`p15_shadow0` / `p16_noshadow` / `p17_shadow1`）的静态版：
+#: 循环体分配 `c`，体之后有一个**可能没跑**的 `if` 重新声明 `c`，最后那次 `load8(c, 0)`
+#: 仍然指循环里那块 ⇒ 前沿**不能**退。旧规则在 `if` 里那个 `let` 处 `break`，把后面
+#: 那次出体使用一起跳过去了，于是发出 `store i32 %tN, ptr @__loment_off`，活块被回收。
+L2_SHADOW_SRC = """module gc_l2_shadow
+choose gc_auto_alpha
+choose runtime
+
+fn s_shadow(cond: u32, n: u32) -> u32 {
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i < 4 {
+        let c: ptr = alloc(n);
+        store8(c, 0, 3);
+        s = s + load8(c, 0);
+        i = i + 1;
+    }
+    if cond != 0 {
+        let c: ptr = alloc(8);
+        store8(c, 0, 9);
+        s = s + load8(c, 0);
+    }
+    return s + load8(c, 0);
+}
+
+fn s_noshadow(cond: u32, n: u32) -> u32 {
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i < 4 {
+        let c: ptr = alloc(n);
+        store8(c, 0, 3);
+        s = s + load8(c, 0);
+        i = i + 1;
+    }
+    return s;
+}
+
+fn s_shadow_only(cond: u32, n: u32) -> u32 {
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i < 4 {
+        let c: ptr = alloc(n);
+        store8(c, 0, 3);
+        s = s + load8(c, 0);
+        i = i + 1;
+    }
+    if cond != 0 {
+        let c: ptr = alloc(8);
+        store8(c, 0, 9);
+        s = s + load8(c, 0);
+    }
+    return s;
+}
+"""
+
+
+@test
+def test_l2_shadow_in_another_block_cancels_the_epoch():
+    """`#714`：体之后**另一个块**里的同名 `let` 结束时末的整格退回（保守），不能用它当
+    "名字换主人"的证据 —— 那条分支可能根本没跑。
+
+    三格：
+      * `s_shadow` —— issue 的复现形状：`if` 里同名 `let` + 之后仍用循环那块 ⇒ **False**
+        （旧规则给出 True，于是活块被回收；这是这条判据的"红"）；
+      * `s_shadow_only` —— 同一个 `if`、但体之后没有再用 ⇒ **False**。这是**保守**的代价：
+        静态上分不出 `if` 跑没跑，宁可少开一格；
+      * `s_noshadow` —— 对照组：去掉那个 `if` ⇒ **True**（规则没有被一刀切死）。
+    """
+    assert _l2_flags(L2_SHADOW_SRC) == {
+        "s_shadow": [False],
+        "s_shadow_only": [False],
+        "s_noshadow": [True],
+    }, _l2_flags(L2_SHADOW_SRC)
 
 
 #: `if` 的两支开纪元那一格（`docs/210` §2.3 / §7）。**源只有一份** —— 这条真值表判据与

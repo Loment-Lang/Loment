@@ -1414,18 +1414,26 @@ CORE_DIMS: dict[str, tuple[str, ...]] = {
     # **但带维名前缀**（`lms_*`，照 `gc_manual`/`gc_auto` 的先例）：`open` / `close`
     # 单独太泛，而 `CORE_WORDS` 还兼管表层语法的 `choose` 行摘取。
     "lms": ("lms_close", "lms_open"),
+    # **安全审计**（`docs/262`，用户 2026-10-18 定第七维）。与其它六维**正交**：
+    # 它不改变任何判决，只决定"放行有没有来源"的记录在不在。
+    # `lspe_open_admin`（开）= 默认；`lspe_close_admin`（关）= **关审计，不关检查** ——
+    # LMS / LGC / runtime / 能力域的判决一条不少，关掉的只是"凭什么放行"的台账。
+    # **关闭带 `_admin`**：关关键系统是一次管理动作（`docs/262` §10.1）。
+    # 取值**带维名前缀**（`lspe_*`），理由同 `lms_*`：`open` / `close` 单独太泛。
+    "lspe": ("lspe_open_admin", "lspe_close_admin"),
 }
 #: 冲突**两两查**时的维序。**写死的** —— 报错文本里两个取值的先后由它决定，
 #: 而两个实现比的是字节，所以它不能是集合迭代顺序。
 #: `lms` 排在最后：它**没有冲突对**，追加在尾部不会改动任何既有配对的先后。
-CORE_DIM_ORDER: tuple[str, ...] = ("mode", "gc", "runtime", "port", "vm", "lms")
+CORE_DIM_ORDER: tuple[str, ...] = ("mode", "gc", "runtime", "port", "vm", "lms", "lspe")
 #: 所有核心模式的取值 —— "这一个 `choose` 是核心模式还是开关"就看它在不在这里面。
 CORE_WORDS = frozenset(w for _ws in CORE_DIMS.values() for w in _ws)
 #: 取值 → 属于哪一维（报错要说清是**哪一维**写了两次）。
 CORE_DIM_OF = {w: d for d, ws in CORE_DIMS.items() for w in ws}
 #: 每一维**不写**时的取值 —— 默认档，且默认**不改变任何现有程序的行为**。
 CORE_DEFAULTS = {"mode": "std", "gc": "gc_manual", "runtime": "no_runtime",
-                 "port": "sealed", "vm": "no_vm", "lms": "lms_close"}
+                 "port": "sealed", "vm": "no_vm", "lms": "lms_close",
+                 "lspe": "lspe_open_admin"}
 #: 维的**人话**名字。报错要说清是**哪一维**写了两次 —— `gc` 对用户不是一个词，
 #: 而"核心模式只能声明一次"在有两维之后就**说不清是哪一维**了。
 CORE_DIM_ZH = {
@@ -1435,6 +1443,7 @@ CORE_DIM_ZH = {
     "port": "对外端口（`sealed` / `hosted`）",
     "vm": "执行模型（`vm` / `no_vm`）",
     "lms": "内存安全（`lms_close` / `lms_open`）",
+    "lspe": "安全审计（`lspe_open_admin` / `lspe_close_admin`）",
 }
 #: **互相冲突的取值对**（`docs/175` §3.4 ⚠）。键是取值，值 = (和它冲突的取值, 为什么)。
 #: 报错要**点名这两档为什么冲突**，不能泛泛说"非法组合"（判据见 `docs/175` §3.4）。
@@ -4032,17 +4041,20 @@ _RECURSION_FLOOR = 8000
 
 
 def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
-          deps: list[Module] | None = None, _dep_pass: bool = False) -> list[str]:
+          deps: list[Module] | None = None, _dep_pass: bool = False,
+          lspe_mode: str = "full") -> list[str]:
     if sys.getrecursionlimit() < _RECURSION_FLOOR:
         sys.setrecursionlimit(_RECURSION_FLOOR)
     try:
-        return _check(mod, ext_funcs=ext_funcs, deps=deps, _dep_pass=_dep_pass)
+        return _check(mod, ext_funcs=ext_funcs, deps=deps, _dep_pass=_dep_pass,
+                      lspe_mode=lspe_mode)
     except RecursionError:
         raise LomError(0, 0, "嵌套超过编译器的递归上限 —— 把这段拆成几个函数，或把表达式拆开") from None
 
 
 def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
-           deps: list[Module] | None = None, _dep_pass: bool = False) -> list[str]:
+           deps: list[Module] | None = None, _dep_pass: bool = False,
+           lspe_mode: str = "full") -> list[str]:
     # **依赖的正文也查** (`#149`, 2026-10-09 补)。原先只把 `deps` 的**导出符号**入表
     # (M12: 仅 pub 可见), 正文不验 —— 于是 `pub fn f(p: ptr) -> u32 { return p; }` 这样的库
     # **当依赖时一路绿**, 只有当**入口**查才报。后果: 一个库可以带着正文类型错发布, 而每一个
@@ -4618,6 +4630,18 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                 # 消息前面点出**哪个单元**的错 —— 不然用户不知道去改哪个文件。
                 where = _unit_where(d)
                 errs.extend(f"{where}: {e}" for e in sub)
+    # ---- LSPE（`docs/262`）：Q1 来源问与站点对账。
+    # ⚠ **只在根单元、只在审计开**。默认档只把无来源站点记进台账的 `undecided`；
+    # 只有 `lspe_mode == "strict"` 才把它们升级成 E034 —— 这是"温柔"那条的落点。
+    if (not _dep_pass
+            and mod.chooses.get("lspe", CORE_DEFAULTS["lspe"]) == "lspe_open_admin"):
+        for s in getattr(mod, "lspe_sites", []):
+            if s.get("kind") not in ("guard", "index"):
+                errs.append(f"{s.get('line', 0)}: LSPE 台账里有未登记的站点种类"
+                            f" {s.get('kind')!r}")
+        if lspe_mode == "strict":
+            for line in getattr(mod, "lspe_unsourced_lines", []):
+                errs.append(f"{line}: LSPE 未能为这次放行给出来源（未标注的放行）")
     return errs
 
 
@@ -5458,6 +5482,21 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
                            "（`Box<[u8; 4]>` / `Box<[u32]>` / `Box<*mut u8>`）**没有名字规则**，"
                            "而且**后端**（`native M23`：struct 字段暂只支持标量）先把它们挡住了 "
                            "—— 所以现在没有东西需要那个名字。见 `docs/147` §2「命名层」")
+    # ---- LSPE 台账的计数（`docs/262` §8）。`lspe_close_admin` 下**关审计**：
+    # 站点普查不算，台账只写状态与 `set_by`。这与"关的是警察、不是法律"一致。
+    _lspe_state = mod.chooses.get("lspe", CORE_DEFAULTS["lspe"])
+    _lspe_sites = ([] if _lspe_state == "lspe_close_admin"
+                   else getattr(mod, "lspe_sites", []))
+    _lspe_by_kind: dict[str, list[int]] = {}
+    for _s in _lspe_sites:
+        _pair = _lspe_by_kind.setdefault(_s["kind"], [0, 0])
+        _pair[0] += 1
+        if _s["proved"]:
+            _pair[1] += 1
+    _lspe_n = len(_lspe_sites)
+    _lspe_proved = sum(1 for _s in _lspe_sites if _s["proved"])
+    _lspe_undecided = _lspe_n - _lspe_proved
+    _lspe_per_kind = {k: f"{v[1]}/{v[0]}" for k, v in sorted(_lspe_by_kind.items()) if v[0]}
     doc = {
         # v3 = v2 + **开关取值** (docs/182 §1)。**升版本而不是往 v2 加字段**, 与 v1->v2
         # 那条同一个理由: 新字段是必填的 (删掉它校验器必须红), 而往旧版加必填字段会让
@@ -5495,7 +5534,9 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # 是编译错误，所以发行版发的对象里 `vm` **恒为** `no_vm`。
         # v14 = v13 + **联网站点的宽度组成** `net_ladder`（`docs/237`）：四档各领走几个站点。
         # 与 `gc_ladder` 同形，多一条交叉：`total_net` 必须等于 `surfaces.net`。
-        "potato": "v15",
+        # v16 = v15 + **LSPE 台账** `lspe`（`docs/262`）：审计状态 + 站点/义务计数 +
+        # 地板明细 + 不变量。它是**另一个字段**，按 `gc_ladder` 的先例单独升一版。
+        "potato": "v16",
         "unit": mod.name,
         "language": "loment",
         # **表层语法**（`docs/188` §2）—— 与 `language` 分工不同, 别混:
@@ -5528,6 +5569,32 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # 与 `gc` **正交** —— 同一张图上相反的两个方向（`docs/210` §6.2）。同一条纪律：
         # **必填**，于是"这份产物开没开内存安全"是**不读源码可判的**。
         "lms": mod.chooses.get("lms", CORE_DEFAULTS["lms"]),
+        # **安全审计**（`docs/262`，用户 2026-10-18 定第七维）：台账是 LSPE 的第四件。
+        # `state` 是开关值；`set_by` 说这一档是**谁定的**（今天只有 default / source）。
+        # 计数在 0.1.5 先全为 0，0.1.5.1 起由 QIR/普查/来源问填真值 —— 但**字段必须现在就在**，
+        # 否则"这份产物有没有被审计"仍然读不出来。
+        "lspe": {
+            "state": _lspe_state,
+            "set_by": ("source" if "lspe" in mod.chooses else "default"),
+            "mode": "full",
+            "level": 3,
+            "sites": _lspe_n,
+            "obligations": _lspe_n,
+            "proved": _lspe_proved,
+            "undecided": _lspe_undecided,
+            "deferred": 0,
+            "refused": 0,
+            "floors": 0,
+            "floor_detail": {"assumed": 0, "stale_wf": 0, "budget": 0, "drop_honest": 0},
+            "per_kind": _lspe_per_kind,
+            # I1 = 站点对账（今天只对"种类都认识"这一半；跨组件那份在 #761）。
+            "invariants": {
+                "i1": ("ok" if all(s["kind"] in ("guard", "index") for s in _lspe_sites)
+                       else "fail"),
+                "i2": "not_run", "i3": "not_run", "i4": "not_run", "i5": "not_run",
+            },
+            "acked": 0,
+        },
         # 开关取值 (用户 2026-09-17: **"开关的取值是要进 Potato 的"**, docs/182 §1)。
         # **永远是显式的数组**（可为空）—— 与 `mode` 同一条纪律: 不存在"缺这项"的形态,
         # 所以"这台机器上这个开关开没开"是**可回放**的, 不是"看当时的源码猜"。
@@ -8844,6 +8911,58 @@ pub enum Result<T, E> { Ok(T), Err(E) }
 """
 
 
+#: `[` 前面出现这些关键字时，它是**类型方括号 / 数组字面量**，不是下标。
+_LSPE_BRACKET_KW = frozenset({
+    "return", "if", "while", "match", "let", "const", "in", "else", "for",
+    "fn", "struct", "enum", "impl", "trait", "pub", "use", "module", "choose",
+    "capability", "excluded", "guard", "as",
+})
+
+
+def _lspe_census(toks: list, unit: str) -> tuple[list[dict], list[int]]:
+    """P0 的站点普查（`docs/262` §5.1）：guard 语句 + 下标表达式。
+
+    口径是**词法的**，且两套实现用**同一条规则** —— 参考侧吃 `lomc.lex` 的 token，
+    自举侧吃驱动器的 token 数组。这样 twin 的计数不会因为 AST 形状不同而漂。
+
+    * `guard` 关键字 = 一个 guard 站点，来源 `capability`；
+    * `[` 且前一个 token 是**非关键字标识符 / `)` / `]`** = 一个 index 站点；
+      下标是**裸字面量**（`[ N ]` 三个 token）时来源 `lms(g0)`，否则无来源。
+    """
+    sites: list[dict] = []
+    unsourced: list[int] = []
+    ordn = {"guard": 0, "index": 0}
+    n = len(toks)
+    for i, t in enumerate(toks):
+        if t.kind == "ident" and t.val == "guard":
+            sites.append({"id": f"{unit}:guard:{ordn['guard']}", "kind": "guard",
+                          "source": "capability", "line": t.line, "proved": True})
+            ordn["guard"] += 1
+            continue
+        if t.kind != "punct" or t.val != "[" or i == 0:
+            continue
+        prev = toks[i - 1]
+        indexish = ((prev.kind == "ident" and prev.val not in _LSPE_BRACKET_KW)
+                    or (prev.kind == "punct" and prev.val in (")", "]")))
+        if not indexish:
+            continue
+        # 能力域声明 `capability d : disk[0..8]` 的 `[` 不是下标 —— 里面有 `..`
+        # （词法器把它拆成两个 `.` token）。
+        if (i + 3 < n and toks[i + 1].kind == "number"
+                and toks[i + 2].kind == "punct" and toks[i + 2].val == "."
+                and toks[i + 3].kind == "punct" and toks[i + 3].val == "."):
+            continue
+        literal = (i + 2 < n and toks[i + 1].kind == "number"
+                   and toks[i + 2].kind == "punct" and toks[i + 2].val == "]")
+        sites.append({"id": f"{unit}:index:{ordn['index']}", "kind": "index",
+                      "source": ("lms(g0)" if literal else None),
+                      "line": t.line, "proved": literal})
+        ordn["index"] += 1
+        if not literal:
+            unsourced.append(t.line)
+    return sites, unsourced
+
+
 def load(path: Path, sw: SwitchTable | None = None) -> Module:
     # **前门**（`docs/188` §7.2）：读法由**声明**决定，不由后缀或嗅探。
     # 一份 `choose write grammar python` 的 `.lomt` 按 `docs/188` §0 **仍然是 Loment**，
@@ -8882,6 +9001,9 @@ def load(path: Path, sw: SwitchTable | None = None) -> Module:
 
     tt, _dias = loment_comefor.expand(tt, text)
     mod = Parser(tt, text).parse()
+    # LSPE 的站点普查（`docs/262` §5.1）：在**最终 token 流**上算一次。
+    # 与自举侧 `potato.lomt` 的 `pt_lspe` 同一条规则 —— twin 的计数不能漂。
+    mod.lspe_sites, mod.lspe_unsourced_lines = _lspe_census(tt, mod.name)
     # 方言清单挂在模块上，供 Potato v4 用（`docs/184` §9 S4.3）。**定义那一段已经被
     # 抹掉了**，所以这是唯一还记得"这份源用了哪些自定义语法"的地方。
     mod.dialects = _dias

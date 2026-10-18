@@ -510,7 +510,12 @@ fn chk_core_dim(src: ptr, t: ptr, k: u32) -> u32 {
     if chk_tok_is(src, t, k, "lms_close") || chk_tok_is(src, t, k, "lms_open") {
         return 5;
     }
-    return 6;
+    // 第七维（`docs/262`，用户 2026-10-18）：`lspe`。与其它六维正交 ——
+    // 它不改变任何判决，只决定"放行有没有来源"的台账在不在。
+    if chk_tok_is(src, t, k, "lspe_open_admin") || chk_tok_is(src, t, k, "lspe_close_admin") {
+        return 6;
+    }
+    return 7;
 }
 
 /// token `i` 是不是**会把运行期拖进产物**的构造（`docs/217`）。1 = 是。
@@ -3661,6 +3666,8 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     let nch_lms: u32 = 0;       // 第六维（`docs/253`）：内存安全 —— ⚠ **只数重复**：
                                 // `lms` 今天**没有冲突对**（它不引入运行期组件，`docs/253` §11.2），
                                 // 所以不像上面五维那样还要 `v_*` / `ln_*` 来判冲突。
+    let nch_lspe: u32 = 0;      // 第七维（`docs/262`）：安全审计 —— 同样**只数重复**。
+                                // 它不改变任何判决，所以没有冲突对。
     // 生效的取值（0 = 没写），用来判"两档不能同时选"（`docs/175` §3.4 ⚠）。
     // **要等这一遍走完才判** —— 两行谁先写是不定的。
     let v_mode: u32 = 0;        // 1 = std, 2 = no_std
@@ -3871,6 +3878,12 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                 // 第六维（`docs/253`）：`lms`。**只有重复要判** —— 它没有冲突对。
                 nch_lms = nch_lms + 1;
                 if nch_lms > 1 {
+                    o = sym_pub(src, t, out, o, E_MODE, i);
+                }
+            } else if dim == 6 {
+                // 第七维（`docs/262`）：`lspe`。**只有重复要判** —— 它没有冲突对。
+                nch_lspe = nch_lspe + 1;
+                if nch_lspe > 1 {
                     o = sym_pub(src, t, out, o, E_MODE, i);
                 }
             } else {

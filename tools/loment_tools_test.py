@@ -1794,6 +1794,25 @@ def test_lomf_never_applies_on_a_guess():
     print("      对不上就报错、一处不动；插入式在解析期被拒；套用与重复套用都幂等")
 
 
+@test
+def test_m77_lspe_state_and_stubs():
+    """`loment lspe state` 打出台账；why/verify 是 0.1.5.2 的桩，必须非零且点名。"""
+    r = subprocess.run([sys.executable, str(ROOT / "tools" / "loment.py"),
+                        "lspe", "state", str(EX / "demo.lomt")],
+                       capture_output=True, text=True, encoding="utf-8", shell=False)
+    assert r.returncode == 0, r.stderr[-300:]
+    doc = json.loads(r.stdout)
+    assert doc["state"] == "lspe_open_admin", doc
+    assert doc["sites"] == doc["proved"] + doc["undecided"], doc
+    for sub in ("why", "verify"):
+        args = [sys.executable, str(ROOT / "tools" / "loment.py"), "lspe", sub]
+        args += ["S47"] if sub == "why" else ["x"]
+        s = subprocess.run(args, capture_output=True, text=True,
+                           encoding="utf-8", shell=False)
+        assert s.returncode == 2, (sub, s.returncode)
+        assert "0.1.5.2" in s.stderr, s.stderr
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_tools_test")
 

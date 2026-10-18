@@ -231,6 +231,7 @@ module std_edge_probe
 choose runtime
 use parse
 use bigint
+use bigdec
 
 fn ep_w(s: str) -> u32 {
     return syscall4(1, 1, str_ptr(s) as u64, str_len(s) as u64) as u32;
@@ -308,6 +309,18 @@ fn _start() {
     let r3: u32 = bigint_divmod_small(q2, 8, b, 7);
     let _d5: u32 = ep_line("big_ret", r3 as u64);
     let _d6: u32 = ep_line("big_q", bigint_to_u64(q2));
+    // #722: bigdec 的零除数 —— 返回哨兵、结果成 0，不是 SIGILL。
+    let bd: ptr = alloc(bigdec_bytes(16));
+    let bdr: ptr = alloc(bigdec_bytes(16));
+    let bdt: ptr = alloc(bigint_dec_tmp_bytes(16));
+    bigdec_from_u64(bd, 16, 100, 2);
+    let rb: u32 = bigdec_div_small(bdr, 16, bd, 0, bdt, 16);
+    let _e0: u32 = ep_line("bd_div0_ret", rb as u64);
+    let bz: u32 = 0;
+    if bigdec_is_zero(bdr) {
+        bz = 1;
+    }
+    let _e1: u32 = ep_line("bd_div0_zero", bz as u64);
     syscall4(60, 0, 0, 0);
 }
 """
@@ -364,6 +377,8 @@ def _edge_expected() -> str:
         "div10_q|100000000",
         f"big_ret|{(2 ** 64 - 1) % 7}",
         f"big_q|{(2 ** 64 - 1) // 7}",
+        "bd_div0_ret|4294967295",
+        "bd_div0_zero|1",
     ]
     return "\n".join(out) + "\n"
 

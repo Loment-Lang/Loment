@@ -1315,6 +1315,14 @@ class Module:
     #: 那让 `loment dbg`（M75）报的"源码级符号化"指不到源，也让断点无从对起 ——
     #: **调试器就是被这一条挡住的**。
     src: "Path | None" = None
+    #: **直接依赖的单元身份**（`resolve_deps` 填，`_unit_id` 的取值）。“依赖体检那一趟”
+    #: 要用它：每个单元**只拿自己的依赖**再接一遍，而不是整份闭包（#726）。
+    #:
+    #: **为什么这不是"更窄所以更危险"**：闭包里的**兄弟单元**会被当成它的依赖 —— 于是
+    #: `f64bits`（没有一条 `use`）会收到"依赖 `mem` 要求 `runtime`"这种话，而它不是
+    #: 根的依赖、只是**根的另一个依赖的依赖**。`check()` 里那句"传给整份闭包只会漏报、
+    #: 不会误报"就是从这儿被证伪的。
+    dep_ids: list = field(default_factory=list)
     #: 本模块的**词法流**（`load()` 填，已在开关/`comefor` 之后）。L0/L1/L2 的判据都
     #: 定义在 token 流上，而"跨函数 deref-only"那次放宽（`docs/210` §7）让分析**不能在
     #: `parse()` 里做**了 —— 安全表要 root + deps 一起算，那只有 `emit_*` 那一层够得着，
@@ -3885,10 +3893,14 @@ def resolve_deps(mod: Module, root: Path, base: Path, entry: Path | None = None,
             if rp in stack:
                 raise LomError(1, 1, f"循环导入: {imp}")
             if rp in seen:
+                # 边**先记**在 `seen` 之前那道 `continue` 上：同一份文件被两个单元
+                # `use`，第二个单元的依赖图里也得有这条边，否则它的体检会少看见它。
+                m.dep_ids.append(rp)
                 continue
             seen.add(rp)
             stack.add(rp)
             sub = load(rp, sw=sw)
+            m.dep_ids.append(_unit_id(sub))
             if is_addin:
                 sub.from_addin = True
             visit(sub, rp.parent, depth + 1)
@@ -4583,8 +4595,24 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     # 把根因埋掉 (与 `pytrans` 的 `pp_uns`、`check` 里那条 `dup_unit` 同一条纪律)。
     # 改完入口再跑一次, 依赖那层的错自然浮上来。
     if not _dep_pass and deps and not errs:
+        _by_id = {_unit_id(x): x for x in deps}
         for d in deps:
-            others = [x for x in deps if _unit_id(x) != _unit_id(d)]
+            # **只给它自己的闭包**（#726）。从前这里传的是**整份** `deps` 减自己 ——
+            # 于是兄弟单元被当成它的依赖：`f64bits` 没有一条 `use`，却因为闭包里
+            # 还有 `mem`/`wide`/`f64`（都声明了 `choose runtime`）而被报"依赖要求
+            # runtime，而根是 no_runtime"。被体检的单元**不是根**，它的"根"是它自己 ——
+            # 而"依赖的声明是需求"这条只该对着**真正的依赖图**说。
+            _reach: set = set()
+            _todo = list(d.dep_ids)
+            while _todo:
+                _k = _todo.pop()
+                if _k in _reach or _k == _unit_id(d):
+                    continue
+                _reach.add(_k)
+                _u = _by_id.get(_k)
+                if _u is not None:
+                    _todo.extend(_u.dep_ids)
+            others = [x for x in deps if _unit_id(x) in _reach]
             sub = check(d, ext_funcs=ext_funcs, deps=others, _dep_pass=True)
             if sub:
                 # 消息前面点出**哪个单元**的错 —— 不然用户不知道去改哪个文件。

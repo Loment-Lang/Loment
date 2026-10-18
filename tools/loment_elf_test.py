@@ -2552,6 +2552,43 @@ def test_a_corrupt_shared_object_is_a_diagnostic_not_a_traceback():
     print(f"      {len(cases)} 种改坏的 .so 都报 Unsupported"
           f"（含版本表跳出/走不完，不再转圈）")
 
+    # **镜像那一侧**（`#593` / `#594`）：包里跑的就是它。它的 `so_load` 把文件长度 `n`
+    # 收进形参、一次也没用过 —— 176 字节的坏文件能读到 32 MiB 外（SIGSEGV），或者读到
+    # 上一个 `--link` 文件留下的字节（诊断指错方向）；DT_STRTAB 缺了还会把 ELF 头那几个
+    # 字节当成 SONAME 写进 `DT_NEEDED`。两半都要**退出非零并说一句话**。
+    if not (_clang() and _wsl()):
+        print("      SKIP 镜像侧: 无 clang/WSL")
+        return
+    mir = _mirror()
+    bld = ROOT / "loment" / "build"
+    bld.mkdir(parents=True, exist_ok=True)
+    llrepo = bld / "_mirror_so_mut.ll"
+    outrepo = bld / "_mirror_so_mut.elf"
+    sorepo = bld / "_mirror_so_mut.so"
+    with tempfile.TemporaryDirectory(prefix="so-mut-mir-") as tdm:
+        src = Path(tdm) / "m.lomt"
+        src.write_text("module m\n\nextern fn compress(a: ptr, b: u32) -> i32;\n\n"
+                       "fn _start() -> u32 {\n    return 0;\n}\n",
+                       encoding="utf-8", newline="\n")
+        llrepo.write_bytes(_ref_ir(src, Path(tdm)).read_bytes())
+    # 版本定义链那两刀是**参考侧独有**的：镜像是按**节类型**找 `.dynsym` / `.gnu.version`，
+    # 从来不读 `.gnu.version_d`（它不需要"版本名的说法"，那份只用于参考的错误消息）。
+    # 它压根不碰那一段，所以改那一段它没反应——**留着会是一条测不到东西的断言**。
+    mir_cases = {k: v for k, v in cases.items() if "版本定义链" not in k}
+    try:
+        for name, data in mir_cases.items():
+            sorepo.write_bytes(data)
+            rc, err = _mirror_run(mir, "loment/build/_mirror_so_mut.ll",
+                                  "loment/build/_mirror_so_mut.elf",
+                                  ("loment/build/_mirror_so_mut.so",))
+            assert rc != 0, f"[镜像] {name}: 改坏的 .so 被收下了 (rc=0)"
+            assert "共享对象" in err, (
+                f"[镜像] {name}: 没说出是共享对象（信号？）rc={rc} {err[-200:]!r}")
+    finally:
+        for f in (llrepo, outrepo, sorepo):
+            f.unlink(missing_ok=True)
+    print(f"      镜像侧：{len(mir_cases)} 种改坏的 .so 都退出非零并点名")
+
 
 @test
 def test_lomelf_selfhost_links_a_real_shared_object():

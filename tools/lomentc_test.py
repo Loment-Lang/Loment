@@ -4273,7 +4273,7 @@ def test_lspe_dimension_defaults_open():
     assert lp["sites"] >= 1
     assert lp["obligations"] == lp["sites"]
     assert lp["sites"] == lp["proved"] + lp["undecided"]
-    assert "index" in lp["per_kind"]
+    assert "InBounds" in lp["per_kind"]
     assert lp["floors"] == 0
     assert lp["floor_detail"] == {"assumed": 0, "stale_wf": 0, "budget": 0, "drop_honest": 0}
     assert lp["invariants"]["i1"] == "ok"
@@ -4322,7 +4322,7 @@ def test_lspe_q1_provenance_and_strict_e034():
     lp = doc["lspe"]
     assert lp["sites"] == 3, lp
     assert lp["proved"] == 2 and lp["undecided"] == 1, lp
-    assert lp["per_kind"] == {"guard": "1/1", "index": "1/2"}, lp
+    assert lp["per_kind"] == {"GuardHolds": "1/1", "InBounds": "1/2"}, lp
     assert potato.validate(doc) == []
 
 
@@ -4577,6 +4577,61 @@ def test_a_parameter_may_shadow_a_module_const():
     dup = ("module v3" + chr(10) + "fn f(K: i64, K: i64) -> i64 { return K; }" + chr(10))
     assert any("重复" in x for x in errs(dup)), errs(dup)
     print("      形参遮蔽常量：接受；真重名：仍然报")
+
+
+def _lspe_registry_errors() -> list[str]:
+    """登记表自身的判据（测试侧）：缺所有者、缺 accept 集合、未知证据、Differential 销义务。"""
+    errs: list[str] = []
+    known = set(lomentc.LSPE_EVIDENCE_KINDS)
+    for name, spec in lomentc.LSPE_OBLIGATIONS.items():
+        owner = spec.get("owner")
+        accept = spec.get("accept")
+        if not isinstance(owner, str) or not owner:
+            errs.append(f"{name}: 缺语义所有者")
+        if not isinstance(accept, tuple) or not accept:
+            errs.append(f"{name}: 缺 accept 集合")
+            continue
+        bad = set(accept) - known
+        if bad:
+            errs.append(f"{name}: 未知证据种类 {sorted(bad)}")
+        if "Differential" in accept:
+            errs.append(f"{name}: Differential 不能单独销掉义务")
+    return errs
+
+
+@test
+def test_lspe_obligation_registry():
+    """14 条义务、8 种证据；每条都有 owner 与 accept；Differential 不在任何 accept 里。"""
+    assert len(lomentc.LSPE_OBLIGATIONS) == 14
+    assert len(lomentc.LSPE_EVIDENCE_KINDS) == 8
+    assert _lspe_registry_errors() == []
+    assert all("Differential" not in v["accept"]
+               for v in lomentc.LSPE_OBLIGATIONS.values())
+    assert set(lomentc.LSPE_EVIDENCE_KINDS) == {
+        "Axiom", "Syntactic", "Typed", "LocalFlow", "Interproc",
+        "GlobalInvariant", "Assumed", "Differential"}
+
+
+@test
+def test_lspe_level_only_lowers_proved():
+    """L0 只认语法证据；L3 才认类型证据。级别只缩不放（`docs/262` §5.6）。"""
+    src = ("module lspe_lv\n\nchoose runtime\n\n"
+           "capability d : disk[0..8]\n\n"
+           "fn f(a: [u32; 4], i: u32) -> u32 {\n"
+           "    guard d(i);\n"
+           "    let x: u32 = a[0];\n"
+           "    return a[i];\n"
+           "}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "lv.lomt"
+        p.write_text(src, encoding="utf-8", newline=chr(10))
+        d0 = json.loads(lomentc.emit_potato(lomentc.load(p, lspe_level=0), ROOT))
+        d3 = json.loads(lomentc.emit_potato(lomentc.load(p, lspe_level=3), ROOT))
+    assert d0["lspe"]["level"] == 0 and d3["lspe"]["level"] == 3
+    # L0：guard 的 Typed 证据被级别挡掉，只剩裸字面量下标那条 Syntactic。
+    assert d0["lspe"]["proved"] == 1, d0["lspe"]
+    assert d3["lspe"]["proved"] == 2, d3["lspe"]
+    assert d0["lspe"]["proved"] <= d3["lspe"]["proved"]
 
 
 def main() -> int:

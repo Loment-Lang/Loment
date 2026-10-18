@@ -2281,7 +2281,7 @@ fn pt_lspe(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
     } else {
         o = pt_str(out, o, "{\n");
         if gt > 0 {
-            o = pt_key(out, o, 3, "guard");
+            o = pt_key(out, o, 3, "GuardHolds");
             o = pt_str(out, o, "\"");
             o = pt_dec(out, o, gt as u64);
             o = pt_str(out, o, "/");
@@ -2292,7 +2292,7 @@ fn pt_lspe(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
             }
         }
         if it > 0 {
-            o = pt_key(out, o, 3, "index");
+            o = pt_key(out, o, 3, "InBounds");
             o = pt_str(out, o, "\"");
             o = pt_dec(out, o, ip as u64);
             o = pt_str(out, o, "/");

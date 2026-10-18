@@ -2049,14 +2049,18 @@ def test_m85_codegen_table_capacity():
     enum_base, enum_stride = cst("CG_ENUM"), 80
     local_base = cst("CG_LOCAL")                      # 枚举表的上界 = 局部表基址
     param_base, param_stride = cst("CG_PARAM"), 160   # `#265`: 20 槽 x 8
+    const_base, const_stride = cst("CG_CONST"), 8     # `#719`: 常量表紧跟安全名表
+    const_cap = cst("CG_MAXCONST")
     bytes_total = cst("CG_BYTES")
     # 守卫必须用**同一个**常量, 否则表放大了守卫还卡在旧数 (或反过来写穿)
     assert f"n >= CG_MAXFN" in src, "函数表的守卫没和容量常量同源"
     assert f"en >= CG_MAXENUM" in src, "枚举表的守卫没和容量常量同源"
+    assert f"kn >= CG_MAXCONST" in src, "常量表的守卫没和容量常量同源"
     # 容量 = 每张表在"下一张表开始时"之前能放多少个。
     cap_fn = (fk_base - fn_base) // fn_stride          # fk 表紧跟函数表
     cap_fk = (cur_base - fk_base) // fk_stride         # 参数替换表紧跟 fk 表
-    cap_param = (bytes_total - param_base) // param_stride
+    cap_param = (const_base - param_base) // param_stride   # 常量表紧跟形参类型表
+    cap_const = (bytes_total - const_base) // const_stride
     cap_enum = (local_base - enum_base) // enum_stride  # 枚举表上界 = 局部表基址
     cap = min(cap_fn, cap_fk, cap_param)
     # 最大单元 = driver.lomt 的整单元 (lexer+codegen+checker+driver)。
@@ -2067,10 +2071,13 @@ def test_m85_codegen_table_capacity():
     nfns = sum(1 for tk in unit_toks if tk.kind == "ident" and tk.val == "fn")
     assert nfns <= cap, (f"最大单元有 {nfns} 个函数, 超过 codegen 表容量 {cap} "
                          f"(fn {cap_fn} / fk {cap_fk} / 形参 {cap_param}) —— 请重排布局")
+    nconst = sum(1 for tk in unit_toks if tk.kind == "ident" and tk.val == "const")
+    assert nconst <= cap_const, (f"最大单元有 {nconst} 个常量, 超过常量表容量 {cap_const}")
     nenum = sum(1 for tk in unit_toks if tk.kind == "ident" and tk.val == "enum")
     assert nenum <= cap_enum, f"最大单元有 {nenum} 个枚举, 超过枚举表容量 {cap_enum}"
     print(f"      codegen 表容量: {cap} 个函数 (fn {cap_fn}/fk {cap_fk}/形参 {cap_param}), "
-          f"最大单元 {nfns} 个; 枚举表 {cap_enum} 格, 单元里 {nenum} 个")
+          f"最大单元 {nfns} 个; 枚举表 {cap_enum} 格, 单元里 {nenum} 个; "
+          f"常量表 {cap_const} 格, 单元里 {nconst} 个")
 
 
 @test

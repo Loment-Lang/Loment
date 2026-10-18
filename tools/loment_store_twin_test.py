@@ -77,27 +77,16 @@ def _declared_grammar(path: Path) -> str:
 
 
 #: **已知缺口**（棘轮：只许变短）。键是 `lompi/store` 下的相对路径。
-KNOWN_GAPS: dict[str, str] = {
-    "std/0.1.0/base32.lomt":
-        "#719：移位右操作数里 `5 * j` 的类型没有折进来（自举落 i64、参考 i32）",
-    "std/0.1.0/matrix.lomt":
-        "#719：`0 as u64 as ptr` 这种**链式**转型在自举侧只做第一层，少了 `inttoptr`",
-    "std/0.1.0/rational.lomt":
-        "#719：64 位字面量的环绕（自举侧只做到 32 位；`9223372036854775808` 没折成负数）",
-    "std/0.1.0/std.lomt":
-        "#719：门面太大，自举侧检查器的符号表装不下（参考实现无上限）",
-    "std/0.1.0/f64fmt.lomt":
-        "#719：链式转型只做第一层 —— `x as i32 as i64` 缺了第二条 `sext`（自举发 "
-        "`store i64 %i32值`，是非法 IR）",
-    "std/0.1.0/libl.lomt":
-        "#719：L0 的安全被调集合比参考**大**：自举把 `bsearch` 的首参判成不外逃、"
-        "参考判成外逃 —— 于是 `bsearch_u32` 的 `alloc(4)` 自举提到栈上（`slot.buf`）、"
-        "参考留在堆上。测试面里 `bsearch` 不接收它，但这一格两边必须同集合",
-    "std/0.1.0/stdio.lomt":
-        "#719：同 `libl`（经 `stdlib` 的 `bsearch_u32` 进来：`alloc(4)` 提栈 / 留堆）",
-    "std/0.1.0/stdlib.lomt":
-        "#719：同 `libl`（`bsearch_u32` 的 `alloc(4)`：自举 L0 提栈、参考留堆）",
-}
+KNOWN_GAPS: dict[str, str] = {}
+
+#: `std` 的**门面**（`module std` + 127 条 `use`，**零个函数**）。它不单独比：
+#: 它自己的贡献是空的，而它的 127 个模块**每一个**都在本判据里单独比过。
+#: 门面本身要钉的是"平名字空间不撞名"，由
+#: `lomentc_test::test_std_package_is_one_unit_without_name_collisions` 管。
+#:
+#: ⚠ 自举编译器编 127 模块的单元**超线性**慢（`std.lomt` 头注实测 n=64 已 187 秒）——
+#: 那是**速度**缺口，不是接受集/IR 分叉，写在这里是为了别把它误当孪生缺口。
+FACADE = "std/0.1.0/std.lomt"
 
 
 def test_store_packages_are_twins() -> None:
@@ -109,6 +98,8 @@ def test_store_packages_are_twins() -> None:
         key = target.relative_to(STORE).as_posix()
         if _declared_grammar(target) != "loment":
             continue                      # 别的读法不在自举侧的目标内（docs/188 §4.1）
+        if key == FACADE:
+            continue                      # 零函数的门面；见 `FACADE` 的说明
         want = _ref_ir(target)
         r = subprocess.run([str(stage1), rel], capture_output=True, cwd=str(ROOT))
         got = r.stdout.decode("utf-8", "replace") if r.returncode == 0 else None
@@ -138,6 +129,21 @@ def test_store_packages_are_twins() -> None:
           f"；两边都拒 {len(both_refused)}；已知缺口 {len(gaps)}（棘轮，只许变短）")
     for key in gaps:
         print(f"        已知缺口: {key}（{KNOWN_GAPS[key][:60]}…）")
+
+
+def test_the_facade_is_still_only_a_facade() -> None:
+    """被跳过的那一份**必须继续是门面**（零函数）—— 谁往里面加代码，这条就红。
+
+    跳过 `std.lomt` 的理由是"它自己的贡献是空的"；一旦它有了函数体，那个理由就不
+    成立，必须把它放回逐字节比对（并且接受那份超线性编译时间）。
+    """
+    import re  # noqa: PLC0415
+    text = (STORE / FACADE).read_text(encoding="utf-8")
+    hits = re.findall(r"(?m)^\s*(?:pub )?fn\s+\w+", text)
+    assert not hits, (
+        f"{FACADE} 里出现了函数（{hits[:3]}）—— 它不再是纯门面："
+        f"把它从跳过名单里拿掉，按真模块逐字节比")
+    print("      门面：`std.lomt` 仍然零函数（127 条 use，逐个模块单独比过）")
 
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

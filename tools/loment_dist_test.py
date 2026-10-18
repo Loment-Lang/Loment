@@ -363,11 +363,13 @@ def test_install_sh(tar: Path) -> None:
     check("loment build --opt 产出可运行二进制",
           r.returncode == 0, (r.stderr or "")[-200:])
     # `build` does not set the exec bit (only `run` chmods -- pre-existing, both backends),
-    # so set it before running.
-    wsl("chmod", "755", o_bin)
-    rr = wsl(o_bin)
-    check("build --opt 的产物跑得起来",
-          rr.returncode == 0 and rr.stdout.strip() != "", (rr.stderr or "")[-160:])
+    # so set it before running. **只在产物真的存在时**才 chmod：那条 `check` 已经在失败时
+    # 记录了 `--opt` 的 stderr，这里再无条件 chmod 只会用 FileNotFoundError 盖掉真正的原因。
+    if r.returncode == 0:
+        wsl("chmod", "755", o_bin)
+        rr = wsl(o_bin)
+        check("build --opt 的产物跑得起来",
+              rr.returncode == 0 and rr.stdout.strip() != "", (rr.stderr or "")[-160:])
     has_clang = wsl("sh", "-c", "command -v clang >/dev/null && echo y || echo n").stdout.strip() == "y"
     if has_clang:
         check("有 clang 时 --opt 走优化路径（不说 fallback）",

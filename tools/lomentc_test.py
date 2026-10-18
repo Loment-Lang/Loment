@@ -4257,6 +4257,145 @@ def test_mixed_width_arithmetic_has_a_common_type():
     print("      narrow side widened (zext), irreconcilable pair refused, product passes clang")
 
 
+@test
+def test_lspe_dimension_defaults_open():
+    """第七维：不写 `choose` 就是 `lspe_open_admin`，台账随产物一起发出（v16）。"""
+    doc = json.loads(lomentc.emit_potato(lomentc.load(DEMO), ROOT))
+    assert doc["potato"] == "v16"
+    lp = doc["lspe"]
+    assert lp["state"] == "lspe_open_admin"
+    assert lp["set_by"] == "default"
+    assert lp["mode"] == "full" and lp["level"] == 3
+    # demo 里有下标表达式；普查至少给出一条，且四个计数自洽。
+    assert lp["sites"] >= 1
+    assert lp["obligations"] == lp["sites"]
+    assert lp["sites"] == lp["proved"] + lp["undecided"]
+    assert "index" in lp["per_kind"]
+    assert lp["floors"] == 0
+    assert lp["floor_detail"] == {"assumed": 0, "stale_wf": 0, "budget": 0, "drop_honest": 0}
+    assert lp["invariants"]["i1"] == "ok"
+    assert potato.validate(doc) == []
+    # QIR 骨架：每个站点有 Site / Claim / Obligation / Evidence 四格。
+    s0 = lomentc.load(DEMO).lspe_sites[0]
+    assert s0["claim"] == "allow"
+    assert s0["obligation"] in ("GuardHolds", "InBounds")
+    assert s0["evidence"] == (s0["source"] or "none")
+
+
+@test
+def test_lspe_close_admin_is_recorded():
+    """`lspe_close_admin` 关的是审计，不是检查；`set_by` 必须说清是源码定的。"""
+    src = "module lspe_close\n\nchoose lspe_close_admin\n\nfn f() -> u32 { return 0; }\n"
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "close.lomt"
+        p.write_text(src, encoding="utf-8", newline=chr(10))
+        doc = json.loads(lomentc.emit_potato(lomentc.load(p), ROOT))
+    assert doc["potato"] == "v16"
+    assert doc["lspe"]["state"] == "lspe_close_admin"
+    assert doc["lspe"]["set_by"] == "source"
+    # 关审计：普查不算，计数全零。
+    assert doc["lspe"]["sites"] == 0 and doc["lspe"]["per_kind"] == {}
+    assert potato.validate(doc) == []
+
+
+@test
+def test_lspe_q1_provenance_and_strict_e034():
+    """Q1 来源问：guard 与裸字面量下标有来源；非字面量下标没有 —— strict 下是 E034。"""
+    src = ("module lspe_q1\n\n"
+           "choose runtime\n\n"
+           "capability d : disk[0..8]\n\n"
+           "fn f(a: [u32; 4], i: u32) -> u32 {\n"
+           "    guard d(i);\n"
+           "    let x: u32 = a[0];\n"
+           "    return a[i];\n"
+           "}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "q1.lomt"
+        p.write_text(src, encoding="utf-8", newline=chr(10))
+        assert lomentc.check(lomentc.load(p), deps=[]) == []
+        errs = lomentc.check(lomentc.load(p), deps=[], lspe_mode="strict")
+        assert any("未标注的放行" in e for e in errs), errs
+        doc = json.loads(lomentc.emit_potato(lomentc.load(p), ROOT))
+    lp = doc["lspe"]
+    assert lp["sites"] == 3, lp
+    assert lp["proved"] == 2 and lp["undecided"] == 1, lp
+    assert lp["per_kind"] == {"guard": "1/1", "index": "1/2"}, lp
+    assert potato.validate(doc) == []
+
+
+@test
+def test_lspe_e035_rejects_an_unregistered_site_kind():
+    """站点对账（I1 的第一半）：普查里出现一个没登记的种类 ⇒ E035。"""
+    mod = lomentc.load(DEMO)
+    mod.lspe_sites = list(getattr(mod, "lspe_sites", [])) + [
+        {"id": "demo:bogus:0", "kind": "bogus", "source": None,
+         "line": 1, "proved": False},
+    ]
+    errs = lomentc.check(mod, deps=[])
+    assert any("未登记的站点" in e for e in errs), errs
+
+
+@test
+def test_lspe_census_agrees_with_the_ast():
+    """独立对照：token 普查的 guard/index 数必须等于 AST 的 Guard/Index 节点数。
+
+    twin 只证一致 —— 两边用同一条 token 规则，同错时它照样绿（`docs/253` §5.1.1）。
+    这一条是那条教训的独立那一腿。
+    """
+    from dataclasses import fields, is_dataclass
+
+    def walk(x, out):
+        if isinstance(x, lomentc.Guard):
+            out["guard"] = out.get("guard", 0) + 1
+        if isinstance(x, lomentc.Index):
+            out["index"] = out.get("index", 0) + 1
+        if is_dataclass(x):
+            for f in fields(x):
+                v = getattr(x, f.name)
+                if isinstance(v, list):
+                    for y in v:
+                        walk(y, out)
+                elif is_dataclass(v):
+                    walk(v, out)
+
+    checked = 0
+    bad = []
+    for p in sorted((ROOT / "loment" / "examples").glob("*.lomt")):
+        try:
+            mod = lomentc.load(p)
+        except lomc.LomError:
+            continue
+        ast: dict[str, int] = {}
+        walk(mod, ast)
+        tok: dict[str, int] = {}
+        for s in getattr(mod, "lspe_sites", []):
+            tok[s["kind"]] = tok.get(s["kind"], 0) + 1
+        checked += 1
+        if ast != tok:
+            bad.append((p.name, ast, tok))
+    assert checked >= 30, checked
+    assert not bad, bad
+
+
+@test
+def test_lspe_site_ids_are_content_addressed():
+    """前面插一个无关站点，已有站点的 id 不变（#794）。"""
+    src1 = "module m\n\nfn f(a: [u32; 4]) -> u32 {\n    return a[0];\n}\n"
+    src2 = ("module m\n\nfn f(a: [u32; 4], b: [u32; 4]) -> u32 {\n"
+            "    let x: u32 = b[1];\n    return a[0];\n}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p1 = Path(td) / "a.lomt"
+        p1.write_text(src1, encoding="utf-8", newline=chr(10))
+        p2 = Path(td) / "b.lomt"
+        p2.write_text(src2, encoding="utf-8", newline=chr(10))
+        m1 = lomentc.load(p1)
+        m2 = lomentc.load(p2)
+    ids1 = [s["id"] for s in m1.lspe_sites if s["kind"] == "index"]
+    ids2 = [s["id"] for s in m2.lspe_sites if s["kind"] == "index"]
+    assert len(ids1) == 1 and len(ids2) == 2, (ids1, ids2)
+    assert ids1[0] in ids2, (ids1, ids2)
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "lomentc_test")
 

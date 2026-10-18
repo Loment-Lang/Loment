@@ -2157,10 +2157,10 @@ fn _start() -> u32 {
     let cg: ptr = cgv as ptr;
     let m: u32 = emit_module(unit, toks2, ir, cg);
     if m == 0 {
-        // **两张表共用这一格，所以两张都点名**（`#345` 的 (a)）：发射器对 `CG_MAXFN` 与
-        // `CG_MAXENUM` 都只 `return 0`，从驱动这一端看不出是哪一张撞的 —— 那就别猜，
-        // 把两个名字一起写出来（原先只写函数数，于是枚举爆掉时用户会去删函数）。
-        let msg: str = "more functions (or more enum variants) than the codegen tables hold -- split the facade";
+        // **几张表共用这一格，所以几张都点名**（`#345` 的 (a)）：发射器对 `CG_MAXFN`、
+        // `CG_MAXENUM` 与 `CG_MAXCONST` 都只 `return 0`，从驱动这一端看不出是哪一张撞的
+        // —— 那就别猜，把名字一起写出来（原先只写函数数，于是枚举爆掉时用户会去删函数）。
+        let msg: str = "more functions, constants or enum variants than the codegen tables hold -- split the facade";
         wdiag_file(dfd, scr, ap, an, 33, str_ptr(msg), str_len(msg));
         return fail(msg);
     }

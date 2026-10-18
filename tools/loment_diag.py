@@ -341,6 +341,14 @@ RULES = [
      "这套工具链是**自举**的：词法缓冲、符号表、codegen 表、回填表都是**固定容量**"
      "（它们开在程序映像里，而不是按需增长）。单元大过那些格就报这一条。"
      "它不是\"你的源码错了\" —— 同一份源码换个更小的形状就编得过。"),
+    ("E034", r"LSPE 未能为这次放行给出来源|未标注的放行",
+     "这次放行没有来源",
+     "LSPE 的 Q1 来源问：编译器放行了，却说不清“凭什么”。默认档只把它记进台账的 "
+     "`undecided`；`--lspe-mode=strict` 下才是这一条。"),
+    ("E035", r"LSPE 台账里有未登记的站点种类",
+     "台账里有未登记的站点",
+     "LSPE 的站点普查与台账对不上：普查枚举出一个种类，台账却不认识它。"
+     "这是**审计器自己的**错误，不是用户代码的错误 —— 与 E036 同族。"),
 ]
 
 
@@ -395,6 +403,8 @@ ASCII_ONE_LINER: dict[int, str] = {
     32: "cannot write the output file - its directory is missing, or it is not writable",
     33: "the unit is too large for this compiler's fixed buffers - split the facade",
     29: "use after free - this block was already passed to `free`",
+    34: "an allow with no provenance - LSPE could not say why it was allowed",
+    35: "the LSPE ledger has a site kind the census did not register",
 }
 
 
@@ -444,6 +454,8 @@ TITLE_EN: dict[int, str] = {
     32: "cannot write the output file",
     33: "this unit is too large for the compiler",
     29: "use after free",
+    34: "an allow with no provenance (LSPE)",
+    35: "the LSPE ledger has an unregistered site kind",
 }
 
 
@@ -480,6 +492,31 @@ class Card:
 
 
 CARDS: dict[int, Card] = {
+    34: Card(
+        what="LSPE 放行了一次访问，却说不出来源 —— 没有能力域、没有 guard、没有类型、"
+             "也没有人标的假设。",
+        why="LSPE 的承诺不是“没有漏洞”，是“没有未被标注的放行”。默认档只把它记进台账的 "
+            "`undecided`；只有 `--lspe-mode=strict` 才会把它变成一条错误。",
+        fixes=(
+            "给这次访问一个来源：能力域、`guard`、常量下标，或一条显式的假设。",
+            "如果确实证不出来，就让它留在台账里 —— 那是**被记录的洞**，不是静默放行。",
+            "要 CI 硬拦就开 `--lspe-mode=strict`；默认档不会替你拒绝。",
+        ),
+        yes="有来源的放行；带 `assumption` 的标注；台账里可见的 `undecided`",
+        no="无来源、也不在台账里的放行",
+    ),
+    35: Card(
+        what="LSPE 的站点普查枚举出一个种类，而台账不认识它。",
+        why="这是**审计器自己的**不一致，不是用户代码的错误。与 E036（反问未记账）同族："
+            "审计者必须先能审自己。",
+        fixes=(
+            "这是编译器缺陷：把这份单元和 `docs/262` 的站点表一起报上来。",
+            "不要靠改用户代码绕过它 —— 那会把审计器的不一致藏进源码。",
+            "先用 `loment lspe state <file>` 看台账里到底是哪个种类没登记，再一并报上来。",
+        ),
+        yes="guard / index 两种已登记的站点",
+        no="未知的站点种类",
+    ),
     1: Card(
         what="两处类型对不上 —— 返回值与声明、实参与形参、载荷与变体、内建实参、赋值两侧。",
         why="Loment **没有隐式数值转换**，也没有类型推断：每个位置上的类型必须显式对得上。"
@@ -1019,6 +1056,36 @@ CARDS: dict[int, Card] = {
 # 每条都能照做）—— 两门语言说**同一件事**，不是两篇各自发挥的文章。
 
 CARDS_EN: dict[int, Card] = {
+    34: Card(
+        what="LSPE allowed an access but cannot name a source: no capability domain, no guard, "
+             "no type, and no assumption supplied by a person.",
+        why="LSPE's promise is not \"no bugs\"; it is \"no silent allow\". The default tier only "
+            "records the site as `undecided` in the ledger. Only `--lspe-mode=strict` turns it "
+            "into an error.",
+        fixes=(
+            "Give the access a source: a capability domain, a `guard`, a constant index, or an "
+            "explicit assumption.",
+            "If it genuinely cannot be proved, leave it in the ledger - a recorded hole, not a "
+            "silent allow.",
+            "For a hard CI gate, use `--lspe-mode=strict`; the default tier will not reject it.",
+        ),
+        yes="an allow with a source; an `assumption` label; a visible `undecided` in the ledger",
+        no="an allow with neither a source nor a ledger entry",
+    ),
+    35: Card(
+        what="The LSPE site census produced a kind the ledger does not know.",
+        why="This is the auditor's own inconsistency, not a defect in the user's code. It is in "
+            "the same family as E036 (an unrecorded question): the auditor must audit itself.",
+        fixes=(
+            "This is a compiler defect: report the unit together with the site table in docs/262.",
+            "Do not work around it in user code - that hides the auditor's inconsistency in the "
+            "source.",
+            "Run `loment lspe state <file>` first to see which kind is unregistered, and include "
+            "that in the report.",
+        ),
+        yes="the registered `guard` / `index` kinds",
+        no="an unknown site kind",
+    ),
     1: Card(
         what="Two types do not line up - the return value against the declaration, an argument "
              "against a parameter, a payload against its variant, a builtin argument, or the two "

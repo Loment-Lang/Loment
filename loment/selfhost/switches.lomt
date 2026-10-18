@@ -169,6 +169,16 @@ pub fn sw_is_core(unit: ptr, toks: ptr, k: u32) -> bool {
     if sw_tok_is(unit, toks, k, "lms_open") {
         return true;
     }
+    // 第七维（`docs/262`，用户 2026-10-18）：`lspe_open_admin` / `lspe_close_admin` ——
+    // **要不要安全审计**。与其它六维正交：它不改变判决，只决定台账在不在。
+    // ⚠ 同一处漏了会静默：`choose lspe_*` 会被当成**开关**去查开关表 ⇒ E022（码对、理由错），
+    // 而 `loment_rule_parity` 只比码集、判绿。
+    if sw_tok_is(unit, toks, k, "lspe_open_admin") {
+        return true;
+    }
+    if sw_tok_is(unit, toks, k, "lspe_close_admin") {
+        return true;
+    }
     return false;
 }
 

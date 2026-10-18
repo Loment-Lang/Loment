@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -344,6 +345,31 @@ def test_every_example_is_decided():
     assert not missing, f"SKIPPED 里有不存在的文件: {missing}"
     print(f"      {len(have)} 份示例全部有说法（{len(COVERED)} 覆盖 / "
           f"{len(REFUSED)} 拒绝 / {len(SKIPPED)} 跳过）")
+
+
+@test
+def test_lspe_ledger_matches_on_guards_and_indices():
+    """guard + 裸字面量下标 + 非字面量下标：两侧台账逐字节相同（`docs/262` §8）。"""
+    s1 = _stage1()
+    if s1 is None:
+        return
+    src = (
+        "module lspe_q1\n\n"
+        "choose runtime\n\n"
+        "capability d : disk[0..8]\n\n"
+        "fn f(a: [u32; 4], i: u32) -> u32 {\n"
+        "    guard d(i);\n"
+        "    let x: u32 = a[0];\n"
+        "    return a[i];\n"
+        "}\n"
+    )
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "lspe_q1.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        r = _run(s1, str(p))
+        assert r.returncode == 0, r.stderr[-400:]
+        want = _want(str(p))
+    assert r.stdout == want, "LSPE 台账在两侧不一致"
 
 
 def main() -> int:

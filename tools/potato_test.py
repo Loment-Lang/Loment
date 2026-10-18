@@ -414,6 +414,62 @@ def fixture_v14() -> dict:
     return d
 
 
+def fixture_v16() -> dict:
+    """一份合法的 **v16** 形式对象: v14 的再 + v15 的 `lms` + v16 的 `lspe`。
+
+    与 v7…v14 同一个理由单独来一份：`lspe` 从 v16 起才合法 —— 拿 v14 去试只会得到
+    "未知顶层字段"，校验器里那几条规则（state/set_by/mode/level、八个计数、
+    `floors` 必须等于四类地板之和、两个嵌套对象）**一条都碰不到**。
+    """
+    d = fixture_v14()
+    d["potato"] = "v16"
+    # v2/v3/v5 的必填字段（`fixture_v14` 这条链没带它们，而 v16 的累积门禁要）。
+    d["mode"] = "std"
+    d["switches"] = []
+    d["dialects"] = []
+    d["bodies"] = []
+    d["lms"] = "lms_close"
+    d["lspe"] = {
+        "state": "lspe_open_admin",
+        "set_by": "default",
+        "mode": "full",
+        "level": 3,
+        "sites": 0,
+        "obligations": 0,
+        "proved": 0,
+        "undecided": 0,
+        "deferred": 0,
+        "refused": 0,
+        "floors": 0,
+        "floor_detail": {"assumed": 0, "stale_wf": 0, "budget": 0, "drop_honest": 0},
+        "per_kind": {},
+        "invariants": {"i1": "not_run", "i2": "not_run", "i3": "not_run",
+                       "i4": "not_run", "i5": "not_run"},
+        "acked": 0,
+    }
+    return d
+
+
+#: v16 的 `lspe` 那几条规则的反例（`docs/262`）。作用在 **v16** 的对象上。
+MUTATORS_V16 = [
+    ("lspe 整个缺掉", lambda d: d.pop("lspe"), "lspe 必须是对象"),
+    ("lspe.state 非法", lambda d: d["lspe"].__setitem__("state", "open"), "lspe.state"),
+    ("lspe.sites 负数", lambda d: d["lspe"].__setitem__("sites", -1), "lspe.sites"),
+    ("lspe.floors 与明细不一致", lambda d: d["lspe"].__setitem__("floors", 1), "floors"),
+]
+
+
+@test
+def test_v16_requires_the_lspe_ledger():
+    """v16 的台账：正例合法，四条反例各钉一条规则。"""
+    assert potato.validate(fixture_v16()) == [], potato.validate(fixture_v16())
+    for name, mut, needle in MUTATORS_V16:
+        d = fixture_v16()
+        mut(d)
+        errs = potato.validate(d)
+        assert any(needle in e for e in errs), (name, errs)
+
+
 #: v14 的 `net_ladder` 那几条规则的反例（`docs/237`）。作用在 **v14** 的对象上。
 #:
 #: 与 `MUTATORS_V10`（`gc_ladder`）同形，**多一条 `gc_ladder` 那边没有的跨字段要求**：
@@ -728,7 +784,7 @@ def _cases() -> list[tuple[str, dict]]:
     out: list[tuple[str, dict]] = [("fixture", fixture()), ("v7", fixture_v7()),
                                    ("v8", fixture_v8()), ("v9", fixture_v9()),
                                    ("v10", fixture_v10()), ("v11", fixture_v11()),
-                                   ("v12", fixture_v12())]
+                                   ("v12", fixture_v12()), ("v16", fixture_v16())]
     # **`gc_manual` + `no_runtime` 是合法档**（"要运行期、但内存我自己管"的反面：
     # 不要运行期、手动回收）—— 它必须**不报错**。上面那张反例表只会钉"该拒的要拒",
     # 钉不住"不该拒的别拒"，所以这一条以**合法样本**的身份过孪生那一关。
@@ -739,6 +795,11 @@ def _cases() -> list[tuple[str, dict]]:
         d = fixture()
         mut(d)
         out.append((name, d))
+    # v16 那一组（`lspe`）也要过孪生那一关 —— 否则两份校验器在 v16 上从没被比过。
+    for name, mut, _ in MUTATORS_V16:
+        d = fixture_v16()
+        mut(d)
+        out.append((f"v16-{name}", d))
     # v7 那一组（`boundary`）也要过孪生那一关 —— 否则两份校验器在 v7 上从没被比过。
     for name, mut, _ in MUTATORS_V7:
         d = fixture_v7()

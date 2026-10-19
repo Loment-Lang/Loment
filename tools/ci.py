@@ -290,7 +290,7 @@ SHARD_COST = {
     "loment_capasserts_test": 4.0,
     "loment_caps_test": 99.9,
     "loment_channel_test": 92.8,
-    "loment_choose_matrix_test": 10.7,
+    "loment_choose_matrix_test": 16.7,
     "loment_cli_test": 29.5,
     "loment_comefor_test": 14.5,
     "loment_cpptrans_test": 0.1,

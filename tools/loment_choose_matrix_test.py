@@ -15,10 +15,13 @@
 #   5. `hosted` 把堆换成宿主的（`; loment-heap: platform` + `@malloc`），`sealed` 不换
 #      （`docs/222` §4）；
 #   6. `lms` 的"收一次再试"只在**真有收集器**时出现（`docs/253` §5.3）；
-#   7. `lspe` 关审计只改台账、不改一行代码（`docs/262` §10.1）。
+#   7. `lspe` 关审计只改台账、不改一行代码（`docs/262` §10.1）；
+#   8. `gc` × `vm` × `lspe` × LVM 四者一致：三档 GC 在 VM 上的行为与原生相同，
+#      `vm` / `lspe` 两维不改 IR，但都进 Potato（`docs/231` §1.3、`docs/243` §4.5）。
 
 from __future__ import annotations
 
+import io
 import itertools
 import json
 import subprocess
@@ -29,6 +32,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import loment_suite  # noqa: E402
 import lomentc  # noqa: E402
+import lomelf  # noqa: E402
+import lvm  # noqa: E402
+import lvm_test as LVMTest  # noqa: E402  (复用同一份"原生 vs VM"夹具，不另抄)
 
 ROOT = Path(__file__).resolve().parent.parent
 TESTS: list[tuple[str, object]] = []
@@ -59,6 +65,29 @@ ALLOC_BODY = """fn main() -> i32 {
     let e: ptr = d;
     store8(e, 0, 1);
     return (load8(a, 0) as i32) + (load8(b, 0) as i32) + (load8(e, 0) as i32);
+}
+"""
+
+#: 能**跑**的探针：入口是 `_start`（VM 与原生都从这里进），退出码 9+3+1 = 13。
+#: 与 `ALLOC_BODY` 同一份梯子，只是入口换掉 —— 两边比的是同一个程序。
+RUN_BODY = """fn _start() -> u32 {
+    let a: ptr = alloc(64);
+    store8(a, 0, 9);
+    let n: u32 = 8;
+    let b: ptr = alloc(n);
+    store8(b, 0, 3);
+    let i: i32 = 0;
+    while i < 4 {
+        let c: ptr = alloc(n);
+        store8(c, 0, 1);
+        i = i + 1;
+    }
+    let d: ptr = alloc(n);
+    let e: ptr = d;
+    store8(e, 0, 1);
+    let s: u32 = (load8(a, 0) as u32) + (load8(b, 0) as u32) + (load8(e, 0) as u32);
+    syscall4(60, s as u64, 0, 0);
+    return 0;
 }
 """
 
@@ -282,6 +311,65 @@ def test_lspe_audit_switch_changes_the_ledger_not_the_code():
         f"Potato 没记对审计开关: {state_open!r} / {state_close!r}"
     assert ir_open == ir_close, "关审计改变了产物 —— 它只该改变台账"
     print("      台账状态跟着开关走，IR 逐字节相同")
+
+
+@test
+def test_gc_vm_lspe_and_lvm_agree_on_every_tier():
+    """GC × VM × LSPE × LVM：三档 GC 在 **VM 上**跑出的行为与原生相同，而 `vm` / `lspe`
+    两维**不改 IR**、只进 Potato（`docs/231` §1.3、`docs/243` §4.5、`docs/262` §10.1）。
+
+    这一条把四个子系统放在同一张格里：
+
+    * `gc`：三档各一份（同一份梯子源）；
+    * `vm`：`choose vm` 与不写——IR 必须逐字节相同（`vm` 今天只声明"要由 VM 执行"，
+      产物不变；哪天它开始动 IR，这条会红，逼着重走 `docs/231` §2.2 的登记处）；
+    * `lspe`：开/关审计——IR 同样必须相同，只有 Potato 的 `state` 变；
+    * `lvm`：VM 跑出的退出码/输出必须与 `lomelf` 原生产物**逐字节相同**。
+    """
+    expected_rc = 13
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        for gc in ("gc_manual", "gc_auto", "gc_auto_alpha"):
+            variants = {
+                "plain": {},
+                "vm": {"vm": "vm"},
+                "lspe_close": {"lspe": "lspe_close_admin"},
+                "vm+lspe_close": {"vm": "vm", "lspe": "lspe_close_admin"},
+            }
+            irs = {}
+            for name, extra in variants.items():
+                cell = {"mode": "std", "gc": gc, "runtime": "runtime", **extra}
+                rc, diag, ir, pot = _emit(td, f"{gc}-{name}", cell, RUN_BODY)
+                assert rc == 0, f"{gc}+{name}: 编不过\n{diag[-400:]}"
+                assert pot.get("gc") == gc, f"{gc}+{name}: Potato 的 gc 记错了"
+                if "vm" in extra:
+                    assert pot.get("vm") == "vm", f"{gc}+{name}: Potato 没记 vm"
+                if "lspe" in extra:
+                    assert (pot.get("lspe") or {}).get("state") == extra["lspe"], \
+                        f"{gc}+{name}: Potato 没记 lspe"
+                irs[name] = ir
+            base = irs["plain"]
+            assert irs["vm"] == base, \
+                f"{gc}: `choose vm` 改变了 IR —— vm 维开始驱动产物，登记处要重走（docs/231 §2.2）"
+            assert irs["lspe_close"] == base, f"{gc}: 关审计改变了 IR"
+            assert irs["vm+lspe_close"] == base, f"{gc}: vm + 关审计组合改变了 IR"
+
+            buf = io.BytesIO()
+            rc_vm = lvm.run_ir(base, buf, None, ["probe"])
+            out_vm = buf.getvalue()
+            assert (rc_vm, out_vm) == (expected_rc, b""), \
+                f"{gc}: VM 跑出 rc={rc_vm} out={out_vm!r}，应为 {expected_rc} 且无输出"
+
+            if sys.platform == "win32" and not LVMTest.ELF._wsl():
+                continue
+            blob, _ = lomelf.compile_ll(base, [])
+            elf = td / f"{gc}.elf"
+            elf.write_bytes(blob)
+            rc_native, out_native = LVMTest._run_native(elf, td, "probe")
+            assert (rc_native, out_native) == (rc_vm, out_vm), (
+                f"{gc}: 原生 rc={rc_native} {out_native!r} / VM rc={rc_vm} {out_vm!r}")
+    native = "" if sys.platform != "win32" or LVMTest.ELF._wsl() else "（本机无 WSL，原生对照跳过）"
+    print(f"      3 档 GC × vm × lspe: IR 逐字节同；VM 均 rc={expected_rc}{native}")
 
 
 def main() -> int:

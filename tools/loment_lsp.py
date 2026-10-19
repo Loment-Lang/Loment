@@ -8,7 +8,8 @@
 # 用法:
 #   python tools/loment_lsp.py            # 标准 LSP stdio 模式
 #   python tools/loment_lsp.py --demo F   # 自测: 打开 F 并打印诊断/补全/跳转
-# 退出码: 0 = OK / 2 = 用法错误。
+#   python tools/loment_lsp.py --check F  # 静态检查: `路径:行:列: E0NN 标题`
+# 退出码: 0 = OK / 1 = `--check` 有诊断 / 2 = 用法或读取错误。
 
 from __future__ import annotations
 
@@ -296,8 +297,15 @@ def handle(msg: dict, docs: dict[str, str]) -> list[dict]:
                 ((params.get("contentChanges") or [{}])[-1].get("text")))
         if text is not None:
             docs[uri] = text
+        pub = {"uri": uri, "diagnostics": _diagnostics(docs.get(uri, ""), uri)}
+        # `#53`：服务声明了 `textDocumentSync: 1`（客户端会发版本号），却把它丢了 ——
+        # 编辑器于是分不清一批诊断描述的是哪一版缓冲区（改完还留着旧波浪线）。
+        # 协议里 `version` 是**可选**的：没发就不编一个。
+        ver = td.get("version")
+        if isinstance(ver, int) and not isinstance(ver, bool):
+            pub["version"] = ver
         return [{"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
-                 "params": {"uri": uri, "diagnostics": _diagnostics(docs.get(uri, ""), uri)}}]
+                 "params": pub}]
     if method == "textDocument/didSave":
         # `#705`：didSave **不是编辑**。真实客户端不带正文；把它当 didChange 会把内存里的
         # 文档存成空串。保存只是磁盘通知 —— 不改文档。
@@ -382,6 +390,38 @@ def handle(msg: dict, docs: dict[str, str]) -> list[dict]:
     return []
 
 
+def _check(path_str: str) -> int:
+    """`--check FILE` —— 与 Loment 版服务同一个 CLI 契约（编辑器任务与 CI 用）。
+
+    输出 `路径:行:列: E0NN 标题`，与 `package.json` 的 `problemMatcher`（`^(.+?):(\\d+):(\\d+): (E\\d{3}) (.+)$`）
+    逐字对齐；退出码 0 = 无诊断 / 1 = 有诊断 / 2 = 读取错误。
+
+    **为什么这条必须存在**：VS Code 扩展在**默认安装**（没配 `loment.serverCommand`）下把
+    「Loment: Check (current file)」直接交给 `python tools/loment_lsp.py --check <file>`。
+    这个脚本原先只认 `--demo`，于是命令面板里点下去得到 `unrecognized arguments: --check`
+    （rc=2）—— 只有把 `serverCommand` 指到 Loment 版服务才碰巧能用（`#713`）。
+
+    码用 `loment_diag.classify()` 分类（与 `loment diag` 同表），**不另编一套**；只报
+    severity 1 的诊断 —— severity 3 是"这份源是别的语法"这类说明，不是文件的错。
+    """
+    try:
+        text = Path(path_str).read_text(encoding="utf-8")
+    except OSError as e:
+        print(f"{path_str}: 读不了: {e}", file=sys.stderr)
+        return 2
+    import loment_diag  # noqa: PLC0415  只在 --check 这一支需要；stdio 服务不付这份导入
+    nerr = 0
+    for d in _diagnostics(text, path_str):
+        if d.get("severity") != 1:
+            continue
+        ln = d["range"]["start"]["line"] + 1
+        col = d["range"]["start"]["character"] + 1   # 对外是 1 起（词法器口径）
+        code, title, _hint = loment_diag.classify(d["message"])
+        print(f"{path_str}:{ln}:{col}: {code} {title}")
+        nerr += 1
+    return 1 if nerr else 0
+
+
 def _serve() -> int:
     docs: dict[str, str] = {}
     while True:
@@ -409,7 +449,11 @@ def _serve() -> int:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="loment_lsp", description="Loment 语言服务")
     ap.add_argument("--demo", metavar="FILE", help="无编辑器自测")
+    # `#713`：扩展的默认「检查」命令跑的就是这一支（与 Loment 版 `lsp --check FILE` 同契约）。
+    ap.add_argument("--check", metavar="FILE", help="静态检查: `路径:行:列: E0NN 标题`")
     a = ap.parse_args(argv)
+    if a.check:
+        return _check(a.check)
     if not a.demo:
         return _serve()
     p = Path(a.demo).resolve()

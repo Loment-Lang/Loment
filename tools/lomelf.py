@@ -6600,7 +6600,7 @@ def compile_ll(text: str, objects: list | None = None,
             here = DATA_VADDR + site
             if target is None:
                 if nm in obj.weak_undefined:
-                    raw = zero_fixup(ty)
+                    raw = weak_value(ty, nm, add, here)
                     data[site:site + len(raw)] = raw
                     applied += 1
                     continue

@@ -32,6 +32,29 @@ These are known and documented. Please check this list first:
 - **Nothing is published as a package yet**, so there is no installed artifact to attack, and no
   version to patch.
 
+## Release and CI integrity
+
+Two repository properties keep a change from certifying itself. Both are deliberate and
+neither is optional:
+
+- **`.github/CODEOWNERS` covers the judge and the release tools** — `.github/` (all
+  workflows and the three `gate-*` budget files), `tools/ci.py`, `tools/loment_suite.py`,
+  `tools/loment_dist.py` and `tools/loment_sign.py`. Branch protection on `main` must
+  require **a review from a code owner** for these paths, and must require the branch to be
+  up to date before merging. That requirement lives in GitHub's repository settings, not in
+  this file; a change that removes CODEOWNERS coverage is itself covered by it.
+- **The release has an anchor outside the archive.** `SHA256SUMS` ships inside the package
+  it describes, so it cannot prove the package. Every release therefore publishes
+  `SHA256SUMS.asc` (detached GPG signature), `loment-signing.asc` (public key) and
+  `FINGERPRINT`, and the release **body** lists the digest of every asset. The installer
+  prints the digest of `SHA256SUMS`; compare it with the release body. The release workflow
+  refuses to publish when the signing secret (`LOMENT_RELEASE_SIGNING_KEY`) is absent.
+
+The installers additionally refuse to install when no SHA-256 verifier exists (rather than
+silently skipping verification), copy only files named by the verified manifest, invoke
+PowerShell by absolute System32 path, and reject archive entries that resolve outside the
+extraction root. Those are enforced by `tools/loment_dist_test.py`.
+
 ## Reporting
 
 **Privately**, through *Security* → *Report a vulnerability* on this repository. That channel is

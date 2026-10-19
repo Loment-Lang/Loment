@@ -25,7 +25,11 @@ use switches
 const IN_CAP: u32 = 4194304;        // 单条入站消息
 const DOC_CAP: u32 = 262144;        // 一个文档的文本（含 16B 尾部：长度 + NUL）
 const N_DOC: u32 = 64;              // 编辑器同时打开的标签页数（`#706`）
-const URI_CAP: u32 = 512;
+// 一个文档 URI 的容量（`#709`）。原先 512（可用 496）—— 一份 613 字节的 URI 被**静默截断**，
+// 客户端按完整 URI 匹配就对不上，定义也指向一份不存在的文档。8192 是这个服务**声明**的上限
+// （可用 8176）；超过时仍会截断，但 `on_change` 会多报一条 Info **点名这个上限**，不再装成没事。
+// LSP 协议本身没有给 URI 定长度上限，所以这是本服务的实现上限，不是协议常量。
+const URI_CAP: u32 = 8192;
 const BODY_OFF: u32 = 8192;         // 出站 body 在出站缓冲内的起点 (前 8KB 给数字缓冲)
 const ARENA_CAP: u32 = 65536;       // JSON DOM
 const TOK_EXTRA: u32 = 65536;
@@ -36,19 +40,19 @@ const S_OLEN: u32 = 0;
 const S_NDOC: u32 = 4;
 const S_NERR: u32 = 8;
 const S_NSYM: u32 = 12;
-const DOCS_URI: u32 = 4096;         // N_DOC * URI_CAP (64 * 512 = 32768)
-const DOCS_TXT: u32 = 40960;        // N_DOC * DOC_CAP (64 * 262144 = 16777216)
-const SYM_OFF: u32 = 16818176;      // = DOCS_TXT + N_DOC * DOC_CAP（文档正文区之后）
+const DOCS_URI: u32 = 4096;         // N_DOC * URI_CAP (64 * 8192 = 524288)
+const DOCS_TXT: u32 = 528384;       // = DOCS_URI + N_DOC * URI_CAP
+const SYM_OFF: u32 = 17305600;      // = DOCS_TXT + N_DOC * DOC_CAP（文档正文区之后）
 // 一条符号记录: 名字 ≤60B + NUL @0..61 | kind @64 | line @68 | **col @72**（`#27`）。
 const SYM_STRIDE: u32 = 80;
 const SYM_MAX: u32 = 256;
-const OUT_OFF: u32 = 17001408;      // 出站缓冲 (BODY_OFF 起才是 body)
-const SCR_OFF: u32 = 17297408;      // 行/临时缓冲
+const OUT_OFF: u32 = 17488832;      // 出站缓冲 (BODY_OFF 起才是 body)
+const SCR_OFF: u32 = 17784832;      // 行/临时缓冲
 // 开关表 (`docs/182` §1): `switches.apply_switches` 要 `SW_BYTES` 字节的暂存。
 // **放在 mem 块末尾并显式撑大 `MEM_CAP`** —— 塞进 `SCR_OFF` 那段会和行缓冲/路径缓冲
 // 抢地方, 越界是**静默改坏**而不是报错 (本仓在这一类上栽过)。
-const SW_OFF: u32 = 17417408;       // = SCR_OFF + 120000, 表从这儿起
-const MEM_CAP: u32 = 17425416;      // SW_OFF + switches.SW_BYTES (8008)
+const SW_OFF: u32 = 17904832;       // = SCR_OFF + 120000, 表从这儿起
+const MEM_CAP: u32 = 17912840;      // SW_OFF + switches.SW_BYTES (8008)
 
 // ---------------------------------------------------------------- 系统调用
 
@@ -418,9 +422,13 @@ fn emit_e0(b: ptr, o: u32, code: u32) -> u32 {
 
 /// publishDiagnostics 通知。
 ///
-/// `note`（`#710` / `#706`）：0 = 没有；1 = 文档被截断（只分析了前半部分）；
-/// 2 = 文档表已满、这份文档没有被分析。**追加在 checker 诊断之后**，用 severity 3
-/// （Info）：它不是源码的错，却必须让客户端看见 —— "没查全"不能装成"干净"。
+/// `note`（`#710` / `#706` / `#709`）是**位标**：1 = 文档被截断（只分析了前半部分）；
+/// 2 = 文档表已满、这份文档没有被分析；4 = URI 超过本服务的上限、只能保留前一段。
+/// 它们**追加在 checker 诊断之后**，用 severity 3（Info）：不是源码的错，却必须让客户端
+/// 看见 —— "没查全"不能装成"干净"。
+///
+/// `has_ver` / `ver`（`#53`）：`didOpen` / `didChange` 里的 `textDocument.version`，有就
+/// 原样回显（协议里它是**可选**的，没发就不编一个）。
 /// token 在**源里**的 UTF-8 字节列（`#707`）：LSP 对外声明 `positionEncoding: utf-8`，
 /// 而词法器的 `col` 数的是**码点**（与 `tools/lomc.py` 的 `lomc.lex` 同一套，`#481`）。
 /// 两者在含 CJK 的行上不等 —— 直接拿 `col` 当初 `character` 会少算字节。
@@ -433,11 +441,15 @@ fn byte_col(text: ptr, off: u32) -> u32 {
 }
 
 fn publish(mem: ptr, text: ptr, toks: ptr, uri: ptr, un: u32, errs: ptr, ne: u32,
-           note: u32) -> u32 {
+           note: u32, has_ver: u32, ver: u32) -> u32 {
     let b: ptr = out_body(mem);
     let o: u32 = BODY_OFF;
     o = json_emit_lit(b, o, "{\"jsonrpc\": \"2.0\", \"method\": \"textDocument/publishDiagnostics\", \"params\": {\"uri\": ");
     o = json_emit_str(b, o, uri, un);
+    if has_ver != 0 {
+        o = json_emit_lit(b, o, ", \"version\": ");
+        o = json_emit_u32(b, o, ver);
+    }
     o = json_emit_lit(b, o, ", \"diagnostics\": [");
     let i: u32 = 0;
     let emitted: u32 = 0;
@@ -492,17 +504,51 @@ fn publish(mem: ptr, text: ptr, toks: ptr, uri: ptr, un: u32, errs: ptr, ne: u32
         i = i + 1;
         emitted = emitted + 1;
     }
-    if note != 0 {
+    if (note & 1) != 0 {
         if emitted > 0 {
             o = json_emit_lit(b, o, ", ");
         }
         o = json_emit_lit(b, o, "{\"range\": {\"start\": {\"line\": 0, \"character\": 0}, \"end\": {\"line\": 0, \"character\": 1}}, \"severity\": 3, \"source\": \"loment\", \"message\": ");
-        if note == 1 {
-            o = json_emit_lit(b, o, "\"文档超过本服务的分析上限，只检查了前一部分 —— 后面的错误可能没有报出来。\"");
-        } else {
-            o = json_emit_lit(b, o, "\"打开的文档数已达本服务上限：这份文档没有被分析；请关闭一些已打开的文档后重新打开。\"");
-        }
+        o = json_emit_lit(b, o, "\"文档超过本服务的分析上限，只检查了前一部分 —— 后面的错误可能没有报出来。\"");
         o = json_emit_lit(b, o, "}");
+        emitted = emitted + 1;
+    }
+    if (note & 2) != 0 {
+        if emitted > 0 {
+            o = json_emit_lit(b, o, ", ");
+        }
+        o = json_emit_lit(b, o, "{\"range\": {\"start\": {\"line\": 0, \"character\": 0}, \"end\": {\"line\": 0, \"character\": 1}}, \"severity\": 3, \"source\": \"loment\", \"message\": ");
+        o = json_emit_lit(b, o, "\"打开的文档数已达本服务上限：这份文档没有被分析；请关闭一些已打开的文档后重新打开。\"");
+        o = json_emit_lit(b, o, "}");
+        emitted = emitted + 1;
+    }
+    if (note & 4) != 0 {
+        if emitted > 0 {
+            o = json_emit_lit(b, o, ", ");
+        }
+        // `#709`：**不回显一个被截断的 URI 就完事** —— 至少要说清上限是多少、为什么对不上。
+        // 消息先拼进暂存 (中文前缀 + 十进制上限 + 后缀) 再整体 JSON 转义。
+        let ub: ptr = ptr_add(mem, SCR_OFF + 6144);
+        let umo: u32 = 0;
+        let upre: str = "URI 超过本服务的上限（";
+        let uq: u32 = 0;
+        while uq < str_len(upre) {
+            store8(ub, umo, str_byte(upre, uq) as u8);
+            umo = umo + 1;
+            uq = uq + 1;
+        }
+        umo = dec_into(ub, umo, URI_CAP - 16);
+        let usuf: str = " 字节）：只能保留前一段，客户端将无法把它与已打开的文档对上。";
+        uq = 0;
+        while uq < str_len(usuf) {
+            store8(ub, umo, str_byte(usuf, uq) as u8);
+            umo = umo + 1;
+            uq = uq + 1;
+        }
+        o = json_emit_lit(b, o, "{\"range\": {\"start\": {\"line\": 0, \"character\": 0}, \"end\": {\"line\": 0, \"character\": 1}}, \"severity\": 3, \"source\": \"loment\", \"message\": ");
+        o = json_emit_str(b, o, ub, umo);
+        o = json_emit_lit(b, o, "}");
+        emitted = emitted + 1;
     }
     o = json_emit_lit(b, o, "]}}");
     out_done(mem, o);
@@ -540,11 +586,16 @@ fn lsc_foreign(src: ptr, t: ptr, nt: u32) -> u64 {
 
 /// **一条 Info，不是一屏 Error**：这份源不是 Loment 写的，这一层没有它的规则。说清楚
 /// "为什么这里安静"比编一堆错有用 —— 静默会让人以为服务挂了。
-fn publish_foreign(mem: ptr, text: ptr, uri: ptr, un: u32, as_st: u32, as_ln: u32) -> u32 {
+fn publish_foreign(mem: ptr, text: ptr, uri: ptr, un: u32, as_st: u32, as_ln: u32,
+                   has_ver: u32, ver: u32) -> u32 {
     let b: ptr = out_body(mem);
     let o: u32 = BODY_OFF;
     o = json_emit_lit(b, o, "{\"jsonrpc\": \"2.0\", \"method\": \"textDocument/publishDiagnostics\", \"params\": {\"uri\": ");
     o = json_emit_str(b, o, uri, un);
+    if has_ver != 0 {
+        o = json_emit_lit(b, o, ", \"version\": ");
+        o = json_emit_u32(b, o, ver);
+    }
     o = json_emit_lit(b, o, ", \"diagnostics\": [{\"range\": {\"start\": {\"line\": 0, \"character\": 0}, \"end\": {\"line\": 0, \"character\": 1}}, \"severity\": 3, \"source\": \"loment\", \"message\": ");
     let mb: ptr = ptr_add(mem, SCR_OFF + 6144);
     let mo: u32 = 0;
@@ -1120,7 +1171,8 @@ fn handle(mem: ptr, src: ptr, arena: ptr, root: u32, m: u32, id: u32,
         return 0;
     }
     if method_eq(src, arena, m, "textDocument/didClose") {
-        let un: u32 = take_uri(mem, src, arena, root);
+        let ur: u64 = take_uri(mem, src, arena, root);
+        let un: u32 = (ur % 4294967296) as u32;
         let ubuf: ptr = ptr_add(mem, SCR_OFF + 2048);
         return doc_remove(mem, ubuf, un);
     }
@@ -1139,8 +1191,11 @@ fn handle(mem: ptr, src: ptr, arena: ptr, root: u32, m: u32, id: u32,
     return 0;
 }
 
-/// 取 params.textDocument.uri -> mem+SCR_OFF+2048, 返回长度。
-fn take_uri(mem: ptr, src: ptr, arena: ptr, root: u32) -> u32 {
+/// 取 params.textDocument.uri -> mem+SCR_OFF+2048。返回 `(截断标志 << 32) | 长度`。
+///
+/// `#709`：URI 超上限时**不能装作完整**。`json_raw_len` 是 JSON 原文长度（不含引号）；
+/// 写满容量而原文更长 = 真的截断了。调用方据此报一条点名上限的 Info。
+fn take_uri(mem: ptr, src: ptr, arena: ptr, root: u32) -> u64 {
     let params: u32 = json_get(src, arena, root, "params");
     if params == 4294967295 {
         return 0;
@@ -1153,7 +1208,24 @@ fn take_uri(mem: ptr, src: ptr, arena: ptr, root: u32) -> u32 {
     if u == 4294967295 {
         return 0;
     }
-    return json_str_into(src, arena, u, ptr_add(mem, SCR_OFF + 2048), URI_CAP - 16);
+    let raw: u32 = json_raw_len(arena, u);
+    let n: u32 = json_str_into(src, arena, u, ptr_add(mem, SCR_OFF + 2048), URI_CAP - 16);
+    if n == URI_CAP - 16 && raw > n {
+        return 4294967296 + (n as u64);
+    }
+    return n as u64;
+}
+
+/// `#53`：`textDocument.version` -> `(有 << 32) | 值`。没发 / 不是数字就是 0（不编）。
+fn read_version(src: ptr, arena: ptr, td: u32) -> u64 {
+    let vn: u32 = json_get(src, arena, td, "version");
+    if vn == 4294967295 {
+        return 0;
+    }
+    if json_nkind(arena, vn) != 4 {
+        return 0;
+    }
+    return 4294967296 + (json_as_u32(src, arena, vn) as u64);
 }
 
 fn on_change(mem: ptr, src: ptr, arena: ptr, root: u32, toks: ptr, chk: ptr,
@@ -1166,7 +1238,12 @@ fn on_change(mem: ptr, src: ptr, arena: ptr, root: u32, toks: ptr, chk: ptr,
     if td == 4294967295 {
         return 0;
     }
-    let un: u32 = take_uri(mem, src, arena, root);
+    let ur: u64 = take_uri(mem, src, arena, root);
+    let un: u32 = (ur % 4294967296) as u32;
+    let uri_over: u32 = (ur / 4294967296) as u32;
+    let vr: u64 = read_version(src, arena, td);
+    let has_ver: u32 = (vr / 4294967296) as u32;
+    let ver: u32 = (vr % 4294967296) as u32;
     let ubuf: ptr = ptr_add(mem, SCR_OFF + 2048);
     // `#710`：**暂存区按文档上限开**（`txb` 是 `_start` 里单独分配的另一块 `DOC_CAP`）。
     // 原先这里既把 cap 写成 200000（小于 DOC_CAP = 262144，等于悄悄丢掉尾部），
@@ -1205,7 +1282,11 @@ fn on_change(mem: ptr, src: ptr, arena: ptr, root: u32, toks: ptr, chk: ptr,
     let idx: u32 = doc_put(mem, ubuf, un, txb, tn_full);
     if idx == 4294967295 {
         // `#706`：表满了 —— **不驱逐**任何一份已打开的文档，并把"这份没被分析"告诉客户端。
-        return publish(mem, txb, toks, ubuf, un, errs, 0, 2);
+        let full_note: u32 = 2;
+        if uri_over != 0 {
+            full_note = full_note | 4;
+        }
+        return publish(mem, txb, toks, ubuf, un, errs, 0, full_note, has_ver, ver);
     }
     let text: ptr = doc_text(mem, idx);
     let tn2: u32 = doc_txtlen(mem, idx);
@@ -1219,16 +1300,22 @@ fn on_change(mem: ptr, src: ptr, arena: ptr, root: u32, toks: ptr, chk: ptr,
         store32(mem, S_NERR, 0);
         scan_syms(mem, text, toks, nt);
         return publish_foreign(mem, text, ubuf, un,
-                               (fg / 4294967296) as u32, (fg % 4294967296) as u32);
+                               (fg / 4294967296) as u32, (fg % 4294967296) as u32,
+                               has_ver, ver);
     }
     let ne: u32 = run_check(text, toks, errs, chk);
     store32(mem, S_NERR, ne);
     scan_syms(mem, text, toks, nt);
-    return publish(mem, text, toks, ubuf, un, errs, ne, truncated);
+    let note: u32 = truncated;
+    if uri_over != 0 {
+        note = note | 4;
+    }
+    return publish(mem, text, toks, ubuf, un, errs, ne, note, has_ver, ver);
 }
 
 fn on_completion(mem: ptr, src: ptr, arena: ptr, root: u32, id: u32, toks: ptr) -> u32 {
-    let un: u32 = take_uri(mem, src, arena, root);
+    let ur: u64 = take_uri(mem, src, arena, root);
+    let un: u32 = (ur % 4294967296) as u32;
     let ubuf: ptr = ptr_add(mem, SCR_OFF + 2048);
     let idx: u32 = doc_find(mem, ubuf, un);
     let b: ptr = out_body(mem);
@@ -1470,7 +1557,8 @@ fn lsc_emit_fields(mem: ptr, text: ptr, toks: ptr, nt: u32, ns: u32, nl: u32,
 }
 
 fn on_definition(mem: ptr, src: ptr, arena: ptr, root: u32, id: u32, toks: ptr) -> u32 {
-    let un: u32 = take_uri(mem, src, arena, root);
+    let ur: u64 = take_uri(mem, src, arena, root);
+    let un: u32 = (ur % 4294967296) as u32;
     let ubuf: ptr = ptr_add(mem, SCR_OFF + 2048);
     let idx: u32 = doc_find(mem, ubuf, un);
     let b: ptr = out_body(mem);

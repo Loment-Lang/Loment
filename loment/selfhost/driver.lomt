@@ -347,6 +347,36 @@ fn rt_phrase(slot: ptr, toks: ptr, tk: u32) -> str {
     return "";
 }
 
+/// **解析类诊断的正文也要说到"是什么构造"**（`#702`）。
+///
+/// 这一格原先只印**那一格 token 原文**：裸 `return;` 报 `;`、120 层嵌套报 `{` ——
+/// 都"有声"，却没有一句说得出发生了什么。标准是 `#343` 的那条："每一条要么能跑，
+/// 要么失败时**点名构造**并**指到一行**"。
+///
+/// 只认这里能**确定**判定的形状（判据与 `checker.lomt` 的语法前置趟同源）：
+///   * `E23` = 嵌套深度上限，正文自带那半句（与参考实现同一个词「嵌套超过」）；
+///   * `E19` 的裸 `return;` —— 参考实现报「期望表达式，得到 ';'」；
+///   * `E19` 的裸块 `{` —— 参考实现报「期望表达式，得到 '{'」。
+///
+/// 其余的 `E19` 照旧退回 token 原文：那里分不出是哪一种语法错，编一句更具体的话
+/// 反而会**指错**（与"错要指在错的地方"同一条纪律）。
+fn err_phrase(slot: ptr, toks: ptr, tk: u32, code: u32) -> str {
+    if code == 23 {
+        return "嵌套超过 64 层 —— 编译器是递归下降的，再深就要把栈用穿了；把中间那几层提成函数，或把这段拆开";
+    }
+    if code == 19 {
+        if tok_is(slot, toks, tk, ";") && tk > 0 && tok_is(slot, toks, tk - 1, "return") {
+            return "期望表达式，得到 ';' —— 裸 `return;` 不是合法构造，`return` 必须带一个值";
+        }
+        if tok_is(slot, toks, tk, "{") && tk > 0
+                && (tok_is(slot, toks, tk - 1, "{") || tok_is(slot, toks, tk - 1, "}")
+                    || tok_is(slot, toks, tk - 1, ";")) {
+            return "期望表达式，得到 '{' —— 单独一层花括号不是语句";
+        }
+    }
+    return "";
+}
+
 /// `E031`（默认档下用了会拖运行期的构造）的**结构化**诊断 —— 正文是**一句话**，不是
 /// token（issue #321）。与参考实现 `check()` 里那条 f-string 逐字节同形：
 /// `{line}: 声明了 …—— {name}（…）。`
@@ -2098,6 +2128,9 @@ fn _start() -> u32 {
             if code == 31 && str_len(ph) > 0 {
                 isrt = 1;
             }
+            // `#702`: 解析类的那几条也要说得出**是什么构造**（裸 return / 嵌套上限 /
+            // 裸块），正文不是那一格 token 原文。与 E031 的 `rt_phrase` 同一处分岔。
+            let ph2: str = err_phrase(unit, toks2, tk, code);
             let take: u32 = 24;
             if ln < 24 {
                 take = ln;
@@ -2105,7 +2138,11 @@ fn _start() -> u32 {
             if isrt == 1 {
                 write_all(2, str_ptr(ph), str_len(ph) as u64);
             } else {
-                write_all(2, ptr_add(unit, st), take as u64);
+                if str_len(ph2) > 0 {
+                    write_all(2, str_ptr(ph2), str_len(ph2) as u64);
+                } else {
+                    write_all(2, ptr_add(unit, st), take as u64);
+                }
             }
             wstr(2, "\n");
             // 同一条诊断, 结构化那一份 (docs/182 §5)。**同一份数据两个受众**:
@@ -2116,9 +2153,15 @@ fn _start() -> u32 {
                                             load32(toks2, tk * 20 + 12), ph,
                                             load32(tytp, RT_N_SITES));
                 } else {
-                    let _j: u64 = wdiag(dfd as u64, scr, ap, an,
-                                        load32(toks2, tk * 20 + 12), code,
-                                        ptr_add(unit, st), take);
+                    if str_len(ph2) > 0 {
+                        let _j2: u64 = wdiag(dfd as u64, scr, ap, an,
+                                             load32(toks2, tk * 20 + 12), code,
+                                             str_ptr(ph2), str_len(ph2));
+                    } else {
+                        let _j: u64 = wdiag(dfd as u64, scr, ap, an,
+                                            load32(toks2, tk * 20 + 12), code,
+                                            ptr_add(unit, st), take);
+                    }
                 }
             }
             e = e + 1;

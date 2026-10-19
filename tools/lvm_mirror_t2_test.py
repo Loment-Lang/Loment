@@ -90,37 +90,41 @@ def _ir(rel: str) -> str:
 
 
 def _run_mirror(rel: str, ir: str, tier: str) -> tuple[bytes, int, str, int]:
-    """跑镜像，返回 `(stdout, rc, profile, decodes)`。"""
+    """跑镜像，返回 `(stdout, rc, profile, decodes)`。
+
+    输入/剖面/计数的路径在**两条平台上都钉成 `/tmp/mirror_*`** —— 于是被解释程序看到的
+    argv[1] 与原生那边 `_run_native(..., argv0)` 用的字符串是同一个（命令单元读 cmdline）。
+    """
     exe = _mirror()
     td = Path(_TD.name)
     inp = td / "in.ll"
-    inp.write_text(ir, encoding="utf-8", newline="\n")
-    prof = td / "prof.txt"
-    stats = td / "stats.txt"
-    for p in (prof, stats, td / "out.txt"):
-        p.unlink(missing_ok=True)
-    argv = ["/tmp/mirror_in.ll", "/tmp/mirror_prof.txt", tier, "/tmp/mirror_stats.txt"]
+    inp.write_text(ir, encoding="utf-8", newline=chr(10))
+    fin, fprof, fstats = "/tmp/mirror_in.ll", "/tmp/mirror_prof.txt", "/tmp/mirror_stats.txt"
+    argv = [fin, fprof, tier, fstats]
     if sys.platform.startswith("linux"):
-        cmd = [str(exe), *argv]
-        r = subprocess.run(cmd, capture_output=True, timeout=900)
+        shutil.copyfile(inp, fin)
+        for f in (fprof, fstats):
+            try:
+                os.unlink(f)
+            except FileNotFoundError:
+                pass
+        r = subprocess.run([str(exe), *argv], capture_output=True, timeout=900)
+        prof_text = Path(fprof).read_text(encoding="utf-8") if Path(fprof).exists() else ""
+        stats_text = Path(fstats).read_text(encoding="utf-8") if Path(fstats).exists() else ""
     else:
         # 先拷进 WSL 自己的文件系统：/mnt/c 刚写的文件立刻读可能是空的（9p 可见性）。
         exe_t = "/tmp/lvm_mirror_t2.bin"
-        cmds = [f"cp {_wsl_path(exe)} {exe_t} 2>/dev/null || true", f"chmod +x {exe_t}",
-                f"cp {_wsl_path(inp)} /tmp/mirror_in.ll",
-                "rm -f /tmp/mirror_prof.txt /tmp/mirror_stats.txt",
+        cmds = [f"cp {_wsl_path(exe)} {exe_t}", f"chmod +x {exe_t}",
+                f"cp {_wsl_path(inp)} {fin}",
+                f"rm -f {fprof} {fstats}",
                 f"{exe_t} " + " ".join(argv)]
         r = subprocess.run([*_WSLCMD, "bash", "-lc", " && ".join(cmds)],
                            capture_output=True, timeout=900)
-        pr = subprocess.run([*_WSLCMD, "bash", "-lc", "cat /tmp/mirror_prof.txt 2>/dev/null"],
+        pr = subprocess.run([*_WSLCMD, "bash", "-lc", f"cat {fprof} 2>/dev/null"],
                             capture_output=True, text=True)
-        st = subprocess.run([*_WSLCMD, "bash", "-lc", "cat /tmp/mirror_stats.txt 2>/dev/null"],
+        st = subprocess.run([*_WSLCMD, "bash", "-lc", f"cat {fstats} 2>/dev/null"],
                             capture_output=True, text=True)
-        prof_text = pr.stdout
-        stats_text = st.stdout
-    if sys.platform.startswith("linux"):
-        prof_text = prof.read_text(encoding="utf-8") if prof.exists() else ""
-        stats_text = stats.read_text(encoding="utf-8") if stats.exists() else ""
+        prof_text, stats_text = pr.stdout, st.stdout
     decodes = int(stats_text.strip() or "-1")
     return r.stdout, r.returncode, prof_text, decodes
 

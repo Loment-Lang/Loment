@@ -3983,7 +3983,7 @@ def resolve_deps(mod: Module, root: Path, base: Path, entry: Path | None = None,
     return order
 
 
-def load_unit(path: Path, root: Path) -> tuple[Module, list[Module]]:
+def load_unit(path: Path, root: Path, lspe_level: int = 3) -> tuple[Module, list[Module]]:
     """**读一个编译单元的唯一入口**：预扫 → 装载 → 解析依赖（`docs/182` §1.10）。
 
     **别处别再自己拼 `load()` + `resolve_deps()`。** 少了预扫那一趟，`addin` 就白写了 ——
@@ -3999,7 +3999,7 @@ def load_unit(path: Path, root: Path) -> tuple[Module, list[Module]]:
     from potato_from import FrontDoorRefused        # noqa: PLC0415
     try:
         sw, addin_paths = prescan_switches(path, root, path.parent, tool_dir, ext)
-        mod = load(path, sw=sw)
+        mod = load(path, sw=sw, lspe_level=lspe_level)
         deps = resolve_deps(mod, root, path.parent, entry=path, sw=sw,
                             addin_paths=addin_paths)
     except (FrontDoorRefused, NotRepresentable) as e:
@@ -5571,14 +5571,17 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
     _lspe_state = mod.chooses.get("lspe", CORE_DEFAULTS["lspe"])
     _lspe_sites = ([] if _lspe_state == "lspe_close_admin"
                    else getattr(mod, "lspe_sites", []))
+    _lspe_level = int(getattr(mod, "lspe_level", 3))
+    _lspe_solver = LspeSolver(_lspe_sites, _lspe_level).run()
     _lspe_by_kind: dict[str, list[int]] = {}
     for _s in _lspe_sites:
-        _pair = _lspe_by_kind.setdefault(_s["kind"], [0, 0])
+        # `per_kind` 按**义务种类**计，不按站点种类计（`docs/262` §5.11）。
+        _pair = _lspe_by_kind.setdefault(_s["obligation"], [0, 0])
         _pair[0] += 1
-        if _s["proved"]:
+        if _lspe_solver.proved(_s):
             _pair[1] += 1
     _lspe_n = len(_lspe_sites)
-    _lspe_proved = sum(1 for _s in _lspe_sites if _s["proved"])
+    _lspe_proved = sum(1 for _s in _lspe_sites if _lspe_solver.proved(_s))
     _lspe_undecided = _lspe_n - _lspe_proved
     _lspe_per_kind = {k: f"{v[1]}/{v[0]}" for k, v in sorted(_lspe_by_kind.items()) if v[0]}
     doc = {
@@ -5661,7 +5664,7 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
             "state": _lspe_state,
             "set_by": ("source" if "lspe" in mod.chooses else "default"),
             "mode": "full",
-            "level": 3,
+            "level": _lspe_level,
             "sites": _lspe_n,
             "obligations": _lspe_n,
             "proved": _lspe_proved,
@@ -9004,6 +9007,86 @@ _LSPE_BRACKET_KW = frozenset({
 })
 
 
+#: LSPE 的证据种类（`docs/262` §5.3）。**`Differential` 永远不在 accept 集合里** ——
+#: 孪生只证一致，不证对（`docs/253` §5.1.1）。
+LSPE_EVIDENCE_KINDS = ("Axiom", "Syntactic", "Typed", "LocalFlow",
+                       "Interproc", "GlobalInvariant", "Assumed", "Differential")
+
+#: LSPE 的 14 条义务（`docs/262` §5.2）。每条都点名**语义所有者**与**接收的听说种类**。
+#: LSPE 不发明语义：`owner` 一项是指到那份语义文档/码的。
+LSPE_OBLIGATIONS: dict[str, dict[str, object]] = {
+    "InBounds": {"owner": "docs/146 / E028",
+                 "accept": ("Syntactic", "Typed", "LocalFlow", "Interproc",
+                            "GlobalInvariant", "Assumed")},
+    "Alive": {"owner": "docs/210 / E029",
+              "accept": ("LocalFlow", "Interproc", "Assumed")},
+    "InDomain": {"owner": "docs/146",
+                 "accept": ("Typed", "GlobalInvariant", "Assumed")},
+    "Exclusive": {"owner": "docs/206 / E007",
+                  "accept": ("LocalFlow", "Interproc", "Assumed")},
+    "Initialized": {"owner": "docs/206 / E006",
+                    "accept": ("Syntactic", "LocalFlow", "Interproc", "Assumed")},
+    "NotDangling": {"owner": "docs/206 / E012",
+                    "accept": ("LocalFlow", "Interproc", "Assumed")},
+    "NoRuntime": {"owner": "docs/182 / E031",
+                  "accept": ("Axiom", "Syntactic", "Typed")},
+    "FreeOwnership": {"owner": "docs/210",
+                      "accept": ("LocalFlow", "Interproc", "Assumed")},
+    "LadderLiability": {"owner": "docs/210",
+                        "accept": ("Typed", "Interproc", "GlobalInvariant", "Assumed")},
+    "CapabilityLive": {"owner": "docs/146",
+                       "accept": ("Typed", "GlobalInvariant", "Assumed")},
+    "TypeWellFormed": {"owner": "docs/158 / docs/147",
+                       "accept": ("Axiom", "Typed", "Interproc", "Assumed")},
+    "DropHonest": {"owner": "docs/253 §1.2",
+                   "accept": ("Assumed",)},
+    "GuardHolds": {"owner": "docs/146",
+                   "accept": ("Syntactic", "Typed", "GlobalInvariant", "Assumed")},
+    "SummaryContract": {"owner": "docs/210 §7",
+                        "accept": ("Axiom", "Interproc", "Assumed")},
+}
+
+
+class LspeSolver:
+    """证据子集格上的工作列表（`docs/262` §5.3 / §5.5）。
+
+    P0 每个站点只有一条义务、没有传播边；但队列顺序与"只做并集"的单调性已经按最终
+    形状写死。接 E3/E4 时只加 successors，不改求解器，也不改确定性的那几条规矩。
+
+    * 证据是 `LSPE_EVIDENCE_KINDS` 的**子集**，按包含关系构成有限格；
+    * `Differential` 永远不在 accept 集合里 —— 它最多是闸门，不能销义务；
+    * 队列按站点 id 排序，不是哈希序。
+    """
+
+    def __init__(self, sites: list[dict], level: int = 3) -> None:
+        self.level = level
+        self.order = sorted(sites, key=lambda s: s["id"])
+        self.accept = {k: set(v["accept"]) for k, v in LSPE_OBLIGATIONS.items()}
+        self.evidence = {s["id"]: self._initial(s) for s in self.order}
+
+    def _initial(self, site: dict) -> frozenset:
+        ev = site.get("evidence")
+        # 级别只缩不放：L0 只认语法证据，L1 起才认类型证据。
+        if ev == "Typed" and self.level < 1:
+            return frozenset()
+        if ev in (None, "none"):
+            return frozenset()
+        if ev in LSPE_EVIDENCE_KINDS:
+            return frozenset({ev})
+        return frozenset()
+
+    def run(self) -> "LspeSolver":
+        queue = list(self.order)
+        while queue:
+            site = queue.pop(0)
+            # 目前没有传播边；保留 worklist 形状，E3/E4 在这里加 successors。
+            self.evidence[site["id"]] = frozenset(self.evidence[site["id"]])
+        return self
+
+    def proved(self, site: dict) -> bool:
+        return bool(self.evidence[site["id"]] & self.accept.get(site["obligation"], set()))
+
+
 def _lspe_census(toks: list, unit: str) -> tuple[list[dict], list[int]]:
     """P0 的站点普查（`docs/262` §5.1）：guard 语句 + 下标表达式。
 
@@ -9031,7 +9114,7 @@ def _lspe_census(toks: list, unit: str) -> tuple[list[dict], list[int]]:
             cap = toks[i + 1].val if i + 1 < n else ""
             sites.append({"id": _id("guard", f"guard:{cap}"), "kind": "guard",
                           "claim": "allow", "obligation": "GuardHolds",
-                          "evidence": "capability",
+                          "evidence": "Typed",
                           "source": "capability", "line": t.line, "proved": True})
             continue
         if t.kind != "punct" or t.val != "[" or i == 0:
@@ -9068,7 +9151,7 @@ def _lspe_census(toks: list, unit: str) -> tuple[list[dict], list[int]]:
         sites.append({"id": _id("index", f"index:{lhs}[{''.join(inner)}]"),
                       "kind": "index",
                       "claim": "allow", "obligation": "InBounds",
-                      "evidence": ("lms(g0)" if literal else "none"),
+                      "evidence": ("Syntactic" if literal else "none"),
                       "source": ("lms(g0)" if literal else None),
                       "line": t.line, "proved": literal})
         if not literal:
@@ -9076,7 +9159,7 @@ def _lspe_census(toks: list, unit: str) -> tuple[list[dict], list[int]]:
     return sites, unsourced
 
 
-def load(path: Path, sw: SwitchTable | None = None) -> Module:
+def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3) -> Module:
     # **前门**（`docs/188` §7.2）：读法由**声明**决定，不由后缀或嗅探。
     # 一份 `choose write grammar python` 的 `.lomt` 按 `docs/188` §0 **仍然是 Loment**，
     # 只是拼法不同 —— 所以这里先把它**翻成 Loment 源码**再往下走。
@@ -9117,6 +9200,7 @@ def load(path: Path, sw: SwitchTable | None = None) -> Module:
     # LSPE 的站点普查（`docs/262` §5.1）：在**最终 token 流**上算一次。
     # 与自举侧 `potato.lomt` 的 `pt_lspe` 同一条规则 —— twin 的计数不能漂。
     mod.lspe_sites, mod.lspe_unsourced_lines = _lspe_census(tt, mod.name)
+    mod.lspe_level = lspe_level
     # 方言清单挂在模块上，供 Potato v4 用（`docs/184` §9 S4.3）。**定义那一段已经被
     # 抹掉了**，所以这是唯一还记得"这份源用了哪些自定义语法"的地方。
     mod.dialects = _dias
@@ -9269,6 +9353,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--print-command", action="store_true",
                     help="打印本单元注册的命令名 (没声明就打空行), docs/223")
     ap.add_argument("--lom-root", default=None, help="use 的 .lom 搜索根 (默认仓库根)")
+    ap.add_argument("--lspe-level", type=int, default=3, choices=(0, 1, 2, 3, 4),
+                    help="LSPE 上下文级别（默认 3；只缩不放）")
     args = ap.parse_args(argv)
 
     # `--diag-out`: **现在就建/清空**, 不是等出错了再建 —— 与自举驱动同一口径 (docs/182 §5)。
@@ -9288,7 +9374,7 @@ def main(argv: list[str] | None = None) -> int:
     path = Path(args.file)
     try:
         # 预扫 → 装载 → 解析依赖，**一个入口**（`docs/182` §1.10）。
-        mod, deps = load_unit(path, root)
+        mod, deps = load_unit(path, root, lspe_level=args.lspe_level)
     except LomError as e:
         print(f"[ERR] {path}: {e}", file=sys.stderr)
         # 位置指不出来的那一档（`line == 0`，例如"前门拒了这份源"）**不写**结构化诊断 ——

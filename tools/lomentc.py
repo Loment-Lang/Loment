@@ -4713,7 +4713,7 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     if (not _dep_pass
             and mod.chooses.get("lspe", CORE_DEFAULTS["lspe"]) == "lspe_open_admin"):
         for s in getattr(mod, "lspe_sites", []):
-            if s.get("kind") not in ("guard", "index"):
+            if s.get("kind") not in _LSPE_SITE_KINDS:
                 errs.append(f"{s.get('line', 0)}: LSPE 台账里有未登记的站点种类"
                             f" {s.get('kind')!r}")
         if lspe_mode == "strict":
@@ -5571,6 +5571,22 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
     _lspe_state = mod.chooses.get("lspe", CORE_DEFAULTS["lspe"])
     _lspe_sites = ([] if _lspe_state == "lspe_close_admin"
                    else getattr(mod, "lspe_sites", []))
+    if deps and _lspe_sites:
+        # E4 的安全表要看**根 + 依赖**（自举侧 `compute_safe` 扫整个单元）；首参表仍只看根
+        # —— 依赖里的函数不是这份产物要审计的站点。`load()` 手上没有 deps，所以这一步
+        # 只能在发射这层补（与 `_gc_alpha_pass` 同一个理由）。
+        _lspe_sites = [s for s in _lspe_sites if s["kind"] != "call"]
+        _seen_e4: dict[str, int] = {}
+
+        def _sid_e4(kind: str, key: str) -> str:
+            occ = _seen_e4.get(key, 0)
+            _seen_e4[key] = occ + 1
+            return f"{mod.name}:{kind}:{_fnv1a32(key + '#' + str(occ)):08x}"
+
+        _lspe_census_e4(
+            getattr(mod, "toks", []), _sid_e4, _lspe_sites,
+            [(getattr(d, "toks", []), _lspe_functions(getattr(d, "toks", [])))
+             for d in deps])
     _lspe_level = int(getattr(mod, "lspe_level", 3))
     _lspe_solver = LspeSolver(_lspe_sites, _lspe_level).run()
     _lspe_by_kind: dict[str, list[int]] = {}
@@ -5676,7 +5692,7 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
             "per_kind": _lspe_per_kind,
             # I1 = 站点对账（今天只对"种类都认识"这一半；跨组件那份在 #761）。
             "invariants": {
-                "i1": ("ok" if all(s["kind"] in ("guard", "index") for s in _lspe_sites)
+                "i1": ("ok" if all(s["kind"] in _LSPE_SITE_KINDS for s in _lspe_sites)
                        else "fail"),
                 "i2": "not_run", "i3": "not_run", "i4": "not_run", "i5": "not_run",
             },
@@ -9006,11 +9022,24 @@ _LSPE_BRACKET_KW = frozenset({
     "capability", "excluded", "guard", "as", "mut",
 })
 
+#: 后接 `(` 也不算函数调用的关键字（`if (...)`、`guard d(...)` …）。
+#: 与自举侧 `pt_lspe_call_kw` **逐字同表** —— 两边普查的调用点计数不能漂。
+_LSPE_CALL_KW = _LSPE_BRACKET_KW | frozenset({"extern", "true", "false", "self"})
+
+#: 普查里允许出现的站点种类（I1 的第一半）。加一种站点要同时登记在这里。
+_LSPE_SITE_KINDS = frozenset({
+    "guard", "index", "free", "alive", "init", "exclusive", "call",
+})
+
 
 #: LSPE 的证据种类（`docs/262` §5.3）。**`Differential` 永远不在 accept 集合里** ——
 #: 孪生只证一致，不证对（`docs/253` §5.1.1）。
 LSPE_EVIDENCE_KINDS = ("Axiom", "Syntactic", "Typed", "LocalFlow",
                        "Interproc", "GlobalInvariant", "Assumed", "Differential")
+
+#: 每种证据**最早**在哪个上下文级别被承认（`docs/262` §5.4 / §5.6）。
+#: 没列出的（Axiom / Syntactic / Assumed / Differential）从 L0 起就承认。
+_LSPE_EVIDENCE_LEVEL = {"Typed": 1, "LocalFlow": 1, "Interproc": 2, "GlobalInvariant": 3}
 
 #: LSPE 的 14 条义务（`docs/262` §5.2）。每条都点名**语义所有者**与**接收的听说种类**。
 #: LSPE 不发明语义：`owner` 一项是指到那份语义文档/码的。
@@ -9066,8 +9095,9 @@ class LspeSolver:
 
     def _initial(self, site: dict) -> frozenset:
         ev = site.get("evidence")
-        # 级别只缩不放：L0 只认语法证据，L1 起才认类型证据。
-        if ev == "Typed" and self.level < 1:
+        # 级别只缩不放（`docs/262` §5.6）：E2 的 Typed 与 E3 的 LocalFlow 从 L1 起，
+        # E4 的 Interproc 从 L2 起，E5 的 GlobalInvariant 从 L3 起。
+        if self.level < _LSPE_EVIDENCE_LEVEL.get(ev, 0):
             return frozenset()
         if ev in (None, "none"):
             return frozenset()
@@ -9088,31 +9118,43 @@ class LspeSolver:
 
 
 def _lspe_census(toks: list, unit: str) -> tuple[list[dict], list[int]]:
-    """P0 的站点普查（`docs/262` §5.1）：guard 语句 + 下标表达式。
+    """站点普查（`docs/262` §5.1）：E1/E2（guard + 下标）、E3、E4。
 
     口径是**词法的**，且两套实现用**同一条规则** —— 参考侧吃 `lomc.lex` 的 token，
     自举侧吃驱动器的 token 数组。这样 twin 的计数不会因为 AST 形状不同而漂。
 
-    * `guard` 关键字 = 一个 guard 站点，来源 `capability`；
-    * `[` 且前一个 token 是**非关键字标识符 / `)` / `]`** = 一个 index 站点；
-      下标是**裸字面量**（`[ N ]` 三个 token）时来源 `lms(g0)`，否则无来源。
+    线性 CFG：语句按 token 顺序执行，`return` 结束它所在块剩下一段。这是 E3 的
+    "固定顺序"定义（`docs/262` §5.4）——没有分支敏感，只有块结构。
     """
     sites: list[dict] = []
     unsourced: list[int] = []
     seen: dict[str, int] = {}
 
-    def _id(kind: str, key: str) -> str:
+    def sid(kind: str, key: str) -> str:
         # 内容寻址：键是站点的 token 文本，重复序数只区分**完全相同**的表达式。
         # 不用行号（会漂），也不用全局序号（在前面插一个站点会把后面全部重编号）。
         occ = seen.get(key, 0)
         seen[key] = occ + 1
         return f"{unit}:{kind}:{_fnv1a32(key + '#' + str(occ)):08x}"
 
+    _lspe_census_e1e2(toks, sid, sites, unsourced)
+    _lspe_census_e3(toks, sid, sites)
+    _lspe_census_e4(toks, sid, sites)
+    return sites, unsourced
+
+
+def _lspe_census_e1e2(toks: list, sid, sites: list[dict], unsourced: list[int]) -> None:
+    """E1 常量 + E2 类型（`docs/262` §5.4）。
+
+    * `guard` 关键字 = 一个 guard 站点，来源 `capability`；
+    * `[` 且前一个 token 是**非关键字标识符 / `)` / `]`** = 一个 index 站点；
+      下标是**裸字面量**（`[ N ]` 三个 token）时来源 `lms(g0)`，否则无来源。
+    """
     n = len(toks)
     for i, t in enumerate(toks):
         if t.kind == "ident" and t.val == "guard":
             cap = toks[i + 1].val if i + 1 < n else ""
-            sites.append({"id": _id("guard", f"guard:{cap}"), "kind": "guard",
+            sites.append({"id": sid("guard", f"guard:{cap}"), "kind": "guard",
                           "claim": "allow", "obligation": "GuardHolds",
                           "evidence": "Typed",
                           "source": "capability", "line": t.line, "proved": True})
@@ -9148,7 +9190,7 @@ def _lspe_census(toks: list, unit: str) -> tuple[list[dict], list[int]]:
         # 只用**紧邻的前一个 token** 作 LHS。往前多抓几个 token 会把上一条语句
         # （`;`、`return` …）也卷进键里 —— 插入一个无关站点就会让 id 变。
         lhs = prev.val
-        sites.append({"id": _id("index", f"index:{lhs}[{''.join(inner)}]"),
+        sites.append({"id": sid("index", f"index:{lhs}[{''.join(inner)}]"),
                       "kind": "index",
                       "claim": "allow", "obligation": "InBounds",
                       "evidence": ("Syntactic" if literal else "none"),
@@ -9156,7 +9198,318 @@ def _lspe_census(toks: list, unit: str) -> tuple[list[dict], list[int]]:
                       "line": t.line, "proved": literal})
         if not literal:
             unsourced.append(t.line)
-    return sites, unsourced
+
+
+def _lspe_match_brace(toks: list, i: int) -> int | None:
+    d = 0
+    for j in range(i, len(toks)):
+        t = toks[j]
+        if t.kind != "punct":
+            continue
+        if t.val == "{":
+            d += 1
+        elif t.val == "}":
+            d -= 1
+            if d == 0:
+                return j
+    return None
+
+
+def _lspe_functions(toks: list) -> list[tuple[int, int, int, int]]:
+    """本单元每个**有体**函数的 `(名字 token, 首形参 token, 体首 token, 体尾 token)`。"""
+    n = len(toks)
+    out: list[tuple[int, int, int, int]] = []
+    for i, t in enumerate(toks):
+        if not (t.kind == "ident" and t.val == "fn"):
+            continue
+        if i > 0 and toks[i - 1].kind == "ident" and toks[i - 1].val == "extern":
+            continue
+        if i + 1 >= n or toks[i + 1].kind != "ident":
+            continue
+        # 找形参表的 `(`（跳过 `<...>`）
+        k = i + 2
+        while k < n and not (toks[k].kind == "punct" and toks[k].val == "("):
+            if toks[k].kind == "punct" and toks[k].val in (";", "{"):
+                break
+            k += 1
+        if k >= n or not (toks[k].kind == "punct" and toks[k].val == "("):
+            continue
+        d = 0
+        j = k
+        while j < n:
+            if toks[j].kind == "punct" and toks[j].val == "(":
+                d += 1
+            elif toks[j].kind == "punct" and toks[j].val == ")":
+                d -= 1
+                if d == 0:
+                    break
+            j += 1
+        if d != 0:
+            continue
+        b = j + 1
+        while b < n and not (toks[b].kind == "punct" and toks[b].val in ("{", ";")):
+            b += 1
+        if b >= n or toks[b].val != "{":
+            continue
+        e = _lspe_match_brace(toks, b)
+        if e is None:
+            continue
+        out.append((i + 1, k + 1, b + 1, e))
+    return out
+
+
+def _lspe_is_write(toks: list, k: int) -> bool:
+    """`x = ...` 是写；`x == ...` 是读（词法器把 `==` 拆成两个 `=` token）。"""
+    n = len(toks)
+    return (k + 1 < n and toks[k + 1].kind == "punct" and toks[k + 1].val == "="
+            and not (k + 2 < n and toks[k + 2].kind == "punct" and toks[k + 2].val == "="))
+
+
+def _lspe_unreachable(toks: list, free_i: int, use_i: int) -> bool:
+    """从 use 反向走到 free：同一块或**外层**块里出现过 `return` ⇒ 这句不可达。
+
+    反向走法自然区分兄弟块：兄弟块里的 `return` 会遇到它的 `}` 被记进深度，不算。
+    """
+    d = 0
+    k = use_i - 1
+    while k > free_i:
+        t = toks[k]
+        if t.kind == "punct":
+            if t.val == "}":
+                d += 1
+            elif t.val == "{" and d > 0:
+                d -= 1
+        elif t.kind == "ident" and d == 0 and t.val == "return":
+            return True
+        k -= 1
+    return False
+
+
+def _lspe_owned(toks: list, at: int, free_i: int, name_i: int) -> bool:
+    """`free(x)` 之前最近一处 `let x` 是不是 `let x : ptr = alloc (`。"""
+    k = free_i - 1
+    while k > at:
+        if (toks[k].kind == "ident" and toks[k].val == toks[name_i].val
+                and toks[k - 1].kind == "ident" and toks[k - 1].val == "let"):
+            n = len(toks)
+            return (k + 5 < n and toks[k + 1].kind == "punct" and toks[k + 1].val == ":"
+                    and toks[k + 2].kind == "ident" and toks[k + 2].val == "ptr"
+                    and toks[k + 3].kind == "punct" and toks[k + 3].val == "="
+                    and toks[k + 4].kind == "ident" and toks[k + 4].val == "alloc"
+                    and toks[k + 5].kind == "punct" and toks[k + 5].val == "(")
+        k -= 1
+    return False
+
+
+def _lspe_census_e3(toks: list, sid, sites: list[dict]) -> None:
+    """E3 局部流（`docs/262` §5.4）：`FreeOwnership` / `Alive` / `Initialized` / `Exclusive`。
+
+    规则与检查器的局部表**同源**（E029 的 `freed` 表、E006 的 `moved` 表）：这里是
+    把那些判决变成证据，不是另写一套语义。线性 CFG 见 `_lspe_census` 的说明。
+    """
+    for _name_i, _p_i, at, end in _lspe_functions(toks):
+        for i in range(at, end):
+            t = toks[i]
+            # ---- FreeOwnership + 之后的 Alive ----
+            if (t.kind == "ident" and t.val == "free" and i + 3 < end
+                    and toks[i + 1].kind == "punct" and toks[i + 1].val == "("
+                    and toks[i + 2].kind == "ident"
+                    and toks[i + 3].kind == "punct" and toks[i + 3].val == ")"):
+                name_i = i + 2
+                name = toks[name_i].val
+                uses: list[int] = []
+                for j in range(i + 4, end):
+                    if toks[j].kind != "ident" or toks[j].val != name:
+                        continue
+                    if j > at and toks[j - 1].kind == "ident" and toks[j - 1].val == "let":
+                        continue                       # 重新声明 = 新名字主人
+                    if _lspe_is_write(toks, j):
+                        continue                       # 写是重新指向，不是用旧块
+                    uses.append(j)
+                reachable = [j for j in uses if not _lspe_unreachable(toks, i + 3, j)]
+                owned = _lspe_owned(toks, at, i, name_i)
+                sites.append({"id": sid("free", f"free:{name}"),
+                              "kind": "free", "claim": "allow",
+                              "obligation": "FreeOwnership",
+                              "evidence": ("LocalFlow" if owned and not reachable else "none"),
+                              "source": ("local-flow" if owned and not reachable else None),
+                              "line": t.line, "proved": owned and not reachable})
+                for j in uses:
+                    un = _lspe_unreachable(toks, i + 3, j)
+                    sites.append({"id": sid("alive", f"alive:{name}:{j - i}"),
+                                  "kind": "alive", "claim": "allow",
+                                  "obligation": "Alive",
+                                  "evidence": ("LocalFlow" if un else "none"),
+                                  "source": ("local-flow" if un else None),
+                                  "line": toks[j].line, "proved": un})
+            # ---- Initialized（`let x: T;` 之后的读） ----
+            if (t.kind == "ident" and t.val == "let" and i + 1 < end
+                    and toks[i + 1].kind == "ident"):
+                name = toks[i + 1].val
+                depth = 0
+                initialized = False
+                j = i + 2
+                while j < end:
+                    v = toks[j].val if toks[j].kind == "punct" else None
+                    if v in ("(", "[", "{"):
+                        depth += 1
+                    elif v in (")", "]", "}") and depth > 0:
+                        depth -= 1
+                    elif v == "=" and depth == 0:
+                        # 声明里的 `=`（`==` 是读，不算；它的第一个 `=` 后面紧跟 `=`）。
+                        if not (j + 1 < end and toks[j + 1].kind == "punct"
+                                and toks[j + 1].val == "="):
+                            initialized = True
+                    elif v == ";" and depth == 0:
+                        break
+                    j += 1
+                if initialized or j >= end:
+                    continue
+                assigned = False
+                for k in range(j + 1, end):
+                    if (toks[k].kind == "ident" and toks[k].val == "let"
+                            and k + 1 < end and toks[k + 1].kind == "ident"
+                            and toks[k + 1].val == name):
+                        break
+                    if toks[k].kind != "ident" or toks[k].val != name:
+                        continue
+                    if k > at and toks[k - 1].kind == "ident" and toks[k - 1].val == "let":
+                        continue
+                    if _lspe_is_write(toks, k):
+                        assigned = True
+                        continue
+                    sites.append({"id": sid("init", f"init:{name}:{k - j}"),
+                                  "kind": "init", "claim": "allow",
+                                  "obligation": "Initialized",
+                                  "evidence": ("LocalFlow" if assigned else "none"),
+                                  "source": ("local-flow" if assigned else None),
+                                  "line": toks[k].line, "proved": assigned})
+            # ---- Exclusive（`&mut x` 与同一语句里的另一次使用重叠） ----
+            if (t.kind == "punct" and t.val == "&" and i + 2 < end
+                    and toks[i + 1].kind == "ident" and toks[i + 1].val == "mut"
+                    and toks[i + 2].kind == "ident"):
+                name = toks[i + 2].val
+                other = False
+                k = i + 3
+                while k < end:
+                    if toks[k].kind == "punct" and toks[k].val == ";":
+                        break
+                    if toks[k].kind == "ident" and toks[k].val == name:
+                        other = True
+                    k += 1
+                sites.append({"id": sid("exclusive", f"exclusive:{name}:{i}"),
+                              "kind": "exclusive", "claim": "allow",
+                              "obligation": "Exclusive",
+                              "evidence": ("none" if other else "LocalFlow"),
+                              "source": (None if other else "local-flow"),
+                              "line": t.line, "proved": not other})
+
+
+def _lspe_safe_set(toks: list, fns: list[tuple[int, int, int, int]],
+                   extra: list[tuple[list, list]] = ()) -> set[str]:
+    """deref-only 摘要的全局不动点（`docs/210` §7）。
+
+    与自举侧 `compute_safe` **同一条 token 规则**（含 `syscall_borrow_ok` 那一支），
+    所以两边算出的安全名集合相同 —— E4 的 `Interproc` 计数不能漂。
+    `extra` 是依赖单元：自举侧 `compute_safe` 扫的是**整个单元**（依赖在根前面），
+    所以发射时的安全表必须把依赖一起算进来（`load32 -> load16 -> load8` 常常跨模块）。
+    递归环只有在有基例时才进入集合；纯递归的函数停在集合外，调用点记 UNDECIDED。
+    """
+    units = [(toks, fns)] + list(extra)
+    safe: set[str] = set(_L0_SAFE_BUILTINS)
+    changed = True
+    rounds = 0
+    while changed and rounds < 256:
+        changed = False
+        rounds += 1
+        for utoks, ufns in units:
+            for name_i, p_i, at, end in ufns:
+                name = utoks[name_i].val
+                if name in safe:
+                    continue
+                if (p_i + 2 >= end or utoks[p_i].kind != "ident"
+                        or utoks[p_i].val == "self"):
+                    continue
+                if not (utoks[p_i + 1].kind == "punct" and utoks[p_i + 1].val == ":"
+                        and utoks[p_i + 2].kind == "ident" and utoks[p_i + 2].val == "ptr"):
+                    continue
+                p = utoks[p_i].val
+                ok = True
+                for k in range(at, end):
+                    if utoks[k].kind != "ident" or utoks[k].val != p:
+                        continue
+                    if (k > 0 and utoks[k - 1].kind == "ident"
+                            and utoks[k - 1].val == "let") or _lspe_is_write(utoks, k):
+                        ok = False
+                        break
+                    if _syscall_borrow_ok(utoks, k):
+                        continue
+                    unqualified = (k < 3
+                                   or not (utoks[k - 3].kind == "punct"
+                                           and utoks[k - 3].val in (".", ":")))
+                    call_ok = (k >= 2 and k + 1 < len(utoks)
+                               and utoks[k - 1].kind == "punct" and utoks[k - 1].val == "("
+                               and utoks[k - 2].kind == "ident" and unqualified
+                               and utoks[k + 1].kind == "punct"
+                               and utoks[k + 1].val in (",", ")")
+                               and utoks[k - 2].val in safe)
+                    if not call_ok:
+                        ok = False
+                        break
+                if ok:
+                    safe.add(name)
+                    changed = True
+    return safe
+
+
+def _lspe_census_e4(toks: list, sid, sites: list[dict],
+                    extra: list[tuple[list, list]] = ()) -> None:
+    """E4 过程间摘要（`docs/262` §5.4）：首参是 `ptr` 的函数的每个调用点一条
+    `SummaryContract` 站点。摘要在安全表里 ⇒ `Interproc`；否则是洞（`none`）。
+
+    摘要键是**调用点的实际实参 token 文本**，不是只有函数名 —— 推断式泛型的替换
+    由实参决定，所以同一个 `f` 的两次不同调用是两个键。
+
+    `extra` 是依赖单元：安全表要看**根 + 依赖**（自举侧 `compute_safe` 扫整个单元），
+    但首参表只看根 —— 依赖里的函数不是这份产物要审计的站点。
+    """
+    fns = _lspe_functions(toks)
+    ptr_first = {toks[n].val for (n, p, _at, end) in fns
+                 if p + 2 < end and toks[p].kind == "ident"
+                 and toks[p + 1].kind == "punct" and toks[p + 1].val == ":"
+                 and toks[p + 2].kind == "ident" and toks[p + 2].val == "ptr"}
+    if not ptr_first:
+        return
+    safe = _lspe_safe_set(toks, fns, extra)
+    n = len(toks)
+    for i, t in enumerate(toks):
+        if t.kind != "ident" or t.val in _LSPE_CALL_KW or t.val not in ptr_first:
+            continue
+        if not (i + 1 < n and toks[i + 1].kind == "punct" and toks[i + 1].val == "("):
+            continue
+        if i > 0 and toks[i - 1].kind == "punct" and toks[i - 1].val in (".", ":"):
+            continue
+        if i > 0 and toks[i - 1].kind == "ident" and toks[i - 1].val == "fn":
+            continue
+        depth = 0
+        j = i + 1
+        inner: list[str] = []
+        while j < n and len(inner) < 32:
+            if toks[j].kind == "punct" and toks[j].val == "(":
+                depth += 1
+            elif toks[j].kind == "punct" and toks[j].val == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            inner.append(toks[j].val)
+            j += 1
+        proved = t.val in safe
+        sites.append({"id": sid("call", f"call:{t.val}{''.join(inner)}"),
+                      "kind": "call", "claim": "allow",
+                      "obligation": "SummaryContract",
+                      "evidence": ("Interproc" if proved else "none"),
+                      "source": (t.val if proved else None),
+                      "line": t.line, "proved": proved})
 
 
 def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3) -> Module:

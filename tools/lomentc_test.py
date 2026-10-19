@@ -4451,8 +4451,11 @@ def test_lspe_census_agrees_with_the_ast():
         ast: dict[str, int] = {}
         walk(mod, ast)
         tok: dict[str, int] = {}
+        # 独立对照只覆盖 E1/E2 两族 —— E3/E4 的站点不是"节点数"同形的东西
+        # （`free`/`let` 的**流**不是节点本身），它们的判据另写。
         for s in getattr(mod, "lspe_sites", []):
-            tok[s["kind"]] = tok.get(s["kind"], 0) + 1
+            if s["kind"] in ("guard", "index"):
+                tok[s["kind"]] = tok.get(s["kind"], 0) + 1
         checked += 1
         if ast != tok:
             bad.append((p.name, ast, tok))
@@ -4712,6 +4715,136 @@ def test_lspe_level_only_lowers_proved():
     assert d0["lspe"]["proved"] == 1, d0["lspe"]
     assert d3["lspe"]["proved"] == 2, d3["lspe"]
     assert d0["lspe"]["proved"] <= d3["lspe"]["proved"]
+
+
+def _lspe_load(tmp: str, name: str, src: str, level: int = 3):
+    p = Path(tmp) / f"{name}.lomt"
+    p.write_text(src, encoding="utf-8", newline=chr(10))
+    mod = lomentc.load(p, lspe_level=level)
+    return p, mod
+
+
+@test
+def test_lspe_e3_a_reachable_use_after_free_is_never_proved():
+    """#740：`free` 之后可达的用，只能是 UNDECIDED —— 不能是 PROVED。"""
+    src = ("module e3_alive\n\nchoose runtime\n\n"
+           "fn f(p: ptr) -> u32 {\n"
+           "    free(p);\n"
+           "    if p == p {\n"
+           "        return 0;\n"
+           "    }\n"
+           "    return 1;\n"
+           "}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p, mod = _lspe_load(td, "alive", src)
+        doc = json.loads(lomentc.emit_potato(mod, ROOT))
+    alive = [s for s in mod.lspe_sites if s["kind"] == "alive"]
+    assert alive, [s["kind"] for s in mod.lspe_sites]
+    assert all(s["evidence"] == "none" for s in alive), alive
+    assert doc["lspe"]["per_kind"]["Alive"] == f"0/{len(alive)}", doc["lspe"]
+
+
+@test
+def test_lspe_e3_an_unreachable_use_after_free_is_proved():
+    """#740：`return` 之后的用不可达，`Alive` 这一条能证；`free` 本身仍无来源。"""
+    src = ("module e3_dead\n\nchoose runtime\n\n"
+           "fn g(p: ptr) -> u32 {\n"
+           "    free(p);\n"
+           "    return 0;\n"
+           "    let x: u32 = load8(p, 0);\n"
+           "}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p, mod = _lspe_load(td, "dead", src)
+        d0 = json.loads(lomentc.emit_potato(mod, ROOT))
+        d0_low = json.loads(lomentc.emit_potato(
+            lomentc.load(p, lspe_level=0), ROOT))
+    alive = [s for s in mod.lspe_sites if s["kind"] == "alive"]
+    assert [s["evidence"] for s in alive] == ["LocalFlow"], alive
+    assert d0["lspe"]["per_kind"]["Alive"] == "1/1", d0["lspe"]
+    assert d0["lspe"]["per_kind"]["FreeOwnership"] == "0/1", d0["lspe"]
+    # L0 不认 LocalFlow：同一条站点降回 UNDECIDED（级别只缩不放）。
+    assert d0_low["lspe"]["per_kind"]["Alive"] == "0/1", d0_low["lspe"]
+
+
+@test
+def test_lspe_e3_initialized_before_assignment_is_undecided():
+    """#740：`let x: T;` 之后、赋值之前的读是 UNDECIDED；赋值之后才是 LocalFlow。"""
+    src = ("module e3_init\n\nchoose runtime\n\n"
+           "fn h() -> u32 {\n"
+           "    let x: u32;\n"
+           "    let a: u32 = x;\n"
+           "    x = 3;\n"
+           "    return a + x;\n"
+           "}\n")
+    with tempfile.TemporaryDirectory() as td:
+        _p, mod = _lspe_load(td, "init", src)
+        doc = json.loads(lomentc.emit_potato(mod, ROOT))
+    init = [s for s in mod.lspe_sites if s["kind"] == "init"]
+    assert [s["evidence"] for s in init] == ["none", "LocalFlow"], init
+    assert doc["lspe"]["per_kind"]["Initialized"] == "1/2", doc["lspe"]
+
+
+@test
+def test_lspe_e3_exclusive_overlap_is_undecided():
+    """#740：同一条语句里 `&mut x` 与 `x` 重叠 ⇒ `Exclusive` 不证。"""
+    src = ("module e3_excl\n\nchoose runtime\n\n"
+           "fn take2(p: ptr, v: u32) -> u32 {\n"
+           "    return load8(p, 0) + v;\n"
+           "}\n\n"
+           "fn h() -> u32 {\n"
+           "    let x: u32 = 1;\n"
+           "    return take2(&mut x as ptr, x);\n"
+           "}\n")
+    with tempfile.TemporaryDirectory() as td:
+        _p, mod = _lspe_load(td, "excl", src)
+        doc = json.loads(lomentc.emit_potato(mod, ROOT))
+    excl = [s for s in mod.lspe_sites if s["kind"] == "exclusive"]
+    assert [s["evidence"] for s in excl] == ["none"], excl
+    assert doc["lspe"]["per_kind"]["Exclusive"] == "0/1", doc["lspe"]
+
+
+@test
+def test_lspe_e4_deref_only_callee_yields_interproc():
+    """#741：只把首参透给 `load8` 的被调有摘要；把首参返回的被调没有。
+
+    摘要键含实参文本 —— 同一个 `deref` 的两次调用是两个键（推断式泛型的替换由实参决定）。
+    """
+    src = ("module e4_sum\n\nchoose runtime\n\n"
+           "fn deref(p: ptr) -> u32 {\n"
+           "    return load8(p, 0);\n"
+           "}\n\n"
+           "fn leak(p: ptr) -> ptr {\n"
+           "    return p;\n"
+           "}\n\n"
+           "fn h(q: ptr, r: ptr) -> u32 {\n"
+           "    let a: u32 = deref(q);\n"
+           "    let b: u32 = deref(r);\n"
+           "    let c: ptr = leak(q);\n"
+           "    return a + b;\n"
+           "}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p, mod = _lspe_load(td, "sum", src)
+        d1 = json.loads(lomentc.emit_potato(lomentc.load(p, lspe_level=1), ROOT))
+        d3 = json.loads(lomentc.emit_potato(mod, ROOT))
+    calls = [s for s in mod.lspe_sites if s["kind"] == "call"]
+    assert [s["evidence"] for s in calls] == ["Interproc", "Interproc", "none"], calls
+    assert len({s["id"] for s in calls}) == 3, calls
+    assert d3["lspe"]["per_kind"]["SummaryContract"] == "2/3", d3["lspe"]
+    # L1 不认 Interproc（E4 从 L2 起）：站点还在，判决降回 UNDECIDED。
+    assert d1["lspe"]["per_kind"]["SummaryContract"] == "0/3", d1["lspe"]
+
+
+@test
+def test_lspe_e4_recursive_summary_terminates_undecided():
+    """#741：纯递归没有基例 ⇒ 摘要不进安全表，调用点是洞（不是静默的 PROVED）。"""
+    src = ("module e4_rec\n\nchoose runtime\n\n"
+           "fn rec(p: ptr) -> u32 {\n"
+           "    return rec(p);\n"
+           "}\n")
+    with tempfile.TemporaryDirectory() as td:
+        _p, mod = _lspe_load(td, "rec", src)
+    calls = [s for s in mod.lspe_sites if s["kind"] == "call"]
+    assert [s["evidence"] for s in calls] == ["none"], calls
 
 
 def main() -> int:

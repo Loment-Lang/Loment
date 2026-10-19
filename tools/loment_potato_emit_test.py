@@ -350,7 +350,14 @@ def test_every_example_is_decided():
 
 @test
 def test_lspe_ledger_matches_on_guards_and_indices():
-    """guard + 裸字面量下标 + 非字面量下标：两侧台账逐字节相同（`docs/262` §8）。"""
+    """E1/E2/E3/E4 四族站点都在场：两侧台账逐字节相同（`docs/262` §8）。
+
+    这份源故意把 E1/E2/E3/E4 的站点都放进去：guard、字面量/非字面量下标、`free`
+    （有可达的用，所以 `Alive` 不证）、未初始化 `let`（赋值后读）、一个 deref-only
+    被调（`Interproc`）和一个泄漏首参的被调（洞）。
+    `Exclusive` 的孪生不在这份夹具里：自举侧前门目前对 `&mut` 实参直接报 E15，
+    到不了台账那一层（那是前门的差，不是普查的差）。
+    """
     s1 = _stage1()
     if s1 is None:
         return
@@ -358,10 +365,21 @@ def test_lspe_ledger_matches_on_guards_and_indices():
         "module lspe_q1\n\n"
         "choose runtime\n\n"
         "capability d : disk[0..8]\n\n"
-        "fn f(a: [u32; 4], i: u32) -> u32 {\n"
+        "fn deref(p: ptr) -> u32 {\n"
+        "    return load8(p, 0);\n"
+        "}\n\n"
+        "fn leak(p: ptr) -> ptr {\n"
+        "    return p;\n"
+        "}\n\n"
+        "fn f(a: [u32; 4], i: u32, q: ptr) -> u32 {\n"
         "    guard d(i);\n"
         "    let x: u32 = a[0];\n"
-        "    return a[i];\n"
+        "    let u: u32;\n"
+        "    u = 3;\n"
+        "    free(q);\n"
+        "    let y: u32 = deref(q);\n"
+        "    let c: ptr = leak(q);\n"
+        "    return a[i] + x + u + y;\n"
         "}\n"
     )
     with tempfile.TemporaryDirectory() as td:

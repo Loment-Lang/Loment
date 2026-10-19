@@ -148,6 +148,9 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  # LVM 的 T2（`docs/259`）：基线编译 —— 原生/T0/T2 三者逐字节同、
                  # 剖面在换引擎后逐字节同、**执行期解码次数为 0**（确定性）、T2 比 T0 快（判符号）。
                  "lvm_t2_test",
+                 # LVM 的 A4 超级指令（`docs/266`）：fused 与 T0 逐字节同（含剖面）、
+                 # 报告按解析顺序、热点选择、分派密集夹具上更快（判符号）。
+                 "lvm_fusion_test",
                  # LVM 的紧凑形（`docs/250`）：文本/紧凑形逐字节同（含剖面）、体积变小、
                  # 加载更快、错形点名拒。
                  "lvm_compact_test",
@@ -366,6 +369,7 @@ SHARD_COST = {
     "lvm_perf_test": 25.0,
     "lvm_profile_test": 22.9,
     "lvm_stability_test": 10.0,
+    "lvm_fusion_test": 32.0,
     "lvm_t2_test": 138.6,
     "lvm_t3_test": 24.7,
     "lvm_test": 20.3,

@@ -173,12 +173,12 @@ int main(void) { return 7; }
 def test_the_floor_is_named_and_sized() -> None:
     """第 7 级（#391）：信任地板有**名字**、有**数**，而且那个数**不会过期**。
 
-    `docs/268` §4 里那一段写死了自举种子的字节数与 SHA-256。这条判据每次重算再比 ——
+    `docs/269` §4 里那一段写死了自举种子的字节数与 SHA-256。这条判据每次重算再比 ——
     于是"文档里的数"与"树里的种子"不可能漂开。种子每次 `--emit` 都会变，
     所以**这份文档必须跟着重算**，而这条判据就是那个提醒。
     """
     import hashlib
-    doc = (ROOT / "docs" / "268-lms-0151.md").read_text(encoding="utf-8")
+    doc = (ROOT / "docs" / "269-lms-0151.md").read_text(encoding="utf-8")
     seed = ROOT / "loment" / "build" / "selfhost_driver.ll"
     assert seed.exists(), "自举种子不在 —— 第 7 级的实物没了"
     blob = seed.read_bytes()
@@ -186,9 +186,9 @@ def test_the_floor_is_named_and_sized() -> None:
     want_sha = hashlib.sha256(blob).hexdigest()
     assert f"artifact: loment/build/selfhost_driver.ll" in doc, "地板没点名那件实物"
     assert f"bytes: {want_bytes}" in doc, (
-        f"docs/268 的地板字节数过期了：树里是 {want_bytes}")
+        f"docs/269 的地板字节数过期了：树里是 {want_bytes}")
     assert f"sha256: {want_sha}" in doc, (
-        f"docs/268 的地板哈希过期了：树里是 {want_sha}")
+        f"docs/269 的地板哈希过期了：树里是 {want_sha}")
     print(f"      地板 = {want_bytes} 字节 / {want_sha[:16]}…（每次都重算）")
 
 

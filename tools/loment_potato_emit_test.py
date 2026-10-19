@@ -368,7 +368,7 @@ def test_lspe_ledger_matches_on_guards_and_indices():
         # 那条 `free` 站点上的 LSPE 台账。而 LMS 第 1 级（E029）从 2026-10-18 起
         # **默认开着**（默认档 `lms_full`），会把这份源直接拒掉。所以这里显式降到
         # 「只要管理器」那一档：关掉的是那条检查，不是这份夹具要测的东西
-        # （`docs/268` §6 的"逐条改，不放宽"）。
+        # （`docs/269` §6 的"逐条改，不放宽"）。
         "choose lms_manage_only_admin\n\n"
         "capability d : disk[0..8]\n\n"
         "fn deref(p: ptr) -> u32 {\n"

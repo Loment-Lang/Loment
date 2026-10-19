@@ -1004,5 +1004,147 @@ def test_lsp_reports_a_truncated_analysis():
     print(f"      {len(fits)}B 完整分析（E002 @{eline}）；{len(over)}B 截断并报出 Info")
 
 
+#: `#53` 的探针：同一份文档在 `didOpen` 与 `didChange` 里各报一次版本号。
+VER_CLEAN = GOOD
+VER_BAD = BAD
+
+
+@test
+def test_lsp_publish_diagnostics_carries_the_document_version():
+    """`#53`：`publishDiagnostics` 要把 `didOpen` / `didChange` 里收到的 `version` 原样带回。
+
+    服务声明了 `textDocumentSync: 1`（客户端**会**在每次编辑时发版本号），却把版本丢了 ——
+    编辑器于是没法判断一批诊断描述的是哪一版缓冲区，"改完还留着的旧波浪线"就是这么来的。
+    `version` 在协议里是可选字段，所以**缺席时不要编一个**。
+
+    两个实现各判一次：Python 版直接调 `handle()`（永远跑）；自举版走真协议（无 clang/WSL 时跳过）。
+    """
+    uri = "file:///version.lomt"
+    docs: dict[str, str] = {}
+
+    def publish(msgs: list[dict]) -> dict:
+        pub = [m for m in msgs if m.get("method") == "textDocument/publishDiagnostics"]
+        assert pub, f"应当回一条 publishDiagnostics: {msgs}"
+        return pub[0]
+
+    p1 = publish(PY_LSP.handle(
+        {"method": "textDocument/didOpen",
+         "params": {"textDocument": {"uri": uri, "version": 1, "text": VER_BAD}}}, docs))
+    assert p1["params"].get("version") == 1, p1
+    assert any("missing_fn" in d["message"] for d in p1["params"]["diagnostics"]), p1
+    p2 = publish(PY_LSP.handle(
+        {"method": "textDocument/didChange",
+         "params": {"textDocument": {"uri": uri, "version": 2},
+                    "contentChanges": [{"text": VER_CLEAN}]}}, docs))
+    assert p2["params"].get("version") == 2, p2
+    assert p2["params"]["diagnostics"] == [], p2
+    # **缺席不编**：没带版本的通知，回包里也不该凭空出现 `version`。
+    p3 = publish(PY_LSP.handle(
+        {"method": "textDocument/didOpen",
+         "params": {"textDocument": {"uri": "file:///noversion.lomt", "text": VER_CLEAN}}}, {}))
+
+    assert "version" not in p3["params"], p3
+
+    if not (_clang() and _wsl()):
+        print("      自举侧 SKIP: 无 clang/WSL（Python 侧已判）")
+        return
+    msgs = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        {"method": "textDocument/didOpen",
+         "params": {"textDocument": {"uri": uri, "version": 1, "text": VER_BAD}}},
+        {"method": "textDocument/didChange",
+         "params": {"textDocument": {"uri": uri, "version": 2},
+                    "contentChanges": [{"text": VER_CLEAN}]}},
+        {"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": {}},
+        {"method": "exit"},
+    ]
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        frames, rc, err = Batch(_build(td), td).run(msgs)
+    assert rc == 0, f"LSP 退出码 {rc}: {err[-300:]}"
+    pubs = [f for f in frames if f.get("method") == "textDocument/publishDiagnostics"]
+    assert [p["params"].get("version") for p in pubs] == [1, 2], pubs
+    assert any(d.get("code") == "E002" for d in pubs[0]["params"]["diagnostics"]), pubs[0]
+    assert pubs[1]["params"]["diagnostics"] == [], pubs[1]
+    print("      两个实现：didOpen v1 / didChange v2 原样回显；缺席时不编 version")
+
+
+#: `#709` 量到的长度：613 字节的 URI > 旧的 `URI_CAP - 16` = 496。
+LONG_URI = "file:///" + "x" * 600 + ".lomt"
+
+
+@test
+def test_lsp_keeps_a_long_uri_whole():
+    """`#709`：URI 超过 496 字节时被**静默截断**，客户端按完整 URI 匹配就对不上。
+
+    这条要求**原样保留**：诊断里 `params.uri` 与 `definition` 结果里的 `uri` 都必须与
+    客户端发来的一字不差。Python 版从来没有上限（它用的是字符串），所以它这一半是**回归**
+    判据；自举版是本次修的正题。
+    """
+    assert len(LONG_URI.encode("utf-8")) == 613, len(LONG_URI.encode("utf-8"))
+    uri = LONG_URI
+    cline = GOOD.splitlines().index("    return helper();")
+    docs = {uri: GOOD}
+    p = PY_LSP.handle({"method": "textDocument/didOpen",
+                       "params": {"textDocument": {"uri": uri, "text": GOOD}}}, docs)
+    assert p[0]["params"]["uri"] == uri, p[0]
+    d = PY_LSP.handle({"jsonrpc": "2.0", "id": 2, "method": "textDocument/definition",
+                       "params": {"textDocument": {"uri": uri},
+                                  "position": {"line": cline, "character": 12}}}, docs)[0]
+    assert d["result"] is not None and d["result"]["uri"] == uri, d
+
+    if not (_clang() and _wsl()):
+        print("      自举侧 SKIP: 无 clang/WSL（Python 侧已判）")
+        return
+    msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"method": "textDocument/didOpen",
+             "params": {"textDocument": {"uri": uri, "text": GOOD}}},
+            {"jsonrpc": "2.0", "id": 2, "method": "textDocument/definition",
+             "params": {"textDocument": {"uri": uri},
+                        "position": {"line": cline, "character": 12}}},
+            {"jsonrpc": "2.0", "id": 3, "method": "shutdown", "params": {}},
+            {"method": "exit"}]
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        frames, rc, err = Batch(_build(td), td).run(msgs)
+    assert rc == 0, f"LSP 退出码 {rc}: {err[-300:]}"
+    pubs = [f for f in frames if f.get("method") == "textDocument/publishDiagnostics"]
+    assert pubs and pubs[0]["params"]["uri"] == uri, (len(uri), pubs[:1])
+    got = [f for f in frames if f.get("id") == 2][0]["result"]
+    assert got is not None and got["uri"] == uri, (len(uri), got)
+    print(f"      {len(uri)}B 的 URI：两个实现的诊断与跳转都原样保留")
+
+
+@test
+def test_lsp_names_the_limit_for_a_uri_that_does_not_fit():
+    """`#709` 的另一半：装不下的 URI 至少要**说出上限**，不能静默截断。
+
+    修法允许"保留完整 URI"或"拒绝并说出上限"；前者有容量上限，所以后者必须真的存在。
+    这条用一个 9000 字节的 URI：它超过服务声明的 8176 字节上限，发布包里必须多一条
+    severity 3 的 Info，消息里带**那个数字**（`URI_CAP - 16`）。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    uri = "file:///" + "y" * 9000 + ".lomt"
+    assert len(uri.encode("utf-8")) > 8176
+    msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"method": "textDocument/didOpen",
+             "params": {"textDocument": {"uri": uri, "text": GOOD}}},
+            {"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": {}},
+            {"method": "exit"}]
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        frames, rc, err = Batch(_build(td), td).run(msgs)
+    assert rc == 0, f"LSP 退出码 {rc}: {err[-300:]}"
+    pubs = [f for f in frames if f.get("method") == "textDocument/publishDiagnostics"]
+    assert len(pubs) == 1, pubs
+    dg = pubs[0]["params"]["diagnostics"]
+    notes = [d for d in dg if d.get("severity") == 3 and "上限" in d["message"]]
+    assert notes, f"超上限的 URI 不能静默截断, 实得 {dg}"
+    assert "8176" in notes[0]["message"], notes[0]
+    print("      超上限 URI：多一条点名 8176 字节上限的 Info（不再静默）")
+
+
 if __name__ == "__main__":
     sys.exit(main())

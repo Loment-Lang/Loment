@@ -177,7 +177,7 @@ jobs:
         run: |
           set -eu
           # 只取这两个 ref：工作区是浅的也可能发生（fetch-depth 之外），显式再来一次。
-          git fetch -q --no-tags origin "+refs/heads/main:refs/remotes/origin/main"                                     "+refs/tags/$TAG:refs/tags/$TAG"
+          git fetch -q --no-tags origin \n            "+refs/heads/main:refs/remotes/origin/main" \n            "+refs/tags/$TAG:refs/tags/$TAG"
           sha=$(git rev-parse "$TAG^{commit}")
 
           # (1) 祖先：tag 指着的那一笔必须已经合进 main
@@ -189,7 +189,7 @@ jobs:
           echo "祖先检查: $sha 在 main 上"
 
           # (2) 门禁：这一笔的聚合检查必须 success —— 否则发布的是没被任何判据看过的树
-          got=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${sha}/check-runs?filter=latest&per_page=100"                 --jq '[.check_runs[] | select(.name == "ci.py --static-only") | .conclusion] | last // "missing"')
+          got=$(gh api \n            "repos/${GITHUB_REPOSITORY}/commits/${sha}/check-runs?filter=latest&per_page=100" \n            --jq '[.check_runs[] | select(.name == "ci.py --static-only") | .conclusion] | last // "missing"')
           if [ "$got" != "success" ]; then
             echo "::error::$sha 的 \`ci.py --static-only\` 是 \`$got\` —— 不发布。"
             echo "::error::先把门禁跑绿（或者等它跑完），再打 tag。"
@@ -219,6 +219,34 @@ jobs:
           set -e
           ls -l loment/dist/
           cat loment/dist/SHA256SUMS
+
+      # `#419`: 完整性锚必须在归档**之外**。签名的是 `SHA256SUMS`（它覆盖每一件产物），
+      # 公钥与指纹也作为 asset 一起发 —— 下载者因此有了一个不由归档自身提供的核对点。
+      # 没有密钥就直接红：一个"没有签名锚"的 release 正是这个 issue 要堵的形状。
+      - name: 分离签名 SHA256SUMS（锚在归档之外）
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        env:
+          SIGNING_KEY: ${{ secrets.LOMENT_RELEASE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SIGNING_KEY:-}" ]; then
+            echo "::error::没有 LOMENT_RELEASE_SIGNING_KEY —— 拒绝发布一个没有外部完整性锚的包"
+            exit 1
+          fi
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          rm -rf "$GNUPGHOME"; mkdir -p "$GNUPGHOME"; chmod 700 "$GNUPGHOME"
+          printf '%s\n' "$SIGNING_KEY" | gpg --batch --quiet --import
+          fpr=$(gpg --batch --with-colons --list-secret-keys \
+            | awk -F: '/^fpr:/ {print $10; exit}')
+          if [ -z "$fpr" ]; then
+            echo "::error::导入了签名密钥但读不到指纹"; exit 1
+          fi
+          gpg --batch --yes --armor --detach-sign --local-user "$fpr" \
+            --output loment/dist/SHA256SUMS.asc loment/dist/SHA256SUMS
+          gpg --batch --yes --armor --export "$fpr" > loment/dist/loment-signing.asc
+          printf '%s\n' "$fpr" > loment/dist/FINGERPRINT
+          gpg --batch --verify loment/dist/SHA256SUMS.asc loment/dist/SHA256SUMS
+          echo "signed SHA256SUMS with $fpr"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -252,9 +280,27 @@ jobs:
           else
             gh release create "$TAG" --title "Loment $VER" $risk "$@" loment/dist/*
           fi
+          # `#419`: 把摘要写进 release **正文** —— 正文与 asset 是两个渠道，用户拿到的
+          # 核对点因此不必来自被核对的归档。安装器打印的也是同一份摘要。
+          gh release view "$TAG" --json body -q .body > "$RUNNER_TEMP/body.md"
+          {
+            echo
+            echo "## Integrity anchors"
+            echo
+            echo "These digests are published here, outside the archives they describe."
+            echo "The installer prints the digest of \`SHA256SUMS\`; compare it with this block."
+            echo
+            echo '```'
+            (cd loment/dist && sha256sum *)
+            echo '```'
+            echo
+            echo "Signing key fingerprint: \`$(cat loment/dist/FINGERPRINT)\`"
+          } >> "$RUNNER_TEMP/body.md"
+          gh release edit "$TAG" --notes-file "$RUNNER_TEMP/body.md"
 
       # 发布之后**回头核对**：文件到底上去没有。`gh release create` 不报错不等于
-      # 五个 asset 都在（0.1.4 那份是手工核过的，这里把那次核对固定下来）。
+      # 该有的 asset 都在（0.1.4 那份是手工核过的，这里把那次核对固定下来）。
+      # `#419` 之后是八件：签名、公钥与指纹**必须**在归档之外一起发。
       - name: 核对挂上去的 asset
         if: ${{ github.event.inputs.dry_run != 'true' }}
         env:
@@ -266,6 +312,9 @@ jobs:
           have=$(gh release view "$TAG" --json assets --jq '.assets[].name' | sort)
           want=$(printf '%s\n' \
             "SHA256SUMS" \
+            "SHA256SUMS.asc" \
+            "loment-signing.asc" \
+            "FINGERPRINT" \
             "loment-$VER-linux-x64.tar.gz" \
             "loment-$VER-windows-x64-setup.exe" \
             "loment-$VER-windows-x64.zip" \
@@ -277,4 +326,4 @@ jobs:
             exit 1
           fi
           echo "$have"
-          echo "五个 asset 齐了"
+          echo "八个 asset 齐了（含归档之外的签名、公钥与指纹）"

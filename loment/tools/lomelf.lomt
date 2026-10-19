@@ -5921,7 +5921,7 @@ fn run(mem: ptr) -> u32 {
                 }
                 if ap == 0 {
                     wstr(2, "loment: 这份产物带了通向世界的端口（共享对象），链接器默认不收。\n");
-                    wstr(2, "loment: 开发通道要它得显式写 --allow-ports；发行版里这条路是关着的（docs/219 §8c）\n");
+                    wstr(2, "loment: 自己调链接器时要它得显式写 --allow-ports（启动器在两个渠道都传，docs/219 §8c）\n");
                     return die(1);
                 }
                 let _r: u32 = so_load(tab, inb, ptr_add(mem, M_OBJ), ln0, p0);

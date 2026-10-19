@@ -2647,6 +2647,8 @@ def test_lomelf_selfhost_links_a_real_shared_object():
                                     ports=False)
             assert rc2 != 0, "发行通道居然收下了共享对象"
             assert "--allow-ports" in err2, f"拒的理由没说到开关: {err2[-300:]!r}"
+            # `#634`：这条消息曾经说"发行版里这条路是关着的"——渠道 2026-10-17 已开。
+            assert "关着的" not in err2, f"还在说渠道关着: {err2[-300:]!r}"
         finally:
             (bld / "_mirror_zso.ll").unlink(missing_ok=True)
             (bld / "_mirror_zso_gate.elf").unlink(missing_ok=True)

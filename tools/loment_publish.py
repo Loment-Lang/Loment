@@ -181,6 +181,7 @@ REPOS: dict[str, dict] = {
             "tools/lvm_profile_test.py",
             "tools/lvm_t2.py", "tools/lvm_t2_test.py",
             "tools/lvm_compact.py", "tools/lvm_compact_test.py",
+            "tools/lvm_fusion_test.py", "tools/lvm_mirror_t2_test.py",
             "tools/lvm_t3.py", "tools/lvm_t3_test.py",
             "tools/lvm_stability_test.py",
             "tools/lvm_perf_test.py",

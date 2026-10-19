@@ -178,9 +178,15 @@ def _ty_of_annotation(node, where: str) -> str:
 class Emitter:
     """一个 `def` -> 一段 Loment 源码。"""
 
-    def __init__(self, fns: dict[str, str], consts: dict[str, str] | None = None) -> None:
+    def __init__(self, fns: dict[str, str], consts: dict[str, str] | None = None,
+                 params: dict[str, list[str]] | None = None) -> None:
         #: 本单元所有函数的**返回类型**。调用点的类型靠它。
         self.fns = fns
+        #: 本单元所有函数的**形参类型**（按声明顺序）。调用点（`raw()` 的 Call 分支）
+        #: 靠它决定每个实参要什么类型 —— **只查返回类型是不够的**（`#218`）：
+        #: 原先每个实参都硬写 `want="i64"`，于是一个 `bool` 形参永远没有调用点能对上，
+        #: 而 `pick(True)` 报的还是"这里要的是整数，给的是布尔"（把话反过来说了）。
+        self.params: dict[str, list[str]] = dict(params or {})
         #: 模块常量的名字 -> 类型。生成的 `pub const` 是模块级的，函数体里用得到。
         self.consts: dict[str, str] = dict(consts or {})
         #: 名字 -> 类型（`bool` / `i64`）。**推导出来的**，见文件头 §决定 2。
@@ -275,7 +281,21 @@ class Emitter:
                 raise Unsupported(f"第 {e.lineno} 行: 只收直接函数调用")
             if e.keywords:
                 raise Unsupported(f"第 {e.lineno} 行: 不支持关键字实参")
-            return f"{_safe(f.id)}({', '.join(self.ex(a, 'i64') for a in e.args)})"
+            # **按被调函数的形参类型要实参**（`#218`）。原先一律 `want="i64"`：
+            # 一个 `bool` 形参在**任何**调用点都配不上 —— `pick(True)` 被拒，而理由
+            # 还反着说（"这里要的是整数"；其实是形参要 bool、调用点硬塞 i64）。
+            # 形参表是 `translate()` 从同一份 AST 上读的，不另推一遍。
+            want_ps = self.params.get(f.id)
+            if want_ps is None:
+                # `ty_of()` 已经保证被调函数在本单元里（Stage A 不跨单元），所以
+                # 走到这里只可能是调用方自己构造的 Emitter（没有传形参表）——
+                # 退回旧行为，别把"少一张表"变成一条假诊断。
+                return f"{_safe(f.id)}({', '.join(self.ex(a, 'i64') for a in e.args)})"
+            if len(want_ps) != len(e.args):
+                raise Unsupported(
+                    f"第 {e.lineno} 行: 调用 `{f.id}` 要 {len(want_ps)} 个实参，"
+                    f"这里给了 {len(e.args)} 个")
+            return f"{_safe(f.id)}({', '.join(self.ex(a, w) for a, w in zip(e.args, want_ps))})"
         if isinstance(e, ast.UnaryOp):
             if isinstance(e.op, ast.Not):
                 # Python 的 `not` 收任何真值、永远出 bool；Loment 的 `!` 只收 bool。
@@ -615,10 +635,13 @@ def translate(src: str, keep: set[str] | None = None,
     """
     fns, mod_consts, doc = parse(src)
     sig: dict[str, str] = {}
+    psig: dict[str, list[str]] = {}
     for f in fns:
         sig[f.name] = _ty_of_annotation(f.returns, f"第 {f.lineno} 行 返回类型")
-        for a in f.args.args:                       # 顺带把参数注解也验一遍
+        # 形参类型**留着**（`#218`）：调用点要按它决定每个实参的类型。
+        psig[f.name] = [
             _ty_of_annotation(a.annotation, f"第 {f.lineno} 行 参数 {a.arg}")
+            for a in f.args.args]
     seen: set[str] = set()
     for f in fns:
         if f.name in seen:
@@ -641,7 +664,7 @@ def translate(src: str, keep: set[str] | None = None,
             continue
         if out:
             out.append("")
-        out.append(Emitter(sig, cenv).emit_fn(f))
+        out.append(Emitter(sig, cenv, psig).emit_fn(f))
     return "\n".join(out) + "\n"
 
 

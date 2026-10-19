@@ -2850,7 +2850,7 @@ fn t2_dest(a: ptr, fi: u32, do_: u32, dl: u32) -> u32 {
     return t2_slot_add(a, fi, do_, dl);
 }
 
-/// 把一条指令折成编译记录。**解不出来的指令记成 K_CERR**，执行到才报 ——
+/// 把一条指令折成编译记录。解不出来的指令记成 K_CERR，执行到才报 ——
 /// 与 T0 的接受集合保持一致（不可达的坏指令不是错，`docs/259` §4.4）。
 fn t2_compile_instr(a: ptr, fi: u32, ii: u32) -> u32 {
     let io: u32 = rd(a, I_OFF, ii * 8 + 2);

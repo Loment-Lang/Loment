@@ -85,7 +85,11 @@ permissions:
 #: 与 `--shard K/N` 的 N 都是它。写错了分片划分就变，并集不再是 `STATIC_CHECKS`，
 #: 而聚合那一步会**数**出来并失败（不是静默少跑几条）。
 env:
-  GATE_SHARDS: "6"
+  #: **2026-10-18 从 6 改成 10**（`#435`）：分片表的数字重新按 runner 实测换过之后,
+  #: 6 片里"均分"的那两片实际各背 ~1180s（`loment_elf_test` 一条就 245～617s, 而它
+  #: 连条目都没有）；10 片让六个均分片的预测和降到 ~394s, 与长尾（173.6 / 92.8 / 63.9）
+  #: 同量级。量的方法与原始数据见 `tools/ci.py:SHARD_COST` 与 `docs/213` §10。
+  GATE_SHARDS: "10"
   #: **容器里的 git 要靠这一条才肯干活。** 工作区是 runner 的用户 checkout 的（UID 不是
   #: 容器里的 root），git 于是拿 "dubious ownership" 拒绝 `ls-files` / `rev-parse` /
   #: `check-attr` / `check-ignore` —— 而好几条判据正是靠这几个子命令的。2026-10-10 换上
@@ -404,19 +408,20 @@ jobs:
   # `fail-fast: false` 是**必须**的：一片红不该让别的片被砍掉 —— 那样看到的是
   # "三片没跑"，而不是"这三片也红"。门禁红的时候最需要的就是**全部**红一起看见。
   #
-  # `include:` 里那 5 行是 `python tools/ci.py --shard-plan 6` 的副本（片号、总数），
+  # `include:` 里那 9 行是 `python tools/ci.py --shard-plan 10` 的副本（片号、总数），
   # **不含片 1** —— 那是上面那个 job，这里用 `needs:` 与它串行。
   # **改分片形状要同时改 `ci.py` 和这里**。
   #
-  # **6 这个数是量出来的**：5 片那一轮（run 38008195263）最重的是"均分"那两片之一
-  # （301s = 装工具链 95s + 30 条判据的和 294s），而长尾那两片各自只要 180s / 202s。
-  # 把均分的那两片再对半切，最重片就落到 seed 那片的地板上 —— 再往上加片只会让更多片
-  # 各自付一次"起步"的钱，墙钟不动（它的下限是"最长的那条判据 + 起身那一段"）。
+  # **10 这个数是量出来的（2026-10-18, `#435`）**：三次成功门禁 run 的 per-suite 耗时
+  # 中位数（`tools/ci.py:SHARD_COST`）。6 片时"均分"的那两片实际各背 ~1180s ——
+  # `loment_elf_test` 一条 245～617s, 而它**没有登记耗时**、按 8s 算, 于是 6/6 一片跑了
+  # 30 分钟。10 片让六个均分片的预测和都落在 ~394s, 与三条长尾（173.6 / 92.8 / 63.9）
+  # 同一量级; 再往上加片, 墙钟的下限变成 `loment_elf_test` 自己（~387s）, 收益归零。
   static-shard:
     name: 静态门禁 ${{ matrix.shard }}/${{ matrix.total }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    # `always()`：独占那片红了**也要**把其余五片跑完。`needs` 的默认行为是"依赖失败就
+    # `always()`：独占那片红了**也要**把其余九片跑完。`needs` 的默认行为是"依赖失败就
     # 跳过"，那样看到的是"五片没跑"而不是"这五片也红"。独占那片与这里并行**不会**踩到
     # 共享位置：它是**先跑完**的那一个。
     if: ${{ always() && github.event.inputs.suite == '' && github.event.inputs.only == '' && github.event.inputs.diagnose_twin != 'true' }}
@@ -431,11 +436,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { shard: 2, total: 6 }
-          - { shard: 3, total: 6 }
-          - { shard: 4, total: 6 }
-          - { shard: 5, total: 6 }
-          - { shard: 6, total: 6 }
+          - { shard: 2, total: 10 }
+          - { shard: 3, total: 10 }
+          - { shard: 4, total: 10 }
+          - { shard: 5, total: 10 }
+          - { shard: 6, total: 10 }
+          - { shard: 7, total: 10 }
+          - { shard: 8, total: 10 }
+          - { shard: 9, total: 10 }
+          - { shard: 10, total: 10 }
     steps:
       # 同 `static-exclusive`：`lom_audit` 的 M93/M95 要历史（见那一处的注释）。
       - uses: actions/checkout@v4
@@ -680,21 +689,35 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          pattern: gate-log-*
+          # **`#443`：`gate-log-[0-9]*`，不带 `gate-log-merged`。** `gate-log-merged`
+          # 是本 job 上一次 attempt 自己上传的**全量副本** —— `gh run rerun --failed`
+          # 之后它还在 artifact 列表里，宽通配符 `gate-log-*` 会把它和真正的分片一起
+          # 下进来，于是每条判据出现两遍（实测 174 = 2×87）。
+          #
+          # **为什么"每次只取最新的那一份 artifact"是对的**：`--failed` 重跑只重跑
+          # 失败的那几片，其余分片**必须**复用上一次 attempt 的产物 —— 按 attempt
+          # 死卡会把它们全部丢掉。`download-artifact` 对同名 artifact 取最新的一份
+          # （`?name=` 的语义），于是每一片恰好落到一个 `gate-log-<K>/` 目录里；
+          # 合成那边再按判据名去重兜底一次。
+          pattern: gate-log-[0-9]*
           path: shards
 
       # 合成是靠约定（各片都叫 `gate.out`，下载进 `shards/gate-log-<K>/`）。
-      # **少一片就少几条判据 —— 那不能静默**: 数对不上就红。
-      # 这也是"N 写错了"的兜底: N 一偏，划分就变，并集就不再是 `STATIC_CHECKS` 那么多条。
+      # **`#443`**：不再 `cat gate-log-*` —— 那个通配符会连 `gate-log-merged`
+      # （聚合 job 上一次 attempt 上传的**全量副本**）一起算，于是一次
+      # `gh run rerun --failed` 就让每条判据出现两遍（实测 174 = 2×87）。
+      # 合成与"每条判据恰好一次"的判断都在 `ci.py --merge-shards` 里：只认
+      # `gate-log-<片号>`、按**判据名**取并集（后者覆盖前者），并要求并集**恰好**是
+      # `STATIC_CHECKS` —— 少一条是"有一片没跑完"，多一条是"有别的东西混进来"，
+      # 两种分开报（原先只说前者，把人指向一片其实跑完了的分片）。
       - name: 合成一份 gate.out
         run: |
           set +e
-          cat shards/gate-log-*/*.out > gate.out 2>/dev/null
-          got=$(grep -c ':: \[static\]' gate.out || true)
-          want=$(python3 -c "import sys; sys.path.insert(0,'tools'); import ci; print(len(ci.STATIC_CHECKS))")
-          echo "合成后 $got 条 / STATIC_CHECKS 里 $want 条"
-          if [ "$got" != "$want" ]; then
-            echo "::error::分片结果不齐：只有 $got 条，应为 $want 条 —— 有一片没跑完或没上传"
+          python3 tools/ci.py --merge-shards shards > gate.out 2> merge.err
+          rc=$?
+          cat merge.err
+          if [ $rc -ne 0 ]; then
+            echo "::error::分片结果不齐 —— 有一片没跑完或没上传（见上面那几行）"
             exit 1
           fi
 
@@ -756,6 +779,51 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "$n_bad" -gt 0 ]; then
             echo "::error::门禁：新红 $n_bad 条 —— $(paste -sd ' ' confirmed.txt)"
+            exit 1
+          fi
+
+      # 判据预算的**另一半**棘轮（`#418`）—— 树内那两条（`ci.py:check_budget`）比的是
+      # **同一份提交里的两个数**：删一条判据、再把地板从 N 改成 N-1，两边一起说谎就绿了；
+      # 给一条既有判据加个环境门、再把那条豁免写进 `gate-skips.txt`，同样绿。
+      #
+      # 这里把两份预算与**对照面**（PR 取 base 分支，push 取 `event.before`）比：
+      # 地板只许**升**（对照面有的套件不许消失、数值不许降），跳过表只许**变短**。
+      # 与下面基线棘轮同一个形状（`comm -13` 只认"新增"），取不到对照面时同样 **fail
+      # closed** —— 一个取不到对照面的棘轮会静默失效，而它正是为此存在的。
+      - name: 判据预算只许收紧（#418）
+        if: ${{ always() }}
+        run: |
+          set +e
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.base_ref }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          case "$base" in
+            ""|0000000000000000000000000000000000000000)
+              echo "::warning::拿不到对照面（新分支的首次 push）—— 这一条跳过，其余照常"
+              exit 0 ;;
+          esac
+          if ! git fetch --no-tags --depth=1 origin "$base" > fetch-budget.log 2>&1; then
+            echo "::error::取对照面失败（$base）—— 门禁不猜，按失败处理"
+            tail -20 fetch-budget.log
+            exit 1
+          fi
+          for f in gate-floors.txt gate-skips.txt; do
+            if ! git show "FETCH_HEAD:.github/$f" > "old-$f" 2> show-budget.log \
+               || [ ! -s "old-$f" ]; then
+              echo "::error::对照面（$base）里读不到 .github/$f —— 门禁不猜，按失败处理"
+              tail -20 show-budget.log
+              exit 1
+            fi
+          done
+          if ! python3 tools/ci.py --budget-vs old-gate-floors.txt old-gate-skips.txt; then
+            {
+              echo "## 判据预算比对照面**松了**（不许）"
+              echo ""
+              echo "地板只许升、跳过表只许变短。删判据再把地板改小、或者给既有判据加个"
+              echo "环境门再把豁免登记进来 —— 那两种改法在这里判失败。"
+            } >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
 

@@ -24,6 +24,14 @@ You get the `loment` command, `lompi`, and the language server. Compiling and ru
 and the installer checks `SHA256SUMS` before it writes anything. Then jump to
 [§3](#3-with-loment-on-your-path).
 
+`SHA256SUMS` travels inside the archive, so it is not a trust anchor by itself. The installer
+prints the digest of `SHA256SUMS`; the release **body** publishes the same digest, and the
+release assets also carry `SHA256SUMS.asc`, `loment-signing.asc` and `FINGERPRINT`. Compare the
+printed digest with the release page (a different channel from the archive), or drop the
+signature assets next to the package — the installer verifies them when present. An installer
+that cannot find any SHA-256 tool refuses to install; `--no-verify` (Windows: `-NoVerify`) is
+the explicit opt-out for a bootstrap environment.
+
 **Or work from a checkout** — needed if you want to change the language itself:
 
 ```

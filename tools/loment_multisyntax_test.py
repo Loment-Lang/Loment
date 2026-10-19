@@ -604,7 +604,24 @@ def test_diag_does_not_tell_you_to_fix_valid_foreign_source():
                       encoding="utf-8", newline="\n")
         assert loment_diag.foreign_note(lp, ["5:1: 期望 ;，得到 '}'"]) is None
         assert loment_diag.foreign_note(td / "m.c", []) is None
-    print("      五种语法都给出对得上的提示; Loment 的 typo 不给")
+
+        # **顺序与码**（`#29`）：`loment diag` 曾经先印 `E999 [未分类]` 与一屏
+        # Loment 的修法，最后才说"这个文件不是 Loment"。现在语言那段是起点，
+        # 解析器看到的东西只作参考；而"翻不出来"也不再是 E999（请报告），是 E023
+        # （这一版的前端还不收那个构造 —— 与其它编译器限制同一条修法）。
+        py = td / "nohdr.py"
+        py.write_text("def _start():\n    return\n", encoding="utf-8", newline="\n")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            loment_diag.main([str(py)])
+        out = buf.getvalue()
+        first = [ln for ln in out.splitlines() if ln.strip()][0]
+        assert "不是 Loment" in first, f"第一行不是语言提示: {out[:200]!r}"
+        assert "E999" not in out, f"翻不出来的源还在报 E999「请报告」: {out[:300]!r}"
+        assert "E023" in out, f"翻不出来的源该是 E023（编译器限制）: {out[:300]!r}"
+        assert out.index("不是 Loment") < out.index("E023"), (
+            f"语言提示排到了 Loment 诊断后面: {out[:300]!r}")
+    print("      五种语法都给出对得上的提示; Loment 的 typo 不给；外源提示在 E023 之前")
 
 
 @test

@@ -663,13 +663,18 @@ fn __loment_store8(p: *mut u8, off: u32, v: u8) {
 #[allow(static_mut_refs)]
 static mut __LOMENT_AUDIT: [u64; 16] = [0; 16];
 
-fn __loment_guard(cap: usize, idx: u64, lo: u64, hi: u64) {
+// **审计只在放行那一支里加**（`#162`）。原先 `__loment_guard` 先 `+= 1` 再判界,
+// 于是越界的那一次**已经写了审计**才 panic —— SECURITY.md 属性 1（traps, with no
+// other side effect）与属性 2（计数 == 放行次数）都不成立, 而且与 IR 后端分岔:
+// 那边的审计只在 `gok` 块里, trap 块是光秃秃的 `__loment_abort()/unreachable`。
+// 结构照 IR 镜像: 放行 -> `__loment_audit`, 越界 -> `__loment_trap`, 两个函数各管一事。
+fn __loment_audit(cap: usize) {
     unsafe {
         __LOMENT_AUDIT[cap] += 1;
     }
-    if idx < lo || idx > hi {
-        panic!("loment: capability {} violation at {}", cap, idx);
-    }
+}
+fn __loment_trap(cap: usize, idx: u64) {
+    panic!("loment: capability {} violation at {}", cap, idx);
 }
 '''
 
@@ -4265,9 +4270,12 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
             # 但**核心模式**仍然只有根单元能定：它声明的是**整个程序**的取值，
             # addin 单元里写了就是**静默无效**，必须报出来（静默才是敌人）。
             if d.chooses:
-                dim0, word0, line0 = d.choose_lines[0]
-                errs.append(f"{line0}: `addin` 单元不许声明核心模式"
-                            f"（在 `{d.name}` 里，`{word0}`）—— "
+                dim0, word0, _line0 = d.choose_lines[0]
+                # **行号不写**（`#702`）：这是**依赖文件**里的一行，而诊断记录整体挂在
+                # **入口文件**上 —— 把它当入口的行号发出去，就是一个越过入口 EOF 的
+                # 位置（`#31` 那个形状）。指不出正确文件就别编一个：消息里点名文件。
+                errs.append(f"`addin` 单元不许声明核心模式"
+                            f"（在 {_unit_where(d)} / `{d.name}` 里，`{word0}`）—— "
                             f"{CORE_DIM_ZH[dim0]}是整个程序的，只有根单元能定")
             continue
         # **库要声明它的运行期需求**（`docs/217`）：上面那条"根必须满足依赖"只对
@@ -4276,9 +4284,10 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
         # 由项目决定"：这一条就是把它兑现。
         if d.rt_sites and d.chooses.get("runtime") != "runtime":
             _n0, _l0 = d.rt_sites[0]
+            # 同上（`#702`）：`_l0` 是**依赖**的行号，不是入口的。
             errs.append(
-                f"{_l0}: 依赖 `{d.name}` 用了会把运行期拖进产物的构造（{_n0}），"
-                f"却没有声明 —— 库该声明它的**需求**。在 `{d.name}` 里写一行 "
+                f"依赖 `{d.name}`（{_unit_where(d)}）用了会把运行期拖进产物的构造"
+                f"（{_n0}），却没有声明 —— 库该声明它的**需求**。在 `{d.name}` 里写一行 "
                 f"`choose runtime`")
         if d.chooses:
             # **依赖可以声明它的需求**（`docs/217`，用户 2026-10-09 裁决）。从前这里一律
@@ -4286,21 +4295,25 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
             # 当依赖又不许写（`loment/lib/proc.lomt` 实测就卡在这儿）。新规矩：依赖的声明
             # **是需求**，根单元的取值**必须满足它**（一致）；不一致才报，报的时候两边都点名。
             _seen: set[str] = set()
-            for dim0, word0, line0 in d.choose_lines:
+            for dim0, word0, _line0 in d.choose_lines:
                 if dim0 in _seen:
                     continue        # 同一维写两次是**依赖自己**的错，不在这儿重复报
                 _seen.add(dim0)
                 if _eff[dim0] != word0:
+                    # 位置见上面 `#702`：`_line0` 是依赖文件里的行号，不是入口的。
+                    # 措辞保住 `依赖 \`X\` 要求 ` 这个前缀 —— `loment_diag.RULES` 的
+                    # E022 按它锚（`test_every_message_the_compiler_can_print_has_a_code`）。
                     errs.append(
-                        f"{line0}: 依赖 `{d.name}` 要求 {CORE_DIM_ZH[dim0]}=`{word0}`，"
+                        f"依赖 `{d.name}` 要求 {CORE_DIM_ZH[dim0]}=`{word0}`，"
                         f"而根单元这一维是 `{_eff[dim0]}` —— 依赖的声明是**需求**，"
-                        f"根必须满足它。在根单元写一行 `choose {word0}`")
+                        f"根必须满足它（在 {_unit_where(d)} 里）。"
+                        f"在根单元写一行 `choose {word0}`")
         if d.addin_lines:
             _nm, _ln = d.addin_lines[0]
-            errs.append(f"{_ln}: 库不许 `addin`（在 `{d.name}` 里，`addin {_nm}`）"
-                        f" —— `addin` 是**根单元**专属的开关设定，装载器只走"
-                        f"「根 + 根 `addin` 到的单元」那张图，所以库里的 `addin` **不会生效**。"
-                        f"库要装代码请用 `use`")
+            errs.append(f"库不许 `addin`（在 {_unit_where(d)} / `{d.name}` 里，"
+                        f"`addin {_nm}`）—— `addin` 是**根单元**专属的开关设定，"
+                        f"装载器只走「根 + 根 `addin` 到的单元」那张图，所以库里的 "
+                        f"`addin` **不会生效**。库要装代码请用 `use`")
 
     # ---- 命令声明（`docs/223` 形态 B）：`pub fn loment_command() -> str { return "名字"; }`
     #
@@ -4308,7 +4321,7 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     # 三条判断都在这一处 —— 与 `choose` / `addin` 同一层，两个实现要对齐的只有这里。
     for d in deps:
         if d.command_line:
-            errs.append(f"{d.command_line}: 库不许声明命令（在 `{d.name}` 里）—— 命令是"
+            errs.append(f"库不许声明命令（在 {_unit_where(d)} / `{d.name}` 里）—— 命令是"
                         f"**可执行产物**的身份，而库是给别人 `use` 的代码。"
                         f"把它挪进入口单元")
     if mod.command_line:
@@ -4408,15 +4421,17 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                 if prev is None:
                     seen_decl[nm] = m0
                 elif _unit_id(prev) != _unit_id(m0):
-                    # **说出来是"哪一份文件"**（`#141`）：原先写"与模块 {prev} 重名",
-                    # 而那是**模块名**、不是撞车的那个符号 —— `函数 f 与模块 ma 重名`
-                    # 让用户去调解一个 `f` 与 `ma` 之间的冲突, 而这两个名字不撞车。
-                    # 真正撞车的是**两份单元都发射 `f`**, 所以指到**另一份文件**上。
-                    # 措辞仍留"重名"二字 —— `loment_diag.RULES` 的 E013 按这几个词锚,
-                    # 换一种说法这条消息会掉出分类表。
-                    errs.append(f"{ln}: {kind} `{nm}` 与 {_unit_where(prev)} 里的 `{nm}` 重名 —— "
-                                f"单元的发射符号是平的 (ABI)，两份单元都会发射 `{nm}`，"
-                                f"调用点也解析到同一个函数；改掉其中一个")
+                    # **两边都点名**（`#141`）：原先写"与模块 {prev} 重名", 而那是
+                    # **模块名**、不是撞车的那个符号 —— `函数 f 与模块 ma 重名` 让用户
+                    # 去调解一个 `f` 与 `ma` 之间的冲突, 而这两个名字不撞车。真正撞车的
+                    # 是**两份单元都发射 `f`**, 所以两份模块名与两份文件都写出来,
+                    # 而不是只说其中一份。措辞仍留"重名"二字 —— `loment_diag.RULES` 的
+                    # E013 按这几个词锚, 换一种说法这条消息会掉出分类表。
+                    errs.append(
+                        f"{ln}: {kind} `{nm}` 重名 —— {_unit_where(prev)}（模块 "
+                        f"`{prev.name}`）与 {_unit_where(m0)}（模块 `{m0.name}`）两个"
+                        f"单元都会发射 `{nm}`；单元的发射符号是平的 (ABI)，调用点也解析"
+                        f"到同一个函数。改掉其中一个")
 
 
     # 结构体: 名字/字段唯一, 类型已声明
@@ -5080,9 +5095,14 @@ def _stmts_rs(stmts: list, indent: int) -> list[str]:
         elif isinstance(s, ExprStmt):
             out.append(f"{pad}{_expr_rs(s.expr)};")
         elif isinstance(s, Guard):  # P4: 能力域守卫 (编译期已查字面量)
+            # **审计只在放行那一支**（`#162`，与 IR 后端的 `gok` 块逐结构对应）:
+            # 越界时 `__loment_trap` 只 panic，一个字节都不写 —— 属性 1 说的
+            # "traps, with no other side effect" 才字面为真。
             out.append(
                 f"{pad}{{ let __i: u64 = ({_expr_rs(s.expr)}) as u64; "
-                f"__loment_guard({s.cap_id}, __i, {s.lo}, {s.hi}); }}"
+                f"if __i < {s.lo} || __i > {s.hi} {{ "
+                f"__loment_trap({s.cap_id}, __i); }} else {{ "
+                f"__loment_audit({s.cap_id}); }} }}"
             )
         else:
             raise AssertionError(f"未知语句 {s!r}")

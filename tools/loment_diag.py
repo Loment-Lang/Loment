@@ -69,6 +69,14 @@ RULES = [
     # （那几层嵌套写法完全合法），是**这一版实现**扛不住；修法也一样，是"换个写法绕开"
     # （把中间那几层提成函数），而不是"按那一行改写法"。
     ("E023", r"嵌套超过", "源码太深", "把中间那几层提成函数，或把这段拆开。"),
+    # **前门拒了这份源**（`#29`）：语法是另一门的、转写器又表示不出来。原先它落进
+    # E999「未分类，请报告」—— 对用户是**错的处境**（不是分类表漏了，是这一版的前端
+    # 还不收那个构造）。与 E023 同码：修法一样，换个写法绕开，绕不开就报告。
+    ("E023", r"写法写的单元里有 .* 处(转写不了|发不出来)|这份源读不通|^定不出源语法",
+     "这一版还没实现（编译器限制）",
+     "这份源用的是**另一门语法**而这一版的前端翻不出来。**换一种写法**（用该语言再"
+     "普通的形状），或者走 `tools/lomt_from.py --lang auto` 那三条进来路；绕不开就"
+     "报告。"),
     ("E023", r"^泛型实参的形状这一格不收",
      "这一版还没实现（编译器限制）",
      "这不是你源码的语义错 —— 是**发射器**还没给这个形状定名字规则：实例名要能拼成"
@@ -2470,22 +2478,31 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"diagnostics": diags, "foreign_note": note},
                          ensure_ascii=False, indent=2))
     else:
-        for d in diags:
-            print(f"{d['code']} [{d['title']}] {d['message']}")
-            if "what" not in d:
-                print(f"      建议: {d['hint']}")
-                continue
-            print(f"      错了什么: {d['what']}")
-            print(f"      为什么错: {d['why']}")
-            print("      怎么改:")
-            for i, fx in enumerate(d["fixes"], 1):
-                print(f"        {i}. {fx}")
-            print(f"      支持:   {d['yes']}")
-            print(f"      不支持: {d['no']}")
+        # **外源文件：语言那段是整条报告的起点**（`#29`）。它原先排在最后，前面先给
+        # `E999`/`E019` 与一屏 **Loment 的**修法 —— 而这份文件不是 Loment，那些修法
+        # 一条都不适用。现在先说是哪门语言、三条进来路；Loment 解析器看到的东西只作为
+        # "在它上面读到的东西"附在后面，卡片整块不印（与报错器 `h_foreign` 同一条口径）。
         if note:
-            print()
             print("  ⚠ " + note)
-        if not diags:
+            if diags:
+                print()
+                print("  Loment 解析器在它上面读到的是（只作参考，别照它改）：")
+            for d in diags:
+                print(f"    {d['code']} [{d['title']}] {d['message']}")
+        else:
+            for d in diags:
+                print(f"{d['code']} [{d['title']}] {d['message']}")
+                if "what" not in d:
+                    print(f"      建议: {d['hint']}")
+                    continue
+                print(f"      错了什么: {d['what']}")
+                print(f"      为什么错: {d['why']}")
+                print("      怎么改:")
+                for i, fx in enumerate(d["fixes"], 1):
+                    print(f"        {i}. {fx}")
+                print(f"      支持:   {d['yes']}")
+                print(f"      不支持: {d['no']}")
+        if not diags and not note:
             print("[OK] 无错误")
     return 1 if diags else 0
 

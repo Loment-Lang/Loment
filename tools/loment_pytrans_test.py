@@ -381,6 +381,48 @@ def test_unary_invert_is_refused_by_the_front_end():
     print("      一元 `-` / `+` 照收")
 
 
+@test
+def test_bool_parameters_can_be_called():
+    """`#218`：`bool` 形参**必须有调用点能过**。
+
+    `docs/187` §5 把 `bool` 列成可写的注解，而调用点的每个实参原先一律按 `i64` 要 ——
+    `pick(True)` 当场被拒，理由还反着说（"这里要的是整数，给的是布尔"：其实是**形参**
+    要 bool、调用点硬塞 i64）。一个文档支持的注解在两边都用不了。
+    """
+    src = ("def pick(c: bool) -> int:\n"
+           "    if c:\n"
+           "        return 1\n"
+           "    return 0\n"
+           "\n"
+           "def main() -> int:\n"
+           "    b = 3 > 2\n"
+           "    return pick(True) + pick(False) + pick(3 > 2) + pick(b)\n")
+    text = pytrans.translate(src)
+    # 字面量/比较/变量三种 bool 实参都按形参的 `bool` 要，而不是被转成 i64
+    assert "pick(true)" in text, f"`pick(True)` 没按 bool 传:\n{text}"
+    assert "pick(false)" in text, f"`pick(False)` 没按 bool 传:\n{text}"
+    assert "pick((3 > 2))" in text, f"`pick(3 > 2)` 没按 bool 传:\n{text}"
+    assert "pick(b)" in text, f"`pick(b)` 没按 bool 传:\n{text}"
+    assert "pick(true != 0)" not in text, "bool 实参被当成整数又转回 bool 了"
+
+    # **整数实参照"整数当条件"的既有规则转**，不是在这里拒：`pick(1)` -> `pick(1 != 0)`
+    int_arg = ("def pick(c: bool) -> int:\n"
+               "    return 1\n"
+               "def main() -> int:\n"
+               "    return pick(1)\n")
+    t2 = pytrans.translate(int_arg)
+    assert "pick(1 != 0)" in t2, f"`pick(1)` 没有按 bool 形参做转换:\n{t2}"
+
+    # 生成的那一份**真能过检查**（不是只在字符串层面看着对）
+    with tempfile.TemporaryDirectory() as t:
+        p = Path(t) / "boolarg.lomt"
+        p.write_text("module boolarg\n\n" + text, encoding="utf-8", newline="\n")
+        mod = lomentc.load(p)
+        e = lomentc.check(mod)
+        assert e == [], f"翻译出来的 Loment 检查不过: {e}"
+    print("      bool 形参：字面量/比较/变量实参都过；整数实参按 `!= 0` 转")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_pytrans_test")
 

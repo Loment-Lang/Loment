@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://github.com/Loment-Lang/loment/actions/workflows/gate.yml"><img src="https://github.com/Loment-Lang/loment/actions/workflows/gate.yml/badge.svg" alt="gate"></a>
   <a href="https://github.com/Loment-Lang/loment/releases/latest"><img src="https://img.shields.io/github/v/release/Loment-Lang/loment?label=release&amp;color=4c6ef5" alt="latest release"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Loment--Open-4c6ef5" alt="license: Loment-Open"></a>
+  <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-4c6ef5" alt="license: MIT OR Apache-2.0"></a>
   <a href="https://discord.gg/rGw7NRNU"><img src="https://img.shields.io/badge/Discord-join%20chat-5865F2?logo=discord&amp;logoColor=white" alt="Discord"></a>
 </p>
 
@@ -80,5 +80,4 @@ suite decides what conforms. The working conventions are in `AGENTS.md`.
 
 ## License
 
-**Loment-Open**: MIT plus two conditions — derived source must credit Loment, and the name is
-reserved. See [LICENSE](LICENSE).
+**MIT OR Apache-2.0**, at your option. See [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).

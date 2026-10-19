@@ -128,7 +128,8 @@ REPOS: dict[str, dict] = {
             # `cmd_push`），前提是它已经跟着筛出来；不在清单里的话追加的是空文件，
             # `*.lomt text eol=lf` 那条规矩照样丢。2026-09-17 第一次修漏写这一条，
             # 远端那份仍只有工具自己那段，是查"克隆出来还是 CRLF"才发现的。
-            "CLAUDE.md", "AGENTS.md", ".gitignore", ".gitattributes", "LICENSE",
+            "CLAUDE.md", "AGENTS.md", ".gitignore", ".gitattributes",
+            "LICENSE-MIT", "LICENSE-APACHE",
             # 新读者走的第二份文档 (**英文**), 与 README 分工: README 说"这是什么",
             # 它只管"怎么跑起来"。README 顶部指向它。不在 `loment_release.GLOBS` 里,
             # 所以不进发布清单 —— 它只服务于仓库读者, 不进包。
@@ -323,10 +324,8 @@ bug reports. Loment is developed in this repository, and the working conventions
 
 ## License
 
-The **Loment-Open License** — the MIT License plus two conditions: source derived from Loment
-must credit that base, and the name "Loment" is reserved. File extensions and syntax are free:
-you may build a different language from this source without `.lomt` or `.lom`. See
-[LICENSE](LICENSE).
+**MIT OR Apache-2.0**, at your option. See [LICENSE-MIT](LICENSE-MIT) and
+[LICENSE-APACHE](LICENSE-APACHE).
 """,
     },
     "lompi": {

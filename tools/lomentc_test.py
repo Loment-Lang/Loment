@@ -4365,7 +4365,10 @@ def _run_elf(exe: Path, td: Path, name: str) -> int:
     """在 Linux 上直接跑，在 Windows 上经 WSL 跑 —— 与 `loment_elf_test` 同一条路数。"""
     if sys.platform.startswith("linux"):
         r = subprocess.run([str(exe)], capture_output=True, shell=False)
-        return r.returncode
+        # ⚠ **被信号打死时 Python 给的是 `-signo`，不是 shell 的 `128+signo`** ——
+        # 两条路（本机 Linux / Windows 经 WSL）必须报同一个数，否则判据只在一边绿。
+        # CI 上第一版就是这么红的：`rc=-4`（SIGILL）对不上期望的 132。
+        return r.returncode if r.returncode >= 0 else 128 - r.returncode
     wslp = "/mnt/" + str(exe.resolve()).replace("\\", "/")[0].lower() + \
         str(exe.resolve()).replace("\\", "/")[2:]
     dst = f"/tmp/lms_{name}_{os.getpid()}.bin"

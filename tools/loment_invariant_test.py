@@ -289,6 +289,77 @@ def test_the_compiler_never_fails_silently_or_dies_by_a_signal():
           f"违反 {len(found)} 格（都记在账上）：{show(set(found))}")
 
 
+@test
+def test_each_member_names_the_construct_and_stays_inside_the_file():
+    """`#702`：不变量 1 的**下半句** —— "有名有姓"。
+
+    `#343` 的标准是"要么能跑，要么失败时**点名构造**并**指到一行**"。#369 只测了
+    "有声"（非空、不是回溯、不是信号），于是 `;` / `{` 这种**有声但什么都没说**的
+    消息照样全绿 —— 正是 `#702` 记的那两格。
+
+    这条把标准可数化，两条都判：
+
+    1. **消息点名构造**：裸 `return;` 要说"表达式/return"，120 层嵌套要说"嵌套超过"；
+    2. **位置不许越过 EOF**：每条诊断的 `line` 要么是 0（没有位置），要么落在入口
+       文件的行数之内 —— `use std` 那 130 条曾经把**依赖**的行号挂在**入口**文件上
+       （7 行文件里报第 14..97 行，`#31` 那个形状）。
+
+    `use std` 在自举驱动上仍撞 `#719` 的容量/时间墙（`KNOWN_GAPS` 里那格，会超时）——
+    那一半在超时时**跳过**，参考侧照判。这不是放宽：超时本身已经由上面那条判据记成
+    一个数，`#702` 管的是"说得出来"。
+    """
+    import json
+
+    def ref_diags(p: Path) -> list[dict]:
+        with tempfile.TemporaryDirectory() as t:
+            out = Path(t) / "d.jsonl"
+            # 参考侧编 `use std` 要解析整张依赖图 —— 比自举侧快得多，但 45 秒在慢机器
+            # 上没有余量；参考侧不会"死"，给足 120 秒（超时在这里才算真异常）。
+            r = subprocess.run([sys.executable, "-X", "utf8", "-I",
+                                str(ROOT / "tools" / "lomentc.py"), str(p),
+                                "--check", "--diag-out", str(out)],
+                               capture_output=True, timeout=120,
+                               shell=False)
+            assert r.returncode == 1, (p.name, r.returncode, r.stderr[-200:])
+            return [json.loads(ln) for ln in
+                    out.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+    want = {
+        # 参考侧的口径：`期望表达式，得到 ';'`（说出了**期望什么**，就是"点名构造"）
+        "bare-return": ("期望表达式",),
+        "nested-if-120": ("嵌套超过",),
+        "use-std": ("依赖", "`std`"),
+    }
+    for name, needles in want.items():
+        p = CORPUS / f"{name}.lomt"
+        recs = ref_diags(p)
+        assert recs, f"{name}: 参考实现一条诊断都没有"
+        nlines = len(p.read_text(encoding="utf-8").splitlines())
+        bad = [r for r in recs if r["line"] > nlines]
+        assert not bad, (
+            f"{name}: {len(bad)} 条记录的位置越过 EOF（{nlines} 行）—— "
+            f"例如第 {bad[0]['line']} 行: {bad[0]['message'][:80]}")
+        joined = "\n".join(r["message"] for r in recs)
+        missing = [w for w in needles if w not in joined]
+        assert not missing, f"{name}: 消息没点名 {missing} —— {joined[:300]!r}"
+
+    # 自举侧：两条**快的**成员必须说得出构造（`use std` 那份见 docstring）
+    if not (_clang() and _wsl()):
+        print("      SKIP: 需要 clang + WSL（自举侧那一半）")
+        return
+    _stage1()
+    for name, needle in (("bare-return", "return"), ("nested-if-120", "嵌套超过")):
+        rc, _out, err = _run_stage1(CORPUS / f"{name}.lomt")
+        assert rc == 1, f"{name}: 自举侧 rc={rc}（期望 1）"
+        assert needle in err, (
+            f"{name}: 自举侧正文没点名 {needle!r} —— 还是只有那一格 token: {err[:200]!r}")
+    rc, _out, err = _run_stage1(CORPUS / "use-std.lomt")
+    if rc != 124:
+        assert "`std`" in err or "std" in err, f"use-std 没点名 std: {err[:200]!r}"
+    print(f"      三份语料都点名构造、没有越过 EOF 的位置；自举侧两快一慢"
+          f"（use-std rc={rc}，超时即 #719 账上那格）")
+
+
 def main() -> int:
     failed = []
     for name, fn in TESTS:

@@ -49,6 +49,7 @@ loment_genesis_test 5
 loment_status_test 4
 lvm_test 6
 lvm_twin_test 4
+lvm_mirror_t2_test 5
 loment_net_test 3
 loment_ffi_test 30
 loment_ports_test 27

@@ -794,16 +794,23 @@ jobs:
       # **同一份提交里的两个数**：删一条判据、再把地板从 N 改成 N-1，两边一起说谎就绿了；
       # 给一条既有判据加个环境门、再把那条豁免写进 `gate-skips.txt`，同样绿。
       #
-      # 这里把两份预算与**对照面**（PR 取 base 分支，push 取 `event.before`）比：
+      # 这里把两份预算与**对照面**（PR 取 **base SHA**，push 取 `event.before`）比：
       # 地板只许**升**（对照面有的套件不许消失、数值不许降），跳过表只许**变短**。
       # 与下面基线棘轮同一个形状（`comm -13` 只认"新增"），取不到对照面时同样 **fail
       # closed** —— 一个取不到对照面的棘轮会静默失效，而它正是为此存在的。
+      #
+      # **为什么是 `base.sha` 而不是 `github.base_ref`**（2026-10-19 实测）：分支名会让
+      # 这一条去取**跑门禁那一刻**的 main，而 PR 的测试合并树是在**推送那一刻**按 main
+      # 建的。两者之间只要 main 抬过一次地板，这个 PR 就会被判"地板降了"—— 而它一个字节
+      # 都没动 `.github/gate-floors.txt`。本 PR 一小时内连撞两次（`#887` 的 18/5，`#884`
+      # 之后的 26→27），每次都要重新合 main 才能再跑一轮。`base.sha` 正是那棵合并树的
+      # 基点，棘轮判的本来就是"这一笔相对它的基点有没有松"。
       - name: 判据预算只许收紧（#418）
         if: ${{ always() }}
         run: |
           set +e
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            base="${{ github.base_ref }}"
+            base="${{ github.event.pull_request.base.sha }}"
           else
             base="${{ github.event.before }}"
           fi
@@ -844,7 +851,8 @@ jobs:
       # 够得着 —— 与"基线该变短了"必须在这儿算，是同一个理由。
       #
       # **对照面从哪儿来**：本地树里没有基线的前一版（`actions/checkout` 默认只取一个
-      # 提交），所以要**显式取一次**：PR 取 base 分支，push 取 `event.before`。
+      # 提交），所以要**显式取一次**：PR 取 **base SHA**（与上面预算棘轮同一个理由 ——
+      # 分支名会取到跑门禁那一刻的 main，与合并树的基点错开），push 取 `event.before`。
       # 取不到就**判失败**（fail closed）—— 与 `lom-door` 那条"列不出文件列表就按失败算"
       # 同一套：一个取不到对照面的棘轮会**静默失效**，而它正是为此存在的。
       - name: 基线只许变短
@@ -852,7 +860,7 @@ jobs:
         run: |
           set +e
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            base="${{ github.base_ref }}"
+            base="${{ github.event.pull_request.base.sha }}"
           else
             base="${{ github.event.before }}"
           fi

@@ -381,7 +381,7 @@ def cmd_lspe_state(a) -> int:
     """`loment lspe state FILE` —— 打印这份单元的 LSPE 台账（`docs/262` §8）。"""
     import json
     p = Path(a.file)
-    mod = lomentc.load(p)
+    mod = lomentc.load(p, lspe_level=a.lspe_level)
     deps = lomentc.resolve_deps(mod, ROOT, p.parent, entry=p)
     errs = lomentc.check(mod, deps=deps)
     if errs:
@@ -443,6 +443,7 @@ def main(argv: list[str] | None = None) -> int:
     lsub = lp.add_subparsers(dest="lspe_cmd", required=True)
     lps = lsub.add_parser("state")
     lps.add_argument("file")
+    lps.add_argument("--lspe-level", type=int, default=3, choices=(0, 1, 2, 3, 4))
     lps.set_defaults(fn=cmd_lspe_state)
     lpw = lsub.add_parser("why")
     lpw.add_argument("site")

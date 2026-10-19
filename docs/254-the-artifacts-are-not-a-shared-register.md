@@ -83,32 +83,39 @@ A: docs/990-probe-a.md      B: docs/991-probe-b.md      试合 A ← B
 **它们留在 PR 路径上是有意的**：它们**正好在它所派生那份源改变时改变**，所以那时的冲突是
 **两次改动真的重叠**，该让人看见。全树生成物不是这样 —— 它变了不代表你碰了它。
 
-### 3.2 `main` 上有一个单一写者，**直推**，且与门禁并行
+### 3.2 `main` 上有一个单一写者：分支 + PR + 显式派发门禁，且与门禁并行
 
-`manifest.yml` 新增 `emit-main`：由 `push: main` 触发，按**硬顺序**重算五件
-（种子 → surface → 手册 → 发布清单 → 校验和 —— 清单记的是*那一刻的树*），**用属主 PAT
-直接推到 `main`**。它只碰生成物，与任何人的 PR 都不重叠。
+`manifest.yml` 的 `emit-main` 由 `push: main` 触发，按**硬顺序**重算五件
+（种子 → surface → 手册 → 发布清单 → 校验和 —— 清单记的是*那一刻的树*），推到
+`chore/emit-main`，开一个 PR 并开 auto-merge，**再显式派发一次门禁**
+（`gh workflow run gate.yml --ref chore/emit-main`）。它只碰生成物，与任何人的 PR 都不重叠。
 
-**为什么是直推，不是开一个 PR** —— 这一条是踩出来的，第一次写的就是"滚动 PR"那个形状：
+**为什么不是直推 `main`**（`#891`）：直推能成立靠的是 `enforce_admins=false` —— 也就是
+这一笔**绕过必需检查**，而推进去的里面就有 `loment/build/selfhost_driver.ll`（每次构建的
+起点）。那不是省一轮的取舍，是**单凭据后门**。2026-10-18 起 `enforce_admins=true`，
+这条路在分支保护上是关闭的。
 
-> **用 `GITHUB_TOKEN` 开的 PR、以及它推的分支，都不触发 `pull_request` / `synchronize`。**
-> 官方规则：`GITHUB_TOKEN` 触发的事件**不新建 workflow run**，只有 `workflow_dispatch` /
-> `repository_dispatch` 例外。于是那个 PR 的门禁**永远不起**、必需检查**永远不报** ⇒
-> auto-merge 永远不落。本仓 `docs/159` 已经撞过这个形状的亲戚（"机器人推送会把必需检查
-> 挂成 `action_required`"，那一节记的是 2026-09-25 那次）。
+**为什么门禁要显式派发**：官方规则说 `GITHUB_TOKEN` 触发的事件**不新建 workflow run** ——
+包括它开的 PR 上的 `pull_request`。于是门禁**不会自己起**、必需检查**不会报**、
+auto-merge 永远不落。第一次写这一套时就撞过这个形状（`docs/159` 的亲戚：机器人推送把
+必需检查挂成 `action_required`）。
 
-**它凭什么推得动 `main`**：`enforce_admins` 是 `false`（2026-10-16 用 API 核实过），所以
-**属主 PAT** 能绕过必需检查；`GITHUB_TOKEN` 不是 admin，会被拒 —— 那正是上面那条替代路
-走不通的第二个理由。用的是 `secrets.MANIFEST_TOKEN`，且**只有这个 job 引用它**：`emit`
-那一路跑在 `pull_request_target` 上（树是别人的），既拿不到也不需要它。
+而 `workflow_dispatch` 与 `repository_dispatch` 是那条规则的**例外**：`GITHUB_TOKEN`
+派发的 dispatch **照样新建 run**。所以这里在开完 PR 之后手动派发一次，检查就落在 PR 的
+head SHA 上。派发路径下 `lom/ 禁区` 是 skipped —— 而必需检查接受的状态是
+`successful` / `skipped` / `neutral` 三种，skipped 不挡合并。
+
+**因此不需要任何仓 secret**：推分支、开 PR、开 auto-merge、派发门禁，用的都是这次运行
+自己的 `github.token`（`contents: write` + `pull-requests: write` + `actions: write`），
+跑完即失效。`MANIFEST_TOKEN` 那条长期属主 PAT 已经从这条链上拿掉。
 
 **"不排在门禁后面"是明确的**：不加 `needs:`、不用 `workflow_run`。两种写法都会把重算
 串在门禁**之后**，于是每一次合并变成"先等门禁、再等重算"。重算只读树、只写生成物，没有
-任何理由等门禁。`main` 的 `push` 门禁随后照样会在这一笔上跑一遍 —— 只是**不阻塞**它。
+任何理由等门禁。等的是**合并**，而合并必然发生在门禁绿了之后。
 
-**代价，一并说清楚**：`main` 上每次合并多一笔机器人提交，而**那一笔没有被门禁拦过**
-（它是重算出来的，不是人写的；门禁随后会在它上面跑，但拦不住）。以及这一套依赖一个
-**仓 secret**：没有它 `emit-main` 直接红（不静默跳过），而**建它是一次人工动作**。
+**代价，一并说清楚**：`main` 上每次合并多一轮生成物 PR，而那个 PR 上的门禁是**完整跑一遍**
+（不是"随后再跑"）。没变的时候不产生提交（`git status` 空 ⇒ 直接退出），所以稳态下没有
+额外的一轮。
 
 ### 3.3 判据：撤掉的那条换了个执行处，并且加了三条
 

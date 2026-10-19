@@ -228,6 +228,23 @@ def test_hosted_port_moves_the_heap_to_the_host():
 
 
 @test
+def test_hosted_and_gc_auto_compose():
+    """`port` 与 `gc` 是两条正交轴：`hosted` + `gc_auto` 是合法格，堆从宿主来，
+    收集器与根表照样在（`docs/222` §4；`_IR_GC_HOSTED`）。"""
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        cell = {"mode": "std", "gc": "gc_auto", "runtime": "runtime", "port": "hosted"}
+        rc, diag, ir, pot = _emit(td, "hosted-auto", cell, ALLOC_BODY)
+        assert rc == 0, f"hosted + gc_auto 编不过\n{diag[-400:]}"
+        assert pot.get("port") == "hosted" and pot.get("gc") == "gc_auto"
+        assert "loment-heap: platform" in ir and "@malloc" in ir, \
+            "hosted + gc_auto 没把堆换成平台的"
+        assert "__loment_collect" in ir and "__loment_roots" in ir, \
+            "hosted + gc_auto 的产物里缺收集器/根表"
+    print("      hosted + gc_auto: 平台堆 + 收集器 + 根表")
+
+
+@test
 def test_lms_rescue_only_exists_when_a_collector_does():
     """`lms` 的"收一次再试"只在真有收集器时出现 —— `gc_manual` 下它是一句空话（`docs/253` §5.3）。"""
     with tempfile.TemporaryDirectory() as tds:

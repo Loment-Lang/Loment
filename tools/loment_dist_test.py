@@ -133,7 +133,8 @@ def test_layout() -> None:
     lin = loment_dist.payload("linux", {"loment-driver": (b"\x7fELF-fake", b"MZ-fake")})
     win = loment_dist.payload("windows", {"loment-driver": (b"\x7fELF-fake", b"MZ-fake")})
     want_common = {"bin/loment", "share/loment/version", "share/loment/seed.ll",
-                   "share/loment/examples/user_hello.lomt", "README.md", "LICENSE"}
+                   "share/loment/examples/user_hello.lomt", "README.md",
+                   "LICENSE-MIT", "LICENSE-APACHE"}
     check("payload 公共布局齐全", want_common <= set(lin))
     check("linux 有 install.sh 且可执行",
           lin.get("install.sh", (b"", 0))[1] == 0o755)

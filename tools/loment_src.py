@@ -40,7 +40,7 @@ SEED = "loment/build/selfhost_driver.ll"
 #: 文档按**名字**选而不是按数字区间: 区间会把别的线的东西收进来 (docs/144-kernel-boundaries、
 #: docs/145-parallel-development、docs/146-kernel-stack-arena 就是这样被误收的)。
 GLOBS = [
-    "README.md", "LICENSE",
+    "README.md", "LICENSE-MIT", "LICENSE-APACHE",
     "loment/**",                       # 语言本体: 源/种子/链接脚本/语料/bootstrap
     "editors/**",                      # VS Code 扩展源码 + vim + 图标
     "docs/*loment*",                   # Loment 的规范/冻结面/手册/发行文档
@@ -213,7 +213,8 @@ def check() -> int:
     print(f"[OK] 包内 SHA256SUMS 自洽 ({len(sums.splitlines())} 条)" if not bad else "")
     must = ["loment/bootstrap.sh", SEED, "loment/selfhost/driver.lomt",
             "loment/selfhost/codegen.lomt", "loment/tools/lsp.lomt",
-            "editors/vscode/package.json", "README-SRC.md", "LICENSE"]
+            "editors/vscode/package.json", "README-SRC.md",
+            "LICENSE-MIT", "LICENSE-APACHE"]
     missing = [m for m in must if m not in files]
     if missing:
         print(f"[DIFF] 缺关键文件: {missing}")

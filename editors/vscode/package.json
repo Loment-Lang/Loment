@@ -4,7 +4,7 @@
   "description": "Loment language support for VS Code: syntax highlighting (including the seven surface grammars), a language server (completion, go to definition, diagnostics, formatting), and build / run / check / debug commands.",
   "version": "0.2.1",
   "publisher": "hooyan2022",
-  "license": "Loment-Open",
+  "license": "MIT OR Apache-2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/Loment-Lang/loment.git"

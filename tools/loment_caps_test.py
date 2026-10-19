@@ -75,10 +75,15 @@ def test(fn):
 #: （导出名现查 `.dynsym`，不再抄进表），于是 `EXP_MAX`（有话）与 `X_SIZE`（步长、
 #: 沉默）两条退出盘点；同时新增 `OBJ_MAX` / `REL_MAX`（对象表与重定位表的容量，两处
 #: 都有 `fail` 路径）。**条数不变（222）**，沉默 157 → **156**（少的是 `X_SIZE`）。
-#: 2026-10-19: +5 —— `loment/tools/lomelf.lomt` 的 V1 三张新表与 TLS 块
-#: （`#609`/`#610`/`#617`）：GOT_MAX / WEAK_MAX / TLS_MAX / PORT_MAX / TLS_CAP，
-#: 每一处越界都是 `fail` 点名退出（不是写穿）。
-CAPACITY_SITES = 227
+#:
+#: 2026-10-19（`#600` × `#631`）：输入缓冲后加了 4 KiB **名字预留区**
+#: （`NAME_RESERVE` / `NAME_CAP`）—— 撑满的 `.ll` 也要放得下收编面的名字。
+#: `NAME_CAP` 是新的写穿点，有 `fail` 路径（不是沉默的一格）；条数 222 → **223**。
+#:
+#: 2026-10-19（`#609` / `#610` / `#617`）：`loment/tools/lomelf.lomt` 的 V1 三张新表
+#: 与 TLS 块：GOT_MAX / WEAK_MAX / TLS_MAX / PORT_MAX / TLS_CAP，每一处越界都是
+#: `fail` 点名退出（不是写穿）。条数 223 → **228**。
+CAPACITY_SITES = 228
 SILENT_SITES = 156
 
 #: 越界时**说不出话**的那些名字（`--silent` 去重、按字节序）。138 个。

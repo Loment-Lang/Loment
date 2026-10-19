@@ -55,27 +55,34 @@ const PE_IMG_BASE: u64 = 5368709120;   // 0x140000000 —— 只在实际落绝�
 // 输入 / 代码 / 输出三块各给 4 MiB（输入装得下种子, 代码与输出按同比例给, 免得
 // "输入收下了、产物却装不下"那种一半的失败）。表区与全局数据不动。
 const M_ARGV: u32 = 0;             // 8192
-const M_IN: u32 = 8192;            // 4 MiB 输入 .ll 文本
-const M_TXT: u32 = 4202496;        // 4 MiB 代码缓冲
-const M_OUT: u32 = 8396800;        // 4 MiB 输出 ELF
-const M_GB: u32 = 12591104;        // 1 MiB 全局数据
+const M_IN: u32 = 8192;            // 4 MiB 输入 .ll 文本 + 4 KiB 名字预留区
+const M_TXT: u32 = 4206592;        // 4 MiB 代码缓冲
+const M_OUT: u32 = 8400896;        // 4 MiB 输出 ELF
+const M_GB: u32 = 12595200;        // 1 MiB 全局数据
 // **表区从 4 MiB 抬到 8 MiB**（2026-10-18，`#599` / `#622`）：导入表要装得下一份
 // 4 MiB `.ll` 能表达的最多不同调用目标（`IMP_MAX`），重定位表也要随对象变大；
 // 两张表都住在表区里，4 MiB 已经排不下。抬法与 `docs/192` / `docs/200` 同一条式子：
 // **整条表区往后挪**，`M_OBJ` / `M_AR` / `ARENA` 依次后移。
-const M_TAB: u32 = 13639680;       // 8 MiB 表区
-const M_OBJ: u32 = 22028288;       // 4 MiB 外部目标文件 (.o) 暂存 (docs/173, 一次一个)
+const M_TAB: u32 = 13643776;       // 8 MiB 表区
+const M_OBJ: u32 = 22032384;       // 4 MiB 外部目标文件 (.o) 暂存 (docs/173, 一次一个)
 // **归档暂存**（`docs/173` 阶段 2，`FujoJTOP/loment#405`）：`.a` 要整包驻留（定点选择要
 // 反复扫它），而成员得拷进 `M_OBJ` 再摆 —— 两块不能是同一块。与 `M_OBJ` 同尺寸：真库
 // （zlib 的 150 KB）离上限很远，上限在这里是给"来的不是库"那种输入一个**响亮的**界。
-const M_AR: u32 = 26222592;        // 4 MiB 归档暂存
+const M_AR: u32 = 26226688;        // 4 MiB 归档暂存
 // **TLS 暂存**（`#610`）：`.tdata` / `.tbss` 不能就地摆（最终布局在 GOT 之后、按对象
-// 顺序重排），所以先收在这里，等所有对象都摆完再一次性落进 `gb`。
-const M_TLS: u32 = 30416896;       // 64 KiB
+// 顺序重排），所以先收在这里，等所有对象都摆完再一次性落进 `gb`。放在 `M_AR` 之后、
+// `ARENA` 之前 —— 各块不重叠（`#777` 再抬内存时跟着后移）。
+const M_TLS: u32 = 30420992;       // 64 KiB
 const TLS_CAP: u32 = 65536;
-const ARENA: u64 = 30482432;
+const ARENA: u64 = 30486528;
 
 const IN_CAP: u32 = 4194304;
+//: `.ll` 文本**之后**的名字预留区（`#600`）：导出名、SONAME、节符号名、收编面那几个
+//: 名字都住在输入缓冲里，游标从文本末尾起。文本撑满 4 MiB 时它们就没地方放了 ——
+//: 参考实现那边名字是 Python 字符串，没有这条上限，于是同一份输入镜像退出 1。
+//: 预留区在整个输入缓冲**之后**、代码缓冲**之前**（下面的 M_* 各块整体后移 4 KiB）。
+const NAME_RESERVE: u32 = 4096;
+const NAME_CAP: u32 = 4198400;      // = IN_CAP + NAME_RESERVE（`const` 只吃字面量）
 //: `--diag-out PATH` 的落点：**argv 暂存块的最后 1 KiB**（`pbuf` 一共 64 KiB，
 //: 它的 0..65536 是路径区，再往后才是代码缓冲）。给启动器传进来的那条诊断文件路径用,
 //: 免得与输入 / 输出 / `--link` 三个落点抢 —— 那三块都是按 argv 长度算出来的。
@@ -3129,7 +3136,7 @@ fn dsec_at(raw: ptr, k: u32) -> u32 {
 /// 错的节上。这里与 `copy_local_name` 的对象号同宽（4 字节），`shndx` 是 ELF 的 16 位
 /// 字段，4 字节也装得下。
 fn put_secname(t: ptr, at: u32, oi: u32, shndx: u32) -> u32 {
-    if at + 10 >= IN_CAP {
+    if at + 10 >= NAME_CAP {
         return fail("the input buffer has no room left for section symbol names");
     }
     store8(t, at, 36 as u8);              // '$'
@@ -4354,7 +4361,7 @@ fn apply_relocs(tab: ptr, t: ptr, txt: ptr, gb: ptr) -> u32 {
 fn copy_local_name(tab: ptr, t: ptr, p: ptr, off: u32, oi: u32) -> u32 {
     let cur: u32 = cell(tab, C_EXTN);
     let n: u32 = cstr_len(p, off);
-    if cur + n + LOCAL_PREFIX >= IN_CAP {
+    if cur + n + LOCAL_PREFIX >= NAME_CAP {
         return fail("the input buffer has no room left for external symbol names");
     }
     store8(t, cur, 36 as u8);
@@ -4374,7 +4381,7 @@ fn copy_local_name(tab: ptr, t: ptr, p: ptr, off: u32, oi: u32) -> u32 {
 fn copy_name(tab: ptr, t: ptr, p: ptr, off: u32) -> u32 {
     let cur: u32 = cell(tab, C_EXTN);
     let n: u32 = cstr_len(p, off);
-    if cur + n >= IN_CAP {
+    if cur + n >= NAME_CAP {
         return fail("the input buffer has no room left for external symbol names");
     }
     let k: u32 = 0;
@@ -5008,16 +5015,15 @@ fn so_load(tab: ptr, t: ptr, mem: ptr, n: u32, pname: ptr) -> u32 {
         wstr(2, "\n");
         return die(1);
     }
-    // SONAME：没有就记**命令行给的路径**（`#595`，与 GNU ld 同一条）。只记 basename
-    // 的话，`--link /abs/dir/libfoo.so` 的产物在 loader 眼里是"去系统目录找 libfoo.so"：
-    // 构建成功、一跑就 `cannot open shared object`。带 `/` 的 DT_NEEDED 被当成路径直接打开。
+    // SONAME：没有就记**命令行给的那个路径**（GNU ld 同一条，#595）。只记 basename
+    // 的话，`--link /tmp/mylibs/libadd.so` 的产物会去找 `libadd.so`，loader 找不到。
     let son_o: u32 = cell(tab, C_EXTN);
     if sono == NO {
         let q: u32 = 0;
         while load8(pname, q) != 0 {
             q = q + 1;
         }
-        setcell(tab, C_EXTN, put_bytes(t, son_o, pname, 0, q, IN_CAP));
+        setcell(tab, C_EXTN, put_bytes(t, son_o, pname, 0, q, NAME_CAP));
         setcell(tab, C_SONOFF, son_o);
         setcell(tab, C_SONLEN, q);
     } else {
@@ -5042,7 +5048,7 @@ fn so_load(tab: ptr, t: ptr, mem: ptr, n: u32, pname: ptr) -> u32 {
                 sl = sl + 1;
             }
         }
-        setcell(tab, C_EXTN, put_bytes(t, son_o, mem, son_at, sl, IN_CAP));
+        setcell(tab, C_EXTN, put_bytes(t, son_o, mem, son_at, sl, NAME_CAP));
         setcell(tab, C_SONOFF, son_o);
         setcell(tab, C_SONLEN, sl);
     }
@@ -5120,7 +5126,11 @@ fn so_load(tab: ptr, t: ptr, mem: ptr, n: u32, pname: ptr) -> u32 {
             let bind: u32 = info / 16;
             let typ: u32 = info % 16;
             if bind == 1 || bind == 2 {
-                if typ == 0 || typ == 1 || typ == 2 || typ == 10 {   // NOTYPE 也算函数（#591）
+                // NOTYPE(0) / OBJECT(1) / FUNC(2) / IFUNC(10)：与参考实现
+                // `SharedObject.__init__` 同一条（#590/#591）。IFUNC 是 glibc 的
+                // `strlen`/`memcpy` 的形态，NOTYPE 是没有 `.type` 的汇编导出。
+                if typ == 0 || typ == 1 || typ == 2 || typ == 10 {
+                    // 名字相对 `.dynstr` 的起点：**两端都要在那一节里面**（`#593`）。
                     let npos: u32 = dstr + noff;
                     if npos < dstr || npos >= dstr + dstrsz {
                         return so_bad(pname, "导出名偏移越出 .dynstr");
@@ -6309,7 +6319,7 @@ fn put_name(t: ptr, at: u32, s: str) -> u32 {
     let n: u32 = str_len(s);
     // 与 `copy_name` 同一条守卫: 名字池住在**输入缓冲**里，越界就踩到下一张缓冲 ——
     // **响亮地退出**，不静默写坏（与 `IN_CAP` 那条同一个纪律）。
-    if at + n >= IN_CAP {
+    if at + n >= NAME_CAP {
         return fail("the input buffer has no room left for the conscripted names");
     }
     let i: u32 = 0;
@@ -6370,11 +6380,15 @@ fn emit_conscript(tab: ptr, out: ptr, c: u32, t: ptr) -> u32 {
     let a3: u32 = put_name(t, a2, "malloc");             // 6
     let a4: u32 = put_name(t, a3, "free");               // 4
     setcell(tab, C_EXTN, a4);
+    // **宿主版堆不包壳**（#631）：`choose hosted` 的分配器自己 `declare` 了 `@malloc`
+    // 并向宿主要 arena；这里再定义 `malloc` 就会指回壳自身（无限递归，实测栈溢出）。
+    // 判据与参考实现 `Emitter.emit_conscript` 同一条：IR 自己 declare 过的名字留给
+    // `.so` 的导出表 —— 自举侧就是 `ext_has`。
     let dd: u32 = d;
-    if lbl_find(tab, t, hn, 14, 0, 0) != NO {
+    if ext_has(tab, t, a2, 6) == 0 && lbl_find(tab, t, hn, 14, 0, 0) != NO {
         dd = emit_abi_wrapper(tab, out, dd, t, a2, 6, hn, 14);
     }
-    if lbl_find(tab, t, a1, 13, 0, 0) != NO {
+    if ext_has(tab, t, a3, 4) == 0 && lbl_find(tab, t, a1, 13, 0, 0) != NO {
         dd = emit_abi_wrapper(tab, out, dd, t, a3, 4, a1, 13);
     }
     return dd;
@@ -6702,13 +6716,14 @@ fn run(mem: ptr) -> u32 {
         tls = 1;
     }
     let tlen0: u32 = emit_all(tab, txt, 0, inb, n as u32, tlsn, tls);
-    // **收编面**（`docs/219` §6）：链里带了外部对象，就把"可闭合"那几个名字提供出来，
-    // 于是它们不再是未定义符号 —— 从表上划掉。粒度是"有没有外部对象"，与参考实现
-    // `tools/lomelf.py` 的 `compile_ll` 同一处判断、同一段字节（`loment_elf_test` 的自举
-    // 镜像那格逐字节钉）。**顺序与那边一致**：我们的代码 -> 收编面 -> 外部对象。
+    // **收编面**（`docs/219` §6）：链里带了**任何外部输入**（`.o` 或 `.so`），就把
+    // "可闭合"那几个名字提供出来，于是它们不再是未定义符号 —— 从表上划掉。粒度与参考
+    // 实现 `tools/lomelf.py` 的 `compile_ll` 同一处判断、同一段字节（`loment_elf_test`
+    // 的自举镜像那格逐字节钉）。**顺序与那边一致**：我们的代码 -> 收编面 -> 外部对象。
+    // `.so` 也要发（#631）：否则只链 `.so` 时 memcpy 一族只能落到导出表上，而 glibc
+    // 把 memcpy 发成 IFUNC/非默认版本，一个都落不下。
     let tlen: u32 = tlen0;
-    // **只链 `.so` 时也发**（`#631`）：`docs/219` §8c 说这些名字有两个落点 —— 收编面，
-    // 或者链上的 `.so` 的导出表。只发在"有 `.o`"那一支时，第二条落点就没了。
+
     if nobj != 0 || nshared != 0 {
         tlen = emit_conscript(tab, txt, tlen, inb);
     }

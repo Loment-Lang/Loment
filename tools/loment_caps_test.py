@@ -79,7 +79,11 @@ def test(fn):
 #: 2026-10-19（`#600` × `#631`）：输入缓冲后加了 4 KiB **名字预留区**
 #: （`NAME_RESERVE` / `NAME_CAP`）—— 撑满的 `.ll` 也要放得下收编面的名字。
 #: `NAME_CAP` 是新的写穿点，有 `fail` 路径（不是沉默的一格）；条数 222 → **223**。
-CAPACITY_SITES = 223
+#:
+#: 2026-10-19（`#609` / `#610` / `#617`）：`loment/tools/lomelf.lomt` 的 V1 三张新表
+#: 与 TLS 块：GOT_MAX / WEAK_MAX / TLS_MAX / PORT_MAX / TLS_CAP，每一处越界都是
+#: `fail` 点名退出（不是写穿）。条数 223 → **228**。
+CAPACITY_SITES = 228
 SILENT_SITES = 156
 
 #: 越界时**说不出话**的那些名字（`--silent` 去重、按字节序）。138 个。

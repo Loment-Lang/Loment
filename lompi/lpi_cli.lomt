@@ -37,6 +37,34 @@ fn out_slice(p: ptr, off: u32, n: u32) {
     sys_write(1, ((p as u64) + (off as u64)) as ptr, n as u64);
 }
 
+/// 把一个路径打印成**一个 shell 词**: 整体单引号, 内部的 `'` 写成 `'\''`。
+///
+/// 包元数据(版本)是**不可信输入** —— 原样插进 `cp -r …` 会让 `$(…)`、`;`、空格、
+/// 反引号在用户照抄执行时生效（#894）。单引号里除 `'` 外没有任何字节有语义,
+/// 而 `'\''` 正是"关引号、转义一个引号、再开引号"。
+fn sh_word_fd(fd: i64, p: ptr, off: u32, n: u32) {
+    sys_write_str(fd, "'");
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = load8(p, off + i);
+        if c == 39 {
+            sys_write_str(fd, "'\\''");
+        } else {
+            sys_write(fd, ((p as u64) + (off as u64) + (i as u64)) as ptr, 1);
+        }
+        i = i + 1;
+    }
+    sys_write_str(fd, "'");
+}
+
+fn sh_word(p: ptr, off: u32, n: u32) {
+    sh_word_fd(1, p, off, n);
+}
+
+fn sh_word_err(p: ptr, off: u32, n: u32) {
+    sh_word_fd(2, p, off, n);
+}
+
 fn out_dec(scr: ptr, v: u64) {
     txt_write_dec(1, scr, v);
 }
@@ -2014,9 +2042,9 @@ fn cli_apply(ws: ptr, np: u32, into: u64, buf: ptr, store: ptr) -> u32 {
         while i < np {
             if (pkg_flags(ws, i) & PKG_F_INCLOSURE) != 0 {
                 cli_dst_of(dst, buf, into, store, ws, i);
-                err_lit("      mkdir -p \"");
-                sys_write(2, dst, txt_len_cstr(dst) as u64);
-                err_lit("\"\n");
+                err_lit("      mkdir -p ");
+                sh_word_err(dst, 0, txt_len_cstr(dst));
+                err_lit("\n");
             }
             i = i + 1;
         }
@@ -2208,9 +2236,9 @@ fn cmd_install(ws: ptr, buf: ptr, m: u32, av_spec: u64) -> u32 {
     }
     out_lit("mkdir -p ");
     if into != 0 {
-        sys_write(1, ((buf as u64) + (sys_arg_off(into) as u64)) as ptr, sys_arg_len(into) as u64);
+        sh_word(buf, sys_arg_off(into), sys_arg_len(into));
     } else {
-        sys_write(1, store, txt_len_cstr(store) as u64);
+        sh_word(store, 0, txt_len_cstr(store));
     }
     out_lit("\n# ");
     out_dec(dec, cl as u64);
@@ -2220,9 +2248,9 @@ fn cmd_install(ws: ptr, buf: ptr, m: u32, av_spec: u64) -> u32 {
         if (pkg_flags(ws, i) & PKG_F_INCLOSURE) != 0 {
             cli_dst_of(dstb, buf, into, store, ws, i);
             out_lit("cp -r ");
-            sys_write(1, pkg_dir(ws, i), txt_len_cstr(pkg_dir(ws, i)) as u64);
+            sh_word(pkg_dir(ws, i), 0, txt_len_cstr(pkg_dir(ws, i)));
             out_lit(" ");
-            sys_write(1, dstb, txt_len_cstr(dstb) as u64);
+            sh_word(dstb, 0, txt_len_cstr(dstb));
             out_lit("\n");
         }
         i = i + 1;

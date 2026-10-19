@@ -1351,6 +1351,83 @@ def test_free_still_reuses_the_block_it_just_freed():
 
 
 @test
+def test_free_scrubs_the_payload_before_reuse():
+    """复用出来的块**不许带着上一任的字节**（#789）—— 两条释放路径各跑一遍。
+
+    **Why**：`free` 只把块挂回链表，`alloc` 把它原样交出去；arena 的 `zeroinitializer`
+    只覆盖**第一次**分配。于是"分配 `cap`、填了 `n`、把 `cap` 发出去"的程序会静默泄露
+    上一任的数据（Heartbleed / CWE-200/457）。这不是越界，光看 IR 与静态检查都看不出来
+    —— 必须在**真跑起来的分配器**上钉住。
+
+    **How to apply**：两条路径各一份探针，写进去的字节都是 `SEC`：
+      * **前沿回退**：`alloc(64)` → 写 → `free`（块顶着前沿）→ `alloc(64)`；
+      * **空闲链表**：`alloc(64)` → 写 → `alloc(32)` 当护栏 → `free`（块不是尾块，只能挂链）
+        → `alloc(64)` 复用 → 再写 → `free` → 再 `alloc(64)`。
+    修好之后新块读到的是 `0,0,0`（退出码 7）；没修时读到 `83,69,67`（退出码 3）。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    probes = {
+        "rewind": (
+            "module reuse_rewind\nchoose runtime\n\n"
+            "fn _start() {\n"
+            "    let a: ptr = alloc(64);\n"
+            "    store8(a, 0, 83 as u8);\n"
+            "    store8(a, 1, 69 as u8);\n"
+            "    store8(a, 2, 67 as u8);\n"
+            "    free(a);\n"
+            "    let b: ptr = alloc(64);\n"
+            "    if load8(b, 0) == 0 && load8(b, 1) == 0 && load8(b, 2) == 0 {\n"
+            "        syscall4(60, 7, 0, 0);\n"
+            "    }\n"
+            "    syscall4(60, 3, 0, 0);\n"
+            "}\n"
+        ),
+        "freelist": (
+            "module reuse_list\nchoose runtime\n\n"
+            "fn _start() {\n"
+            "    let a: ptr = alloc(64);\n"
+            "    store8(a, 0, 83 as u8);\n"
+            "    store8(a, 1, 69 as u8);\n"
+            "    store8(a, 2, 67 as u8);\n"
+            "    let guard: ptr = alloc(32);\n"
+            "    store8(guard, 0, 1 as u8);\n"
+            "    free(a);\n"
+            "    let b: ptr = alloc(64);\n"
+            "    if load8(b, 0) != 0 || load8(b, 1) != 0 || load8(b, 2) != 0 {\n"
+            "        syscall4(60, 3, 0, 0);\n"
+            "    }\n"
+            "    store8(b, 0, 7 as u8);\n"
+            "    free(b);\n"
+            "    let c: ptr = alloc(64);\n"
+            "    if load8(c, 0) == 0 && load8(c, 1) == 0 && load8(c, 2) == 0 {\n"
+            "        syscall4(60, 7, 0, 0);\n"
+            "    }\n"
+            "    syscall4(60, 3, 0, 0);\n"
+            "}\n"
+        ),
+    }
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = {}
+        for tag, text in probes.items():
+            src = td / f"{tag}.lomt"
+            src.write_text(text, encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"{tag}.native"
+            nat.write_bytes(blob)
+            got[tag] = _run_bin(nat, tag, td)[0]
+    for tag, rc in got.items():
+        assert rc == 7, (
+            f"{tag} 那只复用了上一任的字节：退出码 {rc}（期望 7）。"
+            "`free` 必须把载荷擦掉 —— 否则下一个 `alloc` 拿到的是上一任的 `SEC`，"
+            "分配 `cap`、只填 `n`、发送 `cap` 的调用方会静默泄露（#789）")
+    print("      两条释放路径（前沿回退 / 空闲链表）复用后都是零（rc=7）")
+
+
+@test
 def test_gc_heap_example_runs_under_the_collecting_tiers():
     """**真拿 `alloc` 写堆的程序**（`loment/examples/gc_heap`，`docs/210` §7）—— 三个档位各跑一遍。
 

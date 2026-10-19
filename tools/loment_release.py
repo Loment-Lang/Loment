@@ -147,6 +147,8 @@ GLOBS = [
     "tools/loment_interp.py", "tools/loment_ct_test.py",
     # `comefor` 的 token 层展开 (S4.1, docs/184 §9): 展开器 + 判据 + 最小方言演示。
     "tools/loment_comefor.py", "tools/loment_comefor_test.py",
+    # `choose` 的联动矩阵（`#940`）。**与 lomrel.lomt 同一位置**。
+    "tools/loment_choose_matrix_test.py",
     # 外部代码块的字节保真 (S1, docs/185)
     "tools/loment_extblock_test.py",
     "tools/loment_p7_test.py", "tools/loment_p8_test.py", "tools/loment_p9_test.py",

@@ -216,6 +216,7 @@ tools/loment_interp.py
 tools/loment_ct_test.py
 tools/loment_comefor.py
 tools/loment_comefor_test.py
+tools/loment_choose_matrix_test.py
 tools/loment_extblock_test.py
 tools/loment_p7_test.py
 tools/loment_p8_test.py

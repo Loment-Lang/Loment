@@ -840,6 +840,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="直接跑一份紧凑形产物（与 entry 二选一）")
     ap.add_argument("--profile-out", metavar="PATH", default=None,
                     help="T1：把反馈剖面写到 PATH（`docs/247`）。不写就不记，一个字节都不写")
+    ap.add_argument("--fusion-out", metavar="PATH", default=None,
+                    help="A4（docs/266）：把融合报告写到 PATH。不写就不记")
+    ap.add_argument("--fusion-profile", metavar="PATH", default=None,
+                    help="A4：只在这份 T1 剖面点过名的块里融合（chosen from the profile）")
     ap.add_argument("--cache", nargs="?", const="", metavar="PATH", default=None,
                     help="编译产物缓存（docs/265，#646）：缺省放在入口旁边（<entry>.lvmc），"
                          "给 PATH 就放那儿。只在 --tier t2 下有效；过期会**点名拒绝**并重编")
@@ -849,6 +853,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if a.compact is not None and a.compact_out is not None:
         print("lvm: --compact 与 --compact-out 不能同时给", file=sys.stderr)
+        return 2
+    fusion_wanted = a.fusion_out is not None or a.fusion_profile is not None
+    if fusion_wanted and a.compact_out is not None:
+        print("lvm: --fusion-* 要跑程序，--compact-out 只编不跑", file=sys.stderr)
+        return 2
+    if fusion_wanted and a.compact is None and a.tier != "t2":
+        print("lvm: --fusion-* 只在 --tier t2（或 --compact）下有效", file=sys.stderr)
         return 2
     if a.cache is not None:
         if a.tier != "t2":
@@ -865,6 +876,15 @@ def main(argv: list[str] | None = None) -> int:
     root = Path(a.root).resolve()
     buf = io.BytesIO()
     prof = Profile() if a.profile_out else None
+    fusion = None
+    hot = None
+    if a.fusion_out is not None:
+        import lvm_t2                                       # noqa: PLC0415
+        fusion = lvm_t2.FusionReport()
+    if a.fusion_profile is not None:
+        import lvm_t2                                       # noqa: PLC0415
+        hot = lvm_t2.parse_hot_blocks(
+            Path(a.fusion_profile).read_text(encoding="utf-8"))
     values = None
     deopts = None
     if a.values_out is not None:
@@ -892,7 +912,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if a.compact is not None:
             rc = lvm_compact.run_compact(Path(a.compact).read_bytes(), buf, prof,
-                                         [a.compact])
+                                         [a.compact], fusion, hot)
         elif a.cache is not None:
             # 缓存那一趟：入口 -> IR -> （缓存命中就跳过编译）-> 紧凑形 -> 跑。
             # **IR 还是照常生成**（源输入要过前端）—— 缓存省的是 IR 之后那一段，
@@ -904,13 +924,26 @@ def main(argv: list[str] | None = None) -> int:
                   else compile_source(entry, root))
             cpath = Path(a.cache) if a.cache else lvm_cache.default_path(entry)
             payload = lvm_cache.load_or_build(cpath, Path(a.entry), ir)
-            rc = lvm_compact.run_compact(payload, buf, prof, [a.entry])
+            rc = lvm_compact.run_compact(payload, buf, prof, [a.entry], fusion, hot)
         elif a.ir:
-            rc = run_ir(Path(a.entry).read_text(encoding="utf-8"), buf, prof, [a.entry],
-                        a.tier, values, deopts)
+            ir = Path(a.entry).read_text(encoding="utf-8")
+            if a.tier == "t2":
+                import lvm_t2                                # noqa: PLC0415
+                rc = lvm_t2.run_ir_t2(ir, buf, prof, [a.entry], values,
+                                      a.fusion_out is not None or a.fusion_profile is not None,
+                                      fusion, hot)
+            else:
+                rc = run_ir(ir, buf, prof, [a.entry], a.tier, values, deopts)
         else:
-            rc = run_source(Path(a.entry).resolve(), root, buf, prof, [a.entry], a.tier,
-                            values, deopts)
+            if a.tier == "t2":
+                import lvm_t2                                # noqa: PLC0415
+                ir = compile_source(Path(a.entry).resolve(), root)
+                rc = lvm_t2.run_ir_t2(ir, buf, prof, [a.entry], values,
+                                      a.fusion_out is not None or a.fusion_profile is not None,
+                                      fusion, hot)
+            else:
+                rc = run_source(Path(a.entry).resolve(), root, buf, prof, [a.entry],
+                                a.tier, values, deopts)
     except (LvmError, lomelf.ElfError, lomelf.Unsupported,
             lvm_compact.CompactError) as e:
         sys.stdout.buffer.write(buf.getvalue())
@@ -923,6 +956,9 @@ def main(argv: list[str] | None = None) -> int:
     if deopts is not None and a.deopt_out is not None:
         with Path(a.deopt_out).open("w", encoding="utf-8", newline="\n") as f:
             f.write(deopts.text())
+    if fusion is not None and a.fusion_out is not None:
+        with Path(a.fusion_out).open("w", encoding="utf-8", newline="\n") as f:
+            f.write(fusion.text())
     if prof is not None and a.profile_out is not None:
         # `newline="\n"`：本机 `write_text` 会写成 CRLF，而剖面要跨平台逐字节可比。
         with Path(a.profile_out).open("w", encoding="utf-8", newline="\n") as f:

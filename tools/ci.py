@@ -145,12 +145,18 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  # `loment/tools/lvm.lomt`（走种子自举链编成 ELF），比 stdout 字节 + 退出码。
                  # 它同时也在测**自举链把镜像编得对不对**。没有 clang 就 SKIP（不假装成立）。
                  "lvm_twin_test",
+                 # 镜像的 T2（`docs/267`）：原生/镜像 T0/镜像 T2 逐字节同、剖面非空且同、
+                 # 执行期解码 0 次（反向一半也断言）、更快（判符号）、与参考孪生。
+                 "lvm_mirror_t2_test",
                  # LVM 的 T1（`docs/247`）：反馈剖面 —— 确定性 / 关上什么都不写 /
                  # 块次数 == 出边和（对语料每一份）/ 循环次数已知的夹具逐条对上。
                  "lvm_profile_test",
                  # LVM 的 T2（`docs/259`）：基线编译 —— 原生/T0/T2 三者逐字节同、
                  # 剖面在换引擎后逐字节同、**执行期解码次数为 0**（确定性）、T2 比 T0 快（判符号）。
                  "lvm_t2_test",
+                 # LVM 的 A4 超级指令（`docs/266`）：fused 与 T0 逐字节同（含剖面）、
+                 # 报告按解析顺序、热点选择、分派密集夹具上更快（判符号）。
+                 "lvm_fusion_test",
                  # LVM 的紧凑形（`docs/250`）：文本/紧凑形逐字节同（含剖面）、体积变小、
                  # 加载更快、错形点名拒。
                  "lvm_compact_test",
@@ -374,10 +380,12 @@ SHARD_COST = {
     "lvm_perf_test": 25.0,
     "lvm_profile_test": 22.9,
     "lvm_stability_test": 10.0,
+    "lvm_fusion_test": 32.0,
     "lvm_t2_test": 138.6,
     "lvm_t3_test": 24.7,
     "lvm_test": 20.3,
     "lvm_twin_test": 29.2,
+    "lvm_mirror_t2_test": 60.0,
     "potato_cross": 0.0,
     "potato_test": 9.5,
     "vscode_ext_test": 1.2,

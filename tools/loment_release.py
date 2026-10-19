@@ -184,6 +184,7 @@ GLOBS = [
     "tools/lvm_t2.py", "tools/lvm_t2_test.py",
     "tools/lvm_compact.py", "tools/lvm_compact_test.py",
     "tools/lvm_cache.py", "tools/lvm_cache_test.py",
+    "tools/lvm_fusion_test.py", "tools/lvm_mirror_t2_test.py",
     "tools/loment_store_twin_test.py",
     "tools/lvm_t3.py", "tools/lvm_t3_test.py",
     "tools/lvm_stability_test.py",

@@ -82,7 +82,8 @@ const VAL_REC: u32 = 16;             // name_off,name_len,vlo,vhi   (u64 拆两�
 const FR_NV: u32 = 0;                // 值个数
 const FR_NEXT: u32 = 4;              // 槽/聚合 bump（帧内偏移）
 const FR_VALS: u32 = 8;              // 值表起点
-const FR_SLOTS: u32 = 16392;         // 8 + 1024 * 16 —— 槽/聚合区起点
+const FR_INIT: u32 = 16384;          // T2：槽的"写过没有"位图（1024 位 = 128 字节）
+const FR_SLOTS: u32 = 16520;         // 8 + 1024 * 16 + 128 —— 槽/聚合区起点
 
 //: 指令种类（解析期算好，存在记录里 —— 求值期别再逐字比）
 const K_ALLOCA: u32 = 1;
@@ -388,6 +389,7 @@ fn word_end(t: ptr, i: u32, n: u32) -> u32 {
 
 /// 从 i 起跳空白，认一个记号，返回 (起点 << 32) | 长度。
 fn wspan(t: ptr, i: u32, n: u32) -> u64 {
+    if ctx_get(t, C_EXEC) == 1 { ctx_set(t, C_MISS, ctx_get(t, C_MISS) + 1); }
     let s: u32 = skip_sp(t, i, n);
     let e: u32 = word_end(t, s, n);
     return ((s as u64) << 32) | ((e - s) as u64);
@@ -410,6 +412,7 @@ fn trim_span(t: ptr, s: u32, e: u32) -> u64 {
 /// **不写死算子长度** —— `getelementptr` 是 13 个字符不是 12，写错了不会报错，
 /// 只会把算子尾巴当成类型读（`r`），然后在 GEP 上报"这一步没实现"。这类错一个都不要。
 fn after_op(a: ptr, io: u32, e: u32) -> u32 {
+    if ctx_get(a, C_EXEC) == 1 { ctx_set(a, C_MISS, ctx_get(a, C_MISS) + 1); }
     let w: u64 = wspan(a, io, e);
     return skip_sp(a, hi32(w) + lo32(w), e);
 }
@@ -519,6 +522,7 @@ fn match_close(a: ptr, i: u32, n: u32, open: u32, close: u32) -> u32 {
 
 /// 顶层（圆/方/花括号深度 0）逗号或 n 的位置。
 fn seg_end(a: ptr, i: u32, n: u32) -> u32 {
+    if ctx_get(a, C_EXEC) == 1 { ctx_set(a, C_MISS, ctx_get(a, C_MISS) + 1); }
     let d: u32 = 0;
     let j: u32 = i;
     let go: u32 = 1;
@@ -540,6 +544,7 @@ fn seg_end(a: ptr, i: u32, n: u32) -> u32 {
 
 /// 从 `i`（一个顶层逗号或 n）跳到下一段的起点。
 fn seg_next(a: ptr, i: u32, n: u32) -> u32 {
+    if ctx_get(a, C_EXEC) == 1 { ctx_set(a, C_MISS, ctx_get(a, C_MISS) + 1); }
     let j: u32 = i;
     if j < n && load8(a, j) == 44 {
         j = j + 1;
@@ -622,6 +627,7 @@ fn dec_u64(a: ptr, s: u32, e: u32) -> u64 {
 /// 从 off 起读一个类型，返回 (起点 << 32) | 长度。
 /// `{`/`[` 走**外层那一种**括号的配对（与参考实现同一处取舍）。
 fn ty_span(a: ptr, off: u32, n: u32) -> u64 {
+    if ctx_get(a, C_EXEC) == 1 { ctx_set(a, C_MISS, ctx_get(a, C_MISS) + 1); }
     let i: u32 = skip_sp(a, off, n);
     if i >= n {
         return 0;
@@ -693,6 +699,7 @@ fn fld_count(a: ptr, off: u32, len: u32) -> u32 {
 
 /// 结构体里第 k 个字段的类型 span。
 fn fld_ty(a: ptr, off: u32, len: u32, k: u32) -> u64 {
+    if ctx_get(a, C_EXEC) == 1 { ctx_set(a, C_MISS, ctx_get(a, C_MISS) + 1); }
     let n: u32 = off + len;
     let i: u32 = off + 1;
     let d: u32 = 1;
@@ -727,6 +734,7 @@ fn fld_ty(a: ptr, off: u32, len: u32, k: u32) -> u64 {
 
 /// 结构体里第 k 个字段的**偏移**（对齐到它自己的大小；无尾部填充）。
 fn fld_off(a: ptr, off: u32, len: u32, k: u32) -> u32 {
+    if ctx_get(a, C_EXEC) == 1 { ctx_set(a, C_MISS, ctx_get(a, C_MISS) + 1); }
     let o: u32 = 0;
     let i: u32 = 0;
     while i < k {
@@ -753,6 +761,7 @@ fn arr_count(a: ptr, off: u32, len: u32) -> u32 {
 }
 
 fn arr_elem(a: ptr, off: u32, len: u32) -> u64 {
+    if ctx_get(a, C_EXEC) == 1 { ctx_set(a, C_MISS, ctx_get(a, C_MISS) + 1); }
     let i: u32 = off + 1;
     while i < off + len && load8(a, i) != 120 {
         i = i + 1;
@@ -763,6 +772,7 @@ fn arr_elem(a: ptr, off: u32, len: u32) -> u64 {
 /// 类型文本 -> 字节数。**i1 占 1 字节**（与 `lomelf.SCALAR_SIZE` 的 "i1": 1 一致，
 /// 不是 1 位 —— `n / 8` 会给出 0，那是个真踩过的坑）。
 fn ty_size(a: ptr, off: u32, len: u32) -> u32 {
+    if ctx_get(a, C_EXEC) == 1 { ctx_set(a, C_MISS, ctx_get(a, C_MISS) + 1); }
     let c: u32 = load8(a, off);
     if c == 105 {
         let n: u32 = 0;
@@ -917,6 +927,7 @@ fn fr_agg(a: ptr, m: ptr, fr: u32, no: u32, nl: u32, size: u32) -> u32 {
 }
 
 fn vfind(a: ptr, m: ptr, fr: u32, no: u32, nl: u32) -> u32 {
+    if ctx_get(a, C_EXEC) == 1 { ctx_set(a, C_MISS, ctx_get(a, C_MISS) + 1); }
     let n: u32 = rd(m, fr, 0);
     let i: u32 = 0;
     while i < n {
@@ -966,6 +977,7 @@ fn pspan(a: ptr, k: u32, f: u32) -> u64 {
 // ---------------------------------------------------------------- 表查询
 
 fn gaddr(a: ptr, no: u32, nl: u32) -> u32 {
+    if ctx_get(a, C_EXEC) == 1 { ctx_set(a, C_MISS, ctx_get(a, C_MISS) + 1); }
     let ng: u32 = ctx_get(a, C_NG);
     let i: u32 = 0;
     while i < ng {
@@ -980,6 +992,7 @@ fn gaddr(a: ptr, no: u32, nl: u32) -> u32 {
 }
 
 fn fn_find(a: ptr, no: u32, nl: u32) -> u32 {
+    if ctx_get(a, C_EXEC) == 1 { ctx_set(a, C_MISS, ctx_get(a, C_MISS) + 1); }
     let nf: u32 = ctx_get(a, C_NF);
     let i: u32 = 0;
     while i < nf {
@@ -1009,6 +1022,7 @@ fn fn_find_lit(a: ptr, s: str) -> u32 {
 
 /// 某函数里标签文本 = [lo, lo+ll) 的那一块的**块号**（`switch` 用；热路径不用）。
 fn blk_of(a: ptr, fi: u32, lo: u32, ll: u32) -> u32 {
+    if ctx_get(a, C_EXEC) == 1 { ctx_set(a, C_MISS, ctx_get(a, C_MISS) + 1); }
     let fb: u32 = rd(a, F_OFF, fi * 8 + 6);
     let nb: u32 = rd(a, F_OFF, fi * 8 + 7);
     let i: u32 = 0;
@@ -1607,6 +1621,7 @@ fn place_globals(a: ptr, m: ptr) {
 //   聚合 -> 一段**可读地址**（VM 地址），字节就在那儿
 
 fn operand(a: ptr, m: ptr, fr: u32, tyo: u32, tyl: u32, vo: u32, vl: u32) -> u64 {
+    if ctx_get(a, C_EXEC) == 1 { ctx_set(a, C_MISS, ctx_get(a, C_MISS) + 1); }
     if vl == 0 {
         wstr(2, "lvm: 操作数缺失 @");
         write_num(a, 2, vo);
@@ -2080,6 +2095,7 @@ fn vm_syscall(a: ptr, m: ptr, nr: u64, x1: u64, x2: u64, x3: u64) -> u64 {
         if pfd != 0 {
             dump_profile(a, pfd as u64);
         }
+        dump_stats(a);
         syscall4(60, x1 & 255, 0, 0);
         return 0;
     }
@@ -2487,6 +2503,17 @@ fn callee_span(a: ptr, to: u32, tl: u32) -> u64 {
 
 /// 三个段各走一遍表。**顺序 = 解析顺序**（函数 → 块 → 指令）—— 参考那侧也改成按它走，
 /// 两边的产物才逐字节比得了（`docs/247` §4 记了为什么不是按名字排序）。
+fn dump_stats(a: ptr) {
+    let fd: u32 = ctx_get(a, C_STATS_FD);
+    if fd != 0 {
+        write_num(a, fd as u64, ctx_get(a, C_MISS));
+        wstr(fd as u64, "
+");
+        syscall4(3, fd as u64, 0, 0);
+        ctx_set(a, C_STATS_FD, 0);
+    }
+}
+
 fn dump_profile(a: ptr, fd: u64) {
     wlit(fd, "# lvm profile v1
 ");
@@ -2616,6 +2643,1166 @@ fn write_num(a: ptr, fd: u64, v: u32) -> u64 {
     return write_all(fd, b, 1);
 }
 
+// ---------------------------------------------------------------- T2（docs/259 §7，#586）
+//
+// 镜像的 T0 在**执行期**重解操作数与类型文本：每个 SSA 操作数一次线性 `vfind`、
+// 每指令若干次 `ty_span`/`seg_end`/`seg_next`/`ty_size` 扫描。T2 把这一次解码
+// **搬到执行之前**：解析完、全局落位之后，把每条指令的操作数/类型/目标块折成
+// 一张编译表，执行期只读表。
+//
+// **不进紧凑形** —— 镜像是直接吃文本 IR 的，表在每次启动时重建；表只由 IR 决定。
+
+//: 编译表（追加在旧 arena 之后）
+//: `const` 只吃字面量（本语言没有常量表达式）—— 下面的算式写在注释里。
+const T2_OFF: u32 = 9935104;                   // 旧 ARENA 的末尾
+const CC_OFF: u32 = 9935104;                   // T2_OFF；每指令 12 个 u32（48 B）
+const COP_OFF: u32 = 11507968;                 // CC_OFF + 32768*48；操作数描述符 4 u32
+const CX_OFF: u32 = 13605120;                  // COP_OFF + 131072*16；附加池
+const CSL_OFF: u32 = 13867264;                 // CX_OFF + 65536*4；槽名表 2 u32
+const FS2_OFF: u32 = 14129408;                 // CSL_OFF + 32768*8；每函数 4 u32
+const ARENA_T2: u64 = 14137600;                // FS2_OFF + 512*16
+
+//: 编译记录 12 格
+const CR_KIND: u32 = 0;
+const CR_SUB: u32 = 1;
+const CR_DEST: u32 = 2;                        // 槽号；NONE = 无
+const CR_NOPS: u32 = 3;
+const CR_OPS: u32 = 4;                         // 操作数池下标
+const CR_BITS: u32 = 5;
+const CR_SIZE: u32 = 6;
+const CR_AUX: u32 = 7;
+const CR_AUX2: u32 = 8;
+const CR_XB: u32 = 9;                          // 附加池下标
+const CR_XN: u32 = 10;
+const CR_FLAGS: u32 = 11;                      // 1 = 聚合结果
+
+//: 操作数描述符种类
+const CO_SLOT: u32 = 0;                        // a=槽号 b=name_off c=name_len
+const CO_IMM: u32 = 1;                         // a=lo b=hi
+const CO_ZAGG: u32 = 2;                        // a=size
+const CO_GADDR: u32 = 3;                       // a=addr
+const K_CERR: u32 = 34;                        // 编译期解不了，执行到才报
+
+//: 格区里 T2 用的几格
+const C_TIER: u32 = 128;                       // 1 = T2
+const C_CII: u32 = 132;                        // 当前指令下标（编译/执行期）
+const C_CFI: u32 = 136;                        // 当前函数下标（编译期）
+const C_COMPILE: u32 = 140;                    // 1 = 正在建表
+const C_MISS: u32 = 144;                       // 执行期仍发生的文本解码次数
+const C_NSLOT: u32 = 148;                      // 槽表已用
+const C_NCOP: u32 = 152;                       // 操作数池已用
+const C_NCX: u32 = 156;                        // 附加池已用
+const C_EXEC: u32 = 160;                       // 1 = 正在执行（计数器只在这段里加）
+const C_STATS_FD: u32 = 164;                   // 解码计数写到哪个 fd（0 = 不写）
+
+// ---------------------------------------------------------------- T2：编译表
+//
+// 表都在 arena 里（`T2_OFF` 之后）。建表在 `place_globals` 之后 —— `@global` 的地址
+// 那时才有值（同 `docs/259` §4.3）。
+
+fn t2_cr(a: ptr, ii: u32, f: u32) -> u32 {
+    return rd(a, CC_OFF, ii * 12 + f);
+}
+
+fn t2_crw(a: ptr, ii: u32, f: u32, v: u32) {
+    store32(a, CC_OFF + ii * 48 + f * 4, v);
+}
+
+fn t2_copr(a: ptr, i: u32, f: u32) -> u32 {
+    return rd(a, COP_OFF, i * 4 + f);
+}
+
+fn t2_copw(a: ptr, i: u32, f: u32, v: u32) {
+    store32(a, COP_OFF + i * 16 + f * 4, v);
+}
+
+fn t2_xr(a: ptr, i: u32) -> u32 {
+    return rd(a, CX_OFF, i);
+}
+
+fn t2_xw(a: ptr, i: u32, v: u32) {
+    store32(a, CX_OFF + i * 4, v);
+}
+
+fn t2_fs(a: ptr, fi: u32, f: u32) -> u32 {
+    return rd(a, FS2_OFF, fi * 4 + f);
+}
+
+fn t2_fsw(a: ptr, fi: u32, f: u32, v: u32) {
+    store32(a, FS2_OFF + fi * 16 + f * 4, v);
+}
+
+fn t2_slotr(a: ptr, i: u32, f: u32) -> u32 {
+    return rd(a, CSL_OFF, i * 2 + f);
+}
+
+fn t2_slotw(a: ptr, i: u32, f: u32, v: u32) {
+    store32(a, CSL_OFF + i * 8 + f * 4, v);
+}
+
+/// 一个函数里按名字找槽；没有就加。**名字是 SSA 名（不带 `%`）**。
+fn t2_slot_add(a: ptr, fi: u32, no: u32, nl: u32) -> u32 {
+    let s0: u32 = t2_fs(a, fi, 0);
+    let n: u32 = t2_fs(a, fi, 1);
+    let i: u32 = 0;
+    while i < n {
+        let idx: u32 = s0 + i;
+        let o: u32 = t2_slotr(a, idx, 0);
+        let l: u32 = t2_slotr(a, idx, 1);
+        if l == nl {
+            if same(a, no, a, o, nl) {
+                return idx - s0;
+            }
+        }
+        i = i + 1;
+    }
+    let idx: u32 = ctx_get(a, C_NSLOT);
+    if idx >= 32768 {
+        fail("T2 槽表满了");
+    }
+    t2_slotw(a, idx, 0, no);
+    t2_slotw(a, idx, 1, nl);
+    ctx_set(a, C_NSLOT, idx + 1);
+    t2_fsw(a, fi, 1, n + 1);
+    return idx - s0;
+}
+
+fn t2_slot_find(a: ptr, fi: u32, no: u32, nl: u32) -> u32 {
+    let s0: u32 = t2_fs(a, fi, 0);
+    let n: u32 = t2_fs(a, fi, 1);
+    let i: u32 = 0;
+    while i < n {
+        let idx: u32 = s0 + i;
+        if t2_slotr(a, idx, 1) == nl {
+            if same(a, no, a, t2_slotr(a, idx, 0), nl) {
+                return idx - s0;
+            }
+        }
+        i = i + 1;
+    }
+    return NONE;
+}
+
+fn t2_cop_add(a: ptr, kind: u32, x: u32, y: u32, z: u32) -> u32 {
+    let i: u32 = ctx_get(a, C_NCOP);
+    if i >= 131072 {
+        fail("T2 操作数池满了");
+    }
+    t2_copw(a, i, 0, kind);
+    t2_copw(a, i, 1, x);
+    t2_copw(a, i, 2, y);
+    t2_copw(a, i, 3, z);
+    ctx_set(a, C_NCOP, i + 1);
+    return i;
+}
+
+fn t2_x_add(a: ptr, v: u32) -> u32 {
+    let i: u32 = ctx_get(a, C_NCX);
+    if i >= 65536 {
+        fail("T2 附加池满了");
+    }
+    t2_xw(a, i, v);
+    ctx_set(a, C_NCX, i + 1);
+    return i;
+}
+
+/// 一条 **`<类型> <值>`** 操作数 -> 描述符下标。**编译期做，执行期只读表。**
+fn t2_coperand(a: ptr, fi: u32, tyo: u32, tyl: u32, vo: u32, vl: u32) -> u32 {
+    if vl == 0 {
+        return t2_cop_add(a, CO_IMM, 0, 0, 0);
+    }
+    let c: u32 = load8(a, vo);
+    if c == 37 {                                          // %name
+        let s: u32 = t2_slot_add(a, fi, vo, vl);
+        return t2_cop_add(a, CO_SLOT, s, vo, vl);
+    }
+    if c == 64 {                                          // @global
+        return t2_cop_add(a, CO_GADDR, gaddr(a, vo, vl), 0, 0);
+    }
+    if c == 117 || c == 110 {                             // undef / null
+        if is_agg(a, tyo, tyl) {
+            return t2_cop_add(a, CO_ZAGG, ty_size(a, tyo, tyl), 0, 0);
+        }
+        return t2_cop_add(a, CO_IMM, 0, 0, 0);
+    }
+    if c == 116 {                                         // true
+        return t2_cop_add(a, CO_IMM, 1, 0, 0);
+    }
+    if c == 102 {                                         // false
+        return t2_cop_add(a, CO_IMM, 0, 0, 0);
+    }
+    let v: u64 = dec_u64(a, vo, vo + vl);
+    return t2_cop_add(a, CO_IMM, lo32(v), hi32(v), 0);
+}
+
+fn t2_coperand_text(a: ptr, fi: u32, off: u32, n: u32) -> u32 {
+    let ts: u64 = ty_span(a, off, n);
+    let vo: u32 = skip_sp(a, hi32(ts) + lo32(ts), n);
+    let vs: u64 = trim_span(a, vo, seg_end(a, vo, n));
+    return t2_coperand(a, fi, hi32(ts), lo32(ts), hi32(vs), lo32(vs));
+}
+
+/// 目标值（`do_/dl`）-> 槽号；没有目标返回 NONE。
+fn t2_dest(a: ptr, fi: u32, do_: u32, dl: u32) -> u32 {
+    if dl == 0 {
+        return NONE;
+    }
+    return t2_slot_add(a, fi, do_, dl);
+}
+
+/// 把一条指令折成编译记录。解不出来的指令记成 K_CERR，执行到才报 ——
+/// 与 T0 的接受集合保持一致（不可达的坏指令不是错，`docs/259` §4.4）。
+fn t2_compile_instr(a: ptr, fi: u32, ii: u32) -> u32 {
+    let io: u32 = rd(a, I_OFF, ii * 8 + 2);
+    let il: u32 = rd(a, I_OFF, ii * 8 + 3);
+    let k: u32 = rd(a, I_OFF, ii * 8 + 4);
+    let sub: u32 = rd(a, I_OFF, ii * 8 + 5);
+    let do_: u32 = rd(a, I_OFF, ii * 8);
+    let dl: u32 = rd(a, I_OFF, ii * 8 + 1);
+    let e: u32 = io + il;
+    t2_crw(a, ii, CR_KIND, k);
+    t2_crw(a, ii, CR_SUB, sub);
+    t2_crw(a, ii, CR_DEST, t2_dest(a, fi, do_, dl));
+    t2_crw(a, ii, CR_NOPS, 0);
+    t2_crw(a, ii, CR_OPS, 0);
+    t2_crw(a, ii, CR_BITS, 0);
+    t2_crw(a, ii, CR_SIZE, 0);
+    t2_crw(a, ii, CR_AUX, 0);
+    t2_crw(a, ii, CR_AUX2, 0);
+    t2_crw(a, ii, CR_XB, 0);
+    t2_crw(a, ii, CR_XN, 0);
+    t2_crw(a, ii, CR_FLAGS, 0);
+
+    if k == K_ALLOCA {
+        let ts: u64 = ty_span(a, after_op(a, io, e), e);
+        t2_crw(a, ii, CR_SIZE, ty_size(a, hi32(ts), lo32(ts)));
+        return 0;
+    }
+    if k == K_LOAD {
+        let ts: u64 = ty_span(a, after_op(a, io, e), e);
+        let p: u32 = seg_next(a, hi32(ts) + lo32(ts), e);
+        t2_crw(a, ii, CR_OPS, t2_coperand_text(a, fi, p, e));
+        t2_crw(a, ii, CR_NOPS, 1);
+        t2_crw(a, ii, CR_SIZE, ty_size(a, hi32(ts), lo32(ts)));
+        if is_agg(a, hi32(ts), lo32(ts)) {
+            t2_crw(a, ii, CR_FLAGS, 1);
+        }
+        return 0;
+    }
+    if k == K_STORE {
+        let ts: u64 = ty_span(a, after_op(a, io, e), e);
+        let p: u32 = seg_next(a, hi32(ts) + lo32(ts), e);
+        let q: u32 = seg_end(a, p, e);
+        let vs: u64 = trim_span(a, p, q);
+        let vop: u32 = t2_coperand(a, fi, hi32(ts), lo32(ts), hi32(vs), lo32(vs));
+        let aop: u32 = t2_coperand_text(a, fi, seg_next(a, q, e), e);
+        t2_crw(a, ii, CR_OPS, vop);
+        t2_crw(a, ii, CR_NOPS, 2);
+        t2_crw(a, ii, CR_AUX, aop);                       // 第二个操作数（地址）
+        t2_crw(a, ii, CR_SIZE, ty_size(a, hi32(ts), lo32(ts)));
+        if is_agg(a, hi32(ts), lo32(ts)) {
+            t2_crw(a, ii, CR_FLAGS, 1);
+        }
+        return 0;
+    }
+    if k == K_GEP {
+        t2_compile_gep(a, fi, ii, io, il);
+        return 0;
+    }
+    if k == K_EXTRV {
+        let ts: u64 = ty_span(a, after_op(a, io, e), e);
+        let p: u32 = seg_next(a, hi32(ts) + lo32(ts), e);
+        let q: u32 = seg_end(a, p, e);
+        let vs: u64 = trim_span(a, p, q);
+        let op: u32 = t2_coperand(a, fi, hi32(ts), lo32(ts), hi32(vs), lo32(vs));
+        let p2: u32 = seg_next(a, q, e);
+        let idx: u32 = dec_u64(a, p2, seg_end(a, p2, e)) as u32;
+        let f: u64 = fld_ty(a, hi32(ts), lo32(ts), idx);
+        t2_crw(a, ii, CR_OPS, op);
+        t2_crw(a, ii, CR_NOPS, 1);
+        t2_crw(a, ii, CR_AUX, fld_off(a, hi32(ts), lo32(ts), idx));
+        t2_crw(a, ii, CR_AUX2, ty_size(a, hi32(f), lo32(f)));
+        if is_agg(a, hi32(f), lo32(f)) {
+            t2_crw(a, ii, CR_FLAGS, 1);
+        }
+        return 0;
+    }
+    if k == K_INSV {
+        let ts: u64 = ty_span(a, after_op(a, io, e), e);
+        let sz: u32 = ty_size(a, hi32(ts), lo32(ts));
+        let p: u32 = seg_next(a, hi32(ts) + lo32(ts), e);
+        let q: u32 = seg_end(a, p, e);
+        let bs: u64 = trim_span(a, p, q);
+        let bop: u32 = t2_coperand(a, fi, hi32(ts), lo32(ts), hi32(bs), lo32(bs));
+        let p2: u32 = seg_next(a, q, e);
+        let q2: u32 = seg_end(a, p2, e);
+        let vop: u32 = t2_coperand_text(a, fi, p2, q2);
+        let p3: u32 = seg_next(a, q2, e);
+        let idx: u32 = dec_u64(a, p3, seg_end(a, p3, e)) as u32;
+        let f: u64 = fld_ty(a, hi32(ts), lo32(ts), idx);
+        t2_crw(a, ii, CR_OPS, bop);
+        t2_crw(a, ii, CR_NOPS, 2);
+        t2_crw(a, ii, CR_SIZE, sz);
+        t2_crw(a, ii, CR_AUX, fld_off(a, hi32(ts), lo32(ts), idx));
+        t2_crw(a, ii, CR_AUX2, ty_size(a, hi32(f), lo32(f)));
+        if is_agg(a, hi32(f), lo32(f)) {
+            t2_crw(a, ii, CR_FLAGS, 2);
+        }
+        return 0;
+    }
+    if k == K_ICMP {
+        let w: u64 = wspan(a, io, e);
+        let pd: u64 = wspan(a, hi32(w) + lo32(w), e);
+        let ts: u64 = ty_span(a, hi32(pd) + lo32(pd), e);
+        let p: u32 = seg_next(a, hi32(ts) + lo32(ts), e);
+        let q: u32 = seg_end(a, p, e);
+        let a1: u64 = trim_span(a, p, q);
+        let a2: u64 = trim_span(a, seg_next(a, q, e), e);
+        t2_crw(a, ii, CR_OPS, t2_coperand(a, fi, hi32(ts), lo32(ts), hi32(a1), lo32(a1)));
+        t2_coperand(a, fi, hi32(ts), lo32(ts), hi32(a2), lo32(a2));
+        t2_crw(a, ii, CR_NOPS, 2);
+        t2_crw(a, ii, CR_BITS, ty_size(a, hi32(ts), lo32(ts)) * 8);
+        return 0;
+    }
+    if k == K_SDIV || k == K_UDIV || k == K_SREM || k == K_UREM {
+        let w: u64 = wspan(a, io, e);
+        let ts: u64 = ty_span(a, hi32(w) + lo32(w), e);
+        let p: u32 = seg_next(a, hi32(ts) + lo32(ts), e);
+        let q: u32 = seg_end(a, p, e);
+        let a1: u64 = trim_span(a, p, q);
+        let a2: u64 = trim_span(a, seg_next(a, q, e), e);
+        t2_crw(a, ii, CR_OPS, t2_coperand(a, fi, hi32(ts), lo32(ts), hi32(a1), lo32(a1)));
+        t2_coperand(a, fi, hi32(ts), lo32(ts), hi32(a2), lo32(a2));
+        t2_crw(a, ii, CR_NOPS, 2);
+        t2_crw(a, ii, CR_BITS, ty_size(a, hi32(ts), lo32(ts)) * 8);
+        return 0;
+    }
+    if k >= K_ADD && k <= K_ASHR {
+        let w: u64 = wspan(a, io, e);
+        let ts: u64 = ty_span(a, hi32(w) + lo32(w), e);
+        let p: u32 = seg_next(a, hi32(ts) + lo32(ts), e);
+        let q: u32 = seg_end(a, p, e);
+        let a1: u64 = trim_span(a, p, q);
+        let a2: u64 = trim_span(a, seg_next(a, q, e), e);
+        t2_crw(a, ii, CR_OPS, t2_coperand(a, fi, hi32(ts), lo32(ts), hi32(a1), lo32(a1)));
+        t2_coperand(a, fi, hi32(ts), lo32(ts), hi32(a2), lo32(a2));
+        t2_crw(a, ii, CR_NOPS, 2);
+        t2_crw(a, ii, CR_BITS, ty_size(a, hi32(ts), lo32(ts)) * 8);
+        return 0;
+    }
+    if k >= K_TRUNC && k <= K_INTTOPTR {
+        let w: u64 = wspan(a, io, e);
+        let fts: u64 = ty_span(a, hi32(w) + lo32(w), e);
+        let p: u32 = skip_sp(a, hi32(fts) + lo32(fts), e);
+        let vs: u64 = trim_span(a, p, word_end(a, p, e));
+        t2_crw(a, ii, CR_OPS, t2_coperand(a, fi, hi32(fts), lo32(fts),
+                                          hi32(vs), lo32(vs)));
+        t2_crw(a, ii, CR_NOPS, 1);
+        t2_crw(a, ii, CR_BITS, ty_size(a, hi32(fts), lo32(fts)) * 8);
+        if k == K_TRUNC || k == K_SEXT {
+            let tw: u64 = wspan(a, index_of(a, hi32(vs) + lo32(vs), e, 116) + 2, e);
+            t2_crw(a, ii, CR_AUX, ty_size(a, hi32(tw), lo32(tw)) * 8);
+        }
+        return 0;
+    }
+    if k == K_CALL {
+        t2_compile_call(a, fi, ii, io, il);
+        return 0;
+    }
+    if k == K_ASMCALL {
+        t2_compile_asm(a, fi, ii, io, il);
+        return 0;
+    }
+    if k == K_PHI {
+        t2_compile_phi(a, fi, ii, io, il);
+        return 0;
+    }
+    if k == K_BR_COND || k == K_SWITCH || k == K_RET {
+        t2_compile_ctrl(a, ii, io, il);
+        return 0;
+    }
+    if k == K_BR_UNCOND || k == K_UNREACH {
+        return 0;
+    }
+    return 0;
+}
+
+fn t2_compile_gep(a: ptr, fi: u32, ii: u32, io: u32, il: u32) -> u32 {
+    let e: u32 = io + il;
+    let p: u32 = after_op(a, io, e);
+    if has_at(a, p, e, "inbounds") {
+        p = skip_sp(a, p + 8, e);
+    }
+    let ts: u64 = ty_span(a, p, e);
+    let cur_o: u32 = hi32(ts);
+    let cur_l: u32 = lo32(ts);
+    let op: u32 = seg_next(a, cur_o + cur_l, e);
+    let base: u32 = t2_coperand_text(a, fi, op, seg_end(a, op, e));
+    t2_crw(a, ii, CR_OPS, base);
+    let n: u32 = 1;
+    let xb: u32 = ctx_get(a, C_NCX);
+    let q: u32 = seg_next(a, seg_end(a, op, e), e);
+    let k: u32 = 0;
+    while q < e {
+        let qe: u32 = seg_end(a, q, e);
+        let iop: u32 = t2_coperand_text(a, fi, q, qe);
+        if k == 0 {
+            t2_x_add(a, 1);
+            t2_x_add(a, ty_size(a, cur_o, cur_l));
+        } else if load8(a, cur_o) == 91 {
+            let et: u64 = arr_elem(a, cur_o, cur_l);
+            cur_o = hi32(et);
+            cur_l = lo32(et);
+            t2_x_add(a, 1);
+            t2_x_add(a, ty_size(a, cur_o, cur_l));
+        } else if load8(a, cur_o) == 123 {
+            let idx: u64 = t2_imm(a, iop);
+            if t2_copr(a, iop, 0) != CO_IMM {
+                t2_cerr(a, ii, 4, io, il);
+                return 0;
+            }
+            t2_x_add(a, 0);
+            t2_x_add(a, fld_off(a, cur_o, cur_l, idx as u32));
+            let f: u64 = fld_ty(a, cur_o, cur_l, idx as u32);
+            cur_o = hi32(f);
+            cur_l = lo32(f);
+        } else {
+            t2_cerr(a, ii, 4, io, il);
+            return 0;
+        }
+        k = k + 1;
+        q = seg_next(a, qe, e);
+    }
+    t2_crw(a, ii, CR_NOPS, n + k);
+    t2_crw(a, ii, CR_XB, xb);
+    t2_crw(a, ii, CR_XN, k * 2);
+    return 0;
+}
+
+fn t2_cerr(a: ptr, ii: u32, code: u32, io: u32, il: u32) {
+    t2_crw(a, ii, CR_KIND, 34);                            // K_CERR
+    t2_crw(a, ii, CR_AUX, code);
+    t2_crw(a, ii, CR_AUX2, io);
+    t2_crw(a, ii, CR_SUB, il);
+    t2_crw(a, ii, CR_DEST, NONE);
+    t2_crw(a, ii, CR_NOPS, 0);
+}
+
+fn t2_compile_call(a: ptr, fi: u32, ii: u32, io: u32, il: u32) -> u32 {
+    let e: u32 = io + il;
+    let p: u32 = after_op(a, io, e);
+    let p2: u32 = 0;
+    if has_at(a, p, e, "void") {
+        p2 = skip_sp(a, p + 4, e);
+    } else {
+        let ts: u64 = ty_span(a, p, e);
+        p2 = skip_sp(a, hi32(ts) + lo32(ts), e);
+    }
+    let nt: u64 = wspan(a, p2, e);
+    let lp: u32 = skip_sp(a, hi32(nt) + lo32(nt), e);
+    if lp >= e || load8(a, lp) != 40 {
+        t2_cerr(a, ii, 3, io, il);
+        return 0;
+    }
+    let rp: u32 = match_close(a, lp, e, 40, 41);
+    let callee: u32 = fn_find(a, hi32(nt), lo32(nt));
+    if callee == NONE {
+        t2_cerr(a, ii, 2, io, il);
+        return 0;
+    }
+    let npar: u32 = rd(a, F_OFF, callee * 8 + 4);
+    let first_op: u32 = ctx_get(a, C_NCOP);
+    let ap: u32 = skip_sp(a, lp + 1, rp);
+    let n: u32 = 0;
+    while ap < rp {
+        let ae: u32 = seg_end(a, ap, rp);
+        t2_coperand_text(a, fi, ap, ae);
+        ap = seg_next(a, ae, rp);
+        n = n + 1;
+    }
+    if n != npar {
+        t2_cerr(a, ii, 1, io, il);
+        return 0;
+    }
+    t2_crw(a, ii, CR_OPS, first_op);
+    t2_crw(a, ii, CR_NOPS, n);
+    t2_crw(a, ii, CR_AUX, npar);
+    t2_crw(a, ii, CR_AUX2, callee);
+    return 0;
+}
+
+fn t2_compile_asm(a: ptr, fi: u32, ii: u32, io: u32, il: u32) -> u32 {
+    let e: u32 = io + il;
+    let lp: u32 = last_byte(a, io, e, 40);
+    let rp: u32 = last_byte(a, io, e, 41);
+    if lp == NONE || rp == NONE {
+        t2_cerr(a, ii, 7, io, il);
+        return 0;
+    }
+    let p: u32 = skip_sp(a, lp + 1, rp);
+    if p >= rp {
+        t2_cerr(a, ii, 8, io, il);
+        return 0;
+    }
+    let first_op: u32 = ctx_get(a, C_NCOP);
+    let q: u32 = seg_end(a, p, rp);
+    t2_coperand_text(a, fi, p, q);
+    let n: u32 = 1;
+    let c1: u32 = seg_next(a, q, rp);
+    if c1 < rp {
+        let d1: u32 = seg_end(a, c1, rp);
+        t2_coperand_text(a, fi, c1, d1);
+        n = n + 1;
+        let c2: u32 = seg_next(a, d1, rp);
+        if c2 < rp {
+            let d2: u32 = seg_end(a, c2, rp);
+            t2_coperand_text(a, fi, c2, d2);
+            n = n + 1;
+            let c3: u32 = seg_next(a, d2, rp);
+            if c3 < rp {
+                let d3: u32 = seg_end(a, c3, rp);
+                t2_coperand_text(a, fi, c3, d3);
+                n = n + 1;
+            }
+        }
+    }
+    t2_crw(a, ii, CR_OPS, first_op);
+    t2_crw(a, ii, CR_NOPS, n);
+    return 0;
+}
+
+fn t2_compile_phi(a: ptr, fi: u32, ii: u32, io: u32, il: u32) {
+    let e: u32 = io + il;
+    let ts: u64 = ty_span(a, after_op(a, io, e), e);
+    let p: u32 = skip_sp(a, hi32(ts) + lo32(ts), e);
+    let xb: u32 = ctx_get(a, C_NCX);
+    let n: u32 = 0;
+    while p < e {
+        let pe: u32 = match_close(a, p, e, 91, 93);
+        let co: u32 = last_byte(a, p + 1, pe, 44);
+        let lab: u64 = trim_span(a, co + 1, pe);
+        let vs: u64 = trim_span(a, p + 1, co);
+        let op: u32 = t2_coperand(a, fi, hi32(ts), lo32(ts), hi32(vs), lo32(vs));
+        let bi: u32 = blk_of(a, fi, hi32(lab) + 1, lo32(lab) - 1);
+        t2_x_add(a, bi);
+        t2_x_add(a, op);
+        n = n + 1;
+        p = seg_next(a, pe + 1, e);
+    }
+    t2_crw(a, ii, CR_XB, xb);
+    t2_crw(a, ii, CR_XN, n * 2);
+}
+
+fn t2_compile_ctrl(a: ptr, ii: u32, io: u32, il: u32) -> u32 {
+    let k: u32 = rd(a, I_OFF, ii * 8 + 4);
+    let e: u32 = io + il;
+    if k == K_BR_COND {
+        let ts: u64 = ty_span(a, after_op(a, io, e), e);
+        let p: u32 = seg_next(a, hi32(ts) + lo32(ts), e);
+        let vs: u64 = trim_span(a, p, seg_end(a, p, e));
+        // 条件操作数单独存一个池下标：`sub` 里已经有两个块号，放不下。
+        t2_crw(a, ii, CR_OPS, t2_coperand(a, ctx_get(a, C_CFI), hi32(ts), lo32(ts),
+                                          hi32(vs), lo32(vs)));
+        t2_crw(a, ii, CR_NOPS, 1);
+        return 0;
+    }
+    if k == K_RET {
+        let p: u32 = after_op(a, io, e);
+        if p >= e || has_at(a, p, e, "void") {
+            return 0;
+        }
+        let ts: u64 = ty_span(a, p, e);
+        let vo: u32 = skip_sp(a, hi32(ts) + lo32(ts), e);
+        let vs: u64 = trim_span(a, vo, e);
+        t2_crw(a, ii, CR_OPS, t2_coperand(a, ctx_get(a, C_CFI), hi32(ts), lo32(ts),
+                                          hi32(vs), lo32(vs)));
+        t2_crw(a, ii, CR_NOPS, 1);
+        t2_crw(a, ii, CR_SIZE, ty_size(a, hi32(ts), lo32(ts)));
+        if is_agg(a, hi32(ts), lo32(ts)) {
+            t2_crw(a, ii, CR_FLAGS, 1);
+        }
+        return 0;
+    }
+    // switch
+    let ts: u64 = ty_span(a, after_op(a, io, e), e);
+    let p: u32 = seg_next(a, hi32(ts) + lo32(ts), e);
+    let q: u32 = seg_end(a, p, e);
+    let vs: u64 = trim_span(a, p, q);
+    t2_crw(a, ii, CR_AUX, t2_coperand(a, ctx_get(a, C_CFI), hi32(ts), lo32(ts),
+                                      hi32(vs), lo32(vs)));
+    let bo: u32 = index_of(a, q, e, 91);
+    let be: u32 = match_close(a, bo, e, 91, 93);
+    let dw: u64 = wspan(a, lab_after(a, q + 1, bo), bo);
+    let dflt: u32 = blk_of(a, ctx_get(a, C_CFI), hi32(dw), lo32(dw));
+    let xb: u32 = ctx_get(a, C_NCX);
+    let cp: u32 = skip_sp(a, bo + 1, be);
+    let n: u32 = 0;
+    while cp < be {
+        let cty: u64 = ty_span(a, cp, be);
+        let cvs: u64 = trim_span(a, hi32(cty) + lo32(cty),
+                                 seg_end(a, hi32(cty) + lo32(cty), be));
+        let ce: u32 = seg_end(a, cp, be);
+        let lp: u32 = lab_after(a, ce + 1, be);
+        let lw: u64 = wspan(a, lp, be);
+        let cv: u64 = dec_u64(a, hi32(cvs), hi32(cvs) + lo32(cvs));
+        t2_x_add(a, lo32(cv));
+        t2_x_add(a, hi32(cv));
+        t2_x_add(a, blk_of(a, ctx_get(a, C_CFI), hi32(lw), lo32(lw)));
+        t2_x_add(a, ty_size(a, hi32(cty), lo32(cty)) * 8);
+        n = n + 1;
+        cp = seg_next(a, lp + lo32(lw), be);
+    }
+    t2_crw(a, ii, CR_XB, xb);
+    t2_crw(a, ii, CR_XN, n * 4);
+    t2_crw(a, ii, CR_AUX2, dflt);
+    return 0;
+}
+
+/// 整份程序建表。**必须在 `place_globals` 之后**（`@global` 的地址那时才有）。
+fn t2_compile_all(a: ptr) {
+    ctx_set(a, C_COMPILE, 1);
+    ctx_set(a, C_NSLOT, 0);
+    ctx_set(a, C_NCOP, 0);
+    ctx_set(a, C_NCX, 0);
+    let nf: u32 = ctx_get(a, C_NF);
+    let fi: u32 = 0;
+    while fi < nf {
+        t2_fsw(a, fi, 0, ctx_get(a, C_NSLOT));
+        t2_fsw(a, fi, 1, 0);
+        ctx_set(a, C_CFI, fi);
+        let np: u32 = rd(a, F_OFF, fi * 8 + 4);
+        let fp: u32 = rd(a, F_OFF, fi * 8 + 5);
+        let k: u32 = 0;
+        while k < np {
+            let pnm: u64 = pspan(a, fp + k, 2);
+            t2_slot_add(a, fi, hi32(pnm), lo32(pnm));
+            k = k + 1;
+        }
+        let fb: u32 = rd(a, F_OFF, fi * 8 + 6);
+        let nb: u32 = rd(a, F_OFF, fi * 8 + 7);
+        let bi: u32 = 0;
+        while bi < nb {
+            let ii0: u32 = rd(a, B_OFF, (fb + bi) * 5 + 2);
+            let ni: u32 = rd(a, B_OFF, (fb + bi) * 5 + 3);
+            let j: u32 = 0;
+            while j < ni {
+                ctx_set(a, C_CII, ii0 + j);
+                t2_compile_instr(a, fi, ii0 + j);
+                j = j + 1;
+            }
+            bi = bi + 1;
+        }
+        fi = fi + 1;
+    }
+    ctx_set(a, C_COMPILE, 0);
+}
+
+// ---------------------------------------------------------------- T2：执行
+//
+// 读编译表，**不再读任何操作数/类型文本**。语义与 `exec_body` 逐条对齐；错的时机
+// 与错的句子也一样（不可达代码里的坏指令只在执行到时报）。
+
+fn t2_initd(m: ptr, fr: u32, slot: u32) -> bool {
+    let b: u32 = load8(m, fr + FR_INIT + slot / 8);
+    return (b & ((1 as u32) << (slot % 8))) != 0;
+}
+
+fn t2_mark(m: ptr, fr: u32, slot: u32) {
+    let p: u32 = fr + FR_INIT + slot / 8;
+    let b: u32 = load8(m, p);
+    store8(m, p, (b | ((1 as u32) << (slot % 8))) as u8);
+}
+
+fn t2_frame_init(a: ptr, m: ptr, fr: u32, fi: u32) {
+    let s0: u32 = t2_fs(a, fi, 0);
+    let n: u32 = t2_fs(a, fi, 1);
+    wr(m, fr, 0, n);
+    wr(m, fr, 1, FR_SLOTS);
+    mz(m, fr + FR_INIT, 128);
+    let i: u32 = 0;
+    while i < n {
+        let idx: u32 = s0 + i;
+        store32(m, fr + FR_VALS + i * VAL_REC, t2_slotr(a, idx, 0));
+        store32(m, fr + FR_VALS + i * VAL_REC + 4, t2_slotr(a, idx, 1));
+        store32(m, fr + FR_VALS + i * VAL_REC + 8, 0);
+        store32(m, fr + FR_VALS + i * VAL_REC + 12, 0);
+        i = i + 1;
+    }
+}
+
+fn t2_setd(a: ptr, m: ptr, fr: u32, slot: u32, v: u64) {
+    if slot != NONE {
+        vset(a, m, fr, slot, v);
+        t2_mark(m, fr, slot);
+    }
+}
+
+fn t2_imm(a: ptr, i: u32) -> u64 {
+    return (t2_copr(a, i, 1) as u64) | ((t2_copr(a, i, 2) as u64) << 32);
+}
+
+fn t2_getop(a: ptr, m: ptr, fr: u32, i: u32) -> u64 {
+    let kind: u32 = t2_copr(a, i, 0);
+    if kind == CO_SLOT {
+        let s: u32 = t2_copr(a, i, 1);
+        if t2_initd(m, fr, s) == false {
+            return fail_tok(a, "读未定义的值", t2_copr(a, i, 2), t2_copr(a, i, 3)) as u64;
+        }
+        return vget(m, fr, s);
+    }
+    if kind == CO_IMM {
+        return (t2_copr(a, i, 1) as u64) | ((t2_copr(a, i, 2) as u64) << 32);
+    }
+    if kind == CO_ZAGG {
+        return ZERO_ADDR as u64;
+    }
+    return t2_copr(a, i, 1) as u64;                        // CO_GADDR
+}
+
+/// 一个聚合值在**当前帧**里的暂存格（按槽缓存）。与 `fr_agg` 同一套理由：
+/// 同名多次执行复用同一格，不是每轮吃一格。
+fn t2_fr_agg(a: ptr, m: ptr, fr: u32, slot: u32, size: u32) -> u32 {
+    if slot != NONE && t2_initd(m, fr, slot) {
+        let v: u64 = vget(m, fr, slot);
+        if hi32(v) >= size {
+            return lo32(v);
+        }
+    }
+    let d: u32 = fr_alloc(a, m, fr, size, 8);
+    t2_setd(a, m, fr, slot, (d as u64) | (((size as u64)) << 32));
+    return d;
+}
+
+fn t2_arith(k: u32, a1: u64, a2: u64, bits: u32) -> u64 {
+    if k == K_SHL || k == K_LSHR || k == K_ASHR {
+        if (a2 & ((1 as u64) << ((bits - 1) as u64))) != 0 {
+            return fail("移位量是负数") as u64;
+        }
+    }
+    if k == K_ASHR {
+        return mask_bits(ashr64(a1, a2, bits), bits);
+    }
+    if (k == K_SHL || k == K_LSHR) && a2 >= 64 {
+        return 0;
+    }
+    let v: u64 = 0;
+    if k == K_ADD {
+        v = a1 + a2;
+    } else if k == K_SUB {
+        v = a1 - a2;
+    } else if k == K_MUL {
+        v = a1 * a2;
+    } else if k == K_AND {
+        v = a1 & a2;
+    } else if k == K_OR {
+        v = a1 | a2;
+    } else if k == K_XOR {
+        v = a1 ^ a2;
+    } else if k == K_SHL {
+        v = a1 << a2;
+    } else {
+        v = a1 >> a2;
+    }
+    return mask_bits(v, bits);
+}
+
+fn t2_div(a: ptr, k: u32, a1: u64, a2: u64, bits: u32) -> u64 {
+    let sgn: u32 = 0;
+    if k == K_SDIV || k == K_SREM {
+        sgn = 1;
+    }
+    let na: u64 = a1;
+    let nb: u64 = a2;
+    let nga: u32 = 0;
+    let ngb: u32 = 0;
+    if sgn == 1 {
+        if (a1 as i64) < 0 {
+            na = (0 as u64) - a1;
+            nga = 1;
+        }
+        if (a2 as i64) < 0 {
+            nb = (0 as u64) - a2;
+            ngb = 1;
+        }
+    }
+    if nb == 0 {
+        fail("除以零");
+    }
+    let qv: u64 = na / nb;
+    if sgn == 1 && nga != ngb {
+        return mask_bits_for(k, a1, a2, (0 as u64) - qv, bits);
+    }
+    return mask_bits_for(k, a1, a2, qv, bits);
+}
+
+fn t2_icmp(sub: u32, a1: u64, a2: u64, bits: u32) -> u64 {
+    let sm: u64 = (1 as u64) << ((bits - 1) as u64);
+    let x: u64 = a1 ^ sm;
+    let y: u64 = a2 ^ sm;
+    let r: u32 = 0;
+    if sub == P_EQ {
+        if a1 == a2 {
+            r = 1;
+        }
+    } else if sub == P_NE {
+        if a1 != a2 {
+            r = 1;
+        }
+    } else if sub == P_UGT {
+        if a1 > a2 {
+            r = 1;
+        }
+    } else if sub == P_UGE {
+        if a1 >= a2 {
+            r = 1;
+        }
+    } else if sub == P_ULT {
+        if a1 < a2 {
+            r = 1;
+        }
+    } else if sub == P_ULE {
+        if a1 <= a2 {
+            r = 1;
+        }
+    } else if sub == P_SGT {
+        if x > y {
+            r = 1;
+        }
+    } else if sub == P_SGE {
+        if x >= y {
+            r = 1;
+        }
+    } else if sub == P_SLT {
+        if x < y {
+            r = 1;
+        }
+    } else if sub == P_SLE {
+        if x <= y {
+            r = 1;
+        }
+    }
+    return r as u64;
+}
+
+fn t2_cast(k: u32, a1: u64, fbits: u32, tbits: u32) -> u64 {
+    if k == K_PTRTOINT || k == K_INTTOPTR {
+        return a1;
+    }
+    if k == K_TRUNC {
+        return mask_bits(a1, tbits);
+    }
+    if k == K_ZEXT {
+        return mask_bits(a1, fbits);
+    }
+    let sv: u64 = a1;
+    if fbits < 64 {
+        let hi: u64 = sv & (((1 as u64) << ((fbits - 1) as u64)));
+        if hi != 0 {
+            sv = sv | (((0 as u64) - 1) - ((((1 as u64) << (fbits as u64))) - 1));
+        }
+    }
+    return mask_bits(sv, tbits);
+}
+
+fn t2_cerr_msg(a: ptr, code: u32, io: u32, il: u32) -> u64 {
+    if code == 1 {
+        fail("实参个数与形参不符");
+    }
+    if code == 2 {
+        fail("没有这个函数（extern 不接 FFI —— docs/243 §5）");
+    }
+    if code == 3 {
+        fail("只认直接调用（间接调用 T0 不支持）");
+    }
+    if code == 4 {
+        return fail_tok(a, "GEP 的这一步 T0 没实现:", io, il) as u64;
+    }
+    if code == 7 {
+        fail("内联汇编解析不了");
+    }
+    if code == 8 {
+        fail("系统调用没有号");
+    }
+    return fail_tok(a, "这个指令 T0 没实现:", io, il) as u64;
+}
+
+fn t2_insv(a: ptr, m: ptr, fr: u32, ii: u32, dest: u32, ops: u32) -> u64 {
+    let base: u64 = t2_getop(a, m, fr, ops);
+    let val: u64 = t2_getop(a, m, fr, ops + 1);
+    let sz: u32 = t2_cr(a, ii, CR_SIZE);
+    let fo: u32 = t2_cr(a, ii, CR_AUX);
+    let fsz: u32 = t2_cr(a, ii, CR_AUX2);
+    let d: u32 = t2_fr_agg(a, m, fr, dest, sz);
+    mc(m, d, base as u32, sz);
+    if (t2_cr(a, ii, CR_FLAGS) & 2) != 0 {
+        mc(m, d + fo, val as u32, fsz);
+    } else {
+        mw(m, d + fo, fsz, val);
+    }
+    return (d as u64) | (((sz as u64)) << 32);
+}
+
+fn t2_eval(a: ptr, m: ptr, fr: u32, cfr: u32, ii: u32) -> u64 {
+    let k: u32 = t2_cr(a, ii, CR_KIND);
+    let ops: u32 = t2_cr(a, ii, CR_OPS);
+    let dest: u32 = t2_cr(a, ii, CR_DEST);
+    if k == K_CERR {
+        return t2_cerr_msg(a, t2_cr(a, ii, CR_AUX), t2_cr(a, ii, CR_AUX2),
+                           t2_cr(a, ii, CR_SUB));
+    }
+    if k == K_ALLOCA {
+        let sz: u32 = t2_cr(a, ii, CR_SIZE);
+        if sz < 8 {
+            return fr_alloc(a, m, fr, 8, 8) as u64;
+        }
+        return fr_alloc(a, m, fr, sz, 8) as u64;
+    }
+    if k == K_LOAD {
+        let sz: u32 = t2_cr(a, ii, CR_SIZE);
+        let addr: u64 = t2_getop(a, m, fr, ops);
+        if (t2_cr(a, ii, CR_FLAGS) & 1) != 0 {
+            let d: u32 = t2_fr_agg(a, m, fr, dest, sz);
+            mc(m, d, addr as u32, sz);
+            return (d as u64) | (((sz as u64)) << 32);
+        }
+        return mr(m, addr as u32, sz);
+    }
+    if k == K_STORE {
+        let v: u64 = t2_getop(a, m, fr, ops);
+        let addr: u64 = t2_getop(a, m, fr, t2_cr(a, ii, CR_AUX));
+        let sz: u32 = t2_cr(a, ii, CR_SIZE);
+        if (t2_cr(a, ii, CR_FLAGS) & 1) != 0 {
+            mc(m, addr as u32, v as u32, sz);
+        } else {
+            mw(m, addr as u32, sz, v);
+        }
+        return 0;
+    }
+    if k == K_GEP {
+        let base: u64 = t2_getop(a, m, fr, ops);
+        let xb: u32 = t2_cr(a, ii, CR_XB);
+        let xn: u32 = t2_cr(a, ii, CR_XN);
+        let acc: u32 = 0;
+        let s: u32 = 0;
+        while s < xn {
+            let kind: u32 = t2_xr(a, xb + s);
+            let val: u32 = t2_xr(a, xb + s + 1);
+            if kind == 1 {
+                let idx: u64 = t2_getop(a, m, fr, ops + 1 + s / 2);
+                acc = acc + (idx as u32) * val;
+            } else {
+                acc = acc + val;
+            }
+            s = s + 2;
+        }
+        return base + (acc as u64);
+    }
+    if k == K_EXTRV {
+        let agg: u64 = t2_getop(a, m, fr, ops);
+        let fo: u32 = t2_cr(a, ii, CR_AUX);
+        let fsz: u32 = t2_cr(a, ii, CR_AUX2);
+        if (t2_cr(a, ii, CR_FLAGS) & 1) != 0 {
+            let d: u32 = t2_fr_agg(a, m, fr, dest, fsz);
+            mc(m, d, (agg as u32) + fo, fsz);
+            return (d as u64) | (((fsz as u64)) << 32);
+        }
+        return mr(m, (agg as u32) + fo, fsz);
+    }
+    if k == K_INSV {
+        return t2_insv(a, m, fr, ii, dest, ops);
+    }
+    if k == K_ICMP {
+        let a1: u64 = t2_getop(a, m, fr, ops);
+        let a2: u64 = t2_getop(a, m, fr, ops + 1);
+        return t2_icmp(t2_cr(a, ii, CR_SUB), a1, a2, t2_cr(a, ii, CR_BITS));
+    }
+    if k == K_SDIV || k == K_UDIV || k == K_SREM || k == K_UREM {
+        let a1: u64 = t2_getop(a, m, fr, ops);
+        let a2: u64 = t2_getop(a, m, fr, ops + 1);
+        return t2_div(a, k, a1, a2, t2_cr(a, ii, CR_BITS));
+    }
+    if k >= K_ADD && k <= K_ASHR {
+        let a1: u64 = t2_getop(a, m, fr, ops);
+        let a2: u64 = t2_getop(a, m, fr, ops + 1);
+        return t2_arith(k, a1, a2, t2_cr(a, ii, CR_BITS));
+    }
+    if k >= K_TRUNC && k <= K_INTTOPTR {
+        let a1: u64 = t2_getop(a, m, fr, ops);
+        return t2_cast(k, a1, t2_cr(a, ii, CR_BITS), t2_cr(a, ii, CR_AUX));
+    }
+    if k == K_CALL {
+        return t2_call(a, m, fr, ii);
+    }
+    if k == K_ASMCALL {
+        let n: u32 = t2_cr(a, ii, CR_NOPS);
+        let nr: u64 = t2_getop(a, m, fr, ops);
+        let x1: u64 = 0;
+        let x2: u64 = 0;
+        let x3: u64 = 0;
+        if n > 1 {
+            x1 = t2_getop(a, m, fr, ops + 1);
+        }
+        if n > 2 {
+            x2 = t2_getop(a, m, fr, ops + 2);
+        }
+        if n > 3 {
+            x3 = t2_getop(a, m, fr, ops + 3);
+        }
+        return vm_syscall(a, m, nr, x1, x2, x3);
+    }
+    if k == K_UNREACH {
+        fail("执行到 unreachable");
+    }
+    return fail_tok(a, "这个指令 T0 没实现:", rd(a, I_OFF, ii * 8 + 2),
+                    rd(a, I_OFF, ii * 8 + 3)) as u64;
+}
+
+fn t2_call(a: ptr, m: ptr, fr: u32, ii: u32) -> u64 {
+    let callee: u32 = t2_cr(a, ii, CR_AUX2);
+    let npar: u32 = t2_cr(a, ii, CR_AUX);
+    let ops: u32 = t2_cr(a, ii, CR_OPS);
+    let d: u32 = ctx_get(a, C_DEPTH) + 1;
+    if d > MAX_DEPTH {
+        fail("调用太深");
+    }
+    ctx_set(a, C_DEPTH, d);
+    let nfr: u32 = MEM_SIZE - d * FRAME_SIZE;
+    t2_frame_init(a, m, nfr, callee);
+    let k: u32 = 0;
+    while k < npar {
+        let v: u64 = t2_getop(a, m, fr, ops + k);
+        if k < t2_fs(a, callee, 1) {
+            vset(a, m, nfr, k, v);
+            t2_mark(m, nfr, k);
+        }
+        k = k + 1;
+    }
+    let r: u64 = t2_exec(a, m, callee, nfr, fr, t2_cr(a, ii, CR_DEST),
+                         ctx_get(a, C_CII));
+    ctx_set(a, C_DEPTH, d - 1);
+    return r;
+}
+
+fn t2_ret(a: ptr, m: ptr, fr: u32, cfr: u32, ii: u32, ro: u32, rl: u32) -> u64 {
+    let n: u32 = t2_cr(a, ii, CR_NOPS);
+    if n == 0 {
+        return 0;
+    }
+    let v: u64 = t2_getop(a, m, fr, t2_cr(a, ii, CR_OPS));
+    if (t2_cr(a, ii, CR_FLAGS) & 1) != 0 {
+        if cfr == NONE {
+            fail("没有调用者的聚合返回值");
+        }
+        let sz: u32 = t2_cr(a, ii, CR_SIZE);
+        let d: u32 = t2_fr_agg(a, m, cfr, ro, sz);
+        mc(m, d, v as u32, sz);
+        return (d as u64) | (((sz as u64)) << 32);
+    }
+    return v;
+}
+
+fn t2_exec(a: ptr, m: ptr, fi: u32, fr: u32, cfr: u32, ro: u32, rl: u32) -> u64 {
+    let bi: u32 = rd(a, F_OFF, fi * 8 + 6);
+    let prev: u32 = NONE;
+    let go: u32 = 1;
+    while go == 1 {
+        let here: u32 = bi;
+        bump_block(a, bi);
+        let io: u32 = rd(a, B_OFF, bi * 5 + 2);
+        let ni: u32 = rd(a, B_OFF, bi * 5 + 3);
+        let j: u32 = 0;
+        let jumped: u32 = 0;
+        while j < ni && jumped == 0 {
+            let ii: u32 = io + j;
+            ctx_set(a, C_CII, ii);
+            let ns: u32 = ctx_get(a, C_STEPS) + 1;
+            if ns > STEP_CAP {
+                wstr(2, "lvm: 执行超过 "); write_num(a, 2, STEP_CAP);
+                wstr(2, " 条指令，卡在 ");
+                let fno: u32 = rd(a, F_OFF, fi * 8);
+                write_all(2, ptr_add(a, fno), rd(a, F_OFF, fi * 8 + 1) as u64);
+                wstr(2, " 的 [");
+                let to: u32 = rd(a, I_OFF, ii * 8 + 2);
+                write_all(2, ptr_add(a, to), rd(a, I_OFF, ii * 8 + 3) as u64);
+                wstr(2, "]\n");
+                return die(2) as u64;
+            }
+            ctx_set(a, C_STEPS, ns);
+            let k: u32 = t2_cr(a, ii, CR_KIND);
+            if k == K_BR_UNCOND {
+                bump_edge(a, ii, 0);
+                prev = here;
+                bi = t2_cr(a, ii, CR_SUB);
+                jumped = 1;
+            } else if k == K_BR_COND {
+                let c: u64 = t2_getop(a, m, fr, t2_cr(a, ii, CR_OPS));
+                let sub: u32 = t2_cr(a, ii, CR_SUB);
+                prev = here;
+                if c != 0 {
+                    bump_edge(a, ii, 0);
+                    bi = sub >> 16;
+                } else {
+                    bump_edge(a, ii, 1);
+                    bi = sub & 65535;
+                }
+                jumped = 1;
+            } else if k == K_SWITCH {
+                let v: u64 = t2_getop(a, m, fr, t2_cr(a, ii, CR_AUX));
+                let xb: u32 = t2_cr(a, ii, CR_XB);
+                let xn: u32 = t2_cr(a, ii, CR_XN);
+                let tgt: u32 = t2_cr(a, ii, CR_AUX2);
+                let e: u32 = xn / 4;
+                let s: u32 = 0;
+                while s < xn {
+                    let cv: u64 = (t2_xr(a, xb + s) as u64) |
+                                  ((t2_xr(a, xb + s + 1) as u64) << 32);
+                    let bits: u32 = t2_xr(a, xb + s + 3);
+                    if mask_bits(v, bits) == cv {
+                        tgt = t2_xr(a, xb + s + 2);
+                        e = s / 4;
+                        s = xn;
+                    } else {
+                        s = s + 4;
+                    }
+                }
+                bump_edge(a, ii, e);
+                prev = here;
+                bi = tgt;
+                jumped = 1;
+            } else if k == K_RET {
+                return t2_ret(a, m, fr, cfr, ii, ro, rl);
+            } else if k == K_PHI {
+                let xb: u32 = t2_cr(a, ii, CR_XB);
+                let xn: u32 = t2_cr(a, ii, CR_XN);
+                let s: u32 = 0;
+                let hit: u32 = 0;
+                let found: u32 = 0;
+                while s < xn {
+                    if t2_xr(a, xb + s) == prev {
+                        hit = t2_xr(a, xb + s + 1);
+                        found = 1;
+                        s = xn;
+                    } else {
+                        s = s + 2;
+                    }
+                }
+                if found == 0 {
+                    fail("phi 没有来自前驱块的入边");
+                }
+                t2_setd(a, m, fr, t2_cr(a, ii, CR_DEST), t2_getop(a, m, fr, hit));
+            } else {
+                let v: u64 = t2_eval(a, m, fr, cfr, ii);
+                t2_setd(a, m, fr, t2_cr(a, ii, CR_DEST), v);
+            }
+            j = j + 1;
+        }
+        if jumped == 0 {
+            fail("块没有终结指令");
+        }
+    }
+    return 0;
+}
+
 fn run(a: ptr) -> u32 {
     let m: ptr = ptr_add(a, MEM_OFF);
     let ab: ptr = ptr_add(a, ARGV_OFF);
@@ -2650,15 +3837,37 @@ fn run(a: ptr) -> u32 {
     ctx_set(a, C_DEPTH, 0);
     parse_all(a, n as u32);
     place_globals(a, m);
+    // T2（`docs/259` §7，#586）：第三个实参写 `t2` 就先把操作数/类型折成表再跑。
+    let f4: u64 = argv_n(ab, 8192, 4);                   // 可选：把解码计数写到这个文件
+    let f3: u64 = argv_n(ab, 8192, 3);
+    if lo32(f4) > 0 {
+        let sfd: i64 = syscall4(2, ptr_add(ab, hi32(f4)) as u64, 577, 420);
+        if sfd >= 0 {
+            ctx_set(a, C_STATS_FD, sfd as u32);
+        }
+    }
+    if lo32(f3) > 0 && eqw(ab, hi32(f3), lo32(f3), "t2") {
+        ctx_set(a, C_TIER, 1);
+        t2_compile_all(a);
+    }
     let fi: u32 = fn_find_lit(a, "@_start");
     if fi == NONE {
         return fail("这份 IR 里没有 `_start`");
     }
     ctx_set(a, C_DEPTH, 1);
+    ctx_set(a, C_MISS, 0);
+    ctx_set(a, C_EXEC, 1);
     let fr: u32 = MEM_SIZE - FRAME_SIZE;
-    wr(m, fr, 0, 0);
-    wr(m, fr, 1, FR_SLOTS);
-    exec_body(a, m, fi, fr, NONE, 0, 0);
+    if ctx_get(a, C_TIER) == 1 {
+        t2_frame_init(a, m, fr, fi);
+        t2_exec(a, m, fi, fr, NONE, NONE, 0);
+    } else {
+        wr(m, fr, 0, 0);
+        wr(m, fr, 1, FR_SLOTS);
+        exec_body(a, m, fi, fr, NONE, 0, 0);
+    }
+    ctx_set(a, C_EXEC, 0);
+    dump_stats(a);
     let pfd2: u32 = ctx_get(a, C_PROF_FD);
     if pfd2 != 0 {
         dump_profile(a, pfd2 as u64);
@@ -2668,7 +3877,7 @@ fn run(a: ptr) -> u32 {
 }
 
 fn _start() -> u32 {
-    let a: ptr = sys_alloc(ARENA) as ptr;
+    let a: ptr = sys_alloc(ARENA_T2) as ptr;
     if a as u64 == 0 {
         return fail("oom (brk 失败)");
     }

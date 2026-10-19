@@ -1830,6 +1830,62 @@ def strip_grammar_decl(src: str) -> str:
     return _GRAMMAR_LINE.sub(_blank_keep_off, src)
 
 
+def _strip_rust_mut(src: str) -> str:
+    """`grammar rust` 的**表层改写**：把 Rust 的 `mut` 声明标记映射掉（`#77`）。
+
+    Rust 与本语言在"本地变量怎么声明"上没有交集：
+
+        Rust                     本语言
+        let mut v: T = e;        let v: T = e;      （本地变量本来就可变）
+        fn f(mut a: T)           fn f(a: T)
+
+    于是 `grammar rust`（**原生读法**，见 `NATIVE_GRAMMARS`）里**每一个有状态循环都
+    写不出来**：写 `let mut` 解析不过（`期望 :，得到 'v'`），去掉 `mut` 又被 rustc 拒
+    （`cannot assign twice to immutable variable`）。这一门与另外五门的区别只是"它不
+    经过翻译器"，而这件事本来就是**拼法**、不是语义 —— 所以在**前门**做一次等长改写。
+
+    **只抹两种位置**，别的 `mut` 一个字节都不动：
+
+    * `let mut NAME` —— 变量绑定的可变标记；
+    * `( mut NAME :` / `, mut NAME :` —— 形参的可变标记。
+
+    `mut` 在本语言里**还有别的意思**：`mut [T]`（可变切片类型）与 `&mut`（可变借用）。
+    一刀切会把那两处也抹掉，直接改坏程序。判据用**词法器的 token**而不是正则 ——
+    字符串/注释里的 `mut` 不算 token，正则会在那里误伤。
+
+    改写是**等长**的（换成空格、保留换行）：行号、列号、偏移都不动，于是后续诊断仍
+    指回用户写的那一行。词法失败（源本身就读不通）时原样返回 —— 让编译器报它自己的
+    语法错，而不是在这里吞掉。
+    """
+    import lomc  # noqa: PLC0415  (只有 rust 这一支要用它)
+    try:
+        toks = lomc.lex(src)
+    except Exception:                                                # noqa: BLE001
+        return src
+    kill: list = []
+    for i, t in enumerate(toks):
+        if t.kind != "ident" or t.val != "mut":
+            continue
+        prev = toks[i - 1] if i > 0 else None
+        nxt = toks[i + 1] if i + 1 < len(toks) else None
+        if prev is not None and prev.kind == "ident" and prev.val == "let":
+            kill.append(t)                       # `let mut NAME`
+            continue
+        if (prev is not None and prev.kind == "punct" and prev.val in ("(", ",")
+                and nxt is not None and nxt.kind == "ident"):
+            after = toks[i + 2] if i + 2 < len(toks) else None
+            if after is not None and after.kind == "punct" and after.val == ":":
+                kill.append(t)                   # `fn f(mut NAME: T)`
+    if not kill:
+        return src
+    chars = list(src)
+    for t in kill:
+        for k in range(t.off, min(t.off + t.len, len(chars))):
+            if chars[k] not in "\r\n":
+                chars[k] = " "
+    return "".join(chars)
+
+
 def find_decl(src: str) -> tuple[bool, str | None, int]:
     """**只"找"**那一行 —— 与报错器的 `decl_at` **同一个职责**（`docs/188` §1）。
 
@@ -2114,7 +2170,18 @@ def front_door(path: Path, lang: str = "auto", mode: str = "strict") -> FrontUni
         if not declared or g in NATIVE_GRAMMARS:
             # `rust` 与 `loment` 都落这一支：**它就是基础语法**（见 `NATIVE_GRAMMARS`
             # 的注解）—— 不经过任何翻译器，抹掉声明那一行原样交出去。
-            return FrontUnit("loment", strip_grammar_decl(src), False, path)
+            #
+            # **`rust` 还要把 `mut` 映射掉**（`#77`）：这一门是**原生读法**，语法就是
+            # 本语言的语法 —— 而两种语言恰好在"本地变量怎么声明"上写不到一起去
+            # （Rust `let mut v: T` / `fn f(mut a: T)`，本语言 `let v: T` / `fn f(a: T)`，
+            # 本地变量本来就可变）。不映射的话**每一个有状态循环都写不出来**：
+            # `let mut v` 在 `mut` 上解析不过，去掉 `mut` 又被 rustc 拒（不可重赋值）。
+            # 这是一次**表层拼法**的改写，与另外五门翻译器做的事同类；行号与偏移
+            # 一字不动（见 `_strip_rust_mut`）。
+            body = strip_grammar_decl(src)
+            if g == "rust":
+                body = _strip_rust_mut(body)
+            return FrontUnit("loment", body, False, path)
         lang, why = g, "文件头声明 `choose write grammar`"
     else:
         lang, why = resolve_lang(path, lang)

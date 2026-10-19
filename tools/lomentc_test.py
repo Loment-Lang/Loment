@@ -1008,12 +1008,23 @@ def test_unit_wide_unique_names():
     单元里两个模块各声明一个私有 `helper` 时, 后端会发出两条 `define @helper` (非法 IR),
     调用点还会解析到同一个函数 (静默错编) —— 必须编译期拒。同一模块**内部**的重名照旧
     由原规则报 (别被这条取代)。
+
+    **消息也要说实话**（`#141`）：它必须点名**两个**模块，而不是说"函数 f 与模块 ma
+    重名"（`f` 与 `ma` 并不撞车）。原先只断言"有 `重名`"，于是消息说错话也全绿。
     """
     entry = ROOT / "loment" / "selfhost" / "neg_across" / "entry.lomt"
     mod = lomentc.load(entry)
     deps = lomentc.resolve_deps(mod, ROOT, entry.parent, entry=entry)
     unit_errs = lomentc.check(mod, deps=deps)
     assert any("重名" in e for e in unit_errs), unit_errs
+    dup = [e for e in unit_errs if "`helper`" in e and "重名" in e]
+    assert dup, f"没有点名 `helper` 的撞车消息: {unit_errs}"
+    # 两边都点名：撞车的两个单元是 `entry` 与 `has_helper`（不是 `helper` 与某个模块）
+    for side in ("entry", "has_helper"):
+        assert f"模块 `{side}`" in dup[0], f"消息没点名模块 `{side}`: {dup[0]}"
+    assert "与模块" not in dup[0], (
+        f"还在说「与模块 X 重名」—— 那让用户去调解符号与模块名之间不存在的冲突: {dup[0]}")
+    assert "都会发射" in dup[0], f"没说清真正撞的是什么: {dup[0]}"
     e2 = errs('module m\nfn f() -> u32 { return 1; }\nfn f() -> u32 { return 2; }\n')
     assert any("重复定义" in x for x in e2), e2
 
@@ -1325,10 +1336,79 @@ def test_p4_domain_table_and_audit():
     rs = lomentc.emit_rust(mod, ROOT)
     assert "pub static CAP_DOMAINS: &[CapDomain]" in rs
     assert 'space: "disk", lo: 0, hi: 4, revocable: true' in rs
-    assert "__LOMENT_AUDIT" in rs and "fn __loment_guard(" in rs
+    assert "__LOMENT_AUDIT" in rs
+    # 审计与 trap **各是一个函数**（`#162`）：审计只在放行那一支调用。
+    assert "fn __loment_audit(" in rs and "fn __loment_trap(" in rs
+    assert "__LOMENT_AUDIT[cap] += 1" in rs
     ir = lomentc.emit_llvm(mod, ROOT)
     assert "@__loment_caps = internal constant [1 x { i64, i64, i64, i64 }]" in ir
     assert "@__loment_audit = internal global [16 x i64]" in ir
+
+
+@test
+def test_p4_violating_guard_has_no_audit_side_effect():
+    """`#162`：越界那次**不许**先加审计再 trap（SECURITY.md 属性 1 与 2）。
+
+    两个后端都要问，而且用的不是"看看字符串在不在"：Rust 侧编出来**真跑**一次，
+    用一个越界的运行期下标触发 panic，再读 `__LOMENT_AUDIT` —— 修之前它是 1，
+    修之后是 0（放行那次才变 1）。IR 侧看**结构**：审计 `store` 必须排在
+    `__loment_abort` 之后（也就是只在 `gok` 块里）。
+    """
+    import shutil
+    import subprocess
+    src = ("module m\n"
+           "choose runtime\n"
+           "capability c : disk[0..4]\n"
+           "pub fn f(n: u32) -> u32 {\n"
+           "    guard c(n);\n"
+           "    return n;\n"
+           "}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "g.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        mod = lomentc.load(p)
+        assert lomentc.check(mod) == [], lomentc.check(mod)
+        rs = lomentc.emit_rust(mod, ROOT)
+        ir = lomentc.emit_llvm(mod, ROOT)
+
+    # ---- IR：trap 块在前、审计（getelementptr + store）在后 —— 也就是只在 gok 那支
+    seg = ir[ir.find("define i32 @f("):]
+    abort = seg.find("call void @__loment_abort()")
+    gok = seg.find("_gok:")
+    audit = seg.find("getelementptr [16 x i64], ptr @__loment_audit")
+    store = seg.find("store i64", audit) if audit >= 0 else -1
+    assert 0 <= abort < gok < audit < store, (
+        "IR 里审计不在 gok 块里（abort={} gok={} gep={} store={}）—— "
+        "越界那次会先写审计（属性 1 破了）".format(abort, gok, audit, store))
+
+    # ---- Rust：真跑。没有 rustc 就跳过这一半（环境限制，不改判据的结论面）
+    rustc = shutil.which("rustc")
+    if not rustc:
+        print("      SKIP: 无 rustc（Rust 运行那一半）")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "m.rs").write_text(rs, encoding="utf-8", newline="\n")
+        main = (
+            'include!("m.rs");\n'
+            "fn main() {\n"
+            "    std::panic::set_hook(Box::new(|_| {}));\n"
+            "    let bad = std::panic::catch_unwind(|| f(9));\n"
+            '    println!("bad={} audit={}", bad.is_err(), unsafe { __LOMENT_AUDIT[0] });\n'
+            "    let ok = std::panic::catch_unwind(|| f(2));\n"
+            '    println!("ok={} audit={}", ok.is_ok(), unsafe { __LOMENT_AUDIT[0] });\n'
+            "}\n")
+        (d / "main.rs").write_text(main, encoding="utf-8", newline="\n")
+        exe = d / ("g.exe" if sys.platform == "win32" else "g")
+        r = subprocess.run([rustc, "-O", "-o", str(exe), str(d / "main.rs")],
+                           capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, r.stderr[-600:]
+        out = subprocess.run([str(exe)], capture_output=True, text=True,
+                             shell=False).stdout
+        assert "bad=true audit=0" in out, (
+            f"越界那次写了审计（应当是 0）: {out!r}")
+        assert "ok=true audit=1" in out, f"放行那次没计审计: {out!r}"
+    print("      越界 trap 后审计为 0，放行一次才变 1（Rust）；IR 的 store 在 abort 之后")
 
 
 @test

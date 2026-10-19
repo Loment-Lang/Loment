@@ -12,14 +12,14 @@
 # 合计 1057 条判据 / 80 个套件。
 
 lomc_test 25
-lomentc_test 175
+lomentc_test 176
 potato_test 12
 loment_ct_test 2
 loment_comefor_test 12
 loment_extblock_test 7
 loment_multilang_test 2
 loment_ctrans_test 18
-loment_pytrans_test 4
+loment_pytrans_test 5
 loment_jtrans_test 4
 loment_cstrans_test 6
 loment_cpptrans_test 5
@@ -28,7 +28,7 @@ loment_nltrans_test 19
 loment_lomtfrom_test 4
 loment_trans_test 8
 loment_potato_emit_test 7
-loment_grammar_test 21
+loment_grammar_test 22
 loment_tools_test 57
 loment_p7_test 8
 loment_p8_test 33
@@ -89,5 +89,5 @@ loment_store_twin_test 2
 lvm_t3_test 3
 lvm_stability_test 3
 lvm_perf_test 3
-loment_invariant_test 1
+loment_invariant_test 2
 loment_caps_test 5

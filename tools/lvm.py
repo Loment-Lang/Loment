@@ -840,6 +840,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="直接跑一份紧凑形产物（与 entry 二选一）")
     ap.add_argument("--profile-out", metavar="PATH", default=None,
                     help="T1：把反馈剖面写到 PATH（`docs/247`）。不写就不记，一个字节都不写")
+    ap.add_argument("--cache", nargs="?", const="", metavar="PATH", default=None,
+                    help="编译产物缓存（docs/265，#646）：缺省放在入口旁边（<entry>.lvmc），"
+                         "给 PATH 就放那儿。只在 --tier t2 下有效；过期会**点名拒绝**并重编")
     a = ap.parse_args(argv)
     # `lvm_compact` 会经 `lvm_t2` 反过来 import 本模块 —— 只能在 `main()` 里、模块装完之后拿。
     import lvm_compact  # noqa: PLC0415
@@ -847,6 +850,14 @@ def main(argv: list[str] | None = None) -> int:
     if a.compact is not None and a.compact_out is not None:
         print("lvm: --compact 与 --compact-out 不能同时给", file=sys.stderr)
         return 2
+    if a.cache is not None:
+        if a.tier != "t2":
+            print("lvm: --cache 只在 --tier t2 下有效（缓存的是那一格的编译产物）",
+                  file=sys.stderr)
+            return 2
+        if a.compact_out is not None or a.compact is not None:
+            print("lvm: --cache 与 --compact/--compact-out 不能同时给", file=sys.stderr)
+            return 2
     if a.entry is None and a.compact is None:
         print("lvm: 需要一个入口（.lomt / --ir 的 .ll），或 --compact PATH",
               file=sys.stderr)
@@ -882,6 +893,18 @@ def main(argv: list[str] | None = None) -> int:
         if a.compact is not None:
             rc = lvm_compact.run_compact(Path(a.compact).read_bytes(), buf, prof,
                                          [a.compact])
+        elif a.cache is not None:
+            # 缓存那一趟：入口 -> IR -> （缓存命中就跳过编译）-> 紧凑形 -> 跑。
+            # **IR 还是照常生成**（源输入要过前端）—— 缓存省的是 IR 之后那一段，
+            # 也正是 `docs/259` §6 记的 62 ms / 24.7 ms 那一笔（`docs/265` §2）。
+            import lvm_cache                                  # noqa: PLC0415
+
+            entry = Path(a.entry).resolve()
+            ir = (entry.read_text(encoding="utf-8") if a.ir
+                  else compile_source(entry, root))
+            cpath = Path(a.cache) if a.cache else lvm_cache.default_path(entry)
+            payload = lvm_cache.load_or_build(cpath, Path(a.entry), ir)
+            rc = lvm_compact.run_compact(payload, buf, prof, [a.entry])
         elif a.ir:
             rc = run_ir(Path(a.entry).read_text(encoding="utf-8"), buf, prof, [a.entry],
                         a.tier, values, deopts)

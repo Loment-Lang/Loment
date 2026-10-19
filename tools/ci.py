@@ -96,6 +96,9 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  "loment_ct_test",
                  # `comefor` 的 token 层展开 (S4.1, docs/184 §9)
                  "loment_comefor_test",
+                 # `choose` 的联动矩阵（`#940`）：每个合法格都要有子系统真的响应它，
+                 # 每对冲突都要被点名拒绝 —— 格子从 `CORE_DIMS`/`CORE_CONFLICTS` 推出来。
+                 "loment_choose_matrix_test",
                  # 外部代码块的字节保真 (S1, docs/185)
                  "loment_extblock_test",
                  # 多语言程序 (docs/183 §8.2 的 S2 判据)
@@ -287,6 +290,7 @@ SHARD_COST = {
     "loment_capasserts_test": 4.0,
     "loment_caps_test": 99.9,
     "loment_channel_test": 92.8,
+    "loment_choose_matrix_test": 10.7,
     "loment_cli_test": 29.5,
     "loment_comefor_test": 14.5,
     "loment_cpptrans_test": 0.1,

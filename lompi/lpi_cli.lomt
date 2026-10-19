@@ -657,7 +657,8 @@ fn print_help() {
     out_lit("        --from-lock F  install exactly the instances F pins, refuse on mismatch\n");
     out_lit("        --into DIR     target DIR\\<name>\\; default is the global store\n");
     out_lit("  lompi check   <dir>                                 is this a valid Loment library?\n");
-    out_lit("  lompi fetch   [--registry URL]                      plan the registry download\n");
+    out_lit("  lompi fetch   [--registry URL] [--registry-sha256 H]  fetch the registry (H = index sha256)\n");
+    out_lit("        --registry-sha256 H  pin the index hash out of band (64 hex; docs/236 §7.1)\n");
     out_lit("  lompi config                                        show global root and registry\n");
     out_lit("  lompi version                                       print the version\n");
     out_lit("\n");
@@ -1501,7 +1502,86 @@ const NETREQ_IDX: u32 = 64;         // ptr: 索引缓冲
 const NETREQ_IDXCAP: u32 = 72;      // u32
 const NETREQ_BODY: u32 = 80;        // ptr: 单文件响应缓冲
 const NETREQ_BODYCAP: u32 = 88;     // u32
+//: ptr: **带外**钉住的索引 sha256 (64 个小写十六进制字节的 C 串), 或 0 = 没钉。
+//: 索引与它里面的那些哈希走的是**同一条明文通道** —— 那条逐个比 sha256 只能查出
+//: "路上坏了", 挡不住"有人把索引和载荷一起换掉" (issue #306/#377)。
+const NETREQ_PIN: u32 = 96;
 const NETREQ_SIZE: u32 = 128;
+
+//: 完成标记的**内容**是 `lompi-fetch 1 complete\n` (下面两处逐字写死 —— 语言没有
+//: 字符串常量)。它落在 `<cache>/lompi-fetch-complete`, 但"完成"是内容说了算:
+//: 0 字节 = 上一次没走完 (或正在走) —— PE 运行时没有 unlink, 标记删不掉, 所以作废
+//: 只能靠截断 (issue #378)。改这个字符串要两处一起改。
+
+/// 完成标记的完整路径。返回长度 (不含 NUL)。
+fn net_mark_path(dir: ptr, out: ptr) -> u32 {
+    let n: u32 = txt_len_cstr(dir);
+    sys_copy(out, 0, dir, 0, n);
+    let o: u32 = sys_append_sep(out, n);
+    let o2: u32 = sys_append_lit(out, o, "lompi-fetch-complete");
+    store8(out, o2, 0 as u8);
+    return o2;
+}
+
+/// 这个缓存目录取齐了没有。1 = 标记内容说的是"上一次走完了"; 0 = 没有标记、
+/// 标记是空的、或内容不认识 —— **认不出就算不完整**, 别把坏状态当好消息。
+fn net_mark_state(dir: ptr) -> u32 {
+    let mp: ptr = sys_alloc(1200);
+    let _mpn: u32 = net_mark_path(dir, mp);
+    let buf: ptr = sys_alloc(64);
+    let got: u64 = sys_read_file(mp, buf, 64);
+    if got == SYS_ERR {
+        return 0;
+    }
+    if txt_eq_lit(buf, 0, got as u32, "lompi-fetch 1 complete\n") {
+        return 1;
+    }
+    return 0;
+}
+
+/// 写标记: `complete == 1` 落完成令牌, 否则**截断成 0 字节** (= 这次不作数)。
+/// 返回 1 = 写了; 0 = 目录不在 / 写不了 (调用方不需要因此改判, 落盘那一步会自己报)。
+fn net_mark_write(dir: ptr, complete: u32) -> u32 {
+    let mp: ptr = sys_alloc(1200);
+    let _mpn: u32 = net_mark_path(dir, mp);
+    let buf: ptr = sys_alloc(64);
+    if complete == 1 {
+        let m: u32 = sys_append_lit(buf, 0, "lompi-fetch 1 complete\n");
+        if sys_write_file(mp, buf, m as u64) == SYS_ERR {
+            return 0;
+        }
+        return 1;
+    }
+    if sys_write_file(mp, buf, 0) == SYS_ERR {
+        return 0;
+    }
+    return 1;
+}
+
+/// `--registry-sha256` 的值: 必须恰好 64 个十六进制字符; 大小写都收, 但**规整成小写**
+/// 再写进 out (C 串)。返回 1 = 收了; 0 = 形状不对 (调用方当场拒, 别让它变成一颗
+/// 永远比不上的钉子, 看起来却像"已经在验来源")。
+fn net_pin_take(buf: ptr, av: u64, out: ptr) -> u32 {
+    let n: u32 = sys_arg_len(av);
+    if n != 64 {
+        return 0;
+    }
+    let off: u32 = sys_arg_off(av);
+    let i: u32 = 0;
+    while i < 64 {
+        let c: u32 = load8(buf, off + i);
+        let l: u32 = c;
+        if c >= 65 && c <= 70 {
+            l = c + 32;
+        } else if !((c >= 48 && c <= 57) || (c >= 97 && c <= 102)) {
+            return 0;
+        }
+        store8(out, i, l as u8);
+        i = i + 1;
+    }
+    store8(out, 64, 0 as u8);
+    return 1;
+}
 
 /// 从 p 的 [off, n) 取一个空白分隔的字段写进 out (cap)。
 /// 返回 `(新起点 << 32) | 字段长度`; 长度 0 = 这一行没有这一段(调用方据此判失败)。
@@ -1557,7 +1637,8 @@ fn net_basename(p: ptr, n: u32, out: ptr, cap: u32) -> u32 {
 }
 
 /// 把注册表拉进 `dst`(一个**已经存在**的目录: `<root>/cache/<slug>`)。
-/// 返回 1 = 全部下完且逐个**校验过索引里写着的 sha256**; 0 = 任一步不成。
+/// 返回 1 = 全部下完且逐个**校验过索引里写着的 sha256**; 0 = 任一步不成;
+/// 2 = 索引与 `--registry-sha256` 对不上 (**硬失败**, 调用方不许退回到打印计划)。
 fn net_fetch_registry(req: ptr, dst: ptr) -> u32 {
     let base: ptr = txt_load64(req, NETREQ_BASE) as ptr;
     let blen: u32 = txt_len_cstr(base);
@@ -1565,6 +1646,10 @@ fn net_fetch_registry(req: ptr, dst: ptr) -> u32 {
     let idxcap: u32 = txt_load32(req, NETREQ_IDXCAP);
     let body: ptr = txt_load64(req, NETREQ_BODY) as ptr;
     let bodycap: u64 = txt_load32(req, NETREQ_BODYCAP) as u64;
+    // **先作废上一轮的完成标记** (issue #378): 这一趟只要没走到最后, 目录里留下的就是
+    // 0 字节标记, 消费方据此判"不完整"。写在开始而不是在每个失败分支里清, 是因为失败
+    // 路径太多 (索引没来、索引行坏、摘要不对、写盘失败) —— 逐个清理总会漏一条。
+    let _mk0: u32 = net_mark_write(dst, 0);
     let ipath: ptr = sys_alloc(1200);
     sys_copy(ipath, 0, base, 0, blen);
     let o1: u32 = sys_append_lit(ipath, blen, "lompi-index.txt");
@@ -1584,6 +1669,25 @@ fn net_fetch_registry(req: ptr, dst: ptr) -> u32 {
     let st: ptr = sys_alloc(sha_state_size() as u64);
     let dig: ptr = sys_alloc(64);
     let hex: ptr = sys_alloc(128);
+    // 带外钉住的索引哈希。有它, 信任根就在通道之外; 没有它, 下面那条逐个比只能是完整性
+    // 检查 —— 这一点**说出来**, 而且把"怎么弄到钉子"一并说, 别让用户卡在
+    // "--registry-sha256 是唯一提到它的地方" (issue #377)。
+    let pin: ptr = txt_load64(req, NETREQ_PIN) as ptr;
+    if pin != (0 as ptr) {
+        sha_init(st);
+        sha_update(st, idx, ilen as u32);
+        sha_final(st, dig);
+        sha_hex(dig, hex);
+        if !txt_eq(hex, 0, 64, pin, 0, 64) {
+            sys_write_str(2, "lompi: the index does not match --registry-sha256 -- refused\n");
+            return 2;
+        }
+        sys_write_str(1, "lompi: index matches the pinned sha256\n");
+    } else {
+        sys_write_str(1, "lompi: (not pinned; hashes arrived over the same channel)\n");
+        sys_write_str(1, "lompi: to pin it, get lompi-index.txt over a trusted channel and run `sha256sum`,\n");
+        sys_write_str(1, "lompi: then pass the 64 hex digits as --registry-sha256 <hex> (docs/236 §7.1)\n");
+    }
     let off: u32 = 0;
     let files: u32 = 0;
     while off < (ilen as u32) {
@@ -1669,6 +1773,11 @@ fn net_fetch_registry(req: ptr, dst: ptr) -> u32 {
         sys_write_str(2, "lompi: the index has no entries\n");
         return 0;
     }
+    // 整份取齐了才写**完成令牌**。写不进去也不改变"取到了"这个事实, 但消费方会因此
+    // 判不完整 —— 所以把这件事说出来, 而不是静默地留一个没有标记的目录。
+    if net_mark_write(dst, 1) == 0 {
+        sys_write_str(2, "lompi: fetched everything but could not write the completion marker\n");
+    }
     return 1;
 }
 
@@ -1706,6 +1815,25 @@ fn cmd_fetch(ws: ptr, buf: ptr, m: u32) -> u32 {
     let o1: u32 = sys_append_sep(dst, dn);
     let o2: u32 = cli_put_cstr(dst, o1, slug);
     store8(dst, o2, 0 as u8);
+    // 缓存状态**说出来** (issue #378): 没有完成标记的目录一律当"上一次没走完",
+    // 这时 fetch 会整份重取 —— 而用户该知道重取是因为上一轮失败了, 不是因为这里"总是慢".
+    if cli_exists(dst) {
+        if net_mark_state(dst) == 1 {
+            out_lit("lompi: this cache is marked complete; refreshing it\n");
+        } else {
+            out_lit("lompi: this cache is INCOMPLETE (the last fetch did not finish); re-fetching\n");
+        }
+    }
+    // 带外的索引哈希 (issue #377): 形状不对当场拒 —— 一颗永远比不上的钉子会让人以为
+    // "正在验来源", 那比没有钉子更糟。
+    let pinav: u64 = cfg_flag_arg(buf, m, "--registry-sha256");
+    let pin: ptr = 0 as ptr;
+    if pinav != 0 {
+        pin = sys_alloc(72);
+        if net_pin_take(buf, pinav, pin) == 0 {
+            return cli_die("--registry-sha256 wants exactly 64 hex characters");
+        }
+    }
 
     let ipa: ptr = sys_alloc(8);
     let ipb: ptr = sys_alloc(8);
@@ -1730,12 +1858,17 @@ fn cmd_fetch(ws: ptr, buf: ptr, m: u32) -> u32 {
         txt_store32(req, NETREQ_IDXCAP, 65536);
         txt_store64(req, NETREQ_BODY, body as u64);
         txt_store32(req, NETREQ_BODYCAP, NET_FILE_CAP + 8192);
+        txt_store64(req, NETREQ_PIN, pin as u64);
         let bak: u32 = net_fetch_registry(req, dst);
         if bak == 1 {
             out_lit("lompi: registry fetched into ");
             sys_write(1, dst, txt_len_cstr(dst) as u64);
             out_lit("\n");
             return 0;
+        }
+        if bak == 2 {
+            // 钉子对不上**不许**退回到"打印计划" —— 那是把一次拒绝装成一次成功。
+            return 1;
         }
         out_lit("# the http fetch did not go through -- plan below\n");
     } else {
@@ -1760,6 +1893,8 @@ fn cmd_fetch(ws: ptr, buf: ptr, m: u32) -> u32 {
     out_lit("\n# to update later:  git -C ");
     sys_write(1, dst, o2 as u64);
     out_lit(" pull\n");
+    out_lit("# (a cache cloned by hand has no completion marker; `lompi install` only uses\n");
+    out_lit("#  a cache that `lompi fetch` finished -- docs/236 §7.2)\n");
     return 0;
 }
 /// 把一个包的源文件 (含可选的 pkg.lomp) 从 src 目录拷进 dst 目录。
@@ -1948,7 +2083,15 @@ fn cmd_install(ws: ptr, buf: ptr, m: u32, av_spec: u64) -> u32 {
         let g2: u32 = cli_put_cstr(srcroot, g1, slug);
         store8(srcroot, g2, 0 as u8);
         if cli_exists(srcroot) {
-            have_reg = 1;
+            // 装包这条路径**也在消费缓存** —— 它同样要认完成标记 (issue #378)。
+            // 没有标记 / 标记是空的 = 上一轮取到一半断了: 里面可能有半写的文件, 不能装。
+            if net_mark_state(srcroot) == 1 {
+                have_reg = 1;
+            } else {
+                err_lit("lompi: the registry cache is incomplete (the last fetch did not finish)\n");
+                err_lit("  run `lompi fetch` again before installing from it\n");
+                return 1;
+            }
         }
     }
     if have_reg == 0 {

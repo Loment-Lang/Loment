@@ -30,7 +30,7 @@ loment_lomtfrom_test 4
 loment_trans_test 8
 loment_potato_emit_test 7
 loment_grammar_test 22
-loment_tools_test 57
+loment_tools_test 61
 loment_p7_test 8
 loment_p8_test 33
 loment_p9_test 2

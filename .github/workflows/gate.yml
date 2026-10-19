@@ -374,9 +374,22 @@ jobs:
             echo "::error::基线文件 .github/gate-baseline.txt 不见了 —— 门禁不猜，直接判失败"
             exit 1
           fi
-          grep -E ':: \[static\].*FAIL' gate.out | awk '{print $3}' | sort -u > red.txt
-          grep -v '^[[:space:]]*#' .github/gate-baseline.txt | awk 'NF {print $1}' | sort -u > base.txt
-          comm -13 base.txt red.txt > new_red.txt
+          # `#769`: 基线按 **(套件, 判据)** 匹配。解析只在 `ci.py` 里做一份 ——
+          # 按列取套件名的那一版正是整条豁免的来源（不再按列 awk）。
+          # 解析失败要**判失败**（这里 `set +e`，静默的空文件会让门禁绿得看不出来）。
+          if ! python3 tools/ci.py --baseline-red gate.out > red.txt; then
+            echo "::error::红项解析失败（ci.py --baseline-red）—— 门禁不猜，按失败处理"
+            exit 1
+          fi
+          if ! python3 tools/ci.py --baseline-pairs .github/gate-baseline.txt > base.txt; then
+            echo "::error::基线解析失败（ci.py --baseline-pairs）—— 门禁不猜，按失败处理"
+            exit 1
+          fi
+          if ! python3 tools/ci.py --baseline-new gate.out .github/gate-baseline.txt > new_red.txt; then
+            echo "::error::新红解析失败（ci.py --baseline-new）—— 门禁不猜，按失败处理"
+            exit 1
+          fi
+          cut -f1 new_red.txt | sort -u > new_red_suites.txt
           while read -r name; do
             [ -z "$name" ] && continue
             echo "=== 新红复跑（单跑）: $name ==="
@@ -385,12 +398,12 @@ jobs:
             tail -4 "re_$name.log"
             if [ $rc -eq 0 ]; then
               echo "  -> 单跑**绿**：判为并行假红（不计入判据）"
-              echo "$name" >> flaked.txt
+              awk -F'\t' -v n="$name" '$1==n' new_red.txt >> flaked.txt
             else
               echo "  -> 单跑**仍红**：这是这一笔引入的新红"
-              echo "$name" >> confirmed.txt
+              awk -F'\t' -v n="$name" '$1==n' new_red.txt >> confirmed.txt
             fi
-          done < new_red.txt
+          done < new_red_suites.txt
           if [ -s confirmed.txt ]; then
             echo "::error::门禁（独占片）：新红 $(paste -sd ' ' confirmed.txt)"
             exit 1
@@ -546,9 +559,22 @@ jobs:
             echo "::error::基线文件 .github/gate-baseline.txt 不见了 —— 门禁不猜，直接判失败"
             exit 1
           fi
-          grep -E ':: \[static\].*FAIL' gate.out | awk '{print $3}' | sort -u > red.txt
-          grep -v '^[[:space:]]*#' .github/gate-baseline.txt | awk 'NF {print $1}' | sort -u > base.txt
-          comm -13 base.txt red.txt > new_red.txt
+          # `#769`: 基线按 **(套件, 判据)** 匹配。解析只在 `ci.py` 里做一份 ——
+          # 按列取套件名的那一版正是整条豁免的来源（不再按列 awk）。
+          # 解析失败要**判失败**（这里 `set +e`，静默的空文件会让门禁绿得看不出来）。
+          if ! python3 tools/ci.py --baseline-red gate.out > red.txt; then
+            echo "::error::红项解析失败（ci.py --baseline-red）—— 门禁不猜，按失败处理"
+            exit 1
+          fi
+          if ! python3 tools/ci.py --baseline-pairs .github/gate-baseline.txt > base.txt; then
+            echo "::error::基线解析失败（ci.py --baseline-pairs）—— 门禁不猜，按失败处理"
+            exit 1
+          fi
+          if ! python3 tools/ci.py --baseline-new gate.out .github/gate-baseline.txt > new_red.txt; then
+            echo "::error::新红解析失败（ci.py --baseline-new）—— 门禁不猜，按失败处理"
+            exit 1
+          fi
+          cut -f1 new_red.txt | sort -u > new_red_suites.txt
           while read -r name; do
             [ -z "$name" ] && continue
             echo "=== 新红复跑（单跑）: $name ==="
@@ -557,12 +583,12 @@ jobs:
             tail -4 "re_$name.log"
             if [ $rc -eq 0 ]; then
               echo "  -> 单跑**绿**：判为并行假红（不计入判据）"
-              echo "$name" >> flaked.txt
+              awk -F'\t' -v n="$name" '$1==n' new_red.txt >> flaked.txt
             else
               echo "  -> 单跑**仍红**：这是这一笔引入的新红"
-              echo "$name" >> confirmed.txt
+              awk -F'\t' -v n="$name" '$1==n' new_red.txt >> confirmed.txt
             fi
-          done < new_red.txt
+          done < new_red_suites.txt
           if [ -s confirmed.txt ]; then
             echo "::error::门禁（片 ${{ matrix.shard }}）：新红 $(paste -sd ' ' confirmed.txt)"
             exit 1
@@ -736,10 +762,16 @@ jobs:
           fail=$(grep -c ':: \[static\].*FAIL' gate.out || true)
           cat shards/gate-log-*/confirmed.txt 2>/dev/null | sed '/^$/d' | sort -u > confirmed.txt
           cat shards/gate-log-*/flaked.txt 2>/dev/null | sed '/^$/d' | sort -u > flaked.txt
-          grep -E ':: \[static\].*FAIL' gate.out | awk '{print $3}' | sort -u > red.txt
-          grep -v '^[[:space:]]*#' .github/gate-baseline.txt | awk 'NF {print $1}' | sort -u > base.txt
-          comm -13 base.txt red.txt > new_red.txt
-          comm -23 base.txt red.txt > gone.txt
+          # `#769`: 逐条判据比较（解析只在 `ci.py` 里一份）。解析失败要判失败 ——
+          # 静默的空文件会让"没有新红"看起来像真的。
+          python3 tools/ci.py --baseline-red gate.out > red.txt \
+            || { echo "::error::红项解析失败 —— 门禁不猜，按失败处理"; exit 1; }
+          python3 tools/ci.py --baseline-pairs .github/gate-baseline.txt > base.txt \
+            || { echo "::error::基线解析失败 —— 门禁不猜，按失败处理"; exit 1; }
+          python3 tools/ci.py --baseline-new gate.out .github/gate-baseline.txt > new_red.txt \
+            || { echo "::error::新红解析失败 —— 门禁不猜，按失败处理"; exit 1; }
+          python3 tools/ci.py --baseline-gone gate.out .github/gate-baseline.txt > gone.txt \
+            || { echo "::error::基线过期解析失败 —— 门禁不猜，按失败处理"; exit 1; }
           n_red=$(wc -l < red.txt | tr -d ' ')
           n_base=$(wc -l < base.txt | tr -d ' ')
           n_bad=$(wc -l < confirmed.txt | tr -d ' ')
@@ -880,12 +912,12 @@ jobs:
             tail -20 show.log
             exit 1
           fi
-          # 基线是"套件名 [加说明]"的行；只比第一列，注释与空行不算
-          norm() { grep -v '^[[:space:]]*#' "$1" | awk 'NF {print $1}' | sort -u; }
-          norm old-baseline.txt > old.txt
-          norm .github/gate-baseline.txt > new.txt
-          comm -13 old.txt new.txt > added.txt
-          if [ -s added.txt ]; then
+          # `#769`: 基线是 `套件 判据名`（旧格式的一列行读成 `套件 *`）。"只许变短"
+          # 也按逐条判据比：旧的一整条 `套件 *` 授权细化成几条具体判据（收紧），
+          # 但一条逐条豁免**不能**反向授权一条新的整条豁免（那是变粗）。
+          python3 tools/ci.py --baseline-pairs old-baseline.txt > old.txt
+          python3 tools/ci.py --baseline-pairs .github/gate-baseline.txt > new.txt
+          if ! python3 tools/ci.py --baseline-growth old.txt new.txt > added.txt; then
             {
               echo "## 基线**变长了**（不许）"
               echo ""
@@ -902,7 +934,7 @@ jobs:
             echo "::error::基线多了 $(wc -l < added.txt | tr -d ' ') 条 —— $(paste -sd ' ' added.txt)"
             exit 1
           fi
-          echo "基线只许变短: OK（比对照面少了 $(comm -23 old.txt new.txt | wc -l | tr -d ' ') 条）"
+          echo "基线只许变短: OK"
 
       # 分片那边红了，这一道必须**跟着红**。`needs` 的默认行为是"依赖失败就跳过"，
       # 而跳过**不算失败** —— 保护规则会当成"还没报"而永远等下去。所以这里显式看结果。

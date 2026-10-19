@@ -94,4 +94,4 @@ lvm_t3_test 3
 lvm_stability_test 3
 lvm_perf_test 3
 loment_invariant_test 2
-loment_caps_test 5
+loment_caps_test 10

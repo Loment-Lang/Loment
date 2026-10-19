@@ -318,6 +318,6 @@ or you only want it to keep going — that is the whole ask. Thank you.
 
 ## Licence
 
-Loment is dual-licensed under **MIT OR Apache-2.0** ([LICENSE](LICENSE),
+Loment is dual-licensed under **MIT OR Apache-2.0** ([LICENSE-MIT](LICENSE-MIT),
 [LICENSE-APACHE](LICENSE-APACHE)), at your option. Contributions are accepted under the same
 dual license, without any additional terms or conditions.

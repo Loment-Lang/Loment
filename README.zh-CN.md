@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://github.com/Loment-Lang/loment/actions/workflows/gate.yml"><img src="https://github.com/Loment-Lang/loment/actions/workflows/gate.yml/badge.svg" alt="gate"></a>
   <a href="https://github.com/Loment-Lang/loment/releases/latest"><img src="https://img.shields.io/github/v/release/Loment-Lang/loment?label=release&amp;color=4c6ef5" alt="latest release"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-4c6ef5" alt="license: MIT OR Apache-2.0"></a>
+  <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-4c6ef5" alt="license: MIT OR Apache-2.0"></a>
   <a href="https://discord.gg/rGw7NRNU"><img src="https://img.shields.io/badge/Discord-join%20chat-5865F2?logo=discord&amp;logoColor=white" alt="Discord"></a>
 </p>
 
@@ -79,4 +79,4 @@ hello from Loment
 
 ## 许可
 
-**MIT OR Apache-2.0**，二选一。见 [LICENSE](LICENSE) 与 [LICENSE-APACHE](LICENSE-APACHE)。
+**MIT OR Apache-2.0**，二选一。见 [LICENSE-MIT](LICENSE-MIT) 与 [LICENSE-APACHE](LICENSE-APACHE)。

@@ -1,6 +1,6 @@
 # 212 · 许可：Loment-Open（已废）→ MIT OR Apache-2.0
 
-> 状态: **已被取代**（2026-10-19，用户裁）· 落点: 根 `LICENSE` / `LICENSE-APACHE` 与七个登记处
+> 状态: **已被取代**（2026-10-19，用户裁）· 落点: 根 `LICENSE-MIT` / `LICENSE-APACHE` 与七个登记处
 >
 > 一句话: 2026-10-09 用过一版自造的 `Loment-Open`（MIT 加署名与名称两条）；
 > **2026-10-19 起改成 `MIT OR Apache-2.0` 双许可**，两条附加条件一并取消。
@@ -10,18 +10,18 @@
 
 Loment 以 **MIT OR Apache-2.0** 双许可发布，使用者二选一：
 
-* 根 `LICENSE` —— **MIT 全文**（`Copyright (c) 2026 FujoOS Project`）；
+* 根 `LICENSE-MIT` —— **MIT 全文**（`Copyright (c) 2026 FujoOS Project`）；
 * 根 `LICENSE-APACHE` —— Apache License 2.0 标准全文；
-* `editors/vscode/LICENSE` —— 与根 `LICENSE` **逐字节相同**（`vsce` 只找扩展目录那一份，
+* `editors/vscode/LICENSE` —— 与根 `LICENSE-MIT` **逐字节相同**（`vsce` 只找扩展目录那一份，
   判据 `vscode_ext_test::test_vscode_publish_ready` 钉住）。
 
 SPDX 标识就是 `MIT OR Apache-2.0`。两个都是 OSI 认证许可，npm / vsce / Cargo 都认得。
 
-**为什么根 `LICENSE` 里没有那句"二选一"**：GitHub 的许可检测只认**纯正文**。正文前面
-加一段自定义声明，那份文件会被判成 `Other`，侧栏就既不显示 MIT 也不显示 Apache-2.0
-（实测于 2026-10-19）。所以双许可的"二选一"写在 `README`、`CONTRIBUTING.md` 与
-`editors/vscode/package.json` 的 SPDX 字段里；`LICENSE` 与 `LICENSE-APACHE` 各自是
-**可被检测器认出的纯文本**。
+**为什么没有根 `LICENSE`、为什么两份都不带前置声明**：GitHub 的许可检测只认**纯正文**。
+正文前面加一段自定义声明，那份文件会被判成 `Other`，侧栏就既不显示 MIT 也不显示
+Apache-2.0（2026-10-19 实测）。所以这次照 Rust 仓的形状：**只有 `LICENSE-MIT` 与
+`LICENSE-APACHE` 两个文件，各自是可被检测器认出的纯文本**；双许可的"二选一"写在
+`README`、`CONTRIBUTING.md` 与 `editors/vscode/package.json` 的 SPDX 字段里。
 
 ## 1. 为什么换掉 Loment-Open
 
@@ -44,12 +44,12 @@ SPDX 标识就是 `MIT OR Apache-2.0`。两个都是 OSI 认证许可，npm / vs
 
 | # | 位置 | 改动 |
 |---|---|---|
-| 1 | 根 `LICENSE` | Loment-Open 全文 → **纯 MIT 全文** |
+| 1 | 根 `LICENSE-MIT` | Loment-Open 全文 → **纯 MIT 全文**（根 `LICENSE` 删除） |
 | 2 | 根 `LICENSE-APACHE` | **新增**，Apache-2.0 标准全文 |
 | 3 | `README.md` / `README.zh-CN.md` | 徽章与 `## License` / `## 许可` 段 |
 | 4 | `CONTRIBUTING.md` §Licence | 双许可；贡献按同一双许可收 |
 | 5 | `tools/loment_publish.py` 的 README 模板 | 公开仓 README 是直出的，模板同步 |
-| 6 | `editors/vscode/LICENSE` | 与根 `LICENSE` 逐字节相同 |
+| 6 | `editors/vscode/LICENSE` | 与根 `LICENSE-MIT` 逐字节相同 |
 | 7 | `editors/vscode/package.json` / `package-lock.json` | `"license": "MIT OR Apache-2.0"` |
 | 8 | `docs/171` / `docs/235` | 提到旧许可名的地方改成新事实 |
 
@@ -73,4 +73,4 @@ SPDX 标识就是 `MIT OR Apache-2.0`。两个都是 OSI 认证许可，npm / vs
 * `CONTRIBUTING.md` §Licence —— 贡献者入口；这一页是它背后"为什么"的那份。
 * `docs/201-doors-and-registries.md` —— "一个事实有几个登记处"的同一类问题。
 * `docs/171-loment-publish-outlets.md` —— 发布口，说明了公开仓 README 为什么是直出的。
-* 根 `LICENSE` / `LICENSE-APACHE` —— 正本；这一页只是说明，**改了文本这一页要跟着改**。
+* 根 `LICENSE-MIT` / `LICENSE-APACHE` —— 正本；这一页只是说明，**改了文本这一页要跟着改**。

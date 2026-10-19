@@ -73,8 +73,10 @@ token，不是私有），得先匿名要一次 token：
 
 ## 3. 搬家不带过来的东西
 
-* **Actions secrets 不会跟过来。** `secrets.MANIFEST_TOKEN`（`docs/254` §3.2 那个
-  main 侧的写者要用的属主 PAT）要在**新仓**上重建。
+* **Actions secrets 不会跟过来。** 但 main 侧的写者现在**不需要任何 secret**：
+  `docs/254` §3.2 那条链用的是每次运行自己的 `github.token`，门禁靠
+  `workflow_dispatch` 显式派发。`MANIFEST_TOKEN` 这条属主 PAT 已经拿掉，**新仓上没有
+  要重建的 secret**。
 * Actions 的**运行历史与缓存**不搬（无所谓）。
 * 仓的设置里 `default_workflow_permissions` 是 `read`；`ci-image.yml` 自己声明了
   `permissions: packages: write`，构建照常（核实于 2026-10-17 那次构建）。

@@ -288,13 +288,19 @@ def test_main_writer_is_not_behind_the_gate():
     assert "gh pr create" in job and "--auto" in job, (
         "`emit-main` 没有开 PR / 没开 auto-merge —— 生成物必须在门禁之后落地")
 
-    # **PR 必须由一个真身份来开**：`GITHUB_TOKEN` 触发的 `pull_request` 不新建 workflow run，
-    # 那样门禁不会跑、auto-merge 永远等不到东西。属主 PAT 的另一个用处是"能推分支"。
-    assert "secrets.MANIFEST_TOKEN" in job, (
-        "`emit-main` 用的不是 `secrets.MANIFEST_TOKEN` —— `GITHUB_TOKEN` 开的 PR **不触发**"
-        "`pull_request`，门禁因此不会跑")
+    # **PR 用 `GITHUB_TOKEN` 开，但门禁必须显式派发**：`GITHUB_TOKEN` 触发的
+    # `pull_request` 不新建 workflow run，而 `workflow_dispatch` 是那条规则的**例外**。
+    # 少了这次派发，必需检查永远不出现，auto-merge 永远等不到东西。
+    assert "secrets.MANIFEST_TOKEN" not in job, (
+        "`emit-main` 还在用 `MANIFEST_TOKEN` —— 一条长期凭据不该参与信任根的写入；"
+        "改用这次运行的 `github.token` + 显式派发门禁")
+    assert "gh workflow run gate.yml" in job and '--ref "$BRANCH"' in job, (
+        "`emit-main` 没有把门禁派发到生成物分支 —— `GITHUB_TOKEN` 开的 PR 不触发"
+        "`pull_request`，必需检查因此不会出现，auto-merge 永远落不了地")
+    assert "actions: write" in job, (
+        "`emit-main` 没给 `actions: write` —— `gh workflow run` 派发不了门禁")
     print("      main 侧单一写者：五件按硬顺序重算、与门禁并行、整树生成物收全、"
-          "推分支 + PR + auto-merge")
+          "推分支 + PR + dispatch 门禁 + auto-merge")
 
 
 # ---------------------------------------------------------------- M55 格式化

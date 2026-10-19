@@ -73,6 +73,8 @@ mirror: rc=1  loment: unknown relocation type (docs/173 section 3)
 - **TLS 对象与共享对象一起链**：拒绝。这一版的 TLS 块只在自立产物里安装，
   动态链接时 `fs` 归 loader 管（参考实现同一句）。
 - **`M_TLS` / 四张表的位置是硬编码**（`loment/tools/lomelf.lomt`）。#956（`#777`）
-  合入后按它给的落点重排：`TB_GOT 5,775,136` / `TB_WK 5,824,288` /
-  `TB_TLS 5,857,056` / `TB_ND 5,861,152`，`M_TLS` 在 `ARENA` 之后。
+  合入后已按它的落点排好：`TB_GOT 5,775,136` / `TB_WK 5,824,288` /
+  `TB_TLS 5,857,056` / `TB_ND 5,861,152`（表尾 5,893,920），`M_TLS` 在 `ARENA`
+  （36,712,448）之后、`ARENA` 移到 **36,777,984**。再抬内存时四张表跟着表尾走，
+  `M_TLS` 跟着 `ARENA` 走。
 - 容量条数 228、沉默 156（`loment_caps_test`）；新增五处都有 `fail` 路径。

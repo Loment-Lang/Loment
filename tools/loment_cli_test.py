@@ -637,12 +637,20 @@ def test_explain_accepts_three_spellings_and_rejects_junk():
     # 漏改时的症状是"判据红了但源码没错"; 而更糟的一种改法是把断言放宽, 从此再也不测边界。
     # 真实的契约是"explain 接受到表里最后一个码为止", 那就照它测。
     import loment_diag
-    top = max(loment_diag.ASCII_ONE_LINER)
+    # **只取用户码**（`#773`）：E9xx 是另一段，中间 36..899 是空号 —— 拿 900 当
+    # "上一个码"去试 899 会撞上那条空号，测的就不是边界了。
+    top = max(c for c in loment_diag.ASCII_ONE_LINER
+              if not loment_diag.is_internal_code(c))
     rc, _, err = _run(["explain", f"E{top + 1}"] + _no_color())
     assert rc == 2, err[:120]
     for c in (top, top - 1, top - 2):
         rc, out, _ = _run(["explain", f"E{c}"] + _no_color())
         # 标题是三位补零的（与 `error[E023]` 一致），所以这里也按那个拼法找。
+        assert rc == 0 and f"E{c:03d}" in out, (c, rc, out[:120])
+    # 内部码段也要解释得出来（`#773` 那一条记录会渲染成 `error[E900]`）。
+    for c in sorted(c for c in loment_diag.ASCII_ONE_LINER
+                    if loment_diag.is_internal_code(c)):
+        rc, out, _ = _run(["explain", f"E{c}"] + _no_color())
         assert rc == 0 and f"E{c:03d}" in out, (c, rc, out[:120])
     rc, _, _ = _run(["explain"] + _no_color())
     assert rc == 2
@@ -725,6 +733,68 @@ def test_check_json_reports_an_unresolved_use_name():
     assert "nosuchmod" in rec["message"], (
         f"--json 的消息里没有那个没解析出来的名字: {rec['message']!r}")
     print("      E018 的 JSON 消息带上了没解析出来的名字")
+
+
+@test
+def test_the_emitter_reports_a_rule_only_it_knows():
+    """**#775**：检查器收下、发射器降不下去的规则，必须出一条结构化诊断，**不是信号**。
+
+    `#775` 的根不是"少了一条检查"，而是**发射器没有报错通道** —— 于是每条"降不下去"
+    的规则只能抄进检查器，否则用户拿到的是 `panic` / SIGILL / 非法 IR。
+    `tools/lomentc.py:4147` 那条注释把这件事写在明面上。
+
+    这条判据挑的规则**只长在自举发射器里**：一次调用的实参超过 20 个（那 20 是
+    `CG_PARAM` 每函数的槽数，`#265` 量的）。Loment **没有**"实参最多 20 个"这条语言
+    规则 —— 参考实现收下、发射器也能发；只有自举发射器降不下去。修之前那里是
+    `panic(20)`：进程被 ILL 打死，`--diag-out` 一个字都不写（实测 rc=0xC000001D）。
+    修之后它走发射器自己的诊断通道，出 **E023**（"这一版还没实现"），带 token 行号。
+
+    这条判据同时钉住三件事：检查器**不该**为了它长出一条新规则（参考侧 check 干净）；
+    记录**是**结构化的（码 + 行 + 消息）；退出码是**普通失败**（1），不是崩溃码。
+    """
+    params = ", ".join(f"a{i}: u32" for i in range(21))
+    args = ", ".join(str(i) for i in range(21))
+    body = " + ".join(f"a{i}" for i in range(21))
+    text = f"""module m275
+fn f({params}) -> u32 {{ return {body}; }}
+fn _start() {{
+    let x: u32 = f({args});
+    syscall4(60, x as u64, 0, 0);
+}}
+"""
+    with tempfile.TemporaryDirectory(prefix="lomcli-775-") as tds:
+        td = Path(tds)
+        src = td / "many.lomt"
+        src.write_text(text, encoding="utf-8", newline="\n")
+        # ① 参考实现的检查器收下它 —— 这条规则**不是**语言规则。
+        sys.path.insert(0, str(ROOT / "tools"))
+        import lomentc  # noqa: E402
+        mod, deps = lomentc.load_unit(src, ROOT)
+        assert not lomentc.check(mod, deps=deps), (
+            "参考检查器拒了 21 个实参 —— 那它就变成一条语言规则了，"
+            "这条判据测的东西也就变了（#775 要的是发射器自己报）")
+        # 参考发射器发得出来（所以这不是"两个实现都不行"）。
+        assert lomentc.emit_llvm(mod, ROOT, deps), "参考发射器也发不出这份单元"
+        # ② 自举驱动：普通失败 + 一条 E023 记录。
+        d = td / "d.jsonl"
+        r = subprocess.run([str(_build_driver()), str(src), "--diag-out", str(d)],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", shell=False, timeout=120)
+        recs = ([json.loads(ln) for ln in d.read_text(encoding="utf-8").splitlines()
+                 if ln.strip()] if d.exists() else [])
+    assert r.returncode == 1, (
+        f"自举发射器没有正常报错（rc={r.returncode}，"
+        f"0xC000001D=ILL 就是修前的 panic）: {r.stderr[:300]!r}")
+    assert recs, f"发射器拒绝了却没有写结构化诊断: stderr={r.stderr[:300]!r}"
+    rec = recs[0]
+    assert rec["code"] == "E023", rec
+    assert rec["line"] > 0, f"记录没有指到源码行: {rec}"
+    assert "more than 20 arguments" in rec["message"], (
+        f"消息没说出降不下去的那条规则: {rec['message']!r}")
+    # 人看的那一行也要有（直接跑驱动的人手上没有渲染器）。
+    assert "more than 20 arguments" in r.stderr, (
+        f"只写了 JSONL、没打给人看的那一行: {r.stderr[:300]!r}")
+    print("      #775: 发射器独有的降级规则报成 E023（rc=1，有行号），不再是信号")
 
 
 # ---------------------------------------------------------------- 防漂移
@@ -1193,8 +1263,10 @@ def _cli_fixtures(root: Path) -> None:
         lines.pop()
     _w(root / "want_stat.txt", f"{len(yraw)}\n{len(lines)}\n")
     import loment_diag  # noqa: E402
-    # `explain E99` 那条要一个**表外**的码 —— 表长到 99 就该改这里, 所以先钉住
-    assert max(loment_diag.ASCII_ONE_LINER) < 99, "错误码表到 99 了, 换一个表外的码"
+    # `explain E99` 那条要一个**表外**的码 —— 表长到 99 就该改这里, 所以先钉住。
+    # `#773` 起表里另有一段 E9xx（900 起），所以不能再用 `max < 99` 判：99 本身
+    # 仍是用户码段与内部码段之间的空号。
+    assert 99 not in loment_diag.ASCII_ONE_LINER, "错误码表到 99 了, 换一个表外的码"
     # 码的拼法是**三位补零**（`#9`）：`loment codes` 与 `explain` 的标题都印 `E001`，
     # 与诊断正文的 `error[E001]` 一致。夹具照那个拼法写，否则第 18 项会假红。
     _w(root / "codes.txt", "".join(f"E{c:03d} {d}\n"

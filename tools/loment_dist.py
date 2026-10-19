@@ -160,6 +160,45 @@ find_lomelf() {
     tool loment-lomelf
 }
 
+# ---- #773: the channel that exists BEFORE the compiler has a diagnostics sink.
+#
+# A failure that is not written as a record before it happens is invisible to `lomenterr`
+# by construction. The launcher is the one layer that always survives: a shell reports a
+# signal as 128+N, so it can name what killed the tool and synthesize a record that the
+# renderer *can* read. The code is E900 (internal range, separate from every user-facing
+# code) - "a tool died before it could report".
+signal_name() {
+    case "$1" in
+        129) printf '%s' SIGHUP ;;  130) printf '%s' SIGINT ;;
+        131) printf '%s' SIGQUIT ;; 132) printf '%s' SIGILL ;;
+        133) printf '%s' SIGTRAP ;; 134) printf '%s' SIGABRT ;;
+        135) printf '%s' SIGBUS ;;  136) printf '%s' SIGFPE ;;
+        137) printf '%s' SIGKILL ;; 139) printf '%s' SIGSEGV ;;
+        141) printf '%s' SIGPIPE ;; 143) printf '%s' SIGTERM ;;
+        *) printf '%s' "" ;;
+    esac
+}
+
+# $1 = the --diag-out file, $2 = the tool's plain stderr file, $3 = tool name,
+# $4 = the exit status the shell just saw. Writes ONE JSONL record (line 0 = no position,
+# docs/256) and appends a plain line for the no-renderer fallback.
+synthesize_diag() {
+    _sf=$1; _se=$2; _st=${3:-loment-driver}; _src=$4
+    _sname=
+    if [ "$_src" -gt 128 ]; then
+        _sname=$(signal_name "$_src")
+    fi
+    if [ -n "$_sname" ]; then
+        _smsg="$_st was killed by signal $((_src - 128)) ($_sname)"
+    else
+        _smsg="$_st exited with status $_src"
+    fi
+    _smsg="$_smsg and wrote no diagnostic record"
+    printf '{"file":"%s","line":0,"col":0,"code":"E900","message":"%s"}\n' \
+        "$_st" "$_smsg" > "$_sf" 2>/dev/null
+    printf 'loment: %s [E900]\n' "$_smsg" >> "$_se" 2>/dev/null
+}
+
 # Diagnostics. The driver writes its own plain summary to stderr AND, with `--diag-out`,
 # machine-readable records to a file. When the renderer `lomenterr` ships in this package we
 # feed it that file and let ITS output stand (it carries the title, the source line and the
@@ -168,11 +207,31 @@ find_lomelf() {
 report_diags() {
     # $3 is every renderer switch the caller collected (`--no-color` and/or
     # `--short` / `--json`), already space-joined - see the word-splitting note below.
-    dfile=$1; derr=$2; rflags=${3:-}
+    # $4 is the tool's exit status and $5 its name (#773): when it failed and left no
+    # record, synthesize one before rendering. That is the whole point of the second
+    # channel - a crash must not look like "nothing to report".
+    dfile=$1; derr=$2; rflags=${3:-}; drc=${4:-0}; dwho=${5:-loment-driver}
+    if [ "$drc" -ne 0 ] && [ ! -s "$dfile" ]; then
+        synthesize_diag "$dfile" "$derr" "$dwho" "$drc"
+    fi
     if [ -s "$dfile" ] && tool lomenterr >/dev/null 2>&1; then
         # Word-splitting on $rflags is intentional: empty -> no argument at all, and two
         # switches -> two arguments.
         "$(tool lomenterr)" $rflags "$dfile"
+        rrc=$?
+        if [ $rrc -le 1 ]; then
+            return 0
+        fi
+        # The renderer itself failed - the same boundary one level down (#773). Say it,
+        # and still show the compiler's plain lines: never lose the underlying error.
+        if [ $rrc -gt 128 ]; then
+            rsig=$(signal_name "$rrc")
+            [ -n "$rsig" ] && rsig=" ($rsig)"
+            echo "loment: lomenterr died (status $rrc$rsig) while rendering $dfile [E900]" >&2
+        else
+            echo "loment: lomenterr failed (status $rrc) while rendering $dfile [E900]" >&2
+        fi
+        [ -s "$derr" ] && cat "$derr" >&2
         return 0
     fi
     [ -s "$derr" ] && cat "$derr" >&2
@@ -286,7 +345,7 @@ case "${1:-help}" in
             "$(tool loment-driver)" "$(to_posix "$src")" --diag-out "$(to_posix "$dpath")" >/dev/null 2>"$tmp/e.txt" || rc=$?
         fi
         if [ $rc -ne 0 ]; then
-            report_diags "$dpath" "$tmp/e.txt" "$nc $om"
+            report_diags "$dpath" "$tmp/e.txt" "$nc $om" "$rc" "loment-driver"
             exit 1
         fi
         [ -s "$tmp/e.txt" ] && cat "$tmp/e.txt" >&2
@@ -382,7 +441,7 @@ case "${1:-help}" in
         lrc=0
         "$(tool loment-driver)" "$(to_posix "$src")" --diag-out "$tmp/d.jsonl" > "$tmp/a.ll" 2>"$tmp/e.txt" || rc=$?
         if [ $rc -ne 0 ]; then
-            report_diags "$tmp/d.jsonl" "$tmp/e.txt" "$nc $om"
+            report_diags "$tmp/d.jsonl" "$tmp/e.txt" "$nc $om" "$rc" "loment-driver"
             exit 1
         fi
         if [ "$mode" = run ]; then out="$tmp/a.bin"; fi
@@ -478,7 +537,7 @@ LOMENT_LIBCALLS_EOF
         # record its plain line is shown as is, never silently lost. Reusing the driver's
         # file is safe - on success the driver wrote nothing into it.
         if [ $lrc -ne 0 ]; then
-            report_diags "$tmp/d.jsonl" "$tmp/e2.txt" "$nc $om"
+            report_diags "$tmp/d.jsonl" "$tmp/e2.txt" "$nc $om" "$lrc" "loment-lomelf"
             exit 1
         fi
         if [ "$mode" = run ]; then
@@ -584,7 +643,7 @@ goto compile_only_done
 "%here%loment-driver.exe" "%csrc%" --diag-out "%dpath%" 2>"%dtmp%\e.txt"
 :compile_only_done
 set "crc=%ERRORLEVEL%"
-if not "%crc%"=="0" call :report_diags "%dpath%" "%dtmp%\e.txt" "%cnc% %com%"
+if not "%crc%"=="0" call :report_diags "%dpath%" "%dtmp%\e.txt" "%cnc% %com%" "%crc%" "loment-driver"
 if "%crc%"=="0" if exist "%dtmp%\e.txt" type "%dtmp%\e.txt" 1>&2
 if not defined cdout del /q "%dtmp%\d.jsonl" >nul 2>nul
 del /q "%dtmp%\e.txt" >nul 2>nul
@@ -732,7 +791,7 @@ set "tmp=%TEMP%\loment-b%RANDOM%%RANDOM%"
 mkdir "%tmp%" >nul 2>nul
 "%here%loment-driver.exe" "%src%" --diag-out "%tmp%\d.jsonl" > "%tmp%\a.ll" 2>"%tmp%\e.txt"
 set "drc=%ERRORLEVEL%"
-if not "%drc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e.txt" "%cnc% %com%"
+if not "%drc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e.txt" "%cnc% %com%" "%drc%" "loment-driver"
 if not "%drc%"=="0" goto fail
 rem `choose hosted` (docs/222 sec 4.4): the bash launcher reads this header marker and routes
 rem the unit to the host C toolchain. This launcher has no hosted path, and without the check
@@ -745,7 +804,7 @@ rem common one - :report_diags renders it with the title, the why and the fixes;
 rem writes no record its plain line is shown as is, never silently lost.
 "%here%loment-lomelf.exe" "%tmp%\a.ll" "%out%.exe" --diag-out "%tmp%\d.jsonl" %portarg% 2>"%tmp%\e2.txt"
 set "lrc=%ERRORLEVEL%"
-if not "%lrc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e2.txt" "%cnc% %com%"
+if not "%lrc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e2.txt" "%cnc% %com%" "%lrc%" "loment-lomelf"
 if not "%lrc%"=="0" goto fail
 goto done
 
@@ -754,14 +813,14 @@ set "tmp=%TEMP%\loment-r%RANDOM%%RANDOM%"
 mkdir "%tmp%" >nul 2>nul
 "%here%loment-driver.exe" "%src%" --diag-out "%tmp%\d.jsonl" > "%tmp%\a.ll" 2>"%tmp%\e.txt"
 set "drc=%ERRORLEVEL%"
-if not "%drc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e.txt" "%cnc% %com%"
+if not "%drc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e.txt" "%cnc% %com%" "%drc%" "loment-driver"
 if not "%drc%"=="0" goto fail
 rem Same marker check as the build path: a hosted unit is not a PE product (#633).
 findstr /b /l /c:"; loment-port: hosted" "%tmp%\a.ll" >nul 2>nul
 if "%ERRORLEVEL%"=="0" goto hosted_unit
 "%here%loment-lomelf.exe" "%tmp%\a.ll" "%tmp%\a.exe" --diag-out "%tmp%\d.jsonl" %portarg% 2>"%tmp%\e2.txt"
 set "lrc=%ERRORLEVEL%"
-if not "%lrc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e2.txt" "%cnc% %com%"
+if not "%lrc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e2.txt" "%cnc% %com%" "%lrc%" "loment-lomelf"
 if not "%lrc%"=="0" goto fail
 "%tmp%\a.exe"
 set "rc=%ERRORLEVEL%"
@@ -845,13 +904,24 @@ exit /b 2
 
 rem ---------------------------------------------------------------- diagnostics renderer
 rem Reached only via `call`; never fallen into (every label above exits).
-rem %1 = the --diag-out JSONL, %2 = the driver's captured stderr.
+rem %1 = the --diag-out JSONL, %2 = the driver's captured stderr, %3 = renderer flags,
+rem %4 = the tool's exit status, %5 = the tool's name.
 rem
-rem The driver always writes its own plain summary to stderr. When the renderer lomenterr
-rem ships in this package we feed it the records and use ITS output instead (title + source
-rem line + fix, docs/182 6). Without it we show the driver's plain lines AND say so --
-rem silently swapping the renderer is exactly what that contract forbids.
+rem #773: the channel that exists BEFORE the compiler has a diagnostics sink. A tool that
+rem failed and left no record is synthesized here as one E900 line (line 0 = no position,
+rem docs/256) so a crash cannot look like "nothing to report". Then, as before, the driver's
+rem plain summary is used only when the renderer is absent -- and we SAY so.
+rem
+rem NTSTATUS values are negative in cmd; compare them as STRINGS (the same reason the
+rem tool-failure checks below never use `if errorlevel 1`).
 :report_diags
+set "rf=0"
+if exist "%~1" for %%A in ("%~1") do if %%~zA GTR 0 set "rf=1"
+if "%rf%"=="1" goto report_have
+if "%~4"=="0" goto report_have
+if "%~4"=="" goto report_have
+call :synthesize_diag "%~1" "%~2" "%~5" "%~4"
+:report_have
 set "rf=0"
 if exist "%~1" for %%A in ("%~1") do if %%~zA GTR 0 set "rf=1"
 if "%rf%"=="1" if exist "%here%lomenterr.exe" goto report_render
@@ -862,9 +932,36 @@ exit /b 0
 :report_render
 if "%~3"=="" goto report_render_plain
 "%here%lomenterr.exe" %~3 "%~1"
-exit /b 0
+goto report_render_done
 :report_render_plain
 "%here%lomenterr.exe" "%~1"
+:report_render_done
+set "rrc=%ERRORLEVEL%"
+if "%rrc%"=="0" exit /b 0
+if "%rrc%"=="1" exit /b 0
+rem The renderer itself failed -- the same boundary one level down (#773). Say it, and
+rem still show the plain lines: never lose the underlying error.
+echo loment: lomenterr failed (status %rrc%) while rendering %~1 [E900] 1>&2
+if exist "%~2" type "%~2" 1>&2
+exit /b 0
+
+rem %1 = the --diag-out file, %2 = the tool's plain stderr file, %3 = tool name,
+rem %4 = the exit status cmd just saw. Writes one JSONL record (E900) and appends a plain
+rem line for the no-renderer fallback. Every message is ASCII (docs/169 sec 3a).
+:synthesize_diag
+set "stool=%~3"
+if "%stool%"=="" set "stool=loment-driver"
+set "sstat=%~4"
+set "smsg="
+if "%sstat%"=="-1073741819" set "smsg=%stool% was killed by an access violation (SIGSEGV)"
+if "%sstat%"=="-1073741795" set "smsg=%stool% was killed by an illegal instruction (SIGILL)"
+if "%sstat%"=="-1073741676" set "smsg=%stool% was killed by an integer divide by zero (SIGFPE)"
+if "%sstat%"=="-1073741571" set "smsg=%stool% was killed by a stack overflow"
+if "%sstat%"=="-1073740791" set "smsg=%stool% was killed by a stack buffer overrun"
+if not defined smsg set "smsg=%stool% exited with status %sstat%"
+set "smsg=%smsg% and wrote no diagnostic record"
+echo {"file":"%stool%","line":0,"col":0,"code":"E900","message":"%smsg%"} > "%~1"
+echo loment: %smsg% [E900] >> "%~2"
 exit /b 0
 
 rem %1 = one argument from the command line; sets csrc (the only non-command, non-flag

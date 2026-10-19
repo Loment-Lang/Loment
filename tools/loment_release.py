@@ -284,6 +284,10 @@ GLOBS = [
     # **一个目录**, 所以同样要逐条列 (单层的 `loment/examples/*.lomt` 收不到子目录)。
     "loment/examples/cproject/*.lomt",
     "loment/examples/cproject/README.md",
+    # `natural` 的构造示例（#350）：每份 `.nl` 与旁边翻译出来的 `.lomt` 都要随包发 ——
+    # 读者照着一份`.nl` 看 `.lomt`，而判据要求两份都在。
+    "loment/examples/natural/*.nl",
+    "loment/examples/natural/*.lomt",
     # 外部代码块的**词法**语料 (S1): 只喂两个词法器, 不是可编单元。
     "loment/extblock/*.lomt",
     # **词法**语料: 只有词法器才看得见的形状。**故意不放进 `loment/examples/`** ——

@@ -275,41 +275,52 @@ def test_hosted_and_gc_auto_compose():
 
 @test
 def test_lms_rescue_only_exists_when_a_collector_does():
-    """`lms` 的"收一次再试"只在真有收集器时出现 —— `gc_manual` 下它是一句空话（`docs/253` §5.3）。"""
+    """`lms` 的"收一次再试"只在真有收集器时出现 —— `gc_manual` 下它是一句空话（`docs/253` §5.3）。
+
+    取值从 `CORE_DIMS["lms"]` 读、只比较两个取值的**行为差异**，不写死档名 ——
+    这样改档名（如 `lms_*` 增档或重命名）不需要动这条判据，也不会两边各改一半。
+    """
+    values = lomentc.CORE_DIMS["lms"]
+    assert len(values) == 2, f"lms 期望两档，实际 {values}"
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
         sizes = {}
         for gc in ("gc_manual", "gc_auto"):
-            for lms in ("lms_close", "lms_open"):
+            for lms in values:
                 cell = {"mode": "std", "gc": gc, "runtime": "runtime", "lms": lms}
                 rc, diag, ir, pot = _emit(td, f"{gc}-{lms}", cell, ALLOC_BODY)
                 assert rc == 0, f"{gc}+{lms}: 编不过\n{diag[-400:]}"
                 assert pot.get("lms") == lms
                 sizes[(gc, lms)] = len(ir)
-    assert sizes[("gc_manual", "lms_open")] == sizes[("gc_manual", "lms_close")], \
-        "gc_manual 下 lms_open 改变了产物 —— 没有收集器可'拉回', 这一级不该有代码"
-    assert sizes[("gc_auto", "lms_open")] != sizes[("gc_auto", "lms_close")], \
-        "gc_auto 下 lms_open 没有改变产物 —— 第 3 级入口 A 没接上"
-    print(f"      manual 下无差别; auto 下 {sizes[('gc_auto', 'lms_close')]} -> "
-          f"{sizes[('gc_auto', 'lms_open')]} B")
+    a, b = values
+    assert sizes[("gc_manual", a)] == sizes[("gc_manual", b)], \
+        f"gc_manual 下 lms 两档产物不同（{a} vs {b}）—— 没有收集器可'拉回', 这一级不该有代码"
+    assert sizes[("gc_auto", a)] != sizes[("gc_auto", b)], \
+        f"gc_auto 下 lms 两档产物相同（{a} / {b}）—— 第 3 级入口 A 没接上"
+    print(f"      manual 下无差别; auto 下 {a}={sizes[('gc_auto', a)]} / "
+          f"{b}={sizes[('gc_auto', b)]} B")
 
 
 @test
 def test_lspe_audit_switch_changes_the_ledger_not_the_code():
-    """关审计只改台账、不改一行代码（`docs/262` §10.1；`#943`）。"""
+    """关审计只改台账、不改一行代码（`docs/262` §10.1；`#943`）。
+
+    取值从 `CORE_DIMS["lspe"]` 读，不写死档名 —— 与上一条同一条纪律。
+    """
+    values = lomentc.CORE_DIMS["lspe"]
+    assert len(values) == 2, f"lspe 期望两档，实际 {values}"
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
         got = {}
-        for lspe in ("lspe_open_admin", "lspe_close_admin"):
+        for lspe in values:
             cell = {"mode": "std", "gc": "gc_manual", "runtime": "runtime", "lspe": lspe}
             rc, diag, ir, pot = _emit(td, lspe, cell, ALLOC_BODY)
             assert rc == 0, f"{lspe}: 编不过\n{diag[-400:]}"
             got[lspe] = (ir, (pot.get("lspe") or {}).get("state"))
-    (ir_open, state_open), (ir_close, state_close) = (
-        got["lspe_open_admin"], got["lspe_close_admin"])
-    assert state_open == "lspe_open_admin" and state_close == "lspe_close_admin", \
-        f"Potato 没记对审计开关: {state_open!r} / {state_close!r}"
-    assert ir_open == ir_close, "关审计改变了产物 —— 它只该改变台账"
+    (ir_a, state_a), (ir_b, state_b) = (got[v] for v in values)
+    assert (state_a, state_b) == tuple(values), \
+        f"Potato 没记对审计开关: {state_a!r} / {state_b!r}（期望 {values}）"
+    assert ir_a == ir_b, "审计开关改变了产物 —— 它只该改变台账"
     print("      台账状态跟着开关走，IR 逐字节相同")
 
 
@@ -327,14 +338,15 @@ def test_gc_vm_lspe_and_lvm_agree_on_every_tier():
     * `lvm`：VM 跑出的退出码/输出必须与 `lomelf` 原生产物**逐字节相同**。
     """
     expected_rc = 13
+    lspe_alt = lomentc.CORE_DIMS["lspe"][1]
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
         for gc in ("gc_manual", "gc_auto", "gc_auto_alpha"):
             variants = {
                 "plain": {},
                 "vm": {"vm": "vm"},
-                "lspe_close": {"lspe": "lspe_close_admin"},
-                "vm+lspe_close": {"vm": "vm", "lspe": "lspe_close_admin"},
+                "lspe_alt": {"lspe": lspe_alt},
+                "vm+lspe_alt": {"vm": "vm", "lspe": lspe_alt},
             }
             irs = {}
             for name, extra in variants.items():
@@ -351,8 +363,8 @@ def test_gc_vm_lspe_and_lvm_agree_on_every_tier():
             base = irs["plain"]
             assert irs["vm"] == base, \
                 f"{gc}: `choose vm` 改变了 IR —— vm 维开始驱动产物，登记处要重走（docs/231 §2.2）"
-            assert irs["lspe_close"] == base, f"{gc}: 关审计改变了 IR"
-            assert irs["vm+lspe_close"] == base, f"{gc}: vm + 关审计组合改变了 IR"
+            assert irs["lspe_alt"] == base, f"{gc}: 另一档审计改变了 IR"
+            assert irs["vm+lspe_alt"] == base, f"{gc}: vm + 另一档审计组合改变了 IR"
 
             buf = io.BytesIO()
             rc_vm = lvm.run_ir(base, buf, None, ["probe"])

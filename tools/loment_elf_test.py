@@ -2659,12 +2659,16 @@ def test_lomelf_selfhost_links_a_real_shared_object():
 
 @test
 def test_the_mirror_linker_refuses_ports_without_the_dev_flag():
-    """自举链接器的**端口门**（`docs/222` §4）：同一份带端口的外源对象，不给
-    `--allow-ports` 就**必须拒**。
+    """自举链接器的**端口门**（`docs/222` §4）：解析之后**仍然悬空**的外源符号，
+    不给 `--allow-ports` 就**必须拒**；收编面能提供的不算端口（`#615`）。
 
     参考侧那条在 `loment_ffi_test::test_the_port_gate_refuses_by_default_...`；这一条是它
     的孪生。**为什么非要有**：包里装的是**自举**那一只链接器 —— 只有它也拒，
     "0.1.4.5 里 libc 不可调用"才是真的。参考拒、自举收，是最坏的那种分叉。
+
+    ⚠ 夹具与参考侧同一次换过（`#615`）：`memcpy`/`memset`/`memcmp` 由收编面提供、
+    解析之后不再悬空 —— 拿它们测门等于把"提过一个名字"当成"通向世界"。所以**两份都要测**：
+    `cons.o` 不给旗必须**收**（`#615` 的正面），`port.o`（调 `time`）不给旗必须**拒**。
     """
     if not (_clang() and _wsl()):
         print("      SKIP: 无 clang/WSL")
@@ -2673,28 +2677,38 @@ def test_the_mirror_linker_refuses_ports_without_the_dev_flag():
     td = Path(tempfile.mkdtemp(prefix="mf_"))
     bld = ROOT / "loment" / "build"
     bld.mkdir(parents=True, exist_ok=True)
-    tag = "portgate"
-    src = td / f"{tag}.lomt"
+    src = td / "portgate.lomt"
     src.write_text(ffitest.LOMENT_CONSCRIPT_SOURCE, encoding="utf-8", newline="\n")
     ll = _ref_ir(src, td)
     (td / "cons.c").write_text(ffitest.C_CONSCRIPT_SOURCE, encoding="utf-8", newline="\n")
     assert ffitest.compile_c(_clang(), td / "cons.c", td / "cons.o") == 0
-    llrepo = bld / f"_mirror_{tag}.ll"
-    elfrepo = bld / f"_mirror_{tag}.elf"
-    objrepo = ROOT / f"loment/build/_mirror_{tag}_cons.o"
+    (td / "port.c").write_text(ffitest.C_PORT_SOURCE, encoding="utf-8", newline="\n")
+    assert ffitest.compile_c(_clang(), td / "port.c", td / "port.o") == 0
+    llrepo = bld / "_mirror_portgate.ll"
+    consrepo = bld / "_mirror_portgate_cons.o"
+    portrepo = bld / "_mirror_portgate_port.o"
     try:
         llrepo.write_bytes(ll.read_bytes())
-        objrepo.write_bytes((td / "cons.o").read_bytes())
-        rc, err = _mirror_run(mir, f"loment/build/_mirror_{tag}.ll",
-                              f"loment/build/_mirror_{tag}.elf",
-                              (f"loment/build/_mirror_{tag}_cons.o",), ports=False)
-        assert rc != 0, (
+        consrepo.write_bytes((td / "cons.o").read_bytes())
+        portrepo.write_bytes((td / "port.o").read_bytes())
+        rc, err = _mirror_run(mir, "loment/build/_mirror_portgate.ll",
+                              "loment/build/_mirror_portgate_cons.elf",
+                              ("loment/build/_mirror_portgate_cons.o",), ports=False)
+        assert rc == 0, (
+            "收编面能提供的名字被自举链接器当成了端口 —— 解析之后它根本不悬空（`#615`）："
+            + err[-300:])
+        rc2, err2 = _mirror_run(mir, "loment/build/_mirror_portgate.ll",
+                                "loment/build/_mirror_portgate_port.elf",
+                                ("loment/build/_mirror_portgate_port.o",), ports=False)
+        assert rc2 != 0, (
             "自举链接器**没有**端口门 —— 带未定义符号的对象照收，于是包里的 "
             "`loment build --link` 又把 libc 放进来了（`docs/222` §4）")
-        print("      自举链接器：不给 --allow-ports 就拒带端口的对象")
+        assert "undefined symbols" in err2, f"拒绝理由没说出端口：{err2[-300:]}"
+        print("      自举链接器：收编面默认收；真正悬空的符号不给 --allow-ports 就拒")
     finally:
-        for p in (llrepo, elfrepo, objrepo):
-            p.unlink(missing_ok=True)
+        for q in (llrepo, consrepo, portrepo,
+                  bld / "_mirror_portgate_cons.elf", bld / "_mirror_portgate_port.elf"):
+            q.unlink(missing_ok=True)
 
 
 #: `#366` 的语料：刻 N 个块（**一个 `free` 都不写**）→ 用大块把累计请求推过触发阈值、逼出

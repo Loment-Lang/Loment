@@ -1461,12 +1461,18 @@ const PT_GLSCR: u32 = 114448;       // `l1_ptr_only_at` 的 `out`（它要写"�
 // `docs/210` §7 那次放宽的**安全名表**（`[count, name_tok…]`，与 codegen 的 `CG_SAFE` 同形）。
 // 由 codegen 的 **`compute_safe`** 填（potato `use codegen`，两边共用同一支扫描 ⇒ 同一集合）。
 const PT_GLSAFE: u32 = 114456;
+/// 首参是 `ptr` 的函数名 token 表: `[count, name_tok_1, …]`，最多 1024 条。
+/// E4 的调用点普查用它；超容量是**点名的失败**（`pt_lspe_engine` 回 1）。
+const PT_PTRFIRST: u32 = 132864;
+/// E3/E4 的十个计数：free_t/free_p, alive_t/alive_p, init_t/init_p,
+/// excl_t/excl_p, call_t/call_p（各 4 字节）。
+const PT_L3CNT: u32 = 136964;
 const PT_TN: u32 = 46760;          // 收进池子的类型串条数（= 映射表条数）
 const PT_TCUR: u32 = 46764;        // 池子游标
 const PT_TMAX: u32 = 128;
 const PT_TSTRIDE: u32 = 64;
 const PT_TBUF_SZ: u32 = 256;
-const PT_SC_BYTES: u64 = 132864;    // 含上面的安全名表 ((1 + 4600) × 4)
+const PT_SC_BYTES: u64 = 137008;    // 含安全名表 ((1 + 4600) × 4) + 首参表 + E3/E4 计数
 
 /// 一个类型串在池子里的位置（`i` 是池子下标）。
 fn pt_tkey(sc: ptr, i: u32) -> u32 {
@@ -2197,6 +2203,320 @@ fn pt_lspe_index_proved(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
     return n;
 }
 
+/// E3（局部流）+ E4（过程间摘要）的普查（`docs/262` §5.4）。**一个函数**装下全部
+/// —— 自举侧每加一个函数 ≈ +4.7s（`loment_channel_test` 那条护栏注释），所以这里
+/// 不拆小函数，重复的 token 文本比较就地展开。
+///
+/// 规则与参考实现 `_lspe_census_e3` / `_lspe_census_e4` **逐条同形**：
+///   * 线性 CFG：语句按 token 顺序执行；`return` 之后同块/外层块的读不可达；
+///   * `free(x)`：`let x: ptr = alloc(...)` 且之后没有**可达**的用 ⇒ `FreeOwnership`；
+///   * 之后的每次用 ⇒ `Alive`，不可达才证；
+///   * `let x: T;` 之后赋值前的读 ⇒ `Initialized`，赋值后证；
+///   * `&mut x` 与同一语句里的另一次同名用重叠 ⇒ `Exclusive` 不证；
+///   * 首参是 `ptr` 的函数的每个调用点 ⇒ `SummaryContract`，安全表里有摘要才证。
+///
+/// `out` 十个 u32 见 `PT_L3CNT`。返回 1 = 首参表超容量（调用方 `pt_wfail`）。
+fn pt_lspe_engine(unit: ptr, t: ptr, lo: u32, hi: u32,
+                  sft: ptr, pft: ptr, out: ptr) -> u32 {
+    let q: u32 = 0;
+    while q < 10 {
+        store32(out, q * 4, 0);
+        q = q + 1;
+    }
+    store32(pft, 0, 0);
+    // ---- 每个函数：首参表 + 体内 E3 ----
+    let i: u32 = lo;
+    while i < hi && pt_kind(t, i) != 4 {
+        if pt_kind(t, i) == 0 && pt_tis(unit, t, i, "fn") == 1
+                && !(i > lo && pt_tis(unit, t, i - 1, "extern") == 1) {
+            // 形参表的 `(` / `)`（跳过 `<...>`）
+            let lp: u32 = PT_NONE;
+            let k: u32 = i + 2;
+            let g: u32 = 0;
+            while k < hi && pt_kind(t, k) != 4 && g < 64 && lp == PT_NONE {
+                if pt_kind(t, k) == 3 && pt_tis(unit, t, k, "(") == 1 {
+                    lp = k;
+                }
+                if pt_kind(t, k) == 3 && (pt_tis(unit, t, k, ";") == 1
+                        || pt_tis(unit, t, k, "{") == 1) {
+                    g = 64;
+                }
+                k = k + 1;
+            }
+            let rp: u32 = PT_NONE;
+            if lp != PT_NONE {
+                let d: u32 = 0;
+                let j: u32 = lp;
+                while j < hi && pt_kind(t, j) != 4 && rp == PT_NONE {
+                    if pt_kind(t, j) == 3 && pt_tis(unit, t, j, "(") == 1 {
+                        d = d + 1;
+                    }
+                    if pt_kind(t, j) == 3 && pt_tis(unit, t, j, ")") == 1 {
+                        d = d - 1;
+                        if d == 0 {
+                            rp = j;
+                        }
+                    }
+                    j = j + 1;
+                }
+            }
+            // 首参是 `ptr` ⇒ 记进表
+            if rp != PT_NONE && lp + 3 < hi && pt_kind(t, lp + 1) == 0
+                    && pt_tis(unit, t, lp + 1, "self") == 0
+                    && pt_tis(unit, t, lp + 2, ":") == 1
+                    && pt_tis(unit, t, lp + 3, "ptr") == 1 {
+                let c: u32 = load32(pft, 0);
+                if c >= 1024 {
+                    return 1;
+                }
+                store32(pft, (c + 1) * 4, i + 1);
+                store32(pft, 0, c + 1);
+            }
+            // 函数体
+            let b: u32 = rp + 1;
+            let g2: u32 = 0;
+            while b < hi && pt_kind(t, b) != 4 && g2 < 256
+                    && pt_tis(unit, t, b, "{") == 0 && pt_tis(unit, t, b, ";") == 0 {
+                b = b + 1;
+                g2 = g2 + 1;
+            }
+            if pt_kind(t, b) != 4 && pt_tis(unit, t, b, "{") == 1 {
+                let body_at: u32 = b + 1;
+                let body_end: u32 = skip_block(unit, t, b) - 1;
+                let a: u32 = body_at;
+                while a < body_end {
+                    // ---- free(x) + 之后的用 ----
+                    if pt_kind(t, a) == 0 && pt_tis(unit, t, a, "free") == 1
+                            && pt_tis(unit, t, a + 1, "(") == 1
+                            && pt_kind(t, a + 2) == 0
+                            && pt_tis(unit, t, a + 3, ")") == 1 {
+                        let owned: u32 = 0;
+                        let kk: u32 = a;
+                        let stop: u32 = 0;
+                        while kk > body_at && stop == 0 {
+                            kk = kk - 1;
+                            let eq: u32 = 0;
+                            if pt_kind(t, kk) == 0 && pt_kind(t, kk) == pt_kind(t, a + 2) {
+                                eq = 1;
+                                let z: u32 = 0;
+                                while z < pt_tlen(t, a + 2) {
+                                    if load8(unit, pt_off(t, kk) + z)
+                                            != load8(unit, pt_off(t, a + 2) + z) {
+                                        eq = 0;
+                                    }
+                                    z = z + 1;
+                                }
+                            }
+                            if eq == 1 && kk > body_at
+                                    && pt_tis(unit, t, kk - 1, "let") == 1 {
+                                stop = 1;
+                                if kk + 5 < hi && pt_tis(unit, t, kk + 1, ":") == 1
+                                        && pt_tis(unit, t, kk + 2, "ptr") == 1
+                                        && pt_tis(unit, t, kk + 3, "=") == 1
+                                        && pt_tis(unit, t, kk + 4, "alloc") == 1
+                                        && pt_tis(unit, t, kk + 5, "(") == 1 {
+                                    owned = 1;
+                                }
+                            }
+                        }
+                        let reach: u32 = 0;
+                        let j: u32 = a + 4;
+                        while j < body_end {
+                            let eq: u32 = 0;
+                            if pt_kind(t, j) == 0 && pt_kind(t, j) == pt_kind(t, a + 2) {
+                                eq = 1;
+                                let z: u32 = 0;
+                                while z < pt_tlen(t, a + 2) {
+                                    if load8(unit, pt_off(t, j) + z)
+                                            != load8(unit, pt_off(t, a + 2) + z) {
+                                        eq = 0;
+                                    }
+                                    z = z + 1;
+                                }
+                            }
+                            if eq == 1 && !(j > body_at
+                                            && pt_tis(unit, t, j - 1, "let") == 1)
+                                    && !(j + 2 < hi && pt_tis(unit, t, j + 1, "=") == 1
+                                         && pt_tis(unit, t, j + 2, "=") == 0) {
+                                let dead: u32 = 0;
+                                let d3: u32 = 0;
+                                let z: u32 = j - 1;
+                                while z > a + 3 {
+                                    if pt_kind(t, z) == 3 && pt_tis(unit, t, z, "}") == 1 {
+                                        d3 = d3 + 1;
+                                    } else if pt_kind(t, z) == 3
+                                            && pt_tis(unit, t, z, "{") == 1 {
+                                        if d3 > 0 {
+                                            d3 = d3 - 1;
+                                        }
+                                    } else if pt_kind(t, z) == 0 && d3 == 0
+                                            && pt_tis(unit, t, z, "return") == 1 {
+                                        dead = 1;
+                                    }
+                                    z = z - 1;
+                                }
+                                store32(out, 8, load32(out, 8) + 1);
+                                if dead == 1 {
+                                    store32(out, 12, load32(out, 12) + 1);
+                                } else {
+                                    reach = 1;
+                                }
+                            }
+                            j = j + 1;
+                        }
+                        store32(out, 0, load32(out, 0) + 1);
+                        if owned == 1 && reach == 0 {
+                            store32(out, 4, load32(out, 4) + 1);
+                        }
+                    }
+                    // ---- let x: T; 之后的读 ----
+                    if pt_kind(t, a) == 0 && pt_tis(unit, t, a, "let") == 1
+                            && pt_kind(t, a + 1) == 0 {
+                        let dp: u32 = 0;
+                        let init: u32 = 0;
+                        let sem: u32 = PT_NONE;
+                        let j: u32 = a + 2;
+                        while j < body_end && sem == PT_NONE {
+                            if pt_kind(t, j) == 3 {
+                                if pt_tis(unit, t, j, "(") == 1
+                                        || pt_tis(unit, t, j, "[") == 1
+                                        || pt_tis(unit, t, j, "{") == 1 {
+                                    dp = dp + 1;
+                                } else if pt_tis(unit, t, j, ")") == 1
+                                        || pt_tis(unit, t, j, "]") == 1
+                                        || pt_tis(unit, t, j, "}") == 1 {
+                                    if dp > 0 {
+                                        dp = dp - 1;
+                                    }
+                                } else if dp == 0 && pt_tis(unit, t, j, "=") == 1 {
+                                    if pt_tis(unit, t, j + 1, "=") == 0 {
+                                        init = 1;
+                                    }
+                                } else if dp == 0 && pt_tis(unit, t, j, ";") == 1 {
+                                    sem = j;
+                                }
+                            }
+                            j = j + 1;
+                        }
+                        if sem != PT_NONE && init == 0 {
+                            let assigned: u32 = 0;
+                            let k2: u32 = sem + 1;
+                            let stop: u32 = 0;
+                            while k2 < body_end && stop == 0 {
+                                if pt_kind(t, k2) == 0
+                                        && pt_tis(unit, t, k2, "let") == 1 {
+                                    let eq: u32 = 0;
+                                    if k2 + 1 < hi
+                                            && pt_kind(t, k2 + 1) == pt_kind(t, a + 1) {
+                                        eq = 1;
+                                        let z: u32 = 0;
+                                        while z < pt_tlen(t, a + 1) {
+                                            if load8(unit, pt_off(t, k2 + 1) + z)
+                                                    != load8(unit, pt_off(t, a + 1) + z) {
+                                                eq = 0;
+                                            }
+                                            z = z + 1;
+                                        }
+                                    }
+                                    if eq == 1 {
+                                        stop = 1;
+                                    }
+                                } else if pt_kind(t, k2) == 0 {
+                                    let eq: u32 = 0;
+                                    if pt_kind(t, k2) == pt_kind(t, a + 1) {
+                                        eq = 1;
+                                        let z: u32 = 0;
+                                        while z < pt_tlen(t, a + 1) {
+                                            if load8(unit, pt_off(t, k2) + z)
+                                                    != load8(unit, pt_off(t, a + 1) + z) {
+                                                eq = 0;
+                                            }
+                                            z = z + 1;
+                                        }
+                                    }
+                                    if eq == 1 {
+                                        if k2 + 2 < hi
+                                                && pt_tis(unit, t, k2 + 1, "=") == 1
+                                                && pt_tis(unit, t, k2 + 2, "=") == 0 {
+                                            assigned = 1;
+                                        } else {
+                                            store32(out, 16, load32(out, 16) + 1);
+                                            if assigned == 1 {
+                                                store32(out, 20, load32(out, 20) + 1);
+                                            }
+                                        }
+                                    }
+                                }
+                                k2 = k2 + 1;
+                            }
+                        }
+                    }
+                    // ---- &mut x 与同一语句里的另一次用 ----
+                    if pt_kind(t, a) == 3 && pt_tis(unit, t, a, "&") == 1
+                            && pt_kind(t, a + 1) == 0
+                            && pt_tis(unit, t, a + 1, "mut") == 1
+                            && pt_kind(t, a + 2) == 0 {
+                        let other: u32 = 0;
+                        let k3: u32 = a + 3;
+                        let stop: u32 = 0;
+                        while k3 < body_end && stop == 0 {
+                            if pt_kind(t, k3) == 3 && pt_tis(unit, t, k3, ";") == 1 {
+                                stop = 1;
+                            } else if pt_kind(t, k3) == 0 {
+                                let eq: u32 = 0;
+                                if pt_kind(t, k3) == pt_kind(t, a + 2) {
+                                    eq = 1;
+                                    let z: u32 = 0;
+                                    while z < pt_tlen(t, a + 2) {
+                                        if load8(unit, pt_off(t, k3) + z)
+                                                != load8(unit, pt_off(t, a + 2) + z) {
+                                            eq = 0;
+                                        }
+                                        z = z + 1;
+                                    }
+                                }
+                                if eq == 1 {
+                                    other = 1;
+                                }
+                            }
+                            k3 = k3 + 1;
+                        }
+                        store32(out, 24, load32(out, 24) + 1);
+                        if other == 0 {
+                            store32(out, 28, load32(out, 28) + 1);
+                        }
+                    }
+                    a = a + 1;
+                }
+                i = body_end;
+            }
+        }
+        i = i + 1;
+    }
+    // ---- E4：全单元调用点（`name(` 且 name 在首参表里） ----
+    let i4: u32 = lo;
+    while i4 < hi && pt_kind(t, i4) != 4 {
+        if pt_kind(t, i4) == 0 && pt_tis(unit, t, i4 + 1, "(") == 1
+                && pt_lspe_kw(unit, t, i4) == 0
+                && pt_tis(unit, t, i4, "extern") == 0
+                && pt_tis(unit, t, i4, "true") == 0
+                && pt_tis(unit, t, i4, "false") == 0
+                && pt_tis(unit, t, i4, "self") == 0
+                && !(i4 > lo && (pt_tis(unit, t, i4 - 1, ".") == 1
+                        || pt_tis(unit, t, i4 - 1, ":") == 1
+                        || pt_tis(unit, t, i4 - 1, "fn") == 1)) {
+            if safe_by_tok(unit, t, i4, pft) == 1 {
+                store32(out, 32, load32(out, 32) + 1);
+                if safe_by_tok(unit, t, i4, sft) == 1 {
+                    store32(out, 36, load32(out, 36) + 1);
+                }
+            }
+        }
+        i4 = i4 + 1;
+    }
+    return 0;
+}
+
 fn pt_lspe_state(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
     if pt_lspe_val(unit, t, lo, hi) == 2 {
         return pt_qs(out, o, "lspe_close_admin");
@@ -2204,7 +2524,7 @@ fn pt_lspe_state(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
     return pt_qs(out, o, "lspe_open_admin");
 }
 
-fn pt_lspe(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
     let closed: u32 = 0;
     if pt_lspe_val(unit, t, lo, hi) == 2 {
         closed = 1;
@@ -2212,13 +2532,33 @@ fn pt_lspe(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
     let gt: u32 = 0;
     let it: u32 = 0;
     let ip: u32 = 0;
+    let ft: u32 = 0;
+    let fp: u32 = 0;
+    let alt: u32 = 0;
+    let alp: u32 = 0;
+    let nt: u32 = 0;
+    let np: u32 = 0;
+    let et: u32 = 0;
+    let ep: u32 = 0;
+    let ct: u32 = 0;
+    let cp: u32 = 0;
     if closed == 0 {
         gt = pt_lspe_guard_total(unit, t, lo, hi);
         it = pt_lspe_index_total(unit, t, lo, hi);
         ip = pt_lspe_index_proved(unit, t, lo, hi);
+        ft = load32(sc, PT_L3CNT + 0);
+        fp = load32(sc, PT_L3CNT + 4);
+        alt = load32(sc, PT_L3CNT + 8);
+        alp = load32(sc, PT_L3CNT + 12);
+        nt = load32(sc, PT_L3CNT + 16);
+        np = load32(sc, PT_L3CNT + 20);
+        et = load32(sc, PT_L3CNT + 24);
+        ep = load32(sc, PT_L3CNT + 28);
+        ct = load32(sc, PT_L3CNT + 32);
+        cp = load32(sc, PT_L3CNT + 36);
     }
-    let nsite: u32 = gt + it;
-    let nproved: u32 = gt + ip;
+    let nsite: u32 = gt + it + ft + alt + nt + et + ct;
+    let nproved: u32 = gt + ip + fp + alp + np + ep + cp;
     let nund: u32 = nsite - nproved;
     o = pt_str(out, o, "{\n");
     o = pt_key(out, o, 2, "state");
@@ -2276,28 +2616,93 @@ fn pt_lspe(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
     o = pt_str(out, o, "}");
     o = pt_str(out, o, ",\n");
     o = pt_key(out, o, 2, "per_kind");
-    if gt == 0 && it == 0 {
+    if nsite == 0 {
         o = pt_str(out, o, "{}");
     } else {
         o = pt_str(out, o, "{\n");
+        // 键按**字典序**（参考实现 `sorted(per_kind)`）：Alive / Exclusive /
+        // FreeOwnership / GuardHolds / InBounds / Initialized / SummaryContract。
+        let first: u32 = 1;
+        if alt > 0 {
+            o = pt_key(out, o, 3, "Alive");
+            o = pt_str(out, o, "\"");
+            o = pt_dec(out, o, alp as u64);
+            o = pt_str(out, o, "/");
+            o = pt_dec(out, o, alt as u64);
+            o = pt_str(out, o, "\"");
+            first = 0;
+        }
+        if et > 0 {
+            if first == 0 {
+                o = pt_str(out, o, ",\n");
+            }
+            o = pt_key(out, o, 3, "Exclusive");
+            o = pt_str(out, o, "\"");
+            o = pt_dec(out, o, ep as u64);
+            o = pt_str(out, o, "/");
+            o = pt_dec(out, o, et as u64);
+            o = pt_str(out, o, "\"");
+            first = 0;
+        }
+        if ft > 0 {
+            if first == 0 {
+                o = pt_str(out, o, ",\n");
+            }
+            o = pt_key(out, o, 3, "FreeOwnership");
+            o = pt_str(out, o, "\"");
+            o = pt_dec(out, o, fp as u64);
+            o = pt_str(out, o, "/");
+            o = pt_dec(out, o, ft as u64);
+            o = pt_str(out, o, "\"");
+            first = 0;
+        }
         if gt > 0 {
-            o = pt_key(out, o, 3, "guard");
+            if first == 0 {
+                o = pt_str(out, o, ",\n");
+            }
+            o = pt_key(out, o, 3, "GuardHolds");
             o = pt_str(out, o, "\"");
             o = pt_dec(out, o, gt as u64);
             o = pt_str(out, o, "/");
             o = pt_dec(out, o, gt as u64);
             o = pt_str(out, o, "\"");
-            if it > 0 {
-                o = pt_str(out, o, ",\n");
-            }
+            first = 0;
         }
         if it > 0 {
-            o = pt_key(out, o, 3, "index");
+            if first == 0 {
+                o = pt_str(out, o, ",\n");
+            }
+            o = pt_key(out, o, 3, "InBounds");
             o = pt_str(out, o, "\"");
             o = pt_dec(out, o, ip as u64);
             o = pt_str(out, o, "/");
             o = pt_dec(out, o, it as u64);
             o = pt_str(out, o, "\"");
+            first = 0;
+        }
+        if nt > 0 {
+            if first == 0 {
+                o = pt_str(out, o, ",\n");
+            }
+            o = pt_key(out, o, 3, "Initialized");
+            o = pt_str(out, o, "\"");
+            o = pt_dec(out, o, np as u64);
+            o = pt_str(out, o, "/");
+            o = pt_dec(out, o, nt as u64);
+            o = pt_str(out, o, "\"");
+            first = 0;
+        }
+        if ct > 0 {
+            if first == 0 {
+                o = pt_str(out, o, ",\n");
+            }
+            o = pt_key(out, o, 3, "SummaryContract");
+            o = pt_str(out, o, "\"");
+            o = pt_dec(out, o, cp as u64);
+            o = pt_str(out, o, "/");
+            o = pt_dec(out, o, ct as u64);
+            o = pt_str(out, o, "\"");
+            first = 0;
         }
         o = pt_str(out, o, "\n");
         o = pt_ind(out, o, 2);
@@ -5280,6 +5685,12 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     // **跨函数 deref-only 安全表**（`docs/210` §7）—— codegen 的 `compute_safe`（potato
     // `use codegen`）。与 codegen 那边**同一支扫描**，于是 gc_ladder 四层与发射路径一致。
     let _sft: u32 = compute_safe(unit, t, ptr_add(sc, PT_GLSAFE));
+    // E3/E4 的站点普查**在写对象之前**做完 —— 超容量是点名的失败（`pt_wfail`），
+    // 不能在一半对象已经写出去之后再说。
+    if pt_lspe_engine(unit, t, lo, hi, ptr_add(sc, PT_GLSAFE),
+                      ptr_add(sc, PT_PTRFIRST), ptr_add(sc, PT_L3CNT)) == 1 {
+        return pt_wfail("--emit-potato: more functions with a pointer first parameter than this section takes (1024)");
+    }
     store32(sc, PT_N, 0);
     store32(sc, PT_PC, 0);
     store32(sc, PT_EN, 0);
@@ -5427,7 +5838,7 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     // v16（`docs/262`）：LSPE 台账。**必填**，紧跟在 `lms` 之后 ——
     // ⚠ **次序是判据**：参考实现那边 `"lspe"` 紧跟在 `"lms"` 之后，两串字节逐字节比。
     o = pt_key(out, o, 1, "lspe");
-    o = pt_lspe(out, o, unit, t, lo, hi);
+    o = pt_lspe(out, o, sc, unit, t, lo, hi);
     o = pt_str(out, o, ",\n");
     o = pt_key(out, o, 1, "switches");
     o = pt_aopen(out, o, ndf);

@@ -5419,7 +5419,7 @@ class ForeignObject:
 
     * 重定位类型不认识 → 报错 (猜的后果是"跳到错地址", 那是运行期崩溃而不是编译期报错);
     * 重定位指向**非代码节** (`.data`/`.rodata`) → 报错 —— 本档只摆代码节;
-    * 一个符号**有重定位引用它、但到链接结束都没人定义** → 报错 (第 2 阶段仍不链 libc)。
+    * 一个符号**有重定位引用它、但到链接结束都没人定义** → 报错 (点名怎么补)。
 
     **未定义符号本身不再是错误**: 它可能由**另一个对象**提供 —— 这正是多目标文件 C 库的
     形状 (`a.o` 调 `b.o`)。判定推迟到"所有对象都摆好、符号表建好之后"。
@@ -6528,8 +6528,8 @@ def compile_ll(text: str, objects: list | None = None,
                 # **到这一步才判"没人定义"**: 这是多目标文件 C 库与"引用 libc"的分界线 ——
                 # 前者由另一个对象提供, 后者到链接结束都空着。
                 raise Unsupported(
-                    f"{obj.name}: 引用了未定义的符号 {nm} —— 到链接结束都没人提供它"
-                    f" (第 2 阶段仍不链 libc, docs/173 §3)")
+                    f"{obj.name}: 引用了未定义的符号 {nm} —— 到链接结束都没人提供它；"
+                    f"链一个导出它的 .so（--link libfoo.so），或把定义它的对象一起链进来")
             val = target + add                            # 公式里的 S + A
             # **GOTPCREL**（`#609`）：值是 GOT 槽相对 PC 的偏移，不是 S+A-P。
             if ty in (REL_GOTPCREL, REL_GOTPCRELX, REL_REX_GOTPCRELX):
@@ -6565,8 +6565,8 @@ def compile_ll(text: str, objects: list | None = None,
                     applied += 1
                     continue
                 raise Unsupported(
-                    f"{obj.name}: 引用了未定义的符号 {nm} —— 到链接结束都没人提供它"
-                    f" (第 2 阶段仍不链 libc, docs/173 §3)")
+                    f"{obj.name}: 引用了未定义的符号 {nm} —— 到链接结束都没人提供它；"
+                    f"链一个导出它的 .so（--link libfoo.so），或把定义它的对象一起链进来")
             val = target + add
             raw = reloc_value(ty, val, here, f"{obj.name}: 数据节的 {nm}")
             data[site:site + len(raw)] = raw

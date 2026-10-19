@@ -3,7 +3,8 @@
 Loment is a systems programming language: its own syntax is Rust-flavored, and it can also be
 written in C, C++, Java, C#, Go or Python; it emits native x86-64 executables (Linux ELF,
 Windows PE). By default the artifact is **sealed** — no runtime, no libc, no undefined symbols —
-and `choose hosted` is the other path (not finished; a release build refuses it). The
+and `choose hosted` is the other path: an ELF product linked against the host's real libc and
+shared objects (the system loader does the dynamic binding; PE has no hosted path yet). The
 [README](README.md) says what it is; this page is
 only about getting a program to run.
 
@@ -181,13 +182,16 @@ Rust (`#[no_mangle] pub extern "C"`) and Zig (`export fn`) work the same way.
 **This leg is Linux/ELF only today.** A Windows build with a foreign object is refused
 rather than producing something that does not link. Languages whose runtime is not a C
 library — Python, JavaScript, Java, Perl, Lua, Go — are reached through a subprocess
-instead (`loment/lib/proc.lomt`); that is Linux/ELF only as well. What this leg does *not* do is
-reach a real system library. Dynamic libraries and libc are what `choose hosted` opens — and it
-is **not available in a release build**: that path is unfinished, so the release toolchain
-refuses `choose hosted`, and an object carrying undefined symbols is refused by the linker by
-default. The development channel is where it is built; `docs/222-lompi-020-foreign-libs.md` is
-the build-out. The honest ledger for where things stand
-today is `docs/173-loment-ffi.md`.
+instead (`loment/lib/proc.lomt`); that is Linux/ELF only as well.
+
+**Reaching a real system library** — the host's libc and `.so` shared objects — is what
+`choose hosted` opens, and the door opened on 2026-10-17: both release and development
+launchers pass `--allow-ports` to the linker, which links a real ELF shared object and emits
+`PT_INTERP`/`DT_NEEDED`/PLT/GOT for the system loader (`ld.so`) to map and bind. The remaining
+limits are: ELF only (no PE import path), one shared object per build on the self-hosted linker,
+function symbols only, and the host's `ld.so`/glibc must be present. Calling `loment-lomelf`
+directly means adding `--allow-ports` yourself. The honest ledger for where things stand today
+is `docs/173-loment-ffi.md`.
 
 ## 6. Write it in the syntax you already know
 

@@ -801,6 +801,9 @@ class Struct:
     tparams: list = field(default_factory=list)  # M7
     from_generic: str = ""                       # M45: 由哪个泛型声明单态化而来
     generic_args: list = field(default_factory=list)  # M45: 单态化实参
+    #: 与 `fields` 一一对应的**字段名 token 行号**（1-based）。`lomdoc` 取字段的 `///`
+    #: 要用它；空表 = 这份声明不是从源码读出来的（预置 / 合成），生成器就当没有注释。
+    field_lines: list = field(default_factory=list)
 
 
 @dataclass
@@ -881,6 +884,8 @@ class EnumDecl:
     generic_args: list = field(default_factory=list)  # M45
     from_prelude: bool = False   # M10 预置 Option/Result: 由 load() 注入**每个**模块,
                                  # 单元级唯一性检查必须排除它 (否则多模块单元必报假重名)
+    #: 与 `variants` 一一对应的**变体名 token 行号**（1-based），用法同 `Struct.field_lines`。
+    variant_lines: list = field(default_factory=list)
 
 
 @dataclass
@@ -2008,14 +2013,18 @@ class Parser:
         tparams = self.parse_tparams()
         self.expect("punct", "{")
         fields: list[tuple[str, str]] = []
+        field_lines: list[int] = []
         while not self.at("punct", "}"):
+            # 先把行号取下来再吃 token —— 字段的 `///` 是挂在**名字那一行**上的
+            # （`lomdoc` 取注释用；不用 token 之后回推）。
+            field_lines.append(self.peek().line)
             fn = self.ident("字段名")
             self.expect("punct", ":")
             fields.append((fn, self.type_name()))
             if not self.accept("punct", ","):
                 self.accept("punct", ";")
         self.expect("punct", "}")
-        return Struct(name, fields, kw.line, False, tparams)
+        return Struct(name, fields, kw.line, False, tparams, field_lines=field_lines)
 
     def parse_enum(self) -> EnumDecl:
         """L1 枚举: 变体可带单载荷 (v1)。"""
@@ -2025,7 +2034,9 @@ class Parser:
         self.expect("punct", "{")
         variants: list[str] = []
         payloads: dict[str, str] = {}
+        variant_lines: list[int] = []
         while not self.at("punct", "}"):
+            variant_lines.append(self.peek().line)
             v = self.ident("变体名")
             variants.append(v)
             if self.accept("punct", "("):
@@ -2034,7 +2045,8 @@ class Parser:
             if not self.accept("punct", ","):
                 self.accept("punct", ";")
         self.expect("punct", "}")
-        return EnumDecl(name, variants, kw.line, payloads, False, tparams)
+        return EnumDecl(name, variants, kw.line, payloads, False, tparams,
+                        variant_lines=variant_lines)
 
     def parse_trait(self) -> Trait:
         """trait Name { fn m(self, ...) -> R; ... }"""
@@ -2912,6 +2924,9 @@ def prepare(mod: Module, deps: list[Module] | None = None) -> tuple[Module, list
                     s = Struct(
                         name, [(fn, _replace_type(ft, mp)) for fn, ft in g.fields], g.line, True, [])
                     s.from_generic, s.generic_args = base, list(args)
+                    # 单态化出来的那份与原声明是**同一处源码**：字段行号跟着走，
+                    # 否则泛型结构体的字段注释会静默消失（`lomdoc` 只看行号）。
+                    s.field_lines = list(g.field_lines)
                     mod.structs.append(s)
                 else:
                     g = ge[base]
@@ -2919,6 +2934,7 @@ def prepare(mod: Module, deps: list[Module] | None = None) -> tuple[Module, list
                         name, list(g.variants), g.line,
                         {v: _replace_type(pt, mp) for v, pt in g.payloads.items()}, True, [])
                     e.from_generic, e.generic_args = base, list(args)
+                    e.variant_lines = list(g.variant_lines)
                     mod.enums.append(e)
         _rewrite_types(allmods, made)
         _fix_generic_literals(allmods, set(gs) | set(ge))
@@ -9589,6 +9605,9 @@ def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3) -> Modu
                 # 拿它去查**目标文件**的行 —— 实测 Result 会抄到上文某条 capability 的注释。
                 # 注入项在目标文件里没有行, 就该是 0 (Loment 版 lomdoc 也是这么做的)。
                 e.line = 0
+                # 变体行号同理：它们指向 **prelude 文件**，拿它们去查目标文件会抄到
+                # 无关的注释。空表 = 没有可用的行号。
+                e.variant_lines = []
                 mod.enums.append(e)
     # 记住源文件在哪 —— 调试信息（DWARF 的 `!DIFile`）要它。见 `Module.src` 的注释。
     #

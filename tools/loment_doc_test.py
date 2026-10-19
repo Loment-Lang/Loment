@@ -148,6 +148,48 @@ def test_loment_lomdoc_matches_python():
 
 
 @test
+def test_field_and_variant_docs_are_rendered():
+    """`///` 挂在**字段**与**变体**上时也要进文档（`#56`）。
+
+    原先只读顶层声明（struct / enum / const / fn），字段与变体的注释被静默丢掉 ——
+    作者写了、编译器收了、页面里没有。结构体加第三列"说明"，变体在那条列表项后面
+    用 ` — ` 接上；空注释不画分隔符。
+
+    判据跑的是**参考实现的命令行**（真行为）；孪生的同一段由
+    `test_loment_lomdoc_matches_python` / `test_loment_lomdoc_edge_cases` 逐字节对拍。
+    """
+    src = ("module docs2\n\n"
+           "/// A point in the plane.\n"
+           "pub struct Pt {\n"
+           "    /// Horizontal coordinate.\n"
+           "    x: u32,\n"
+           "    /// Vertical coordinate.\n"
+           "    y: u32,\n"
+           "}\n\n"
+           "/// Which shape this is.\n"
+           "pub enum Kind {\n"
+           "    /// A unit variant.\n"
+           "    Small,\n"
+           "    /// A variant carrying a width.\n"
+           "    Wide(u32),\n"
+           "}\n")
+    with tempfile.TemporaryDirectory(prefix="lomdoc-field-") as tds:
+        p = Path(tds) / "docs2.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        r = subprocess.run([sys.executable, str(ROOT / "tools" / "lomdoc.py"), str(p)],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", shell=False, timeout=120)
+    assert r.returncode == 0, r.stderr[-300:]
+    out = r.stdout
+    assert "| 字段 | 类型 | 说明 |" in out, out
+    assert "| `x` | `u32` | Horizontal coordinate. |" in out, out
+    assert "| `y` | `u32` | Vertical coordinate. |" in out, out
+    assert "- `Kind::Small` — A unit variant." in out, out
+    assert "- `Kind::Wide` (u32) — A variant carrying a width." in out, out
+    print("      struct 字段与 enum 变体的 /// 都进了页面")
+
+
+@test
 def test_stdout_and_out_are_byte_identical():
     """`loment doc F > a` 与 `loment doc F --out b` 必须**逐字节相同**（`#506`）。
 
@@ -192,13 +234,17 @@ const MASK: u32 = 0x10;
 
 /// 类型文档
 struct Pair {
+    /// First component.
     a: u32,
+    /// Second component.
     b: u32,
 }
 
 /// 枚举文档
 enum Color {
+    /// A plain color.
     Red,
+    /// An RGB color.
     Rgb(u32),
 }
 
@@ -240,7 +286,8 @@ register edgecmd {
 @test
 def test_loment_lomdoc_edge_cases():
     """语料里没出现的段: excluded / 十六进制常量 / 多行 doc / 双方法 trait / 空 doc /
-    register 块里的函数 (含它自己的 doc 行 —— 语料那份块里没有 `///`)。"""
+    **结构体字段与枚举变体的 `///`**（`#56`） / register 块里的函数 (含它自己的 doc 行 ——
+    语料那份块里没有 `///`)。"""
     if not (_clang() and _wsl()):
         print("      SKIP: 无 clang/WSL")
         return
@@ -266,7 +313,8 @@ def test_loment_lomdoc_edge_cases():
                     f"  got : {got[max(0,k-70):k+50]!r}")
     finally:
         probe.unlink(missing_ok=True)
-    print("      边界用例 (excluded/hex/多行 doc/双方法 trait/泛型/空 doc/register 块) 一致")
+    print("      边界用例 (excluded/hex/多行 doc/字段与变体 doc/双方法 trait/泛型/"
+          "空 doc/register 块) 一致")
 
 
 #: 别的写法的样本：`choose write grammar c` 打头，第二行就是函数声明。

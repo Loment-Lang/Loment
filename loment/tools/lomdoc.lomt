@@ -686,8 +686,8 @@ fn sec_structs(mem: ptr, src: ptr, len: u32, t: ptr, n: u32) -> u32 {
                     em_tok(mem, src, t, i + 1);
                     el(mem, "`");
                     em_doc_part(mem, src, len, tk_line(t, i));
-                    el(mem, "| 字段 | 类型 |");
-                    el(mem, "|---|---|");
+                    el(mem, "| 字段 | 类型 | 说明 |");
+                    el(mem, "|---|---|---|");
                     let h: u32 = i + 2;
                     let g: u32 = h;
                     let go: u32 = 1;
@@ -708,8 +708,12 @@ fn sec_structs(mem: ptr, src: ptr, len: u32, t: ptr, n: u32) -> u32 {
                         em_tok(mem, src, t, f);
                         em(mem, "` | `");
                         let fr: u64 = ptype(mem, src, t, f + 2);
-                        em(mem, "` |");
-                        el(mem, "");
+                        em(mem, "` | ");
+                        // 字段的 `///` 与声明一样按**行号**取（镜像 `Struct.field_lines`）：
+                        // 注释挂在字段名那一行上方，与类型写在哪一行无关。
+                        let fdn: u32 = collect_doc(mem, src, len, tk_line(t, f));
+                        em_doc(mem, src, fdn);
+                        el(mem, " |");
                         f = (fr / 4294967296) as u32;
                         if tk_is(src, t, f, ",") {
                             f = f + 1;
@@ -776,6 +780,8 @@ fn sec_enums(mem: ptr, src: ptr, len: u32, t: ptr, n: u32) -> u32 {
                     }
                     let v: u32 = h + 1;
                     while v < n && !tk_is(src, t, v, "}") && tk_kind(t, v) != 4 {
+                        // 变体的 `///` 与别的声明同一口径：按**变体名那一行**往上取。
+                        let vdn: u32 = collect_doc(mem, src, len, tk_line(t, v));
                         em(mem, "- `");
                         em_tok(mem, src, t, i + 1);
                         em(mem, "::");
@@ -788,6 +794,11 @@ fn sec_enums(mem: ptr, src: ptr, len: u32, t: ptr, n: u32) -> u32 {
                             v = ((pr / 4294967296) as u32) + 1;
                         } else {
                             v = v + 1;
+                        }
+                        // 空注释不印分隔符 —— 空行上没有要说的东西，多一个 ` — ` 就是噪声。
+                        if vdn > 0 {
+                            em(mem, " — ");
+                            em_doc(mem, src, vdn);
                         }
                         el(mem, "");
                         if tk_is(src, t, v, ",") {

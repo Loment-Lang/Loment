@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -94,6 +95,30 @@ def _names() -> list[str]:
 
 def _no_color() -> list[str]:
     return ["--no-color"]
+
+
+_driver: Path | None = None
+
+
+def _build_driver() -> Path:
+    """把**包里的自举驱动**从种子链出来（本机格式），供 `loment check` 的行为判据用。
+
+    装好的包跑的正是这个种子（`loment/build/selfhost_driver.ll`），不是仓库里的 Python
+    参考实现 —— 所以"用户敲 `loment check` 看到什么"只能拿它量。`loment_dist` 用同一份
+    种子出 PE/ELF（见那里的 `TOOLS`），这里只是不打包。
+    """
+    global _driver
+    if _driver is not None:
+        return _driver
+    seed = (ROOT / "loment" / "build" / "selfhost_driver.ll").read_text(encoding="utf-8")
+    raw = (lomelf.compile_pe if IS_WIN else lomelf.compile_ll)(seed)[0]
+    assert raw, "链接器产出为空"
+    td = Path(tempfile.mkdtemp(prefix="lomcli-driver-"))
+    exe = td / ("loment-driver.exe" if IS_WIN else "loment-driver")
+    exe.write_bytes(raw)
+    exe.chmod(0o755)
+    _driver = exe
+    return exe
 
 
 # ---------------------------------------------------------------- 构建与入口
@@ -648,6 +673,60 @@ def test_reference_pages_are_nonempty():
         assert len(out.strip()) > 60, f"{c} 输出太短: {out!r}"
 
 
+@test
+def test_reference_page_columns_never_touch():
+    """首列 ≥10 宽时也必须与说明隔开（`#35`）。
+
+    `termrow` 用 `wpadx(..., 10)` 补空格，而 `wpadx` **只补到** 10 —— 首列本身 10 宽或
+    更宽时一个空格都不写，于是 `* capabilitycapability`、`* program/ABIchoose`、
+    `control flowif / else` 三行粘在一起。修法是**无条件补一个分隔空格**。
+
+    判据取的是**真输出**（起 CLI 打那三页），不是源码里有没有 `wstr` —— 粘住是渲染结果
+    的性质。三行各代表一种宽度（12 / 13 / 12），任何固定的 pad 宽度都救不了全部。
+    """
+    rc, out, _ = _run(["keywords"] + _no_color())
+    assert rc == 0, rc
+    assert "  * capability capability  guard" in out, (
+        f"`* capability`（12 宽）与说明粘住了: {out!r}")
+    assert "  * program/ABI choose  addin" in out, (
+        f"`* program/ABI`（13 宽）与说明粘住了: {out!r}")
+    rc, out, _ = _run(["syntax"] + _no_color())
+    assert rc == 0, rc
+    assert "  control flow if / else if / else" in out, (
+        f"`control flow`（12 宽）与说明粘住了: {out!r}")
+    print("      首列 12/13 宽的三行都与说明隔开")
+
+
+@test
+def test_check_json_reports_an_unresolved_use_name():
+    """`use <名字>` 解析失败时，`--json` 的 `message` 必须说出**那个名字**（`#50`）。
+
+    判据跑的是**包里的自举驱动**（种子链出来的），因为用户敲的 `loment check` 走的是它，
+    不是仓库里的 Python 参考实现。原先结构化那一份只写前缀
+    （"the name import does not resolve, or is ambiguous: "），名字只出现在 stderr ——
+    按 `message` 显示诊断的编辑器看到的是"找不到"，却没说是哪个。
+    """
+    with tempfile.TemporaryDirectory(prefix="lomcli-e18-") as tds:
+        td = Path(tds)
+        src = td / "e18.lomt"
+        src.write_text("module e18\nuse nosuchmod\nfn _start() { syscall4(60,0,0,0); }\n",
+                       encoding="utf-8", newline="\n")
+        d = td / "d.jsonl"
+        r = subprocess.run([str(_build_driver()), str(src), "--diag-out", str(d)],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", shell=False, timeout=120)
+        assert r.returncode == 1, (r.returncode, r.stdout[:200], r.stderr[:200])
+        recs = [json.loads(ln) for ln in d.read_text(encoding="utf-8").splitlines()
+                if ln.strip()]
+    assert len(recs) == 1, recs
+    rec = recs[0]
+    assert rec["code"] == "E018", rec
+    assert rec["line"] == 2, rec
+    assert "nosuchmod" in rec["message"], (
+        f"--json 的消息里没有那个没解析出来的名字: {rec['message']!r}")
+    print("      E018 的 JSON 消息带上了没解析出来的名字")
+
+
 # ---------------------------------------------------------------- 防漂移
 
 @test
@@ -930,6 +1009,53 @@ def test_both_launchers_reject_extra_check_files():
     assert 'echo loment: check accepts exactly one input file 1>&2' in cmd
     assert 'if "%cmode%"=="i"' in cmd, "cmd: 拒绝里没按 cmode 说出用户敲的那个命令名"
     assert 'if defined cbad exit /b 2' in cmd
+
+
+@test
+def test_launchers_refuse_what_they_cannot_honour():
+    """四个"广告了却办不到 / 接受了却丢掉"的开关（`#632` `#633` `#635` `#636`）。
+
+    * **`#632`** Windows 的 PE 链接器拒**每一个** `--link`，而 `.cmd` 的 usage 还在广告
+      它 —— 用户按广告敲，撞的是一句 PE/ELF 的话。修法是**按名拒**并把 usage 里那一格拿掉。
+    * **`#633`** `.cmd` 从不读 IR 头的 `; loment-port: hosted`，于是 `choose hosted` 的单元
+      掉进 PE 链接器，报"没有 `_start`"——指错了问题。两处（build / run）都要认那个标记。
+    * **`#635`** `--link` 的值原先拼成一个字符串再**不加引号展开**，路径里的空格把它劈成
+      两个参数。bash 改成数组；cmd 侧既然 `--link` 被拒，就不再留那条拼接路径。
+    * **`#636`** `run` 接受 `-o` 却把它覆盖成临时路径：**退 0、没有产物**。两个启动器都
+      按名拒。
+
+    cmd 部分只能**静态**判（CI 没有 cmd）；bash 的那两半由 `loment_err_test` 的桩包
+    **真跑**（`test_launcher_refuses_o_on_run` / `test_launcher_keeps_a_link_path_with_spaces`）。
+    """
+    sys.path.insert(0, str(ROOT / "tools"))
+    import loment_dist  # noqa: E402
+    sh, cmd = loment_dist.LAUNCHER_SH, loment_dist.LAUNCHER_CMD
+
+    # #632：广告里有 --link、行为里只是累加 —— 两处都得消失，换成一个点名拒绝。
+    usage = cmd.split(":usage", 1)[1].split("exit /b", 1)[0]
+    assert "--link" not in usage, f"Windows usage 还在广告 --link: {usage!r}"
+    assert "--link needs the ELF target" in cmd, "#632: 没有按名拒 --link"
+    assert "%linkargs%" not in cmd, "#635: cmd 还留着拼接后再展开的 linkargs"
+
+    # #633：两处（build / run）都要读标记，且都要有拒绝的落点。
+    assert cmd.count('findstr /b /l /c:"; loment-port: hosted"') == 2, \
+        "#633: build/run 里不是两处都读 `; loment-port: hosted`"
+    assert ":hosted_unit" in cmd and "hosted products need the ELF target" in cmd, \
+        "#633: 没有点名拒绝 hosted 的落点"
+    assert cmd.index('findstr /b /l /c:"; loment-port: hosted"') < cmd.index(":hosted_unit")
+
+    # #635：bash 把 --link 的值放进数组，展开时加引号。
+    assert "linkargs[${#linkargs[@]}]=--link" in sh, "#635: bash 没把 --link 放进数组"
+    assert '"${linkargs[@]}"' in sh, "#635: bash 展开 linkargs 时没加引号"
+    assert not re.search(r"\$linkargs\b", sh), "#635: bash 还留着字符串版 linkargs"
+    assert not re.search(r"\$objs\b", sh), "#635: bash 还留着字符串版 objs"
+
+    # #636：两个启动器都按名拒 `run -o`。
+    assert "-o is for build; run produces no artifact" in sh, "#636: bash 没拒 run -o"
+    assert "-o is for build; run produces no artifact" in cmd, "#636: cmd 没拒 run -o"
+    assert 'if [ "$mode" = run ] && [ -n "$out_set" ]' in sh, "#636: bash 的拒绝没接在解析之后"
+    assert 'if "%bmode%"=="r" goto run_out_refused' in cmd, "#636: cmd 的拒绝没接在 :barg_out"
+    print("      #632/#633/#635/#636: 四个开关都不再被广告/静默接受")
 
 
 # ---------------------------------------------------------------- Loment 版（S1 第十二格）

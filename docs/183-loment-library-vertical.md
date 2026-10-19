@@ -85,7 +85,7 @@ choose 也是硬写法"），所以它是**核心语法**的一个新开关名�
 |---|---|---|---|
 | **V0** | **结构**：外部库在库系统里有位置 | `deps/<名字>/` 能放"接口单元 + 二进制"；`lompi` 能取/锁/校验它 | 一个**手工搭的**外部库目录，`use <名字>` 能解析、能链、能跑。**后端仍是玩具**（自包含 freestanding），所以这一步不动链接器 |
 | **V1** | **静态 libc** | 带 libc 依赖的**真实 C 库** | `loment run` 调 **zlib** 的 `compress`/`uncompress`，解压回原文。zlib 是 `.a` + 依赖 `malloc/free/memcpy` |
-| **V2** ✅ **2026-10-17**（`#360`） | **动态库装载**（`docs/173` 阶段 3） | "装好的 `.so`" | `loment run` 调**系统装的** `libz.so`（不静态链），自己解 `PT_DYNAMIC` + 重定位。**已兑现**：两个链接器都读 `ET_DYN` 的导出表、发 `PT_INTERP`/`DT_NEEDED`/PLT/GOT；产物 20 KB、`compress → uncompress → 原文` rc=0，两侧逐字节相同 |
+| **V2** ✅ **2026-10-17**（`#360`） | **动态库**（`docs/173` 阶段 3） | "装好的 `.so`" | `loment run` 调**系统装的** `libz.so`（不静态链）。**产品发的是表，不是 loader**：两个链接器都读 `ET_DYN` 的导出表、发 `PT_INTERP`/`PT_DYNAMIC`/`DT_NEEDED`/PLT-GOT；**映射与重定位绑定由系统的 `ld.so` 完成**。已兑现：产物 20 KB、`compress → uncompress → 原文` rc=0，两侧逐字节相同 |
 | **V3** | **运行期嵌入**（阶段 4） | Python / Java **的 API** | `loment run` 调 **`numpy`** 算一个数组的和。要 `libpython` + CPython C-API 胶水 |
 | **V4** | **语法层解真实源** | 从**真实库**生成声明面 | 喂 **`zlib.h`**（typedef / 函数式宏 / `unsigned long` / `Bytef*`）→ 接口单元 → V1 那条跑通。今天 C 前端是**轻量正则**，`zlib.h` 会当场碎 |
 | **V5** | **`choose` 解禁开关** | 二进制从**全局禁**变成**每程序可开** | `choose <开关>` 的程序能链二进制；**不写就编译不过**（且报错说清为什么） |
@@ -94,7 +94,9 @@ choose 也是硬写法"），所以它是**核心语法**的一个新开关名�
 最强的那条腿）；V2/V3 是 `docs/173` 的阶段 3/4；V4 让 V1–V3 的声明面**不必手写**；
 V5 是纪律面，放在最后是因为它要等"二进制真的能用"才有意义。
 
-**V2 的 loader 与多库**（`#604` / `#596`，**参考链接器 `tools/lomelf.py`**）：
+**V2 的 interp 与多库**（`#604` / `#596`，**参考链接器 `tools/lomelf.py`**）：
+产品**不携带自己的 loader** —— 它只写出 `ld.so` 会消费的表（`PT_INTERP` 指名那个
+loader），真正的映射与符号绑定发生在宿主 loader 里（`docs/219` §164）。
 `PT_INTERP` 不再写死 —— 链接时按 `--interp PATH` → `LOMENT_INTERP` → 链接机上的候选
 （glibc 两个常见落点、musl）解析，Windows 上交叉链接仍默认
 `/lib64/ld-linux-x86-64.so.2`（目标不是本机，用 `--interp` 覆盖）。`--link` 可以给多个

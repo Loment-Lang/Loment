@@ -325,6 +325,7 @@ case "${1:-help}" in
         src=$1; shift
         reject_l0 "$src" "$mode"
         out=
+        out_set=
         links=()
         nc=
         om=
@@ -335,7 +336,7 @@ case "${1:-help}" in
         ccargs=
         while [ $# -gt 0 ]; do
             case "$1" in
-                -o|--out) out=${2:-}; shift 2 ;;
+                -o|--out) out=${2:-}; out_set=1; shift 2 ;;
                 # A foreign object file (docs/173 FFI): loment build app.lomt --link libfoo.o
                 --link) links[${#links[@]}]="${2:-}"; shift 2 ;;
                 # Optimize with clang when it is installed (docs/212 sec 5A). **Opt-in on purpose**:
@@ -366,6 +367,14 @@ case "${1:-help}" in
                 *) echo "loment: unknown option $1" >&2; exit 2 ;;
             esac
         done
+        # `-o` on `run` used to be parsed and then overwritten by the temporary path, so
+        # the user got a successful exit and no artifact (#636). Accepting a flag and
+        # dropping it is the silent case the launcher forbids everywhere else - refuse it
+        # by name instead of inventing a second meaning for `run`.
+        if [ "$mode" = run ] && [ -n "$out_set" ]; then
+            echo "loment: -o is for build; run produces no artifact" >&2
+            exit 2
+        fi
         need loment-driver loment-driver
         need loment-lomelf loment-lomelf
         tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
@@ -415,11 +424,15 @@ case "${1:-help}" in
             echo "loment: -L / -l / --cc-arg need --hosted: a sealed product links no host library (docs/222)" >&2
             exit 2
         fi
-        linkargs=
-        objs=
+        # Keep every `--link` value in its own argument slot. A concatenated string is
+        # expanded unquoted below, so `--link "/tmp/my libs/add.o"` used to reach the
+        # linker as `--link /tmp/my` + `libs/add.o` (#635).
+        linkargs=()
+        objs=()
         for l in "${links[@]}"; do
-            linkargs="$linkargs --link $(to_posix "$l")"
-            objs="$objs $(to_posix "$l")"
+            linkargs[${#linkargs[@]}]=--link
+            linkargs[${#linkargs[@]}]=$(to_posix "$l")
+            objs[${#objs[@]}]=$(to_posix "$l")
         done
         if [ -n "$hosted" ]; then
             # ---- hosted (docs/222 sec 4): a C-runtime product with open ports to the world.
@@ -437,7 +450,7 @@ case "${1:-help}" in
                 exit 1
             fi
             # shellcheck disable=SC2086
-            "$cc" "$tmp/a.ll" $objs $ccargs $Largs $largs -o "$out" || exit 1
+            "$cc" "$tmp/a.ll" "${objs[@]}" $ccargs $Largs $largs -o "$out" || exit 1
         elif [ -n "$opt" ]; then
             cc=$(command -v clang 2>/dev/null || true)
             if [ -n "$cc" ]; then
@@ -449,15 +462,13 @@ case "${1:-help}" in
 LOMENT_LIBCALLS_EOF
                 # shellcheck disable=SC2086
                 "$cc" --target=x86_64-unknown-linux-gnu -nostdlib -ffreestanding -static \
-                    -fno-pie -O2 "$tmp/a.ll" "$tmp/libcalls.ll" $objs -o "$out" || exit 1
+                    -fno-pie -O2 "$tmp/a.ll" "$tmp/libcalls.ll" "${objs[@]}" -o "$out" || exit 1
             else
                 echo "loment: --opt: no clang found, falling back to the unoptimized lomelf backend" >&2
-                # shellcheck disable=SC2086
-                "$(tool loment-lomelf)" "$tmp/a.ll" "$out" --diag-out "$tmp/d.jsonl" $linkargs $portarg 2>"$tmp/e2.txt" || lrc=$?
+                "$(tool loment-lomelf)" "$tmp/a.ll" "$out" --diag-out "$tmp/d.jsonl" "${linkargs[@]}" $portarg 2>"$tmp/e2.txt" || lrc=$?
             fi
         elif [ ${#links[@]} -gt 0 ]; then
-            # shellcheck disable=SC2086
-            "$(tool loment-lomelf)" "$tmp/a.ll" "$out" --diag-out "$tmp/d.jsonl" $linkargs $portarg 2>"$tmp/e2.txt" || lrc=$?
+            "$(tool loment-lomelf)" "$tmp/a.ll" "$out" --diag-out "$tmp/d.jsonl" "${linkargs[@]}" $portarg 2>"$tmp/e2.txt" || lrc=$?
         else
             "$(tool loment-lomelf)" "$tmp/a.ll" "$out" --diag-out "$tmp/d.jsonl" 2>"$tmp/e2.txt" || lrc=$?
         fi
@@ -625,7 +636,6 @@ rem NOTE: no parenthesised blocks -- `%ERRORLEVEL%` inside one expands at parse 
 set "src=%~2"
 if "%src%"=="" goto usage
 set "out="
-set "linkargs="
 rem Port door (@CHANNEL@, docs/222 sec 4): open in both channels since 2026-10-17 (#406) -
 rem LibC's static and run-time halves are both done. lomelf still refuses a ported object by
 rem default; this flag is what opens it, and it is passed in both channels.
@@ -675,15 +685,22 @@ set "com=%~1"
 shift
 goto barg_loop
 :barg_out
+rem `-o` on `run` used to be parsed and never used: the run path hardcodes its temporary
+rem output, so the user got exit 0 and no artifact (#636). Refuse it by name.
+if "%bmode%"=="r" goto run_out_refused
 set "out=%~2"
 shift
 shift
 goto barg_loop
 :barg_link
-set "linkargs=%linkargs% --link %~2"
-shift
-shift
-goto barg_loop
+rem The PE branch of lomelf refuses every foreign object, so `--link` can never succeed
+rem here; advertising it only sends users into that refusal (#632). Refuse it here, by
+rem name, with the reason the linker cannot: this launcher produces PE.
+echo loment: --link needs the ELF target (foreign objects are ELF only); this launcher builds PE 1>&2
+exit /b 2
+:run_out_refused
+echo loment: -o is for build; run produces no artifact 1>&2
+exit /b 2
 :barg_opt
 rem The clang-optimized path (docs/212 sec 5A) is implemented for ELF only; this launcher links
 rem with the self-hosted lomelf. Refused **by name** rather than silently ignored.
@@ -717,11 +734,16 @@ mkdir "%tmp%" >nul 2>nul
 set "drc=%ERRORLEVEL%"
 if not "%drc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e.txt" "%cnc% %com%"
 if not "%drc%"=="0" goto fail
+rem `choose hosted` (docs/222 sec 4.4): the bash launcher reads this header marker and routes
+rem the unit to the host C toolchain. This launcher has no hosted path, and without the check
+rem the PE linker reports "the unit has no _start" -- the wrong problem entirely (#633).
+findstr /b /l /c:"; loment-port: hosted" "%tmp%\a.ll" >nul 2>nul
+if "%ERRORLEVEL%"=="0" goto hosted_unit
 rem The linker gets its OWN --diag-out, into the same file (on success the driver wrote
 rem nothing into it). When it can put a code on - the `-o` directory not existing is the
 rem common one - :report_diags renders it with the title, the why and the fixes; when it
 rem writes no record its plain line is shown as is, never silently lost.
-"%here%loment-lomelf.exe" "%tmp%\a.ll" "%out%.exe" --diag-out "%tmp%\d.jsonl" %linkargs% %portarg% 2>"%tmp%\e2.txt"
+"%here%loment-lomelf.exe" "%tmp%\a.ll" "%out%.exe" --diag-out "%tmp%\d.jsonl" %portarg% 2>"%tmp%\e2.txt"
 set "lrc=%ERRORLEVEL%"
 if not "%lrc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e2.txt" "%cnc% %com%"
 if not "%lrc%"=="0" goto fail
@@ -734,7 +756,10 @@ mkdir "%tmp%" >nul 2>nul
 set "drc=%ERRORLEVEL%"
 if not "%drc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e.txt" "%cnc% %com%"
 if not "%drc%"=="0" goto fail
-"%here%loment-lomelf.exe" "%tmp%\a.ll" "%tmp%\a.exe" --diag-out "%tmp%\d.jsonl" %linkargs% %portarg% 2>"%tmp%\e2.txt"
+rem Same marker check as the build path: a hosted unit is not a PE product (#633).
+findstr /b /l /c:"; loment-port: hosted" "%tmp%\a.ll" >nul 2>nul
+if "%ERRORLEVEL%"=="0" goto hosted_unit
+"%here%loment-lomelf.exe" "%tmp%\a.ll" "%tmp%\a.exe" --diag-out "%tmp%\d.jsonl" %portarg% 2>"%tmp%\e2.txt"
 set "lrc=%ERRORLEVEL%"
 if not "%lrc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e2.txt" "%cnc% %com%"
 if not "%lrc%"=="0" goto fail
@@ -749,6 +774,14 @@ del /q "%tmp%\a.ll" >nul 2>nul
 rmdir "%tmp%" >nul 2>nul
 echo loment: %out%.exe
 exit /b 0
+
+rem A unit that declared `choose hosted` in its IR header (#633). Reached from both the
+rem build and the run path; the message names the limitation instead of letting the PE
+rem linker talk about `_start`, which is not what the user wrote.
+:hosted_unit
+echo loment: this unit declares choose hosted; hosted products need the ELF target (docs/222 sec 4) 1>&2
+echo         This launcher builds PE and has no hosted/import path yet. 1>&2
+goto fail
 
 rem NOTE: tool failures are tested with a STRING compare, never `if errorlevel 1`.
 rem A crashed tool exits with a NEGATIVE code (0xC000001D = -1073741795) and cmd compares
@@ -797,8 +830,8 @@ echo                               check only (diagnostics on stderr, IR discard
 echo                               --short: one grep-able line per diagnostic
 echo                               --json:  one object per diagnostic (for editors and CI)
 echo                               --max N: render at most N (default 20; 0 = all)
-echo   loment build FILE [-o OUT] [--link OBJ...] [--opt] [--hosted]
-echo                               compile and link; --link adds a foreign object (FFI)
+echo   loment build FILE [-o OUT] [--opt] [--hosted]
+echo                               compile and link
 echo                               --opt: optimize with clang -O2 (ELF only)
 echo                               --hosted: link the host's real libraries (ELF only)
 echo   loment run FILE [--opt] [--hosted]
@@ -2835,8 +2868,9 @@ def payload(kind: str, bins: dict[str, tuple[bytes, bytes]]) -> dict[str, tuple[
     idx = 1 if kind == "windows" else 0
     for name, pair in bins.items():
         files[f"bin/{name}{'.exe' if kind == 'windows' else ''}"] = (pair[idx], 0o755)
-    # 包里那份启动器是**发行版渠道**的（`docs/222` §4 的端口门）：`--hosted` 与端口标记
-    # 点名拒、不给链接器传 `--allow-ports`。开发通道用 `LAUNCHER_SH` 本体（判据里的桩包）。
+    # 包里那份启动器由 `release` 渠道**生成**（模板里只有注释上的 `@CHANNEL@`）。端口门
+    # 自 2026-10-17（`#406`）起在**两个渠道都开着**：启动器无条件给链接器传
+    # `--allow-ports`，链真 `.so` 不再是开发通道的特权（`docs/219` §8c）。
     files["bin/loment"] = (_subst(LAUNCHER_SH, "release").encode("ascii"), 0o755)
     if kind == "windows":
         # Windows 用原生 .cmd 启动器：包里全是 PE，直接调本机 exe，不再往 WSL 转发
@@ -2879,14 +2913,13 @@ def payload(kind: str, bins: dict[str, tuple[bytes, bytes]]) -> dict[str, tuple[
 def _subst(text: str, channel: str = "dev") -> str:
     """把模板里的占位符换掉。**默认 `dev`** —— 于是老调用点（判据里的桩包）行为不变。
 
-    `channel` 只喂 `@CHANNEL@`（`docs/222` §4 的**端口门**，2026-10-12 用户定）：
+    `channel` 只喂 `@CHANNEL@`。**它今天只出现在注释里** —— 端口门自 2026-10-17
+    （`#406`）起在两个渠道都开着：`--hosted` 与带未定义符号的外源对象都由启动器传
+    `--allow-ports` 给链接器，发行版与开发版在这件事上没有行为差别（`docs/219` §8c）。
+    链接器自己的默认仍是"拒"（直接调它时要显式写 `--allow-ports`）。
 
-    * `dev`：`--hosted` 那条路照旧，链外源对象时给链接器传 `--allow-ports`（那扇门在开发
-      通道是开的）；
-    * `release`：`--hosted` / 端口标记**点名拒**，且**一个标志都不传** —— 链接器的默认
-      就是"拒"，于是"发行版里 libc 不可调用"不靠启动器记得做什么，靠默认值本身。
-
-    发行包由 `emit()` 走 `release`；判据里的桩包走默认的 `dev`。
+    发行包由 `emit()` 走 `release`；判据里的桩包走默认的 `dev`。两者生成的脚本在
+    `@CHANNEL@` 之外**逐字节相同**。
     """
     return (text.replace("@DISPLAY@", DISPLAY).replace("@VERSION@", VER)
             .replace("@LIBCALLS@", _FREESTANDING_LIBCALLS)

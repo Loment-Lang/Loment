@@ -932,7 +932,15 @@ class Emitter:
             self.asm.emit(store_sized(RBP, dst + off, RAX, size_of(ety)))
 
     def _icmp(self, t, d):
-        m = re.match(r"icmp\s+(\w+)\s+(.+)$", t, re.S)
+        # `#376`：原先直接 `ICMP_CC[m.group(1)]` —— 一条认不出的 `icmp` 会让整个 PE
+        # 后端甩 Python 栈（`'NoneType' object has no attribute 'group'`），没指令、
+        # 没谓词、没来源。两条失败都**点名**：看不懂的整条指令 / 不认识的谓词。
+        m = re.match(r"icmp\s+(?:samesign\s+)?(\w+)\s+(.+)$", t, re.S)
+        if not m:
+            raise Unsupported(f"PE 后端看不懂这条 icmp：{t.strip()!r}")
+        if m.group(1) not in ICMP_CC:
+            raise Unsupported(
+                f"PE 后端不认识比较谓词 icmp {m.group(1)}：{t.strip()!r}")
         cc, signed = ICMP_CC[m.group(1)]
         ty, i = parse_type(m.group(2))
         a, b = split_top(m.group(2)[i:])
@@ -6143,6 +6151,16 @@ def load_foreign(path: Path):
         return Archive(path)
     if raw[:4] == b"\x7fELF" and len(raw) >= 20 and struct.unpack_from("<H", raw, 16)[0] == 3:
         return SharedObject(path)                  # `.so`：V2 的那条腿（docs/173 阶段 3）
+    # `#637`：Debian/Ubuntu 的 `libz.so` 是 **GNU ld 链接脚本**（ASCII 的
+    # `GROUP ( /lib/.../libz.so.1 ... )`），不是 ELF。原先它掉进 `ForeignObject`，
+    # 报"不是 ELF64 小端目标文件"—— 把共享对象叫成"目标文件"，也没说该链哪个。
+    head = raw[:4096].lstrip()
+    if head.startswith((b"GROUP", b"INPUT", b"/* GNU ld script")):
+        txt = raw[:4096].decode("utf-8", "replace")
+        m = re.search(r"^\s*(?:GROUP|INPUT)\s*\(\s*([^\s)]+)", txt, re.M)
+        target = m.group(1) if m else ""
+        hint = f"；它指向 {target}，链那个文件" if target else "；链它指向的 .so 本体"
+        raise Unsupported(f"{path.name}: 这是 GNU ld 链接脚本{hint}（不是 ELF 共享对象）")
     return ForeignObject(path)
 
 

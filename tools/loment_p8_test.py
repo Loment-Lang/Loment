@@ -1248,6 +1248,50 @@ def test_m92_lms_entry_a_rescue_is_byte_identical():
 
 
 @test
+def test_m93_lms_rejector_site_is_byte_identical():
+    """LMS 第 3/4 级：**`alloc` 直接发出的指针**上那一条 g1 检查 —— 两实现逐字节一致。
+
+    `docs/253` §5.3 入口 B 的第一步：界是编译期常量的访存点发一条 `icmp`，
+    越界时第 4 级**跳过那一条访存**、程序继续（§5.4）。这条判据钉三件事：
+
+    * **发**：`let p: ptr = alloc(N)` 之后的 `load8/store8` 真的带检查；
+    * **不发**：`choose close lms_guard` 一条都没有（关得掉）；
+    * **保守**：过了 `ptr_add` 的派生指针**不发** —— 那里读不到块头，乱发比不发更坏。
+    """
+    if not _clang():
+        print("      SKIP: 无 clang")
+        return
+    probe = ("module m\nchoose runtime\nconst N: u32 = 8;\n%s\n\n"
+             "fn f() -> u32 {\n    let p: ptr = alloc(N);\n"
+             "    store8(p, 9, 1);\n    let x: u32 = load8(p, 0);\n    return x;\n}\n")
+    derived = ("module m\nchoose runtime\nconst N: u32 = 8;\n%s\n\n"
+               "fn f() -> u32 {\n    let p: ptr = alloc(N);\n"
+               "    let q: ptr = ptr_add(p, 1);\n"
+               "    let x: u32 = load8(q, 0);\n    return x;\n}\n")
+    cases = (("on", probe % ""), ("off", probe % "choose close lms_guard"),
+             ("derived", derived % ""))
+    with tempfile.TemporaryDirectory() as td:
+        exe = _build_codegen(td)
+        outs: dict[str, str] = {}
+        for tag, text in cases:
+            target = Path(td) / f"lms_{tag}.lomt"
+            target.write_text(text, encoding="utf-8", newline="\n")
+            want = _unit_ll(target)
+            got = _run_codegen(exe, target, td)
+            outs[tag] = got
+            if got != want:
+                i = next((k for k in range(min(len(got), len(want))) if got[k] != want[k]), None)
+                a = max(0, (i or 0) - 60)
+                raise AssertionError(
+                    f"lms_{tag} 首个差异 @{i}:\n"
+                    f" loment {got[a:(i or 0) + 80]!r}\n python {want[a:(i or 0) + 80]!r}")
+    # 不许空转
+    assert outs["on"].count("lmsok") >= 2, "两个访存点都该有检查"
+    assert outs["off"].count("lmsok") == 0, "关掉第 3 级之后一条都不许有"
+    assert outs["derived"].count("lmsok") == 0, "派生指针不发检查（保守）"
+
+
+@test
 def test_m91_l1_definite_lifetime_is_byte_identical():
     """L1（**定活**，`docs/210` §2.5）：那一份真值表源，在**两个实现**上逐字节一致。
 

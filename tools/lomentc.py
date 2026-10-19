@@ -1519,6 +1519,67 @@ for _t, _lv in LMS_TIERS.items():
 assert set(LMS_TIERS) == set(CORE_DIMS["lms"]), (set(LMS_TIERS), CORE_DIMS["lms"])
 
 
+def lms_report(mod, deps: list | None = None) -> str:
+    """**第 2 级（管理器）的产物**（`docs/253` §5.0 / #386）：这份单元的内存图。
+
+    ⚠ **这是对那句"详细输出所有内存"的一次改判**，理由写在这里而不是写在文档里：
+
+    * 原话要的是一份**运行期**的全景。可那样一来管理器就必须是**有状态**的运行期，
+      而默认档是 `no_runtime`（`docs/175` §3.6 是一条**保证**），而且它与
+      `docs/253` §13.2「默认产物不带一个新符号」直接打架 —— 除非把管理器做成默认关，
+      可裁定说默认是满档。
+    * 编译期这份图回答的是**同一类问题**（"这份程序的内存长什么样"），而且是
+      **不读源码可判**的：它把每一处 `alloc` 站点、它的大小（常量 / 动态）、
+      所属单元与函数、以及 arena 的上限一起列出来。
+
+    于是第 2 级落到**构建期**：它不改变产物一个字节，只回答"内存在哪"。
+
+    ⚠ **不主张**它是运行期的堆快照。运行期那份（带时间轴的"这块在 S12 被释放"）
+    仍然没有 —— `docs/253` §5.2 的报错器那一格因此还是空的，这一页不冒充它。
+    """
+    mods = [mod] + list(deps or [])
+    out = ["# lms report v1",
+           f"unit {mod.name}",
+           f"tier {mod.chooses.get('lms', CORE_DEFAULTS['lms'])}",
+           "levels " + " ".join(n for n in LMS_TOGGLES if _lms_level(mod, n))]
+    port = mod.chooses.get("port", CORE_DEFAULTS["port"])
+    out.append(f"arena {HOSTED_ARENA_BYTES if port == 'hosted' else 65536}")
+    total = 0
+    dynamic = 0
+    for m in mods:
+        toks = getattr(m, "toks", [])
+        if not toks:
+            continue
+        for f in m.funcs:
+            i = f.tok_at
+            while i < f.tok_end:
+                t = toks[i]
+                if t.kind == "ident" and t.val == "alloc" \
+                        and i + 1 < len(toks) and toks[i + 1].kind == "punct" \
+                        and toks[i + 1].val == "(":
+                    prev = toks[i - 1] if i > 0 else None
+                    if not (prev is not None and prev.kind == "ident" and prev.val == "fn"):
+                        size = "dynamic"
+                        # `alloc(<单个数字字面量>)` 与 `alloc(<模块常量>)` 都算得出；
+                        # 其余一律记 `dynamic` —— **猜一个数比承认算不出更坏**。
+                        if i + 3 < len(toks) and toks[i + 3].val == ")":
+                            a = toks[i + 2]
+                            if a.kind == "number":
+                                size = a.val
+                            elif a.kind == "ident":
+                                c = next((c for c in m.consts if c.name == a.val), None)
+                                if c is not None:
+                                    size = str(c.value)
+                        if size == "dynamic":
+                            dynamic += 1
+                        total += 1
+                        out.append(f"alloc {m.name}:{f.name} line={t.line} size={size}")
+                i += 1
+    out.append(f"total_alloc_sites {total}")
+    out.append(f"dynamic_alloc_sites {dynamic}")
+    return "\n".join(out) + "\n"
+
+
 def _lms_level(mod, name: str) -> bool:
     """这一份产物里第几级开着（`docs/253` §11.4 叠加规则的读法）。
 
@@ -7533,7 +7594,9 @@ class _Ir:
                  dbg_scope: int | None = None, dbg_lines: dict | None = None,
                  dbg_meta: list | None = None, dbg_types: dict | None = None,
                  gc_alpha: bool = False, gc_auto: bool = False,
-                 gc_barrier: bool = True):
+                 gc_barrier: bool = True,
+                 lms_guard: bool = False, lms_reject: bool = False,
+                 lms_crash: bool = False):
         self.funcs, self.consts, self.f = funcs, consts, f
         self.structs = structs or {}
         self.enums = enums or {}
@@ -7568,6 +7631,19 @@ class _Ir:
         #: —— 挂上去就是未定义符号（实测：`FujoJTOP/loment#239` 一修好，这条立刻露出来）。
         #: 与自举侧同一个判据（那边是 `heap_needed` 预扫描出来的 `s+516`）。
         self.gc_barrier = gc_barrier
+        #: **LMS 第 3/4/5 级在访存点上的三档回答**（`docs/253` §5.3/§5.4/§5.5）：
+        #:   * `lms_guard`  —— 发不发那条内联界检查（g1 格：界是编译期常量）；
+        #:   * `lms_reject` —— 越界的**那一条**访存跳过，程序继续（第 4 级）；
+        #:   * `lms_crash`  —— 不能跳过时退出进程（第 5 级）。
+        #: 三个都不开就**一条检查都不发** —— 一条没有回答的检查比没有检查更坏。
+        self.lms_guard = lms_guard
+        self.lms_reject = lms_reject
+        self.lms_crash = lms_crash
+        #: **指针的来源**（`docs/253` §5.3 入口 B 的第一步）：`let p: ptr = alloc(N)`
+        #: 且 `N` 是编译期常量 ⇒ `{p: N}`。只收**直接来自 `alloc`** 的指针：
+        #: 过了 `ptr_add` / 切片 / 结构体字段的，这里是**没有**记录的 —— 保守地不发，
+        #: 比"对派生指针乱发"安全（后者会把块里的数据当成块长读，后果比不检查更坏）。
+        self.lms_size: dict[str, int] = {}
         self.rootk = 0
         self.dbg_types = dbg_types if dbg_types is not None else {}  # M59: 类型 -> DIBasicType
         self.dbg_loc: int | None = None             # 当前语句的 DILocation
@@ -8179,6 +8255,34 @@ class _Ir:
         self.w(f"{p} = call ptr @__loment_alloc(i32 {size_var})")
         return p
 
+    def _lms_fixed_size(self, e) -> int | None:
+        """`alloc(<常量>)` 的那个常量 —— 字面量或模块常量；别的形状返回 `None`。
+
+        **只认这两种**：界必须是**编译期常量**才落得进 g1 格（`docs/253` §5.3 那张表）；
+        运行期算出来的尺寸落 g2（要一条动态比较），这一轮不做。
+        """
+        if isinstance(e, IntLit):
+            return e.value
+        if isinstance(e, Ident):
+            c = self.consts.get(e.name)
+            if c is not None and isinstance(c[1], int):
+                return c[1]
+        return None
+
+    def _lms_guard_site(self, e: Call) -> int | None:
+        """这一处访存要不要发 g1 检查；要的话返回块的**载荷字节数**。
+
+        三个条件缺一不可：第 3 级开着、至少有一级能对它作出回答（拒/崩）、
+        而且这个指针**直接来自** `alloc(<常量>)`。过了 `ptr_add` 的、切片的、
+        结构体字段的指针这里**没有记录** —— 保守地不发，比把块里的数据当块长读安全。
+        """
+        if not self.lms_guard or not (self.lms_reject or self.lms_crash):
+            return None
+        a0 = e.args[0] if e.args else None
+        if not isinstance(a0, Ident):
+            return None
+        return self.lms_size.get(a0.name)
+
     def builtin(self, e: Call) -> tuple[str, str]:
         """str_len / str_eq / str_concat / str_byte / slice_len 的 IR 降级。"""
         if e.name == "alloc":  # M15: bump 分配器
@@ -8189,8 +8293,42 @@ class _Ir:
             self.w(f"call void @__loment_free(ptr {p})")
             return "u32", "0"
         if e.name == "load8":
+            n = self._lms_guard_site(e)
             _, pv = self.expr(e.args[0], "ptr")
             _, ov = self.expr(e.args[1], "u32")
+            if n is not None:
+                ok, bad = self.l("lmsok"), self.l("lmsbad")
+                c = self.t()
+                self.w(f"{c} = icmp ult i32 {ov}, {n}")
+                self.w(f"br i1 {c}, label %{ok}, label %{bad}")
+                self.terminated = True
+                self.label(bad)
+                join = None
+                if self.lms_reject:
+                    # **第 4 级**（`docs/253` §5.4）：这一条 `load` 被拒，值取 0，
+                    # 控制流**从它继续** —— 赔进去的是这一条指令，不是这个进程。
+                    join = self.l("lmsjoin")
+                    self.w(f"br label %{join}")
+                else:
+                    # **第 5 级**：拒不了就崩（`llvm.trap` = 进程自己退出）。
+                    self.w("call void @__loment_abort()")
+                    self.w("unreachable")
+                self.terminated = True
+                self.label(ok)
+                g = self.t()
+                self.w(f"{g} = getelementptr i8, ptr {pv}, i32 {ov}")
+                b8 = self.t()
+                self.w(f"{b8} = load i8, ptr {g}")
+                z = self.t()
+                self.w(f"{z} = zext i8 {b8} to i32")
+                if join is None:
+                    return "u32", z
+                self.w(f"br label %{join}")
+                self.terminated = True
+                self.label(join)
+                r = self.t()
+                self.w(f"{r} = phi i32 [ 0, %{bad} ], [ {z}, %{ok} ]")
+                return "u32", r
             g = self.t()
             self.w(f"{g} = getelementptr i8, ptr {pv}, i32 {ov}")
             b8 = self.t()
@@ -8199,9 +8337,26 @@ class _Ir:
             self.w(f"{r} = zext i8 {b8} to i32")
             return "u32", r
         if e.name == "store8":
+            n = self._lms_guard_site(e)
             _, pv = self.expr(e.args[0], "ptr")
             _, ov = self.expr(e.args[1], "u32")
             _, vv = self.expr(e.args[2], "u8")
+            join = None
+            if n is not None:
+                ok, bad = self.l("lmsok"), self.l("lmsbad")
+                c = self.t()
+                self.w(f"{c} = icmp ult i32 {ov}, {n}")
+                self.w(f"br i1 {c}, label %{ok}, label %{bad}")
+                self.terminated = True
+                self.label(bad)
+                if self.lms_reject:
+                    join = self.l("lmsjoin")
+                    self.w(f"br label %{join}")
+                else:
+                    self.w("call void @__loment_abort()")
+                    self.w("unreachable")
+                self.terminated = True
+                self.label(ok)
             g = self.t()
             self.w(f"{g} = getelementptr i8, ptr {pv}, i32 {ov}")
             if self.gc_barrier:
@@ -8214,6 +8369,10 @@ class _Ir:
                 # 8 条 `store8` 无论怎么跨都落在同一张或相邻两三张卡里，一张都不会漏。
                 self.w(f"call void @__loment_wb(ptr {g})")
             self.w(f"store i8 {vv}, ptr {g}")
+            if join is not None:
+                self.w(f"br label %{join}")
+                self.terminated = True
+                self.label(join)
             return "u32", "0"
         if e.name == "atomic_add":  # M21
             _, pv = self.expr(e.args[0], "ptr")
@@ -8526,9 +8685,24 @@ class _Ir:
                 # 这里不必再看右式的形状：`_l0_promotable` 只把 `let NAME: ptr = alloc(<常量>)`
                 # 收进表里，所以进到这里就一定是那个形状。
                 self.w(f"store ptr %{s.name}.buf, ptr {self.vars[s.name][1]}")
+                # **L0 的缓冲也是定长的**：它只是从堆上提到了栈上，界没有变。
+                # 不记这一格，自举侧（按 token 流的形状认，与档无关）会比参考多发一条
+                # g1 检查 —— `gc_l0_alpha` 那三格判据就是这么红的。
+                self.lms_size[s.name] = self.l0[s.name]
                 return
             _, v = self.expr(s.expr, s.type)
             self.w(f"store {self.ll(s.type)} {v}, ptr {self.vars[s.name][1]}")
+            # **来源**（`docs/253` §5.3 入口 B 的第一步）：只有 `let p: ptr = alloc(<常量>)`
+            # 这个形状记进表里；别的形状（派生指针、切片、结构体字段）**不记** ——
+            # 保守地不发检查，比把块里的数据当块长读安全。
+            if s.type == "ptr":
+                n = (self._lms_fixed_size(s.expr.args[0])
+                     if isinstance(s.expr, Call) and s.expr.name == "alloc"
+                     and s.expr.args else None)
+                if n is not None:
+                    self.lms_size[s.name] = n
+                else:
+                    self.lms_size.pop(s.name, None)
             mask = self.slots.get(s.name)
             if mask is not None:
                 # **块内精确**（`docs/210` §2.9）：把块头的借出标记从 `-1` 改成
@@ -8557,6 +8731,10 @@ class _Ir:
             ty, ptr = self.vars[s.target.name]
             _, v = self.expr(s.expr, ty)
             self.w(f"store {self.ll(ty)} {v}, ptr {ptr}")
+            # 重新赋值 = 这个名字**不再指那块块** —— 来源记录当场作废
+            # （与 E029 那条"`free` 之后重新赋值就不算用完再放"同口径）。
+            if ty == "ptr":
+                self.lms_size.pop(s.target.name, None)
             return
         if isinstance(s, If):
             _, c = self.expr(s.cond, "bool")
@@ -8677,10 +8855,13 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
                   dbg_scope: int | None = None, dbg_lines: dict | None = None,
                   dbg_meta: list | None = None, dbg_types: dict | None = None,
                   gc_alpha: bool = False, gc_auto: bool = False,
-                  gc_barrier: bool = True
+                  gc_barrier: bool = True,
+                  lms_guard: bool = False, lms_reject: bool = False,
+                  lms_crash: bool = False
                   ) -> tuple[list[str], str]:
     ir = _Ir(funcs, consts, f, structs, enums, coverage, cov_counter,
-             dbg_scope, dbg_lines, dbg_meta, dbg_types, gc_alpha, gc_auto, gc_barrier)
+             dbg_scope, dbg_lines, dbg_meta, dbg_types, gc_alpha, gc_auto, gc_barrier,
+             lms_guard, lms_reject, lms_crash)
     if f.interrupt:  # M33: x86_intrcc 需要中断帧指针
         ir.out.append(f"; {f.name} -> interrupt (x86_intrcc)")
         ir.out.append(f"define x86_intrcc void @{f.name}(ptr byval([8 x i8]) %__frame)"
@@ -8936,6 +9117,11 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     #   * **这份产物里真的有收集器**（`gc_auto` / `gc_auto_alpha`）—— `gc_manual` 下
     #     没有东西可收，"拉回"在那里是一句空话。这是这一级**明写的边界**。
     _lms_rescue = _lms_level(mod, "lms_guard") and (gc_auto or gc_alpha)
+    # **第 3/4/5 级在访存点上的三档**（`docs/253` §5.3–§5.5）：检查 / 跳过 / 退出。
+    # 三个都不开就一条检查都不发 —— 没有回答的检查比没有检查更坏。
+    _lms_guard = _lms_level(mod, "lms_guard")
+    _lms_reject = _lms_level(mod, "lms_reject")
+    _lms_crash = _lms_level(mod, "lms_crash")
     # **运行期维**（`docs/217` / `docs/175` §3.6）。两个方向各一句话：
     #   * `runtime`    ⇒ 产物里**一定**有那段运行期 —— 这里的 `rt_on` 无条件发 `_IR_RUNTIME`；
     #   * `no_runtime` ⇒ 产物里**一定没有** —— 那条**不在这里**：它在 `check()` 里拒
@@ -9002,7 +9188,8 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
             g, text = _emit_ir_func(f, funcs, consts, structs, enums, coverage,
                                     cov_counter, scope, lines, meta if debug else None,
                                     dbg_types if debug else None, gc_alpha, gc_auto,
-                                    gc_alpha and _has_heap_pre)
+                                    gc_alpha and _has_heap_pre,
+                                    _lms_guard, _lms_reject, _lms_crash)
             globals_ += g
             body.append(text)
     # **命令入口**（`docs/223`）：声明了命令、又没写 `_start` -> 工具链替它发一个。
@@ -9390,6 +9577,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--emit-rust", metavar="PATH")
     ap.add_argument("--emit-potato", metavar="PATH")
     ap.add_argument("--emit-llvm", metavar="PATH", help="LLVM IR (native M0: 标量子集, docs/144)")
+    ap.add_argument("--lms-report", metavar="PATH",
+                    help="LMS 第 2 级（管理器）：把这份单元的内存图写到 PATH（docs/253 §5.2）")
     ap.add_argument("--coverage", action="store_true", help="M63: IR 块覆盖计数 (配合 --emit-llvm)")
     ap.add_argument("--debug", action="store_true", help="M59: DWARF 行表元数据 (配合 --emit-llvm)")
     ap.add_argument("--print", dest="print_target", choices=("rust", "potato", "llvm"))
@@ -9465,6 +9654,12 @@ def main(argv: list[str] | None = None) -> int:
         potato = emit_potato(mod, root, deps)
         llvm = emit_llvm(mod, root, deps, coverage=args.coverage, debug=args.debug) \
             if (args.emit_llvm or args.print_target == "llvm") else ""
+        if args.lms_report:
+            rep = lms_report(mod, deps)
+            rp = Path(args.lms_report)
+            rp.parent.mkdir(parents=True, exist_ok=True)
+            rp.write_text(rep, encoding="utf-8", newline="\n")
+            print(f"[OK] {path} -> {args.lms_report} ({len(rep)}B)")
     except LomError as e:
         print(f"[ERR] {path}: {e}", file=sys.stderr)
         write_diags(args.diag_out, [diag_record(path, e.line, e.col, e.msg)])
@@ -9479,7 +9674,8 @@ def main(argv: list[str] | None = None) -> int:
         "potato": (args.emit_potato, potato),
         "llvm": (args.emit_llvm, llvm),
     }
-    if not any(dest for dest, _ in targets.values()) and not args.check:
+    if not any(dest for dest, _ in targets.values()) and not args.check \
+            and not args.lms_report:
         print("[ERR] 未指定输出 (--emit-rust / --emit-potato / --print / --check)", file=sys.stderr)
         return 2
 

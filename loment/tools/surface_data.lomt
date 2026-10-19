@@ -654,11 +654,11 @@ pub fn code_fix(c: u32, i: u32, lang: u32) -> str {
     if k == 448 { return "Put the index back inside `0..len-1`."; }
     if k == 450 { return "If the array really should be longer, lengthen the **declaration** (`[u32; 16]`)."; }
     if k == 452 { return "When the index is **computed** rather than a literal this rule cannot fire - guard it yourself: a fixed-size array plus an explicit `if i >= 4 { ... }`, and `slice_len(x)` for slices (a runtime index is not checked by default - see the `no` line below)."; }
-    if k == 454 { return "To have it checked automatically (development channel): write `choose lms_guard` explicitly (level 3) in the root unit, or keep the default `lms_full` tier, and the guarantor rescuers run (`docs/253` section 5.3)."; }
+    if k == 454 { return "The default tier (`lms_full`) already carries level 3 (the guarantor); to switch it alone write `choose lms_guard` / `choose close lms_guard` (`docs/253` section 11.4)."; }
     if k == 449 { return "把下标改回 `0..len-1` 之内。"; }
     if k == 451 { return "数组确实该更长的话，把**声明**改长（`[u32; 16]` 之类）。"; }
     if k == 453 { return "下标是**算出来的**（不是字面量）时这条发不出来 —— 那种情况自己挡：定长数组配一个显式的 `if i >= 4 { … }`，切片用 `slice_len(x)`（运行期的下标默认不检查，见下面 `no` 那一行）。"; }
-    if k == 455 { return "想让它自动挡（开发通道）：默认档 `lms_full` 就带着第 3 级（保障器）；要单独关/开它，写 `choose lms_guard` / `choose close lms_guard`（`docs/253` §11.4）。"; }
+    if k == 455 { return "默认档 `lms_full` 就带着第 3 级（保障器）；要单独关/开它，写 `choose lms_guard` / `choose close lms_guard`（`docs/253` §11.4）。"; }
     if k == 464 { return "Do not `free` it - let LGC own the block (under `gc_auto` / `gc_auto_alpha` the blocks `alloc` hands out are the collector's anyway)."; }
     if k == 466 { return "If you really must release early: after `free(p)` assign `p` a new block and stop using the old value."; }
     if k == 468 { return "Move the `free` to **after the last use** - i.e. where `p`'s lifetime actually ends."; }

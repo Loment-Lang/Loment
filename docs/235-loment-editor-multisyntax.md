@@ -25,8 +25,9 @@
 | `package.json` | 七个语言 + 七份语法；`capabilities.untrustedWorkspaces`（#166）；`loment.extraExtensions`；命令 / 任务 / 断点的 `when` 与 `languages` 从 `== loment` 改成**家族判据** |
 | `tools/loment_lsp.py` · `loment/tools/lsp.lomt` | **#28**：`completionProvider` 从 `{"triggerCharacters":[".",":"]}` 改成 `{}` |
 
-版本 0.1.0 → **0.2.0**（多语法是新功能）。许可在 `origin/main` 上早已是 `Loment-Open`，
-本次作业从 `origin/main` 起，所以那一栏是**自动对齐**的 —— 本地的 0.1.0 只是落后 425 个提交。
+版本 0.1.0 → **0.2.0**（多语法是新功能）。许可在 `origin/main` 上早已是 `MIT OR Apache-2.0`
+（0.1.5 起；此前是 `Loment-Open`），本次作业从 `origin/main` 起，所以那一栏是**自动对齐**的
+—— 本地的 0.1.0 只是落后 425 个提交。
 
 ## 2. 七门表层语法：为什么是"各门一个 `loment-<规范名>`"
 

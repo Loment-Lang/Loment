@@ -8,6 +8,17 @@ body:
         [CONTRIBUTING.md](https://github.com/Loment-Lang/loment/blob/main/CONTRIBUTING.md) says
         everything outside `lom/` is open, criticism included. This is the place for it — the
         strongest version of your case is the most useful version.
+  - type: checkboxes
+    id: contributing
+    attributes:
+      label: Before you file
+      description: |
+        [CONTRIBUTING.md](https://github.com/Loment-Lang/loment/blob/main/CONTRIBUTING.md) is the
+        short document this form assumes you have read: what is closed under `lom/`, what the gate
+        is, and the house rules for a change.
+      options:
+        - label: I have read CONTRIBUTING.md.
+          required: true
   - type: textarea
     id: what
     attributes:

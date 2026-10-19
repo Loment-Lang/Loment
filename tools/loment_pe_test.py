@@ -1997,6 +1997,28 @@ def test_pe_and_elf_agree_on_net_programs():
     print(f"      PE 与 ELF 逐字节相同：{shown}")
 
 
+@test
+def test_an_unrecognised_icmp_is_a_diagnostic_not_a_traceback():
+    """`#376`：认不出的 `icmp` 不许甩 Python 栈。
+
+    原先 `ICMP_CC[m.group(1)]` 直接索引：谓词不认识就是 `KeyError`，整条不匹配就是
+    `AttributeError: 'NoneType' ...` —— 没指令、没谓词、没来源。现在两条路径都点名。
+    `samesign`（LLVM 19 起的标志）应当被**接受**：它是优化提示，语义与不带时相同。
+    """
+    ir = ("define i32 @_start() {\nentry:\n"
+          "  %r = icmp PRED i32 1, 2\n"
+          "  ret i32 %r\n}\n")
+    try:
+        lomelf.compile_pe(ir.replace("PRED", "foo"))
+    except lomelf.Unsupported as e:
+        assert "icmp foo" in str(e), str(e)
+    else:
+        raise AssertionError("不认识的谓词居然编过去了")
+    blob, _info = lomelf.compile_pe(ir.replace("PRED", "samesign ult"))
+    assert blob, "带 samesign 的标志被拒了 —— 它是优化提示，不是新语义"
+    print("      不认识的谓词：点名 `icmp foo`；`samesign ult` 照常编出产物")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_pe_test")
 

@@ -77,7 +77,7 @@ _CALL_RE = re.compile(r"@([-A-Za-z0-9_.]+)\((.*)\)\s*$", re.S)
 class _CFunc:
     """一个函数编译后的样子。`blocks[i][j]` 就是 IR 里第 i 块的第 j 条指令。"""
 
-    __slots__ = ("name", "nslots", "params", "blocks", "labels")
+    __slots__ = ("name", "nslots", "params", "blocks", "labels", "plan")
 
     def __init__(self, name: str) -> None:
         self.name = name
@@ -85,6 +85,10 @@ class _CFunc:
         self.params: list[int] = []
         self.blocks: list[list[tuple]] = []
         self.labels: list[str] = []
+        #: 派生的**融合计划**（`docs/266`，issue #647）：每个块一张
+        #: `[(起始下标, 条数, 形状名), ...]`。**不序列化** —— 它完全由 `blocks` 决定，
+        #: 紧凑形解出来的 `_CFunc` 在第一次执行时重算，所以缓存与直编拿到同一张计划。
+        self.plan: list[list[tuple[int, int, str]]] | None = None
 
 
 class Program:
@@ -96,13 +100,20 @@ class Program:
     会让"根本没执行到的代码"把整个程序打死，那是**换引擎顺带改了语义**。
     """
 
-    def __init__(self, globals_: list, funcs: list, externs: list) -> None:
+    def __init__(self, globals_: list, funcs: list, externs: list,
+                 fuse: bool = True, fusion: "FusionReport | None" = None,
+                 hot: set[tuple[str, str]] | None = None) -> None:
         # ⚠ 调用方必须**已经**把全局摆好了（`Global.addr` 有值），否则下面的 `enc`
         # 会把每个 `@global` 编成地址 0 —— 见模块开头那段。
         self.globals = {g.name: g for g in globals_}
         self.funcs = {f.name: f for f in funcs}
         self.externs = set(externs)
         self.cfuncs: dict[str, _CFunc] = {}
+        #: A4（#647）：融合的开关、报告与**热点块集**。`hot is None` = 每块都融；
+        #: 给了集合就只在集合里的块融（"chosen from the T1 profile's counts"）。
+        self.fuse = fuse
+        self.fusion = fusion
+        self.hot = hot
 
     def cfunc(self, name: str) -> "_CFunc":
         """取一个函数编译后的样子；没编过就现在编。错误消息**与 T0 逐字一致**。"""
@@ -375,6 +386,97 @@ def _compile_call(text: str, dest: int, enc, prog: Program) -> tuple:
     return (_OP_CALL, name, args, dest)
 
 
+# ---------------------------------------------------------------- A4：超级指令
+_OPNAME = {
+    _OP_ALLOCA: "alloca", _OP_LOAD: "load", _OP_STORE: "store", _OP_GEP: "gep",
+    _OP_GEP_DYN: "gep.dyn", _OP_EXTRACT: "extractvalue", _OP_INSERT: "insertvalue",
+    _OP_ICMP: "icmp", _OP_DIV: "div", _OP_ARITH: "arith", _OP_CAST: "cast",
+    _OP_CALL: "call", _OP_ASM: "asm", _OP_RMW: "atomicrmw", _OP_PHI: "phi",
+    _OP_BR: "br", _OP_SWITCH: "switch", _OP_RET: "ret", _OP_UNREACH: "unreachable",
+    _OP_ERROR: "error", _OP_DEAD: "dead",
+}
+
+
+def _shape(op: tuple) -> str:
+    """报告里那一格的名字。算术 / 除法 / 转型带上算子名（`add`、`sdiv`、`zext`）——
+    只写 `arith` 的话，报告说不清"哪一串"被合了。"""
+    k = op[0]
+    if k in (_OP_ARITH, _OP_DIV, _OP_CAST) and len(op) > 1 and isinstance(op[1], str):
+        return op[1]
+    return _OPNAME.get(k, f"op{k}")
+
+
+#: 有**专门处理器**的两条形状（`_exec_pair`）。只合这两种 —— 把三条以上或没专
+#: 门处理器的形状硬塞进来，会让执行退回 `_run_value` 的通用分派，**比不合并还慢**
+#: （2026-10-19 实测：第一版就是那么写的，T2 从 5.5x 掉到 4.1x）。
+_PAIR_OK = frozenset({
+    (_OP_ARITH, _OP_ARITH),
+    (_OP_ARITH, _OP_STORE),
+    (_OP_LOAD, _OP_ARITH),
+    (_OP_ICMP, _OP_BR),
+})
+
+
+def _plan_block(ops: list, fuse: bool = True) -> list[tuple[int, int, str]]:
+    """一块的融合计划：`[(起始下标, 条数, 形状名), ...]`。**下标是 IR 里的原下标** ——
+    剖面按它记边与调用点，融合不许把站点挪走。"""
+    if not fuse:
+        return [(i, 1, _shape(op)) for i, op in enumerate(ops)]
+    plan: list[tuple[int, int, str]] = []
+    i, n = 0, len(ops)
+    while i < n:
+        if i + 1 < n and (ops[i][0], ops[i + 1][0]) in _PAIR_OK:
+            plan.append((i, 2, _shape(ops[i]) + "+" + _shape(ops[i + 1])))
+            i += 2
+            continue
+        plan.append((i, 1, _shape(ops[i])))
+        i += 1
+    return plan
+
+
+class FusionReport:
+    """融合报告（`docs/266`）：一个**关着就一个字节都不写**的产物。
+
+    格式与 T1 剖面同一套纪律（`docs/247`）：`[sites]` 按 IR 解析顺序，`[patterns]`
+    给出每种形状的总数。**没有这份报告，判据只能量"变快了"，说不出"合了什么"。**
+    """
+
+    def __init__(self) -> None:
+        self.sites: list[tuple[str, str, int, str]] = []
+        self.counts: dict[str, int] = {}
+
+    def add(self, fn: str, label: str, start: int, shape: str) -> None:
+        self.sites.append((fn, label, start, shape))
+        self.counts[shape] = self.counts.get(shape, 0) + 1
+
+    def text(self) -> str:
+        out = ["# lvm fusion v1",
+               "# site = (function, block, first-instruction-index); shape = the fused op sequence",
+               "# order = IR parse order; [patterns] is sorted by shape",
+               "[sites]"]
+        out += [f"{fn}	{blk}	{i}	{shape}" for (fn, blk, i, shape) in self.sites]
+        out.append("[patterns]")
+        out += [f"{shape}	{self.counts[shape]}" for shape in sorted(self.counts)]
+        return chr(10).join(out) + chr(10)
+
+
+def parse_hot_blocks(text: str) -> set[tuple[str, str]]:
+    """从一份 T1 剖面里取出**被执行过的块**（`[blocks]` 段）。融合只在这些块里做 ——
+    "chosen from the T1 profile's counts"（issue #647）。剖面的格式见 `docs/247`。"""
+    hot: set[tuple[str, str]] = set()
+    section = ""
+    for ln in text.splitlines():
+        if ln.startswith("[") and ln.endswith("]"):
+            section = ln[1:-1]
+            continue
+        if section != "blocks" or not ln or ln.startswith("#"):
+            continue
+        parts = ln.split("	")
+        if len(parts) >= 2:
+            hot.add((parts[0], parts[1]))
+    return hot
+
+
 # ---------------------------------------------------------------- 执行期
 def _rd(vals: list, op: tuple):
     k = op[0]
@@ -406,14 +508,32 @@ class T2Executor(lvm.Executor):
     """T0 的执行体 + 一个**编译档**的 `run`。系统调用 / 内存 / 剖面**全用 T0 那一份**。"""
 
     def __init__(self, globals_: list, funcs: list, externs: list, out,
-                 profile=None, argv: list[str] | None = None, values=None) -> None:
+                 profile=None, argv: list[str] | None = None, values=None,
+                 fuse: bool = True, fusion: "FusionReport | None" = None,
+                 hot: set[tuple[str, str]] | None = None) -> None:
         super().__init__(globals_, funcs, externs, out, profile, argv)
         #: T3 的**值观察**（`docs/248` §3.2 的 B1 要"值"，而剖面只记次数）。
         #: 只在开着剖面时才记（那一条路本来就有指令下标 `j`）—— 见 `_OP_CALL` 那一支。
         self.values = values
         # ⚠ **必须在 `super().__init__` 之后**：那里才调 `_place_globals` 给
         # `Global.addr` 赋值，而编译期要拿那个地址去编每个 `@global` 操作数。
-        self.prog = Program(globals_, funcs, externs)
+        self.prog = Program(globals_, funcs, externs, fuse, fusion, hot)
+
+    # ------------------------------------------------------------ 融合计划
+    def _plan(self, cf: _CFunc, bi: int, blk: list) -> list:
+        """取（并第一次算）这个函数的融合计划。**按块决定**：热点集里没有的块不融。"""
+        if cf.plan is None:
+            cf.plan = []
+            for k, ops in enumerate(cf.blocks):
+                allow = self.prog.fuse and (
+                    self.prog.hot is None or (cf.name, cf.labels[k]) in self.prog.hot)
+                cf.plan.append(_plan_block(ops, allow))
+            if self.prog.fusion is not None:
+                for k, plan in enumerate(cf.plan):
+                    for start, count, shape in plan:
+                        if count > 1:
+                            self.prog.fusion.add(cf.name, cf.labels[k], start, shape)
+        return cf.plan[bi]
 
     # ------------------------------------------------------------ 调用
     def call_t2(self, cf: _CFunc, args: list, entry: bool = False):
@@ -449,6 +569,8 @@ class T2Executor(lvm.Executor):
             blk = blocks[bi]
             if prof is not None:
                 prof.block(name, labels[bi])
+                # 记剖面时不融合：那份产物要比逐字节（判据 B）。融合是执行期的事，
+                # 开关在不在都不改变被记录的行为。
                 for j, op in enumerate(blk):
                     steps += 1
                     if steps > lvm.STEP_CAP:
@@ -458,16 +580,18 @@ class T2Executor(lvm.Executor):
 
                     if code == _OP_CALL:
                         _, cname, a_ops, d = op
-                        cf = self.prog.cfunc(cname)
+                        # ⚠ 别覆盖 `cf` —— 它还是**当前函数**，融合计划按它取
+                        # （A4 之后这里踩过一次：覆盖后下一轮拿的是被调方的计划）。
+                        callee = self.prog.cfunc(cname)
                         # issue #716：**先判个数、再求值实参** —— 多出来的那个实参若是
                         # 未定义的值，T0 报的是"实参个数与形参不符"，不是"读未定义的值"。
-                        if len(a_ops) != len(cf.params):
+                        if len(a_ops) != len(callee.params):
                             raise lvm.LvmError("实参个数与形参不符")
                         args = [_rd(vals, o) for o in a_ops]
                         prof.call_site((name, labels[bi], j), cname)
                         if self.values is not None and args:
                             self.values.observe((name, labels[bi], j), args[0])
-                        v = self.call_t2(cf, args)
+                        v = self.call_t2(callee, args)
                         if d >= 0:
                             vals[d] = v
                         continue
@@ -512,7 +636,48 @@ class T2Executor(lvm.Executor):
                     _run_value(self, vals, op)
             else:
                 # **热路径**：没有剖面时，整条链上每一步都只碰整数。
-                for j, op in enumerate(blk):
+                for (j, count, _sh) in self._plan(cf, bi, blk):
+                    op = blk[j]
+                    if count == 2:
+                        steps += 1
+                        if steps > lvm.STEP_CAP:
+                            raise lvm.LvmError(
+                                f"步数上限 {lvm.STEP_CAP}：{name} 的块 {labels[bi]}，"
+                                f"第 {j} 条")
+                        steps += 1
+                        if steps > lvm.STEP_CAP:
+                            raise lvm.LvmError(
+                                f"步数上限 {lvm.STEP_CAP}：{name} 的块 {labels[bi]}，"
+                                f"第 {j + 1} 条")
+                        # 就地展开（**不要**调 `_exec_pair`）：一个 Python 函数调用的
+                        # 开销几乎等于它替掉的那条分派链，实测只剩 1.04x。见 docs/266。
+                        q2 = blk[j + 1]
+                        ka, kb = op[0], q2[0]
+                        if ka == _OP_ARITH and kb == _OP_ARITH:
+                            _, o1, t1, x1, y1, d1 = op
+                            vals[d1] = lvm.arith(o1, _rd(vals, x1), _rd(vals, y1), t1)
+                            _, o2, t2, x2, y2, d2 = q2
+                            vals[d2] = lvm.arith(o2, _rd(vals, x2), _rd(vals, y2), t2)
+                        elif ka == _OP_LOAD and kb == _OP_ARITH:
+                            _, t1, x1, d1 = op
+                            vals[d1] = self.load(t1, _rd(vals, x1))
+                            _, o2, t2, x2, y2, d2 = q2
+                            vals[d2] = lvm.arith(o2, _rd(vals, x2), _rd(vals, y2), t2)
+                        elif ka == _OP_ARITH and kb == _OP_STORE:
+                            _, o1, t1, x1, y1, d1 = op
+                            vals[d1] = lvm.arith(o1, _rd(vals, x1), _rd(vals, y1), t1)
+                            _, t2, v2, p2 = q2
+                            self.store(t2, _rd(vals, p2), _rd(vals, v2))
+                        else:                                  # icmp + br
+                            _, fn, sg, ty, x1, y1, d1 = op
+                            x, y = _rd(vals, x1), _rd(vals, y1)
+                            if sg:
+                                x, y = lvm.signed(x, ty), lvm.signed(y, ty)
+                            vals[d1] = 1 if fn(x, y) else 0
+                            _, cond, tgt, alt = q2
+                            prev, bi = bi, (tgt if cond is None or _rd(vals, cond) else alt)
+                            break
+                        continue
                     steps += 1
                     if steps > lvm.STEP_CAP:
                         raise lvm.LvmError(
@@ -552,10 +717,10 @@ class T2Executor(lvm.Executor):
                         break
                     if code == _OP_CALL:
                         _, cname, a_ops, d = op
-                        cf = self.prog.cfunc(cname)
-                        if len(a_ops) != len(cf.params):
+                        callee = self.prog.cfunc(cname)
+                        if len(a_ops) != len(callee.params):
                             raise lvm.LvmError("实参个数与形参不符")
-                        v = self.call_t2(cf, [_rd(vals, o) for o in a_ops])
+                        v = self.call_t2(callee, [_rd(vals, o) for o in a_ops])
                         if d >= 0:
                             vals[d] = v
                         continue
@@ -668,16 +833,32 @@ def _run_value(vm: T2Executor, vals: list, op: tuple) -> None:
 
 # ---------------------------------------------------------------- 前门
 def run_ir_t2(text: str, out, profile=None, argv: list[str] | None = None,
-              values=None) -> int:
-    """IR 文本 -> **编译一次** -> 跑完 -> 退出码。与 `lvm.run_ir` 同一个契约。"""
+              values=None, fuse: bool = True,
+              fusion: "FusionReport | None" = None,
+              hot: set[tuple[str, str]] | None = None) -> int:
+    """IR 文本 -> **编译一次** -> 跑完 -> 退出码。与 `lvm.run_ir` 同一个契约。
+
+    `fuse` 是 A4（`docs/266`，issue #647）：默认开 —— 它只合并纯值指令，没有假设、
+    没有守卫，判据是"语义逐字节相同"。`fusion` 给一份报告对象时才记站点（关着不写）；
+    `hot` 限制只在剖面点过名的块里融合。"""
     globals_, funcs, externs = lomelf.parse_ll(text)
     if profile is not None:
         profile.bind(funcs)
     if values is not None:
         values.bind(funcs)                  # 没有它 `text()` 不知道按什么顺序输出
-    vm = T2Executor(globals_, funcs, externs, out, profile, argv, values)
+    vm = T2Executor(globals_, funcs, externs, out, profile, argv, values,
+                    fuse, fusion, hot)
     if "_start" not in vm.prog.funcs:
         raise lvm.LvmError("这份 IR 里没有 `_start`")
+    if fusion is not None:
+        # 报告要覆盖**整份程序**：懒编译只编走到的那几个，报告会缺块。编译全部是安全的
+        # —— 编不出来的指令变成 `_OP_ERROR`，只有执行到才抛（与 T0 的接受集合一致）。
+        # 计划也要在这里**先算一遍**：记剖面时的执行路径不融合（判据 B），不会顺手
+        # 算计划，报告就会是空的。
+        for name in list(vm.prog.funcs):
+            cf = vm.prog.cfunc(name)
+            if cf.blocks:
+                vm._plan(cf, 0, cf.blocks[0])
     start = vm.prog.cfunc("_start")
     try:
         vm.call_t2(start, [], entry=True)

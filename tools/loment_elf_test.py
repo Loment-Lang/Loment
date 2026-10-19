@@ -4156,6 +4156,31 @@ def test_an_archive_that_contributes_no_member_does_not_enable_tls_or_the_conscr
     print("      没人用的归档: 不装 TLS、不发收编面，与参考逐字节相同")
 
 
+@test
+def test_a_gnu_ld_script_is_named_as_one_and_points_at_the_real_file():
+    """`#637`：Debian 的 `libz.so` 是 ASCII 的 GNU ld 脚本，不是 ELF。
+
+    原先它掉进 `ForeignObject` 的兜底，报"不是 ELF64 小端目标文件" —— 把共享对象
+    叫成"目标文件"，也没说该链哪个。现在点名"链接脚本"并给出它指向的 `.so`。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        script = Path(t) / "libz.so"
+        script.write_text(
+            "/* GNU ld script\n   Use the shared library.  */\n"
+            "GROUP ( /lib/x86_64-linux-gnu/libz.so.1  AS_NEEDED ( /lib64/ld-linux-x86-64.so.2 ) )\n",
+            encoding="utf-8", newline="\n")
+        try:
+            lomelf.load_foreign(script)
+        except lomelf.Unsupported as e:
+            msg = str(e)
+            assert "链接脚本" in msg, msg
+            assert "/lib/x86_64-linux-gnu/libz.so.1" in msg, msg
+            assert "目标文件" not in msg, msg
+        else:
+            raise AssertionError("GNU ld 脚本被当成 ELF 收下了")
+    print("      GNU ld 脚本: 点名『链接脚本』并给出它指向的 libz.so.1")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_elf_test")
 

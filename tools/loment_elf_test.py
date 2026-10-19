@@ -2659,12 +2659,16 @@ def test_lomelf_selfhost_links_a_real_shared_object():
 
 @test
 def test_the_mirror_linker_refuses_ports_without_the_dev_flag():
-    """自举链接器的**端口门**（`docs/222` §4）：同一份带端口的外源对象，不给
-    `--allow-ports` 就**必须拒**。
+    """自举链接器的**端口门**（`docs/222` §4）：解析之后**仍然悬空**的外源符号，
+    不给 `--allow-ports` 就**必须拒**；收编面能提供的不算端口（`#615`）。
 
     参考侧那条在 `loment_ffi_test::test_the_port_gate_refuses_by_default_...`；这一条是它
     的孪生。**为什么非要有**：包里装的是**自举**那一只链接器 —— 只有它也拒，
     "0.1.4.5 里 libc 不可调用"才是真的。参考拒、自举收，是最坏的那种分叉。
+
+    ⚠ 夹具与参考侧同一次换过（`#615`）：`memcpy`/`memset`/`memcmp` 由收编面提供、
+    解析之后不再悬空 —— 拿它们测门等于把"提过一个名字"当成"通向世界"。所以**两份都要测**：
+    `cons.o` 不给旗必须**收**（`#615` 的正面），`port.o`（调 `time`）不给旗必须**拒**。
     """
     if not (_clang() and _wsl()):
         print("      SKIP: 无 clang/WSL")
@@ -2673,28 +2677,38 @@ def test_the_mirror_linker_refuses_ports_without_the_dev_flag():
     td = Path(tempfile.mkdtemp(prefix="mf_"))
     bld = ROOT / "loment" / "build"
     bld.mkdir(parents=True, exist_ok=True)
-    tag = "portgate"
-    src = td / f"{tag}.lomt"
+    src = td / "portgate.lomt"
     src.write_text(ffitest.LOMENT_CONSCRIPT_SOURCE, encoding="utf-8", newline="\n")
     ll = _ref_ir(src, td)
     (td / "cons.c").write_text(ffitest.C_CONSCRIPT_SOURCE, encoding="utf-8", newline="\n")
     assert ffitest.compile_c(_clang(), td / "cons.c", td / "cons.o") == 0
-    llrepo = bld / f"_mirror_{tag}.ll"
-    elfrepo = bld / f"_mirror_{tag}.elf"
-    objrepo = ROOT / f"loment/build/_mirror_{tag}_cons.o"
+    (td / "port.c").write_text(ffitest.C_PORT_SOURCE, encoding="utf-8", newline="\n")
+    assert ffitest.compile_c(_clang(), td / "port.c", td / "port.o") == 0
+    llrepo = bld / "_mirror_portgate.ll"
+    consrepo = bld / "_mirror_portgate_cons.o"
+    portrepo = bld / "_mirror_portgate_port.o"
     try:
         llrepo.write_bytes(ll.read_bytes())
-        objrepo.write_bytes((td / "cons.o").read_bytes())
-        rc, err = _mirror_run(mir, f"loment/build/_mirror_{tag}.ll",
-                              f"loment/build/_mirror_{tag}.elf",
-                              (f"loment/build/_mirror_{tag}_cons.o",), ports=False)
-        assert rc != 0, (
+        consrepo.write_bytes((td / "cons.o").read_bytes())
+        portrepo.write_bytes((td / "port.o").read_bytes())
+        rc, err = _mirror_run(mir, "loment/build/_mirror_portgate.ll",
+                              "loment/build/_mirror_portgate_cons.elf",
+                              ("loment/build/_mirror_portgate_cons.o",), ports=False)
+        assert rc == 0, (
+            "收编面能提供的名字被自举链接器当成了端口 —— 解析之后它根本不悬空（`#615`）："
+            + err[-300:])
+        rc2, err2 = _mirror_run(mir, "loment/build/_mirror_portgate.ll",
+                                "loment/build/_mirror_portgate_port.elf",
+                                ("loment/build/_mirror_portgate_port.o",), ports=False)
+        assert rc2 != 0, (
             "自举链接器**没有**端口门 —— 带未定义符号的对象照收，于是包里的 "
             "`loment build --link` 又把 libc 放进来了（`docs/222` §4）")
-        print("      自举链接器：不给 --allow-ports 就拒带端口的对象")
+        assert "undefined symbols" in err2, f"拒绝理由没说出端口：{err2[-300:]}"
+        print("      自举链接器：收编面默认收；真正悬空的符号不给 --allow-ports 就拒")
     finally:
-        for p in (llrepo, elfrepo, objrepo):
-            p.unlink(missing_ok=True)
+        for q in (llrepo, consrepo, portrepo,
+                  bld / "_mirror_portgate_cons.elf", bld / "_mirror_portgate_port.elf"):
+            q.unlink(missing_ok=True)
 
 
 #: `#366` 的语料：刻 N 个块（**一个 `free` 都不写**）→ 用大块把累计请求推过触发阈值、逼出
@@ -3388,6 +3402,112 @@ def test_pic_objects_link_through_a_static_got():
         rc, _out = _run_bin(exe, "pic", td)
         assert rc == 7, f"PIC 对象读回 {rc}（期望 7）"
     print("      -fPIC 对象经静态 GOT 取到全局（rc=7）")
+
+
+@test
+def test_mirror_matches_reference_on_pic_tls_and_weak_objects():
+    """自举侧镜像在**外部对象**上与参考实现逐字节相同（`#609` / `#610` / `#617`）。
+
+    镜像原先只认六种重定位、也没有静态 GOT / TLS 块 / 弱引用：一个 `-fPIC` 的发行版库
+    （Debian 的 hardening flags 默认开）在**包内那份链接器**上报"不认识的重定位类型 42"，
+    而参考实现早就能链 —— 判据只比"两边一致"时看不见这一整类，因为两边都失败也是一致。
+    所以每一类都要求**真的链过去、字节相同、退出码相同**。
+
+    四类：`-fPIC` 对象（GOTPCREL 族）、`__thread` 对象（TPOFF32 + 多对象 TLS 片段）、
+    弱未定义（解析不到绑 0，且不进端口门）、弱定义 + 强定义（强的那份赢）。
+    最后一类额外按**不开 `--allow-ports`** 跑 —— 端口门判的是"所有对象摆完还剩什么"，
+    自闭合的多目标文件组合不该被拒（`#615`）。
+    """
+    clang = _clang()
+    if not (clang and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    mir = _mirror()
+    lsrc = ('module mo\n\n'
+            'extern fn f() -> i32;\n\n'
+            'fn _start() {\n'
+            '    syscall4(60, f() as u64, 0, 0);\n'
+            '}\n')
+    cases = [
+        ("pic", {"p.c": ('int g = 7;\nint f(void) { return g; }\n', ("-fPIC", "-O2"))},
+         ("p.o",), 7, True),
+        ("tls", {"t1.c": ('__thread int t = 5;\nint f(void) { return t; }\n', ()),
+                 "t2.c": ('__thread long long u = 9;\nint g(void) { return (int)u; }\n', ())},
+         ("t1.o", "t2.o"), 5, True),
+        ("weak", {"w.c": ('extern void opt(void) __attribute__((weak));\n'
+                          'int f(void) { if (opt) opt(); return 7; }\n', ())},
+         ("w.o",), 7, True),
+        ("wstrong", {"ws.c": ('int f(void) __attribute__((weak));\n'
+                              'int f(void) { return 1; }\n', ()),
+                     "st.c": ('int f(void) { return 2; }\n', ())},
+         ("ws.o", "st.o"), 2, False),
+    ]
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        for name, cfiles, order, want_rc, ports in cases:
+            for cname, (csrc, extra) in cfiles.items():
+                (td / cname).write_text(csrc, encoding="utf-8", newline="\n")
+                assert ffitest.compile_c(clang, td / cname, td / (cname[:-2] + ".o"),
+                                         extra) == 0, f"[{name}] C 编译失败 ({cname})"
+            src = td / f"{name}.lomt"
+            src.write_text(lsrc, encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            objs = tuple(td / o for o in order)
+            ref_blob, _ = lomelf.compile_ll(
+                ll.read_text(encoding="utf-8"),
+                [lomelf.load_foreign(o) for o in objs], allow_ports=ports)
+            links = tuple(str(_wsl_path(o)) for o in objs)
+            out = td / f"{name}_mir.elf"
+            rc, err = _mirror_run(mir, str(_wsl_path(ll)), str(_wsl_path(out)),
+                                  links, ports=ports)
+            assert rc == 0, (
+                f"[{name}] 镜像链接失败（参考实现链过去了）: {err[-300:]}")
+            got = out.read_bytes()
+            assert got == ref_blob, (
+                f"[{name}] 镜像产物与参考不逐字节相同（{len(got)} vs {len(ref_blob)} B）")
+            rc2, _out = _run_bin(out, f"mir_{name}", td)
+            assert rc2 == want_rc, f"[{name}] 镜像产物读出 {rc2}（期望 {want_rc}）"
+    print("      -fPIC / __thread / 弱未定义 / 弱+强：镜像与参考逐字节相同且行为一致")
+
+
+@test
+def test_a_gnu_ld_script_names_the_file_it_points_to():
+    """**GNU ld 链接脚本要说清它指向哪个文件**（`#637`）。
+
+    发行版里的 `libc.so` / `libz.so` 常常不是 ELF，而是一行 `GROUP ( /usr/lib/.../libc.so.6 )`。
+    原先两个实现都把它当"不是 ELF 对象"报 —— 用户手上唯一能行动的信息（真正的文件）没了：
+    他要么去翻构建脚本，要么以为这个库不能用。判据要求**两份实现**都把目标路径印出来。
+    """
+    clang = _clang()
+    if not (clang and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    mir = _mirror()
+    target = "/usr/lib/x86_64-linux-gnu/libc.so.6"
+    lsrc = ('module lds\n\n'
+            'fn _start() {\n'
+            '    syscall4(60, 0, 0, 0);\n'
+            '}\n')
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        script = td / "libc.so"
+        script.write_text(f"/* GNU ld script */\nGROUP ( {target} AS_NEEDED ( libc_nonshared.a ) )\n",
+                          encoding="utf-8", newline="\n")
+        src = td / "lds.lomt"
+        src.write_text(lsrc, encoding="utf-8", newline="\n")
+        ll = _ref_ir(src, td)
+        try:
+            lomelf.load_foreign(script)
+        except lomelf.Unsupported as e:
+            assert target in str(e), f"参考实现的拒绝理由没印出目标：{e}"
+        else:
+            raise AssertionError("参考实现把 GNU ld 脚本当成了共享对象")
+        out = td / "lds.elf"
+        rc, err = _mirror_run(mir, str(_wsl_path(ll)), str(_wsl_path(out)),
+                              (str(_wsl_path(script)),), ports=True)
+        assert rc != 0, "镜像把 GNU ld 脚本链过去了"
+        assert target in err, f"镜像的拒绝理由没印出目标：{err[-300:]}"
+    print("      两份实现都点名脚本指向的真文件")
 
 
 @test

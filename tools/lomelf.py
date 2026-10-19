@@ -6432,6 +6432,10 @@ def compile_ll(text: str, objects: list | None = None,
                 em.asm.labels[nm] = tls_base + tls_bases[i] + val
                 appended.append(nm)
         em.asm.buf += obj.text
+    # **`_GLOBAL_OFFSET_TABLE_` 是我们的符号**（`#617`）：`-fPIC` / 弱引用的对象会把它报成
+    # `GLOBAL UND`，但它由**链接器**给（就是静态 GOT 的基址）。不定义它，端口门会把它
+    # 当成"通向世界的端口"，一个自闭合的 PIC 对象因此被拒。
+    em.asm.labels.setdefault("_GLOBAL_OFFSET_TABLE_", DATA_VADDR + got_off)
     # **端口门**（2026-10-12 用户定：0.1.4.5 里 libc 不可调用）。
     #
     # ⚠ 判的是**解析之后还剩什么**（`#615`）：以前拿每个对象自己的 `undefined` 清单来判，
@@ -6520,15 +6524,25 @@ def compile_ll(text: str, objects: list | None = None,
             return struct.pack("<Q", val & 0xFFFFFFFFFFFFFFFF)
         return struct.pack("<I", val & 0xFFFFFFFF)     # REL_32 / REL_32S
 
-    def zero_fixup(ty: int) -> bytes:
-        """弱未定义引用解析不到时的值：0（`#617`）。"""
+    def weak_value(ty: int, nm: str, add: int, here: int) -> bytes:
+        """弱未定义引用解析不到时的值（`#617`）：**S = 0**。
+
+        * `PC32` / `PLT32` / `PC64` 存的是 `S + A - P`，S=0 ⇒ `A - P`（不是 0！）。
+          写 0 会让 `call` 落到下一条指令上 —— 分支一旦被走到就是死循环。
+        * **GOTPCREL 族**存的是"GOT 槽相对 PC"，而**槽的内容**才是符号地址；槽由
+          `got_addr` 建好并保持 0，所以这里照常写 `GOT + A - P`。第一版写成 0 位移，
+          于是 `mov rax, [rip+0]` 读到了指令后面的字节 —— 非 0 ⇒ `if (weak_fn)` 为真，
+          真的去 call 一个空地址（实测 SIGSEGV）。
+        """
+        if ty in (REL_GOTPCREL, REL_GOTPCRELX, REL_REX_GOTPCRELX):
+            return struct.pack("<i", got_addr[nm] + add - here)
         if ty in (REL_PC32, REL_PLT32):
-            return struct.pack("<i", 0)
+            return struct.pack("<i", add - here)
         if ty == REL_PC64:
-            return struct.pack("<q", 0)
+            return struct.pack("<q", add - here)
         if ty == REL_64:
-            return struct.pack("<Q", 0)
-        return struct.pack("<I", 0)
+            return struct.pack("<Q", add)
+        return struct.pack("<I", add & 0xFFFFFFFF)
 
     for i, obj in enumerate(objects):
         base = TEXT_VADDR + bases[i]
@@ -6539,7 +6553,7 @@ def compile_ll(text: str, objects: list | None = None,
             if target is None:
                 # **弱引用不是错误**：C 的语义是绑 0（`#617`）。强引用才是"没人定义"。
                 if nm in obj.weak_undefined:
-                    raw = zero_fixup(ty)
+                    raw = weak_value(ty, nm, add, here)
                     em.asm.buf[site:site + len(raw)] = raw
                     applied += 1
                     continue
@@ -6578,7 +6592,7 @@ def compile_ll(text: str, objects: list | None = None,
             here = DATA_VADDR + site
             if target is None:
                 if nm in obj.weak_undefined:
-                    raw = zero_fixup(ty)
+                    raw = weak_value(ty, nm, add, here)
                     data[site:site + len(raw)] = raw
                     applied += 1
                     continue

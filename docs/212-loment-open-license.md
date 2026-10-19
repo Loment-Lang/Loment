@@ -10,12 +10,18 @@
 
 Loment 以 **MIT OR Apache-2.0** 双许可发布，使用者二选一：
 
-* 根 `LICENSE` —— 双许可声明 + MIT 全文（`Copyright (c) 2026 FujoOS Project`）；
+* 根 `LICENSE` —— **MIT 全文**（`Copyright (c) 2026 FujoOS Project`）；
 * 根 `LICENSE-APACHE` —— Apache License 2.0 标准全文；
 * `editors/vscode/LICENSE` —— 与根 `LICENSE` **逐字节相同**（`vsce` 只找扩展目录那一份，
   判据 `vscode_ext_test::test_vscode_publish_ready` 钉住）。
 
 SPDX 标识就是 `MIT OR Apache-2.0`。两个都是 OSI 认证许可，npm / vsce / Cargo 都认得。
+
+**为什么根 `LICENSE` 里没有那句"二选一"**：GitHub 的许可检测只认**纯正文**。正文前面
+加一段自定义声明，那份文件会被判成 `Other`，侧栏就既不显示 MIT 也不显示 Apache-2.0
+（实测于 2026-10-19）。所以双许可的"二选一"写在 `README`、`CONTRIBUTING.md` 与
+`editors/vscode/package.json` 的 SPDX 字段里；`LICENSE` 与 `LICENSE-APACHE` 各自是
+**可被检测器认出的纯文本**。
 
 ## 1. 为什么换掉 Loment-Open
 
@@ -38,7 +44,7 @@ SPDX 标识就是 `MIT OR Apache-2.0`。两个都是 OSI 认证许可，npm / vs
 
 | # | 位置 | 改动 |
 |---|---|---|
-| 1 | 根 `LICENSE` | Loment-Open 全文 → 双许可声明 + MIT 全文 |
+| 1 | 根 `LICENSE` | Loment-Open 全文 → **纯 MIT 全文** |
 | 2 | 根 `LICENSE-APACHE` | **新增**，Apache-2.0 标准全文 |
 | 3 | `README.md` / `README.zh-CN.md` | 徽章与 `## License` / `## 许可` 段 |
 | 4 | `CONTRIBUTING.md` §Licence | 双许可；贡献按同一双许可收 |

@@ -247,20 +247,27 @@ jobs:
   # 走 `workflow_run` —— 那两种写法都会把重算排在门禁**后面**，于是"合并一次多等一轮"。
   # 重算本身是独立的、只读树 + 写生成物，没有理由等门禁。
   #
-  # **为什么是直推 `main`，不是开一个 PR**（2026-10-16 定）：
+  # **曾经是直推 `main`，2026-10-18 改成"分支 + PR + auto-merge"**（`#891`）。
   #
-  #   * 开 PR 这条路**在 GitHub 上不成立** —— 用 `GITHUB_TOKEN` 开的 PR 与它推的分支
-  #     **都不触发** `pull_request` / `synchronize`（官方规则：`GITHUB_TOKEN` 触发的事件
-  #     不新建 workflow run，只有 `workflow_dispatch` / `repository_dispatch` 例外）。
-  #     于是那个 PR 拿不到门禁、必需检查永远不报 ⇒ auto-merge 永远不落。本仓 `docs/159`
-  #     已经撞过这个形状的亲戚（"机器人推送会把必需检查挂成 `action_required`"）。
-  #   * 直推就没有那一串：重算完几秒就落，**不等任何门禁**。`main` 的 `push` 门禁随后
-  #     照样会在这一笔上跑一遍（只是**不阻塞**它）。
+  # 直推当时能成立的两个前提，一个是真的、一个正好是问题本身：
   #
-  # **它凭什么推得动 `main`**：分支保护里 `enforce_admins` 是 `false`（2026-10-16 用 API
-  # 核实过），所以**属主 PAT** 能绕过必需检查。`GITHUB_TOKEN` 不行（它不是 admin）——
-  # 那正是上面那条替代路走不通的第二个理由。用 `secrets.MANIFEST_TOKEN`，**且只有这个 job
-  # 引用它**：`emit` 那一路只处理本仓分支的 `push`，既拿不到也不需要它。
+  #   * **用 `GITHUB_TOKEN` 开的 PR 不触发 `pull_request`** —— 官方规则，`docs/159` 也撞过
+  #     亲戚（"机器人推送会把必需检查挂成 `action_required`"）。所以这条路**必须**由一个
+  #     真身份来开 PR：这里用的是 `secrets.MANIFEST_TOKEN`（属主 PAT），它触发的事件会新建
+  #     workflow run —— 门禁因此跑得起来，auto-merge 才有东西可等。
+  #   * **直推之所以推得动，是因为 `enforce_admins=false`** —— 也就是这一笔**绕过必需检查**。
+  #     推进去的里面就有 `loment/build/selfhost_driver.ll`（每次构建的起点）：那条路等于
+  #     "一把凭据可以在无人复核、无门禁的情况下改写信任根"。那不是省一轮的取舍，那是**单凭据
+  #     后门**的形状。
+  #
+  # 现在的形状：重算完推到 `chore/emit-main` → 开 PR → `--auto --squash`，门禁绿了它自己落。
+  # **重算仍然不等门禁**（没有 `needs:` / `workflow_run`，`test_main_writer_is_not_behind_the_gate`
+  # 钉着）：等的是**合并**，不是计算。
+  #
+  # 代价与前提：`MANIFEST_TOKEN` 需要 **Contents: Read and write**（推分支）**和
+  # Pull requests: Read and write**（开 PR / 开 auto-merge）。少了后者这条流水线会**响亮地**
+  # 失败（那条报错就写在下面），而不是悄悄不刷新。**且只有这个 job 引用它** ——
+  # `emit` 那一路只处理本仓分支的 `push`，既拿不到也不需要它。
   emit-main:
     name: main 上的生成物（单一写者）
     # **回环守卫**：这个 job 自己推上去的那一笔会再来一次 `push: main`，而那时树本来就是
@@ -387,15 +394,38 @@ jobs:
                     loment/build/release-manifest.json loment/build/SHA256SUMS docs/manual docs
             git commit -q -m "[生成物] 只有生成物：种子 + surface_data + 手册 + 发布清单 + SHA256SUMS（main 上重算）"
 
-            if git push "$URL" HEAD:main >"$log" 2>&1; then
-              echo "推上去了：$(git log --oneline -1)"
+            # **推的是分支，不是 main**（`#891`）。直推 main 之所以能成，靠的是
+            # `enforce_admins=false` —— 也就是"这一笔绕过必需检查"。而推进去的里面就有
+            # `loment/build/selfhost_driver.ll`（每次构建的起点）：那条路等于**一把凭据
+            # 可以在无人复核、无门禁的情况下改写信任根**。
+            #
+            # 改成：推到 `chore/emit-main`，开 PR，打开 auto-merge —— 门禁在 PR 上跑，
+            # 绿了它自己落地。**重算仍然不等门禁**（`needs:` / `workflow_run` 一个都没有，
+            # 见 `test_main_writer_is_not_behind_the_gate`）：等的是**合并**，不是计算。
+            BRANCH=chore/emit-main
+            if git push --force "$URL" "HEAD:refs/heads/$BRANCH" >"$log" 2>&1; then
+              export GH_TOKEN="$TOKEN"
+              open_n=$(gh pr list --repo "$REPO" --head "$BRANCH" --state open \
+                         --json number --jq 'length' 2>/dev/null || echo 0)
+              if [ "$open_n" = "0" ]; then
+                gh pr create --repo "$REPO" --base main --head "$BRANCH" \
+                  --title "[生成物] 只有生成物：main 上重算的种子 / surface / 手册 / 清单 / SHA256SUMS" \
+                  --body "自动任务重算出来的生成物，**必须过门禁才落地**（#891）。这一笔以前直推 main，靠的是 enforce_admins=false 绕过必需检查。" || {
+                    echo "::error::分支推上去了，但开不了 PR —— MANIFEST_TOKEN 还差一个权限：**Pull requests: Read and write**（只有 Contents 的话开不了 PR，而这条流水线从此落不了地）"
+                    exit 1
+                  }
+              fi
+              # 已开着就再来一次也无害（auto-merge 已开时 gh 会报一句，不当失败）。
+              gh pr merge --repo "$REPO" "$BRANCH" --auto --squash 2>/dev/null || \
+                echo "::warning::auto-merge 没打开（PR 已存在、或仓库关了 auto-merge）—— 这一笔要人合"
+              echo "推上去了：分支 $BRANCH，PR 等门禁: $(git log --oneline -1)"
               exit 0
             fi
             redact "$log"
             # **权限被拒 ≠ main 动了**。前者重试三轮也不会变好，而日志原先一律说
             # "main 又动了" —— 那会把一个配置错误伪装成并发，正是这个仓最不肯让的形状。
             if grep -qiE 'denied to |Permission to |" ?403|401 Unauthorized|Bad credentials|Authentication failed' "$log"; then
-              echo "::error::推被**权限**拒了，不是 main 动了 —— 检查两件事：① secret MANIFEST_TOKEN 是细粒度 PAT、对该仓有 Contents: Read and write、没过期；② 这个 job 的 checkout 有 persist-credentials: false（否则 checkout 写的 extraheader 会盖过 PAT，推的身份变成 github-actions[bot]）。上面是 git 的原文。"
+              echo "::error::推被**权限**拒了，不是 main 动了 —— 检查：secret MANIFEST_TOKEN 是细粒度 PAT、对该仓有 **Contents: Read and write**（开 PR 还要 **Pull requests: Read and write**）、没过期；以及这个 job 的 checkout 有 persist-credentials: false。上面是 git 的原文。"
               exit 1
             fi
             echo "::warning::推被拒了（main 又动了）—— 重新落在最新的 main 上再算一轮"

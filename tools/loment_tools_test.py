@@ -278,13 +278,23 @@ def test_main_writer_is_not_behind_the_gate():
     added = _add_list(job)
     missing = [a for a in WHOLE_TREE_ARTIFACTS if a not in added]
     assert not missing, f"`emit-main` 没有把整树生成物收进提交：{missing}"
-    # **推得动 `main` 的那个前提**：属主 PAT。`GITHUB_TOKEN` 不是 admin，推 `main` 会被分支
-    # 保护拒掉（`enforce_admins` 是 false）—— 于是重算出来的东西**永远落不到 `main` 上**，
-    # 而除了这一条，没有别的判据会发现（`docs/254` §3.2 与 §5 第 3 条）。
+    # **推的是分支，不是 `main`**（`#891`）。直推靠的是 `enforce_admins=false`，也就是
+    # "这一笔绕过必需检查"，而它带着 `loment/build/selfhost_driver.ll` —— 一把凭据改信任根。
+    # 现在走"分支 + PR + auto-merge"：重算仍然不等门禁（上面那两条钉着），等的是**合并**。
+    assert 'BRANCH=chore/emit-main' in job and 'HEAD:refs/heads/$BRANCH' in job, (
+        "`emit-main` 没有推到 `chore/emit-main` —— 直推 `main` 那条路绕过必需检查（#891）")
+    assert "HEAD:main" not in job, (
+        "`emit-main` 里还有直推 `main` —— 那是绕过必需检查那条路（#891）")
+    assert "gh pr create" in job and "--auto" in job, (
+        "`emit-main` 没有开 PR / 没开 auto-merge —— 生成物必须在门禁之后落地")
+
+    # **PR 必须由一个真身份来开**：`GITHUB_TOKEN` 触发的 `pull_request` 不新建 workflow run，
+    # 那样门禁不会跑、auto-merge 永远等不到东西。属主 PAT 的另一个用处是"能推分支"。
     assert "secrets.MANIFEST_TOKEN" in job, (
-        "`emit-main` 推 `main` 用的不是 `secrets.MANIFEST_TOKEN` —— `GITHUB_TOKEN` 推不动"
-        "（它不是 admin，会撞分支保护），而它推不动这件事本身不会报错到任何人面前")
-    print("      main 侧单一写者：五件按硬顺序重算、与门禁并行、整树生成物收全、用属主 PAT 推")
+        "`emit-main` 用的不是 `secrets.MANIFEST_TOKEN` —— `GITHUB_TOKEN` 开的 PR **不触发**"
+        "`pull_request`，门禁因此不会跑")
+    print("      main 侧单一写者：五件按硬顺序重算、与门禁并行、整树生成物收全、"
+          "推分支 + PR + auto-merge")
 
 
 # ---------------------------------------------------------------- M55 格式化
@@ -1744,14 +1754,31 @@ def test_gate_container_image_matches_the_recipe():
     所以这里只比**出现过的**那些。
     """
     wf = _gate_workflow()
-    tags = re.findall(r"image:\s*ghcr\.io/[^:\s]+:(\S+)", wf)
-    assert tags, "gate.yml 里一个 `container.image` 都没有"
+    # **各 job 拉的是摘要，不是 tag**（`#890`）：`image: ghcr.io/<org>/loment-ci@sha256:<64 hex>`。
+    # tag 是可移动的 —— 谁重打 `:5`，谁就决定了"绿"是什么意思，而运行记录里没有痕迹。
+    digests = re.findall(r"image:\s*ghcr\.io/[^@\s]+@(sha256:[0-9a-f]{64})", wf)
+    assert digests, "gate.yml 里一个按摘要钉住的 `container.image` 都没有（#890）"
+    assert len(set(digests)) == 1, f"两个 job 拉的不是同一个镜像: {sorted(set(digests))}"
+    digest = digests[0]
+    floating = re.findall(r"image:\s*ghcr\.io/[^@\s]+:([^\s@]+)\s*$", wf, re.M)
+    assert not floating, f"还有 job 按浮动 tag 拉镜像: {floating} —— 那是可移动的指针（#890）"
+
+    # 三处副本必须相等：两个 `image:` + 顶层 `CI_IMAGE_DIGEST`（聚合那一步把它写进工件）
+    env_digest = re.search(r'^  CI_IMAGE_DIGEST: "([^"]+)"', wf, re.M)
+    assert env_digest, "gate.yml 顶层没有 `CI_IMAGE_DIGEST` —— 聚合那一步没东西可记"
+    assert env_digest.group(1) == digest, (
+        f"`CI_IMAGE_DIGEST` 是 {env_digest.group(1)}，而各 job 拉的是 {digest} —— "
+        "工件里记的将不是真正判定的那个环境")
+
+    # **tag 那一半仍然要比**：摘要不可读，人是靠 `CI_IMAGE_TAG` 知道换的是哪一版。
     recipe = (ROOT / ".github" / "workflows" / "ci-image.yml").read_text(encoding="utf-8")
     m = re.search(r'^  TAG: "([^"]+)"', recipe, re.M)
     assert m, "ci-image.yml 里找不到 `TAG`"
-    assert set(tags) == {m.group(1)}, (
-        f"gate.yml 用 {sorted(set(tags))}，ci-image.yml 构建 {m.group(1)} —— "
-        f"镜像抬了 tag 而各 job 没跟，是静默的")
+    alias = re.search(r'^  CI_IMAGE_TAG: "([^"]+)"', wf, re.M)
+    assert alias, "gate.yml 顶层没有 `CI_IMAGE_TAG` —— 摘要与 recipe 之间就没有可读的连线"
+    assert alias.group(1) == m.group(1), (
+        f"gate.yml 记的 tag 是 {alias.group(1)}，ci-image.yml 构建 {m.group(1)} —— "
+        f"镜像抬了 tag 而各 job 没跟，是静默的（新摘要要用 `docker pull` 取，见 ci-image.yml 文件头）")
 
     import loment_publish
     owners = set(re.findall(r"image:\s*ghcr\.io/([^/:\s]+)/", wf))

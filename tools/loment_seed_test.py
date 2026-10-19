@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -34,6 +35,33 @@ def test_seed_matches_reference():
         f"缺 {loment_seed.SEED.relative_to(ROOT)} (python tools/loment_seed.py --emit)"
     rc = loment_seed.check()
     assert rc == 0, "种子过期 (见上面 [DIFF]; 运行 python tools/loment_seed.py --emit)"
+
+
+@test
+def test_seed_fits_the_linkers_input_buffer():
+    """种子必须装进 lomelf 的输入缓冲, 并且**留出名义余量** (`#777`)。
+
+    这条上限就是**种子的上限**: `bootstrap.sh` 的 1/4 步把种子喂给 lomelf —— 提交进仓库的
+    genesis 与包内镜像都是同一份源码建的。越过去之后 `read_all` 会收满即停、`run()` 里那条
+    守卫会**响亮退出**（不再是静默截断), 但自举链就停在这里; `#441` 的悬崖就是这个形状。
+
+    余量写成一个看得见的数 (`RESERVE`): 低于它就算失败, 逼下一笔改动先抬布局, 而不是让
+    预算悄悄归零。上限与种子大小都**读**出来, 不另抄一份数（与 `IN_CAP` 那条纪律同源）。
+    """
+    import lomelf  # noqa: F401  (只为确保 tools/ 在 sys.path 上这条路径可导入)
+
+    src = (ROOT / "loment" / "tools" / "lomelf.lomt").read_text(encoding="utf-8")
+    m = re.search(r"const IN_CAP: u32 = (\d+);", src)
+    assert m, "在 loment/tools/lomelf.lomt 里找不到 `const IN_CAP: u32 = <数>;`"
+    cap = int(m.group(1))
+    seed = loment_seed.SEED.stat().st_size
+    reserve = 256 * 1024
+    assert seed + reserve <= cap, (
+        f"种子 {seed} B + 名义余量 {reserve} B > lomelf 输入上限 {cap} B"
+        f"（实际余量 {cap - seed} B）。越限时 lomelf **响亮退出**, 自举链断在这里。"
+        f"抬法是 `docs/192` / `docs/200` 那条式子: M_TXT/M_OUT/M_GB/M_TAB/M_OBJ/M_AR/ARENA"
+        f" 与 IN_CAP 一起后移, 表区按同一比例抬（2026-10-19 那次: 4 MiB -> 6 MiB, `#777`）")
+    print(f"      种子 {seed} B / 输入上限 {cap} B, 余量 {cap - seed} B (要求 >= {reserve})")
 
 
 @test

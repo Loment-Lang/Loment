@@ -76,6 +76,7 @@ def _mirror() -> Path:
     _TD = tempfile.TemporaryDirectory()
     _BIN = Path(_TD.name) / "lvm.bin"
     _BIN.write_bytes(blob)
+    _BIN.chmod(0o755)          # Linux 上直接 exec；Windows 上走 WSL 的 cp+chmod
     return _BIN
 
 

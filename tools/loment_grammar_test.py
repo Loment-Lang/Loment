@@ -428,6 +428,75 @@ def test_declared_rust_is_the_base_syntax_not_a_foreign_module():
 
 
 @test
+def test_declared_rust_maps_mut_away_but_keeps_mut_slices():
+    """`#77`：`grammar rust` 里**重赋值必须写得出来**。
+
+    这一门是原生读法，而两种语言在"本地变量怎么声明"上没有交集：
+
+        Rust                     本语言
+        let mut v: T = e;        let v: T = e;      （本地变量本来就可变）
+        fn f(mut a: T)           fn f(a: T)
+
+    不映射的话**每一个有状态循环都写不出来**：写 `let mut` 解析不过（`期望 :，得到 'v'`），
+    去掉 `mut` 被 rustc 拒（不可重赋值）。所以前门做一次**等长**的表层改写（行号不动）。
+
+    **反面也要钉**：`mut` 在本语言里还有别的意思 —— `mut [T]`（可变切片）与 `&mut`
+    （可变借用）。一刀切会把那两处抹掉，直接改坏程序。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        p = td / "m1.lomt"
+        p.write_text(
+            "choose write grammar rust\n"
+            "module m1\n"
+            "\n"
+            "pub fn f(n: i32) -> i32 {\n"
+            "    let mut v: i32 = n;\n"
+            "    v = v + 1;\n"
+            "    return v;\n"
+            "}\n"
+            "\n"
+            "fn add(mut a: i32) -> i32 {\n"
+            "    a = a + 1;\n"
+            "    return a;\n"
+            "}\n", encoding="utf-8", newline="\n")
+        fu = potato_from.front_door(p)
+        assert fu.translated is False, "rust 是原生读法，不该走翻译器"
+        # 声明行 + 正文长度不变（等长抹除）
+        assert len(fu.source) == len(p.read_text(encoding="utf-8")), "改写必须等长"
+        assert "let mut" not in fu.source, f"`let mut` 没映射掉:\n{fu.source}"
+        assert "(mut a:" not in fu.source, f"形参的 `mut` 没映射掉:\n{fu.source}"
+        assert "let     v: i32" in fu.source, f"`let mut v` 该变成 `let     v`:\n{fu.source}"
+
+        r = subprocess.run([sys.executable, str(ROOT / "tools" / "lomentc.py"),
+                            "--print", "llvm", str(p)],
+                           capture_output=True, text=True, shell=False)
+        out = (r.stdout or "") + (r.stderr or "")
+        assert r.returncode == 0, f"`let mut` 的 grammar rust 该编得过：{out[-400:]}"
+        assert "@f(" in out and "@add(" in out, out[-300:]
+
+        # **`mut [T]` 与 `&mut` 一个字节都不许动**
+        p2 = td / "m2.lomt"
+        p2.write_text(
+            "choose write grammar rust\n"
+            "module m2\n"
+            "\n"
+            "fn w(xs: mut [u32]) -> u32 {\n"
+            "    xs[0] = 7;\n"
+            "    return xs[0];\n"
+            "}\n"
+            "\n"
+            "fn m() -> u32 {\n"
+            "    let a: [u32; 2] = [1, 2];\n"
+            "    return w(&mut a);\n"
+            "}\n", encoding="utf-8", newline="\n")
+        src2 = potato_from.front_door(p2).source
+        assert "xs: mut [u32]" in src2, f"类型位置上的 `mut [u32]` 被抹掉了:\n{src2}"
+        assert "&mut a" in src2, f"`&mut` 被抹掉了:\n{src2}"
+    print("      `grammar rust`：`let mut` / `mut a:` 映射掉；`mut [T]` / `&mut` 不动")
+
+
+@test
 def test_front_door_translates_a_foreign_grammar_into_loment_in_process():
     """**读法是别的写法时，前门把它翻成 Loment —— 在本进程里算，不拉起那个语言。**
 

@@ -43,7 +43,7 @@ loment_json_test 4
 loment_pkg_test 3
 loment_lomc_test 4
 loment_lsp_test 19
-loment_elf_test 66
+loment_elf_test 70
 loment_pe_test 16
 loment_genesis_test 5
 loment_status_test 4

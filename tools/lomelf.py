@@ -1405,7 +1405,7 @@ class Emitter:
             self.asm.emit(mov_ri32(RDI, 0))
             self.asm.emit(b"\x0F\x05")
 
-    def emit_conscript(self, defined: set[str]) -> None:
+    def emit_conscript(self, defined: set[str], externs: set[str] | None = None) -> None:
         """**收编面**（`docs/219` §6 第 1 条）：C 世界里那几个"**可闭合**"的名字，由**我们**提供。
 
         名字与实现在这里，**表的另一半在 `tools/loment_ports.py`** —— 那边把它判成 `close`，
@@ -1493,12 +1493,18 @@ class Emitter:
         # **只在堆在的时候发**：底下那两条 `@__loment_alloc` / `@__loment_free` 是我们这份
         # IR 里的定义（编译器在程序用到 `alloc`/`free` 时发出）。没有它们就没有"我们的堆"——
         # 那时**不发**，让外部对象的 `malloc` 在链接期响亮地报未定义，而不是发一个悬空调用。
-        if "__loment_alloc" in defined:
+        #
+        # **宿主版堆不包壳**（`#631`）：`choose hosted` 的分配器自己 `declare` 了
+        # `@malloc` 并向宿主要 arena。若这里再定义 `malloc` 转调 `__loment_alloc`，
+        # 那条导入就指回壳自身 —— 无限递归（实测栈溢出 SIGSEGV）。所以 IR 自己
+        # `declare` 过的名字不包壳，留给 `.so` 的导出表（自举侧用 `ext_has`，同一条）。
+        externs = set(externs or ())
+        if "__loment_alloc" in defined and "malloc" not in externs:
             a.label("malloc")
             a.emit(b"\x55\x57")                  # push rbp; push rdi (size)
             a.call("__loment_alloc")
             a.emit(b"\x48\x83\xC4\x08\x5D\xC3")  # add rsp, 8; pop rbp; ret
-        if "__loment_free" in defined:
+        if "__loment_free" in defined and "free" not in externs:
             a.label("free")
             a.emit(b"\x55\x57")                  # push rbp; push rdi (ptr)
             a.call("__loment_free")
@@ -5933,7 +5939,11 @@ class SharedObject:
                     f"rebuild it with -Wl,-soname,libfoo.so.1")
             self.soname = soname
         else:
-            self.soname = path.name
+            # 没有 SONAME：`DT_NEEDED` 记**命令行给的那个路径**（GNU ld 同一条，`#595`）。
+            # 只记 basename 的话，`--link /tmp/mylibs/libadd.so` 的产物会去找
+            # `libadd.so`，而那个名字不在 loader 的任何搜索路径里 —— 链接成功、运行期
+            # `cannot open shared object file`，链路里没有任何一步说出这件事。
+            self.soname = str(path)
         if e_shnum == 0:
             # 条数能从 `DT_HASH` 拿，但**版本表**在节头里；被 strip 掉的 `.so` 这一版还不读。
             raise Unsupported(
@@ -6030,10 +6040,15 @@ class SharedObject:
             if st_shndx == 0 or st_name == 0:                   # 它自己的依赖，不是它的导出
                 continue
             bind, typ = st_info >> 4, st_info & 0x0F
-            # GLOBAL/WEAK 的 OBJECT(1) / FUNC(2) / IFUNC(10)。**IFUNC 必须算函数导出**：
-            # glibc 的 `strlen` / `memcpy` 就是 IFUNC（`STT_GNU_IFUNC`），loader 的
-            # `JUMP_SLOT` 解析会调它的 resolver 拿到实现 —— 对它来说与普通函数没差别。
-            if bind not in (1, 2) or typ not in (1, 2, 10):
+            # GLOBAL/WEAK 的 NOTYPE(0) / OBJECT(1) / FUNC(2) / IFUNC(10)。
+            # **IFUNC 必须算函数导出**：glibc 的 `strlen` / `memcpy` 就是 IFUNC
+            # （`STT_GNU_IFUNC`），loader 的 `JUMP_SLOT` 解析会调它的 resolver 拿到实现
+            # —— 对它来说与普通函数没差别。
+            # **NOTYPE 也算函数导出**（`#591`）：没有 `.type` 指令的汇编函数
+            # （`gcc -shared` 出来的 `STT_NOTYPE`）就是一个正常的可调用导出，`dlsym`
+            # 和 loader 都不看这个类型。`STT_SECTION`(3) / `STT_FILE`(4) / `STT_TLS`(6)
+            # 仍然拒 —— 它们不是可调用的名字。
+            if bind not in (1, 2) or typ not in (0, 1, 2, 10):
                 continue
             end = dstrtab.find(b"\x00", st_name)
             if st_name >= len(dstrtab) or end < 0:
@@ -6077,7 +6092,7 @@ class SharedObject:
             hidden = bool(versym[k] & 0x8000) if k < len(versym) else False
             # 同名可能有多条（不同版本）：**默认版本优先**，非默认的不覆盖它。
             if nm not in self.exports or (self.exports[nm][1] is False and not hidden):
-                self.exports[nm] = ("func" if typ in (2, 10) else "object", not hidden)
+                self.exports[nm] = ("func" if typ in (0, 2, 10) else "object", not hidden)
             if k < len(versym) and (versym[k] & 0x7FFF) > 1:
                 self.versions.setdefault(nm, vnames.get(versym[k] & 0x7FFF, "?"))
         if not self.exports:
@@ -6143,10 +6158,12 @@ C_ARG_REGS = (RDI, RSI, RDX, RCX, R8, R9)
 #: **与表上的话正好相反**。反过来不要求 —— 表里还有一批**尚未实现**的
 #: （`calloc` / `realloc` / `strlen` / `__udivdi3` …），那是 S1d/S1e 的活。
 #:
-#: ⚠ `malloc` / `free` 多一条条件：**堆在才发** —— 它们是一层"换成 C ABI"的薄壳，
+#: ⚠ `malloc` / `free` 多两条条件：**堆在才发** —— 它们是一层"换成 C ABI"的薄壳，
 #: 底下调的是 `@__loment_alloc` / `@__loment_free`（`docs/219` §2.1）。没有堆就没有
 #: "我们的堆"可指，发了会悬着一个未定义的调用。判据是**我们这份 IR 里有没有那两条定义**
-#: （`funcs` 的名字），不是文本里出现过那个名字。
+#: （`funcs` 的名字），不是文本里出现过那个名字。**第二条**（`#631`）：IR 自己
+#: `declare` 了 `@malloc`/`@free` 时不发 —— 宿主版分配器就是向 libc 的 `malloc`
+#: 要 arena 的，包壳会让那条导入指回壳自身（无限递归）。
 CONSCRIPT = ("memcpy", "memset", "memcmp", "__stack_chk_fail", "malloc", "free")
 
 #: 产物带外部对象时给它的一小块 **TLS**（`docs/219` S2）。要 ≥ 0x30 字节 ——
@@ -6326,12 +6343,15 @@ def compile_ll(text: str, objects: list | None = None,
                        finis=len(fini_ranges), call_exit=call_exit)
     for f in funcs:
         em.emit_func(f)
-    # **收编面**（`docs/219` §6）：链里带了外部对象，就把"可闭合"那几个名字提供出来，
-    # 于是它们**不再是未定义符号** —— 从表上划掉。粒度是"有没有外部对象"，不是
-    # "有没有人要它"：精确到后者要链接器先算出需求集，自举侧 `lomelf.lomt` 一次只驻留
-    # 一个对象，那一格留到下一轮（`docs/219` §8b）。**测量不受影响** —— 那始终是尺子的活。
-    if objects:
-        em.emit_conscript({f.name for f in funcs})
+    # **收编面**（`docs/219` §6）：链里带了**任何外部输入**（`.o` 或 `.so`），就把
+    # "可闭合"那几个名字提供出来，于是它们**不再是未定义符号** —— 从表上划掉。
+    # 判据是"有没有外部输入"，不是"有没有人要它"：精确到后者要链接器先算出需求集，
+    # 自举侧 `lomelf.lomt` 一次只驻留一个对象，那一格留到下一轮（`docs/219` §8b）。
+    # **`.so` 也要发**（`#631`）：只链 `.so` 时原先一格收编面都没有，`memcpy` 一族
+    # 落到 `.so` 的导出表上 —— 而 glibc 把它们全发成 IFUNC/非默认版本，等于一个都落不下。
+    # 名字的另一端在我们手里（§5.2 条件二），发出来才算兑现文档里的那句话。
+    if objects or shared:
+        em.emit_conscript({f.name for f in funcs}, externs)
     # 外部目标文件 (docs/173 阶段 1/2): 三步, **顺序不能换** ——
     #   ① **摆位置**: 每个对象的 `.text` 接在我们自己的代码之后 (16 对齐), 记下基址;
     #   ② **建符号表**: 把我们自己的标签与所有对象的导出符号合成一张表。**必须先全摆完**:

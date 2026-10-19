@@ -59,13 +59,17 @@ const M_IN: u32 = 8192;            // 4 MiB 输入 .ll 文本
 const M_TXT: u32 = 4202496;        // 4 MiB 代码缓冲
 const M_OUT: u32 = 8396800;        // 4 MiB 输出 ELF
 const M_GB: u32 = 12591104;        // 1 MiB 全局数据
-const M_TAB: u32 = 13639680;       // 4 MiB 表区
-const M_OBJ: u32 = 17833984;       // 4 MiB 外部目标文件 (.o) 暂存 (docs/173, 一次一个)
+// **表区从 4 MiB 抬到 8 MiB**（2026-10-18，`#599` / `#622`）：导入表要装得下一份
+// 4 MiB `.ll` 能表达的最多不同调用目标（`IMP_MAX`），重定位表也要随对象变大；
+// 两张表都住在表区里，4 MiB 已经排不下。抬法与 `docs/192` / `docs/200` 同一条式子：
+// **整条表区往后挪**，`M_OBJ` / `M_AR` / `ARENA` 依次后移。
+const M_TAB: u32 = 13639680;       // 8 MiB 表区
+const M_OBJ: u32 = 22028288;       // 4 MiB 外部目标文件 (.o) 暂存 (docs/173, 一次一个)
 // **归档暂存**（`docs/173` 阶段 2，`FujoJTOP/loment#405`）：`.a` 要整包驻留（定点选择要
 // 反复扫它），而成员得拷进 `M_OBJ` 再摆 —— 两块不能是同一块。与 `M_OBJ` 同尺寸：真库
 // （zlib 的 150 KB）离上限很远，上限在这里是给"来的不是库"那种输入一个**响亮的**界。
-const M_AR: u32 = 22028288;        // 4 MiB 归档暂存
-const ARENA: u64 = 26222592;
+const M_AR: u32 = 26222592;        // 4 MiB 归档暂存
+const ARENA: u64 = 30416896;
 
 const IN_CAP: u32 = 4194304;
 //: `--diag-out PATH` 的落点：**argv 暂存块的最后 1 KiB**（`pbuf` 一共 64 KiB，
@@ -198,13 +202,23 @@ const E_NOFF: u32 = 0;
 const E_NLEN: u32 = 4;
 
 // 外部对象表 (docs/173 阶段 2): 每个对象在**代码缓冲**里的起点。它的基址 = TEXT_VADDR + 该值。
-const TB_OBJ: u32 = 2505504;       // stride 8 × 256
+// `#621`：表声明的容量是 256 条、每条 8 字节 = 2048 字节。原先它后面紧跟着
+// `TB_FREL`（只隔 1000 字节），第 126 个对象就压到第一条重定位上。现在 `TB_FREL`
+// 挪到表区后段，这张表真的有自己声明的 2048 字节；另外 `link_object_mem` 里补了
+// `OBJ_MAX` 守卫（越界点名退出，绝不静默写穿）。
+const OBJ_MAX: u32 = 256;          // 摆得下的外部对象上限
+const TB_OBJ: u32 = 2505504;       // stride 8 × OBJ_MAX
 const O_TEXT: u32 = 0;             // 该对象的代码在缓冲里的偏移 (16 对齐)
 const O_DATA: u32 = 4;             // 该对象的**数据节**在数据缓冲 (gb) 里的起点 (16 对齐)
 
 // 外部重定位表 (docs/173 阶段 2): 先**全部记下来**, 等所有对象都摆好、标签都立好, 再统一应用
 // —— 因为 `a.o` 里的重定位可能指向只有 `b.o` 知道的地址。
-const TB_FREL: u32 = 2506504;      // stride 32 × 4096
+//
+// `#622`：这张表原先**没有容量守卫**，第 4097 条直接写进归档需要集（`TB_NEED`）。
+// 现在它挪到 `TB_IMP` 之后、有自己的 `REL_MAX` 守卫；32768 条是给"一个 -O2 对象动辄
+// 几千条重定位"留的余量，表区（8 MiB）里排得下。
+const REL_MAX: u32 = 32768;        // 重定位记录上限
+const TB_FREL: u32 = 3809056;      // stride 32 × REL_MAX
 const F2_OBJ: u32 = 0;             // 对象号 (索引 TB_OBJ)
 const F2_AT: u32 = 4;              // 被重定位节在该对象代码里的起点
 const F2_OFF: u32 = 8;             // r_offset (节内偏移)
@@ -214,15 +228,20 @@ const F2_NLEN: u32 = 20;
 const F2_ADD: u32 = 24;            // 加数 (i32 位型)
 const F2_IN: u32 = 28;             // 0 = 落在**代码**上 (写 txt); 1 = 落在**数据**上 (写 gb)
 
-// **归档那两张表**（`docs/173` 阶段 2，`FujoJTOP/loment#405`）。两张都借 `TB_EXT` 的
-// (起点, 长度) 形状 —— 一样的 8 字节、一样的访问器。
+// **归档那两张表**（`docs/173` 阶段 2，`FujoJTOP/loment#405`）。
 //
 // 上界**都是点名拒**（`need_add` / `ar_take` 里那条守卫）：真库的需要集是几十个量级、
 // 挑中的成员也是十几个，撞上是"来的不是库"，那种输入该听见名字而不是少挑几个成员。
+//
+// `#623`：成员表不再是"当前归档"的临时表 —— 它跨归档留存，每条带上**归档号**
+// （12 字节：归档号、起点、长度）。第二份归档因此不会把第一份的成员按错的字节重摆一遍。
 const NEED_MAX: u32 = 2048;        // 需要集条数上限
 const TB_NEED: u32 = 2637600;      // stride 8 × NEED_MAX: (名字池起点, 长度)
-const MEM_MAX: u32 = 1024;         // 归档挑中的成员上限
-const TB_MEM: u32 = 2653984;       // stride 8 × MEM_MAX: (在 M_AR 里的起点, 长度)
+const MEM_MAX: u32 = 4096;         // 归档挑中的成员上限（跨全部归档）
+const TB_MEM: u32 = 2653984;       // stride 12 × MEM_MAX: (归档号, 在 M_AR 里的起点, 长度)
+const M_ARIDX: u32 = 0;
+const M_OFF: u32 = 4;
+const M_LEN: u32 = 8;
 
 // ---------------------------------------------------------------- 常量
 
@@ -3043,21 +3062,33 @@ fn dsec_at(raw: ptr, k: u32) -> u32 {
     return align_to(cur, al2);
 }
 
-/// 把节符号的**合成名**写进名字池：`$` + 对象号 + `.` + 节号（四个字节，**不是**文本）。
+/// 把节符号的**合成名**写进名字池：`$` + **4 字节**对象号 + `.` + **4 字节**节号
+/// （十个字节，**不是**文本）。
 /// **节符号**（`STT_SECTION`）的 `st_name` 是 0，名字靠 `shndx` 认 —— clang 对"指向
 /// `.rodata` 里某个常量"的重定位就是引用它。
 ///
 /// ⚠ 名字必须**按对象**唯一：只用节号的话，两个对象各有 `.rodata` 时第二个会被
 /// "先来的为准"挡掉、指到**第一个对象的节**上（静默算错地址）。参考实现同一条理由。
+///
+/// `#624`：原先对象号与节号各只写**一个字节**（`as u8` 是无条件截断），于是第 5 节与
+/// 第 261 节、第 0 个与第 256 个对象都撞名 —— 标签表"先来的为准"，重定位静默落到
+/// 错的节上。这里与 `copy_local_name` 的对象号同宽（4 字节），`shndx` 是 ELF 的 16 位
+/// 字段，4 字节也装得下。
 fn put_secname(t: ptr, at: u32, oi: u32, shndx: u32) -> u32 {
-    if at + 4 >= IN_CAP {
+    if at + 10 >= IN_CAP {
         return fail("the input buffer has no room left for section symbol names");
     }
     store8(t, at, 36 as u8);              // '$'
-    store8(t, at + 1, oi as u8);
-    store8(t, at + 2, 46 as u8);          // '.'
-    store8(t, at + 3, shndx as u8);
-    return at + 4;
+    store8(t, at + 1, (oi % 256) as u8);
+    store8(t, at + 2, ((oi / 256) % 256) as u8);
+    store8(t, at + 3, ((oi / 65536) % 256) as u8);
+    store8(t, at + 4, ((oi / 16777216) % 256) as u8);
+    store8(t, at + 5, 46 as u8);          // '.'
+    store8(t, at + 6, (shndx % 256) as u8);
+    store8(t, at + 7, ((shndx / 256) % 256) as u8);
+    store8(t, at + 8, ((shndx / 65536) % 256) as u8);
+    store8(t, at + 9, ((shndx / 16777216) % 256) as u8);
+    return at + 10;
 }
 
 fn sh_num(raw: ptr) -> u32 {
@@ -3284,6 +3315,58 @@ fn read_link_file(path: ptr, buf: ptr, cap: u32) -> u32 {
     return lo32(rn);
 }
 
+/// `--link` 的那个文件是不是**共享对象**（只看 ELF 头 64 字节，不整份读）。
+/// 分类必须在"读进缓冲"**之前**做：`.o` 仍走 4 MiB 暂存（`docs/158` §4 #9），
+/// 而 `.so` 不再有那份上限（`#597`）—— 它整份 `mmap` 进来，想多大都行。
+fn link_file_is_shared(path: ptr, probe: ptr) -> u32 {
+    let fd: i64 = open_ro(path);
+    if fd < 0 {
+        return failc("cannot open the foreign object file: ", path);
+    }
+    let rn: i64 = syscall4(0, fd as u64, probe as u64, 64);
+    syscall4(3, fd as u64, 0, 0);
+    if rn <= 0 {
+        return 0;
+    }
+    return is_shared(probe, lo32(rn as u64));
+}
+
+/// 把 `.so` **只读映射**进来，返回基址；长度记进 `C_SOLEN`，基址拆进 `C_SOHI`/`C_SOLO`
+/// （`so_resolve` 之后还要按名字现查，映射必须活到链接结束）。
+///
+/// 映射而不是读进缓冲：`.so` 可能几十 MB（`libpython` / `libLLVM` / `libQt6`），
+/// 而链接器只需要它的头、节头和几张表 —— 参考实现 `path.read_bytes()` 没有上限，
+/// 镜像的 4 MiB 暂存因此是**只属于镜像的**一道假墙（`#597`）。
+fn map_link_file(tab: ptr, path: ptr) -> ptr {
+    let fd: i64 = open_ro(path);
+    if fd < 0 {
+        let _e: u32 = failc("cannot open the shared object: ", path);
+        return path;
+    }
+    let sz: i64 = syscall4(8, fd as u64, 0, 2);        // lseek(fd, 0, SEEK_END)
+    if sz <= 0 {
+        syscall4(3, fd as u64, 0, 0);
+        let _e2: u32 = failc("the shared object is empty: ", path);
+        return path;
+    }
+    if sz > 4294967295 {
+        syscall4(3, fd as u64, 0, 0);
+        let _e3: u32 = failc("the shared object is larger than 4 GiB: ", path);
+        return path;
+    }
+    // PROT_READ = 1, MAP_PRIVATE = 2, offset 0。
+    let mp: i64 = syscall7(9, 0, sz as u64, 1, 2, fd as u64, 0);
+    syscall4(3, fd as u64, 0, 0);
+    if mp < 0 {
+        let _e4: u32 = failc("cannot map the shared object: ", path);
+        return path;
+    }
+    setcell(tab, C_SOLEN, sz as u32);
+    setcell(tab, C_SOHI, hi32(mp as u64));
+    setcell(tab, C_SOLO, lo32(mp as u64));
+    return mp as ptr;
+}
+
 /// 这个文件是 `ar` 归档吗 —— 看**内容**不看后缀（`.a`/`.o`/无后缀在各家工具链里并不统一，
 /// 而两个魔数都极短且不可能互串）。参考实现 `load_foreign` 同一条。
 fn is_archive(mem: ptr, n: u32) -> u32 {
@@ -3348,6 +3431,11 @@ fn link_object_mem(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, ap: u3
     // 记下这个对象的代码在缓冲里的起点 —— 重定位要按它算 `S + A - P`, 而**应用**要等到
     // 所有对象都摆好 (见 apply_relocs)。
     let oi: u32 = cell(tab, C_NOBJ);
+    // `#621` / `#622`：对象表有它声明的容量（256 条），越界**点名退出** ——
+    // 原先这里没有守卫，第 126 个对象压到第一条重定位上，应用重定位时写到任意地址。
+    if oi >= OBJ_MAX {
+        let _f: u32 = fail("too many objects laid out (OBJ_MAX) -- the archive or object list is too large for this linker");
+    }
     store32(tab, TB_OBJ + oi * 8 + O_TEXT, at0);
     setcell(tab, C_NOBJ, oi + 1);
     let dd: u32 = at0;
@@ -3451,11 +3539,11 @@ fn link_object_mem(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, ap: u3
                             if nmoff2 == 0 {
                                 // ⚠ `put_secname` 返回的是**末尾**（好推进游标）—— 标签名要的是
                                 // **起点**，所以两处必须分开取。写成 `noff = put_secname(...)`
-                                // 会让标签名读成名字**后面**那 4 个字节，于是登记与查找各落在
+                                // 会让标签名读成名字**后面**那 10 个字节，于是登记与查找各落在
                                 // 不同位置、永远对不上（实测就是这么红的）。
                                 let cur: u32 = cell(tab, C_EXTN);
                                 noff = cur;
-                                nl = 4;
+                                nl = 10;
                                 setcell(tab, C_EXTN, put_secname(t, cur, oi, shndx));
                             } else {
                                 // **局部**（`bind == 0`）一律**按对象改名** —— 与参考实现
@@ -3566,7 +3654,7 @@ fn link_object_mem(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, ap: u3
                     // ⚠ 与登记处同一条：起点与游标是两个值，别把返回值当起点。
                     let cur: u32 = cell(tab, C_EXTN);
                     noff3 = cur;
-                    nlen3 = 4;
+                    nlen3 = 10;
                     setcell(tab, C_EXTN, put_secname(t, cur, oi, rd16(mem, symoff + 6)));
                 } else {
                     // **与登记处同一套**：局部符号按对象改名（`bind` 在符号记录的第 4 字节
@@ -3580,6 +3668,11 @@ fn link_object_mem(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, ap: u3
                     }
                 }
                 let fi: u32 = cell(tab, C_NFREL);
+                // `#622`：重定位表原先没有守卫，第 4097 条写进归档需要集。现在它
+                // 有自己的容量，越界点名退出（表区抬到 8 MiB 之后 `REL_MAX` 是 32768）。
+                if fi >= REL_MAX {
+                    let _f: u32 = fail("too many relocation records (REL_MAX) -- the object file is too large for this linker");
+                }
                 let fb: u32 = TB_FREL + fi * 32;
                 store32(tab, fb + F2_OBJ, oi);
                 store32(tab, fb + F2_AT, tsecat);
@@ -3794,11 +3887,13 @@ fn ar_member(mem: ptr, pos: u32, n: u32) -> u64 {
     return ((pos + 60 + sz + (sz % 2)) as u64) * 4294967296 + sz as u64;
 }
 
-/// **挑成员并摆**（`docs/173` 阶段 2，`FujoJTOP/loment#405`）：定点选择，再按**挑中的次序**
-/// 逐个摆。字节已经在 `arb` 里（调用方读过 —— 归档先读进 `M_OBJ` 看魔数，是归档再拷进
-/// `M_AR`：`M_OBJ` 要留给成员自己，每个成员都要拷进去，那一整套 ELF 助手才用得上）。
-fn link_archive(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, objs: ptr, arb: ptr,
-                an: u32, ap: u32) -> u32 {
+/// **挑成员**（`docs/173` 阶段 2，`FujoJTOP/loment#405`）：定点选择，把挑中的成员
+/// 按**收下的次序**登记进 `TB_MEM`（带**归档号**，`#623`）。字节已经在 `arb` 里。
+///
+/// 选择与**摆**分开：是否发 TLS 块 / 收编面，取决于"到底有没有对象被摆下去"，
+/// 而那要等归档挑完才知道（`#625`）—— 参考实现也是先展开归档、再决定
+/// `has_foreign`。
+fn select_archive(tab: ptr, t: ptr, objs: ptr, arb: ptr, an: u32, aridx: u32) -> u32 {
     // ---- 定点：反复扫整包，收"定义了需要集里某个符号"的成员，直到一趟收不到新的。
     // **一趟里按归档顺序收**、被收下的按收下的次序排 —— 与参考实现 `Archive.select` 的
     // 那两层循环逐条同义（次序不同，产物就不同）。
@@ -3817,7 +3912,7 @@ fn link_archive(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, objs: ptr, arb: ptr
                 let doff: u32 = pos + 60;
                 let dlen: u32 = lo32(pack);
                 if ar_is_elf(arb, doff) == 1 {
-                    if ar_taken(tab, doff) == 0 {
+                    if ar_taken(tab, aridx, doff) == 0 {
                         // 成员拷进 `M_OBJ` 再扫 —— 那一整套 ELF 助手都按"对象在缓冲起点"
                         // 写的，参数化它们要动几十处调用点。
                         if dlen >= OBJ_CAP {
@@ -3826,7 +3921,7 @@ fn link_archive(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, objs: ptr, arb: ptr
                         copy_n(objs, 0, arb, doff, dlen);
                         if obj_usable(objs) == 1 {
                             if obj_syms(tab, t, objs, 0) == 1 {
-                                ar_take(tab, doff, dlen);
+                                ar_take(tab, aridx, doff, dlen);
                                 let _u: u32 = obj_syms(tab, t, objs, 1);
                                 changed = 1;
                             }
@@ -3843,19 +3938,28 @@ fn link_archive(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, objs: ptr, arb: ptr
         wstr(2, "loment: the archive holds no members\n");
         return die(1);
     }
-    // ---- 按**挑中的次序**摆（`TB_MEM` 里登记的就是那个次序）。
+    return 0;
+}
+
+/// 把**这一份归档**挑中的成员（`TB_MEM` 里归档号相同的那些）按登记次序摆下去。
+/// 归档字节由调用方重新读进 `arb`（`M_AR` 一次只装一份 —— 这正是 `#623` 的由来：
+/// 全局成员表若不认归档号，第二份归档会拿自己的字节重摆第一份的成员）。
+fn lay_archive(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, objs: ptr, arb: ptr,
+               aridx: u32, ap: u32) -> u32 {
     let nmem: u32 = cell(tab, C_NMEM);
     let i: u32 = 0;
     let nd: u32 = d;
     while i < nmem {
-        let base: u32 = TB_MEM + i * 8;
-        let doff2: u32 = load32(tab, base + E_NOFF);
-        let dlen2: u32 = load32(tab, base + E_NLEN);
-        if dlen2 >= OBJ_CAP {
-            let _f: u32 = fail("an archive member is larger than the 4 MiB limit");
+        let base: u32 = TB_MEM + i * 12;
+        if load32(tab, base + M_ARIDX) == aridx {
+            let doff2: u32 = load32(tab, base + M_OFF);
+            let dlen2: u32 = load32(tab, base + M_LEN);
+            if dlen2 >= OBJ_CAP {
+                let _f: u32 = fail("an archive member is larger than the 4 MiB limit");
+            }
+            copy_n(objs, 0, arb, doff2, dlen2);
+            nd = link_object_mem(tab, t, txt, gb, nd, objs, ap);
         }
-        copy_n(objs, 0, arb, doff2, dlen2);
-        nd = link_object_mem(tab, t, txt, gb, nd, objs, ap);
         i = i + 1;
     }
     return nd;
@@ -3871,13 +3975,14 @@ fn ar_is_elf(arb: ptr, off: u32) -> u32 {
     return 1;
 }
 
-/// 这个成员已经被挑过了吗（`TB_MEM` 里按数据起点查 —— 一趟里同一个起点只可能出现一次）。
-fn ar_taken(tab: ptr, doff: u32) -> u32 {
+/// 这个成员已经被挑过了吗（`TB_MEM` 里按 **(归档号, 数据起点)** 查 —— `#623`：
+/// 只比起点的话，第二份归档的第一个成员（同样在偏移 8）会被当成已收下）。
+fn ar_taken(tab: ptr, aridx: u32, doff: u32) -> u32 {
     let i: u32 = 0;
     let n: u32 = cell(tab, C_NMEM);
     while i < n {
-        let base: u32 = TB_MEM + i * 8;
-        if load32(tab, base + E_NOFF) == doff {
+        let base: u32 = TB_MEM + i * 12;
+        if load32(tab, base + M_ARIDX) == aridx && load32(tab, base + M_OFF) == doff {
             return 1;
         }
         i = i + 1;
@@ -3885,14 +3990,15 @@ fn ar_taken(tab: ptr, doff: u32) -> u32 {
     return 0;
 }
 
-fn ar_take(tab: ptr, doff: u32, dlen: u32) {
+fn ar_take(tab: ptr, aridx: u32, doff: u32, dlen: u32) {
     let k: u32 = cell(tab, C_NMEM);
     if k >= MEM_MAX {
         let _f: u32 = fail("the archive members picked exceed the limit (MEM_MAX) -- the archive is too large for this linker");
     }
-    let base: u32 = TB_MEM + k * 8;
-    store32(tab, base + E_NOFF, doff);
-    store32(tab, base + E_NLEN, dlen);
+    let base: u32 = TB_MEM + k * 12;
+    store32(tab, base + M_ARIDX, aridx);
+    store32(tab, base + M_OFF, doff);
+    store32(tab, base + M_LEN, dlen);
     setcell(tab, C_NMEM, k + 1);
 }
 
@@ -4078,21 +4184,28 @@ fn resolve_fixups(tab: ptr, t: ptr, txt: ptr) -> u32 {
 //
 // `.so` 的字节**一个也不进产物**: 我们只读它的**导出表**, 产物里留下 `DT_NEEDED` 与
 // PLT; 跑起来的时候由系统的 loader 把 `.so` 映射进来、按名字解析、把地址填进 GOT。
-
-const EXP_MAX: u32 = 8192;         // 导出表条数上限
-const TB_EXP: u32 = 2662176;       // stride 12 × EXP_MAX: (名字池起点, 长度, 标志)
-const X_NOFF: u32 = 0;
-const X_NLEN: u32 = 4;
-const X_FLAG: u32 = 8;             // bit0 = 默认版本 / bit1 = 数据符号
-const X_SIZE: u32 = 12;
-const IMP_MAX: u32 = 1024;         // 导入表条数上限
+//
+// **导出表不再是"进链接时逐条抄下来"**（`#598` / `#600`）：`.so` 用 `mmap` 整份映射
+// 进来（只读、私有），`.dynsym` / `.dynstr` 的偏移记在 cell 里；解析一个导入名时
+// **现扫** `.dynsym` —— 与 loader 的做法、与参考实现的"按名字查"同一条。于是
+// ① 没有导出条数上限（一个库里 4 万条导出也照链）；② 导出名不占名字池，一份写满
+// 输入缓冲的 `.ll` 加一个真 `.so` 也不再被拒。
+const IMP_MAX: u32 = 131072;       // 导入表条数上限（≥ 一份 4 MiB .ll 能表达的目标数）
 const TB_IMP: u32 = 2760480;       // stride 8 × IMP_MAX: (名字池起点, 长度)
 
 const C_NSHARED: u32 = 120;        // 0/1 —— 这一版一次只能链一个 `.so`
 const C_SONOFF: u32 = 124;         // SONAME 在名字池里的起点与长度
 const C_SONLEN: u32 = 128;
-const C_NEXP: u32 = 132;           // 导出表条数
 const C_NIMP: u32 = 136;           // 导入表条数
+const C_SOHI: u32 = 188;           // mmap 的共享对象基址（u64 拆两格）
+const C_SOLO: u32 = 192;
+const C_SOLEN: u32 = 196;          // 文件长度
+const C_DSYMOFF: u32 = 200;        // `.dynsym` 的文件偏移与条数
+const C_DSYMN: u32 = 204;
+const C_DSTROFF: u32 = 208;        // `.dynstr` 的文件偏移与长度
+const C_DSTRSZ: u32 = 212;
+const C_VSOFF: u32 = 216;          // `.gnu.version` 的文件偏移与条数（0 = 没有）
+const C_VSN: u32 = 220;
 const C_PLTA: u32 = 140;           // PLT 起点 (vaddr)
 const C_INTERP: u32 = 144;         // `.interp` 的 vaddr
 const C_GOTA: u32 = 148;           // `.got.plt` 的 vaddr
@@ -4144,54 +4257,139 @@ fn put_bytes(dst: ptr, at: u32, src: ptr, off: u32, len: u32, cap: u32) -> u32 {
     return at + len;
 }
 
-/// 记一条导出。同名可能有多条（不同版本）：**默认版本优先**，非默认的不覆盖它 ——
-/// 与参考实现的 `SharedObject.__init__` 同一条规则。
-fn exp_add(tab: ptr, t: ptr, src: ptr, off: u32, len: u32, typ: u32, hidden: u32) -> u32 {
-    let n: u32 = cell(tab, C_NEXP);
-    let k: u32 = 0;
-    while k < n {
-        let base: u32 = TB_EXP + k * X_SIZE;
-        if nm_eq(t, load32(tab, base + X_NOFF), load32(tab, base + X_NLEN), src, off, len) == 1 {
-            let f: u32 = load32(tab, base + X_FLAG);
-            if f % 2 == 0 && hidden == 0 {
-                store32(tab, base + X_FLAG, f - f % 2 + 1);
-            }
-            return 0;
-        }
-        k = k + 1;
+/// `.shstrtab` 里第 `k` 节的**节名起点**；越界返回 `NO`。
+fn shstr_name(mem: ptr, k: u32, sbase: u32, ssz: u32) -> u32 {
+    let noff: u32 = load32(mem, sec_hdr(mem, k));
+    let at: u32 = sbase + noff;
+    if at < sbase {
+        return NO;
     }
-    if n >= EXP_MAX {
-        let _f2: u32 = fail("共享对象导出表满了 — 抬高 EXP_MAX");
+    if at >= sbase + ssz {
+        return NO;
     }
-    let cur: u32 = cell(tab, C_EXTN);
-    let nx: u32 = put_bytes(t, cur, src, off, len, IN_CAP);
-    setcell(tab, C_EXTN, nx);
-    let base2: u32 = TB_EXP + n * X_SIZE;
-    store32(tab, base2 + X_NOFF, cur);
-    store32(tab, base2 + X_NLEN, len);
-    let isdef: u32 = 1 - hidden;
-    let isobj: u32 = 0;
-    if typ == 1 {
-        isobj = 1;
-    }
-    store32(tab, base2 + X_FLAG, isdef + isobj * 2);
-    setcell(tab, C_NEXP, n + 1);
-    return 0;
+    return at;
 }
 
-/// 查一个导出：返回 `标志 + 1`（0 = 没有这个名字）—— 加一是为了把"找到了但标志是 0"
-/// 与"没找到"分开。
-fn exp_find(tab: ptr, t: ptr, noff: u32, nlen: u32) -> u32 {
-    let n: u32 = cell(tab, C_NEXP);
+/// `mem[at..lim)` 这个 NUL 结尾的名字**正好是** `lit` 吗（长度也要一样）。
+/// 单用 `lit_at` 不够：它只比前 L 个字节，`".dynsym2"` 会被当成 `".dynsym"`。
+fn name_is(mem: ptr, at: u32, lim: u32, lit: str) -> u32 {
+    // **不靠 `&&` 短路**（自举侧两个操作数都会被求值）：这里 `mem` 是映射进来的文件，
+    // `load8` 在区间末尾之外就是 SIGBUS。所以用嵌套分支守边界。
+    let n: u32 = 0;
+    let go: u32 = 1;
+    while go == 1 && n < 4096 {
+        if at + n >= lim {
+            go = 0;
+        } else if load8(mem, at + n) == 0 {
+            go = 0;
+        } else {
+            n = n + 1;
+        }
+    }
+    if n != str_len(lit) {
+        return 0;
+    }
+    return lit_at(mem, at, at + n, lit);
+}
+
+/// 按**节名**找节（`#602`）。参考实现是 `byname[".dynsym"]` / `byname[".dynstr"]`
+/// —— 镜像原先按节类型挑 `.dynsym`（最后一条胜出）、`.dynstr` 靠 `sh_link`，
+/// 两个手工构造的 `.so` 于是给出不同的导出集。这里改成同一条按名字的规则。
+fn sec_find(mem: ptr, shn: u32, sbase: u32, ssz: u32, lit: str) -> u32 {
     let k: u32 = 0;
-    while k < n {
-        let base: u32 = TB_EXP + k * X_SIZE;
-        if span_eq(t, load32(tab, base + X_NOFF), load32(tab, base + X_NLEN), noff, nlen) == 1 {
-            return load32(tab, base + X_FLAG) + 1;
+    while k < shn {
+        let at: u32 = shstr_name(mem, k, sbase, ssz);
+        if at != NO {
+            if name_is(mem, at, sbase + ssz, lit) == 1 {
+                return k;
+            }
         }
         k = k + 1;
     }
-    return 0;
+    return NO;
+}
+
+/// 共享对象映射进来的基址（`C_SOHI` / `C_SOLO` 两格拼回一个 u64）。
+fn so_base(tab: ptr) -> ptr {
+    let hi: u64 = cell(tab, C_SOHI) as u64;
+    let lo: u64 = cell(tab, C_SOLO) as u64;
+    return (hi * PHI + lo) as ptr;
+}
+
+/// 查一个导出：返回 `标志 + 1`（bit0 = 默认版本 / bit1 = 数据符号；0 = 没有）。
+///
+/// 同名可能有多条（不同版本）：参考实现的规则是"默认版本优先"，而且**换掉的是整个
+/// 元组** —— 包括 kind。镜像原先只抬 bit0、把 kind 留在第一次见到的那条上，于是
+/// "先以非默认 OBJECT 出现、后面再以默认 FUNC 出现"的合法形状会被当成数据符号拒掉
+/// （`#601`）。这里现扫 `.dynsym`，按同一条规则算出胜出条目。
+fn so_resolve(tab: ptr, t: ptr, noff: u32, nlen: u32) -> u32 {
+    let mem: ptr = so_base(tab);
+    let dso: u32 = cell(tab, C_DSYMOFF);
+    let dsn: u32 = cell(tab, C_DSYMN);
+    let stro: u32 = cell(tab, C_DSTROFF);
+    let strsz: u32 = cell(tab, C_DSTRSZ);
+    let vso: u32 = cell(tab, C_VSOFF);
+    let vsn: u32 = cell(tab, C_VSN);
+    let found: u32 = 0;
+    let kind: u32 = 0;
+    let isdef: u32 = 0;
+    let k: u32 = 1;
+    while k < dsn {
+        let o3: u32 = dso + k * 24;
+        let stn: u32 = load32(mem, o3);
+        let info: u32 = load8(mem, o3 + 4) as u32;
+        let other: u32 = load8(mem, o3 + 5) as u32;
+        let shndx: u32 = rd16(mem, o3 + 6);
+        if shndx != 0 && stn != 0 {
+            let bind: u32 = info / 16;
+            let typ: u32 = info % 16;
+            if bind == 1 || bind == 2 {
+                // GLOBAL/WEAK 的 OBJECT(1) / FUNC(2) / IFUNC(10) —— IFUNC 对 loader
+                // 与普通函数没差别（glibc 的 `memcpy` / `strlen` 就是它）。
+                if typ == 1 || typ == 2 || typ == 10 {
+                    let vis: u32 = other % 4;          // STV_DEFAULT(0)/PROTECTED(3) 可绑定
+                    if vis != 1 && vis != 2 {
+                        let npos: u32 = stro + stn;
+                        if npos >= stro && npos < stro + strsz {
+                            let nl: u32 = 0;
+                            let go2: u32 = 1;
+                            while go2 == 1 && nl < 4096 {
+                                if npos + nl >= stro + strsz {
+                                    go2 = 0;
+                                } else if load8(mem, npos + nl) == 0 {
+                                    go2 = 0;
+                                } else {
+                                    nl = nl + 1;
+                                }
+                            }
+                            if nm_eq(mem, npos, nl, t, noff, nlen) == 1 {
+                                let hid: u32 = 0;
+                                if k < vsn {
+                                    if rd16(mem, vso + k * 2) >= 32768 {
+                                        hid = 1;
+                                    }
+                                }
+                                let kd: u32 = 0;
+                                if typ == 1 {
+                                    kd = 1;
+                                }
+                                if found == 0 || (isdef == 0 && hid == 0) {
+                                    kind = kd;
+                                    isdef = 1 - hid;
+                                    found = 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        k = k + 1;
+    }
+    if found == 0 {
+        return 0;
+    }
+    return isdef + kind * 2 + 1;
 }
 
 /// `[off, off+span)` 在文件里吗（`#593`）。用 u64 算：`u32` 的加法回绕会把
@@ -4214,10 +4412,10 @@ fn so_bad(pname: ptr, what: str) -> u32 {
     return die(1);
 }
 
-/// 读一个 `.so` 的**导出表**与 SONAME。**不搬它的任何字节**。
+/// 读一个 `.so` 的**导出表位置**与 SONAME。**不搬它的任何字节**（整份只读映射进来）。
 fn so_load(tab: ptr, t: ptr, mem: ptr, n: u32, pname: ptr) -> u32 {
     // **每一次读之前都要问一句在不在文件里**（`#593`）。`load8`/`load32` 是裸内建、
-    // 没有边界；而 `mem` 是 4 MiB 的暂存区。少了这些检查，一个 176 字节的坏文件能让
+    // 没有边界；而 `mem` 是刚映射进来的文件。少了这些检查，一个 176 字节的坏文件能让
     // 链接器读出去（SIGSEGV），或者读到**上一个 `--link` 文件留下的字节** ——
     // 后者的症状是一句指错方向的诊断（"被 strip 掉了?"）。
     // 有界之后就不必再清零暂存区：`n` 之外的那些字节再也走不到。
@@ -4328,15 +4526,23 @@ fn so_load(tab: ptr, t: ptr, mem: ptr, n: u32, pname: ptr) -> u32 {
         // **在这里数、带 `n` 这个上限**：`cstr_len` 只看 4096 字节，够不到文件尾时
         // 它会一路扫过暂存区（`#593`）。
         let sl: u32 = 0;
-        while son_at + sl < n && sl < 4096 && load8(mem, son_at + sl) != 0 {
-            sl = sl + 1;
+        let gos: u32 = 1;
+        while gos == 1 && sl < 4096 {
+            if son_at + sl >= n {
+                gos = 0;
+            } else if load8(mem, son_at + sl) == 0 {
+                gos = 0;
+            } else {
+                sl = sl + 1;
+            }
         }
         setcell(tab, C_EXTN, put_bytes(t, son_o, mem, son_at, sl, IN_CAP));
         setcell(tab, C_SONOFF, son_o);
         setcell(tab, C_SONLEN, sl);
     }
-    // 节头：`.dynsym`(11) / `.gnu.version`(0x6FFFFFFF)，`.dynstr` 就是 `.dynsym` 的
-    // `sh_link`（与参考实现 `byname[".dynstr"]` 指同一节）。
+    // 节头：按**节名**找 `.dynsym` / `.dynstr` / `.gnu.version`（`#602`）。
+    // 参考实现就是 `byname[...]`；按类型挑会让"两条 SHT_DYNSYM"或"sh_link 指别处"
+    // 的输入给出不同的导出集 —— 两侧产物于是不同。
     let shoff: u32 = load32(mem, 40);
     let shen: u32 = rd16(mem, 58);
     let shn: u32 = sh_num(mem);
@@ -4346,40 +4552,38 @@ fn so_load(tab: ptr, t: ptr, mem: ptr, n: u32, pname: ptr) -> u32 {
     if so_fits(n, shoff, (shn as u64) * (shen as u64)) == 0 {
         return so_bad(pname, "节头表");
     }
-    let dsi: u32 = NO;
-    let vsi: u32 = NO;
-    k = 0;
-    while k < shn {
-        let ty: u32 = sh_type(mem, k);
-        if ty == 11 {
-            dsi = k;
-        }
-        if ty == 1879048191 {
-            vsi = k;
-        }
-        k = k + 1;
+    let shstri: u32 = rd16(mem, 62);
+    if shstri >= shn {
+        return so_bad(pname, "e_shstrndx 越界");
     }
+    let sbase: u32 = sh_off(mem, shstri);
+    let ssz: u32 = sh_size(mem, shstri);
+    if so_fits(n, sbase, ssz as u64) == 0 {
+        return so_bad(pname, ".shstrtab");
+    }
+    let dsi: u32 = sec_find(mem, shn, sbase, ssz, ".dynsym");
     if dsi == NO {
         wstr(2, "loment: 共享对象没有 .dynsym（被 strip 掉了?）—— 这一版只读带节头的 .so: ");
         write_cstr(2, pname, 0);
         wstr(2, "\n");
         return die(1);
     }
-    let dsli: u32 = sh_link(mem, dsi);
-    if dsli >= shn {
-        return so_bad(pname, ".dynsym 的 sh_link 指到一个不存在的节");
+    let stri: u32 = sec_find(mem, shn, sbase, ssz, ".dynstr");
+    if stri == NO {
+        return so_bad(pname, "共享对象没有 .dynstr");
     }
     let dso: u32 = sh_off(mem, dsi);
     let dssz: u32 = sh_size(mem, dsi);
     let dsn: u32 = dssz / 24;
-    let dstr: u32 = sh_off(mem, dsli);
-    let dstrsz: u32 = sh_size(mem, dsli);
+    let dstr: u32 = sh_off(mem, stri);
+    let dstrsz: u32 = sh_size(mem, stri);
     if so_fits(n, dso, dssz as u64) == 0 {
         return so_bad(pname, ".dynsym 表");
     }
     if so_fits(n, dstr, dstrsz as u64) == 0 {
         return so_bad(pname, ".dynstr 表");
     }
+    let vsi: u32 = sec_find(mem, shn, sbase, ssz, ".gnu.version");
     let vso: u32 = 0;
     let vsn: u32 = 0;
     if vsi != NO {
@@ -4390,6 +4594,15 @@ fn so_load(tab: ptr, t: ptr, mem: ptr, n: u32, pname: ptr) -> u32 {
             return so_bad(pname, ".gnu.version 表");
         }
     }
+    // 把这几张表的位置留给 `so_resolve` —— 导入是**之后**才一条条查的。
+    setcell(tab, C_DSYMOFF, dso);
+    setcell(tab, C_DSYMN, dsn);
+    setcell(tab, C_DSTROFF, dstr);
+    setcell(tab, C_DSTRSZ, dstrsz);
+    setcell(tab, C_VSOFF, vso);
+    setcell(tab, C_VSN, vsn);
+    // 至少要有一条能用的导出 —— 与参考实现同一句话、同一处失败。**只数，不抄。**
+    let nex: u32 = 0;
     k = 1;
     while k < dsn {
         let o3: u32 = dso + k * 24;
@@ -4401,30 +4614,18 @@ fn so_load(tab: ptr, t: ptr, mem: ptr, n: u32, pname: ptr) -> u32 {
             let bind: u32 = info / 16;
             let typ: u32 = info % 16;
             if bind == 1 || bind == 2 {
-                if typ == 1 || typ == 2 {
-                    // 名字相对 `.dynstr` 的起点：**两端都要在那一节里面**（`#593`）。
+                if typ == 1 || typ == 2 || typ == 10 {
                     let npos: u32 = dstr + noff;
                     if npos < dstr || npos >= dstr + dstrsz {
                         return so_bad(pname, "导出名偏移越出 .dynstr");
                     }
-                    let nl: u32 = 0;
-                    while npos + nl < dstr + dstrsz && nl < 4096
-                            && load8(mem, npos + nl) != 0 {
-                        nl = nl + 1;
-                    }
-                    let hid: u32 = 0;
-                    if k < vsn {
-                        if rd16(mem, vso + k * 2) >= 32768 {
-                            hid = 1;
-                        }
-                    }
-                    let _a: u32 = exp_add(tab, t, mem, npos, nl, typ, hid);
+                    nex = nex + 1;
                 }
             }
         }
         k = k + 1;
     }
-    if cell(tab, C_NEXP) == 0 {
+    if nex == 0 {
         wstr(2, "loment: 共享对象没有可用的导出（GLOBAL/WEAK 的 FUNC/OBJECT）: ");
         write_cstr(2, pname, 0);
         wstr(2, "\n");
@@ -4521,7 +4722,7 @@ fn collect_imports(tab: ptr, t: ptr, tlen: u32) -> u32 {
         let bl: u32 = load32(tab, base + F_BLEN);
         if lbl_find(tab, t, no, nl, bo, bl) == NO {
             if imp_has(tab, t, no, nl) == 0 {
-                let f: u32 = exp_find(tab, t, no, nl);
+                let f: u32 = so_resolve(tab, t, no, nl);
                 if f == 0 {
                     wstr(2, "loment: 共享对象里没有导出 ");
                     write_all(2, ptr_add(t, no), nl as u64);
@@ -5907,27 +6108,31 @@ fn run(mem: ptr) -> u32 {
     //   * 动态链时**不能装** —— `fs` 归 `ld.so` 管，指向 glibc 的整块 TLS
     //     （`errno`/`tcache`/栈金丝雀都在里面）。再 `arch_prctl(ARCH_SET_FS)` 一次就把
     //     它顶掉了，症状是 zlib 一路调到 libc 的 `malloc` 时读到垃圾线程指针。
-    let nobj: u32 = 0;
+    let ndirect: u32 = 0;
     let nshared: u32 = 0;
     if nlink != 0 && pe == 0 {
         let s0: u32 = 0;
         while s0 < nlink {
             let p0: ptr = ptr_add(pbuf, obase + s0 * 1024);
-            let ln0: u32 = read_link_file(p0, ptr_add(mem, M_OBJ), OBJ_CAP);
-            if is_shared(ptr_add(mem, M_OBJ), ln0) == 1 {
+            // 先只读 64 字节**分类**：`.so` 走映射、`.o` 走 4 MiB 暂存（`#597`）。
+            if link_file_is_shared(p0, ptr_add(mem, M_OBJ)) == 1 {
                 if nshared != 0 {
                     wstr(2, "loment: 一次只能链一个共享对象\n");
                     return die(1);
                 }
                 if ap == 0 {
                     wstr(2, "loment: 这份产物带了通向世界的端口（共享对象），链接器默认不收。\n");
-                    wstr(2, "loment: 开发通道要它得显式写 --allow-ports；发行版里这条路是关着的（docs/219 §8c）\n");
+                    wstr(2, "loment: 自己调链接器时要它得显式写 --allow-ports（启动器在两个渠道都传，docs/219 §8c）\n");
                     return die(1);
                 }
-                let _r: u32 = so_load(tab, inb, ptr_add(mem, M_OBJ), ln0, p0);
+                let mp: ptr = map_link_file(tab, p0);
+                let _r: u32 = so_load(tab, inb, mp, cell(tab, C_SOLEN), p0);
                 nshared = 1;
             } else {
-                nobj = nobj + 1;
+                let ln0: u32 = read_link_file(p0, ptr_add(mem, M_OBJ), OBJ_CAP);
+                if is_archive(ptr_add(mem, M_OBJ), ln0) == 0 {
+                    ndirect = ndirect + 1;
+                }
             }
             s0 = s0 + 1;
         }
@@ -5936,6 +6141,51 @@ fn run(mem: ptr) -> u32 {
     collect_globals(tab, inb, n as u32, gb);
     collect_externs(tab, inb, n as u32);
     place_globals(tab, inb);
+    // 外部目标文件 (docs/173): 代码节接在我们自己的代码之后, **数据节接在数据段之后**,
+    // 导出符号立标签。
+    //
+    // **归档必须在入口桩之前展开**（`#625`）：参考实现先展开归档、再按 `objects`
+    // （直接对象 + 挑中的成员）决定 TLS 与收编面；镜像原先数的是 `--link` 文件的
+    // 个数，于是"链了一份没人用的归档"也会凭空长出 TLS 块与整段 memcpy/memset。
+    let tobj: ptr = ptr_add(mem, M_OBJ);
+    let arb: ptr = ptr_add(mem, M_AR);
+    let got: u32 = 0;
+    if nlink != 0 {
+        // ① **需要集**：这份 IR 里 `declare` 的外部符号 ∪ 直接给的 `.o` 的未定义符号
+        //    —— 归档的定点选择要它（"我的 a.o 引用归档成员里的 b"正是靠这一条接上的）。
+        need_from_externs(tab, inb);
+        got = 0;
+        while got < nlink {
+            let p0: ptr = ptr_add(pbuf, obase + got * 1024);
+            if link_file_is_shared(p0, tobj) == 0 {
+                let ln0: u32 = read_link_file(p0, tobj, OBJ_CAP);
+                if is_archive(tobj, ln0) == 0 {
+                    check_obj(p0, tobj);      // 不是归档就得是能用的 `.o`（否则拒在这里）
+                    let _u: u32 = obj_syms(tab, inb, tobj, 1);
+                }
+            }
+            got = got + 1;
+        }
+        // ② **归档展开**：定点选成员，只登记（`TB_MEM` 带归档号）不摆 —— 摆要等
+        //    代码缓冲的游标定下来（直接对象一律排在归档前面）。
+        got = 0;
+        let aridx0: u32 = 0;
+        while got < nlink {
+            let p0: ptr = ptr_add(pbuf, obase + got * 1024);
+            if link_file_is_shared(p0, tobj) == 0 {
+                let ln2: u32 = read_link_file(p0, tobj, OBJ_CAP);
+                if is_archive(tobj, ln2) == 1 {
+                    copy_n(arb, 0, tobj, 0, ln2);
+                    let _s: u32 = select_archive(tab, inb, tobj, arb, ln2, aridx0);
+                    aridx0 = aridx0 + 1;
+                }
+            }
+            got = got + 1;
+        }
+    }
+    // "到底有没有外部对象被摆下去" —— 直接对象 + 归档挑中的成员。TLS、收编面、
+    // 入口桩的 prologue 全看它，而不是看 `--link` 写了几个文件（`#625`）。
+    let nobj: u32 = ndirect + cell(tab, C_NMEM);
     // **TLS 的名字先写进名字池**：入口桩要用它（`arch_prctl` 的目标），而标签要等
     // TLS 块摆好（在对象之后）才立 —— 回填在最后一步，所以中间这段时间"有名无址"是对的。
     let tlsn: u32 = cell(tab, C_EXTN);
@@ -5953,52 +6203,33 @@ fn run(mem: ptr) -> u32 {
     if nobj != 0 {
         tlen = emit_conscript(tab, txt, tlen, inb);
     }
-    // 外部目标文件 (docs/173): 代码节接在我们自己的代码之后, **数据节接在数据段之后**,
-    // 导出符号立标签。
-    //
-    // **两趟**（`FujoJTOP/loment#405`）。参考实现在 `compile_ll` 里就是这个次序，
-    // 次序不同产物就不同：
-    //   ① **需要集**：这份 IR 里 `declare` 的外部符号 ∪ 直接给的 `.o` 的未定义符号
-    //      —— 归档的定点选择要它（"我的 a.o 引用归档成员里的 b"正是靠这一条接上的）；
-    //   ② 先按参数顺序**摆直接对象**，再按同样顺序**处理归档** —— 参考实现那份是
-    //      `flat = list(direct) + 各归档挑出来的成员`，**直接对象一律排在归档前面**。
-    let tobj: ptr = ptr_add(mem, M_OBJ);
-    let arb: ptr = ptr_add(mem, M_AR);
-    let got: u32 = 0;
+    // ③ **摆直接对象**（按 `--link` 顺序），再 ④ **摆归档挑中的成员**（按归档顺序、
+    //    每份内部按收下的次序）—— 参考实现那份是
+    //    `flat = list(direct) + 各归档挑出来的成员`，直接对象一律排在归档前面。
     if nlink != 0 {
-        need_from_externs(tab, inb);
-        while got < nlink {
-            let p0: ptr = ptr_add(pbuf, obase + got * 1024);
-            let ln0: u32 = read_link_file(p0, tobj, OBJ_CAP);
-            if is_archive(tobj, ln0) == 0 {
-                // **共享对象不参与布局**（V2）：它的字节一个也不进产物，这里只跳过。
-                if is_shared(tobj, ln0) == 0 {
-                    check_obj(p0, tobj);      // 不是归档就得是能用的 `.o`（否则拒在这里）
-                    let _u: u32 = obj_syms(tab, inb, tobj, 1);
-                }
-            }
-            got = got + 1;
-        }
-        // ① 直接对象
         got = 0;
         while got < nlink {
             let p0: ptr = ptr_add(pbuf, obase + got * 1024);
-            let ln1: u32 = read_link_file(p0, tobj, OBJ_CAP);
-            if is_archive(tobj, ln1) == 0 {
-                if is_shared(tobj, ln1) == 0 {
+            if link_file_is_shared(p0, tobj) == 0 {
+                let ln1: u32 = read_link_file(p0, tobj, OBJ_CAP);
+                if is_archive(tobj, ln1) == 0 {
                     check_obj(p0, tobj);
                     tlen = link_object_mem(tab, inb, txt, gb, tlen, tobj, ap);
                 }
             }
             got = got + 1;
         }
-        // ② 归档：整包读进 `M_AR`（成员要一个个拷进 `M_OBJ` 再摆），定点挑成员再摆。
         got = 0;
+        let aridx1: u32 = 0;
         while got < nlink {
-            let ln2: u32 = read_link_file(ptr_add(pbuf, obase + got * 1024), tobj, OBJ_CAP);
-            if is_archive(tobj, ln2) == 1 {
-                copy_n(arb, 0, tobj, 0, ln2);
-                tlen = link_archive(tab, inb, txt, gb, tlen, tobj, arb, ln2, ap);
+            let p0: ptr = ptr_add(pbuf, obase + got * 1024);
+            if link_file_is_shared(p0, tobj) == 0 {
+                let ln2: u32 = read_link_file(p0, tobj, OBJ_CAP);
+                if is_archive(tobj, ln2) == 1 {
+                    copy_n(arb, 0, tobj, 0, ln2);
+                    tlen = lay_archive(tab, inb, txt, gb, tlen, tobj, arb, aridx1, ap);
+                    aridx1 = aridx1 + 1;
+                }
             }
             got = got + 1;
         }

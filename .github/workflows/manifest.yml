@@ -247,25 +247,32 @@ jobs:
   # 走 `workflow_run` —— 那两种写法都会把重算排在门禁**后面**，于是"合并一次多等一轮"。
   # 重算本身是独立的、只读树 + 写生成物，没有理由等门禁。
   #
-  # **为什么是直推 `main`，不是开一个 PR**（2026-10-16 定）：
+  # **曾经是直推 `main`，2026-10-18 改成"分支 + PR + auto-merge"**（`#891`）。
   #
-  #   * 开 PR 这条路**在 GitHub 上不成立** —— 用 `GITHUB_TOKEN` 开的 PR 与它推的分支
-  #     **都不触发** `pull_request` / `synchronize`（官方规则：`GITHUB_TOKEN` 触发的事件
-  #     不新建 workflow run，只有 `workflow_dispatch` / `repository_dispatch` 例外）。
-  #     于是那个 PR 拿不到门禁、必需检查永远不报 ⇒ auto-merge 永远不落。本仓 `docs/159`
-  #     已经撞过这个形状的亲戚（"机器人推送会把必需检查挂成 `action_required`"）。
-  #   * 直推就没有那一串：重算完几秒就落，**不等任何门禁**。`main` 的 `push` 门禁随后
-  #     照样会在这一笔上跑一遍（只是**不阻塞**它）。
+  # 直推当时能成立的两个前提，一个是真的、一个正好是问题本身：
   #
-  # **它凭什么推得动 `main`**：分支保护里 `enforce_admins` 是 `false`（2026-10-16 用 API
-  # 核实过），所以**属主 PAT** 能绕过必需检查。`GITHUB_TOKEN` 不行（它不是 admin）——
-  # 那正是上面那条替代路走不通的第二个理由。用 `secrets.MANIFEST_TOKEN`，**且只有这个 job
-  # 引用它**：`emit` 那一路只处理本仓分支的 `push`，既拿不到也不需要它。
+  #   * **用 `GITHUB_TOKEN` 开的 PR 不触发 `pull_request`** —— 官方规则，`docs/159` 也撞过
+  #     亲戚（"机器人推送会把必需检查挂成 `action_required`"）。曾经因此改用属主 PAT
+  #     （`secrets.MANIFEST_TOKEN`）来开 PR。**现在不用了**：`workflow_dispatch` 是那条
+  #     规则的**例外**（`GITHUB_TOKEN` 触发的 dispatch 照样新建 run），所以 PR 用
+  #     `GITHUB_TOKEN` 开，再由这里显式 `gh workflow run gate.yml --ref chore/emit-main`
+  #     把门禁派发到 PR 的 head SHA 上。**没有任何长期凭据参与信任根的写入。**
+  #   * **直推之所以推得动，是因为 `enforce_admins=false`** —— 也就是这一笔**绕过必需检查**。
+  #     推进去的里面就有 `loment/build/selfhost_driver.ll`（每次构建的起点）：那条路等于
+  #     "一把凭据可以在无人复核、无门禁的情况下改写信任根"。那不是省一轮的取舍，那是**单凭据
+  #     后门**的形状。
+  #
+  # 现在的形状：重算完推到 `chore/emit-main` → 开 PR → `--auto --squash`，门禁绿了它自己落。
+  # **重算仍然不等门禁**（没有 `needs:` / `workflow_run`，`test_main_writer_is_not_behind_the_gate`
+  # 钉着）：等的是**合并**，不是计算。
+  #
+  # 前提：这个 job 要 **`contents: write`**（推分支）、**`pull-requests: write`**（开 PR /
+  # 开 auto-merge）、**`actions: write`**（派发门禁）。**一个仓 secret 都不需要** ——
+  # 用的全是这一次运行自己的 `GITHUB_TOKEN`，跑完即失效。
   emit-main:
     name: main 上的生成物（单一写者）
-    # **回环守卫**：这个 job 自己推上去的那一笔会再来一次 `push: main`，而那时树本来就是
-    # 最新的。按**提交信息**判 —— 推它的是属主 PAT，`github.actor` 是属主而不是
-    # `github-actions[bot]`，所以按 actor 判的老守卫在这里**不成立**。
+    # **回环守卫**：只按**提交信息**判。旧版本还按 `github.actor` 判（"属主 PAT 推的"），
+    # 现在推它的是 `GITHUB_TOKEN` —— 那条 `push` 事件根本不会新建 run，守卫不负责这一步。
     #
     # `workflow_dispatch` 也收（手动点一次 = "现在就把 main 上的生成物对齐"）；
     # PR 事件不收 —— 它们检出的是**别人的**树，拿它去写生成物是错的。
@@ -276,38 +283,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      contents: read
+      contents: write       # 推 chore/emit-main
+      pull-requests: write  # 开 PR / 开 auto-merge
+      actions: write        # gh workflow run：把门禁派发到这个分支
     # **`cancel-in-progress: true`**（与 `emit` 不同）：这个 job 每次都从**当前的 main 尖**上
     # 重算，所以旧的那一轮被取消没有任何损失，而串行排队会让生成物越落越远。
     concurrency:
       group: manifest-main
       cancel-in-progress: true
     steps:
-      # **密钥不在就直接红**，不静默跳过：跳过的后果是生成物**永远**不再刷新，而门禁里
-      # 没有任何判据会发现（`loment_tools_test` 钉的是这个 job 的**存在与形状**，
-      # 不是"它跑成功了" —— 见 `docs/254` §5 第 3 条）。
-      - name: 密钥在不在
-        env:
-          TOKEN: ${{ secrets.MANIFEST_TOKEN }}
-        run: |
-          set -e
-          if [ -z "$TOKEN" ]; then
-            echo "::error::没有 MANIFEST_TOKEN —— main 上的生成物没人推得上去。"
-            echo "::error::建一个**细粒度 PAT**（只给这个仓，Contents: Read and write），存成这个仓的 secret MANIFEST_TOKEN。"
-            echo "::error::为什么不用 GITHUB_TOKEN：它不是 admin，推 main 会被分支保护拒掉（enforce_admins 是 false，属主 PAT 能绕过）。"
-            exit 1
-          fi
-
       # 全量取 —— 改号那一步要在前一个 main 上看号（见下面「改号」）。
       #
-      # **`persist-credentials: false` 是这条链推不推得动 main 的关键**：`actions/checkout`
-      # 默认把 workflow token 写进 `http.https://github.com/.extraheader` 的一条
-      # `AUTHORIZATION` 头，而**它会盖过**下面推送 URL 里的 `x-access-token:<MANIFEST_TOKEN>`
-      # —— 于是推的身份是 `github-actions[bot]`（这个 job 只有 `contents: read`），403，
-      # 而重试循环把它误报成「main 又动了」，连试三轮之后红。
-      #
-      # 实测（2026-10-17）：main 上**从没有过**一笔 `loment-artifacts` 的提交 —— 这条推送
-      # 路一直是坏的，上一次「成功」恰好是"生成物本来就是最新的、什么都不用推"。
+      # **`persist-credentials: false`**：推送 URL 里自己带 `x-access-token:<GITHUB_TOKEN>`，
+      # 不想让 checkout 留下的 `AUTHORIZATION` 头与它混在一起。这个 job 现在本来就有
+      # `contents: write`，两条路都能推；钉成一条是为了"推的是谁"只有一个答案。
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -326,17 +315,17 @@ jobs:
       # 被拒只说明这一轮算的基点已经旧了（有人在这几秒里合了新的），重来一轮就好。
       - name: 在最新的 main 上重算，然后推上去
         env:
-          TOKEN: ${{ secrets.MANIFEST_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
           set -e
-          URL="https://x-access-token:${TOKEN}@github.com/${REPO}.git"
+          URL="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
           git config user.name  "loment-artifacts"
           git config user.email "artifacts@users.noreply.github.com"
 
           # git 出错时会把**整条 URL（含 token）**打进 stderr。GitHub 会遮密钥，
           # 但这里再遮一层：那条日志是要被人读的。
-          redact() { sed "s|${TOKEN}|<MANIFEST_TOKEN>|g" "$1"; }
+          redact() { sed "s|${GH_TOKEN}|<GITHUB_TOKEN>|g" "$1"; }
 
           attempt=1
           while [ "$attempt" -le 3 ]; do
@@ -387,15 +376,42 @@ jobs:
                     loment/build/release-manifest.json loment/build/SHA256SUMS docs/manual docs
             git commit -q -m "[生成物] 只有生成物：种子 + surface_data + 手册 + 发布清单 + SHA256SUMS（main 上重算）"
 
-            if git push "$URL" HEAD:main >"$log" 2>&1; then
-              echo "推上去了：$(git log --oneline -1)"
+            # **推的是分支，不是 main**（`#891`）。直推 main 之所以能成，靠的是
+            # `enforce_admins=false` —— 也就是"这一笔绕过必需检查"。而推进去的里面就有
+            # `loment/build/selfhost_driver.ll`（每次构建的起点）：那条路等于**一把凭据
+            # 可以在无人复核、无门禁的情况下改写信任根**。
+            #
+            # 改成：推到 `chore/emit-main`，开 PR，打开 auto-merge —— 门禁在 PR 上跑，
+            # 绿了它自己落地。**重算仍然不等门禁**（`needs:` / `workflow_run` 一个都没有，
+            # 见 `test_main_writer_is_not_behind_the_gate`）：等的是**合并**，不是计算。
+            BRANCH=chore/emit-main
+            if git push --force "$URL" "HEAD:refs/heads/$BRANCH" >"$log" 2>&1; then
+              open_n=$(gh pr list --repo "$REPO" --head "$BRANCH" --state open \
+                         --json number --jq 'length' 2>/dev/null || echo 0)
+              if [ "$open_n" = "0" ]; then
+                gh pr create --repo "$REPO" --base main --head "$BRANCH" \
+                  --title "[生成物] 只有生成物：main 上重算的种子 / surface / 手册 / 清单 / SHA256SUMS" \
+                  --body "自动任务重算出来的生成物，**必须过门禁才落地**（#891）。这一笔以前直推 main，靠的是 enforce_admins=false 绕过必需检查。" || {
+                    echo "::error::分支推上去了，但开不了 PR —— 检查这个 job 的 permissions 是否还有 **pull-requests: write**"
+                    exit 1
+                  }
+              fi
+              # **门禁不会自己起**：`GITHUB_TOKEN` 开的 PR 不触发 `pull_request`。而
+              # `workflow_dispatch` 是那条规则的**例外** —— 显式派发一次，必需检查就落在
+              # 这个分支当前的 head SHA 上（`lom/ 禁区` 在 dispatch 下是 skipped，
+              # 而 skipped 是必需检查接受的三种状态之一）。
+              gh workflow run gate.yml --repo "$REPO" --ref "$BRANCH"
+              # 已开着就再来一次也无害（auto-merge 已开时 gh 会报一句，不当失败）。
+              gh pr merge --repo "$REPO" "$BRANCH" --auto --squash 2>/dev/null || \
+                echo "::warning::auto-merge 没打开（PR 已存在、或仓库关了 auto-merge）—— 这一笔要人合"
+              echo "推上去了：分支 $BRANCH，门禁已派发，PR 等它: $(git log --oneline -1)"
               exit 0
             fi
             redact "$log"
             # **权限被拒 ≠ main 动了**。前者重试三轮也不会变好，而日志原先一律说
             # "main 又动了" —— 那会把一个配置错误伪装成并发，正是这个仓最不肯让的形状。
             if grep -qiE 'denied to |Permission to |" ?403|401 Unauthorized|Bad credentials|Authentication failed' "$log"; then
-              echo "::error::推被**权限**拒了，不是 main 动了 —— 检查两件事：① secret MANIFEST_TOKEN 是细粒度 PAT、对该仓有 Contents: Read and write、没过期；② 这个 job 的 checkout 有 persist-credentials: false（否则 checkout 写的 extraheader 会盖过 PAT，推的身份变成 github-actions[bot]）。上面是 git 的原文。"
+              echo "::error::推被**权限**拒了，不是 main 动了 —— 检查这个 job 的 permissions 是否还有 **contents: write**。上面是 git 的原文。"
               exit 1
             fi
             echo "::warning::推被拒了（main 又动了）—— 重新落在最新的 main 上再算一轮"

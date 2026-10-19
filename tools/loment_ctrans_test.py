@@ -284,7 +284,11 @@ def _wsl() -> bool:
 
 
 def _wsl_path(p: Path) -> str:
+    # Linux（CI 的 runner）上 `_WSLCMD` 是空的，路径就是它本身 —— 不要再套 `/mnt/<盘>`，
+    # 那会把 `/tmp/x` 变成 `/mnt//tmp/x`（`#382` 之后判据在 Linux 上原生跑）。
     s = str(p.resolve()).replace("\\", "/")
+    if sys.platform.startswith("linux"):
+        return s
     return "/mnt/" + s[0].lower() + s[2:]
 
 
@@ -372,6 +376,124 @@ def test_translation_runs_same_as_clang():
             assert l_rc == c_rc, (
                 f"{name}: **翻译出来的 Loment 与 clang 编的 C 结果不同**: {l_rc} != {c_rc}")
             print(f"      {name}: clang -> {c_rc}，翻译成 Loment -> {l_rc}（相等）")
+
+
+#: 每条都是某个 issue 的**最小复现**（`#120` / `#123` / `#125` / `#131` / `#133`）。
+#: 两边真编真跑再与一个**推出来的**退出码对一次 —— 只比"两边相等"的话，
+#: 翻译器与 clang 一起错成同一副样子也会被放过去。
+_ISSUE_REPROS = [
+    # #120：块里那个 x 出了块就没了（C 给 1；不保块作用域时给 2）
+    ("120-if", "int f(int c) { int x = 1; if (c) { int x = 2; } return x; }\n"
+               "int main() { return f(1); }\n", 1),
+    ("120-while", "int f() { int x = 1; int i = 0; while (i < 1) {"
+                  " int x = 5; i = i + 1; } return x; }\n"
+                  "int main() { return f(); }\n", 1),
+    # #123：`int` 与 `unsigned` 见面时按 C 的寻常算术转换提升（`-1` 变 4294967295）
+    ("123-cmp", "int main() { int a = -1; unsigned b = 0;"
+                " if (a > b) { return 7; } return 8; }\n", 7),
+    ("123-arith", "int main() { int a = -1; unsigned b = 0;"
+                  " if (a + b > 100) return 7; return 8; }\n", 7),
+    # #125：返回位置的隐式整型转换（u32 -> i32）
+    ("125-ret", "int f(unsigned int v) { return v; }\n"
+                "int main() { return f(7); }\n", 7),
+    # #131：负字面量 / 减法 / 移位 / -2^31 的比较都是**有符号**的
+    ("131-lit", "int main(void) { return (-1 < 0); }\n", 1),
+    ("131-sub", "int main(void) { return ((0 - 1) < 0); }\n", 1),
+    ("131-shift", "int main(void) { return ((1 << 31) < 0); }\n", 1),
+    ("131-min", "int main(void) { return ((-2147483648) < 0); }\n", 1),
+    # #133：`int` + `long` 的加法与**随后的比较**都提升到 64 位
+    ("133-long", "int main(void) { int x = 1; long y = 2147483647;"
+                 " return (x + y > 0); }\n", 1),
+]
+
+
+@test
+def test_issue_repros_run_like_clang():
+    """`#120` / `#123` / `#125` / `#131` / `#133` 的最小复现，**两边跑出来的数一样**。
+
+    这几条在 `widths.c` / `blockscope.c` 两份语料里已有覆盖，但语料写的是"一个面"；
+    这里逐条放的是**issue 正文里那段最小程序** —— 将来谁把某条修回去，失败信息里能
+    直接看到 issue 号，而不是"某份 60 行的语料差了一个数"。
+
+    `#132`（超 32 位字面量）不在这里：它现在的答案是**拒**，由
+    `test_comparison_operands_are_pinned_to_a_signed_width` 钉住。
+    `#121`（`use` 被静默丢）在 `loment_multisyntax_test` 里（转写期就报出来）。
+    """
+    # 期望值 `want` 是 clang 那边**记录下来的**（开发时逐条跑出来的）。这条判据要在
+    # CI 上跑（新增跳过是禁区，`#418`）：那里没有 clang，所以只跑译文那一侧，与记录值比。
+    # 有 clang 时再多一比 —— C 侧现在仍然是这个数。
+    have_clang = _clang() is not None and _wsl()
+    with tempfile.TemporaryDirectory() as t:
+        for label, src, want in _ISSUE_REPROS:
+            td = Path(t) / label.replace("-", "_")
+            td.mkdir()
+            doc, rep = potato_from.from_c(src, label + ".c", "strict")
+            assert not rep.skipped, (label, rep.skipped[:3])
+            l_rc = _run(_build_loment(td, doc))
+            assert l_rc == want, f"{label}: 译文算出来 {l_rc}，clang 记录的是 {want}"
+            if have_clang:
+                c_rc = _run(_build_c(td, src))
+                assert c_rc == want, f"{label}: clang 那边现在也不对: {c_rc} != {want}"
+            print(f"      {label}: 翻译成 Loment -> {l_rc}（期望 {want}）")
+
+
+@test
+def test_shadowing_declaration_reads_the_outer_name_in_its_initializer():
+    """**遮蔽 + 初值引用被遮蔽的那个名**（`#234`）。
+
+    块里 `int x = x + 100;` 要发成 `let x__1: i32 = (x + 100);` —— 右边那个 `x`
+    是**外层**那个。原先先 `decl_bind` 再发初值，右边也跟着改成 `x__1`，于是产物是
+    `let x__1: i32 = (x__1 + 100);`：一条**自引用**声明，check 报"使用未声明的变量
+    x__1"（用户从没写过这个名字）。
+
+    C 在这里严格说是未定义行为（新 `x` 的作用域从声明符之后就开始了），但本语言连
+    "读一个正在声明的名字"都写不出来；外层有同名时读外层是**确定且保义**的选择
+    （`#234` 的期望），外层没有那个名字就照旧响亮报"用了没声明过的"。
+
+    `for (int x = x + 1; …)` 是同一处的第二个入口（循环变量也改名外提）。
+    """
+    src_if = ("int entry() { int x = 10; if (x > 0) { int x = x + 100;"
+              " if (x > 100) { x = 7; } } return x; }\n")
+    out = ctrans.translate(src_if)
+    assert "let x__1: i32 = (x + 100);" in out, out
+    assert "x__1 + 100" not in out, f"初值读到了刚改名的那个（自引用）:\n{out}"
+    assert "if (x__1 > (100 as i32)) {" in out, out
+
+    src_for = ("int f() { int x = 5; for (int x = x + 1; x < 7; x = x + 1) { }"
+               " return x; }\n")
+    out_for = ctrans.translate(src_for)
+    assert "let x__1: i32 = (x + 1);" in out_for, out_for
+    # 步进那一行**本来就该**写改名后的 `x__1`（那是循环变量），所以只看 `let` 那行
+    assert "let x__1: i32 = (x__1 + 1);" not in out_for, (
+        f"for 初值读到了刚改名的那个（自引用）:\n{out_for}")
+
+    # 外层**没有**那个名字：照旧响亮拒（不能拿一个不存在的初值去编）
+    try:
+        ctrans.translate("int f() { int x = x + 1; return x; }\n")
+    except trans_core.Unsupported as e:
+        assert "没声明过" in str(e), e
+    else:
+        raise AssertionError("自引用初值（外层没有同名）没被拒")
+
+    # 产物要**真编得过**，并且跑出来与 C 一样（那个 if 程序 C 给 10）
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        with_main = src_if + "int main() { return entry(); }\n"
+        doc, _rep = potato_from.from_c(with_main, "nest.c", "strict")
+        if _clang() and _wsl():
+            c_rc = _run(_build_c(td, with_main))
+            l_rc = _run(_build_loment(td, doc))
+            assert c_rc == 10, f"clang 那边就不对: {c_rc} != 10"
+            assert l_rc == c_rc, f"译文与 clang 不同: {l_rc} != {c_rc}"
+            print(f"      遮蔽 + 自引用初值：clang -> {c_rc}，翻译 -> {l_rc}（相等）")
+        else:
+            text, _ = lomt_from.emit_lomt(doc, impl=True)
+            p = td / "nest.lomt"
+            p.write_text(text + _L_ENTRY, encoding="utf-8", newline="\n")
+            mod = lomentc.load(p)
+            deps = lomentc.resolve_deps(mod, ROOT, p.parent, entry=p)
+            assert not lomentc.check(mod, deps=deps), "翻译出来的 Loment 检查不过"
+            print("      遮蔽 + 自引用初值：产物可检查（无 clang/WSL，未跑数值）")
 
 
 @test
@@ -498,6 +620,10 @@ def test_comparison_operands_are_pinned_to_a_signed_width():
     for label, src, want_txt in (
             ("负数比较", "int f(int a) { return ((0 - 1) < a); }\n", "(0 as i32) - (1 as i32)"),
             ("字面量对字面量", "int f() { return (0 - 1) < 0; }\n", "(0 as i32) - (1 as i32)"),
+            # `#131` 那张表最后一行：正的 2147483648 不在 i32 里，**取负之后**在 ——
+            # 先把负号并进常量再发，否则 `_lit32` 会拿那个正字面量误拒。
+            ("最小负数", "int f(int a) { return ((-2147483648) < a); }\n",
+             "(-2147483648 as i32)"),
     ):
         out = ctrans.translate(src)
         assert want_txt in out, f"{label}: 没钉住宽度:\n{out}"

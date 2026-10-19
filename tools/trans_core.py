@@ -1155,6 +1155,17 @@ class Emitter:
             # **括号自己带上**（与 `ex` 里那处 `as` 同一个理由）：`(0 as i32) < (1 as i32)`
             # 里的 `i32 <` 否则会被 parser 当成**泛型实参**的开头。
             return f"({e.v} as {ty})"
+        if (isinstance(e, Un) and e.op == "-" and isinstance(e.e, Lit)
+                and not e.e.b):
+            # `-2147483648`（`#131` 那张表的最后一行）：**正的** 2147483648 不在 i32 里，
+            # 可整个式子（取负之后）在。`_lit32` 看的是那个正字面量，于是会误拒 ——
+            # 先把负号并进常量再发，既过得了那道闸、又保住了有符号比较（C 给 1）。
+            #
+            # 只在**有符号**那一侧这么做：C 里十进制常量 `2147483648` 是 `long`，
+            # 取负仍是 `long`；把它塞进无符号场合是另一条（未建）的规则，照旧拒。
+            v = -e.e.v
+            if ty in ("i8", "i16", "i32", "i64") and -(2 ** 31) <= v < 2 ** 31:
+                return f"({v} as {ty})"
         if isinstance(e, Bin) and e.op not in ("&&", "||"):
             op, _want, _b = self.d.bin[e.op]
             return f"({self.pinned(e.l, ty)} {op} {self.pinned(e.r, ty)})"
@@ -1230,13 +1241,24 @@ class Emitter:
         if isinstance(s, Decl):
             if s.ty == "()":
                 raise Unsupported(f"第 {s.line} 行: 不能声明 `void` 变量")
+            # **初值要在"这条声明生效之前"发射**（`#234`）。块里一条遮蔽外层的
+            # `int x = x + 100;`：本语言没有块作用域，那条声明会被改名成 `x__1`；
+            # 若先 `decl_bind` 再发初值，`x` 在右边也会被读成 `x__1` ——
+            # `let x__1: i32 = (x__1 + 100);` 是一条**自引用**的声明，check 直接报
+            # "使用未声明的变量 x__1"（用户从没写过这个名字）。
+            #
+            # C 里这里其实是**未定义行为**（新 `x` 的作用域从声明符之后就开始了，
+            # 初值读到的是它自己的不确定值）。本语言表达不了"读一个正在声明的名字"，
+            # 而外层恰好有同名时读外层是**确定且保义**的选择（`#234` 的期望），
+            # 所以初值在旧绑定下发射；外层没有那个名字就照旧响亮报"用了没声明过的"。
+            init = None if s.init is None else self.sink(s.init, s.ty)
             nm = self.decl_bind(s.name, s.line)
             self.varty[s.name] = s.ty
-            if s.init is None:
+            if init is None:
                 # 见文件头 §语义选择 1：C 的未初始化在这里变成确定的零值
                 self.out(f"let {nm}: {s.ty} = 0;", depth)
             else:
-                self.out(f"let {nm}: {s.ty} = {self.sink(s.init, s.ty)};", depth)
+                self.out(f"let {nm}: {s.ty} = {init};", depth)
             return
         if isinstance(s, Assign):
             if s.name not in self.vars:
@@ -1309,16 +1331,19 @@ class Emitter:
                 raise Unsupported(f"第 {s.init.line} 行: 不能声明 `void` 变量")
             old = self.vars.get(s.init.name)
             oldty = self.varty.get(s.init.name)
+            # 与 `stmt(Decl)` 同一处（`#234`）：初值在循环变量**生效之前**发射。
+            # `for (int x = x + 1; …)` 里右边那个 `x` 是外层的那个（本语言表达不了
+            # 自引用，而外层有同名时读外层是确定选择），改名之后才不会读成 `x__1`。
+            init = None if s.init.init is None else self.sink(s.init.init, s.init.ty)
             new = self.fresh(s.init.name)
             self.vars[s.init.name] = new
             # 循环变量的**类型**也要跟着这个作用域走（见 `self.varty`）——
             # 收在 `saved` 里，循环结束处一起还回去。
             self.varty[s.init.name] = s.init.ty
-            if s.init.init is None:
+            if init is None:
                 self.out(f"let {new}: {s.init.ty} = 0;", depth)
             else:
-                self.out(f"let {new}: {s.init.ty} = {self.sink(s.init.init, s.init.ty)};",
-                         depth)
+                self.out(f"let {new}: {s.init.ty} = {init};", depth)
             saved = (s.init.name, old, oldty)
         elif s.init is not None:
             self.stmt(s.init, depth)

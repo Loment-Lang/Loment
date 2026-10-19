@@ -7,6 +7,17 @@ body:
       value: |
         Four things make a report actionable here, and [CONTRIBUTING.md](https://github.com/Loment-Lang/loment/blob/main/CONTRIBUTING.md)
         asks for the same four. Issues are in English.
+  - type: checkboxes
+    id: contributing
+    attributes:
+      label: Before you file
+      description: |
+        [CONTRIBUTING.md](https://github.com/Loment-Lang/loment/blob/main/CONTRIBUTING.md) is the
+        short document this form assumes you have read: what is closed under `lom/`, what the gate
+        is, and the house rules for a change.
+      options:
+        - label: I have read CONTRIBUTING.md.
+          required: true
   - type: textarea
     id: environment
     attributes:

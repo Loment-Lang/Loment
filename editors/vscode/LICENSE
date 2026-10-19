@@ -1,17 +1,6 @@
-The Loment-Open License
-
-Version 1.0 — 2026-10-09
+MIT License
 
 Copyright (c) 2026 FujoOS Project
-
-Loment-Open is the MIT License with two additions, Sections 2 and 3. Sections 1
-and 4 are the MIT text, kept verbatim. A work distributed under these terms is
-governed by the Loment-Open License; it is not MIT-licensed and must not be
-presented as such.
-
---------------------------------------------------------------------------------
-1. Grant  (MIT, verbatim)
---------------------------------------------------------------------------------
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -22,43 +11,6 @@ furnished to do so, subject to the following conditions:
 
 The above copyright notice and this permission notice shall be included in all
 copies or substantial portions of the Software.
-
---------------------------------------------------------------------------------
-2. Base attribution  (additional condition)
---------------------------------------------------------------------------------
-
-Source code that is derived from the Software, and that you distribute, must
-carry a readable statement of where it came from — naming Loment and the FujoOS
-Project. Put it somewhere a reader will find it, such as a NOTICE file or the
-README:
-
-    Based on Loment (FujoOS Project) — https://github.com/Loment-Lang/loment
-
-Keep that statement in every source distribution of the derived work.
-Attribution is the whole of this condition. It does not oblige you to use the
-Loment name, the Loment file extensions, or the Loment syntax anywhere else in
-the derived work.
-
---------------------------------------------------------------------------------
-3. Scope: suffixes, syntax, and the name  (additional condition)
---------------------------------------------------------------------------------
-
-This section makes the edges of the grant in Section 1 explicit.
-
-  * File extensions and syntax are free. Anything you build from the Software
-    may use any file extension and any syntax. In particular, you may build a
-    new language from the Software without using the `.lomt` or `.lom`
-    extensions, or any other Loment-specific form.
-
-  * No trademark is claimed or granted. This license reserves no trademark. The
-    one thing it does constrain is the name: a work derived from the Software
-    must not be presented as "Loment", or as an official, sponsored, or
-    endorsed Loment. Naming a derived work anything else is permitted. This is
-    separate from, and does not widen, the attribution in Section 2.
-
---------------------------------------------------------------------------------
-4. Disclaimer  (MIT, verbatim)
---------------------------------------------------------------------------------
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,

@@ -157,6 +157,9 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  # LVM 的紧凑形（`docs/250`）：文本/紧凑形逐字节同（含剖面）、体积变小、
                  # 加载更快、错形点名拒。
                  "lvm_compact_test",
+                 # LVM 的编译产物缓存（`docs/265`）：冷/热两趟逐字节同（stdout/rc/剖面）、
+                 # 旧缓存点名拒、热的那一趟 0 次解码、形/魔数/截断三种坏头都拒。
+                 "lvm_cache_test",
                  # `lompi/store/**` 的孪生（#679 / #719）：每一份当根单元，两边的接受集
                  # 相同、IR 逐字节相同；已知缺口是一张只许变短的棘轮。
                  "loment_store_twin_test",
@@ -368,6 +371,7 @@ SHARD_COST = {
     "lomentc_test": 10.5,
     "lompi_sync": 0.0,
     "lompicheck_test": 1.1,
+    "lvm_cache_test": 1.0,
     "lvm_compact_test": 51.3,
     "lvm_perf_test": 25.0,
     "lvm_profile_test": 22.9,

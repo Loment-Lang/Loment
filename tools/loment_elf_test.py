@@ -3437,6 +3437,203 @@ def test_two_shared_objects_link_in_order():
     print("      两个 .so 同时链上：DT_NEEDED 按 --link 顺序，两个库的函数都跑通 (rc=0)")
 
 
+@test
+def test_ifunc_exports_from_libc_are_importable():
+    """**IFUNC 导出能导入**（`#590`）：glibc 把 `strlen`/`strcmp` 一族发成
+    `STT_GNU_IFUNC`（实测 libc.so.6 里 65 个），loader 的 `JUMP_SLOT` 解析会先调
+    resolver 再绑 —— 对导入方与普通函数没有差别。原先的导出过滤器只收
+    FUNC/OBJECT，这些名字在导出表建成之前就被丢掉了，链接期报"库里没有这个名字"，
+    而名字明明在 `.dynsym` 里。
+
+    判据用真 `libc.so.6`，并且只用**不收编**的两个名字：收编面只有
+    memcpy/memset/memcmp/malloc/free/__stack_chk_fail，`strlen`/`strcmp` 只能从
+    `.so` 的导出表落地。链接成功、导入表里有它们、跑出 0 —— 三件事一起量。
+    """
+    if not _wsl():
+        print("      SKIP: 需要 WSL（或 Linux）跑 ELF")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        libc = ffitest._system_so(td / "libc.so.6", ffitest._LIB6_CANDIDATES)
+        if libc is None:
+            print("      SKIP: 这台上没有 libc.so.6")
+            return
+        src = ('module ifunc\n'
+               'choose runtime\n\n'
+               'extern fn strlen(s: ptr) -> u64;\n'
+               'extern fn strcmp(a: ptr, b: ptr) -> i32;\n\n'
+               'fn _start() {\n'
+               '    let a: ptr = alloc(8);\n'
+               '    let b: ptr = alloc(8);\n'
+               '    store8(a, 0, 104);\n'
+               '    store8(a, 1, 105);\n'
+               '    store8(a, 2, 0);\n'
+               '    store8(b, 0, 104);\n'
+               '    store8(b, 1, 105);\n'
+               '    store8(b, 2, 0);\n'
+               '    if strlen(a) != 2 { syscall4(60, 11, 0, 0); }\n'
+               '    if strcmp(a, b) != 0 { syscall4(60, 12, 0, 0); }\n'
+               '}\n')
+        blob, info = _build_src(td, "ifunc", src, (libc,))
+        assert set(info["imports"]) >= {"strlen", "strcmp"}, (
+            f"IFUNC 导出没有变成导入：imports={info['imports']}")
+        assert _dt_needed(blob) == ["libc.so.6"], _dt_needed(blob)
+        exe = td / "ifunc.elf"
+        exe.write_bytes(blob)
+        rc, _out = _run_bin(exe, "ifunc", td)
+        assert rc == 0, f"IFUNC 导入跑出的退出码是 {rc}（strlen/strcmp 绑错了）"
+    print("      libc 的 IFUNC 导出（strlen/strcmp）变成导入并跑通 (rc=0)")
+
+
+@test
+def test_a_notype_function_export_can_be_imported():
+    """**`STT_NOTYPE` 的函数导出能导入**（`#591`）：没有 `.type`/`.size` 指令的汇编
+    库（`gcc -shared` 出来的正常形状）把函数发成 NOTYPE。它是完全可调用的导出 ——
+    loader 对 `R_X86_64_JUMP_SLOT` 不看符号类型，`dlsym` 也照样解析。原先的白名单只有
+    OBJECT/FUNC 两种，于是手工汇编库一个都导不进来，诊断还说"库里没有这个名字"。
+
+    夹具是**真 `gcc -shared`** 从一份没有 `.type` 的 `.s` 生成的；先用 `readelf` 确认
+    它确实是 `NOTYPE GLOBAL`，再链接、跑出 7。
+    """
+    if not _wsl():
+        print("      SKIP: 需要 WSL（或 Linux）跑 ELF")
+        return
+    if _sh("command -v gcc", 60).returncode != 0:
+        print("      SKIP: 没有 gcc（夹具要真 `gcc -shared` 产物）")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        asm = ('.text\n'
+               '.globl asm_func\n'
+               'asm_func:\n'
+               '    mov $7, %eax\n'
+               '    ret\n')
+        (td / "notype.s").write_text(asm, encoding="utf-8", newline="\n")
+        so = td / "libx_notype.so"
+        r = _sh(f"gcc -shared -fPIC -Wl,-soname,libx_notype.so "
+                f"-o {_wsl_path(so)} {_wsl_path(td / 'notype.s')}", 180, text=True)
+        assert r.returncode == 0, f"gcc 造夹具失败: {r.stderr[-300:]}"
+        syms = _sh(f"readelf -sW {_wsl_path(so)}", 120, text=True).stdout
+        line = next((ln for ln in syms.splitlines()
+                     if ln.rstrip().endswith("asm_func")), "")
+        assert "NOTYPE" in line and "GLOBAL" in line, (
+            f"夹具形状不对（要 NOTYPE GLOBAL）：{line!r}")
+        obj = lomelf.load_foreign(so)
+        assert obj.exports.get("asm_func") == ("func", True), obj.exports
+        src = ('module notype\n'
+               'choose runtime\n\n'
+               'extern fn asm_func() -> i32;\n\n'
+               'fn _start() {\n'
+               '    syscall4(60, asm_func() as u64, 0, 0);\n'
+               '}\n')
+        blob, info = _build_src(td, "notype", src, (so,))
+        assert "asm_func" in info["imports"], info["imports"]
+        assert _dt_needed(blob) == ["libx_notype.so"], _dt_needed(blob)
+        exe = td / "notype.elf"
+        exe.write_bytes(blob)
+        binn = f"{_T}lomelf_notype.bin"
+        script = (f"rm -f {binn} && cp {_wsl_path(exe)} {binn} && chmod +x {binn} && "
+                  f"LD_LIBRARY_PATH={_wsl_path(td)} timeout 20 {binn}; echo -n $?")
+        rr = _sh(script, 140)
+        rc = int(rr.stdout.decode().strip())
+        assert rc == 7, f"asm_func 返回 7，但产物退出码是 {rc}"
+    print("      真 gcc 造的 NOTYPE 汇编导出变成导入并跑出 7")
+
+
+@test
+def test_a_shared_object_without_soname_is_recorded_by_the_path_given():
+    """**没有 SONAME 的 `.so` 记命令行给的那个路径**（`#595`）：GNU ld 就是这个行为。
+
+    原先回退到 `path.name`，于是 `--link /tmp/mylibs/libadd.so` 的产物把
+    `DT_NEEDED` 写成 `libadd.so` —— 而那个名字不在 loader 的任何搜索路径里。链接期
+    一声不响，运行期 `cannot open shared object file`。判据用真 `gcc -shared`（不带
+    `-Wl,-soname`）造夹具，先确认它真的没有 SONAME，再核产物里记的是完整路径。
+    """
+    if not _wsl():
+        print("      SKIP: 需要 WSL（或 Linux）跑 ELF")
+        return
+    if _sh("command -v gcc", 60).returncode != 0:
+        print("      SKIP: 没有 gcc（夹具要真 `gcc -shared` 产物）")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        (td / "mylibs").mkdir()
+        (td / "add.c").write_text("int add(int a, int b) { return a + b; }\n",
+                                  encoding="utf-8", newline="\n")
+        so = td / "mylibs" / "libadd.so"
+        r = _sh(f"gcc -shared -fPIC -o {_wsl_path(so)} {_wsl_path(td / 'add.c')}",
+                180, text=True)
+        assert r.returncode == 0, f"gcc 造夹具失败: {r.stderr[-300:]}"
+        dyn = _sh(f"readelf -dW {_wsl_path(so)}", 120, text=True).stdout
+        assert "SONAME" not in dyn, f"夹具带了 SONAME，测不到这条：{dyn[-300:]}"
+        obj = lomelf.load_foreign(so)
+        assert obj.soname == str(so), (
+            f"没有 SONAME 时记的是 {obj.soname!r}，应当记命令行给的路径 {str(so)!r}")
+        src = ('module soname\n'
+               'choose runtime\n\n'
+               'extern fn add(a: i32, b: i32) -> i32;\n\n'
+               'fn _start() {\n'
+               '    syscall4(60, add(3, 4) as u64, 0, 0);\n'
+               '}\n')
+        blob, info = _build_src(td, "soname", src, (so,))
+        assert info["shared"] == [str(so)], info["shared"]
+        assert _dt_needed(blob) == [str(so)], (
+            f"DT_NEEDED 是 {_dt_needed(blob)!r} —— 只记 basename 的产物运行期找不到库")
+        assert _dt_needed(blob) != [so.name], "DT_NEEDED 又退回成裸文件名了"
+    print("      没有 SONAME 的 `.so`：DT_NEEDED 是命令行给的完整路径，不是 basename")
+
+
+@test
+def test_the_conscript_surface_is_emitted_for_a_shared_object_only_link():
+    """**只链 `.so` 时也发收编面**（`#631`）：`docs/219` §8c 说未定义的名字只落在
+    "收编面"或"`.so` 导出表"两处。原先收编面的判据是 `if objects:` —— 只链 `.so`
+    时 `objects` 是空的，收编面从不发出，`memcpy` 只能去 `.so` 的导出表里找；而
+    glibc/zlib 那条路要么是 IFUNC、要么根本没有这个名字。
+
+    判据用真 `libz.so`：`memcpy` 必须由收编面落地（不进导入表），`compress` 仍然
+    从 `.so` 导入；两者都跑通。若收编面没发，这条在链接期就红（"没有导出 memcpy"）。
+    """
+    if not _wsl():
+        print("      SKIP: 需要 WSL（或 Linux）跑 ELF")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        so = ffitest._system_so(td / "libz.so.1", ffitest.LIBZ_SO_CANDIDATES)
+        if so is None:
+            print("      SKIP: 这台上没有 libz.so（要 zlib1g）")
+            return
+        src = ('module con\n'
+               'choose runtime\n\n'
+               'extern fn memcpy(d: ptr, s: ptr, n: u64) -> ptr;\n'
+               'extern fn compress(dst: ptr, dstlen: ptr, src: ptr, srclen: u64) -> i32;\n\n'
+               'fn _start() {\n'
+               '    let a: ptr = alloc(16);\n'
+               '    let b: ptr = alloc(16);\n'
+               '    store8(a, 0, 65);\n'
+               '    store8(a, 1, 66);\n'
+               '    store8(a, 2, 67);\n'
+               '    store8(a, 3, 68);\n'
+               '    memcpy(b, a, 4);\n'
+               '    if load8(b, 2) != 67 { syscall4(60, 11, 0, 0); }\n'
+               '    let out: ptr = alloc(64);\n'
+               '    let olen: ptr = alloc(8);\n'
+               '    store8(olen, 0, 64);\n'
+               '    store8(olen, 1, 0);\n'
+               '    store8(olen, 2, 0);\n'
+               '    store8(olen, 3, 0);\n'
+               '    if compress(out, olen, b, 4) != 0 { syscall4(60, 12, 0, 0); }\n'
+               '}\n')
+        blob, info = _build_src(td, "con", src, (so,))
+        assert "memcpy" not in info["imports"], (
+            f"memcpy 还在导入表里：{info['imports']} —— 收编面没有为 .so-only 链接发出")
+        assert "compress" in info["imports"], info["imports"]
+        exe = td / "con.elf"
+        exe.write_bytes(blob)
+        rc, _out = _run_bin(exe, "conscript", td)
+        assert rc == 0, f"收编面的 memcpy + libz 的 compress 跑出 {rc}（期望 0）"
+    print("      `.so`-only：memcpy 由收编面提供、compress 走导入，两者都跑通 (rc=0)")
+
+
 # ------------------------------------------------------------------ 自举链接器容量/镜像 (#597-#602, #621-#625)
 #
 # 这一组判据全部**手搭夹具**（不经 clang）：量的是"镜像链接器对同一份输入给出与参考
@@ -3837,6 +4034,31 @@ def test_an_archive_that_contributes_no_member_does_not_enable_tls_or_the_conscr
     _mirror_matches_reference("625", "define i32 @_start() {\nentry:\n  ret i32 0\n}\n",
                               [("625.a", ar)])
     print("      没人用的归档: 不装 TLS、不发收编面，与参考逐字节相同")
+
+
+@test
+def test_a_gnu_ld_script_is_named_as_one_and_points_at_the_real_file():
+    """`#637`：Debian 的 `libz.so` 是 ASCII 的 GNU ld 脚本，不是 ELF。
+
+    原先它掉进 `ForeignObject` 的兜底，报"不是 ELF64 小端目标文件" —— 把共享对象
+    叫成"目标文件"，也没说该链哪个。现在点名"链接脚本"并给出它指向的 `.so`。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        script = Path(t) / "libz.so"
+        script.write_text(
+            "/* GNU ld script\n   Use the shared library.  */\n"
+            "GROUP ( /lib/x86_64-linux-gnu/libz.so.1  AS_NEEDED ( /lib64/ld-linux-x86-64.so.2 ) )\n",
+            encoding="utf-8", newline="\n")
+        try:
+            lomelf.load_foreign(script)
+        except lomelf.Unsupported as e:
+            msg = str(e)
+            assert "链接脚本" in msg, msg
+            assert "/lib/x86_64-linux-gnu/libz.so.1" in msg, msg
+            assert "目标文件" not in msg, msg
+        else:
+            raise AssertionError("GNU ld 脚本被当成 ELF 收下了")
+    print("      GNU ld 脚本: 点名『链接脚本』并给出它指向的 libz.so.1")
 
 
 def main() -> int:

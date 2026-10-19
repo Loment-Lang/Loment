@@ -972,13 +972,13 @@ def test_vscode_publish_ready():
     assert str(icon) in files, f"{icon} 不在 package.json 的 files 里"
     assert str(icon) in vscode_ext.INCLUDE_FILES, \
         f"{icon} 不在 vscode_ext.INCLUDE_FILES 里（本机侧载那份会缺它）"
-    # ③ LICENSE：扩展目录里那份 == 仓根那份
-    lic_ext, lic_root = EXT / "LICENSE", ROOT / "LICENSE"
+    # ③ LICENSE：扩展目录里那份 == 仓根的 LICENSE-MIT
+    lic_ext, lic_root = EXT / "LICENSE", ROOT / "LICENSE-MIT"
     assert lic_ext.is_file(), "扩展目录里没有 LICENSE（vsce 只找这一份）"
-    assert lic_root.is_file(), "仓根没有 LICENSE？"
+    assert lic_root.is_file(), "仓根没有 LICENSE-MIT？"
     assert lic_ext.read_bytes().replace(b"\r\n", b"\n") == \
         lic_root.read_bytes().replace(b"\r\n", b"\n"), \
-        "editors/vscode/LICENSE 与仓根 LICENSE 不一致（两份许可正文已经开始漂了）"
+        "editors/vscode/LICENSE 与仓根 LICENSE-MIT 不一致（两份许可正文已经开始漂了）"
     assert "LICENSE" in files and "LICENSE" in vscode_ext.INCLUDE_FILES, \
         "LICENSE 没进打包清单"
     # ④ node_modules 两份清单都要有

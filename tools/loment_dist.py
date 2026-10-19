@@ -112,7 +112,7 @@ ICON = "editors/loment.ico"
 #: 安装界面正中那个**圆角方形标**。不新画一张图：`editors/loment.ico` 的 7 帧全是 PNG，
 #: 取最大的那帧直接当图片用 —— 于是 logo 只有**一个真源**，安装器也不必自带解码器。
 LOGO_NAME = "loment-logo.png"
-LICENSE = "LICENSE"
+LICENSES = ("LICENSE-MIT", "LICENSE-APACHE")
 # 随包的 agent skill —— 装完 Loment, AI agent 读它就会写 Loment。
 # **自足**: 内建函数表/语法/错误码/包内命令都在里面, 不引用仓库路径。原样拷进包,
 # 不做 @VERSION@ 替换 —— 这样"包里的那份 == 仓库里的那份"是可判据的。
@@ -1638,7 +1638,7 @@ if (Test-Path -LiteralPath $libSrc) {
     New-Item -ItemType Directory -Path $libDst -Force | Out-Null
     Copy-VerifiedTree $libSrc $libDst $verified 'share/loment/lib'
 }
-foreach ($rel in @('README.md', 'LICENSE')) {
+foreach ($rel in @('README.md', 'LICENSE-MIT', 'LICENSE-APACHE')) {
     if ($verified -notcontains $rel) { throw "unlisted file in package: $rel -- refusing to install" }
     $f = Join-Path $Payload $rel
     Copy-Item -LiteralPath $f -Destination (Join-Path $Prefix $rel) -Force
@@ -2895,7 +2895,8 @@ def payload(kind: str, bins: dict[str, tuple[bytes, bytes]]) -> dict[str, tuple[
     for rel, body in _store_files().items():
         files[f"share/lompi/store/{rel}"] = (body, 0o644)
     files["README.md"] = (_subst(README_MD).encode(), 0o644)
-    files["LICENSE"] = (_read(LICENSE), 0o644)
+    for lic in LICENSES:
+        files[lic] = (_read(lic), 0o644)
     if kind == "linux":
         files["install.sh"] = (_subst(INSTALL_SH).encode("ascii"), 0o755)
     else:
@@ -3206,7 +3207,8 @@ def _fresh_sources(kind: str) -> dict[str, bytes]:
         "share/loment/version": version_text().encode(),
         f"share/loment/examples/{Path(EXAMPLE).name}": _read(EXAMPLE),
         "README.md": _subst(README_MD).encode(),
-        "LICENSE": _read(LICENSE),
+        "LICENSE-MIT": _read("LICENSE-MIT"),
+        "LICENSE-APACHE": _read("LICENSE-APACHE"),
     }
     if kind == "linux":
         out["bin/loment"] = _subst(LAUNCHER_SH, "release").encode("ascii")

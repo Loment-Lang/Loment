@@ -84,6 +84,7 @@ loment_megaproject_test 8
 loment_state_test 8
 lvm_profile_test 4
 lvm_t2_test 7
+lvm_cache_test 6
 lvm_compact_test 11
 loment_store_twin_test 2
 lvm_t3_test 3

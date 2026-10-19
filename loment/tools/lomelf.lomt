@@ -4346,7 +4346,7 @@ fn so_resolve(tab: ptr, t: ptr, noff: u32, nlen: u32) -> u32 {
             if bind == 1 || bind == 2 {
                 // GLOBAL/WEAK 的 OBJECT(1) / FUNC(2) / IFUNC(10) —— IFUNC 对 loader
                 // 与普通函数没差别（glibc 的 `memcpy` / `strlen` 就是它）。
-                if typ == 1 || typ == 2 || typ == 10 {
+                if typ == 0 || typ == 1 || typ == 2 || typ == 10 {   // NOTYPE 也算函数（#591）
                     let vis: u32 = other % 4;          // STV_DEFAULT(0)/PROTECTED(3) 可绑定
                     if vis != 1 && vis != 2 {
                         let npos: u32 = stro + stn;
@@ -4500,20 +4500,18 @@ fn so_load(tab: ptr, t: ptr, mem: ptr, n: u32, pname: ptr) -> u32 {
         wstr(2, "\n");
         return die(1);
     }
-    // SONAME：没有就用**文件名**（loader 按那个找）。
+    // SONAME：没有就记**命令行给的路径**（`#595`，与 GNU ld 同一条）。只记 basename
+    // 的话，`--link /abs/dir/libfoo.so` 的产物在 loader 眼里是"去系统目录找 libfoo.so"：
+    // 构建成功、一跑就 `cannot open shared object`。带 `/` 的 DT_NEEDED 被当成路径直接打开。
     let son_o: u32 = cell(tab, C_EXTN);
     if sono == NO {
-        let bn: u32 = 0;
         let q: u32 = 0;
         while load8(pname, q) != 0 {
-            if load8(pname, q) == 47 {
-                bn = q + 1;
-            }
             q = q + 1;
         }
-        setcell(tab, C_EXTN, put_bytes(t, son_o, pname, bn, q - bn, IN_CAP));
+        setcell(tab, C_EXTN, put_bytes(t, son_o, pname, 0, q, IN_CAP));
         setcell(tab, C_SONOFF, son_o);
-        setcell(tab, C_SONLEN, q - bn);
+        setcell(tab, C_SONLEN, q);
     } else {
         // `sto + sono` 要么回绕、要么越界 —— 两种都不能拿去当偏移（`#594`）。
         let son_at: u32 = sto + sono;
@@ -4614,7 +4612,7 @@ fn so_load(tab: ptr, t: ptr, mem: ptr, n: u32, pname: ptr) -> u32 {
             let bind: u32 = info / 16;
             let typ: u32 = info % 16;
             if bind == 1 || bind == 2 {
-                if typ == 1 || typ == 2 || typ == 10 {
+                if typ == 0 || typ == 1 || typ == 2 || typ == 10 {   // NOTYPE 也算函数（#591）
                     let npos: u32 = dstr + noff;
                     if npos < dstr || npos >= dstr + dstrsz {
                         return so_bad(pname, "导出名偏移越出 .dynstr");
@@ -6200,7 +6198,9 @@ fn run(mem: ptr) -> u32 {
     // `tools/lomelf.py` 的 `compile_ll` 同一处判断、同一段字节（`loment_elf_test` 的自举
     // 镜像那格逐字节钉）。**顺序与那边一致**：我们的代码 -> 收编面 -> 外部对象。
     let tlen: u32 = tlen0;
-    if nobj != 0 {
+    // **只链 `.so` 时也发**（`#631`）：`docs/219` §8c 说这些名字有两个落点 —— 收编面，
+    // 或者链上的 `.so` 的导出表。只发在"有 `.o`"那一支时，第二条落点就没了。
+    if nobj != 0 || nshared != 0 {
         tlen = emit_conscript(tab, txt, tlen, inb);
     }
     // ③ **摆直接对象**（按 `--link` 顺序），再 ④ **摆归档挑中的成员**（按归档顺序、

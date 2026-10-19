@@ -5333,6 +5333,10 @@ def _pe_emit(funcs, globals_, slots) -> tuple[bytes, int]:
     em = PeEmitter(globals_)
     for g in globals_:
         em.asm.labels[g.name] = g.addr
+    # **`_GLOBAL_OFFSET_TABLE_` 是我们的符号**（`#617`）：`-fPIC` / 弱引用的对象会把它报成
+    # `GLOBAL UND`，但它由**链接器**给（就是静态 GOT 的基址）。不定义它，端口门会把它
+    # 当成"通向世界的端口"，一个自闭合的 PIC 对象因此被拒。
+    em.asm.labels.setdefault("_GLOBAL_OFFSET_TABLE_", DATA_VADDR + got_off)
     em.emit_entry_stub("_start")
     emit_win_shim(em, slots)
     for f in funcs:
@@ -5933,7 +5937,11 @@ class SharedObject:
                     f"rebuild it with -Wl,-soname,libfoo.so.1")
             self.soname = soname
         else:
-            self.soname = path.name
+            # **没有 SONAME 时记命令行给的路径**（`#595`），与 GNU ld 同一条：
+            # 只记 basename 的话，`--link /abs/dir/libfoo.so` 的产物在 loader 眼里是
+            # "去系统目录找 libfoo.so" —— 构建成功、一跑就 `cannot open shared object`。
+            # 带 `/` 的 DT_NEEDED 被 loader 当作**路径**直接打开，这正是我们要的。
+            self.soname = path.as_posix()
         if e_shnum == 0:
             # 条数能从 `DT_HASH` 拿，但**版本表**在节头里；被 strip 掉的 `.so` 这一版还不读。
             raise Unsupported(
@@ -6033,7 +6041,10 @@ class SharedObject:
             # GLOBAL/WEAK 的 OBJECT(1) / FUNC(2) / IFUNC(10)。**IFUNC 必须算函数导出**：
             # glibc 的 `strlen` / `memcpy` 就是 IFUNC（`STT_GNU_IFUNC`），loader 的
             # `JUMP_SLOT` 解析会调它的 resolver 拿到实现 —— 对它来说与普通函数没差别。
-            if bind not in (1, 2) or typ not in (1, 2, 10):
+            # **`STT_NOTYPE`(0) 也算函数导出**（`#591`）：手写汇编库（`.globl` +
+            # 标签，没有 `.type`）导出的就是它，`dlsym` 照样能拿到。排除它就等于
+            # 判定"库里没有这个名字"，而符号明明在 `.dynsym` 里。
+            if bind not in (1, 2) or typ not in (0, 1, 2, 10):
                 continue
             end = dstrtab.find(b"\x00", st_name)
             if st_name >= len(dstrtab) or end < 0:
@@ -6077,7 +6088,7 @@ class SharedObject:
             hidden = bool(versym[k] & 0x8000) if k < len(versym) else False
             # 同名可能有多条（不同版本）：**默认版本优先**，非默认的不覆盖它。
             if nm not in self.exports or (self.exports[nm][1] is False and not hidden):
-                self.exports[nm] = ("func" if typ in (2, 10) else "object", not hidden)
+                self.exports[nm] = ("func" if typ in (0, 2, 10) else "object", not hidden)
             if k < len(versym) and (versym[k] & 0x7FFF) > 1:
                 self.versions.setdefault(nm, vnames.get(versym[k] & 0x7FFF, "?"))
         if not self.exports:
@@ -6128,7 +6139,33 @@ def load_foreign(path: Path):
         return Archive(path)
     if raw[:4] == b"\x7fELF" and len(raw) >= 20 and struct.unpack_from("<H", raw, 16)[0] == 3:
         return SharedObject(path)                  # `.so`：V2 的那条腿（docs/173 阶段 3）
+    # **GNU ld 的链接脚本不是目标文件**（`#637`）：Debian 系的 `/usr/lib/.../libz.so`
+    # 是一段 `GROUP ( /lib/x86_64-linux-gnu/libz.so.1 ... )` 文本。用户按 `-lz` 的直觉
+    # 指过去，原先拿到的是"不是 ELF64 小端目标文件"—— 把共享库叫成目标文件，而且不告诉他
+    # 真正该指哪一个。这里认出脚本，把它点名的第一个路径说出来。
+    script = _ld_script_target(raw)
+    if script is not None:
+        raise Unsupported(
+            f"{path.name}: 这是一个 GNU ld 链接脚本，不是共享对象 —— 它指向 {script}；"
+            f"把那个文件给 --link（`--link {script}`）")
     return ForeignObject(path)
+
+
+def _ld_script_target(raw: bytes) -> str | None:
+    """`GROUP (...)` / `INPUT (...)` 脚本点名的第一个路径；不是脚本就返回 None。"""
+    if b"\x00" in raw[:4096]:            # 脚本是纯文本；有 NUL 就别当脚本
+        return None
+    text = raw[:8192].decode("ascii", "replace")
+    for keyword in ("GROUP", "INPUT"):
+        i = text.find(keyword + " (")
+        if i < 0:
+            continue
+        rest = text[i + len(keyword) + 2:]
+        for tok in rest.replace("(", " ").replace(")", " ").split():
+            if tok.startswith("-"):
+                continue
+            return tok
+    return None
 
 
 #: System V AMD64 整数实参寄存器 (我们**自己的**约定是实参走栈, 这一套只给 extern 调用点)。
@@ -6218,6 +6255,10 @@ def compile_ll(text: str, objects: list | None = None,
     got_names.sort()
     got_off = align_up(len(data), 8)
     got_addr = {nm: DATA_VADDR + got_off + 8 * k for k, nm in enumerate(got_names)}
+    # **`_GLOBAL_OFFSET_TABLE_` 是我们的符号**（`#617`）：`-fPIC`/弱引用的对象会把它报成
+    # `GLOBAL UND`，但它由**链接器**给（就是静态 GOT 的基址）。不定义它，端口门会把它
+    # 当成"通向世界的端口"，一个自闭合的 PIC 对象因此被拒。
+
     if got_names:
         data += bytes(8 * len(got_names))
     # **TLS 块**（`docs/219` S2）：`-fstack-protector` 编出来的库（发行版的 zlib 就是）
@@ -6330,7 +6371,10 @@ def compile_ll(text: str, objects: list | None = None,
     # 于是它们**不再是未定义符号** —— 从表上划掉。粒度是"有没有外部对象"，不是
     # "有没有人要它"：精确到后者要链接器先算出需求集，自举侧 `lomelf.lomt` 一次只驻留
     # 一个对象，那一格留到下一轮（`docs/219` §8b）。**测量不受影响** —— 那始终是尺子的活。
-    if objects:
+    # **只链 `.so` 时也发**（`#631`）：`docs/219` §8c 说这些名字有两个落点 ——
+    # 收编面，或者链上的 `.so` 的导出表。只发在"有 `.o`"那一支时，第二条落点就没了：
+    # 一个不导出 `memcpy` 的库会让用户拿到"没有导出 memcpy"，而文档说收编面会兜住。
+    if objects or shared:
         em.emit_conscript({f.name for f in funcs})
     # 外部目标文件 (docs/173 阶段 1/2): 三步, **顺序不能换** ——
     #   ① **摆位置**: 每个对象的 `.text` 接在我们自己的代码之后 (16 对齐), 记下基址;
@@ -6482,15 +6526,25 @@ def compile_ll(text: str, objects: list | None = None,
             return struct.pack("<Q", val & 0xFFFFFFFFFFFFFFFF)
         return struct.pack("<I", val & 0xFFFFFFFF)     # REL_32 / REL_32S
 
-    def zero_fixup(ty: int) -> bytes:
-        """弱未定义引用解析不到时的值：0（`#617`）。"""
+    def weak_value(ty: int, nm: str, add: int, here: int) -> bytes:
+        """弱未定义引用解析不到时的值（`#617`）：**S = 0**。
+
+        * `PC32` / `PLT32` / `PC64` 存的是 `S + A - P`，S=0 ⇒ `A - P`（不是 0！）。
+          写 0 会让 `call` 落到下一条指令上 —— 分支一旦被走到就是死循环。
+        * **GOTPCREL 族**存的是"GOT 槽相对 PC"，而**槽的内容**才是符号地址；槽由
+          `got_addr` 建好并保持 0，所以这里照常写 `GOT + A - P`。第一版写成 0 位移，
+          于是 `mov rax, [rip+0]` 读到了指令后面的字节 —— 非 0 ⇒ `if (weak_fn)` 为真，
+          真的去 call 一个空地址（实测 SIGSEGV）。
+        """
+        if ty in (REL_GOTPCREL, REL_GOTPCRELX, REL_REX_GOTPCRELX):
+            return struct.pack("<i", got_addr[nm] + add - here)
         if ty in (REL_PC32, REL_PLT32):
-            return struct.pack("<i", 0)
+            return struct.pack("<i", add - here)
         if ty == REL_PC64:
-            return struct.pack("<q", 0)
+            return struct.pack("<q", add - here)
         if ty == REL_64:
-            return struct.pack("<Q", 0)
-        return struct.pack("<I", 0)
+            return struct.pack("<Q", add)
+        return struct.pack("<I", add & 0xFFFFFFFF)
 
     for i, obj in enumerate(objects):
         base = TEXT_VADDR + bases[i]
@@ -6501,7 +6555,7 @@ def compile_ll(text: str, objects: list | None = None,
             if target is None:
                 # **弱引用不是错误**：C 的语义是绑 0（`#617`）。强引用才是"没人定义"。
                 if nm in obj.weak_undefined:
-                    raw = zero_fixup(ty)
+                    raw = weak_value(ty, nm, add, here)
                     em.asm.buf[site:site + len(raw)] = raw
                     applied += 1
                     continue

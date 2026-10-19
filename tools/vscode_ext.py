@@ -31,7 +31,7 @@ INCLUDE_DIRS = ("src", "syntaxes", "node_modules")
 INCLUDE_FILES = ("package.json", "language-configuration.json",
                  "language-configuration-python.json", "README.md",
                  # 发布到商店那两件（vsce 要 `icon` 指到的文件在包里，
-                 # `LICENSE` 是 `Loment-Open` 的正文 —— vsce 只找**扩展目录**这一份）
+                 # `LICENSE` 是 MIT / Apache-2.0 双许可正文 —— vsce 只找**扩展目录**这一份）
                  "LICENSE", "loment-icon.png")
 SKIP_NAMES = (".map", ".ts", ".md.bak")
 

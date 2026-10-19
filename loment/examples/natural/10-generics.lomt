@@ -1,0 +1,57 @@
+// 由 tools/lomt_from.py 从 Potato 形式对象生成 —— 请勿手改。
+// 它是**带实现的单元** (`--impl`, docs/186): 带正文的函数是真 `pub fn`，
+// 没带正文的仍是 `extern fn` (实现在源语言那一侧, docs/173 §2)。
+// 源对象: unit=generics language=loment potato=v6
+
+module generics
+choose runtime
+
+// ---- 由正文翻译出来的实现 (docs/186: natural -> Loment, tools/nltrans.py)
+fn nl_write_num(fd: u64, v: i64) {
+    let buf: ptr = alloc(24);
+    let start: u32 = 0;
+    let x: u64 = 0;
+    let zero: i64 = 0;
+    if v < zero {
+        store8(buf, 0, 45 as u8);
+        start = 1;
+        x = (zero - v) as u64;
+    } else {
+        x = v as u64;
+    }
+    let n: u32 = start;
+    if x == 0 {
+        store8(buf, n, 48 as u8);
+        n = n + 1;
+    }
+    while x > 0 {
+        store8(buf, n, (48 + ((x % 10) as u32)) as u8);
+        x = x / 10;
+        n = n + 1;
+    }
+    let i: u32 = 0;
+    while i < (n - start) / 2 {
+        let lo: u8 = load8(buf, start + i) as u8;
+        let hi: u8 = load8(buf, n - 1 - i) as u8;
+        store8(buf, start + i, hi);
+        store8(buf, n - 1 - i, lo);
+        i = i + 1;
+    }
+    syscall4(1, fd, buf as u64, n as u64);
+}
+
+pub fn largest<T>(a: T, b: T) -> T {
+    if (a > b) {
+        return a;
+    }
+    return b;
+}
+
+pub fn _start() {
+    let eight: i64 = 8;
+    let three: i64 = 3;
+    let big: i64 = largest(eight, three);
+    nl_write_num(1, big as i64);
+    syscall4(1, 1, str_ptr("\n") as u64, str_len("\n") as u64);
+    syscall4(60 as u64, 0 as u64, 0 as u64, 0 as u64);
+}

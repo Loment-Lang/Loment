@@ -338,6 +338,8 @@ loment/examples/multilang/03-java/*.lomt
 loment/examples/multilang/README.md
 loment/examples/cproject/*.lomt
 loment/examples/cproject/README.md
+loment/examples/natural/*.nl
+loment/examples/natural/*.lomt
 loment/extblock/*.lomt
 loment/lex/*.lomt
 loment/ctrans/*.c

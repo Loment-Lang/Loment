@@ -16,6 +16,7 @@ lomentc_test 184
 potato_test 12
 loment_ct_test 2
 loment_comefor_test 12
+loment_choose_matrix_test 9
 loment_extblock_test 7
 loment_multilang_test 2
 loment_ctrans_test 20
@@ -35,7 +36,7 @@ loment_p8_test 33
 loment_p9_test 2
 loment_gc_surface_test 3
 loment_gc_why_test 4
-loment_seed_test 4
+loment_seed_test 5
 loment_fmt_test 8
 loment_doc_test 5
 loment_channel_test 8

@@ -436,8 +436,18 @@ def test_foreign_file_gets_a_language_section():
     # 一屏不适用的"修法"把一份好 C 改坏，翻到底才看见那句"这个文件不是 Loment"。
     for label in ("错了什么:", "为什么错:", "怎么改:", "支持:", "不支持:"):
         assert label not in out, f"外源文件不该给 Loment 的说明卡（{label}）: {out[-400:]!r}"
+    # **它是整条报告的起点**（`#29`）：第一行就该是那句语言提示，而不是
+    # `error[E019]`/`error[E002]` —— 解析器在错的语言上看到的东西一条都不该先出来
+    # （"`_start` 明明在下一行声明着"那种误导最伤）。
+    body = [ln for ln in out.splitlines() if ln.strip()]
+    assert body, out
+    assert "不是 Loment" in body[0], (
+        f"第一条不是语言提示: {body[:3]!r}")
+    assert not any(ln.lstrip().startswith("error[") for ln in out.splitlines()), (
+        f"外源文件还在印 Loment 的错误头: {out[:300]!r}")
+    assert "E002" not in out, f"还在用 E002（undeclared name）说一份 C 源: {out[-300:]!r}"
     print("      外源文件: 认出语言 + 三条路 + 边界, 且语言以 --lang auto 为准；"
-          "提示顶在前面，Loment 的说明卡不再出现")
+          "它顶到最前，Loment 的错误头与说明卡都不再出现")
 
 
 @test
@@ -1158,6 +1168,34 @@ def test_json_suggestions_are_machine_applicable():
 
 
 @test
+def test_json_omits_an_empty_suggestions_array():
+    """没有候选时 `suggestions` **整个字段缺席**，不是 `[]`（`#51`）。
+
+    空数组在消费者眼里等于"这个错误没有可应用的修改"，而"这个码今天根本不产建议"
+    是另一件事 —— 两者混在一个形状里，编辑器就没法判断该不该找修法。字段缺席 = 后者；
+    字段在且非空 = 前者。与 `byte_start`/`byte_end` 只在指得准时出现同一条纪律。
+
+    夹具是 `p.zz`：E015（结构体没有这个字段）。E002 那条路（有候选）由上面那条判据
+    钉着 —— 所以这里的断言是"**同样的出口**在没东西可说时不写一个空壳"。
+    """
+    src = ("module m\n\n"
+           "struct P { a: u32, b: u32 }\n\n"
+           "fn _start() {\n"
+           "    let p: P = P { a: 1, b: 2 };\n"
+           "    let v: u32 = p.zz;\n"
+           "    syscall4(60, 0, 0, 0);\n"
+           "}\n")
+    _, d = _check(src)
+    rc, out = _run_in(d.parent, d, "--json")
+    assert rc == 1, (rc, out[:200])
+    obj = json.loads([ln for ln in out.splitlines() if ln.strip()][0])
+    assert obj["code"] == "E015", obj
+    assert "suggestions" not in obj, (
+        f"E015 没有候选，却写了一个空 suggestions: {obj.get('suggestions')!r}")
+    print("      --json: 没有候选的码不写空 suggestions（字段缺席）")
+
+
+@test
 def test_the_tail_points_at_loment_explain():
     """结尾一行 `more: loment explain E002` —— 抄 rustc 的 `try 'rustc --explain E0318'`。
 
@@ -1288,6 +1326,39 @@ def _launcher_pkg(with_err: bool) -> Path:
 _LAUNCHER_ENV = dict(os.environ)
 _LAUNCHER_ENV["PATH"] = (f"{_shp(Path('/usr/bin'))}:{_shp(Path('/bin'))}:"
                          f"{_LAUNCHER_ENV.get('PATH', '')}")
+
+
+#: 成功的那条路上用的桩驱动：吐一段不会触发 hosted 标记的 IR，退 0。
+_LAUNCHER_OK_DRIVER = ("#!/bin/sh\n"
+                       "printf '%s\\n' 'define i32 @_start() { ret i32 0 }'\n"
+                       "exit 0\n")
+
+
+def _launcher_build_pkg() -> tuple[Path, Path]:
+    """摆一个**能走到链接器**的桩包：驱动成功、`loment-lomelf` 把自己的 argv 写下来。
+
+    `_launcher_pkg` 的桩驱动故意失败（测渲染/诊断那几条）。`--link` 的参数形状要在
+    链接器那一侧看 —— 所以这里换一个**成功**的驱动，外加一个记录 argv 的桩链接器。
+    """
+    import loment_dist  # noqa: E402
+
+    t = Path(tempfile.mkdtemp(prefix="lomenterr-launcher-build-"))
+    pf = t / "pf"
+    (pf / "bin").mkdir(parents=True)
+    (pf / "share" / "loment").mkdir(parents=True)
+    (pf / "share" / "loment" / "version").write_bytes(b"stub\n")
+    (pf / "bin" / "loment-driver").write_text(_LAUNCHER_OK_DRIVER, encoding="utf-8",
+                                              newline="\n")
+    log = pf / "lomelf-argv.txt"
+    (pf / "bin" / "loment-lomelf").write_text(
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > '" + _shp(log) + "'\nexit 0\n",
+        encoding="utf-8", newline="\n")
+    (pf / "bin" / "loment").write_text(
+        loment_dist._subst(loment_dist.LAUNCHER_SH), encoding="utf-8", newline="\n")
+    for p in (pf / "bin").iterdir():
+        p.chmod(0o755)
+    (pf / "src.lomt").write_text("module m\n", encoding="utf-8", newline="\n")
+    return pf, log
 
 
 @test
@@ -1542,6 +1613,64 @@ def test_launcher_takes_exactly_one_input_file():
 
     print("      启动器: 开关在文件名前也能到驱动; 第二个文件被拒(退 2, 驱动没起), "
           "且拒绝里说的是用户敲的那个命令名")
+
+
+@test
+def test_launcher_refuses_o_on_run():
+    """`loment run F -o X` 必须**退 2 并说清**，而不是退 0、什么也不写（`#636`）。
+
+    原先 `out` 在 run 那条路被临时路径无条件覆盖，`-o` 静默消失 —— "接受了却丢掉"
+    正是启动器别处反复挡的那一类。判据同时钉住**驱动没有被起**：拒绝了却还编一遍，
+    是既做了又不承认。
+    """
+    bash = shutil.which("bash")
+    if not bash:
+        print("        (跳过: 没有 bash, 跑不了 POSIX 启动器)")
+        return
+    pf = _launcher_pkg(False)
+    out = pf / "artifact"
+    r = subprocess.run(
+        [bash, _shp(pf / "bin" / "loment"), "run", _shp(pf / "src.lomt"),
+         "-o", _shp(out)],
+        cwd=str(pf), env=_LAUNCHER_ENV, capture_output=True, text=True,
+        encoding="utf-8", errors="replace", shell=False, timeout=60)
+    blob = r.stdout + r.stderr
+    assert r.returncode == 2, f"`run -o` 该退 2, 实得 {r.returncode}: {blob!r}"
+    assert "-o is for build; run produces no artifact" in blob, blob
+    assert "PLAIN-DRIVER-OUTPUT" not in blob, (
+        f"拒绝了却还是把驱动起了: {blob!r}")
+    assert not out.exists(), f"`run` 仍然写出了一个产物: {out}"
+    print("      启动器: run -o 被拒(退 2, 驱动没起, 无产物)")
+
+
+@test
+def test_launcher_keeps_a_link_path_with_spaces():
+    """`--link "/tmp/my libs/add.o"` 必须作为一个参数到达链接器（`#635`）。
+
+    原先 `--link` 的值被拼进一个字符串再**不加引号展开**，路径里的空格把它劈成
+    `/tmp/my` 与 `libs/add.o`（前者被当成打不开的文件）。判据看的是**桩链接器收到的
+    argv**：`--link` 的下一个元素必须逐字是那条带空格的路径。bash 侧用数组；
+    cmd 侧已按 `#632` 整条拒掉，不再有拼接路径。
+    """
+    bash = shutil.which("bash")
+    if not bash:
+        print("        (跳过: 没有 bash, 跑不了 POSIX 启动器)")
+        return
+    pf, log = _launcher_build_pkg()
+    link = "/tmp/my libs/add.o"
+    r = subprocess.run(
+        [bash, _shp(pf / "bin" / "loment"), "build", _shp(pf / "src.lomt"),
+         "--link", link, "-o", _shp(pf / "out")],
+        cwd=str(pf), env=_LAUNCHER_ENV, capture_output=True, text=True,
+        encoding="utf-8", errors="replace", shell=False, timeout=60)
+    assert r.returncode == 0, (r.returncode, r.stdout[-300:], r.stderr[-300:])
+    argv = [ln for ln in log.read_text(encoding="utf-8").splitlines() if ln]
+    assert "--link" in argv, f"链接器没收到 --link: {argv!r}"
+    i = argv.index("--link")
+    assert i + 1 < len(argv), f"--link 后面没有值: {argv!r}"
+    assert argv[i + 1] == link, (
+        f"带空格的 --link 值被劈开了: {argv[i:i + 3]!r}（应为 {link!r}）")
+    print("      启动器: 带空格的 --link 路径作为一个参数到达链接器")
 
 
 # ---------------------------------------------------------------- Loment 版（S1 第十一格）

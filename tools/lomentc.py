@@ -663,13 +663,18 @@ fn __loment_store8(p: *mut u8, off: u32, v: u8) {
 #[allow(static_mut_refs)]
 static mut __LOMENT_AUDIT: [u64; 16] = [0; 16];
 
-fn __loment_guard(cap: usize, idx: u64, lo: u64, hi: u64) {
+// **审计只在放行那一支里加**（`#162`）。原先 `__loment_guard` 先 `+= 1` 再判界,
+// 于是越界的那一次**已经写了审计**才 panic —— SECURITY.md 属性 1（traps, with no
+// other side effect）与属性 2（计数 == 放行次数）都不成立, 而且与 IR 后端分岔:
+// 那边的审计只在 `gok` 块里, trap 块是光秃秃的 `__loment_abort()/unreachable`。
+// 结构照 IR 镜像: 放行 -> `__loment_audit`, 越界 -> `__loment_trap`, 两个函数各管一事。
+fn __loment_audit(cap: usize) {
     unsafe {
         __LOMENT_AUDIT[cap] += 1;
     }
-    if idx < lo || idx > hi {
-        panic!("loment: capability {} violation at {}", cap, idx);
-    }
+}
+fn __loment_trap(cap: usize, idx: u64) {
+    panic!("loment: capability {} violation at {}", cap, idx);
 }
 '''
 
@@ -796,6 +801,9 @@ class Struct:
     tparams: list = field(default_factory=list)  # M7
     from_generic: str = ""                       # M45: 由哪个泛型声明单态化而来
     generic_args: list = field(default_factory=list)  # M45: 单态化实参
+    #: 与 `fields` 一一对应的**字段名 token 行号**（1-based）。`lomdoc` 取字段的 `///`
+    #: 要用它；空表 = 这份声明不是从源码读出来的（预置 / 合成），生成器就当没有注释。
+    field_lines: list = field(default_factory=list)
 
 
 @dataclass
@@ -876,6 +884,8 @@ class EnumDecl:
     generic_args: list = field(default_factory=list)  # M45
     from_prelude: bool = False   # M10 预置 Option/Result: 由 load() 注入**每个**模块,
                                  # 单元级唯一性检查必须排除它 (否则多模块单元必报假重名)
+    #: 与 `variants` 一一对应的**变体名 token 行号**（1-based），用法同 `Struct.field_lines`。
+    variant_lines: list = field(default_factory=list)
 
 
 @dataclass
@@ -2163,14 +2173,18 @@ class Parser:
         tparams = self.parse_tparams()
         self.expect("punct", "{")
         fields: list[tuple[str, str]] = []
+        field_lines: list[int] = []
         while not self.at("punct", "}"):
+            # 先把行号取下来再吃 token —— 字段的 `///` 是挂在**名字那一行**上的
+            # （`lomdoc` 取注释用；不用 token 之后回推）。
+            field_lines.append(self.peek().line)
             fn = self.ident("字段名")
             self.expect("punct", ":")
             fields.append((fn, self.type_name()))
             if not self.accept("punct", ","):
                 self.accept("punct", ";")
         self.expect("punct", "}")
-        return Struct(name, fields, kw.line, False, tparams)
+        return Struct(name, fields, kw.line, False, tparams, field_lines=field_lines)
 
     def parse_enum(self) -> EnumDecl:
         """L1 枚举: 变体可带单载荷 (v1)。"""
@@ -2180,7 +2194,9 @@ class Parser:
         self.expect("punct", "{")
         variants: list[str] = []
         payloads: dict[str, str] = {}
+        variant_lines: list[int] = []
         while not self.at("punct", "}"):
+            variant_lines.append(self.peek().line)
             v = self.ident("变体名")
             variants.append(v)
             if self.accept("punct", "("):
@@ -2189,7 +2205,8 @@ class Parser:
             if not self.accept("punct", ","):
                 self.accept("punct", ";")
         self.expect("punct", "}")
-        return EnumDecl(name, variants, kw.line, payloads, False, tparams)
+        return EnumDecl(name, variants, kw.line, payloads, False, tparams,
+                        variant_lines=variant_lines)
 
     def parse_trait(self) -> Trait:
         """trait Name { fn m(self, ...) -> R; ... }"""
@@ -3067,6 +3084,9 @@ def prepare(mod: Module, deps: list[Module] | None = None) -> tuple[Module, list
                     s = Struct(
                         name, [(fn, _replace_type(ft, mp)) for fn, ft in g.fields], g.line, True, [])
                     s.from_generic, s.generic_args = base, list(args)
+                    # 单态化出来的那份与原声明是**同一处源码**：字段行号跟着走，
+                    # 否则泛型结构体的字段注释会静默消失（`lomdoc` 只看行号）。
+                    s.field_lines = list(g.field_lines)
                     mod.structs.append(s)
                 else:
                     g = ge[base]
@@ -3074,6 +3094,7 @@ def prepare(mod: Module, deps: list[Module] | None = None) -> tuple[Module, list
                         name, list(g.variants), g.line,
                         {v: _replace_type(pt, mp) for v, pt in g.payloads.items()}, True, [])
                     e.from_generic, e.generic_args = base, list(args)
+                    e.variant_lines = list(g.variant_lines)
                     mod.enums.append(e)
         _rewrite_types(allmods, made)
         _fix_generic_literals(allmods, set(gs) | set(ge))
@@ -4178,7 +4199,7 @@ def resolve_deps(mod: Module, root: Path, base: Path, entry: Path | None = None,
     return order
 
 
-def load_unit(path: Path, root: Path) -> tuple[Module, list[Module]]:
+def load_unit(path: Path, root: Path, lspe_level: int = 3) -> tuple[Module, list[Module]]:
     """**读一个编译单元的唯一入口**：预扫 → 装载 → 解析依赖（`docs/182` §1.10）。
 
     **别处别再自己拼 `load()` + `resolve_deps()`。** 少了预扫那一趟，`addin` 就白写了 ——
@@ -4194,7 +4215,7 @@ def load_unit(path: Path, root: Path) -> tuple[Module, list[Module]]:
     from potato_from import FrontDoorRefused        # noqa: PLC0415
     try:
         sw, addin_paths = prescan_switches(path, root, path.parent, tool_dir, ext)
-        mod = load(path, sw=sw)
+        mod = load(path, sw=sw, lspe_level=lspe_level)
         deps = resolve_deps(mod, root, path.parent, entry=path, sw=sw,
                             addin_paths=addin_paths)
     except (FrontDoorRefused, NotRepresentable) as e:
@@ -4449,9 +4470,12 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
             # 但**核心模式**仍然只有根单元能定：它声明的是**整个程序**的取值，
             # addin 单元里写了就是**静默无效**，必须报出来（静默才是敌人）。
             if d.chooses:
-                dim0, word0, line0 = d.choose_lines[0]
-                errs.append(f"{line0}: `addin` 单元不许声明核心模式"
-                            f"（在 `{d.name}` 里，`{word0}`）—— "
+                dim0, word0, _line0 = d.choose_lines[0]
+                # **行号不写**（`#702`）：这是**依赖文件**里的一行，而诊断记录整体挂在
+                # **入口文件**上 —— 把它当入口的行号发出去，就是一个越过入口 EOF 的
+                # 位置（`#31` 那个形状）。指不出正确文件就别编一个：消息里点名文件。
+                errs.append(f"`addin` 单元不许声明核心模式"
+                            f"（在 {_unit_where(d)} / `{d.name}` 里，`{word0}`）—— "
                             f"{CORE_DIM_ZH[dim0]}是整个程序的，只有根单元能定")
             continue
         # **库要声明它的运行期需求**（`docs/217`）：上面那条"根必须满足依赖"只对
@@ -4460,9 +4484,10 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
         # 由项目决定"：这一条就是把它兑现。
         if d.rt_sites and d.chooses.get("runtime") != "runtime":
             _n0, _l0 = d.rt_sites[0]
+            # 同上（`#702`）：`_l0` 是**依赖**的行号，不是入口的。
             errs.append(
-                f"{_l0}: 依赖 `{d.name}` 用了会把运行期拖进产物的构造（{_n0}），"
-                f"却没有声明 —— 库该声明它的**需求**。在 `{d.name}` 里写一行 "
+                f"依赖 `{d.name}`（{_unit_where(d)}）用了会把运行期拖进产物的构造"
+                f"（{_n0}），却没有声明 —— 库该声明它的**需求**。在 `{d.name}` 里写一行 "
                 f"`choose runtime`")
         if d.chooses:
             # **依赖可以声明它的需求**（`docs/217`，用户 2026-10-09 裁决）。从前这里一律
@@ -4470,21 +4495,25 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
             # 当依赖又不许写（`loment/lib/proc.lomt` 实测就卡在这儿）。新规矩：依赖的声明
             # **是需求**，根单元的取值**必须满足它**（一致）；不一致才报，报的时候两边都点名。
             _seen: set[str] = set()
-            for dim0, word0, line0 in d.choose_lines:
+            for dim0, word0, _line0 in d.choose_lines:
                 if dim0 in _seen:
                     continue        # 同一维写两次是**依赖自己**的错，不在这儿重复报
                 _seen.add(dim0)
                 if _eff[dim0] != word0:
+                    # 位置见上面 `#702`：`_line0` 是依赖文件里的行号，不是入口的。
+                    # 措辞保住 `依赖 \`X\` 要求 ` 这个前缀 —— `loment_diag.RULES` 的
+                    # E022 按它锚（`test_every_message_the_compiler_can_print_has_a_code`）。
                     errs.append(
-                        f"{line0}: 依赖 `{d.name}` 要求 {CORE_DIM_ZH[dim0]}=`{word0}`，"
+                        f"依赖 `{d.name}` 要求 {CORE_DIM_ZH[dim0]}=`{word0}`，"
                         f"而根单元这一维是 `{_eff[dim0]}` —— 依赖的声明是**需求**，"
-                        f"根必须满足它。在根单元写一行 `choose {word0}`")
+                        f"根必须满足它（在 {_unit_where(d)} 里）。"
+                        f"在根单元写一行 `choose {word0}`")
         if d.addin_lines:
             _nm, _ln = d.addin_lines[0]
-            errs.append(f"{_ln}: 库不许 `addin`（在 `{d.name}` 里，`addin {_nm}`）"
-                        f" —— `addin` 是**根单元**专属的开关设定，装载器只走"
-                        f"「根 + 根 `addin` 到的单元」那张图，所以库里的 `addin` **不会生效**。"
-                        f"库要装代码请用 `use`")
+            errs.append(f"库不许 `addin`（在 {_unit_where(d)} / `{d.name}` 里，"
+                        f"`addin {_nm}`）—— `addin` 是**根单元**专属的开关设定，"
+                        f"装载器只走「根 + 根 `addin` 到的单元」那张图，所以库里的 "
+                        f"`addin` **不会生效**。库要装代码请用 `use`")
 
     # ---- 命令声明（`docs/223` 形态 B）：`pub fn loment_command() -> str { return "名字"; }`
     #
@@ -4492,7 +4521,7 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     # 三条判断都在这一处 —— 与 `choose` / `addin` 同一层，两个实现要对齐的只有这里。
     for d in deps:
         if d.command_line:
-            errs.append(f"{d.command_line}: 库不许声明命令（在 `{d.name}` 里）—— 命令是"
+            errs.append(f"库不许声明命令（在 {_unit_where(d)} / `{d.name}` 里）—— 命令是"
                         f"**可执行产物**的身份，而库是给别人 `use` 的代码。"
                         f"把它挪进入口单元")
     if mod.command_line:
@@ -4594,15 +4623,17 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                 if prev is None:
                     seen_decl[nm] = m0
                 elif _unit_id(prev) != _unit_id(m0):
-                    # **说出来是"哪一份文件"**（`#141`）：原先写"与模块 {prev} 重名",
-                    # 而那是**模块名**、不是撞车的那个符号 —— `函数 f 与模块 ma 重名`
-                    # 让用户去调解一个 `f` 与 `ma` 之间的冲突, 而这两个名字不撞车。
-                    # 真正撞车的是**两份单元都发射 `f`**, 所以指到**另一份文件**上。
-                    # 措辞仍留"重名"二字 —— `loment_diag.RULES` 的 E013 按这几个词锚,
-                    # 换一种说法这条消息会掉出分类表。
-                    errs.append(f"{ln}: {kind} `{nm}` 与 {_unit_where(prev)} 里的 `{nm}` 重名 —— "
-                                f"单元的发射符号是平的 (ABI)，两份单元都会发射 `{nm}`，"
-                                f"调用点也解析到同一个函数；改掉其中一个")
+                    # **两边都点名**（`#141`）：原先写"与模块 {prev} 重名", 而那是
+                    # **模块名**、不是撞车的那个符号 —— `函数 f 与模块 ma 重名` 让用户
+                    # 去调解一个 `f` 与 `ma` 之间的冲突, 而这两个名字不撞车。真正撞车的
+                    # 是**两份单元都发射 `f`**, 所以两份模块名与两份文件都写出来,
+                    # 而不是只说其中一份。措辞仍留"重名"二字 —— `loment_diag.RULES` 的
+                    # E013 按这几个词锚, 换一种说法这条消息会掉出分类表。
+                    errs.append(
+                        f"{ln}: {kind} `{nm}` 重名 —— {_unit_where(prev)}（模块 "
+                        f"`{prev.name}`）与 {_unit_where(m0)}（模块 `{m0.name}`）两个"
+                        f"单元都会发射 `{nm}`；单元的发射符号是平的 (ABI)，调用点也解析"
+                        f"到同一个函数。改掉其中一个")
 
 
     # 结构体: 名字/字段唯一, 类型已声明
@@ -4900,7 +4931,7 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     if (not _dep_pass
             and mod.chooses.get("lspe", CORE_DEFAULTS["lspe"]) == "lspe_open_admin"):
         for s in getattr(mod, "lspe_sites", []):
-            if s.get("kind") not in ("guard", "index"):
+            if s.get("kind") not in _LSPE_SITE_KINDS:
                 errs.append(f"{s.get('line', 0)}: LSPE 台账里有未登记的站点种类"
                             f" {s.get('kind')!r}")
         if lspe_mode == "strict":
@@ -5266,9 +5297,14 @@ def _stmts_rs(stmts: list, indent: int) -> list[str]:
         elif isinstance(s, ExprStmt):
             out.append(f"{pad}{_expr_rs(s.expr)};")
         elif isinstance(s, Guard):  # P4: 能力域守卫 (编译期已查字面量)
+            # **审计只在放行那一支**（`#162`，与 IR 后端的 `gok` 块逐结构对应）:
+            # 越界时 `__loment_trap` 只 panic，一个字节都不写 —— 属性 1 说的
+            # "traps, with no other side effect" 才字面为真。
             out.append(
                 f"{pad}{{ let __i: u64 = ({_expr_rs(s.expr)}) as u64; "
-                f"__loment_guard({s.cap_id}, __i, {s.lo}, {s.hi}); }}"
+                f"if __i < {s.lo} || __i > {s.hi} {{ "
+                f"__loment_trap({s.cap_id}, __i); }} else {{ "
+                f"__loment_audit({s.cap_id}); }} }}"
             )
         else:
             raise AssertionError(f"未知语句 {s!r}")
@@ -5753,14 +5789,33 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
     _lspe_state = mod.chooses.get("lspe", CORE_DEFAULTS["lspe"])
     _lspe_sites = ([] if _lspe_state == "lspe_close_admin"
                    else getattr(mod, "lspe_sites", []))
+    if deps and _lspe_sites:
+        # E4 的安全表要看**根 + 依赖**（自举侧 `compute_safe` 扫整个单元）；首参表仍只看根
+        # —— 依赖里的函数不是这份产物要审计的站点。`load()` 手上没有 deps，所以这一步
+        # 只能在发射这层补（与 `_gc_alpha_pass` 同一个理由）。
+        _lspe_sites = [s for s in _lspe_sites if s["kind"] != "call"]
+        _seen_e4: dict[str, int] = {}
+
+        def _sid_e4(kind: str, key: str) -> str:
+            occ = _seen_e4.get(key, 0)
+            _seen_e4[key] = occ + 1
+            return f"{mod.name}:{kind}:{_fnv1a32(key + '#' + str(occ)):08x}"
+
+        _lspe_census_e4(
+            getattr(mod, "toks", []), _sid_e4, _lspe_sites,
+            [(getattr(d, "toks", []), _lspe_functions(getattr(d, "toks", [])))
+             for d in deps])
+    _lspe_level = int(getattr(mod, "lspe_level", 3))
+    _lspe_solver = LspeSolver(_lspe_sites, _lspe_level).run()
     _lspe_by_kind: dict[str, list[int]] = {}
     for _s in _lspe_sites:
-        _pair = _lspe_by_kind.setdefault(_s["kind"], [0, 0])
+        # `per_kind` 按**义务种类**计，不按站点种类计（`docs/262` §5.11）。
+        _pair = _lspe_by_kind.setdefault(_s["obligation"], [0, 0])
         _pair[0] += 1
-        if _s["proved"]:
+        if _lspe_solver.proved(_s):
             _pair[1] += 1
     _lspe_n = len(_lspe_sites)
-    _lspe_proved = sum(1 for _s in _lspe_sites if _s["proved"])
+    _lspe_proved = sum(1 for _s in _lspe_sites if _lspe_solver.proved(_s))
     _lspe_undecided = _lspe_n - _lspe_proved
     _lspe_per_kind = {k: f"{v[1]}/{v[0]}" for k, v in sorted(_lspe_by_kind.items()) if v[0]}
     doc = {
@@ -5848,7 +5903,7 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
             "state": _lspe_state,
             "set_by": ("source" if "lspe" in mod.chooses else "default"),
             "mode": "full",
-            "level": 3,
+            "level": _lspe_level,
             "sites": _lspe_n,
             "obligations": _lspe_n,
             "proved": _lspe_proved,
@@ -5860,7 +5915,7 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
             "per_kind": _lspe_per_kind,
             # I1 = 站点对账（今天只对"种类都认识"这一半；跨组件那份在 #761）。
             "invariants": {
-                "i1": ("ok" if all(s["kind"] in ("guard", "index") for s in _lspe_sites)
+                "i1": ("ok" if all(s["kind"] in _LSPE_SITE_KINDS for s in _lspe_sites)
                        else "fail"),
                 "i2": "not_run", "i3": "not_run", "i4": "not_run", "i5": "not_run",
             },
@@ -9321,35 +9376,141 @@ _LSPE_BRACKET_KW = frozenset({
     "capability", "excluded", "guard", "as", "mut",
 })
 
+#: 后接 `(` 也不算函数调用的关键字（`if (...)`、`guard d(...)` …）。
+#: 与自举侧 `pt_lspe_call_kw` **逐字同表** —— 两边普查的调用点计数不能漂。
+_LSPE_CALL_KW = _LSPE_BRACKET_KW | frozenset({"extern", "true", "false", "self"})
+
+#: 普查里允许出现的站点种类（I1 的第一半）。加一种站点要同时登记在这里。
+_LSPE_SITE_KINDS = frozenset({
+    "guard", "index", "free", "alive", "init", "exclusive", "call",
+})
+
+
+#: LSPE 的证据种类（`docs/262` §5.3）。**`Differential` 永远不在 accept 集合里** ——
+#: 孪生只证一致，不证对（`docs/253` §5.1.1）。
+LSPE_EVIDENCE_KINDS = ("Axiom", "Syntactic", "Typed", "LocalFlow",
+                       "Interproc", "GlobalInvariant", "Assumed", "Differential")
+
+#: 每种证据**最早**在哪个上下文级别被承认（`docs/262` §5.4 / §5.6）。
+#: 没列出的（Axiom / Syntactic / Assumed / Differential）从 L0 起就承认。
+_LSPE_EVIDENCE_LEVEL = {"Typed": 1, "LocalFlow": 1, "Interproc": 2, "GlobalInvariant": 3}
+
+#: LSPE 的 14 条义务（`docs/262` §5.2）。每条都点名**语义所有者**与**接收的听说种类**。
+#: LSPE 不发明语义：`owner` 一项是指到那份语义文档/码的。
+LSPE_OBLIGATIONS: dict[str, dict[str, object]] = {
+    "InBounds": {"owner": "docs/146 / E028",
+                 "accept": ("Syntactic", "Typed", "LocalFlow", "Interproc",
+                            "GlobalInvariant", "Assumed")},
+    "Alive": {"owner": "docs/210 / E029",
+              "accept": ("LocalFlow", "Interproc", "Assumed")},
+    "InDomain": {"owner": "docs/146",
+                 "accept": ("Typed", "GlobalInvariant", "Assumed")},
+    "Exclusive": {"owner": "docs/206 / E007",
+                  "accept": ("LocalFlow", "Interproc", "Assumed")},
+    "Initialized": {"owner": "docs/206 / E006",
+                    "accept": ("Syntactic", "LocalFlow", "Interproc", "Assumed")},
+    "NotDangling": {"owner": "docs/206 / E012",
+                    "accept": ("LocalFlow", "Interproc", "Assumed")},
+    "NoRuntime": {"owner": "docs/182 / E031",
+                  "accept": ("Axiom", "Syntactic", "Typed")},
+    "FreeOwnership": {"owner": "docs/210",
+                      "accept": ("LocalFlow", "Interproc", "Assumed")},
+    "LadderLiability": {"owner": "docs/210",
+                        "accept": ("Typed", "Interproc", "GlobalInvariant", "Assumed")},
+    "CapabilityLive": {"owner": "docs/146",
+                       "accept": ("Typed", "GlobalInvariant", "Assumed")},
+    "TypeWellFormed": {"owner": "docs/158 / docs/147",
+                       "accept": ("Axiom", "Typed", "Interproc", "Assumed")},
+    "DropHonest": {"owner": "docs/253 §1.2",
+                   "accept": ("Assumed",)},
+    "GuardHolds": {"owner": "docs/146",
+                   "accept": ("Syntactic", "Typed", "GlobalInvariant", "Assumed")},
+    "SummaryContract": {"owner": "docs/210 §7",
+                        "accept": ("Axiom", "Interproc", "Assumed")},
+}
+
+
+class LspeSolver:
+    """证据子集格上的工作列表（`docs/262` §5.3 / §5.5）。
+
+    P0 每个站点只有一条义务、没有传播边；但队列顺序与"只做并集"的单调性已经按最终
+    形状写死。接 E3/E4 时只加 successors，不改求解器，也不改确定性的那几条规矩。
+
+    * 证据是 `LSPE_EVIDENCE_KINDS` 的**子集**，按包含关系构成有限格；
+    * `Differential` 永远不在 accept 集合里 —— 它最多是闸门，不能销义务；
+    * 队列按站点 id 排序，不是哈希序。
+    """
+
+    def __init__(self, sites: list[dict], level: int = 3) -> None:
+        self.level = level
+        self.order = sorted(sites, key=lambda s: s["id"])
+        self.accept = {k: set(v["accept"]) for k, v in LSPE_OBLIGATIONS.items()}
+        self.evidence = {s["id"]: self._initial(s) for s in self.order}
+
+    def _initial(self, site: dict) -> frozenset:
+        ev = site.get("evidence")
+        # 级别只缩不放（`docs/262` §5.6）：E2 的 Typed 与 E3 的 LocalFlow 从 L1 起，
+        # E4 的 Interproc 从 L2 起，E5 的 GlobalInvariant 从 L3 起。
+        if self.level < _LSPE_EVIDENCE_LEVEL.get(ev, 0):
+            return frozenset()
+        if ev in (None, "none"):
+            return frozenset()
+        if ev in LSPE_EVIDENCE_KINDS:
+            return frozenset({ev})
+        return frozenset()
+
+    def run(self) -> "LspeSolver":
+        queue = list(self.order)
+        while queue:
+            site = queue.pop(0)
+            # 目前没有传播边；保留 worklist 形状，E3/E4 在这里加 successors。
+            self.evidence[site["id"]] = frozenset(self.evidence[site["id"]])
+        return self
+
+    def proved(self, site: dict) -> bool:
+        return bool(self.evidence[site["id"]] & self.accept.get(site["obligation"], set()))
+
 
 def _lspe_census(toks: list, unit: str) -> tuple[list[dict], list[int]]:
-    """P0 的站点普查（`docs/262` §5.1）：guard 语句 + 下标表达式。
+    """站点普查（`docs/262` §5.1）：E1/E2（guard + 下标）、E3、E4。
 
     口径是**词法的**，且两套实现用**同一条规则** —— 参考侧吃 `lomc.lex` 的 token，
     自举侧吃驱动器的 token 数组。这样 twin 的计数不会因为 AST 形状不同而漂。
 
-    * `guard` 关键字 = 一个 guard 站点，来源 `capability`；
-    * `[` 且前一个 token 是**非关键字标识符 / `)` / `]`** = 一个 index 站点；
-      下标是**裸字面量**（`[ N ]` 三个 token）时来源 `lms(g0)`，否则无来源。
+    线性 CFG：语句按 token 顺序执行，`return` 结束它所在块剩下一段。这是 E3 的
+    "固定顺序"定义（`docs/262` §5.4）——没有分支敏感，只有块结构。
     """
     sites: list[dict] = []
     unsourced: list[int] = []
     seen: dict[str, int] = {}
 
-    def _id(kind: str, key: str) -> str:
+    def sid(kind: str, key: str) -> str:
         # 内容寻址：键是站点的 token 文本，重复序数只区分**完全相同**的表达式。
         # 不用行号（会漂），也不用全局序号（在前面插一个站点会把后面全部重编号）。
         occ = seen.get(key, 0)
         seen[key] = occ + 1
         return f"{unit}:{kind}:{_fnv1a32(key + '#' + str(occ)):08x}"
 
+    _lspe_census_e1e2(toks, sid, sites, unsourced)
+    _lspe_census_e3(toks, sid, sites)
+    _lspe_census_e4(toks, sid, sites)
+    return sites, unsourced
+
+
+def _lspe_census_e1e2(toks: list, sid, sites: list[dict], unsourced: list[int]) -> None:
+    """E1 常量 + E2 类型（`docs/262` §5.4）。
+
+    * `guard` 关键字 = 一个 guard 站点，来源 `capability`；
+    * `[` 且前一个 token 是**非关键字标识符 / `)` / `]`** = 一个 index 站点；
+      下标是**裸字面量**（`[ N ]` 三个 token）时来源 `lms(g0)`，否则无来源。
+    """
     n = len(toks)
     for i, t in enumerate(toks):
         if t.kind == "ident" and t.val == "guard":
             cap = toks[i + 1].val if i + 1 < n else ""
-            sites.append({"id": _id("guard", f"guard:{cap}"), "kind": "guard",
+            sites.append({"id": sid("guard", f"guard:{cap}"), "kind": "guard",
                           "claim": "allow", "obligation": "GuardHolds",
-                          "evidence": "capability",
+                          "evidence": "Typed",
                           "source": "capability", "line": t.line, "proved": True})
             continue
         if t.kind != "punct" or t.val != "[" or i == 0:
@@ -9383,18 +9544,329 @@ def _lspe_census(toks: list, unit: str) -> tuple[list[dict], list[int]]:
         # 只用**紧邻的前一个 token** 作 LHS。往前多抓几个 token 会把上一条语句
         # （`;`、`return` …）也卷进键里 —— 插入一个无关站点就会让 id 变。
         lhs = prev.val
-        sites.append({"id": _id("index", f"index:{lhs}[{''.join(inner)}]"),
+        sites.append({"id": sid("index", f"index:{lhs}[{''.join(inner)}]"),
                       "kind": "index",
                       "claim": "allow", "obligation": "InBounds",
-                      "evidence": ("lms(g0)" if literal else "none"),
+                      "evidence": ("Syntactic" if literal else "none"),
                       "source": ("lms(g0)" if literal else None),
                       "line": t.line, "proved": literal})
         if not literal:
             unsourced.append(t.line)
-    return sites, unsourced
 
 
-def load(path: Path, sw: SwitchTable | None = None) -> Module:
+def _lspe_match_brace(toks: list, i: int) -> int | None:
+    d = 0
+    for j in range(i, len(toks)):
+        t = toks[j]
+        if t.kind != "punct":
+            continue
+        if t.val == "{":
+            d += 1
+        elif t.val == "}":
+            d -= 1
+            if d == 0:
+                return j
+    return None
+
+
+def _lspe_functions(toks: list) -> list[tuple[int, int, int, int]]:
+    """本单元每个**有体**函数的 `(名字 token, 首形参 token, 体首 token, 体尾 token)`。"""
+    n = len(toks)
+    out: list[tuple[int, int, int, int]] = []
+    for i, t in enumerate(toks):
+        if not (t.kind == "ident" and t.val == "fn"):
+            continue
+        if i > 0 and toks[i - 1].kind == "ident" and toks[i - 1].val == "extern":
+            continue
+        if i + 1 >= n or toks[i + 1].kind != "ident":
+            continue
+        # 找形参表的 `(`（跳过 `<...>`）
+        k = i + 2
+        while k < n and not (toks[k].kind == "punct" and toks[k].val == "("):
+            if toks[k].kind == "punct" and toks[k].val in (";", "{"):
+                break
+            k += 1
+        if k >= n or not (toks[k].kind == "punct" and toks[k].val == "("):
+            continue
+        d = 0
+        j = k
+        while j < n:
+            if toks[j].kind == "punct" and toks[j].val == "(":
+                d += 1
+            elif toks[j].kind == "punct" and toks[j].val == ")":
+                d -= 1
+                if d == 0:
+                    break
+            j += 1
+        if d != 0:
+            continue
+        b = j + 1
+        while b < n and not (toks[b].kind == "punct" and toks[b].val in ("{", ";")):
+            b += 1
+        if b >= n or toks[b].val != "{":
+            continue
+        e = _lspe_match_brace(toks, b)
+        if e is None:
+            continue
+        out.append((i + 1, k + 1, b + 1, e))
+    return out
+
+
+def _lspe_is_write(toks: list, k: int) -> bool:
+    """`x = ...` 是写；`x == ...` 是读（词法器把 `==` 拆成两个 `=` token）。"""
+    n = len(toks)
+    return (k + 1 < n and toks[k + 1].kind == "punct" and toks[k + 1].val == "="
+            and not (k + 2 < n and toks[k + 2].kind == "punct" and toks[k + 2].val == "="))
+
+
+def _lspe_unreachable(toks: list, free_i: int, use_i: int) -> bool:
+    """从 use 反向走到 free：同一块或**外层**块里出现过 `return` ⇒ 这句不可达。
+
+    反向走法自然区分兄弟块：兄弟块里的 `return` 会遇到它的 `}` 被记进深度，不算。
+    """
+    d = 0
+    k = use_i - 1
+    while k > free_i:
+        t = toks[k]
+        if t.kind == "punct":
+            if t.val == "}":
+                d += 1
+            elif t.val == "{" and d > 0:
+                d -= 1
+        elif t.kind == "ident" and d == 0 and t.val == "return":
+            return True
+        k -= 1
+    return False
+
+
+def _lspe_owned(toks: list, at: int, free_i: int, name_i: int) -> bool:
+    """`free(x)` 之前最近一处 `let x` 是不是 `let x : ptr = alloc (`。"""
+    k = free_i - 1
+    while k > at:
+        if (toks[k].kind == "ident" and toks[k].val == toks[name_i].val
+                and toks[k - 1].kind == "ident" and toks[k - 1].val == "let"):
+            n = len(toks)
+            return (k + 5 < n and toks[k + 1].kind == "punct" and toks[k + 1].val == ":"
+                    and toks[k + 2].kind == "ident" and toks[k + 2].val == "ptr"
+                    and toks[k + 3].kind == "punct" and toks[k + 3].val == "="
+                    and toks[k + 4].kind == "ident" and toks[k + 4].val == "alloc"
+                    and toks[k + 5].kind == "punct" and toks[k + 5].val == "(")
+        k -= 1
+    return False
+
+
+def _lspe_census_e3(toks: list, sid, sites: list[dict]) -> None:
+    """E3 局部流（`docs/262` §5.4）：`FreeOwnership` / `Alive` / `Initialized` / `Exclusive`。
+
+    规则与检查器的局部表**同源**（E029 的 `freed` 表、E006 的 `moved` 表）：这里是
+    把那些判决变成证据，不是另写一套语义。线性 CFG 见 `_lspe_census` 的说明。
+    """
+    for _name_i, _p_i, at, end in _lspe_functions(toks):
+        for i in range(at, end):
+            t = toks[i]
+            # ---- FreeOwnership + 之后的 Alive ----
+            if (t.kind == "ident" and t.val == "free" and i + 3 < end
+                    and toks[i + 1].kind == "punct" and toks[i + 1].val == "("
+                    and toks[i + 2].kind == "ident"
+                    and toks[i + 3].kind == "punct" and toks[i + 3].val == ")"):
+                name_i = i + 2
+                name = toks[name_i].val
+                uses: list[int] = []
+                for j in range(i + 4, end):
+                    if toks[j].kind != "ident" or toks[j].val != name:
+                        continue
+                    if j > at and toks[j - 1].kind == "ident" and toks[j - 1].val == "let":
+                        continue                       # 重新声明 = 新名字主人
+                    if _lspe_is_write(toks, j):
+                        continue                       # 写是重新指向，不是用旧块
+                    uses.append(j)
+                reachable = [j for j in uses if not _lspe_unreachable(toks, i + 3, j)]
+                owned = _lspe_owned(toks, at, i, name_i)
+                sites.append({"id": sid("free", f"free:{name}"),
+                              "kind": "free", "claim": "allow",
+                              "obligation": "FreeOwnership",
+                              "evidence": ("LocalFlow" if owned and not reachable else "none"),
+                              "source": ("local-flow" if owned and not reachable else None),
+                              "line": t.line, "proved": owned and not reachable})
+                for j in uses:
+                    un = _lspe_unreachable(toks, i + 3, j)
+                    sites.append({"id": sid("alive", f"alive:{name}:{j - i}"),
+                                  "kind": "alive", "claim": "allow",
+                                  "obligation": "Alive",
+                                  "evidence": ("LocalFlow" if un else "none"),
+                                  "source": ("local-flow" if un else None),
+                                  "line": toks[j].line, "proved": un})
+            # ---- Initialized（`let x: T;` 之后的读） ----
+            if (t.kind == "ident" and t.val == "let" and i + 1 < end
+                    and toks[i + 1].kind == "ident"):
+                name = toks[i + 1].val
+                depth = 0
+                initialized = False
+                j = i + 2
+                while j < end:
+                    v = toks[j].val if toks[j].kind == "punct" else None
+                    if v in ("(", "[", "{"):
+                        depth += 1
+                    elif v in (")", "]", "}") and depth > 0:
+                        depth -= 1
+                    elif v == "=" and depth == 0:
+                        # 声明里的 `=`（`==` 是读，不算；它的第一个 `=` 后面紧跟 `=`）。
+                        if not (j + 1 < end and toks[j + 1].kind == "punct"
+                                and toks[j + 1].val == "="):
+                            initialized = True
+                    elif v == ";" and depth == 0:
+                        break
+                    j += 1
+                if initialized or j >= end:
+                    continue
+                assigned = False
+                for k in range(j + 1, end):
+                    if (toks[k].kind == "ident" and toks[k].val == "let"
+                            and k + 1 < end and toks[k + 1].kind == "ident"
+                            and toks[k + 1].val == name):
+                        break
+                    if toks[k].kind != "ident" or toks[k].val != name:
+                        continue
+                    if k > at and toks[k - 1].kind == "ident" and toks[k - 1].val == "let":
+                        continue
+                    if _lspe_is_write(toks, k):
+                        assigned = True
+                        continue
+                    sites.append({"id": sid("init", f"init:{name}:{k - j}"),
+                                  "kind": "init", "claim": "allow",
+                                  "obligation": "Initialized",
+                                  "evidence": ("LocalFlow" if assigned else "none"),
+                                  "source": ("local-flow" if assigned else None),
+                                  "line": toks[k].line, "proved": assigned})
+            # ---- Exclusive（`&mut x` 与同一语句里的另一次使用重叠） ----
+            if (t.kind == "punct" and t.val == "&" and i + 2 < end
+                    and toks[i + 1].kind == "ident" and toks[i + 1].val == "mut"
+                    and toks[i + 2].kind == "ident"):
+                name = toks[i + 2].val
+                other = False
+                k = i + 3
+                while k < end:
+                    if toks[k].kind == "punct" and toks[k].val == ";":
+                        break
+                    if toks[k].kind == "ident" and toks[k].val == name:
+                        other = True
+                    k += 1
+                sites.append({"id": sid("exclusive", f"exclusive:{name}:{i}"),
+                              "kind": "exclusive", "claim": "allow",
+                              "obligation": "Exclusive",
+                              "evidence": ("none" if other else "LocalFlow"),
+                              "source": (None if other else "local-flow"),
+                              "line": t.line, "proved": not other})
+
+
+def _lspe_safe_set(toks: list, fns: list[tuple[int, int, int, int]],
+                   extra: list[tuple[list, list]] = ()) -> set[str]:
+    """deref-only 摘要的全局不动点（`docs/210` §7）。
+
+    与自举侧 `compute_safe` **同一条 token 规则**（含 `syscall_borrow_ok` 那一支），
+    所以两边算出的安全名集合相同 —— E4 的 `Interproc` 计数不能漂。
+    `extra` 是依赖单元：自举侧 `compute_safe` 扫的是**整个单元**（依赖在根前面），
+    所以发射时的安全表必须把依赖一起算进来（`load32 -> load16 -> load8` 常常跨模块）。
+    递归环只有在有基例时才进入集合；纯递归的函数停在集合外，调用点记 UNDECIDED。
+    """
+    units = [(toks, fns)] + list(extra)
+    safe: set[str] = set(_L0_SAFE_BUILTINS)
+    changed = True
+    rounds = 0
+    while changed and rounds < 256:
+        changed = False
+        rounds += 1
+        for utoks, ufns in units:
+            for name_i, p_i, at, end in ufns:
+                name = utoks[name_i].val
+                if name in safe:
+                    continue
+                if (p_i + 2 >= end or utoks[p_i].kind != "ident"
+                        or utoks[p_i].val == "self"):
+                    continue
+                if not (utoks[p_i + 1].kind == "punct" and utoks[p_i + 1].val == ":"
+                        and utoks[p_i + 2].kind == "ident" and utoks[p_i + 2].val == "ptr"):
+                    continue
+                p = utoks[p_i].val
+                ok = True
+                for k in range(at, end):
+                    if utoks[k].kind != "ident" or utoks[k].val != p:
+                        continue
+                    if (k > 0 and utoks[k - 1].kind == "ident"
+                            and utoks[k - 1].val == "let") or _lspe_is_write(utoks, k):
+                        ok = False
+                        break
+                    if _syscall_borrow_ok(utoks, k):
+                        continue
+                    unqualified = (k < 3
+                                   or not (utoks[k - 3].kind == "punct"
+                                           and utoks[k - 3].val in (".", ":")))
+                    call_ok = (k >= 2 and k + 1 < len(utoks)
+                               and utoks[k - 1].kind == "punct" and utoks[k - 1].val == "("
+                               and utoks[k - 2].kind == "ident" and unqualified
+                               and utoks[k + 1].kind == "punct"
+                               and utoks[k + 1].val in (",", ")")
+                               and utoks[k - 2].val in safe)
+                    if not call_ok:
+                        ok = False
+                        break
+                if ok:
+                    safe.add(name)
+                    changed = True
+    return safe
+
+
+def _lspe_census_e4(toks: list, sid, sites: list[dict],
+                    extra: list[tuple[list, list]] = ()) -> None:
+    """E4 过程间摘要（`docs/262` §5.4）：首参是 `ptr` 的函数的每个调用点一条
+    `SummaryContract` 站点。摘要在安全表里 ⇒ `Interproc`；否则是洞（`none`）。
+
+    摘要键是**调用点的实际实参 token 文本**，不是只有函数名 —— 推断式泛型的替换
+    由实参决定，所以同一个 `f` 的两次不同调用是两个键。
+
+    `extra` 是依赖单元：安全表要看**根 + 依赖**（自举侧 `compute_safe` 扫整个单元），
+    但首参表只看根 —— 依赖里的函数不是这份产物要审计的站点。
+    """
+    fns = _lspe_functions(toks)
+    ptr_first = {toks[n].val for (n, p, _at, end) in fns
+                 if p + 2 < end and toks[p].kind == "ident"
+                 and toks[p + 1].kind == "punct" and toks[p + 1].val == ":"
+                 and toks[p + 2].kind == "ident" and toks[p + 2].val == "ptr"}
+    if not ptr_first:
+        return
+    safe = _lspe_safe_set(toks, fns, extra)
+    n = len(toks)
+    for i, t in enumerate(toks):
+        if t.kind != "ident" or t.val in _LSPE_CALL_KW or t.val not in ptr_first:
+            continue
+        if not (i + 1 < n and toks[i + 1].kind == "punct" and toks[i + 1].val == "("):
+            continue
+        if i > 0 and toks[i - 1].kind == "punct" and toks[i - 1].val in (".", ":"):
+            continue
+        if i > 0 and toks[i - 1].kind == "ident" and toks[i - 1].val == "fn":
+            continue
+        depth = 0
+        j = i + 1
+        inner: list[str] = []
+        while j < n and len(inner) < 32:
+            if toks[j].kind == "punct" and toks[j].val == "(":
+                depth += 1
+            elif toks[j].kind == "punct" and toks[j].val == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            inner.append(toks[j].val)
+            j += 1
+        proved = t.val in safe
+        sites.append({"id": sid("call", f"call:{t.val}{''.join(inner)}"),
+                      "kind": "call", "claim": "allow",
+                      "obligation": "SummaryContract",
+                      "evidence": ("Interproc" if proved else "none"),
+                      "source": (t.val if proved else None),
+                      "line": t.line, "proved": proved})
+
+
+def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3) -> Module:
     # **前门**（`docs/188` §7.2）：读法由**声明**决定，不由后缀或嗅探。
     # 一份 `choose write grammar python` 的 `.lomt` 按 `docs/188` §0 **仍然是 Loment**，
     # 只是拼法不同 —— 所以这里先把它**翻成 Loment 源码**再往下走。
@@ -9435,6 +9907,7 @@ def load(path: Path, sw: SwitchTable | None = None) -> Module:
     # LSPE 的站点普查（`docs/262` §5.1）：在**最终 token 流**上算一次。
     # 与自举侧 `potato.lomt` 的 `pt_lspe` 同一条规则 —— twin 的计数不能漂。
     mod.lspe_sites, mod.lspe_unsourced_lines = _lspe_census(tt, mod.name)
+    mod.lspe_level = lspe_level
     # 方言清单挂在模块上，供 Potato v4 用（`docs/184` §9 S4.3）。**定义那一段已经被
     # 抹掉了**，所以这是唯一还记得"这份源用了哪些自定义语法"的地方。
     mod.dialects = _dias
@@ -9470,6 +9943,9 @@ def load(path: Path, sw: SwitchTable | None = None) -> Module:
                 # 拿它去查**目标文件**的行 —— 实测 Result 会抄到上文某条 capability 的注释。
                 # 注入项在目标文件里没有行, 就该是 0 (Loment 版 lomdoc 也是这么做的)。
                 e.line = 0
+                # 变体行号同理：它们指向 **prelude 文件**，拿它们去查目标文件会抄到
+                # 无关的注释。空表 = 没有可用的行号。
+                e.variant_lines = []
                 mod.enums.append(e)
     # 记住源文件在哪 —— 调试信息（DWARF 的 `!DIFile`）要它。见 `Module.src` 的注释。
     #
@@ -9589,6 +10065,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--print-command", action="store_true",
                     help="打印本单元注册的命令名 (没声明就打空行), docs/223")
     ap.add_argument("--lom-root", default=None, help="use 的 .lom 搜索根 (默认仓库根)")
+    ap.add_argument("--lspe-level", type=int, default=3, choices=(0, 1, 2, 3, 4),
+                    help="LSPE 上下文级别（默认 3；只缩不放）")
     args = ap.parse_args(argv)
 
     # `--diag-out`: **现在就建/清空**, 不是等出错了再建 —— 与自举驱动同一口径 (docs/182 §5)。
@@ -9608,7 +10086,7 @@ def main(argv: list[str] | None = None) -> int:
     path = Path(args.file)
     try:
         # 预扫 → 装载 → 解析依赖，**一个入口**（`docs/182` §1.10）。
-        mod, deps = load_unit(path, root)
+        mod, deps = load_unit(path, root, lspe_level=args.lspe_level)
     except LomError as e:
         print(f"[ERR] {path}: {e}", file=sys.stderr)
         # 位置指不出来的那一档（`line == 0`，例如"前门拒了这份源"）**不写**结构化诊断 ——

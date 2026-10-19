@@ -112,7 +112,7 @@ ICON = "editors/loment.ico"
 #: 安装界面正中那个**圆角方形标**。不新画一张图：`editors/loment.ico` 的 7 帧全是 PNG，
 #: 取最大的那帧直接当图片用 —— 于是 logo 只有**一个真源**，安装器也不必自带解码器。
 LOGO_NAME = "loment-logo.png"
-LICENSE = "LICENSE"
+LICENSES = ("LICENSE-MIT", "LICENSE-APACHE")
 # 随包的 agent skill —— 装完 Loment, AI agent 读它就会写 Loment。
 # **自足**: 内建函数表/语法/错误码/包内命令都在里面, 不引用仓库路径。原样拷进包,
 # 不做 @VERSION@ 替换 —— 这样"包里的那份 == 仓库里的那份"是可判据的。
@@ -325,6 +325,7 @@ case "${1:-help}" in
         src=$1; shift
         reject_l0 "$src" "$mode"
         out=
+        out_set=
         links=()
         nc=
         om=
@@ -335,7 +336,7 @@ case "${1:-help}" in
         ccargs=
         while [ $# -gt 0 ]; do
             case "$1" in
-                -o|--out) out=${2:-}; shift 2 ;;
+                -o|--out) out=${2:-}; out_set=1; shift 2 ;;
                 # A foreign object file (docs/173 FFI): loment build app.lomt --link libfoo.o
                 --link) links[${#links[@]}]="${2:-}"; shift 2 ;;
                 # Optimize with clang when it is installed (docs/212 sec 5A). **Opt-in on purpose**:
@@ -366,6 +367,14 @@ case "${1:-help}" in
                 *) echo "loment: unknown option $1" >&2; exit 2 ;;
             esac
         done
+        # `-o` on `run` used to be parsed and then overwritten by the temporary path, so
+        # the user got a successful exit and no artifact (#636). Accepting a flag and
+        # dropping it is the silent case the launcher forbids everywhere else - refuse it
+        # by name instead of inventing a second meaning for `run`.
+        if [ "$mode" = run ] && [ -n "$out_set" ]; then
+            echo "loment: -o is for build; run produces no artifact" >&2
+            exit 2
+        fi
         need loment-driver loment-driver
         need loment-lomelf loment-lomelf
         tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
@@ -415,11 +424,15 @@ case "${1:-help}" in
             echo "loment: -L / -l / --cc-arg need --hosted: a sealed product links no host library (docs/222)" >&2
             exit 2
         fi
-        linkargs=
-        objs=
+        # Keep every `--link` value in its own argument slot. A concatenated string is
+        # expanded unquoted below, so `--link "/tmp/my libs/add.o"` used to reach the
+        # linker as `--link /tmp/my` + `libs/add.o` (#635).
+        linkargs=()
+        objs=()
         for l in "${links[@]}"; do
-            linkargs="$linkargs --link $(to_posix "$l")"
-            objs="$objs $(to_posix "$l")"
+            linkargs[${#linkargs[@]}]=--link
+            linkargs[${#linkargs[@]}]=$(to_posix "$l")
+            objs[${#objs[@]}]=$(to_posix "$l")
         done
         if [ -n "$hosted" ]; then
             # ---- hosted (docs/222 sec 4): a C-runtime product with open ports to the world.
@@ -437,7 +450,7 @@ case "${1:-help}" in
                 exit 1
             fi
             # shellcheck disable=SC2086
-            "$cc" "$tmp/a.ll" $objs $ccargs $Largs $largs -o "$out" || exit 1
+            "$cc" "$tmp/a.ll" "${objs[@]}" $ccargs $Largs $largs -o "$out" || exit 1
         elif [ -n "$opt" ]; then
             cc=$(command -v clang 2>/dev/null || true)
             if [ -n "$cc" ]; then
@@ -449,15 +462,13 @@ case "${1:-help}" in
 LOMENT_LIBCALLS_EOF
                 # shellcheck disable=SC2086
                 "$cc" --target=x86_64-unknown-linux-gnu -nostdlib -ffreestanding -static \
-                    -fno-pie -O2 "$tmp/a.ll" "$tmp/libcalls.ll" $objs -o "$out" || exit 1
+                    -fno-pie -O2 "$tmp/a.ll" "$tmp/libcalls.ll" "${objs[@]}" -o "$out" || exit 1
             else
                 echo "loment: --opt: no clang found, falling back to the unoptimized lomelf backend" >&2
-                # shellcheck disable=SC2086
-                "$(tool loment-lomelf)" "$tmp/a.ll" "$out" --diag-out "$tmp/d.jsonl" $linkargs $portarg 2>"$tmp/e2.txt" || lrc=$?
+                "$(tool loment-lomelf)" "$tmp/a.ll" "$out" --diag-out "$tmp/d.jsonl" "${linkargs[@]}" $portarg 2>"$tmp/e2.txt" || lrc=$?
             fi
         elif [ ${#links[@]} -gt 0 ]; then
-            # shellcheck disable=SC2086
-            "$(tool loment-lomelf)" "$tmp/a.ll" "$out" --diag-out "$tmp/d.jsonl" $linkargs $portarg 2>"$tmp/e2.txt" || lrc=$?
+            "$(tool loment-lomelf)" "$tmp/a.ll" "$out" --diag-out "$tmp/d.jsonl" "${linkargs[@]}" $portarg 2>"$tmp/e2.txt" || lrc=$?
         else
             "$(tool loment-lomelf)" "$tmp/a.ll" "$out" --diag-out "$tmp/d.jsonl" 2>"$tmp/e2.txt" || lrc=$?
         fi
@@ -625,7 +636,6 @@ rem NOTE: no parenthesised blocks -- `%ERRORLEVEL%` inside one expands at parse 
 set "src=%~2"
 if "%src%"=="" goto usage
 set "out="
-set "linkargs="
 rem Port door (@CHANNEL@, docs/222 sec 4): open in both channels since 2026-10-17 (#406) -
 rem LibC's static and run-time halves are both done. lomelf still refuses a ported object by
 rem default; this flag is what opens it, and it is passed in both channels.
@@ -675,15 +685,22 @@ set "com=%~1"
 shift
 goto barg_loop
 :barg_out
+rem `-o` on `run` used to be parsed and never used: the run path hardcodes its temporary
+rem output, so the user got exit 0 and no artifact (#636). Refuse it by name.
+if "%bmode%"=="r" goto run_out_refused
 set "out=%~2"
 shift
 shift
 goto barg_loop
 :barg_link
-set "linkargs=%linkargs% --link %~2"
-shift
-shift
-goto barg_loop
+rem The PE branch of lomelf refuses every foreign object, so `--link` can never succeed
+rem here; advertising it only sends users into that refusal (#632). Refuse it here, by
+rem name, with the reason the linker cannot: this launcher produces PE.
+echo loment: --link needs the ELF target (foreign objects are ELF only); this launcher builds PE 1>&2
+exit /b 2
+:run_out_refused
+echo loment: -o is for build; run produces no artifact 1>&2
+exit /b 2
 :barg_opt
 rem The clang-optimized path (docs/212 sec 5A) is implemented for ELF only; this launcher links
 rem with the self-hosted lomelf. Refused **by name** rather than silently ignored.
@@ -717,11 +734,16 @@ mkdir "%tmp%" >nul 2>nul
 set "drc=%ERRORLEVEL%"
 if not "%drc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e.txt" "%cnc% %com%"
 if not "%drc%"=="0" goto fail
+rem `choose hosted` (docs/222 sec 4.4): the bash launcher reads this header marker and routes
+rem the unit to the host C toolchain. This launcher has no hosted path, and without the check
+rem the PE linker reports "the unit has no _start" -- the wrong problem entirely (#633).
+findstr /b /l /c:"; loment-port: hosted" "%tmp%\a.ll" >nul 2>nul
+if "%ERRORLEVEL%"=="0" goto hosted_unit
 rem The linker gets its OWN --diag-out, into the same file (on success the driver wrote
 rem nothing into it). When it can put a code on - the `-o` directory not existing is the
 rem common one - :report_diags renders it with the title, the why and the fixes; when it
 rem writes no record its plain line is shown as is, never silently lost.
-"%here%loment-lomelf.exe" "%tmp%\a.ll" "%out%.exe" --diag-out "%tmp%\d.jsonl" %linkargs% %portarg% 2>"%tmp%\e2.txt"
+"%here%loment-lomelf.exe" "%tmp%\a.ll" "%out%.exe" --diag-out "%tmp%\d.jsonl" %portarg% 2>"%tmp%\e2.txt"
 set "lrc=%ERRORLEVEL%"
 if not "%lrc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e2.txt" "%cnc% %com%"
 if not "%lrc%"=="0" goto fail
@@ -734,7 +756,10 @@ mkdir "%tmp%" >nul 2>nul
 set "drc=%ERRORLEVEL%"
 if not "%drc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e.txt" "%cnc% %com%"
 if not "%drc%"=="0" goto fail
-"%here%loment-lomelf.exe" "%tmp%\a.ll" "%tmp%\a.exe" --diag-out "%tmp%\d.jsonl" %linkargs% %portarg% 2>"%tmp%\e2.txt"
+rem Same marker check as the build path: a hosted unit is not a PE product (#633).
+findstr /b /l /c:"; loment-port: hosted" "%tmp%\a.ll" >nul 2>nul
+if "%ERRORLEVEL%"=="0" goto hosted_unit
+"%here%loment-lomelf.exe" "%tmp%\a.ll" "%tmp%\a.exe" --diag-out "%tmp%\d.jsonl" %portarg% 2>"%tmp%\e2.txt"
 set "lrc=%ERRORLEVEL%"
 if not "%lrc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e2.txt" "%cnc% %com%"
 if not "%lrc%"=="0" goto fail
@@ -749,6 +774,14 @@ del /q "%tmp%\a.ll" >nul 2>nul
 rmdir "%tmp%" >nul 2>nul
 echo loment: %out%.exe
 exit /b 0
+
+rem A unit that declared `choose hosted` in its IR header (#633). Reached from both the
+rem build and the run path; the message names the limitation instead of letting the PE
+rem linker talk about `_start`, which is not what the user wrote.
+:hosted_unit
+echo loment: this unit declares choose hosted; hosted products need the ELF target (docs/222 sec 4) 1>&2
+echo         This launcher builds PE and has no hosted/import path yet. 1>&2
+goto fail
 
 rem NOTE: tool failures are tested with a STRING compare, never `if errorlevel 1`.
 rem A crashed tool exits with a NEGATIVE code (0xC000001D = -1073741795) and cmd compares
@@ -797,8 +830,8 @@ echo                               check only (diagnostics on stderr, IR discard
 echo                               --short: one grep-able line per diagnostic
 echo                               --json:  one object per diagnostic (for editors and CI)
 echo                               --max N: render at most N (default 20; 0 = all)
-echo   loment build FILE [-o OUT] [--link OBJ...] [--opt] [--hosted]
-echo                               compile and link; --link adds a foreign object (FFI)
+echo   loment build FILE [-o OUT] [--opt] [--hosted]
+echo                               compile and link
 echo                               --opt: optimize with clang -O2 (ELF only)
 echo                               --hosted: link the host's real libraries (ELF only)
 echo   loment run FILE [--opt] [--hosted]
@@ -913,11 +946,13 @@ INSTALL_SH = r'''#!/bin/sh
 #   sh install.sh [--prefix DIR] [--no-path] [--no-skill]   default prefix: $HOME/.local
 #   sh install.sh --uninstall [--prefix DIR]
 # --no-skill: do not install the agent skill into ~/.claude/skills/loment
+# --no-verify: install WITHOUT checking the package (deliberate, prints a warning)
 set -eu
 
 prefix=${PREFIX:-$HOME/.local}
 no_path=0
 no_skill=0
+no_verify=0
 uninstall=0
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -925,13 +960,20 @@ while [ $# -gt 0 ]; do
         --prefix=*) prefix=${1#*=}; shift ;;
         --no-path) no_path=1; shift ;;
         --no-skill) no_skill=1; shift ;;
+        --no-verify) no_verify=1; shift ;;
         --uninstall) uninstall=1; shift ;;
-        -h|--help) sed -n '2,4p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,5p' "$0"; exit 0 ;;
         *) echo "install: unknown option $1" >&2; exit 2 ;;
     esac
 done
 [ -n "$prefix" ] || { echo "install: empty --prefix" >&2; exit 2; }
-src=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# POSIX parameter expansion instead of `dirname`: verification must still run in a
+# minimal environment where only shell builtins are guaranteed (see #425).
+case "$0" in
+    */*) _self_dir=${0%/*} ;;
+    *) _self_dir=. ;;
+esac
+src=$(CDPATH= cd -- "$_self_dir" && pwd)
 
 # A `lompi` or `loment` that is NOT ours but sits EARLIER on PATH wins, silently: you type
 # `lompi version` and get an older standalone build, with nothing anywhere saying why. This
@@ -984,18 +1026,137 @@ if [ "$uninstall" = 1 ]; then
     exit 0
 fi
 
-if command -v sha256sum >/dev/null 2>&1; then
-    (cd "$src" && sha256sum -c --quiet SHA256SUMS) || {
-        echo "install: SHA256SUMS mismatch -- package is corrupt" >&2; exit 1; }
+# --- package integrity ---------------------------------------------------------------
+# The list travels WITH the package, so it is not a trust anchor by itself: the digest of
+# SHA256SUMS is printed below, and the release page publishes the same digest through a
+# second channel. An attacker who rewrites the archive and the list together cannot also
+# rewrite that page. Verification is never silently skipped: a missing verifier is fatal
+# unless the caller passes --no-verify.
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        _o=$(sha256sum "$1") || return 1
+    elif command -v shasum >/dev/null 2>&1; then
+        _o=$(shasum -a 256 "$1") || return 1
+    elif command -v openssl >/dev/null 2>&1; then
+        _o=$(openssl dgst -sha256 -r "$1") || return 1
+    else
+        return 2
+    fi
+    printf '%s\n' "${_o%% *}"
+}
+
+verify_package() {
+    _sums="$src/SHA256SUMS"
+    [ -f "$_sums" ] || {
+        echo "install: SHA256SUMS missing -- package is incomplete" >&2; return 1; }
+    if command -v sha256sum >/dev/null 2>&1; then
+        (cd "$src" && sha256sum -c --quiet SHA256SUMS) || {
+            echo "install: SHA256SUMS mismatch -- package is corrupt" >&2; return 1; }
+    elif command -v shasum >/dev/null 2>&1; then
+        (cd "$src" && shasum -a 256 -c --status SHA256SUMS) || {
+            echo "install: SHA256SUMS mismatch -- package is corrupt" >&2; return 1; }
+    elif command -v openssl >/dev/null 2>&1; then
+        while IFS= read -r _line; do
+            [ -n "$_line" ] || continue
+            _want=${_line%% *}
+            _rel=${_line#*  }
+            _got=$(sha256_of "$src/$_rel") || {
+                echo "install: cannot hash $_rel -- package is corrupt" >&2; return 1; }
+            [ "$_got" = "$_want" ] || {
+                echo "install: SHA256SUMS mismatch: $_rel" >&2; return 1; }
+        done < "$_sums"
+    else
+        # An installer that cannot check its payload must SAY SO and STOP. Installing
+        # anyway is precisely the hole (#425); an explicit --no-verify is the only way
+        # past this, so an unverified install is a decision rather than a fallback.
+        echo "install: no SHA-256 verifier (sha256sum / shasum / openssl) found" >&2
+        echo "install: refusing to install an unverified package; pass --no-verify to override" >&2
+        return 1
+    fi
+    return 0
+}
+
+verify_signature_if_present() {
+    # Signature assets are published BESIDE the archive (release page). When a user puts
+    # them next to the package we verify them; when they are absent the digest printed
+    # below is the out-of-band comparison point.
+    _asc="$src/SHA256SUMS.asc"
+    [ -f "$_asc" ] || return 0
+    _pub="$src/loment-signing.asc"
+    [ -f "$_pub" ] || {
+        echo "install: SHA256SUMS.asc present but loment-signing.asc missing" >&2
+        return 1; }
+    command -v gpg >/dev/null 2>&1 || {
+        echo "install: gpg not found -- cannot verify SHA256SUMS.asc" >&2; return 1; }
+    # Random when the OS can name it; the PID fallback is still created fresh, not reused.
+    _gh=$(mktemp -d 2>/dev/null) || {
+        _gh=${TMPDIR:-/tmp}/loment-gpg-$$
+        rm -rf "$_gh"
+        mkdir -p "$_gh"
+    }
+    chmod 700 "$_gh" 2>/dev/null || true
+    if ! GNUPGHOME=$_gh gpg --batch --quiet --import "$_pub" 2>/dev/null; then
+        rm -rf "$_gh"
+        echo "install: cannot import loment-signing.asc" >&2
+        return 1
+    fi
+    if ! GNUPGHOME=$_gh gpg --batch --status-fd 1 --verify "$_asc" "$_sums" 2>/dev/null \
+         | grep -q '^\[GNUPG:\] GOODSIG '; then
+        rm -rf "$_gh"
+        echo "install: SHA256SUMS.asc does NOT verify against loment-signing.asc" >&2
+        return 1
+    fi
+    echo "install: SHA256SUMS.asc verified against loment-signing.asc"
+    rm -rf "$_gh"
+    return 0
+}
+
+copy_verified_payload() {
+    # Iterate the VERIFIED manifest and copy exactly those entries. An unlisted file in
+    # bin/ is a hard error: it would otherwise be installed but never hashed (#424).
+    _sums="$src/SHA256SUMS"
+    [ -f "$_sums" ] || {
+        echo "install: SHA256SUMS missing -- package is incomplete" >&2; return 1; }
+    while IFS= read -r _line; do
+        [ -n "$_line" ] || continue
+        _rel=${_line#*  }
+        case "$_rel" in
+            bin/*|share/*) ;;
+            *) continue ;;
+        esac
+        case "$_rel" in
+            /*|*../*|*/..|..) echo "install: refusing suspicious path in SHA256SUMS: $_rel" >&2
+                              return 1 ;;
+        esac
+        _dst="$prefix/$_rel"
+        _dir=${_dst%/*}
+        [ -d "$_dir" ] || mkdir -p "$_dir"
+        cp -f "$src/$_rel" "$_dst" || return 1
+    done < "$_sums"
+    for _f in "$src/bin/"*; do
+        [ -f "$_f" ] || continue
+        if ! grep -F -q "  bin/${_f##*/}" "$_sums"; then
+            echo "install: unlisted file in package: bin/${_f##*/}" >&2
+            return 1
+        fi
+    done
+    return 0
+}
+
+if [ "$no_verify" = 1 ]; then
+    echo "install: WARNING: --no-verify -- installing WITHOUT checking the package" >&2
 else
-    echo "install: (no sha256sum available; skipping package verification)" >&2
+    verify_package || exit 1
+    verify_signature_if_present || exit 1
+    _digest=$(sha256_of "$src/SHA256SUMS") || {
+        echo "install: cannot compute the SHA256SUMS digest" >&2; exit 1; }
+    echo "install: SHA256SUMS digest: $_digest"
+    echo "install: compare it with the digest published on the release page"
+    echo "install:          (out of band -- do not trust a digest found inside this archive)"
 fi
 
 mkdir -p "$prefix/bin" "$prefix/share/loment" "$prefix/share/lompi"
-cp -f "$src/bin/"* "$prefix/bin/"
-cp -R "$src/share/loment/." "$prefix/share/loment/"
-# lompi's guide lives under its OWN share tree (it is a standalone command)
-cp -R "$src/share/lompi/." "$prefix/share/lompi/"
+copy_verified_payload || exit 1
 chmod 755 "$prefix/bin/"*
 
 "$prefix/bin/loment" version || {
@@ -1126,6 +1287,7 @@ param(
     [switch]$NoPath,
     [switch]$NoFileType,
     [switch]$NoSkill,
+    [switch]$NoVerify,
     [switch]$Uninstall,
     [switch]$DryRun
 )
@@ -1140,10 +1302,60 @@ function Say([string]$m) { Write-Host $m }
 function Resolve-Payload {
     if ($PayloadDir -ne '') { return $PayloadDir }
     if ($PayloadZip -ne '') {
-        $dst = Join-Path $env:TEMP ('loment-setup-' + $PID)
-        if (Test-Path -LiteralPath $dst) { Remove-Item -LiteralPath $dst -Recurse -Force }
-        Expand-Archive -LiteralPath $PayloadZip -DestinationPath $dst -Force
-        return $dst
+        # Extract BY HAND: Windows PowerShell 5.1's Expand-Archive does not reject `..`
+        # or absolute entries (the rejection arrived in .NET Core 3.0), so a crafted zip
+        # can write outside the target before any check runs. We also verify every entry
+        # against SHA256SUMS BEFORE writing a single byte, and only into a directory the
+        # OS names for us (no predictable loment-setup-<PID> to pre-create or guess).
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $root = Join-Path $env:TEMP ('loment-setup-' + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $root -Force | Out-Null
+        $rootFull = [IO.Path]::GetFullPath($root).TrimEnd('\') + '\'
+        $zip = [IO.Compression.ZipFile]::OpenRead($PayloadZip)
+        try {
+            $sumsEntry = $zip.GetEntry('SHA256SUMS')
+            if (-not $sumsEntry) { throw "SHA256SUMS missing from payload.zip -- package is incomplete" }
+            $want = @{}
+            $reader = New-Object System.IO.StreamReader($sumsEntry.Open())
+            try {
+                while (($line = $reader.ReadLine()) -ne $null) {
+                    if ($line -match '^([0-9a-f]{64})  (.+)$') { $want[$Matches[2]] = $Matches[1] }
+                }
+            } finally { $reader.Dispose() }
+            $sha = [System.Security.Cryptography.SHA256]::Create()
+            try {
+                foreach ($e in $zip.Entries) {
+                    if ($e.FullName -eq '' -or $e.FullName.EndsWith('/')) { continue }
+                    $rel = $e.FullName.Replace('/', '\')
+                    if ([IO.Path]::IsPathRooted($rel) -or $rel -match '(^|\\)\.\.(\\|$)') {
+                        throw "payload.zip entry escapes the extraction root: $($e.FullName)"
+                    }
+                    $dest = [IO.Path]::GetFullPath((Join-Path $rootFull $rel))
+                    if (-not $dest.StartsWith($rootFull, [StringComparison]::OrdinalIgnoreCase)) {
+                        throw "payload.zip entry escapes the extraction root: $($e.FullName)"
+                    }
+                    if ($e.FullName -eq 'SHA256SUMS') { continue }
+                    if (-not $want.ContainsKey($e.FullName)) {
+                        throw "unlisted file in package: $($e.FullName)"
+                    }
+                    $s = $e.Open()
+                    try { $hash = $sha.ComputeHash($s) } finally { $s.Dispose() }
+                    $got = ([BitConverter]::ToString($hash)).Replace('-', '').ToLower()
+                    if ($got -ne $want[$e.FullName]) {
+                        throw "SHA256SUMS mismatch: $($e.FullName)"
+                    }
+                }
+            } finally { $sha.Dispose() }
+            # Verification passed -- now, and only now, write the files.
+            foreach ($e in $zip.Entries) {
+                if ($e.FullName -eq '' -or $e.FullName.EndsWith('/')) { continue }
+                $rel = $e.FullName.Replace('/', '\')
+                $dest = [IO.Path]::GetFullPath((Join-Path $rootFull $rel))
+                New-Item -ItemType Directory -Path (Split-Path -Parent $dest) -Force | Out-Null
+                [IO.Compression.ZipFileExtensions]::ExtractToFile($e, $dest, $true)
+            }
+        } finally { $zip.Dispose() }
+        return $root
     }
     return $ScriptDir
 }
@@ -1152,16 +1364,63 @@ function Verify-Sums([string]$payload) {
     $sums = Join-Path $payload 'SHA256SUMS'
     if (-not (Test-Path -LiteralPath $sums)) { throw "SHA256SUMS missing -- package is incomplete" }
     $bad = 0
+    $verified = @()
     foreach ($line in Get-Content -LiteralPath $sums) {
-        if ($line -notmatch '^([0-9a-f]{64})\s+(.+)$') { continue }
+        if ($line -notmatch '^([0-9a-f]{64})  (.+)$') { continue }
         $want = $Matches[1]; $rel = $Matches[2]
         $f = Join-Path $payload $rel
         if (-not (Test-Path -LiteralPath $f)) { Say "[sums] missing: $rel"; $bad++; continue }
         $got = (Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash.ToLower()
-        if ($got -ne $want) { Say "[sums] MISMATCH: $rel"; $bad++ }
+        if ($got -ne $want) { Say "[sums] MISMATCH: $rel"; $bad++ } else { $verified += $rel }
     }
     if ($bad -gt 0) { throw "$bad file(s) failed SHA256SUMS verification" }
     Say "[1/6] SHA256SUMS verified"
+    return $verified
+}
+
+function Verify-SignatureIfPresent([string]$payload) {
+    # The signature assets are published BESIDE the archive (release page). When present
+    # next to the payload we verify them; otherwise the SHA256SUMS digest printed later is
+    # the out-of-band comparison point.
+    $asc = Join-Path $payload 'SHA256SUMS.asc'
+    if (-not (Test-Path -LiteralPath $asc)) { return }
+    $pub = Join-Path $payload 'loment-signing.asc'
+    if (-not (Test-Path -LiteralPath $pub)) {
+        throw "SHA256SUMS.asc present but loment-signing.asc missing"
+    }
+    if (-not (Get-Command gpg -ErrorAction SilentlyContinue)) {
+        throw "gpg not found -- cannot verify SHA256SUMS.asc"
+    }
+    $home2 = Join-Path $env:TEMP ('loment-gpg-' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $home2 -Force | Out-Null
+    $old = $env:GNUPGHOME
+    try {
+        $env:GNUPGHOME = $home2
+        & gpg --batch --quiet --import $pub
+        if ($LASTEXITCODE -ne 0) { throw "cannot import loment-signing.asc" }
+        & gpg --batch --verify $asc (Join-Path $payload 'SHA256SUMS')
+        if ($LASTEXITCODE -ne 0) { throw "SHA256SUMS.asc does NOT verify against loment-signing.asc" }
+        Say "[1b/6] detached signature verified"
+    } finally {
+        $env:GNUPGHOME = $old
+        Remove-Item -LiteralPath $home2 -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Copy-VerifiedTree([string]$From, [string]$To, [string[]]$Verified, [string]$Prefix) {
+    # Copy exactly what the verified manifest names. An unlisted file is a hard error:
+    # iterating the directory instead of the list installs files nobody hashed (#424).
+    $files = @(Get-ChildItem -LiteralPath $From -Recurse -File -ErrorAction SilentlyContinue)
+    foreach ($f in $files) {
+        $rel = $Prefix + '/' + $f.FullName.Substring($From.Length + 1).Replace('\', '/')
+        if ($Verified -notcontains $rel) {
+            throw "unlisted file in package: $rel -- refusing to install"
+        }
+        $tail = $f.FullName.Substring($From.Length + 1)
+        $dst = Join-Path $To $tail
+        New-Item -ItemType Directory -Path (Split-Path -Parent $dst) -Force | Out-Null
+        Copy-Item -LiteralPath $f.FullName -Destination $dst -Force
+    }
 }
 
 function Remove-PathEntry([string]$dir) {
@@ -1335,12 +1594,25 @@ if ($DryRun) {
     exit 0
 }
 
-Verify-Sums $Payload
+$verified = @()
+if ($NoVerify) {
+    Say "WARNING: -NoVerify -- installing WITHOUT checking the package"
+    $sumsPath = Join-Path $Payload 'SHA256SUMS'
+    if (-not (Test-Path -LiteralPath $sumsPath)) { throw "SHA256SUMS missing -- package is incomplete" }
+    foreach ($line in Get-Content -LiteralPath $sumsPath) {
+        if ($line -match '^[0-9a-f]{64}  (.+)$') { $verified += $Matches[1] }
+    }
+} else {
+    $verified = @(Verify-Sums $Payload)
+    Verify-SignatureIfPresent $Payload
+    $digest = (Get-FileHash -LiteralPath (Join-Path $Payload 'SHA256SUMS') -Algorithm SHA256).Hash.ToLower()
+    Say "[1a/6] SHA256SUMS digest: $digest"
+    Say "       compare it with the digest published on the release page"
+    Say "       (out of band -- do not trust a digest found inside this archive)"
+}
 
 New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
-foreach ($f in Get-ChildItem -LiteralPath (Join-Path $Payload 'bin') -File) {
-    Copy-Item -LiteralPath $f.FullName -Destination (Join-Path $BinDir $f.Name) -Force
-}
+Copy-VerifiedTree (Join-Path $Payload 'bin') $BinDir $verified 'bin'
 $shareDir = Join-Path $Prefix 'share\loment'
 New-Item -ItemType Directory -Path (Join-Path $shareDir 'examples') -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $shareDir 'skill') -Force | Out-Null
@@ -1353,28 +1625,23 @@ foreach ($rel in @('share/loment/version', 'share/loment/seed.ll',
                    'share/loment/examples/tour.lomt',
                    'share/loment/skill/SKILL.md',
                    'share/lompi/skill/SKILL.md')) {
+    if ($verified -notcontains $rel) { throw "unlisted file in package: $rel -- refusing to install" }
     $f = Join-Path $Payload $rel.Replace('/', '\')
-    if (Test-Path -LiteralPath $f) {
-        Copy-Item -LiteralPath $f -Destination (Join-Path $Prefix $rel.Replace('/', '\')) -Force
-    }
+    Copy-Item -LiteralPath $f -Destination (Join-Path $Prefix $rel.Replace('/', '\')) -Force
 }
-# loment/lib: the modules you can `use` by name (proc is one). The name-form search looks
-# at <cwd>/loment/lib, so a packaged user has no copy of it unless we ship one -- and the
-# directory must exist before Copy-Item writes into it.
+# loment/lib: the modules you can `use` by name (proc is one). Copy from the VERIFIED
+# list, not from a wildcard: a stray file in the directory has no hash and must not
+# reach the installed prefix.
 $libSrc = Join-Path $Payload 'share\loment\lib'
 if (Test-Path -LiteralPath $libSrc) {
     $libDst = Join-Path $Prefix 'share\loment\lib'
     New-Item -ItemType Directory -Path $libDst -Force | Out-Null
-    # `-Path`, NOT `-LiteralPath`: the latter does not expand wildcards, so that line
-    # copies NOTHING and says nothing ($ErrorActionPreference='Stop' does not catch it --
-    # there is no error). Measured: after install share/loment/lib was simply absent while
-    # the installer exited 0. The two store copies below already used -Path, which is why
-    # they were always fine.
-    Copy-Item -Path (Join-Path $libSrc '*') -Destination $libDst -Force
+    Copy-VerifiedTree $libSrc $libDst $verified 'share/loment/lib'
 }
-foreach ($rel in @('README.md', 'LICENSE')) {
+foreach ($rel in @('README.md', 'LICENSE-MIT', 'LICENSE-APACHE')) {
+    if ($verified -notcontains $rel) { throw "unlisted file in package: $rel -- refusing to install" }
     $f = Join-Path $Payload $rel
-    if (Test-Path -LiteralPath $f) { Copy-Item -LiteralPath $f -Destination (Join-Path $Prefix $rel) -Force }
+    Copy-Item -LiteralPath $f -Destination (Join-Path $Prefix $rel) -Force
 }
 Say "[2/6] toolchain -> $BinDir"
 
@@ -1395,7 +1662,7 @@ $storeSrc = Join-Path $lompiShareDir 'store'
 $storeFrom = Join-Path $Payload 'share\lompi\store'
 if (Test-Path -LiteralPath $storeFrom) {
     New-Item -ItemType Directory -Path $storeSrc -Force | Out-Null
-    Copy-Item -Path (Join-Path $storeFrom '*') -Destination $storeSrc -Recurse -Force
+    Copy-VerifiedTree $storeFrom $storeSrc $verified 'share/lompi/store'
     $dst = Get-LompiStore (Join-Path $BinDir 'lompi.exe')
     if ($dst) {
         New-Item -ItemType Directory -Path $dst -Force | Out-Null
@@ -1510,7 +1777,17 @@ rem   * plain .zip                 -> this directory IS the payload
 rem Double-clicking this file installs with defaults; see README.md for the switches
 rem (-Prefix, -NoPath, -NoFileType, -NoSkill, -DryRun, -Uninstall).
 setlocal
+rem #422: cmd.exe resolves a bare program name from the CURRENT DIRECTORY before PATH
+rem unless this is set -- and the current directory is the unpack directory, which is
+rem exactly what the archive's supplier controls. Belt and braces: invoke PowerShell by
+rem absolute System32 path below; this closes the same search for anything else.
+set "NoDefaultCurrentDirectoryInExePath=1"
 set HERE=%~dp0
+set "PS=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+if not exist "%PS%" (
+  echo install: Windows PowerShell not found at "%PS%"
+  exit /b 1
+)
 set PSARGS=
 if exist "%HERE%payload.zip" set PSARGS=-PayloadZip "%HERE%payload.zip"
 
@@ -1522,17 +1799,17 @@ rem 2026-10-12: a double-click used to do *exactly* the right thing and show non
 rem console is not visible in that launch, so "it worked" and "it did nothing" looked the same.
 if not "%~1"=="" goto console
 if not exist "%HERE%welcome.ps1" goto console
-powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%HERE%welcome.ps1" %PSARGS%
+"%PS%" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%HERE%welcome.ps1" %PSARGS%
 exit /b %ERRORLEVEL%
 
 :console
-powershell -NoProfile -ExecutionPolicy Bypass -File "%HERE%install.ps1" %PSARGS% %*
+"%PS%" -NoProfile -ExecutionPolicy Bypass -File "%HERE%install.ps1" %PSARGS% %*
 rem String compare, not `if errorlevel 1` -- a crashed interpreter exits NEGATIVE and
 rem cmd compares that as signed, so the batch test would read it as success.
 if not "%ERRORLEVEL%"=="0" (
   echo.
   echo install failed. See README.md, or run it manually:
-  echo   powershell -ExecutionPolicy Bypass -File "%HERE%install.ps1" %PSARGS%
+  echo   "%PS%" -ExecutionPolicy Bypass -File "%HERE%install.ps1" %PSARGS%
   pause
   exit /b 1
 )
@@ -2013,7 +2290,11 @@ $btnInstall.Add_Click({
             }
             $inner = '& ' + (& $q $InstallPs1) + ' ' + ($parts -join ' ') + ' *> ' + (& $q $logFile)
             $ps = New-Object System.Diagnostics.Process
-            $ps.StartInfo.FileName = 'powershell'
+            # #422: never a bare name -- CreateProcess searches the current directory,
+            # which is the unpack directory an archive supplier controls.
+            $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+            if (-not (Test-Path -LiteralPath $psExe)) { throw "Windows PowerShell not found at $psExe" }
+            $ps.StartInfo.FileName = $psExe
             $ps.StartInfo.Arguments = '-NoProfile -ExecutionPolicy Bypass -Command "' + $inner + '"'
             $ps.StartInfo.UseShellExecute = $false
             $ps.StartInfo.CreateNoWindow = $true
@@ -2587,8 +2868,9 @@ def payload(kind: str, bins: dict[str, tuple[bytes, bytes]]) -> dict[str, tuple[
     idx = 1 if kind == "windows" else 0
     for name, pair in bins.items():
         files[f"bin/{name}{'.exe' if kind == 'windows' else ''}"] = (pair[idx], 0o755)
-    # 包里那份启动器是**发行版渠道**的（`docs/222` §4 的端口门）：`--hosted` 与端口标记
-    # 点名拒、不给链接器传 `--allow-ports`。开发通道用 `LAUNCHER_SH` 本体（判据里的桩包）。
+    # 包里那份启动器由 `release` 渠道**生成**（模板里只有注释上的 `@CHANNEL@`）。端口门
+    # 自 2026-10-17（`#406`）起在**两个渠道都开着**：启动器无条件给链接器传
+    # `--allow-ports`，链真 `.so` 不再是开发通道的特权（`docs/219` §8c）。
     files["bin/loment"] = (_subst(LAUNCHER_SH, "release").encode("ascii"), 0o755)
     if kind == "windows":
         # Windows 用原生 .cmd 启动器：包里全是 PE，直接调本机 exe，不再往 WSL 转发
@@ -2613,7 +2895,8 @@ def payload(kind: str, bins: dict[str, tuple[bytes, bytes]]) -> dict[str, tuple[
     for rel, body in _store_files().items():
         files[f"share/lompi/store/{rel}"] = (body, 0o644)
     files["README.md"] = (_subst(README_MD).encode(), 0o644)
-    files["LICENSE"] = (_read(LICENSE), 0o644)
+    for lic in LICENSES:
+        files[lic] = (_read(lic), 0o644)
     if kind == "linux":
         files["install.sh"] = (_subst(INSTALL_SH).encode("ascii"), 0o755)
     else:
@@ -2631,14 +2914,13 @@ def payload(kind: str, bins: dict[str, tuple[bytes, bytes]]) -> dict[str, tuple[
 def _subst(text: str, channel: str = "dev") -> str:
     """把模板里的占位符换掉。**默认 `dev`** —— 于是老调用点（判据里的桩包）行为不变。
 
-    `channel` 只喂 `@CHANNEL@`（`docs/222` §4 的**端口门**，2026-10-12 用户定）：
+    `channel` 只喂 `@CHANNEL@`。**它今天只出现在注释里** —— 端口门自 2026-10-17
+    （`#406`）起在两个渠道都开着：`--hosted` 与带未定义符号的外源对象都由启动器传
+    `--allow-ports` 给链接器，发行版与开发版在这件事上没有行为差别（`docs/219` §8c）。
+    链接器自己的默认仍是"拒"（直接调它时要显式写 `--allow-ports`）。
 
-    * `dev`：`--hosted` 那条路照旧，链外源对象时给链接器传 `--allow-ports`（那扇门在开发
-      通道是开的）；
-    * `release`：`--hosted` / 端口标记**点名拒**，且**一个标志都不传** —— 链接器的默认
-      就是"拒"，于是"发行版里 libc 不可调用"不靠启动器记得做什么，靠默认值本身。
-
-    发行包由 `emit()` 走 `release`；判据里的桩包走默认的 `dev`。
+    发行包由 `emit()` 走 `release`；判据里的桩包走默认的 `dev`。两者生成的脚本在
+    `@CHANNEL@` 之外**逐字节相同**。
     """
     return (text.replace("@DISPLAY@", DISPLAY).replace("@VERSION@", VER)
             .replace("@LIBCALLS@", _FREESTANDING_LIBCALLS)
@@ -2925,7 +3207,8 @@ def _fresh_sources(kind: str) -> dict[str, bytes]:
         "share/loment/version": version_text().encode(),
         f"share/loment/examples/{Path(EXAMPLE).name}": _read(EXAMPLE),
         "README.md": _subst(README_MD).encode(),
-        "LICENSE": _read(LICENSE),
+        "LICENSE-MIT": _read("LICENSE-MIT"),
+        "LICENSE-APACHE": _read("LICENSE-APACHE"),
     }
     if kind == "linux":
         out["bin/loment"] = _subst(LAUNCHER_SH, "release").encode("ascii")

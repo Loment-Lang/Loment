@@ -327,17 +327,54 @@ def test_driver_seed_matches_reference() -> None:
 ## 9. 怎么用
 
 ```bash
-python tools/ci.py --shard-plan 6                # 打印 6 片的分法（片号 + 条数 + 名字）
-python tools/ci.py --static-only --shard 3/6     # 只跑第 3 片
+python tools/ci.py --shard-plan 10               # 打印 10 片的分法（片号 + 条数 + 名字）
+python tools/ci.py --static-only --shard 3/10    # 只跑第 3 片
 python tools/ci.py --static-only                 # 本机整道（不分片，老行为）
 python tools/loment_release.py --emit            # 生成物两件 —— 改了 GLOBS 覆盖的文件就要跑
 python tools/loment_release.py --checksums loment/build/SHA256SUMS
 ```
 
-`gate.yml` 的矩阵里那五行（片号、总数）是 `--shard-plan 6` 的**副本**（**不含片 1** ——
+`gate.yml` 的矩阵里那九行（片号、总数）是 `--shard-plan 10` 的**副本**（**不含片 1** ——
 那是独占那个 job）。**改分片形状要同时改 `ci.py` 和这里**；走样的后果由聚合那一步兜住：
-它会把各片并起来**数**一遍，不等于 `STATIC_CHECKS` 的条数就红。
+它会把各片按**判据名**并一遍，缺失或多余的判据都红（`#443` 之后不再数行数）。
 
-片数的下限也是 `shards()` 守着的：`n` 太小时**直接断言失败**（独占 1 条 + 长尾 2 条已经
-占了 3 片，剩下那 60 多条还得有地方放），不会"分不开就合一片" —— 合掉之后
+片数的下限也是 `shards()` 守着的：`n` 太小时**直接断言失败**（独占 1 条 + 长尾 3 条已经
+占了 4 片，剩下那 80 多条还得有地方放），不会"分不开就合一片" —— 合掉之后
 `--shard K/N` 取到的就不是调用方以为的那一片了。
+
+## 10. 2026-10-18 重量：`loment_elf_test` 与 10 片（`#435`）
+
+**症状**：run 38953249045（PR #404, `f498c5f8`）的墙钟是 30.1 分钟，全部落在 6/6；
+其余五片 5.1 / 5.0 / 3.5 / 2.2 / 0.1 分钟。门禁的墙钟 = 最慢的那一片。
+
+**成因**：`ci.py:SHARD_COST` 是对"树"的一个断言，而**没有任何东西检查它**。
+`loment_elf_test` 在表里没有条目 —— 于是按 `SHARD_DEFAULT_S = 8` 秒算。它实际上
+一条判据编一个 ELF 再执行，实测 **245 / 387 / 617 秒**（三次 run）。不是它变慢了，
+是它过去**没在 runner 上真跑**（`#382` / `#404` 之后才跑起来），表一直没重量。
+
+**量法**（可复现）：
+
+1. 取三次**成功**门禁 run 的 artifact（`gate-log-<K>/gate.out`）：
+   `39162110108` / `39163005969` / `39159523472`（2026-10-18）；
+2. 每行 `:: [static] <套件> PASS <秒>s` 取那个秒数；
+3. 同一个套件在三份里的**中位数**就是表里的数（89 条，没有缺失）。
+
+这些数是在片内 `-j 4` 并行下量的，**本身就含同片争用** —— 拿它均分是对的，
+拿它当"这条判据单独要多久"是错的。
+
+**改了什么**：
+
+* `SHARD_COST` 覆盖 **`STATIC_CHECKS` 全表**（89 条），`unpriced_checks()` 钉住覆盖；
+  新加判据没有条目时 `shards()` 当场断言失败 —— 不会再静默按 8 秒算。
+  确实量不出的可以放进 `SHARD_COST_EXEMPT`（今天为空），那是**登记过的选择**。
+* `GATE_SHARDS` 6 → **10**：按中位数贪心均分，6 片时两个"均分"片各背 **~1180s**；
+  10 片时六个均分片的预测和都是 **~394s**，与三条长尾（`loment_p8_test` 173.6 /
+  `loment_channel_test` 92.8 / `loment_seed_test` 63.9）同一量级。再往上加片没有收益：
+  墙钟的下限变成 `loment_elf_test` 自己（~387s）。
+* 判据 `loment_tools_test::test_every_static_check_has_a_measured_shard_cost` 钉住
+  "每个名字要么有实测条目、要么明确豁免"；它还做一次反向自检（把 `loment_elf_test`
+  从表里拿掉，`unpriced_checks()` 必须点名它）。
+
+**没做的**：没有把 `loment_elf_test` 挪进 `ISOLATED_STATIC`。10 片的分法里它恰好
+独占一个均分片（其余 6 条加起来 ~7s），加进名单只会让"长尾"的定义变模糊；
+哪天它的实测再涨到与 `loment_p8_test` 同量级（~600s 变成常态），再移。

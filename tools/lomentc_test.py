@@ -1010,12 +1010,23 @@ def test_unit_wide_unique_names():
     单元里两个模块各声明一个私有 `helper` 时, 后端会发出两条 `define @helper` (非法 IR),
     调用点还会解析到同一个函数 (静默错编) —— 必须编译期拒。同一模块**内部**的重名照旧
     由原规则报 (别被这条取代)。
+
+    **消息也要说实话**（`#141`）：它必须点名**两个**模块，而不是说"函数 f 与模块 ma
+    重名"（`f` 与 `ma` 并不撞车）。原先只断言"有 `重名`"，于是消息说错话也全绿。
     """
     entry = ROOT / "loment" / "selfhost" / "neg_across" / "entry.lomt"
     mod = lomentc.load(entry)
     deps = lomentc.resolve_deps(mod, ROOT, entry.parent, entry=entry)
     unit_errs = lomentc.check(mod, deps=deps)
     assert any("重名" in e for e in unit_errs), unit_errs
+    dup = [e for e in unit_errs if "`helper`" in e and "重名" in e]
+    assert dup, f"没有点名 `helper` 的撞车消息: {unit_errs}"
+    # 两边都点名：撞车的两个单元是 `entry` 与 `has_helper`（不是 `helper` 与某个模块）
+    for side in ("entry", "has_helper"):
+        assert f"模块 `{side}`" in dup[0], f"消息没点名模块 `{side}`: {dup[0]}"
+    assert "与模块" not in dup[0], (
+        f"还在说「与模块 X 重名」—— 那让用户去调解符号与模块名之间不存在的冲突: {dup[0]}")
+    assert "都会发射" in dup[0], f"没说清真正撞的是什么: {dup[0]}"
     e2 = errs('module m\nfn f() -> u32 { return 1; }\nfn f() -> u32 { return 2; }\n')
     assert any("重复定义" in x for x in e2), e2
 
@@ -1327,10 +1338,79 @@ def test_p4_domain_table_and_audit():
     rs = lomentc.emit_rust(mod, ROOT)
     assert "pub static CAP_DOMAINS: &[CapDomain]" in rs
     assert 'space: "disk", lo: 0, hi: 4, revocable: true' in rs
-    assert "__LOMENT_AUDIT" in rs and "fn __loment_guard(" in rs
+    assert "__LOMENT_AUDIT" in rs
+    # 审计与 trap **各是一个函数**（`#162`）：审计只在放行那一支调用。
+    assert "fn __loment_audit(" in rs and "fn __loment_trap(" in rs
+    assert "__LOMENT_AUDIT[cap] += 1" in rs
     ir = lomentc.emit_llvm(mod, ROOT)
     assert "@__loment_caps = internal constant [1 x { i64, i64, i64, i64 }]" in ir
     assert "@__loment_audit = internal global [16 x i64]" in ir
+
+
+@test
+def test_p4_violating_guard_has_no_audit_side_effect():
+    """`#162`：越界那次**不许**先加审计再 trap（SECURITY.md 属性 1 与 2）。
+
+    两个后端都要问，而且用的不是"看看字符串在不在"：Rust 侧编出来**真跑**一次，
+    用一个越界的运行期下标触发 panic，再读 `__LOMENT_AUDIT` —— 修之前它是 1，
+    修之后是 0（放行那次才变 1）。IR 侧看**结构**：审计 `store` 必须排在
+    `__loment_abort` 之后（也就是只在 `gok` 块里）。
+    """
+    import shutil
+    import subprocess
+    src = ("module m\n"
+           "choose runtime\n"
+           "capability c : disk[0..4]\n"
+           "pub fn f(n: u32) -> u32 {\n"
+           "    guard c(n);\n"
+           "    return n;\n"
+           "}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "g.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        mod = lomentc.load(p)
+        assert lomentc.check(mod) == [], lomentc.check(mod)
+        rs = lomentc.emit_rust(mod, ROOT)
+        ir = lomentc.emit_llvm(mod, ROOT)
+
+    # ---- IR：trap 块在前、审计（getelementptr + store）在后 —— 也就是只在 gok 那支
+    seg = ir[ir.find("define i32 @f("):]
+    abort = seg.find("call void @__loment_abort()")
+    gok = seg.find("_gok:")
+    audit = seg.find("getelementptr [16 x i64], ptr @__loment_audit")
+    store = seg.find("store i64", audit) if audit >= 0 else -1
+    assert 0 <= abort < gok < audit < store, (
+        "IR 里审计不在 gok 块里（abort={} gok={} gep={} store={}）—— "
+        "越界那次会先写审计（属性 1 破了）".format(abort, gok, audit, store))
+
+    # ---- Rust：真跑。没有 rustc 就跳过这一半（环境限制，不改判据的结论面）
+    rustc = shutil.which("rustc")
+    if not rustc:
+        print("      SKIP: 无 rustc（Rust 运行那一半）")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "m.rs").write_text(rs, encoding="utf-8", newline="\n")
+        main = (
+            'include!("m.rs");\n'
+            "fn main() {\n"
+            "    std::panic::set_hook(Box::new(|_| {}));\n"
+            "    let bad = std::panic::catch_unwind(|| f(9));\n"
+            '    println!("bad={} audit={}", bad.is_err(), unsafe { __LOMENT_AUDIT[0] });\n'
+            "    let ok = std::panic::catch_unwind(|| f(2));\n"
+            '    println!("ok={} audit={}", ok.is_ok(), unsafe { __LOMENT_AUDIT[0] });\n'
+            "}\n")
+        (d / "main.rs").write_text(main, encoding="utf-8", newline="\n")
+        exe = d / ("g.exe" if sys.platform == "win32" else "g")
+        r = subprocess.run([rustc, "-O", "-o", str(exe), str(d / "main.rs")],
+                           capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, r.stderr[-600:]
+        out = subprocess.run([str(exe)], capture_output=True, text=True,
+                             shell=False).stdout
+        assert "bad=true audit=0" in out, (
+            f"越界那次写了审计（应当是 0）: {out!r}")
+        assert "ok=true audit=1" in out, f"放行那次没计审计: {out!r}"
+    print("      越界 trap 后审计为 0，放行一次才变 1（Rust）；IR 的 store 在 abort 之后")
 
 
 @test
@@ -4409,7 +4489,7 @@ def test_lspe_dimension_defaults_open():
     assert lp["sites"] >= 1
     assert lp["obligations"] == lp["sites"]
     assert lp["sites"] == lp["proved"] + lp["undecided"]
-    assert "index" in lp["per_kind"]
+    assert "InBounds" in lp["per_kind"]
     assert lp["floors"] == 0
     assert lp["floor_detail"] == {"assumed": 0, "stale_wf": 0, "budget": 0, "drop_honest": 0}
     assert lp["invariants"]["i1"] == "ok"
@@ -4458,7 +4538,7 @@ def test_lspe_q1_provenance_and_strict_e034():
     lp = doc["lspe"]
     assert lp["sites"] == 3, lp
     assert lp["proved"] == 2 and lp["undecided"] == 1, lp
-    assert lp["per_kind"] == {"guard": "1/1", "index": "1/2"}, lp
+    assert lp["per_kind"] == {"GuardHolds": "1/1", "InBounds": "1/2"}, lp
     assert potato.validate(doc) == []
 
 
@@ -4507,8 +4587,11 @@ def test_lspe_census_agrees_with_the_ast():
         ast: dict[str, int] = {}
         walk(mod, ast)
         tok: dict[str, int] = {}
+        # 独立对照只覆盖 E1/E2 两族 —— E3/E4 的站点不是"节点数"同形的东西
+        # （`free`/`let` 的**流**不是节点本身），它们的判据另写。
         for s in getattr(mod, "lspe_sites", []):
-            tok[s["kind"]] = tok.get(s["kind"], 0) + 1
+            if s["kind"] in ("guard", "index"):
+                tok[s["kind"]] = tok.get(s["kind"], 0) + 1
         checked += 1
         if ast != tok:
             bad.append((p.name, ast, tok))
@@ -4713,6 +4796,191 @@ def test_a_parameter_may_shadow_a_module_const():
     dup = ("module v3" + chr(10) + "fn f(K: i64, K: i64) -> i64 { return K; }" + chr(10))
     assert any("重复" in x for x in errs(dup)), errs(dup)
     print("      形参遮蔽常量：接受；真重名：仍然报")
+
+
+def _lspe_registry_errors() -> list[str]:
+    """登记表自身的判据（测试侧）：缺所有者、缺 accept 集合、未知证据、Differential 销义务。"""
+    errs: list[str] = []
+    known = set(lomentc.LSPE_EVIDENCE_KINDS)
+    for name, spec in lomentc.LSPE_OBLIGATIONS.items():
+        owner = spec.get("owner")
+        accept = spec.get("accept")
+        if not isinstance(owner, str) or not owner:
+            errs.append(f"{name}: 缺语义所有者")
+        if not isinstance(accept, tuple) or not accept:
+            errs.append(f"{name}: 缺 accept 集合")
+            continue
+        bad = set(accept) - known
+        if bad:
+            errs.append(f"{name}: 未知证据种类 {sorted(bad)}")
+        if "Differential" in accept:
+            errs.append(f"{name}: Differential 不能单独销掉义务")
+    return errs
+
+
+@test
+def test_lspe_obligation_registry():
+    """14 条义务、8 种证据；每条都有 owner 与 accept；Differential 不在任何 accept 里。"""
+    assert len(lomentc.LSPE_OBLIGATIONS) == 14
+    assert len(lomentc.LSPE_EVIDENCE_KINDS) == 8
+    assert _lspe_registry_errors() == []
+    assert all("Differential" not in v["accept"]
+               for v in lomentc.LSPE_OBLIGATIONS.values())
+    assert set(lomentc.LSPE_EVIDENCE_KINDS) == {
+        "Axiom", "Syntactic", "Typed", "LocalFlow", "Interproc",
+        "GlobalInvariant", "Assumed", "Differential"}
+
+
+@test
+def test_lspe_level_only_lowers_proved():
+    """L0 只认语法证据；L3 才认类型证据。级别只缩不放（`docs/262` §5.6）。"""
+    src = ("module lspe_lv\n\nchoose runtime\n\n"
+           "capability d : disk[0..8]\n\n"
+           "fn f(a: [u32; 4], i: u32) -> u32 {\n"
+           "    guard d(i);\n"
+           "    let x: u32 = a[0];\n"
+           "    return a[i];\n"
+           "}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "lv.lomt"
+        p.write_text(src, encoding="utf-8", newline=chr(10))
+        d0 = json.loads(lomentc.emit_potato(lomentc.load(p, lspe_level=0), ROOT))
+        d3 = json.loads(lomentc.emit_potato(lomentc.load(p, lspe_level=3), ROOT))
+    assert d0["lspe"]["level"] == 0 and d3["lspe"]["level"] == 3
+    # L0：guard 的 Typed 证据被级别挡掉，只剩裸字面量下标那条 Syntactic。
+    assert d0["lspe"]["proved"] == 1, d0["lspe"]
+    assert d3["lspe"]["proved"] == 2, d3["lspe"]
+    assert d0["lspe"]["proved"] <= d3["lspe"]["proved"]
+
+
+def _lspe_load(tmp: str, name: str, src: str, level: int = 3):
+    p = Path(tmp) / f"{name}.lomt"
+    p.write_text(src, encoding="utf-8", newline=chr(10))
+    mod = lomentc.load(p, lspe_level=level)
+    return p, mod
+
+
+@test
+def test_lspe_e3_a_reachable_use_after_free_is_never_proved():
+    """#740：`free` 之后可达的用，只能是 UNDECIDED —— 不能是 PROVED。"""
+    src = ("module e3_alive\n\nchoose runtime\n\n"
+           "fn f(p: ptr) -> u32 {\n"
+           "    free(p);\n"
+           "    if p == p {\n"
+           "        return 0;\n"
+           "    }\n"
+           "    return 1;\n"
+           "}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p, mod = _lspe_load(td, "alive", src)
+        doc = json.loads(lomentc.emit_potato(mod, ROOT))
+    alive = [s for s in mod.lspe_sites if s["kind"] == "alive"]
+    assert alive, [s["kind"] for s in mod.lspe_sites]
+    assert all(s["evidence"] == "none" for s in alive), alive
+    assert doc["lspe"]["per_kind"]["Alive"] == f"0/{len(alive)}", doc["lspe"]
+
+
+@test
+def test_lspe_e3_an_unreachable_use_after_free_is_proved():
+    """#740：`return` 之后的用不可达，`Alive` 这一条能证；`free` 本身仍无来源。"""
+    src = ("module e3_dead\n\nchoose runtime\n\n"
+           "fn g(p: ptr) -> u32 {\n"
+           "    free(p);\n"
+           "    return 0;\n"
+           "    let x: u32 = load8(p, 0);\n"
+           "}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p, mod = _lspe_load(td, "dead", src)
+        d0 = json.loads(lomentc.emit_potato(mod, ROOT))
+        d0_low = json.loads(lomentc.emit_potato(
+            lomentc.load(p, lspe_level=0), ROOT))
+    alive = [s for s in mod.lspe_sites if s["kind"] == "alive"]
+    assert [s["evidence"] for s in alive] == ["LocalFlow"], alive
+    assert d0["lspe"]["per_kind"]["Alive"] == "1/1", d0["lspe"]
+    assert d0["lspe"]["per_kind"]["FreeOwnership"] == "0/1", d0["lspe"]
+    # L0 不认 LocalFlow：同一条站点降回 UNDECIDED（级别只缩不放）。
+    assert d0_low["lspe"]["per_kind"]["Alive"] == "0/1", d0_low["lspe"]
+
+
+@test
+def test_lspe_e3_initialized_before_assignment_is_undecided():
+    """#740：`let x: T;` 之后、赋值之前的读是 UNDECIDED；赋值之后才是 LocalFlow。"""
+    src = ("module e3_init\n\nchoose runtime\n\n"
+           "fn h() -> u32 {\n"
+           "    let x: u32;\n"
+           "    let a: u32 = x;\n"
+           "    x = 3;\n"
+           "    return a + x;\n"
+           "}\n")
+    with tempfile.TemporaryDirectory() as td:
+        _p, mod = _lspe_load(td, "init", src)
+        doc = json.loads(lomentc.emit_potato(mod, ROOT))
+    init = [s for s in mod.lspe_sites if s["kind"] == "init"]
+    assert [s["evidence"] for s in init] == ["none", "LocalFlow"], init
+    assert doc["lspe"]["per_kind"]["Initialized"] == "1/2", doc["lspe"]
+
+
+@test
+def test_lspe_e3_exclusive_overlap_is_undecided():
+    """#740：同一条语句里 `&mut x` 与 `x` 重叠 ⇒ `Exclusive` 不证。"""
+    src = ("module e3_excl\n\nchoose runtime\n\n"
+           "fn take2(p: ptr, v: u32) -> u32 {\n"
+           "    return load8(p, 0) + v;\n"
+           "}\n\n"
+           "fn h() -> u32 {\n"
+           "    let x: u32 = 1;\n"
+           "    return take2(&mut x as ptr, x);\n"
+           "}\n")
+    with tempfile.TemporaryDirectory() as td:
+        _p, mod = _lspe_load(td, "excl", src)
+        doc = json.loads(lomentc.emit_potato(mod, ROOT))
+    excl = [s for s in mod.lspe_sites if s["kind"] == "exclusive"]
+    assert [s["evidence"] for s in excl] == ["none"], excl
+    assert doc["lspe"]["per_kind"]["Exclusive"] == "0/1", doc["lspe"]
+
+
+@test
+def test_lspe_e4_deref_only_callee_yields_interproc():
+    """#741：只把首参透给 `load8` 的被调有摘要；把首参返回的被调没有。
+
+    摘要键含实参文本 —— 同一个 `deref` 的两次调用是两个键（推断式泛型的替换由实参决定）。
+    """
+    src = ("module e4_sum\n\nchoose runtime\n\n"
+           "fn deref(p: ptr) -> u32 {\n"
+           "    return load8(p, 0);\n"
+           "}\n\n"
+           "fn leak(p: ptr) -> ptr {\n"
+           "    return p;\n"
+           "}\n\n"
+           "fn h(q: ptr, r: ptr) -> u32 {\n"
+           "    let a: u32 = deref(q);\n"
+           "    let b: u32 = deref(r);\n"
+           "    let c: ptr = leak(q);\n"
+           "    return a + b;\n"
+           "}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p, mod = _lspe_load(td, "sum", src)
+        d1 = json.loads(lomentc.emit_potato(lomentc.load(p, lspe_level=1), ROOT))
+        d3 = json.loads(lomentc.emit_potato(mod, ROOT))
+    calls = [s for s in mod.lspe_sites if s["kind"] == "call"]
+    assert [s["evidence"] for s in calls] == ["Interproc", "Interproc", "none"], calls
+    assert len({s["id"] for s in calls}) == 3, calls
+    assert d3["lspe"]["per_kind"]["SummaryContract"] == "2/3", d3["lspe"]
+    # L1 不认 Interproc（E4 从 L2 起）：站点还在，判决降回 UNDECIDED。
+    assert d1["lspe"]["per_kind"]["SummaryContract"] == "0/3", d1["lspe"]
+
+
+@test
+def test_lspe_e4_recursive_summary_terminates_undecided():
+    """#741：纯递归没有基例 ⇒ 摘要不进安全表，调用点是洞（不是静默的 PROVED）。"""
+    src = ("module e4_rec\n\nchoose runtime\n\n"
+           "fn rec(p: ptr) -> u32 {\n"
+           "    return rec(p);\n"
+           "}\n")
+    with tempfile.TemporaryDirectory() as td:
+        _p, mod = _lspe_load(td, "rec", src)
+    calls = [s for s in mod.lspe_sites if s["kind"] == "call"]
+    assert [s["evidence"] for s in calls] == ["none"], calls
 
 
 def main() -> int:

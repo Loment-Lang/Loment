@@ -871,12 +871,12 @@ def test_the_port_gate_only_counts_names_left_unresolved():
     对象调收编面提供的 `memcpy` 也一样 —— 那个名字链接器自己会发出来。
     """
     a = _elf_obj(
-        code=((".text", b"\xE8\x00\x00\x00\x00\xC3"),),
+        code=((".text", bytes([0xE8, 0, 0, 0, 0, 0xC3])),),
         syms=(("f", 1, 2, ".text", 0, 0), ("g", 1, 2, 0, 0, 0)),
         relocs=((".text", 1, lomelf.REL_PLT32, 1, -4),))
     b = _elf_obj(syms=(("g", 1, 2, ".text", 0, 0),))
     c = _elf_obj(
-        code=((".text", b"\xE8\x00\x00\x00\x00\xC3"),),
+        code=((".text", bytes([0xE8, 0, 0, 0, 0, 0xC3])),),
         syms=(("c_fn", 1, 2, ".text", 0, 0), ("memcpy", 1, 2, 0, 0, 0)),
         relocs=((".text", 1, lomelf.REL_PLT32, 1, -4),))
     with tempfile.TemporaryDirectory() as t:
@@ -942,7 +942,7 @@ def test_an_object_can_call_into_a_linked_shared_object():
     `call` 的落点是 16 对齐的 PLT 桩（不是 0，也不是对象自己的代码）。
     """
     obj = _elf_obj(
-        code=((".text", b"\xE8\x00\x00\x00\x00\xC3"),),
+        code=((".text", bytes([0xE8, 0, 0, 0, 0, 0xC3])),),
         syms=(("f", 1, 2, ".text", 0, 0), ("libfunc", 1, 2, 0, 0, 0)),
         relocs=((".text", 1, lomelf.REL_PLT32, 1, -4),))
     with tempfile.TemporaryDirectory() as t:
@@ -992,6 +992,30 @@ def test_extern_call_sites_save_the_callers_rbx():
     b = t.find(b"\x48\x89\xDC\x5B")             # mov rsp, rbx; pop rbx
     assert a >= 0 and b > a, (a, b)
     print("      extern 调用点: push rbx … pop rbx 包住了对齐序列")
+
+
+@test
+def test_unresolved_symbol_message_names_the_way_out():
+    """`#634`：没人提供的符号，报错要说**怎么补**，不要说"这一步还不链 libc"。
+
+    "第 2 阶段仍不链 libc" 从 V1/V2 起就不成立了 —— 现在链一个导出它的 `.so`
+    就是解法。文字会被人照做，所以它必须指对路。
+    """
+    obj = _elf_obj(
+        code=((".text", bytes([0xE8, 0, 0, 0, 0, 0xC3])),),
+        syms=(("f", 1, 2, ".text", 0, 0), ("libfunc", 1, 2, 0, 0, 0)),
+        relocs=((".text", 1, lomelf.REL_PLT32, 1, -4),))
+    with tempfile.TemporaryDirectory() as t:
+        fo = _load_obj(Path(t), "helper.o", obj)
+        try:
+            lomelf.compile_ll(_IR_START0, [fo], allow_ports=True)
+        except lomelf.Unsupported as e:
+            msg = str(e)
+            assert "不链 libc" not in msg, msg
+            assert ".so" in msg or "定义它的对象" in msg, msg
+            print("      未定义符号：报错点名 `--link` 一个 .so 或补上定义它的对象")
+        else:
+            raise AssertionError("没人提供的符号居然链过去了")
 
 
 def _heap_rounding(ir: str) -> tuple[int, int, int]:

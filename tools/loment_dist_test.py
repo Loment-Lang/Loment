@@ -133,7 +133,8 @@ def test_layout() -> None:
     lin = loment_dist.payload("linux", {"loment-driver": (b"\x7fELF-fake", b"MZ-fake")})
     win = loment_dist.payload("windows", {"loment-driver": (b"\x7fELF-fake", b"MZ-fake")})
     want_common = {"bin/loment", "share/loment/version", "share/loment/seed.ll",
-                   "share/loment/examples/user_hello.lomt", "README.md", "LICENSE"}
+                   "share/loment/examples/user_hello.lomt", "README.md",
+                   "LICENSE-MIT", "LICENSE-APACHE"}
     check("payload 公共布局齐全", want_common <= set(lin))
     check("linux 有 install.sh 且可执行",
           lin.get("install.sh", (b"", 0))[1] == 0o755)
@@ -193,6 +194,87 @@ def test_layout() -> None:
     check("loment.cmd usage 块所有非空行均以 echo 开头",
           all(ln.startswith("echo") for ln in usage_lines),
           str([ln for ln in usage_lines if not ln.startswith("echo")]))
+
+
+# ------------------------------------------------- 安装器与发布链的加固 (0.1.5 security)
+#
+# 这一组是**静态形状**判据：它们不构建包，所以在 ubuntu runner 上也跑得到。
+# 真跑那半在下面 `test_install_sh` / `test_windows_installer` 里（需要 sh / Windows）。
+
+def test_installer_hardening() -> None:
+    lin = loment_dist.INSTALL_SH
+    win = loment_dist.INSTALL_PS1
+    cmd = loment_dist.INSTALL_CMD
+    wps = loment_dist.WELCOME_PS1
+
+    # ---- #422: 裸名 `powershell` 会先搜当前目录（= 攻击者控制的解包目录）
+    bare = [ln.strip() for ln in (cmd + "\n" + wps).splitlines()
+            if re.match(r"^\s*powershell(\.exe)?\s", ln, re.I)]
+    check("安装脚本不按裸名调用 powershell (#422)", not bare, str(bare[:2]))
+    abs_ps = "System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+    check("install.cmd 用 System32 下的绝对 powershell 路径 (#422)", abs_ps in cmd)
+    check("setup 启动器用绝对 powershell 路径 (#422)", abs_ps in wps)
+    check("install.cmd 关掉当前目录搜索 (#422)",
+          "NoDefaultCurrentDirectoryInExePath" in cmd)
+
+    # ---- #423: 解包前逐条校验；越界条目拒绝；目录随机而非 PID 可猜
+    check("install.ps1 手工读 zip 并在写盘前校验条目 (#423)",
+          "ZipFile" in win and "GetFullPath" in win and "SHA256SUMS" in win)
+    check("install.ps1 拒绝越出解包根的条目 (#423)",
+          "escapes the extraction root" in win)
+    check("install.ps1 解包目录用随机名, 不再用 PID (#423)",
+          "loment-setup-' + $PID" not in win and "NewGuid" in win)
+
+    # ---- #424: 校验的是清单，复制的也必须只有清单
+    check("install.sh 不再按目录通配复制 (#424)",
+          'cp -f "$src/bin/"*' not in lin and 'cp -R "$src/share' not in lin,
+          "仍按目录复制: 清单外文件会被装上")
+    check("install.sh 按 SHA256SUMS 逐条复制 (#424)",
+          "while IFS= read -r" in lin and "SHA256SUMS" in lin)
+    check("install.sh 对清单外的 bin/ 文件硬报错 (#424)",
+          "unlisted file in package" in lin)
+    check("install.ps1 不再按目录通配复制 (#424)",
+          "Get-ChildItem -LiteralPath (Join-Path $Payload 'bin') -File" not in win)
+    check("install.ps1 对清单外的文件硬报错 (#424)",
+          "unlisted file in package" in win)
+
+    # ---- #425: 没有校验器时**拒绝**，不是跳过
+    check("install.sh 没有 SHA-256 校验器时拒绝安装 (#425)",
+          "no SHA-256 verifier" in lin and "skipping package verification" not in lin)
+    check("install.sh 有显式的 --no-verify 退出开关 (#425)",
+          "--no-verify" in lin)
+
+    # ---- #419: 摘要要能被用户拿到归档之外核对
+    low = lin.lower()
+    check("install.sh 打印 SHA256SUMS 摘要供离线核对 (#419)",
+          "release page" in low and "digest" in low)
+    loww = win.lower()
+    check("install.ps1 打印 SHA256SUMS 摘要供离线核对 (#419)",
+          "release page" in loww and "digest" in loww)
+
+
+def test_release_integrity_anchor() -> None:
+    rel = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    for asset in ("SHA256SUMS.asc", "loment-signing.asc", "FINGERPRINT"):
+        check(f"release.yml 把 {asset} 挂成发布资产 (#419)", asset in rel)
+    check("release.yml 对 SHA256SUMS 做分离签名 (#419)", "detach-sign" in rel)
+    check("release.yml 没密钥时拒绝发布 (#419)",
+          "LOMENT_RELEASE_SIGNING_KEY" in rel)
+    check("release.yml 把摘要写进 release 正文 (归档之外的第二个渠道) (#419)",
+          "sha256sum" in rel and "release edit" in rel)
+
+    manifest = (ROOT / ".github" / "workflows" / "manifest.yml").read_text(encoding="utf-8")
+    check("manifest.yml 不再在 fork 的树上跑写权限 job (#420)",
+          not re.search(r"^  pull_request_target:", manifest, re.M)
+          and "maintainer_can_modify" not in manifest
+          and "github.event.pull_request" not in manifest,
+          "fork 的树仍能进入带写权限 token 的作业")
+
+    co = ROOT / ".github" / "CODEOWNERS"
+    body = co.read_text(encoding="utf-8") if co.exists() else ""
+    check(".github/CODEOWNERS 罩住门禁、判据预算与工作流 (#421)",
+          co.exists() and "tools/ci.py" in body and "gate-floors.txt" in body
+          and ".github/workflows/" in body)
 
 
 # ------------------------------------------------------------------ 2/3. 归档
@@ -421,6 +503,32 @@ def test_install_sh(tar: Path) -> None:
     r = wsl("sh", wsl_path(install), "--prefix", PREFIX_IT, "--no-path")
     check("重复安装幂等", r.returncode == 0, (r.stderr or "")[-160:])
 
+    # #424: 清单之外的 bin/ 文件必须**硬报错**，不能"装上去但没校验过"。
+    # 复制一棵树再加一个文件 —— 校验和仍然全对，只有"复制集合 == 校验集合"能抓到它。
+    tamper = work / "tamper"
+    pfx_evil = PREFIX_IT + "_evil"
+    wsl("rm", "-rf", pfx_evil)
+    if tamper.exists():
+        shutil.rmtree(tamper)
+    shutil.copytree(root, tamper)
+    (tamper / "bin" / "loment-evil").write_bytes(b"#!/bin/sh\nexit 0\n")
+    r = wsl("sh", wsl_path(tamper / "install.sh"), "--prefix", pfx_evil, "--no-path")
+    out = (r.stdout or "") + (r.stderr or "")
+    check("install.sh 拒绝清单外的 bin/ 文件 (#424)",
+          r.returncode != 0 and "unlisted file in package" in out, out[-200:])
+    wsl("rm", "-rf", pfx_evil)
+
+    # #425: 没有任何 SHA-256 校验器时必须**停下**。PATH 清空后 `sh` 仍由绝对路径启动，
+    # `command -v` 什么也找不到 —— 这正是最小容器/加固环境里的形状。
+    pfx_nv = PREFIX_IT + "_nv"
+    wsl("rm", "-rf", pfx_nv)
+    r = wsl("env", "PATH=/nonexistent", "/bin/sh", wsl_path(install),
+            "--prefix", pfx_nv, "--no-path")
+    out = (r.stdout or "") + (r.stderr or "")
+    check("install.sh 没有 SHA-256 校验器时拒绝安装 (#425)",
+          r.returncode != 0 and "verifier" in out, out[-200:])
+    wsl("rm", "-rf", pfx_nv)
+
     # 卸载: 清干净
     r = wsl("sh", wsl_path(install), "--uninstall", "--prefix", PREFIX_IT)
     r2 = wsl("test", "-e", f"{PREFIX_IT}/bin/loment")
@@ -488,6 +596,36 @@ def test_windows_installer(zipf: Path) -> None:
     out = (r.stdout or "") + (r.stderr or "")
     check("install.ps1 -PayloadZip (自解压包路径) 也能跑",
           r.returncode == 0 and "payload" in out, out[-220:])
+
+    # #423: 一个把条目写到解包目录之外的 zip 必须被**写盘之前**拒绝。
+    # `..\loment-escape.txt` 就是最小形状；不校验时它会落到 %TEMP% 根上。
+    evil = work / "evil.zip"
+    with zipfile.ZipFile(evil, "w") as zf:
+        zf.writestr("SHA256SUMS", b"")
+        zf.writestr("../loment-escape.txt", b"pwned\n")
+    r = subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps1),
+                        "-DryRun", "-PayloadZip", str(evil)], capture_output=True, text=True,
+                       shell=False, encoding="utf-8", errors="replace", timeout=180)
+    out = (r.stdout or "") + (r.stderr or "")
+    check("install.ps1 拒绝越出解包根的 zip 条目 (#423)",
+          r.returncode != 0 and "escapes the extraction root" in out, out[-220:])
+    with contextlib.suppress(OSError):
+        (Path(tempfile.gettempdir()) / "loment-escape.txt").unlink()
+
+    # #424: 清单之外的文件必须拒绝装上（真跑 install.ps1，不是只看文本）。
+    tamper = work / "tamper"
+    if tamper.exists():
+        shutil.rmtree(tamper)
+    shutil.copytree(root, tamper)
+    (tamper / "bin" / "loment-evil.exe").write_bytes(b"MZ" + b"\0" * 32)
+    r = subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps1),
+                        "-PayloadDir", str(tamper), "-Prefix", str(work / "inst-tamper"),
+                        "-NoPath", "-NoFileType", "-NoSkill"],
+                       capture_output=True, text=True, shell=False,
+                       encoding="utf-8", errors="replace", timeout=300)
+    out = (r.stdout or "") + (r.stderr or "")
+    check("install.ps1 拒绝清单外的 bin/ 文件 (#424)",
+          r.returncode != 0 and "unlisted file in package" in out, out[-220:])
 
     exe = OUT / f"loment-{VER}-windows-x64-setup.exe"  # 正式产物目录里的 (测试不重建 exe)
     if exe.exists():
@@ -1060,6 +1198,8 @@ def main() -> int:
                      ("包里那个 VM 真跑一份程序", test_lvm_ships_and_runs_a_program),
                      ("布局与脚本卫生", test_layout), ("归档内容与确定性", test_archives),
                      ("安装脚本点名更靠前的同名命令", test_installers_name_an_earlier_lompi),
+                     ("安装器加固 (0.1.5 security)", test_installer_hardening),
+                     ("发布完整性锚与工作流权限面", test_release_integrity_anchor),
                      ("--check 的新鲜度", test_check_detects_staleness),
                      ("skill 与示例同步", test_skill_example_sync),
                      ("读者文档里的样例都能编", test_docs_samples_compile)):

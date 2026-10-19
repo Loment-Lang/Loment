@@ -66,7 +66,7 @@
 |---|---|---|---|
 | 1 | rustc 的 `help:` | 唯一候选时**印出改好的那一行**（行号 + 竖线 + 替换后的名字 + 新名字下的插入符），而不是只说一句"你是不是想写 X" | `test_the_help_block_prints_the_fixed_line` |
 | 2 | Ruby 的 `Did you mean?` | **并列不再闭嘴**：列出最多 3 个候选，每条带**种类**（`a function` / `a local variable`，来自 `decl_kw`）与**行号** | `test_ties_list_candidates_with_kind_and_line` |
-| 3 | rustc `--error-format=json` / Swift fix-it | `--json` 的 `suggestions[]` 给 `replacement` + **`byte_start`/`byte_end`** + `applicability`（`MaybeIncorrect`，与 rustc 对同类建议的判定同名同义）。**自己加的一条规矩**：字节偏移**只在那名字于本文件里全局唯一时**才给 —— 我们拿不到编译器的 span，位置是**推**出来的，推不准就只给名字 | `test_json_suggestions_are_machine_applicable` |
+| 3 | rustc `--error-format=json` / Swift fix-it | `--json` 的 `suggestions[]` 给 `replacement` + **`byte_start`/`byte_end`** + `applicability`（`MaybeIncorrect`，与 rustc 对同类建议的判定同名同义）。**自己加的两条规矩**：字节偏移**只在那名字于本文件里全局唯一时**才给 —— 我们拿不到编译器的 span，位置是**推**出来的，推不准就只给名字；**没有候选时整个字段缺席**（`#51`），空数组会被读成"没有可用的修改" | `test_json_suggestions_are_machine_applicable` · `test_json_omits_an_empty_suggestions_array` |
 | 4 | rustc 的 `try 'rustc --explain E0308'` | 结尾一行 `more: loment explain E002`（由出现过的码驱动） | `test_the_tail_points_at_loment_explain` |
 | 5 | clang `-ferror-limit=20` / Go 卡 10 条 / javac `-Xmaxerrs` | `--max N`（默认 **20**，`0` = 全部），超了**明说还剩几条** | `test_max_caps_and_says_how_many_were_hidden` |
 | 6 | clang 的 `^` 与 `~` 两种标记、`note: declared here` | 只抄了**精神**（插入符要指到 token）—— 见 §4 | 同 #1（改好的那行下面那个 `^`） |

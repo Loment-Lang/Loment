@@ -269,72 +269,135 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
 #: (`loment_dist_test` 用的 `loment/build/dist` 只有它自己碰, 不必独占。)
 EXCLUSIVE_STATIC = ("lompi_sync",)
 
-#: 各条判据在 **CI runner**（ubuntu-latest, 4 vCPU）上的实测耗时, 秒。
-#: 量于 2026-09-26 那一轮 `gate.out`（run 36209626967）, **`loment_dist_test` 除外** ——
-#: 它那 954s 里有 3/4 是"用 stage1 重编自举驱动", 2026-10-09 已经拿掉（docs/213）,
-#: 这里填的是拿掉之后的估计值。
+#: 各条判据在 **CI runner**（ubuntu-latest, 4 vCPU, 片内 `-j 4`）上的实测耗时, 秒。
 #:
-#: **只用来切分片**, 且过期只会让分片不均 —— 不会漏判据: 分片是对 `STATIC_CHECKS`
-#: **全表**切的（见 `shards`）, 没登记的名字按 `SHARD_DEFAULT_S` 算。
+#: **量法（2026-10-18, `#435`）**：取三次**成功**门禁 run 的 artifact ——
+#: `39162110108` / `39163005969` / `39159523472` —— 每个套件那一行
+#: `:: [static] <名> PASS <秒>s` 的**中位数**（三份里都出现过的名字, 没有缺失）。
+#: 这些数是在片内并行下量的, 所以**本身就含同片争用**：拿它均分是对的,
+#: 拿它当"这条判据单独要多久"是错的。重量的做法与那几个 run 的原始数据见 `docs/213` §10。
+#:
+#: **每一个 `STATIC_CHECKS` 都必须在这里有一行**（`unpriced_checks()` 钉住）——
+#: 这正是 `#435` 的成因：`loment_elf_test` 没有条目, 按 `SHARD_DEFAULT_S` 的 8 秒算,
+#: 实际 245～617 秒, 把 6/6 那片拖到 30 分钟。**新加判据要量一次再填**;
+#: 确实还量不出（比如没在 runner 上跑过）就放进 `SHARD_COST_EXEMPT` 并写清理由。
 SHARD_COST = {
-    "lomentc_test": 15.8,
-    "potato_test": 16.8,
-    "loment_ct_test": 1.9,
-    "loment_ctrans_test": 168.9,
-    "loment_lomtfrom_test": 9.3,
-    "loment_trans_test": 136.6,
-    "loment_potato_emit_test": 50.0,
-    "loment_grammar_test": 1.1,
-    "loment_tools_test": 6.3,
-    "loment_p8_test": 229.2,
-    "loment_rule_parity": 2.5,
-    # 渠道（`docs/231`）：三次自举驱动 IR + 两个 ELF 构建 —— 与本机实测同量级时再收窄。
-    "loment_channel_test": 300.0,
-    "loment_seed_test": 243.8,
-    "loment_docs_test": 0.5,
-    "loment_editors_test": 1.3,
-    "loment_dist_test": 110.0,
-    "loment_src": 1.2,
-    "loment_lib_test": 10.0,
-    "loment_cli_test": 50.8,
-    "loment_err_test": 6.6,
-    # `#369` 的计量器：28 次运行 + 一次 `种子 -> clang -> stage1`。这个数是**估的**
-    # （于 Windows+WSL 实测 17s；runner 上原生起 stage1，应该更小）—— 按这张表自己的
-    # 说明，估偏只会让分片不均，不会漏判据。
-    "loment_invariant_test": 20.0,
-    "loment_std_test": 1.0,
-    "loment_libl_test": 3.0,
-    # 实测: 4 条; `lumtui_demo` 在 T0 上要 6.2s×3（判据 D 的 A/B），合计 ~40s。
-    "lvm_t2_test": 45.0,
-    # 实测: 4 条; 语料 9 份各编一次紧凑形（`lumtui_demo` 那份解码/编码最重）。
-    "lvm_compact_test": 30.0,
-    # 实测: 1 条; 种子链成 stage1（纯 Python 链接）+ 156 个模块各编一次。
-    "loment_store_twin_test": 120.0,
-    # 实测: 3 条; 语料 9 份各记一趟值再跑一趟 T3，另两份夹具。
-    "lvm_t3_test": 60.0,
-    # 实测: 3 条; 死循环三档 + 五种拒绝 + 读一页文档，秒级。
-    "lvm_stability_test": 10.0,
-    # 实测: 3 条; 四档各跑一趟 lumtui_demo（T0 那份 ~7s），合计 ~12s。
+    "fuai_contract_check": 0.0,
+    "lom_audit": 0.0,
+    "lomc_test": 3.6,
+    "loment_admit_test": 2.2,
+    "loment_capasserts_test": 4.0,
+    "loment_caps_test": 99.9,
+    "loment_channel_test": 92.8,
+    "loment_cli_test": 29.5,
+    "loment_comefor_test": 14.5,
+    "loment_cpptrans_test": 0.1,
+    "loment_cstrans_test": 0.0,
+    "loment_ct_test": 1.6,
+    "loment_ctrans_test": 63.5,
+    "loment_dap_test": 0.0,
+    "loment_dist_test": 170.2,
+    "loment_doc_test": 57.3,
+    "loment_docs_test": 0.1,
+    "loment_door_test": 0.2,
+    "loment_editors_test": 0.3,
+    # `#435` 的主角：55 条判据（那一轮 34 条）, **每条都编一个 ELF 再执行**。量到
+    # 245 / 387 / 617s（三次 run）, 中位数 387s —— 而它此前连条目都没有。
+    "loment_elf_test": 387.4,
+    "loment_eol": 0.2,
+    "loment_eol_test": 2.4,
+    "loment_err_test": 11.0,
+    "loment_extblock_test": 1.2,
+    "loment_ffi_test": 1.9,
+    "loment_filetype_test": 0.0,
+    "loment_fmt_test": 45.0,
+    "loment_gc_surface_test": 90.9,
+    "loment_gc_why_test": 0.8,
+    "loment_genesis_test": 0.4,
+    "loment_gotrans_test": 5.8,
+    "loment_grammar_test": 2.1,
+    "loment_hosted_test": 3.6,
+    "loment_i18n_test": 0.0,
+    "loment_internet_test": 8.9,
+    "loment_invariant_test": 72.5,
+    "loment_json_test": 2.3,
+    "loment_jtrans_test": 0.0,
+    "loment_lib_test": 7.4,
+    "loment_libl_test": 1.9,
+    "loment_lomc_test": 9.5,
+    "loment_lompi_test": 61.5,
+    "loment_lomtfrom_test": 6.8,
+    "loment_lsp_test": 47.0,
+    "loment_lumtui_test": 4.9,
+    "loment_megaproject_test": 16.6,
+    "loment_multilang_test": 0.0,
+    "loment_multisyntax_projects_test": 0.0,
+    "loment_multisyntax_test": 0.4,
+    "loment_net_test": 0.0,
+    "loment_nltrans_test": 0.4,
+    "loment_os_test": 40.6,
+    "loment_p7_test": 0.8,
+    "loment_p8_test": 173.6,
+    "loment_p9_test": 2.7,
+    "loment_pe_test": 4.1,
+    "loment_pkg_test": 3.9,
+    "loment_ports_test": 0.3,
+    "loment_potato_emit_test": 90.6,
+    "loment_publish": 0.5,
+    "loment_pytrans_test": 0.3,
+    "loment_register_test": 0.8,
+    "loment_rel_test": 268.7,
+    "loment_rule_parity": 4.3,
+    "loment_seed_test": 63.9,
+    "loment_sign_test": 0.1,
+    "loment_src": 1.3,
+    "loment_state_test": 0.3,
+    "loment_status": 0.0,
+    "loment_status_test": 2.3,
+    "loment_std_test": 3.1,
+    "loment_store_twin_test": 261.6,
+    "loment_syscalls_test": 1.4,
+    "loment_thread_test": 0.5,
+    "loment_tools_test": 10.0,
+    "loment_trans_test": 111.1,
+    "loment_zwframe_test": 2.5,
+    "lomentc_test": 10.5,
+    "lompi_sync": 0.0,
+    "lompicheck_test": 1.1,
+    "lvm_compact_test": 51.3,
     "lvm_perf_test": 25.0,
-    # 实测: 8 条; 每条各编一个原生探针 (参考编译器 IR + lomelf), 端到端那条还起一个
-    # 真 http.server。本机 6.9s。
-    "loment_internet_test": 10.0,
-    # 实测: 5 条; 一条编 ELF 探针并在 WSL 里跟 CPython 对跑, 另一条起 4 个真线程
-    # 跑 20 万次临界区 (docs/245 阶段 2)。本机 5.6s。
-    "loment_os_test": 20.0,
-    # 实测: 6 条; 两条各编一次 ELF 探针并在 WSL 里起 4 个线程跑 (另四条是编译期负例,
-    # 不落产物)。本机 0.8s —— WSL 热的时候。冷启动给宽一点。
-    "loment_thread_test": 30.0,
-    "loment_lompi_test": 119.8,
-    "loment_multisyntax_projects_test": 2.1,
-    "loment_net_test": 0.2,          # 实测: 读四份表 + 四条自证, 不编译
-    # 含 300 个 Java 模块那一档的 javac + JVM（没有 javac 时那一支可见地 SKIP，快得多）
-    "loment_megaproject_test": 15.0,
-}
-#: 没登记耗时的判据按这个算。实测大部分判据在秒级, 取 8s 偏保守。
+    "lvm_profile_test": 22.9,
+    "lvm_stability_test": 10.0,
+    "lvm_t2_test": 138.6,
+    "lvm_t3_test": 24.7,
+    "lvm_test": 20.3,
+    "lvm_twin_test": 29.2,
+    "potato_cross": 0.0,
+    "potato_test": 9.5,
+    "vscode_ext_test": 1.2,
+}  # 91 条 = `len(STATIC_CHECKS)`；`unpriced_checks()` 钉住这条等式。
+
+#: 不参与均分、也**不需要** `SHARD_COST` 条目的判据。**今天是空的** —— 89 条全有实测值。
+#: 留着这个集合是为了让"新判据还没量过"有一个**明确**的落脚处：放进来的代价是它按
+#: `SHARD_DEFAULT_S` 算（可能把一片拖长）, 但那是登记过的选择, 不是静默的默认值。
+SHARD_COST_EXEMPT: frozenset[str] = frozenset()
+
+#: 没登记耗时的判据按这个算 —— **正常情况下不该发生**：`unpriced_checks()` 会断言。
 SHARD_DEFAULT_S = 8.0
 
-#: **整条跑、且各占一片**的那几条 —— 它们是长尾（一条就 200s+）, 与任何别的判据同片
+
+def unpriced_checks() -> list[str]:
+    """`STATIC_CHECKS` 里既没有实测耗时、也没明确豁免的那几条。
+
+    `#435`：分片表是一个**关于树的断言**, 而此前没有任何东西检查它 —— 没登记的名字
+    静默按 8 秒算, 于是 `loment_elf_test`（245～617s）把一片拖到 30 分钟。这个函数
+    就是那个断言的执行点：`shards()` 与 `loment_tools_test` 的判据都问它。
+    """
+    return [n for n in STATIC_CHECKS
+            if n not in SHARD_COST and n not in SHARD_COST_EXEMPT]
+
+
+#: **整条跑、且各占一片**的那几条 —— 它们是长尾（一条就 150s+）, 与任何别的判据同片
 #: 都不会更快（墙钟是 max 不是 sum）。
 #:
 #: **为什么独占还更划算**: 它们是**单线程长跑**, 跟三条重判据挤同一台 4 vCPU 的 runner
@@ -342,8 +405,9 @@ SHARD_DEFAULT_S = 8.0
 #: `loment_p8_test` 从 229s 掉到 156s（docs/213 §5）。**这才是这条名单现在的理由**;
 #: 以前还有一条"独占之后那一片的工具链可以压到最小", 那个随工具链做成镜像而作废了
 #: （各片现在是同一份镜像, 没有"档位"可言）。
-#: 往这里加一条之前: 先确认它真的是**长尾单线程**（否则切成两片更划算）, 并把它从
-#: `SHARD_COST` 的负担里拿走（它自己一片, 不再参与均分）。
+#: 往这里加一条之前: 先确认它真的是**长尾单线程**（否则切成两片更划算）。
+#: 它们各自成片、不参与均分, 但**照样有实测条目**（`docs/213` §10）—— 那份数既是记录,
+#: 也是"哪天不独占了一片"时的分片依据。
 ISOLATED_STATIC = ("loment_seed_test", "loment_p8_test", "loment_channel_test")
 
 
@@ -366,6 +430,12 @@ def shards(n: int) -> list[list[str]]:
     """
     if n <= 1:
         return [list(STATIC_CHECKS)]
+    # `#435`: 分片表必须覆盖全表 —— 没登记的名字会按 `SHARD_DEFAULT_S` 静默算, 而
+    # 一条被低估的重判据能把整片的墙钟拖长一个数量级（`loment_elf_test` 就是这样）。
+    unpriced = unpriced_checks()
+    assert not unpriced, (
+        f"这些判据没有实测耗时（`#435`）：{unpriced} —— 量一次填进 SHARD_COST, "
+        f"或者放进 SHARD_COST_EXEMPT 并写清理由; 别让它们按 {SHARD_DEFAULT_S}s 静默算")
     excl = [x for x in STATIC_CHECKS if any(e in x for e in EXCLUSIVE_STATIC)]
     iso = [x for x in STATIC_CHECKS if x in ISOLATED_STATIC]
     rest = [x for x in STATIC_CHECKS if x not in excl and x not in iso]
@@ -432,7 +502,7 @@ _SKIP_LINE_RE = re.compile(r"^\s*SKIP\s+([^:]+):\s*(.*)$")
 _PASS_LINE_RE = re.compile(r"^\s*PASS\s+(\S+)\s*$")
 
 
-def read_budget() -> tuple[dict[str, int], set[tuple[str, str]]]:
+def read_budget(floors_path=None, skips_path=None) -> tuple[dict[str, int], set[tuple[str, str]]]:
     """读两份预算：`(地板, 允许的跳过)`。
 
     地板：`套件 条数` —— 条数是 `len(TESTS)`，**与环境无关**，所以必须精确相等。
@@ -440,12 +510,16 @@ def read_budget() -> tuple[dict[str, int], set[tuple[str, str]]]:
 
     `#` 起头是注释，行尾 `#` 之后也是注释（两条纪律与 `.github/gate-baseline.txt` 同一套）。
     文件不见了**不跳过**：门禁不猜，直接判失败。
+
+    `floors_path` / `skips_path` 可以把**对照面**（base 分支上取下来的那两份）喂进来 ——
+    `#418` 的 `--budget-vs` 就是这么用的。默认是树里那两份。
     """
     floors: dict[str, int] = {}
     skips: set[tuple[str, str]] = set()
     base = pathlib.Path(__file__).resolve().parent.parent
-    for rel, keep in ((ROOT_FLOORS, "floor"), (ROOT_SKIPS, "skip")):
-        p = base / rel
+    for given, rel, keep in ((floors_path, ROOT_FLOORS, "floor"),
+                             (skips_path, ROOT_SKIPS, "skip")):
+        p = pathlib.Path(given) if given else base / rel
         if not p.exists():
             raise FileNotFoundError(f"{rel} 不见了 —— 门禁不猜，直接判失败")
         for ln in p.read_text(encoding="utf-8").splitlines():
@@ -461,6 +535,37 @@ def read_budget() -> tuple[dict[str, int], set[tuple[str, str]]]:
             else:
                 skips.add((suite, val))
     return floors, skips
+
+
+def check_budget_against_base(base_floors: dict[str, int],
+                              base_skips: set[tuple[str, str]],
+                              floors: dict[str, int],
+                              skips: set[tuple[str, str]]) -> list[str]:
+    """`#418`：预算只能**收紧**, 不能比对照面（base 分支）松。返回问题清单。
+
+    树内的两道棘轮（`check_budget`）是**同一份提交里的两个数**比 —— 删一条判据再把
+    地板改小, 两边一起说谎, 它就绿了。这里补上缺的那一半：
+
+      * 地板的**每一条**都要还在, 而且**不许降**（`base_floors[s] <= floors[s]`）。
+        新套件（对照面里没有的）可以加 —— 那是收紧;
+      * 跳过表只许**变短**：`skips - base_skips` 非空就红。新增一条跳过等于把
+        "给既有判据加个环境门"或"新判据生来就跳过"登记成合法 —— 那正是要堵的路。
+
+    与 `.github/gate-baseline.txt` 的棘轮同一个形状（`comm -13` 只认"新增"）;
+    **取不到对照面时由调用方 fail closed**, 这里只比两份已读出来的预算。
+    """
+    bad: list[str] = []
+    for suite, was in sorted(base_floors.items()):
+        if suite not in floors:
+            bad.append(f"{suite}: 对照面里有这个套件, 现在整条从 {ROOT_FLOORS} 里没了 —— "
+                       f"删掉整条套件不是解法（要不跑它就说明为什么, 单独开 issue）")
+        elif floors[suite] < was:
+            bad.append(f"{suite}: 地板比对照面**降了**（{was} -> {floors[suite]}）—— "
+                       f"删判据、再把地板改小, 两边一起改就绿了; 这不是解法")
+    for suite, crit in sorted(skips - base_skips):
+        bad.append(f"{suite} 的 {crit}: 这条跳过**对照面里没有** —— 跳过表只许变短; "
+                   f"给既有判据加环境门、再把豁免登记进来, 不是解法")
+    return bad
 
 
 def read_criterion_lines(out: str) -> tuple[list[str], list[str], bool]:
@@ -538,6 +643,59 @@ def check_budget(results, floors, skips, *, in_ci: bool) -> list[str]:
                 continue          # 这一片根本没跑那个套件 —— 不是"它没跳"
             print(f"::notice::{ROOT_SKIPS} 里的 {suite} {crit} 这次**没跳** —— 修好了就删掉它")
     return bad
+
+
+#: 各片 artifact 的目录名：`gate-log-<片号>`（可带后缀）。**`gate-log-merged` 不匹配** ——
+#: 那是聚合 job 自己上传的全量副本, 正是 `#443` 双重计数的来源。
+_SHARD_ARTIFACT_RE = re.compile(r"^gate-log-(\d+)(?:[-_. ].*)?$")
+_STATIC_LINE_RE = re.compile(r"^:: \[static\] (\S+)\b")
+
+
+def merge_shard_logs(root, expected=STATIC_CHECKS) -> tuple[str, list[str]]:
+    """把各片 artifact 目录合成一份 `gate.out`：返回 `(合并后的文本, 问题清单)`。
+
+    `#443`：原先聚合那步是 `cat shards/gate-log-*/*.out` 再**数行数**。两个坑：
+
+      * `gate-log-merged` 也匹配 `gate-log-*` —— 它是聚合 job 上一次 attempt 上传的
+        **全量副本**；`gh run rerun --failed` 之后它还在, 于是每条判据被算两遍
+        （实测 174 = 2×87）；
+      * 就算目录只有各片, 行数相等也**不能**证明"每条判据恰好一次"：重复一条 +
+        漏掉另一条, 行数照样对。
+
+    所以这里按**判据名**取并集：只认 `gate-log-<片号>` 目录, 同名的判据**后者覆盖前者**
+    （目录按片号、再按名字排序, 于是新 attempt 的那份赢）, 再要求并集**恰好**等于
+    `STATIC_CHECKS` —— 少一条是有一片没跑完, 多一条是 `STATIC_CHECKS` 之外的东西混进来了。
+
+    问题清单非空时调用方判失败；文本照常返回（能合的部分先打出来看）。
+    """
+    root = pathlib.Path(root)
+    if not root.is_dir():
+        return "", [f"{root} 不存在 —— 一个分片 artifact 都没下载到"]
+    dirs = [p for p in root.iterdir()
+            if p.is_dir() and _SHARD_ARTIFACT_RE.match(p.name)]
+    dirs.sort(key=lambda p: (int(_SHARD_ARTIFACT_RE.match(p.name).group(1)), p.name))
+    if not dirs:
+        return "", [f"{root} 下没有 `gate-log-<片号>` 目录 —— 一个分片 artifact 都没下载到"]
+    problems: list[str] = []
+    by_name: dict[str, str] = {}
+    for d in dirs:
+        out = d / "gate.out"
+        if not out.is_file():
+            problems.append(f"{d.name}: 没有 gate.out（这一片没跑到合成？）")
+            continue
+        for ln in out.read_text(encoding="utf-8", errors="replace").splitlines():
+            m = _STATIC_LINE_RE.match(ln)
+            if m:
+                by_name[m.group(1)] = ln          # 后出现的覆盖先出现的（新 attempt 赢）
+    missing = [n for n in expected if n not in by_name]
+    extra = sorted(set(by_name) - set(expected))
+    if missing:
+        problems.append(f"少了 {len(missing)} 条判据（有一片没跑完或没上传）："
+                        f"{' '.join(missing)}")
+    if extra:
+        problems.append(f"多了 {len(extra)} 条 `STATIC_CHECKS` 之外的判据：{' '.join(extra)}")
+    text = "".join(by_name[n] + "\n" for n in expected if n in by_name)
+    return text, problems
 
 
 def format_line(name: str, ok: bool, tail: str, dt: float, skips: int) -> str:
@@ -723,6 +881,11 @@ def main():
                          "见 shards()。`K/N` 里 N 必须等于 `--shard-plan` 给的那个 N")
     ap.add_argument("--shard-plan", type=int, metavar="N", default=None,
                     help="只打印 N 片的分法（每片一行: 片号 + 条数 + 名字）, 不跑任何判据")
+    ap.add_argument("--merge-shards", metavar="DIR", default=None,
+                    help="把 DIR 下各片 artifact(`gate-log-<片号>/gate.out`) 合成一份 gate.out "
+                         "打到 stdout; 按**判据名**取并集并要求恰好覆盖 STATIC_CHECKS (`#443`)")
+    ap.add_argument("--budget-vs", nargs=2, metavar=("FLOORS", "SKIPS"), default=None,
+                    help="把树里的判据预算与对照面（那两份文件）比: 只许收紧 (`#418`)")
     default_jobs = max(1, min(8, (os.cpu_count() or 4)))
     ap.add_argument("-j", "--jobs", type=int, default=default_jobs,
                     help=f"静态门禁并行度 (默认 {default_jobs}; 1 = 串行同进程)")
@@ -731,6 +894,38 @@ def main():
     if a.shard_plan is not None:
         for i, b in enumerate(shards(a.shard_plan)):
             print(f"shard {i + 1}/{a.shard_plan} ({len(b)} 条): {' '.join(b)}")
+        return 0
+
+    # `#443`: 聚合那一步只做一件事 —— 把各片 artifact 合成一份 gate.out。合成与
+    # "覆盖是不是恰好一次"的判断都在这一个函数里, 因为它必须能在判据里被复现
+    # （workflow 里的 shell 没法用夹具喂两个 attempt 的产物）。
+    if a.merge_shards is not None:
+        text, problems = merge_shard_logs(a.merge_shards)
+        sys.stdout.write(text)
+        n = sum(1 for ln in text.splitlines() if _STATIC_LINE_RE.match(ln))
+        print(f"fujoci: 合成 {n} 条（应 {len(STATIC_CHECKS)} 条）", file=sys.stderr)
+        for b in problems:
+            print(f"::error::{b}", file=sys.stderr)
+        return 1 if problems else 0
+
+    # `#418`: 预算的**另一半**棘轮。树内那两条（`check_budget`）比的是同一份提交里
+    # 的两个数 —— 一起改就绿了。这里比的是**对照面**（base 分支）与这一棵树。
+    if a.budget_vs is not None:
+        try:
+            base_floors, base_skips = read_budget(*a.budget_vs)
+            floors, skips = read_budget()
+        except (OSError, ValueError) as e:
+            print(f"::error::判据预算对照面读不出来 —— 门禁不猜, 按失败处理：{e}")
+            return 1
+        bad = check_budget_against_base(base_floors, base_skips, floors, skips)
+        if bad:
+            print(f"fujoci: 判据预算比对照面松了 {len(bad)} 条：")
+            for b in bad:
+                print(f"  - {b}")
+            print("::error::判据预算只许收紧 —— 见上面每一行")
+            return 1
+        print(f"fujoci: 判据预算只许收紧: OK（套件 {len(base_floors)} -> {len(floors)}，"
+              f"跳过 {len(base_skips)} -> {len(skips)}）")
         return 0
 
     # `--shard K/N` -> 这一片的名字表。**必须经过 `shards(N)`** —— 分片的划分与它的

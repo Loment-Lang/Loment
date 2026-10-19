@@ -1866,7 +1866,11 @@ fn em_qpath(ctx: ptr, o: u32, plen: u32) -> u32 {
 /// 所以命令一律带 `--lang auto`，最后一行也把这句话说明。说死一句错的语言，用户会拿着
 /// 错的命令去试 —— 那比不说还坏。
 fn h_foreign(ctx: ptr, o: u32, li: u32, w: u32, plen: u32) -> u32 {
-    o = em_gut(ctx, o, w);
+    // `o == 0` = 这一段就是**整条报告的起点**（`#29`：外源文件只印这一块）。
+    // 第一行不补 `  | ` 的 gutter —— 那会让它看起来像"上一段没印出来"。
+    if o > 0 {
+        o = em_gut(ctx, o, w);
+    }
     o = em_col(ctx, o, "1;31");
     o = em(ctx, o, ui(ctx, S_FOREIGN1));
     o = em_rst(ctx, o);
@@ -2125,44 +2129,51 @@ fn rec_json(ctx: ptr, cnum: u32, clen: u32, line: u32, col: u32, mlen: u32, plen
     // 形状抄 rustc 的 `--error-format=json`：`message` 说这是什么、`replacement` 给换成什么、
     // `byte_start`/`byte_end` 圈住换哪儿、`applicability` 说这个建议有多可信
     // （`MaybeIncorrect` = 按编辑距离猜的，与 rustc 对同类建议的判定同名同义）。
-    o = em(ctx, o, ",\"suggestions\":[");
+    //
+    // **没有建议时整个字段缺席，不写一个空数组**（`#51`）：`[]` 与"这件东西还没做"
+    // 在消费者眼里是同一条消息（"没有可应用的修改"），而**一条都没有**是两个不同的
+    // 事实。字段缺席 = "这个码今天不产建议"；字段在且非空 = "这里有能直接套用的修改"。
+    // 与 `byte_start`/`byte_end` 只在指得准时出现是同一条纪律。
     let cn: u32 = load32(ctx, C_CANDN);
-    let k: u32 = 0;
-    while k < cn {
-        if k > 0 {
-            o = em_byte(ctx, o, COMMA);
+    if cn > 0 {
+        o = em(ctx, o, ",\"suggestions\":[");
+        let k: u32 = 0;
+        while k < cn {
+            if k > 0 {
+                o = em_byte(ctx, o, COMMA);
+            }
+            o = em_byte(ctx, o, LBRACE);
+            o = em(ctx, o, "\"message\":");
+            o = em_byte(ctx, o, QUOTE);
+            o = json_add(ctx, o, ui(ctx, S_SUG_ONE_A));
+            o = json_add(ctx, o, kind_name(ctx, load32(ctx, C_CANDKD + k * 4)));
+            o = json_add(ctx, o, ui(ctx, S_SUG_ONE_B));
+            o = em_byte(ctx, o, QUOTE);
+            o = em(ctx, o, ",\"kind\":");
+            o = json_str(ctx, o, kind_key(load32(ctx, C_CANDKD + k * 4)));
+            // **换成什么**：只有位置（`byte_*`）没有内容，编辑器没法应用 —— 它得知道往那片字节里
+            // 写什么。这一格与 `byte_*` 是一对（rustc 那边叫 `suggested_replacement`）。
+            o = em(ctx, o, ",\"replacement\":");
+            o = json_span(ctx, o, ptr_add(ctx, C_CAND + k * SUG_NAME),
+                          load32(ctx, C_CANDNL + k * 4));
+            o = em(ctx, o, ",\"line\":");
+            o = em_u32(ctx, o, load32(ctx, C_CANDLN + k * 4));
+            // **字节偏移只在那个词于本文件里全局唯一时才给**：给一个指错位置的偏移，
+            // 编辑器会照着它去改用户的代码 —— 那比不给坏得多。字段缺席 = "这一条别自动应用"，
+            // 与 rustc 那边 `applicability: Unspecified` 是同一个意思。
+            if cn == 1 && load32(ctx, C_TOKOFF) != 4294967295 {
+                o = em(ctx, o, ",\"byte_start\":");
+                o = em_u32(ctx, o, load32(ctx, C_TOKOFF));
+                o = em(ctx, o, ",\"byte_end\":");
+                o = em_u32(ctx, o, load32(ctx, C_TOKOFF) + load32(ctx, C_TOKLEN));
+            }
+            o = em(ctx, o, ",\"applicability\":");
+            o = json_str(ctx, o, "MaybeIncorrect");
+            o = em_byte(ctx, o, RBRACE);
+            k = k + 1;
         }
-        o = em_byte(ctx, o, LBRACE);
-        o = em(ctx, o, "\"message\":");
-        o = em_byte(ctx, o, QUOTE);
-        o = json_add(ctx, o, ui(ctx, S_SUG_ONE_A));
-        o = json_add(ctx, o, kind_name(ctx, load32(ctx, C_CANDKD + k * 4)));
-        o = json_add(ctx, o, ui(ctx, S_SUG_ONE_B));
-        o = em_byte(ctx, o, QUOTE);
-        o = em(ctx, o, ",\"kind\":");
-        o = json_str(ctx, o, kind_key(load32(ctx, C_CANDKD + k * 4)));
-        // **换成什么**：只有位置（`byte_*`）没有内容，编辑器没法应用 —— 它得知道往那片字节里
-        // 写什么。这一格与 `byte_*` 是一对（rustc 那边叫 `suggested_replacement`）。
-        o = em(ctx, o, ",\"replacement\":");
-        o = json_span(ctx, o, ptr_add(ctx, C_CAND + k * SUG_NAME),
-                      load32(ctx, C_CANDNL + k * 4));
-        o = em(ctx, o, ",\"line\":");
-        o = em_u32(ctx, o, load32(ctx, C_CANDLN + k * 4));
-        // **字节偏移只在那个词于本文件里全局唯一时才给**：给一个指错位置的偏移，
-        // 编辑器会照着它去改用户的代码 —— 那比不给坏得多。字段缺席 = "这一条别自动应用"，
-        // 与 rustc 那边 `applicability: Unspecified` 是同一个意思。
-        if cn == 1 && load32(ctx, C_TOKOFF) != 4294967295 {
-            o = em(ctx, o, ",\"byte_start\":");
-            o = em_u32(ctx, o, load32(ctx, C_TOKOFF));
-            o = em(ctx, o, ",\"byte_end\":");
-            o = em_u32(ctx, o, load32(ctx, C_TOKOFF) + load32(ctx, C_TOKLEN));
-        }
-        o = em(ctx, o, ",\"applicability\":");
-        o = json_str(ctx, o, "MaybeIncorrect");
-        o = em_byte(ctx, o, RBRACE);
-        k = k + 1;
+        o = em_byte(ctx, o, RBRACK);
     }
-    o = em_byte(ctx, o, RBRACK);
     // 同一条理由，机器那一侧要的是**字段**而不是一句话（`#485`）。
     if mtr == 1 {
         o = em(ctx, o, ",\"truncated\":true");
@@ -2962,6 +2973,22 @@ fn _start() -> u32 {
                     } else {
                         let w: u32 = dig_w(line);
                         store32(ctx, C_TRUNC, mtr);
+                        // **外源文件：整条报告就是那条语言提示**（`#29`）。
+                        // 原先它排在 Loment 诊断（头 / 位置 / 片段 / 消息 / 四段建议）
+                        // **后面**：读的人先看到 `error[E002]` 与一屏不适用的"修法"，
+                        // 翻到底才看见"这个文件不是 Loment" —— 而那句才是对的。
+                        // 现在先判定，命中就**只印它**：Loment 解析器在错的语言上看到的
+                        // 东西（`E002` / `E019` 与那四段）一条都不出现，`h_foreign` 自带
+                        // 这门语言的边界、调用约定与三条进来路。
+                        let f_li: u32 = 4294967295;
+                        if have == 1 && foreign_seen(ctx, plen) == 0 {
+                            f_li = sniff_lang(ctx, sr, srl, cnum, plen);
+                        }
+                        let o6: u32 = 0;
+                        if f_li != 4294967295 {
+                            o6 = h_foreign(ctx, 0, f_li, w, plen);
+                            foreign_remember(ctx, plen);
+                        } else {
                         let o: u32 = h_head(ctx, 0, cnum, clen);
                         let o2: u32 = h_loc(ctx, o, line, col, w, plen);
                         let o3: u32 = o2;
@@ -2978,35 +3005,20 @@ fn _start() -> u32 {
                             }
                         }
                         let o4: u32 = h_msg(ctx, o3, C_MSG, mlen, w);
-                        // **外源那条提示顶到卡片前面，而且卡片整块不渲染**（`#29`）。
-                        // 卡片那四段（what / why / 怎么改 / supported）讲的**全是 Loment 的
-                        // 规矩**，而这份文件根本不是 Loment —— 原先它排在**最后**，读的人先
-                        // 照着一屏不适用的"修法"把一份好 C 改坏，翻到底才看见那句
-                        // "这个文件不是 Loment"。**说的那句才是对的**，所以它先出来，
-                        // 而那四段**不再出现**（`h_foreign` 自带这门语言的边界与调用约定）。
-                        let f_li: u32 = 4294967295;
-                        if have == 1 && foreign_seen(ctx, plen) == 0 {
-                            f_li = sniff_lang(ctx, sr, srl, cnum, plen);
-                        }
-                        let o6: u32 = 0;
-                        if f_li != 4294967295 {
-                            o6 = h_foreign(ctx, o4, f_li, w, plen);
-                            foreign_remember(ctx, plen);
+                        let o5: u32 = h_card(ctx, o4, cnum, w);
+                        // 两条**码专属**的补充，排在卡片**之后** —— 先给通用的四段，
+                        // 再给这一条的专属信息（它们的计算在模式分岔之前，见上）。
+                        let o5b: u32 = o5;
+                        if load32(ctx, C_CANDN) > 0 {
+                            o5b = h_sug(ctx, o5, sr, srl, w);
                         } else {
-                            let o5: u32 = h_card(ctx, o4, cnum, w);
-                            // 两条**码专属**的补充，排在卡片**之后** —— 先给通用的四段，
-                            // 再给这一条的专属信息（它们的计算在模式分岔之前，见上）。
-                            let o5b: u32 = o5;
-                            if load32(ctx, C_CANDN) > 0 {
-                                o5b = h_sug(ctx, o5, sr, srl, w);
-                            } else {
-                                if cnum == 18 && load32(ctx, C_TOKOFF) != 4294967295 {
-                                    o5b = h_cands(ctx, o5, w, dn,
-                                                  ptr_add(sr, load32(ctx, C_TOKOFF)),
-                                                  load32(ctx, C_TOKLEN));
-                                }
+                            if cnum == 18 && load32(ctx, C_TOKOFF) != 4294967295 {
+                                o5b = h_cands(ctx, o5, w, dn,
+                                              ptr_add(sr, load32(ctx, C_TOKOFF)),
+                                              load32(ctx, C_TOKLEN));
                             }
-                            o6 = o5b;
+                        }
+                        o6 = o5b;
                         }
                         write_all(2, ctx, em(ctx, o6, "\n") as u64);
                         if load32(ctx, C_TRUNC) == 1 {

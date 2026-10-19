@@ -251,8 +251,7 @@ fn whex2(fd: u64, v: u32) -> u64 {
 ///
 /// 控制字节一律走 `\u00XX` 而**不是**替换成空格: 替换是**悄悄改内容**, 而这条链上
 /// 唯一的底气就是"报出来的东西和源码里的一致"。
-fn wjson_str(fd: u64, p: ptr, n: u32) -> u64 {
-    let _q: u64 = wstr(fd, "\"");
+fn wjson_bytes(fd: u64, p: ptr, n: u32) -> u64 {
     let i: u32 = 0;
     while i < n {
         let c: u32 = load8(p, i) as u32;
@@ -268,6 +267,25 @@ fn wjson_str(fd: u64, p: ptr, n: u32) -> u64 {
         }
         i = i + 1;
     }
+    return i as u64;
+}
+
+fn wjson_str(fd: u64, p: ptr, n: u32) -> u64 {
+    let _q: u64 = wstr(fd, "\"");
+    let _b: u64 = wjson_bytes(fd, p, n);
+    return wstr(fd, "\"");
+}
+
+/// 同 `wjson_str`，但内容由**两段**拼成：一段字符串字面量（消息前缀）+ 一段来自源码的
+/// 字节（解析不到的名字）。两段之间没有分隔符 —— 调用方自己把冒号与空格写进前缀。
+///
+/// 为什么需要它（`#50`）：`use <名字>` 解析失败原先只把前缀写进 JSON，名字只出现在
+/// stderr 那行里。下游按 `message` 显示诊断时，看到的是"找不到，或是有歧义："，
+/// **没说是哪个名字** —— 而那正是用户要改的那一处。
+fn wjson_str2(fd: u64, p: ptr, n: u32, q: ptr, m: u32) -> u64 {
+    let _o: u64 = wstr(fd, "\"");
+    let _a: u64 = wjson_bytes(fd, p, n);
+    let _b: u64 = wjson_bytes(fd, q, m);
     return wstr(fd, "\"");
 }
 
@@ -277,6 +295,13 @@ fn wjson_str(fd: u64, p: ptr, n: u32) -> u64 {
 /// 那是 `docs/158` §4 记着的既有分叉, 判据比的是**码**。
 fn wdiag(fd: u64, scr: ptr, file: ptr, fnam: u32,
          line: u32, code: u32, frag: ptr, fl: u32) -> u64 {
+    return wdiag_tail(fd, scr, file, fnam, line, code, frag, fl, frag, 0);
+}
+
+/// 同 `wdiag`，但 `message` 后面还接一段**不是字符串字面量**的字节（解析不到的名字）。
+/// 空尾巴（`tl == 0`）时与 `wdiag` 逐字节相同。
+fn wdiag_tail(fd: u64, scr: ptr, file: ptr, fnam: u32,
+              line: u32, code: u32, frag: ptr, fl: u32, tail: ptr, tl: u32) -> u64 {
     let _a: u64 = wstr(fd, "{\"file\":");
     let _b: u64 = wjson_str(fd, file, fnam);
     let _c: u64 = wstr(fd, ",\"line\":");
@@ -294,7 +319,7 @@ fn wdiag(fd: u64, scr: ptr, file: ptr, fnam: u32,
     }
     let _f: u64 = wdec(fd, scr, code);
     let _g: u64 = wstr(fd, "\",\"message\":");
-    let _h: u64 = wjson_str(fd, frag, fl);
+    let _h: u64 = wjson_str2(fd, frag, fl, tail, tl);
     return wstr(fd, "}\n");
 }
 
@@ -325,10 +350,26 @@ fn wdiag_at(fd: i64, scr: ptr, file: ptr, fnam: u32, line: u32, code: u32,
     }
 }
 
+/// 同上，但 `message` 后面再接一段**已经量好的切片**（解析不到的名字）——
+/// 与 `failp` 那一对同一个理由：名字不在字符串字面量里，长度只能由调用方给。
+fn wdiag_at_tail(fd: i64, scr: ptr, file: ptr, fnam: u32, line: u32, code: u32,
+                 msgp: ptr, msgn: u32, tail: ptr, tl: u32) {
+    if fd >= 0 {
+        let _r: u64 = wdiag_tail(fd as u64, scr, file, fnam, line, code,
+                                 msgp, msgn, tail, tl);
+    }
+}
+
 /// 同上，位置那一格给 0（= 没有位置）。**指不出位置就别编一个** —— `lomenterr` 的
 /// `num_raw` 就是这个口径（`line`/`col` 为 0 = 没位置），而渲染器见 0 就不印 `:行号`。
 fn wdiag_file(fd: i64, scr: ptr, file: ptr, fnam: u32, code: u32, msgp: ptr, msgn: u32) {
     wdiag_at(fd, scr, file, fnam, 0, code, msgp, msgn);
+}
+
+/// `wdiag_file` + 尾巴，理由同上。
+fn wdiag_file_tail(fd: i64, scr: ptr, file: ptr, fnam: u32, code: u32,
+                   msgp: ptr, msgn: u32, tail: ptr, tl: u32) {
+    wdiag_at_tail(fd, scr, file, fnam, 0, code, msgp, msgn, tail, tl);
 }
 
 /// 会把运行期拖进产物的构造 → **人话**（issue #321）。照抄参考实现 `tools/lomentc.py`
@@ -344,6 +385,36 @@ fn rt_phrase(slot: ptr, toks: ptr, tk: u32) -> str {
     if tok_is(slot, toks, tk, "str_eq") { return "`str_eq`"; }
     if tok_is(slot, toks, tk, "panic") { return "`panic`"; }
     if tok_is(slot, toks, tk, "guard") { return "`guard`（能力域守卫）"; }
+    return "";
+}
+
+/// **解析类诊断的正文也要说到"是什么构造"**（`#702`）。
+///
+/// 这一格原先只印**那一格 token 原文**：裸 `return;` 报 `;`、120 层嵌套报 `{` ——
+/// 都"有声"，却没有一句说得出发生了什么。标准是 `#343` 的那条："每一条要么能跑，
+/// 要么失败时**点名构造**并**指到一行**"。
+///
+/// 只认这里能**确定**判定的形状（判据与 `checker.lomt` 的语法前置趟同源）：
+///   * `E23` = 嵌套深度上限，正文自带那半句（与参考实现同一个词「嵌套超过」）；
+///   * `E19` 的裸 `return;` —— 参考实现报「期望表达式，得到 ';'」；
+///   * `E19` 的裸块 `{` —— 参考实现报「期望表达式，得到 '{'」。
+///
+/// 其余的 `E19` 照旧退回 token 原文：那里分不出是哪一种语法错，编一句更具体的话
+/// 反而会**指错**（与"错要指在错的地方"同一条纪律）。
+fn err_phrase(slot: ptr, toks: ptr, tk: u32, code: u32) -> str {
+    if code == 23 {
+        return "嵌套超过 64 层 —— 编译器是递归下降的，再深就要把栈用穿了；把中间那几层提成函数，或把这段拆开";
+    }
+    if code == 19 {
+        if tok_is(slot, toks, tk, ";") && tk > 0 && tok_is(slot, toks, tk - 1, "return") {
+            return "期望表达式，得到 ';' —— 裸 `return;` 不是合法构造，`return` 必须带一个值";
+        }
+        if tok_is(slot, toks, tk, "{") && tk > 0
+                && (tok_is(slot, toks, tk - 1, "{") || tok_is(slot, toks, tk - 1, "}")
+                    || tok_is(slot, toks, tk - 1, ";")) {
+            return "期望表达式，得到 '{' —— 单独一层花括号不是语句";
+        }
+    }
     return "";
 }
 
@@ -1667,7 +1738,10 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
                                              ptr_add(slot, rbase + 19200 + na * 64), scr);
             if rl == 0 {
                 let dm: str = "`addin` not found: ";
-                wdiag_file(dfd, scr, path, n, 18, str_ptr(dm), str_len(dm));
+                // 名字也要进结构化那一份（`#50`）：只写前缀的话，按 `message` 显示的
+                // 编辑器看到的是"找不到："，没说是哪个。
+                wdiag_file_tail(dfd, scr, path, n, 18, str_ptr(dm), str_len(dm),
+                                ptr_add(slot, ap), al);
                 failp(dm, ptr_add(slot, ap), al);
                 die(1);
             } else {
@@ -1711,8 +1785,10 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
                 if rl == 0 {
                     // 同"打不开": 报出来之后**硬失败**, 不带着缺依赖的单元继续编
                     let dm: str = "the name import does not resolve, or is ambiguous: ";
-                    wdiag_at(dfd, scr, path, n, load32(toks, (i + 1) * 20 + 12), 18,
-                             str_ptr(dm), str_len(dm));
+                    // 名字也要进结构化那一份（`#50`）：`--json` 的消费者拿到的
+                    // `message` 得说清是**哪个** `use` 没解析出来。
+                    wdiag_at_tail(dfd, scr, path, n, load32(toks, (i + 1) * 20 + 12), 18,
+                                  str_ptr(dm), str_len(dm), ptr_add(slot, up), ul);
                     failp(dm, ptr_add(slot, up), ul);
                     die(1);
                 } else {
@@ -2098,6 +2174,9 @@ fn _start() -> u32 {
             if code == 31 && str_len(ph) > 0 {
                 isrt = 1;
             }
+            // `#702`: 解析类的那几条也要说得出**是什么构造**（裸 return / 嵌套上限 /
+            // 裸块），正文不是那一格 token 原文。与 E031 的 `rt_phrase` 同一处分岔。
+            let ph2: str = err_phrase(unit, toks2, tk, code);
             let take: u32 = 24;
             if ln < 24 {
                 take = ln;
@@ -2105,7 +2184,11 @@ fn _start() -> u32 {
             if isrt == 1 {
                 write_all(2, str_ptr(ph), str_len(ph) as u64);
             } else {
-                write_all(2, ptr_add(unit, st), take as u64);
+                if str_len(ph2) > 0 {
+                    write_all(2, str_ptr(ph2), str_len(ph2) as u64);
+                } else {
+                    write_all(2, ptr_add(unit, st), take as u64);
+                }
             }
             wstr(2, "\n");
             // 同一条诊断, 结构化那一份 (docs/182 §5)。**同一份数据两个受众**:
@@ -2116,9 +2199,15 @@ fn _start() -> u32 {
                                             load32(toks2, tk * 20 + 12), ph,
                                             load32(tytp, RT_N_SITES));
                 } else {
-                    let _j: u64 = wdiag(dfd as u64, scr, ap, an,
-                                        load32(toks2, tk * 20 + 12), code,
-                                        ptr_add(unit, st), take);
+                    if str_len(ph2) > 0 {
+                        let _j2: u64 = wdiag(dfd as u64, scr, ap, an,
+                                             load32(toks2, tk * 20 + 12), code,
+                                             str_ptr(ph2), str_len(ph2));
+                    } else {
+                        let _j: u64 = wdiag(dfd as u64, scr, ap, an,
+                                            load32(toks2, tk * 20 + 12), code,
+                                            ptr_add(unit, st), take);
+                    }
                 }
             }
             e = e + 1;

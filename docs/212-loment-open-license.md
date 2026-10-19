@@ -1,75 +1,76 @@
-# 212 · Loment-Open：为什么允许"拿 Loment 做一门别的语言"
+# 212 · 许可：Loment-Open（已废）→ MIT OR Apache-2.0
 
-> 状态: 决定（2026-10-09，用户裁三项）· 落点: 根 `LICENSE` 与四个登记处 · 输入: 用户口述诉求
+> 状态: **已被取代**（2026-10-19，用户裁）· 落点: 根 `LICENSE-MIT` / `LICENSE-APACHE` 与七个登记处
 >
-> 一句话: 把 MIT 原文**逐字**留下来，在它后面加两条**分隔的**附加条款 —— 一条要署名基座，
-> 一条把"后缀/语法自由"写死成授权、把"名称"保留下来。**代价写在 §2，别绕过它。**
+> 一句话: 2026-10-09 用过一版自造的 `Loment-Open`（MIT 加署名与名称两条）；
+> **2026-10-19 起改成 `MIT OR Apache-2.0` 双许可**，两条附加条件一并取消。
+> 旧文本只在 git 历史里；这一页保留它为什么被换掉的记录。
 
-## 0. 诉求，以及一个反直觉的事实
+## 0. 现在的许可（2026-10-19 起）
 
-诉求（2026-10-09，用户）：**基于 Loment 源码开发全新的语言、可以不用 `.lomt` / `.lom` 后缀；
-但要在允许范围内规范地写上"基于 Loment 开发"。**
+Loment 以 **MIT OR Apache-2.0** 双许可发布，使用者二选一：
 
-反直觉的事实先说清楚：**MIT 本来就允许这件事。** MIT 的授权是
-"use, copy, modify, merge, publish, distribute, sublicense, and/or sell … **without
-restriction**"（根 `LICENSE` §1）。它从不限制文件后缀、语法、语言名，也从不限制"照它做一门新语言"。
-所以这一版**不是把 MIT 放宽** —— 关于后缀的那句只能是**澄清**（把默许写成明文）。
+* 根 `LICENSE-MIT` —— **MIT 全文**（`Copyright (c) 2026 FujoOS Project`）；
+* 根 `LICENSE-APACHE` —— Apache License 2.0 标准全文；
+* `editors/vscode/LICENSE` —— 与根 `LICENSE-MIT` **逐字节相同**（`vsce` 只找扩展目录那一份，
+  判据 `vscode_ext_test::test_vscode_publish_ready` 钉住）。
 
-反过来，用户要的"务必写上"如果超出 MIT 已有的"保留版权与许可声明"，那就是**新增义务**、是**收紧**。
-两股力方向相反，所以 §1 把 MIT 原文一字不动地留着，附加条款另起一节 —— 谁改了哪一半，一眼能分。
+SPDX 标识就是 `MIT OR Apache-2.0`。两个都是 OSI 认证许可，npm / vsce / Cargo 都认得。
 
-## 1. 改成了什么
+**为什么没有根 `LICENSE`、为什么两份都不带前置声明**：GitHub 的许可检测只认**纯正文**。
+正文前面加一段自定义声明，那份文件会被判成 `Other`，侧栏就既不显示 MIT 也不显示
+Apache-2.0（2026-10-19 实测）。所以这次照 Rust 仓的形状：**只有 `LICENSE-MIT` 与
+`LICENSE-APACHE` 两个文件，各自是可被检测器认出的纯文本**；双许可的"二选一"写在
+`README`、`CONTRIBUTING.md` 与 `editors/vscode/package.json` 的 SPDX 字段里。
 
-**许可文本**（根 `LICENSE`）四节，其中两节是 MIT 逐字、两节是附加：
+## 1. 为什么换掉 Loment-Open
 
-| 节 | 内容 | 来源 |
+2026-10-09 那一版是 MIT 原文加两条附加：派生源码必须署名 Loment（§2），名称保留（§3）。
+当时就写清了代价（旧 §2）：**它不是 MIT、不是 OSI 开源许可、没有 SPDX 标识**，
+对外说"Loment 是开源项目"要留神措辞。那一版是一次有意的实验，不是疏忽。
+
+换掉的理由是那三条代价在一年里全都兑现了：
+
+1. **没有 SPDX 标识** —— `"license": "Loment-Open"` 在 npm / vsce 眼里是未知值，
+   打包告警；下游的许可扫描器只能把它标成 `NOASSERTION`。
+2. **不是 OSI 开源许可** —— 对外说"开源"时始终要加括号解释，这与"把话说清楚"的方向相反。
+3. **署名与名称两条没有带来可观测的收益** —— 派生作品本来就会在 git 历史与 README 里
+   留痕；名称保护真正该去的地方是商标，不是版权许可。
+
+**用户 2026-10-19 裁：改用 `MIT OR Apache-2.0`，不再用自己的许可。**
+这也是 Rust 生态的惯例（`MIT OR Apache-2.0` 双许可，使用者按需选）。
+
+## 2. 改了什么（登记处）
+
+| # | 位置 | 改动 |
 |---|---|---|
-| 1 Grant | "Permission is hereby granted … subject to the following conditions:" + 通知段 | **MIT 逐字** |
-| 2 Base attribution | 分发**派生源码**时保留一句 `Based on Loment (FujoOS Project) — <repo>` | 附加 |
-| 3 Scope: suffixes, syntax, the name | 后缀/语法**自由**；不主张商标，只保留**名称** | 附加 |
-| 4 Disclaimer | "THE SOFTWARE IS PROVIDED "AS IS" …" | **MIT 逐字** |
+| 1 | 根 `LICENSE-MIT` | Loment-Open 全文 → **纯 MIT 全文**（根 `LICENSE` 删除） |
+| 2 | 根 `LICENSE-APACHE` | **新增**，Apache-2.0 标准全文 |
+| 3 | `README.md` / `README.zh-CN.md` | 徽章与 `## License` / `## 许可` 段 |
+| 4 | `CONTRIBUTING.md` §Licence | 双许可；贡献按同一双许可收 |
+| 5 | `tools/loment_publish.py` 的 README 模板 | 公开仓 README 是直出的，模板同步 |
+| 6 | `editors/vscode/LICENSE` | 与根 `LICENSE-MIT` 逐字节相同 |
+| 7 | `editors/vscode/package.json` / `package-lock.json` | `"license": "MIT OR Apache-2.0"` |
+| 8 | `docs/171` / `docs/235` | 提到旧许可名的地方改成新事实 |
 
-文本开头明写"**它不是 MIT 许可，也不得被当作 MIT 分发**" —— 这是**故意的**（用户 2026-10-09 裁：
-"不再叫 MIT，这是故意的"）。所以 §2 的代价不是疏忽，是选择。
+`loment_publish.py` 的发布包清单里 `LICENSE` 那一项不变；`LICENSE-APACHE` 随根目录一起进包
+（发布口的文件清单按仓根展开）。
 
-**四个登记处**（改 `<file>:<line>` 时对 HEAD 而言）：
+## 3. 边界（诚实清单）
 
-* 根 `LICENSE` —— 正文。
-* `README.md` 的 `## License` 段 —— 人第一眼看到的说法。
-* `tools/loment_publish.py` 里**发布口 README 模板**的同名段 —— 公开仓 `FujoJTOP/loment`
-  的 README 由这个工具直出（`tools/loment_publish.py:564`），**手敲那份不对**。
-* `CONTRIBUTING.md` 的 `## Licence` 段 —— 贡献者读的那份。
-* `editors/vscode/package.json` 的 `"license"` 字段 —— `"MIT"` -> `"Loment-Open"`（用户裁）。
-
-## 2. 代价（读这一节，别只看 §1）
-
-1. **它不是 MIT。** §1、§4 是 MIT 原文，但 §2、§3 是**条件**；两份文本不同，就不能互标。
-2. **它不是 OSI 认证的开源许可。** OSI 按**文本**逐份认证，不接受自造变体；这一份没有提交、
-   也不打算提交。于是它在严格意义上**不是** OSD 意义上的"开源许可"，只是一个源码公开的许可。
-3. **它没有 SPDX 标识符。** `"license": "Loment-Open"` 在 npm / vsce 眼里是**未知值**，打包会告警。
-   实测这台机器上 VS Code 扩展是**侧载 `.vsix`**（`tools/loment_dist.py` 的 dist 里带的是打完的包），
-   不进 Marketplace —— 所以这条代价今天只落到告警上，不落到"上不了架"。
-4. **对外说"Loment 是开源项目"时要留神措辞**：可以说"源码公开、许可宽松（MIT 加两条）"，
-   但"OSI 开源许可"这个说法从这一天起不再准确。这条与 `docs/204` / 对外文案同属一类口子。
-
-## 3. 不主张 / 不做
-
-1. **不主张这有法律意见。** 这一页是**工程记录**：记的是改了哪几个字节、为什么、代价在哪。
-   真要依赖它打官司，去找律师 —— 那不是我给的。
-2. **不主张"基于 MIT"能免掉版权人的同意。** 既往贡献是按 MIT 收的（旧 `CONTRIBUTING.md` §Licence
-   原文如此）。换出口许可严格说是版权人的处分权；本仓今天的版权人只有一个（FujoOS Project），
-   所以改得动 —— 但**若将来有第三方贡献者**，这一条的边界要重新看。
-3. **不主张商标。** §3 明确"不主张也不授予商标"，对名称的约束**只是名称**（用户 2026-10-09 裁：
-   "没有商标，Loment 顶多约束名称"）。别把 §3 读成一条商标条款。
-4. **没给 `lompi` 仓补 `LICENSE`。** `tools/loment_publish.py` 的 `lompi` 发布 spec（`:316`）只切
-   `lompi/` 与 skill，**不切 `LICENSE`** —— 那个公开仓今天没有许可文件。这是**它原本就有的洞**，
-   与这次改名无关；要补是另一笔。
-5. **不改 `lom/`、不动判据。** 这次只碰文本与登记处；`lom/*.lom` 是跨线契约（`CLAUDE.md`），
-   换许可不构成改它的理由。
+1. **不主张这有法律意见。** 这一页是工程记录：记的是改了哪几个字节、为什么、代价在哪。
+2. **换出口许可是版权人的处分权。** 旧 `CONTRIBUTING.md` 是按 Loment-Open 收的贡献；
+   本仓今天的版权人只有 FujoOS Project，所以改得动。若将来有第三方贡献者按旧文本贡献过，
+   这一条的边界要重新看（git 历史里有每一笔的作者）。
+3. **名称保护不再写在许可里。** `Loment` 这个名字的使用约束不再由版权许可承载；
+   要不要主张商标是另一件事，与本次改动无关。
+4. **`lompi` 仓仍然没有 `LICENSE`。** `tools/loment_publish.py` 的 `lompi` 发布 spec 只切
+   `lompi/` 与 skill，不切 `LICENSE` —— 那是它原本就有的洞，与换许可无关；要补是另一笔。
+5. **不改 `lom/`、不动判据。** 这次只碰文本与登记处；`lom/*.lom` 是跨线契约（`CLAUDE.md`）。
 
 ## 4. 与其它文档的关系
 
 * `CONTRIBUTING.md` §Licence —— 贡献者入口；这一页是它背后"为什么"的那份。
-* `docs/201-doors-and-registries.md` —— "一个事实有几个登记处"的同一类问题；这次的登记处是 §1 那四处。
+* `docs/201-doors-and-registries.md` —— "一个事实有几个登记处"的同一类问题。
 * `docs/171-loment-publish-outlets.md` —— 发布口，说明了公开仓 README 为什么是直出的。
-* 根 `LICENSE` —— 正本；这一页只是它的说明，**改了文本这一页要跟着改**（§1 那张表）。
+* 根 `LICENSE-MIT` / `LICENSE-APACHE` —— 正本；这一页只是说明，**改了文本这一页要跟着改**。

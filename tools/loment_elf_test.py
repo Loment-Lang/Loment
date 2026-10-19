@@ -2647,6 +2647,8 @@ def test_lomelf_selfhost_links_a_real_shared_object():
                                     ports=False)
             assert rc2 != 0, "发行通道居然收下了共享对象"
             assert "--allow-ports" in err2, f"拒的理由没说到开关: {err2[-300:]!r}"
+            # `#634`：这条消息曾经说"发行版里这条路是关着的"——渠道 2026-10-17 已开。
+            assert "关着的" not in err2, f"还在说渠道关着: {err2[-300:]!r}"
         finally:
             (bld / "_mirror_zso.ll").unlink(missing_ok=True)
             (bld / "_mirror_zso_gate.elf").unlink(missing_ok=True)
@@ -3433,6 +3435,630 @@ def test_two_shared_objects_link_in_order():
         rc, _out = _run_bin(exe, "two_so", td)
         assert rc == 0, f"两个共享对象一起跑的退出码是 {rc}（期望 0）"
     print("      两个 .so 同时链上：DT_NEEDED 按 --link 顺序，两个库的函数都跑通 (rc=0)")
+
+
+@test
+def test_ifunc_exports_from_libc_are_importable():
+    """**IFUNC 导出能导入**（`#590`）：glibc 把 `strlen`/`strcmp` 一族发成
+    `STT_GNU_IFUNC`（实测 libc.so.6 里 65 个），loader 的 `JUMP_SLOT` 解析会先调
+    resolver 再绑 —— 对导入方与普通函数没有差别。原先的导出过滤器只收
+    FUNC/OBJECT，这些名字在导出表建成之前就被丢掉了，链接期报"库里没有这个名字"，
+    而名字明明在 `.dynsym` 里。
+
+    判据用真 `libc.so.6`，并且只用**不收编**的两个名字：收编面只有
+    memcpy/memset/memcmp/malloc/free/__stack_chk_fail，`strlen`/`strcmp` 只能从
+    `.so` 的导出表落地。链接成功、导入表里有它们、跑出 0 —— 三件事一起量。
+    """
+    if not _wsl():
+        print("      SKIP: 需要 WSL（或 Linux）跑 ELF")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        libc = ffitest._system_so(td / "libc.so.6", ffitest._LIB6_CANDIDATES)
+        if libc is None:
+            print("      SKIP: 这台上没有 libc.so.6")
+            return
+        src = ('module ifunc\n'
+               'choose runtime\n\n'
+               'extern fn strlen(s: ptr) -> u64;\n'
+               'extern fn strcmp(a: ptr, b: ptr) -> i32;\n\n'
+               'fn _start() {\n'
+               '    let a: ptr = alloc(8);\n'
+               '    let b: ptr = alloc(8);\n'
+               '    store8(a, 0, 104);\n'
+               '    store8(a, 1, 105);\n'
+               '    store8(a, 2, 0);\n'
+               '    store8(b, 0, 104);\n'
+               '    store8(b, 1, 105);\n'
+               '    store8(b, 2, 0);\n'
+               '    if strlen(a) != 2 { syscall4(60, 11, 0, 0); }\n'
+               '    if strcmp(a, b) != 0 { syscall4(60, 12, 0, 0); }\n'
+               '}\n')
+        blob, info = _build_src(td, "ifunc", src, (libc,))
+        assert set(info["imports"]) >= {"strlen", "strcmp"}, (
+            f"IFUNC 导出没有变成导入：imports={info['imports']}")
+        assert _dt_needed(blob) == ["libc.so.6"], _dt_needed(blob)
+        exe = td / "ifunc.elf"
+        exe.write_bytes(blob)
+        rc, _out = _run_bin(exe, "ifunc", td)
+        assert rc == 0, f"IFUNC 导入跑出的退出码是 {rc}（strlen/strcmp 绑错了）"
+    print("      libc 的 IFUNC 导出（strlen/strcmp）变成导入并跑通 (rc=0)")
+
+
+@test
+def test_a_notype_function_export_can_be_imported():
+    """**`STT_NOTYPE` 的函数导出能导入**（`#591`）：没有 `.type`/`.size` 指令的汇编
+    库（`gcc -shared` 出来的正常形状）把函数发成 NOTYPE。它是完全可调用的导出 ——
+    loader 对 `R_X86_64_JUMP_SLOT` 不看符号类型，`dlsym` 也照样解析。原先的白名单只有
+    OBJECT/FUNC 两种，于是手工汇编库一个都导不进来，诊断还说"库里没有这个名字"。
+
+    夹具是**真 `gcc -shared`** 从一份没有 `.type` 的 `.s` 生成的；先用 `readelf` 确认
+    它确实是 `NOTYPE GLOBAL`，再链接、跑出 7。
+    """
+    if not _wsl():
+        print("      SKIP: 需要 WSL（或 Linux）跑 ELF")
+        return
+    if _sh("command -v gcc", 60).returncode != 0:
+        print("      SKIP: 没有 gcc（夹具要真 `gcc -shared` 产物）")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        asm = ('.text\n'
+               '.globl asm_func\n'
+               'asm_func:\n'
+               '    mov $7, %eax\n'
+               '    ret\n')
+        (td / "notype.s").write_text(asm, encoding="utf-8", newline="\n")
+        so = td / "libx_notype.so"
+        r = _sh(f"gcc -shared -fPIC -Wl,-soname,libx_notype.so "
+                f"-o {_wsl_path(so)} {_wsl_path(td / 'notype.s')}", 180, text=True)
+        assert r.returncode == 0, f"gcc 造夹具失败: {r.stderr[-300:]}"
+        syms = _sh(f"readelf -sW {_wsl_path(so)}", 120, text=True).stdout
+        line = next((ln for ln in syms.splitlines()
+                     if ln.rstrip().endswith("asm_func")), "")
+        assert "NOTYPE" in line and "GLOBAL" in line, (
+            f"夹具形状不对（要 NOTYPE GLOBAL）：{line!r}")
+        obj = lomelf.load_foreign(so)
+        assert obj.exports.get("asm_func") == ("func", True), obj.exports
+        src = ('module notype\n'
+               'choose runtime\n\n'
+               'extern fn asm_func() -> i32;\n\n'
+               'fn _start() {\n'
+               '    syscall4(60, asm_func() as u64, 0, 0);\n'
+               '}\n')
+        blob, info = _build_src(td, "notype", src, (so,))
+        assert "asm_func" in info["imports"], info["imports"]
+        assert _dt_needed(blob) == ["libx_notype.so"], _dt_needed(blob)
+        exe = td / "notype.elf"
+        exe.write_bytes(blob)
+        binn = f"{_T}lomelf_notype.bin"
+        script = (f"rm -f {binn} && cp {_wsl_path(exe)} {binn} && chmod +x {binn} && "
+                  f"LD_LIBRARY_PATH={_wsl_path(td)} timeout 20 {binn}; echo -n $?")
+        rr = _sh(script, 140)
+        rc = int(rr.stdout.decode().strip())
+        assert rc == 7, f"asm_func 返回 7，但产物退出码是 {rc}"
+    print("      真 gcc 造的 NOTYPE 汇编导出变成导入并跑出 7")
+
+
+@test
+def test_a_shared_object_without_soname_is_recorded_by_the_path_given():
+    """**没有 SONAME 的 `.so` 记命令行给的那个路径**（`#595`）：GNU ld 就是这个行为。
+
+    原先回退到 `path.name`，于是 `--link /tmp/mylibs/libadd.so` 的产物把
+    `DT_NEEDED` 写成 `libadd.so` —— 而那个名字不在 loader 的任何搜索路径里。链接期
+    一声不响，运行期 `cannot open shared object file`。判据用真 `gcc -shared`（不带
+    `-Wl,-soname`）造夹具，先确认它真的没有 SONAME，再核产物里记的是完整路径。
+    """
+    if not _wsl():
+        print("      SKIP: 需要 WSL（或 Linux）跑 ELF")
+        return
+    if _sh("command -v gcc", 60).returncode != 0:
+        print("      SKIP: 没有 gcc（夹具要真 `gcc -shared` 产物）")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        (td / "mylibs").mkdir()
+        (td / "add.c").write_text("int add(int a, int b) { return a + b; }\n",
+                                  encoding="utf-8", newline="\n")
+        so = td / "mylibs" / "libadd.so"
+        r = _sh(f"gcc -shared -fPIC -o {_wsl_path(so)} {_wsl_path(td / 'add.c')}",
+                180, text=True)
+        assert r.returncode == 0, f"gcc 造夹具失败: {r.stderr[-300:]}"
+        dyn = _sh(f"readelf -dW {_wsl_path(so)}", 120, text=True).stdout
+        assert "SONAME" not in dyn, f"夹具带了 SONAME，测不到这条：{dyn[-300:]}"
+        obj = lomelf.load_foreign(so)
+        assert obj.soname == str(so), (
+            f"没有 SONAME 时记的是 {obj.soname!r}，应当记命令行给的路径 {str(so)!r}")
+        src = ('module soname\n'
+               'choose runtime\n\n'
+               'extern fn add(a: i32, b: i32) -> i32;\n\n'
+               'fn _start() {\n'
+               '    syscall4(60, add(3, 4) as u64, 0, 0);\n'
+               '}\n')
+        blob, info = _build_src(td, "soname", src, (so,))
+        assert info["shared"] == [str(so)], info["shared"]
+        assert _dt_needed(blob) == [str(so)], (
+            f"DT_NEEDED 是 {_dt_needed(blob)!r} —— 只记 basename 的产物运行期找不到库")
+        assert _dt_needed(blob) != [so.name], "DT_NEEDED 又退回成裸文件名了"
+    print("      没有 SONAME 的 `.so`：DT_NEEDED 是命令行给的完整路径，不是 basename")
+
+
+@test
+def test_the_conscript_surface_is_emitted_for_a_shared_object_only_link():
+    """**只链 `.so` 时也发收编面**（`#631`）：`docs/219` §8c 说未定义的名字只落在
+    "收编面"或"`.so` 导出表"两处。原先收编面的判据是 `if objects:` —— 只链 `.so`
+    时 `objects` 是空的，收编面从不发出，`memcpy` 只能去 `.so` 的导出表里找；而
+    glibc/zlib 那条路要么是 IFUNC、要么根本没有这个名字。
+
+    判据用真 `libz.so`：`memcpy` 必须由收编面落地（不进导入表），`compress` 仍然
+    从 `.so` 导入；两者都跑通。若收编面没发，这条在链接期就红（"没有导出 memcpy"）。
+    """
+    if not _wsl():
+        print("      SKIP: 需要 WSL（或 Linux）跑 ELF")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        so = ffitest._system_so(td / "libz.so.1", ffitest.LIBZ_SO_CANDIDATES)
+        if so is None:
+            print("      SKIP: 这台上没有 libz.so（要 zlib1g）")
+            return
+        src = ('module con\n'
+               'choose runtime\n\n'
+               'extern fn memcpy(d: ptr, s: ptr, n: u64) -> ptr;\n'
+               'extern fn compress(dst: ptr, dstlen: ptr, src: ptr, srclen: u64) -> i32;\n\n'
+               'fn _start() {\n'
+               '    let a: ptr = alloc(16);\n'
+               '    let b: ptr = alloc(16);\n'
+               '    store8(a, 0, 65);\n'
+               '    store8(a, 1, 66);\n'
+               '    store8(a, 2, 67);\n'
+               '    store8(a, 3, 68);\n'
+               '    memcpy(b, a, 4);\n'
+               '    if load8(b, 2) != 67 { syscall4(60, 11, 0, 0); }\n'
+               '    let out: ptr = alloc(64);\n'
+               '    let olen: ptr = alloc(8);\n'
+               '    store8(olen, 0, 64);\n'
+               '    store8(olen, 1, 0);\n'
+               '    store8(olen, 2, 0);\n'
+               '    store8(olen, 3, 0);\n'
+               '    if compress(out, olen, b, 4) != 0 { syscall4(60, 12, 0, 0); }\n'
+               '}\n')
+        blob, info = _build_src(td, "con", src, (so,))
+        assert "memcpy" not in info["imports"], (
+            f"memcpy 还在导入表里：{info['imports']} —— 收编面没有为 .so-only 链接发出")
+        assert "compress" in info["imports"], info["imports"]
+        exe = td / "con.elf"
+        exe.write_bytes(blob)
+        rc, _out = _run_bin(exe, "conscript", td)
+        assert rc == 0, f"收编面的 memcpy + libz 的 compress 跑出 {rc}（期望 0）"
+    print("      `.so`-only：memcpy 由收编面提供、compress 走导入，两者都跑通 (rc=0)")
+
+
+# ------------------------------------------------------------------ 自举链接器容量/镜像 (#597-#602, #621-#625)
+#
+# 这一组判据全部**手搭夹具**（不经 clang）：量的是"镜像链接器对同一份输入给出与参考
+# 逐字节相同的产物"，而触发那些上限的输入（5 MiB 的 `.so`、8300 条导出、4097 条重定位）
+# 正是真工具链不肯/很难产出的形状。每条都**先在未修的链接器上跑红**（2026-10-18 实测
+# 0/11），修完之后与参考逐字节相同。
+#
+# 判据吃的是种子自举出来的镜像（`_mirror()`），所以它们的**红/绿**直接对应
+# `loment/tools/lomelf.lomt`，不是 Python 参考实现。
+
+import loment_ports_test as _ports   # noqa: E402  (共用 `_elf_obj` / `_make_ar`)
+
+
+def _fixture_path(name: str) -> Path:
+    d = ROOT / "loment" / "build"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"_cap_{name}"
+
+
+def _shared_object(exports, *, soname="libfixture.so.1", versym=None, pad=0,
+                   second=None, dynsym_link_dynstr2=False):
+    """搭一个 ELF64 `.so`。`exports` / `second` 项 = (名字, bind, type, value)；
+    `st_shndx` 固定指向 `.text`（第 3 节）。`pad` 在文件尾补零字节（两个解析器都忽略）。
+
+    `second` 会再放一条 `SHT_DYNSYM`（`.dynsym2`）；`dynsym_link_dynstr2=True` 时
+    `.dynsym` 的 `sh_link` 指向 `.dynstr2` —— 参考按**名字**挑 `.dynstr`，镜像原先按
+    `sh_link` 挑，于是两侧会给出不同的导出集（#602）。
+    """
+    exports = list(exports)
+    second = list(second or [])
+    nsym, nsym2 = len(exports), len(second)
+    phoff, phnum = 64, 2
+    dyn_off = phoff + phnum * 56
+    dynsz = 6 * 16
+    dynsym_off = dyn_off + dynsz
+    dynsym_size = 24 * (1 + nsym)
+    dstr_off = dynsym_off + dynsym_size
+    names = [e[0] for e in exports] + [soname] + [e[0] for e in second]
+    dstr = b"\x00"
+    offs: dict[str, int] = {}
+    for nm in names:
+        if nm not in offs:
+            offs[nm] = len(dstr)
+            dstr += nm.encode() + b"\x00"
+    cur = dstr_off + len(dstr)
+    dsym2_off = cur
+    dsym2_size = 24 * (1 + nsym2)
+    if second:
+        cur += dsym2_size
+    dstr2_off = cur
+    dstr2 = b"\x00"
+    offs2: dict[str, int] = {}
+    for e in second:
+        offs2[e[0]] = len(dstr2)
+        dstr2 += e[0].encode() + b"\x00"
+    if second:
+        cur += len(dstr2)
+    vs_off = cur
+    vs_size = (2 * (1 + nsym)) if versym is not None else 0
+    vs_size = (vs_size + 1) // 2 * 2
+    cur += vs_size
+    shstr_off = cur
+    sec_names = [".dynsym", ".dynstr", ".text"]
+    if second:
+        sec_names += [".dynsym2", ".dynstr2"]
+    if versym is not None:
+        sec_names += [".gnu.version"]
+    sec_names += [".shstrtab"]
+    shstr = b"\x00"
+    nameoff: dict[str, int] = {}
+    for nm in sec_names:
+        nameoff[nm] = len(shstr)
+        shstr += nm.encode() + b"\x00"
+    cur += len(shstr)
+    text_off = cur
+    text = bytes([(i % 251) + 1 for i in range(max(nsym, nsym2, 1))])
+    cur += len(text)
+    while cur % 8:
+        cur += 1
+    shoff = cur
+    nsec = 1 + len(sec_names)
+    total_unpadded = shoff + nsec * 64
+    b = bytearray(total_unpadded + pad)
+    b[0:8] = b"\x7fELF\x02\x01\x01\x00"
+    struct.pack_into("<H", b, 16, 3)                 # ET_DYN
+    struct.pack_into("<H", b, 18, 62)                # EM_X86_64
+    struct.pack_into("<I", b, 20, 1)
+    struct.pack_into("<Q", b, 32, phoff)
+    struct.pack_into("<Q", b, 40, shoff)
+    struct.pack_into("<H", b, 52, 64)
+    struct.pack_into("<H", b, 54, 56)
+    struct.pack_into("<H", b, 56, phnum)
+    struct.pack_into("<H", b, 58, 64)
+    struct.pack_into("<H", b, 60, nsec)
+    struct.pack_into("<H", b, 62, nsec - 1)          # .shstrtab last
+    struct.pack_into("<IIQQQQQQ", b, phoff, 1, 5, 0, 0, 0,
+                     total_unpadded, total_unpadded, 0x1000)
+    struct.pack_into("<IIQQQQQQ", b, phoff + 56, 2, 6, dyn_off, dyn_off,
+                     dyn_off, dynsz, dynsz, 8)
+    for i, (tag, val) in enumerate(((5, dstr_off), (10, len(dstr)),
+                                    (6, dynsym_off), (11, 24),
+                                    (14, offs[soname]), (0, 0))):
+        struct.pack_into("<QQ", b, dyn_off + i * 16, tag, val)
+    b[dstr_off:dstr_off + len(dstr)] = dstr
+    if second:
+        b[dstr2_off:dstr2_off + len(dstr2)] = dstr2
+    b[shstr_off:shstr_off + len(shstr)] = shstr
+    b[text_off:text_off + len(text)] = text
+    for i, (nm, bind, typ, val) in enumerate(exports, start=1):
+        struct.pack_into("<IBBHQQ", b, dynsym_off + i * 24, offs[nm],
+                         (bind << 4) | typ, 0, 3, val, 1)
+    if second:
+        for i, (nm, bind, typ, val) in enumerate(second, start=1):
+            struct.pack_into("<IBBHQQ", b, dsym2_off + i * 24, offs2[nm],
+                             (bind << 4) | typ, 0, 3, val, 1)
+    if versym is not None:
+        for i, v in enumerate(versym):
+            struct.pack_into("<H", b, vs_off + i * 2, v)
+    order = [".dynsym", ".dynstr", ".text"] + (
+        [".dynsym2", ".dynstr2"] if second else []) + (
+        [".gnu.version"] if versym is not None else []) + [".shstrtab"]
+    idx_of = {nm: 1 + k for k, nm in enumerate(order)}
+
+    def sec(k, nm, typ, flags, off, size, link, info, al, ent):
+        struct.pack_into("<IIQQQQIIQQ", b, shoff + k * 64, nameoff[nm], typ,
+                         flags, 0, off, size, link, info, al, ent)
+
+    for k, nm in enumerate(order, start=1):
+        if nm == ".dynsym":
+            link = idx_of[".dynstr2"] if dynsym_link_dynstr2 else idx_of[".dynstr"]
+            sec(k, nm, 11, 2, dynsym_off, dynsym_size, link, 1, 8, 24)
+        elif nm == ".dynstr":
+            sec(k, nm, 3, 2, dstr_off, len(dstr), 0, 0, 1, 0)
+        elif nm == ".text":
+            sec(k, nm, 1, 6, text_off, len(text), 0, 0, 16, 0)
+        elif nm == ".dynsym2":
+            sec(k, nm, 11, 2, dsym2_off, dsym2_size, idx_of[".dynstr2"], 1, 8, 24)
+        elif nm == ".dynstr2":
+            sec(k, nm, 3, 2, dstr2_off, len(dstr2), 0, 0, 1, 0)
+        elif nm == ".gnu.version":
+            sec(k, nm, 0x6FFFFFFF, 2, vs_off, vs_size, idx_of[".dynsym"], 0, 2, 2)
+        else:
+            sec(k, nm, 3, 0, shstr_off, len(shstr), 0, 0, 1, 0)
+    return bytes(b)
+
+
+def _many_sections_object():
+    """一个 260 个 `.rodata` 节的 ET_REL；第 5 与第 261 节各有**节符号**，`.rela.text`
+    引用第 261 节。旧镜像把对象号与节号各截成 1 字节，两条合成名撞在一起（#624）。"""
+    secs: list[dict] = []
+    byname: dict[str, int] = {}
+
+    def add(nm, typ, flags, blob=b"", *, size=None, link=0, info=0, align=1, ent=0):
+        idx = len(secs)
+        secs.append({"name": nm, "type": typ, "flags": flags, "blob": blob,
+                     "size": len(blob) if size is None else size, "link": link,
+                     "info": info, "align": align, "entsize": ent, "nameoff": 0})
+        byname[nm] = idx
+        return idx
+
+    add("", 0, 0)
+    add(".text", 1, 6, b"\x00" * 16, align=16)
+    for i in range(260):
+        add(f".rodata{i}", 1, 2, bytes([i % 251 + 1]))
+    strtab = add(".strtab", 3, 0)
+    symtab = add(".symtab", 2, 0, align=8, ent=24, link=strtab, info=1)
+    rela = add(".rela.text", 4, 0, align=8, ent=24, link=symtab,
+               info=byname[".text"])
+    shstr = add(".shstrtab", 3, 0)
+    sd = bytearray(24)
+    for shndx in (5, 261):                       # symbol 1 = section 5, 2 = section 261
+        sd += struct.pack("<IBBHQQ", 0, (0 << 4) | 3, 0, shndx, 0, 0)
+    secs[symtab]["blob"], secs[symtab]["size"] = bytes(sd), len(sd)
+    rb = struct.pack("<QQq", 0, (2 << 32) | 1, 0)   # R_X86_64_32 against symbol 2
+    secs[rela]["blob"], secs[rela]["size"] = rb, len(rb)
+    sh = bytearray(b"\x00")
+    for s in secs:
+        s["nameoff"] = len(sh)
+        sh += s["name"].encode() + b"\x00"
+    secs[shstr]["blob"], secs[shstr]["size"] = bytes(sh), len(sh)
+    out = bytearray(64)
+    for s in secs:
+        while len(out) % s["align"]:
+            out.append(0)
+        s["off"] = len(out)
+        out += s["blob"]
+    while len(out) % 8:
+        out.append(0)
+    shoff = len(out)
+    for s in secs:
+        out += struct.pack("<IIQQQQIIQQ", s["nameoff"], s["type"], s["flags"], 0,
+                           s["off"], s["size"], s["link"], s["info"],
+                           s["align"], s["entsize"])
+    out[0:16] = b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 8
+    struct.pack_into("<HHIQQQIHHHHHH", out, 16, 1, 0x3E, 1, 0, 0, shoff, 0,
+                     64, 0, 0, 64, len(secs), shstr)
+    return bytes(out)
+
+
+def _mirror_matches_reference(tag: str, ir: str, fixture, expected=None):
+    """跑一次镜像，产物必须与参考逐字节相同。`fixture` = 要写进 `loment/build/` 的
+    (文件名, 字节) 列表；返回镜像产物。找不到 clang/WSL 时 SKIP。"""
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return None
+    mir = _mirror()
+    links = []
+    written = []
+    try:
+        for nm, blob in fixture:
+            p = _fixture_path(nm)
+            p.write_bytes(blob)
+            written.append(p)
+            links.append(p.relative_to(ROOT).as_posix())
+        ll_rel = f"loment/build/_cap_{tag}.ll"
+        out_rel = f"loment/build/_cap_{tag}.elf"
+        ll = ROOT / ll_rel
+        out = ROOT / out_rel
+        ll.write_text(ir, encoding="utf-8", newline="\n")
+        written.append(ll)
+        want = expected if expected is not None else lomelf.compile_ll(
+            ir, [lomelf.load_foreign(p) for p in written if p.suffix != ".ll"],
+            allow_ports=True)[0]
+        rc, err = _mirror_run(mir, ll_rel, out_rel, tuple(links))
+        assert rc == 0, f"[{tag}] 镜像退出 {rc}: {err[-300:]}"
+        got = out.read_bytes()
+    finally:
+        for p in written:
+            p.unlink(missing_ok=True)
+        (_fixture_path(f"{tag}.elf")).unlink(missing_ok=True)
+    assert got == want, f"[{tag}] 镜像与参考不同 ({len(got)}B vs {len(want)}B)"
+    return got
+
+
+_IR_CALL0 = "declare i32 @{n}()\ndefine i32 @_start() {{\nentry:\n  %r = call i32 @{n}()\n  ret i32 %r\n}}\n"
+
+
+@test
+def test_a_shared_object_larger_than_four_mib_links():
+    """`#597`：5 MiB 的 `.so`。参考没有上限；镜像原先在**分类之前**就按 4 MiB 拒。"""
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    blob = _shared_object([("add_two", 1, 2, 0)], pad=5 * 1024 * 1024)
+    assert len(blob) > 4 * 1024 * 1024
+    _mirror_matches_reference("597", _IR_CALL0.format(n="add_two"),
+                             [("597.so", blob)])
+    print("      5 MiB .so: 镜像照链，与参考逐字节相同")
+
+
+@test
+def test_a_shared_object_with_more_than_8192_exports_links():
+    """`#598`：8300 条导出、程序只要一条。镜像原先抄**全部**导出、撞 8192 上限。"""
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    blob = _shared_object([(f"s{i}", 1, 2, i) for i in range(8300)])
+    _mirror_matches_reference("598", _IR_CALL0.format(n="s0"), [("598.so", blob)])
+    print("      8300 条导出: 只解析用到的那一条，与参考逐字节相同")
+
+
+@test
+def test_a_program_with_more_than_1024_imports_links():
+    """`#599`：1030 个不同导入。镜像的 `IMP_MAX` 原先 1024。"""
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    blob = _shared_object([(f"f{i}", 1, 2, i) for i in range(1030)])
+    lines = [f"declare i32 @f{i}()" for i in range(1030)]
+    lines += ["define i32 @_start() {", "entry:"]
+    lines += [f"  %r{i} = call i32 @f{i}()" for i in range(1030)]
+    lines += ["  ret i32 0", "}"]
+    _mirror_matches_reference("599", "\n".join(lines) + "\n", [("599.so", blob)])
+    print("      1030 个导入: 镜像与参考逐字节相同")
+
+
+@test
+def test_export_names_do_not_crowd_out_a_full_input_buffer():
+    """`#600`：4.19 MB 的 `.ll` + 8300 条导出的 `.so`。镜像原先把导出名抄进输入缓冲尾。"""
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    blob = _shared_object([(f"s{i}", 1, 2, i) for i in range(8300)])
+    pad = "".join(";" + "x" * 999 + "\n" for _ in range(4190))
+    ir = _IR_CALL0.format(n="s0") + pad
+    assert 4_190_000 < len(ir) < 4_194_304, len(ir)
+    _mirror_matches_reference("600", ir, [("600.so", blob)])
+    print("      4.19 MB .ll + 真 .so: 镜像与参考逐字节相同")
+
+
+@test
+def test_the_default_version_replaces_the_kind_of_a_name():
+    """`#601`：同名先非默认 OBJECT、后默认 FUNC。镜像原先只抬默认位、改不了 kind。"""
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    blob = _shared_object([("sym", 1, 1, 0), ("sym", 1, 2, 1)],
+                          versym=[0, 0x8002, 3])
+    _mirror_matches_reference("601", _IR_CALL0.format(n="sym"), [("601.so", blob)])
+    print("      默认 FUNC 覆盖非默认 OBJECT: 镜像与参考逐字节相同")
+
+
+@test
+def test_dynsym_and_dynstr_are_resolved_by_name():
+    """`#602`：两条 `SHT_DYNSYM`，且 `.dynsym.sh_link` 指向 `.dynstr2`。
+    参考按**名字**挑 `.dynsym`/`.dynstr`，镜像原先按类型挑最后一条、按 `sh_link` 取串表。"""
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    blob = _shared_object([("add_two", 1, 2, 0)], second=[("other", 1, 2, 0)],
+                          dynsym_link_dynstr2=True)
+    _mirror_matches_reference("602", _IR_CALL0.format(n="add_two"),
+                              [("602.so", blob)])
+    print("      两条 .dynsym：按名字取 .dynsym/.dynstr，与参考逐字节相同")
+
+
+@test
+def test_more_than_125_objects_do_not_overwrite_relocations():
+    """`#621`：130 个归档成员。`TB_OBJ` 声明的 2048 字节原先只有 1000 可用，第 126 个
+    对象压到第一条重定位上。现在表有自己的空间，且越界会点名。"""
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    members = []
+    for i in range(130):
+        syms = [(f"f{i}", 1, 2, ".text", 0, 1)]
+        relocs = []
+        if i > 0:
+            syms.append((f"f{i-1}", 1, 0, 0, 0, 0))
+            relocs = [(".text", 0, 2, 1, 0)]
+        members.append((f"m{i}.o", _ports._elf_obj(syms=syms, relocs=relocs)))
+    _mirror_matches_reference("621", _IR_CALL0.format(n="f129"),
+                              [("621.a", _ports._make_ar(members))])
+    print("      130 个对象: 对象表不越界，与参考逐字节相同")
+
+
+@test
+def test_more_than_4096_relocations_do_not_overwrite_the_need_set():
+    """`#622`：4097 条重定位 + 一份归档。记录 4097 原先写进归档需要集的第一项；
+    让它承载**第一个**需要名，坏的那一侧就挑不到归档成员。"""
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    code = b"\x90" * 16400
+    relocs = [(".text", i * 4, 2, 0, 0) for i in range(4097)]
+    obj = _ports._elf_obj(code=((".text", code),),
+                          syms=[("g", 1, 2, ".text", 0, 1)], relocs=relocs)
+    ar = _ports._make_ar([("u.o", _ports._elf_obj(
+        syms=[("want", 1, 2, ".text", 0, 1)]))])
+    ir = ("declare i32 @want()\ndeclare i32 @g()\ndefine i32 @_start() {\nentry:\n"
+          "  %r = call i32 @g()\n  %w = call i32 @want()\n  %c = add i32 %r, %w\n"
+          "  ret i32 %c\n}\n")
+    _mirror_matches_reference("622", ir, [("622.o", obj), ("622.a", ar)])
+    print("      4097 条重定位: 需要集不被踩，与参考逐字节相同")
+
+
+@test
+def test_a_second_archive_does_not_relay_the_first_archives_members():
+    """`#623`：两份归档，ELF 成员落在不同偏移。成员表原是全局的、累积的：第二份归档
+    会把第一份的偏移按**第二份的字节**重摆一遍。"""
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    a1 = _ports._make_ar([("one.o", _ports._elf_obj(
+        syms=[("one", 1, 2, ".text", 0, 1)]))])
+    a2 = _ports._make_ar([("other.o", _ports._elf_obj(
+        syms=[("other", 1, 2, ".text", 0, 1)])),
+        ("two.o", _ports._elf_obj(
+            syms=[("two", 1, 2, ".text", 0, 1)]))])
+    ir = ("declare i32 @one()\ndeclare i32 @two()\ndefine i32 @_start() {\nentry:\n"
+          "  %a = call i32 @one()\n  %b = call i32 @two()\n  %c = add i32 %a, %b\n"
+          "  ret i32 %c\n}\n")
+    _mirror_matches_reference("623", ir, [("623a.a", a1), ("623b.a", a2)])
+    print("      两份归档: 成员按归档号各摆各的，与参考逐字节相同")
+
+
+@test
+def test_section_symbol_names_do_not_collide_after_256_sections():
+    """`#624`：第 5 与第 261 节各有节符号。合成名原先对象号/节号各截成 1 字节，
+    两条名字撞在一起，重定位静默落到第 5 节。"""
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    _mirror_matches_reference("624", "define i32 @_start() {\nentry:\n  ret i32 0\n}\n",
+                              [("624.o", _many_sections_object())])
+    print("      第 5 / 261 节: 合成名不再撞，与参考逐字节相同")
+
+
+@test
+def test_an_archive_that_contributes_no_member_does_not_enable_tls_or_the_conscript_surface():
+    """`#625`：`--link unused.a`，没有任何成员被挑中。参考的 `objects` 为空 ⇒ 不装
+    TLS、不发收编面；镜像原先数的是 `--link` 文件的个数。"""
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    ar = _ports._make_ar([("z.o", _ports._elf_obj(
+        syms=[("never", 1, 2, ".text", 0, 1)]))])
+    _mirror_matches_reference("625", "define i32 @_start() {\nentry:\n  ret i32 0\n}\n",
+                              [("625.a", ar)])
+    print("      没人用的归档: 不装 TLS、不发收编面，与参考逐字节相同")
+
+
+@test
+def test_a_gnu_ld_script_is_named_as_one_and_points_at_the_real_file():
+    """`#637`：Debian 的 `libz.so` 是 ASCII 的 GNU ld 脚本，不是 ELF。
+
+    原先它掉进 `ForeignObject` 的兜底，报"不是 ELF64 小端目标文件" —— 把共享对象
+    叫成"目标文件"，也没说该链哪个。现在点名"链接脚本"并给出它指向的 `.so`。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        script = Path(t) / "libz.so"
+        script.write_text(
+            "/* GNU ld script\n   Use the shared library.  */\n"
+            "GROUP ( /lib/x86_64-linux-gnu/libz.so.1  AS_NEEDED ( /lib64/ld-linux-x86-64.so.2 ) )\n",
+            encoding="utf-8", newline="\n")
+        try:
+            lomelf.load_foreign(script)
+        except lomelf.Unsupported as e:
+            msg = str(e)
+            assert "链接脚本" in msg, msg
+            assert "/lib/x86_64-linux-gnu/libz.so.1" in msg, msg
+            assert "目标文件" not in msg, msg
+        else:
+            raise AssertionError("GNU ld 脚本被当成 ELF 收下了")
+    print("      GNU ld 脚本: 点名『链接脚本』并给出它指向的 libz.so.1")
 
 
 def main() -> int:

@@ -178,7 +178,7 @@ npx --yes @vscode/vsce@latest publish      # 版本取 package.json；token 走 
 | 件 | 为什么 |
 |---|---|
 | `repository` | 没有它 `vsce` 每次都要求 `--allow-missing-repository` |
-| 扩展目录里的 `LICENSE` | **`vsce` 只找扩展目录**这一份（仓根那份它看不见）；`Loment-Open` 不是 SPDX 标识，找不到文件它会提示。判据钉住它与仓根**逐字节相同** |
+| 扩展目录里的 `LICENSE` | **`vsce` 只找扩展目录**这一份（仓根那份它看不见）；`MIT OR Apache-2.0` 是 SPDX 表达式，缺文件 `vsce` 会提示。判据钉住它与仓根**逐字节相同** |
 | `icon`（128×128 PNG） | 没有它商店卡片是灰的。现在这份是从 `editors/loment.ico` 的 128 帧转出来的 |
 | `package.json` 的 `files` | vsce 的允许清单。**`node_modules` 必须在里面** —— 商店装下来的那份**不会**跑 `npm install` |
 

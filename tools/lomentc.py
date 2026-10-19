@@ -1292,6 +1292,11 @@ class Module:
     #:   * `own_switches` = **本模块自己写了没写**。只有"库不许 `choose`"用它 ——
     #:     混用的话，每个被 `use` 进来的库都会"因为全局表里有定义"而被误判成库写了 choose。
     own_switches: "SwitchTable | None" = None
+    #: **只给"直接读源码"的路径用**：LMS 七个细开关的显式取值（`docs/253` §11.4）。
+    #: 走真前门时这些行在 `_apply_switches` 那一趟就被吞掉、记进 `switches`；而判据里
+    #: 大量调用 `Parser(...).parse()` 直接读源码（不经装载器），那一趟根本不跑 ——
+    #: 没有这个字段，`choose close lms_guard` 在那里就等于没写。
+    lms_writes: dict[str, bool] = field(default_factory=dict)
     #: **外部代码块**（`docs/185` S1）。两个字段而不是一个:
     #:   * `ext_langs` = `command <语言>` / `foruse <语言>` **声明**过的语言名。
     #:     词法器就是靠它消歧的（不带 `let` 的写法只认声明过的名字），parser 只是
@@ -1390,7 +1395,7 @@ MAXDEPTH = 8
 #:   * `runtime` —— `runtime` / `no_runtime`：产物里**有没有运行期**（`docs/175` §3.6）；
 #:   * `port`    —— `sealed` / `hosted`：产物**通不通着世界**（`docs/222` §4）；
 #:   * `vm`      —— `vm` / `no_vm`：**要哪种执行模型**（`docs/231`）；
-#:   * `lms`     —— `close` / `open`：**要不要内存安全**（`docs/253`）。
+#:   * `lms`     —— **档名**：七级安全梯子开哪几级（`docs/253` §11.3）。
 #:
 #: `runtime` 的取值**刻意只说"有没有"**，不说"里面装了什么"：装的东西会随年份长
 #: （今天是收集器，明天可能是线程、宿主服务），把它钉进值名里，两年后加能力就得回头
@@ -1423,17 +1428,26 @@ CORE_DIMS: dict[str, tuple[str, ...]] = {
     # `gc` 管"谁归还"（生命周期的**内向可达**），这一维管"谁能碰"（许可的**外向**）；
     # `docs/210` §6.2 那句"箭头反了"说的就是这两条是同一张图上的相反方向。
     #
-    # `lms_close`（关）= 今天的形状，也是**默认** —— 默认档不许改变任何现有程序的行为。
-    # `lms_open`（开）= 检查器发 E024–E026，保障器**按站点分配**发内联界检查。
+    # **取值是档名，不是开/关**（`docs/253` §11.3，用户 2026-10-15 三裁）：
+    # `lms_full`（默认，七级全开）/ `lms_forensic_admin`（1+2+3+4）/
+    # `lms_daily_admin`（1+3+4）/ `lms_manage_only_admin`（2）。
     #
-    # **它不引入运行期组件**（`docs/253` §11.2）：四格落的都是**指令**
-    # （一条 `cmp` / 一个 `llvm.trap`），没有表、没有位图 —— 所以它与 `no_runtime`
-    # **不冲突**，`CORE_CONFLICTS` 里因此没有它。
+    # ⚠ **这一维的方向与别的维相反**：别的维写了 `choose` 是**多**一点东西，
+    # 这一维写了是**少**一点 —— 因为默认已经是满的。`choose lms_daily_admin`
+    # 读作"**从满档降到日常档**"，不是"打开日常档"。
+    #
+    # ⚠ **非满档一律带 `_admin`**：这是 `docs/262` §10.1 立的仓级规则
+    # （"关闭关键安全系统的取值必须带 `_admin`"）第一次被**机械检查** ——
+    # `LMS_TIERS` 那张表在导入期逐个核，`loment_lms_test` 也钉着。
+    # 满档不是关闭，所以不带。
+    #
+    # **它不引入运行期组件**（`docs/253` §11.2）：七级的落地都是**指令**
+    # （一条 `cmp` / 一个 `llvm.trap` / 一段内联桩），没有表、没有位图 ——
+    # 所以它与 `no_runtime` **不冲突**，`CORE_CONFLICTS` 里因此没有它。
     # 取值**刻意不带机制名**：今天是边界检查，明天可能是派生指针追踪 ——
     # 与 `runtime` / `vm` 同一条纪律，装的东西不进值名。
-    # **但带维名前缀**（`lms_*`，照 `gc_manual`/`gc_auto` 的先例）：`open` / `close`
-    # 单独太泛，而 `CORE_WORDS` 还兼管表层语法的 `choose` 行摘取。
-    "lms": ("lms_close", "lms_open"),
+    "lms": ("lms_full", "lms_forensic_admin", "lms_daily_admin",
+            "lms_manage_only_admin"),
     # **安全审计**（`docs/262`，用户 2026-10-18 定第七维）。与其它六维**正交**：
     # 它不改变任何判决，只决定"放行有没有来源"的记录在不在。
     # `lspe_open_admin`（开）= 默认；`lspe_close_admin`（关）= **关审计，不关检查** ——
@@ -1452,7 +1466,7 @@ CORE_WORDS = frozenset(w for _ws in CORE_DIMS.values() for w in _ws)
 CORE_DIM_OF = {w: d for d, ws in CORE_DIMS.items() for w in ws}
 #: 每一维**不写**时的取值 —— 默认档，且默认**不改变任何现有程序的行为**。
 CORE_DEFAULTS = {"mode": "std", "gc": "gc_manual", "runtime": "no_runtime",
-                 "port": "sealed", "vm": "no_vm", "lms": "lms_close",
+                 "port": "sealed", "vm": "no_vm", "lms": "lms_full",
                  "lspe": "lspe_open_admin"}
 #: 维的**人话**名字。报错要说清是**哪一维**写了两次 —— `gc` 对用户不是一个词，
 #: 而"核心模式只能声明一次"在有两维之后就**说不清是哪一维**了。
@@ -1462,9 +1476,63 @@ CORE_DIM_ZH = {
     "runtime": "运行期（`runtime` / `no_runtime`）",
     "port": "对外端口（`sealed` / `hosted`）",
     "vm": "执行模型（`vm` / `no_vm`）",
-    "lms": "内存安全（`lms_close` / `lms_open`）",
+    "lms": "内存安全档（`lms_full` / `lms_forensic_admin` / "
+           "`lms_daily_admin` / `lms_manage_only_admin`）",
     "lspe": "安全审计（`lspe_open_admin` / `lspe_close_admin`）",
 }
+
+#: **LMS 的七个细开关**（`docs/253` §11.4 ①），次序就是七级的次序 ——
+#: 判据与 `lms_levels` 那个 Potato 字段都按这个次序，所以它**写死**。
+LMS_TOGGLES: tuple[str, ...] = (
+    "lms_check",     # 1 检查器（编译期拒）
+    "lms_manage",    # 2 管理器（全内存可见）
+    "lms_guard",     # 3 保障器（先拉回）
+    "lms_reject",    # 4 拒绝器（跳过错的那一条指令）
+    "lms_crash",     # 5 崩溃器（退出进程）
+    "lms_restart",   # 6 重启器（C 写的，进程外）
+    "lms_seed",      # 7 最小子集（信任地板的尺寸与哈希）
+)
+
+#: **档 → 七个开关的初值**（`docs/253` §11.4 ③）。
+#:
+#: ⚠ **这张表必须住在编译器里**，不能只在 `chooseset` 文件里 —— 档要先于开关落定
+#: （开关决定"解析前抹不抹"），而 `set choose` 的定义在另一个单元里，预扫时还没读到。
+#: 于是它是**新的一张登记表**：两套实现各一份、逐字节一致（同 `CORE_DIMS` 的纪律）。
+#:
+#: ⚠ `lms_daily_admin` 是 **1+3+4**，不是初稿的 1+4（`docs/253` §5.4）：
+#: 拒绝器**不自己发现错误**，它的判决只能来自第 2 或第 3 级。1+4 的日常档里
+#: 没有任何东西给它喂判决 —— 那不是"便宜一点"，那是一个**不会响的级**。
+LMS_TIERS: dict[str, tuple[bool, ...]] = {
+    "lms_full":             (True, True, True, True, True, True, True),
+    "lms_forensic_admin":   (True, True, True, True, False, False, False),
+    "lms_daily_admin":      (True, False, True, True, False, False, False),
+    "lms_manage_only_admin": (False, True, False, False, False, False, False),
+}
+
+#: **`_admin` 规则**（`docs/262` §10.1）：关掉关键安全系统的取值必须带 `_admin`。
+#: LMS 是这条规则第一次被**机械检查**的地方 —— 满档之外全是降级，所以全都得带。
+#: 导入期就核：表写错在这里炸，而不是等某个人读错一个档名。
+for _t, _lv in LMS_TIERS.items():
+    assert len(_lv) == len(LMS_TOGGLES), (_t, _lv)
+    assert _t == "lms_full" or _t.endswith("_admin"), (
+        f"`{_t}` 降级了内存安全却没有 `_admin` 后缀（`docs/262` §10.1）")
+assert set(LMS_TIERS) == set(CORE_DIMS["lms"]), (set(LMS_TIERS), CORE_DIMS["lms"])
+
+
+def _lms_level(mod, name: str) -> bool:
+    """这一份产物里第几级开着（`docs/253` §11.4 叠加规则的读法）。
+
+    **先看开关表**：预扫已经按档铺过初值，显式写覆盖过。表不在（单元是测试里直接
+    构造的、没走装载器）才回退到档名 —— 那条回退走的是**同一张表**，所以两处不会漂。
+    """
+    sw = getattr(mod, "switches", None)
+    if sw is not None and (name in sw.seeded or name in sw.vals or name in sw.defs):
+        return sw.state(name)
+    writes = getattr(mod, "lms_writes", None)
+    if writes and name in writes:
+        return writes[name]
+    tier = getattr(mod, "chooses", {}).get("lms", CORE_DEFAULTS["lms"])
+    return LMS_TIERS.get(tier, LMS_TIERS["lms_full"])[LMS_TOGGLES.index(name)]
 #: **互相冲突的取值对**（`docs/175` §3.4 ⚠）。键是取值，值 = (和它冲突的取值, 为什么)。
 #: 报错要**点名这两档为什么冲突**，不能泛泛说"非法组合"（判据见 `docs/175` §3.4）。
 CORE_CONFLICTS = {
@@ -1517,6 +1585,11 @@ class SwitchTable:
     def __init__(self) -> None:
         self.defs: dict[str, int] = {}                  # 名字 -> 定义行（首次）
         self.vals: dict[str, tuple[bool, int]] = {}     # 名字 -> (开?, 取值行)（首次）
+        #: **档铺进来的初值**（`docs/253` §11.4 叠加规则）：`vals[name]` 的行号是 `0`
+        #: —— **它们不是"写的"，是"默认的"**。分开记的理由是判据，不是洁癖：
+        #: 一次显式写必须能**覆盖**初值而不被判成"写了两遍"。若初值也进 `defs`/`vals`
+        #: 的正常轨道，`_collect_switches` 那条重复检查就会把用户的每一次覆盖都报成 E022。
+        self.seeded: set[str] = set()
         #: `(名字, 重复行, 首次行)` —— **同一件事写两遍要报出来**，不是后一个盖前一个。
         #: 与"`choose` 只能出现一次"删除之后留下的那个空档正好互补：条数放开了，
         #: 但**同名**仍然只许一次，否则"这个开关到底开没开"就没有答案。
@@ -1535,6 +1608,9 @@ class SwitchTable:
         遍历顺序的排法。只收**定义过的**开关 —— 取值一个没定义的名字是错误
         （`check()` 里报），不该悄悄进对象。
         """
+        # ⚠ **档铺进来的初值不进这里**（2026-10-18）：`switches` 记的是"源码写了什么"，
+        # 而"实际开着哪几级"由 `lms_levels` 那个字段答 —— 两件事分开，判据才分得清
+        # "用户写的"与"档给的"。混在一处会让 `switches` 变成两个来源的并集。
         return [{"name": n, "on": self.state(n)} for n in sorted(self.defs)]
 
 
@@ -1572,13 +1648,21 @@ def _collect_switches(toks: list, tbl: SwitchTable) -> None:
             if nxt is not None and nxt.kind == "ident" and nxt.val == "close":
                 nn = toks[i + 2] if i + 2 < len(toks) else None
                 if nn is not None and nn.kind == "ident":
-                    if nn.val in tbl.vals:
+                    if nn.val in tbl.seeded:
+                        # **显式写覆盖档铺的初值**（`docs/253` §11.4 叠加规则）。
+                        # 它是"写的"，从此不再算初值 —— 于是**第二次**写才会撞重复。
+                        tbl.seeded.discard(nn.val)
+                        tbl.vals[nn.val] = (False, t.line)
+                    elif nn.val in tbl.vals:
                         tbl.dup.append((nn.val, t.line, tbl.vals[nn.val][1]))
                         tbl.ndup = tbl.ndup + 1
                     else:
                         tbl.vals[nn.val] = (False, t.line)
             elif nxt is not None and nxt.kind == "ident" and nxt.val not in CORE_WORDS:
-                if nxt.val in tbl.vals:
+                if nxt.val in tbl.seeded:
+                    tbl.seeded.discard(nxt.val)
+                    tbl.vals[nxt.val] = (True, t.line)
+                elif nxt.val in tbl.vals:
                     tbl.dup.append((nxt.val, t.line, tbl.vals[nxt.val][1]))
                     tbl.ndup = tbl.ndup + 1
                 else:
@@ -1977,8 +2061,23 @@ class Parser:
                 # 语法层只收集, 规则集中在一处, 两个实现要对齐的也就只有那一处。
                 # 值属于**哪一维**由 `CORE_DIM_OF` 查 —— 加一维不必再动这两行。
                 # （非核心的词在 `_apply_switches` 那一趟就被吞掉了, 到不了这里。）
-                mod.chooses[CORE_DIM_OF[w.val]] = w.val
-                mod.choose_lines.append((CORE_DIM_OF[w.val], w.val, line))
+                # ⚠ 只有**核心维的取值**才记进 `chooses`。普通开关（含 LMS 的七个
+                # 细开关 `lms_check` … `lms_seed`）在 `_apply_switches` 那一趟就被吞掉了；
+                # 直接拿源码跑 parser 的路径（判据里到处都是）会把它送到这里 —— 那是
+                # **开关**，不是某一维的取值，跳过而不是崩。
+                if w.val in CORE_DIM_OF:
+                    mod.chooses[CORE_DIM_OF[w.val]] = w.val
+                    mod.choose_lines.append((CORE_DIM_OF[w.val], w.val, line))
+                elif w.val == "close":
+                    # `choose close <名字>`：整个语句都是开关，吃掉名字。
+                    if self.peek(0).kind == "ident":
+                        nn = self.next()
+                        if nn.val in LMS_TOGGLES:
+                            mod.lms_writes[nn.val] = False
+                elif w.val in LMS_TOGGLES:
+                    # 直接读源码的路径（不经 `_apply_switches`）也要看得见显式开关。
+                    mod.lms_writes[w.val] = True
+                # 其余：`choose <开关名>` —— 只吃掉那一个词。
             elif t.val == "extern":  # docs/173: 外部函数声明
                 self.next()
                 f = self.parse_fn(extern=True)
@@ -3799,6 +3898,43 @@ def resolve_name(name: str, root: Path, proj: Path | None = None,
     raise LomError(1, 1, f"名字导入找不到模块 {name}: {where} 下都没有 {name}{ext}")
 
 
+def _lms_tier_of(toks: list) -> str:
+    """根单元里写的 `lms` 档名；没写就是 `CORE_DEFAULTS["lms"]`。
+
+    **只看深度 0**，而且跳过 `set choose <名字> { … }` 那一段的 `set`（那是在**定义**
+    一个开关，不是在选档）。与自举侧 `checker.lomt` 的 `chk_lms_tier` 同一条规则 ——
+    两边扫的是同一串 token，判据是产物的字节。
+    """
+    depth = 0
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        if t.kind == "punct" and t.val in "{[(":
+            depth += 1
+        elif t.kind == "punct" and t.val in "}])":
+            depth -= 1
+        elif depth == 0 and t.kind == "ident" and t.val == "choose" \
+                and i + 1 < len(toks) and toks[i + 1].kind == "ident" \
+                and toks[i + 1].val in LMS_TIERS:
+            prev = toks[i - 1] if i > 0 else None
+            if not (prev is not None and prev.kind == "ident" and prev.val == "set"):
+                return toks[i + 1].val
+        i += 1
+    return CORE_DEFAULTS["lms"]
+
+
+def _seed_lms(tbl: SwitchTable, tier: str) -> None:
+    """**档铺初值**（`docs/253` §11.4 叠加规则的第二步）。
+
+    ⚠ **必须在 `_collect_switches` 之前**：显式写的开关要在初值**之上**覆盖。
+    反过来（先收再铺）时，初值会盖掉用户写的值 —— 而那只在"用户写了与档不同的值"
+    时才看得出来，是一条**会静默**的错序。
+    """
+    for name, on in zip(LMS_TOGGLES, LMS_TIERS[tier]):
+        tbl.vals[name] = (on, 0)          # 行号 0 = 初值，不是"写的"
+        tbl.seeded.add(name)
+
+
 def prescan_switches(entry: Path, root: Path, proj: Path | None,
                      tool_dir: Path | None, ext: str) -> tuple[SwitchTable, list[Path]]:
     """**两趟装载的第一趟**：只做词法，定出整张开关表（`docs/182` §1.6 ②、§1.10）。
@@ -3865,6 +4001,9 @@ def prescan_switches(entry: Path, root: Path, proj: Path | None,
         # **`addin` 目标只许是 chooseset** —— 而根单元是正常程序，不受这条管。
         if depth > 0:
             _check_chooseset(toks, str(rp))
+        else:
+            # **`lms` 档铺初值，且必须在收开关之前**（`docs/253` §11.4 叠加规则）。
+            _seed_lms(tbl, _lms_tier_of(toks))
         _collect_switches(toks, tbl)
         i = 0
         while i < len(toks):
@@ -4125,7 +4264,7 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     # 它管**合法性**（外向许可），与 `gc_*`（生命周期、内向可达）**正交**（`docs/210` §6.2）。
     # ⚠ 这一条**长在检查器里，不长在发射器里**：自举侧的 `codegen.lomt` **根本没有报错
     #   通道**（那边所有编译错误都出自 `checker.lomt`）—— 放到发射器里两边就不同构了。
-    lms = mod.chooses.get("lms", CORE_DEFAULTS["lms"]) == "lms_open"
+    lms = _lms_level(mod, "lms_check")
     funcs = dict(ext_funcs or {})
     deps = deps or []
 
@@ -4341,7 +4480,9 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
             errs.append(f"{line}: 开关 `{name}` 写了两次（第一次在第 {first} 行）—— "
                         f"同一件事写两遍就没有答案了; 删掉一条")
         for name, (_on, line) in sorted(sw.vals.items()):
-            if name not in sw.defs:
+            # **LMS 的七个细开关由编译器定义**（`docs/253` §11.4）：它们是这一维的
+            # 细分，不需要用户再写一遍 `set choose lms_check { … }`。
+            if name not in sw.defs and name not in sw.seeded and name not in LMS_TOGGLES:
                 errs.append(f"{line}: 未定义的开关 `{name}` —— 先写 "
                             f"`set choose {name} {{ … }}` 定义它")
         for d in deps:
@@ -5600,7 +5741,7 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # 与 `gc_ladder` 同形，多一条交叉：`total_net` 必须等于 `surfaces.net`。
         # v16 = v15 + **LSPE 台账** `lspe`（`docs/262`）：审计状态 + 站点/义务计数 +
         # 地板明细 + 不变量。它是**另一个字段**，按 `gc_ladder` 的先例单独升一版。
-        "potato": "v16",
+        "potato": "v17",
         "unit": mod.name,
         "language": "loment",
         # **表层语法**（`docs/188` §2）—— 与 `language` 分工不同, 别混:
@@ -5629,10 +5770,15 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # 空白的第一格）。发行版里它恒为 `no_vm`（渠道闸）。**它今天不承诺性能**：
         # 没有字节码、没有解释器，`choose vm` 的产物与 `no_vm` **逐字节相同**。
         "vm": mod.chooses.get("vm", CORE_DEFAULTS["vm"]),
-        # **内存安全**（`docs/253`，用户 2026-10-15 定第六维）：`close` / `open`。
+        # **内存安全档**（`docs/253` §11.3，用户 2026-10-15 定第六维）。
         # 与 `gc` **正交** —— 同一张图上相反的两个方向（`docs/210` §6.2）。同一条纪律：
-        # **必填**，于是"这份产物开没开内存安全"是**不读源码可判的**。
+        # **必填**，于是"这份产物在哪一档上"是**不读源码可判的**。
+        # ⚠ 取值是**档名**，不是"开没开"：`lms_full` 是默认，**写了档是降级**。
         "lms": mod.chooses.get("lms", CORE_DEFAULTS["lms"]),
+        # **实际开着哪几级**（v17）。档名说"想要哪一档"，显式开关可以覆盖它 ——
+        # 于是两者**可以不一致**，而这一格记的是**最后**的结果。
+        # 这也是 `docs/253` §9 判据 9/11 唯一能"不读源码可判"的落点。
+        "lms_levels": {_n: _lms_level(mod, _n) for _n in LMS_TOGGLES},
         # **安全审计**（`docs/262`，用户 2026-10-18 定第七维）：台账是 LSPE 的第四件。
         # `state` 是开关值；`set_by` 说这一档是**谁定的**（今天只有 default / source）。
         # 计数在 0.1.5 先全为 0，0.1.5.1 起由 QIR/普查/来源问填真值 —— 但**字段必须现在就在**，
@@ -5773,15 +5919,21 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
 # **为什么是变换、不是另抄一份**：那 200 行分配器在两处实现里必须同源。`hosted` 那一份
 # 就是这么来的（`_arena_indirect`，见 `_IR_GC_HOSTED`）—— 手抄必漂。
 # 三处**局部**改写，每一处都先 `assert` 命中：改不动就**当场炸**，不静默漂。
-_LMS_RETRY_DECL = "@__loment_lms_retry = internal global i1 false\n"
-
-
 def _heap_with_lms_rescue(text: str) -> str:
     lines = text.split("\n")
     i = next(k for k, l in enumerate(lines)
              if l.startswith("define internal ptr @__loment_alloc"))
     j = next(k for k in range(i + 1, len(lines)) if lines[k] == "}")
     body = lines[i:j + 1]
+    # (0) 重试标记是**本帧的一个 alloca**，不是全局（2026-10-18，LMS 0.1.5.1）：
+    #   * `docs/253` §13.2 那条约束 —— **默认档不许带 `@__loment_` 符号** ——
+    #     在默认 = 满档之后就成了这一级的硬边界；全局标记会让每一个 `gc_auto`
+    #     产物的默认 IR 里多出一个符号，`lomentc_test` 那条"默认档一点痕迹都没有"
+    #     就当场反了；
+    #   * 顺带修掉一个真缺陷：全局标记在**重入**时串味（一次 alloc 期间的收集器
+    #     回调里再 alloc，第二次会白拿一次重试）。alloca 是每帧一份，天然不串。
+    k = body.index("entry:")
+    body[k + 1:k + 1] = ["  %lmsretry = alloca i1", "  store i1 false, ptr %lmsretry"]
     # (1) `floop` 的两个 phi 各加一条入边（从 `rescue` 回来）。**只改这一个函数体**
     # —— 同一个文件里的 `__loment_free` 也有一个同名形状的 phi 循环，碰不得。
     k = body.index("floop:")
@@ -5796,10 +5948,10 @@ def _heap_with_lms_rescue(text: str) -> str:
     assert body[k + 2] == "  unreachable"
     body[k + 1:k + 3] = [
         "  ; ---- LMS 第 3 级入口 A（docs/253 §5.3）：先拉回，拉不回来才死 ----",
-        "  %lmsdone = load i1, ptr @__loment_lms_retry",
+        "  %lmsdone = load i1, ptr %lmsretry",
         "  br i1 %lmsdone, label %dead, label %rescue",
         "rescue:",
-        "  store i1 true, ptr @__loment_lms_retry",
+        "  store i1 true, ptr %lmsretry",
         "  call void @__loment_collect()",
         "  %head2 = load i32, ptr @__loment_freehead",
         "  br label %floop",
@@ -5812,8 +5964,8 @@ def _heap_with_lms_rescue(text: str) -> str:
     idx = [k for k, l in enumerate(body) if l.startswith("  ret ptr ")]
     assert len(idx) >= 2, idx
     for k in reversed(idx):
-        body.insert(k, "  store i1 false, ptr @__loment_lms_retry")
-    return _LMS_RETRY_DECL + "\n".join(lines[:i] + body + lines[j + 1:])
+        body.insert(k, "  store i1 false, ptr %lmsretry")
+    return "\n".join(lines[:i] + body + lines[j + 1:])
 
 
 _IR_HEAP_LMS = _heap_with_lms_rescue(_IR_HEAP)
@@ -8783,8 +8935,7 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     #   * `lms` 开着 —— 它属于 LMS 第 3 级，不是回收档的事；
     #   * **这份产物里真的有收集器**（`gc_auto` / `gc_auto_alpha`）—— `gc_manual` 下
     #     没有东西可收，"拉回"在那里是一句空话。这是这一级**明写的边界**。
-    _lms_rescue = (mod.chooses.get("lms", CORE_DEFAULTS["lms"]) == "lms_open"
-                   and (gc_auto or gc_alpha))
+    _lms_rescue = _lms_level(mod, "lms_guard") and (gc_auto or gc_alpha)
     # **运行期维**（`docs/217` / `docs/175` §3.6）。两个方向各一句话：
     #   * `runtime`    ⇒ 产物里**一定**有那段运行期 —— 这里的 `rt_on` 无条件发 `_IR_RUNTIME`；
     #   * `no_runtime` ⇒ 产物里**一定没有** —— 那条**不在这里**：它在 `check()` 里拒

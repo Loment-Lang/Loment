@@ -1213,10 +1213,12 @@ def test_m92_lms_entry_a_rescue_is_byte_identical():
     probe = ("module m\nchoose runtime\nconst N: u32 = 64;\n%s\n\n"
              "fn f() -> u32 {\n    let p: ptr = alloc(N);\n"
              "    return load8(p, 0);\n}\n")
+    # 2026-10-18（0.1.5.1）：显式写 `lms_guard`（第 3 级）—— 档名换成七级开关后
+    # `lms_open` 不再是取值；显式写也让这条判据不依赖默认档（默认是 `lms_full`）。
     cases = (
-        ("gc_auto", "choose gc_auto\nchoose lms_open"),
-        ("gc_auto_alpha", "choose gc_auto_alpha\nchoose lms_open"),
-        ("gc_auto_hosted", "choose hosted\nchoose gc_auto\nchoose lms_open"),
+        ("gc_auto", "choose gc_auto\nchoose lms_guard"),
+        ("gc_auto_alpha", "choose gc_auto_alpha\nchoose lms_guard"),
+        ("gc_auto_hosted", "choose hosted\nchoose gc_auto\nchoose lms_guard"),
     )
     with tempfile.TemporaryDirectory() as td:
         exe = _build_codegen(td)
@@ -1233,10 +1235,16 @@ def test_m92_lms_entry_a_rescue_is_byte_identical():
                 raise AssertionError(
                     f"lms_{tag} 首个差异 @{i}:\n"
                     f" loment {got[a:(i or 0) + 80]!r}\n python {want[a:(i or 0) + 80]!r}")
-    # 不许空转：三格都必须**真的**带那条救援路径，且**两条成功返回各清一次**标记
+    # 不许空转：三格都必须**真的**带那条救援路径，且每一条成功返回各清一次标记。
+    # ⚠ 2026-10-18 起标记是**本帧的 alloca**，不是全局 —— 默认满档之后
+    # `docs/253` §13.2（默认产物不带 `@__loment_` 符号）必须仍然成立。
     for tag, out in outs.items():
-        assert "@__loment_lms_retry" in out, f"{tag}: 没有入口 A —— 这条判据在空转"
-        assert out.count("store i1 false, ptr @__loment_lms_retry") == 2, tag
+        assert "%lmsretry = alloca i1" in out, f"{tag}: 没有入口 A —— 这条判据在空转"
+        assert "@__loment_lms_retry" not in out, f"{tag}: 又长出全局符号了"
+        # 1 次初始化 + 每条成功返回一次清（sealed 两条、hosted 三条）
+        assert out.count("store i1 false, ptr %lmsretry") >= 3, (
+            tag, out.count("store i1 false, ptr %lmsretry"))
+        assert out.count("%lmsretry = alloca i1") == 1, tag
 
 
 @test

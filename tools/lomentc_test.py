@@ -1364,7 +1364,7 @@ def test_e028_literal_index_over_a_fixed_array():
     # 渲染器的头一行已经印了码，正文再写一次就是同一件事印两遍。
     assert any(loment_diag.classify(x)[0] == "E028" for x in errs(off)), errs(off)
     # `lms` 开着也一样拒，而且**只报一条** —— 两条路都在的时候不许数出两条诊断
-    on = "module m\nchoose lms_open\n" + body
+    on = "module m\nchoose lms_full\n" + body
     assert len([x for x in errs(on) if loment_diag.classify(x)[0] == "E028"]) == 1, errs(on)
     # **边界**：正好在界内的那个下标**不报** —— 否则这条会把"越界"读成"下标 >= 0 就报"
     edge = "module m\n" + body.replace("a[10]", "a[3]")
@@ -1494,7 +1494,9 @@ def test_e029_use_after_free():
     ⚠ `docs/210` §2.8 给 `free` 加的那五条检查管的是 **`free` 自己那一端**
     （这块是不是真块、有没有重复释放），管不了"**之后再用**" —— 那正是这一格。
 
-    这一对同样是"同一份源，加不加 `choose lms_open` 判决相反"。
+    **2026-10-18 改判（0.1.5.1）**：这一对从"加不加 `choose lms_open`"翻成
+    "默认满档 ⇒ 开着；降档到 `lms_manage_only_admin` ⇒ 关着" —— 因为 `lms`
+    的默认值现在是 `lms_full`，而 `lms_open` / `lms_close` 不再是取值。
     """
     head = "module m\nchoose runtime\n%s\n"
 
@@ -1505,16 +1507,20 @@ def test_e029_use_after_free():
         return ("fn f() -> u32 {\n    let p: ptr = alloc(8);\n"
                 "    let x: u32 = load8(p, 0);\n    free(p);\n    return x;\n}\n")
 
-    # 关着（默认）：use-after-free 一个字的检查都没有
-    assert errs(head % "" + body(True)) == [], errs(head % "" + body(True))
-    # 开着：编译期拒
-    on = head % "choose lms_open" + body(True)
+    # **默认 = 满档 ⇒ 第 1 级开着**：use-after-free 编译期拒
+    on = head % "" + body(True)
     assert any(loment_diag.classify(x)[0] == "E029" for x in errs(on)), errs(on)
+    # 降到"只要管理器"那一档：第 1 级关着，use-after-free 一个字的检查都没有
+    off = head % "choose lms_manage_only_admin" + body(True)
+    assert errs(off) == [], errs(off)
+    # 显式清单个开关**覆盖档**（`docs/253` §11.4 叠加规则）：降档了也照样开着第 1 级
+    ov = head % "choose lms_manage_only_admin\nchoose lms_check" + body(True)
+    assert any(loment_diag.classify(x)[0] == "E029" for x in errs(ov)), errs(ov)
     # **先读后 free** 合法 —— 这一半挡住"见过 free 就报"那种过头实现
-    ok = head % "choose lms_open" + body(False)
+    ok = head % "" + body(False)
     assert errs(ok) == [], errs(ok)
     # **free 之后重新赋值** = 这个名字不再指那块死掉的块 ⇒ 不报（与自举侧 `chk_fr_del` 同口径）
-    re = head % "choose lms_open" + (
+    re = head % "" + (
         "fn f() -> u32 {\n    let p: ptr = alloc(8);\n    free(p);\n"
         "    p = alloc(8);\n    return load8(p, 0);\n}\n")
     assert errs(re) == [], errs(re)
@@ -4122,8 +4128,8 @@ _TIER_CHOOSES = (
     # ⚠ 这两格是**故意**加进来的 —— 那一支 IR（`boom` 改成 `rescue`/`dead`、`floop`
     # 的 phi 多一条入边）是本项目里**手写 IR 最容易写错**的一类，而孪生判据看不出来
     # （两处实现一起错时它照样绿）。**只有过一遍 clang 才知道它是不是合法 LLVM。**
-    ("gc_auto/lms", "choose gc_auto\nchoose runtime\nchoose lms_open"),
-    ("gc_auto_alpha/lms", "choose gc_auto_alpha\nchoose runtime\nchoose lms_open"),
+    ("gc_auto/lms", "choose gc_auto\nchoose runtime\nchoose lms_guard"),
+    ("gc_auto_alpha/lms", "choose gc_auto_alpha\nchoose runtime\nchoose lms_guard"),
 )
 
 
@@ -4151,16 +4157,20 @@ def test_lms_entry_a_rescue_needs_both_lms_and_a_collector():
         return lomentc.emit_llvm(parse(probe % chooses), ROOT, [])
 
     for gc in ("gc_manual", "gc_auto", "gc_auto_alpha"):
-        off = ir(f"choose {gc}")
-        assert "__loment_lms_retry" not in off, (gc, "关着时不许有")
-        on = ir(f"choose {gc}\nchoose lms_open")
+        # 2026-10-18（0.1.5.1）：第 3 级由 `lms_guard` 这个**细开关**管，
+        # 它默认开着（满档）；这里显式关掉那一格，判据因此不依赖默认档。
+        off = ir(f"choose {gc}\nchoose close lms_guard")
+        assert "lmsretry" not in off, (gc, "关着时不许有")
+        on = ir(f"choose {gc}\nchoose lms_guard")
         if gc == "gc_manual":
-            assert "__loment_lms_retry" not in on, (gc, "没有收集器 ⇒ 没有东西可拉回")
+            assert "lmsretry" not in on, (gc, "没有收集器 ⇒ 没有东西可拉回")
         else:
-            assert "__loment_lms_retry" in on, (gc, "开着且要收 ⇒ 该有")
-            # **只许重来一次**：重试标记在**每一条成功返回前**都要清掉。
-            # 不清的话"这一次"用掉的重试会留给下一次分配 —— 那是**假的能力**。
-            assert on.count("store i1 false, ptr @__loment_lms_retry") == 2, on
+            assert "%lmsretry = alloca i1" in on, (gc, "开着且要收 ⇒ 该有")
+            # **默认产物不带 `@__loment_` 符号**（`docs/253` §13.2）：标记是本帧的 alloca，
+            # 不是全局 —— 满档是默认，这条不能反。
+            assert "@__loment_lms_retry" not in on, (gc, "不许再长出全局符号")
+            # **只许重来一次**：重试标记在**每一条成功返回前**都要清掉（1 次初始化 + 2 次清）。
+            assert on.count("store i1 false, ptr %lmsretry") == 3, on
 
 
 @test
@@ -4264,7 +4274,7 @@ def test_mixed_width_arithmetic_has_a_common_type():
 def test_lspe_dimension_defaults_open():
     """第七维：不写 `choose` 就是 `lspe_open_admin`，台账随产物一起发出（v16）。"""
     doc = json.loads(lomentc.emit_potato(lomentc.load(DEMO), ROOT))
-    assert doc["potato"] == "v16"
+    assert doc["potato"] == "v17"
     lp = doc["lspe"]
     assert lp["state"] == "lspe_open_admin"
     assert lp["set_by"] == "default"
@@ -4293,7 +4303,7 @@ def test_lspe_close_admin_is_recorded():
         p = Path(td) / "close.lomt"
         p.write_text(src, encoding="utf-8", newline=chr(10))
         doc = json.loads(lomentc.emit_potato(lomentc.load(p), ROOT))
-    assert doc["potato"] == "v16"
+    assert doc["potato"] == "v17"
     assert doc["lspe"]["state"] == "lspe_close_admin"
     assert doc["lspe"]["set_by"] == "source"
     # 关审计：普查不算，计数全零。

@@ -2019,7 +2019,9 @@ fn pt_vm(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
 /// ⚠ **取值带维名前缀**（`lms_*`，照 `gc_manual`/`gc_auto` 的先例）：`open` / `close`
 /// 单独太泛。⚠ **它不引入运行期组件**（`docs/253` §11.2），所以它**不与 `no_runtime`
 /// 冲突** —— 这一层不判冲突（那是校验器的事），只把源码里写的那个词如实抄进对象。
-fn pt_lms(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+/// `lms` 档的**序号**：1 full / 2 forensic / 3 daily / 4 manage_only / 0 没写。
+/// 与参考实现的 `LMS_TIERS` 同一张表（加一档两边一起动）。
+fn pt_lms_val(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
     let d: u32 = 0;
     let i: u32 = lo;
     while i < hi && pt_kind(t, i) != 4 {
@@ -2032,13 +2034,168 @@ fn pt_lms(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
             if (c == 125 || c == 41 || c == 93) && d > 0 {
                 d = d - 1;
             }
-        } else if d == 0 && pt_tis(unit, t, i, "choose")
-                && (pt_tis(unit, t, i + 1, "lms_close") || pt_tis(unit, t, i + 1, "lms_open")) {
-            return pt_q(out, o, unit, pt_off(t, i + 1), pt_tlen(t, i + 1));
+        } else if d == 0 && pt_tis(unit, t, i, "choose") {
+            if pt_tis(unit, t, i + 1, "lms_full") {
+                return 1;
+            }
+            if pt_tis(unit, t, i + 1, "lms_forensic_admin") {
+                return 2;
+            }
+            if pt_tis(unit, t, i + 1, "lms_daily_admin") {
+                return 3;
+            }
+            if pt_tis(unit, t, i + 1, "lms_manage_only_admin") {
+                return 4;
+            }
         }
         i = i + 1;
     }
-    return pt_qs(out, o, "lms_close");
+    return 0;
+}
+
+/// `lms`（`docs/253` §11.3，2026-10-18 改判）：**四个档名**，默认 `lms_full`。
+/// 与参考实现的 `CORE_DIMS["lms"]` / `CORE_DEFAULTS["lms"]` 是同一张表。
+///
+/// ⚠ **方向与别的维相反**：默认是满的，写档是**降级**。非满档一律带 `_admin`
+/// （`docs/262` §10.1 的仓级规则）。⚠ 它**不与 `no_runtime` 冲突**（§11.2）。
+fn pt_lms(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+    let v: u32 = pt_lms_val(unit, t, lo, hi);
+    if v == 2 {
+        return pt_qs(out, o, "lms_forensic_admin");
+    }
+    if v == 3 {
+        return pt_qs(out, o, "lms_daily_admin");
+    }
+    if v == 4 {
+        return pt_qs(out, o, "lms_manage_only_admin");
+    }
+    return pt_qs(out, o, "lms_full");
+}
+
+/// **实际开着哪几级**（v17，`docs/253` §11.4）：档铺初值，显式 `choose lms_x` /
+/// `choose close lms_x` 覆盖 —— 与参考实现 `_lms_level` 同一条叠加规则。
+///
+/// 位序就是 `LMS_TOGGLES` 的次序：check / manage / guard / reject / crash /
+/// restart / seed。默认满档 = 127。
+fn pt_lms_mask(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+    let v: u32 = pt_lms_val(unit, t, lo, hi);
+    // 满档 127；法医 1+2+3+4 = 15；日常 1+3+4 = 13；只要管理器 = 2。
+    let m: u32 = 127;
+    if v == 2 {
+        m = 15;
+    }
+    if v == 3 {
+        m = 13;
+    }
+    if v == 4 {
+        m = 2;
+    }
+    let d: u32 = 0;
+    let i: u32 = lo;
+    while i < hi && pt_kind(t, i) != 4 {
+        let k: u32 = pt_kind(t, i);
+        if k == 3 {
+            let c: u32 = load8(unit, pt_off(t, i)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                d = d + 1;
+            }
+            if (c == 125 || c == 41 || c == 93) && d > 0 {
+                d = d - 1;
+            }
+        } else if d == 0 && pt_tis(unit, t, i, "choose") {
+            // ⚠ `set choose <名字>` 是**定义**，不是取值 —— 与参考实现同一处跳过。
+            let isdef: u32 = 0;
+            if i > 0 {
+                if pt_tis(unit, t, i - 1, "set") {
+                    isdef = 1;
+                }
+            }
+            if isdef == 0 {
+                let neg: u32 = 0;
+                let j: u32 = i + 1;
+                if pt_tis(unit, t, i + 1, "close") {
+                    neg = 1;
+                    j = i + 2;
+                }
+                let bit: u32 = 0;
+                if pt_tis(unit, t, j, "lms_check") {
+                    bit = 1;
+                }
+                if pt_tis(unit, t, j, "lms_manage") {
+                    bit = 2;
+                }
+                if pt_tis(unit, t, j, "lms_guard") {
+                    bit = 4;
+                }
+                if pt_tis(unit, t, j, "lms_reject") {
+                    bit = 8;
+                }
+                if pt_tis(unit, t, j, "lms_crash") {
+                    bit = 16;
+                }
+                if pt_tis(unit, t, j, "lms_restart") {
+                    bit = 32;
+                }
+                if pt_tis(unit, t, j, "lms_seed") {
+                    bit = 64;
+                }
+                if bit != 0 {
+                    if neg == 1 {
+                        m = m & (127 - bit);
+                    } else {
+                        m = m | bit;
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return m;
+}
+
+/// 把 `lms_mask` 逐个印成**布尔**，键序 = 七级的次序（参考实现是同一张 `LMS_TOGGLES`）。
+fn pt_lms_levels(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+    let m: u32 = pt_lms_mask(unit, t, lo, hi);
+    o = pt_str(out, o, "{\n");
+    let names: u32 = 0;
+    while names < 7 {
+        let bit: u32 = 1 << names;
+        let v: u32 = 0;
+        if m & bit != 0 {
+            v = 1;
+        }
+        if names == 0 {
+            o = pt_key(out, o, 2, "lms_check");
+        }
+        if names == 1 {
+            o = pt_key(out, o, 2, "lms_manage");
+        }
+        if names == 2 {
+            o = pt_key(out, o, 2, "lms_guard");
+        }
+        if names == 3 {
+            o = pt_key(out, o, 2, "lms_reject");
+        }
+        if names == 4 {
+            o = pt_key(out, o, 2, "lms_crash");
+        }
+        if names == 5 {
+            o = pt_key(out, o, 2, "lms_restart");
+        }
+        if names == 6 {
+            o = pt_key(out, o, 2, "lms_seed");
+        }
+        o = pt_bool(out, o, v);
+        if names < 6 {
+            o = pt_str(out, o, ",\n");
+        } else {
+            o = pt_str(out, o, "\n");
+        }
+        names = names + 1;
+    }
+    o = pt_ind(out, o, 1);
+    o = pt_str(out, o, "}");
+    return o;
 }
 
 /// v16（`docs/262`，用户 2026-10-18 定第七维）：LSPE 台账。**必填**，紧跟在 `lms` 之后 ——
@@ -5376,10 +5533,11 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     let nlw2: u32 = pt_rung_total(unit, t, lo, hi, 2);
     let nlw3: u32 = pt_rung_total(unit, t, lo, hi, 3);
     let nlw_tot: u32 = nlw0 + nlw1 + nlw2 + nlw3;
-    // v15 = v14 + **内存安全**（`docs/253`，用户 2026-10-15 定第六维）：`lms_close` / `lms_open`。
-    // 它在**最后** —— 与前面几维同形，且"这份产物开没开内存安全"是**不读源码可判**的。
+    // v15 = v14 + **内存安全档**（`docs/253` §11.3，2026-10-18 改成档名）。
+    // v17 = v16 + **实际开着哪几级** `lms_levels`（同一次改判）。
+    // 它在**最后** —— 与前面几维同形，且"这份产物在哪一档上"是**不读源码可判**的。
     o = pt_key(out, o, 1, "potato");
-    o = pt_qs(out, o, "v16");
+    o = pt_qs(out, o, "v17");
     o = pt_str(out, o, ",\n");
     // `unit` 是**根**那份源的 `module` 名 —— 依赖在前, 所以它是根那个标记后面的名字
     // (不是第 1 个 token: 那是第一个依赖的名字)。
@@ -5423,6 +5581,12 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     // ⚠ **次序是判据**：参考实现那边 `"lms"` 紧跟在 `"vm"` 之后，两串字节逐字节比。
     o = pt_key(out, o, 1, "lms");
     o = pt_lms(out, o, unit, t, lo, hi);
+    o = pt_str(out, o, ",\n");
+    // v17（`docs/253` §11.4）：**实际开着哪几级**。档名说"想要哪一档"，显式开关可以
+    // 覆盖它 —— 于是两者**可以不一致**，而这一格记的是**最后**的结果。
+    // ⚠ **次序是判据**：参考实现那边 `"lms_levels"` 紧跟在 `"lms"` 之后。
+    o = pt_key(out, o, 1, "lms_levels");
+    o = pt_lms_levels(out, o, unit, t, lo, hi);
     o = pt_str(out, o, ",\n");
     // v16（`docs/262`）：LSPE 台账。**必填**，紧跟在 `lms` 之后 ——
     // ⚠ **次序是判据**：参考实现那边 `"lspe"` 紧跟在 `"lms"` 之后，两串字节逐字节比。

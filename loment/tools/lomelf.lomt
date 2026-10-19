@@ -54,24 +54,37 @@ const PE_IMG_BASE: u64 = 5368709120;   // 0x140000000 —— 只在实际落绝�
 // （`bootstrap.sh` 的 1/4 步），所以这条上限就是**种子的上限**。抬法是把布局整体重排:
 // 输入 / 代码 / 输出三块各给 4 MiB（输入装得下种子, 代码与输出按同比例给, 免得
 // "输入收下了、产物却装不下"那种一半的失败）。表区与全局数据不动。
+// ---- 2026-10-19: 输入 / 代码 / 输出三块各从 4 MiB 抬到 6 MiB（`#777`）
+//
+// 实测 2026-10-19: 种子 4,153,242 B / IN_CAP 4,194,304 B —— 只剩 **41,062 B**（约 10 KB
+// 源码）。那一格不是"还早"：越过之后 `read_all` 收满即停，`run()` 里那条守卫会响亮退出
+// （不再是静默截断），但整条自举链就停在这里 —— 也就是 `#441` 那个悬崖的现代形态。
+// 抬法与 `docs/192` / `docs/200` 同一条式子，三块 **1:1** 一起抬（+2 MiB）：
+//   M_TXT 4202496 -> 6299648    M_OUT 8396800 -> 12591104    M_GB 12591104 -> 18882560
+//   M_TAB 13639680 -> 20054016  M_OBJ 22028288 -> 28442624  M_AR 26222592 -> 32636928
+//   ARENA 30416896 -> 36833024
+// 表区随输入一起抬（输入多 1.5 倍 ⇒ 标签/回填最多也多 1.5 倍）：
+//   TB_G_MAX 4096 -> 6144 (+65,536)
+//   TB_LBL_MAX 32768 -> 49152 (+393,216)   TB_FIX_MAX 32768 -> 49152 (+458,752)
+// 之后每一张表的偏移统一后移 **+917,504**；表尾 5,775,136 B 仍在 8 MiB 表区内。
 const M_ARGV: u32 = 0;             // 8192
-const M_IN: u32 = 8192;            // 4 MiB 输入 .ll 文本
-const M_TXT: u32 = 4202496;        // 4 MiB 代码缓冲
-const M_OUT: u32 = 8396800;        // 4 MiB 输出 ELF
-const M_GB: u32 = 12591104;        // 1 MiB 全局数据
+const M_IN: u32 = 8192;            // 6 MiB 输入 .ll 文本
+const M_TXT: u32 = 6299648;        // 6 MiB 代码缓冲
+const M_OUT: u32 = 12591104;       // 6 MiB 输出 ELF
+const M_GB: u32 = 18882560;        // 1 MiB 全局数据
 // **表区从 4 MiB 抬到 8 MiB**（2026-10-18，`#599` / `#622`）：导入表要装得下一份
 // 4 MiB `.ll` 能表达的最多不同调用目标（`IMP_MAX`），重定位表也要随对象变大；
 // 两张表都住在表区里，4 MiB 已经排不下。抬法与 `docs/192` / `docs/200` 同一条式子：
 // **整条表区往后挪**，`M_OBJ` / `M_AR` / `ARENA` 依次后移。
-const M_TAB: u32 = 13639680;       // 8 MiB 表区
-const M_OBJ: u32 = 22028288;       // 4 MiB 外部目标文件 (.o) 暂存 (docs/173, 一次一个)
+const M_TAB: u32 = 20054016;       // 8 MiB 表区
+const M_OBJ: u32 = 28442624;       // 4 MiB 外部目标文件 (.o) 暂存 (docs/173, 一次一个)
 // **归档暂存**（`docs/173` 阶段 2，`FujoJTOP/loment#405`）：`.a` 要整包驻留（定点选择要
 // 反复扫它），而成员得拷进 `M_OBJ` 再摆 —— 两块不能是同一块。与 `M_OBJ` 同尺寸：真库
 // （zlib 的 150 KB）离上限很远，上限在这里是给"来的不是库"那种输入一个**响亮的**界。
-const M_AR: u32 = 26222592;        // 4 MiB 归档暂存
-const ARENA: u64 = 30416896;
+const M_AR: u32 = 32636928;        // 4 MiB 归档暂存
+const ARENA: u64 = 36833024;
 
-const IN_CAP: u32 = 4194304;
+const IN_CAP: u32 = 6291456;
 //: `--diag-out PATH` 的落点：**argv 暂存块的最后 1 KiB**（`pbuf` 一共 64 KiB，
 //: 它的 0..65536 是路径区，再往后才是代码缓冲）。给启动器传进来的那条诊断文件路径用,
 //: 免得与输入 / 输出 / `--link` 三个落点抢 —— 那三块都是按 argv 长度算出来的。
@@ -129,7 +142,7 @@ const C_NMEM: u32 = 116;           // 归档**挑中**的成员条数
 // 抬到 4 MiB**, `M_OBJ` / `ARENA` 依次后移（与 `docs/192` §2 抬输入缓冲同一条式子）。
 // `TB_G_MAX` 是给判据读的（`loment_genesis_test::test_seed_fits_lomelf_table_caps`）——
 // 与 `IN_CAP` 那条同一种"把余量变成看得见的预算"。
-const TB_G_MAX: u32 = 4096;        // 全局表条数上限（判据按它数种子里的 `@x = `）
+const TB_G_MAX: u32 = 6144;        // 全局表条数上限（判据按它数种子里的 `@x = `）
 const TB_G: u32 = 256;             // 全局表 stride 32 × TB_G_MAX
 const G_NOFF: u32 = 0;
 const G_NLEN: u32 = 4;
@@ -155,20 +168,20 @@ const G_ZERO: u32 = 28;
 //
 // **同一抬法当时在另一条分支上也做了一遍**（`docs/222` §7 的自举侧 v11 `surfaces`，
 // 多 193 条标签）—— 两边数一模一样，并进 main 时这一处按一份落地，不是两抬。
-const TB_LBL_MAX: u32 = 32768;     // 标签表条数
-const TB_FIX_MAX: u32 = 32768;     // 回填表条数
+const TB_LBL_MAX: u32 = 49152;     // 标签表条数
+const TB_FIX_MAX: u32 = 49152;     // 回填表条数
 const TB_SLOT_MAX: u32 = 32768;    // 槽表条数（每函数清）
 const TB_ALLOC_MAX: u32 = 8192;    // alloca 表条数（每函数清）
 const TB_PHI_MAX: u32 = 512;       // phi 表条数（每函数清）
 
-const TB_LBL: u32 = 131328;          // 标签表 stride 24 × TB_LBL_MAX: (函数名, 块名, 地址)
+const TB_LBL: u32 = 196864;          // 标签表 stride 24 × TB_LBL_MAX: (函数名, 块名, 地址)
 const L_NOFF: u32 = 0;
 const L_NLEN: u32 = 4;
 const L_ADDR: u32 = 8;
 const L_BOFF: u32 = 12;            // 基本块名 (函数级标签留 0)
 const L_BLEN: u32 = 16;
 
-const TB_FIX: u32 = 917760;        // 回填表 stride 28 × TB_FIX_MAX（16384 → 32768, docs/200 §3）
+const TB_FIX: u32 = 1376512;        // 回填表 stride 28 × TB_FIX_MAX（16384 → 32768, docs/200 §3）
 const F_SITE: u32 = 0;
 const F_KIND: u32 = 4;
 const F_NOFF: u32 = 8;
@@ -176,28 +189,28 @@ const F_NLEN: u32 = 12;
 const F_BOFF: u32 = 16;
 const F_BLEN: u32 = 20;
 
-const TB_SLOT: u32 = 1835264;       // 槽表 stride 16 × 32768 (每函数清)
+const TB_SLOT: u32 = 2752768;       // 槽表 stride 16 × 32768 (每函数清)
 const S_NOFF: u32 = 0;
 const S_NLEN: u32 = 4;
 const S_OFF: u32 = 8;
 
-const TB_ALLOC: u32 = 2359552;     // alloca 表 stride 16 × 8192 (每函数清)
+const TB_ALLOC: u32 = 3277056;     // alloca 表 stride 16 × 8192 (每函数清)
 const A_NOFF: u32 = 0;
 const A_NLEN: u32 = 4;
 const A_OFF: u32 = 8;
 const A_SIZE: u32 = 12;
 
-const TB_ARG: u32 = 2490624;       // 调用实参暂存 (每个 24 字节)
+const TB_ARG: u32 = 3408128;       // 调用实参暂存 (每个 24 字节)
 
-const TB_PHI: u32 = 2491008;       // phi 表 stride 16 × 512 (每函数清)
-const TB_IDATA: u32 = 2499200;      // PE: 导入表 blob 的落点（4115 字节，走 hex 搬进来）
+const TB_PHI: u32 = 3408512;       // phi 表 stride 16 × 512 (每函数清)
+const TB_IDATA: u32 = 3416704;      // PE: 导入表 blob 的落点（4115 字节，走 hex 搬进来）
 const PH_BOFF: u32 = 0;            // 所属基本块名
 const PH_BLEN: u32 = 4;
 const PH_IOFF: u32 = 8;            // phi 指令的起始偏移
 const PH_ILEN: u32 = 12;
 
 // 外部函数表 (docs/173): `declare` 出来的符号名, 偏移指向**输入文本** (与标签表同基)。
-const TB_EXT: u32 = 2504704;       // stride 8 × 4096: (起点, 长度)
+const TB_EXT: u32 = 3422208;       // stride 8 × 4096: (起点, 长度)
 const E_NOFF: u32 = 0;
 const E_NLEN: u32 = 4;
 
@@ -207,7 +220,7 @@ const E_NLEN: u32 = 4;
 // 挪到表区后段，这张表真的有自己声明的 2048 字节；另外 `link_object_mem` 里补了
 // `OBJ_MAX` 守卫（越界点名退出，绝不静默写穿）。
 const OBJ_MAX: u32 = 256;          // 摆得下的外部对象上限
-const TB_OBJ: u32 = 2505504;       // stride 8 × OBJ_MAX
+const TB_OBJ: u32 = 3423008;       // stride 8 × OBJ_MAX
 const O_TEXT: u32 = 0;             // 该对象的代码在缓冲里的偏移 (16 对齐)
 const O_DATA: u32 = 4;             // 该对象的**数据节**在数据缓冲 (gb) 里的起点 (16 对齐)
 
@@ -218,7 +231,7 @@ const O_DATA: u32 = 4;             // 该对象的**数据节**在数据缓冲 (
 // 现在它挪到 `TB_IMP` 之后、有自己的 `REL_MAX` 守卫；32768 条是给"一个 -O2 对象动辄
 // 几千条重定位"留的余量，表区（8 MiB）里排得下。
 const REL_MAX: u32 = 32768;        // 重定位记录上限
-const TB_FREL: u32 = 3809056;      // stride 32 × REL_MAX
+const TB_FREL: u32 = 4726560;      // stride 32 × REL_MAX
 const F2_OBJ: u32 = 0;             // 对象号 (索引 TB_OBJ)
 const F2_AT: u32 = 4;              // 被重定位节在该对象代码里的起点
 const F2_OFF: u32 = 8;             // r_offset (节内偏移)
@@ -236,9 +249,9 @@ const F2_IN: u32 = 28;             // 0 = 落在**代码**上 (写 txt); 1 = 落
 // `#623`：成员表不再是"当前归档"的临时表 —— 它跨归档留存，每条带上**归档号**
 // （12 字节：归档号、起点、长度）。第二份归档因此不会把第一份的成员按错的字节重摆一遍。
 const NEED_MAX: u32 = 2048;        // 需要集条数上限
-const TB_NEED: u32 = 2637600;      // stride 8 × NEED_MAX: (名字池起点, 长度)
+const TB_NEED: u32 = 3555104;      // stride 8 × NEED_MAX: (名字池起点, 长度)
 const MEM_MAX: u32 = 4096;         // 归档挑中的成员上限（跨全部归档）
-const TB_MEM: u32 = 2653984;       // stride 12 × MEM_MAX: (归档号, 在 M_AR 里的起点, 长度)
+const TB_MEM: u32 = 3571488;       // stride 12 × MEM_MAX: (归档号, 在 M_AR 里的起点, 长度)
 const M_ARIDX: u32 = 0;
 const M_OFF: u32 = 4;
 const M_LEN: u32 = 8;
@@ -4191,7 +4204,7 @@ fn resolve_fixups(tab: ptr, t: ptr, txt: ptr) -> u32 {
 // ① 没有导出条数上限（一个库里 4 万条导出也照链）；② 导出名不占名字池，一份写满
 // 输入缓冲的 `.ll` 加一个真 `.so` 也不再被拒。
 const IMP_MAX: u32 = 131072;       // 导入表条数上限（≥ 一份 4 MiB .ll 能表达的目标数）
-const TB_IMP: u32 = 2760480;       // stride 8 × IMP_MAX: (名字池起点, 长度)
+const TB_IMP: u32 = 3677984;       // stride 8 × IMP_MAX: (名字池起点, 长度)
 
 const C_NSHARED: u32 = 120;        // 0/1 —— 这一版一次只能链一个 `.so`
 const C_SONOFF: u32 = 124;         // SONAME 在名字池里的起点与长度

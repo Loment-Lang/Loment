@@ -347,6 +347,9 @@ def test_seed_fits_lomrel_normalization_buffer():
 
     与 `loment_genesis_test::test_seed_fits_lomelf_input_buffer` 同一个形状：
     从 `lomrel.lomt` 里**读**上限，不另抄一份，并把余量打出来。
+
+    `#777` 起还要求**名义余量**（256 KiB）：越界的另一半是"还没越，但下一笔改动就顶出去"。
+    种子 4,153,242 B 对旧的 4 MiB 只剩 41,062 B —— 这一条两处都要看得见。
     """
     src = SRC.read_text(encoding="utf-8")
     m = re.search(r"const NORM_CAP: u32 = (\d+);", src)
@@ -357,11 +360,14 @@ def test_seed_fits_lomrel_normalization_buffer():
         f = ROOT / p
         if f.is_file() and f.stat().st_size > worst_sz:
             worst, worst_sz = p, f.stat().st_size
-    assert worst_sz < cap, (
-        f"清单里最大的工件 {worst}（{worst_sz} B）超过 lomrel 的归一化上限 {cap} B。"
-        f"**越界不报错**，会写坏已装载的清单（症状是「后面每一条都对不上」）—— "
+    reserve = 256 * 1024
+    assert worst_sz + reserve <= cap, (
+        f"清单里最大的工件 {worst}（{worst_sz} B）+ 名义余量 {reserve} B 超过 lomrel 的"
+        f"归一化上限 {cap} B（实际余量 {cap - worst_sz} B）。**越界不报错**，会写坏"
+        f"已装载的清单（症状是「后面每一条都对不上」）—— "
         f"抬 `M_NORM` / `NORM_CAP` / `M_CUR` / `ARENA`，见 docs/200 §6")
-    print(f"      最大工件 {worst} {worst_sz} B / 归一化上限 {cap} B, 余量 {cap - worst_sz}")
+    print(f"      最大工件 {worst} {worst_sz} B / 归一化上限 {cap} B, "
+          f"余量 {cap - worst_sz} B (要求 >= {reserve})")
 
 
 def _manifest_paths() -> list[str]:

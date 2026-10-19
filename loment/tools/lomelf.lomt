@@ -69,7 +69,11 @@ const M_OBJ: u32 = 22028288;       // 4 MiB 外部目标文件 (.o) 暂存 (docs
 // 反复扫它），而成员得拷进 `M_OBJ` 再摆 —— 两块不能是同一块。与 `M_OBJ` 同尺寸：真库
 // （zlib 的 150 KB）离上限很远，上限在这里是给"来的不是库"那种输入一个**响亮的**界。
 const M_AR: u32 = 26222592;        // 4 MiB 归档暂存
-const ARENA: u64 = 30416896;
+// **TLS 暂存**（`#610`）：`.tdata` / `.tbss` 不能就地摆（最终布局在 GOT 之后、按对象
+// 顺序重排），所以先收在这里，等所有对象都摆完再一次性落进 `gb`。
+const M_TLS: u32 = 30416896;       // 64 KiB
+const TLS_CAP: u32 = 65536;
+const ARENA: u64 = 30482432;
 
 const IN_CAP: u32 = 4194304;
 //: `--diag-out PATH` 的落点：**argv 暂存块的最后 1 KiB**（`pbuf` 一共 64 KiB，
@@ -243,9 +247,30 @@ const M_ARIDX: u32 = 0;
 const M_OFF: u32 = 4;
 const M_LEN: u32 = 8;
 
+// **V1 的三张新表**（`#609` / `#610` / `#617`）：静态 GOT 的需求、弱未定义的名字、
+// 每个对象的 TLS 片段。放在归档表之后，表区（8 MiB）里排得下。
+const GOT_MAX: u32 = 4096;         // GOT 槽上限（`-fPIC` 对象的每个外部全局一个）
+const TB_GOT: u32 = 2703488;       // stride 12: (名字池起点, 长度, 槽的 vaddr)
+const GW_NOFF: u32 = 0;
+const GW_NLEN: u32 = 4;
+const GW_ADDR: u32 = 8;
+const WEAK_MAX: u32 = 4096;        // 弱未定义名字上限
+const TB_WK: u32 = 4857632;        // stride 8: (名字池起点, 长度)
+const PORT_MAX: u32 = 4096;        // 未定义的**强**符号名上限（端口门的判据）
+const TB_ND: u32 = 4902912;        // stride 8: (名字池起点, 长度)
+const TLS_MAX: u32 = 256;          // 一个归档最多多少个成员带 TLS 片段
+const TB_TLS: u32 = 4889728;       // stride 16: (在 M_TLS 里的起点, 长度, 对齐, 最终块内偏移)
+const T_OFF: u32 = 0;
+const T_LEN: u32 = 4;
+const T_AL: u32 = 8;
+const T_FIN: u32 = 12;
+
 // ---------------------------------------------------------------- 常量
 
 const TEXT_VADDR: u32 = 4194304;   // 0x400000
+// TLS 符号的**占位地址**（`#610`）：它们的真地址要等 TLS 块落到数据段里才知道，
+// 所以先登记在哨兵之后（块内偏移），应用 `TPOFF` 重定位时再换算。产物里不出现它。
+const TLS_SENT: u32 = 805306368;   // 0x30000000
 // **数据段在代码缓冲之后**（`docs/253`，2026-10-16）。原先钉在 `0x600000`，文本段于是
 // 只有 `0x400000..0x600000` 这 2 MiB 可用 —— 而**越界不报错**：多出来的代码盖在数据段上，
 // 产物一启动就段错误（0 字节输出），看起来像编译器坏了。实测 2026-10-15：`main` 自己
@@ -3035,9 +3060,38 @@ fn is_meta_sec(raw: ptr, noff: u32) -> u32 {
 
 /// 该节是不是要摆的**数据节**：`SHF_ALLOC`(0x2) 且类型 PROGBITS(1)/NOBITS(8)，
 /// 不是代码节、不是元数据节、非空。**与参考实现那条筛选一一对应**（镜像判据钉）。
+fn is_tls_sec(raw: ptr, k: u32) -> u32 {
+    if sh_type(raw, k) != 1 && sh_type(raw, k) != 8 { return 0; }
+    if sh_flags(raw, k) % 4 < 2 { return 0; }              // SHF_ALLOC = 0x2
+    if (sh_flags(raw, k) / 1024) % 2 != 1 { return 0; }    // SHF_TLS = 0x400
+    if sh_size(raw, k) == 0 { return 0; }
+    return 1;
+}
+
+/// 第 k 节在该对象 **TLS 片段**里的起点：TLS 节按节表顺序拼接、每节按自己的
+/// `sh_addralign`（至少 1）对齐。与 `dsec_at` 同一形状（`#610`）。
+fn tls_sec_at(raw: ptr, k: u32) -> u32 {
+    let cur: u32 = 0;
+    let i: u32 = 0;
+    while i < k {
+        if is_tls_sec(raw, i) == 1 {
+            let al: u32 = sh_align(raw, i);
+            if al < 1 { al = 1; }
+            cur = align_to(cur, al) + sh_size(raw, i);
+        }
+        i = i + 1;
+    }
+    let al2: u32 = sh_align(raw, k);
+    if al2 < 1 { al2 = 1; }
+    return align_to(cur, al2);
+}
+
 fn is_data_sec(raw: ptr, k: u32) -> u32 {
     if sh_type(raw, k) != 1 && sh_type(raw, k) != 8 { return 0; }
     if sh_flags(raw, k) % 4 < 2 { return 0; }              // SHF_ALLOC = 0x2
+    // **TLS 不是普通数据**（`#610`）：`.tdata` / `.tbss` 要按 TLS 块布局摆，
+    // 摆进普通数据段会让 `TPOFF` 重定位算出的偏移整体错位。
+    if (sh_flags(raw, k) / 1024) % 2 == 1 { return 0; }    // SHF_TLS = 0x400
     if is_code_sec(raw, sec_name(raw, k)) == 1 { return 0; }
     if is_meta_sec(raw, sec_name(raw, k)) == 1 { return 0; }
     if sh_size(raw, k) == 0 { return 0; }
@@ -3385,12 +3439,90 @@ fn is_archive(mem: ptr, n: u32) -> u32 {
     return 1;
 }
 
+/// 一个 GNU ld 链接脚本里 `GROUP (` / `INPUT (` 点名的第一个路径的起点；
+/// 不是脚本就返回 `NO`（`#637`）。`n` 是文件字节数 —— 不扫缓冲区里文件之后的内容。
+fn ld_script_target(mem: ptr, n: u32) -> u32 {
+    let lim: u32 = 4096;
+    if n < lim { lim = n; }
+    let z: u32 = 0;
+    while z < lim {
+        if load8(mem, z) == 0 { return NO; }               // 脚本是纯文本
+        z = z + 1;
+    }
+    let lim8: u32 = 8192;
+    if n < lim8 { lim8 = n; }
+    let i: u32 = 0;
+    while i + 7 < lim8 {
+        let g: u32 = 0;
+        if load8(mem, i) == 71 && load8(mem, i + 1) == 82 && load8(mem, i + 2) == 79
+            && load8(mem, i + 3) == 85 && load8(mem, i + 4) == 80
+            && load8(mem, i + 5) == 32 && load8(mem, i + 6) == 40 {
+            g = 1;                                          // GROUP (
+        }
+        let h: u32 = 0;
+        if load8(mem, i) == 73 && load8(mem, i + 1) == 78 && load8(mem, i + 2) == 80
+            && load8(mem, i + 3) == 85 && load8(mem, i + 4) == 84
+            && load8(mem, i + 5) == 32 && load8(mem, i + 6) == 40 {
+            h = 1;                                          // INPUT (
+        }
+        if g == 1 || h == 1 {
+            let q: u32 = i + 7;
+            let go: u32 = 1;
+            while q < lim8 && go == 1 {
+                let c: u32 = load8(mem, q) as u32;
+                if c == 32 || c == 9 || c == 10 || c == 13 || c == 40 || c == 41 {
+                    q = q + 1;
+                } else if c == 45 {                          // '-' 开头: 跳过这个词
+                    while q < lim8 {
+                        let c2: u32 = load8(mem, q) as u32;
+                        if c2 == 32 || c2 == 9 || c2 == 10 || c2 == 13
+                            || c2 == 40 || c2 == 41 {
+                            q = lim8;                        // 停在这个词尾
+                        } else {
+                            q = q + 1;
+                        }
+                    }
+                    go = 0;
+                } else {
+                    return q;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return NO;
+}
+
 /// 直接给的 `.o` 的校验（归档成员不在这里 —— 它们用不了时是**当它不在池子里**，
 /// 那是 `obj_usable` 的事）。三条判据与参考实现 `ForeignObject._load` 抛 `Unsupported`
 /// 的那几处逐字相同。
-fn check_obj(path: ptr, mem: ptr) -> u32 {
+fn check_obj(path: ptr, mem: ptr, n: u32) -> u32 {
     if load8(mem, 0) != 127 || load8(mem, 1) != 69 || load8(mem, 2) != 76
         || load8(mem, 3) != 70 || load8(mem, 4) != 2 || load8(mem, 5) != 1 {
+        // **GNU ld 链接脚本**（`#637`）：发行版里的 `libc.so` 常常就是 `GROUP (...)`。
+        // 把它当"不是 ELF 对象"报，用户手上唯一有用的那条信息（它指向哪个文件）就没了。
+        let st: u32 = ld_script_target(mem, n);
+        if st != NO {
+            let se: u32 = st;
+            let go2: u32 = 1;
+            while se < n && go2 == 1 {
+                let c: u32 = load8(mem, se) as u32;
+                if c == 32 || c == 9 || c == 10 || c == 13 || c == 40 || c == 41 {
+                    go2 = 0;                                   // 词尾
+                } else {
+                    se = se + 1;
+                }
+            }
+            let sl: u32 = se - st;
+            if sl > 200 { sl = 200; }
+            wstr(2, "loment: this is a GNU ld linker script, not a shared object -- it points to ");
+            if sl != 0 {
+                let _w: u64 = write_all(2, ptr_add(mem, st), sl as u64);
+            }
+            wstr(2, "; pass that file to --link
+");
+            return die(1);
+        }
         return failc("not an ELF64 little-endian object file: ", path);
     }
     if rd16(mem, 16) != 1 {
@@ -3409,7 +3541,8 @@ fn check_obj(path: ptr, mem: ptr) -> u32 {
 /// `M_OBJ` 的。与"从文件读"那一半（`link_object`）分开，是因为两处**只有读的那一段不同**
 /// —— 校验、摆节、立标签、端口门计数全在这一半里，两侧共用同一份（"逐条镜像"那条纪律：
 /// 多一份就是多一份要同时改的东西）。
-fn link_object_mem(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, ap: u32) -> u32 {
+fn link_object_mem(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, ap: u32,
+                      tlsbuf: ptr) -> u32 {
     // **未定义符号在这里不再是错误** (阶段 2): 它可能由**另一个对象**提供 —— 那正是多目标
     // 文件 C 库的形状 (`a.o` 调 `b.o`)。判定推迟到"所有对象都摆好、重定位都应用完"。
     // 之前那两段 (未定义就报错 / 见重定位就报错) 是在没有重定位能力时的硬拒; 现在两条都
@@ -3488,6 +3621,62 @@ fn link_object_mem(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, ap: u3
     }
     setcell(tab, C_GB, db);
     store32(tab, TB_OBJ + oi * 8 + O_DATA, gb0);
+    // **TLS 片段**（`#610`）：`.tdata` / `.tbss` 不进普通数据块 —— 它们的最终位置要等
+    // 所有对象都摆完（GOT 之后、bss 之前）按对象顺序重排。先按节序暂存进 `M_TLS`，
+    // 每节按自己的 `sh_addralign`（至少 1）对齐 —— 与参考实现 `ForeignObject.tls` 同一条。
+    // 符号登记在哨兵 `TLS_SENT` 之后；真地址在 `layout_tls` 之后才换算。
+    let tlsf: u32 = 0;
+    let htls: u32 = 0;
+    // 参考实现 `ForeignObject.tls_align` **从 16 起算**（不是从 1），每个对象的 TLS
+    // 片段因此落在块内 16 的倍数上；这里同一个数，产物才逐字节相同。
+    let tmax2: u32 = 16;
+    let iq3: u32 = 0;
+    while iq3 < ns {
+        if is_tls_sec(mem, iq3) == 1 {
+            htls = 1;
+            let al6: u32 = sh_align(mem, iq3);
+            if al6 > tmax2 { tmax2 = al6; }
+        }
+        iq3 = iq3 + 1;
+    }
+    if htls == 1 {
+        let te: u32 = cell(tab, C_NTLS);
+        if te >= TLS_MAX {
+            let _f: u32 = fail("too many TLS fragments (TLS_MAX) -- the object list is too large for this linker");
+        }
+        let cur6: u32 = cell(tab, C_TLSR);
+        let f0: u32 = cur6;
+        let i6b: u32 = 0;
+        while i6b < ns {
+            if is_tls_sec(mem, i6b) == 1 {
+                let al7: u32 = sh_align(mem, i6b);
+                if al7 < 1 { al7 = 1; }
+                // **片段内**对齐（相对 f0），不是相对整个暂存区：参考实现的 `obj.tls`
+                // 是每个对象各自从 0 起拼的，段内偏移 `tls_sec_at` 也是相对它算的。
+                let nd6: u32 = f0 + align_to(cur6 - f0, al7);
+                if nd6 + sh_size(mem, i6b) > TLS_CAP {
+                    let _f: u32 = fail("TLS data exceeds TLS_CAP -- raise TLS_CAP in loment/tools/lomelf.lomt");
+                }
+                pad_zero(tlsbuf, cur6, nd6);
+                cur6 = nd6;
+                if sh_type(mem, i6b) == 1 {
+                    copy_n(tlsbuf, cur6, mem, sh_off(mem, i6b), sh_size(mem, i6b));
+                } else {
+                    pad_zero(tlsbuf, cur6, cur6 + sh_size(mem, i6b));
+                }
+                cur6 = cur6 + sh_size(mem, i6b);
+            }
+            i6b = i6b + 1;
+        }
+        let tb6: u32 = TB_TLS + te * 16;
+        store32(tab, tb6 + T_OFF, f0);
+        store32(tab, tb6 + T_LEN, cur6 - f0);
+        store32(tab, tb6 + T_AL, tmax2);
+        store32(tab, tb6 + T_FIN, 0);
+        setcell(tab, C_NTLS, te + 1);
+        setcell(tab, C_TLSR, cur6);
+        tlsf = f0;
+    }
     // **端口门**（`docs/222` §4，2026-10-12 用户定）：本对象里未定义符号的条数 ——
     // 判据与参考实现 `tools/lomelf.py` 的 `ForeignObject.undefined` 逐字相同
     // （`shndx == 0` 且 GLOBAL/WEAK 且有名字）。见下面那个 `else if`。
@@ -3529,7 +3718,8 @@ fn link_object_mem(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, ap: u3
                                 lbl_add(tab, noff, nl, 0, 0,
                                         TEXT_VADDR + at0 + sec_at(mem, shndx) + val);
                             }
-                        } else if code_sec == 1 || is_data_sec(mem, shndx) == 1 {
+                        } else if code_sec == 1 || is_data_sec(mem, shndx) == 1
+                            || is_tls_sec(mem, shndx) == 1 {
                             // **数据节里的符号一律收（含局部）**：`.L.str` 就是 `bind=0` 的
                             // `STT_OBJECT`；**节符号**（`st_name` 为 0）两边都给一个按对象
                             // 唯一的合成名（参考实现 `$<对象名>$sec<k>`，这里 `$<对象号>.<节号>`）
@@ -3561,6 +3751,11 @@ fn link_object_mem(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, ap: u3
                                 if code_sec == 1 {
                                     lbl_add(tab, noff, nl, 0, 0,
                                             TEXT_VADDR + at0 + sec_at(mem, shndx) + val);
+                                } else if is_tls_sec(mem, shndx) == 1 {
+                                    // TLS 的 `st_value` 是**节内偏移**（`#610`）；片段起点
+                                    // `tlsf` + 节内起点 + 符号偏移，真地址等 `layout_tls` 换算。
+                                    lbl_add(tab, noff, nl, 0, 0,
+                                            TLS_SENT + tlsf + tls_sec_at(mem, shndx) + val);
                                 } else {
                                     lbl_add(tab, noff, nl, 0, 0,
                                             data_base(tab) + gb0 + dsec_at(mem, shndx) + val);
@@ -3574,7 +3769,40 @@ fn link_object_mem(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, ap: u3
                         // **自闭合的对象走不到这里**：`docs/173` 一直在发的 FFI 形状、
                         // `docs/177` 那 10 个语言，对象里一条未定义符号都没有。
                         if nmoff2 != 0 && (bind == 1 || bind == 2) {
-                            np = np + 1;
+                            // **弱引用不是端口**（`#617`）：解析不到就绑 0，不是硬需求。
+                            // **`_GLOBAL_OFFSET_TABLE_` 是我们的符号**（`#617`）：静态 GOT 的
+                            // 基址，链接器自己给 —— 一个自闭合的 `-fPIC` 对象因此不该被拒。
+                            if bind == 2 {
+                                let noffw: u32 = copy_name(tab, t, mem, stro2 + nmoff2);
+                                let nlw: u32 = cstr_len(mem, stro2 + nmoff2);
+                                if weak_find(tab, t, noffw, nlw) == NO {
+                                    let wc: u32 = cell(tab, C_NWK);
+                                    if wc >= WEAK_MAX {
+                                        let _f: u32 = fail("too many weak undefined names (WEAK_MAX) -- the object is too large for this linker");
+                                    }
+                                    let wb: u32 = TB_WK + wc * 8;
+                                    store32(tab, wb + GW_NOFF, noffw);
+                                    store32(tab, wb + GW_NLEN, nlw);
+                                    setcell(tab, C_NWK, wc + 1);
+                                }
+                            } else if cstr_is_got_name(mem, stro2 + nmoff2) == 0 {
+                                np = np + 1;
+                                // **端口门判"解析之后还剩什么"**（`#615`）：名字全收下来，
+                                // 等所有对象都摆好、标签都立好再判 —— 判在这里会把
+                                // "a.o 调 g、b.o 定义 g"这种自闭合组合也拒掉。
+                                let noffp: u32 = copy_name(tab, t, mem, stro2 + nmoff2);
+                                let nlp: u32 = cstr_len(mem, stro2 + nmoff2);
+                                if nd_find(tab, t, noffp, nlp) == NO {
+                                    let pc: u32 = cell(tab, C_NDN);
+                                    if pc >= PORT_MAX {
+                                        let _f: u32 = fail("too many undefined symbols (PORT_MAX) -- the object is too large for this linker");
+                                    }
+                                    let pb: u32 = TB_ND + pc * 8;
+                                    store32(tab, pb, noffp);
+                                    store32(tab, pb + 4, nlp);
+                                    setcell(tab, C_NDN, pc + 1);
+                                }
+                            }
                         }
                     }
                     k2 = k2 + 1;
@@ -3582,28 +3810,6 @@ fn link_object_mem(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, ap: u3
             }
         }
         i4 = i4 + 1;
-    }
-    // **端口门**：这个对象带端口、而调用方没有显式放开 ⇒ **点名拒**（不是静默丢掉那些
-    // 符号 —— 丢掉会在回填时报一句"引用了未定义的符号"，用户看到的是"符号找不到"而不是
-    // "这扇门关着"，方向完全错了）。放开只有一条路：`--allow-ports`。
-    //
-    // **`#406` 开闸（2026-10-17）之后默认仍然是拒**：链接器不知道渠道（它是一只被启动器
-    // 调起来的独立工具），所以"默认拒 + 启动器显式开"这条形状不变 —— 变的是启动器**两个
-    // 渠道都传那面旗**（`tools/loment_dist.py`）。与参考实现同一条口径。
-    if ap == 0 && np != 0 {
-        wstr(2, "loment: this foreign object carries undefined symbols (ports to the outside world),
-");
-        wstr(2, "and the linker does not take those by default. The linker does not know the channel
-");
-        wstr(2, "(it is a standalone tool the launcher calls), so the default is always to refuse;
-");
-        wstr(2, "both channels' launchers pass --allow-ports (docs/222 sec 4.5, opened 2026-10-17).
-");
-        wstr(2, "Calling this linker directly needs the flag. A self-contained object (one with no
-");
-        wstr(2, "undefined symbols) is unaffected.
-");
-        return die(1);
     }
     // 重定位**只记不应用** (docs/173 阶段 2): 应用要等所有对象都摆好、标签都立好 ——
     // `a.o` 里的重定位可能指向只有 `b.o` 知道的地址。只认参考实现认的那六种; 其余**硬拒**
@@ -3640,7 +3846,12 @@ fn link_object_mem(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, ap: u3
                 let rinfo: u64 = rd64(mem, o5 + 8);
                 let ty: u32 = lo32(rinfo);
                 let si: u32 = hi32(rinfo);
-                if ty != 1 && ty != 2 && ty != 4 && ty != 10 && ty != 11 && ty != 24 {
+                // **`#609` / `#610`** 补进来的五种：GOTPCREL(9) / GOTPCRELX(41) /
+                // REX_GOTPCRELX(42) / TPOFF64(18) / TPOFF32(23)。与参考实现
+                // `SUPPORTED_RELOCS` 同一组；工具链（gcc/clang）的 `-fPIC` / `__thread`
+                // 对象就发这些，拒掉它们等于所有 PIC 库都链不了。
+                if ty != 1 && ty != 2 && ty != 4 && ty != 9 && ty != 10 && ty != 11
+                    && ty != 18 && ty != 23 && ty != 24 && ty != 41 && ty != 42 {
                     wstr(2, "loment: unknown relocation type (docs/173 section 3)\n");
                     return die(1);
                 }
@@ -3665,6 +3876,21 @@ fn link_object_mem(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, ap: u3
                     } else {
                         nlen3 = cstr_len(mem, stro3 + nmoff3);
                         noff3 = copy_name(tab, t, mem, stro3 + nmoff3);
+                    }
+                }
+                // **静态 GOT 的需求表**（`#609`）：`-fPIC` 对象每个外部地址一条
+                // GOTPCREL。槽在数据段里、所有对象摆完之后统一造（`layout_got`）。
+                if ty == 9 || ty == 41 || ty == 42 {
+                    if got_find(tab, t, noff3, nlen3) == NO {
+                        let gc: u32 = cell(tab, C_NGOT);
+                        if gc >= GOT_MAX {
+                            let _f: u32 = fail("too many GOT slots (GOT_MAX) -- the object list is too large for this linker");
+                        }
+                        let ge: u32 = TB_GOT + gc * 12;
+                        store32(tab, ge + GW_NOFF, noff3);
+                        store32(tab, ge + GW_NLEN, nlen3);
+                        store32(tab, ge + GW_ADDR, 0);
+                        setcell(tab, C_NGOT, gc + 1);
                     }
                 }
                 let fi: u32 = cell(tab, C_NFREL);
@@ -3945,7 +4171,7 @@ fn select_archive(tab: ptr, t: ptr, objs: ptr, arb: ptr, an: u32, aridx: u32) ->
 /// 归档字节由调用方重新读进 `arb`（`M_AR` 一次只装一份 —— 这正是 `#623` 的由来：
 /// 全局成员表若不认归档号，第二份归档会拿自己的字节重摆第一份的成员）。
 fn lay_archive(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, objs: ptr, arb: ptr,
-               aridx: u32, ap: u32) -> u32 {
+               aridx: u32, ap: u32, tlsbuf: ptr) -> u32 {
     let nmem: u32 = cell(tab, C_NMEM);
     let i: u32 = 0;
     let nd: u32 = d;
@@ -3958,7 +4184,7 @@ fn lay_archive(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, objs: ptr, arb: ptr,
                 let _f: u32 = fail("an archive member is larger than the 4 MiB limit");
             }
             copy_n(objs, 0, arb, doff2, dlen2);
-            nd = link_object_mem(tab, t, txt, gb, nd, objs, ap);
+            nd = link_object_mem(tab, t, txt, gb, nd, objs, ap, tlsbuf);
         }
         i = i + 1;
     }
@@ -4012,18 +4238,11 @@ fn apply_relocs(tab: ptr, t: ptr, txt: ptr, gb: ptr) -> u32 {
     let i: u32 = 0;
     while i < n {
         let base: u32 = TB_FREL + i * 32;
+        let ty: u32 = load32(tab, base + F2_TY);
+        let add: u32 = load32(tab, base + F2_ADD);
         let oi: u32 = load32(tab, base + F2_OBJ);
         let target: u32 = lbl_find(tab, t, load32(tab, base + F2_NOFF),
                                    load32(tab, base + F2_NLEN), 0, 0);
-        if target == NO {
-            // **到链接结束才判"没人定义"**: 这是"多目标文件 C 库"与"引用 libc"的分界线 ——
-            // 前者由另一个对象提供, 后者到链接结束都空着。
-            wstr(2, "loment: undefined symbol ");
-            write_all(2, ptr_add(t, load32(tab, base + F2_NOFF)),
-                      load32(tab, base + F2_NLEN) as u64);
-            wstr(2, " -- nothing provides it by the end of the link (this stage still does not link libc)\n");
-            return die(1);
-        }
         // **两条路**（`docs/219` §8b 第 1 条）：`F2_IN` 说这条重定位的**落点**在哪 ——
         // 0 = 代码缓冲 `txt`（基址 `TEXT_VADDR`），1 = 数据缓冲 `gb`（基址 `data_base`）。
         // 算的是同一套 `S + A` / `S + A - P`，只是写到不同的缓冲、P 用不同的基址。
@@ -4041,16 +4260,77 @@ fn apply_relocs(tab: ptr, t: ptr, txt: ptr, gb: ptr) -> u32 {
                    + load32(tab, base + F2_AT) + load32(tab, base + F2_OFF);
             p = TEXT_VADDR + site;                            // 公式里的 P
         }
-        let val: u32 = target + load32(tab, base + F2_ADD);   // 公式里的 S + A
-        let ty: u32 = load32(tab, base + F2_TY);
-        if ty == 2 || ty == 4 {
-            store32(buf, site, val - p);                      // PC32 / PLT32
-        } else if ty == 24 {
-            w64(buf, site, (val - p) as u64);                 // PC64
-        } else if ty == 1 {
-            w64(buf, site, val as u64);                       // 64
+        if ty == 9 || ty == 41 || ty == 42 {
+            // **GOTPCREL 族**（`#609`）：值是 GOT **槽相对 PC** 的位移，不是 S+A-P。
+            // 槽的**内容**（符号地址）在 `layout_got` 里已经写好；槽不存在才是错。
+            let gi: u32 = got_find(tab, t, load32(tab, base + F2_NOFF),
+                                   load32(tab, base + F2_NLEN));
+            if gi == NO {
+                wstr(2, "loment: GOT-relative relocation without a GOT slot\n");
+                return die(1);
+            }
+            let ge: u32 = TB_GOT + gi * 12;
+            store32(buf, site, load32(tab, ge + GW_ADDR) + add - p);
+        } else if target == NO {
+            // **弱引用不是错误**（`#617`）：C 的语义是绑 0。`PC32`/`PLT32` 存的是
+            // `S + A - P`，S=0 ⇒ `A - P`（写 0 会让 call 落到下一条指令上）。
+            if weak_find(tab, t, load32(tab, base + F2_NOFF),
+                         load32(tab, base + F2_NLEN)) != NO {
+                if ty == 2 || ty == 4 {
+                    store32(buf, site, add - p);
+                } else if ty == 24 {
+                    w64(buf, site, ((add - p) as i32 as i64) as u64);
+                } else if ty == 1 {
+                    w64(buf, site, (add as i32 as i64) as u64);
+                } else {
+                    store32(buf, site, add);
+                }
+            } else {
+                // **到链接结束才判"没人定义"**: 这是"多目标文件 C 库"与"引用 libc"的
+                // 分界线 —— 前者由另一个对象提供, 后者到链接结束都空着。
+                wstr(2, "loment: undefined symbol ");
+                write_all(2, ptr_add(t, load32(tab, base + F2_NOFF)),
+                          load32(tab, base + F2_NLEN) as u64);
+                wstr(2, " -- nothing provides it by the end of the link (this stage still does not link libc)\n");
+                return die(1);
+            }
+        } else if ty == 23 || ty == 18 {
+            // **TLS**（`#610`）：`S + A - TP`。标签里存的是哨兵 + 暂存偏移，先换算成
+            // 真地址（`layout_tls` 记下的块基址 + 块内最终偏移）。
+            let so: u32 = target - TLS_SENT;
+            let ntk: u32 = cell(tab, C_NTLS);
+            let sr: u32 = NO;
+            let kk: u32 = 0;
+            while kk < ntk {
+                let ee: u32 = TB_TLS + kk * 16;
+                let of0: u32 = load32(tab, ee + T_OFF);
+                let ln0: u32 = load32(tab, ee + T_LEN);
+                if so >= of0 && so < of0 + ln0 {
+                    sr = cell(tab, C_TLSB) + load32(tab, ee + T_FIN) + (so - of0);
+                }
+                kk = kk + 1;
+            }
+            if sr == NO {
+                wstr(2, "loment: TLS relocation against a symbol outside every TLS section\n");
+                return die(1);
+            }
+            let tp: u32 = cell(tab, C_TLSP);
+            if ty == 23 {
+                store32(buf, site, sr + add - tp);
+            } else {
+                w64(buf, site, (((sr + add) - tp) as i32 as i64) as u64);
+            }
         } else {
-            store32(buf, site, val);                          // 32 / 32S
+            let val: u32 = target + add;                      // 公式里的 S + A
+            if ty == 2 || ty == 4 {
+                store32(buf, site, val - p);                  // PC32 / PLT32
+            } else if ty == 24 {
+                w64(buf, site, (val - p) as u64);             // PC64
+            } else if ty == 1 {
+                w64(buf, site, val as u64);                   // 64
+            } else {
+                store32(buf, site, val);                      // 32 / 32S
+            }
         }
         i = i + 1;
     }
@@ -4104,6 +4384,226 @@ fn copy_name(tab: ptr, t: ptr, p: ptr, off: u32) -> u32 {
     }
     setcell(tab, C_EXTN, cur + n);
     return cur;
+}
+
+// ---------------------------------------------------------------- GOT / TLS / 弱引用 (#609 #610 #617)
+
+/// 名字池里的第 k 条是不是 `(off, len)`？`weak_find` / `got_find` 共用同一形状。
+fn weak_find(tab: ptr, t: ptr, off: u32, len: u32) -> u32 {
+    let n: u32 = cell(tab, C_NWK);
+    let k: u32 = 0;
+    while k < n {
+        let e: u32 = TB_WK + k * 8;
+        if span_eq(t, load32(tab, e), load32(tab, e + 4), off, len) == 1 {
+            return k;
+        }
+        k = k + 1;
+    }
+    return NO;
+}
+
+fn nd_find(tab: ptr, t: ptr, off: u32, len: u32) -> u32 {
+    let n: u32 = cell(tab, C_NDN);
+    let k: u32 = 0;
+    while k < n {
+        let e: u32 = TB_ND + k * 8;
+        if span_eq(t, load32(tab, e), load32(tab, e + 4), off, len) == 1 {
+            return k;
+        }
+        k = k + 1;
+    }
+    return NO;
+}
+
+fn got_find(tab: ptr, t: ptr, off: u32, len: u32) -> u32 {
+    let n: u32 = cell(tab, C_NGOT);
+    let k: u32 = 0;
+    while k < n {
+        let e: u32 = TB_GOT + k * 12;
+        if span_eq(t, load32(tab, e + GW_NOFF), load32(tab, e + GW_NLEN),
+                   off, len) == 1 {
+            return k;
+        }
+        k = k + 1;
+    }
+    return NO;
+}
+
+/// `_GLOBAL_OFFSET_TABLE_`（21 字节）—— 它由**链接器**给（静态 GOT 的基址），
+/// 不该算进"通向世界的端口"（`#617`）。
+fn cstr_is_got_name(p: ptr, off: u32) -> u32 {
+    if cstr_len(p, off) != 21 { return 0; }
+    if load8(p, off) != 95 { return 0; }        // _
+    if load8(p, off + 1) != 71 { return 0; }    // G
+    if load8(p, off + 2) != 76 { return 0; }    // L
+    if load8(p, off + 3) != 79 { return 0; }    // O
+    if load8(p, off + 4) != 66 { return 0; }    // B
+    if load8(p, off + 5) != 65 { return 0; }    // A
+    if load8(p, off + 6) != 76 { return 0; }    // L
+    if load8(p, off + 7) != 95 { return 0; }    // _
+    if load8(p, off + 8) != 79 { return 0; }    // O
+    if load8(p, off + 9) != 70 { return 0; }    // F
+    if load8(p, off + 10) != 70 { return 0; }   // F
+    if load8(p, off + 11) != 83 { return 0; }   // S
+    if load8(p, off + 12) != 69 { return 0; }   // E
+    if load8(p, off + 13) != 84 { return 0; }   // T
+    if load8(p, off + 14) != 95 { return 0; }   // _
+    if load8(p, off + 15) != 84 { return 0; }   // T
+    if load8(p, off + 16) != 65 { return 0; }   // A
+    if load8(p, off + 17) != 66 { return 0; }   // B
+    if load8(p, off + 18) != 76 { return 0; }   // L
+    if load8(p, off + 19) != 69 { return 0; }   // E
+    if load8(p, off + 20) != 95 { return 0; }   // _
+    return 1;
+}
+
+/// 两个名字的字节序比较：1 = 前者小，2 = 前者大，0 = 相等。
+/// GOT 槽按名字排序，好让两侧（参考 / 镜像）产物逐字节相同（`#609`）。
+fn name_cmp(t: ptr, ao: u32, al: u32, bo: u32, bl: u32) -> u32 {
+    let m: u32 = al;
+    if bl < m { m = bl; }
+    let k: u32 = 0;
+    while k < m {
+        let a: u32 = load8(t, ao + k) as u32;
+        let b: u32 = load8(t, bo + k) as u32;
+        if a < b { return 1; }
+        if a > b { return 2; }
+        k = k + 1;
+    }
+    if al < bl { return 1; }
+    if al > bl { return 2; }
+    return 0;
+}
+
+/// **端口门**（`#615`）：所有对象都摆完、标签都立好之后，**仍然解析不到**的强符号
+/// 才是"通向世界的端口"。判在摆放中途会把 "a.o 调 g、b.o 定义 g" 这种自闭合组合也
+/// 拒掉（原先就是这么红的）；弱引用不是端口（`#617`），`_GLOBAL_OFFSET_TABLE_` 也不是
+/// （链接器自己给，`#609`）。
+fn check_ports(tab: ptr, t: ptr, ap: u32, nshared: u32) -> u32 {
+    if ap != 0 { return 0; }
+    let n: u32 = cell(tab, C_NDN);
+    let k: u32 = 0;
+    let bad: u32 = 0;
+    while k < n {
+        let e: u32 = TB_ND + k * 8;
+        if lbl_find(tab, t, load32(tab, e), load32(tab, e + 4), 0, 0) == NO {
+            bad = bad + 1;
+        }
+        k = k + 1;
+    }
+    // 一条共享对象本身就是"这份产物要在运行期往外要东西" —— 与参考实现同一句判断。
+    if bad != 0 || nshared != 0 {
+        wstr(2, "loment: this foreign object carries undefined symbols (ports to the outside world),
+");
+        wstr(2, "and the linker does not take those by default. The linker does not know the channel
+");
+        wstr(2, "(it is a standalone tool the launcher calls), so the default is always to refuse;
+");
+        wstr(2, "both channels' launchers pass --allow-ports (docs/222 sec 4.5, opened 2026-10-17).
+");
+        wstr(2, "Calling this linker directly needs the flag. A self-contained object (one with no
+");
+        wstr(2, "undefined symbols) is unaffected.
+");
+        return die(1);
+    }
+    return 0;
+}
+
+/// **静态 GOT**（`#609`）：按名字排序、在数据段里造 8 字节槽，内容 = 符号地址。
+/// 做 `mov` -> `lea` 的松弛也仍然正确 —— 多一次取存，少一条路径。返回 GOT 的起始偏移。
+fn layout_got(tab: ptr, t: ptr, gb: ptr) -> u32 {
+    let n: u32 = cell(tab, C_NGOT);
+    let i: u32 = 1;
+    while i < n {
+        let j: u32 = i;
+        let go: u32 = 1;
+        while j > 0 && go == 1 {
+            let a: u32 = TB_GOT + (j - 1) * 12;
+            let b: u32 = TB_GOT + j * 12;
+            if name_cmp(t, load32(tab, a + GW_NOFF), load32(tab, a + GW_NLEN),
+                        load32(tab, b + GW_NOFF), load32(tab, b + GW_NLEN)) == 2 {
+                let tn: u32 = load32(tab, a + GW_NOFF);
+                let tl: u32 = load32(tab, a + GW_NLEN);
+                store32(tab, a + GW_NOFF, load32(tab, b + GW_NOFF));
+                store32(tab, a + GW_NLEN, load32(tab, b + GW_NLEN));
+                store32(tab, b + GW_NOFF, tn);
+                store32(tab, b + GW_NLEN, tl);
+                j = j - 1;
+            } else {
+                go = 0;
+            }
+        }
+        i = i + 1;
+    }
+    let off: u32 = align_to(cell(tab, C_GB), 8);
+    pad_zero(gb, cell(tab, C_GB), off);
+    let k: u32 = 0;
+    while k < n {
+        let e: u32 = TB_GOT + k * 12;
+        let noff: u32 = load32(tab, e + GW_NOFF);
+        let nl: u32 = load32(tab, e + GW_NLEN);
+        let at: u32 = data_base(tab) + off + k * 8;
+        store32(tab, e + GW_ADDR, at);
+        let lv: u32 = lbl_find(tab, t, noff, nl, 0, 0);
+        if lv != NO {
+            w64(gb, off + k * 8, lv as u64);
+        }
+        k = k + 1;
+    }
+    setcell(tab, C_GB, off + n * 8);
+    setcell(tab, C_SGOT, data_base(tab) + off);
+    return off;
+}
+
+/// **TLS 块**（`#610`）：`.tdata` / `.tbss` 片段按对象顺序摆，块尾是线程指针（variant II），
+/// 之后留 0x40 字节给 TCB / `fs:0x28` 的金丝雀。没有 TLS 节时保持旧的 256 字节块。
+fn layout_tls(tab: ptr, t: ptr, gb: ptr, tlsbuf: ptr, tlsn: u32) {
+    let nt: u32 = cell(tab, C_NTLS);
+    if nt != 0 {
+        let a: u32 = 16;
+        let q0: u32 = 0;
+        while q0 < nt {
+            let e0: u32 = TB_TLS + q0 * 16;
+            let al0: u32 = load32(tab, e0 + T_AL);
+            if al0 > a { a = al0; }
+            q0 = q0 + 1;
+        }
+        let base: u32 = align_to(cell(tab, C_GB), a);
+        pad_zero(gb, cell(tab, C_GB), base);
+        let cur: u32 = 0;
+        let k: u32 = 0;
+        while k < nt {
+            let e: u32 = TB_TLS + k * 16;
+            let off0: u32 = load32(tab, e + T_OFF);
+            let len0: u32 = load32(tab, e + T_LEN);
+            let al: u32 = load32(tab, e + T_AL);
+            if al < 1 { al = 1; }
+            let fo: u32 = align_to(cur, al);
+            pad_zero(gb, base + cur, base + fo);
+            copy_n(gb, base + fo, tlsbuf, off0, len0);
+            store32(tab, e + T_FIN, fo);
+            cur = fo + len0;
+            k = k + 1;
+        }
+        let cur16: u32 = align_to(cur, 16);
+        pad_zero(gb, base + cur, base + cur16);
+        let tp: u32 = data_base(tab) + base + cur16;
+        pad_zero(gb, base + cur16, base + cur16 + 64);
+        setcell(tab, C_GB, base + cur16 + 64);
+        setcell(tab, C_TLSB, data_base(tab) + base);
+        setcell(tab, C_TLSP, tp);
+        lbl_add(tab, tlsn, 12, 0, 0, tp);
+    } else {
+        let t0: u32 = align_to(cell(tab, C_GB), 16);
+        pad_zero(gb, cell(tab, C_GB), t0);
+        pad_zero(gb, t0, t0 + 256);
+        setcell(tab, C_GB, t0 + 256);
+        let tp: u32 = data_base(tab) + t0;
+        setcell(tab, C_TLSP, tp);
+        setcell(tab, C_TLSB, 0);
+        lbl_add(tab, tlsn, 12, 0, 0, tp);
+    }
 }
 
 // ---------------------------------------------------------------- 落盘与回填
@@ -4218,6 +4718,14 @@ const C_HASHA: u32 = 172;
 const C_GNUA: u32 = 176;
 const C_RELAA: u32 = 180;
 const C_NEEDOFF: u32 = 184;        // DT_NEEDED 的值 = SONAME 在 `.dynstr` 里的偏移
+const C_NGOT: u32 = 224;           // 静态 GOT 的槽数（`#609`）
+const C_SGOT: u32 = 228;           // 静态 GOT 的 vaddr
+const C_NWK: u32 = 232;            // 弱未定义名字的条数（`#617`）
+const C_NTLS: u32 = 236;           // TLS 片段条数（`#610`）
+const C_TLSP: u32 = 240;           // 线程指针（TP = TLS 块尾）
+const C_TLSR: u32 = 244;           // TLS 暂存游标（M_TLS 内）
+const C_TLSB: u32 = 248;           // TLS 块基址（数据段内 vaddr）
+const C_NDN: u32 = 252;            // 未定义强符号（端口门）的条数
 
 fn is_shared(mem: ptr, n: u32) -> u32 {
     if n < 64 {
@@ -6077,6 +6585,7 @@ fn run(mem: ptr) -> u32 {
     }
     let tab: ptr = ptr_add(mem, M_TAB);
     let gb: ptr = ptr_add(mem, M_GB);
+    let tlsbuf: ptr = ptr_add(mem, M_TLS);
     let txt: ptr = ptr_add(mem, M_TXT + 65536);
     let ob: ptr = ptr_add(mem, M_OUT);
     // 输出名以 `.exe` 结尾 = 出 PE（Windows），否则出 ELF。参考实现用 --target，
@@ -6158,7 +6667,7 @@ fn run(mem: ptr) -> u32 {
             if link_file_is_shared(p0, tobj) == 0 {
                 let ln0: u32 = read_link_file(p0, tobj, OBJ_CAP);
                 if is_archive(tobj, ln0) == 0 {
-                    check_obj(p0, tobj);      // 不是归档就得是能用的 `.o`（否则拒在这里）
+                    check_obj(p0, tobj, ln0);      // 不是归档就得是能用的 `.o`（否则拒在这里）
                     let _u: u32 = obj_syms(tab, inb, tobj, 1);
                 }
             }
@@ -6213,8 +6722,8 @@ fn run(mem: ptr) -> u32 {
             if link_file_is_shared(p0, tobj) == 0 {
                 let ln1: u32 = read_link_file(p0, tobj, OBJ_CAP);
                 if is_archive(tobj, ln1) == 0 {
-                    check_obj(p0, tobj);
-                    tlen = link_object_mem(tab, inb, txt, gb, tlen, tobj, ap);
+                    check_obj(p0, tobj, ln1);
+                    tlen = link_object_mem(tab, inb, txt, gb, tlen, tobj, ap, tlsbuf);
                 }
             }
             got = got + 1;
@@ -6227,7 +6736,7 @@ fn run(mem: ptr) -> u32 {
                 let ln2: u32 = read_link_file(p0, tobj, OBJ_CAP);
                 if is_archive(tobj, ln2) == 1 {
                     copy_n(arb, 0, tobj, 0, ln2);
-                    tlen = lay_archive(tab, inb, txt, gb, tlen, tobj, arb, aridx1, ap);
+                    tlen = lay_archive(tab, inb, txt, gb, tlen, tobj, arb, aridx1, ap, tlsbuf);
                     aridx1 = aridx1 + 1;
                 }
             }
@@ -6243,14 +6752,26 @@ fn run(mem: ptr) -> u32 {
         let _f: u32 = fail("文本段满了 — 抬 OUT_CAP (loment/tools/lomelf.lomt) 与 tools/lomelf.py 的 TEXT_CAP/ELF_DATA_VADDR");
     }
     // **bss 的地址与标签必须等到这里**（`docs/219` §8b 第 1 条）—— 位置见 `place_bss`。
-    // **TLS 块**（`docs/219` S2）：接在对象数据之后、与参考实现同一处、同样 256 字节。
-    // 必须在 `place_bss` **之前** —— bss 的地址是按数据段当前长度算的。
+    //
+    // **静态 GOT**（`#609`）与 **TLS 块**（`#610`）接在对象数据之后、bss 之前 ——
+    // 与参考实现 `compile_ll` 同一处、同一个顺序（GOT -> TLS -> bss），产物因此逐字节相同。
+    // GOT 的**内容**要等所有标签都立好才填得上，所以它与布局在同一趟里做完。
+    let goff: u32 = layout_got(tab, inb, gb);
+    // **`_GLOBAL_OFFSET_TABLE_` 是我们的符号**（`#617`）：静态 GOT 的基址。它常被 `-fPIC`
+    // 对象报成 `GLOBAL UND`，不定义它，端口门会把一个自闭合的 PIC 对象当成"通向世界"。
+    let gotn: u32 = cell(tab, C_EXTN);
+    setcell(tab, C_EXTN, put_name(inb, gotn, "_GLOBAL_OFFSET_TABLE_"));
+    lbl_add(tab, gotn, 21, 0, 0, data_base(tab) + goff);
+    // **端口门在标签立好之后判**（`#615`）：这时"还剩什么解析不到"才是真正的端口。
+    let pr: u32 = check_ports(tab, inb, ap, nshared);
+    if pr != 0 {
+        return pr;
+    }
+    if cell(tab, C_NTLS) != 0 && nshared != 0 {
+        let _f: u32 = fail("TLS objects cannot be linked together with a shared object -- this version installs its own TLS block only in self-contained products (docs/219 S2)");
+    }
     if nobj != 0 && nshared == 0 {
-        let t0: u32 = align_to(cell(tab, C_GB), 16);
-        pad_zero(gb, cell(tab, C_GB), t0);
-        pad_zero(gb, t0, t0 + 256);
-        setcell(tab, C_GB, t0 + 256);
-        lbl_add(tab, tlsn, 12, 0, 0, data_base(tab) + t0);
+        layout_tls(tab, inb, gb, tlsbuf, tlsn);
     }
     place_bss(tab, inb);
     // 外部对象的重定位: **所有对象都摆好了**才应用 (docs/173 阶段 2)。

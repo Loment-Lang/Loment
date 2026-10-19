@@ -5333,10 +5333,6 @@ def _pe_emit(funcs, globals_, slots) -> tuple[bytes, int]:
     em = PeEmitter(globals_)
     for g in globals_:
         em.asm.labels[g.name] = g.addr
-    # **`_GLOBAL_OFFSET_TABLE_` 是我们的符号**（`#617`）：`-fPIC` / 弱引用的对象会把它报成
-    # `GLOBAL UND`，但它由**链接器**给（就是静态 GOT 的基址）。不定义它，端口门会把它
-    # 当成"通向世界的端口"，一个自闭合的 PIC 对象因此被拒。
-    em.asm.labels.setdefault("_GLOBAL_OFFSET_TABLE_", DATA_VADDR + got_off)
     em.emit_entry_stub("_start")
     emit_win_shim(em, slots)
     for f in funcs:
@@ -6438,6 +6434,10 @@ def compile_ll(text: str, objects: list | None = None,
                 em.asm.labels[nm] = tls_base + tls_bases[i] + val
                 appended.append(nm)
         em.asm.buf += obj.text
+    # **`_GLOBAL_OFFSET_TABLE_` 是我们的符号**（`#617`）：`-fPIC` / 弱引用的对象会把它报成
+    # `GLOBAL UND`，但它由**链接器**给（就是静态 GOT 的基址）。不定义它，端口门会把它
+    # 当成"通向世界的端口"，一个自闭合的 PIC 对象因此被拒。
+    em.asm.labels.setdefault("_GLOBAL_OFFSET_TABLE_", DATA_VADDR + got_off)
     # **端口门**（2026-10-12 用户定：0.1.4.5 里 libc 不可调用）。
     #
     # ⚠ 判的是**解析之后还剩什么**（`#615`）：以前拿每个对象自己的 `undefined` 清单来判，

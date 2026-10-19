@@ -3391,6 +3391,72 @@ def test_pic_objects_link_through_a_static_got():
 
 
 @test
+def test_mirror_matches_reference_on_pic_tls_and_weak_objects():
+    """自举侧镜像在**外部对象**上与参考实现逐字节相同（`#609` / `#610` / `#617`）。
+
+    镜像原先只认六种重定位、也没有静态 GOT / TLS 块 / 弱引用：一个 `-fPIC` 的发行版库
+    （Debian 的 hardening flags 默认开）在**包内那份链接器**上报"不认识的重定位类型 42"，
+    而参考实现早就能链 —— 判据只比"两边一致"时看不见这一整类，因为两边都失败也是一致。
+    所以每一类都要求**真的链过去、字节相同、退出码相同**。
+
+    四类：`-fPIC` 对象（GOTPCREL 族）、`__thread` 对象（TPOFF32 + 多对象 TLS 片段）、
+    弱未定义（解析不到绑 0，且不进端口门）、弱定义 + 强定义（强的那份赢）。
+    最后一类额外按**不开 `--allow-ports`** 跑 —— 端口门判的是"所有对象摆完还剩什么"，
+    自闭合的多目标文件组合不该被拒（`#615`）。
+    """
+    clang = _clang()
+    if not (clang and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    mir = _mirror()
+    lsrc = ('module mo\n\n'
+            'extern fn f() -> i32;\n\n'
+            'fn _start() {\n'
+            '    syscall4(60, f() as u64, 0, 0);\n'
+            '}\n')
+    cases = [
+        ("pic", {"p.c": ('int g = 7;\nint f(void) { return g; }\n', ("-fPIC", "-O2"))},
+         ("p.o",), 7, True),
+        ("tls", {"t1.c": ('__thread int t = 5;\nint f(void) { return t; }\n', ()),
+                 "t2.c": ('__thread long long u = 9;\nint g(void) { return (int)u; }\n', ())},
+         ("t1.o", "t2.o"), 5, True),
+        ("weak", {"w.c": ('extern void opt(void) __attribute__((weak));\n'
+                          'int f(void) { if (opt) opt(); return 7; }\n', ())},
+         ("w.o",), 7, True),
+        ("wstrong", {"ws.c": ('int f(void) __attribute__((weak));\n'
+                              'int f(void) { return 1; }\n', ()),
+                     "st.c": ('int f(void) { return 2; }\n', ())},
+         ("ws.o", "st.o"), 2, False),
+    ]
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        for name, cfiles, order, want_rc, ports in cases:
+            for cname, (csrc, extra) in cfiles.items():
+                (td / cname).write_text(csrc, encoding="utf-8", newline="\n")
+                assert ffitest.compile_c(clang, td / cname, td / (cname[:-2] + ".o"),
+                                         extra) == 0, f"[{name}] C 编译失败 ({cname})"
+            src = td / f"{name}.lomt"
+            src.write_text(lsrc, encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            objs = tuple(td / o for o in order)
+            ref_blob, _ = lomelf.compile_ll(
+                ll.read_text(encoding="utf-8"),
+                [lomelf.load_foreign(o) for o in objs], allow_ports=ports)
+            links = tuple(str(_wsl_path(o)) for o in objs)
+            out = td / f"{name}_mir.elf"
+            rc, err = _mirror_run(mir, str(_wsl_path(ll)), str(_wsl_path(out)),
+                                  links, ports=ports)
+            assert rc == 0, (
+                f"[{name}] 镜像链接失败（参考实现链过去了）: {err[-300:]}")
+            got = out.read_bytes()
+            assert got == ref_blob, (
+                f"[{name}] 镜像产物与参考不逐字节相同（{len(got)} vs {len(ref_blob)} B）")
+            rc2, _out = _run_bin(out, f"mir_{name}", td)
+            assert rc2 == want_rc, f"[{name}] 镜像产物读出 {rc2}（期望 {want_rc}）"
+    print("      -fPIC / __thread / 弱未定义 / 弱+强：镜像与参考逐字节相同且行为一致")
+
+
+@test
 def test_two_shared_objects_link_in_order():
     """**一次可以链两个共享对象**（`#596`）：`libz` 的 `compress` + `libc` 的 `strlen`。
 

@@ -20,23 +20,24 @@ const M_NAMES: u32 = 147456;       // 131072 本目录命中的名字 (1024 x 12
 const M_NOFF: u32 = 278528;        // 8192   名字长度 (2048 x 4)
 const M_POFF: u32 = 286720;        // 8192   路径在池里的偏移 (2048 x 4)
 const M_PATHS: u32 = 294912;       // 512 KiB 相对路径池
-const M_IN: u32 = 819200;          // 4 MiB 输入 (种子 selfhost_driver.ll 有 1.63 MB)
-const M_OUT: u32 = 5013504;        // 1 MiB 输出
-const M_SHA: u32 = 6062592;        // 1024 sha 状态
-const M_DIG: u32 = 6063616;        // 32 摘要
-const M_HEX: u32 = 6063648;        // 64 hex
+const M_IN: u32 = 819200;          // 6 MiB 输入 (种子 selfhost_driver.ll 有 4.15 MB)
+const M_OUT: u32 = 7110656;        // 1 MiB 输出
+const M_SHA: u32 = 8159744;        // 1024 sha 状态
+const M_DIG: u32 = 8160768;        // 32 摘要
+const M_HEX: u32 = 8160800;        // 64 hex
 // ---- 2026-09-20: 归一化副本从 2 MiB 抬到 4 MiB（`docs/200` §5）
+// ---- 2026-10-19: 输入与归一化副本 4 -> 6 MiB（`#777`，与 lomelf 同一条式子）
 //
 // 起因与 `lomelf` 那两处**同一个病**: 自举种子长过了这一格。原先这里只给 2 MiB，
 // 而清单里**有比它大的工件**（种子本身）—— 越界就写进紧挨着的 `M_CUR`（已装载的清单），
 // 于是症状是"从种子那一条起后面全对不上"，指不到现场。
 // 抬法: `NORM_CAP` 跟 `IN_CAP` **同值**（读得进来的就得归一化得了），`M_CUR` /
-// `ARENA` 依次后移。
-const M_NORM: u32 = 6063744;       // 4 MiB 归一化副本
-const M_CUR: u32 = 10258048;       // 1 MiB 现有 manifest
-const ARENA: u64 = 11534336;
+// `ARENA` 依次后移。2026-10-19 的 6 MiB 同样 1:1 抬两块，其余各块的相对间距不变。
+const M_NORM: u32 = 8160896;       // 6 MiB 归一化副本
+const M_CUR: u32 = 14452352;       // 1 MiB 现有 manifest
+const ARENA: u64 = 15728640;
 
-const NORM_CAP: u32 = 4194304;
+const NORM_CAP: u32 = 6291456;
 const CUR_CAP: u32 = 1048576;
 
 const C_POOL: u32 = 4080;          // M_TMP 里的池游标格
@@ -44,7 +45,7 @@ const C_POOL: u32 = 4080;          // M_TMP 里的池游标格
 const DENT_CAP: u32 = 131072;
 const POOL_CAP: u32 = 524288;
 
-const IN_CAP: u32 = 4194304;
+const IN_CAP: u32 = 6291456;
 const OUT_CAP: u32 = 1048576;
 
 // ---------------------------------------------------------------- 系统调用

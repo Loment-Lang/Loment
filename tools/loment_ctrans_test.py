@@ -274,6 +274,14 @@ def _clang() -> str | None:
 
 
 def _wsl() -> bool:
+    """能不能跑 Linux ELF：**Linux 上原生跑**，Windows 上经 WSL（`#371` / `#382`）。
+
+    原先只问 `shutil.which("wsl")` —— Linux runner 上没有那个二进制，于是这一族判据
+    在 CI 上**一条都不跑**，只留下一条"跳过而没登记"的预算红。Linux 上两条腿本来就
+    在（clang 在镜像里，ELF 直接执行），所以那里直接回 `True`。
+    """
+    if sys.platform.startswith("linux"):
+        return True
     if not shutil.which("wsl"):
         return False
     try:

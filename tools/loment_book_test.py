@@ -32,6 +32,7 @@ ROOT = Path(__file__).resolve().parent.parent
 BOOK = ROOT / "book"
 SRC = BOOK / "src"
 BY_EXAMPLE = BOOK / "by-example"
+CONTRIBUTING_SRC = ROOT / "contributing" / "src"
 HELPERS = BY_EXAMPLE / "helpers.lomt"
 IS_WIN = sys.platform == "win32"
 
@@ -137,7 +138,7 @@ def _run_one(path: Path, src: str, sin, exp, line: int) -> list[str]:
     return bad
 
 
-def _run_dir(files: list[Path], label: str) -> None:
+def _run_dir(files: list[Path], label: str, allow_zero: bool = False) -> None:
     bad: list[str] = []
     blocks = 0
     for p in files:
@@ -145,10 +146,13 @@ def _run_dir(files: list[Path], label: str) -> None:
         for src, sin, exp, line in _blocks(text):
             blocks += 1
             bad.extend(_run_one(p, src, sin, exp, line))
-    assert blocks > 0, f"{label}: 一个 rust,run 块都没找到"
+    assert blocks > 0 or allow_zero, f"{label}: 一个 rust,run 块都没找到"
     if bad:
         raise AssertionError(f"{label}: {len(bad)} 个块不过\n" + "\n".join(bad[:12]))
-    print(f"      {label}: {blocks} 个可运行块全部编译并运行通过")
+    if blocks:
+        print(f"      {label}: {blocks} 个可运行块全部编译并运行通过")
+    else:
+        print(f"      {label}: {len(files)} 章，没有 rust,run 块（贡献书只有命令与指针）")
 
 
 @test
@@ -165,6 +169,14 @@ def test_by_example_runs():
     files = sorted(BY_EXAMPLE.glob("*.md"))
     assert files, "book/by-example 不存在或为空"
     _run_dir(files, "book/by-example")
+
+
+@test
+def test_contributing_book_renders():
+    """贡献书没有可运行块，但每一章都要在（它讲的是仓库与流程，不是程序）。"""
+    files = sorted(CONTRIBUTING_SRC.glob("*.md"))
+    assert files, "contributing/src 不存在或为空"
+    _run_dir(files, "contributing/src", allow_zero=True)
 
 
 @test

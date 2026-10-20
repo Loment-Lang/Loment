@@ -21,10 +21,16 @@ Rust-flavoured, but the accents are different, and the book points them out as t
 - A unit can declare **capability domains** — what it is allowed to reach — and `guard` checks
   them at run time.
 
-## The three tracks
+## The books and the practice tracks
 
-- **This book** — read it in order. It has three parts: getting started, the language, and what
-  happens under the hood.
+There are two books. This one teaches the language; the other explains how the project is built
+and how to change it.
+
+- **Using Loment** (this book) — read it in order. It has two parts: getting started, and the
+  language.
+- **[Loment Development Contribution Plan](../../contributing/src/00-introduction.md)** — the
+  repository, the gate, the two compilers, the bootstrap chain, releases, the roadmap and the
+  architecture tour. Read it when you want to change Loment, not just use it.
 - **[Loment by Example](../by-example/README.md)** — one concept per file, annotated. Use it as a
   reference for shapes.
 - **[Lomentlings](../../exercises/README.md)** — broken programs to fix, with a runner that tells

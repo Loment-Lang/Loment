@@ -428,7 +428,7 @@ def fixture_v16() -> dict:
     d["switches"] = []
     d["dialects"] = []
     d["bodies"] = []
-    d["lms"] = "lms_close"
+    d["lms"] = "lms_full"
     d["lspe"] = {
         "state": "lspe_open_admin",
         "set_by": "default",
@@ -448,6 +448,34 @@ def fixture_v16() -> dict:
         "acked": 0,
     }
     return d
+
+
+def fixture_v17() -> dict:
+    """一份合法的 **v17** 形式对象：v16 的再 + **实际开着哪几级** `lms_levels`。
+
+    `lms_levels` 是 v17 起才合法的字段（`docs/253` §11.4）：档名（`lms`）说"想要哪一档"，
+    显式开关可以覆盖它，所以只有这一格记着**最后**是什么。
+    """
+    d = fixture_v16()
+    d["potato"] = "v17"
+    d["lms_levels"] = {
+        "lms_check": True, "lms_manage": True, "lms_guard": True,
+        "lms_reject": True, "lms_crash": True, "lms_restart": True,
+        "lms_seed": True,
+    }
+    return d
+
+
+#: v17 的 `lms_levels` 那几条规则的反例（`docs/253` §11.4）。作用在 **v17** 的对象上。
+MUTATORS_V17 = [
+    ("lms_levels 整个缺掉", lambda d: d.pop("lms_levels"), "lms_levels 必须是对象"),
+    ("lms_levels 少一级", lambda d: d["lms_levels"].pop("lms_guard"),
+     "lms_levels 少了"),
+    ("lms_levels 多一个键", lambda d: d["lms_levels"].__setitem__("lms_bogus", True),
+     "不认识的键"),
+    ("lms_levels 的值不是布尔", lambda d: d["lms_levels"].__setitem__("lms_check", 1),
+     "必须是布尔"),
+]
 
 
 #: v16 的 `lspe` 那几条规则的反例（`docs/262`）。作用在 **v16** 的对象上。
@@ -475,6 +503,17 @@ def test_v16_requires_the_lspe_ledger():
     assert potato.validate(fixture_v16()) == [], potato.validate(fixture_v16())
     for name, mut, needle in MUTATORS_V16:
         d = fixture_v16()
+        mut(d)
+        errs = potato.validate(d)
+        assert any(needle in e for e in errs), (name, errs)
+
+
+@test
+def test_v17_requires_the_lms_levels():
+    """v17 的七级开关（`docs/253` §11.4）：正例合法，四条反例各钉一条规则。"""
+    assert potato.validate(fixture_v17()) == [], potato.validate(fixture_v17())
+    for name, mut, needle in MUTATORS_V17:
+        d = fixture_v17()
         mut(d)
         errs = potato.validate(d)
         assert any(needle in e for e in errs), (name, errs)
@@ -794,7 +833,8 @@ def _cases() -> list[tuple[str, dict]]:
     out: list[tuple[str, dict]] = [("fixture", fixture()), ("v7", fixture_v7()),
                                    ("v8", fixture_v8()), ("v9", fixture_v9()),
                                    ("v10", fixture_v10()), ("v11", fixture_v11()),
-                                   ("v12", fixture_v12()), ("v16", fixture_v16())]
+                                   ("v12", fixture_v12()), ("v16", fixture_v16()),
+                                   ("v17", fixture_v17())]
     # **`gc_manual` + `no_runtime` 是合法档**（"要运行期、但内存我自己管"的反面：
     # 不要运行期、手动回收）—— 它必须**不报错**。上面那张反例表只会钉"该拒的要拒",
     # 钉不住"不该拒的别拒"，所以这一条以**合法样本**的身份过孪生那一关。

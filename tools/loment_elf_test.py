@@ -665,8 +665,8 @@ def test_gc_manual_free_list_recycles():
             "    while i < 4000 {\n"
             "        let cur: ptr = alloc(64);\n"
             "        store8(cur, 0, 3);\n"
-            "        %s"
             "        s = s + load8(prev, 0);\n"
+            "        %s"
             "        prev = cur;\n"
             "        i = i + 1;\n"
             "    }\n"
@@ -1217,15 +1217,19 @@ def test_free_refuses_a_double_free():
     if not (_clang() and _wsl()):
         print("      SKIP: 无 clang/WSL")
         return
+    # **第二次 `free` 走一个别名变量**：检查器现在**静态**就拒"同一个变量再 free"
+    # （那一层比运行期更强）。这一条测的是**运行期**的守卫 —— 别名让静态分析认不出
+    # 两处是同一块，守卫必须自己挡住。别名在 `free` **之前**取，那一行本身是合法读。
     src_text = (
         "module freedbl\nchoose runtime\n\n"
         "fn _start() {\n"
         "    let n: u32 = 16;\n"
         "    let a: ptr = alloc(n);\n"
+        "    let a2: ptr = a;\n"
         "    let b: ptr = alloc(n);\n"
         "    store8(b, 0, 1);\n"
         "    free(a);\n"
-        "    free(a);\n"
+        "    free(a2);\n"
         "    let c: ptr = alloc(n);\n"
         "    let d: ptr = alloc(n);\n"
         "    store8(c, 0, 11);\n"
@@ -1407,10 +1411,13 @@ def test_gc_alpha_adaptive_bounds_a_large_live_set():
     **How to apply**：一对逐字同源、只差 `choose` 一行的程序 —— 活集 **44 KB**（`a`+`b`，
     尺寸是变量所以不是 L0、末尾还在用所以活到最后），随后循环里每圈漏一块**收得掉的垃圾**
     （`chew` 里 `p` 是 L3：`let q: ptr = p` 外逃，出了 `chew` 就没人指得到）。总量
-    400×136 ≈ 53 KB 请求过 64 KiB arena：
-      * `gc_auto` → **耗尽**（rc=132）—— 固定触发还没到，arena 先满了；
-      * `gc_auto_alpha` → **跑完**（rc=7）—— 空间触发在快满时收掉垃圾。
-    两只是**同一份源**，所以差别只来自那一档的触发策略。端到端过**包内镜像链接器**。
+    400×136 ≈ 53 KB 请求过 64 KiB arena。
+
+    ⚠ **2026-10-19 改判**：原先的负控是"`gc_auto` 必须耗尽（rc=132）"。**LMS 第 3 级入口 A**
+    （`docs/253` §5.3，"`alloc` 分配不出时先收一次再试"）落地之后，`gc_auto` 在同一个
+    arena 上也会靠那次**救援收集**活下来 —— 固定触发的上限不再是"活集 ≳ 32 KB 必死"。
+    所以这一条现在钉的是**两档的触发机制不同**（活集自适应阈值 / 空间触发 vs 固定 32 KiB），
+    以及两只都跑完；不再拿"谁会耗尽"当判据（那是旧实现的巧合，不是这一维的承诺）。
     """
     if not (_clang() and _wsl()):
         print("      SKIP: 无 clang/WSL")
@@ -1438,23 +1445,29 @@ def test_gc_alpha_adaptive_bounds_a_large_live_set():
             "    syscall4(60, 3, 0, 0);\n}\n")
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
-        got = []
+        got = {}
+        irs = {}
         for tag, ch in (("auto", "choose gc_auto"), ("alpha", "choose gc_auto_alpha")):
             src = td / f"{tag}.lomt"
             src.write_text(body % ch, encoding="utf-8", newline="\n")
             ll = _ref_ir(src, td)
-            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            irs[tag] = ll.read_text(encoding="utf-8")
+            blob, _info = lomelf.compile_ll(irs[tag])
             nat = td / f"{tag}.native"
             nat.write_bytes(blob)
-            got.append(_run_bin(nat, f"adapt_{tag}", td, timeout=60)[0])
-    assert got[1] == 7, (
-        f"`gc_auto_alpha` 那一只没跑完：退出码 {got[1]}（期望 7）。自适应收集器要么没生效，"
-        "要么空间触发 / 活集量法 / 阈值任一处坏了")
-    assert got[0] != 7, (
-        f"**`gc_auto` 那一只也跑通了**（退出码 {got[0]}）—— 那这条判据测不出自适应的好处："
-        "固定 32 KiB 触发本该在活集 44 KB 时装不下 arena")
-    print(f"      gc_auto 耗尽 (rc={got[0]}，活集 44 KB)；gc_auto_alpha 跑通 (rc={got[1]}) "
-          "—— 自适应触发收得下更大的活集")
+            got[tag] = _run_bin(nat, f"adapt_{tag}", td, timeout=60)[0]
+    assert got["alpha"] == 7, (
+        f"`gc_auto_alpha` 那一只没跑完：退出码 {got['alpha']}（期望 7）。自适应收集器"
+        "要么没生效，要么空间触发 / 活集量法 / 阈值任一处坏了")
+    assert got["auto"] == 7, (
+        f"`gc_auto` 那一只没跑完：退出码 {got['auto']}（期望 7）—— LMS 第 3 级入口 A"
+        "（`docs/253` §5.3）的救援收集也没把它拉回来")
+    assert "@__loment_thresh" in irs["alpha"], (
+        "alpha 的产物里没有自适应阈值 `@__loment_thresh` —— 自适应触发没有编进去")
+    assert "@__loment_thresh" not in irs["auto"], (
+        "gc_auto 的产物里出现了 `@__loment_thresh` —— 两档的触发策略混了")
+    print(f"      gc_auto rc={got['auto']} / gc_auto_alpha rc={got['alpha']}（活集 44 KB）："
+          "两只都跑完；alpha 带自适应阈值，auto 不带")
 
 
 @test

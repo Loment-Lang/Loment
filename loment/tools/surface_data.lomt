@@ -27,7 +27,7 @@
 module surface_data
 choose runtime
 
-pub fn n_codes() -> u32 { return 35; }
+pub fn n_codes() -> u32 { return 38; }
 
 /// 报错器自己的版本（`lomenterr version` 打的就是它）。真源：`tools/loment_release.py`。
 pub fn lomenterr_version() -> str { return "0.1.2"; }
@@ -104,6 +104,12 @@ pub fn code_title(c: u32, lang: u32) -> str {
     if k == 69 { return "这次放行没有来源"; }
     if k == 70 { return "the LSPE ledger has an unregistered site kind"; }
     if k == 71 { return "台账里有未登记的站点"; }
+    if k == 72 { return "LSPE's self-audit failed"; }
+    if k == 73 { return "LSPE 自检失败"; }
+    if k == 74 { return "an LSPE policy lock does not match"; }
+    if k == 75 { return "LSPE 策略锁"; }
+    if k == 76 { return "`lspe pass` needs a reason"; }
+    if k == 77 { return "`lspe pass` 缺少理由"; }
     return "";
 }
 
@@ -179,6 +185,12 @@ pub fn code_what(c: u32, lang: u32) -> str {
     if k == 69 { return "LSPE 放行了一次访问，却说不出来源 —— 没有能力域、没有 guard、没有类型、也没有人标的假设。"; }
     if k == 70 { return "The LSPE site census produced a kind the ledger does not know."; }
     if k == 71 { return "LSPE 的站点普查枚举出一个种类，而台账不认识它。"; }
+    if k == 72 { return "LSPE's self-audit found the ledger and the sites disagree."; }
+    if k == 73 { return "审计器自检发现台账与站点对不上。"; }
+    if k == 74 { return "A policy lock does not match this artifact."; }
+    if k == 75 { return "策略层要求的锁与这份产物不符。"; }
+    if k == 76 { return "An `lspe pass` block has no reason, or only whitespace."; }
+    if k == 77 { return "`lspe pass` 后面缺一句理由（或者理由全是空白）。"; }
     return "";
 }
 
@@ -254,6 +266,12 @@ pub fn code_why(c: u32, lang: u32) -> str {
     if k == 69 { return "LSPE 的承诺不是“没有漏洞”，是“没有未被标注的放行”。默认档只把它记进台账的 `undecided`；只有 `--lspe-mode=strict` 才会把它变成一条错误。"; }
     if k == 70 { return "This is the auditor's own inconsistency, not a defect in the user's code. It is in the same family as E036 (an unrecorded question): the auditor must audit itself."; }
     if k == 71 { return "这是**审计器自己的**不一致，不是用户代码的错误。与 E036（反问未记账）同族：审计者必须先能审自己。"; }
+    if k == 72 { return "The auditor must be able to audit itself: this is the auditor's own failure, not a defect in the user's code."; }
+    if k == 73 { return "审计者必须先能审自己：这一条是**审计器自己的**失败，不是用户代码的错误。"; }
+    if k == 74 { return "The policy layer is a future surface; there is no policy layer today, so this code is reserved."; }
+    if k == 75 { return "策略层是未来面；今天没有策略层，这个码先占住。"; }
+    if k == 76 { return "The bypass is receipted: the block itself goes into the ledger, and the reason is its signature. A reasonless bypass is the unlabelled floor LSPE exists to prevent."; }
+    if k == 77 { return "旁路是**有收据的**：块本身进台账，理由就是签名。没有理由的旁路等于一块无标签地板 —— 那正是 LSPE 要防的形状。"; }
     return "";
 }
 
@@ -329,6 +347,12 @@ pub fn code_yes(c: u32, lang: u32) -> str {
     if k == 69 { return "有来源的放行；带 `assumption` 的标注；台账里可见的 `undecided`"; }
     if k == 70 { return "the registered `guard` / `index` kinds"; }
     if k == 71 { return "guard / index 两种已登记的站点"; }
+    if k == 72 { return "a coherent ledger"; }
+    if k == 73 { return "自洽的台账"; }
+    if k == 74 { return "an artifact that matches its policy"; }
+    if k == 75 { return "与策略一致的产物"; }
+    if k == 76 { return "a non-empty reason"; }
+    if k == 77 { return "一句非空理由"; }
     return "";
 }
 
@@ -404,6 +428,12 @@ pub fn code_no(c: u32, lang: u32) -> str {
     if k == 69 { return "无来源、也不在台账里的放行"; }
     if k == 70 { return "an unknown site kind"; }
     if k == 71 { return "未知的站点种类"; }
+    if k == 72 { return "a ledger that fails self-audit"; }
+    if k == 73 { return "自检失败的台账"; }
+    if k == 74 { return "an artifact that does not"; }
+    if k == 75 { return "与策略不符的产物"; }
+    if k == 76 { return "an empty string / whitespace only / not a string"; }
+    if k == 77 { return "空字符串 / 只有空白 / 根本不是字符串"; }
     return "";
 }
 
@@ -443,6 +473,9 @@ pub fn code_ascii(c: u32) -> str {
     if c == 33 { return "the unit is too large for this compiler's fixed buffers - split the facade"; }
     if c == 34 { return "an allow with no provenance - LSPE could not say why it was allowed"; }
     if c == 35 { return "the LSPE ledger has a site kind the census did not register"; }
+    if c == 36 { return "LSPE's own self-audit failed"; }
+    if c == 37 { return "an LSPE policy lock does not match this artifact"; }
+    if c == 38 { return "an `lspe pass` block with no reason"; }
     return "";
 }
 
@@ -707,6 +740,24 @@ pub fn code_fix(c: u32, i: u32, lang: u32) -> str {
     if k == 561 { return "这是编译器缺陷：把这份单元和 `docs/262` 的站点表一起报上来。"; }
     if k == 563 { return "不要靠改用户代码绕过它 —— 那会把审计器的不一致藏进源码。"; }
     if k == 565 { return "先用 `loment lspe state <file>` 看台账里到底是哪个种类没登记，再一并报上来。"; }
+    if k == 576 { return "Report the unit together with the output of `loment lspe state`."; }
+    if k == 578 { return "Do not work around it in source - that hides the auditor's problem."; }
+    if k == 580 { return "Check first whether this is a stale ledger from `lspe_close_admin`."; }
+    if k == 577 { return "把这份单元和 `loment lspe state` 的输出一起报上来。"; }
+    if k == 579 { return "不要靠改源码绕过 —— 那会把审计器的问题藏起来。"; }
+    if k == 581 { return "先确认是不是 `lspe_close_admin` 下的陈旧台账。"; }
+    if k == 592 { return "Check whether this artifact's `set_by` / `mode` came from the policy you meant."; }
+    if k == 594 { return "If an external policy file was used, check its version against the artifact."; }
+    if k == 596 { return "Attach the policy file and the artifact when reporting."; }
+    if k == 593 { return "确认这份产物的 `set_by` / `mode` 是不是来自想要的策略。"; }
+    if k == 595 { return "如果用了外部策略文件，检查它的版本与产物一致。"; }
+    if k == 597 { return "报告时附上策略文件与产物。"; }
+    if k == 608 { return "State why this block skips the audit: `lspe pass \"measured on the target hardware\" { ... }`."; }
+    if k == 610 { return "If only a few sites are unproved, prefer the default tier and leave them in the ledger."; }
+    if k == 612 { return "Keep the reason narrow: say why this block must skip the audit, not a general note."; }
+    if k == 609 { return "写上为什么这块要绕开审计：`lspe pass \"measured on the target hardware\" { … }`。"; }
+    if k == 611 { return "如果只是某几条证不出来，优先用 `--lspe-mode=strict` 之外的默认档，让它留在台账里。"; }
+    if k == 613 { return "理由写窄一点：只说这块为什么必须绕开审计，不要写成一段泛泛的说明。"; }
     return "";
 }
 
@@ -748,6 +799,9 @@ pub fn code_nfix(c: u32) -> u32 {
     if c == 33 { return 4; }
     if c == 34 { return 3; }
     if c == 35 { return 3; }
+    if c == 36 { return 3; }
+    if c == 37 { return 3; }
+    if c == 38 { return 3; }
     return 0;
 }
 

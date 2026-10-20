@@ -350,7 +350,7 @@ Running it should print `42 10 9 6 2 3` and `TOUR RESULT: PASS`.
 | Construct | How it is written |
 |---|---|
 | Module | `module <name>` on the first line (no semicolon) |
-| Project mode | `choose` - **five dimensions**, each written at most once and **only in the entry unit**; libraries may not write it (E22). `std` / `no_std` · `gc_manual` / `gc_auto` / `gc_auto_alpha` · `runtime` / `no_runtime` · `sealed` / `hosted` · `vm` / `no_vm` - see 2.1 |
+| Project mode | `choose` - **seven dimensions**, each written at most once and **only in the entry unit**; libraries may not write it (E22). `std` / `no_std` · `gc_manual` / `gc_auto` / `gc_auto_alpha` / `no_gc` · `runtime` / `no_runtime` · `sealed` / `hosted` · `vm` / `no_vm` · `lms_full` / `lms_forensic_admin` / `lms_daily_admin` / `lms_manage_only_admin` · `lspe_open_admin` / `lspe_close_admin` - see 2.1 |
 | Switch setting | `addin <name>` (**entry unit only**) - pulls in a "switch settings" unit, see 2.2 |
 | Custom syntax | `comefor let "word" to { … }` … `byuse "word" done` - **define a new syntax at compile time**. The block after `to` is **a Loment program** (`fn main` is its entry; **the return value is how many tokens it ate**) which reads and emits tokens with `ct_n` / `ct_tok` / `ct_out` / `ct_syn`. Definition and terminator are **top-level only** and cannot nest; expansion happens at the token layer **before parsing**, so errors and jumps still point at the line you wrote. See `docs/184` |
 | Import | **Two spellings, neither takes a semicolon**: `use name` (**searched in layers, first hit wins**: (1) project root `<project>/deps/<name>/<name><ext>` (2) the toolchain's own `<tool dir>/../share/lompi/store/<name>/<version>/<name><ext>` (3) the four built-in roots `loment/lib` → `examples` → `selfhost` → `tools`, where **only layer 3 requires the name to be unique**); `use "path/to/other.lomt"` (relative to the current file or the working directory - **use this form for a sibling file in your own directory**). `<ext>` defaults to `.lomt` and a project can change it (section 7). At most **300** `use` lines in one file. **At most one name-form `use` per unit today** - see 6.3 |
@@ -376,7 +376,7 @@ Running it should print `42 10 9 6 2 3` and `TOUR RESULT: PASS`.
 
 ### 2.1 Project mode `choose`
 
-`choose` is how a program states a property of **the whole artifact**. There are **five
+`choose` is how a program states a property of **the whole artifact**. There are **seven
 dimensions**, each written at most once, and each one lands in the Potato form object - so
 "what kind of artifact is this" is answerable on the side that does **not** read the source.
 
@@ -388,13 +388,15 @@ choose no_std          // ← once for the whole program; the default is std
 
 | Dimension | Values | Default | What it decides |
 |---|---|---|---|
-| **Layer** | `std` · `no_std` | `std` | which layer the program may use |
-| **Reclamation** | `gc_manual` · `gc_auto` · `gc_auto_alpha` | `gc_manual` | how memory is reclaimed - see section 3.2 |
-| **Runtime** | `runtime` · `no_runtime` | `no_runtime` | whether the artifact may carry a runtime |
+| **Layer** | `std` · `no_std` | `std` | which layer the program may use - `std` unlocks the hosted layer (libc / filesystem / threads / time / network), `no_std` refuses it |
+| **Reclamation** | `gc_manual` · `gc_auto` · `gc_auto_alpha` · `no_gc` | `gc_manual` | how memory is reclaimed - see section 3.2; `no_gc` declares the artifact carries no collector |
+| **Runtime** | `runtime` · `no_runtime` | `no_runtime` | whether the artifact may carry a runtime (the heap is still on demand) |
 | **Port** | `sealed` · `hosted` | `sealed` | whether the artifact may reach outside itself by linking host libraries |
 | **Execution model** | `vm` · `no_vm` | `no_vm` | which execution model the program is for |
+| **Memory safety** | `lms_full` · `lms_forensic_admin` · `lms_daily_admin` · `lms_manage_only_admin` | `lms_full` | which of the seven LMS levels are on |
+| **Audit ledger** | `lspe_open_admin` · `lspe_close_admin` | `lspe_open_admin` | whether LSPE records the ledger (off changes the ledger, never a verdict) |
 
-What holds for all five:
+What holds for all seven:
 
 - **It is a property of the program, not of a file**: each dimension appears at most once, and
   **only in the entry unit** (a library pulled in by `use` that writes one is E22). Both compilers
@@ -403,7 +405,8 @@ What holds for all five:
   behaviour that was there before the dimension existed.
 - **Contradictory pairs are named, not lumped.** `gc_auto` with `no_runtime` is refused because
   automatic reclamation *is* that runtime; `hosted` with `no_std` is refused because `no_std` says
-  there is nothing underneath and `hosted` says to link against it. The diagnostic names the pair
+  there is nothing underneath and `hosted` says to link against it; both automatic tiers with
+  `no_std` are refused because a collector needs that runtime. The diagnostic names the pair
   and the reason; it never says "illegal combination".
 - A value that is not in the table is a typo, and a typo **is E22**.
 

@@ -173,6 +173,7 @@ tools/lom_audit.py
 tools/lomc_test.py
 tools/lomentc.py
 tools/lomentc_test.py
+tools/lspe_test.py
 tools/potato.py
 tools/potato_test.py
 tools/potato_cross.py
@@ -361,6 +362,8 @@ loment/nltrans/*.lomt
 loment/invariants/*.lomt
 loment/examples/*.lomt
 loment/selfhost/*.lomt
+loment/lspe/*.py
+loment/lspe/*.lomt
 loment/corpus.json
 lom/*.lom
 docs/*.md

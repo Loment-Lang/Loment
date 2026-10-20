@@ -271,8 +271,8 @@ SILENT_LITERALS = {
     ("loment/selfhost/driver.lomt", "literal:4000"): 3,
     ("loment/selfhost/interp.lomt", "literal:20"): 1,
     ("loment/selfhost/lexer.lomt", "literal:256"): 1,
-    ("loment/selfhost/potato.lomt", "literal:10"): 1,
     ("loment/selfhost/potato.lomt", "literal:20"): 1,
+    ("loment/lspe/lspe.lomt", "literal:10"): 1,
     ("loment/tools/lomadmit.lomt", "literal:4000"): 1,
     ("loment/tools/lomc.lomt", "literal:4000"): 1,
     ("loment/tools/lomcapasserts.lomt", "literal:4000"): 2,
@@ -438,7 +438,7 @@ def test_literal_caps_and_static_arrays_are_visible():
     盘点里 —— 这条判据就是"现在在了"的兑现，而且钉的是**行级**事实。
     """
     lits = {(r["file"], r["line"], r["name"]) for r in loment_caps.scan_literals()}
-    for f, line, name in (("loment/selfhost/driver.lomt", 865, "literal:200"),
+    for f, line, name in (("loment/selfhost/driver.lomt", 868, "literal:200"),
                           ("loment/tools/lomfmt.lomt", 497, "literal:16"),
                           ("loment/tools/lomc.lomt", 501, "literal:4000")):
         assert (f, line, name) in lits, (

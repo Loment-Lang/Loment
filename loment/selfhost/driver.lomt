@@ -759,7 +759,10 @@ fn name_root_at(r: u32) -> str {
     if r == 2 {
         return "loment/selfhost";
     }
-    return "loment/tools";
+    if r == 3 {
+        return "loment/tools";
+    }
+    return "loment/lspe";
 }
 
 /// NUL 串长度。
@@ -1196,7 +1199,7 @@ fn resolve_use_name(src: ptr, off: u32, len: u32, dst: ptr, scr: ptr, ins: u32) 
     let hits: u32 = 0;
     let hit_len: u32 = 0;
     let r: u32 = 0;
-    while r < 4 {
+    while r < 5 {
         let rp: str = name_root_at(r);
         let d: u32 = 0;
         let j: u32 = 0;

@@ -3532,6 +3532,47 @@ def test_a_gnu_ld_script_names_the_file_it_points_to():
 
 
 @test
+def test_both_linkers_check_a_no_gc_claim_against_the_collector():
+    """**`no_gc` 的声明要有牙**（`#538`）：IR 说"不带收集器"，链接器就核它真的没带。
+
+    两个方向都判：诚实的 `no_gc` IR 两份链接器都收；一份**伪造**的（声明 `no_gc`
+    却定义 `@__loment_collect`）两份都点名拒。这是 `docs/227` 判据 B 的镜像 ——
+    编译器是那句话的作者，能拿一份不是自己生成的 IR 去核它的，只有链接器这一侧。
+    """
+    clang = _clang()
+    if not (clang and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    mir = _mirror()
+    honest = ("; loment-gc: no_gc\n"
+              "define i32 @_start() {\nentry:\n  ret i32 0\n}\n")
+    forged = ("; loment-gc: no_gc\n"
+              "define void @__loment_collect() {\nentry:\n  ret void\n}\n"
+              "define i32 @_start() {\nentry:\n  ret i32 0\n}\n")
+    # 参考实现：诚实的那份收，伪造的那份拒。
+    lomelf.compile_ll(honest, [])
+    try:
+        lomelf.compile_ll(forged, [])
+    except lomelf.Unsupported as e:
+        assert "no_gc" in str(e), f"参考实现拒绝时没点名 no_gc: {e}"
+    else:
+        raise AssertionError("参考实现收下了声明 no_gc 却带收集器的 IR")
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        for tag, text, want_ok in (("honest", honest, True), ("forged", forged, False)):
+            f = td / f"{tag}.ll"
+            f.write_text(text, encoding="utf-8", newline="\n")
+            rc, err = _mirror_run(mir, str(_wsl_path(f)), str(_wsl_path(td / f"{tag}.elf")))
+            if want_ok:
+                assert rc == 0, f"[{tag}] 镜像拒了诚实的 no_gc IR: {err[-300:]}"
+            else:
+                assert rc != 0, "镜像收下了声明 no_gc 却带收集器的 IR"
+                assert "no_gc" in err, f"[{tag}] 镜像拒绝时没点名 no_gc: {err[-300:]}"
+    print("      no_gc：两份链接器都收诚实的、都点名拒伪造的")
+
+
+
+@test
 def test_two_shared_objects_link_in_order():
     """**一次可以链两个共享对象**（`#596`）：`libz` 的 `compress` + `libc` 的 `strlen`。
 

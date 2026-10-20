@@ -70,8 +70,8 @@ loment_door_test 6
 loment_admit_test 8
 loment_zwframe_test 7
 loment_lib_test 15
-loment_cli_test 47
-loment_err_test 44
+loment_cli_test 48
+loment_err_test 45
 loment_std_test 4
 loment_libl_test 2
 loment_internet_test 12

@@ -129,6 +129,8 @@ EXPLAINED: dict[tuple[str, str], str] = {
         "整型码的**取值范围**：`c >= K_INT_MIN && c <= K_INT_MAX` 判的是码，不是计数",
     ("loment/selfhost/checker.lomt", "K_INT_MAX"):
         "整型码的**取值范围**：同 `K_INT_MIN`（判的是码，不是计数）",
+    ("loment/selfhost/checker.lomt", "CHK_ENV_MAX"):
+        "写满即停（不写穿）；>1536 由发射阶段的 `PT_EMAX` 点名拒 —— 检查器没有输出通道",
     ("loment/selfhost/codegen.lomt", "CG_MAXFN"):
         "越界**由调用方报**：守卫这里 `return 0`，驱动器 `fail(\"…codegen 表容量…\")` 说得出来",
     ("loment/selfhost/codegen.lomt", "CG_MAXENUM"):

@@ -104,8 +104,8 @@ def test(fn):
 #:    写穿/静默丢，现在点名拒），另外 7 处"越界由调用方报"的写进 `EXPLAINED`。
 #:    顺带 `PT_EN` 被认出是**槽位不是容量**，退出本口径。
 #: ⇒ 条数 236 → **235**、沉默 162 → **154**、沉默名 **129** 个。
-CAPACITY_SITES = 235
-SILENT_SITES = 154
+CAPACITY_SITES = 236
+SILENT_SITES = 155
 
 #: 第二类：字面量上界（`#770`）。`[T; N]` 与 `literal:<N>` 各自钉住总数与沉默的那一份。
 LITERAL_SITES = 63
@@ -118,6 +118,7 @@ ARRAY_SILENT = 16
 #: 判断"真缺口"用 `loment_caps.gaps()`（那条另有一条判据）。
 SILENT_NAMES = frozenset((
     "ARENA_CAP",
+    "CHK_ENV_MAX",
     "CASES_CAP",
     "CG_MAXENUM",
     "CG_MAXFN",

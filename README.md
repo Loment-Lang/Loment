@@ -36,7 +36,7 @@ Python, no clang and no WSL.
   C, C++, Java, C#, Go or Python.
 - **Gentle where Rust is strict.** LSPE, the safety audit layer, is gentler than Rust's borrow
   checker while offering nearly the same safety: it audits the compiler's own decisions and
-  records every allowance, so no permit is silent. [docs/262](docs/262-lspe-safety-police-espace.md)
+  records every allowance, so no permit is silent.
 
 Diagnostics come from a separate program: `lomenterr version` prints `lomenterr 0.1.2`, its own
 number.

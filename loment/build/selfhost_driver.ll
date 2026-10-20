@@ -120501,7 +120501,7 @@ L229_then:
   %t1049 = load ptr, ptr %scr.addr
   %t1050 = load ptr, ptr %ap.addr
   %t1051 = load i32, ptr %an.addr
-  %t1052 = load ptr, ptr %toks2.addr
+  %t1052 = load ptr, ptr %ctoks.addr
   %t1053 = load i32, ptr %et.addr
   %t1054 = mul i32 %t1053, 20
   %t1055 = add i32 %t1054, 12

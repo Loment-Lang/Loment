@@ -1,0 +1,30 @@
+8394819	AOT 超接口初始化状态
+8394807	CRaC 跨主机 glibc
+8394775	测试文件改名
+8394744	Valhalla 数组断言回滚
+8394716	事件回调语义
+8394696	JFR 采样规格
+8394662	限定内部类构造丢外层接收者类型
+8394654	Valhalla 缺 return
+8394633	Shenandoah 屏障缺空检查
+8394622	RISC-V movptr2 回滚
+8394583	ProblemList
+8394580	绑 127.x.x.255 失败
+8394564	utsname 包含
+8394515	"Field too big for insn" 保证失败
+8394502	s390x ZGC 测试
+8394492	FreeType 升级
+8394487	medialib 原型
+8394406	RISC-V 屏障
+8394375	非字面量布尔常量进 switch 使编译器崩溃
+8394343	lshl 结果错误
+8394316	skip 在 position > size 时返回负值
+8394269	弃用 OpenType 名单
+8394265	时区偏移测试
+8394236	RISC-V StoreLoad
+8394225	Valhalla C2 断言
+8394217	poller 组配置
+8394181	free 了错误指针
+8394146	hsdis + binutils
+8394091	ZGC 堆参数
+8394032	medialib 数学表

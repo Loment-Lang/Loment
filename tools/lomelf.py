@@ -6195,6 +6195,16 @@ def compile_ll(text: str, objects: list | None = None,
     global TEXT_VADDR, DATA_VADDR
     TEXT_VADDR, DATA_VADDR = ELF_TEXT_VADDR, ELF_DATA_VADDR   # PE 目标会改这两个全局
     globals_, funcs, externs = parse_ll(text)
+    # **`no_gc` 的带牙检查**（`#538`）：IR 自己声明"不带收集器"，那就核它真的没带。
+    # 这是 `docs/227` 判据 B 的镜像 —— 那边判"声明了 `no_runtime` 却拖进运行期"，
+    # 这边判"声明了 `no_gc` 却带着收集器"。检查放在**链接器**而不是编译器，因为
+    # 编译器正是那句话的作者；能拿一份不是自己生成的 IR 来核它的，只有这一侧。
+    if "; loment-gc: no_gc" in text and (
+            "@__loment_collect" in text or "@__loment_roots" in text):
+        raise Unsupported(
+            "这份 IR 声明了 `no_gc`（产物不带收集器），却带着收集器"
+            "（`@__loment_collect` / `@__loment_roots`）—— 两句话不能同时成立；"
+            "去掉 `choose no_gc`，或去掉产生收集器的那一档")
     # **先把三种输入分开**（`#616`）：归档要展开、共享对象只提供导出表、其余才是要摆的
     # `.o`。以前这一步先做归档展开、后滤共享对象 —— 而展开时要读 `o.undefined`，
     # `SharedObject` 没有那个字段，于是 `--link libz.so --link libfoo.a` 直接抛

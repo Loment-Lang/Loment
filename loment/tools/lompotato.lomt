@@ -1526,7 +1526,8 @@ fn chk_v1(mem: ptr, doc: u32, ver: u32) -> u32 {
             let lg: u32 = jstr(mem, gc, ptr_add(mem, M_SB), 4096);
             if eq_lit(ptr_add(mem, M_SB), lg, "gc_manual") == 1
                     || eq_lit(ptr_add(mem, M_SB), lg, "gc_auto") == 1
-                    || eq_lit(ptr_add(mem, M_SB), lg, "gc_auto_alpha") == 1 {
+                    || eq_lit(ptr_add(mem, M_SB), lg, "gc_auto_alpha") == 1
+                    || eq_lit(ptr_add(mem, M_SB), lg, "no_gc") == 1 {
                 gok = 1;
             }
         }

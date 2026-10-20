@@ -492,7 +492,7 @@ fn chk_core_dim(src: ptr, t: ptr, k: u32) -> u32 {
         return 0;
     }
     if chk_tok_is(src, t, k, "gc_manual") || chk_tok_is(src, t, k, "gc_auto")
-            || chk_tok_is(src, t, k, "gc_auto_alpha") {
+            || chk_tok_is(src, t, k, "gc_auto_alpha") || chk_tok_is(src, t, k, "no_gc") {
         return 1;
     }
     if chk_tok_is(src, t, k, "runtime") || chk_tok_is(src, t, k, "no_runtime") {
@@ -587,6 +587,9 @@ fn chk_core_val(src: ptr, t: ptr, k: u32) -> u32 {
     }
     if chk_tok_is(src, t, k, "gc_auto_alpha") {
         return 3;
+    }
+    if chk_tok_is(src, t, k, "no_gc") {
+        return 4;
     }
     if chk_tok_is(src, t, k, "runtime") {
         return 1;
@@ -3927,7 +3930,9 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     // 地方。**顺序要与那份表的 i<j 枚举一致**，否则两条冲突同时命中时码的次序会反
     // （自举侧是逐个 if 写的，没有那张表可循）。
     // 锚点 = 这两维里**较后**写的那一行（某维没写就是另一维那行）。
-    if eff_mode == 2 && eff_gc >= 2 {
+    // **`no_gc` 不是第 4 个"更自动"的档** —— 判"自动档"必须按值 2/3 写死，
+    // 不能写 `>= 2`（那会把 `no_gc`(4) 也算进去，与它自己"不带收集器"的声明相反）。
+    if eff_mode == 2 && (eff_gc == 2 || eff_gc == 3) {
         o = sym_pub(src, t, out, o, E_MODE, later_line(ln_mode, ln_gc));
     }
     // (mode, port)：`no_std` 说"底下没有东西"，`hosted` 说"往下链东西"（`docs/222` §4.2）。
@@ -3935,7 +3940,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
         o = sym_pub(src, t, out, o, E_MODE, later_line(ln_mode, ln_port));
     }
     // (mode, runtime) 那一对今天没有冲突 —— 留个位置说明它被想过，不是漏了。
-    if eff_gc >= 2 && eff_rt == 2 {
+    if (eff_gc == 2 || eff_gc == 3) && eff_rt == 2 {
         o = sym_pub(src, t, out, o, E_MODE, later_line(ln_gc, ln_rt));
     }
     // ---- **运行期维的强保证**（`docs/217`）：`no_runtime`（默认）说"产物里没有运行期"，

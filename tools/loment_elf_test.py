@@ -657,7 +657,11 @@ def test_gc_manual_free_list_recycles():
     if not _wsl():
         print("      SKIP: 无 WSL")
         return
-    body = ("module gclist\nchoose gc_manual\nchoose runtime\n\nfn _start() {\n"
+    # ⚠ 这份夹具**故意**读一块刚 `free` 掉的块（它测的是空闲链表的**复用**：值在复用
+    # 之前还在）。E029 从默认档 `lms_full` 起就开着，所以这里显式降到「只要管理器」
+    # 那一档 —— 关掉的是那条检查，不是这条判据要测的分配器行为（`docs/269` §6）。
+    body = ("module gclist\nchoose gc_manual\nchoose lms_manage_only_admin\n"
+            "choose runtime\n\nfn _start() {\n"
             "    let prev: ptr = alloc(64);\n"
             "    store8(prev, 0, 3);\n"
             "    let i: u32 = 0;\n"
@@ -1218,7 +1222,8 @@ def test_free_refuses_a_double_free():
         print("      SKIP: 无 clang/WSL")
         return
     src_text = (
-        "module freedbl\nchoose runtime\n\n"
+        # 故意双重释放 —— 同上：关掉第 1 级，让 `free` 自己那道运行期检查说话。
+        "module freedbl\nchoose runtime\nchoose lms_manage_only_admin\n\n"
         "fn _start() {\n"
         "    let n: u32 = 16;\n"
         "    let a: ptr = alloc(n);\n"
@@ -1415,7 +1420,10 @@ def test_gc_alpha_adaptive_bounds_a_large_live_set():
     if not (_clang() and _wsl()):
         print("      SKIP: 无 clang/WSL")
         return
-    body = ("module gcadapt\n%s\nchoose runtime\n\n"
+    # ⚠ **第 3 级关掉**：入口 A（用尽时先收一次再试）会让 `gc_auto` 那一只也活下来，
+    # 于是这条判据测不出"固定触发 vs 自适应"的差别 —— 它要量的是**收集器的触发策略**，
+    # 不是保障器的救援。两只都关，比较才公平（`docs/269` §6）。
+    body = ("module gcadapt\n%s\nchoose close lms_guard\nchoose runtime\n\n"
             "fn chew(n: u32) -> u32 {\n"
             "    let p: ptr = alloc(n);\n"
             "    let q: ptr = p;\n"

@@ -1415,7 +1415,10 @@ CORE_DIMS: dict[str, tuple[str, ...]] = {
     # `gc_auto_alpha` = **混合档**（用户 2026-09-23 定，`docs/175` §3.4.1）：
     # 静态内存管理 + 动态回收，**不存在任何冻结全部业务的阶段**，且自适应。
     # 名字带 `alpha` 是**明说的**：这一档在动，用它的项目认这一点。
-    "gc": ("gc_manual", "gc_auto", "gc_auto_alpha"),
+    # `no_gc`（`#538`，`docs/266`）：产物**不带收集器**。它不是第四个"更自动"的档，
+    # 而是把「没有收集器」这件事变成**程序自己的声明** —— 与 `no_runtime` 同一条
+    # 纪律（`docs/227`）：一个断言，而不是读者从数字里推出来的结论。
+    "gc": ("gc_manual", "gc_auto", "gc_auto_alpha", "no_gc"),
     # 用户 2026-09-23：「运行期是海量工程必经之路，我们不得不利用 `choose` 开关
     # 启动/关闭 runtime」。**默认是关的** —— 默认档不许改变任何现有程序的行为。
     "runtime": ("runtime", "no_runtime"),
@@ -1482,7 +1485,7 @@ CORE_DEFAULTS = {"mode": "std", "gc": "gc_manual", "runtime": "no_runtime",
 #: 而"核心模式只能声明一次"在有两维之后就**说不清是哪一维**了。
 CORE_DIM_ZH = {
     "mode": "运行模式（`std` / `no_std`）",
-    "gc": "回收档（`gc_manual` / `gc_auto` / `gc_auto_alpha`）",
+    "gc": "回收档（`gc_manual` / `gc_auto` / `gc_auto_alpha` / `no_gc`）",
     "runtime": "运行期（`runtime` / `no_runtime`）",
     "port": "对外端口（`sealed` / `hosted`）",
     "vm": "执行模型（`vm` / `no_vm`）",
@@ -2127,7 +2130,7 @@ class Parser:
                 line = t.line
                 self.next()
                 w = self.expect("ident", None,
-                                "（核心模式的取值：std / no_std / gc_manual / gc_auto）")
+                                "（核心模式的取值：std / no_std / gc_manual / gc_auto / gc_auto_alpha / no_gc）")
                 # **记录每个出现位置, 判定放到 check()** —— 与 `extern` 的重名同一条路数:
                 # 语法层只收集, 规则集中在一处, 两个实现要对齐的也就只有那一处。
                 # 值属于**哪一维**由 `CORE_DIM_OF` 查 —— 加一维不必再动这两行。
@@ -9149,6 +9152,12 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # 只有 `no_std` 才多发这一行 —— 默认 `std` 的 IR 一个字节都不变。
     if mod.chooses.get("mode", CORE_DEFAULTS["mode"]) == "no_std":
         out.append("; loment-mode: no_std")
+    # `choose no_gc`（`#538`）：产物**自己声明**"我不带收集器"。与 `loment-port` 同一条
+    # 理由 —— 构建那一侧（链接器）要能核这句话是真的：声明了 `no_gc` 而 IR 里出现
+    # `@__loment_collect` / `@__loment_roots`，链接期点名拒（`docs/227` 判据 B 的镜像）。
+    # 只有 `no_gc` 才多发这一行，其余档的 IR 一个字节都不变。
+    if mod.chooses.get("gc", CORE_DEFAULTS["gc"]) == "no_gc":
+        out.append("; loment-gc: no_gc")
     out.append("")
     globals_: list[str] = []
     body: list[str] = []

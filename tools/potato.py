@@ -154,7 +154,7 @@ MODES = ("std", "no_std")
 #: `gc_manual` = 回收由程序显式做；`gc_auto` = 运行期负责回收。
 #: 后者**放弃了"确定性"这条差异点**（`docs/140`），而这件事**记在对象里** ——
 #: 于是"这个产物放弃了确定性"是**不读源码可判**的。
-GCS = ("gc_manual", "gc_auto", "gc_auto_alpha")
+GCS = ("gc_manual", "gc_auto", "gc_auto_alpha", "no_gc")
 #: `runtime` 的取值 = **产物里有没有运行期**（`docs/175` §3.6）。只有这两个 ——
 #: 它是一个**存在开关**，不是"运行期里装了什么清单"（那个会随年份长）。
 RUNTIMES = ("runtime", "no_runtime")

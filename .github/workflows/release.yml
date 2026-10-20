@@ -118,6 +118,9 @@ jobs:
     if: ${{ !endsWith(github.event.inputs.tag || github.ref_name, '-pre') }}
     # Windows: 第五件 setup.exe 要 Windows 自带的 iexpress（见文件头那两节）。
     runs-on: windows-latest
+    # Deployments 里的发版记录。环境只允许 `main` 与 `v*` 标签（仓库设置里那条
+    # deployment branch policy），所以这里没有额外的门 —— 它是记录，不是审批闸。
+    environment: release
     # 下面那些 `run:` 全是 bash 写的；Windows runner 默认给 PowerShell，所以整片钉成 bash
     # （runner 自带 Git Bash）。逐个步骤写 `shell: bash` 也行，钉在这里少一处漏掉的机会。
     defaults:

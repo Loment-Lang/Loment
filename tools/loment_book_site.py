@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# loment_book_site.py — 把 book/ 渲染成静态站点（GitHub Pages 用）
+# loment_book_site.py — 把两本书（book/ 与 contributing/）渲染成静态站点（GitHub Pages 用）
 #
 # 为什么自己写渲染器：书的 Markdown 只用到很窄的一组语法（标题、段落、围栏代码、
 # 行内代码、粗体/斜体、链接、列表、引用、表格），而门禁要能在**没有 mdBook 的
@@ -21,9 +21,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 BOOK = ROOT / "book"
-SRC = BOOK / "src"
 BY_EXAMPLE = BOOK / "by-example"
-SUMMARY = BOOK / "SUMMARY.md"
+CONTRIBUTING = ROOT / "contributing"
+
+#: 两本书。`slug` 是站点里的顶层目录，`root` 是仓库里的目录。
+BOOKS = (
+    {"slug": "usage", "root": BOOK, "title": "Using Loment",
+     "blurb": "How to install the toolchain, write programs, and use the language."},
+    {"slug": "contributing", "root": CONTRIBUTING,
+     "title": "Loment Development Contribution Plan",
+     "blurb": "How the project is built, measured and changed."},
+)
 
 _ENTRY = re.compile(r"^\s*(?:\d+\.\s*)?\[(.+?)\]\((.+?)\)\s*$")
 _FENCE = re.compile(r"^```([A-Za-z0-9_,+-]*)\s*$")
@@ -31,6 +39,17 @@ _HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
 _UL = re.compile(r"^\s*[-*]\s+(.*)$")
 _OL = re.compile(r"^\s*\d+\.\s+(.*)$")
 _CODE = re.compile(r"`([^`]+)`")
+
+
+def _rel(path: str, start: str) -> str:
+    """站内相对路径。不用 `posixpath.relpath`：它在 Windows 上会走 ntpath.abspath，
+    把相对起点解析成盘符路径。"""
+    p = [x for x in posixpath.normpath(path).split("/") if x not in ("", ".")]
+    s = [x for x in posixpath.normpath(start).split("/") if x not in ("", ".")]
+    i = 0
+    while i < len(p) and i < len(s) and p[i] == s[i]:
+        i += 1
+    return "/".join([".."] * (len(s) - i) + p[i:]) or "."
 
 
 def _slug(text: str) -> str:
@@ -62,23 +81,33 @@ def _inline_text(text: str) -> str:
     return text
 
 
-#: 正在渲染的源文件（repo 相对）。相对链接要靠它算落点：book/ 内的链接改成站内页，
-#: 指向 book/ 之外的链接（`../../exercises/README.md`）改成 GitHub 上的原文。
+#: 正在渲染的源文件（repo 相对）。相对链接要靠它算落点：两本书内的链接改成站内页，
+#: 指向书之外的链接（`../../exercises/README.md`）改成 GitHub 上的原文。
 CURRENT_SRC = "book/src/00-introduction.md"
+
+
+def _site_path(repo_rel: str) -> str | None:
+    """repo 相对的 .md -> 站点相对路径；不在任何一本书里就返回 None。"""
+    if not repo_rel.endswith(".md"):
+        return None
+    for b in BOOKS:
+        prefix = b["root"].relative_to(ROOT).as_posix() + "/"
+        if repo_rel.startswith(prefix):
+            return "%s/%s.html" % (b["slug"], repo_rel[len(prefix):-3])
+    return None
 
 
 def _href(url: str) -> str:
     if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", url) or url.startswith("#"):
         return html.escape(url, quote=True)
     path, _, frag = url.partition("#")
-    target = posixpath.normpath(
-        posixpath.join(posixpath.dirname(CURRENT_SRC), path))
-    if target.startswith("book/") and target.endswith(".md"):
-        site = target[len("book/"): -3] + ".html"
-        here = posixpath.dirname(CURRENT_SRC)[len("book/"):] or "."
-        out = posixpath.relpath(site, here)
+    target = posixpath.normpath(posixpath.join(posixpath.dirname(CURRENT_SRC), path))
+    here = posixpath.dirname(_site_path(CURRENT_SRC) or "")
+    site = _site_path(target)
+    if site:
+        out = _rel(site, here)
     else:
-        out = ("https://github.com/Loment-Lang/Loment/blob/main/" + target)
+        out = "https://github.com/Loment-Lang/Loment/blob/main/" + target
     if frag:
         out += "#" + frag
     return html.escape(out, quote=True)
@@ -180,11 +209,11 @@ def render_markdown(text: str) -> str:
     return "\n".join(out)
 
 
-def summary_entries() -> list[tuple[str, str, str]]:
-    """(part, title, relative source path) —— 只读 SUMMARY.md。"""
+def summary_entries(root: Path) -> list[tuple[str, str, str]]:
+    """(part, title, 相对 root 的源路径) —— 只读该书的 SUMMARY.md。"""
     part = ""
     out: list[tuple[str, str, str]] = []
-    for line in SUMMARY.read_text(encoding="utf-8").split("\n"):
+    for line in (root / "SUMMARY.md").read_text(encoding="utf-8").split("\n"):
         if line.startswith("## "):
             part = line[3:].strip()
             continue
@@ -206,11 +235,11 @@ def by_example_entries() -> list[tuple[str, str, str]]:
     return out
 
 
-def _title_of(path: Path) -> str:
-    for line in path.read_text(encoding="utf-8").split("\n"):
-        if line.startswith("# "):
-            return line[2:].strip()
-    return path.stem
+def _book_entries(book: dict) -> list[tuple[str, str, str]]:
+    entries = summary_entries(book["root"])
+    if book["root"] == BOOK:
+        entries += by_example_entries()
+    return entries
 
 
 CSS = """
@@ -221,7 +250,7 @@ body { margin:0; color:var(--fg); background:var(--bg);
 a { color:#0b5cad; text-decoration:none; }
 a:hover { text-decoration:underline; }
 header.top { border-bottom:1px solid var(--line); padding:14px 24px; display:flex;
-  gap:16px; align-items:baseline; }
+  gap:16px; align-items:baseline; flex-wrap:wrap; }
 header.top strong { font-size:17px; }
 header.top span { color:var(--muted); font-size:13px; }
 .layout { display:flex; max-width:1180px; margin:0 auto; }
@@ -250,31 +279,36 @@ th, td { border:1px solid var(--line); padding:6px 10px; text-align:left; }
 th { background:var(--code); }
 .pager { display:flex; justify-content:space-between; gap:16px; margin-top:44px;
   padding-top:16px; border-top:1px solid var(--line); font-size:14px; }
+.books { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr));
+  gap:20px; margin:26px 0; }
+.book { border:1px solid var(--line); border-radius:8px; padding:18px 20px; }
+.book h2 { margin:0 0 6px; font-size:20px; }
+.book p { color:var(--muted); margin:6px 0 12px; }
 @media (max-width:820px) { .layout { display:block; } nav.toc { position:static;
   width:auto; max-height:none; border-right:0; border-bottom:1px solid var(--line); }
   main { padding:24px 20px 48px; } }
 """
 
 
-def _page(title: str, body: str, toc: str, root: str, prev, nxt) -> str:
+def _page(title: str, body: str, toc: str, css_href: str, here: str, prev, nxt) -> str:
     pager = []
     if prev:
-        pager.append('<a href="%s%s">← %s</a>' % (root, prev[1], html.escape(prev[0])))
+        pager.append('<a href="%s">← %s</a>' % (prev[1], html.escape(prev[0])))
     else:
         pager.append("<span></span>")
     if nxt:
-        pager.append('<a href="%s%s">%s →</a>' % (root, nxt[1], html.escape(nxt[0])))
+        pager.append('<a href="%s">%s →</a>' % (nxt[1], html.escape(nxt[0])))
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{html.escape(title)} — Loment</title>
-<link rel="stylesheet" href="{root}assets/style.css">
+<link rel="stylesheet" href="{css_href}">
 </head>
 <body>
-<header class="top"><strong><a href="{root}index.html">Loment</a></strong>
-<span>The Loment Book</span></header>
+<header class="top"><strong><a href="{_rel('index.html', here)}">Loment</a></strong>
+<span>{html.escape(title)}</span></header>
 <div class="layout">
 <nav class="toc">{toc}</nav>
 <main>
@@ -287,8 +321,16 @@ def _page(title: str, body: str, toc: str, root: str, prev, nxt) -> str:
 """
 
 
-def _toc(entries, current: str, root: str) -> str:
-    parts: list[str] = []
+def _toc(book: dict, entries, current_site: str, here: str, others: list[dict]) -> str:
+    parts: list[str] = ['<h4>Books</h4><ul>']
+    for b in [book] + others:
+        target = _rel(
+            "%s/%s" % (b["slug"], _book_entries(b)[0][2][:-3] + ".html"), here)
+        cls = ' class="current"' if b is book else ""
+        parts.append('<li><a href="%s"%s>%s</a></li>'
+                     % (target, cls, html.escape(b["title"])))
+    parts.append("</ul>")
+
     seen = None
     for part, title, rel in entries:
         if part != seen:
@@ -296,54 +338,63 @@ def _toc(entries, current: str, root: str) -> str:
                 parts.append("</ul>")
             parts.append('<h4>%s</h4><ul>' % html.escape(part or "Contents"))
             seen = part
-        target = rel[: -3] + ".html"
-        cls = ' class="current"' if rel == current else ""
-        parts.append('<li><a href="%s%s"%s>%s</a></li>'
-                     % (root, target, cls, _inline(title)))
+        site = book["slug"] + "/" + rel[:-3] + ".html"
+        cls = ' class="current"' if site == current_site else ""
+        parts.append('<li><a href="%s"%s>%s</a></li>'
+                     % (_rel(site, here), cls, _inline(title)))
     parts.append("</ul>")
     return "".join(parts)
 
 
 def build(out: Path) -> list[Path]:
-    book_entries = summary_entries()
-    ex_entries = by_example_entries()
-    entries = book_entries + ex_entries
-
-    sources: list[tuple[str, Path, str]] = []
-    for part, title, rel in entries:
-        sources.append((title, BOOK / rel, rel))
-
     out.mkdir(parents=True, exist_ok=True)
     (out / "assets").mkdir(exist_ok=True)
     (out / "assets" / "style.css").write_text(CSS, encoding="utf-8", newline="\n")
 
-    written: list[Path] = []
     global CURRENT_SRC
-    for idx, (title, path, rel) in enumerate(sources):
-        CURRENT_SRC = "book/" + rel
-        body = render_markdown(path.read_text(encoding="utf-8"))
-        prev = (sources[idx - 1][0], sources[idx - 1][2][:-3] + ".html") if idx else None
-        nxt = (sources[idx + 1][0], sources[idx + 1][2][:-3] + ".html") \
-            if idx + 1 < len(sources) else None
-        page = _page(title, body, _toc(entries, rel, "../"), "../", prev, nxt)
-        dest = out / (rel[:-3] + ".html")
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(page, encoding="utf-8", newline="\n")
-        written.append(dest)
+    written: list[Path] = []
+    for book in BOOKS:
+        entries = _book_entries(book)
+        sources = [(title, book["root"] / rel, rel) for part, title, rel in entries]
+        for idx, (title, path, rel) in enumerate(sources):
+            CURRENT_SRC = book["root"].relative_to(ROOT).as_posix() + "/" + rel
+            site = book["slug"] + "/" + rel[:-3] + ".html"
+            here = posixpath.dirname(site)
+            css = _rel("assets/style.css", here)
+            body = render_markdown(path.read_text(encoding="utf-8"))
+            prev = (sources[idx - 1][0],
+                    _rel(book["slug"] + "/" + sources[idx - 1][2][:-3] + ".html",
+                                      here)) if idx else None
+            nxt = (sources[idx + 1][0],
+                   _rel(book["slug"] + "/" + sources[idx + 1][2][:-3] + ".html",
+                                     here)) if idx + 1 < len(sources) else None
+            toc = _toc(book, entries, site, here,
+                       [b for b in BOOKS if b is not book])
+            page = _page(title, body, toc, css, here, prev, nxt)
+            dest = out / site
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(page, encoding="utf-8", newline="\n")
+            written.append(dest)
 
+    cards = []
+    for b in BOOKS:
+        first = _book_entries(b)[0]
+        cards.append('<div class="book"><h2>%s</h2><p>%s</p>'
+                     '<p><a href="%s/%s">Start reading →</a></p></div>'
+                     % (html.escape(b["title"]), html.escape(b["blurb"]),
+                        b["slug"], first[2][:-3] + ".html"))
     index = f"""<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Loment — learn</title><link rel="stylesheet" href="assets/style.css"></head>
+<title>Loment — documentation</title><link rel="stylesheet" href="assets/style.css"></head>
 <body>
-<header class="top"><strong>Loment</strong><span>The Loment Book</span></header>
-<div class="layout"><nav class="toc">{_toc(entries, "", "")}</nav>
-<main><h1>The Loment Book</h1>
-<p>Read the book from the beginning, or jump to <a href="by-example/01-hello.html">By Example</a>.
-Every program in here is compiled and run by the build; if a chapter stops working, the gate
-turns red.</p>
-<p><a href="{entries[0][2][:-3]}.html">Start with {html.escape(entries[0][1])} →</a></p>
-</main></div></body></html>
+<header class="top"><strong>Loment</strong><span>Documentation</span></header>
+<main style="max-width:900px;margin:0 auto">
+<h1>Loment documentation</h1>
+<p>Two books. The first is for using the language; the second is for changing the project.
+Both are compiled or link-checked by the gate.</p>
+<div class="books">{''.join(cards)}</div>
+</main></body></html>
 """
     (out / "index.html").write_text(index, encoding="utf-8", newline="\n")
     written.append(out / "index.html")
@@ -361,7 +412,7 @@ def check(out: Path, written: list[Path]) -> list[str]:
                 continue
             target = posixpath.normpath((base / href.split("#")[0]).as_posix())
             if target and target not in files:
-                bad.append(f"{p.name}: 链接落空 {href}")
+                bad.append(f"{p.relative_to(out).as_posix()}: 链接落空 {href}")
     return bad
 
 

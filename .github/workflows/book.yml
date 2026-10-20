@@ -15,6 +15,7 @@ on:
     branches: [main]
     paths:
       - "book/**"
+      - "contributing/**"
       - "tools/loment_book_site.py"
       - ".github/workflows/book.yml"
   workflow_dispatch:

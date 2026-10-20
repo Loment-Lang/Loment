@@ -30,16 +30,19 @@ def _build(td: Path) -> list[Path]:
 
 @test
 def test_every_chapter_has_a_page():
-    """SUMMARY 的每一条、by-example 的每个文件，都渲染出一页。"""
-    entries = loment_book_site.summary_entries() + loment_book_site.by_example_entries()
-    with tempfile.TemporaryDirectory(prefix="lomsite_") as tds:
-        out = Path(tds) / "site"
-        written = _build(Path(tds))
-        have = {p.relative_to(out).as_posix() for p in written}
-        missing = [rel[:-3] + ".html" for _, _, rel in entries
-                   if rel[:-3] + ".html" not in have]
-    assert not missing, "这些条目没有页面: " + ", ".join(missing[:8])
-    assert len(entries) == 32, f"条目数变了: {len(entries)}（SUMMARY + by-example）"
+    """两本书的每一条、by-example 的每个文件，都渲染出一页。"""
+    total = 0
+    for book in loment_book_site.BOOKS:
+        entries = loment_book_site._book_entries(book)
+        total += len(entries)
+        with tempfile.TemporaryDirectory(prefix="lomsite_") as tds:
+            out = Path(tds) / "site"
+            written = _build(Path(tds))
+            have = {p.relative_to(out).as_posix() for p in written}
+        missing = [book["slug"] + "/" + rel[:-3] + ".html" for _, _, rel in entries
+                   if book["slug"] + "/" + rel[:-3] + ".html" not in have]
+        assert not missing, f"{book['slug']}: 这些条目没有页面: " + ", ".join(missing[:8])
+    assert total == 46, f"条目数变了: {total}（两本书 + by-example）"
 
 
 @test
@@ -58,7 +61,7 @@ def test_code_fences_are_preserved_and_escaped():
     with tempfile.TemporaryDirectory(prefix="lomsite_") as tds:
         out = Path(tds) / "site"
         _build(Path(tds))
-        page = (out / "src" / "07-option-result.html").read_text(encoding="utf-8")
+        page = (out / "usage" / "src" / "07-option-result.html").read_text(encoding="utf-8")
     assert '<pre><code class="language-rust">' in page, "围栏块的语言类丢了"
     assert "Result&lt;u32, u32&gt;" in page, "尖括号没有转义"
     assert not re.search(r"Result<u32", page), "代码块里有未转义的小于号"
@@ -66,14 +69,19 @@ def test_code_fences_are_preserved_and_escaped():
 
 @test
 def test_toc_marks_the_current_chapter():
-    """每一页的目录只标自己那一条。"""
+    """目录标出当前这本书与当前这一章，各一条。"""
     with tempfile.TemporaryDirectory(prefix="lomsite_") as tds:
         out = Path(tds) / "site"
         _build(Path(tds))
-        page = (out / "src" / "07-option-result.html").read_text(encoding="utf-8")
-    assert page.count('class="current"') == 1, "目录里当前章的标记不是恰好一条"
+        page = (out / "usage" / "src" / "07-option-result.html").read_text(encoding="utf-8")
+        other = (out / "contributing" / "src" / "04-the-gate.html").read_text(encoding="utf-8")
+    assert page.count('class="current"') == 2, "当前书 + 当前章应当各有一条标记"
     assert 'class="current">Option, Result and <code>?</code></a>' in page, \
         "当前章的标题没被选中"
+    assert 'class="current">Loment Development Contribution Plan</a>' in other, \
+        "贡献书里没标出当前书"
+    assert "Using Loment" in other and "Loment Development Contribution Plan" in page, \
+        "两本书没有互相出现在目录里"
 
 
 def main() -> int:

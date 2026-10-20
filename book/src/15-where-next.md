@@ -46,3 +46,8 @@ The gate is the contract: every claim has a criterion. `python tools/ci.py --fas
 set; `CONTRIBUTING.md` explains the rest. If you change the language, the reference and the
 self-hosted implementation must change in the same commit, and the book's runnable blocks must
 still compile — the gate checks all three.
+
+The second book goes through all of it:
+[Loment Development Contribution Plan](../../contributing/src/00-introduction.md) — the
+repository layout, the gate and its ratchets, the two compilers and the seed, the bootstrap
+chain, releases, the docs numbering, the roadmap, and an architecture tour.

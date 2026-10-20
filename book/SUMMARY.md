@@ -22,7 +22,6 @@
 13. [Generics and traits](src/13-generics-and-traits.md)
 14. [Commands, extensions and FFI](src/14-commands-and-ffi.md)
 
-## Part III — Under the hood
+## Where next
 
-15. [From source to an executable](src/15-under-the-hood.md)
-16. [Where next](src/16-where-next.md)
+15. [Where next](src/15-where-next.md)

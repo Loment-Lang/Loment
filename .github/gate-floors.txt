@@ -25,7 +25,7 @@ loment_jtrans_test 4
 loment_cstrans_test 6
 loment_cpptrans_test 6
 loment_gotrans_test 7
-loment_nltrans_test 19
+loment_nltrans_test 20
 loment_lomtfrom_test 4
 loment_trans_test 8
 loment_potato_emit_test 7
@@ -77,7 +77,7 @@ loment_internet_test 11
 loment_os_test 5
 loment_thread_test 7
 loment_lumtui_test 7
-loment_lompi_test 31
+loment_lompi_test 33
 lompicheck_test 7
 loment_register_test 9
 loment_multisyntax_test 73

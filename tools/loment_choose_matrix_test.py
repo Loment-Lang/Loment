@@ -277,28 +277,29 @@ def test_hosted_and_gc_auto_compose():
 def test_lms_rescue_only_exists_when_a_collector_does():
     """`lms` 的"收一次再试"只在真有收集器时出现 —— `gc_manual` 下它是一句空话（`docs/253` §5.3）。
 
-    取值从 `CORE_DIMS["lms"]` 读、只比较两个取值的**行为差异**，不写死档名 ——
-    这样改档名（如 `lms_*` 增档或重命名）不需要动这条判据，也不会两边各改一半。
+    取值从 `CORE_DIMS["lms"]` 读、判的是**重试标记**（`@__loment_lms_retry`）出现在哪：
+    没有收集器时它一个都不该有；有收集器时**恰好一档**有（"收一次再试"的那一档）。
+    不写死档名，也不假设两档在 manual 下产物相同 —— LMS 第 1 级的界检查与回收档无关，
+    manual 下两档也会不同（`#963`）。
     """
     values = lomentc.CORE_DIMS["lms"]
     assert len(values) == 2, f"lms 期望两档，实际 {values}"
+    marker = "@__loment_lms_retry"
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
-        sizes = {}
+        retry = {}
         for gc in ("gc_manual", "gc_auto"):
             for lms in values:
                 cell = {"mode": "std", "gc": gc, "runtime": "runtime", "lms": lms}
                 rc, diag, ir, pot = _emit(td, f"{gc}-{lms}", cell, ALLOC_BODY)
                 assert rc == 0, f"{gc}+{lms}: 编不过\n{diag[-400:]}"
                 assert pot.get("lms") == lms
-                sizes[(gc, lms)] = len(ir)
-    a, b = values
-    assert sizes[("gc_manual", a)] == sizes[("gc_manual", b)], \
-        f"gc_manual 下 lms 两档产物不同（{a} vs {b}）—— 没有收集器可'拉回', 这一级不该有代码"
-    assert sizes[("gc_auto", a)] != sizes[("gc_auto", b)], \
-        f"gc_auto 下 lms 两档产物相同（{a} / {b}）—— 第 3 级入口 A 没接上"
-    print(f"      manual 下无差别; auto 下 {a}={sizes[('gc_auto', a)]} / "
-          f"{b}={sizes[('gc_auto', b)]} B")
+                retry[(gc, lms)] = marker in ir
+    assert not any(retry[("gc_manual", v)] for v in values), \
+        f"gc_manual 下出现了 {marker} —— 没有收集器可'拉回', 这一级不该有代码"
+    assert sum(retry[("gc_auto", v)] for v in values) == 1, \
+        f"gc_auto 下 {marker} 不是恰好一档：{ {v: retry[('gc_auto', v)] for v in values} }"
+    print(f"      gc_manual: 两档都没有重试；gc_auto: 恰好一档带重试")
 
 
 @test

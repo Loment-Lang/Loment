@@ -47,12 +47,19 @@ _INJECT = ("choose gc_auto_alpha", "choose runtime")
 
 
 def _inject(text: str) -> str | None:
-    """把 alpha 那两个 `choose` 插到 `module` 行之后；源里已有 `choose gc` 的回 `None`（跳过）。
+    """把 alpha 那两个 `choose` 插到 `module` 行之后；源里已表态的回 `None`（跳过）。
+
+    **也跳过声明 `no_std` 的源**（`choose mode no_std` 与简写 `choose no_std` 两种拼法）：
+    `mode=no_std` 与 `gc=gc_auto` 是冲突表里的一对（自动回收要一个运行期），注入 alpha 会让
+    这份源自检就失败 —— 量不到东西而整条判据红，红的却不是尺子坏了。这类源**本来就不在**
+    这一维的可测面上，跳过是对的。
 
     **为什么必须 `module` 行之后**：`module` 是文件的第一件事，`choose` 排在它后面（语言规定）。
     没有 `module` 行（不是一份 Loment 单元）也回 `None`。
     """
-    if "choose gc" in text:
+    if "choose gc" in text or any(
+            ln.split()[:1] == ["choose"] and "no_std" in ln.split()
+            for ln in text.split("\n")):
         return None
     out, done = [], False
     for ln in text.split("\n"):

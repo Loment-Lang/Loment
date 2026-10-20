@@ -124,7 +124,13 @@ def _foreign_grammar(text: str) -> tuple[str, str | None] | None:
 
 
 def _diagnostics(text: str, path: str) -> list[dict]:
+    # `#351`：`.nl` 是 natural 后缀（参考实现 `potato_from.EXT`）。这种文件里**没有**
+    # `choose write grammar` 那一行，所以按**后缀**认；与声明那一条走同一句话：
+    # 一条 Info、零假错。放在声明检查**之前**只对没有声明的文件生效 —— 有声明时下面
+    # 那条按声明走（声明写的是哪门就说是哪门）。
     fg = _foreign_grammar(text)
+    if fg is None and str(path).lower().endswith(".nl"):
+        fg = ("natural", None)
     if fg is not None:
         lang, derr = fg
         if derr:

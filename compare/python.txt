@@ -1,0 +1,30 @@
+71026	Python 3.5 running on Linux kernel 3.17+ can block at startup or on importing the random module on getrandom()
+45943	windows console doesn't print or input Unicode
+47020	Test issue
+56535	Linux 3: code should avoid using sys.platform == 'linux2'
+28525	gh-87135: Hang non-main threads that attempt to acquire the GIL during finalization
+49203	cgi module cannot handle POST with multipart/form-data in 3.x
+88074	array.array should remain immutable: add Py_TPFLAGS_IMMUTABLETYPE flag
+111116	[CVE-2023-27043] gh-102988: Reject malformed addresses in email.parseaddr()
+98110	Objects/object.c:2276: _PyTrash_thread_destroy_chain: Assertion `tstate->trash_delete_nesting == 1' failed.
+67705	datetime.utcfromtimestamp rounds results incorrectly
+72367	Implementation of the PEP 538: coerce C locale to C.utf-8
+42382	Add sys.platlibdir and configure --with-platlibdir to use /usr/lib64 on Fedora and SuSE
+27434	gh-63416: Speed up assertEqual on long sequences
+109534	TLS/SSL asyncio leaks memory 
+46023	Move Demo/classes/Rat.py to Lib/fractions.py and fix it up.
+46058	Get rid of more references to __cmp__
+15735	bpo-34037: Fix test_asyncio failure and add loop.shutdown_default_executor()
+103341	gh-102140: fix false negative in csv.Sniffer.has_header
+70626	ctypes.util.find_library fails when ldconfig/glibc not available (e.g., AIX)
+123134	Creating an ungodly amount of sub interpreters in a short amount of time causes memory debug assertions.
+56850	Remove -mno-cygwin from distutils
+52148	posix.getgroups() failure on Mac OS X
+68178	Callable builtin doesn't respect descriptors
+51760	msvc9compiler.py: ValueError when trying to compile with VC Express
+47550	urllib.quote and unquote - Unicode issues
+47437	os.listdir can return byte strings
+57362	IDLE 3.x on Windows exits when pasting non-BMP unicode
+53451	Parent process hanging in multiprocessing if children terminate unexpectedly
+4003	bpo-31786: Make select.poll.poll block if ms < 0 for every value of ms
+62052	Built-in module _io can lose data from buffered files in reference cycles

@@ -1,6 +1,6 @@
 # Loment Language Standard
 
-**LLS** · **0.1.4.6** · Edition 1
+**LLS** · **0.1.4.7** · Edition 1
 
 > **Status.** The language surface this document defines is **frozen**: changing it costs the
 > procedure in §6.2, and nothing else does. What is *not* frozen — the implementations, the
@@ -93,7 +93,7 @@ program*, not of a function or a file.
 | Dimension | Values | Default | What it selects |
 |---|---|---|---|
 | `mode` | `std` / `no_std` | `std` | Which layer the program may use: the host's, or the core's alone |
-| `gc` | `gc_manual` / `gc_auto` / `gc_auto_alpha` | `gc_manual` | Who reclaims memory: the program, a collector, or a hybrid |
+| `gc` | `gc_manual` / `gc_auto` / `gc_auto_alpha` / `no_gc` | `gc_manual` | Who reclaims memory: the program, a collector, a hybrid, or **no collector at all** |
 | `runtime` | `runtime` / `no_runtime` | `no_runtime` | Whether the artifact carries a runtime |
 | `port` | `sealed` / `hosted` | `sealed` | Whether the artifact has ports to the world |
 | `vm` | `vm` / `no_vm` | `no_vm` | Which execution model the program is for |
@@ -189,34 +189,12 @@ command line and mean opposite things in a standard.
 
 | Value | Dimension | What it declares |
 |---|---|---|
-| `no_gc` | `gc` | That the artifact carries **no collector**. |
+| — | — | No planned value at present. |
 
-The position behind `no_gc` is already the language's, and is already checkable: **an internal
-absence is a first-class claim.** "This artifact has no runtime, no allocator and no collector" is
-enforced by the **compiler** rather than probed at run time, and it is **printed into the
-artifact** (`docs/229` §4.2). Absence is the degenerate case of composition — a program whose
-allocations are all settled before run time ends with an L3 residue of zero, emits no collector,
-and its own summary is what says so (`docs/210` §4.5: *the normal case is that there is no
-component called GC*).
-
-So the **property exists today, as a consequence**. What is planned is the **declaration**: a `gc`
-value that states it, so that "this artifact carries no collector" is a claim the program makes and
-the build records, rather than something a reader has to derive from the numbers. That is the same
-move the language makes everywhere else — which is why the value is on this list rather than
-written off as unreachable.
-
-Two consequences follow:
-
-- A conforming implementation is **not** required to accept `no_gc` today.
-- An implementation that refuses it **must not present the refusal as the language forbidding it.**
-
-When `no_gc` is built it joins the table in §4 and takes §6.2 like any other change to the switch
-set.
-
-> **The plan has no record of its own.** There is no `docs/NNN` for `no_gc`; this clause is the only
-> place the value is written down, and a standard is the wrong place for a plan. The project
-> records plans as numbered documents. Until one exists, read this as a note rather than as a
-> decision.
+The mechanism exists because a value may be decided before it is built. The one entry this table
+carried — `no_gc` on `gc`, "the artifact carries no collector" — shipped in LLS 0.1.4.7 and now
+lives in §4; the plan behind it is `docs/269`, and the claim is checked by both linkers against
+the IR (a `no_gc` artifact that carries `@__loment_collect` is refused).
 
 ---
 

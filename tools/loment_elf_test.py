@@ -3532,6 +3532,141 @@ def test_a_gnu_ld_script_names_the_file_it_points_to():
 
 
 @test
+def test_both_linkers_check_a_no_std_claim_against_the_hosted_layer():
+    """**`no_std` 的声明要有牙**（`#941` / #539）：IR 说"只用核那一层"，链接器就核它没带宿主层。
+
+    两个方向：诚实的 `no_std` IR 两份链接器都收；一份**伪造**的（声明 `no_std`
+    却带着 `; loment-port: hosted`）两份都点名拒。与 `docs/227` 判据 B 同形。
+    """
+    clang = _clang()
+    if not (clang and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    mir = _mirror()
+    body = "define i32 @_start() {\nentry:\n  ret i32 0\n}\n"
+    honest = "; loment-mode: no_std\n" + body
+    forged = "; loment-mode: no_std\n; loment-port: hosted\n" + body
+    lomelf.compile_ll(honest, [])
+    try:
+        lomelf.compile_ll(forged, [])
+    except lomelf.Unsupported as e:
+        assert "no_std" in str(e), f"参考实现拒绝时没点名 no_std: {e}"
+    else:
+        raise AssertionError("参考实现收下了声明 no_std 却带宿主层的 IR")
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        for tag, text, want_ok in (("honest", honest, True), ("forged", forged, False)):
+            f = td / f"{tag}.ll"
+            f.write_text(text, encoding="utf-8", newline="\n")
+            rc, err = _mirror_run(mir, str(_wsl_path(f)), str(_wsl_path(td / f"{tag}.elf")))
+            if want_ok:
+                assert rc == 0, f"[{tag}] 镜像拒了诚实的 no_std IR: {err[-300:]}"
+            else:
+                assert rc != 0, "镜像收下了声明 no_std 却带宿主层的 IR"
+                assert "no_std" in err, f"[{tag}] 镜像拒绝时没点名 no_std: {err[-300:]}"
+    print("      no_std：两份链接器都收诚实的、都点名拒伪造的")
+
+
+@test
+def test_both_linkers_check_a_no_gc_claim_against_the_collector():
+    """**`no_gc` 的声明要有牙**（`#538`）：IR 说"不带收集器"，链接器就核它真的没带。
+
+    两个方向都判：诚实的 `no_gc` IR 两份链接器都收；一份**伪造**的（声明 `no_gc`
+    却定义 `@__loment_collect`）两份都点名拒。这是 `docs/227` 判据 B 的镜像 ——
+    编译器是那句话的作者，能拿一份不是自己生成的 IR 去核它的，只有链接器这一侧。
+    """
+    clang = _clang()
+    if not (clang and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    mir = _mirror()
+    honest = ("; loment-gc: no_gc\n"
+              "define i32 @_start() {\nentry:\n  ret i32 0\n}\n")
+    forged = ("; loment-gc: no_gc\n"
+              "define void @__loment_collect() {\nentry:\n  ret void\n}\n"
+              "define i32 @_start() {\nentry:\n  ret i32 0\n}\n")
+    # 参考实现：诚实的那份收，伪造的那份拒。
+    lomelf.compile_ll(honest, [])
+    try:
+        lomelf.compile_ll(forged, [])
+    except lomelf.Unsupported as e:
+        assert "no_gc" in str(e), f"参考实现拒绝时没点名 no_gc: {e}"
+    else:
+        raise AssertionError("参考实现收下了声明 no_gc 却带收集器的 IR")
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        for tag, text, want_ok in (("honest", honest, True), ("forged", forged, False)):
+            f = td / f"{tag}.ll"
+            f.write_text(text, encoding="utf-8", newline="\n")
+            rc, err = _mirror_run(mir, str(_wsl_path(f)), str(_wsl_path(td / f"{tag}.elf")))
+            if want_ok:
+                assert rc == 0, f"[{tag}] 镜像拒了诚实的 no_gc IR: {err[-300:]}"
+            else:
+                assert rc != 0, "镜像收下了声明 no_gc 却带收集器的 IR"
+                assert "no_gc" in err, f"[{tag}] 镜像拒绝时没点名 no_gc: {err[-300:]}"
+    print("      no_gc：两份链接器都收诚实的、都点名拒伪造的")
+
+
+@test
+def test_both_linkers_and_pe_agree_on_every_legal_choose_cell():
+    """**每个合法格**都走两条链接器 + PE（`#940` 的判据在链接器这一侧的落点）。
+
+    对每个合法格：同一份 IR，参考与自举镜像各链一次 —— ELF 产物**逐字节相同**并真跑
+    （退出码 7）；PE 产物也逐字节相同（不出运行，PE 不在这台机器上跑）。
+    格子与冲突对都从 `lomentc.CORE_DIMS` / `CORE_CONFLICTS` 现算，不写死 —— 加一维
+    时这张表自己长。`mode` 的 `no_std` 行由上面那条负例钉"声明有牙"。
+    """
+    clang = _clang()
+    if not (clang and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    import itertools  # noqa: PLC0415
+    import lomentc as _c  # noqa: PLC0415
+    dims = ("mode", "gc", "runtime")
+    conflicts = [set(p) for p in _c.CORE_CONFLICTS]
+    cells = []
+    for combo in itertools.product(*(_c.CORE_DIMS[d] for d in dims)):
+        if any(pair <= set(combo) for pair in conflicts):
+            continue
+        cells.append(dict(zip(dims, combo)))
+    mir = _mirror()
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        for cell in cells:
+            name = "-".join(cell[d] for d in dims)
+            src = td / f"{name}.lomt"
+            src.write_text("module cell\n" + "".join(f"choose {v}\n" for v in cell.values())
+                           + "\nfn _start() {\n    syscall4(60, 7, 0, 0);\n}\n",
+                           encoding="utf-8", newline="\n")
+            mod = lomentc.load(src)
+            deps = lomentc.resolve_deps(mod, ROOT, td, entry=src)
+            errs = lomentc.check(mod, deps=deps)
+            assert not errs, f"{name}: 编不过 {errs[:2]}"
+            ir = lomentc.emit_llvm(mod, ROOT, deps)
+            ll = td / f"{name}.ll"
+            ll.write_text(ir, encoding="utf-8", newline="\n")
+            # ELF：参考 vs 镜像，逐字节 + 真跑。
+            ref_blob, _ = lomelf.compile_ll(ir, [])
+            out = td / f"{name}.elf"
+            rc, err = _mirror_run(mir, str(_wsl_path(ll)), str(_wsl_path(out)))
+            assert rc == 0, f"{name}: 镜像链接失败: {err[-300:]}"
+            assert out.read_bytes() == ref_blob, f"{name}: ELF 产物与参考不同"
+            for tag, exe in (("ref", None), ("mir", out)):
+                if exe is None:
+                    exe = td / f"{name}_ref.elf"
+                    exe.write_bytes(ref_blob)
+                got, _o = _run_bin(exe, f"cell_{name}_{tag}", td)
+                assert got == 7, f"{name}[{tag}]: 跑出 {got}（期望 7）"
+            # PE：参考 vs 镜像，逐字节。
+            pe_ref, _ = lomelf.compile_pe(ir)
+            pe_out = td / f"{name}.exe"
+            rc2, err2 = _mirror_run(mir, str(_wsl_path(ll)), str(_wsl_path(pe_out)))
+            assert rc2 == 0, f"{name}: 镜像 PE 失败: {err2[-300:]}"
+            assert pe_out.read_bytes() == pe_ref, f"{name}: PE 产物与参考不同"
+        print(f"      {len(cells)} 个合法格: ELF 与 PE 两份链接器逐字节相同，ELF 真跑 7")
+
+
+@test
 def test_two_shared_objects_link_in_order():
     """**一次可以链两个共享对象**（`#596`）：`libz` 的 `compress` + `libc` 的 `strlen`。
 

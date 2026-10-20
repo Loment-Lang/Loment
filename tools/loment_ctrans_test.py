@@ -274,6 +274,14 @@ def _clang() -> str | None:
 
 
 def _wsl() -> bool:
+    """能不能跑 Linux ELF：**Linux 上原生跑**，Windows 上经 WSL（`#371` / `#382`）。
+
+    原先只问 `shutil.which("wsl")` —— Linux runner 上没有那个二进制，于是这一族判据
+    在 CI 上**一条都不跑**，只留下一条"跳过而没登记"的预算红。Linux 上两条腿本来就
+    在（clang 在镜像里，ELF 直接执行），所以那里直接回 `True`。
+    """
+    if sys.platform.startswith("linux"):
+        return True
     if not shutil.which("wsl"):
         return False
     try:
@@ -405,6 +413,107 @@ _ISSUE_REPROS = [
     ("133-long", "int main(void) { int x = 1; long y = 2147483647;"
                  " return (x + y > 0); }\n", 1),
 ]
+
+
+#: `#356` 的差分判据用的两只入口：**同一个 C 函数**，两边各写一个"打印一个字节 +
+#: 退出码"的入口，于是 stdout 字节与退出码都能逐字节比。字节 = 32 + (v & 63)，
+#: 避开 `_run` 那条"stdout 就是退出码"的解析。
+_C_ENTRY_IO = """
+static void _loment_exit(long code) {
+    __asm__ volatile("syscall" : : "a"(60L), "D"(code) : "rcx", "r11", "memory");
+}
+static void _loment_put(long v) {
+    char b = (char)(32 + (v & 63));
+    __asm__ volatile("syscall" : : "a"(1L), "D"(1L), "S"(&b), "d"(1L)
+                     : "rcx", "r11", "memory");
+}
+void _start(void) {
+    long v = main();
+    _loment_put(v);
+    _loment_exit(v & 255);
+}
+"""
+
+_L_ENTRY_IO = """
+fn _start() {
+    let v: i32 = main();
+    let buf: ptr = alloc(1);
+    store8(buf, 0, (32 + ((v as u32) % 64)) as u8);
+    syscall4(1, 1, buf as u64, 1);
+    syscall4(60, ((v as u32) % 256) as u64, 0, 0);
+}
+"""
+
+
+def _build_c_io(td: Path, src: str) -> Path:
+    (td / "c_io.c").write_text(src + _C_ENTRY_IO, encoding="utf-8", newline="\n")
+    exe = td / "c_io.bin"
+    r = subprocess.run(
+        [_clang(), "--target=x86_64-unknown-linux-gnu", "-O1",
+         "-ffreestanding", "-nostdlib", "-fno-stack-protector",
+         "-o", str(exe), str(td / "c_io.c")],
+        capture_output=True, text=True, shell=False)
+    assert r.returncode == 0, f"C 编译失败: {r.stderr[-400:]}"
+    return exe
+
+
+def _build_loment_io(td: Path, doc: dict) -> Path:
+    text, _skipped = lomt_from.emit_lomt(doc, impl=True)
+    # 译文自己可能已经写了 `choose runtime`（用到分配时前端会加）；没有就补一行 ——
+    # 入口那只 `alloc(1)` 需要它，而**同一维写两次**会被拒（这一步正是判据的一部分）。
+    if "choose runtime" not in text:
+        head, sep, rest = text.partition("\n")
+        text = head + "\n\nchoose runtime\n" + (sep + rest if sep else "")
+    p = td / "l_io.lomt"
+    p.write_text(text + _L_ENTRY_IO, encoding="utf-8", newline="\n")
+    mod = lomentc.load(p)
+    deps = lomentc.resolve_deps(mod, ROOT, p.parent, entry=p)
+    errs = lomentc.check(mod, deps=deps)
+    assert not errs, f"译文检查不过: {errs[:3]}"
+    blob, _info = lomelf.compile_ll(lomentc.emit_llvm(mod, ROOT, deps), [])
+    exe = td / "l_io.bin"
+    exe.write_bytes(blob)
+    return exe
+
+
+def _run_io(exe: Path) -> tuple[int, bytes]:
+    """跑一次，返回 (退出码, stdout 字节)。stdout 是**原始字节** —— 判据比的正是它。"""
+    r = subprocess.run(
+        [*_WSLCMD, "bash", "-lc",
+         f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}; echo -n \";$?\""],
+        capture_output=True, timeout=300, shell=False)
+    out = r.stdout
+    payload, _, rc = out.rpartition(b";")
+    return int(rc.strip() or -1), payload
+
+
+@test
+def test_c_differential_harness_compares_stdout_and_exit_code():
+    """**同一份 `.c`：`cc` 与翻译器各跑一遍，stdout 字节 + 退出码都要逐字节相同**（`#356`）。
+
+    这是 C 面缺的那条判据：原先逐条 repro 只比**退出码**（`_run`），所以"数算对了、
+    但写出去的字节不对"这一类看不见。这里给两边各配一只 **打印一个字节**的入口
+    （`_C_ENTRY_IO` / `_L_ENTRY_IO`），于是同一条缺陷形状在两条链上都必须给出同一串
+    字节 —— 包括 `#120` 块作用域、`#123` 混用有无符号、`#125` 整数转换、`#131` 负字面量
+    比较、`#133` int/long 的求值次序。
+
+    没有 clang/WSL 时跳过（CI 的 Linux runner 上两条腿都在）。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 需要 clang + WSL")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        for label, src, want in _ISSUE_REPROS:
+            td = Path(t) / label.replace("-", "_")
+            td.mkdir()
+            doc, rep = potato_from.from_c(src, label + ".c", "strict")
+            assert not rep.skipped, (label, rep.skipped[:3])
+            c_rc, c_out = _run_io(_build_c_io(td, src))
+            l_rc, l_out = _run_io(_build_loment_io(td, doc))
+            assert (l_rc, l_out) == (c_rc, c_out), (
+                f"{label}: cc=({c_rc}, {c_out!r}) 译文=({l_rc}, {l_out!r}) —— "
+                f"stdout 或退出码不同（记录值是 {want}）")
+            print(f"      {label}: stdout={c_out!r} rc={c_rc}（两条链逐字节相同）")
 
 
 @test

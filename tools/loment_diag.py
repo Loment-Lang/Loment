@@ -207,7 +207,7 @@ RULES = [
              r"`addin` 嵌套超过|`addin` 拉进来的单元里只能写 choose 相关代码|"
              r"依赖嵌套超过",
      "`choose` / `addin` 用法不对",
-     "**核心模式**（`std`/`no_std`、`gc_manual`/`gc_auto`/`gc_auto_alpha`、"
+     "**核心模式**（`std`/`no_std`、`gc_manual`/`gc_auto`/`gc_auto_alpha`/`no_gc`、"
      "`runtime`/`no_runtime`、`sealed`/`hosted`、`vm`/`no_vm`）声明的是**整个程序**的取值，"
      "所以**每一维**只能出现一次、只能在**根单元**，而且有些档**不能同时选**"
      "（`no_std` + `gc_auto` 要往核里塞收集器；`no_runtime` + `gc_auto` 是定义上矛盾"
@@ -811,7 +811,7 @@ CARDS: dict[int, Card] = {
     22: Card(
         what="`choose` / `addin` 的写法不对 —— 可能是**核心模式**的某一维，也可能是**开关**。",
         why="这是**两个不同的东西**被放在一起管：① **核心模式**是**整个程序**的属性，而且它有**五维** —— "
-            "`mode`（`std` / `no_std`：能用哪一层）、`gc`（`gc_manual` / `gc_auto` / `gc_auto_alpha`：回收由谁做）、"
+            "`mode`（`std` / `no_std`：能用哪一层）、`gc`（`gc_manual` / `gc_auto` / `gc_auto_alpha` / `no_gc`：回收由谁做）、"
             "`runtime`（`runtime` / `no_runtime`：产物里有没有运行期）、`port`（`sealed` / `hosted`：通不通着世界）、"
             "`vm`（`vm` / `no_vm`：要哪种执行模型）。**每一维各自只能声明一次**，而且只能在根单元"
             "（`loment.conf` 之外没有第二个地方能改它）；两维取值互相矛盾（`gc_auto` 与 `no_runtime`）也在这里报。"
@@ -1505,7 +1505,7 @@ CARDS_EN: dict[int, Card] = {
              "a **switch**.",
         why="Two different things are managed here: (1) **the core mode** is a property of **the "
             "whole program**, and it has **five dimensions** - `mode` (`std` / `no_std`: which "
-            "layer is available), `gc` (`gc_manual` / `gc_auto` / `gc_auto_alpha`: who reclaims), "
+            "layer is available), `gc` (`gc_manual` / `gc_auto` / `gc_auto_alpha` / `no_gc`: who reclaims), "
             "`runtime` (`runtime` / `no_runtime`: whether the artifact carries one), `port` "
             "(`sealed` / `hosted`: whether it reaches outside itself), and `vm` (`vm` / `no_vm`: "
             "which execution model). **Each dimension may be declared once**, and only in the "

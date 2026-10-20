@@ -8487,6 +8487,11 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
     if contains_ident(src, toks, "hosted") == 1 {
         emit_str(s, out, "; loment-port: hosted\n");
     }
+    // `choose no_std`（`#941` / #539）：产物**自己声明**"只用核那一层"。与上面那行
+    // 同一条认法；链接器核它没把宿主层拉进来（`; loment-port: hosted`）。
+    if contains_ident(src, toks, "no_std") == 1 {
+        emit_str(s, out, "; loment-mode: no_std\n");
+    }
     emit_str(s, out, "\n");
     if load32(s, 512) == 1 {
         emit_runtime(s, out);

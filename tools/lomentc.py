@@ -9144,6 +9144,11 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     _hosted_port = mod.chooses.get("port", CORE_DEFAULTS["port"]) == "hosted"
     if _hosted_port:
         out.append("; loment-port: hosted")
+    # `choose no_std`（`#941` / #539）：产物**自己声明**"只用核那一层"。与 `no_gc`
+    # 同一条纪律（`docs/227` 判据 B 的形状）：链接器核它真的没把宿主层拉进来。
+    # 只有 `no_std` 才多发这一行 —— 默认 `std` 的 IR 一个字节都不变。
+    if mod.chooses.get("mode", CORE_DEFAULTS["mode"]) == "no_std":
+        out.append("; loment-mode: no_std")
     out.append("")
     globals_: list[str] = []
     body: list[str] = []

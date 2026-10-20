@@ -579,6 +579,18 @@ fn word_end(t: ptr, i: u32, n: u32) -> u32 {
     return j;
 }
 
+/// 文本里有没有 `lit`（逐字节找）。认 IR 自己声明的标记 —— `; loment-mode: no_std` 之类。
+fn mem_has(t: ptr, n: u32, lit: str) -> u32 {
+    let ll: u32 = str_len(lit);
+    if ll == 0 || n < ll { return 0; }
+    let i: u32 = 0;
+    while i + ll <= n {
+        if lit_at(t, i, i + ll, lit) == 1 { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
 fn lit_at(t: ptr, i: u32, n: u32, lit: str) -> u32 {
     let L: u32 = str_len(lit);
     if i + L > n {
@@ -6786,6 +6798,13 @@ fn run(mem: ptr) -> u32 {
     if nobj != 0 && nshared == 0 {
         setcell(tab, C_EXTN, put_name(inb, tlsn, "__loment_tls"));
         tls = 1;
+    }
+    // **`no_std` 的带牙检查**（`#941` / #539）：IR 声明"只用核那一层"，就不能带宿主层。
+    if mem_has(inb, n as u32, "; loment-mode: no_std") == 1
+        && mem_has(inb, n as u32, "; loment-port: hosted") == 1 {
+        wstr(2, "loment: this IR declares `no_std` (the core layer alone) but carries the hosted layer (`; loment-port: hosted`) -- the two cannot both hold
+");
+        return die(1);
     }
     let tlen0: u32 = emit_all(tab, txt, 0, inb, n as u32, tlsn, tls);
     // **收编面**（`docs/219` §6）：链里带了**任何外部输入**（`.o` 或 `.so`），就把

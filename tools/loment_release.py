@@ -173,6 +173,9 @@ GLOBS = [
     "tools/loment_dap.py", "tools/loment_dap_test.py",
     "tools/mono_trace.py",
     "tools/loment_ir_diff.py", "tools/loment_rule_parity.py",
+    # `lms` 这一维与七级的判据（`docs/253` §9 / `docs/269`）。
+    # **两处清单插入同一位置** —— 次序就是发布清单的次序。
+    "tools/loment_lms_test.py",
     # 渠道常量（`docs/231` §2.2）：参考实现侧那份恒为 dev；**自举侧那一份在
     # `loment/selfhost/checker.lomt` 里**（一个常量一行），打包期由 `loment_dist.py` 换掉。
     # **两处清单插入同一位置** —— 次序就是发布清单的次序。
@@ -189,6 +192,7 @@ GLOBS = [
     "tools/lvm_cache.py", "tools/lvm_cache_test.py",
     "tools/lvm_fusion_test.py", "tools/lvm_mirror_t2_test.py",
     "tools/loment_store_twin_test.py",
+    "tools/loment_spec_oracle_test.py",
     "tools/lvm_t3.py", "tools/lvm_t3_test.py",
     "tools/lvm_stability_test.py",
     "tools/lvm_perf_test.py",
@@ -264,6 +268,9 @@ GLOBS = [
     # 无 Python 自举 (docs/159): 启动脚本 + 种子 (参考实现发射的驱动 IR) + Loment 版格式化器
     "loment/bootstrap.sh", "scripts/lomc.ps1", "scripts/install-lsp.ps1",
     "loment/build/selfhost_driver.ll", "loment/build/genesis/*", "loment/tools/*.lomt",
+    # **LMS 第 6 级**（`docs/253` §5.5 / `docs/269` §4）：用 C 写的重启器。
+    # 它随包发 —— 信任地板的实物必须在产物里，不能只在仓库里。
+    "restarter/loment-restart.c",
     "editors/loment.ico",
     "editors/vscode/package.json", "editors/vscode/language-configuration.json",
     "editors/vscode/language-configuration-python.json",

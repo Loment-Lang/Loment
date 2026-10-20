@@ -1501,11 +1501,14 @@ def test_gc_alpha_adaptive_bounds_a_large_live_set():
     （`chew` 里 `p` 是 L3：`let q: ptr = p` 外逃，出了 `chew` 就没人指得到）。总量
     400×136 ≈ 53 KB 请求过 64 KiB arena。
 
-    ⚠ **2026-10-19 改判**：原先的负控是"`gc_auto` 必须耗尽（rc=132）"。**LMS 第 3 级入口 A**
-    （`docs/253` §5.3，"`alloc` 分配不出时先收一次再试"）落地之后，`gc_auto` 在同一个
-    arena 上也会靠那次**救援收集**活下来 —— 固定触发的上限不再是"活集 ≳ 32 KB 必死"。
-    所以这一条现在钉的是**两档的触发机制不同**（活集自适应阈值 / 空间触发 vs 固定 32 KiB），
-    以及两只都跑完；不再拿"谁会耗尽"当判据（那是旧实现的巧合，不是这一维的承诺）。
+    ⚠ **2026-10-20 定稿**：两只都 `choose close lms_guard` —— LMS 第 3 级入口 A
+    （`docs/253` §5.3，"`alloc` 分配不出时先收一次再试"）会用一次救援收集把 `gc_auto`
+    也救活，那这条判据量到的就是保障器而不是触发策略。关掉它之后两档才可比：
+
+      * `gc_auto` → **耗尽**（rc=132）：固定 32 KiB 触发够不到，arena 先满；
+      * `gc_auto_alpha` → **跑完**（rc=7）：空间触发在快满时收掉垃圾。
+
+    另一条独立证据在产物的文本里：只有 alpha 那份带 `@__loment_thresh`。
     """
     if not (_clang() and _wsl()):
         print("      SKIP: 无 clang/WSL")
@@ -1550,15 +1553,16 @@ def test_gc_alpha_adaptive_bounds_a_large_live_set():
     assert got["alpha"] == 7, (
         f"`gc_auto_alpha` 那一只没跑完：退出码 {got['alpha']}（期望 7）。自适应收集器"
         "要么没生效，要么空间触发 / 活集量法 / 阈值任一处坏了")
-    assert got["auto"] == 7, (
-        f"`gc_auto` 那一只没跑完：退出码 {got['auto']}（期望 7）—— LMS 第 3 级入口 A"
+    assert got["auto"] == 132, (
+        f"`gc_auto` 那一只没耗尽：退出码 {got['auto']}（期望 132）—— 第 3 级保障器已被"
+        "`choose close lms_guard` 关掉，固定 32 KiB 触发就应当先撞上 64 KiB 的 arena"
         "（`docs/253` §5.3）的救援收集也没把它拉回来")
     assert "@__loment_thresh" in irs["alpha"], (
         "alpha 的产物里没有自适应阈值 `@__loment_thresh` —— 自适应触发没有编进去")
     assert "@__loment_thresh" not in irs["auto"], (
         "gc_auto 的产物里出现了 `@__loment_thresh` —— 两档的触发策略混了")
     print(f"      gc_auto rc={got['auto']} / gc_auto_alpha rc={got['alpha']}（活集 44 KB）："
-          "两只都跑完；alpha 带自适应阈值，auto 不带")
+          "固定触发耗尽、自适应跑完；alpha 独有 `@__loment_thresh`")
 
 
 @test

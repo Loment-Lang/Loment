@@ -353,6 +353,68 @@ pub fn apply_switches(unit: ptr, toks: ptr, nt: u32, sw: ptr) -> u32 {
     return o;
 }
 
+/// `lspe pass "reason" { 体 }` 在 **token 层拆平**（`docs/262` §5.16 / `#786`）。
+///
+/// 参考实现在**解析**里做同一件事：头与括号只是旁路标记，块体就是**当前位置的语句**
+/// （`parse_stmt` 返回 `parse_block()`，再被摊进外层块）。自举侧没有 AST，于是在词法流上
+/// 做同一个变换 —— 与 `apply_switches` 同一手法（**只删不插**，所以原地压也安全）。
+///
+/// **理由为空的块不拆**：头留着，`checker` 的 E038 那一扫才看得见它（参考实现也是
+/// 解析期报 E038 并中止；自举侧那个扫在 `check_arena` 里，同一口径）。所以这里只认
+/// `lspe` + `pass` + **非空字符串** + `{`。
+///
+/// `[a, b)` 是本次扫描的范围；递归进去的是块体，因此嵌套的旁路块也照样拆平。
+/// `out` 可以与 `toks` 同一块（目的下标永远 ≤ 源下标，向前搬不会踩到未读的 token）。
+pub fn desugar_lspe_pass(unit: ptr, toks: ptr, a: u32, b: u32, out: ptr, o: u32) -> u32 {
+    let j: u32 = a;
+    while j < b {
+        let hit: u32 = 0;
+        if j + 3 < b {
+            if load32(toks, j * 20) == 0 && sw_tok_is(unit, toks, j, "lspe")
+                    && load32(toks, (j + 1) * 20) == 0
+                    && sw_tok_is(unit, toks, j + 1, "pass")
+                    && load32(toks, (j + 2) * 20) == 2
+                    && load32(toks, (j + 3) * 20) == 3
+                    && (load8(unit, load32(toks, (j + 3) * 20 + 4)) as u32) == 123 {
+                let st: u32 = load32(toks, (j + 2) * 20 + 4);
+                let ln: u32 = load32(toks, (j + 2) * 20 + 8);
+                let nonblank: u32 = 0;
+                let k: u32 = 1;
+                while k + 1 < ln {
+                    let ch: u32 = load8(unit, st + k) as u32;
+                    if ch != 32 && ch != 9 {
+                        nonblank = 1;
+                    }
+                    k = k + 1;
+                }
+                if nonblank == 1 {
+                    // 括号不配对时不拆：原样留给语法前置趟（拆了会把 `{` 吞掉，
+                    // 报出来的位置与源对不上）。
+                    let e0: u32 = block_end(unit, toks, j + 3, b);
+                    if e0 < b && load32(toks, e0 * 20) == 3
+                            && (load8(unit, load32(toks, e0 * 20 + 4)) as u32) == 125 {
+                        hit = 1;
+                    }
+                }
+            }
+        }
+        if hit == 1 {
+            let e: u32 = block_end(unit, toks, j + 3, b);
+            o = desugar_lspe_pass(unit, toks, j + 4, e, out, o);
+            j = e + 1;
+        } else {
+            let q: u32 = 0;
+            while q < 5 {
+                store32(out, o * 20 + q * 4, load32(toks, j * 20 + q * 4));
+                q = q + 1;
+            }
+            o = o + 1;
+            j = j + 1;
+        }
+    }
+    return o;
+}
+
 /// 开关的**规则**（`docs/182` §1.8）。返回**条数**（不是字节偏移 —— 调用方拿它加到
 /// "共几条"上; 返回字节偏移会让那边按 8 倍去读未初始化的缓冲, 实测症状是**段错误**）。
 pub fn switch_rules(unit: ptr, toks: ptr, sw: ptr, errs: ptr, o: u32) -> u32 {

@@ -64,16 +64,75 @@ def test_differential_never_discharges():
 @test
 def test_census_is_content_addressed_and_lexical():
     src = ("module m\n\nfn f(a: [u32; 4]) -> u32 {\n    return a[0];\n}\n")
-    sites, unsourced = lspe.census(lomc.lex(src), "m")
+    sites, unsourced, passes = lspe.census(lomc.lex(src), "m")
     idx = [s for s in sites if s["kind"] == "index"]
     assert len(idx) == 1 and idx[0]["evidence"] == "Syntactic", sites
     assert unsourced == []
+    assert passes == []
 
     src2 = src.replace("a[0]", "a[0] + a[1]")
-    sites2, _ = lspe.census(lomc.lex(src2), "m")
+    sites2, _, _ = lspe.census(lomc.lex(src2), "m")
     ids1 = {s["id"] for s in idx}
     ids2 = {s["id"] for s in sites2 if s["kind"] == "index"}
     assert ids1 < ids2, (ids1, ids2)
+
+
+@test
+def test_pass_block_covers_its_sites_and_shows_up_in_the_ledger():
+    """`lspe pass "reason" { … }`（`docs/262` §5.16 / `#786`）。
+
+    块里的站点**仍进 `sites`**，但不证明；块自己的站点数、`pass_ratio` 与
+    `floors.pass` 要一起动 —— 旁路只让"被旁路掉多少"这个公开的数变难看，
+    不让覆盖率变好看。
+    """
+    src = ("module m\n\nfn f(a: [u32; 4]) -> u32 {\n"
+           "    lspe pass \"manual bound check\" {\n"
+           "        let p: u32 = a[1];\n"
+           "    }\n"
+           "    return a[0] + p;\n}\n")
+    toks = lomc.lex(src)
+    sites, _, passes = lspe.census(toks, "m")
+    assert len(passes) == 1 and passes[0]["reason"] == "manual bound check", passes
+    covered = [s for s in sites if s.get("covered_by")]
+    assert len(covered) == 1, sites
+    doc = lspe.build_ledger(sites=sites, state="lspe_open_admin", set_by="default",
+                            level=3, toks=toks, unit="m", passes=passes)
+    assert doc["sites"] == 2 and doc["proved"] == 1, doc
+    assert doc["passes"][0]["sites"] == 1, doc["passes"]
+    assert doc["pass_sites"] == 1 and doc["passed_sites"] == 1
+    assert doc["pass_ratio"] == "1/2"
+    assert doc["floors"] == 1 and doc["floor_detail"]["pass"] == 1
+    assert doc["per_kind"]["InBounds"] == "1/2"
+
+
+@test
+def test_callee_with_a_pass_block_is_an_unchecked_summary():
+    """旁路**不跨调用传播**（`#786` 第 3 条 / `docs/262` §5.16）。
+
+    同一条 deref-only 被调：不带旁路 ⇒ 调用点 `Interproc`；带旁路 ⇒ 摘要 `Unchecked`，
+    调用点保持 UNDECIDED。两条一起钉，防止"把带旁路的函数从安全表里摘掉"变成
+    "谁都不再安全"。
+    """
+    body = ("module m\n\nfn {name}(p: ptr) -> u32 {{\n"
+            "{inner}"
+            "}}\n\nfn f(q: ptr) -> u32 {{\n    return {name}(q);\n}}\n")
+    plain = body.format(name="deref", inner="    return load8(p, 0);\n")
+
+    def summary(doc):
+        return doc["per_kind"].get("SummaryContract")
+
+    def ledger(src):
+        toks = lomc.lex(src)
+        sites, _, passes = lspe.census(toks, "m")
+        return lspe.build_ledger(sites=sites, state="lspe_open_admin", set_by="default",
+                                 level=3, toks=toks, unit="m", passes=passes)
+
+    assert summary(ledger(plain)) == "1/1", ledger(plain)["per_kind"]
+    bypassed = body.format(
+        name="deref",
+        inner='    lspe pass "caller checked" {\n        return load8(p, 0);\n    }\n')
+    got = ledger(bypassed)
+    assert summary(got) == "0/1", got["per_kind"]
 
 
 @test

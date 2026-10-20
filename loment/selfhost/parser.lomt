@@ -547,6 +547,14 @@ fn parse_stmts(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
 }
 
 fn parse_stmt(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
+    // `lspe pass "reason" { … }`：**纯审计标注**。块里的语句照常检查、照常发射，
+    // 所以解析时直接把内层语句接进外层（语言没有块作用域）。理由的 E038 在
+    // checker 的 token 扫描里判 —— 这里负责把块拆平。
+    if tok_is(src, t, i, "lspe") && tok_is(src, t, i + 1, "pass")
+            && tok_kind(t, i + 2) == 2 && tok_is(src, t, i + 3, "{") {
+        let rp: u64 = parse_stmts(src, t, i + 4, out, o);
+        return pack(unpk_i(rp) + 1, unpk_o(rp));
+    }
     if tok_is(src, t, i, "let") {
         o = puts(out, o, "(let ");
         i = i + 1;

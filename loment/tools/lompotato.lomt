@@ -332,6 +332,20 @@ fn is_lspe_key(kp: ptr, kl: u32) -> u32 {
     if eq_lit(kp, kl, "per_kind") == 1 { return 1; }
     if eq_lit(kp, kl, "invariants") == 1 { return 1; }
     if eq_lit(kp, kl, "acked") == 1 { return 1; }
+    if eq_lit(kp, kl, "passes") == 1 { return 1; }
+    if eq_lit(kp, kl, "pass_sites") == 1 { return 1; }
+    if eq_lit(kp, kl, "passed_sites") == 1 { return 1; }
+    if eq_lit(kp, kl, "pass_ratio") == 1 { return 1; }
+    return 0;
+}
+
+/// `passes` 元素的键（`docs/262` §5.16）—— **恰好**这五个，与 `tools/potato.py` 同表。
+fn is_pass_key(kp: ptr, kl: u32) -> u32 {
+    if eq_lit(kp, kl, "id") == 1 { return 1; }
+    if eq_lit(kp, kl, "line") == 1 { return 1; }
+    if eq_lit(kp, kl, "end_line") == 1 { return 1; }
+    if eq_lit(kp, kl, "reason") == 1 { return 1; }
+    if eq_lit(kp, kl, "sites") == 1 { return 1; }
     return 0;
 }
 
@@ -353,6 +367,7 @@ fn is_floor_key(kp: ptr, kl: u32) -> u32 {
     if eq_lit(kp, kl, "stale_wf") == 1 { return 1; }
     if eq_lit(kp, kl, "budget") == 1 { return 1; }
     if eq_lit(kp, kl, "drop_honest") == 1 { return 1; }
+    if eq_lit(kp, kl, "pass") == 1 { return 1; }
     return 0;
 }
 
@@ -428,6 +443,56 @@ fn jstr_len(mem: ptr, n: u32) -> u32 {
         return NOTFOUND;
     }
     return jstr(mem, n, ptr_add(mem, M_SB2), 8192);
+}
+
+/// `"覆盖/总数"` 吗：两边都是**ASCII** 十进制数字，中间恰好一个 `/`。
+/// 与 `tools/potato.py` 的 `re.fullmatch(r"[0-9]+/[0-9]+", ...)` 同一条
+/// （两边的判决要一样，见 `potato_test` 的孪生那一格）。
+fn jratio_ok(mem: ptr, n: u32) -> u32 {
+    if n == NOTFOUND || jkind(mem, n) != 3 {
+        return 0;
+    }
+    let ln: u32 = jstr(mem, n, ptr_add(mem, M_SB2), 8192);
+    if ln < 3 {
+        return 0;
+    }
+    let p: ptr = ptr_add(mem, M_SB2);
+    let sl: u32 = 0;
+    let k: u32 = 0;
+    while k < ln {
+        let c: u32 = load8(p, k) as u32;
+        if c == 47 {
+            sl = sl + 1;
+        } else if c < 48 || c > 57 {
+            return 0;
+        }
+        k = k + 1;
+    }
+    if sl != 1 {
+        return 0;
+    }
+    if (load8(p, 0) as u32) == 47 || (load8(p, ln - 1) as u32) == 47 {
+        return 0;
+    }
+    return 1;
+}
+
+/// 字符串结点的**解码后正文只有空白**吗（含空串）。与 Python 的 `not .strip()` 同义。
+fn jstr_blank(mem: ptr, n: u32) -> u32 {
+    if n == NOTFOUND || jkind(mem, n) != 3 {
+        return 1;
+    }
+    let ln: u32 = jstr(mem, n, ptr_add(mem, M_SB2), 8192);
+    let p: ptr = ptr_add(mem, M_SB2);
+    let k: u32 = 0;
+    while k < ln {
+        let c: u32 = load8(p, k) as u32;
+        if c != 32 && c != 9 && c != 10 && c != 11 && c != 12 && c != 13 {
+            return 0;
+        }
+        k = k + 1;
+    }
+    return 1;
 }
 
 // ---------------------------------------------------------------- 类型表达式
@@ -1714,6 +1779,50 @@ fn chk_v1(mem: ptr, doc: u32, ver: u32) -> u32 {
             if jkey_nonneg(mem, lp, "refused") == 0 { let _e6: u32 = bad(mem); }
             if jkey_nonneg(mem, lp, "floors") == 0 { let _e7: u32 = bad(mem); }
             if jkey_nonneg(mem, lp, "acked") == 0 { let _e8: u32 = bad(mem); }
+            if jkey_nonneg(mem, lp, "pass_sites") == 0 { let _e9: u32 = bad(mem); }
+            if jkey_nonneg(mem, lp, "passed_sites") == 0 { let _e10: u32 = bad(mem); }
+            // `lspe pass` 的收据（`docs/262` §5.16 / `#786`）：`pass_ratio` 是
+            // `"覆盖/总数"`，`passes` 的元素必须**恰好**是
+            // id / line / end_line / reason / sites —— 与参考实现 `tools/potato.py`
+            // 逐条同形（孪生判据比的是判决，不是报错文案）。
+            let prx: u32 = jget(mem, lp, "pass_ratio");
+            if jratio_ok(mem, prx) == 0 {
+                let _e11: u32 = bad(mem);
+            }
+            let psx: u32 = jget(mem, lp, "passes");
+            if psx == NOTFOUND || jkind(mem, psx) != 2 {
+                let _e12: u32 = bad(mem);
+            } else {
+                let pe: u32 = jfirst(mem, psx);
+                while pe != NOTFOUND {
+                    let pn: u32 = 0;
+                    let pm: u32 = jfirst(mem, pe);
+                    while pm != NOTFOUND {
+                        let pkn: u32 = jmkey(mem, pm);
+                        let pkl: u32 = jstr(mem, pkn, ptr_add(mem, M_SB2), 4096);
+                        if is_pass_key(ptr_add(mem, M_SB2), pkl) == 0 {
+                            let _pk: u32 = bad(mem);
+                        }
+                        pn = pn + 1;
+                        pm = jsib(mem, pm);
+                    }
+                    if pn != 5 {
+                        let _pn2: u32 = bad(mem);
+                    }
+                    let pid: u32 = jget(mem, pe, "id");
+                    if pid == NOTFOUND || jstr_len(mem, pid) == 0 {
+                        let _pi: u32 = bad(mem);
+                    }
+                    let prs: u32 = jget(mem, pe, "reason");
+                    if prs == NOTFOUND || jstr_blank(mem, prs) != 0 {
+                        let _pr: u32 = bad(mem);
+                    }
+                    if jkey_nonneg(mem, pe, "line") == 0 { let _pl: u32 = bad(mem); }
+                    if jkey_nonneg(mem, pe, "end_line") == 0 { let _ple: u32 = bad(mem); }
+                    if jkey_nonneg(mem, pe, "sites") == 0 { let _ps2: u32 = bad(mem); }
+                    pe = jsib(mem, pe);
+                }
+            }
             let fd: u32 = jget(mem, lp, "floor_detail");
             if fd == NOTFOUND || jkind(mem, fd) != 1 {
                 let _f: u32 = bad(mem);
@@ -1731,18 +1840,21 @@ fn chk_v1(mem: ptr, doc: u32, ver: u32) -> u32 {
                 let fb: u32 = jkey_nonneg(mem, fd, "stale_wf");
                 let fc: u32 = jkey_nonneg(mem, fd, "budget");
                 let fdd: u32 = jkey_nonneg(mem, fd, "drop_honest");
+                let fdp: u32 = jkey_nonneg(mem, fd, "pass");
                 if fa == 0 { let _g1: u32 = bad(mem); }
                 if fb == 0 { let _g2: u32 = bad(mem); }
                 if fc == 0 { let _g3: u32 = bad(mem); }
                 if fdd == 0 { let _g4: u32 = bad(mem); }
-                if fa == 1 && fb == 1 && fc == 1 && fdd == 1 {
+                if fdp == 0 { let _g5: u32 = bad(mem); }
+                if fa == 1 && fb == 1 && fc == 1 && fdd == 1 && fdp == 1 {
                     let fl: u32 = jget(mem, lp, "floors");
                     if fl != NOTFOUND && jkind(mem, fl) == 4 {
                         let s1: i64 = jint_signed(mem, jget(mem, fd, "assumed"));
                         let s2: i64 = jint_signed(mem, jget(mem, fd, "stale_wf"));
                         let s3: i64 = jint_signed(mem, jget(mem, fd, "budget"));
                         let s4: i64 = jint_signed(mem, jget(mem, fd, "drop_honest"));
-                        let sum: i64 = s1 + s2 + s3 + s4;
+                        let s5: i64 = jint_signed(mem, jget(mem, fd, "pass"));
+                        let sum: i64 = s1 + s2 + s3 + s4 + s5;
                         if jint_signed(mem, fl) != sum {
                             let _h: u32 = bad(mem);
                         }

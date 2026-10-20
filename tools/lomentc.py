@@ -2338,13 +2338,21 @@ class Parser:
                            f"用穿了（自举那一边直接段错误，不是诊断）。把中间那几层提成"
                            f"函数，或把这段拆开")
 
+    def _append_stmt(self, out: list, s) -> None:
+        # `lspe pass "r" { … }` 是**纯审计标注**：块内的语句照常检查、照常发射，
+        # 所以解析时直接并把它们接进外层语句表（语言没有块作用域）。
+        if isinstance(s, list):
+            out.extend(s)
+        else:
+            out.append(s)
+
     def parse_block(self) -> list:
         self.deeper()
         try:
             self.expect("punct", "{")
             out = []
             while not self.at("punct", "}"):
-                out.append(self.parse_stmt())
+                self._append_stmt(out, self.parse_stmt())
             self.expect("punct", "}")
             return out
         finally:
@@ -2352,6 +2360,15 @@ class Parser:
 
     def parse_stmt(self):
         t = self.peek()
+        if t.val == "lspe" and self.peek(1).kind == "ident" and self.peek(1).val == "pass":
+            self.next()
+            self.next()
+            reason = self.peek()
+            if reason.kind != "string" or not reason.val.strip():
+                raise LomError(reason.line, reason.col,
+                               "`lspe pass` 必须写明理由（E038）")
+            self.next()
+            return self.parse_block()
         if t.val == "guard":  # P4: 能力域守卫
             self.next()
             cap = self.ident("能力名")
@@ -2408,7 +2425,8 @@ class Parser:
                     # **不给跨度**：`else if` 是一条**语句**（`otherwise = [If(...)]`），
                     # 它自己那两支的跨度由它自己的解析填 —— 在这里再包一层，自举侧那一份
                     # 就对不上（它走的是 `stmt()` 递归，没有对应的一层）⇒ 逐字节判据会红。
-                    otherwise = [self.parse_stmt()]
+                    otherwise = []
+                    self._append_stmt(otherwise, self.parse_stmt())
                 else:
                     else_at = self.i + 1
                     otherwise = self.parse_block()
@@ -5876,6 +5894,7 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
             toks=getattr(mod, "toks", []),
             unit=mod.name,
             deps=[getattr(d, "toks", []) for d in (deps or [])],
+            passes=getattr(mod, "lspe_passes", []),
         ),
         # 开关取值 (用户 2026-09-17: **"开关的取值是要进 Potato 的"**, docs/182 §1)。
         # **永远是显式的数组**（可为空）—— 与 `mode` 同一条纪律: 不存在"缺这项"的形态,
@@ -9365,7 +9384,7 @@ def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3) -> Modu
     mod = Parser(tt, text).parse()
     # LSPE 的站点普查（`docs/262` §5.1）：在**最终 token 流**上算一次。
     # 与自举侧 `potato.lomt` 的 `pt_lspe` 同一条规则 —— twin 的计数不能漂。
-    mod.lspe_sites, mod.lspe_unsourced_lines = lspe.census(tt, mod.name)
+    mod.lspe_sites, mod.lspe_unsourced_lines, mod.lspe_passes = lspe.census(tt, mod.name)
     mod.lspe_level = lspe_level
     # 方言清单挂在模块上，供 Potato v4 用（`docs/184` §9 S4.3）。**定义那一段已经被
     # 抹掉了**，所以这是唯一还记得"这份源用了哪些自定义语法"的地方。

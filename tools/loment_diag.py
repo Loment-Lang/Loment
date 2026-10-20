@@ -359,6 +359,17 @@ RULES = [
      "台账里有未登记的站点",
      "LSPE 的站点普查与台账对不上：普查枚举出一个种类，台账却不认识它。"
      "这是**审计器自己的**错误，不是用户代码的错误 —— 与 E036 同族。"),
+    ("E036", r"LSPE 自检失败",
+     "LSPE 自检失败",
+     "审计器在自检时发现自己的台账与站点对不上。这是**审计器自己的**问题，不是用户代码的"
+     "错误 —— 与 E035 同族。"),
+    ("E037", r"LSPE 策略锁",
+     "LSPE 策略锁",
+     "策略层（未来面）要求的锁与这份产物不符。今天没有策略层，这个码先占住，不会被发出。"),
+    ("E038", r"`lspe pass` 必须写明理由",
+     "`lspe pass` 缺少理由",
+     "`lspe pass` 是**有记录的**审计旁路：块本身进台账。没有理由的旁路就是 LSPE "
+     "存在的意义所要防的那种无标签地板，所以它在这里被拒。"),
 ]
 
 
@@ -415,6 +426,9 @@ ASCII_ONE_LINER: dict[int, str] = {
     29: "use after free - this block was already passed to `free`",
     34: "an allow with no provenance - LSPE could not say why it was allowed",
     35: "the LSPE ledger has a site kind the census did not register",
+    36: "LSPE's own self-audit failed",
+    37: "an LSPE policy lock does not match this artifact",
+    38: "an `lspe pass` block with no reason",
 }
 
 
@@ -466,6 +480,9 @@ TITLE_EN: dict[int, str] = {
     29: "use after free",
     34: "an allow with no provenance (LSPE)",
     35: "the LSPE ledger has an unregistered site kind",
+    36: "LSPE's self-audit failed",
+    37: "an LSPE policy lock does not match",
+    38: "`lspe pass` needs a reason",
 }
 
 
@@ -526,6 +543,40 @@ CARDS: dict[int, Card] = {
         ),
         yes="guard / index 两种已登记的站点",
         no="未知的站点种类",
+    ),
+    36: Card(
+        what="审计器自检发现台账与站点对不上。",
+        why="审计者必须先能审自己：这一条是**审计器自己的**失败，不是用户代码的错误。",
+        fixes=(
+            "把这份单元和 `loment lspe state` 的输出一起报上来。",
+            "不要靠改源码绕过 —— 那会把审计器的问题藏起来。",
+            "先确认是不是 `lspe_close_admin` 下的陈旧台账。",
+        ),
+        yes="自洽的台账",
+        no="自检失败的台账",
+    ),
+    37: Card(
+        what="策略层要求的锁与这份产物不符。",
+        why="策略层是未来面；今天没有策略层，这个码先占住。",
+        fixes=(
+            "确认这份产物的 `set_by` / `mode` 是不是来自想要的策略。",
+            "如果用了外部策略文件，检查它的版本与产物一致。",
+            "报告时附上策略文件与产物。",
+        ),
+        yes="与策略一致的产物",
+        no="与策略不符的产物",
+    ),
+    38: Card(
+        what="`lspe pass` 后面缺一句理由（或者理由全是空白）。",
+        why="旁路是**有收据的**：块本身进台账，理由就是签名。没有理由的旁路等于一块"
+            "无标签地板 —— 那正是 LSPE 要防的形状。",
+        fixes=(
+            '写上为什么这块要绕开审计：`lspe pass "measured on the target hardware" { … }`。',
+            "如果只是某几条证不出来，优先用 `--lspe-mode=strict` 之外的默认档，让它留在台账里。",
+            "理由写窄一点：只说这块为什么必须绕开审计，不要写成一段泛泛的说明。",
+        ),
+        yes="一句非空理由",
+        no="空字符串 / 只有空白 / 根本不是字符串",
     ),
     1: Card(
         what="两处类型对不上 —— 返回值与声明、实参与形参、载荷与变体、内建实参、赋值两侧。",
@@ -1095,6 +1146,42 @@ CARDS_EN: dict[int, Card] = {
         ),
         yes="the registered `guard` / `index` kinds",
         no="an unknown site kind",
+    ),
+    36: Card(
+        what="LSPE's self-audit found the ledger and the sites disagree.",
+        why="The auditor must be able to audit itself: this is the auditor's own failure, not a "
+            "defect in the user's code.",
+        fixes=(
+            "Report the unit together with the output of `loment lspe state`.",
+            "Do not work around it in source - that hides the auditor's problem.",
+            "Check first whether this is a stale ledger from `lspe_close_admin`.",
+        ),
+        yes="a coherent ledger",
+        no="a ledger that fails self-audit",
+    ),
+    37: Card(
+        what="A policy lock does not match this artifact.",
+        why="The policy layer is a future surface; there is no policy layer today, so this code "
+            "is reserved.",
+        fixes=(
+            "Check whether this artifact's `set_by` / `mode` came from the policy you meant.",
+            "If an external policy file was used, check its version against the artifact.",
+            "Attach the policy file and the artifact when reporting.",
+        ),
+        yes="an artifact that matches its policy",
+        no="an artifact that does not",
+    ),
+    38: Card(
+        what="An `lspe pass` block has no reason, or only whitespace.",
+        why="The bypass is receipted: the block itself goes into the ledger, and the reason is "
+            "its signature. A reasonless bypass is the unlabelled floor LSPE exists to prevent.",
+        fixes=(
+            'State why this block skips the audit: `lspe pass "measured on the target hardware" { ... }`.',
+            "If only a few sites are unproved, prefer the default tier and leave them in the ledger.",
+            "Keep the reason narrow: say why this block must skip the audit, not a general note.",
+        ),
+        yes="a non-empty reason",
+        no="an empty string / whitespace only / not a string",
     ),
     1: Card(
         what="Two types do not line up - the return value against the declaration, an argument "

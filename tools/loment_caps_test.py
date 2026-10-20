@@ -153,7 +153,7 @@ SILENT_LITERALS = {
     ("loment/selfhost/interp.lomt", "literal:20"): 1,
     ("loment/selfhost/lexer.lomt", "literal:256"): 1,
     ("loment/selfhost/potato.lomt", "literal:20"): 1,
-    ("loment/lspe/lspe.lomt", "literal:10"): 1,
+    ("loment/lspe/lspe.lomt", "literal:14"): 1,
     ("loment/tools/lomadmit.lomt", "literal:4000"): 1,
     ("loment/tools/lomc.lomt", "literal:4000"): 1,
     ("loment/tools/lomcapasserts.lomt", "literal:4000"): 2,

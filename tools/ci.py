@@ -128,6 +128,8 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  # `choose write grammar`: 读法由声明决定、出厂锁的取值表、声明先抹掉
                  "loment_grammar_test",
                  "loment_tools_test", "loment_p7_test", "loment_p8_test", "loment_p9_test",
+                 # `lms` 这一维：档 + 七个细开关 + 叠加规则（`docs/253` §9 / §11.4）
+                 "loment_lms_test",
                  # GC 证明面的量尺（`docs/210` §7）—— 语料跑成 alpha、加总 gc_ladder。
                  "loment_gc_surface_test",
                  # 逐站点说出"为什么落到那一层"（`docs/229`）—— 判据 A 是与编译器的**对账**：
@@ -335,6 +337,9 @@ SHARD_COST = {
     "loment_jtrans_test": 0.0,
     "loment_lib_test": 7.4,
     "loment_libl_test": 1.9,
+    # `lms` 这一维与七级（`docs/253` §9 / `docs/269`）。本机 4.0s（含一次 `cc` + 跑重启器）；
+    # CI 上量出来再改这一格 —— 它进的是分片均分，不是判据预算。
+    "loment_lms_test": 4.0,
     "loment_lomc_test": 9.5,
     "loment_lompi_test": 61.5,
     "loment_lomtfrom_test": 6.8,

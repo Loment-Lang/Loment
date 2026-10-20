@@ -932,7 +932,15 @@ class Emitter:
             self.asm.emit(store_sized(RBP, dst + off, RAX, size_of(ety)))
 
     def _icmp(self, t, d):
-        m = re.match(r"icmp\s+(\w+)\s+(.+)$", t, re.S)
+        # `#376`：原先直接 `ICMP_CC[m.group(1)]` —— 一条认不出的 `icmp` 会让整个 PE
+        # 后端甩 Python 栈（`'NoneType' object has no attribute 'group'`），没指令、
+        # 没谓词、没来源。两条失败都**点名**：看不懂的整条指令 / 不认识的谓词。
+        m = re.match(r"icmp\s+(?:samesign\s+)?(\w+)\s+(.+)$", t, re.S)
+        if not m:
+            raise Unsupported(f"PE 后端看不懂这条 icmp：{t.strip()!r}")
+        if m.group(1) not in ICMP_CC:
+            raise Unsupported(
+                f"PE 后端不认识比较谓词 icmp {m.group(1)}：{t.strip()!r}")
         cc, signed = ICMP_CC[m.group(1)]
         ty, i = parse_type(m.group(2))
         a, b = split_top(m.group(2)[i:])
@@ -6143,6 +6151,16 @@ def load_foreign(path: Path):
         return Archive(path)
     if raw[:4] == b"\x7fELF" and len(raw) >= 20 and struct.unpack_from("<H", raw, 16)[0] == 3:
         return SharedObject(path)                  # `.so`：V2 的那条腿（docs/173 阶段 3）
+    # `#637`：Debian/Ubuntu 的 `libz.so` 是 **GNU ld 链接脚本**（ASCII 的
+    # `GROUP ( /lib/.../libz.so.1 ... )`），不是 ELF。原先它掉进 `ForeignObject`，
+    # 报"不是 ELF64 小端目标文件"—— 把共享对象叫成"目标文件"，也没说该链哪个。
+    head = raw[:4096].lstrip()
+    if head.startswith((b"GROUP", b"INPUT", b"/* GNU ld script")):
+        txt = raw[:4096].decode("utf-8", "replace")
+        m = re.search(r"^\s*(?:GROUP|INPUT)\s*\(\s*([^\s)]+)", txt, re.M)
+        target = m.group(1) if m else ""
+        hint = f"；它指向 {target}，链那个文件" if target else "；链它指向的 .so 本体"
+        raise Unsupported(f"{path.name}: 这是 GNU ld 链接脚本{hint}（不是 ELF 共享对象）")
     return ForeignObject(path)
 
 
@@ -6414,6 +6432,10 @@ def compile_ll(text: str, objects: list | None = None,
                 em.asm.labels[nm] = tls_base + tls_bases[i] + val
                 appended.append(nm)
         em.asm.buf += obj.text
+    # **`_GLOBAL_OFFSET_TABLE_` 是我们的符号**（`#617`）：`-fPIC` / 弱引用的对象会把它报成
+    # `GLOBAL UND`，但它由**链接器**给（就是静态 GOT 的基址）。不定义它，端口门会把它
+    # 当成"通向世界的端口"，一个自闭合的 PIC 对象因此被拒。
+    em.asm.labels.setdefault("_GLOBAL_OFFSET_TABLE_", DATA_VADDR + got_off)
     # **端口门**（2026-10-12 用户定：0.1.4.5 里 libc 不可调用）。
     #
     # ⚠ 判的是**解析之后还剩什么**（`#615`）：以前拿每个对象自己的 `undefined` 清单来判，
@@ -6502,15 +6524,25 @@ def compile_ll(text: str, objects: list | None = None,
             return struct.pack("<Q", val & 0xFFFFFFFFFFFFFFFF)
         return struct.pack("<I", val & 0xFFFFFFFF)     # REL_32 / REL_32S
 
-    def zero_fixup(ty: int) -> bytes:
-        """弱未定义引用解析不到时的值：0（`#617`）。"""
+    def weak_value(ty: int, nm: str, add: int, here: int) -> bytes:
+        """弱未定义引用解析不到时的值（`#617`）：**S = 0**。
+
+        * `PC32` / `PLT32` / `PC64` 存的是 `S + A - P`，S=0 ⇒ `A - P`（不是 0！）。
+          写 0 会让 `call` 落到下一条指令上 —— 分支一旦被走到就是死循环。
+        * **GOTPCREL 族**存的是"GOT 槽相对 PC"，而**槽的内容**才是符号地址；槽由
+          `got_addr` 建好并保持 0，所以这里照常写 `GOT + A - P`。第一版写成 0 位移，
+          于是 `mov rax, [rip+0]` 读到了指令后面的字节 —— 非 0 ⇒ `if (weak_fn)` 为真，
+          真的去 call 一个空地址（实测 SIGSEGV）。
+        """
+        if ty in (REL_GOTPCREL, REL_GOTPCRELX, REL_REX_GOTPCRELX):
+            return struct.pack("<i", got_addr[nm] + add - here)
         if ty in (REL_PC32, REL_PLT32):
-            return struct.pack("<i", 0)
+            return struct.pack("<i", add - here)
         if ty == REL_PC64:
-            return struct.pack("<q", 0)
+            return struct.pack("<q", add - here)
         if ty == REL_64:
-            return struct.pack("<Q", 0)
-        return struct.pack("<I", 0)
+            return struct.pack("<Q", add)
+        return struct.pack("<I", add & 0xFFFFFFFF)
 
     for i, obj in enumerate(objects):
         base = TEXT_VADDR + bases[i]
@@ -6521,7 +6553,7 @@ def compile_ll(text: str, objects: list | None = None,
             if target is None:
                 # **弱引用不是错误**：C 的语义是绑 0（`#617`）。强引用才是"没人定义"。
                 if nm in obj.weak_undefined:
-                    raw = zero_fixup(ty)
+                    raw = weak_value(ty, nm, add, here)
                     em.asm.buf[site:site + len(raw)] = raw
                     applied += 1
                     continue
@@ -6560,7 +6592,7 @@ def compile_ll(text: str, objects: list | None = None,
             here = DATA_VADDR + site
             if target is None:
                 if nm in obj.weak_undefined:
-                    raw = zero_fixup(ty)
+                    raw = weak_value(ty, nm, add, here)
                     data[site:site + len(raw)] = raw
                     applied += 1
                     continue

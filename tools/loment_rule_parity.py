@@ -338,14 +338,17 @@ _CASES: list[tuple[str, str]] = [
     # ---- LMS 第 1 级检查器 (E028) ------------------------------------------
     # `docs/253` §5.1：`lms` 开着时，**字面量下标越过定长数组的界**是编译期的一个诊断。
     # ⚠ **这一条为什么必须进这张表**：孪生判据**看不见**这个分歧 ——
-    # `loment_p8_test` / `loment_potato_emit_test` 的语料里没有一个用 `lms_open`，
+    # `loment_p8_test` / `loment_potato_emit_test` 的语料里没有一个用 LMS 那一维，
     # 所以"参考侧拒、自举侧不拒"在那两条判据下**照样绿**（孪生只证一致，不证对）。
-    # 只有这张表会让同一个 `choose lms_open` 源**两边各跑一遍、比码集**。
+    # 只有这张表会让同一个探针**两边各跑一遍、比码集**。
+    # ⚠ 2026-10-18（0.1.5.1）：取值从 `lms_open` 换成**档名**，默认是 `lms_full`。
     ("lms-e028-literal-index-over-a-fixed-array",
-     "module m\n\nchoose lms_open\n\nfn f() -> u32 {\n"
+     "module m\n\nchoose lms_full\n\nfn f() -> u32 {\n"
      "    let a: [u32; 4] = [1, 2, 3, 4];\n    let x: u32 = a[10];\n    return x;\n}\n"),
+    # E029 那条现在**默认就发**（满档 ⇒ 第 1 级开着），所以探针不写档 ——
+    # 这正好顺带钉住"默认 = 满档"这件事。
     ("lms-e029-use-after-free",
-     "module m\n\nchoose runtime\nchoose lms_open\n\nfn f() -> u32 {\n"
+     "module m\n\nchoose runtime\n\nfn f() -> u32 {\n"
      "    let p: ptr = alloc(8);\n    free(p);\n"
      "    let x: u32 = load8(p, 0);\n    return x;\n}\n"),
     # ---- 语句起点的"这不是表达式" (issue #49) ---------------------------------

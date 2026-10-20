@@ -657,7 +657,11 @@ def test_gc_manual_free_list_recycles():
     if not _wsl():
         print("      SKIP: 无 WSL")
         return
-    body = ("module gclist\nchoose gc_manual\nchoose runtime\n\nfn _start() {\n"
+    # ⚠ 这份夹具**故意**读一块刚 `free` 掉的块（它测的是空闲链表的**复用**：值在复用
+    # 之前还在）。E029 从默认档 `lms_full` 起就开着，所以这里显式降到「只要管理器」
+    # 那一档 —— 关掉的是那条检查，不是这条判据要测的分配器行为（`docs/270` §6）。
+    body = ("module gclist\nchoose gc_manual\nchoose lms_manage_only_admin\n"
+            "choose runtime\n\nfn _start() {\n"
             "    let prev: ptr = alloc(64);\n"
             "    store8(prev, 0, 3);\n"
             "    let i: u32 = 0;\n"
@@ -665,8 +669,8 @@ def test_gc_manual_free_list_recycles():
             "    while i < 4000 {\n"
             "        let cur: ptr = alloc(64);\n"
             "        store8(cur, 0, 3);\n"
-            "        %s"
             "        s = s + load8(prev, 0);\n"
+            "        %s"
             "        prev = cur;\n"
             "        i = i + 1;\n"
             "    }\n"
@@ -1217,15 +1221,20 @@ def test_free_refuses_a_double_free():
     if not (_clang() and _wsl()):
         print("      SKIP: 无 clang/WSL")
         return
+    # **第二次 `free` 走一个别名变量**：检查器现在**静态**就拒"同一个变量再 free"
+    # （那一层比运行期更强）。这一条测的是**运行期**的守卫 —— 别名让静态分析认不出
+    # 两处是同一块，守卫必须自己挡住。别名在 `free` **之前**取，那一行本身是合法读。
     src_text = (
-        "module freedbl\nchoose runtime\n\n"
+        # 故意双重释放 —— 同上：关掉第 1 级，让 `free` 自己那道运行期检查说话。
+        "module freedbl\nchoose runtime\nchoose lms_manage_only_admin\n\n"
         "fn _start() {\n"
         "    let n: u32 = 16;\n"
         "    let a: ptr = alloc(n);\n"
+        "    let a2: ptr = a;\n"
         "    let b: ptr = alloc(n);\n"
         "    store8(b, 0, 1);\n"
         "    free(a);\n"
-        "    free(a);\n"
+        "    free(a2);\n"
         "    let c: ptr = alloc(n);\n"
         "    let d: ptr = alloc(n);\n"
         "    store8(c, 0, 11);\n"
@@ -1407,15 +1416,21 @@ def test_gc_alpha_adaptive_bounds_a_large_live_set():
     **How to apply**：一对逐字同源、只差 `choose` 一行的程序 —— 活集 **44 KB**（`a`+`b`，
     尺寸是变量所以不是 L0、末尾还在用所以活到最后），随后循环里每圈漏一块**收得掉的垃圾**
     （`chew` 里 `p` 是 L3：`let q: ptr = p` 外逃，出了 `chew` 就没人指得到）。总量
-    400×136 ≈ 53 KB 请求过 64 KiB arena：
-      * `gc_auto` → **耗尽**（rc=132）—— 固定触发还没到，arena 先满了；
-      * `gc_auto_alpha` → **跑完**（rc=7）—— 空间触发在快满时收掉垃圾。
-    两只是**同一份源**，所以差别只来自那一档的触发策略。端到端过**包内镜像链接器**。
+    400×136 ≈ 53 KB 请求过 64 KiB arena。
+
+    ⚠ **2026-10-19 改判**：LMS 第 3 级入口 A（`docs/253` §5.3，"`alloc` 分配不出时先收一次
+    再试"）默认开着，会把 `gc_auto` 那一只也救活 —— 那就测不出两档触发策略的差别了。
+    所以夹具**显式关掉保障器**（`choose close lms_guard`），比较的才是收集器本身：
+    守卫开着时"救援"属于第 3 级，它的行为由 `loment_lms_test` 管；这里只钉触发机制。
+    关掉之后负控重新成立 —— `gc_auto` **必须耗尽**（rc=132），`gc_auto_alpha` 必须跑完。
     """
     if not (_clang() and _wsl()):
         print("      SKIP: 无 clang/WSL")
         return
-    body = ("module gcadapt\n%s\nchoose runtime\n\n"
+    # ⚠ **第 3 级关掉**：入口 A（用尽时先收一次再试）会让 `gc_auto` 那一只也活下来，
+    # 于是这条判据测不出"固定触发 vs 自适应"的差别 —— 它要量的是**收集器的触发策略**，
+    # 不是保障器的救援。两只都关，比较才公平（`docs/270` §6）。
+    body = ("module gcadapt\n%s\nchoose close lms_guard\nchoose runtime\n\n"
             "fn chew(n: u32) -> u32 {\n"
             "    let p: ptr = alloc(n);\n"
             "    let q: ptr = p;\n"
@@ -1438,23 +1453,29 @@ def test_gc_alpha_adaptive_bounds_a_large_live_set():
             "    syscall4(60, 3, 0, 0);\n}\n")
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
-        got = []
+        got = {}
+        irs = {}
         for tag, ch in (("auto", "choose gc_auto"), ("alpha", "choose gc_auto_alpha")):
             src = td / f"{tag}.lomt"
             src.write_text(body % ch, encoding="utf-8", newline="\n")
             ll = _ref_ir(src, td)
-            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            irs[tag] = ll.read_text(encoding="utf-8")
+            blob, _info = lomelf.compile_ll(irs[tag])
             nat = td / f"{tag}.native"
             nat.write_bytes(blob)
-            got.append(_run_bin(nat, f"adapt_{tag}", td, timeout=60)[0])
-    assert got[1] == 7, (
-        f"`gc_auto_alpha` 那一只没跑完：退出码 {got[1]}（期望 7）。自适应收集器要么没生效，"
-        "要么空间触发 / 活集量法 / 阈值任一处坏了")
-    assert got[0] != 7, (
-        f"**`gc_auto` 那一只也跑通了**（退出码 {got[0]}）—— 那这条判据测不出自适应的好处："
-        "固定 32 KiB 触发本该在活集 44 KB 时装不下 arena")
-    print(f"      gc_auto 耗尽 (rc={got[0]}，活集 44 KB)；gc_auto_alpha 跑通 (rc={got[1]}) "
-          "—— 自适应触发收得下更大的活集")
+            got[tag] = _run_bin(nat, f"adapt_{tag}", td, timeout=60)[0]
+    assert got["alpha"] == 7, (
+        f"`gc_auto_alpha` 那一只没跑完：退出码 {got['alpha']}（期望 7）。自适应收集器"
+        "要么没生效，要么空间触发 / 活集量法 / 阈值任一处坏了")
+    assert got["auto"] != 7, (
+        f"**`gc_auto` 那一只也跑通了**（退出码 {got['auto']}）—— 保障器已经关掉，固定 32 KiB"
+        " 触发本该在活集 44 KB 时装不下 64 KiB arena（期望耗尽，rc=132）")
+    assert "@__loment_thresh" in irs["alpha"], (
+        "alpha 的产物里没有自适应阈值 `@__loment_thresh` —— 自适应触发没有编进去")
+    assert "@__loment_thresh" not in irs["auto"], (
+        "gc_auto 的产物里出现了 `@__loment_thresh` —— 两档的触发策略混了")
+    print(f"      gc_auto 耗尽 (rc={got['auto']}，活集 44 KB)；gc_auto_alpha 跑通 "
+          f"(rc={got['alpha']}) —— 自适应触发收得下更大的活集")
 
 
 @test
@@ -2659,12 +2680,16 @@ def test_lomelf_selfhost_links_a_real_shared_object():
 
 @test
 def test_the_mirror_linker_refuses_ports_without_the_dev_flag():
-    """自举链接器的**端口门**（`docs/222` §4）：同一份带端口的外源对象，不给
-    `--allow-ports` 就**必须拒**。
+    """自举链接器的**端口门**（`docs/222` §4）：解析之后**仍然悬空**的外源符号，
+    不给 `--allow-ports` 就**必须拒**；收编面能提供的不算端口（`#615`）。
 
     参考侧那条在 `loment_ffi_test::test_the_port_gate_refuses_by_default_...`；这一条是它
     的孪生。**为什么非要有**：包里装的是**自举**那一只链接器 —— 只有它也拒，
     "0.1.4.5 里 libc 不可调用"才是真的。参考拒、自举收，是最坏的那种分叉。
+
+    ⚠ 夹具与参考侧同一次换过（`#615`）：`memcpy`/`memset`/`memcmp` 由收编面提供、
+    解析之后不再悬空 —— 拿它们测门等于把"提过一个名字"当成"通向世界"。所以**两份都要测**：
+    `cons.o` 不给旗必须**收**（`#615` 的正面），`port.o`（调 `time`）不给旗必须**拒**。
     """
     if not (_clang() and _wsl()):
         print("      SKIP: 无 clang/WSL")
@@ -2673,28 +2698,38 @@ def test_the_mirror_linker_refuses_ports_without_the_dev_flag():
     td = Path(tempfile.mkdtemp(prefix="mf_"))
     bld = ROOT / "loment" / "build"
     bld.mkdir(parents=True, exist_ok=True)
-    tag = "portgate"
-    src = td / f"{tag}.lomt"
+    src = td / "portgate.lomt"
     src.write_text(ffitest.LOMENT_CONSCRIPT_SOURCE, encoding="utf-8", newline="\n")
     ll = _ref_ir(src, td)
     (td / "cons.c").write_text(ffitest.C_CONSCRIPT_SOURCE, encoding="utf-8", newline="\n")
     assert ffitest.compile_c(_clang(), td / "cons.c", td / "cons.o") == 0
-    llrepo = bld / f"_mirror_{tag}.ll"
-    elfrepo = bld / f"_mirror_{tag}.elf"
-    objrepo = ROOT / f"loment/build/_mirror_{tag}_cons.o"
+    (td / "port.c").write_text(ffitest.C_PORT_SOURCE, encoding="utf-8", newline="\n")
+    assert ffitest.compile_c(_clang(), td / "port.c", td / "port.o") == 0
+    llrepo = bld / "_mirror_portgate.ll"
+    consrepo = bld / "_mirror_portgate_cons.o"
+    portrepo = bld / "_mirror_portgate_port.o"
     try:
         llrepo.write_bytes(ll.read_bytes())
-        objrepo.write_bytes((td / "cons.o").read_bytes())
-        rc, err = _mirror_run(mir, f"loment/build/_mirror_{tag}.ll",
-                              f"loment/build/_mirror_{tag}.elf",
-                              (f"loment/build/_mirror_{tag}_cons.o",), ports=False)
-        assert rc != 0, (
+        consrepo.write_bytes((td / "cons.o").read_bytes())
+        portrepo.write_bytes((td / "port.o").read_bytes())
+        rc, err = _mirror_run(mir, "loment/build/_mirror_portgate.ll",
+                              "loment/build/_mirror_portgate_cons.elf",
+                              ("loment/build/_mirror_portgate_cons.o",), ports=False)
+        assert rc == 0, (
+            "收编面能提供的名字被自举链接器当成了端口 —— 解析之后它根本不悬空（`#615`）："
+            + err[-300:])
+        rc2, err2 = _mirror_run(mir, "loment/build/_mirror_portgate.ll",
+                                "loment/build/_mirror_portgate_port.elf",
+                                ("loment/build/_mirror_portgate_port.o",), ports=False)
+        assert rc2 != 0, (
             "自举链接器**没有**端口门 —— 带未定义符号的对象照收，于是包里的 "
             "`loment build --link` 又把 libc 放进来了（`docs/222` §4）")
-        print("      自举链接器：不给 --allow-ports 就拒带端口的对象")
+        assert "undefined symbols" in err2, f"拒绝理由没说出端口：{err2[-300:]}"
+        print("      自举链接器：收编面默认收；真正悬空的符号不给 --allow-ports 就拒")
     finally:
-        for p in (llrepo, elfrepo, objrepo):
-            p.unlink(missing_ok=True)
+        for q in (llrepo, consrepo, portrepo,
+                  bld / "_mirror_portgate_cons.elf", bld / "_mirror_portgate_port.elf"):
+            q.unlink(missing_ok=True)
 
 
 #: `#366` 的语料：刻 N 个块（**一个 `free` 都不写**）→ 用大块把累计请求推过触发阈值、逼出
@@ -3391,6 +3426,112 @@ def test_pic_objects_link_through_a_static_got():
 
 
 @test
+def test_mirror_matches_reference_on_pic_tls_and_weak_objects():
+    """自举侧镜像在**外部对象**上与参考实现逐字节相同（`#609` / `#610` / `#617`）。
+
+    镜像原先只认六种重定位、也没有静态 GOT / TLS 块 / 弱引用：一个 `-fPIC` 的发行版库
+    （Debian 的 hardening flags 默认开）在**包内那份链接器**上报"不认识的重定位类型 42"，
+    而参考实现早就能链 —— 判据只比"两边一致"时看不见这一整类，因为两边都失败也是一致。
+    所以每一类都要求**真的链过去、字节相同、退出码相同**。
+
+    四类：`-fPIC` 对象（GOTPCREL 族）、`__thread` 对象（TPOFF32 + 多对象 TLS 片段）、
+    弱未定义（解析不到绑 0，且不进端口门）、弱定义 + 强定义（强的那份赢）。
+    最后一类额外按**不开 `--allow-ports`** 跑 —— 端口门判的是"所有对象摆完还剩什么"，
+    自闭合的多目标文件组合不该被拒（`#615`）。
+    """
+    clang = _clang()
+    if not (clang and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    mir = _mirror()
+    lsrc = ('module mo\n\n'
+            'extern fn f() -> i32;\n\n'
+            'fn _start() {\n'
+            '    syscall4(60, f() as u64, 0, 0);\n'
+            '}\n')
+    cases = [
+        ("pic", {"p.c": ('int g = 7;\nint f(void) { return g; }\n', ("-fPIC", "-O2"))},
+         ("p.o",), 7, True),
+        ("tls", {"t1.c": ('__thread int t = 5;\nint f(void) { return t; }\n', ()),
+                 "t2.c": ('__thread long long u = 9;\nint g(void) { return (int)u; }\n', ())},
+         ("t1.o", "t2.o"), 5, True),
+        ("weak", {"w.c": ('extern void opt(void) __attribute__((weak));\n'
+                          'int f(void) { if (opt) opt(); return 7; }\n', ())},
+         ("w.o",), 7, True),
+        ("wstrong", {"ws.c": ('int f(void) __attribute__((weak));\n'
+                              'int f(void) { return 1; }\n', ()),
+                     "st.c": ('int f(void) { return 2; }\n', ())},
+         ("ws.o", "st.o"), 2, False),
+    ]
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        for name, cfiles, order, want_rc, ports in cases:
+            for cname, (csrc, extra) in cfiles.items():
+                (td / cname).write_text(csrc, encoding="utf-8", newline="\n")
+                assert ffitest.compile_c(clang, td / cname, td / (cname[:-2] + ".o"),
+                                         extra) == 0, f"[{name}] C 编译失败 ({cname})"
+            src = td / f"{name}.lomt"
+            src.write_text(lsrc, encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            objs = tuple(td / o for o in order)
+            ref_blob, _ = lomelf.compile_ll(
+                ll.read_text(encoding="utf-8"),
+                [lomelf.load_foreign(o) for o in objs], allow_ports=ports)
+            links = tuple(str(_wsl_path(o)) for o in objs)
+            out = td / f"{name}_mir.elf"
+            rc, err = _mirror_run(mir, str(_wsl_path(ll)), str(_wsl_path(out)),
+                                  links, ports=ports)
+            assert rc == 0, (
+                f"[{name}] 镜像链接失败（参考实现链过去了）: {err[-300:]}")
+            got = out.read_bytes()
+            assert got == ref_blob, (
+                f"[{name}] 镜像产物与参考不逐字节相同（{len(got)} vs {len(ref_blob)} B）")
+            rc2, _out = _run_bin(out, f"mir_{name}", td)
+            assert rc2 == want_rc, f"[{name}] 镜像产物读出 {rc2}（期望 {want_rc}）"
+    print("      -fPIC / __thread / 弱未定义 / 弱+强：镜像与参考逐字节相同且行为一致")
+
+
+@test
+def test_a_gnu_ld_script_names_the_file_it_points_to():
+    """**GNU ld 链接脚本要说清它指向哪个文件**（`#637`）。
+
+    发行版里的 `libc.so` / `libz.so` 常常不是 ELF，而是一行 `GROUP ( /usr/lib/.../libc.so.6 )`。
+    原先两个实现都把它当"不是 ELF 对象"报 —— 用户手上唯一能行动的信息（真正的文件）没了：
+    他要么去翻构建脚本，要么以为这个库不能用。判据要求**两份实现**都把目标路径印出来。
+    """
+    clang = _clang()
+    if not (clang and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    mir = _mirror()
+    target = "/usr/lib/x86_64-linux-gnu/libc.so.6"
+    lsrc = ('module lds\n\n'
+            'fn _start() {\n'
+            '    syscall4(60, 0, 0, 0);\n'
+            '}\n')
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        script = td / "libc.so"
+        script.write_text(f"/* GNU ld script */\nGROUP ( {target} AS_NEEDED ( libc_nonshared.a ) )\n",
+                          encoding="utf-8", newline="\n")
+        src = td / "lds.lomt"
+        src.write_text(lsrc, encoding="utf-8", newline="\n")
+        ll = _ref_ir(src, td)
+        try:
+            lomelf.load_foreign(script)
+        except lomelf.Unsupported as e:
+            assert target in str(e), f"参考实现的拒绝理由没印出目标：{e}"
+        else:
+            raise AssertionError("参考实现把 GNU ld 脚本当成了共享对象")
+        out = td / "lds.elf"
+        rc, err = _mirror_run(mir, str(_wsl_path(ll)), str(_wsl_path(out)),
+                              (str(_wsl_path(script)),), ports=True)
+        assert rc != 0, "镜像把 GNU ld 脚本链过去了"
+        assert target in err, f"镜像的拒绝理由没印出目标：{err[-300:]}"
+    print("      两份实现都点名脚本指向的真文件")
+
+
+@test
 def test_two_shared_objects_link_in_order():
     """**一次可以链两个共享对象**（`#596`）：`libz` 的 `compress` + `libc` 的 `strlen`。
 
@@ -4034,6 +4175,31 @@ def test_an_archive_that_contributes_no_member_does_not_enable_tls_or_the_conscr
     _mirror_matches_reference("625", "define i32 @_start() {\nentry:\n  ret i32 0\n}\n",
                               [("625.a", ar)])
     print("      没人用的归档: 不装 TLS、不发收编面，与参考逐字节相同")
+
+
+@test
+def test_a_gnu_ld_script_is_named_as_one_and_points_at_the_real_file():
+    """`#637`：Debian 的 `libz.so` 是 ASCII 的 GNU ld 脚本，不是 ELF。
+
+    原先它掉进 `ForeignObject` 的兜底，报"不是 ELF64 小端目标文件" —— 把共享对象
+    叫成"目标文件"，也没说该链哪个。现在点名"链接脚本"并给出它指向的 `.so`。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        script = Path(t) / "libz.so"
+        script.write_text(
+            "/* GNU ld script\n   Use the shared library.  */\n"
+            "GROUP ( /lib/x86_64-linux-gnu/libz.so.1  AS_NEEDED ( /lib64/ld-linux-x86-64.so.2 ) )\n",
+            encoding="utf-8", newline="\n")
+        try:
+            lomelf.load_foreign(script)
+        except lomelf.Unsupported as e:
+            msg = str(e)
+            assert "链接脚本" in msg, msg
+            assert "/lib/x86_64-linux-gnu/libz.so.1" in msg, msg
+            assert "目标文件" not in msg, msg
+        else:
+            raise AssertionError("GNU ld 脚本被当成 ELF 收下了")
+    print("      GNU ld 脚本: 点名『链接脚本』并给出它指向的 libz.so.1")
 
 
 def main() -> int:

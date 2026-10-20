@@ -90,7 +90,7 @@ RELEASE_NAME = "0.1.4.7"  # 人读显示名 (发行包/文档用同一个真源)
 LOMENTERR = "0.1.2"
 GLOBS = [
     "tools/lomc.py", "tools/lom_audit.py", "tools/lomc_test.py", "tools/lomentc.py",
-    "tools/lomentc_test.py", "tools/potato.py", "tools/potato_test.py",
+    "tools/lomentc_test.py", "tools/lspe_test.py", "tools/potato.py", "tools/potato_test.py",
     "tools/potato_cross.py", "tools/potato_from.py", "tools/potato_measure.py",
     "tools/potato_llm_arm.py",
     "tools/potato_assert.py", "tools/loment.py", "tools/lomfmt.py",
@@ -147,6 +147,8 @@ GLOBS = [
     "tools/loment_interp.py", "tools/loment_ct_test.py",
     # `comefor` 的 token 层展开 (S4.1, docs/184 §9): 展开器 + 判据 + 最小方言演示。
     "tools/loment_comefor.py", "tools/loment_comefor_test.py",
+    # `choose` 的联动矩阵（`#940`）。**与 lomrel.lomt 同一位置**。
+    "tools/loment_choose_matrix_test.py",
     # 外部代码块的字节保真 (S1, docs/185)
     "tools/loment_extblock_test.py",
     "tools/loment_p7_test.py", "tools/loment_p8_test.py", "tools/loment_p9_test.py",
@@ -168,6 +170,9 @@ GLOBS = [
     "tools/loment_dap.py", "tools/loment_dap_test.py",
     "tools/mono_trace.py",
     "tools/loment_ir_diff.py", "tools/loment_rule_parity.py",
+    # `lms` 这一维与七级的判据（`docs/253` §9 / `docs/270`）。
+    # **两处清单插入同一位置** —— 次序就是发布清单的次序。
+    "tools/loment_lms_test.py",
     # 渠道常量（`docs/231` §2.2）：参考实现侧那份恒为 dev；**自举侧那一份在
     # `loment/selfhost/checker.lomt` 里**（一个常量一行），打包期由 `loment_dist.py` 换掉。
     # **两处清单插入同一位置** —— 次序就是发布清单的次序。
@@ -181,7 +186,10 @@ GLOBS = [
     "tools/lvm.py", "tools/lvm_test.py", "tools/lvm_twin_test.py", "tools/lvm_profile_test.py",
     "tools/lvm_t2.py", "tools/lvm_t2_test.py",
     "tools/lvm_compact.py", "tools/lvm_compact_test.py",
+    "tools/lvm_cache.py", "tools/lvm_cache_test.py",
+    "tools/lvm_fusion_test.py", "tools/lvm_mirror_t2_test.py",
     "tools/loment_store_twin_test.py",
+    "tools/loment_spec_oracle_test.py",
     "tools/lvm_t3.py", "tools/lvm_t3_test.py",
     "tools/lvm_stability_test.py",
     "tools/lvm_perf_test.py",
@@ -257,6 +265,9 @@ GLOBS = [
     # 无 Python 自举 (docs/159): 启动脚本 + 种子 (参考实现发射的驱动 IR) + Loment 版格式化器
     "loment/bootstrap.sh", "scripts/lomc.ps1", "scripts/install-lsp.ps1",
     "loment/build/selfhost_driver.ll", "loment/build/genesis/*", "loment/tools/*.lomt",
+    # **LMS 第 6 级**（`docs/253` §5.5 / `docs/270` §4）：用 C 写的重启器。
+    # 它随包发 —— 信任地板的实物必须在产物里，不能只在仓库里。
+    "restarter/loment-restart.c",
     "editors/loment.ico",
     "editors/vscode/package.json", "editors/vscode/language-configuration.json",
     "editors/vscode/language-configuration-python.json",
@@ -280,6 +291,10 @@ GLOBS = [
     # **一个目录**, 所以同样要逐条列 (单层的 `loment/examples/*.lomt` 收不到子目录)。
     "loment/examples/cproject/*.lomt",
     "loment/examples/cproject/README.md",
+    # `natural` 的构造示例（#350）：每份 `.nl` 与旁边翻译出来的 `.lomt` 都要随包发 ——
+    # 读者照着一份`.nl` 看 `.lomt`，而判据要求两份都在。
+    "loment/examples/natural/*.nl",
+    "loment/examples/natural/*.lomt",
     # 外部代码块的**词法**语料 (S1): 只喂两个词法器, 不是可编单元。
     "loment/extblock/*.lomt",
     # **词法**语料: 只有词法器才看得见的形状。**故意不放进 `loment/examples/`** ——

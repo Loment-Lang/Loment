@@ -74,8 +74,11 @@ def _build_entry(stem: str) -> Path | None:
         return None
     import loment_dist  # noqa: E402
     stage1 = loment_dist.build_stage1()
-    # 自举镜按 **CWD** 解析路径形式的 `use "lpi_cli.lomt"` —— 必须在 lompi/ 里编。
-    r = subprocess.run([str(stage1), f"{stem}.lomt"], cwd=str(SRC_DIR),
+    # 从**仓根**编 (入口写 `lompi/<stem>.lomt`)。路径形式的 `use "lpi_cli.lomt"` 会落到
+    # 导入文件所在目录; 而自举镜的**开发 checkout** store 根是 CWD 相对的 `lompi/store`
+    # —— `lpi_cli` 现在按名字取 `internet` 的模块 (issue #375), 所以在 lompi/ 里编会报
+    # "the name import does not resolve"。
+    r = subprocess.run([str(stage1), f"lompi/{stem}.lomt"], cwd=str(ROOT),
                        capture_output=True, shell=False, timeout=300)
     if r.returncode != 0 or not r.stdout:
         raise AssertionError(f"stage1 编 {stem} 失败: {r.stderr[-300:]!r}")
@@ -124,6 +127,175 @@ def test_reference_implementation_accepts_lompi():
     deps = lomentc.resolve_deps(mod, ROOT, SRC_DIR, entry=ENTRY)
     errs = lomentc.check(mod, deps=deps)
     assert not errs, f"参考实现检查不过: {errs[:3]}"
+
+
+#: issue #375 点名的那几个"lpi_cli 自带一份"的联网函数。前五个在本基线里真的存在并被
+#: 这一次删掉; 后三个 (状态行 / Content-Length / 段校验) 在 issue 写作时的那条线里存在,
+#: 这里一并**钉成不许出现** —— 重新长出来就是又开了第二份实现。
+_REMOVED_NET_FNS = (
+    "net_tcp4", "net_connect4", "net_send", "net_recv", "net_hdr_end",
+    "net_status_is_200", "net_content_length", "net_seg_ok",
+)
+
+
+@test
+def test_network_primitives_come_from_the_internet_package():
+    """#375: 联网只有 `internet` 一份实现 —— lpi_cli 不再自带传输 / 报文框架 / URL 拆解。
+
+    两半一起钉：
+
+    * **源码扫描**：被删掉的那几个 `fn` 一个都不许回来; `use tcp/http/uri/ip` 必须在;
+      旧的"头里某处出现 ` 200`"那种子串判定也不许回来。
+    * **依赖图**：按名字解析出来的单元里，`tcp`/`http`/`uri`/`ip`/`sock` 都真的住在
+      `lompi/store/internet/0.1.0/` —— 不是别处一份同名文件碰巧顶上。
+
+    留在 lpi_cli 的只有**编排**（`net_http_get` / `net_parse_http`）与一小块 `net_crlf`：
+    `http_req_build` 的形参是 `str`（字面量），而 lompi 的路径来自命令行，只能是 `ptr+len`。
+    """
+    src = (SRC_DIR / "lpi_cli.lomt").read_text(encoding="utf-8")
+    for name in _REMOVED_NET_FNS:
+        assert not re.search(rf"\bfn {name}\s*\(", src), \
+            f"lpi_cli 还留着 {name} 自己的实现 —— 又回到了两份"
+    for mod in ("tcp", "http", "uri", "ip"):
+        assert re.search(rf"^use {mod}\s*$", src, re.M), f"lpi_cli 没有按名字取 {mod}"
+    assert '" 200"' not in src, "旧的子串 200 判定回来了 —— 用 http_status_line"
+    m = re.search(r"pub fn net_http_get\(.*?\n\}", src, re.S)
+    assert m, "net_http_get 不见了"
+    assert "http_status_line(" in m.group(0), "net_http_get 没有走包里的状态行解析"
+    assert "http_body_start(" in m.group(0), "net_http_get 没有走包里的体起点"
+    assert "tcp_connect4(" in m.group(0) and "tcp_send_all(" in m.group(0), \
+        "net_http_get 没有走包里的传输层"
+
+    mod = lomentc.load(ENTRY)
+    deps = lomentc.resolve_deps(mod, ROOT, SRC_DIR, entry=ENTRY)
+    pkg = SRC_DIR / "store" / "internet" / "0.1.0"
+    for name in ("tcp", "http", "uri", "ip", "sock"):
+        hit = [d for d in deps if d.name == name]
+        assert hit, f"依赖图里没有 {name}"
+        assert hit[0].src and Path(hit[0].src).resolve().parent == pkg.resolve(), \
+            f"{name} 不是从 internet 包解析来的: {getattr(hit[0], 'src', None)}"
+
+
+#: #309/#375 的共享语料。以前它喂给两份实现（lpi_cli::net_hdr_end 与
+#: internet::http_hdr_end）做孪生对拍; 副本删掉之后，这一层比的是**唯一实现与
+#: CPython 的字节原语** —— 证明的是"这份实现对"，不只是"两边一致"。
+_TWIN_CORPUS = [
+    b"X: 1\r\n\r\nbody",
+    b"X: 1\n\nbody",
+    b"HTTP/1.0 200 OK\r\nX: 1\r\n\r\nBODY\r\n\r\nTAIL",
+    b"HTTP/1.0 200 OK\nX: 1\n\nBODY\r\n\r\nTAIL",
+    b"A\r\n\r\n",
+    b"no terminator here",
+    b"\r\n\r\n",
+    b"\n\n",
+    b"X: 1\r\nY: 2\n\nZ\r\n\r\n",
+    b"",
+]
+
+
+def _hdr_end_oracle(blob: bytes) -> int | None:
+    """CPython 的字节原语：两种空行结束形式**一起看、谁先出现谁赢**。
+
+    这不是把 Loment 的循环抄一遍 —— 用的是 `bytes.find` (C 实现)；旧实现"先在全缓冲里
+    找 CRLFCRLF、找不到才退到 LFLF"会让 LF-only 的头把 body 里的 CRLFCRLF 当成头结束，
+    语料 3/8 立刻把它抓出来。
+    """
+    hits = [p for p in (blob.find(b"\r\n\r\n"), blob.find(b"\n\n")) if p >= 0]
+    return min(hits) if hits else None
+
+
+@test
+def test_hdr_end_agrees_with_the_reference_oracle():
+    """#309 的孪生对拍在 #375 之后的形态：**唯一实现 vs CPython 的字节原语**。
+
+    副本已经删掉，不能再拿两份 Loment 实现互比 —— 那只能证明"两边一起对/一起错"。
+    这里把包里的 `http_hdr_end` 在共享语料上跑一遍，逐个对 `bytes.find` 的最小值：
+    它证明的是**这一份实现对**，而不只是"没有漂"。（lpi_cli 现在调的就是这一份。）
+    """
+    prelude = """
+fn w(s: str) -> u32 {
+    return syscall4(1, 1, str_ptr(s) as u64, str_len(s) as u64) as u32;
+}
+
+fn wd(v: u32) -> u32 {
+    let b: ptr = alloc(16);
+    let n: u32 = 0;
+    let x: u32 = v;
+    if x == 0 { store8(b, 0, 48 as u8); n = 1; }
+    while x > 0 {
+        store8(b, n, (48 + x % 10) as u8);
+        x = x / 10;
+        n = n + 1;
+    }
+    let i: u32 = 0;
+    while i < n / 2 {
+        let lo: u8 = load8(b, i) as u8;
+        store8(b, i, load8(b, n - 1 - i) as u8);
+        store8(b, n - 1 - i, lo);
+        i = i + 1;
+    }
+    return syscall4(1, 1, b as u64, n as u64) as u32;
+}
+
+fn hx(s: str, out: ptr) -> u32 {
+    let n: u32 = str_len(s) / 2;
+    let i: u32 = 0;
+    while i < n {
+        let hi: u32 = hv(str_byte(s, i * 2));
+        let lo: u32 = hv(str_byte(s, i * 2 + 1));
+        store8(out, i, ((hi * 16 + lo) & 255) as u8);
+        i = i + 1;
+    }
+    return n;
+}
+
+fn hv(c: u32) -> u32 {
+    let i: u32 = 0;
+    let tbl: str = "0123456789abcdef";
+    while i < 16 {
+        if str_byte(tbl, i) == c { return i; }
+        i = i + 1;
+    }
+    return 0;
+}
+"""
+    body = []
+    for i, blob in enumerate(_TWIN_CORPUS):
+        body.append(f"    let b{i}: ptr = alloc(256);")
+        body.append(f'    let n{i}: u32 = hx("{blob.hex()}", b{i});')
+        body.append(f"    let r{i}: u32 = http_hdr_end(b{i}, 0, n{i});")
+        body.append(f'    w("H|{i}|");')
+        body.append(f'    if r{i} == HTTP_NO {{ w("N\\n"); }} else {{ wd(r{i}); w("\\n"); }}')
+    body.append("    syscall4(60, 0, 0, 0);")
+    body.append("}")
+    src = "\n".join(["module hdr_probe", "choose runtime", "use http", prelude,
+                     "fn _start() {"]) + "\n" + "\n".join(body) + "\n"
+    with tempfile.TemporaryDirectory(prefix="hdr-") as tds:
+        td = Path(tds)
+        probe = td / "hdr_probe.lomt"
+        probe.write_text(src, encoding="utf-8", newline="\n")
+        mod = lomentc.load(probe)
+        deps = lomentc.resolve_deps(mod, ROOT, td, entry=probe)
+        errs = lomentc.check(mod, deps=deps)
+        assert not errs, f"头结束探针检查不过: {errs[:3]}"
+        ll = lomentc.emit_llvm(mod, ROOT, deps)
+        raw = (lomelf.compile_pe if IS_WIN else lomelf.compile_ll)(ll)[0]
+        exe = td / ("hdr_probe" + (".exe" if IS_WIN else ".elf"))
+        exe.write_bytes(raw)
+        exe.chmod(0o755)
+        out = subprocess.run([str(exe)], capture_output=True, text=True, encoding="utf-8",
+                             errors="replace", shell=False, timeout=120).stdout
+    got = {}
+    for line in out.splitlines():
+        if line.startswith("H|"):
+            _, i, v = line.split("|")
+            got[int(i)] = None if v == "N" else int(v)
+    assert len(got) == len(_TWIN_CORPUS), f"探针输出不全: {out!r}"
+    want = {i: _hdr_end_oracle(b) for i, b in enumerate(_TWIN_CORPUS)}
+    diff = [f"语料[{i}] 实现={got[i]!r} 参考={want[i]!r}"
+            for i in want if got[i] != want[i]]
+    assert not diff, "头结束与参考原语不一致:\n" + "\n".join(diff)
+    print(f"      http_hdr_end 在 {len(_TWIN_CORPUS)} 条共享语料上与 CPython bytes.find 一致")
 
 
 @test

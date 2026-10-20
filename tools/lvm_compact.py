@@ -541,13 +541,24 @@ def _decode_op(r: _Reader, s) -> tuple:
 
 
 # ---------------------------------------------------------------- 前门
-def run_compact(blob: bytes, out, profile=None, argv: list[str] | None = None) -> int:
-    """紧凑形 -> 跑完 -> 退出码。与 `lvm.run_ir` / `lvm_t2.run_ir_t2` 同一个契约。"""
+def run_compact(blob: bytes, out, profile=None, argv: list[str] | None = None,
+                fusion=None, hot: set[tuple[str, str]] | None = None) -> int:
+    """紧凑形 -> 跑完 -> 退出码。与 `lvm.run_ir` / `lvm_t2.run_ir_t2` 同一个契约。
+
+    `fusion` / `hot` 是 A4（`docs/266`，issue #647）：融合计划**不序列化**，解码之后
+    按 op 重算 —— 所以紧凑形、缓存与直编拿到同一张计划。给 `fusion` 时在这里先算一遍
+    （执行可能只走到一部分函数，报告要覆盖整份程序）。
+    """
     globals_, funcs, externs, cfuncs = decode(blob)
     if profile is not None:
         profile.bind(funcs)
-    vm = lvm_t2.T2Executor(globals_, funcs, externs, out, profile, argv)
+    vm = lvm_t2.T2Executor(globals_, funcs, externs, out, profile, argv,
+                           fusion=fusion, hot=hot)
     vm.prog.cfuncs.update(cfuncs)
+    if fusion is not None:
+        for cf in cfuncs.values():
+            if cf.blocks:
+                vm._plan(cf, 0, cf.blocks[0])
     start = cfuncs.get("_start")
     if start is None:
         raise lvm.LvmError("这份 IR 里没有 `_start`")

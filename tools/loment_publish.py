@@ -182,6 +182,8 @@ REPOS: dict[str, dict] = {
             "tools/lvm_profile_test.py",
             "tools/lvm_t2.py", "tools/lvm_t2_test.py",
             "tools/lvm_compact.py", "tools/lvm_compact_test.py",
+            "tools/lvm_cache.py", "tools/lvm_cache_test.py",
+            "tools/lvm_fusion_test.py", "tools/lvm_mirror_t2_test.py",
             "tools/lvm_t3.py", "tools/lvm_t3_test.py",
             "tools/lvm_stability_test.py",
             "tools/lvm_perf_test.py",
@@ -356,15 +358,16 @@ run `lompi` directly.
 
 ## Building it
 
-You need the Loment toolchain first (<https://github.com/Loment-Lang/loment>), then **from this
-directory**:
+You need the Loment toolchain first (<https://github.com/Loment-Lang/loment>; 0.1.5 or newer
+ships the `internet` library lompi uses), then **from this directory**:
 
 ```
 loment build lompi.lomt -o lompi
 ```
 
-(The directory matters: this toolchain resolves relative imports such as `use "lpi_cli.lomt"`
-against the **current working directory**.)
+(Path imports such as `use "lpi_cli.lomt"` resolve relative to the importing file; the
+`internet` package (`use tcp` / `use http` / `use uri` / `use ip`) comes from the toolchain's
+bundled store.)
 
 ```
 lompi version

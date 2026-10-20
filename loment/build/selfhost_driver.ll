@@ -50856,20 +50856,29 @@ entry:
   store i32 %envc, ptr %envc.addr
   store i32 %name_tok, ptr %name_tok.addr
   store i32 %ty, ptr %ty.addr
-  %t1 = load ptr, ptr %env.addr
-  %t2 = load i32, ptr %envc.addr
-  %t3 = mul i32 %t2, 8
-  %t4 = load i32, ptr %name_tok.addr
-  call void @store32(ptr %t1, i32 %t3, i32 %t4)
-  %t5 = load ptr, ptr %env.addr
-  %t6 = load i32, ptr %envc.addr
-  %t7 = mul i32 %t6, 8
-  %t8 = add i32 %t7, 4
-  %t9 = load i32, ptr %ty.addr
-  call void @store32(ptr %t5, i32 %t8, i32 %t9)
-  %t10 = load i32, ptr %envc.addr
-  %t11 = add i32 %t10, 1
-  ret i32 %t11
+  %t1 = load i32, ptr %envc.addr
+  %t2 = icmp uge i32 %t1, 4096
+  br i1 %t2, label %L1_then, label %L2_else
+L1_then:
+  %t3 = load i32, ptr %envc.addr
+  ret i32 %t3
+L2_else:
+  br label %L3_end
+L3_end:
+  %t4 = load ptr, ptr %env.addr
+  %t5 = load i32, ptr %envc.addr
+  %t6 = mul i32 %t5, 8
+  %t7 = load i32, ptr %name_tok.addr
+  call void @store32(ptr %t4, i32 %t6, i32 %t7)
+  %t8 = load ptr, ptr %env.addr
+  %t9 = load i32, ptr %envc.addr
+  %t10 = mul i32 %t9, 8
+  %t11 = add i32 %t10, 4
+  %t12 = load i32, ptr %ty.addr
+  call void @store32(ptr %t8, i32 %t11, i32 %t12)
+  %t13 = load i32, ptr %envc.addr
+  %t14 = add i32 %t13, 1
+  ret i32 %t14
 }
 ; chk_tok_int -> u32
 define i32 @chk_tok_int(ptr %src, ptr %t, i32 %i) {
@@ -68053,12 +68062,12 @@ entry:
 ; chk_arena_tyt -> u32
 define i32 @chk_arena_tyt() {
 entry:
-  ret i32 107856
+  ret i32 138576
 }
 ; chk_arena_bytes -> u32
 define i32 @chk_arena_bytes() {
 entry:
-  ret i32 111968
+  ret i32 142688
 }
 ; err_name -> str
 define { ptr, i64 } @err_name(i32 %c) {

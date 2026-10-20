@@ -1572,6 +1572,83 @@ def test_launcher_writes_the_diag_out_file_the_user_named():
     print("      启动器: --diag-out PATH 写到用户点名的那一份，渲染照旧")
 
 
+def _launcher_crash_pkg(renderer: str | None) -> Path:
+    """一个**会崩的**桩包：驱动被 SIGSEGV 打死，`--diag-out` 一个字都不写。
+
+    这正是 `#773` 那条边界：诊断文件是空的，渲染器无事可做，启动器只留一个退出码 1。
+    `renderer` 是桩渲染器的脚本正文（`None` = 包里没有渲染器）。
+    """
+    import loment_dist  # noqa: E402
+
+    t = Path(tempfile.mkdtemp(prefix="lomenterr-crash-"))
+    pf = t / "pf"
+    (pf / "bin").mkdir(parents=True)
+    (pf / "share" / "loment").mkdir(parents=True)
+    (pf / "share" / "loment" / "version").write_bytes(b"stub\n")
+    (pf / "bin" / "loment-driver").write_text(
+        "#!/bin/sh\nkill -SEGV $$\n", encoding="utf-8", newline="\n")
+    (pf / "bin" / "loment").write_text(
+        loment_dist._subst(loment_dist.LAUNCHER_SH), encoding="utf-8", newline="\n")
+    if renderer is not None:
+        (pf / "bin" / "lomenterr").write_text(renderer, encoding="utf-8", newline="\n")
+    for p in (pf / "bin").iterdir():
+        p.chmod(0o755)
+    (pf / "src.lomt").write_text("module m\n", encoding="utf-8", newline="\n")
+    return pf
+
+
+@test
+def test_launcher_synthesizes_a_record_when_the_compiler_dies_silently():
+    """**#773**：编译器被信号打死、`--diag-out` 空着时，启动器要**合成一条 E900**。
+
+    修之前：`report_diags` 看到空文件就只把驱动的 stderr 原样回吐（而崩溃时它是空的），
+    于是用户拿到一个退出码 1 与**零行**输出 —— 正好是"最需要解释"的那种失败。
+    修之后：启动器拿到 139（128+SIGSEGV），写一条 `line:0` 的记录（没有源码位置），
+    渲染器照常渲染；包里没有渲染器时，同一句话以裸行出现。
+
+    判据跑**真启动器 + 会崩的桩驱动**，并且让桩渲染器 `cat` 出它拿到的文件 ——
+    所以"记录真的被写出来、真的交到了渲染器手里"是直接看得到的，不是读源码猜的。
+    """
+    bash = shutil.which("bash")
+    if not bash:
+        print("        (跳过: 没有 bash, 跑不了 POSIX 启动器)")
+        return
+
+    # ① 有渲染器：它收到的是那份合成了 E900 的 JSONL。
+    pf = _launcher_crash_pkg('#!/bin/sh\ncat "$1"\n')
+    r = _launcher_run(bash, pf, [])
+    out = r.stdout + r.stderr
+    assert r.returncode == 1, (r.returncode, out[-300:])
+    recs = [json.loads(ln) for ln in r.stdout.splitlines() if ln.strip().startswith("{")]
+    assert recs, f"渲染器没拿到 JSONL（或一条都没合成）: {out[-400:]!r}"
+    rec = recs[0]
+    assert rec["code"] == "E900", rec
+    assert rec["line"] == 0, rec           # 没有源码位置 —— 与 docs/256 同一口径
+    assert rec["file"] == "loment-driver", rec
+    assert "SIGSEGV" in rec["message"] and "signal 11" in rec["message"], rec
+    assert "no diagnostic record" in rec["message"], rec
+
+    # ② 没有渲染器：同一句话必须**照样说出来**（裸行），不能因为没人渲染就消失。
+    pf = _launcher_crash_pkg(None)
+    r = _launcher_run(bash, pf, [])
+    out = r.stdout + r.stderr
+    assert r.returncode == 1, (r.returncode, out[-300:])
+    assert "E900" in out and "SIGSEGV" in out and "loment-driver" in out, (
+        f"崩溃在无渲染器的包里又变成了零行: {out[-400:]!r}")
+    assert "no lomenterr" in out, f"没有渲染器这件事本身也要说: {out[-300:]!r}"
+
+    # ③ 渲染器**自己**崩了（同一个边界往下一层）：要说出它死了，并保留底层错误。
+    pf = _launcher_crash_pkg('#!/bin/sh\nkill -SEGV $$\n')
+    r = _launcher_run(bash, pf, [])
+    out = r.stdout + r.stderr
+    assert r.returncode == 1, (r.returncode, out[-300:])
+    assert "lomenterr died" in out and "E900" in out, (
+        f"报错器崩了而启动器装作没事: {out[-400:]!r}")
+    assert "loment-driver was killed" in out, (
+        f"报错器崩了以后把底层错误也丢了: {out[-400:]!r}")
+    print("      #773: 编译器崩溃合成 E900（有/无渲染器都说话）；渲染器崩溃也点名")
+
+
 @test
 def test_launcher_takes_exactly_one_input_file():
     """`check`/`ir` 只吃**一个**文件: 多给的那个要**报错退 2**, 不能静默只查第一个。

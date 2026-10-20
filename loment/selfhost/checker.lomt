@@ -549,9 +549,14 @@ fn chk_rt_site(src: ptr, t: ptr, i: u32) -> u32 {
         }
         return 0;
     }
+    // `#778`：真线程要把运行期锁与 `@__loment_rt_threads` 带进产物 ——
+    // 与参考实现 `_RUNTIME_SITES` 同一条（`no_runtime` 下点名拒）。
+    // 注释写在 `if` **之前**，不夹进 `||` 链中间：两个格式化器对"表达式中间的
+    // 行注释"归属不同行，夹在中间会让孪生判据分叉（`loment_fmt_test` 实测）。
     if chk_tok_is(src, t, i, "alloc") || chk_tok_is(src, t, i, "free")
             || chk_tok_is(src, t, i, "str_concat") || chk_tok_is(src, t, i, "str_eq")
-            || chk_tok_is(src, t, i, "panic") {
+            || chk_tok_is(src, t, i, "panic")
+            || chk_tok_is(src, t, i, "thread_spawn") {
         if chk_tok_is(src, t, i + 1, "(") {
             return 1;
         }
@@ -1303,7 +1308,18 @@ fn chk_env_get(src: ptr, t: ptr, env: ptr, envc: u32, name_tok: u32) -> u32 {
     return 0;
 }
 
+/// 名字环境（每函数：形参 + 块内 `let`）的条数上限。
+///
+/// **2026-10-20**：原先没有上限，而这一段只有 **2048 字节 = 256 条**。一份 515 个
+/// `let` 的函数在 Linux 上**段错误**（PE 上只是静默写坏后面的段，所以一直没现形）；
+/// `#774` 的 1537 局部变量判据反而走不到 `PT_EMAX`。现在放到 4096 条（32 KiB），
+/// 并且**写满就停**：`PT_EMAX`（1536）在发射阶段仍会点名拒，更大量根本到不了产物。
+const CHK_ENV_MAX: u32 = 4096;
+
 fn chk_env_add(t: ptr, env: ptr, envc: u32, name_tok: u32, ty: u32) -> u32 {
+    if envc >= CHK_ENV_MAX {
+        return envc;                    // 表满：不写穿（拒绝由 `PT_EMAX` 那一层点名）
+    }
     store32(env, envc * 8, name_tok);
     store32(env, envc * 8 + 4, ty);
     return envc + 1;
@@ -3578,7 +3594,9 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
 /// 语句**起点**那一条要在走查里判（要边界），留在 `chk_body`，不在这儿重复。
 fn chk_syntax_prepass(src: ptr, t: ptr, out: ptr, o: u32) -> u32 {
     let i: u32 = 0;
-    let depth: u32 = 0;
+    let depth: u32 = 0;        // 花括号深度 (只管"块没闭合"那条旧判据)
+    let nest: u32 = 0;         // 块 + 括号的**共用**嵌套深度 (E023 的判据)
+    let un_run: u32 = 0;       // 连续一元运算符的链长 (`!` / `-` / `&`)
     let deep_done: u32 = 0;
     while chk_tok_kind(t, i) != 4 {
         // **裸块不是语句**（`#44`）：Loment 没有"单独一层花括号"这回事，参考实现在解析期
@@ -3599,15 +3617,46 @@ fn chk_syntax_prepass(src: ptr, t: ptr, out: ptr, o: u32) -> u32 {
         // 只报**第一次**越界：再往上每层都报一遍对读者没意义（参考实现也只报一条）。
         // **已经报过语法错就不再报它**：参考实现是"第一个解析错就中止"，两条一起报会让
         // 码集比它多一个。
-        if chk_tok_is(src, t, i, "{") {
-            depth = depth + 1;
-            if depth > 64 && deep_done == 0 && o == 0 {
+        // **深度上限要覆盖每一条会递归的构造**（`#868`–`#874`）：原先只数 `{`，于是
+        // 100 层括号 / 300 层调用 / 256 层下标 / 256 层数组类型都从这里放行，一路走到
+        // codegen 的递归里把栈用穿 —— **段错误、零输出**。参考实现用一个计数同时管块
+        // 与表达式（`lomentc.MAX_NEST`），这里照抄那个口径：`(` `[` `{` 各进一层。
+        // 计数从 token 流**左侧一遍**算出、与输入大小无关，所以"越深越先报"是构造性的。
+        if chk_tok_kind(t, i) == 3
+                && (chk_tok_is(src, t, i, "{") || chk_tok_is(src, t, i, "(")
+                    || chk_tok_is(src, t, i, "[")) {
+            nest = nest + 1;
+            if nest > 64 && deep_done == 0 && o == 0 {
                 o = sym_pub(src, t, out, o, E_DEEP, i);
                 deep_done = 1;
             }
         }
+        if (chk_tok_kind(t, i) == 3
+                && (chk_tok_is(src, t, i, "}") || chk_tok_is(src, t, i, ")")
+                    || chk_tok_is(src, t, i, "]"))) && nest > 0 {
+            nest = nest - 1;
+        }
+        // 块深度**单独**数：文件末尾"块没闭合"只说花括号，别把没闭合的 `(` `[` 也算进去
+        // （那会换掉既有语料上的报码）。
+        if chk_tok_is(src, t, i, "{") {
+            depth = depth + 1;
+        }
         if chk_tok_is(src, t, i, "}") && depth > 0 {
             depth = depth - 1;
+        }
+        // **一元链**（`#870`）：`parse_unary` 每层递归一次，而括号计数看不见它
+        // （`!!!!true` 里一个括号都没有）。连续的一元运算符就是链长；`!=` 被词法拆成
+        // `!` `=`，`&`/`-` 的二元用法隔着操作数 —— 所以"连续"这个判据把两者分开。
+        if chk_tok_kind(t, i) == 3
+                && (chk_tok_is(src, t, i, "!") || chk_tok_is(src, t, i, "-")
+                    || chk_tok_is(src, t, i, "&")) {
+            un_run = un_run + 1;
+            if un_run > 64 && deep_done == 0 && o == 0 {
+                o = sym_pub(src, t, out, o, E_DEEP, i);
+                deep_done = 1;
+            }
+        } else {
+            un_run = 0;
         }
         // 裸 `return;`（不带值）**不是合法构造** —— `loment syntax` 明说它必须带值。
         // 参考实现报 E019 "期望表达式，得到 ';'"；自举侧原先**段错误、什么都不印**
@@ -4381,8 +4430,8 @@ pub fn chk_arena_env() -> u32 { return 105808; }
 /// 登记元素/切片类型 —— 一个 150 条 let 的函数能开出几百条。不清零就会写穿到后面的
 /// 区 (静默改坏别人), 所以条数是"每函数上限"而不是"整单元上限"。
 /// 448 条/函数对语料最重的函数 (152 let) 仍有 3 倍余量。
-pub fn chk_arena_tyt() -> u32 { return 107856; }
-pub fn chk_arena_bytes() -> u32 { return 111968; }
+pub fn chk_arena_tyt() -> u32 { return 138576; }
+pub fn chk_arena_bytes() -> u32 { return 142688; }
 
 // 原先这里有个 `check(src, t, out)` 薄包装 (自己开 arena)。**去掉了**: arena 现在 ~100 KB,
 // 语言自带的 64 KiB bump 堆放不下, 而"在调用方进程里改 brk"这条路对 C 夹具是**危险**的

@@ -1,4 +1,4 @@
-# 原生面的独立 oracle，与一个可证伪的自举根（#772 / #776）
+# docs/270 · 原生面的语义 oracle 与可证伪的自举根
 
 **状态**：已落地（2026-10-19）。判据 `loment_spec_oracle_test`（3 条）与
 `loment_genesis_test`（5 → 8 条）；根记录 `loment/build/genesis/provenance.json`。

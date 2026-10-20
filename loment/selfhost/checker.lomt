@@ -507,7 +507,11 @@ fn chk_core_dim(src: ptr, t: ptr, k: u32) -> u32 {
         return 4;
     }
     // 第六维（`docs/253`，用户 2026-10-15）：`lms`。与 `gc` **正交**。
-    if chk_tok_is(src, t, k, "lms_close") || chk_tok_is(src, t, k, "lms_open") {
+    // 2026-10-18（0.1.5.1）：取值从"开/关"改成**档名**（`docs/253` §11.3）——
+    // 默认 `lms_full`，写档是**降级**。非满档一律带 `_admin`（`docs/262` §10.1）。
+    if chk_tok_is(src, t, k, "lms_full") || chk_tok_is(src, t, k, "lms_forensic_admin")
+            || chk_tok_is(src, t, k, "lms_daily_admin")
+            || chk_tok_is(src, t, k, "lms_manage_only_admin") {
         return 5;
     }
     // 第七维（`docs/262`，用户 2026-10-18）：`lspe`。与其它六维正交 ——
@@ -609,12 +613,18 @@ fn chk_core_val(src: ptr, t: ptr, k: u32) -> u32 {
     if chk_tok_is(src, t, k, "no_vm") {
         return 2;
     }
-    // 第六维（`docs/253`）：`lms_close` / `lms_open`。
-    if chk_tok_is(src, t, k, "lms_close") {
+    // 第六维（`docs/253` §11.3）：四个档名。序号是**维内**的，只用来判"两档同时选"。
+    if chk_tok_is(src, t, k, "lms_full") {
         return 1;
     }
-    if chk_tok_is(src, t, k, "lms_open") {
+    if chk_tok_is(src, t, k, "lms_forensic_admin") {
         return 2;
+    }
+    if chk_tok_is(src, t, k, "lms_daily_admin") {
+        return 3;
+    }
+    if chk_tok_is(src, t, k, "lms_manage_only_admin") {
+        return 4;
     }
     return 0;
 }
@@ -1332,23 +1342,67 @@ fn chk_tok_int(src: ptr, t: ptr, i: u32) -> u32 {
     return r;
 }
 
-/// `lms` 开着吗（`docs/253`） —— 第 1 级检查器（E028）的开关。
+/// `lms` **第 1 级（检查器）**开着吗（`docs/253`）—— E029（用完再放）的开关。
 ///
-/// **扫 token 流**，与 `codegen.lomt` 的 `gc_alpha_tier` 同一个形状（那边扫
-/// `choose gc_auto_alpha`）—— 两边读的都是**根单元源码里那个词**，那是同一条纪律。
+/// **2026-10-18 起它读档，不再读"'open'"**：默认 `lms_full` ⇒ 开着；
+/// 四个档里只有 `lms_manage_only_admin` 关掉第 1 级。显式写的
+/// `choose lms_check` / `choose close lms_check` **覆盖档**
+/// （`docs/253` §11.4 叠加规则），与参考实现 `_lms_level` 同一条。
+///
+/// **扫 token 流**（只扫深度 0，且跳过 `set choose <名字>` 那个定义），与
+/// `codegen.lomt` 的 `lms_guard_on` 同一个形状 —— 两边读的都是源码里那个词。
 ///
 /// ⚠ **为什么在这里自己扫一遍，而不是让调用方传进来**：`chk_tex` 已经有八个参数，
 /// 再加一个要把**所有递归调用点**都改一遍。而这个判断只在「**定长数组 + 裸字面量下标**」
 /// 那一格才被问到 —— 那是稀有形状，一遍扫描的代价落在那里可以接受。
 fn chk_lms_on(src: ptr, t: ptr) -> u32 {
+    let d: u32 = 0;
+    let ex_on: u32 = 0;
+    let ex_off: u32 = 0;
+    let tier_off: u32 = 0;
     let i: u32 = 0;
     while chk_tok_kind(t, i) != 4 {
-        if chk_tok_is(src, t, i, "choose") && chk_tok_is(src, t, i + 1, "lms_open") {
-            return 1;
+        let k: u32 = chk_tok_kind(t, i);
+        if k == 3 {
+            let c: u32 = load8(src, tok_start(t, i)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                d = d + 1;
+            }
+            if (c == 125 || c == 41 || c == 93) && d > 0 {
+                d = d - 1;
+            }
+        } else if d == 0 && chk_tok_is(src, t, i, "choose") {
+            // `set choose <名字>` 是**定义**，不是取值 —— 与参考实现同一处跳过。
+            let isdef: u32 = 0;
+            if i > 0 {
+                if chk_tok_is(src, t, i - 1, "set") {
+                    isdef = 1;
+                }
+            }
+            if isdef == 0 {
+                if chk_tok_is(src, t, i + 1, "lms_check") {
+                    ex_on = 1;
+                }
+                if chk_tok_is(src, t, i + 1, "close") && chk_tok_is(src, t, i + 2, "lms_check") {
+                    ex_off = 1;
+                }
+                if chk_tok_is(src, t, i + 1, "lms_manage_only_admin") {
+                    tier_off = 1;
+                }
+            }
         }
         i = i + 1;
     }
-    return 0;
+    if ex_off == 1 {
+        return 0;
+    }
+    if ex_on == 1 {
+        return 1;
+    }
+    if tier_off == 1 {
+        return 0;
+    }
+    return 1;
 }
 
 /// 名字对应的类型: 局部环境优先, 再看顶层符号表 (模块级常量在函数体内可见,

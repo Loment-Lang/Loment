@@ -128,6 +128,8 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  # `choose write grammar`: 读法由声明决定、出厂锁的取值表、声明先抹掉
                  "loment_grammar_test",
                  "loment_tools_test", "loment_p7_test", "loment_p8_test", "loment_p9_test",
+                 # `lms` 这一维：档 + 七个细开关 + 叠加规则（`docs/253` §9 / §11.4）
+                 "loment_lms_test",
                  # GC 证明面的量尺（`docs/210` §7）—— 语料跑成 alpha、加总 gc_ladder。
                  "loment_gc_surface_test",
                  # 逐站点说出"为什么落到那一层"（`docs/229`）—— 判据 A 是与编译器的**对账**：
@@ -335,6 +337,9 @@ SHARD_COST = {
     "loment_jtrans_test": 0.0,
     "loment_lib_test": 7.4,
     "loment_libl_test": 1.9,
+    # `lms` 这一维与七级（`docs/253` §9 / `docs/269`）。本机 4.0s（含一次 `cc` + 跑重启器）；
+    # CI 上量出来再改这一格 —— 它进的是分片均分，不是判据预算。
+    "loment_lms_test": 4.0,
     "loment_lomc_test": 9.5,
     "loment_lompi_test": 61.5,
     "loment_lomtfrom_test": 6.8,
@@ -511,9 +516,26 @@ def count_skips(text: str) -> int:
 ROOT_FLOORS = ".github/gate-floors.txt"
 #: 允许跳过的判据。一行 `套件 判据名 # 环境/仓库: 理由`；`*` = 整条套件被跳过。
 ROOT_SKIPS = ".github/gate-skips.txt"
+#: 已知红项。一行 `套件 判据名 # 环境/仓库: 理由`；`*` = **整条套件级红**（崩溃/超时，
+#: 没有可点名的判据 —— 它**不**表示"这条套件里的任何一条都算已知红"，见 `baseline_new`）。
+ROOT_BASELINE = ".github/gate-baseline.txt"
 
 _SKIP_LINE_RE = re.compile(r"^\s*SKIP\s+([^:]+):\s*(.*)$")
 _PASS_LINE_RE = re.compile(r"^\s*PASS\s+(\S+)\s*$")
+#: 各套件输出里 `  FAIL  <判据名>: …` 的判据名 —— 与 `loment_suite.run` 的输出契约一致。
+_FAIL_CRIT_RE = re.compile(r"^\s*FAIL\s+(\S+):", re.M)
+#: `:: [static] …` 那一行末尾的机器可读失败名单（`format_line` 打出来的）。
+_FAILED_FIELD_RE = re.compile(r"\[failed=([^\]]*)\]")
+
+
+def failed_criteria(out: str) -> tuple[str, ...]:
+    """一条检查的输出里**点名失败**的判据（按出现顺序去重）。
+
+    `#769`：基线原来按**套件名**匹配 —— 一条套件只要在基线里，它里面**任何**一条判据
+    回归都被豁免。逐条匹配要能拿到"这个套件红的是哪几条"，而 `loment_suite.run` 的
+    输出契约里正好有那行 `  FAIL  <判据名>: …`（老循环也打这个形状）。
+    """
+    return tuple(dict.fromkeys(m.group(1) for m in _FAIL_CRIT_RE.finditer(out)))
 
 
 def read_budget(floors_path=None, skips_path=None) -> tuple[dict[str, int], set[tuple[str, str]]]:
@@ -580,6 +602,97 @@ def check_budget_against_base(base_floors: dict[str, int],
         bad.append(f"{suite} 的 {crit}: 这条跳过**对照面里没有** —— 跳过表只许变短; "
                    f"给既有判据加环境门、再把豁免登记进来, 不是解法")
     return bad
+
+
+# ---------------------------------------------------------------- 已知红基线（`#769`）
+#
+# 基线的一行是 `套件 判据名`（`*` = 整条套件级红：崩溃/超时，**没有**可点名的判据）。
+# 原先那版只取行首第一个词（套件名），于是**一条套件只要在基线里，它里面任何一条判据
+# 回归都被豁免** —— 133 条判据（14.3%）落在这种整条豁免里，包括唯一那条种子容量判据
+# （`loment_genesis_test::test_seed_fits_lomelf_input_buffer`）与镜像链接器的对拍判据
+# （`loment_elf_test::test_lomelf_selfhost_matches_reference`）。
+#
+# 覆盖关系（`covers`）是这一版的关键：
+#   * `(套件, 判据)` 被覆盖 ⇔ 基线里有**这条判据**，或基线里有 `(套件, *)`（旧格式的
+#     整条豁免 —— 只在跟**对照面**比"只许变短"时认它，好让"细化为逐条"不算变长）；
+#   * `(套件, *)` 被覆盖 ⇔ 基线里**也有** `(套件, *)`。反过来不成立：一条逐条豁免
+#     **不能**授权一条新的整条豁免（那是变粗，不是变短）。
+
+def read_baseline(path=None) -> set[tuple[str, str]]:
+    """读基线：`{(套件, 判据名), …}`。旧格式的一列行（只有套件名）读成 `(套件, "*")`。
+
+    旧格式的兼容是**为对照面**准备的：PR 的 base 分支上那份基线还是整条豁免，
+    "只许变短"的棘轮要读得懂它，否则细化这一笔自己先判失败。
+    """
+    p = pathlib.Path(path) if path else pathlib.Path(__file__).resolve().parent.parent / ROOT_BASELINE
+    if not p.exists():
+        raise FileNotFoundError(f"{p} 不见了 —— 门禁不猜，直接判失败")
+    base: set[tuple[str, str]] = set()
+    for ln in p.read_text(encoding="utf-8").splitlines():
+        body = ln.split("#", 1)[0].strip()
+        if not body:
+            continue
+        parts = body.split()
+        if len(parts) == 1:
+            base.add((parts[0], "*"))          # 旧格式：整条套件
+        elif len(parts) == 2:
+            base.add((parts[0], parts[1]))
+        else:
+            raise ValueError(f"{ROOT_BASELINE}: 这一行要写成 `套件 判据名`: {ln!r}")
+    return base
+
+
+def baseline_red(gate_out: str) -> set[tuple[str, str]]:
+    """从合并后的 `gate.out` 读出**这一轮红在哪几条判据上**。
+
+    一条 `:: [static] … FAIL` 行末尾带着 `[failed=名字,…]`（`format_line` 打的）。
+    没有那个字段、或字段是 `*`，说明红是**套件级**的（崩溃/超时/导入失败）——
+    那时没有任何判据名可点，只能记 `(套件, "*")`。
+    """
+    red: set[tuple[str, str]] = set()
+    for ln in gate_out.splitlines():
+        m = _STATIC_LINE_RE.match(ln)
+        if not m or " FAIL " not in ln:
+            continue
+        suite = m.group(1)
+        fm = _FAILED_FIELD_RE.search(ln)
+        names = [] if not fm else [n.strip() for n in fm.group(1).split(",") if n.strip()]
+        if not names or names == ["*"]:
+            red.add((suite, "*"))
+        else:
+            red.update((suite, n) for n in names)
+    return red
+
+
+def _covers(base: set[tuple[str, str]], pair: tuple[str, str]) -> bool:
+    suite, crit = pair
+    if crit == "*":
+        return (suite, "*") in base       # 整条豁免只能由整条豁免授权
+    return pair in base or (suite, "*") in base
+
+
+def baseline_new(red: set[tuple[str, str]], base: set[tuple[str, str]]) -> list[tuple[str, str]]:
+    """这一轮红、而基线**没有逐条授权**的那些 —— 它们才是要判失败的"新红"。"""
+    return sorted(p for p in red if not _covers(base, p))
+
+
+def baseline_gone(red: set[tuple[str, str]], base: set[tuple[str, str]]) -> list[tuple[str, str]]:
+    """基线里有、这一轮**不再红**的那些（只在 summary 里提醒"该变短了"）。"""
+    return sorted(p for p in base if not _covers(red, p))
+
+
+def baseline_growth(old: set[tuple[str, str]], new: set[tuple[str, str]]) -> list[tuple[str, str]]:
+    """`new` 里**超出 `old` 授权**的那些 —— 非空 = 基线变长了（不许）。"""
+    return sorted(p for p in new if not _covers(old, p))
+
+
+def format_pairs(pairs) -> str:
+    """`套件<TAB>判据名` 一行一条 —— workflow 用 `cut -f1` / `awk -F'\\t'` 读。"""
+    return "".join(f"{s}\t{c}\n" for s, c in sorted(pairs))
+
+
+def _read_text(path) -> str:
+    return pathlib.Path(path).read_text(encoding="utf-8", errors="replace")
 
 
 def read_criterion_lines(out: str) -> tuple[list[str], list[str], bool]:
@@ -712,12 +825,20 @@ def merge_shard_logs(root, expected=STATIC_CHECKS) -> tuple[str, list[str]]:
     return text, problems
 
 
-def format_line(name: str, ok: bool, tail: str, dt: float, skips: int) -> str:
+def format_line(name: str, ok: bool, tail: str, dt: float, skips: int,
+                failed: tuple[str, ...] = ()) -> str:
     """`:: [static] …` 那一行的**纯函数**版本 —— 判据能直接钉它的形状。
 
     跳过的条数**只在非零时出现**：大多数检查一条都不跳，给它加个 `0 SKIP` 只是噪音。
+
+    `#769`：失败时再带一个**机器可读**的 `[failed=…]`。基线要按判据逐条匹配，
+    而 `tail` 是给人读的一句话（可能被截断、也可能含 `；`），拿它解析名字不可靠。
+    没有点名判据的失败（崩溃/超时/导入失败）打成 `[failed=*]` —— 那是**整条套件级红**，
+    与"某一条已知红"不是一回事。
     """
     mark = f"  {skips} SKIP" if skips else ""
+    if not ok:
+        mark += f"  [failed={','.join(failed) if failed else '*'}]"
     return f":: [static] {name:14s} {'PASS' if ok else 'FAIL'}  {dt:6.1f}s{mark}  {tail}"
 
 
@@ -733,11 +854,12 @@ class Result(NamedTuple):
     skipped: tuple[str, ...]     # 打了 SKIP 的判据名（运行器会连名字一起打）
     declared: int                # `len(TESTS)`；没有 TESTS 的 driver 脚本是 0
     level_skip: bool             # 整条套件级跳过（循环之前就 return 0 那种）
+    failed: tuple[str, ...] = () # 点名失败的判据（`#769`）；空 = 套件级失败
 
 
 def _report(r: "Result") -> None:
     """一行结果。**只在一处打** —— 两个路径各打一次会变成打两遍 (上一版就是这么错的)。"""
-    print(format_line(r.name, r.ok, r.tail, r.dt, r.skips), flush=True)
+    print(format_line(r.name, r.ok, r.tail, r.dt, r.skips, r.failed), flush=True)
 
 
 def _run_one_check(name: str) -> Result:
@@ -770,8 +892,12 @@ def _run_one_check(name: str) -> Result:
     # `#371`: 跳过被记成**通过**, 所以那个数得单独数出来报 —— 否则这一行报的是
     # "没抛异常的总数"。CI 是 ubuntu 容器, 里面没有 `wsl`, 于是 104 条判据在 runner 上
     # 一条都不跑而门禁全绿 (最重的是 `loment_elf_test`: 运行时护栏整条在里面)。
+    # `#769`: 基线要逐条判据匹配，所以把点名失败的那几条一起带出去。`rc != 0` 而没有
+    # 任何 `FAIL <名>:` 行 = 套件级失败（崩溃/超时），`failed` 保持空 —— 调用方把它记成
+    # `(套件, "*")`，与"这条套件里某一条已知红"分开。
+    failed = failed_criteria(out) if rc != 0 else ()
     return Result(name, rc == 0, (tail[-1] if tail else ""), dt, count_skips(out),
-                  tuple(passed), tuple(skipped), declared, level)
+                  tuple(passed), tuple(skipped), declared, level, failed)
 
 
 def run_static(only: tuple[str, ...] = (), jobs: int = 1, names: list[str] | None = None):
@@ -900,6 +1026,16 @@ def main():
                          "打到 stdout; 按**判据名**取并集并要求恰好覆盖 STATIC_CHECKS (`#443`)")
     ap.add_argument("--budget-vs", nargs=2, metavar=("FLOORS", "SKIPS"), default=None,
                     help="把树里的判据预算与对照面（那两份文件）比: 只许收紧 (`#418`)")
+    ap.add_argument("--baseline-red", metavar="GATE_OUT", default=None,
+                    help="从合并后的 gate.out 读出这一轮红的 (套件,判据) 对 (`#769`)")
+    ap.add_argument("--baseline-pairs", metavar="BASELINE", default=None,
+                    help="把基线文件格式化成 (套件,判据) 对（旧格式的一列行读成 `套件 *`）")
+    ap.add_argument("--baseline-new", nargs=2, metavar=("GATE_OUT", "BASELINE"), default=None,
+                    help="这一轮**基线没逐条授权**的红 (= 判失败的那一份)")
+    ap.add_argument("--baseline-gone", nargs=2, metavar=("GATE_OUT", "BASELINE"), default=None,
+                    help="基线里有、这一轮不再红的那些 (只提醒「该变短了」)")
+    ap.add_argument("--baseline-growth", nargs=2, metavar=("OLD", "NEW"), default=None,
+                    help="NEW 超出 OLD 授权的那些对; 非空 = 基线变长了（不许, 退出码 1）")
     default_jobs = max(1, min(8, (os.cpu_count() or 4)))
     ap.add_argument("-j", "--jobs", type=int, default=default_jobs,
                     help=f"静态门禁并行度 (默认 {default_jobs}; 1 = 串行同进程)")
@@ -940,6 +1076,34 @@ def main():
             return 1
         print(f"fujoci: 判据预算只许收紧: OK（套件 {len(base_floors)} -> {len(floors)}，"
               f"跳过 {len(base_skips)} -> {len(skips)}）")
+        return 0
+
+    # `#769`: 已知红基线的逐条匹配。workflow 把这几个子命令的输出当作文件内容用，
+    # 于是"怎么解析"只有这一份实现（shell 里 `awk '{print $3}'` 那种按列猜的写法
+    # 在判据名带 `；`/被截断时会静默失配）。
+    if a.baseline_red is not None:
+        sys.stdout.write(format_pairs(baseline_red(_read_text(a.baseline_red))))
+        return 0
+    if a.baseline_pairs is not None:
+        sys.stdout.write(format_pairs(read_baseline(a.baseline_pairs)))
+        return 0
+    if a.baseline_new is not None:
+        red = baseline_red(_read_text(a.baseline_new[0]))
+        sys.stdout.write(format_pairs(baseline_new(red, read_baseline(a.baseline_new[1]))))
+        return 0
+    if a.baseline_gone is not None:
+        red = baseline_red(_read_text(a.baseline_gone[0]))
+        sys.stdout.write(format_pairs(baseline_gone(red, read_baseline(a.baseline_gone[1]))))
+        return 0
+    if a.baseline_growth is not None:
+        old, new = (read_baseline(p) for p in a.baseline_growth)
+        grew = baseline_growth(old, new)
+        if grew:
+            sys.stdout.write(format_pairs(grew))
+            print(f"fujoci: 基线比对照面长了 {len(grew)} 条 —— 只许变短", file=sys.stderr)
+            return 1
+        print(f"fujoci: 基线只许变短: OK（对照面 {len(old)} 条 -> 这一棵树 {len(new)} 条）",
+              file=sys.stderr)
         return 0
 
     # `--shard K/N` -> 这一片的名字表。**必须经过 `shards(N)`** —— 分片的划分与它的

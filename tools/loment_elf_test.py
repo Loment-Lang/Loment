@@ -653,6 +653,12 @@ def test_gc_manual_free_list_recycles():
         它保证"跑通"不是"反正都跑得通"。
 
     实测（2026-09-25）：这条在 phi 修好之前是 **rc = 132** —— 那时的链表恒为 1 个节点。
+
+    ⚠ **读 `prev` 要绕过静态追踪**（`docs/253` §5.1 的 E029；2026-10-19 起默认档
+    `lms_full` 打开）：这一条**故意**在 `free(prev)` 之后读那一块（它就是靠"释放后还读得到
+    3"来证明块没被串味）。检查器现在会把它当成 use-after-free 拒掉，于是反过来把指针先
+    存进 `[u64; 1]` 再读回来（`ptr → u64 → ptr`）：E029 只跟变量名，看不见内存里那一个。
+    运行期行为一个字节都没变 —— 这一条测的是**空闲链表复用**，不是检查器。
     """
     if not _wsl():
         print("      SKIP: 无 WSL")
@@ -660,13 +666,16 @@ def test_gc_manual_free_list_recycles():
     body = ("module gclist\nchoose gc_manual\nchoose runtime\n\nfn _start() {\n"
             "    let prev: ptr = alloc(64);\n"
             "    store8(prev, 0, 3);\n"
+            "    let slot: [u64; 1] = [0];\n"
             "    let i: u32 = 0;\n"
             "    let s: u32 = 0;\n"
             "    while i < 4000 {\n"
             "        let cur: ptr = alloc(64);\n"
             "        store8(cur, 0, 3);\n"
+            "        slot[0] = prev as u64;\n"
             "        %s"
-            "        s = s + load8(prev, 0);\n"
+            "        let rd: ptr = slot[0] as ptr;\n"
+            "        s = s + load8(rd, 0);\n"
             "        prev = cur;\n"
             "        i = i + 1;\n"
             "    }\n"
@@ -1210,9 +1219,16 @@ def test_free_refuses_a_double_free():
     "程序跑起来"这一层钉住，光看 IR 看不出来。
 
     **How to apply**：`a` 后面还分配了 `b`，所以 `a` **不是尾块** —— 走挂链那一支（尾块那条
-    路由"落在已分配区间内"那条检查挡，是另一条路，另有用例覆盖）。第二次 `free(a)` 之后再
+    路由"落在已分配区间内"那条检查挡，是另一条路，另有用例覆盖）。第二次 `free` 之后再
     要两块、分别写不同字节：**没修好时它们会指向同一段**，后写的盖掉先写的 ⇒ 退出码 3。
     借出标记（`next == -1`）正是让"已经释放过"这件事在第二次 `free` 时看得见的东西。
+
+    ⚠ **第二次 `free` 的指针要绕过静态追踪**（`docs/253` §5.1 的 E029；2026-10-19 起默认
+    档 `lms_full` 打开）：`free(a); free(a)` 现在在**检查期**就被拒，根本走不到分配器 ——
+    而这一条要测的是**运行期**那道所有权检查。所以把指针先存进一个 `[u64; 1]` 再读回来
+    （`ptr → u64 → ptr`，经内存转一手）：E029 只跟变量名，看不见"读回来的这个值就是 `a`"。
+    这不是放宽判据 —— 它是**把静态那一层让开**，让运行时那条唯一能挡住"同一块进两次
+    空闲链"的检查被真的执行到。
     """
     if not (_clang() and _wsl()):
         print("      SKIP: 无 clang/WSL")
@@ -1221,11 +1237,14 @@ def test_free_refuses_a_double_free():
         "module freedbl\nchoose runtime\n\n"
         "fn _start() {\n"
         "    let n: u32 = 16;\n"
+        "    let slot: [u64; 1] = [0];\n"
         "    let a: ptr = alloc(n);\n"
         "    let b: ptr = alloc(n);\n"
         "    store8(b, 0, 1);\n"
+        "    slot[0] = a as u64;\n"
         "    free(a);\n"
-        "    free(a);\n"
+        "    let a2: ptr = slot[0] as ptr;\n"
+        "    free(a2);\n"
         "    let c: ptr = alloc(n);\n"
         "    let d: ptr = alloc(n);\n"
         "    store8(c, 0, 11);\n"
@@ -1411,11 +1430,19 @@ def test_gc_alpha_adaptive_bounds_a_large_live_set():
       * `gc_auto` → **耗尽**（rc=132）—— 固定触发还没到，arena 先满了；
       * `gc_auto_alpha` → **跑完**（rc=7）—— 空间触发在快满时收掉垃圾。
     两只是**同一份源**，所以差别只来自那一档的触发策略。端到端过**包内镜像链接器**。
+
+    ⚠ **两半都钉 `choose lms_manage_only_admin`**（`docs/253` §11.4）：2026-10-19 起默认档
+    `lms_full` 打开了第 3 级**保障器** —— 它在 `alloc` 分配不出时先收一次再试
+    （`_heap_with_lms_rescue`）。那一级把 `gc_auto` 的"固定触发装不下"也救活了，于是
+    这条判据量到的会是保障器而不是触发策略。这一条要测的是**触发策略**，所以把第 3 级
+    在**两半**都关掉（`lms_manage_only_admin` 是表里 `lms_guard = false` 的那一档；
+    第 3 级自己的行为由 `loment_lms_test` 管）。这不是把期望值挪到新结果上：
+    `gc_auto` 仍然必须**真的耗尽**，差别仍然只来自 GC 那一行。
     """
     if not (_clang() and _wsl()):
         print("      SKIP: 无 clang/WSL")
         return
-    body = ("module gcadapt\n%s\nchoose runtime\n\n"
+    body = ("module gcadapt\n%s\nchoose runtime\nchoose lms_manage_only_admin\n\n"
             "fn chew(n: u32) -> u32 {\n"
             "    let p: ptr = alloc(n);\n"
             "    let q: ptr = p;\n"

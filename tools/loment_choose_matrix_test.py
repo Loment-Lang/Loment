@@ -281,24 +281,32 @@ def test_lms_rescue_only_exists_when_a_collector_does():
     这样改档名（如 `lms_*` 增档或重命名）不需要动这条判据，也不会两边各改一半。
     """
     values = lomentc.CORE_DIMS["lms"]
-    assert len(values) == 2, f"lms 期望两档，实际 {values}"
+    # ⚠ **不假设"恰好两档"**（2026-10-19，`docs/253` §11.3 把 `lms` 改成档名之后是四档）。
+    # 这一格要的是"第 3 级**开**与**关**各一档"，所以**从编译器那张表里挑**：位序与
+    # `LMS_TOGGLES` 同一张，判据因此不写死任何档名。
+    gi = lomentc.LMS_TOGGLES.index("lms_guard")
+    off = next(v for v in values if not lomentc.LMS_TIERS[v][gi])
+    on = next(v for v in values if lomentc.LMS_TIERS[v][gi])
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
-        sizes = {}
+        got: dict[tuple[str, str], str] = {}
         for gc in ("gc_manual", "gc_auto"):
-            for lms in values:
+            for lms in (off, on):
                 cell = {"mode": "std", "gc": gc, "runtime": "runtime", "lms": lms}
                 rc, diag, ir, pot = _emit(td, f"{gc}-{lms}", cell, ALLOC_BODY)
                 assert rc == 0, f"{gc}+{lms}: 编不过\n{diag[-400:]}"
                 assert pot.get("lms") == lms
-                sizes[(gc, lms)] = len(ir)
-    a, b = values
-    assert sizes[("gc_manual", a)] == sizes[("gc_manual", b)], \
-        f"gc_manual 下 lms 两档产物不同（{a} vs {b}）—— 没有收集器可'拉回', 这一级不该有代码"
-    assert sizes[("gc_auto", a)] != sizes[("gc_auto", b)], \
-        f"gc_auto 下 lms 两档产物相同（{a} / {b}）—— 第 3 级入口 A 没接上"
-    print(f"      manual 下无差别; auto 下 {a}={sizes[('gc_auto', a)]} / "
-          f"{b}={sizes[('gc_auto', b)]} B")
+                got[(gc, lms)] = ir
+    # **判的是那条救援路径在不在**，不是产物大小：`lms_guard` 开着时两个回收档都会发
+    # g1 界检查（`docs/253` §5.3 入口 B），所以"两档产物大小相同"在 `gc_manual` 下
+    # 已经不成立了 —— 而入口 A 的判据从来只是那个 `%lmsretry` 标记。
+    for gc in ("gc_manual", "gc_auto"):
+        assert "%lmsretry" not in got[(gc, off)], f"{gc}+{off}: 关着第 3 级还有救援标记"
+        want = gc == "gc_auto"
+        assert ("%lmsretry" in got[(gc, on)]) == want, (
+            f"{gc}+{on}: 救援路径该{'有' if want else '没有'}"
+            f"（`gc_manual` 下没有东西可收，入口 A 是一句空话）")
+    print(f"      {off} 无救援标记；{on} 只在 gc_auto 下有（入口 A 依赖收集器）")
 
 
 @test

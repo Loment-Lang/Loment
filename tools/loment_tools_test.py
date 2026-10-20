@@ -1585,9 +1585,170 @@ def test_gate_workflow_aggregation_fails_closed():
         "棘轮取不到对照面时没判失败（fail closed）—— 静默跳过的棘轮会变成"
         "一句永远不生效的谎话")
     assert 'echo "::error::对照面（$base）里读不到' in agg, "同上（读不到基线那一处）"
-    assert "comm -13 old.txt new.txt" in agg, "棘轮没在算'新增'（comm -13 那一列）"
-    assert "norm .github/gate-baseline.txt > new.txt" in agg, "棘轮比的不是树里那份基线"
+    # `#769`: "只许变短"按 (套件, 判据) 比，且解析只在 `ci.py` 一份（逐条匹配的
+    # 覆盖关系 —— 旧的整条 `套件 *` 可以细化为几条具体判据 —— 没法用 `comm` 表达）。
+    assert "tools/ci.py --baseline-growth old.txt new.txt" in agg, (
+        "棘轮没在按逐条判据算'新增'（`ci.py --baseline-growth`）")
+    assert "python3 tools/ci.py --baseline-pairs .github/gate-baseline.txt > new.txt" in agg, (
+        "棘轮比的不是树里那份基线（而且必须走 `ci.py` 的解析，不要按列 awk）")
     print("      聚合的两条防静默 + 两处基线缺失守卫 + 基线棘轮都在")
+
+
+@test
+def test_baseline_is_matched_per_criterion():
+    """`#769`：基线按 **(套件, 判据)** 匹配 —— 整条套件豁免不再吞掉别的判据。
+
+    **Why**：原先 `gate.yml` 用 `awk '{print $3}'` 取套件名，基线里写 `<套件>` 就豁免
+    **整条套件**。实测代价：133 条判据（14.3%）落在这种豁免里，包括唯一那条种子容量判据
+    （`loment_genesis_test::test_seed_fits_lomelf_input_buffer`）与镜像链接器的对拍判据
+    （`loment_elf_test::test_lomelf_selfhost_matches_reference`）。一条环境红会把同一套件
+    里别的判据一起带走。
+
+    **How to apply**：`ci.baseline_red()` 从 `:: [static] … FAIL` 行的 `[failed=a,b]`
+    读判据名（机器可读，不解析给人看的那句 tail）；`ci.baseline_new()` 逐条比。
+    `(套件, *)` 只表示**套件级失败**（崩溃/超时，没有可点名的判据），它**不**授权
+    同套件的其它判据。
+    """
+    import ci
+
+    out = ("  PASS  a\n"
+           "  FAIL  test_a: AssertionError: x\n"
+           "  FAIL  test_b: ValueError: y\n")
+    assert ci.failed_criteria(out) == ("test_a", "test_b")
+    assert ci.failed_criteria("  PASS  a\n") == ()
+
+    # 一行里点名两条判据 = 两条已知红; 没有 `[failed]` / `*` = 套件级红。
+    gate = (":: [static] loment_elf_test FAIL     1.0s  [failed=test_a,test_b]  …\n"
+            ":: [static] lom_audit      FAIL     0.0s  [failed=*]  boom\n"
+            ":: [static] loment_p8_test PASS     1.0s  ok\n")
+    red = ci.baseline_red(gate)
+    assert red == {("loment_elf_test", "test_a"), ("loment_elf_test", "test_b"),
+                   ("lom_audit", "*")}, red
+
+    # 只登记了 test_a 时，同套件的 test_b **仍然**是新红 —— 这正是本 issue 的要点。
+    base = {("loment_elf_test", "test_a")}
+    assert ci.baseline_new(red, base) == [("lom_audit", "*"),
+                                           ("loment_elf_test", "test_b")], (
+        "同套件的另一条判据被整条豁免吞掉了 —— `#769` 没生效")
+
+    # `(套件, *)` 只授权套件级红，不授权任何具名判据。
+    assert ci.baseline_new({("s", "t")}, {("s", "*")}) == []
+    assert ci.baseline_new({("s", "*")}, {("s", "t")}) == [("s", "*")], (
+        "一条逐条豁免反向授权了整条豁免 —— 那是变粗，不是变短")
+
+    # 旧格式（只有套件名）为对照面保留：读成 `(套件, *)`。
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "old-baseline.txt"
+        p.write_text("loment_elf_test   # 旧格式\n", encoding="utf-8", newline="\n")
+        assert ci.read_baseline(p) == {("loment_elf_test", "*")}
+
+    # `:: [static]` 那一行必须带机器可读的失败名单（否则 workflow 只能猜 tail）。
+    assert "[failed=test_a,test_b]" in ci.format_line("x", False, "…", 1.0, 0,
+                                                      ("test_a", "test_b"))
+    assert "[failed=*]" in ci.format_line("x", False, "…", 1.0, 0, ())
+    assert "[failed=" not in ci.format_line("x", True, "…", 1.0, 0, ())
+    print("      逐条匹配: 同套件的另一条判据仍是新红；整条豁免只能由整条豁免授权")
+
+
+@test
+def test_baseline_only_shrinks_per_criterion():
+    """`#769` 的"只许变短"也按逐条判据比 —— 细化不算变长，变粗才算。
+
+    **Why**：把原来的一整条 `套件 *` 拆成几条具体判据**是收紧**（覆盖面从"全部"缩到
+    那几条），必须放过；反过来，把几条具体判据合并成 `套件 *` 是**放宽**，必须红。
+    `comm` 表达不了这个覆盖关系，所以这一半也在 `ci.py` 里（`baseline_growth`）。
+    """
+    import ci
+
+    fine = {("s", "t1")}
+    coarse = {("s", "*")}
+    assert ci.baseline_growth(coarse, fine) == [], "细化（整条 -> 逐条）被判成了变长"
+    assert ci.baseline_growth(fine, coarse) == [("s", "*")], "变粗（逐条 -> 整条）没判红"
+    assert ci.baseline_growth(fine, fine | {("s", "t2")}) == [("s", "t2")], (
+        "新增一条逐条豁免没判红")
+    assert ci.baseline_growth(fine, set()) == [], "变短（删条目）被判成了失败"
+    assert ci.baseline_growth(coarse, coarse | {("s", "t1")}) == [], (
+        "整条豁免下补一条逐条记录不算变长（覆盖已经包含它）")
+    print("      整条 -> 逐条 = 收紧；逐条 -> 整条 = 放宽；两者都按 (套件,判据) 判")
+
+
+@test
+def test_gate_workflow_uses_the_per_criterion_baseline():
+    """`#769` 的接线：三处基线解析都走 `ci.py`，不再按列 `awk`。"""
+    wf = _gate_workflow()
+    for job in ("static-exclusive", "static-shard", "static"):
+        block = _job_block(wf, job)
+        assert "tools/ci.py --baseline-red gate.out > red.txt" in block, (
+            f"{job}: 没按逐条判据读红项")
+        assert "tools/ci.py --baseline-pairs .github/gate-baseline.txt > base.txt" in block, (
+            f"{job}: 没按逐条判据读基线")
+        assert "tools/ci.py --baseline-new gate.out .github/gate-baseline.txt" in block, (
+            f"{job}: 没按逐条判据算新红")
+        assert "awk '{print $3}'" not in block, (
+            f"{job}: 还在按列取套件名 —— 那正是整条豁免的来源")
+    assert "tools/ci.py --baseline-gone gate.out .github/gate-baseline.txt" in \
+        _job_block(wf, "static"), "汇总 job 没按逐条判据算'基线该变短了'"
+    # 单跑确认按**套件**（一次跑整条），但确认/假红的记录要保留判据对。
+    for job in ("static-exclusive", "static-shard"):
+        block = _job_block(wf, job)
+        assert "cut -f1 new_red.txt | sort -u > new_red_suites.txt" in block, (
+            f"{job}: 单跑复用的套件名没从逐条对里取")
+        assert 'awk -F\'\\t\' -v n="$name" \'$1==n\' new_red.txt' in block, (
+            f"{job}: confirmed/flaked 记的不是 (套件,判据) 对")
+    print("      三处基线解析 + 汇总的 gone + 单跑套件名都接在逐条对上")
+
+
+@test
+def test_the_static_line_carries_the_failed_criteria():
+    """端到端：一条真失败的套件在 `:: [static]` 行里带出 `[failed=<名字>]`（`#769`）。
+
+    **Why**：workflow 解析的是 `gate.out`，而那里每个套件只有**一行**。如果那一行只写
+    "FAIL"、名字只在给人看的 tail 里（可能被截断、也可能含 `；`），逐条基线就没法可靠
+    匹配。所以 `_run_one_check` 从套件自己的 `  FAIL  <名字>:` 行里收集，`format_line`
+    打成机器可读的字段。没有点名判据的失败 = `[failed=*]`（套件级）。
+    """
+    import ci
+
+    probe = Path(tempfile.mkdtemp(prefix="loment-baseline-probe-"))
+    try:
+        (probe / "loment_baseline_probe.py").write_text(
+            "import loment_suite\n"
+            "\n"
+            "TESTS = []\n"
+            "\n"
+            "def test(fn):\n"
+            "    TESTS.append((fn.__name__, fn))\n"
+            "    return fn\n"
+            "\n"
+            "@test\n"
+            "def test_green():\n"
+            "    pass\n"
+            "\n"
+            "@test\n"
+            "def test_red():\n"
+            "    raise AssertionError('boom')\n"
+            "\n"
+            "def main() -> int:\n"
+            "    return loment_suite.run(TESTS, 'loment_baseline_probe')\n",
+            encoding="utf-8", newline="\n")
+        sys.path.insert(0, str(probe))
+        try:
+            r = ci._run_one_check("loment_baseline_probe")
+            r2 = ci._run_one_check("loment_baseline_probe_no_such_module")
+        finally:
+            sys.path.remove(str(probe))
+            sys.modules.pop("loment_baseline_probe", None)
+        assert not r.ok, "探针的 test_red 没让套件失败"
+        assert r.failed == ("test_red",), f"失败的判据没认出来：{r.failed!r}"
+        line = ci.format_line(r.name, r.ok, r.tail, r.dt, r.skips, r.failed)
+        assert "[failed=test_red]" in line, line
+        assert r2.failed == (), "导入失败的套件不该凭空点名一条判据"
+        assert "[failed=*]" in ci.format_line(r2.name, r2.ok, r2.tail, r2.dt,
+                                              r2.skips, r2.failed)
+    finally:
+        shutil.rmtree(probe, ignore_errors=True)
+    print("      套件失败 -> [failed=<判据>]；崩溃/导入失败 -> [failed=*]")
 
 
 @test

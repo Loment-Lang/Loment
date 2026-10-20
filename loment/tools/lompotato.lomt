@@ -335,6 +335,19 @@ fn is_lspe_key(kp: ptr, kl: u32) -> u32 {
     return 0;
 }
 
+/// `lms_levels` 的七个键（`docs/253` §11.4）—— 与参考实现的 `LMS_TOGGLES` 同表，
+/// 与自举侧 `pt_lms_levels` 同序。
+fn is_lms_level_key(kp: ptr, kl: u32) -> u32 {
+    if eq_lit(kp, kl, "lms_check") == 1 { return 1; }
+    if eq_lit(kp, kl, "lms_manage") == 1 { return 1; }
+    if eq_lit(kp, kl, "lms_guard") == 1 { return 1; }
+    if eq_lit(kp, kl, "lms_reject") == 1 { return 1; }
+    if eq_lit(kp, kl, "lms_crash") == 1 { return 1; }
+    if eq_lit(kp, kl, "lms_restart") == 1 { return 1; }
+    if eq_lit(kp, kl, "lms_seed") == 1 { return 1; }
+    return 0;
+}
+
 fn is_floor_key(kp: ptr, kl: u32) -> u32 {
     if eq_lit(kp, kl, "assumed") == 1 { return 1; }
     if eq_lit(kp, kl, "stale_wf") == 1 { return 1; }
@@ -639,6 +652,10 @@ fn is_top_key(ver: u32, kp: ptr, kl: u32) -> u32 {
     // v16 = v15 + **LSPE 台账**（`docs/262`，用户 2026-10-18 定第七维）：`lspe` 对象。
     // 它是 LSPE 的第四件 —— 没有它，"这份产物有没有被审计"读不出来。
     if ver >= 16 && eq_lit(kp, kl, "lspe") == 1 {
+        return 1;
+    }
+    // v17 = v16 + **实际开着哪几级**（`docs/253` §11.4）：`lms_levels` 对象。
+    if ver >= 17 && eq_lit(kp, kl, "lms_levels") == 1 {
         return 1;
     }
     return 0;
@@ -1623,8 +1640,10 @@ fn chk_v1(mem: ptr, doc: u32, ver: u32) -> u32 {
         let lok: u32 = 0;
         if lm != NOTFOUND && jkind(mem, lm) == 3 {
             let ll: u32 = jstr(mem, lm, ptr_add(mem, M_SB), 4096);
-            if eq_lit(ptr_add(mem, M_SB), ll, "lms_close") == 1
-                    || eq_lit(ptr_add(mem, M_SB), ll, "lms_open") == 1 {
+            if eq_lit(ptr_add(mem, M_SB), ll, "lms_full") == 1
+                    || eq_lit(ptr_add(mem, M_SB), ll, "lms_forensic_admin") == 1
+                    || eq_lit(ptr_add(mem, M_SB), ll, "lms_daily_admin") == 1
+                    || eq_lit(ptr_add(mem, M_SB), ll, "lms_manage_only_admin") == 1 {
                 lok = 1;
             }
         }
@@ -1755,6 +1774,35 @@ fn chk_v1(mem: ptr, doc: u32, ver: u32) -> u32 {
             }
         }
     }
+    if ver >= 17 {
+        // v17（`docs/253` §11.4）：七级开关。与 Python 的 `potato.validate` 逐条对齐 ——
+        // 连错的条数都要一致。判三件事：对象 / 键封闭且七个别缺 / 值都是布尔。
+        let lv: u32 = jget(mem, doc, "lms_levels");
+        if lv == NOTFOUND || jkind(mem, lv) != 1 {
+            let _v17: u32 = bad(mem);
+        } else {
+            let km: u32 = jfirst(mem, lv);
+            while km != NOTFOUND {
+                let kn: u32 = jmkey(mem, km);
+                let kl2: u32 = jstr(mem, kn, ptr_add(mem, M_SB2), 4096);
+                if is_lms_level_key(ptr_add(mem, M_SB2), kl2) == 0 {
+                    let _u17: u32 = bad(mem);
+                }
+                let vn: u32 = jmval(mem, km);
+                if jkind(mem, vn) != 5 && jkind(mem, vn) != 6 {
+                    let _b17: u32 = bad(mem);
+                }
+                km = jsib(mem, km);
+            }
+            if jget(mem, lv, "lms_check") == NOTFOUND { let _m1: u32 = bad(mem); }
+            if jget(mem, lv, "lms_manage") == NOTFOUND { let _m2: u32 = bad(mem); }
+            if jget(mem, lv, "lms_guard") == NOTFOUND { let _m3: u32 = bad(mem); }
+            if jget(mem, lv, "lms_reject") == NOTFOUND { let _m4: u32 = bad(mem); }
+            if jget(mem, lv, "lms_crash") == NOTFOUND { let _m5: u32 = bad(mem); }
+            if jget(mem, lv, "lms_restart") == NOTFOUND { let _m6: u32 = bad(mem); }
+            if jget(mem, lv, "lms_seed") == NOTFOUND { let _m7: u32 = bad(mem); }
+        }
+    }
     if ver >= 6 {
         let gr: u32 = jget(mem, doc, "grammar");
         let gok: u32 = 0;
@@ -1857,6 +1905,9 @@ fn validate(mem: ptr, tot: u32) -> u32 {
         }
         if eq_lit(t, l, "v16") == 1 {
             ver = 16;
+        }
+        if eq_lit(t, l, "v17") == 1 {
+            ver = 17;
         }
     }
     if ver == NOTFOUND {

@@ -1,0 +1,8 @@
+module pos_no_gc
+
+choose no_gc
+choose runtime
+
+fn f() -> u32 {
+    return 1;
+}

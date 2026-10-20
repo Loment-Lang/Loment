@@ -276,6 +276,8 @@ tools/loment_multisyntax_test.py
 tools/loment_multisyntax_projects_test.py
 tools/loment_megaproject_test.py
 tools/loment_multilang_test.py
+tools/loment_book_test.py
+tools/lomentlings.py
 tools/trans_core.py
 tools/ctrans.py
 tools/loment_ctrans_test.py

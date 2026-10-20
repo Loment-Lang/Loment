@@ -269,6 +269,9 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  # 多语法前端 (docs/179, docs/175 §6 第 4 条): 外源源码 -> 接口单元
                  # -> L1 调用 -> 链外部目标文件 -> 跑出预期退出码
                  "loment_multisyntax_test",
+                 # 教材 (docs 之外的 `book/`)：书与 by-example 的每个 `rust,run` 块
+                 # 真编真跑、练习答案逐字节对上 —— 教材也会腐烂。
+                 "loment_book_test",
                  # 六门表层语法**各一个大型项目**（带正文、能真跑）: 前门翻出来的 Loment
                  # 跑出的数 == 对照组（clang/g++/javac/go/CPython/rustc）== 独立期望值
                  "loment_multisyntax_projects_test",
@@ -304,6 +307,8 @@ SHARD_COST = {
     "lom_audit": 0.0,
     "lomc_test": 3.6,
     "loment_admit_test": 2.2,
+    # 教材: 28 个可运行块 + 10 份练习答案。本机 20s 左右（Windows PE 链接慢一点）。
+    "loment_book_test": 120.0,
     "loment_capasserts_test": 4.0,
     "loment_caps_test": 99.9,
     "loment_channel_test": 92.8,
@@ -404,7 +409,7 @@ SHARD_COST = {
     "potato_cross": 0.0,
     "potato_test": 9.5,
     "vscode_ext_test": 1.2,
-}  # 96 条 = `len(STATIC_CHECKS)`；`unpriced_checks()` 钉住这条等式。
+}  # 97 条 = `len(STATIC_CHECKS)`；`unpriced_checks()` 钉住这条等式。
 
 #: 不参与均分、也**不需要** `SHARD_COST` 条目的判据。**今天是空的** —— 89 条全有实测值。
 #: 留着这个集合是为了让"新判据还没量过"有一个**明确**的落脚处：放进来的代价是它按

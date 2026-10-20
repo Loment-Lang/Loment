@@ -8734,6 +8734,12 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
     if contains_ident(src, toks, "hosted") == 1 {
         emit_str(s, out, "; loment-port: hosted\n");
     }
+    // `choose no_gc`（`#538`）：产物**自己声明**"我不带收集器"。与上面那行同一条认法
+    // （`contains_ident`：`no_gc` 只可能是核心模式的取值，别处写它早就是未定义名字）。
+    // 链接器据此核 IR 里真的没有 `@__loment_collect` / `@__loment_roots`。
+    if contains_ident(src, toks, "no_gc") == 1 {
+        emit_str(s, out, "; loment-gc: no_gc\n");
+    }
     emit_str(s, out, "\n");
     if load32(s, 512) == 1 {
         emit_runtime(s, out);

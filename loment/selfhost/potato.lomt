@@ -1946,7 +1946,8 @@ fn pt_gc(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
             }
         } else if d == 0 && pt_tis(unit, t, i, "choose")
                 && (pt_tis(unit, t, i + 1, "gc_manual") || pt_tis(unit, t, i + 1, "gc_auto")
-                || pt_tis(unit, t, i + 1, "gc_auto_alpha")) {
+                || pt_tis(unit, t, i + 1, "gc_auto_alpha")
+                || pt_tis(unit, t, i + 1, "no_gc")) {
             return pt_q(out, o, unit, pt_off(t, i + 1), pt_tlen(t, i + 1));
         }
         i = i + 1;

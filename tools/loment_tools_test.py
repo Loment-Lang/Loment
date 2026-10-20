@@ -1616,6 +1616,11 @@ def test_baseline_is_matched_per_criterion():
            "  FAIL  test_b: ValueError: y\n")
     assert ci.failed_criteria(out) == ("test_a", "test_b")
     assert ci.failed_criteria("  PASS  a\n") == ()
+    # `loment_dist_test` 的收尾清单是另一种形状（名字可带空格、无冒号）——
+    # 不认它，那条套件的任何一条判据失败都只剩一个 `*`，定位不到是哪条。
+    assert ci.failed_criteria("  FAIL  Windows 安装脚本  [TimeoutExpired: x]\n") == \
+        ("Windows 安装脚本",)
+    assert ci.failed_criteria("  FAIL  test_a: x\n  FAIL  test_a: y\n") == ("test_a",)
 
     # 一行里点名两条判据 = 两条已知红; 没有 `[failed]` / `*` = 套件级红。
     gate = (":: [static] loment_elf_test FAIL     1.0s  [failed=test_a,test_b]  …\n"

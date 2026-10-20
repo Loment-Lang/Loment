@@ -197,6 +197,242 @@ pub fn lspe_index_proved(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
     return n;
 }
 
+/// guard 站点里被 pass 覆盖的个数（证明数要扣掉它）。
+pub fn lspe_guard_covered(unit: ptr, t: ptr, lo: u32, hi: u32, pbuf: ptr) -> u32 {
+    let n: u32 = 0;
+    let i: u32 = lo;
+    while i < hi && lspe_kind(t, i) != 4 {
+        if lspe_kind(t, i) == 0 && lspe_tis(unit, t, i, "guard") == 1
+                && lspe_cover(i, pbuf) != 0 {
+            // 块自己的 `sites` 也要跟着涨：E1 这两族站点不经过 `lspe_note_covered`
+            // （它们由 `lspe_guard_total` / `lspe_index_total` 另扫一遍）。
+            let cb: u32 = lspe_cover(i, pbuf) * 16;
+            store32(pbuf, cb + 8, load32(pbuf, cb + 8) + 1);
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// index 站点里被 pass 覆盖的个数（规则与 `lspe_index_total` 逐条同形）。
+pub fn lspe_index_covered(unit: ptr, t: ptr, lo: u32, hi: u32, pbuf: ptr) -> u32 {
+    let n: u32 = 0;
+    let i: u32 = lo;
+    while i < hi && lspe_kind(t, i) != 4 {
+        if lspe_kind(t, i) == 3 && lspe_tis(unit, t, i, "[") == 1 && i > lo {
+            let ok: u32 = 0;
+            if lspe_kind(t, i - 1) == 0 && lspe_kw(unit, t, i - 1) == 0 {
+                ok = 1;
+            }
+            if lspe_kind(t, i - 1) == 3
+                    && (lspe_tis(unit, t, i - 1, ")") == 1
+                        || lspe_tis(unit, t, i - 1, "]") == 1) {
+                ok = 1;
+            }
+            if ok == 1 && i + 3 < hi && lspe_kind(t, i + 1) == 1
+                    && lspe_tis(unit, t, i + 2, ".") == 1
+                    && lspe_tis(unit, t, i + 3, ".") == 1 {
+                ok = 0;
+            }
+            if ok == 1 && lspe_cover(i, pbuf) != 0 {
+                let cb: u32 = lspe_cover(i, pbuf) * 16;
+                store32(pbuf, cb + 8, load32(pbuf, cb + 8) + 1);
+                n = n + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 安全表里**带旁路**的函数摘出去（`#786` 第 3 条）：它的摘要不再是干净的
+/// deref-only，而是 `Unchecked` —— 调用点必须保持 UNDECIDED，旁路不跨调用传播。
+///
+/// 参考实现在 `census.py` 的 `_lspe_safe_set` 里做同一件事（那里有现成的函数体
+/// 跨度）。这里拿不到跨度，所以按 `safe_mark_fn` 的同一条走法找体：`nm` → `(` →
+/// 首个 `{` → `skip_block`。表形是 `[count, name_tok × …]`（`compute_safe` 的产物）。
+///
+/// ⚠ 走的是**原流**（`--emit-potato` 那一份，头与括号还在）：codegen 那边的同一张表
+/// 拿的是**拆平后**的流，看不见头 —— 那条路要的是"指针逃不逃"，与审计覆盖无关。
+pub fn lspe_drop_unchecked(unit: ptr, t: ptr, tbl: ptr) -> u32 {
+    let n: u32 = load32(tbl, 0);
+    let keep: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let nm: u32 = load32(tbl, (i + 1) * 4);
+        let bad: u32 = 0;
+        let lp: u32 = nm + 1;
+        let g1: u32 = 0;
+        while lspe_kind(t, lp) != 4 && !lspe_tis(unit, t, lp, "(") && g1 < 64 {
+            lp = lp + 1;
+            g1 = g1 + 1;
+        }
+        if lspe_tis(unit, t, lp, "(") == true {
+            let b: u32 = lp + 1;
+            let g2: u32 = 0;
+            while lspe_kind(t, b) != 4 && !lspe_tis(unit, t, b, "{") && g2 < 8192 {
+                b = b + 1;
+                g2 = g2 + 1;
+            }
+            if lspe_tis(unit, t, b, "{") == true {
+                let at: u32 = b + 1;
+                let end: u32 = skip_block(unit, t, b) - 1;
+                let k: u32 = at;
+                while k < end {
+                    if lspe_kind(t, k) == 0 && lspe_tis(unit, t, k, "lspe") == true
+                            && k + 1 < end && lspe_kind(t, k + 1) == 0
+                            && lspe_tis(unit, t, k + 1, "pass") == true {
+                        bad = 1;
+                    }
+                    k = k + 1;
+                }
+            }
+        }
+        if bad == 0 {
+            store32(tbl, (keep + 1) * 4, nm);
+            keep = keep + 1;
+        }
+        i = i + 1;
+    }
+    store32(tbl, 0, keep);
+    return keep;
+}
+
+/// 最外层 pass 块的个数（`floors.pass`）：没有被别的块包含的那些。
+pub fn lspe_pass_outer(pbuf: ptr) -> u32 {
+    let pn: u32 = load32(pbuf, 0);
+    let outer: u32 = 0;
+    let s: u32 = 0;
+    while s < pn {
+        let b: u32 = (s + 1) * 16;
+        let inner: u32 = 0;
+        let r: u32 = 0;
+        while r < pn {
+            if r != s {
+                let c: u32 = (r + 1) * 16;
+                if load32(pbuf, c) < load32(pbuf, b)
+                        && load32(pbuf, b + 4) < load32(pbuf, c + 4) {
+                    inner = 1;
+                }
+            }
+            r = r + 1;
+        }
+        if inner == 0 {
+            outer = outer + 1;
+        }
+        s = s + 1;
+    }
+    return outer;
+}
+
+/// 两个 token 的原文相同（kind 也要相同）。
+pub fn lspe_teq(unit: ptr, t: ptr, a: u32, b: u32) -> u32 {
+    if lspe_kind(t, a) != lspe_kind(t, b) || lspe_tlen(t, a) != lspe_tlen(t, b) {
+        return 0;
+    }
+    let oa: u32 = lspe_off(t, a);
+    let ob: u32 = lspe_off(t, b);
+    let n: u32 = lspe_tlen(t, a);
+    let k: u32 = 0;
+    while k < n {
+        if load8(unit, oa + k) != load8(unit, ob + k) {
+            return 0;
+        }
+        k = k + 1;
+    }
+    return 1;
+}
+
+/// span `s` 是不是最外层（没有别的块包含它）。
+pub fn lspe_span_outer(pbuf: ptr, s: u32) -> u32 {
+    let pn: u32 = load32(pbuf, 0);
+    let b: u32 = (s + 1) * 16;
+    let r: u32 = 0;
+    while r < pn {
+        if r != s {
+            let c: u32 = (r + 1) * 16;
+            if load32(pbuf, c) < load32(pbuf, b)
+                    && load32(pbuf, b + 4) < load32(pbuf, c + 4) {
+                return 0;
+            }
+        }
+        r = r + 1;
+    }
+    return 1;
+}
+
+/// 同理由的第几次（内容寻址 id 的 `#occ` 那一半）。
+pub fn lspe_occ(unit: ptr, t: ptr, pbuf: ptr, s: u32) -> u32 {
+    let n: u32 = 0;
+    let b: u32 = (s + 1) * 16;
+    let tok: u32 = load32(pbuf, b) - 1;
+    let r: u32 = 0;
+    while r < s {
+        let c: u32 = (r + 1) * 16;
+        if lspe_teq(unit, t, tok, load32(pbuf, c) - 1) == 1 {
+            n = n + 1;
+        }
+        r = r + 1;
+    }
+    return n;
+}
+
+fn lspe_fnv_byte(h: u32, b: u32) -> u32 {
+    return (h ^ b) * 16777619;
+}
+
+fn lspe_fnv_dec(h: u32, v: u32) -> u32 {
+    if v >= 10 {
+        h = lspe_fnv_dec(h, v / 10);
+    }
+    return lspe_fnv_byte(h, 48 + v % 10);
+}
+
+/// `pass:<reason>#<occ>` 的 FNV-1a 32 —— 与参考实现 `_fnv1a32` 同一条。
+pub fn lspe_fnv_pass(unit: ptr, t: ptr, tok: u32, occ: u32) -> u32 {
+    let h: u32 = lspe_fnv_byte(2166136261, 112);   // 'p'
+    h = lspe_fnv_byte(h, 97);                       // 'a'
+    h = lspe_fnv_byte(h, 115);                      // 's'
+    h = lspe_fnv_byte(h, 115);                      // 's'
+    h = lspe_fnv_byte(h, 58);                       // ':'
+    let off: u32 = lspe_off(t, tok) + 1;            // 跳过开头引号
+    let n: u32 = lspe_tlen(t, tok);
+    let k: u32 = 1;
+    while k + 1 < n {
+        h = lspe_fnv_byte(h, load8(unit, off + k - 1) as u32);
+        k = k + 1;
+    }
+    h = lspe_fnv_byte(h, 35);                       // '#'
+    return lspe_fnv_dec(h, occ);
+}
+
+/// token `i` 落在哪个 pass 块里：回 span 序号 + 1（0 = 不在）。
+fn lspe_cover(i: u32, pbuf: ptr) -> u32 {
+    let n: u32 = load32(pbuf, 0);
+    let k: u32 = 0;
+    while k < n {
+        let b: u32 = (k + 1) * 16;
+        if i > load32(pbuf, b) && i < load32(pbuf, b + 4) {
+            return k + 1;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+/// 站点被 pass 覆盖：`passed_sites++`，块自己的 `sites++`；回 1（覆盖）/ 0（不在块里）。
+fn lspe_note_covered(i: u32, pbuf: ptr, out: ptr) -> u32 {
+    let c: u32 = lspe_cover(i, pbuf);
+    if c == 0 {
+        return 0;
+    }
+    store32(out, 44, load32(out, 44) + 1);
+    let b: u32 = c * 16;
+    store32(pbuf, b + 8, load32(pbuf, b + 8) + 1);
+    return 1;
+}
+
 /// E3（局部流）+ E4（过程间摘要）的普查（`docs/262` §5.4）。**一个函数**装下全部
 /// —— 自举侧每加一个函数 ≈ +4.7s（`loment_channel_test` 那条护栏注释），所以这里
 /// 不拆小函数，重复的 token 文本比较就地展开。
@@ -211,13 +447,36 @@ pub fn lspe_index_proved(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
 ///
 /// `out` 十个 u32 见 `PT_L3CNT`。返回 1 = 首参表超容量（调用方 `pt_wfail`）。
 pub fn lspe_engine(unit: ptr, t: ptr, lo: u32, hi: u32,
-                  sft: ptr, pft: ptr, out: ptr) -> u32 {
+                  sft: ptr, pft: ptr, out: ptr, pbuf: ptr) -> u32 {
     let q: u32 = 0;
-    while q < 10 {
+    while q < 14 {
         store32(out, q * 4, 0);
         q = q + 1;
     }
     store32(pft, 0, 0);
+    // ---- pass 块：`lspe pass "reason" { … }`（`docs/262` §5.16）----
+    // 表形：`[count, open, close, sites, pad] × 64`。只记跨度；理由与 id 在写手里读。
+    store32(pbuf, 0, 0);
+    let pi: u32 = lo;
+    while pi < hi && lspe_kind(t, pi) != 4 {
+        if lspe_kind(t, pi) == 0 && lspe_tis(unit, t, pi, "lspe") == 1
+                && lspe_tis(unit, t, pi + 1, "pass") == 1
+                && lspe_kind(t, pi + 2) == 2
+                && lspe_tis(unit, t, pi + 3, "{") == 1 {
+            let pc: u32 = load32(pbuf, 0);
+            if pc >= 64 {
+                return 2;                     // 容量：写手点名报，不静默丢
+            }
+            let pend: u32 = skip_block(unit, t, pi + 3) - 1;
+            let b: u32 = (pc + 1) * 16;
+            store32(pbuf, b, pi + 3);
+            store32(pbuf, b + 4, pend);
+            store32(pbuf, b + 8, 0);
+            store32(pbuf, 0, pc + 1);
+            pi = pend;
+        }
+        pi = pi + 1;
+    }
     // ---- 每个函数：首参表 + 体内 E3 ----
     let i: u32 = lo;
     while i < hi && lspe_kind(t, i) != 4 {
@@ -349,8 +608,9 @@ pub fn lspe_engine(unit: ptr, t: ptr, lo: u32, hi: u32,
                                     }
                                     z = z - 1;
                                 }
+                                let acov: u32 = lspe_note_covered(j, pbuf, out);
                                 store32(out, 8, load32(out, 8) + 1);
-                                if dead == 1 {
+                                if dead == 1 && acov == 0 {
                                     store32(out, 12, load32(out, 12) + 1);
                                 } else {
                                     reach = 1;
@@ -358,8 +618,9 @@ pub fn lspe_engine(unit: ptr, t: ptr, lo: u32, hi: u32,
                             }
                             j = j + 1;
                         }
+                        let fcov: u32 = lspe_note_covered(a, pbuf, out);
                         store32(out, 0, load32(out, 0) + 1);
-                        if owned == 1 && reach == 0 {
+                        if owned == 1 && reach == 0 && fcov == 0 {
                             store32(out, 4, load32(out, 4) + 1);
                         }
                     }
@@ -434,8 +695,9 @@ pub fn lspe_engine(unit: ptr, t: ptr, lo: u32, hi: u32,
                                                 && lspe_tis(unit, t, k2 + 2, "=") == 0 {
                                             assigned = 1;
                                         } else {
+                                            let icov: u32 = lspe_note_covered(k2, pbuf, out);
                                             store32(out, 16, load32(out, 16) + 1);
-                                            if assigned == 1 {
+                                            if assigned == 1 && icov == 0 {
                                                 store32(out, 20, load32(out, 20) + 1);
                                             }
                                         }
@@ -475,8 +737,9 @@ pub fn lspe_engine(unit: ptr, t: ptr, lo: u32, hi: u32,
                             }
                             k3 = k3 + 1;
                         }
+                        let ecov: u32 = lspe_note_covered(a, pbuf, out);
                         store32(out, 24, load32(out, 24) + 1);
-                        if other == 0 {
+                        if other == 0 && ecov == 0 {
                             store32(out, 28, load32(out, 28) + 1);
                         }
                     }
@@ -500,14 +763,22 @@ pub fn lspe_engine(unit: ptr, t: ptr, lo: u32, hi: u32,
                         || lspe_tis(unit, t, i4 - 1, ":") == 1
                         || lspe_tis(unit, t, i4 - 1, "fn") == 1)) {
             if safe_by_tok(unit, t, i4, pft) == 1 {
+                let ccov: u32 = lspe_note_covered(i4, pbuf, out);
                 store32(out, 32, load32(out, 32) + 1);
-                if safe_by_tok(unit, t, i4, sft) == 1 {
+                if safe_by_tok(unit, t, i4, sft) == 1 && ccov == 0 {
                     store32(out, 36, load32(out, 36) + 1);
                 }
             }
         }
         i4 = i4 + 1;
     }
+    // ---- guard/index 的覆盖与最外层块数（`docs/262` §5.16）----
+    let gcov: u32 = lspe_guard_covered(unit, t, lo, hi, pbuf);
+    let icov2: u32 = lspe_index_covered(unit, t, lo, hi, pbuf);
+    store32(out, 48, gcov);
+    store32(out, 52, icov2);
+    store32(out, 44, load32(out, 44) + gcov + icov2);
+    store32(out, 40, lspe_pass_outer(pbuf));
     return 0;
 }
 

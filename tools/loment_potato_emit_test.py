@@ -354,7 +354,8 @@ def test_lspe_ledger_matches_on_guards_and_indices():
 
     这份源故意把 E1/E2/E3/E4 的站点都放进去：guard、字面量/非字面量下标、`free`
     （有可达的用，所以 `Alive` 不证）、未初始化 `let`（赋值后读）、一个 deref-only
-    被调（`Interproc`）和一个泄漏首参的被调（洞）。
+    被调（`Interproc`）、一个泄漏首参的被调（洞），以及一个**带 `lspe pass` 的被调**
+    （摘要 `Unchecked` ⇒ 调用点不证，`#786` 第 3 条）。
     `Exclusive` 的孪生不在这份夹具里：自举侧前门目前对 `&mut` 实参直接报 E15，
     到不了台账那一层（那是前门的差，不是普查的差）。
     """
@@ -377,6 +378,14 @@ def test_lspe_ledger_matches_on_guards_and_indices():
         "fn leak(p: ptr) -> ptr {\n"
         "    return p;\n"
         "}\n\n"
+        # 带旁路的被调：摘要变成 `Unchecked`（`#786` 第 3 条），于是 `checked(q)` 那个
+        # 调用点**不证**。这一格两侧必须同样地不给证明（安全表是从 token 流算的，
+        # 自举侧摘表那一步在 `lspe_drop_unchecked`）。
+        "fn checked(p: ptr) -> u32 {\n"
+        "    lspe pass \"caller checked\" {\n"
+        "        return load8(p, 0);\n"
+        "    }\n"
+        "}\n\n"
         "fn f(a: [u32; 4], i: u32, q: ptr) -> u32 {\n"
         "    guard d(i);\n"
         "    let x: u32 = a[0];\n"
@@ -385,7 +394,11 @@ def test_lspe_ledger_matches_on_guards_and_indices():
         "    free(q);\n"
         "    let y: u32 = deref(q);\n"
         "    let c: ptr = leak(q);\n"
-        "    return a[i] + x + u + y;\n"
+        "    let z: u32 = checked(q);\n"
+        "    lspe pass \"manual bound check\" {\n"
+        "        let p1: u32 = a[1];\n"
+        "    }\n"
+        "    return a[i] + x + u + y + z + p1;\n"
         "}\n"
     )
     with tempfile.TemporaryDirectory() as td:

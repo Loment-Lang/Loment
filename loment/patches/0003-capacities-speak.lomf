@@ -129,14 +129,14 @@ new <<<
 
 edit loment/selfhost/driver.lomt expect 1
 old <<<
-    let m: u32 = emit_module(unit, toks2, ir, cg);
+    let m: u32 = emit_module(unit, ctoks, ir, cg);
     if m == 0 {
         let msg: str = "more functions than the codegen table holds -- split the facade";
         wdiag_file(dfd, scr, ap, an, 33, str_ptr(msg), str_len(msg));
         return fail(msg);
 >>>
 new <<<
-    let m: u32 = emit_module(unit, toks2, ir, cg);
+    let m: u32 = emit_module(unit, ctoks, ir, cg);
     if m == 0 {
         // **发射器自己的诊断通道**（`#775`）：先问它是不是"有一条规则降不下去"。
         // 那条比容量溢出更具体 —— 有规则号、有 token 位置，能指出是哪一处。
@@ -145,7 +145,7 @@ new <<<
             let et: u32 = emit_error_tok(cg);
             let em: str = "the self-hosted emitter cannot lower a call with more than 20 arguments -- split the call into smaller ones";
             if dfd >= 0 {
-                wdiag(dfd as u64, scr, ap, an, load32(toks2, et * 20 + 12), 23,
+                wdiag(dfd as u64, scr, ap, an, load32(ctoks, et * 20 + 12), 23,
                       str_ptr(em), str_len(em));
             }
             return fail(em);

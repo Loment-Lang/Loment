@@ -175,6 +175,31 @@ fn pt_hex1(out: ptr, o: u32, v: u32) -> u32 {
     return o + 1;
 }
 
+/// 8 位小写十六进制（`pass` 的 id）。高 nibble 先写。
+fn pt_hex8(out: ptr, o: u32, v: u32) -> u32 {
+    o = pt_hex1(out, o, (v >> 28) & 15);
+    o = pt_hex1(out, o, (v >> 24) & 15);
+    o = pt_hex1(out, o, (v >> 20) & 15);
+    o = pt_hex1(out, o, (v >> 16) & 15);
+    o = pt_hex1(out, o, (v >> 12) & 15);
+    o = pt_hex1(out, o, (v >> 8) & 15);
+    o = pt_hex1(out, o, (v >> 4) & 15);
+    return pt_hex1(out, o, v & 15);
+}
+
+/// 源偏移 `off` 的行号（1 起）。token 记录里没有行号，只能数换行。
+fn pt_line_at(unit: ptr, off: u32) -> u32 {
+    let n: u32 = 1;
+    let i: u32 = 0;
+    while i < off {
+        if load8(unit, i) == 10 {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
 /// `\u00XX` —— `json.dumps` 对 < 0x20 的其余控制字符就是**十六进制小写**两位。
 fn pt_uesc(out: ptr, o: u32, c: u32) -> u32 {
     o = pt_str(out, o, "\\u00");
@@ -1480,15 +1505,18 @@ const PT_GLSAFE: u32 = 114456;
 /// 首参是 `ptr` 的函数名 token 表: `[count, name_tok_1, …]`，最多 1024 条。
 /// E4 的调用点普查用它；超容量是**点名的失败**（`loment/lspe/lspe.lomt` 的 `lspe_engine` 回 1）。
 const PT_PTRFIRST: u32 = 132864;
-/// E3/E4 的十个计数：free_t/free_p, alive_t/alive_p, init_t/init_p,
-/// excl_t/excl_p, call_t/call_p（各 4 字节）。
+/// E3/E4 的十个计数 + pass 的四个：
+/// free_t/free_p, alive_t/alive_p, init_t/init_p, excl_t/excl_p, call_t/call_p,
+/// pass_sites/passed_sites/guard_covered/index_covered（各 4 字节，共 14 个）。
 const PT_L3CNT: u32 = 136964;
+/// `lspe pass` 的块表：`[count, open, close, sites, pad] × 64`（每块 16 字节）。
+const PT_PASS: u32 = 137020;
 const PT_TN: u32 = 46760;          // 收进池子的类型串条数（= 映射表条数）
 const PT_TCUR: u32 = 46764;        // 池子游标
 const PT_TMAX: u32 = 128;
 const PT_TSTRIDE: u32 = 64;
 const PT_TBUF_SZ: u32 = 256;
-const PT_SC_BYTES: u64 = 137008;    // 含安全名表 ((1 + 4600) × 4) + 首参表 + E3/E4 计数
+const PT_SC_BYTES: u64 = 138048;    // 安全名表 + 首参表 + E3/E4 计数 + pass 块表
 
 /// 一个类型串在池子里的位置（`i` 是池子下标）。
 fn pt_tkey(sc: ptr, i: u32) -> u32 {
@@ -2249,6 +2277,10 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32) -> u3
     let ep: u32 = 0;
     let ct: u32 = 0;
     let cp: u32 = 0;
+    let gcov: u32 = 0;
+    let icov: u32 = 0;
+    let psites: u32 = 0;
+    let passed: u32 = 0;
     if closed == 0 {
         gt = lspe_guard_total(unit, t, lo, hi);
         it = lspe_index_total(unit, t, lo, hi);
@@ -2263,9 +2295,14 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32) -> u3
         ep = load32(sc, PT_L3CNT + 28);
         ct = load32(sc, PT_L3CNT + 32);
         cp = load32(sc, PT_L3CNT + 36);
+        psites = load32(sc, PT_L3CNT + 40);
+        passed = load32(sc, PT_L3CNT + 44);
+        gcov = load32(sc, PT_L3CNT + 48);
+        icov = load32(sc, PT_L3CNT + 52);
     }
     let nsite: u32 = gt + it + ft + alt + nt + et + ct;
-    let nproved: u32 = gt + ip + fp + alp + np + ep + cp;
+    // pass 块里的站点不证明：guard / index 的 proved 要扣掉覆盖数。
+    let nproved: u32 = (gt - gcov) + (ip - icov) + fp + alp + np + ep + cp;
     let nund: u32 = nsite - nproved;
     o = pt_str(out, o, "{\n");
     o = pt_key(out, o, 2, "state");
@@ -2303,7 +2340,7 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32) -> u3
     o = pt_dec(out, o, 0 as u64);
     o = pt_str(out, o, ",\n");
     o = pt_key(out, o, 2, "floors");
-    o = pt_dec(out, o, 0 as u64);
+    o = pt_dec(out, o, psites as u64);
     o = pt_str(out, o, ",\n");
     o = pt_key(out, o, 2, "floor_detail");
     o = pt_str(out, o, "{\n");
@@ -2318,6 +2355,9 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32) -> u3
     o = pt_str(out, o, ",\n");
     o = pt_key(out, o, 3, "drop_honest");
     o = pt_dec(out, o, 0 as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "pass");
+    o = pt_dec(out, o, psites as u64);
     o = pt_str(out, o, "\n");
     o = pt_ind(out, o, 2);
     o = pt_str(out, o, "}");
@@ -2369,7 +2409,9 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32) -> u3
             }
             o = pt_key(out, o, 3, "GuardHolds");
             o = pt_str(out, o, "\"");
-            o = pt_dec(out, o, gt as u64);
+            // 被 pass 覆盖的站点**不证明**（参考实现 `ledger.py`：`covered_by` 的
+            // 站点求解器给空）。与上面 `nproved` 的口径同一条。
+            o = pt_dec(out, o, (gt - gcov) as u64);
             o = pt_str(out, o, "/");
             o = pt_dec(out, o, gt as u64);
             o = pt_str(out, o, "\"");
@@ -2381,7 +2423,7 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32) -> u3
             }
             o = pt_key(out, o, 3, "InBounds");
             o = pt_str(out, o, "\"");
-            o = pt_dec(out, o, ip as u64);
+            o = pt_dec(out, o, (ip - icov) as u64);
             o = pt_str(out, o, "/");
             o = pt_dec(out, o, it as u64);
             o = pt_str(out, o, "\"");
@@ -2415,6 +2457,66 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32) -> u3
         o = pt_ind(out, o, 2);
         o = pt_str(out, o, "}");
     }
+    // `lspe pass` 的收据（`docs/262` §5.16）：id + 跨度 + 理由 + 覆盖站点数。
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "passes");
+    let pcx: u32 = load32(sc, PT_PASS);
+    if pcx == 0 {
+        o = pt_str(out, o, "[]");
+    } else {
+        o = pt_str(out, o, "[\n");
+        let ix2: u32 = 0;
+        let s2: u32 = 0;
+        while s2 < pcx {
+            if lspe_span_outer(ptr_add(sc, PT_PASS), s2) == 1 {
+                let b2: u32 = (s2 + 1) * 16;
+                let open: u32 = load32(sc, PT_PASS + b2);
+                let close: u32 = load32(sc, PT_PASS + b2 + 4);
+                o = pt_aelm(out, o, 3, ix2);
+                o = pt_str(out, o, "{\n");
+                o = pt_key(out, o, 4, "id");
+                o = pt_str(out, o, "\"");
+                o = pt_mem(out, o, unit, pt_off(t, lo + 1), pt_tlen(t, lo + 1));
+                o = pt_str(out, o, ":pass:");
+                o = pt_hex8(out, o, lspe_fnv_pass(unit, t, open - 1,
+                                                 lspe_occ(unit, t, ptr_add(sc, PT_PASS), s2)));
+                o = pt_str(out, o, "\"");
+                o = pt_str(out, o, ",\n");
+                o = pt_key(out, o, 4, "line");
+                o = pt_dec(out, o, pt_line_at(unit, pt_off(t, open - 3)) as u64);
+                o = pt_str(out, o, ",\n");
+                o = pt_key(out, o, 4, "end_line");
+                o = pt_dec(out, o, pt_line_at(unit, pt_off(t, close)) as u64);
+                o = pt_str(out, o, ",\n");
+                o = pt_key(out, o, 4, "reason");
+                o = pt_q(out, o, unit, pt_off(t, open - 1) + 1, pt_tlen(t, open - 1) - 2);
+                o = pt_str(out, o, ",\n");
+                o = pt_key(out, o, 4, "sites");
+                o = pt_dec(out, o, load32(sc, PT_PASS + b2 + 8) as u64);
+                o = pt_str(out, o, "\n");
+                o = pt_ind(out, o, 3);
+                o = pt_str(out, o, "}");
+                ix2 = ix2 + 1;
+            }
+            s2 = s2 + 1;
+        }
+        o = pt_str(out, o, "\n");
+        o = pt_ind(out, o, 2);
+        o = pt_str(out, o, "]");
+    }
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "pass_sites");
+    o = pt_dec(out, o, psites as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "passed_sites");
+    o = pt_dec(out, o, passed as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "pass_ratio");
+    o = pt_str(out, o, "\"");
+    o = pt_dec(out, o, passed as u64);
+    o = pt_str(out, o, "/");
+    o = pt_dec(out, o, nsite as u64);
+    o = pt_str(out, o, "\"");
     o = pt_str(out, o, ",\n");
     o = pt_key(out, o, 2, "invariants");
     o = pt_str(out, o, "{\n");
@@ -5407,11 +5509,19 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     // **跨函数 deref-only 安全表**（`docs/210` §7）—— codegen 的 `compute_safe`（potato
     // `use codegen`）。与 codegen 那边**同一支扫描**，于是 gc_ladder 四层与发射路径一致。
     let _sft: u32 = compute_safe(unit, t, ptr_add(sc, PT_GLSAFE));
+    // 带 `lspe pass` 的函数是 `Unchecked` 摘要（`#786` 第 3 条）：从安全表里摘掉，
+    // 调用点因此保持 UNDECIDED。此时 `t` 是**原流**（头还在），正好看得见旁路。
+    let _sn: u32 = lspe_drop_unchecked(unit, t, ptr_add(sc, PT_GLSAFE));
     // E3/E4 的站点普查**在写对象之前**做完 —— 超容量是点名的失败（`pt_wfail`），
     // 不能在一半对象已经写出去之后再说。
-    if lspe_engine(unit, t, lo, hi, ptr_add(sc, PT_GLSAFE),
-                      ptr_add(sc, PT_PTRFIRST), ptr_add(sc, PT_L3CNT)) == 1 {
+    let lrc: u32 = lspe_engine(unit, t, lo, hi, ptr_add(sc, PT_GLSAFE),
+                               ptr_add(sc, PT_PTRFIRST), ptr_add(sc, PT_L3CNT),
+                               ptr_add(sc, PT_PASS));
+    if lrc == 1 {
         return pt_wfail("--emit-potato: more functions with a pointer first parameter than this section takes (1024)");
+    }
+    if lrc == 2 {
+        return pt_wfail("--emit-potato: more `lspe pass` blocks than this section takes (64)");
     }
     store32(sc, PT_N, 0);
     store32(sc, PT_PC, 0);

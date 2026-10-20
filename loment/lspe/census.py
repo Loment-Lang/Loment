@@ -35,8 +35,53 @@ LSPE_CALL_KW = LSPE_BRACKET_KW | frozenset({"extern", "true", "false", "self"})
 
 
 
-def census(toks: list, unit: str) -> tuple[list[dict], list[int]]:
-    """站点普查（`docs/262` §5.1）：E1/E2（guard + 下标）、E3、E4。
+def pass_spans(toks: list, sid) -> list[dict]:
+    """`lspe pass "reason" { … }` 的词法跨度（`docs/262` §5.16）。
+
+    块是**审计旁路**，不是控制流：内层语句照常检查、照常发射；这里只记它的
+    token 跨度、理由与 id，供普查给内层站点打 `covered_by`。
+    """
+    spans: list[dict] = []
+    n = len(toks)
+    for i, t in enumerate(toks):
+        if not (t.kind == "ident" and t.val == "lspe" and i + 3 < n):
+            continue
+        if not (toks[i + 1].kind == "ident" and toks[i + 1].val == "pass"):
+            continue
+        if toks[i + 2].kind != "string" or not toks[i + 2].val.strip():
+            continue                          # 解析器已用 E038 拒掉；这里防御性跳过
+        if not (toks[i + 3].kind == "punct" and toks[i + 3].val == "{"):
+            continue
+        end = _lspe_match_brace(toks, i + 3)
+        if end is None:
+            continue
+        spans.append({"id": sid("pass", f"pass:{toks[i + 2].val}"),
+                      "reason": toks[i + 2].val,
+                      "open": i + 3, "close": end,
+                      "line": t.line, "end_line": toks[end].line, "sites": 0})
+    for s in spans:
+        s["outer"] = not any(o is not s and o["open"] < s["open"] and s["close"] < o["close"]
+                             for o in spans)
+    return spans
+
+
+def _covered(spans: list[dict], i: int) -> str | None:
+    """token `i` 落在哪个 pass 块里（取最外层；没有就回 None）。"""
+    for s in spans:
+        if s["open"] < i < s["close"] and s.get("outer", True):
+            return s["id"]
+    return None
+
+
+def _mark(site: dict, cover, i: int) -> dict:
+    cid = cover(i)
+    if cid:
+        site["covered_by"] = cid
+    return site
+
+
+def census(toks: list, unit: str) -> tuple[list[dict], list[int], list[dict]]:
+    """站点普查（`docs/262` §5.1）：E1/E2（guard + 下标）、E3、E4、pass 块。
 
     口径是**词法的**，且两套实现用**同一条规则** —— 参考侧吃 `lomc.lex` 的 token，
     自举侧吃驱动器的 token 数组。这样 twin 的计数不会因为 AST 形状不同而漂。
@@ -56,13 +101,25 @@ def census(toks: list, unit: str) -> tuple[list[dict], list[int]]:
         seen[key] = occ + 1
         return f"{unit}:{kind}:{_fnv1a32(key + '#' + str(occ)):08x}"
 
-    census_e1e2(toks, sid, sites, unsourced)
-    census_e3(toks, sid, sites)
-    census_e4(toks, sid, sites)
-    return sites, unsourced
+    spans = pass_spans(toks, sid)
+
+    def cover(i: int) -> str | None:
+        return _covered(spans, i)
+
+    census_e1e2(toks, sid, sites, unsourced, cover)
+    census_e3(toks, sid, sites, cover)
+    census_e4(toks, sid, sites, (), cover)
+    for s in sites:
+        cid = s.get("covered_by")
+        if cid:
+            for ps in spans:
+                if ps["id"] == cid:
+                    ps["sites"] += 1
+    return sites, unsourced, spans
 
 
-def census_e1e2(toks: list, sid, sites: list[dict], unsourced: list[int]) -> None:
+def census_e1e2(toks: list, sid, sites: list[dict], unsourced: list[int],
+                cover=lambda _i: None) -> None:
     """E1 常量 + E2 类型（`docs/262` §5.4）。
 
     * `guard` 关键字 = 一个 guard 站点，来源 `capability`；
@@ -73,10 +130,14 @@ def census_e1e2(toks: list, sid, sites: list[dict], unsourced: list[int]) -> Non
     for i, t in enumerate(toks):
         if t.kind == "ident" and t.val == "guard":
             cap = toks[i + 1].val if i + 1 < n else ""
-            sites.append({"id": sid("guard", f"guard:{cap}"), "kind": "guard",
-                          "claim": "allow", "obligation": "GuardHolds",
-                          "evidence": "Typed",
-                          "source": "capability", "line": t.line, "proved": True})
+            site = {"id": sid("guard", f"guard:{cap}"), "kind": "guard",
+                    "claim": "allow", "obligation": "GuardHolds",
+                    "evidence": "Typed",
+                    "source": "capability", "line": t.line, "proved": True}
+            cid = cover(i)
+            if cid:
+                site["covered_by"] = cid
+            sites.append(site)
             continue
         if t.kind != "punct" or t.val != "[" or i == 0:
             continue
@@ -109,12 +170,16 @@ def census_e1e2(toks: list, sid, sites: list[dict], unsourced: list[int]) -> Non
         # 只用**紧邻的前一个 token** 作 LHS。往前多抓几个 token 会把上一条语句
         # （`;`、`return` …）也卷进键里 —— 插入一个无关站点就会让 id 变。
         lhs = prev.val
-        sites.append({"id": sid("index", f"index:{lhs}[{''.join(inner)}]"),
-                      "kind": "index",
-                      "claim": "allow", "obligation": "InBounds",
-                      "evidence": ("Syntactic" if literal else "none"),
-                      "source": ("lms(g0)" if literal else None),
-                      "line": t.line, "proved": literal})
+        site = {"id": sid("index", f"index:{lhs}[{''.join(inner)}]"),
+                "kind": "index",
+                "claim": "allow", "obligation": "InBounds",
+                "evidence": ("Syntactic" if literal else "none"),
+                "source": ("lms(g0)" if literal else None),
+                "line": t.line, "proved": literal}
+        cid = cover(i)
+        if cid:
+            site["covered_by"] = cid
+        sites.append(site)
         if not literal:
             unsourced.append(t.line)
 
@@ -220,7 +285,8 @@ def _lspe_owned(toks: list, at: int, free_i: int, name_i: int) -> bool:
     return False
 
 
-def census_e3(toks: list, sid, sites: list[dict]) -> None:
+def census_e3(toks: list, sid, sites: list[dict],
+              cover=lambda _i: None) -> None:
     """E3 局部流（`docs/262` §5.4）：`FreeOwnership` / `Alive` / `Initialized` / `Exclusive`。
 
     规则与检查器的局部表**同源**（E029 的 `freed` 表、E006 的 `moved` 表）：这里是
@@ -247,20 +313,22 @@ def census_e3(toks: list, sid, sites: list[dict]) -> None:
                     uses.append(j)
                 reachable = [j for j in uses if not _lspe_unreachable(toks, i + 3, j)]
                 owned = _lspe_owned(toks, at, i, name_i)
-                sites.append({"id": sid("free", f"free:{name}"),
-                              "kind": "free", "claim": "allow",
-                              "obligation": "FreeOwnership",
-                              "evidence": ("LocalFlow" if owned and not reachable else "none"),
-                              "source": ("local-flow" if owned and not reachable else None),
-                              "line": t.line, "proved": owned and not reachable})
+                sites.append(_mark({"id": sid("free", f"free:{name}"),
+                                    "kind": "free", "claim": "allow",
+                                    "obligation": "FreeOwnership",
+                                    "evidence": ("LocalFlow" if owned and not reachable else "none"),
+                                    "source": ("local-flow" if owned and not reachable else None),
+                                    "line": t.line, "proved": owned and not reachable},
+                                   cover, i))
                 for j in uses:
                     un = _lspe_unreachable(toks, i + 3, j)
-                    sites.append({"id": sid("alive", f"alive:{name}:{j - i}"),
-                                  "kind": "alive", "claim": "allow",
-                                  "obligation": "Alive",
-                                  "evidence": ("LocalFlow" if un else "none"),
-                                  "source": ("local-flow" if un else None),
-                                  "line": toks[j].line, "proved": un})
+                    sites.append(_mark({"id": sid("alive", f"alive:{name}:{j - i}"),
+                                        "kind": "alive", "claim": "allow",
+                                        "obligation": "Alive",
+                                        "evidence": ("LocalFlow" if un else "none"),
+                                        "source": ("local-flow" if un else None),
+                                        "line": toks[j].line, "proved": un},
+                                       cover, j))
             # ---- Initialized（`let x: T;` 之后的读） ----
             if (t.kind == "ident" and t.val == "let" and i + 1 < end
                     and toks[i + 1].kind == "ident"):
@@ -297,12 +365,13 @@ def census_e3(toks: list, sid, sites: list[dict]) -> None:
                     if _lspe_is_write(toks, k):
                         assigned = True
                         continue
-                    sites.append({"id": sid("init", f"init:{name}:{k - j}"),
-                                  "kind": "init", "claim": "allow",
-                                  "obligation": "Initialized",
-                                  "evidence": ("LocalFlow" if assigned else "none"),
-                                  "source": ("local-flow" if assigned else None),
-                                  "line": toks[k].line, "proved": assigned})
+                    sites.append(_mark({"id": sid("init", f"init:{name}:{k - j}"),
+                                        "kind": "init", "claim": "allow",
+                                        "obligation": "Initialized",
+                                        "evidence": ("LocalFlow" if assigned else "none"),
+                                        "source": ("local-flow" if assigned else None),
+                                        "line": toks[k].line, "proved": assigned},
+                                       cover, k))
             # ---- Exclusive（`&mut x` 与同一语句里的另一次使用重叠） ----
             if (t.kind == "punct" and t.val == "&" and i + 2 < end
                     and toks[i + 1].kind == "ident" and toks[i + 1].val == "mut"
@@ -316,12 +385,13 @@ def census_e3(toks: list, sid, sites: list[dict]) -> None:
                     if toks[k].kind == "ident" and toks[k].val == name:
                         other = True
                     k += 1
-                sites.append({"id": sid("exclusive", f"exclusive:{name}:{i}"),
-                              "kind": "exclusive", "claim": "allow",
-                              "obligation": "Exclusive",
-                              "evidence": ("none" if other else "LocalFlow"),
-                              "source": (None if other else "local-flow"),
-                              "line": t.line, "proved": not other})
+                sites.append(_mark({"id": sid("exclusive", f"exclusive:{name}:{i}"),
+                                    "kind": "exclusive", "claim": "allow",
+                                    "obligation": "Exclusive",
+                                    "evidence": ("none" if other else "LocalFlow"),
+                                    "source": (None if other else "local-flow"),
+                                    "line": t.line, "proved": not other},
+                                   cover, i))
 
 
 def _lspe_safe_set(toks: list, fns: list[tuple[int, int, int, int]],
@@ -351,6 +421,12 @@ def _lspe_safe_set(toks: list, fns: list[tuple[int, int, int, int]],
                     continue
                 if not (utoks[p_i + 1].kind == "punct" and utoks[p_i + 1].val == ":"
                         and utoks[p_i + 2].kind == "ident" and utoks[p_i + 2].val == "ptr"):
+                    continue
+                # 带 `lspe pass` 的摘要是 `Unchecked`（`#786` 第 3 条）：它不再证明
+                # 任何事，所以调用点保持 UNDECIDED —— 旁路不跨调用传播。
+                if any(utoks[k].kind == "ident" and utoks[k].val == "lspe"
+                       and k + 1 < end and utoks[k + 1].kind == "ident"
+                       and utoks[k + 1].val == "pass" for k in range(at, end)):
                     continue
                 p = utoks[p_i].val
                 ok = True
@@ -382,7 +458,7 @@ def _lspe_safe_set(toks: list, fns: list[tuple[int, int, int, int]],
 
 
 def census_e4(toks: list, sid, sites: list[dict],
-              extra: list[list] = ()) -> None:
+              extra: list[list] = (), cover=lambda _i: None) -> None:
     """E4 过程间摘要（`docs/262` §5.4）：首参是 `ptr` 的函数的每个调用点一条
     `SummaryContract` 站点。摘要在安全表里 ⇒ `Interproc`；否则是洞（`none`）。
 
@@ -424,10 +500,11 @@ def census_e4(toks: list, sid, sites: list[dict],
             inner.append(toks[j].val)
             j += 1
         proved = t.val in safe
-        sites.append({"id": sid("call", f"call:{t.val}{''.join(inner)}"),
-                      "kind": "call", "claim": "allow",
-                      "obligation": "SummaryContract",
-                      "evidence": ("Interproc" if proved else "none"),
-                      "source": (t.val if proved else None),
-                      "line": t.line, "proved": proved})
+        sites.append(_mark({"id": sid("call", f"call:{t.val}{''.join(inner)}"),
+                            "kind": "call", "claim": "allow",
+                            "obligation": "SummaryContract",
+                            "evidence": ("Interproc" if proved else "none"),
+                            "source": (t.val if proved else None),
+                            "line": t.line, "proved": proved},
+                           cover, i))
 

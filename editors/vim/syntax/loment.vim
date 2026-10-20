@@ -58,6 +58,9 @@ syn match lomentKeyword "\<choose\>\s\+write\s\+grammar\s\+\S\+"
 syn match lomentKeyword "\<set\>\s\+choose\>\s\+\w\+"
 syn match lomentKeyword "\<choose\>\s\+close\>\s\+\w\+"
 syn match lomentCore    "\<choose\>\s\+\%(std\|no_std\|gc_manual\|gc_auto\|gc_auto_alpha\|runtime\|no_runtime\)\>"
+" ---- LSPE 的词法旁路 (docs/262 §5.16 / #786): `lspe pass "reason" { … }`
+" `lspe` / `pass` 都不是保留字, 所以按**成对形状**认 (与 TextMate 语法同一条判据)。
+syn match lomentKeyword "\<lspe\>\s\+pass\>"
 
 " ---- 数字 (十进制 / 0x) 与字符串 (含转义; 跨行也可以)
 syn match lomentNumber "\<\d\+"

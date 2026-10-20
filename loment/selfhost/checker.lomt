@@ -74,6 +74,7 @@ const E_DANGLE: u32 = 12;  // E012 悬垂借用 (返回局部变量的借用)
 const E_MODE: u32 = 22;    // E022 项目模式 `choose` 用法不对 (docs/143 §3.2)
 const E_RT: u32 = 31;      // E031 这一档是 `no_runtime`，而这个构造要运行期 (issue #321)
 const E_PARSE: u32 = 19;   // E019 期望表达式 —— 参考实现 `parse_primary` 的口径 (issue #49)
+const E_PASS: u32 = 38;    // E038 `lspe pass` 没有理由（docs/262 §5.16）
 const E_DEEP: u32 = 23;    // E023 源码太深 —— 嵌套超过 64 层 (issue #44)
 
 /// 拖运行期的构造**有几个** —— 检查器数好放这儿，驱动取来拼报文的"另有 N 处"那半句
@@ -3751,12 +3752,48 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     store32(oc, 0, 0);
     let n: u32 = 0;
     let o: u32 = 0;
+    // `lspe pass "reason" { 体 }` 在**检查入口**拆平（`docs/262` §5.16 / `#786`）：
+    // 参考实现在解析里做，自举侧没有 AST，于是在 token 流上做同一个变换。放在这里
+    // （不是每个调用方各做一次）是因为 checker 的消费方不止驱动器 —— 语言服务与
+    // m85 的独立 checker 夹具都直接调 `check_arena`，漏一处就有一处看见块头。
+    // 驱动器先拆过一份交给这里（它还要原流给 `--emit-potato`），第二次是原样拷回。
+    let ntks: u32 = 0;
+    while chk_tok_kind(t, ntks) != 4 {
+        ntks = ntks + 1;
+    }
+    let _nt2: u32 = desugar_lspe_pass(src, t, 0, ntks, t, 0);
     // **语法前置趟**：报出任何 E019 就直接收工 —— 参考实现是"解析错就中止"，一条业务检查
     // 都不跑；自举侧没有解析器，得把这条分界显式补上，否则下游会多报（issue #7 / #323）。
     o = chk_syntax_prepass(src, t, out, 0);
     if o != 0 {
         store32(oc, 0, o);
         return o / 8;
+    }
+    // E038：`lspe pass` 的理由必填（`docs/262` §5.16）。匿名旁路 = 无标签地板。
+    let pi: u32 = 0;
+    while chk_tok_kind(t, pi) != 4 {
+        if chk_tok_is(src, t, pi, "lspe") && chk_tok_is(src, t, pi + 1, "pass") {
+            let nonblank: u32 = 0;
+            if chk_tok_kind(t, pi + 2) == 2 {
+                let sl: u32 = tok_len(t, pi + 2);
+                let kk: u32 = 1;
+                while kk + 1 < sl {
+                    let ch: u32 = load8(src, tok_start(t, pi + 2) + kk) as u32;
+                    if ch != 32 && ch != 9 {
+                        nonblank = 1;
+                    }
+                    kk = kk + 1;
+                }
+            }
+            if nonblank == 0 {
+                // 与语法前置趟同一条分界：参考实现在**解析**里就抛 E038 并中止，
+                // 一条业务检查都不跑；继续走会把后面那几十条级联噪声一起喷出来。
+                o = sym_pub(src, t, out, o, E_PASS, pi);
+                store32(oc, 0, o);
+                return o / 8;
+            }
+        }
+        pi = pi + 1;
     }
     let nexs: u32 = 0;
     let i: u32 = 0;

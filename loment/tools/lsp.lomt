@@ -410,7 +410,10 @@ fn run_check(text: ptr, toks: ptr, errs: ptr, chk: ptr) -> u32 {
 /// 拿 `lex` 的原始 token 直接喂 `run_check`/`scan_syms`, 于是关着的开关体照样被检查
 /// (满屏假错), 体里定义的 `fn` 也会被补全与跳转当成真的。
 fn switchify(mem: ptr, text: ptr, toks: ptr, nt: u32) -> u32 {
-    return apply_switches(text, toks, nt, ptr_add(mem, SW_OFF));
+    let n: u32 = apply_switches(text, toks, nt, ptr_add(mem, SW_OFF));
+    // `lspe pass "reason" { 体 }` 在 token 层拆平（`docs/262` §5.16）：检查、补全、
+    // 跳转看到的都是**块体本身**，与参考实现的解析同义（头与括号只是旁路标记）。
+    return desugar_lspe_pass(text, toks, 0, n, toks, 0);
 }
 
 fn emit_e0(b: ptr, o: u32, code: u32) -> u32 {

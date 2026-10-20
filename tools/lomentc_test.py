@@ -4496,7 +4496,10 @@ def test_lspe_dimension_defaults_open():
     assert lp["sites"] == lp["proved"] + lp["undecided"]
     assert "InBounds" in lp["per_kind"]
     assert lp["floors"] == 0
-    assert lp["floor_detail"] == {"assumed": 0, "stale_wf": 0, "budget": 0, "drop_honest": 0}
+    # `#786` 起 `floor_detail` 多一格 `pass`（`docs/262` §5.16），`passes` 恒为数组。
+    assert lp["floor_detail"] == {"assumed": 0, "stale_wf": 0, "budget": 0,
+                                  "drop_honest": 0, "pass": 0}
+    assert lp["passes"] == [] and lp["pass_ratio"] == f"0/{lp['sites']}"
     assert lp["invariants"]["i1"] == "ok"
     assert potato.validate(doc) == []
     # QIR 骨架：每个站点有 Site / Claim / Obligation / Evidence 四格。

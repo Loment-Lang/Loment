@@ -45,6 +45,12 @@ DUP = ("module t\n\nfn a() -> u32 {\n    return 1;\n}\n\n"
 #: 报假错（消费方轴 `docs/182` §1.9 那条，与开关/方言是同一个入口缺口）。
 REG_SRC = ("module t\n\nregister tcmd {\n"
            "    fn command_main(argv: ptr, argc: u32) -> u32 {\n        return argc;\n    }\n}\n")
+#: `lspe pass`（`docs/262` §5.16 / `#786`）—— 语言服务也走同一趟 token 拆平。不认它
+#: 就会在**编得过**的源上喷 E14/E2/E27（消费方轴，与 `register` 那格同一个缺口）。
+PASS_SRC = ("module t\n\nfn main() -> u32 {\n"
+            "    lspe pass \"manual bound check\" {\n        let x: u32 = 3;\n    }\n"
+            "    return x;\n}\n")
+PASS_BAD = PASS_SRC.replace('"manual bound check"', '"   "')
 
 
 def test(fn):
@@ -247,6 +253,10 @@ def test_lsp_diagnostics_match_selfhosted_checker():
         # `register` 块是新语法：语言服务认不出它就会在这份**编得过**的源上报一条
         # "未知顶层关键字"，而那正是消费方轴要抓的那种假错。
         ("register", REG_SRC, None, 0, 0),
+        # `lspe pass`：块体照常检查（编得过 ⇒ 0 条）；理由空白 ⇒ 只有 E038。
+        ("lspe-pass", PASS_SRC, None, 0, 0),
+        ("lspe-pass-blank", PASS_BAD, "E038",
+         PASS_BAD.splitlines().index('    lspe pass "   " {'), 1),
     ]
     msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}]
     for name, text, _c, _l, _n in cases:

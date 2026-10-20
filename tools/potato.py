@@ -193,15 +193,16 @@ LSPE_MODES = ("full", "quiet", "strict")
 LSPE_LEVELS = (0, 1, 2, 3, 4)
 #: 五条不变量（`docs/262` §8）。P0 的骨架里它们是 `not_run`，不是假 `ok`。
 LSPE_INVARIANTS = ("i1", "i2", "i3", "i4", "i5")
-#: 台账里的计数键（`docs/262` §8）。`floors` 另有一条自洽：它等于四类地板之和。
+#: 台账里的计数键（`docs/262` §8）。`floors` 另有一条自洽：它等于地板明细之和。
 LSPE_COUNTS = ("sites", "obligations", "proved", "undecided",
-               "deferred", "refused", "floors", "acked")
-LSPE_FLOOR_KEYS = ("assumed", "stale_wf", "budget", "drop_honest")
+               "deferred", "refused", "floors", "acked",
+               "pass_sites", "passed_sites")
+LSPE_FLOOR_KEYS = ("assumed", "stale_wf", "budget", "drop_honest", "pass")
 #: `lspe` 是一个**封闭**对象：未知键必须报，不能静默扩展（与 `gc_ladder` 同一条纪律）。
 LSPE_KEYS = frozenset({
     "state", "set_by", "mode", "level", "sites", "obligations", "proved",
     "undecided", "deferred", "refused", "floors", "floor_detail", "per_kind",
-    "invariants", "acked",
+    "invariants", "acked", "passes", "pass_sites", "passed_sites", "pass_ratio",
 })
 #: **核心模式的全部取值**（`docs/182` §1.3 的"核心语法硬写法"）：各维的取值并起来。
 #:
@@ -670,7 +671,7 @@ def validate(doc: object) -> list[str]:
                     want = sum(fd[k] for k in LSPE_FLOOR_KEYS)
                     if fl != want:
                         errs.append(f"{ver}: lspe.floors 是 {fl!r}，"
-                                    f"但四类地板之和是 {want}（floors 必须等于明细之和）")
+                                    f"但地板明细之和是 {want}（floors 必须等于明细之和）")
             pk = lp.get("per_kind")
             if not isinstance(pk, dict):
                 errs.append(f"{ver}: lspe.per_kind 必须是对象，得到 {pk!r}")
@@ -683,6 +684,29 @@ def validate(doc: object) -> list[str]:
                 for k in LSPE_INVARIANTS:
                     if k not in inv:
                         errs.append(f"{ver}: lspe.invariants 缺键 {k}")
+            # `lspe pass` 的收据（`docs/262` §5.16）：块 id、跨度、理由、覆盖站点数。
+            pr = lp.get("pass_ratio")
+            if not isinstance(pr, str) or not re.fullmatch(r"[0-9]+/[0-9]+", pr):
+                errs.append(f"{ver}: lspe.pass_ratio 必须是 \"覆盖/总数\"，得到 {pr!r}")
+            ps = lp.get("passes")
+            if not isinstance(ps, list):
+                errs.append(f"{ver}: lspe.passes 必须是数组，得到 {ps!r}")
+            else:
+                for i, e in enumerate(ps):
+                    if not isinstance(e, dict):
+                        errs.append(f"{ver}: lspe.passes[{i}] 必须是对象，得到 {e!r}")
+                        continue
+                    if set(e) != {"id", "line", "end_line", "reason", "sites"}:
+                        errs.append(f"{ver}: lspe.passes[{i}] 的键必须恰好是 "
+                                    f"id/line/end_line/reason/sites，得到 {sorted(e)}")
+                    if not isinstance(e.get("id"), str) or not e.get("id"):
+                        errs.append(f"{ver}: lspe.passes[{i}].id 必须是非空字符串")
+                    if not isinstance(e.get("reason"), str) or not e.get("reason", "").strip():
+                        errs.append(f"{ver}: lspe.passes[{i}].reason 必须非空（匿名旁路不允许）")
+                    for k in ("line", "end_line", "sites"):
+                        v = e.get(k)
+                        if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+                            errs.append(f"{ver}: lspe.passes[{i}].{k} 必须是非负整数，得到 {v!r}")
 
     unit = _req(doc, "unit", "根", errs)
     if unit is not None and (not isinstance(unit, str) or not IDENT_RE.match(unit)):

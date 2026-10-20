@@ -23,6 +23,9 @@ class LspeSolver:
         self.evidence = {s["id"]: self._initial(s) for s in self.order}
 
     def _initial(self, site: dict) -> frozenset:
+        # pass 块里的站点只记账，不参与证明（`docs/262` §5.16）。
+        if site.get("covered_by"):
+            return frozenset()
         ev = site.get("evidence")
         # 级别只缩不放（`docs/262` §5.6）：E2 的 Typed 与 E3 的 LocalFlow 从 L1 起，
         # E4 的 Interproc 从 L2 起，E5 的 GlobalInvariant 从 L3 起。

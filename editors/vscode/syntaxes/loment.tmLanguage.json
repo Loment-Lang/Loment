@@ -8,6 +8,7 @@
     { "include": "#strings" },
     { "include": "#numbers" },
     { "include": "#grammar-decl" },
+    { "include": "#lspe-pass" },
     { "include": "#switches" },
     { "include": "#extlang" },
     { "include": "#register" },
@@ -67,6 +68,18 @@
             "2": { "name": "keyword.other.choose.loment" },
             "3": { "name": "keyword.other.grammar.loment" },
             "4": { "name": "support.constant.grammar.loment" }
+          }
+        }
+      ]
+    },
+    "lspe-pass": {
+      "comment": "LSPE 的词法旁路 (docs/262 §5.16 / #786): `lspe pass \"reason\" { … }`。`lspe` / `pass` 都不是保留字, 所以按**成对形状**认 —— 与编译器同一条判据 (tools/lomentc.py 的 `parse_stmt`)。理由串本身交给 `#strings`。",
+      "patterns": [
+        {
+          "match": "\\b(lspe)([ \\t]+)(pass)\\b",
+          "captures": {
+            "1": { "name": "keyword.control.lspe.loment" },
+            "3": { "name": "keyword.control.lspe.loment" }
           }
         }
       ]

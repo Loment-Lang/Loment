@@ -441,8 +441,10 @@ def fixture_v16() -> dict:
         "deferred": 0,
         "refused": 0,
         "floors": 0,
-        "floor_detail": {"assumed": 0, "stale_wf": 0, "budget": 0, "drop_honest": 0},
+        "floor_detail": {"assumed": 0, "stale_wf": 0, "budget": 0,
+                         "drop_honest": 0, "pass": 0},
         "per_kind": {},
+        "passes": [], "pass_sites": 0, "passed_sites": 0, "pass_ratio": "0/0",
         "invariants": {"i1": "not_run", "i2": "not_run", "i3": "not_run",
                        "i4": "not_run", "i5": "not_run"},
         "acked": 0,
@@ -494,6 +496,11 @@ MUTATORS_V16 = [
      lambda d: d["lspe"]["floor_detail"].__setitem__("bogus", 1), "不认识的键"),
     ("invariants 未知键",
      lambda d: d["lspe"]["invariants"].__setitem__("i6", "ok"), "不认识的键"),
+    # `lspe pass` 的收据（`docs/262` §5.16）：形状不对要当场红。
+    ("pass_ratio 形状不对",
+     lambda d: d["lspe"].__setitem__("pass_ratio", "1/2/3"), "pass_ratio"),
+    ("passes 不是数组", lambda d: d["lspe"].__setitem__("passes", 0),
+     "passes 必须是数组"),
 ]
 
 

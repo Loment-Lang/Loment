@@ -2106,6 +2106,32 @@ fn _start() -> u32 {
         wdiag_file(dfd, scr, ap, an, 23, str_ptr(dm), str_len(dm));
         return fail(dm);
     }
+    // `lspe pass "reason" { 体 }`（`docs/262` §5.16 / `#786`）：参考实现在**解析**里把
+    // 头与括号拆平（块体就是当前位置的语句）。自举侧没有 AST，于是在 token 层做同一件事
+    // —— 检查与发射看**拆平后**的流；`--emit-potato` 看**原流**（LSPE 的块表要从头与
+    // 括号来，见 `loment/lspe/lspe.lomt`）。拆平**只删不插**，所以拷一份再压即可。
+    let ctoks: ptr = toks2;
+    let lp: u32 = 0;
+    let ci: u32 = 0;
+    while ci + 1 < nt {
+        if load32(toks2, ci * 20) == 0 && tok_is(unit, toks2, ci, "lspe")
+                && load32(toks2, (ci + 1) * 20) == 0 && tok_is(unit, toks2, ci + 1, "pass") {
+            lp = 1;
+            ci = nt;
+        } else {
+            ci = ci + 1;
+        }
+    }
+    if lp == 1 {
+        let dv: u64 = sys_alloc((nt as u64) * 20 + 64);
+        if dv == 0 {
+            let dm: str = "out of memory: cannot allocate the `lspe pass` buffer (brk failed)";
+            wdiag_file(dfd, scr, ap, an, 33, str_ptr(dm), str_len(dm));
+            return fail(dm);
+        }
+        ctoks = dv as ptr;
+        let _nc: u32 = desugar_lspe_pass(unit, toks2, 0, nt, ctoks, 0);
+    }
     // 先检查再发射: 有诊断就报到 stderr 并以 1 退出, 否则才发 IR。
     // 诊断格式与 p8 的 C 夹具同源: `<码>@<token>:<行> <片段>` 一行一条。
     let errsv: u64 = sys_alloc(8192);
@@ -2130,9 +2156,9 @@ fn _start() -> u32 {
     // 这是个**保守上界** (trait 里只声明不发射的方法也算进去), 超了就报错, 不写穿。
     let nsym: u32 = 0;
     let sk: u32 = 0;
-    while load32(toks2, sk * 20) != 4 {
-        if tok_is(unit, toks2, sk, "fn") || tok_is(unit, toks2, sk, "const")
-                || tok_is(unit, toks2, sk, "struct") || tok_is(unit, toks2, sk, "enum") {
+    while load32(ctoks, sk * 20) != 4 {
+        if tok_is(unit, ctoks, sk, "fn") || tok_is(unit, ctoks, sk, "const")
+                || tok_is(unit, ctoks, sk, "struct") || tok_is(unit, ctoks, sk, "enum") {
             nsym = nsym + 1;
         }
         sk = sk + 1;
@@ -2143,7 +2169,7 @@ fn _start() -> u32 {
         return fail(dm);
     }
     let tytp: ptr = ptr_add(arena, chk_arena_tyt());
-    let ne: u32 = check_arena(unit, toks2, errs, arena,
+    let ne: u32 = check_arena(unit, ctoks, errs, arena,
                               ptr_add(arena, chk_arena_scr()),
                               ptr_add(arena, chk_arena_ctab()),
                               ptr_add(arena, chk_arena_nc()),
@@ -2152,7 +2178,7 @@ fn _start() -> u32 {
                               tytp);
     // 开关的规则接在检查器之后 —— 开关表在**驱动器**手上（做装载与裁减的是它）,
     // 与 "`choose` 第三条（库不许）落在装载器" 同一个理由（docs/176 §7.3）。
-    let nsw: u32 = switch_rules(unit, toks2, sw, errs, ne * 8);
+    let nsw: u32 = switch_rules(unit, ctoks, sw, errs, ne * 8);
     let ne2: u32 = ne + nsw;
     if ne2 != 0 {
         wstr(2, "loment: static checks failed\n");
@@ -2165,21 +2191,21 @@ fn _start() -> u32 {
             wstr(2, " @");
             wdec(2, scr, tk);
             wstr(2, " line ");
-            wdec(2, scr, load32(toks2, tk * 20 + 12));
+            wdec(2, scr, load32(ctoks, tk * 20 + 12));
             wstr(2, ": ");
-            let st: u32 = load32(toks2, tk * 20 + 4);
-            let ln: u32 = load32(toks2, tk * 20 + 8);
+            let st: u32 = load32(ctoks, tk * 20 + 4);
+            let ln: u32 = load32(ctoks, tk * 20 + 8);
             // `E031`（这一档是 `no_runtime`，而这个构造要运行期）：正文写成**那句话**，
             // 不是那一格 token（issue #321）。码是**专属**的（不再与 `choose` 共用 E022），
             // `str_len(ph) > 0` 只是"那格 token 在名单里"的兜底，照旧走 token 原文。
-            let ph: str = rt_phrase(unit, toks2, tk);
+            let ph: str = rt_phrase(unit, ctoks, tk);
             let isrt: u32 = 0;
             if code == 31 && str_len(ph) > 0 {
                 isrt = 1;
             }
             // `#702`: 解析类的那几条也要说得出**是什么构造**（裸 return / 嵌套上限 /
             // 裸块），正文不是那一格 token 原文。与 E031 的 `rt_phrase` 同一处分岔。
-            let ph2: str = err_phrase(unit, toks2, tk, code);
+            let ph2: str = err_phrase(unit, ctoks, tk, code);
             let take: u32 = 24;
             if ln < 24 {
                 take = ln;
@@ -2199,16 +2225,16 @@ fn _start() -> u32 {
             if dfd >= 0 {
                 if isrt == 1 {
                     let _k2: u64 = wdiag_rt(dfd as u64, scr, ap, an,
-                                            load32(toks2, tk * 20 + 12), ph,
+                                            load32(ctoks, tk * 20 + 12), ph,
                                             load32(tytp, RT_N_SITES));
                 } else {
                     if str_len(ph2) > 0 {
                         let _j2: u64 = wdiag(dfd as u64, scr, ap, an,
-                                             load32(toks2, tk * 20 + 12), code,
+                                             load32(ctoks, tk * 20 + 12), code,
                                              str_ptr(ph2), str_len(ph2));
                     } else {
                         let _j: u64 = wdiag(dfd as u64, scr, ap, an,
-                                            load32(toks2, tk * 20 + 12), code,
+                                            load32(ctoks, tk * 20 + 12), code,
                                             ptr_add(unit, st), take);
                     }
                 }
@@ -2247,7 +2273,7 @@ fn _start() -> u32 {
         return fail(dm);
     }
     let cg: ptr = cgv as ptr;
-    let m: u32 = emit_module(unit, toks2, ir, cg);
+    let m: u32 = emit_module(unit, ctoks, ir, cg);
     if m == 0 {
         // **发射器自己的诊断通道**（`#775`）：先问它是不是"有一条规则降不下去"。
         // 那条比容量溢出更具体 —— 有规则号、有 token 位置，能指出是哪一处。
@@ -2256,7 +2282,7 @@ fn _start() -> u32 {
             let et: u32 = emit_error_tok(cg);
             let em: str = "the self-hosted emitter cannot lower a call with more than 20 arguments -- split the call into smaller ones";
             if dfd >= 0 {
-                wdiag(dfd as u64, scr, ap, an, load32(toks2, et * 20 + 12), 23,
+                wdiag(dfd as u64, scr, ap, an, load32(ctoks, et * 20 + 12), 23,
                       str_ptr(em), str_len(em));
             }
             return fail(em);

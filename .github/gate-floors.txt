@@ -17,7 +17,7 @@ lspe_test 9
 potato_test 13
 loment_ct_test 2
 loment_comefor_test 12
-loment_choose_matrix_test 11
+loment_choose_matrix_test 17
 loment_extblock_test 7
 loment_multilang_test 2
 loment_ctrans_test 21

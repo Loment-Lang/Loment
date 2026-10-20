@@ -277,29 +277,44 @@ def test_hosted_and_gc_auto_compose():
 def test_lms_rescue_only_exists_when_a_collector_does():
     """`lms` 的"收一次再试"只在真有收集器时出现 —— `gc_manual` 下它是一句空话（`docs/253` §5.3）。
 
-    取值从 `CORE_DIMS["lms"]` 读、判的是**重试标记**（`@__loment_lms_retry`）出现在哪：
-    没有收集器时它一个都不该有；有收集器时**恰好一档**有（"收一次再试"的那一档）。
-    不写死档名，也不假设两档在 manual 下产物相同 —— LMS 第 1 级的界检查与回收档无关，
-    manual 下两档也会不同（`#963`）。
+    判的是**重试标记**出现在哪：没有收集器时一个都不该有；有收集器时只有"第 3 级开着"
+    的那一档有。档从 `CORE_DIMS["lms"]` 读，第 3 级开/关按 `LMS_TIERS`/`LMS_TOGGLES`
+    选（`#963` 之后 lms 是四档）；这两张表还不存在时退回"两档各一个"。
+
+    标记同时认两种拼法：`@__loment_lms_retry`（全局，`#963` 之前）与 `%lmsretry`
+    （本帧 alloca，`#963` 起；默认产物不许新增 `@__loment_` 符号）。
+    `#963` 合并后可以把认旧拼法的那一半删掉。
     """
     values = lomentc.CORE_DIMS["lms"]
-    assert len(values) == 2, f"lms 期望两档，实际 {values}"
-    marker = "@__loment_lms_retry"
+    tiers = getattr(lomentc, "LMS_TIERS", None)
+    toggles = getattr(lomentc, "LMS_TOGGLES", None)
+    if tiers is not None and toggles is not None:
+        gi = toggles.index("lms_guard")
+        on = next(v for v in values if tiers[v][gi])
+        off = next(v for v in values if not tiers[v][gi])
+    else:
+        assert len(values) == 2, f"lms 期望两档（或有 LMS_TIERS），实际 {values}"
+        off, on = values
+    markers = ("%lmsretry", "@__loment_lms_retry")
+
+    def has_retry(ir: str) -> bool:
+        return any(m in ir for m in markers)
+
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
         retry = {}
         for gc in ("gc_manual", "gc_auto"):
-            for lms in values:
+            for lms in (off, on):
                 cell = {"mode": "std", "gc": gc, "runtime": "runtime", "lms": lms}
                 rc, diag, ir, pot = _emit(td, f"{gc}-{lms}", cell, ALLOC_BODY)
                 assert rc == 0, f"{gc}+{lms}: 编不过\n{diag[-400:]}"
                 assert pot.get("lms") == lms
-                retry[(gc, lms)] = marker in ir
-    assert not any(retry[("gc_manual", v)] for v in values), \
-        f"gc_manual 下出现了 {marker} —— 没有收集器可'拉回', 这一级不该有代码"
-    assert sum(retry[("gc_auto", v)] for v in values) == 1, \
-        f"gc_auto 下 {marker} 不是恰好一档：{ {v: retry[('gc_auto', v)] for v in values} }"
-    print(f"      gc_manual: 两档都没有重试；gc_auto: 恰好一档带重试")
+                retry[(gc, lms)] = has_retry(ir)
+    assert not retry[("gc_manual", off)] and not retry[("gc_manual", on)], \
+        f"gc_manual 下出现了重试标记（{off} / {on}）—— 没有收集器可'拉回', 这一级不该有代码"
+    assert retry[("gc_auto", on)], f"gc_auto 下第 3 级开着的档（{on}）没有重试标记"
+    assert not retry[("gc_auto", off)], f"gc_auto 下第 3 级关着的档（{off}）带了重试标记"
+    print(f"      gc_manual: 两档都无重试；gc_auto: 只有 {on} 带重试")
 
 
 @test

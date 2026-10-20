@@ -1,6 +1,6 @@
 ---
 name: loment
-description: Read this before writing a program in Loment - FujoOS's own systems language (Rust-flavoured surface syntax plus capability domains; six more surface grammars - C, C++, Java, C#, Go, Python - share its semantics, see docs/188). With the toolchain installed you can write, check and compile native executables with no Python runtime. Use it for: writing a Loment program or a .lomt file; **writing a Loment library** (a library is a directory, dependencies are the `use` lines in the source, exports are `pub`, optional `pkg.lomp` manifest, see section 9); managing or debugging dependencies; compiling or running with the `loment` command; reading the E001-E027 error codes; looking up a builtin or a piece of syntax (`loment builtins` / `loment syntax` / `loment cheat`); expressing a piece of logic in the project's own language; how to write struct / enum / match / capability / guard; **giving a project its own source extension** (`source_ext` in `loment.conf`, section 7.1); **registering a custom `loment` subcommand** (`loment foo` runs `loment-foo` from PATH, section 7.2); and what differs when migrating from another language. **For anything about libraries and dependencies read the lompi guide first** (`~/.claude/skills/lompi/SKILL.md`, or `<prefix>/share/lompi/skill/SKILL.md` when you only have the package) - installing a library, resolving dependencies, which libraries exist on this machine, and what a `use <name>` resolves to all live there. Also use this whenever the task is to author, read or debug Loment source (.lomt / .lom / .lomp) or a Loment library with the toolchain installed.
+description: Read this before writing a program in Loment - FujoOS's own systems language (Rust-flavoured surface syntax plus capability domains; six more surface grammars - C, C++, Java, C#, Go, Python - share its semantics, see docs/188). With the toolchain installed you can write, check and compile native executables with no Python runtime. Use it for: writing a Loment program or a .lomt file; **writing a Loment library** (a library is a directory, dependencies are the `use` lines in the source, exports are `pub`, optional `pkg.lomp` manifest, see section 9); managing or debugging dependencies; compiling or running with the `loment` command; reading the E001-E036 error codes; looking up a builtin or a piece of syntax (`loment builtins` / `loment syntax` / `loment cheat`); expressing a piece of logic in the project's own language; how to write struct / enum / match / capability / guard; **giving a project its own source extension** (`source_ext` in `loment.conf`, section 7.1); **registering a custom `loment` subcommand** (`loment foo` runs `loment-foo` from PATH, section 7.2); and what differs when migrating from another language. **For anything about libraries and dependencies read the lompi guide first** (`~/.claude/skills/lompi/SKILL.md`, or `<prefix>/share/lompi/skill/SKILL.md` when you only have the package) - installing a library, resolving dependencies, which libraries exist on this machine, and what a `use <name>` resolves to all live there. Also use this whenever the task is to author, read or debug Loment source (.lomt / .lom / .lomp) or a Loment library with the toolchain installed.
 ---
 
 # Loment: the language you write programs in
@@ -30,9 +30,12 @@ choose write grammar python     // must come before `module`; once per file
 > translators have no Loment twin yet (`docs/189` section 4.1). So "write `.py` inside the
 > package and it runs" **is not true today**.
 
-The alias table is **frozen at the factory** (16 spellings to 8 canonical names; it cannot be
-extended or overridden, `docs/188` section 1.1). Getting it wrong is one of four errors: the name
-is not in the table / it is written after `module` / it is written twice / no name follows it.
+The alias table is **frozen at the factory**: six foreign grammars plus `loment` and `rust` are
+the eight names that parse today. A ninth canonical name, `natural` (`.nl`, `docs/197`), is
+already in the table but **not parsed yet** - declaring it is refused loudly, not silently
+mis-read. The table cannot be extended or overridden (`docs/188` section 1.1). Getting it wrong
+is one of four errors: the name is not in the table / it is written after `module` / it is
+written twice / no name follows it.
 
 **Boundaries to know before writing in one of those spellings** (measured; each one saves a
 round trip):
@@ -61,9 +64,9 @@ safe.
 loment version
 ```
 
-You get something like `Loment 0.1.4 (0.1.4), commit <short>`. **The commit is what
-counts**: different checkouts can do different things (this file describes the 0.1.4
-generation; older packages print `0.1.4 Alpha` / `0.1.4 Alpha2.3` / `0.1.4 Pre2`).
+You get something like `Loment 0.1.5 (0.1.5), commit <short>`. **The commit is what
+counts**: different checkouts can do different things (this file describes the 0.1.5
+generation; older packages print `0.1.4`, `0.1.4 Alpha` / `0.1.4 Alpha2.3` / `0.1.4 Pre2`).
 
 **There are 38 commands; `loment help` lists all of them** (grouped, aligned, coloured) and
 `loment help <command>` documents one. The ones used most:
@@ -88,7 +91,7 @@ what self-contained means here):
 | `loment syntax` | The syntax cheat sheet |
 | `loment builtins` | The builtin table (all of them, there are no others) |
 | `loment types` / `keywords` / `caps` | Type table / keywords / capability domains |
-| `loment codes` / `loment explain E4` | The E001-E027 table / one code in detail |
+| `loment codes` / `loment explain E4` | The E001-E036 table / one code in detail |
 | `loment new NAME` | Write a skeleton that `loment run` accepts immediately |
 | `loment stat` / `fns` / `grep` / `hash` / `cat` | Read source (lines, signatures, search, sha256, numbered print) |
 | `loment ls` / `tree` / `examples` / `example tour` | Directory and examples |
@@ -353,7 +356,7 @@ Running it should print `42 10 9 6 2 3` and `TOUR RESULT: PASS`.
 | Project mode | `choose` - **seven dimensions**, each written at most once and **only in the entry unit**; libraries may not write it (E22). `std` / `no_std` · `gc_manual` / `gc_auto` / `gc_auto_alpha` / `no_gc` · `runtime` / `no_runtime` · `sealed` / `hosted` · `vm` / `no_vm` · `lms_full` / `lms_forensic_admin` / `lms_daily_admin` / `lms_manage_only_admin` · `lspe_open_admin` / `lspe_close_admin` - see 2.1 |
 | Switch setting | `addin <name>` (**entry unit only**) - pulls in a "switch settings" unit, see 2.2 |
 | Custom syntax | `comefor let "word" to { … }` … `byuse "word" done` - **define a new syntax at compile time**. The block after `to` is **a Loment program** (`fn main` is its entry; **the return value is how many tokens it ate**) which reads and emits tokens with `ct_n` / `ct_tok` / `ct_out` / `ct_syn`. Definition and terminator are **top-level only** and cannot nest; expansion happens at the token layer **before parsing**, so errors and jumps still point at the line you wrote. See `docs/184` |
-| Import | **Two spellings, neither takes a semicolon**: `use name` (**searched in layers, first hit wins**: (1) project root `<project>/deps/<name>/<name><ext>` (2) the toolchain's own `<tool dir>/../share/lompi/store/<name>/<version>/<name><ext>` (3) the four built-in roots `loment/lib` → `examples` → `selfhost` → `tools`, where **only layer 3 requires the name to be unique**); `use "path/to/other.lomt"` (relative to the current file or the working directory - **use this form for a sibling file in your own directory**). `<ext>` defaults to `.lomt` and a project can change it (section 7). At most **300** `use` lines in one file. **At most one name-form `use` per unit today** - see 6.3 |
+| Import | **Two spellings, neither takes a semicolon**: `use name` (**searched in layers, first hit wins**: (1) project root `<project>/deps/<name>/<name><ext>` (2) the toolchain's own `<tool dir>/../share/lompi/store/<name>/<version>/<name><ext>` (3) the four built-in roots `loment/lib` → `examples` → `selfhost` → `tools`, where **only layer 3 requires the name to be unique**); `use "path/to/other.lomt"` (relative to the current file or the working directory - **use this form for a sibling file in your own directory**). `<ext>` defaults to `.lomt` and a project can change it (section 7). At most **300** `use` lines in one file. **Several name-form `use` lines are allowed in 0.1.5** (older packages stopped at one) - see 6.3 |
 | Function | `fn f(a: u32, b: str) -> u32 { ... }` (no return value: `fn f()`); **at most 10 parameters** (a hard constraint of the self-hosted side's layout: the parameter table has 10 slots. It fails in two shapes: a count mismatch between parameters and arguments is the normal E3, while **a call site with more than 10 arguments** goes through `panic` - exit code 132 with **no diagnostic**. When you see "no error but exit 132", count your arguments) |
 | Export | Add `pub` for cross-module visibility: `pub fn` / `pub struct` / `pub const` |
 | Constant | `const NAME: u32 = 3` |
@@ -389,20 +392,22 @@ choose no_std          // ← once for the whole program; the default is std
 | Dimension | Values | Default | What it decides |
 |---|---|---|---|
 | **Layer** | `std` · `no_std` | `std` | which layer the program may use - `std` unlocks the hosted layer (libc / filesystem / threads / time / network), `no_std` refuses it |
-| **Reclamation** | `gc_manual` · `gc_auto` · `gc_auto_alpha` · `no_gc` | `gc_manual` | how memory is reclaimed - see section 3.2; `no_gc` declares the artifact carries no collector |
+| **Reclamation** | `gc_manual` · `gc_auto` · `gc_auto_alpha` · `no_gc` | `gc_manual` | how memory is reclaimed - see section 2.1 and `docs/210`; `no_gc` declares the artifact carries no collector |
 | **Runtime** | `runtime` · `no_runtime` | `no_runtime` | whether the artifact may carry a runtime (the heap is still on demand) |
 | **Port** | `sealed` · `hosted` | `sealed` | whether the artifact may reach outside itself by linking host libraries |
-| **Execution model** | `vm` · `no_vm` | `no_vm` | which execution model the program is for |
-| **Memory safety** | `lms_full` · `lms_forensic_admin` · `lms_daily_admin` · `lms_manage_only_admin` | `lms_full` | which of the seven LMS levels are on |
-| **Audit ledger** | `lspe_open_admin` · `lspe_close_admin` | `lspe_open_admin` | whether LSPE records the ledger (off changes the ledger, never a verdict) |
+| **Execution model** | `vm` · `no_vm` | `no_vm` | which execution model the program is for - see below |
+| **Memory safety** | `lms_full` · `lms_forensic_admin` · `lms_daily_admin` · `lms_manage_only_admin` | `lms_full` | which of the seven LMS levels are on. **The direction is reversed**: the default is full, and a non-full value is a downgrade; every non-full value carries `_admin` |
+| **Audit ledger** | `lspe_open_admin` · `lspe_close_admin` | `lspe_open_admin` | whether LSPE records the ledger (off changes the ledger, never a verdict); the Potato v16 ledger records the site, obligation and evidence |
 
 What holds for all seven:
 
 - **It is a property of the program, not of a file**: each dimension appears at most once, and
   **only in the entry unit** (a library pulled in by `use` that writes one is E22). Both compilers
   enforce this.
-- **A default never changes what an existing program does** - which is why every default is the
-  behaviour that was there before the dimension existed.
+- **A default preserves the pre-dimension behaviour - with one recorded exception.** `lms`
+  defaults to `lms_full`, and that tier adds inline bounds checks on `alloc(<const>)`-derived
+  accesses, so it does change the artifact and some out-of-bounds behaviour (`docs/270` section
+  6). Treat that as a documented exception, not as the rule.
 - **Contradictory pairs are named, not lumped.** `gc_auto` with `no_runtime` is refused because
   automatic reclamation *is* that runtime; `hosted` with `no_std` is refused because `no_std` says
   there is nothing underneath and `hosted` says to link against it; both automatic tiers with
@@ -410,13 +415,11 @@ What holds for all seven:
   and the reason; it never says "illegal combination".
 - A value that is not in the table is a typo, and a typo **is E22**.
 
-**`vm` is the fifth, and it does nothing yet.** It answers *which execution model is this program
-for?*, and like every other dimension the value says **whether**, never **which** - a name that
-encoded today's tier would have to be renamed in order to add tomorrow's. **In a release build
-`choose vm` is a compile error**; only the development channel accepts it, so an installed
-toolchain can never accept a promise it cannot keep. What that channel produces is
-**byte-identical to `no_vm`** - there is no bytecode and no interpreter yet (`docs/231`,
-`docs/232`).
+**`vm` says "which execution model", not "which tier".** The release gate opened on 2026-10-17
+(`docs/231`), so an installed toolchain accepts `choose vm`. Today it only records the
+dimension: the artifact is **byte-identical to `no_vm`**, and there is no bytecode. The
+interpreted tier is a separate tool - `loment-lvm file.ll` runs the LVM interpreter over LLVM IR
+(`docs/243`) - and the artifact does not carry it.
 
 **`no_std` is what Loment actually is** (it was written for FujoOS in the first place). `std` is
 the default and means you may use host capabilities. **When it is required**: writing systems,
@@ -600,14 +603,14 @@ each bring in one module, see 3.1 at the end of this section.
 | `str_concat(a: str, b: str) -> str` | Concatenation (**the compile-time bump heap, which is only 64 KiB** - do not build big strings) |
 | `str_ptr(s: str) -> ptr` | The data pointer (for feeding syscalls) |
 | `alloc(n: u32) -> ptr` | Bump-heap allocation (the same 64 KiB cap - **and read 6.2.14 before relying on it**) |
-| `free(p: ptr) -> u32` | A placeholder (the bump heap does not really reclaim) |
+| `free(p: ptr) -> u32` | Returns the block to the allocator (bump pointer + address-ordered free list); it cannot grow past 64 KiB and does not coalesce (`docs/210` section 2.8) |
 | `load8(p: ptr, off: u32) -> u32` | Read a byte |
 | `store8(p: ptr, off: u32, v: u8) -> u32` | Write a byte |
 | `ptr_add(p: ptr, n: u32) -> ptr` / `ptr_sub` | Pointer offset |
 | `slice_len(s: [T]) -> u32` | Slice length |
 | `panic(code: u32) -> u32` | Does not return (the type is a placeholder) |
 | `atomic_add(p: ptr, n: u32) -> u32` | Atomic add |
-| `get_bits(v: u8, hi: u32, lo: u32) -> u8` / `set_bits(v: u8, hi: u32, lo: u32, x: u8) -> u8` | Bitfield read/write |
+| `get_bits(v: u8, shift: u32, width: u32) -> u8` / `set_bits(v: u8, shift: u32, width: u32, x: u8) -> u8` | Bitfield read/write; the second argument is the **shift**, the third is the **width** - not `hi`/`lo` |
 | `inb(port: u16) -> u32` / `outb(port: u16, v: u8) -> u32` | Port I/O (**only on the Rust translation path**, not the native one) |
 | `syscall4(nr: u64, a0: u64, a1: u64, a2: u64) -> i64` | A raw syscall (rax/rdi/rsi/rdx) |
 | `syscall6(nr: u64, a0..a4: u64) -> i64` | The same, with two more arguments |
@@ -642,15 +645,16 @@ fn _start() {
 
 | Package | Roughly what is in it | Examples |
 |---|---|---|
-| `std` | 127 **portable** modules (not one syscall): containers, text, big integers, floating point, hashing and checksums, compression, bit twiddling | `vec` `map` `set` `heap` `deque` `trie` `text` `utf8` `parse` `fmt` `bigint` `f64` `crc32` `deflate` `png` |
+| `std` | 133 **portable** modules (not one syscall): containers, text, big integers, floating point, hashing and checksums, compression, bit twiddling | `vec` `map` `set` `heap` `deque` `trie` `text` `utf8` `parse` `fmt` `bigint` `f64` `crc32` `deflate` `png` |
 | `host` | The host side (needs syscalls): files, directories, argv, stat, logging | `fs` `io` `dir` `argv` `stat` `log` |
 
-- **One name-form `use` per unit is the limit today** - a second one fails, with a message that
-  names no file and no line (6.3.20). To pull in several modules, use the **path** form
-  (`use "<prefix>/share/lompi/store/std/0.1.0/text.lomt"`), which has no such limit. **Take the
-  modules one at a time; do not write a facade.**
-- `use std` exists but drags all 127 modules into **one unit**, and measured today it takes
-  **18 minutes and then dies with SIGILL**. Do not use it.
+- **Several name-form `use` lines are allowed in 0.1.5** (verified: `use vec` plus `use numfmt`
+  compiles). Older packages limited a unit to one name-form `use`; on those, the **path** form
+  (`use "<prefix>/share/lompi/store/std/0.1.0/text.lomt"`) was the workaround. **Take modules one
+  at a time anyway; a facade is huge and collision-prone.**
+- `use std` exists and drags all **133** modules into one unit. The 0.1.4.6 fix removed the old
+  "18 minutes then SIGILL" failure (measured in 0.1.5: about 16 seconds to IR), but the facade is
+  still large; prefer per-module imports.
 - Only the name form works this way; `store` is a **directory tree** - do not reach into it by
   path unless you mean the path form above.
 - `mem` / `num` / `proc` / `sha256` / `json` exist **on both sides**: `use mem` gets the
@@ -695,6 +699,12 @@ what you should do, not by wording**:
 | E21 | **An `extern fn` signature outside FFI stage 1** (scalars and `ptr` only) - see 7.3.1 |
 | E22 | **`choose` used wrongly** (written twice / misspelled mode / a library wrote it) - see 2.1 |
 | E23 | **Not implemented in this version (a compiler limit)** - **not your source's fault**; write around it, and report it if you cannot. Progress is the milestone table in `docs/145` |
+| E28 | **A literal index is out of range** for a fixed-size array (LMS level 1) |
+| E29 | **Use after free** (LMS level 1, under the default `lms_full`) |
+| E30 | **Unknown name in a type position** |
+| E31 | **A construct that would drag in the runtime** while the artifact says `no_runtime` |
+| E32–E33 | Capacity / internal-limit codes from the safety engines - report them rather than writing around them |
+| E34–E37 | **LSPE audit**: undecided under strict mode (E34), ledger mismatch (E35), self-check (E36), reserved (E37) |
 
 **Every code has a full card** (what went wrong / why / at least three fixes / supported and not
 supported) which `loment check` renders; `loment explain E4` gives the ASCII version of one. The
@@ -704,7 +714,10 @@ table above is only an overview.
 1;` is not legal; write `let x: u32 = 1;`) or an undefined function name; `E3` is a call with the
 wrong argument count; `E19` see 6.1.
 
-## 5. Capability domains (the one new thing Loment module blk
+## 5. Capability domains (the one new thing Loment adds)
+
+```rust
+module blk
 choose runtime
 
 capability blk_write : disk[0..4] revocable
@@ -712,8 +725,6 @@ capability blk_write : disk[0..4] revocable
 fn write_slot(slot: u32) -> u32 {
     guard blk_write(slot);   // out of range -> trap; in range -> audit count +1
     return slot;
-}
-return slot;
 }
 ```
 
@@ -731,6 +742,15 @@ actually do things**. `syscall4` / `syscall6` are raw builtins, `alloc` / `load8
 `ptr_add` are raw, and FFI links arbitrary C. A program - or a library it `use`s - opens a socket,
 reads a file and writes through a raw pointer with **no declaration, no audit entry, and nothing
 in the diagnostics that shows it**. `capability` says what a domain is; it does not stop anyone.
+
+### 5.1 LSPE: the audit layer (0.1.5)
+
+The seventh `choose` dimension, `lspe`, does not change any verdict. `lspe_open_admin` (the
+default) records every allowance in the Potato v16 ledger: the site, the obligation, the
+evidence, and what is still unproved. `lspe_close_admin` turns the **recording** off; LMS / LGC /
+runtime / capability decisions are unchanged. Audit failures are E034-E037, and in strict mode an
+undecided question becomes E034. The subject is the compiler's own decision, not your program
+(`docs/262`).
 
 ## 6. The trap list (every entry was measured; **reading this first saves most of the rework**)
 
@@ -806,23 +826,22 @@ are different things, and it is worth knowing which one you are looking at.
     the arena comes from the host's `malloc` and is 1 MiB. If you are writing something that
     serves, this is the first constraint to design around.
 
-15. **A runtime index is not bounds-checked. A literal one is now a compile error.** The two
-    halves have different answers, and it matters which one you are holding:
+15. **Array and slice indices are not bounds-checked; the default LMS tier checks the
+    alloc-derived accesses it can see.** The answers differ by site:
     - **Literal index, out of range, fixed-size array** - `xs[5]` on `[u32; 3]` - is
-      **refused by `check` (E028)**, at compile time, in the default tier. (Before 2026-10-16
-      it was accepted and read whatever was next in memory; the refusal used to be reachable
-      only under `choose lms_open`, which does not ship. This is `docs/205` section 1.1 C5,
-      which had only ever covered `guard` - see section 5.)
-    - **Any other index** - a variable, an expression, or anything into a slice `[T]` - is
-      **unchecked at runtime**: a little out of range writes elsewhere with no trap, and
-      `xs[100000] = 1` **segfaults** the process.
+      **refused by `check` (E028)**, at compile time, in the default tier.
+    - **Any other array/slice index** - a variable, an expression, or anything into a slice
+      `[T]` - is **unchecked at runtime**: a little out of range writes elsewhere with no trap,
+      and `xs[100000] = 1` **segfaults** the process.
+    - **`load8`/`store8` on an `alloc(<const>)` block** are checked under the default
+      `lms_full` (level 3B): level 4 skips the out-of-range access (read returns 0, the write
+      does not happen) or level 5 traps. See `docs/270` section 1.
 
     An index that comes from outside your program - a request, a file, a length field - is
     therefore a memory-safety question, and the language will not raise it for you. **Guard it
     yourself**: a fixed-size array has a compile-time length, so write `if i >= 3 { … }`; a
-    slice carries its own length, so `slice_len(x)` gives it to you. (Automatic per-site inline
-    bounds checks exist as `choose lms_open` in the root unit - it is a development-channel
-    intermediate and does not ship, `docs/253` section 14.2.)
+    slice carries its own length, so `slice_len(x)` gives it to you. The old `choose lms_open`
+    escape hatch is gone; select a tier with `choose lms_*` (section 2.1).
 
 16. **Integer arithmetic is defined to wrap, there is no checked arithmetic, and division by
     zero kills the process.** The wrap is a **rule, not an accident**: `4294967295 + 1` is `0`
@@ -865,22 +884,20 @@ are different things, and it is worth knowing which one you are looking at.
 ### 6.3 What the toolchain cannot do today
 
 These are defects rather than language rules, and each one is here because meeting it without
-knowing costs half a day.
+knowing costs half a day. The text says which ones 0.1.5 already fixed.
 
-20. **A unit can carry only one name-form `use`.** The second one fails with
-    `loment: cannot open <garbage>` where the "path" is a fragment of your own
-    source - exit 1, no file name, no line. The path form `use "…/text.lomt"` has no such limit,
-    so that is the workaround. A unit that carries imports also loses most of its string-literal
-    capacity: measured, **eight ~34-byte literals** are enough to bring the compiler down with
-    the same message, while a unit with no imports takes forty of them. The length of the store
-    path matters too (five imports compile from a 90-character store root and fail at 91).
-21. **About 400 levels of nested blocks crash the compiler** with SIGSEGV and print nothing (200
-    levels are fine; the same file flattened into 400 sequential statements, which is bigger,
-    compiles). A generated parser table or a long `if`/`else if` chain can reach that by accident.
-22. **A `.lomt` file with no `module` declaration crashes the compiler driver** with SIGSEGV and
-    no diagnostic. (A *missing* file, by contrast, gets a clear message - it is the broken unit
-    that gets the silent crash.)
-23. **`use std` takes 18 minutes and then dies.** See 3.1.
+20. **Several name-form `use` lines are fine in 0.1.5** (verified: `use vec` plus `use numfmt`
+    compiles). Older packages stopped at one with `loment: cannot open <garbage>`, and on those
+    the path form was the workaround; a unit with imports also lost most of its string-literal
+    capacity (measured: eight ~34-byte literals could bring the old compiler down).
+21. **Deep nesting is still a wall, but the number moved.** The reference parser refuses nesting
+    beyond **64 levels** with a diagnostic ("嵌套超过 64 层"); the self-hosted parser still
+    segfaults on some deeply nested forms (nested parentheses / indexes / generic arguments,
+    #868-#874). Flatten it or split it into functions.
+22. **A `.lomt` file with no `module` declaration is a clear diagnostic now** ("期望 module").
+    Older packages crashed with SIGSEGV; 0.1.5 does not.
+23. **`use std` is no longer an 18-minute SIGILL.** 0.1.4.6 fixed it; measured in 0.1.5 it
+    reaches IR in about 16 seconds. It is still a 133-module facade - prefer per-module imports.
 
 ## 7. Two openings: your own extension, your own `loment` command
 

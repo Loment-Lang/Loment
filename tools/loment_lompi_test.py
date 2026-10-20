@@ -861,6 +861,101 @@ def test_store_argument_is_optional():
         _sh.rmtree(td, ignore_errors=True)
 
 
+# ---------------------------------------------------------------- 落盘计划的安全边界
+
+@test
+def test_install_plan_quotes_package_controlled_version():
+    """包元数据（版本）不能被原样插进计划里的**可执行命令**（#894）。
+
+    **Why**：`lompi` 在 PE 上建不了目录，于是把 `cp -r …` 打印出来让用户照抄。
+    版本号来自包自己（目录名 / `pkg.lomp` 的 `version()`），原先**不加引号**直接插进去
+    —— 一个 `1$(curl …|sh)` 的版本就能让这行计划在用户手里执行任意 shell。这是
+    xz / event-stream 的安装期 RCE 形状：不需要 lompi 自己执行任何东西，计划本身就是载荷。
+
+    **How to apply**：造一个版本号里带 `$(…)`、`;`、空格与单引号的包，跑 `lompi install`
+    看它打出的 `cp -r`。两个词都必须是**单引号包起来的一个 shell 词**（内部 `'` 写成
+    `'\''`）。删掉这两个词之后，整行里不剩任何 `$`、`;`、反引号。`--apply` 缺目录时
+    打出的 `mkdir -p` 同一条规矩。Linux 上再**真的把那一行交给 shell 跑一遍**，确认
+    没有载荷文件落地 —— 引号漏了的话 `touch` 会替我们发现。
+    """
+    import shutil as _sh
+
+    exe = _build()
+    if exe is None:
+        print(f"      SKIP: {_skip}")
+        return
+    dist = ROOT / "loment" / "dist"
+    dist.mkdir(parents=True, exist_ok=True)
+    td = Path(tempfile.mkdtemp(dir=dist, prefix=".lompi-shquote-"))
+    try:
+        bin2 = td / "bin"
+        bin2.mkdir()
+        exe2 = bin2 / ("lompi.exe" if IS_WIN else "lompi")
+        _sh.copy2(exe, exe2)
+        exe2.chmod(0o755)
+
+        def run(*args: str) -> tuple[int, str]:
+            r = subprocess.run([str(exe2), *args], cwd=str(bin2), capture_output=True,
+                               text=True, encoding="utf-8", errors="replace",
+                               shell=False, timeout=180)
+            return r.returncode, (r.stdout or "") + (r.stderr or "")
+
+        # 全局 store 在哪儿**由 lompi 自己说**（`cfg_root` 的规则会因平台/路径而变，
+        # 判据不猜；与 `test_store_argument_is_optional` 同一个办法）。
+        rc0, cfg = run("config")
+        assert rc0 == 0, f"lompi config 失败: {cfg[:300]!r}"
+        store_line = next((ln for ln in cfg.splitlines() if ln.startswith("store:")), None)
+        assert store_line, f"lompi config 没给出 store 行: {cfg[:400]!r}"
+        store = Path(store_line.split(":", 1)[1].strip())
+
+        ver = "1$(touch${IFS}pwned); echo 'x'"
+        pkg = store / "evil" / ver
+        pkg.mkdir(parents=True)
+        (pkg / "evil.lomt").write_text(
+            "module evil" + chr(10) + "pub fn f() -> u32 { return 1; }" + chr(10),
+            encoding="utf-8", newline=chr(10))
+        (pkg / "pkg.lomp").write_text(
+            "module pkg" + chr(10) + chr(10)
+            + 'pub fn name() -> str {' + chr(10)
+            + '    return "evil";' + chr(10) + "}" + chr(10)
+            + 'pub fn version() -> str {' + chr(10)
+            + '    return "' + ver + '";' + chr(10) + "}" + chr(10),
+            encoding="utf-8", newline=chr(10))
+
+        def q(s: str) -> str:
+            return "'" + s.replace("'", "'\\''") + "'"
+
+        dest = td / "dest"
+        dest.mkdir()
+        rc, out = run("install", "evil", "--into", str(dest))
+        assert rc == 0, f"install 没给出计划: rc={rc} {out[:400]!r}"
+        line = next((ln for ln in out.splitlines() if ln.startswith("cp -r ")), None)
+        assert line, f"计划里没有 cp -r 行: {out[:400]!r}"
+        src = str(pkg)
+        dst = str(dest / "evil")
+        assert q(src) in line, f"源路径不是一个安全的 shell 词: {line!r}"
+        assert q(dst) in line, f"目标路径不是一个安全的 shell 词: {line!r}"
+        rest = line.replace(q(src), "").replace(q(dst), "")
+        for ch in ("$", ";", "`", "\n"):
+            assert ch not in rest, f"引号之外还留着可执行的 {ch!r}: {line!r}"
+
+        # `--apply` 缺目标目录时打出的 mkdir 命令同一条规矩
+        rc2, out2 = run("install", "evil", "--into", str(dest), "--apply")
+        assert rc2 == 1, f"--apply 缺目录应当拒: rc={rc2} {out2[:300]!r}"
+        assert "mkdir -p " + q(dst) in out2, f"mkdir 提示没有安全引号: {out2[:400]!r}"
+
+        # 真的把计划里那一行交给 shell（仅 Linux）：引号漏了，载荷会落地。
+        if sys.platform.startswith("linux") and _sh.which("bash"):
+            subprocess.run(["bash", "-c", line], cwd=str(td), shell=False, timeout=60)
+            hits = [p for p in td.rglob("pwned")]
+            assert not hits, f"照抄计划执行后载荷落地了: {hits}"
+            print("      计划里的版本被单引号钉成一个词，shell 执行后没有载荷落地")
+        else:
+            print("      计划里的版本被单引号钉成一个词（本机不做 shell 执行）")
+    finally:
+        _sh.rmtree(td, ignore_errors=True)
+
+
 # ---------------------------------------------------------------- 边界（这是用户定的）
 
 @test

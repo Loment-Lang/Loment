@@ -19,6 +19,9 @@ about
 about **2026-10-17 重写过一次**（不是新事，是同一件事的第二次落）：`#440` 把驱动器里所有面向用户的
 about 消息改成了英文 + `wdiag_file`，并删掉了 `fujoc-s:` 这个内部名（用户敲的是 `loment`）。
 about 这一笔那四条消息跟着改成同一口径 —— 两条改动撞在同一段文本上，所以 `expect` 与两块都重写了。
+about
+about **2026-10-19**：`#775` 在最后那一块（`emit_module` 的失败分支）里加了发射器自己的诊断通道
+about （E023）；`old -> new` 的文本因此连带更新，`new` 必须与树里逐字一致。
 about 
 about 棘轮：`loment_caps_test::test_the_front_end_has_no_silent_capacity` 把「前端缺口 0」钉住，
 about `EXPLAINED` 逐条写清每一处排除的来路（见 `tools/loment_caps.py`）。
@@ -135,6 +138,18 @@ old <<<
 new <<<
     let m: u32 = emit_module(unit, toks2, ir, cg);
     if m == 0 {
+        // **发射器自己的诊断通道**（`#775`）：先问它是不是"有一条规则降不下去"。
+        // 那条比容量溢出更具体 —— 有规则号、有 token 位置，能指出是哪一处。
+        let ec: u32 = emit_error_code(cg);
+        if ec != 0 {
+            let et: u32 = emit_error_tok(cg);
+            let em: str = "the self-hosted emitter cannot lower a call with more than 20 arguments -- split the call into smaller ones";
+            if dfd >= 0 {
+                wdiag(dfd as u64, scr, ap, an, load32(toks2, et * 20 + 12), 23,
+                      str_ptr(em), str_len(em));
+            }
+            return fail(em);
+        }
         // **几张表共用这一格，所以几张都点名**（`#345` 的 (a)）：发射器对 `CG_MAXFN`、
         // `CG_MAXENUM` 与 `CG_MAXCONST` 都只 `return 0`，从驱动这一端看不出是哪一张撞的
         // —— 那就别猜，把名字一起写出来（原先只写函数数，于是枚举爆掉时用户会去删函数）。

@@ -2237,7 +2237,9 @@ def test_m85_codegen_arg_arity_is_loud():
     ② 语料里没有任何函数超过 20 个形参 (否则把闸门"修好"就等于让它再次静默)。
     """
     src = (ROOT / "loment" / "selfhost" / "codegen.lomt").read_text(encoding="utf-8")
-    assert "panic(20);" in src, "自举 codegen 的实参超限闸门不见了"
+    # `#775`：闸门从 `panic(20)` 换成了发射器自己的诊断通道（`cg_fail`），
+    # 名字仍是同一条规则。判据认**规则在**，不认它是怎么说话的。
+    assert "cg_fail(s, 1, j)" in src, "自举 codegen 的实参超限闸门不见了"
     assert "a < 20" in src, "实参上限常量变了: 请同步形参表步长与这条测试"
     worst = 0
     worst_fn = ""

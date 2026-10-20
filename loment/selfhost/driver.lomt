@@ -2275,6 +2275,18 @@ fn _start() -> u32 {
     let cg: ptr = cgv as ptr;
     let m: u32 = emit_module(unit, ctoks, ir, cg);
     if m == 0 {
+        // **发射器自己的诊断通道**（`#775`）：先问它是不是"有一条规则降不下去"。
+        // 那条比容量溢出更具体 —— 有规则号、有 token 位置，能指出是哪一处。
+        let ec: u32 = emit_error_code(cg);
+        if ec != 0 {
+            let et: u32 = emit_error_tok(cg);
+            let em: str = "the self-hosted emitter cannot lower a call with more than 20 arguments -- split the call into smaller ones";
+            if dfd >= 0 {
+                wdiag(dfd as u64, scr, ap, an, load32(toks2, et * 20 + 12), 23,
+                      str_ptr(em), str_len(em));
+            }
+            return fail(em);
+        }
         // **几张表共用这一格，所以几张都点名**（`#345` 的 (a)）：发射器对 `CG_MAXFN`、
         // `CG_MAXENUM` 与 `CG_MAXCONST` 都只 `return 0`，从驱动这一端看不出是哪一张撞的
         // —— 那就别猜，把名字一起写出来（原先只写函数数，于是枚举爆掉时用户会去删函数）。

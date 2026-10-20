@@ -568,6 +568,63 @@ def test_http_matches_python_client():
     print(f"      http: 原因短语 {len(_HTTP_CODES)} 条 + 报文框架 7 项与 CPython 一致")
 
 
+@test
+def test_http_req_build_rejects_line_breaks():
+    """`http_req_build` 拒掉 method / target / host 里的 CR、LF、NUL（#790）。
+
+    **Why**：这三个字段直接变成请求行与头行。一个从文件 / argv / URL 拼出来的 host 里
+    混进 LF，就多出一整行头（甚至拆出第二个请求）—— CRLF 注入 / request splitting
+    （CWE-113）。公共构建器是**唯一**该做这次校验的地方；"调用方自己记得查"正是每个
+    在这块出过 CVE 的 HTTP 库试过的第一条路。
+
+    **How to apply**：七个被污染的输入（每个字段各 CR / LF，host 再加 NUL）都必须返回
+    `HTTP_NO`，而且 `out` 一个字节都不许被写（先填 `A`，拒后仍是 `A`）。另有一条
+    正常构建当对照 —— 否则"永远返回 HTTP_NO"也能过。
+    """
+    probe = _head("use http") + r"""
+fn _start() {
+    let o: ptr = alloc(256);
+    let ok: u32 = http_req_build(o, 256, "GET", "/x", "h.example", 80, 0);
+    w("OK|"); wd(ok); w("|"); wd(load8(o, 0)); w("\n");
+    store8(o, 0, 65 as u8);
+    let m1: u32 = http_req_build(o, 256, "GE\nT", "/x", "h.example", 80, 0);
+    w("M_LF|"); wd(m1); w("|"); wd(load8(o, 0)); w("\n");
+    store8(o, 0, 65 as u8);
+    let m2: u32 = http_req_build(o, 256, "GE\rT", "/x", "h.example", 80, 0);
+    w("M_CR|"); wd(m2); w("|"); wd(load8(o, 0)); w("\n");
+    store8(o, 0, 65 as u8);
+    let t1: u32 = http_req_build(o, 256, "GET", "/x\nX-Injected: yes", "h.example", 80, 0);
+    w("T_LF|"); wd(t1); w("|"); wd(load8(o, 0)); w("\n");
+    store8(o, 0, 65 as u8);
+    let t2: u32 = http_req_build(o, 256, "GET", "/x\rX-Injected: yes", "h.example", 80, 0);
+    w("T_CR|"); wd(t2); w("|"); wd(load8(o, 0)); w("\n");
+    store8(o, 0, 65 as u8);
+    let h1: u32 = http_req_build(o, 256, "GET", "/x", "a.example\nX-Injected: yes", 80, 0);
+    w("H_LF|"); wd(h1); w("|"); wd(load8(o, 0)); w("\n");
+    store8(o, 0, 65 as u8);
+    let h2: u32 = http_req_build(o, 256, "GET", "/x", "a.example\rX-Injected: yes", 80, 0);
+    w("H_CR|"); wd(h2); w("|"); wd(load8(o, 0)); w("\n");
+    store8(o, 0, 65 as u8);
+    let h3: u32 = http_req_build(o, 256, "GET", "/x", "a.example\0X-Injected: yes", 80, 0);
+    w("H_NUL|"); wd(h3); w("|"); wd(load8(o, 0)); w("\n");
+    syscall4(60, 0, 0, 0);
+}
+"""
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        g = _kv(_run(_compile(probe, "http_inject", td)))
+    assert "OK" in g, g
+    ok_len, ok_first = g["OK"].split("|")
+    assert ok_len != str(4294967295) and int(ok_len) > 0, f"正常的请求构建失败了: {g['OK']!r}"
+    assert ok_first == "71", f"正常构建没写进 out（首字节应为 'G'=71）: {g['OK']!r}"
+    for k in ("M_LF", "M_CR", "T_LF", "T_CR", "H_LF", "H_CR", "H_NUL"):
+        assert k in g, f"探针没打出 {k}"
+        val, first = g[k].split("|")
+        assert val == str(4294967295), f"{k} 没有被拒：返回值 {val}（期望 HTTP_NO）"
+        assert first == "65", f"{k} 被拒之前已经写了 out（首字节 {first}，应保持 65）"
+    print("      method/target/host 的 CR/LF/NUL 全部拒掉，且没有写脏 out")
+
+
 # ---------------------------------------------------------------- 端到端 (真服务器)
 
 def _serve(root: Path) -> tuple[object, int]:

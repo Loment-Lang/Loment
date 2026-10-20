@@ -21,13 +21,21 @@
 // 平键：`code_*` 是 `c * 2 + lang`，`code_fix` 是 `(c * stride + i) * 2 + lang`
 // （一条码最多 8 条修法）。按码嵌 `if` 要嵌两层，平键一层就够，而且生成器这边一眼
 // 看得出哪条码少了哪一档。
-// **码从 1 起连续编号**, 所以 `n_codes()` 也就是最后那个码 —— 两个消费者（`lomcli`
-// 的 codes/explain、报错器）都拿它当上界用, 那条不变式有判据钉着。
+// **用户码从 1 起连续编号**, 所以 `n_codes()` 也就是最后一个用户码 —— 两个消费者
+// （`lomcli` 的 codes/explain、报错器）都拿它当上界用, 那条不变式有判据钉着。
+// **E9xx 是内部码段**（`#773`：工具链自己崩了）：独立一段、不参与那条上界，
+// 由 `internal_lo()` / `internal_hi()` 另外给出。
 
 module surface_data
 choose runtime
 
 pub fn n_codes() -> u32 { return 38; }
+
+/// 内部码段的下界（`#773`）。`E900` 起是"工具链自己崩了"那一类。
+pub fn internal_lo() -> u32 { return 900; }
+
+/// 内部码段的上界（含）。
+pub fn internal_hi() -> u32 { return 900; }
 
 /// 报错器自己的版本（`lomenterr version` 打的就是它）。真源：`tools/loment_release.py`。
 pub fn lomenterr_version() -> str { return "0.1.2"; }
@@ -110,6 +118,8 @@ pub fn code_title(c: u32, lang: u32) -> str {
     if k == 75 { return "LSPE 策略锁"; }
     if k == 76 { return "`lspe pass` needs a reason"; }
     if k == 77 { return "`lspe pass` 缺少理由"; }
+    if k == 1800 { return "the tool died without reporting (internal)"; }
+    if k == 1801 { return "工具链进程死了，没留下诊断"; }
     return "";
 }
 
@@ -191,6 +201,8 @@ pub fn code_what(c: u32, lang: u32) -> str {
     if k == 75 { return "策略层要求的锁与这份产物不符。"; }
     if k == 76 { return "An `lspe pass` block has no reason, or only whitespace."; }
     if k == 77 { return "`lspe pass` 后面缺一句理由（或者理由全是空白）。"; }
+    if k == 1800 { return "A process in the toolchain died **before it could write a structured diagnostic** - killed by a signal, or exited abnormally, with no record in `--diag-out`."; }
+    if k == 1801 { return "工具链里的一个进程在**能写出结构化诊断之前**就死了 —— 被信号打死，或者以异常状态退出，而 `--diag-out` 一份记录都没写。"; }
     return "";
 }
 
@@ -272,6 +284,8 @@ pub fn code_why(c: u32, lang: u32) -> str {
     if k == 75 { return "策略层是未来面；今天没有策略层，这个码先占住。"; }
     if k == 76 { return "The bypass is receipted: the block itself goes into the ledger, and the reason is its signature. A reasonless bypass is the unlabelled floor LSPE exists to prevent."; }
     if k == 77 { return "旁路是**有收据的**：块本身进台账，理由就是签名。没有理由的旁路等于一块无标签地板 —— 那正是 LSPE 要防的形状。"; }
+    if k == 1800 { return "The diagnostics channel can only describe failures that were **successfully serialized before the failure**. A compiler crash, a linker crash, or the renderer crashing on its own all go the same way: the JSONL is empty and there is nothing for the renderer to do. The launcher now closes that gap: it reads the exit status / signal name and synthesizes this record, so \"no record\" no longer means \"nothing happened\" (#773). This is not a semantic error in your source - it is the **implementation failing on itself**."; }
+    if k == 1801 { return "诊断系统只能描述**在失败之前已经成功序列化**的失败。编译器崩溃、链接器崩溃、报错器自己崩溃，走的都是这条路：JSONL 是空的，渲染器无事可做。启动器现在替它收尸：拿到退出状态 / 信号名，合成这一条记录，于是「没有任何记录」不再等于「什么都没有发生」（`#773`）。这不是你源码的语义错 —— 它是**实现自己的失败**。"; }
     return "";
 }
 
@@ -353,6 +367,8 @@ pub fn code_yes(c: u32, lang: u32) -> str {
     if k == 75 { return "与策略一致的产物"; }
     if k == 76 { return "a non-empty reason"; }
     if k == 77 { return "一句非空理由"; }
+    if k == 1800 { return "a tool exits 0 (no diagnostics) or 1 (diagnostics, and it left a record)"; }
+    if k == 1801 { return "工具链以 0 退出（无诊断）或 1 退出（有诊断并留下了记录）"; }
     return "";
 }
 
@@ -434,6 +450,8 @@ pub fn code_no(c: u32, lang: u32) -> str {
     if k == 75 { return "与策略不符的产物"; }
     if k == 76 { return "an empty string / whitespace only / not a string"; }
     if k == 77 { return "空字符串 / 只有空白 / 根本不是字符串"; }
+    if k == 1800 { return "killed by a signal / exited abnormally without writing any structured diagnostic"; }
+    if k == 1801 { return "被信号打死 / 异常退出，而且一份结构化诊断都没写"; }
     return "";
 }
 
@@ -476,6 +494,7 @@ pub fn code_ascii(c: u32) -> str {
     if c == 36 { return "LSPE's own self-audit failed"; }
     if c == 37 { return "an LSPE policy lock does not match this artifact"; }
     if c == 38 { return "an `lspe pass` block with no reason"; }
+    if c == 900 { return "a tool in the chain died before it could report (internal) - report it with the unit"; }
     return "";
 }
 
@@ -758,6 +777,14 @@ pub fn code_fix(c: u32, i: u32, lang: u32) -> str {
     if k == 609 { return "写上为什么这块要绕开审计：`lspe pass \"measured on the target hardware\" { … }`。"; }
     if k == 611 { return "如果只是某几条证不出来，优先用 `--lspe-mode=strict` 之外的默认档，让它留在台账里。"; }
     if k == 613 { return "理由写窄一点：只说这块为什么必须绕开审计，不要写成一段泛泛的说明。"; }
+    if k == 14400 { return "Report the smallest source that reproduces it together with this record - a crash is a compiler defect, not something you can work around in your code."; }
+    if k == 14402 { return "Include the exit status / signal name (already in this message) and the output of `loment version`."; }
+    if k == 14404 { return "If the message names the **linker** (`loment-lomelf`), also include the `-o` path and the target platform."; }
+    if k == 14406 { return "If the message names the **renderer** (`lomenterr`), attach that JSONL as it is - what it could not render is exactly what has to be fixed."; }
+    if k == 14401 { return "把最小可复现的那份源码 + 这一条一起报上来 —— 崩溃是编译器缺陷，不是靠改你的代码能绕开的。"; }
+    if k == 14403 { return "附上退出状态 / 信号名（这一条消息里已经写了）与 `loment version`。"; }
+    if k == 14405 { return "如果是**链接器**那一侧（消息点名 `loment-lomelf`），同时附上 `-o` 的路径与目标平台。"; }
+    if k == 14407 { return "如果是**报错器**那一侧（消息点名 `lomenterr`），把那份 JSONL 原样附上 —— 它渲染不了的东西正是要修的东西。"; }
     return "";
 }
 
@@ -802,6 +829,7 @@ pub fn code_nfix(c: u32) -> u32 {
     if c == 36 { return 3; }
     if c == 37 { return 3; }
     if c == 38 { return 3; }
+    if c == 900 { return 4; }
     return 0;
 }
 

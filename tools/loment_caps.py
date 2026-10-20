@@ -100,7 +100,12 @@ _ARRAY_STMT = re.compile(r"^(?:let|var|const|fn)\b")
 #: `failp(` 是 2026-10-17 补的：`fail` 的变体（消息 + 一段字节），同样走
 #: `loment: …` + `die(1)`。少了它，新写的"读满槽"那条守卫（用 `failp` 报路径）会被
 #: 判成沉默 —— 那是词汇表不全，不是守卫不在。
-SPEAKS = ("fail(", "failp(", "sym_pub(", "err_", "E0", "loment: ", "太大", "非法", "超", "越界")
+#: `set_err(` / `wr_err(` 是 2026-10-19 补的（`#774`）：`interp.lomt` 的失败路径是
+#: **先记一个错误码**（`set_err(st, E_OOM)`），再由入口把它写成 `ERR oom`（`wr_err`）。
+#: 词汇表原先只有 `err_`（前缀），`set_err` 这种**把 err 放在词尾**的形状一条都认不出 ——
+#: 于是 7 处**确实会说话**的守卫被算成了沉默。补的是**形状**，不是放宽判据。
+SPEAKS = ("fail(", "failp(", "sym_pub(", "err_", "set_err(", "wr_err(",
+          "E0", "loment: ", "太大", "非法", "超", "越界")
 
 #: 守卫分支往后看几行算"同一处"。
 LOOKAHEAD = 8
@@ -132,6 +137,44 @@ EXPLAINED: dict[tuple[str, str], str] = {
         "**检测点，不是写入点**（`#485`）：`if mlen >= MSG_CAP` 判的是「这条消息有没有"
         "被拷满」，判到了就印 `truncated` / 写 `\"truncated\": true`。越界在这里不是"
         "写穿，而是这条判据要回答的问题",
+    # ---- `#774`（2026-10-19）：自举编译器剩下的那些"越界由调用方报"或"步长不是容量"。
+    # 每一条都指着**真实存在的失败消息**（行号会漂，所以引的是消息原文）——
+    # 用来核对的是"那句话还在不在"，不是"这一行还是不是那个数"。
+    ("loment/selfhost/comefor.lomt", "MAX_DIALECT"):
+        "越界**由调用方报**：`expand_comefor` 返回 4，驱动器 `comefor_fail` 打印 "
+        "`too many comefor dialects (limit is 64)` 并 `die(1)`",
+    ("loment/selfhost/potato.lomt", "PT_L0CAP"):
+        "越界**由调用方报**：`pt_lay_check` 返回 1，`potato_emit` 打印 "
+        "`one of the L0 layouts ... cannot be parsed`（点名拒，不静默少几条 `layouts`）",
+    ("loment/selfhost/potato.lomt", "PT_FMAX"):
+        "越界**由调用方报**：本笔给它补了守卫（第 17 个字段起 `pt_l0_rec` 返回低 32 位 0），"
+        "`pt_lay_check` 于是返回 1，同 `PT_L0CAP` 那句点名消息（消息里写了 16 字段）",
+    ("loment/selfhost/potato.lomt", "PT_GLRMX"):
+        "越界**由调用方报**：本笔给它补了守卫（`pt_gl_l2ranges` 返回 `PT_GLRMX + 1`，"
+        "经 `pt_gl_fn` / `pt_gl_all` 把高位置 1），`potato_emit` 打印 "
+        "`more than 32 loop bodies that carry an allocation`。原先静默停在 32，"
+        "把剩下的分配算成 L3（与参考实现分叉且两边都不报错）",
+    ("loment/selfhost/potato.lomt", "PT_TMAX"):
+        "越界**由调用方报**：`pt_tref_add` 返回 0 → `pt_collect_at` 返回 0 → "
+        "`potato_emit` 打印 `the type string pool is full (128 entries of 64 bytes)`",
+    ("loment/selfhost/potato.lomt", "PT_TSTRIDE"):
+        "**步长/单条长度**，不是条数：`len + 8 >= PT_TSTRIDE` 挡的是**一条类型串太长**，"
+        "走的是和 `PT_TMAX` 同一条拒绝（`the type string pool is full (128 entries of "
+        "64 bytes) -- raise PT_TMAX / PT_TSTRIDE`）",
+    ("loment/selfhost/potato.lomt", "PT_EMAX"):
+        "越界**由调用方报**：本笔把 `pt_env_put` 的静默 `if` 改成返回 1，"
+        "`pt_mono_body` / `pt_mono_one` 返回 3，`potato_emit` 打印 "
+        "`more than 1536 locals or parameters in one function (PT_EMAX)`",
+    ("loment/selfhost/potato.lomt", "PT_MAX"):
+        "越界**由调用方报**：`pt_inst_add` 返回 `PT_MAX + 1` → `pt_mono_call` 返回 1 → "
+        "`potato_emit` 打印 `the shape of a generic call site is outside this section`"
+        "（实例表满也落在这一句；拒发，不静默丢实例）",
+    ("loment/selfhost/potato.lomt", "PT_AMAX"):
+        "越界**由调用方报**：`narg > PT_AMAX || ntp > PT_AMAX` → `pt_mono_call` 返回 1 → "
+        "同 `PT_MAX` 那句 `the shape of a generic call site is outside this section`",
+    ("loment/selfhost/potato.lomt", "PT_GMAX"):
+        "越界**由调用方报**：`pt_gfn_scan` 返回 1 → `potato_emit` 打印 "
+        "`more generic function declarations than this section takes`",
     ("loment/selfhost/lexer.lomt", "MAX_LANG"):
         "**有守卫**（`dn < MAX_LANG`，不写穿）：它静默**丢**的是第 17 条语言声明 —— "
         "那是 (a) 里「丢」那一半，**本笔没做**。留着的理由写在这里而不是抹掉：参考实现"

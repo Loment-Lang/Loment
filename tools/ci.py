@@ -383,7 +383,7 @@ SHARD_COST = {
     # 程序，Windows 侧）。CI 上还没量到，先按 15 记，量到后替换。
     "loment_spec_oracle_test": 15.0,
     "loment_syscalls_test": 1.4,
-    "loment_thread_test": 0.5,
+    "loment_thread_test": 3.6,
     "loment_tools_test": 10.0,
     "loment_trans_test": 111.1,
     "loment_zwframe_test": 2.5,

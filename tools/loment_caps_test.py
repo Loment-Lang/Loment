@@ -95,8 +95,17 @@ def test(fn):
 #:   * `loment/examples/` 里四个示例常量：`NODE` / `W` / `H` / `SCALE`（都沉默）。
 #: 所以条数 228 → **236**、沉默 156 → **162**（新增的 6 个沉默名都写进了 `EXPLAINED`）。
 #: **这一笔只扩口径，不改行为**：新扫到的沉默项逐条在 `EXPLAINED` 里写清来路。
-CAPACITY_SITES = 236
-SILENT_SITES = 162
+#:
+#: 2026-10-19（`FujoJTOP/loment#774`，叠在 `#770` 的递归口径上）：**自举编译器零真缺口**。
+#: ① 筛子的词汇表补了两种实际在用的"说话"形状 —— `set_err(` / `wr_err(`：
+#:    `interp.lomt` 的守卫一直是"先记错误码、入口写成 `ERR <种类>`"，而 `SPEAKS`
+#:    原先只有前缀 `err_`，认不出 `set_err`；7 处**本来就会说话**的守卫从沉默变有话。
+#: ② `potato.lomt` 的三张表补了真守卫（`PT_EMAX` / `PT_FMAX` / `PT_GLRMX` —— 原先
+#:    写穿/静默丢，现在点名拒），另外 7 处"越界由调用方报"的写进 `EXPLAINED`。
+#:    顺带 `PT_EN` 被认出是**槽位不是容量**，退出本口径。
+#: ⇒ 条数 236 → **235**、沉默 162 → **154**、沉默名 **129** 个。
+CAPACITY_SITES = 235
+SILENT_SITES = 154
 
 #: 第二类：字面量上界（`#770`）。`[T; N]` 与 `literal:<N>` 各自钉住总数与沉默的那一份。
 LITERAL_SITES = 63
@@ -108,26 +117,135 @@ ARRAY_SILENT = 17
 #: ⚠ 这里按**筛子**的口径（`not speaks`），所以那些"来路已写明"的也在内 ——
 #: 判断"真缺口"用 `loment_caps.gaps()`（那条另有一条判据）。
 SILENT_NAMES = frozenset((
-    "ARENA_CAP", "ARGS_CAP", "ARG_STEP", "CASES_CAP", "CG_MAXENUM", "CG_MAXFN",
-    "CMAX", "CNTSZ", "CR", "CTX_CAP", "CUR_CAP", "CW", "C_CAND", "DECL_KW",
-    "DELIM_CAP", "DEPS_CAP", "DEPTHSZ", "DIGEST_LEN", "DIRQ", "DOC_CAP",
-    "DOC_MAX", "EMAX", "ENTS_CAP", "ENT_CAP", "ENT_STRIDE", "ENV_CAP", "FBUF",
-    "FMAX", "FNMAX", "FRAME_CAP", "FUAI_CAP", "FW", "F_A1", "F_A3", "F_A4",
-    "F_REV", "GIT_CAP", "H", "HASH_LEN", "IN_CAP", "J_NODE_STRIDE", "J_PL",
-    "J_PS", "K_ADD", "K_ASHR", "K_FN", "K_INTTOPTR", "K_INT_MAX", "K_INT_MIN",
-    "K_TRUNC", "LIMIT", "LINE_CAP", "LMAX", "LTOK_CAP", "MAXBAD", "MAXD",
-    "MAXF", "MAXOP", "MAXROW", "MAXTOK", "MAXW", "MAX_DEPTH", "MAX_DIALECT",
-    "MAX_LANG", "MEM_CAP", "MIN_RECLEN", "MMAX", "MSG_CAP", "MW", "M_AUX",
-    "M_CAP", "NAMEE", "NAMES_CAP", "NAME_MAX", "NMAX", "NODE", "NPOOL", "NW",
-    "N_DOC", "OB_CAP", "OUT_CAP", "PATHW", "PATH_CAP", "POOL_CAP", "PROC_WS",
-    "PT_AMAX", "PT_EMAX", "PT_EN", "PT_FMAX", "PT_GLRMX", "PT_GMAX",
-    "PT_L0CAP", "PT_MAX", "PT_TMAX", "PT_TSTRIDE", "PY_TMAX", "QNAMES_CAP",
-    "QUEUE_CAP", "Q_STRIDE", "ROWE", "SCALE", "SEG_TYPES", "SHOWN",
-    "SHOW_MAX", "SMAX", "SRCCAP", "SRC_CAP", "STR_CAP", "SUG_CAP",
-    "SUG_NAME", "SW", "SYM_MAX", "SYM_STRIDE", "SYS_CAP", "S_ENUM",
-    "S_FIELD", "S_META", "S_NAME", "S_PARAM", "S_REC", "S_VALG", "TA",
-    "TMAX", "TM_CAP", "TOKE", "TOKMAX", "TOK_CAP", "TOOL_N", "TXT_CAP",
-    "T_W", "URI_CAP", "VAL_REC", "VIM_CAP", "W", "W_EACH", "ZERO_CAP",
+    "ARENA_CAP",
+    "CASES_CAP",
+    "CG_MAXENUM",
+    "CG_MAXFN",
+    "CMAX",
+    "CNTSZ",
+    "CR",
+    "CTX_CAP",
+    "CUR_CAP",
+    "CW",
+    "C_CAND",
+    "DECL_KW",
+    "DELIM_CAP",
+    "DEPS_CAP",
+    "DEPTHSZ",
+    "DIGEST_LEN",
+    "DIRQ",
+    "DOC_CAP",
+    "DOC_MAX",
+    "EMAX",
+    "ENTS_CAP",
+    "ENT_CAP",
+    "ENT_STRIDE",
+    "FBUF",
+    "FMAX",
+    "FNMAX",
+    "FRAME_CAP",
+    "FUAI_CAP",
+    "FW",
+    "F_A1",
+    "F_A3",
+    "F_A4",
+    "F_REV",
+    "GIT_CAP",
+    "H",
+    "HASH_LEN",
+    "IN_CAP",
+    "J_NODE_STRIDE",
+    "J_PL",
+    "J_PS",
+    "K_ADD",
+    "K_ASHR",
+    "K_FN",
+    "K_INTTOPTR",
+    "K_INT_MAX",
+    "K_INT_MIN",
+    "K_TRUNC",
+    "LINE_CAP",
+    "LMAX",
+    "LTOK_CAP",
+    "MAXBAD",
+    "MAXD",
+    "MAXF",
+    "MAXOP",
+    "MAXROW",
+    "MAXTOK",
+    "MAXW",
+    "MAX_DIALECT",
+    "MAX_LANG",
+    "MEM_CAP",
+    "MIN_RECLEN",
+    "MMAX",
+    "MSG_CAP",
+    "MW",
+    "M_AUX",
+    "M_CAP",
+    "NAMEE",
+    "NAMES_CAP",
+    "NAME_MAX",
+    "NMAX",
+    "NODE",
+    "NPOOL",
+    "NW",
+    "N_DOC",
+    "OB_CAP",
+    "OUT_CAP",
+    "PATHW",
+    "PATH_CAP",
+    "POOL_CAP",
+    "PROC_WS",
+    "PT_AMAX",
+    "PT_EMAX",
+    "PT_FMAX",
+    "PT_GLRMX",
+    "PT_GMAX",
+    "PT_L0CAP",
+    "PT_MAX",
+    "PT_TMAX",
+    "PT_TSTRIDE",
+    "PY_TMAX",
+    "QNAMES_CAP",
+    "QUEUE_CAP",
+    "Q_STRIDE",
+    "ROWE",
+    "SCALE",
+    "SEG_TYPES",
+    "SHOWN",
+    "SHOW_MAX",
+    "SMAX",
+    "SRCCAP",
+    "SRC_CAP",
+    "STR_CAP",
+    "SUG_CAP",
+    "SUG_NAME",
+    "SW",
+    "SYM_MAX",
+    "SYM_STRIDE",
+    "SYS_CAP",
+    "S_ENUM",
+    "S_FIELD",
+    "S_META",
+    "S_NAME",
+    "S_PARAM",
+    "S_REC",
+    "S_VALG",
+    "TA",
+    "TMAX",
+    "TM_CAP",
+    "TOKE",
+    "TOKMAX",
+    "TOOL_N",
+    "TXT_CAP",
+    "T_W",
+    "URI_CAP",
+    "VAL_REC",
+    "VIM_CAP",
+    "W",
+    "W_EACH",
+    "ZERO_CAP",
 ))
 
 #: 字面量上界里**沉默**的那一份，键是 `(文件, literal:<N>)`，值是**条数**
@@ -393,6 +511,33 @@ def test_the_front_end_has_no_silent_capacity():
             f"编译器前端的{label}还有**说不出话**的：" + "; ".join(
                 f"{r['file']}:{r['line']} {r['name']}" for r in gap2))
     print(f"      前端 {len(fe)} 处具名容量，缺口 0（其余要么有话，要么来路写在 EXPLAINED 里）")
+
+
+@test
+def test_the_self_host_compiler_has_no_silent_capacity():
+    """**自举编译器（`loment/selfhost/`）一处真缺口都不许有** —— `#774` 的那条线。
+
+    **Why**：`#774` 说的是"固定表没有失败路径，而失败是**沉默**的"。前端那五个文件
+    （`docs/258` 的 (a)）只是这条线的一段；`potato` / `interp` / `comefor` 同样在
+    编译一份用户源时被推着走。这一条把 (a) 从"前端"扩到**整个自举编译器**：
+    `loment/selfhost/` 下每一处容量，要么它自己的守卫说得出来，要么 `EXPLAINED`
+    里有一条**指着真实失败消息**的理由（越界由调用方的 `pt_wfail` / `fail` 报）。
+
+    **How to apply**：加一张固定表就加一条 `EXPLAINED` 或一条守卫；两样都没有 =
+    下一份输入会**静默写穿**（自举侧的症状是段错误，`#343` 那一族）。这条判据
+    与 `loment_caps.gaps()` 同源，不另写一套扫描。
+    """
+    rows = [r for r in loment_caps.scan()
+            if r["file"].startswith("loment/selfhost/")]
+    assert rows, "自举编译器一处容量都没扫到 —— 这条判据自己先失效了"
+    gap = loment_caps.gaps(rows)
+    assert not gap, (
+        "自举编译器还有**说不出话**的容量："
+        + "; ".join(f"{r['file']}:{r['line']} {r['name']}={r['value']}" for r in gap)
+        + " —— 越界时它只会写穿或静默截断（`#774`）"
+    )
+    print(f"      自举编译器 {len(rows)} 处容量，真缺口 0"
+          f"（{sum(1 for r in rows if r['explained'])} 处来路写在 EXPLAINED 里）")
 
 
 @test

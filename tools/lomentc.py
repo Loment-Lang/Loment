@@ -373,6 +373,88 @@ setprev:
 @__loment_freehead = internal global i32 0
 '''
 
+#: **运行期并发的全部状态**（`FujoJTOP/loment#778`）。
+#:
+#: 今天只有一条**取号锁**（ticket lock）：`atomic_add` 拿到了锁，`owner` 记持有者的
+#: `gettid()`，于是同一线程的重入（`alloc` 里的 `alloc`、根帧里再 `alloc`）只加深度。
+#: 为什么不是"加一试试、失败再减回去"：那个形状在 A 拿到锁之后会被 B 的加一减一
+#: 骗回 0（`docs/245` §8 实测过），取号锁天然公平且只用 `atomicrmw add`（本后端的
+#: IR 子集只有这一种原子）。
+#:
+#: **谁拿它**：`alloc` / `free` / 根表 push-pop。线程体不拿 —— 见 `_IR_RT_THREADS`。
+#: 一份不用 `thread_spawn` 的单元**一个字节都不发**（门槛在 `emit_llvm` 那一侧）。
+#:
+#: **线程标志**（`1` = 这份产物起过线程）。它不数"当前活几个"，因为那需要在子线程
+#: 的退出路径上减一，而那条路径是**链接器发的机器码尾声**（`lomelf._SPAWN_TAIL`），
+#: 加一次调用要同时改两只链接器的字节序列。取号锁把这一点换成一个**单调**的边界：
+#: 起过线程之后，自动收集在**本进程剩余的生命里整个不跑**（`maybe_collect` 直接返回）。
+#: 代价是线程程序的堆只增不减（`free` 仍然兑现、LIFO 仍然后退前沿）；换来的是
+#: **收集器永远不与任何线程交错**，不需要 stop-the-world，也不需要停任何人。
+_IR_RT_THREADS = "@__loment_rt_threads = internal global i32 0\n"
+
+_IR_RT_LOCK = '''; ---- 运行期锁（`FujoJTOP/loment#778`）----------------------------------------
+;
+; **模型**（`docs/245` §10）：一条全局取号锁串行化 `alloc` / `free` / 根表游标；
+; 自动收集在**有线程活着**时**整个不跑**（`@__loment_rt_threads != 0` 时 `maybe_collect`
+; 直接返回）。于是收集器只在「起过线程之前」运行 —— 它不去停
+; 任何一个 mutator，也不需要停。线程之间真正并发；`atomic_add` 是 seq_cst。
+;
+; 重入靠 `@__loment_rt_own`（持有者的 tid；`tid` 永远 > 0，0 = 没人持有）。
+@__loment_rt_next = internal global i32 0
+@__loment_rt_serving = internal global i32 0
+@__loment_rt_own = internal global i32 0
+@__loment_rt_depth = internal global i32 0
+
+define internal i32 @__loment_rt_tid() {
+entry:
+  %t = call i64 asm sideeffect "syscall", "={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}"(i64 186, i64 0, i64 0, i64 0)
+  %r = trunc i64 %t to i32
+  ret i32 %r
+}
+
+define internal void @__loment_rt_acquire() {
+entry:
+  %ti = call i32 @__loment_rt_tid()
+  %o = atomicrmw add ptr @__loment_rt_own, i32 0 seq_cst
+  %mine = icmp eq i32 %o, %ti
+  br i1 %mine, label %reenter, label %wait
+reenter:
+  %d0 = load i32, ptr @__loment_rt_depth
+  %d1 = add i32 %d0, 1
+  store i32 %d1, ptr @__loment_rt_depth
+  ret void
+wait:
+  %tkt = atomicrmw add ptr @__loment_rt_next, i32 1 seq_cst
+  br label %spin
+spin:
+  %srv = atomicrmw add ptr @__loment_rt_serving, i32 0 seq_cst
+  %ours = icmp eq i32 %srv, %tkt
+  br i1 %ours, label %got, label %spin
+got:
+  %own = atomicrmw add ptr @__loment_rt_own, i32 %ti seq_cst
+  store i32 1, ptr @__loment_rt_depth
+  ret void
+}
+
+define internal void @__loment_rt_release() {
+entry:
+  %d0 = load i32, ptr @__loment_rt_depth
+  %d1 = sub i32 %d0, 1
+  store i32 %d1, ptr @__loment_rt_depth
+  %z = icmp eq i32 %d1, 0
+  br i1 %z, label %drop, label %done
+drop:
+  %o = atomicrmw add ptr @__loment_rt_own, i32 0 seq_cst
+  %neg = sub i32 0, %o
+  %clr = atomicrmw add ptr @__loment_rt_own, i32 %neg seq_cst
+  %rel = atomicrmw add ptr @__loment_rt_serving, i32 1 seq_cst
+  br label %done
+done:
+  ret void
+}
+
+'''
+
 #: `hosted` 那一份 arena 的字节数（`docs/228` §3.3）。**编译期常量**，并且**写进产物**
 #: （`; loment-heap: platform <N>`）—— 与上面那个 `; loment-port: hosted` 同一个道理：
 #: 构建那一侧要知道这件事，而它不该去读源码（读源码要它懂 Loment 的词法，而 IR 本来就是
@@ -4283,6 +4365,9 @@ _RUNTIME_SITES: dict[str, str] = {
     "str_eq": "`str_eq`",
     "panic": "`panic`",
     "guard": "`guard`（能力域守卫）",
+    # `#778`：真线程要把运行期的锁与活线程计数带进产物（`alloc`/`free`/根表在
+    # 线程之间共享）。所以它和 `alloc` 一样，是"会把运行期拖进来"的构造。
+    "thread_spawn": "`thread_spawn`（运行期锁）",
 }
 
 
@@ -6396,6 +6481,15 @@ roots:
 #: `gc_auto` 的触发：**按累计请求量**记 —— 过了 32 KiB 就收一次并清零。
 _IR_GC_TRIGGER_FIXED = '''define internal void @__loment_maybe_collect(i32 %sz) {
 entry:
+  ; **有线程活着就不收**（`FujoJTOP/loment#778`）：收集器今天没有 stop-the-world
+  ; 协议 —— 它会去扫别的线程的根槽，而那要求全世界的 mutator 都停在安全点上。
+  ; 本版把这一条**换成推迟**：`@__loment_rt_threads` 是「这台进程起过线程」的标志
+  ; （`thread_spawn` 的调用点在 `clone` 之前把它置 1），非零时直接返回。于是收集只在
+  ; 起过线程之前发生 —— 不需要停任何人，也就不会与任何人交错。
+  %lv = load i32, ptr @__loment_rt_threads
+  %defer = icmp ne i32 %lv, 0
+  br i1 %defer, label %out, label %count
+count:
   ; **时钟 = 分配器真正吃掉多少字节**（`__loment_alloc` 自己那两行 `(sz + 23) & -16`），
   ; 不是「载荷请求多少」—— 少了块头那 8 字节，小块程序的时钟就比消耗慢：8 字节载荷的
   ; 块消耗 32、时钟只走 8，慢一倍 ⇒ 计数越过阈值的那一刻，arena 已经装满了（实测：
@@ -6609,6 +6703,11 @@ out:
 ; 判据（退回去了就说明死块都在顶端，正是小回收该干的事），而年轻代的**大小**不是。
 define internal void @__loment_maybe_collect(i32 %sz) {
 entry:
+  ; **有线程活着就不收** —— 与固定档同一条（`FujoJTOP/loment#778`，见那边整段理由）。
+  %lv = load i32, ptr @__loment_rt_threads
+  %defer = icmp ne i32 %lv, 0
+  br i1 %defer, label %out, label %count
+count:
   ; **时钟 = 分配器真正吃掉多少字节**（`(sz + 23) & -16`），不是载荷请求 —— 与固定档同一条
   ; 理由（见 `_IR_GC_TRIGGER_FIXED`）。空间触发那一格原先写成 `off + sz + 8`：**多算了那
   ; 个 8**（块头早被 `& -16` 那条并进去了），于是它报的「下一块落在哪儿」比实际偏后。
@@ -7684,7 +7783,7 @@ class _Ir:
                  dbg_scope: int | None = None, dbg_lines: dict | None = None,
                  dbg_meta: list | None = None, dbg_types: dict | None = None,
                  gc_alpha: bool = False, gc_auto: bool = False,
-                 gc_barrier: bool = True,
+                 gc_barrier: bool = True, threads: bool = False,
                  lms_guard: bool = False, lms_reject: bool = False,
                  lms_crash: bool = False):
         self.funcs, self.consts, self.f = funcs, consts, f
@@ -7721,6 +7820,9 @@ class _Ir:
         #: —— 挂上去就是未定义符号（实测：`FujoJTOP/loment#239` 一修好，这条立刻露出来）。
         #: 与自举侧同一个判据（那边是 `heap_needed` 预扫描出来的 `s+516`）。
         self.gc_barrier = gc_barrier
+        #: **这份产物起不起线程**（`#778`）：true 才在 alloc/free/根表站点发 acquire/release。
+        #: false 时那些站点**一个字节都不多**（默认档的产物逐字节不变）。
+        self.threads = threads
         #: **LMS 第 3/4/5 级在访存点上的三档回答**（`docs/253` §5.3/§5.4/§5.5）：
         #:   * `lms_guard`  —— 发不发那条内联界检查（g1 格：界是编译期常量）；
         #:   * `lms_reject` —— 越界的**那一条**访存跳过，程序继续（第 4 级）；
@@ -7919,6 +8021,11 @@ class _Ir:
         self.rootk = sum(slots(nm) for nm, (ty, _) in self.vars.items() if self._root_ty(ty))
         if self.rootk == 0:
             return
+        # `#778`：根表的游标与槽是**线程间共享**的。push/pop 各自是一段很短的
+        # 临界区（不是整个调用帧）—— 线程体之间因此不会互相等，收集器也不会
+        # 在两个 push 之间看到半张表。
+        if self.threads:
+            self.w("call void @__loment_rt_acquire()")
         n0 = self.t()
         self.w(f"{n0} = load i32, ptr @__loment_rootn")
         i = 0
@@ -7969,6 +8076,8 @@ class _Ir:
         self.w("unreachable")
         self.terminated = True
         self.label(ok)
+        if self.threads:
+            self.w("call void @__loment_rt_release()")
 
     def l1_free(self, names) -> None:
         """`gc_auto_alpha` 的 **L1**：把这些名字的块还掉（`docs/210` §2.5）。
@@ -7981,17 +8090,25 @@ class _Ir:
             _, slot = self.vars[name]
             t = self.t()
             self.w(f"{t} = load ptr, ptr {slot}")
+            if self.threads:
+                self.w("call void @__loment_rt_acquire()")
             self.w(f"call void @__loment_free(ptr {t})")
+            if self.threads:
+                self.w("call void @__loment_rt_release()")
 
     def roots_pop(self) -> None:
         """离开本帧：把根表的游标退回去（与 `roots_push` 成对）。"""
         if not self.gc_any or self.rootk == 0:
             return
+        if self.threads:
+            self.w("call void @__loment_rt_acquire()")
         n = self.t()
         self.w(f"{n} = load i32, ptr @__loment_rootn")
         m = self.t()
         self.w(f"{m} = sub i32 {n}, {self.rootk}")
         self.w(f"store i32 {m}, ptr @__loment_rootn")
+        if self.threads:
+            self.w("call void @__loment_rt_release()")
 
     # -- 表达式 -> (loment 类型, 值)
     def expr(self, e, want: str | None = None) -> tuple[str, str]:
@@ -8337,12 +8454,19 @@ class _Ir:
         挪到这儿之后**每一次**分配都计数；发的是同一段文本、同一顺序、同一个实参，
         所以只含 `alloc` 的程序产物字节**完全不变**。
         """
+        if self.threads:
+            # `#778`：分配器与收集器是**线程间共享**的状态。线程程序里整段
+            # （计数 + 可能发生的收集 + 分配）都在同一把运行期锁里 —— 收集因此
+            # 不可能与另一次 `alloc`/`free` 交错。非线程程序的产物逐字节不变。
+            self.w("call void @__loment_rt_acquire()")
         if self.gc_any:
             # 先问一句"该收了没有"—— 收在**分配之前**，所以不需要"分配失败再重试"那条路，
             # 也就不必动 `__loment_alloc` 一个字节（另外两档的产物因此逐字节不变）。
             self.w(f"call void @__loment_maybe_collect(i32 {size_var})")
         p = self.t()
         self.w(f"{p} = call ptr @__loment_alloc(i32 {size_var})")
+        if self.threads:
+            self.w("call void @__loment_rt_release()")
         return p
 
     def _lms_fixed_size(self, e) -> int | None:
@@ -8380,7 +8504,11 @@ class _Ir:
             return "ptr", self.alloc_ir(sz)
         if e.name == "free":
             _, p = self.expr(e.args[0], "ptr")
+            if self.threads:
+                self.w("call void @__loment_rt_acquire()")
             self.w(f"call void @__loment_free(ptr {p})")
+            if self.threads:
+                self.w("call void @__loment_rt_release()")
             return "u32", "0"
         if e.name == "load8":
             n = self._lms_guard_site(e)
@@ -8562,6 +8690,9 @@ class _Ir:
             a_arg = self.expr(e.args[2], "u64")[1]
             a_done = self.expr(e.args[3], "u64")[1]
             ent = e.args[0].value
+            # `#778`：**在 `clone` 之前**把"这台进程起过线程"记下来。从这一刻起
+            # `maybe_collect` 不再收（`_IR_RT_THREADS` 的注释里写了为什么是单调的）。
+            self.w("store i32 1, ptr @__loment_rt_threads")
             r = self.t()
             # 这条 asm 的名字是**两个词**（`thread_spawn @入口`）：链接器按第一个词分派、
             # 从第二个词里取符号。约束里的 `{r9}` / `{si}` / `{r12}` 不是 Linux 的系统调用
@@ -8945,13 +9076,13 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
                   dbg_scope: int | None = None, dbg_lines: dict | None = None,
                   dbg_meta: list | None = None, dbg_types: dict | None = None,
                   gc_alpha: bool = False, gc_auto: bool = False,
-                  gc_barrier: bool = True,
+                  gc_barrier: bool = True, threads: bool = False,
                   lms_guard: bool = False, lms_reject: bool = False,
                   lms_crash: bool = False
                   ) -> tuple[list[str], str]:
     ir = _Ir(funcs, consts, f, structs, enums, coverage, cov_counter,
              dbg_scope, dbg_lines, dbg_meta, dbg_types, gc_alpha, gc_auto, gc_barrier,
-             lms_guard, lms_reject, lms_crash)
+             threads, lms_guard, lms_reject, lms_crash)
     if f.interrupt:  # M33: x86_intrcc 需要中断帧指针
         ir.out.append(f"; {f.name} -> interrupt (x86_intrcc)")
         ir.out.append(f"define x86_intrcc void @{f.name}(ptr byval([8 x i8]) %__frame)"
@@ -9128,11 +9259,30 @@ def _heap_needed(mods: list, rt_on: bool = True) -> bool:
         toks = getattr(m, "toks", None) or []
         funcs = getattr(m, "funcs", None) or []
         for i, tk in enumerate(toks):
-            if tk.kind != "ident" or tk.val not in ("alloc", "str_concat", "free"):
+            # `thread_spawn`（`#778`）：线程要带上运行期锁与 `@__loment_rt_threads` ——
+            # 它们和分配器同一段文本，所以起线程就发堆（即便这个程序自己一次 `alloc`
+            # 都不写）。与自举侧 `heap_needed` 同一个集合。
+            if tk.kind != "ident" or tk.val not in ("alloc", "str_concat", "free",
+                                                    "thread_spawn"):
                 continue
             if tk.val == "alloc" and _alloc_promoted(toks, i, funcs):
                 continue
             return True
+    return False
+
+
+def _uses_threads(mods: list) -> bool:
+    """这份产物起不起真线程（`thread_spawn`，`docs/245`）。
+
+    只在这一个地方决定"要不要发那把运行期锁、要不要给 alloc/free/根表加锁":
+    没有线程的程序**产物逐字节不变**（锁的全局、函数、调用点一个都不发）。
+    与自举侧同一个判据（那边是 `contains_ident(src, toks, "thread_spawn")`）——
+    合并后的 token 流里出现过这个词就算，**保守**（多发型一份不存在的线程只是慢）。
+    """
+    for m in mods:
+        for tk in (getattr(m, "toks", None) or []):
+            if tk.kind == "ident" and tk.val == "thread_spawn":
+                return True
     return False
 
 
@@ -9229,6 +9379,9 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # 单元真的要那块 arena。判据得在**发射函数体之前**算好 —— 屏障是在 `store8` 站点上
     # 发的，而它引用堆。与自举侧同一条规则（那边预扫描成 `s+516`）。
     _has_heap_pre = _heap_needed([mod, *deps], rt_on)
+    #: **这份产物起不起线程**（`#778`）：true 才发运行期锁、才给 alloc/free/根表加锁。
+    #: 与 `_heap_needed` 同一个地方算 —— 两者都要在**发射函数体之前**定下来。
+    _has_threads = _uses_threads([mod, *deps])
     meta: list[str] = []
     dbg_types: dict = {}  # M59: 局部变量类型 -> DIBasicType (全模块共享一份)
 
@@ -9278,7 +9431,7 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
             g, text = _emit_ir_func(f, funcs, consts, structs, enums, coverage,
                                     cov_counter, scope, lines, meta if debug else None,
                                     dbg_types if debug else None, gc_alpha, gc_auto,
-                                    gc_alpha and _has_heap_pre,
+                                    gc_alpha and _has_heap_pre, _has_threads,
                                     _lms_guard, _lms_reject, _lms_crash)
             globals_ += g
             body.append(text)
@@ -9365,6 +9518,14 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
                 # 上面那个例外：说了才不是静默。
                 out.append("; loment-heap: static 65536")
             out.append(_IR_HEAP_LMS if _lms_rescue else _IR_HEAP)
+    # **线程标志**（`#778`）：收集器的触发读它（起过线程就整个不跑），`thread_spawn`
+    # 的调用点把它置 1。所以"发收集器"或"发线程锁"任一成立就得有它；两件事都不成立时
+    # 一个字节不发（非线程程序的产物因此逐字节不变）。
+    if _has_threads or ((gc_auto or gc_alpha) and _needs_heap):
+        out.append(_IR_RT_THREADS)
+    # **运行期锁**（`#778`）：只有真起线程的产物才发 —— 非线程程序的产物逐字节不变。
+    if _has_threads:
+        out.append(_IR_RT_LOCK)
     # **根表跟着 `gc_any` 发**（见 `_IR_ROOTS`）：`gc_auto` / `gc_auto_alpha` 只要函数里有
     # 指针槽就会往根表写 —— 而收集器**跟着堆发**。两件事解绑，才能让"有根没堆"的单元
     # （alpha 把 alloc 全 L0 提走那种）不至于发出引用未定义全局的产物。**次序是 HEAP→ROOTS→GC**。

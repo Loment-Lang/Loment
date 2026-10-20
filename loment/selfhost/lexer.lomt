@@ -74,7 +74,15 @@ fn lx_word_len(src: ptr, off: u32) -> u32 {
 /// 两种写法：`let IDENT {` **总认**；`IDENT {` 只在 IDENT 是**声明过的语言名、且在顶层**
 /// 时认 —— `struct S {` / `fn f() -> u32 {` 的 `{` 前面也是标识符，只有"语言名"能把
 /// 它们排除掉；顶层那一条挡的是 `if c { }`（`c` 既是语言名又是局部变量时）。
-fn lx_ext_starts(src: ptr, out: ptr, n: u32, depth: u32, dl: [u32; 16], dn: u32) -> bool {
+fn lx_ext_starts(src: ptr, out: ptr, n: u32, depth: u32, dl: [u32; 16], dn: u32,
+                  cap: u32) -> bool {
+    // **写满之后不许再读表（`#805`）**：`lex_cap` 在 `n >= cap` 时只数不写，于是
+    // `out[(n-1)*20]` 已经在缓冲之外。原先这里照读，结果 *更大的* 输入反而绕过
+    // "token 太多"的守卫、在越界读上段错误 —— 守卫因此不单调。缓冲满了就没有
+    // "结构"可判：这一条 `{` 一律按普通标点走，由调用方拿 `n > cap` 报容量错。
+    if n > cap {
+        return false;
+    }
     if n >= 2 && load32(out, (n - 1) * 20) == 0 && load32(out, (n - 2) * 20) == 0
             && lx_is(src, load32(out, (n - 2) * 20 + 4),
                      load32(out, (n - 2) * 20 + 8), "let") {
@@ -231,7 +239,7 @@ pub fn lex_cap(src: ptr, len: u32, out: ptr, cap: u32) -> u32 {
         } else if is_punct(c) {
             // 外部代码块（`docs/185` §4）：`{` 到**配对的** `}` 之间按**原始字节**收成一个
             // raw token（kind = 5），不经过转义表 —— 这一节的全部意义就是"Loment 不动它"。
-            if c == 123 && lx_ext_starts(src, out, n, depth, dl, dn) {
+            if c == 123 && lx_ext_starts(src, out, n, depth, dl, dn, cap) {
                 let s: u32 = i + 1;
                 let j: u32 = s;
                 let d: u32 = 1;

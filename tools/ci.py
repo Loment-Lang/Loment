@@ -128,6 +128,9 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  # `choose write grammar`: 读法由声明决定、出厂锁的取值表、声明先抹掉
                  "loment_grammar_test",
                  "loment_tools_test", "loment_p7_test", "loment_p8_test", "loment_p9_test",
+                 # 崩溃批次（`#805` / `#868`–`#874`）：深度/容量越界**只许出诊断**。
+                 # 每条都跑种子链出来的自举驱动（真入口），不是拿 Python 实现代替。
+                 "loment_crash_test",
                  # `lms` 这一维：档 + 七个细开关 + 叠加规则（`docs/253` §9 / §11.4）
                  "loment_lms_test",
                  # GC 证明面的量尺（`docs/210` §7）—— 语料跑成 alpha、加总 gc_ladder。
@@ -308,6 +311,7 @@ SHARD_COST = {
     "loment_cli_test": 29.5,
     "loment_comefor_test": 14.5,
     "loment_cpptrans_test": 0.1,
+    "loment_crash_test": 26.1,   # 种子 -> 驱动（clang -O1）一次, 九条判据共用
     "loment_cstrans_test": 0.0,
     "loment_ct_test": 1.6,
     "loment_ctrans_test": 63.5,

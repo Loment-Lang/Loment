@@ -152,6 +152,9 @@ GLOBS = [
     # 外部代码块的字节保真 (S1, docs/185)
     "tools/loment_extblock_test.py",
     "tools/loment_p7_test.py", "tools/loment_p8_test.py", "tools/loment_p9_test.py",
+    # 崩溃批次（`#805` / `#868`–`#874`）：深度/容量越界只许出诊断。**与
+    # `loment/tools/lomrel.lomt` 同一位置** —— 两处逐条同序是判据。
+    "tools/loment_crash_test.py",
     # GC 证明面的量尺（`docs/210` §7）：把语料跑成 `gc_auto_alpha`，加总 v10 的 `gc_ladder`。
     # **两处清单插入同一位置** —— 次序就是发布清单的次序。
     "tools/loment_gc_surface.py", "tools/loment_gc_surface_test.py",

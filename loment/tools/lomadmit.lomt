@@ -317,13 +317,27 @@ fn read_all(fd: u64, buf: ptr, cap: u64) -> u64 {
     return off;
 }
 
+/// 读整个文件。返回字节数, 或两个哨兵:
+///   4294967295 = 打不开；
+///   4294967294 = **比 `cap` 大** —— 容量错, 不许静默截断（`#872`）。
+///
+/// 原先 `read_all` 读满 `cap` 就收工, 调用方把前缀当成整份输入: 文件一大, 最后一行被
+/// 拦腰截断, 报出来的是"这一行字段数不对" —— 指错了地方。多读一个字节就能把
+/// "刚好 cap 字节"（合法）与"超过 cap"分开。
 fn slurp(p: ptr, n: u32, buf: ptr, cap: u32, scr: ptr) -> u32 {
     let fd: i64 = open_ro(p, n, scr);
     if fd < 0 {
         return 4294967295;
     }
     let got: u64 = read_all(fd as u64, buf, cap as u64);
+    let more: i64 = 0;
+    if got == cap as u64 {
+        more = syscall4(0, fd as u64, buf as u64, 1);
+    }
     let _c: i64 = syscall4(3, fd as u64, 0, 0);
+    if more > 0 {
+        return 4294967294;
+    }
     return got as u32;
 }
 
@@ -335,6 +349,11 @@ fn slurp(p: ptr, n: u32, buf: ptr, cap: u32, scr: ptr) -> u32 {
 fn grow_out(slot: ptr, out: ptr, olen: u32, cap: u32, need: u32) -> u32 {
     let ncap: u32 = cap;
     while ncap < need {
+        // **翻倍也会走到头**（`#872`）：`ncap * 2` 在 u32 上会回绕成 0, 于是这个循环
+        // 永远出不去。到 1 GiB 就停, 由调用方报容量错 —— 那里比这里多一条消息。
+        if ncap > 1073741824 {
+            return 0;
+        }
         ncap = ncap * 2;
     }
     let nv: u64 = sys_alloc(ncap as u64);
@@ -541,6 +560,15 @@ fn _start() -> u32 {
         let _w: u64 = write_all(2, out, (o1 + 1) as u64);
         return die(2);
     }
+    if clen == 4294967294 {
+        // **容量错要报容量**（`#872`）：静默截断会让最后一行变成"字段数不对" —— 用户
+        // 拿着一条假诊断去改一份没写错的行。
+        let o0: u32 = put_lit(out, 0, "loment_admit: cases file is too large: more than ");
+        let o1: u32 = put_dec(out, o0, CASES_CAP as u64);
+        let o2: u32 = put_lit(out, o1, " bytes -- split it into smaller files\n");
+        let _w: u64 = write_all(2, out, o2 as u64);
+        return die(2);
+    }
     let n: u32 = clen as u32;
     let olen: u32 = 0;
     let lineno: u32 = 0;
@@ -566,9 +594,19 @@ fn _start() -> u32 {
             if fend > fstart {
                 // 一条记录的输出上界: 回显的两段原文 <= 行本身, 固定开销 ~150 B。
                 let need: u32 = olen + (fend - fstart) + 256;
+                // `need` 回绕 = 已经写不下了。报容量错, 别拿一个变小的数去比 `outcap`。
+                if need < olen {
+                    let o0: u32 = put_lit(out, 0, "loment_admit: output is too large: the record buffer cannot grow");
+                    store8(out, o0, 10 as u8);
+                    let _w: u64 = write_all(2, out, (o0 + 1) as u64);
+                    return die(2);
+                }
                 if need > outcap {
                     let nc: u32 = grow_out(gslot, out, olen, outcap, need);
                     if nc == 0 {
+                        let o0: u32 = put_lit(out, 0, "loment_admit: output is too large: the record buffer cannot grow");
+                        store8(out, o0, 10 as u8);
+                        let _w: u64 = write_all(2, out, (o0 + 1) as u64);
                         return die(2);
                     }
                     outcap = nc;

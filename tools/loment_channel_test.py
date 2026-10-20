@@ -4,15 +4,15 @@
 **这一条为什么必须存在**：渠道（`LOMENT_CHANNEL`）不是一个命令，是**这条流水线**
 （`loment_dist.py`）—— 它把自举侧那一行常量翻成 `1` 再建包。**没有判据的话，那一步
 悄悄失效谁也不知道**。它当初守的是"发行版拒 `choose vm`"（用户 2026-10-11 定）；
-**2026-10-17 起四道闸全放开**（用户裁决：LVM 完成一大半），于是它现在守的是
-"注入仍然生效、而且只生效在那一处" —— 四份探针在两端都必须被**收**。
+**2026-10-20 起五道闸全放开**（最后一道 `lspe` 随 0.1.5 落地），于是它现在守的是
+"注入仍然生效、而且只生效在那一处" —— 五份探针在两端都必须被**收**。
 
 两半：
 
 * **F（轻，到处可跑）**：发行版种子 = f(仓树, channel=release)，**可重算**；
   而且它与 dev 种子的差**恰好是那一个常量的效果** —— 差**一个字节**，长度相同。
   这条是放闸之后**真正的守门人**：闸没了，注入要是也悄悄没了，只有它会红。
-* **D（重，要 clang + WSL）**：真建一对 dev / 发行版驱动器，四份探针都必须过。
+* **D（重，要 clang + WSL）**：真建一对 dev / 发行版驱动器，五份探针都必须过。
   **两端都要**：只测"发行版收"的话，一个把发行版当 dev 的构建也能绿。
 
 用法: python tools/loment_channel_test.py     (退出码 0 = 全过)
@@ -53,15 +53,15 @@ PROBE_HOSTED = "module probe_hosted\n\nchoose hosted\n\nfn main() -> u32 {\n    
 #: 测到的就不是渠道闸了。
 PROBE_LIBL = ("module probe_libl\n\nchoose runtime\n\nuse libl\n\n"
               "fn f() -> u32 {\n    return 1;\n}\n")
-#: 探针：`choose lspe_open_admin`（`docs/262`）。**0.1.4.7 起发行版必须拒它** ——
-#: LSPE 第一部分（维度 + 台账 + 普查）还没兑现，与 LVM 当初同一条渠道闸。
-#: dev 必须收。放开时把这条期望**反转**，别删（棘轮）。
+#: 探针：`choose lspe_open_admin`（`docs/262`）。**2026-10-20 起发行版必须收它** ——
+#: LSPE 第一部分（维度 + 台账 + 普查）已随 0.1.5 落地，最后一道渠道闸打开。
+#: 这是**反转过的老闸**：0.1.4.7 起它要求"发行版拒"，探针留着不删（棘轮）。
 PROBE_LSPE = ("module probe_lspe\n\nchoose lspe_open_admin\n\n"
               "fn f() -> u32 {\n    return 1;\n}\n")
 
 #: 渠道常量在源码里被**读到**的处数 —— 也就是 dev/release 两个种子该差几处。
 #:
-#: **今天仍是 1，但含义变了**（2026-10-17，最后一道 `vm` 闸放开之后）：`checker.lomt` 的
+#: **今天仍是 1，但含义变了**（2026-10-20，最后一道 `lspe` 闸放开之后）：`checker.lomt` 的
 #: `check()` 里那一个 `let rel` 是**唯一**的读取点，而**已经没有闸读它了** —— 它还留着，
 #: 是因为渠道是"下一个还没兑现的维"的注入点，拆渠道是另一次改动。于是两个种子只差 1 个
 #: 字符，这条判据守的东西从"闸生效"变成了"**注入仍然生效**"。
@@ -222,9 +222,9 @@ def test_both_launchers_open_the_port_door():
 
 @test
 def test_release_driver_refuses_channel_gated_constructs():
-    """**判据 D**：发行版驱动器拒**被渠道闸关住的东西**，dev 驱动器收 —— 两端都要测。
+    """**判据 D**：五份探针在两个驱动器里都过 —— 渠道闸已全部放开，两端都要测。
 
-    今天**四放一关**，机制同一条（读同一个渠道常量）：
+    机制同一条（读同一个渠道常量）。五道闸的历史：
 
     * **`choose vm`** —— 一维核心模式，闸在 `check()`（`docs/231` §2）。**2026-10-17 放开**
       （用户裁决，LVM 完成一大半）：探针留着、期望反转，发行版现在必须**收**它；
@@ -232,10 +232,12 @@ def test_release_driver_refuses_channel_gated_constructs():
       都落齐了）：探针留着、期望反转，发行版现在必须**收**它；
     * **`use libl`** —— 一个**名字**，闸在**名字解析**处。**2026-10-15 放开**（`#358`）：
       探针**留着**、期望**反转**，发行版现在必须**收**它。棘轮规矩是**替换**不是删掉；
-      放开的条件写在 `docs/232` §1.3 那份承诺里。
+      放开的条件写在 `docs/232` §1.3 那份承诺里；
+    * **`choose lspe_*`** —— 第七维核心模式。**2026-10-20 放开**（用户裁决，0.1.5 发布前）：
+      LSPE 第一部分随 0.1.5 落地，探针**留着**、期望**反转**（`docs/262` §10.6）。
 
-    三份探针都测（`libl` 那份现在验的是**收**），而且**共用同一对驱动器**（各建一次 ELF
-    很贵）—— 几段闸读的是同一个常量，建三对驱动器只是把同一件事再做一遍。
+    五份探针都测，而且**共用同一对驱动器**（各建一次 ELF 很贵）—— 几道闸读的是同一个
+    常量，建三对驱动器只是把同一件事再做一遍。
 
     跳过条件与 `loment_p8_test` 同：要 clang（建 ELF）与 WSL（跑 ELF）。
     """
@@ -255,8 +257,8 @@ def test_release_driver_refuses_channel_gated_constructs():
               ("vm", PROBE_VM, False),
               ("libl", PROBE_LIBL, False),
               ("hosted", PROBE_HOSTED, False),
-              # 0.1.4.7：唯一还关着的一道 —— LSPE 第一部分没兑现，发行版说"不"。
-              ("lspe", PROBE_LSPE, True)]
+              # 2026-10-20：最后一道闸也打开 —— LSPE 第一部分已随 0.1.5 落地。
+              ("lspe", PROBE_LSPE, False)]
     made: list[Path] = []
     try:
         for tag, src, _refuse in probes:
@@ -279,7 +281,7 @@ def test_release_driver_refuses_channel_gated_constructs():
                         f"（`docs/231` §2 / `docs/222` §4.5）")
                 else:
                     assert rc == 0, f"对照组在发行版里被拒了：{err[-200:]}"
-        print("      dev 都收；发行版只拒 lspe（其余四道闸已放开）")
+        print("      dev 都收；发行版五份都收（最后一道 lspe 闸 2026-10-20 放开）")
     finally:
         for p in made:
             p.unlink(missing_ok=True)

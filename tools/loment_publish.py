@@ -150,6 +150,10 @@ REPOS: dict[str, dict] = {
             "tools/potato_from.py", "tools/potato_llm_arm.py", "tools/potato_measure.py",
             "tools/potato_test.py", "tools/vscode_ext.py", "tools/vscode_ext_test.py",
             "tools/fuai_contract_check.py",
+            # LSPE 子系统自己的判据（`docs/262`）。`loment/lspe/` 拆包那一笔把它加进了
+            # 门禁（`ci.py` 的 `STATIC_CHECKS`），但名字不以 `lom` 开头、也不在 potato
+            # 一族 —— **门禁闭包**那条判据在 CI 上点了名（2026-10-20）。
+            "tools/lspe_test.py",
             # 花括号族的共享前端核（`docs/188` §7.1）。同样不以 `lom` 开头。
             "tools/trans_core.py",
             # C -> Loment 的翻译器（`docs/186` Stage A）。名字**不以 `lom` 开头**，

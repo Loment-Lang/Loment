@@ -265,6 +265,180 @@ fn _start() {{
 """
 
 
+#: **并发分配**探针（`FujoJTOP/loment#778`）。与上面那份的分工：上面证明"线程是真的"，
+#: 这一份证明"运行期在多个线程同时 `alloc`/`free` 时不会把同一段字节发给两个人"。
+#:
+#: 每个线程每轮分配 `K` 个 64 字节的块 + 一个指针数组，给每块写一个**全局唯一**的
+#: 64 位标签（线程号 / 轮次 / 序号拼出来），然后：
+#:   * 两两比较指针 —— 相等就 `dups++`（分配器把同一块发给了两个线程）；
+#:   * 读回两个 8 字节字 —— 不等于写进去的就 `bad++`（覆写 = 别名，撕裂同理）。
+#: 最后全部 `free`。`gc_auto` 是**故意**开的：它让 `maybe_collect` 在每个分配点都被
+#: 问一次，而线程标志一旦置 1 它就必须**整个不跑**（`#778` 的模型：收集器不与线程交错）。
+#: 所以这一份同时也钉住"线程程序里收集器不被叫醒"。
+_ALLOC_WORKER = f"""
+module th_alloc
+choose runtime
+choose gc_auto
+
+const N: u32 = {N};
+const ROUNDS: u32 = 1500;
+const K: u32 = 8;
+const SZ: u32 = 64;
+const STACK: u64 = {STACK};
+
+fn rd(p: ptr, o: u32) -> u64 {{
+    let v: u64 = 0;
+    v = (load8(p, o) as u64) + ((load8(p, o + 1) as u64) << 8)
+        + ((load8(p, o + 2) as u64) << 16) + ((load8(p, o + 3) as u64) << 24)
+        + ((load8(p, o + 4) as u64) << 32) + ((load8(p, o + 5) as u64) << 40)
+        + ((load8(p, o + 6) as u64) << 48) + ((load8(p, o + 7) as u64) << 56);
+    return v;
+}}
+
+fn wr(p: ptr, o: u32, v: u64) {{
+    let i: u32 = 0;
+    while i < 8 {{
+        store8(p, o + i, ((v >> ((i * 8) as u32)) & 255) as u8);
+        i = i + 1;
+    }}
+}}
+
+fn rd32(p: ptr) -> u32 {{
+    return load8(p, 0) | (load8(p, 1) << 8) | (load8(p, 2) << 16) | (load8(p, 3) << 24);
+}}
+
+fn wr32(p: ptr, v: u32) {{
+    store8(p, 0, (v & 255) as u8);
+    store8(p, 1, ((v >> 8) & 255) as u8);
+    store8(p, 2, ((v >> 16) & 255) as u8);
+    store8(p, 3, ((v >> 24) & 255) as u8);
+}}
+
+fn tag(me: u64, i: u32, j: u32) -> u64 {{
+    return me * 1000000000 + (i as u64) * 100 + (j as u64);
+}}
+
+fn worker(arg: u64) -> u32 {{
+    let rec: ptr = arg as ptr;
+    let me: u64 = rd(rec, 0);
+    let dups: ptr = rd(rec, 8) as ptr;
+    let bad: ptr = rd(rec, 16) as ptr;
+    let i: u32 = 0;
+    while i < ROUNDS {{
+        let slots: ptr = alloc((K * 8) as u32);
+        let j: u32 = 0;
+        while j < K {{
+            let b: ptr = alloc(SZ);
+            let t: u64 = tag(me, i, j);
+            wr(b, 0, t);
+            wr(b, 8, t ^ 11400714819323198485);
+            wr(slots, j * 8, b as u64);
+            j = j + 1;
+        }}
+        j = 0;
+        while j < K {{
+            let pj: u64 = rd(slots, j * 8);
+            let k: u32 = 0;
+            while k < j {{
+                if rd(slots, k * 8) == pj {{
+                    atomic_add(dups, 1);
+                }}
+                k = k + 1;
+            }}
+            let want: u64 = tag(me, i, j);
+            let b: ptr = pj as ptr;
+            if rd(b, 0) != want || rd(b, 8) != (want ^ 11400714819323198485) {{
+                atomic_add(bad, 1);
+            }}
+            j = j + 1;
+        }}
+        j = 0;
+        while j < K {{
+            free(rd(slots, j * 8) as ptr);
+            j = j + 1;
+        }}
+        free(slots);
+        i = i + 1;
+    }}
+    return 0;
+}}
+
+fn wu(v: u64) -> u32 {{
+    let b: ptr = alloc(24);
+    let n: u32 = 0;
+    let x: u64 = v;
+    if x == 0 {{
+        store8(b, 0, 48 as u8);
+        n = 1;
+    }}
+    while x > 0 {{
+        store8(b, n, (48 + (x % 10) as u32) as u8);
+        x = x / 10;
+        n = n + 1;
+    }}
+    let i: u32 = 0;
+    while i < n / 2 {{
+        let lo: u8 = load8(b, i) as u8;
+        store8(b, i, load8(b, n - 1 - i) as u8);
+        store8(b, n - 1 - i, lo);
+        i = i + 1;
+    }}
+    return syscall4(1, 1, b as u64, n as u64) as u32;
+}}
+
+fn line(t: str, v: u64) -> u32 {{
+    let _a: i64 = syscall4(1, 1, str_ptr(t) as u64, str_len(t) as u64);
+    let _e: i64 = syscall4(1, 1, str_ptr("=") as u64, 1);
+    let w: u32 = wu(v);
+    return syscall4(1, 1, str_ptr(" ") as u64, 1) as u32;
+}}
+
+fn _start() {{
+    let dups: ptr = alloc(8);
+    wr32(dups, 0);
+    let bad: ptr = alloc(8);
+    wr32(bad, 0);
+    let done: ptr = alloc(8);
+    wr32(done, 0);
+    let recs: ptr = alloc((N * 32) as u32);
+    let i: u32 = 0;
+    while i < N {{
+        let rec: ptr = ((recs as u64) + ((i * 32) as u64)) as ptr;
+        wr(rec, 0, (i + 1) as u64);
+        wr(rec, 8, dups as u64);
+        wr(rec, 16, bad as u64);
+        wr(rec, 24, 0);
+        let stk: i64 = syscall7(9, 0, STACK, 3, 34, (0 as u64) - 1, 0);
+        if stk < 0 {{
+            let _e: u32 = wu(9999);
+        }} else {{
+            let t: i64 = thread_spawn("worker", (stk as u64) + STACK, rec as u64, done as u64);
+            let _s: u32 = 0;
+        }}
+        i = i + 1;
+    }}
+    // 主线程**在工作线程跑着的时候也分配/释放** —— 分配器的锁要挡的是这一条。
+    // 每轮睡 1ms，让工作线程真的推进；`spins` 有界，挂死会以 done < N 现形。
+    let ts: ptr = alloc(16);
+    let spins: u32 = 0;
+    while rd32(done) < N && spins < 4000 {{
+        let tmp: ptr = alloc(16);
+        free(tmp);
+        wr(ts, 0, 0);
+        wr(ts, 8, 1000000);
+        let _s: i64 = syscall4(35, ts as u64, 0, 0);
+        spins = spins + 1;
+    }}
+    let _1: u32 = line("dups", rd32(dups) as u64);
+    let _2: u32 = line("bad", rd32(bad) as u64);
+    let _3: u32 = line("done", rd32(done) as u64);
+    let _4: u32 = line("spins", spins as u64);
+    let _5: i64 = syscall4(1, 1, str_ptr("\\n") as u64, 1);
+    syscall4(60, 0, 0, 0);
+}}
+"""
+
+
 def _kv(text: str) -> dict[str, list[str]]:
     """探针的 stdout 是一串 `<标签>=<十进制数>`（没有 printf，逐个写十进制）。"""
     out: dict[str, list[str]] = {}
@@ -339,6 +513,79 @@ def test_completion_wakes_the_joiner():
         f"完成计数 {got['done'][0]}，期望 {N} —— 产物里那段尾声没跑到"
     assert int(got["wakes"][0]) > 0, \
         ("主线程一次都没被 futex 叫醒 —— 通知那一段没发出来 (或没发对)")
+
+
+def _run_alloc_probe(td: Path) -> dict[str, list[str]]:
+    assert _have_linux(), "没有 WSL/Linux, 跑不了 ELF 探针"
+    exe = _compile_elf(_ALLOC_WORKER, td, "th_alloc")
+    got = _run_linux([_lx(exe)], timeout=600)
+    assert got.returncode == 0, f"并发分配探针没跑完 (rc={got.returncode}): {got.stderr[-300:]}"
+    return _kv(got.stdout)
+
+
+@test
+def test_concurrent_alloc_never_aliases():
+    """`N` 个线程**同时** `alloc`/`free`：同一段字节不许发给两个人，写进去的字许进不许出。
+
+    这是 `#778` 的那条证伪面。分配器原先是一个**不加锁**的首次适配链表（`load`/`store`
+    全是普通读写），两个线程可以同时看到同一个空闲块、各自把它切走 —— 症状是两块活的
+    分配指向同一段字节（`dups > 0`），或者后一个线程把前一个线程的标签覆写掉
+    （`bad > 0`）。探针把这两种都数出来，`spins` 有界，所以挂死（`#519`）也会以
+    `done < N` 现形而不是把判据卡死。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        got = _run_alloc_probe(Path(tds))
+    assert "dups" in got and "bad" in got and "done" in got, f"探针输出不全: {got}"
+    assert int(got["dups"][0]) == 0, \
+        f"分配器把同一块发给了两个线程 {got['dups'][0]} 次 (aliasing)"
+    assert int(got["bad"][0]) == 0, \
+        f"写进去的标签被别的线程改掉 {got['bad'][0]} 次 (覆写 = 别名)"
+    assert int(got["done"][0]) == N, \
+        f"只有 {got['done'][0]}/{N} 个工作线程跑完 —— 并发分配挂住了"
+
+
+@test
+def test_threaded_output_carries_the_runtime_lock():
+    """线程程序的产物里**必须有**那把锁：`alloc`/`free` 站点前后各一条 acquire/release，
+    且 `thread_spawn` 之前把线程标志置 1（收集器据此整个不跑）。"""
+    PROBE.parent.mkdir(parents=True, exist_ok=True)
+    with PROBE.open("w", encoding="utf-8", newline="\n") as f:
+        f.write(_ALLOC_WORKER)
+    try:
+        mod = lomentc.load(PROBE)
+        deps = lomentc.resolve_deps(mod, ROOT, PROBE.parent, entry=PROBE)
+        ll = lomentc.emit_llvm(mod, ROOT, deps)
+    finally:
+        PROBE.unlink(missing_ok=True)
+    assert "@__loment_rt_acquire" in ll and "@__loment_rt_release" in ll, \
+        "线程程序的产物里没有运行期锁 —— alloc/free 会在两个线程里同时走链表"
+    assert "store i32 1, ptr @__loment_rt_threads" in ll, \
+        "thread_spawn 之前没有把线程标志置 1 —— 收集器还会在线程活着时跑"
+    assert ll.count("call void @__loment_rt_acquire()") >= 4, \
+        "锁只挂在了一个站点上（alloc/free/两个根表游标都要）"
+
+
+@test
+def test_non_threaded_output_is_lock_free():
+    """**没有线程的程序一个锁字节都不发** —— 默认档的产物逐字节不变，
+    `#778` 的代价只落在真的用了 `thread_spawn` 的产物上。"""
+    src = ("module no_th\nchoose runtime\n"
+           "fn _start() {\n"
+           "    let p: ptr = alloc(8);\n"
+           "    store8(p, 0, 1 as u8);\n"
+           "    free(p);\n"
+           "}\n")
+    PROBE.parent.mkdir(parents=True, exist_ok=True)
+    with PROBE.open("w", encoding="utf-8", newline="\n") as f:
+        f.write(src)
+    try:
+        mod = lomentc.load(PROBE)
+        deps = lomentc.resolve_deps(mod, ROOT, PROBE.parent, entry=PROBE)
+        ll = lomentc.emit_llvm(mod, ROOT, deps)
+    finally:
+        PROBE.unlink(missing_ok=True)
+    assert "@__loment_rt_acquire" not in ll and "@__loment_rt_threads" not in ll, \
+        "非线程程序带上了运行期锁 —— 那把锁只该发给真的起线程的产物"
 
 
 @test

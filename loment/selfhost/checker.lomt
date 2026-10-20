@@ -547,7 +547,10 @@ fn chk_rt_site(src: ptr, t: ptr, i: u32) -> u32 {
     }
     if chk_tok_is(src, t, i, "alloc") || chk_tok_is(src, t, i, "free")
             || chk_tok_is(src, t, i, "str_concat") || chk_tok_is(src, t, i, "str_eq")
-            || chk_tok_is(src, t, i, "panic") {
+            || chk_tok_is(src, t, i, "panic")
+            // `#778`：真线程要把运行期锁与 `@__loment_rt_threads` 带进产物 ——
+            // 与参考实现 `_RUNTIME_SITES` 同一条（`no_runtime` 下点名拒）。
+            || chk_tok_is(src, t, i, "thread_spawn") {
         if chk_tok_is(src, t, i + 1, "(") {
             return 1;
         }

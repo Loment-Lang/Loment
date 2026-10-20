@@ -391,6 +391,81 @@ def test_lspe_ledger_matches_on_guards_and_indices():
     assert r.stdout == want, "LSPE 台账在两侧不一致"
 
 
+#: **从表的大小反推输入**（`FujoJTOP/loment#774`）。三处容量各配一份**刚好越过**
+#: 边界的最小源：1537 个局部变量（`PT_EMAX = 1536`）、33 个带 `alloc` 的循环
+#: （`PT_GLRMX = 32`）、17 个字段的 `record`（`PT_FMAX = 16`）。
+#:
+#: 这一条判的是 `#774` 要的形状：**不是**"编译成功"，而是**编译器带着一句点名的
+#: 诊断退出**。改之前三份都是"退出码 0 + 一份看起来正常的对象"（17 字段那份的
+#: `layouts` 名字/尺寸都是错的，33 循环那份把第 33 个分配算成 L3 而与参考实现分叉）。
+def _emit_potato_on(stage1: Path, p: Path) -> subprocess.CompletedProcess:
+    return subprocess.run([str(stage1), str(p), "--emit-potato"], cwd=str(ROOT),
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", shell=False, timeout=300)
+
+
+@test
+def test_capacity_bounds_fail_closed_by_name():
+    """越过三张表的上界时，编译器**点名拒**，不静默截断/写穿（`#774`）。"""
+    stage1 = _stage1()
+    if stage1 is None:
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+
+        # ① 局部变量表：1537 个 `let`。`pt_env_put` 原先静默丢第 1537 个。
+        loc = ("module cap_locals\nchoose runtime\n"
+               "fn g<T>(x: T) -> T { return x; }\n"
+               "fn f() {\n"
+               + "".join(f"    let a{i}: u32 = {i % 100};\n" for i in range(1537))
+               + "}\nfn _start() {\n}\n")
+        p = td / "cap_locals.lomt"
+        p.write_text(loc, encoding="utf-8", newline="\n")
+        r = _emit_potato_on(stage1, p)
+        assert r.returncode != 0, "1537 个局部变量居然编过了 —— `PT_EMAX` 的守卫没落地"
+        assert "1536 locals or parameters" in r.stderr, \
+            f"拒绝了，但没点名是哪张表: {r.stderr[-300:]}"
+
+        # ② 纪元范围表：33 个各自带 `alloc` 的循环。原先停在 32，剩下那个算 L3。
+        loops = ("module cap_loops\nchoose runtime\nchoose gc_auto_alpha\n"
+                 "fn g<T>(x: T) -> T { return x; }\n"
+                 "fn f(sz: u32) {\n"
+                 + "".join(
+                     f"    let i{i}: u32 = 0;\n"
+                     f"    while i{i} < 3 {{\n"
+                     f"        let b{i}: ptr = alloc(sz);\n"
+                     f"        store8(b{i}, 0, 1 as u8);\n"
+                     f"        i{i} = i{i} + 1;\n"
+                     f"    }}\n"
+                     for i in range(33))
+                 + "}\nfn _start() {\n}\n")
+        p = td / "cap_loops.lomt"
+        p.write_text(loops, encoding="utf-8", newline="\n")
+        r = _emit_potato_on(stage1, p)
+        assert r.returncode != 0, "33 个纪元循环居然编过了 —— `PT_GLRMX` 的守卫没落地"
+        assert "32 loop bodies" in r.stderr, \
+            f"拒绝了，但没点名是哪张表: {r.stderr[-300:]}"
+
+        # ③ L0 字段表：17 个字段的 `record`。原先 `nf` 越表、读出垃圾，对象里
+        #    名字与尺寸都不对（而退出码是 0）。
+        lp = td / "cap_rec.lom"
+        lp.write_text(
+            "module cap_l0\n"
+            "record R layout(packed, size=76, endian=little) {\n"
+            + "".join(f"  f{i} : u32 @{i * 4}\n" for i in range(17))
+            + "}\n", encoding="utf-8", newline="\n")
+        use = ("module cap_rec\nchoose runtime\n"
+               f'use "{lp.as_posix()}"\n'
+               "fn _start() {\n}\n")
+        p = td / "cap_rec.lomt"
+        p.write_text(use, encoding="utf-8", newline="\n")
+        r = _emit_potato_on(stage1, p)
+        assert r.returncode != 0, "17 字段的 record 居然编过了 —— `PT_FMAX` 的守卫没落地"
+        assert "16 fields" in r.stderr, \
+            f"拒绝了，但没点名是哪张表: {r.stderr[-300:]}"
+    print("      PT_EMAX / PT_GLRMX / PT_FMAX：越界三份都点名拒")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_potato_emit_test")
 

@@ -2012,9 +2012,16 @@ fn emit_l1(s: ptr, out: ptr, src: ptr, toks: ptr, hook: u32, rt_at: u32, rt_end:
                         let t: u32 = new_temp(s, out);
                         emit_str(s, out, " = load ptr, ptr %");
                         emit_local_name(s, out, src, toks, nm);
-                        emit_str(s, out, ".addr\n  call void @__loment_free(ptr ");
+                        emit_str(s, out, ".addr\n");
+                        if load32(s, 556) == 1 {
+                            emit_str(s, out, "  call void @__loment_rt_acquire()\n");
+                        }
+                        emit_str(s, out, "  call void @__loment_free(ptr ");
                         emit_temp_ref(s, out, t);
                         emit_str(s, out, ")\n");
+                        if load32(s, 556) == 1 {
+                            emit_str(s, out, "  call void @__loment_rt_release()\n");
+                        }
                         n = n + 1;
                     }
                 }
@@ -3040,6 +3047,11 @@ fn find_const(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
 /// `__loment_maybe_collect` 里, 而那个函数一次都不会被调用）。挪到这儿之后**每一次**
 /// 分配都计数; 同一段文本、同一顺序、同一个实参, 所以只含 `alloc` 的程序产物字节不变。
 fn emit_alloc_seq(s: ptr, out: ptr, szlvl: u32, lvl: u32) -> u32 {
+    if load32(s, 556) == 1 {
+        // `#778`：线程程序里分配器的链表是**共享**的 —— 计数 + 可能收集 + 分配整段
+        // 在运行期锁里。非线程程序的产物逐字节不变（参考实现同一条门槛）。
+        emit_str(s, out, "  call void @__loment_rt_acquire()\n");
+    }
     if gc_any(s) == 1 {
         // 收在**分配之前** -> 不需要"分配失败再重试"那条路, `__loment_alloc` 一字节不动。
         emit_str(s, out, "  call void @__loment_maybe_collect(i32 ");
@@ -3051,6 +3063,9 @@ fn emit_alloc_seq(s: ptr, out: ptr, szlvl: u32, lvl: u32) -> u32 {
     emit_str(s, out, " = call ptr @__loment_alloc(i32 ");
     emit_val(s, out, szlvl);
     emit_str(s, out, ")\n");
+    if load32(s, 556) == 1 {
+        emit_str(s, out, "  call void @__loment_rt_release()\n");
+    }
     set_temp_val(s, lvl, p);
     return p;
 }
@@ -3191,9 +3206,15 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
             let k2: u32 = arg1(s, out, src, toks, j + 2, lvl);
             // **真回收**（`docs/175` §3.4）：这里是那条"允诺却不兑现"的解药 ——
             // 以前只把实参求出来就丢掉，`free` 编得过、跑起来什么都不发生。
+            if load32(s, 556) == 1 {
+                emit_str(s, out, "  call void @__loment_rt_acquire()\n");
+            }
             emit_str(s, out, "  call void @__loment_free(ptr ");
             emit_val(s, out, lvl);
             emit_str(s, out, ")\n");
+            if load32(s, 556) == 1 {
+                emit_str(s, out, "  call void @__loment_rt_release()\n");
+            }
             store8(s, btxt(s, lvl), 48 as u8);   // 结果值 = 字面量 0
             store32(s, blen(s, lvl), 1);
             return k2 + 1;
@@ -3587,6 +3608,8 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
             let k2: u32 = arg1(s, out, src, toks, j + 4, lvl + 2);   // 栈顶
             let k3: u32 = arg1(s, out, src, toks, k2, lvl + 3);      // 子线程实参
             let k4: u32 = arg1(s, out, src, toks, k3, lvl + 4);      // 完成通知地址
+            // `#778`：在 `clone` 之前把"这台进程起过线程"记下来（参考侧同一顺序）。
+            emit_str(s, out, "  store i32 1, ptr @__loment_rt_threads\n");
             emit_str(s, out, "  ");
             let sc: u32 = new_temp(s, out);
             emit_str(s, out, " = call i64 asm sideeffect \"thread_spawn @");
@@ -6209,6 +6232,83 @@ setprev:
     return o;
 }
 
+/// **线程标志**（`#778`）—— 与 `lomentc._IR_RT_THREADS` 逐字节同源。
+/// `1` = 这台进程起过线程；`maybe_collect` 见到它就整个不跑。
+fn emit_rt_threads(s: ptr, out: ptr) -> u32 {
+    return emit_str(s, out, "@__loment_rt_threads = internal global i32 0
+");
+}
+
+/// **运行期锁**（`#778`）—— 与 `lomentc._IR_RT_LOCK` 逐字节同源。
+///
+/// 一条全局取号锁：`atomic_add` 取号、`@__loment_rt_own` 记持有者 tid 做重入。
+/// 只有真起线程的产物才发（`s + 556`）；`alloc` / `free` / 根表游标在 thread 程序里
+/// 各拿一次。**收集器不在任何线程活着的时候跑** —— 见 `maybe_collect` 里的线程标志。
+fn emit_rt_lock(s: ptr, out: ptr) -> u32 {
+    return emit_str(s, out, "; ---- 运行期锁（`FujoJTOP/loment#778`）----------------------------------------
+;
+; **模型**（`docs/245` §10）：一条全局取号锁串行化 `alloc` / `free` / 根表游标；
+; 自动收集在**有线程活着**时**整个不跑**（`@__loment_rt_threads != 0` 时 `maybe_collect`
+; 直接返回）。于是收集器只会在线程全部退出之后、单线程的状态下运行 —— 它不去停
+; 任何一个 mutator，也不需要停。线程之间真正并发；`atomic_add` 是 seq_cst。
+;
+; 重入靠 `@__loment_rt_own`（持有者的 tid；`tid` 永远 > 0，0 = 没人持有）。
+@__loment_rt_next = internal global i32 0
+@__loment_rt_serving = internal global i32 0
+@__loment_rt_own = internal global i32 0
+@__loment_rt_depth = internal global i32 0
+
+define internal i32 @__loment_rt_tid() {
+entry:
+  %t = call i64 asm sideeffect \"syscall\", \"={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}\"(i64 186, i64 0, i64 0, i64 0)
+  %r = trunc i64 %t to i32
+  ret i32 %r
+}
+
+define internal void @__loment_rt_acquire() {
+entry:
+  %ti = call i32 @__loment_rt_tid()
+  %o = atomicrmw add ptr @__loment_rt_own, i32 0 seq_cst
+  %mine = icmp eq i32 %o, %ti
+  br i1 %mine, label %reenter, label %wait
+reenter:
+  %d0 = load i32, ptr @__loment_rt_depth
+  %d1 = add i32 %d0, 1
+  store i32 %d1, ptr @__loment_rt_depth
+  ret void
+wait:
+  %tkt = atomicrmw add ptr @__loment_rt_next, i32 1 seq_cst
+  br label %spin
+spin:
+  %srv = atomicrmw add ptr @__loment_rt_serving, i32 0 seq_cst
+  %ours = icmp eq i32 %srv, %tkt
+  br i1 %ours, label %got, label %spin
+got:
+  %own = atomicrmw add ptr @__loment_rt_own, i32 %ti seq_cst
+  store i32 1, ptr @__loment_rt_depth
+  ret void
+}
+
+define internal void @__loment_rt_release() {
+entry:
+  %d0 = load i32, ptr @__loment_rt_depth
+  %d1 = sub i32 %d0, 1
+  store i32 %d1, ptr @__loment_rt_depth
+  %z = icmp eq i32 %d1, 0
+  br i1 %z, label %drop, label %done
+drop:
+  %o = atomicrmw add ptr @__loment_rt_own, i32 0 seq_cst
+  %neg = sub i32 0, %o
+  %clr = atomicrmw add ptr @__loment_rt_own, i32 %neg seq_cst
+  %rel = atomicrmw add ptr @__loment_rt_serving, i32 1 seq_cst
+  br label %done
+done:
+  ret void
+}
+
+");
+}
+
 /// **`hosted` 那一份分配器**（`docs/228` 的 A = `docs/219` §8b 的 **S1e**）——
 /// 下面这几段字面量与 `lomentc._IR_HEAP_HOSTED` **逐字节同源**（脚本从它切的，不手抄）。
 ///
@@ -7329,6 +7429,11 @@ out:
 ; 判据（退回去了就说明死块都在顶端，正是小回收该干的事），而年轻代的**大小**不是。
 define internal void @__loment_maybe_collect(i32 %sz) {
 entry:
+  ; **有线程活着就不收** —— 与固定档同一条（`FujoJTOP/loment#778`，见那边整段理由）。
+  %lv = load i32, ptr @__loment_rt_threads
+  %defer = icmp ne i32 %lv, 0
+  br i1 %defer, label %out, label %count
+count:
   ; **时钟 = 分配器真正吃掉多少字节**（`(sz + 23) & -16`），不是载荷请求 —— 与固定档同一条
   ; 理由（见 `_IR_GC_TRIGGER_FIXED`）。空间触发那一格原先写成 `off + sz + 8`：**多算了那
   ; 个 8**（块头早被 `& -16` 那条并进去了），于是它报的「下一块落在哪儿」比实际偏后。
@@ -7408,6 +7513,15 @@ done:
     }
     return emit_str(s, out, "define internal void @__loment_maybe_collect(i32 %sz) {
 entry:
+  ; **有线程活着就不收**（`FujoJTOP/loment#778`）：收集器今天没有 stop-the-world
+  ; 协议 —— 它会去扫别的线程的根槽，而那要求全世界的 mutator 都停在安全点上。
+  ; 本版把这一条**换成推迟**：`@__loment_rt_threads` 是「这台进程起过线程」的标志
+  ; （`thread_spawn` 的调用点在 `clone` 之前把它置 1），非零时直接返回。于是收集只在
+  ; 起过线程之前发生 —— 不需要停任何人，也就不会与任何人交错。
+  %lv = load i32, ptr @__loment_rt_threads
+  %defer = icmp ne i32 %lv, 0
+  br i1 %defer, label %out, label %count
+count:
   ; **时钟 = 分配器真正吃掉多少字节**（`__loment_alloc` 自己那两行 `(sz + 23) & -16`），
   ; 不是「载荷请求多少」—— 少了块头那 8 字节，小块程序的时钟就比消耗慢：8 字节载荷的
   ; 块消耗 32、时钟只走 8，慢一倍 ⇒ 计数越过阈值的那一刻，arena 已经装满了（实测：
@@ -7573,6 +7687,10 @@ fn roots_push(s: ptr, out: ptr, src: ptr, toks: ptr, k: u32, nl: u32) -> u32 {
     if n == 0 {
         return 0;
     }
+    // `#778`：根表的游标与槽是线程间共享的 —— push 这一段整体是一段短临界区。
+    if load32(s, 556) == 1 {
+        emit_str(s, out, "  call void @__loment_rt_acquire()\n");
+    }
     let n0: u32 = alloc_temp(s);
     emit_str(s, out, "  ");
     emit_temp_ref(s, out, n0);
@@ -7637,6 +7755,9 @@ fn roots_push(s: ptr, out: ptr, src: ptr, toks: ptr, k: u32, nl: u32) -> u32 {
     emit_str(s, out, "  call void @__loment_abort()\n  unreachable\n");
     store32(s, 476, 1);
     lab_def(s, out, ok, "rok");
+    if load32(s, 556) == 1 {
+        emit_str(s, out, "  call void @__loment_rt_release()\n");
+    }
     return 0;
 }
 
@@ -7645,6 +7766,10 @@ fn roots_pop(s: ptr, out: ptr) -> u32 {
     let n: u32 = load32(s, 580);
     if n == 0 {
         return 0;
+    }
+    // `#778`：与 `roots_push` 同一把锁、同一段短临界区。
+    if load32(s, 556) == 1 {
+        emit_str(s, out, "  call void @__loment_rt_acquire()\n");
     }
     let a: u32 = alloc_temp(s);
     emit_str(s, out, "  ");
@@ -7659,7 +7784,11 @@ fn roots_pop(s: ptr, out: ptr) -> u32 {
     emit_dec(s, out, n);
     emit_str(s, out, "\n  store i32 ");
     emit_temp_ref(s, out, b);
-    return emit_str(s, out, ", ptr @__loment_rootn\n");
+    emit_str(s, out, ", ptr @__loment_rootn\n");
+    if load32(s, 556) == 1 {
+        emit_str(s, out, "  call void @__loment_rt_release()\n");
+    }
+    return 0;
 }
 
 fn emit_runtime(s: ptr, out: ptr) -> u32 {
@@ -7753,9 +7882,12 @@ fn heap_needed(s: ptr, src: ptr, toks: ptr, rt_on: u32) -> u32 {
     let i: u32 = 0;
     while tok_kind(toks, i) != 4 {
         let hit: u32 = 0;
+        // `thread_spawn`（`#778`）：线程要带上运行期锁与 `@__loment_rt_threads` ——
+        // 它们与分配器同一段文本，所以起线程就发堆（见参考实现 `_heap_needed`）。
         if tok_kind(toks, i) == 0 && (tok_is(src, toks, i, "alloc")
                 || tok_is(src, toks, i, "str_concat")     // str_concat 也拼到堆上
-                || tok_is(src, toks, i, "free")) {        // 回收也要读那份状态
+                || tok_is(src, toks, i, "free")           // 回收也要读那份状态
+                || tok_is(src, toks, i, "thread_spawn")) {
             hit = 1;
         }
         if hit == 1 && tok_is(src, toks, i, "alloc") && alloc_is_promoted(s, src, toks, i) == 1 {
@@ -7994,6 +8126,9 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
     }
     store32(s, 544, 0);   // "声明了 `extern fn`"——由 heap_needed 那一趟扫描顺带写下
     store32(s, 516, heap_needed(s, src, toks, rt_on));
+    // `#778`：这份产物起不起线程（合并后的 token 流里出现过 `thread_spawn`）。
+    // 只在这一个地方定：它决定发不发运行期锁、以及 alloc/free/根表站点加不加锁。
+    store32(s, 556, contains_ident(src, toks, "thread_spawn"));
     store32(s, 532, strings_needed(src, toks));
     // 符号表: 登记函数。同时识别 trait 声明 (方法只声明不发射) 与 impl 块 (方法名 = <类型>_<方法>)
     let i: u32 = 0;
@@ -8277,6 +8412,15 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
             }
             emit_heap(s, out, lms_rescue);
         }
+    }
+    // **线程标志**（`#778`）：收集器读它、`thread_spawn` 置它。参考实现的门槛是
+    // `_has_threads or (gc_any and heap)` —— 这里同一条（次序 HEAP→THREADS→LOCK→ROOTS）。
+    if load32(s, 556) == 1 || (gc_any(s) == 1 && load32(s, 516) == 1) {
+        emit_rt_threads(s, out);
+    }
+    // **运行期锁**：只有真起线程的产物才发（非线程程序的产物逐字节不变）。
+    if load32(s, 556) == 1 {
+        emit_rt_lock(s, out);
     }
     if gc_any(s) == 1 {
         // **根表跟着 `gc_any` 发**（与参考实现同形）—— 函数里的指针槽会往它写，定义必须在；

@@ -83,16 +83,22 @@ def test(fn):
 #: 2026-10-19（`#609` / `#610` / `#617`）：`loment/tools/lomelf.lomt` 的 V1 三张新表
 #: 与 TLS 块：GOT_MAX / WEAK_MAX / TLS_MAX / PORT_MAX / TLS_CAP，每一处越界都是
 #: `fail` 点名退出（不是写穿）。条数 223 → **228**。
-CAPACITY_SITES = 228
-SILENT_SITES = 156
+#: 2026-10-19（`FujoJTOP/loment#774`）：**自举编译器零真缺口**。
+#: ① 筛子的词汇表补了两种实际在用的"说话"形状 —— `set_err(` / `wr_err(`：
+#:    `interp.lomt` 的守卫一直是"先记错误码、入口写成 `ERR <种类>`"，而 `SPEAKS`
+#:    原先只有前缀 `err_`，认不出 `set_err`；7 处**本来就会说话**的守卫从沉默变有话。
+#: ② `potato.lomt` 的三张表补了真守卫（`PT_EMAX` / `PT_FMAX` / `PT_GLRMX` —— 原先
+#:    写穿/静默丢，现在点名拒），另外 7 处"越界由调用方报"的写进 `EXPLAINED`。
+#:    顺带 `PT_EN` 被认出是**槽位不是容量**，退出本口径。
+#: ⇒ 条数 228 → **227**、沉默 156 → **148**、沉默名 **123** 个。
+CAPACITY_SITES = 227
+SILENT_SITES = 148
 
 #: 越界时**说不出话**的那些名字（`--silent` 去重、按字节序）。138 个。
 #: ⚠ 这里按**筛子**的口径（`not speaks`），所以那 6 条"来路已写明"的也在内 ——
 #: 判断"真缺口"用 `loment_caps.gaps()`（那条另有一条判据）。
 SILENT_NAMES = frozenset((
     "ARENA_CAP",
-    "ARGS_CAP",
-    "ARG_STEP",
     "CASES_CAP",
     "CG_MAXENUM",
     "CG_MAXFN",
@@ -115,7 +121,6 @@ SILENT_NAMES = frozenset((
     "ENTS_CAP",
     "ENT_CAP",
     "ENT_STRIDE",
-    "ENV_CAP",
     "FBUF",
     "FMAX",
     "FNMAX",
@@ -138,7 +143,6 @@ SILENT_NAMES = frozenset((
     "K_INT_MAX",
     "K_INT_MIN",
     "K_TRUNC",
-    "LIMIT",
     "LINE_CAP",
     "LMAX",
     "LTOK_CAP",
@@ -149,16 +153,15 @@ SILENT_NAMES = frozenset((
     "MAXROW",
     "MAXTOK",
     "MAXW",
-    "MAX_DEPTH",
     "MAX_DIALECT",
     "MAX_LANG",
     "MEM_CAP",
     "MIN_RECLEN",
     "MMAX",
+    "MSG_CAP",
     "MW",
     "M_AUX",
     "M_CAP",
-    "MSG_CAP",
     "NAMEE",
     "NAMES_CAP",
     "NAME_MAX",
@@ -173,7 +176,6 @@ SILENT_NAMES = frozenset((
     "POOL_CAP",
     "PT_AMAX",
     "PT_EMAX",
-    "PT_EN",
     "PT_FMAX",
     "PT_GLRMX",
     "PT_GMAX",
@@ -211,7 +213,6 @@ SILENT_NAMES = frozenset((
     "TM_CAP",
     "TOKE",
     "TOKMAX",
-    "TOK_CAP",
     "TOOL_N",
     "TXT_CAP",
     "T_W",
@@ -288,6 +289,33 @@ def test_the_front_end_has_no_silent_capacity():
           "（`FujoJTOP/loment#345` 采纳的 (a)）")
     print(f"      前端 {len(fe)} 处容量，缺口 0（其余 {len(fe) - len(gap)} 处要么有话，"
           "要么来路写在 EXPLAINED 里）")
+
+
+@test
+def test_the_self_host_compiler_has_no_silent_capacity():
+    """**自举编译器（`loment/selfhost/`）一处真缺口都不许有** —— `#774` 的那条线。
+
+    **Why**：`#774` 说的是"固定表没有失败路径，而失败是**沉默**的"。前端那五个文件
+    （`docs/258` 的 (a)）只是这条线的一段；`potato` / `interp` / `comefor` 同样在
+    编译一份用户源时被推着走。这一条把 (a) 从"前端"扩到**整个自举编译器**：
+    `loment/selfhost/` 下每一处容量，要么它自己的守卫说得出来，要么 `EXPLAINED`
+    里有一条**指着真实失败消息**的理由（越界由调用方的 `pt_wfail` / `fail` 报）。
+
+    **How to apply**：加一张固定表就加一条 `EXPLAINED` 或一条守卫；两样都没有 =
+    下一份输入会**静默写穿**（自举侧的症状是段错误，`#343` 那一族）。这条判据
+    与 `loment_caps.gaps()` 同源，不另写一套扫描。
+    """
+    rows = [r for r in loment_caps.scan()
+            if r["file"].startswith("loment/selfhost/")]
+    assert rows, "自举编译器一处容量都没扫到 —— 这条判据自己先失效了"
+    gap = loment_caps.gaps(rows)
+    assert not gap, (
+        "自举编译器还有**说不出话**的容量："
+        + "; ".join(f"{r['file']}:{r['line']} {r['name']}={r['value']}" for r in gap)
+        + " —— 越界时它只会写穿或静默截断（`#774`）"
+    )
+    print(f"      自举编译器 {len(rows)} 处容量，真缺口 0"
+          f"（{sum(1 for r in rows if r['explained'])} 处来路写在 EXPLAINED 里）")
 
 
 @test

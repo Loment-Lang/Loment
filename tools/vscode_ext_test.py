@@ -1103,6 +1103,31 @@ def test_vscode_doctor_names_same_name_other_publisher():
           " _别人的同名扩展_）")
 
 
+@test
+def test_vscode_colours_dot_nl_as_the_natural_grammar():
+    """`#351`：`.nl` 的**语言归属**与参考实现的 `EXT` 表说同一件事。
+
+    参考实现把 `.nl` 归一成 `natural`（`potato_from.EXT`）；编辑器这一侧必须让
+    打开一个 `.nl` 就落到 `loment-natural`（静态登记，不靠声明那一行 —— 那个文件里
+    本来就没有 `choose write grammar`），并且那门语法的 scope 是 `source.loment.natural`。
+    """
+    import potato_from  # noqa: PLC0415
+    assert potato_from.EXT.get(".nl") == "natural", (
+        f"参考实现不再把 .nl 认成 natural: {potato_from.EXT.get('.nl')!r}")
+    pkg = json.loads((EXT / "package.json").read_text(encoding="utf-8"))
+    nat = next((l for l in pkg["contributes"]["languages"] if l["id"] == "loment-natural"), None)
+    assert nat is not None, "清单里没有 loment-natural"
+    assert ".nl" in (nat.get("extensions") or []), (
+        "package.json 没有把 .nl 登记给 loment-natural —— 打开 .nl 不会上色")
+    gram = next((g for g in pkg["contributes"]["grammars"]
+                 if g["language"] == "loment-natural"), None)
+    assert gram is not None and gram["path"] == "./syntaxes/loment-natural.tmLanguage.json", gram
+    scope = json.loads((EXT / "syntaxes" / "loment-natural.tmLanguage.json")
+                       .read_text(encoding="utf-8"))["scopeName"]
+    assert scope == "source.loment.natural", scope
+    print("      .nl -> loment-natural（与 potato_from.EXT 同一张表），scope 正确")
+
+
 def main(argv: list[str] | None = None) -> int:
     return loment_suite.run(TESTS, "vscode_ext_test", only=(argv[0] if argv else None))
 

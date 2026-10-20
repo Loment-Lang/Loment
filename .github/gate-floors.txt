@@ -16,10 +16,10 @@ lomentc_test 187
 potato_test 13
 loment_ct_test 2
 loment_comefor_test 12
-loment_choose_matrix_test 10
+loment_choose_matrix_test 11
 loment_extblock_test 7
 loment_multilang_test 2
-loment_ctrans_test 20
+loment_ctrans_test 21
 loment_pytrans_test 5
 loment_jtrans_test 4
 loment_cstrans_test 6
@@ -44,8 +44,8 @@ loment_channel_test 8
 loment_json_test 4
 loment_pkg_test 3
 loment_lomc_test 4
-loment_lsp_test 19
-loment_elf_test 74
+loment_lsp_test 20
+loment_elf_test 76
 loment_pe_test 17
 loment_genesis_test 8
 loment_status_test 4
@@ -58,7 +58,7 @@ loment_ports_test 27
 loment_hosted_test 14
 loment_rel_test 8
 loment_editors_test 3
-vscode_ext_test 18
+vscode_ext_test 19
 loment_filetype_test 4
 loment_dap_test 4
 loment_eol_test 3

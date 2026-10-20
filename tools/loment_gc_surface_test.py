@@ -38,6 +38,9 @@ def test_injection_flips_manual_to_alpha():
     lines = got.split("\n")
     assert lines[1] == "choose gc_auto_alpha" and lines[2] == "choose runtime", lines[:3]
     assert surf._inject("module m\nchoose gc_manual\n") is None, "已表态的不该被注入"
+    assert surf._inject("module m\nchoose mode no_std\n") is None, (
+        "`no_std` 与 `gc_auto` 冲突，注入只会让这份源自检失败 —— 该跳过，不该硬翻")
+    assert surf._inject("module m\nchoose no_std\n") is None, "简写 `choose no_std` 也是表态"
     assert surf._inject("not a loment unit\n") is None, "没有 module 行不该被注入"
 
 

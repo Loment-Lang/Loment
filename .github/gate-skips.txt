@@ -14,7 +14,6 @@
 # 那份量取脚本从套件源码里抽（`gate.out` 每条只留最后一行，带不出原因）。
 loment_cstrans_test test_a_byte_only_unit_runs_and_proves_it_is_unsigned  # 环境: 需要 dotnet + WSL
 loment_cstrans_test test_translation_runs_same_as_dotnet  # 环境: 需要 dotnet + WSL
-loment_ctrans_test test_translation_runs_same_as_clang  # 环境: 需要 clang + WSL
 loment_dap_test test_breakpoint_stops_on_the_right_line  # 环境: 需要 WSL + Windows 侧 clang
 loment_dap_test test_next_crosses_a_call  # 环境: 需要 WSL + Windows 侧 clang
 loment_dap_test test_step_in_moves_to_another_line  # 环境: 需要 WSL + Windows 侧 clang

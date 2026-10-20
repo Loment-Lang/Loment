@@ -350,7 +350,11 @@ async function startClient(context) {
     'Loment',
     // v10 的 Executable 是**接口**: 用对象字面量; 默认 stdio 传输
     { run: { command, args }, debug: { command, args } },
-    { documentSelector: [{ scheme: 'file', language: 'loment' }], outputChannel: chan });
+    { documentSelector: [{ scheme: 'file', language: 'loment' },
+                          // `#351`：`.nl` 由静态登记成为 `loment-natural` —— 它的正文是
+                          // natural 写法，语言服务按后缀认出来、只回一条 Info（不报假错）。
+                          { scheme: 'file', language: 'loment-natural' }],
+      outputChannel: chan });
   context.subscriptions.push(c);
   await c.start();
   chan.appendLine(`Language server started: ${label}`);

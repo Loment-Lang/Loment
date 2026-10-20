@@ -1,0 +1,30 @@
+31844	Tracking issue for specialization (RFC 1210)
+10184	floating point to integer casts can cause undefined behaviour
+27060	repr(packed) allows invalid unaligned loads
+10389	Collisions in type_id
+126600	`std::process::exit` is not thread-safe in combination with C code calling `exit`
+156920	`dyn Allocator` together with `Allocator + Clone` requirements is unsound, leading to UB with `Arc`
+27970	set_var/remove_var are unsound in combination with C code that reads the environment
+81996	repr(C) on MSVC targets does not always match MSVC type layout when ZST are involved
+28728	LLVM loop optimization can make safe programs crash
+107975	Miscompilation: Equal pointers comparing as unequal
+39575	std::os::unix::process::CommandExt::before_exec should be unsafe
+82523	Tracking Issue for future-incompatibility warning `unaligned_references`
+16012	Replace stack overflow checking with stack probes
+154321	SGX UserRef is unsound
+57893	builtin trait-object impl and user written ones can unsoundly overlap
+112480	MSVC on x86-32 Windows fails to align variables to their required alignment
+44367	repr(simd) is unsound
+83994	Exiting a process calls exit() which isn’t thread-safe
+52652	Abort instead of unwinding past FFI functions
+55005	Arc::drop has a (potentially) dangling shared ref
+116573	Inlining causes miscompilation of code that mixes target features
+46188	ill-typed unused FFI declarations can cause UB
+114582	Non-temporal stores (and _mm_stream operations in stdarch) break our memory model
+127979	Incorrect behavior on Windows with dylibs and ThinLTO
+25860	Implied bounds on nested references + variance = soundness hole
+49206	Constants can contain references that are not Sync
+63818	Resolve unsound interaction between noalias and self-referential data (incl. generators, async fn)
+68304	Box<dyn FnOnce> doesn't respect self alignment
+114479	Tracking issue: 32bit x86 targets without SSE2 have unsound floating point behavior
+63787	Ref parameter incorrectly decorated with `noalias` attribute

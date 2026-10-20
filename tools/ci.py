@@ -543,6 +543,11 @@ _SKIP_LINE_RE = re.compile(r"^\s*SKIP\s+([^:]+):\s*(.*)$")
 _PASS_LINE_RE = re.compile(r"^\s*PASS\s+(\S+)\s*$")
 #: 各套件输出里 `  FAIL  <判据名>: …` 的判据名 —— 与 `loment_suite.run` 的输出契约一致。
 _FAIL_CRIT_RE = re.compile(r"^\s*FAIL\s+(\S+):", re.M)
+#: `loment_dist_test` 的收尾清单是 `  FAIL  <判据名>  [<detail>]`（名字可带空格、无冒号）。
+#: 不认它的话，那条套件的**任何**一条判据失败都会退化成 `(套件, "*")` —— 日志里只剩一个
+#: `*`，"新红复跑"也就说不出是哪一条（实测：2026-10-20 #1069 的分片 8 连红两次，
+#: 工件的 `re_*.log` 里只有 `[failed=*]`）。两种形状都认，名字按出现顺序去重。
+_FAIL_CRIT_BRACKET_RE = re.compile(r"^\s*FAIL\s{2,}(\S.*?)\s{2,}\[", re.M)
 #: `:: [static] …` 那一行末尾的机器可读失败名单（`format_line` 打出来的）。
 _FAILED_FIELD_RE = re.compile(r"\[failed=([^\]]*)\]")
 
@@ -554,7 +559,9 @@ def failed_criteria(out: str) -> tuple[str, ...]:
     回归都被豁免。逐条匹配要能拿到"这个套件红的是哪几条"，而 `loment_suite.run` 的
     输出契约里正好有那行 `  FAIL  <判据名>: …`（老循环也打这个形状）。
     """
-    return tuple(dict.fromkeys(m.group(1) for m in _FAIL_CRIT_RE.finditer(out)))
+    names = [m.group(1) for m in _FAIL_CRIT_RE.finditer(out)]
+    names += [m.group(1) for m in _FAIL_CRIT_BRACKET_RE.finditer(out)]
+    return tuple(dict.fromkeys(names))
 
 
 def read_budget(floors_path=None, skips_path=None) -> tuple[dict[str, int], set[tuple[str, str]]]:

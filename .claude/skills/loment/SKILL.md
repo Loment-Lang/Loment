@@ -391,13 +391,13 @@ choose no_std          // ← once for the whole program; the default is std
 
 | Dimension | Values | Default | What it decides |
 |---|---|---|---|
-| **Layer** | `std` · `no_std` | `std` | which layer the program may use |
-| **Reclamation** | `gc_manual` · `gc_auto` · `gc_auto_alpha` · `no_gc` | `gc_manual` | how memory is reclaimed - see section 2.1 and `docs/210`. `no_gc` declares "no collector in the artifact", like `no_runtime` |
-| **Runtime** | `runtime` · `no_runtime` | `no_runtime` | whether the artifact may carry a runtime |
+| **Layer** | `std` · `no_std` | `std` | which layer the program may use - `std` unlocks the hosted layer (libc / filesystem / threads / time / network), `no_std` refuses it |
+| **Reclamation** | `gc_manual` · `gc_auto` · `gc_auto_alpha` · `no_gc` | `gc_manual` | how memory is reclaimed - see section 2.1 and `docs/210`; `no_gc` declares the artifact carries no collector |
+| **Runtime** | `runtime` · `no_runtime` | `no_runtime` | whether the artifact may carry a runtime (the heap is still on demand) |
 | **Port** | `sealed` · `hosted` | `sealed` | whether the artifact may reach outside itself by linking host libraries |
 | **Execution model** | `vm` · `no_vm` | `no_vm` | which execution model the program is for - see below |
-| **Memory safety** | `lms_full` · `lms_forensic_admin` · `lms_daily_admin` · `lms_manage_only_admin` | `lms_full` | which rungs of the seven-level safety ladder are on. **The direction is reversed**: the default is full, and a non-full value is a downgrade; every non-full value carries `_admin` |
-| **Audit** | `lspe_open_admin` · `lspe_close_admin` | `lspe_open_admin` | whether every allowance is recorded in the Potato v16 ledger. `close` turns the **audit** off, not the checks |
+| **Memory safety** | `lms_full` · `lms_forensic_admin` · `lms_daily_admin` · `lms_manage_only_admin` | `lms_full` | which of the seven LMS levels are on. **The direction is reversed**: the default is full, and a non-full value is a downgrade; every non-full value carries `_admin` |
+| **Audit ledger** | `lspe_open_admin` · `lspe_close_admin` | `lspe_open_admin` | whether LSPE records the ledger (off changes the ledger, never a verdict); the Potato v16 ledger records the site, obligation and evidence |
 
 What holds for all seven:
 
@@ -410,7 +410,8 @@ What holds for all seven:
   6). Treat that as a documented exception, not as the rule.
 - **Contradictory pairs are named, not lumped.** `gc_auto` with `no_runtime` is refused because
   automatic reclamation *is* that runtime; `hosted` with `no_std` is refused because `no_std` says
-  there is nothing underneath and `hosted` says to link against it. The diagnostic names the pair
+  there is nothing underneath and `hosted` says to link against it; both automatic tiers with
+  `no_std` are refused because a collector needs that runtime. The diagnostic names the pair
   and the reason; it never says "illegal combination".
 - A value that is not in the table is a typo, and a typo **is E22**.
 

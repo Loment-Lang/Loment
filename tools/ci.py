@@ -168,6 +168,9 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  # `lompi/store/**` 的孪生（#679 / #719）：每一份当根单元，两边的接受集
                  # 相同、IR 逐字节相同；已知缺口是一张只许变短的棘轮。
                  "loment_store_twin_test",
+                 # 原生面的**独立** oracle（#772）：期望值由规范模型给出，不问参考实现
+                 # 也不问自举侧 —— 两侧一致但与规范不同时判红（孪生判据看不见这一类）。
+                 "loment_spec_oracle_test",
                  # LVM 的 T3（`docs/261`）：守卫特化 + 去优化 —— 语料不变、夹具恰好去优化
                  # 一次且副作用只发生一次、反例零去优化。
                  "lvm_t3_test",
@@ -372,6 +375,9 @@ SHARD_COST = {
     "loment_status_test": 2.3,
     "loment_std_test": 3.1,
     "loment_store_twin_test": 261.6,
+    # 2026-10-19（#772）：本机实测 13.2s（建一次 stage1 + 两个编译器各跑一个 21 格的
+    # 程序，Windows 侧）。CI 上还没量到，先按 15 记，量到后替换。
+    "loment_spec_oracle_test": 15.0,
     "loment_syscalls_test": 1.4,
     "loment_thread_test": 0.5,
     "loment_tools_test": 10.0,
@@ -394,7 +400,7 @@ SHARD_COST = {
     "potato_cross": 0.0,
     "potato_test": 9.5,
     "vscode_ext_test": 1.2,
-}  # 92 条 = `len(STATIC_CHECKS)`；`unpriced_checks()` 钉住这条等式。
+}  # 96 条 = `len(STATIC_CHECKS)`；`unpriced_checks()` 钉住这条等式。
 
 #: 不参与均分、也**不需要** `SHARD_COST` 条目的判据。**今天是空的** —— 89 条全有实测值。
 #: 留着这个集合是为了让"新判据还没量过"有一个**明确**的落脚处：放进来的代价是它按

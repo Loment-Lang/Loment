@@ -1,4 +1,4 @@
-# 静态门禁的**基线** —— 这份清单上的红项是**已知的**（不判失败）；清单之外的**新红**判失败。
+# 静态门禁的**已知红基线** —— 这份清单上的红项**不判失败**；清单之外的**新红**判失败。
 #
 # 纪律（与 `PARSE_KNOWN_GAPS` / `M85_KNOWN_GAPS` 那两道棘轮同一个形状）：
 #
@@ -10,6 +10,14 @@
 #     `仓库`（真的还没做完，是待修的红）。
 #   * 本文件**不进发布清单**：`.github/**` 不在 `loment_release.GLOBS` 里，
 #     所以动它不会让清单过期。
+#
+# **2026-10-19：基线改成逐条判据（`#769`）。** 原先的一行只有套件名，于是"套件在基线里"
+# 等于"它里面**任何**一条判据红都不判失败"—— 133 条判据（14.3%）落在这种整条豁免里，
+# 包括唯一那条种子容量判据（`loment_genesis_test::test_seed_fits_lomelf_input_buffer`）
+# 与镜像链接器的对拍判据（`loment_elf_test::test_lomelf_selfhost_matches_reference`）。
+# 现在每行是 `套件 判据名`；`*` **只**表示"这条套件级失败（崩溃/超时/导入失败）没有可点名的
+# 判据"，**不是**"这条套件里任何一条都算已知红"。逐条匹配的实现与口径在
+# `tools/ci.py` 的 `read_baseline` / `baseline_red` / `baseline_new`。
 #
 # 量于 2026-09-22，`main@61f6289` 那一轮（run 35785011534）实测 10 条：
 # 4 条是"缺 LinuxFUAI 姊妹检出"（与本机同源），其余是 Linux 可移植性（正在逐条修）。
@@ -27,31 +35,25 @@
 # （PR `#411`：把 `bin-literal` 登记进判据自己的 `PARSE_LEVEL`，与 `#409` 的诊断一致），
 # 合进 `main` 之后它在本机 29/29，所以那一行连同它下面的理由一起删掉。
 #
-# 2026-10-17 改一条的理由（**这一行留着**）：`loment_elf_test` 在 runner 上仍然会红，
-# 但它红的原因**换过两次**，别按旧理由读它：
-#   * 2026-10-16 那一次（`#439` 合入，`bf1ff342`，36/37）的成因是**文本段越界** —— 镜像的
-#     `DATA_VADDR` 原先钉在 `0x600000`，文本段只有 2 MiB 且**越界不报错**（多出来的代码
-#     盖在数据段上，产物一启动就段错误、0 字节输出）。`f13885fc`（`#414`）把它改成
-#     `TEXT_VADDR + OUT_CAP` 并补了"文本段满了就点名退出"的守卫（`docs/253`），同一轮的
-#     gate（run `38981261985`）是 `37/37 通过 598.8s` —— **这一半确实修好了**。
-#   * 2026-10-17 这一轮（run `38987352154`）又红了，但**换了两条**，原来的成因一条都不占：
-#     `test_lomelf_rebuilds_the_compiler_without_clang` **900 秒超时**（`TimeoutExpired`，
-#     不是断言失败），以及 `test_the_generational_barrier_has_a_measured_cost` 量到 **6.54×**
-#     （界 5×）。后者的修法是"别拿墙钟比值当门禁"，已由 `#442` / `#445` 换成 IR 里的
-#     确定性量；**前者是负载下跑不完，还没人处理**。
-# 所以这一行此刻**不能删**：判据不是稳定绿的，而它红起来的样子（一条 900 秒超时）和一条
-# 真回归长得一模一样 —— 删掉就等于把"这条会红"这件事本身藏起来。等到它在**没有超时**的
-# 情况下连续几轮 `37/37`，再把这一行连同上面的理由一起删掉。
+# 2026-10-17 关于 `loment_elf_test` 的历史（**2026-10-19 已按实测变短，整条删除**）：
+#   * 2026-10-16（`#439`，`bf1ff342`）的成因是文本段越界，已由 `f13885fc`（`#414`）修好；
+#   * 2026-10-17（run `38987352154`）红的是 900 秒超时与一条墙钟比值判据，后者已由
+#     `#442` / `#445` 换成 IR 里的确定性量；
+#   * 2026-10-19 的 `main` push（run `39340765771`）实测 `loment_elf_test` **全绿**，
+#     所以按"只许变短"把它从基线里删掉 —— **镜像链接器那条判据从这一笔起真正生效**。
 #
-# 格式：每行一个检查名（`:: [static] <名字> … FAIL` 里的那个名字）；`#` 起头是注释。
-fuai_contract_check          # 环境：缺 LinuxFUAI/ 姊妹检出
-lom_audit                    # 环境：同上（要读对方的 C 头）
-lomc_test                    # 环境：同上（发布副本一致性那两条）
-potato_cross                 # 环境：同上（缺 LinuxFUAI/tools/potato_verify.py）
-loment_multisyntax_projects_test  # 仓库：新落的判据，runner 上 2/3（正在修）
-loment_trans_test            # 仓库：Linux 可移植性
-loment_doc_test              # 仓库：#399 —— 自举 lomdoc 比参考少 59 字节（本机 Windows 上也同样红）
-loment_eol_test              # 仓库：#400 —— 退出码不一致（本机 Windows 上也同样红）
-loment_cli_test              # 环境：判据在 /tmp 造一个"python 侧安装"再跑它，runner 上那份没造出来
-loment_genesis_test          # 环境：那条判据有意把 PATH 削到 /usr/bin:/bin，前提是树里有 genesis 工件；runner 上没有
-loment_elf_test              # 仓库：#444 —— runner 上仍会红；2026-10-17 实测是 900s 超时（墙钟比值那半已由 #442/#445 修掉）
+# 2026-10-19 逐条化（run `39340765771` 实测；同一轮里 `loment_doc_test` / `loment_trans_test`
+# 也已全绿，一并删除）。下面每一条都是**那一条判据**的名字，不是"整个套件"。
+#
+# 格式：每行 `套件 判据名`（或 `套件 *` = 套件级失败，没有可点名的判据）；
+# `#` 起头是注释，行尾 `#` 之后也是注释。
+fuai_contract_check *                        # 环境：缺 LinuxFUAI/ 姊妹检出（driver 脚本，没有判据可点）
+lom_audit *                                  # 环境：同上（要读对方的 C 头）
+potato_cross *                               # 环境：同上（缺 LinuxFUAI/tools/potato_verify.py）
+lomc_test test_spec_json_is_generated        # 环境：要 LinuxFUAI/spec/spec.json（姊妹仓不在树里）
+lomc_test test_fujr_byte_roundtrip           # 环境：同上（缺 m31_res.run 基准）
+loment_cli_test test_cli_check_matches_loment_twin  # 环境：判据在 /tmp 造一个"python 侧安装"，runner 上那份没造出来
+loment_eol_test test_lomeol_matches_python   # 仓库：#400 —— runner 上 git 报 dubious ownership，loment_eol 走 SKIP 分支
+loment_eol_test test_lomeol_reports_crlf_like_python  # 仓库：同上（#400）
+loment_genesis_test test_bootstrap_needs_no_clang  # 环境：判据有意把 PATH 削到 /usr/bin:/bin，前提是树里有 genesis 工件；runner 上没有
+loment_multisyntax_projects_test test_every_project_runs_the_same_as_its_control  # 仓库：新落的判据，runner 上 C++ 对照组编译失败（正在修）

@@ -721,8 +721,19 @@ reversible  能不能撤销 / 撤销后回到什么状态
 
 ### 5.14 双实现与容量：这是最贵的一段
 
-质疑器必须在 **`tools/lomentc.py`** 与 **`loment/selfhost/*.lomt`** 两侧各有一份，
-且 QIR 序列化逐字节一致。
+质疑器必须在两侧各有一份，且 QIR 序列化逐字节一致。**两侧的正本都在 `loment/lspe/`**：
+
+| 侧 | 文件 | 角色 |
+|---|---|---|
+| 参考实现 | `loment/lspe/registry.py` | 14 条义务、8 种证据、接收关系、级别门 |
+| | `loment/lspe/solver.py` | 证据子集格上的工作列表 |
+| | `loment/lspe/census.py` | 词法普查 + 引擎 E1–E4 |
+| | `loment/lspe/ledger.py` | Potato v16 台账的形状与归零规则 |
+| 自举侧 | `loment/lspe/lspe.lomt` | 同一套普查与引擎（token 级、单函数装下） |
+
+编译器只是**客户端**：`tools/lomentc.py` 在 `load()` 里调一次普查、在 `emit_potato()`
+里调一次台账构造，再加一个名字根（`loment/lspe`）；`loment/selfhost/potato.lomt`
+只保留台账**写手**（`pt_lspe`）与 `use lspe`。判据 `lspe_test` 钉住这条边界。
 
 **三条已经量过的代价**（不是猜的）：
 
@@ -732,7 +743,8 @@ reversible  能不能撤销 / 撤销后回到什么状态
    质疑器是编译器里最大的新增，**先量 `SLOT` 再写**。
 3. **种子过 ~3.88 MB 会发出坏 stage1**（`project_genesis_seed_size_cliff`，2026-10-17 复测已过）。
    质疑器会把 `codegen.lomt` 撑大；如果逼近那道墙，**先把质疑器拆成独立 `.lomt`**，
-   而不是硬塞。
+   而不是硬塞。**这一步已经做了**：`loment/lspe/lspe.lomt` 就是从 `potato.lomt`
+   拆出来的那一块（2026-10-20），种子只涨了约 4 KB。
 
 **落地纪律**（与 `docs/158` §5 一致）：
 
@@ -1257,6 +1269,7 @@ LSPE 在它之上：
 | 13 | `loment/tools/lompotato.lomt` | 孪生校验器 |
 | 14 | `loment/build/selfhost_driver.ll` | `python tools/loment_seed.py --emit` |
 | 15 | **新判据（`lomentc_test` / 开关表）** | **关键关闭值必须带 `_admin`** —— 扫 `CORE_DIMS`，`*_close` / `*_off` 缺后缀 ⇒ 红 |
+| 16 | **`loment/lspe/`** | 子系统正本；`NAME_ROOTS` 第五根（两侧同序）；`loment_caps.TREES`；发布/source glob；`lspe_test` 套件 |
 
 **Potato 升 v16 而不是塞进 v15**：与 `gc_ladder`（v10）、`net_ladder`（v14）同一先例。
 塞进 v15 会让 v15 的单元一起必填。

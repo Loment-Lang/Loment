@@ -91,7 +91,8 @@ BOOT_S = 7.5
 KEY_HZ = 0.10
 
 # L0/L1 静态门禁 (docs/141, docs/143): 先于 QEMU 矩阵, 失败即中止 — 接口漂移不该等到运行期。
-STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potato_cross",
+STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "lspe_test", "potato_test",
+                 "potato_cross",
                  # 编译期子集解释器 (S4.0, docs/184 §9)
                  "loment_ct_test",
                  # `comefor` 的 token 层展开 (S4.1, docs/184 §9)
@@ -360,6 +361,7 @@ SHARD_COST = {
     "loment_trans_test": 111.1,
     "loment_zwframe_test": 2.5,
     "lomentc_test": 10.5,
+    "lspe_test": 1.0,
     "lompi_sync": 0.0,
     "lompicheck_test": 1.1,
     "lvm_compact_test": 51.3,

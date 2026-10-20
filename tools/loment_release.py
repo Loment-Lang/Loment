@@ -304,7 +304,8 @@ GLOBS = [
     # `#343` 那一类（"编译器不作声地死掉"）的**最小见证**（`#369`）：`#343` 表里每一格
     # 各一只，是这一类**仅有的**目击者 —— 边界走查在判据里现生成，见证只能是文件。
     "loment/invariants/*.lomt",
-    "loment/examples/*.lomt", "loment/selfhost/*.lomt", "loment/corpus.json",
+    "loment/examples/*.lomt", "loment/selfhost/*.lomt",
+    "loment/lspe/*.py", "loment/lspe/*.lomt", "loment/corpus.json",
     "lom/*.lom",
     # 设计文档: 这份清单是 **Loment 线**的, 而本仓就是 Loment 的开发口 —— `docs/` 里
     # 全是这条线的文档, 所以一条 `docs/*.md` 就够, 不必再按名字分段收。

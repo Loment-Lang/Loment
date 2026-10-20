@@ -345,6 +345,8 @@ loment/nltrans/*.lomt
 loment/invariants/*.lomt
 loment/examples/*.lomt
 loment/selfhost/*.lomt
+loment/lspe/*.py
+loment/lspe/*.lomt
 loment/corpus.json
 lom/*.lom
 docs/*.md

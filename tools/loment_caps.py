@@ -26,8 +26,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-#: 扫哪两棵树 —— 编译器本体（`selfhost/`）与包内工具（`tools/`，里面是链接器、CLI 等）。
-TREES = ("loment/selfhost", "loment/tools")
+#: 扫哪几棵树 —— 编译器本体（`selfhost/`）、包内工具（`tools/`，链接器/CLI 等）
+#: 与 LSPE 子系统（`lspe/`）。
+TREES = ("loment/selfhost", "loment/tools", "loment/lspe")
 
 #: **排除生成的数据文件**：它们的常量是表项（步长/条目数），不是"编译器自己有多少内存"。
 #: 混进来会把数抬高一截，而这个数是要拿来说事的。

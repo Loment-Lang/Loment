@@ -13,10 +13,12 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import loment_suite  # noqa: E402
 import lomc  # noqa: E402
 import loment_diag  # noqa: E402
 import lomentc  # noqa: E402
+import lspe  # noqa: E402
 import potato  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -1971,15 +1973,15 @@ def test_store_with_two_versions_is_an_error():
 def test_project_local_deps_wins_over_a_builtin_root():
     """`deps/` 里有 `bytes`、仓库内置根里也有 —— 前两层先命中先用, **不报歧义**。
 
-    唯一性只管第③层 (内置四根): 它抓的是"作者把名字写重了"; 使用者选哪一份是**优先级**的
-    事, 像 PYTHONPATH。两件事混进一个错误, 使用者不知道该改什么。
+    唯一性只管第③层 (内置五根，含 `loment/lspe`): 它抓的是"作者把名字写重了"; 使用者选
+    哪一份是**优先级**的事, 像 PYTHONPATH。两件事混进一个错误, 使用者不知道该改什么。
     """
     with tempfile.TemporaryDirectory() as td:
         proj = Path(td) / "proj"
         _pkg(proj / "deps" / "bytes", "bytes")
         got = lomentc.resolve_name("bytes", ROOT, proj, None)
         assert got == proj / "deps" / "bytes" / "bytes.lomt", got
-        assert hasattr(lomentc, "NAME_ROOTS") and len(lomentc.NAME_ROOTS) == 4
+        assert hasattr(lomentc, "NAME_ROOTS") and len(lomentc.NAME_ROOTS) == 5
 
 
 @test
@@ -4665,8 +4667,8 @@ def test_a_parameter_may_shadow_a_module_const():
 def _lspe_registry_errors() -> list[str]:
     """登记表自身的判据（测试侧）：缺所有者、缺 accept 集合、未知证据、Differential 销义务。"""
     errs: list[str] = []
-    known = set(lomentc.LSPE_EVIDENCE_KINDS)
-    for name, spec in lomentc.LSPE_OBLIGATIONS.items():
+    known = set(lspe.LSPE_EVIDENCE_KINDS)
+    for name, spec in lspe.LSPE_OBLIGATIONS.items():
         owner = spec.get("owner")
         accept = spec.get("accept")
         if not isinstance(owner, str) or not owner:
@@ -4685,12 +4687,12 @@ def _lspe_registry_errors() -> list[str]:
 @test
 def test_lspe_obligation_registry():
     """14 条义务、8 种证据；每条都有 owner 与 accept；Differential 不在任何 accept 里。"""
-    assert len(lomentc.LSPE_OBLIGATIONS) == 14
-    assert len(lomentc.LSPE_EVIDENCE_KINDS) == 8
+    assert len(lspe.LSPE_OBLIGATIONS) == 14
+    assert len(lspe.LSPE_EVIDENCE_KINDS) == 8
     assert _lspe_registry_errors() == []
     assert all("Differential" not in v["accept"]
-               for v in lomentc.LSPE_OBLIGATIONS.values())
-    assert set(lomentc.LSPE_EVIDENCE_KINDS) == {
+               for v in lspe.LSPE_OBLIGATIONS.values())
+    assert set(lspe.LSPE_EVIDENCE_KINDS) == {
         "Axiom", "Syntactic", "Typed", "LocalFlow", "Interproc",
         "GlobalInvariant", "Assumed", "Differential"}
 

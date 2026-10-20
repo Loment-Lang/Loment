@@ -370,9 +370,9 @@ SHARD_COST = {
     "loment_status_test": 2.3,
     "loment_std_test": 3.1,
     "loment_store_twin_test": 261.6,
-    # 2026-10-19（#772）：本机实测约 4s（建一次 stage1 + 两个编译器各跑一个 21 格的
-    # 程序）。CI 上还没量到，按本机值记，量到后替换。
-    "loment_spec_oracle_test": 4.0,
+    # 2026-10-19（#772）：本机实测 13.2s（建一次 stage1 + 两个编译器各跑一个 21 格的
+    # 程序，Windows 侧）。CI 上还没量到，先按 15 记，量到后替换。
+    "loment_spec_oracle_test": 15.0,
     "loment_syscalls_test": 1.4,
     "loment_thread_test": 0.5,
     "loment_tools_test": 10.0,
@@ -395,7 +395,7 @@ SHARD_COST = {
     "potato_cross": 0.0,
     "potato_test": 9.5,
     "vscode_ext_test": 1.2,
-}  # 92 条 = `len(STATIC_CHECKS)`；`unpriced_checks()` 钉住这条等式。
+}  # 96 条 = `len(STATIC_CHECKS)`；`unpriced_checks()` 钉住这条等式。
 
 #: 不参与均分、也**不需要** `SHARD_COST` 条目的判据。**今天是空的** —— 89 条全有实测值。
 #: 留着这个集合是为了让"新判据还没量过"有一个**明确**的落脚处：放进来的代价是它按

@@ -340,7 +340,7 @@ SHARD_COST = {
     "loment_jtrans_test": 0.0,
     "loment_lib_test": 7.4,
     "loment_libl_test": 1.9,
-    # `lms` 这一维与七级（`docs/253` §9 / `docs/269`）。本机 4.0s（含一次 `cc` + 跑重启器）；
+    # `lms` 这一维与七级（`docs/253` §9 / `docs/270`）。本机 4.0s（含一次 `cc` + 跑重启器）；
     # CI 上量出来再改这一格 —— 它进的是分片均分，不是判据预算。
     "loment_lms_test": 4.0,
     "loment_lomc_test": 9.5,

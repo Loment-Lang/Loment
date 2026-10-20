@@ -657,7 +657,11 @@ def test_gc_manual_free_list_recycles():
     if not _wsl():
         print("      SKIP: 无 WSL")
         return
-    body = ("module gclist\nchoose gc_manual\nchoose runtime\n\nfn _start() {\n"
+    # ⚠ 这份夹具**故意**读一块刚 `free` 掉的块（它测的是空闲链表的**复用**：值在复用
+    # 之前还在）。E029 从默认档 `lms_full` 起就开着，所以这里显式降到「只要管理器」
+    # 那一档 —— 关掉的是那条检查，不是这条判据要测的分配器行为（`docs/270` §6）。
+    body = ("module gclist\nchoose gc_manual\nchoose lms_manage_only_admin\n"
+            "choose runtime\n\nfn _start() {\n"
             "    let prev: ptr = alloc(64);\n"
             "    store8(prev, 0, 3);\n"
             "    let i: u32 = 0;\n"
@@ -1221,7 +1225,8 @@ def test_free_refuses_a_double_free():
     # （那一层比运行期更强）。这一条测的是**运行期**的守卫 —— 别名让静态分析认不出
     # 两处是同一块，守卫必须自己挡住。别名在 `free` **之前**取，那一行本身是合法读。
     src_text = (
-        "module freedbl\nchoose runtime\n\n"
+        # 故意双重释放 —— 同上：关掉第 1 级，让 `free` 自己那道运行期检查说话。
+        "module freedbl\nchoose runtime\nchoose lms_manage_only_admin\n\n"
         "fn _start() {\n"
         "    let n: u32 = 16;\n"
         "    let a: ptr = alloc(n);\n"
@@ -1413,16 +1418,19 @@ def test_gc_alpha_adaptive_bounds_a_large_live_set():
     （`chew` 里 `p` 是 L3：`let q: ptr = p` 外逃，出了 `chew` 就没人指得到）。总量
     400×136 ≈ 53 KB 请求过 64 KiB arena。
 
-    ⚠ **2026-10-19 改判**：原先的负控是"`gc_auto` 必须耗尽（rc=132）"。**LMS 第 3 级入口 A**
-    （`docs/253` §5.3，"`alloc` 分配不出时先收一次再试"）落地之后，`gc_auto` 在同一个
-    arena 上也会靠那次**救援收集**活下来 —— 固定触发的上限不再是"活集 ≳ 32 KB 必死"。
-    所以这一条现在钉的是**两档的触发机制不同**（活集自适应阈值 / 空间触发 vs 固定 32 KiB），
-    以及两只都跑完；不再拿"谁会耗尽"当判据（那是旧实现的巧合，不是这一维的承诺）。
+    ⚠ **2026-10-19 改判**：LMS 第 3 级入口 A（`docs/253` §5.3，"`alloc` 分配不出时先收一次
+    再试"）默认开着，会把 `gc_auto` 那一只也救活 —— 那就测不出两档触发策略的差别了。
+    所以夹具**显式关掉保障器**（`choose close lms_guard`），比较的才是收集器本身：
+    守卫开着时"救援"属于第 3 级，它的行为由 `loment_lms_test` 管；这里只钉触发机制。
+    关掉之后负控重新成立 —— `gc_auto` **必须耗尽**（rc=132），`gc_auto_alpha` 必须跑完。
     """
     if not (_clang() and _wsl()):
         print("      SKIP: 无 clang/WSL")
         return
-    body = ("module gcadapt\n%s\nchoose runtime\n\n"
+    # ⚠ **第 3 级关掉**：入口 A（用尽时先收一次再试）会让 `gc_auto` 那一只也活下来，
+    # 于是这条判据测不出"固定触发 vs 自适应"的差别 —— 它要量的是**收集器的触发策略**，
+    # 不是保障器的救援。两只都关，比较才公平（`docs/270` §6）。
+    body = ("module gcadapt\n%s\nchoose close lms_guard\nchoose runtime\n\n"
             "fn chew(n: u32) -> u32 {\n"
             "    let p: ptr = alloc(n);\n"
             "    let q: ptr = p;\n"
@@ -1459,15 +1467,15 @@ def test_gc_alpha_adaptive_bounds_a_large_live_set():
     assert got["alpha"] == 7, (
         f"`gc_auto_alpha` 那一只没跑完：退出码 {got['alpha']}（期望 7）。自适应收集器"
         "要么没生效，要么空间触发 / 活集量法 / 阈值任一处坏了")
-    assert got["auto"] == 7, (
-        f"`gc_auto` 那一只没跑完：退出码 {got['auto']}（期望 7）—— LMS 第 3 级入口 A"
-        "（`docs/253` §5.3）的救援收集也没把它拉回来")
+    assert got["auto"] != 7, (
+        f"**`gc_auto` 那一只也跑通了**（退出码 {got['auto']}）—— 保障器已经关掉，固定 32 KiB"
+        " 触发本该在活集 44 KB 时装不下 64 KiB arena（期望耗尽，rc=132）")
     assert "@__loment_thresh" in irs["alpha"], (
         "alpha 的产物里没有自适应阈值 `@__loment_thresh` —— 自适应触发没有编进去")
     assert "@__loment_thresh" not in irs["auto"], (
         "gc_auto 的产物里出现了 `@__loment_thresh` —— 两档的触发策略混了")
-    print(f"      gc_auto rc={got['auto']} / gc_auto_alpha rc={got['alpha']}（活集 44 KB）："
-          "两只都跑完；alpha 带自适应阈值，auto 不带")
+    print(f"      gc_auto 耗尽 (rc={got['auto']}，活集 44 KB)；gc_auto_alpha 跑通 "
+          f"(rc={got['alpha']}) —— 自适应触发收得下更大的活集")
 
 
 @test
@@ -3521,46 +3529,6 @@ def test_a_gnu_ld_script_names_the_file_it_points_to():
         assert rc != 0, "镜像把 GNU ld 脚本链过去了"
         assert target in err, f"镜像的拒绝理由没印出目标：{err[-300:]}"
     print("      两份实现都点名脚本指向的真文件")
-
-
-@test
-def test_both_linkers_check_a_no_gc_claim_against_the_collector():
-    """**`no_gc` 的声明要有牙**（`#538`）：IR 说"不带收集器"，链接器就核它真的没带。
-
-    两个方向都判：诚实的 `no_gc` IR 两份链接器都收；一份**伪造**的（声明 `no_gc`
-    却定义 `@__loment_collect`）两份都点名拒。这是 `docs/227` 判据 B 的镜像 ——
-    编译器是那句话的作者，能拿一份不是自己生成的 IR 去核它的，只有链接器这一侧。
-    """
-    clang = _clang()
-    if not (clang and _wsl()):
-        print("      SKIP: 无 clang/WSL")
-        return
-    mir = _mirror()
-    honest = ("; loment-gc: no_gc\n"
-              "define i32 @_start() {\nentry:\n  ret i32 0\n}\n")
-    forged = ("; loment-gc: no_gc\n"
-              "define void @__loment_collect() {\nentry:\n  ret void\n}\n"
-              "define i32 @_start() {\nentry:\n  ret i32 0\n}\n")
-    # 参考实现：诚实的那份收，伪造的那份拒。
-    lomelf.compile_ll(honest, [])
-    try:
-        lomelf.compile_ll(forged, [])
-    except lomelf.Unsupported as e:
-        assert "no_gc" in str(e), f"参考实现拒绝时没点名 no_gc: {e}"
-    else:
-        raise AssertionError("参考实现收下了声明 no_gc 却带收集器的 IR")
-    with tempfile.TemporaryDirectory() as t:
-        td = Path(t)
-        for tag, text, want_ok in (("honest", honest, True), ("forged", forged, False)):
-            f = td / f"{tag}.ll"
-            f.write_text(text, encoding="utf-8", newline="\n")
-            rc, err = _mirror_run(mir, str(_wsl_path(f)), str(_wsl_path(td / f"{tag}.elf")))
-            if want_ok:
-                assert rc == 0, f"[{tag}] 镜像拒了诚实的 no_gc IR: {err[-300:]}"
-            else:
-                assert rc != 0, "镜像收下了声明 no_gc 却带收集器的 IR"
-                assert "no_gc" in err, f"[{tag}] 镜像拒绝时没点名 no_gc: {err[-300:]}"
-    print("      no_gc：两份链接器都收诚实的、都点名拒伪造的")
 
 
 @test

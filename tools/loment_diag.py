@@ -961,8 +961,8 @@ CARDS: dict[int, Card] = {
             "下标是**算出来的**（不是字面量）时这条发不出来 —— 那种情况自己挡：定长数组"
             "配一个显式的 `if i >= 4 { … }`，切片用 `slice_len(x)`（运行期的下标默认不检查，"
             "见下面 `no` 那一行）。",
-            "想让它自动挡（开发通道）：根单元写一行 `choose lms_open` —— 那时保障器会按站点"
-            "发内联界检查（`docs/253` §5.2）。它不进发行版。",
+            "默认档 `lms_full` 就带着第 3 级（保障器）；要单独关/开它，写 "
+            "`choose lms_guard` / `choose close lms_guard`（`docs/253` §11.4）。",
         ),
         yes="下标是字面量、且落在界内",
         no="下标是变量或表达式（这一条只能在编译期判已知的两个数，算出来的界不是它能管的）；"
@@ -1739,9 +1739,9 @@ CARDS_EN: dict[int, Card] = {
             "guard it yourself: a fixed-size array plus an explicit `if i >= 4 { ... }`, "
             "and `slice_len(x)` for slices (a runtime index is not checked by default - "
             "see the `no` line below).",
-            "To have it checked automatically (development channel): write `choose "
-            "lms_open` in the root unit and the guarantor emits an inline bounds check "
-            "per site (`docs/253` section 5.2). It does not ship.",
+            "The default tier (`lms_full`) already carries level 3 (the guarantor); to "
+            "switch it alone write `choose lms_guard` / `choose close lms_guard` "
+            "(`docs/253` section 11.4).",
         ),
         yes="the index is a literal and is inside the bounds",
         no="the index is a variable or an expression (this rule can only compare two "

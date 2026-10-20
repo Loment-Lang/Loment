@@ -92,10 +92,15 @@ fn btxt(s: ptr, lvl: u32) -> u32 {
 // —— 与检查器**同一条出口**（`wdiag` / `--diag-out`）。规则本身仍然长在发射器里
 // （它才是唯一知道"降不降得下去"的一方），但不再需要抄第二遍。
 //
-// 两个格：588 = 码（0 = 没失败），592 = token 下标（0 = 没有位置）。
+// 两个格：**556 = 码**（0 = 没失败），**560 = token 下标**（0 = 没有位置）。
+// ⚠ 别贴着 572/576/588 —— 572/576 是 GC 档位、**588 是 LMS 七级掩码**（`docs/253`
+// §11.4）。`#775` 第一版把这两个格放在 588/592：`emit_module` 一清、掩码一写，
+// 发射器每次成功都把 LMS 掩码当成"失败码"读出来，自举 stage1 于是报
+// "cannot lower a call with more than 20 arguments"（实际什么都没失败）。
+// 556/560 在这一排里是空的（560 是 match 臂表搬家前的老位置，`#719` 之后没人用）。
 // 只记**第一处**失败：后面的失败多半是它的连锁反应，多记只会把第一处淹掉。
-const CG_ERR: u32 = 588;
-const CG_ERRTOK: u32 = 592;
+const CG_ERR: u32 = 556;
+const CG_ERRTOK: u32 = 560;
 
 /// 发射器报一条"降不下去"。**不在这里退出**：递归下降的每个返回点都退出会把
 /// 几百处调用点都改成三态；粘性标记 + 末尾作废输出代价小得多，而且不会漏。
@@ -3164,6 +3169,50 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
         if tok_is(src, toks, j, "load8") {
             let ap: u32 = expr_bin(s, out, src, toks, j + 2, 1, lvl, 0);
             let ao: u32 = expr_bin(s, out, src, toks, ap + 1, 1, lvl + 1, 0);
+            // **第 3/4/5 级**（`docs/253` §5.3–§5.5）：界是编译期常量的访存点发一条 g1 检查。
+            // 与参考实现 `_Ir.builtin` 同一条规则、同一段文本 —— 判据是产物的字节。
+            let n: u32 = 0;
+            let mk: u32 = load32(s, 588);
+            if mk & 4 != 0 && (mk & 8 != 0 || mk & 16 != 0) && ap == j + 3 {
+                if tok_kind(toks, j + 2) == 0 {
+                    n = lms_alloc_size(s, src, toks, j + 2);
+                }
+            }
+            let join: u32 = 0;
+            let lok: u32 = 0;
+            let lbad: u32 = 0;
+            if n != 0 {
+                lok = load32(s, 480) + 1;
+                store32(s, 480, lok + 1);
+                lbad = lok + 1;
+                emit_str(s, out, "  ");
+                let c: u32 = new_temp(s, out);
+                emit_str(s, out, " = icmp ult i32 ");
+                emit_val(s, out, lvl + 1);
+                emit_str(s, out, ", ");
+                emit_dec(s, out, n);
+                emit_str(s, out, "\n  br i1 %t");
+                emit_dec(s, out, c);
+                emit_str(s, out, ", label ");
+                lab_ref(s, out, lok, "lmsok");
+                emit_str(s, out, ", label ");
+                lab_ref(s, out, lbad, "lmsbad");
+                emit_str(s, out, "\n");
+                store32(s, 476, 1);
+                lab_def(s, out, lbad, "lmsbad");
+                if mk & 8 != 0 {
+                    join = load32(s, 480) + 1;
+                    store32(s, 480, join);
+                    emit_str(s, out, "  br label ");
+                    lab_ref(s, out, join, "lmsjoin");
+                    emit_str(s, out, "\n");
+                    store32(s, 476, 1);
+                } else {
+                    emit_str(s, out, "  call void @__loment_abort()\n  unreachable\n");
+                    store32(s, 476, 1);
+                }
+                lab_def(s, out, lok, "lmsok");
+            }
             emit_str(s, out, "  ");
             let g: u32 = new_temp(s, out);
             emit_str(s, out, " = getelementptr i8, ptr ");
@@ -3179,7 +3228,25 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
             emit_str(s, out, " = zext i8 %t");
             emit_dec(s, out, b8);
             emit_str(s, out, " to i32\n");
-            set_temp_val(s, lvl, z);
+            if join != 0 {
+                emit_str(s, out, "  br label ");
+                lab_ref(s, out, join, "lmsjoin");
+                emit_str(s, out, "\n");
+                store32(s, 476, 1);
+                lab_def(s, out, join, "lmsjoin");
+                emit_str(s, out, "  ");
+                let ph: u32 = new_temp(s, out);
+                emit_str(s, out, " = phi i32 [ 0, ");
+                lab_ref(s, out, lbad, "lmsbad");
+                emit_str(s, out, " ], [ %t");
+                emit_dec(s, out, z);
+                emit_str(s, out, ", ");
+                lab_ref(s, out, lok, "lmsok");
+                emit_str(s, out, " ]\n");
+                set_temp_val(s, lvl, ph);
+            } else {
+                set_temp_val(s, lvl, z);
+            }
             if tok_is(src, toks, ao + 1, "as") {   // load8(...) as T
                 apply_cast(s, out, src, toks, 0, ao + 2, lvl);
                 return ao + 3;
@@ -3190,6 +3257,47 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
             let ap2: u32 = expr_bin(s, out, src, toks, j + 2, 1, lvl, 0);
             let ao2: u32 = expr_bin(s, out, src, toks, ap2 + 1, 1, lvl + 1, 0);
             let av: u32 = expr_bin(s, out, src, toks, ao2 + 1, 1, lvl + 2, 0);
+            // 同 `load8`：g1 检查 + 拒/崩（`docs/253` §5.3–§5.5）。
+            let n2: u32 = 0;
+            let mk2: u32 = load32(s, 588);
+            if mk2 & 4 != 0 && (mk2 & 8 != 0 || mk2 & 16 != 0) && ap2 == j + 3 {
+                if tok_kind(toks, j + 2) == 0 {
+                    n2 = lms_alloc_size(s, src, toks, j + 2);
+                }
+            }
+            let join2: u32 = 0;
+            let lok2: u32 = 0;
+            if n2 != 0 {
+                lok2 = load32(s, 480) + 1;
+                store32(s, 480, lok2 + 1);
+                emit_str(s, out, "  ");
+                let c2: u32 = new_temp(s, out);
+                emit_str(s, out, " = icmp ult i32 ");
+                emit_val(s, out, lvl + 1);
+                emit_str(s, out, ", ");
+                emit_dec(s, out, n2);
+                emit_str(s, out, "\n  br i1 %t");
+                emit_dec(s, out, c2);
+                emit_str(s, out, ", label ");
+                lab_ref(s, out, lok2, "lmsok");
+                emit_str(s, out, ", label ");
+                lab_ref(s, out, lok2 + 1, "lmsbad");
+                emit_str(s, out, "\n");
+                store32(s, 476, 1);
+                lab_def(s, out, lok2 + 1, "lmsbad");
+                if mk2 & 8 != 0 {
+                    join2 = load32(s, 480) + 1;
+                    store32(s, 480, join2);
+                    emit_str(s, out, "  br label ");
+                    lab_ref(s, out, join2, "lmsjoin");
+                    emit_str(s, out, "\n");
+                    store32(s, 476, 1);
+                } else {
+                    emit_str(s, out, "  call void @__loment_abort()\n  unreachable\n");
+                    store32(s, 476, 1);
+                }
+                lab_def(s, out, lok2, "lmsok");
+            }
             emit_str(s, out, "  ");
             let g2: u32 = new_temp(s, out);
             emit_str(s, out, " = getelementptr i8, ptr ");
@@ -3211,6 +3319,13 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
             emit_str(s, out, ", ptr %t");
             emit_dec(s, out, g2);
             emit_str(s, out, "\n");
+            if join2 != 0 {
+                emit_str(s, out, "  br label ");
+                lab_ref(s, out, join2, "lmsjoin");
+                emit_str(s, out, "\n");
+                store32(s, 476, 1);
+                lab_def(s, out, join2, "lmsjoin");
+            }
             store8(s, btxt(s, lvl), 48 as u8);   // 结果值 = 字面量 0
             store32(s, blen(s, lvl), 1);
             return av + 1;
@@ -4695,6 +4810,18 @@ fn tag_id(tag: str) -> u32 {
     if str_eq(tag, "mwild") {
         return 25;
     }
+    // LMS 的 g1 三块（`docs/253` §5.3–§5.5）：phi 里要**按名字**指回它们，
+    // 所以必须在表里 —— 落回 9 会让 `%L12_lmsjoin` 印成 `%L12_sc_end`
+    // （`bootprobe.lomt` 那一格就是这么红的：两个实现的字节差 1）。
+    if str_eq(tag, "lmsok") {
+        return 26;
+    }
+    if str_eq(tag, "lmsbad") {
+        return 27;
+    }
+    if str_eq(tag, "lmsjoin") {
+        return 28;
+    }
     return 9;   // sc_end
 }
 
@@ -4770,6 +4897,15 @@ fn tag_name(id: u32) -> str {
     }
     if id == 25 {
         return "mwild";
+    }
+    if id == 26 {
+        return "lmsok";
+    }
+    if id == 27 {
+        return "lmsbad";
+    }
+    if id == 28 {
+        return "lmsjoin";
     }
     return "sc_end";
 }
@@ -6004,17 +6140,14 @@ fn emit_heap(s: ptr, out: ptr, lms: u32) -> u32 {
     // **LMS 第 3 级入口 A**（`docs/253` §5.3）：`lms` 开着时，`alloc` 分配不出**先收一次
     // 再试**，还不行才 abort。这段文本与 `lomentc._IR_HEAP_LMS` **逐字节同源** ——
     // 四处增量与参考那一侧的四处改写一一对应：
-    //   ① 全局声明（`@__loment_lms_retry`）；② `floop` 的 phi 多一条入边；
+    //   ① 入口处的 `%lmsretry = alloca i1`（**本帧的**，不是全局 —— 默认满档之后
+    //      `docs/253` §13.2 那条"默认产物不带 `@__loment_` 符号"必须仍然成立，
+    //      而全局标记还会在重入时串味）；② `floop` 的 phi 多一条入边；
     //   ③ `boom` 换成 `rescue`/`dead`；④ **两条成功返回前**各清一次重试标记。
     // ⚠ **④ 不能省**：不清的话"这一次"用掉的唯一一次重试会**留给下一次分配** ——
     // 那是**假的能力**（第二次真耗尽时它不救了）。
     // ⚠ 上面那句"脚本从它生成"是**旧注释**：树里**没有**那个脚本，这一段是手维护的。
     let o: u32 = 0;
-    if lms == 1 {
-        o = emit_str(s, out, "@__loment_lms_retry = internal global i1 false");
-        o = emit_str(s, out, "
-");
-    }
     o = emit_str(s, out, "; ---- 分配器（docs/175 §3.4 的 `gc_manual`）------------------------------------
 ;
 ; 这里以前是**纯 bump**（`@__loment_off` 只涨不落），而 `free` 是个**占位** ——
@@ -6052,7 +6185,13 @@ fn emit_heap(s: ptr, out: ptr, lms: u32) -> u32 {
 ; 而且它是收集器那一层的活（`docs/175` §3.4 的 `gc_auto`）。
 define internal ptr @__loment_alloc(i32 %size) {
 entry:
-  %need0 = add i32 %size, 23
+");
+    if lms == 1 {
+        o = emit_str(s, out, "  %lmsretry = alloca i1
+  store i1 false, ptr %lmsretry
+");
+    }
+    o = emit_str(s, out, "  %need0 = add i32 %size, 23
   %need = and i32 %need0, -16
   %head = load i32, ptr @__loment_freehead
   br label %floop
@@ -6127,7 +6266,7 @@ taken:
   %kp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %ko
 ");
     if lms == 1 {
-        o = emit_str(s, out, "  store i1 false, ptr @__loment_lms_retry
+        o = emit_str(s, out, "  store i1 false, ptr %lmsretry
 ");
     }
     o = emit_str(s, out, "  ret ptr %kp
@@ -6140,10 +6279,10 @@ boom:
 ");
     if lms == 1 {
         o = emit_str(s, out, "  ; ---- LMS 第 3 级入口 A（docs/253 §5.3）：先拉回，拉不回来才死 ----
-  %lmsdone = load i1, ptr @__loment_lms_retry
+  %lmsdone = load i1, ptr %lmsretry
   br i1 %lmsdone, label %dead, label %rescue
 rescue:
-  store i1 true, ptr @__loment_lms_retry
+  store i1 true, ptr %lmsretry
   call void @__loment_collect()
   %head2 = load i32, ptr @__loment_freehead
   br label %floop
@@ -6167,7 +6306,7 @@ dead:
   %bp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %bo
 ");
     if lms == 1 {
-        o = emit_str(s, out, "  store i1 false, ptr @__loment_lms_retry
+        o = emit_str(s, out, "  store i1 false, ptr %lmsretry
 ");
     }
     o = emit_str(s, out, "  ret ptr %bp
@@ -6289,11 +6428,6 @@ setprev:
 /// `boom` 换成 `rescue`·`dead` / **两条成功返回前**各清一次重试标记。
 fn emit_heap_indirect(s: ptr, out: ptr, statik: u32, lms: u32) -> u32 {
     let d: u32 = 0;
-    if lms == 1 {
-        d = d + emit_str(s, out, "@__loment_lms_retry = internal global i1 false");
-        d = d + emit_str(s, out, "
-");
-    }
     d = d + emit_str(s, out, "; ---- 分配器（`docs/228`：arena 从**外面**来的那一份；`docs/175` §3.4）--------------------
 ;
 ; 与 `_IR_HEAP` 同序、同一条空闲链表，只换两件事：arena 从**外面**来
@@ -6354,7 +6488,13 @@ have:
     }
     d = d + emit_str(s, out, "define internal ptr @__loment_alloc(i32 %size) {
 entry:
-  %hb = call ptr @__loment_arena()
+");
+    if lms == 1 {
+        d = d + emit_str(s, out, "  %lmsretry = alloca i1
+  store i1 false, ptr %lmsretry
+");
+    }
+    d = d + emit_str(s, out, "  %hb = call ptr @__loment_arena()
   %need0 = add i32 %size, 23
   %need = and i32 %need0, -16
   %head = load i32, ptr @__loment_freehead
@@ -6423,7 +6563,7 @@ taken:
   %kp = getelementptr i8, ptr %hb, i32 %ko
 ");
     if lms == 1 {
-        d = d + emit_str(s, out, "  store i1 false, ptr @__loment_lms_retry
+        d = d + emit_str(s, out, "  store i1 false, ptr %lmsretry
 ");
     }
     d = d + emit_str(s, out, "  ret ptr %kp
@@ -6436,10 +6576,10 @@ boom:
 ");
     if lms == 1 {
         d = d + emit_str(s, out, "  ; ---- LMS 第 3 级入口 A（docs/253 §5.3）：先拉回，拉不回来才死 ----
-  %lmsdone = load i1, ptr @__loment_lms_retry
+  %lmsdone = load i1, ptr %lmsretry
   br i1 %lmsdone, label %dead, label %rescue
 rescue:
-  store i1 true, ptr @__loment_lms_retry
+  store i1 true, ptr %lmsretry
   call void @__loment_collect()
   %head2 = load i32, ptr @__loment_freehead
   br label %floop
@@ -6463,7 +6603,7 @@ dead:
   %bp = getelementptr i8, ptr %hb, i32 %bo
 ");
     if lms == 1 {
-        d = d + emit_str(s, out, "  store i1 false, ptr @__loment_lms_retry
+        d = d + emit_str(s, out, "  store i1 false, ptr %lmsretry
 ");
     }
     d = d + emit_str(s, out, "  ret ptr %bp
@@ -6586,19 +6726,140 @@ setprev:
 /// 本单元要不要**收集器与根表**（`docs/210` §2.1）：`gc_auto`（576）**或** `gc_auto_alpha`
 /// （572）。此前只有 `gc_auto` —— alpha 的 L3 残差没人收（只有分配器）；这一步给 alpha
 /// 也配上收集器（它的触发是自适应那支，见 `emit_gc_trigger`）。
-/// `lms` 开着吗（`docs/253`）—— **第 3 级入口 A** 的开关。**扫 token 流**，与
-/// `gc_alpha_tier` 同一个形状（那边扫 `choose gc_auto_alpha`）。
+/// `lms` **第 3 级（保障器）**开着吗（`docs/253`）—— **入口 A** 的开关。
+///
+/// **2026-10-18 起它读档**：默认 `lms_full` ⇒ 开着；`lms_forensic_admin` /
+/// `lms_daily_admin` 也开着第 3 级；`lms_manage_only_admin` 关掉它。
+/// 显式写的 `choose lms_guard` / `choose close lms_guard` **覆盖档**
+/// （§11.4 叠加规则）—— 与参考实现 `_lms_level` 同一张表。
 ///
 /// ⚠ **它只是这个开关的一半** —— 另一半是"**这份产物里真的有收集器**"
 /// （`gc_any(s)`）。两个条件缺一不可：`gc_manual` 下没有东西可收，
 /// "拉回"在那里是一句空话（`docs/253` §5.3 明写的边界）。
-fn lms_open_tier(src: ptr, toks: ptr) -> u32 {
+fn lms_mask(src: ptr, toks: ptr) -> u32 {
+    // 档铺初值（与参考实现 `LMS_TIERS` 同一张表）：满档 127 / 法医 15 / 日常 13 / 只要管理器 2。
+    let m: u32 = 127;
+    let d: u32 = 0;
     let i: u32 = 0;
     while tok_kind(toks, i) != 4 {
-        if tok_is(src, toks, i, "choose") && tok_is(src, toks, i + 1, "lms_open") {
-            return 1;
+        let k: u32 = tok_kind(toks, i);
+        if k == 3 {
+            let c: u32 = load8(src, load32(toks, i * 20 + 4)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                d = d + 1;
+            }
+            if (c == 125 || c == 41 || c == 93) && d > 0 {
+                d = d - 1;
+            }
+        } else if d == 0 && tok_is(src, toks, i, "choose") {
+            if tok_is(src, toks, i + 1, "lms_forensic_admin") {
+                m = 15;
+            }
+            if tok_is(src, toks, i + 1, "lms_daily_admin") {
+                m = 13;
+            }
+            if tok_is(src, toks, i + 1, "lms_manage_only_admin") {
+                m = 2;
+            }
         }
         i = i + 1;
+    }
+    // 显式开关**覆盖**档（`docs/253` §11.4 叠加规则）。位序 = 七级的次序：
+    // check=1 manage=2 guard=4 reject=8 crash=16 restart=32 seed=64。
+    d = 0;
+    i = 0;
+    while tok_kind(toks, i) != 4 {
+        let k: u32 = tok_kind(toks, i);
+        if k == 3 {
+            let c: u32 = load8(src, load32(toks, i * 20 + 4)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                d = d + 1;
+            }
+            if (c == 125 || c == 41 || c == 93) && d > 0 {
+                d = d - 1;
+            }
+        } else if d == 0 && tok_is(src, toks, i, "choose") {
+            let isdef: u32 = 0;
+            if i > 0 {
+                if tok_is(src, toks, i - 1, "set") {
+                    isdef = 1;
+                }
+            }
+            if isdef == 0 {
+                let neg: u32 = 0;
+                let j: u32 = i + 1;
+                if tok_is(src, toks, i + 1, "close") {
+                    neg = 1;
+                    j = i + 2;
+                }
+                let bit: u32 = 0;
+                if tok_is(src, toks, j, "lms_check") {
+                    bit = 1;
+                }
+                if tok_is(src, toks, j, "lms_manage") {
+                    bit = 2;
+                }
+                if tok_is(src, toks, j, "lms_guard") {
+                    bit = 4;
+                }
+                if tok_is(src, toks, j, "lms_reject") {
+                    bit = 8;
+                }
+                if tok_is(src, toks, j, "lms_crash") {
+                    bit = 16;
+                }
+                if tok_is(src, toks, j, "lms_restart") {
+                    bit = 32;
+                }
+                if tok_is(src, toks, j, "lms_seed") {
+                    bit = 64;
+                }
+                if bit != 0 {
+                    if neg == 1 {
+                        m = m & (127 - bit);
+                    } else {
+                        m = m | bit;
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return m;
+}
+
+/// `let NAME: ptr = alloc(<常量>)` 的**载荷字节数**；0 = 不认（于是那条访存不发检查）。
+///
+/// 与参考实现 `_Ir.lms_size` **同一条规则**：按发射顺序往回找**最近一次**同名声明；
+/// 中间出现一次 `<NAME> = …` 就作废。只认**编译期常量**的界（g1 格，`docs/253` §5.3）。
+/// ⚠ 保守：`ptr_add` / 切片 / 结构体字段派生的指针这里查不到 —— **不发**检查，
+/// 比把块里的数据当块长读安全（§5.3 入口 B 的准备 ③）。
+fn lms_alloc_size(s: ptr, src: ptr, toks: ptr, name: u32) -> u32 {
+    let lo: u32 = load32(s, 564);
+    let k: u32 = name;
+    while k > lo {
+        k = k - 1;
+        if tok_kind(toks, k) == 0 && tok_eq(src, toks, k, name) && tok_is(src, toks, k + 1, "=") {
+            return 0;
+        }
+        if tok_is(src, toks, k, "let") && k > 0 {
+            if !tok_is(src, toks, k - 1, "if")
+                    && tok_kind(toks, k + 1) == 0 && tok_eq(src, toks, k + 1, name)
+                    && tok_is(src, toks, k + 2, ":") && tok_is(src, toks, k + 3, "ptr")
+                    && tok_is(src, toks, k + 4, "=") && tok_is(src, toks, k + 5, "alloc")
+                    && tok_is(src, toks, k + 6, "(") && tok_is(src, toks, k + 8, ")") {
+                if tok_kind(toks, k + 7) == 1 {
+                    return tok_int(src, toks, k + 7);
+                }
+                if tok_kind(toks, k + 7) == 0 {
+                    let vt: u32 = find_const(s, src, toks, k + 7);
+                    if vt != 0 && tok_kind(toks, vt) == 1 {
+                        return tok_int(src, toks, vt);
+                    }
+                }
+                return 0;
+            }
+        }
     }
     return 0;
 }
@@ -8031,6 +8292,10 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
     store32(s, 484, 0);   // 局部数
     store32(s, 572, gc_alpha_tier(src, toks));   // L0 只在 `gc_auto_alpha` 档上跑
     store32(s, 576, gc_auto_tier(src, toks));    // 自动收集只在 `gc_auto` 档上跑
+    // **LMS 七级开关的实际集合**（`docs/253` §11.4，2026-10-18）：档铺初值 + 显式覆盖。
+    // 位序 = 七级的次序（check=1 manage=2 guard=4 reject=8 crash=16 restart=32 seed=64）。
+    // 与参考实现 `_lms_level` 同一个来源，判据是产物的字节。
+    store32(s, 588, lms_mask(src, toks));
     // 这两个预扫描要读 572 —— **顺序不能反** (它们在 alpha 档要跳过被提升的 alloc)
     store32(s, 512, runtime_needed(s, src, toks));
     // `choose runtime` = **强制带**（`docs/217`）：用不到也发 `_IR_RUNTIME`。
@@ -8300,9 +8565,9 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
     // 并且**说出来**（`; loment-heap: static 65536`，"不静默"）。
     // 与参考实现 `_ffi_heap` / `_ffi_grown` 同一条规则。
     // **LMS 第 3 级入口 A**（`docs/253` §5.3）：两个条件缺一不可 —— `lms` 开着
-    // **且** 这份产物里有收集器（`gc_any`）。三支共用同一个判断，见 `lms_open_tier`。
+    // **且** 这份产物里有收集器（`gc_any`）。三支共用同一个判断，见 `lms_mask`。
     let lms_rescue: u32 = 0;
-    if lms_open_tier(src, toks) == 1 && gc_any(s) == 1 {
+    if load32(s, 588) & 4 != 0 && gc_any(s) == 1 {
         lms_rescue = 1;
     }
     let indirect: u32 = 0;

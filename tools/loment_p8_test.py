@@ -1213,10 +1213,12 @@ def test_m92_lms_entry_a_rescue_is_byte_identical():
     probe = ("module m\nchoose runtime\nconst N: u32 = 64;\n%s\n\n"
              "fn f() -> u32 {\n    let p: ptr = alloc(N);\n"
              "    return load8(p, 0);\n}\n")
+    # 2026-10-18（0.1.5.1）：显式写 `lms_guard`（第 3 级）—— 档名换成七级开关后
+    # `lms_open` 不再是取值；显式写也让这条判据不依赖默认档（默认是 `lms_full`）。
     cases = (
-        ("gc_auto", "choose gc_auto\nchoose lms_open"),
-        ("gc_auto_alpha", "choose gc_auto_alpha\nchoose lms_open"),
-        ("gc_auto_hosted", "choose hosted\nchoose gc_auto\nchoose lms_open"),
+        ("gc_auto", "choose gc_auto\nchoose lms_guard"),
+        ("gc_auto_alpha", "choose gc_auto_alpha\nchoose lms_guard"),
+        ("gc_auto_hosted", "choose hosted\nchoose gc_auto\nchoose lms_guard"),
     )
     with tempfile.TemporaryDirectory() as td:
         exe = _build_codegen(td)
@@ -1233,10 +1235,60 @@ def test_m92_lms_entry_a_rescue_is_byte_identical():
                 raise AssertionError(
                     f"lms_{tag} 首个差异 @{i}:\n"
                     f" loment {got[a:(i or 0) + 80]!r}\n python {want[a:(i or 0) + 80]!r}")
-    # 不许空转：三格都必须**真的**带那条救援路径，且**两条成功返回各清一次**标记
+    # 不许空转：三格都必须**真的**带那条救援路径，且每一条成功返回各清一次标记。
+    # ⚠ 2026-10-18 起标记是**本帧的 alloca**，不是全局 —— 默认满档之后
+    # `docs/253` §13.2（默认产物不带 `@__loment_` 符号）必须仍然成立。
     for tag, out in outs.items():
-        assert "@__loment_lms_retry" in out, f"{tag}: 没有入口 A —— 这条判据在空转"
-        assert out.count("store i1 false, ptr @__loment_lms_retry") == 2, tag
+        assert "%lmsretry = alloca i1" in out, f"{tag}: 没有入口 A —— 这条判据在空转"
+        assert "@__loment_lms_retry" not in out, f"{tag}: 又长出全局符号了"
+        # 1 次初始化 + 每条成功返回一次清（sealed 两条、hosted 三条）
+        assert out.count("store i1 false, ptr %lmsretry") >= 3, (
+            tag, out.count("store i1 false, ptr %lmsretry"))
+        assert out.count("%lmsretry = alloca i1") == 1, tag
+
+
+@test
+def test_m93_lms_rejector_site_is_byte_identical():
+    """LMS 第 3/4 级：**`alloc` 直接发出的指针**上那一条 g1 检查 —— 两实现逐字节一致。
+
+    `docs/253` §5.3 入口 B 的第一步：界是编译期常量的访存点发一条 `icmp`，
+    越界时第 4 级**跳过那一条访存**、程序继续（§5.4）。这条判据钉三件事：
+
+    * **发**：`let p: ptr = alloc(N)` 之后的 `load8/store8` 真的带检查；
+    * **不发**：`choose close lms_guard` 一条都没有（关得掉）；
+    * **保守**：过了 `ptr_add` 的派生指针**不发** —— 那里读不到块头，乱发比不发更坏。
+    """
+    if not _clang():
+        print("      SKIP: 无 clang")
+        return
+    probe = ("module m\nchoose runtime\nconst N: u32 = 8;\n%s\n\n"
+             "fn f() -> u32 {\n    let p: ptr = alloc(N);\n"
+             "    store8(p, 9, 1);\n    let x: u32 = load8(p, 0);\n    return x;\n}\n")
+    derived = ("module m\nchoose runtime\nconst N: u32 = 8;\n%s\n\n"
+               "fn f() -> u32 {\n    let p: ptr = alloc(N);\n"
+               "    let q: ptr = ptr_add(p, 1);\n"
+               "    let x: u32 = load8(q, 0);\n    return x;\n}\n")
+    cases = (("on", probe % ""), ("off", probe % "choose close lms_guard"),
+             ("derived", derived % ""))
+    with tempfile.TemporaryDirectory() as td:
+        exe = _build_codegen(td)
+        outs: dict[str, str] = {}
+        for tag, text in cases:
+            target = Path(td) / f"lms_{tag}.lomt"
+            target.write_text(text, encoding="utf-8", newline="\n")
+            want = _unit_ll(target)
+            got = _run_codegen(exe, target, td)
+            outs[tag] = got
+            if got != want:
+                i = next((k for k in range(min(len(got), len(want))) if got[k] != want[k]), None)
+                a = max(0, (i or 0) - 60)
+                raise AssertionError(
+                    f"lms_{tag} 首个差异 @{i}:\n"
+                    f" loment {got[a:(i or 0) + 80]!r}\n python {want[a:(i or 0) + 80]!r}")
+    # 不许空转
+    assert outs["on"].count("lmsok") >= 2, "两个访存点都该有检查"
+    assert outs["off"].count("lmsok") == 0, "关掉第 3 级之后一条都不许有"
+    assert outs["derived"].count("lmsok") == 0, "派生指针不发检查（保守）"
 
 
 @test

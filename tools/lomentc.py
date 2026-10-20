@@ -310,6 +310,25 @@ sane:
   %hok = and i1 %szok, %endok
   br i1 %hok, label %check, label %out
 check:
+  ; ---- 擦除载荷（#789）------------------------------------------------------------
+  ; `free` 之后这块随时会被下一次 `alloc` 原样交出去。不擦的话，新主人读到的是
+  ; 上一任留下的字节 —— 分配的是 `cap`、只填了 `n`、把 `cap` 发出去的程序因此静默
+  ; 泄密（Heartbleed 形状，CWE-200/457）。arena 的 `zeroinitializer` 只覆盖**第一次**
+  ; 分配，覆盖不到复用。代价是一次按块长的 `memset`（这里展开成逐字节循环）。
+  ; 范围是 `[hi+8, hend)`：`hend = hi + sz` 是这块的**记录总长**，擦的正是下一个
+  ; 主人能合法看到的那段载荷。
+  %zstart = add i32 %hi, 8
+  br label %zloop
+zloop:
+  %zi = phi i32 [ %zstart, %check ], [ %znext, %zbody ]
+  %zdone = icmp uge i32 %zi, %hend
+  br i1 %zdone, label %zend, label %zbody
+zbody:
+  %zpp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %zi
+  store i8 0, ptr %zpp
+  %znext = add i32 %zi, 1
+  br label %zloop
+zend:
   %off = load i32, ptr @__loment_off
   %istail = icmp eq i32 %hend, %off
   br i1 %istail, label %rewind, label %link
@@ -563,6 +582,22 @@ sane:
   %hok = and i1 %szok, %endok
   br i1 %hok, label %check, label %out
 check:
+  ; ---- 擦除载荷（#789）------------------------------------------------------------
+  ; 与 `_IR_HEAP` 同一条：`free` 之后这块随时会被下一次 `alloc` 原样交出去，不擦就是
+  ; 上一任的字节泄给新主人（CWE-200/457）。arena 来自宿主 `malloc`，**更没有**零初
+  ; 保证 —— 第一次分配就可能看到别的进程/旧分配留下的内容，所以这条在这里更要紧。
+  %zstart = add i32 %hi, 8
+  br label %zloop
+zloop:
+  %zi = phi i32 [ %zstart, %check ], [ %znext, %zbody ]
+  %zdone = icmp uge i32 %zi, %hend
+  br i1 %zdone, label %zend, label %zbody
+zbody:
+  %zpp = getelementptr i8, ptr %hb, i32 %zi
+  store i8 0, ptr %zpp
+  %znext = add i32 %zi, 1
+  br label %zloop
+zend:
   %off = load i32, ptr @__loment_off
   %istail = icmp eq i32 %hend, %off
   br i1 %istail, label %rewind, label %link

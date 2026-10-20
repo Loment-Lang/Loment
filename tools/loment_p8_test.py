@@ -938,6 +938,8 @@ def test_m82_loment_codegen_byte_identical():
                        ROOT / "loment" / "selfhost" / "ir_builtin.lomt",
                        ROOT / "loment" / "selfhost" / "ir_index.lomt",
                        ROOT / "loment" / "selfhost" / "ir_call5.lomt",
+                       # `#941`：`choose no_std` 的那行 IR 标记两份实现必须逐字节同。
+                       ROOT / "loment" / "selfhost" / "ir_no_std.lomt",
                        # `#538`：`choose no_gc` 的那行 IR 标记两份实现必须逐字节同。
                        ROOT / "loment" / "selfhost" / "ir_no_gc.lomt"):
             want = _unit_ll(target)

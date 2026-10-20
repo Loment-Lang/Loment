@@ -6195,6 +6195,14 @@ def compile_ll(text: str, objects: list | None = None,
     global TEXT_VADDR, DATA_VADDR
     TEXT_VADDR, DATA_VADDR = ELF_TEXT_VADDR, ELF_DATA_VADDR   # PE 目标会改这两个全局
     globals_, funcs, externs = parse_ll(text)
+    # **`no_std` 的带牙检查**（`#941` / #539）：声明只用核那一层，就不能带宿主层。
+    # 与 `docs/227` 判据 B 同形 —— 编译器是那句话的作者，能拿一份不是自己生成的 IR
+    # 去核它的只有链接器这一侧。
+    if "; loment-mode: no_std" in text and "; loment-port: hosted" in text:
+        raise Unsupported(
+            "这份 IR 声明了 `no_std`（只用核那一层），却带着宿主层"
+            "（`; loment-port: hosted`）—— `no_std` 的定义里没有宿主；"
+            "去掉 `choose no_std`，或去掉 `choose hosted`")
     # **`no_gc` 的带牙检查**（`#538`）：IR 自己声明"不带收集器"，那就核它真的没带。
     # 这是 `docs/227` 判据 B 的镜像 —— 那边判"声明了 `no_runtime` 却拖进运行期"，
     # 这边判"声明了 `no_gc` 却带着收集器"。检查放在**链接器**而不是编译器，因为

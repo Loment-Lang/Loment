@@ -397,6 +397,35 @@ def test_gc_vm_lspe_and_lvm_agree_on_every_tier():
 
 
 @test
+def test_no_std_is_a_claim_the_linker_checks():
+    """`mode` 行（`#941` / #539）：`no_std` 的产物**自己声明**只用核那一层，链接器核这句话。
+
+    与 `docs/227` 判据 B 同形：诚实的 `no_std` 编得过、IR 里有 `; loment-mode: no_std`
+    且没有 `; loment-port: hosted`；一份**伪造**的（宿主层产物 + 那行声明）在链接期
+    被点名拒。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        rc, diag, ir, pot = _emit(td, "nostd", {"mode": "no_std", "gc": "gc_manual",
+                                                "runtime": "no_runtime"}, PURE_BODY)
+        assert rc == 0, f"`choose no_std` 编不过\n{diag[-400:]}"
+        assert pot.get("mode") == "no_std", f"Potato 记错了运行模式: {pot.get('mode')!r}"
+        assert "; loment-mode: no_std" in ir, "产物没有声明它只用核那一层"
+        assert "; loment-port: hosted" not in ir, "no_std 的产物带了宿主层"
+        rc, diag, hosted_ir, _pot = _emit(td, "hosted_forge", {"mode": "std", "gc": "gc_manual",
+                                                               "runtime": "no_runtime",
+                                                               "port": "hosted"}, PURE_BODY)
+        assert rc == 0 and "; loment-port: hosted" in hosted_ir, "夹具不成形：宿主层没有标记"
+        try:
+            lomelf.compile_ll("; loment-mode: no_std\n" + hosted_ir, [])
+        except lomelf.Unsupported as e:
+            assert "no_std" in str(e), f"拒绝时没点名 no_std: {e}"
+        else:
+            raise AssertionError("声明 no_std 却带着宿主层的 IR 被链接器收下了")
+    print("      no_std: 编得过、产物无宿主层、伪造的声明在链接期点名拒")
+
+
+@test
 def test_no_gc_is_accepted_and_the_linker_checks_the_claim():
     """`no_gc`（`#538`）：值是核心取值，产物**自己声明**不带收集器，链接器核这句话。
 

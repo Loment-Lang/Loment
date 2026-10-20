@@ -579,7 +579,8 @@ fn word_end(t: ptr, i: u32, n: u32) -> u32 {
     return j;
 }
 
-/// 文本里有没有 `lit`（逐字节找）。认 IR 自己声明的标记 —— `; loment-gc: no_gc`（`#538`）。
+/// 文本里有没有 `lit`（逐字节找）。认 IR 自己声明的标记 —— `; loment-mode: no_std`、
+/// `; loment-gc: no_gc`（`#538`）之类。
 fn mem_has(t: ptr, n: u32, lit: str) -> u32 {
     let ll: u32 = str_len(lit);
     if ll == 0 || n < ll { return 0; }
@@ -6798,6 +6799,13 @@ fn run(mem: ptr) -> u32 {
     if nobj != 0 && nshared == 0 {
         setcell(tab, C_EXTN, put_name(inb, tlsn, "__loment_tls"));
         tls = 1;
+    }
+    // **`no_std` 的带牙检查**（`#941` / #539）：IR 声明"只用核那一层"，就不能带宿主层。
+    if mem_has(inb, n as u32, "; loment-mode: no_std") == 1
+        && mem_has(inb, n as u32, "; loment-port: hosted") == 1 {
+        wstr(2, "loment: this IR declares `no_std` (the core layer alone) but carries the hosted layer (`; loment-port: hosted`) -- the two cannot both hold
+");
+        return die(1);
     }
     // **`no_gc` 的带牙检查**（`#538`）：IR 自己声明"不带收集器"，那就核它真的没带。
     // 与参考实现 `tools/lomelf.py` 同一条判断、同一处失败（`docs/227` 判据 B 的镜像）。

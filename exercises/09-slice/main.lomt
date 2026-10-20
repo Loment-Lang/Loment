@@ -1,0 +1,29 @@
+module ex
+
+choose runtime
+
+use num
+
+fn print_dec(v: u32) {
+    let b: ptr = alloc(16);
+    let n: u32 = num_to_dec(b, v);
+    syscall4(1, 1, b as u64, n as u64);
+}
+
+fn print_nl() {
+    syscall4(1, 1, str_ptr("
+") as u64, str_len("
+") as u64);
+}
+
+fn bump(xs: [u32]) {
+    xs[0] = xs[0] + 100;
+}
+
+fn _start() {
+    let a: [u32; 2] = [1, 2];
+    bump(a);
+    print_dec(a[0]);
+    print_nl();
+    syscall4(60, 0, 0, 0);
+}

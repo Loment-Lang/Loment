@@ -373,7 +373,7 @@ SHARD_COST = {
     "loment_std_test": 3.1,
     "loment_store_twin_test": 261.6,
     "loment_syscalls_test": 1.4,
-    "loment_thread_test": 0.5,
+    "loment_thread_test": 3.6,
     "loment_tools_test": 10.0,
     "loment_trans_test": 111.1,
     "loment_zwframe_test": 2.5,

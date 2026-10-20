@@ -589,6 +589,48 @@ def test_non_threaded_output_is_lock_free():
 
 
 @test
+def test_selfhost_thread_ir_matches_reference():
+    """线程程序的 IR 两份实现**逐字节相同**（`docs/158` §5）。
+
+    这一条要挡的不是"跑得对"，是**文本漂移**：`#778` 把四样东西写进了发射器的文本 ——
+    取号锁、`@__loment_rt_threads`、收集器入口的推迟、以及 `thread_spawn` 之前那次
+    置位。任何一处只在一边改，这里当场红；而**跑得对**的判据（上面那几条）对一个
+    多出来的字符串全局、少一行注释是看不见的。
+
+    用真东西：种子链成的 stage1 编同一份探针，与参考实现的 `emit_llvm` 比字节。
+    缺 stage1（没有种子/链接器）时 SKIP，与 `loment_potato_emit_test` 同一条口径。
+    """
+    try:
+        import loment_dist  # noqa: PLC0415
+        stage1 = loment_dist.build_stage1()
+    except Exception as e:  # noqa: BLE001
+        print(f"      SKIP: 拿不到 stage1 ({type(e).__name__}: {e})")
+        return
+    PROBE.parent.mkdir(parents=True, exist_ok=True)
+    with PROBE.open("w", encoding="utf-8", newline="\n") as f:
+        f.write(_ALLOC_WORKER)
+    try:
+        mod = lomentc.load(PROBE)
+        deps = lomentc.resolve_deps(mod, ROOT, PROBE.parent, entry=PROBE)
+        errs = lomentc.check(mod, deps=deps, _dep_pass=True)
+        assert not errs, errs[:3]
+        want = lomentc.emit_llvm(mod, ROOT, deps)
+        got = subprocess.run([str(stage1), str(PROBE)], cwd=str(ROOT),
+                             capture_output=True, text=True, encoding="utf-8",
+                             errors="replace", shell=False, timeout=300)
+    finally:
+        PROBE.unlink(missing_ok=True)
+    assert got.returncode == 0, f"stage1 编探针失败: {got.stderr[-300:]}"
+    g, w = got.stdout.splitlines(), want.splitlines()
+    for i in range(min(len(g), len(w))):
+        if g[i] != w[i]:
+            raise AssertionError(
+                f"线程程序 IR 第 {i + 1} 行不同：\n  参考: {w[i]!r}\n  自举: {g[i]!r}")
+    assert g == w, f"行数不同：参考 {len(w)}，自举 {len(g)}（多出的/少掉的在末尾）"
+    print(f"      线程程序 IR 与参考逐字节相同（{len(want)} 字符）")
+
+
+@test
 def test_entry_must_be_a_string_literal():
     """入口必须是**字面量**：产物里那是一条写死的调用边，不是运行期取得到的值。"""
     src = _WORKER.replace('thread_spawn("worker"', 'thread_spawn(who')

@@ -2292,16 +2292,28 @@ fn emit_str_globals(s: ptr, out: ptr, src: ptr, toks: ptr) -> u32 {
                     d = d - 1;
                 }
                 if d > 0 && tok_kind(toks, j) == 2 {
-                    emit_str(s, out, "@.str.");
-                    emit_tok(s, out, src, toks, i + 1);
-                    emit_str(s, out, ".");
-                    emit_dec(s, out, s_gc(s, 0));
-                    emit_str(s, out, " = private unnamed_addr constant [");
-                    emit_dec(s, out, str_lit_len(src, toks, j));
-                    emit_str(s, out, " x i8] c\"");
-                    emit_str_lit_bytes(s, out, src, toks, j);
-                    emit_str(s, out, "\"\n");
-                    s_gc(s, 1);
+                    // `thread_spawn` 的第一个实参是**编译期的名字**，不是表达式
+                    // （`docs/245`）：参考实现从不求值它，也就不给它发字符串全局。
+                    // 预扫描是**文本序**的，会把它当普通字面量收进来 —— 跳过，
+                    // 否则两个实现的 `.str.<fn>.<n>` 编号与内容都对不上（实测：
+                    // 自举侧多一条 `@.str._start.0 = ... c"worker"`）。
+                    let tse: u32 = 0;
+                    if j > 1 && tok_is(src, toks, j - 2, "thread_spawn")
+                            && tok_is(src, toks, j - 1, "(") {
+                        tse = 1;
+                    }
+                    if tse == 0 {
+                        emit_str(s, out, "@.str.");
+                        emit_tok(s, out, src, toks, i + 1);
+                        emit_str(s, out, ".");
+                        emit_dec(s, out, s_gc(s, 0));
+                        emit_str(s, out, " = private unnamed_addr constant [");
+                        emit_dec(s, out, str_lit_len(src, toks, j));
+                        emit_str(s, out, " x i8] c\"");
+                        emit_str_lit_bytes(s, out, src, toks, j);
+                        emit_str(s, out, "\"\n");
+                        s_gc(s, 1);
+                    }
                 }
                 j = j + 1;
             }
@@ -2338,7 +2350,15 @@ fn strings_needed(src: ptr, toks: ptr) -> u32 {
                     d = d - 1;
                 }
                 if d > 0 && tok_kind(toks, j) == 2 {
-                    return 1;
+                    // `thread_spawn` 的入口名不是表达式（同 `emit_str_globals`）。
+                    let tse2: u32 = 0;
+                    if j > 1 && tok_is(src, toks, j - 2, "thread_spawn")
+                            && tok_is(src, toks, j - 1, "(") {
+                        tse2 = 1;
+                    }
+                    if tse2 == 0 {
+                        return 1;
+                    }
                 }
                 j = j + 1;
             }
@@ -6370,6 +6390,7 @@ setprev:
 /// `1` = 这台进程起过线程；`maybe_collect` 见到它就整个不跑。
 fn emit_rt_threads(s: ptr, out: ptr) -> u32 {
     return emit_str(s, out, "@__loment_rt_threads = internal global i32 0
+
 ");
 }
 
@@ -6383,7 +6404,7 @@ fn emit_rt_lock(s: ptr, out: ptr) -> u32 {
 ;
 ; **模型**（`docs/245` §10）：一条全局取号锁串行化 `alloc` / `free` / 根表游标；
 ; 自动收集在**有线程活着**时**整个不跑**（`@__loment_rt_threads != 0` 时 `maybe_collect`
-; 直接返回）。于是收集器只会在线程全部退出之后、单线程的状态下运行 —— 它不去停
+; 直接返回）。于是收集器只在「起过线程之前」运行 —— 它不去停
 ; 任何一个 mutator，也不需要停。线程之间真正并发；`atomic_add` 是 seq_cst。
 ;
 ; 重入靠 `@__loment_rt_own`（持有者的 tid；`tid` 永远 > 0，0 = 没人持有）。
@@ -6439,6 +6460,7 @@ drop:
 done:
   ret void
 }
+
 
 ");
 }

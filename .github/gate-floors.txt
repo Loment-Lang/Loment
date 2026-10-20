@@ -76,7 +76,7 @@ loment_std_test 4
 loment_libl_test 2
 loment_internet_test 11
 loment_os_test 5
-loment_thread_test 10
+loment_thread_test 11
 loment_lumtui_test 7
 loment_lompi_test 33
 lompicheck_test 7

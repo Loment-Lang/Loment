@@ -36,6 +36,11 @@ import loment_zwframe as _zwf  # noqa: E402  （只为借一个数：帧长）
 
 ADMIT_VERSION = 1
 
+#: 用例文件的字节上限 —— 与 `loment/tools/lomadmit.lomt` 的 `CASES_CAP` **同值**。
+#: 超过它是**容量错**（点名报出来、退出码 2），不是"把前缀当整份输入"：静默截断会让
+#: 最后一行变成一条假语法错（`#872`）。
+CASES_CAP = 262144
+
 #: 四档，**从窄到宽** —— 与 Potato v14 的 `net_ladder` 同一套档名（`docs/237`）。
 RUNGS = ("w0", "w1", "w2", "w3")
 
@@ -181,6 +186,10 @@ def main(argv: list[str] | None = None) -> int:
     p = Path(a[0])
     if not p.is_file():
         print(f"loment_admit: cannot open {a[0]}", file=sys.stderr)
+        return 2
+    if p.stat().st_size > CASES_CAP:
+        print(f"loment_admit: cases file is too large: more than {CASES_CAP} bytes -- "
+              f"split it into smaller files", file=sys.stderr)
         return 2
     rc, out, err = run_cases(p.read_text(encoding="utf-8"))
     sys.stdout.write(out)

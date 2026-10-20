@@ -1056,12 +1056,16 @@ def test_object_using_memcpy_is_conscripted_and_runs():
 
 
 #: **`docs/219` §8 的 C2 夹具**：C 侧的 `free` 要还的是 **Loment `alloc` 出来的块** ——
-#: 同一条空闲链。Loment 先 `alloc` 一块、交给 C；C 写一个字节，然后**用 C 的 `free`**
-#: 把它还掉；Loment 再要一次同尺寸 —— 只有拿回**同一个地址**才算"同一个堆"。
+#: 同一条空闲链。Loment 先 `alloc` 一块、交给 C；C 写一个字节、**读回来**，然后
+#: **用 C 的 `free`** 把它还掉；Loment 再要一次同尺寸 —— 只有拿回**同一个地址**才算
+#: "同一个堆"。
+#:
+#: 读必须发生在 `free` **之前**：`free` 自 2026-10-19 起会擦除载荷（#789），
+#: `free(p); return p[0];` 会读到 0，测到的就成了"释放后内存还留着旧值"而不是这条判据。
 C_MALLOC_SOURCE = """\
 extern void free(void *);
 
-int c_put(char *p) { p[0] = 42; free(p); return p[0]; }
+int c_put(char *p) { p[0] = 42; int v = p[0]; free(p); return v; }
 int c_same(char *a, char *b) { return a == b; }
 """
 

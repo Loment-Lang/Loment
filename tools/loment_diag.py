@@ -359,7 +359,31 @@ RULES = [
      "台账里有未登记的站点",
      "LSPE 的站点普查与台账对不上：普查枚举出一个种类，台账却不认识它。"
      "这是**审计器自己的**错误，不是用户代码的错误 —— 与 E036 同族。"),
+    # ---- E900（`#773`，2026-10-19）：**工具链进程死了，而且没留下诊断**。
+    #
+    # 这一条不是编译器说的，是**启动器**在收尸时合成的：编译器（或链接器、报错器自己）
+    # 被信号打死 / 异常退出，而 `--diag-out` 一份记录都没写。那种情形原先对报错器来说
+    # **根本不存在** —— 文件是空的，渲染器无事可做，启动器只留一个退出码 1。
+    #
+    # **为什么是 E900 而不是下一个 E0xx**：它不是"你的源码哪一行错了"，也不是"这一版
+    # 还没实现"—— 它是**实现自己崩了**。把它编进用户码段会让 `loment codes` 把它当
+    # 普通错误列出来，还会让"码从 1 起连续"那条不变式与 `n_codes()` 的上界语义打架。
+    # 900-999 独立一段：`n_codes()` 仍是用户码的上界，内部码由 `internal_lo()/hi()` 另给。
+    ("E900", r"wrote no diagnostic record|没有写出诊断记录|died before it could report",
+     "工具链进程死了，没留下诊断",
+     "编译器 / 链接器 / 报错器之一在能写出结构化诊断之前就死了（信号或异常退出）。"
+     "这不是你源码的语义错 —— 它是**实现自己的失败**，修法与改你那一行无关。"),
 ]
+
+#: 内部码的号段（`#773`）。与用户码分开：`n_codes()` 只给用户码的上界，
+#: 而 900..999 留给"工具链自己崩了"这一类，不参与"从 1 起连续"那条不变式。
+INTERNAL_LO = 900
+INTERNAL_HI = 999
+
+
+def is_internal_code(c: int) -> bool:
+    """这个号是不是内部码（E9xx）。"""
+    return INTERNAL_LO <= c <= INTERNAL_HI
 
 
 #: 每条码的**一行 ASCII 说明** —— `loment codes` / `loment explain` 用它。
@@ -415,6 +439,9 @@ ASCII_ONE_LINER: dict[int, str] = {
     29: "use after free - this block was already passed to `free`",
     34: "an allow with no provenance - LSPE could not say why it was allowed",
     35: "the LSPE ledger has a site kind the census did not register",
+    # E9xx: internal. `loment codes` lists this block after the user codes
+    # (`#773`: a tool that dies without a record is still a failure that must speak).
+    900: "a tool in the chain died before it could report (internal) - report it with the unit",
 }
 
 
@@ -466,6 +493,7 @@ TITLE_EN: dict[int, str] = {
     29: "use after free",
     34: "an allow with no provenance (LSPE)",
     35: "the LSPE ledger has an unregistered site kind",
+    900: "the tool died without reporting (internal)",
 }
 
 
@@ -1045,6 +1073,25 @@ CARDS: dict[int, Card] = {
         ),
         yes="单元在词法缓冲 / 符号表 / codegen 表 / 回填表的容量之内",
         no="单个源文件里塞一整个库；几百个 `use`；几百个顶层声明",
+    ),
+    900: Card(
+        what="工具链里的一个进程在**能写出结构化诊断之前**就死了 —— 被信号打死，"
+             "或者以异常状态退出，而 `--diag-out` 一份记录都没写。",
+        why="诊断系统只能描述**在失败之前已经成功序列化**的失败。编译器崩溃、链接器崩溃、"
+            "报错器自己崩溃，走的都是这条路：JSONL 是空的，渲染器无事可做。"
+            "启动器现在替它收尸：拿到退出状态 / 信号名，合成这一条记录，"
+            "于是「没有任何记录」不再等于「什么都没有发生」（`#773`）。"
+            "这不是你源码的语义错 —— 它是**实现自己的失败**。",
+        fixes=(
+            "把最小可复现的那份源码 + 这一条一起报上来 —— 崩溃是编译器缺陷，"
+            "不是靠改你的代码能绕开的。",
+            "附上退出状态 / 信号名（这一条消息里已经写了）与 `loment version`。",
+            "如果是**链接器**那一侧（消息点名 `loment-lomelf`），同时附上 `-o` 的路径与目标平台。",
+            "如果是**报错器**那一侧（消息点名 `lomenterr`），把那份 JSONL 原样附上 —— "
+            "它渲染不了的东西正是要修的东西。",
+        ),
+        yes="工具链以 0 退出（无诊断）或 1 退出（有诊断并留下了记录）",
+        no="被信号打死 / 异常退出，而且一份结构化诊断都没写",
     ),
 }
 
@@ -1842,6 +1889,30 @@ CARDS_EN: dict[int, Card] = {
         no="a whole library in one source file; hundreds of `use`; hundreds of top-level "
            "declarations",
     ),
+    900: Card(
+        what="A process in the toolchain died **before it could write a structured "
+             "diagnostic** - killed by a signal, or exited abnormally, with no record in "
+             "`--diag-out`.",
+        why="The diagnostics channel can only describe failures that were **successfully "
+            "serialized before the failure**. A compiler crash, a linker crash, or the "
+            "renderer crashing on its own all go the same way: the JSONL is empty and there "
+            "is nothing for the renderer to do. The launcher now closes that gap: it reads "
+            "the exit status / signal name and synthesizes this record, so \"no record\" no "
+            "longer means \"nothing happened\" (#773). This is not a semantic error in your "
+            "source - it is the **implementation failing on itself**.",
+        fixes=(
+            "Report the smallest source that reproduces it together with this record - a "
+            "crash is a compiler defect, not something you can work around in your code.",
+            "Include the exit status / signal name (already in this message) and the output "
+            "of `loment version`.",
+            "If the message names the **linker** (`loment-lomelf`), also include the `-o` "
+            "path and the target platform.",
+            "If the message names the **renderer** (`lomenterr`), attach that JSONL as it is "
+            "- what it could not render is exactly what has to be fixed.",
+        ),
+        yes="a tool exits 0 (no diagnostics) or 1 (diagnostics, and it left a record)",
+        no="killed by a signal / exited abnormally without writing any structured diagnostic",
+    ),
 }
 
 
@@ -2287,6 +2358,22 @@ def surface_lomt() -> str:
                           lambda c: _attr(CARDS_EN, c, "no"))),
     )
     codes = sorted(dict(RULES_BY_CODE))
+    user_codes = [c for c in codes if not is_internal_code(c)]
+    internal_codes = [c for c in codes if is_internal_code(c)]
+    if not user_codes:
+        raise SystemExit("loment_diag: 一个用户码都没有")
+    # 两个号段各自连续：用户码 1..max，内部码 900..max。
+    # `n_codes()` 只报用户码的上界（消费者拿它当 `1..n_codes()` 的循环上界），
+    # 内部码从另一对访问器取（`internal_lo/hi`）—— 混在一起会让 36..899 的空号
+    # 在 `loment codes` 里印成一行行空标题。
+    if user_codes != list(range(1, user_codes[-1] + 1)):
+        raise SystemExit(
+            f"loment_diag: 用户码不是从 1 起连续, 缺: "
+            f"{sorted(set(range(1, user_codes[-1] + 1)) - set(user_codes))}")
+    if internal_codes != list(range(internal_codes[0], internal_codes[-1] + 1)):
+        raise SystemExit(f"loment_diag: 内部码不是连续一段: {internal_codes}")
+    if internal_codes[0] < INTERNAL_LO or internal_codes[-1] > INTERNAL_HI:
+        raise SystemExit(f"loment_diag: 内部码越出 {INTERNAL_LO}..{INTERNAL_HI}: {internal_codes}")
 
     # **两个语言槽的修法条数必须相同**，因为 `code_nfix` 只报一个数（语言不进它的键）。
     # 这里硬失败而不是取最大值：少一条修法而生成器照常出表，症状是英文用户读到一半
@@ -2321,8 +2408,10 @@ def surface_lomt() -> str:
         "// 平键：`code_*` 是 `c * 2 + lang`，`code_fix` 是 `(c * stride + i) * 2 + lang`",
         "// （一条码最多 8 条修法）。按码嵌 `if` 要嵌两层，平键一层就够，而且生成器这边一眼",
         "// 看得出哪条码少了哪一档。",
-        "// **码从 1 起连续编号**, 所以 `n_codes()` 也就是最后那个码 —— 两个消费者（`lomcli`",
-        "// 的 codes/explain、报错器）都拿它当上界用, 那条不变式有判据钉着。",
+        "// **用户码从 1 起连续编号**, 所以 `n_codes()` 也就是最后一个用户码 —— 两个消费者",
+        "// （`lomcli` 的 codes/explain、报错器）都拿它当上界用, 那条不变式有判据钉着。",
+        "// **E9xx 是内部码段**（`#773`：工具链自己崩了）：独立一段、不参与那条上界，",
+        "// 由 `internal_lo()` / `internal_hi()` 另外给出。",
         "",
         "module surface_data",
         # **生成物也要满足新规矩**（`docs/227`）：这份单元 `use` 的是 `bytes` / `json`，
@@ -2330,7 +2419,13 @@ def surface_lomt() -> str:
         # 这一条是 CI 上抓到的：本地那一轮我重建了 surface_data 却忘了它也是调用方。
         "choose runtime",
         "",
-        f"pub fn n_codes() -> u32 {{ return {len(codes)}; }}",
+        f"pub fn n_codes() -> u32 {{ return {user_codes[-1]}; }}",
+        "",
+        f"/// 内部码段的下界（`#773`）。`E{INTERNAL_LO}` 起是\"工具链自己崩了\"那一类。",
+        f"pub fn internal_lo() -> u32 {{ return {internal_codes[0]}; }}",
+        "",
+        f"/// 内部码段的上界（含）。",
+        f"pub fn internal_hi() -> u32 {{ return {internal_codes[-1]}; }}",
         "",
         # 报错器**自己的**版本号 —— 与语言版本是两条线（`docs/182` §17）。
         # **导进来而不是在这里再写一遍**：真源是 `loment_release.LOMENTERR`，而那正是

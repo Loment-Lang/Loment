@@ -129,3 +129,37 @@ python tools/loment_caps.py --frontend     # 编译器前端：容量 19 处，�
 
 **可证伪**：`test_every_exclusion_states_a_reason` 在写这张表的**当场**就红了一次 ——
 `TY_K_NAMED` 那条记录在移位的假阳性修掉之后**已经指不到东西**了。所以它不是一条空判据。
+
+---
+
+## 6. 2026-10-19 扩到**整个自举编译器**（`FujoJTOP/loment#774`）
+
+§2 把 (a) 收在**前端五个文件**上。`#774` 指出那没有关掉类：`potato` / `interp` /
+`comefor` 同样被用户的一份源推着走，而它们的固定表**越界时不说话**。这一笔把线扩到
+`loment/selfhost/` 整棵树，并且把"说话"从纸面变成**能拿输入验的**：
+
+1. **`interp` 的 7 处**：它们一直有失败路径 —— 先 `set_err(st, E_OOM)`，入口再写成
+   `ERR oom`。筛子原先只认前缀 `err_`，认不出 `set_err` / `wr_err` 这两个**词尾**形状。
+   补进 `SPEAKS` 是**补词汇**，不是放宽判据（`loment_caps.py` 里写清了）。
+2. **`potato` 的三张表补了真守卫**（原先要么写穿相邻表、要么静默丢）：
+   * `PT_EMAX`（局部变量表 1536）：`pt_env_put` 的静默 `if` 改成返回 1，一路传到
+     `potato_emit` 的 `more than 1536 locals or parameters` 并退出 1；
+   * `PT_FMAX`（L0 字段表 16）：第 17 个字段起 `pt_l0_rec` 返回"解析不了"，
+     `pt_lay_check` 点名拒（原先 `nf` 越表，`layouts` 的名字与尺寸都是垃圾）；
+   * `PT_GLRMX`（纪元范围表 32）：停在 32 而后面还有 token 就返回溢出哨兵，
+     `potato_emit` 点名拒（原先把第 33 个循环里的分配静默算成 L3，
+     与参考实现分叉而两边都不报错）。
+3. **另外 7 处"越界由调用方报"**（`PT_L0CAP` / `PT_TMAX` / `PT_TSTRIDE` / `PT_MAX` /
+   `PT_AMAX` / `PT_GMAX` / `comefor` 的 `MAX_DIALECT`）写进 `EXPLAINED`，每条都指着
+   `pt_wfail` / `fail` 的那句原文 —— 它们一直会说话，只是话在 8 行以外。
+4. **新判据**：
+   * 静态：`loment_caps_test::test_the_self_host_compiler_has_no_silent_capacity` ——
+     `loment/selfhost/` 的每一处容量要么有话、要么 `EXPLAINED` 里有一条能核对的理由；
+   * 动态：`loment_potato_emit_test::test_capacity_bounds_fail_closed_by_name` ——
+     **从表的大小反推输入**（1537 个局部变量 / 33 个带 alloc 的循环 / 17 字段的
+     `record`），三份都必须**带着点名的诊断退出**。改之前三份都是退出码 0。
+
+数：在 `#770` 把口径扩到整棵 `loment/**` 之后（236 处 / 沉默 162），本笔把
+`interp` 那 7 处"本来就会说话"的从沉默里取回、`PT_EN` 退出本口径 ⇒ **容量 235 处、
+沉默 154**；真缺口 —— **自举编译器 0**。其余（`loment/lib`、`loment/tools/` 与示例里
+的打包 CLI / 链接器 / LSP / VM）仍按 §4.2 记账，由筛子的总数与名单钉住。

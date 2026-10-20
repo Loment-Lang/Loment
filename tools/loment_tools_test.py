@@ -809,12 +809,23 @@ def test_code_tables_cover_the_same_codes():
     assert ruled == ascii_, (
         f"只在 RULES 里: {sorted(ruled - ascii_)}; 只在 ASCII 表里: {sorted(ascii_ - ruled)}")
     assert 0 not in ruled, "有码解不出数字"
-    # **编码必须从 1 起连续**: `surface_data.n_codes()` 给的是**条数**, 而两个消费者
-    # (`lomcli` 的 `codes`/`explain`, 循环 1..n_codes()) 拿它当**上界**用 —— 那只有在
-    # 连续编号时才等价。留个空号(比如只有 E24 没有 E25)会让两边静默错位。
-    assert ruled == set(range(1, max(ruled) + 1)), (
-        f"码不是连续编号, 缺: {sorted(set(range(1, max(ruled) + 1)) - ruled)}")
-    print(f"      两张码表键集相等 ({len(ruled)} 条: E{min(ruled)}–E{max(ruled)})")
+    # **两段各自从起点连续**（`#773`）：用户码 1..max 与内部码 E900..max 分开编号。
+    # `surface_data.n_codes()` 只给**用户码**的上界，而 `lomcli` 的 `codes`/`explain`
+    # 拿它当 `1..n_codes()` 的循环上界用 —— 那只有在用户码连续时才等价；40..899
+    # 这种空号不许出现，否则 `codes` 会印出一行行空标题。内部码另起一段，同样连续。
+    user = {c for c in ruled if not loment_diag.is_internal_code(c)}
+    internal = {c for c in ruled if loment_diag.is_internal_code(c)}
+    assert user, "一个用户码都没有"
+    assert user == set(range(1, max(user) + 1)), (
+        f"用户码不是连续编号, 缺: {sorted(set(range(1, max(user) + 1)) - user)}")
+    if internal:
+        assert internal == set(range(min(internal), max(internal) + 1)), (
+            f"内部码不是连续编号, 缺: "
+            f"{sorted(set(range(min(internal), max(internal) + 1)) - internal)}")
+        assert min(internal) >= loment_diag.INTERNAL_LO, (
+            f"内部码低于 {loment_diag.INTERNAL_LO}: {sorted(internal)}")
+    print(f"      两张码表键集相等 ({len(ruled)} 条: 用户 E1–E{max(user)}"
+          f", 内部 {sorted('E%d' % c for c in internal)})")
 
 
 @test

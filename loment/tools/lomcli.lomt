@@ -1300,11 +1300,23 @@ fn do_codes(mem: ptr, ab: ptr, argc: u32) -> u32 {
     // 是那里的 RULES + ASCII_ONE_LINER)。这里原先抄了 23 条 `codrow`, 与那份表是同一件事的
     // 两个副本 —— 而本仓那四个静默 bug 全出自"同一份清单抄第二遍" (docs/179 7.3)。加一个码
     // 忘了改这里, 表现是"新码在 `loment codes` 里凭空消失", 没有任何判据会红。
-    // 码从 1 起**连续编号** (loment_diag 的 RULES 就是这么给的; 那条不变式有判据钉着,
+    // 用户码从 1 起**连续编号** (loment_diag 的 RULES 就是这么给的; 那条不变式有判据钉着,
     // 见 loment_tools_test 的 test_code_tables_cover_the_same_codes), 所以 n_codes()
-    // 也**就是最后一个码**。
+    // 也**就是最后一个用户码**。
+    // **E9xx 是另一段**（`#773`：工具链自己崩了）。它不参与上面那个上界, 否则
+    // 36..899 这些空号会印成一行行空标题。两段各自连续, 分开循环。
     let c: u32 = 1;
     while c <= n_codes() {
+        codrow_n(mem, 1, c, code_ascii(c));
+        c = c + 1;
+    }
+    wstr(1, "\n  ");
+    gray(mem, 1);
+    wstr(1, "Internal codes (a tool died before it could report):");
+    colr(mem, 1);
+    wstr(1, "\n");
+    c = internal_lo();
+    while c <= internal_hi() {
         codrow_n(mem, 1, c, code_ascii(c));
         c = c + 1;
     }
@@ -1347,8 +1359,16 @@ fn do_explain(mem: ptr, ab: ptr, argc: u32) -> u32 {
     arg_copy(mem, ab, 2, a);
     let code: u32 = parse_code(a, strlen_n(a));
     // 上界**问 surface_data**, 不写死 —— 写死一个数字就是又一份"同一件事的第二个副本",
-    // 下一个码加进去时它会静默变成错的 (docs/182 5.2)。
-    if code == 0 || code > n_codes() {
+    // 下一个码加进去时它会静默变成错的 (docs/182 5.2)。用户码与内部码是**两段**
+    // (`#773`): 中间 36..899 是空号, 不认。
+    let known: u32 = 0;
+    if code >= 1 && code <= n_codes() {
+        known = 1;
+    }
+    if code >= internal_lo() && code <= internal_hi() {
+        known = 1;
+    }
+    if known == 0 {
         return err_usage(mem, "explain takes an error code (see `loment codes`)");
     }
     wstr(1, "\n  ");

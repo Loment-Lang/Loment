@@ -236,11 +236,36 @@ pub fn http_hdr_dec(d: ptr, ho: u32, hn: u32, name: str,
 
 // ---------------------------------------------------------------- 构建请求
 
+/// 一个请求字段里**不许出现**的字节: CR (13)、LF (10)、NUL (0)。
+///
+/// 这三个字节是请求行/头行的骨架 —— 调用方从文件、argv 或 URL 拼出来的 `host` 里
+/// 混进一个 LF, 就多出一整行头（甚至拆出第二个请求）。这是 CRLF 注入 / request
+/// splitting (CWE-113); `http_req_build` 是公共构建器, 校验该在这里做一次 (#790)。
+fn httpp_field_ok(s: str) -> bool {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = str_byte(s, i);
+        if c == 13 || c == 10 || c == 0 {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
 /// 拼一条请求到 out (上限 cap), 返回长度; 放不下返回 HTTP_NO。
+/// `method` / `target` / `host` 里有 CR、LF 或 NUL 时也返回 HTTP_NO —— 这些字段会直接
+/// 变成请求行 / 头行, 带换行就是注入 (#790)。拒绝而不是静默删字节: 调用方给的值要么
+/// 原样出现, 要么整条构建失败。
 /// 行结束一律 CRLF (逐字节写 —— 见文件头那条转义限制)。
 /// `keep_alive` 非 0 写 `Connection: keep-alive`, 否则 `Connection: close`。
 pub fn http_req_build(out: ptr, cap: u32, method: str, target: str, host: str,
                       port: u32, keep_alive: u32) -> u32 {
+    // 先拒输入, 再算容量 —— 被污染的字段一个字节都不该落进 out。
+    if !httpp_field_ok(method) || !httpp_field_ok(target) || !httpp_field_ok(host) {
+        return HTTP_NO;
+    }
     // 连接行按**最长的那一支**留: keep-alive 是 22 字节、close 是 17。原来固定给 18,
     // 于是 keep_alive 非 0 时估算少 4 字节, 端口那 6 字节余量一旦被 5 位端口用满
     // (实际超出 = 端口位数 - 1) 就会写到 cap 之外。改的时候两边**一起改**。

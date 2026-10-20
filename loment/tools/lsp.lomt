@@ -567,6 +567,21 @@ fn publish(mem: ptr, text: ptr, toks: ptr, uri: ptr, un: u32, errs: ptr, ne: u32
 /// 返回**别名在源里的跨度**（`(起点 << 32) | 长度`），0 = 没声明或者声明的是原生语法。
 /// 回**跨度**而不是 token 下标：这一趟要跑在 `switchify` **之前**（`apply_switches` 会把
 /// `choose write grammar …` 那一行当开关声明吃掉），之后下标就全移位了。
+/// `#351`：这份文档的 URI 以 `.nl` 结尾吗（大小写不敏感）。natural 的源**没有**
+/// `choose write grammar` 那一行（后缀就是答案），所以这里按后缀认。
+fn uri_is_nl(u: ptr, n: u32) -> u32 {
+    if n < 3 { return 0; }
+    let c0: u32 = load8(u, n - 3) as u32;
+    let c1: u32 = load8(u, n - 2) as u32;
+    let c2: u32 = load8(u, n - 1) as u32;
+    if c0 == 46 {
+        if (c1 == 110 || c1 == 78) && (c2 == 108 || c2 == 76) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 fn lsc_foreign(src: ptr, t: ptr, nt: u32) -> u64 {
     let i: u32 = 0;
     while i + 3 < nt {
@@ -1299,6 +1314,21 @@ fn on_change(mem: ptr, src: ptr, arena: ptr, root: u32, toks: ptr, chk: ptr,
     // 当开关声明吃掉，之后 token 流里就找不到它了（下标也会整体移位）。
     let fg: u64 = lsc_foreign(text, toks, nt);
     let nt: u32 = switchify(mem, text, toks, nt);
+    // `#351`：`.nl` 文件没有声明那一行 —— 按后缀认 natural，与"声明了别的语法"
+    // 同一句话：一条 Info、零假错。声明优先（`fg != 0` 时按声明走）。
+    if fg == 0 && uri_is_nl(ubuf, un) == 1 {
+        let sc: ptr = ptr_add(mem, SCR_OFF + 6144 + 2048);
+        store8(sc, 0, 110 as u8);   // n
+        store8(sc, 1, 97 as u8);    // a
+        store8(sc, 2, 116 as u8);   // t
+        store8(sc, 3, 117 as u8);   // u
+        store8(sc, 4, 114 as u8);   // r
+        store8(sc, 5, 97 as u8);    // a
+        store8(sc, 6, 108 as u8);   // l
+        store32(mem, S_NERR, 0);
+        scan_syms(mem, text, toks, nt);
+        return publish_foreign(mem, sc, ubuf, un, 0, 7, has_ver, ver);
+    }
     if fg != 0 {
         store32(mem, S_NERR, 0);
         scan_syms(mem, text, toks, nt);

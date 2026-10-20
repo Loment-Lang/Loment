@@ -127,6 +127,10 @@ pub fn sw_is_core(unit: ptr, toks: ptr, k: u32) -> bool {
     if sw_tok_is(unit, toks, k, "gc_auto_alpha") {
         return true;
     }
+    // `no_gc`（`#538`，`docs/266`）：产物**不带收集器** —— 把"没有收集器"变成声明。
+    if sw_tok_is(unit, toks, k, "no_gc") {
+        return true;
+    }
     // 第三维（`docs/175` §3.6）：`runtime` / `no_runtime`。取值只说"有没有运行期"，
     // 不说"里面装了什么" —— 装的东西会随年份长，钉进值名里两年后加能力就得回头改。
     if sw_tok_is(unit, toks, k, "runtime") {

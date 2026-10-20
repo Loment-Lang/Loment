@@ -803,7 +803,9 @@ def test_m81_loment_checker_matches_python():
            ROOT / "loment" / "examples" / "native.lomt",
            # trait 里**只有签名**的方法: 自举侧 E027 第一版就是在这份文件上误报的
            # (拿后面 `struct` 的 `{` 当函数体), 所以它必须在正例里当钉子。
-           ROOT / "loment" / "examples" / "native_trait.lomt"]
+           ROOT / "loment" / "examples" / "native_trait.lomt",
+           # `#538`：`no_gc` 是核心取值 —— 自举 checker 必须**收**它（只有参考收不算落地）。
+           ROOT / "loment" / "selfhost" / "pos" / "no_gc.lomt"]
     with tempfile.TemporaryDirectory() as td:
         exe = _build_checker(td)
         exact = 0
@@ -935,7 +937,11 @@ def test_m82_loment_codegen_byte_identical():
                        ROOT / "loment" / "selfhost" / "ir_div.lomt",
                        ROOT / "loment" / "selfhost" / "ir_builtin.lomt",
                        ROOT / "loment" / "selfhost" / "ir_index.lomt",
-                       ROOT / "loment" / "selfhost" / "ir_call5.lomt"):
+                       ROOT / "loment" / "selfhost" / "ir_call5.lomt",
+                       # `#941`：`choose no_std` 的那行 IR 标记两份实现必须逐字节同。
+                       ROOT / "loment" / "selfhost" / "ir_no_std.lomt",
+                       # `#538`：`choose no_gc` 的那行 IR 标记两份实现必须逐字节同。
+                       ROOT / "loment" / "selfhost" / "ir_no_gc.lomt"):
             want = _unit_ll(target)
             got = _run_codegen(exe, target, td)
             if got != want:

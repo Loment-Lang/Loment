@@ -209,6 +209,13 @@ GLOBS = [
     "tools/loment_megaproject_test.py",
     # 多语言程序 (docs/183 §8.2 的 S2 判据): 三段各用一门语法写, 真编真链真跑。
     "tools/loment_multilang_test.py",
+    # 教材 (`book/`, `exercises/`): 书里每个可运行块真编真跑、练习答案逐字节对上。
+    # **书与练习本身不进清单** —— 理由同上, 它们靠 `tools/` 才能跑。
+    "tools/loment_book_test.py",
+    "tools/lomentlings.py",
+    # 线上书: 纯 Python 渲染器 + 判据, GitHub Pages 的 workflow 用的就是它。
+    "tools/loment_book_site.py",
+    "tools/loment_book_site_test.py",
     # 花括号族 (C/C++/Java/C#) 的**共享前端核** (docs/188 §7.1): 一份解析器 + 方言表。
     # 各门只给自己那张 `Dialect`。
     "tools/trans_core.py",

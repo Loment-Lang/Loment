@@ -140,11 +140,15 @@ def _body(cell: dict[str, str]) -> str:
 
 @test
 def test_every_legal_cell_compiles_and_the_artifact_records_it():
-    """六个合法格全部编得过，且**产物自己记着**它选了哪一格（`#940` 第 1、2 行）。"""
+    """合法格全部编得过，且**产物自己记着**它选了哪一格（`#940` 第 1、2 行）。
+
+    `#538` 给 `gc` 加了第四个值 `no_gc`：2 × 4 × 2 − 6 对冲突 = **10 个**合法格
+    （#940 正文写"六个"时 `gc` 只有三档）。
+    """
     cells = _legal_cells()
-    assert len(cells) == 6, (
-        f"合法格应为 6 个（#940），实际 {len(cells)} 个 —— `CORE_DIMS` / `CORE_CONFLICTS`"
-        f" 变了就要同时改这条判据与那条 issue")
+    assert len(cells) == 10, (
+        f"合法格应为 10 个（#538 之后），实际 {len(cells)} 个 —— `CORE_DIMS` /"
+        f" `CORE_CONFLICTS` 变了就要同时改这条判据与那条 issue")
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
         for cell in cells:
@@ -390,6 +394,65 @@ def test_gc_vm_lspe_and_lvm_agree_on_every_tier():
                 f"{gc}: 原生 rc={rc_native} {out_native!r} / VM rc={rc_vm} {out_vm!r}")
     native = "" if sys.platform != "win32" or LVMTest.ELF._wsl() else "（本机无 WSL，原生对照跳过）"
     print(f"      3 档 GC × vm × lspe: IR 逐字节同；VM 均 rc={expected_rc}{native}")
+
+
+@test
+def test_no_std_is_a_claim_the_linker_checks():
+    """`mode` 行（`#941` / #539）：`no_std` 的产物**自己声明**只用核那一层，链接器核这句话。
+
+    与 `docs/227` 判据 B 同形：诚实的 `no_std` 编得过、IR 里有 `; loment-mode: no_std`
+    且没有 `; loment-port: hosted`；一份**伪造**的（宿主层产物 + 那行声明）在链接期
+    被点名拒。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        rc, diag, ir, pot = _emit(td, "nostd", {"mode": "no_std", "gc": "gc_manual",
+                                                "runtime": "no_runtime"}, PURE_BODY)
+        assert rc == 0, f"`choose no_std` 编不过\n{diag[-400:]}"
+        assert pot.get("mode") == "no_std", f"Potato 记错了运行模式: {pot.get('mode')!r}"
+        assert "; loment-mode: no_std" in ir, "产物没有声明它只用核那一层"
+        assert "; loment-port: hosted" not in ir, "no_std 的产物带了宿主层"
+        rc, diag, hosted_ir, _pot = _emit(td, "hosted_forge", {"mode": "std", "gc": "gc_manual",
+                                                               "runtime": "no_runtime",
+                                                               "port": "hosted"}, PURE_BODY)
+        assert rc == 0 and "; loment-port: hosted" in hosted_ir, "夹具不成形：宿主层没有标记"
+        try:
+            lomelf.compile_ll("; loment-mode: no_std\n" + hosted_ir, [])
+        except lomelf.Unsupported as e:
+            assert "no_std" in str(e), f"拒绝时没点名 no_std: {e}"
+        else:
+            raise AssertionError("声明 no_std 却带着宿主层的 IR 被链接器收下了")
+    print("      no_std: 编得过、产物无宿主层、伪造的声明在链接期点名拒")
+
+
+@test
+def test_no_gc_is_accepted_and_the_linker_checks_the_claim():
+    """`no_gc`（`#538`）：值是核心取值，产物**自己声明**不带收集器，链接器核这句话。
+
+    三件事：`choose no_gc` 编得过；IR 里有 `; loment-gc: no_gc` 且**没有**收集器/根表；
+    一份**伪造**的 IR（同一份 gc_auto 产物 + 那行声明）在**链接期**被点名拒 ——
+    这是 `docs/227` 判据 B 的镜像，也是这个值"有牙"的地方。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        rc, diag, ir, pot = _emit(td, "nogc", {"mode": "std", "gc": "no_gc",
+                                              "runtime": "runtime"}, ALLOC_BODY)
+        assert rc == 0, f"`choose no_gc` 编不过\n{diag[-400:]}"
+        assert pot.get("gc") == "no_gc", f"Potato 记错了回收档: {pot.get('gc')!r}"
+        assert "; loment-gc: no_gc" in ir, "产物没有声明它不带收集器"
+        for sym in ("__loment_collect", "__loment_roots"):
+            assert sym not in ir, f"`choose no_gc` 的产物里出现了 {sym}"
+        # 同形状的一份自动档产物（确实带着收集器）—— 拿来伪造声明。
+        rc, diag, auto_ir, _pot = _emit(td, "auto_forge", {"mode": "std", "gc": "gc_auto",
+                                                           "runtime": "runtime"}, ALLOC_BODY)
+        assert rc == 0 and "__loment_collect" in auto_ir, "夹具不成形：auto 产物没有收集器"
+        try:
+            lomelf.compile_ll("; loment-gc: no_gc\n" + auto_ir, [])
+        except lomelf.Unsupported as e:
+            assert "no_gc" in str(e), f"拒绝时没点名 no_gc: {e}"
+        else:
+            raise AssertionError("声明 no_gc 却带着收集器的 IR 被链接器收下了")
+    print("      no_gc: 编得过、产物无收集器、伪造的声明在链接期点名拒")
 
 
 def main() -> int:

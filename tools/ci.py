@@ -128,6 +128,9 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  # `choose write grammar`: 读法由声明决定、出厂锁的取值表、声明先抹掉
                  "loment_grammar_test",
                  "loment_tools_test", "loment_p7_test", "loment_p8_test", "loment_p9_test",
+                 # 崩溃批次（`#805` / `#868`–`#874`）：深度/容量越界**只许出诊断**。
+                 # 每条都跑种子链出来的自举驱动（真入口），不是拿 Python 实现代替。
+                 "loment_crash_test",
                  # GC 证明面的量尺（`docs/210` §7）—— 语料跑成 alpha、加总 gc_ladder。
                  "loment_gc_surface_test",
                  # 逐站点说出"为什么落到那一层"（`docs/229`）—— 判据 A 是与编译器的**对账**：
@@ -303,6 +306,7 @@ SHARD_COST = {
     "loment_cli_test": 29.5,
     "loment_comefor_test": 14.5,
     "loment_cpptrans_test": 0.1,
+    "loment_crash_test": 26.1,   # 种子 -> 驱动（clang -O1）一次, 九条判据共用
     "loment_cstrans_test": 0.0,
     "loment_ct_test": 1.6,
     "loment_ctrans_test": 63.5,
@@ -389,7 +393,7 @@ SHARD_COST = {
     "potato_cross": 0.0,
     "potato_test": 9.5,
     "vscode_ext_test": 1.2,
-}  # 92 条 = `len(STATIC_CHECKS)`；`unpriced_checks()` 钉住这条等式。
+}  # 96 条 = `len(STATIC_CHECKS)`；`unpriced_checks()` 钉住这条等式。
 
 #: 不参与均分、也**不需要** `SHARD_COST` 条目的判据。**今天是空的** —— 89 条全有实测值。
 #: 留着这个集合是为了让"新判据还没量过"有一个**明确**的落脚处：放进来的代价是它按

@@ -3521,7 +3521,9 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
 /// 语句**起点**那一条要在走查里判（要边界），留在 `chk_body`，不在这儿重复。
 fn chk_syntax_prepass(src: ptr, t: ptr, out: ptr, o: u32) -> u32 {
     let i: u32 = 0;
-    let depth: u32 = 0;
+    let depth: u32 = 0;        // 花括号深度 (只管"块没闭合"那条旧判据)
+    let nest: u32 = 0;         // 块 + 括号的**共用**嵌套深度 (E023 的判据)
+    let un_run: u32 = 0;       // 连续一元运算符的链长 (`!` / `-` / `&`)
     let deep_done: u32 = 0;
     while chk_tok_kind(t, i) != 4 {
         // **裸块不是语句**（`#44`）：Loment 没有"单独一层花括号"这回事，参考实现在解析期
@@ -3542,15 +3544,46 @@ fn chk_syntax_prepass(src: ptr, t: ptr, out: ptr, o: u32) -> u32 {
         // 只报**第一次**越界：再往上每层都报一遍对读者没意义（参考实现也只报一条）。
         // **已经报过语法错就不再报它**：参考实现是"第一个解析错就中止"，两条一起报会让
         // 码集比它多一个。
-        if chk_tok_is(src, t, i, "{") {
-            depth = depth + 1;
-            if depth > 64 && deep_done == 0 && o == 0 {
+        // **深度上限要覆盖每一条会递归的构造**（`#868`–`#874`）：原先只数 `{`，于是
+        // 100 层括号 / 300 层调用 / 256 层下标 / 256 层数组类型都从这里放行，一路走到
+        // codegen 的递归里把栈用穿 —— **段错误、零输出**。参考实现用一个计数同时管块
+        // 与表达式（`lomentc.MAX_NEST`），这里照抄那个口径：`(` `[` `{` 各进一层。
+        // 计数从 token 流**左侧一遍**算出、与输入大小无关，所以"越深越先报"是构造性的。
+        if chk_tok_kind(t, i) == 3
+                && (chk_tok_is(src, t, i, "{") || chk_tok_is(src, t, i, "(")
+                    || chk_tok_is(src, t, i, "[")) {
+            nest = nest + 1;
+            if nest > 64 && deep_done == 0 && o == 0 {
                 o = sym_pub(src, t, out, o, E_DEEP, i);
                 deep_done = 1;
             }
         }
+        if (chk_tok_kind(t, i) == 3
+                && (chk_tok_is(src, t, i, "}") || chk_tok_is(src, t, i, ")")
+                    || chk_tok_is(src, t, i, "]"))) && nest > 0 {
+            nest = nest - 1;
+        }
+        // 块深度**单独**数：文件末尾"块没闭合"只说花括号，别把没闭合的 `(` `[` 也算进去
+        // （那会换掉既有语料上的报码）。
+        if chk_tok_is(src, t, i, "{") {
+            depth = depth + 1;
+        }
         if chk_tok_is(src, t, i, "}") && depth > 0 {
             depth = depth - 1;
+        }
+        // **一元链**（`#870`）：`parse_unary` 每层递归一次，而括号计数看不见它
+        // （`!!!!true` 里一个括号都没有）。连续的一元运算符就是链长；`!=` 被词法拆成
+        // `!` `=`，`&`/`-` 的二元用法隔着操作数 —— 所以"连续"这个判据把两者分开。
+        if chk_tok_kind(t, i) == 3
+                && (chk_tok_is(src, t, i, "!") || chk_tok_is(src, t, i, "-")
+                    || chk_tok_is(src, t, i, "&")) {
+            un_run = un_run + 1;
+            if un_run > 64 && deep_done == 0 && o == 0 {
+                o = sym_pub(src, t, out, o, E_DEEP, i);
+                deep_done = 1;
+            }
+        } else {
+            un_run = 0;
         }
         // 裸 `return;`（不带值）**不是合法构造** —— `loment syntax` 明说它必须带值。
         // 参考实现报 E019 "期望表达式，得到 ';'"；自举侧原先**段错误、什么都不印**

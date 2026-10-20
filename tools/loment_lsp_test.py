@@ -713,6 +713,40 @@ def test_a_foreign_grammar_file_gets_one_info_and_no_fake_errors():
 
 
 @test
+def test_a_dot_nl_file_gets_one_info_and_no_fake_errors():
+    """`#351`：`.nl` **没有** `choose write grammar` 那一行 —— 两个语言服务按**后缀**认
+    natural，一条 Info、一条 Error 都没有。
+
+    参考实现把 `.nl` 认成 `natural`（`potato_from.EXT`）；编辑器按同一张表把它交给
+    `loment-natural`。语言服务要是拿 Loment 的规则去读它，用户会去改一份本来就对的源
+    —— 这与 `#262` 是同一条，只是入口从"声明"换成了"后缀"。
+    """
+    src = (ROOT / "loment" / "nltrans" / "Sample.nl").read_text(encoding="utf-8")
+    uri = "file:///sample.nl"
+    pdg = PY_LSP.handle({"method": "textDocument/didOpen",
+                         "params": {"textDocument": {"uri": uri, "text": src}}},
+                        {uri: src})[0]["params"]["diagnostics"]
+    assert pdg and all(d["severity"] == 3 for d in pdg), pdg
+    assert "natural" in pdg[0]["message"], pdg[0]["message"]
+    if not (_clang() and _wsl()):
+        print("      自举侧 SKIP: 无 clang/WSL（Python 侧已判）")
+        return
+    msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"method": "textDocument/didOpen",
+             "params": {"textDocument": {"uri": uri, "text": src}}},
+            {"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": {}},
+            {"method": "exit"}]
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        frames, rc, err = Batch(_build(td), td).run(msgs)
+    assert rc == 0, f"LSP 退出码 {rc}: {err[-300:]}"
+    dg = frames[1]["params"]["diagnostics"]
+    assert dg and all(d["severity"] == 3 for d in dg), dg
+    assert "natural" in dg[0]["message"], dg[0]["message"]
+    print("      两个语言服务：.nl 假错 0 条，各一条 Info 说明这是 natural 语法")
+
+
+@test
 def test_lsp_did_save_does_not_erase_the_document():
     """`#705`：didSave **不带正文**，不能当成一次空编辑把内存里的文档擦掉。
 

@@ -100,6 +100,9 @@ ahci_events.txt
 # 签名私钥/自签证书 (本机, 绝不进仓库 —— 判据 loment_sign_test 会核这条忽略规则)
 /loment/build/sign/
 
+# 线上书的本地渲染产物 (`python tools/loment_book_site.py --out _site`)
+/_site/
+
 # 会话交接件 (整段对话正文, 绝不进仓库)
 /.claude/HANDOFF.md
 /.claude/transcript-extract.txt

@@ -98,3 +98,4 @@ lvm_perf_test 3
 loment_invariant_test 2
 loment_caps_test 10
 loment_book_test 3
+loment_book_site_test 4

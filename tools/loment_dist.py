@@ -74,7 +74,10 @@ VER = loment_release.RELEASE                # 机器: 0.1.4
 #: CWD 那一格是给 **路径形式的 `use "..."`** 用的 —— 它按「仓根 → 导入文件所在目录」解析,
 #: 两边实现同序 (2026-09-16 之前自举镜只按 CWD, 已修; 见 docs/158 §5)。仓库其它工具全用
 #: 名字形式 (`use bytes`), 那一套的搜索根是项目根/工具链, 与 CWD 无关, 所以它们一律写 "."。
-#: lompi 是唯一一个用路径形式 import 的。
+#:
+#: lompi 也写 ".": 它的路径形式 import 靠导入文件所在目录 (修复后的规矩), 而它现在从
+#: 随包 store 里按名字取 `internet` 的模块 —— 自举镜的**开发 checkout** 那一层把 store
+#: 写成 CWD 相对的 `lompi/store`, 只有从仓根编才命中 (issue #375)。
 TOOLS: list[tuple[str, str, str]] = [
     ("loment-driver", "loment/selfhost/driver.lomt", "."),
     ("loment-lsp", "loment/tools/lsp.lomt", "."),
@@ -97,7 +100,7 @@ TOOLS: list[tuple[str, str, str]] = [
     # 是另一个命令; `loment help` 里不出现它, 见 docs/169 §2)。随包一起装, 因为它是用
     # Loment 写的、由同一条自举链编出来的。源码的**正本在开发者的工作区** (`lompi/` 这份
     # 是随包发布的快照), 两边靠 tools/lompi_sync.py 校验, 见 docs/170。
-    ("lompi", "lompi/lompi.lomt", "lompi"),
+    ("lompi", "lompi/lompi.lomt", "."),
     # **VM（`choose vm` 的执行体）** —— `#355`，`docs/263`。2026-10-18 起随包发：
     # 引擎 T0–T3 与去优化都落了（`docs/259`/`docs/261`），失败面有判据（`docs/262`）。
     # ⚠ 它是**镜像**（Loment 写的那份），走同一条自举链；`docs/231` §2 的渠道闸也同日放开，

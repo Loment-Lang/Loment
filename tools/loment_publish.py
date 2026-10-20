@@ -358,15 +358,16 @@ run `lompi` directly.
 
 ## Building it
 
-You need the Loment toolchain first (<https://github.com/Loment-Lang/loment>), then **from this
-directory**:
+You need the Loment toolchain first (<https://github.com/Loment-Lang/loment>; 0.1.5 or newer
+ships the `internet` library lompi uses), then **from this directory**:
 
 ```
 loment build lompi.lomt -o lompi
 ```
 
-(The directory matters: this toolchain resolves relative imports such as `use "lpi_cli.lomt"`
-against the **current working directory**.)
+(Path imports such as `use "lpi_cli.lomt"` resolve relative to the importing file; the
+`internet` package (`use tcp` / `use http` / `use uri` / `use ip`) comes from the toolchain's
+bundled store.)
 
 ```
 lompi version

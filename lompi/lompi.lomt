@@ -1,9 +1,14 @@
 // lompi/lompi.lomt — 程序入口
 //
-// 编译 (必须在 lompi/ 下调用 —— 本工具链的路径导入按 **CWD** 解析):
+// 编译 (**在本仓根调用**, 入口写 `lompi/lompi.lomt`):
 //
-//     loment.cmd build lompi.lomt -o lompi
-//     ./lompi.exe index fixture/store
+//     loment.cmd build lompi/lompi.lomt -o lompi
+//     ./lompi.exe index lompi/fixture/store
+//
+// 为什么要在仓根: 路径导入 (`use "lpi_cli.lomt"`) 会落到导入文件所在目录, 但联网层
+// 现在按名字从随包 store 取 `internet` 的模块 (issue #375), 而自举镜的**开发 checkout**
+// store 根是 CWD 相对的 `lompi/store` —— 在 `lompi/` 里编会报 "the name import does not
+// resolve"。装出来的工具链则从 `<前缀>/share/lompi/store` 取, 与 CWD 无关。
 //
 // 这块工作区 (ws) 是整个程序的唯一大块内存: lompi 不动态分配, 所有层都在这块上
 // 按命名偏移干活 (布局见 lpi_pkg 开头)。argv 缓冲另开一块小的一一它要装整个命令行,

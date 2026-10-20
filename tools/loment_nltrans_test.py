@@ -729,6 +729,63 @@ def test_the_generic_return_type_is_not_looked_up():
     print("      泛型返回不进声明表；补 `as` 之后照常翻出来")
 
 
+#: `loment/examples/natural/`：**每个表层构造一份**（#350）。
+#: 键是文件名主干，值是这份程序文档里写明的 stdout。退出码一律 0 ——
+#: 每个示例自己用 `talk to the machine 60 with 0, 0, 0` 退出。
+NATURAL_EXAMPLES = {
+    "01-declaration": "8\n",      # 常量 + 带参函数
+    "02-say": "say: 42\n",        # `say` 文本/数
+    "03-word-operators": "21\n",  # plus/minus/times/over/modulo
+    "04-loops": "16\n",           # let/set、for（终点不含）、while
+    "05-when": "1\n",             # when/otherwise
+    "06-match": "10\n",           # 两条臂 -> match
+    "07-if-let": "9\n",           # 一条臂、无兜底 -> if let
+    "08-containers": "16\n",      # 结构体 + `the x of p` + buffer
+    "09-verbs": "verbs: 65 A\n",  # paint / say / talk to the machine
+    "10-generics": "8\n",         # `for any T`
+}
+
+
+@test
+def test_every_natural_example_has_a_twin_and_runs_to_its_documented_output():
+    """**示例目录逐份可学、可跑**（#350）：`loment/examples/natural/`。
+
+    三件事一起判，缺一不可：
+
+    1. 每份 `.nl` 的旁边有一份 `.lomt`；
+    2. 那份 `.lomt` 与 `front_door(.nl).source` **逐字节**相同 —— 读者看到的
+       两种拼法真的是同一个程序（`docs/188` §7.1.1 那一条）；
+    3. 那份 `.lomt` 真编真跑，stdout == 表里写的那一行。
+
+    只比字节的话，一份翻译对了但跑不动的示例也能绿；只跑的话，手改过的 twin
+    就没人看着。目录与表**双向**核对：多一份没登记的、少一份登记过的，都红。
+    """
+    if not _wsl():
+        print("      SKIP: 需要 WSL 来跑 ELF")
+        return
+    ex = ROOT / "loment" / "examples" / "natural"
+    on_disk = sorted(p.stem for p in ex.glob("*.nl"))
+    missing = sorted(set(NATURAL_EXAMPLES) - set(on_disk))
+    orphan = sorted(set(on_disk) - set(NATURAL_EXAMPLES))
+    assert not missing, f"表里登记了但目录里没有: {missing}"
+    assert not orphan, f"目录里有但没人看着（登记到 NATURAL_EXAMPLES）: {orphan}"
+    for stem in on_disk:
+        nl = ex / f"{stem}.nl"
+        twin = ex / f"{stem}.lomt"
+        assert twin.exists(), f"{nl.name}: 旁边没有 .lomt 孪生"
+        got = potato_from.front_door(nl).source
+        want = twin.read_bytes().decode("utf-8")
+        assert got == want, (
+            f"{stem}: 翻译器的产物与树里的 .lomt 不同 —— "
+            f"跑 `python tools/nltrans.py {nl.relative_to(ROOT)}` 重新生成")
+        exe, dump = _build(twin)
+        rc, out = _run_elf(exe)
+        assert rc == 0, f"{stem}: 退出码 {rc}（期望 0）。" + dump
+        assert out == NATURAL_EXAMPLES[stem], (
+            f"{stem}: stdout {out!r} != 文档里的 {NATURAL_EXAMPLES[stem]!r}" + dump)
+    print(f"      {len(on_disk)} 份构造示例：孪生逐字节相同、真跑到文档输出")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_nltrans_test")
 

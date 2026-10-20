@@ -26,6 +26,16 @@ module lpi_cli
 choose runtime
 
 use "lpi_idn.lomt"
+// 联网那一层**不再自备一份** (issue #375): 传输在 `tcp`/`sock`, 报文框架在 `http`,
+// URL 拆解在 `uri` + `ip` —— 都是随包 `internet` 0.1.0 的模块。它们是**兄弟**,
+// 不是往 `lompi -> cli -> idn -> ...` 那条 8 层链上再接一层 (那条链一层都不能再加;
+// 兄弟模块从 lpi_cli 看是第 2 层)。本文件只留编排 (`net_http_get` / `net_parse_http`)
+// 与那条**动态**请求的拼装: `http_req_build` 的形参是 `str` (字面量), 而这里的路径
+// 来自命令行, 只能按 `ptr + len` 走。
+use tcp
+use http
+use uri
+use ip
 
 // ---------------------------------------------------------------- 输出
 
@@ -1152,102 +1162,44 @@ pub fn cfg_slug(url: ptr, n: u32, out: ptr, outcap: u32) -> u32 {
 
 // ---------------------------------------------------------------- 联网 (0.2.0)
 //
-// **为什么这一层住在 lpi_cli 里**: 链的**嵌套上限是 8 层**(`loment ir` 报
-// 「依赖嵌套超过 8 层」), 而 lompi 的链已经是 `lompi -> lpi_cli -> lpi_idn ->
-// lpi_pkg -> lpi_sha -> lpi_dir -> lpi_txt -> lpi_sys` 八层 —— 再插一个模块就
-// 超了。所以联网原语与 `fetch` 放在同一个文件里: 它在链顶, `txt_*`/`sha_*` 都够得着。
+// **传输与报文框架都在随包 `internet` 里** (issue #375): `tcp_connect4` / `tcp_send_all`
+// / `tcp_recv` / `sock_close` 负责连接与收发, `http_hdr_end` / `http_status_line` /
+// `http_body_start` 负责报文框架, `uri_parse` + `ip_v4_parse` 负责 URL。以前这里各有一
+// 份自己的实现, 每修一次加固都要修两遍 (#292 就是这样漏了两年)。
+//
+// 本文件只留**编排**: 取参数、拼那条路径来自命令行的请求、把响应体切出来。请求拼装
+// 不能交给 `http_req_build` —— 它的形参是 `str` (字面量), 而这里的 path 是 `ptr+len`。
 //
 // **能力边界**(写在 `docs/236`): 只认 `http://` + IPv4 字面量 —— 工具链里
 // **没有解析器**(没有 `getaddrinfo`)、**没有 TLS**。这两条是运行时欠账, 不是
 // lompi 的设计立场: 0.1.5 时那句是「PE 上没有 socket」, 联网面补完(`docs/234`)
 // 之后往后退到了这一格。
 
-/// socket / connect / sendto / recvfrom 的 Linux 号 (x86-64)。
-pub const NET_SYS_SOCKET: u64 = 41;
-pub const NET_SYS_CONNECT: u64 = 42;
-pub const NET_SYS_SENDTO: u64 = 44;
-pub const NET_SYS_RECVFROM: u64 = 45;
-pub const NET_AF_INET: u64 = 2;
-pub const NET_SOCK_STREAM: u64 = 1;
 /// 端口是 16 位。
 pub const NET_PORT_MAX: u64 = 65535;
 /// 失败哨兵 (与 `SYS_ERR` 同值, 免得两个哨兵混着比)。
 pub const NET_ERR: u64 = 18446744073709551615;
 
-// ---------------------------------------------------------------- 基本件
-
-/// IPv4 TCP socket。失败返回 -1。
-pub fn net_tcp4() -> i64 {
-    return syscall4(NET_SYS_SOCKET, NET_AF_INET, NET_SOCK_STREAM, 0);
-}
-
-/// 连到 a.b.c.d:port —— **点分四段直接写进 `sockaddr_in`** (没有解析器可用)。
-/// addr 至少 16 字节。返回 connect 的返回值 (0 = 成)。
-pub fn net_connect4(fd: i64, addr: ptr, a: u32, b: u32, c: u32, d: u32, port: u64) -> i64 {
-    store8(addr, 0, 2 as u8);            // sin_family = AF_INET
-    store8(addr, 1, 0 as u8);
-    let ph: u64 = port / 256;
-    store8(addr, 2, ph as u8);           // 端口是**网络序**: 高字节在前
-    store8(addr, 3, (port % 256) as u8);
-    store8(addr, 4, a as u8);
-    store8(addr, 5, b as u8);
-    store8(addr, 6, c as u8);
-    store8(addr, 7, d as u8);
-    let i: u32 = 8;
-    while i < 16 {
-        store8(addr, i, 0 as u8);
-        i = i + 1;
-    }
-    return syscall4(NET_SYS_CONNECT, fd as u64, addr as u64, 16);
-}
-
-/// 已连接的 socket 上 `sendto` 不带地址就是 `send`。
-pub fn net_send(fd: i64, p: ptr, n: u64) -> i64 {
-    return syscall7(NET_SYS_SENDTO, fd as u64, p as u64, n, 0, 0, 0);
-}
-
-pub fn net_recv(fd: i64, p: ptr, cap: u64) -> i64 {
-    return syscall7(NET_SYS_RECVFROM, fd as u64, p as u64, cap, 0, 0, 0);
-}
-
 // ---------------------------------------------------------------- 明文 HTTP GET
 
-/// 一条 `HTTP/1.0 GET`。连 a.b.c.d:port, 把 `path` 取进 `out`, 返回**响应体**长度;
-/// 任何一步失败返回 `NET_ERR`。
-///
-/// * 参数从 `req` 那块暂存里取 (`NETREQ_*`); `head` 缓冲固定 1024 字节;
-/// * 整条响应先收进 `out`, 再把头切掉 —— 所以 `cap` 要装得下"头 + 体";
-/// * `Host:` 里写 `a.b.c.d:port` (对 IP 字面量来说这就是对的名字)。
 /// 写一个 CRLF —— **不能靠字符串字面量**: Loment 的转义只认 `\n`, `\r` 会**退化成一个
 /// 字母 `r`**(实测: 服务器收到的请求行是 `HTTP/1.0r`, 直接回 400 "Bad request version")。
-/// 所以 CR 走字节写, 不写字面量。
+/// 所以 CR 走字节写, 不写字面量。`internet` 的 `http_req_build` 有同一段, 但它是
+/// `httpp_crlf` (私有) 且只收 `str` 形参 —— 动态路径够不着, 所以这里留这一小块。
 pub fn net_crlf(dst: ptr, off: u32) -> u32 {
     store8(dst, off, 13 as u8);
     store8(dst, off + 1, 10 as u8);
     return off + 2;
 }
 
-/// 找 HTTP 头结束(字节 13,10,13,10), 返回头结束的下标; 找不到返回 DIR_ERR。
-/// 顺手认一下只发 LF 的服务器 —— 少见, 但撞上了不该被当成"这不是 HTTP"。
-pub fn net_hdr_end(p: ptr, n: u32) -> u32 {
-    let i: u32 = 0;
-    while i + 4 <= n {
-        if load8(p, i) == 13 && load8(p, i + 1) == 10
-            && load8(p, i + 2) == 13 && load8(p, i + 3) == 10 {
-            return i;
-        }
-        i = i + 1;
-    }
-    let j: u32 = 0;
-    while j + 2 <= n {
-        if load8(p, j) == 10 && load8(p, j + 1) == 10 {
-            return j;
-        }
-        j = j + 1;
-    }
-    return DIR_ERR;
-}
-
+/// 一条 `HTTP/1.0 GET`。连 a.b.c.d:port, 把 `path` 取进 `out`, 返回**响应体**长度;
+/// 任何一步失败返回 `NET_ERR`。
+///
+/// * 参数从 `req` 那块暂存里取 (`NETREQ_*`); `head` 缓冲固定 1024 字节;
+/// * 整条响应先收进 `out`, 再把头切掉 —— 所以 `cap` 要装得下"头 + 体";
+/// * `Host:` 里写 `a.b.c.d:port` (对 IP 字面量来说这就是对的名字);
+/// * 头结束 / 状态行 / 体起点**全部走 `internet::http`**: 状态码按状态行读, 不再用
+///   "头里某处出现 ` 200`" 那种子串判定 (一个头值里带 ` 200` 会被误当成功)。
 pub fn net_http_get(req: ptr, path: ptr, plen: u32, out: ptr, cap: u64) -> u64 {
     let scr: ptr = txt_load64(req, NETREQ_SCR) as ptr;
     let head: ptr = txt_load64(req, NETREQ_HEAD) as ptr;
@@ -1256,13 +1208,9 @@ pub fn net_http_get(req: ptr, path: ptr, plen: u32, out: ptr, cap: u64) -> u64 {
     let c: u32 = txt_load32(req, NETREQ_C);
     let d: u32 = txt_load32(req, NETREQ_D);
     let port: u64 = txt_load64(req, NETREQ_PORT);
-    let fd: i64 = net_tcp4();
+    let ipv: u32 = (a << 24) | (b << 16) | (c << 8) | d;
+    let fd: i64 = tcp_connect4(ipv, port as u32, scr);
     if fd < 0 {
-        return NET_ERR;
-    }
-    let cn: i64 = net_connect4(fd, scr, a, b, c, d, port);
-    if cn < 0 {
-        sys_close(fd);
         return NET_ERR;
     }
     let o: u32 = txt_put(head, 0, "GET ");
@@ -1281,37 +1229,43 @@ pub fn net_http_get(req: ptr, path: ptr, plen: u32, out: ptr, cap: u64) -> u64 {
     let oC: u32 = net_crlf(head, txt_put(head, oB, "Connection: close"));
     let oD: u32 = net_crlf(head, oC);
     if oD > 1024 {
-        sys_close(fd);
+        sock_close(fd);
         return NET_ERR;
     }
-    let sn: i64 = net_send(fd, head, oD as u64);
+    let sn: i64 = tcp_send_all(fd, head, oD as u64);
     if sn < 0 {
-        sys_close(fd);
+        sock_close(fd);
         return NET_ERR;
     }
     let got: u64 = 0;
     let run: u32 = 1;
     while run == 1 && got < cap {
         let dst: ptr = ((out as u64) + got) as ptr;
-        let r: i64 = net_recv(fd, dst, cap - got);
+        let r: i64 = tcp_recv(fd, dst, cap - got);
         if r <= 0 {
             run = 0;
         } else {
             got = got + (r as u64);
         }
     }
-    sys_close(fd);
+    sock_close(fd);
     if got == 0 {
         return NET_ERR;
     }
-    let hdr: u32 = net_hdr_end(out, got as u32);
-    if hdr == DIR_ERR {
+    // 状态行先过 (它同时能证明头本身是 HTTP), 再取体起点 —— 两件事都不在这里重写。
+    let so: u32 = http_status_line(out, 0, got as u32, head);
+    if so != 1 {
         return NET_ERR;                  // 不是一条 HTTP 响应
     }
-    if txt_find_lit(out, 0, hdr, " 200") == TXT_NFIND {
+    let code: u32 = load8(head, 0) | (load8(head, 1) << 8)
+                  | (load8(head, 2) << 16) | (load8(head, 3) << 24);
+    if code != 200 {
         return NET_ERR;                  // 非 200(含 3xx: 不跟重定向)
     }
-    let bstart: u32 = hdr + 4;
+    let bstart: u32 = http_body_start(out, 0, got as u32);
+    if bstart == HTTP_NO {
+        return NET_ERR;                  // 状态行之后没有空行: 头没结束
+    }
     let blen: u32 = (got as u32) - bstart;
     if bstart > 0 {
         sys_copy(out, 0, out, bstart, blen);
@@ -1323,105 +1277,105 @@ pub fn net_http_get(req: ptr, path: ptr, plen: u32, out: ptr, cap: u64) -> u64 {
 //
 // 只拆 `http://a.b.c.d[:port][/path]` 这一种形状; 别的一律"不认"(返回 0),
 // 由上层回退到打印计划。**不猜**: 认不出来就说不认。
+//
+// 拆解本身在 `internet` 的 `uri` (结构) 与 `ip` (四段地址) 里; 这里只把结果摆成
+// lompi 要的形状 (4 个 u32 + 一个 u64 端口 + NUL 结尾的路径)。
 
 /// 拆一个 registry URL。全部成功返回 1, 否则返回 0 (调用方去打印计划)。
-/// * `a`..`d` 收 4 段地址; `port_out` 收端口 (缺省 80);
-/// * `path`/`pathcap` 收**路径**(含前导 `/`, 不含 query; 空路径写成 `/`);
-/// * `ip` 是"这个 URL 能不能自己连"的标志位输出(0/1) —— 现代码里它总是 1,
-///   留着是为了"主机不是 IP 字面量"那一支明确地失败。
+/// * `pa`..`pd` 收 4 段地址; `port_out` 收端口 (缺省 80);
+/// * `path`/`pathcap` 收**路径**(含前导 `/`, 不含 query; 空路径写成 `/`)。
 pub fn net_parse_http(url: ptr, n: u32,
                       pa: ptr, pb: ptr, pc: ptr, pd: ptr, port_out: ptr,
                       path: ptr, pathcap: u32) -> u32 {
-    // 必须 http:// 开头 (https:// 直接不认 —— 没有 TLS)
-    if n < 8 || !txt_eq_lit(url, 0, 7, "http://") {
+    let rec: ptr = sys_alloc(URI_REC as u64);
+    let oo: ptr = sys_alloc(4);
+    let ol: ptr = sys_alloc(4);
+    if rec == (0 as ptr) || oo == (0 as ptr) || ol == (0 as ptr) {
         return 0;
     }
-    let i: u32 = 7;
-    // 四段十进制, 点分隔
-    let ok: u32 = 1;
-    let seg: u32 = 0;
-    let v0: u32 = 0;
-    let v1: u32 = 0;
-    let v2: u32 = 0;
-    let v3: u32 = 0;
-    while seg < 4 && ok == 1 {
-        let st: u32 = i;
-        while i < n && txt_is_digit(load8(url, i)) {
-            i = i + 1;
-        }
-        if i == st {
-            ok = 0;
-        } else {
-            let v: u64 = txt_parse_dec_v(txt_parse_dec(url, st, i - st));
-            if v > 255 {
-                ok = 0;
-            }
-            if seg == 0 {
-                v0 = v as u32;
-            } else if seg == 1 {
-                v1 = v as u32;
-            } else if seg == 2 {
-                v2 = v as u32;
-            } else {
-                v3 = v as u32;
-            }
-            seg = seg + 1;
-            if seg < 4 {
-                if i >= n || load8(url, i) != 46 {
-                    ok = 0;
-                } else {
-                    i = i + 1;
-                }
-            }
-        }
-    }
-    if ok == 0 {
+    if uri_parse(url, 0, n, rec) == 0 {
         return 0;
     }
+    // scheme 必须**正好**是 `http` —— `https` 要有 TLS, 工具链里没有。
+    if uri_part(rec, 0, oo, ol) == 0 {
+        return 0;
+    }
+    let soff: u32 = txt_load32(oo, 0);
+    if txt_load32(ol, 0) != 4 || !txt_eq_lit(url, soff, 4, "http") {
+        return 0;
+    }
+    if !uri_has_authority(rec) {
+        return 0;
+    }
+    // 用户信息 (`user@host`) 不认 —— 旧实现也不认, 而它在这里没有任何用处。
+    if uri_part(rec, 1, oo, ol) == 1 {
+        return 0;
+    }
+    // 主机必须是一个 IPv4 字面量 (主机名要有解析器, IPv6 这里不认)。
+    if uri_part(rec, 2, oo, ol) == 0 {
+        return 0;
+    }
+    let hoff: u32 = txt_load32(oo, 0);
+    let hlen: u32 = txt_load32(ol, 0);
+    let ipv: ptr = sys_alloc(4);
+    if ipv == (0 as ptr) {
+        return 0;
+    }
+    if ip_v4_parse(url, hoff, hlen, ipv) == 0 {
+        return 0;
+    }
+    let v: u32 = txt_load32(ipv, 0);
     let port: u64 = 80;
-    if i < n && load8(url, i) == 58 {
-        i = i + 1;
-        let ps: u32 = i;
-        while i < n && txt_is_digit(load8(url, i)) {
-            i = i + 1;
-        }
-        if i == ps {
-            return 0;
-        }
-        port = txt_parse_dec_v(txt_parse_dec(url, ps, i - ps));
-        if port == 0 || port > NET_PORT_MAX {
-            return 0;
-        }
+    let pv: u32 = uri_port(rec);
+    // 端口语法上在场 (`host:` 后面) 但读成 `URI_NO` = 超过 u32 —— 不能当成"没写端口"
+    // 悄悄退回 80 (旧实现按 u64 读, 那种 URL 是拒的)。
+    let has_colon: u32 = 0;
+    if hoff + hlen < n && load8(url, hoff + hlen) == 58 {
+        has_colon = 1;
     }
-    // 余下的是路径 (可空; 空 = `/`)
+    if pv == URI_NO && has_colon == 1 {
+        return 0;
+    }
+    if pv != URI_NO {
+        if pv == 0 || pv > NET_PORT_MAX {
+            return 0;
+        }
+        port = pv as u64;
+    }
+    // 余下的是路径 (可空; 空 = `/`); `?`/`#` 之后不取。
+    // 旧实现要求主机后面紧跟 `/` 或结束 —— `http://h?x` 那种"没有路径只有 query"
+    // 仍然不认, 别让这次换成 uri 之后悄悄放宽。
+    if uri_part(rec, 3, oo, ol) == 0 {
+        return 0;
+    }
+    let poff: u32 = txt_load32(oo, 0);
+    let plen: u32 = txt_load32(ol, 0);
+    if plen == 0 {
+        if uri_part(rec, 4, oo, ol) == 1 || uri_part(rec, 5, oo, ol) == 1 {
+            return 0;
+        }
+    } else if load8(url, poff) != 47 {
+        return 0;                        // 主机后面必须是 `/`
+    }
     let pn: u32 = 0;
-    if i < n {
-        if load8(url, i) != 47 {
-            return 0;                    // 主机后面必须是 `/` 或结束
+    let i: u32 = 0;
+    while i < plen {
+        if pn + 1 >= pathcap {
+            return 0;
         }
-        while i < n {
-            if load8(url, i) == 63 || load8(url, i) == 35 {
-                // `?` / `#` 之后不取(我们不支持 query)
-                i = n;
-            } else {
-                if pn + 1 >= pathcap {
-                    return 0;
-                }
-                store8(path, pn, load8(url, i) as u8);
-                pn = pn + 1;
-                i = i + 1;
-            }
-        }
+        store8(path, pn, load8(url, poff + i) as u8);
+        pn = pn + 1;
+        i = i + 1;
     }
     if pn == 0 {
         store8(path, 0, 47 as u8);
         pn = 1;
     }
     store8(path, pn, 0 as u8);
-    txt_store32(pa, 0, v0);
-    txt_store32(pb, 0, v1);
-    txt_store32(pc, 0, v2);
-    txt_store32(pd, 0, v3);
+    txt_store32(pa, 0, (v >> 24) & 255);
+    txt_store32(pb, 0, (v >> 16) & 255);
+    txt_store32(pc, 0, (v >> 8) & 255);
+    txt_store32(pd, 0, v & 255);
     txt_store64(port_out, 0, port);
     return 1;
 }
@@ -1475,12 +1429,91 @@ fn test_net_parse_rejects_hostname() -> bool {
     return net_parse_http(s, o, pa, pb, pc, pd, po, path, 64) == 0;
 }
 
+fn test_net_parse_defaults_empty_path_and_port() -> bool {
+    let s: ptr = sys_alloc(64);
+    let pa: ptr = sys_alloc(8);
+    let pb: ptr = sys_alloc(8);
+    let pc: ptr = sys_alloc(8);
+    let pd: ptr = sys_alloc(8);
+    let po: ptr = sys_alloc(8);
+    let path: ptr = sys_alloc(64);
+    let o: u32 = sys_put_lit(s, "http://10.0.0.7");
+    if net_parse_http(s, o, pa, pb, pc, pd, po, path, 64) != 1 {
+        return false;
+    }
+    if txt_load32(pa, 0) != 10 || txt_load32(pb, 0) != 0
+        || txt_load32(pc, 0) != 0 || txt_load32(pd, 0) != 7 {
+        return false;
+    }
+    return txt_load64(po, 0) == 80 && txt_len_cstr(path) == 1 && load8(path, 0) == 47;
+}
+
+fn test_net_parse_drops_query() -> bool {
+    let s: ptr = sys_alloc(64);
+    let pa: ptr = sys_alloc(8);
+    let pb: ptr = sys_alloc(8);
+    let pc: ptr = sys_alloc(8);
+    let pd: ptr = sys_alloc(8);
+    let po: ptr = sys_alloc(8);
+    let path: ptr = sys_alloc(64);
+    let o: u32 = sys_put_lit(s, "http://10.0.0.7/libs?x=1");
+    if net_parse_http(s, o, pa, pb, pc, pd, po, path, 64) != 1 {
+        return false;
+    }
+    return txt_len_cstr(path) == 5 && txt_eq_lit(path, 0, 5, "/libs");
+}
+
+fn test_net_parse_rejects_bad_octet() -> bool {
+    let s: ptr = sys_alloc(64);
+    let pa: ptr = sys_alloc(8);
+    let pb: ptr = sys_alloc(8);
+    let pc: ptr = sys_alloc(8);
+    let pd: ptr = sys_alloc(8);
+    let po: ptr = sys_alloc(8);
+    let path: ptr = sys_alloc(64);
+    let o: u32 = sys_put_lit(s, "http://1.2.3.256/x");
+    return net_parse_http(s, o, pa, pb, pc, pd, po, path, 64) == 0;
+}
+
+fn test_net_parse_rejects_query_without_path() -> bool {
+    let s: ptr = sys_alloc(64);
+    let pa: ptr = sys_alloc(8);
+    let pb: ptr = sys_alloc(8);
+    let pc: ptr = sys_alloc(8);
+    let pd: ptr = sys_alloc(8);
+    let po: ptr = sys_alloc(8);
+    let path: ptr = sys_alloc(64);
+    let o: u32 = sys_put_lit(s, "http://10.0.0.7?x");
+    return net_parse_http(s, o, pa, pb, pc, pd, po, path, 64) == 0;
+}
+
+fn test_net_parse_rejects_userinfo_and_overflow_port() -> bool {
+    let s: ptr = sys_alloc(64);
+    let pa: ptr = sys_alloc(8);
+    let pb: ptr = sys_alloc(8);
+    let pc: ptr = sys_alloc(8);
+    let pd: ptr = sys_alloc(8);
+    let po: ptr = sys_alloc(8);
+    let path: ptr = sys_alloc(64);
+    let o1: u32 = sys_put_lit(s, "http://user@10.0.0.7/x");
+    if net_parse_http(s, o1, pa, pb, pc, pd, po, path, 64) != 0 {
+        return false;
+    }
+    let o2: u32 = sys_put_lit(s, "http://10.0.0.7:99999999999999999999/x");
+    return net_parse_http(s, o2, pa, pb, pc, pd, po, path, 64) == 0;
+}
+
 /// 跑本模块全部自检, 返回失败条数 (0 = 全绿)。
 pub fn selftest_net() -> u32 {
     let f: u32 = 0;
     if !test_net_parse_rejects_https() { f = f + 1; sys_write_str(1, "  FAIL net_parse_https\n"); }
     if !test_net_parse_accepts_ip_and_port() { f = f + 1; sys_write_str(1, "  FAIL net_parse_ip\n"); }
     if !test_net_parse_rejects_hostname() { f = f + 1; sys_write_str(1, "  FAIL net_parse_hostname\n"); }
+    if !test_net_parse_defaults_empty_path_and_port() { f = f + 1; sys_write_str(1, "  FAIL net_parse_defaults\n"); }
+    if !test_net_parse_drops_query() { f = f + 1; sys_write_str(1, "  FAIL net_parse_query\n"); }
+    if !test_net_parse_rejects_bad_octet() { f = f + 1; sys_write_str(1, "  FAIL net_parse_octet\n"); }
+    if !test_net_parse_rejects_query_without_path() { f = f + 1; sys_write_str(1, "  FAIL net_parse_query_only\n"); }
+    if !test_net_parse_rejects_userinfo_and_overflow_port() { f = f + 1; sys_write_str(1, "  FAIL net_parse_userinfo\n"); }
     return f;
 }
 // ---------------------------------------------------------------- 注册表: 自己拉 (0.2.0)

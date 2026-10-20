@@ -17,7 +17,13 @@
 #   6. `lms` 的"收一次再试"只在**真有收集器**时出现（`docs/253` §5.3）；
 #   7. `lspe` 关审计只改台账、不改一行代码（`docs/262` §10.1）；
 #   8. `gc` × `vm` × `lspe` × LVM 四者一致：三档 GC 在 VM 上的行为与原生相同，
-#      `vm` / `lspe` 两维不改 IR，但都进 Potato（`docs/231` §1.3、`docs/243` §4.5）。
+#      `vm` / `lspe` 两维不改 IR，但都进 Potato（`docs/231` §1.3、`docs/243` §4.5）；
+#   9. **整张矩阵**的每个合法格，参考与自举的 IR 逐字节相同（`#940` / `#943`）；
+#  10. `no_std` 的镜像**没有宿主层**（无 `.dynsym`/`.interp`/`.dynamic`、零导入）；
+#  11. `std` + `hosted` 的镜像**带着宿主层**（真 libc 的导入 + 跑出 7）；
+#  12. `no_std + hosted` 在**两个前端**都被拒（参考点名两个取值，自举锚在后写那行）；
+#  13. `gc` 档位是**链接后镜像**的性质（函数集按档不同；`no_gc` 与 `manual` 逐字节同）；
+#  14. `runtime` 的闭包按格子算（不调用的运行期层也在；堆按需；`no_runtime` 只有入口）。
 
 from __future__ import annotations
 
@@ -101,6 +107,24 @@ PURE_BODY = """fn main() -> i32 {
 }
 """
 
+#: 能跑的纯核探针（`_start`，不碰堆）—— `runtime` 的闭包按**格子**算，不按"用没用到"。
+START_ONLY_BODY = """fn _start() {
+    syscall4(60, 13, 0, 0);
+}
+"""
+
+#: **宿主层**的探针（`#539`）：`abs` 是 libc 导出的名字，`alloc` 走 `hosted` 的平台堆。
+#: 退出码 7 = `abs(-7)` —— 导入没解析、平台堆没接上、产物没跑起来，任一处错都到不了这个数。
+HOSTED_BODY = """extern fn abs(v: i32) -> i32;
+
+fn _start() {
+    let p: ptr = alloc(8);
+    store8(p, 0, 65 as u8);
+    let v: i32 = abs(0 as i32 - 7);
+    syscall4(60, v as u64, 0, 0);
+}
+"""
+
 
 def _source(cell: dict[str, str], body: str) -> str:
     lines = ["module probe"] + [f"choose {cell[d]}" for d in cell] + ["", body]
@@ -136,6 +160,45 @@ def _legal_cells() -> list[dict[str, str]]:
 
 def _body(cell: dict[str, str]) -> str:
     return PURE_BODY if cell["runtime"] == "no_runtime" else ALLOC_BODY
+
+
+def _all_legal_cells() -> list[dict[str, str]]:
+    """**整张矩阵**的合法格（`#940` 第 1 行 / `#943`）：七维全部参与，冲突对现读。
+
+    与 `_legal_cells` 的区别只在维数：那一条是 `#940` 正文点名的三个核心维（链接与运行
+    的那十格），这一条是"每一维都算一格" —— 新维度一进 `CORE_DIMS`，这里自己长。
+    """
+    conflicts = [set(p) for p in lomentc.CORE_CONFLICTS]
+    cells = []
+    for combo in itertools.product(*(lomentc.CORE_DIMS[d] for d in lomentc.CORE_DIM_ORDER)):
+        values = set(combo)
+        if any(pair <= values for pair in conflicts):
+            continue
+        cells.append(dict(zip(lomentc.CORE_DIM_ORDER, combo)))
+    return cells
+
+
+_STAGE1: Path | None = None
+
+
+def _stage1() -> Path:
+    """自举驱动（**种子现链**）—— 与参考实现逐格对拍用的那一个实现。
+
+    链接一次、全矩阵共用（缓存）：240 个格子各链一次是纯浪费，而 stage1 的字节只取决
+    于种子，不取决于格子。
+    """
+    global _STAGE1
+    if _STAGE1 is None:
+        import loment_dist  # noqa: PLC0415
+        _STAGE1 = loment_dist.build_stage1()
+    return _STAGE1
+
+
+def _selfhost_ir(td: Path, src: Path) -> tuple[int, str, str]:
+    """让自举驱动编一份单元。返回 `(rc, stdout, stderr)` —— stdout 就是它的 IR。"""
+    r = subprocess.run([str(_stage1()), src.name], cwd=str(td),
+                       capture_output=True, text=True, shell=False, timeout=120)
+    return r.returncode, r.stdout, r.stderr
 
 
 @test
@@ -211,7 +274,46 @@ def test_each_gc_tier_drives_the_collector_and_the_ladder():
 
 
 @test
-def test_runtime_is_a_property_of_the_artifact():
+def test_gc_tier_is_a_property_of_the_linked_artifact():
+    """`#942`：档位不是 IR 里的一句话 —— **链出来的镜像**按档位不同，且与 Potato 一致。
+
+    上一条比的是 IR 符号。这一条比**链接之后**的东西：`compile_ll` 报的 `funcs` 就是
+    镜像里真实存在的函数。`no_gc` 与 `gc_manual` 必须给出**逐字节相同**的镜像 —— 那才叫
+    "声明的不带收集器"落在产物上，而不是少了一行标记。
+    """
+    tiers = ("gc_manual", "gc_auto", "gc_auto_alpha", "no_gc")
+    got: dict[str, tuple[set[str], bytes]] = {}
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        for tier in tiers:
+            rc, diag, ir, pot = _emit(td, f"img_{tier}",
+                                      {"mode": "std", "gc": tier, "runtime": "runtime"},
+                                      RUN_BODY)
+            assert rc == 0, f"{tier}: 编不过\n{diag[-400:]}"
+            assert pot.get("gc") == tier, f"{tier}: Potato 记的是 {pot.get('gc')!r}"
+            blob, info = lomelf.compile_ll(ir, [])
+            got[tier] = (set(info["funcs"]), blob)
+    manual_f, manual_b = got["gc_manual"]
+    auto_f, auto_b = got["gc_auto"]
+    alpha_f, alpha_b = got["gc_auto_alpha"]
+    nogc_f, nogc_b = got["no_gc"]
+    assert not ({"__loment_collect", "__loment_maybe_collect"} & manual_f), \
+        f"gc_manual 的镜像里出现了收集器: {sorted(manual_f)}"
+    assert {"__loment_collect", "__loment_maybe_collect"} <= auto_f, \
+        f"gc_auto 的镜像里缺收集器: {sorted(auto_f)}"
+    assert {"__loment_collect", "__loment_minor", "__loment_major", "__loment_wb"} <= alpha_f, \
+        f"gc_auto_alpha 的镜像里缺分代那一套: {sorted(alpha_f)}"
+    assert auto_f > manual_f and alpha_f > auto_f, (
+        f"档位没有让镜像变大/变小（manual={len(manual_f)} auto={len(auto_f)} "
+        f"alpha={len(alpha_f)} 个函数）—— 档位没驱动链接进去的那部分")
+    assert nogc_f == manual_f, (
+        f"no_gc 与 gc_manual 的函数集不同：{sorted(nogc_f ^ manual_f)}")
+    assert nogc_b == manual_b, "no_gc 的镜像与 gc_manual **不是逐字节相同** —— 声明没落在产物上"
+    print("      manual/auto/alpha 的镜像函数集各不同；no_gc 与 manual 逐字节相同")
+
+
+@test
+def test_runtime_is_a_property_of_the_linked_artifact():
     """`runtime` ⇒ 产物里有分配器；`no_runtime` ⇒ 一个符号都没有，且 `alloc` 被拒（`#944`）。"""
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
@@ -235,6 +337,56 @@ def test_runtime_is_a_property_of_the_artifact():
         assert rc != 0, "`no_runtime` 下用 `alloc` 被接受了（那是保证，不是声明）"
         assert "no_runtime" in diag, f"拒绝时没点名 no_runtime\n{diag[-400:]}"
     print("      runtime: 有分配器；no_runtime: 零运行期符号，且 alloc 被点名拒绝")
+
+
+@test
+def test_runtime_is_a_property_of_the_linked_artifact():
+    """`#944`：运行期的**闭包**按格子算，不按"程序用没用到"—— 链接之后看得见。
+
+    一份**从不分配**的程序，`choose runtime` 也要带上运行期那一层（`_IR_RUNTIME`：
+    mem*/abort），而**堆按需**（`docs/217`：只会除法的裸机引导程序不该凭空多 64 KiB
+    的 `.bss`；`alloc` 在 `no_runtime` 下是编译期拒的，所以"有分配器"必然意味着格子对）。
+    `no_runtime` 的镜像里一个运行期函数都没有、`.bss` 为零。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        rc, diag, ir, pot = _emit(td, "rt_img_on",
+                                  {"mode": "std", "gc": "gc_manual", "runtime": "runtime"},
+                                  START_ONLY_BODY)
+        assert rc == 0, f"runtime 档编不过\n{diag[-400:]}"
+        assert pot.get("runtime") == "runtime"
+        _blob, info = lomelf.compile_ll(ir, [])
+        assert {"__loment_memcpy", "__loment_memset", "__loment_memcmp",
+                "__loment_abort"} <= set(info["funcs"]), (
+            f"`choose runtime` 的镜像里没有运行期那一层（程序没调用它，但闭包按格子算）: "
+            f"{sorted(info['funcs'])}")
+        assert "__loment_alloc" not in info["funcs"], (
+            "程序没 `alloc`，堆却进来了 —— 堆是按需的（`docs/217`）")
+        assert info["bss"] == 0, f"没 `alloc` 的程序带了 .bss: {info}"
+
+        rc, diag, ir, pot = _emit(td, "rt_img_off",
+                                  {"mode": "std", "gc": "gc_manual", "runtime": "no_runtime"},
+                                  START_ONLY_BODY)
+        assert rc == 0, f"no_runtime 的纯程序编不过\n{diag[-400:]}"
+        assert pot.get("runtime") == "no_runtime"
+        _blob, info = lomelf.compile_ll(ir, [])
+        assert set(info["funcs"]) == {"_start"}, (
+            f"`choose no_runtime` 的镜像里有别的东西: {sorted(info['funcs'])}")
+        assert info["data"] == 0 and info["bss"] == 0, f"no_runtime 还有数据段: {info}"
+
+        rc, diag, ir, _pot = _emit(td, "rt_img_auto",
+                                   {"mode": "std", "gc": "gc_auto", "runtime": "runtime"},
+                                   RUN_BODY)
+        assert rc == 0
+        _blob, info = lomelf.compile_ll(ir, [])
+        assert {"__loment_alloc", "__loment_collect"} <= set(info["funcs"]), (
+            f"runtime + gc_auto 的镜像里缺收集器/分配器: {sorted(info['funcs'])}")
+
+        rc, diag, _ir, _pot = _emit(td, "rt_img_bad",
+                                    {"mode": "std", "gc": "gc_auto", "runtime": "no_runtime"},
+                                    ALLOC_BODY)
+        assert rc != 0, "`no_runtime` + `gc_auto` 被接受了（那是冲突对）"
+    print("      runtime 的闭包按格子算（不分配也有分配器）；no_runtime 镜像只有 _start")
 
 
 @test
@@ -423,6 +575,122 @@ def test_no_std_is_a_claim_the_linker_checks():
         else:
             raise AssertionError("声明 no_std 却带着宿主层的 IR 被链接器收下了")
     print("      no_std: 编得过、产物无宿主层、伪造的声明在链接期点名拒")
+
+
+@test
+def test_both_implementations_emit_the_same_ir_on_every_legal_cell():
+    """`#940` 第 1 行 / `#943`：**整张矩阵**的每个合法格，两份实现的 IR 逐字节相同。
+
+    `#940` 正文写的"六格"是 `mode × gc × runtime`；现在 `CORE_DIMS` 是七维，合法格
+    由编译器自己的表**现算**（当前 240 个）。格子**不写死** —— 加一维、改一对冲突，
+    这条判据自己跟着长。要的是"每一格都有人答"，所以**不抽样**：抽样的绿灯证明不了
+    没被抽到的那一格。自举驱动是种子现链的那一只，与用户拿到的 dev 通道同一份实现。
+    """
+    cells = _all_legal_cells()
+    assert len(cells) >= 100, (
+        f"整张矩阵只剩 {len(cells)} 个合法格 —— 维或冲突表被改窄了，先解释再改这条")
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        for cell in cells:
+            name = "-".join(cell[d] for d in lomentc.CORE_DIM_ORDER)
+            rc, diag, ref, pot = _emit(td, name, cell, _body(cell))
+            assert rc == 0, f"{name}: 参考实现编不过\n{diag[-400:]}"
+            for dim in lomentc.CORE_DIM_ORDER:
+                assert pot.get(dim) == cell[dim] or dim in ("lms", "lspe"), (
+                    f"{name}: Potato 记的是 {dim}={pot.get(dim)!r}, 请求的是 {cell[dim]!r}")
+            src = td / f"{name}.lomt"
+            rc2, got, err = _selfhost_ir(td, src)
+            assert rc2 == 0, f"{name}: 自举驱动拒绝（rc={rc2}）{err[-300:]}"
+            assert got == ref, (
+                f"{name}: 两份实现的 IR 不同（参考 {len(ref)}B / 自举 {len(got)}B）")
+    print(f"      {len(cells)} 个合法格：参考与自举的 IR 逐字节相同")
+
+
+@test
+def test_no_std_image_carries_no_hosted_layer():
+    """`#941` / `#539`：`no_std` 的产物是**自足的镜像** —— 没有动态导入、没有宿主层。
+
+    `std` 解锁宿主层（`docs/222` §4），`no_std` 的定义是"只用核那一层"；这句话要能
+    从**产物**上核：镜像里没有 `.dynsym` / `.interp` / `.dynamic`，链接器也报零导入。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        rc, diag, ir, pot = _emit(td, "nostd_img",
+                                  {"mode": "no_std", "gc": "gc_manual", "runtime": "runtime"},
+                                  RUN_BODY)
+        assert rc == 0, f"`choose no_std` 编不过\n{diag[-400:]}"
+        assert pot.get("mode") == "no_std"
+        assert "; loment-mode: no_std" in ir, "产物没有声明它只用核那一层"
+        blob, info = lomelf.compile_ll(ir, [])
+        assert info["shared"] == [] and info["imports"] == [], (
+            f"no_std 的镜像里有导入: {info['shared']} / {info['imports']}")
+        for sec in (b".dynsym", b".interp", b".dynamic"):
+            assert sec not in blob, f"no_std 的镜像里有 {sec.decode()} —— 宿主层被拉进来了"
+    print("      no_std: 静态镜像，无 .dynsym/.interp/.dynamic，零导入")
+
+
+@test
+def test_std_hosted_image_carries_the_hosted_layer():
+    """`#941` / `#539`：`std` + `hosted` 的产物**带着宿主层** —— 真 libc 的导入与运行。
+
+    与上一条是**同一个判据的两个方向**：`no_std` 必须没有宿主层，`std`+`hosted` 必须
+    有。`abs(-7)` 跑出 7 这件事把"导入解析"也从链接期带到了运行期。
+    """
+    import loment_ffi_test as ffitest  # noqa: PLC0415
+    if not LVMTest.ELF._wsl():
+        print("      SKIP: 需要 WSL（或 Linux）跑 ELF")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        libc = ffitest._system_so(td / "libc.so.6", ffitest._LIB6_CANDIDATES)
+        if libc is None:
+            print("      SKIP: 这台机器上没有 libc.so.6")
+            return
+        src = td / "std_hosted.lomt"
+        src.write_text(_source({"mode": "std", "gc": "gc_manual",
+                                "runtime": "runtime", "port": "hosted"}, HOSTED_BODY),
+                       encoding="utf-8", newline="\n")
+        mod = lomentc.load(src)
+        deps = lomentc.resolve_deps(mod, ROOT, td, entry=src)
+        errs = lomentc.check(mod, deps=deps)
+        assert not errs, f"`std` + `hosted` 编不过：{errs[:1]}"
+        ir = lomentc.emit_llvm(mod, ROOT, deps)
+        blob, info = lomelf.compile_ll(ir, [lomelf.load_foreign(libc)], allow_ports=True)
+        assert info["shared"] == ["libc.so.6"], f"没有链上真 libc: {info}"
+        assert "abs" in info["imports"], f"宿主层的名字不在导入表里: {info['imports']}"
+        assert b".dynsym" in blob and b".interp" in blob, "std+hosted 的镜像不是动态的"
+        exe = td / "std_hosted.elf"
+        exe.write_bytes(blob)
+        r = LVMTest.ELF._sh(f"chmod +x {LVMTest.ELF._wsl_path(exe)} && "
+                            f"{LVMTest.ELF._wsl_path(exe)}", 120)
+        assert r.returncode == 7, (
+            f"std+hosted 的产物跑出 {r.returncode}（期望 7）：{r.stderr[-300:]!r}")
+    print("      std+hosted: 链真 libc.so.6、abs 进导入表、跑出 7")
+
+
+@test
+def test_no_std_with_hosted_is_refused_by_both_front_ends():
+    """`#539` 第 3、4 条：`no_std` + `hosted` 的拒绝要发生在**用户入口**，两个前端都要。
+
+    参考实现点名两个取值与那条需求链（`CORE_CONFLICTS` 的原文）；自举驱动拒绝并把
+    锚点放在**后写的那一行**。两边报文的措辞本来就分叉（`docs/158` §4），这里核的是
+    "都拒绝 + 参考点名 + 自举指对行"，不核文本逐字节。
+    """
+    cell = {"mode": "no_std", "port": "hosted"}
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        rc, diag, _ir, _pot = _emit(td, "nostd_hosted", cell, START_ONLY_BODY)
+        assert rc != 0, "参考实现收下了 `no_std` + `hosted`"
+        for v in ("no_std", "hosted"):
+            assert v in diag, f"参考实现的诊断没点名 {v!r}\n{diag[-400:]}"
+        assert "不能同时选" in diag or "冲突" in diag, f"没说清是冲突\n{diag[-400:]}"
+        src = td / "nostd_hosted.lomt"     # `_emit` 已经把同一份源写在那里
+        rc2, _out, err = _selfhost_ir(td, src)
+        assert rc2 != 0, "自举驱动收下了 `no_std` + `hosted`"
+        assert "E22" in err, f"自举驱动拒绝时没给 E22：{err[-300:]!r}"
+        assert "line 3" in err, (
+            f"自举驱动的锚点不在后写的那一行（`hosted` 是第 3 行）：{err[-300:]!r}")
+    print("      no_std+hosted: 参考点名两个取值与需求链；自举拒绝并锚在第 3 行")
 
 
 @test

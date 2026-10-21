@@ -85,20 +85,36 @@ def _ladder_of(path: Path) -> dict:
     src = _inject(text)
     if src is None:
         return {"skipped": True}
-    with tempfile.TemporaryDirectory(prefix="gcsurface-") as tds:
-        tmp = Path(tds) / path.name
+    # **临时件写在源同目录、且不以 `.lomt` 结尾**：`use` 的相对依赖按入口所在目录解析
+    # （私有临时目录里 `use "bytes.lomt"` 找不到，整份源会被误判成"跳过的"）；而结尾不是
+    # `.lomt` 时，`Path.glob("**/*.lomt")` 与发布清单都匹配不到它 —— 于是并行分片的
+    # 假红（docs/213 §7）也不会回来。名字里带 pid，同目录并发也撞不上。
+    tmp = path.parent / f".gcsurface-{path.stem}-{os.getpid()}"
+    try:
         tmp.write_text(src, encoding="utf-8", newline="\n")
         mod, deps = lomentc.load_unit(tmp, ROOT)
         doc = json.loads(lomentc.emit_potato(mod, ROOT, deps))
         return doc["gc_ladder"]
-
+    except Exception as e:                       # noqa: BLE001
+        # 递归之后会撞到**不是可发射单元**的语料（例如带 `Box<[u32]>` 的负例）。
+        # 量尺不替它们编数：记成"跳过的"，并在 `--all` 里给出原因。
+        return {"skipped": True, "why": f"{type(e).__name__}: {e}"[:120]}
+    finally:
+        tmp.unlink(missing_ok=True)
 
 def measure(dirs=CORPUS) -> list[tuple[str, dict]]:
     """逐文件量：`[(相对路径, gc_ladder), …]`，**按路径排序**（确定性）。跳过的也留着（带 `skipped`）。"""
     rows: list[tuple[str, dict]] = []
     for d in dirs:
-        for p in sorted((ROOT / d).glob("*.lomt")):
-            rows.append((p.relative_to(ROOT).as_posix(), _ladder_of(p)))
+        # **递归**：`cproject/` 这类子目录也是真语料（2026-10-21 之前用的是
+        # `glob("*.lomt")`，子目录整段漏量）。**已经在源里写了 `choose gc` 的文件照旧跳过**
+        # （它自己已表态，`_inject` 回 `None`）。
+        for p in sorted((ROOT / d).glob("**/*.lomt")):
+            try:
+                rel = p.relative_to(ROOT).as_posix()
+            except ValueError:                  # `--dirs` 指到仓外（例如 lompi 的库仓）
+                rel = p.as_posix()
+            rows.append((rel, _ladder_of(p)))
     return rows
 
 

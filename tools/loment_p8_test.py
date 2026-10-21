@@ -1337,6 +1337,41 @@ def test_m91_l1_definite_lifetime_is_byte_identical():
         "alpha 那一份没有多出 L1 的 free —— 这条判据在空转"
 
 
+@test
+def test_m92_safe_argument_position_is_byte_identical():
+    """逐形参安全位（`docs/210` §2.2.1，2026-10-21）：真值源在**两个实现**上逐字节一致。
+
+    这一条钉的是自举侧那份镜像：安全表多了一张**平行掩码表**，位置解码器（`safe_use_at`）
+    与参考实现的 `_call_arg_pos`/`_safe_use` 必须逐条同判。差一格，产物就整段不同 ——
+    而"第二实参也安全"恰恰是 std 库里 82.9% 残差的开关。
+
+    源只有一份（`lomentc_test.GC_ARGPOS_*`），那边同时钉住 L0/L1/L3 的真值格。
+    """
+    if not _clang():
+        print("      SKIP: 无 clang")
+        return
+    import lomentc_test  # noqa: E402
+    with tempfile.TemporaryDirectory() as td:
+        exe = _build_codegen(td)
+        outs: dict[str, str] = {}
+        for tag, src in (("alpha", lomentc_test.GC_ARGPOS_ALPHA_SRC),
+                         ("manual", lomentc_test.GC_ARGPOS_MANUAL_SRC)):
+            target = Path(td) / f"gc_argpos_{tag}.lomt"
+            target.write_text(src, encoding="utf-8", newline="\n")
+            mod = lomentc.load(target)
+            deps = lomentc.resolve_deps(mod, ROOT, target.parent, entry=target)
+            want = lomentc.emit_llvm(mod, ROOT, deps)
+            got = _run_codegen(exe, target, td)
+            outs[tag] = got
+            if got != want:
+                i = next((k for k in range(min(len(got), len(want))) if got[k] != want[k]), None)
+                a = max(0, (i or 0) - 60)
+                raise AssertionError(
+                    f"gc_argpos_{tag} 首个差异 @{i}: "
+                    f"loment {got[a:(i or 0) + 80]!r} / python {want[a:(i or 0) + 80]!r}")
+    assert outs["alpha"].count("call void @__loment_free(") >         outs["manual"].count("call void @__loment_free("),         "alpha 那一份没有多出 L1 的 free —— 这条判据在空转"
+
+
 def _dep_paths(target: Path) -> list[Path]:
     """按 lomentc.resolve_deps 的规则取依赖文件 (被依赖者在前), 并与参考实现的模块名序列核对。
 

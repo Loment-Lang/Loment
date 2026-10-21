@@ -2768,6 +2768,72 @@ def test_excluded_network_is_a_behaviour_claim():
     assert errs(var) == [], errs(var)
 
 
+#: 逐形参安全位的真值源（`docs/210` §2.2.1）：第一实参（回归）、两跳后的第二实参（放宽）、
+#: 以及一个外逃的被调（阴性对照）。两份只差 `choose` 那一行。
+GC_ARGPOS_ALPHA_SRC = """module gc_argpos
+choose gc_auto_alpha
+choose runtime
+
+fn first(p: ptr) -> u32 {
+    return load8(p, 0) as u32;
+}
+
+fn peek(off: u32, p: ptr) -> u32 {
+    return load8(p, off) as u32;
+}
+
+fn peek2(off: u32, p: ptr) -> u32 {
+    return peek(off, p);
+}
+
+fn escape(p: ptr) -> ptr {
+    return ptr_add(p, 1);
+}
+
+fn main() -> i32 {
+    let n: u32 = 8;
+    let a: ptr = alloc(n);
+    let b: ptr = alloc(n);
+    store8(a, 0, 5);
+    store8(b, 0, 6);
+    let x: u32 = first(a);
+    let y: u32 = peek2(0, b);
+    let c: ptr = alloc(n);
+    let d: ptr = escape(c);
+    store8(d, 0, 1);
+    return (x as i32) + (y as i32) + (load8(d, 0) as i32);
+}
+"""
+GC_ARGPOS_MANUAL_SRC = GC_ARGPOS_ALPHA_SRC.replace("choose gc_auto_alpha", "choose gc_manual")
+
+
+@test
+def test_gc_safe_argument_position():
+    """**安全位置是逐形参的，不是"只有第一个实参"**（`docs/210` §2.2.1，2026-10-21）。
+
+    这一格钉的是那次放宽的**两个方向**：
+
+      * `a` 传在 `first` 的**第一个**实参 —— 旧规则也接得住（回归格）；
+      * `b` 传在 `peek2` 的**第二个**实参，而 `peek2` 又把它传在 `peek` 的第二个实参 ——
+        **两跳**的逐形参不动点。旧规则下这两个站点都在 L3；std 库里 82.9% 的残差正是这一格；
+      * `c` 交给 `escape`（返回 `ptr_add(p, 1)`）—— 形参外逃，**必须仍留在 L3**。
+        这一格是**阴性对照**：规则一放松就把它也提走，那是 use-after-free。
+
+    实测（`loment_gc_surface` 的口径）std 库 2,948 个站点：放开前 33.7% 进 L0–L2，
+    放开后 89.1%。所以这不是一格边角。
+    """
+    a = json.loads(lomentc.emit_potato(parse(GC_ARGPOS_ALPHA_SRC), ROOT))["gc_ladder"]
+    m = json.loads(lomentc.emit_potato(parse(GC_ARGPOS_MANUAL_SRC), ROOT))["gc_ladder"]
+    assert a == {"l0": 0, "l1": 2, "l2": 0, "l3": 1, "total_sites": 3}, f"alpha: {a}"
+    assert m == {"l0": 0, "l1": 0, "l2": 0, "l3": 3, "total_sites": 3}, f"manual: {m}"
+    ir = lomentc.emit_llvm(parse(GC_ARGPOS_ALPHA_SRC), ROOT)
+    ir_m = lomentc.emit_llvm(parse(GC_ARGPOS_MANUAL_SRC), ROOT)
+    # alpha 的产物里还有收集器自己的清扫路径也会调 `__loment_free`，所以不钉绝对数；
+    # 钉的是"默认档一个都没有、alpha 至少多出 a 与 b 两条"。
+    assert "call void @__loment_free(" not in ir_m, "默认档一行都不许动"
+    assert ir.count("call void @__loment_free(") >= 2,         "两个安全的块都该在最后一次用处之后被还掉（第一个实参 + 第二跳的第二实参）"
+
+
 @test
 def test_l0_param_shadow_is_not_promoted():
     """形参同名的那条 `let` **不提升** —— 它买的是"不会发出没有定义的 `%NAME.buf`"。

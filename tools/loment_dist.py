@@ -1413,7 +1413,30 @@ function Resolve-Payload {
         $rootFull = [IO.Path]::GetFullPath($root).TrimEnd('\') + '\'
         $zip = [IO.Compression.ZipFile]::OpenRead($PayloadZip)
         try {
+            # Payloads come in two shapes. Zipping the distribution's **contents** puts
+            # SHA256SUMS at the archive root. Zipping the distribution **directory** gives
+            # every entry one shared leading folder (loment-<ver>-windows-x64/), and then
+            # there is no root SHA256SUMS -- which is how the released 0.1.5 setup.exe was
+            # built, so it refused a complete package with "SHA256SUMS missing". Accept
+            # exactly that shape: one shared folder, with SHA256SUMS at its root. Anything
+            # else is still reported as incomplete.
+            $top = ''
             $sumsEntry = $zip.GetEntry('SHA256SUMS')
+            if (-not $sumsEntry) {
+                $tops = @{}
+                $shared = $true
+                foreach ($e in $zip.Entries) {
+                    if ($e.FullName -eq '' -or $e.FullName.EndsWith('/')) { continue }
+                    $cut = $e.FullName.IndexOf('/')
+                    if ($cut -le 0) { $shared = $false; break }
+                    $tops[$e.FullName.Substring(0, $cut)] = $true
+                }
+                if ($shared -and $tops.Count -eq 1) {
+                    $seg = [string](@($tops.Keys)[0])
+                    $sumsEntry = $zip.GetEntry($seg + '/SHA256SUMS')
+                    if ($sumsEntry) { $top = $seg + '/' }
+                }
+            }
             if (-not $sumsEntry) { throw "SHA256SUMS missing from payload.zip -- package is incomplete" }
             $want = @{}
             $reader = New-Object System.IO.StreamReader($sumsEntry.Open())
@@ -1426,7 +1449,8 @@ function Resolve-Payload {
             try {
                 foreach ($e in $zip.Entries) {
                     if ($e.FullName -eq '' -or $e.FullName.EndsWith('/')) { continue }
-                    $rel = $e.FullName.Replace('/', '\')
+                    $name = $e.FullName.Substring($top.Length)
+                    $rel = $name.Replace('/', '\')
                     if ([IO.Path]::IsPathRooted($rel) -or $rel -match '(^|\\)\.\.(\\|$)') {
                         throw "payload.zip entry escapes the extraction root: $($e.FullName)"
                     }
@@ -1434,14 +1458,14 @@ function Resolve-Payload {
                     if (-not $dest.StartsWith($rootFull, [StringComparison]::OrdinalIgnoreCase)) {
                         throw "payload.zip entry escapes the extraction root: $($e.FullName)"
                     }
-                    if ($e.FullName -eq 'SHA256SUMS') { continue }
-                    if (-not $want.ContainsKey($e.FullName)) {
+                    if ($name -eq 'SHA256SUMS') { continue }
+                    if (-not $want.ContainsKey($name)) {
                         throw "unlisted file in package: $($e.FullName)"
                     }
                     $s = $e.Open()
                     try { $hash = $sha.ComputeHash($s) } finally { $s.Dispose() }
                     $got = ([BitConverter]::ToString($hash)).Replace('-', '').ToLower()
-                    if ($got -ne $want[$e.FullName]) {
+                    if ($got -ne $want[$name]) {
                         throw "SHA256SUMS mismatch: $($e.FullName)"
                     }
                 }
@@ -1449,12 +1473,15 @@ function Resolve-Payload {
             # Verification passed -- now, and only now, write the files.
             foreach ($e in $zip.Entries) {
                 if ($e.FullName -eq '' -or $e.FullName.EndsWith('/')) { continue }
-                $rel = $e.FullName.Replace('/', '\')
+                $name = $e.FullName.Substring($top.Length)
+                $rel = $name.Replace('/', '\')
                 $dest = [IO.Path]::GetFullPath((Join-Path $rootFull $rel))
                 New-Item -ItemType Directory -Path (Split-Path -Parent $dest) -Force | Out-Null
                 [IO.Compression.ZipFileExtensions]::ExtractToFile($e, $dest, $true)
             }
         } finally { $zip.Dispose() }
+        # `$top` is stripped on the way out, so the extraction root itself is the
+        # distribution root in both shapes -- the rest of the script needs no other change.
         return $root
     }
     return $ScriptDir
@@ -2388,7 +2415,13 @@ $btnInstall.Add_Click({
             foreach ($a in $argv) {
                 if ($a.StartsWith('-')) { $parts += $a } else { $parts += (& $q $a) }
             }
-            $inner = '& ' + (& $q $InstallPs1) + ' ' + ($parts -join ' ') + ' *> ' + (& $q $logFile)
+            # A terminating error (throw / $ErrorActionPreference='Stop') does NOT go into a
+            # `*>` redirection -- the engine reports it at the host instead. That is how the
+            # 0.1.5 setup.exe showed "Install failed (exit 1) -- see the log above" over an
+            # EMPTY log while install.ps1 had a very clear message for the console nobody
+            # could see. The catch writes that reason into the same file.
+            $inner = 'try { & ' + (& $q $InstallPs1) + ' ' + ($parts -join ' ') + ' *> ' + (& $q $logFile)
+            $inner += ' } catch { ($_ | Out-String) | Out-File -LiteralPath ' + (& $q $logFile) + ' -Append; exit 1 }'
             $ps = New-Object System.Diagnostics.Process
             # #422: never a bare name -- CreateProcess searches the current directory,
             # which is the unpack directory an archive supplier controls.
@@ -3102,7 +3135,16 @@ def iexpress_sed(target: Path, src: Path, files: list[str]) -> str:
 
 
 def emit_exe(zip_bytes: bytes, target: Path) -> bool:
-    """iexpress (Windows 自带) 打自解压安装包: payload.zip + install.ps1 + install.cmd。"""
+    """iexpress (Windows 自带) 打自解压安装包: payload.zip + install.ps1 + install.cmd。
+
+    载荷**必须**是"发行目录的内容"压在 zip 根上。0.1.5 发布出去的那个 exe 是从目录本身
+    压的（每条目多一层 `loment-<ver>-.../`），安装器当场把完整包判成不完整。install.ps1
+    现在两种形状都认（`$top`），但**发行侧只发根上那种**：一种形状，少一条可能漂的路。
+    """
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        if "SHA256SUMS" not in zf.namelist():
+            raise SystemExit("  [setup.exe] 载荷没有根上的 SHA256SUMS —— 拒绝打一个装不上的包"
+                             "（把发行目录的**内容**压进去，不要压目录本身）")
     src = STAGE / "exe-payload"
     if src.exists():
         shutil.rmtree(src)

@@ -559,6 +559,27 @@ def test_installers_name_an_earlier_lompi() -> None:
               "loment" in body and "lompi" in body, f"检查体里少了名字: {body[:90]!r}")
 
 
+def test_setup_shapes_are_pinned_statically() -> None:
+    """自解压包的两条性质, 用**静态形状**钉住 —— 因为真跑那半只在 Windows 上。
+
+    2026-10-21 发布出去的那个 `setup.exe` 有两处静默:
+      1. 载荷是从**发行目录**压的 (每条目带 `loment-<ver>-.../`), 而 install.ps1 只在
+         zip 根上找 `SHA256SUMS` —— 完整包被当成 "package is incomplete" 拒绝;
+      2. 失败原因走的是**终止性错误**, 它绕过窗口那条 `*>` 重定向 —— 日志是空的,
+         回执却写着 "see the log above"。
+    真跑的两条在 `test_windows_installer` 里; 门禁只有 ubuntu runner, 所以这一条在两个
+    平台都跑得到, 钉的是"这两个形状还在代码里"。
+    """
+    ps = loment_dist.INSTALL_PS1
+    check("install.ps1 有'单层目录载荷'的归一化 (0.1.5 那个形状)",
+          "$tops.Count -eq 1" in ps and "$e.FullName.Substring($top.Length)" in ps,
+          "载荷带一层共用目录时会被当成 package incomplete")
+    wp = loment_dist.WELCOME_PS1
+    check("welcome.ps1 把子进程的终止性错误也写进日志 (0.1.5 是空日志)",
+          "'try { & '" in wp and "} catch {" in wp and "-Append" in wp,
+          "throw 绕过 *> 重定向 —— 窗口又会看不见原因")
+
+
 def test_windows_installer(zipf: Path) -> None:
     if sys.platform != "win32":
         # 这一条验的是 install.ps1 / install.cmd 那套 Windows 安装脚本。runner 上**有
@@ -596,6 +617,53 @@ def test_windows_installer(zipf: Path) -> None:
     out = (r.stdout or "") + (r.stderr or "")
     check("install.ps1 -PayloadZip (自解压包路径) 也能跑",
           r.returncode == 0 and "payload" in out, out[-220:])
+
+    # 2026-10-21: the released 0.1.5 setup.exe carried a payload zipped from the
+    # distribution **directory** -- every entry prefixed `loment-<ver>-.../`. The old
+    # fixture was hand-built root-flat, so it could never catch that; install.ps1 looked
+    # for SHA256SUMS at the archive root and called a complete package incomplete.
+    # Fixture note: `payload(..., {})` carries no binaries, so a **real** install would
+    # stop later at the smoke test. That is why this one stays `-DryRun`: reaching the
+    # plan at all means the payload was accepted, verified and unpacked. (Checked by hand
+    # on 2026-10-21 against the same fixture: the real run gets past "[1/6] SHA256SUMS
+    # verified" and copies bin/ + share/, then fails only on the absent driver.)
+    wrapped = work / "payload-wrapped.zip"
+    wrapped.write_bytes(loment_dist._zip(f"loment-{VER}-windows-x64",
+                                         loment_dist.payload("windows", {})))
+    r = subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps1),
+                        "-DryRun", "-PayloadZip", str(wrapped)], capture_output=True,
+                       text=True, shell=False, encoding="utf-8", errors="replace",
+                       timeout=180)
+    out = (r.stdout or "") + (r.stderr or "")
+    check("install.ps1 -PayloadZip 认单层目录的载荷 (0.1.5 那个形状)",
+          r.returncode == 0 and "dry-run" in out and "package is incomplete" not in out,
+          out[-220:])
+
+    # The window must show WHY the install failed. `*>` does not capture a terminating
+    # error (throw / $ErrorActionPreference='Stop'), so on 0.1.5 the log stayed empty and
+    # the receipt said "see the log above" over nothing. Run the real window with the
+    # real child wiring against a script that only throws, and look for the marker.
+    marker = "boom-marker-4f2a"
+    thrower = work / "throws.ps1"
+    thrower.write_text(f"throw '{marker}'\n", encoding="ascii")
+    tdir = Path(tempfile.gettempdir())
+    before = set(tdir.glob("loment-setup-*.log"))
+    r = subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                        str(root / "welcome.ps1"), "-InstallPs1", str(thrower),
+                        "-AutoRun", "-AutoClose", "-Prefix", str(work / "inst-gui"),
+                        "-NoPath", "-NoFileType", "-NoSkill", "-DryRun"],
+                       capture_output=True, text=True, shell=False,
+                       encoding="utf-8", errors="replace", timeout=180)
+    fresh = set(tdir.glob("loment-setup-*.log")) - before
+    hit = False
+    for p in fresh:
+        data = p.read_bytes()
+        # `*>` writes UTF-16LE; Out-File -Append matches it. Accept either, so this
+        # criterion measures "the text arrived", not the encoding choice.
+        if marker.encode() in data or marker.encode("utf-16-le") in data:
+            hit = True
+    check("welcome.ps1 把 install.ps1 的终止性错误写进日志 (0.1.5 是空的)", hit,
+          f"new logs={len(fresh)} rc={r.returncode} {(r.stderr or '')[-160:]}")
 
     # #423: 一个把条目写到解包目录之外的 zip 必须被**写盘之前**拒绝。
     # `..\loment-escape.txt` 就是最小形状；不校验时它会落到 %TEMP% 根上。
@@ -1200,6 +1268,7 @@ def main() -> int:
                      ("包里那个 VM 真跑一份程序", test_lvm_ships_and_runs_a_program),
                      ("布局与脚本卫生", test_layout), ("归档内容与确定性", test_archives),
                      ("安装脚本点名更靠前的同名命令", test_installers_name_an_earlier_lompi),
+                     ("自解压包的两种载荷形状 (静态)", test_setup_shapes_are_pinned_statically),
                      ("安装器加固 (0.1.5 security)", test_installer_hardening),
                      ("发布完整性锚与工作流权限面", test_release_integrity_anchor),
                      ("--check 的新鲜度", test_check_detects_staleness),

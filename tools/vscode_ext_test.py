@@ -286,10 +286,32 @@ def test_vscode_check_command_runs_on_a_default_install():
                              text=True, timeout=60, shell=False)
         assert rr2.returncode == 0 and rr2.stdout.strip() == "", (
             f"干净文件应当 rc=0 且无输出, 实得 {rr2.returncode}: {rr2.stdout!r}")
+
+        # **表层语法的文件（这里还带 `use`）要交给参考实现**：语言服务的 `--check`
+        # 既不解 `use`（#1166），自举版也不认 `choose write grammar`（同一份 `bitkit.lomt`
+        # 在自举 `lsp --check` 下满屏 E002，参考实现说 OK）。
+        # 夹具用 java 那个例子：`cproject` 目前在 main 上**参考实现也拒**（C 那边的
+        # 32 位字面量 3988292384），拿它当"应当 rc=0"的夹具会测到另一个缺陷。
+        r2 = _activate({"enableLsp": False, "toolCommand": "loment"}, [],
+                       run_cmd="loment.checkFile",
+                       active=str(ROOT / "loment/examples/multisyntax-projects/java/"
+                                  "01-intseq/main.lomt"))
+        got2 = json.loads(r2.stdout)
+        assert got2.get("ok") and got2.get("execs"), got2
+        ex2 = got2["execs"][-1]
+        assert Path(ex2["args"][0]).name == "loment.py", ex2
+        assert ex2["args"][1] == "diag", ex2
+        rr3 = subprocess.run([_python(), *ex2["args"]], cwd=ex2.get("cwd") or str(ROOT),
+                             capture_output=True, text=True, timeout=120, shell=False,
+                             encoding="utf-8", errors="replace")
+        assert rr3.returncode == 0, (
+            f"参考实现应当认这份带外门依赖的源, 实得 {rr3.returncode}: "
+            f"{rr3.stdout[-300:]!r}")
     finally:
         probe.unlink(missing_ok=True)
     print("      默认安装：`loment.checkFile` 的 argv = python …--check <file>，"
-          "错误文件 rc=1 且逐行对得上 problemMatcher，干净文件 rc=0")
+          "错误文件 rc=1 且逐行对得上 problemMatcher，干净文件 rc=0；"
+          "外门/多文件走 tools/loment.py diag")
 
 
 # ---------------------------------------------------------------- 4. VSIX

@@ -472,15 +472,20 @@ function activate(context) {
       }
       const r = workspaceRoot(path.dirname(file));
       const rel = path.relative(r, file).replace(/\\/g, '/');
-      // **有 `use` 的时候先问检出里的参考实现**：`tools/loment.py diag` 会解 `use` 树，
-      // 两个语言服务**都不会**（只查当前文件），于是任何多文件工程的跨模块调用都报
-      // `E002 符号未声明` —— 2026-10-21 实测：`cproject/main.lomt` 在 `--check` 下 5 条
-      // E002，参考实现说 `[OK] 无错误`。没有 `use` 的单文件用 `--check`（**不需要 Python**）。
-      let uses = false;
+      // **两种情况先问检出里的参考实现**（否则用户拿到的是假错）：
+      //   1. 文件有 `use` —— 两个语言服务都不解 `use` 树，跨模块调用一律报
+      //      `E002 符号未声明`（#1166）；
+      //   2. 文件声明了外门语法 —— 参考实现认得声明（`[OK]`），而**自举版** `lsp --check`
+      //      不认（2026-10-21 实测：`bitkit.lomt` 满屏 E002，Python 版同一份文件干净）。
+      // 其余单文件仍走 `--check`（**不需要 Python**）。
+      let needsReference = false;
       try {
-        uses = usesModules(fs.readFileSync(file, 'utf8'));
+        const text = fs.readFileSync(file, 'utf8');
+        const decl = readGrammarDecl(text);
+        needsReference = usesModules(text)
+          || (decl.declared && languageIdFor(decl.grammar) !== 'loment');
       } catch (e) { /* 读不了就按单文件走 */ }
-      if (uses) {
+      if (needsReference) {
         const ref = findTool(r, 'loment.py')
           || findTool(path.dirname(file), 'loment.py');
         if (ref) {

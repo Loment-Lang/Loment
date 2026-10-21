@@ -180,7 +180,9 @@ jobs:
         run: |
           set -eu
           # 只取这两个 ref：工作区是浅的也可能发生（fetch-depth 之外），显式再来一次。
-          git fetch -q --no-tags origin \n            "+refs/heads/main:refs/remotes/origin/main" \n            "+refs/tags/$TAG:refs/tags/$TAG"
+          git fetch -q --no-tags origin \
+            "+refs/heads/main:refs/remotes/origin/main" \
+            "+refs/tags/$TAG:refs/tags/$TAG"
           sha=$(git rev-parse "$TAG^{commit}")
 
           # (1) 祖先：tag 指着的那一笔必须已经合进 main
@@ -192,7 +194,9 @@ jobs:
           echo "祖先检查: $sha 在 main 上"
 
           # (2) 门禁：这一笔的聚合检查必须 success —— 否则发布的是没被任何判据看过的树
-          got=$(gh api \n            "repos/${GITHUB_REPOSITORY}/commits/${sha}/check-runs?filter=latest&per_page=100" \n            --jq '[.check_runs[] | select(.name == "ci.py --static-only") | .conclusion] | last // "missing"')
+          got=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/commits/${sha}/check-runs?filter=latest&per_page=100" \
+            --jq '[.check_runs[] | select(.name == "ci.py --static-only") | .conclusion] | last // "missing"')
           if [ "$got" != "success" ]; then
             echo "::error::$sha 的 \`ci.py --static-only\` 是 \`$got\` —— 不发布。"
             echo "::error::先把门禁跑绿（或者等它跑完），再打 tag。"

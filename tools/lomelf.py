@@ -6304,7 +6304,7 @@ def compile_ll(text: str, objects: list | None = None,
     TEXT_VADDR, DATA_VADDR = ELF_TEXT_VADDR, ELF_DATA_VADDR   # PE 目标会改这两个全局
     globals_, funcs, externs = parse_ll(text)
     # A name that is both `declare`d and `define`d in this text is an internal call.
-    # Multi-input linking (docs/279 sec 6.2) concatenates the app IR with library IRs;
+    # Multi-input linking (docs/282 sec 6.2) concatenates the app IR with library IRs;
     # the app's `declare __jl_x` then meets the library's `define __jl_x`. Keeping the
     # name in `externs` would send the call through the C ABI register path, which is
     # wrong on PE. Same rule as `merge_ir_texts` (declare satisfied by define).

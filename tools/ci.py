@@ -110,7 +110,7 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "lspe_test", "potato_
                  "loment_pytrans_test",
                  # Java 翻成 Loment: 跑出的数 == javac 编那份 Java 跑出的数 (docs/188 §7.1)
                  "loment_jtrans_test",
-                 # Java AOT: 真 javac class -> Loment IR -> PE (docs/278/279)
+                 # Java AOT: 真 javac class -> Loment IR -> PE (docs/281/282)
                  "loment_java_test",
                  # C# 翻成 Loment: 跑出的数 == dotnet 编那份 C# 跑出的数 (docs/188 §7.1)
                  "loment_cstrans_test",

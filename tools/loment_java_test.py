@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""loment_java_test.py — Java AOT P0 (docs/274, docs/275).
+"""loment_java_test.py — Java AOT P0 (docs/281, docs/282).
 
 The first vertical slice:
 

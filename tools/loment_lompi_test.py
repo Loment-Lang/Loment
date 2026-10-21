@@ -454,7 +454,7 @@ def test_show_reports_the_content_identity():
 @test
 def test_foreign_package_kind_is_checked_hashed_and_planned():
     """A foreign package is recognised by `foreign.lomp`, its jar is in the
-    identity, and `show` says `kind: foreign` (docs/278/279; docs/222 §5).
+    identity, and `show` says `kind: foreign` (docs/281/282; docs/222 §5).
 
     This is the lompi-side half of the Java AOT path: without it `install`
     would copy only the `.lomt` and the jar would silently disappear.

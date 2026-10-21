@@ -378,7 +378,7 @@ fn cmd_tree(ws: ptr, buf: ptr, store: ptr, av_spec: u64) -> u32 {
 
 // ---------------------------------------------------------------- resolve / verify
 
-// ---- 锁 v2 的外源字段 (docs/279 §5.3)
+// ---- 锁 v2 的外源字段 (docs/282 §5.3)
 //
 // 一个外源包在锁里多一行: `foreign <名> <版本> <身份> jar=<sha> ir=<sha>
 // abi=<JL-A/1> compiler=<id>`。**两个哈希都要重算**, 不是信 `foreign.txt` 里写的 ——
@@ -726,7 +726,7 @@ fn cmd_verify(ws: ptr, buf: ptr, store: ptr, av_spec: u64, av_lock: u64) -> u32 
     if got as u32 != o || !txt_eq(R(ws), 0, o, file, 0, o) {
         err_lit("[DIFF] lompi: lock does not match store\n");
         // 指出**第一处不同**的那一行 —— 外源行的 `jar=` / `ir=` / `compiler=`
-        // 就在行里, 所以"哪一项变了"不用另造一套字段名 (docs/279 §5.3)。
+        // 就在行里, 所以"哪一项变了"不用另造一套字段名 (docs/282 §5.3)。
         let a: u32 = 0;
         let b: u32 = 0;
         let nf: u32 = got as u32;
@@ -986,7 +986,7 @@ fn print_help() {
     out_lit("  lompi check   <dir>                                 is this a valid Loment library?\n");
     out_lit("  lompi fetch   [--registry URL] [--registry-sha256 H]  fetch the registry (H = index sha256)\n");
     out_lit("        --registry-sha256 H  pin the index hash out of band (64 hex; docs/236 §7.1)\n");
-    out_lit("        --foreign-index-sha256 H  pin the foreign index separately (64 hex; docs/279 §7)\n");
+    out_lit("        --foreign-index-sha256 H  pin the foreign index separately (64 hex; docs/282 §7)\n");
     out_lit("        --insecure           accept unpinned indexes from 127.0.0.1 only\n");
     out_lit("  lompi config                                        show global root and registry\n");
     out_lit("  lompi version                                       print the version\n");
@@ -2291,7 +2291,7 @@ fn net_fetch_registry(req: ptr, dst: ptr, pin2: ptr, allow_unpinned: u32) -> u32
         }
     }
     }
-    // 外源索引 (docs/279 §4–§5): 源码索引取完之后再跟随它; jar 走流式落盘。
+    // 外源索引 (docs/282 §4–§5): 源码索引取完之后再跟随它; jar 走流式落盘。
     let fk: u32 = net_fetch_foreign(req, dst, base, blen, pin2, allow_unpinned);
     if fk == 2 {
         return 2;                    // 钉子不对 / 没有钉子: 硬失败, 不许退回计划
@@ -2319,7 +2319,7 @@ fn net_fetch_registry(req: ptr, dst: ptr, pin2: ptr, allow_unpinned: u32) -> u32
     return 1;
 }
 
-// ---------------------------------------------------------------- 外源索引 (docs/279)
+// ---------------------------------------------------------------- 外源索引 (docs/282)
 
 /// 路径里有 `..` 段? — 注册表给的是不可信输入, 成员路径不许跳出包目录。
 fn net_has_dotdot(p: ptr, n: u32) -> u32 {
@@ -2481,7 +2481,7 @@ fn net_fetch_foreign(req: ptr, dst: ptr, base: ptr, blen: u32,
     let dig: ptr = sys_alloc(64);
     let hex: ptr = sys_alloc(128);
     // 带外钉子: 外源索引与它里面的哈希走同一条明文通道。jar 是**可执行代码**,
-    // 所以这里的默认是拒, 不是"提醒一下"(docs/279 §7)。
+    // 所以这里的默认是拒, 不是"提醒一下"(docs/282 §7)。
     if pin != (0 as ptr) {
         sha_hex_of(idx, ilen as u32, st, dig, hex);
         if !txt_eq(hex, 0, 64, pin, 0, 64) {
@@ -2492,7 +2492,7 @@ fn net_fetch_foreign(req: ptr, dst: ptr, base: ptr, blen: u32,
     } else if allow_unpinned == 0 {
         sys_write_str(2, "lompi: this registry has foreign packages, but the foreign index is not pinned\n");
         sys_write_str(2, "lompi: pass --foreign-index-sha256 <64 hex> (get it over a trusted channel), or\n");
-        sys_write_str(2, "lompi: --insecure for a local registry on 127.0.0.1 (docs/279 §7)\n");
+        sys_write_str(2, "lompi: --insecure for a local registry on 127.0.0.1 (docs/282 §7)\n");
         return 2;
     } else {
         sys_write_str(1, "lompi: --insecure: an unpinned foreign index is accepted from loopback only\n");
@@ -2646,7 +2646,7 @@ fn cmd_fetch(ws: ptr, buf: ptr, m: u32) -> u32 {
             return cli_die("--registry-sha256 wants exactly 64 hex characters");
         }
     }
-    // 外源索引是**第二份**文件 —— 一个钉子盖不住两个 (docs/279 §7)。
+    // 外源索引是**第二份**文件 —— 一个钉子盖不住两个 (docs/282 §7)。
     // 没给开关时再看 lompi.conf 的 `foreign_index_sha256()`。
     let pin2: ptr = 0 as ptr;
     let pin2av: u64 = cfg_flag_arg(buf, m, "--foreign-index-sha256");
@@ -2665,7 +2665,7 @@ fn cmd_fetch(ws: ptr, buf: ptr, m: u32) -> u32 {
             }
         }
     }
-    // `--insecure` 只对本地回环生效 (docs/279 §7): 它在别处不是"降级", 是拒绝。
+    // `--insecure` 只对本地回环生效 (docs/282 §7): 它在别处不是"降级", 是拒绝。
     let insecure: u32 = 0;
     if cfg_has_flag(buf, m, "--insecure") {
         insecure = 1;

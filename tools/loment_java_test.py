@@ -208,6 +208,52 @@ fn _start() {
 
 
 @test
+def test_arrays_end_to_end():
+    """int[] and long[]: newarray, iastore/iaload, lastore/laload, loop code."""
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "deps" / "arraylib").mkdir(parents=True)
+        ir, _iface = _emit(FIX / "ArrayLib.class", "arraylib", d / "deps" / "arraylib")
+        rc = _build_and_run(d, ir, """module app
+use arraylib
+
+fn _start() {
+    let a: i32 = arraylib_sum();
+    let b: i64 = arraylib_sumLong();
+    let ok: i64 = ((a - 140) as i64) + (b - 14);
+    syscall4(60, ok as u64, 0, 0);
+}
+""")
+        if sys.platform == "win32":
+            assert rc == 0, rc
+            print("      sum()=140, sumLong()=14 -> exit 0 on PE")
+        else:
+            print("SKIP: PE execution is Windows-only; IR emitted and linked to ELF")
+
+
+@test
+def test_objects_end_to_end():
+    """new/dup/<init>/getfield/putfield with a default constructor."""
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "deps" / "objlib").mkdir(parents=True)
+        ir, _iface = _emit(FIX / "ObjLib.class", "objlib", d / "deps" / "objlib")
+        rc = _build_and_run(d, ir, """module app
+use objlib
+
+fn _start() {
+    let r: i32 = objlib_makeAndRead();
+    syscall4(60, (r - 16) as u64, 0, 0);
+}
+""")
+        if sys.platform == "win32":
+            assert rc == 0, rc
+            print("      new/getfield/putfield -> 16 on PE")
+        else:
+            print("SKIP: PE execution is Windows-only; IR emitted and linked to ELF")
+
+
+@test
 def test_merge_removes_satisfied_declaration():
     """The merged IR has no extern declaration for a symbol defined in a second input."""
     with tempfile.TemporaryDirectory() as td:

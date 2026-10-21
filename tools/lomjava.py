@@ -106,9 +106,17 @@ class Method:
 
 
 @dataclass
+class Field:
+    access: int
+    name: str
+    desc: str
+
+
+@dataclass
 class ClassFile:
     name: str
     methods: list[Method]
+    fields: list[Field]
     pool: list
 
 
@@ -164,9 +172,13 @@ def parse_class(data: bytes) -> ClassFile:
     r.u2()  # super
     for _ in range(r.u2()):
         r.u2()
-    for _ in range(r.u2()):  # fields
-        r.u2(); r.u2(); r.u2()
+    fields: list[Field] = []
+    for _ in range(r.u2()):
+        access = r.u2()
+        fname = _utf8(pool, r.u2())
+        fdesc = _utf8(pool, r.u2())
         _skip_attributes(r, pool)
+        fields.append(Field(access, fname, fdesc))
     methods: list[Method] = []
     for _ in range(r.u2()):
         access = r.u2()
@@ -189,7 +201,7 @@ def parse_class(data: bytes) -> ClassFile:
                 _skip_attributes(cr, pool)
         methods.append(Method(access, name, desc, code, max_stack, max_locals))
 
-    return ClassFile(_class_name(pool, this_class), methods, pool)
+    return ClassFile(_class_name(pool, this_class), methods, fields, pool)
 
 
 def _skip_attributes(r: Reader, pool) -> None:
@@ -332,6 +344,13 @@ def _init_ops() -> None:
         _op(code, name, "h", -2)
     _op(167, "goto", "h", 0)
     _op(184, "invokestatic", "h", 0)
+    _op(46, "iaload", "", -1); _op(47, "laload", "", -1)
+    _op(79, "iastore", "", -3); _op(80, "lastore", "", -3)
+    _op(188, "newarray", "b", 0); _op(190, "arraylength", "", 0)
+    _op(187, "new", "h", 1); _op(89, "dup", "", 1)
+    _op(87, "pop", "", -1); _op(88, "pop2", "", -2)
+    _op(180, "getfield", "h", 0); _op(181, "putfield", "h", -2)
+    _op(183, "invokespecial", "h", 0)
     _op(172, "ireturn", "", -1); _op(173, "lreturn", "", -1)
     _op(174, "freturn", "", -1); _op(175, "dreturn", "", -2)
     _op(176, "areturn", "", -1); _op(177, "return", "", 0)
@@ -371,6 +390,30 @@ def decode(code: bytes) -> list[Insn]:
     return out
 
 
+def desc_type(t: str) -> str:
+    if not t:
+        raise JavaError("empty field descriptor")
+    c = t[0]
+    if c in "IJZBCS":
+        return "i64" if c == "J" else "i32"
+    if c in "FD":
+        raise JavaError("float/double fields are not supported")
+    if c in "L[":
+        return "ptr"
+    raise JavaError(f"bad field descriptor {t!r}")
+
+
+def fieldref(pool: list, idx: int) -> tuple[str, str, str]:
+    ent = pool[idx] if idx < len(pool) else None
+    if not ent or ent[0] != CP_FIELDREF:
+        raise JavaError(f"constant pool #{idx}: expected Fieldref")
+    cls = _class_name(pool, ent[1])
+    nat = pool[ent[2]]
+    if not nat or nat[0] != CP_NAME_AND_TYPE:
+        raise JavaError(f"constant pool #{ent[2]}: expected NameAndType")
+    return cls, _utf8(pool, nat[1]), _utf8(pool, nat[2])
+
+
 def methodref(pool: list, idx: int) -> tuple[str, str, str]:
     ent = pool[idx] if idx < len(pool) else None
     if not ent or ent[0] not in (CP_METHODREF, CP_INTERFACE_METHODREF):
@@ -387,7 +430,10 @@ def _delta(x: Insn, pool: list) -> int:
     if name in ("invokestatic", "invokevirtual", "invokespecial", "invokeinterface"):
         _cls, _n, desc = methodref(pool, x.args[0])
         params, ret = parse_method_descriptor(desc)
-        return (0 if ret == "void" else 1) - len(params)
+        delta = (0 if ret == "void" else 1) - len(params)
+        if name != "invokestatic":
+            delta -= 1          # `this` is an extra stack value
+        return delta
     return x.stack_delta
 
 
@@ -427,19 +473,52 @@ def stack_heights(insns: list[Insn], pool: list) -> dict[int, int]:
 
 # ---------------------------------------------------------------- IR emitter
 
+def _alloc_sym(module: str) -> str:
+    return f"__jrt_alloc_{module}"
+
+
+def _jrt_alloc_ir(module: str) -> str:
+    """A minimal per-module heap: one MiB of zeroed .bss and a bump pointer.
+
+    Per-module symbols avoid a duplicate definition when two libraries are
+    linked before a shared `jrt.ll` exists. There is no collection yet.
+    """
+    sym = _alloc_sym(module)
+    return f'''@__jrt_heap_{module} = internal global [1048576 x i8] zeroinitializer
+@__jrt_off_{module} = internal global i32 0
+
+define internal ptr @{sym}(i32 %n) {{
+entry:
+  %o = load i32, ptr @__jrt_off_{module}
+  %p = add i32 %o, 8
+  %e = add i32 %p, %n
+  store i32 %e, ptr @__jrt_off_{module}
+  %q = getelementptr [1048576 x i8], ptr @__jrt_heap_{module}, i32 0, i32 %p
+  ret ptr %q
+}}
+'''
+
+
 def mangle(module: str, cls: str, name: str, desc: str) -> str:
     h = hashlib.sha256(f"{cls}.{name}{desc}".encode()).hexdigest()[:8]
-    return f"__jl_{module}_{name}_{h}"
+    # `<init>` is not a legal LLVM symbol character; keep the digest (which is
+    # computed over the real name) and sanitize only the readable prefix.
+    safe = re.sub(r"[^A-Za-z0-9_.$-]", "_", name)
+    return f"__jl_{module}_{safe}_{h}"
 
 
 def _slot_local(name: str, ty: str) -> str:
-    return f"%loc{name}"
+    # A JVM local slot may be reused with a different type (e.g. `int i` twice,
+    # then the same slot holds a `long`). Give each (slot, type) pair its own
+    # storage; the verifier guarantees a slot is written before it is read, so
+    # this preserves semantics without a full local-type lattice.
+    return f"%loc{name}_{ty}"
 
 
 class Emitter:
     def __init__(self, insns: list[Insn], heights: dict[int, int], max_stack: int,
                  params: list[str], param_slots: list[int], ret: str, pool: list,
-                 module: str, own_class: str):
+                 module: str, own_class: str, field_layout: dict, obj_size: int):
         self.insns = insns
         self.heights = heights
         self.max_stack = max_stack
@@ -449,9 +528,11 @@ class Emitter:
         self.pool = pool
         self.module = module
         self.own_class = own_class
+        self.field_layout = field_layout
+        self.obj_size = obj_size
         self.lines: list[str] = []
         self.tmp = 0
-        self.locals: dict[int, str] = {}
+        self.locals: dict[tuple[int, str], str] = {}
 
     def t(self) -> str:
         self.tmp += 1
@@ -461,13 +542,8 @@ class Emitter:
         self.lines.append("  " + s)
 
     def local(self, idx: int, ty: str) -> str:
-        cur = self.locals.get(idx)
-        if cur is None:
-            self.locals[idx] = ty
-            return ty
-        if cur != ty:
-            raise JavaError(f"local {idx} used as {ty} but previously {cur}")
-        return cur
+        self.locals[(idx, ty)] = ty
+        return ty
 
     def run(self) -> str:
         # entry: allocate locals and operand-stack slots, copy parameters.
@@ -477,11 +553,7 @@ class Emitter:
             self.local(slot, ty)
         # Discover local types from the bytecode before emitting allocas.
         self._scan_locals()
-        for idx in range(max(self.locals.keys(), default=-1) + 1):
-            if idx not in self.locals:
-                self.locals[idx] = "i32"
-        for idx in sorted(self.locals):
-            ty = self.locals[idx]
+        for idx, ty in sorted(self.locals):
             self.emit(f"{_slot_local(str(idx), ty)} = alloca {ty}")
         for i, (slot, ty) in enumerate(zip(self.param_slots, self.params)):
             self.emit(f"store {ty} %p{i}, ptr {_slot_local(str(slot), ty)}")
@@ -507,7 +579,9 @@ class Emitter:
                 self.local(int(name[-1]), "i64")
             elif name.startswith("iload_") or name.startswith("istore_"):
                 self.local(int(name[-1]), "i32")
-            elif name.startswith("aload") or name.startswith("astore"):
+            elif name in ("aload", "astore"):
+                self.local(x.args[0], "ptr")
+            elif name.startswith("aload_") or name.startswith("astore_"):
                 self.local(int(name[-1]), "ptr")
             elif name.startswith("fload") or name.startswith("fstore"):
                 raise JavaError("float locals are not supported in the first slice")
@@ -580,10 +654,19 @@ class Emitter:
             v = self.t()
             self.emit(f"{v} = load {ty}, ptr {_slot_local(str(idx), ty)}")
             self._push(ty, v, h0)
+        elif name in ("aload", "aload_0", "aload_1", "aload_2", "aload_3"):
+            idx = x.args[0] if x.args else int(name[-1])
+            v = self.t()
+            self.emit(f"{v} = load ptr, ptr {_slot_local(str(idx), 'ptr')}")
+            self._push("ptr", v, h0)
         elif name in ("istore", "istore_0", "istore_1", "istore_2", "istore_3"):
             idx = x.args[0] if x.args else int(name[-1])
             v = self._pop("i32", h0 - 1)
             self.emit(f"store i32 {v}, ptr {_slot_local(str(idx), 'i32')}")
+        elif name in ("astore", "astore_0", "astore_1", "astore_2", "astore_3"):
+            idx = x.args[0] if x.args else int(name[-1])
+            v = self._pop("ptr", h0 - 1)
+            self.emit(f"store ptr {v}, ptr {_slot_local(str(idx), 'ptr')}")
         elif name in ("lstore", "lstore_0", "lstore_1", "lstore_2", "lstore_3"):
             idx = x.args[0] if x.args else int(name[-1])
             v = self._pop("i64", h0 - 1)
@@ -686,6 +769,97 @@ class Emitter:
             c = self.t()
             self.emit(f"{c} = icmp {cond} i32 {a}, {b}")
             self.emit(f"br i1 {c}, label %L{x.args[0]}, label %L{x.off + x.size}")
+        elif name == "dup":
+            v = self.t()
+            self.emit(f"{v} = load i64, ptr %stk{h0 - 1}")
+            self.emit(f"store i64 {v}, ptr %stk{h0}")
+        elif name in ("pop", "pop2"):
+            pass
+        elif name == "new":
+            cls = _class_name(self.pool, x.args[0])
+            if cls != self.own_class:
+                raise JavaError(f"new {cls}: only the current class is supported yet")
+            p = self.t()
+            self.emit(f"{p} = call ptr @{_alloc_sym(self.module)}(i32 {self.obj_size})")
+            self._push("ptr", p, h0)
+        elif name == "getfield":
+            cls, fname, desc = fieldref(self.pool, x.args[0])
+            if cls != self.own_class or fname not in self.field_layout:
+                raise JavaError(f"getfield {cls}.{fname}: field is not in this class")
+            off, ty = self.field_layout[fname]
+            obj = self._pop("ptr", h0 - 1)
+            q = self.t()
+            self.emit(f"{q} = getelementptr i8, ptr {obj}, i32 {off}")
+            v = self.t()
+            self.emit(f"{v} = load {ty}, ptr {q}")
+            self._push(ty, v, h0 - 1)
+        elif name == "putfield":
+            cls, fname, desc = fieldref(self.pool, x.args[0])
+            if cls != self.own_class or fname not in self.field_layout:
+                raise JavaError(f"putfield {cls}.{fname}: field is not in this class")
+            off, ty = self.field_layout[fname]
+            val = self._pop(ty, h0 - 1)
+            obj = self._pop("ptr", h0 - 2)
+            q = self.t()
+            self.emit(f"{q} = getelementptr i8, ptr {obj}, i32 {off}")
+            self.emit(f"store {ty} {val}, ptr {q}")
+        elif name == "invokespecial":
+            cls, mname, desc = methodref(self.pool, x.args[0])
+            if mname == "<init>" and cls == "java/lang/Object":
+                self._pop("ptr", h0 - 1)
+                return
+            if mname == "<init>" and cls == self.own_class:
+                params, ret = parse_method_descriptor(desc)
+                n = len(params)
+                vals = [""] * n
+                for i in range(n - 1, -1, -1):
+                    vals[i] = self._pop(params[i], h0 - n + i)
+                this = self._pop("ptr", h0 - n - 1)
+                sym = mangle(self.module, cls, mname, desc)
+                argtxt = ", ".join([f"ptr {this}"] +
+                                   [f"{t} {v}" for t, v in zip(params, vals)])
+                self.emit(f"call void @{sym}({argtxt})")
+                return
+            raise JavaError(f"invokespecial {cls}.{mname}{desc} is not supported")
+        elif name == "newarray":
+            atype = x.args[0]
+            elem = {4: 1, 5: 2, 8: 1, 9: 2, 10: 4, 11: 8}.get(atype)
+            if elem is None:
+                raise JavaError(f"newarray atype {atype} is not supported")
+            count = self._pop("i32", h0 - 1)
+            size = self.t()
+            total = self.t()
+            self.emit(f"{size} = mul i32 {count}, {elem}")
+            self.emit(f"{total} = add i32 {size}, 8")
+            p = self.t()
+            self.emit(f"{p} = call ptr @{_alloc_sym(self.module)}(i32 {total})")
+            self.emit(f"store i32 {count}, ptr {p}")
+            self._push("ptr", p, h0 - 1)
+        elif name == "arraylength":
+            p = self._pop("ptr", h0 - 1)
+            n = self.t()
+            self.emit(f"{n} = load i32, ptr {p}")
+            self._push("i32", n, h0 - 1)
+        elif name in ("iaload", "laload", "iastore", "lastore"):
+            ty = "i64" if name.startswith("l") else "i32"
+            width = 8 if ty == "i64" else 4
+            if name.endswith("store"):
+                val = self._pop(ty, h0 - 1)
+                idx = self._pop("i32", h0 - 2)
+                arr = self._pop("ptr", h0 - 3)
+            else:
+                idx = self._pop("i32", h0 - 1)
+                arr = self._pop("ptr", h0 - 2)
+            base = self.t(); off = self.t(); q = self.t()
+            self.emit(f"{base} = getelementptr i8, ptr {arr}, i32 8")
+            self.emit(f"{off} = mul i32 {idx}, {width}")
+            self.emit(f"{q} = getelementptr i8, ptr {base}, i32 {off}")
+            if name.endswith("store"):
+                self.emit(f"store {ty} {val}, ptr {q}")
+            else:
+                v = self.t()
+                self.emit(f"{v} = load {ty}, ptr {q}")
+                self._push(ty, v, h0 - 2)
         elif name == "invokestatic":
             cls, mname, desc = methodref(self.pool, x.args[0])
             if cls != self.own_class:
@@ -721,29 +895,38 @@ class Emitter:
             raise JavaError(f"opcode {name} at {x.off} is not supported in the first slice")
 
 
-def emit_method_ir(module: str, cls: str, m: Method, pool: list) -> tuple[str, str, str] | None:
-    if not (m.access & ACC_STATIC):
+def emit_method_ir(module: str, cls: str, m: Method, pool: list,
+                   field_layout: dict, obj_size: int) -> tuple[str, str, str] | None:
+    is_ctor = m.name == "<init>"
+    if not (m.access & ACC_STATIC) and not is_ctor:
         return None
     if m.access & (ACC_NATIVE | ACC_ABSTRACT):
         return None
-    if m.name.startswith("<"):
+    if m.name.startswith("<") and not is_ctor:
         return None
     if m.code is None:
         return None
-    params, ret = parse_method_descriptor(m.desc)
+    desc_params, ret = parse_method_descriptor(m.desc)
     if ret not in ("i32", "i64", "void"):
         raise JavaError(f"{cls}.{m.name}: unsupported return type in {m.desc}")
+    if is_ctor:
+        if ret != "void":
+            raise JavaError(f"{cls}.<init>{m.desc}: a constructor must return void")
+        params = ["ptr"] + desc_params
+    else:
+        params = desc_params
     if len(params) > 8:
         raise JavaError(f"{cls}.{m.name}: more than 8 parameters")
     insns = decode(m.code)
     heights = stack_heights(insns, pool)
     sym = mangle(module, cls, m.name, m.desc)
     slots = []
-    slot = 0
+    slot = 1 if is_ctor else 0       # `this` occupies local slot 0
     for t in params:
         slots.append(slot)
         slot += 2 if t == "i64" else 1
-    em = Emitter(insns, heights, m.max_stack, params, slots, ret, pool, module, cls)
+    em = Emitter(insns, heights, m.max_stack, params, slots, ret, pool, module, cls,
+                 field_layout, obj_size)
     body = em.run()
     def irty(t: str) -> str:
         return "void" if t == "void" else t
@@ -754,20 +937,29 @@ def emit_method_ir(module: str, cls: str, m: Method, pool: list) -> tuple[str, s
 
 
 def emit(module: str, cf: ClassFile, ir_path: Path, iface_path: Path) -> list[tuple]:
+    layout: dict[str, tuple[int, str]] = {}
+    off = 8
+    for f in cf.fields:
+        layout[f.name] = (off, desc_type(f.desc))
+        off += 8
+    obj_size = off
     funcs: list[tuple[str, str, str, list[str], str]] = []
     for m in cf.methods:
-        got = emit_method_ir(module, cf.name, m, cf.pool)
+        got = emit_method_ir(module, cf.name, m, cf.pool, layout, obj_size)
         if got is None:
             continue
         sym, text, name = got
         params, ret = parse_method_descriptor(m.desc)
         funcs.append((sym, text, name, params, ret))
     funcs.sort(key=lambda x: (x[2], x[0]))
-    ir_path.write_text("\n\n".join(x[1] for x in funcs) + "\n", encoding="utf-8", newline="\n")
+    ir_path.write_text("\n\n".join(x[1] for x in funcs) + "\n\n" + _jrt_alloc_ir(module),
+                       encoding="utf-8", newline="\n")
 
     lines = [f"module {module}", ""]
     used: set[str] = set()
     for sym, _text, name, params, ret in funcs:
+        if name.startswith("<"):
+            continue
         base = f"{module}_{name}"
         alias = base
         n = 2

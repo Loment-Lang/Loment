@@ -286,10 +286,32 @@ def test_vscode_check_command_runs_on_a_default_install():
                              text=True, timeout=60, shell=False)
         assert rr2.returncode == 0 and rr2.stdout.strip() == "", (
             f"干净文件应当 rc=0 且无输出, 实得 {rr2.returncode}: {rr2.stdout!r}")
+
+        # **表层语法的文件（这里还带 `use`）要交给参考实现**：语言服务的 `--check`
+        # 既不解 `use`（#1166），自举版也不认 `choose write grammar`（同一份 `bitkit.lomt`
+        # 在自举 `lsp --check` 下满屏 E002，参考实现说 OK）。
+        # 夹具用 java 那个例子：`cproject` 目前在 main 上**参考实现也拒**（C 那边的
+        # 32 位字面量 3988292384），拿它当"应当 rc=0"的夹具会测到另一个缺陷。
+        r2 = _activate({"enableLsp": False, "toolCommand": "loment"}, [],
+                       run_cmd="loment.checkFile",
+                       active=str(ROOT / "loment/examples/multisyntax-projects/java/"
+                                  "01-intseq/main.lomt"))
+        got2 = json.loads(r2.stdout)
+        assert got2.get("ok") and got2.get("execs"), got2
+        ex2 = got2["execs"][-1]
+        assert Path(ex2["args"][0]).name == "loment.py", ex2
+        assert ex2["args"][1] == "diag", ex2
+        rr3 = subprocess.run([_python(), *ex2["args"]], cwd=ex2.get("cwd") or str(ROOT),
+                             capture_output=True, text=True, timeout=120, shell=False,
+                             encoding="utf-8", errors="replace")
+        assert rr3.returncode == 0, (
+            f"参考实现应当认这份带外门依赖的源, 实得 {rr3.returncode}: "
+            f"{rr3.stdout[-300:]!r}")
     finally:
         probe.unlink(missing_ok=True)
     print("      默认安装：`loment.checkFile` 的 argv = python …--check <file>，"
-          "错误文件 rc=1 且逐行对得上 problemMatcher，干净文件 rc=0")
+          "错误文件 rc=1 且逐行对得上 problemMatcher，干净文件 rc=0；"
+          "外门/多文件走 tools/loment.py diag")
 
 
 # ---------------------------------------------------------------- 4. VSIX
@@ -351,7 +373,8 @@ def test_vscode_build_and_run_commands():
         print("      SKIP 分支判定: 无 node")
         return
     script = """
-const {invocation} = require(process.argv[1]);
+const {invocation, usesModules} = require(process.argv[1]);
+const fs = require('fs');
 const R = process.argv[2];
 const F = R + '/loment/examples/tour.lomt';
 process.stdout.write(JSON.stringify({
@@ -372,7 +395,15 @@ process.stdout.write(JSON.stringify({
   lib_run:   invocation({root:R, file:R + '/loment/examples/mathutil.lomt',
                          action:'run', platform:'win32', buildDir:'loment/build'}),
   lib_build: invocation({root:R, file:R + '/loment/examples/mathutil.lomt',
-                         action:'build', platform:'win32', buildDir:'loment/build'})
+                         action:'build', platform:'win32', buildDir:'loment/build'}),
+  // 外门语法：入口自己是（C 写的叶子），或依赖是（原生宿主 use 了它）
+  surf_entry: invocation({root:R, file:R + '/loment/examples/cproject/bitkit.lomt',
+                          action:'build', platform:'win32', buildDir:'loment/build'}),
+  surf_dep:   invocation({root:R, file:R + '/loment/examples/cproject/main.lomt',
+                          action:'build', platform:'win32', buildDir:'loment/build'}),
+  uses_yes: usesModules(fs.readFileSync(R + '/loment/examples/cproject/main.lomt', 'utf8')),
+  uses_no:  usesModules(fs.readFileSync(R + '/loment/examples/tour.lomt', 'utf8')),
+  uses_comments_only: usesModules('module t\\n// use "bitkit.lomt"\\n/* use "numkit.lomt" */\\n')
 }));
 """
     r = subprocess.run([node, "-e", script, str(EXT / "src" / "build-cmd.js"), str(ROOT)],
@@ -436,8 +467,41 @@ process.stdout.write(JSON.stringify({
     assert got["lib_build"].get("how") == "lomc", \
         f"库模块只是不能「运行」，编译照旧: {got['lib_build']}"
     print("      库模块：`运行` 拦住并说明缺 `_start`；`编译` 照旧放行")
-    print(f"      编译/运行：清单↔实现对得上；分支判定 {len(got)} 例"
-          f"（CLI / WSL / 开发树 / 报错 / 空窗口）")
+
+    # ⑧ **外门语法要先说清是哪个文件**（2026-10-21）。自举编译器只会说
+    #    "this file does not look like Loment"，而被点名的其实是依赖；入口文件里连
+    #    `choose write grammar` 都没有，用户照着它找不着东西。
+    se = got["surf_entry"]
+    assert "error" in se and "bitkit.lomt" in se["error"], f"入口自己是外门: {se}"
+    assert "lomentc.py" in se["error"], f"报错要给一条真能编的路: {se['error'][:200]}"
+    sd = got["surf_dep"]
+    assert "error" in sd, sd
+    # **第一行**必须点是依赖，不是入口（入口在后面的命令行里当"要编的东西"出现，对的）
+    first = sd["error"].splitlines()[0]
+    assert "bitkit.lomt" in first and "main.lomt" not in first, \
+        f"依赖是外门时要点名**依赖**，不是入口: {first}"
+    assert "module this file uses" in first, f"要说清它是依赖: {first}"
+    print("      外门语法：入口/依赖都被点名，并给出参考实现的命令")
+
+    # ⑨ `use` 的判定（决定「检查」走参考实现还是语言服务）：注释里的不算
+    assert got["uses_yes"] is True, "main.lomt 有 use，却没认出来"
+    assert got["uses_no"] is False, "tour.lomt 没有 use，却被认成有"
+    assert got["uses_comments_only"] is False, "注释里的 use 被当成了依赖"
+    print("      `use` 判定：源码里有、注释里没有")
+
+    # ⑩ Windows 包装脚本抓 stage1 输出时**必须把控制台编码切成 UTF-8**。
+    #    PowerShell 用 `[Console]::OutputEncoding` 解原生命令的 stdout（中文 Windows 上是
+    #    GBK），而 IR 里带着源码注释 —— 按 GBK 解会把中文变乱码，双字节解码还会**吃掉
+    #    后面的换行**：下一个 `define` 被粘进 `;` 注释、`entry:` 落到顶层，clang 报
+    #    `expected top-level entity`（2026-10-21 实测 `tour.lomt`：编译"成功"、链接失败）。
+    #    判据只有**静态形状**：真跑要在 Windows 上构建整个 stage1，门禁在 ubuntu。
+    for ps in (ROOT / "scripts" / "lomc.ps1", ROOT / "scripts" / "install-lsp.ps1"):
+        body = ps.read_text(encoding="utf-8")
+        assert "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding" in body, \
+            f"{ps.name}: 抓取编码没切成 UTF-8 —— IR 里的中文注释会被按 GBK 解坏"
+        assert "[Console]::OutputEncoding = $prevEnc" in body, \
+            f"{ps.name}: 改了控制台编码却没恢复（会把用户的窗口留在 UTF-8 上）"
+    print("      Windows 包装脚本：抓 stage1 输出前切 UTF-8、之后恢复")
 
 
 # ---------------------------------------------------------------- 6. 扩展真的激活
@@ -578,8 +642,13 @@ Module._load = function (req) {
       out.dap = d ? { cmd: d.cmd, args: d.args } : null;
     }
     // 打开 DOCS 里每一份文档（语言提示是事件驱动的，必须真的派事件）
+    // `toString()` 是**必须的**：扩展拿 `uri.toString()` 当"这份文档我们已经设过什么"
+    // 的键（防 `setTextDocumentLanguage` 自激）。少了它每个 uri 都是
+    // "[object Object]" —— 所有文档共用一格，第一份设完就把后面的挡住了。
+    // 2026-10-21 就是这么发现"删掉声明回不到 loment"这条判据是红的（而代码是对的）。
     const docs = DOCS.map((c) => ({
-      uri: { scheme: 'file', fsPath: c.path },
+      uri: { scheme: 'file', fsPath: c.path,
+             toString: () => 'file://' + c.path.replace(/\\/g, '/') },
       languageId: c.lang || 'loment',
       getText: () => fs.readFileSync(c.path, 'utf8'),
     }));
@@ -846,8 +915,12 @@ def test_vscode_surface_grammar_switches_language():
             'pub fn source_ext() -> str { return ".foo"; }\n', encoding="utf-8")
         (proj / "a.foo").write_text("module a\n", encoding="utf-8")
         (proj / "b.txt").write_text("hello\n", encoding="utf-8")
+        # 声明删掉之后要**回**到 `loment`：原先返回 undefined（"不认领"），于是它一直
+        # 停在 `loment-<x>` —— 状态栏写着外门语法、语言服务也不接（2026-10-21）。
+        (proj / "plain.lomt").write_text("module p\n", encoding="utf-8")
         cases += [(str(proj / "a.foo"), "plaintext", "loment"),   # 项目自定义后缀 -> L1
-                  (str(proj / "b.txt"), "plaintext", "plaintext")]  # 别的后缀，不认领
+                  (str(proj / "b.txt"), "plaintext", "plaintext"),  # 别的后缀，不认领
+                  (str(proj / "plain.lomt"), "loment-c", "loment")]  # 声明删了 -> 回原生
         docs = [{"path": (c[0] if Path(c[0]).is_absolute() else str(ROOT / c[0])),
                  "lang": c[1]} for c in cases]
         r = _activate({"enableLsp": False, "buildDir": "loment/build"}, docs)

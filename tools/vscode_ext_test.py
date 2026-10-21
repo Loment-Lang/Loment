@@ -351,7 +351,8 @@ def test_vscode_build_and_run_commands():
         print("      SKIP 分支判定: 无 node")
         return
     script = """
-const {invocation} = require(process.argv[1]);
+const {invocation, usesModules} = require(process.argv[1]);
+const fs = require('fs');
 const R = process.argv[2];
 const F = R + '/loment/examples/tour.lomt';
 process.stdout.write(JSON.stringify({
@@ -372,7 +373,15 @@ process.stdout.write(JSON.stringify({
   lib_run:   invocation({root:R, file:R + '/loment/examples/mathutil.lomt',
                          action:'run', platform:'win32', buildDir:'loment/build'}),
   lib_build: invocation({root:R, file:R + '/loment/examples/mathutil.lomt',
-                         action:'build', platform:'win32', buildDir:'loment/build'})
+                         action:'build', platform:'win32', buildDir:'loment/build'}),
+  // 外门语法：入口自己是（C 写的叶子），或依赖是（原生宿主 use 了它）
+  surf_entry: invocation({root:R, file:R + '/loment/examples/cproject/bitkit.lomt',
+                          action:'build', platform:'win32', buildDir:'loment/build'}),
+  surf_dep:   invocation({root:R, file:R + '/loment/examples/cproject/main.lomt',
+                          action:'build', platform:'win32', buildDir:'loment/build'}),
+  uses_yes: usesModules(fs.readFileSync(R + '/loment/examples/cproject/main.lomt', 'utf8')),
+  uses_no:  usesModules(fs.readFileSync(R + '/loment/examples/tour.lomt', 'utf8')),
+  uses_comments_only: usesModules('module t\\n// use "bitkit.lomt"\\n/* use "numkit.lomt" */\\n')
 }));
 """
     r = subprocess.run([node, "-e", script, str(EXT / "src" / "build-cmd.js"), str(ROOT)],
@@ -436,8 +445,27 @@ process.stdout.write(JSON.stringify({
     assert got["lib_build"].get("how") == "lomc", \
         f"库模块只是不能「运行」，编译照旧: {got['lib_build']}"
     print("      库模块：`运行` 拦住并说明缺 `_start`；`编译` 照旧放行")
-    print(f"      编译/运行：清单↔实现对得上；分支判定 {len(got)} 例"
-          f"（CLI / WSL / 开发树 / 报错 / 空窗口）")
+
+    # ⑧ **外门语法要先说清是哪个文件**（2026-10-21）。自举编译器只会说
+    #    "this file does not look like Loment"，而被点名的其实是依赖；入口文件里连
+    #    `choose write grammar` 都没有，用户照着它找不着东西。
+    se = got["surf_entry"]
+    assert "error" in se and "bitkit.lomt" in se["error"], f"入口自己是外门: {se}"
+    assert "lomentc.py" in se["error"], f"报错要给一条真能编的路: {se['error'][:200]}"
+    sd = got["surf_dep"]
+    assert "error" in sd, sd
+    # **第一行**必须点是依赖，不是入口（入口在后面的命令行里当"要编的东西"出现，对的）
+    first = sd["error"].splitlines()[0]
+    assert "bitkit.lomt" in first and "main.lomt" not in first, \
+        f"依赖是外门时要点名**依赖**，不是入口: {first}"
+    assert "module this file uses" in first, f"要说清它是依赖: {first}"
+    print("      外门语法：入口/依赖都被点名，并给出参考实现的命令")
+
+    # ⑨ `use` 的判定（决定「检查」走参考实现还是语言服务）：注释里的不算
+    assert got["uses_yes"] is True, "main.lomt 有 use，却没认出来"
+    assert got["uses_no"] is False, "tour.lomt 没有 use，却被认成有"
+    assert got["uses_comments_only"] is False, "注释里的 use 被当成了依赖"
+    print("      `use` 判定：源码里有、注释里没有")
 
 
 # ---------------------------------------------------------------- 6. 扩展真的激活
@@ -578,8 +606,13 @@ Module._load = function (req) {
       out.dap = d ? { cmd: d.cmd, args: d.args } : null;
     }
     // 打开 DOCS 里每一份文档（语言提示是事件驱动的，必须真的派事件）
+    // `toString()` 是**必须的**：扩展拿 `uri.toString()` 当"这份文档我们已经设过什么"
+    // 的键（防 `setTextDocumentLanguage` 自激）。少了它每个 uri 都是
+    // "[object Object]" —— 所有文档共用一格，第一份设完就把后面的挡住了。
+    // 2026-10-21 就是这么发现"删掉声明回不到 loment"这条判据是红的（而代码是对的）。
     const docs = DOCS.map((c) => ({
-      uri: { scheme: 'file', fsPath: c.path },
+      uri: { scheme: 'file', fsPath: c.path,
+             toString: () => 'file://' + c.path.replace(/\\/g, '/') },
       languageId: c.lang || 'loment',
       getText: () => fs.readFileSync(c.path, 'utf8'),
     }));
@@ -846,8 +879,12 @@ def test_vscode_surface_grammar_switches_language():
             'pub fn source_ext() -> str { return ".foo"; }\n', encoding="utf-8")
         (proj / "a.foo").write_text("module a\n", encoding="utf-8")
         (proj / "b.txt").write_text("hello\n", encoding="utf-8")
+        # 声明删掉之后要**回**到 `loment`：原先返回 undefined（"不认领"），于是它一直
+        # 停在 `loment-<x>` —— 状态栏写着外门语法、语言服务也不接（2026-10-21）。
+        (proj / "plain.lomt").write_text("module p\n", encoding="utf-8")
         cases += [(str(proj / "a.foo"), "plaintext", "loment"),   # 项目自定义后缀 -> L1
-                  (str(proj / "b.txt"), "plaintext", "plaintext")]  # 别的后缀，不认领
+                  (str(proj / "b.txt"), "plaintext", "plaintext"),  # 别的后缀，不认领
+                  (str(proj / "plain.lomt"), "loment-c", "loment")]  # 声明删了 -> 回原生
         docs = [{"path": (c[0] if Path(c[0]).is_absolute() else str(ROOT / c[0])),
                  "lang": c[1]} for c in cases]
         r = _activate({"enableLsp": False, "buildDir": "loment/build"}, docs)

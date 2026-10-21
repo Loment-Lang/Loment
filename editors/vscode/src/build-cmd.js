@@ -21,6 +21,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { readGrammarDecl, NATIVE_GRAMMARS } = require('./grammar-detect');
 
 /** 相对路径一律用 `/` —— 传给外部命令，反斜杠在 WSL/clang 那侧会被当转义。 */
 function posixRel(root, p) {
@@ -89,6 +90,101 @@ function hasEntry(file) {
  * @param {string[]} [o.toolArgs]  `loment.toolArgs`
  * @param {string} [o.buildDir]  `loment.buildDir`（相对工作区根）
  */
+/** 抹掉注释, 只为了别把注释里的 `use "..."` 当成依赖。换行留着 —— `^` 是按行锚的。 */
+function stripComments(text) {
+  let out = '';
+  let i = 0;
+  const n = text.length;
+  while (i < n) {
+    const c = text[i];
+    if (c === '/' && text[i + 1] === '/') {
+      while (i < n && text[i] !== '\n') {
+        i += 1;
+      }
+    } else if (c === '/' && text[i + 1] === '*') {
+      i += 2;
+      while (i < n && !(text[i] === '*' && text[i + 1] === '/')) {
+        i += 1;
+      }
+      i += 2;
+    } else if (c === '"') {
+      let j = i + 1;
+      while (j < n && text[j] !== '"') {
+        j += text[j] === '\\' ? 2 : 1;
+      }
+      out += text.slice(i, Math.min(j + 1, n));
+      i = j + 1;
+    } else {
+      out += c;
+      i += 1;
+    }
+  }
+  return out;
+}
+
+/**
+ * 文件头声明了哪门**非原生**表层语法；没有（或声明的是 `loment`/`rust`）就 null。
+ *
+ * 声明怎么读与参考实现逐条对拍（`grammar-detect.js` 那一套，`vscode_ext_test` 枚举全仓
+ * 语料盯着的就是它）。这里只多问一句"是不是原生"。
+ */
+function surfaceGrammarOf(file) {
+  try {
+    const d = readGrammarDecl(fs.readFileSync(file, 'utf8'));
+    return d.declared && NATIVE_GRAMMARS.indexOf(d.grammar) < 0 ? d.grammar : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * 这个**编译单元**里第一份带非原生表层语法声明的文件：入口自己，或入口 `use "…"` 的
+ * 同目录模块（一层）。
+ *
+ * **为什么必须看依赖**：`loment/examples/cproject/main.lomt` 是原生写的宿主，表层语法在
+ * 它 `use` 的 `bitkit.lomt` 里 —— 编译失败的是**那个依赖**，而报错说的是"this file"。
+ * 用户照着入口文件找半天，找不到任何 `choose write grammar`。
+ *
+ * **为什么只找一层**：拼接层的 `use` 树由工具链自己解；编辑器这一侧只要够早地认出
+ * "这个单元里有外门语法的叶子"，多解一层就多一份会漂的重复实现。漏一层的代价是退回
+ * 工具链原来的报错，不是错判。
+ */
+function surfaceInUnit(file) {
+  const own = surfaceGrammarOf(file);
+  if (own) {
+    return { file, grammar: own, entry: true };
+  }
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch (e) {
+    return null;
+  }
+  const dir = path.dirname(file);
+  const re = /^[ \t]*use[ \t]+"([^"]+)"/gm;
+  const src = stripComments(text);
+  let m;
+  while ((m = re.exec(src)) !== null) {
+    const dep = path.resolve(dir, m[1]);
+    const g = surfaceGrammarOf(dep);
+    if (g) {
+      return { file: dep, grammar: g, entry: false };
+    }
+  }
+  return null;
+}
+
+/**
+ * 这份源有没有 `use`（路径形式 `use "m.lomt"` 或名字形式 `use std`）。
+ *
+ * 有的话**语言服务的诊断不完整**：两个实现都只查当前文件（`_parse`/`run_check` 都不做
+ * `resolve_deps`），于是跨模块的名字全报 `E002 符号未声明` —— 一份编得过的多文件工程
+ * 在编辑器里满屏假错（2026-10-21 实测，`cproject/main.lomt` 5 条）。调用方据此挑检查器。
+ */
+function usesModules(text) {
+  return /^[ \t]*use[ \t]+(?:"|[A-Za-z_])/m.test(stripComments(text));
+}
+
 function invocation(o) {
   const file = o.file;
   const action = o.action === 'run' ? 'run' : 'build';
@@ -96,6 +192,40 @@ function invocation(o) {
   const tool = (o.toolCommand || '').trim();
   // 没打开文件夹时（空窗口）调用方给的是**文件所在目录** —— 那也是个合法的基准。
   const root = o.root || path.dirname(file);
+
+  // ---- ⓪' 外门语法：**说清楚是哪个文件，以及现在能怎么编**
+  //
+  // 2026-10-21 用户报"扩展莫名其妙的不可编译 / 显示不是 Loment"：一份**原生**宿主
+  // `use` 了 C 写法的叶子，自举编译器会说 "this file does not look like Loment"
+  // （0.1.5 的 CLI）或"这份源的自举侧收不了…"（开发树的 seed）—— 两句都没点名**哪个**
+  // 文件，而入口文件里连 `choose write grammar` 都没有。先把这句说出来。
+  //
+  // 两种形状都拦：入口自己是外门（编译一片叶子），或依赖是外门（编译整个工程）。
+  // **不判"工具链能不能翻译"** —— 今天所有路径都是自举侧（收不了），而哪天有了翻译器的
+  // 孪生，这条就会变成误拦；所以文案里点名"这条路用的是什么"，而不是下永久结论。
+  const surface = surfaceInUnit(file);
+  if (surface) {
+    const where = path.relative(root, surface.file).replace(/\\/g, '/');
+    // 命令编的是**入口**（`use` 树由工具链自己解），不是那个叶子文件 —— 编叶子只会得到
+    // 它的 IR，用户要的是整个程序。
+    const entry = path.relative(root, file).replace(/\\/g, '/');
+    const dir = o.buildDir || 'loment/build';
+    const stem = path.basename(file).replace(/\.lomt$/i, '');
+    return {
+      error: `\`${where}\` declares the **${surface.grammar}** surface grammar `
+        + `(\`choose write grammar ${surface.grammar}\`)`
+        + (surface.entry ? '.\n' : ' -- it is a module this file uses.\n')
+        + 'The compiler this button runs takes only `choose write grammar loment` '
+        + '(or `rust`); the other spellings wait on the translator\'s Loment twin '
+        + '(docs/189 section 4.1). That module is what the compiler means when it '
+        + 'answers "this file does not look like Loment".\n'
+        + 'If your toolchain has the translator, point `loment.toolCommand` at it. '
+        + 'Otherwise build with the reference implementation (a checkout has one):\n'
+        + `  python tools/lomentc.py "${entry}" --emit-llvm ${dir}/${stem}.ll `
+        + `--emit-potato ${dir}/${stem}.potato.json\n`
+        + `  python tools/lomelf.py ${dir}/${stem}.ll -o ${dir}/${stem} --target elf`,
+    };
+  }
 
   // ---- ⓪ 「运行」一个没有 `_start` 的文件，是**没有意义**的（也编不出可执行）
   //
@@ -158,4 +288,5 @@ function invocation(o) {
   };
 }
 
-module.exports = { invocation, posixRel, outName, findWrapper };
+module.exports = { invocation, posixRel, outName, findWrapper, surfaceInUnit,
+                   surfaceGrammarOf, stripComments, usesModules };

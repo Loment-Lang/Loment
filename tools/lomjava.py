@@ -1154,7 +1154,8 @@ def emit(module: str, classes: list[ClassFile], ir_path: Path,
                        "\n".join(init_lines) + "\n\n" + _jrt_alloc_ir(module),
                        encoding="utf-8", newline="\n")
 
-    lines = [f"module {module}", "", f"extern fn {init_sym}();", ""]
+    decls = [f"extern fn {init_sym}();"]
+    bodies: list[str] = []
     used: set[str] = set()
     multi = len(classes) > 1
     for sym, _text, name, params, ret, is_static, cls in funcs:
@@ -1171,18 +1172,26 @@ def emit(module: str, classes: list[ClassFile], ir_path: Path,
         args = ", ".join(f"a{i}: {t}" for i, t in enumerate(params))
         call = ", ".join(f"a{i}" for i in range(len(params)))
         rt = "" if ret == "void" else f" -> {ret}"
-        lines.append(f"pub fn {alias}({args}){rt} {{")
-        lines.append(f"    {init_sym}();")
+        # Declarations go **after every body**. The self-hosted checker's
+        # per-function body walk starts at each `fn` token and takes the next
+        # `{` as that function's body; a bodiless `extern fn` therefore adopts
+        # the body of the function below it and checks it against the extern's
+        # (empty) parameter list, so every parameter there reads as undefined
+        # (E2). Trailing declarations have no following body and are skipped.
+        # Filed as an issue; when the checker is fixed this can move back.
         if ret == "void":
-            lines.append(f"    {sym}({call});")
+            decls.append(f"extern fn {sym}({args});")
         else:
-            lines.append(f"    return {sym}({call});")
-        lines.append("}")
+            decls.append(f"extern fn {sym}({args}) -> {ret};")
+        bodies.append(f"pub fn {alias}({args}){rt} {{")
+        bodies.append(f"    {init_sym}();")
         if ret == "void":
-            lines.append(f"extern fn {sym}({args});")
+            bodies.append(f"    {sym}({call});")
         else:
-            lines.append(f"extern fn {sym}({args}) -> {ret};")
-        lines.append("")
+            bodies.append(f"    return {sym}({call});")
+        bodies.append("}")
+        bodies.append("")
+    lines = [f"module {module}", ""] + bodies + decls
     iface_path.write_text("\n".join(lines), encoding="utf-8", newline="\n")
     return funcs
 

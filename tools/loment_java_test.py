@@ -39,7 +39,7 @@ def test(fn):
 
 
 def _emit(classfile: Path, module: str, out: Path) -> tuple[Path, Path]:
-    cf = lomjava.parse_class(classfile.read_bytes())
+    cf = lomjava.load_class(classfile)
     ir = out / f"{module}.ll"
     iface = out / f"{module}.lomt"
     lomjava.emit(module, cf, ir, iface)
@@ -321,6 +321,32 @@ fn _start() {
         if sys.platform == "win32":
             assert rc == 0, rc
             print("      counter: 5 -> 8 -> 8 on PE")
+        else:
+            print("SKIP: PE execution is Windows-only; IR emitted and linked to ELF")
+
+
+@test
+def test_single_class_jar():
+    """A jar with one class is accepted; multi-class jars are named and refused."""
+    import zipfile
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        jar = d / "mathlib.jar"
+        with zipfile.ZipFile(jar, "w", zipfile.ZIP_DEFLATED) as z:
+            z.write(FIX / "MathLib.class", "com/example/MathLib.class")
+        (d / "deps" / "mathlib").mkdir(parents=True)
+        ir, _iface = _emit(jar, "mathlib", d / "deps" / "mathlib")
+        rc = _build_and_run(d, ir, """module app
+use mathlib
+
+fn _start() {
+    let r: i32 = mathlib_add(2, 3);
+    syscall4(60, r as u64, 0, 0);
+}
+""")
+        if sys.platform == "win32":
+            assert rc == 5, rc
+            print("      single-class jar -> add(2,3)=5 on PE")
         else:
             print("SKIP: PE execution is Windows-only; IR emitted and linked to ELF")
 

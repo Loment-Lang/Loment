@@ -29,6 +29,7 @@ import hashlib
 import re
 import struct
 import sys
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -204,6 +205,26 @@ def parse_class(data: bytes) -> ClassFile:
         methods.append(Method(access, name, desc, code, max_stack, max_locals))
 
     return ClassFile(_class_name(pool, this_class), methods, fields, pool)
+
+
+def load_class(path: Path) -> ClassFile:
+    """Read a `.class`, or a jar with exactly one class.
+
+    Multi-class jars need a class registry (cross-class calls, field layouts and
+    virtual dispatch); that is a later slice. A jar is accepted now so the
+    package pipeline can carry the real artifact.
+    """
+    data = path.read_bytes()
+    if data[:4] == b"PK\x03\x04":
+        with zipfile.ZipFile(path) as z:
+            names = [n for n in z.namelist()
+                     if n.endswith(".class") and not n.startswith("META-INF/")]
+            if len(names) != 1:
+                raise JavaError(
+                    f"jar has {len(names)} class entries; multi-class jars are not "
+                    f"supported yet")
+            return parse_class(z.read(names[0]))
+    return parse_class(data)
 
 
 def _skip_attributes(r: Reader, pool) -> None:
@@ -1117,8 +1138,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--emit-interface")
     a = ap.parse_args(argv)
     try:
-        data = Path(a.classfile).read_bytes()
-        cf = parse_class(data)
+        cf = load_class(Path(a.classfile))
         out_dir = Path(a.out_dir) if a.out_dir else None
         ir = Path(a.emit_ir) if a.emit_ir else (out_dir / f"{a.module}.ll")
         iface = Path(a.emit_interface) if a.emit_interface else (out_dir / f"{a.module}.lomt")

@@ -3120,8 +3120,16 @@ def emit_exe(zip_bytes: bytes, target: Path) -> bool:
     if not Path(ie).exists():
         print("  [setup.exe] SKIP: iexpress 不存在")
         return False
-    r = subprocess.run([ie, "/N", str(sed)], capture_output=True, text=True,
-                       shell=False, cwd=str(src))
+    # `/Q` **不是可选的**（2026-10-20 实测）：不带它时，IExpress 在没有可交互控制台的
+    # 进程里不去读 SED，而是弹出 "IExpress Wizard" 等输入 —— 进程 0% CPU 永久挂着，
+    # 外面看起来就是"构建卡住"。发行作业因此撑满 60 分钟上限（#1077）。
+    # 超时是第二道保险：GUI 建包正常只要几秒，300 秒还没回来就判失败，别让整条链陪葬。
+    try:
+        r = subprocess.run([ie, "/N", "/Q", str(sed)], capture_output=True, text=True,
+                           shell=False, cwd=str(src), timeout=300)
+    except subprocess.TimeoutExpired:
+        print("  [setup.exe] iexpress 300 秒没返回 —— 已终止（向导在等输入？）")
+        return False
     if not (target.exists() and target.stat().st_size > 0):
         print(f"  [setup.exe] iexpress 失败 rc={r.returncode}: "
               f"{(r.stdout or r.stderr)[-300:]}")

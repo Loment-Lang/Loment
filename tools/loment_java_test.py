@@ -184,6 +184,30 @@ fn _start() {
 
 
 @test
+def test_static_calls_end_to_end():
+    """`invokestatic` to another method in the same class, including long args."""
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "deps" / "multilb").mkdir(parents=True)
+        ir, _iface = _emit(FIX / "MultiLib.class", "multilb", d / "deps" / "multilb")
+        rc = _build_and_run(d, ir, """module app
+use multilb
+
+fn _start() {
+    let a: i32 = multilb_sumSquares(3, 4);
+    let b: i64 = multilb_addTwice(5);
+    let ok: i64 = ((a - 25) as i64) + (b - 20);
+    syscall4(60, ok as u64, 0, 0);
+}
+""")
+        if sys.platform == "win32":
+            assert rc == 0, rc
+            print("      sumSquares(3,4)=25, addTwice(5)=20 -> exit 0 on PE")
+        else:
+            print("SKIP: PE execution is Windows-only; IR emitted and linked to ELF")
+
+
+@test
 def test_merge_removes_satisfied_declaration():
     """The merged IR has no extern declaration for a symbol defined in a second input."""
     with tempfile.TemporaryDirectory() as td:

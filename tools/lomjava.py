@@ -331,6 +331,7 @@ def _init_ops() -> None:
                        (165, "if_acmpeq"), (166, "if_acmpne")):
         _op(code, name, "h", -2)
     _op(167, "goto", "h", 0)
+    _op(184, "invokestatic", "h", 0)
     _op(172, "ireturn", "", -1); _op(173, "lreturn", "", -1)
     _op(174, "freturn", "", -1); _op(175, "dreturn", "", -2)
     _op(176, "areturn", "", -1); _op(177, "return", "", 0)
@@ -370,7 +371,27 @@ def decode(code: bytes) -> list[Insn]:
     return out
 
 
-def stack_heights(insns: list[Insn]) -> dict[int, int]:
+def methodref(pool: list, idx: int) -> tuple[str, str, str]:
+    ent = pool[idx] if idx < len(pool) else None
+    if not ent or ent[0] not in (CP_METHODREF, CP_INTERFACE_METHODREF):
+        raise JavaError(f"constant pool #{idx}: expected Methodref")
+    cls = _class_name(pool, ent[1])
+    nat = pool[ent[2]]
+    if not nat or nat[0] != CP_NAME_AND_TYPE:
+        raise JavaError(f"constant pool #{ent[2]}: expected NameAndType")
+    return cls, _utf8(pool, nat[1]), _utf8(pool, nat[2])
+
+
+def _delta(x: Insn, pool: list) -> int:
+    name = _OPS[x.op][0]
+    if name in ("invokestatic", "invokevirtual", "invokespecial", "invokeinterface"):
+        _cls, _n, desc = methodref(pool, x.args[0])
+        params, ret = parse_method_descriptor(desc)
+        return (0 if ret == "void" else 1) - len(params)
+    return x.stack_delta
+
+
+def stack_heights(insns: list[Insn], pool: list) -> dict[int, int]:
     """Compute the operand-stack height at every reachable instruction.
     Branches that disagree are rejected; this is a small verifier, not a guess.
     """
@@ -388,7 +409,7 @@ def stack_heights(insns: list[Insn]) -> dict[int, int]:
         height[off] = h
         x = by_off[off]
         name = _OPS[x.op][0]
-        after = h + x.stack_delta
+        after = h + _delta(x, pool)
         if after < 0:
             raise JavaError(f"operand stack underflow at {off}")
         nxt = off + x.size
@@ -417,7 +438,8 @@ def _slot_local(name: str, ty: str) -> str:
 
 class Emitter:
     def __init__(self, insns: list[Insn], heights: dict[int, int], max_stack: int,
-                 params: list[str], param_slots: list[int], ret: str, pool: list):
+                 params: list[str], param_slots: list[int], ret: str, pool: list,
+                 module: str, own_class: str):
         self.insns = insns
         self.heights = heights
         self.max_stack = max_stack
@@ -425,6 +447,8 @@ class Emitter:
         self.param_slots = param_slots
         self.ret = ret
         self.pool = pool
+        self.module = module
+        self.own_class = own_class
         self.lines: list[str] = []
         self.tmp = 0
         self.locals: dict[int, str] = {}
@@ -662,6 +686,25 @@ class Emitter:
             c = self.t()
             self.emit(f"{c} = icmp {cond} i32 {a}, {b}")
             self.emit(f"br i1 {c}, label %L{x.args[0]}, label %L{x.off + x.size}")
+        elif name == "invokestatic":
+            cls, mname, desc = methodref(self.pool, x.args[0])
+            if cls != self.own_class:
+                raise JavaError(
+                    f"invokestatic {cls}.{mname}{desc}: cross-class calls are not "
+                    f"supported yet")
+            params, ret = parse_method_descriptor(desc)
+            n = len(params)
+            vals = [""] * n
+            for i in range(n - 1, -1, -1):
+                vals[i] = self._pop(params[i], h0 - n + i)
+            sym = mangle(self.module, cls, mname, desc)
+            argtxt = ", ".join(f"{t} {v}" for t, v in zip(params, vals))
+            if ret == "void":
+                self.emit(f"call void @{sym}({argtxt})")
+            else:
+                r = self.t()
+                self.emit(f"{r} = call {ret} @{sym}({argtxt})")
+                self._push(ret, r, h0 - n)
         elif name == "goto":
             self.emit(f"br label %L{x.args[0]}")
         elif name == "ireturn":
@@ -693,14 +736,14 @@ def emit_method_ir(module: str, cls: str, m: Method, pool: list) -> tuple[str, s
     if len(params) > 8:
         raise JavaError(f"{cls}.{m.name}: more than 8 parameters")
     insns = decode(m.code)
-    heights = stack_heights(insns)
+    heights = stack_heights(insns, pool)
     sym = mangle(module, cls, m.name, m.desc)
     slots = []
     slot = 0
     for t in params:
         slots.append(slot)
         slot += 2 if t == "i64" else 1
-    em = Emitter(insns, heights, m.max_stack, params, slots, ret, pool)
+    em = Emitter(insns, heights, m.max_stack, params, slots, ret, pool, module, cls)
     body = em.run()
     def irty(t: str) -> str:
         return "void" if t == "void" else t

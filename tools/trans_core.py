@@ -577,6 +577,10 @@ class Parser:
             self.i += 1
             return Un(t[1], self.unary(), t[2])
         if t[0] == "op" and t[1] in ("+", "*", "&"):
+            if self.d.name == "java" and t[1] == "+":
+                raise Unsupported(
+                    f"第 {t[2]} 行: 不支持一元 `+`（Java 允许它，但这个子集没有"
+                    f"把它翻过来的语义；去掉它即可）。")
             raise Unsupported(f"第 {t[2]} 行: 不支持一元 `{t[1]}`"
                               f"（取地址/解引用不在 Stage A 子集里）")
         return self.primary()

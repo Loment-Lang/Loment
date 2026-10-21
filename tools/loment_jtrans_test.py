@@ -404,6 +404,45 @@ def test_java_literal_forms_and_heritage():
     print("      binary/underscore/octal/char/L/hex literals; heritage rejected")
 
 
+@test
+def test_java_out_of_subset_is_named():
+    """Out-of-subset Java constructs get a named diagnostic, not a token error.
+
+    These are the audit findings that all shared the same shape: the construct
+    was split into unremarkable tokens and the error pointed somewhere unrelated
+    (#831/#832/#833/#834/#838/#839/#840/#842/#843/#845/#846/#847/#848/#851/
+    #853/#855). Support is still out of scope; the message is the deliverable.
+    """
+    cases = [
+        ("public class T { public static int f() { double d = 1.5; return 1; } }", "float"),
+        ("public class T { public static int f() { Object o = null; return 1; } }", "null"),
+        ("public class T { int x; public int f() { return this.x; } }", "this"),
+        ("public class T { public int f() { return super.hashCode(); } }", "super"),
+        ("public class T { public static int f(Object o) { return o instanceof String ? 1 : 0; } }", "instanceof"),
+        ("public class T { public static int f() throws Exception { return 1; } }", "throws"),
+        ("public class T { public static int f() { synchronized (T.class) { return 1; } } }", "synchronized"),
+        ("public class T { public static int f() { Runnable r = () -> {}; return 1; } }", "lambda"),
+        ("@Deprecated public class T { public static int f() { return 1; } }", "注解"),
+        ('public class T { public static int f() { String s = """x"""; return 1; } }', "文本块"),
+        ("public class T { T(int x) { } public static int f() { return 1; } }", "构造器"),
+        ("public class T { static { } public static int f() { return 1; } }", "静态初始化块"),
+        ("public sealed class T permits U { public static int f() { return 1; } }", "sealed"),
+        ("public enum T { A, B }", "enum"),
+        ("public interface T { int f(); }", "interface"),
+        ("public record T(int x) { }", "record"),
+        ("public class T { public static int f() { Object o = T.class; return 1; } }", "class"),
+        ("public class T { public static int f(int a) { return +a; } }", "一元 `+`"),
+    ]
+    for src, needle in cases:
+        try:
+            jtrans.translate(src)
+        except jtrans.Unsupported as e:
+            assert needle in str(e), (needle, str(e))
+        else:
+            raise AssertionError(f"accepted an out-of-subset construct: {needle}")
+    print(f"      {len(cases)} out-of-subset constructs named")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_jtrans_test")
 

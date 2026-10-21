@@ -89,6 +89,83 @@ _CSHELL_HEAD = re.compile(r"(?<![\w.])"
 _JAVA_SHELLS = [("class", _CSHELL_HEAD, False, True)]
 
 
+def _mask(src: str) -> str:
+    """Blank comments and string/char literals, preserving newlines and length."""
+    out = list(src)
+    i = 0
+    while i < len(src):
+        c = src[i]
+        if c == "/" and i + 1 < len(src) and src[i + 1] == "/":
+            j = src.find("\n", i)
+            if j < 0:
+                j = len(src)
+            for k in range(i, j):
+                out[k] = " "
+            i = j
+        elif c == "/" and i + 1 < len(src) and src[i + 1] == "*":
+            j = src.find("*/", i + 2)
+            j = len(src) if j < 0 else j + 2
+            for k in range(i, j):
+                if src[k] != "\n":
+                    out[k] = " "
+            i = j
+        elif c in ("'", '"'):
+            quote = c
+            j = i + 1
+            while j < len(src):
+                if src[j] == "\\":
+                    j += 2
+                    continue
+                if src[j] == quote:
+                    j += 1
+                    break
+                j += 1
+            for k in range(i, min(j, len(src))):
+                if src[k] != "\n":
+                    out[k] = " "
+            i = j
+        else:
+            i += 1
+    return "".join(out)
+
+
+#: Constructs that are **outside the subset**. Name them before the shared parser
+#: sees them: otherwise `this.x` becomes "unrecognized '.'", `throws` becomes
+#: "expected '{'", and so on (issues #831/#832/#833/#834/#838/#839/#840/
+#: #842/#843/#845/#846/#847/#848/#851/#853/#855).
+_PRE = [
+    (r"\bsynchronized\b", "`synchronized`"),
+    (r"\b(?:this|super)\s*\.", "`this` / `super` 的字段访问"),
+    (r"\.class\b", "`X.class` 类字面量"),
+    (r"\binstanceof\b", "`instanceof`"),
+    (r"\bthrows\b", "`throws` 子句"),
+    (r"->", "lambda（`->`）"),
+    (r"@[A-Za-z_]", "注解"),
+    (r"\bstatic\s*\{", "静态初始化块"),
+    (r"\b(?:enum|interface|record|sealed|permits)\b", "`enum` / `interface` / `record` / `sealed`"),
+    (r"(?<![\w.])[A-Z]\w*[ \t]*\([^;{]*\)[ \t]*\{", "构造器"),
+    (r"\bnull\b", "`null` 字面量"),
+    (r"\b(?:float|double)\b", "`float` / `double`"),
+    (r"\d+\.\d+(?:[eE][+-]?\d+)?", "浮点字面量"),
+]
+
+
+def _precheck(src: str) -> None:
+    if '"""' in src:
+        line = src[:src.index('"""')].count("\n") + 1
+        raise Unsupported(
+            f"第 {line} 行: 不支持文本块（`\"\"\"`）。本子集没有多行字符串值；"
+            f"整条构造原先会被拆成看不懂的 token 错误。")
+    masked = _mask(src)
+    for pat, what in _PRE:
+        m = re.search(pat, masked)
+        if m:
+            line = masked[:m.start()].count("\n") + 1
+            raise Unsupported(
+                f"第 {line} 行: 不支持{what}（Stage A 的 Java 子集没有对应语义；"
+                f"整条构造原先会被拆成看不懂的 token 错误）。")
+
+
 def _unwrap(src: str) -> str:
     """抹掉 `class X … { … }` 的**外壳**，成员就成了顶层。**不动行号。**
 
@@ -100,6 +177,7 @@ def _unwrap(src: str) -> str:
     **注释**抹成空白，于是 `String s = "class X {";` 会被当成一个 `class` 头，
     外壳从字符串**里面**开始切。现在字符串字面量也一起抹。
     """
+    _precheck(src)
     # A `class` header that carries `extends` / `implements` was silently
     # discarded by the shell stripper (#822). The subset has no inheritance
     # model, so say that instead of translating a different program.

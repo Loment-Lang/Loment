@@ -452,6 +452,50 @@ def test_show_reports_the_content_identity():
 
 
 @test
+def test_foreign_package_kind_is_checked_hashed_and_planned():
+    """A foreign package is recognised by `foreign.lomp`, its jar is in the
+    identity, and `show` says `kind: foreign` (docs/278/279; docs/222 §5).
+
+    This is the lompi-side half of the Java AOT path: without it `install`
+    would copy only the `.lomt` and the jar would silently disappear.
+    """
+    rc, out = _run(["version"])
+    if rc == -1:
+        print(f"      SKIP: {_skip}")
+        return
+    with tempfile.TemporaryDirectory(prefix="lompi-foreign-") as t:
+        td = Path(t)
+        pkg = td / "store" / "mathlib" / "1.0.0"
+        pkg.mkdir(parents=True)
+        (pkg / "mathlib.lomt").write_text(
+            "module mathlib\n\npub fn f() -> i32 { return 1; }\n",
+            encoding="utf-8", newline="\n")
+        (pkg / "foreign.lomp").write_text(
+            'module foreign\n\npub fn name() -> str { return "mathlib"; }\n'
+            'pub fn version() -> str { return "1.0.0"; }\n'
+            'pub fn kind() -> str { return "java"; }\n',
+            encoding="utf-8", newline="\n")
+        (pkg / "foreign.txt").write_text(
+            "# lompi foreign v1\nkind java\nartifact jar lib.bin\n",
+            encoding="utf-8", newline="\n")
+        (pkg / "lib.bin").write_bytes(b"\x00java\xff")
+
+        rc, out = _run(["check", str(pkg)])
+        assert rc == 0 and "foreign manifest" in out, out[:240]
+
+        rc, out = _run(["hash", str(pkg)])
+        assert rc == 0 and "files: 4" in out, out[:240]
+
+        rc, out = _run(["show", str(td / "store"), "mathlib"])
+        assert rc == 0 and "kind:    foreign" in out, out[:240]
+
+        rc, out = _run(["plan", str(td / "store"), "mathlib",
+                        "--into", str(td / "into")])
+        assert rc == 0 and "mathlib@1.0.0" in out, out[:240]
+        print("      foreign: check/hash/show/plan")
+
+
+@test
 def test_version_command_and_the_shipped_version_agree():
     """`lompi version` 打的那个号，必须是我们说好要发的那个。
 

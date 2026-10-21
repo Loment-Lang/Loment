@@ -267,7 +267,12 @@ fn cmd_show(ws: ptr, buf: ptr, store: ptr, av_spec: u64) -> u32 {
     out_lit("\ndir:     ");
     out_lit("");
     sys_write(1, pkg_dir(ws, idx), txt_len_cstr(pkg_dir(ws, idx)) as u64);
-    out_lit("\n");
+    out_lit("\nkind:    ");
+    if pkg_kind(ws, pkg_dir(ws, idx)) == 1 {
+        out_lit("foreign\n");
+    } else {
+        out_lit("loment\n");
+    }
     // 边
     let d: ptr = pkg_dir(ws, idx);
     let nf: u32 = pkg_list_sources(ws, d);
@@ -540,13 +545,14 @@ fn cmd_hash(ws: ptr, buf: ptr, m: u32, av_dir: u64) -> u32 {
         cli_die("cannot open directory");
         return 1;
     }
-    if pkg_own_hash(ws, scr, nf, dig) != nf {
+    let hashed: u32 = pkg_own_hash(ws, scr, nf, dig);
+    if hashed == 0 {
         cli_die("source file unreadable or too large (refusing to hash truncated content)");
         return 1;
     }
     sha_hex(dig, hex);
     out_lit("files: ");
-    out_dec(((ws as u64) + WS_SCR2 as u64) as ptr, nf as u64);
+    out_dec(((ws as u64) + WS_SCR2 as u64) as ptr, hashed as u64);
     out_lit("\nself:  ");
     out_slice(hex, 0, 64);
     out_lit("\n");
@@ -1972,7 +1978,13 @@ fn cli_copy_pkg(ws: ptr, src: ptr, dst: ptr, scr: ptr, scr2: ptr) -> u32 {
     if sn == dn && txt_eq(src, 0, sn, dst, 0, dn) {
         return 0;                                  // 源与目标同一个目录, 没什么可做
     }
+    // A foreign package's jar/IR/manifests are payload, not "sources"; copy every
+    // regular file. A source package keeps the old `.lomt`-only set.
+    let kind: u32 = pkg_kind(ws, src);
     let n: u32 = pkg_list_sources(ws, src);
+    if kind == 1 {
+        n = pkg_list_payload(ws, src);
+    }
     if n == DIR_ERR {
         return 4294967295;
     }

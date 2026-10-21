@@ -601,6 +601,67 @@ pub fn pkg_list_sources(ws: ptr, path: ptr) -> u32 {
     return out;
 }
 
+/// 目录里有没有这个叶子文件。用 1 字节读探一下 —— 只问存在性, 不读内容。
+/// 用 WS_TMP 末尾做路径、WS_FILE 做读缓冲; 调用方别在它之后还指望那两块。
+fn pkg_file_exists(ws: ptr, dir: ptr, leaf: str) -> u32 {
+    let scr: ptr = W(ws, WS_TMP + 7168);
+    let file: ptr = W(ws, WS_FILE);
+    let dn: u32 = txt_len_cstr(dir);
+    let ln: u32 = str_len(leaf);
+    if dn + 1 + ln + 1 > 1024 {
+        return 0;
+    }
+    sys_join(scr, dir, dn, str_ptr(leaf), ln);
+    let got: u64 = sys_read_file(scr, file, 1);
+    if got == SYS_ERR {
+        return 0;
+    }
+    return 1;
+}
+
+/// 包的种类: 0 = Loment 源码包, 1 = 外源包（有 `foreign.lomp`）。
+///
+/// 不往包记录里加字段: 记录是 stride 32 的固定布局, 动它要重排整个工作区。
+/// `foreign.lomp` 是 docs/222 §5 的清单文件名, 问它一次比记住它更不容易漂。
+pub fn pkg_kind(ws: ptr, dir: ptr) -> u32 {
+    if pkg_file_exists(ws, dir, "foreign.lomp") != 0 {
+        return 1;
+    }
+    return 0;
+}
+
+/// 列出**外源包**参与身份的全部普通文件（`foreign.lomp` / `foreign.txt` /
+/// `*.jar` / `*.ll` / `link.txt` / 生成的 `.lomt` 等），已排序。
+/// `deps/` 不是普通文件，天然被排除。
+pub fn pkg_list_payload(ws: ptr, path: ptr) -> u32 {
+    let names: ptr = W(ws, WS_NAMES);
+    let ents: ptr = W(ws, WS_ENTS);
+    let dbuf: ptr = W(ws, WS_DBUF);
+    let n: u32 = dir_list(path, dbuf, WS_DBUF_CAP as u64,
+                          names, WS_NAMES_CAP, ents, WS_ENTS_CAP);
+    if n == DIR_ERR { return DIR_ERR; }
+    let out: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let l: u32 = dir_ent_name_len(ents, i);
+        let keep: bool = dir_ent_type(ents, i) == DIR_TYPE_REG && l > 0;
+        if keep {
+            if out != i {
+                let a: u32 = 0;
+                while a < DIR_ENT_STRIDE {
+                    store8(ents, out * DIR_ENT_STRIDE + a,
+                           load8(ents, i * DIR_ENT_STRIDE + a) as u8);
+                    a = a + 1;
+                }
+            }
+            out = out + 1;
+        }
+        i = i + 1;
+    }
+    pkg_sort_ents(names, ents, out);
+    return out;
+}
+
 /// 自身源码哈希: 对每个文件按名字序喂 `名字 0x00 内容 0x00` 进 sha。
 /// 喂名字与 NUL 是为了让 "ab"+"c" 和 "a"+"bc" 分得开 —— 不加分隔符就能被构造出
 /// 两个不同包拿到同一个身份。
@@ -616,9 +677,19 @@ pub fn pkg_own_hash(ws: ptr, path: ptr, nfiles: u32, dig: ptr) -> u32 {
     let zero: ptr = W(ws, WS_ZERO);
     let pathn: u32 = txt_len_cstr(path);
     store8(zero, 0, 0 as u8);
+    // A foreign package hashes **every regular file** (the jar is part of its
+    // identity, docs/222 §5); a source package keeps the old `.lomt`-only set.
+    let kind: u32 = pkg_kind(ws, path);
+    let n: u32 = nfiles;
+    if kind == 1 {
+        n = pkg_list_payload(ws, path);
+    }
+    if n == DIR_ERR {
+        return 0;
+    }
     sha_init(st);
     let i: u32 = 0;
-    while i < nfiles {
+    while i < n {
         let o: u32 = dir_ent_name_off(ents, i);
         let l: u32 = dir_ent_name_len(ents, i);
         sys_join(scr, path, pathn, ((names as u64) + (o as u64)) as ptr, l);
@@ -633,7 +704,7 @@ pub fn pkg_own_hash(ws: ptr, path: ptr, nfiles: u32, dig: ptr) -> u32 {
         i = i + 1;
     }
     sha_final(st, dig);
-    return nfiles;
+    return n;
 }
 
 /// 扫包内全部 .lomt 的 use 边, 去重, 写进 WS_EPOOL / WS_EENTS。返回边数。
@@ -856,6 +927,20 @@ pub fn pkg_check(ws: ptr, dir: ptr, rep: ptr, repcap: u32) -> u32 {
     if nf == 0 {
         o = pkg_rep(rep, o, "[BAD] no *.lomt in this directory");
         return bad + 1;
+    }
+
+    // ---- 外源包: `foreign.lomp` + `foreign.txt` 是 docs/222 §5 的清单面
+    let kind: u32 = pkg_kind(ws, dir);
+    if kind == 1 {
+        if pkg_file_exists(ws, dir, "foreign.lomp") == 0 {
+            o = pkg_rep(rep, o, "[BAD] foreign package has no foreign.lomp");
+            bad = bad + 1;
+        } else if pkg_file_exists(ws, dir, "foreign.txt") == 0 {
+            o = pkg_rep(rep, o, "[BAD] foreign package has no foreign.txt");
+            bad = bad + 1;
+        } else {
+            o = pkg_rep(rep, o, "[ok] foreign manifest: foreign.lomp + foreign.txt");
+        }
     }
 
     // ---- 推断包名

@@ -145,6 +145,13 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "lspe_test", "potato_
                  "loment_channel_test",
                  "loment_json_test", "loment_pkg_test", "loment_lomc_test", "loment_lsp_test",
                  "loment_elf_test", "loment_pe_test", "loment_genesis_test", "loment_status_test",
+                 # 热更新的准入判据（`#1147`）：五个等式 + 签名 + 单调 + 重放。
+                 "loment_update_test",
+                 # 热更新的元数据（`#1149`）：帧布局哈希 + 调用点表，且采集是加性的。
+                 "loment_hotmeta_test",
+                 # 热更新构建档（`#1150`）：槽表 + 入口闸；默认档与 origin/main 逐字节对拍，
+                 # 两档行为在 WSL 里比 stdout 与退出码。
+                 "loment_hotswap_test",
                  # LVM 的 T0（`docs/243`）：同一批程序，**原生产物与 VM** 比 stdout 字节 + 退出码。
                  "lvm_test",
                  # LVM 自举镜像的**孪生判据**（`docs/243` §5）：同一份 `.ll` 喂参考实现与
@@ -387,6 +394,12 @@ SHARD_COST = {
     "loment_state_test": 0.3,
     "loment_status": 0.0,
     "loment_status_test": 2.3,
+    # 2026-10-21（#1147）：本机 Windows 实测 9.4s（每支拷一棵 3 MB 的树 + openssl 真签真验）。
+    "loment_update_test": 9.4,
+    # 2026-10-21（#1149）：本机 Windows 实测 0.8s（四份小源各编一次 + 一次 CLI）。
+    "loment_hotmeta_test": 0.8,
+    # 2026-10-21（#1150）：本机 Windows 实测 1.7s（含一次 WSL 跑两个 ELF）。
+    "loment_hotswap_test": 1.7,
     "loment_std_test": 3.1,
     "loment_store_twin_test": 261.6,
     # 2026-10-19（#772）：本机实测 13.2s（建一次 stage1 + 两个编译器各跑一个 21 格的

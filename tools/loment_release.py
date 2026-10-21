@@ -373,6 +373,13 @@ GLOBS = [
     # `globs_text()` 逐行对齐** —— 两处插在不同位置会给出同集合不同顺序的两份清单,
     # `loment_rel_test` 报"落盘不同"而字节数一样。
     "tools/loment_state.py", "tools/loment_state_test.py",
+    # 热更新的准入判据（`#1147`）：五个等式 + 签名 + 单调 + 重放。
+    # **插入位置与 `loment/tools/lomrel.lomt` 的 `globs_text()` 逐行对齐**。
+    "tools/loment_update.py", "tools/loment_update_test.py",
+    # 元数据（`#1149`）：帧布局哈希 + 调用点表。**插入位置与 lomrel.lomt 逐行对齐**。
+    "tools/loment_hotmeta_test.py",
+    # 构建档（`#1150`）：槽表 + 入口闸。**插入位置与 lomrel.lomt 逐行对齐**。
+    "tools/loment_hotswap_test.py",
 ]
 
 

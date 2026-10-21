@@ -50,6 +50,7 @@ LSPE_OBLIGATIONS: dict[str, dict[str, object]] = {
 }
 
 #: 普查里允许出现的站点种类（I1 的第一半）。加一种站点要同时登记在这里。
+#: `bounds` 是**生成**的站点（LMS g1 内联界检查，没有自己的语法；`#1021`）。
 LSPE_SITE_KINDS = frozenset({
-    "guard", "index", "free", "alive", "init", "exclusive", "call",
+    "guard", "index", "bounds", "free", "alive", "init", "exclusive", "call",
 })

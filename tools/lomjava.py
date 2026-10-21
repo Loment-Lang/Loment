@@ -352,6 +352,7 @@ def _init_ops() -> None:
     _op(187, "new", "h", 1); _op(89, "dup", "", 1)
     _op(87, "pop", "", -1); _op(88, "pop2", "", -2)
     _op(180, "getfield", "h", 0); _op(181, "putfield", "h", -2)
+    _op(178, "getstatic", "h", 1); _op(179, "putstatic", "h", -1)
     _op(183, "invokespecial", "h", 0); _op(182, "invokevirtual", "h", 0)
     _op(172, "ireturn", "", -1); _op(173, "lreturn", "", -1)
     _op(174, "freturn", "", -1); _op(175, "dreturn", "", -2)
@@ -521,7 +522,7 @@ class Emitter:
     def __init__(self, insns: list[Insn], heights: dict[int, int], max_stack: int,
                  params: list[str], param_slots: list[int], ret: str, pool: list,
                  module: str, own_class: str, field_layout: dict, obj_size: int,
-                 globals_: list):
+                 static_layout: dict, globals_: list):
         self.insns = insns
         self.heights = heights
         self.max_stack = max_stack
@@ -533,6 +534,7 @@ class Emitter:
         self.own_class = own_class
         self.field_layout = field_layout
         self.obj_size = obj_size
+        self.static_layout = static_layout
         self.globals = globals_
         self.strn = 0
         self.lines: list[str] = []
@@ -810,6 +812,18 @@ class Emitter:
             p = self.t()
             self.emit(f"{p} = call ptr @{_alloc_sym(self.module)}(i32 {self.obj_size})")
             self._push("ptr", p, h0)
+        elif name in ("getstatic", "putstatic"):
+            cls, fname, desc = fieldref(self.pool, x.args[0])
+            if cls != self.own_class or fname not in self.static_layout:
+                raise JavaError(f"{name} {cls}.{fname}: static field is not in this class")
+            sym, ty = self.static_layout[fname]
+            if name == "getstatic":
+                v = self.t()
+                self.emit(f"{v} = load {ty}, ptr @{sym}")
+                self._push(ty, v, h0)
+            else:
+                v = self._pop(ty, h0 - 1)
+                self.emit(f"store {ty} {v}, ptr @{sym}")
         elif name == "getfield":
             cls, fname, desc = fieldref(self.pool, x.args[0])
             if cls != self.own_class or fname not in self.field_layout:
@@ -965,7 +979,7 @@ class Emitter:
 
 
 def emit_method_ir(module: str, cls: str, m: Method, pool: list,
-                   field_layout: dict, obj_size: int,
+                   field_layout: dict, obj_size: int, static_layout: dict,
                    globals_: list) -> tuple[str, str, str] | None:
     is_static = bool(m.access & ACC_STATIC)
     is_ctor = m.name == "<init>"
@@ -993,7 +1007,7 @@ def emit_method_ir(module: str, cls: str, m: Method, pool: list,
         slots.append(slot)
         slot += 2 if t == "i64" else 1
     em = Emitter(insns, heights, m.max_stack, params, slots, ret, pool, module, cls,
-                 field_layout, obj_size, globals_)
+                 field_layout, obj_size, static_layout, globals_)
     body = em.run()
     def irty(t: str) -> str:
         return "void" if t == "void" else t
@@ -1005,15 +1019,24 @@ def emit_method_ir(module: str, cls: str, m: Method, pool: list,
 
 def emit(module: str, cf: ClassFile, ir_path: Path, iface_path: Path) -> list[tuple]:
     layout: dict[str, tuple[int, str]] = {}
+    static_layout: dict[str, tuple[str, str]] = {}
+    globals_: list[str] = []
     off = 8
     for f in cf.fields:
-        layout[f.name] = (off, desc_type(f.desc))
-        off += 8
+        ty = desc_type(f.desc)
+        if f.access & ACC_STATIC:
+            safe = re.sub(r"[^A-Za-z0-9_.$-]", "_", f.name)
+            sym = f"__jl_static_{module}_{safe}_{hashlib.sha256(f.name.encode()).hexdigest()[:8]}"
+            globals_.append(f"@{sym} = internal global {ty} zeroinitializer")
+            static_layout[f.name] = (sym, ty)
+        else:
+            layout[f.name] = (off, ty)
+            off += 8
     obj_size = off
     funcs: list[tuple[str, str, str, list[str], str, bool]] = []
-    globals_: list[str] = []
     for m in cf.methods:
-        got = emit_method_ir(module, cf.name, m, cf.pool, layout, obj_size, globals_)
+        got = emit_method_ir(module, cf.name, m, cf.pool, layout, obj_size,
+                             static_layout, globals_)
         if got is None:
             continue
         sym, text, name, is_static = got

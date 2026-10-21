@@ -301,6 +301,31 @@ fn _start() {
 
 
 @test
+def test_static_fields_end_to_end():
+    """getstatic/putstatic: state survives across calls to the same class."""
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "deps" / "staticlib").mkdir(parents=True)
+        ir, _iface = _emit(FIX / "StaticLib.class", "staticlib", d / "deps" / "staticlib")
+        rc = _build_and_run(d, ir, """module app
+use staticlib
+
+fn _start() {
+    let a: i32 = staticlib_bump(5);
+    let b: i32 = staticlib_bump(3);
+    let c: i32 = staticlib_get();
+    let ok: i32 = (a - 5) + (b - 8) + (c - 8);
+    syscall4(60, ok as u64, 0, 0);
+}
+""")
+        if sys.platform == "win32":
+            assert rc == 0, rc
+            print("      counter: 5 -> 8 -> 8 on PE")
+        else:
+            print("SKIP: PE execution is Windows-only; IR emitted and linked to ELF")
+
+
+@test
 def test_merge_removes_satisfied_declaration():
     """The merged IR has no extern declaration for a symbol defined in a second input."""
     with tempfile.TemporaryDirectory() as td:

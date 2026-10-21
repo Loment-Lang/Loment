@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -4508,6 +4509,38 @@ def test_lspe_dimension_defaults_open():
     assert s0["claim"] == "allow"
     assert s0["obligation"] in ("GuardHolds", "InBounds")
     assert s0["evidence"] == (s0["source"] or "none")
+
+
+@test
+def test_lspe_bounds_sites_match_the_ir_checks():
+    """台账里的 `bounds` 站点 == IR 里那些**常量界**的 `icmp ult i32`（`#1021`）。
+
+    这条是那个问题的量尺：LMS g1 的检查没有自己的语法，只有**词法形状**；
+    如果普查规则与发射器的规则分叉，两边的数就对不上 —— 而注释不会让它们对上。
+    """
+    src = ("module lspe_bounds\n\nchoose runtime\n\nfn f() -> u32 {\n"
+           "    let p: ptr = alloc(16);\n    store8(p, 0, 1);\n"
+           "    let a: u32 = load8(p, 15);\n    return a;\n}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "b.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        mod, deps = lomentc.load_unit(p, ROOT)
+        bounds = [s for s in mod.lspe_sites if s["kind"] == "bounds"]
+        ir = lomentc.emit_llvm(mod, ROOT, deps)
+    consts = [ln for ln in ir.splitlines()
+              if re.search(r"icmp ult i32 [0-9]+, [0-9]+$", ln)]
+    assert len(bounds) == 2 and len(consts) == 2, (len(bounds), consts)
+
+    # 档位关掉（只要管理器）：两边都归零。
+    off_src = src.replace("choose runtime", "choose runtime\nchoose lms_manage_only_admin")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "off.lomt"
+        p.write_text(off_src, encoding="utf-8", newline="\n")
+        mod2, deps2 = lomentc.load_unit(p, ROOT)
+        bounds2 = [s for s in mod2.lspe_sites if s["kind"] == "bounds"]
+        ir2 = lomentc.emit_llvm(mod2, ROOT, deps2)
+    assert not bounds2, bounds2
+    assert not re.search(r"icmp ult i32 [0-9]+, [0-9]+$", ir2, re.M)
 
 
 @test

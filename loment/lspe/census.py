@@ -35,6 +35,117 @@ LSPE_CALL_KW = LSPE_BRACKET_KW | frozenset({"extern", "true", "false", "self"})
 
 
 
+def census_bounds(toks: list, sid, sites: list[dict], cover=lambda _i: None,
+                  lms=frozenset()) -> None:
+    """E2b：LMS **g1 内联界检查**的站点（`docs/262` §5.1 / `#1021`）。
+
+    第 3 级（`lms_guard`）对 `load8` / `store8` 发一条 `icmp ult i32 …, <const>` ——
+    这是实打实花在热路径上的检查，但在此之前的普查里**没有条目**（它没有自己的语法）。
+
+    规则与两侧**发射器**逐条同形（参考 `_Ir._lms_guard_site`，自举 `lms_alloc_size`）：
+
+    * 只认 `load8` / `store8`（参考实现只给这两条内建发检查）；
+    * 首参是标识符，且按发射顺序往回找到**最近一次** `let NAME : ptr = alloc(<常量>)`；
+      中间出现一次 `NAME = …` 就作废（遮蔽/重新赋值改变来源）；
+    * 常量只认字面量与模块 `const`（与 `_lms_fixed_size` 同一张表）；
+    * 档位：`lms_guard` **且**（`lms_reject` 或 `lms_crash`）开着。三档回答都不开时
+      发射器一条检查都不发（"没有回答的检查比没有检查更坏"）。
+
+    ⚠ 这是**词法近似**，但它是两侧都完整持有的那一份表示：g1 站点没有自己的语法，
+      id 只能从 token 文本拼（`bounds:<fn>:<指针>:<load8|store8>:<界>`）；重复的
+      完全相同访问由 `sid` 的序数区分。
+    """
+    if "lms_guard" not in lms or not ({"lms_reject", "lms_crash"} & set(lms)):
+        return
+    fns = _lspe_functions(toks)
+    n = len(toks)
+    for i, t in enumerate(toks):
+        if t.kind != "ident" or t.val not in ("load8", "store8"):
+            continue
+        if i + 1 >= n or toks[i + 1].kind != "punct" or toks[i + 1].val != "(":
+            continue
+        if i > 0 and toks[i - 1].kind == "punct" and toks[i - 1].val in (".", ":"):
+            continue
+        if i > 0 and toks[i - 1].kind == "ident" and toks[i - 1].val == "fn":
+            continue
+        a = i + 2
+        if a >= n or toks[a].kind != "ident":
+            continue
+        fn = next(((nm, at) for (nm, _p, at, end) in fns if at <= i < end), None)
+        if fn is None:
+            continue
+        size = _lspe_alloc_size(toks, a, fn[1])
+        if size is None:
+            continue
+        site = {"id": sid("bounds",
+                          f"bounds:{toks[fn[0]].val}:{toks[a].val}:{t.val}:{size}"),
+                "kind": "bounds", "claim": "allow", "obligation": "InBounds",
+                "evidence": "Syntactic", "source": "lms(g1)",
+                "line": t.line, "proved": True}
+        cid = cover(i)
+        if cid:
+            site["covered_by"] = cid
+        sites.append(site)
+
+
+def _lspe_int(tok) -> int | None:
+    if tok is None or tok.kind != "number":
+        return None
+    try:
+        return int(tok.val.replace("_", ""), 0)
+    except ValueError:
+        return None
+
+
+def _lspe_const_int(toks: list, name: str) -> int | None:
+    """模块 `const NAME : T = <字面量>;` 的值（与 `_lms_fixed_size` 的 `self.consts` 同表）。"""
+    n = len(toks)
+    for k, t in enumerate(toks):
+        if not (t.kind == "ident" and t.val == "const" and k + 1 < n
+                and toks[k + 1].kind == "ident" and toks[k + 1].val == name):
+            continue
+        j = k + 2
+        while j < n and not (toks[j].kind == "punct" and toks[j].val in ("=", ";")):
+            j += 1
+        if j + 1 < n and toks[j].val == "=":
+            return _lspe_int(toks[j + 1])
+    return None
+
+
+def _lspe_alloc_size(toks: list, name_tok: int, lo: int) -> int | None:
+    """往回找**最近一次** `let NAME : ptr = alloc(<常量>)`；被 `NAME = …` 挡掉就回 `None`。
+
+    `lo` 是所在函数的体首 token —— 与自举侧 `lms_alloc_size` 同一条边界
+    （参考实现的 `_Ir.lms_size` 是发射期的一张表，顺序等价于这条向后扫描）。
+    """
+    name = toks[name_tok].val
+    n = len(toks)
+    j = name_tok - 1
+    while j >= lo:
+        t = toks[j]
+        if (t.kind == "ident" and t.val == name and j + 1 < n
+                and toks[j + 1].kind == "punct" and toks[j + 1].val == "="):
+            return None
+        if (t.kind == "ident" and t.val == "let" and j > 0
+                and not (toks[j - 1].kind == "ident" and toks[j - 1].val == "if")
+                and j + 8 < n
+                and toks[j + 1].kind == "ident" and toks[j + 1].val == name
+                and toks[j + 2].kind == "punct" and toks[j + 2].val == ":"
+                and toks[j + 3].kind == "ident" and toks[j + 3].val == "ptr"
+                and toks[j + 4].kind == "punct" and toks[j + 4].val == "="
+                and toks[j + 5].kind == "ident" and toks[j + 5].val == "alloc"
+                and toks[j + 6].kind == "punct" and toks[j + 6].val == "("
+                and toks[j + 8].kind == "punct" and toks[j + 8].val == ")"):
+            arg = toks[j + 7]
+            if arg.kind == "number":
+                return _lspe_int(arg)
+            if arg.kind == "ident":
+                return _lspe_const_int(toks, arg.val)
+            return None
+        j -= 1
+    return None
+
+
 def pass_spans(toks: list, sid) -> list[dict]:
     """`lspe pass "reason" { … }` 的词法跨度（`docs/262` §5.16）。
 
@@ -80,7 +191,8 @@ def _mark(site: dict, cover, i: int) -> dict:
     return site
 
 
-def census(toks: list, unit: str) -> tuple[list[dict], list[int], list[dict]]:
+def census(toks: list, unit: str,
+           lms=frozenset()) -> tuple[list[dict], list[int], list[dict]]:
     """站点普查（`docs/262` §5.1）：E1/E2（guard + 下标）、E3、E4、pass 块。
 
     口径是**词法的**，且两套实现用**同一条规则** —— 参考侧吃 `lomc.lex` 的 token，
@@ -107,6 +219,7 @@ def census(toks: list, unit: str) -> tuple[list[dict], list[int], list[dict]]:
         return _covered(spans, i)
 
     census_e1e2(toks, sid, sites, unsourced, cover)
+    census_bounds(toks, sid, sites, cover, lms)
     census_e3(toks, sid, sites, cover)
     census_e4(toks, sid, sites, (), cover)
     for s in sites:

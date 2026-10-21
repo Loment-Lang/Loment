@@ -157,6 +157,33 @@ fn _start() {
 
 
 @test
+def test_long_end_to_end():
+    """long params/returns, `lcmp`, `ldc2_w`, `i2l` and the 64-bit stack slots."""
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "deps" / "longlib").mkdir(parents=True)
+        ir, _iface = _emit(FIX / "LongLib.class", "longlib", d / "deps" / "longlib")
+        rc = _build_and_run(d, ir, """module app
+use longlib
+
+fn _start() {
+    let a: i64 = longlib_add(3, 4);
+    let c1: i32 = longlib_cmp(3, 4) + 1;
+    let c2: i32 = longlib_cmp(4, 3) + 1;
+    let c3: i32 = longlib_cmp(5, 5) + 1;
+    let m: i64 = longlib_mix(5, 2);
+    let ok: i64 = (a - 7) + (c1 as i64) + ((c2 - 2) as i64) + ((c3 - 1) as i64) + (m - 15);
+    syscall4(60, ok as u64, 0, 0);
+}
+""")
+        if sys.platform == "win32":
+            assert rc == 0, rc
+            print("      long add/cmp/mix -> exit 0 on PE")
+        else:
+            print("SKIP: PE execution is Windows-only; IR emitted and linked to ELF")
+
+
+@test
 def test_merge_removes_satisfied_declaration():
     """The merged IR has no extern declaration for a symbol defined in a second input."""
     with tempfile.TemporaryDirectory() as td:

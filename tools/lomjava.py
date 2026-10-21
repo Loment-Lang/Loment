@@ -280,8 +280,8 @@ def _init_ops() -> None:
     for i, name in enumerate(("nop", "aconst_null", "iconst_m1", "iconst_0", "iconst_1",
                               "iconst_2", "iconst_3", "iconst_4", "iconst_5")):
         _op(i, name, "", 1 if 2 <= i <= 8 else 0)
-    _op(9, "lconst_0", "", 2)
-    _op(10, "lconst_1", "", 2)
+    _op(9, "lconst_0", "", 1)
+    _op(10, "lconst_1", "", 1)
     _op(11, "fconst_0", "", 1)
     _op(12, "fconst_1", "", 1)
     _op(13, "fconst_2", "", 1)
@@ -291,36 +291,37 @@ def _init_ops() -> None:
     _op(17, "sipush", "h", 1)
     _op(18, "ldc", "b", 1)
     _op(19, "ldc_w", "h", 1)
-    _op(20, "ldc2_w", "h", 2)
-    _op(21, "iload", "b", 1); _op(22, "lload", "b", 2)
+    _op(20, "ldc2_w", "h", 1)
+    _op(21, "iload", "b", 1); _op(22, "lload", "b", 1)
     _op(23, "fload", "b", 1); _op(24, "dload", "b", 2)
     _op(25, "aload", "b", 1)
     for k in range(4):
         _op(26 + k, f"iload_{k}", "", 1)
-        _op(30 + k, f"lload_{k}", "", 2)
+        _op(30 + k, f"lload_{k}", "", 1)
         _op(42 + k, f"aload_{k}", "", 1)
-    _op(54, "istore", "b", -1); _op(55, "lstore", "b", -2)
+    _op(54, "istore", "b", -1); _op(55, "lstore", "b", -1)
     _op(56, "fstore", "b", -1); _op(57, "dstore", "b", -2)
     _op(58, "astore", "b", -1)
     for k in range(4):
         _op(59 + k, f"istore_{k}", "", -1)
-        _op(63 + k, f"lstore_{k}", "", -2)
+        _op(63 + k, f"lstore_{k}", "", -1)
         _op(75 + k, f"astore_{k}", "", -1)
     for code, name, delta in (
-            (96, "iadd", -1), (97, "ladd", -2), (98, "fadd", -1), (99, "dadd", -2),
-            (100, "isub", -1), (101, "lsub", -2), (102, "fsub", -1), (103, "dsub", -2),
-            (104, "imul", -1), (105, "lmul", -2), (106, "fmul", -1), (107, "dmul", -2),
-            (108, "idiv", -1), (109, "ldiv", -2), (110, "fdiv", -1), (111, "ddiv", -2),
-            (112, "irem", -1), (113, "lrem", -2), (114, "frem", -1), (115, "drem", -2),
+            (96, "iadd", -1), (97, "ladd", -1), (98, "fadd", -1), (99, "dadd", -2),
+            (100, "isub", -1), (101, "lsub", -1), (102, "fsub", -1), (103, "dsub", -2),
+            (104, "imul", -1), (105, "lmul", -1), (106, "fmul", -1), (107, "dmul", -2),
+            (108, "idiv", -1), (109, "ldiv", -1), (110, "fdiv", -1), (111, "ddiv", -2),
+            (112, "irem", -1), (113, "lrem", -1), (114, "frem", -1), (115, "drem", -2),
             (116, "ineg", 0), (117, "lneg", 0),
             (120, "ishl", -1), (121, "lshl", -1), (122, "ishr", -1), (123, "lshr", -1),
             (124, "iushr", -1), (125, "lushr", -1),
-            (126, "iand", -1), (127, "land", -2), (128, "ior", -1), (129, "lor", -2),
-            (130, "ixor", -1), (131, "lxor", -2),
+            (126, "iand", -1), (127, "land", -1), (128, "ior", -1), (129, "lor", -1),
+            (130, "ixor", -1), (131, "lxor", -1),
             (132, "iinc", 0)):
         _op(code, name, "bb" if code == 132 else "", delta)
-    _op(133, "i2l", "", 1); _op(134, "i2f", "", 0); _op(135, "i2d", "", 1)
-    _op(136, "l2i", "", -1); _op(137, "l2f", "", -1); _op(138, "l2d", "", 0)
+    _op(148, "lcmp", "", -1)
+    _op(133, "i2l", "", 0); _op(134, "i2f", "", 0); _op(135, "i2d", "", 0)
+    _op(136, "l2i", "", 0); _op(137, "l2f", "", 0); _op(138, "l2d", "", 0)
     _op(145, "i2b", "", 0); _op(146, "i2c", "", 0); _op(147, "i2s", "", 0)
     _op(153, "ifeq", "h", -1); _op(154, "ifne", "h", -1)
     _op(155, "iflt", "h", -1); _op(156, "ifge", "h", -1)
@@ -330,7 +331,7 @@ def _init_ops() -> None:
                        (165, "if_acmpeq"), (166, "if_acmpne")):
         _op(code, name, "h", -2)
     _op(167, "goto", "h", 0)
-    _op(172, "ireturn", "", -1); _op(173, "lreturn", "", -2)
+    _op(172, "ireturn", "", -1); _op(173, "lreturn", "", -1)
     _op(174, "freturn", "", -1); _op(175, "dreturn", "", -2)
     _op(176, "areturn", "", -1); _op(177, "return", "", 0)
 
@@ -416,11 +417,12 @@ def _slot_local(name: str, ty: str) -> str:
 
 class Emitter:
     def __init__(self, insns: list[Insn], heights: dict[int, int], max_stack: int,
-                 params: list[str], ret: str, pool: list):
+                 params: list[str], param_slots: list[int], ret: str, pool: list):
         self.insns = insns
         self.heights = heights
         self.max_stack = max_stack
         self.params = params
+        self.param_slots = param_slots
         self.ret = ret
         self.pool = pool
         self.lines: list[str] = []
@@ -444,9 +446,11 @@ class Emitter:
         return cur
 
     def run(self) -> str:
-        # entry: allocate locals and operand-stack slots, copy parameters
-        for i, ty in enumerate(self.params):
-            self.local(i, ty)
+        # entry: allocate locals and operand-stack slots, copy parameters.
+        # JVM local slots are not value indices: a long/double occupies two
+        # slots. `param_slots` maps each descriptor parameter to its slot.
+        for slot, ty in zip(self.param_slots, self.params):
+            self.local(slot, ty)
         # Discover local types from the bytecode before emitting allocas.
         self._scan_locals()
         for idx in range(max(self.locals.keys(), default=-1) + 1):
@@ -455,14 +459,14 @@ class Emitter:
         for idx in sorted(self.locals):
             ty = self.locals[idx]
             self.emit(f"{_slot_local(str(idx), ty)} = alloca {ty}")
-        for i, ty in enumerate(self.params):
-            self.emit(f"store {ty} %p{i}, ptr {_slot_local(str(i), ty)}")
+        for i, (slot, ty) in enumerate(zip(self.param_slots, self.params)):
+            self.emit(f"store {ty} %p{i}, ptr {_slot_local(str(slot), ty)}")
         for k in range(self.max_stack):
             # The stack slot type is discovered from the instruction that writes
             # it.  For the first slice every value is i32/i64; allocate i64 and
             # use trunc/sext around narrow values would be wasteful, so use i32
             # unless a long is present.
-            self.emit(f"%stk{k} = alloca i32")
+            self.emit(f"%stk{k} = alloca i64")
         self.emit(f"br label %L{self.insns[0].off}" if self.insns else "ret void")
         for x in self.insns:
             self._insn(x)
@@ -480,23 +484,43 @@ class Emitter:
             elif name.startswith("iload_") or name.startswith("istore_"):
                 self.local(int(name[-1]), "i32")
             elif name.startswith("aload") or name.startswith("astore"):
-                raise JavaError("reference locals are not supported in the first slice")
+                self.local(int(name[-1]), "ptr")
             elif name.startswith("fload") or name.startswith("fstore"):
                 raise JavaError("float locals are not supported in the first slice")
             elif name.startswith("dload") or name.startswith("dstore"):
                 raise JavaError("double locals are not supported in the first slice")
 
     def _push(self, ty: str, val: str, h: int) -> None:
-        if ty == "i64":
-            raise JavaError("long operand-stack slots are not supported in the first slice")
-        self.emit(f"store i32 {val}, ptr %stk{h}")
+        # Every operand-stack slot is i64; i32 and ptr values are converted at
+        # the boundary. One slot width is enough for i32/i64/ptr and keeps the
+        # emitter independent of a full JVM type lattice for now.
+        if ty == "i32":
+            x = self.t()
+            self.emit(f"{x} = sext i32 {val} to i64")
+            self.emit(f"store i64 {x}, ptr %stk{h}")
+        elif ty == "i64":
+            self.emit(f"store i64 {val}, ptr %stk{h}")
+        elif ty == "ptr":
+            x = self.t()
+            self.emit(f"{x} = ptrtoint ptr {val} to i64")
+            self.emit(f"store i64 {x}, ptr %stk{h}")
+        else:
+            raise JavaError(f"operand-stack type {ty} is not supported")
 
     def _pop(self, ty: str, h: int) -> str:
-        if ty == "i64":
-            raise JavaError("long operand-stack slots are not supported in the first slice")
         v = self.t()
-        self.emit(f"{v} = load i32, ptr %stk{h}")
-        return v
+        self.emit(f"{v} = load i64, ptr %stk{h}")
+        if ty == "i32":
+            x = self.t()
+            self.emit(f"{x} = trunc i64 {v} to i32")
+            return x
+        if ty == "i64":
+            return v
+        if ty == "ptr":
+            x = self.t()
+            self.emit(f"{x} = inttoptr i64 {v} to ptr")
+            return x
+        raise JavaError(f"operand-stack type {ty} is not supported")
 
     def _insn(self, x: Insn) -> None:
         name = _OPS[x.op][0]
@@ -518,22 +542,28 @@ class Emitter:
             if not ent or ent[0] != CP_INTEGER:
                 raise JavaError(f"{name} #{x.args[0]} is not an int constant")
             self._push("i32", str(ent[1]), h0)
+        elif name == "ldc2_w":
+            ent = self.pool[x.args[0]] if x.args[0] < len(self.pool) else None
+            if not ent or ent[0] != CP_LONG:
+                raise JavaError(f"ldc2_w #{x.args[0]} is not a long constant")
+            self._push("i64", str(ent[1]), h0)
+        elif name in ("lconst_0", "lconst_1"):
+            self._push("i64", "0" if name == "lconst_0" else "1", h0)
         elif name in ("iload", "lload", "iload_0", "iload_1", "iload_2", "iload_3",
                       "lload_0", "lload_1", "lload_2", "lload_3"):
             idx = x.args[0] if x.args else int(name[-1])
             ty = "i64" if name.startswith("l") else "i32"
             v = self.t()
             self.emit(f"{v} = load {ty}, ptr {_slot_local(str(idx), ty)}")
-            if ty == "i64":
-                # Keep the first slice honest: no long values on the stack.
-                raise JavaError("long values on the operand stack are not supported yet")
             self._push(ty, v, h0)
         elif name in ("istore", "istore_0", "istore_1", "istore_2", "istore_3"):
             idx = x.args[0] if x.args else int(name[-1])
             v = self._pop("i32", h0 - 1)
             self.emit(f"store i32 {v}, ptr {_slot_local(str(idx), 'i32')}")
         elif name in ("lstore", "lstore_0", "lstore_1", "lstore_2", "lstore_3"):
-            raise JavaError("long locals are not supported yet")
+            idx = x.args[0] if x.args else int(name[-1])
+            v = self._pop("i64", h0 - 1)
+            self.emit(f"store i64 {v}, ptr {_slot_local(str(idx), 'i64')}")
         elif name == "iinc":
             idx, delta = x.args
             v = self.t()
@@ -549,31 +579,72 @@ class Emitter:
             r = self.t()
             self.emit(f"{r} = {op} i32 {a}, {b}")
             self._push("i32", r, h0 - 2)
-        elif name in ("idiv", "irem"):
-            b = self._pop("i32", h0 - 1)
-            a = self._pop("i32", h0 - 2)
-            op = "sdiv" if name == "idiv" else "srem"
+        elif name in ("ladd", "lsub", "lmul", "land", "lor", "lxor"):
+            b = self._pop("i64", h0 - 1)
+            a = self._pop("i64", h0 - 2)
+            op = {"ladd": "add", "lsub": "sub", "lmul": "mul",
+                  "land": "and", "lor": "or", "lxor": "xor"}[name]
             r = self.t()
-            self.emit(f"{r} = {op} i32 {a}, {b}")
+            self.emit(f"{r} = {op} i64 {a}, {b}")
+            self._push("i64", r, h0 - 2)
+        elif name in ("idiv", "irem", "ldiv", "lrem"):
+            ty = "i64" if name.startswith("l") else "i32"
+            b = self._pop(ty, h0 - 1)
+            a = self._pop(ty, h0 - 2)
+            op = "sdiv" if name.endswith("div") else "srem"
+            r = self.t()
+            self.emit(f"{r} = {op} {ty} {a}, {b}")
+            self._push(ty, r, h0 - 2)
+        elif name in ("ineg", "lneg"):
+            ty = "i64" if name == "lneg" else "i32"
+            a = self._pop(ty, h0 - 1)
+            r = self.t()
+            self.emit(f"{r} = sub {ty} 0, {a}")
+            self._push(ty, r, h0 - 1)
+        elif name in ("ishl", "ishr", "iushr", "lshl", "lshr", "lushr"):
+            ty = "i64" if name.startswith("l") else "i32"
+            b = self._pop("i32", h0 - 1)   # the shift distance is always int
+            a = self._pop(ty, h0 - 2)
+            m = self.t()
+            if ty == "i64":
+                bb = self.t()
+                self.emit(f"{bb} = sext i32 {b} to i64")
+                self.emit(f"{m} = and i64 {bb}, 63")
+            else:
+                self.emit(f"{m} = and i32 {b}, 31")
+            r = self.t()
+            op = {"ishl": "shl", "ishr": "ashr", "iushr": "lshr",
+                  "lshl": "shl", "lshr": "ashr", "lushr": "lshr"}[name]
+            self.emit(f"{r} = {op} {ty} {a}, {m}")
+            self._push(ty, r, h0 - 2)
+        elif name == "lcmp":
+            b = self._pop("i64", h0 - 1)
+            a = self._pop("i64", h0 - 2)
+            lt = self.t(); gt = self.t(); r1 = self.t(); r2 = self.t(); r = self.t()
+            self.emit(f"{lt} = icmp slt i64 {a}, {b}")
+            self.emit(f"{gt} = icmp sgt i64 {a}, {b}")
+            self.emit(f"{r1} = zext i1 {lt} to i32")
+            self.emit(f"{r2} = zext i1 {gt} to i32")
+            self.emit(f"{r} = sub i32 {r2}, {r1}")
             self._push("i32", r, h0 - 2)
-        elif name == "ineg":
+        elif name == "i2l":
             a = self._pop("i32", h0 - 1)
             r = self.t()
-            self.emit(f"{r} = sub i32 0, {a}")
-            self._push("i32", r, h0 - 1)
-        elif name in ("ishl", "ishr", "iushr"):
-            b = self._pop("i32", h0 - 1)
-            a = self._pop("i32", h0 - 2)
-            m = self.t()
-            self.emit(f"{m} = and i32 {b}, 31")
+            self.emit(f"{r} = sext i32 {a} to i64")
+            self._push("i64", r, h0 - 1)
+        elif name == "l2i":
+            a = self._pop("i64", h0 - 1)
             r = self.t()
-            op = {"ishl": "shl", "ishr": "ashr", "iushr": "lshr"}[name]
-            self.emit(f"{r} = {op} i32 {a}, {m}")
-            self._push("i32", r, h0 - 2)
-        elif name == "i2l" or name == "l2i" or name in ("i2b", "i2c", "i2s"):
-            raise JavaError(f"{name} is not supported yet")
-        elif name.startswith("l") and name not in ("ldc", "ldc_w", "ldc2_w"):
-            raise JavaError(f"{name} (long arithmetic) is not supported yet")
+            self.emit(f"{r} = trunc i64 {a} to i32")
+            self._push("i32", r, h0 - 1)
+        elif name in ("i2b", "i2c", "i2s"):
+            a = self._pop("i32", h0 - 1)
+            narrow = {"i2b": ("i8", "sext"), "i2c": ("i16", "zext"),
+                      "i2s": ("i16", "sext")}[name]
+            t0 = self.t(); r = self.t()
+            self.emit(f"{t0} = trunc i32 {a} to {narrow[0]}")
+            self.emit(f"{r} = {narrow[1]} {narrow[0]} {t0} to i32")
+            self._push("i32", r, h0 - 1)
         elif name in ("ifeq", "ifne", "iflt", "ifge", "ifgt", "ifle"):
             v = self._pop("i32", h0 - 1)
             cond = {"ifeq": "eq", "ifne": "ne", "iflt": "slt",
@@ -596,9 +667,12 @@ class Emitter:
         elif name == "ireturn":
             v = self._pop("i32", h0 - 1)
             self.emit(f"ret i32 {v}")
+        elif name == "lreturn":
+            v = self._pop("i64", h0 - 1)
+            self.emit(f"ret i64 {v}")
         elif name == "return":
             self.emit("ret void")
-        elif name in ("lreturn", "freturn", "dreturn", "areturn"):
+        elif name in ("freturn", "dreturn", "areturn"):
             raise JavaError(f"{name} is not supported in the first slice")
         else:
             raise JavaError(f"opcode {name} at {x.off} is not supported in the first slice")
@@ -621,13 +695,16 @@ def emit_method_ir(module: str, cls: str, m: Method, pool: list) -> tuple[str, s
     insns = decode(m.code)
     heights = stack_heights(insns)
     sym = mangle(module, cls, m.name, m.desc)
-    em = Emitter(insns, heights, m.max_stack, params, ret, pool)
+    slots = []
+    slot = 0
+    for t in params:
+        slots.append(slot)
+        slot += 2 if t == "i64" else 1
+    em = Emitter(insns, heights, m.max_stack, params, slots, ret, pool)
     body = em.run()
     def irty(t: str) -> str:
         return "void" if t == "void" else t
-    if ret == "i64":
-        raise JavaError(f"{cls}.{m.name}: long returns are not supported yet")
-    argtxt = ", ".join(f"i32 %p{i}" for i in range(len(params)))
+    argtxt = ", ".join(f"{t} %p{i}" for i, t in enumerate(params))
     rt = irty(ret)
     text = [f"define internal {rt} @{sym}({argtxt}) {{", "entry:", body, "}"]
     return sym, "\n".join(text), m.name

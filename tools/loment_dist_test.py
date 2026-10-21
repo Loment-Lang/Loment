@@ -679,7 +679,9 @@ def test_windows_installer(zipf: Path) -> None:
             built = run_dir / "run-setup.exe"
             sed.write_text(loment_dist.iexpress_sed(built, run_dir, files),
                            encoding="ascii", newline="\r\n")
-            subprocess.run([ie, "/N", str(sed)], capture_output=True, cwd=str(run_dir),
+            # `/Q` 与正式件同口径（`emit_exe`）：没有它，无可交互控制台时 IExpress
+            # 会弹向导等输入，180 秒后抛 TimeoutExpired（#1077）。
+            subprocess.run([ie, "/N", "/Q", str(sed)], capture_output=True, cwd=str(run_dir),
                            timeout=180)
             if not built.exists():
                 check("自解压包能打出 (iexpress)", False, "iexpress 没产出 exe")

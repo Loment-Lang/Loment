@@ -279,6 +279,28 @@ fn _start() {
 
 
 @test
+def test_instance_methods_end_to_end():
+    """A constructor with an argument and an `invokevirtual` in the same class."""
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "deps" / "instlib").mkdir(parents=True)
+        ir, _iface = _emit(FIX / "InstanceLib.class", "instlib", d / "deps" / "instlib")
+        rc = _build_and_run(d, ir, """module app
+use instlib
+
+fn _start() {
+    let r: i32 = instlib_run();
+    syscall4(60, (r - 12) as u64, 0, 0);
+}
+""")
+        if sys.platform == "win32":
+            assert rc == 0, rc
+            print("      new InstanceLib(7).add(5) = 12 on PE")
+        else:
+            print("SKIP: PE execution is Windows-only; IR emitted and linked to ELF")
+
+
+@test
 def test_merge_removes_satisfied_declaration():
     """The merged IR has no extern declaration for a symbol defined in a second input."""
     with tempfile.TemporaryDirectory() as td:

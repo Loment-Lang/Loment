@@ -839,7 +839,17 @@ class Emitter:
             for i in range(n - 1, -1, -1):
                 vals[i] = self._pop(params[i], h0 - n + i)
             recv = self._pop("ptr", h0 - n - 1)
-            if cls == "java/lang/String" and mname == "length" and desc == "()I":
+            if cls == self.own_class:
+                sym = mangle(self.module, cls, mname, desc)
+                argtxt = ", ".join([f"ptr {recv}"] +
+                                   [f"{t} {v}" for t, v in zip(params, vals)])
+                if ret == "void":
+                    self.emit(f"call void @{sym}({argtxt})")
+                else:
+                    r = self.t()
+                    self.emit(f"{r} = call {ret} @{sym}({argtxt})")
+                    self._push(ret, r, h0 - n - 1)
+            elif cls == "java/lang/String" and mname == "length" and desc == "()I":
                 q = self.t()
                 self.emit(f"{q} = getelementptr i8, ptr {recv}, i32 16")
                 v = self.t()
@@ -862,7 +872,7 @@ class Emitter:
             if mname == "<init>" and cls == "java/lang/Object":
                 self._pop("ptr", h0 - 1)
                 return
-            if mname == "<init>" and cls == self.own_class:
+            if cls == self.own_class:
                 params, ret = parse_method_descriptor(desc)
                 n = len(params)
                 vals = [""] * n
@@ -872,7 +882,12 @@ class Emitter:
                 sym = mangle(self.module, cls, mname, desc)
                 argtxt = ", ".join([f"ptr {this}"] +
                                    [f"{t} {v}" for t, v in zip(params, vals)])
-                self.emit(f"call void @{sym}({argtxt})")
+                if ret == "void":
+                    self.emit(f"call void @{sym}({argtxt})")
+                else:
+                    r = self.t()
+                    self.emit(f"{r} = call {ret} @{sym}({argtxt})")
+                    self._push(ret, r, h0 - n - 1)
                 return
             raise JavaError(f"invokespecial {cls}.{mname}{desc} is not supported")
         elif name == "newarray":
@@ -952,9 +967,8 @@ class Emitter:
 def emit_method_ir(module: str, cls: str, m: Method, pool: list,
                    field_layout: dict, obj_size: int,
                    globals_: list) -> tuple[str, str, str] | None:
+    is_static = bool(m.access & ACC_STATIC)
     is_ctor = m.name == "<init>"
-    if not (m.access & ACC_STATIC) and not is_ctor:
-        return None
     if m.access & (ACC_NATIVE | ACC_ABSTRACT):
         return None
     if m.name.startswith("<") and not is_ctor:
@@ -967,9 +981,7 @@ def emit_method_ir(module: str, cls: str, m: Method, pool: list,
     if is_ctor:
         if ret != "void":
             raise JavaError(f"{cls}.<init>{m.desc}: a constructor must return void")
-        params = ["ptr"] + desc_params
-    else:
-        params = desc_params
+    params = desc_params if is_static else ["ptr"] + desc_params
     if len(params) > 8:
         raise JavaError(f"{cls}.{m.name}: more than 8 parameters")
     insns = decode(m.code)
@@ -988,7 +1000,7 @@ def emit_method_ir(module: str, cls: str, m: Method, pool: list,
     argtxt = ", ".join(f"{t} %p{i}" for i, t in enumerate(params))
     rt = irty(ret)
     text = [f"define internal {rt} @{sym}({argtxt}) {{", "entry:", body, "}"]
-    return sym, "\n".join(text), m.name
+    return sym, "\n".join(text), m.name, is_static
 
 
 def emit(module: str, cf: ClassFile, ir_path: Path, iface_path: Path) -> list[tuple]:
@@ -998,15 +1010,15 @@ def emit(module: str, cf: ClassFile, ir_path: Path, iface_path: Path) -> list[tu
         layout[f.name] = (off, desc_type(f.desc))
         off += 8
     obj_size = off
-    funcs: list[tuple[str, str, str, list[str], str]] = []
+    funcs: list[tuple[str, str, str, list[str], str, bool]] = []
     globals_: list[str] = []
     for m in cf.methods:
         got = emit_method_ir(module, cf.name, m, cf.pool, layout, obj_size, globals_)
         if got is None:
             continue
-        sym, text, name = got
+        sym, text, name, is_static = got
         params, ret = parse_method_descriptor(m.desc)
-        funcs.append((sym, text, name, params, ret))
+        funcs.append((sym, text, name, params, ret, is_static))
     funcs.sort(key=lambda x: (x[2], x[0]))
     ir_path.write_text("\n\n".join(globals_) + "\n\n" +
                        "\n\n".join(x[1] for x in funcs) + "\n\n" + _jrt_alloc_ir(module),
@@ -1014,8 +1026,8 @@ def emit(module: str, cf: ClassFile, ir_path: Path, iface_path: Path) -> list[tu
 
     lines = [f"module {module}", ""]
     used: set[str] = set()
-    for sym, _text, name, params, ret in funcs:
-        if name.startswith("<"):
+    for sym, _text, name, params, ret, is_static in funcs:
+        if name.startswith("<") or not is_static:
             continue
         base = f"{module}_{name}"
         alias = base

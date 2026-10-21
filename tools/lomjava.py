@@ -104,6 +104,7 @@ class Method:
     code: bytes | None
     max_stack: int
     max_locals: int
+    exc: list
 
 
 @dataclass
@@ -189,6 +190,7 @@ def parse_class(data: bytes) -> ClassFile:
         desc = _utf8(pool, r.u2())
         code = None
         max_stack = max_locals = 0
+        exc: list = []
         for _ in range(r.u2()):
             aname = _utf8(pool, r.u2())
             length = r.u4()
@@ -200,9 +202,9 @@ def parse_class(data: bytes) -> ClassFile:
                 n = cr.u4()
                 code = cr.take(n)
                 for _ in range(cr.u2()):
-                    cr.take(8)
+                    exc.append((cr.u2(), cr.u2(), cr.u2(), cr.u2()))
                 _skip_attributes(cr, pool)
-        methods.append(Method(access, name, desc, code, max_stack, max_locals))
+        methods.append(Method(access, name, desc, code, max_stack, max_locals, exc))
 
     return ClassFile(_class_name(pool, this_class), methods, fields, pool)
 
@@ -375,6 +377,7 @@ def _init_ops() -> None:
     _op(180, "getfield", "h", 0); _op(181, "putfield", "h", -2)
     _op(178, "getstatic", "h", 1); _op(179, "putstatic", "h", -1)
     _op(183, "invokespecial", "h", 0); _op(182, "invokevirtual", "h", 0)
+    _op(191, "athrow", "", -1)
     _op(172, "ireturn", "", -1); _op(173, "lreturn", "", -1)
     _op(174, "freturn", "", -1); _op(175, "dreturn", "", -2)
     _op(176, "areturn", "", -1); _op(177, "return", "", 0)
@@ -461,13 +464,14 @@ def _delta(x: Insn, pool: list) -> int:
     return x.stack_delta
 
 
-def stack_heights(insns: list[Insn], pool: list) -> dict[int, int]:
+def stack_heights(insns: list[Insn], pool: list, exc: list | None = None) -> dict[int, int]:
     """Compute the operand-stack height at every reachable instruction.
     Branches that disagree are rejected; this is a small verifier, not a guess.
+    Exception handlers start with the thrown object on the stack (height 1).
     """
     by_off = {x.off: x for x in insns}
     height: dict[int, int] = {}
-    work = [(0, 0)]
+    work = [(0, 0)] + [(e[2], 1) for e in (exc or [])]
     while work:
         off, h = work.pop()
         if off not in by_off:
@@ -483,7 +487,8 @@ def stack_heights(insns: list[Insn], pool: list) -> dict[int, int]:
         if after < 0:
             raise JavaError(f"operand stack underflow at {off}")
         nxt = off + x.size
-        if name in ("ireturn", "lreturn", "freturn", "dreturn", "areturn", "return"):
+        if name in ("ireturn", "lreturn", "freturn", "dreturn", "areturn",
+                    "return", "athrow"):
             continue
         if name == "goto":
             work.append((x.args[0], after))
@@ -510,6 +515,7 @@ def _jrt_alloc_ir(module: str) -> str:
     sym = _alloc_sym(module)
     return f'''@__jrt_heap_{module} = internal global [1048576 x i8] zeroinitializer
 @__jrt_off_{module} = internal global i32 0
+@__jrt_exc_{module} = internal global ptr zeroinitializer
 
 define internal ptr @{sym}(i32 %n) {{
 entry:
@@ -543,7 +549,7 @@ class Emitter:
     def __init__(self, insns: list[Insn], heights: dict[int, int], max_stack: int,
                  params: list[str], param_slots: list[int], ret: str, pool: list,
                  module: str, own_class: str, field_layout: dict, obj_size: int,
-                 static_layout: dict, globals_: list):
+                 static_layout: dict, globals_: list, exc: list | None = None):
         self.insns = insns
         self.heights = heights
         self.max_stack = max_stack
@@ -557,6 +563,7 @@ class Emitter:
         self.obj_size = obj_size
         self.static_layout = static_layout
         self.globals = globals_
+        self.exc = exc or []
         self.strn = 0
         self.lines: list[str] = []
         self.tmp = 0
@@ -647,6 +654,33 @@ class Emitter:
             self.emit(f"{x} = inttoptr i64 {v} to ptr")
             return x
         raise JavaError(f"operand-stack type {ty} is not supported")
+
+    def _check_exc(self, x: Insn) -> None:
+        """After a call (or `athrow`): if the module exception slot is set,
+        jump to the innermost handler covering this bytecode offset, or return
+        a default value so the caller can propagate it."""
+        e = self.t()
+        self.emit(f"{e} = load ptr, ptr @__jrt_exc_{self.module}")
+        is_ = self.t()
+        self.emit(f"{is_} = icmp ne ptr {e}, null")
+        handler = None
+        for start, end, target, _typ in self.exc:
+            if start <= x.off < end:
+                handler = target
+                break
+        self.emit(f"br i1 {is_}, label %E{x.off}, label %N{x.off}")
+        self.lines.append(f"E{x.off}:")
+        if handler is not None:
+            self.emit(f"store ptr null, ptr @__jrt_exc_{self.module}")
+            self._push("ptr", e, 0)
+            self.emit(f"br label %L{handler}")
+        elif self.ret == "void":
+            self.emit("ret void")
+        elif self.ret in ("i32", "i64"):
+            self.emit(f"ret {self.ret} 0")
+        else:
+            raise JavaError(f"exception propagation does not support a {self.ret} return")
+        self.lines.append(f"N{x.off}:")
 
     def _insn(self, x: Insn) -> None:
         name = _OPS[x.op][0]
@@ -828,10 +862,15 @@ class Emitter:
             pass
         elif name == "new":
             cls = _class_name(self.pool, x.args[0])
-            if cls != self.own_class:
+            if cls == self.own_class:
+                size = self.obj_size
+            elif cls in ("java/lang/RuntimeException", "java/lang/Exception",
+                         "java/lang/Throwable"):
+                size = 8
+            else:
                 raise JavaError(f"new {cls}: only the current class is supported yet")
             p = self.t()
-            self.emit(f"{p} = call ptr @{_alloc_sym(self.module)}(i32 {self.obj_size})")
+            self.emit(f"{p} = call ptr @{_alloc_sym(self.module)}(i32 {size})")
             self._push("ptr", p, h0)
         elif name in ("getstatic", "putstatic"):
             cls, fname, desc = fieldref(self.pool, x.args[0])
@@ -902,10 +941,20 @@ class Emitter:
             else:
                 raise JavaError(
                     f"invokevirtual {cls}.{mname}{desc} is not supported yet")
+            self._check_exc(x)
         elif name == "invokespecial":
             cls, mname, desc = methodref(self.pool, x.args[0])
             if mname == "<init>" and cls == "java/lang/Object":
                 self._pop("ptr", h0 - 1)
+                return
+            if mname == "<init>" and cls in (
+                    "java/lang/RuntimeException", "java/lang/Exception",
+                    "java/lang/Throwable"):
+                params, _ret = parse_method_descriptor(desc)
+                n = len(params)
+                for i in range(n - 1, -1, -1):
+                    self._pop(params[i], h0 - n + i)
+                self._pop("ptr", h0 - n - 1)
                 return
             if cls == self.own_class:
                 params, ret = parse_method_descriptor(desc)
@@ -923,6 +972,7 @@ class Emitter:
                     r = self.t()
                     self.emit(f"{r} = call {ret} @{sym}({argtxt})")
                     self._push(ret, r, h0 - n - 1)
+                self._check_exc(x)
                 return
             raise JavaError(f"invokespecial {cls}.{mname}{desc} is not supported")
         elif name == "newarray":
@@ -983,6 +1033,11 @@ class Emitter:
                 r = self.t()
                 self.emit(f"{r} = call {ret} @{sym}({argtxt})")
                 self._push(ret, r, h0 - n)
+            self._check_exc(x)
+        elif name == "athrow":
+            e = self._pop("ptr", h0 - 1)
+            self.emit(f"store ptr {e}, ptr @__jrt_exc_{self.module}")
+            self._check_exc(x)
         elif name == "goto":
             self.emit(f"br label %L{x.args[0]}")
         elif name == "ireturn":
@@ -1020,7 +1075,7 @@ def emit_method_ir(module: str, cls: str, m: Method, pool: list,
     if len(params) > 8:
         raise JavaError(f"{cls}.{m.name}: more than 8 parameters")
     insns = decode(m.code)
-    heights = stack_heights(insns, pool)
+    heights = stack_heights(insns, pool, m.exc)
     sym = mangle(module, cls, m.name, m.desc)
     slots = []
     slot = 0                         # `this` (when present) is local slot 0
@@ -1028,7 +1083,7 @@ def emit_method_ir(module: str, cls: str, m: Method, pool: list,
         slots.append(slot)
         slot += 2 if t == "i64" else 1
     em = Emitter(insns, heights, m.max_stack, params, slots, ret, pool, module, cls,
-                 field_layout, obj_size, static_layout, globals_)
+                 field_layout, obj_size, static_layout, globals_, m.exc)
     body = em.run()
     def irty(t: str) -> str:
         return "void" if t == "void" else t

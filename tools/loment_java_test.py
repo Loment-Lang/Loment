@@ -352,6 +352,30 @@ fn _start() {
 
 
 @test
+def test_exceptions_end_to_end():
+    """try/catch + athrow: a caught RuntimeException returns 7."""
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "deps" / "exclib").mkdir(parents=True)
+        ir, _iface = _emit(FIX / "ExcLib.class", "exclib", d / "deps" / "exclib")
+        rc = _build_and_run(d, ir, """module app
+use exclib
+
+fn _start() {
+    let a: i32 = exclib_thrower();
+    let b: i32 = exclib_after();
+    let ok: i32 = (a - 7) + (b - 3);
+    syscall4(60, ok as u64, 0, 0);
+}
+""")
+        if sys.platform == "win32":
+            assert rc == 0, rc
+            print("      throw/catch -> 7, after() -> 3 on PE")
+        else:
+            print("SKIP: PE execution is Windows-only; IR emitted and linked to ELF")
+
+
+@test
 def test_merge_removes_satisfied_declaration():
     """The merged IR has no extern declaration for a symbol defined in a second input."""
     with tempfile.TemporaryDirectory() as td:

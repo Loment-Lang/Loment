@@ -10,7 +10,7 @@ javac --release 8 -d classes src/com/example/MathLib.java src/com/example/Branch
                             src/com/example/LongLib.java src/com/example/MultiLib.java \
                             src/com/example/ArrayLib.java src/com/example/ObjLib.java \
                             src/com/example/StringLib.java src/com/example/InstanceLib.java \
-                            src/com/example/StaticLib.java
+                            src/com/example/StaticLib.java src/com/example/ExcLib.java
 ```
 
 Sources are next to the class files. They are compiled with `--release 8` so the
@@ -29,6 +29,7 @@ f6cf5c1ec80d53b622ea0c37d7e316d6f5b92e90cff924bd75ab7854dacaf14a  MultiLib.class
 90bd62325f630788d7edb52b62ea0eec065374bdf6bcb13255f6a634f526b70e  StringLib.class
 559d36ae8b55150ce4a3f5366394865d1cd2469a5f30c6c0a25ef8e9d21dffb2  InstanceLib.class
 5234cc7a7c3242c08764c06b043c49a8fbd9be85667974ad08e1e9d4081ccfcc  StaticLib.class
+0b179a534533c40a1f8c036a13c954dc2192d1484b0823e862126e4d8710afa5  ExcLib.class
 ```
 
 `loment_java_test.py` uses these files and does **not** invoke `java`, `javac`

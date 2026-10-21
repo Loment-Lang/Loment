@@ -6452,13 +6452,6 @@ fn hot_cb(mb: ptr) -> ptr {
     return ptr_add(mb, M_CALLBUF - M_META);
 }
 
-fn hexch(v: u32) -> u32 {
-    if v < 10 {
-        return 48 + v;
-    }
-    return 87 + v;
-}
-
 fn put_dec(buf: ptr, at: u32, v: u32) -> u32 {
     let n: u32 = 1;
     let x: u32 = v;
@@ -6501,17 +6494,6 @@ fn put_span(buf: ptr, at: u32, src: ptr, off: u32, len: u32) -> u32 {
         i = i + 1;
     }
     return at + len;
-}
-
-fn put_hex64(buf: ptr, at: u32, dig: ptr) -> u32 {
-    let i: u32 = 0;
-    while i < 32 {
-        let b: u32 = load8(dig, i);
-        store8(buf, at + i * 2, hexch(b >> 4) as u8);
-        store8(buf, at + i * 2 + 1, hexch(b & 15) as u8);
-        i = i + 1;
-    }
-    return at + 64;
 }
 
 /// 帧布局哈希：`frame=N` + 排序去重的槽偏移 + 排序的 `(off,size)`，逐行用 `\n` 连。

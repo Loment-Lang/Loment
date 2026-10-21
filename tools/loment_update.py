@@ -290,6 +290,10 @@ def parse_hot_meta(text: str) -> dict[str, dict]:
                 raise Reject("hot-meta", line)
             kv = dict(x.split("=", 1) for x in w[2:])
             cur = {"frame": int(kv["frame"]), "layout": kv["layout"], "calls": []}
+            if "entry" in kv:
+                cur["entry"] = int(kv["entry"])
+            if "tramp" in kv:
+                cur["tramp"] = int(kv["tramp"])
             funcs[w[1]] = cur
         elif w[0] == "call" and cur is not None:
             cur["calls"].append((w[1], int(w[2].split("=", 1)[1])))

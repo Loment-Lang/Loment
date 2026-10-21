@@ -39,6 +39,10 @@ from pathlib import Path
 #: 所以这个数一旦被文本超过，数据段就会被压住（**不报错**，产物一启动就段错误）。
 #: 越过它的情形由 `compile_ll` 末尾那条判据点名拒 —— 原先没有这条，地板是**没标注的**。
 TEXT_CAP = 4194304                 # 4 MiB = 0x400000
+#: 热更新档（`#1150`）：槽表排在文本段最前面，每槽一条 `jmp rel32` + NOP 填到定长。
+#: 槽号按**函数名排序**分配，所以同一份 IR 每一次都落在同一个地址；函数集合一变，
+#: 表形就变（准入侧拿 `slots` 与 `tramp` 逐条比，见 `#1152`）。
+HOT_STRIDE = 16
 ELF_TEXT_VADDR = 0x400000
 #: 数据段在**代码缓冲之后**：文本段可用 `0x400000..0x800000`，正好是 `TEXT_CAP`。
 #: 原先钉 `0x600000`（2 MiB 窗口），实测 2026-10-15 `main` 自己已占 99.4%。
@@ -663,9 +667,14 @@ def parse_phi(text: str) -> tuple[str, list[tuple[str, str]]]:
 
 
 class Emitter:
-    def __init__(self, globals_: list[Global], externs: set[str] | None = None):
+    def __init__(self, globals_: list[Global], externs: set[str] | None = None,
+                 hotswap: bool = False, swappable: list[str] | None = None):
         self.asm = Asm(TEXT_VADDR)
         self.externs = externs or set()   # docs/173: 这些名字走 C ABI 传参
+        self.hotswap = hotswap
+        self.hot_slots = ({n: i for i, n in enumerate(sorted(swappable or []))}
+                          if hotswap else {})
+        self.hot_header: dict = {}
         self.globals = {g.name: g for g in globals_}
         self.cur: Func | None = None
         self.cur_block = ""
@@ -1192,7 +1201,7 @@ class Emitter:
         if callee == "@llvm.trap":
             self.asm.emit(b"\x0F\x0B")
         else:
-            self.asm.call(callee[1:])
+            self.asm.call(self._hot_target(callee[1:]))
             self._hot_record(callee[1:])
         if total:
             self.asm.emit(alu_ri(ADD, RSP, total))
@@ -1346,6 +1355,42 @@ class Emitter:
         assert self.cur is not None
         return f"{self.cur.name}${label}"
 
+    def _hot_target(self, name: str) -> str:
+        """内部调用在热更新档下走**槽**，不是直接跳到实现。"""
+        if self.hotswap and name in self.hot_slots:
+            return f"__hot_tramp_{name}"
+        return name
+
+    def emit_trampolines(self) -> None:
+        """槽表：`TEXT_VADDR + slot*HOT_STRIDE`，每条 `jmp rel32` 到当前实现。"""
+        for name, slot in sorted(self.hot_slots.items(), key=lambda kv: kv[1]):
+            at = self.asm.here()
+            want = TEXT_VADDR + slot * HOT_STRIDE
+            if at != want:
+                raise ElfError(f"热更新槽 {slot} 落在 {at:#x}，应为 {want:#x}")
+            self.asm.label(f"__hot_tramp_{name}")
+            self.asm.jmp(name)
+            self.asm.emit(b"\x90" * (HOT_STRIDE - 5))
+
+    def emit_gate(self) -> None:
+        """入口闸（`#1150`）：读全局 epoch，非零就走候选那条路（真正的换在 `#1151`）。"""
+        start = self.asm.here()
+        self.hot_header["gate"] = start - TEXT_VADDR
+        self.asm.label("__loment_hot_gate")
+        self.asm.emit(b"\x55")                  # push rbp
+        self.asm.emit(b"\x48\x89\xE5")          # mov rbp, rsp
+        self.asm.mov_abs(RAX, "__loment_hot_epoch")
+        self.asm.emit(b"\x83\x38\x00")          # cmp dword [rax], 0
+        self.asm.jcc("e", "__loment_hot_gate_ret")
+        self.asm.label("__loment_hot_gate_pending")
+        self.asm.label("__loment_hot_gate_ret")
+        self.asm.emit(b"\x5D\xC3")              # pop rbp; ret
+        # **固定核的摘要**：闸的字节 + 槽表的定长。换版时这一段必须逐字节相同，
+        # 否则装载器拒绝（准入侧把它当作 fixed_core 的真身，见 docs/280 §4）。
+        body = bytes(self.asm.buf[start - TEXT_VADDR:])
+        self.hot_header["gate_digest"] = hashlib.sha256(
+            body + f"stride={HOT_STRIDE}".encode("ascii")).hexdigest()
+
     def emit_func(self, f: Func) -> None:
         self.cur = f
         self.plan_frame(f)
@@ -1357,17 +1402,24 @@ class Emitter:
         self.asm.emit(b"\x48\x89\xE5")  # mov rbp, rsp
         if self.frame:
             self.asm.emit(alu_ri(SUB, RSP, self.frame))
+        if self.hotswap:
+            self.asm.call("__loment_hot_gate")
+            self._hot_record("__gate")
         for blk in f.blocks:
             self.cur_block = blk.label
             self.asm.label(self.blk(blk.label))
             for ins in blk.instrs:
                 self.lower(ins)
-        self.hot_funcs.append({
+        row = {
             "name": f.name,
+            "entry": self._hot_entry - TEXT_VADDR,
             "frame": self.frame,
             "layout": self._frame_layout(),
             "calls": self._hot_calls,
-        })
+        }
+        if self.hotswap:
+            row["tramp"] = self.hot_slots[f.name]
+        self.hot_funcs.append(row)
         self.cur = None
 
     def _frame_layout(self) -> str:
@@ -1418,7 +1470,7 @@ class Emitter:
             self.asm.emit(b"\x48\x83\xC3\x08")                    # add rbx, 8
             self.asm.jmp(f"__ctor_loop_{j}")
             self.asm.label(f"__ctor_done_{j}")
-        self.asm.call(start_name)
+        self.asm.call(self._hot_target(start_name))
         # **析构表逆序跑**（`#611`）：C++ 的 `.fini_array` 语义就是"构造的逆序"。
         for j in range(finis):
             self.asm.mov_abs(RBX, f"__loment_fini_end_{j}")
@@ -6219,15 +6271,23 @@ CONSCRIPT = ("memcpy", "memset", "memcmp", "__stack_chk_fail", "malloc", "free")
 _TLS_SIZE = 256
 
 
-def hot_metadata(funcs: list[dict]) -> str:
-    """`.lomhot` 的文本形（`#1149`）。
+def hot_metadata(funcs: list[dict], header: dict | None = None) -> str:
+    """`.lomhot` 的文本形（`#1149` / `#1150`）。
 
-    顺序是**确定的**：函数按 IR 顺序，调用点按发射顺序。偏移是**函数相对**的
-    （从函数入口算起），所以换一个槽地址、换一次链接都不改这些数。
+    顺序是**确定的**：函数按 IR 顺序，调用点按发射顺序。调用点偏移是**函数相对**的
+    （从函数入口算起），所以换一个槽地址、换一次链接都不改这些数。`entry` 是函数入口
+    相对文本段起点的偏移（装载器用它算实际地址）；`tramp` 只有热更新档才有。
     """
     out = ["lomhot 1"]
+    if header:
+        out.append(f"fixed gate={header['gate']} stride={header['stride']}"
+                   f" slots={header['slots']} digest={header['gate_digest']}")
     for fn in funcs:
-        out.append(f"func {fn['name']} frame={fn['frame']} layout={fn['layout']}")
+        row = (f"func {fn['name']} entry={fn['entry']}"
+               f" frame={fn['frame']} layout={fn['layout']}")
+        if "tramp" in fn:
+            row += f" tramp={fn['tramp']}"
+        out.append(row)
         for cid, off in fn["calls"]:
             out.append(f"call {cid} at={off}")
     return "\n".join(out) + "\n"
@@ -6235,7 +6295,8 @@ def hot_metadata(funcs: list[dict]) -> str:
 
 def compile_ll(text: str, objects: list | None = None,
                allow_ports: bool = False, interp: str | None = None,
-               collect_hot: bool = True) -> tuple[bytes, dict]:
+               collect_hot: bool = True,
+               hotswap: bool = False) -> tuple[bytes, dict]:
     objects = objects or []
     global TEXT_VADDR, DATA_VADDR
     TEXT_VADDR, DATA_VADDR = ELF_TEXT_VADDR, ELF_DATA_VADDR   # PE 目标会改这两个全局
@@ -6383,7 +6444,12 @@ def compile_ll(text: str, objects: list | None = None,
     # 对它是**特判** (发 `ud2` 而不是真去 call)。放进 externs 会把它抢进 C ABI 那条路,
     # 于是 `call llvm.trap` 在 finalize 里报"未定义的标签" —— 实测把 loment_elf_test 从
     # 7/7 打到 4/7。所以这里滤掉 (除 llvm.* 之外没有别的内建 declare)。
-    em = Emitter(globals_, {x for x in externs if not x.startswith("llvm.")})
+    em = Emitter(globals_, {x for x in externs if not x.startswith("llvm.")},
+                 hotswap=hotswap, swappable=[f.name for f in funcs])
+    if hotswap:
+        # 入口闸读的那个 epoch 字；候选在等时非零（`#1151` 写它）。
+        em.asm.labels["__loment_hot_epoch"] = DATA_VADDR + len(data) + bss
+        bss += 8
     for g in globals_:
         em.asm.labels[g.name] = g.addr
     # **TLS 只在"没有 loader 替我们管"的时候才自己装**。
@@ -6420,6 +6486,11 @@ def compile_ll(text: str, objects: list | None = None,
     # 用"导出表里有没有 `exit`"而不是"有没有共享对象"：只有 libz 的产物没有 stdio 要刷，
     # 也就不该凭空多出一条导入。
     call_exit = any("exit" in so.exports for so in shared)
+    if hotswap:
+        em.emit_trampolines()
+        em.emit_gate()
+        em.hot_header["stride"] = HOT_STRIDE
+        em.hot_header["slots"] = len(funcs)
     em.emit_entry_stub("_start", tls=has_foreign, ctors=len(ctor_ranges),
                        finis=len(fini_ranges), call_exit=call_exit)
     for f in funcs:
@@ -6689,7 +6760,8 @@ def compile_ll(text: str, objects: list | None = None,
         "funcs": [f.name for f in funcs], "objects": [o.name for o in objects],
         "linked": appended, "relocs": applied,
         "shared": [s.soname for s in shared], "imports": imported,
-        "hot": hot_metadata(em.hot_funcs) if collect_hot else "",
+        "hot": hot_metadata(em.hot_funcs, em.hot_header if hotswap else None)
+               if collect_hot else "",
     }
 
 
@@ -6701,6 +6773,7 @@ def main(argv: list[str] | None = None) -> int:
     allow_ports = False
     interp = None
     hot_meta = None
+    profile = "default"
     files: list[str] = []
     link: list[Path] = []
     i = 0
@@ -6728,23 +6801,36 @@ def main(argv: list[str] | None = None) -> int:
             # 热更新的元数据（`#1149`）：帧布局哈希 + 调用点表。**不影响产物一个字节**。
             i += 1
             hot_meta = argv[i]
+        elif a == "--profile":
+            # 构建档（`#1150`）。default 与 hotswap 的产物**不**逐字节相同 —— 后者多槽表、
+            # 多入口闸，这是它存在的理由；default 那份不受影响（判据拿 origin/main 对拍）。
+            i += 1
+            profile = argv[i]
         else:
             files.append(a)
         i += 1
-    if len(files) != 1 or target not in ("elf", "pe"):
+    if (len(files) != 1 or target not in ("elf", "pe")
+            or profile not in ("default", "hotswap")):
         print("用法: lomelf.py IN.ll [-o OUT] [--target elf|pe] [--check]"
-              " [--link OBJ.o ...] [--allow-ports] [--interp PATH] [--hot-meta PATH]",
+              " [--link OBJ.o ...] [--allow-ports] [--interp PATH] [--hot-meta PATH]"
+              " [--profile default|hotswap]",
               file=sys.stderr)
         return 2
     if link and target == "pe":
         print("[ERR] --link 目前只支持 ELF 目标 (docs/173 §3)", file=sys.stderr)
         return 2
+    if profile == "hotswap" and target != "elf":
+        print("[ERR] --profile hotswap 目前只支持 ELF 目标", file=sys.stderr)
+        return 2
     src = Path(files[0])
     try:
         objs = [load_foreign(p) for p in link]
-        blob, info = (compile_pe if target == "pe" else compile_ll)(
-            src.read_text(encoding="utf-8"),
-            *(() if target == "pe" else (objs, allow_ports, interp)))
+        if target == "pe":
+            blob, info = compile_pe(src.read_text(encoding="utf-8"))
+        else:
+            blob, info = compile_ll(src.read_text(encoding="utf-8"), objs,
+                                    allow_ports, interp,
+                                    hotswap=(profile == "hotswap"))
     except Unsupported as e:
         print(f"[ERR] {e}", file=sys.stderr)
         return 1

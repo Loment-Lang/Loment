@@ -377,6 +377,8 @@ GLOBS = [
     "tools/loment_update.py", "tools/loment_update_test.py",
     # 元数据（`#1149`）：帧布局哈希 + 调用点表。**插入位置与 lomrel.lomt 逐行对齐**。
     "tools/loment_hotmeta_test.py",
+    # 构建档（`#1150`）：槽表 + 入口闸。**插入位置与 lomrel.lomt 逐行对齐**。
+    "tools/loment_hotswap_test.py",
 ]
 
 

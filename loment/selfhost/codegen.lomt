@@ -1364,8 +1364,8 @@ pub fn l0_safe_callee(src: ptr, toks: ptr, i: u32, tbl: ptr) -> bool {
         return true;
     }
     // **跨函数 deref-only 放宽**（`docs/210` §7）：`tbl` 里那些"首参不外逃"的用户函数，
-    // 调用它们与调内建**一样安全**（首参不会流到别处）。
-    return safe_by_tok(src, toks, i, tbl) == 1;
+    // 调用它们与调内建**一样安全**（首参不会流到别处）。查的是**旧规则那一位**。
+    return safe_first_by_tok(src, toks, i, tbl) == 1;
 }
 
 /// token `i` 的名字在安全名表 `tbl` 里吗（按**文本**比，不看下标 —— 调用点与声明处是
@@ -1383,6 +1383,26 @@ pub fn safe_by_tok(src: ptr, toks: ptr, i: u32, tbl: ptr) -> u32 {
     return 0;
 }
 
+/// 安全表里 token `i` 的**旧规则**（首参安全）结论（最高位）。LSPE 的 E4 普查与
+/// `safe_mark_first` 用这一支 —— 语义不随 `docs/210` §2.2.1 的逐形参放宽而改
+/// （`docs/262` 的四个计数不能漂）。**别拿它查 `PT_PTRFIRST`**：那张是纯名字表。
+/// 掩码表相对安全表基址的偏移 —— `lspe_drop_unchecked` 压紧名字表时要把掩码一起搬。
+pub fn safe_mask_off() -> u32 {
+    return CG_SAFE_MASK_OFF;
+}
+
+pub fn safe_first_by_tok(src: ptr, toks: ptr, i: u32, tbl: ptr) -> u32 {
+    let n: u32 = load32(tbl, 0);
+    let j: u32 = 1;
+    while j <= n {
+        if tok_eq(src, toks, load32(tbl, j * 4), i) == 1 {
+            return (load32(tbl, CG_SAFE_MASK_OFF + (j - 1) * 4) >> 31) & 1;
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+
 /// token `i` 的名字的**逐形参掩码**（0 = 不在表里）。名字表 `[count, name…]` 里找序号 j，
 /// 掩码在 `tbl + CG_SAFE_MASK_OFF + j*4`。`docs/210` §2.2.1。
 pub fn safe_mask_by_tok(src: ptr, toks: ptr, i: u32, tbl: ptr) -> u32 {
@@ -1390,7 +1410,7 @@ pub fn safe_mask_by_tok(src: ptr, toks: ptr, i: u32, tbl: ptr) -> u32 {
     let j: u32 = 1;
     while j <= n {
         if tok_eq(src, toks, load32(tbl, j * 4), i) == 1 {
-            return load32(tbl, CG_SAFE_MASK_OFF + (j - 1) * 4);
+            return load32(tbl, CG_SAFE_MASK_OFF + (j - 1) * 4) & 65535;
         }
         j = j + 1;
     }
@@ -1463,6 +1483,58 @@ pub fn safe_use_at(src: ptr, toks: ptr, k: u32, tbl: ptr) -> u32 {
 /// 首参是 `ptr`，且它在函数体内**每一处**出现都必须是"**整个第一个实参**" —— 紧跟 `(`、
 /// 那个 `(` 紧跟一个标识符被调名（不是限定名）、且首参后面紧跟 `,` 或 `)` —— 而那个被调
 /// **本身安全**（内建或已在表里）。任何别的用法即逃逸，不标。
+/// **旧规则**（首参安全）的那一半 —— 与 LSPE 的 E4 普查逐条相同。回 1/0。
+/// 它只写进掩码的**最高位**；GC 的 L0/L1/L2 用的是低位（`safe_mask_by_tok`）。
+fn safe_mark_first(src: ptr, toks: ptr, nm: u32, tbl: ptr) -> u32 {
+    let lp: u32 = nm + 1;
+    let g1: u32 = 0;
+    while tok_kind(toks, lp) != 4 && !tok_is(src, toks, lp, "(") && g1 < 64 {
+        lp = lp + 1;
+        g1 = g1 + 1;
+    }
+    if !tok_is(src, toks, lp, "(") {
+        return 0;
+    }
+    let p: u32 = lp + 1;
+    if tok_kind(toks, p) != 0 || tok_is(src, toks, p, "self") {
+        return 0;
+    }
+    if !(tok_is(src, toks, p + 1, ":") && tok_is(src, toks, p + 2, "ptr")) {
+        return 0;
+    }
+    let b: u32 = p + 3;
+    let g2: u32 = 0;
+    while tok_kind(toks, b) != 4 && !tok_is(src, toks, b, "{") && g2 < 8192 {
+        b = b + 1;
+        g2 = g2 + 1;
+    }
+    if !tok_is(src, toks, b, "{") {
+        return 0;
+    }
+    let at: u32 = b + 1;
+    let end: u32 = skip_block(src, toks, b) - 1;
+    let k: u32 = at;
+    while k < end {
+        if tok_kind(toks, k) == 0 && tok_eq(src, toks, k, p) {
+            if tok_is(src, toks, k - 1, "let") || tok_is(src, toks, k + 1, "=") {
+                return 0;
+            }
+            if !(k >= 2 && tok_is(src, toks, k - 1, "(") && tok_kind(toks, k - 2) == 0
+                    && !tok_is(src, toks, k - 3, ".") && !tok_is(src, toks, k - 3, ":")
+                    && (tok_is(src, toks, k + 1, ",") || tok_is(src, toks, k + 1, ")"))
+                    || syscall_borrow_ok(src, toks, k)) {
+                return 0;                           // 其余任何用法：逃逸
+            }
+            if l0_safe_callee(src, toks, k - 2, tbl) == false
+                    && !syscall_borrow_ok(src, toks, k) {
+                return 0;                           // 被调本身还不安全（"借"那一支不必）
+            }
+        }
+        k = k + 1;
+    }
+    return 1;
+}
+
 fn safe_mark_fn(src: ptr, toks: ptr, nm: u32, tbl: ptr) -> u32 {
     // 找形参表的 `(`（跳过函数名与 `<...>`）
     let lp: u32 = nm + 1;
@@ -1533,8 +1605,18 @@ fn safe_mark_fn(src: ptr, toks: ptr, nm: u32, tbl: ptr) -> u32 {
             j = end + 1;
         }
     }
-    if mask == 0 {
+    let old_ok: u32 = safe_mark_first(src, toks, nm, tbl);
+    if mask == 0 && old_ok == 0 {
         return 0;
+    }
+    if old_ok == 1 {
+        let hi: u32 = 1;
+        let h: u32 = 0;
+        while h < 31 {
+            hi = hi * 2;
+            h = h + 1;
+        }
+        mask = mask | hi;
     }
     let c: u32 = load32(tbl, 0);
     let e: u32 = 1;

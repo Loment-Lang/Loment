@@ -291,6 +291,10 @@ pub fn lspe_drop_unchecked(unit: ptr, t: ptr, tbl: ptr) -> u32 {
         }
         if bad == 0 {
             store32(tbl, (keep + 1) * 4, nm);
+            // 掩码表与名字表**同序**（`docs/210` §2.2.1）：压紧名字时掩码要一起搬，
+            // 否则后面每一个函数的掩码都错位（旧的 GC 规则与 E4 会静默读错人）。
+            store32(tbl, safe_mask_off() + keep * 4,
+                    load32(tbl, safe_mask_off() + i * 4));
             keep = keep + 1;
         }
         i = i + 1;
@@ -765,7 +769,7 @@ pub fn lspe_engine(unit: ptr, t: ptr, lo: u32, hi: u32,
             if safe_by_tok(unit, t, i4, pft) == 1 {
                 let ccov: u32 = lspe_note_covered(i4, pbuf, out);
                 store32(out, 32, load32(out, 32) + 1);
-                if safe_by_tok(unit, t, i4, sft) == 1 && ccov == 0 {
+                if safe_first_by_tok(unit, t, i4, sft) == 1 && ccov == 0 {
                     store32(out, 36, load32(out, 36) + 1);
                 }
             }

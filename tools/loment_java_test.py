@@ -69,12 +69,14 @@ def _build_and_run(tmp: Path, lib: Path, app_src: str) -> int:
         [app_ll.read_text(encoding="utf-8"), lib.read_text(encoding="utf-8")],
         [str(app_ll), str(lib)]), encoding="utf-8")
     text = merged.read_text(encoding="utf-8")
-    if sys.platform != "win32":
-        lomelf.compile_ll(text)
-        return 0
-    blob, _info = lomelf.compile_pe(text)
-    exe = tmp / "app.exe"
+    if sys.platform == "win32":
+        blob, _info = lomelf.compile_pe(text)
+        exe = tmp / "app.exe"
+    else:
+        blob, _info = lomelf.compile_ll(text)
+        exe = tmp / "app"
     exe.write_bytes(blob)
+    exe.chmod(0o755)
     r = subprocess.run([str(exe)], capture_output=True, timeout=30)
     return r.returncode
 
@@ -123,11 +125,8 @@ fn _start() {
     syscall4(60, r as u64, 0, 0);
 }
 """)
-        if sys.platform == "win32":
-            assert rc == 5, rc
-            print("      add(2,3) -> exit 5 on PE")
-        else:
-            print("SKIP: PE execution is Windows-only; IR emitted and linked to ELF")
+        assert rc == 5, rc
+        print(f"      add(2,3) -> exit 5 on {'PE' if sys.platform == 'win32' else 'ELF'}")
 
 
 @test
@@ -149,11 +148,8 @@ fn _start() {
     syscall4(60, ok as u64, 0, 0);
 }
 """)
-        if sys.platform == "win32":
-            assert rc == 0, rc
-            print("      clamp/sign -> exit 0 on PE")
-        else:
-            print("SKIP: PE execution is Windows-only; IR emitted and linked to ELF")
+        assert rc == 0, rc
+        print(f"      clamp/sign -> exit 0 on {'PE' if sys.platform == 'win32' else 'ELF'}")
 
 
 @test
@@ -176,11 +172,8 @@ fn _start() {
     syscall4(60, ok as u64, 0, 0);
 }
 """)
-        if sys.platform == "win32":
-            assert rc == 0, rc
-            print("      long add/cmp/mix -> exit 0 on PE")
-        else:
-            print("SKIP: PE execution is Windows-only; IR emitted and linked to ELF")
+        assert rc == 0, rc
+        print(f"      long add/cmp/mix -> exit 0 on {'PE' if sys.platform == 'win32' else 'ELF'}")
 
 
 @test
@@ -200,11 +193,8 @@ fn _start() {
     syscall4(60, ok as u64, 0, 0);
 }
 """)
-        if sys.platform == "win32":
-            assert rc == 0, rc
-            print("      sumSquares(3,4)=25, addTwice(5)=20 -> exit 0 on PE")
-        else:
-            print("SKIP: PE execution is Windows-only; IR emitted and linked to ELF")
+        assert rc == 0, rc
+        print(f"      sumSquares(3,4)=25, addTwice(5)=20 -> exit 0 on {'PE' if sys.platform == 'win32' else 'ELF'}")
 
 
 @test
@@ -224,11 +214,8 @@ fn _start() {
     syscall4(60, ok as u64, 0, 0);
 }
 """)
-        if sys.platform == "win32":
-            assert rc == 0, rc
-            print("      sum()=140, sumLong()=14 -> exit 0 on PE")
-        else:
-            print("SKIP: PE execution is Windows-only; IR emitted and linked to ELF")
+        assert rc == 0, rc
+        print(f"      sum()=140, sumLong()=14 -> exit 0 on {'PE' if sys.platform == 'win32' else 'ELF'}")
 
 
 @test
@@ -246,11 +233,8 @@ fn _start() {
     syscall4(60, (r - 16) as u64, 0, 0);
 }
 """)
-        if sys.platform == "win32":
-            assert rc == 0, rc
-            print("      new/getfield/putfield -> 16 on PE")
-        else:
-            print("SKIP: PE execution is Windows-only; IR emitted and linked to ELF")
+        assert rc == 0, rc
+        print(f"      new/getfield/putfield -> 16 on {'PE' if sys.platform == 'win32' else 'ELF'}")
 
 
 @test
@@ -271,11 +255,8 @@ fn _start() {
     syscall4(60, ok as u64, 0, 0);
 }
 """)
-        if sys.platform == "win32":
-            assert rc == 0, rc
-            print("      length/charAt of literals -> exit 0 on PE")
-        else:
-            print("SKIP: PE execution is Windows-only; IR emitted and linked to ELF")
+        assert rc == 0, rc
+        print(f"      length/charAt of literals -> exit 0 on {'PE' if sys.platform == 'win32' else 'ELF'}")
 
 
 @test
@@ -293,11 +274,8 @@ fn _start() {
     syscall4(60, (r - 12) as u64, 0, 0);
 }
 """)
-        if sys.platform == "win32":
-            assert rc == 0, rc
-            print("      new InstanceLib(7).add(5) = 12 on PE")
-        else:
-            print("SKIP: PE execution is Windows-only; IR emitted and linked to ELF")
+        assert rc == 0, rc
+        print(f"      new InstanceLib(7).add(5) = 12 on {'PE' if sys.platform == 'win32' else 'ELF'}")
 
 
 @test
@@ -318,11 +296,8 @@ fn _start() {
     syscall4(60, ok as u64, 0, 0);
 }
 """)
-        if sys.platform == "win32":
-            assert rc == 0, rc
-            print("      counter: 5 -> 8 -> 8 on PE")
-        else:
-            print("SKIP: PE execution is Windows-only; IR emitted and linked to ELF")
+        assert rc == 0, rc
+        print(f"      counter: 5 -> 8 -> 8 on {'PE' if sys.platform == 'win32' else 'ELF'}")
 
 
 @test
@@ -344,11 +319,8 @@ fn _start() {
     syscall4(60, r as u64, 0, 0);
 }
 """)
-        if sys.platform == "win32":
-            assert rc == 5, rc
-            print("      single-class jar -> add(2,3)=5 on PE")
-        else:
-            print("SKIP: PE execution is Windows-only; IR emitted and linked to ELF")
+        assert rc == 5, rc
+        print(f"      single-class jar -> add(2,3)=5 on {'PE' if sys.platform == 'win32' else 'ELF'}")
 
 
 @test
@@ -368,11 +340,8 @@ fn _start() {
     syscall4(60, ok as u64, 0, 0);
 }
 """)
-        if sys.platform == "win32":
-            assert rc == 0, rc
-            print("      throw/catch -> 7, after() -> 3 on PE")
-        else:
-            print("SKIP: PE execution is Windows-only; IR emitted and linked to ELF")
+        assert rc == 0, rc
+        print(f"      throw/catch -> 7, after() -> 3 on {'PE' if sys.platform == 'win32' else 'ELF'}")
 
 
 @test
@@ -391,11 +360,8 @@ fn _start() {
     syscall4(60, (r - 22) as u64, 0, 0);
 }
 """)
-        if sys.platform == "win32":
-            assert rc == 0, rc
-            print("      ClassA.run(): new/getfield/static add/value -> 22 on PE")
-        else:
-            print("SKIP: PE execution is Windows-only; IR emitted and linked to ELF")
+        assert rc == 0, rc
+        print(f"      ClassA.run(): new/getfield/static add/value -> 22 on {'PE' if sys.platform == 'win32' else 'ELF'}")
 
 
 @test

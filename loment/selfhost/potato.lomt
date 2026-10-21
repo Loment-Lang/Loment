@@ -1504,19 +1504,19 @@ const PT_GLSCR: u32 = 114448;       // `l1_ptr_only_at` 的 `out`（它要写"�
 const PT_GLSAFE: u32 = 114456;
 /// 首参是 `ptr` 的函数名 token 表: `[count, name_tok_1, …]`，最多 1024 条。
 /// E4 的调用点普查用它；超容量是**点名的失败**（`loment/lspe/lspe.lomt` 的 `lspe_engine` 回 1）。
-const PT_PTRFIRST: u32 = 132864;
+const PT_PTRFIRST: u32 = 151264;
 /// E3/E4 的十个计数 + pass 的四个：
 /// free_t/free_p, alive_t/alive_p, init_t/init_p, excl_t/excl_p, call_t/call_p,
 /// pass_sites/passed_sites/guard_covered/index_covered（各 4 字节，共 14 个）。
-const PT_L3CNT: u32 = 136964;
+const PT_L3CNT: u32 = 155364;
 /// `lspe pass` 的块表：`[count, open, close, sites, pad] × 64`（每块 16 字节）。
-const PT_PASS: u32 = 137020;
+const PT_PASS: u32 = 155420;
 const PT_TN: u32 = 46760;          // 收进池子的类型串条数（= 映射表条数）
 const PT_TCUR: u32 = 46764;        // 池子游标
 const PT_TMAX: u32 = 128;
 const PT_TSTRIDE: u32 = 64;
 const PT_TBUF_SZ: u32 = 256;
-const PT_SC_BYTES: u64 = 138048;    // 安全名表 + 首参表 + E3/E4 计数 + pass 块表
+const PT_SC_BYTES: u64 = 156448;    // 安全名表 + 首参表 + E3/E4 计数 + pass 块表
 
 /// 一个类型串在池子里的位置（`i` 是池子下标）。
 fn pt_tkey(sc: ptr, i: u32) -> u32 {

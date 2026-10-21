@@ -34,7 +34,7 @@ choose runtime
 // 常量初值只能用**整数字面量** (语言如此), 所以下面都是算好的数 —— 改容量要重算:
 //   CG_FK = CG_FN + CG_MAXFN*12            CG_CUR = CG_FK + CG_MAXFN*8
 //   CG_LOCAL = CG_ENUM + CG_MAXENUM*80     CG_PARAM = CG_LOCAL + 4096
-//   CG_BYTES = CG_SAFE + (1 + CG_MAXFN)*4
+//   CG_CONST = CG_SAFE + (1 + 2*CG_MAXFN)*4    CG_BYTES = CG_CONST + CG_MAXCONST*8
 const CG_FN: u32 = 12288;          // 函数表 (12 B/条: name_tok, ret_tok, ...)
 const CG_MAXFN: u32 = 4600;
 const CG_FK: u32 = 67488;          // fkind 表 (8 B/条)
@@ -46,7 +46,8 @@ const CG_PARAM: u32 = 135168;      // 每函数形参类型 (160 B/条 = 20 槽 
 // `docs/210` §7 那次放宽的**安全名表**：`[0]` 条数，`[1..]` = "首参不外逃"的用户函数
 // **名字 token 下标**。由 `compute_safe` 在 `emit_module` 里算（`compute_safe` 也 `pub`，
 // 于是 `potato.lomt` 用同一支扫描、只是写进它自己的表 —— **同一份源，两边算出的集合相同**）。
-const CG_SAFE: u32 = 871168;       // 安全名表 (1 + CG_MAXFN 个 u32) = CG_PARAM + CG_MAXFN*160
+const CG_SAFE: u32 = 871168;       // 安全名表 (1 + 2*CG_MAXFN 个 u32: 名字表 + 掩码表)
+const CG_SAFE_MASK_OFF: u32 = 18404;   // = (1 + CG_MAXFN) * 4：掩码表相对名字表基址
 //: **常量表**（`#719`）：`find_const` 原来每次**扫全单元 token**。`std` 门面（~50 万
 //: token、几万次标识符求值）因此是 O(n²)，自举编它要十几分钟（参考 15 秒）。一趟扫完
 //: 存 `(name_tok, type_tok)`，查找就只是 540 条以内的小表。
@@ -57,9 +58,9 @@ const CG_SAFE: u32 = 871168;       // 安全名表 (1 + CG_MAXFN 个 u32) = CG_P
 //: 那个四字节 `alloc` 被提到栈上（`slot.buf`）、与参考实现分叉（#719，`stdlib` 的
 //: `sd_key_cmp` 抓到）。这一格是 ABI 级的静默串写，别改回贴着标量的地址。
 const CG_ARM: u32 = 7680;          // 7680..8192: 能力域表之后、值栈之前的那 512 字节
-const CG_CONST: u32 = 889572;      // 常量表 (8 B/条) 紧跟安全名表
+const CG_CONST: u32 = 907972;      // 常量表 (8 B/条) 紧跟安全名表
 const CG_MAXCONST: u32 = 1024;
-const CG_BYTES: u32 = 897764;      // 整块大小 = CG_CONST + CG_MAXCONST*8
+const CG_BYTES: u32 = 916164;      // 整块大小 = CG_CONST + CG_MAXCONST*8
 use bytes
 use lexer
 
@@ -1335,8 +1336,7 @@ fn syscall_borrow_ok(src: ptr, toks: ptr, v: u32) -> bool {
 /// 出现点判据（`docs/246` §5.3）：`v` 处的名字**这次出现算不算"没外逃"** ——
 /// ① 是某个 `l0_safe_callee` 的**整个第一个实参**（老规则）；或 ② 是"借"（见上）。
 fn gc_occ_ok(src: ptr, toks: ptr, v: u32, tbl: ptr) -> bool {
-    if v >= 2 && tok_is(src, toks, v - 1, "(") && l0_safe_callee(src, toks, v - 2, tbl)
-            && (tok_is(src, toks, v + 1, ",") || tok_is(src, toks, v + 1, ")")) {
+    if safe_use_at(src, toks, v, tbl) == 1 {
         return true;
     }
     return syscall_borrow_ok(src, toks, v);
@@ -1369,7 +1369,8 @@ pub fn l0_safe_callee(src: ptr, toks: ptr, i: u32, tbl: ptr) -> bool {
 }
 
 /// token `i` 的名字在安全名表 `tbl` 里吗（按**文本**比，不看下标 —— 调用点与声明处是
-/// 两个 token）。表形如 `[count, name_tok_1, name_tok_2, …]`。
+/// 两个 token）。表形如 `[count, name_tok_1, name_tok_2, …]`；**掩码在同址的第二张表**
+/// （`CG_SAFE_MASK_OFF` 之后，与名字表同序）—— 保持名字表原形，LSPE 的 E4 普查还用它。
 pub fn safe_by_tok(src: ptr, toks: ptr, i: u32, tbl: ptr) -> u32 {
     let n: u32 = load32(tbl, 0);
     let j: u32 = 1;
@@ -1382,6 +1383,80 @@ pub fn safe_by_tok(src: ptr, toks: ptr, i: u32, tbl: ptr) -> u32 {
     return 0;
 }
 
+/// token `i` 的名字的**逐形参掩码**（0 = 不在表里）。名字表 `[count, name…]` 里找序号 j，
+/// 掩码在 `tbl + CG_SAFE_MASK_OFF + j*4`。`docs/210` §2.2.1。
+pub fn safe_mask_by_tok(src: ptr, toks: ptr, i: u32, tbl: ptr) -> u32 {
+    let n: u32 = load32(tbl, 0);
+    let j: u32 = 1;
+    while j <= n {
+        if tok_eq(src, toks, load32(tbl, j * 4), i) == 1 {
+            return load32(tbl, CG_SAFE_MASK_OFF + (j - 1) * 4);
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+
+/// 内建的安全实参位：只有首参（位 0）。
+fn builtin_safe_mask(src: ptr, toks: ptr, i: u32) -> u32 {
+    if tok_is(src, toks, i, "load8") || tok_is(src, toks, i, "store8")
+            || tok_is(src, toks, i, "atomic_add") {
+        return 1;
+    }
+    return 0;
+}
+
+/// token `k`（一个实参）落在**安全位置**上吗：它是某个裸标识符被调的整个第 pos 个实参，
+/// 而那个被调的第 pos 个形参不外逃。与参考实现 `_call_arg_pos` + `_safe_use` **逐条相同**。
+pub fn safe_use_at(src: ptr, toks: ptr, k: u32, tbl: ptr) -> u32 {
+    if k < 1 {
+        return 0;
+    }
+    if !(tok_is(src, toks, k - 1, "(") || tok_is(src, toks, k - 1, ",")) {
+        return 0;
+    }
+    if !(tok_is(src, toks, k + 1, ",") || tok_is(src, toks, k + 1, ")")) {
+        return 0;
+    }
+    let depth: u32 = 0;
+    let pos: u32 = 0;
+    let i: u32 = k - 1;
+    let go: u32 = 1;
+    while go == 1 {
+        if tok_is(src, toks, i, ")") || tok_is(src, toks, i, "]") || tok_is(src, toks, i, "}") {
+            depth = depth + 1;
+        } else if tok_is(src, toks, i, "(") || tok_is(src, toks, i, "[") || tok_is(src, toks, i, "{") {
+            if depth == 0 {
+                if tok_is(src, toks, i, "[") || tok_is(src, toks, i, "{") {
+                    return 0;
+                }
+                if !(i >= 2 && tok_kind(toks, i - 1) == 0
+                        && !tok_is(src, toks, i - 2, ".") && !tok_is(src, toks, i - 2, ":")) {
+                    return 0;
+                }
+                let m: u32 = builtin_safe_mask(src, toks, i - 1);
+                if m != 0 {
+                    if pos == 0 {
+                        return 1;
+                    }
+                    return 0;
+                }
+                let um: u32 = safe_mask_by_tok(src, toks, i - 1, tbl);
+                return (um >> pos) & 1;
+            }
+            depth = depth - 1;
+        } else if tok_is(src, toks, i, ",") && depth == 0 {
+            pos = pos + 1;
+        }
+        if i == 0 {
+            go = 0;
+        } else {
+            i = i - 1;
+        }
+    }
+    return 0;
+}
+
 /// 试把 `nm`（一个 `fn` 的名字 token）标进安全名表 —— 够格就标、回 1（**变了**），否则回 0。
 ///
 /// 规则与参考实现的 `_deref_summary` + `_gc_alpha_pass` 的不动点**同一条**（定义在 token 流上）：
@@ -1389,9 +1464,6 @@ pub fn safe_by_tok(src: ptr, toks: ptr, i: u32, tbl: ptr) -> u32 {
 /// 那个 `(` 紧跟一个标识符被调名（不是限定名）、且首参后面紧跟 `,` 或 `)` —— 而那个被调
 /// **本身安全**（内建或已在表里）。任何别的用法即逃逸，不标。
 fn safe_mark_fn(src: ptr, toks: ptr, nm: u32, tbl: ptr) -> u32 {
-    if safe_by_tok(src, toks, nm, tbl) == 1 {
-        return 0;                                   // 已经在表里
-    }
     // 找形参表的 `(`（跳过函数名与 `<...>`）
     let lp: u32 = nm + 1;
     let g1: u32 = 0;
@@ -1402,15 +1474,8 @@ fn safe_mark_fn(src: ptr, toks: ptr, nm: u32, tbl: ptr) -> u32 {
     if !tok_is(src, toks, lp, "(") {
         return 0;
     }
-    let p: u32 = lp + 1;
-    if tok_kind(toks, p) != 0 || tok_is(src, toks, p, "self") {
-        return 0;                                   // 首参不是普通标识符（空表 / self）
-    }
-    if !(tok_is(src, toks, p + 1, ":") && tok_is(src, toks, p + 2, "ptr")) {
-        return 0;                                   // 首参不是 ptr
-    }
-    // 函数体的 `{`
-    let b: u32 = p + 3;
+    // 函数体的 `{`（形参表整段跳过）
+    let b: u32 = lp + 1;
     let g2: u32 = 0;
     while tok_kind(toks, b) != 4 && !tok_is(src, toks, b, "{") && g2 < 8192 {
         b = b + 1;
@@ -1421,27 +1486,74 @@ fn safe_mark_fn(src: ptr, toks: ptr, nm: u32, tbl: ptr) -> u32 {
     }
     let at: u32 = b + 1;
     let end: u32 = skip_block(src, toks, b) - 1;
-    let k: u32 = at;
-    while k < end {
-        if tok_kind(toks, k) == 0 && tok_eq(src, toks, k, p) {
-            if tok_is(src, toks, k - 1, "let") || tok_is(src, toks, k + 1, "=") {
-                return 0;                           // 遮蔽 / 重新赋值
+    // **逐形参**：位置 pi 从 0 数（`self` 也占一位，与方法调用点的实参位一致）。
+    let mask: u32 = 0;
+    let pi: u32 = 0;
+    let j: u32 = lp + 1;
+    while j < end && !tok_is(src, toks, j, ")") {
+        if tok_kind(toks, j) == 0 && !tok_is(src, toks, j, "self")
+                && tok_is(src, toks, j + 1, ":") && tok_is(src, toks, j + 2, "ptr") {
+            let ok: u32 = 1;
+            let k: u32 = at;
+            while k < end {
+                if tok_kind(toks, k) == 0 && tok_eq(src, toks, k, j) {
+                    if tok_is(src, toks, k - 1, "let") || tok_is(src, toks, k + 1, "=") {
+                        ok = 0;                     // 遮蔽 / 重新赋值
+                    } else if safe_use_at(src, toks, k, tbl) == 0 {
+                        ok = 0;                     // 其余任何用法：逃逸 / 位置不安全
+                    }
+                }
+                k = k + 1;
             }
-            if !(k >= 2 && tok_is(src, toks, k - 1, "(") && tok_kind(toks, k - 2) == 0
-                    && !tok_is(src, toks, k - 3, ".") && !tok_is(src, toks, k - 3, ":")
-                    && (tok_is(src, toks, k + 1, ",") || tok_is(src, toks, k + 1, ")"))
-                    || syscall_borrow_ok(src, toks, k)) {
-                return 0;                           // 其余任何用法：逃逸
-            }
-            if l0_safe_callee(src, toks, k - 2, tbl) == false
-                    && !syscall_borrow_ok(src, toks, k) {
-                return 0;                           // 被调本身还不安全（"借"那一支不必）
+            if ok == 1 {
+                let bit: u32 = 1;
+                let q: u32 = 0;
+                while q < pi {
+                    bit = bit * 2;
+                    q = q + 1;
+                }
+                mask = mask | bit;
             }
         }
-        k = k + 1;
+        // 跳到下一个顶层逗号（括号 / 方括号 / 尖括号里的逗号不算）
+        let dep: u32 = 0;
+        while j < end && !(dep == 0 && (tok_is(src, toks, j, ",") || tok_is(src, toks, j, ")"))) {
+            if tok_is(src, toks, j, "(") || tok_is(src, toks, j, "[") || tok_is(src, toks, j, "<") {
+                dep = dep + 1;
+            } else if tok_is(src, toks, j, ")") || tok_is(src, toks, j, "]")
+                    || tok_is(src, toks, j, ">") {
+                dep = dep - 1;
+            }
+            j = j + 1;
+        }
+        if tok_is(src, toks, j, ",") {
+            pi = pi + 1;
+            j = j + 1;
+        } else {
+            j = end + 1;
+        }
+    }
+    if mask == 0 {
+        return 0;
     }
     let c: u32 = load32(tbl, 0);
+    let e: u32 = 1;
+    while e <= c {
+        if tok_eq(src, toks, load32(tbl, e * 4), nm) == 1 {
+            let old: u32 = load32(tbl, CG_SAFE_MASK_OFF + (e - 1) * 4);
+            if (old | mask) == old {
+                return 0;
+            }
+            store32(tbl, CG_SAFE_MASK_OFF + (e - 1) * 4, old | mask);
+            return 1;
+        }
+        e = e + 1;
+    }
+    if c >= CG_MAXFN {
+        return 0;
+    }
     store32(tbl, (c + 1) * 4, nm);
+    store32(tbl, CG_SAFE_MASK_OFF + c * 4, mask);
     store32(tbl, 0, c + 1);
     return 1;
 }

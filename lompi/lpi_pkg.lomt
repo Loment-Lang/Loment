@@ -511,6 +511,9 @@ pub const PKG_F_ACTIVE: u32 = 2;
 pub const PKG_F_MISSING: u32 = 4;
 /// 标志位: 在闭包内 —— resolve/tree/install 都靠它标记"这次要处理哪些实例"。
 pub const PKG_F_INCLOSURE: u32 = 8;
+/// 标志位: 这一趟锁遍历已经发射过 —— 闭包先标一遍 (与 0.2.0 同一个顺序), 再走一遍
+/// 发射; 第二遍不能靠 INCLOSURE 防重入 (那会把所有节点都当成"已访问")。
+pub const PKG_F_LOCK: u32 = 16;
 
 /// 单个源码文件的字节上限 —— 超了报错而不是静默截断 (截断会算出一个错的身份)。
 pub const PKG_FILE_MAX: u32 = 262144;
@@ -1075,9 +1078,29 @@ pub fn pkg_lock_read(ws: ptr, buf: ptr, len: u32, np: u32, msg: ptr, msgcap: u32
         } else if c == 35 {
             i = txt_next_line(buf, i, len);
         } else {
-            let ns: u32 = i;
+            // 锁 v2 的行前面有关键字 (`loment` / `foreign`); v1 没有。
+            // 先读第一个词, 是关键字就把名字挪到下一段。
+            let fs: u32 = i;
             while i < len && !pkg_is_space(load8(buf, i)) {
                 i = i + 1;
+            }
+            let fl: u32 = i - fs;
+            let kw: u32 = 0;
+            if (fl == 6 && txt_eq_lit(buf, fs, 6, "loment"))
+                || (fl == 7 && txt_eq_lit(buf, fs, 7, "foreign")) {
+                kw = 1;
+            }
+            let ns: u32 = i;
+            if kw == 1 {
+                while i < len && (load8(buf, i) == 32 || load8(buf, i) == 9) {
+                    i = i + 1;
+                }
+                ns = i;
+                while i < len && !pkg_is_space(load8(buf, i)) {
+                    i = i + 1;
+                }
+            } else {
+                i = fs + fl;
             }
             let nl: u32 = i - ns;
             while i < len && (load8(buf, i) == 32 || load8(buf, i) == 9) {
@@ -1118,6 +1141,9 @@ pub fn pkg_lock_read(ws: ptr, buf: ptr, len: u32, np: u32, msg: ptr, msgcap: u32
                 return PKG_ERR;
             }
             pkg_set_flag(ws, idx, PKG_F_INCLOSURE);
+            // `foreign` 行在身份后面还有 `jar=… ir=… abi=… compiler=…`;
+            // 它们属于同一行, 不能当成下一行的包名。
+            i = txt_next_line(buf, ds + dl, len);
             cnt = cnt + 1;
         }
     }

@@ -378,19 +378,151 @@ fn cmd_tree(ws: ptr, buf: ptr, store: ptr, av_spec: u64) -> u32 {
 
 // ---------------------------------------------------------------- resolve / verify
 
-/// 把锁打出来 (进报告区)。锁的每行是 `名字 版本 身份` —— 只有**内容哈希**,
+// ---- 锁 v2 的外源字段 (docs/279 §5.3)
+//
+// 一个外源包在锁里多一行: `foreign <名> <版本> <身份> jar=<sha> ir=<sha>
+// abi=<JL-A/1> compiler=<id>`。**两个哈希都要重算**, 不是信 `foreign.txt` 里写的 ——
+// 锁回答的是"这棵仓库还是不是那把锁描述的那棵", 抄一遍清单回答不了那个问题。
+const LK_ABI_O: u32 = 0;
+const LK_ABI_L: u32 = 4;
+const LK_JAR_O: u32 = 8;
+const LK_JAR_L: u32 = 12;
+const LK_JSHA_O: u32 = 16;
+const LK_JSHA_L: u32 = 20;
+const LK_IR_O: u32 = 24;
+const LK_IR_L: u32 = 28;
+const LK_ISHA_O: u32 = 32;
+const LK_ISHA_L: u32 = 36;
+const LK_COMP_O: u32 = 40;
+const LK_COMP_L: u32 = 44;
+const LK_REC: u32 = 48;
+
+/// 流式算一个文件的 sha256 (jar 可能是几 MB, `WS_FILE` 那块装不下)。
+/// 返回 1 = 写进 hex; 0 = 打不开 / 读失败。
+fn lock_sha_file(path: ptr, hex: ptr) -> u32 {
+    let fd: i64 = sys_open_ro(path);
+    if fd < 0 {
+        return 0;
+    }
+    let st: ptr = sys_alloc(sha_state_size() as u64);
+    let buf: ptr = sys_alloc(NET_CHUNK as u64);
+    let dig: ptr = sys_alloc(64);
+    sha_init(st);
+    let run: u32 = 1;
+    while run == 1 {
+        let r: i64 = syscall4(SYS_READ, fd as u64, buf as u64, NET_CHUNK as u64);
+        if r < 0 {
+            sys_close(fd);
+            return 0;
+        }
+        if r == 0 {
+            run = 0;
+        } else {
+            sha_update(st, buf, r as u32);
+        }
+    }
+    sys_close(fd);
+    sha_final(st, dig);
+    sha_hex(dig, hex);
+    return 1;
+}
+
+/// `foreign.txt` 里锁要的两个事实: `abi <值>` 与 `artifact jar <路径> <sha>`。
+/// 偏移都相对 `buf` 本身 (调用方随后还要读它)。
+fn lock_parse_manifest(buf: ptr, n: u32, rec: ptr) {
+    let w0: ptr = sys_alloc(32);
+    let w1: ptr = sys_alloc(64);
+    let w2: ptr = sys_alloc(576);
+    let w3: ptr = sys_alloc(128);
+    let off: u32 = 0;
+    while off < n {
+        let ll: u32 = txt_line_len(buf, off, n);
+        if ll > 0 && load8(buf, off) != 35 {
+            let a: u64 = net_field(buf, off, off + ll, w0, 32);
+            let l0: u32 = net_flen(a);
+            if l0 == 3 && txt_eq_lit(w0, 0, 3, "abi") {
+                let b: u64 = net_field(buf, net_foff(a), off + ll, w1, 64);
+                txt_store32(rec, LK_ABI_O, net_foff(b) - net_flen(b) - 1);
+                txt_store32(rec, LK_ABI_L, net_flen(b));
+            } else if l0 == 8 && txt_eq_lit(w0, 0, 8, "artifact") {
+                let b: u64 = net_field(buf, net_foff(a), off + ll, w1, 64);
+                if net_flen(b) == 3 && txt_eq_lit(w1, 0, 3, "jar") {
+                    let c: u64 = net_field(buf, net_foff(b), off + ll, w2, 576);
+                    let d: u64 = net_field(buf, net_foff(c), off + ll, w3, 128);
+                    txt_store32(rec, LK_JAR_O, net_foff(c) - net_flen(c) - 1);
+                    txt_store32(rec, LK_JAR_L, net_flen(c));
+                    txt_store32(rec, LK_JSHA_O, net_foff(d) - net_flen(d) - 1);
+                    txt_store32(rec, LK_JSHA_L, net_flen(d));
+                }
+            }
+        }
+        let nx: u32 = txt_next_line(buf, off, n);
+        if nx <= off {
+            off = n;
+        } else {
+            off = nx;
+        }
+    }
+}
+
+/// `link.txt` 里的 `ir <名字> <sha>` 与可选的 `compiler <id>`。
+fn lock_parse_link(buf: ptr, n: u32, rec: ptr) {
+    let w0: ptr = sys_alloc(32);
+    let w1: ptr = sys_alloc(576);
+    let w2: ptr = sys_alloc(128);
+    let off: u32 = 0;
+    while off < n {
+        let ll: u32 = txt_line_len(buf, off, n);
+        if ll > 0 && load8(buf, off) != 35 {
+            let a: u64 = net_field(buf, off, off + ll, w0, 32);
+            let l0: u32 = net_flen(a);
+            if l0 == 2 && txt_eq_lit(w0, 0, 2, "ir") {
+                let b: u64 = net_field(buf, net_foff(a), off + ll, w1, 576);
+                let c: u64 = net_field(buf, net_foff(b), off + ll, w2, 128);
+                txt_store32(rec, LK_IR_O, net_foff(b) - net_flen(b) - 1);
+                txt_store32(rec, LK_IR_L, net_flen(b));
+                txt_store32(rec, LK_ISHA_O, net_foff(c) - net_flen(c) - 1);
+                txt_store32(rec, LK_ISHA_L, net_flen(c));
+            } else if l0 == 8 && txt_eq_lit(w0, 0, 8, "compiler") {
+                let b: u64 = net_field(buf, net_foff(a), off + ll, w1, 576);
+                txt_store32(rec, LK_COMP_O, net_foff(b) - net_flen(b) - 1);
+                txt_store32(rec, LK_COMP_L, net_flen(b));
+            }
+        }
+        let nx: u32 = txt_next_line(buf, off, n);
+        if nx <= off {
+            off = n;
+        } else {
+            off = nx;
+        }
+    }
+}
+
+/// 把锁打出来 (进报告区)。源码包每行 `名字 版本 身份` —— 只有**内容哈希**,
 /// 没有版本区间 (docs/168 §3.2: 版本对机器只是标签)。
+///
+/// 闭包里**没有**外源包时, 输出与 v1 逐字节相同 (头也是 `v1`)。有外源包时头改成
+/// `v2` (同一长度, 最后一位改写), 并在它的那一行前面多打一条 `foreign` 行。
 fn build_lock(ws: ptr, n: u32, root: u32) -> u32 {
     let rep: ptr = R(ws);
     let names: ptr = ((ws as u64) + WS_SNAMES as u64) as ptr;
     let pool: ptr = ((ws as u64) + WS_EPOOL as u64) as ptr;
     let eents: ptr = ((ws as u64) + WS_EENTS as u64) as ptr;
     let stack: ptr = ((ws as u64) + WS_TMP as u64 + 5120) as ptr;
+    let rec: ptr = sys_alloc(LK_REC as u64);
+    let mbuf: ptr = sys_alloc(65536);
+    let lbuf: ptr = sys_alloc(65536);
+    let mpath: ptr = sys_alloc(1200);
+    let ipath: ptr = sys_alloc(1200);
+    let jhex: ptr = sys_alloc(128);
+    let ihex: ptr = sys_alloc(128);
     let o: u32 = 0;
-    o = txt_put(rep, o, "# lompi lock v1\n");
+    o = txt_put(rep, o, "# lompi lock v1
+");
     if root == PKG_NONE {
         return o;
     }
+    // ---- 第一趟: 只标闭包 (与 0.2.0 的遍历、顺序、上限一字不差)
     let spx: u32 = 0;
     txt_store32(stack, 0, root);
     spx = 1;
@@ -398,12 +530,6 @@ fn build_lock(ws: ptr, n: u32, root: u32) -> u32 {
     while spx > 0 {
         spx = spx - 1;
         let cur: u32 = txt_load32(stack, spx * 8);
-        o = txt_put_bytes(rep, o, names, pkg_name_off(ws, cur), pkg_name_len(ws, cur));
-        o = txt_put(rep, o, " ");
-        o = txt_put_bytes(rep, o, names, pkg_ver_off(ws, cur), pkg_ver_len(ws, cur));
-        o = txt_put(rep, o, " ");
-        o = txt_put_bytes(rep, o, pkg_id_hex(ws, cur), 0, 64);
-        o = txt_put(rep, o, "\n");
         let c: u32 = idn_edges_of(ws, cur);
         idn_sort_edges(pool, eents, c);
         let k: u32 = c;
@@ -417,6 +543,130 @@ fn build_lock(ws: ptr, n: u32, root: u32) -> u32 {
                     && (pkg_flags(ws, ch) & PKG_F_INCLOSURE) == 0 && spx < 256 {
                     pkg_set_flag(ws, ch, PKG_F_INCLOSURE);
                     txt_store32(stack, spx * 8, ch);
+                    spx = spx + 1;
+                }
+            }
+        }
+    }
+    // ---- 第二趟: 闭包里有外源包吗? 有 -> v2 (头最后一位改写, 长度不变)
+    let v2: u32 = 0;
+    let q: u32 = 0;
+    while q < n {
+        if (pkg_flags(ws, q) & PKG_F_INCLOSURE) != 0
+            && pkg_kind(ws, pkg_dir(ws, q)) == 1 {
+            v2 = 1;
+        }
+        q = q + 1;
+    }
+    if v2 == 1 {
+        store8(rep, 14, 50 as u8);              // "# lompi lock v1" -> v2
+    }
+    // ---- 第三趟: 按**同一个顺序**再走一遍并发射 (PKG_F_LOCK 防重入)
+    txt_store32(stack, 0, root);
+    spx = 1;
+    pkg_set_flag(ws, root, PKG_F_LOCK);
+    while spx > 0 {
+        spx = spx - 1;
+        let cur: u32 = txt_load32(stack, spx * 8);
+        let dir: ptr = pkg_dir(ws, cur);
+        let dn: u32 = txt_len_cstr(dir);
+        if pkg_kind(ws, dir) == 1 {
+            let r: u32 = 0;
+            while r < LK_REC {
+                store8(rec, r, 0 as u8);
+                r = r + 1;
+            }
+            sys_copy(mpath, 0, dir, 0, dn);
+            let me: u32 = sys_append_sep(mpath, dn);
+            let me2: u32 = sys_append_lit(mpath, me, "foreign.txt");
+            store8(mpath, me2, 0 as u8);
+            let mn: u64 = sys_read_file(mpath, mbuf, 65536);
+            if mn != SYS_ERR {
+                lock_parse_manifest(mbuf, mn as u32, rec);
+            }
+            sys_copy(ipath, 0, dir, 0, dn);
+            let le: u32 = sys_append_sep(ipath, dn);
+            let le2: u32 = sys_append_lit(ipath, le, "link.txt");
+            store8(ipath, le2, 0 as u8);
+            let ln: u64 = sys_read_file(ipath, lbuf, 65536);
+            if ln != SYS_ERR {
+                lock_parse_link(lbuf, ln as u32, rec);
+            }
+            o = txt_put(rep, o, "foreign ");
+            o = txt_put_bytes(rep, o, names, pkg_name_off(ws, cur), pkg_name_len(ws, cur));
+            o = txt_put(rep, o, " ");
+            o = txt_put_bytes(rep, o, names, pkg_ver_off(ws, cur), pkg_ver_len(ws, cur));
+            o = txt_put(rep, o, " ");
+            o = txt_put_bytes(rep, o, pkg_id_hex(ws, cur), 0, 64);
+            // jar: 重算它自己的字节 (不抄 foreign.txt 里那串)
+            o = txt_put(rep, o, " jar=");
+            let jl: u32 = txt_load32(rec, LK_JAR_L);
+            if jl > 0 && jl < 576 {
+                sys_join(ipath, dir, dn,
+                         ((mbuf as u64) + (txt_load32(rec, LK_JAR_O) as u64)) as ptr, jl);
+                if lock_sha_file(ipath, jhex) == 1 {
+                    o = txt_put_bytes(rep, o, jhex, 0, 64);
+                } else {
+                    o = txt_put(rep, o, "unreadable");
+                }
+            } else {
+                o = txt_put(rep, o, "none");
+            }
+            // ir: link.txt 点名的那个, 同样重算
+            o = txt_put(rep, o, " ir=");
+            let il: u32 = txt_load32(rec, LK_IR_L);
+            if il > 0 && il < 576 {
+                sys_join(ipath, dir, dn,
+                         ((lbuf as u64) + (txt_load32(rec, LK_IR_O) as u64)) as ptr, il);
+                if lock_sha_file(ipath, ihex) == 1 {
+                    o = txt_put_bytes(rep, o, ihex, 0, 64);
+                } else {
+                    o = txt_put(rep, o, "unreadable");
+                }
+            } else {
+                o = txt_put(rep, o, "none");
+            }
+            o = txt_put(rep, o, " abi=");
+            let al: u32 = txt_load32(rec, LK_ABI_L);
+            if al > 0 && al < 64 {
+                o = txt_put_bytes(rep, o, mbuf, txt_load32(rec, LK_ABI_O), al);
+            } else {
+                o = txt_put(rep, o, "-");
+            }
+            o = txt_put(rep, o, " compiler=");
+            let cl: u32 = txt_load32(rec, LK_COMP_L);
+            if cl > 0 && cl < 576 {
+                o = txt_put_bytes(rep, o, lbuf, txt_load32(rec, LK_COMP_O), cl);
+            } else {
+                o = txt_put(rep, o, "unknown");
+            }
+            o = txt_put(rep, o, "
+");
+        }
+        if v2 == 1 {
+            o = txt_put(rep, o, "loment ");
+        }
+        o = txt_put_bytes(rep, o, names, pkg_name_off(ws, cur), pkg_name_len(ws, cur));
+        o = txt_put(rep, o, " ");
+        o = txt_put_bytes(rep, o, names, pkg_ver_off(ws, cur), pkg_ver_len(ws, cur));
+        o = txt_put(rep, o, " ");
+        o = txt_put_bytes(rep, o, pkg_id_hex(ws, cur), 0, 64);
+        o = txt_put(rep, o, "
+");
+        let c2: u32 = idn_edges_of(ws, cur);
+        idn_sort_edges(pool, eents, c2);
+        let k2: u32 = c2;
+        while k2 > 0 {
+            k2 = k2 - 1;
+            if lex_ent_kind(eents, k2) == LEX_NAME {
+                let ch2: u32 = idn_resolve_name(ws, n, cur,
+                    ((pool as u64) + (lex_ent_off(eents, k2) as u64)) as ptr,
+                    lex_ent_len(eents, k2));
+                if ch2 != PKG_NONE && ch2 != IDN_NOEDGE
+                    && (pkg_flags(ws, ch2) & PKG_F_INCLOSURE) != 0
+                    && (pkg_flags(ws, ch2) & PKG_F_LOCK) == 0 && spx < 256 {
+                    pkg_set_flag(ws, ch2, PKG_F_LOCK);
+                    txt_store32(stack, spx * 8, ch2);
                     spx = spx + 1;
                 }
             }
@@ -464,14 +714,47 @@ fn cmd_verify(ws: ptr, buf: ptr, store: ptr, av_spec: u64, av_lock: u64) -> u32 
     let o: u32 = build_lock(ws, n, idx);
     // 读锁文件
     sys_put_bytes(lockp, buf, sys_arg_off(av_lock), sys_arg_len(av_lock));
-    let file: ptr = ((ws as u64) + WS_STORE as u64) as ptr;
-    let got: u64 = sys_read_file(lockp, file, 4096);
+    // 锁里现在可能有外源行 (jar/ir 两个 64 位哈希), 4096 的暂存不够用 ——
+    // `WS_STORE` 那块是 4 KiB。而且**不能借 WS_FILE**: `build_lock` 里的 `pkg_kind`
+    // 会经 `pkg_file_exists` 往 WS_FILE 读 1 个字节, 把锁的第 0 个字节踩掉。
+    let file: ptr = sys_alloc(PKG_FILE_MAX as u64);
+    let got: u64 = sys_read_file(lockp, file, PKG_FILE_MAX as u64);
     if got == SYS_ERR {
         cli_die("cannot read lock file");
         return 2;
     }
     if got as u32 != o || !txt_eq(R(ws), 0, o, file, 0, o) {
         err_lit("[DIFF] lompi: lock does not match store\n");
+        // 指出**第一处不同**的那一行 —— 外源行的 `jar=` / `ir=` / `compiler=`
+        // 就在行里, 所以"哪一项变了"不用另造一套字段名 (docs/279 §5.3)。
+        let a: u32 = 0;
+        let b: u32 = 0;
+        let nf: u32 = got as u32;
+        let run: u32 = 1;
+        let said: u32 = 0;
+        while run == 1 && said == 0 {
+            let la: u32 = txt_line_len(R(ws), a, o);
+            let lb: u32 = txt_line_len(file, b, nf);
+            if la == lb && txt_eq(R(ws), a, la, file, b, lb) {
+                let na: u32 = txt_next_line(R(ws), a, o);
+                let nb: u32 = txt_next_line(file, b, nf);
+                if na <= a || nb <= b {
+                    run = 0;
+                } else {
+                    a = na;
+                    b = nb;
+                }
+            } else {
+                err_lit("  first differing line: ");
+                if lb > 0 {
+                    sys_write(2, ((file as u64) + (b as u64)) as ptr, lb as u64);
+                } else if la > 0 {
+                    sys_write(2, ((R(ws) as u64) + (a as u64)) as ptr, la as u64);
+                }
+                err_lit("\n");
+                said = 1;
+            }
+        }
         return 1;
     }
     out_lit("[OK] lompi: lock matches store (");
@@ -703,6 +986,8 @@ fn print_help() {
     out_lit("  lompi check   <dir>                                 is this a valid Loment library?\n");
     out_lit("  lompi fetch   [--registry URL] [--registry-sha256 H]  fetch the registry (H = index sha256)\n");
     out_lit("        --registry-sha256 H  pin the index hash out of band (64 hex; docs/236 §7.1)\n");
+    out_lit("        --foreign-index-sha256 H  pin the foreign index separately (64 hex; docs/279 §7)\n");
+    out_lit("        --insecure           accept unpinned indexes from 127.0.0.1 only\n");
     out_lit("  lompi config                                        show global root and registry\n");
     out_lit("  lompi version                                       print the version\n");
     out_lit("\n");
@@ -1235,6 +1520,7 @@ pub fn net_crlf(dst: ptr, off: u32) -> u32 {
 /// * 头结束 / 状态行 / 体起点**全部走 `internet::http`**: 状态码按状态行读, 不再用
 ///   "头里某处出现 ` 200`" 那种子串判定 (一个头值里带 ` 200` 会被误当成功)。
 pub fn net_http_get(req: ptr, path: ptr, plen: u32, out: ptr, cap: u64) -> u64 {
+    txt_store32(req, NETREQ_STATUS, 0);
     let scr: ptr = txt_load64(req, NETREQ_SCR) as ptr;
     let head: ptr = txt_load64(req, NETREQ_HEAD) as ptr;
     let a: u32 = txt_load32(req, NETREQ_A);
@@ -1293,6 +1579,7 @@ pub fn net_http_get(req: ptr, path: ptr, plen: u32, out: ptr, cap: u64) -> u64 {
     }
     let code: u32 = load8(head, 0) | (load8(head, 1) << 8)
                   | (load8(head, 2) << 16) | (load8(head, 3) << 24);
+    txt_store32(req, NETREQ_STATUS, code);
     if code != 200 {
         return NET_ERR;                  // 非 200(含 3xx: 不跟重定向)
     }
@@ -1305,6 +1592,153 @@ pub fn net_http_get(req: ptr, path: ptr, plen: u32, out: ptr, cap: u64) -> u64 {
         sys_copy(out, 0, out, bstart, blen);
     }
     return blen as u64;
+}
+
+//: 流式取件: 头缓冲与单块缓冲。体的大小与内存无关 —— 真实的 jar 常有几 MB,
+//: 而 `NET_FILE_CAP` 是 256 KiB; "把缓冲加大"只是把墙往后挪一格。
+const NET_HEAD_CAP: u32 = 4096;
+const NET_CHUNK: u32 = 16384;
+
+/// 半份文件不能当成一份: PE 上没有 unlink, 截断是能用的"删掉"。
+fn net_truncate(path: ptr) {
+    let z: ptr = sys_alloc(1);
+    let _w: u64 = sys_write_file(path, z, 0);
+}
+
+/// 流式取一个文件: 响应体**直接落盘**, 不经过 `NET_FILE_CAP` 那块整块缓冲。
+///
+/// 头只留 4 KiB (报文头本身就那么点), 体按 16 KiB 一块 `tcp_recv` → `sha_update` →
+/// `write`。`want` (可空) = 期望的 64 个小写 hex; `outhex` (可空) 收实际值。
+/// 返回 1 = 落盘且 (给了 `want` 时) 哈希一致; 0 = 任何一步失败 (文件被截成 0 字节)。
+///
+/// 与 `net_http_get` 共用同一条报文框架 (`internet::http`) 与同一条信任规矩:
+/// 只认 200、不跟重定向、`http_body_start` 说了算。
+fn net_http_get_to_file(req: ptr, path: ptr, plen: u32, dst: ptr,
+                        want: ptr, outhex: ptr) -> u32 {
+    txt_store32(req, NETREQ_STATUS, 0);
+    let scr: ptr = txt_load64(req, NETREQ_SCR) as ptr;
+    let head: ptr = txt_load64(req, NETREQ_HEAD) as ptr;
+    let a: u32 = txt_load32(req, NETREQ_A);
+    let b: u32 = txt_load32(req, NETREQ_B);
+    let c: u32 = txt_load32(req, NETREQ_C);
+    let d: u32 = txt_load32(req, NETREQ_D);
+    let port: u64 = txt_load64(req, NETREQ_PORT);
+    let ipv: u32 = (a << 24) | (b << 16) | (c << 8) | d;
+    let fd: i64 = tcp_connect4(ipv, port as u32, scr);
+    if fd < 0 {
+        return 0;
+    }
+    let o: u32 = txt_put(head, 0, "GET ");
+    let o1: u32 = txt_put_bytes(head, o, path, 0, plen);
+    let o2: u32 = net_crlf(head, txt_put(head, o1, " HTTP/1.0"));
+    let o2b: u32 = txt_put(head, o2, "Host: ");
+    let o3: u32 = txt_put_dec(head, o2b, a as u64);
+    let o4: u32 = txt_put_byte(head, o3, 46);
+    let o5: u32 = txt_put_dec(head, o4, b as u64);
+    let o6: u32 = txt_put_byte(head, o5, 46);
+    let o7: u32 = txt_put_dec(head, o6, c as u64);
+    let o8: u32 = txt_put_byte(head, o7, 46);
+    let o9: u32 = txt_put_dec(head, o8, d as u64);
+    let oA: u32 = txt_put_byte(head, o9, 58);
+    let oB: u32 = txt_put_dec(head, oA, port);
+    let oC: u32 = net_crlf(head, txt_put(head, oB, "Connection: close"));
+    let oD: u32 = net_crlf(head, oC);
+    if oD > 1024 {
+        sock_close(fd);
+        return 0;
+    }
+    let sn: i64 = tcp_send_all(fd, head, oD as u64);
+    if sn < 0 {
+        sock_close(fd);
+        return 0;
+    }
+    let hbuf: ptr = sys_alloc(NET_HEAD_CAP as u64);
+    let chunk: ptr = sys_alloc(NET_CHUNK as u64);
+    let st: ptr = sys_alloc(sha_state_size() as u64);
+    let dig: ptr = sys_alloc(64);
+    let hex: ptr = outhex;
+    if hex == (0 as ptr) {
+        hex = sys_alloc(128);
+    }
+    if hbuf == (0 as ptr) || chunk == (0 as ptr) || st == (0 as ptr) || dig == (0 as ptr) {
+        sock_close(fd);
+        return 0;
+    }
+    // ---- 报文头: 收到空行为止。头没结束就先收满 4 KiB 的, 不是 HTTP。
+    let hn: u32 = 0;
+    let bs: u32 = HTTP_NO;
+    let run: u32 = 1;
+    while run == 1 {
+        let room: u32 = NET_HEAD_CAP - hn;
+        let r: i64 = tcp_recv(fd, ((hbuf as u64) + (hn as u64)) as ptr, room as u64);
+        if r <= 0 {
+            sock_close(fd);
+            return 0;
+        }
+        hn = hn + (r as u32);
+        bs = http_body_start(hbuf, 0, hn);
+        if bs != HTTP_NO {
+            run = 0;
+        } else if hn >= NET_HEAD_CAP {
+            sock_close(fd);
+            return 0;
+        }
+    }
+    let so: u32 = http_status_line(hbuf, 0, hn, head);
+    if so != 1 {
+        sock_close(fd);
+        return 0;
+    }
+    let code: u32 = load8(head, 0) | (load8(head, 1) << 8)
+                  | (load8(head, 2) << 16) | (load8(head, 3) << 24);
+    txt_store32(req, NETREQ_STATUS, code);
+    if code != 200 {
+        sock_close(fd);
+        return 0;
+    }
+    let fw: i64 = sys_open_wo(dst);
+    if fw < 0 {
+        sock_close(fd);
+        return 0;
+    }
+    sha_init(st);
+    let ok: u32 = 1;
+    if bs < hn {
+        let bl: u32 = hn - bs;
+        let bp: ptr = ((hbuf as u64) + (bs as u64)) as ptr;
+        sha_update(st, bp, bl);
+        let w: u64 = sys_write(fw, bp, bl as u64);
+        if w != (bl as u64) {
+            ok = 0;
+        }
+    }
+    while ok == 1 {
+        let r2: i64 = tcp_recv(fd, chunk, NET_CHUNK as u64);
+        if r2 < 0 {
+            ok = 0;
+        } else if r2 == 0 {
+            ok = 2;                  // 干净的 EOF (Connection: close 的分界)
+        } else {
+            sha_update(st, chunk, r2 as u32);
+            let w2: u64 = sys_write(fw, chunk, r2 as u64);
+            if w2 != (r2 as u64) {
+                ok = 0;
+            }
+        }
+    }
+    sock_close(fd);
+    sys_close(fw);
+    if ok != 2 {
+        net_truncate(dst);
+        return 0;
+    }
+    sha_final(st, dig);
+    sha_hex(dig, hex);
+    if want != (0 as ptr) && !txt_eq(hex, 0, 64, want, 0, 64) {
+        net_truncate(dst);
+        return 0;
+    }
+    return 1;
 }
 
 // ---------------------------------------------------------------- URL 拆解
@@ -1573,6 +2007,14 @@ const NETREQ_BODYCAP: u32 = 88;     // u32
 //: 索引与它里面的那些哈希走的是**同一条明文通道** —— 那条逐个比 sha256 只能查出
 //: "路上坏了", 挡不住"有人把索引和载荷一起换掉" (issue #306/#377)。
 const NETREQ_PIN: u32 = 96;
+//: u32: 最近一次 `net_http_get` 读到的状态码 (0 = 没读到状态行)。只为让调用方
+//: 分辨"404 = 没有这个索引"与"网络根本没通" —— 两者都返回 `NET_ERR`。
+const NETREQ_STATUS: u32 = 104;
+//: ptr: **外源索引**的带外钉子 (`--foreign-index-sha256` / lompi.conf)。
+//: 两个索引是两份文件, 一个钉子盖不住两个。
+const NETREQ_PIN2: u32 = 112;
+//: u32: 这一趟取到的外源包的个数 (让主流程分辨"没有外源索引"与"索引是空的")。
+const NETREQ_FCOUNT: u32 = 120;
 const NETREQ_SIZE: u32 = 128;
 
 //: 完成标记的**内容**是 `lompi-fetch 1 complete\n` (下面两处逐字写死 —— 语言没有
@@ -1628,15 +2070,13 @@ fn net_mark_write(dir: ptr, complete: u32) -> u32 {
 /// `--registry-sha256` 的值: 必须恰好 64 个十六进制字符; 大小写都收, 但**规整成小写**
 /// 再写进 out (C 串)。返回 1 = 收了; 0 = 形状不对 (调用方当场拒, 别让它变成一颗
 /// 永远比不上的钉子, 看起来却像"已经在验来源")。
-fn net_pin_take(buf: ptr, av: u64, out: ptr) -> u32 {
-    let n: u32 = sys_arg_len(av);
+fn net_pin_take_bytes(p: ptr, n: u32, out: ptr) -> u32 {
     if n != 64 {
         return 0;
     }
-    let off: u32 = sys_arg_off(av);
     let i: u32 = 0;
     while i < 64 {
-        let c: u32 = load8(buf, off + i);
+        let c: u32 = load8(p, i);
         let l: u32 = c;
         if c >= 65 && c <= 70 {
             l = c + 32;
@@ -1648,6 +2088,12 @@ fn net_pin_take(buf: ptr, av: u64, out: ptr) -> u32 {
     }
     store8(out, 64, 0 as u8);
     return 1;
+}
+
+/// `--registry-sha256` / `--foreign-index-sha256` 的值 (argv 形式)。
+fn net_pin_take(buf: ptr, av: u64, out: ptr) -> u32 {
+    let off: u32 = sys_arg_off(av);
+    return net_pin_take_bytes(((buf as u64) + (off as u64)) as ptr, sys_arg_len(av), out);
 }
 
 /// 从 p 的 [off, n) 取一个空白分隔的字段写进 out (cap)。
@@ -1706,7 +2152,7 @@ fn net_basename(p: ptr, n: u32, out: ptr, cap: u32) -> u32 {
 /// 把注册表拉进 `dst`(一个**已经存在**的目录: `<root>/cache/<slug>`)。
 /// 返回 1 = 全部下完且逐个**校验过索引里写着的 sha256**; 0 = 任一步不成;
 /// 2 = 索引与 `--registry-sha256` 对不上 (**硬失败**, 调用方不许退回到打印计划)。
-fn net_fetch_registry(req: ptr, dst: ptr) -> u32 {
+fn net_fetch_registry(req: ptr, dst: ptr, pin2: ptr, allow_unpinned: u32) -> u32 {
     let base: ptr = txt_load64(req, NETREQ_BASE) as ptr;
     let blen: u32 = txt_len_cstr(base);
     let idx: ptr = txt_load64(req, NETREQ_IDX) as ptr;
@@ -1722,9 +2168,16 @@ fn net_fetch_registry(req: ptr, dst: ptr) -> u32 {
     let o1: u32 = sys_append_lit(ipath, blen, "lompi-index.txt");
     store8(ipath, o1, 0 as u8);
     let ilen: u64 = net_http_get(req, ipath, o1, idx, idxcap as u64);
+    // 404 = 这个注册表没有源码索引。外源注册表可以只有 `lompi-foreign-index.txt`;
+    // 两种都没有时才回退到打印计划 (与 0.2.0 对"索引不存在"的说法一致)。
+    let src_missing: u32 = 0;
     if ilen == NET_ERR {
-        sys_write_str(2, "lompi: the registry did not answer -- falling back to the plan\n");
-        return 0;
+        if txt_load32(req, NETREQ_STATUS) == 404 {
+            src_missing = 1;
+        } else {
+            sys_write_str(2, "lompi: the registry did not answer -- falling back to the plan\n");
+            return 0;
+        }
     }
     let name: ptr = sys_alloc(192);
     let ver: ptr = sys_alloc(128);
@@ -1757,6 +2210,7 @@ fn net_fetch_registry(req: ptr, dst: ptr) -> u32 {
     }
     let off: u32 = 0;
     let files: u32 = 0;
+    if src_missing == 0 {
     while off < (ilen as u32) {
         let ll: u32 = txt_line_len(idx, off, ilen as u32);
         if ll > 0 && load8(idx, off) != 35 {
@@ -1836,15 +2290,306 @@ fn net_fetch_registry(req: ptr, dst: ptr) -> u32 {
             off = nxt;
         }
     }
-    if files == 0 {
-        sys_write_str(2, "lompi: the index has no entries\n");
+    }
+    // 外源索引 (docs/279 §4–§5): 源码索引取完之后再跟随它; jar 走流式落盘。
+    let fk: u32 = net_fetch_foreign(req, dst, base, blen, pin2, allow_unpinned);
+    if fk == 2 {
+        return 2;                    // 钉子不对 / 没有钉子: 硬失败, 不许退回计划
+    }
+    if fk == 0 {
+        // 外源那一半**开始过**了: 失败不许退回到"打印 git clone 计划" ——
+        // 那是把一次拒绝装成一次成功 (jar 是可执行代码, 与源码包不同)。
+        return 3;
+    }
+    let fcount: u32 = txt_load32(req, NETREQ_FCOUNT);
+    if files == 0 && fcount == 0 {
+        if src_missing == 1 {
+            sys_write_str(2, "lompi: the registry did not answer -- falling back to the plan\n");
+        } else {
+            sys_write_str(2, "lompi: the index has no entries\n");
+        }
         return 0;
     }
-    // 整份取齐了才写**完成令牌**。写不进去也不改变"取到了"这个事实, 但消费方会因此
-    // 判不完整 —— 所以把这件事说出来, 而不是静默地留一个没有标记的目录。
+    // 两个索引 + 所有 artifact 都取齐了才写**完成令牌**。写不进去也不改变"取到了"
+    // 这个事实, 但消费方会因此判不完整 —— 所以把这件事说出来, 而不是静默地留一个
+    // 没有标记的目录。
     if net_mark_write(dst, 1) == 0 {
         sys_write_str(2, "lompi: fetched everything but could not write the completion marker\n");
     }
+    return 1;
+}
+
+// ---------------------------------------------------------------- 外源索引 (docs/279)
+
+/// 路径里有 `..` 段? — 注册表给的是不可信输入, 成员路径不许跳出包目录。
+fn net_has_dotdot(p: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i + 1 < n {
+        if load8(p, i) == 46 && load8(p, i + 1) == 46 {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// `p[0..n]` 里最后一个 `/` 之前的目录, 带结尾分隔符 (没有分隔符时是空串)。
+fn net_dir_of(p: ptr, n: u32, out: ptr) {
+    let cut: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        if load8(p, i) == 47 {
+            cut = i + 1;
+        }
+        i = i + 1;
+    }
+    sys_copy(out, 0, p, 0, cut);
+    store8(out, cut, 0 as u8);
+}
+
+/// 按 `foreign.txt` 的 `artifact` 行取成员文件, 写进 `outdir`。
+/// 返回取到的个数; 任何一步失败返回 4294967295。
+///
+/// `jar` 走流式 (`net_http_get_to_file`), 其余走 `NET_FILE_CAP` 那一块 ——
+/// 256 KiB 是小文件路径的上限, 不是整个联网面的上限。
+fn net_fetch_artifacts(req: ptr, body: ptr, n: u32, adir: ptr, outdir: ptr) -> u32 {
+    let w0: ptr = sys_alloc(64);
+    let w1: ptr = sys_alloc(64);
+    let w2: ptr = sys_alloc(576);
+    let w3: ptr = sys_alloc(128);
+    let afull: ptr = sys_alloc(1600);
+    let ofull: ptr = sys_alloc(1600);
+    let bnb: ptr = sys_alloc(576);
+    let hx: ptr = sys_alloc(128);
+    let st: ptr = sys_alloc(sha_state_size() as u64);
+    let dig: ptr = sys_alloc(64);
+    let scratch: ptr = sys_alloc((NET_FILE_CAP as u64) + 8192);
+    let adl: u32 = txt_len_cstr(adir);
+    let odl: u32 = txt_len_cstr(outdir);
+    let count: u32 = 0;
+    let off: u32 = 0;
+    while off < n {
+        let ll: u32 = txt_line_len(body, off, n);
+        if ll > 0 && load8(body, off) != 35 {
+            let g0: u64 = net_field(body, off, off + ll, w0, 64);
+            let l0: u32 = net_flen(g0);
+            if l0 == 8 && txt_eq_lit(w0, 0, 8, "artifact") {
+                let g1: u64 = net_field(body, net_foff(g0), off + ll, w1, 64);
+                let g2: u64 = net_field(body, net_foff(g1), off + ll, w2, 576);
+                let g3: u64 = net_field(body, net_foff(g2), off + ll, w3, 128);
+                let k1: u32 = net_flen(g1);
+                let p2: u32 = net_flen(g2);
+                let s3: u32 = net_flen(g3);
+                if k1 == 0 || p2 == 0 || s3 != 64 {
+                    sys_write_str(2, "lompi: bad artifact line in foreign.txt (want: artifact KIND PATH SHA256 [MERKLE])\n");
+                    return 4294967295;
+                }
+                if load8(w2, 0) == 47 || net_has_dotdot(w2, p2) == 1 {
+                    sys_write_str(2, "lompi: bad artifact path in foreign.txt\n");
+                    return 4294967295;
+                }
+                let bn: u32 = net_basename(w2, p2, bnb, 576);
+                if bn == 0 {
+                    sys_write_str(2, "lompi: bad artifact path in foreign.txt\n");
+                    return 4294967295;
+                }
+                sys_copy(afull, 0, adir, 0, adl);
+                let a1: u32 = sys_append_bytes(afull, adl, w2, p2);
+                store8(afull, a1, 0 as u8);
+                sys_copy(ofull, 0, outdir, 0, odl);
+                let b1: u32 = sys_append_sep(ofull, odl);
+                let b2: u32 = sys_append_bytes(ofull, b1, bnb, bn);
+                store8(ofull, b2, 0 as u8);
+                let is_jar: u32 = 0;
+                if k1 == 3 && txt_eq_lit(w1, 0, 3, "jar") {
+                    is_jar = 1;
+                }
+                if is_jar == 1 {
+                    if net_http_get_to_file(req, afull, a1, ofull, w3, hx) == 0 {
+                        sys_write_str(2, "lompi: streaming download failed for ");
+                        sys_write(2, w2, p2 as u64);
+                        sys_write_str(2, "\nlompi: (hash mismatch, write error, or the server stopped)\n");
+                        sys_write_str(2, "lompi: the destination must exist:  mkdir -p ");
+                        sys_write(2, outdir, odl as u64);
+                        sys_write_str(2, "\n");
+                        return 4294967295;
+                    }
+                } else {
+                    let got: u64 = net_http_get(req, afull, a1, scratch, NET_FILE_CAP as u64);
+                    if got == NET_ERR {
+                        sys_write_str(2, "lompi: no body for ");
+                        sys_write(2, w2, p2 as u64);
+                        sys_write_str(2, "\n");
+                        return 4294967295;
+                    }
+                    sha_hex_of(scratch, got as u32, st, dig, hx);
+                    if !txt_eq(hx, 0, 64, w3, 0, 64) {
+                        sys_write_str(2, "lompi: sha256 mismatch for ");
+                        sys_write(2, w2, p2 as u64);
+                        sys_write_str(2, " -- refused\n");
+                        return 4294967295;
+                    }
+                    if sys_write_file(ofull, scratch, got) == SYS_ERR {
+                        sys_write_str(2, "lompi: cannot write ");
+                        sys_write(2, ofull, txt_len_cstr(ofull) as u64);
+                        sys_write_str(2, "\nlompi: make it first:  mkdir -p ");
+                        sys_write(2, outdir, odl as u64);
+                        sys_write_str(2, "\n");
+                        return 4294967295;
+                    }
+                }
+                count = count + 1;
+            }
+        }
+        let nxt: u32 = txt_next_line(body, off, n);
+        if nxt <= off {
+            off = n;
+        } else {
+            off = nxt;
+        }
+    }
+    return count;
+}
+
+/// 取外源索引 + 它指到的 `foreign.txt` + 清单里的每个 artifact。
+///
+/// 返回 1 = 没有外源索引 (404) 或全部取齐并逐个校验过; 0 = 失败;
+/// 2 = **硬失败** (钉子不对 / 外源索引没有带外钉子), 调用方不许退回到打印计划。
+///
+/// 完成标记由 `net_fetch_registry` 在**两个索引都走完之后**才写 —— 半截的 jar
+/// 不能被 `install` 当成一份完整缓存 (`docs/236` §7.2)。
+fn net_fetch_foreign(req: ptr, dst: ptr, base: ptr, blen: u32,
+                     pin: ptr, allow_unpinned: u32) -> u32 {
+    txt_store32(req, NETREQ_FCOUNT, 0);
+    let idx: ptr = txt_load64(req, NETREQ_IDX) as ptr;
+    let idxcap: u32 = txt_load32(req, NETREQ_IDXCAP);
+    let body: ptr = txt_load64(req, NETREQ_BODY) as ptr;
+    let bodycap: u64 = txt_load32(req, NETREQ_BODYCAP) as u64;
+    let ipath: ptr = sys_alloc(1600);
+    sys_copy(ipath, 0, base, 0, blen);
+    let o1: u32 = sys_append_lit(ipath, blen, "lompi-foreign-index.txt");
+    store8(ipath, o1, 0 as u8);
+    let ilen: u64 = net_http_get(req, ipath, o1, idx, idxcap as u64);
+    if ilen == NET_ERR {
+        if txt_load32(req, NETREQ_STATUS) == 404 {
+            return 1;                       // 这个注册表只有源码包
+        }
+        sys_write_str(2, "lompi: the foreign index did not answer\n");
+        return 0;
+    }
+    let st: ptr = sys_alloc(sha_state_size() as u64);
+    let dig: ptr = sys_alloc(64);
+    let hex: ptr = sys_alloc(128);
+    // 带外钉子: 外源索引与它里面的哈希走同一条明文通道。jar 是**可执行代码**,
+    // 所以这里的默认是拒, 不是"提醒一下"(docs/279 §7)。
+    if pin != (0 as ptr) {
+        sha_hex_of(idx, ilen as u32, st, dig, hex);
+        if !txt_eq(hex, 0, 64, pin, 0, 64) {
+            sys_write_str(2, "lompi: the foreign index does not match --foreign-index-sha256 -- refused\n");
+            return 2;
+        }
+        sys_write_str(1, "lompi: foreign index matches the pinned sha256\n");
+    } else if allow_unpinned == 0 {
+        sys_write_str(2, "lompi: this registry has foreign packages, but the foreign index is not pinned\n");
+        sys_write_str(2, "lompi: pass --foreign-index-sha256 <64 hex> (get it over a trusted channel), or\n");
+        sys_write_str(2, "lompi: --insecure for a local registry on 127.0.0.1 (docs/279 §7)\n");
+        return 2;
+    } else {
+        sys_write_str(1, "lompi: --insecure: an unpinned foreign index is accepted from loopback only\n");
+    }
+    let name: ptr = sys_alloc(192);
+    let ver: ptr = sys_alloc(128);
+    let mpath: ptr = sys_alloc(576);
+    let msha: ptr = sys_alloc(128);
+    let mfull: ptr = sys_alloc(1600);
+    let adir: ptr = sys_alloc(1600);
+    let outdir: ptr = sys_alloc(1600);
+    let mbn: ptr = sys_alloc(576);
+    let mout: ptr = sys_alloc(1600);
+    let off: u32 = 0;
+    let count: u32 = 0;
+    while off < (ilen as u32) {
+        let ll: u32 = txt_line_len(idx, off, ilen as u32);
+        if ll > 0 && load8(idx, off) != 35 {
+            let f0: u64 = net_field(idx, off, off + ll, name, 192);
+            let f1: u64 = net_field(idx, net_foff(f0), off + ll, ver, 128);
+            let f2: u64 = net_field(idx, net_foff(f1), off + ll, mpath, 576);
+            let f3: u64 = net_field(idx, net_foff(f2), off + ll, msha, 128);
+            let nl: u32 = net_flen(f0);
+            let vl: u32 = net_flen(f1);
+            let pl: u32 = net_flen(f2);
+            let sl: u32 = net_flen(f3);
+            if nl == 0 || vl == 0 || pl == 0 || sl != 64 {
+                sys_write_str(2, "lompi: bad foreign index line (want: name version manifest-path sha256)\n");
+                return 0;
+            }
+            if load8(mpath, 0) == 47 || net_has_dotdot(mpath, pl) == 1 {
+                sys_write_str(2, "lompi: bad path in the foreign index\n");
+                return 0;
+            }
+            sys_copy(mfull, 0, base, 0, blen);
+            let m0: u32 = sys_append_bytes(mfull, blen, mpath, pl);
+            store8(mfull, m0, 0 as u8);
+            let got: u64 = net_http_get(req, mfull, m0, body, bodycap);
+            if got == NET_ERR {
+                sys_write_str(2, "lompi: no body for ");
+                sys_write(2, mpath, pl as u64);
+                sys_write_str(2, "\n");
+                return 0;
+            }
+            sha_hex_of(body, got as u32, st, dig, hex);
+            if !txt_eq(hex, 0, 64, msha, 0, 64) {
+                sys_write_str(2, "lompi: sha256 mismatch for ");
+                sys_write(2, mpath, pl as u64);
+                sys_write_str(2, " -- refused\n");
+                return 0;
+            }
+            // 成员路径相对 `foreign.txt` 自己所在的目录。
+            net_dir_of(mfull, m0, adir);
+            let dn: u32 = txt_len_cstr(dst);
+            sys_copy(outdir, 0, dst, 0, dn);
+            let q1: u32 = sys_append_sep(outdir, dn);
+            let q2: u32 = sys_append_bytes(outdir, q1, name, nl);
+            let q3: u32 = sys_append_sep(outdir, q2);
+            let q4: u32 = sys_append_bytes(outdir, q3, ver, vl);
+            store8(outdir, q4, 0 as u8);
+            // `foreign.txt` 是包的一部分 (`pkg_check` 要它, 身份也要它): 落盘。
+            let mbl: u32 = net_basename(mpath, pl, mbn, 576);
+            if mbl == 0 {
+                sys_write_str(2, "lompi: bad manifest path in the foreign index\n");
+                return 0;
+            }
+            sys_copy(mout, 0, outdir, 0, q4);
+            let w1: u32 = sys_append_sep(mout, q4);
+            let w2: u32 = sys_append_bytes(mout, w1, mbn, mbl);
+            store8(mout, w2, 0 as u8);
+            if sys_write_file(mout, body, got) == SYS_ERR {
+                sys_write_str(2, "lompi: cannot write ");
+                sys_write(2, mout, w2 as u64);
+                sys_write_str(2, "\nlompi: make it first:  mkdir -p ");
+                sys_write(2, outdir, q4 as u64);
+                sys_write_str(2, "\n");
+                return 0;
+            }
+            let an: u32 = net_fetch_artifacts(req, body, got as u32, adir, outdir);
+            if an == 4294967295 {
+                return 0;
+            }
+            count = count + an;
+            sys_write_str(1, "fetched foreign ");
+            sys_write(1, name, nl as u64);
+            sys_write_str(1, " ");
+            sys_write(1, ver, vl as u64);
+            sys_write_str(1, "  manifest + artifacts ok\n");
+        }
+        let nxt: u32 = txt_next_line(idx, off, ilen as u32);
+        if nxt <= off {
+            off = ilen as u32;
+        } else {
+            off = nxt;
+        }
+    }
+    txt_store32(req, NETREQ_FCOUNT, count);
     return 1;
 }
 
@@ -1901,6 +2646,30 @@ fn cmd_fetch(ws: ptr, buf: ptr, m: u32) -> u32 {
             return cli_die("--registry-sha256 wants exactly 64 hex characters");
         }
     }
+    // 外源索引是**第二份**文件 —— 一个钉子盖不住两个 (docs/279 §7)。
+    // 没给开关时再看 lompi.conf 的 `foreign_index_sha256()`。
+    let pin2: ptr = 0 as ptr;
+    let pin2av: u64 = cfg_flag_arg(buf, m, "--foreign-index-sha256");
+    if pin2av != 0 {
+        pin2 = sys_alloc(72);
+        if net_pin_take(buf, pin2av, pin2) == 0 {
+            return cli_die("--foreign-index-sha256 wants exactly 64 hex characters");
+        }
+    } else {
+        let cpin: ptr = sys_alloc(72);
+        let cn: u32 = cfg_label(ws, exed, "foreign_index_sha256", cpin, 72);
+        if cn > 0 {
+            pin2 = sys_alloc(72);
+            if net_pin_take_bytes(cpin, cn, pin2) == 0 {
+                return cli_die("lompi.conf: foreign_index_sha256 wants exactly 64 hex characters");
+            }
+        }
+    }
+    // `--insecure` 只对本地回环生效 (docs/279 §7): 它在别处不是"降级", 是拒绝。
+    let insecure: u32 = 0;
+    if cfg_has_flag(buf, m, "--insecure") {
+        insecure = 1;
+    }
 
     let ipa: ptr = sys_alloc(8);
     let ipb: ptr = sys_alloc(8);
@@ -1909,6 +2678,17 @@ fn cmd_fetch(ws: ptr, buf: ptr, m: u32) -> u32 {
     let pop: ptr = sys_alloc(8);
     let base: ptr = sys_alloc(1200);
     if net_parse_http(reg, n, ipa, ipb, ipc, ipd, pop, base, 1200) == 1 {
+        let loopback: u32 = 0;
+        if txt_load32(ipa, 0) == 127 && txt_load32(ipb, 0) == 0
+            && txt_load32(ipc, 0) == 0 && txt_load32(ipd, 0) == 1 {
+            loopback = 1;
+        }
+        if insecure == 1 && loopback == 0 {
+            return cli_die("--insecure only applies to a local registry on 127.0.0.1");
+        }
+        if insecure == 1 {
+            out_lit("lompi: --insecure: unpinned indexes are accepted (127.0.0.1 only)\n");
+        }
         let head: ptr = sys_alloc(1024);
         let idx: ptr = sys_alloc(65536);
         let body: ptr = sys_alloc((NET_FILE_CAP as u64) + 8192);
@@ -1926,7 +2706,8 @@ fn cmd_fetch(ws: ptr, buf: ptr, m: u32) -> u32 {
         txt_store64(req, NETREQ_BODY, body as u64);
         txt_store32(req, NETREQ_BODYCAP, NET_FILE_CAP + 8192);
         txt_store64(req, NETREQ_PIN, pin as u64);
-        let bak: u32 = net_fetch_registry(req, dst);
+        txt_store64(req, NETREQ_PIN2, pin2 as u64);
+        let bak: u32 = net_fetch_registry(req, dst, pin2, insecure);
         if bak == 1 {
             out_lit("lompi: registry fetched into ");
             sys_write(1, dst, txt_len_cstr(dst) as u64);
@@ -1935,6 +2716,10 @@ fn cmd_fetch(ws: ptr, buf: ptr, m: u32) -> u32 {
         }
         if bak == 2 {
             // 钉子对不上**不许**退回到"打印计划" —— 那是把一次拒绝装成一次成功。
+            return 1;
+        }
+        if bak == 3 {
+            // 外源索引/成员文件没取成: 同上, 失败就是失败。
             return 1;
         }
         out_lit("# the http fetch did not go through -- plan below\n");

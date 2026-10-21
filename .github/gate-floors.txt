@@ -81,7 +81,7 @@ loment_internet_test 12
 loment_os_test 5
 loment_thread_test 11
 loment_lumtui_test 7
-loment_lompi_test 35
+loment_lompi_test 38
 lompicheck_test 7
 loment_register_test 9
 loment_multisyntax_test 73

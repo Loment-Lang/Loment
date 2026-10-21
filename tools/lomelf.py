@@ -672,7 +672,9 @@ class Emitter:
         self.asm = Asm(TEXT_VADDR)
         self.externs = externs or set()   # docs/173: 这些名字走 C ABI 传参
         self.hotswap = hotswap
-        self.hot_slots = ({n: i for i, n in enumerate(sorted(swappable or []))}
+        #: 槽号按 **IR 顺序** 分配（不是按名字排序）—— 自举镜像按同一路走，两边
+        #: 才可能逐字节相同；函数集合一变槽表整体位移，`tramp=<slot>` 会把它暴露出来。
+        self.hot_slots = ({n: i for i, n in enumerate(swappable or [])}
                           if hotswap else {})
         self.hot_header: dict = {}
         self.globals = {g.name: g for g in globals_}

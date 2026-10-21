@@ -1862,7 +1862,7 @@ def test_l1_definite_lifetime_bounds_the_heap():
 
 
 def _mirror_run(mir: Path, in_rel: str, out_rel: str, links: tuple[str, ...] = (),
-                ports: bool = True) -> tuple[int, str]:
+                ports: bool = True, flags: str = "") -> tuple[int, str]:
     """在 WSL 里用镜像编一个**仓库内相对路径**的 `.ll`。返回 (退出码, stderr)。
 
     stdout 与退出码不混在一个流里: 先让它跑, 再单独 `echo -n $?` (与 `_run_bin` 同一条纪律)。
@@ -1877,7 +1877,7 @@ def _mirror_run(mir: Path, in_rel: str, out_rel: str, links: tuple[str, ...] = (
     if links and ports:
         extra += " --allow-ports"
     script = (f"cp {_wsl_path(mir)} {tag} && chmod +x {tag} && cd {_wsl_path(ROOT)} && "
-              f"{tag} {in_rel} {out_rel}{extra}; echo -n $?")
+              f"{tag} {in_rel} {out_rel}{extra}{flags}; echo -n $?")
     r = _sh(script, 900)
     try:
         rc = int(r.stdout.decode().strip())
@@ -4418,6 +4418,75 @@ def test_a_gnu_ld_script_is_named_as_one_and_points_at_the_real_file():
         else:
             raise AssertionError("GNU ld 脚本被当成 ELF 收下了")
     print("      GNU ld 脚本: 点名『链接脚本』并给出它指向的 libz.so.1")
+
+
+@test
+def test_selfhost_mirror_emits_identical_hot_metadata():
+    """镜像的 `--hot-meta`（`#1149`）与参考实现**逐字节相同**。
+
+    ELF 已经由 `test_lomelf_selfhost_matches_reference` 钉住；这一条钉另一件产物：
+    函数顺序、帧布局哈希、调用点 id 与偏移 —— 任何一处不同，重映射就指错。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    mir = _mirror()
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        ll = _ref_ir(ROOT / "loment" / "examples" / "user_hello.lomt", td)
+        ir = ll.read_text(encoding="utf-8")
+        want_elf, info = lomelf.compile_ll(ir)
+        llrepo = ROOT / "loment" / "build" / "_hot_meta.ll"
+        elfrepo = ROOT / "loment" / "build" / "_hot_meta.elf"
+        metarepo = ROOT / "loment" / "build" / "_hot_meta.lomhot"
+        try:
+            llrepo.write_bytes(ll.read_bytes())
+            rc, err = _mirror_run(
+                mir, "loment/build/_hot_meta.ll", "loment/build/_hot_meta.elf",
+                flags=" --hot-meta loment/build/_hot_meta.lomhot")
+            assert rc == 0, f"镜像退出 {rc}: {err[-200:]}"
+            assert elfrepo.read_bytes() == want_elf, "镜像 ELF 与参考不同"
+            got = metarepo.read_text(encoding="utf-8")
+            assert got == info["hot"], f"元数据不同:\n{got[-300:]}\n---\n{info['hot'][-300:]}"
+        finally:
+            for p in (llrepo, elfrepo, metarepo):
+                p.unlink(missing_ok=True)
+    print("      镜像的 --hot-meta 与参考逐字节相同")
+
+
+@test
+def test_selfhost_mirror_hotswap_profile():
+    """镜像的 `--profile hotswap`（`#1150`）：槽表、入口闸、元数据三样都相同，且跑起来一样。"""
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    mir = _mirror()
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        ll = _ref_ir(ROOT / "loment" / "examples" / "user_hello.lomt", td)
+        ir = ll.read_text(encoding="utf-8")
+        want_elf, info = lomelf.compile_ll(ir, hotswap=True)
+        reffile = td / "ref_hot.elf"
+        reffile.write_bytes(want_elf)
+        llrepo = ROOT / "loment" / "build" / "_hot_sw.ll"
+        elfrepo = ROOT / "loment" / "build" / "_hot_sw.elf"
+        metarepo = ROOT / "loment" / "build" / "_hot_sw.lomhot"
+        try:
+            llrepo.write_bytes(ll.read_bytes())
+            rc, err = _mirror_run(
+                mir, "loment/build/_hot_sw.ll", "loment/build/_hot_sw.elf",
+                flags=" --hot-meta loment/build/_hot_sw.lomhot --profile hotswap")
+            assert rc == 0, f"镜像退出 {rc}: {err[-200:]}"
+            assert elfrepo.read_bytes() == want_elf, "hotswap 档的 ELF 与参考不同"
+            got = metarepo.read_text(encoding="utf-8")
+            assert got == info["hot"], f"hotswap 元数据不同:\n{got[:300]}\n---\n{info['hot'][:300]}"
+            a = _run_bin(reffile, "hot_ref", td)
+            b = _run_bin(elfrepo, "hot_mir", td)
+            assert a == b == (0, b"M67 RESULT: PASS loment-user\n"), (a, b)
+        finally:
+            for p in (llrepo, elfrepo, metarepo):
+                p.unlink(missing_ok=True)
+    print("      镜像 hotswap 档：ELF、元数据、实跑三者都与参考一致")
 
 
 def main() -> int:

@@ -4,8 +4,13 @@
 // 同一份 `.ll` 喂本程序 (走种子自举链编成 ELF 后跑) 与 tools/lomelf.py,
 // **产出的 ELF 逐字节相同**。这是"编译一个 Loment 程序不再需要一个 C 编译器"的那一格。
 //
-// CLI:  lomelf IN.ll OUT        (无选项; 参考实现的 -o/--check 是它自己的便利, 不镜像)
+// CLI:  lomelf IN.ll OUT [--diag-out PATH] [--link OBJ ...] [--allow-ports]
+//                       [--hot-meta PATH] [--profile hotswap]
+//        (参考实现的 -o/--check 是它自己的便利, 不镜像)
 // 退出码 0 = OK / 1 = 输入不支持或解析失败 / 2 = 用法错误
+//
+// `--hot-meta` 落 `.lomhot`（`#1149`）；`--profile hotswap` 发槽表与入口闸（`#1150`）。
+// 两份产物都必须与参考实现**逐字节相同**，判据在 `loment_elf_test` 的两条镜像对拍里。
 //
 // 与参考实现 (tools/lomelf.py) 的关系: **逐条镜像**, 包括那些看起来啰嗦的地方 ——
 // 判据是字节相同, 任何"我这版写得更漂亮"的发挥都会让判据红。参考实现就是这格的规格书。
@@ -20,6 +25,7 @@ module lomelf
 choose runtime
 
 use bytes
+use sha256
 use win_shim_data
 
 // ---------------------------------------------------------------- PE 目标
@@ -88,7 +94,49 @@ const M_AR: u32 = 32518144;        // 4 MiB 归档暂存
 // `#777` 之后放在 `ARENA`（36,712,448）之后、`ARENA` 再后移 64 KiB。
 const M_TLS: u32 = 36712448;       // 64 KiB
 const TLS_CAP: u32 = 65536;
-const ARENA: u64 = 36777984;
+
+// ---- 热更新（`#1149` / `#1150`）：接在 TLS 之后，ARENA 跟着涨。
+const M_HOTPATH: u32 = 36777984;   // 4 KiB   `--hot-meta` 的路径
+const M_META: u32 = 36782080;      // 256 KiB 元数据文本
+const M_SCRATCH: u32 = 37044224;   // 320 KiB 排序数组 + 规范化串 + sha 状态
+const M_CALLBUF: u32 = 37371904;   // 64 KiB  当前函数的调用点（函数末尾并进元数据）
+const ARENA: u64 = 37437440;
+
+// 热更新状态块（`M_SCRATCH` 头 64 字节）。**不占 `tab` 的单元格** —— 那 64 格已经
+// 用满到 252，`TB_G` 从 256 开始。
+const HS_MLEN: u32 = 0;         // 元数据已写长度
+const HS_CLEN: u32 = 4;         // 调用点缓冲已写长度
+const HS_FENTRY: u32 = 8;       // 当前函数入口（文本相对）
+const HS_NORD: u32 = 12;        // 当前函数的 callee 次序表条数
+const HS_HGATE: u32 = 16;       // 入口闸的文本相对偏移
+const HS_HRUN: u32 = 20;        // 1 = hotswap 档
+const HS_NHS: u32 = 24;         // 槽表条数
+const HS_META: u32 = 28;        // 1 = `--hot-meta` 给了
+const HS_HOTPN: u32 = 32;       // 元数据路径的长度
+const HS_EPOCHN: u32 = 36;      // `__loment_hot_epoch` 在名字池里的偏移
+const HS_ENTRY: u32 = 40;       // 入口桩的文本相对偏移（槽表/闸在它前面）
+const HS_SA: u32 = 64;          // u32 × 8192 槽偏移
+const HS_AA: u32 = 32832;       // (off,size) × 8192 alloca
+const HS_SB: u32 = 98368;       // 192 KiB 规范化串
+const HS_CTX: u32 = 294976;     // 1024 sha 状态
+const HS_DIG: u32 = 296000;     // 32 摘要
+const HS_HEX: u32 = 296032;     // 64 hex
+const HS_MAXN: u32 = 8192;
+
+// 槽表（`#1150`）：名字 -> 槽号，按 IR 顺序分配（与参考实现的 `hot_slots` 同序）。
+const TB_HS: u32 = 5775136;     // stride 16 × 4096
+const HSX_NOFF: u32 = 0;
+const HSX_NLEN: u32 = 4;
+const HSX_SLOT: u32 = 8;
+const HS_MAX: u32 = 4096;
+
+// 调用点次序表（`#1149`）：同一个 callee 在一个函数里第几次被调用。
+const TB_ORD: u32 = 5840672;    // stride 16 × 1024
+const R_NOFF: u32 = 0;
+const R_NLEN: u32 = 4;
+const R_CNT: u32 = 8;
+const R_EXT: u32 = 12;
+const ORD_MAX: u32 = 1024;
 
 const IN_CAP: u32 = 6291456;
 //: `.ll` 文本**之后**的名字预留区（`#600`）：导出名、SONAME、节符号名、收编面那几个
@@ -1407,6 +1455,13 @@ fn em_call_lbl(out: ptr, c: u32, tab: ptr, noff: u32, nlen: u32) -> u32 {
     return e4(out, d, 0);
 }
 
+/// 直连一个**已知地址**的 `call rel32`（热更新档走槽时用它：槽地址与代码布局无关）。
+fn em_call_abs(out: ptr, c: u32, target: u32, base: u32) -> u32 {
+    let d: u32 = e1(out, c, 232);
+    let rel: i32 = target as i32 - (base as i32 + d as i32 + 4);
+    return e4(out, d, rel as u32);
+}
+
 /// 跳到基本块 (名字 = 函数名 + 块名)。
 fn em_jmp_blk(out: ptr, c: u32, tab: ptr, fo: u32, fl: u32, bo: u32, bl: u32) -> u32 {
     let d: u32 = e1(out, c, 233);
@@ -2136,7 +2191,7 @@ fn line_dest(t: ptr, ls: u32, le: u32) -> u64 {
     return 0;
 }
 
-fn lower(tab: ptr, out: ptr, c: u32, t: ptr, ls: u32, le: u32) -> u32 {
+fn lower(tab: ptr, out: ptr, c: u32, t: ptr, ls: u32, le: u32, mb: ptr) -> u32 {
     let i: u32 = skip_sp(t, ls, le);
     if i >= le {
         return c;
@@ -2245,7 +2300,7 @@ fn lower(tab: ptr, out: ptr, c: u32, t: ptr, ls: u32, le: u32) -> u32 {
         return do_ptrcast(tab, out, c, t, i, le, load32(tab, C_DESTO), load32(tab, C_DESTL), 1);
     }
     if lit_at(t, i, le, "call ") == 1 {
-        return do_call(tab, out, c, t, i + 5, le, load32(tab, C_DESTO), load32(tab, C_DESTL));
+        return do_call(tab, out, c, t, i + 5, le, load32(tab, C_DESTO), load32(tab, C_DESTL), mb);
     }
     if lit_at(t, i, le, "ret") == 1 {
         return do_ret(tab, out, c, t, i, le);
@@ -2477,7 +2532,8 @@ fn arg_parens(t: ptr, from: u32, le: u32) -> u64 {
     return pk16(lp, rp);
 }
 
-fn do_call(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen: u32) -> u32 {
+fn do_call(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen: u32,
+           mb: ptr) -> u32 {
     let j: u32 = skip_sp(t, i, le);
     let has_ret: u32 = 1;
     let ret_agg: u32 = 0;
@@ -2519,7 +2575,8 @@ fn do_call(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen:
     let nargs: u32 = nargs_of(t, lp, rp);
     // ---- 外部函数 (docs/173): 实参走**寄存器**, 不走我们自己的栈约定。
     if ext_has(tab, t, cs + 1, ce - cs - 1) == 1 {
-        return do_call_extern(tab, out, c, t, lp, rp, nargs, cs, ce, has_ret + ret_agg * 2);
+        return do_call_extern(tab, out, c, t, lp, rp, nargs, cs, ce,
+                              has_ret + ret_agg * 2, mb);
     }
     let total: u32 = 0;
     let q: u32 = 0;
@@ -2566,7 +2623,18 @@ fn do_call(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen:
         d = e1(out, d, 15);
         d = e1(out, d, 11);
     } else {
-        d = em_call_lbl(out, d, tab, cs + 1, ce - cs - 1);
+        if load32(hot_sc(mb), HS_HRUN) == 1 {
+            let sl: u32 = hs_find(mb, tab, t, cs + 1, ce - cs - 1);
+            if sl != NO {
+                d = em_call_abs(out, d, txt_base(tab) + sl * 16, txt_base(tab));
+            } else {
+                d = em_call_lbl(out, d, tab, cs + 1, ce - cs - 1);
+            }
+        } else {
+            d = em_call_lbl(out, d, tab, cs + 1, ce - cs - 1);
+        }
+        let _mc: u32 = meta_call(mb, tab, t, cs + 1, ce - cs - 1, 0,
+                                 d - load32(hot_sc(mb), HS_FENTRY));
     }
     if total != 0 {
         d = em_alu_ri(out, d, ADD, RSP, total);
@@ -3359,7 +3427,7 @@ fn c_arg_reg(k: u32) -> u32 {
 ///
 /// flags: bit0 = 有返回值, bit1 = 返回值是聚合 (第 1 阶段直接拒)。
 fn do_call_extern(tab: ptr, out: ptr, c: u32, t: ptr, lp: u32, rp: u32, nargs: u32,
-                  cs: u32, ce: u32, flags: u32) -> u32 {
+                  cs: u32, ce: u32, flags: u32, mb: ptr) -> u32 {
     if nargs > 6 {
         return fail("extern call: stage 1 takes at most 6 arguments");
     }
@@ -3399,6 +3467,8 @@ fn do_call_extern(tab: ptr, out: ptr, c: u32, t: ptr, lp: u32, rp: u32, nargs: u
     d = em_mov_rr(out, d, RBX, RSP, 1);
     d = em_alu_ri(out, d, AND_, RSP, 4294967280);
     d = em_call_lbl(out, d, tab, cs + 1, ce - cs - 1);
+    let _mc: u32 = meta_call(mb, tab, t, cs + 1, ce - cs - 1, 1,
+                             d - load32(hot_sc(mb), HS_FENTRY));
     d = em_mov_rr(out, d, RSP, RBX, 1);
     d = em_pop(out, d, RBX);
     // **返回值照旧落回目标槽** —— 与内部调用同一步。少了这一句, 调用结果**丢掉**, 后面
@@ -5511,7 +5581,7 @@ fn phdr_t(ob: ptr, at: u32, typ: u32, flags: u32, off: u32, vaddr: u32,
 /// 同一段罩进 **`PT_GNU_RELRO`**（`#608`）：`DF_BIND_NOW` 已发，加载器做完重定位后
 /// 把 GOT/.dynamic 变成只读。
 fn build_elf_dynamic(tab: ptr, ob: ptr, txt: ptr, tlen: u32, gb: ptr, dlen: u32,
-                     bss: u32) -> u32 {
+                     bss: u32, start_at: u64) -> u32 {
     let text_off: u32 = 4096;
     let data_off: u32 = align_to(text_off + tlen, 4096);
     let tail_off: u32 = align_to(data_off + dlen, 4096);
@@ -5664,7 +5734,8 @@ fn build_elf_dynamic(tab: ptr, ob: ptr, txt: ptr, tlen: u32, gb: ptr, dlen: u32,
 }
 
 /// 组装 ELF: 头 + 两个 PT_LOAD。返回文件总长。
-fn build_elf(tab: ptr, ob: ptr, txt: ptr, tlen: u32, gb: ptr, dlen: u32, bss: u32) -> u32 {
+fn build_elf(tab: ptr, ob: ptr, txt: ptr, tlen: u32, gb: ptr, dlen: u32, bss: u32,
+             start_at: u64) -> u32 {
     let text_off: u32 = 4096;
     let data_off: u32 = align_to(text_off + tlen, 4096);
     let file_end: u32 = data_off + dlen;
@@ -5693,8 +5764,8 @@ fn build_elf(tab: ptr, ob: ptr, txt: ptr, tlen: u32, gb: ptr, dlen: u32, bss: u3
     store8(ob, 18, 62 as u8);
     store8(ob, 19, 0 as u8);
     w32(ob, 20, 1);
-    // e_entry = TEXT_VADDR (入口桩在代码缓冲起始处)
-    w64(ob, 24, TEXT_VADDR as u64);
+    // e_entry = 入口桩的位置（默认档就是 TEXT_VADDR；热更新档前面还有槽表与闸）
+    w64(ob, 24, start_at);
     // e_phoff = 64
     w64(ob, 32, 64);
     // e_shoff = 节头表起点
@@ -5861,7 +5932,8 @@ fn find_start(t: ptr, n: u32) -> u32 {
 /// 而没有 TLS 时 `fs` 是 0 —— 那是去读地址 `0x28`，未映射，**一进去就段错误**。
 /// 所以先 `arch_prctl(ARCH_SET_FS, &__loment_tls)` 把 `fs` 指过来。
 /// 金丝雀**不需要是随机数**：入口存一次、出口比一次，中间没人改，永远相等。
-fn em_entry_stub(out: ptr, c: u32, tab: ptr, ss: u32, tlsn: u32, tls: u32) -> u32 {
+fn em_entry_stub(out: ptr, c: u32, tab: ptr, ss: u32, tlsn: u32, tls: u32,
+                 mb: ptr, t: ptr) -> u32 {
     let d: u32 = c;
     if tls != 0 {
         d = e1(out, d, 184);                       // b8
@@ -5877,7 +5949,16 @@ fn em_entry_stub(out: ptr, c: u32, tab: ptr, ss: u32, tlsn: u32, tls: u32) -> u3
         d = e1(out, d, 15);                        // 0f
         d = e1(out, d, 5);                         // 05  -> syscall
     }
-    d = em_call_lbl(out, d, tab, ss, 6);
+    if load32(hot_sc(mb), HS_HRUN) == 1 {
+        let sl: u32 = hs_find(mb, tab, t, ss, 6);
+        if sl != NO {
+            d = em_call_abs(out, d, txt_base(tab) + sl * 16, txt_base(tab));
+        } else {
+            d = em_call_lbl(out, d, tab, ss, 6);
+        }
+    } else {
+        d = em_call_lbl(out, d, tab, ss, 6);
+    }
     d = em_mov_ri32(out, d, RAX, 60);
     d = em_mov_ri32(out, d, RDI, 0);
     d = e1(out, d, 15);
@@ -6341,7 +6422,382 @@ fn do_atomic(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dle
     return emit_put(tab, out, d, t, doff, dlen, RAX);
 }
 
-fn emit_func(tab: ptr, out: ptr, c: u32, t: ptr, ls: u32, le: u32, bs: u32, be: u32) -> u32 {
+// ---------------------------------------------------------------- 热更新元数据（`#1149`）
+//
+// **与 tools/lomelf.py 逐字节相同**：函数按 IR 顺序、调用点按发射顺序；布局哈希的
+// 规范化串与参考实现 `_frame_layout` 同一条。状态住在 `M_SCRATCH` 头部（见 HS_*），
+// 不占 `tab` 的单元格。
+
+fn hot_sc(mb: ptr) -> ptr {
+    return ptr_add(mb, M_SCRATCH - M_META);
+}
+
+fn hot_cb(mb: ptr) -> ptr {
+    return ptr_add(mb, M_CALLBUF - M_META);
+}
+
+fn hexch(v: u32) -> u32 {
+    if v < 10 {
+        return 48 + v;
+    }
+    return 87 + v;
+}
+
+fn put_dec(buf: ptr, at: u32, v: u32) -> u32 {
+    let n: u32 = 1;
+    let x: u32 = v;
+    while x >= 10 {
+        x = x / 10;
+        n = n + 1;
+    }
+    let k: u32 = n;
+    let y: u32 = v;
+    while k > 0 {
+        k = k - 1;
+        store8(buf, at + k, (48 + y % 10) as u8);
+        y = y / 10;
+    }
+    return at + n;
+}
+
+fn put_dec_i(buf: ptr, at: u32, v: i32) -> u32 {
+    if v < 0 {
+        store8(buf, at, 45 as u8);
+        return put_dec(buf, at + 1, (0 - v) as u32);
+    }
+    return put_dec(buf, at, v as u32);
+}
+
+fn put_cstr(buf: ptr, at: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        store8(buf, at + i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    return at + n;
+}
+
+fn put_span(buf: ptr, at: u32, src: ptr, off: u32, len: u32) -> u32 {
+    let i: u32 = 0;
+    while i < len {
+        store8(buf, at + i, load8(src, off + i) as u8);
+        i = i + 1;
+    }
+    return at + len;
+}
+
+fn put_hex64(buf: ptr, at: u32, dig: ptr) -> u32 {
+    let i: u32 = 0;
+    while i < 32 {
+        let b: u32 = load8(dig, i);
+        store8(buf, at + i * 2, hexch(b >> 4) as u8);
+        store8(buf, at + i * 2 + 1, hexch(b & 15) as u8);
+        i = i + 1;
+    }
+    return at + 64;
+}
+
+/// 帧布局哈希：`frame=N` + 排序去重的槽偏移 + 排序的 `(off,size)`，逐行用 `\n` 连。
+/// 返回 hex 在 `M_SCRATCH` 里的偏移（调用方自己 `ptr_add`）。
+fn frame_hash(mb: ptr, tab: ptr) -> u32 {
+    let sc: ptr = hot_sc(mb);
+    let sa: ptr = ptr_add(sc, HS_SA);
+    let aa: ptr = ptr_add(sc, HS_AA);
+    let sb: ptr = ptr_add(sc, HS_SB);
+    let n: u32 = cell(tab, C_NSLOT);
+    if n > HS_MAXN {
+        let _f: u32 = fail("too many slots in one function for the hot-update metadata");
+    }
+    let i: u32 = 0;
+    while i < n {
+        store32(sa, i * 4, load32(tab, TB_SLOT + i * 16 + S_OFF));
+        i = i + 1;
+    }
+    i = 1;
+    while i < n {
+        let v: i32 = load32(sa, i * 4) as i32;
+        let j: i32 = i as i32 - 1;
+        let go: u32 = 1;
+        while j >= 0 && go == 1 {
+            let w: i32 = load32(sa, (j as u32) * 4) as i32;
+            if w > v {
+                store32(sa, ((j as u32) + 1) * 4, w as u32);
+                j = j - 1;
+            } else {
+                go = 0;
+            }
+        }
+        store32(sa, ((j + 1) as u32) * 4, v as u32);
+        i = i + 1;
+    }
+    let p: u32 = put_cstr(sb, 0, "frame=");
+    p = put_dec(sb, p, cell(tab, C_FRAME));
+    i = 0;
+    let prev: i32 = 0;
+    let first: u32 = 1;
+    while i < n {
+        let v: i32 = load32(sa, i * 4) as i32;
+        if first == 1 || v != prev {
+            store8(sb, p, 10 as u8);
+            store8(sb, p + 1, 115 as u8);
+            p = put_dec_i(sb, p + 2, v);
+            prev = v;
+            first = 0;
+        }
+        i = i + 1;
+    }
+    let na: u32 = cell(tab, C_NALLOC);
+    if na > HS_MAXN {
+        let _f2: u32 = fail("too many allocas in one function for the hot-update metadata");
+    }
+    i = 0;
+    while i < na {
+        store32(aa, i * 8, load32(tab, TB_ALLOC + i * 16 + A_OFF));
+        store32(aa, i * 8 + 4, load32(tab, TB_ALLOC + i * 16 + A_SIZE));
+        i = i + 1;
+    }
+    i = 1;
+    while i < na {
+        let vo: i32 = load32(aa, i * 8) as i32;
+        let vs: u32 = load32(aa, i * 8 + 4);
+        let j2: i32 = i as i32 - 1;
+        let go2: u32 = 1;
+        while j2 >= 0 && go2 == 1 {
+            let wo: i32 = load32(aa, (j2 as u32) * 8) as i32;
+            let ws: u32 = load32(aa, (j2 as u32) * 8 + 4);
+            let gt: u32 = 0;
+            if wo > vo {
+                gt = 1;
+            }
+            if wo == vo && ws > vs {
+                gt = 1;
+            }
+            if gt == 1 {
+                store32(aa, ((j2 as u32) + 1) * 8, wo as u32);
+                store32(aa, ((j2 as u32) + 1) * 8 + 4, ws);
+                j2 = j2 - 1;
+            } else {
+                go2 = 0;
+            }
+        }
+        store32(aa, ((j2 + 1) as u32) * 8, vo as u32);
+        store32(aa, ((j2 + 1) as u32) * 8 + 4, vs);
+        i = i + 1;
+    }
+    i = 0;
+    let po: i32 = 0;
+    let ps: u32 = 0;
+    let first2: u32 = 1;
+    while i < na {
+        let vo: i32 = load32(aa, i * 8) as i32;
+        let vs: u32 = load32(aa, i * 8 + 4);
+        let dup: u32 = 0;
+        if first2 == 0 && vo == po && vs == ps {
+            dup = 1;
+        }
+        if dup == 0 {
+            store8(sb, p, 10 as u8);
+            store8(sb, p + 1, 97 as u8);
+            p = put_dec_i(sb, p + 2, vo);
+            store8(sb, p, 47 as u8);
+            p = put_dec(sb, p + 1, vs);
+            po = vo;
+            ps = vs;
+            first2 = 0;
+        }
+        i = i + 1;
+    }
+    let ctx: ptr = ptr_add(sc, HS_CTX);
+    let dig: ptr = ptr_add(sc, HS_DIG);
+    let hx: ptr = ptr_add(sc, HS_HEX);
+    sha_init(ctx);
+    sha_update(ctx, sb, p);
+    sha_final(ctx, dig);
+    hex_dig(dig, hx);
+    return HS_HEX;
+}
+
+fn ord_of(mb: ptr, tab: ptr, t: ptr, noff: u32, nlen: u32, ext: u32) -> u32 {
+    let sc: ptr = hot_sc(mb);
+    let n: u32 = load32(sc, HS_NORD);
+    let k: u32 = 0;
+    while k < n {
+        let b: u32 = TB_ORD + k * 16;
+        if load32(tab, b + R_EXT) == ext
+            && span_eq(t, load32(tab, b + R_NOFF), load32(tab, b + R_NLEN), noff, nlen) == 1 {
+            let c: u32 = load32(tab, b + R_CNT);
+            store32(tab, b + R_CNT, c + 1);
+            return c;
+        }
+        k = k + 1;
+    }
+    if n >= ORD_MAX {
+        let _f: u32 = fail("too many distinct call targets in one function (hot-update metadata)");
+    }
+    let b: u32 = TB_ORD + n * 16;
+    store32(tab, b + R_NOFF, noff);
+    store32(tab, b + R_NLEN, nlen);
+    store32(tab, b + R_CNT, 1);
+    store32(tab, b + R_EXT, ext);
+    store32(sc, HS_NORD, n + 1);
+    return 0;
+}
+
+fn meta_func(mb: ptr, tab: ptr, t: ptr, noff: u32, nlen: u32, at_entry: u32) -> u32 {
+    let sc: ptr = hot_sc(mb);
+    let at: u32 = load32(sc, HS_MLEN);
+    let p: u32 = put_cstr(mb, at, "func ");
+    p = put_span(mb, p, t, noff, nlen);
+    p = put_cstr(mb, p, " entry=");
+    p = put_dec(mb, p, at_entry);
+    p = put_cstr(mb, p, " frame=");
+    p = put_dec(mb, p, cell(tab, C_FRAME));
+    p = put_cstr(mb, p, " layout=");
+    // `hex_dig` 写出来的**已经是 64 个 ASCII 字符**，照抄，不要再 hex 一遍。
+    p = put_span(mb, p, ptr_add(sc, HS_HEX), 0, 64);
+    if load32(sc, HS_HRUN) == 1 {
+        p = put_cstr(mb, p, " tramp=");
+        p = put_dec(mb, p, hs_find(mb, tab, t, cell(tab, C_FNO), cell(tab, C_FNL)));
+    }
+    store8(mb, p, 10 as u8);
+    store32(sc, HS_MLEN, p + 1);
+    return p + 1;
+}
+
+fn meta_call(mb: ptr, tab: ptr, t: ptr, noff: u32, nlen: u32, ext: u32, at: u32) -> u32 {
+    let sc: ptr = hot_sc(mb);
+    let cb: ptr = hot_cb(mb);
+    let o: u32 = ord_of(mb, tab, t, noff, nlen, ext);
+    let p: u32 = load32(sc, HS_CLEN);
+    p = put_cstr(cb, p, "call ");
+    if ext == 1 {
+        p = put_cstr(cb, p, "extern:");
+    }
+    p = put_span(cb, p, t, noff, nlen);
+    store8(cb, p, 64 as u8);
+    p = put_dec(cb, p + 1, o);
+    p = put_cstr(cb, p, " at=");
+    p = put_dec(cb, p, at);
+    store8(cb, p, 10 as u8);
+    store32(sc, HS_CLEN, p + 1);
+    return p + 1;
+}
+
+fn meta_gate(mb: ptr, at: u32) -> u32 {
+    let sc: ptr = hot_sc(mb);
+    let cb: ptr = hot_cb(mb);
+    let p: u32 = load32(sc, HS_CLEN);
+    p = put_cstr(cb, p, "call __gate@0 at=");
+    p = put_dec(cb, p, at);
+    store8(cb, p, 10 as u8);
+    store32(sc, HS_CLEN, p + 1);
+    return p + 1;
+}
+
+fn meta_flush(mb: ptr) -> u32 {
+    let sc: ptr = hot_sc(mb);
+    let cb: ptr = hot_cb(mb);
+    let at: u32 = load32(sc, HS_MLEN);
+    let n: u32 = load32(sc, HS_CLEN);
+    let i: u32 = 0;
+    while i < n {
+        store8(mb, at + i, load8(cb, i) as u8);
+        i = i + 1;
+    }
+    store32(sc, HS_MLEN, at + n);
+    store32(sc, HS_CLEN, 0);
+    return at + n;
+}
+
+fn hs_find(mb: ptr, tab: ptr, t: ptr, noff: u32, nlen: u32) -> u32 {
+    let n: u32 = load32(hot_sc(mb), HS_NHS);
+    let k: u32 = 0;
+    while k < n {
+        let b: u32 = TB_HS + k * 16;
+        if span_eq(t, load32(tab, b + HSX_NOFF), load32(tab, b + HSX_NLEN), noff, nlen) == 1 {
+            return load32(tab, b + HSX_SLOT);
+        }
+        k = k + 1;
+    }
+    return NO;
+}
+
+/// 槽表预扫（`#1150`）：按 IR 顺序给每个 `define` 的名字分配槽号。**与参考实现的
+/// `hot_slots` 同序** —— 两边都按函数出现顺序，不排序。
+fn hs_prepass(mb: ptr, tab: ptr, t: ptr, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        let le: u32 = line_end(t, i, n);
+        let ls: u32 = skip_sp(t, i, le);
+        if lit_at(t, ls, le, "define ") == 1 {
+            let j: u32 = skip_sp(t, ls + 6, le);
+            if lit_at(t, j, le, "internal") == 1 {
+                j = skip_sp(t, j + 8, le);
+            }
+            if lit_at(t, j, le, "private") == 1 {
+                j = skip_sp(t, j + 7, le);
+            }
+            let rts: u64 = type_span(t, j, le);
+            let j2: u32 = skip_sp(t, hi32(rts) + lo32(rts), le);
+            let ns: u32 = j2 + 1;
+            let ne: u32 = word_end(t, ns, le);
+            let k: u32 = load32(hot_sc(mb), HS_NHS);
+            if k >= HS_MAX {
+                let _f: u32 = fail("too many functions for the hot-update slot table");
+            }
+            let b: u32 = TB_HS + k * 16;
+            store32(tab, b + HSX_NOFF, ns);
+            store32(tab, b + HSX_NLEN, ne - ns);
+            store32(tab, b + HSX_SLOT, k);
+            store32(hot_sc(mb), HS_NHS, k + 1);
+        }
+        i = le + 1;
+    }
+}
+
+/// 入口闸（`#1150`）：读全局 epoch，为零直接返回。字节与参考实现 `emit_gate` 逐字节同。
+fn em_gate(out: ptr, c: u32, tab: ptr, mb: ptr) -> u32 {
+    let d: u32 = c;
+    d = e1(out, d, 85);                    // push rbp
+    d = e1(out, d, 72);                    // REX.W
+    d = e1(out, d, 137);                   // mov rbp, rsp
+    d = e1(out, d, 229);
+    d = em_mov_abs(out, d, tab, RAX, load32(hot_sc(mb), HS_EPOCHN), 18);
+    d = e1(out, d, 131);                   // cmp dword [rax], 0
+    d = e1(out, d, 56);
+    d = e1(out, d, 0);
+    d = e1(out, d, 15);                    // je +0（候选那条路在 #1151）
+    d = e1(out, d, 132);
+    d = e4(out, d, 0);
+    d = e1(out, d, 93);                    // pop rbp
+    return e1(out, d, 195);                // ret
+}
+
+/// `fixed` 头：闸的字节 + `stride=16` 的 sha256。**换版时这一段必须逐字节相同**。
+fn meta_fixed(mb: ptr, tab: ptr, out: ptr, goff: u32, glen: u32) -> u32 {
+    let sc: ptr = hot_sc(mb);
+    let ctx: ptr = ptr_add(sc, HS_CTX);
+    let dig: ptr = ptr_add(sc, HS_DIG);
+    let hx: ptr = ptr_add(sc, HS_HEX);
+    sha_init(ctx);
+    sha_update(ctx, ptr_add(out, goff), glen);
+    sha_update(ctx, str_ptr("stride=16"), 9);
+    sha_final(ctx, dig);
+    hex_dig(dig, hx);
+    let at: u32 = load32(sc, HS_MLEN);
+    let p: u32 = put_cstr(mb, at, "fixed gate=");
+    p = put_dec(mb, p, goff);
+    p = put_cstr(mb, p, " stride=16 slots=");
+    p = put_dec(mb, p, load32(sc, HS_NHS));
+    p = put_cstr(mb, p, " digest=");
+    p = put_span(mb, p, hx, 0, 64);
+    store8(mb, p, 10 as u8);
+    store32(sc, HS_MLEN, p + 1);
+    return p + 1;
+}
+
+fn emit_func(tab: ptr, out: ptr, c: u32, t: ptr, ls: u32, le: u32, bs: u32, be: u32, mb: ptr) -> u32 {
     setcell(tab, C_NSLOT, 0);
     setcell(tab, C_NALLOC, 0);
     setcell(tab, C_FRAME, 0);
@@ -6351,12 +6807,23 @@ fn emit_func(tab: ptr, out: ptr, c: u32, t: ptr, ls: u32, le: u32, bs: u32, be: 
     lbl_add(tab, ns, ne - ns, 0, 0, txt_base(tab) + c);
     setcell(tab, C_FNO, ns);
     setcell(tab, C_FNL, ne - ns);
+    // 热更新元数据（`#1149`）：入口、帧布局、调用点。**采集不影响产物字节**。
+    store32(hot_sc(mb), HS_FENTRY, c);
+    store32(hot_sc(mb), HS_NORD, 0);
+    store32(hot_sc(mb), HS_CLEN, 0);
+    let _hh: u32 = frame_hash(mb, tab);
+    let _mf: u32 = meta_func(mb, tab, t, ns, ne - ns, c);
     let d: u32 = e1(out, c, 85);          // push rbp
     d = e1(out, d, 72);                   // REX.W
     d = e1(out, d, 137);                  // mov rbp, rsp
     d = e1(out, d, 229);
     if cell(tab, C_FRAME) != 0 {
         d = em_alu_ri(out, d, SUB, RSP, cell(tab, C_FRAME));
+    }
+    if load32(hot_sc(mb), HS_HRUN) == 1 {
+        let g: u32 = load32(hot_sc(mb), HS_HGATE);
+        d = em_call_abs(out, d, txt_base(tab) + g, txt_base(tab));
+        let _mg: u32 = meta_gate(mb, d - c);
     }
     let i: u32 = bs;
     while i < be {
@@ -6387,13 +6854,14 @@ fn emit_func(tab: ptr, out: ptr, c: u32, t: ptr, ls: u32, le: u32, bs: u32, be: 
             if dst != 0 {
                 let op: u32 = skip_sp(t, hi32(dst) + lo32(dst), me2);
                 let op2: u32 = skip_sp(t, op + 1, me2);
-                d = lower(tab, out, d, t, op2, me2);
+                d = lower(tab, out, d, t, op2, me2, mb);
             } else {
-                d = lower(tab, out, d, t, ls2, me2);
+                d = lower(tab, out, d, t, ls2, me2, mb);
             }
         }
         i = le2 + 1;
     }
+    let _fl: u32 = meta_flush(mb);
     return d;
 }
 
@@ -6479,14 +6947,39 @@ fn emit_conscript(tab: ptr, out: ptr, c: u32, t: ptr) -> u32 {
     return dd;
 }
 
-fn emit_all(tab: ptr, out: ptr, c: u32, t: ptr, n: u32, tlsn: u32, tls: u32) -> u32 {
+fn emit_all(tab: ptr, out: ptr, c: u32, t: ptr, n: u32, tlsn: u32, tls: u32,
+            mb: ptr) -> u32 {
     let ss: u32 = find_start(t, n);
     if ss == NO {
         return fail("the unit has no `_start` entry point -- declare `fn _start()`, or `command_main` together with a command declaration");
     }
     let d: u32 = c;
+    if load32(hot_sc(mb), HS_HRUN) == 1 {
+        hs_prepass(mb, tab, t, n);
+        let k0: u32 = 0;
+        let sn: u32 = load32(hot_sc(mb), HS_NHS);
+        while k0 < sn {
+            let b0: u32 = TB_HS + k0 * 16;
+            let noff0: u32 = load32(tab, b0 + HSX_NOFF);
+            let nlen0: u32 = load32(tab, b0 + HSX_NLEN);
+            d = e1(out, d, 233);                       // E9 -> 当前实现
+            fix_add(tab, d, 0, noff0, nlen0, 0, 0);
+            d = e4(out, d, 0);
+            let pad0: u32 = 11;
+            while pad0 > 0 {
+                d = e1(out, d, 144);                   // NOP
+                pad0 = pad0 - 1;
+            }
+            k0 = k0 + 1;
+        }
+        store32(hot_sc(mb), HS_HGATE, d);
+        let g0: u32 = d;
+        d = em_gate(out, d, tab, mb);
+        let _fx: u32 = meta_fixed(mb, tab, out, g0, d - g0);
+    }
+    store32(hot_sc(mb), HS_ENTRY, d);
     if cell(tab, C_PE) == 1 {
-        d = em_entry_stub_pe(out, c, tab, ss);
+        d = em_entry_stub_pe(out, d, tab, ss);
         setcell(tab, C_SHIM, d);                // syscall 站点按这个偏移算 rel32
         let rn: u32 = n_shim();
         let k: u32 = 0;
@@ -6495,7 +6988,7 @@ fn emit_all(tab: ptr, out: ptr, c: u32, t: ptr, n: u32, tlsn: u32, tls: u32) -> 
             k = k + 1;
         }
     } else {
-        d = em_entry_stub(out, c, tab, ss, tlsn, tls);
+        d = em_entry_stub(out, d, tab, ss, tlsn, tls, mb, t);
     }
     let i: u32 = 0;
     while i < n {
@@ -6517,7 +7010,7 @@ fn emit_all(tab: ptr, out: ptr, c: u32, t: ptr, n: u32, tlsn: u32, tls: u32) -> 
                     j = je + 1;
                 }
             }
-            d = emit_func(tab, out, d, t, ls, le, bs2, be);
+            d = emit_func(tab, out, d, t, ls, le, bs2, be, mb);
             i = be + 1;
         } else {
             i = le + 1;
@@ -6561,6 +7054,16 @@ fn _start() -> u32 {
 
 fn run(mem: ptr) -> u32 {
     let ab: ptr = ptr_add(mem, M_ARGV);
+    let mb: ptr = ptr_add(mem, M_META);
+    let _m0: u32 = put_cstr(mb, 0, "lomhot 1\n");
+    store32(hot_sc(mb), HS_MLEN, _m0);
+    store32(hot_sc(mb), HS_CLEN, 0);
+    store32(hot_sc(mb), HS_NORD, 0);
+    store32(hot_sc(mb), HS_NHS, 0);
+    store32(hot_sc(mb), HS_HRUN, 0);
+    store32(hot_sc(mb), HS_META, 0);
+    store32(hot_sc(mb), HS_HOTPN, 0);
+    store32(hot_sc(mb), HS_ENTRY, 0);
     let a1: u64 = argv_n(ab, 8192, 1);
     let o1: u64 = argv_n(ab, 8192, 2);
     if a1 == 0 || o1 == 0 {
@@ -6618,6 +7121,35 @@ fn run(mem: ptr) -> u32 {
                 }
                 store8(pbuf, dst + lo32(pv), 0 as u8);
                 nlink = nlink + 1;
+                ok = ok + 2;
+            } else if lo32(av) == 10
+                    && lit_at(ab, hi32(av), hi32(av) + 10, "--hot-meta") == 1 {
+                // 热更新元数据（`#1149`）：路径拷进自己的缓冲区（argv 缓冲随后会被读入踩掉）。
+                let pv: u64 = argv_n(ab, 8192, ok + 1);
+                if lo32(pv) == 0 {
+                    wstr(2, "loment: --hot-meta needs a file name\n");
+                    return die(2);
+                }
+                let j1: u32 = 0;
+                while j1 < lo32(pv) {
+                    store8(ptr_add(mem, M_HOTPATH), j1, load8(ab, hi32(pv) + j1) as u8);
+                    j1 = j1 + 1;
+                }
+                store8(ptr_add(mem, M_HOTPATH), lo32(pv), 0 as u8);
+                store32(hot_sc(mb), HS_HOTPN, lo32(pv));
+                store32(hot_sc(mb), HS_META, 1);
+                ok = ok + 2;
+            } else if lo32(av) == 9
+                    && lit_at(ab, hi32(av), hi32(av) + 9, "--profile") == 1 {
+                // 构建档（`#1150`）：今天只有 hotswap 一档。
+                let pv: u64 = argv_n(ab, 8192, ok + 1);
+                if lo32(pv) == 7
+                        && lit_at(ab, hi32(pv), hi32(pv) + 7, "hotswap") == 1 {
+                    store32(hot_sc(mb), HS_HRUN, 1);
+                } else {
+                    wstr(2, "loment: unknown --profile (expected hotswap)\n");
+                    return die(2);
+                }
                 ok = ok + 2;
             } else if lo32(av) == 10
                     && lit_at(ab, hi32(av), hi32(av) + 10, "--diag-out") == 1 {
@@ -6706,8 +7238,18 @@ fn run(mem: ptr) -> u32 {
         return die(2);
     }
     setcell(tab, C_PE, pe);
+    if pe == 1 && load32(hot_sc(mb), HS_HRUN) == 1 {
+        wstr(2, "loment: --profile hotswap takes ELF output only\n");
+        return die(2);
+    }
     // 外部符号名池的游标: 从输入文本的**末尾**开始, 见 copy_name。
     setcell(tab, C_EXTN, n as u32);
+    if load32(hot_sc(mb), HS_HRUN) == 1 {
+        // 入口闸读的那个 epoch 字：名字先立起来，地址等 `place_bss` 再回填。
+        let en: u32 = put_name(inb, cell(tab, C_EXTN), "__loment_hot_epoch");
+        store32(hot_sc(mb), HS_EPOCHN, en);
+        setcell(tab, C_EXTN, en + 18);
+    }
     // **阶段 0（V2，`docs/183` §4）**：先扫一遍 `--link` 的文件里有没有共享对象。
     // 这一步必须**在入口桩之前**，因为"要不要自己装 TLS"取决于它：
     //   * 静态链外部 `.o` 时**要装**（`fs:0x28` 得落在一块可读写的 TLS 里）；
@@ -6816,7 +7358,7 @@ fn run(mem: ptr) -> u32 {
 ");
         return die(1);
     }
-    let tlen0: u32 = emit_all(tab, txt, 0, inb, n as u32, tlsn, tls);
+    let tlen0: u32 = emit_all(tab, txt, 0, inb, n as u32, tlsn, tls, mb);
     // **收编面**（`docs/219` §6）：链里带了**任何外部输入**（`.o` 或 `.so`），就把
     // "可闭合"那几个名字提供出来，于是它们不再是未定义符号 —— 从表上划掉。粒度与参考
     // 实现 `tools/lomelf.py` 的 `compile_ll` 同一处判断、同一段字节（`loment_elf_test`
@@ -6890,6 +7432,13 @@ fn run(mem: ptr) -> u32 {
         layout_tls(tab, inb, gb, tlsbuf, tlsn);
     }
     place_bss(tab, inb);
+    if load32(hot_sc(mb), HS_HRUN) == 1 {
+        // epoch 字进 bss：地址 = 数据段尾 + 现有 bss，再把它算进 bss 大小。
+        let bss0: u32 = cell(tab, C_BSS);
+        let ep: u32 = data_base(tab) + align_to(cell(tab, C_GB), 8) + bss0;
+        lbl_add(tab, load32(hot_sc(mb), HS_EPOCHN), 18, 0, 0, ep);
+        setcell(tab, C_BSS, bss0 + 8);
+    }
     // 外部对象的重定位: **所有对象都摆好了**才应用 (docs/173 阶段 2)。
     let rr: u32 = apply_relocs(tab, inb, txt, gb);
     if rr != 0 {
@@ -6913,7 +7462,8 @@ fn run(mem: ptr) -> u32 {
         if tlen > OUT_CAP {
             let _f: u32 = fail("文本段+动态表超过 OUT_CAP — 抬 OUT_CAP (loment/tools/lomelf.lomt) 与 tools/lomelf.py 的 TEXT_CAP/ELF_DATA_VADDR");
         }
-        total = build_elf_dynamic(tab, ob, txt, tlen, gb, dlen, cell(tab, C_BSS));
+        total = build_elf_dynamic(tab, ob, txt, tlen, gb, dlen, cell(tab, C_BSS),
+                                  TEXT_VADDR as u64 + load32(hot_sc(mb), HS_ENTRY) as u64);
     } else if pe == 1 {
         let idata: ptr = ptr_add(tab, TB_IDATA);
         let dd: u32 = 0;
@@ -6925,7 +7475,8 @@ fn run(mem: ptr) -> u32 {
         }
         total = build_pe(ob, txt, tlen, gb, dlen, idata, dd);
     } else {
-        total = build_elf(tab, ob, txt, tlen, gb, dlen, cell(tab, C_BSS));
+        total = build_elf(tab, ob, txt, tlen, gb, dlen, cell(tab, C_BSS),
+                          TEXT_VADDR as u64 + load32(hot_sc(mb), HS_ENTRY) as u64);
     }
     // **点名那个写不出去的文件**: 说"写不了输出"而不说是哪个, 读者手上唯一有用的
     // 那条信息(路径)就没了 —— 而这条最常撞上的起因正是"输出目录不存在", 一看路径就明白
@@ -6941,5 +7492,13 @@ fn run(mem: ptr) -> u32 {
     }
     write_all(ofd as u64, ob, total as u64);
     syscall4(3, ofd as u64, 0, 0);
+    if load32(hot_sc(mb), HS_META) == 1 {
+        let mfd: i64 = open_wo(ptr_add(mem, M_HOTPATH));
+        if mfd < 0 {
+            return fail("cannot write the hot-update metadata file");
+        }
+        let _mw: u64 = write_all(mfd as u64, mb, load32(hot_sc(mb), HS_MLEN) as u64);
+        syscall4(3, mfd as u64, 0, 0);
+    }
     return 0;
 }

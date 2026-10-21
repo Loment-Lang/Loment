@@ -9593,9 +9593,17 @@ def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3) -> Modu
 
     tt, _dias = loment_comefor.expand(tt, text)
     mod = Parser(tt, text).parse()
+    # **开关表先挂上**（原先在下面几条之后）：LSPE 的 `bounds` 普查要读 LMS 的档位，
+    # 而档位既可能来自档名、也可能来自 `choose close lms_guard` 这种显式覆盖 ——
+    # 后者只在表里。挂晚了，普查会退回档名，于是"关着 guard 却记了 g1 站点"（#1021）。
+    mod.switches = tbl          # **整个程序**的表（单文件装载时就是 `own`）
     # LSPE 的站点普查（`docs/262` §5.1）：在**最终 token 流**上算一次。
     # 与自举侧 `potato.lomt` 的 `pt_lspe` 同一条规则 —— twin 的计数不能漂。
-    mod.lspe_sites, mod.lspe_unsourced_lines, mod.lspe_passes = lspe.census(tt, mod.name)
+    # LMS 的 g1 内联界检查也是站点（`#1021`）：档位从**开关表**读（预扫已按档铺过
+    # 初值），与发射器同一个读法。
+    _lms_on = frozenset(n for n in LMS_TOGGLES if _lms_level(mod, n))
+    mod.lspe_sites, mod.lspe_unsourced_lines, mod.lspe_passes = lspe.census(
+        tt, mod.name, lms=_lms_on)
     mod.lspe_level = lspe_level
     # 方言清单挂在模块上，供 Potato v4 用（`docs/184` §9 S4.3）。**定义那一段已经被
     # 抹掉了**，所以这是唯一还记得"这份源用了哪些自定义语法"的地方。
@@ -9605,7 +9613,6 @@ def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3) -> Modu
     # 基础语法的一种拼法、归到 `loment`；别的写法给的是那一门的规范名）。
     # 与 `dialects` 同一个做法：不是 dataclass 字段，是装载时挂上去的。
     mod.grammar = _fu.grammar
-    mod.switches = tbl          # **整个程序**的表（单文件装载时就是 `own`）
     mod.own_switches = own      # 本模块**自己**写的 —— 只有"库不许 choose"用它
     # `addin` 的行单独记一份 —— 它被抹掉了，而"库里写了 `addin` 却没生效"要能报出来。
     _d = 0

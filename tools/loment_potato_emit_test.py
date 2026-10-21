@@ -410,7 +410,40 @@ def test_lspe_ledger_matches_on_guards_and_indices():
     assert r.stdout == want, "LSPE 台账在两侧不一致"
 
 
-#: **从表的大小反推输入**（`FujoJTOP/loment#774`）。三处容量各配一份**刚好越过**
+@test
+def test_lspe_bounds_sites_match_on_both_implementations():
+    """LMS g1 的内联界检查是两个实现的**同一批** `bounds` 站点（`#1021`）。
+
+    它没有自己的语法：两侧都只能从 token 形状认（`let p: ptr = alloc(<常量>)` 之后的
+    `load8` / `store8`）。这条钉的是"认出来的条数一样"—— 参考侧的数还另有一条判据
+    （`lomentc_test`）与 IR 里的 `icmp ult i32 …, <const>` 对账。
+    """
+    s1 = _stage1()
+    if s1 is None:
+        return
+    src = (
+        "module lspe_bounds\n\n"
+        "choose runtime\n\n"
+        "fn f() -> u32 {\n"
+        "    let p: ptr = alloc(16);\n"
+        "    store8(p, 0, 1);\n"
+        "    let a: u32 = load8(p, 15);\n"
+        "    free(p);\n"
+        "    return a;\n"
+        "}\n"
+    )
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "lspe_bounds.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        r = _run(s1, str(p))
+        assert r.returncode == 0, r.stderr[-400:]
+        want = _want(str(p))
+    assert r.stdout == want, "bounds 站点在两侧的台账不一致"
+    lp = json.loads(want)["lspe"]
+    assert lp["per_kind"].get("InBounds") == "2/2", lp
+
+
+#: **从表的大小反推输入**（FujoJTOP/loment#774）。三处容量各配一份**刚好越过**
 #: 边界的最小源：1537 个局部变量（`PT_EMAX = 1536`）、33 个带 `alloc` 的循环
 #: （`PT_GLRMX = 32`）、17 个字段的 `record`（`PT_FMAX = 16`）。
 #:

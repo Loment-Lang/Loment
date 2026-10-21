@@ -834,8 +834,10 @@ fn f(a: [u32; 4], i: u32) -> u32 {
 - 语言服务：`switchify` 里同一趟，所以补全、跳转、诊断看到的都是块体；
   编辑器语法按**成对形状**上色（`lspe`/`pass` 不是保留字）。
 
-**棘轮**：`pass_ratio` 在语料上只许降不许升（§5.11 第 1 条）。今天还没有一条
-判据钉住这条 —— 接 `gate-floors.txt` 是 0.1.5.2 的事。
+**棘轮**：`pass_ratio` 在语料上只许降不许升（§5.11 第 1 条）。基线在
+`.github/lspe-pass-baseline.txt`（逐份单元 `passed_sites` / `sites`），判据是
+`lspe_test::test_pass_ratio_does_not_increase_on_the_corpus`；加旁路块之后必须
+`python tools/lspe_ratchet.py --emit` 显式改基线 —— 那一步就是承认"多卖了一格审计"。
 
 ---
 

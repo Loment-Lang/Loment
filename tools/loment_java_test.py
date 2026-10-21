@@ -254,6 +254,31 @@ fn _start() {
 
 
 @test
+def test_strings_end_to_end():
+    """String literals (modified UTF-8 -> UTF-16LE), length() and charAt()."""
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "deps" / "stringlib").mkdir(parents=True)
+        ir, _iface = _emit(FIX / "StringLib.class", "stringlib", d / "deps" / "stringlib")
+        rc = _build_and_run(d, ir, """module app
+use stringlib
+
+fn _start() {
+    let a: i32 = stringlib_len();
+    let b: i32 = stringlib_at();
+    let c: i32 = stringlib_code();
+    let ok: i32 = (a - 5) + (b - 101) + (c - 65);
+    syscall4(60, ok as u64, 0, 0);
+}
+""")
+        if sys.platform == "win32":
+            assert rc == 0, rc
+            print("      length/charAt of literals -> exit 0 on PE")
+        else:
+            print("SKIP: PE execution is Windows-only; IR emitted and linked to ELF")
+
+
+@test
 def test_merge_removes_satisfied_declaration():
     """The merged IR has no extern declaration for a symbol defined in a second input."""
     with tempfile.TemporaryDirectory() as td:

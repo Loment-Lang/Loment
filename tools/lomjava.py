@@ -138,9 +138,11 @@ def parse_class(data: bytes) -> ClassFile:
             n = r.u2()
             raw = r.take(n)
             try:
-                s = raw.decode("utf-8")
+                # Class-file UTF-8 is "modified UTF-8": a NUL is encoded as
+                # C0 80. Replace that before decoding; ordinary UTF-8 otherwise.
+                s = raw.replace(b"\xc0\x80", b"\x00").decode("utf-8")
             except UnicodeDecodeError as e:
-                raise JavaError(f"constant pool #{i}: invalid UTF-8: {e}") from None
+                raise JavaError(f"constant pool #{i}: invalid modified UTF-8: {e}") from None
             pool[i] = (tag, s)
         elif tag == CP_INTEGER:
             pool[i] = (tag, struct.unpack(">i", r.take(4))[0])
@@ -350,7 +352,7 @@ def _init_ops() -> None:
     _op(187, "new", "h", 1); _op(89, "dup", "", 1)
     _op(87, "pop", "", -1); _op(88, "pop2", "", -2)
     _op(180, "getfield", "h", 0); _op(181, "putfield", "h", -2)
-    _op(183, "invokespecial", "h", 0)
+    _op(183, "invokespecial", "h", 0); _op(182, "invokevirtual", "h", 0)
     _op(172, "ireturn", "", -1); _op(173, "lreturn", "", -1)
     _op(174, "freturn", "", -1); _op(175, "dreturn", "", -2)
     _op(176, "areturn", "", -1); _op(177, "return", "", 0)
@@ -518,7 +520,8 @@ def _slot_local(name: str, ty: str) -> str:
 class Emitter:
     def __init__(self, insns: list[Insn], heights: dict[int, int], max_stack: int,
                  params: list[str], param_slots: list[int], ret: str, pool: list,
-                 module: str, own_class: str, field_layout: dict, obj_size: int):
+                 module: str, own_class: str, field_layout: dict, obj_size: int,
+                 globals_: list):
         self.insns = insns
         self.heights = heights
         self.max_stack = max_stack
@@ -530,6 +533,8 @@ class Emitter:
         self.own_class = own_class
         self.field_layout = field_layout
         self.obj_size = obj_size
+        self.globals = globals_
+        self.strn = 0
         self.lines: list[str] = []
         self.tmp = 0
         self.locals: dict[tuple[int, str], str] = {}
@@ -637,9 +642,32 @@ class Emitter:
             self._push("i32", str(x.args[0]), h0)
         elif name in ("ldc", "ldc_w"):
             ent = self.pool[x.args[0]] if x.args[0] < len(self.pool) else None
-            if not ent or ent[0] != CP_INTEGER:
-                raise JavaError(f"{name} #{x.args[0]} is not an int constant")
-            self._push("i32", str(ent[1]), h0)
+            if ent and ent[0] == CP_INTEGER:
+                self._push("i32", str(ent[1]), h0)
+            elif ent and ent[0] == CP_STRING:
+                s = _utf8(self.pool, ent[1])
+                data = s.encode("utf-16-le")
+                nbytes = len(data) if data else 1
+                if not data:
+                    data = b"\x00"
+                sym = f"__jl_str_{self.module}_{hashlib.sha256(data).hexdigest()[:10]}"
+                esc = "".join(f"\\{b:02x}" for b in data)
+                if not any(g.startswith(f"@{sym} ") for g in self.globals):
+                    self.globals.append(
+                        f'@{sym} = internal constant [{nbytes} x i8] c"{esc}"')
+                d = self.t()
+                self.emit(f"{d} = getelementptr [{nbytes} x i8], ptr @{sym}, i32 0, i32 0")
+                p = self.t()
+                self.emit(f"{p} = call ptr @{_alloc_sym(self.module)}(i32 {32 + nbytes})")
+                q = self.t()
+                self.emit(f"{q} = getelementptr i8, ptr {p}, i32 8")
+                self.emit(f"store ptr {d}, ptr {q}")
+                r = self.t()
+                self.emit(f"{r} = getelementptr i8, ptr {p}, i32 16")
+                self.emit(f"store i32 {len(data) // 2}, ptr {r}")
+                self._push("ptr", p, h0)
+            else:
+                raise JavaError(f"{name} #{x.args[0]} is not an int/string constant")
         elif name == "ldc2_w":
             ent = self.pool[x.args[0]] if x.args[0] < len(self.pool) else None
             if not ent or ent[0] != CP_LONG:
@@ -803,6 +831,32 @@ class Emitter:
             q = self.t()
             self.emit(f"{q} = getelementptr i8, ptr {obj}, i32 {off}")
             self.emit(f"store {ty} {val}, ptr {q}")
+        elif name == "invokevirtual":
+            cls, mname, desc = methodref(self.pool, x.args[0])
+            params, ret = parse_method_descriptor(desc)
+            n = len(params)
+            vals = [""] * n
+            for i in range(n - 1, -1, -1):
+                vals[i] = self._pop(params[i], h0 - n + i)
+            recv = self._pop("ptr", h0 - n - 1)
+            if cls == "java/lang/String" and mname == "length" and desc == "()I":
+                q = self.t()
+                self.emit(f"{q} = getelementptr i8, ptr {recv}, i32 16")
+                v = self.t()
+                self.emit(f"{v} = load i32, ptr {q}")
+                self._push("i32", v, h0 - n - 1)
+            elif cls == "java/lang/String" and mname == "charAt" and desc == "(I)C":
+                q = self.t(); off = self.t(); c = self.t(); z = self.t()
+                self.emit(f"{q} = getelementptr i8, ptr {recv}, i32 8")
+                self.emit(f"{q} = load ptr, ptr {q}")
+                self.emit(f"{off} = mul i32 {vals[0]}, 2")
+                self.emit(f"{c} = getelementptr i8, ptr {q}, i32 {off}")
+                self.emit(f"{c} = load i16, ptr {c}")
+                self.emit(f"{z} = zext i16 {c} to i32")
+                self._push("i32", z, h0 - n - 1)
+            else:
+                raise JavaError(
+                    f"invokevirtual {cls}.{mname}{desc} is not supported yet")
         elif name == "invokespecial":
             cls, mname, desc = methodref(self.pool, x.args[0])
             if mname == "<init>" and cls == "java/lang/Object":
@@ -896,7 +950,8 @@ class Emitter:
 
 
 def emit_method_ir(module: str, cls: str, m: Method, pool: list,
-                   field_layout: dict, obj_size: int) -> tuple[str, str, str] | None:
+                   field_layout: dict, obj_size: int,
+                   globals_: list) -> tuple[str, str, str] | None:
     is_ctor = m.name == "<init>"
     if not (m.access & ACC_STATIC) and not is_ctor:
         return None
@@ -921,12 +976,12 @@ def emit_method_ir(module: str, cls: str, m: Method, pool: list,
     heights = stack_heights(insns, pool)
     sym = mangle(module, cls, m.name, m.desc)
     slots = []
-    slot = 1 if is_ctor else 0       # `this` occupies local slot 0
+    slot = 0                         # `this` (when present) is local slot 0
     for t in params:
         slots.append(slot)
         slot += 2 if t == "i64" else 1
     em = Emitter(insns, heights, m.max_stack, params, slots, ret, pool, module, cls,
-                 field_layout, obj_size)
+                 field_layout, obj_size, globals_)
     body = em.run()
     def irty(t: str) -> str:
         return "void" if t == "void" else t
@@ -944,15 +999,17 @@ def emit(module: str, cf: ClassFile, ir_path: Path, iface_path: Path) -> list[tu
         off += 8
     obj_size = off
     funcs: list[tuple[str, str, str, list[str], str]] = []
+    globals_: list[str] = []
     for m in cf.methods:
-        got = emit_method_ir(module, cf.name, m, cf.pool, layout, obj_size)
+        got = emit_method_ir(module, cf.name, m, cf.pool, layout, obj_size, globals_)
         if got is None:
             continue
         sym, text, name = got
         params, ret = parse_method_descriptor(m.desc)
         funcs.append((sym, text, name, params, ret))
     funcs.sort(key=lambda x: (x[2], x[0]))
-    ir_path.write_text("\n\n".join(x[1] for x in funcs) + "\n\n" + _jrt_alloc_ir(module),
+    ir_path.write_text("\n\n".join(globals_) + "\n\n" +
+                       "\n\n".join(x[1] for x in funcs) + "\n\n" + _jrt_alloc_ir(module),
                        encoding="utf-8", newline="\n")
 
     lines = [f"module {module}", ""]

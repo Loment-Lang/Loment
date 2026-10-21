@@ -1505,18 +1505,19 @@ const PT_GLSAFE: u32 = 114456;
 /// 首参是 `ptr` 的函数名 token 表: `[count, name_tok_1, …]`，最多 1024 条。
 /// E4 的调用点普查用它；超容量是**点名的失败**（`loment/lspe/lspe.lomt` 的 `lspe_engine` 回 1）。
 const PT_PTRFIRST: u32 = 151264;
-/// E3/E4 的十个计数 + pass 的四个：
+/// E3/E4 的十个计数 + pass 的四个 + bounds 的两个：
 /// free_t/free_p, alive_t/alive_p, init_t/init_p, excl_t/excl_p, call_t/call_p,
-/// pass_sites/passed_sites/guard_covered/index_covered（各 4 字节，共 14 个）。
+/// pass_sites/passed_sites/guard_covered/index_covered, bounds_t/bounds_covered
+/// （各 4 字节，共 16 个；`bounds` 是 LMS g1 内联界检查，`#1021`）。
 const PT_L3CNT: u32 = 155364;
 /// `lspe pass` 的块表：`[count, open, close, sites, pad] × 64`（每块 16 字节）。
-const PT_PASS: u32 = 155420;
+const PT_PASS: u32 = 155428;
 const PT_TN: u32 = 46760;          // 收进池子的类型串条数（= 映射表条数）
 const PT_TCUR: u32 = 46764;        // 池子游标
 const PT_TMAX: u32 = 128;
 const PT_TSTRIDE: u32 = 64;
 const PT_TBUF_SZ: u32 = 256;
-const PT_SC_BYTES: u64 = 156448;    // 安全名表 + 首参表 + E3/E4 计数 + pass 块表
+const PT_SC_BYTES: u64 = 156452;    // 安全名表 + 首参表 + E3/E4/bounds 计数 + pass 块表
 
 /// 一个类型串在池子里的位置（`i` 是池子下标）。
 fn pt_tkey(sc: ptr, i: u32) -> u32 {
@@ -2279,6 +2280,8 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32) -> u3
     let cp: u32 = 0;
     let gcov: u32 = 0;
     let icov: u32 = 0;
+    let bt: u32 = 0;
+    let bcov: u32 = 0;
     let psites: u32 = 0;
     let passed: u32 = 0;
     if closed == 0 {
@@ -2299,10 +2302,12 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32) -> u3
         passed = load32(sc, PT_L3CNT + 44);
         gcov = load32(sc, PT_L3CNT + 48);
         icov = load32(sc, PT_L3CNT + 52);
+        bt = load32(sc, PT_L3CNT + 56);
+        bcov = load32(sc, PT_L3CNT + 60);
     }
-    let nsite: u32 = gt + it + ft + alt + nt + et + ct;
-    // pass 块里的站点不证明：guard / index 的 proved 要扣掉覆盖数。
-    let nproved: u32 = (gt - gcov) + (ip - icov) + fp + alp + np + ep + cp;
+    let nsite: u32 = gt + it + ft + alt + nt + et + ct + bt;
+    // pass 块里的站点不证明：guard / index / bounds 的 proved 要扣掉覆盖数。
+    let nproved: u32 = (gt - gcov) + (ip - icov) + fp + alp + np + ep + cp + (bt - bcov);
     let nund: u32 = nsite - nproved;
     o = pt_str(out, o, "{\n");
     o = pt_key(out, o, 2, "state");
@@ -2417,15 +2422,17 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32) -> u3
             o = pt_str(out, o, "\"");
             first = 0;
         }
-        if it > 0 {
+        if it + bt > 0 {
             if first == 0 {
                 o = pt_str(out, o, ",\n");
             }
             o = pt_key(out, o, 3, "InBounds");
             o = pt_str(out, o, "\"");
-            o = pt_dec(out, o, (ip - icov) as u64);
+            // 下标站点**与** LMS g1 内联界检查（`#1021`）都算 InBounds：
+            // 后者没有自己的语法，但它是热路径上真实存在的那条检查。
+            o = pt_dec(out, o, (ip - icov + bt - bcov) as u64);
             o = pt_str(out, o, "/");
-            o = pt_dec(out, o, it as u64);
+            o = pt_dec(out, o, (it + bt) as u64);
             o = pt_str(out, o, "\"");
             first = 0;
         }
@@ -5514,7 +5521,8 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     let _sn: u32 = lspe_drop_unchecked(unit, t, ptr_add(sc, PT_GLSAFE));
     // E3/E4 的站点普查**在写对象之前**做完 —— 超容量是点名的失败（`pt_wfail`），
     // 不能在一半对象已经写出去之后再说。
-    let lrc: u32 = lspe_engine(unit, t, lo, hi, ptr_add(sc, PT_GLSAFE),
+    let lrc: u32 = lspe_engine(unit, t, lo, hi, pt_lms_mask(unit, t, lo, hi),
+                               ptr_add(sc, PT_GLSAFE),
                                ptr_add(sc, PT_PTRFIRST), ptr_add(sc, PT_L3CNT),
                                ptr_add(sc, PT_PASS));
     if lrc == 1 {

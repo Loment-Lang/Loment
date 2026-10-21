@@ -449,11 +449,13 @@ fn lspe_note_covered(i: u32, pbuf: ptr, out: ptr) -> u32 {
 ///   * `&mut x` 与同一语句里的另一次同名用重叠 ⇒ `Exclusive` 不证；
 ///   * 首参是 `ptr` 的函数的每个调用点 ⇒ `SummaryContract`，安全表里有摘要才证。
 ///
-/// `out` 十个 u32 见 `PT_L3CNT`。返回 1 = 首参表超容量（调用方 `pt_wfail`）。
-pub fn lspe_engine(unit: ptr, t: ptr, lo: u32, hi: u32,
+/// `out` 十六个 u32 见 `PT_L3CNT`。`lm` 是 LMS 的七级掩码（`pt_lms_mask` 算好传进来；
+/// `bounds` 站点只在 `lms_guard` **且**（`lms_reject` 或 `lms_crash`）时存在）。
+/// 返回 1 = 首参表超容量（调用方 `pt_wfail`）。
+pub fn lspe_engine(unit: ptr, t: ptr, lo: u32, hi: u32, lm: u32,
                   sft: ptr, pft: ptr, out: ptr, pbuf: ptr) -> u32 {
     let q: u32 = 0;
-    while q < 14 {
+    while q < 16 {
         store32(out, q * 4, 0);
         q = q + 1;
     }
@@ -775,6 +777,109 @@ pub fn lspe_engine(unit: ptr, t: ptr, lo: u32, hi: u32,
             }
         }
         i4 = i4 + 1;
+    }
+    // ---- E2b：LMS g1 内联界检查站点（`docs/262` §5.1 / `#1021`）----
+    //
+    // 与参考实现 `census_bounds` **同一条词法规则**：`load8` / `store8` 的首参，按
+    // 发射顺序往回找到**最近一次** `let NAME: ptr = alloc(<常量>)`；中间出现一次
+    // `NAME = …` 就作废（遮蔽/重新赋值改变来源）。只认字面量与模块 `const` ——
+    // 与两侧发射器（`_Ir._lms_guard_site` / `lms_alloc_size`）逐条同形。
+    //
+    // 档位：`lms_guard` 且（`lms_reject` 或 `lms_crash`）。三档回答都不开时发射器
+    // 一条检查都不发（"没有回答的检查比没有检查更坏"）。
+    if lm & 4 != 0 && (lm & 8 != 0 || lm & 16 != 0) {
+        let bi: u32 = lo;
+        while bi < hi && lspe_kind(t, bi) != 4 {
+            let cand: u32 = 0;
+            if bi + 2 < hi && lspe_kind(t, bi) == 0 && lspe_tis(unit, t, bi + 1, "(") == 1
+                    && lspe_kind(t, bi + 2) == 0 {
+                if lspe_tis(unit, t, bi, "load8") == 1
+                        || lspe_tis(unit, t, bi, "store8") == 1 {
+                    cand = 1;
+                }
+            }
+            if cand == 1 && bi > 0 && lspe_kind(t, bi - 1) == 3
+                    && (lspe_tis(unit, t, bi - 1, ".") == 1
+                        || lspe_tis(unit, t, bi - 1, ":") == 1) {
+                cand = 0;
+            }
+            if cand == 1 && bi > 0 && lspe_tis(unit, t, bi - 1, "fn") == 1 {
+                cand = 0;
+            }
+            if cand == 1 {
+                // 所在函数的体首：往回找最近的 `fn`，再往前找它的 `{`。
+                // 找不到函数（顶层表达式）就不认 —— 与参考实现同一条边界。
+                let fj: u32 = bi;
+                let found: u32 = 0;
+                while fj > lo && found == 0 {
+                    fj = fj - 1;
+                    if lspe_kind(t, fj) == 0 && lspe_tis(unit, t, fj, "fn") == 1 {
+                        found = 1;
+                    }
+                }
+                let fs: u32 = bi;
+                if found == 1 {
+                    let fb: u32 = fj;
+                    while fb < hi && lspe_tis(unit, t, fb, "{") == 0 {
+                        fb = fb + 1;
+                    }
+                    fs = fb + 1;
+                }
+                // 往回找最近一次同名声明；`NAME = …` 挡掉。
+                let hit: u32 = 0;
+                let j: u32 = bi + 1;
+                let done: u32 = 0;
+                while found == 1 && j > fs && done == 0 {
+                    j = j - 1;
+                    if lspe_kind(t, j) == 0 && lspe_teq(unit, t, j, bi + 2) == 1
+                            && lspe_tis(unit, t, j + 1, "=") == 1 {
+                        done = 1;
+                    } else if j + 8 < hi && lspe_kind(t, j) == 0
+                            && lspe_tis(unit, t, j, "let") == 1
+                            && !(j > 0 && lspe_tis(unit, t, j - 1, "if") == 1)
+                            && lspe_kind(t, j + 1) == 0
+                            && lspe_teq(unit, t, j + 1, bi + 2) == 1
+                            && lspe_tis(unit, t, j + 2, ":") == 1
+                            && lspe_tis(unit, t, j + 3, "ptr") == 1
+                            && lspe_tis(unit, t, j + 4, "=") == 1
+                            && lspe_tis(unit, t, j + 5, "alloc") == 1
+                            && lspe_tis(unit, t, j + 6, "(") == 1
+                            && lspe_tis(unit, t, j + 8, ")") == 1 {
+                        if lspe_kind(t, j + 7) == 1 {
+                            hit = 1;
+                        } else if lspe_kind(t, j + 7) == 0 {
+                            // 模块 `const NAME : T = <字面量>;`
+                            let ci: u32 = lo;
+                            while ci < hi && lspe_kind(t, ci) != 4 {
+                                if lspe_kind(t, ci) == 0
+                                        && lspe_tis(unit, t, ci, "const") == 1
+                                        && lspe_teq(unit, t, ci + 1, j + 7) == 1 {
+                                    let ce: u32 = ci + 2;
+                                    while ce < hi && lspe_tis(unit, t, ce, "=") == 0
+                                            && lspe_tis(unit, t, ce, ";") == 0 {
+                                        ce = ce + 1;
+                                    }
+                                    if ce + 1 < hi && lspe_tis(unit, t, ce, "=") == 1
+                                            && lspe_kind(t, ce + 1) == 1 {
+                                        hit = 1;
+                                    }
+                                }
+                                ci = ci + 1;
+                            }
+                        }
+                        done = 1;
+                    }
+                }
+                if hit == 1 {
+                    let bcov: u32 = lspe_note_covered(bi, pbuf, out);
+                    store32(out, 56, load32(out, 56) + 1);
+                    if bcov == 1 {
+                        store32(out, 60, load32(out, 60) + 1);
+                    }
+                }
+            }
+            bi = bi + 1;
+        }
     }
     // ---- guard/index 的覆盖与最外层块数（`docs/262` §5.16）----
     let gcov: u32 = lspe_guard_covered(unit, t, lo, hi, pbuf);

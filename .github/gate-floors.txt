@@ -12,8 +12,8 @@
 
 
 lomc_test 25
-lomentc_test 187
-lspe_test 9
+lomentc_test 189
+lspe_test 10
 potato_test 13
 loment_ct_test 2
 loment_comefor_test 12
@@ -29,12 +29,12 @@ loment_gotrans_test 7
 loment_nltrans_test 20
 loment_lomtfrom_test 4
 loment_trans_test 8
-loment_potato_emit_test 8
+loment_potato_emit_test 9
 loment_lms_test 9
 loment_grammar_test 22
 loment_tools_test 61
 loment_p7_test 8
-loment_p8_test 34
+loment_p8_test 35
 loment_p9_test 2
 loment_crash_test 9
 loment_gc_surface_test 3

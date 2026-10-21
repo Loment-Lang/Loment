@@ -489,6 +489,20 @@ process.stdout.write(JSON.stringify({
     assert got["uses_comments_only"] is False, "注释里的 use 被当成了依赖"
     print("      `use` 判定：源码里有、注释里没有")
 
+    # ⑩ Windows 包装脚本抓 stage1 输出时**必须把控制台编码切成 UTF-8**。
+    #    PowerShell 用 `[Console]::OutputEncoding` 解原生命令的 stdout（中文 Windows 上是
+    #    GBK），而 IR 里带着源码注释 —— 按 GBK 解会把中文变乱码，双字节解码还会**吃掉
+    #    后面的换行**：下一个 `define` 被粘进 `;` 注释、`entry:` 落到顶层，clang 报
+    #    `expected top-level entity`（2026-10-21 实测 `tour.lomt`：编译"成功"、链接失败）。
+    #    判据只有**静态形状**：真跑要在 Windows 上构建整个 stage1，门禁在 ubuntu。
+    for ps in (ROOT / "scripts" / "lomc.ps1", ROOT / "scripts" / "install-lsp.ps1"):
+        body = ps.read_text(encoding="utf-8")
+        assert "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding" in body, \
+            f"{ps.name}: 抓取编码没切成 UTF-8 —— IR 里的中文注释会被按 GBK 解坏"
+        assert "[Console]::OutputEncoding = $prevEnc" in body, \
+            f"{ps.name}: 改了控制台编码却没恢复（会把用户的窗口留在 UTF-8 上）"
+    print("      Windows 包装脚本：抓 stage1 输出前切 UTF-8、之后恢复")
+
 
 # ---------------------------------------------------------------- 6. 扩展真的激活
 

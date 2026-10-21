@@ -6647,6 +6647,50 @@ def compile_ll(text: str, objects: list | None = None,
     }
 
 
+#: IR 级链接：同名 `define` 出现两次是硬错；一个 `declare` 只要在同一批输入里有
+#: `define`，就从文本里去掉 —— 于是调用点不再走 C ABI，而是走 Loment 自己的栈约定。
+#: 这对 PE 尤其重要：PE 的 extern 调用点仍是 System V 寄存器（见 `C_ARG_REGS` 的注释）。
+_IR_DEF_RE = re.compile(r"^define\b[^@\n]*@([A-Za-z0-9_.$-]+)\s*\(", re.M)
+_IR_DECL_RE = re.compile(r"^declare\b[^@\n]*@([A-Za-z0-9_.$-]+)\s*\(", re.M)
+
+
+def merge_ir_texts(texts: list[str], names: list[str] | None = None) -> str:
+    """Merge several IR modules and resolve declarations against definitions.
+
+    The inputs are independent modules (application, one or more Java libraries,
+    `jrt`).  This is deliberately a text-level merge: the rest of the linker
+    still sees one module, so both targets and both implementations keep one
+    code path.  It is also what makes a `declare`-ed Java symbol a direct call
+    instead of an extern C-ABI call.
+    """
+    names = names or [f"input#{i}" for i in range(len(texts))]
+    defined: dict[str, str] = {}
+    starts = 0
+    for name, text in zip(names, texts):
+        for sym in _IR_DEF_RE.findall(text):
+            if sym in defined:
+                raise Unsupported(
+                    f"重复定义 @{sym}: {defined[sym]} 与 {name}")
+            defined[sym] = name
+            if sym == "_start":
+                starts += 1
+    if "_start" not in defined:
+        raise Unsupported("没有 _start 入口（合并后的 IR 需要恰好一个）")
+    if starts != 1:
+        raise Unsupported("合并后的 IR 必须恰好有一个 _start")
+
+    out: list[str] = []
+    for text in texts:
+        kept: list[str] = []
+        for line in text.splitlines():
+            m = _IR_DECL_RE.match(line)
+            if m and m.group(1) in defined:
+                continue
+            kept.append(line)
+        out.append("\n".join(kept))
+    return "\n\n".join(out)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "--dump-win-shim" and len(argv) == 2:
@@ -6680,8 +6724,8 @@ def main(argv: list[str] | None = None) -> int:
         else:
             files.append(a)
         i += 1
-    if len(files) != 1 or target not in ("elf", "pe"):
-        print("用法: lomelf.py IN.ll [-o OUT] [--target elf|pe] [--check]"
+    if not files or target not in ("elf", "pe"):
+        print("用法: lomelf.py IN.ll [MORE.ll ...] [-o OUT] [--target elf|pe] [--check]"
               " [--link OBJ.o ...] [--allow-ports] [--interp PATH]", file=sys.stderr)
         return 2
     if link and target == "pe":
@@ -6689,9 +6733,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     src = Path(files[0])
     try:
+        texts = [Path(f).read_text(encoding="utf-8") for f in files]
+        text = texts[0] if len(texts) == 1 else merge_ir_texts(texts, files)
         objs = [load_foreign(p) for p in link]
         blob, info = (compile_pe if target == "pe" else compile_ll)(
-            src.read_text(encoding="utf-8"),
+            text,
             *(() if target == "pe" else (objs, allow_ports, interp)))
     except Unsupported as e:
         print(f"[ERR] {e}", file=sys.stderr)

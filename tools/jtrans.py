@@ -100,6 +100,24 @@ def _unwrap(src: str) -> str:
     **注释**抹成空白，于是 `String s = "class X {";` 会被当成一个 `class` 头，
     外壳从字符串**里面**开始切。现在字符串字面量也一起抹。
     """
+    # A `class` header that carries `extends` / `implements` was silently
+    # discarded by the shell stripper (#822). The subset has no inheritance
+    # model, so say that instead of translating a different program.
+    for m in _CSHELL_HEAD.finditer(src):
+        head = m.group(0)
+        if re.search(r"\b(?:extends|implements)\b", head):
+            line = src[:m.start()].count("\n") + 1
+            raise Unsupported(
+                f"第 {line} 行: 不支持 `extends` / `implements`（子集没有继承与接口模型；"
+                f"整条子句原先会被静默丢掉，翻译出来的是**另一个程序**）。")
+    # `package` / `import` change the meaning of a name; silently skipping them
+    # would translate a different program (#859 / #860).
+    for i, line in enumerate(src.splitlines(), 1):
+        s = line.strip()
+        if s.startswith("import ") or s.startswith("package "):
+            raise Unsupported(
+                f"第 {i} 行: 不支持 `import` / `package`（平名字空间里没有包与导入；"
+                f"跳过它们会把名字解析成别的东西）。")
     return strip_shells(src, _JAVA_SHELLS)
 
 
@@ -144,6 +162,13 @@ JAVA = Dialect(
     coerce_int_to_bool=False,
     coerce_bool_to_int=False,
     int_default="i32",
+    narrow_literal_check=True,
+    reject_const_zero_div=True,
+    mask_shift=True,
+    hex_wrap=True,
+    octal_literals=True,
+    binary_literals=True,
+    digit_separators=True,
     safe_suffix="_j",
     #: Java 的函数住在 `class` 里，而解析器看的是顶层 —— 见文件头 §①。
     pre=_unwrap,

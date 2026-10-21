@@ -150,6 +150,24 @@ class Dialect:
     #:
     #: 所以这是**方言面**上的开关，不是 `if <语言>`（`docs/188` §7.1）。
     usual_arith: bool = False
+    #: **窄整型的字面量初值要查范围。** Java/C# 的 `byte b = 200;` 本来就是编译错；
+    #: 不查的话生成的是 `let b: i8 = 200;`，运行时静默回绕成 -56。
+    narrow_literal_check: bool = False
+    #: **常量零做除数/模数要拒。** Java 把 `1 / 0` 当编译期错误（常量表达式）；
+    #: 不拒的话生成一份能编过的源，运行时 SIGFPE。
+    reject_const_zero_div: bool = False
+    #: **移位距离按 Java 语义掩码**（`int` 掩 31、`long` 掩 63）。本语言的移位不掩，
+    #: 于是 `1 << 32` 在 Java 是 1、在这里是 0。
+    mask_shift: bool = False
+    #: **十六进制字面量按 32 位补码读**。Java 的 `0xFFFFFFFF` 是 `int -1`；
+    #: 不这么做的话它会被当成 4294967295，然后被 32 位字面量闸拒掉。
+    hex_wrap: bool = False
+    #: 这些字面量写法在**这一门**里收不收。C 的 `010` 是八进制，但本子集历史上只收
+    #: 十/十六进制（`docs/186` §4）；Java 的 `010`/`0b1010`/`1_000` 都是合法写法，
+    #: 而 #811/#812/#813 要的就是它们。所以按方言分，不分的话 C 的旧判据会红。
+    octal_literals: bool = False
+    binary_literals: bool = False
+    digit_separators: bool = False
     #: 撞上 Loment 保留字时给名字加的后缀。**每门不同** —— 两门用同一个后缀的话，
     #: 将来把两个单元合起来会莫名其妙撞名。
     safe_suffix: str = "_x"
@@ -279,8 +297,10 @@ _TOKEN = re.compile(r"""
       (?P<ws>\s+)
     | (?P<lc>//[^\n]*)
     | (?P<bc>/\*.*?\*/)
+    | (?P<chr>'(?:\\.|[^'\\])')
+    | (?P<str>"(?:\\.|[^"\\])*")
     | (?P<id>[A-Za-z_][A-Za-z0-9_]*)
-    | (?P<num>0[xX][0-9a-fA-F]+|[0-9]+)
+    | (?P<num>0[xX][0-9a-fA-F_]+[lL]?|0[bB][01_]+[lL]?|0[oO][0-7_]+[lL]?|[0-9][0-9_]*[lL]?)
     | (?P<op>>>=|>>>|<<=|>>=|\+=|-=|\*=|/=|%=|&=|\|=|\^=|\.\.\.|<<|>>|<=|>=|==|!=|&&|\|\||\+\+|--|[-+*/%&|^~!<>=();,{}\[\]?:#])
 """, re.X | re.S)
 
@@ -328,7 +348,8 @@ def tokens(src: str) -> list[tuple[str, str, int]]:
             if text in _REJECT_OP:
                 raise Unsupported(f"第 {line} 行: 不支持 `{text}`"
                                   f"（写成 `x = x + 1;` 那种单独一条语句）")
-        out.append((kind if kind in ("id", "num") else "op", text, line))
+        out.append((kind if kind in ("id", "num", "chr", "str") else "op",
+                   text, line))
         i = m.end()
     return out
 
@@ -567,24 +588,16 @@ class Parser:
             e = self.expr()
             self.want(")")
             return e
+        if t[0] == "chr":
+            self.i += 1
+            return Lit(_char_value(t[1], t[2]), t[2])
+        if t[0] == "str":
+            raise Unsupported(
+                f"第 {t[2]} 行: 不支持字符串字面量（这一族把字符串值当引用类型，"
+                f"而 Stage A 的子集没有字符串值；`String` 本身也不在类型表里）。")
         if t[0] == "num":
             self.i += 1
-            try:
-                v = int(t[1], 0)
-            except ValueError:
-                # `int(s, 0)` 是**按 Python 的读法**认进制：它拒绝前导零（`010`），
-                # 而 C 的前导零**恰恰是八进制**（`010` == 8）—— 两边正好相反。
-                # 原先这一处**漏出裸 `ValueError`**：整屏 Python 回溯、没有行号、
-                # 退出码 1（与"子集外"同码而不同因），三条防线
-                # （`emit_lomt` 的 `except errs`、`front_door` 的 `except front_errors`、
-                # `lomentc.load_unit` 那个唯一入口）**一条都拦不住**。
-                # 子集只收十/十六进制（`docs/186` §4），所以这里**点名拒**并给出路。
-                raise Unsupported(
-                    f"第 {t[2]} 行: 读不了这个整数字面量 `{t[1]}` —— 子集只收"
-                    f"**十/十六进制**（`docs/186` §4）。C 里前导零是**八进制**"
-                    f"（`010` 就是 8），这一门没有那种写法：写成十进制 `8`，"
-                    f"或者写成十六进制 `0x8`。")
-            return Lit(v, t[2])
+            return Lit(_parse_int_lit(t[1], t[2], self.d), t[2])
         if t[0] == "id" and t[1] in ("true", "false") and self.d.bool_literals:
             # 这一族的源码里这两个就是**字面量**（见 `Dialect.bool_literals`），
             # 而 Loment 也有 `true` / `false` —— 直接映过去。
@@ -787,6 +800,88 @@ class Parser:
 # ---------------------------------------------------------------- 发射
 
 #: Loment 的保留字 —— 生成的标识符不能撞上。**这一张四门共用**（保留字是本语言的）。
+#: 目标整型的取值范围。`narrow_literal_check` 用它把 Java 的编译期窄化错误
+#: 在翻译期报出来，而不是让 `let b: i8 = 200;` 静默回绕。
+_INT_RANGE = {
+    "i8": (-128, 127), "i16": (-32768, 32767),
+    "i32": (-(2 ** 31), 2 ** 31 - 1), "i64": (-(2 ** 63), 2 ** 63 - 1),
+    "u8": (0, 255), "u16": (0, 65535),
+    "u32": (0, 2 ** 32 - 1), "u64": (0, 2 ** 64 - 1),
+}
+
+
+def _int_const(e: object) -> int | None:
+    """Fold a literal or a negated literal. Anything else is unknown (None)."""
+    if isinstance(e, Lit) and not e.b:
+        return e.v
+    if isinstance(e, Un) and e.op == "-" and isinstance(e.e, Lit) and not e.e.b:
+        return -e.e.v
+    return None
+
+
+def _parse_int_lit(text: str, line: int, d: "Dialect") -> int:
+    """Parse decimal / hex / binary / octal, with `_` separators and an `L` suffix.
+
+    Java and C both treat a leading zero as octal; Python's `int(s, 0)` does not,
+    and raises on `010`.  The old path leaked that `ValueError` as a raw traceback
+    or produced a C-specific message.  This helper names the literal instead.
+    """
+    if "_" in text and not d.digit_separators:
+        raise Unsupported(
+            f"第 {line} 行: 这一门不收数字分隔符 `_`（Java 的 `1_000` 要写成 `1000`）。")
+    t = text.replace("_", "")
+    wide = t[-1:] in ("l", "L")
+    if wide:
+        t = t[:-1]
+    low = t.lower()
+    is_octal = low.startswith("0o") or (len(t) > 1 and t[0] == "0"
+                                        and not low.startswith(("0x", "0b")))
+    if low.startswith("0b") and not d.binary_literals:
+        raise Unsupported(
+            f"第 {line} 行: 这一门不收二进制字面量 `{text}`（写成十六进制或十进制）。")
+    if is_octal and not d.octal_literals:
+        raise Unsupported(
+            f"第 {line} 行: 读不了这个整数字面量 `{text}` —— 这一门只收**十/十六进制**"
+            f"（`docs/186` §4）。`010` 是八进制（等于 8）；写成 `8` 或 `0x8`。")
+    try:
+        if low.startswith("0x"):
+            v = int(t, 16)
+        elif low.startswith("0b"):
+            v = int(t, 2)
+        elif low.startswith("0o"):
+            v = int(t, 8)
+        elif len(t) > 1 and t[0] == "0":
+            v = int(t, 8)
+        else:
+            v = int(t, 10)
+    except ValueError:
+        raise Unsupported(
+            f"第 {line} 行: 读不了这个整数字面量 `{text}`。支持十进制、`0x` 十六进制、"
+            f"`0b` 二进制与 `0` 开头的八进制；`_` 分隔符与 `L` 后缀可以写。") from None
+    if (getattr(d, "hex_wrap", False) and low.startswith("0x") and not wide
+            and 2 ** 31 <= v < 2 ** 32):
+        v -= 2 ** 32
+    return v
+
+
+def _char_value(text: str, line: int) -> int:
+    """Java/C character literal -> its integer value."""
+    body = text[1:-1]
+    if body.startswith("\\u") and len(body) == 6:
+        try:
+            return int(body[2:], 16)
+        except ValueError:
+            pass
+    esc = {"n": 10, "t": 9, "r": 13, "\\": 92, "'": 39, '"': 34, "0": 0,
+           "b": 8, "f": 12}
+    if body.startswith("\\") and len(body) == 2 and body[1] in esc:
+        return esc[body[1]]
+    if len(body) == 1:
+        return ord(body)
+    raise Unsupported(
+        f"第 {line} 行: 读不了这个字符字面量 `{text}`（只收单字符与常见转义）。")
+
+
 def _lit32(e: object) -> None:
     """**整数字面量必须在 32 位以内**，否则**拒**（不再静默截断）。
 
@@ -1081,6 +1176,15 @@ class Emitter:
         （Java / C# / Go）**不转** —— 它们的规则各不同，硬转会写出那些语言本不接受
         的程序。`bool` 位置照旧走 `ex` 那条投影（`want_of`）。
         """
+        if self.d.narrow_literal_check and ty in _INT_RANGE:
+            v = _int_const(e)
+            if v is not None:
+                lo, hi = _INT_RANGE[ty]
+                if not lo <= v <= hi:
+                    raise Unsupported(
+                        f"第 {e.line} 行: 字面量 {v} 超出 {ty} 的范围 "
+                        f"[{lo}, {hi}]。Java 里这是一条编译期错误（窄化要显式写 "
+                        f"`({ty})`）；放着不管会静默回绕。")
         w = self.want_of(ty)
         if w != "int" or not self.d.usual_arith:
             return self.ex(e, w)
@@ -1218,13 +1322,41 @@ class Emitter:
             return f"({e.op}{self.ex(e.e, 'int')})"
         if isinstance(e, Bin):
             op, want, _b = self.d.bin[e.op]
+            if self.d.reject_const_zero_div and e.op in ("/", "%"):
+                v = _int_const(e.r)
+                if v == 0:
+                    raise Unsupported(
+                        f"第 {e.line} 行: 常量零做除数/模数。Java 的常量表达式在这里"
+                        f"就是编译期错误；生成出来的源能编过，但运行时会 SIGFPE。")
             if op in _CMP_OPS:
                 # **比较的操作数要钉住宽度**（见 `pinned`）：先按源语言的寻常算术转换
                 # 算该在哪个宽度比，再**叶子式**地钉那张表。不定型才退回 `int_default`。
                 pt = None
                 if self.d.usual_arith:
                     pt = _usual_arith(self.num_ty(e.l), self.num_ty(e.r))
+                else:
+                    # Java/C#: the comparison happens at the wider of the two
+                    # operand types (either side is long => long). Without this,
+                    # two same-width longs were pinned to int_default (i32), and
+                    # the comparison silently narrowed to 32 bits (#491).
+                    lt, rt = self.num_ty(e.l), self.num_ty(e.r)
+                    if lt and rt and lt != rt:
+                        pt = "i64" if "i64" in (lt, rt) else self.d.int_default
+                    else:
+                        pt = lt or rt
                 return f"({self.pinned(e.l, pt)} {op} {self.pinned(e.r, pt)})"
+            if self.d.mask_shift and e.op in ("<<", ">>"):
+                # Java masks the shift distance: int by 0x1f, long by 0x3f.
+                # The mask is emitted in the left operand's width because this
+                # language requires both operands of a binary operator to have
+                # the same width (issue #316).
+                lt = self.num_ty(e.l) or self.d.int_default
+                right = self.ex(e.r, "int")
+                if lt == "i64":
+                    right = f"(({right} as i64) & 63)"
+                else:
+                    right = f"(({right}) & 31)"
+                return f"({self.ex(e.l, 'int')} {op} {right})"
             if self.d.usual_arith and op in _ARITH_OPS:
                 # **算术也要按提升后的宽度做**（`int` + `long` 在 C 里是 64 位加法）。
                 pt = _usual_arith(self.num_ty(e.l), self.num_ty(e.r))

@@ -98,9 +98,9 @@ const TLS_CAP: u32 = 65536;
 // ---- 热更新（`#1149` / `#1150`）：接在 TLS 之后，ARENA 跟着涨。
 const M_HOTPATH: u32 = 36777984;   // 4 KiB   `--hot-meta` 的路径
 const M_META: u32 = 36782080;      // 256 KiB 元数据文本
-const M_SCRATCH: u32 = 37044224;   // 320 KiB 排序数组 + 规范化串 + sha 状态
-const M_CALLBUF: u32 = 37371904;   // 64 KiB  当前函数的调用点（函数末尾并进元数据）
-const ARENA: u64 = 37437440;
+const M_SCRATCH: u32 = 37044224;   // 512 KiB 排序数组 + 规范化串 + sha 状态
+const M_CALLBUF: u32 = 37568512;   // 64 KiB  当前函数的调用点（函数末尾并进元数据）
+const ARENA: u64 = 37634048;
 
 // 热更新状态块（`M_SCRATCH` 头 64 字节）。**不占 `tab` 的单元格** —— 那 64 格已经
 // 用满到 252，`TB_G` 从 256 开始。
@@ -117,10 +117,10 @@ const HS_EPOCHN: u32 = 36;      // `__loment_hot_epoch` 在名字池里的偏移
 const HS_ENTRY: u32 = 40;       // 入口桩的文本相对偏移（槽表/闸在它前面）
 const HS_SA: u32 = 64;          // u32 × 8192 槽偏移
 const HS_AA: u32 = 32832;       // (off,size) × 8192 alloca
-const HS_SB: u32 = 98368;       // 192 KiB 规范化串
-const HS_CTX: u32 = 294976;     // 1024 sha 状态
-const HS_DIG: u32 = 296000;     // 32 摘要
-const HS_HEX: u32 = 296032;     // 64 hex
+const HS_SB: u32 = 98368;       // 384 KiB 规范化串（8192 槽 + 8192 alloca 的上界）
+const HS_CTX: u32 = 491584;     // 1024 sha 状态
+const HS_DIG: u32 = 492608;     // 32 摘要
+const HS_HEX: u32 = 492640;     // 64 hex
 const HS_MAXN: u32 = 8192;
 
 // 槽表（`#1150`）：名字 -> 槽号，按 IR 顺序分配（与参考实现的 `hot_slots` 同序）。
@@ -131,12 +131,12 @@ const HSX_SLOT: u32 = 8;
 const HS_MAX: u32 = 4096;
 
 // 调用点次序表（`#1149`）：同一个 callee 在一个函数里第几次被调用。
-const TB_ORD: u32 = 5840672;    // stride 16 × 1024
+const TB_ORD: u32 = 5840672;    // stride 16 × 8192
 const R_NOFF: u32 = 0;
 const R_NLEN: u32 = 4;
 const R_CNT: u32 = 8;
 const R_EXT: u32 = 12;
-const ORD_MAX: u32 = 1024;
+const ORD_MAX: u32 = 8192;
 
 const IN_CAP: u32 = 6291456;
 //: `.ll` 文本**之后**的名字预留区（`#600`）：导出名、SONAME、节符号名、收编面那几个
@@ -2633,8 +2633,10 @@ fn do_call(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen:
         } else {
             d = em_call_lbl(out, d, tab, cs + 1, ce - cs - 1);
         }
-        let _mc: u32 = meta_call(mb, tab, t, cs + 1, ce - cs - 1, 0,
-                                 d - load32(hot_sc(mb), HS_FENTRY));
+        if hot_on(mb) == 1 {
+            let _mc: u32 = meta_call(mb, tab, t, cs + 1, ce - cs - 1, 0,
+                                     d - load32(hot_sc(mb), HS_FENTRY));
+        }
     }
     if total != 0 {
         d = em_alu_ri(out, d, ADD, RSP, total);
@@ -3467,8 +3469,10 @@ fn do_call_extern(tab: ptr, out: ptr, c: u32, t: ptr, lp: u32, rp: u32, nargs: u
     d = em_mov_rr(out, d, RBX, RSP, 1);
     d = em_alu_ri(out, d, AND_, RSP, 4294967280);
     d = em_call_lbl(out, d, tab, cs + 1, ce - cs - 1);
-    let _mc: u32 = meta_call(mb, tab, t, cs + 1, ce - cs - 1, 1,
-                             d - load32(hot_sc(mb), HS_FENTRY));
+    if hot_on(mb) == 1 {
+        let _mc: u32 = meta_call(mb, tab, t, cs + 1, ce - cs - 1, 1,
+                                 d - load32(hot_sc(mb), HS_FENTRY));
+    }
     d = em_mov_rr(out, d, RSP, RBX, 1);
     d = em_pop(out, d, RBX);
     // **返回值照旧落回目标槽** —— 与内部调用同一步。少了这一句, 调用结果**丢掉**, 后面
@@ -6432,6 +6436,18 @@ fn hot_sc(mb: ptr) -> ptr {
     return ptr_add(mb, M_SCRATCH - M_META);
 }
 
+/// 采集只在 `--hot-meta` 或 `--profile hotswap` 时发生。普通构建**一个字节都不碰**这些
+/// 缓冲区 —— 否则一个函数的调用目标一多就会撞上元数据的表容量，而那种程序根本没要元数据。
+fn hot_on(mb: ptr) -> u32 {
+    if load32(hot_sc(mb), HS_META) == 1 {
+        return 1;
+    }
+    if load32(hot_sc(mb), HS_HRUN) == 1 {
+        return 1;
+    }
+    return 0;
+}
+
 fn hot_cb(mb: ptr) -> ptr {
     return ptr_add(mb, M_CALLBUF - M_META);
 }
@@ -6807,12 +6823,15 @@ fn emit_func(tab: ptr, out: ptr, c: u32, t: ptr, ls: u32, le: u32, bs: u32, be: 
     lbl_add(tab, ns, ne - ns, 0, 0, txt_base(tab) + c);
     setcell(tab, C_FNO, ns);
     setcell(tab, C_FNL, ne - ns);
-    // 热更新元数据（`#1149`）：入口、帧布局、调用点。**采集不影响产物字节**。
-    store32(hot_sc(mb), HS_FENTRY, c);
-    store32(hot_sc(mb), HS_NORD, 0);
-    store32(hot_sc(mb), HS_CLEN, 0);
-    let _hh: u32 = frame_hash(mb, tab);
-    let _mf: u32 = meta_func(mb, tab, t, ns, ne - ns, c);
+    // 热更新元数据（`#1149`）：入口、帧布局、调用点。**采集不影响产物字节**，
+    // 而且只有要元数据的构建才采（见 `hot_on`）。
+    if hot_on(mb) == 1 {
+        store32(hot_sc(mb), HS_FENTRY, c);
+        store32(hot_sc(mb), HS_NORD, 0);
+        store32(hot_sc(mb), HS_CLEN, 0);
+        let _hh: u32 = frame_hash(mb, tab);
+        let _mf: u32 = meta_func(mb, tab, t, ns, ne - ns, c);
+    }
     let d: u32 = e1(out, c, 85);          // push rbp
     d = e1(out, d, 72);                   // REX.W
     d = e1(out, d, 137);                  // mov rbp, rsp
@@ -6861,7 +6880,9 @@ fn emit_func(tab: ptr, out: ptr, c: u32, t: ptr, ls: u32, le: u32, bs: u32, be: 
         }
         i = le2 + 1;
     }
-    let _fl: u32 = meta_flush(mb);
+    if hot_on(mb) == 1 {
+        let _fl: u32 = meta_flush(mb);
+    }
     return d;
 }
 

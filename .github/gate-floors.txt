@@ -101,3 +101,4 @@ loment_invariant_test 2
 loment_caps_test 11
 loment_book_test 4
 loment_book_site_test 4
+loment_update_test 13

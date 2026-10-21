@@ -395,6 +395,8 @@ tools/loment_status.py
 tools/loment_syscalls_test.py
 tools/loment_state.py
 tools/loment_state_test.py
+tools/loment_update.py
+tools/loment_update_test.py
 ";
 }
 

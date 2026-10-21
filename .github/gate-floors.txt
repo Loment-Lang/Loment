@@ -13,7 +13,7 @@
 
 lomc_test 25
 lomentc_test 188
-lspe_test 10
+lspe_test 11
 potato_test 13
 loment_ct_test 2
 loment_comefor_test 12

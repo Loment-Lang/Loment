@@ -90,7 +90,8 @@ RELEASE_NAME = "0.1.5"  # 人读显示名 (发行包/文档用同一个真源)
 LOMENTERR = "0.1.2"
 GLOBS = [
     "tools/lomc.py", "tools/lom_audit.py", "tools/lomc_test.py", "tools/lomentc.py",
-    "tools/lomentc_test.py", "tools/lspe_test.py", "tools/potato.py", "tools/potato_test.py",
+    "tools/lomentc_test.py", "tools/lspe_test.py", "tools/lspe_ratchet.py",
+    "tools/potato.py", "tools/potato_test.py",
     "tools/potato_cross.py", "tools/potato_from.py", "tools/potato_measure.py",
     "tools/potato_llm_arm.py",
     "tools/potato_assert.py", "tools/loment.py", "tools/lomfmt.py",

@@ -289,6 +289,10 @@ jobs:
           fi
           # `#419`: 把摘要写进 release **正文** —— 正文与 asset 是两个渠道，用户拿到的
           # 核对点因此不必来自被核对的归档。安装器打印的也是同一份摘要。
+          #
+          # **只列载荷**：锚文件自己的摘要（`SHA256SUMS` / 它的签名 / 公钥 / 指纹）是
+          # **自指**的 —— 把它们列在这里既没有锚定意义，又容易被读成"正文里有密钥"。
+          # 公钥与指纹的公开面是那三个 asset，正文只留一行指纹供人对照。
           gh release view "$TAG" --json body -q .body > "$RUNNER_TEMP/body.md"
           {
             echo
@@ -298,7 +302,12 @@ jobs:
             echo "The installer prints the digest of \`SHA256SUMS\`; compare it with this block."
             echo
             echo '```'
-            (cd loment/dist && sha256sum *)
+            (cd loment/dist && for f in *; do
+              case "$f" in
+                SHA256SUMS|SHA256SUMS.asc|loment-signing.asc|FINGERPRINT) continue ;;
+              esac
+              sha256sum "$f"
+            done)
             echo '```'
             echo
             echo "Signing key fingerprint: \`$(cat loment/dist/FINGERPRINT)\`"

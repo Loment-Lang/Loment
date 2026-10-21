@@ -288,6 +288,8 @@ tools/pytrans.py
 tools/loment_pytrans_test.py
 tools/jtrans.py
 tools/loment_jtrans_test.py
+tools/lomjava.py
+tools/loment_java_test.py
 tools/cstrans.py
 tools/loment_cstrans_test.py
 tools/cpptrans.py

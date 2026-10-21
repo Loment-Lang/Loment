@@ -231,6 +231,9 @@ GLOBS = [
     # Java 翻成 Loment (docs/188 §7.1 六门里的第三门; 花括号族第二张方言表)。
     "tools/jtrans.py",
     "tools/loment_jtrans_test.py",
+    # Java AOT：class -> IR + 接口（docs/278/279）与它的判据。
+    "tools/lomjava.py",
+    "tools/loment_java_test.py",
     # C# 翻成 Loment (六门里的第四门; 花括号族**多两层壳**的那一门)。
     "tools/cstrans.py",
     "tools/loment_cstrans_test.py",

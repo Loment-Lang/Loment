@@ -443,6 +443,20 @@ def test_java_out_of_subset_is_named():
     print(f"      {len(cases)} out-of-subset constructs named")
 
 
+@test
+def test_java_diag_note_does_not_invent_shift_syntax():
+    """The Java language card must not claim Loment has signed/unsigned `>>` (#867)."""
+    import loment_diag
+    card = loment_diag.LANG_CARDS["java"]
+    assert "分有符号" not in card.edge, card.edge
+    assert "两种写法" not in card.edge, card.edge
+    assert "逻辑右移" in card.edge, card.edge
+    en = loment_diag.LANG_EDGE_EN["java"]
+    assert "signed and the unsigned shift" not in en, en
+    assert "logical right shift" in en, en
+    print("      Java card states: >>> logical, >> arithmetic")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_jtrans_test")
 

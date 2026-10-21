@@ -110,6 +110,8 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "lspe_test", "potato_
                  "loment_pytrans_test",
                  # Java 翻成 Loment: 跑出的数 == javac 编那份 Java 跑出的数 (docs/188 §7.1)
                  "loment_jtrans_test",
+                 # Java AOT: 真 javac class -> Loment IR -> PE (docs/278/279)
+                 "loment_java_test",
                  # C# 翻成 Loment: 跑出的数 == dotnet 编那份 C# 跑出的数 (docs/188 §7.1)
                  "loment_cstrans_test",
                  # C++ 翻成 Loment: 跑出的数 == g++ 编那份 C++ 跑出的数 (docs/188 §7.1)
@@ -352,6 +354,7 @@ SHARD_COST = {
     "loment_invariant_test": 72.5,
     "loment_json_test": 2.3,
     "loment_jtrans_test": 0.0,
+    "loment_java_test": 3.0,
     "loment_lib_test": 7.4,
     "loment_libl_test": 1.9,
     # `lms` 这一维与七级（`docs/253` §9 / `docs/270`）。本机 4.0s（含一次 `cc` + 跑重启器）；

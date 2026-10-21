@@ -3302,6 +3302,58 @@ fn ext_has(tab: ptr, t: ptr, noff: u32, nlen: u32) -> u32 {
     return 0;
 }
 
+/// 这份文本里有没有**定义**这个名字 (`define ... @name(`)。
+fn defined_at(t: ptr, n: u32, noff: u32, nlen: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        let le: u32 = line_end(t, i, n);
+        let ls: u32 = skip_sp(t, i, le);
+        if lit_at(t, ls, le, "define ") == 1 {
+            let j: u32 = ls + 7;
+            while j < le && load8(t, j) != 64 {
+                j = j + 1;
+            }
+            if j < le {
+                let ne: u32 = word_end(t, j + 1, le);
+                if ne - (j + 1) == nlen
+                    && span_eq(t, j + 1, ne - (j + 1), noff, nlen) == 1 {
+                    return 1;
+                }
+            }
+        }
+        i = le + 1;
+    }
+    return 0;
+}
+
+/// 把"本模块也定义了"的名字从外部符号表里摘掉。
+///
+/// 多份 IR 拼在一起时（应用里的 `declare __jl_x` + 库里的 `define __jl_x`），
+/// `collect_externs` 会照样把那个名字记成外部函数，而 `do_call` **先查外部表** ——
+/// 于是这次调用走 C ABI 的寄存器约定。PE 上实参直接错位；ELF 上只是"正好也能跑"
+/// 的错觉（SysV 前 6 个整数实参恰好是同一批寄存器）。语义上它是内部调用，
+/// 表里就不该有它。与参考实现 `merge_ir_texts` 的"declare 被 define 满足即删掉"同一条。
+fn ext_drop_defined(tab: ptr, t: ptr, n: u32) {
+    let out: u32 = 0;
+    let k: u32 = 0;
+    let cnt: u32 = cell(tab, C_NEXT);
+    while k < cnt {
+        let base: u32 = TB_EXT + k * 8;
+        let noff: u32 = load32(tab, base + E_NOFF);
+        let nlen: u32 = load32(tab, base + E_NLEN);
+        if defined_at(t, n, noff, nlen) == 0 {
+            if out != k {
+                let d: u32 = TB_EXT + out * 8;
+                store32(tab, d + E_NOFF, noff);
+                store32(tab, d + E_NLEN, nlen);
+            }
+            out = out + 1;
+        }
+        k = k + 1;
+    }
+    setcell(tab, C_NEXT, out);
+}
+
 /// 扫 `declare` 行, 记下外部符号名 (docs/173)。`llvm.*` **不是外部函数**: 运行期块里有
 /// `declare void @llvm.trap()`, 而 do_call 对它是特判 (发 ud2)。把它收进来会抢进 C ABI
 /// 那条路, 于是 `call llvm.trap` 在回填时报"未定义的标签" —— 参考侧实测把 elf 判据从
@@ -6746,6 +6798,9 @@ fn run(mem: ptr) -> u32 {
     }
     collect_globals(tab, inb, n as u32, gb);
     collect_externs(tab, inb, n as u32);
+    // 拼接进来的库 IR 会把应用里的 `declare` 满足掉；那些名字必须从外部表里摘掉，
+    // 否则调用点会走 C ABI（PE 上实参错位）。见 `ext_drop_defined`。
+    ext_drop_defined(tab, inb, n as u32);
     place_globals(tab, inb);
     // 外部目标文件 (docs/173): 代码节接在我们自己的代码之后, **数据节接在数据段之后**,
     // 导出符号立标签。

@@ -439,6 +439,96 @@ case "${1:-help}" in
         fi
         need loment-driver loment-driver
         need loment-lomelf loment-lomelf
+        # ---- deps/*/link.txt (docs/279 sec 5.4/6.1): the only build-time discovery point.
+        #
+        # The source-level surface stays `use <name>`; there is no --java-lib. Every
+        # `ir NAME SHA256` line is verified here - a missing file or a changed hash is a
+        # named error, never a silent link of something else. `runtime jrt VER` adds
+        # share/loment/jrt/VER/jrt.ll once per closure.
+        #
+        # The merge is plain concatenation. The linker drops a `declare` that its own
+        # `define` satisfies (`ext_drop_defined` in loment/tools/lomelf.lomt), so no IR
+        # text is rewritten here: two launchers parsing IR would be two chances to
+        # corrupt it, and IR strings may contain shell/batch metacharacters.
+        deps_ir=()
+        deps_rt=()
+        if [ -d deps ]; then
+            if ls deps/*/link.txt >/dev/null 2>&1 && ! command -v sha256sum >/dev/null 2>&1; then
+                echo "loment: cannot verify deps/*/link.txt: sha256sum is not on PATH" >&2
+                exit 1
+            fi
+            for lf in deps/*/link.txt; do
+                [ -f "$lf" ] || continue
+                ldir=${lf%/link.txt}
+                while IFS= read -r line || [ -n "$line" ]; do
+                    line=${line%$'\r'}
+                    line=${line#"${line%%[![:space:]]*}"}
+                    case "$line" in
+                        ''|'#'*) continue ;;
+                    esac
+                    kind=${line%%[[:space:]]*}
+                    rest=${line#"$kind"}
+                    rest=${rest#"${rest%%[![:space:]]*}"}
+                    case "$kind" in
+                        ir)
+                            name=${rest%%[[:space:]]*}
+                            sha=${rest#"$name"}
+                            sha=${sha#"${sha%%[![:space:]]*}"}
+                            extra=
+                            case "$sha" in *[[:space:]]*) extra=1 ;; esac
+                            if [ -z "$name" ] || [ -z "$sha" ] || [ -n "$extra" ]; then
+                                echo "loment: $lf: want 'ir NAME SHA256', got '$line'" >&2
+                                exit 1
+                            fi
+                            p="$ldir/$name"
+                            if [ ! -f "$p" ]; then
+                                echo "loment: $lf lists $name, but $p does not exist" >&2
+                                echo "        (reinstall the dependency, or remove $ldir)" >&2
+                                exit 1
+                            fi
+                            got=$(sha256sum "$p" 2>/dev/null | cut -d' ' -f1)
+                            if [ "$got" != "$sha" ]; then
+                                echo "loment: $lf lists $name with sha256 $sha" >&2
+                                echo "        but the file on disk hashes to ${got:-<unreadable>}" >&2
+                                exit 1
+                            fi
+                            deps_ir[${#deps_ir[@]}]=$(to_posix "$p")
+                            ;;
+                        runtime)
+                            rname=${rest%%[[:space:]]*}
+                            ver=${rest#"$rname"}
+                            ver=${ver#"${ver%%[![:space:]]*}"}
+                            if [ "$rname" != "jrt" ] || [ -z "$ver" ] \
+                               || [ "${ver%%[[:space:]]*}" != "$ver" ]; then
+                                echo "loment: $lf: want 'runtime jrt VERSION', got '$line'" >&2
+                                exit 1
+                            fi
+                            seen=
+                            if [ ${#deps_rt[@]} -gt 0 ]; then
+                                for v in "${deps_rt[@]}"; do [ "$v" = "$ver" ] && seen=1; done
+                            fi
+                            [ -n "$seen" ] && continue
+                            deps_rt[${#deps_rt[@]}]="$ver"
+                            ;;
+                        *)
+                            echo "loment: $lf: unknown line '$line' (want ir / runtime / #)" >&2
+                            exit 1
+                            ;;
+                    esac
+                done < "$lf"
+            done
+        fi
+        if [ ${#deps_rt[@]} -gt 0 ]; then
+            for v in "${deps_rt[@]}"; do
+                rt="$share/jrt/$v/jrt.ll"
+                if [ ! -f "$rt" ]; then
+                    echo "loment: a dependency asks for runtime jrt $v, but this package has no" >&2
+                    echo "        $rt (the runtime ships with the toolchain, docs/279 sec 5.4)" >&2
+                    exit 1
+                fi
+                deps_ir[${#deps_ir[@]}]=$rt
+            done
+        fi
         tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
         rc=0
         lrc=0
@@ -446,6 +536,31 @@ case "${1:-help}" in
         if [ $rc -ne 0 ]; then
             report_diags "$tmp/d.jsonl" "$tmp/e.txt" "$nc $om" "$rc" "loment-driver"
             exit 1
+        fi
+        # ---- merge deps IR (if any). Plain concatenation; see the note where the
+        # link.txt files are scanned. A symbol defined by two inputs is a named error:
+        # the linker keeps one label per name, so a duplicate would silently win/lose.
+        link_ir="$tmp/a.ll"
+        if [ ${#deps_ir[@]} -gt 0 ]; then
+            : > "$tmp/defs"
+            sed -n 's/^define[^@]*@\([A-Za-z0-9_.$-]*\)(.*/\1/p' "$tmp/a.ll" >> "$tmp/defs"
+            for f in "${deps_ir[@]}"; do
+                sed -n 's/^define[^@]*@\([A-Za-z0-9_.$-]*\)(.*/\1/p' "$f" >> "$tmp/defs"
+            done
+            dups=$(sort "$tmp/defs" | uniq -d)
+            if [ -n "$dups" ]; then
+                echo "loment: two inputs define the same symbol:" >&2
+                echo "$dups" | sed 's/^/        /' >&2
+                echo "        (a library IR and the app share a name; docs/279 sec 6)" >&2
+                exit 1
+            fi
+            cat "$tmp/a.ll" > "$tmp/merged.ll"
+            printf '\n' >> "$tmp/merged.ll"
+            for f in "${deps_ir[@]}"; do
+                cat "$f" >> "$tmp/merged.ll"
+                printf '\n' >> "$tmp/merged.ll"
+            done
+            link_ir="$tmp/merged.ll"
         fi
         if [ "$mode" = run ]; then out="$tmp/a.bin"; fi
         if [ -z "$out" ]; then
@@ -512,7 +627,7 @@ case "${1:-help}" in
                 exit 1
             fi
             # shellcheck disable=SC2086
-            "$cc" "$tmp/a.ll" "${objs[@]}" $ccargs $Largs $largs -o "$out" || exit 1
+            "$cc" "$link_ir" "${objs[@]}" $ccargs $Largs $largs -o "$out" || exit 1
         elif [ -n "$opt" ]; then
             cc=$(command -v clang 2>/dev/null || true)
             if [ -n "$cc" ]; then
@@ -524,15 +639,15 @@ case "${1:-help}" in
 LOMENT_LIBCALLS_EOF
                 # shellcheck disable=SC2086
                 "$cc" --target=x86_64-unknown-linux-gnu -nostdlib -ffreestanding -static \
-                    -fno-pie -O2 "$tmp/a.ll" "$tmp/libcalls.ll" "${objs[@]}" -o "$out" || exit 1
+                    -fno-pie -O2 "$link_ir" "$tmp/libcalls.ll" "${objs[@]}" -o "$out" || exit 1
             else
                 echo "loment: --opt: no clang found, falling back to the unoptimized lomelf backend" >&2
-                "$(tool loment-lomelf)" "$tmp/a.ll" "$out" --diag-out "$tmp/d.jsonl" "${linkargs[@]}" $portarg 2>"$tmp/e2.txt" || lrc=$?
+                "$(tool loment-lomelf)" "$link_ir" "$out" --diag-out "$tmp/d.jsonl" "${linkargs[@]}" $portarg 2>"$tmp/e2.txt" || lrc=$?
             fi
         elif [ ${#links[@]} -gt 0 ]; then
-            "$(tool loment-lomelf)" "$tmp/a.ll" "$out" --diag-out "$tmp/d.jsonl" "${linkargs[@]}" $portarg 2>"$tmp/e2.txt" || lrc=$?
+            "$(tool loment-lomelf)" "$link_ir" "$out" --diag-out "$tmp/d.jsonl" "${linkargs[@]}" $portarg 2>"$tmp/e2.txt" || lrc=$?
         else
-            "$(tool loment-lomelf)" "$tmp/a.ll" "$out" --diag-out "$tmp/d.jsonl" 2>"$tmp/e2.txt" || lrc=$?
+            "$(tool loment-lomelf)" "$link_ir" "$out" --diag-out "$tmp/d.jsonl" 2>"$tmp/e2.txt" || lrc=$?
         fi
         # The linker gets its OWN --diag-out, into the same file: when it can put a code on
         # (the `-o` directory not existing is the common one) it writes a record there and
@@ -776,6 +891,12 @@ rem points the user at the wrong problem entirely.
 echo loment: --hosted is not available on Windows yet (ELF only for now; docs/222 sec 7) 1>&2
 exit /b 2
 :barg_done
+rem deps\*\link.txt (docs/279 sec 5.4/6.1): the only build-time discovery point. Each
+rem `ir NAME SHA256` line is verified; a missing file or a changed hash is a named error.
+rem The merge is plain concatenation - the linker drops a `declare` that its own `define`
+rem satisfies, so no IR text is parsed (and possibly mangled) by a batch loop.
+call :scan_deps
+if defined derror goto depfail
 if "%bmode%"=="r" goto run_go
 
 rem docs/223: a unit that registers a command names its own artifact (`loment-<name>`),
@@ -801,11 +922,13 @@ rem the unit to the host C toolchain. This launcher has no hosted path, and with
 rem the PE linker reports "the unit has no _start" -- the wrong problem entirely (#633).
 findstr /b /l /c:"; loment-port: hosted" "%tmp%\a.ll" >nul 2>nul
 if "%ERRORLEVEL%"=="0" goto hosted_unit
+call :make_merged
+if defined derror goto fail
 rem The linker gets its OWN --diag-out, into the same file (on success the driver wrote
 rem nothing into it). When it can put a code on - the `-o` directory not existing is the
 rem common one - :report_diags renders it with the title, the why and the fixes; when it
 rem writes no record its plain line is shown as is, never silently lost.
-"%here%loment-lomelf.exe" "%tmp%\a.ll" "%out%.exe" --diag-out "%tmp%\d.jsonl" %portarg% 2>"%tmp%\e2.txt"
+"%here%loment-lomelf.exe" "%linkll%" "%out%.exe" --diag-out "%tmp%\d.jsonl" %portarg% 2>"%tmp%\e2.txt"
 set "lrc=%ERRORLEVEL%"
 if not "%lrc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e2.txt" "%cnc% %com%" "%lrc%" "loment-lomelf"
 if not "%lrc%"=="0" goto fail
@@ -821,21 +944,166 @@ if not "%drc%"=="0" goto fail
 rem Same marker check as the build path: a hosted unit is not a PE product (#633).
 findstr /b /l /c:"; loment-port: hosted" "%tmp%\a.ll" >nul 2>nul
 if "%ERRORLEVEL%"=="0" goto hosted_unit
-"%here%loment-lomelf.exe" "%tmp%\a.ll" "%tmp%\a.exe" --diag-out "%tmp%\d.jsonl" %portarg% 2>"%tmp%\e2.txt"
+call :make_merged
+if defined derror goto fail
+"%here%loment-lomelf.exe" "%linkll%" "%tmp%\a.exe" --diag-out "%tmp%\d.jsonl" %portarg% 2>"%tmp%\e2.txt"
 set "lrc=%ERRORLEVEL%"
 if not "%lrc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e2.txt" "%cnc% %com%" "%lrc%" "loment-lomelf"
 if not "%lrc%"=="0" goto fail
 "%tmp%\a.exe"
 set "rc=%ERRORLEVEL%"
-del /q "%tmp%\a.ll" "%tmp%\a.exe" >nul 2>nul
+del /q "%tmp%\a.ll" "%tmp%\a.exe" "%tmp%\merged.ll" "%tmp%\defs.txt" "%tmp%\defs.sorted" >nul 2>nul
 rmdir "%tmp%" >nul 2>nul
 exit /b %rc%
 
 :done
-del /q "%tmp%\a.ll" >nul 2>nul
+del /q "%tmp%\a.ll" "%tmp%\merged.ll" "%tmp%\defs.txt" "%tmp%\defs.sorted" >nul 2>nul
 rmdir "%tmp%" >nul 2>nul
 echo loment: %out%.exe
 exit /b 0
+
+rem ---- deps\*\link.txt scanning (docs/279 sec 5.4/6.1). Reached once per build/run, from
+rem :barg_done. Numbered variables (ir0, ir1, ...) instead of a list: batch has no arrays,
+rem and a space-joined list would break on a path with a space.
+:scan_deps
+set "dn=0"
+set "rts=;"
+set "derror="
+if not exist deps exit /b 0
+for /d %%D in (deps\*) do if exist "%%D\link.txt" call :scan_link "%%D"
+exit /b 0
+
+:scan_link
+if defined derror exit /b 0
+set "ldir=%~1"
+set "lf=%~1\link.txt"
+for /f "usebackq tokens=1,2,3,*" %%K in ("%lf%") do call :link_line "%%K" "%%L" "%%M" "%%N"
+exit /b 0
+
+:link_line
+if defined derror exit /b 0
+set "lk=%~1"
+if "%lk%"=="" exit /b 0
+if "%lk:~0,1%"=="#" exit /b 0
+if /I "%lk%"=="ir" goto link_ir
+if /I "%lk%"=="runtime" goto link_rt
+echo loment: %lf%: unknown line "%lk% %~2 %~3" (want ir / runtime / # comment) 1>&2
+set "derror=1"
+exit /b 0
+
+:link_ir
+set "lname=%~2"
+set "lsha=%~3"
+set "lextra=%~4"
+if "%lname%"=="" goto link_ir_bad
+if "%lsha%"=="" goto link_ir_bad
+if not "%lextra%"=="" goto link_ir_bad
+set "lp=%ldir%\%lname%"
+if not exist "%lp%" goto link_ir_missing
+call :sha_of "%lp%"
+if /I not "%sha%"=="%lsha%" goto link_ir_hash
+set "ir%dn%=%lp%"
+set /a dn+=1
+exit /b 0
+:link_ir_missing
+echo loment: %lf% lists %lname%, but %lp% does not exist 1>&2
+echo         (reinstall the dependency, or remove %ldir%) 1>&2
+set "derror=1"
+exit /b 0
+:link_ir_hash
+echo loment: %lf% lists %lname% with sha256 %lsha% 1>&2
+echo         but the file on disk hashes to %sha% 1>&2
+set "derror=1"
+exit /b 0
+:link_ir_bad
+echo loment: %lf%: want 'ir NAME SHA256', got "%lk% %~2 %~3 %~4" 1>&2
+set "derror=1"
+exit /b 0
+
+:link_rt
+if /I not "%~2"=="jrt" goto link_rt_bad
+set "lver=%~3"
+if "%lver%"=="" goto link_rt_bad
+if not "%~4"=="" goto link_rt_bad
+rem Once per closure. `call set` evaluates %rts% a second time without delayed expansion.
+call set "rtchk=%%rts:;%lver%;=%%"
+if not "%rtchk%"=="%rts%" exit /b 0
+set "lrt=%share%\jrt\%lver%\jrt.ll"
+if not exist "%lrt%" goto link_rt_missing
+set "rts=%rts%%lver%;"
+set "ir%dn%=%lrt%"
+set /a dn+=1
+exit /b 0
+:link_rt_missing
+echo loment: a dependency asks for runtime jrt %lver%, but this package has no 1>&2
+echo         %lrt% (the runtime ships with the toolchain, docs/279 sec 5.4) 1>&2
+set "derror=1"
+exit /b 0
+:link_rt_bad
+echo loment: %lf%: want 'runtime jrt VERSION', got "%~1 %~2 %~3" 1>&2
+set "derror=1"
+exit /b 0
+
+:sha_of
+set "sha="
+for /f "skip=1 delims=" %%H in ('certutil -hashfile "%~1" SHA256 2^>nul') do if not defined sha set "sha=%%H"
+if defined sha set "sha=%sha: =%"
+exit /b 0
+
+rem Concatenate the app IR with every listed IR. A symbol defined twice is a named error
+rem (the linker keeps one label per name, so a duplicate would silently win or lose).
+:make_merged
+set "linkll=%tmp%\a.ll"
+if "%dn%"=="0" exit /b 0
+type nul > "%tmp%\defs.txt"
+call :collect_defs "%tmp%\a.ll"
+set "i=0"
+:cm_loop
+if %i% geq %dn% goto cm_done
+call set "cp=%%ir%i%%%"
+call :collect_defs "%cp%"
+set /a i+=1
+goto cm_loop
+:cm_done
+sort "%tmp%\defs.txt" /o "%tmp%\defs.sorted" >nul 2>nul
+set "prev="
+for /f "usebackq delims=" %%L in ("%tmp%\defs.sorted") do call :dup_check "%%L"
+if defined derror exit /b 0
+copy /b /y "%tmp%\a.ll" "%tmp%\merged.ll" >nul
+echo.>> "%tmp%\merged.ll"
+set "i=0"
+:mm_loop
+if %i% geq %dn% goto mm_done
+call set "cp=%%ir%i%%%"
+copy /b /y "%tmp%\merged.ll"+"%cp%" "%tmp%\merged2.ll" >nul
+move /y "%tmp%\merged2.ll" "%tmp%\merged.ll" >nul
+echo.>> "%tmp%\merged.ll"
+set /a i+=1
+goto mm_loop
+:mm_done
+set "linkll=%tmp%\merged.ll"
+exit /b 0
+
+:collect_defs
+for /f "usebackq tokens=2 delims=@" %%S in (`findstr /b /l /c:"define " "%~1"`) do call :def_sym "%%S"
+exit /b 0
+:def_sym
+for /f "tokens=1 delims=(" %%T in ("%~1") do echo %%T>>"%tmp%\defs.txt"
+exit /b 0
+:dup_check
+if defined derror exit /b 0
+if /I "%~1"=="%prev%" goto dup_found
+set "prev=%~1"
+exit /b 0
+:dup_found
+echo loment: two inputs define the same symbol: %~1 1>&2
+echo         (a library IR and the app share a name; docs/279 sec 6) 1>&2
+set "derror=1"
+exit /b 0
+
+:depfail
+echo loment: the deps IR is not usable -- nothing was produced 1>&2
+exit /b 1
 
 rem A unit that declared `choose hosted` in its IR header (#633). Reached from both the
 rem build and the run path; the message names the limitation instead of letting the PE
@@ -851,7 +1119,7 @@ rem that as signed -- so `if errorlevel 1` reads it as success, we fall through 
 rem and print "loment: <out>.exe" while nothing was written. Proven 2026-09-15:
 rem `loment build tour.lomt -o tour` exited 0 with no tour.exe on disk.
 :fail
-del /q "%tmp%\a.ll" "%tmp%\a.exe" "%tmp%\d.jsonl" "%tmp%\e.txt" "%tmp%\e2.txt" >nul 2>nul
+del /q "%tmp%\a.ll" "%tmp%\a.exe" "%tmp%\d.jsonl" "%tmp%\e.txt" "%tmp%\e2.txt" "%tmp%\merged.ll" "%tmp%\defs.txt" "%tmp%\defs.sorted" >nul 2>nul
 rmdir "%tmp%" >nul 2>nul
 echo loment: failed -- nothing was produced 1>&2
 exit /b 1

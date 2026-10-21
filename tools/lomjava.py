@@ -122,6 +122,13 @@ class ClassFile:
     pool: list
 
 
+@dataclass
+class ClassMeta:
+    layout: dict          # instance field -> (byte offset, ir type)
+    static_layout: dict   # static field -> (global symbol, ir type)
+    size: int             # bytes allocated by `new`
+
+
 def parse_class(data: bytes) -> ClassFile:
     r = Reader(data)
     if r.u4() != 0xCAFEBABE:
@@ -209,24 +216,21 @@ def parse_class(data: bytes) -> ClassFile:
     return ClassFile(_class_name(pool, this_class), methods, fields, pool)
 
 
-def load_class(path: Path) -> ClassFile:
-    """Read a `.class`, or a jar with exactly one class.
-
-    Multi-class jars need a class registry (cross-class calls, field layouts and
-    virtual dispatch); that is a later slice. A jar is accepted now so the
-    package pipeline can carry the real artifact.
-    """
+def load_classes(path: Path) -> list[ClassFile]:
+    """Read a `.class`, or every class entry in a jar (sorted by entry name)."""
     data = path.read_bytes()
     if data[:4] == b"PK\x03\x04":
         with zipfile.ZipFile(path) as z:
-            names = [n for n in z.namelist()
-                     if n.endswith(".class") and not n.startswith("META-INF/")]
-            if len(names) != 1:
-                raise JavaError(
-                    f"jar has {len(names)} class entries; multi-class jars are not "
-                    f"supported yet")
-            return parse_class(z.read(names[0]))
-    return parse_class(data)
+            names = sorted(n for n in z.namelist()
+                           if n.endswith(".class") and not n.startswith("META-INF/"))
+            if not names:
+                raise JavaError("jar has no .class entries")
+            return [parse_class(z.read(n)) for n in names]
+    return [parse_class(data)]
+
+
+def load_class(path: Path) -> ClassFile:
+    return load_classes(path)[0]
 
 
 def _skip_attributes(r: Reader, pool) -> None:
@@ -548,8 +552,8 @@ def _slot_local(name: str, ty: str) -> str:
 class Emitter:
     def __init__(self, insns: list[Insn], heights: dict[int, int], max_stack: int,
                  params: list[str], param_slots: list[int], ret: str, pool: list,
-                 module: str, own_class: str, field_layout: dict, obj_size: int,
-                 static_layout: dict, globals_: list, exc: list | None = None):
+                 module: str, own_class: str, registry: dict, metas: dict,
+                 globals_: list, exc: list | None = None):
         self.insns = insns
         self.heights = heights
         self.max_stack = max_stack
@@ -559,9 +563,8 @@ class Emitter:
         self.pool = pool
         self.module = module
         self.own_class = own_class
-        self.field_layout = field_layout
-        self.obj_size = obj_size
-        self.static_layout = static_layout
+        self.registry = registry
+        self.metas = metas
         self.globals = globals_
         self.exc = exc or []
         self.strn = 0
@@ -862,21 +865,23 @@ class Emitter:
             pass
         elif name == "new":
             cls = _class_name(self.pool, x.args[0])
-            if cls == self.own_class:
-                size = self.obj_size
+            meta = self.metas.get(cls)
+            if meta is not None:
+                size = meta.size
             elif cls in ("java/lang/RuntimeException", "java/lang/Exception",
                          "java/lang/Throwable"):
                 size = 8
             else:
-                raise JavaError(f"new {cls}: only the current class is supported yet")
+                raise JavaError(f"new {cls}: class is not in the linked set")
             p = self.t()
             self.emit(f"{p} = call ptr @{_alloc_sym(self.module)}(i32 {size})")
             self._push("ptr", p, h0)
         elif name in ("getstatic", "putstatic"):
             cls, fname, desc = fieldref(self.pool, x.args[0])
-            if cls != self.own_class or fname not in self.static_layout:
-                raise JavaError(f"{name} {cls}.{fname}: static field is not in this class")
-            sym, ty = self.static_layout[fname]
+            meta = self.metas.get(cls)
+            if meta is None or fname not in meta.static_layout:
+                raise JavaError(f"{name} {cls}.{fname}: static field is not in the linked set")
+            sym, ty = meta.static_layout[fname]
             if name == "getstatic":
                 v = self.t()
                 self.emit(f"{v} = load {ty}, ptr @{sym}")
@@ -886,9 +891,10 @@ class Emitter:
                 self.emit(f"store {ty} {v}, ptr @{sym}")
         elif name == "getfield":
             cls, fname, desc = fieldref(self.pool, x.args[0])
-            if cls != self.own_class or fname not in self.field_layout:
-                raise JavaError(f"getfield {cls}.{fname}: field is not in this class")
-            off, ty = self.field_layout[fname]
+            meta = self.metas.get(cls)
+            if meta is None or fname not in meta.layout:
+                raise JavaError(f"getfield {cls}.{fname}: field is not in the linked set")
+            off, ty = meta.layout[fname]
             obj = self._pop("ptr", h0 - 1)
             q = self.t()
             self.emit(f"{q} = getelementptr i8, ptr {obj}, i32 {off}")
@@ -897,9 +903,10 @@ class Emitter:
             self._push(ty, v, h0 - 1)
         elif name == "putfield":
             cls, fname, desc = fieldref(self.pool, x.args[0])
-            if cls != self.own_class or fname not in self.field_layout:
-                raise JavaError(f"putfield {cls}.{fname}: field is not in this class")
-            off, ty = self.field_layout[fname]
+            meta = self.metas.get(cls)
+            if meta is None or fname not in meta.layout:
+                raise JavaError(f"putfield {cls}.{fname}: field is not in the linked set")
+            off, ty = meta.layout[fname]
             val = self._pop(ty, h0 - 1)
             obj = self._pop("ptr", h0 - 2)
             q = self.t()
@@ -913,7 +920,7 @@ class Emitter:
             for i in range(n - 1, -1, -1):
                 vals[i] = self._pop(params[i], h0 - n + i)
             recv = self._pop("ptr", h0 - n - 1)
-            if cls == self.own_class:
+            if cls in self.registry:
                 sym = mangle(self.module, cls, mname, desc)
                 argtxt = ", ".join([f"ptr {recv}"] +
                                    [f"{t} {v}" for t, v in zip(params, vals)])
@@ -956,7 +963,7 @@ class Emitter:
                     self._pop(params[i], h0 - n + i)
                 self._pop("ptr", h0 - n - 1)
                 return
-            if cls == self.own_class:
+            if cls in self.registry:
                 params, ret = parse_method_descriptor(desc)
                 n = len(params)
                 vals = [""] * n
@@ -1016,10 +1023,9 @@ class Emitter:
                 self._push(ty, v, h0 - 2)
         elif name == "invokestatic":
             cls, mname, desc = methodref(self.pool, x.args[0])
-            if cls != self.own_class:
+            if cls not in self.registry:
                 raise JavaError(
-                    f"invokestatic {cls}.{mname}{desc}: cross-class calls are not "
-                    f"supported yet")
+                    f"invokestatic {cls}.{mname}{desc}: class is not in the linked set")
             params, ret = parse_method_descriptor(desc)
             n = len(params)
             vals = [""] * n
@@ -1055,13 +1061,14 @@ class Emitter:
 
 
 def emit_method_ir(module: str, cls: str, m: Method, pool: list,
-                   field_layout: dict, obj_size: int, static_layout: dict,
+                   registry: dict, metas: dict,
                    globals_: list) -> tuple[str, str, str] | None:
     is_static = bool(m.access & ACC_STATIC)
     is_ctor = m.name == "<init>"
+    is_clinit = m.name == "<clinit>"
     if m.access & (ACC_NATIVE | ACC_ABSTRACT):
         return None
-    if m.name.startswith("<") and not is_ctor:
+    if m.name.startswith("<") and not (is_ctor or is_clinit):
         return None
     if m.code is None:
         return None
@@ -1071,6 +1078,8 @@ def emit_method_ir(module: str, cls: str, m: Method, pool: list,
     if is_ctor:
         if ret != "void":
             raise JavaError(f"{cls}.<init>{m.desc}: a constructor must return void")
+    if is_clinit and (not is_static or ret != "void" or desc_params):
+        raise JavaError(f"{cls}.<clinit>: must be static ()V")
     params = desc_params if is_static else ["ptr"] + desc_params
     if len(params) > 8:
         raise JavaError(f"{cls}.{m.name}: more than 8 parameters")
@@ -1083,7 +1092,7 @@ def emit_method_ir(module: str, cls: str, m: Method, pool: list,
         slots.append(slot)
         slot += 2 if t == "i64" else 1
     em = Emitter(insns, heights, m.max_stack, params, slots, ret, pool, module, cls,
-                 field_layout, obj_size, static_layout, globals_, m.exc)
+                 registry, metas, globals_, m.exc)
     body = em.run()
     def irty(t: str) -> str:
         return "void" if t == "void" else t
@@ -1093,42 +1102,66 @@ def emit_method_ir(module: str, cls: str, m: Method, pool: list,
     return sym, "\n".join(text), m.name, is_static
 
 
-def emit(module: str, cf: ClassFile, ir_path: Path, iface_path: Path) -> list[tuple]:
-    layout: dict[str, tuple[int, str]] = {}
-    static_layout: dict[str, tuple[str, str]] = {}
+def emit(module: str, classes: list[ClassFile], ir_path: Path,
+         iface_path: Path) -> list[tuple]:
+    registry = {cf.name: cf for cf in classes}
+    metas: dict[str, ClassMeta] = {}
     globals_: list[str] = []
-    off = 8
-    for f in cf.fields:
-        ty = desc_type(f.desc)
-        if f.access & ACC_STATIC:
-            safe = re.sub(r"[^A-Za-z0-9_.$-]", "_", f.name)
-            sym = f"__jl_static_{module}_{safe}_{hashlib.sha256(f.name.encode()).hexdigest()[:8]}"
-            globals_.append(f"@{sym} = internal global {ty} zeroinitializer")
-            static_layout[f.name] = (sym, ty)
-        else:
-            layout[f.name] = (off, ty)
-            off += 8
-    obj_size = off
-    funcs: list[tuple[str, str, str, list[str], str, bool]] = []
-    for m in cf.methods:
-        got = emit_method_ir(module, cf.name, m, cf.pool, layout, obj_size,
-                             static_layout, globals_)
-        if got is None:
-            continue
-        sym, text, name, is_static = got
-        params, ret = parse_method_descriptor(m.desc)
-        funcs.append((sym, text, name, params, ret, is_static))
-    funcs.sort(key=lambda x: (x[2], x[0]))
+    for cf in classes:
+        layout: dict[str, tuple[int, str]] = {}
+        static_layout: dict[str, tuple[str, str]] = {}
+        off = 8
+        for f in cf.fields:
+            ty = desc_type(f.desc)
+            if f.access & ACC_STATIC:
+                safe = re.sub(r"[^A-Za-z0-9_.$-]", "_", f.name)
+                sym = (f"__jl_static_{module}_{safe}_"
+                       f"{hashlib.sha256(f.name.encode()).hexdigest()[:8]}")
+                globals_.append(f"@{sym} = internal global {ty} zeroinitializer")
+                static_layout[f.name] = (sym, ty)
+            else:
+                layout[f.name] = (off, ty)
+                off += 8
+        metas[cf.name] = ClassMeta(layout, static_layout, off)
+
+    funcs: list[tuple[str, str, str, list[str], str, bool, str]] = []
+    for cf in classes:
+        for m in cf.methods:
+            got = emit_method_ir(module, cf.name, m, cf.pool, registry, metas, globals_)
+            if got is None:
+                continue
+            sym, text, name, is_static = got
+            params, ret = parse_method_descriptor(m.desc)
+            funcs.append((sym, text, name, params, ret, is_static, cf.name))
+    funcs.sort(key=lambda x: (x[6], x[2], x[0]))
+    init_sym = f"__jl_init_{module}"
+    inited = f"@__jl_inited_{module}"
+    globals_.append(f"{inited} = internal global i32 0")
+    clinits = [x[0] for x in funcs if x[2] == "<clinit>"]
+    init_lines = [
+        f"define internal void @{init_sym}() {{",
+        "entry:",
+        f"  %s = load i32, ptr {inited}",
+        "  %n = icmp ne i32 %s, 0",
+        "  br i1 %n, label %done, label %run",
+        "run:",
+        f"  store i32 1, ptr {inited}",
+    ]
+    init_lines += [f"  call void @{s}()" for s in clinits]
+    init_lines += ["  br label %done", "done:", "  ret void", "}"]
     ir_path.write_text("\n\n".join(globals_) + "\n\n" +
-                       "\n\n".join(x[1] for x in funcs) + "\n\n" + _jrt_alloc_ir(module),
+                       "\n\n".join(x[1] for x in funcs) + "\n\n" +
+                       "\n".join(init_lines) + "\n\n" + _jrt_alloc_ir(module),
                        encoding="utf-8", newline="\n")
 
-    lines = [f"module {module}", ""]
+    lines = [f"module {module}", "", f"extern fn {init_sym}();", ""]
     used: set[str] = set()
-    for sym, _text, name, params, ret, is_static in funcs:
+    multi = len(classes) > 1
+    for sym, _text, name, params, ret, is_static, cls in funcs:
         if name.startswith("<") or not is_static:
             continue
-        base = f"{module}_{name}"
+        simple = re.sub(r"[^A-Za-z0-9_]", "_", cls.rsplit("/", 1)[-1])
+        base = f"{module}_{simple}_{name}" if multi else f"{module}_{name}"
         alias = base
         n = 2
         while alias in used:
@@ -1139,6 +1172,7 @@ def emit(module: str, cf: ClassFile, ir_path: Path, iface_path: Path) -> list[tu
         call = ", ".join(f"a{i}" for i in range(len(params)))
         rt = "" if ret == "void" else f" -> {ret}"
         lines.append(f"pub fn {alias}({args}){rt} {{")
+        lines.append(f"    {init_sym}();")
         if ret == "void":
             lines.append(f"    {sym}({call});")
         else:
@@ -1193,14 +1227,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--emit-interface")
     a = ap.parse_args(argv)
     try:
-        cf = load_class(Path(a.classfile))
+        classes = load_classes(Path(a.classfile))
         out_dir = Path(a.out_dir) if a.out_dir else None
         ir = Path(a.emit_ir) if a.emit_ir else (out_dir / f"{a.module}.ll")
         iface = Path(a.emit_interface) if a.emit_interface else (out_dir / f"{a.module}.lomt")
         if out_dir:
             out_dir.mkdir(parents=True, exist_ok=True)
-        funcs = emit(a.module, cf, ir, iface)
-        print(f"[OK] {cf.name}: {len(funcs)} method(s) -> {ir} + {iface}")
+        funcs = emit(a.module, classes, ir, iface)
+        print(f"[OK] {len(classes)} class(es), {len(funcs)} method(s) -> {ir} + {iface}")
         return 0
     except (JavaError, OSError) as e:
         print(f"[ERR] {e}", file=sys.stderr)

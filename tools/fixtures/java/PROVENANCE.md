@@ -30,7 +30,13 @@ f6cf5c1ec80d53b622ea0c37d7e316d6f5b92e90cff924bd75ab7854dacaf14a  MultiLib.class
 559d36ae8b55150ce4a3f5366394865d1cd2469a5f30c6c0a25ef8e9d21dffb2  InstanceLib.class
 5234cc7a7c3242c08764c06b043c49a8fbd9be85667974ad08e1e9d4081ccfcc  StaticLib.class
 0b179a534533c40a1f8c036a13c954dc2192d1484b0823e862126e4d8710afa5  ExcLib.class
+9e0550e7604deb5e5841f4cf76873272d35467dbf31d06a8a05f8c7cb73626fe  ClassA.class
+8ac841eb0765f768c8fa2b7b75e355d2cea5d664aa05b937fbc1a61cf5dbb340  ClassB.class
+bdf27f66639ae96aae6a24b0da6ad6b976857b128f98c9a0bff0727a81f3ee01  multiclass.jar
 ```
+
+`multiclass.jar` contains `com/example/ClassA.class` and `com/example/ClassB.class`;
+it is the multi-class fixture (cross-class `new`, static field, `invokestatic`).
 
 `loment_java_test.py` uses these files and does **not** invoke `java`, `javac`
 or `jar`; it only parses the bytes and emits Loment IR.

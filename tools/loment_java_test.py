@@ -39,10 +39,10 @@ def test(fn):
 
 
 def _emit(classfile: Path, module: str, out: Path) -> tuple[Path, Path]:
-    cf = lomjava.load_class(classfile)
+    classes = lomjava.load_classes(classfile)
     ir = out / f"{module}.ll"
     iface = out / f"{module}.lomt"
-    lomjava.emit(module, cf, ir, iface)
+    lomjava.emit(module, classes, ir, iface)
     return ir, iface
 
 
@@ -371,6 +371,29 @@ fn _start() {
         if sys.platform == "win32":
             assert rc == 0, rc
             print("      throw/catch -> 7, after() -> 3 on PE")
+        else:
+            print("SKIP: PE execution is Windows-only; IR emitted and linked to ELF")
+
+
+@test
+def test_multi_class_jar():
+    """A two-class jar: cross-class new/getfield/putstatic/invokestatic + <clinit>."""
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "deps" / "multiclass").mkdir(parents=True)
+        jar = FIX.parent.parent / "multiclass.jar"
+        ir, _iface = _emit(jar, "multiclass", d / "deps" / "multiclass")
+        rc = _build_and_run(d, ir, """module app
+use multiclass
+
+fn _start() {
+    let r: i32 = multiclass_ClassA_run();
+    syscall4(60, (r - 22) as u64, 0, 0);
+}
+""")
+        if sys.platform == "win32":
+            assert rc == 0, rc
+            print("      ClassA.run(): new/getfield/static add/value -> 22 on PE")
         else:
             print("SKIP: PE execution is Windows-only; IR emitted and linked to ELF")
 

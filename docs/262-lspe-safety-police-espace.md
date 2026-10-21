@@ -401,8 +401,8 @@ Rust 的借用检查不是一个 pass，是一整套机器：
 
 `docs/253` 已经付过一次学费：**行号会漂，码号不会**。
 站点 id 同理。P0 用 `(unit 名, kind, 站点内容, 重复序数)` 作 id ——
-站点内容是 `guard <cap>` 或 `<lhs>[<inner>]` 的 **token 文本**，
-重复序数只区分**完全相同**的表达式；**不用行号，也不用全局序号**：
+站点内容是 `guard <cap>`、`<lhs>[<inner>]` 或 `bounds:<fn>:<ptr>:<load8|store8>:<界>`
+的 **token 文本**，重复序数只区分**完全相同**的表达式；**不用行号，也不用全局序号**：
 
 - 格式化（`loment fmt`）之后 id 不变；
 - 在前面插一个**无关**站点，已有站点的 id 不变（全局序号会让它们全部重编号）；
@@ -419,6 +419,17 @@ Rust 的借用检查不是一个 pass，是一整套机器：
 3. 两个集合必须相等。
 
 不等 ⇒ **E035**（幽灵站点 / 漏登）。这条是 §8 的 I1，也是"审计者不能漏人"的地基。
+
+**第三种站点：`bounds`（LMS g1 的内联界检查，`#1021`）。** 它没有自己的语法 ——
+是 `load8` / `store8` 通过 `let p: ptr = alloc(<常量>)` 的指针时，第 3 级
+（`lms_guard`）发在热路径上的那条 `icmp ult i32 …, <const>`。这条检查是**生成**的，
+但它是真实存在的放行：不记它，台账上最新的一层安全机制就**没有来源**。
+
+它的词法规则与两侧发射器逐条同形（`census_bounds` / `lms_alloc_size`）：
+首参往回找到最近一次 `let NAME: ptr = alloc(<常量>)`，中间一次 `NAME = …` 作废；
+只认字面量与模块 `const`；档位是 `lms_guard` **且**（`lms_reject` 或 `lms_crash`）。
+证据记为 `Syntactic`（来源是**词法形状**，不是类型推导），义务记 `InBounds` ——
+`per_kind` 里它与普通下标合并计数，因为读者问的是"这一处放行凭什么"。
 
 ### 5.2 义务系统：十四种待证子目标
 
@@ -834,8 +845,10 @@ fn f(a: [u32; 4], i: u32) -> u32 {
 - 语言服务：`switchify` 里同一趟，所以补全、跳转、诊断看到的都是块体；
   编辑器语法按**成对形状**上色（`lspe`/`pass` 不是保留字）。
 
-**棘轮**：`pass_ratio` 在语料上只许降不许升（§5.11 第 1 条）。今天还没有一条
-判据钉住这条 —— 接 `gate-floors.txt` 是 0.1.5.2 的事。
+**棘轮**：`pass_ratio` 在语料上只许降不许升（§5.11 第 1 条）。基线在
+`.github/lspe-pass-baseline.txt`（逐份单元 `passed_sites` / `sites`），判据是
+`lspe_test::test_pass_ratio_does_not_increase_on_the_corpus`；加旁路块之后必须
+`python tools/lspe_ratchet.py --emit` 显式改基线 —— 那一步就是承认"多卖了一格审计"。
 
 ---
 

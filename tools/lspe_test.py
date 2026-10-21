@@ -136,6 +136,77 @@ def test_callee_with_a_pass_block_is_an_unchecked_summary():
 
 
 @test
+def test_pass_ratio_does_not_increase_on_the_corpus():
+    """`pass_ratio` 的棘轮（`docs/262` §5.16 / `#1065`）。
+
+    基线 `.github/lspe-pass-baseline.txt` 逐份钉住 `passed_sites / sites`：
+    **比值变大就红**（把站点包进 `lspe pass "…"` 必须显式改基线，那一步就是承认
+    "我多卖了一格审计"）；变小是好事，只打印。
+    """
+    from fractions import Fraction  # noqa: PLC0415
+
+    import lspe_ratchet as R  # noqa: PLC0415
+
+    base = R.load_baseline()
+    cur = R.measure()
+    stale = sorted(set(base) ^ set(cur))
+    assert not stale, (
+        "基线里的单元与语料表对不上：" + " ".join(stale) +
+        "\n  重算：`python tools/lspe_ratchet.py --emit`")
+
+    def ratio(pair):
+        p, s = pair
+        return Fraction(p, s) if s else Fraction(0)
+
+    worse, better = [], []
+    for rel in sorted(cur):
+        if ratio(cur[rel]) > ratio(base[rel]):
+            worse.append(f"{rel}: {base[rel][0]}/{base[rel][1]} -> "
+                         f"{cur[rel][0]}/{cur[rel][1]}")
+        elif ratio(cur[rel]) < ratio(base[rel]):
+            better.append(f"{rel}: {base[rel][0]}/{base[rel][1]} -> "
+                          f"{cur[rel][0]}/{cur[rel][1]}")
+    assert not worse, (
+        "这些单元的 `pass_ratio` 变大了（旁路块只能显式记账，不能顺手涨）：\n  " +
+        "\n  ".join(worse) +
+        "\n  确认是有意的就 `python tools/lspe_ratchet.py --emit` 并提交基线")
+    if better:
+        print(f"      {len(better)} 份单元的旁路率下降：" + "；".join(better[:4]))
+    total_p = sum(p for p, _ in cur.values())
+    total_s = sum(s for _, s in cur.values())
+    print(f"      {len(cur)} 份单元：{total_p}/{total_s} 个站点被旁路"
+          f"（基线 {len(base)} 份）")
+
+
+@test
+def test_bounds_sites_come_from_lms_g1():
+    """LMS g1 的内联界检查在台账里是 `bounds` 站点（`docs/262` §5.1 / `#1021`）。
+
+    它没有自己的语法：来源是**词法形状**（`let p: ptr = alloc(<常量>)` 之后
+    按发射顺序的 `load8` / `store8`），档位是 `lms_guard` 且（reject 或 crash）。
+    档位关着时**一条都不发** —— 与两侧发射器同一条判据。
+    """
+    src = ("module m\n\nfn f() -> u32 {\n    let p: ptr = alloc(8);\n"
+           "    store8(p, 0, 1);\n    let a: u32 = load8(p, 1);\n    return a;\n}\n")
+    toks = lomc.lex(src)
+    on = frozenset({"lms_guard", "lms_reject"})
+    sites, _, _ = lspe.census(toks, "m", lms=on)
+    bound = [s for s in sites if s["kind"] == "bounds"]
+    assert len(bound) == 2, sites
+    assert all(s["source"] == "lms(g1)" and s["proved"]
+               and s["obligation"] == "InBounds" for s in bound), bound
+
+    off, _, _ = lspe.census(toks, "m", lms=frozenset({"lms_check", "lms_manage"}))
+    assert not [s for s in off if s["kind"] == "bounds"], off
+
+    # `NAME = …` 让最近一次的来源作废（与发射器同一条"往回找"规则）。
+    src2 = src.replace("    let a: u32 = load8(p, 1);",
+                       "    p = p;\n    let a: u32 = load8(p, 1);")
+    s2, _, _ = lspe.census(lomc.lex(src2), "m", lms=on)
+    assert len([s for s in s2 if s["kind"] == "bounds"]) == 1, s2
+
+
+@test
 def test_ledger_shape_and_close_admin_zeroing():
     site = {"id": "m:index:1", "kind": "index", "obligation": "InBounds",
             "evidence": "Syntactic", "line": 1}

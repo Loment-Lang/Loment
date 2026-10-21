@@ -1,0 +1,56 @@
+# `lspe pass` 的通过率基线（`docs/262` §5.16 / #1065）。
+#
+# 一行一份语料单元：<路径> <passed_sites> <sites>。
+# 比值**不许变大**：把站点包进 `lspe pass "…"` 之后必须显式改这里，
+# 那一步就是"我知道自己在多卖一格审计"。比值变小是好事，照常更新、不判红。
+#
+# 重算：`python tools/lspe_ratchet.py --emit`
+loment/examples/addin/main.lomt 0 0
+loment/examples/ahci.lomt 0 0
+loment/examples/all_loment.lomt 0 6
+loment/examples/allocator.lomt 0 7
+loment/examples/bootprobe.lomt 0 1
+loment/examples/bytes.lomt 0 4
+loment/examples/cmd_hello.lomt 0 0
+loment/examples/demo.lomt 0 2
+loment/examples/fuc_node.lomt 0 0
+loment/examples/gc_ladder/main.lomt 0 2
+loment/examples/lumtui_demo.lomt 0 9
+loment/examples/mathutil.lomt 0 0
+loment/examples/native.lomt 0 0
+loment/examples/native_agg.lomt 0 3
+loment/examples/native_bits.lomt 0 0
+loment/examples/native_brk.lomt 0 2
+loment/examples/native_cap.lomt 0 2
+loment/examples/native_chain.lomt 0 0
+loment/examples/native_concat.lomt 0 0
+loment/examples/native_entry.lomt 0 0
+loment/examples/native_gen.lomt 0 0
+loment/examples/native_gen_sig.lomt 0 0
+loment/examples/native_match_full.lomt 0 6
+loment/examples/native_mem.lomt 0 5
+loment/examples/native_mut.lomt 0 6
+loment/examples/native_res.lomt 0 0
+loment/examples/native_slice.lomt 0 2
+loment/examples/native_str.lomt 0 0
+loment/examples/native_trait.lomt 0 0
+loment/examples/nested_gen/main.lomt 0 0
+loment/examples/net_ladder/main.lomt 0 0
+loment/examples/register_hello.lomt 0 0
+loment/examples/selfcheck.lomt 0 0
+loment/examples/switch.lomt 0 0
+loment/examples/toolchain.lomt 0 0
+loment/examples/tour.lomt 0 8
+loment/examples/user_hello.lomt 0 0
+loment/lib/lumtui.lomt 0 22
+loment/lib/mem.lomt 0 5
+loment/lib/num.lomt 0 0
+loment/selfhost/ir_for.lomt 0 0
+loment/selfhost/ir_mem.lomt 0 0
+loment/tools/lomcli.lomt 0 689
+loment/tools/lomsyscalls.lomt 0 34
+lompi/store/host/0.1.0/fs.lomt 0 3
+lompi/store/std/0.1.0/f64bits.lomt 0 0
+lompi/store/std/0.1.0/hash.lomt 0 30
+lompi/store/std/0.1.0/num.lomt 0 0
+lompi/store/std/0.1.0/text.lomt 0 41

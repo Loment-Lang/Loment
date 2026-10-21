@@ -104,7 +104,11 @@ def test(fn):
 #:    写穿/静默丢，现在点名拒），另外 7 处"越界由调用方报"的写进 `EXPLAINED`。
 #:    顺带 `PT_EN` 被认出是**槽位不是容量**，退出本口径。
 #: ⇒ 条数 236 → **235**、沉默 162 → **154**、沉默名 **129** 个。
-CAPACITY_SITES = 236
+#:
+#: 2026-10-21（`#1149` / `#1150`）：`loment/tools/lomelf.lomt` 新增三条**有守卫**的容量 ——
+#: `HS_MAX`（槽表）、`HS_MAXN`（单函数槽 / alloca 上界）、`ORD_MAX`（调用目标次序表）。
+#: 三条越界都点名拒绝，所以"沉默"那份不跟着动。条数 **239**。
+CAPACITY_SITES = 239
 SILENT_SITES = 155
 
 #: 第二类：字面量上界（`#770`）。`[T; N]` 与 `literal:<N>` 各自钉住总数与沉默的那一份。
@@ -272,7 +276,7 @@ SILENT_LITERALS = {
     ("loment/selfhost/interp.lomt", "literal:20"): 1,
     ("loment/selfhost/lexer.lomt", "literal:256"): 1,
     ("loment/selfhost/potato.lomt", "literal:20"): 1,
-    ("loment/lspe/lspe.lomt", "literal:14"): 1,
+    ("loment/lspe/lspe.lomt", "literal:16"): 1,
     ("loment/tools/lomadmit.lomt", "literal:4000"): 1,
     ("loment/tools/lomc.lomt", "literal:4000"): 1,
     ("loment/tools/lomcapasserts.lomt", "literal:4000"): 2,

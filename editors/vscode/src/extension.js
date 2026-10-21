@@ -15,8 +15,8 @@ const vscode = require('vscode');
 const path = require('path');
 const fs = require('fs');
 const { LanguageClient } = require('vscode-languageclient/node');
-const { findServer } = require('./server-path');
-const { invocation } = require('./build-cmd');
+const { findServer, findTool } = require('./server-path');
+const { invocation, usesModules } = require('./build-cmd');
 const { invocation: debugInvocation } = require('./debug-cmd');
 const { readGrammarDecl, languageIdFor } = require('./grammar-detect');
 const { DEFAULT_L1_EXT, sourceExtForDir } = require('./conf-ext');
@@ -58,13 +58,44 @@ function out() {
   return output;
 }
 
-/** 工作区根 (第一个文件夹); 没有就退回当前文件的目录。 */
+/**
+ * 工作区根: **包含这个文件的那个文件夹**; 单根工作区就是它自己; 没有文件夹就退回文件目录。
+ *
+ * 原先一律取 `folders[0]` —— 多根工作区里第二、第三个文件夹中的文件于是用**别人的根**
+ * 算相对路径，`build-cmd.js` 拿到 `../…` 就报"这个文件不在工作区里"（2026-10-21）。
+ */
 function workspaceRoot(fallbackDir) {
   const folders = vscode.workspace.workspaceFolders;
   if (folders && folders.length) {
+    if (fallbackDir) {
+      for (const f of folders) {
+        const base = f.uri.fsPath;
+        const rel = path.relative(base, fallbackDir);
+        if (!rel.startsWith('..') && !path.isAbsolute(rel)) {
+          return base;
+        }
+      }
+    }
     return folders[0].uri.fsPath;
   }
   return fallbackDir || undefined;
+}
+
+/**
+ * 建好 `loment.buildDir`。
+ *
+ * `loment build FILE -o <buildDir>/<stem>` 的 `-o` 只是**路径**：目录不存在时链接器说的是
+ * `lomelf: 写不了输出` —— 用户看不出跟自己有关。本仓里那个目录恰好一直在，所以只有
+ * **在别的项目里**才现形（2026-10-21 实测）。失败不拦：真写不了时编译器自己会说。
+ */
+function ensureBuildDir(root) {
+  if (!root) {
+    return;
+  }
+  try {
+    fs.mkdirSync(path.resolve(root, cfg().get('buildDir') || 'loment/build'),
+                 { recursive: true });
+  } catch (e) { /* 让编译器去报 */ }
 }
 
 function resolveServerPath() {
@@ -126,7 +157,9 @@ function targetLanguageId(doc) {
   }
   const ext = path.extname(doc.uri.fsPath).toLowerCase();
   if (!ext || ext === DEFAULT_L1_EXT) {
-    return undefined;
+    // **回 `loment`，不是"不认领"**：删掉声明之后它仍是原生 Loment 源。返回 undefined
+    // 会让它一直停在 `loment-<x>`（状态栏写着外门语法、语言服务也不接）—— 2026-10-21。
+    return 'loment';
   }
   if (extraExtensions().indexOf(ext) >= 0) {
     return 'loment';
@@ -278,6 +311,7 @@ class LomentTaskProvider {
     }
     const file = ed.document.uri.fsPath;
     const root = workspaceRoot(path.dirname(file));
+    ensureBuildDir(root);
     const out = [];
     for (const [action, label] of [['build', 'Loment: 编译'], ['run', 'Loment: 编译并运行']]) {
       const inv = invocation({
@@ -376,6 +410,7 @@ async function compileCurrent(action) {
     return;
   }
   const r = workspaceRoot(path.dirname(file));
+  ensureBuildDir(r);
   const inv = invocation({
     root: r,
     file,
@@ -437,13 +472,36 @@ function activate(context) {
       }
       const r = workspaceRoot(path.dirname(file));
       const rel = path.relative(r, file).replace(/\\/g, '/');
-      // 语言服务的 `--check` 与编辑器里的诊断同源 (自举 checker), 且**不需要 Python**
+      // **两种情况先问检出里的参考实现**（否则用户拿到的是假错）：
+      //   1. 文件有 `use` —— 两个语言服务都不解 `use` 树，跨模块调用一律报
+      //      `E002 符号未声明`（#1166）；
+      //   2. 文件声明了外门语法 —— 参考实现认得声明（`[OK]`），而**自举版** `lsp --check`
+      //      不认（2026-10-21 实测：`bitkit.lomt` 满屏 E002，Python 版同一份文件干净）。
+      // 其余单文件仍走 `--check`（**不需要 Python**）。
+      let needsReference = false;
+      try {
+        const text = fs.readFileSync(file, 'utf8');
+        const decl = readGrammarDecl(text);
+        needsReference = usesModules(text)
+          || (decl.declared && languageIdFor(decl.grammar) !== 'loment');
+      } catch (e) { /* 读不了就按单文件走 */ }
+      if (needsReference) {
+        const ref = findTool(r, 'loment.py')
+          || findTool(path.dirname(file), 'loment.py');
+        if (ref) {
+          await runToolTask('Loment: 静态检查', [ref, 'diag', file], r);
+          return;
+        }
+      }
       const inv = serverInvocation(['--check', rel]);
       if (inv) {
         await runExec('Loment: 静态检查', inv.cmd, inv.args, r, '$loment');
         return;
       }
-      await runToolTask('Loment: 静态检查', [toolPath(r, 'loment.py'), 'diag', file], r);
+      vscode.window.showErrorMessage(
+        'Loment: no checker found — this window has neither a Loment checkout '
+        + '(`tools/loment.py`) nor a language server (set `loment.serverPath` or '
+        + '`loment.serverCommand`).');
     }),
 
     vscode.commands.registerCommand('loment.runTests', async () => {

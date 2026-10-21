@@ -7,12 +7,12 @@
 const fs = require('fs');
 const path = require('path');
 
-/** 从 startDir 逐级向上找 <dir>/tools/loment_lsp.py, 最多 8 层。找不到返回 null。 */
-function findServer(startDir, maxUp) {
+/** 从 startDir 逐级向上找 `<dir>/tools/<name>`, 最多 8 层。找不到返回 null。 */
+function findTool(startDir, name, maxUp) {
   const limit = typeof maxUp === 'number' ? maxUp : 8;
   let cur = startDir ? path.resolve(startDir) : null;
   for (let i = 0; i < limit && cur; i += 1) {
-    const cand = path.join(cur, 'tools', 'loment_lsp.py');
+    const cand = path.join(cur, 'tools', name);
     if (fs.existsSync(cand)) {
       return cand;
     }
@@ -25,4 +25,9 @@ function findServer(startDir, maxUp) {
   return null;
 }
 
-module.exports = { findServer };
+/** 从 startDir 逐级向上找 <dir>/tools/loment_lsp.py, 最多 8 层。找不到返回 null。 */
+function findServer(startDir, maxUp) {
+  return findTool(startDir, 'loment_lsp.py', maxUp);
+}
+
+module.exports = { findServer, findTool };

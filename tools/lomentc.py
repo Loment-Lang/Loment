@@ -6947,6 +6947,65 @@ _L0_SAFE_BUILTINS = frozenset(("load8", "store8", "atomic_add"))
 #: 上表**故意排除**的首参为 `ptr` 的内建（每条都要有理由，见上）。判据拿它做完整性检查。
 _L0_PTR_ARG0_UNSAFE = frozenset(("free", "ptr_add", "ptr_sub"))
 
+#: 内建的安全实参位：名字 → 位掩码（第 j 位 = 第 j 个实参可以安全地传指针）。
+#:
+#: 三个内建只解引用**首参**，所以掩码恒为 `1`。用户函数的安全位由 `_gc_alpha_pass`
+#: 的**逐形参**不动点算出来（见 `_deref_summary`）—— 从 2026-10-21 起不再是"只有首参"。
+_BUILTIN_SAFE_MASK: dict[str, int] = {b: 1 for b in _L0_SAFE_BUILTINS}
+
+
+def _call_arg_pos(toks: list, k: int) -> "tuple[str, int] | None":
+    """token `k` 是不是某个**裸标识符被调**的**整个第 pos 个实参**？是则回 `(名字, pos)`。
+
+    这是 L0/L1/L2 安全判据的**唯一**位置解码器（`docs/210` §2.2.1 的 2026-10-21 放宽）：
+    以前只认第一个实参，现在任意位置都认，但那个位置必须在被调的形参摘要里也是安全的。
+
+    `k` 前面必须是 `(`（第一个实参）或 `,`（其余），后面必须是 `,` 或 `)`；然后向前找
+    本次调用的 `(`，路上按嵌套跳过括号/方括号/花括号，深度 0 的 `,` 每见一个就把位置 +1。
+    找不到"紧跟标识符的 `(`"就回 `None` —— 调用者把它当**逃逸**。
+    """
+    n = len(toks)
+
+    def word(i: int, text: str) -> bool:
+        return 0 <= i < n and toks[i].kind != "string" and toks[i].val == text
+
+    def ident(i: int) -> bool:
+        return 0 <= i < n and toks[i].kind == "ident"
+
+    if not ((word(k - 1, "(") or word(k - 1, ","))
+            and (word(k + 1, ",") or word(k + 1, ")"))):
+        return None
+    depth, pos, i = 0, 0, k - 1
+    while i >= 0:
+        if word(i, ")") or word(i, "]") or word(i, "}"):
+            depth += 1
+        elif word(i, "(") or word(i, "[") or word(i, "{"):
+            if depth == 0:
+                if word(i, "[") or word(i, "{"):
+                    return None                  # 数组/结构字面量不是调用
+                if not (ident(i - 1) and not word(i - 2, ".")
+                        and not word(i - 2, ":")):
+                    return None                  # 不是裸标识符被调
+                return (toks[i - 1].val, pos)
+            depth -= 1
+        elif word(i, ",") and depth == 0:
+            pos += 1
+        i -= 1
+    return None
+
+
+def _safe_use(toks: list, k: int, safe: dict[str, int]) -> bool:
+    """token `k` 是**某个安全位置上的整个实参**吗（`docs/210` §2.2.1 的逐形参判据）。
+
+    `safe` 是**名字 → 位掩码**：第 j 位为 1 表示"这个函数的第 j 个形参不外逃"。
+    内建的掩码在 `_BUILTIN_SAFE_MASK`；用户函数的掩码由不动点算。
+    """
+    t = _call_arg_pos(toks, k)
+    if t is None:
+        return False
+    name, pos = t
+    return bool((safe.get(name, 0) >> pos) & 1)
+
 
 def _reset_l1(stmts: list) -> None:
     """清空一棵语句树的 `Return.l1` —— `_gc_alpha_pass` 要能**幂等**重跑（同一份 mod 被
@@ -6966,21 +7025,25 @@ def _reset_l1(stmts: list) -> None:
 
 
 def _deref_summary(f: Func, toks: list):
-    """`f` 的**首参**流进哪些被调 —— `docs/210` §7 那次放宽的原料。回 `None` 或
-    `(escapes, callees)`：首参不是 `ptr` 回 `None`；`escapes` = 首参**有没有**逃逸的用法；
-    `callees` = 首参**只**当"整个第一个实参"流进去的那些被调名字。
+    """`f` 的**每个形参**流进哪些（被调, 实参位）—— `docs/210` §2.2.1 的逐形参摘要。
 
-    **规则与 L0/L1/L2 同一条，定义在 token 流上**（理由见 `_l0_promotable`）：首参名 `P`
-    在函数体内每一处出现都必须紧跟 `(`、那个 `(` 紧跟一个**标识符**被调名（不是限定名）、
-    且 `P` 后面紧跟 `,` 或 `)`。任何别的用法 —— 重新赋值、遮蔽（`let P`）、传第二参、
-    进算术、当返回值 —— 即 **escape**。
+    回 `None`（没有形参）或一张**与形参等长的表**：非 `ptr` 形参是 `None`；`ptr` 形参是
+    `(escapes, targets)` —— `escapes` 表示这个形参**有没有**逃逸的用法；`targets` 是它
+    作为"整个第 j 个实参"流进去的 `(被调名, j)` 集合。
 
-    **"安全"不在这一步判**：这里只记"流进了哪些名字"。`callees` 是否全都安全，由
+    **2026-10-21 的放宽**：以前只给首参做摘要，于是"指针传在第二个实参"一律落 L3。
+    实测 std 库里 82.9% 的 L3 站点只因为这一点被挡（`docs/210` §7），所以摘要改成
+    **逐形参**：第 j 个形参只在"每个调用点的第 j 个实参也安全"时才安全。
+
+    规则仍定义在 token 流上（理由见 `_l0_promotable`）：形参名 `P` 在函数体内每一处出现
+    都必须**恰好是某个被调的整个实参**（位置由 `_call_arg_pos` 解码）。任何别的用法 ——
+    重新赋值、遮蔽（`let P`）、进算术、当返回值 —— 即 **escape**。
+
+    **"安全"不在这一步判**：这里只记"流进了谁、在第几位"。那些位置是否安全，由
     `_gc_alpha_pass` 的**全局不动点**定 —— 于是 `load32 -> load16 -> load8` 一层层解开。
     """
-    if not f.params or f.params[0].type != "ptr":
+    if not f.params:
         return None
-    p = f.params[0].name
     at, end = f.tok_at, f.tok_end
     n = len(toks)
 
@@ -6990,20 +7053,27 @@ def _deref_summary(f: Func, toks: list):
     def ident(i: int) -> bool:
         return 0 <= i < n and toks[i].kind == "ident"
 
-    callees: set[str] = set()
-    k = at
-    while k < end:
-        if ident(k) and toks[k].val == p:
-            if word(k - 1, "let") or word(k + 1, "="):
-                return (True, frozenset())              # 遮蔽 / 重新赋值
-            if (word(k - 1, "(") and ident(k - 2) and not word(k - 3, ".")
-                    and not word(k - 3, ":")
-                    and (word(k + 1, ",") or word(k + 1, ")"))):
-                callees.add(toks[k - 2].val)
-            else:
-                return (True, frozenset())              # 其余任何用法：逃逸
-        k += 1
-    return (False, frozenset(callees))
+    per = []
+    for p in f.params:
+        if p.type != "ptr":
+            per.append(None)
+            continue
+        escapes = False
+        targets: set[tuple[str, int]] = set()
+        k = at
+        while k < end:
+            if ident(k) and toks[k].val == p.name:
+                if word(k - 1, "let") or word(k + 1, "="):
+                    escapes = True                          # 遮蔽 / 重新赋值
+                    break
+                t = _call_arg_pos(toks, k)
+                if t is None:
+                    escapes = True                          # 其余任何用法：逃逸
+                    break
+                targets.add(t)
+            k += 1
+        per.append((escapes, frozenset(targets)))
+    return per
 
 
 def _gc_alpha_pass(mod: Module, deps: list[Module] | None = None) -> None:
@@ -7016,9 +7086,10 @@ def _gc_alpha_pass(mod: Module, deps: list[Module] | None = None) -> None:
 
     两半：
 
-    1. **全局不动点**：`safe = 三个内建`；反复把"首参是 `ptr`、不外逃、且 `callees` 全落在
-       `safe` 里"的用户函数加进去，直到不动。于是 `load8`（内建）⇒ `load16`（只进 `load8`）
-       ⇒ `load32`（只进 `load16`）一层层解开。
+    1. **全局不动点**：`safe` 是**名字 → 位掩码**（第 j 位 = 第 j 个形参不外逃），起点是
+       三个内建（掩码 `1`）；反复把"其中一些位不外逃、且它们流进的每个 (被调, 实参位) 也
+       安全"的位加进去，直到不动。于是 `load8`（内建）⇒ `load16`（首参只进 `load8`）⇒
+       `load32`（首参只进 `load16`）一层层解开。
     2. **跑分析**：对每个**自己选了 `gc_auto_alpha`** 的模块，用这张 `safe` 重算 L0/L1/L2。
        **幂等**（先清空三张表再算），所以同一份 mod 被 emit 两次也不会叠。
 
@@ -7026,19 +7097,27 @@ def _gc_alpha_pass(mod: Module, deps: list[Module] | None = None) -> None:
     `choose`"一致：默认档一行都不动）。
     """
     mods = list(deps or []) + [mod]
-    safe: set[str] = set(_L0_SAFE_BUILTINS)
+    safe: dict[str, int] = dict(_BUILTIN_SAFE_MASK)
     changed = True
     while changed:
         changed = False
         for m in mods:
             for f in list(m.funcs) + [g for im in m.impls for g in im.funcs]:
-                if f.name in safe or f.deref is None:
+                if f.deref is None:
                     continue
-                escapes, callees = f.deref
-                if not escapes and callees <= safe:
-                    safe.add(f.name)
+                mask = 0
+                for i, s in enumerate(f.deref):
+                    if s is None:
+                        continue
+                    escapes, targets = s
+                    if escapes:
+                        continue
+                    if all(((safe.get(c, 0) >> pos) & 1) for c, pos in targets):
+                        mask |= 1 << i
+                if mask and (safe.get(f.name, 0) | mask) != safe.get(f.name, 0):
+                    safe[f.name] = safe.get(f.name, 0) | mask
                     changed = True
-    frozen = frozenset(safe)
+    frozen = dict(safe)
     for m in mods:
         if m.chooses.get("gc") != "gc_auto_alpha":
             continue
@@ -7227,7 +7306,7 @@ def _provably_free(toks: list, s: int, e: int) -> bool:
 
 
 def _l0_promotable(f: Func, toks: list,
-                   safe: "frozenset[str] | set[str]" = _L0_SAFE_BUILTINS) -> dict[str, int]:
+                   safe: "dict[str, int] | None" = None) -> dict[str, int]:
     """`gc_auto_alpha` 的 **L0**：哪些 `alloc(<常量>)` 可以**提升到栈**。回 `{变量名: 字节数}`。
 
     **规则定义在 token 流上，不在 AST 上 —— 这是有意的**，也是它与自举侧
@@ -7357,7 +7436,7 @@ def _syscall_borrow_ok(toks: list, i: int) -> bool:
 
 
 def _ptr_only_uses(toks: list, at: int, end: int, name: str, nm: int,
-                   safe: "frozenset[str] | set[str]" = _L0_SAFE_BUILTINS) -> tuple[bool, int, int]:
+                   safe: "dict[str, int] | None" = None) -> tuple[bool, int, int]:
     """`name` 在 `[at, end)` 里**只被解引用透过、从不外逃**？回 `(ok, 声明次数, 最后出现下标)`。
 
     **L0 与 L1 共用这一条**（它们的差别只在"尺寸要不要字面量"与"插不插 `free`"）——
@@ -7374,9 +7453,8 @@ def _ptr_only_uses(toks: list, at: int, end: int, name: str, nm: int,
     def ident(i: int) -> bool:
         return 0 <= i < n and toks[i].kind == "ident"
 
-    def safe_callee(i: int) -> bool:
-        return (ident(i) and toks[i].val in safe
-                and not word(i - 1, ".") and not word(i - 1, ":"))
+    if safe is None:
+        safe = _BUILTIN_SAFE_MASK
 
     ok, ndecl, last = True, 0, -1
     k = at
@@ -7391,17 +7469,14 @@ def _ptr_only_uses(toks: list, at: int, end: int, name: str, nm: int,
             elif word(k + 1, "="):
                 ok = False                          # 重新赋值
                 break
-            elif not ((word(k - 1, "(") and safe_callee(k - 2)
-                       and (word(k + 1, ",") or word(k + 1, ")")))
-                      or _syscall_borrow_ok(toks, k)):
+            elif not (_safe_use(toks, k, safe) or _syscall_borrow_ok(toks, k)):
                 ok = False                          # 其余任何用法：外逃
                 break
         k += 1
     return ok, ndecl, last
 
 
-def _l1_place(f: Func, toks: list,
-              safe: "frozenset[str] | set[str]" = _L0_SAFE_BUILTINS) -> None:
+def _l1_place(f: Func, toks: list, safe: "dict[str, int] | None" = None) -> None:
     """`gc_auto_alpha` 的 **L1（定活）**：把 `free` 挂到 AST 上（`s.l1` / `f.l1`）。
 
     **这一层证的是什么**：某个 `alloc` 出来的块，在**它最后一次被用到之后**立刻还掉。
@@ -7549,7 +7624,7 @@ def _int_lit(v: str) -> int:
 
 
 def _l2_ok(toks: list, at: int, end: int, fend: int, l0: dict[str, int],
-           safe: "frozenset[str] | set[str]" = _L0_SAFE_BUILTINS) -> bool:
+           safe: "dict[str, int] | None" = None) -> bool:
     """循环体能不能在末尾**批量归还**（`docs/210` §2 的 **L2**）。**规则也定义在 token 流上。**
 
     这是"回收时间而不是对象"今天能落地的那一半：**体的末尾把分配器的前沿退回去**，
@@ -7579,9 +7654,8 @@ def _l2_ok(toks: list, at: int, end: int, fend: int, l0: dict[str, int],
     def ident(i: int) -> bool:
         return 0 <= i < n and toks[i].kind == "ident"
 
-    def safe_callee(i: int) -> bool:
-        return (ident(i) and toks[i].val in safe
-                and not word(i - 1, ".") and not word(i - 1, ":"))
+    if safe is None:
+        safe = _BUILTIN_SAFE_MASK
 
     nalloc = 0
     for k in range(at, end):
@@ -7627,9 +7701,7 @@ def _l2_ok(toks: list, at: int, end: int, fend: int, l0: dict[str, int],
                     return False           # 体内第二处声明（遮蔽）：认不清哪个是哪个
                 elif word(k + 1, "="):
                     return False           # 重新赋值
-                elif not ((word(k - 1, "(") and safe_callee(k - 2)
-                           and (word(k + 1, ",") or word(k + 1, ")")))
-                          or _syscall_borrow_ok(toks, k)):
+                elif not (_safe_use(toks, k, safe) or _syscall_borrow_ok(toks, k)):
                     return False
         if ndecl != 1:
             return False
@@ -9593,9 +9665,17 @@ def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3) -> Modu
 
     tt, _dias = loment_comefor.expand(tt, text)
     mod = Parser(tt, text).parse()
+    # **开关表先挂上**（原先在下面几条之后）：LSPE 的 `bounds` 普查要读 LMS 的档位，
+    # 而档位既可能来自档名、也可能来自 `choose close lms_guard` 这种显式覆盖 ——
+    # 后者只在表里。挂晚了，普查会退回档名，于是"关着 guard 却记了 g1 站点"（#1021）。
+    mod.switches = tbl          # **整个程序**的表（单文件装载时就是 `own`）
     # LSPE 的站点普查（`docs/262` §5.1）：在**最终 token 流**上算一次。
     # 与自举侧 `potato.lomt` 的 `pt_lspe` 同一条规则 —— twin 的计数不能漂。
-    mod.lspe_sites, mod.lspe_unsourced_lines, mod.lspe_passes = lspe.census(tt, mod.name)
+    # LMS 的 g1 内联界检查也是站点（`#1021`）：档位从**开关表**读（预扫已按档铺过
+    # 初值），与发射器同一个读法。
+    _lms_on = frozenset(n for n in LMS_TOGGLES if _lms_level(mod, n))
+    mod.lspe_sites, mod.lspe_unsourced_lines, mod.lspe_passes = lspe.census(
+        tt, mod.name, lms=_lms_on)
     mod.lspe_level = lspe_level
     # 方言清单挂在模块上，供 Potato v4 用（`docs/184` §9 S4.3）。**定义那一段已经被
     # 抹掉了**，所以这是唯一还记得"这份源用了哪些自定义语法"的地方。
@@ -9605,7 +9685,6 @@ def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3) -> Modu
     # 基础语法的一种拼法、归到 `loment`；别的写法给的是那一门的规范名）。
     # 与 `dialects` 同一个做法：不是 dataclass 字段，是装载时挂上去的。
     mod.grammar = _fu.grammar
-    mod.switches = tbl          # **整个程序**的表（单文件装载时就是 `own`）
     mod.own_switches = own      # 本模块**自己**写的 —— 只有"库不许 choose"用它
     # `addin` 的行单独记一份 —— 它被抹掉了，而"库里写了 `addin` 却没生效"要能报出来。
     _d = 0

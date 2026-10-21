@@ -27,6 +27,7 @@ br/switch/phi；直接 call（<= 6 实参）；内联汇编 syscall；atomicrmw 
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import struct
@@ -672,6 +673,13 @@ class Emitter:
         self.allocas: dict[str, tuple[int, int]] = {}
         self.frame = 0
         self.phis: dict[str, list[Instr]] = {}
+        #: 热更新的元数据（`#1149`）：每个函数的帧布局哈希与调用点表。
+        #: 采集**不改一个字节**（见 `loment_hotmeta_test` 的加性判据），只有
+        #: `--hot-meta PATH` 才落盘。
+        self.hot_funcs: list[dict] = []
+        self._hot_entry = 0
+        self._hot_calls: list[tuple[str, int]] = []
+        self._hot_seq: dict[str, int] = {}
 
     # ---- 帧
 
@@ -1151,6 +1159,7 @@ class Emitter:
             self.asm.emit(mov_rr(RBX, RSP))
             self.asm.emit(alu_ri(AND_, RSP, -16))
             self.asm.call(callee[1:], extern=True)
+            self._hot_record("extern:" + callee[1:])
             self.asm.emit(mov_rr(RSP, RBX))
             self.asm.emit(pop_r(RBX))
             # **返回值照旧落回目标槽** —— 与内部调用同一步。少了这一句, 调用结果**丢掉**,
@@ -1184,6 +1193,7 @@ class Emitter:
             self.asm.emit(b"\x0F\x0B")
         else:
             self.asm.call(callee[1:])
+            self._hot_record(callee[1:])
         if total:
             self.asm.emit(alu_ri(ADD, RSP, total))
         if d is not None and not ret_agg:
@@ -1340,6 +1350,9 @@ class Emitter:
         self.cur = f
         self.plan_frame(f)
         self.asm.label(f.name)
+        self._hot_entry = self.asm.here()
+        self._hot_calls = []
+        self._hot_seq = {}
         self.asm.emit(b"\x55")          # push rbp
         self.asm.emit(b"\x48\x89\xE5")  # mov rbp, rsp
         if self.frame:
@@ -1349,7 +1362,24 @@ class Emitter:
             self.asm.label(self.blk(blk.label))
             for ins in blk.instrs:
                 self.lower(ins)
+        self.hot_funcs.append({
+            "name": f.name,
+            "frame": self.frame,
+            "layout": self._frame_layout(),
+            "calls": self._hot_calls,
+        })
         self.cur = None
+
+    def _frame_layout(self) -> str:
+        parts = [f"frame={self.frame}"]
+        parts.extend(f"s{o}" for o in sorted(set(self.slots.values())))
+        parts.extend(f"a{o}/{z}" for o, z in sorted(self.allocas.values()))
+        return hashlib.sha256("\n".join(parts).encode("ascii")).hexdigest()
+
+    def _hot_record(self, target: str) -> None:
+        n = self._hot_seq.get(target, 0)
+        self._hot_seq[target] = n + 1
+        self._hot_calls.append((f"{target}@{n}", self.asm.here() - self._hot_entry))
 
     def _call_stub_slot(self, skip_label: str) -> None:
         """调 `[rbx]` 指向的函数；空槽与 `-1` 哨兵跳过（`#611`）。
@@ -6189,8 +6219,23 @@ CONSCRIPT = ("memcpy", "memset", "memcmp", "__stack_chk_fail", "malloc", "free")
 _TLS_SIZE = 256
 
 
+def hot_metadata(funcs: list[dict]) -> str:
+    """`.lomhot` 的文本形（`#1149`）。
+
+    顺序是**确定的**：函数按 IR 顺序，调用点按发射顺序。偏移是**函数相对**的
+    （从函数入口算起），所以换一个槽地址、换一次链接都不改这些数。
+    """
+    out = ["lomhot 1"]
+    for fn in funcs:
+        out.append(f"func {fn['name']} frame={fn['frame']} layout={fn['layout']}")
+        for cid, off in fn["calls"]:
+            out.append(f"call {cid} at={off}")
+    return "\n".join(out) + "\n"
+
+
 def compile_ll(text: str, objects: list | None = None,
-               allow_ports: bool = False, interp: str | None = None) -> tuple[bytes, dict]:
+               allow_ports: bool = False, interp: str | None = None,
+               collect_hot: bool = True) -> tuple[bytes, dict]:
     objects = objects or []
     global TEXT_VADDR, DATA_VADDR
     TEXT_VADDR, DATA_VADDR = ELF_TEXT_VADDR, ELF_DATA_VADDR   # PE 目标会改这两个全局
@@ -6644,6 +6689,7 @@ def compile_ll(text: str, objects: list | None = None,
         "funcs": [f.name for f in funcs], "objects": [o.name for o in objects],
         "linked": appended, "relocs": applied,
         "shared": [s.soname for s in shared], "imports": imported,
+        "hot": hot_metadata(em.hot_funcs) if collect_hot else "",
     }
 
 
@@ -6654,6 +6700,7 @@ def main(argv: list[str] | None = None) -> int:
     out, check, target = None, False, "elf"
     allow_ports = False
     interp = None
+    hot_meta = None
     files: list[str] = []
     link: list[Path] = []
     i = 0
@@ -6677,12 +6724,17 @@ def main(argv: list[str] | None = None) -> int:
         elif a == "--link":
             i += 1
             link.append(Path(argv[i]))
+        elif a == "--hot-meta":
+            # 热更新的元数据（`#1149`）：帧布局哈希 + 调用点表。**不影响产物一个字节**。
+            i += 1
+            hot_meta = argv[i]
         else:
             files.append(a)
         i += 1
     if len(files) != 1 or target not in ("elf", "pe"):
         print("用法: lomelf.py IN.ll [-o OUT] [--target elf|pe] [--check]"
-              " [--link OBJ.o ...] [--allow-ports] [--interp PATH]", file=sys.stderr)
+              " [--link OBJ.o ...] [--allow-ports] [--interp PATH] [--hot-meta PATH]",
+              file=sys.stderr)
         return 2
     if link and target == "pe":
         print("[ERR] --link 目前只支持 ELF 目标 (docs/173 §3)", file=sys.stderr)
@@ -6702,6 +6754,15 @@ def main(argv: list[str] | None = None) -> int:
     if check:
         print(f"[OK] {src} 可编 (text {info['text']} B, data {info['data']} B, bss {info['bss']} B)")
         return 0
+    if hot_meta:
+        if target != "elf":
+            print("[ERR] --hot-meta 目前只支持 ELF 目标", file=sys.stderr)
+            return 2
+        try:
+            Path(hot_meta).write_text(info["hot"], encoding="utf-8", newline="\n")
+        except OSError as e:
+            print(f"[ERR] 写不了 {hot_meta}: {e.strerror or e}", file=sys.stderr)
+            return 1
     if out is None:
         out = str(src.with_suffix(".exe" if target == "pe" else ""))
     # **写不出去要说话，而且要说清是哪个路径**（`issue #8`）。这里原先是一句**裸写**：

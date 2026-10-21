@@ -277,6 +277,46 @@ def check(candidate: Path, tree: Path, *, state: Path | None = None,
     return cand
 
 
+def parse_hot_meta(text: str) -> dict[str, dict]:
+    """`.lomhot`（`#1149`）-> {函数名: {frame, layout, calls}}。"""
+    funcs: dict[str, dict] = {}
+    cur: dict | None = None
+    for line in text.splitlines():
+        w = line.split()
+        if not w:
+            continue
+        if w[0] == "func":
+            if len(w) < 4:
+                raise Reject("hot-meta", line)
+            kv = dict(x.split("=", 1) for x in w[2:])
+            cur = {"frame": int(kv["frame"]), "layout": kv["layout"], "calls": []}
+            funcs[w[1]] = cur
+        elif w[0] == "call" and cur is not None:
+            cur["calls"].append((w[1], int(w[2].split("=", 1)[1])))
+    return funcs
+
+
+def remap_plan(old: dict[str, dict], new: dict[str, dict]) -> dict[str, dict]:
+    """哪些函数能在安全点被改指到新镜像（`#1152` 用它）。
+
+    两个条件缺一不可：帧布局哈希相同（槽位读得到）、调用点 id 序列相同
+    （返回地址能一一对上）。任一不同 -> `remap: false`，只能等它没有活跃帧时再换。
+    """
+    plan: dict[str, dict] = {}
+    for name, o in old.items():
+        n = new.get(name)
+        if n is None:
+            plan[name] = {"remap": False, "why": "missing"}
+            continue
+        same_calls = [c for c, _ in o["calls"]] == [c for c, _ in n["calls"]]
+        same_layout = o["layout"] == n["layout"]
+        plan[name] = {
+            "remap": same_calls and same_layout,
+            "why": "" if same_calls and same_layout else ("calls" if not same_calls else "layout"),
+        }
+    return plan
+
+
 def _diff_keys(a: dict | None, b: dict) -> str:
     a = a or {}
     added = sorted(set(a) - set(b))
@@ -304,6 +344,15 @@ def cmd_manifest(args: argparse.Namespace) -> int:
         Path(args.out).write_text(text, encoding="utf-8", newline="\n")
     else:
         sys.stdout.write(text)
+    return 0
+
+
+def cmd_compare(args: argparse.Namespace) -> int:
+    old = parse_hot_meta(Path(args.old).read_text(encoding="utf-8"))
+    new = parse_hot_meta(Path(args.new).read_text(encoding="utf-8"))
+    for name, row in remap_plan(old, new).items():
+        print(f"remap {name} {'yes' if row['remap'] else 'no'}"
+              + (f" ({row['why']})" if row["why"] else ""))
     return 0
 
 
@@ -342,6 +391,11 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--allow-rollback", action="store_true",
                    help="explicit operator rollback: skip the monotonic check")
     c.set_defaults(fn=cmd_check)
+
+    p = sub.add_parser("compare", help="which functions can be remapped between two builds")
+    p.add_argument("--old", required=True, help="the running build's .lomhot")
+    p.add_argument("--new", required=True, help="the candidate's .lomhot")
+    p.set_defaults(fn=cmd_compare)
 
     args = ap.parse_args(argv)
     return args.fn(args)

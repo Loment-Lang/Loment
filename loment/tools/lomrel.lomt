@@ -397,6 +397,7 @@ tools/loment_state.py
 tools/loment_state_test.py
 tools/loment_update.py
 tools/loment_update_test.py
+tools/loment_hotmeta_test.py
 ";
 }
 

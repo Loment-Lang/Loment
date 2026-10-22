@@ -586,6 +586,133 @@ class Emitter:
         self.tmp += 1
         return f"%t{self.tmp}"
 
+    # ---- String.equals / hashCode, inline over the UTF-16 bytes ----------
+    #
+    # Bytes rather than `i16` loads: both linkers already handle `load i8`
+    # (every string path uses it), while a 16-bit load is one more instruction
+    # shape to keep in agreement.
+
+    def _str_units(self, s: str, i: str) -> tuple[str, str]:
+        """Return (lo, hi) bytes of code unit `i` of String value `s`."""
+        d = self.t()
+        q = self.t()
+        self.emit(f"{d} = getelementptr i8, ptr {s}, i32 8")
+        self.emit(f"{d} = load ptr, ptr {d}")
+        self.emit(f"{q} = mul i32 {i}, 2")
+        p = self.t()
+        self.emit(f"{p} = getelementptr i8, ptr {d}, i32 {q}")
+        lo = self.t()
+        self.emit(f"{lo} = load i8, ptr {p}")
+        q2 = self.t()
+        self.emit(f"{q2} = add i32 {q}, 1")
+        p2 = self.t()
+        self.emit(f"{p2} = getelementptr i8, ptr {d}, i32 {q2}")
+        hi = self.t()
+        self.emit(f"{hi} = load i8, ptr {p2}")
+        return lo, hi
+
+    def _str_len(self, s: str) -> str:
+        q = self.t()
+        v = self.t()
+        self.emit(f"{q} = getelementptr i8, ptr {s}, i32 16")
+        self.emit(f"{v} = load i32, ptr {q}")
+        return v
+
+    def _string_equals(self, recv: str, other: str) -> str:
+        n = self.lbl
+        self.lbl += 1
+        r = self.t()
+        self.emit(f"{r} = alloca i32")
+        self.emit(f"store i32 0, ptr {r}")
+        oi = self.t()
+        self.emit(f"{oi} = ptrtoint ptr {other} to i64")
+        iz = self.t()
+        self.emit(f"{iz} = icmp eq i64 {oi}, 0")
+        self.emit(f"br i1 {iz}, label %SE{n}D, label %SE{n}L")
+        self.emit(f"SE{n}L:")
+        l1 = self._str_len(recv)
+        l2 = self._str_len(other)
+        le = self.t()
+        self.emit(f"{le} = icmp eq i32 {l1}, {l2}")
+        self.emit(f"br i1 {le}, label %SE{n}I, label %SE{n}D")
+        self.emit(f"SE{n}I:")
+        i = self.t()
+        self.emit(f"{i} = alloca i32")
+        self.emit(f"store i32 0, ptr {i}")
+        self.emit(f"br label %SE{n}P")
+        self.emit(f"SE{n}P:")
+        iv = self.t()
+        self.emit(f"{iv} = load i32, ptr {i}")
+        go = self.t()
+        self.emit(f"{go} = icmp slt i32 {iv}, {l1}")
+        self.emit(f"br i1 {go}, label %SE{n}B, label %SE{n}S")
+        self.emit(f"SE{n}B:")
+        a1, b1 = self._str_units(recv, iv)
+        a2, b2 = self._str_units(other, iv)
+        c1 = self.t()
+        c2 = self.t()
+        ce = self.t()
+        self.emit(f"{c1} = icmp eq i8 {a1}, {a2}")
+        self.emit(f"{c2} = icmp eq i8 {b1}, {b2}")
+        self.emit(f"{ce} = and i1 {c1}, {c2}")
+        self.emit(f"br i1 {ce}, label %SE{n}N, label %SE{n}D")
+        self.emit(f"SE{n}N:")
+        nv = self.t()
+        self.emit(f"{nv} = add i32 {iv}, 1")
+        self.emit(f"store i32 {nv}, ptr {i}")
+        self.emit(f"br label %SE{n}P")
+        self.emit(f"SE{n}S:")
+        self.emit(f"store i32 1, ptr {r}")
+        self.emit(f"br label %SE{n}D")
+        self.emit(f"SE{n}D:")
+        rv = self.t()
+        self.emit(f"{rv} = load i32, ptr {r}")
+        self._push("i32", rv, 0)
+        return rv
+
+    def _string_hash(self, recv: str) -> str:
+        n = self.lbl
+        self.lbl += 1
+        h = self.t()
+        self.emit(f"{h} = alloca i32")
+        self.emit(f"store i32 0, ptr {h}")
+        l1 = self._str_len(recv)
+        i = self.t()
+        self.emit(f"{i} = alloca i32")
+        self.emit(f"store i32 0, ptr {i}")
+        self.emit(f"br label %SH{n}P")
+        self.emit(f"SH{n}P:")
+        iv = self.t()
+        self.emit(f"{iv} = load i32, ptr {i}")
+        go = self.t()
+        self.emit(f"{go} = icmp slt i32 {iv}, {l1}")
+        self.emit(f"br i1 {go}, label %SH{n}B, label %SH{n}D")
+        self.emit(f"SH{n}B:")
+        lo, hi = self._str_units(recv, iv)
+        h0 = self.t()
+        hv = self.t()
+        cu = self.t()
+        hiw = self.t()
+        h1 = self.t()
+        h2 = self.t()
+        nv = self.t()
+        self.emit(f"{h0} = load i32, ptr {h}")
+        self.emit(f"{hv} = mul i32 {h0}, 31")
+        self.emit(f"{cu} = zext i8 {lo} to i32")
+        self.emit(f"{hiw} = zext i8 {hi} to i32")
+        self.emit(f"{hiw} = shl i32 {hiw}, 8")
+        self.emit(f"{h1} = add i32 {hv}, {cu}")
+        self.emit(f"{h2} = add i32 {h1}, {hiw}")
+        self.emit(f"store i32 {h2}, ptr {h}")
+        self.emit(f"{nv} = add i32 {iv}, 1")
+        self.emit(f"store i32 {nv}, ptr {i}")
+        self.emit(f"br label %SH{n}P")
+        self.emit(f"SH{n}D:")
+        rv = self.t()
+        self.emit(f"{rv} = load i32, ptr {h}")
+        self._push("i32", rv, 0)
+        return rv
+
     def emit(self, s: str) -> None:
         self.lines.append("  " + s)
 
@@ -971,6 +1098,10 @@ class Emitter:
                     r = self.t()
                     self.emit(f"{r} = call {ret} @{sym}({argtxt})")
                     self._push(ret, r, h0 - n - 1)
+            elif cls == "java/lang/String" and mname == "equals" and desc == "(Ljava/lang/Object;)Z":
+                self._string_equals(recv, vals[0])
+            elif cls == "java/lang/String" and mname == "hashCode" and desc == "()I":
+                self._string_hash(recv)
             elif cls == "java/lang/String" and mname == "length" and desc == "()I":
                 q = self.t()
                 self.emit(f"{q} = getelementptr i8, ptr {recv}, i32 16")

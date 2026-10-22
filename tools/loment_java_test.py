@@ -450,6 +450,25 @@ fn _start() {
           f"{len(err)} of stderr")
 
 
+@test
+def test_string_equals_and_hash_code():
+    """#1060: String.equals/hashCode agree with Java, ASCII and non-ASCII."""
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "deps" / "streq").mkdir(parents=True)
+        ir, _iface = _emit(FIX / "StrEq.class", "streq", d / "deps" / "streq")
+        rc = _build_and_run(d, ir, """module app
+use streq
+
+fn _start() {
+    let r: i32 = streq_run();
+    syscall4(60, r as u64, 0, 0);
+}
+""")
+    assert rc == 63, rc
+    print("      equals/hashCode: 63 (six checks, including 中文)")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_java_test")
 

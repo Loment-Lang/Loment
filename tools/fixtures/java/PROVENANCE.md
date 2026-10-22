@@ -10,7 +10,7 @@ javac --release 8 -d classes src/com/example/MathLib.java src/com/example/Branch
                             src/com/example/LongLib.java src/com/example/MultiLib.java \
                             src/com/example/ArrayLib.java src/com/example/ObjLib.java \
                             src/com/example/StringLib.java src/com/example/InstanceLib.java \
-                            src/com/example/StaticLib.java src/com/example/ExcLib.java \n                            src/com/example/PrintLib.java
+                            src/com/example/StaticLib.java src/com/example/ExcLib.java \n                            src/com/example/PrintLib.java \n                            src/com/example/StrEq.java
 ```
 
 Sources are next to the class files. They are compiled with `--release 8` so the
@@ -31,13 +31,15 @@ f6cf5c1ec80d53b622ea0c37d7e316d6f5b92e90cff924bd75ab7854dacaf14a  MultiLib.class
 5234cc7a7c3242c08764c06b043c49a8fbd9be85667974ad08e1e9d4081ccfcc  StaticLib.class
 0b179a534533c40a1f8c036a13c954dc2192d1484b0823e862126e4d8710afa5  ExcLib.class
 a8a472bbf1a2a37dabbb87084c7b8400cb83954799d3dd85861d61bc79a7654a  PrintLib.class
+274dc509c73bd439d0853941f3fec6f1108c210cc8dfa2095657925d02084f26  StrEq.class
 9e0550e7604deb5e5841f4cf76873272d35467dbf31d06a8a05f8c7cb73626fe  ClassA.class
 8ac841eb0765f768c8fa2b7b75e355d2cea5d664aa05b937fbc1a61cf5dbb340  ClassB.class
 bdf27f66639ae96aae6a24b0da6ad6b976857b128f98c9a0bff0727a81f3ee01  multiclass.jar
 ```
 
-`PrintLib` is the jrt printing fixture (`System.out`/`err`, `Math`); its
-expected output is in `tools/loment_java_test.py`.
+`PrintLib` is the jrt printing fixture (`System.out`/`err`, `Math`); `StrEq`
+covers `String.equals` / `hashCode` (ASCII and `中文`). Their expected values
+are in `tools/loment_java_test.py`.
 
 `multiclass.jar` contains `com/example/ClassA.class` and `com/example/ClassB.class`;
 it is the multi-class fixture (cross-class `new`, static field, `invokestatic`).

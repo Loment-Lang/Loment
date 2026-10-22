@@ -291,6 +291,7 @@ tools/jtrans.py
 tools/loment_jtrans_test.py
 tools/lomjava.py
 tools/loment_java_test.py
+tools/loment_jrt.py
 tools/cstrans.py
 tools/loment_cstrans_test.py
 tools/cpptrans.py
@@ -311,6 +312,7 @@ tools/loment_rel_test.py
 tools/loment_pkg_test.py
 tools/loment_lomc_test.py
 loment/lib/*.lomt
+loment/lib/jrt/*
 tools/loment_lsp_test.py
 tools/loment_editors_test.py
 editors/vim/*.md

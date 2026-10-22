@@ -56,18 +56,15 @@ def _app_ir(tmp: Path, body: str) -> str:
     return lomentc.emit_llvm(mod, ROOT, deps)
 
 
-def _build_and_run(tmp: Path, lib: Path, app_src: str) -> int:
-    """Build one app + one library; return the product's exit code.
-
-    On non-Windows this compiles the merged IR to ELF only (the build path is
-    still exercised) and returns 0; the caller prints the SKIP.
-    """
+def _build_and_run_io(tmp: Path, libs: list[Path], app_src: str) -> tuple[int, bytes, bytes]:
+    """Build one app + N libraries; return (exit code, stdout, stderr)."""
     app_ll = tmp / "app.ll"
     app_ll.write_text(_app_ir(tmp, app_src), encoding="utf-8")
     merged = tmp / "merged.ll"
     merged.write_text(lomelf.merge_ir_texts(
-        [app_ll.read_text(encoding="utf-8"), lib.read_text(encoding="utf-8")],
-        [str(app_ll), str(lib)]), encoding="utf-8")
+        [app_ll.read_text(encoding="utf-8")] +
+        [p.read_text(encoding="utf-8") for p in libs],
+        [str(app_ll)] + [str(p) for p in libs]), encoding="utf-8")
     text = merged.read_text(encoding="utf-8")
     if sys.platform == "win32":
         blob, _info = lomelf.compile_pe(text)
@@ -78,7 +75,11 @@ def _build_and_run(tmp: Path, lib: Path, app_src: str) -> int:
     exe.write_bytes(blob)
     exe.chmod(0o755)
     r = subprocess.run([str(exe)], capture_output=True, timeout=30)
-    return r.returncode
+    return r.returncode, r.stdout, r.stderr
+
+
+def _build_and_run(tmp: Path, lib: Path, app_src: str) -> int:
+    return _build_and_run_io(tmp, [lib], app_src)[0]
 
 
 @test
@@ -419,6 +420,34 @@ def test_bad_class_is_rejected():
             assert "magic" in str(e) or "truncated" in str(e), e
         else:
             raise AssertionError("corrupt class accepted")
+
+
+@test
+def test_jrt_println_end_to_end():
+    """#1060: System.out/err print/println and Math's integer subset, through jrt.
+
+    `jrt.ll` is the shared runtime (generated from `loment/lib/jrt/jrt.lomt`);
+    the app, the library and the runtime are merged into one product. The
+    expected bytes are what the JVM prints for the same class.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "deps" / "printlib").mkdir(parents=True)
+        ir, _iface = _emit(FIX / "PrintLib.class", "printlib", d / "deps" / "printlib")
+        jrt = ROOT / "loment" / "lib" / "jrt" / "jrt.ll"
+        rc, out, err = _build_and_run_io(d, [ir, jrt], """module app
+use printlib
+
+fn _start() {
+    printlib_hello();
+    syscall4(60, 0, 0, 0);
+}
+""")
+    assert rc == 0, rc
+    assert out == b"hello\n42\n-7\nx=1234567890123\n5\n3\n9\n", out
+    assert err == b"e\n", err
+    print(f"      println/print + Math -> {len(out)} bytes of stdout, "
+          f"{len(err)} of stderr")
 
 
 def main() -> int:

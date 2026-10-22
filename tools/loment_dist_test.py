@@ -1393,6 +1393,45 @@ def test_java_dependency_autolinks() -> None:
           r.returncode != 0 and "undefined label" in out, out[-300:])
     lt.with_suffix(".bak").rename(lt)
 
+    # ---- #1060: the shared runtime, once per closure, from the package's share/
+    import loment_jrt
+    check("jrt.ll 与 jrt.lomt 一致（不是手改的旧产物）",
+          loment_jrt.main(["--check"]) == 0)
+    (pkg / "share" / "loment" / "jrt" / "0.1.0").mkdir(parents=True)
+    (pkg / "share" / "loment" / "jrt" / "0.1.0" / "jrt.ll").write_bytes(
+        (ROOT / "loment" / "lib" / "jrt" / "jrt.ll").read_bytes())
+    proj2 = work / "proj2"
+    (proj2 / "deps" / "printlib").mkdir(parents=True)
+    classes = lomjava.load_classes(ROOT / "tools/fixtures/java/com/example/PrintLib.class")
+    pir = proj2 / "deps" / "printlib" / "printlib.ll"
+    lomjava.emit("printlib", classes, pir, proj2 / "deps" / "printlib" / "printlib.lomt")
+    (proj2 / "deps" / "printlib" / "link.txt").write_text(
+        "# lompi link v1\n"
+        f"ir printlib.ll {hashlib.sha256(pir.read_bytes()).hexdigest()}\n"
+        "runtime jrt 0.1.0\n", encoding="utf-8", newline="\n")
+    (proj2 / "app.lomt").write_text(
+        "module app\nuse printlib\n\nfn _start() {\n"
+        "    printlib_hello();\n    syscall4(60, 0, 0, 0);\n}\n",
+        encoding="utf-8", newline="\n")
+    if os.name == "nt":
+        cmd2 = [r"C:\Windows\System32\cmd.exe", "/c", str(launcher),
+                "build", "app.lomt", "-o", "app"]
+    else:
+        cmd2 = [str(launcher), "build", "app.lomt", "-o", "app"]
+    r = subprocess.run(cmd2, cwd=str(proj2), capture_output=True, text=True, env=env)
+    exe2 = proj2 / ("app.exe" if os.name == "nt" else "app")
+    check("runtime jrt 从包里加上（不用 --java-lib）",
+          r.returncode == 0 and exe2.exists(),
+          ((r.stdout or "") + (r.stderr or ""))[-300:])
+    if exe2.exists():
+        if os.name != "nt":
+            exe2.chmod(0o755)
+        rr = subprocess.run([str(exe2)], capture_output=True)
+        check("println/print 的输出与 JVM 相同",
+              rr.returncode == 0
+              and rr.stdout == b"hello\n42\n-7\nx=1234567890123\n5\n3\n9\n"
+              and rr.stderr == b"e\n", repr(rr.stdout[-80:]) + repr(rr.stderr[-40:]))
+
 
 def main() -> int:
     print("loment_dist_test —— 发行包判据 (docs/162)")

@@ -2052,7 +2052,20 @@ fn one_global(tab: ptr, t: ptr, gb: ptr, ls: u32, le: u32) -> u32 {
     let k: u32 = skip_sp(t, to + tl, le);
     let doff: u32 = align_to(cell(tab, C_GB), 8);
     let zero: u32 = 0;
-    let sz: u32 = emit_init(t, gb, doff, to, tl, k, le - k);
+    // `zeroinitializer`（或压根没写初值）**不进数据缓冲**：`emit_init` 会把类型
+    // 大小的零字节真的写进 `gb`，而 `gb` 是固定暂存 —— 一个 1 MiB 的
+    // `internal global [1048576 x i8] zeroinitializer`（`jrt`/java 分配器就有）
+    // 会把后面的表**整片冲掉**，症状是几条街以外的一句"undefined label"。
+    // 参考实现本来就不物化全零全局（`g.data` 是空字节串），这里对齐它。
+    let zi: u32 = 0;
+    let p0: u32 = skip_sp(t, k, le);
+    if k >= le || lit_at(t, p0, le, "zeroinitializer") == 1 {
+        zi = 1;
+    }
+    let sz: u32 = tysz;
+    if zi == 0 {
+        sz = emit_init(t, gb, doff, to, tl, k, le - k);
+    }
     // 全零 -> bss。与参考实现同判: 判据是**内容长度 + 内容**, 不是 `zeroinitializer`
     // 关键字（`if g.data != b"\0" * size_of(g.ty)`）—— 长度不等于类型大小的一律进 data,
     // 例如 `c"..."` 比它那个数组类型短的时候。
@@ -2061,7 +2074,7 @@ fn one_global(tab: ptr, t: ptr, gb: ptr, ls: u32, le: u32) -> u32 {
         nz = 1;
     }
     let q: u32 = 0;
-    while q < sz {
+    while q < sz && zi == 0 {
         if load8(gb, doff + q) != 0 {
             nz = 1;
         }

@@ -3286,6 +3286,12 @@ def payload(kind: str, bins: dict[str, tuple[bytes, bytes]]) -> dict[str, tuple[
     # 2026-09-16 真装了一遍才看见 (判据里跑的都是仓库内的路径, 照不出来)。
     for lib in sorted((ROOT / "loment" / "lib").glob("*.lomt")):
         files[f"share/loment/lib/{lib.name}"] = (lib.read_bytes(), 0o644)
+    # `jrt` is the minimal Java runtime (docs/281 §7). The build wrapper adds
+    # `share/loment/jrt/<ver>/jrt.ll` once per closure when a dependency's
+    # `link.txt` names `runtime jrt <ver>`.
+    for name in ("jrt.ll", "jrt.lomt"):
+        files[f"share/loment/jrt/0.1.0/{name}"] = (
+            _read(f"loment/lib/jrt/{name}"), 0o644)
     files["share/loment/skill/SKILL.md"] = (_read(SKILL), 0o644)
     # lompi 是独立命令，它那份指南也放**自己**的 share 树下，不塞进 share/loment/
     files["share/lompi/skill/SKILL.md"] = (_read(SKILL_LOMPI), 0o644)

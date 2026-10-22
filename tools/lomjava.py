@@ -282,12 +282,12 @@ def _one_type(s: str, i: int) -> tuple[str, int]:
         while j < len(s) and s[j] == "[":
             j += 1
         _, j = _one_type(s, j)
-        return "ref", j
+        return "ptr", j
     if c == "L":
         j = s.find(";", i)
         if j < 0:
             raise JavaError("bad reference descriptor")
-        return "ref", j + 1
+        return "ptr", j + 1
     if c == "Z" or c == "B" or c == "C" or c == "S" or c == "I":
         return "i32", i + 1
     if c == "J":
@@ -533,6 +533,15 @@ entry:
 '''
 
 
+_JRT_DECLS = """declare void @jrt_print_i32(i64, i32)
+declare void @jrt_println_i32(i64, i32)
+declare void @jrt_print_i64(i64, i64)
+declare void @jrt_println_i64(i64, i64)
+declare void @jrt_print_s(i64, ptr)
+declare void @jrt_println_s(i64, ptr)
+declare void @jrt_println(i64)"""
+
+
 def mangle(module: str, cls: str, name: str, desc: str) -> str:
     h = hashlib.sha256(f"{cls}.{name}{desc}".encode()).hexdigest()[:8]
     # `<init>` is not a legal LLVM symbol character; keep the digest (which is
@@ -570,6 +579,7 @@ class Emitter:
         self.strn = 0
         self.lines: list[str] = []
         self.tmp = 0
+        self.lbl = 0
         self.locals: dict[tuple[int, str], str] = {}
 
     def t(self) -> str:
@@ -697,7 +707,12 @@ class Emitter:
                  "iconst_3": 3, "iconst_4": 4, "iconst_5": 5}[name]
             self._push("i32", str(v), h0)
         elif name == "bipush":
-            self._push("i32", str(x.args[0]), h0)
+            # The byte operand is signed; the decoder keeps it unsigned so that
+            # `ldc`/`iload` indices (the other users of "b") stay indices.
+            v = x.args[0]
+            if v >= 128:
+                v -= 256
+            self._push("i32", str(v), h0)
         elif name == "sipush":
             self._push("i32", str(x.args[0]), h0)
         elif name in ("ldc", "ldc_w"):
@@ -878,17 +893,27 @@ class Emitter:
             self._push("ptr", p, h0)
         elif name in ("getstatic", "putstatic"):
             cls, fname, desc = fieldref(self.pool, x.args[0])
-            meta = self.metas.get(cls)
-            if meta is None or fname not in meta.static_layout:
-                raise JavaError(f"{name} {cls}.{fname}: static field is not in the linked set")
-            sym, ty = meta.static_layout[fname]
-            if name == "getstatic":
+            # `System.out` / `System.err` are PrintStream objects in Java; here
+            # they are just the file descriptor, carried as a pointer constant.
+            if (name == "getstatic" and cls == "java/lang/System"
+                    and fname in ("out", "err") and desc == "Ljava/io/PrintStream;"):
+                fd = 1 if fname == "out" else 2
                 v = self.t()
-                self.emit(f"{v} = load {ty}, ptr @{sym}")
-                self._push(ty, v, h0)
+                self.emit(f"{v} = inttoptr i64 {fd} to ptr")
+                self._push("ptr", v, h0)
             else:
-                v = self._pop(ty, h0 - 1)
-                self.emit(f"store {ty} {v}, ptr @{sym}")
+                meta = self.metas.get(cls)
+                if meta is None or fname not in meta.static_layout:
+                    raise JavaError(
+                        f"{name} {cls}.{fname}: static field is not in the linked set")
+                sym, ty = meta.static_layout[fname]
+                if name == "getstatic":
+                    v = self.t()
+                    self.emit(f"{v} = load {ty}, ptr @{sym}")
+                    self._push(ty, v, h0)
+                else:
+                    v = self._pop(ty, h0 - 1)
+                    self.emit(f"store {ty} {v}, ptr @{sym}")
         elif name == "getfield":
             cls, fname, desc = fieldref(self.pool, x.args[0])
             meta = self.metas.get(cls)
@@ -920,7 +945,23 @@ class Emitter:
             for i in range(n - 1, -1, -1):
                 vals[i] = self._pop(params[i], h0 - n + i)
             recv = self._pop("ptr", h0 - n - 1)
-            if cls in self.registry:
+            if cls == "java/io/PrintStream" and mname in ("print", "println"):
+                fd = self.t()
+                self.emit(f"{fd} = ptrtoint ptr {recv} to i64")
+                nl = "ln" if mname == "println" else ""
+                if n == 0 and mname == "println":
+                    self.emit(f"call void @jrt_println(i64 {fd})")
+                elif n == 1 and params[0] == "i32":
+                    self.emit(f"call void @jrt_print{nl}_i32(i64 {fd}, i32 {vals[0]})")
+                elif n == 1 and params[0] == "i64":
+                    self.emit(f"call void @jrt_print{nl}_i64(i64 {fd}, i64 {vals[0]})")
+                elif n == 1 and params[0] == "ptr":
+                    self.emit(f"call void @jrt_print{nl}_s(i64 {fd}, ptr {vals[0]})")
+                else:
+                    raise JavaError(
+                        f"PrintStream.{mname}{desc} is not supported yet "
+                        f"(only int, long, String, and println())")
+            elif cls in self.registry:
                 sym = mangle(self.module, cls, mname, desc)
                 argtxt = ", ".join([f"ptr {recv}"] +
                                    [f"{t} {v}" for t, v in zip(params, vals)])
@@ -1023,6 +1064,61 @@ class Emitter:
                 self._push(ty, v, h0 - 2)
         elif name == "invokestatic":
             cls, mname, desc = methodref(self.pool, x.args[0])
+            # `java.lang.Math`'s integer subset: lowered inline, no runtime call.
+            if cls == "java/lang/Math" and mname in ("abs", "min", "max"):
+                if desc in ("(I)I", "(J)J") and mname == "abs":
+                    ty = "i32" if desc == "(I)I" else "i64"
+                    a = self._pop(ty, h0 - 1)
+                    # Same reason as min/max: a branch + store is the shape the
+                    # self-hosted linker already agrees on (a mask/`ashr`
+                    # shortcut was miscompiled there).
+                    n = self.lbl
+                    self.lbl += 1
+                    p = self.t(); c = self.t()
+                    self.emit(f"{p} = alloca {ty}")
+                    self.emit(f"{c} = icmp slt {ty} {a}, 0")
+                    self.emit(f"br i1 {c}, label %AB{n}N, label %AB{n}P")
+                    self.emit(f"AB{n}N:")
+                    nm = self.t()
+                    self.emit(f"  {nm} = sub {ty} 0, {a}")
+                    self.emit(f"  store {ty} {nm}, ptr {p}")
+                    self.emit(f"  br label %AB{n}E")
+                    self.emit(f"AB{n}P:")
+                    self.emit(f"  store {ty} {a}, ptr {p}")
+                    self.emit(f"  br label %AB{n}E")
+                    self.emit(f"AB{n}E:")
+                    r = self.t()
+                    self.emit(f"  {r} = load {ty}, ptr {p}")
+                    self._push(ty, r, h0 - 1)
+                elif desc in ("(II)I", "(JJ)J") and mname in ("min", "max"):
+                    ty = "i32" if desc == "(II)I" else "i64"
+                    b = self._pop(ty, h0 - 1)
+                    a = self._pop(ty, h0 - 2)
+                    # A mask (`sext i1`) shortcut is correct in LLVM but the
+                    # self-hosted linker's 1-bit handling has bitten before
+                    # (#224); a store + branch is the boring shape both
+                    # backends already agree on.
+                    n = self.lbl
+                    self.lbl += 1
+                    p = self.t()
+                    c = self.t()
+                    self.emit(f"{p} = alloca {ty}")
+                    self.emit(f"{c} = icmp {'slt' if mname == 'min' else 'sgt'} {ty} {a}, {b}")
+                    self.emit(f"br i1 {c}, label %MM{n}A, label %MM{n}B")
+                    self.emit(f"MM{n}A:")
+                    self.emit(f"  store {ty} {a}, ptr {p}")
+                    self.emit(f"  br label %MM{n}E")
+                    self.emit(f"MM{n}B:")
+                    self.emit(f"  store {ty} {b}, ptr {p}")
+                    self.emit(f"  br label %MM{n}E")
+                    self.emit(f"MM{n}E:")
+                    r = self.t()
+                    self.emit(f"  {r} = load {ty}, ptr {p}")
+                    self._push(ty, r, h0 - 2)
+                else:
+                    raise JavaError(f"Math.{mname}{desc} is not supported yet")
+                self._check_exc(x)
+                return
             if cls not in self.registry:
                 raise JavaError(
                     f"invokestatic {cls}.{mname}{desc}: class is not in the linked set")
@@ -1151,7 +1247,8 @@ def emit(module: str, classes: list[ClassFile], ir_path: Path,
     init_lines += ["  br label %done", "done:", "  ret void", "}"]
     ir_path.write_text("\n\n".join(globals_) + "\n\n" +
                        "\n\n".join(x[1] for x in funcs) + "\n\n" +
-                       "\n".join(init_lines) + "\n\n" + _jrt_alloc_ir(module),
+                       "\n".join(init_lines) + "\n\n" +
+                       _JRT_DECLS + "\n\n" + _jrt_alloc_ir(module),
                        encoding="utf-8", newline="\n")
 
     decls = [f"extern fn {init_sym}();"]

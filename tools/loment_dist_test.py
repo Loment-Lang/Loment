@@ -1284,8 +1284,10 @@ def test_java_dependency_autolinks() -> None:
     built = loment_dist.build_tools({"loment-driver", "loment-lomelf"})
     for name in ("loment-driver", "loment-lomelf"):
         elf, pe = built[name]
-        (pkg / "bin" / (f"{name}.exe" if os.name == "nt" else name)).write_bytes(
-            pe if os.name == "nt" else elf)
+        exe = pkg / "bin" / (f"{name}.exe" if os.name == "nt" else name)
+        exe.write_bytes(pe if os.name == "nt" else elf)
+        if os.name != "nt":
+            exe.chmod(0o755)          # `[ -x ]` 在启动器的 `need` 里就是这么问的
     if os.name == "nt":
         launcher = pkg / "bin" / "loment.cmd"
         launcher.write_bytes(loment_dist._subst(loment_dist.LAUNCHER_CMD)
@@ -1295,14 +1297,25 @@ def test_java_dependency_autolinks() -> None:
         launcher = pkg / "bin" / "loment"
         launcher.write_bytes(loment_dist._subst(loment_dist.LAUNCHER_SH).encode("ascii"))
         launcher.chmod(0o755)
-        path_var = "/usr/bin:/bin"
+        # CI 的 `/usr/bin` 里有 java（runner 镜像自带 JRE），所以"PATH 里没有 java"
+        # 不能靠 `/usr/bin:/bin` 来说 —— 那只是**这台机器**恰好没有。造一个只放
+        # 启动器真正要用到的命令的目录，PATH 只有它。
+        pathbin = pkg / "pathbin"
+        pathbin.mkdir()
+        for cmd in ("bash", "env", "dirname", "mktemp", "rm", "ls", "cat", "sed",
+                    "sort", "uniq", "cut", "grep", "sha256sum", "chmod"):
+            real = shutil.which(cmd)
+            if real:
+                (pathbin / cmd).symlink_to(real)
+        path_var = str(pathbin)
     for tool in ("java", "javac", "jar", "clang"):
         check(f"PATH 里没有 {tool}", shutil.which(tool, path=path_var) is None)
     # `wsl.exe` 本身就住在 System32 里，拿 PATH 排除不掉；`cmd`/`certutil`/`findstr`
     # 却非它不可。所以这一条判**启动器不调用它**（与 ELF 那条原生执行合起来才是完整的话）。
     ltext = launcher.read_text(encoding="utf-8", errors="replace")
-    # （`wslpath` 是 sh 启动器的路径转换，不是"转发到 WSL 去跑"—— 只排除 `wsl ` / `wsl.exe`。）
-    check("启动器不调用 wsl", "wsl " not in ltext.lower() and "wsl.exe" not in ltext.lower())
+    # 只看代码行（注释里说"under WSL"不算调用）；`wslpath` 是路径转换，不是转发。
+    lcode = "\n".join(l for l in ltext.splitlines() if not l.lstrip().startswith(("#", "rem")))
+    check("启动器不调用 wsl", not re.search(r"\bwsl(?!path)", lcode, re.I))
 
     classes = lomjava.load_classes(ROOT / "tools/fixtures/java/com/example/MathLib.class")
     ir = proj / "deps" / "mathlib" / "mathlib.ll"
@@ -1327,6 +1340,9 @@ def test_java_dependency_autolinks() -> None:
     check("deps/*/link.txt 自动链接出一个产物", r.returncode == 0 and exe.exists(),
           ((r.stdout or "") + (r.stderr or ""))[-300:])
     if exe.exists():
+        if os.name != "nt":
+            # `build` 不设执行位（只有 `run` chmod —— 既有行为，与后端的其余判据一致）。
+            exe.chmod(0o755)
         rr = subprocess.run([str(exe)], capture_output=True)
         check("产物原生跑：mathlib_add(2,3) = 5", rr.returncode == 5, f"rc={rr.returncode}")
         if os.name == "nt":

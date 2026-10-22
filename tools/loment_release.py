@@ -380,6 +380,8 @@ GLOBS = [
     "tools/loment_hotmeta_test.py",
     # 构建档（`#1150`）：槽表 + 入口闸。**插入位置与 lomrel.lomt 逐行对齐**。
     "tools/loment_hotswap_test.py",
+    # 双槽装载器参考模型（`#1151`）：重定位表、装槽、翻转。**同位置**。
+    "tools/loment_hotload.py", "tools/loment_hotload_test.py",
 ]
 
 

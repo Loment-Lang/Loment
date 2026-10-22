@@ -1,0 +1,183 @@
+// hotswap.lomt — 热更新的固定核：把一份候选镜像装进第二个槽，然后把槽表翻过去。
+// （`#1151`，规范 `docs/281`；参考实现 `tools/loment_hotload.py` / `_exec.py`）
+//
+// **这段代码不进槽表的重定位范围**：它自己就是换代码的那一方。它只碰两样东西 ——
+// 候选镜像的文本段（新槽）与本镜像的槽表（就地改）。
+//
+// 输入是一份扁平的装载件（测试的 harness 生成）：
+//
+//   0   u32 magic "HOTL"
+//   4   u32 self_base        本镜像的文本基址
+//   8   u32 self_slots       槽表条数
+//   12  u32 self_gate        入口闸的文本相对偏移
+//   16  u32 self_gate_len    闸的字节数（两侧必须一致）
+//   20  u32 cand_base        候选镜像的链接基址
+//   24  u32 cand_slots
+//   28  u32 cand_gate
+//   32  u32 cand_text_len
+//   36  u32 nreloc
+//   40  u32 nfunc
+//   44  u32 text_len
+//   HOT_HDR  nreloc × (u32 off, u32 target_lo, u32 target_hi)
+//   ... nfunc × (u32 slot, u32 entry)
+//   ... text[text_len]
+//
+// 返回 0 = 装上了；其它值是点名拒绝（见每个 `return` 的数字）。
+
+module hotswap
+choose runtime
+
+use bytes
+use sha256
+
+const HOT_MAGIC: u32 = 1280593736;   // "HOTL"（0x4C544F48）
+const HOT_SLOT: u32 = 268435456;     // 0x10000000
+const HOT_STRIDE: u32 = 16;
+const HOT_MAX_FN: u32 = 4096;
+const HOT_HDR: u32 = 48;             // 装载件头
+const HOT_RELOC: u32 = 12;           // 一条重定位的字节数
+const HOT_FUNC: u32 = 8;             // 一个函数条目的字节数
+const HOT_DIG: u32 = 32;             // sha256 摘要字节数
+const HOT_MMAP_FLAGS: u32 = 50;      // PRIVATE 2 | FIXED 0x10 | ANON 0x20
+const HOT_PROT_RW: u32 = 3;
+const HOT_PROT_RX: u32 = 5;
+//: 改自己的槽表时**不能撤 EXEC**：装载器自己正从那一页取指。真实的固定核会住在一块
+//: 单独的、不参与换页的区域；这一版为了自包含，补丁期间用 RWX，打完立刻收回 RX。
+const HOT_PROT_RWX: u32 = 7;
+
+fn l32(p: ptr, o: u32) -> u32 {
+    return load32(p, o);
+}
+
+fn p32(v: u32) -> ptr {
+    return v as ptr;
+}
+
+fn page_up(v: u32) -> u32 {
+    return (v + 4095) / 4096 * 4096;
+}
+
+fn digest_at(buf: ptr, src: ptr, len: u32, ctx: ptr, dig: ptr) -> u32 {
+    sha_init(ctx);
+    sha_update(ctx, src, len);
+    sha_update(ctx, str_ptr("stride=16"), 9);
+    sha_final(ctx, dig);
+    return 0;
+}
+
+/// 装一份候选。`blob` 是装载件，`n` 是它的字节数。
+pub fn hot_install(blob: ptr, n: u32) -> u32 {
+    if n < HOT_HDR {
+        return 1;
+    }
+    if l32(blob, 0) != HOT_MAGIC {
+        return 2;
+    }
+    let self_base: u32 = l32(blob, 4);
+    let self_slots: u32 = l32(blob, 8);
+    let self_gate: u32 = l32(blob, 12);
+    let self_gate_len: u32 = l32(blob, 16);
+    let cand_base: u32 = l32(blob, 20);
+    let cand_slots: u32 = l32(blob, 24);
+    let cand_gate: u32 = l32(blob, 28);
+    let cand_text_len: u32 = l32(blob, 32);
+    let nreloc: u32 = l32(blob, 36);
+    let nfunc: u32 = l32(blob, 40);
+    let text_len: u32 = l32(blob, 44);
+    let text_at: u32 = HOT_HDR + nreloc * HOT_RELOC + nfunc * HOT_FUNC;
+    if n < text_at + text_len {
+        return 3;
+    }
+    if self_slots != cand_slots || cand_slots > HOT_MAX_FN {
+        return 4;
+    }
+    if self_gate_len != 25 {
+        return 5;
+    }
+    // 固定核摘要：两侧的闸字节 + 槽表的定长。不同 = 不是同一段机器码，拒绝。
+    let sc: ptr = alloc(4096);
+    if sc as u64 == 0 {
+        return 6;
+    }
+    let ctx: ptr = sc;
+    let d1: ptr = ptr_add(sc, 1024);
+    let d2: ptr = ptr_add(sc, 1088);
+    let _a: u32 = digest_at(sc, ptr_add(p32(self_base), self_gate), self_gate_len, ctx, d1);
+    let _b: u32 = digest_at(sc, ptr_add(blob, text_at + cand_gate), self_gate_len, ctx, d2);
+    let i: u32 = 0;
+    while i < HOT_DIG {
+        if load8(d1, i) != load8(d2, i) {
+            return 7;
+        }
+        i = i + 1;
+    }
+    // 新槽：定址、匿名、私有。
+    let span: u32 = page_up(cand_text_len);
+    let mp: i64 = syscall7(9, HOT_SLOT as u64, span as u64, HOT_PROT_RW as u64,
+                           HOT_MMAP_FLAGS as u64, 0, 0);
+    if mp < 0 {
+        return 8;
+    }
+    if mp as u64 != HOT_SLOT as u64 {
+        return 9;
+    }
+    let dst: ptr = p32(HOT_SLOT);
+    i = 0;
+    while i < text_len {
+        store8(dst, i, load8(blob, text_at + i) as u8);
+        i = i + 1;
+    }
+    // 只平移**指向候选文本自身**的绝对量；数据引用是共享状态，一个字节都不动。
+    let k: u32 = 0;
+    while k < nreloc {
+        let ro: u32 = HOT_HDR + k * HOT_RELOC;
+        let off: u32 = l32(blob, ro);
+        let lo: u32 = l32(blob, ro + 4);
+        let hi: u32 = l32(blob, ro + 8);
+        if hi == 0 && lo >= cand_base && lo < cand_base + cand_text_len {
+            store32(dst, off, lo + HOT_SLOT - cand_base);
+            store32(dst, off + 4, 0);
+        }
+        k = k + 1;
+    }
+    if syscall4(10, HOT_SLOT as u64, span as u64, HOT_PROT_RX as u64) < 0 {
+        return 10;
+    }
+    // 每个候选入口都要落在文本段里，槽号在表内。
+    let f: u32 = 0;
+    while f < nfunc {
+        let fo: u32 = HOT_HDR + nreloc * HOT_RELOC + f * HOT_FUNC;
+        let slot: u32 = l32(blob, fo);
+        let entry: u32 = l32(blob, fo + 4);
+        if slot >= cand_slots {
+            return 11;
+        }
+        if entry >= cand_text_len {
+            return 12;
+        }
+        f = f + 1;
+    }
+    // 改自己的槽表：先放开写，改完收回执行权限。
+    let self_span: u32 = page_up(self_slots * HOT_STRIDE);
+    if syscall4(10, self_base as u64, self_span as u64, HOT_PROT_RWX as u64) < 0 {
+        return 13;
+    }
+    f = 0;
+    while f < nfunc {
+        let fo: u32 = HOT_HDR + nreloc * HOT_RELOC + f * HOT_FUNC;
+        let slot: u32 = l32(blob, fo);
+        let entry: u32 = l32(blob, fo + 4);
+        let at: u32 = self_base + slot * HOT_STRIDE;
+        let rel: i32 = (HOT_SLOT + entry) as i32 - (at + 5) as i32;
+        store8(at as ptr, 0, 233 as u8);          // E9
+        store32(at as ptr, 1, rel as u32);
+        f = f + 1;
+    }
+    if syscall4(10, self_base as u64, self_span as u64, HOT_PROT_RX as u64) < 0 {
+        return 14;
+    }
+    // epoch：闸里那条 movabs 的立即数就是那个字的地址（共享数据段）。
+    let ep: u32 = load32(p32(self_base), self_gate + 6);
+    store32(ep as ptr, 0, 1);
+    return 0;
+}

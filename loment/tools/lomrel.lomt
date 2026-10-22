@@ -403,6 +403,7 @@ tools/loment_hotswap_test.py
 tools/loment_hotload.py
 tools/loment_hotload_exec.py
 tools/loment_hotload_test.py
+tools/loment_hotcore_test.py
 ";
 }
 

@@ -198,6 +198,19 @@ EXPLAINED: dict[tuple[str, str], str] = {
         "示例程序的设计画布高度（36），同 `W`",
     ("loment/examples/native.lomt", "SCALE"):
         "示例程序的缩放系数（3），只参与尺寸计算；不是编译器或工具的固定表",
+    # ---- 2026-10-22（`#1151`）热更新的固定核 ----
+    ("loment/lib/hotswap.lomt", "HOT_STRIDE"):
+        "槽表的**步长**（16 B），不是「能装多少」；条数由 `HOT_MAX_FN` 守",
+    ("loment/lib/hotswap.lomt", "HOT_RELOC"):
+        "一条重定位记录的**字节数**（12），与 `J_NODE_STRIDE` 同形",
+    ("loment/lib/hotswap.lomt", "HOT_FUNC"):
+        "一个函数条目的**字节数**（8），同上",
+    ("loment/lib/hotswap.lomt", "HOT_HDR"):
+        "装载件头的长度（48）；`n < HOT_HDR` 那条直接返回 1，调用方按**返回码**点名",
+    ("loment/lib/hotswap.lomt", "HOT_DIG"):
+        "sha256 摘要的字节数（32），循环上界由算法定",
+    ("loment/lib/hotswap.lomt", "HOT_MAX_FN"):
+        "槽表条数上限（4096）；越界返回 4，调用方按**返回码**点名",
 }
 
 #: 字面量上界 / 定长数组的逐条来路。键是 `(文件, literal:<N>)` / `(文件, array:[T;N])`。

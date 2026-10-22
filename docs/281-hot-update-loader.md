@@ -48,14 +48,32 @@ reloc 38 8388608
 `movabs` 的立即数里读出来，断言它落在共享数据段里。
 
 它**不**负责：原子发布 epoch（今天只是读写同一个字）、释放旧槽、把活跃帧改指过去
-（`#1152`）。把装载器本身写进 Loment 的固定核也还没做。
+（`#1152`）。
+
+### 3.1 固定核：`loment/lib/hotswap.lomt`
+
+同一套步骤的 **Loment 实现**（这才是会随工具链一起发出去的那一份）：
+
+- `hot_install(blob, n)` 收一份扁平装载件（头 + 重定位表 + 函数表 + 候选文本），
+  自己 `mmap` 第二个槽（`syscall7(9, …)`）、复制、按目标分类改绝对量、`mprotect` 成 RX；
+- 固定核摘要**在进程内现算**：`sha256(本镜像的闸字节 + "stride=16")` 与候选的逐字节比；
+- 改自己的槽表时**不能撤 EXEC** —— 装载器自己正从那一页取指。这一版为了自包含，
+  补丁期间用 RWX（真实的固定核应该住在一块单独的、不参与换页的区域，那样可以一直 RW 或
+  用双映射）；打完立刻收回 RX。
+- 失败**不终止进程**：返回一个数字（1 头太短 / 2 魔数 / 3 长度 / 4 槽表 / 5 闸长 /
+  6 内存 / 7 摘要 / 8 mmap / 9 地址 / 10 mprotect / 11 槽号 / 12 入口 / 13-14 自改），
+  由调用方点名。探针把返回码与结果一起打出来。
+
+`tools/loment_hotcore_test.py` 让一个真的 Loment 探针**换掉自己**：先调 `add(1,2)` 得 3，
+把装载件交给固定核，再调一次得 4；epoch 由装载器写成 1。另两条判据把候选的闸改一个字节
+（返回 7）、把槽表条数改掉（返回 4），两次都保持 `AFTER 3`、`EPOCH 0`。
 
 ## 4. 判据
 
 | 判据 | 问法 |
 |---|---|
 | `test_metadata_carries_a_relocation_table` | 每条 `reloc` 的偏移上，文本里的 8 字节值**就是**记录的目标？ |
-| `test_relocation_shifts_every_absolute_value` | 搬到 `0x10000000` 后，每条都正好加了 delta？ |
+| `test_data_references_are_shared_not_shifted` | 搬到 `0x10000000` 后，数据引用**保持原值**？ |
 | `test_new_slot_trampolines_stay_inside_the_slot` | 新镜像每条槽的 `E9` 都落在新槽内部？ |
 | `test_flip_rewrites_the_old_slot_table` | 翻转后旧槽表每条 `jmp` 都指到新实现？ |
 | `test_fixed_core_mismatch_is_refused` | 固定核摘要不同 → `fixed-core`？ |
@@ -63,15 +81,20 @@ reloc 38 8388608
 | `test_function_set_mismatch_is_refused` | 函数集合不同 → `table`？ |
 | `test_ping_pong_between_two_targets` | 连翻两次，槽表从 A 指到 B 再指回 A？ |
 | `test_executes_in_a_real_process` | 真进程里翻转前后调同一个函数：3 -> 4？epoch 在共享数据段？ |
+| `test_fixed_core_flips_its_own_table` | 固定核（Loment）在自己进程里装槽表：3 -> 4、返回 0、epoch=1？ |
+| `test_tampered_digest_is_refused` | 候选的闸改一个字节 → 返回 7，`AFTER 3`、`EPOCH 0`？ |
+| `test_slot_shape_mismatch_is_refused` | 槽表条数不同 → 返回 4，没装？ |
 
 夹具两份镜像都由 `tools/lomentc.py` + `tools/lomelf.py` 从真的 `.lomt` 源编出来，
 元数据是链接器写的，不手写。执行那条在 Windows 上走 WSL，Linux 上原生。
 
 ## 5. 这一版**不**做到的
 
-1. **Loment 侧的固定核还没写。** 进程里的参考实现是 Python（`loment_hotload_exec.py`）；
-   真正的装载器要长在工具链里，并且做原子发布 epoch、释放旧槽、在安全点调用 `#1152` 的重映射。
-2. **epoch 只是读写同一个字**，没有 release/acquire 语义，也没有"翻转进行中"的保护。
+1. **固定核还是"自包含探针"形态**：它改了正运行的那一页（RWX 窗口）、只按**条数**核对
+   函数集合（不逐名比）、并且还没有接进工具链的构建（`loment build --profile hotswap`
+   的管线还缺）。真实形态要把它放在单独的不换页区域，并逐名核对槽表。
+2. **epoch 只是读写同一个字**，没有 release/acquire 语义，也没有"翻转进行中"的保护；
+   旧槽也不释放（`#1152` 之前旧帧还在里面跑）。
 3. **数据段里的绝对指针**：今天的产物把字符串等放进 `.data`，引用它们的是代码里的
    `movabs`（在表里，且**不平移**——数据是共享的）。一份在**数据里**存**代码**指针的产物
    （函数指针表）才需要按目标分类做真正的重定位；语言今天没有函数指针。

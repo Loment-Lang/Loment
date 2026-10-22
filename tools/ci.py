@@ -154,6 +154,8 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "lspe_test", "potato_
                  "loment_hotswap_test",
                  # 双槽装载器参考模型（`#1151`）：重定位表、装槽、翻转、拒绝面。
                  "loment_hotload_test",
+                 # 固定核（`loment/lib/hotswap.lomt`）在真进程里换掉自己（`#1151`）。
+                 "loment_hotcore_test",
                  # LVM 的 T0（`docs/243`）：同一批程序，**原生产物与 VM** 比 stdout 字节 + 退出码。
                  "lvm_test",
                  # LVM 自举镜像的**孪生判据**（`docs/243` §5）：同一份 `.ll` 喂参考实现与
@@ -404,6 +406,8 @@ SHARD_COST = {
     "loment_hotswap_test": 1.7,
     # 2026-10-22（#1151）：本机 Windows 实测 1.1s（两份小源各编一次 + 一次 WSL 真跑）。
     "loment_hotload_test": 1.1,
+    # 2026-10-22（#1151）：本机 Windows 实测 2.3s（三次真进程，每次两份小源各编一次）。
+    "loment_hotcore_test": 2.3,
     "loment_std_test": 3.1,
     "loment_store_twin_test": 261.6,
     # 2026-10-19（#772）：本机实测 13.2s（建一次 stage1 + 两个编译器各跑一个 21 格的

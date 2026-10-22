@@ -61,12 +61,19 @@ def _parse(text: str):
     return mod
 
 
+#: 这个会话对外的列编码。**LSP 3.17 的默认是 utf-16**，而服务端内部的列是
+#: UTF-8 字节偏移（`#707`）—— 只有在客户端 `initialize` 里声明了 utf-8 时才直接说字节。
+#:
+#: **为什么必须有这一层**：`vscode-languageclient` 10.1.1 写死
+#: `general.positionEncodings = ['utf-16']` 并对别的编码**直接抛错**
+#: （`client.js:1106`）—— 服务端无条件回 utf-8 等于让每个 VS Code 连不上（`#1171`）。
+_POSITION_ENCODING = "utf-16"
+
+
 def _utf8_to_index(s: str, col: int) -> int:
     """LSP 的 `character`（UTF-8 字节偏移）-> Python str 下标（码点）。
 
-    `initialize` 里声明了 `positionEncoding: "utf-8"`（`#707`）：本服务对外用**字节**
-    列（词法器的 `col` 逐字节走）。Python 的字符串下标按码点走 —— 含非 ASCII 的行不换算
-    就会整体错位。落在多字节字符中间时退到该字符之前（不劈开一个字符）。
+    落在多字节字符中间时退到该字符之前（不劈开一个字符）。
     """
     if col <= 0:
         return 0
@@ -78,6 +85,57 @@ def _index_to_utf8(s: str, idx: int) -> int:
     if idx <= 0:
         return 0
     return len(s[:idx].encode("utf-8"))
+
+
+def _index_to_utf16(s: str, idx: int) -> int:
+    """Python str 下标（码点）-> UTF-16 code unit 偏移（代理对算两格）。"""
+    if idx <= 0:
+        return 0
+    return len(s[:idx].encode("utf-16-le")) // 2
+
+
+def _utf16_to_index(s: str, col: int) -> int:
+    """UTF-16 code unit 偏移 -> Python str 下标。落在代理对中间时退到它之前。"""
+    if col <= 0:
+        return 0
+    units = 0
+    for i, ch in enumerate(s):
+        w = 2 if ord(ch) > 0xFFFF else 1
+        if units + w > col:
+            return i
+        units += w
+        if units == col:
+            return i + 1
+    return len(s)
+
+
+def _col_to_index(s: str, col: int) -> int:
+    """对外的 `character` -> 码点下标（按本会话协商的编码）。"""
+    if _POSITION_ENCODING == "utf-8":
+        return _utf8_to_index(s, col)
+    return _utf16_to_index(s, col)
+
+
+def _index_to_col(s: str, idx: int) -> int:
+    """码点下标 -> 对外的 `character`（按本会话协商的编码）。"""
+    if _POSITION_ENCODING == "utf-8":
+        return _index_to_utf8(s, idx)
+    return _index_to_utf16(s, idx)
+
+
+def _negotiate_position_encoding(params: dict) -> str:
+    """客户端声明了哪些编码（`general.positionEncodings`）-> 本会话用哪个。
+
+    LSP 3.17：服务端只能从客户端列的编码里挑；客户端没列 = 只支持 utf-16。本服务的
+    内部列是 UTF-8 字节偏移，所以只有客户端明确列了 `utf-8` 才用它 —— 否则回 utf-16
+    并在边界上换算。
+    """
+    caps = params.get("capabilities") or {}
+    general = caps.get("general") or {}
+    encs = general.get("positionEncodings")
+    if isinstance(encs, list) and "utf-8" in encs:
+        return "utf-8"
+    return "utf-16"
 
 
 def _line_span(text: str, line1: int) -> tuple[int, int]:
@@ -100,8 +158,8 @@ def _line_span(text: str, line1: int) -> tuple[int, int]:
         if t.line == line1:
             c0 = max(0, t.col - 1)
             c1 = c0 + max(1, t.len)
-            # 词法器的列是**码点**（Python 字符串下标），对外要给 UTF-8 字节列（`#707`）。
-            return _index_to_utf8(cur, c0), _index_to_utf8(cur, c1)
+            # 词法器的列是**码点**（Python 字符串下标），对外按协商的编码换算（`#707`/`#1171`）。
+            return _index_to_col(cur, c0), _index_to_col(cur, c1)
     return 0, 1
 
 
@@ -155,8 +213,8 @@ def _diagnostics(text: str, path: str) -> list[dict]:
         cur = lines[ln] if ln < len(lines) else ""
         ci = max(0, e.col - 1) if e.line > 0 else 0
         # `LomError.col` 是码点列；对外是 UTF-8 字节列（`#707`）。
-        c0 = _index_to_utf8(cur, ci)
-        c1 = _index_to_utf8(cur, ci + 1)
+        c0 = _index_to_col(cur, ci)
+        c1 = _index_to_col(cur, ci + 1)
         return [{"range": {"start": {"line": ln, "character": c0},
                            "end": {"line": ln, "character": c1}},
                  "severity": 1, "source": "loment", "message": str(e)}]
@@ -189,8 +247,9 @@ def _name_span(text: str, line0: int, word: str) -> tuple[int, int]:
     m = _re.search(rf"\b{_re.escape(word)}\b", lines[line0])
     if not m:
         return 0, 0
-    # 对外是 UTF-8 字节列（`#707`）；`re` 给的是码点下标。
-    return _index_to_utf8(lines[line0], m.start()), _index_to_utf8(lines[line0], m.end())
+    # `re` 给的是码点下标；对外按协商的编码换算（`#707`/`#1171`）。
+    return (_index_to_col(lines[line0], m.start()),
+            _index_to_col(lines[line0], m.end()))
 
 
 def _decls(text: str) -> dict[str, dict]:
@@ -221,8 +280,8 @@ def _member_receiver(text: str, line: int, ch: int) -> str | None:
     lines = text.splitlines()
     if not (0 <= line < len(lines)):
         return None
-    # `ch` 是 LSP 的 UTF-8 字节列（`#707`），切片要码点下标。
-    prefix = lines[line][:_utf8_to_index(lines[line], ch)]
+    # `ch` 是客户端按协商编码给的列（`#707`/`#1171`），切片要码点下标。
+    prefix = lines[line][:_col_to_index(lines[line], ch)]
     m = re.search(r"([A-Za-z_]\w*)\.[A-Za-z0-9_]*$", prefix)
     if not m:
         return None
@@ -275,6 +334,7 @@ def _member_items(text: str, recv: str, line1: int) -> list[dict] | None:
 
 def handle(msg: dict, docs: dict[str, str]) -> list[dict]:
     """纯函数式 LSP 处理: 输入一条消息, 输出若干条待发送消息。"""
+    global _POSITION_ENCODING
     method = msg.get("method", "")
     params = msg.get("params") or {}
     rid = msg.get("id")
@@ -285,11 +345,13 @@ def handle(msg: dict, docs: dict[str, str]) -> list[dict]:
         # （`p.` 后面回来的还是一屏关键字）——于是每敲一个点就弹一屏没用的东西，
         # 读起来就是坏的。成员补全没实现之前，**不广告触发字符**才是诚实的那一半
         # （issue 自己指的那条路）。手动 Ctrl+Space 照旧可用。
-        # `positionEncoding: "utf-8"`（`#707`）：列是 UTF-8 字节偏移，而 LSP 3.17 的默认
-        # 是 UTF-16。不声明 = 客户端按 UTF-16 发位置 = 含非 ASCII 的行整体错位。
-        # 与 `loment/tools/lsp.lomt` 同一份声明（两处实现保持一致）。
+        #
+        # 编码**按客户端声明的协商**（`#1171`）：无条件回 utf-8 会让
+        # `vscode-languageclient` 10.1.1 直接抛 `Unsupported position encoding`
+        # （它写死只支持 utf-16）。与 `loment/tools/lsp.lomt` 同一份规矩。
+        _POSITION_ENCODING = _negotiate_position_encoding(params)
         return [{"jsonrpc": "2.0", "id": rid, "result": {
-            "capabilities": {"positionEncoding": "utf-8",
+            "capabilities": {"positionEncoding": _POSITION_ENCODING,
                              "textDocumentSync": 1,
                              "definitionProvider": True,
                              "documentFormattingProvider": True,
@@ -331,8 +393,8 @@ def handle(msg: dict, docs: dict[str, str]) -> list[dict]:
             import re
             # 光标可能落在词中间 (编辑器就是这样报的): 先向左扩到词首, 再取整词
             line = lines[ln]
-            # `character` 是 UTF-8 字节列（`#707`），扩词要在码点下标上走。
-            ch = _utf8_to_index(line, pos.get("character", 0))
+            # `character` 按协商的编码（`#707`/`#1171`），扩词要在码点下标上走。
+            ch = _col_to_index(line, pos.get("character", 0))
             start = min(max(ch, 0), len(line))
             while start > 0 and (line[start - 1].isalnum() or line[start - 1] == "_"):
                 start -= 1

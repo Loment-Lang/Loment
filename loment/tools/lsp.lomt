@@ -40,6 +40,10 @@ const S_OLEN: u32 = 0;
 const S_NDOC: u32 = 4;
 const S_NERR: u32 = 8;
 const S_NSYM: u32 = 12;
+//: 对外的列编码（`#1171`）：0 = UTF-8 字节偏移（客户端声明了 `utf-8`）；
+//: 1 = UTF-16 code unit（LSP 3.17 的默认 —— `vscode-languageclient` 只支持这一种，
+//: 服务端无条件回 utf-8 会让每个 VS Code 连不上）。
+const S_ENC: u32 = 16;
 const DOCS_URI: u32 = 4096;         // N_DOC * URI_CAP (64 * 8192 = 524288)
 const DOCS_TXT: u32 = 528384;       // = DOCS_URI + N_DOC * URI_CAP
 const SYM_OFF: u32 = 17305600;      // = DOCS_TXT + N_DOC * DOC_CAP（文档正文区之后）
@@ -443,6 +447,83 @@ fn byte_col(text: ptr, off: u32) -> u32 {
     return off - s;
 }
 
+/// `[s, off)` 这段 UTF-8 字节折成多少 **UTF-16 code unit**（按首字节判序列长度；
+/// 越过 0xFFFF 的码点算两格）。对外的列在 `S_ENC = 1` 时用这个（`#1171`）。
+fn utf16_units(text: ptr, s: u32, off: u32) -> u32 {
+    let i: u32 = s;
+    let n: u32 = 0;
+    while i < off {
+        let c: u32 = load8(text, i) as u32;
+        if c < 128 {
+            n = n + 1;
+            i = i + 1;
+        } else {
+            if c < 224 {
+                n = n + 1;
+                i = i + 2;
+            } else {
+                if c < 240 {
+                    n = n + 1;
+                    i = i + 3;
+                } else {
+                    n = n + 2;
+                    i = i + 4;
+                }
+            }
+        }
+    }
+    return n;
+}
+
+/// 对外的列：`S_ENC = 0` 给 UTF-8 字节偏移，否则给 UTF-16 code unit。
+fn char_col(mem: ptr, text: ptr, off: u32) -> u32 {
+    if load32(mem, M_STATE + S_ENC) == 0 {
+        return byte_col(text, off);
+    }
+    let s: u32 = off;
+    while s > 0 && load8(text, s - 1) != 10 {
+        s = s - 1;
+    }
+    return utf16_units(text, s, off);
+}
+
+/// 客户端给的 `character`（按 `S_ENC`）-> 行内**字节**偏移。
+///
+/// `word_at` / `lsc_member_recv` 都按字节走，所以入站必须先换算；客户端只说 utf-16 时，
+/// 含 CJK 的行上用字节当列会整体往右错（`#1171`）。
+fn ch_to_byte(mem: ptr, text: ptr, line: u32, ch: u32) -> u32 {
+    if load32(mem, M_STATE + S_ENC) == 0 {
+        return ch;
+    }
+    let ls: u32 = line_start(text, line);
+    let i: u32 = ls;
+    let n: u32 = 0;
+    while n < ch {
+        let c: u32 = load8(text, i) as u32;
+        if c == 0 || c == 10 {
+            return i - ls;
+        }
+        if c < 128 {
+            n = n + 1;
+            i = i + 1;
+        } else {
+            if c < 224 {
+                n = n + 1;
+                i = i + 2;
+            } else {
+                if c < 240 {
+                    n = n + 1;
+                    i = i + 3;
+                } else {
+                    n = n + 2;
+                    i = i + 4;
+                }
+            }
+        }
+    }
+    return i - ls;
+}
+
 fn publish(mem: ptr, text: ptr, toks: ptr, uri: ptr, un: u32, errs: ptr, ne: u32,
            note: u32, has_ver: u32, ver: u32) -> u32 {
     let b: ptr = out_body(mem);
@@ -467,7 +548,7 @@ fn publish(mem: ptr, text: ptr, toks: ptr, uri: ptr, un: u32, errs: ptr, ne: u32
         let off: u32 = load32(toks, tk * 20 + 4);
         let tlen: u32 = load32(toks, tk * 20 + 8);
         // 列从 token 的**字节偏移**推：LSP 的列 0 起，`token.off` 是文件内字节偏移。
-        let sp: u32 = byte_col(text, off);
+        let sp: u32 = char_col(mem, text, off);
         let ep: u32 = sp + 1;
         if tlen > 0 {
             ep = sp + tlen;
@@ -1114,6 +1195,7 @@ fn _start() -> u32 {
     store32(mem, S_NDOC, 0);
     store32(mem, S_NSYM, 0);
     store32(mem, S_NERR, 0);
+    store32(mem, M_STATE + S_ENC, 1);      // 默认 UTF-16（LSP 3.17；`#1171`）
     let hdr: ptr = ptr_add(mem, SCR_OFF);
     // 命令行模式: `lsp --check FILE` -> 跑检查、按 `路径:行:列: E0NN 标题` 打诊断、退出。
     // (编辑器任务/CI 用; 与 LSP 循环共用同一套 checker 与文案表)
@@ -1155,11 +1237,34 @@ fn handle(mem: ptr, src: ptr, arena: ptr, root: u32, m: u32, id: u32,
         // `completionProvider: {}` = 支持补全、但**没有触发字符**（`#28`：原先登着 `.` 与 `:`，
         // 而补全不看位置 —— 每敲一个点就弹一屏关键字。两处实现一起改：`tools/loment_lsp.py`）
         //
-        // `positionEncoding: "utf-8"`（`#707`）：本服务里的列全是**UTF-8 字节偏移**
-        // （词法器的 `col` 逐字节走，`word_at` / `lsc_member_recv` 也按字节加），
-        // 而 LSP 3.17 的默认是 UTF-16。不声明 = 客户端按 UTF-16 发位置 = 含非 ASCII 的行
-        // 上补全/跳转整体错位。如实声明，比悄悄换成 UTF-16 少一层换算、也不会漂。
-        let o2: u32 = json_emit_lit(b, o, "{\"capabilities\": {\"positionEncoding\": \"utf-8\", \"textDocumentSync\": 1, \"definitionProvider\": true, \"completionProvider\": {}}, \"serverInfo\": {\"name\": \"loment-lsp\", \"version\": \"0.3\"}}");
+        // 编码**按客户端声明协商**（LSP 3.17，`#1171`）：只有客户端在
+        // `capabilities.general.positionEncodings` 里列了 `utf-8` 才回 utf-8；否则回
+        // UTF-16 -- `vscode-languageclient` 10.1.1 写死只支持 UTF-16，对别的编码**直接
+        // 抛错**，服务端无条件回 utf-8 等于让每个 VS Code 连不上。
+        // 本服务内部的列是 UTF-8 字节偏移，UTF-16 模式在 `char_col` / `ch_to_byte` 换算。
+        let params: u32 = json_get(src, arena, root, "params");
+        let caps: u32 = json_get(src, arena, params, "capabilities");
+        let gen: u32 = json_get(src, arena, caps, "general");
+        let encs: u32 = json_get(src, arena, gen, "positionEncodings");
+        let mode: u32 = 1;
+        if encs != 4294967295 {
+            // 子节点链以 **0** 收尾（`json.lomt`：`while m != 0`），不是 0xFFFFFFFF ——
+            // 写成后者会绕着节点 0 空转（2026-10-22 实测：LSP 起来后一条都不回）。
+            let kid: u32 = json_first_child(arena, encs);
+            while kid != 0 {
+                if byte_is(src, json_raw_off(arena, kid), json_raw_len(arena, kid), "utf-8") {
+                    mode = 0;
+                }
+                kid = json_sibling(arena, kid);
+            }
+        }
+        store32(mem, M_STATE + S_ENC, mode);
+        let o2: u32 = 0;
+        if mode == 0 {
+            o2 = json_emit_lit(b, o, "{\"capabilities\": {\"positionEncoding\": \"utf-8\", \"textDocumentSync\": 1, \"definitionProvider\": true, \"completionProvider\": {}}, \"serverInfo\": {\"name\": \"loment-lsp\", \"version\": \"0.3\"}}");
+        } else {
+            o2 = json_emit_lit(b, o, "{\"capabilities\": {\"positionEncoding\": \"utf-16\", \"textDocumentSync\": 1, \"definitionProvider\": true, \"completionProvider\": {}}, \"serverInfo\": {\"name\": \"loment-lsp\", \"version\": \"0.3\"}}");
+        }
         // 注意: 上面这段以 `"0.3"}}` 收尾 = 关掉 serverInfo 与 result; **外层对象还要一个 `}`**
         let o2b: u32 = json_emit_lit(b, o2, "}");
         out_done(mem, o2b);
@@ -1362,7 +1467,7 @@ fn on_completion(mem: ptr, src: ptr, arena: ptr, root: u32, id: u32, toks: ptr) 
         let ch: u32 = json_as_u32(src, arena, json_get(src, arena, pos, "character"));
         let text: ptr = doc_text(mem, idx);
         let tn: u32 = doc_txtlen(mem, idx);
-        let rc: u64 = lsc_member_recv(text, ln, ch);
+        let rc: u64 = lsc_member_recv(text, ln, ch_to_byte(mem, text, ln, ch));
         if rc != 0 {
             let nt: u32 = lex(text, tn, toks);
             let nt: u32 = switchify(mem, text, toks, nt);
@@ -1607,7 +1712,7 @@ fn on_definition(mem: ptr, src: ptr, arena: ptr, root: u32, id: u32, toks: ptr) 
     let line: u32 = json_as_u32(src, arena, json_get(src, arena, pos, "line"));
     let ch: u32 = json_as_u32(src, arena, json_get(src, arena, pos, "character"));
     let text: ptr = doc_text(mem, idx);
-    let wl: u32 = word_at(mem, text, line, ch);
+    let wl: u32 = word_at(mem, text, line, ch_to_byte(mem, text, line, ch));
     let wbuf: ptr = ptr_add(mem, SCR_OFF + 5120);
     let tn: u32 = doc_txtlen(mem, idx);
     let nt: u32 = lex(text, tn, toks);

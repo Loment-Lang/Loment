@@ -163,6 +163,79 @@ class Batch:
 
 
 @test
+def test_position_encoding_is_negotiated():
+    """`#1171`: 编下列编码**按客户端声明协商**，缺 utf-8 时回 utf-16 并换算。
+
+    服务端原先无条件回 `positionEncoding: "utf-8"`（`#707`）。按 LSP 3.17，服务端只能
+    从客户端的 `general.positionEncodings` 里挑；`vscode-languageclient` 10.1.1 写死
+    `['utf-16']` 并对别的编码**直接抛错**，于是每个 VS Code 都连不上
+    （`Unsupported position encoding (utf-8) received from server`）。
+
+    这条同时钉两件事：**声明**要对，**列**要跟着换算。列用一行带 CJK 的源 —— UTF-8 字节列
+    与 UTF-16 code unit 在那行上不等，选错了这一格就对不上。
+    """
+    src = ('module m\n\nfn f() -> u32 {\n    return 1;\n}\n\n'
+           'fn g() -> u32 {\n    let s: str = "中文"; return nope;\n}\n')
+    line = src.splitlines()[7]
+    byte_col = len(line.encode("utf-8")[:line.encode("utf-8").index(b"nope")])
+    u16_col = len(line[:line.index("nope")].encode("utf-16-le")) // 2
+    assert byte_col != u16_col, "夹具没让两种编码分开，这条判据就是空的"
+
+    cases = ((["utf-16"], "utf-16", u16_col),
+             (["utf-8", "utf-16"], "utf-8", byte_col),
+             (None, "utf-16", u16_col))
+
+    # ---- Python 那一侧（同一份规矩的第二份实现）
+    # 声明要一致；**列**在这一侧用纯函数钉：参考实现的 checker 只报行，诊断的列是
+    # "这一行的第一个 token"（`_line_span`），CJK 之后的位置在诊断上没有体现 ——
+    # 那条路由 `test_lsp_declares_utf8_positions_and_honours_them` 的补全/跳转覆盖。
+    try:
+        for declared, want_enc, _ in cases:
+            caps = {} if declared is None else {"general": {"positionEncodings": declared}}
+            out = PY_LSP.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                                 "params": {"capabilities": caps}}, {})
+            got = out[0]["result"]["capabilities"].get("positionEncoding")
+            assert got == want_enc, (declared, got)
+        idx = line.index("nope")
+        PY_LSP._POSITION_ENCODING = "utf-16"
+        assert PY_LSP._index_to_col(line, idx) == u16_col, "utf-16 列换算"
+        assert PY_LSP._col_to_index(line, u16_col) == idx, "utf-16 列反算"
+        PY_LSP._POSITION_ENCODING = "utf-8"
+        assert PY_LSP._index_to_col(line, idx) == byte_col, "utf-8 列换算"
+        assert PY_LSP._col_to_index(line, byte_col) == idx, "utf-8 列反算"
+        # 代理对：一个 emoji 在 UTF-16 里占两格
+        PY_LSP._POSITION_ENCODING = "utf-16"
+        assert PY_LSP._index_to_col("😀a", 1) == 2 and PY_LSP._col_to_index("😀a", 2) == 1
+    finally:
+        PY_LSP._POSITION_ENCODING = "utf-16"      # 别把状态漏给后面的判据
+
+    # ---- 自举那一侧：真协议、真 ELF
+    if not (_clang() and _wsl()):
+        print("  SKIP 自举 LSP 的编码协商: 无 clang/WSL")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        b = Batch(_build(Path(td)), Path(td))
+        for declared, want_enc, want_col in cases:
+            caps = {} if declared is None else {"general": {"positionEncodings": declared}}
+            out, rc, err = b.run([
+                {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                 "params": {"capabilities": caps}},
+                {"jsonrpc": "2.0", "method": "textDocument/didOpen",
+                 "params": {"textDocument": {"uri": "file:///t.lomt", "text": src}}},
+                {"jsonrpc": "2.0", "id": 3, "method": "shutdown", "params": {}},
+            ])
+            assert rc == 0, (rc, err[-300:])
+            init = next(m for m in out if m.get("id") == 1)
+            got_enc = init["result"]["capabilities"].get("positionEncoding")
+            assert got_enc == want_enc, (declared, got_enc, err[-200:])
+            dg = [m for m in out if m.get("method") == "textDocument/publishDiagnostics"]
+            assert dg, "没有诊断（夹具里有一个未声明的符号）"
+            got_col = dg[-1]["params"]["diagnostics"][0]["range"]["start"]["character"]
+            assert got_col == want_col, (declared, got_col, want_col)
+    print("      编码协商: 声明 utf-8 才回 utf-8；否则回 utf-16 且列按 code unit 换算")
+
+
+@test
 def test_lsp_protocol_roundtrip():
     """一整套: initialize -> didOpen(好) -> didChange(坏) -> completion -> definition
     -> shutdown -> exit, 逐帧核对。"""
@@ -922,13 +995,19 @@ def _u8_col(line: str, ch_index: int) -> int:
     return len(line[:ch_index].encode("utf-8"))
 
 
+def _u16_col(line: str, ch_index: int) -> int:
+    """UTF-16 code unit 列（代理对算两格）。`#1171` 的默认编码。"""
+    return len(line[:ch_index].encode("utf-16-le")) // 2
+
+
 @test
 def test_lsp_declares_utf8_positions_and_honours_them():
-    """`#707`：位置是 UTF-8 字节偏移，而 LSP 3.17 默认 UTF-16、`positionEncoding` 从未声明。
+    """`#707`/`#1171`：位置编码**按客户端声明**，两个方向都要对齐。
 
-    最省事又诚实的修法是**声明** `positionEncoding: "utf-8"`。这条判据同时扮演客户端：
-    它读 initialize 的能力，然后**按 utf-8 计算** `character`（含非 ASCII 的行），
-    要求补全/诊断真的落在那个位置 —— 声明与行为必须一致。
+    客户端声明 `utf-8` 时服务端回 utf-8、列按 UTF-8 字节；只声明 utf-16（默认）时回
+    utf-16、列按 code unit（`#1171`）。这条判据同时扮演客户端：读 initialize 的能力，
+    按**协商出来的编码**算 `character`（含非 ASCII 的行），要求补全/跳转/诊断真的落在
+    那个位置 —— 声明与行为必须一致。两种编码各跑一遍，两个实现都跑。
     """
     if not (_clang() and _wsl()):
         print("      SKIP: 无 clang/WSL")
@@ -936,69 +1015,72 @@ def test_lsp_declares_utf8_positions_and_honours_them():
     uri = "file:///utf8.lomt"
     lines = UTF8_MEMBER.splitlines()
     ml = lines.index("    let s2: str = \"中文\"; let v: u32 = q. // 成员")
-    mch = _u8_col(lines[ml], lines[ml].index("q.") + 2)
-    # 定义跳转的**输入**也在 CJK 之后：`AB` 在同一行更早出现了 CJK 字面量。
-    # 按 UTF-16 解释这个字节列会落到 `AB` 后面 4 个字（`= 2`）上，跳转就指错。
+    # 定义跳转的**输入**与诊断的列都在 CJK 之后：选错编码就会整体错位。
     ul = lines.index("    let s3: str = \"中文\"; let z: AB = 2;")
-    a0 = _u8_col(lines[ul], lines[ul].index("AB") + 1)
     dln = lines.index("struct AB {")
     want_def = {"start": {"line": dln, "character": 7},
                 "end": {"line": dln, "character": 9}}
     dl = UTF8_BAD.splitlines().index("    let s: str = \"中文\"; let w: f64 = 0;")
     dline = UTF8_BAD.splitlines()[dl]
-    f0 = _u8_col(dline, dline.index("f64"))
-    msgs = [
-        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
-        {"method": "textDocument/didOpen",
-         "params": {"textDocument": {"uri": uri, "text": UTF8_MEMBER}}},
-        {"jsonrpc": "2.0", "id": 2, "method": "textDocument/completion",
-         "params": {"textDocument": {"uri": uri},
-                    "position": {"line": ml, "character": mch}}},
-        {"jsonrpc": "2.0", "id": 3, "method": "textDocument/definition",
-         "params": {"textDocument": {"uri": uri},
-                    "position": {"line": ul, "character": a0}}},
-        {"method": "textDocument/didOpen",
-         "params": {"textDocument": {"uri": "file:///utf8bad.lomt", "text": UTF8_BAD}}},
-        {"jsonrpc": "2.0", "id": 4, "method": "shutdown", "params": {}},
-        {"method": "exit"},
-    ]
+
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
-        frames, rc, err = Batch(_build(td), td).run(msgs)
-    assert rc == 0, f"LSP 退出码 {rc}: {err[-300:]}"
-    caps = frames[0]["result"]["capabilities"]
-    assert caps.get("positionEncoding") == "utf-8", caps
-    by_id = {f["id"]: f for f in frames if "id" in f}
-    assert {i["label"] for i in by_id[2]["result"]["items"]} == {"x", "y"}, by_id[2]
-    got_def = by_id[3]["result"]
-    assert got_def is not None and got_def["range"] == want_def, (want_def, got_def)
-    dg = [f["params"]["diagnostics"] for f in frames
-          if f.get("method") == "textDocument/publishDiagnostics"][-1]
-    want = {"start": {"line": dl, "character": f0},
-            "end": {"line": dl, "character": f0 + 3}}
-    assert any(d["range"] == want for d in dg), (want, dg)
+        elf = _build(td)                    # 编一次，两种声明各跑一遍
+        for enc, col in (("utf-8", _u8_col), ("utf-16", _u16_col)):
+            mch = col(lines[ml], lines[ml].index("q.") + 2)
+            a0 = col(lines[ul], lines[ul].index("AB") + 1)
+            f0 = col(dline, dline.index("f64"))
+            init = {"capabilities": {"general": {"positionEncodings": [enc]}}}
+            msgs = [
+                {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": init},
+                {"method": "textDocument/didOpen",
+                 "params": {"textDocument": {"uri": uri, "text": UTF8_MEMBER}}},
+                {"jsonrpc": "2.0", "id": 2, "method": "textDocument/completion",
+                 "params": {"textDocument": {"uri": uri},
+                            "position": {"line": ml, "character": mch}}},
+                {"jsonrpc": "2.0", "id": 3, "method": "textDocument/definition",
+                 "params": {"textDocument": {"uri": uri},
+                            "position": {"line": ul, "character": a0}}},
+                {"method": "textDocument/didOpen",
+                 "params": {"textDocument": {"uri": "file:///utf8bad.lomt",
+                                             "text": UTF8_BAD}}},
+                {"jsonrpc": "2.0", "id": 4, "method": "shutdown", "params": {}},
+                {"method": "exit"},
+            ]
+            frames, rc, err = Batch(elf, td).run(msgs)
+            assert rc == 0, f"[{enc}] LSP 退出码 {rc}: {err[-300:]}"
+            caps = frames[0]["result"]["capabilities"]
+            assert caps.get("positionEncoding") == enc, (enc, caps)
+            by_id = {f["id"]: f for f in frames if "id" in f}
+            assert {i["label"] for i in by_id[2]["result"]["items"]} == {"x", "y"}, (enc, by_id[2])
+            got_def = by_id[3]["result"]
+            assert got_def is not None and got_def["range"] == want_def, \
+                (enc, want_def, got_def)
+            dg = [f["params"]["diagnostics"] for f in frames
+                  if f.get("method") == "textDocument/publishDiagnostics"][-1]
+            want = {"start": {"line": dl, "character": f0},
+                    "end": {"line": dl, "character": f0 + 3}}
+            assert any(d["range"] == want for d in dg), (enc, want, dg)
 
-    # Python 版：同一份声明；输入按 UTF-8 字节列给；输出也用字节列。
-    py_caps = PY_LSP.handle({"id": 1, "method": "initialize", "params": {}}, {})[0][
-        "result"]["capabilities"]
-    assert py_caps.get("positionEncoding") == "utf-8", py_caps
-    got = PY_LSP.handle({"jsonrpc": "2.0", "id": 2, "method": "textDocument/completion",
-                         "params": {"textDocument": {"uri": uri},
-                                    "position": {"line": ml, "character": mch}}},
-                        {uri: UTF8_MEMBER})[0]["result"]["items"]
-    assert {i["label"] for i in got} == {"x", "y"}, got
-    pdef = PY_LSP.handle({"jsonrpc": "2.0", "id": 3, "method": "textDocument/definition",
-                          "params": {"textDocument": {"uri": uri},
-                                     "position": {"line": ul, "character": a0}}},
-                         {uri: UTF8_MEMBER})[0]["result"]
-    assert pdef is not None and pdef["range"] == want_def, (want_def, pdef)
-    pdg = PY_LSP.handle({"method": "textDocument/didOpen",
-                         "params": {"textDocument": {"uri": "file:///u8bad.lomt",
-                                                     "text": UTF8_BAD}}},
-                        {"file:///u8bad.lomt": UTF8_BAD})[0]["params"]["diagnostics"]
-    assert any(d["range"]["start"]["line"] == dl for d in pdg), pdg
-    print(f"      声明 positionEncoding=utf-8；CJK 行上 `q.` 补全、AB 跳转与诊断列"
-          f"（{f0}..{f0 + 3}）都按字节对齐（两个实现）")
+            # Python 版：同一份协商；输入按协商的编码给。
+            py_caps = PY_LSP.handle({"id": 1, "method": "initialize",
+                                     "params": init}, {})[0]["result"]["capabilities"]
+            assert py_caps.get("positionEncoding") == enc, (enc, py_caps)
+            got = PY_LSP.handle({"jsonrpc": "2.0", "id": 2,
+                                 "method": "textDocument/completion",
+                                 "params": {"textDocument": {"uri": uri},
+                                            "position": {"line": ml, "character": mch}}},
+                                {uri: UTF8_MEMBER})[0]["result"]["items"]
+            assert {i["label"] for i in got} == {"x", "y"}, (enc, got)
+            pdef = PY_LSP.handle({"jsonrpc": "2.0", "id": 3,
+                                  "method": "textDocument/definition",
+                                  "params": {"textDocument": {"uri": uri},
+                                             "position": {"line": ul, "character": a0}}},
+                                 {uri: UTF8_MEMBER})[0]["result"]
+            assert pdef is not None and pdef["range"] == want_def, (enc, want_def, pdef)
+    PY_LSP._POSITION_ENCODING = "utf-16"
+    print("      两种声明（utf-8 / utf-16）：CJK 行上 `q.` 补全、AB 跳转与诊断列"
+          "都按协商出来的编码对齐（两个实现）")
 
 
 @test

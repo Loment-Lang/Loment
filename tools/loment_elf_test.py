@@ -569,6 +569,48 @@ def test_mirror_phi_is_simultaneous():
     print("      phi 同时赋值: 参考得 2, 自举侧逐字节相同")
 
 
+#: `#1060`：一个 1 MiB 的 `zeroinitializer` 全局**不许**被物化进镜像的固定暂存。
+#: 自举链接器原来对"全零"也走 `emit_init`，把类型大小的零字节真的写进数据缓冲 ——
+#: 1 MiB 之后（`jrt`/java 分配器就是这个形状）表被整片冲掉，症状是几条街以外的
+#: "undefined label: @msg"。这份 IR 先写一句 `ok` 再退出 0：修好得 0 + `ok`，
+#: 没修则在链接期报一句不相干的未定义标签。
+_BIG_ZERO_IR = """\
+@big = internal global [1048576 x i8] zeroinitializer
+@msg = internal constant [3 x i8] c"ok\\0A\\00"
+
+define internal void @_start() {
+entry:
+  %p = getelementptr [3 x i8], ptr @msg, i32 0, i32 0
+  %pi = ptrtoint ptr %p to i64
+  %w = call i64 asm sideeffect "syscall", "={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}"(i64 1, i64 1, i64 %pi, i64 3)
+  %x = call i64 asm sideeffect "syscall", "={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}"(i64 60, i64 0, i64 0, i64 0)
+  ret void
+}
+"""
+
+
+@test
+def test_mirror_keeps_a_mebibyte_zero_global_out_of_its_tables():
+    """A 1 MiB zero global stays in bss; it must not overwrite the mirror's tables."""
+    if not _wsl():
+        print("      SKIP: 无 WSL")
+        return
+    mir = _mirror()
+    llrepo = ROOT / "loment" / "build" / "_bigzero.ll"
+    elfrepo = ROOT / "loment" / "build" / "_bigzero.elf"
+    try:
+        llrepo.write_text(_BIG_ZERO_IR, encoding="utf-8", newline="\n")
+        rcm, err = _mirror_run(mir, "loment/build/_bigzero.ll", "loment/build/_bigzero.elf")
+        assert rcm == 0, f"镜像退出 {rcm}: {err[-300:]}"
+        with tempfile.TemporaryDirectory() as tds:
+            rc, out = _run_bin(elfrepo, "bigzero", Path(tds))
+    finally:
+        elfrepo.unlink(missing_ok=True)
+        llrepo.unlink(missing_ok=True)
+    assert rc == 0 and out == b"ok\n", f"rc={rc} out={out!r}"
+    print("      1 MiB 零全局进 bss，后面的字符串标签照常解析")
+
+
 #: `#313`：GEP 的下标是**符号扩展**的（LLVM LangRef）。`@g[6] - 4` 该落在 `@g[2]`；
 #: 零扩展让它落到 `@g[6] + 4294967292` —— 4 GiB 之外，读它就是 SIGSEGV（139，零输出）。
 #: 程序把 42 写在 `@g[2]`，再从那个负偏移读回来当退出码：**修好得 42，没修得 139**。

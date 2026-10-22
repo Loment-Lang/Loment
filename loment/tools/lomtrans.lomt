@@ -1070,6 +1070,139 @@ fn is_op1(c: u32) -> u32 {
     return 0;
 }
 
+/// `_PRE`（`tools/jtrans.py`）在**解析之前**点名拒绝的那些构造。
+///
+/// 孪生这边它是**兜底**：只在解析已经失败之后跑 —— 正常输入走不到这里，所以不会
+/// 误伤。命中就把"解析不过（2）"改回参考实现的说法："子集外（1）"。不这么做，
+/// 同一条输入在两边给出不同的退出码（`lomtrans_test` 就是这么红起来的）。
+fn pc_skip_sp(p: ptr, i: u32, n: u32) -> u32 {
+    let k: u32 = i;
+    while k < n && is_sp(load8(p, k)) == 1 {
+        k = k + 1;
+    }
+    return k;
+}
+
+fn pc_word_at(p: ptr, i: u32, j: u32, lit: str) -> u32 {
+    let l: u32 = j - i;
+    if l != str_len(lit) {
+        return 0;
+    }
+    let k: u32 = 0;
+    while k < l {
+        if load8(p, i + k) != (str_byte(lit, k) as u32) {
+            return 0;
+        }
+        k = k + 1;
+    }
+    return 1;
+}
+
+fn pc_word(p: ptr, off: u32, n: u32, lit: str) -> u32 {
+    let j: u32 = off;
+    while j < n && is_w(load8(p, j)) == 1 {
+        j = j + 1;
+    }
+    return pc_word_at(p, off, j, lit);
+}
+
+fn pc_reject(p: ptr, n: u32, lang: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = load8(p, i);
+        if c == 64 && i + 1 < n && is_id0(load8(p, i + 1)) == 1 {
+            return 1;                                   // 注解
+        }
+        if c == 45 && i + 1 < n && load8(p, i + 1) == 62 {
+            return 1;                                   // lambda 的 `->`
+        }
+        if c == 46 && i + 1 < n && pc_word(p, i + 1, n, "class") == 1 {
+            return 1;                                   // `X.class`
+        }
+        if is_d(c) == 1 && i + 2 < n && load8(p, i + 1) == 46
+            && is_d(load8(p, i + 2)) == 1 {
+            return 1;                                   // 浮点字面量
+        }
+        if is_id0(c) == 1 {
+            let j: u32 = i + 1;
+            while j < n && is_w(load8(p, j)) == 1 {
+                j = j + 1;
+            }
+            if pc_word_at(p, i, j, "synchronized") == 1
+                || pc_word_at(p, i, j, "instanceof") == 1
+                || pc_word_at(p, i, j, "throws") == 1
+                || pc_word_at(p, i, j, "enum") == 1
+                || pc_word_at(p, i, j, "interface") == 1
+                || pc_word_at(p, i, j, "record") == 1
+                || pc_word_at(p, i, j, "sealed") == 1
+                || pc_word_at(p, i, j, "permits") == 1
+                || pc_word_at(p, i, j, "null") == 1
+                || pc_word_at(p, i, j, "float") == 1
+                || pc_word_at(p, i, j, "double") == 1 {
+                return 1;
+            }
+            if lang == DL_CS && (pc_word_at(p, i, j, "string") == 1
+                || pc_word_at(p, i, j, "object") == 1
+                || pc_word_at(p, i, j, "decimal") == 1) {
+                return 1;
+            }
+            // 参考实现的 `import` / `package` 那条只对 Java 跑（C# 用 `using`）。
+            if lang == DL_JAVA && (pc_word_at(p, i, j, "import") == 1
+                || pc_word_at(p, i, j, "package") == 1) {
+                return 1;
+            }
+            // `String` 是 Java 类型表里明确拒的那一个 —— 但**只在它当类型名的时候**。
+            // `List<String>` 的参考结果是"期望类型名，得到 List"（2）：泛型先把它挡住了，
+            // 这里再按 `String` 报 1 就比参考早了。
+            if lang == DL_JAVA && pc_word_at(p, i, j, "String") == 1 {
+                let k: u32 = pc_skip_sp(p, j, n);
+                if k < n && is_id0(load8(p, k)) == 1 {
+                    return 1;
+                }
+            }
+            if pc_word_at(p, i, j, "this") == 1 || pc_word_at(p, i, j, "super") == 1 {
+                let k: u32 = pc_skip_sp(p, j, n);
+                if k < n && load8(p, k) == 46 {
+                    return 1;                           // `this.x` / `super.x`
+                }
+            }
+            if pc_word_at(p, i, j, "static") == 1 {
+                let k: u32 = pc_skip_sp(p, j, n);
+                if k < n && load8(p, k) == 123 {
+                    return 1;                           // 静态初始化块
+                }
+            }
+            if lang == DL_JAVA && c >= 65 && c <= 90 {  // 构造器: Upper(...) {
+                let k: u32 = pc_skip_sp(p, j, n);
+                if k < n && load8(p, k) == 40 {
+                    let q: u32 = k + 1;
+                    let cl: u32 = 0;
+                    while q < n && cl == 0 {
+                        let d: u32 = load8(p, q);
+                        if d == 41 {
+                            cl = 1;
+                        } else if d == 59 || d == 123 || d == 10 {
+                            q = n;
+                        } else {
+                            q = q + 1;
+                        }
+                    }
+                    if cl == 1 {
+                        let k2: u32 = pc_skip_sp(p, q + 1, n);
+                        if k2 < n && load8(p, k2) == 123 {
+                            return 1;
+                        }
+                    }
+                }
+            }
+            i = j;
+        } else {
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
 /// `trans_core.tokens`。错误写进 `M_TMP + 8`：0 = 好，1 = 子集外，2 = 认不出的字符。
 /// 返回记号数。
 fn tokenize(mem: ptr, src: ptr, n: u32) -> u32 {
@@ -1415,9 +1548,17 @@ fn p_at(mem: ptr, src: ptr, text: str, k: u32) -> u32 {
 }
 
 /// 出错的两种（上游 `Unsupported` = 退出 1 / `CError` = 退出 2）。只记码与行号。
+///
+/// **第一条错说了算**：早先的点名拒绝（子集外 = 1）不能被后面跌跌撞撞的
+/// "这里本该有个 `;`"（解析不过 = 2）盖掉。参考实现也是先抛先赢 —— 它先跑
+/// `_precheck`，命中就 `Unsupported`，根本走不到解析器。覆盖会让同一条输入在
+/// 两边给出不同的退出码（`loment_trans_test` 就是这么红起来的）。
 fn perr(mem: ptr, code: u32) -> u32 {
-    let _a: u32 = st32(pst(mem), PS_ERR, code);
-    let _b: u32 = st32(pst(mem), 272, tk_line(mem, ld32(pst(mem), PS_I)));
+    let st: ptr = pst(mem);
+    if ld32(st, PS_ERR) == 0 {
+        let _a: u32 = st32(st, PS_ERR, code);
+        let _b: u32 = st32(st, 272, tk_line(mem, ld32(st, PS_I)));
+    }
     return 0;
 }
 
@@ -6901,6 +7042,13 @@ fn _start() -> u32 {
             return errout("unbalanced", 2);
         }
     }
+    // Java 的 `_PRE` 是**解析之前**的点名拒绝（`tools/jtrans.py`）。孪生这边也必须
+    // 在解析之前跑：`synchronized void f()` 这类输入孪生的解析器**吃得下**（静默丢掉
+    // 修饰词），只有参考实现拒 —— 放到失败之后跑就永远等不到它。
+    // C# 没有这条前置检查（它自己的 `_unwrap` 没有），所以只在失败路径上兜底。
+    if lang == DL_JAVA && pc_reject(body, n, lang) == 1 {
+        return errout("unsupported", 1);
+    }
     let out: ptr = ptr_add(mem, M_OUT);
     if pre == 1 {
         let o: u32 = appn(out, 0, body, 0, n);
@@ -6927,6 +7075,9 @@ fn _start() -> u32 {
     if ec == 1 {
         return errout("unsupported", 1);
     }
+    if ec == 2 && (lang == DL_JAVA || lang == DL_CS) && pc_reject(body, n, lang) == 1 {
+        return errout("unsupported", 1);
+    }
     if ec == 2 {
         return errout("cerror", 2);
     }
@@ -6950,6 +7101,9 @@ fn _start() -> u32 {
     if p_unit(mem, body, lang, ptr_add(st, 440)) == 0 {
         let e: u32 = ld32(st, PS_ERR);
         if e == 1 {
+            return errout("unsupported", 1);
+        }
+        if (lang == DL_JAVA || lang == DL_CS) && pc_reject(body, n, lang) == 1 {
             return errout("unsupported", 1);
         }
         return errout("cerror", 2);

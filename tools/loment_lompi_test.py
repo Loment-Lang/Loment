@@ -452,6 +452,50 @@ def test_show_reports_the_content_identity():
 
 
 @test
+def test_foreign_package_kind_is_checked_hashed_and_planned():
+    """A foreign package is recognised by `foreign.lomp`, its jar is in the
+    identity, and `show` says `kind: foreign` (docs/281/282; docs/222 §5).
+
+    This is the lompi-side half of the Java AOT path: without it `install`
+    would copy only the `.lomt` and the jar would silently disappear.
+    """
+    rc, out = _run(["version"])
+    if rc == -1:
+        print(f"      SKIP: {_skip}")
+        return
+    with tempfile.TemporaryDirectory(prefix="lompi-foreign-") as t:
+        td = Path(t)
+        pkg = td / "store" / "mathlib" / "1.0.0"
+        pkg.mkdir(parents=True)
+        (pkg / "mathlib.lomt").write_text(
+            "module mathlib\n\npub fn f() -> i32 { return 1; }\n",
+            encoding="utf-8", newline="\n")
+        (pkg / "foreign.lomp").write_text(
+            'module foreign\n\npub fn name() -> str { return "mathlib"; }\n'
+            'pub fn version() -> str { return "1.0.0"; }\n'
+            'pub fn kind() -> str { return "java"; }\n',
+            encoding="utf-8", newline="\n")
+        (pkg / "foreign.txt").write_text(
+            "# lompi foreign v1\nkind java\nartifact jar lib.bin\n",
+            encoding="utf-8", newline="\n")
+        (pkg / "lib.bin").write_bytes(b"\x00java\xff")
+
+        rc, out = _run(["check", str(pkg)])
+        assert rc == 0 and "foreign manifest" in out, out[:240]
+
+        rc, out = _run(["hash", str(pkg)])
+        assert rc == 0 and "files: 4" in out, out[:240]
+
+        rc, out = _run(["show", str(td / "store"), "mathlib"])
+        assert rc == 0 and "kind:    foreign" in out, out[:240]
+
+        rc, out = _run(["plan", str(td / "store"), "mathlib",
+                        "--into", str(td / "into")])
+        assert rc == 0 and "mathlib@1.0.0" in out, out[:240]
+        print("      foreign: check/hash/show/plan")
+
+
+@test
 def test_version_command_and_the_shipped_version_agree():
     """`lompi version` 打的那个号，必须是我们说好要发的那个。
 
@@ -671,6 +715,186 @@ def test_fetch_pins_the_index_hash_out_of_band():
     # 帮助面也提到它 —— 旗子不是唯一知道它存在的地方
     rc, out = _run(["help"])
     assert rc == 0 and "--registry-sha256" in out and "docs/236" in out, out[:600]
+
+
+def _foreign_registry(root: Path, jar: bytes) -> tuple[bytes, bytes]:
+    """Write a one-package foreign registry under `root`; return (manifest, index)."""
+    import hashlib
+    (root / "pkg/1.0").mkdir(parents=True, exist_ok=True)
+    iface = (b"module mathlib\n\n"
+             b"pub fn mathlib_add(a0: i32, a1: i32) -> i32 {\n"
+             b"    return a0 + a1;\n"
+             b"}\n"
+             b"extern fn __jl_mathlib_add_(a0: i32, a1: i32) -> i32;\n")
+    lomp = b'module foreign\n\npub fn kind() -> str { return "java"; }\n'
+    manifest = (
+        "# lompi foreign v1\n"
+        "abi JL-A/1\n"
+        "backend aot\n"
+        "kind java\n"
+        f"artifact jar lib.jar {hashlib.sha256(jar).hexdigest()} {'0' * 64}\n"
+        f"artifact interface mathlib.lomt {hashlib.sha256(iface).hexdigest()}\n"
+        f"artifact manifest foreign.lomp {hashlib.sha256(lomp).hexdigest()}\n"
+    ).encode()
+    for name, data in (("lib.jar", jar), ("mathlib.lomt", iface),
+                       ("foreign.lomp", lomp), ("foreign.txt", manifest)):
+        (root / "pkg/1.0" / name).write_bytes(data)
+    index = (f"# lompi-foreign-index.txt\n"
+             f"mathlib 1.0 pkg/1.0/foreign.txt "
+             f"{hashlib.sha256(manifest).hexdigest()}\n").encode()
+    return manifest, index
+
+
+@test
+def test_fetch_follows_foreign_artifacts_and_streams_a_large_jar():
+    """#1056: the foreign index, its manifest, and a 1 MiB jar.
+
+    The jar is the point: `net_http_get` holds one response in a 256 KiB buffer, so
+    the old path cannot carry it. The streaming path writes the body to disk as it
+    arrives; the sha256 still has to match the manifest. The completion marker is
+    written only after both indexes and every artifact verified.
+    """
+    import hashlib
+    if _build() is None:
+        print(f"      SKIP: {_skip}")
+        return
+    jar = bytes(((i * 37 + 11) & 0xFF) for i in range(1024 * 1024))
+    with tempfile.TemporaryDirectory(prefix="foreign-") as td:
+        reg = Path(td)
+        manifest, index = _foreign_registry(reg, jar)
+        httpd, port = _serve_registry(reg, "# no source packages\n", {
+            "pkg/1.0/lib.jar": jar,
+            "pkg/1.0/mathlib.lomt": (reg / "pkg/1.0/mathlib.lomt").read_bytes(),
+            "pkg/1.0/foreign.lomp": (reg / "pkg/1.0/foreign.lomp").read_bytes(),
+            "pkg/1.0/foreign.txt": manifest,
+            "lompi-foreign-index.txt": index,
+        })
+        try:
+            url = f"http://127.0.0.1:{port}"
+            rc, out = _run(["fetch", "--registry", url])
+            assert rc != 0 and "not pinned" in out, out[:500]
+            rc, out = _fetch_ready(url, ["--insecure"])
+            assert rc == 0, out[:600]
+            dest = _cache_dest(out)
+            assert dest is not None, out[:400]
+            pkgdir = dest / "mathlib" / "1.0"
+            assert (pkgdir / "lib.jar").read_bytes() == jar, "1 MiB jar 没逐字节落盘"
+            assert (pkgdir / "mathlib.lomt").exists(), "接口单元没落盘"
+            assert (pkgdir / "foreign.lomp").exists(), "清单标签没落盘"
+            assert (pkgdir / "foreign.txt").read_bytes() == manifest, "foreign.txt 没落盘"
+            assert (dest / "lompi-fetch-complete").read_text() == "lompi-fetch 1 complete\n"
+        finally:
+            httpd.shutdown()
+
+
+@test
+def test_foreign_artifacts_are_refused_without_a_pin_or_after_a_byte_changes():
+    """#1056: the pin is required, a changed byte is refused, and no half file stays."""
+    import hashlib
+    if _build() is None:
+        print(f"      SKIP: {_skip}")
+        return
+    jar = bytes(((i * 11 + 3) & 0xFF) for i in range(4096))
+    with tempfile.TemporaryDirectory(prefix="foreign-pin-") as td:
+        reg = Path(td)
+        manifest, index = _foreign_registry(reg, jar)
+        httpd, port = _serve_registry(reg, "# no source packages\n", {
+            "pkg/1.0/lib.jar": jar,
+            "pkg/1.0/mathlib.lomt": (reg / "pkg/1.0/mathlib.lomt").read_bytes(),
+            "pkg/1.0/foreign.lomp": (reg / "pkg/1.0/foreign.lomp").read_bytes(),
+            "pkg/1.0/foreign.txt": manifest,
+            "lompi-foreign-index.txt": index,
+        })
+        try:
+            url = f"http://127.0.0.1:{port}"
+            pin = hashlib.sha256(index).hexdigest()
+            rc, out = _fetch_ready(url, ["--foreign-index-sha256", pin])
+            assert rc == 0, out[:500]
+            dest = _cache_dest(out)
+            assert dest is not None, out[:400]
+            assert (dest / "lompi-fetch-complete").read_text() == "lompi-fetch 1 complete\n"
+            # 一个字节就够：同一个索引钉子，jar 与清单里的哈希对不上
+            (reg / "pkg/1.0/lib.jar").write_bytes(jar[:100] + b"\x00" + jar[101:])
+            rc, out = _run(["fetch", "--registry", url, "--foreign-index-sha256", pin])
+            assert rc != 0, f"改了一个字节的 jar 却被接受: {out[:400]!r}"
+            assert "streaming download failed" in out or "mismatch" in out, out[:400]
+            assert (dest / "lompi-fetch-complete").read_bytes() == b"", "失败后标记不是 0 字节"
+            assert (dest / "mathlib/1.0/lib.jar").stat().st_size == 0, "半份 jar 留在了盘上"
+            # 消费方也不许拿这份缓存去装
+            rc, out = _run(["install", "mathlib", "--registry", url,
+                            "--into", str(reg / "deps")])
+            assert rc != 0 and "incomplete" in out, out[:400]
+            # `--insecure` 只对回环生效
+            rc, out = _run(["fetch", "--registry", "http://10.0.0.7", "--insecure"])
+            assert rc != 0 and "127.0.0.1" in out, out[:300]
+        finally:
+            httpd.shutdown()
+
+
+@test
+def test_lock_v2_pins_jar_ir_abi_and_compiler():
+    """#1056: a foreign package gets a `foreign` line with both hashes recomputed.
+
+    Changing the jar or the compiler must make `verify` red **and name the line**;
+    a source-only store keeps emitting v1, byte for byte.
+    """
+    import hashlib
+    if _build() is None:
+        print(f"      SKIP: {_skip}")
+        return
+    with tempfile.TemporaryDirectory(prefix="lock2-") as td:
+        store = Path(td) / "store"
+        pkg = store / "mathlib" / "1.0"
+        pkg.mkdir(parents=True)
+        jar = b"J" * 4096
+        ir = b"; a tiny IR stand-in\n"
+        (pkg / "lib.jar").write_bytes(jar)
+        (pkg / "mathlib.ll").write_bytes(ir)
+        (pkg / "mathlib.lomt").write_text(
+            "module mathlib\n\npub fn small() -> i32 { return 1; }\n",
+            encoding="utf-8", newline="\n")
+        (pkg / "foreign.lomp").write_text(
+            'module foreign\n\npub fn kind() -> str { return "java"; }\n',
+            encoding="utf-8", newline="\n")
+        (pkg / "foreign.txt").write_text(
+            "# lompi foreign v1\nabi JL-A/1\nkind java\n"
+            f"artifact jar lib.jar {hashlib.sha256(jar).hexdigest()}\n",
+            encoding="utf-8", newline="\n")
+        link = ("# lompi link v1\ncompiler jl-0.1.5\n"
+                f"ir mathlib.ll {hashlib.sha256(ir).hexdigest()}\n")
+        (pkg / "link.txt").write_text(link, encoding="utf-8", newline="\n")
+
+        rc, out = _run(["resolve", str(store), "mathlib"])
+        assert rc == 0 and out.startswith("# lompi lock v2\n"), out[:400]
+        fline = [l for l in out.splitlines() if l.startswith("foreign ")]
+        assert len(fline) == 1, out[:400]
+        assert f"jar={hashlib.sha256(jar).hexdigest()}" in fline[0], fline[0]
+        assert f"ir={hashlib.sha256(ir).hexdigest()}" in fline[0], fline[0]
+        assert "abi=JL-A/1" in fline[0] and "compiler=jl-0.1.5" in fline[0], fline[0]
+        lock = Path(td) / "l.lock"
+        lock.write_text(out, encoding="utf-8", newline="\n")
+        rc, out = _run(["verify", str(store), "mathlib", str(lock)])
+        assert rc == 0, out[:400]
+
+        (pkg / "lib.jar").write_bytes(jar[:-1] + b"K")
+        rc, out = _run(["verify", str(store), "mathlib", str(lock)])
+        assert rc != 0 and "jar=" in out and "first differing line" in out, out[:600]
+        (pkg / "lib.jar").write_bytes(jar)
+
+        (pkg / "link.txt").write_text(link.replace("jl-0.1.5", "jl-0.1.6"),
+                                      encoding="utf-8", newline="\n")
+        rc, out = _run(["verify", str(store), "mathlib", str(lock)])
+        assert rc != 0 and "compiler=" in out and "first differing line" in out, out[:600]
+
+        # 源码包照旧 v1（外源行只在外源包上出现）
+        plain = store / "plain" / "0.1.0"
+        plain.mkdir(parents=True)
+        (plain / "plain.lomt").write_text(
+            "module plain\n\npub fn two() -> i32 { return 2; }\n",
+            encoding="utf-8", newline="\n")
+        rc, out = _run(["resolve", str(store), "plain"])
+        assert rc == 0 and out.startswith("# lompi lock v1\n"), out[:400]
+        assert "foreign " not in out, out[:400]
 
 
 @test

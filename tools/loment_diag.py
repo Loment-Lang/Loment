@@ -2078,7 +2078,8 @@ LANG_CARDS: dict[str, LangCard] = {
         tokens=("public class", "static void main", "System.out"),
         edge="类继承、接口、泛型擦除、异常、`String`、集合类都不翻；"
              "`boolean` 与 `int` 是分开的（`&&` 出 boolean，所以**不用补转换** —— 这点与 C 相反）；"
-             "`>>>` 是无符号右移（Loment 的 `>>` 分有符号/无符号两种写法）。",
+             "`>>>` 是逻辑右移；Loment 的 `>>` 是**算术**的（要逻辑右移得写 "
+             "`(a as u32) >> n`）。",
         abi="**JVM 默认不导出 C ABI**；要链接得上 JNI 或 NativeAOT。",
     ),
     "csharp": LangCard(
@@ -2176,7 +2177,8 @@ LANG_EDGE_EN: dict[str, str] = {
     "java": "Class inheritance, interfaces, generic erasure, exceptions, `String` and the "
             "collection classes are not translated. `boolean` and `int` are separate (`&&` "
             "produces boolean, so **no conversion is needed** - the opposite of C); `>>>` is the "
-            "unsigned right shift (Loment spells the signed and the unsigned shift differently).",
+            "logical right shift; Loment's `>>` is arithmetic (write `(a as u32) >> n` for a "
+            "logical shift).",
     "csharp": "Class inheritance, interfaces, generics, LINQ, properties (`get; set;`), events, "
               "delegates and exceptions are not translated. The three shells `using` / "
               "`namespace` / `class` are stripped (both the brace form and the file-scoped "

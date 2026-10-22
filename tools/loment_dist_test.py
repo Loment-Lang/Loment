@@ -24,6 +24,7 @@ import io
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tarfile
@@ -1261,11 +1262,183 @@ def test_docs_samples_compile() -> None:
     print(f"      {len(DOC_SAMPLES)} 份文档共 {total} 块 rust 样例全过前端")
 
 
+def test_java_dependency_autolinks() -> None:
+    """#1062: `use mathlib` + `deps/mathlib/link.txt` -> a native product.
+
+    The package is built the same way the release builds it (stage1 -> tool IR ->
+    lomelf), then a project is compiled by the **shipped launcher** with a PATH that
+    has no `java`, `javac`, `jar`, `wsl` or `clang`. The launcher must find the IR
+    through `deps/*/link.txt`, verify its sha256, merge it, and produce a product
+    that runs and imports no JVM DLL.
+    """
+    import lomjava
+
+    work = loment_dist.STAGE / "java-link"
+    if work.exists():
+        shutil.rmtree(work)
+    pkg, proj = work / "pkg", work / "proj"
+    (pkg / "bin").mkdir(parents=True)
+    (pkg / "share" / "loment").mkdir(parents=True)
+    (proj / "deps" / "mathlib").mkdir(parents=True)
+
+    built = loment_dist.build_tools({"loment-driver", "loment-lomelf"})
+    for name in ("loment-driver", "loment-lomelf"):
+        elf, pe = built[name]
+        exe = pkg / "bin" / (f"{name}.exe" if os.name == "nt" else name)
+        exe.write_bytes(pe if os.name == "nt" else elf)
+        if os.name != "nt":
+            exe.chmod(0o755)          # `[ -x ]` 在启动器的 `need` 里就是这么问的
+    if os.name == "nt":
+        launcher = pkg / "bin" / "loment.cmd"
+        launcher.write_bytes(loment_dist._subst(loment_dist.LAUNCHER_CMD)
+                             .replace("\n", "\r\n").encode("ascii"))
+        path_var = r"C:\Windows\System32;C:\Windows"
+    else:
+        launcher = pkg / "bin" / "loment"
+        launcher.write_bytes(loment_dist._subst(loment_dist.LAUNCHER_SH).encode("ascii"))
+        launcher.chmod(0o755)
+        # CI 的 `/usr/bin` 里有 java（runner 镜像自带 JRE），所以"PATH 里没有 java"
+        # 不能靠 `/usr/bin:/bin` 来说 —— 那只是**这台机器**恰好没有。造一个只放
+        # 启动器真正要用到的命令的目录，PATH 只有它。
+        pathbin = pkg / "pathbin"
+        pathbin.mkdir()
+        for cmd in ("bash", "env", "dirname", "mktemp", "rm", "ls", "cat", "sed",
+                    "sort", "uniq", "cut", "grep", "sha256sum", "chmod"):
+            real = shutil.which(cmd)
+            if real:
+                (pathbin / cmd).symlink_to(real)
+        path_var = str(pathbin)
+    for tool in ("java", "javac", "jar", "clang"):
+        check(f"PATH 里没有 {tool}", shutil.which(tool, path=path_var) is None)
+    # `wsl.exe` 本身就住在 System32 里，拿 PATH 排除不掉；`cmd`/`certutil`/`findstr`
+    # 却非它不可。所以这一条判**启动器不调用它**（与 ELF 那条原生执行合起来才是完整的话）。
+    ltext = launcher.read_text(encoding="utf-8", errors="replace")
+    # 只看代码行（注释里说"under WSL"不算调用）；`wslpath` 是路径转换，不是转发。
+    lcode = "\n".join(l for l in ltext.splitlines() if not l.lstrip().startswith(("#", "rem")))
+    check("启动器不调用 wsl", not re.search(r"\bwsl(?!path)", lcode, re.I))
+
+    classes = lomjava.load_classes(ROOT / "tools/fixtures/java/com/example/MathLib.class")
+    ir = proj / "deps" / "mathlib" / "mathlib.ll"
+    lomjava.emit("mathlib", classes, ir, proj / "deps" / "mathlib" / "mathlib.lomt")
+    (proj / "deps" / "mathlib" / "link.txt").write_text(
+        "# lompi link v1\n"
+        f"ir mathlib.ll {hashlib.sha256(ir.read_bytes()).hexdigest()}\n",
+        encoding="utf-8", newline="\n")
+    (proj / "app.lomt").write_text(
+        "module app\nuse mathlib\n\nfn _start() {\n"
+        "    let r: i32 = mathlib_add(2, 3);\n"
+        "    syscall4(60, r as u64, 0, 0);\n}\n",
+        encoding="utf-8", newline="\n")
+
+    env = dict(os.environ, PATH=path_var)
+    if os.name == "nt":
+        cmd = [r"C:\Windows\System32\cmd.exe", "/c", str(launcher), "build", "app.lomt", "-o", "app"]
+    else:
+        cmd = [str(launcher), "build", "app.lomt", "-o", "app"]
+    r = subprocess.run(cmd, cwd=str(proj), capture_output=True, text=True, env=env)
+    exe = proj / ("app.exe" if os.name == "nt" else "app")
+    check("deps/*/link.txt 自动链接出一个产物", r.returncode == 0 and exe.exists(),
+          ((r.stdout or "") + (r.stderr or ""))[-300:])
+    if exe.exists():
+        if os.name != "nt":
+            # `build` 不设执行位（只有 `run` chmod —— 既有行为，与后端的其余判据一致）。
+            exe.chmod(0o755)
+        rr = subprocess.run([str(exe)], capture_output=True)
+        check("产物原生跑：mathlib_add(2,3) = 5", rr.returncode == 5, f"rc={rr.returncode}")
+        if os.name == "nt":
+            blob = exe.read_bytes()
+            pe = struct.unpack_from("<I", blob, 0x3C)[0]
+            opt = pe + 24
+            magic = struct.unpack_from("<H", blob, opt)[0]
+            dd = opt + (112 if magic == 0x20B else 96)
+            irva, _isz = struct.unpack_from("<II", blob, dd + 8)
+            secs = struct.unpack_from("<H", blob, pe + 6)[0]
+            optsz = struct.unpack_from("<H", blob, pe + 20)[0]
+            base = pe + 24 + optsz
+
+            def off(rva: int) -> int | None:
+                for k in range(secs):
+                    o = base + k * 40
+                    vs, va, rs, rp = struct.unpack_from("<IIII", blob, o + 8)
+                    if va <= rva < va + max(vs, rs):
+                        return rp + rva - va
+                return None
+
+            dlls, k = [], 0
+            while True:
+                o = off(irva + k * 20)
+                ilt, _ts, _fc, name_rva, _iat = struct.unpack_from("<IIIII", blob, o)
+                if ilt == 0 and name_rva == 0:
+                    break
+                no = off(name_rva)
+                dlls.append(blob[no:blob.index(b"\0", no)].decode().lower())
+                k += 1
+            check("PE 导入表是 kernel32 + ws2_32", dlls == ["kernel32.dll", "ws2_32.dll"], str(dlls))
+            check("PE 导入表里没有 jvm.dll / java.dll",
+                  not ({"jvm.dll", "java.dll"} & set(dlls)), str(dlls))
+
+    # ---- 缺 IR：包装器点名（不是静默链了别的东西）
+    ir.rename(ir.with_suffix(".bak"))
+    r = subprocess.run(cmd, cwd=str(proj), capture_output=True, text=True, env=env)
+    out = (r.stdout or "") + (r.stderr or "")
+    check("link.txt 里点名的 IR 不在 -> 点名报错",
+          r.returncode != 0 and "does not exist" in out, out[-300:])
+    ir.with_suffix(".bak").rename(ir)
+    # ---- 缺 link.txt：链接器点名未定义符号（不是静默成功）
+    lt = proj / "deps" / "mathlib" / "link.txt"
+    lt.rename(lt.with_suffix(".bak"))
+    r = subprocess.run(cmd, cwd=str(proj), capture_output=True, text=True, env=env)
+    out = (r.stdout or "") + (r.stderr or "")
+    check("删掉 link.txt -> 未定义符号，非零退出",
+          r.returncode != 0 and "undefined label" in out, out[-300:])
+    lt.with_suffix(".bak").rename(lt)
+
+    # ---- #1060: the shared runtime, once per closure, from the package's share/
+    import loment_jrt
+    check("jrt.ll 与 jrt.lomt 一致（不是手改的旧产物）",
+          loment_jrt.main(["--check"]) == 0)
+    (pkg / "share" / "loment" / "jrt" / "0.1.0").mkdir(parents=True)
+    (pkg / "share" / "loment" / "jrt" / "0.1.0" / "jrt.ll").write_bytes(
+        (ROOT / "loment" / "lib" / "jrt" / "jrt.ll").read_bytes())
+    proj2 = work / "proj2"
+    (proj2 / "deps" / "printlib").mkdir(parents=True)
+    classes = lomjava.load_classes(ROOT / "tools/fixtures/java/com/example/PrintLib.class")
+    pir = proj2 / "deps" / "printlib" / "printlib.ll"
+    lomjava.emit("printlib", classes, pir, proj2 / "deps" / "printlib" / "printlib.lomt")
+    (proj2 / "deps" / "printlib" / "link.txt").write_text(
+        "# lompi link v1\n"
+        f"ir printlib.ll {hashlib.sha256(pir.read_bytes()).hexdigest()}\n"
+        "runtime jrt 0.1.0\n", encoding="utf-8", newline="\n")
+    (proj2 / "app.lomt").write_text(
+        "module app\nuse printlib\n\nfn _start() {\n"
+        "    printlib_hello();\n    syscall4(60, 0, 0, 0);\n}\n",
+        encoding="utf-8", newline="\n")
+    if os.name == "nt":
+        cmd2 = [r"C:\Windows\System32\cmd.exe", "/c", str(launcher),
+                "build", "app.lomt", "-o", "app"]
+    else:
+        cmd2 = [str(launcher), "build", "app.lomt", "-o", "app"]
+    r = subprocess.run(cmd2, cwd=str(proj2), capture_output=True, text=True, env=env)
+    exe2 = proj2 / ("app.exe" if os.name == "nt" else "app")
+    check("runtime jrt 从包里加上（不用 --java-lib）",
+          r.returncode == 0 and exe2.exists(),
+          ((r.stdout or "") + (r.stderr or ""))[-300:])
+    if exe2.exists():
+        if os.name != "nt":
+            exe2.chmod(0o755)
+        rr = subprocess.run([str(exe2)], capture_output=True)
+        check("println/print 的输出与 JVM 相同",
+              rr.returncode == 0
+              and rr.stdout == b"hello\n42\n-7\nx=1234567890123\n5\n3\n9\n"
+              and rr.stderr == b"e\n", repr(rr.stdout[-80:]) + repr(rr.stderr[-40:]))
+
+
 def main() -> int:
     print("loment_dist_test —— 发行包判据 (docs/162)")
     for name, fn in (("driver 的来源：种子 == 参考实现", test_driver_seed_matches_reference),
                      ("--opt 编出来的驱动自己跑得起来", test_opt_driver_runs),
                      ("包里那个 VM 真跑一份程序", test_lvm_ships_and_runs_a_program),
+                     ("Java 依赖经 link.txt 自动链接", test_java_dependency_autolinks),
                      ("布局与脚本卫生", test_layout), ("归档内容与确定性", test_archives),
                      ("安装脚本点名更靠前的同名命令", test_installers_name_an_earlier_lompi),
                      ("自解压包的两种载荷形状 (静态)", test_setup_shapes_are_pinned_statically),

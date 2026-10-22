@@ -306,8 +306,10 @@ def test_java_specific_difference_is_loud():
           "    public static int f(int a) { return a >> 1; }\n"
           "}\n")
     text = jtrans.translate(ok)
-    assert "a) >> 1" in text or ">> 1" in text, text
-    print("      `>>`（算术，与 Loment 一致）照收")
+    # Java masks the shift distance (int: 0x1f). The translation must keep the
+    # arithmetic `>>` and add the mask; issue #819 is the `1 << 32` case.
+    assert ">>" in text and "& 31" in text, text
+    print("      `>>`（算术，与 Loment 一致）照收，且距离按 31 掩码")
 
 
 @test
@@ -333,6 +335,126 @@ def test_class_shell_is_stripped_without_moving_lines():
     assert [i for i, c in enumerate(u) if c == "\n"] == \
            [i for i, c in enumerate(src) if c == "\n"], "换行位置漂了"
     print("      外壳抹掉、长度与换行位置一字不变")
+
+
+@test
+def test_java_semantic_guards():
+    """Java-specific compile-time errors and semantics (#821 / #820 / #491 / #819).
+
+    These are the four highest-severity grammar-audit findings: a silently
+    wrapping literal, a SIGFPE that starts as a constant, a 64-bit comparison
+    narrowed to 32 bits, and a shift count that Java masks but this language
+    does not.
+    """
+    def bad(src: str, needle: str) -> None:
+        try:
+            jtrans.translate(src)
+        except jtrans.Unsupported as e:
+            msg = str(e)
+            assert needle in msg, msg
+            print(f"      rejected: {msg[:80]}")
+        else:
+            raise AssertionError(f"expected a diagnostic containing {needle!r}")
+
+    bad("public class T { public static int f() { byte b = 200; return b; } }", "i8")
+    bad("public class T { public static int f() { int x = 1 / 0; return x; } }", "零")
+
+    cmp_text = jtrans.translate(
+        "public class T { public static boolean f(long a) { return a < 0; } }")
+    assert "as i64" in cmp_text, cmp_text
+    cmp_line = next(x.strip() for x in cmp_text.splitlines() if "return" in x)
+    print(f"      long comparison widened: {cmp_line}")
+
+    shift_text = jtrans.translate(
+        "public class T { public static int f() { return 1 << 32; } }")
+    assert "& 31" in shift_text, shift_text
+    shift_line = next(x.strip() for x in shift_text.splitlines() if "return" in x)
+    print(f"      shift masked: {shift_line}")
+
+
+@test
+def test_java_literal_forms_and_heritage():
+    """Java literal forms (#808/#810/#811/#812/#813/#815) and loud heritage (#822).
+
+    The subset has no inheritance, no packages and no imports. Those clauses must
+    be rejected, not stripped; a class that silently loses `extends Base` is a
+    different program.
+    """
+    def tr(src: str) -> str:
+        return jtrans.translate(src)
+
+    assert "= 10;" in tr("public class T { public static int f() { int x = 0b1010; return x; } }")
+    assert "= 1000;" in tr("public class T { public static int f() { int x = 1_000; return x; } }")
+    assert "= 8;" in tr("public class T { public static int f() { int x = 010; return x; } }")
+    assert "= 97;" in tr("public class T { public static int f() { char c = 'a'; return c; } }")
+    assert "return -1;" in tr("public class T { public static int f() { return 0xFFFFFFFF; } }")
+    assert "return 100;" in tr("public class T { public static long f() { return 100L; } }")
+
+    for src, needle in (
+            ("public class T extends Base { public static int f() { return 1; } }", "extends"),
+            ("public class T implements I { public static int f() { return 1; } }", "implements"),
+            ("package p; public class T { public static int f() { return 1; } }", "package"),
+            ("import java.util.List; public class T { public static int f() { return 1; } }", "import")):
+        try:
+            tr(src)
+        except jtrans.Unsupported as e:
+            assert needle in str(e), (needle, str(e))
+        else:
+            raise AssertionError(f"{needle} was silently accepted")
+    print("      binary/underscore/octal/char/L/hex literals; heritage rejected")
+
+
+@test
+def test_java_out_of_subset_is_named():
+    """Out-of-subset Java constructs get a named diagnostic, not a token error.
+
+    These are the audit findings that all shared the same shape: the construct
+    was split into unremarkable tokens and the error pointed somewhere unrelated
+    (#831/#832/#833/#834/#838/#839/#840/#842/#843/#845/#846/#847/#848/#851/
+    #853/#855). Support is still out of scope; the message is the deliverable.
+    """
+    cases = [
+        ("public class T { public static int f() { double d = 1.5; return 1; } }", "float"),
+        ("public class T { public static int f() { Object o = null; return 1; } }", "null"),
+        ("public class T { int x; public int f() { return this.x; } }", "this"),
+        ("public class T { public int f() { return super.hashCode(); } }", "super"),
+        ("public class T { public static int f(Object o) { return o instanceof String ? 1 : 0; } }", "instanceof"),
+        ("public class T { public static int f() throws Exception { return 1; } }", "throws"),
+        ("public class T { public static int f() { synchronized (T.class) { return 1; } } }", "synchronized"),
+        ("public class T { public static int f() { Runnable r = () -> {}; return 1; } }", "lambda"),
+        ("@Deprecated public class T { public static int f() { return 1; } }", "注解"),
+        ('public class T { public static int f() { String s = """x"""; return 1; } }', "文本块"),
+        ("public class T { T(int x) { } public static int f() { return 1; } }", "构造器"),
+        ("public class T { static { } public static int f() { return 1; } }", "静态初始化块"),
+        ("public sealed class T permits U { public static int f() { return 1; } }", "sealed"),
+        ("public enum T { A, B }", "enum"),
+        ("public interface T { int f(); }", "interface"),
+        ("public record T(int x) { }", "record"),
+        ("public class T { public static int f() { Object o = T.class; return 1; } }", "class"),
+        ("public class T { public static int f(int a) { return +a; } }", "一元 `+`"),
+    ]
+    for src, needle in cases:
+        try:
+            jtrans.translate(src)
+        except jtrans.Unsupported as e:
+            assert needle in str(e), (needle, str(e))
+        else:
+            raise AssertionError(f"accepted an out-of-subset construct: {needle}")
+    print(f"      {len(cases)} out-of-subset constructs named")
+
+
+@test
+def test_java_diag_note_does_not_invent_shift_syntax():
+    """The Java language card must not claim Loment has signed/unsigned `>>` (#867)."""
+    import loment_diag
+    card = loment_diag.LANG_CARDS["java"]
+    assert "分有符号" not in card.edge, card.edge
+    assert "两种写法" not in card.edge, card.edge
+    assert "逻辑右移" in card.edge, card.edge
+    en = loment_diag.LANG_EDGE_EN["java"]
+    assert "signed and the unsigned shift" not in en, en
+    assert "logical right shift" in en, en
+    print("      Java card states: >>> logical, >> arithmetic")
 
 
 def main() -> int:

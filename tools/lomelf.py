@@ -6303,6 +6303,13 @@ def compile_ll(text: str, objects: list | None = None,
     global TEXT_VADDR, DATA_VADDR
     TEXT_VADDR, DATA_VADDR = ELF_TEXT_VADDR, ELF_DATA_VADDR   # PE 目标会改这两个全局
     globals_, funcs, externs = parse_ll(text)
+    # A name that is both `declare`d and `define`d in this text is an internal call.
+    # Multi-input linking (docs/282 sec 6.2) concatenates the app IR with library IRs;
+    # the app's `declare __jl_x` then meets the library's `define __jl_x`. Keeping the
+    # name in `externs` would send the call through the C ABI register path, which is
+    # wrong on PE. Same rule as `merge_ir_texts` (declare satisfied by define).
+    _defined = {f.name for f in funcs}
+    externs = [x for x in externs if x not in _defined]
     # **`no_std` 的带牙检查**（`#941` / #539）：声明只用核那一层，就不能带宿主层。
     # 与 `docs/227` 判据 B 同形 —— 编译器是那句话的作者，能拿一份不是自己生成的 IR
     # 去核它的只有链接器这一侧。
@@ -6767,6 +6774,50 @@ def compile_ll(text: str, objects: list | None = None,
     }
 
 
+#: IR 级链接：同名 `define` 出现两次是硬错；一个 `declare` 只要在同一批输入里有
+#: `define`，就从文本里去掉 —— 于是调用点不再走 C ABI，而是走 Loment 自己的栈约定。
+#: 这对 PE 尤其重要：PE 的 extern 调用点仍是 System V 寄存器（见 `C_ARG_REGS` 的注释）。
+_IR_DEF_RE = re.compile(r"^define\b[^@\n]*@([A-Za-z0-9_.$-]+)\s*\(", re.M)
+_IR_DECL_RE = re.compile(r"^declare\b[^@\n]*@([A-Za-z0-9_.$-]+)\s*\(", re.M)
+
+
+def merge_ir_texts(texts: list[str], names: list[str] | None = None) -> str:
+    """Merge several IR modules and resolve declarations against definitions.
+
+    The inputs are independent modules (application, one or more Java libraries,
+    `jrt`).  This is deliberately a text-level merge: the rest of the linker
+    still sees one module, so both targets and both implementations keep one
+    code path.  It is also what makes a `declare`-ed Java symbol a direct call
+    instead of an extern C-ABI call.
+    """
+    names = names or [f"input#{i}" for i in range(len(texts))]
+    defined: dict[str, str] = {}
+    starts = 0
+    for name, text in zip(names, texts):
+        for sym in _IR_DEF_RE.findall(text):
+            if sym in defined:
+                raise Unsupported(
+                    f"重复定义 @{sym}: {defined[sym]} 与 {name}")
+            defined[sym] = name
+            if sym == "_start":
+                starts += 1
+    if "_start" not in defined:
+        raise Unsupported("没有 _start 入口（合并后的 IR 需要恰好一个）")
+    if starts != 1:
+        raise Unsupported("合并后的 IR 必须恰好有一个 _start")
+
+    out: list[str] = []
+    for text in texts:
+        kept: list[str] = []
+        for line in text.splitlines():
+            m = _IR_DECL_RE.match(line)
+            if m and m.group(1) in defined:
+                continue
+            kept.append(line)
+        out.append("\n".join(kept))
+    return "\n\n".join(out)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "--dump-win-shim" and len(argv) == 2:
@@ -6811,9 +6862,9 @@ def main(argv: list[str] | None = None) -> int:
         else:
             files.append(a)
         i += 1
-    if (len(files) != 1 or target not in ("elf", "pe")
+    if (not files or target not in ("elf", "pe")
             or profile not in ("default", "hotswap")):
-        print("用法: lomelf.py IN.ll [-o OUT] [--target elf|pe] [--check]"
+        print("用法: lomelf.py IN.ll [MORE.ll ...] [-o OUT] [--target elf|pe] [--check]"
               " [--link OBJ.o ...] [--allow-ports] [--interp PATH] [--hot-meta PATH]"
               " [--profile default|hotswap]",
               file=sys.stderr)
@@ -6826,12 +6877,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     src = Path(files[0])
     try:
+        texts = [Path(f).read_text(encoding="utf-8") for f in files]
+        text = texts[0] if len(texts) == 1 else merge_ir_texts(texts, files)
         objs = [load_foreign(p) for p in link]
         if target == "pe":
-            blob, info = compile_pe(src.read_text(encoding="utf-8"))
+            blob, info = compile_pe(text)
         else:
-            blob, info = compile_ll(src.read_text(encoding="utf-8"), objs,
-                                    allow_ports, interp,
+            blob, info = compile_ll(text, objs, allow_ports, interp,
                                     hotswap=(profile == "hotswap"))
     except Unsupported as e:
         print(f"[ERR] {e}", file=sys.stderr)

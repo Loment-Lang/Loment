@@ -78,13 +78,20 @@ def text_of(blob: bytes, meta: dict) -> bytes:
 
 
 def relocate(text: bytes, meta: dict, slot: int) -> bytearray:
-    """把文本段搬到 `slot`：先整体复制，再把每条绝对地址加 `delta`。"""
+    """把文本段搬到 `slot`。
+
+    **只有指向本镜像代码的绝对量要加 `delta`**。指向数据段（全局、字符串、epoch 字）的
+    绝对量**必须保持原值** —— 热更新换的是代码，不是状态；新镜像看见的必须是同一份数据。
+    今天没有函数指针，所以表里通常一条代码目标都没有；这条规则是给以后留的。
+    """
     out = bytearray(text)
-    delta = slot - meta["base"]
+    base = meta["base"]
+    lo, hi = base, base + len(out)
     for off, tgt in meta["relocs"]:
         if off + 8 > len(out):
             raise Refused("reloc", f"偏移 {off} 越界")
-        struct.pack_into("<Q", out, off, tgt + delta)
+        if lo <= tgt < hi:
+            struct.pack_into("<Q", out, off, tgt + (slot - base))
     return out
 
 

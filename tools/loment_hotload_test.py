@@ -49,7 +49,7 @@ C = A.replace("add(1, 2)", "add(1, 5)")
 SLOT_B = 0x10000000
 
 
-def _meta(src: str):
+def _build(src: str):
     with __import__("tempfile").TemporaryDirectory() as t:
         p = Path(t) / "probe.lomt"
         p.write_text(src, encoding="utf-8", newline="\n")
@@ -59,8 +59,12 @@ def _meta(src: str):
         assert not errs, errs[:2]
         ir = lomentc.emit_llvm(mod, ROOT, deps)
     blob, info = lomelf.compile_ll(ir, hotswap=True)
-    meta = hl.parse(info["hot"])
-    return blob, meta, hl.text_of(blob, meta)
+    return blob, hl.parse(info["hot"]), hl.text_of(blob, hl.parse(info["hot"])), info["hot"]
+
+
+def _meta(src: str):
+    blob, meta, text, _raw = _build(src)
+    return blob, meta, text
 
 
 @test
@@ -74,13 +78,14 @@ def test_metadata_carries_a_relocation_table() -> None:
 
 
 @test
-def test_relocation_shifts_every_absolute_value() -> None:
+def test_data_references_are_shared_not_shifted() -> None:
+    """数据段里的地址**不跟着镜像走**：新镜像看见的必须是同一份状态。"""
     _blob, meta, text = _meta(A)
     moved = hl.relocate(text, meta, SLOT_B)
-    delta = SLOT_B - meta["base"]
     for off, tgt in meta["relocs"]:
-        assert struct.unpack_from("<Q", moved, off)[0] == tgt + delta
-    print(f"      搬到 {SLOT_B:#x}：{len(meta['relocs'])} 条绝对地址全部加上 delta")
+        assert not (meta["base"] <= tgt < meta["base"] + len(text)), tgt
+        assert struct.unpack_from("<Q", moved, off)[0] == tgt, (off, tgt)
+    print(f"      搬到 {SLOT_B:#x}：{len(meta['relocs'])} 条数据引用保持原值")
 
 
 @test
@@ -167,6 +172,64 @@ def test_ping_pong_between_two_targets() -> None:
         assert am["base"] + slot * 16 + 5 + rel == want
         assert want != first[slot]
     print("      两次翻转：槽表从 A 指到 B，再指回 A")
+
+
+@test
+def test_executes_in_a_real_process() -> None:
+    """真进程：映射两份镜像、翻转、**再调一次**——第二个答案必须来自新实现。
+
+    Windows 上走 WSL（产物是 Linux ABI）；两边都没有就跑不了，SKIP 并说原因。
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    qsrc = C.replace("return a + b;", "return a + b + 1;")
+    ab, am, _at, ar = _build(A)
+    qb, qm, _qt, qr = _build(qsrc)
+    script = ROOT / "tools" / "loment_hotload_exec.py"
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        (td / "a.elf").write_bytes(ab)
+        (td / "q.elf").write_bytes(qb)
+        (td / "a.lomhot").write_text(ar, encoding="utf-8")
+        (td / "q.lomhot").write_text(qr, encoding="utf-8")
+        names = ["a.elf", "a.lomhot", "q.elf", "q.lomhot", "add"]
+        if sys.platform.startswith("linux"):
+            r = subprocess.run([sys.executable, str(script)] + [str(td / n) for n in names],
+                               capture_output=True, text=True)
+        else:
+            if not shutil.which("wsl"):
+                print("SKIP: 没有 WSL/Linux，跑不了 ELF")
+                return
+            probe = subprocess.run(["wsl", "-e", "python3", "-c", "print(1)"],
+                                   capture_output=True, text=True)
+            if probe.returncode != 0:
+                print("SKIP: WSL 里没有 python3")
+                return
+
+            def w(p: Path) -> str:
+                s = str(p.resolve()).replace("\\", "/")
+                return "/mnt/" + s[0].lower() + s[2:]
+
+            dest = "/tmp/loment-hotload-exec"
+            pre = (f"rm -rf {dest} && mkdir -p {dest} && cp {w(script)} {dest}/exec.py && "
+                   + " && ".join(f"cp {w(td / n)} {dest}/{n}" for n in names[:4]))
+            cmd = (pre + f" && python3 {dest}/exec.py {dest}/a.elf {dest}/a.lomhot "
+                         f"{dest}/q.elf {dest}/q.lomhot add")
+            r = subprocess.run(["wsl", "-e", "bash", "-lc", cmd],
+                               capture_output=True, text=True)
+        assert r.returncode == 0, (r.stdout[-300:], r.stderr[-300:])
+    vals = {}
+    for line in r.stdout.splitlines():
+        m = line.split()
+        if len(m) == 2:
+            vals[m[0]] = int(m[1], 0)
+    assert vals.get("BEFORE") == 3, r.stdout
+    assert vals.get("AFTER") == 4, r.stdout
+    assert 0x800000 <= vals.get("EPOCH", 0) < 0x900000, r.stdout
+    assert vals.get("SLOT") == am["base"] + am["funcs"]["add"]["tramp"] * 16, r.stdout
+    print("      真进程：翻转前后 3 -> 4，epoch 落在共享数据段，槽地址对得上")
 
 
 def main() -> int:

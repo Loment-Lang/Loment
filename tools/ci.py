@@ -402,8 +402,8 @@ SHARD_COST = {
     "loment_hotmeta_test": 0.8,
     # 2026-10-21（#1150）：本机 Windows 实测 1.7s（含一次 WSL 跑两个 ELF）。
     "loment_hotswap_test": 1.7,
-    # 2026-10-22（#1151）：本机 Windows 实测 0.5s（两份小源各编一次 + 纯字节变换）。
-    "loment_hotload_test": 0.5,
+    # 2026-10-22（#1151）：本机 Windows 实测 1.1s（两份小源各编一次 + 一次 WSL 真跑）。
+    "loment_hotload_test": 1.1,
     "loment_std_test": 3.1,
     "loment_store_twin_test": 261.6,
     # 2026-10-19（#772）：本机实测 13.2s（建一次 stage1 + 两个编译器各跑一个 21 格的

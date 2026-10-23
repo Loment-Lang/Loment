@@ -106,3 +106,4 @@ loment_hotmeta_test 7
 loment_hotswap_test 7
 loment_hotload_test 9
 loment_hotcore_test 3
+loment_hotbuild_test 4

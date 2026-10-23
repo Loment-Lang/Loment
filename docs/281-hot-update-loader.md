@@ -65,8 +65,26 @@ reloc 38 8388608
   由调用方点名。探针把返回码与结果一起打出来。
 
 `tools/loment_hotcore_test.py` 让一个真的 Loment 探针**换掉自己**：先调 `add(1,2)` 得 3，
-把装载件交给固定核，再调一次得 4；epoch 由装载器写成 1。另两条判据把候选的闸改一个字节
-（返回 7）、把槽表条数改掉（返回 4），两次都保持 `AFTER 3`、`EPOCH 0`。
+把装载件交给固定核，再调一次得 4（epoch=1）；然后 `hot_restore` 把槽表改回（再调得 3），
+`hot_release` 把候选那一槽 `munmap` 掉（epoch 回到 0）。
+
+epoch 的发布顺序是 **`SWAPPING`(2) → 改槽表 → `READY`(1)**。两个 store 都是对齐的 32 位写
+（x86-64 上原子），TSO 保证 store-store 顺序；语言层面没有 release/acquire，换到弱内存序的
+机器要在这一处补。`hot_restore` 先发 0，再改回去。
+
+`hot_install` 把每个槽**原来的目标**存进调用方给的 `save`（每槽 4 字节），`hot_restore`
+用它 + 候选的函数表改回去。**只有在没有任何东西指向候选槽时才能 `hot_release`** ——
+今天就是 restore 之后；帧的重映射（`#1152`）之前，运行中的旧镜像那一槽永远不能还。
+
+### 3.2 构建管线：`loment build --profile hotswap`
+
+两个启动器（bash / batch）都解析 `--profile`，只收 `hotswap`，并把它原样交给
+`loment-lomelf`。三个组合**点名拒绝**：不认识的 profile、`--opt`（clang 不发槽表）、
+`--hosted`（装载器没有共享对象那条路）。`loment help build` 里也写了这一条。
+
+`tools/loment_hotbuild_test.py` 把 `LAUNCHER_SH` 原样取出来，配一对假的 driver / lomelf
+**真跑启动器**：转发看的是假链接器收到的 argv；两个拒绝看的是退出码与那句话。
+Windows 启动器与 `loment help` 是文本判据（batch 在 Linux 上跑不了）。
 
 ## 4. 判据
 
@@ -81,9 +99,13 @@ reloc 38 8388608
 | `test_function_set_mismatch_is_refused` | 函数集合不同 → `table`？ |
 | `test_ping_pong_between_two_targets` | 连翻两次，槽表从 A 指到 B 再指回 A？ |
 | `test_executes_in_a_real_process` | 真进程里翻转前后调同一个函数：3 -> 4？epoch 在共享数据段？ |
-| `test_fixed_core_flips_its_own_table` | 固定核（Loment）在自己进程里装槽表：3 -> 4、返回 0、epoch=1？ |
+| `test_fixed_core_flips_its_own_table` | 固定核（Loment）装槽表 3 -> 4、改回 3、`munmap` 旧槽、epoch 1 -> 0？ |
 | `test_tampered_digest_is_refused` | 候选的闸改一个字节 → 返回 7，`AFTER 3`、`EPOCH 0`？ |
 | `test_slot_shape_mismatch_is_refused` | 槽表条数不同 → 返回 4，没装？ |
+| `test_bash_launcher_forwards_the_profile` | `loment build --profile hotswap` 把这两个参数交给链接器？ |
+| `test_bash_launcher_refuses_an_unknown_profile` | 不认识的 profile → 退出 2 并点名？ |
+| `test_bash_launcher_refuses_opt_with_profile` | `--opt` 与 `--profile` 同时给 → 退出 2 并点名？ |
+| `test_batch_and_help_mention_the_profile` | Windows 启动器与 `loment help` 都写了 `--profile hotswap`？ |
 
 夹具两份镜像都由 `tools/lomentc.py` + `tools/lomelf.py` 从真的 `.lomt` 源编出来，
 元数据是链接器写的，不手写。执行那条在 Windows 上走 WSL，Linux 上原生。
@@ -91,10 +113,10 @@ reloc 38 8388608
 ## 5. 这一版**不**做到的
 
 1. **固定核还是"自包含探针"形态**：它改了正运行的那一页（RWX 窗口）、只按**条数**核对
-   函数集合（不逐名比）、并且还没有接进工具链的构建（`loment build --profile hotswap`
-   的管线还缺）。真实形态要把它放在单独的不换页区域，并逐名核对槽表。
-2. **epoch 只是读写同一个字**，没有 release/acquire 语义，也没有"翻转进行中"的保护；
-   旧槽也不释放（`#1152` 之前旧帧还在里面跑）。
+   函数集合（不逐名比）。真实形态要把它放在单独的不换页区域，并逐名核对槽表。
+2. **epoch 只有"对齐 32 位写 + x86 TSO"这一层**：没有语言层的 release/acquire，也没有
+   多线程下的"翻转进行中"等待；换到弱内存序的机器要补。旧的**运行中**槽仍然不能释放
+   （`hot_release` 只在 restore 之后用）—— 那是 `#1152` 的事。
 3. **数据段里的绝对指针**：今天的产物把字符串等放进 `.data`，引用它们的是代码里的
    `movabs`（在表里，且**不平移**——数据是共享的）。一份在**数据里**存**代码**指针的产物
    （函数指针表）才需要按目标分类做真正的重定位；语言今天没有函数指针。

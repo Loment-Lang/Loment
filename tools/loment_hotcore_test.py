@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import struct
 import subprocess
@@ -96,24 +97,44 @@ fn _start() -> u32 {
         return 1;
     }
     let data: ptr = ptr_add(buf, 256);
+    let save: ptr = ptr_add(buf, 131072);
     let n: i64 = syscall4(0, fd as u64, data as u64, 200000);
     syscall4(3, fd as u64, 0, 0);
     let before: u32 = add(1, 2);
-    let rc: u32 = hot_install(data, n as u32);
+    let rc: u32 = hot_install(data, n as u32, save);
     let after: u32 = add(1, 2);
     let sb: u32 = load32(data, 4);
     let sg: u32 = load32(data, 12);
+    let tl: u32 = load32(data, 32);
+    let span: u32 = (tl + 4095) / 4096 * 4096;
     let ep: u32 = load32(sb as ptr, sg + 6);
     let ev: u32 = load32(ep as ptr, 0);
+    let after2: u32 = 0;
+    let rr: u32 = 0;
+    let rel: u32 = 0;
+    if rc == 0 {
+        rr = hot_restore(data, n as u32, save, sb);
+        after2 = add(1, 2);
+        rel = hot_release(268435456, span);
+    }
+    let ev2: u32 = load32(ep as ptr, 0);
     let _a: i64 = wstr(1, "BEFORE ");
     let _b: i64 = wdec(1, before);
     let _c: i64 = wstr(1, " AFTER ");
     let _d: i64 = wdec(1, after);
     let _e2: i64 = wstr(1, " RC ");
     let _f: i64 = wdec(1, rc);
-    let _g: i64 = wstr(1, " EPOCH ");
-    let _h: i64 = wdec(1, ev);
-    let _j: i64 = wstr(1, "\\n");
+    let _g: i64 = wstr(1, " RESTORED ");
+    let _h: i64 = wdec(1, after2);
+    let _i: i64 = wstr(1, " RR ");
+    let _j: i64 = wdec(1, rr);
+    let _k: i64 = wstr(1, " RELEASE ");
+    let _l: i64 = wdec(1, rel);
+    let _m: i64 = wstr(1, " EPOCH ");
+    let _n: i64 = wdec(1, ev);
+    let _o: i64 = wstr(1, " EPOCH2 ");
+    let _p: i64 = wdec(1, ev2);
+    let _q: i64 = wstr(1, "\\n");
     return 0;
 }
 """
@@ -187,6 +208,7 @@ def _case(mutate=None) -> dict[str, int]:
     with tempfile.TemporaryDirectory() as t:
         probe = Path(t) / "probe.elf"
         probe.write_bytes(pb)
+        os.chmod(probe, 0o755)
         (ROOT / "loment" / "build").mkdir(parents=True, exist_ok=True)
         target = ROOT / "loment" / "build" / "hot.in"
         target.write_bytes(bytes(blob))
@@ -209,7 +231,11 @@ def test_fixed_core_flips_its_own_table() -> None:
     assert got.get("AFTER") == 4, got
     assert got.get("RC") == 0, got
     assert got.get("EPOCH") == 1, got
-    print("      固定核在自己进程里完成 mmap/mprotect/翻转：3 -> 4，epoch=1")
+    assert got.get("RESTORED") == 3, got
+    assert got.get("RR") == 0, got
+    assert got.get("RELEASE") == 0, got
+    assert got.get("EPOCH2") == 0, got
+    print("      固定核：mmap/翻转 3 -> 4（epoch=1），改回 3，旧槽 munmap（epoch=0）")
 
 
 @test
@@ -225,6 +251,7 @@ def test_tampered_digest_is_refused() -> None:
     assert got.get("RC") == 7, got
     assert got.get("AFTER") == 3, got
     assert got.get("EPOCH") == 0, got
+    assert got.get("RESTORED") == 0, got
     print("      候选的闸被改了一个字节 —— RC 7，槽表没动，epoch 仍是 0")
 
 
@@ -239,6 +266,7 @@ def test_slot_shape_mismatch_is_refused() -> None:
         return
     assert got.get("RC") == 4, got
     assert got.get("AFTER") == 3, got
+    assert got.get("RESTORED") == 0, got
     print("      槽表条数不同 —— RC 4，没装")
 
 

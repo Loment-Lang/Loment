@@ -196,7 +196,8 @@ def test_executes_in_a_real_process() -> None:
         (td / "q.lomhot").write_text(qr, encoding="utf-8")
         names = ["a.elf", "a.lomhot", "q.elf", "q.lomhot", "add"]
         if sys.platform.startswith("linux"):
-            r = subprocess.run([sys.executable, str(script)] + [str(td / n) for n in names],
+            r = subprocess.run([sys.executable, str(script)]
+                               + [str(td / n) for n in names[:4]] + [names[4]],
                                capture_output=True, text=True)
         else:
             if not shutil.which("wsl"):

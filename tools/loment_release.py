@@ -383,6 +383,7 @@ GLOBS = [
     # 双槽装载器参考模型（`#1151`）：重定位表、装槽、翻转。**同位置**。
     "tools/loment_hotload.py", "tools/loment_hotload_exec.py",
     "tools/loment_hotload_test.py", "tools/loment_hotcore_test.py",
+    "tools/loment_hotbuild_test.py",
 ]
 
 

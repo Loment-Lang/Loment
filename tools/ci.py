@@ -152,6 +152,12 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "lspe_test", "potato_
                  # 热更新构建档（`#1150`）：槽表 + 入口闸；默认档与 origin/main 逐字节对拍，
                  # 两档行为在 WSL 里比 stdout 与退出码。
                  "loment_hotswap_test",
+                 # 双槽装载器参考模型（`#1151`）：重定位表、装槽、翻转、拒绝面。
+                 "loment_hotload_test",
+                 # 固定核（`loment/lib/hotswap.lomt`）在真进程里换掉自己（`#1151`）。
+                 "loment_hotcore_test",
+                 # 构建管线（`#1151`）：`loment build --profile hotswap` 的启动器转发与拒绝。
+                 "loment_hotbuild_test",
                  # LVM 的 T0（`docs/243`）：同一批程序，**原生产物与 VM** 比 stdout 字节 + 退出码。
                  "lvm_test",
                  # LVM 自举镜像的**孪生判据**（`docs/243` §5）：同一份 `.ll` 喂参考实现与
@@ -400,6 +406,12 @@ SHARD_COST = {
     "loment_hotmeta_test": 0.8,
     # 2026-10-21（#1150）：本机 Windows 实测 1.7s（含一次 WSL 跑两个 ELF）。
     "loment_hotswap_test": 1.7,
+    # 2026-10-22（#1151）：本机 Windows 实测 1.1s（两份小源各编一次 + 一次 WSL 真跑）。
+    "loment_hotload_test": 1.1,
+    # 2026-10-22（#1151）：本机 Windows 实测 2.3s（三次真进程，每次两份小源各编一次）。
+    "loment_hotcore_test": 2.3,
+    # 2026-10-22（#1151）：本机 Windows 实测 1.5s（启动器在 WSL 的原生 /tmp 里真跑三次）。
+    "loment_hotbuild_test": 1.5,
     "loment_std_test": 3.1,
     "loment_store_twin_test": 261.6,
     # 2026-10-19（#772）：本机实测 13.2s（建一次 stage1 + 两个编译器各跑一个 21 格的

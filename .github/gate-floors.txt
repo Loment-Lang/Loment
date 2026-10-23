@@ -104,3 +104,6 @@ loment_book_site_test 4
 loment_update_test 13
 loment_hotmeta_test 7
 loment_hotswap_test 7
+loment_hotload_test 9
+loment_hotcore_test 3
+loment_hotbuild_test 4

@@ -400,6 +400,11 @@ tools/loment_update.py
 tools/loment_update_test.py
 tools/loment_hotmeta_test.py
 tools/loment_hotswap_test.py
+tools/loment_hotload.py
+tools/loment_hotload_exec.py
+tools/loment_hotload_test.py
+tools/loment_hotcore_test.py
+tools/loment_hotbuild_test.py
 ";
 }
 

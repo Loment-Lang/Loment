@@ -255,9 +255,12 @@ Loment @DISPLAY@  (@VERSION@)
                               --short: one grep-able line per diagnostic
                               --json:  one object per diagnostic (for editors and CI)
                               --max N: render at most N (default 20; 0 = all)
-  loment build FILE [-o OUT] [--link OBJ...] [--opt] [--hosted [-L DIR] [-l LIB] [--cc-arg X]]
+  loment build FILE [-o OUT] [--link OBJ...] [--opt] [--profile hotswap]
+                              [--hosted [-L DIR] [-l LIB] [--cc-arg X]]
                               compile and link; --link adds a foreign object (FFI)
                               --opt: optimize with clang -O2 when it is installed (ELF)
+                              --profile hotswap: slot table + entry gate, so the artifact
+                                                  can be hot-updated (ELF only; docs/281)
                               --hosted: link against the host's real libraries (docs/222)
   loment run FILE [--opt] [--hosted [-L DIR] [-l LIB] [--cc-arg X]]
                               compile, link and run
@@ -393,6 +396,8 @@ case "${1:-help}" in
         om=
         opt=
         hosted=
+        profile=
+        profarg=
         Largs=
         largs=
         ccargs=
@@ -405,6 +410,11 @@ case "${1:-help}" in
                 # the default path stays clang-free (`lomelf`), so the hermetic / offline build
                 # never grows a dependency on an optimizer being present.
                 --opt|-O2) opt=1; shift ;;
+                # Hot-update profile (#1151, docs/281): the linker emits a 16-byte slot
+                # table per function and an entry gate, so the artifact can be replaced
+                # in place. ELF only, and not with --opt (clang does not emit the slots)
+                # or --hosted (the loader has no shared-object path).
+                --profile) profile=${2:-}; shift 2 ;;
                 # Hosted (docs/222): the product is allowed to have open ports to the world, so
                 # it is linked by the host's C toolchain against the real libc and the real
                 # libraries you name. The entry becomes `main` (the C runtime starts us) and
@@ -436,6 +446,21 @@ case "${1:-help}" in
         if [ "$mode" = run ] && [ -n "$out_set" ]; then
             echo "loment: -o is for build; run produces no artifact" >&2
             exit 2
+        fi
+        if [ -n "$profile" ]; then
+            if [ "$profile" != hotswap ]; then
+                echo "loment: unknown --profile $profile (the only profile is hotswap)" >&2
+                exit 2
+            fi
+            if [ -n "$opt" ]; then
+                echo "loment: --profile hotswap cannot be combined with --opt (clang does not emit the slot table)" >&2
+                exit 2
+            fi
+            if [ -n "$hosted" ]; then
+                echo "loment: --profile hotswap cannot be combined with --hosted (the loader has no shared-object path)" >&2
+                exit 2
+            fi
+            profarg="--profile hotswap"
         fi
         need loment-driver loment-driver
         need loment-lomelf loment-lomelf
@@ -527,12 +552,12 @@ LOMENT_LIBCALLS_EOF
                     -fno-pie -O2 "$tmp/a.ll" "$tmp/libcalls.ll" "${objs[@]}" -o "$out" || exit 1
             else
                 echo "loment: --opt: no clang found, falling back to the unoptimized lomelf backend" >&2
-                "$(tool loment-lomelf)" "$tmp/a.ll" "$out" --diag-out "$tmp/d.jsonl" "${linkargs[@]}" $portarg 2>"$tmp/e2.txt" || lrc=$?
+                "$(tool loment-lomelf)" "$tmp/a.ll" "$out" --diag-out "$tmp/d.jsonl" "${linkargs[@]}" $portarg $profarg 2>"$tmp/e2.txt" || lrc=$?
             fi
         elif [ ${#links[@]} -gt 0 ]; then
-            "$(tool loment-lomelf)" "$tmp/a.ll" "$out" --diag-out "$tmp/d.jsonl" "${linkargs[@]}" $portarg 2>"$tmp/e2.txt" || lrc=$?
+            "$(tool loment-lomelf)" "$tmp/a.ll" "$out" --diag-out "$tmp/d.jsonl" "${linkargs[@]}" $portarg $profarg 2>"$tmp/e2.txt" || lrc=$?
         else
-            "$(tool loment-lomelf)" "$tmp/a.ll" "$out" --diag-out "$tmp/d.jsonl" 2>"$tmp/e2.txt" || lrc=$?
+            "$(tool loment-lomelf)" "$tmp/a.ll" "$out" --diag-out "$tmp/d.jsonl" $profarg 2>"$tmp/e2.txt" || lrc=$?
         fi
         # The linker gets its OWN --diag-out, into the same file: when it can put a code on
         # (the `-o` directory not existing is the common one) it writes a record there and
@@ -702,6 +727,7 @@ rem Port door (@CHANNEL@, docs/222 sec 4): open in both channels since 2026-10-1
 rem LibC's static and run-time halves are both done. lomelf still refuses a ported object by
 rem default; this flag is what opens it, and it is passed in both channels.
 set "portarg=--allow-ports"
+set "profarg="
 set "cnc="
 set "com="
 shift
@@ -714,6 +740,7 @@ if /I "%~1"=="--link" goto barg_link
 if /I "%~1"=="--opt" goto barg_opt
 if /I "%~1"=="-O2" goto barg_opt
 if /I "%~1"=="--hosted" goto barg_hosted
+if /I "%~1"=="--profile" goto barg_profile
 if /I "%~1"=="-L" goto barg_hosted
 if /I "%~1"=="-l" goto barg_hosted
 set "bcs=%~1"
@@ -763,6 +790,17 @@ exit /b 2
 :run_out_refused
 echo loment: -o is for build; run produces no artifact 1>&2
 exit /b 2
+:barg_profile
+rem Hot-update profile (#1151, docs/281): the linker emits the slot table and the entry
+rem gate. Refuse an unknown profile by name instead of silently producing a default build.
+if /I not "%~2"=="hotswap" (
+  echo loment: unknown --profile %~2 ^(the only profile is hotswap^) 1>&2
+  exit /b 2
+)
+set "profarg=--profile hotswap"
+shift
+shift
+goto barg_loop
 :barg_opt
 rem The clang-optimized path (docs/212 sec 5A) is implemented for ELF only; this launcher links
 rem with the self-hosted lomelf. Refused **by name** rather than silently ignored.
@@ -805,7 +843,7 @@ rem The linker gets its OWN --diag-out, into the same file (on success the drive
 rem nothing into it). When it can put a code on - the `-o` directory not existing is the
 rem common one - :report_diags renders it with the title, the why and the fixes; when it
 rem writes no record its plain line is shown as is, never silently lost.
-"%here%loment-lomelf.exe" "%tmp%\a.ll" "%out%.exe" --diag-out "%tmp%\d.jsonl" %portarg% 2>"%tmp%\e2.txt"
+"%here%loment-lomelf.exe" "%tmp%\a.ll" "%out%.exe" --diag-out "%tmp%\d.jsonl" %portarg% %profarg% 2>"%tmp%\e2.txt"
 set "lrc=%ERRORLEVEL%"
 if not "%lrc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e2.txt" "%cnc% %com%" "%lrc%" "loment-lomelf"
 if not "%lrc%"=="0" goto fail
@@ -821,7 +859,7 @@ if not "%drc%"=="0" goto fail
 rem Same marker check as the build path: a hosted unit is not a PE product (#633).
 findstr /b /l /c:"; loment-port: hosted" "%tmp%\a.ll" >nul 2>nul
 if "%ERRORLEVEL%"=="0" goto hosted_unit
-"%here%loment-lomelf.exe" "%tmp%\a.ll" "%tmp%\a.exe" --diag-out "%tmp%\d.jsonl" %portarg% 2>"%tmp%\e2.txt"
+"%here%loment-lomelf.exe" "%tmp%\a.ll" "%tmp%\a.exe" --diag-out "%tmp%\d.jsonl" %portarg% %profarg% 2>"%tmp%\e2.txt"
 set "lrc=%ERRORLEVEL%"
 if not "%lrc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e2.txt" "%cnc% %com%" "%lrc%" "loment-lomelf"
 if not "%lrc%"=="0" goto fail
@@ -892,9 +930,10 @@ echo                               check only (diagnostics on stderr, IR discard
 echo                               --short: one grep-able line per diagnostic
 echo                               --json:  one object per diagnostic (for editors and CI)
 echo                               --max N: render at most N (default 20; 0 = all)
-echo   loment build FILE [-o OUT] [--opt] [--hosted]
+echo   loment build FILE [-o OUT] [--opt] [--profile hotswap] [--hosted]
 echo                               compile and link
 echo                               --opt: optimize with clang -O2 (ELF only)
+echo                               --profile hotswap: slot table + entry gate (ELF only)
 echo                               --hosted: link the host's real libraries (ELF only)
 echo   loment run FILE [--opt] [--hosted]
 echo                               compile, link and run

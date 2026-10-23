@@ -6721,6 +6721,35 @@ fn hs_find(mb: ptr, tab: ptr, t: ptr, noff: u32, nlen: u32) -> u32 {
     return NO;
 }
 
+/// 绝对地址重定位表（`#1151`）：`base <文本基址>` + 每条 8 字节绝对量的
+/// `reloc <文本相对偏移> <目标地址>`。装载器把第二份镜像摆到别的槽时，按
+/// `新基址 - base` 逐条改这些 8 字节；PC 相对的那些不在表里（整体平移时不改）。
+fn meta_relocs(mb: ptr, tab: ptr, txt: ptr) -> u32 {
+    let sc: ptr = hot_sc(mb);
+    let p: u32 = load32(sc, HS_MLEN);
+    p = put_cstr(mb, p, "base ");
+    p = put_dec(mb, p, txt_base(tab));
+    store8(mb, p, 10 as u8);
+    p = p + 1;
+    let n: u32 = cell(tab, C_NFIX);
+    let i: u32 = 0;
+    while i < n {
+        let b: u32 = TB_FIX + i * 28;
+        if load32(tab, b + F_KIND) == 1 {
+            let site: u32 = load32(tab, b + F_SITE);
+            p = put_cstr(mb, p, "reloc ");
+            p = put_dec(mb, p, site);
+            store8(mb, p, 32 as u8);
+            p = put_dec(mb, p + 1, load32(txt, site));
+            store8(mb, p, 10 as u8);
+            p = p + 1;
+        }
+        i = i + 1;
+    }
+    store32(sc, HS_MLEN, p);
+    return p;
+}
+
 /// 槽表预扫（`#1150`）：按 IR 顺序给每个 `define` 的名字分配槽号。**与参考实现的
 /// `hot_slots` 同序** —— 两边都按函数出现顺序，不排序。
 fn hs_prepass(mb: ptr, tab: ptr, t: ptr, n: u32) {
@@ -7245,6 +7274,10 @@ fn run(mem: ptr) -> u32 {
         wstr(2, "loment: --profile hotswap takes ELF output only\n");
         return die(2);
     }
+    if pe == 1 && load32(hot_sc(mb), HS_META) == 1 {
+        wstr(2, "loment: --hot-meta takes ELF output only\n");
+        return die(2);
+    }
     // 外部符号名池的游标: 从输入文本的**末尾**开始, 见 copy_name。
     setcell(tab, C_EXTN, n as u32);
     if load32(hot_sc(mb), HS_HRUN) == 1 {
@@ -7455,6 +7488,9 @@ fn run(mem: ptr) -> u32 {
     let r: u32 = resolve_fixups(tab, inb, txt);
     if r != 0 {
         return r;
+    }
+    if hot_on(mb) == 1 {
+        let _mr: u32 = meta_relocs(mb, tab, txt);
     }
     let dlen: u32 = align_to(cell(tab, C_GB), 8);
     let total: u32 = 0;

@@ -32,6 +32,7 @@ import sys
 import tarfile
 import tempfile
 import zipfile
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -2033,6 +2034,14 @@ if (Test-Path -LiteralPath $libSrc) {
     New-Item -ItemType Directory -Path $libDst -Force | Out-Null
     Copy-VerifiedTree $libSrc $libDst $verified 'share/loment/lib'
 }
+# jrt (docs/281 sec 7): the Java runtime shipped with the toolchain. `loment build`
+# looks it up under share/loment/jrt/<ver>/jrt.ll.
+$jrtSrc = Join-Path $Payload 'share\loment\jrt'
+if (Test-Path -LiteralPath $jrtSrc) {
+    $jrtDst = Join-Path $Prefix 'share\loment\jrt'
+    New-Item -ItemType Directory -Path $jrtDst -Force | Out-Null
+    Copy-VerifiedTree $jrtSrc $jrtDst $verified 'share/loment/jrt'
+}
 foreach ($rel in @('README.md', 'LICENSE-MIT', 'LICENSE-APACHE')) {
     if ($verified -notcontains $rel) { throw "unlisted file in package: $rel -- refusing to install" }
     $f = Join-Path $Payload $rel
@@ -2926,12 +2935,22 @@ powershell -File install.ps1 -Uninstall    # Windows（同时清 PATH、文件�
 
 # ------------------------------------------------------------------ 自举构建
 
+#: `lomelf.compile_*` keeps the text/data base addresses in **module globals**
+#: (`TEXT_VADDR` / `DATA_VADDR`). `build_tools` links tools in a thread pool, so one
+#: thread's ELF link could run with another thread's PE addresses (CI shard 8 hit
+#: exactly that: the packaged driver was linked with PE text/data addresses and every
+#: `loment ir/check/run` in the installed package failed). The compile subprocesses
+#: are what the pool is for; linking is serialized here.
+_LINK_LOCK = threading.Lock()
+
+
 def _lomelf_link(ir_text: str, target: str) -> bytes:
     """IR -> 可执行文件。用仓库自己的原生后端（`tools/lomelf.py`），**不再经 clang**。"""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import lomelf
     fn = lomelf.compile_pe if target == "pe" else lomelf.compile_ll
-    return fn(ir_text)[0]
+    with _LINK_LOCK:
+        return fn(ir_text)[0]
 
 
 def _host_target() -> str:

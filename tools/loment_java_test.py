@@ -416,6 +416,27 @@ fn _start() {
 
 
 @test
+def test_object_arrays_casts_and_instanceof():
+    """#1059: `anewarray` / `aaload` / `aastore` / `checkcast` / `instanceof`."""
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "deps" / "castlib").mkdir(parents=True)
+        jar = FIX.parent.parent / "castlib.jar"
+        ir, _iface = _emit(jar, "castlib", d / "deps" / "castlib")
+        rc = _build_and_run(d, ir, """module app
+use castlib
+
+fn _start() {
+    let r: i32 = castlib_CastLib_run();
+    syscall4(60, (r - 18) as u64, 0, 0);
+}
+""")
+        assert rc == 0, rc
+        print(f"      Box[] + instanceof + cast -> 18 on "
+              f"{'PE' if sys.platform == 'win32' else 'ELF'}")
+
+
+@test
 def test_merge_removes_satisfied_declaration():
     """The merged IR has no extern declaration for a symbol defined in a second input."""
     with tempfile.TemporaryDirectory() as td:

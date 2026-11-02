@@ -466,7 +466,13 @@ def _init_ops() -> None:
     _op(184, "invokestatic", "h", 0)
     _op(46, "iaload", "", -1); _op(47, "laload", "", -1)
     _op(79, "iastore", "", -3); _op(80, "lastore", "", -3)
+    _op(50, "aaload", "", -1)
+    _op(51, "baload", "", -1); _op(52, "caload", "", -1); _op(53, "saload", "", -1)
+    _op(83, "aastore", "", -3)
+    _op(84, "bastore", "", -3); _op(85, "castore", "", -3); _op(86, "sastore", "", -3)
     _op(188, "newarray", "b", 0); _op(190, "arraylength", "", 0)
+    _op(189, "anewarray", "h", 0)
+    _op(192, "checkcast", "h", 0); _op(193, "instanceof", "h", 0)
     _op(187, "new", "h", 1); _op(89, "dup", "", 1)
     _op(87, "pop", "", -1); _op(88, "pop2", "", -2)
     _op(180, "getfield", "h", 0); _op(181, "putfield", "h", -2)
@@ -934,14 +940,24 @@ def _vstep(cf: ClassFile, m: Method, x: Insn, st: list, lc: list) -> list[int]:
                 _vpop(st, T_REF, ctx, x.off)
         if ret != "void":
             _vpush(st, _vtype(ret, ctx), m, ctx, x.off)
-    elif name in ("iaload", "laload"):
+    elif name in ("iaload", "laload", "aaload", "baload", "caload", "saload"):
         _vpop(st, T_I32, ctx, x.off)
         _vpop(st, T_REF, ctx, x.off)
-        _vpush(st, T_I64 if name == "laload" else T_I32, m, ctx, x.off)
-    elif name in ("iastore", "lastore"):
-        _vpop(st, T_I64 if name == "lastore" else T_I32, ctx, x.off)
+        got = {"laload": T_I64, "aaload": T_REF}.get(name, T_I32)
+        _vpush(st, got, m, ctx, x.off)
+    elif name in ("iastore", "lastore", "aastore", "bastore", "castore", "sastore"):
+        _vpop(st, {"lastore": T_I64, "aastore": T_REF}.get(name, T_I32), ctx, x.off)
         _vpop(st, T_I32, ctx, x.off)
         _vpop(st, T_REF, ctx, x.off)
+    elif name == "anewarray":
+        _vpop(st, T_I32, ctx, x.off)
+        _vpush(st, T_REF, m, ctx, x.off)
+    elif name == "checkcast":
+        _vpop(st, T_REF, ctx, x.off)
+        _vpush(st, T_REF, m, ctx, x.off)
+    elif name == "instanceof":
+        _vpop(st, T_REF, ctx, x.off)
+        _vpush(st, T_I32, m, ctx, x.off)
     elif name in ("faload", "daload", "fastore", "dastore"):
         raise JavaError(f"J003: {ctx} @{x.off}: float/double arrays are not supported")
     elif name == "newarray":
@@ -2047,9 +2063,10 @@ class Emitter:
             n = self.t()
             self.emit(f"{n} = load i32, ptr {p}")
             self._push("i32", n, h0 - 1)
-        elif name in ("iaload", "laload", "iastore", "lastore"):
-            ty = "i64" if name.startswith("l") else "i32"
-            width = 8 if ty == "i64" else 4
+        elif name in ("iaload", "laload", "aaload", "baload", "caload", "saload",
+                      "iastore", "lastore", "aastore", "bastore", "castore", "sastore"):
+            ty = {"l": "i64", "a": "ptr"}.get(name[0], "i32")
+            width = {"l": 8, "a": 8, "b": 1, "c": 2, "s": 2}.get(name[0], 4)
             if name.endswith("store"):
                 val = self._pop(ty, h0 - 1)
                 idx = self._pop("i32", h0 - 2)
@@ -2067,6 +2084,46 @@ class Emitter:
                 v = self.t()
                 self.emit(f"{v} = load {ty}, ptr {q}")
                 self._push(ty, v, h0 - 2)
+        elif name == "anewarray":
+            count = self._pop("i32", h0 - 1)
+            size = self.t()
+            total = self.t()
+            self.emit(f"{size} = mul i32 {count}, 8")
+            self.emit(f"{total} = add i32 {size}, 8")
+            p = self.t()
+            self.emit(f"{p} = call ptr @{_alloc_sym(self.module)}(i32 {total})")
+            self.emit(f"store i32 {count}, ptr {p}")
+            self._push("ptr", p, h0 - 1)
+        elif name == "checkcast":
+            # 类身份在这个子集里只有一个格（引用）：转换不产生代码。转换失败该抛
+            # `ClassCastException` 的那条**没有**做（见 docs/282 状态行）。
+            v = self._pop("ptr", h0 - 1)
+            self._push("ptr", v, h0 - 1)
+        elif name == "instanceof":
+            obj = self._pop("ptr", h0 - 1)
+            want = _class_name(self.pool, x.args[0])
+            ids = [self.class_ids[n] for n in sorted(self.registry)
+                   if self._is_sub(n, want)]
+            cid = self.t()
+            self.emit(f"{cid} = load i32, ptr {obj}")
+            if not ids:
+                z = self.t()
+                self.emit(f"{z} = add i32 0, 0")
+                self._push("i32", z, h0 - 1)
+            else:
+                first = self.t()
+                self.emit(f"{first} = icmp eq i32 {cid}, {ids[0]}")
+                acc = self.t()
+                self.emit(f"{acc} = zext i1 {first} to i32")
+                for cid_want in ids[1:]:
+                    c = self.t()
+                    nx = self.t()
+                    self.emit(f"{c} = icmp eq i32 {cid}, {cid_want}")
+                    self.emit(f"{nx} = zext i1 {c} to i32")
+                    joined = self.t()
+                    self.emit(f"{joined} = or i32 {acc}, {nx}")
+                    acc = joined
+                self._push("i32", acc, h0 - 1)
         elif name == "invokestatic":
             cls, mname, desc = methodref(self.pool, x.args[0])
             # `java.lang.Math`'s integer subset: lowered inline, no runtime call.

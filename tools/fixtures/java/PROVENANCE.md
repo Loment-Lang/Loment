@@ -65,3 +65,9 @@ with an override in each subclass; `SwitchLib` has one dense switch
 64e50e5d1a7534dc219b98cc256be15c4f46085f7677e7f6b221691340c3ac9c  shapelib.jar
 2de47b44d6dcb8f81f24add791a9ad7afcdd36a80b1745a246fc8584c88d6d10  switchlib.jar
 ```
+
+`castlib.jar` (object arrays, `instanceof`, `checkcast`), same toolchain:
+
+```
+b95df01d513e8cfe56249a208f72c865913f9dbb988d1e53c16bec32b2a98cdb  castlib.jar
+```

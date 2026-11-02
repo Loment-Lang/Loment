@@ -478,7 +478,10 @@ def test_foreign_package_kind_is_checked_hashed_and_planned():
         (pkg / "foreign.txt").write_text(
             "# lompi foreign v1\nkind java\nartifact jar lib.bin\n",
             encoding="utf-8", newline="\n")
-        (pkg / "lib.bin").write_bytes(b"\x00java\xff")
+        # 真的是一只 zip：`plan` 会读它的中央目录做闭包级类名检查（#1055）。
+        import zipfile
+        with zipfile.ZipFile(pkg / "lib.bin", "w") as z:
+            z.writestr("com/example/Math.class", b"\xca\xfe\xba\xbe\x00\x00\x00\x34")
 
         rc, out = _run(["check", str(pkg)])
         assert rc == 0 and "foreign manifest" in out, out[:240]
@@ -493,6 +496,71 @@ def test_foreign_package_kind_is_checked_hashed_and_planned():
                         "--into", str(td / "into")])
         assert rc == 0 and "mathlib@1.0.0" in out, out[:240]
         print("      foreign: check/hash/show/plan")
+
+
+def _jvm_pkg(store: Path, name: str, classes: list[str], dep: str | None) -> None:
+    """写一个 `kind java` 的外源包：入口 .lomt + foreign.lomp + foreign.txt + lib.jar。"""
+    import hashlib
+    import zipfile
+    pkg = store / name / "1.0.0"
+    pkg.mkdir(parents=True)
+    use = f"use {dep}\n" if dep else ""
+    (pkg / f"{name}.lomt").write_text(
+        f"module {name}\n\n{use}pub fn {name}_f() -> i32 {{ return 1; }}\n",
+        encoding="utf-8", newline="\n")
+    (pkg / "foreign.lomp").write_text(
+        f'module foreign\n\npub fn name() -> str {{ return "{name}"; }}\n'
+        f'pub fn version() -> str {{ return "1.0.0"; }}\n'
+        f'pub fn kind() -> str {{ return "java"; }}\n',
+        encoding="utf-8", newline="\n")
+    jar = pkg / "lib.jar"
+    with zipfile.ZipFile(jar, "w") as z:
+        for c in classes:
+            z.writestr(c, b"\xca\xfe\xba\xbe\x00\x00\x00\x34")
+    sha = hashlib.sha256(jar.read_bytes()).hexdigest()
+    (pkg / "foreign.txt").write_text(
+        "# lompi foreign v1\nkind java\n"
+        f"artifact jar lib.jar {sha}\n",
+        encoding="utf-8", newline="\n")
+
+
+def _identity(store: Path, name: str) -> str:
+    rc, out = _run(["show", str(store), name])
+    assert rc == 0, out[:240]
+    m = re.search(r"^\s*id:\s+([0-9a-f]{64})\s*$", out, re.M)
+    assert m, out[:240]
+    return m.group(1)
+
+
+@test
+def test_duplicate_class_rejected():
+    """#1055: JVM 只有一个平的类命名空间。
+
+    两个实例各带一份 `com/example/Shared.class` 时，构建期只能挑一份 —— 那正是
+    内容身份要防的静默合并，lompi 的"多版本共存"对 JVM 不成立。所以 plan/install
+    必须拒绝，并把**两个身份**都打出来（只说"重复"不够，用户要知道删哪一个）。
+    """
+    rc, out = _run(["version"])
+    if rc == -1:
+        print(f"      SKIP: {_skip}")
+        return
+    with tempfile.TemporaryDirectory(prefix="lompi-jvm-") as t:
+        td = Path(t)
+        store = td / "store"
+        _jvm_pkg(store, "liba", ["com/example/Shared.class", "com/example/A.class"], None)
+        _jvm_pkg(store, "libb", ["com/example/Shared.class", "com/example/B.class"], "liba")
+
+        rc, out = _run(["plan", str(store), "libb", "--into", str(td / "into")])
+        assert rc != 0, out[:400]
+        assert "com/example/Shared.class" in out, out[:400]
+        ida, idb = _identity(store, "liba"), _identity(store, "libb")
+        assert ida in out and idb in out, f"两个身份没有都打出来: {out[:400]}"
+
+        # 对照组：类名不撞时同一条依赖链装得下去（检查不是"见到 jar 就拒"）。
+        _jvm_pkg(store, "libc", ["com/example/Only.class"], "liba")
+        rc, out = _run(["plan", str(store), "libc", "--into", str(td / "into")])
+        assert rc == 0 and "package instance(s) in the closure" in out, out[:400]
+        print("      jvm: duplicate class refused with both identities; disjoint jars pass")
 
 
 @test

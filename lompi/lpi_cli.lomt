@@ -794,6 +794,14 @@ fn cmd_plan(ws: ptr, buf: ptr, store: ptr, av_spec: u64, into: u64) -> u32 {
     // 闭包
     let stack: ptr = ((ws as u64) + WS_TMP as u64 + 5120) as ptr;
     let c: u32 = idn_closure(ws, n, idx, stack, 256, msg, 128);
+    // JVM 的类名是平的: 闭包里两个实例给同一个类 = 硬错误 (issue #1055)。
+    // 计划就是"要装什么" —— 在这里拒, 比等 `install` 到落盘前才拒更早。
+    let jrep: ptr = ((ws as u64) + WS_REPORT as u64) as ptr;
+    if pkg_check_jvm_classes(ws, n, jrep, WS_REPORT_CAP) != 0 {
+        err_lit("[BAD] lompi: refusing to plan -- the JVM class namespace collides:\n");
+        sys_write(2, jrep, txt_len_cstr(jrep) as u64);
+        return 1;
+    }
     out_lit("# ");
     out_dec(scr, c as u64);
     out_lit(" package instance(s) in the closure:\n");
@@ -3036,6 +3044,14 @@ fn cmd_install(ws: ptr, buf: ptr, m: u32, av_spec: u64) -> u32 {
             err_lit("\n");
             return 1;
         }
+    }
+
+    // ---- JVM 类名闭包 (issue #1055): 平命名空间里两个实例给同一个类 = 硬错误。
+    // 放在落盘计划之前: 装到一个删不掉半成品的位置之前就得拒绝。
+    if pkg_check_jvm_classes(ws, np2, rep, WS_REPORT_CAP) != 0 {
+        err_lit("[BAD] lompi: refusing to install -- the JVM class namespace collides:\n");
+        sys_write(2, rep, txt_len_cstr(rep) as u64);
+        return 1;
     }
 
     // ---- 落盘: 打出计划; `--apply` 时交给 cli_apply 真的写。

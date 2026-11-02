@@ -5,7 +5,7 @@
 // file) and linked **once** per closure by the build wrapper, through a
 // `runtime jrt <version>` line in `deps/*/link.txt`.
 //
-// The rules this file follows (docs/281 §7):
+// The rules this file follows (docs/282 §7):
 //
 //   * no libc, no JVM: the only syscalls are `write` (1) and, in a later
 //     slice, the heap/scalar ones behind `jrt/sys`;

@@ -1529,7 +1529,7 @@ fn cls_jar(jpath: ptr, jl: u32, owner: u32, tab: ptr, names: ptr, ctr: ptr,
     if big == 1 {
         let o2: u32 = txt_put(rep, ro, "lompi: a JVM package's jar is larger than 16 MiB: ");
         let o2b: u32 = txt_put_bytes(rep, o2, jpath, 0, jl);
-        let o2c: u32 = txt_put(rep, o2b, " (the class-index window; docs/282 sec 6)");
+        let o2c: u32 = txt_put(rep, o2b, " (the class-index window; docs/283 sec 6)");
         txt_store32(ctr, 12, txt_put_nl(rep, o2c));
         return 1;
     }

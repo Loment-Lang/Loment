@@ -465,7 +465,7 @@ case "${1:-help}" in
         fi
         need loment-driver loment-driver
         need loment-lomelf loment-lomelf
-        # ---- deps/*/link.txt (docs/282 sec 5.4/6.1): the only build-time discovery point.
+        # ---- deps/*/link.txt (docs/283 sec 5.4/6.1): the only build-time discovery point.
         #
         # The source-level surface stays `use <name>`; there is no --java-lib. Every
         # `ir NAME SHA256` line is verified here - a missing file or a changed hash is a
@@ -549,7 +549,7 @@ case "${1:-help}" in
                 rt="$share/jrt/$v/jrt.ll"
                 if [ ! -f "$rt" ]; then
                     echo "loment: a dependency asks for runtime jrt $v, but this package has no" >&2
-                    echo "        $rt (the runtime ships with the toolchain, docs/282 sec 5.4)" >&2
+                    echo "        $rt (the runtime ships with the toolchain, docs/283 sec 5.4)" >&2
                     exit 1
                 fi
                 deps_ir[${#deps_ir[@]}]=$rt
@@ -577,7 +577,7 @@ case "${1:-help}" in
             if [ -n "$dups" ]; then
                 echo "loment: two inputs define the same symbol:" >&2
                 echo "$dups" | sed 's/^/        /' >&2
-                echo "        (a library IR and the app share a name; docs/282 sec 6)" >&2
+                echo "        (a library IR and the app share a name; docs/283 sec 6)" >&2
                 exit 1
             fi
             cat "$tmp/a.ll" > "$tmp/merged.ll"
@@ -930,7 +930,7 @@ rem points the user at the wrong problem entirely.
 echo loment: --hosted is not available on Windows yet (ELF only for now; docs/222 sec 7) 1>&2
 exit /b 2
 :barg_done
-rem deps\*\link.txt (docs/282 sec 5.4/6.1): the only build-time discovery point. Each
+rem deps\*\link.txt (docs/283 sec 5.4/6.1): the only build-time discovery point. Each
 rem `ir NAME SHA256` line is verified; a missing file or a changed hash is a named error.
 rem The merge is plain concatenation - the linker drops a `declare` that its own `define`
 rem satisfies, so no IR text is parsed (and possibly mangled) by a batch loop.
@@ -1001,7 +1001,7 @@ rmdir "%tmp%" >nul 2>nul
 echo loment: %out%.exe
 exit /b 0
 
-rem ---- deps\*\link.txt scanning (docs/282 sec 5.4/6.1). Reached once per build/run, from
+rem ---- deps\*\link.txt scanning (docs/283 sec 5.4/6.1). Reached once per build/run, from
 rem :barg_done. Numbered variables (ir0, ir1, ...) instead of a list: batch has no arrays,
 rem and a space-joined list would break on a path with a space.
 :scan_deps
@@ -1075,7 +1075,7 @@ set /a dn+=1
 exit /b 0
 :link_rt_missing
 echo loment: a dependency asks for runtime jrt %lver%, but this package has no 1>&2
-echo         %lrt% (the runtime ships with the toolchain, docs/282 sec 5.4) 1>&2
+echo         %lrt% (the runtime ships with the toolchain, docs/283 sec 5.4) 1>&2
 set "derror=1"
 exit /b 0
 :link_rt_bad
@@ -1136,7 +1136,7 @@ set "prev=%~1"
 exit /b 0
 :dup_found
 echo loment: two inputs define the same symbol: %~1 1>&2
-echo         (a library IR and the app share a name; docs/282 sec 6) 1>&2
+echo         (a library IR and the app share a name; docs/283 sec 6) 1>&2
 set "derror=1"
 exit /b 0
 
@@ -2073,7 +2073,7 @@ if (Test-Path -LiteralPath $libSrc) {
     New-Item -ItemType Directory -Path $libDst -Force | Out-Null
     Copy-VerifiedTree $libSrc $libDst $verified 'share/loment/lib'
 }
-# jrt (docs/281 sec 7): the Java runtime shipped with the toolchain. `loment build`
+# jrt (docs/282 sec 7): the Java runtime shipped with the toolchain. `loment build`
 # looks it up under share/loment/jrt/<ver>/jrt.ll.
 $jrtSrc = Join-Path $Payload 'share\loment\jrt'
 if (Test-Path -LiteralPath $jrtSrc) {

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """loment_jrt.py — build `loment/lib/jrt/jrt.ll` from `jrt.lomt`.
 
-`jrt` is the minimal Java runtime (docs/281 §7): printing today, the object
+`jrt` is the minimal Java runtime (docs/282 §7): printing today, the object
 model and exceptions in later slices. It is written in Loment and compiled by
 the same seed the rest of the toolchain uses, so the artifact is deterministic.
 
@@ -31,7 +31,7 @@ OUT = ROOT / "loment" / "lib" / "jrt" / "jrt.ll"
 
 HEADER = (
     "; 由 tools/loment_jrt.py 从 loment/lib/jrt/jrt.lomt 生成 —— 不要手改\n"
-    "; jrt: the minimal Java runtime (docs/281 §7)\n\n"
+    "; jrt: the minimal Java runtime (docs/282 §7)\n\n"
 )
 
 _DROP = ("__loment_memcmp", "__loment_memset", "__loment_memcpy")

@@ -578,6 +578,38 @@ def test_merge_rejects_duplicate_definition():
 
 
 @test
+def test_merge_rejects_a_reserved_symbol_from_the_application():
+    """#1061: `__jl_` / `__jrt_` belong to the AOT side; the app must not take them.
+
+    A library IR may define them (that is what `lomjava` emits); the **first**
+    input is the application, and defining a reserved name there would be an
+    attempt to impersonate a library implementation.
+    """
+    app = """define internal i32 @__jl_mathlib_add_(i32 %a, i32 %b) {
+entry:
+  ret i32 0
+}
+
+define void @_start() {
+entry:
+  ret void
+}
+"""
+    lib = """define internal i32 @__jl_other_add_(i32 %a, i32 %b) {
+entry:
+  ret i32 1
+}
+"""
+    try:
+        lomelf.merge_ir_texts([app, lib], ["app.ll", "lib.ll"])
+    except lomelf.Unsupported as e:
+        assert "__jl_" in str(e), e
+        print(f"      reserved prefix rejected: {e}")
+    else:
+        raise AssertionError("the application was allowed to define a reserved symbol")
+
+
+@test
 def test_bad_class_is_rejected():
     """A corrupt class file is a named error, not a traceback."""
     for data in (b"\x00" * 8, b"not a class file"):

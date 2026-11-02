@@ -6806,11 +6806,16 @@ def merge_ir_texts(texts: list[str], names: list[str] | None = None) -> str:
     names = names or [f"input#{i}" for i in range(len(texts))]
     defined: dict[str, str] = {}
     starts = 0
-    for name, text in zip(names, texts):
+    for idx, (name, text) in enumerate(zip(names, texts)):
         for sym in _IR_DEF_RE.findall(text):
             if sym in defined:
                 raise Unsupported(
                     f"重复定义 @{sym}: {defined[sym]} 与 {name}")
+            if idx == 0 and (sym.startswith("__jl_") or sym.startswith("__jrt_")):
+                # 前两个前缀属于 AOT 降级器与运行期：应用 IR 定义它们就等于
+                # 冒充一个库的实现（docs/282 §6.2）。
+                raise Unsupported(
+                    f"应用 IR 不能定义保留前缀的符号 @{sym}（__jl_ / __jrt_ 是保留的）")
             defined[sym] = name
             if sym == "_start":
                 starts += 1

@@ -13,6 +13,9 @@ define internal void @__jrt_abort() {
 
 declare void @llvm.trap()
 
+@.str.jrt_uncaught.0 = private unnamed_addr constant [24 x i8] c"\45\78\63\65\70\74\69\6F\6E\20\69\6E\20\74\68\72\65\61\64\20\6D\61\69\6E"
+@.str.jrt_uncaught.1 = private unnamed_addr constant [24 x i8] c"\45\78\63\65\70\74\69\6F\6E\20\69\6E\20\74\68\72\65\61\64\20\6D\61\69\6E"
+
 ; jrt_alloc -> ptr
 define ptr @jrt_alloc(i32 %n) {
 entry:
@@ -832,4 +835,507 @@ entry:
   %t5 = load ptr, ptr %b.addr
   call void @wr(i64 %t4, ptr %t5, i32 1)
   ret void
+}
+; st32 -> ()
+define void @st32(ptr %p, i32 %off, i32 %v) {
+entry:
+  %p.addr = alloca ptr
+  %off.addr = alloca i32
+  %v.addr = alloca i32
+  store ptr %p, ptr %p.addr
+  store i32 %off, ptr %off.addr
+  store i32 %v, ptr %v.addr
+  %t1 = load ptr, ptr %p.addr
+  %t2 = load i32, ptr %off.addr
+  %t3 = load i32, ptr %v.addr
+  %t4 = and i32 %t3, 255
+  %t5 = trunc i32 %t4 to i8
+  %t6 = getelementptr i8, ptr %t1, i32 %t2
+  store i8 %t5, ptr %t6
+  %t7 = load ptr, ptr %p.addr
+  %t8 = load i32, ptr %off.addr
+  %t9 = add i32 %t8, 1
+  %t10 = load i32, ptr %v.addr
+  %t11 = lshr i32 %t10, 8
+  %t12 = and i32 %t11, 255
+  %t13 = trunc i32 %t12 to i8
+  %t14 = getelementptr i8, ptr %t7, i32 %t9
+  store i8 %t13, ptr %t14
+  %t15 = load ptr, ptr %p.addr
+  %t16 = load i32, ptr %off.addr
+  %t17 = add i32 %t16, 2
+  %t18 = load i32, ptr %v.addr
+  %t19 = lshr i32 %t18, 16
+  %t20 = and i32 %t19, 255
+  %t21 = trunc i32 %t20 to i8
+  %t22 = getelementptr i8, ptr %t15, i32 %t17
+  store i8 %t21, ptr %t22
+  %t23 = load ptr, ptr %p.addr
+  %t24 = load i32, ptr %off.addr
+  %t25 = add i32 %t24, 3
+  %t26 = load i32, ptr %v.addr
+  %t27 = lshr i32 %t26, 24
+  %t28 = and i32 %t27, 255
+  %t29 = trunc i32 %t28 to i8
+  %t30 = getelementptr i8, ptr %t23, i32 %t25
+  store i8 %t29, ptr %t30
+  ret void
+}
+; st64 -> ()
+define void @st64(ptr %p, i32 %off, i64 %v) {
+entry:
+  %p.addr = alloca ptr
+  %off.addr = alloca i32
+  %v.addr = alloca i64
+  store ptr %p, ptr %p.addr
+  store i32 %off, ptr %off.addr
+  store i64 %v, ptr %v.addr
+  %t1 = load ptr, ptr %p.addr
+  %t2 = load i32, ptr %off.addr
+  %t3 = load i64, ptr %v.addr
+  %t4 = and i64 %t3, 4294967295
+  %t5 = trunc i64 %t4 to i32
+  call void @st32(ptr %t1, i32 %t2, i32 %t5)
+  %t6 = load ptr, ptr %p.addr
+  %t7 = load i32, ptr %off.addr
+  %t8 = add i32 %t7, 4
+  %t9 = load i64, ptr %v.addr
+  %t10 = lshr i64 %t9, 32
+  %t11 = trunc i64 %t10 to i32
+  call void @st32(ptr %t6, i32 %t8, i32 %t11)
+  ret void
+}
+; sb_grow -> ()
+define void @sb_grow(ptr %sb, i32 %need) {
+entry:
+  %sb.addr = alloca ptr
+  %need.addr = alloca i32
+  %len.addr = alloca i32
+  %cap.addr = alloca i32
+  %want.addr = alloca i32
+  %nc.addr = alloca i32
+  %old.addr = alloca ptr
+  %nb.addr = alloca ptr
+  %_c.addr = alloca i32
+  store ptr %sb, ptr %sb.addr
+  store i32 %need, ptr %need.addr
+  %t1 = load ptr, ptr %sb.addr
+  %t2 = call i32 @ld32(ptr %t1, i32 0)
+  store i32 %t2, ptr %len.addr
+  %t3 = load ptr, ptr %sb.addr
+  %t4 = call i32 @ld32(ptr %t3, i32 4)
+  store i32 %t4, ptr %cap.addr
+  %t5 = load i32, ptr %len.addr
+  %t6 = load i32, ptr %need.addr
+  %t7 = add i32 %t5, %t6
+  store i32 %t7, ptr %want.addr
+  %t8 = load i32, ptr %want.addr
+  %t9 = load i32, ptr %cap.addr
+  %t10 = icmp ugt i32 %t8, %t9
+  br i1 %t10, label %L1_then, label %L2_else
+L1_then:
+  %t11 = load i32, ptr %cap.addr
+  store i32 %t11, ptr %nc.addr
+  br label %L4_wcond
+L4_wcond:
+  %t12 = load i32, ptr %nc.addr
+  %t13 = load i32, ptr %want.addr
+  %t14 = icmp ult i32 %t12, %t13
+  br i1 %t14, label %L5_wbody, label %L6_wend
+L5_wbody:
+  %t15 = load i32, ptr %nc.addr
+  %t16 = mul i32 %t15, 2
+  store i32 %t16, ptr %nc.addr
+  br label %L4_wcond
+L6_wend:
+  %t17 = load ptr, ptr %sb.addr
+  %t18 = call i64 @ld64(ptr %t17, i32 8)
+  %t19 = inttoptr i64 %t18 to ptr
+  store ptr %t19, ptr %old.addr
+  %t20 = load i32, ptr %nc.addr
+  %t21 = mul i32 %t20, 2
+  %t22 = call ptr @jrt_alloc(i32 %t21)
+  store ptr %t22, ptr %nb.addr
+  %t23 = load ptr, ptr %nb.addr
+  %t24 = load ptr, ptr %old.addr
+  %t25 = load i32, ptr %len.addr
+  %t26 = mul i32 %t25, 2
+  %t27 = call i32 @copy8(ptr %t23, i32 0, ptr %t24, i32 0, i32 %t26)
+  store i32 %t27, ptr %_c.addr
+  %t28 = load ptr, ptr %sb.addr
+  %t29 = load ptr, ptr %nb.addr
+  %t30 = ptrtoint ptr %t29 to i64
+  call void @st64(ptr %t28, i32 8, i64 %t30)
+  %t31 = load ptr, ptr %sb.addr
+  %t32 = load i32, ptr %nc.addr
+  call void @st32(ptr %t31, i32 4, i32 %t32)
+  br label %L3_end
+L2_else:
+  br label %L3_end
+L3_end:
+  ret void
+}
+; sb_put -> ()
+define void @sb_put(ptr %sb, i32 %ch) {
+entry:
+  %sb.addr = alloca ptr
+  %ch.addr = alloca i32
+  %len.addr = alloca i32
+  %buf.addr = alloca ptr
+  store ptr %sb, ptr %sb.addr
+  store i32 %ch, ptr %ch.addr
+  %t1 = load ptr, ptr %sb.addr
+  call void @sb_grow(ptr %t1, i32 1)
+  %t2 = load ptr, ptr %sb.addr
+  %t3 = call i32 @ld32(ptr %t2, i32 0)
+  store i32 %t3, ptr %len.addr
+  %t4 = load ptr, ptr %sb.addr
+  %t5 = call i64 @ld64(ptr %t4, i32 8)
+  %t6 = inttoptr i64 %t5 to ptr
+  store ptr %t6, ptr %buf.addr
+  %t7 = load ptr, ptr %buf.addr
+  %t8 = load i32, ptr %len.addr
+  %t9 = mul i32 %t8, 2
+  %t10 = load i32, ptr %ch.addr
+  %t11 = and i32 %t10, 255
+  %t12 = trunc i32 %t11 to i8
+  %t13 = getelementptr i8, ptr %t7, i32 %t9
+  store i8 %t12, ptr %t13
+  %t14 = load ptr, ptr %buf.addr
+  %t15 = load i32, ptr %len.addr
+  %t16 = mul i32 %t15, 2
+  %t17 = add i32 %t16, 1
+  %t18 = load i32, ptr %ch.addr
+  %t19 = lshr i32 %t18, 8
+  %t20 = and i32 %t19, 255
+  %t21 = trunc i32 %t20 to i8
+  %t22 = getelementptr i8, ptr %t14, i32 %t17
+  store i8 %t21, ptr %t22
+  %t23 = load ptr, ptr %sb.addr
+  %t24 = load i32, ptr %len.addr
+  %t25 = add i32 %t24, 1
+  call void @st32(ptr %t23, i32 0, i32 %t25)
+  ret void
+}
+; sb_mag -> ()
+define void @sb_mag(ptr %sb, i64 %mag) {
+entry:
+  %sb.addr = alloca ptr
+  %mag.addr = alloca i64
+  %buf.addr = alloca ptr
+  %n.addr = alloca i32
+  %v.addr = alloca i64
+  store ptr %sb, ptr %sb.addr
+  store i64 %mag, ptr %mag.addr
+  %t1 = load i64, ptr %mag.addr
+  %t2 = icmp eq i64 %t1, 0
+  br i1 %t2, label %L1_then, label %L2_else
+L1_then:
+  %t3 = load ptr, ptr %sb.addr
+  call void @sb_put(ptr %t3, i32 48)
+  br label %L3_end
+L2_else:
+  %t4 = call ptr @jrt_alloc(i32 32)
+  store ptr %t4, ptr %buf.addr
+  store i32 0, ptr %n.addr
+  %t5 = load i64, ptr %mag.addr
+  store i64 %t5, ptr %v.addr
+  br label %L4_wcond
+L4_wcond:
+  %t6 = load i64, ptr %v.addr
+  %t7 = icmp ugt i64 %t6, 0
+  br i1 %t7, label %L5_wbody, label %L6_wend
+L5_wbody:
+  %t8 = load ptr, ptr %buf.addr
+  %t9 = load i32, ptr %n.addr
+  %t10 = load i64, ptr %v.addr
+  %t12 = icmp eq i64 10, 0
+  br i1 %t12, label %L8_dtrap, label %L7_dok
+L8_dtrap:
+  call void @__jrt_abort()
+  unreachable
+L7_dok:
+  %t11 = urem i64 %t10, 10
+  br label %L9_dend
+L9_dend:
+  %t13 = add i64 48, %t11
+  %t14 = trunc i64 %t13 to i8
+  %t15 = getelementptr i8, ptr %t8, i32 %t9
+  store i8 %t14, ptr %t15
+  %t16 = load i32, ptr %n.addr
+  %t17 = add i32 %t16, 1
+  store i32 %t17, ptr %n.addr
+  %t18 = load i64, ptr %v.addr
+  %t20 = icmp eq i64 10, 0
+  br i1 %t20, label %L11_dtrap, label %L10_dok
+L11_dtrap:
+  call void @__jrt_abort()
+  unreachable
+L10_dok:
+  %t19 = udiv i64 %t18, 10
+  br label %L12_dend
+L12_dend:
+  store i64 %t19, ptr %v.addr
+  br label %L4_wcond
+L6_wend:
+  br label %L13_wcond
+L13_wcond:
+  %t21 = load i32, ptr %n.addr
+  %t22 = icmp ugt i32 %t21, 0
+  br i1 %t22, label %L14_wbody, label %L15_wend
+L14_wbody:
+  %t23 = load i32, ptr %n.addr
+  %t24 = sub i32 %t23, 1
+  store i32 %t24, ptr %n.addr
+  %t25 = load ptr, ptr %sb.addr
+  %t26 = load ptr, ptr %buf.addr
+  %t27 = load i32, ptr %n.addr
+  %t28 = getelementptr i8, ptr %t26, i32 %t27
+  %t29 = load i8, ptr %t28
+  %t30 = zext i8 %t29 to i32
+  call void @sb_put(ptr %t25, i32 %t30)
+  br label %L13_wcond
+L15_wend:
+  br label %L3_end
+L3_end:
+  ret void
+}
+; jrt_sb_new -> ptr
+define ptr @jrt_sb_new() {
+entry:
+  %sb.addr = alloca ptr
+  %cap.addr = alloca i32
+  %buf.addr = alloca ptr
+  %t1 = call ptr @jrt_alloc(i32 16)
+  store ptr %t1, ptr %sb.addr
+  store i32 32, ptr %cap.addr
+  %t2 = load i32, ptr %cap.addr
+  %t3 = mul i32 %t2, 2
+  %t4 = call ptr @jrt_alloc(i32 %t3)
+  store ptr %t4, ptr %buf.addr
+  %t5 = load ptr, ptr %sb.addr
+  call void @st32(ptr %t5, i32 0, i32 0)
+  %t6 = load ptr, ptr %sb.addr
+  %t7 = load i32, ptr %cap.addr
+  call void @st32(ptr %t6, i32 4, i32 %t7)
+  %t8 = load ptr, ptr %sb.addr
+  %t9 = load ptr, ptr %buf.addr
+  %t10 = ptrtoint ptr %t9 to i64
+  call void @st64(ptr %t8, i32 8, i64 %t10)
+  %t11 = load ptr, ptr %sb.addr
+  ret ptr %t11
+}
+; jrt_sb_c -> ()
+define void @jrt_sb_c(ptr %sb, i32 %ch) {
+entry:
+  %sb.addr = alloca ptr
+  %ch.addr = alloca i32
+  store ptr %sb, ptr %sb.addr
+  store i32 %ch, ptr %ch.addr
+  %t1 = load ptr, ptr %sb.addr
+  %t2 = load i32, ptr %ch.addr
+  call void @sb_put(ptr %t1, i32 %t2)
+  ret void
+}
+; jrt_sb_i32 -> ()
+define void @jrt_sb_i32(ptr %sb, i32 %v) {
+entry:
+  %sb.addr = alloca ptr
+  %v.addr = alloca i32
+  store ptr %sb, ptr %sb.addr
+  store i32 %v, ptr %v.addr
+  %t1 = load i32, ptr %v.addr
+  %t2 = icmp slt i32 %t1, 0
+  br i1 %t2, label %L1_then, label %L2_else
+L1_then:
+  %t3 = load ptr, ptr %sb.addr
+  call void @sb_put(ptr %t3, i32 45)
+  %t4 = load ptr, ptr %sb.addr
+  %t5 = load i32, ptr %v.addr
+  %t6 = sext i32 %t5 to i64
+  %t7 = sub i64 0, %t6
+  call void @sb_mag(ptr %t4, i64 %t7)
+  br label %L3_end
+L2_else:
+  %t8 = load ptr, ptr %sb.addr
+  %t9 = load i32, ptr %v.addr
+  %t10 = sext i32 %t9 to i64
+  call void @sb_mag(ptr %t8, i64 %t10)
+  br label %L3_end
+L3_end:
+  ret void
+}
+; jrt_sb_i64 -> ()
+define void @jrt_sb_i64(ptr %sb, i64 %v) {
+entry:
+  %sb.addr = alloca ptr
+  %v.addr = alloca i64
+  store ptr %sb, ptr %sb.addr
+  store i64 %v, ptr %v.addr
+  %t1 = load i64, ptr %v.addr
+  %t2 = icmp slt i64 %t1, 0
+  br i1 %t2, label %L1_then, label %L2_else
+L1_then:
+  %t3 = load ptr, ptr %sb.addr
+  call void @sb_put(ptr %t3, i32 45)
+  %t4 = load ptr, ptr %sb.addr
+  %t5 = load i64, ptr %v.addr
+  %t6 = sub i64 0, %t5
+  call void @sb_mag(ptr %t4, i64 %t6)
+  br label %L3_end
+L2_else:
+  %t7 = load ptr, ptr %sb.addr
+  %t8 = load i64, ptr %v.addr
+  call void @sb_mag(ptr %t7, i64 %t8)
+  br label %L3_end
+L3_end:
+  ret void
+}
+; jrt_sb_s -> ()
+define void @jrt_sb_s(ptr %sb, ptr %s) {
+entry:
+  %sb.addr = alloca ptr
+  %s.addr = alloca ptr
+  %src.addr = alloca ptr
+  %n.addr = alloca i32
+  %i.addr = alloca i32
+  %len.addr = alloca i32
+  %buf.addr = alloca ptr
+  store ptr %sb, ptr %sb.addr
+  store ptr %s, ptr %s.addr
+  %t1 = load ptr, ptr %s.addr
+  %t2 = ptrtoint ptr %t1 to i64
+  %t3 = icmp ne i64 %t2, 0
+  br i1 %t3, label %L1_then, label %L2_else
+L1_then:
+  %t4 = load ptr, ptr %s.addr
+  %t5 = call i64 @ld64(ptr %t4, i32 8)
+  %t6 = inttoptr i64 %t5 to ptr
+  store ptr %t6, ptr %src.addr
+  %t7 = load ptr, ptr %s.addr
+  %t8 = call i32 @ld32(ptr %t7, i32 16)
+  store i32 %t8, ptr %n.addr
+  store i32 0, ptr %i.addr
+  br label %L4_wcond
+L4_wcond:
+  %t9 = load i32, ptr %i.addr
+  %t10 = load i32, ptr %n.addr
+  %t11 = icmp ult i32 %t9, %t10
+  br i1 %t11, label %L5_wbody, label %L6_wend
+L5_wbody:
+  %t12 = load ptr, ptr %sb.addr
+  call void @sb_grow(ptr %t12, i32 1)
+  %t13 = load ptr, ptr %sb.addr
+  %t14 = call i32 @ld32(ptr %t13, i32 0)
+  store i32 %t14, ptr %len.addr
+  %t15 = load ptr, ptr %sb.addr
+  %t16 = call i64 @ld64(ptr %t15, i32 8)
+  %t17 = inttoptr i64 %t16 to ptr
+  store ptr %t17, ptr %buf.addr
+  %t18 = load ptr, ptr %buf.addr
+  %t19 = load i32, ptr %len.addr
+  %t20 = mul i32 %t19, 2
+  %t21 = load ptr, ptr %src.addr
+  %t22 = load i32, ptr %i.addr
+  %t23 = mul i32 %t22, 2
+  %t24 = getelementptr i8, ptr %t21, i32 %t23
+  %t25 = load i8, ptr %t24
+  %t26 = zext i8 %t25 to i32
+  %t27 = trunc i32 %t26 to i8
+  %t28 = getelementptr i8, ptr %t18, i32 %t20
+  store i8 %t27, ptr %t28
+  %t29 = load ptr, ptr %buf.addr
+  %t30 = load i32, ptr %len.addr
+  %t31 = mul i32 %t30, 2
+  %t32 = add i32 %t31, 1
+  %t33 = load ptr, ptr %src.addr
+  %t34 = load i32, ptr %i.addr
+  %t35 = mul i32 %t34, 2
+  %t36 = add i32 %t35, 1
+  %t37 = getelementptr i8, ptr %t33, i32 %t36
+  %t38 = load i8, ptr %t37
+  %t39 = zext i8 %t38 to i32
+  %t40 = trunc i32 %t39 to i8
+  %t41 = getelementptr i8, ptr %t29, i32 %t32
+  store i8 %t40, ptr %t41
+  %t42 = load ptr, ptr %sb.addr
+  %t43 = load i32, ptr %len.addr
+  %t44 = add i32 %t43, 1
+  call void @st32(ptr %t42, i32 0, i32 %t44)
+  %t45 = load i32, ptr %i.addr
+  %t46 = add i32 %t45, 1
+  store i32 %t46, ptr %i.addr
+  br label %L4_wcond
+L6_wend:
+  br label %L3_end
+L2_else:
+  br label %L3_end
+L3_end:
+  ret void
+}
+; jrt_uncaught -> ()
+define void @jrt_uncaught() {
+entry:
+  %nl.addr = alloca ptr
+  %t1 = getelementptr inbounds [24 x i8], ptr @.str.jrt_uncaught.0, i64 0, i64 0
+  %t2 = insertvalue { ptr, i64 } undef, ptr %t1, 0
+  %t3 = insertvalue { ptr, i64 } %t2, i64 24, 1
+  %t4 = extractvalue { ptr, i64 } %t3, 0
+  %t5 = getelementptr inbounds [24 x i8], ptr @.str.jrt_uncaught.1, i64 0, i64 0
+  %t6 = insertvalue { ptr, i64 } undef, ptr %t5, 0
+  %t7 = insertvalue { ptr, i64 } %t6, i64 24, 1
+  %t8 = extractvalue { ptr, i64 } %t7, 1
+  %t9 = trunc i64 %t8 to i32
+  call void @wr(i64 2, ptr %t4, i32 %t9)
+  %t10 = call ptr @jrt_alloc(i32 4)
+  store ptr %t10, ptr %nl.addr
+  %t11 = load ptr, ptr %nl.addr
+  %t12 = getelementptr i8, ptr %t11, i32 0
+  store i8 10, ptr %t12
+  %t13 = load ptr, ptr %nl.addr
+  call void @wr(i64 2, ptr %t13, i32 1)
+  %t14 = call i64 asm sideeffect "syscall", "={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}"(i64 60, i64 1, i64 0, i64 0)
+  ret void
+}
+; jrt_sb_str -> ptr
+define ptr @jrt_sb_str(ptr %sb) {
+entry:
+  %sb.addr = alloca ptr
+  %len.addr = alloca i32
+  %bytes.addr = alloca i32
+  %buf.addr = alloca ptr
+  %src.addr = alloca ptr
+  %_c.addr = alloca i32
+  %s.addr = alloca ptr
+  store ptr %sb, ptr %sb.addr
+  %t1 = load ptr, ptr %sb.addr
+  %t2 = call i32 @ld32(ptr %t1, i32 0)
+  store i32 %t2, ptr %len.addr
+  %t3 = load i32, ptr %len.addr
+  %t4 = mul i32 %t3, 2
+  store i32 %t4, ptr %bytes.addr
+  %t5 = load i32, ptr %bytes.addr
+  %t6 = add i32 %t5, 2
+  %t7 = call ptr @jrt_alloc(i32 %t6)
+  store ptr %t7, ptr %buf.addr
+  %t8 = load ptr, ptr %sb.addr
+  %t9 = call i64 @ld64(ptr %t8, i32 8)
+  %t10 = inttoptr i64 %t9 to ptr
+  store ptr %t10, ptr %src.addr
+  %t11 = load ptr, ptr %buf.addr
+  %t12 = load ptr, ptr %src.addr
+  %t13 = load i32, ptr %bytes.addr
+  %t14 = call i32 @copy8(ptr %t11, i32 0, ptr %t12, i32 0, i32 %t13)
+  store i32 %t14, ptr %_c.addr
+  %t15 = call ptr @jrt_alloc(i32 24)
+  store ptr %t15, ptr %s.addr
+  %t16 = load ptr, ptr %s.addr
+  %t17 = load ptr, ptr %buf.addr
+  %t18 = ptrtoint ptr %t17 to i64
+  call void @st64(ptr %t16, i32 8, i64 %t18)
+  %t19 = load ptr, ptr %s.addr
+  %t20 = load i32, ptr %len.addr
+  call void @st32(ptr %t19, i32 16, i32 %t20)
+  %t21 = load ptr, ptr %s.addr
+  ret ptr %t21
 }

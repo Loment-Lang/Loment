@@ -422,6 +422,147 @@ def test_bad_class_is_rejected():
             raise AssertionError("corrupt class accepted")
 
 
+def _mk_class(name: str, code: bytes, *, max_stack: int = 8, max_locals: int = 8,
+              exc: list | None = None, method: str = "m", desc: str = "()V",
+              access: int = 0x0008) -> bytes:
+    """手工造一个最小 class 文件。
+
+    javac 不会产出验证器要拒绝的那几种形状（类型混淆、越界分支、坏异常表），
+    所以这些反例只能自己拼字节 —— 它们是"恶意输入"的夹具，不是"真实现的产物"。
+    """
+    import struct
+    cp = [
+        b"\x01" + struct.pack(">H", len(name)) + name.encode(),
+        b"\x07\x00\x01",
+        b"\x01" + struct.pack(">H", 16) + b"java/lang/Object",
+        b"\x07\x00\x03",
+        b"\x01" + struct.pack(">H", len(method)) + method.encode(),
+        b"\x01" + struct.pack(">H", len(desc)) + desc.encode(),
+        b"\x01\x00\x04Code",
+    ]
+    body = struct.pack(">HHI", max_stack, max_locals, len(code)) + code
+    body += struct.pack(">H", len(exc or []))
+    for start, end, target, ctype in (exc or []):
+        body += struct.pack(">HHHH", start, end, target, ctype)
+    body += b"\x00\x00"
+    meth = (struct.pack(">HHHH", access, 5, 6, 1) +
+            struct.pack(">HI", 7, len(body)) + body)
+    return (struct.pack(">IHHH", 0xCAFEBABE, 0, 52, len(cp) + 1) + b"".join(cp) +
+            struct.pack(">HHHHHH", 0x0021, 2, 4, 0, 0, 1) + meth + b"\x00\x00")
+
+
+def _verify_rejects(data: bytes, prefix: str, *needles: str) -> str:
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        try:
+            lomjava.emit("bad", [lomjava.parse_class(data)], d / "bad.ll", d / "bad.lomt")
+        except lomjava.JavaError as e:
+            msg = str(e)
+            assert msg.startswith(prefix), msg
+            for n in needles:
+                assert n in msg, msg
+            return msg
+        else:
+            raise AssertionError("the verifier accepted a class it must reject")
+
+
+@test
+def test_verifier_rejects_int_used_as_a_reference():
+    """#1058：降级之后一个槽就是 i64 —— 不判类型，手写字节码就能让它把整数当指针。
+
+    `iconst_1; athrow` 里抛的"对象"是个整数。降级器会 `inttoptr` 它然后写内存。
+    """
+    msg = _verify_rejects(_mk_class("A", b"\x04\xbf"), "J002", "reference")
+    print(f"      int-as-ref rejected: {msg}")
+
+
+@test
+def test_verifier_rejects_astore_of_an_int():
+    msg = _verify_rejects(_mk_class("A", b"\x04\x4b\x00"), "J002", "astore")
+    print(f"      astore-of-int rejected: {msg}")
+
+
+@test
+def test_verifier_rejects_a_stack_height_mismatch():
+    # 0: iconst_1 / 1: ifeq +4 -> 5 / 4: iconst_2 / 5: goto +3 -> 8 / 8: pop / 9: return
+    # 两条边到达 5 时栈深不同（0 与 1）—— 合并点必须拒。
+    msg = _verify_rejects(_mk_class("A", b"\x04\x99\x00\x04\x05\xa7\x00\x03\x57\xb1"),
+                          "J002", "differ")
+    print(f"      height mismatch rejected: {msg}")
+
+
+@test
+def test_verifier_rejects_a_bad_exception_range():
+    msg = _verify_rejects(_mk_class("A", b"\xb1", exc=[(0, 99, 0, 0)]), "J002", "exception range")
+    print(f"      bad exception range rejected: {msg}")
+
+
+@test
+def test_verifier_rejects_oversized_code():
+    msg = _verify_rejects(_mk_class("A", b"\x00" * 65536), "J002", "cap")
+    print(f"      oversized code rejected: {msg}")
+
+
+@test
+def test_verifier_names_the_unsupported_constructs():
+    msg = _verify_rejects(_mk_class("A", b"\xa8\x00\x03"), "J003", "jsr")
+    print(f"      jsr rejected: {msg}")
+    msg = _verify_rejects(_mk_class("A", b"\x0b\xb1"), "J003", "float")
+    print(f"      float rejected: {msg}")
+
+
+def _fieldref_pool(owner: str, field: str, desc: str) -> list:
+    return [None,
+            (lomjava.CP_UTF8, owner), (lomjava.CP_CLASS, 1),
+            (lomjava.CP_UTF8, field), (lomjava.CP_UTF8, desc),
+            (lomjava.CP_NAME_AND_TYPE, 3, 4),
+            (lomjava.CP_FIELDREF, 2, 5)]
+
+
+@test
+def test_verifier_rejects_private_and_final_violations():
+    """访问控制：另一个类碰私有字段、或在本类构造器之外写 final 字段。"""
+    pool = _fieldref_pool("A", "x", "I")
+    a = lomjava.ClassFile(
+        "A", [], [lomjava.Field(lomjava.ACC_PRIVATE | lomjava.ACC_FINAL, "x", "I")], pool)
+    # aconst_null; getfield #6; pop; return
+    read = lomjava.Method(lomjava.ACC_STATIC, "m", "()V",
+                          b"\x01\xb4\x00\x06\x57\xb1", 4, 4, [])
+    b = lomjava.ClassFile("B", [read], [], pool)
+    try:
+        lomjava.verify_classes([a, b])
+    except lomjava.JavaError as e:
+        assert str(e).startswith("J002") and "private" in str(e), e
+        print(f"      private field rejected: {e}")
+    else:
+        raise AssertionError("private field access was accepted")
+
+    # aconst_null; iconst_1; putfield #6; return —— 在 B 里写 A 的 final 字段
+    write = lomjava.Method(lomjava.ACC_STATIC, "m", "()V",
+                           b"\x01\x04\xb5\x00\x06\xb1", 4, 4, [])
+    a2 = lomjava.ClassFile("A", [], [lomjava.Field(lomjava.ACC_FINAL, "x", "I")], pool)
+    b2 = lomjava.ClassFile("B", [write], [], pool)
+    try:
+        lomjava.verify_classes([a2, b2])
+    except lomjava.JavaError as e:
+        assert str(e).startswith("J002") and "final" in str(e), e
+        print(f"      final write rejected: {e}")
+    else:
+        raise AssertionError("a final field write outside <init> was accepted")
+
+
+@test
+def test_verifier_caps_the_class_count():
+    many = [lomjava.ClassFile(f"C{i}", [], [], []) for i in range(lomjava.MAX_CLASSES + 1)]
+    try:
+        lomjava.verify_classes(many)
+    except lomjava.JavaError as e:
+        assert str(e).startswith("J002") and "classes" in str(e), e
+        print(f"      class cap: {e}")
+    else:
+        raise AssertionError("the class-count cap was not enforced")
+
+
 @test
 def test_jrt_println_end_to_end():
     """#1060: System.out/err print/println and Math's integer subset, through jrt.

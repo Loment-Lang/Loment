@@ -230,13 +230,18 @@ report_diags() {
     # record, synthesize one before rendering. That is the whole point of the second
     # channel - a crash must not look like "nothing to report".
     dfile=$1; derr=$2; rflags=${3:-}; drc=${4:-0}; dwho=${5:-loment-driver}
+    _synth=0
     if [ "$drc" -ne 0 ] && [ ! -s "$dfile" ]; then
         synthesize_diag "$dfile" "$derr" "$dwho" "$drc"
+        _synth=1
     fi
     # #673: the tool was killed *after* it had already written records. Rendering those
     # alone reads as an ordinary compile error and hides that the compiler never finished
     # -- so append a record that says so, in every output mode (full / --short / --json).
-    if [ "$drc" -gt 128 ] && [ -s "$dfile" ]; then
+    # Not when the record just above was synthesized: that one already says the tool died
+    # and named the signal ("and wrote no diagnostic record"), and this one would add a
+    # second, contradictory "after writing some diagnostics".
+    if [ "$drc" -gt 128 ] && [ "$_synth" -eq 0 ] && [ -s "$dfile" ]; then
         _sn=$(signal_name "$drc")
         [ -n "$_sn" ] && _sn=" ($_sn)"
         _sm="$dwho was killed by signal $((drc - 128))$_sn after writing some diagnostics; what is shown below may be incomplete"

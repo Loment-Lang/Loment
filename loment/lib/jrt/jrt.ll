@@ -1,5 +1,5 @@
 ; 由 tools/loment_jrt.py 从 loment/lib/jrt/jrt.lomt 生成 —— 不要手改
-; jrt: the minimal Java runtime (docs/281 §7)
+; jrt: the minimal Java runtime (docs/282 §7)
 
 ; 由 tools/lomentc.py 生成 (native: LLVM IR, docs/144/145)
 ; clang -O1 driver.c this.ll -o exe

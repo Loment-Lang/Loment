@@ -338,6 +338,31 @@ def test_control_bytes_in_the_source_are_escaped():
 
 
 @test
+def test_a_filled_buffer_says_the_whole_diagnostic_was_cut():
+    """`#671`: 一行超长源码能把 32 KiB 渲染缓冲占满，插入符、消息和整张卡片随之消失。
+
+    剩下的那句提示原先**粘在源行末尾**，读起来像"这一行被截了"—— 而真正丢的是整条诊断。
+    现在它自己占一行，并且说清丢的是什么。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "long.lomt"
+        src.write_text("module m\n\nfn f() -> u32 {\n    return g(" + "1 + " * 120000
+                       + "1);\n}\n", encoding="utf-8", newline="\n")
+        d = Path(td) / "d.jsonl"
+        d.write_text(json.dumps({"file": str(src), "line": 4, "col": 12,
+                                 "code": "E002", "message": "m"}) + "\n",
+                     encoding="utf-8", newline="\n")
+        rc, out = _render(d)
+    assert rc == 1, rc
+    notice = ("lomenterr: this diagnostic was too long "
+              "to render in full (the source line alone filled the 32 KiB buffer)")
+    # 它必须**自成一行**：前一行是被填满的缓冲（一段没写完的源行），不是提示粘在它尾巴上
+    assert "\n" + notice + "\n" in out, f"截断提示没有单独占一行: {out[-300:]!r}"
+    assert "\n\n" + notice not in out, "提示前多了一个空行"
+    print("      缓冲被占满：截断提示另起一行，并说清丢的是整条诊断")
+
+
+@test
 def test_a_cut_message_says_so_in_the_long_form_too():
     """`#665`: 消息超过 `MSG_CAP` 就被截断，`--short`/`--json` 会说，长表原先不说。
 

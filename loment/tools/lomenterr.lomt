@@ -183,6 +183,7 @@ const S_BADLINE_J: u32 = 58;     // `--json` 里那条坏行的 note（`#478`）
 const S_CUT: u32 = 59;           // `--short` / `--json` 的截断标记（`#485`）
 const S_NOTFILE: u32 = 60;       // 诊断文件那条路径不是普通文件（目录 / FIFO / 设备）
 const S_MORECODES: u32 = 61;     // 汇总表满了之后没列出来的码（`#670`）
+const S_TRUNC_DIAG: u32 = 62;    // 32 KiB 渲染缓冲把**整条诊断**截断了（`#671`）
 // 候选**是什么** —— 抄 rustc 的 "a local variable with a similar name exists"。
 // 只说一个名字，用户还得自己去找它在哪、是干什么的；说了种类，一眼就知道该不该照它改。
 const S_KIND_FN: u32 = 38;
@@ -277,6 +278,8 @@ fn ui_en(k: u32) -> str {
     // 而不是把它当成一份空诊断（那会让一份编译失败的运行报 `[OK] no diagnostics`，`#661`）。
     if k == 60 { return "lomenterr: the diagnostics path is not a regular file\n"; }
     if k == 61 { return " more codes were left out of this list"; }
+    // `#671`：截断的是**整条诊断**（插入符、消息、卡片全没了），不是那一行源码。
+    if k == 62 { return "lomenterr: this diagnostic was too long to render in full (the source line alone filled the 32 KiB buffer)\n"; }
     if k == 34 { return "lomenterr: cannot open the diagnostics file\n"; }
     if k == 35 { return "there is no `./deps` directory here, so layer 1 cannot find anything: layer 1 is `<project root>/deps/<name>/<name>.lomt`. Create that file, or name the location with the path form `use \"./x.lomt\"`.\n"; }
     if k == 36 { return "`./deps` is here; the closest names in it are:\n"; }
@@ -343,6 +346,7 @@ fn ui_zh(k: u32) -> str {
     if k == 59 { return " [已截断]"; }
     if k == 60 { return "lomenterr: 诊断文件那条路径不是普通文件\n"; }
     if k == 61 { return " 个码没有列进这张表"; }
+    if k == 62 { return "lomenterr: 这条诊断太长，被截断在这里（光是源码那一行就占满了 32 KiB 缓冲）\n"; }
     if k == 34 { return "lomenterr: 打不开诊断文件\n"; }
     if k == 35 { return "这里没有 `./deps` 目录 —— 第 1 层找的是「项目根」下的 `deps/<名字>/<名字>.lomt`，所以它找不到任何东西。补那个文件，或者用路径形式 `use \"./x.lomt\"` 指明位置。\n"; }
     if k == 36 { return "`./deps` 在这里，里面最接近的名字有:\n"; }
@@ -3196,10 +3200,14 @@ fn _start() -> u32 {
                         }
                         o6 = o5b;
                         }
-                        write_all(2, ctx, em(ctx, o6, "\n") as u64);
+                        // 换行**单独写**（`#671`）：缓冲满了之后 `em_byte` 不再落字节，连这个
+                        // `\n` 都会被丢掉 —— 于是截断提示粘在源行末尾，读起来像"这一行被截了"。
+                        write_all(2, ctx, o6 as u64);
+                        write_all(2, str_ptr("\n"), 1);
                         if load32(ctx, C_TRUNC) == 1 {
-                            let cut: str = ui(ctx, S_TRUNC);
-                            write_all(2, str_ptr(cut), str_len(cut) as u64);
+                            // 说清丢的是**整条诊断**（插入符、消息、卡片），不是那一行源码。
+                            let cutd: str = ui(ctx, S_TRUNC_DIAG);
+                            write_all(2, str_ptr(cutd), str_len(cutd) as u64);
                         }
                     }
                 }

@@ -9813,6 +9813,28 @@ def write_diags(out: str | None, records: list[dict]) -> None:
     print(f"[DIAG] {len(records)} 条 -> {out}", file=sys.stderr)
 
 
+# ---------------------------------------------------------------------------
+# `reboot(2)` 那一手的写法：魔数必须**同时**传对，少一个都不认（`0x28121969`
+# 就是 Linus 的生日）。这里三个，散在一份源的三处 —— 模块名，和两个常量值。
+#
+# 正常写程序凑不齐它们（没人会把 `module hxy` 和这两个数写在一起）；凑齐了也只做
+# 一件事：在 stderr 上留一行。**不进产物、不改 IR、不影响任何一条诊断** —— 所以它
+# 不会让两个实现分叉，也不会让门禁多一条要维护的判据。
+#
+#   20100529   一个人的生日
+#   hxy        一个名字的缩写
+#   20260928   这门语言出生的那天
+_SECRET_NAME = "hxy"
+_SECRET_NUMBERS = (20100529, 20260928)
+
+
+def _if_you_know(mod: "Module") -> None:
+    """认出来了就留一行；认不出来就是普通编译，什么都多不出来。"""
+    vals = {c.value for c in mod.consts if isinstance(c.value, int)}
+    if mod.name == _SECRET_NAME and all(n in vals for n in _SECRET_NUMBERS):
+        print("\n  ♥  2010-05-29  ·  hxy  ·  2026-09-28\n", file=sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="lomentc", description="L1 Loment 编译器 v0")
     ap.add_argument("file", help=".lomt 源文件")
@@ -9875,6 +9897,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[ERR] {path}: {msg}", file=sys.stderr)
         write_diags(args.diag_out, [diag_record(path, 0, 0, msg)])
         return 1
+
+    _if_you_know(mod)
 
     errs = check(mod, deps=deps)
     if errs:
@@ -9951,12 +9975,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
-# ---------------------------------------------------------------------------
-# 这份编译器不使用下面这三个值。它们在这里，只是在这里：
-#
-#     20100529   ·   hxy   ·   20260928
-#
-# 第一个是一个人的生日，第二个是一个名字的缩写，第三个是这门语言出生的那天。
-# 不打印、不写进产物、不影响任何编译结果 —— 想读到它们，只能打开这个文件。
-# ---------------------------------------------------------------------------

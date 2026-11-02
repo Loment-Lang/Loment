@@ -102,6 +102,9 @@ const ROW_STRIDE: u32 = 192;
 const NAME_MAX: u32 = 47;
 //: `newfstatat` 的 `struct stat` 暂存（x86-64 上 144 字节；只读 `st_mode`，偏移 24）。
 //: 放在 `C_MAX`/`C_WANTVER` 之后、`CTX_CAP` 之前那段空地上。
+//: 汇总表（64 格）装满之后**没能列进去的码**个数（`#670`）。表满时原先静默丢码，
+//: 而总数照数 —— "500 errors:" 后面那串加不到 500，且没有任何标记。
+const C_SUMDROP: u32 = 64936;
 const C_STB: u32 = 64960;
 const S_IFMT: u32 = 61440;
 const S_IFREG: u32 = 32768;
@@ -179,6 +182,7 @@ const S_SUM1: u32 = 57;          // 同上，但只有**一条**（英文要单�
 const S_BADLINE_J: u32 = 58;     // `--json` 里那条坏行的 note（`#478`）
 const S_CUT: u32 = 59;           // `--short` / `--json` 的截断标记（`#485`）
 const S_NOTFILE: u32 = 60;       // 诊断文件那条路径不是普通文件（目录 / FIFO / 设备）
+const S_MORECODES: u32 = 61;     // 汇总表满了之后没列出来的码（`#670`）
 // 候选**是什么** —— 抄 rustc 的 "a local variable with a similar name exists"。
 // 只说一个名字，用户还得自己去找它在哪、是干什么的；说了种类，一眼就知道该不该照它改。
 const S_KIND_FN: u32 = 38;
@@ -272,6 +276,7 @@ fn ui_en(k: u32) -> str {
     // 目录能被 open、FIFO 会在 open 上阻塞 —— 所以在 open 之前 stat。说清"不是文件"，
     // 而不是把它当成一份空诊断（那会让一份编译失败的运行报 `[OK] no diagnostics`，`#661`）。
     if k == 60 { return "lomenterr: the diagnostics path is not a regular file\n"; }
+    if k == 61 { return " more codes were left out of this list"; }
     if k == 34 { return "lomenterr: cannot open the diagnostics file\n"; }
     if k == 35 { return "there is no `./deps` directory here, so layer 1 cannot find anything: layer 1 is `<project root>/deps/<name>/<name>.lomt`. Create that file, or name the location with the path form `use \"./x.lomt\"`.\n"; }
     if k == 36 { return "`./deps` is here; the closest names in it are:\n"; }
@@ -337,6 +342,7 @@ fn ui_zh(k: u32) -> str {
     if k == 58 { return "诊断文件里的这一行不是合法 JSON"; }
     if k == 59 { return " [已截断]"; }
     if k == 60 { return "lomenterr: 诊断文件那条路径不是普通文件\n"; }
+    if k == 61 { return " 个码没有列进这张表"; }
     if k == 34 { return "lomenterr: 打不开诊断文件\n"; }
     if k == 35 { return "这里没有 `./deps` 目录 —— 第 1 层找的是「项目根」下的 `deps/<名字>/<名字>.lomt`，所以它找不到任何东西。补那个文件，或者用路径形式 `use \"./x.lomt\"` 指明位置。\n"; }
     if k == 36 { return "`./deps` 在这里，里面最接近的名字有:\n"; }
@@ -2277,10 +2283,17 @@ fn sum_add(ctx: ptr, cnum: u32) {
             i = i + 1;
         }
     }
-    if hit == 0 && n < SUM_CAP {
-        store32(ctx, C_SUMK + n * 4, cnum);
-        store32(ctx, C_SUMV + n * 4, 1);
-        store32(ctx, C_SUMN, n + 1);
+    if hit == 0 {
+        if n < SUM_CAP {
+            store32(ctx, C_SUMK + n * 4, cnum);
+            store32(ctx, C_SUMV + n * 4, 1);
+            store32(ctx, C_SUMN, n + 1);
+        } else {
+            // 表满：**记一笔**，汇总行末尾要说出来（`#670`）。总数是另外数的，
+            // 所以丢掉明细不会算错总数 —— 但它会让"总数 vs 明细和"对不上，而那正是
+            // 读者唯一能自查的地方。
+            store32(ctx, C_SUMDROP, load32(ctx, C_SUMDROP) + 1);
+        }
     }
 }
 
@@ -2341,6 +2354,14 @@ fn sum_print(ctx: ptr, total: u32) -> u32 {
         acc = em(ctx, acc, ui(ctx, S_SUM_X));
         acc = em_u32(ctx, acc, load32(ctx, C_SUMV + k * 4));
         k = k + 1;
+    }
+    let drop: u32 = load32(ctx, C_SUMDROP);
+    if drop > 0 {
+        acc = em_byte(ctx, acc, COMMA);
+        acc = em_byte(ctx, acc, SP);
+        acc = em_byte(ctx, acc, 43);                 // '+'
+        acc = em_u32(ctx, acc, drop);
+        acc = em(ctx, acc, ui(ctx, S_MORECODES));
     }
     return em_byte(ctx, acc, NL);
 }
@@ -2892,6 +2913,7 @@ fn _start() -> u32 {
     store32(ctx, C_TRUNC, 0);
     store32(ctx, C_CANDN, 0);
     store32(ctx, C_SUMN, 0);
+    store32(ctx, C_SUMDROP, 0);
     // 颜色**默认开**（与 `lomcli` 同一个默认值）；`--no-color` / `-C` 把它关掉，
     // 而 `parse_args` 同时把诊断文件那个参数抄进 `scr + SCR_DIAG`。
     store32(ctx, C_COLOR, 1);

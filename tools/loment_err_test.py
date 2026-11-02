@@ -904,6 +904,29 @@ def test_the_toolchain_beside_errconfig_is_the_second_place_read():
 # ---------------------------------------------------------------- 汇总 (§15)
 
 @test
+def test_a_full_summary_table_says_what_it_left_out():
+    """`#670`: 汇总表只有 64 格。满了之后原先**静默丢码**，而总数照数 —— `100 errors:`
+    后面那串只加到 64，且没有任何标记。现在末尾明说漏了几个码。
+    """
+    def summary(n_codes: int) -> str:
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td) / "d.jsonl"
+            rows = [{"file": "x.lomt", "line": 1, "col": 1,
+                     "code": f"E{i + 1:03d}", "message": "m"} for i in range(n_codes)]
+            d.write_text("\n".join(json.dumps(r) for r in rows) + "\n",
+                         encoding="utf-8", newline="\n")
+            _rc, out = _render(d, "--max", "0")
+        return next(ln for ln in out.splitlines() if " errors:" in ln)
+
+    small = summary(30)
+    big = summary(100)
+    assert small.startswith("30 errors:") and "more codes" not in small, small
+    assert big.startswith("100 errors:"), big[:80]
+    assert "+36 more codes" in big, f"漏掉的码没说出来: {big[-120:]!r}"
+    print("      汇总表满 64 格后，末尾说出漏了几个码")
+
+
+@test
 def test_summary_groups_by_code_worst_first():
     """结尾的汇总**按码分组，条数多的先出**，并列时码号小的在前。
 

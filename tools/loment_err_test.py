@@ -360,6 +360,28 @@ def test_a_cut_message_says_so_in_the_long_form_too():
 
 
 @test
+def test_json_output_is_always_valid_utf8():
+    """`#666`: `--json` 的消费者是 JSON 解析器 —— 一个非法字节就让**整份文档**解析失败。
+
+    诊断文件可能来自别的工具链 / 更老的版本 / 夹具，所以渲染器是最后一道防线：多字节
+    序列验不过就写 U+FFFD，而不是把那个字节原样抄进去。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td) / "bad.jsonl"
+        # 消息里放一个**单独的 0xFF**：不是任何 UTF-8 序列的一部分。
+        d.write_bytes(b'{"file":"x.lomt","line":1,"col":1,"code":"E002",'
+                      b'"message":"a\xffb"}\n')
+        r = subprocess.run([str(_bin()), "--no-color", "--json", str(d)],
+                           capture_output=True, shell=False, timeout=60, cwd=str(td))
+    assert r.returncode == 1, r.returncode
+    # 渲染器把诊断写 **fd 2**（`--json` 也是）；这一行就是判据：解不开就抛。
+    text = (r.stdout + r.stderr).decode("utf-8")
+    row = json.loads(text.splitlines()[0])
+    assert row["message"] == "a�b", repr(row["message"])
+    print("      --json 的非法字节写成 U+FFFD，整份输出仍是合法 UTF-8")
+
+
+@test
 def test_the_fallback_code_has_a_card():
     """`#658`: E999 是**兜底码**，原先它是唯一一个没有卡片的码 —— 报错器于是用"工具链版本
     不齐"去解释编译器自己的兜底，而那句话是错的：分类表与编译器是同一个仓、同一次构建。

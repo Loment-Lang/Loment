@@ -2073,7 +2073,68 @@ fn json_body(ctx: ptr, o: u32, p: ptr, n: u32) -> u32 {
                             if c < 32 {
                                 o = em_u00(ctx, o, c);
                             } else {
-                                o = em_byte(ctx, o, c);
+                                // `#666`：`--json` 的消费者是 JSON 解析器，一个非法字节就让
+                                // **整份文档**解析失败。多字节序列按首字节验完再抄；不合法的
+                                // 那个字节写成 U+FFFD —— 仍然是一个合法 JSON 字符串。
+                                if c < 128 {
+                                    o = em_byte(ctx, o, c);
+                                } else {
+                                    let need: u32 = 0;
+                                    let ok: u32 = 1;
+                                    if c >= 194 && c <= 223 {
+                                        need = 1;
+                                    } else {
+                                        if c >= 224 && c <= 239 {
+                                            need = 2;
+                                        } else {
+                                            if c >= 240 && c <= 244 {
+                                                need = 3;
+                                            } else {
+                                                ok = 0;
+                                            }
+                                        }
+                                    }
+                                    if ok == 1 && i + need >= n {
+                                        ok = 0;
+                                    }
+                                    if ok == 1 {
+                                        let b1: u32 = load8(p, i + 1);
+                                        if b1 < 128 || b1 > 191 {
+                                            ok = 0;
+                                        }
+                                        // 过长写法与代理区：Python 的 UTF-8 解码器同样拒。
+                                        if c == 224 && b1 < 160 {
+                                            ok = 0;
+                                        }
+                                        if c == 237 && b1 > 159 {
+                                            ok = 0;
+                                        }
+                                        if c == 240 && b1 < 144 {
+                                            ok = 0;
+                                        }
+                                        if c == 244 && b1 > 143 {
+                                            ok = 0;
+                                        }
+                                        let k: u32 = 2;
+                                        while k <= need {
+                                            let cc: u32 = load8(p, i + k);
+                                            if cc < 128 || cc > 191 {
+                                                ok = 0;
+                                            }
+                                            k = k + 1;
+                                        }
+                                    }
+                                    if ok == 0 {
+                                        o = em(ctx, o, "\\ufffd");
+                                    } else {
+                                        let k2: u32 = 0;
+                                        while k2 <= need {
+                                            o = em_byte(ctx, o, load8(p, i + k2));
+                                            k2 = k2 + 1;
+                                        }
+                                        i = i + need;
+                                    }
+                                }
                             }
                         }
                     }

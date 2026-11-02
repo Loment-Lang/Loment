@@ -693,6 +693,72 @@ def test_python_lsp_ranges_are_not_placeholders_either():
     print("      检查期落在对的**那一行**上；解析期给到**真列**；definition 给到名字的跨度")
 
 
+CLAMP_SRC = ("// a\n"
+             "fn helper() -> u32 {\n"
+             "    return 1;\n"
+             "}\n"
+             "\n"
+             "fn main() -> u32 {\n"
+             "    return helper();\n"
+             "}\n")
+
+
+@test
+def test_definition_clamps_the_character_to_the_line_end():
+    """`#711`：`character` 超过行长时要**夹到行长**，不是落到下一行去。
+
+    LSP 规定 "if the character value is greater than the line length it defaults back to
+    the line length"。原先自举那一侧直接 `line_start + ch`：第 1 行只有 `// a` 四个字节，
+    客户端报 `character: 10`（光标停在行尾之后很远）时那个偏移落进了**第 2 行**，
+    于是 `definition` 回了 `helper` —— 看起来像认得，其实是读到了下一行的名字。
+
+    Python 参考实现按切片取前缀，天然夹住；两边应当一致。
+    """
+    uri = "file:///clamp.lomt"
+    # 第 0 行 `// a`（4 字节）+ 换行 = 第 1 行从 5 起；+10 落在 `helper` 里。
+    line0 = CLAMP_SRC.splitlines()[0]
+    far = len(line0) + 6
+    col = CLAMP_SRC.splitlines()[1].index("helper")
+    want = {"start": {"line": 1, "character": col},
+            "end": {"line": 1, "character": col + len("helper")}}
+    if _clang() and _wsl():
+        with tempfile.TemporaryDirectory() as tds:
+            td = Path(tds)
+            elf = _build(td)
+            for enc in ("utf-8", "utf-16"):
+                init = {"capabilities": {"general": {"positionEncodings": [enc]}}}
+                msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": init},
+                        {"method": "textDocument/didOpen",
+                         "params": {"textDocument": {"uri": uri, "text": CLAMP_SRC}}},
+                        {"jsonrpc": "2.0", "id": 2, "method": "textDocument/definition",
+                         "params": {"textDocument": {"uri": uri},
+                                    "position": {"line": 0, "character": far}}},
+                        # 对照: 正常位置（第 1 行 `fn helper` 的 `h`）仍然要回那次声明。
+                        {"jsonrpc": "2.0", "id": 3, "method": "textDocument/definition",
+                         "params": {"textDocument": {"uri": uri},
+                                    "position": {"line": 1, "character": col}}},
+                        {"jsonrpc": "2.0", "id": 4, "method": "shutdown", "params": {}},
+                        {"method": "exit"}]
+                frames, rc, err = Batch(elf, td).run(msgs)
+                assert rc == 0, f"[{enc}] LSP 退出码 {rc}: {err[-300:]}"
+                by_id = {f["id"]: f for f in frames if "id" in f}
+                assert by_id[2]["result"] is None, \
+                    f"[{enc}] 越界列落到了下一行: {by_id[2]['result']}"
+                assert by_id[3]["result"] is not None \
+                    and by_id[3]["result"]["range"] == want, (enc, by_id[3])
+    else:
+        print("      SKIP lsp.lomt 那一半: 无 clang/WSL")
+    docs = {uri: CLAMP_SRC}
+    PY_LSP.handle({"method": "textDocument/didOpen",
+                   "params": {"textDocument": {"uri": uri, "text": CLAMP_SRC}}}, docs)
+    py = PY_LSP.handle({"jsonrpc": "2.0", "id": 2, "method": "textDocument/definition",
+                        "params": {"textDocument": {"uri": uri},
+                                   "position": {"line": 0, "character": far}}},
+                       docs)[0]["result"]
+    assert py is None, f"Python 一侧也越界了: {py}"
+    print("      越界列夹到行长（两边都回 null），正常位置的对照仍然回那次声明")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_lsp_test")
 

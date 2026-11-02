@@ -1317,12 +1317,18 @@ def test_java_dependency_autolinks() -> None:
     lcode = "\n".join(l for l in ltext.splitlines() if not l.lstrip().startswith(("#", "rem")))
     check("启动器不调用 wsl", not re.search(r"\bwsl(?!path)", lcode, re.I))
 
+    # The runtime ships with the toolchain; every Java closure needs it (the
+    # generated interface calls `jrt_uncaught` at the exception boundary).
+    (pkg / "share" / "loment" / "jrt" / "0.1.0").mkdir(parents=True, exist_ok=True)
+    (pkg / "share" / "loment" / "jrt" / "0.1.0" / "jrt.ll").write_bytes(
+        (ROOT / "loment" / "lib" / "jrt" / "jrt.ll").read_bytes())
     classes = lomjava.load_classes(ROOT / "tools/fixtures/java/com/example/MathLib.class")
     ir = proj / "deps" / "mathlib" / "mathlib.ll"
     lomjava.emit("mathlib", classes, ir, proj / "deps" / "mathlib" / "mathlib.lomt")
     (proj / "deps" / "mathlib" / "link.txt").write_text(
         "# lompi link v1\n"
-        f"ir mathlib.ll {hashlib.sha256(ir.read_bytes()).hexdigest()}\n",
+        f"ir mathlib.ll {hashlib.sha256(ir.read_bytes()).hexdigest()}\n"
+        "runtime jrt 0.1.0\n",
         encoding="utf-8", newline="\n")
     (proj / "app.lomt").write_text(
         "module app\nuse mathlib\n\nfn _start() {\n"
@@ -1397,7 +1403,7 @@ def test_java_dependency_autolinks() -> None:
     import loment_jrt
     check("jrt.ll 与 jrt.lomt 一致（不是手改的旧产物）",
           loment_jrt.main(["--check"]) == 0)
-    (pkg / "share" / "loment" / "jrt" / "0.1.0").mkdir(parents=True)
+    (pkg / "share" / "loment" / "jrt" / "0.1.0").mkdir(parents=True, exist_ok=True)
     (pkg / "share" / "loment" / "jrt" / "0.1.0" / "jrt.ll").write_bytes(
         (ROOT / "loment" / "lib" / "jrt" / "jrt.ll").read_bytes())
     proj2 = work / "proj2"

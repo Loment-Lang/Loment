@@ -2212,6 +2212,46 @@ def test_the_caret_lands_under_the_offending_character_after_wide_text():
     print("      CJK 前缀之后：caret 落在 `@` 下（按显示宽度对齐）")
 
 
+@test
+def test_the_caret_lands_under_the_offending_character_after_tabs():
+    """`#668`: 源行**原样回显**（tab 还是 tab），caret 行铺的是空格 —— tab 必须按 8 对齐。
+
+    与上一条同一个量（渲染前缀的终端宽度），只是前缀是 tab：终端把它展开到下一个 8 的
+    倍数，caret 必须走同样多列。修它的是 `utf8_cell`（`#477`），这条判据把 tab 那一半
+    单独钉住，免得以后又只测 CJK。
+    """
+    import unicodedata
+
+    def width(text: str) -> int:
+        w = 0
+        for ch in text:
+            if ch == "\t":
+                w += 8 - (w % 8)
+            elif unicodedata.combining(ch):
+                pass
+            elif unicodedata.east_asian_width(ch) in ("W", "F"):
+                w += 2
+            else:
+                w += 1
+        return w
+
+    src = "module m\nfn f() -> u32 {\n\t\tlet s: str = \"日本語\"; @ return 0;\n}\n"
+    _f, d = _check(src)
+    _rc, out = _render(d)
+    lines = out.splitlines()
+    row = [ln for ln in lines if "日本語" in ln]
+    caret = [ln for ln in lines if "^" in ln]
+    assert row and caret, out
+    body = row[0][row[0].index("|") + 2:]
+    assert body.startswith("\t\t"), f"源行没有原样回显 tab: {body!r}"
+    upto = body.index("@")
+    caret_body = caret[0][caret[0].index("|") + 2:]
+    lead = len(caret_body) - len(caret_body.lstrip(" "))
+    assert lead == width(body[:upto]), (
+        f"caret 前缀 {lead} 列，源码前缀（含两个 tab）显示宽度 {width(body[:upto])} 列")
+    print("      tab 前缀之后：caret 仍落在 `@` 下（tab 按 8 对齐）")
+
+
 def main() -> int:
     print(f"loment_err_test: {len(TESTS)} 条\n")
     bad = 0

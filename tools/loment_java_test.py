@@ -57,7 +57,15 @@ def _app_ir(tmp: Path, body: str) -> str:
 
 
 def _build_and_run_io(tmp: Path, libs: list[Path], app_src: str) -> tuple[int, bytes, bytes]:
-    """Build one app + N libraries; return (exit code, stdout, stderr)."""
+    """Build one app + N libraries; return (exit code, stdout, stderr).
+
+    `jrt.ll` is added once, like the build wrapper does for every closure: the
+    generated interface checks the exception slot at the boundary and calls into
+    the runtime, so the runtime is part of the product.
+    """
+    jrt = ROOT / "loment" / "lib" / "jrt" / "jrt.ll"
+    if jrt not in libs:
+        libs = list(libs) + [jrt]
     app_ll = tmp / "app.ll"
     app_ll.write_text(_app_ir(tmp, app_src), encoding="utf-8")
     merged = tmp / "merged.ll"
@@ -434,6 +442,94 @@ fn _start() {
         assert rc == 0, rc
         print(f"      Box[] + instanceof + cast -> 18 on "
               f"{'PE' if sys.platform == 'win32' else 'ELF'}")
+
+
+@test
+def test_string_builder_end_to_end():
+    """#1060: StringBuilder from jrt — append(int/long/String/char) and toString."""
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "deps" / "sblib").mkdir(parents=True)
+        jar = FIX.parent.parent / "sblib.jar"
+        ir, _iface = _emit(jar, "sblib", d / "deps" / "sblib")
+        jrt = ROOT / "loment" / "lib" / "jrt" / "jrt.ll"
+        rc, out, _err = _build_and_run_io(d, [ir, jrt], """module app
+use sblib
+
+fn _start() {
+    let n: i32 = sblib_run();
+    syscall4(60, (n - 7) as u64, 0, 0);
+}
+""")
+        assert rc == 0, rc
+        assert out == b"n=7,-3x" + bytes([10]), out
+        print(f"      StringBuilder -> {out!r}")
+
+
+@test
+def test_string_concat_through_invokedynamic():
+    """#1059: `+` on strings in a --release 17 class goes through
+    StringConcatFactory; the recipe is lowered to jrt StringBuilder calls."""
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "deps" / "concatlib").mkdir(parents=True)
+        jar = FIX.parent.parent / "concatlib.jar"
+        ir, _iface = _emit(jar, "concatlib", d / "deps" / "concatlib")
+        jrt = ROOT / "loment" / "lib" / "jrt" / "jrt.ll"
+        rc, out, _err = _build_and_run_io(d, [ir, jrt], """module app
+use concatlib
+
+fn _start() {
+    let n: i32 = concatlib_run();
+    syscall4(60, (n - 12) as u64, 0, 0);
+}
+""")
+        assert rc == 0, rc
+        assert out == b"a=7 b=-3 c=x" + bytes([10]), out
+        print(f"      invokedynamic concat -> {out!r}")
+
+
+@test
+def test_boxed_primitives():
+    """#1060: Integer/Long/Character boxes — `valueOf` allocates, `*Value()` reads."""
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "deps" / "boxlib").mkdir(parents=True)
+        jar = FIX.parent.parent / "boxlib.jar"
+        ir, _iface = _emit(jar, "boxlib", d / "deps" / "boxlib")
+        jrt = ROOT / "loment" / "lib" / "jrt" / "jrt.ll"
+        rc, out, _err = _build_and_run_io(d, [ir, jrt], """module app
+use boxlib
+
+fn _start() {
+    let n: i32 = boxlib_run();
+    syscall4(60, (n - 4) as u64, 0, 0);
+}
+""")
+        assert rc == 0, rc
+        assert out == b"7-3x" + bytes([10]), out
+        print(f"      boxed Integer/Long/Character -> {out!r}")
+
+
+@test
+def test_uncaught_exception_prints_and_exits_one():
+    """#1060: an exception nobody catches leaves the boundary loudly."""
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "deps" / "throwlib").mkdir(parents=True)
+        jar = FIX.parent.parent / "throwlib.jar"
+        ir, _iface = _emit(jar, "throwlib", d / "deps" / "throwlib")
+        rc, _out, err = _build_and_run_io(d, [ir], """module app
+use throwlib
+
+fn _start() {
+    let n: i32 = throwlib_run();
+    syscall4(60, n as u64, 0, 0);
+}
+""")
+        assert rc == 1, (rc, err)
+        assert err == b"Exception in thread main" + bytes([10]), err
+        print(f"      uncaught -> exit 1, stderr {err!r}")
 
 
 @test

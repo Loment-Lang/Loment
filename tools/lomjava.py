@@ -130,6 +130,8 @@ class ClassFile:
     #: 超类名（`java/lang/Object` 为 None）与直接接口名 —— 验证器的可见性要用。
     super_name: str | None = None
     interfaces: list = field(default_factory=list)
+    #: `BootstrapMethods`：[(method_handle 的 CP 下标, [静态参数 CP 下标])]。
+    bootstrap: list = field(default_factory=list)
 
 
 @dataclass
@@ -229,9 +231,21 @@ def parse_class(data: bytes) -> ClassFile:
         methods.append(Method(access, name, desc, code, max_stack, max_locals, exc,
                               frames))
 
+    bootstrap: list = []
+    for _ in range(r.u2()):
+        aname = _utf8(pool, r.u2())
+        length = r.u4()
+        body = r.take(length)
+        if aname == "BootstrapMethods":
+            br = Reader(body)
+            for _ in range(br.u2()):
+                mh = br.u2()
+                args = [br.u2() for _ in range(br.u2())]
+                bootstrap.append((mh, args))
+
     return ClassFile(_class_name(pool, this_class), methods, fields, pool,
                      _class_name(pool, super_idx) if super_idx else None,
-                     [_class_name(pool, i) for i in ifaces])
+                     [_class_name(pool, i) for i in ifaces], bootstrap)
 
 
 #: `StackMapTable` 的 verification_type_info 标签（JVMS §4.7.4）。
@@ -479,6 +493,7 @@ def _init_ops() -> None:
     _op(178, "getstatic", "h", 1); _op(179, "putstatic", "h", -1)
     _op(183, "invokespecial", "h", 0); _op(182, "invokevirtual", "h", 0)
     _op(170, "tableswitch", "sw", -1); _op(171, "lookupswitch", "sw", -1)
+    _op(186, "invokedynamic", "hh", 0)
     _op(191, "athrow", "", -1)
     _op(172, "ireturn", "", -1); _op(173, "lreturn", "", -1)
     _op(174, "freturn", "", -1); _op(175, "dreturn", "", -2)
@@ -518,6 +533,10 @@ def decode(code: bytes) -> list[Insn]:
             if i + 2 > len(code):
                 raise JavaError(f"truncated {name} at {off}")
             args = (code[i], struct.unpack_from(">b", code, i + 1)[0]); i += 2
+        elif fmt == "hh":
+            if i + 4 > len(code):
+                raise JavaError(f"truncated {name} at {off}")
+            args = (struct.unpack_from(">H", code, i)[0],); i += 4
         elif fmt == "sw":
             # 跳转表按 **4 字节对齐**（相对方法起始），padding 是 0..3 个 0 字节。
             while i % 4 != 0:
@@ -590,7 +609,7 @@ def methodref(pool: list, idx: int) -> tuple[str, str, str]:
     return cls, _utf8(pool, nat[1]), _utf8(pool, nat[2])
 
 
-def _delta(x: Insn, pool: list) -> int:
+def _delta(x: Insn, pool: list, bootstrap: list | None = None) -> int:
     name = _OPS[x.op][0]
     if name in ("invokestatic", "invokevirtual", "invokespecial", "invokeinterface"):
         _cls, _n, desc = methodref(pool, x.args[0])
@@ -599,10 +618,114 @@ def _delta(x: Insn, pool: list) -> int:
         if name != "invokestatic":
             delta -= 1          # `this` is an extra stack value
         return delta
+    if name == "invokedynamic":
+        params, ret, _pieces = indy_concat(pool, bootstrap or [], x.args[0])
+        return (0 if ret == "V" else 1) - len(params)
     return x.stack_delta
 
 
-def stack_heights(insns: list[Insn], pool: list, exc: list | None = None) -> dict[int, int]:
+def _raw_params(desc: str) -> list[str]:
+    """方法描述符的参数，**原样**保留（`C` 与 `I` 在这里分得开）。"""
+    out: list[str] = []
+    i = 1
+    while i < len(desc) and desc[i] != ")":
+        j = i
+        while j < len(desc) and desc[j] == "[":
+            j += 1
+        if j < len(desc) and desc[j] == "L":
+            j = desc.index(";", j) + 1
+        else:
+            j += 1
+        out.append(desc[i:j])
+        i = j
+    return out
+
+
+def _ir_of(raw: str) -> str:
+    c = raw[0]
+    if c == "J":
+        return "i64"
+    if c in "IZBCS":
+        return "i32"
+    if c in "L[":
+        return "ptr"
+    if c in "FD":
+        raise JavaError("float/double are not supported")
+    if c == "V":
+        return "void"
+    raise JavaError(f"bad descriptor {raw!r}")
+
+
+def indy_concat(pool: list, bootstrap: list, idx: int):
+    """解 `invokedynamic`：只认 `StringConcatFactory` 的两个入口。
+
+    返回 (参数描述符列表, 返回描述符, 片段表)。片段是 `("arg", i, desc)` 或
+    `("text", s)` —— 后者是 recipe 里的字面量与 `\\u0002` 引用的常量。
+    别的 bootstrap 一律 J003：这个子集不做方法句柄。
+    """
+    ent = pool[idx] if idx < len(pool) else None
+    if not ent or ent[0] != CP_INVOKE_DYNAMIC:
+        raise JavaError(f"J002: bad invokedynamic constant #{idx}")
+    bsm_idx, nat_idx = ent[1], ent[2]
+    nat = pool[nat_idx] if nat_idx < len(pool) else None
+    if not nat or nat[0] != CP_NAME_AND_TYPE:
+        raise JavaError(f"J002: invokedynamic #{idx}: bad name-and-type")
+    desc = _utf8(pool, nat[2])
+    params = _raw_params(desc)
+    ret = desc[desc.index(")") + 1:]
+    if bsm_idx >= len(bootstrap):
+        raise JavaError(f"J002: invokedynamic #{idx}: no bootstrap method")
+    mh_idx, arg_idx = bootstrap[bsm_idx]
+    mh = pool[mh_idx] if mh_idx < len(pool) else None
+    if not mh or mh[0] != CP_METHOD_HANDLE:
+        raise JavaError(f"J002: invokedynamic #{idx}: bad bootstrap handle")
+    ref = pool[mh[2]] if mh[2] < len(pool) else None
+    if not ref or ref[0] != CP_METHODREF:
+        raise JavaError(f"J002: invokedynamic #{idx}: bad bootstrap target")
+    cls = _class_name(pool, ref[1])
+    mname = _utf8(pool, pool[ref[2]][1])
+    if cls != "java/lang/invoke/StringConcatFactory":
+        raise JavaError(
+            f"J003: invokedynamic via {cls}.{mname}: method handles are not supported")
+    statics = []
+    for ai in arg_idx:
+        a = pool[ai] if ai < len(pool) else None
+        if a and a[0] == CP_STRING:
+            statics.append(_utf8(pool, a[1]))
+        else:
+            statics.append(None)
+    pieces: list = []
+    if mname == "makeConcat":
+        pieces = [("arg", i, params[i]) for i in range(len(params))]
+    elif mname == "makeConcatWithConstants":
+        if not statics or statics[0] is None:
+            raise JavaError(f"J002: invokedynamic #{idx}: no concat recipe")
+        recipe = statics[0]
+        ai = 0
+        nxt = 1
+        for ch in recipe:
+            if ch == "\x01":
+                if ai >= len(params):
+                    raise JavaError(f"J002: invokedynamic #{idx}: recipe has too many holes")
+                pieces.append(("arg", ai, params[ai]))
+                ai += 1
+            elif ch == "\x02":
+                if nxt >= len(statics) or statics[nxt] is None:
+                    raise JavaError(f"J002: invokedynamic #{idx}: missing recipe constant")
+                pieces.append(("text", statics[nxt]))
+                nxt += 1
+            else:
+                pieces.append(("text", ch))
+        if ai != len(params):
+            raise JavaError(f"J002: invokedynamic #{idx}: recipe leaves parameters unused")
+    else:
+        raise JavaError(
+            f"J003: StringConcatFactory.{mname} is not supported")
+    return params, ret, pieces
+
+
+def stack_heights(insns: list[Insn], pool: list, exc: list | None = None,
+                  bootstrap: list | None = None) -> dict[int, int]:
     """Compute the operand-stack height at every reachable instruction.
     Branches that disagree are rejected; this is a small verifier, not a guess.
     Exception handlers start with the thrown object on the stack (height 1).
@@ -621,7 +744,7 @@ def stack_heights(insns: list[Insn], pool: list, exc: list | None = None) -> dic
         height[off] = h
         x = by_off[off]
         name = _OPS[x.op][0]
-        after = h + _delta(x, pool)
+        after = h + _delta(x, pool, bootstrap)
         if after < 0:
             raise JavaError(f"operand stack underflow at {off}")
         nxt = off + x.size
@@ -966,6 +1089,12 @@ def _vstep(cf: ClassFile, m: Method, x: Insn, st: list, lc: list) -> list[int]:
     elif name == "arraylength":
         _vpop(st, T_REF, ctx, x.off)
         _vpush(st, T_I32, m, ctx, x.off)
+    elif name == "invokedynamic":
+        params, ret, _pieces = indy_concat(cf.pool, cf.bootstrap, x.args[0])
+        for raw in reversed(params):
+            _vpop(st, _vtype(_ir_of(raw), ctx), ctx, x.off)
+        if ret != "V":
+            _vpush(st, _vtype(_ir_of(ret), ctx), m, ctx, x.off)
     elif name == "athrow":
         _vpop(st, T_REF, ctx, x.off)
         return []
@@ -1309,6 +1438,13 @@ def _jrt_alloc_ir(module: str) -> str:
 @__jrt_off_{module} = internal global i32 0
 @__jrt_exc_{module} = internal global ptr zeroinitializer
 
+define internal i1 @__jl_exc_{module}() {{
+entry:
+  %x = load ptr, ptr @__jrt_exc_{module}
+  %n = icmp ne ptr %x, null
+  ret i1 %n
+}}
+
 define internal ptr @{sym}(i32 %n) {{
 entry:
   %o = load i32, ptr @__jrt_off_{module}
@@ -1321,13 +1457,29 @@ entry:
 '''
 
 
+#: 装箱：类名 -> (描述符字符, IR 类型, 取值方法)。盒子就是 +8 一个值，类号 0。
+_BOX = {
+    "java/lang/Integer": ("I", "i32", "intValue"),
+    "java/lang/Long": ("J", "i64", "longValue"),
+    "java/lang/Boolean": ("Z", "i32", "booleanValue"),
+    "java/lang/Byte": ("B", "i32", "byteValue"),
+    "java/lang/Short": ("S", "i32", "shortValue"),
+    "java/lang/Character": ("C", "i32", "charValue"),
+}
+
 _JRT_DECLS = """declare void @jrt_print_i32(i64, i32)
 declare void @jrt_println_i32(i64, i32)
 declare void @jrt_print_i64(i64, i64)
 declare void @jrt_println_i64(i64, i64)
 declare void @jrt_print_s(i64, ptr)
 declare void @jrt_println_s(i64, ptr)
-declare void @jrt_println(i64)"""
+declare void @jrt_println(i64)
+declare ptr @jrt_sb_new()
+declare void @jrt_sb_c(ptr, i32)
+declare void @jrt_sb_i32(ptr, i32)
+declare void @jrt_sb_i64(ptr, i64)
+declare void @jrt_sb_s(ptr, ptr)
+declare ptr @jrt_sb_str(ptr)"""
 
 
 def mangle(module: str, cls: str, name: str, desc: str) -> str:
@@ -1350,7 +1502,8 @@ class Emitter:
     def __init__(self, insns: list[Insn], heights: dict[int, int], max_stack: int,
                  params: list[str], param_slots: list[int], ret: str, pool: list,
                  module: str, own_class: str, registry: dict, metas: dict,
-                 class_ids: dict, globals_: list, exc: list | None = None):
+                 class_ids: dict, globals_: list, exc: list | None = None,
+                 bootstrap: list | None = None):
         self.insns = insns
         self.heights = heights
         self.max_stack = max_stack
@@ -1364,6 +1517,7 @@ class Emitter:
         self.metas = metas
         #: 对象的头 4 字节是类号（0 = 非 `new` 出来的东西：String、数组、异常垫片）。
         self.class_ids = class_ids
+        self.bootstrap = bootstrap or []
         self.globals = globals_
         self.exc = exc or []
         self.strn = 0
@@ -1898,20 +2052,26 @@ class Emitter:
             pass
         elif name == "new":
             cls = _class_name(self.pool, x.args[0])
-            meta = self.metas.get(cls)
-            if meta is not None:
-                size = meta.size
-            elif cls in ("java/lang/RuntimeException", "java/lang/Exception",
-                         "java/lang/Throwable"):
-                size = 8
+            if cls == "java/lang/StringBuilder":
+                # 运行期对象（jrt 管它的布局）；`<init>` 只做初值，见 invokespecial。
+                sb = self.t()
+                self.emit(f"{sb} = call ptr @jrt_sb_new()")
+                self._push("ptr", sb, h0)
             else:
-                raise JavaError(f"new {cls}: class is not in the linked set")
-            p = self.t()
-            self.emit(f"{p} = call ptr @{_alloc_sym(self.module)}(i32 {size})")
-            # 对象头的前 4 字节是类号 —— 虚分派就靠它（`String`/数组/异常垫片
-            # 不是 `new` 出来的，头是 0，不走分派）。
-            self.emit(f"store i32 {self.class_ids.get(cls, 0)}, ptr {p}")
-            self._push("ptr", p, h0)
+                meta = self.metas.get(cls)
+                if meta is not None:
+                    size = meta.size
+                elif cls in ("java/lang/RuntimeException", "java/lang/Exception",
+                             "java/lang/Throwable"):
+                    size = 8
+                else:
+                    raise JavaError(f"new {cls}: class is not in the linked set")
+                p = self.t()
+                self.emit(f"{p} = call ptr @{_alloc_sym(self.module)}(i32 {size})")
+                # 对象头的前 4 字节是类号 —— 虚分派就靠它（`String`/数组/异常垫片
+                # 不是 `new` 出来的，头是 0，不走分派）。
+                self.emit(f"store i32 {self.class_ids.get(cls, 0)}, ptr {p}")
+                self._push("ptr", p, h0)
         elif name in ("getstatic", "putstatic"):
             cls, fname, desc = fieldref(self.pool, x.args[0])
             # `System.out` / `System.err` are PrintStream objects in Java; here
@@ -1982,6 +2142,31 @@ class Emitter:
                     raise JavaError(
                         f"PrintStream.{mname}{desc} is not supported yet "
                         f"(only int, long, String, and println())")
+            elif cls in _BOX and mname == _BOX[cls][2] and desc == f"(){_BOX[cls][0]}":
+                q = self.t()
+                v = self.t()
+                self.emit(f"{q} = getelementptr i8, ptr {recv}, i32 8")
+                self.emit(f"{v} = load {_BOX[cls][1]}, ptr {q}")
+                self._push(_BOX[cls][1], v, h0 - n - 1)
+            elif cls == "java/lang/StringBuilder" and mname == "append":
+                if n != 1:
+                    raise JavaError(f"StringBuilder.append{desc} is not supported yet")
+                if desc == "(C)Ljava/lang/StringBuilder;":
+                    self.emit(f"call void @jrt_sb_c(ptr {recv}, i32 {vals[0]})")
+                elif params[0] == "i32":
+                    self.emit(f"call void @jrt_sb_i32(ptr {recv}, i32 {vals[0]})")
+                elif params[0] == "i64":
+                    self.emit(f"call void @jrt_sb_i64(ptr {recv}, i64 {vals[0]})")
+                elif params[0] == "ptr":
+                    self.emit(f"call void @jrt_sb_s(ptr {recv}, ptr {vals[0]})")
+                else:
+                    raise JavaError(f"StringBuilder.append{desc} is not supported yet")
+                self._push("ptr", recv, h0 - n - 1)
+            elif (cls == "java/lang/StringBuilder" and mname == "toString"
+                  and desc == "()Ljava/lang/String;"):
+                r = self.t()
+                self.emit(f"{r} = call ptr @jrt_sb_str(ptr {recv})")
+                self._push("ptr", r, h0 - n - 1)
             elif cls in self.registry:
                 self._virtual_call(x, cls, mname, desc, recv, params, ret, vals, h0)
             elif cls == "java/lang/String" and mname == "equals" and desc == "(Ljava/lang/Object;)Z":
@@ -2009,6 +2194,19 @@ class Emitter:
             self._check_exc(x)
         elif name == "invokespecial":
             cls, mname, desc = methodref(self.pool, x.args[0])
+            if cls == "java/lang/StringBuilder" and mname == "<init>":
+                params0, _r0 = parse_method_descriptor(desc)
+                if not params0:
+                    self._pop("ptr", h0 - 1)
+                elif params0[0] == "ptr":
+                    a0 = self._pop("ptr", h0 - 1)
+                    recv0 = self._pop("ptr", h0 - 2)
+                    self.emit(f"call void @jrt_sb_s(ptr {recv0}, ptr {a0})")
+                else:
+                    raise JavaError(
+                        f"StringBuilder.<init>{desc} is not supported yet")
+                self._check_exc(x)
+                return
             if mname == "<init>" and cls == "java/lang/Object":
                 self._pop("ptr", h0 - 1)
                 return
@@ -2181,6 +2379,19 @@ class Emitter:
                     raise JavaError(f"Math.{mname}{desc} is not supported yet")
                 self._check_exc(x)
                 return
+            if cls in _BOX and mname == "valueOf":
+                code, irty, _get = _BOX[cls]
+                if desc != f"({code})L{cls};":
+                    raise JavaError(f"boxing {cls}.valueOf{desc} is not supported")
+                v = self._pop(irty, h0 - 1)
+                p = self.t()
+                self.emit(f"{p} = call ptr @{_alloc_sym(self.module)}(i32 16)")
+                q = self.t()
+                self.emit(f"{q} = getelementptr i8, ptr {p}, i32 8")
+                self.emit(f"store {irty} {v}, ptr {q}")
+                self._push("ptr", p, h0 - 1)
+                self._check_exc(x)
+                return
             if cls not in self.registry:
                 raise JavaError(
                     f"invokestatic {cls}.{mname}{desc}: class is not in the linked set")
@@ -2202,6 +2413,33 @@ class Emitter:
                 r = self.t()
                 self.emit(f"{r} = call {ret} @{sym}({argtxt})")
                 self._push(ret, r, h0 - n)
+            self._check_exc(x)
+        elif name == "invokedynamic":
+            raw_params, _ret_raw, pieces = indy_concat(
+                self.pool, self.bootstrap, x.args[0])
+            n = len(raw_params)
+            vals = [""] * n
+            for i in range(n - 1, -1, -1):
+                vals[i] = self._pop(_ir_of(raw_params[i]), h0 - n + i)
+            sb = self.t()
+            self.emit(f"{sb} = call ptr @jrt_sb_new()")
+            for piece in pieces:
+                if piece[0] == "arg":
+                    raw = piece[2]
+                    if raw == "C":
+                        self.emit(f"call void @jrt_sb_c(ptr {sb}, i32 {vals[piece[1]]})")
+                    elif _ir_of(raw) == "i32":
+                        self.emit(f"call void @jrt_sb_i32(ptr {sb}, i32 {vals[piece[1]]})")
+                    elif _ir_of(raw) == "i64":
+                        self.emit(f"call void @jrt_sb_i64(ptr {sb}, i64 {vals[piece[1]]})")
+                    else:
+                        self.emit(f"call void @jrt_sb_s(ptr {sb}, ptr {vals[piece[1]]})")
+                else:
+                    for ch in piece[1]:
+                        self.emit(f"call void @jrt_sb_c(ptr {sb}, i32 {ord(ch)})")
+            r = self.t()
+            self.emit(f"{r} = call ptr @jrt_sb_str(ptr {sb})")
+            self._push("ptr", r, h0 - n)
             self._check_exc(x)
         elif name == "athrow":
             e = self._pop("ptr", h0 - 1)
@@ -2238,7 +2476,8 @@ class Emitter:
 
 def emit_method_ir(module: str, cls: str, m: Method, pool: list,
                    registry: dict, metas: dict, class_ids: dict,
-                   globals_: list) -> tuple[str, str, str] | None:
+                   globals_: list,
+                   bootstrap: list | None = None) -> tuple[str, str, str] | None:
     is_static = bool(m.access & ACC_STATIC)
     is_ctor = m.name == "<init>"
     is_clinit = m.name == "<clinit>"
@@ -2260,7 +2499,8 @@ def emit_method_ir(module: str, cls: str, m: Method, pool: list,
     if len(params) > 8:
         raise JavaError(f"{cls}.{m.name}: more than 8 parameters")
     insns = decode(m.code)
-    heights = stack_heights(insns, pool, m.exc)
+    cf_bootstrap = bootstrap or []
+    heights = stack_heights(insns, pool, m.exc, cf_bootstrap)
     sym = mangle(module, cls, m.name, m.desc)
     slots = []
     slot = 0                         # `this` (when present) is local slot 0
@@ -2268,7 +2508,7 @@ def emit_method_ir(module: str, cls: str, m: Method, pool: list,
         slots.append(slot)
         slot += 2 if t == "i64" else 1
     em = Emitter(insns, heights, m.max_stack, params, slots, ret, pool, module, cls,
-                 registry, metas, class_ids, globals_, m.exc)
+                 registry, metas, class_ids, globals_, m.exc, cf_bootstrap)
     body = em.run()
     def irty(t: str) -> str:
         return "void" if t == "void" else t
@@ -2328,7 +2568,7 @@ def emit(module: str, classes: list[ClassFile], ir_path: Path,
     for cf in classes:
         for m in cf.methods:
             got = emit_method_ir(module, cf.name, m, cf.pool, registry, metas,
-                                 class_ids, globals_)
+                                 class_ids, globals_, cf.bootstrap)
             if got is None:
                 continue
             sym, text, name, is_static = got
@@ -2359,7 +2599,10 @@ def emit(module: str, classes: list[ClassFile], ir_path: Path,
             f"J002: the generated IR is over {MAX_IR_BYTES} bytes (resource cap)")
     ir_path.write_text(ir_text, encoding="utf-8", newline="\n")
 
-    decls = [f"extern fn {init_sym}();"]
+    exc_fn = f"__jl_exc_{module}"
+    decls = [f"extern fn {init_sym}();",
+             f"extern fn {exc_fn}() -> bool;",
+             "extern fn jrt_uncaught();"]
     bodies: list[str] = []
     used: set[str] = set()
     multi = len(classes) > 1
@@ -2393,7 +2636,11 @@ def emit(module: str, classes: list[ClassFile], ir_path: Path,
         if ret == "void":
             bodies.append(f"    {sym}({call});")
         else:
-            bodies.append(f"    return {sym}({call});")
+            bodies.append(f"    let r: {ret} = {sym}({call});")
+        # 未捕获的异常走到边界就打印并退出 —— 而不是带着一个默认值悄悄返回。
+        bodies.append(f"    if {exc_fn}() {{ jrt_uncaught(); }}")
+        if ret != "void":
+            bodies.append("    return r;")
         bodies.append("}")
         bodies.append("")
     lines = [f"module {module}", ""] + bodies + decls

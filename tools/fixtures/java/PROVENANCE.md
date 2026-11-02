@@ -71,3 +71,14 @@ with an override in each subclass; `SwitchLib` has one dense switch
 ```
 b95df01d513e8cfe56249a208f72c865913f9dbb988d1e53c16bec32b2a98cdb  castlib.jar
 ```
+
+Runtime pieces (#1060), same `javac 23`:
+
+```
+# --release 8: StringBuilder calls, no invokedynamic
+65180b143db28bd20414ede60b498ce6ffac11f8719ff38fa831fe03f509693c  sblib.jar
+3e33d5839853b7a1061573a042387f0ea62d2bb62fb4940ddf289eba2962e848  throwlib.jar
+# --release 17: `+` becomes invokedynamic (StringConcatFactory), boxes via valueOf
+4e9dea923423550d38053e00d16ca95993ce4dd1d3c83a9f30eca35bc79b027d  concatlib.jar
+20751afefaaead43b34481670eb15b0a84efd95524c48e35d0b46f4415fec428  boxlib.jar
+```

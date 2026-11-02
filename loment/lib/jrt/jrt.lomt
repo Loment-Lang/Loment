@@ -230,3 +230,144 @@ pub fn jrt_println(fd: i64) {
     store8(b, 0, 10 as u8);
     wr(fd, b, 1);
 }
+
+// ---------------------------------------------------------------- StringBuilder
+//
+// 布局（与 AOT 侧约定）：
+//
+//   +0   i32  已用（UTF-16 单元数）
+//   +4   i32  容量（单元数）
+//   +8   ptr  数据
+//
+// `jrt_sb_str` 产出的 String 与 `ldc` 产的形状一致：+8 数据、+16 长度。数据是
+// **拷出去**的 —— toString() 之后还可以继续 append。
+
+fn st32(p: ptr, off: u32, v: u32) {
+    store8(p, off, (v & 255) as u8);
+    store8(p, off + 1, ((v >> 8) & 255) as u8);
+    store8(p, off + 2, ((v >> 16) & 255) as u8);
+    store8(p, off + 3, ((v >> 24) & 255) as u8);
+}
+
+fn st64(p: ptr, off: u32, v: u64) {
+    st32(p, off, (v & 4294967295) as u32);
+    st32(p, off + 4, (v >> 32) as u32);
+}
+
+fn sb_grow(sb: ptr, need: u32) {
+    let len: u32 = ld32(sb, 0);
+    let cap: u32 = ld32(sb, 4);
+    let want: u32 = len + need;
+    if want > cap {
+        let nc: u32 = cap;
+        while nc < want {
+            nc = nc * 2;
+        }
+        let old: ptr = ld64(sb, 8) as ptr;
+        let nb: ptr = jrt_alloc(nc * 2);
+        let _c: u32 = copy8(nb, 0, old, 0, len * 2);
+        st64(sb, 8, nb as u64);
+        st32(sb, 4, nc);
+    }
+}
+
+fn sb_put(sb: ptr, ch: u32) {
+    sb_grow(sb, 1);
+    let len: u32 = ld32(sb, 0);
+    let buf: ptr = ld64(sb, 8) as ptr;
+    store8(buf, len * 2, (ch & 255) as u8);
+    store8(buf, len * 2 + 1, ((ch >> 8) & 255) as u8);
+    st32(sb, 0, len + 1);
+}
+
+/// 十进制数字（无符号）追加到 builder —— 先倒着进暂存，再正着写。
+fn sb_mag(sb: ptr, mag: u64) {
+    if mag == 0 {
+        sb_put(sb, 48);
+    } else {
+        let buf: ptr = jrt_alloc(32);
+        let n: u32 = 0;
+        let v: u64 = mag;
+        while v > 0 {
+            store8(buf, n, ((48 as u64) + (v % 10)) as u8);
+            n = n + 1;
+            v = v / 10;
+        }
+        while n > 0 {
+            n = n - 1;
+            sb_put(sb, load8(buf, n) as u32);
+        }
+    }
+}
+
+pub fn jrt_sb_new() -> ptr {
+    let sb: ptr = jrt_alloc(16);
+    let cap: u32 = 32;
+    let buf: ptr = jrt_alloc(cap * 2);
+    st32(sb, 0, 0);
+    st32(sb, 4, cap);
+    st64(sb, 8, buf as u64);
+    return sb;
+}
+
+pub fn jrt_sb_c(sb: ptr, ch: i32) {
+    sb_put(sb, ch as u32);
+}
+
+pub fn jrt_sb_i32(sb: ptr, v: i32) {
+    if v < 0 {
+        sb_put(sb, 45);
+        sb_mag(sb, (0 - (v as i64)) as u64);
+    } else {
+        sb_mag(sb, v as u64);
+    }
+}
+
+pub fn jrt_sb_i64(sb: ptr, v: i64) {
+    if v < 0 {
+        sb_put(sb, 45);
+        sb_mag(sb, (0 - v) as u64);
+    } else {
+        sb_mag(sb, v as u64);
+    }
+}
+
+pub fn jrt_sb_s(sb: ptr, s: ptr) {
+    if (s as u64) != 0 {
+        let src: ptr = ld64(s, 8) as ptr;
+        let n: u32 = ld32(s, 16);
+        let i: u32 = 0;
+        while i < n {
+            sb_grow(sb, 1);
+            let len: u32 = ld32(sb, 0);
+            let buf: ptr = ld64(sb, 8) as ptr;
+            store8(buf, len * 2, load8(src, i * 2) as u8);
+            store8(buf, len * 2 + 1, load8(src, i * 2 + 1) as u8);
+            st32(sb, 0, len + 1);
+            i = i + 1;
+        }
+    }
+}
+
+/// 未捕获的 Java 异常：一行消息到 stderr，退出码 1。
+///
+/// 没有栈回溯，也没有异常类名 —— 这个子集里异常不携带类型信息（见 docs/282 状态行）。
+pub fn jrt_uncaught() {
+    wr(2, str_ptr("Exception in thread main"), str_len("Exception in thread main"));
+    let nl: ptr = jrt_alloc(4);
+    store8(nl, 0, 10 as u8);
+    wr(2, nl, 1);
+    syscall4(60, 1, 0, 0);
+}
+
+pub fn jrt_sb_str(sb: ptr) -> ptr {
+    let len: u32 = ld32(sb, 0);
+    let bytes: u32 = len * 2;
+    let buf: ptr = jrt_alloc(bytes + 2);
+    let src: ptr = ld64(sb, 8) as ptr;
+    let _c: u32 = copy8(buf, 0, src, 0, bytes);
+    let s: ptr = jrt_alloc(24);
+    st64(s, 8, buf as u64);
+    st32(s, 16, len);
+    return s;
+}

@@ -283,6 +283,76 @@ def test_unknown_code_is_said_out_loud():
 
 
 @test
+def test_codes_outside_the_catalogue_are_never_minted():
+    """`#662` / `#667`: 码的形状不对时，**不许**归口重写成一个像真码的假码。
+
+    * `34`（没有 `E`）—— 原先解成 34，`em_code` 印成 `E034`，而 E034 不在码表里；
+    * `E4294967298` —— 数字在 `u32` 里回绕成 2，卡片、标题、汇总全按 E002 出，读者
+      拿到的是**另一条规则的建议**。这比"未知"糟得多：它看着非常确定。
+
+    两条都必须走"未知码"那条路：原样印码、标题说不知道、汇总写 `E?`。
+    """
+    for code, fake in (("34", "E034"), ("E4294967298", "E002"), ("E0", "E000")):
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td) / "d.jsonl"
+            d.write_text(json.dumps({"file": "x.lomt", "line": 1, "col": 1,
+                                     "code": code, "message": "m"}) + "\n",
+                         encoding="utf-8", newline="\n")
+            rc, out = _render(d)
+        assert rc == 1, (code, rc, out[:200])
+        assert f"error[{code}]" in out, f"码要原样印出来: {out[:120]!r}"
+        assert "unknown error code" in out, f"{code}: 没说不知道: {out[:200]!r}"
+        assert fake not in out, f"{code}: 被归口成了真码 {fake}: {out[-200:]!r}"
+        assert "E?" in out, f"{code}: 汇总不该给它编一个码: {out[-200:]!r}"
+    print("      码的形状不对（无 E / 过长 / 零）: 一律未知，不编 E0NN")
+
+
+@test
+def test_a_column_without_a_line_never_looks_like_a_line():
+    """`#664`: `line: 0` + `col: 12` 原先渲染成 `--> x.lomt:12` —— 与"第 12 行"同形。
+
+    没有行号的列在这里没有意义（编译器自己也没说那在第几行）。`--short` 同一条纪律。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td) / "d.jsonl"
+        d.write_text(json.dumps({"file": "x.lomt", "line": 0, "col": 12,
+                                 "code": "E002", "message": "m"}) + "\n",
+                     encoding="utf-8", newline="\n")
+        rc, out = _render(d)
+        assert rc == 1, (rc, out)
+        assert "--> x.lomt\n" in out, f"没有行号时只印文件名: {out[:160]!r}"
+        assert "x.lomt:12" not in out, f"列冒充成了行号: {out[:160]!r}"
+        rc2, short = _render(d, "--short")
+        assert rc2 == 1 and "x.lomt: error[E002]" in short, short[:160]
+    print("      没有行号时，列不再冒充行号（完整 / --short 两处）")
+
+
+@test
+def test_a_diagnostics_path_that_is_not_a_regular_file_is_refused():
+    """`#660` / `#661`: 不是普通文件的路径要**报出来并退 2**，不当空文件、也不挂住。
+
+    目录在 Linux 上**能 open**、读才失败 —— 原实现把那次失败读成"零条诊断"，于是报
+    `[OK] no diagnostics` 并退 0（编译可能刚失败）。FIFO 更糟：**open 就阻塞**，整个
+    报错器一声不响地挂住。两者都在 open 之前 stat 一次挡住。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td) / "out.jsonl"
+        d.mkdir()
+        rc, out = _run_in(Path(td), d)
+        assert rc == 2, (rc, out[:200])
+        assert "not a regular file" in out, out[:200]
+        # 不存在的路径仍走原来那句（既有文案与判据都没动）
+        rc2, out2 = _run_in(Path(td), Path(td) / "missing.jsonl")
+        assert rc2 == 2 and "cannot open" in out2, (rc2, out2[:200])
+        if hasattr(os, "mkfifo"):
+            f = Path(td) / "w.jsonl"
+            os.mkfifo(f)                      # 不给 writer：老实现会在这里挂到超时
+            rc3, out3 = _run_in(Path(td), f)
+            assert rc3 == 2 and "not a regular file" in out3, (rc3, out3[:200])
+    print("      目录 / FIFO / 不存在的路径：各自报出来并退 2，不挂住")
+
+
+@test
 def test_broken_line_is_echoed_not_skipped():
     """诊断文件里混进非 JSON 行: **原样打出来**并计数, 不跳过。
 
@@ -861,8 +931,11 @@ def test_short_mode_is_one_line_per_diagnostic():
         src = Path(td) / "bad.lomt"
         src.write_text(SEMANTIC, encoding="utf-8", newline="\n")
         d = Path(td) / "d.jsonl"
+        # 第三条：消息里带 `\r`（`#669`）。只折 `\n` 不够 —— CR 会把光标送回行首，
+        # 后半句盖掉 `file:line:` 前缀，"一行一条"当场破掉。
         rows = [{"file": "a.lomt", "line": 3, "col": 7, "code": "E002", "message": "x\ny"},
-                {"file": "b.lomt", "line": 9, "col": 0, "code": "E019", "message": "z"}]
+                {"file": "b.lomt", "line": 9, "col": 0, "code": "E019", "message": "z"},
+                {"file": "c.lomt", "line": 2, "col": 1, "code": "E002", "message": "p\rq"}]
         d.write_text("\n".join(json.dumps(r) for r in rows) + "\n",
                      encoding="utf-8", newline="\n")
         rc, out = _run_in(Path(td), d, "--short", color=True)
@@ -871,9 +944,10 @@ def test_short_mode_is_one_line_per_diagnostic():
     assert lines[0] == "a.lomt:3:7: error[E002]: x y", f"短格式不对: {lines[0]!r}"
     # col=0 是"编译器只给了行号"（check() 的语义错就是这样），那时不该硬编一个列出来
     assert lines[1] == "b.lomt:9: error[E019]: z", f"没列时不该印列: {lines[1]!r}"
-    assert lines[2] == "2 errors: E002 x1, E019 x1", f"短模式不给汇总: {lines[2]!r}"
-    assert lines[3] == "more: loment explain E002 E019", f"没有 explain 指针: {lines[3]!r}"
-    assert len(lines) == 4, f"两条诊断 + 汇总 + 指针 = 4 行, 得到 {len(lines)} 行: {out!r}"
+    assert lines[2] == "c.lomt:2:1: error[E002]: p q", f"CR 没折成空格: {lines[2]!r}"
+    assert lines[3] == "3 errors: E002 x2, E019 x1", f"短模式不给汇总: {lines[3]!r}"
+    assert lines[4] == "more: loment explain E002 E019", f"没有 explain 指针: {lines[4]!r}"
+    assert len(lines) == 5, f"三条诊断 + 汇总 + 指针 = 5 行, 得到 {len(lines)} 行: {out!r}"
     assert "\x1b" not in out, f"--short 不该上色 (管道里要能 grep): {out[:120]!r}"
     print("      --short: 一行一条 + 换行折空格 + 顺带关色 + 末尾汇总与 explain 指针")
 

@@ -100,6 +100,12 @@ const C_WANTVER: u32 = 64932;    // 命令行上要的是 `version` 而不是一
 const C_ROW: u32 = 64544;
 const ROW_STRIDE: u32 = 192;
 const NAME_MAX: u32 = 47;
+//: `newfstatat` 的 `struct stat` 暂存（x86-64 上 144 字节；只读 `st_mode`，偏移 24）。
+//: 放在 `C_MAX`/`C_WANTVER` 之后、`CTX_CAP` 之前那段空地上。
+const C_STB: u32 = 64960;
+const S_IFMT: u32 = 61440;
+const S_IFREG: u32 = 32768;
+const STAT_NONE: u32 = 4294967295;
 
 //: `scr` 里留给"扫 argv 扫出来的那个路径"的一段。open_ro 自己用 scr[0..4001]，
 //: 所以这一段必须从它后面起 —— 扫完再调 open_ro 把它抄到前面去。
@@ -172,6 +178,7 @@ const S_SUM_X: u32 = 33;         // 汇总里 " x2" 那个 x
 const S_SUM1: u32 = 57;          // 同上，但只有**一条**（英文要单数，`#487`）
 const S_BADLINE_J: u32 = 58;     // `--json` 里那条坏行的 note（`#478`）
 const S_CUT: u32 = 59;           // `--short` / `--json` 的截断标记（`#485`）
+const S_NOTFILE: u32 = 60;       // 诊断文件那条路径不是普通文件（目录 / FIFO / 设备）
 // 候选**是什么** —— 抄 rustc 的 "a local variable with a similar name exists"。
 // 只说一个名字，用户还得自己去找它在哪、是干什么的；说了种类，一眼就知道该不该照它改。
 const S_KIND_FN: u32 = 38;
@@ -262,6 +269,9 @@ fn ui_en(k: u32) -> str {
     if k == 57 { return " error: "; }
     if k == 58 { return "this line in the diagnostics file is not valid JSON"; }
     if k == 59 { return " [truncated]"; }
+    // 目录能被 open、FIFO 会在 open 上阻塞 —— 所以在 open 之前 stat。说清"不是文件"，
+    // 而不是把它当成一份空诊断（那会让一份编译失败的运行报 `[OK] no diagnostics`，`#661`）。
+    if k == 60 { return "lomenterr: the diagnostics path is not a regular file\n"; }
     if k == 34 { return "lomenterr: cannot open the diagnostics file\n"; }
     if k == 35 { return "there is no `./deps` directory here, so layer 1 cannot find anything: layer 1 is `<project root>/deps/<name>/<name>.lomt`. Create that file, or name the location with the path form `use \"./x.lomt\"`.\n"; }
     if k == 36 { return "`./deps` is here; the closest names in it are:\n"; }
@@ -326,6 +336,7 @@ fn ui_zh(k: u32) -> str {
     if k == 57 { return " 条错误："; }   // 中文不分数，与 k == 32 相同
     if k == 58 { return "诊断文件里的这一行不是合法 JSON"; }
     if k == 59 { return " [已截断]"; }
+    if k == 60 { return "lomenterr: 诊断文件那条路径不是普通文件\n"; }
     if k == 34 { return "lomenterr: 打不开诊断文件\n"; }
     if k == 35 { return "这里没有 `./deps` 目录 —— 第 1 层找的是「项目根」下的 `deps/<名字>/<名字>.lomt`，所以它找不到任何东西。补那个文件，或者用路径形式 `use \"./x.lomt\"` 指明位置。\n"; }
     if k == 36 { return "`./deps` 在这里，里面最接近的名字有:\n"; }
@@ -565,6 +576,20 @@ fn sys_alloc(n: u64) -> u64 {
         return 0;
     }
     return cur as u64;
+}
+
+/// `newfstatat` 的 `st_mode` 掩成文件类型位。`STAT_NONE` = 问不到。
+///
+/// **为什么报错器要 stat**（`#660` / `#661`）：诊断文件那条路径是什么，决定了能不能打开。
+/// 目录在 Linux 上能 open、读才失败，于是"读不到"被当成"空文件"，报 `[OK] no diagnostics` 并
+/// 退 0；FIFO 则在 **open** 上就阻塞，整个报错器一声不响地挂住。两者在 open 之前 stat 一次
+/// 就都挡住了。`newfstatat` 本来就在这 8 个跨平台 syscall 里（`lomcli` 用的同一套）。
+fn stat_mode(p: ptr, stb: ptr) -> u32 {
+    let r: i64 = syscall4(262, (0 as u64) - 100, p as u64, stb as u64);
+    if r < 0 {
+        return STAT_NONE;
+    }
+    return load32(stb, 24) & S_IFMT;
 }
 
 fn read_all(fd: u64, buf: ptr, cap: u64) -> u64 {
@@ -994,22 +1019,34 @@ fn after_visible(src: ptr, s: u32, n: u32) -> u32 {
 
 /// "E022" -> 22。取不出数字就是 0 (调用方据此走"未知码"那条,**不静默**)。
 fn code_num(ctx: ptr, off: u32, n: u32) -> u32 {
+    // 只认 `E` + 1..3 位数字（`E002`，大小写都收）。别的形状一律当"解不出"（返回 0）：
+    //
+    //   * `34`（没有 `E`）—— 原先会解成 34，**正好撞上真实的 E034**，于是渲染出一张
+    //     跟这条诊断毫无关系的卡片（`#662`）；
+    //   * `E4294967298` —— 数字在 u32 里回绕成 2，索到 E002 的卡片上（`#667`）。
+    //
+    // 判据是**形状**而不是"今天码表到几"：渲染器不该知道码表的上界，多一个码不该改这里。
     let v: u32 = 0;
-    let got: u32 = 0;
+    let nd: u32 = 0;
+    let saw_e: u32 = 0;
     let i: u32 = 0;
     while i < n {
         let c: u32 = load8(ctx, off + i);
-        if c >= 48 && c <= 57 {
-            v = v * 10 + (c - 48);
-            got = 1;
+        if i == 0 && (c == 69 || c == 101) {
+            saw_e = 1;
         } else {
-            if got == 1 {
-                return v;
+            if c < 48 || c > 57 {
+                return 0;
             }
+            nd = nd + 1;
+            if nd > 3 {
+                return 0;
+            }
+            v = v * 10 + (c - 48);
         }
         i = i + 1;
     }
-    if got == 0 {
+    if saw_e == 0 || nd == 0 || v == 0 {
         return 0;
     }
     return v;
@@ -1048,6 +1085,14 @@ fn src_ensure(ctx: ptr, sr: ptr, sc: ptr, plen: u32) -> u32 {
     let pv: u32 = load32(ctx, C_PREVLEN);
     if pv == plen && bytes_eq(ptr_add(ctx, C_PREV), pv, ptr_add(ctx, C_PATH), plen) == true {
         return 1;
+    }
+    // 源路径也可能不是普通文件（`#660`）：FIFO 会在 open 上阻塞，设备读不到头。与诊断文件
+    // 同一条纪律 —— 不是普通文件就当"读不到源"，照常出头/位置/建议，只是没有源码那两行。
+    let smode: u32 = stat_mode(ptr_add(ctx, C_PATH), ptr_add(ctx, C_STB));
+    if smode != STAT_NONE && smode != S_IFREG {
+        store32(ctx, C_SRCLEN, 0);
+        store32(ctx, C_PREVLEN, 0);
+        return 0;
     }
     let fd: i64 = open_ro(ptr_add(ctx, C_PATH), plen, sc);
     if fd < 0 {
@@ -1124,7 +1169,9 @@ fn h_loc(ctx: ptr, o: u32, line: u32, col: u32, w: u32, plen: u32) -> u32 {
         o = em_byte(ctx, o, COLON);
         o = em_u32(ctx, o, line);
     }
-    if col > 0 {
+    // **列只在有行号时才印**（`#664`）：`line == 0` 而 `col == 12` 时，`file:12` 与"第 12 行"
+    // 逐字节同形 —— 编辑器会跳到编译器从没说过的那一行。没有行号的列在这里没有意义。
+    if col > 0 && line > 0 {
         o = em_byte(ctx, o, COLON);
         o = em_u32(ctx, o, col);
     }
@@ -2063,7 +2110,8 @@ fn rec_short(ctx: ptr, line: u32, col: u32, mlen: u32, plen: u32, clen: u32, mtr
     }
     // `col == 0` = 编译器只给了行号（`check()` 的语义诊断都是这样）。**那时不印列** ——
     // 与 `h_loc` 同一条纪律：`x.lomt:9:0:` 会让编辑器按第 0 列跳，那是编出来的位置。
-    if col > 0 {
+    // 反过来（`#664`）：没有行号时列也不印 —— 否则 `file:12` 看起来就是第 12 行。
+    if col > 0 && line > 0 {
         o = em_byte(ctx, o, COLON);
         o = em_u32(ctx, o, col);
     }
@@ -2077,7 +2125,9 @@ fn rec_short(ctx: ptr, line: u32, col: u32, mlen: u32, plen: u32, clen: u32, mtr
     let m: u32 = 0;
     while m < mlen {
         let c: u32 = load8(ctx, C_MSG + m);
-        if c == NL {
+        // `\r` 与 `\n` **同样**折成空格（`#669`）：只折 `\n` 时，一条消息里的 CR 会把光标
+        // 送回行首，后半句盖掉 `file:line:` 前缀 —— "一行一条"这个承诺当场破掉。
+        if c == NL || c == CR {
             o = em_byte(ctx, o, SP);
         } else {
             o = em_byte(ctx, o, c);
@@ -2847,6 +2897,13 @@ fn _start() -> u32 {
     }
     let ap: ptr = ptr_add(sc, (av >> 32) as u32);
     let an: u32 = (av % 4294967296) as u32;
+    // `#660` / `#661`：目录能 open、读才失败（会被当成空文件而报 `[OK]`），FIFO 在 open 上
+    // 直接阻塞。**open 之前 stat 一次**，两者都在这里挡住。stat 问不到（`STAT_NONE`）就
+    // 不拦 —— 交给 open 自己报 `cannot open`，那条既有文案与判据都还在。
+    let dmode: u32 = stat_mode(ap, ptr_add(ctx, C_STB));
+    if dmode != STAT_NONE && dmode != S_IFREG {
+        return fail(ui(ctx, S_NOTFILE));
+    }
     let fd: i64 = open_ro(ap, an, sc);
     if fd < 0 {
         return fail(ui(ctx, S_NOOPEN));

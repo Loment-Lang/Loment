@@ -9876,7 +9876,19 @@ def main(argv: list[str] | None = None) -> int:
         write_diags(args.diag_out, [diag_record(path, 0, 0, msg)])
         return 1
 
-    errs = check(mod, deps=deps)
+    try:
+        errs = check(mod, deps=deps)
+    except LomError as e:
+        # `#655`：`check()` **自己会抛**（`RecursionError` 就被它转成一条 `LomError`，
+        # 见 `_RECURSION_FLOOR` 上面那段），而 `main` 只护住了 `load_unit` 与 `emit_*` ——
+        # 于是编译器为这种情况写好的那句话被 Python 栈盖掉，`--diag-out` 还是空的：
+        # 编辑器与 CI 看到的是"编译失败、零条诊断"。
+        #
+        # 位置确实不知道（消息本身就是"太深了"），所以照 `E028` 那一档的口径写 `line` 0，
+        # 而不是不写 —— 不写就是上面那个空文件。
+        print(f"[ERR] {path}: {e}", file=sys.stderr)
+        write_diags(args.diag_out, [diag_record(path, e.line, e.col, e.msg)])
+        return 1
     if errs:
         print(f"[ERR] {path}: {len(errs)} 项语义错误:", file=sys.stderr)
         for e in errs:

@@ -360,6 +360,27 @@ def test_a_cut_message_says_so_in_the_long_form_too():
 
 
 @test
+def test_the_fallback_code_has_a_card():
+    """`#658`: E999 是**兜底码**，原先它是唯一一个没有卡片的码 —— 报错器于是用"工具链版本
+    不齐"去解释编译器自己的兜底，而那句话是错的：分类表与编译器是同一个仓、同一次构建。
+
+    现在它有一张真卡片：说清"没归类"，并给出报告时要带的东西。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td) / "d.jsonl"
+        d.write_text(json.dumps({"file": "x.lomt", "line": 1, "col": 1,
+                                 "code": "E999", "message": "never seen this"}) + "\n",
+                     encoding="utf-8", newline="\n")
+        rc, out = _render(d)
+    assert rc == 1, (rc, out[:200])
+    assert "error[E999]: unclassified (please report)" in out, out[:200]
+    assert "not in the classification table" in out, out[:300]
+    assert "toolchain versions may not match" not in out, \
+        f"还在拿版本不齐解释兜底码: {out[-300:]!r}"
+    print("      兜底码 E999 有卡片：说“没归类”，不再怪版本")
+
+
+@test
 def test_a_column_without_a_line_never_looks_like_a_line():
     """`#664`: `line: 0` + `col: 12` 原先渲染成 `--> x.lomt:12` —— 与"第 12 行"同形。
 
@@ -973,20 +994,21 @@ def test_summary_is_singular_and_points_only_at_codes_that_exist():
         rc, out = _render(d)
         assert rc == 1, (rc, out[:200])
         assert "1 error: E999 x1" in out, f"单数没生效: {out[-200:]!r}"
-        assert "more: loment explain" not in out, \
-            f"指了一个不存在的码: {[l for l in out.splitlines() if 'more:' in l]!r}"
+        # `#658` 之后 E999 有一张真卡片，`explain E999` 讲得出来 —— 指它是**对的**。
+        assert "more: loment explain E999" in out, \
+            f"兜底码有卡片了就该指: {[l for l in out.splitlines() if 'more:' in l]!r}"
 
-        # 一真一假：真那个要指，假那个不许带出来。
+        # 一真一假：真那个要指，**表里没有的**不许带出来。E777 是用户码段里的空号。
         d2 = Path(td) / "mixed.jsonl"
         d2.write_text("\n".join(json.dumps(r) for r in (
-            {"file": "x.lomt", "line": 1, "col": 1, "code": "E999", "message": "a"},
+            {"file": "x.lomt", "line": 1, "col": 1, "code": "E777", "message": "a"},
             {"file": "x.lomt", "line": 1, "col": 1, "code": "E001", "message": "b"},
         )) + "\n", encoding="utf-8", newline="\n")
         rc, out = _render(d2)
         assert rc == 1, (rc, out[:200])
         more = [l for l in out.splitlines() if "more:" in l]
-        assert more and "E001" in more[0] and "E999" not in more[0], f"more 行不对: {more!r}"
-    print("      汇总: 一条用单数，more 只指表里有的码 (E001 指，E999 不指)")
+        assert more and "E001" in more[0] and "E777" not in more[0], f"more 行不对: {more!r}"
+    print("      汇总: 一条用单数；more 只指表里有的码 (E001 与 E999 指，E777 不指)")
 
 
 # ---------------------------------------------------------------- --short / --json (§15)
@@ -1916,7 +1938,9 @@ _JSONL = {
                         "message": "4: 使用未声明的变量 z"}],
     "parse.jsonl": [{"file": "{F}/par.lomt", "line": 6, "col": 1, "code": "E002",
                      "message": "6:1: 语法错"}],
-    "unknown.jsonl": [{"file": "{F}/bad.lomt", "line": 4, "col": 0, "code": "E999",
+    # `#658` 之后 E999 **有卡片**了（兜底码也该解释自己），所以"表里没有的码"这条
+    # 换成一个真正的空号：用户码段是 1..N 连续的，E777 不在表里。
+    "unknown.jsonl": [{"file": "{F}/bad.lomt", "line": 4, "col": 0, "code": "E777",
                        "message": "4: 无此码"}],
     "broken.jsonl": [{"file": "{F}/bad.lomt", "line": 99, "col": 0, "code": "E002",
                       "message": "99: 行号越界"}],

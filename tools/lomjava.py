@@ -30,7 +30,7 @@ import re
 import struct
 import sys
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 # ---------------------------------------------------------------- class file
@@ -53,6 +53,7 @@ CP_INVOKE_DYNAMIC = 18
 CP_MODULE = 19
 CP_PACKAGE = 20
 
+ACC_PUBLIC = 0x0001
 ACC_PRIVATE = 0x0002
 ACC_PROTECTED = 0x0004
 ACC_STATIC = 0x0008
@@ -108,6 +109,9 @@ class Method:
     max_stack: int
     max_locals: int
     exc: list
+    #: `StackMapTable` 的帧：[(bytecode offset, 声明的操作数栈类型列表)]。
+    #: 空表示类文件没带这张表（v49 及以前）。局部变量的声明帧直接从表里读。
+    frames: list = field(default_factory=list)
 
 
 @dataclass
@@ -123,6 +127,9 @@ class ClassFile:
     methods: list[Method]
     fields: list[Field]
     pool: list
+    #: 超类名（`java/lang/Object` 为 None）与直接接口名 —— 验证器的可见性要用。
+    super_name: str | None = None
+    interfaces: list = field(default_factory=list)
 
 
 @dataclass
@@ -183,9 +190,8 @@ def parse_class(data: bytes) -> ClassFile:
 
     r.u2()  # access
     this_class = r.u2()
-    r.u2()  # super
-    for _ in range(r.u2()):
-        r.u2()
+    super_idx = r.u2()
+    ifaces = [r.u2() for _ in range(r.u2())]
     fields: list[Field] = []
     for _ in range(r.u2()):
         access = r.u2()
@@ -201,6 +207,7 @@ def parse_class(data: bytes) -> ClassFile:
         code = None
         max_stack = max_locals = 0
         exc: list = []
+        frames: list = []
         for _ in range(r.u2()):
             aname = _utf8(pool, r.u2())
             length = r.u4()
@@ -213,10 +220,82 @@ def parse_class(data: bytes) -> ClassFile:
                 code = cr.take(n)
                 for _ in range(cr.u2()):
                     exc.append((cr.u2(), cr.u2(), cr.u2(), cr.u2()))
-                _skip_attributes(cr, pool)
-        methods.append(Method(access, name, desc, code, max_stack, max_locals, exc))
+                for _ in range(cr.u2()):
+                    cname = _utf8(pool, cr.u2())
+                    clen = cr.u4()
+                    cbody = cr.take(clen)
+                    if cname == "StackMapTable":
+                        frames = _parse_stack_map(cbody)
+        methods.append(Method(access, name, desc, code, max_stack, max_locals, exc,
+                              frames))
 
-    return ClassFile(_class_name(pool, this_class), methods, fields, pool)
+    return ClassFile(_class_name(pool, this_class), methods, fields, pool,
+                     _class_name(pool, super_idx) if super_idx else None,
+                     [_class_name(pool, i) for i in ifaces])
+
+
+#: `StackMapTable` 的 verification_type_info 标签（JVMS §4.7.4）。
+SM_TOP, SM_INT, SM_FLOAT, SM_DOUBLE, SM_LONG, SM_NULL, SM_UTHIS, SM_OBJ, SM_UNINIT = range(9)
+
+
+def _parse_vti(r: Reader) -> tuple:
+    tag = r.u1()
+    if tag == 7:
+        return (SM_OBJ, r.u2())
+    if tag == 8:
+        return (SM_UNINIT, r.u1())
+    if 0 <= tag <= 6:
+        return (tag, 0)
+    raise JavaError(f"StackMapTable: bad verification type {tag}")
+
+
+def _parse_stack_map(body: bytes) -> list:
+    """把 `StackMapTable` 读成**增量帧**：[(offset, kind, payload)]。
+
+    增量而不是展开：`chop`/`append` 相对的是上一帧，而上一帧相对的是方法的入口帧
+    （形参）—— 入口帧只有调用方（验证器）知道。这里只负责把字节读对。
+    """
+    r = Reader(body)
+    out: list = []
+    off = -1
+    for _ in range(r.u2()):
+        ft = r.u1()
+        if ft <= 63:                       # same_frame
+            off += ft + 1
+            out.append((off, "same", ()))
+        elif ft <= 127:                    # same_locals_1_stack_item
+            off += (ft - 64) + 1
+            out.append((off, "same1", (_parse_vti(r),)))
+        elif ft == 247:                    # same_locals_1_stack_item_extended
+            off += r.u2() + 1
+            out.append((off, "same1", (_parse_vti(r),)))
+        elif 248 <= ft <= 250:             # chop_frame
+            off += r.u2() + 1
+            out.append((off, "chop", (251 - ft,)))
+        elif ft == 251:                    # same_frame_extended
+            off += r.u2() + 1
+            out.append((off, "same", ()))
+        elif 252 <= ft <= 254:             # append_frame
+            off += r.u2() + 1
+            out.append((off, "append", tuple(_parse_vti(r) for _ in range(ft - 251))))
+        elif ft == 255:                    # full_frame
+            off += r.u2() + 1
+            loc = tuple(_parse_vti(r) for _ in range(r.u2()))
+            st = tuple(_parse_vti(r) for _ in range(r.u2()))
+            out.append((off, "full", (loc, st)))
+        else:
+            raise JavaError(f"StackMapTable: bad frame type {ft}")
+    return out
+
+
+def _slots(vtis: tuple) -> list:
+    """一个 verification type 占几个槽：long/double 占两个（第二个是 Top）。"""
+    out: list = []
+    for tag, info in vtis:
+        out.append((tag, info))
+        if tag in (SM_LONG, SM_DOUBLE):
+            out.append((SM_TOP, 0))
+    return out
 
 
 def load_classes(path: Path) -> list[ClassFile]:
@@ -534,6 +613,8 @@ T_I32 = "i32"
 T_I64 = "i64"
 T_REF = "ref"
 T_NULL = "null"
+#: 构造器里的 `this`，在 `invokespecial <init>` 之前不可当引用用。
+T_UTHIS = "uninitialized-this"
 
 #: 一个 jar 最多带这么多个类（编译期资源上限的一部分）。
 MAX_CLASSES = 1024
@@ -601,6 +682,20 @@ def _vstore(lc: list, idx: int, t: str, ctx: str, off: int) -> None:
         lc[idx + 1] = T_TOP
 
 
+def _v_uninit(t: str) -> bool:
+    return t == T_UTHIS or t.startswith("uninit@")
+
+
+def _v_initialized(st: list, lc: list, tag: str) -> None:
+    """`invokespecial <init>` 之后，同一个未初始化对象的**所有副本**都成了引用。"""
+    for i, t in enumerate(st):
+        if t == tag:
+            st[i] = T_REF
+    for i, t in enumerate(lc):
+        if t == tag:
+            lc[i] = T_REF
+
+
 def _vstep(cf: ClassFile, m: Method, x: Insn, st: list, lc: list) -> list[int]:
     """Apply one instruction to (stack, locals); return successor offsets."""
     name = _OPS[x.op][0]
@@ -654,7 +749,7 @@ def _vstep(cf: ClassFile, m: Method, x: Insn, st: list, lc: list) -> list[int]:
                 raise JavaError(f"J002: {ctx} @{x.off}: lload of a {got} local")
             _vpush(st, T_I64, m, ctx, x.off)
         else:
-            if got not in (T_REF, T_NULL):
+            if got not in (T_REF, T_NULL) and not _v_uninit(got):
                 raise JavaError(f"J002: {ctx} @{x.off}: aload of a {got} local")
             _vpush(st, got, m, ctx, x.off)
     elif name.startswith("istore"):
@@ -670,7 +765,7 @@ def _vstep(cf: ClassFile, m: Method, x: Insn, st: list, lc: list) -> list[int]:
         if not st:
             raise JavaError(f"J002: {ctx} @{x.off}: operand stack underflow")
         t = st.pop()
-        if t not in (T_REF, T_NULL):
+        if t not in (T_REF, T_NULL) and not _v_uninit(t):
             raise JavaError(f"J002: {ctx} @{x.off}: astore of a {t}")
         _vstore(lc, idx, t, ctx, x.off)
     elif name in ("fstore", "dstore", "fload", "dload"):
@@ -752,7 +847,9 @@ def _vstep(cf: ClassFile, m: Method, x: Insn, st: list, lc: list) -> list[int]:
                 raise JavaError(f"J002: {ctx} @{x.off}: pop2 on a one-slot stack")
             _vpop(st, st[-1], ctx, x.off)
     elif name == "new":
-        _vpush(st, T_REF, m, ctx, x.off)
+        # 未初始化的对象带**分配点**：`dup` 出来的两份是同一个对象，一次 `<init>`
+        # 之后一起变成引用（JVMS §4.10.1.9）。
+        _vpush(st, f"uninit@{x.off}", m, ctx, x.off)
     elif name in ("getstatic", "putstatic"):
         cls, fname, desc = fieldref(cf.pool, x.args[0])
         if (name == "getstatic" and cls == "java/lang/System"
@@ -781,7 +878,18 @@ def _vstep(cf: ClassFile, m: Method, x: Insn, st: list, lc: list) -> list[int]:
         for t in reversed(vtypes):
             _vpop(st, t, ctx, x.off)
         if name != "invokestatic":
-            _vpop(st, T_REF, ctx, x.off)
+            if not st:
+                raise JavaError(f"J002: {ctx} @{x.off}: operand stack underflow")
+            recv = st[-1]
+            if _v_uninit(recv):
+                if mname != "<init>":
+                    raise JavaError(
+                        f"J002: {ctx} @{x.off}: {cls}.{mname} called on an "
+                        f"uninitialized object")
+                st.pop()
+                _v_initialized(st, lc, recv)
+            else:
+                _vpop(st, T_REF, ctx, x.off)
         if ret != "void":
             _vpush(st, _vtype(ret, ctx), m, ctx, x.off)
     elif name in ("iaload", "laload"):
@@ -810,6 +918,9 @@ def _vstep(cf: ClassFile, m: Method, x: Insn, st: list, lc: list) -> list[int]:
             _vpop(st, want, ctx, x.off)
         if st:
             raise JavaError(f"J002: {ctx} @{x.off}: {len(st)} value(s) left on the stack at return")
+        if m.name == "<init>" and any(t == T_UTHIS for t in lc):
+            raise JavaError(
+                f"J002: {ctx} @{x.off}: the constructor returns with `this` uninitialized")
         return []
     else:
         raise JavaError(f"J003: {ctx} @{x.off}: opcode `{name}` is not supported")
@@ -843,7 +954,7 @@ def _verify_method(cf: ClassFile, m: Method) -> None:
     if not static:
         if m.max_locals < 1:
             raise JavaError(f"J002: {ctx}: max_locals is 0 but the method takes `this`")
-        lc0[0] = T_REF
+        lc0[0] = T_UTHIS if m.name == "<init>" else T_REF
         slot = 1
     for t in params:
         vt = _vtype(t, ctx)
@@ -914,9 +1025,8 @@ def _verify_method(cf: ClassFile, m: Method) -> None:
     else:
         raise JavaError(f"J002: {ctx}: the verifier did not reach a fixed point")
 
-    if ret != "void":
-        # 至少有一条 return 用对了类型 —— 由 _vstep 的 return 分支逐个判。
-        pass
+    if m.frames:
+        _verify_frames(cf, m, lc0, slot, state, starts)
 
 
 def _find_member(owner: ClassFile, name: str, desc: str, kind: str):
@@ -927,45 +1037,179 @@ def _find_member(owner: ClassFile, name: str, desc: str, kind: str):
     return None
 
 
-def _verify_access(cf: ClassFile, m: Method, registry: dict) -> None:
-    """访问控制（docs/282 §8.1）：闭包内可见的成员才判。
+_SM_TO_T = {SM_TOP: T_TOP, SM_INT: T_I32, SM_LONG: T_I64,
+            SM_NULL: T_NULL, SM_UTHIS: T_UTHIS, SM_OBJ: T_REF}
 
-    继承来的成员不在注册表里（`parse_class` 不保留超类链），所以查不到就跳过 ——
-    那半条规则要类层次，见状态行。
+
+_T_TO_SM = {T_TOP: (SM_TOP, 0), T_I32: (SM_INT, 0), T_I64: (SM_LONG, 0),
+            T_REF: (SM_OBJ, 0), T_NULL: (SM_NULL, 0), T_UTHIS: (SM_UTHIS, 0)}
+
+
+def _t_to_sm(t: str) -> tuple:
+    if t in _T_TO_SM:
+        return _T_TO_SM[t]
+    if t.startswith("uninit@"):
+        return (SM_UNINIT, int(t[7:]))
+    raise JavaError(f"J002: internal: no stack-map form for {t}")
+
+
+def _sm_type(v: tuple, ctx: str) -> str:
+    tag, info = v
+    if tag in (SM_FLOAT, SM_DOUBLE):
+        raise JavaError(f"J003: {ctx}: floating-point stack maps are not supported")
+    if tag == SM_UNINIT:
+        return f"uninit@{info}"
+    return _SM_TO_T[tag]
+
+
+def _compat(a: str, b: str) -> bool:
+    # 帧里声明的是"这个槽可赋给什么"。`Top` 在 JVM 的类型格里是顶 —— 任何值都
+    # 可以赋给它（赋过去之后这个槽就不可用了），所以帧说 top、推导有值，是合法的。
+    if a == b or a == T_TOP:
+        return True
+    # 引用格点在这里被抹平（`ref` / `null`），所以"可赋给"只要两边都是引用类。
+    return a in (T_REF, T_NULL) and b in (T_REF, T_NULL)
+
+
+def _verify_frames(cf: ClassFile, m: Method, lc0: list, plen: int, state: dict,
+                   starts: set) -> None:
+    """`StackMapTable` 与推导结果逐槽比对（docs/282 §8.1）。
+
+    只判**声明了的**帧：JVM 还要求每个基本块起点都有帧，那条要额外记前驱 —— 这里
+    先不比"缺帧"，比"声明了的帧与推导一致"（写进状态行的仍是缺口）。
     """
+    ctx = f"{cf.name}.{m.name}{m.desc}"
+    # 帧里的局部变量只列到"用到的最后一个"，入口帧也只是形参那一段 —— 不能拿
+    # 补到 max_locals 的整张表去接 append/chop。
+    locals_ = [_t_to_sm(t) for t in lc0[:plen]]
+    for off, kind, payload in m.frames:
+        if kind == "same":
+            stack = []
+        elif kind == "same1":
+            stack = _slots(payload)
+        elif kind == "chop":
+            k = payload[0]
+            if k > len(locals_):
+                raise JavaError(
+                    f"J002: {ctx} @{off}: StackMapTable chop underflows the locals")
+            locals_ = locals_[:len(locals_) - k]
+            stack = []
+        elif kind == "append":
+            locals_ = locals_ + _slots(payload)
+            stack = []
+        else:
+            locals_ = _slots(payload[0])
+            stack = _slots(payload[1])
+        if len(locals_) > m.max_locals:
+            raise JavaError(
+                f"J002: {ctx} @{off}: StackMapTable declares more locals than max_locals")
+        if off not in starts:
+            raise JavaError(
+                f"J002: {ctx} @{off}: StackMapTable frame is not on an instruction")
+        if off not in state:
+            continue                      # 不可达：没有推导值可比
+        inferred_stack, inferred_locals = state[off]
+        if len(stack) != len(inferred_stack):
+            raise JavaError(
+                f"J002: {ctx} @{off}: StackMapTable stack depth {len(stack)} "
+                f"disagrees with the inferred {len(inferred_stack)}")
+        for i, (v, got) in enumerate(zip(stack, inferred_stack)):
+            want = _sm_type(v, ctx)
+            if not _compat(want, got):
+                raise JavaError(
+                    f"J002: {ctx} @{off}: StackMapTable stack slot {i} is {want}, "
+                    f"inferred {got}")
+        for i in range(max(len(locals_), len(inferred_locals))):
+            v = locals_[i] if i < len(locals_) else (SM_TOP, 0)
+            want = _sm_type(v, ctx)
+            got = inferred_locals[i] if i < len(inferred_locals) else T_TOP
+            if not _compat(want, got):
+                raise JavaError(
+                    f"J002: {ctx} @{off}: StackMapTable local {i} is {want}, "
+                    f"inferred {got}")
+
+
+def _resolve_member(cls: str, name: str, desc: str, kind: str, registry: dict):
+    """沿超类链找成员。返回 (声明它的类名, 成员)；链走出闭包就返回 (None, None)。"""
+    cur = registry.get(cls)
+    steps = 0
+    while cur is not None and steps < 64:
+        f = _find_member(cur, name, desc, kind)
+        if f is not None:
+            return cur.name, f
+        cur = registry.get(cur.super_name) if cur.super_name else None
+        steps += 1
+    return None, None
+
+
+def _package(name: str) -> str:
+    return name.rsplit("/", 1)[0] if "/" in name else ""
+
+
+def _is_subclass(name: str, owner: str, registry: dict) -> bool:
+    cur = registry.get(name)
+    steps = 0
+    while cur is not None and cur.super_name is not None and steps < 64:
+        if cur.super_name == owner:
+            return True
+        cur = registry.get(cur.super_name)
+        steps += 1
+    return False
+
+
+def _access_word(access: int) -> str:
+    if access & ACC_PRIVATE:
+        return "private"
+    if access & ACC_PROTECTED:
+        return "protected"
+    if access & ACC_PUBLIC:
+        return "public"
+    return "package-private"
+
+
+def _visible(accessor: str, owner: str, access: int, registry: dict) -> bool:
+    if access & ACC_PUBLIC:
+        return True
+    if access & ACC_PRIVATE:
+        return accessor == owner
+    same_pkg = _package(accessor) == _package(owner)
+    if access & ACC_PROTECTED:
+        return same_pkg or accessor == owner or _is_subclass(accessor, owner, registry)
+    # 包内可见
+    return same_pkg
+
+
+def _verify_access(cf: ClassFile, m: Method, registry: dict) -> None:
+    """访问控制（docs/282 §8.1）：闭包内能解析到的成员才判；链走出闭包就跳过。"""
     ctx = f"{cf.name}.{m.name}{m.desc}"
     for x in decode(m.code):
         name = _OPS[x.op][0]
         if name in ("getfield", "putfield", "getstatic", "putstatic"):
             cls, fname, desc = fieldref(cf.pool, x.args[0])
-            owner = registry.get(cls)
+            owner, f = _resolve_member(cls, fname, desc, "field", registry)
             if owner is None:
                 continue
-            f = _find_member(owner, fname, desc, "field")
-            if f is None:
-                continue
-            if f.access & ACC_PRIVATE and cls != cf.name:
+            if not _visible(cf.name, owner, f.access, registry):
                 raise JavaError(
-                    f"J002: {ctx} @{x.off}: {cls}.{fname} is private")
+                    f"J002: {ctx} @{x.off}: {owner}.{fname} is "
+                    f"{_access_word(f.access)} and not visible here")
             if f.access & ACC_FINAL and name in ("putfield", "putstatic"):
-                ok = (cls == cf.name and
+                ok = (owner == cf.name and
                       ((name == "putfield" and m.name == "<init>") or
                        (name == "putstatic" and m.name == "<clinit>")))
                 if not ok:
                     raise JavaError(
-                        f"J002: {ctx} @{x.off}: {cls}.{fname} is final and assigned "
+                        f"J002: {ctx} @{x.off}: {owner}.{fname} is final and assigned "
                         f"outside its initializer")
         elif name in ("invokestatic", "invokevirtual", "invokespecial"):
             cls, mname, desc = methodref(cf.pool, x.args[0])
-            owner = registry.get(cls)
+            owner, mm = _resolve_member(cls, mname, desc, "method", registry)
             if owner is None:
                 continue
-            mm = _find_member(owner, mname, desc, "method")
-            if mm is None:
-                continue
-            if mm.access & ACC_PRIVATE and cls != cf.name:
+            if not _visible(cf.name, owner, mm.access, registry):
                 raise JavaError(
-                    f"J002: {ctx} @{x.off}: {cls}.{mname}{desc} is private")
+                    f"J002: {ctx} @{x.off}: {owner}.{mname}{desc} is "
+                    f"{_access_word(mm.access)} and not visible here")
 
 
 def verify_classes(classes: list[ClassFile]) -> None:

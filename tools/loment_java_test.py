@@ -424,7 +424,8 @@ def test_bad_class_is_rejected():
 
 def _mk_class(name: str, code: bytes, *, max_stack: int = 8, max_locals: int = 8,
               exc: list | None = None, method: str = "m", desc: str = "()V",
-              access: int = 0x0008) -> bytes:
+              access: int = 0x0008, smt: bytes | None = None,
+              super_name: str = "java/lang/Object") -> bytes:
     """手工造一个最小 class 文件。
 
     javac 不会产出验证器要拒绝的那几种形状（类型混淆、越界分支、坏异常表），
@@ -434,17 +435,21 @@ def _mk_class(name: str, code: bytes, *, max_stack: int = 8, max_locals: int = 8
     cp = [
         b"\x01" + struct.pack(">H", len(name)) + name.encode(),
         b"\x07\x00\x01",
-        b"\x01" + struct.pack(">H", 16) + b"java/lang/Object",
+        b"\x01" + struct.pack(">H", len(super_name)) + super_name.encode(),
         b"\x07\x00\x03",
         b"\x01" + struct.pack(">H", len(method)) + method.encode(),
         b"\x01" + struct.pack(">H", len(desc)) + desc.encode(),
         b"\x01\x00\x04Code",
+        b"\x01" + struct.pack(">H", 13) + b"StackMapTable",
     ]
     body = struct.pack(">HHI", max_stack, max_locals, len(code)) + code
     body += struct.pack(">H", len(exc or []))
     for start, end, target, ctype in (exc or []):
         body += struct.pack(">HHHH", start, end, target, ctype)
-    body += b"\x00\x00"
+    # `StackMapTable` 是 **Code 属性内部**的属性，不是方法属性。
+    body += struct.pack(">H", 0 if smt is None else 1)
+    if smt is not None:
+        body += struct.pack(">HI", 8, len(smt)) + smt
     meth = (struct.pack(">HHHH", access, 5, 6, 1) +
             struct.pack(">HI", 7, len(body)) + body)
     return (struct.pack(">IHHH", 0xCAFEBABE, 0, 52, len(cp) + 1) + b"".join(cp) +
@@ -549,6 +554,47 @@ def test_verifier_rejects_private_and_final_violations():
         print(f"      final write rejected: {e}")
     else:
         raise AssertionError("a final field write outside <init> was accepted")
+
+
+@test
+def test_verifier_rejects_a_stack_map_that_disagrees():
+    """`StackMapTable` 说的栈深/槽型必须与推导结果一致（docs/282 §8.1）。"""
+    import struct
+    # same_locals_1_stack_item, offset_delta 0, 一个 Integer —— 但推导在 0 处栈是空的
+    smt = struct.pack(">H", 1) + b"\x40\x01"
+    msg = _verify_rejects(_mk_class("A", b"\xb1", smt=smt), "J002", "stack depth")
+    print(f"      stack map rejected: {msg}")
+
+
+@test
+def test_verifier_honours_protected_and_the_super_chain():
+    """`protected` 在子类里可用、在包外非子类里不可用 —— 要沿超类链判。"""
+    pool = _fieldref_pool("p1/A", "x", "I")
+    a = lomjava.ClassFile("p1/A", [],
+                          [lomjava.Field(lomjava.ACC_PROTECTED, "x", "I")], pool)
+    # aconst_null; getfield #6; pop; return
+    read = lomjava.Method(lomjava.ACC_STATIC, "m", "()V",
+                          b"\x01\xb4\x00\x06\x57\xb1", 4, 4, [])
+    outside = lomjava.ClassFile("p2/B", [read], [], pool)
+    try:
+        lomjava.verify_classes([a, outside])
+    except lomjava.JavaError as e:
+        assert str(e).startswith("J002") and "protected" in str(e), e
+        print(f"      protected outside a subclass rejected: {e}")
+    else:
+        raise AssertionError("protected access outside the package/subclass was accepted")
+    sub = lomjava.ClassFile("p2/C", [read], [], pool, super_name="p1/A")
+    lomjava.verify_classes([a, sub])
+    print("      protected inside a subclass accepted")
+
+
+@test
+def test_verifier_rejects_uninitialized_this_escaping():
+    """构造器里 `this` 在 `invokespecial <init>` 之前不能当引用用（JVMS §4.10.1.9）。"""
+    # <init>: aload_0; athrow
+    msg = _verify_rejects(_mk_class("A", b"\x2a\xbf", method="<init>", access=0x0001),
+                          "J002", "uninitialized")
+    print(f"      uninitialized this rejected: {msg}")
 
 
 @test

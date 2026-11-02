@@ -982,11 +982,31 @@ fn line_start(text: ptr, line: u32) -> u32 {
     return res;
 }
 
+/// 那一行的**字节**长度（不含换行符）。
+///
+/// `#711`：LSP 说 `character` 超过行长时要**夹到行长**。原先 `word_at` /
+/// `lsc_member_recv` 直接 `line_start + ch`，越界的位置落进**下一行** ——
+/// 一个 `character: 20`（那行只有 10 字节）就能把定义跳到下一行的名字上，
+/// 看起来像认得，其实是读到了别人的 token。
+fn line_len(text: ptr, line: u32) -> u32 {
+    let s: u32 = line_start(text, line);
+    let i: u32 = s;
+    while load8(text, i) != 0 && load8(text, i) != 10 {
+        i = i + 1;
+    }
+    return i - s;
+}
+
 /// 光标处的词 -> 写进 mem+SCR_OFF+5120, 返回长度。
 fn word_at(mem: ptr, text: ptr, line: u32, ch: u32) -> u32 {
     let buf: ptr = ptr_add(mem, SCR_OFF + 5120);
     let lstart: u32 = line_start(text, line);
-    let c: u32 = lstart + ch;
+    let chc: u32 = ch;
+    let ll: u32 = line_len(text, line);
+    if chc > ll {
+        chc = ll;
+    }
+    let c: u32 = lstart + chc;
     let s: u32 = c;
     while s > lstart && is_wordc(load8(text, s - 1)) {
         s = s - 1;
@@ -1596,7 +1616,12 @@ fn emit_syms(mem: ptr, o: u32, idx: u32, toks: ptr) -> u32 {
 /// **宁可少给，不给错的** —— 补错一项比少补一项更打扰人。
 fn lsc_member_recv(text: ptr, line: u32, ch: u32) -> u64 {
     let lstart: u32 = line_start(text, line);
-    let c: u32 = lstart + ch;
+    let chc: u32 = ch;
+    let ll: u32 = line_len(text, line);
+    if chc > ll {
+        chc = ll;
+    }
+    let c: u32 = lstart + chc;
     let e: u32 = c;
     while e > lstart && is_wordc(load8(text, e - 1)) {
         e = e - 1;

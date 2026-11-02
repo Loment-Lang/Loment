@@ -308,6 +308,58 @@ def test_codes_outside_the_catalogue_are_never_minted():
 
 
 @test
+def test_control_bytes_in_the_source_are_escaped():
+    """`#654`: 源行是**逐字节**回显的，所以一个文件能让终端清屏、改色、伪造诊断。
+
+    控制字节（除 tab）现在印成 `\\xNN` 四个普通字符；caret 的宽度跟着按四列算，
+    所以对齐不受影响。`--no-color` 原先**帮不上忙** —— 它关的是渲染器自己的上色，
+    关不掉源文件里的字节。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "ansi.lomt"
+        # ESC 在 caret **前面**：转义把这几个字节从 1 列撑成 4 列，caret 必须跟着右移。
+        src.write_bytes('module m\n\nfn f() -> u32 {\n    return g("\x1b[2J", z);\n}\n'
+                        .encode("utf-8"))
+        d = Path(td) / "d.jsonl"
+        d.write_text(json.dumps({"file": "ansi.lomt", "line": 4, "col": 22,
+                                 "code": "E002", "message": "m"}) + "\n",
+                     encoding="utf-8", newline="\n")
+        rc, out = _run_in(Path(td), d)
+    assert rc == 1, (rc, out[:200])
+    assert "\x1b" not in out, "源文件里的 ESC 原样进了终端"
+    assert '\\x1b[2J", z);' in out, f"没有转义成 \\xNN: {out[:300]!r}"
+    # caret 与**渲染出来**的那一行对齐（不是与原始字节对齐）
+    lines = out.splitlines()
+    shown = next(ln for ln in lines if ln.startswith("4 | "))[len("4 | "):]
+    caret = next(ln for ln in lines if "^" in ln)
+    # 渲染出来的那一行是纯 ASCII（`\xNN` 是人看的字符），所以字符下标 == 显示列。
+    assert caret.index("^") - len("  | ") == shown.index("z"), (caret, shown)
+    print("      源行的控制字节印成 \\xNN，caret 仍对齐")
+
+
+@test
+def test_a_cut_message_says_so_in_the_long_form_too():
+    """`#665`: 消息超过 `MSG_CAP` 就被截断，`--short`/`--json` 会说，长表原先不说。
+
+    被截断的消息与完整的长得一模一样 —— 这正是"静默"的形状。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td) / "d.jsonl"
+        d.write_text(json.dumps({"file": "x.lomt", "line": 4, "col": 1,
+                                 "code": "E002", "message": "y" * 40000}) + "\n",
+                     encoding="utf-8", newline="\n")
+        rc, out = _render(d)
+        s = Path(td) / "s.jsonl"
+        s.write_text(json.dumps({"file": "x.lomt", "line": 4, "col": 1,
+                                 "code": "E002", "message": "plain"}) + "\n",
+                     encoding="utf-8", newline="\n")
+        rc2, out2 = _render(s)
+    assert rc == 1 and "[truncated]" in out, f"截断没说出来: {out[-300:]!r}"
+    assert rc2 == 1 and "[truncated]" not in out2, "没截断的消息不该带标记"
+    print("      长消息在完整渲染里也说 [truncated]；短消息不带")
+
+
+@test
 def test_a_column_without_a_line_never_looks_like_a_line():
     """`#664`: `line: 0` + `col: 12` 原先渲染成 `--> x.lomt:12` —— 与"第 12 行"同形。
 

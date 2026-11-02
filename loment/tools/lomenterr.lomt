@@ -844,6 +844,19 @@ fn em_pad(ctx: ptr, o: u32, n: u32) -> u32 {
     return o;
 }
 
+fn hexdig(c: u32) -> u32 {
+    if c < 10 {
+        return 48 + c;
+    }
+    return 87 + c;          // 'a' = 97
+}
+
+/// 两个小写十六进制位（`\xNN` 转义用，`#654`）。
+fn em_hex2(ctx: ptr, o: u32, v: u32) -> u32 {
+    o = em_byte(ctx, o, hexdig((v >> 4) & 15));
+    return em_byte(ctx, o, hexdig(v & 15));
+}
+
 fn em_u32(ctx: ptr, o: u32, v: u32) -> u32 {
     if v == 0 {
         return em_byte(ctx, o, 48);
@@ -1197,6 +1210,11 @@ fn utf8_cell(sr: ptr, i: u32, avail: u32) -> u64 {
     if b0 == 9 {
         return 4294967296 as u64 + 8;
     }
+    // 控制字节会被**转义**成 `\xNN`（四个字符，见 `h_snip`，`#654`）。宽度必须跟着走，
+    // 否则 caret 与转义后的源行对不齐。DEL（0x7F）同理。
+    if b0 < 32 || b0 == 127 {
+        return 4294967296 as u64 + 4;
+    }
     if b0 < 128 {
         return 4294967296 as u64 + 1;
     }
@@ -1245,7 +1263,16 @@ fn h_snip(ctx: ptr, o: u32, sr: ptr, srl: u32, line: u32, col: u32, w: u32, mlen
     o = em(ctx, o, " | ");
     let k: u32 = 0;
     while k < ln {
-        o = em_byte(ctx, o, load8(sr, st + k));
+        let c: u32 = load8(sr, st + k);
+        // **控制字节不进终端**（`#654`）：源文件能写 ESC，而这段是逐字节回显的 ——
+        // 于是一个文件可以让用户清屏、改色、甚至伪造一条诊断。`\xNN` 是四个普通字符，
+        // 终端只当文本；`utf8_cell` 对它们按 4 列算，caret 因此仍然对齐。
+        if c < 32 && c != TAB || c == 127 {
+            o = em(ctx, o, "\\x");
+            o = em_hex2(ctx, o, c);
+        } else {
+            o = em_byte(ctx, o, c);
+        }
         k = k + 1;
     }
     o = em(ctx, o, "\n");
@@ -3062,7 +3089,16 @@ fn _start() -> u32 {
                             }
                         }
                         let o4: u32 = h_msg(ctx, o3, C_MSG, mlen, w);
-                        let o5: u32 = h_card(ctx, o4, cnum, w);
+                        // `#665`：消息在拷进 `C_MSG` 时就封顶了（`MSG_CAP`）。`--short` /
+                        // `--json` 早就会说（`S_CUT`），长表原先**什么都不说** —— 一条被
+                        // 截断的消息看起来和完整的一模一样。同一句话，同一处。
+                        let o4b: u32 = o4;
+                        if mtr == 1 {
+                            o4b = em_gut(ctx, o4, w);
+                            o4b = em(ctx, o4b, ui(ctx, S_CUT));
+                            o4b = em(ctx, o4b, "\n");
+                        }
+                        let o5: u32 = h_card(ctx, o4b, cnum, w);
                         // 两条**码专属**的补充，排在卡片**之后** —— 先给通用的四段，
                         // 再给这一条的专属信息（它们的计算在模式分岔之前，见上）。
                         let o5b: u32 = o5;

@@ -564,6 +564,38 @@ def test_duplicate_class_rejected():
 
 
 @test
+def test_a_published_java_package_passes_lompi_check():
+    """The publisher-side tool emits a `kind java` package lompi accepts.
+
+    This is the install half of the epic: the AOT compile happens where the jar
+    is published; the consumer's `lompi` only copies and verifies.
+    """
+    rc, out = _run(["version"])
+    if rc == -1:
+        print(f"      SKIP: {_skip}")
+        return
+    import loment_java_pkg
+    with tempfile.TemporaryDirectory(prefix="lompi-javapkg-") as t:
+        td = Path(t)
+        jar = ROOT / "tools" / "fixtures" / "java" / "shapelib.jar"
+        pkg = loment_java_pkg.build_package(jar, "shapelib", "1.0.0", td / "store")
+
+        rc, out = _run(["check", str(pkg)])
+        assert rc == 0 and "foreign manifest" in out, out[:400]
+
+        rc, out = _run(["plan", str(td / "store"), "shapelib",
+                        "--into", str(td / "deps")])
+        assert rc == 0 and "package instance(s)" in out, out[:400]
+
+        link = (pkg / "link.txt").read_text(encoding="utf-8")
+        sha = __import__("hashlib").sha256(
+            (pkg / "shapelib.ll").read_bytes()).hexdigest()
+        assert f"ir shapelib.ll {sha}" in link, link
+        assert "runtime jrt 0.1.0" in link, link
+        print("      java package: check + plan + link.txt")
+
+
+@test
 def test_version_command_and_the_shipped_version_agree():
     """`lompi version` 打的那个号，必须是我们说好要发的那个。
 

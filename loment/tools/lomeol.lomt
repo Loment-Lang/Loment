@@ -13,6 +13,10 @@
 // git 的退出码: `proc_sh` 不看子进程退出码 (`loment/lib/proc.lomt` 头注写明),
 // 所以命令行尾巴上挂一句 `echo -n "rc=$?"` 把它带回来 —— 与 Python 版那个
 // `if rc != 0: return None`(→ SKIP, 退 2)是同一条判据。
+//
+// SKIP 那行以 **`SKIP` 开头**(不是 `loment_eol: SKIP —— …`): 门禁按行首数跳过
+// (`.github/gate-skips.txt`), 前缀一改机器就一条都数不到。Python 版早改成这个口径了,
+// 这一份原先没跟上 —— 那正是一条只靠"文本一致"能抓住的漂移 (`#400`)。
 
 module lomeol
 choose runtime
@@ -200,10 +204,13 @@ fn _start() -> u32 {
     let g: ptr = gv as ptr;
     let bad: ptr = bv as ptr;
 
-    let n: i64 = proc_sh("git ls-files --eol --cached --others --exclude-standard -z; echo -n \"rc=$?\"", g, GIT_CAP);
+    // `2>/dev/null`: `proc_sh` 只接 stdout, 子进程的 stderr 会直接漏到我们的 stderr 上 ——
+    // 而 Python 版把两路都收进了 `capture_output`, 只打自己那句 SKIP。不屏蔽的话,
+    // "不在工作树"这一档两边就只差 git 那行 `fatal: not a git repository`。
+    let n: i64 = proc_sh("git ls-files --eol --cached --others --exclude-standard -z 2>/dev/null; echo -n \"rc=$?\"", g, GIT_CAP);
     if n < 0 {
         // 起不来 = 与 Python 版"不在 git 工作树"同一档 (退 2)。
-        say("loment_eol: SKIP —— 不是 git 工作树 (行尾契约由 .gitattributes 与检出共同保证)\n");
+        say("SKIP  不是 git 工作树 (行尾契约由 .gitattributes 与检出共同保证)\n");
         return die(2);
     }
     let total: u32 = n as u32;
@@ -214,7 +221,7 @@ fn _start() -> u32 {
         k = k - 1;
     }
     if k == 0 {
-        say("loment_eol: SKIP —— 不是 git 工作树 (行尾契约由 .gitattributes 与检出共同保证)\n");
+        say("SKIP  不是 git 工作树 (行尾契约由 .gitattributes 与检出共同保证)\n");
         return die(2);
     }
     let rc: u32 = 0;
@@ -224,7 +231,7 @@ fn _start() -> u32 {
         j = j + 1;
     }
     if rc != 0 {
-        say("loment_eol: SKIP —— 不是 git 工作树 (行尾契约由 .gitattributes 与检出共同保证)\n");
+        say("SKIP  不是 git 工作树 (行尾契约由 .gitattributes 与检出共同保证)\n");
         return die(2);
     }
 

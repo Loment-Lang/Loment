@@ -46,3 +46,22 @@ it is the multi-class fixture (cross-class `new`, static field, `invokestatic`).
 
 `loment_java_test.py` uses these files and does **not** invoke `java`, `javac`
 or `jar`; it only parses the bytes and emits Loment IR.
+
+## 2026-11-02 additions (inheritance and switches)
+
+`shapelib.jar` and `switchlib.jar` were compiled the same day with the same
+`javac 23` and `--release 8` from `src/com/example/{ShapeLib,SwitchLib}.java`,
+then packed with Python's `zipfile` (the machine has no `jar` on `PATH`):
+
+```
+javac --release 8 -d classes src/com/example/ShapeLib.java src/com/example/SwitchLib.java
+```
+
+`ShapeLib` is a three-level hierarchy (`ShapeLib$Shape`, `$Square`, `$Rect`)
+with an override in each subclass; `SwitchLib` has one dense switch
+(`tableswitch`) and one sparse switch (`lookupswitch`).
+
+```
+64e50e5d1a7534dc219b98cc256be15c4f46085f7677e7f6b221691340c3ac9c  shapelib.jar
+2de47b44d6dcb8f81f24add791a9ad7afcdd36a80b1745a246fc8584c88d6d10  switchlib.jar
+```

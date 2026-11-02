@@ -472,6 +472,7 @@ def _init_ops() -> None:
     _op(180, "getfield", "h", 0); _op(181, "putfield", "h", -2)
     _op(178, "getstatic", "h", 1); _op(179, "putstatic", "h", -1)
     _op(183, "invokespecial", "h", 0); _op(182, "invokevirtual", "h", 0)
+    _op(170, "tableswitch", "sw", -1); _op(171, "lookupswitch", "sw", -1)
     _op(191, "athrow", "", -1)
     _op(172, "ireturn", "", -1); _op(173, "lreturn", "", -1)
     _op(174, "freturn", "", -1); _op(175, "dreturn", "", -2)
@@ -511,6 +512,39 @@ def decode(code: bytes) -> list[Insn]:
             if i + 2 > len(code):
                 raise JavaError(f"truncated {name} at {off}")
             args = (code[i], struct.unpack_from(">b", code, i + 1)[0]); i += 2
+        elif fmt == "sw":
+            # 跳转表按 **4 字节对齐**（相对方法起始），padding 是 0..3 个 0 字节。
+            while i % 4 != 0:
+                i += 1
+            if name == "tableswitch":
+                if i + 12 > len(code):
+                    raise JavaError(f"truncated tableswitch at {off}")
+                dflt, low, high = struct.unpack_from(">iii", code, i)
+                i += 12
+                if high < low or (high - low) > 65535:
+                    raise JavaError(f"bad tableswitch bounds at {off}: {low}..{high}")
+                n = high - low + 1
+                if i + 4 * n > len(code):
+                    raise JavaError(f"truncated tableswitch at {off}")
+                table = []
+                for k in range(n):
+                    rel = struct.unpack_from(">i", code, i + 4 * k)[0]
+                    table.append((low + k, off + rel))
+                i += 4 * n
+                args = (off + dflt, tuple(table))
+            else:
+                if i + 8 > len(code):
+                    raise JavaError(f"truncated lookupswitch at {off}")
+                dflt, n = struct.unpack_from(">ii", code, i)
+                i += 8
+                if n < 0 or n > 65535 or i + 8 * n > len(code):
+                    raise JavaError(f"bad lookupswitch pair count at {off}: {n}")
+                table = []
+                for k in range(n):
+                    val, rel = struct.unpack_from(">ii", code, i + 8 * k)
+                    table.append((val, off + rel))
+                i += 8 * n
+                args = (off + dflt, tuple(table))
         out.append(Insn(off, op, args, i - off, delta))
     return out
 
@@ -590,6 +624,10 @@ def stack_heights(insns: list[Insn], pool: list, exc: list | None = None) -> dic
             continue
         if name == "goto":
             work.append((x.args[0], after))
+        elif name in ("tableswitch", "lookupswitch"):
+            work.append((x.args[0], after))
+            for _val, tgt in x.args[1]:
+                work.append((tgt, after))
         elif name.startswith("if"):
             work.append((x.args[0], after))
             work.append((nxt, after))
@@ -828,6 +866,10 @@ def _vstep(cf: ClassFile, m: Method, x: Insn, st: list, lc: list) -> list[int]:
         branch = x.args[0]
     elif name == "goto":
         return [x.args[0]]
+    elif name in ("tableswitch", "lookupswitch"):
+        _vpop(st, T_I32, ctx, x.off)
+        dflt, table = x.args
+        return [dflt] + [tgt for _val, tgt in table]
     elif name == "dup":
         if not st:
             raise JavaError(f"J002: {ctx} @{x.off}: dup on an empty stack")
@@ -1292,7 +1334,7 @@ class Emitter:
     def __init__(self, insns: list[Insn], heights: dict[int, int], max_stack: int,
                  params: list[str], param_slots: list[int], ret: str, pool: list,
                  module: str, own_class: str, registry: dict, metas: dict,
-                 globals_: list, exc: list | None = None):
+                 class_ids: dict, globals_: list, exc: list | None = None):
         self.insns = insns
         self.heights = heights
         self.max_stack = max_stack
@@ -1304,6 +1346,8 @@ class Emitter:
         self.own_class = own_class
         self.registry = registry
         self.metas = metas
+        #: 对象的头 4 字节是类号（0 = 非 `new` 出来的东西：String、数组、异常垫片）。
+        self.class_ids = class_ids
         self.globals = globals_
         self.exc = exc or []
         self.strn = 0
@@ -1472,6 +1516,107 @@ class Emitter:
         for x in self.insns:
             self._insn(x)
         return "\n".join(self.lines)
+
+    # ---- 继承：字段与实现都沿超类链找 -------------------------------------
+
+    def _field(self, cls: str, name: str, static: bool):
+        """沿超类链找字段，返回它**声明类**给出的 (偏移/符号, IR 类型)。"""
+        cur = cls
+        steps = 0
+        while cur in self.registry and steps < 64:
+            meta = self.metas.get(cur)
+            if meta is not None:
+                got = (meta.static_layout if static else meta.layout).get(name)
+                if got is not None:
+                    return got
+            cur = self.registry[cur].super_name
+            steps += 1
+        return None
+
+    def _impl(self, cls: str, name: str, desc: str):
+        """沿超类链找方法实现，返回 (声明类名, Method)。"""
+        cur = cls
+        steps = 0
+        while cur in self.registry and steps < 64:
+            cf = self.registry[cur]
+            for mm in cf.methods:
+                if mm.name == name and mm.desc == desc:
+                    return cur, mm
+            cur = cf.super_name
+            steps += 1
+        return None, None
+
+    def _is_sub(self, name: str, base: str) -> bool:
+        cur = name
+        steps = 0
+        while cur in self.registry and steps < 64:
+            if cur == base:
+                return True
+            cur = self.registry[cur].super_name
+            steps += 1
+        return False
+
+    def _virtual_call(self, x, cls: str, mname: str, desc: str, recv: str,
+                      params: list, ret: str, vals: list, h0: int) -> None:
+        """闭世界去虚化：按对象的类号分派到**直调**（docs/282 §6.3）。
+
+        候选 = 闭包里所有 `cls` 的子类（含自己），取各自沿超类链解析出来的实现。
+        只有一个实现时就是一次直调；多个时按类号比较，最后落到引用类自己的实现
+        （闭世界里不会出现别的类号，那条分支是给"头是 0"的垫片留的）。
+        """
+        default_sym = None
+        entries: list[tuple[int, str]] = []
+        for name in sorted(self.registry):
+            if not self._is_sub(name, cls):
+                continue
+            owner, mm = self._impl(name, mname, desc)
+            if owner is None or mm.code is None:
+                continue
+            sym = mangle(self.module, owner, mname, desc)
+            if name == cls:
+                default_sym = sym
+            entries.append((self.class_ids[name], sym))
+        if not entries:
+            raise JavaError(
+                f"invokevirtual {cls}.{mname}{desc}: no implementation in the linked set")
+        if default_sym is None:
+            default_sym = entries[0][1]
+        argtxt = ", ".join([f"ptr {recv}"] +
+                           [f"{t} {v}" for t, v in zip(params, vals)])
+        switch = [(cid, sym) for cid, sym in entries if sym != default_sym]
+        if not switch:
+            if ret == "void":
+                self.emit(f"call void @{default_sym}({argtxt})")
+            else:
+                r = self.t()
+                self.emit(f"{r} = call {ret} @{default_sym}({argtxt})")
+                self._push(ret, r, h0 - len(params) - 1)
+            return
+        lbl = self.lbl
+        self.lbl += 1
+        cidv = self.t()
+        self.emit(f"{cidv} = load i32, ptr {recv}")
+        self.emit(f"br label %V{lbl}_c0")
+        for i, (want, sym) in enumerate(switch):
+            self.lines.append(f"V{lbl}_c{i}:")
+            c = self.t()
+            self.emit(f"{c} = icmp eq i32 {cidv}, {want}")
+            self.emit(f"br i1 {c}, label %V{lbl}_t{i}, label %V{lbl}_c{i + 1}")
+            self.lines.append(f"V{lbl}_t{i}:")
+            self._emit_call(sym, argtxt, ret, h0 - len(params) - 1)
+            self.emit(f"br label %V{lbl}_end")
+        self.lines.append(f"V{lbl}_c{len(switch)}:")
+        self._emit_call(default_sym, argtxt, ret, h0 - len(params) - 1)
+        self.emit(f"br label %V{lbl}_end")
+        self.lines.append(f"V{lbl}_end:")
+
+    def _emit_call(self, sym: str, argtxt: str, ret: str, slot: int) -> None:
+        if ret == "void":
+            self.emit(f"call void @{sym}({argtxt})")
+        else:
+            r = self.t()
+            self.emit(f"{r} = call {ret} @{sym}({argtxt})")
+            self._push(ret, r, slot)
 
     def _scan_locals(self) -> None:
         for x in self.insns:
@@ -1747,6 +1892,9 @@ class Emitter:
                 raise JavaError(f"new {cls}: class is not in the linked set")
             p = self.t()
             self.emit(f"{p} = call ptr @{_alloc_sym(self.module)}(i32 {size})")
+            # 对象头的前 4 字节是类号 —— 虚分派就靠它（`String`/数组/异常垫片
+            # 不是 `new` 出来的，头是 0，不走分派）。
+            self.emit(f"store i32 {self.class_ids.get(cls, 0)}, ptr {p}")
             self._push("ptr", p, h0)
         elif name in ("getstatic", "putstatic"):
             cls, fname, desc = fieldref(self.pool, x.args[0])
@@ -1759,11 +1907,11 @@ class Emitter:
                 self.emit(f"{v} = inttoptr i64 {fd} to ptr")
                 self._push("ptr", v, h0)
             else:
-                meta = self.metas.get(cls)
-                if meta is None or fname not in meta.static_layout:
+                gotf = self._field(cls, fname, True)
+                if gotf is None:
                     raise JavaError(
                         f"{name} {cls}.{fname}: static field is not in the linked set")
-                sym, ty = meta.static_layout[fname]
+                sym, ty = gotf
                 if name == "getstatic":
                     v = self.t()
                     self.emit(f"{v} = load {ty}, ptr @{sym}")
@@ -1773,10 +1921,10 @@ class Emitter:
                     self.emit(f"store {ty} {v}, ptr @{sym}")
         elif name == "getfield":
             cls, fname, desc = fieldref(self.pool, x.args[0])
-            meta = self.metas.get(cls)
-            if meta is None or fname not in meta.layout:
+            gotf = self._field(cls, fname, False)
+            if gotf is None:
                 raise JavaError(f"getfield {cls}.{fname}: field is not in the linked set")
-            off, ty = meta.layout[fname]
+            off, ty = gotf
             obj = self._pop("ptr", h0 - 1)
             q = self.t()
             self.emit(f"{q} = getelementptr i8, ptr {obj}, i32 {off}")
@@ -1785,10 +1933,10 @@ class Emitter:
             self._push(ty, v, h0 - 1)
         elif name == "putfield":
             cls, fname, desc = fieldref(self.pool, x.args[0])
-            meta = self.metas.get(cls)
-            if meta is None or fname not in meta.layout:
+            gotf = self._field(cls, fname, False)
+            if gotf is None:
                 raise JavaError(f"putfield {cls}.{fname}: field is not in the linked set")
-            off, ty = meta.layout[fname]
+            off, ty = gotf
             val = self._pop(ty, h0 - 1)
             obj = self._pop("ptr", h0 - 2)
             q = self.t()
@@ -1819,15 +1967,7 @@ class Emitter:
                         f"PrintStream.{mname}{desc} is not supported yet "
                         f"(only int, long, String, and println())")
             elif cls in self.registry:
-                sym = mangle(self.module, cls, mname, desc)
-                argtxt = ", ".join([f"ptr {recv}"] +
-                                   [f"{t} {v}" for t, v in zip(params, vals)])
-                if ret == "void":
-                    self.emit(f"call void @{sym}({argtxt})")
-                else:
-                    r = self.t()
-                    self.emit(f"{r} = call {ret} @{sym}({argtxt})")
-                    self._push(ret, r, h0 - n - 1)
+                self._virtual_call(x, cls, mname, desc, recv, params, ret, vals, h0)
             elif cls == "java/lang/String" and mname == "equals" and desc == "(Ljava/lang/Object;)Z":
                 self._string_equals(recv, vals[0])
             elif cls == "java/lang/String" and mname == "hashCode" and desc == "()I":
@@ -1866,13 +2006,17 @@ class Emitter:
                 self._pop("ptr", h0 - n - 1)
                 return
             if cls in self.registry:
+                owner, mm2 = self._impl(cls, mname, desc)
+                if owner is None or mm2.code is None:
+                    raise JavaError(
+                        f"invokespecial {cls}.{mname}{desc}: no definition in the linked set")
                 params, ret = parse_method_descriptor(desc)
                 n = len(params)
                 vals = [""] * n
                 for i in range(n - 1, -1, -1):
                     vals[i] = self._pop(params[i], h0 - n + i)
                 this = self._pop("ptr", h0 - n - 1)
-                sym = mangle(self.module, cls, mname, desc)
+                sym = mangle(self.module, owner, mname, desc)
                 argtxt = ", ".join([f"ptr {this}"] +
                                    [f"{t} {v}" for t, v in zip(params, vals)])
                 if ret == "void":
@@ -1983,12 +2127,17 @@ class Emitter:
             if cls not in self.registry:
                 raise JavaError(
                     f"invokestatic {cls}.{mname}{desc}: class is not in the linked set")
+            # 静态方法可以继承：沿超类链找到**声明它的**那个类再取名。
+            owner, mm = self._impl(cls, mname, desc)
+            if owner is None or mm.code is None:
+                raise JavaError(
+                    f"invokestatic {cls}.{mname}{desc}: no definition in the linked set")
             params, ret = parse_method_descriptor(desc)
             n = len(params)
             vals = [""] * n
             for i in range(n - 1, -1, -1):
                 vals[i] = self._pop(params[i], h0 - n + i)
-            sym = mangle(self.module, cls, mname, desc)
+            sym = mangle(self.module, owner, mname, desc)
             argtxt = ", ".join(f"{t} {v}" for t, v in zip(params, vals))
             if ret == "void":
                 self.emit(f"call void @{sym}({argtxt})")
@@ -2001,6 +2150,19 @@ class Emitter:
             e = self._pop("ptr", h0 - 1)
             self.emit(f"store ptr {e}, ptr @__jrt_exc_{self.module}")
             self._check_exc(x)
+        elif name in ("tableswitch", "lookupswitch"):
+            key = self._pop("i32", h0 - 1)
+            dflt, table = x.args
+            lbl = self.lbl
+            self.lbl += 1
+            self.emit(f"br label %S{lbl}_0")
+            for i, (val, target) in enumerate(table):
+                self.lines.append(f"S{lbl}_{i}:")
+                c = self.t()
+                self.emit(f"{c} = icmp eq i32 {key}, {val}")
+                self.emit(f"br i1 {c}, label %L{target}, label %S{lbl}_{i + 1}")
+            self.lines.append(f"S{lbl}_{len(table)}:")
+            self.emit(f"br label %L{dflt}")
         elif name == "goto":
             self.emit(f"br label %L{x.args[0]}")
         elif name == "ireturn":
@@ -2018,7 +2180,7 @@ class Emitter:
 
 
 def emit_method_ir(module: str, cls: str, m: Method, pool: list,
-                   registry: dict, metas: dict,
+                   registry: dict, metas: dict, class_ids: dict,
                    globals_: list) -> tuple[str, str, str] | None:
     is_static = bool(m.access & ACC_STATIC)
     is_ctor = m.name == "<init>"
@@ -2049,7 +2211,7 @@ def emit_method_ir(module: str, cls: str, m: Method, pool: list,
         slots.append(slot)
         slot += 2 if t == "i64" else 1
     em = Emitter(insns, heights, m.max_stack, params, slots, ret, pool, module, cls,
-                 registry, metas, globals_, m.exc)
+                 registry, metas, class_ids, globals_, m.exc)
     body = em.run()
     def irty(t: str) -> str:
         return "void" if t == "void" else t
@@ -2067,10 +2229,31 @@ def emit(module: str, classes: list[ClassFile], ir_path: Path,
     registry = {cf.name: cf for cf in classes}
     metas: dict[str, ClassMeta] = {}
     globals_: list[str] = []
+    # 类号按名字排序 —— 同一个输入集必须得到同一套号（可复现）。0 留给
+    # "不是 `new` 出来的对象"（String、数组），所以从 1 开始。
+    class_ids = {name: i + 1 for i, name in enumerate(sorted(registry))}
+    # 子类先算完超类：字段偏移从超类对象的末尾接着排，虚分派的"谁是子类"也靠它。
+    order: list[ClassFile] = []
+    placed: set[str] = set()
+
+    def _place(cf: ClassFile, depth: int = 0) -> None:
+        if cf.name in placed or depth > 64:
+            return
+        sup = registry.get(cf.super_name) if cf.super_name else None
+        if sup is not None:
+            _place(sup, depth + 1)
+        if cf.name in placed:
+            return
+        placed.add(cf.name)
+        order.append(cf)
+
     for cf in classes:
+        _place(cf)
+    for cf in order:
+        sup_meta = metas.get(cf.super_name) if cf.super_name else None
         layout: dict[str, tuple[int, str]] = {}
         static_layout: dict[str, tuple[str, str]] = {}
-        off = 8
+        off = sup_meta.size if sup_meta is not None else 8
         for f in cf.fields:
             ty = desc_type(f.desc)
             if f.access & ACC_STATIC:
@@ -2087,7 +2270,8 @@ def emit(module: str, classes: list[ClassFile], ir_path: Path,
     funcs: list[tuple[str, str, str, list[str], str, bool, str]] = []
     for cf in classes:
         for m in cf.methods:
-            got = emit_method_ir(module, cf.name, m, cf.pool, registry, metas, globals_)
+            got = emit_method_ir(module, cf.name, m, cf.pool, registry, metas,
+                                 class_ids, globals_)
             if got is None:
                 continue
             sym, text, name, is_static = got

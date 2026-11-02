@@ -366,6 +366,56 @@ fn _start() {
 
 
 @test
+def test_inheritance_and_virtual_dispatch():
+    """#1059: a base-typed receiver dispatches to the subclass's override.
+
+    `ShapeLib.total(Shape, Shape)` calls `area()` on the base type; the two
+    arguments are a `Square` and a `Rect`. Closed-world dispatch compares the
+    object's class id and calls the matching implementation directly.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "deps" / "shapelib").mkdir(parents=True)
+        jar = FIX.parent.parent / "shapelib.jar"
+        ir, _iface = _emit(jar, "shapelib", d / "deps" / "shapelib")
+        rc = _build_and_run(d, ir, """module app
+use shapelib
+
+fn _start() {
+    let a: i32 = shapelib_ShapeLib_run();
+    let b: i32 = shapelib_ShapeLib_plain();
+    syscall4(60, ((a - 17) + (b - 11)) as u64, 0, 0);
+}
+""")
+        assert rc == 0, rc
+        print(f"      Square/Rect/Shape dispatch -> 17 and 11 on "
+              f"{'PE' if sys.platform == 'win32' else 'ELF'}")
+
+
+@test
+def test_switch_tables_and_sparse():
+    """#1059: `tableswitch` and `lookupswitch` lower to compare chains."""
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "deps" / "switchlib").mkdir(parents=True)
+        jar = FIX.parent.parent / "switchlib.jar"
+        ir, _iface = _emit(jar, "switchlib", d / "deps" / "switchlib")
+        rc = _build_and_run(d, ir, """module app
+use switchlib
+
+fn _start() {
+    let a: i32 = switchlib_pick(3);
+    let b: i32 = switchlib_sparse(1000);
+    let c: i32 = switchlib_pick(9);
+    syscall4(60, ((a - 30) + (b - 7) + (c + 1)) as u64, 0, 0);
+}
+""")
+        assert rc == 0, rc
+        print(f"      tableswitch/lookupswitch -> 30, 7, -1 on "
+              f"{'PE' if sys.platform == 'win32' else 'ELF'}")
+
+
+@test
 def test_merge_removes_satisfied_declaration():
     """The merged IR has no extern declaration for a symbol defined in a second input."""
     with tempfile.TemporaryDirectory() as td:

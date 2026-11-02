@@ -604,7 +604,7 @@ fn catalog(mem: ptr, fd: u64) {
     sec(mem, fd, "COMPILE & RUN");
     row(mem, fd, "ir", "FILE", "print LLVM IR to stdout");
     row(mem, fd, "check", "FILE", "check only, discard IR (diagnostics on stderr)");
-    row(mem, fd, "build", "FILE [-o NAME] [--link OBJ...] [--opt]", "compile and link to an executable");
+    row(mem, fd, "build", "FILE [-o NAME] [--link OBJ...] [--opt] [--profile hotswap]", "compile and link to an executable");
     row(mem, fd, "run", "FILE [--link OBJ...] [--opt]", "compile, link and run");
     row(mem, fd, "version", "", "print the version line");
     row(mem, fd, "lsp", "", "language server over stdio");
@@ -693,7 +693,7 @@ fn help_of(mem: ptr, fd: u64, cmd: ptr, n: u32) -> u32 {
         return 0;
     }
     if eq_cstr(cmd, n, "build") {
-        usage_line(mem, fd, "build", "FILE [-o NAME] [--link OBJ...] [--opt]", "Compile and link to an executable.\n  -o takes a name WITHOUT an extension: -o hi gives hi.exe on Windows, hi on Linux.\n  --link OBJ adds a foreign ELF object (FFI): give the .o you compiled yourself.\n  A self-contained object needs nothing else. An object that carries undefined symbols is\n  refused by default; the launcher passes --allow-ports in both channels (open since\n  2026-10-17, docs/222 sec 4.5). Calling the self-hosted lomelf directly needs that flag.\n  --opt hands the IR to clang -O2 when clang is installed (ELF) -- the same optimizer C\n  and Rust use; without clang it says so and falls back to the self-hosted lomelf linker.");
+        usage_line(mem, fd, "build", "FILE [-o NAME] [--link OBJ...] [--opt] [--profile hotswap]", "Compile and link to an executable.\n  -o takes a name WITHOUT an extension: -o hi gives hi.exe on Windows, hi on Linux.\n  --link OBJ adds a foreign ELF object (FFI): give the .o you compiled yourself.\n  A self-contained object needs nothing else. An object that carries undefined symbols is\n  refused by default; the launcher passes --allow-ports in both channels (open since\n  2026-10-17, docs/222 sec 4.5). Calling the self-hosted lomelf directly needs that flag.\n  --opt hands the IR to clang -O2 when clang is installed (ELF) -- the same optimizer C\n  and Rust use; without clang it says so and falls back to the self-hosted lomelf linker.\n  --profile hotswap emits a slot table and an entry gate so the artifact can be replaced\n  in place by a hot update (ELF only; docs/281).");
         return 0;
     }
     if eq_cstr(cmd, n, "run") {

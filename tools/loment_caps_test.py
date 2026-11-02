@@ -108,8 +108,13 @@ def test(fn):
 #: 2026-10-21（`#1149` / `#1150`）：`loment/tools/lomelf.lomt` 新增三条**有守卫**的容量 ——
 #: `HS_MAX`（槽表）、`HS_MAXN`（单函数槽 / alloca 上界）、`ORD_MAX`（调用目标次序表）。
 #: 三条越界都点名拒绝，所以"沉默"那份不跟着动。条数 **239**。
-CAPACITY_SITES = 239
-SILENT_SITES = 155
+#:
+#: 2026-10-22（`#1151`）：`loment/lib/hotswap.lomt` 的六个常量进了口径 —— 两个是步长
+#: （`HOT_STRIDE` / `HOT_RELOC`）、一个是记录长度（`HOT_FUNC`）、三个是装载件的头长 /
+#: 摘要长度 / 槽表上限。它们都在 `EXPLAINED` 里写清来路（装载器用**返回码**点名，
+#: 不在这里终止进程）。条数 239 → **245**、沉默 155 → **161**。
+CAPACITY_SITES = 245
+SILENT_SITES = 161
 
 #: 第二类：字面量上界（`#770`）。`[T; N]` 与 `literal:<N>` 各自钉住总数与沉默的那一份。
 LITERAL_SITES = 63
@@ -159,6 +164,12 @@ SILENT_NAMES = frozenset((
     "H",
     "HASH_LEN",
     "IN_CAP",
+    "HOT_DIG",
+    "HOT_FUNC",
+    "HOT_HDR",
+    "HOT_MAX_FN",
+    "HOT_RELOC",
+    "HOT_STRIDE",
     "J_NODE_STRIDE",
     "J_PL",
     "J_PS",

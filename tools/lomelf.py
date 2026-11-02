@@ -6273,7 +6273,9 @@ CONSCRIPT = ("memcpy", "memset", "memcmp", "__stack_chk_fail", "malloc", "free")
 _TLS_SIZE = 256
 
 
-def hot_metadata(funcs: list[dict], header: dict | None = None) -> str:
+def hot_metadata(funcs: list[dict], header: dict | None = None,
+                 base: int | None = None,
+                 relocs: list[tuple[int, int]] | None = None) -> str:
     """`.lomhot` 的文本形（`#1149` / `#1150`）。
 
     顺序是**确定的**：函数按 IR 顺序，调用点按发射顺序。调用点偏移是**函数相对**的
@@ -6292,6 +6294,12 @@ def hot_metadata(funcs: list[dict], header: dict | None = None) -> str:
         out.append(row)
         for cid, off in fn["calls"]:
             out.append(f"call {cid} at={off}")
+    # 绝对地址的重定位表（`#1151`）：装载器把第二份镜像摆到别的槽时，按 `新基址 - base`
+    # 逐条改这些 8 字节。PC 相对的那些（call/jmp/jcc）**不在表里** —— 整体平移时不改。
+    if base is not None:
+        out.append(f"base {base}")
+        for off, tgt in relocs or ():
+            out.append(f"reloc {off} {tgt}")
     return "\n".join(out) + "\n"
 
 
@@ -6762,8 +6770,13 @@ def compile_ll(text: str, objects: list | None = None,
         "funcs": [f.name for f in funcs], "objects": [o.name for o in objects],
         "linked": appended, "relocs": applied,
         "shared": [s.soname for s in shared], "imports": imported,
-        "hot": hot_metadata(em.hot_funcs, em.hot_header if hotswap else None)
-               if collect_hot else "",
+        "hot": hot_metadata(
+            em.hot_funcs,
+            em.hot_header if hotswap else None,
+            em.asm.base,
+            [(site - em.asm.base, em.asm.labels[lbl])
+             for site, lbl, _w, kind in em.asm.fixups if kind == "abs"],
+        ) if collect_hot else "",
     }
 
 

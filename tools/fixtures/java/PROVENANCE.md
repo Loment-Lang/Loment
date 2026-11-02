@@ -82,3 +82,9 @@ Runtime pieces (#1060), same `javac 23`:
 4e9dea923423550d38053e00d16ca95993ce4dd1d3c83a9f30eca35bc79b027d  concatlib.jar
 20751afefaaead43b34481670eb15b0a84efd95524c48e35d0b46f4415fec428  boxlib.jar
 ```
+
+`initlib.jar` (class-init order and laziness), `--release 8`:
+
+```
+5976e0d72dd45165958336472e7fb041a9476aad69ed1b0dd6533394ef1a55fc  initlib.jar
+```

@@ -533,6 +533,32 @@ fn _start() {
 
 
 @test
+def test_class_initialisation_is_lazy_and_ordered():
+    """#1059: `<clinit>` runs on first use, superclass first, and only once.
+
+    `B extends A`: touching `B` initialises `A` then `B`; `C` is never touched,
+    so its initialiser must never run (an eager "run every <clinit>" would).
+    """
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "deps" / "initlib").mkdir(parents=True)
+        jar = FIX.parent.parent / "initlib.jar"
+        ir, _iface = _emit(jar, "initlib", d / "deps" / "initlib")
+        rc, out, _err = _build_and_run_io(d, [ir], """module app
+use initlib
+
+fn _start() {
+    let a: i32 = initlib_InitLib_single();
+    let b: i32 = initlib_InitLib_run();
+    syscall4(60, ((a - 1) + (b - 1)) as u64, 0, 0);
+}
+""")
+        assert rc == 0, rc
+        assert out == b"A" + bytes([10]) + b"B" + bytes([10]), out
+        print(f"      class init -> {out!r} (C never ran)")
+
+
+@test
 def test_merge_removes_satisfied_declaration():
     """The merged IR has no extern declaration for a symbol defined in a second input."""
     with tempfile.TemporaryDirectory() as td:

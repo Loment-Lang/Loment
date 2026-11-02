@@ -1503,7 +1503,7 @@ class Emitter:
                  params: list[str], param_slots: list[int], ret: str, pool: list,
                  module: str, own_class: str, registry: dict, metas: dict,
                  class_ids: dict, globals_: list, exc: list | None = None,
-                 bootstrap: list | None = None):
+                 bootstrap: list | None = None, class_init: dict | None = None):
         self.insns = insns
         self.heights = heights
         self.max_stack = max_stack
@@ -1518,6 +1518,7 @@ class Emitter:
         #: 对象的头 4 字节是类号（0 = 非 `new` 出来的东西：String、数组、异常垫片）。
         self.class_ids = class_ids
         self.bootstrap = bootstrap or []
+        self.class_init = class_init or {}
         self.globals = globals_
         self.exc = exc or []
         self.strn = 0
@@ -1688,6 +1689,12 @@ class Emitter:
         return "\n".join(self.lines)
 
     # ---- 继承：字段与实现都沿超类链找 -------------------------------------
+
+    def _ensure_init(self, cls: str) -> None:
+        """JVMS §5.5：静态字段访问、`new`、静态方法调用都先初始化那个类。"""
+        fn = self.class_init.get(cls)
+        if fn is not None:
+            self.emit(f"call void @{fn}()")
 
     def _field(self, cls: str, name: str, static: bool):
         """沿超类链找字段，返回它**声明类**给出的 (偏移/符号, IR 类型)。"""
@@ -2052,6 +2059,7 @@ class Emitter:
             pass
         elif name == "new":
             cls = _class_name(self.pool, x.args[0])
+            self._ensure_init(cls)
             if cls == "java/lang/StringBuilder":
                 # 运行期对象（jrt 管它的布局）；`<init>` 只做初值，见 invokespecial。
                 sb = self.t()
@@ -2074,6 +2082,7 @@ class Emitter:
                 self._push("ptr", p, h0)
         elif name in ("getstatic", "putstatic"):
             cls, fname, desc = fieldref(self.pool, x.args[0])
+            self._ensure_init(cls)
             # `System.out` / `System.err` are PrintStream objects in Java; here
             # they are just the file descriptor, carried as a pointer constant.
             if (name == "getstatic" and cls == "java/lang/System"
@@ -2405,6 +2414,7 @@ class Emitter:
             vals = [""] * n
             for i in range(n - 1, -1, -1):
                 vals[i] = self._pop(params[i], h0 - n + i)
+            self._ensure_init(owner)
             sym = mangle(self.module, owner, mname, desc)
             argtxt = ", ".join(f"{t} {v}" for t, v in zip(params, vals))
             if ret == "void":
@@ -2477,7 +2487,8 @@ class Emitter:
 def emit_method_ir(module: str, cls: str, m: Method, pool: list,
                    registry: dict, metas: dict, class_ids: dict,
                    globals_: list,
-                   bootstrap: list | None = None) -> tuple[str, str, str] | None:
+                   bootstrap: list | None = None,
+                   class_init: dict | None = None) -> tuple[str, str, str] | None:
     is_static = bool(m.access & ACC_STATIC)
     is_ctor = m.name == "<init>"
     is_clinit = m.name == "<clinit>"
@@ -2508,13 +2519,21 @@ def emit_method_ir(module: str, cls: str, m: Method, pool: list,
         slots.append(slot)
         slot += 2 if t == "i64" else 1
     em = Emitter(insns, heights, m.max_stack, params, slots, ret, pool, module, cls,
-                 registry, metas, class_ids, globals_, m.exc, cf_bootstrap)
+                 registry, metas, class_ids, globals_, m.exc, cf_bootstrap,
+                 class_init or {})
     body = em.run()
     def irty(t: str) -> str:
         return "void" if t == "void" else t
     argtxt = ", ".join(f"{t} %p{i}" for i, t in enumerate(params))
     rt = irty(ret)
-    text = [f"define internal {rt} @{sym}({argtxt}) {{", "entry:", body, "}"]
+    own_init = (class_init or {}).get(cls)
+    pro = f"  call void @{own_init}()" if own_init and not is_clinit else None
+    lines = [f"define internal {rt} @{sym}({argtxt}) {{", "entry:"]
+    if pro:
+        lines.append(pro)
+    lines.append(body)
+    lines.append("}")
+    text = lines
     return sym, "\n".join(text), m.name, is_static
 
 
@@ -2564,35 +2583,53 @@ def emit(module: str, classes: list[ClassFile], ir_path: Path,
                 off += 8
         metas[cf.name] = ClassMeta(layout, static_layout, off)
 
+    # 每类一个惰性初始化桩：类第一次被用到时跑一次它的 `<clinit>`，**先**跑
+    # 超类的（JVMS §5.5）。模块里不再有一口气全跑的初始化。
+    def _key(name: str) -> str:
+        return re.sub(r"[^A-Za-z0-9_]", "_", name)
+
+    clinit_syms: dict[str, str] = {}
+    for cf in order:
+        for m in cf.methods:
+            if m.name == "<clinit>" and m.code is not None:
+                clinit_syms[cf.name] = mangle(module, cf.name, m.name, m.desc)
+    class_init: dict[str, str] = {}
+    for cf in order:
+        k = _key(cf.name)
+        fn = f"__jl_clinit_{module}_{k}"
+        class_init[cf.name] = fn
+        guard = f"@__jl_clinit_done_{module}_{k}"
+        sup = cf.super_name if cf.super_name in registry else None
+        lines = [f"{guard} = internal global i32 0",
+                 f"define internal void @{fn}() {{",
+                 "entry:",
+                 f"  %s = load i32, ptr {guard}",
+                 "  %n = icmp ne i32 %s, 0",
+                 "  br i1 %n, label %done, label %run",
+                 "run:",
+                 f"  store i32 1, ptr {guard}"]
+        if sup is not None:
+            lines.append(f"  call void @{class_init[sup]}()")
+        own = clinit_syms.get(cf.name)
+        if own is not None:
+            lines.append(f"  call void @{own}()")
+        lines += ["  br label %done", "done:", "  ret void", "}"]
+        globals_.extend(lines)
+
     funcs: list[tuple[str, str, str, list[str], str, bool, str]] = []
     for cf in classes:
         for m in cf.methods:
             got = emit_method_ir(module, cf.name, m, cf.pool, registry, metas,
-                                 class_ids, globals_, cf.bootstrap)
+                                 class_ids, globals_, cf.bootstrap,
+                                 class_init)
             if got is None:
                 continue
             sym, text, name, is_static = got
             params, ret = parse_method_descriptor(m.desc)
             funcs.append((sym, text, name, params, ret, is_static, cf.name))
     funcs.sort(key=lambda x: (x[6], x[2], x[0]))
-    init_sym = f"__jl_init_{module}"
-    inited = f"@__jl_inited_{module}"
-    globals_.append(f"{inited} = internal global i32 0")
-    clinits = [x[0] for x in funcs if x[2] == "<clinit>"]
-    init_lines = [
-        f"define internal void @{init_sym}() {{",
-        "entry:",
-        f"  %s = load i32, ptr {inited}",
-        "  %n = icmp ne i32 %s, 0",
-        "  br i1 %n, label %done, label %run",
-        "run:",
-        f"  store i32 1, ptr {inited}",
-    ]
-    init_lines += [f"  call void @{s}()" for s in clinits]
-    init_lines += ["  br label %done", "done:", "  ret void", "}"]
     ir_text = ("\n\n".join(globals_) + "\n\n" +
                "\n\n".join(x[1] for x in funcs) + "\n\n" +
-               "\n".join(init_lines) + "\n\n" +
                _JRT_DECLS + "\n\n" + _jrt_alloc_ir(module))
     if len(ir_text.encode("utf-8")) > MAX_IR_BYTES:
         raise JavaError(
@@ -2600,8 +2637,7 @@ def emit(module: str, classes: list[ClassFile], ir_path: Path,
     ir_path.write_text(ir_text, encoding="utf-8", newline="\n")
 
     exc_fn = f"__jl_exc_{module}"
-    decls = [f"extern fn {init_sym}();",
-             f"extern fn {exc_fn}() -> bool;",
+    decls = [f"extern fn {exc_fn}() -> bool;",
              "extern fn jrt_uncaught();"]
     bodies: list[str] = []
     used: set[str] = set()
@@ -2632,7 +2668,6 @@ def emit(module: str, classes: list[ClassFile], ir_path: Path,
         else:
             decls.append(f"extern fn {sym}({args}) -> {ret};")
         bodies.append(f"pub fn {alias}({args}){rt} {{")
-        bodies.append(f"    {init_sym}();")
         if ret == "void":
             bodies.append(f"    {sym}({call});")
         else:

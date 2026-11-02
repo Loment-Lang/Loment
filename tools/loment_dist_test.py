@@ -491,6 +491,40 @@ def test_install_sh(tar: Path) -> None:
           r.returncode == 0 and "Compile and link to an executable" in r.stdout,
           (r.stdout or r.stderr)[:140])
 
+    # #659: `--max` 后面没跟数 —— 那是**启动器**的用法错，不是渲染器的。
+    # 修之前它被原样转发成裸 `--max`，lomenterr 把诊断文件当成上限、打自己的 usage，
+    # 用户的编译错误一条都看不到。
+    r = wsl(f"{PREFIX_IT}/bin/loment", "check", ex, "--max")
+    out = (r.stdout or "") + (r.stderr or "")
+    check("`loment check FILE --max` 是启动器的用法错，不是渲染器的 (#659)",
+          r.returncode == 2 and "--max needs a number" in out
+          and "usage: lomenterr" not in out, f"rc={r.returncode} out={out[-200:]}")
+
+    # #673: 编译器写完一条诊断之后**被信号杀死**。只渲染那条记录，读起来像一次普通
+    # 编译错误 —— 用户看不出编译器根本没跑完。这里用一个会 SIGSEGV 的假驱动验它。
+    drv = f"{PREFIX_IT}/bin/loment-driver"
+    wsl("mv", drv, drv + ".real")
+    stub = IT_OUT / "crash-driver.sh"
+    stub.write_text(
+        "#!/bin/sh\n"
+        "while [ $# -gt 0 ]; do\n"
+        "  case \"$1\" in --diag-out) shift; d=$1 ;; esac\n"
+        "  shift\n"
+        "done\n"
+        "printf '{\"file\":\"x.lomt\",\"line\":1,\"col\":1,\"code\":\"E002\","
+        "\"message\":\"m\"}\\n' > \"$d\"\n"
+        "kill -SEGV $$\n", encoding="utf-8", newline="\n")
+    wsl("cp", wsl_path(stub), drv)
+    wsl("chmod", "755", drv)
+    r = wsl(f"{PREFIX_IT}/bin/loment", "check", ex)
+    wsl("rm", "-f", drv)
+    wsl("mv", drv + ".real", drv)
+    out = (r.stdout or "") + (r.stderr or "")
+    check("编译器写了一条诊断后被信号杀死：说破，且退出码不压成 1 (#673)",
+          r.returncode == 139 and "killed by signal 11" in out
+          and "may be incomplete" in out and "E002" in out,
+          f"rc={r.returncode} out={out[-260:]}")
+
     # 缺件时的报错要指名：临时把 fmt 拿掉，`loment fmt` 应该明确说"这个包没包含"
     wsl("rm", "-f", f"{PREFIX_IT}/bin/loment-fmt")
     r = wsl(f"{PREFIX_IT}/bin/loment", "fmt",

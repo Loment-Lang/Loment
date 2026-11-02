@@ -462,6 +462,10 @@ ASCII_ONE_LINER: dict[int, str] = {
     # E9xx: internal. `loment codes` lists this block after the user codes
     # (`#773`: a tool that dies without a record is still a failure that must speak).
     900: "a tool in the chain died before it could report (internal) - report it with the unit",
+    # E999 is the fallback (`classify()` lands here when no rule matches), not a member of
+    # the internal series: it sits at the top of the range on purpose (`loment_diag`'s
+    # emitter excludes it from the "contiguous internal block" invariant too).
+    999: "unclassified - please report it",
 }
 
 

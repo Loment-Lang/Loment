@@ -505,6 +505,7 @@ pub fn code_ascii(c: u32) -> str {
     if c == 37 { return "an LSPE policy lock does not match this artifact"; }
     if c == 38 { return "an `lspe pass` block with no reason"; }
     if c == 900 { return "a tool in the chain died before it could report (internal) - report it with the unit"; }
+    if c == 999 { return "unclassified - please report it"; }
     return "";
 }
 

@@ -149,6 +149,8 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "lspe_test", "potato_
                  "loment_update_test",
                  # 发布侧的热更新清单（`#1153`）：字段全部由树算出来，稳定版也带、准入拒绝。
                  "loment_hotfix_test",
+                 # 暂存目录（`#1154`）：fetch 在进程外，换的那条路只看目录、不开 socket。
+                 "loment_staging_test",
                  # 热更新的元数据（`#1149`）：帧布局哈希 + 调用点表，且采集是加性的。
                  "loment_hotmeta_test",
                  # 热更新构建档（`#1150`）：槽表 + 入口闸；默认档与 origin/main 逐字节对拍，
@@ -406,6 +408,8 @@ SHARD_COST = {
     "loment_update_test": 9.4,
     # 2026-11-03（#1153）：本机 Windows 实测 1.2s（七棵树拷出来各算一遍 + 一次真签真验）。
     "loment_hotfix_test": 1.2,
+    # 2026-11-03（#1154）：本机 Windows 实测 1.0s（四棵树 + 几份真签名候选）。
+    "loment_staging_test": 1.0,
     # 2026-10-21（#1149）：本机 Windows 实测 0.8s（四份小源各编一次 + 一次 CLI）。
     "loment_hotmeta_test": 0.8,
     # 2026-10-21（#1150）：本机 Windows 实测 1.7s（含一次 WSL 跑两个 ELF）。

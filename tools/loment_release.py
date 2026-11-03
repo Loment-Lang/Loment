@@ -378,6 +378,8 @@ GLOBS = [
     "tools/loment_update.py", "tools/loment_update_test.py",
     # 发布侧的清单（`#1153`）：`hotfix.json` 由树算出来，先落盘再算校验和。**同位置**。
     "tools/loment_hotfix.py", "tools/loment_hotfix_test.py",
+    # 暂存目录（`#1154`）：fetch 在进程外，换的那条路只看目录。**同位置**。
+    "tools/loment_staging.py", "tools/loment_staging_test.py",
     # 元数据（`#1149`）：帧布局哈希 + 调用点表。**插入位置与 lomrel.lomt 逐行对齐**。
     "tools/loment_hotmeta_test.py",
     # 构建档（`#1150`）：槽表 + 入口闸。**插入位置与 lomrel.lomt 逐行对齐**。

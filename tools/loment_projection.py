@@ -76,8 +76,14 @@ class Projection:
         }
 
 
+#: `cherry-pick` 会**造一个提交**，所以它需要一个 committer 身份。CI 上没有全局
+#: `user.name`/`user.email`，现场就会失败 —— 而失败被归进 `depends-on-feature`，
+#: 看起来像"这个 fix 依赖功能"。身份由我们自己给，别依赖机器上的配置。
+_IDENT = ["-c", "user.email=hotfix@loment.invalid", "-c", "user.name=hotfix"]
+
+
 def _git(tree: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", "-C", str(tree), *args],
+    return subprocess.run(["git", *_IDENT, "-C", str(tree), *args],
                           capture_output=True, text=True, check=check)
 
 
@@ -166,6 +172,8 @@ def project(tree: Path, base_ref: str, tip_ref: str, work: Path, *,
         if cp.returncode != 0:
             _git(work, "cherry-pick", "--abort", check=False)
             proj.evicted.append(Step(sha, subject, "depends-on-feature"))
+            if not proj.detail:
+                proj.detail = (cp.stderr or cp.stdout).strip().splitlines()[-1][:160]
             continue
         if interface_digests(work) != base_digests:
             _git(work, "reset", "--hard", "HEAD~1", check=False)

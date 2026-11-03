@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-# loment_hotcore_test.py — 固定核（`loment/lib/hotswap.lomt`）在真进程里换掉自己（`#1151`）。
+# loment_hotcore_test.py — 固定核（`loment/lib/hotswap.lomt`）在真进程里换掉自己（`#1151`/`#1152`）。
 #
-# 探针是一个真的 Loment 程序：它先调自己的 `add(1,2)`（走槽表），把装载件交给固定核，
-# 再调一次 —— 第二次必须落到候选镜像的实现上。固定核自己做 mmap / mprotect / 摘要比对 /
-# 槽表改写 / epoch 发布，全部是 Loment。
+# 探针是一个真的 Loment 程序：`nest()` 递归到第 `DEPTH` 层，在最里面把装载件交给固定核，
+# 然后**每一层都接着跑**。返回地址在换之前属于旧镜像，换之后必须落到新镜像上 ——
+# 于是每层读到的版本常量必须来自**新**实现。`tag` 是函数体里的字面量，不是查表、
+# 不是环境变量：只有返回地址真的被改写了，它才会变。
+#
+# 固定核自己做 mmap / mprotect / 摘要比对 / 槽表改写 / 帧链重映射 / epoch 发布，全是 Loment。
 
 from __future__ import annotations
 
@@ -24,7 +27,6 @@ import lomelf  # noqa: E402
 import loment_hotload as hl  # noqa: E402
 
 TESTS: list = []
-MAGIC = 0x4C544F48
 
 
 def test(fn):
@@ -36,6 +38,8 @@ PROBE = """module hotcore
 choose runtime
 use bytes
 use hotswap
+
+const DEPTH: u32 = 4;
 
 fn write_all(fd: u64, p: ptr, n: u64) -> i64 {
     let off: u64 = 0;
@@ -74,8 +78,18 @@ fn wdec(fd: u64, v: u32) -> i64 {
     return write_all(fd, ptr_add(buf, 32), d as u64);
 }
 
-fn add(a: u32, b: u32) -> u32 {
-    return a + b;
+//: 递归层。`tag` 是**函数体里的字面量** —— 两个构建只差这一个数。
+fn nest(d: u32, ctx: ptr, blob: ptr, n: u32, save: ptr) -> u32 {
+    store32(ctx, 0, load32(ctx, 0) + 1);
+    let inner: u32 = 0;
+    if d > 0 {
+        inner = nest(d - 1, ctx, blob, n, save);
+    } else {
+        let rc: u32 = hot_install(blob, n, save);
+        store32(ctx, 4, rc);
+    }
+    let tag: u32 = 1;
+    return inner + tag;
 }
 
 fn _start() -> u32 {
@@ -96,48 +110,81 @@ fn _start() -> u32 {
         let _e: i64 = wstr(1, "NOFILE\\n");
         return 1;
     }
+    let ctx: ptr = ptr_add(buf, 64);
     let data: ptr = ptr_add(buf, 256);
     let save: ptr = ptr_add(buf, 131072);
+    // 一块"索引"：换之前由**旧代码**写满，换之后由**新代码**读回来（`#1155`）。
+    let idx: ptr = ptr_add(buf, 160000);
+    let k: u32 = 0;
+    while k < 256 {
+        store8(idx, k, (k * 7 + 3) as u8);
+        k = k + 1;
+    }
+    store32(ctx, 0, 0);
+    store32(ctx, 4, 0);
     let n: i64 = syscall4(0, fd as u64, data as u64, 200000);
     syscall4(3, fd as u64, 0, 0);
-    let before: u32 = add(1, 2);
-    let rc: u32 = hot_install(data, n as u32, save);
-    let after: u32 = add(1, 2);
+    let sum: u32 = nest(DEPTH, ctx, data, n as u32, save);
+    let count: u32 = load32(ctx, 0);
+    let rc: u32 = load32(ctx, 4);
+    let done: u32 = load32(save, 16384);
     let sb: u32 = load32(data, 4);
     let sg: u32 = load32(data, 12);
-    let tl: u32 = load32(data, 32);
-    let span: u32 = (tl + 4095) / 4096 * 4096;
-    let ep: u32 = load32(sb as ptr, sg + 6);
+    let ep: u32 = load32(sb as ptr, sg + 10);
     let ev: u32 = load32(ep as ptr, 0);
-    let after2: u32 = 0;
-    let rr: u32 = 0;
-    let rel: u32 = 0;
-    if rc == 0 {
-        rr = hot_restore(data, n as u32, save, sb);
-        after2 = add(1, 2);
-        rel = hot_release(268435456, span);
+    let ck: u32 = 0;
+    k = 0;
+    while k < 256 {
+        ck = ck + load8(idx, k);
+        k = k + 1;
     }
-    let ev2: u32 = load32(ep as ptr, 0);
-    let _a: i64 = wstr(1, "BEFORE ");
-    let _b: i64 = wdec(1, before);
-    let _c: i64 = wstr(1, " AFTER ");
-    let _d: i64 = wdec(1, after);
+    let _a: i64 = wstr(1, "SUM ");
+    let _b: i64 = wdec(1, sum);
+    let _c: i64 = wstr(1, " COUNT ");
+    let _d: i64 = wdec(1, count);
     let _e2: i64 = wstr(1, " RC ");
     let _f: i64 = wdec(1, rc);
-    let _g: i64 = wstr(1, " RESTORED ");
-    let _h: i64 = wdec(1, after2);
-    let _i: i64 = wstr(1, " RR ");
-    let _j: i64 = wdec(1, rr);
-    let _k: i64 = wstr(1, " RELEASE ");
-    let _l: i64 = wdec(1, rel);
-    let _m: i64 = wstr(1, " EPOCH ");
-    let _n: i64 = wdec(1, ev);
-    let _o: i64 = wstr(1, " EPOCH2 ");
-    let _p: i64 = wdec(1, ev2);
+    let _g: i64 = wstr(1, " DONE ");
+    let _h: i64 = wdec(1, done);
+    let _i: i64 = wstr(1, " EPOCH ");
+    let _j: i64 = wdec(1, ev);
+    let _x: i64 = wstr(1, " IDX ");
+    let _y: i64 = wdec(1, ck);
     let _q: i64 = wstr(1, "\\n");
     return 0;
 }
 """
+
+#: 想换成新实现的构建：把版本常量改成 2，其余逐字相同 —— 布局与调用点 id 都不动。
+Q = PROBE.replace("let tag: u32 = 1;", "let tag: u32 = 2;")
+
+#: 帧布局变了：`nest` 多一个临时量。**在栈上**的函数布局一变就必须拒绝。
+Q_LAYOUT = Q.replace(
+    "    let tag: u32 = 2;\n    return inner + tag;",
+    "    let tag: u32 = 2;\n    let extra: u32 = load32(ctx, 8);\n"
+    "    return inner + tag + extra;",
+)
+
+NEST2 = """
+fn nest2(d: u32, ctx: ptr, blob: ptr, n: u32, save: ptr) -> u32 {
+    store32(ctx, 0, load32(ctx, 0) + 1);
+    let inner: u32 = 0;
+    if d > 0 {
+        inner = nest2(d - 1, ctx, blob, n, save);
+    } else {
+        let rc: u32 = hot_install(blob, n, save);
+        store32(ctx, 4, rc);
+    }
+    let tag: u32 = 1;
+    return inner + tag;
+}
+"""
+
+#: 调用点 id 序列变了、布局没变：`nest` 改调同形的 `nest2`（两侧都定义，槽表不变）。
+CALLS_P = PROBE.replace("fn _start() -> u32 {", NEST2 + "\nfn _start() -> u32 {")
+CALLS_Q = (CALLS_P.replace("let tag: u32 = 1;", "let tag: u32 = 2;")
+           .replace("inner = nest(d - 1, ctx, blob, n, save);",
+                    "inner = nest2(d - 1, ctx, blob, n, save);"))
 
 
 def _build(src: str):
@@ -154,26 +201,12 @@ def _build(src: str):
     return blob, meta, hl.text_of(blob, meta)
 
 
-def _blob(pmeta, qmeta, qtext) -> bytes:
-    funcs = sorted((fn["tramp"], fn["entry"]) for fn in qmeta["funcs"].values())
-    out = struct.pack("<12I", MAGIC, pmeta["base"], pmeta["fixed"]["slots"],
-                      pmeta["fixed"]["gate"], 25, qmeta["base"],
-                      qmeta["fixed"]["slots"], qmeta["fixed"]["gate"],
-                      len(qtext), len(qmeta["relocs"]), len(funcs), len(qtext))
-    for off, tgt in qmeta["relocs"]:
-        out += struct.pack("<III", off, tgt & 0xFFFFFFFF, tgt >> 32)
-    for slot, entry in funcs:
-        out += struct.pack("<II", slot, entry)
-    return out + qtext
-
-
 def _run(probe: Path) -> str | None:
     if sys.platform.startswith("linux"):
         r = subprocess.run([str(probe)], cwd=ROOT, capture_output=True, text=True)
         return r.stdout
     if not shutil.which("wsl"):
         return None
-    probe_wsl = subprocess.run(["wsl", "-e", "true"], capture_output=True)
 
     def w(p: Path) -> str:
         s = str(p.resolve()).replace("\\", "/")
@@ -199,10 +232,10 @@ def _fields(out: str) -> dict[str, int]:
     return vals
 
 
-def _case(mutate=None) -> dict[str, int]:
-    pb, pm, _pt = _build(PROBE)
-    qb, qm, qt = _build(PROBE.replace("return a + b;", "return a + b + 1;"))
-    blob = bytearray(_blob(pm, qm, qt))
+def _case(psrc: str, qsrc: str, mutate=None) -> dict[str, int]:
+    pb, pm, _pt = _build(psrc)
+    qb, qm, qt = _build(qsrc)
+    blob = bytearray(hl.build_blob(pm, qm, qt))
     if mutate is not None:
         mutate(blob, pm, qm)
     with tempfile.TemporaryDirectory() as t:
@@ -221,38 +254,69 @@ def _case(mutate=None) -> dict[str, int]:
     return _fields(out)
 
 
-@test
-def test_fixed_core_flips_its_own_table() -> None:
-    got = _case()
+def _skip(got) -> bool:
     if got.get("SKIP"):
         print("SKIP: 没有 WSL/Linux，跑不了 ELF")
+        return True
+    return False
+
+
+@test
+def test_every_live_frame_continues_in_the_new_image() -> None:
+    for depth in (1, 2, 16):
+        src = PROBE.replace("const DEPTH: u32 = 4;", f"const DEPTH: u32 = {depth};")
+        qsrc = Q.replace("const DEPTH: u32 = 4;", f"const DEPTH: u32 = {depth};")
+        got = _case(src, qsrc)
+        if _skip(got):
+            return
+        # 每层都读到新常量 2：只有返回地址被逐帧改写才可能。
+        assert got.get("SUM") == (depth + 1) * 2, (depth, got)
+        # 每层的入口副作用只发生一次。
+        assert got.get("COUNT") == depth + 1, (depth, got)
+        assert got.get("RC") == 0, (depth, got)
+        # 改写过几帧：hot_install 自己 + DEPTH+1 层 nest（`_start` 那帧没有调用点）。
+        assert got.get("DONE") == depth + 2, (depth, got)
+        assert got.get("EPOCH") == 1, (depth, got)
+    print("      N = 1/2/16：每一帧都接着在新镜像里跑（版本常量逐层读到 2），副作用一次")
+
+
+@test
+def test_the_index_survives_the_swap() -> None:
+    """状态不是代码：换之前写满的一块"索引"，换之后由**新代码**原样读回来（`#1155`）。"""
+    got = _case(PROBE, Q)
+    if _skip(got):
         return
-    assert got.get("BEFORE") == 3, got
-    assert got.get("AFTER") == 4, got
+    want = sum((k * 7 + 3) % 256 for k in range(256))
+    assert got.get("IDX") == want, (got, want)
+    assert got.get("SUM") == 10, got       # 5 帧 × 版本常量 2
+    print(f"      索引校验和 {want} 换前换后相同 —— 换的是代码，不是状态")
+
+
+@test
+def test_the_swap_reports_one_epoch() -> None:
+    got = _case(PROBE, Q)
+    if _skip(got):
+        return
     assert got.get("RC") == 0, got
     assert got.get("EPOCH") == 1, got
-    assert got.get("RESTORED") == 3, got
-    assert got.get("RR") == 0, got
-    assert got.get("RELEASE") == 0, got
-    assert got.get("EPOCH2") == 0, got
-    print("      固定核：mmap/翻转 3 -> 4（epoch=1），改回 3，旧槽 munmap（epoch=0）")
+    print("      装完 epoch 是 READY（1）")
 
 
 @test
 def test_tampered_digest_is_refused() -> None:
     def mutate(blob, pm, qm) -> None:
-        at = 48 + len(qm["relocs"]) * 12 + len(qm["funcs"]) * 8 + qm["fixed"]["gate"] + 3
+        at = (hl.HDR + len(qm["funcs"]) * hl.FUNC
+              + sum(len(f["calls"]) for f in qm["funcs"].values()) * hl.CALL
+              + len(qm["relocs"]) * hl.RELOC + qm["fixed"]["gate"] + 3)
         blob[at] ^= 0xFF
 
-    got = _case(mutate)
-    if got.get("SKIP"):
-        print("SKIP: 没有 WSL/Linux，跑不了 ELF")
+    got = _case(PROBE, Q, mutate)
+    if _skip(got):
         return
     assert got.get("RC") == 7, got
-    assert got.get("AFTER") == 3, got
+    assert got.get("SUM") == 5, got
     assert got.get("EPOCH") == 0, got
-    assert got.get("RESTORED") == 0, got
-    print("      候选的闸被改了一个字节 —— RC 7，槽表没动，epoch 仍是 0")
+    print("      候选的闸被改了一个字节 —— RC 7，槽表与帧都没动")
 
 
 @test
@@ -260,14 +324,37 @@ def test_slot_shape_mismatch_is_refused() -> None:
     def mutate(blob, pm, qm) -> None:
         struct.pack_into("<I", blob, 24, qm["fixed"]["slots"] + 1)
 
-    got = _case(mutate)
-    if got.get("SKIP"):
-        print("SKIP: 没有 WSL/Linux，跑不了 ELF")
+    got = _case(PROBE, Q, mutate)
+    if _skip(got):
         return
     assert got.get("RC") == 4, got
-    assert got.get("AFTER") == 3, got
-    assert got.get("RESTORED") == 0, got
+    assert got.get("SUM") == 5, got
     print("      槽表条数不同 —— RC 4，没装")
+
+
+@test
+def test_frame_layout_change_is_refused_by_name() -> None:
+    _pb, pm, _pt = _build(PROBE)
+    slot = pm["funcs"]["nest"]["tramp"]
+    got = _case(PROBE, Q_LAYOUT)
+    if _skip(got):
+        return
+    assert got.get("RC") == (hl.FLAG_LAYOUT << 12) + slot, (slot, got)
+    assert got.get("SUM") == 5, got          # 还是旧实现：每层 1
+    assert got.get("EPOCH") == 0, got
+    print(f"      nest 布局变了 —— 拒绝并点名槽 {slot}（RC 段 {hl.FLAG_LAYOUT}），旧代码照跑")
+
+
+@test
+def test_call_id_change_is_refused_by_name() -> None:
+    _pb, pm, _pt = _build(CALLS_P)
+    slot = pm["funcs"]["nest"]["tramp"]
+    got = _case(CALLS_P, CALLS_Q)
+    if _skip(got):
+        return
+    assert got.get("RC") == (hl.FLAG_CALLS << 12) + slot, (slot, got)
+    assert got.get("SUM") == 5, got
+    print(f"      调用点 id 序列变了 —— 拒绝并点名槽 {slot}（RC 段 {hl.FLAG_CALLS}）")
 
 
 def main() -> int:

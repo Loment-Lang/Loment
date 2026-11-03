@@ -209,9 +209,13 @@ EXPLAINED: dict[tuple[str, str], str] = {
     ("loment/lib/hotswap.lomt", "HOT_RELOC"):
         "一条重定位记录的**字节数**（12），与 `J_NODE_STRIDE` 同形",
     ("loment/lib/hotswap.lomt", "HOT_FUNC"):
-        "一个函数条目的**字节数**（8），同上",
+        "一个函数条目的**字节数**（24：槽、两侧入口、flags、调用点数），同上",
+    ("loment/lib/hotswap.lomt", "HOT_CALL"):
+        "一对（旧偏移，新偏移）的**字节数**（8），同上",
+    ("loment/lib/hotswap.lomt", "HOT_FRAMES"):
+        "帧链最多走 4096 层（`#1152`）；走到就停，不写任何东西",
     ("loment/lib/hotswap.lomt", "HOT_HDR"):
-        "装载件头的长度（48）；`n < HOT_HDR` 那条直接返回 1，调用方按**返回码**点名",
+        "装载件头的长度（56）；`n < HOT_HDR` 那条直接返回 1，调用方按**返回码**点名",
     ("loment/lib/hotswap.lomt", "HOT_DIG"):
         "sha256 摘要的字节数（32），循环上界由算法定",
     ("loment/lib/hotswap.lomt", "HOT_MAX_FN"):

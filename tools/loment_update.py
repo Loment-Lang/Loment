@@ -28,6 +28,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import loment_hotfix as hf
+
 SCHEMA = 1
 
 CONTRACT_GLOB = "lom/*.lom"
@@ -48,6 +50,20 @@ _TAG_RE = re.compile(r"^v(?P<base>\d+\.\d+\.\d+)(?:-(?P<kind>[A-Za-z0-9.]+))?$")
 _SUM_RE = re.compile(r"^([0-9a-f]{64})\s+\*?(.+?)\s*$")
 _CAP_RE = re.compile(r"^\s*capability\s+(.+?)\s*$")
 _RELEASE_RE = re.compile(r'^RELEASE\s*=\s*"([^"]+)"', re.M)
+
+
+class _Progress:
+    """准入的进度：`check` 里六关各 tick 一次（命令行只读这个数）。"""
+
+    def __init__(self, fn) -> None:
+        self.fn = fn
+        self.i = 0
+        self.n = 6
+
+    def tick(self) -> None:
+        self.i += 1
+        if self.fn:
+            self.fn(self.i, self.n)
 
 
 class Reject(Exception):
@@ -77,34 +93,11 @@ def read_release(tree: Path) -> str:
     return m.group(1)
 
 
-def contract_digests(tree: Path) -> dict[str, str]:
-    return {
-        p.relative_to(tree).as_posix(): sha256_file(p)
-        for p in _rel_files(tree, CONTRACT_GLOB)
-    }
-
-
-def capability_manifest(tree: Path) -> list[str]:
-    caps: set[str] = set()
-    for pattern in CAPABILITY_GLOBS:
-        for p in _rel_files(tree, pattern):
-            for line in p.read_text(encoding="utf-8").splitlines():
-                m = _CAP_RE.match(line)
-                if m:
-                    caps.add(m.group(1))
-    return sorted(caps)
-
-
-def fixed_core_files(tree: Path) -> list[str]:
-    listing = tree / FIXED_CORE_LIST
-    if not listing.is_file():
-        return []
-    out: list[str] = []
-    for line in listing.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line and not line.startswith("#"):
-            out.append(line)
-    return out
+#: 契约 / 能力 / 固定核这三样**只在生产者那边定义一次**（`loment_hotfix`）：
+#: 两个实现逐字段同名同编码是这张清单的立身之本，各写一份必然漂。
+contract_digests = hf.contract_digests
+capability_manifest = hf.capability_manifest
+fixed_core_digest = hf.fixed_core_digest
 
 
 def _digest_of_paths(tree: Path, rels: list[str]) -> str:
@@ -116,10 +109,6 @@ def _digest_of_paths(tree: Path, rels: list[str]) -> str:
         h.update(rel.encode("utf-8") + b"\0")
         h.update(sha256_file(p).encode("ascii"))
     return h.hexdigest()
-
-
-def fixed_core_digest(tree: Path) -> str:
-    return _digest_of_paths(tree, fixed_core_files(tree))
 
 
 def identity(tree: Path) -> str:
@@ -143,20 +132,10 @@ def _suffix_number(kind: str) -> int:
 
 
 def manifest(tree: Path, release: str) -> dict:
-    base, _kind, _n = parse_tag(release)
-    return {
-        "schema": SCHEMA,
-        "release": release,
-        "prerelease": "-" in release,
-        "baseline": base,
-        "language": read_release(tree),
-        "contract": contract_digests(tree),
-        "capabilities": capability_manifest(tree),
-        "fixed_core": fixed_core_digest(tree),
-        "identity": identity(tree),
-        "functions": [],
-        "artifact": {},
-    }
+    """和发布侧（`loment_hotfix.build`）**同一份**清单，外加树身份。"""
+    man = hf.build(tree, release)
+    man["identity"] = identity(tree)
+    return man
 
 
 def read_sums(candidate: Path) -> dict[str, str]:
@@ -208,8 +187,13 @@ def _write_state(path: Path, accepted: set[str]) -> None:
 
 
 def check(candidate: Path, tree: Path, *, state: Path | None = None,
-          current: str | None = None, allow_rollback: bool = False) -> dict:
-    """返回候选的清单；任何一条不成立抛 `Reject`。"""
+          current: str | None = None, allow_rollback: bool = False,
+          progress=None) -> dict:
+    """返回候选的清单；任何一条不成立抛 `Reject`。
+
+    `progress(i, n)` 在每一关之前被叫一次 —— 命令行用它画进度条，准入的判断只有这一份。
+    """
+    steps = _Progress(progress)
     man_path = candidate / "hotfix.json"
     if not man_path.is_file():
         raise Reject("manifest-missing", "hotfix.json")
@@ -221,6 +205,7 @@ def check(candidate: Path, tree: Path, *, state: Path | None = None,
     if cand.get("schema") != SCHEMA:
         raise Reject("schema", f"想要 {SCHEMA}，得到 {cand.get('schema')!r}")
 
+    steps.tick()
     release = cand.get("release", "")
     base, kind, n = parse_tag(release)
     if kind == "pre":
@@ -228,6 +213,7 @@ def check(candidate: Path, tree: Path, *, state: Path | None = None,
     if not cand.get("prerelease") or "-" not in release:
         raise Reject("not-prerelease", release)
 
+    steps.tick()
     verify_signature(candidate)
 
     artifact = cand.get("artifact") or {}
@@ -243,6 +229,7 @@ def check(candidate: Path, tree: Path, *, state: Path | None = None,
     if sha256_file(payload) != sums[name]:
         raise Reject("artifact-digest", f"{name} 与 SHA256SUMS 不一致")
 
+    steps.tick()
     running = {
         "baseline": read_release(tree),
         "language": read_release(tree),
@@ -262,6 +249,25 @@ def check(candidate: Path, tree: Path, *, state: Path | None = None,
     if cand.get("fixed_core") != running["fixed_core"]:
         raise Reject("fixed-core", "不可换的那部分变了")
 
+    steps.tick()
+    # 投影（`#1157`）：清单必须说清它属于哪条基线、哪次发布，以及线上每一条**都是 fix**。
+    proj = cand.get("projection")
+    if proj is None:
+        raise Reject("projection-missing", "清单里没有投影")
+    if proj.get("baseline") != running["baseline"]:
+        raise Reject("projection-baseline",
+                     f"{proj.get('baseline')!r} != {running['baseline']!r}")
+    if proj.get("release") not in (None, release):
+        raise Reject("projection-release", f"{proj.get('release')!r} != {release!r}")
+    for step in proj.get("line") or []:
+        if step.get("kind") != "fix":
+            raise Reject("projection", f"{step.get('sha', '?')[:12]} 不是 fix")
+    evicted = {s.get("sha") for s in proj.get("evicted") or []}
+    for step in proj.get("line") or []:
+        if step.get("sha") in evicted:
+            raise Reject("projection", f"{step.get('sha', '')[:12]} 同时在线上与被剔除")
+
+    steps.tick()
     accepted = _read_state(state)
     if release in accepted:
         raise Reject("replay", f"{release} 已经装过")
@@ -271,6 +277,7 @@ def check(candidate: Path, tree: Path, *, state: Path | None = None,
         if cur_base == base and n <= cur_n and not allow_rollback:
             raise Reject("version", f"{release} 不比 {current} 新")
 
+    steps.tick()
     if state is not None:
         accepted.add(release)
         _write_state(state, accepted)

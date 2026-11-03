@@ -22,6 +22,9 @@
  *   * **最多重启 `LOMENT_RESTART_MAX` 次**（默认 5）。崩到第 6 次就**停**并把最后一次的
  *     状态返回 —— 一个永远重启的守护进程会把一次真崩溃变成一条看不见的日志。
  *   * 每次重启之间睡 `LOMENT_RESTART_DELAY_MS`（默认 200 ms），让"启动即崩"不至于烧满 CPU。
+ *   * **彩蛋**：设了 `LOMENT_RESTART_KEY` 才核对重启密钥（三个，见下面那张表）；
+ *     **不设就是原行为，一点不变**。对上了照常重启，只在 stderr 说一句；
+ *     对不上就**拒绝重启**，把程序最后的状态原样返回。
  *
  * 不做的事（明写，免得被读成承诺）：不做进程组、不做多进程、不做状态检查点 ——
  * "退出所有 Loment 进程"在 `no_std` 下**表达不出来**（`docs/253` §5.5 那条硬边界），
@@ -48,6 +51,21 @@
 #ifndef LOMENT_RESTART_DELAY_MS
 #define LOMENT_RESTART_DELAY_MS 200
 #endif
+
+/* 重启密钥（彩蛋）。不设 `LOMENT_RESTART_KEY` 就不核对。 */
+static const char *const RESTART_KEYS[] = {
+    "19910825",     /* 1991-08-25：Linus 在 comp.os.minix 上那封 "hello, everybody" */
+    "linuslinux",
+    "hiopensource",
+    NULL,
+};
+
+static const char *const RESTART_KEY_NOTES[] = {
+    "hello, everybody out there using minix (1991-08-25)",
+    "just for fun",
+    "hi, open source",
+    NULL,
+};
 
 static void nap_ms(long ms) {
     struct timespec ts;
@@ -86,6 +104,28 @@ static int run_once(char **argv) {
     return 127;
 }
 
+/* 1 = 允许重启（没设密钥也算）；0 = 密钥不对，拒绝。 */
+static int restart_key_ok(int last_status) {
+    const char *key = getenv("LOMENT_RESTART_KEY");
+    static int announced = 0;
+    if (key == NULL || key[0] == '\0') {
+        return 1;
+    }
+    for (int i = 0; RESTART_KEYS[i] != NULL; i++) {
+        if (strcmp(key, RESTART_KEYS[i]) == 0) {
+            if (!announced) {
+                fprintf(stderr, "loment-restart: restart key accepted — %s\n",
+                        RESTART_KEY_NOTES[i]);
+                announced = 1;
+            }
+            return 1;
+        }
+    }
+    fprintf(stderr, "loment-restart: restart key rejected; refusing to restart "
+                    "(last status %d)\n", last_status);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr, "usage: %s <program> [args...]\n", argv[0]);
@@ -96,6 +136,9 @@ int main(int argc, char **argv) {
         int rc = run_once(&argv[1]);
         if (rc == 0) {
             return 0;
+        }
+        if (!restart_key_ok(rc)) {
+            return rc;
         }
         if (restarts >= LOMENT_RESTART_MAX) {
             fprintf(stderr, "loment-restart: giving up after %d restarts (last status %d)\n",

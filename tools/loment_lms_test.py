@@ -247,7 +247,49 @@ def test_restarter_brings_the_program_back() -> None:
         r3 = run(f"cd {base} && ./loment-restart ./always 2>&1; echo rc=$?")
         assert "rc=7" in r3.stdout, r3.stdout
         assert "giving up" in r3.stdout, "没有上限 —— 这会把一次真崩溃变成看不见的日志"
+        assert "restart key" not in r3.stdout, "没设密钥时不该出现彩蛋那一行"
     print("      崩溃后拉起（2 次）并停止；永远崩则到上限就停（rc=7）")
+
+
+def test_restarter_checks_the_restart_key() -> None:
+    """第 6 级的彩蛋：设了 `LOMENT_RESTART_KEY` 才核对重启密钥。
+
+    三个密钥（`19910825` / `linuslinux` / `hiopensource`）各放行一次，且**真的重启**；
+    错的密钥**一次都不重启**，把程序最后的状态原样返回。
+
+    编译时把 `LOMENT_RESTART_MAX` 压到 2、延迟压到 0 —— 这里判的是"放行/拒绝"，
+    不是上限；上限由上面那条判据用默认值钉着。
+    """
+    src = ROOT / "restarter" / "loment-restart.c"
+    assert src.exists(), "restarter/loment-restart.c 不在 —— 第 6 级没有实物"
+    linux = sys.platform.startswith("linux")
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        (tdp / "always.c").write_text(_ALWAYS, encoding="utf-8", newline="\n")
+        if linux:
+            run = lambda cmd: subprocess.run(["bash", "-lc", cmd], capture_output=True,
+                                             text=True, cwd=str(tdp))
+        else:
+            run = lambda cmd: subprocess.run(["wsl", "-e", "bash", "-lc", cmd],
+                                             capture_output=True, text=True)
+        base = _sh_path(tdp)
+        r = run(f"cd {base} && cc -O2 -DLOMENT_RESTART_MAX=2 -DLOMENT_RESTART_DELAY_MS=0 "
+                f"-o loment-restart {_sh_path(src)} && cc -O2 -o always always.c")
+        if r.returncode != 0:
+            print(f"      SKIP: 没有 C 编译器 ({r.stderr.strip()[:120]})")
+            return
+        for key in ("19910825", "linuslinux", "hiopensource"):
+            out = run(f"cd {base} && LOMENT_RESTART_KEY={key} "
+                      f"./loment-restart ./always 2>&1; echo rc=$?")
+            assert "restart key accepted" in out.stdout, (key, out.stdout)
+            assert "loment-restart: restart 1 after 7" in out.stdout, (key, out.stdout)
+            assert "rc=7" in out.stdout, (key, out.stdout)
+        bad = run(f"cd {base} && LOMENT_RESTART_KEY=letmein "
+                  f"./loment-restart ./always 2>&1; echo rc=$?")
+        assert "restart key rejected" in bad.stdout, bad.stdout
+        assert "restart 1 after" not in bad.stdout, ("错密钥仍然重启了", bad.stdout)
+        assert "rc=7" in bad.stdout, bad.stdout
+    print("      三个密钥放行并真的重启；错密钥拒绝重启（rc=7）")
 
 
 def test_the_admin_rule_is_mechanical() -> None:

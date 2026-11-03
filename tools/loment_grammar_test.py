@@ -61,6 +61,8 @@ def test(fn):
 #: （用户提的"将来可以用哈希把它钉死"，钉的就是这一刻；现在先用一条判据钉。）
 LOCKED_ALIASES = {
     "loment": "loment",
+    # 2026-11-03: Tur 是本语言自己的正式语法名（从 Rust 直接修改）。这是一笔**改锁**。
+    "tur": "tur",
     "c": "c",
     "py": "python", "python": "python",
     "java": "java",
@@ -125,6 +127,7 @@ def test_aliases_spell_the_same_canonical_name():
                              (("golang", "go"), "go"),
                              (("rs", "rust"), "rust"),
                              (("loment",), "loment"),
+                             (("tur",), "tur"),
                              (("c",), "c"),
                              (("java",), "java")):
         for s in spellings:
@@ -355,46 +358,43 @@ def test_front_door_handles_the_loment_half_without_the_parser():
 
 
 @test
-def test_declared_rust_is_the_base_syntax_not_a_foreign_module():
-    """**`choose write grammar rust` = 基础语法的一种拼法**（用户 2026-09-22 的裁定）：
+def test_declared_tur_is_the_native_syntax_and_rust_is_a_surface_grammar():
+    """**`tur` = 本语言的原生语法；`rust` 退回表层语法**（用户 2026-11-03 的裁定）。
 
-    > rust 语法是 Loment 基础语法，不需要翻译
+    > Tur 从 Rust 直接修改；rust 和其他几种语法一样
 
-    ## 改之前的样子（这条判据治的就是它）
+    ## 为什么把两者分开
 
-    `rust` 在**两处**都登记着 —— 出厂锁 `GRAMMAR_ALIASES` 的右列（== `potato.GRAMMARS`）
-    与 `front_door` 的 `LANGS`。于是**源码里能写、对象也合法**，可 `lomt_from._TOOLS` 里
-    **没有 rust 这一门**（`from_rust` 是 `docs/179` 抽接口那条路：只记声明、**不抓正文**）。
-    结果：
+    2026-09-22 曾把 `rust` 当成"基础语法的另一种拼法"直接原生读。代价是：我们后来给
+    本语言加的每一样东西（`print`、`fn main` 入口、`capability`/`guard` 等）都会落到
+    "`grammar rust` 是严格 Rust 子集"这条承诺上。现在把边界正式化：
 
-    * 前门把这份源交给 `from_rust` → 对象里一个 `body` 都没有 → `emit_lomt(impl=True)`
-      逐个跳过 → `NotRepresentable`，**文件被拒**；
-    * 而那句跳过理由还劝人「带正文的加 `--impl` 翻出来」—— 前门**已经**用的 `impl=True`。
-      一条登记在锁里的写法，**没有任何一份源编得过去，报的话还指反**。
+    * **`tur`** —— 本语言自己的正式语法名，从 Rust 直接修改；原生读，不经过翻译器。
+    * **`rust`** —— 一门**表层语法**，与 C/Java/Go 同级；走 `from_rust`（只抽接口）。
+      于是"严格 Rust 子集"由**读法本身**保证，我们的修改漏不过去。
 
-    ## 钉三件
+    ## 钉四件
 
-    1. **声明为 rust 与没写声明是同一支**：`translated=False`、产物里没有生成器包头、
-       正文一字不动。这同时排除"它被 `from_rust` 读过"—— 那条路的产物是**生成**的
-       （包头 `// 由 tools/lomt_from.py 从 Potato 形式对象生成`）。
-    2. **命令行上真编得出 IR**（`docs/188` §7.2 那条教训：**入口不止一处**，
-       库那侧全绿而命令行上抛栈）—— 而且看的是 `.ll` 里真有那个函数，不只是没报错。
-    3. **`.rs` 那条路没被一起改掉**：后缀说"这是 Rust 的文件"照旧走 `from_rust` 抽接口。
-       **声明与后缀分工不同**（`docs/188` §2）—— 少了这一条，下一次"顺手统一"
-       就会把接口那条路悄悄换成原生读法，而 `kernel/src/*.rs` 与 `lompotc --rust`
-       的孪生判据全靠它。对照面是 `resolve_lang`（**前端工具**的入口，它照旧按后缀说话）。
+    1. **声明为 tur 与没写声明是同一支**：`translated=False`、产物里没有生成器包头、
+       正文一字不动（声明行抹成等长空白）。
+    2. **命令行上真编得出 IR**（`docs/188` §7.2 那条教训：**入口不止一处**）。
+    3. **`rust` 不在 `NATIVE_GRAMMARS`**：声明的 rust 完整程序走 `from_rust` 的既有失败
+       模式（`NotRepresentable`），**不被**原生读法收下。
+    4. **`.rs` 那条路没被一起改掉**：后缀说"这是 Rust 的文件"照旧走 `from_rust`。
+       **声明与后缀分工不同**（`docs/188` §2）—— `kernel/src/*.rs` 与 `lompotc --rust`
+       的孪生判据全靠它。
     """
     body = "module m\n\npub fn f(x: i32) -> i32 {\n    return x * 3;\n}\n"
     with tempfile.TemporaryDirectory() as t:
         td = Path(t)
         a = td / "a.lomt"
-        a.write_text("choose write grammar rust\n" + body, encoding="utf-8", newline="\n")
+        a.write_text("choose write grammar tur\n" + body, encoding="utf-8", newline="\n")
         fa = potato_from.front_door(a)
         assert (fa.grammar, fa.translated) == ("loment", False), (fa.grammar, fa.translated)
         assert "从 Potato 形式对象生成" not in fa.source, "它被当外国模块翻过了"
         assert fa.source.endswith(body), "正文没原样留着"
         assert fa.source[:len(fa.source) - len(body)].strip() == "", "声明那一行该抹成空白"
-        assert len(fa.source) == len("choose write grammar rust\n" + body), "抹声明必须等长"
+        assert len(fa.source) == len("choose write grammar tur\n" + body), "抹声明必须等长"
 
         # 对照面：**另一个单元**（同内容、不写声明）。两个实现一起错时"自举 == 参考"
         # 照样绿（`docs/182` §1.9），所以比的得是这份源自己。
@@ -406,34 +406,47 @@ def test_declared_rust_is_the_base_syntax_not_a_foreign_module():
                             "--print", "llvm", str(a)],
                            capture_output=True, text=True, shell=False)
         out = (r.stdout or "") + (r.stderr or "")
-        assert r.returncode == 0, f"`grammar rust` 该编得过：{out[-300:]}"
+        assert r.returncode == 0, f"`grammar tur` 该编得过：{out[-300:]}"
         assert "Traceback" not in out, f"抛栈了 —— 话到不了用户眼前：\n{out[-400:]}"
         assert "define " in out and "@f(" in out, f"IR 里没有那个函数：{out[-300:]}"
+
+        # **`rust` 不再是原生语法**：完整程序必须走 `from_rust` 的既有失败模式。
+        r2 = td / "r.lomt"
+        r2.write_text("choose write grammar rust\n" + body, encoding="utf-8", newline="\n")
+        try:
+            potato_from.front_door(r2)
+        except Exception as e:                                     # noqa: BLE001
+            assert type(e).__name__ in ("NotRepresentable", "FrontDoorRefused"), (
+                f"`grammar rust` 该按表层语法被拒，得到 {type(e).__name__}: {e}")
+        else:
+            raise AssertionError("`grammar rust` 仍被当原生读法收下了 —— 它已退回表层语法")
 
         rs = td / "x.rs"
         rs.write_text("pub fn g(a: i32) -> i32 { a + 1 }\n", encoding="utf-8", newline="\n")
         assert potato_from.resolve_lang(rs)[0] == "rust", "`.rs` 的后缀读法被改掉了"
         assert potato_from.LANGS["rust"] is potato_from.from_rust, "`.rs` 那条路被换掉了"
         assert "rust" not in lomt_from._TOOLS, (
-            "`rust` 出现在 `_TOOLS` 里了 —— 它是**基础语法**，不该有翻译器"
-            "（用户 2026-09-22 的裁定）")
+            "`rust` 出现在 `_TOOLS` 里了 —— 它是**表层语法**，不该有原生翻译器")
 
         # `NATIVE_GRAMMARS` 是**出厂锁里的一个子集**（原生读法的那几个）—— 它不该冒出
         # `potato.GRAMMARS` 之外的名字，否则"源里能写"与"对象里合法"就分家了。
         assert "loment" in potato_from.NATIVE_GRAMMARS
+        assert "tur" in potato_from.NATIVE_GRAMMARS
+        assert "rust" not in potato_from.NATIVE_GRAMMARS, (
+            "`rust` 还在原生集里 —— 它已退回成和 C/Java/Go 同级的表层语法")
         assert set(potato_from.NATIVE_GRAMMARS) <= set(potato.GRAMMARS), (
             f"{potato_from.NATIVE_GRAMMARS} 里有不在 `potato.GRAMMARS` 里的名字 —— "
             f"那个名字写不进对象，源侧与对象侧就分家了")
-    print("      `grammar rust`：原生读法、命令行上真编出 IR（`.rs` 那条接口路不受影响）")
+    print("      `grammar tur`：原生读法、命令行上真编出 IR；`grammar rust` 退回表层语法")
 
 
 @test
-def test_declared_rust_maps_mut_away_but_keeps_mut_slices():
-    """`#77`：`grammar rust` 里**重赋值必须写得出来**。
+def test_declared_tur_maps_mut_away_but_keeps_mut_slices():
+    """`#77`：`grammar tur` 里**重赋值必须写得出来**。
 
     这一门是原生读法，而两种语言在"本地变量怎么声明"上没有交集：
 
-        Rust                     本语言
+        Rust                     Tur
         let mut v: T = e;        let v: T = e;      （本地变量本来就可变）
         fn f(mut a: T)           fn f(a: T)
 
@@ -447,7 +460,7 @@ def test_declared_rust_maps_mut_away_but_keeps_mut_slices():
         td = Path(t)
         p = td / "m1.lomt"
         p.write_text(
-            "choose write grammar rust\n"
+            "choose write grammar tur\n"
             "module m1\n"
             "\n"
             "pub fn f(n: i32) -> i32 {\n"
@@ -461,7 +474,7 @@ def test_declared_rust_maps_mut_away_but_keeps_mut_slices():
             "    return a;\n"
             "}\n", encoding="utf-8", newline="\n")
         fu = potato_from.front_door(p)
-        assert fu.translated is False, "rust 是原生读法，不该走翻译器"
+        assert fu.translated is False, "tur 是原生读法，不该走翻译器"
         # 声明行 + 正文长度不变（等长抹除）
         assert len(fu.source) == len(p.read_text(encoding="utf-8")), "改写必须等长"
         assert "let mut" not in fu.source, f"`let mut` 没映射掉:\n{fu.source}"
@@ -472,13 +485,13 @@ def test_declared_rust_maps_mut_away_but_keeps_mut_slices():
                             "--print", "llvm", str(p)],
                            capture_output=True, text=True, shell=False)
         out = (r.stdout or "") + (r.stderr or "")
-        assert r.returncode == 0, f"`let mut` 的 grammar rust 该编得过：{out[-400:]}"
+        assert r.returncode == 0, f"`let mut` 的 grammar tur 该编得过：{out[-400:]}"
         assert "@f(" in out and "@add(" in out, out[-300:]
 
         # **`mut [T]` 与 `&mut` 一个字节都不许动**
         p2 = td / "m2.lomt"
         p2.write_text(
-            "choose write grammar rust\n"
+            "choose write grammar tur\n"
             "module m2\n"
             "\n"
             "fn w(xs: mut [u32]) -> u32 {\n"
@@ -493,7 +506,7 @@ def test_declared_rust_maps_mut_away_but_keeps_mut_slices():
         src2 = potato_from.front_door(p2).source
         assert "xs: mut [u32]" in src2, f"类型位置上的 `mut [u32]` 被抹掉了:\n{src2}"
         assert "&mut a" in src2, f"`&mut` 被抹掉了:\n{src2}"
-    print("      `grammar rust`：`let mut` / `mut a:` 映射掉；`mut [T]` / `&mut` 不动")
+    print("      `grammar tur`：`let mut` / `mut a:` 映射掉；`mut [T]` / `&mut` 不动")
 
 
 @test

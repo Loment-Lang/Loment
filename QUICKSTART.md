@@ -46,16 +46,15 @@ $ cd loment
 ```rust
 module hello
 
-fn _start() {
-    let s: str = "hello from Loment\n";
-    syscall4(1, 1, str_ptr(s) as u64, str_len(s) as u64);
-    syscall4(60, 0, 0, 0);
+fn main() {
+    print("hello from Loment\n");
 }
 ```
 
-`_start` is the entry point, because a sealed artifact has no runtime to call one for you.
-There is no `printf` either: output goes through the `write` system call, whose arguments are
-the file descriptor, the string's pointer and its length. The second call is `exit`.
+`main` is the entry point: no arguments, no return type, and the linker's entry stub exits 0
+after it returns. `print` writes a string to stdout (one `write` syscall) — it adds no newline
+and does no formatting; the `\n` is in the string. The freestanding entry is still `_start`
+(kernel / no-libc code), and it wins when both exist.
 
 ## 2. Compile and run it
 

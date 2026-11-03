@@ -51,6 +51,7 @@ BUILTINS = {
     "get_bits": (("u8", "u32", "u32"), "u8"),        # M22: 位域读
     "set_bits": (("u8", "u32", "u32", "u8"), "u8"),  # M22: 位域写
     "str_ptr": (("str",), "ptr"),                    # M67: str 数据指针 (syscall 用)
+    "print": (("str",), "u32"),                      # 写 stdout: write(1, ptr, len)
     "ptr_add": (("ptr", "u32"), "ptr"),              # M73: 指针字节偏移
     "ptr_sub": (("ptr", "u32"), "ptr"),
     "syscall4": (("u64", "u64", "u64", "u64"), "i64"),  # M67: nr, a0..a2 (rax/rdi/rsi/rdx)
@@ -5334,6 +5335,12 @@ def _expr_rs(e) -> str:
             return f"(({a[0]}) as *mut u8).add(({a[1]}) as usize)"
         if e.name == "ptr_sub":
             return f"(({a[0]}) as *mut u8).sub(({a[1]}) as usize)"
+        if e.name == "print":  # 写 stdout (no_std 友好: 直接 syscall)
+            return ("{ let __s: &str = " + a[0] + "; let mut __r: i64; "
+                    "unsafe { core::arch::asm!(\"syscall\", "
+                    "inlateout(\"rax\") 1i64 => __r, in(\"rdi\") 1i64, "
+                    "in(\"rsi\") __s.as_ptr() as i64, in(\"rdx\") __s.len() as i64, "
+                    "lateout(\"rcx\") _, lateout(\"r11\") _); } (__r as u32) }")
         if e.name == "syscall4":  # M67: Linux 系统调用 (rax/rdi/rsi/rdx)
             return ("{ let mut __r: i64; unsafe { core::arch::asm!(\"syscall\", "
                     "inlateout(\"rax\") (" + a[0] + ") as i64 => __r, "
@@ -5633,8 +5640,10 @@ def _count_boundary(mod: Module) -> dict:
     walk(mod)
     ext = [f.name for f in mod.externs]
     n_extc = sum(names.count(nm) for nm in ext)
-    n_sys = sum(names.count(b) for b in _potato.BOUNDARY_BUILTINS if b.startswith("syscall"))
-    n_ptr = sum(names.count(b) for b in _potato.BOUNDARY_BUILTINS if not b.startswith("syscall"))
+    # **按显式的两张表分，不按名字前缀猜**：`print` 是机调用但不以 `syscall` 开头，
+    # 前缀口径会把它错记成裸指针变换（`potato.BOUNDARY_SYSCALLS` 是那份真源）。
+    n_sys = sum(names.count(b) for b in _potato.BOUNDARY_SYSCALLS)
+    n_ptr = sum(names.count(b) for b in _potato.BOUNDARY_PTR_TRANSFORMS)
     return {"extern_declared": len(ext), "extern_calls": n_extc, "syscalls": n_sys,
             "ptr_transforms": n_ptr, "total_sites": n_extc + n_sys + n_ptr}
 
@@ -5699,6 +5708,9 @@ def _machine_call_sites(mod: Module) -> list[tuple[int, int | None]]:
     out: list[tuple[int, int | None]] = []
 
     def walk(x) -> None:
+        if isinstance(x, (Call, MethodCall)) and getattr(x, "name", "") == "print":
+            # `print` 落地是 `write(1, …)`：号是固定的 1，没有"首参写成字面量"这回事。
+            out.append((getattr(x, "line", 0), 1))
         if isinstance(x, (Call, MethodCall)) and getattr(x, "name", "") in SYSCALL_BUILTINS:
             args = getattr(x, "args", [])
             first = args[0] if args else None
@@ -8708,6 +8720,21 @@ class _Ir:
             r = self.t()
             self.w(f"{r} = getelementptr inbounds i8, ptr {pv}, i64 {n64}")
             return "ptr", r
+        if e.name == "print":  # 写 stdout: write(1, ptr, len)
+            _, sv = self.expr(e.args[0], "str")
+            p = self.t()
+            self.w(f"{p} = extractvalue {{ ptr, i64 }} {sv}, 0")
+            ln = self.t()
+            self.w(f"{ln} = extractvalue {{ ptr, i64 }} {sv}, 1")
+            pi = self.t()
+            self.w(f"{pi} = ptrtoint ptr {p} to i64")
+            r = self.t()
+            self.w(f'{r} = call i64 asm sideeffect "syscall", '
+                   f'"={{ax}},{{ax}},{{di}},{{si}},{{dx}},~{{cx}},~{{r11}},~{{memory}}"'
+                   f"(i64 1, i64 1, i64 {pi}, i64 {ln})")
+            t = self.t()
+            self.w(f"{t} = trunc i64 {r} to i32")
+            return "u32", t
         if e.name == "syscall4":  # M67: Linux 系统调用
             vals = [self.expr(a, "u64")[1] for a in e.args]
             r = self.t()

@@ -5427,11 +5427,27 @@ def dump_win_shim(path) -> int:
     return 0
 
 
-def _pe_emit(funcs, globals_, slots) -> tuple[bytes, int]:
+def _entry_name(funcs) -> str:
+    """用户态入口名：`_start` 优先；没有它时 `main` 接手。
+
+    `main` 不许有形参 —— 入口桩按无参 ABI 调它，带形参的 `main` 读到的是寄存器里
+    的残留值（那是静默错，不是报错）。`_start` 仍然优先，所以裸机/内核那一路不受影响。
+    """
+    if any(f.name == "_start" for f in funcs):
+        return "_start"
+    mains = [f for f in funcs if f.name == "main"]
+    if not mains:
+        raise Unsupported("没有 _start 或 main 入口（原生产物 v0 需要一个用户态入口）")
+    if mains[0].params:
+        raise Unsupported("main 不能有形参（没有 _start 时它就是用户态入口）")
+    return "main"
+
+
+def _pe_emit(funcs, globals_, slots, entry: str) -> tuple[bytes, int]:
     em = PeEmitter(globals_)
     for g in globals_:
         em.asm.labels[g.name] = g.addr
-    em.emit_entry_stub("_start")
+    em.emit_entry_stub(entry)
     emit_win_shim(em, slots)
     for f in funcs:
         em.emit_func(f)
@@ -5441,8 +5457,7 @@ def _pe_emit(funcs, globals_, slots) -> tuple[bytes, int]:
 def compile_pe(text: str) -> tuple[bytes, dict]:
     global TEXT_VADDR
     globals_, funcs, _externs = parse_ll(text)
-    if not any(f.name == "_start" for f in funcs):
-        raise Unsupported("没有 _start 入口（PE 产物需要一个用户态入口）")
+    entry = _entry_name(funcs)
 
     # 四个节的 RVA 全是常量，所以**不需要不动点**：发射一遍就完事。
     # （早先按"代码长度决定 .data 的 RVA"排过一次，那是为了迁就 .text 只能钉在最低 RVA；
@@ -5450,7 +5465,7 @@ def compile_pe(text: str) -> tuple[bytes, dict]:
     TEXT_VADDR = PE_IMAGE_BASE + PE_TEXT_RVA
     data, bss = _pe_layout_globals(globals_, PE_DATA_RVA)
     idata, slots = build_pe_idata()
-    code, entry = _pe_emit(funcs, globals_, slots)
+    code, entry = _pe_emit(funcs, globals_, slots, entry)
 
     blob = build_pe(code, bytes(data), entry - PE_IMAGE_BASE, idata)
     return blob, {"text": len(code), "data": len(data), "bss": bss,
@@ -6482,8 +6497,7 @@ def compile_ll(text: str, objects: list | None = None,
     has_foreign = bool(objects) and not shared
     if has_foreign:
         em.asm.labels["__loment_tls"] = tls_addr
-    if not any(f.name == "_start" for f in funcs):
-        raise Unsupported("没有 _start 入口（原生产物 v0 需要一个用户态入口）")
+    entry = _entry_name(funcs)
     # 构造函数表的位置（`#611`）：表本身已经摆在 `data` 里，这里只把首尾地址立成标签，
     # 入口桩按它们走表。一个对象都没有时 `ctor_ranges` 为空，桩里一条指令都不多。
     ctor_ranges: list[tuple[int, int]] = []
@@ -6508,7 +6522,7 @@ def compile_ll(text: str, objects: list | None = None,
         em.emit_gate()
         em.hot_header["stride"] = HOT_STRIDE
         em.hot_header["slots"] = len(funcs)
-    em.emit_entry_stub("_start", tls=has_foreign, ctors=len(ctor_ranges),
+    em.emit_entry_stub(entry, tls=has_foreign, ctors=len(ctor_ranges),
                        finis=len(fini_ranges), call_exit=call_exit)
     for f in funcs:
         em.emit_func(f)
@@ -6820,8 +6834,9 @@ def merge_ir_texts(texts: list[str], names: list[str] | None = None) -> str:
             if sym == "_start":
                 starts += 1
     if "_start" not in defined:
-        raise Unsupported("没有 _start 入口（合并后的 IR 需要恰好一个）")
-    if starts != 1:
+        if "main" not in defined:
+            raise Unsupported("没有 _start 或 main 入口（合并后的 IR 需要恰好一个）")
+    elif starts != 1:
         raise Unsupported("合并后的 IR 必须恰好有一个 _start")
 
     out: list[str] = []

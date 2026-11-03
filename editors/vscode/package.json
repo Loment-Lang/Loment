@@ -65,6 +65,7 @@
     "onLanguage:loment-csharp",
     "onLanguage:loment-go",
     "onLanguage:loment-python",
+    "onLanguage:loment-rust",
     "onLanguage:loment-natural",
     "workspaceContains:**/loment.conf"
   ],
@@ -138,6 +139,13 @@
         "configuration": "./language-configuration-python.json"
       },
       {
+        "id": "loment-rust",
+        "aliases": [
+          "Loment (Rust surface grammar)"
+        ],
+        "configuration": "./language-configuration.json"
+      },
+      {
         "id": "loment-natural",
         "aliases": [
           "Loment (natural surface grammar)"
@@ -187,6 +195,11 @@
         "language": "loment-python",
         "scopeName": "source.loment.python",
         "path": "./syntaxes/loment-python.tmLanguage.json"
+      },
+      {
+        "language": "loment-rust",
+        "scopeName": "source.loment.rust",
+        "path": "./syntaxes/loment-rust.tmLanguage.json"
       },
       {
         "language": "loment-natural",

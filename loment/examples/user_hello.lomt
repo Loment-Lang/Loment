@@ -9,16 +9,13 @@ module user_hello
 //         -fuse-ld=lld -Wl,-e,_start loment/build/user_hello.ll \
 //         -o loment/build/user_hello.elf
 
-fn write_str(fd: u64, s: str) -> i64 {
-    return syscall4(1, fd, str_ptr(s) as u64, str_len(s) as u64);
-}
-
-fn exit(code: u64) -> i64 {
-    return syscall4(60, code, 0, 0);
+// 一个**用户函数**调用：DAP 的 `next`/`stepIn` 判据要靠它区分"跨过"与"钻进去"
+// （`print` 是内建、直接内联，没有函数体可钻）。
+fn write_line(s: str) {
+    print(s);
 }
 
 fn _start() {
-    let msg: str = "M67 RESULT: PASS loment-user\n";
-    write_str(1, msg);
-    exit(0);
+    write_line("M67 RESULT: PASS loment-user\n");
+    syscall4(60, 0, 0, 0);
 }

@@ -626,26 +626,34 @@ def test_diag_does_not_tell_you_to_fix_valid_foreign_source():
 
 @test
 def test_diag_does_not_call_a_native_declaration_foreign():
-    """**声明里写的"原生"语法不是"外源"** —— `rust` 是 `NATIVE_GRAMMARS` 里那个。
+    """**声明里写的"原生"语法不是"外源"** —— `tur` 是 `NATIVE_GRAMMARS` 里那个。
 
-    `choose write grammar rust` 的文件**就是** Loment（只是拼法，`docs/188` §2、
-    2026-09-22 的裁定），前门当原生读。而这一处原先对 `lang in LANGS` 一律给外源卡 ——
-    `rust` 也在 `LANGS` 里，于是它说"**这个文件不是 Loment 语法**、别照上面那条改"，
+    `choose write grammar tur` 的文件**就是** Loment（只是拼法，`docs/188` §2、
+    2026-11-03 的裁定），前门当原生读。而这一处原先对 `lang in LANGS` 一律给外源卡 ——
+    `tur` 也在 `LANGS` 里，于是它说"**这个文件不是 Loment 语法**、别照上面那条改"，
     而上面那条（**补 `module`**）**恰恰是对的**：一条该听的话被一句"别听"撤销。
 
     **但只排"声明"那一路**：一份**真 Rust 源码**叫 `.rs`、没写声明 —— 那时按**后缀**
     认，而那句提示**是对的**（那份内容确实不是 Loment）。靠 `resolve_lang` 给的
-    `why`（`文件头声明 …` / `后缀 …`）分。一刀切把 `rust` 整个排掉，
-    会把那条真该说的话一起消掉（`SYNTAXES` 里那条 `.rs` 用的就是真 Rust 源码）。
+    `why`（`文件头声明 …` / `后缀 …`）分。
+
+    **`rust` 已退回表层语法**（2026-11-03）：声明 rust 的文件**该**拿外源提示。
     """
     import loment_diag                                                # noqa: PLC0415
     with tempfile.TemporaryDirectory() as t:
         td = Path(t)
-        d = td / "r.lomt"                      # 声明是 rust、正文是 Loment
-        d.write_text("choose write grammar rust\n\nfn f() -> i32 {\n    return 1;\n}\n",
+        d = td / "r.lomt"                      # 声明是 tur、正文是 Loment
+        d.write_text("choose write grammar tur\n\nfn f() -> i32 {\n    return 1;\n}\n",
                      encoding="utf-8", newline="\n")
         assert loment_diag.foreign_note(d, ["2:1: 期望 module，得到 'fn'"]) is None, \
-            "对一份 `choose write grammar rust` 的 Loment 说了'不是 Loment'"
+            "对一份 `choose write grammar tur` 的 Loment 说了'不是 Loment'"
+        # 反面：声明为 rust 的**不再**是原生 —— 它该拿外源提示。
+        r0 = td / "r0.lomt"
+        r0.write_text("choose write grammar rust\n\nfn f() -> i32 {\n    return 1;\n}\n",
+                      encoding="utf-8", newline="\n")
+        note0 = loment_diag.foreign_note(r0, ["2:1: 期望 module，得到 'fn'"])
+        assert note0 and "不是 Loment" in note0, (
+            "`grammar rust` 已退回表层语法，诊断却仍把它当原生")
         # 反面一：真 Rust 源码（`.rs`、没声明）**照旧**要点名
         r = td / "real.rs"
         r.write_text("#[no_mangle]\npub fn f() {}\n", encoding="utf-8", newline="\n")
@@ -1284,7 +1292,7 @@ def test_entry_layer_refuses_foreign_grammar_instead_of_mangling_it():
     却拿**原文**去按那些行号索引 —— 短文件 `IndexError` 甩栈；长文件不越界，于是
     **不崩、给出张冠李戴的文档**（`fn alpha` 拿到 `beta` 的注释），退 0。
 
-    两面都钉：非原生写法**必须拒**（`fmt` 还**不许动文件**），原生与 `rust` **照旧**。
+    两面都钉：非原生写法**必须拒**（`fmt` 还**不许动文件**），原生与 `tur` **照旧**。
     """
     import lomdoc                                                     # noqa: PLC0415
     import lomfmt                                                     # noqa: PLC0415
@@ -1298,14 +1306,14 @@ def test_entry_layer_refuses_foreign_grammar_instead_of_mangling_it():
         assert p.read_bytes() == before, "fmt --write 把用户那份源改了"
         assert lomfmt.main([str(p)]) == 2, "fmt（stdout 模式）没拒"
         assert lomdoc.main([str(p)]) == 1, "doc 对 C 写法没拒"
-        # 原生与 `rust`（`NATIVE_GRAMMARS` 里那个）照旧
+        # 原生与 `tur`（`NATIVE_GRAMMARS` 里那两个）照旧
         for tag, src in (("native.lomt", "module m\n\nfn f() -> i32 {\n    return 1;\n}\n"),
-                         ("rust.lomt", "choose write grammar rust\n\nmodule m\n\n"
-                                       "fn f() -> i32 {\n    return 1;\n}\n")):
+                         ("tur.lomt", "choose write grammar tur\n\nmodule m\n\n"
+                                      "fn f() -> i32 {\n    return 1;\n}\n")):
             q = td / tag
             q.write_text(src, encoding="utf-8", newline="\n")
             assert "fn f" in lomfmt.format_source(q.read_text(encoding="utf-8")), tag
-    print("      fmt/doc 认出非原生写法就拒（fmt 不动文件）；原生与 rust 照旧")
+    print("      fmt/doc 认出非原生写法就拒（fmt 不动文件）；原生与 tur 照旧")
 
 
 

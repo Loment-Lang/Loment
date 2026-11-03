@@ -1,4 +1,4 @@
-choose write grammar rust
+choose write grammar tur
 module gdecl
 
 fn main() -> u32 {

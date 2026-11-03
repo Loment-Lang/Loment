@@ -902,8 +902,8 @@ def test_vscode_surface_grammar_switches_language():
         ("loment/examples/multisyntax-projects/c/01-algo/algo.lomt", "loment", "loment-c"),
         ("loment/examples/multisyntax-projects/go/01-digest/digest.lomt", "loment", "loment-go"),
         ("loment/lib/lumtui_math.lomt", "loment", "loment-python"),
-        # `rust` 是**原生**（docs/188 §7.3）：声明了也不该换语言 id
-        ("loment/selfhost/grammar_decl/rust.lomt", "loment", "loment"),
+        # `tur` 是**原生**（docs/285）：声明了也不该换语言 id
+        ("loment/selfhost/grammar_decl/tur.lomt", "loment", "loment"),
         # 没声明 = 原生
         ("loment/examples/tour.lomt", "loment", "loment"),
         # 用户显式指定过的语言不去抢（`lom` 是 L0，家族之外）
@@ -918,9 +918,14 @@ def test_vscode_surface_grammar_switches_language():
         # 声明删掉之后要**回**到 `loment`：原先返回 undefined（"不认领"），于是它一直
         # 停在 `loment-<x>` —— 状态栏写着外门语法、语言服务也不接（2026-10-21）。
         (proj / "plain.lomt").write_text("module p\n", encoding="utf-8")
+        # `rust` 已退回**表层语法**（docs/285）：声明了要换到 `loment-rust`
+        (proj / "rusty.lomt").write_text(
+            "choose write grammar rust\n\nmodule r\n\nfn f() -> i32 {\n    return 1;\n}\n",
+            encoding="utf-8")
         cases += [(str(proj / "a.foo"), "plaintext", "loment"),   # 项目自定义后缀 -> L1
                   (str(proj / "b.txt"), "plaintext", "plaintext"),  # 别的后缀，不认领
-                  (str(proj / "plain.lomt"), "loment-c", "loment")]  # 声明删了 -> 回原生
+                  (str(proj / "plain.lomt"), "loment-c", "loment"),  # 声明删了 -> 回原生
+                  (str(proj / "rusty.lomt"), "loment", "loment-rust")]  # rust 是表层语法
         docs = [{"path": (c[0] if Path(c[0]).is_absolute() else str(ROOT / c[0])),
                  "lang": c[1]} for c in cases]
         r = _activate({"enableLsp": False, "buildDir": "loment/build"}, docs)
@@ -944,7 +949,7 @@ def test_vscode_surface_grammar_switches_language():
 
 @test
 def test_vscode_multisyntax_languages_are_declared():
-    """七门外门表层语法**在清单里各有语言 + 语法**，而且借的宿主 scope 写对。
+    """八门外门表层语法**在清单里各有语言 + 语法**，而且借的宿主 scope 写对。
 
     三处必须说同一件事：出厂锁那张别名表（`potato_from.GRAMMAR_ALIASES`）、
     `grammar-detect.js` 的 `languageIdFor`、以及 `package.json` 的 languages/grammars。
@@ -967,7 +972,8 @@ def test_vscode_multisyntax_languages_are_declared():
             f"`languageIdFor` 给出的 id 与清单不同: {sorted(set(ids))}")
     # 每一门外门语法的语法文件都必须**只做两件事**：认那行声明 + include 宿主的语法。
     guests = {"c": "source.c", "cpp": "source.cpp", "java": "source.java",
-              "csharp": "source.cs", "go": "source.go", "python": "source.python"}
+              "csharp": "source.cs", "go": "source.go", "python": "source.python",
+              "rust": "source.rust"}
     for g in foreign:
         path = EXT / "syntaxes" / f"loment-{g}.tmLanguage.json"
         assert path.is_file(), f"缺语法文件: {path.name}"

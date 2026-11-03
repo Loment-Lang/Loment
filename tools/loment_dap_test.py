@@ -5,13 +5,13 @@
 
 不是"协议格式对" —— 那是没用的判据。它钉的是：
 
-  * **断点真的停在那一行**，而且是停在该语句**执行之前**：`setBreakpoints(22)` 之后
-    拿到的 `stackTrace` 里 `line` 必须是 22，且那一刻 `write_str` 还没打出一个字。
+  * **断点真的停在那一行**，而且是停在该语句**执行之前**：`setBreakpoints(19)` 之后
+    拿到的 `stackTrace` 里 `line` 必须是 19，且那一刻 `write_line` 还没打出一个字。
     **只断言"收到了 stopped 事件"等于什么都没测** —— 一个永远停在 `_start` 的假调试器
     也能通过；而一个把断点钉在语句**下一条**上的实现，用户看到的永远是"这行做完了"。
-  * **程序真的跑了**：`_start` 里那句 `write_str` 打出来的 `M67 RESULT: PASS` 要以
+  * **程序真的跑了**：`_start` 里那句 `write_line` 打出来的 `M67 RESULT: PASS` 要以
     DAP 的 `output` 事件到得了客户端（不然"调试"看到的是一段没输出的死程序）。
-  * **单步按行走、`next` 跨过 call**：第 22 行编译成四条指令，只单步一条行号不变；
+  * **单步按行走、`next` 跨过 call**：第 19 行编译成四条指令，只单步一条行号不变；
     而 `next` 若"在别的源行上停下"，被调函数的第一行也算别的源行 —— 于是 `next` 与
     `stepIn` 变成一回事。这两条各自都是**真的会坏**的。
   * **落不上的断点要说**：行表里没有的那一行必须 `verified: false` ——
@@ -36,14 +36,14 @@ import loment_suite
 ROOT = Path(__file__).resolve().parent.parent
 EXAMPLE = ROOT / "loment" / "examples" / "user_hello.lomt"
 
-#: 断点设在哪一行 —— `_start` 里那句 `write_str(1, msg);`（见那个例子的源）。
+#: 断点设在哪一行 —— `_start` 里那句 `write_line("M67 RESULT: …")`（见那个例子的源）。
 #: **这个数要和源对上**，对不上判据就变成"随便哪一行都行"。
 #:
-#: 选它而不是下一行的 `exit(0)` 是有意的：`write_str` **还没执行**，所以"停在断点时
-#: 输出尚未出现"本身又是一条判据 —— 断点落在语句**之前**，不是之后。
-BP_LINE = 22
+#: 选它而不是下一行的 `syscall4(60, …)` 是有意的：`write_line` **还没执行**，所以"停在
+#: 断点时输出尚未出现"本身又是一条判据 —— 断点落在语句**之前**，不是之后。
+BP_LINE = 19
 
-#: `_start` 里那句 `write_str` 打出来的东西（`loment/examples/user_hello.lomt`）。
+#: `write_line` 里那句 `print` 打出来的东西（`loment/examples/user_hello.lomt`）。
 MARKER = "M67 RESULT: PASS"
 
 TESTS: list = []
@@ -249,8 +249,9 @@ def test_step_in_moves_to_another_line():
 def test_next_crosses_a_call():
     """**`next` 跨过 call，`stepIn` 钻进去** —— 两者必须是**不同的行**。
 
-    第 22 行是 `write_str(1, msg);`。按 `next` 应当停在**下一句**（第 23 行 `exit(0);`，
-    即 `write_str` 返回之后）；按 `stepIn` 应当钻进 `write_str` 的函数体（第 13 行）。
+    第 19 行是 `write_line("M67 RESULT: …");`。按 `next` 应当停在**下一句**（第 20 行
+    `syscall4(60, …)`，即 `write_line` 返回之后）；按 `stepIn` 应当钻进 `write_line` 的
+    函数体（第 15 行）。
 
     **两个都给 13 就是坏的**：那说明 `next` 只做到"在别的源行上停下"，而被调函数的
     第一行也是"别的源行" —— 于是 `next` 和 `stepIn` 变成一回事，用户按 `next` 想跨过

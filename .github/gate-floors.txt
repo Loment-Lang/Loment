@@ -12,7 +12,7 @@
 
 
 lomc_test 25
-lomentc_test 190
+lomentc_test 191
 lspe_test 11
 potato_test 13
 loment_ct_test 2
@@ -48,7 +48,7 @@ loment_json_test 4
 loment_pkg_test 3
 loment_lomc_test 4
 loment_lsp_test 22
-loment_elf_test 80
+loment_elf_test 81
 loment_pe_test 17
 loment_genesis_test 8
 loment_status_test 4

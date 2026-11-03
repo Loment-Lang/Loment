@@ -32,8 +32,10 @@ Python, no clang and no WSL.
   ELF, Windows PE, or a bare object for metal. The toolchain is itself written in Loment.
 - **Accountable.** A capability domain says how far a unit may reach, and a form object records
   what it holds and reaches, so what a program can touch is answerable without reading the source.
-- **Familiar.** The syntax is Rust-flavored, and the same program can be written in six more:
-  C, C++, Java, C#, Go or Python.
+- **Familiar.** The language's own syntax is **Tur**, derived directly from Rust and extended
+  with capability domains, `choose` / `module`, `guard` and `print`. The same program can also be
+  written in C, C++, Java, C#, Go or Python spelling; Rust is kept as a strict-subset surface
+  grammar (interface extraction only).
 - **Gentle where Rust is strict.** LSPE, the safety audit layer, is gentler than Rust's borrow
   checker while offering nearly the same safety: it audits the compiler's own decisions and
   records every allowance, so no permit is silent.
@@ -46,10 +48,8 @@ number.
 ```rust
 module hello
 
-fn _start() {
-    let s: str = "hello from Loment\n";
-    syscall4(1, 1, str_ptr(s) as u64, str_len(s) as u64);
-    syscall4(60, 0, 0, 0);
+fn main() {
+    print("hello from Loment\n");
 }
 ```
 

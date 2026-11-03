@@ -1,22 +1,18 @@
 # Hello
 
-The smallest runnable unit. `_start` is the process entry point; the `exit` syscall ends it.
+The smallest runnable unit. `main` is the process entry point; `print` writes a string to stdout.
 
 ```rust,run
 module be_hello
 
-choose runtime
-
-use "helpers.lomt"
-
-fn _start() {
-    out("hello from Loment\n");
-    syscall4(60, 0, 0, 0);
+fn main() {
+    print("hello from Loment\n");
 }
 ```
 <!-- expect: hello from Loment -->
 
 - `module` is the first line and has no semicolon.
-- `choose runtime` claims the runtime for the whole program; the entry unit is the only place that
-  may write it.
-- `_start` takes no arguments and **must not `return`** — end with `syscall4(60, …)`.
+- `main` takes no arguments and has no return type; the linker's entry stub calls it and exits 0.
+- `print` writes the string's bytes to stdout (one `write` syscall). It does not add a newline —
+  the `\n` is in the string. There is no printf and no formatting.
+- The freestanding entry is `_start` (kernel / no-libc code). A program with both uses `_start`.

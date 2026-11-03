@@ -1,14 +1,14 @@
-choose write grammar rust
+choose write grammar tur
 module bitkit
 choose runtime
 
-/* bitkit.lomt —— 用 **Rust 拼法**写的 Loment 模块。
+/* bitkit.lomt —— 用 **Tur 拼法**写的 Loment 模块。
  *
- * 后缀 `.lomt` 说的是"这是一份 Loment 的文件"；首行 `choose write grammar rust`
- * 说的是"按 Rust 的拼法读它"。语义仍然是 Loment 的：**表层语法只决定拼法与形状，
- * 不决定语义**（docs/188 §0）。
+ * 后缀 `.lomt` 说的是"这是一份 Loment 的文件"；首行 `choose write grammar tur`
+ * 说的是"按 Tur 的拼法读它"。Tur 是本语言自己的正式语法（从 Rust 直接修改），
+ * 语义仍然是 Loment 的：**表层语法只决定拼法与形状，不决定语义**（docs/188 §0）。
  *
- * 与其他五门**不一样的一处**（这一门特有）：`rust` 是 Loment 的**基础语法**，
+ * 与其他五门**不一样的一处**（这一门特有）：`tur` 是 Loment 的**原生语法**，
  * 所以前门**不经过任何翻译器** —— 它只把首行声明抹成空白，原样交给原生解析器。
  * 原生解析器要求**源里自带 `module <名字>` 行**（另五门的模块名是翻译器从文件名
  * 造出来的）：于是这一份的第二行必须是 `module bitkit`，与文件 stem 一致。

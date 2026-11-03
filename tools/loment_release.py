@@ -232,6 +232,13 @@ GLOBS = [
     # Java 翻成 Loment (docs/188 §7.1 六门里的第三门; 花括号族第二张方言表)。
     "tools/jtrans.py",
     "tools/loment_jtrans_test.py",
+    # Java AOT：class -> IR + 接口（docs/281/282）与它的判据。
+    "tools/lomjava.py",
+    "tools/loment_java_test.py",
+    # `jrt`（最小 Java 运行期）的生成器；产物随包发在 share/loment/jrt/ 下。
+    "tools/loment_jrt.py",
+    # 发布侧 AOT：jar -> lompi `kind java` 包（接口 + 预编译 IR + link.txt）。
+    "tools/loment_java_pkg.py",
     # C# 翻成 Loment (六门里的第四门; 花括号族**多两层壳**的那一门)。
     "tools/cstrans.py",
     "tools/loment_cstrans_test.py",
@@ -261,6 +268,7 @@ GLOBS = [
     "tools/loment_genesis.py", "tools/loment_genesis_test.py",
     "tools/loment_status_test.py", "tools/loment_rel_test.py",
     "tools/loment_pkg_test.py", "tools/loment_lomc_test.py", "loment/lib/*.lomt",
+    "loment/lib/jrt/*",
     "tools/loment_lsp_test.py", "tools/loment_editors_test.py",
     "editors/vim/*.md", "editors/vim/syntax/*.vim", "editors/vim/ftdetect/*.vim",
     "editors/vim/ftplugin/*.vim",

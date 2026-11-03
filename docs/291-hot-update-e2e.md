@@ -1,4 +1,4 @@
-# 289 · 端到端：一次 fix 进到跑着的进程里，一次契约变更被拒（`#1155`）
+# 291 · 端到端：一次 fix 进到跑着的进程里，一次契约变更被拒（`#1155`）
 
 > 上游：`#1146`（伞）。判据：`tools/loment_hotcore_test.py`（7 条，真进程）、
 > `tools/loment_hotline_test.py`（6 条）、`tools/loment_projection_test.py`（6 条）。

@@ -1,4 +1,4 @@
-# 290 · 稳定性模拟：一个进程连着换六次（`#1152` 追加）
+# 292 · 稳定性模拟：一个进程连着换六次（`#1152` 追加）
 
 > 实现：`loment/lib/hotswap.lomt`（`cand_slot`）、`tools/loment_hotload.build_blob`；
 > 判据：`tools/loment_hotstress_test.py`（2 条）。

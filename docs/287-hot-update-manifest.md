@@ -1,4 +1,4 @@
-# 285 · 每个 Pre-Release 都带一份 `hotfix.json`（`#1153`）
+# 287 · 每个 Pre-Release 都带一份 `hotfix.json`（`#1153`）
 
 > 上游：`#1146`（伞）、`#1147`（准入判据）。实现：`tools/loment_hotfix.py`；
 > 落盘点：`tools/loment_dist.py` 的 `emit()`（在算 `SHA256SUMS` **之前**）；

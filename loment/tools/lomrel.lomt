@@ -293,6 +293,7 @@ tools/lomjava.py
 tools/loment_java_test.py
 tools/loment_jrt.py
 tools/loment_java_pkg.py
+tools/lomjava_corpus.py
 tools/cstrans.py
 tools/loment_cstrans_test.py
 tools/cpptrans.py

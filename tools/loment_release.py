@@ -239,6 +239,8 @@ GLOBS = [
     "tools/loment_jrt.py",
     # 发布侧 AOT：jar -> lompi `kind java` 包（接口 + 预编译 IR + link.txt）。
     "tools/loment_java_pkg.py",
+    # 真实 jar 语料的扫描器（jar 本身不入树，坐标与哈希在 java-corpus.txt 里）。
+    "tools/lomjava_corpus.py",
     # C# 翻成 Loment (六门里的第四门; 花括号族**多两层壳**的那一门)。
     "tools/cstrans.py",
     "tools/loment_cstrans_test.py",

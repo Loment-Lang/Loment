@@ -1627,6 +1627,31 @@ LMS_TOGGLES: tuple[str, ...] = (
     "lms_seed",      # 7 最小子集（信任地板的尺寸与哈希）
 )
 
+#: **每一级声明的运行期预算**（`docs/253` §11.2.1，#1023）。取值只有四个：
+#:
+#:   * `none`         —— 编译期 / 产物属性，不碰运行期；
+#:   * `instructions` —— 只发指令（比较、`br`、`llvm.trap`、本帧 `alloca`），**不发
+#:                      运行期组件、不引入 `@__loment_` 符号**；
+#:   * `state`        —— 需要一份**运行期状态**（表 / 位图 / 堆快照）；
+#:   * `outside`      —— 在进程外（重启器是另一个程序）。
+#:
+#: ⚠ **这张表是 #1023 的承重点**：`no_runtime` + `lms_full` 今天是合法的，因为七级
+#: 恰好全是 `none` / `instructions` / `outside`。若有一天第 2 级真的要做运行期堆快照，
+#: 把这里的 `none` 改成 `state`，检查器会**当场**拒绝 `no_runtime` 的产物，并点名
+#: 是哪一级、预算是多少 —— 而不是等一个用户撞上"说好没有运行期，产物里却有一张表"。
+LMS_LEVEL_BUDGETS: dict[str, str] = {
+    "lms_check": "none",
+    "lms_manage": "none",       # 今天是编译期内存图（`docs/270` §3.1）；真做成运行期快照时改 `state`
+    "lms_guard": "instructions",
+    "lms_reject": "instructions",
+    "lms_crash": "instructions",
+    "lms_restart": "outside",
+    "lms_seed": "none",
+}
+LMS_BUDGETS = ("none", "instructions", "state", "outside")
+assert tuple(LMS_LEVEL_BUDGETS) == LMS_TOGGLES, (tuple(LMS_LEVEL_BUDGETS), LMS_TOGGLES)
+assert set(LMS_LEVEL_BUDGETS.values()) <= set(LMS_BUDGETS), LMS_LEVEL_BUDGETS
+
 #: **档 → 七个开关的初值**（`docs/253` §11.4 ③）。
 #:
 #: ⚠ **这张表必须住在编译器里**，不能只在 `chooseset` 文件里 —— 档要先于开关落定
@@ -1765,7 +1790,9 @@ CORE_CONFLICTS = {
         "而外部库把指针放进**它自己的结构**里（zlib 的 `z_stream` 就是），"
         "那些指针在 Loment 的栈之外 —— 前沿一回卷，C 手里那个指针就指到了**已经退回去"
         "的地方**。`docs/219` §6.1 已把这一对写成硬边界；"
-        "要 hosted 请用 `gc_manual` 或 `gc_auto`"),
+        "要 hosted 请用 `gc_manual` 或 `gc_auto`。"
+        "这是一条**划窄（narrowing）**，不是「非法组合」：开出它的条件是"
+        "**一个不回卷前沿的 L2**（`docs/228` §7 的判决表）"),
 }
 
 
@@ -4562,6 +4589,25 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                             if _w in _pair), 1)
                 errs.append(f"{_ln}: `{_pair[0]}` 与 `{_pair[1]}` 不能同时选 —— {_why}")
 
+    # ---- **LMS 的运行期预算**（`docs/253` §11.2.1，#1023）。
+    # 每一级在 `LMS_LEVEL_BUDGETS` 里声明自己要不要运行期状态。今天七级恰好都是
+    # `none` / `instructions` / `outside`，所以 `no_runtime` + `lms_full` **合法** ——
+    # 但那是**被检查的性质**，不是"碰巧能编过"：把某一级改成 `state`，这里当场点名。
+    if _eff["runtime"] == "no_runtime":
+        for _lvl in LMS_TOGGLES:
+            if not _lms_level(mod, _lvl):
+                continue
+            _budget = LMS_LEVEL_BUDGETS[_lvl]
+            if _budget == "state":
+                _ln = next((l for _d, _w, l in reversed(mod.choose_lines)
+                            if _d == "lms"), 1)
+                errs.append(
+                    f"{_ln}: LMS 的 `{_lvl}` 的预算写的是 `state` —— 它需要一份"
+                    f"**运行期状态**，而这份程序声明了 `no_runtime`。"
+                    f"`no_runtime` 是**保证**：产物里不许出现那段运行期。"
+                    f"要这一级就写 `choose runtime`；不要就把它关掉"
+                    f"（`docs/253` §11.2.1 的预算表）")
+
     # ---- **运行期维是一条保证，不是一句期望**（`docs/217` / `docs/175` §3.6）。
     # `no_runtime`（默认）说的不是"我们希望产物里没有运行期"，而是"**产物里没有运行期**"
     # —— 于是凡是会把它拖进去的构造，**编译期点名拒**（用户 2026-10-09 裁决：按字面做，
@@ -5969,7 +6015,10 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # 与 `gc_ladder` 同形，多一条交叉：`total_net` 必须等于 `surfaces.net`。
         # v16 = v15 + **LSPE 台账** `lspe`（`docs/262`）：审计状态 + 站点/义务计数 +
         # 地板明细 + 不变量。它是**另一个字段**，按 `gc_ladder` 的先例单独升一版。
-        "potato": "v17",
+        # v18 = v17 + **七级的运行期预算** `lms_budgets`（`docs/253` §11.2.1，#1023）：
+        # 每一级是 `none` / `instructions` / `state` / `outside`。于是
+        # "这份产物承诺没有运行期"是**不读源码可判**的 —— 不是靠七级实现碰巧都轻。
+        "potato": "v18",
         "unit": mod.name,
         "language": "loment",
         # **表层语法**（`docs/188` §2）—— 与 `language` 分工不同, 别混:
@@ -6007,6 +6056,9 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # 于是两者**可以不一致**，而这一格记的是**最后**的结果。
         # 这也是 `docs/253` §9 判据 9/11 唯一能"不读源码可判"的落点。
         "lms_levels": {_n: _lms_level(mod, _n) for _n in LMS_TOGGLES},
+        # **七级的运行期预算**（v18，#1023）。键序与 `LMS_TOGGLES` 同一张；值是上面
+        # 那张表的四个取值之一。产物里带着它，读者不必知道"今天的实现碰巧没有表"。
+        "lms_budgets": {_n: LMS_LEVEL_BUDGETS[_n] for _n in LMS_TOGGLES},
         # **安全审计**（`docs/262`，用户 2026-10-18 定第七维）：台账是 LSPE 的第四件。
         # 计数、`per_kind`、不变量与 `lspe_close_admin` 的归零都在 `lspe/ledger.py`；
         # 编译器只把这个映射写进产物。

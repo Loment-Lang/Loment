@@ -130,18 +130,20 @@ def test_two_tiers_are_an_error() -> None:
 
 
 def test_levels_reach_the_artifact() -> None:
-    """判 D：`lms_levels` 进 Potato v17，七个布尔与编译器那张表逐条对上。"""
+    """判 D：`lms_levels` 进 Potato v18，七个布尔与编译器那张表逐条对上。"""
     mod, deps = _load("choose lms_forensic_admin")
     doc = json.loads(lomentc.emit_potato(mod, ROOT, deps))
-    assert doc["potato"] == "v17", doc["potato"]
+    assert doc["potato"] == "v18", doc["potato"]
     assert doc["lms"] == "lms_forensic_admin"
     assert doc["lms_levels"] == {
         "lms_check": True, "lms_manage": True, "lms_guard": True,
         "lms_reject": True, "lms_crash": False, "lms_restart": False,
         "lms_seed": False}, doc["lms_levels"]
+    # v18：预算表也在产物里（`#1023`）—— 档名与开关可以不一致，预算与级无关。
+    assert doc["lms_budgets"] == lomentc.LMS_LEVEL_BUDGETS, doc["lms_budgets"]
     # 校验器认它（同一份对象，两边判一样）
     assert potato.validate(doc) == [], potato.validate(doc)
-    print("      Potato v17 的 lms_levels 与编译器那张表逐条对上，校验器收下")
+    print("      Potato v18 的 lms_levels / lms_budgets 与编译器那张表逐条对上，校验器收下")
 
 
 def test_manager_report_lists_every_alloc_site() -> None:
@@ -500,6 +502,54 @@ def test_vm_trap_reports_the_site() -> None:
         assert rc == 132 and out == b"", (name, rc, out)
         assert re.search(r"llvm\.trap at [^:\s]+:[^#\s]+#\d+", err), (name, err)
     print("      T0/T2/T3 都报 `llvm.trap at 函数:块#指令`，退出码 132")
+
+
+def test_lms_budgets_are_declared_and_recorded() -> None:
+    """#1023：七级的运行期预算有**声明**，而且进产物（Potato v18）。
+
+    今天七级恰好是 `none` / `instructions` / `outside` —— 所以 `no_runtime` + `lms_full`
+    合法。但那是**被检查的性质**：表里改一个值，检查器就会点名。产物里也要能读到，
+    这样"这份产物承诺没有运行期"不是靠读源码猜。
+    """
+    want = {
+        "lms_check": "none", "lms_manage": "none", "lms_guard": "instructions",
+        "lms_reject": "instructions", "lms_crash": "instructions",
+        "lms_restart": "outside", "lms_seed": "none",
+    }
+    assert lomentc.LMS_LEVEL_BUDGETS == want, lomentc.LMS_LEVEL_BUDGETS
+    assert tuple(lomentc.LMS_LEVEL_BUDGETS) == lomentc.LMS_TOGGLES
+    mod, deps = _load("")
+    doc = json.loads(lomentc.emit_potato(mod, ROOT, deps))
+    assert doc["potato"] == "v18", doc["potato"]
+    assert doc["lms_budgets"] == want, doc["lms_budgets"]
+    assert potato.validate(doc) == [], potato.validate(doc)
+    print("      七级预算已声明；Potato v18 的 lms_budgets 与编译器同一张表")
+
+
+def test_a_stateful_level_rejects_no_runtime() -> None:
+    """#1023：把某一级改成 `state`，`no_runtime` 的产物**当场点名**。
+
+    这是"预算不是一句注释"的证伪：不动源码，只动编译器那张表 —— 检查器必须红，
+    并且报文里同时有**级名**与**预算**。今天七级都不是 `state`，所以这是**探针
+    构建**（issue 原话：a probe build that forces level 2 to allocate）。
+    """
+    src = "module m\n\nfn f() -> u32 {\n    return 7;\n}\n"
+
+    def check() -> list[str]:
+        mod = lomentc.Parser(lomc.lex(src), src).parse()
+        lomentc._gc_alpha_pass(mod, [])
+        return lomentc.check(mod, deps=[])
+
+    assert check() == [], "默认七级不该被拒 —— no_runtime + lms_full 必须合法"
+    old = lomentc.LMS_LEVEL_BUDGETS["lms_manage"]
+    lomentc.LMS_LEVEL_BUDGETS["lms_manage"] = "state"
+    try:
+        errs = check()
+    finally:
+        lomentc.LMS_LEVEL_BUDGETS["lms_manage"] = old
+    assert any("lms_manage" in e and "state" in e for e in errs), errs
+    assert any("no_runtime" in e for e in errs), errs
+    print("      预算改成 state => no_runtime 被拒，报文点名 lms_manage / state")
 
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

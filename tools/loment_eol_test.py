@@ -16,8 +16,6 @@ from __future__ import annotations
 
 import os
 
-import contextlib
-import io
 import shutil
 import subprocess
 import sys
@@ -27,7 +25,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import loment_suite  # noqa: E402
 import lomentc  # noqa: E402
-import loment_eol  # noqa: E402
 
 #: WSL 侧临时路径前缀 —— **每个进程一份**（WSL 的 `/tmp` 是所有 `wsl -e` 调用共用的，
 #: 固定文件名在并发跑门禁时会让两个进程互相跑对方的二进制 —— 那是**错结果**，不是慢）。
@@ -35,10 +32,9 @@ _T = f"/tmp/loment-{os.getpid()}-"
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "loment" / "tools" / "lomeol.lomt"
-#: 漂移用例用的探针：`.gitattributes` 里 `*.lomt text eol=lf`，所以一个新造的 CRLF `.lomt`
-#: 会以 `i/ w/crlf attr/text eol=lf` 出现在 `git ls-files --eol` 里。
-PROBE = ROOT / "loment" / "build" / "zz_crlf_probe.lomt"
-PROBE_BYTES = b"module zzprobe\r\n\r\nfn f() -> u32 {\r\n    return 0;\r\n}\r\n"
+#: 漂移用例用的探针：夹具仓库的 `.gitattributes` 里 `*.lomt text eol=lf`，所以一个 CRLF
+#: 的 `.lomt` 会以 `i/ w/crlf attr/text eol=lf` 出现在 `git ls-files --eol` 里。
+CRLF_BYTES = b"module zzprobe\r\n\r\nfn f() -> u32 {\r\n    return 0;\r\n}\r\n"
 TESTS: list[tuple[str, object]] = []
 
 
@@ -108,25 +104,51 @@ def _norm(v: str) -> str:
     return v
 
 
-def _py(args: list[str]) -> tuple[int, str, str]:
-    """进程内跑 Python 版并捕获两路输出（避免换行翻译 —— 与 loment_status_test 同一理由）。"""
-    buf, err = io.StringIO(), io.StringIO()
-    try:
-        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
-            rc = loment_eol.main(args)
-    except SystemExit as e:
-        rc = e.code if isinstance(e.code, int) else 1
-    return rc, buf.getvalue(), err.getvalue()
+def _fixture_repo(td: Path) -> Path:
+    """造一份**最小的 git 仓库**给两边跑（`#400`）。
+
+    为什么不在 `ROOT` 上跑：工作树里 `.git` 是一个文件，内容像
+    `gitdir: D:/Dev/<主仓>/.git/worktrees/<名字>` —— 那是**宿主**路径，WSL 里的 `git`
+    打不开它。于是 `lomeol` 正确地回 SKIP（"无法判定"），而 Python 那一侧在宿主上跑、
+    看得到仓库并给出真结论：两边都"对"，可比的东西却没有。自己造一份仓库，两边看到的
+    就是同一件东西 —— 内容也正是这条判据要的：`.gitattributes` 声明 `*.lomt text eol=lf`。
+
+    `core.autocrlf=false` 是**显式**给的：这台机器的全局配置开着它，而那会让
+    "索引侧与工作区侧"的对比随**操作者的配置**变，判据就不可复现了。
+    """
+    repo = td / "repo"
+    repo.mkdir()
+    (repo / ".gitattributes").write_text("*.lomt text eol=lf\n", encoding="utf-8", newline="\n")
+    (repo / "ok.lomt").write_bytes(b"module ok\n\nfn f() -> u32 {\n    return 0;\n}\n")
+    for args in (["init", "-q"], ["-c", "core.autocrlf=false", "add", "-A"]):
+        r = subprocess.run(["git", *args], cwd=str(repo), capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr[-300:]
+    return repo
 
 
-def _run(elf: Path, td: Path, name: str, args: list[str]) -> tuple[int, str, str]:
-    """在 WSL 里跑孪生, **cwd = 仓库根**（`git` 要在这儿跑, 与 Python 版同）。"""
+def _py_in(repo: Path, args: list[str]) -> tuple[int, str, str]:
+    """在**指定的仓库**里跑 Python 版 —— 与 ELF 那一侧看的是同一个仓（`#400`）。
+
+    Python 版把仓库根定在**脚本自己所在的位置**（`Path(__file__).parent.parent`），
+    不是进程 cwd，所以换了 cwd 它照样去查本仓。把同一份脚本原样拷进夹具仓库再跑，
+    两边的"仓库根"就都对上了（ELF 那边是用 cwd 认的）。
+    """
+    (repo / "tools").mkdir(exist_ok=True)
+    shutil.copyfile(ROOT / "tools" / "loment_eol.py", repo / "tools" / "loment_eol.py")
+    r = subprocess.run([sys.executable, str(repo / "tools" / "loment_eol.py"), *args],
+                       cwd=str(repo), capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", shell=False)
+    return r.returncode, r.stdout, r.stderr
+
+
+def _run(elf: Path, td: Path, name: str, args: list[str], repo: Path) -> tuple[int, str, str]:
+    """在 WSL 里跑孪生, **cwd 与 Python 版相同**（`git` 要在这儿跑）。"""
     outp = td / f"{name}.out"
     errp = td / f"{name}.err"
     binn = f"{_T}lomeol_{name}.bin"
     quoted = " ".join(args)
     script = (f"rm -f {binn} && cp {_wsl_path(elf)} {binn} && chmod +x {binn} && "
-              f"cd {_wsl_path(ROOT)} && {binn} {quoted} "
+              f"cd {_wsl_path(repo)} && {binn} {quoted} "
               f"> {_wsl_path(outp)} 2> {_wsl_path(errp)}; echo -n $?")
     r = subprocess.run([*_WSLCMD, "bash", "-lc", script],
                        capture_output=True, text=True, timeout=300, shell=False)
@@ -139,9 +161,10 @@ def _run(elf: Path, td: Path, name: str, args: list[str]) -> tuple[int, str, str
     return rc, out, err
 
 
-def _pair(elf: Path, td: Path, name: str, args: list[str]) -> tuple[int, str, str]:
-    wr, wo, we = _py(args)
-    gr, go, ge = _run(elf, td, name, args)
+def _pair(elf: Path, td: Path, name: str, args: list[str],
+          repo: Path) -> tuple[int, str, str]:
+    wr, wo, we = _py_in(repo, args)
+    gr, go, ge = _run(elf, td, name, args, repo)
     if (wr, _norm(wo), _norm(we)) == (gr, go, ge):
         return gr, go, ge
     raise AssertionError(
@@ -160,16 +183,17 @@ def test_lomeol_matches_python():
         return
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
+        repo = _fixture_repo(td)
         elf = _build(td)
-        rc, out, _err = _pair(elf, td, "noargs", [])
-        assert rc in (0, 1), f"退出码应当是 0 (干净) 或 1 (有 CRLF), 实得 {rc}"
+        rc, out, _err = _pair(elf, td, "noargs", [], repo)
+        assert rc == 0, f"干净仓库应当退 0, 实得 {rc}: {out[:200]!r}"
         assert out.startswith("loment_eol: "), out[:120]
     print("      无参数那一趟: stdout + stderr + 退出码一致")
 
 
 @test
 def test_lomeol_reports_crlf_like_python():
-    """真有 CRLF 时也一致 —— 造一个 CRLF 的新 `.lomt`, 走报告的第二条路。
+    """真有 CRLF 时也一致 —— 往夹具仓库里放一个 CRLF 的 `.lomt`, 走报告的第二条路。
 
     **两边一致还不够**: 要是两边**都没报**也会"一致"。所以额外独立断言一次
     "探针出现在输出里", 否则这条判据是摆样子。
@@ -177,21 +201,43 @@ def test_lomeol_reports_crlf_like_python():
     if not (_clang() and _wsl()):
         print("      SKIP: 无 clang/WSL")
         return
-    PROBE.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        PROBE.write_bytes(PROBE_BYTES)
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        repo = _fixture_repo(td)
+        (repo / "bad.lomt").write_bytes(CRLF_BYTES)
         # 先跟 Python 版要一次结论, 确认探针真的被算作 CRLF（判据自己的前提）
-        prc, pout, _perr = _py([])
-        rel = PROBE.relative_to(ROOT).as_posix()
+        prc, pout, _perr = _py_in(repo, [])
         assert prc == 1, f"Python 版应当报 CRLF (退 1), 实得 {prc}: {pout[:200]!r}"
-        assert rel in pout, f"Python 版没点到探针 {rel}: {pout[:200]!r}"
-        with tempfile.TemporaryDirectory() as tds:
-            td = Path(tds)
-            elf = _build(td)
-            _pair(elf, td, "crlf", [])
-    finally:
-        PROBE.unlink(missing_ok=True)
+        assert "bad.lomt" in pout, f"Python 版没点到探针 bad.lomt: {pout[:200]!r}"
+        elf = _build(td)
+        _pair(elf, td, "crlf", [], repo)
     print("      有 CRLF 时: 报告与退出码一致（且独立断言过探针真被报出来）")
+
+
+@test
+def test_both_say_the_same_thing_outside_a_git_tree():
+    """不在 git 工作树里时，两份都回**行首是 `SKIP`** 的那一行、退出 2（`#400`）。
+
+    Python 版早改成这个口径（门禁按行首数跳过，`.github/gate-skips.txt`），
+    `lomeol.lomt` 原先仍打 `loment_eol: SKIP —— …` —— 两边都"说了"，但一份数得到、
+    一份数不到。这条判据在**非仓库**的临时目录里跑，两边都走 SKIP 那一支。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        plain = td / "plain"
+        plain.mkdir()
+        # 临时目录本身可能就在某个仓库里（这台机器的 `%TEMP%` 在 `C:/Users/hooya` 那个
+        # 仓库底下）。一个指不到东西的 `.git` 文件让 **git 发现**在两边都失败 —— 那正是
+        # "不在工作树"的形状，而且不靠临时目录恰好落在哪儿。
+        (plain / ".git").write_text("gitdir: /nonexistent/nowhere\n", encoding="utf-8")
+        elf = _build(td)
+        rc, out, _err = _pair(elf, td, "norepo", [], plain)
+    assert rc == 2, f"无法判定应当退 2, 实得 {rc}: {out[:160]!r}"
+    assert out.startswith("SKIP  不是 git 工作树"), out[:160]
+    print("      非仓库目录：两份都是 `SKIP` 开头的那一行、退出 2")
 
 
 @test

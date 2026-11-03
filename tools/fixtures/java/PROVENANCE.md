@@ -77,7 +77,7 @@ Runtime pieces (#1060), same `javac 23`:
 ```
 # --release 8: StringBuilder calls, no invokedynamic
 65180b143db28bd20414ede60b498ce6ffac11f8719ff38fa831fe03f509693c  sblib.jar
-3e33d5839853b7a1061573a042387f0ea62d2bb62fb4940ddf289eba2962e848  throwlib.jar
+4f876b5a8f5264b01779f8b21cee7bc2408b01dfbc1dbb86be1b2207b285a2ce  throwlib.jar  (message + caughtMessage)
 # --release 17: `+` becomes invokedynamic (StringConcatFactory), boxes via valueOf
 4e9dea923423550d38053e00d16ca95993ce4dd1d3c83a9f30eca35bc79b027d  concatlib.jar
 20751afefaaead43b34481670eb15b0a84efd95524c48e35d0b46f4415fec428  boxlib.jar
@@ -87,4 +87,10 @@ Runtime pieces (#1060), same `javac 23`:
 
 ```
 5976e0d72dd45165958336472e7fb041a9476aad69ed1b0dd6533394ef1a55fc  initlib.jar
+```
+
+`ifacelib.jar` (interface dispatch), `--release 8`:
+
+```
+84a526619f10bc9bb01bd8eb55696f163ce78e4e3da140ff488d6ae574a7500e  ifacelib.jar
 ```

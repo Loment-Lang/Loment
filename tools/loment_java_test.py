@@ -559,6 +559,56 @@ fn _start() {
 
 
 @test
+def test_interface_dispatch():
+    """#1059 P1: `invokeinterface` dispatches to the two implementations."""
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "deps" / "ifacelib").mkdir(parents=True)
+        jar = FIX.parent.parent / "ifacelib.jar"
+        ir, _iface = _emit(jar, "ifacelib", d / "deps" / "ifacelib")
+        rc = _build_and_run(d, ir, """module app
+use ifacelib
+
+fn _start() {
+    let r: i32 = ifacelib_IfaceLib_run();
+    syscall4(60, (r - 17) as u64, 0, 0);
+}
+""")
+        assert rc == 0, rc
+        print(f"      invokeinterface -> 17 on "
+              f"{'PE' if sys.platform == 'win32' else 'ELF'}")
+
+
+@test
+def test_exception_messages_survive_catch_and_uncaught():
+    """#1060: `new RuntimeException("boom")` carries its message.
+
+    Caught: `getMessage().length()` is 4. Uncaught: the boundary prints the
+    message after the prefix and still exits 1.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "deps" / "throwlib").mkdir(parents=True)
+        jar = FIX.parent.parent / "throwlib.jar"
+        ir, _iface = _emit(jar, "throwlib", d / "deps" / "throwlib")
+        rc, _out, err = _build_and_run_io(d, [ir], """module app
+use throwlib
+
+fn _start() {
+    let n: i32 = throwlib_caughtMessage();
+    if n != 4 {
+        syscall4(60, 90, 0, 0);
+    }
+    let _r: i32 = throwlib_boomMsg();
+    syscall4(60, 0, 0, 0);
+}
+""")
+        assert rc == 1, (rc, err)
+        assert err == b"Exception in thread main: boom" + bytes([10]), err
+        print(f"      exception message -> caught (4) and uncaught {err!r}")
+
+
+@test
 def test_merge_removes_satisfied_declaration():
     """The merged IR has no extern declaration for a symbol defined in a second input."""
     with tempfile.TemporaryDirectory() as td:

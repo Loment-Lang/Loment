@@ -492,6 +492,7 @@ def _init_ops() -> None:
     _op(180, "getfield", "h", 0); _op(181, "putfield", "h", -2)
     _op(178, "getstatic", "h", 1); _op(179, "putstatic", "h", -1)
     _op(183, "invokespecial", "h", 0); _op(182, "invokevirtual", "h", 0)
+    _op(185, "invokeinterface", "hh", 0)
     _op(170, "tableswitch", "sw", -1); _op(171, "lookupswitch", "sw", -1)
     _op(186, "invokedynamic", "hh", 0)
     _op(191, "athrow", "", -1)
@@ -1042,7 +1043,7 @@ def _vstep(cf: ClassFile, m: Method, x: Insn, st: list, lc: list) -> list[int]:
         else:
             _vpop(st, ty, ctx, x.off)
             _vpop(st, T_REF, ctx, x.off)
-    elif name in ("invokestatic", "invokevirtual", "invokespecial"):
+    elif name in ("invokestatic", "invokevirtual", "invokespecial", "invokeinterface"):
         cls, mname, desc = methodref(cf.pool, x.args[0])
         params, ret = parse_method_descriptor(desc)
         vtypes = [_vtype(t, ctx) for t in params]
@@ -1388,7 +1389,7 @@ def _verify_access(cf: ClassFile, m: Method, registry: dict) -> None:
                     raise JavaError(
                         f"J002: {ctx} @{x.off}: {owner}.{fname} is final and assigned "
                         f"outside its initializer")
-        elif name in ("invokestatic", "invokevirtual", "invokespecial"):
+        elif name in ("invokestatic", "invokevirtual", "invokespecial", "invokeinterface"):
             cls, mname, desc = methodref(cf.pool, x.args[0])
             owner, mm = _resolve_member(cls, mname, desc, "method", registry)
             if owner is None:
@@ -1443,6 +1444,12 @@ entry:
   %x = load ptr, ptr @__jrt_exc_{module}
   %n = icmp ne ptr %x, null
   ret i1 %n
+}}
+
+define internal ptr @__jl_exc_ptr_{module}() {{
+entry:
+  %x = load ptr, ptr @__jrt_exc_{module}
+  ret ptr %x
 }}
 
 define internal ptr @{sym}(i32 %n) {{
@@ -1723,13 +1730,25 @@ class Emitter:
             steps += 1
         return None, None
 
+    def _is_iface_sub(self, iface: str, base: str, depth: int) -> bool:
+        if iface == base:
+            return True
+        cf = self.registry.get(iface)
+        if cf is None or depth <= 0:
+            return False
+        return any(self._is_iface_sub(i, base, depth - 1) for i in cf.interfaces)
+
     def _is_sub(self, name: str, base: str) -> bool:
+        """类链或接口链上是不是 `base` —— 接口调用要做闭世界分派。"""
         cur = name
         steps = 0
         while cur in self.registry and steps < 64:
             if cur == base:
                 return True
-            cur = self.registry[cur].super_name
+            cf = self.registry[cur]
+            if any(self._is_iface_sub(i, base, 8) for i in cf.interfaces):
+                return True
+            cur = cf.super_name
             steps += 1
         return False
 
@@ -2071,7 +2090,8 @@ class Emitter:
                     size = meta.size
                 elif cls in ("java/lang/RuntimeException", "java/lang/Exception",
                              "java/lang/Throwable"):
-                    size = 8
+                    # +8 是 message（String），未捕获时打出来。
+                    size = 24
                 else:
                     raise JavaError(f"new {cls}: class is not in the linked set")
                 p = self.t()
@@ -2127,7 +2147,7 @@ class Emitter:
             q = self.t()
             self.emit(f"{q} = getelementptr i8, ptr {obj}, i32 {off}")
             self.emit(f"store {ty} {val}, ptr {q}")
-        elif name == "invokevirtual":
+        elif name in ("invokevirtual", "invokeinterface"):
             cls, mname, desc = methodref(self.pool, x.args[0])
             params, ret = parse_method_descriptor(desc)
             n = len(params)
@@ -2157,6 +2177,13 @@ class Emitter:
                 self.emit(f"{q} = getelementptr i8, ptr {recv}, i32 8")
                 self.emit(f"{v} = load {_BOX[cls][1]}, ptr {q}")
                 self._push(_BOX[cls][1], v, h0 - n - 1)
+            elif cls in ("java/lang/Throwable", "java/lang/Exception",
+                         "java/lang/RuntimeException") and mname == "getMessage"                     and desc == "()Ljava/lang/String;":
+                q = self.t()
+                v = self.t()
+                self.emit(f"{q} = getelementptr i8, ptr {recv}, i32 8")
+                self.emit(f"{v} = load ptr, ptr {q}")
+                self._push("ptr", v, h0 - n - 1)
             elif cls == "java/lang/StringBuilder" and mname == "append":
                 if n != 1:
                     raise JavaError(f"StringBuilder.append{desc} is not supported yet")
@@ -2176,7 +2203,9 @@ class Emitter:
                 r = self.t()
                 self.emit(f"{r} = call ptr @jrt_sb_str(ptr {recv})")
                 self._push("ptr", r, h0 - n - 1)
-            elif cls in self.registry:
+            elif cls in self.registry or (
+                    name == "invokeinterface"
+                    and any(self._is_sub(n, cls) for n in self.registry)):
                 self._virtual_call(x, cls, mname, desc, recv, params, ret, vals, h0)
             elif cls == "java/lang/String" and mname == "equals" and desc == "(Ljava/lang/Object;)Z":
                 self._string_equals(recv, vals[0])
@@ -2224,9 +2253,16 @@ class Emitter:
                     "java/lang/Throwable"):
                 params, _ret = parse_method_descriptor(desc)
                 n = len(params)
+                vals = [""] * n
                 for i in range(n - 1, -1, -1):
-                    self._pop(params[i], h0 - n + i)
-                self._pop("ptr", h0 - n - 1)
+                    vals[i] = self._pop(params[i], h0 - n + i)
+                recv = self._pop("ptr", h0 - n - 1)
+                if n == 1 and params[0] == "ptr":
+                    q = self.t()
+                    self.emit(f"{q} = getelementptr i8, ptr {recv}, i32 8")
+                    self.emit(f"store ptr {vals[0]}, ptr {q}")
+                elif n != 0:
+                    raise JavaError(f"{cls}.<init>{desc} is not supported yet")
                 return
             if cls in self.registry:
                 owner, mm2 = self._impl(cls, mname, desc)
@@ -2638,7 +2674,8 @@ def emit(module: str, classes: list[ClassFile], ir_path: Path,
 
     exc_fn = f"__jl_exc_{module}"
     decls = [f"extern fn {exc_fn}() -> bool;",
-             "extern fn jrt_uncaught();"]
+             f"extern fn __jl_exc_ptr_{module}() -> ptr;",
+             "extern fn jrt_uncaught(exc: ptr);"]
     bodies: list[str] = []
     used: set[str] = set()
     multi = len(classes) > 1
@@ -2673,7 +2710,8 @@ def emit(module: str, classes: list[ClassFile], ir_path: Path,
         else:
             bodies.append(f"    let r: {ret} = {sym}({call});")
         # 未捕获的异常走到边界就打印并退出 —— 而不是带着一个默认值悄悄返回。
-        bodies.append(f"    if {exc_fn}() {{ jrt_uncaught(); }}")
+        bodies.append(
+            f"    if {exc_fn}() {{ jrt_uncaught(__jl_exc_ptr_{module}()); }}")
         if ret != "void":
             bodies.append("    return r;")
         bodies.append("}")

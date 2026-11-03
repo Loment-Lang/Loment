@@ -352,8 +352,15 @@ pub fn jrt_sb_s(sb: ptr, s: ptr) {
 /// 未捕获的 Java 异常：一行消息到 stderr，退出码 1。
 ///
 /// 没有栈回溯，也没有异常类名 —— 这个子集里异常不携带类型信息（见 docs/282 状态行）。
-pub fn jrt_uncaught() {
+pub fn jrt_uncaught(exc: ptr) {
     wr(2, str_ptr("Exception in thread main"), str_len("Exception in thread main"));
+    if (exc as u64) != 0 {
+        let msg: ptr = ld64(exc, 8) as ptr;
+        if (msg as u64) != 0 {
+            wr(2, str_ptr(": "), 2);
+            jstr(2, msg, 0);
+        }
+    }
     let nl: ptr = jrt_alloc(4);
     store8(nl, 0, 10 as u8);
     wr(2, nl, 1);

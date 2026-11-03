@@ -396,6 +396,9 @@ GLOBS = [
     "tools/loment_hotart.py", "tools/loment_hotart_test.py",
     # 稳定性模拟（`#1152` 追加）：一个进程连着换六次、两槽轮流。**同位置**。
     "tools/loment_hotstress_test.py",
+    # 命令行与模拟器（`#1155`）：`loment hotupdate` 与假 Pre-Release 的搭建。**同位置**。
+    "tools/loment_hotupdate.py",
+    "tools/loment_demo_release.py",
     # 元数据（`#1149`）：帧布局哈希 + 调用点表。**插入位置与 lomrel.lomt 逐行对齐**。
     "tools/loment_hotmeta_test.py",
     # 构建档（`#1150`）：槽表 + 入口闸。**插入位置与 lomrel.lomt 逐行对齐**。

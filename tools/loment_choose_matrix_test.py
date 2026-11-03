@@ -23,13 +23,15 @@
 #  11. `std` + `hosted` 的镜像**带着宿主层**（真 libc 的导入 + 跑出 7）；
 #  12. `no_std + hosted` 在**两个前端**都被拒（参考点名两个取值，自举锚在后写那行）；
 #  13. `gc` 档位是**链接后镜像**的性质（函数集按档不同；`no_gc` 与 `manual` 逐字节同）；
-#  14. `runtime` 的闭包按格子算（不调用的运行期层也在；堆按需；`no_runtime` 只有入口）。
+#  14. `runtime` 的闭包按格子算（不调用的运行期层也在；堆按需；`no_runtime` 只有入口）；
+#  15. `hosted` × `lms` 的合法格：g1 检查照发，越界写/读被拒，界内那一半算出 1（#1025）。
 
 from __future__ import annotations
 
 import io
 import itertools
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -429,6 +431,73 @@ def test_hosted_and_gc_auto_compose():
     print("      hosted + gc_auto: 平台堆 + 收集器 + 根表")
 
 
+#: hosted + LMS 的探针：`alloc(8)` 直接发出的指针，一个界内写 + 两个越界访存。
+#: 拒绝器把它们跳过 ⇒ `1 + 0 = 1`；g1 检查不在时读到的是复用后的字节（不是 1）。
+HOSTED_LMS_BODY = """fn _start() {
+    let p: ptr = alloc(8);
+    store8(p, 0, 1);
+    store8(p, 9, 7);
+    let x: u32 = load8(p, 0);
+    let y: u32 = load8(p, 9);
+    let v: u32 = x + y;
+    syscall4(60, v as u64, 0, 0);
+}
+"""
+
+
+@test
+def test_hosted_and_lms_compose():
+    """`#1025`：`hosted` × `lms` 的合法格 —— g1 检查照发，且真链真跑。
+
+    * `gc_manual` / `gc_auto` × lms 开/关四格都编得过；平台堆与 `@malloc` 都在；
+    * lms 开 ⇒ 有 `lmsok`；lms 关 ⇒ 一条都没有；
+    * 入口 A 的 `%lmsretry` 只在 **gc_auto + lms 开** 时出现（`gc_manual` 没有收集器）；
+    * lms 开的两格**真链 libc、真跑**：越界写/读被拒，界内那一半算出 **1**。
+    """
+    values = lomentc.CORE_DIMS["lms"]
+    gi = lomentc.LMS_TOGGLES.index("lms_guard")
+    off = next(v for v in values if not lomentc.LMS_TIERS[v][gi])
+    on = next(v for v in values if lomentc.LMS_TIERS[v][gi])
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        irs = {}
+        for gc in ("gc_manual", "gc_auto"):
+            for lms in (off, on):
+                cell = {"mode": "std", "gc": gc, "runtime": "runtime",
+                        "port": "hosted", "lms": lms}
+                rc, diag, ir, pot = _emit(td, f"hosted-{gc}-{lms}", cell, HOSTED_LMS_BODY)
+                assert rc == 0, f"{gc}+hosted+{lms}: 编不过\n{diag[-400:]}"
+                assert pot.get("port") == "hosted" and pot.get("lms") == lms
+                assert "loment-heap: platform" in ir and "@malloc" in ir, \
+                    "hosted 没把堆换成平台的"
+                assert ("lmsok" in ir) == (lms == on), (
+                    f"{gc}+{lms}: g1 检查{'该有' if lms == on else '不该有'}")
+                assert ("%lmsretry" in ir) == (gc == "gc_auto" and lms == on), (
+                    f"{gc}+{lms}: 入口 A 的标记不对")
+                irs[(gc, lms)] = ir
+        import loment_ffi_test as ffitest  # noqa: PLC0415
+        if not LVMTest.ELF._wsl():
+            print("      SKIP 运行: 需要 WSL（或 Linux）跑 ELF")
+            return
+        libc = ffitest._system_so(td / "libc.so.6", ffitest._LIB6_CANDIDATES)
+        if libc is None:
+            print("      SKIP 运行: 这台机器上没有 libc.so.6")
+            return
+        foreign = lomelf.load_foreign(libc)
+        for gc in ("gc_manual", "gc_auto"):
+            blob, info = lomelf.compile_ll(irs[(gc, on)], [foreign], allow_ports=True)
+            assert info["shared"] == ["libc.so.6"], (gc, info)
+            exe = td / f"hosted_{gc}_lms.elf"
+            exe.write_bytes(blob)
+            r = LVMTest.ELF._sh(
+                f"chmod +x {LVMTest.ELF._wsl_path(exe)} && "
+                f"{LVMTest.ELF._wsl_path(exe)}", 120)
+            assert r.returncode == 1, (
+                f"{gc}+hosted+lms 跑出 {r.returncode}（期望 1：越界被拒、界内那一半照算）"
+                f"：{r.stderr[-300:]!r}")
+    print("      hosted × {manual, auto} × lms 开/关都编得过；lms 开的两格真链真跑 rc=1")
+
+
 @test
 def test_lms_rescue_only_exists_when_a_collector_does():
     """`lms` 的"收一次再试"只在真有收集器时出现 —— `gc_manual` 下它是一句空话（`docs/253` §5.3）。
@@ -721,6 +790,108 @@ def test_no_gc_is_accepted_and_the_linker_checks_the_claim():
         else:
             raise AssertionError("声明 no_gc 却带着收集器的 IR 被链接器收下了")
     print("      no_gc: 编得过、产物无收集器、伪造的声明在链接期点名拒")
+
+
+# ---------------------------------------------------------------- 交锁表（#1020）
+
+#: `store8` 的探针：`alloc(N)` 直接发出的指针，alpha 写屏障与 LMS g1 都盯着它。
+_INTERLOCK_STORE = """const N: u32 = 8;
+
+fn _start() -> u32 {
+    let p: ptr = alloc(N);
+    store8(p, 0, 1);
+    syscall4(60, 0, 0, 0);
+    return 0;
+}
+"""
+
+
+@test
+def test_interlock_store8_checks_before_barrier():
+    """`#1020` §3.1：屏障在**接受分支内**，检查在分支外。
+
+    反过来写，屏障会在一个被拒的地址上跑 —— 写没发生，但卡被标了，而且**没有判据会红**。
+    这条断言三件事：`lmsok` 块里有 `__loment_wb`、`lmsbad` 块里没有、`br` 在 `lmsok` 之前。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        rc, diag, ir, _pot = _emit(td, "interlock_store",
+                                   {"mode": "std", "gc": "gc_auto_alpha",
+                                    "runtime": "runtime"}, _INTERLOCK_STORE)
+        assert rc == 0, f"交锁探针编不过\n{diag[-400:]}"
+    # 一个块的正文到**下一个标签**为止（`lmsbad` 的正文里不能再把 `lmsok` 吞进来）。
+    ok = re.search(r"^(L\d+_lmsok):\n(.*?)(?=^L\d+_|\Z)", ir, re.S | re.M)
+    bad = re.search(r"^(L\d+_lmsbad):\n(.*?)(?=^L\d+_|\Z)", ir, re.S | re.M)
+    assert ok and bad, "产物里没有 lmsok / lmsbad 两块 —— 探针不在场"
+    assert "__loment_wb" in ok.group(2), "写屏障不在接受分支里"
+    assert "__loment_wb" not in bad.group(2), ("写屏障跑到了被拒分支里", bad.group(2))
+    assert ok.group(2).index("getelementptr") < ok.group(2).index("__loment_wb"), \
+        "屏障必须在 GEP 之后"
+    br = re.search(r"br i1 \S+, label %(L\d+_lmsok), label %(L\d+_lmsbad)", ir)
+    assert br and ir.index(br.group(0)) < ir.index(f"{br.group(1)}:"), \
+        "分支不在 lmsok 之前"
+    print("      store8: 检查在分支外、屏障在接受分支内且晚于 GEP")
+
+
+#: `alloc` 的探针：`gc_auto` + 入口 A（lms 默认满档）。
+_INTERLOCK_ALLOC = """const N: u32 = 64;
+
+fn _start() -> u32 {
+    let p: ptr = alloc(N);
+    syscall4(60, 0, 0, 0);
+    return 0;
+}
+"""
+
+
+@test
+def test_interlock_alloc_retry_is_inside_the_allocator():
+    """`#1020` §3.2：入口 A 的 retry 在 `boom` 之后、`dead` 之前，标记是本帧 `alloca`。
+
+    收集器在**分配器内部**跑；retry 标记若是全局，下一次分配会继承上一次的"已重试"
+    假能力。这条钉住：`%lmsretry` 在 `__loment_alloc` 内、`boom` 前；`rescue` 调收集器；
+    `floop` 的 phi 有 `rescue` 入边；产物里没有 `@__loment_lms_retry`。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        rc, diag, ir, _pot = _emit(td, "interlock_alloc",
+                                   {"mode": "std", "gc": "gc_auto",
+                                    "runtime": "runtime"}, _INTERLOCK_ALLOC)
+        assert rc == 0, f"交锁探针编不过\n{diag[-400:]}"
+    m = re.search(r"define internal ptr @__loment_alloc\(i32 %size\) \{\n(.*?)\n\}\n",
+                  ir, re.S)
+    assert m, "产物里没有分配器"
+    body = m.group(1)
+    assert "%lmsretry = alloca i1" in body, "retry 标记不在分配器里"
+    assert "@__loment_lms_retry" not in ir, "又长出了全局 retry 符号"
+    boom, rescue, dead = body.find("\nboom:"), body.find("\nrescue:"), body.find("\ndead:")
+    assert -1 < boom < rescue < dead, ("boom/rescue/dead 的顺序不对", boom, rescue, dead)
+    rescue_body = body[rescue:dead]
+    assert "call void @__loment_collect()" in rescue_body, "rescue 块里没有收集器"
+    assert "[ %head2, %rescue ]" in body, "floop 的 phi 没有 rescue 入边"
+    gc_call = ir.find("call void @__loment_maybe_collect")
+    alloc_call = ir.find("call ptr @__loment_alloc")
+    assert -1 < gc_call < alloc_call, "GC 的常规触发不在分配点之前"
+    print("      alloc: 常规触发在分配前；retry 在本帧、boom 后 dead 前，rescue 调收集器")
+
+
+@test
+def test_interlock_free_is_seen_by_the_checker():
+    """`#1020`：`free(p)` 之后再用 `p`，LMS 检查器必须点名（E029），不是静默。"""
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        rc, diag, _ir, _pot = _emit(
+            td, "interlock_free",
+            {"mode": "std", "gc": "gc_manual", "runtime": "runtime"},
+            "const N: u32 = 8;\n"
+            "fn f() -> u32 {\n"
+            "    let p: ptr = alloc(N);\n"
+            "    free(p);\n"
+            "    return load8(p, 0) as u32;\n"
+            "}\n")
+        assert rc != 0, "`free` 之后再用没有被拒"
+        assert "free" in diag and "不能再用" in diag, f"诊断没点名 use-after-free：{diag[-400:]}"
+    print("      free × LMS：用后使用被检查器点名拒绝")
 
 
 def main() -> int:

@@ -32,7 +32,7 @@ const GRAMMAR_ALIASES = {
 };
 
 //: 读法就是原生语法的规范名 —— 它们**不需要**另立一份语法文件：
-//: `loment` 是默认拼法，`tur` 是本语言自己的正式语法名（2026-11-03，`docs/288`）。
+//: `loment` 是默认拼法，`tur` 是本语言自己的正式语法名（2026-11-03，`docs/293`）。
 //: **`rust` 不在这里**：它退回成一门表层语法（与 C/Java/Go 同级），所以它有
 //: `loment-rust` 那一套语法文件。
 const NATIVE_GRAMMARS = ['loment', 'tur'];

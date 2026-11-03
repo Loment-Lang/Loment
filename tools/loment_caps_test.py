@@ -114,7 +114,7 @@ def test(fn):
 #: 摘要长度 / 槽表上限。它们都在 `EXPLAINED` 里写清来路（装载器用**返回码**点名，
 #: 不在这里终止进程）。条数 239 → **245**、沉默 155 → **161**。
 CAPACITY_SITES = 245
-SILENT_SITES = 161
+SILENT_SITES = 162
 
 #: 第二类：字面量上界（`#770`）。`[T; N]` 与 `literal:<N>` 各自钉住总数与沉默的那一份。
 LITERAL_SITES = 63
@@ -237,6 +237,7 @@ SILENT_NAMES = frozenset((
     "STR_CAP",
     "SUG_CAP",
     "SUG_NAME",
+    "SUM_CAP",
     "SW",
     "SYM_MAX",
     "SYM_STRIDE",

@@ -15,6 +15,7 @@ declare void @llvm.trap()
 
 @.str.jrt_uncaught.0 = private unnamed_addr constant [24 x i8] c"\45\78\63\65\70\74\69\6F\6E\20\69\6E\20\74\68\72\65\61\64\20\6D\61\69\6E"
 @.str.jrt_uncaught.1 = private unnamed_addr constant [24 x i8] c"\45\78\63\65\70\74\69\6F\6E\20\69\6E\20\74\68\72\65\61\64\20\6D\61\69\6E"
+@.str.jrt_uncaught.2 = private unnamed_addr constant [2 x i8] c"\3A\20"
 
 ; jrt_alloc -> ptr
 define ptr @jrt_alloc(i32 %n) {
@@ -1274,9 +1275,12 @@ L3_end:
   ret void
 }
 ; jrt_uncaught -> ()
-define void @jrt_uncaught() {
+define void @jrt_uncaught(ptr %exc) {
 entry:
+  %exc.addr = alloca ptr
+  %msg.addr = alloca ptr
   %nl.addr = alloca ptr
+  store ptr %exc, ptr %exc.addr
   %t1 = getelementptr inbounds [24 x i8], ptr @.str.jrt_uncaught.0, i64 0, i64 0
   %t2 = insertvalue { ptr, i64 } undef, ptr %t1, 0
   %t3 = insertvalue { ptr, i64 } %t2, i64 24, 1
@@ -1287,14 +1291,43 @@ entry:
   %t8 = extractvalue { ptr, i64 } %t7, 1
   %t9 = trunc i64 %t8 to i32
   call void @wr(i64 2, ptr %t4, i32 %t9)
-  %t10 = call ptr @jrt_alloc(i32 4)
-  store ptr %t10, ptr %nl.addr
-  %t11 = load ptr, ptr %nl.addr
-  %t12 = getelementptr i8, ptr %t11, i32 0
-  store i8 10, ptr %t12
-  %t13 = load ptr, ptr %nl.addr
-  call void @wr(i64 2, ptr %t13, i32 1)
-  %t14 = call i64 asm sideeffect "syscall", "={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}"(i64 60, i64 1, i64 0, i64 0)
+  %t10 = load ptr, ptr %exc.addr
+  %t11 = ptrtoint ptr %t10 to i64
+  %t12 = icmp ne i64 %t11, 0
+  br i1 %t12, label %L1_then, label %L2_else
+L1_then:
+  %t13 = load ptr, ptr %exc.addr
+  %t14 = call i64 @ld64(ptr %t13, i32 8)
+  %t15 = inttoptr i64 %t14 to ptr
+  store ptr %t15, ptr %msg.addr
+  %t16 = load ptr, ptr %msg.addr
+  %t17 = ptrtoint ptr %t16 to i64
+  %t18 = icmp ne i64 %t17, 0
+  br i1 %t18, label %L4_then, label %L5_else
+L4_then:
+  %t19 = getelementptr inbounds [2 x i8], ptr @.str.jrt_uncaught.2, i64 0, i64 0
+  %t20 = insertvalue { ptr, i64 } undef, ptr %t19, 0
+  %t21 = insertvalue { ptr, i64 } %t20, i64 2, 1
+  %t22 = extractvalue { ptr, i64 } %t21, 0
+  call void @wr(i64 2, ptr %t22, i32 2)
+  %t23 = load ptr, ptr %msg.addr
+  call void @jstr(i64 2, ptr %t23, i32 0)
+  br label %L6_end
+L5_else:
+  br label %L6_end
+L6_end:
+  br label %L3_end
+L2_else:
+  br label %L3_end
+L3_end:
+  %t24 = call ptr @jrt_alloc(i32 4)
+  store ptr %t24, ptr %nl.addr
+  %t25 = load ptr, ptr %nl.addr
+  %t26 = getelementptr i8, ptr %t25, i32 0
+  store i8 10, ptr %t26
+  %t27 = load ptr, ptr %nl.addr
+  call void @wr(i64 2, ptr %t27, i32 1)
+  %t28 = call i64 asm sideeffect "syscall", "={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}"(i64 60, i64 1, i64 0, i64 0)
   ret void
 }
 ; jrt_sb_str -> ptr

@@ -90,6 +90,10 @@ def main(argv: list[str] | None = None) -> int:
 
     got = st.stage(tmp, tree, tag, progress=_prog)
     shutil.rmtree(tmp, ignore_errors=True)
+    if got.parent.name == "applied":
+        # 幂等：这一版已经装过了（`stage` 直接返回 `applied/` 里那一份）。
+        print(f"already up to date: {tag}")
+        return 0
     if got.parent.name == "rejected":
         if seen["i"] < seen["n"]:
             _pct("checking...", seen["i"], seen["n"], end=True)   # 停在**拒绝的那一关**

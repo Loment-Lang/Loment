@@ -19,7 +19,7 @@
 module lpi_sys
 choose runtime
 
-const SYS_READ: u64 = 0;
+pub const SYS_READ: u64 = 0;
 const SYS_WRITE: u64 = 1;
 const SYS_CLOSE: u64 = 3;
 const SYS_BRK: u64 = 12;

@@ -107,7 +107,10 @@ pub fn idn_pass1(ws: ptr, n: u32) -> u32 {
         let nf: u32 = pkg_list_sources(ws, d);
         if nf != DIR_ERR {
             let dig: ptr = ((ws as u64) + WS_DIG as u64) as ptr;
-            if pkg_own_hash(ws, d, nf, dig) == nf {
+            // `pkg_own_hash` hashes the payload for a foreign package and returns
+            // that count, which is not `nf` (the `.lomt` count). Zero is the
+            // failure sentinel; a valid package always has at least one file.
+            if pkg_own_hash(ws, d, nf, dig) != 0 {
                 sha_hex(dig, pkg_id_hex(ws, i));
                 ok = ok + 1;
             }

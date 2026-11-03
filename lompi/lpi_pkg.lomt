@@ -511,6 +511,9 @@ pub const PKG_F_ACTIVE: u32 = 2;
 pub const PKG_F_MISSING: u32 = 4;
 /// 标志位: 在闭包内 —— resolve/tree/install 都靠它标记"这次要处理哪些实例"。
 pub const PKG_F_INCLOSURE: u32 = 8;
+/// 标志位: 这一趟锁遍历已经发射过 —— 闭包先标一遍 (与 0.2.0 同一个顺序), 再走一遍
+/// 发射; 第二遍不能靠 INCLOSURE 防重入 (那会把所有节点都当成"已访问")。
+pub const PKG_F_LOCK: u32 = 16;
 
 /// 单个源码文件的字节上限 —— 超了报错而不是静默截断 (截断会算出一个错的身份)。
 pub const PKG_FILE_MAX: u32 = 262144;
@@ -601,6 +604,67 @@ pub fn pkg_list_sources(ws: ptr, path: ptr) -> u32 {
     return out;
 }
 
+/// 目录里有没有这个叶子文件。用 1 字节读探一下 —— 只问存在性, 不读内容。
+/// 用 WS_TMP 末尾做路径、WS_FILE 做读缓冲; 调用方别在它之后还指望那两块。
+fn pkg_file_exists(ws: ptr, dir: ptr, leaf: str) -> u32 {
+    let scr: ptr = W(ws, WS_TMP + 7168);
+    let file: ptr = W(ws, WS_FILE);
+    let dn: u32 = txt_len_cstr(dir);
+    let ln: u32 = str_len(leaf);
+    if dn + 1 + ln + 1 > 1024 {
+        return 0;
+    }
+    sys_join(scr, dir, dn, str_ptr(leaf), ln);
+    let got: u64 = sys_read_file(scr, file, 1);
+    if got == SYS_ERR {
+        return 0;
+    }
+    return 1;
+}
+
+/// 包的种类: 0 = Loment 源码包, 1 = 外源包（有 `foreign.lomp`）。
+///
+/// 不往包记录里加字段: 记录是 stride 32 的固定布局, 动它要重排整个工作区。
+/// `foreign.lomp` 是 docs/222 §5 的清单文件名, 问它一次比记住它更不容易漂。
+pub fn pkg_kind(ws: ptr, dir: ptr) -> u32 {
+    if pkg_file_exists(ws, dir, "foreign.lomp") != 0 {
+        return 1;
+    }
+    return 0;
+}
+
+/// 列出**外源包**参与身份的全部普通文件（`foreign.lomp` / `foreign.txt` /
+/// `*.jar` / `*.ll` / `link.txt` / 生成的 `.lomt` 等），已排序。
+/// `deps/` 不是普通文件，天然被排除。
+pub fn pkg_list_payload(ws: ptr, path: ptr) -> u32 {
+    let names: ptr = W(ws, WS_NAMES);
+    let ents: ptr = W(ws, WS_ENTS);
+    let dbuf: ptr = W(ws, WS_DBUF);
+    let n: u32 = dir_list(path, dbuf, WS_DBUF_CAP as u64,
+                          names, WS_NAMES_CAP, ents, WS_ENTS_CAP);
+    if n == DIR_ERR { return DIR_ERR; }
+    let out: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let l: u32 = dir_ent_name_len(ents, i);
+        let keep: bool = dir_ent_type(ents, i) == DIR_TYPE_REG && l > 0;
+        if keep {
+            if out != i {
+                let a: u32 = 0;
+                while a < DIR_ENT_STRIDE {
+                    store8(ents, out * DIR_ENT_STRIDE + a,
+                           load8(ents, i * DIR_ENT_STRIDE + a) as u8);
+                    a = a + 1;
+                }
+            }
+            out = out + 1;
+        }
+        i = i + 1;
+    }
+    pkg_sort_ents(names, ents, out);
+    return out;
+}
+
 /// 自身源码哈希: 对每个文件按名字序喂 `名字 0x00 内容 0x00` 进 sha。
 /// 喂名字与 NUL 是为了让 "ab"+"c" 和 "a"+"bc" 分得开 —— 不加分隔符就能被构造出
 /// 两个不同包拿到同一个身份。
@@ -616,9 +680,19 @@ pub fn pkg_own_hash(ws: ptr, path: ptr, nfiles: u32, dig: ptr) -> u32 {
     let zero: ptr = W(ws, WS_ZERO);
     let pathn: u32 = txt_len_cstr(path);
     store8(zero, 0, 0 as u8);
+    // A foreign package hashes **every regular file** (the jar is part of its
+    // identity, docs/222 §5); a source package keeps the old `.lomt`-only set.
+    let kind: u32 = pkg_kind(ws, path);
+    let n: u32 = nfiles;
+    if kind == 1 {
+        n = pkg_list_payload(ws, path);
+    }
+    if n == DIR_ERR {
+        return 0;
+    }
     sha_init(st);
     let i: u32 = 0;
-    while i < nfiles {
+    while i < n {
         let o: u32 = dir_ent_name_off(ents, i);
         let l: u32 = dir_ent_name_len(ents, i);
         sys_join(scr, path, pathn, ((names as u64) + (o as u64)) as ptr, l);
@@ -633,7 +707,7 @@ pub fn pkg_own_hash(ws: ptr, path: ptr, nfiles: u32, dig: ptr) -> u32 {
         i = i + 1;
     }
     sha_final(st, dig);
-    return nfiles;
+    return n;
 }
 
 /// 扫包内全部 .lomt 的 use 边, 去重, 写进 WS_EPOOL / WS_EENTS。返回边数。
@@ -858,6 +932,20 @@ pub fn pkg_check(ws: ptr, dir: ptr, rep: ptr, repcap: u32) -> u32 {
         return bad + 1;
     }
 
+    // ---- 外源包: `foreign.lomp` + `foreign.txt` 是 docs/222 §5 的清单面
+    let kind: u32 = pkg_kind(ws, dir);
+    if kind == 1 {
+        if pkg_file_exists(ws, dir, "foreign.lomp") == 0 {
+            o = pkg_rep(rep, o, "[BAD] foreign package has no foreign.lomp");
+            bad = bad + 1;
+        } else if pkg_file_exists(ws, dir, "foreign.txt") == 0 {
+            o = pkg_rep(rep, o, "[BAD] foreign package has no foreign.txt");
+            bad = bad + 1;
+        } else {
+            o = pkg_rep(rep, o, "[ok] foreign manifest: foreign.lomp + foreign.txt");
+        }
+    }
+
     // ---- 推断包名
     let own: u32 = pkg_base(dir, 0, buf1, 256);
     let par: u32 = pkg_base(dir, 1, buf2, 256);
@@ -990,9 +1078,29 @@ pub fn pkg_lock_read(ws: ptr, buf: ptr, len: u32, np: u32, msg: ptr, msgcap: u32
         } else if c == 35 {
             i = txt_next_line(buf, i, len);
         } else {
-            let ns: u32 = i;
+            // 锁 v2 的行前面有关键字 (`loment` / `foreign`); v1 没有。
+            // 先读第一个词, 是关键字就把名字挪到下一段。
+            let fs: u32 = i;
             while i < len && !pkg_is_space(load8(buf, i)) {
                 i = i + 1;
+            }
+            let fl: u32 = i - fs;
+            let kw: u32 = 0;
+            if (fl == 6 && txt_eq_lit(buf, fs, 6, "loment"))
+                || (fl == 7 && txt_eq_lit(buf, fs, 7, "foreign")) {
+                kw = 1;
+            }
+            let ns: u32 = i;
+            if kw == 1 {
+                while i < len && (load8(buf, i) == 32 || load8(buf, i) == 9) {
+                    i = i + 1;
+                }
+                ns = i;
+                while i < len && !pkg_is_space(load8(buf, i)) {
+                    i = i + 1;
+                }
+            } else {
+                i = fs + fl;
             }
             let nl: u32 = i - ns;
             while i < len && (load8(buf, i) == 32 || load8(buf, i) == 9) {
@@ -1033,6 +1141,9 @@ pub fn pkg_lock_read(ws: ptr, buf: ptr, len: u32, np: u32, msg: ptr, msgcap: u32
                 return PKG_ERR;
             }
             pkg_set_flag(ws, idx, PKG_F_INCLOSURE);
+            // `foreign` 行在身份后面还有 `jar=… ir=… abi=… compiler=…`;
+            // 它们属于同一行, 不能当成下一行的包名。
+            i = txt_next_line(buf, ds + dl, len);
             cnt = cnt + 1;
         }
     }
@@ -1299,6 +1410,357 @@ pub fn sto_find(ws: ptr, n: u32, name: str, ver: str) -> u32 {
         i = i + 1;
     }
     return best;
+}
+
+// ---------------------------------------------------------------- JVM 类命名空间 (issue #1055)
+//
+// JVM 的类名是**平的**（`com/foo/Bar`）。两个 jar 各带一份同名类时，构建期只能挑
+// 一份 —— 而"挑"不是包管理器该做的事，那正是内容身份要防的静默合并。所以闭包里
+// 出现重复类名就是硬错误，并且**两个身份都要打出来**：只说"重复"不够，用户要知道
+// 删哪一个。lompi 的"多版本共存"对 JVM 不成立。
+//
+// 只读 zip 的**中央目录**，不信本地文件头：中央目录是权威索引（`unzip -l` 看的就是
+// 它），本地文件头可以在同一个文件里自相矛盾。
+//
+// 为什么不 seek：sys 层没有 lseek，PE 垫片上那个号也未必在。整只 jar 读进一块 brk
+// 缓冲更简单，代价是一个写死的窗口 —— 窗口外的 jar **报错**，不装作"没有冲突"。
+
+/// 读整只 jar 的窗口。比它大的 jar 这条检查看不见 —— 报错，不静默放过。
+pub const CLS_JAR_CAP: u32 = 16777216;
+/// 整个闭包的类名池。
+pub const CLS_NAMES_CAP: u32 = 2097152;
+/// 开放寻址表的槽数（2 的幂）。线性探测，半满以内不退化。
+pub const CLS_SLOTS: u32 = 65536;
+/// 单个闭包最多记住的类名数。
+pub const CLS_MAX: u32 = 1048576;
+
+/// 表项: hash / name_off / name_len / owner。`name_len == 0` 是空槽
+/// （类名不可能是空串）。brk 新页是零，所以这张表不用自己清零。
+const CLS_ENT: u32 = 16;
+const CLS_NONE: u32 = 4294967295;
+const CLS_MISS: u64 = 18446744073709551615;
+
+/// 只用来分桶，不是身份 —— 身份是 `pkg_own_hash` 那一套。
+fn cls_hash(p: ptr, off: u32, len: u32) -> u32 {
+    let h: u32 = 0;
+    let i: u32 = 0;
+    while i < len {
+        h = txt_rotr32(h, 5) ^ load8(p, off + i);
+        i = i + 1;
+    }
+    return h;
+}
+
+/// 找同名项；没有就登记到第一个空槽。返回槽号（表满返回 CLS_NONE）。
+fn cls_slot(tab: ptr, names: ptr, off: u32, len: u32, h: u32, owner: u32) -> u32 {
+    let mask: u32 = CLS_SLOTS - 1;
+    let s: u32 = h & mask;
+    let steps: u32 = 0;
+    while steps < CLS_SLOTS {
+        let e: u32 = s * CLS_ENT;
+        let el: u32 = txt_load32(tab, e + 8);
+        if el == 0 {
+            txt_store32(tab, e + 0, h);
+            txt_store32(tab, e + 4, off);
+            txt_store32(tab, e + 8, len);
+            txt_store32(tab, e + 12, owner);
+            return s;
+        }
+        if el == len && txt_eq(names, txt_load32(tab, e + 4), len, names, off, len) {
+            return s;
+        }
+        s = (s + 1) & mask;
+        steps = steps + 1;
+    }
+    return CLS_NONE;
+}
+
+fn cls_space(c: u32) -> bool {
+    return c == 32 || c == 9 || c == 13 || c == 10;
+}
+
+/// 在 `[from, to)` 里取第 n 个空白分隔的词。返回 (偏移 << 32) | 长度；
+/// 没有这个词返回 CLS_MISS。
+fn cls_word(p: ptr, from: u32, to: u32, n: u32) -> u64 {
+    let i: u32 = from;
+    let k: u32 = 0;
+    let o: u32 = 0;
+    let l: u32 = 0;
+    while i < to {
+        if cls_space(load8(p, i)) {
+            i = i + 1;
+        } else {
+            o = i;
+            while i < to && !cls_space(load8(p, i)) {
+                i = i + 1;
+            }
+            l = i - o;
+            if k == n {
+                return ((o as u64) << 32) | (l as u64);
+            }
+            k = k + 1;
+        }
+    }
+    return CLS_MISS;
+}
+
+/// 把一只 jar 中央目录里的每个 `.class` 名登记进 (tab, names, ctr)。
+///
+/// 返回 0 = 成功；1 = 读不了 / 不是 zip / 超窗口（原因写进 rep）；2 = 撞名
+/// （槽号在 ctr+8，名字已经登记好了）。报告偏移在 ctr+12 进出。
+fn cls_jar(jpath: ptr, jl: u32, owner: u32, tab: ptr, names: ptr, ctr: ptr,
+           rep: ptr, buf: ptr) -> u32 {
+    let ro: u32 = txt_load32(ctr, 12);
+    let fd: i64 = sys_open_ro(jpath);
+    if fd < 0 {
+        let o1: u32 = txt_put(rep, ro, "lompi: cannot read a JVM package's jar: ");
+        let o1b: u32 = txt_put_bytes(rep, o1, jpath, 0, jl);
+        txt_store32(ctr, 12, txt_put_nl(rep, o1b));
+        return 1;
+    }
+    let n: u64 = sys_read_all(fd, buf, CLS_JAR_CAP as u64);
+    let big: u32 = 0;
+    if n == (CLS_JAR_CAP as u64) {
+        let probe: i64 = syscall4(SYS_READ, fd as u64,
+                                  (buf as u64) + (CLS_JAR_CAP as u64), 1);
+        if probe > 0 { big = 1; }
+    }
+    sys_close(fd);
+    if big == 1 {
+        let o2: u32 = txt_put(rep, ro, "lompi: a JVM package's jar is larger than 16 MiB: ");
+        let o2b: u32 = txt_put_bytes(rep, o2, jpath, 0, jl);
+        let o2c: u32 = txt_put(rep, o2b, " (the class-index window; docs/283 sec 6)");
+        txt_store32(ctr, 12, txt_put_nl(rep, o2c));
+        return 1;
+    }
+    let len: u32 = n as u32;
+    if len < 22 {
+        let o3: u32 = txt_put(rep, ro, "lompi: a JVM package's jar is not a zip archive: ");
+        let o3b: u32 = txt_put_bytes(rep, o3, jpath, 0, jl);
+        txt_store32(ctr, 12, txt_put_nl(rep, o3b));
+        return 1;
+    }
+    // ---- EOCD: 末尾 22 字节 + 最多 64 KiB 注释区，从后往前找
+    let lo: u32 = 0;
+    if len > 65557 { lo = len - 65557; }
+    let e: u32 = CLS_NONE;
+    let i: u32 = len - 22;
+    let go: u32 = 1;
+    while go == 1 {
+        if txt_load32(buf, i) == 101010256 {
+            e = i;
+            go = 0;
+        } else if i == lo {
+            go = 0;
+        } else {
+            i = i - 1;
+        }
+    }
+    let bad: u32 = 0;
+    let p: u32 = 0;
+    let cnt: u32 = 0;
+    if e == CLS_NONE {
+        bad = 1;
+        let o4: u32 = txt_put(rep, ro, "lompi: a JVM package's jar is not a zip archive (no EOCD): ");
+        let o4b: u32 = txt_put_bytes(rep, o4, jpath, 0, jl);
+        txt_store32(ctr, 12, txt_put_nl(rep, o4b));
+    } else {
+        cnt = txt_load32(buf, e + 10) & 65535;
+        let cdsz: u32 = txt_load32(buf, e + 12);
+        let cdo: u32 = txt_load32(buf, e + 16);
+        if cdo > len || cdsz > len - cdo {
+            bad = 1;
+            let o5: u32 = txt_put(rep, ro, "lompi: a JVM package's jar has an out-of-range central directory: ");
+            let o5b: u32 = txt_put_bytes(rep, o5, jpath, 0, jl);
+            txt_store32(ctr, 12, txt_put_nl(rep, o5b));
+        } else {
+            p = cdo;
+        }
+    }
+    let k: u32 = 0;
+    while bad == 0 && k < cnt {
+        if p + 46 > len {
+            bad = 1;
+            let o6: u32 = txt_put(rep, ro, "lompi: a JVM package's jar is truncated (central directory): ");
+            let o6b: u32 = txt_put_bytes(rep, o6, jpath, 0, jl);
+            txt_store32(ctr, 12, txt_put_nl(rep, o6b));
+        } else if txt_load32(buf, p) != 33639248 {
+            bad = 1;
+            let o7: u32 = txt_put(rep, ro, "lompi: a JVM package's jar has a bad central-directory entry: ");
+            let o7b: u32 = txt_put_bytes(rep, o7, jpath, 0, jl);
+            txt_store32(ctr, 12, txt_put_nl(rep, o7b));
+        } else {
+            let x: u32 = txt_load32(buf, p + 28);
+            let nl: u32 = x & 65535;
+            let el: u32 = (x >> 16) & 65535;
+            let cl: u32 = txt_load32(buf, p + 32) & 65535;
+            let adv: u32 = 46 + nl + el + cl;
+            if p + adv > len {
+                bad = 1;
+                let o8: u32 = txt_put(rep, ro, "lompi: a JVM package's jar is truncated (entry name): ");
+                let o8b: u32 = txt_put_bytes(rep, o8, jpath, 0, jl);
+                txt_store32(ctr, 12, txt_put_nl(rep, o8b));
+            } else if nl > 6 && txt_eq_lit(buf, p + 46 + nl - 6, 6, ".class") {
+                let noff: u32 = txt_load32(ctr, 0);
+                let ncnt: u32 = txt_load32(ctr, 4);
+                if ncnt >= CLS_MAX || noff + nl > CLS_NAMES_CAP {
+                    bad = 1;
+                    let o9: u32 = txt_put(rep, ro, "lompi: the closure has too many JVM class names (cap 2 MiB / 1M)");
+                    txt_store32(ctr, 12, txt_put_nl(rep, o9));
+                } else {
+                    sys_copy(names, noff, buf, p + 46, nl);
+                    let h: u32 = cls_hash(names, noff, nl);
+                    let s: u32 = cls_slot(tab, names, noff, nl, h, owner);
+                    if s == CLS_NONE {
+                        bad = 1;
+                        let oa: u32 = txt_put(rep, ro, "lompi: the JVM class-name index is full");
+                        txt_store32(ctr, 12, txt_put_nl(rep, oa));
+                    } else if txt_load32(tab, s * CLS_ENT + 12) != owner {
+                        txt_store32(ctr, 8, s);
+                        bad = 2;
+                    } else {
+                        txt_store32(ctr, 0, noff + nl);
+                        txt_store32(ctr, 4, ncnt + 1);
+                    }
+                }
+            }
+            p = p + adv;
+        }
+        k = k + 1;
+    }
+    return bad;
+}
+
+/// 闭包里的 JVM 类名冲突检查（issue #1055）。
+///
+/// 返回 0 = 没有冲突；1 = 冲突或读不了（报告在 rep，NUL 结尾）。
+/// 只有 `kind java` 的外源包才查：`artifact jar` 是它们的实现，而源码包的 `.lomt`
+/// 没有"平命名空间"这回事。
+pub fn pkg_check_jvm_classes(ws: ptr, np: u32, rep: ptr, repcap: u32) -> u32 {
+    let file: ptr = W(ws, WS_FILE);
+    let scr: ptr = W(ws, WS_SCR);
+    // 先看一眼有没有外源包 —— 没有就不占那 19 MiB（PE 垫片的 brk 只有 64 MiB）。
+    let any: u32 = 0;
+    let i0: u32 = 0;
+    while i0 < np && any == 0 {
+        if (pkg_flags(ws, i0) & PKG_F_INCLOSURE) != 0 && pkg_kind(ws, pkg_dir(ws, i0)) == 1 {
+            any = 1;
+        }
+        i0 = i0 + 1;
+    }
+    if any == 0 { return 0; }
+    let tab: ptr = sys_alloc((CLS_SLOTS * CLS_ENT) as u64);
+    let names: ptr = sys_alloc(CLS_NAMES_CAP as u64);
+    let ctr: ptr = sys_alloc(64);
+    // 一只 jar 缓冲**共用**: sys_alloc 不会还内存, 每只 jar 各要一块 16 MiB 会在第三只上撞墙。
+    let jbuf: ptr = sys_alloc((CLS_JAR_CAP as u64) + 16);
+    if (tab as u64) == 0 || (names as u64) == 0 || (ctr as u64) == 0 || (jbuf as u64) == 0 {
+        let oz: u32 = txt_put(rep, 0, "lompi: out of memory while checking the JVM class namespace");
+        txt_put_nl(rep, oz);
+        return 1;
+    }
+    txt_store32(ctr, 0, 0);
+    txt_store32(ctr, 4, 0);
+    txt_store32(ctr, 8, CLS_NONE);
+    txt_store32(ctr, 12, 0);
+    let bad: u32 = 0;
+    let seen: u32 = 0;
+    let i: u32 = 0;
+    while i < np && bad == 0 {
+        if (pkg_flags(ws, i) & PKG_F_INCLOSURE) != 0 {
+            let dir: ptr = pkg_dir(ws, i);
+            if pkg_kind(ws, dir) == 1 {
+                let dn: u32 = txt_len_cstr(dir);
+                sys_join(scr, dir, dn, str_ptr("foreign.txt"), 11);
+                let got: u64 = sys_read_file(scr, file, PKG_FILE_MAX as u64);
+                if got == SYS_ERR || got > (PKG_FILE_MAX as u64) {
+                    let om: u32 = txt_put(rep, 0, "lompi: cannot read foreign.txt of ");
+                    let omb: u32 = txt_put_bytes(rep, om, dir, 0, dn);
+                    txt_store32(ctr, 12, txt_put_nl(rep, omb));
+                    bad = 1;
+                } else {
+                    let n: u32 = got as u32;
+                    // ---- 第一趟: 这个包声明的是 JVM 吗?
+                    let is_java: u32 = 0;
+                    let o1: u32 = 0;
+                    while o1 < n && is_java == 0 {
+                        let l1: u32 = txt_line_len(file, o1, n);
+                        if l1 > 0 {
+                            let w0: u64 = cls_word(file, o1, o1 + l1, 0);
+                            if w0 != CLS_MISS && (w0 as u32) == 4
+                                && txt_eq_lit(file, (w0 >> 32) as u32, 4, "kind") {
+                                let w1: u64 = cls_word(file, o1, o1 + l1, 1);
+                                if w1 != CLS_MISS && (w1 as u32) == 4
+                                    && txt_eq_lit(file, (w1 >> 32) as u32, 4, "java") {
+                                    is_java = 1;
+                                }
+                            }
+                        }
+                        o1 = txt_next_line(file, o1, n);
+                    }
+                    // ---- 第二趟: 登记每只 jar 的类名
+                    let o2: u32 = 0;
+                    while o2 < n && bad == 0 && is_java == 1 {
+                        let l2: u32 = txt_line_len(file, o2, n);
+                        if l2 > 0 {
+                            let a0: u64 = cls_word(file, o2, o2 + l2, 0);
+                            if a0 != CLS_MISS && (a0 as u32) == 8
+                                && txt_eq_lit(file, (a0 >> 32) as u32, 8, "artifact") {
+                                let a1: u64 = cls_word(file, o2, o2 + l2, 1);
+                                let a2: u64 = cls_word(file, o2, o2 + l2, 2);
+                                if a1 != CLS_MISS && a2 != CLS_MISS
+                                    && (a1 as u32) == 3
+                                    && txt_eq_lit(file, (a1 >> 32) as u32, 3, "jar") {
+                                    let po: u32 = (a2 >> 32) as u32;
+                                    let pl: u32 = a2 as u32;
+                                    let jl: u32 = sys_join(scr, dir, dn,
+                                                           ((file as u64) + (po as u64)) as ptr, pl);
+                                    let r: u32 = cls_jar(scr, jl, i, tab, names, ctr, rep, jbuf);
+                                    seen = seen + 1;
+                                    if r == 1 { bad = 1; }
+                                    if r == 2 {
+                                        let s: u32 = txt_load32(ctr, 8);
+                                        let prev: u32 = txt_load32(tab, s * CLS_ENT + 12);
+                                        let mo: u32 = txt_load32(tab, s * CLS_ENT + 4);
+                                        let ml: u32 = txt_load32(tab, s * CLS_ENT + 8);
+                                        let o3: u32 = txt_load32(ctr, 12);
+                                        let o3a: u32 = txt_put(rep, o3, "lompi: two JVM packages provide the same class: ");
+                                        let o3b: u32 = txt_put_bytes(rep, o3a, names, mo, ml);
+                                        let o3c: u32 = txt_put_nl(rep, o3b);
+                                        let o3d: u32 = txt_put(rep, o3c, "  ");
+                                        let o3e: u32 = txt_put_bytes(rep, o3d, pkg_id_hex(ws, prev), 0, 64);
+                                        let o3f: u32 = txt_put(rep, o3e, "  ");
+                                        let o3g: u32 = txt_put_bytes(rep, o3f, W(ws, WS_SNAMES), pkg_name_off(ws, prev), pkg_name_len(ws, prev));
+                                        let o3h: u32 = txt_put(rep, o3g, " ");
+                                        let o3i: u32 = txt_put_bytes(rep, o3h, W(ws, WS_SNAMES), pkg_ver_off(ws, prev), pkg_ver_len(ws, prev));
+                                        let o3j: u32 = txt_put_nl(rep, o3i);
+                                        let o3k: u32 = txt_put(rep, o3j, "  ");
+                                        let o3l: u32 = txt_put_bytes(rep, o3k, pkg_id_hex(ws, i), 0, 64);
+                                        let o3m: u32 = txt_put(rep, o3l, "  ");
+                                        let o3n: u32 = txt_put_bytes(rep, o3m, W(ws, WS_SNAMES), pkg_name_off(ws, i), pkg_name_len(ws, i));
+                                        let o3o: u32 = txt_put(rep, o3n, " ");
+                                        let o3p: u32 = txt_put_bytes(rep, o3o, W(ws, WS_SNAMES), pkg_ver_off(ws, i), pkg_ver_len(ws, i));
+                                        let o3q: u32 = txt_put_nl(rep, o3p);
+                                        let o3r: u32 = txt_put(rep, o3q, "  (JVM has one flat class namespace; lompi's multi-version coexistence cannot apply)");
+                                        txt_store32(ctr, 12, txt_put_nl(rep, o3r));
+                                        bad = 1;
+                                    }
+                                }
+                            }
+                        }
+                        o2 = txt_next_line(file, o2, n);
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    if bad != 0 {
+        store8(rep, txt_load32(ctr, 12), 0 as u8);
+    }
+    if seen == 0 { return 0; }
+    // repcap 同 pkg_check: 报告偏移由本函数自己走, 不读它 —— 留着自说明。
+    return bad;
 }
 
 // ---------------------------------------------------------------- 自检

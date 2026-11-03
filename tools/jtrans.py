@@ -89,6 +89,83 @@ _CSHELL_HEAD = re.compile(r"(?<![\w.])"
 _JAVA_SHELLS = [("class", _CSHELL_HEAD, False, True)]
 
 
+def _mask(src: str) -> str:
+    """Blank comments and string/char literals, preserving newlines and length."""
+    out = list(src)
+    i = 0
+    while i < len(src):
+        c = src[i]
+        if c == "/" and i + 1 < len(src) and src[i + 1] == "/":
+            j = src.find("\n", i)
+            if j < 0:
+                j = len(src)
+            for k in range(i, j):
+                out[k] = " "
+            i = j
+        elif c == "/" and i + 1 < len(src) and src[i + 1] == "*":
+            j = src.find("*/", i + 2)
+            j = len(src) if j < 0 else j + 2
+            for k in range(i, j):
+                if src[k] != "\n":
+                    out[k] = " "
+            i = j
+        elif c in ("'", '"'):
+            quote = c
+            j = i + 1
+            while j < len(src):
+                if src[j] == "\\":
+                    j += 2
+                    continue
+                if src[j] == quote:
+                    j += 1
+                    break
+                j += 1
+            for k in range(i, min(j, len(src))):
+                if src[k] != "\n":
+                    out[k] = " "
+            i = j
+        else:
+            i += 1
+    return "".join(out)
+
+
+#: Constructs that are **outside the subset**. Name them before the shared parser
+#: sees them: otherwise `this.x` becomes "unrecognized '.'", `throws` becomes
+#: "expected '{'", and so on (issues #831/#832/#833/#834/#838/#839/#840/
+#: #842/#843/#845/#846/#847/#848/#851/#853/#855).
+_PRE = [
+    (r"\bsynchronized\b", "`synchronized`"),
+    (r"\b(?:this|super)\s*\.", "`this` / `super` 的字段访问"),
+    (r"\.class\b", "`X.class` 类字面量"),
+    (r"\binstanceof\b", "`instanceof`"),
+    (r"\bthrows\b", "`throws` 子句"),
+    (r"->", "lambda（`->`）"),
+    (r"@[A-Za-z_]", "注解"),
+    (r"\bstatic\s*\{", "静态初始化块"),
+    (r"\b(?:enum|interface|record|sealed|permits)\b", "`enum` / `interface` / `record` / `sealed`"),
+    (r"(?<![\w.])[A-Z]\w*[ \t]*\([^;{]*\)[ \t]*\{", "构造器"),
+    (r"\bnull\b", "`null` 字面量"),
+    (r"\b(?:float|double)\b", "`float` / `double`"),
+    (r"\d+\.\d+(?:[eE][+-]?\d+)?", "浮点字面量"),
+]
+
+
+def _precheck(src: str) -> None:
+    if '"""' in src:
+        line = src[:src.index('"""')].count("\n") + 1
+        raise Unsupported(
+            f"第 {line} 行: 不支持文本块（`\"\"\"`）。本子集没有多行字符串值；"
+            f"整条构造原先会被拆成看不懂的 token 错误。")
+    masked = _mask(src)
+    for pat, what in _PRE:
+        m = re.search(pat, masked)
+        if m:
+            line = masked[:m.start()].count("\n") + 1
+            raise Unsupported(
+                f"第 {line} 行: 不支持{what}（Stage A 的 Java 子集没有对应语义；"
+                f"整条构造原先会被拆成看不懂的 token 错误）。")
+
+
 def _unwrap(src: str) -> str:
     """抹掉 `class X … { … }` 的**外壳**，成员就成了顶层。**不动行号。**
 
@@ -100,6 +177,25 @@ def _unwrap(src: str) -> str:
     **注释**抹成空白，于是 `String s = "class X {";` 会被当成一个 `class` 头，
     外壳从字符串**里面**开始切。现在字符串字面量也一起抹。
     """
+    _precheck(src)
+    # A `class` header that carries `extends` / `implements` was silently
+    # discarded by the shell stripper (#822). The subset has no inheritance
+    # model, so say that instead of translating a different program.
+    for m in _CSHELL_HEAD.finditer(src):
+        head = m.group(0)
+        if re.search(r"\b(?:extends|implements)\b", head):
+            line = src[:m.start()].count("\n") + 1
+            raise Unsupported(
+                f"第 {line} 行: 不支持 `extends` / `implements`（子集没有继承与接口模型；"
+                f"整条子句原先会被静默丢掉，翻译出来的是**另一个程序**）。")
+    # `package` / `import` change the meaning of a name; silently skipping them
+    # would translate a different program (#859 / #860).
+    for i, line in enumerate(src.splitlines(), 1):
+        s = line.strip()
+        if s.startswith("import ") or s.startswith("package "):
+            raise Unsupported(
+                f"第 {i} 行: 不支持 `import` / `package`（平名字空间里没有包与导入；"
+                f"跳过它们会把名字解析成别的东西）。")
     return strip_shells(src, _JAVA_SHELLS)
 
 
@@ -144,6 +240,13 @@ JAVA = Dialect(
     coerce_int_to_bool=False,
     coerce_bool_to_int=False,
     int_default="i32",
+    narrow_literal_check=True,
+    reject_const_zero_div=True,
+    mask_shift=True,
+    hex_wrap=True,
+    octal_literals=True,
+    binary_literals=True,
+    digit_separators=True,
     safe_suffix="_j",
     #: Java 的函数住在 `class` 里，而解析器看的是顶层 —— 见文件头 §①。
     pre=_unwrap,

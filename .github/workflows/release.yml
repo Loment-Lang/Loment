@@ -214,6 +214,10 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
       - name: 构建发行包
+        env:
+          # `#1153`：清单里的 `release`/`prerelease` 必须跟着**真 tag**走，
+          # 不能从 `RELEASE` 猜（`-pre` 与稳定版差的就是这一位）。
+          LOMENT_RELEASE_TAG: ${{ steps.ver.outputs.tag }}
         run: |
           set -e
           python tools/loment_dist.py --emit

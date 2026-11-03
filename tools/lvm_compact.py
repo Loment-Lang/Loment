@@ -566,4 +566,6 @@ def run_compact(blob: bytes, out, profile=None, argv: list[str] | None = None,
         vm.call_t2(start, [], entry=True)
     except lvm._Exit as e:                              # noqa: SLF001
         return e.code
+    except lvm._Trap as e:                              # noqa: SLF001
+        return lvm.trap_exit(e.site)
     return 0

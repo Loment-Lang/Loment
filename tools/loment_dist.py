@@ -183,6 +183,22 @@ signal_name() {
     esac
 }
 
+# `--max` takes a number (#659). An empty operand used to reach the renderer as a bare
+# `--max`, which read the diagnostics file as the number, printed its usage and exited 2 -
+# so the user's compile errors were replaced by a usage message for a tool they never
+# invoked. That is a launcher mistake and it is refused here, not passed along.
+need_max() {
+    case "$1" in
+        ''|*[!0-9]*)
+            if [ -n "$1" ]; then
+                echo "loment: --max needs a number, got '$1'" >&2
+            else
+                echo "loment: --max needs a number" >&2
+            fi
+            exit 2 ;;
+    esac
+}
+
 # $1 = the --diag-out file, $2 = the tool's plain stderr file, $3 = tool name,
 # $4 = the exit status the shell just saw. Writes ONE JSONL record (line 0 = no position,
 # docs/256) and appends a plain line for the no-renderer fallback.
@@ -215,8 +231,24 @@ report_diags() {
     # record, synthesize one before rendering. That is the whole point of the second
     # channel - a crash must not look like "nothing to report".
     dfile=$1; derr=$2; rflags=${3:-}; drc=${4:-0}; dwho=${5:-loment-driver}
+    _synth=0
     if [ "$drc" -ne 0 ] && [ ! -s "$dfile" ]; then
         synthesize_diag "$dfile" "$derr" "$dwho" "$drc"
+        _synth=1
+    fi
+    # #673: the tool was killed *after* it had already written records. Rendering those
+    # alone reads as an ordinary compile error and hides that the compiler never finished
+    # -- so append a record that says so, in every output mode (full / --short / --json).
+    # Not when the record just above was synthesized: that one already says the tool died
+    # and named the signal ("and wrote no diagnostic record"), and this one would add a
+    # second, contradictory "after writing some diagnostics".
+    if [ "$drc" -gt 128 ] && [ "$_synth" -eq 0 ] && [ -s "$dfile" ]; then
+        _sn=$(signal_name "$drc")
+        [ -n "$_sn" ] && _sn=" ($_sn)"
+        _sm="$dwho was killed by signal $((drc - 128))$_sn after writing some diagnostics; what is shown below may be incomplete"
+        printf '{"file":"%s","line":0,"col":0,"code":"E900","message":"%s"}\n' \
+            "$dwho" "$_sm" >> "$dfile" 2>/dev/null
+        printf 'loment: %s [E900]\n' "$_sm" >> "$derr" 2>/dev/null
     fi
     if [ -s "$dfile" ] && tool lomenterr >/dev/null 2>&1; then
         # Word-splitting on $rflags is intentional: empty -> no argument at all, and two
@@ -317,8 +349,8 @@ case "${1:-help}" in
             case "$1" in
                 -C|--no-color) nc=$1; shift ;;
                 --short|--json) om=$1; shift ;;
-                --max) om="$om --max ${2:-}"; shift 2 ;;
-                --max=*) om="$om $1"; shift ;;
+                --max) maxval=${2:-}; need_max "$maxval"; om="$om --max $maxval"; shift 2 ;;
+                --max=*) maxval=${1#--max=}; need_max "$maxval"; om="$om $1"; shift ;;
                 # `--diag-out PATH` is NOT a renderer switch: it names the file the DRIVER
                 # writes its structured records to. `lomenterr`'s own usage tells users to
                 # spell exactly this, and those JSON lines carry the byte_start/byte_end
@@ -353,7 +385,10 @@ case "${1:-help}" in
         fi
         if [ $rc -ne 0 ]; then
             report_diags "$dpath" "$tmp/e.txt" "$nc $om" "$rc" "loment-driver"
-            exit 1
+            # #673: exit 1 means "this source has errors". A tool killed by a signal never
+            # got to say that, so its status is reported as what it is (128+N); the same
+            # flattening happened to every other non-1 status the driver can return.
+            exit "$rc"
         fi
         [ -s "$tmp/e.txt" ] && cat "$tmp/e.txt" >&2
         exit 0 ;;
@@ -435,8 +470,8 @@ case "${1:-help}" in
                 --cc-arg=*) ccargs="$ccargs ${1#--cc-arg=}"; shift ;;
                 -C|--no-color) nc=$1; shift ;;
                 --short|--json) om=$1; shift ;;
-                --max) om="$om --max ${2:-}"; shift 2 ;;
-                --max=*) om="$om $1"; shift ;;
+                --max) maxval=${2:-}; need_max "$maxval"; om="$om --max $maxval"; shift 2 ;;
+                --max=*) maxval=${1#--max=}; need_max "$maxval"; om="$om $1"; shift ;;
                 *) echo "loment: unknown option $1" >&2; exit 2 ;;
             esac
         done
@@ -561,7 +596,7 @@ case "${1:-help}" in
         "$(tool loment-driver)" "$(to_posix "$src")" --diag-out "$tmp/d.jsonl" > "$tmp/a.ll" 2>"$tmp/e.txt" || rc=$?
         if [ $rc -ne 0 ]; then
             report_diags "$tmp/d.jsonl" "$tmp/e.txt" "$nc $om" "$rc" "loment-driver"
-            exit 1
+            exit "$rc"
         fi
         # ---- merge deps IR (if any). Plain concatenation; see the note where the
         # link.txt files are scanned. A symbol defined by two inputs is a named error:
@@ -682,7 +717,7 @@ LOMENT_LIBCALLS_EOF
         # file is safe - on success the driver wrote nothing into it.
         if [ $lrc -ne 0 ]; then
             report_diags "$tmp/d.jsonl" "$tmp/e2.txt" "$nc $om" "$lrc" "loment-lomelf"
-            exit 1
+            exit "$lrc"
         fi
         if [ "$mode" = run ]; then
             chmod 755 "$out"
@@ -772,6 +807,12 @@ for %%A in (%*) do call :scan_arg "%%~A"
 rem :scan_arg runs inside a `for ... do call`, so it cannot end the script itself: it
 rem records the bad option and this is where the run stops with the same status bash uses.
 if defined cbad exit /b 2
+rem #659: `--max` as the LAST word leaves its value pending - the same empty operand the
+rem bash scan refuses, one spelling over.
+if defined cwantmax (
+    echo loment: --max needs a number 1>&2
+    exit /b 2
+)
 if not defined csrc goto usage
 set "dtmp=%TEMP%\loment-d%RANDOM%%RANDOM%"
 mkdir "%dtmp%" >nul 2>nul
@@ -873,7 +914,21 @@ rem "undefined label: c_add" from the linker, which points the user at the wrong
 echo loment: unknown option %~1 1>&2
 exit /b 2
 :barg_max
-set "com=%com% --max %~2"
+rem #659: `--max` with no number (or a non-number) used to be forwarded as a bare
+rem `--max`, and lomenterr then read the diagnostics FILE as the cap and printed its
+rem usage instead of the user's errors. The launcher refuses it by name.
+set "bmax=%~2"
+if "%bmax%"=="" (
+    echo loment: --max needs a number 1>&2
+    exit /b 2
+)
+set "bmaxbad="
+for /f "delims=0123456789" %%A in ("%bmax%") do set "bmaxbad=1"
+if defined bmaxbad (
+    echo loment: --max needs a number, got '%bmax%' 1>&2
+    exit /b 2
+)
+set "com=%com% --max %bmax%"
 shift
 shift
 goto barg_loop
@@ -1235,6 +1290,9 @@ call :synthesize_diag "%~1" "%~2" "%~5" "%~4"
 :report_have
 set "rf=0"
 if exist "%~1" for %%A in ("%~1") do if %%~zA GTR 0 set "rf=1"
+if "%rf%"=="1" call :crash_note "%~1" "%~2" "%~5" "%~4"
+set "rf=0"
+if exist "%~1" for %%A in ("%~1") do if %%~zA GTR 0 set "rf=1"
 if "%rf%"=="1" if exist "%here%lomenterr.exe" goto report_render
 if exist "%~2" type "%~2" 1>&2
 if "%rf%"=="1" echo loment: no lomenterr in this package - showing the compiler's plain diagnostics 1>&2
@@ -1275,6 +1333,30 @@ echo {"file":"%stool%","line":0,"col":0,"code":"E900","message":"%smsg%"} > "%~1
 echo loment: %smsg% [E900] >> "%~2"
 exit /b 0
 
+rem %1 = the --diag-out file, %2 = the tool's plain stderr file, %3 = tool name, %4 = the
+rem status cmd just saw. #673: the tool was killed AFTER it had already written records.
+rem Rendering those alone reads as an ordinary compile error and hides that the compiler
+rem never finished -- so append one E900 record (line 0 = no position, docs/256) that says
+rem so, in every output mode (full / --short / --json).
+:crash_note
+set "ctool=%~3"
+if "%ctool%"=="" set "ctool=loment-driver"
+set "cst=%~4"
+if "%cst%"=="0" exit /b 0
+if "%cst%"=="1" exit /b 0
+if "%cst%"=="2" exit /b 0
+set "cwhy="
+if "%cst%"=="-1073741819" set "cwhy=was killed by an access violation (SIGSEGV)"
+if "%cst%"=="-1073741795" set "cwhy=was killed by an illegal instruction (SIGILL)"
+if "%cst%"=="-1073741676" set "cwhy=was killed by an integer divide by zero (SIGFPE)"
+if "%cst%"=="-1073741571" set "cwhy=was killed by a stack overflow"
+if "%cst%"=="-1073740791" set "cwhy=was killed by a stack buffer overrun"
+if not defined cwhy set "cwhy=failed (status %cst%)"
+set "cmsg=%ctool% %cwhy% after writing some diagnostics; what is shown below may be incomplete"
+echo {"file":"%ctool%","line":0,"col":0,"code":"E900","message":"%cmsg%"} >> "%~1"
+echo loment: %cmsg% [E900] >> "%~2"
+exit /b 0
+
 rem %1 = one argument from the command line; sets csrc (the only non-command, non-flag
 rem word), cnc (the colour switch) and com (the renderer output mode). Reached only via
 rem `call` from :compile_only.
@@ -1292,7 +1374,22 @@ exit /b 0
 set "cwantmax="
 rem The value has to travel WITH the flag: `lomenterr --max d.jsonl` takes the diagnostics
 rem file as the cap and then prints its usage instead of the user's errors (issue #13).
+rem #659: it must be a number - anything else is the launcher's mistake, not the
+rem renderer's, so it is refused here with the launcher's own usage message.
+set "smax=%~1"
+if "%smax%"=="" goto scan_max_val_none
+set "smaxbad="
+for /f "delims=0123456789" %%A in ("%smax%") do set "smaxbad=1"
+if defined smaxbad goto scan_max_val_bad
 set "com=%com% %~1"
+exit /b 0
+:scan_max_val_bad
+echo loment: --max needs a number, got '%smax%' 1>&2
+set "cbad=1"
+exit /b 0
+:scan_max_val_none
+echo loment: --max needs a number 1>&2
+set "cbad=1"
 exit /b 0
 :scan_out_val
 set "cwantout="
@@ -3608,6 +3705,15 @@ def emit(only: set[str] | None, want_exe: bool, out_dir: Path | None = None,
     for p in stale:
         _unlink_retry(p)
         print(f"  [陈旧] 删掉 {p.name} (不是本次产物)")
+
+    # 热更新的清单（`#1153`）：**先落盘再算校验和** —— 签名锚覆盖的是整个 dist，
+    # 后写的文件不在 `SHA256SUMS` 里，等于没有签。tag 从 workflow 传进来
+    # （`LOMENT_RELEASE_TAG`），本机 `--emit` 就用 `v<RELEASE>`。
+    import os
+    import loment_hotfix
+    tag = os.environ.get("LOMENT_RELEASE_TAG") or f"v{VER}"
+    hf = loment_hotfix.write(ROOT, tag, out / "hotfix.json")
+    print(f"  [{hf.name}] {hf.stat().st_size} 字节 (热更新清单, {tag})")
 
     sums = write_sums(out)
     print(f"  [{sums.name}] {len(made)} 行")

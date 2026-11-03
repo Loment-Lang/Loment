@@ -1,10 +1,10 @@
-// hotswap.lomt — 热更新的固定核：把一份候选镜像装进第二个槽，然后把槽表翻过去。
-// （`#1151`，规范 `docs/281`；参考实现 `tools/loment_hotload.py` / `_exec.py`）
+// hotswap.lomt — 热更新的固定核：把一份候选镜像装进第二个槽，把槽表翻过去，
+// 再把**活着的帧链**改指到新镜像（`#1151`/`#1152`，规范 `docs/281`/`docs/282`）。
 //
-// **这段代码不进槽表的重定位范围**：它自己就是换代码的那一方。它只碰两样东西 ——
-// 候选镜像的文本段（新槽）与本镜像的槽表（就地改）。
+// **这段代码不进槽表的重定位范围**：它自己就是换代码的那一方。它只碰三样东西 ——
+// 候选镜像的文本段（新槽）、本镜像的槽表（就地改）、以及当前线程的栈帧。
 //
-// 输入是一份扁平的装载件（测试的 harness 生成）：
+// 输入是一份扁平的装载件（测试的 harness 生成；字段与 `tools/loment_hotload.py` 同）：
 //
 //   0   u32 magic "HOTL"
 //   4   u32 self_base        本镜像的文本基址
@@ -18,9 +18,17 @@
 //   36  u32 nreloc
 //   40  u32 nfunc
 //   44  u32 text_len
-//   HOT_HDR  nreloc × (u32 off, u32 target_lo, u32 target_hi)
-//   ... nfunc × (u32 slot, u32 entry)
-//   ... text[text_len]
+//   48  u32 ncalls           调用点配对总数
+//   52  u32 cand_slot       候选装到哪个槽（`#1152`：两个槽轮流，见 docs/292）
+//   HOT_HDR  nfunc × (slot, self_entry, cand_entry, flags, ncalls, pad)
+//   ...      ncalls × (self_off, cand_off)     —— 按函数顺序、按调用点顺序
+//   ...      nreloc × (off, target_lo, target_hi)
+//   ...      text[text_len]
+//
+// `flags` 是准入侧（`loment_update.remap_plan`）已经算好的结论：
+//   0 = 可重映射（帧布局相同、调用点 id 序列相同）
+//   1 = 帧布局变了        2 = 调用点 id 序列变了      3 = 一侧没有这个函数
+// 只有**真的在栈上**的函数才触发拒绝 —— 其余函数等它没有活跃帧时自然换过去。
 //
 // 返回 0 = 装上了；其它值是点名拒绝（见每个 `return` 的数字）。
 
@@ -31,13 +39,23 @@ use bytes
 use sha256
 
 const HOT_MAGIC: u32 = 1280593736;   // "HOTL"（0x4C544F48）
-const HOT_SLOT: u32 = 268435456;     // 0x10000000
+const HOT_SLOT: u32 = 268435456;     // 0x10000000（第一个候选槽）
+const HOT_SLOT2: u32 = 536870912;    // 0x20000000（第二个：两个槽轮流，见 docs/292）
 const HOT_STRIDE: u32 = 16;
 const HOT_MAX_FN: u32 = 4096;
-const HOT_HDR: u32 = 48;             // 装载件头
+const HOT_HDR: u32 = 56;             // 装载件头
+const HOT_FUNC: u32 = 24;            // 一个函数条目的字节数
+const HOT_CALL: u32 = 8;             // 一对（旧偏移，新偏移）
 const HOT_RELOC: u32 = 12;           // 一条重定位的字节数
-const HOT_FUNC: u32 = 8;             // 一个函数条目的字节数
 const HOT_DIG: u32 = 32;             // sha256 摘要字节数
+const HOT_GATE_LEN: u32 = 33;        // 入口闸的字节数（`docs/280` §4）
+const HOT_GATE_EP: u32 = 10;         // 闸里 epoch 那条 movabs 的立即数偏移
+const HOT_FRAMES: u32 = 4096;        // 帧链最多走这么深
+const HOT_SAVE_N: u32 = 16384;       // `save` 里记"改了几帧"的位置（每槽 4 字节之后的空地）
+//: 摘要把一个 sha256 上下文（624 B）+ 两个 32 B 摘要放在 `save` 的这一段里。
+//: **不在装载路径上申请堆**：bump 堆只有 64 KiB，每次 `alloc` 都是一次泄漏 ——
+//: 实测第 14 次热更新就把堆耗尽、撞进相邻的 .bss（`docs/292` §2 第 4 条）。
+const HOT_SAVE_SCRATCH: u32 = 32768;
 const HOT_SWAPPING: u32 = 2;         // epoch：正在改槽表（这个窗口里别进来）
 const HOT_READY: u32 = 1;            // epoch：新实现已经发布
 const HOT_MMAP_FLAGS: u32 = 50;      // PRIVATE 2 | FIXED 0x10 | ANON 0x20
@@ -53,6 +71,13 @@ fn l32(p: ptr, o: u32) -> u32 {
 
 fn p32(v: u32) -> ptr {
     return v as ptr;
+}
+
+/// 读 8 字节。栈地址在 47 位空间里，装不进 u32 —— 指针只能拼回来。
+fn ld64(p: ptr, o: u32) -> u64 {
+    let lo: u32 = load32(p, o);
+    let hi: u32 = load32(p, o + 4);
+    return ((hi as u64) << 32) + (lo as u64);
 }
 
 /// `v < 0` 的替身，**返回 bool**。自举侧对 `i64 < 0`、以及随后对结果再写 `== 1`，
@@ -77,8 +102,98 @@ fn digest_at(buf: ptr, src: ptr, len: u32, ctx: ptr, dig: ptr) -> u32 {
     return 0;
 }
 
+/// 沿 `frame` 走一遍帧链。`write == 0` 只**检查**，`write == 1` 真的改。
+///
+/// 帧链的构造（`lomelf` 的序言）：每个函数 `push rbp; mov rbp, rsp`，于是
+/// `[rbp] = 调用者的帧指针`、`[rbp+8] = 返回地址`。返回地址永远是某个调用点的
+/// **下一条指令**，所以它在两侧的 `.lomhot` 里各有一格；配对由调用点的先后位置给出
+/// （id 序列相同是 `flags == 0` 的前提，见文件头）。
+///
+/// 先检查后改写是**两条独立的遍历**：`hot_install` 在任何一帧被改指之前就要知道
+/// 整条链能不能映射，否则会造出"一半旧一半新"的栈。
+///
+/// 返回 0 = 全部可映射 / 改完；否则 `(原因 << 12) | 槽号`：4096 段 = 帧布局变了，
+/// 8192 段 = id 序列变了，12288 段 = 一侧没有这个函数。
+fn hot_remap(blob: ptr, frame: u64, write: u32, save: ptr) -> u32 {
+    let nfunc: u32 = load32(blob, 40);
+    let ncalls: u32 = load32(blob, 48);
+    let self_base: u32 = load32(blob, 4);
+    let calls_at: u32 = HOT_HDR + nfunc * HOT_FUNC;
+    let rbp: u64 = frame;
+    let steps: u32 = 0;
+    let done: u32 = 0;
+
+    let rc: u32 = 0;
+    while steps < HOT_FRAMES && rc == 0 && rbp % 8 == 0 && rbp >= 4096 {
+        let q: ptr = rbp as ptr;
+        let ra: u32 = load32(q, 8);
+        let f: u32 = 0;
+        let cur: u32 = 0;
+        let hit: u32 = 0;
+        while f < nfunc {
+            let fo: u32 = HOT_HDR + f * HOT_FUNC;
+            let sentry: u32 = load32(blob, fo + 4);
+            let flags: u32 = load32(blob, fo + 12);
+            let n: u32 = load32(blob, fo + 16);
+            let k: u32 = 0;
+            while k < n && hit == 0 {
+                let co: u32 = calls_at + (cur + k) * HOT_CALL;
+                let old: u32 = self_base + sentry + load32(blob, co);
+                if old == ra {
+                    hit = 1;
+                    if flags != 0 {
+                        rc = (flags << 12) + load32(blob, fo);
+                    } else {
+                        if write == 1 {
+                            let nv: u32 = load32(blob, 52) + load32(blob, fo + 8)
+                                          + load32(blob, co + 4);
+                            store32(q, 8, nv);
+                            store32(q, 12, 0);
+                            done = done + 1;
+                        }
+                    }
+                }
+                k = k + 1;
+            }
+            cur = cur + n;
+            f = f + 1;
+        }
+        // 栈向下长：帧链上的上一个 `rbp` 一定**更高**。不满足就说明走到根了
+        // （`_start` 的调用者是内核/入口桩，那个槽里没有帧指针），停。
+        let nxt: u64 = ld64(q, 0);
+        if nxt > rbp {
+            rbp = nxt;
+        } else {
+            rbp = 0;
+        }
+        steps = steps + 1;
+    }
+
+    if write == 1 {
+        store32(save, HOT_SAVE_N, done);
+    }
+    return rc;
+}
+
 /// 装一份候选。`blob` 是装载件，`n` 是它的字节数。
 pub fn hot_install(blob: ptr, n: u32, save: ptr) -> u32 {
+    // **开头这一段不能有任何调用**（连 `l32` 都不行）。
+    //
+    // 闸在**每个**函数入口把当时的 `rbp` 写进 `epoch + 8`。也就是说：只有在函数的第一条
+    // 语句上，那个格子才属于**本函数**；一旦调了任何东西，被调函数的闸就把它换成了
+    // 被调函数自己的帧指针。所以这里用 `load8`（内建，不发 `call`）自己拼地址、自己读。
+    let sb0: u32 = load8(blob, 4) + load8(blob, 5) * 256
+                 + load8(blob, 6) * 65536 + load8(blob, 7) * 16777216;
+    let sg0: u32 = load8(blob, 12) + load8(blob, 13) * 256
+                 + load8(blob, 14) * 65536 + load8(blob, 15) * 16777216;
+    let gp0: u32 = sb0 + sg0 + HOT_GATE_EP;
+    let ep0: u32 = load8(gp0 as ptr, 0) + load8(gp0 as ptr, 1) * 256
+                 + load8(gp0 as ptr, 2) * 65536 + load8(gp0 as ptr, 3) * 16777216;
+    let fl0: u32 = load8(ep0 as ptr, 8) + load8(ep0 as ptr, 9) * 256
+                 + load8(ep0 as ptr, 10) * 65536 + load8(ep0 as ptr, 11) * 16777216;
+    let fh0: u32 = load8(ep0 as ptr, 12) + load8(ep0 as ptr, 13) * 256
+                 + load8(ep0 as ptr, 14) * 65536 + load8(ep0 as ptr, 15) * 16777216;
+    let frame: u64 = ((fh0 as u64) << 32) + (fl0 as u64);
     if n < HOT_HDR {
         return 1;
     }
@@ -96,24 +211,28 @@ pub fn hot_install(blob: ptr, n: u32, save: ptr) -> u32 {
     let nreloc: u32 = l32(blob, 36);
     let nfunc: u32 = l32(blob, 40);
     let text_len: u32 = l32(blob, 44);
-    let text_at: u32 = HOT_HDR + nreloc * HOT_RELOC + nfunc * HOT_FUNC;
+    let ncalls: u32 = l32(blob, 48);
+    let slot_va: u32 = l32(blob, 52);     // 这一份候选装到哪个槽（两个槽轮流）
+    let calls_at: u32 = HOT_HDR + nfunc * HOT_FUNC;
+    let reloc_at: u32 = calls_at + ncalls * HOT_CALL;
+    let text_at: u32 = reloc_at + nreloc * HOT_RELOC;
     if n < text_at + text_len {
         return 3;
     }
     if self_slots != cand_slots || cand_slots > HOT_MAX_FN {
         return 4;
     }
-    if self_gate_len != 25 {
+    if self_gate_len != HOT_GATE_LEN {
         return 5;
     }
+    // **先把帧指针拿到手**：闸在入口把调用者的 rbp 写在 epoch 字后面 8 字节。
+    // 下面随便哪个调用都会再进一次闸、把那 8 字节覆盖掉，所以这一句必须排在所有调用之前。
+    let ep: u32 = load32(p32(self_base), self_gate + HOT_GATE_EP);
     // 固定核摘要：两侧的闸字节 + 槽表的定长。不同 = 不是同一段机器码，拒绝。
-    let sc: ptr = alloc(4096);
-    if sc as u64 == 0 {
-        return 6;
-    }
+    let sc: ptr = ptr_add(save, HOT_SAVE_SCRATCH);
     let ctx: ptr = sc;
-    let d1: ptr = ptr_add(sc, 1024);
-    let d2: ptr = ptr_add(sc, 1088);
+    let d1: ptr = ptr_add(sc, 640);
+    let d2: ptr = ptr_add(sc, 672);
     let _a: u32 = digest_at(sc, ptr_add(p32(self_base), self_gate), self_gate_len, ctx, d1);
     let _b: u32 = digest_at(sc, ptr_add(blob, text_at + cand_gate), self_gate_len, ctx, d2);
     let i: u32 = 0;
@@ -123,17 +242,22 @@ pub fn hot_install(blob: ptr, n: u32, save: ptr) -> u32 {
         }
         i = i + 1;
     }
+    // **先把整条帧链检查一遍**：有一帧不能映射就整份拒绝，一个字节都不动。
+    let chk: u32 = hot_remap(blob, frame, 0, save);
+    if chk != 0 {
+        return chk;
+    }
     // 新槽：定址、匿名、私有。
     let span: u32 = page_up(cand_text_len);
-    let mp: i64 = syscall7(9, HOT_SLOT as u64, span as u64, HOT_PROT_RW as u64,
+    let mp: i64 = syscall7(9, slot_va as u64, span as u64, HOT_PROT_RW as u64,
                            HOT_MMAP_FLAGS as u64, 0, 0);
     if is_neg(mp) {
         return 8;
     }
-    if mp as u64 != HOT_SLOT as u64 {
+    if mp as u64 != slot_va as u64 {
         return 9;
     }
-    let dst: ptr = p32(HOT_SLOT);
+    let dst: ptr = p32(slot_va);
     i = 0;
     while i < text_len {
         store8(dst, i, load8(blob, text_at + i) as u8);
@@ -142,25 +266,25 @@ pub fn hot_install(blob: ptr, n: u32, save: ptr) -> u32 {
     // 只平移**指向候选文本自身**的绝对量；数据引用是共享状态，一个字节都不动。
     let k: u32 = 0;
     while k < nreloc {
-        let ro: u32 = HOT_HDR + k * HOT_RELOC;
+        let ro: u32 = reloc_at + k * HOT_RELOC;
         let off: u32 = l32(blob, ro);
         let lo: u32 = l32(blob, ro + 4);
         let hi: u32 = l32(blob, ro + 8);
         if hi == 0 && lo >= cand_base && lo < cand_base + cand_text_len {
-            store32(dst, off, lo + HOT_SLOT - cand_base);
+            store32(dst, off, lo + slot_va - cand_base);
             store32(dst, off + 4, 0);
         }
         k = k + 1;
     }
-    if is_neg(syscall4(10, HOT_SLOT as u64, span as u64, HOT_PROT_RX as u64)) {
+    if is_neg(syscall4(10, slot_va as u64, span as u64, HOT_PROT_RX as u64)) {
         return 10;
     }
     // 每个候选入口都要落在文本段里，槽号在表内。
     let f: u32 = 0;
     while f < nfunc {
-        let fo: u32 = HOT_HDR + nreloc * HOT_RELOC + f * HOT_FUNC;
+        let fo: u32 = HOT_HDR + f * HOT_FUNC;
         let slot: u32 = l32(blob, fo);
-        let entry: u32 = l32(blob, fo + 4);
+        let entry: u32 = l32(blob, fo + 8);
         if slot >= cand_slots {
             return 11;
         }
@@ -169,38 +293,41 @@ pub fn hot_install(blob: ptr, n: u32, save: ptr) -> u32 {
         }
         f = f + 1;
     }
-    // epoch：闸里那条 movabs 的立即数就是那个字的地址（共享数据段）。
-    // **先发 SWAPPING、再动槽表、最后发 READY**。两个 store 都是 4 字节对齐的 ——
-    // x86-64 上对齐的 32 位写**本身就是原子的**，TSO 又保证 store-store 顺序：读的一方
-    // 看见 READY=1 时，槽表的写入一定已经可见。这是目标 ISA 的性质，不是语言保证；
-    // 换到弱内存序的机器要在这里补成 release store（读侧补 acquire）。
-    // （试过 `use atomics`：它把 store 包的 `mem` 拉进来，与 `loment/lib/mem` 撞名。）
-    let ep: u32 = load32(p32(self_base), self_gate + 6);
     let self_span: u32 = page_up(self_slots * HOT_STRIDE);
     // 先把本槽表原来的目标存下来 —— 释放/回滚要用。
     f = 0;
     while f < nfunc {
-        let fo: u32 = HOT_HDR + nreloc * HOT_RELOC + f * HOT_FUNC;
+        let fo: u32 = HOT_HDR + f * HOT_FUNC;
         let slot: u32 = l32(blob, fo);
         let at: u32 = self_base + slot * HOT_STRIDE;
         let rel0: i32 = load32(at as ptr, 1) as i32;
         store32(save, slot * 4, (at + 5) + rel0 as u32);
         f = f + 1;
     }
+    // epoch：`SWAPPING` → 改槽表 → 改帧链 → `READY`。两个 store 都是 4 字节对齐的 ——
+    // x86-64 上对齐的 32 位写**本身就是原子的**，TSO 又保证 store-store 顺序：读的一方
+    // 看见 READY=1 时，槽表与帧链的写入一定已经可见。这是目标 ISA 的性质，不是语言保证；
+    // 换到弱内存序的机器要在这里补成 release store（读侧补 acquire）。
+    // （试过 `use atomics`：它把 store 包的 `mem` 拉进来，与 `loment/lib/mem` 撞名。）
     if is_neg(syscall4(10, self_base as u64, self_span as u64, HOT_PROT_RWX as u64)) {
         return 13;
     }
     store32(ep as ptr, 0, HOT_SWAPPING);
     f = 0;
     while f < nfunc {
-        let fo: u32 = HOT_HDR + nreloc * HOT_RELOC + f * HOT_FUNC;
+        let fo: u32 = HOT_HDR + f * HOT_FUNC;
         let slot: u32 = l32(blob, fo);
-        let entry: u32 = l32(blob, fo + 4);
+        let entry: u32 = l32(blob, fo + 8);
         let at: u32 = self_base + slot * HOT_STRIDE;
-        let rel: i32 = (HOT_SLOT + entry) as i32 - (at + 5) as i32;
+        let rel: i32 = (slot_va + entry) as i32 - (at + 5) as i32;
         store8(at as ptr, 0, 233 as u8);          // E9
         store32(at as ptr, 1, rel as u32);
         f = f + 1;
+    }
+    // 槽表已经全指新镜像；把**活着**的帧也改指过去。上面检查过，这里不会拒绝。
+    let rr: u32 = hot_remap(blob, frame, 1, save);
+    if rr != 0 {
+        return rr;
     }
     if is_neg(syscall4(10, self_base as u64, self_span as u64, HOT_PROT_RX as u64)) {
         return 14;
@@ -215,7 +342,6 @@ pub fn hot_restore(blob: ptr, n: u32, save: ptr, self_base: u32) -> u32 {
     if n < HOT_HDR || l32(blob, 0) != HOT_MAGIC {
         return 1;
     }
-    let nreloc: u32 = l32(blob, 36);
     let nfunc: u32 = l32(blob, 40);
     let self_slots: u32 = l32(blob, 8);
     let self_gate: u32 = l32(blob, 12);
@@ -226,11 +352,11 @@ pub fn hot_restore(blob: ptr, n: u32, save: ptr, self_base: u32) -> u32 {
     if is_neg(syscall4(10, self_base as u64, span as u64, HOT_PROT_RWX as u64)) {
         return 2;
     }
-    let ep: u32 = load32(p32(self_base), self_gate + 6);
+    let ep: u32 = load32(p32(self_base), self_gate + HOT_GATE_EP);
     store32(ep as ptr, 0, 0);
     let f: u32 = 0;
     while f < nfunc {
-        let fo: u32 = HOT_HDR + nreloc * HOT_RELOC + f * HOT_FUNC;
+        let fo: u32 = HOT_HDR + f * HOT_FUNC;
         let slot: u32 = l32(blob, fo);
         let at: u32 = self_base + slot * HOT_STRIDE;
         let tgt: u32 = load32(save, slot * 4);
@@ -246,8 +372,10 @@ pub fn hot_restore(blob: ptr, n: u32, save: ptr, self_base: u32) -> u32 {
 }
 
 /// 归还一个槽（`munmap`）。**只在没有任何东西指向它时调用** —— 今天就是 `hot_restore`
-/// 之后：槽表已经指回本镜像，候选那一槽没人引用。帧的重映射（`#1152`）之前，
-/// 运行中的旧镜像那一槽永远不能这样还。
+/// 之后：槽表已经指回本镜像，候选那一槽没人引用。
+///
+/// `#1152` 之后调用方还要多一条：上一次安装返回 0（整条帧链都改指过去了），
+/// 否则旧槽里的返回地址可能还活着。
 pub fn hot_release(slot: u32, len: u32) -> u32 {
     if is_neg(syscall4(11, slot as u64, len as u64, 0)) {
         return 1;

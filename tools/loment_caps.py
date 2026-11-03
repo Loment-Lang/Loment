@@ -135,6 +135,11 @@ EXPLAINED: dict[tuple[str, str], str] = {
         "越界**由调用方报**：守卫这里 `return 0`，驱动器 `fail(\"…codegen 表容量…\")` 说得出来",
     ("loment/selfhost/codegen.lomt", "CG_MAXENUM"):
         "越界**由调用方报**：同 `CG_MAXFN`（一句话点名两张表）",
+    ("loment/tools/lomenterr.lomt", "SUM_CAP"):
+        "越界**由调用方报**（`#670`）：表满时只把 `C_SUMDROP` 加一，真正的句子由 "
+        "`sum_print` 在汇总行末尾印（`N 个码没有列进这张表` / "
+        "`N more codes were left out of this list`）—— 那个函数在这段的 ±8 行之外，"
+        "扫描窗口看不到它。总数是另外数的，所以丢掉明细不会算错总数",
     ("loment/tools/lomenterr.lomt", "MSG_CAP"):
         "**检测点，不是写入点**（`#485`）：`if mlen >= MSG_CAP` 判的是「这条消息有没有"
         "被拷满」，判到了就印 `truncated` / 写 `\"truncated\": true`。越界在这里不是"
@@ -204,9 +209,13 @@ EXPLAINED: dict[tuple[str, str], str] = {
     ("loment/lib/hotswap.lomt", "HOT_RELOC"):
         "一条重定位记录的**字节数**（12），与 `J_NODE_STRIDE` 同形",
     ("loment/lib/hotswap.lomt", "HOT_FUNC"):
-        "一个函数条目的**字节数**（8），同上",
+        "一个函数条目的**字节数**（24：槽、两侧入口、flags、调用点数），同上",
+    ("loment/lib/hotswap.lomt", "HOT_CALL"):
+        "一对（旧偏移，新偏移）的**字节数**（8），同上",
+    ("loment/lib/hotswap.lomt", "HOT_FRAMES"):
+        "帧链最多走 4096 层（`#1152`）；走到就停，不写任何东西",
     ("loment/lib/hotswap.lomt", "HOT_HDR"):
-        "装载件头的长度（48）；`n < HOT_HDR` 那条直接返回 1，调用方按**返回码**点名",
+        "装载件头的长度（56）；`n < HOT_HDR` 那条直接返回 1，调用方按**返回码**点名",
     ("loment/lib/hotswap.lomt", "HOT_DIG"):
         "sha256 摘要的字节数（32），循环上界由算法定",
     ("loment/lib/hotswap.lomt", "HOT_MAX_FN"):

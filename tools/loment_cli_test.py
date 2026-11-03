@@ -962,10 +962,14 @@ def test_both_launchers_forward_the_renderer_output_modes():
     assert sh.count('"$nc $om"') == 3, "bash 启动器没把输出模式转交给 report_diags"
     assert '"$(tool lomenterr)" $rflags "$dfile"' in sh, \
         "renderer 的开关没有一起(word-split)传给 lomenterr"
-    # `--max N` / `--max=N`：两个拼法都要转交，而且**带上它的值**（这个词的两个拼法各一条）
-    assert sh.count('--max) om="$om --max ${2:-}"; shift 2 ;;') == 2, \
-        "bash: --max <N> 没被认/没带上值"
-    assert sh.count('--max=*) om="$om $1"; shift ;;') == 2, "bash: --max=N 那个拼法没被认"
+    # `--max N` / `--max=N`：两个拼法都要转交，而且**带上它的值**（这个词的两个拼法各一条）。
+    # 值先过 `need_max` 再转发（`#659`：缺数值是**启动器**的用法错，不能原样漏给渲染器 ——
+    # 那会让它把诊断文件当成上限、用自己的 usage 顶掉用户的报错）。
+    assert sh.count('--max) maxval=${2:-}; need_max "$maxval"') == 2, \
+        "bash: --max <N> 没被认/没校验/没带上值"
+    assert sh.count('--max=*) maxval=${1#--max=}; need_max "$maxval"') == 2, \
+        "bash: --max=N 那个拼法没被认/没校验"
+    assert sh.count('om="$om --max $maxval"') == 2, "bash: --max 的值没被转交"
 
     # cmd: check 走 :scan_arg、build/run 走 :barg_loop —— 两条路都要认，且都要转交
     assert cmd.count('if /I "%~1"=="--short" goto scan_om') == 1, "cmd: check 不认 --short"
@@ -988,7 +992,10 @@ def test_both_launchers_forward_the_renderer_output_modes():
     assert ':scan_max' in cmd and 'set "cskip=1"' in cmd, "cmd: 没记住 --max 的值那一个词"
     assert cmd.count('if not defined cskip goto scan_arg_go') == 1, \
         "cmd: 跳过一个词的机制不在（--max 的值会被当成源文件）"
-    assert cmd.count('set "com=%com% --max %~2"') == 1, "cmd: build/run 没带上 --max 的值"
+    # 值同样先过数值校验再累加（`#659`；`:barg_max` 用的是校验过的 `%bmax%`）。
+    assert cmd.count('set "com=%com% --max %bmax%"') == 1, "cmd: build/run 没带上 --max 的值"
+    assert cmd.count('for /f "delims=0123456789"') == 2, \
+        "cmd: 两处 --max 的值都没做数值校验（缺值/非数要当启动器的用法错）"
 
 
 @test

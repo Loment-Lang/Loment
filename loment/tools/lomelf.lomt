@@ -6855,7 +6855,9 @@ fn em_gate(out: ptr, c: u32, tab: ptr, mb: ptr) -> u32 {
     d = e1(out, d, 72);                    // REX.W
     d = e1(out, d, 137);                   // mov rbp, rsp
     d = e1(out, d, 229);
+    d = e4(out, d, 5081928);               // mov rcx, [rbp]  (48 8B 4D 00)
     d = em_mov_abs(out, d, tab, RAX, load32(hot_sc(mb), HS_EPOCHN), 18);
+    d = e4(out, d, 138971464);             // mov [rax+8], rcx (48 89 48 08)
     d = e1(out, d, 131);                   // cmp dword [rax], 0
     d = e1(out, d, 56);
     d = e1(out, d, 0);
@@ -7600,10 +7602,12 @@ fn run(mem: ptr) -> u32 {
     place_bss(tab, inb);
     if load32(hot_sc(mb), HS_HRUN) == 1 {
         // epoch 字进 bss：地址 = 数据段尾 + 现有 bss，再把它算进 bss 大小。
+        // 紧跟着的 8 字节是闸存下来的**调用者帧指针**（`#1152`）—— 固定核按 `epoch+8` 读，
+        // 两者必须相邻，所以这里一次留 16 字节。
         let bss0: u32 = cell(tab, C_BSS);
         let ep: u32 = data_base(tab) + align_to(cell(tab, C_GB), 8) + bss0;
         lbl_add(tab, load32(hot_sc(mb), HS_EPOCHN), 18, 0, 0, ep);
-        setcell(tab, C_BSS, bss0 + 8);
+        setcell(tab, C_BSS, bss0 + 16);
     }
     // 外部对象的重定位: **所有对象都摆好了**才应用 (docs/173 阶段 2)。
     let rr: u32 = apply_relocs(tab, inb, txt, gb);

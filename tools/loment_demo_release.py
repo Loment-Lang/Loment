@@ -225,7 +225,17 @@ def cmd_make(args) -> int:
     print(f"[OK] 假 Pre-Release: {rel}" + (f"  (tamper: {args.tamper})" if args.tamper else ""))
     for p in sorted(rel.iterdir()):
         print(f"       {p.name}  {p.stat().st_size} B")
+    # `loment hotupdate` 的落点：启动器把未知子命令转给 PATH 上的 `loment-<名字>`。
+    bin_dir = work / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    shim = bin_dir / "loment-hotupdate"
+    target = (ROOT / "tools" / "loment_hotupdate.py").as_posix()
+    shim.write_text("#!/usr/bin/env bash\n"
+                    f'exec python "{target}" "$@"\n',
+                    encoding="utf-8", newline="\n")
+    os.chmod(shim, 0o755)
     print(f"     基线二进制: {work / 'demotool.elf'}")
+    print(f"     命令       : PATH=\"{bin_dir.as_posix()}:$PATH\" loment hotupdate --work {work}")
     return 0
 
 

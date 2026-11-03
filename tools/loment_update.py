@@ -52,6 +52,20 @@ _CAP_RE = re.compile(r"^\s*capability\s+(.+?)\s*$")
 _RELEASE_RE = re.compile(r'^RELEASE\s*=\s*"([^"]+)"', re.M)
 
 
+class _Progress:
+    """准入的进度：`check` 里六关各 tick 一次（命令行只读这个数）。"""
+
+    def __init__(self, fn) -> None:
+        self.fn = fn
+        self.i = 0
+        self.n = 6
+
+    def tick(self) -> None:
+        self.i += 1
+        if self.fn:
+            self.fn(self.i, self.n)
+
+
 class Reject(Exception):
     def __init__(self, code: str, detail: str = "") -> None:
         super().__init__(f"{code}: {detail}" if detail else code)
@@ -173,8 +187,13 @@ def _write_state(path: Path, accepted: set[str]) -> None:
 
 
 def check(candidate: Path, tree: Path, *, state: Path | None = None,
-          current: str | None = None, allow_rollback: bool = False) -> dict:
-    """返回候选的清单；任何一条不成立抛 `Reject`。"""
+          current: str | None = None, allow_rollback: bool = False,
+          progress=None) -> dict:
+    """返回候选的清单；任何一条不成立抛 `Reject`。
+
+    `progress(i, n)` 在每一关之前被叫一次 —— 命令行用它画进度条，准入的判断只有这一份。
+    """
+    steps = _Progress(progress)
     man_path = candidate / "hotfix.json"
     if not man_path.is_file():
         raise Reject("manifest-missing", "hotfix.json")
@@ -186,6 +205,7 @@ def check(candidate: Path, tree: Path, *, state: Path | None = None,
     if cand.get("schema") != SCHEMA:
         raise Reject("schema", f"想要 {SCHEMA}，得到 {cand.get('schema')!r}")
 
+    steps.tick()
     release = cand.get("release", "")
     base, kind, n = parse_tag(release)
     if kind == "pre":
@@ -193,6 +213,7 @@ def check(candidate: Path, tree: Path, *, state: Path | None = None,
     if not cand.get("prerelease") or "-" not in release:
         raise Reject("not-prerelease", release)
 
+    steps.tick()
     verify_signature(candidate)
 
     artifact = cand.get("artifact") or {}
@@ -208,6 +229,7 @@ def check(candidate: Path, tree: Path, *, state: Path | None = None,
     if sha256_file(payload) != sums[name]:
         raise Reject("artifact-digest", f"{name} 与 SHA256SUMS 不一致")
 
+    steps.tick()
     running = {
         "baseline": read_release(tree),
         "language": read_release(tree),
@@ -227,6 +249,7 @@ def check(candidate: Path, tree: Path, *, state: Path | None = None,
     if cand.get("fixed_core") != running["fixed_core"]:
         raise Reject("fixed-core", "不可换的那部分变了")
 
+    steps.tick()
     # 投影（`#1157`）：清单必须说清它属于哪条基线、哪次发布，以及线上每一条**都是 fix**。
     proj = cand.get("projection")
     if proj is None:
@@ -244,6 +267,7 @@ def check(candidate: Path, tree: Path, *, state: Path | None = None,
         if step.get("sha") in evicted:
             raise Reject("projection", f"{step.get('sha', '')[:12]} 同时在线上与被剔除")
 
+    steps.tick()
     accepted = _read_state(state)
     if release in accepted:
         raise Reject("replay", f"{release} 已经装过")
@@ -253,6 +277,7 @@ def check(candidate: Path, tree: Path, *, state: Path | None = None,
         if cur_base == base and n <= cur_n and not allow_rollback:
             raise Reject("version", f"{release} 不比 {current} 新")
 
+    steps.tick()
     if state is not None:
         accepted.add(release)
         _write_state(state, accepted)

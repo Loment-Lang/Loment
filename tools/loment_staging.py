@@ -65,7 +65,7 @@ def _reject(bdir: Path, release: str, code: str, detail: str) -> None:
 
 
 def stage(src: Path, tree: Path, release: str, *, current: str | None = None,
-          allow_rollback: bool = False) -> Path:
+          allow_rollback: bool = False, progress=None) -> Path:
     """检查一份已下载好的候选，然后（且只在通过时）放进 `incoming/`。
 
     检查就是 `#1147` 的那一套：签名、五个等式、预发布、版本单调、重放。任何一条不过
@@ -81,7 +81,7 @@ def stage(src: Path, tree: Path, release: str, *, current: str | None = None,
             return seen
     try:
         lu.check(src, tree, state=bdir / "state.json",
-                 current=current, allow_rollback=allow_rollback)
+                 current=current, allow_rollback=allow_rollback, progress=progress)
     except lu.Reject as e:
         _reject(bdir, release, e.code, e.detail)
         return bdir / "rejected" / f"{release}.json"

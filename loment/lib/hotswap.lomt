@@ -52,6 +52,10 @@ const HOT_GATE_LEN: u32 = 33;        // 入口闸的字节数（`docs/280` §4�
 const HOT_GATE_EP: u32 = 10;         // 闸里 epoch 那条 movabs 的立即数偏移
 const HOT_FRAMES: u32 = 4096;        // 帧链最多走这么深
 const HOT_SAVE_N: u32 = 16384;       // `save` 里记"改了几帧"的位置（每槽 4 字节之后的空地）
+//: 摘要把一个 sha256 上下文（624 B）+ 两个 32 B 摘要放在 `save` 的这一段里。
+//: **不在装载路径上申请堆**：bump 堆只有 64 KiB，每次 `alloc` 都是一次泄漏 ——
+//: 实测第 14 次热更新就把堆耗尽、撞进相邻的 .bss（`docs/290` §2 第 4 条）。
+const HOT_SAVE_SCRATCH: u32 = 32768;
 const HOT_SWAPPING: u32 = 2;         // epoch：正在改槽表（这个窗口里别进来）
 const HOT_READY: u32 = 1;            // epoch：新实现已经发布
 const HOT_MMAP_FLAGS: u32 = 50;      // PRIVATE 2 | FIXED 0x10 | ANON 0x20
@@ -225,13 +229,10 @@ pub fn hot_install(blob: ptr, n: u32, save: ptr) -> u32 {
     // 下面随便哪个调用都会再进一次闸、把那 8 字节覆盖掉，所以这一句必须排在所有调用之前。
     let ep: u32 = load32(p32(self_base), self_gate + HOT_GATE_EP);
     // 固定核摘要：两侧的闸字节 + 槽表的定长。不同 = 不是同一段机器码，拒绝。
-    let sc: ptr = alloc(4096);
-    if sc as u64 == 0 {
-        return 6;
-    }
+    let sc: ptr = ptr_add(save, HOT_SAVE_SCRATCH);
     let ctx: ptr = sc;
-    let d1: ptr = ptr_add(sc, 1024);
-    let d2: ptr = ptr_add(sc, 1088);
+    let d1: ptr = ptr_add(sc, 640);
+    let d2: ptr = ptr_add(sc, 672);
     let _a: u32 = digest_at(sc, ptr_add(p32(self_base), self_gate), self_gate_len, ctx, d1);
     let _b: u32 = digest_at(sc, ptr_add(blob, text_at + cand_gate), self_gate_len, ctx, d2);
     let i: u32 = 0;

@@ -149,13 +149,14 @@ fn _start() -> u32 {
     let where: u32 = 0;
     let live: u32 = 0;          // 上一个还值得还的槽（0 = 原始镜像，不能还）
     while k <= CYCLES {
-        let tpl: str = "loment/build/h0.in";
+        let tpl: str = "loment/build/h00.in";
         i = 0;
         while i < str_len(tpl) {
             store8(pathb, i, str_byte(tpl, i) as u8);
             i = i + 1;
         }
-        store8(pathb, 14, (48 + k) as u8);
+        store8(pathb, 14, (48 + k / 10) as u8);
+        store8(pathb, 15, (48 + k % 10) as u8);
         store8(pathb, i, 0 as u8);
         let fd: i64 = syscall4(2, pathb as u64, 0, 0);
         if fd < 0 {
@@ -259,7 +260,7 @@ def _case(versions: list[str], plan: list[tuple], *, tamper: tuple[int, ...] = (
             text_len = _s.unpack_from("<I", blob, 44)[0]
             at = len(blob) - text_len + new_meta["fixed"]["gate"] + 3
             blob[at] ^= 0xFF
-        f = target / f"h{k}.in"
+        f = target / f"h{k:02d}.in"
         f.write_bytes(bytes(blob))
         written.append(f)
     with tempfile.TemporaryDirectory() as t:
@@ -341,8 +342,8 @@ def _run(probe: Path, cycles: int) -> str | None:
     script = (f"rm -rf /tmp/hotstress && mkdir -p /tmp/hotstress/loment/build && "
               f"cp {w(probe)} /tmp/hotstress_probe && chmod +x /tmp/hotstress_probe")
     for k in range(1, cycles + 1):
-        script += f" && cp {w(ROOT / 'loment' / 'build' / f'h{k}.in')} " \
-                  f"/tmp/hotstress/loment/build/h{k}.in"
+        script += f" && cp {w(ROOT / 'loment' / 'build' / f'h{k:02d}.in')} " \
+                  f"/tmp/hotstress/loment/build/h{k:02d}.in"
     script += " && cd /tmp/hotstress && /tmp/hotstress_probe"
     r = subprocess.run(["wsl", "-e", "bash", "-lc", script], capture_output=True, text=True)
     return r.stdout

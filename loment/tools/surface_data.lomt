@@ -34,8 +34,8 @@ pub fn n_codes() -> u32 { return 38; }
 /// 内部码段的下界（`#773`）。`E900` 起是"工具链自己崩了"那一类。
 pub fn internal_lo() -> u32 { return 900; }
 
-/// 内部码段的上界（含）。
-pub fn internal_hi() -> u32 { return 900; }
+/// 内部码段的上界（含；含兜底码 `E999`，空号由消费者跳过）。
+pub fn internal_hi() -> u32 { return 999; }
 
 /// 报错器自己的版本（`lomenterr version` 打的就是它）。真源：`tools/loment_release.py`。
 pub fn lomenterr_version() -> str { return "0.1.2"; }

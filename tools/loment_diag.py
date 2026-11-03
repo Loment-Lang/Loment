@@ -2555,8 +2555,11 @@ def surface_lomt() -> str:
         f"/// 内部码段的下界（`#773`）。`E{INTERNAL_LO}` 起是\"工具链自己崩了\"那一类。",
         f"pub fn internal_lo() -> u32 {{ return {internal_codes[0]}; }}",
         "",
-        f"/// 内部码段的上界（含）。",
-        f"pub fn internal_hi() -> u32 {{ return {internal_codes[-1]}; }}",
+        # 上界是**号段边界**，不是"最后一条有文字的码"：兜底码 E999 钉在顶端（`#658`），
+        # 中间 901..998 是空号。消费者按"有文字才印"跳过空号（`lomcli` 的 codes/explain），
+        # 所以边界给 `INTERNAL_HI` 才能让 E999 既列得出来、又不把空号印成标题。
+        f"/// 内部码段的上界（含；含兜底码 `E{FALLBACK}`，空号由消费者跳过）。",
+        f"pub fn internal_hi() -> u32 {{ return {INTERNAL_HI}; }}",
         "",
         # 报错器**自己的**版本号 —— 与语言版本是两条线（`docs/182` §17）。
         # **导进来而不是在这里再写一遍**：真源是 `loment_release.LOMENTERR`，而那正是

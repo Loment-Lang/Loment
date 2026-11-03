@@ -1312,12 +1312,18 @@ fn do_codes(mem: ptr, ab: ptr, argc: u32) -> u32 {
     }
     wstr(1, "\n  ");
     gray(mem, 1);
-    wstr(1, "Internal codes (a tool died before it could report):");
+    // 这一段的标题不再只写"工具链崩了"：兜底码 `E999` 也在里面（`#658`），
+    // 它的意思是"分类表没认出这条消息"，不是某个进程死了。
+    wstr(1, "Internal codes (the toolchain's own, not about your source):");
     colr(mem, 1);
     wstr(1, "\n");
     c = internal_lo();
     while c <= internal_hi() {
-        codrow_n(mem, 1, c, code_ascii(c));
+        // **有文字才印**：`901..998` 是空号，印出来就是一行行空标题。上界现在是号段
+        // 边界（`internal_hi()` 含兜底码 `E999`），不再是"最后一条有文字的码"。
+        if str_len(code_ascii(c)) > 0 {
+            codrow_n(mem, 1, c, code_ascii(c));
+        }
         c = c + 1;
     }
     wstr(1, "\n  ");
@@ -1365,7 +1371,9 @@ fn do_explain(mem: ptr, ab: ptr, argc: u32) -> u32 {
     if code >= 1 && code <= n_codes() {
         known = 1;
     }
-    if code >= internal_lo() && code <= internal_hi() {
+    // 内部段里 `901..998` 是空号（上界是号段边界，含兜底码 `E999`）—— 认它们等于给一个
+    // 不存在的码印一张空表。**有文字才算认**，与 `codes` 那边同一条口径。
+    if code >= internal_lo() && code <= internal_hi() && str_len(code_ascii(code)) > 0 {
         known = 1;
     }
     if known == 0 {

@@ -63,7 +63,7 @@ loment_editors_test 3
 vscode_ext_test 19
 loment_filetype_test 4
 loment_dap_test 4
-loment_eol_test 3
+loment_eol_test 4
 loment_syscalls_test 3
 loment_capasserts_test 4
 loment_i18n_test 2

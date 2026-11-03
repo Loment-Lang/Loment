@@ -821,6 +821,21 @@ entry:
   call void @jstr(i64 %t1, ptr %t2, i32 1)
   ret void
 }
+; jrt_write_bytes -> ()
+define void @jrt_write_bytes(i64 %fd, ptr %p, i32 %n) {
+entry:
+  %fd.addr = alloca i64
+  %p.addr = alloca ptr
+  %n.addr = alloca i32
+  store i64 %fd, ptr %fd.addr
+  store ptr %p, ptr %p.addr
+  store i32 %n, ptr %n.addr
+  %t1 = load i64, ptr %fd.addr
+  %t2 = load ptr, ptr %p.addr
+  %t3 = load i32, ptr %n.addr
+  call void @wr(i64 %t1, ptr %t2, i32 %t3)
+  ret void
+}
 ; jrt_println -> ()
 define void @jrt_println(i64 %fd) {
 entry:

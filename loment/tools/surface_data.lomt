@@ -34,8 +34,8 @@ pub fn n_codes() -> u32 { return 38; }
 /// 内部码段的下界（`#773`）。`E900` 起是"工具链自己崩了"那一类。
 pub fn internal_lo() -> u32 { return 900; }
 
-/// 内部码段的上界（含）。
-pub fn internal_hi() -> u32 { return 900; }
+/// 内部码段的上界（含；含兜底码 `E999`，空号由消费者跳过）。
+pub fn internal_hi() -> u32 { return 999; }
 
 /// 报错器自己的版本（`lomenterr version` 打的就是它）。真源：`tools/loment_release.py`。
 pub fn lomenterr_version() -> str { return "0.1.2"; }
@@ -120,6 +120,8 @@ pub fn code_title(c: u32, lang: u32) -> str {
     if k == 77 { return "`lspe pass` 缺少理由"; }
     if k == 1800 { return "the tool died without reporting (internal)"; }
     if k == 1801 { return "工具链进程死了，没留下诊断"; }
+    if k == 1998 { return "unclassified (please report)"; }
+    if k == 1999 { return "未分类（请报告）"; }
     return "";
 }
 
@@ -203,6 +205,8 @@ pub fn code_what(c: u32, lang: u32) -> str {
     if k == 77 { return "`lspe pass` 后面缺一句理由（或者理由全是空白）。"; }
     if k == 1800 { return "A process in the toolchain died **before it could write a structured diagnostic** - killed by a signal, or exited abnormally, with no record in `--diag-out`."; }
     if k == 1801 { return "工具链里的一个进程在**能写出结构化诊断之前**就死了 —— 被信号打死，或者以异常状态退出，而 `--diag-out` 一份记录都没写。"; }
+    if k == 1998 { return "The compiler reported an error that is not in the classification table -- even the toolchain did not recognise which code this message belongs to."; }
+    if k == 1999 { return "编译器报了一条错，而分类表里没有它 —— 连工具链自己都没认出这条消息属于哪个码。"; }
     return "";
 }
 
@@ -286,6 +290,8 @@ pub fn code_why(c: u32, lang: u32) -> str {
     if k == 77 { return "旁路是**有收据的**：块本身进台账，理由就是签名。没有理由的旁路等于一块无标签地板 —— 那正是 LSPE 要防的形状。"; }
     if k == 1800 { return "The diagnostics channel can only describe failures that were **successfully serialized before the failure**. A compiler crash, a linker crash, or the renderer crashing on its own all go the same way: the JSONL is empty and there is nothing for the renderer to do. The launcher now closes that gap: it reads the exit status / signal name and synthesizes this record, so \"no record\" no longer means \"nothing happened\" (#773). This is not a semantic error in your source - it is the **implementation failing on itself**."; }
     if k == 1801 { return "诊断系统只能描述**在失败之前已经成功序列化**的失败。编译器崩溃、链接器崩溃、报错器自己崩溃，走的都是这条路：JSONL 是空的，渲染器无事可做。启动器现在替它收尸：拿到退出状态 / 信号名，合成这一条记录，于是「没有任何记录」不再等于「什么都没有发生」（`#773`）。这不是你源码的语义错 —— 它是**实现自己的失败**。"; }
+    if k == 1998 { return "The table and the compiler come out of the same repository and the same build. A message landing here means it has not been classified yet, not that the toolchain versions disagree: fix by the message, then report it so a rule can be added."; }
+    if k == 1999 { return "分类表与编译器是同一个仓、同一次构建出来的。消息在这里落空，意思是它还没被归类，不是版本不齐：先按原文去改，再把这条消息报上来，下一条规则就补在它上面。"; }
     return "";
 }
 
@@ -369,6 +375,8 @@ pub fn code_yes(c: u32, lang: u32) -> str {
     if k == 77 { return "一句非空理由"; }
     if k == 1800 { return "a tool exits 0 (no diagnostics) or 1 (diagnostics, and it left a record)"; }
     if k == 1801 { return "工具链以 0 退出（无诊断）或 1 退出（有诊断并留下了记录）"; }
+    if k == 1998 { return "classified messages after a report lands"; }
+    if k == 1999 { return "报告之后有专属分类的消息"; }
     return "";
 }
 
@@ -452,6 +460,8 @@ pub fn code_no(c: u32, lang: u32) -> str {
     if k == 77 { return "空字符串 / 只有空白 / 根本不是字符串"; }
     if k == 1800 { return "killed by a signal / exited abnormally without writing any structured diagnostic"; }
     if k == 1801 { return "被信号打死 / 异常退出，而且一份结构化诊断都没写"; }
+    if k == 1998 { return "guessing a code"; }
+    if k == 1999 { return "自动猜一个码"; }
     return "";
 }
 
@@ -495,6 +505,7 @@ pub fn code_ascii(c: u32) -> str {
     if c == 37 { return "an LSPE policy lock does not match this artifact"; }
     if c == 38 { return "an `lspe pass` block with no reason"; }
     if c == 900 { return "a tool in the chain died before it could report (internal) - report it with the unit"; }
+    if c == 999 { return "unclassified - please report it"; }
     return "";
 }
 
@@ -785,6 +796,12 @@ pub fn code_fix(c: u32, i: u32, lang: u32) -> str {
     if k == 14403 { return "附上退出状态 / 信号名（这一条消息里已经写了）与 `loment version`。"; }
     if k == 14405 { return "如果是**链接器**那一侧（消息点名 `loment-lomelf`），同时附上 `-o` 的路径与目标平台。"; }
     if k == 14407 { return "如果是**报错器**那一侧（消息点名 `lomenterr`），把那份 JSONL 原样附上 —— 它渲染不了的东西正是要修的东西。"; }
+    if k == 15984 { return "Change what the message says -- it is still accurate, it just lacks a card."; }
+    if k == 15986 { return "Report the message, the source lines and the command that produced it."; }
+    if k == 15988 { return "Include the toolchain version (`loment version`) so the table can be aligned."; }
+    if k == 15985 { return "按消息原文去改 —— 它说的仍然是真话，只是此刻缺一张解释卡。"; }
+    if k == 15987 { return "把消息原文、出错的那几行源码和跑的命令一起报告上来。"; }
+    if k == 15989 { return "顺手写一下工具链版本（`loment version`），分类表按它对齐。"; }
     return "";
 }
 
@@ -830,6 +847,7 @@ pub fn code_nfix(c: u32) -> u32 {
     if c == 37 { return 3; }
     if c == 38 { return 3; }
     if c == 900 { return 4; }
+    if c == 999 { return 3; }
     return 0;
 }
 

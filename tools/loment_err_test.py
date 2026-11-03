@@ -283,6 +283,196 @@ def test_unknown_code_is_said_out_loud():
 
 
 @test
+def test_codes_outside_the_catalogue_are_never_minted():
+    """`#662` / `#667`: 码的形状不对时，**不许**归口重写成一个像真码的假码。
+
+    * `34`（没有 `E`）—— 原先解成 34，`em_code` 印成 `E034`，而 E034 不在码表里；
+    * `E4294967298` —— 数字在 `u32` 里回绕成 2，卡片、标题、汇总全按 E002 出，读者
+      拿到的是**另一条规则的建议**。这比"未知"糟得多：它看着非常确定。
+
+    两条都必须走"未知码"那条路：原样印码、标题说不知道、汇总写 `E?`。
+    """
+    for code, fake in (("34", "E034"), ("E4294967298", "E002"), ("E0", "E000")):
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td) / "d.jsonl"
+            d.write_text(json.dumps({"file": "x.lomt", "line": 1, "col": 1,
+                                     "code": code, "message": "m"}) + "\n",
+                         encoding="utf-8", newline="\n")
+            rc, out = _render(d)
+        assert rc == 1, (code, rc, out[:200])
+        assert f"error[{code}]" in out, f"码要原样印出来: {out[:120]!r}"
+        assert "unknown error code" in out, f"{code}: 没说不知道: {out[:200]!r}"
+        assert fake not in out, f"{code}: 被归口成了真码 {fake}: {out[-200:]!r}"
+        assert "E?" in out, f"{code}: 汇总不该给它编一个码: {out[-200:]!r}"
+    print("      码的形状不对（无 E / 过长 / 零）: 一律未知，不编 E0NN")
+
+
+@test
+def test_control_bytes_in_the_source_are_escaped():
+    """`#654`: 源行是**逐字节**回显的，所以一个文件能让终端清屏、改色、伪造诊断。
+
+    控制字节（除 tab）现在印成 `\\xNN` 四个普通字符；caret 的宽度跟着按四列算，
+    所以对齐不受影响。`--no-color` 原先**帮不上忙** —— 它关的是渲染器自己的上色，
+    关不掉源文件里的字节。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "ansi.lomt"
+        # ESC 在 caret **前面**：转义把这几个字节从 1 列撑成 4 列，caret 必须跟着右移。
+        src.write_bytes('module m\n\nfn f() -> u32 {\n    return g("\x1b[2J", z);\n}\n'
+                        .encode("utf-8"))
+        d = Path(td) / "d.jsonl"
+        d.write_text(json.dumps({"file": "ansi.lomt", "line": 4, "col": 22,
+                                 "code": "E002", "message": "m"}) + "\n",
+                     encoding="utf-8", newline="\n")
+        rc, out = _run_in(Path(td), d)
+    assert rc == 1, (rc, out[:200])
+    assert "\x1b" not in out, "源文件里的 ESC 原样进了终端"
+    assert '\\x1b[2J", z);' in out, f"没有转义成 \\xNN: {out[:300]!r}"
+    # caret 与**渲染出来**的那一行对齐（不是与原始字节对齐）
+    lines = out.splitlines()
+    shown = next(ln for ln in lines if ln.startswith("4 | "))[len("4 | "):]
+    caret = next(ln for ln in lines if "^" in ln)
+    # 渲染出来的那一行是纯 ASCII（`\xNN` 是人看的字符），所以字符下标 == 显示列。
+    assert caret.index("^") - len("  | ") == shown.index("z"), (caret, shown)
+    print("      源行的控制字节印成 \\xNN，caret 仍对齐")
+
+
+@test
+def test_a_filled_buffer_says_the_whole_diagnostic_was_cut():
+    """`#671`: 一行超长源码能把 32 KiB 渲染缓冲占满，插入符、消息和整张卡片随之消失。
+
+    剩下的那句提示原先**粘在源行末尾**，读起来像"这一行被截了"—— 而真正丢的是整条诊断。
+    现在它自己占一行，并且说清丢的是什么。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "long.lomt"
+        src.write_text("module m\n\nfn f() -> u32 {\n    return g(" + "1 + " * 120000
+                       + "1);\n}\n", encoding="utf-8", newline="\n")
+        d = Path(td) / "d.jsonl"
+        d.write_text(json.dumps({"file": str(src), "line": 4, "col": 12,
+                                 "code": "E002", "message": "m"}) + "\n",
+                     encoding="utf-8", newline="\n")
+        rc, out = _render(d)
+    assert rc == 1, rc
+    notice = ("lomenterr: this diagnostic was too long "
+              "to render in full (the source line alone filled the 32 KiB buffer)")
+    # 它必须**自成一行**：前一行是被填满的缓冲（一段没写完的源行），不是提示粘在它尾巴上
+    assert "\n" + notice + "\n" in out, f"截断提示没有单独占一行: {out[-300:]!r}"
+    assert "\n\n" + notice not in out, "提示前多了一个空行"
+    print("      缓冲被占满：截断提示另起一行，并说清丢的是整条诊断")
+
+
+@test
+def test_a_cut_message_says_so_in_the_long_form_too():
+    """`#665`: 消息超过 `MSG_CAP` 就被截断，`--short`/`--json` 会说，长表原先不说。
+
+    被截断的消息与完整的长得一模一样 —— 这正是"静默"的形状。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td) / "d.jsonl"
+        d.write_text(json.dumps({"file": "x.lomt", "line": 4, "col": 1,
+                                 "code": "E002", "message": "y" * 40000}) + "\n",
+                     encoding="utf-8", newline="\n")
+        rc, out = _render(d)
+        s = Path(td) / "s.jsonl"
+        s.write_text(json.dumps({"file": "x.lomt", "line": 4, "col": 1,
+                                 "code": "E002", "message": "plain"}) + "\n",
+                     encoding="utf-8", newline="\n")
+        rc2, out2 = _render(s)
+    assert rc == 1 and "[truncated]" in out, f"截断没说出来: {out[-300:]!r}"
+    assert rc2 == 1 and "[truncated]" not in out2, "没截断的消息不该带标记"
+    print("      长消息在完整渲染里也说 [truncated]；短消息不带")
+
+
+@test
+def test_json_output_is_always_valid_utf8():
+    """`#666`: `--json` 的消费者是 JSON 解析器 —— 一个非法字节就让**整份文档**解析失败。
+
+    诊断文件可能来自别的工具链 / 更老的版本 / 夹具，所以渲染器是最后一道防线：多字节
+    序列验不过就写 U+FFFD，而不是把那个字节原样抄进去。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td) / "bad.jsonl"
+        # 消息里放一个**单独的 0xFF**：不是任何 UTF-8 序列的一部分。
+        d.write_bytes(b'{"file":"x.lomt","line":1,"col":1,"code":"E002",'
+                      b'"message":"a\xffb"}\n')
+        r = subprocess.run([str(_bin()), "--no-color", "--json", str(d)],
+                           capture_output=True, shell=False, timeout=60, cwd=str(td))
+    assert r.returncode == 1, r.returncode
+    # 渲染器把诊断写 **fd 2**（`--json` 也是）；这一行就是判据：解不开就抛。
+    text = (r.stdout + r.stderr).decode("utf-8")
+    row = json.loads(text.splitlines()[0])
+    assert row["message"] == "a�b", repr(row["message"])
+    print("      --json 的非法字节写成 U+FFFD，整份输出仍是合法 UTF-8")
+
+
+@test
+def test_the_fallback_code_has_a_card():
+    """`#658`: E999 是**兜底码**，原先它是唯一一个没有卡片的码 —— 报错器于是用"工具链版本
+    不齐"去解释编译器自己的兜底，而那句话是错的：分类表与编译器是同一个仓、同一次构建。
+
+    现在它有一张真卡片：说清"没归类"，并给出报告时要带的东西。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td) / "d.jsonl"
+        d.write_text(json.dumps({"file": "x.lomt", "line": 1, "col": 1,
+                                 "code": "E999", "message": "never seen this"}) + "\n",
+                     encoding="utf-8", newline="\n")
+        rc, out = _render(d)
+    assert rc == 1, (rc, out[:200])
+    assert "error[E999]: unclassified (please report)" in out, out[:200]
+    assert "not in the classification table" in out, out[:300]
+    assert "toolchain versions may not match" not in out, \
+        f"还在拿版本不齐解释兜底码: {out[-300:]!r}"
+    print("      兜底码 E999 有卡片：说“没归类”，不再怪版本")
+
+
+@test
+def test_a_column_without_a_line_never_looks_like_a_line():
+    """`#664`: `line: 0` + `col: 12` 原先渲染成 `--> x.lomt:12` —— 与"第 12 行"同形。
+
+    没有行号的列在这里没有意义（编译器自己也没说那在第几行）。`--short` 同一条纪律。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td) / "d.jsonl"
+        d.write_text(json.dumps({"file": "x.lomt", "line": 0, "col": 12,
+                                 "code": "E002", "message": "m"}) + "\n",
+                     encoding="utf-8", newline="\n")
+        rc, out = _render(d)
+        assert rc == 1, (rc, out)
+        assert "--> x.lomt\n" in out, f"没有行号时只印文件名: {out[:160]!r}"
+        assert "x.lomt:12" not in out, f"列冒充成了行号: {out[:160]!r}"
+        rc2, short = _render(d, "--short")
+        assert rc2 == 1 and "x.lomt: error[E002]" in short, short[:160]
+    print("      没有行号时，列不再冒充行号（完整 / --short 两处）")
+
+
+@test
+def test_a_diagnostics_path_that_is_not_a_regular_file_is_refused():
+    """`#660` / `#661`: 不是普通文件的路径要**报出来并退 2**，不当空文件、也不挂住。
+
+    目录在 Linux 上**能 open**、读才失败 —— 原实现把那次失败读成"零条诊断"，于是报
+    `[OK] no diagnostics` 并退 0（编译可能刚失败）。FIFO 更糟：**open 就阻塞**，整个
+    报错器一声不响地挂住。两者都在 open 之前 stat 一次挡住。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td) / "out.jsonl"
+        d.mkdir()
+        rc, out = _run_in(Path(td), d)
+        assert rc == 2, (rc, out[:200])
+        assert "not a regular file" in out, out[:200]
+        # 不存在的路径仍走原来那句（既有文案与判据都没动）
+        rc2, out2 = _run_in(Path(td), Path(td) / "missing.jsonl")
+        assert rc2 == 2 and "cannot open" in out2, (rc2, out2[:200])
+        if hasattr(os, "mkfifo"):
+            f = Path(td) / "w.jsonl"
+            os.mkfifo(f)                      # 不给 writer：老实现会在这里挂到超时
+            rc3, out3 = _run_in(Path(td), f)
+            assert rc3 == 2 and "not a regular file" in out3, (rc3, out3[:200])
+    print("      目录 / FIFO / 不存在的路径：各自报出来并退 2，不挂住")
+
+
+@test
 def test_broken_line_is_echoed_not_skipped():
     """诊断文件里混进非 JSON 行: **原样打出来**并计数, 不跳过。
 
@@ -782,6 +972,29 @@ def test_the_toolchain_beside_errconfig_is_the_second_place_read():
 # ---------------------------------------------------------------- 汇总 (§15)
 
 @test
+def test_a_full_summary_table_says_what_it_left_out():
+    """`#670`: 汇总表只有 64 格。满了之后原先**静默丢码**，而总数照数 —— `100 errors:`
+    后面那串只加到 64，且没有任何标记。现在末尾明说漏了几个码。
+    """
+    def summary(n_codes: int) -> str:
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td) / "d.jsonl"
+            rows = [{"file": "x.lomt", "line": 1, "col": 1,
+                     "code": f"E{i + 1:03d}", "message": "m"} for i in range(n_codes)]
+            d.write_text("\n".join(json.dumps(r) for r in rows) + "\n",
+                         encoding="utf-8", newline="\n")
+            _rc, out = _render(d, "--max", "0")
+        return next(ln for ln in out.splitlines() if " errors:" in ln)
+
+    small = summary(30)
+    big = summary(100)
+    assert small.startswith("30 errors:") and "more codes" not in small, small
+    assert big.startswith("100 errors:"), big[:80]
+    assert "+36 more codes" in big, f"漏掉的码没说出来: {big[-120:]!r}"
+    print("      汇总表满 64 格后，末尾说出漏了几个码")
+
+
+@test
 def test_summary_groups_by_code_worst_first():
     """结尾的汇总**按码分组，条数多的先出**，并列时码号小的在前。
 
@@ -828,20 +1041,21 @@ def test_summary_is_singular_and_points_only_at_codes_that_exist():
         rc, out = _render(d)
         assert rc == 1, (rc, out[:200])
         assert "1 error: E999 x1" in out, f"单数没生效: {out[-200:]!r}"
-        assert "more: loment explain" not in out, \
-            f"指了一个不存在的码: {[l for l in out.splitlines() if 'more:' in l]!r}"
+        # `#658` 之后 E999 有一张真卡片，`explain E999` 讲得出来 —— 指它是**对的**。
+        assert "more: loment explain E999" in out, \
+            f"兜底码有卡片了就该指: {[l for l in out.splitlines() if 'more:' in l]!r}"
 
-        # 一真一假：真那个要指，假那个不许带出来。
+        # 一真一假：真那个要指，**表里没有的**不许带出来。E777 是用户码段里的空号。
         d2 = Path(td) / "mixed.jsonl"
         d2.write_text("\n".join(json.dumps(r) for r in (
-            {"file": "x.lomt", "line": 1, "col": 1, "code": "E999", "message": "a"},
+            {"file": "x.lomt", "line": 1, "col": 1, "code": "E777", "message": "a"},
             {"file": "x.lomt", "line": 1, "col": 1, "code": "E001", "message": "b"},
         )) + "\n", encoding="utf-8", newline="\n")
         rc, out = _render(d2)
         assert rc == 1, (rc, out[:200])
         more = [l for l in out.splitlines() if "more:" in l]
-        assert more and "E001" in more[0] and "E999" not in more[0], f"more 行不对: {more!r}"
-    print("      汇总: 一条用单数，more 只指表里有的码 (E001 指，E999 不指)")
+        assert more and "E001" in more[0] and "E777" not in more[0], f"more 行不对: {more!r}"
+    print("      汇总: 一条用单数；more 只指表里有的码 (E001 与 E999 指，E777 不指)")
 
 
 # ---------------------------------------------------------------- --short / --json (§15)
@@ -861,8 +1075,11 @@ def test_short_mode_is_one_line_per_diagnostic():
         src = Path(td) / "bad.lomt"
         src.write_text(SEMANTIC, encoding="utf-8", newline="\n")
         d = Path(td) / "d.jsonl"
+        # 第三条：消息里带 `\r`（`#669`）。只折 `\n` 不够 —— CR 会把光标送回行首，
+        # 后半句盖掉 `file:line:` 前缀，"一行一条"当场破掉。
         rows = [{"file": "a.lomt", "line": 3, "col": 7, "code": "E002", "message": "x\ny"},
-                {"file": "b.lomt", "line": 9, "col": 0, "code": "E019", "message": "z"}]
+                {"file": "b.lomt", "line": 9, "col": 0, "code": "E019", "message": "z"},
+                {"file": "c.lomt", "line": 2, "col": 1, "code": "E002", "message": "p\rq"}]
         d.write_text("\n".join(json.dumps(r) for r in rows) + "\n",
                      encoding="utf-8", newline="\n")
         rc, out = _run_in(Path(td), d, "--short", color=True)
@@ -871,9 +1088,10 @@ def test_short_mode_is_one_line_per_diagnostic():
     assert lines[0] == "a.lomt:3:7: error[E002]: x y", f"短格式不对: {lines[0]!r}"
     # col=0 是"编译器只给了行号"（check() 的语义错就是这样），那时不该硬编一个列出来
     assert lines[1] == "b.lomt:9: error[E019]: z", f"没列时不该印列: {lines[1]!r}"
-    assert lines[2] == "2 errors: E002 x1, E019 x1", f"短模式不给汇总: {lines[2]!r}"
-    assert lines[3] == "more: loment explain E002 E019", f"没有 explain 指针: {lines[3]!r}"
-    assert len(lines) == 4, f"两条诊断 + 汇总 + 指针 = 4 行, 得到 {len(lines)} 行: {out!r}"
+    assert lines[2] == "c.lomt:2:1: error[E002]: p q", f"CR 没折成空格: {lines[2]!r}"
+    assert lines[3] == "3 errors: E002 x2, E019 x1", f"短模式不给汇总: {lines[3]!r}"
+    assert lines[4] == "more: loment explain E002 E019", f"没有 explain 指针: {lines[4]!r}"
+    assert len(lines) == 5, f"三条诊断 + 汇总 + 指针 = 5 行, 得到 {len(lines)} 行: {out!r}"
     assert "\x1b" not in out, f"--short 不该上色 (管道里要能 grep): {out[:120]!r}"
     print("      --short: 一行一条 + 换行折空格 + 顺带关色 + 末尾汇总与 explain 指针")
 
@@ -1767,7 +1985,9 @@ _JSONL = {
                         "message": "4: 使用未声明的变量 z"}],
     "parse.jsonl": [{"file": "{F}/par.lomt", "line": 6, "col": 1, "code": "E002",
                      "message": "6:1: 语法错"}],
-    "unknown.jsonl": [{"file": "{F}/bad.lomt", "line": 4, "col": 0, "code": "E999",
+    # `#658` 之后 E999 **有卡片**了（兜底码也该解释自己），所以"表里没有的码"这条
+    # 换成一个真正的空号：用户码段是 1..N 连续的，E777 不在表里。
+    "unknown.jsonl": [{"file": "{F}/bad.lomt", "line": 4, "col": 0, "code": "E777",
                        "message": "4: 无此码"}],
     "broken.jsonl": [{"file": "{F}/bad.lomt", "line": 99, "col": 0, "code": "E002",
                       "message": "99: 行号越界"}],
@@ -2061,6 +2281,46 @@ def test_the_caret_lands_under_the_offending_character_after_wide_text():
     assert lead == width(body[:upto]), (
         f"caret 前缀 {lead} 列，源码前缀显示宽度 {width(body[:upto])} 列")
     print("      CJK 前缀之后：caret 落在 `@` 下（按显示宽度对齐）")
+
+
+@test
+def test_the_caret_lands_under_the_offending_character_after_tabs():
+    """`#668`: 源行**原样回显**（tab 还是 tab），caret 行铺的是空格 —— tab 必须按 8 对齐。
+
+    与上一条同一个量（渲染前缀的终端宽度），只是前缀是 tab：终端把它展开到下一个 8 的
+    倍数，caret 必须走同样多列。修它的是 `utf8_cell`（`#477`），这条判据把 tab 那一半
+    单独钉住，免得以后又只测 CJK。
+    """
+    import unicodedata
+
+    def width(text: str) -> int:
+        w = 0
+        for ch in text:
+            if ch == "\t":
+                w += 8 - (w % 8)
+            elif unicodedata.combining(ch):
+                pass
+            elif unicodedata.east_asian_width(ch) in ("W", "F"):
+                w += 2
+            else:
+                w += 1
+        return w
+
+    src = "module m\nfn f() -> u32 {\n\t\tlet s: str = \"日本語\"; @ return 0;\n}\n"
+    _f, d = _check(src)
+    _rc, out = _render(d)
+    lines = out.splitlines()
+    row = [ln for ln in lines if "日本語" in ln]
+    caret = [ln for ln in lines if "^" in ln]
+    assert row and caret, out
+    body = row[0][row[0].index("|") + 2:]
+    assert body.startswith("\t\t"), f"源行没有原样回显 tab: {body!r}"
+    upto = body.index("@")
+    caret_body = caret[0][caret[0].index("|") + 2:]
+    lead = len(caret_body) - len(caret_body.lstrip(" "))
+    assert lead == width(body[:upto]), (
+        f"caret 前缀 {lead} 列，源码前缀（含两个 tab）显示宽度 {width(body[:upto])} 列")
+    print("      tab 前缀之后：caret 仍落在 `@` 下（tab 按 8 对齐）")
 
 
 def main() -> int:

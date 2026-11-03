@@ -814,7 +814,11 @@ def test_code_tables_cover_the_same_codes():
     # 拿它当 `1..n_codes()` 的循环上界用 —— 那只有在用户码连续时才等价；40..899
     # 这种空号不许出现，否则 `codes` 会印出一行行空标题。内部码另起一段，同样连续。
     user = {c for c in ruled if not loment_diag.is_internal_code(c)}
-    internal = {c for c in ruled if loment_diag.is_internal_code(c)}
+    # `E999` 是**兜底码**（没有任何规则命中时才落到它，见 `loment_diag` 里那条恒假的规则）。
+    # 它按设计钉在区间顶端，不属于"内部码从 900 起连续"那条不变式 —— 生成器那边同样
+    # 排除它（`FALLBACK`）。不排除的话，加一条兜底规则就会把这条判据判红。
+    fallback = 999
+    internal = {c for c in ruled if loment_diag.is_internal_code(c) and c != fallback}
     assert user, "一个用户码都没有"
     assert user == set(range(1, max(user) + 1)), (
         f"用户码不是连续编号, 缺: {sorted(set(range(1, max(user) + 1)) - user)}")

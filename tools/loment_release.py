@@ -380,6 +380,10 @@ GLOBS = [
     "tools/loment_hotfix.py", "tools/loment_hotfix_test.py",
     # 暂存目录（`#1154`）：fetch 在进程外，换的那条路只看目录。**同位置**。
     "tools/loment_staging.py", "tools/loment_staging_test.py",
+    # 热线与投影（`#1156`）：只重放声明为 fix 的提交。**同位置**。
+    "tools/loment_projection.py", "tools/loment_projection_test.py",
+    # 投影清单与 status（`#1157`）。**同位置**。
+    "tools/loment_hotline_test.py",
     # 元数据（`#1149`）：帧布局哈希 + 调用点表。**插入位置与 lomrel.lomt 逐行对齐**。
     "tools/loment_hotmeta_test.py",
     # 构建档（`#1150`）：槽表 + 入口闸。**插入位置与 lomrel.lomt 逐行对齐**。

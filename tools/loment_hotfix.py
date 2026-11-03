@@ -148,7 +148,8 @@ def build(tree: Path, release: str, *, projection: dict | None = None) -> dict:
         "cli": cli_digest(tree),
         "fixed_core": fixed_core_digest(tree),
         "functions": [],
-        "projection": projection or {"baseline": base, "line": [], "evicted": [], "tree": None},
+        "projection": projection or {"baseline": base, "release": release,
+                              "line": [], "evicted": [], "tree": None},
         "artifact": {},
     }
 

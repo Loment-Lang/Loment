@@ -227,6 +227,23 @@ def check(candidate: Path, tree: Path, *, state: Path | None = None,
     if cand.get("fixed_core") != running["fixed_core"]:
         raise Reject("fixed-core", "不可换的那部分变了")
 
+    # 投影（`#1157`）：清单必须说清它属于哪条基线、哪次发布，以及线上每一条**都是 fix**。
+    proj = cand.get("projection")
+    if proj is None:
+        raise Reject("projection-missing", "清单里没有投影")
+    if proj.get("baseline") != running["baseline"]:
+        raise Reject("projection-baseline",
+                     f"{proj.get('baseline')!r} != {running['baseline']!r}")
+    if proj.get("release") not in (None, release):
+        raise Reject("projection-release", f"{proj.get('release')!r} != {release!r}")
+    for step in proj.get("line") or []:
+        if step.get("kind") != "fix":
+            raise Reject("projection", f"{step.get('sha', '?')[:12]} 不是 fix")
+    evicted = {s.get("sha") for s in proj.get("evicted") or []}
+    for step in proj.get("line") or []:
+        if step.get("sha") in evicted:
+            raise Reject("projection", f"{step.get('sha', '')[:12]} 同时在线上与被剔除")
+
     accepted = _read_state(state)
     if release in accepted:
         raise Reject("replay", f"{release} 已经装过")

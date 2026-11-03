@@ -117,12 +117,22 @@ def poll(baseline: str, root: Path | None = None) -> Path | None:
 
 
 def take(candidate: Path, root: Path | None = None) -> Path:
-    """把一份候选从 `incoming/` 挪进 `applied/`（换完，或者换被拒绝之后）。"""
+    """把一份候选从 `incoming/` 挪进 `applied/`（换完，或者换被拒绝之后）。
+
+    **应用顺序要记下来**：`status` 判断"这次是不是回滚"靠的是先后，不是版本号 ——
+    按版本号排序的话，回滚永远看不见（实测：hot.2 之后回到 hot.1 会排成 hot.1, hot.2）。
+    """
     bdir = Path(candidate).parent.parent
-    dest = bdir / "applied" / Path(candidate).name
+    name = Path(candidate).name
+    dest = bdir / "applied" / name
     if dest.exists():
         shutil.rmtree(dest)
     Path(candidate).rename(dest)
+    ledger = bdir / "applied.json"
+    seq = json.loads(ledger.read_text(encoding="utf-8")) if ledger.is_file() else []
+    if not seq or seq[-1] != name:
+        seq.append(name)
+    ledger.write_text(json.dumps(seq, indent=2) + "\n", encoding="utf-8", newline="\n")
     return dest
 
 
@@ -152,16 +162,52 @@ def fetch(tag: str, tree: Path, *, downloader: list[str] | None = None,
 
 
 def applied(baseline: str, root: Path | None = None) -> list[dict]:
-    """已经交给换的那些清单，最老的在前（`loment update status` 读它）。"""
+    """已经交给换的那些清单，**按应用顺序**（`loment update status` 读它）。"""
     d = (root or home()) / baseline / "applied"
     if not d.is_dir():
         return []
+    ledger = d.parent / "applied.json"
+    if ledger.is_file():
+        names = json.loads(ledger.read_text(encoding="utf-8"))
+    else:
+        names = sorted((p.name for p in d.iterdir()), key=_release_key)
     out = []
-    for p in sorted(d.iterdir(), key=lambda p: _release_key(p.name)):
-        man = p / "hotfix.json"
+    for name in names:
+        man = d / name / "hotfix.json"
         if man.is_file():
             out.append(json.loads(man.read_text(encoding="utf-8")))
     return out
+
+
+def status(baseline: str, root: Path | None = None) -> str:
+    """`loment update status` 的那段文本（`#1157`）：线、已应用的 fix、要重启的 fix。
+
+    回滚在线上是**往左走**：后一次接受的 release 比前一次小。它被标成 `rollback`，
+    不是 `upgrade` —— 自动接受保持单调，往回走只能是显式的操作。
+    """
+    rows = applied(baseline, root)
+    out = [f"line    {baseline}"]
+    if not rows:
+        out.append("  (nothing applied)")
+        return "\n".join(out) + "\n"
+    prev = None
+    for man in rows:
+        rel = man.get("release", "?")
+        move = ""
+        if prev is not None:
+            move = "  (rollback)" if _release_key(rel) < _release_key(prev) else ""
+        out.append(f"  {rel}{move}")
+        for step in (man.get("projection") or {}).get("line") or []:
+            out.append(f"    + {step.get('sha', '')[:12]}  {step.get('subject', '')}")
+        prev = rel
+    last = rows[-1]
+    evicted = (last.get("projection") or {}).get("evicted") or []
+    if evicted:
+        out.append("restart required")
+        for step in evicted:
+            out.append(f"    ! {step.get('sha', '')[:12]}  {step.get('subject', '')}"
+                       f"  ({step.get('reason', '?')})")
+    return "\n".join(out) + "\n"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -177,7 +223,12 @@ def main(argv: list[str] | None = None) -> int:
     f.add_argument("--allow-rollback", action="store_true")
     p = sub.add_parser("poll", help="what the running process would pick up now")
     p.add_argument("--baseline", required=True)
+    s = sub.add_parser("status", help="the hot line, the fixes applied, the ones to restart for")
+    s.add_argument("--baseline", required=True)
     args = ap.parse_args(argv)
+    if args.cmd == "status":
+        sys.stdout.write(status(args.baseline))
+        return 0
     if args.cmd == "fetch":
         try:
             out = fetch(args.tag, Path(args.at).resolve(),

@@ -468,6 +468,35 @@ def fixture_v17() -> dict:
     return d
 
 
+def fixture_v18() -> dict:
+    """一份合法的 **v18** 形式对象：v17 的再 + **七级的运行期预算** `lms_budgets`。
+
+    `lms_budgets` 是 v18 起才合法的字段（`docs/253` §11.2.1，#1023）：每一级声明它
+    要不要一份运行期状态。今天七级是 `none` / `instructions` / `outside` —— 所以
+    `no_runtime` + `lms_full` 合法，而这件事从"实现碰巧都轻"变成**产物里可判**。
+    """
+    d = fixture_v17()
+    d["potato"] = "v18"
+    d["lms_budgets"] = {
+        "lms_check": "none", "lms_manage": "none", "lms_guard": "instructions",
+        "lms_reject": "instructions", "lms_crash": "instructions",
+        "lms_restart": "outside", "lms_seed": "none",
+    }
+    return d
+
+
+#: v18 的 `lms_budgets` 那几条规则的反例（`docs/253` §11.2.1）。作用在 **v18** 的对象上。
+MUTATORS_V18 = [
+    ("lms_budgets 整个缺掉", lambda d: d.pop("lms_budgets"), "lms_budgets 必须是对象"),
+    ("lms_budgets 少一级", lambda d: d["lms_budgets"].pop("lms_guard"),
+     "lms_budgets 少了"),
+    ("lms_budgets 多一个键", lambda d: d["lms_budgets"].__setitem__("lms_bogus", "none"),
+     "不认识的键"),
+    ("lms_budgets 的值不在表里", lambda d: d["lms_budgets"].__setitem__("lms_check", "heap"),
+     "必须是"),
+]
+
+
 #: v17 的 `lms_levels` 那几条规则的反例（`docs/253` §11.4）。作用在 **v17** 的对象上。
 MUTATORS_V17 = [
     ("lms_levels 整个缺掉", lambda d: d.pop("lms_levels"), "lms_levels 必须是对象"),
@@ -502,6 +531,17 @@ MUTATORS_V16 = [
     ("passes 不是数组", lambda d: d["lspe"].__setitem__("passes", 0),
      "passes 必须是数组"),
 ]
+
+
+@test
+def test_v18_requires_the_lms_budgets():
+    """v18 的七级预算（`docs/253` §11.2.1，#1023）：正例合法，四条反例各钉一条规则。"""
+    assert potato.validate(fixture_v18()) == [], potato.validate(fixture_v18())
+    for name, mut, needle in MUTATORS_V18:
+        d = fixture_v18()
+        mut(d)
+        errs = potato.validate(d)
+        assert any(needle in e for e in errs), (name, errs)
 
 
 @test
@@ -841,7 +881,7 @@ def _cases() -> list[tuple[str, dict]]:
                                    ("v8", fixture_v8()), ("v9", fixture_v9()),
                                    ("v10", fixture_v10()), ("v11", fixture_v11()),
                                    ("v12", fixture_v12()), ("v16", fixture_v16()),
-                                   ("v17", fixture_v17())]
+                                   ("v17", fixture_v17()), ("v18", fixture_v18())]
     # **`gc_manual` + `no_runtime` 是合法档**（"要运行期、但内存我自己管"的反面：
     # 不要运行期、手动回收）—— 它必须**不报错**。上面那张反例表只会钉"该拒的要拒",
     # 钉不住"不该拒的别拒"，所以这一条以**合法样本**的身份过孪生那一关。
@@ -887,6 +927,11 @@ def _cases() -> list[tuple[str, dict]]:
     _okp = fixture_v11()
     _okp["port"] = "hosted"
     out.append(("v11-hosted-gc_manual", _okp))
+    # v18 那一组（`lms_budgets`，`#1023`）也要过孪生那一关。
+    for name, mut, _ in MUTATORS_V18:
+        d = fixture_v18()
+        mut(d)
+        out.append((f"v18-{name}", d))
     # v12 那一组（`surfaces`）同理。
     for name, mut, _ in MUTATORS_V12:
         d = fixture_v12()

@@ -687,14 +687,36 @@ entry:
 
 @test
 def test_bad_class_is_rejected():
-    """A corrupt class file is a named error, not a traceback."""
+    """A corrupt class file is a **named** error (`J001`), not a traceback."""
     for data in (b"\x00" * 8, b"not a class file"):
         try:
             lomjava.parse_class(data)
         except lomjava.JavaError as e:
-            assert "magic" in str(e) or "truncated" in str(e), e
+            msg = str(e)
+            assert msg.startswith("J001"), msg
+            assert "magic" in msg or "truncated" in msg, msg
         else:
             raise AssertionError("corrupt class accepted")
+    print("      corrupt classes -> J001")
+
+
+@test
+def test_jar_bomb_is_rejected():
+    """#1057: entry sizes and compression ratios are capped before inflating."""
+    import zipfile
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        jar = d / "bomb.jar"
+        with zipfile.ZipFile(jar, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("com/example/Big.class", b"\x00" * (2 * 1024 * 1024))
+        try:
+            lomjava.load_classes(jar)
+        except lomjava.JavaError as e:
+            msg = str(e)
+            assert msg.startswith("J001") and ("ratio" in msg or "cap" in msg), msg
+            print(f"      jar bomb rejected: {msg}")
+        else:
+            raise AssertionError("a zip bomb was accepted")
 
 
 def _mk_class(name: str, code: bytes, *, max_stack: int = 8, max_locals: int = 8,

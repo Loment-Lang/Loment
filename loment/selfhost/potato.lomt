@@ -2271,6 +2271,37 @@ fn pt_lms_levels(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
     return o;
 }
 
+/// v18（`docs/253` §11.2.1，#1023）：七级的**运行期预算**。**必填**，紧跟在
+/// `lms_levels` 之后 —— ⚠ **次序是判据**：参考实现那边 `"lms_budgets"` 紧跟在
+/// `"lms_levels"` 之后，两串字节逐字节比。
+fn pt_lms_budgets(out: ptr, o: u32) -> u32 {
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 2, "lms_check");
+    o = pt_qs(out, o, "none");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "lms_manage");
+    o = pt_qs(out, o, "none");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "lms_guard");
+    o = pt_qs(out, o, "instructions");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "lms_reject");
+    o = pt_qs(out, o, "instructions");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "lms_crash");
+    o = pt_qs(out, o, "instructions");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "lms_restart");
+    o = pt_qs(out, o, "outside");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "lms_seed");
+    o = pt_qs(out, o, "none");
+    o = pt_str(out, o, "\n");
+    o = pt_ind(out, o, 1);
+    o = pt_str(out, o, "}");
+    return o;
+}
+
 /// v16（`docs/262`，用户 2026-10-18 定第七维）：LSPE 台账。**必填**，紧跟在 `lms` 之后 ——
 /// ⚠ **次序是判据**：参考实现那边 `"lspe"` 紧跟在 `"lms"` 之后，两串字节逐字节比。
 /// P0 的骨架里计数全 0、不变量 `not_run` —— 这是**明说的未运行**，不是假 `ok`。
@@ -5661,7 +5692,7 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     // v17 = v16 + **实际开着哪几级** `lms_levels`（同一次改判）。
     // 它在**最后** —— 与前面几维同形，且"这份产物在哪一档上"是**不读源码可判**的。
     o = pt_key(out, o, 1, "potato");
-    o = pt_qs(out, o, "v17");
+    o = pt_qs(out, o, "v18");
     o = pt_str(out, o, ",\n");
     // `unit` 是**根**那份源的 `module` 名 —— 依赖在前, 所以它是根那个标记后面的名字
     // (不是第 1 个 token: 那是第一个依赖的名字)。
@@ -5711,6 +5742,11 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     // ⚠ **次序是判据**：参考实现那边 `"lms_levels"` 紧跟在 `"lms"` 之后。
     o = pt_key(out, o, 1, "lms_levels");
     o = pt_lms_levels(out, o, unit, t, lo, hi);
+    o = pt_str(out, o, ",\n");
+    // v18（`docs/253` §11.2.1，#1023）：七级的**运行期预算**。紧跟在 `lms_levels` 之后 ——
+    // ⚠ **次序是判据**：参考实现那边 `"lms_budgets"` 紧跟在 `"lms_levels"` 之后。
+    o = pt_key(out, o, 1, "lms_budgets");
+    o = pt_lms_budgets(out, o);
     o = pt_str(out, o, ",\n");
     // v16（`docs/262`）：LSPE 台账。**必填**，紧跟在 `lms` 之后 ——
     // ⚠ **次序是判据**：参考实现那边 `"lspe"` 紧跟在 `"lms"` 之后，两串字节逐字节比。

@@ -4593,7 +4593,7 @@ def test_mixed_width_arithmetic_has_a_common_type():
 def test_lspe_dimension_defaults_open():
     """第七维：不写 `choose` 就是 `lspe_open_admin`，台账随产物一起发出（v16）。"""
     doc = json.loads(lomentc.emit_potato(lomentc.load(DEMO), ROOT))
-    assert doc["potato"] == "v17"
+    assert doc["potato"] == "v18"
     lp = doc["lspe"]
     assert lp["state"] == "lspe_open_admin"
     assert lp["set_by"] == "default"
@@ -4657,7 +4657,7 @@ def test_lspe_close_admin_is_recorded():
         p = Path(td) / "close.lomt"
         p.write_text(src, encoding="utf-8", newline=chr(10))
         doc = json.loads(lomentc.emit_potato(lomentc.load(p), ROOT))
-    assert doc["potato"] == "v17"
+    assert doc["potato"] == "v18"
     assert doc["lspe"]["state"] == "lspe_close_admin"
     assert doc["lspe"]["set_by"] == "source"
     # 关审计：普查不算，计数全零。

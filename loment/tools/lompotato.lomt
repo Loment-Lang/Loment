@@ -362,6 +362,15 @@ fn is_lms_level_key(kp: ptr, kl: u32) -> u32 {
     return 0;
 }
 
+/// v18（`docs/253` §11.2.1，#1023）的**四个预算取值**。
+fn is_lms_budget(kp: ptr, kl: u32) -> u32 {
+    if eq_lit(kp, kl, "none") == 1 { return 1; }
+    if eq_lit(kp, kl, "instructions") == 1 { return 1; }
+    if eq_lit(kp, kl, "state") == 1 { return 1; }
+    if eq_lit(kp, kl, "outside") == 1 { return 1; }
+    return 0;
+}
+
 fn is_floor_key(kp: ptr, kl: u32) -> u32 {
     if eq_lit(kp, kl, "assumed") == 1 { return 1; }
     if eq_lit(kp, kl, "stale_wf") == 1 { return 1; }
@@ -721,6 +730,10 @@ fn is_top_key(ver: u32, kp: ptr, kl: u32) -> u32 {
     }
     // v17 = v16 + **实际开着哪几级**（`docs/253` §11.4）：`lms_levels` 对象。
     if ver >= 17 && eq_lit(kp, kl, "lms_levels") == 1 {
+        return 1;
+    }
+    // v18 = v17 + **七级的运行期预算**（`docs/253` §11.2.1，#1023）：`lms_budgets` 对象。
+    if ver >= 18 && eq_lit(kp, kl, "lms_budgets") == 1 {
         return 1;
     }
     return 0;
@@ -1916,6 +1929,42 @@ fn chk_v1(mem: ptr, doc: u32, ver: u32) -> u32 {
             if jget(mem, lv, "lms_seed") == NOTFOUND { let _m7: u32 = bad(mem); }
         }
     }
+    if ver >= 18 {
+        // v18（`docs/253` §11.2.1，#1023）：七级预算。与 Python 的 `potato.validate`
+        // 逐条对齐 —— 连错的条数都要一致：对象 / 键封闭且七个别缺 / 值是四个预算之一。
+        let lb: u32 = jget(mem, doc, "lms_budgets");
+        if lb == NOTFOUND || jkind(mem, lb) != 1 {
+            let _v18: u32 = bad(mem);
+        } else {
+            let kb: u32 = jfirst(mem, lb);
+            while kb != NOTFOUND {
+                let knb: u32 = jmkey(mem, kb);
+                let klb: u32 = jstr(mem, knb, ptr_add(mem, M_SB2), 4096);
+                if is_lms_level_key(ptr_add(mem, M_SB2), klb) == 0 {
+                    let _u18: u32 = bad(mem);
+                }
+                let vnb: u32 = jmval(mem, kb);
+                let bok: u32 = 0;
+                if jkind(mem, vnb) == 3 {
+                    let vlb: u32 = jstr(mem, vnb, ptr_add(mem, M_SB2), 4096);
+                    if is_lms_budget(ptr_add(mem, M_SB2), vlb) == 1 {
+                        bok = 1;
+                    }
+                }
+                if bok == 0 {
+                    let _b18: u32 = bad(mem);
+                }
+                kb = jsib(mem, kb);
+            }
+            if jget(mem, lb, "lms_check") == NOTFOUND { let _n1: u32 = bad(mem); }
+            if jget(mem, lb, "lms_manage") == NOTFOUND { let _n2: u32 = bad(mem); }
+            if jget(mem, lb, "lms_guard") == NOTFOUND { let _n3: u32 = bad(mem); }
+            if jget(mem, lb, "lms_reject") == NOTFOUND { let _n4: u32 = bad(mem); }
+            if jget(mem, lb, "lms_crash") == NOTFOUND { let _n5: u32 = bad(mem); }
+            if jget(mem, lb, "lms_restart") == NOTFOUND { let _n6: u32 = bad(mem); }
+            if jget(mem, lb, "lms_seed") == NOTFOUND { let _n7: u32 = bad(mem); }
+        }
+    }
     if ver >= 6 {
         let gr: u32 = jget(mem, doc, "grammar");
         let gok: u32 = 0;
@@ -2022,6 +2071,9 @@ fn validate(mem: ptr, tot: u32) -> u32 {
         }
         if eq_lit(t, l, "v17") == 1 {
             ver = 17;
+        }
+        if eq_lit(t, l, "v18") == 1 {
+            ver = 18;
         }
     }
     if ver == NOTFOUND {

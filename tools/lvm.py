@@ -384,6 +384,26 @@ class _Exit(Exception):
         self.code = code
 
 
+class _Trap(Exception):
+    """`llvm.trap` —— 第 5 级崩溃器的落地（`docs/253` §5.5）。
+
+    原生那边它是 `SIGILL`（shell 报 132）；VM 这边把它定成**同一个退出码**，
+    并把站点（函数 / 块 / 指令序号）写出来 —— 两个实现"都死了"不算证据，
+    要说得出**死在哪一条**（#1027）。
+    """
+
+    def __init__(self, site) -> None:
+        self.site = site
+        self.code = 132
+
+
+def trap_exit(site) -> int:
+    """`llvm.trap` 的共同出口：**132**（与原生 `SIGILL` 同一个数）+ 一行站点。"""
+    fn, blk, idx = site
+    print(f"lvm: llvm.trap at {fn}:{blk}#{idx}", file=sys.stderr)
+    return 132
+
+
 class Executor(Vm):
     # ------------------------------------------------------------ 系统调用
     def syscall(self, nr: int, a: list[int]) -> int:
@@ -477,6 +497,8 @@ class Executor(Vm):
             raise LvmError(f"解析不了调用: {text!r}")
         name = m2.group(1)
         args = [s for s in lomelf.split_top(m2.group(2)) if s]
+        if name == "llvm.trap":
+            raise _Trap(self.site)
         if name in self.externs:
             raise LvmError(f"`{name}` 是 extern —— T0 不接 FFI（`docs/243` §5）")
         fn = self.funcs.get(name)
@@ -529,8 +551,18 @@ class Executor(Vm):
                 raise LvmError(f"{fn.name}: 没有块 {label}")
             if self.profile is not None:
                 self.profile.block(fn.name, blk.label)
+            #: LLVM 的 `phi` 是**并行**的：同一块里后面的 phi 读前面的 phi 时，
+            #: 读到的是**入边**的旧值，不是这一轮刚写进去的新值。顺序求值会让
+            #: `%prev = phi [0, %link], [%cur, %lcont]` 读到**新的** `%cur`（它刚被
+            #: 前一条 phi 改成 0），`free` 的空闲链因此每轮都被重置成单块 —— 实测
+            #: `gc_auto` 的空闲块永远不复用，arena 提前耗尽（#1027）。
+            _pending_phi: list[tuple[str, object]] = []
             for idx, ins in enumerate(blk.instrs):
                 if self.profile is not None:
+                    self.site = (fn.name, blk.label, idx)
+                elif ins.text.startswith("call "):
+                    # 只有 `llvm.trap` 需要站点；它是**调用**，所以只在调用点记 ——
+                    # 不给每条指令付一次元组的代价（T1 关掉时"一个字节都不写"）。
                     self.site = (fn.name, blk.label, idx)
                 steps += 1
                 if steps > STEP_CAP:
@@ -539,8 +571,12 @@ class Executor(Vm):
                         f"第 {idx} 条 —— {ins.text[:60]}")
                 if ins.text.startswith("phi "):
                     if ins.dest:
-                        fr.vals[ins.dest] = self._phi(fr, ins.text, prev)
+                        _pending_phi.append((ins.dest, self._phi(fr, ins.text, prev)))
                     continue
+                if _pending_phi:
+                    for _d, _v in _pending_phi:
+                        fr.vals[_d] = _v
+                    _pending_phi = []
                 if ins.text.startswith("br "):
                     label, _pred, edge = self._br(fr, ins.text, blk.label)
                     if self.profile is not None:
@@ -791,6 +827,8 @@ def run_ir(text: str, out, profile: Profile | None = None,
         vm.run(start, [], None)
     except _Exit as e:
         return e.code
+    except _Trap as e:
+        return trap_exit(e.site)
     return 0
 
 

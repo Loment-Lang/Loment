@@ -77,7 +77,11 @@ def _run_native(elf: Path, td: Path, argv0: str, timeout: int = 20) -> tuple[int
         # POSIX：`executable=` 加上 argv[0] 想写什么就写什么（这是 execve 的语义）。
         r = subprocess.run([argv0], executable=str(p), capture_output=True,
                            timeout=timeout, shell=False)
-        return r.returncode, r.stdout
+        # ⚠ **被信号打死时 Python 给的是 `-signo`，不是 shell 的 `128+signo`** ——
+        # 与 `lomentc_test._run_elf` 同一条规矩：两条路（本机 Linux / Windows 经 WSL）
+        # 必须报同一个数，否则 LMS 的崩溃格只在一边绿（CI 实测 `-4` vs `132`）。
+        rc = r.returncode if r.returncode >= 0 else 128 - r.returncode
+        return rc, r.stdout
     binn = f"/tmp/lvm_native_{os.getpid()}.bin"
     outp = td / "prog.out"
     script = (f"rm -f {binn} && cp {ELF._wsl_path(elf)} {binn} && chmod +x {binn} && "

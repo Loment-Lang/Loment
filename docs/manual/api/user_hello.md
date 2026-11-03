@@ -20,7 +20,11 @@
 
 ## 函数
 
-### `fn write_line(s: str) -> ()`
+### `fn write_str(fd: u64, s: str) -> i64`
+
+
+
+### `fn exit(code: u64) -> i64`
 
 
 

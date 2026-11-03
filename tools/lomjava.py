@@ -73,28 +73,28 @@ class Reader:
 
     def u1(self) -> int:
         if self.i + 1 > len(self.data):
-            raise JavaError("truncated class file")
+            raise JavaError(f"J001: truncated class file at byte {self.i}")
         v = self.data[self.i]
         self.i += 1
         return v
 
     def u2(self) -> int:
         if self.i + 2 > len(self.data):
-            raise JavaError("truncated class file")
+            raise JavaError(f"J001: truncated class file at byte {self.i}")
         v = struct.unpack_from(">H", self.data, self.i)[0]
         self.i += 2
         return v
 
     def u4(self) -> int:
         if self.i + 4 > len(self.data):
-            raise JavaError("truncated class file")
+            raise JavaError(f"J001: truncated class file at byte {self.i}")
         v = struct.unpack_from(">I", self.data, self.i)[0]
         self.i += 4
         return v
 
     def take(self, n: int) -> bytes:
         if self.i + n > len(self.data):
-            raise JavaError("truncated class file")
+            raise JavaError(f"J001: truncated class file at byte {self.i}")
         v = self.data[self.i:self.i + n]
         self.i += n
         return v
@@ -144,11 +144,11 @@ class ClassMeta:
 def parse_class(data: bytes) -> ClassFile:
     r = Reader(data)
     if r.u4() != 0xCAFEBABE:
-        raise JavaError("bad magic (not a class file)")
+        raise JavaError("J001: bad magic (not a class file)")
     r.u2()  # minor
     major = r.u2()
     if major < 45 or major > 69:
-        raise JavaError(f"unsupported class-file major version {major}")
+        raise JavaError(f"J001: unsupported class-file major version {major}")
 
     cp_count = r.u2()
     pool: list = [None] * cp_count
@@ -163,7 +163,7 @@ def parse_class(data: bytes) -> ClassFile:
                 # C0 80. Replace that before decoding; ordinary UTF-8 otherwise.
                 s = raw.replace(b"\xc0\x80", b"\x00").decode("utf-8")
             except UnicodeDecodeError as e:
-                raise JavaError(f"constant pool #{i}: invalid modified UTF-8: {e}") from None
+                raise JavaError(f"J001: constant pool #{i}: invalid modified UTF-8: {e}") from None
             pool[i] = (tag, s)
         elif tag == CP_INTEGER:
             pool[i] = (tag, struct.unpack(">i", r.take(4))[0])
@@ -187,7 +187,7 @@ def parse_class(data: bytes) -> ClassFile:
         elif tag == CP_METHOD_HANDLE:
             pool[i] = (tag, r.u1(), r.u2())
         else:
-            raise JavaError(f"constant pool #{i}: unsupported tag {tag}")
+            raise JavaError(f"J001: constant pool #{i}: unsupported tag {tag}")
         i += 1
 
     r.u2()  # access
@@ -312,17 +312,45 @@ def _slots(vtis: tuple) -> list:
     return out
 
 
+#: 单条目的解压后上限与整只 jar 的总上限（防 zip 炸弹，docs/282 §8.1 的资源上限）。
+MAX_ENTRY_BYTES = 16 * 1024 * 1024
+MAX_JAR_BYTES = 64 * 1024 * 1024
+#: 压缩比上限。正常的 `.class` 是 2–5 倍；全零的炸弹条目轻松上百倍。
+MAX_RATIO = 200
+
+
 def load_classes(path: Path) -> list[ClassFile]:
-    """Read a `.class`, or every class entry in a jar (sorted by entry name)."""
+    """Read a `.class`, or every class entry in a jar (sorted by entry name).
+
+    A jar is **untrusted**: entry sizes are checked against fixed caps and a
+    compression-ratio cap before anything is decompressed (`J001`), so a bomb is
+    rejected instead of filling memory.
+    """
     data = path.read_bytes()
     if data[:4] == b"PK\x03\x04":
         with zipfile.ZipFile(path) as z:
             names = sorted(n for n in z.namelist()
                            if n.endswith(".class") and not n.startswith("META-INF/"))
             if not names:
-                raise JavaError("jar has no .class entries")
+                raise JavaError("J001: jar has no .class entries")
             if len(names) > MAX_CLASSES:
                 raise JavaError(f"J002: jar has {len(names)} classes (cap {MAX_CLASSES})")
+            total = 0
+            for n in names:
+                info = z.getinfo(n)
+                size = info.file_size
+                if size > MAX_ENTRY_BYTES:
+                    raise JavaError(
+                        f"J001: {n} is {size} bytes uncompressed "
+                        f"(cap {MAX_ENTRY_BYTES})")
+                if info.compress_size > 0 and size // info.compress_size > MAX_RATIO:
+                    raise JavaError(
+                        f"J001: {n} expands {size} from {info.compress_size} bytes "
+                        f"(ratio cap {MAX_RATIO})")
+                total += size
+                if total > MAX_JAR_BYTES:
+                    raise JavaError(
+                        f"J001: the jar expands past {MAX_JAR_BYTES} bytes")
             return [parse_class(z.read(n)) for n in names]
     return [parse_class(data)]
 

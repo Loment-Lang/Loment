@@ -269,6 +269,20 @@ class T3Executor(lvm_t2.T2Executor):
         steps = 0
         while True:
             blk = blocks[bi]
+            # phi **并行**求值（与 T0/T2 同一条注释，见 #1027）。
+            if blk and blk[0][0] == lvm_t2._OP_PHI:              # noqa: SLF001
+                pending: list[tuple[int, object]] = []
+                for op in blk:
+                    if op[0] != lvm_t2._OP_PHI:                  # noqa: SLF001
+                        break
+                    _, d, mapping = op
+                    src = mapping.get(prev)
+                    if src is None:
+                        raise lvm.LvmError(f"{name}: phi 没有来自块 {prev} 的入边")
+                    if d >= 0:
+                        pending.append((d, _rd(vals, src)))
+                for d, v in pending:
+                    vals[d] = v
             if prof is not None:
                 prof.block(name, labels[bi])
             for j, op in enumerate(blk):
@@ -290,14 +304,14 @@ class T3Executor(lvm_t2.T2Executor):
                         # 内联把"每次调用一块新帧"这件事弄丢了（`docs/249` §2）。
                         cframe = [lvm.STACK_TOP - (self.depth + 1) * lvm.FRAME_SIZE]
                         for o2 in inline:
-                            self._one(vals, o2, cframe)
+                            self._one(vals, o2, cframe, site)
                     else:
                         # 假设不成立：记一条，走通用调用（**副作用只发生一次** ——
                         # 摊平的那段还没开始跑，谈不上"重跑"）
                         if self.deopts is not None:
                             self.deopts.hit(site, DEOPT_GUARD)
                         self._one(vals, (lvm_t2._OP_CALL, cname,   # noqa: SLF001
-                                         [arg_op], inline_dest(inline)), frame)
+                                         [arg_op], inline_dest(inline)), frame, site)
                     continue
                 if code == _OP_STORE_CONST:
                     vals[op[1]] = op[2]
@@ -310,7 +324,7 @@ class T3Executor(lvm_t2.T2Executor):
                     vals[d] = frame[0]
                     frame[0] += size
                     continue
-                self._one(vals, op, frame)
+                self._one(vals, op, frame, (name, labels[bi], j))
                 if code == lvm_t2._OP_BR:                        # noqa: SLF001
                     prev, bi = bi, (op[2] if op[1] is None else
                                     (op[2] if _rd(vals, op[1]) else op[3]))
@@ -327,14 +341,10 @@ class T3Executor(lvm_t2.T2Executor):
                     prev, bi = bi, tgt
                     break
                 if code == lvm_t2._OP_PHI:                       # noqa: SLF001
-                    src = op[2].get(prev)
-                    if src is None:
-                        raise lvm.LvmError(f"{name}: phi 没有来自块 {prev} 的入边")
-                    if op[1] >= 0:
-                        vals[op[1]] = _rd(vals, src)
+                    # 块入口已经按并行语义算完。
                     continue
 
-    def _one(self, vals, op, frame) -> None:
+    def _one(self, vals, op, frame, site=None) -> None:
         """一条**普通** op（调用 / 算术 / 内存 / 系统调用…）—— 与 T2 同一套语义。"""
         code = op[0]
         if code == _OP_STORE_CONST:          # 摊平进来的那段里也有这两条
@@ -347,6 +357,8 @@ class T3Executor(lvm_t2.T2Executor):
             frame[0] += size
         elif code == lvm_t2._OP_CALL:                            # noqa: SLF001
             _, cname, a_ops, d = op
+            if cname == "llvm.trap":
+                raise lvm._Trap(site)                            # noqa: SLF001
             cf = self.prog.cfunc(cname)
             # 与 T2 那两处同一条规矩（issue #716）：**先判个数、再求值实参**。
             if len(a_ops) != len(cf.params):
@@ -396,4 +408,6 @@ def run_ir_t3(text: str, out, profile=None, argv: list[str] | None = None,
         vm.call_t2(vm.prog.cfunc("_start"), [], entry=True)
     except lvm._Exit as e:                                      # noqa: SLF001
         return e.code
+    except lvm._Trap as e:                                      # noqa: SLF001
+        return lvm.trap_exit(e.site)
     return 0

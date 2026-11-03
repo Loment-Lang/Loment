@@ -17,6 +17,10 @@ from pathlib import Path
 
 SLOT_STRIDE = 16
 
+#: 两个候选槽（`docs/290`）：装进**不**在跑的那一个，然后整条帧链改指过去。
+SLOT_A = 0x10000000
+SLOT_B = 0x20000000
+
 #: 装载件的头（`loment/lib/hotswap.lomt` 文件头的表）。`#1152` 加了函数表与调用点配对：
 #: 重映射要知道"这个返回地址是哪个函数的第几个调用点"，两侧各一格才能换成新偏移。
 MAGIC = 0x4C544F48
@@ -199,14 +203,21 @@ def remap_rows(old: dict, new: dict) -> list[dict]:
     return rows
 
 
-def build_blob(old: dict, new: dict, new_text: bytes) -> bytes:
-    """把两份 `.lomhot` 与候选文本拼成固定核吃的装载件。"""
+def build_blob(old: dict, new: dict, new_text: bytes, *, self_base: int | None = None,
+               cand_slot: int = SLOT_A) -> bytes:
+    """把两份 `.lomhot` 与候选文本拼成固定核吃的装载件。
+
+    `cand_slot` 是这一份候选要装进哪个槽 —— 两个槽轮流用（`docs/290`）。
+    `self_base` 是**跑着的镜像**在哪个地址：第一次是链接基址，之后就是上一个槽。
+    """
     rows = remap_rows(old, new)
     ncalls = sum(len(r["pairs"]) for r in rows)
-    out = struct.pack("<14I", MAGIC, old["base"], old["fixed"]["slots"],
+    out = struct.pack("<14I", MAGIC, old["base"] if self_base is None else self_base,
+                      old["fixed"]["slots"],
                       old["fixed"]["gate"], GATE_LEN, new["base"],
                       new["fixed"]["slots"], new["fixed"]["gate"], len(new_text),
-                      len(new["relocs"]), len(rows), len(new_text), ncalls, 0)
+                      len(new["relocs"]), len(rows), len(new_text), ncalls,
+                      cand_slot)
     for r in rows:
         out += struct.pack("<6I", r["slot"], r["self_entry"], r["cand_entry"],
                            r["flag"], len(r["pairs"]), 0)

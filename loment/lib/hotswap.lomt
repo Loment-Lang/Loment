@@ -19,6 +19,7 @@
 //   40  u32 nfunc
 //   44  u32 text_len
 //   48  u32 ncalls           调用点配对总数
+//   52  u32 cand_slot       候选装到哪个槽（`#1152`：两个槽轮流，见 docs/290）
 //   HOT_HDR  nfunc × (slot, self_entry, cand_entry, flags, ncalls, pad)
 //   ...      ncalls × (self_off, cand_off)     —— 按函数顺序、按调用点顺序
 //   ...      nreloc × (off, target_lo, target_hi)
@@ -38,7 +39,8 @@ use bytes
 use sha256
 
 const HOT_MAGIC: u32 = 1280593736;   // "HOTL"（0x4C544F48）
-const HOT_SLOT: u32 = 268435456;     // 0x10000000
+const HOT_SLOT: u32 = 268435456;     // 0x10000000（第一个候选槽）
+const HOT_SLOT2: u32 = 536870912;    // 0x20000000（第二个：两个槽轮流，见 docs/290）
 const HOT_STRIDE: u32 = 16;
 const HOT_MAX_FN: u32 = 4096;
 const HOT_HDR: u32 = 56;             // 装载件头
@@ -139,7 +141,7 @@ fn hot_remap(blob: ptr, frame: u64, write: u32, save: ptr) -> u32 {
                         rc = (flags << 12) + load32(blob, fo);
                     } else {
                         if write == 1 {
-                            let nv: u32 = HOT_SLOT + load32(blob, fo + 8)
+                            let nv: u32 = load32(blob, 52) + load32(blob, fo + 8)
                                           + load32(blob, co + 4);
                             store32(q, 8, nv);
                             store32(q, 12, 0);
@@ -206,6 +208,7 @@ pub fn hot_install(blob: ptr, n: u32, save: ptr) -> u32 {
     let nfunc: u32 = l32(blob, 40);
     let text_len: u32 = l32(blob, 44);
     let ncalls: u32 = l32(blob, 48);
+    let slot_va: u32 = l32(blob, 52);     // 这一份候选装到哪个槽（两个槽轮流）
     let calls_at: u32 = HOT_HDR + nfunc * HOT_FUNC;
     let reloc_at: u32 = calls_at + ncalls * HOT_CALL;
     let text_at: u32 = reloc_at + nreloc * HOT_RELOC;
@@ -245,15 +248,15 @@ pub fn hot_install(blob: ptr, n: u32, save: ptr) -> u32 {
     }
     // 新槽：定址、匿名、私有。
     let span: u32 = page_up(cand_text_len);
-    let mp: i64 = syscall7(9, HOT_SLOT as u64, span as u64, HOT_PROT_RW as u64,
+    let mp: i64 = syscall7(9, slot_va as u64, span as u64, HOT_PROT_RW as u64,
                            HOT_MMAP_FLAGS as u64, 0, 0);
     if is_neg(mp) {
         return 8;
     }
-    if mp as u64 != HOT_SLOT as u64 {
+    if mp as u64 != slot_va as u64 {
         return 9;
     }
-    let dst: ptr = p32(HOT_SLOT);
+    let dst: ptr = p32(slot_va);
     i = 0;
     while i < text_len {
         store8(dst, i, load8(blob, text_at + i) as u8);
@@ -267,12 +270,12 @@ pub fn hot_install(blob: ptr, n: u32, save: ptr) -> u32 {
         let lo: u32 = l32(blob, ro + 4);
         let hi: u32 = l32(blob, ro + 8);
         if hi == 0 && lo >= cand_base && lo < cand_base + cand_text_len {
-            store32(dst, off, lo + HOT_SLOT - cand_base);
+            store32(dst, off, lo + slot_va - cand_base);
             store32(dst, off + 4, 0);
         }
         k = k + 1;
     }
-    if is_neg(syscall4(10, HOT_SLOT as u64, span as u64, HOT_PROT_RX as u64)) {
+    if is_neg(syscall4(10, slot_va as u64, span as u64, HOT_PROT_RX as u64)) {
         return 10;
     }
     // 每个候选入口都要落在文本段里，槽号在表内。
@@ -315,7 +318,7 @@ pub fn hot_install(blob: ptr, n: u32, save: ptr) -> u32 {
         let slot: u32 = l32(blob, fo);
         let entry: u32 = l32(blob, fo + 8);
         let at: u32 = self_base + slot * HOT_STRIDE;
-        let rel: i32 = (HOT_SLOT + entry) as i32 - (at + 5) as i32;
+        let rel: i32 = (slot_va + entry) as i32 - (at + 5) as i32;
         store8(at as ptr, 0, 233 as u8);          // E9
         store32(at as ptr, 1, rel as u32);
         f = f + 1;

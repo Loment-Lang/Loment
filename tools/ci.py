@@ -157,6 +157,8 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "lspe_test", "potato_
                  "loment_hotline_test",
                  # 投影树 → 热更新件（`#1155`）：两份真 hotswap 档拼出的装载件过准入。
                  "loment_hotart_test",
+                 # 稳定性模拟（`#1152` 追加）：连换六次、两槽轮流、被拒的一轮不扰动。
+                 "loment_hotstress_test",
                  # 热更新的元数据（`#1149`）：帧布局哈希 + 调用点表，且采集是加性的。
                  "loment_hotmeta_test",
                  # 热更新构建档（`#1150`）：槽表 + 入口闸；默认档与 origin/main 逐字节对拍，
@@ -422,6 +424,8 @@ SHARD_COST = {
     "loment_hotline_test": 2.2,
     # 2026-11-03（#1155）：本机 Windows 实测 1.6s（每支编两份小程序）。
     "loment_hotart_test": 1.6,
+    # 2026-11-03（#1152）：本机 Windows 实测 4.5s（八份源各编一次 + 两次真进程）。
+    "loment_hotstress_test": 4.5,
     # 2026-10-21（#1149）：本机 Windows 实测 0.8s（四份小源各编一次 + 一次 CLI）。
     "loment_hotmeta_test": 0.8,
     # 2026-10-21（#1150）：本机 Windows 实测 1.7s（含一次 WSL 跑两个 ELF）。

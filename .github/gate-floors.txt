@@ -103,8 +103,14 @@ loment_caps_test 11
 loment_book_test 4
 loment_book_site_test 4
 loment_update_test 13
+loment_hotfix_test 7
+loment_staging_test 6
+loment_projection_test 6
+loment_hotline_test 6
+loment_hotart_test 4
+loment_hotstress_test 2
 loment_hotmeta_test 7
 loment_hotswap_test 7
-loment_hotload_test 9
-loment_hotcore_test 3
+loment_hotload_test 13
+loment_hotcore_test 7
 loment_hotbuild_test 4

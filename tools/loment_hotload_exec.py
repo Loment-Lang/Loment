@@ -142,12 +142,13 @@ def main() -> int:
     slot = am["funcs"][fn]["tramp"]
     slot_va = am["base"] + slot * SLOT_STRIDE
 
-    # 入口闸里那条 movabs 给出 epoch 的地址（共享数据段里）
+    # 入口闸里那条 movabs 给出 epoch 的地址（共享数据段里）。
+    # 闸的前 8 字节先把调用者的 rbp 记到 `epoch+8`（`#1152`），所以 movabs 在 +8。
     gate = am["base"] + am["fixed"]["gate"]
-    gate_bytes = ctypes.string_at(gate, 16)
-    if gate_bytes[4:6] != b"\x48\xb8":
+    gate_bytes = ctypes.string_at(gate, 20)
+    if gate_bytes[8:10] != b"\x48\xb8":
         die(f"gate does not start with movabs: {gate_bytes.hex()}")
-    epoch = struct.unpack_from("<Q", gate_bytes, 6)[0]
+    epoch = struct.unpack_from("<Q", gate_bytes, 10)[0]
 
     stub = bytearray()
     stub += bytes([0x6A, 0x02])                       # push 2

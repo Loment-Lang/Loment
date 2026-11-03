@@ -384,6 +384,21 @@ GLOBS = [
     # 热更新的准入判据（`#1147`）：五个等式 + 签名 + 单调 + 重放。
     # **插入位置与 `loment/tools/lomrel.lomt` 的 `globs_text()` 逐行对齐**。
     "tools/loment_update.py", "tools/loment_update_test.py",
+    # 发布侧的清单（`#1153`）：`hotfix.json` 由树算出来，先落盘再算校验和。**同位置**。
+    "tools/loment_hotfix.py", "tools/loment_hotfix_test.py",
+    # 暂存目录（`#1154`）：fetch 在进程外，换的那条路只看目录。**同位置**。
+    "tools/loment_staging.py", "tools/loment_staging_test.py",
+    # 热线与投影（`#1156`）：只重放声明为 fix 的提交。**同位置**。
+    "tools/loment_projection.py", "tools/loment_projection_test.py",
+    # 投影清单与 status（`#1157`）。**同位置**。
+    "tools/loment_hotline_test.py",
+    # 投影树 → 热更新件（`#1155`）：编两份 hotswap 档，拼装载件。**同位置**。
+    "tools/loment_hotart.py", "tools/loment_hotart_test.py",
+    # 稳定性模拟（`#1152` 追加）：一个进程连着换六次、两槽轮流。**同位置**。
+    "tools/loment_hotstress_test.py",
+    # 命令行与模拟器（`#1155`）：`loment hotupdate` 与假 Pre-Release 的搭建。**同位置**。
+    "tools/loment_hotupdate.py",
+    "tools/loment_demo_release.py",
     # 元数据（`#1149`）：帧布局哈希 + 调用点表。**插入位置与 lomrel.lomt 逐行对齐**。
     "tools/loment_hotmeta_test.py",
     # 构建档（`#1150`）：槽表 + 入口闸。**插入位置与 lomrel.lomt 逐行对齐**。

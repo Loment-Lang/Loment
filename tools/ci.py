@@ -149,6 +149,18 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "lspe_test", "potato_
                  "loment_elf_test", "loment_pe_test", "loment_genesis_test", "loment_status_test",
                  # 热更新的准入判据（`#1147`）：五个等式 + 签名 + 单调 + 重放。
                  "loment_update_test",
+                 # 发布侧的热更新清单（`#1153`）：字段全部由树算出来，稳定版也带、准入拒绝。
+                 "loment_hotfix_test",
+                 # 暂存目录（`#1154`）：fetch 在进程外，换的那条路只看目录、不开 socket。
+                 "loment_staging_test",
+                 # 热线与投影（`#1156`）：只重放声明为 fix 的提交；digest 关拦标错的功能。
+                 "loment_projection_test",
+                 # 投影清单（`#1157`）：点名装了什么、剔除了什么；回滚不是升级。
+                 "loment_hotline_test",
+                 # 投影树 → 热更新件（`#1155`）：两份真 hotswap 档拼出的装载件过准入。
+                 "loment_hotart_test",
+                 # 稳定性模拟（`#1152` 追加）：连换六次、两槽轮流、被拒的一轮不扰动。
+                 "loment_hotstress_test",
                  # 热更新的元数据（`#1149`）：帧布局哈希 + 调用点表，且采集是加性的。
                  "loment_hotmeta_test",
                  # 热更新构建档（`#1150`）：槽表 + 入口闸；默认档与 origin/main 逐字节对拍，
@@ -406,6 +418,19 @@ SHARD_COST = {
     "loment_status_test": 2.3,
     # 2026-10-21（#1147）：本机 Windows 实测 9.4s（每支拷一棵 3 MB 的树 + openssl 真签真验）。
     "loment_update_test": 9.4,
+    # 2026-11-03（#1153）：本机 Windows 实测 1.2s（七棵树拷出来各算一遍 + 一次真签真验）。
+    "loment_hotfix_test": 1.2,
+    # 2026-11-03（#1154）：本机 Windows 实测 1.0s（四棵树 + 几份真签名候选）。
+    "loment_staging_test": 1.0,
+    # 2026-11-03（#1156）：本机 Windows 实测 2.0s（每支建一棵 git 仓库 + 真 cherry-pick）。
+    "loment_projection_test": 2.0,
+    # 2026-11-03（#1157）：本机 Windows 实测 2.2s（同上 + 真签名候选 + status）。
+    "loment_hotline_test": 2.2,
+    # 2026-11-03（#1155）：本机 Windows 实测 1.6s（每支编两份小程序）。
+    "loment_hotart_test": 1.6,
+    # 2026-11-03（#1152）：本机 Windows 实测 9.0s（十七份源各编一次 + 两次真进程）。
+    # 循环钉在 16：原来每装一次泄漏 4 KiB，第 14 次撞上 64 KiB 的堆（docs/292 §2）。
+    "loment_hotstress_test": 9.0,
     # 2026-10-21（#1149）：本机 Windows 实测 0.8s（四份小源各编一次 + 一次 CLI）。
     "loment_hotmeta_test": 0.8,
     # 2026-10-21（#1150）：本机 Windows 实测 1.7s（含一次 WSL 跑两个 ELF）。

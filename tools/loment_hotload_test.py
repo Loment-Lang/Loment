@@ -175,6 +175,81 @@ def test_ping_pong_between_two_targets() -> None:
 
 
 @test
+def test_gate_records_the_callers_frame_pointer() -> None:
+    """闸的 33 字节：`push rbp; mov rbp, rsp; mov rcx, [rbp]; ...`（`#1152`）。
+
+    帧链只能从闸里拿到 —— 语言没有"读 rbp"的内建，而闸在**每一个**函数入口被调用，
+    `[rbp]` 正好是那个函数的帧指针。
+    """
+    _blob, meta, text = _meta(A)
+    g = meta["fixed"]["gate"]
+    b = text[g:g + hl.GATE_LEN]
+    assert b[:8] == bytes.fromhex("554889e5488b4d00"), b[:8].hex()
+    assert b[8:10] == bytes.fromhex("48b8"), b[8:10].hex()      # movabs rax, &epoch
+    assert b[18:22] == bytes.fromhex("48894808"), b[18:22].hex()  # mov [rax+8], rcx
+    assert b[22:25] == bytes.fromhex("833800"), b[22:25].hex()
+    assert b[25:31] == bytes.fromhex("0f8400000000"), b[25:31].hex()
+    assert b[31:33] == bytes.fromhex("5dc3"), b[31:33].hex()
+    epoch = struct.unpack_from("<Q", b, 10)[0]
+    assert epoch >= 0x800000, hex(epoch)   # 共享数据段
+    print(f"      闸 33 字节，帧指针存进 epoch+8（epoch 在 {epoch:#x}）")
+
+
+@test
+def test_the_blob_pairs_old_and_new_call_sites() -> None:
+    _ab, am, _at = _meta(A)
+    _cb, cm, ctext = _meta(C)
+    blob = hl.build_blob(am, cm, ctext)
+    nfunc, _text_len, ncalls = struct.unpack_from("<I", blob, 40)[0], \
+        struct.unpack_from("<I", blob, 44)[0], struct.unpack_from("<I", blob, 48)[0]
+    rows = [struct.unpack_from("<6I", blob, hl.HDR + i * hl.FUNC) for i in range(nfunc)]
+    pairs = [struct.unpack_from("<2I", blob, hl.HDR + nfunc * hl.FUNC + i * hl.CALL)
+             for i in range(ncalls)]
+    old_by_slot = {fn["tramp"]: fn for fn in am["funcs"].values()}
+    new_by_slot = {fn["tramp"]: fn for fn in cm["funcs"].values()}
+    cur = 0
+    for slot, sentry, centry, _flags, n, _pad in rows:
+        ofn, nfn = old_by_slot[slot], new_by_slot[slot]
+        assert (sentry, centry) == (ofn["entry"], nfn["entry"])
+        assert [p[0] for p in pairs[cur:cur + n]] == [off for _id, off in ofn["calls"]]
+        assert [p[1] for p in pairs[cur:cur + n]] == [off for _id, off in nfn["calls"]]
+        cur += n
+    assert cur == ncalls
+    print(f"      {nfunc} 个函数、{ncalls} 对调用点，旧偏移与新偏移都对得上")
+
+
+@test
+def test_the_model_remaps_a_chain_into_the_slot() -> None:
+    _ab, am, _at = _meta(A)
+    _cb, cm, ctext = _meta(C)
+    fn = am["funcs"]["_start"]
+    chain = [am["base"] + fn["entry"] + off for _id, off in fn["calls"]]
+    moved, code = hl.remap(am, cm, chain, SLOT_B)
+    assert code == 0, code
+    for nv in moved:
+        assert SLOT_B <= nv < SLOT_B + len(ctext), hex(nv)
+    # 不认识的地址（入口桩、外部代码）原样留着
+    keep, code = hl.remap(am, cm, [0xDEAD0000], SLOT_B)
+    assert keep == [0xDEAD0000] and code == 0
+    print(f"      {len(chain)} 个返回地址全部搬进新槽；表外地址一个不动")
+
+
+@test
+def test_remap_refuses_a_changed_frame_layout() -> None:
+    """返回地址落在**调用者**的代码里，所以要比的是调用者的帧布局。"""
+    _ab, am, _at = _meta(A)
+    _cb, cm, _ctext = _meta(C)
+    fn = am["funcs"]["_start"]
+    ra = am["base"] + fn["entry"] + dict(fn["calls"])["add@0"]
+    bad = dict(cm)
+    bad["funcs"] = dict(cm["funcs"])
+    bad["funcs"]["_start"] = dict(cm["funcs"]["_start"], layout="0" * 64)
+    _moved, code = hl.remap(am, bad, [ra], SLOT_B)
+    assert code == (hl.FLAG_LAYOUT << 12) + am["funcs"]["_start"]["tramp"], code
+    print("      调用者的帧布局变了 —— 拒绝码点名它的槽")
+
+
+@test
 def test_executes_in_a_real_process() -> None:
     """真进程：映射两份镜像、翻转、**再调一次**——第二个答案必须来自新实现。
 

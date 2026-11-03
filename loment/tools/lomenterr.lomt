@@ -100,6 +100,15 @@ const C_WANTVER: u32 = 64932;    // 命令行上要的是 `version` 而不是一
 const C_ROW: u32 = 64544;
 const ROW_STRIDE: u32 = 192;
 const NAME_MAX: u32 = 47;
+//: `newfstatat` 的 `struct stat` 暂存（x86-64 上 144 字节；只读 `st_mode`，偏移 24）。
+//: 放在 `C_MAX`/`C_WANTVER` 之后、`CTX_CAP` 之前那段空地上。
+//: 汇总表（64 格）装满之后**没能列进去的码**个数（`#670`）。表满时原先静默丢码，
+//: 而总数照数 —— "500 errors:" 后面那串加不到 500，且没有任何标记。
+const C_SUMDROP: u32 = 64936;
+const C_STB: u32 = 64960;
+const S_IFMT: u32 = 61440;
+const S_IFREG: u32 = 32768;
+const STAT_NONE: u32 = 4294967295;
 
 //: `scr` 里留给"扫 argv 扫出来的那个路径"的一段。open_ro 自己用 scr[0..4001]，
 //: 所以这一段必须从它后面起 —— 扫完再调 open_ro 把它抄到前面去。
@@ -172,6 +181,9 @@ const S_SUM_X: u32 = 33;         // 汇总里 " x2" 那个 x
 const S_SUM1: u32 = 57;          // 同上，但只有**一条**（英文要单数，`#487`）
 const S_BADLINE_J: u32 = 58;     // `--json` 里那条坏行的 note（`#478`）
 const S_CUT: u32 = 59;           // `--short` / `--json` 的截断标记（`#485`）
+const S_NOTFILE: u32 = 60;       // 诊断文件那条路径不是普通文件（目录 / FIFO / 设备）
+const S_MORECODES: u32 = 61;     // 汇总表满了之后没列出来的码（`#670`）
+const S_TRUNC_DIAG: u32 = 62;    // 32 KiB 渲染缓冲把**整条诊断**截断了（`#671`）
 // 候选**是什么** —— 抄 rustc 的 "a local variable with a similar name exists"。
 // 只说一个名字，用户还得自己去找它在哪、是干什么的；说了种类，一眼就知道该不该照它改。
 const S_KIND_FN: u32 = 38;
@@ -262,6 +274,12 @@ fn ui_en(k: u32) -> str {
     if k == 57 { return " error: "; }
     if k == 58 { return "this line in the diagnostics file is not valid JSON"; }
     if k == 59 { return " [truncated]"; }
+    // 目录能被 open、FIFO 会在 open 上阻塞 —— 所以在 open 之前 stat。说清"不是文件"，
+    // 而不是把它当成一份空诊断（那会让一份编译失败的运行报 `[OK] no diagnostics`，`#661`）。
+    if k == 60 { return "lomenterr: the diagnostics path is not a regular file\n"; }
+    if k == 61 { return " more codes were left out of this list"; }
+    // `#671`：截断的是**整条诊断**（插入符、消息、卡片全没了），不是那一行源码。
+    if k == 62 { return "lomenterr: this diagnostic was too long to render in full (the source line alone filled the 32 KiB buffer)\n"; }
     if k == 34 { return "lomenterr: cannot open the diagnostics file\n"; }
     if k == 35 { return "there is no `./deps` directory here, so layer 1 cannot find anything: layer 1 is `<project root>/deps/<name>/<name>.lomt`. Create that file, or name the location with the path form `use \"./x.lomt\"`.\n"; }
     if k == 36 { return "`./deps` is here; the closest names in it are:\n"; }
@@ -326,6 +344,9 @@ fn ui_zh(k: u32) -> str {
     if k == 57 { return " 条错误："; }   // 中文不分数，与 k == 32 相同
     if k == 58 { return "诊断文件里的这一行不是合法 JSON"; }
     if k == 59 { return " [已截断]"; }
+    if k == 60 { return "lomenterr: 诊断文件那条路径不是普通文件\n"; }
+    if k == 61 { return " 个码没有列进这张表"; }
+    if k == 62 { return "lomenterr: 这条诊断太长，被截断在这里（光是源码那一行就占满了 32 KiB 缓冲）\n"; }
     if k == 34 { return "lomenterr: 打不开诊断文件\n"; }
     if k == 35 { return "这里没有 `./deps` 目录 —— 第 1 层找的是「项目根」下的 `deps/<名字>/<名字>.lomt`，所以它找不到任何东西。补那个文件，或者用路径形式 `use \"./x.lomt\"` 指明位置。\n"; }
     if k == 36 { return "`./deps` 在这里，里面最接近的名字有:\n"; }
@@ -565,6 +586,20 @@ fn sys_alloc(n: u64) -> u64 {
         return 0;
     }
     return cur as u64;
+}
+
+/// `newfstatat` 的 `st_mode` 掩成文件类型位。`STAT_NONE` = 问不到。
+///
+/// **为什么报错器要 stat**（`#660` / `#661`）：诊断文件那条路径是什么，决定了能不能打开。
+/// 目录在 Linux 上能 open、读才失败，于是"读不到"被当成"空文件"，报 `[OK] no diagnostics` 并
+/// 退 0；FIFO 则在 **open** 上就阻塞，整个报错器一声不响地挂住。两者在 open 之前 stat 一次
+/// 就都挡住了。`newfstatat` 本来就在这 8 个跨平台 syscall 里（`lomcli` 用的同一套）。
+fn stat_mode(p: ptr, stb: ptr) -> u32 {
+    let r: i64 = syscall4(262, (0 as u64) - 100, p as u64, stb as u64);
+    if r < 0 {
+        return STAT_NONE;
+    }
+    return load32(stb, 24) & S_IFMT;
 }
 
 fn read_all(fd: u64, buf: ptr, cap: u64) -> u64 {
@@ -819,6 +854,19 @@ fn em_pad(ctx: ptr, o: u32, n: u32) -> u32 {
     return o;
 }
 
+fn hexdig(c: u32) -> u32 {
+    if c < 10 {
+        return 48 + c;
+    }
+    return 87 + c;          // 'a' = 97
+}
+
+/// 两个小写十六进制位（`\xNN` 转义用，`#654`）。
+fn em_hex2(ctx: ptr, o: u32, v: u32) -> u32 {
+    o = em_byte(ctx, o, hexdig((v >> 4) & 15));
+    return em_byte(ctx, o, hexdig(v & 15));
+}
+
 fn em_u32(ctx: ptr, o: u32, v: u32) -> u32 {
     if v == 0 {
         return em_byte(ctx, o, 48);
@@ -994,22 +1042,34 @@ fn after_visible(src: ptr, s: u32, n: u32) -> u32 {
 
 /// "E022" -> 22。取不出数字就是 0 (调用方据此走"未知码"那条,**不静默**)。
 fn code_num(ctx: ptr, off: u32, n: u32) -> u32 {
+    // 只认 `E` + 1..3 位数字（`E002`，大小写都收）。别的形状一律当"解不出"（返回 0）：
+    //
+    //   * `34`（没有 `E`）—— 原先会解成 34，**正好撞上真实的 E034**，于是渲染出一张
+    //     跟这条诊断毫无关系的卡片（`#662`）；
+    //   * `E4294967298` —— 数字在 u32 里回绕成 2，索到 E002 的卡片上（`#667`）。
+    //
+    // 判据是**形状**而不是"今天码表到几"：渲染器不该知道码表的上界，多一个码不该改这里。
     let v: u32 = 0;
-    let got: u32 = 0;
+    let nd: u32 = 0;
+    let saw_e: u32 = 0;
     let i: u32 = 0;
     while i < n {
         let c: u32 = load8(ctx, off + i);
-        if c >= 48 && c <= 57 {
-            v = v * 10 + (c - 48);
-            got = 1;
+        if i == 0 && (c == 69 || c == 101) {
+            saw_e = 1;
         } else {
-            if got == 1 {
-                return v;
+            if c < 48 || c > 57 {
+                return 0;
             }
+            nd = nd + 1;
+            if nd > 3 {
+                return 0;
+            }
+            v = v * 10 + (c - 48);
         }
         i = i + 1;
     }
-    if got == 0 {
+    if saw_e == 0 || nd == 0 || v == 0 {
         return 0;
     }
     return v;
@@ -1048,6 +1108,14 @@ fn src_ensure(ctx: ptr, sr: ptr, sc: ptr, plen: u32) -> u32 {
     let pv: u32 = load32(ctx, C_PREVLEN);
     if pv == plen && bytes_eq(ptr_add(ctx, C_PREV), pv, ptr_add(ctx, C_PATH), plen) == true {
         return 1;
+    }
+    // 源路径也可能不是普通文件（`#660`）：FIFO 会在 open 上阻塞，设备读不到头。与诊断文件
+    // 同一条纪律 —— 不是普通文件就当"读不到源"，照常出头/位置/建议，只是没有源码那两行。
+    let smode: u32 = stat_mode(ptr_add(ctx, C_PATH), ptr_add(ctx, C_STB));
+    if smode != STAT_NONE && smode != S_IFREG {
+        store32(ctx, C_SRCLEN, 0);
+        store32(ctx, C_PREVLEN, 0);
+        return 0;
     }
     let fd: i64 = open_ro(ptr_add(ctx, C_PATH), plen, sc);
     if fd < 0 {
@@ -1124,7 +1192,9 @@ fn h_loc(ctx: ptr, o: u32, line: u32, col: u32, w: u32, plen: u32) -> u32 {
         o = em_byte(ctx, o, COLON);
         o = em_u32(ctx, o, line);
     }
-    if col > 0 {
+    // **列只在有行号时才印**（`#664`）：`line == 0` 而 `col == 12` 时，`file:12` 与"第 12 行"
+    // 逐字节同形 —— 编辑器会跳到编译器从没说过的那一行。没有行号的列在这里没有意义。
+    if col > 0 && line > 0 {
         o = em_byte(ctx, o, COLON);
         o = em_u32(ctx, o, col);
     }
@@ -1149,6 +1219,11 @@ fn utf8_cell(sr: ptr, i: u32, avail: u32) -> u64 {
     let b0: u32 = load8(sr, i) as u32;
     if b0 == 9 {
         return 4294967296 as u64 + 8;
+    }
+    // 控制字节会被**转义**成 `\xNN`（四个字符，见 `h_snip`，`#654`）。宽度必须跟着走，
+    // 否则 caret 与转义后的源行对不齐。DEL（0x7F）同理。
+    if b0 < 32 || b0 == 127 {
+        return 4294967296 as u64 + 4;
     }
     if b0 < 128 {
         return 4294967296 as u64 + 1;
@@ -1198,7 +1273,16 @@ fn h_snip(ctx: ptr, o: u32, sr: ptr, srl: u32, line: u32, col: u32, w: u32, mlen
     o = em(ctx, o, " | ");
     let k: u32 = 0;
     while k < ln {
-        o = em_byte(ctx, o, load8(sr, st + k));
+        let c: u32 = load8(sr, st + k);
+        // **控制字节不进终端**（`#654`）：源文件能写 ESC，而这段是逐字节回显的 ——
+        // 于是一个文件可以让用户清屏、改色、甚至伪造一条诊断。`\xNN` 是四个普通字符，
+        // 终端只当文本；`utf8_cell` 对它们按 4 列算，caret 因此仍然对齐。
+        if c < 32 && c != TAB || c == 127 {
+            o = em(ctx, o, "\\x");
+            o = em_hex2(ctx, o, c);
+        } else {
+            o = em_byte(ctx, o, c);
+        }
         k = k + 1;
     }
     o = em(ctx, o, "\n");
@@ -1993,7 +2077,68 @@ fn json_body(ctx: ptr, o: u32, p: ptr, n: u32) -> u32 {
                             if c < 32 {
                                 o = em_u00(ctx, o, c);
                             } else {
-                                o = em_byte(ctx, o, c);
+                                // `#666`：`--json` 的消费者是 JSON 解析器，一个非法字节就让
+                                // **整份文档**解析失败。多字节序列按首字节验完再抄；不合法的
+                                // 那个字节写成 U+FFFD —— 仍然是一个合法 JSON 字符串。
+                                if c < 128 {
+                                    o = em_byte(ctx, o, c);
+                                } else {
+                                    let need: u32 = 0;
+                                    let ok: u32 = 1;
+                                    if c >= 194 && c <= 223 {
+                                        need = 1;
+                                    } else {
+                                        if c >= 224 && c <= 239 {
+                                            need = 2;
+                                        } else {
+                                            if c >= 240 && c <= 244 {
+                                                need = 3;
+                                            } else {
+                                                ok = 0;
+                                            }
+                                        }
+                                    }
+                                    if ok == 1 && i + need >= n {
+                                        ok = 0;
+                                    }
+                                    if ok == 1 {
+                                        let b1: u32 = load8(p, i + 1);
+                                        if b1 < 128 || b1 > 191 {
+                                            ok = 0;
+                                        }
+                                        // 过长写法与代理区：Python 的 UTF-8 解码器同样拒。
+                                        if c == 224 && b1 < 160 {
+                                            ok = 0;
+                                        }
+                                        if c == 237 && b1 > 159 {
+                                            ok = 0;
+                                        }
+                                        if c == 240 && b1 < 144 {
+                                            ok = 0;
+                                        }
+                                        if c == 244 && b1 > 143 {
+                                            ok = 0;
+                                        }
+                                        let k: u32 = 2;
+                                        while k <= need {
+                                            let cc: u32 = load8(p, i + k);
+                                            if cc < 128 || cc > 191 {
+                                                ok = 0;
+                                            }
+                                            k = k + 1;
+                                        }
+                                    }
+                                    if ok == 0 {
+                                        o = em(ctx, o, "\\ufffd");
+                                    } else {
+                                        let k2: u32 = 0;
+                                        while k2 <= need {
+                                            o = em_byte(ctx, o, load8(p, i + k2));
+                                            k2 = k2 + 1;
+                                        }
+                                        i = i + need;
+                                    }
+                                }
                             }
                         }
                     }
@@ -2063,7 +2208,8 @@ fn rec_short(ctx: ptr, line: u32, col: u32, mlen: u32, plen: u32, clen: u32, mtr
     }
     // `col == 0` = 编译器只给了行号（`check()` 的语义诊断都是这样）。**那时不印列** ——
     // 与 `h_loc` 同一条纪律：`x.lomt:9:0:` 会让编辑器按第 0 列跳，那是编出来的位置。
-    if col > 0 {
+    // 反过来（`#664`）：没有行号时列也不印 —— 否则 `file:12` 看起来就是第 12 行。
+    if col > 0 && line > 0 {
         o = em_byte(ctx, o, COLON);
         o = em_u32(ctx, o, col);
     }
@@ -2077,7 +2223,9 @@ fn rec_short(ctx: ptr, line: u32, col: u32, mlen: u32, plen: u32, clen: u32, mtr
     let m: u32 = 0;
     while m < mlen {
         let c: u32 = load8(ctx, C_MSG + m);
-        if c == NL {
+        // `\r` 与 `\n` **同样**折成空格（`#669`）：只折 `\n` 时，一条消息里的 CR 会把光标
+        // 送回行首，后半句盖掉 `file:line:` 前缀 —— "一行一条"这个承诺当场破掉。
+        if c == NL || c == CR {
             o = em_byte(ctx, o, SP);
         } else {
             o = em_byte(ctx, o, c);
@@ -2200,10 +2348,17 @@ fn sum_add(ctx: ptr, cnum: u32) {
             i = i + 1;
         }
     }
-    if hit == 0 && n < SUM_CAP {
-        store32(ctx, C_SUMK + n * 4, cnum);
-        store32(ctx, C_SUMV + n * 4, 1);
-        store32(ctx, C_SUMN, n + 1);
+    if hit == 0 {
+        if n < SUM_CAP {
+            store32(ctx, C_SUMK + n * 4, cnum);
+            store32(ctx, C_SUMV + n * 4, 1);
+            store32(ctx, C_SUMN, n + 1);
+        } else {
+            // 表满：**记一笔**，汇总行末尾要说出来（`#670`）。总数是另外数的，
+            // 所以丢掉明细不会算错总数 —— 但它会让"总数 vs 明细和"对不上，而那正是
+            // 读者唯一能自查的地方。
+            store32(ctx, C_SUMDROP, load32(ctx, C_SUMDROP) + 1);
+        }
     }
 }
 
@@ -2264,6 +2419,14 @@ fn sum_print(ctx: ptr, total: u32) -> u32 {
         acc = em(ctx, acc, ui(ctx, S_SUM_X));
         acc = em_u32(ctx, acc, load32(ctx, C_SUMV + k * 4));
         k = k + 1;
+    }
+    let drop: u32 = load32(ctx, C_SUMDROP);
+    if drop > 0 {
+        acc = em_byte(ctx, acc, COMMA);
+        acc = em_byte(ctx, acc, SP);
+        acc = em_byte(ctx, acc, 43);                 // '+'
+        acc = em_u32(ctx, acc, drop);
+        acc = em(ctx, acc, ui(ctx, S_MORECODES));
     }
     return em_byte(ctx, acc, NL);
 }
@@ -2815,6 +2978,7 @@ fn _start() -> u32 {
     store32(ctx, C_TRUNC, 0);
     store32(ctx, C_CANDN, 0);
     store32(ctx, C_SUMN, 0);
+    store32(ctx, C_SUMDROP, 0);
     // 颜色**默认开**（与 `lomcli` 同一个默认值）；`--no-color` / `-C` 把它关掉，
     // 而 `parse_args` 同时把诊断文件那个参数抄进 `scr + SCR_DIAG`。
     store32(ctx, C_COLOR, 1);
@@ -2847,6 +3011,13 @@ fn _start() -> u32 {
     }
     let ap: ptr = ptr_add(sc, (av >> 32) as u32);
     let an: u32 = (av % 4294967296) as u32;
+    // `#660` / `#661`：目录能 open、读才失败（会被当成空文件而报 `[OK]`），FIFO 在 open 上
+    // 直接阻塞。**open 之前 stat 一次**，两者都在这里挡住。stat 问不到（`STAT_NONE`）就
+    // 不拦 —— 交给 open 自己报 `cannot open`，那条既有文案与判据都还在。
+    let dmode: u32 = stat_mode(ap, ptr_add(ctx, C_STB));
+    if dmode != STAT_NONE && dmode != S_IFREG {
+        return fail(ui(ctx, S_NOTFILE));
+    }
     let fd: i64 = open_ro(ap, an, sc);
     if fd < 0 {
         return fail(ui(ctx, S_NOOPEN));
@@ -3005,7 +3176,16 @@ fn _start() -> u32 {
                             }
                         }
                         let o4: u32 = h_msg(ctx, o3, C_MSG, mlen, w);
-                        let o5: u32 = h_card(ctx, o4, cnum, w);
+                        // `#665`：消息在拷进 `C_MSG` 时就封顶了（`MSG_CAP`）。`--short` /
+                        // `--json` 早就会说（`S_CUT`），长表原先**什么都不说** —— 一条被
+                        // 截断的消息看起来和完整的一模一样。同一句话，同一处。
+                        let o4b: u32 = o4;
+                        if mtr == 1 {
+                            o4b = em_gut(ctx, o4, w);
+                            o4b = em(ctx, o4b, ui(ctx, S_CUT));
+                            o4b = em(ctx, o4b, "\n");
+                        }
+                        let o5: u32 = h_card(ctx, o4b, cnum, w);
                         // 两条**码专属**的补充，排在卡片**之后** —— 先给通用的四段，
                         // 再给这一条的专属信息（它们的计算在模式分岔之前，见上）。
                         let o5b: u32 = o5;
@@ -3020,10 +3200,14 @@ fn _start() -> u32 {
                         }
                         o6 = o5b;
                         }
-                        write_all(2, ctx, em(ctx, o6, "\n") as u64);
+                        // 换行**单独写**（`#671`）：缓冲满了之后 `em_byte` 不再落字节，连这个
+                        // `\n` 都会被丢掉 —— 于是截断提示粘在源行末尾，读起来像"这一行被截了"。
+                        write_all(2, ctx, o6 as u64);
+                        write_all(2, str_ptr("\n"), 1);
                         if load32(ctx, C_TRUNC) == 1 {
-                            let cut: str = ui(ctx, S_TRUNC);
-                            write_all(2, str_ptr(cut), str_len(cut) as u64);
+                            // 说清丢的是**整条诊断**（插入符、消息、卡片），不是那一行源码。
+                            let cutd: str = ui(ctx, S_TRUNC_DIAG);
+                            write_all(2, str_ptr(cutd), str_len(cutd) as u64);
                         }
                     }
                 }

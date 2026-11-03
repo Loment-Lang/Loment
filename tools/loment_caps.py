@@ -135,6 +135,11 @@ EXPLAINED: dict[tuple[str, str], str] = {
         "越界**由调用方报**：守卫这里 `return 0`，驱动器 `fail(\"…codegen 表容量…\")` 说得出来",
     ("loment/selfhost/codegen.lomt", "CG_MAXENUM"):
         "越界**由调用方报**：同 `CG_MAXFN`（一句话点名两张表）",
+    ("loment/tools/lomenterr.lomt", "SUM_CAP"):
+        "越界**由调用方报**（`#670`）：表满时只把 `C_SUMDROP` 加一，真正的句子由 "
+        "`sum_print` 在汇总行末尾印（`N 个码没有列进这张表` / "
+        "`N more codes were left out of this list`）—— 那个函数在这段的 ±8 行之外，"
+        "扫描窗口看不到它。总数是另外数的，所以丢掉明细不会算错总数",
     ("loment/tools/lomenterr.lomt", "MSG_CAP"):
         "**检测点，不是写入点**（`#485`）：`if mlen >= MSG_CAP` 判的是「这条消息有没有"
         "被拷满」，判到了就印 `truncated` / 写 `\"truncated\": true`。越界在这里不是"

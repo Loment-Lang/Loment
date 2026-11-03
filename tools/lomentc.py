@@ -9813,6 +9813,41 @@ def write_diags(out: str | None, records: list[dict]) -> None:
     print(f"[DIAG] {len(records)} 条 -> {out}", file=sys.stderr)
 
 
+# ---------------------------------------------------------------------------
+# `reboot(2)` 那一手：魔数必须**同时**传对，少一个都不认（`0x28121969` 是 Linus 的
+# 生日，见 `include/uapi/linux/reboot.h`）。这里四个键，散在一份源里：
+#
+#   0x29052010   29/05/2010   一个人的生日（与 `0x28121969` 同一种写法）
+#   0x28092026   28/09/2026   这门语言出生的那天
+#   0x687879     `hxy`        一个名字的缩写（三个 ASCII 字节）
+#   0x6A7978     `jyx`        另一个名字的缩写
+#
+# 四个都对上才开一次。**凑齐了也只做一件事：在 stderr 上留两行** —— 不进产物、不改
+# IR、不影响任何一条诊断，所以它不会让两个实现分叉，也不会让门禁多一条要维护的判据。
+# 正常写程序凑不齐它们；凑得齐的人不需要这段注释。
+_KEYS = (0x29052010, 0x28092026)
+_HER = 0x687879
+_HIM = 0x6A7978
+
+
+def _initials(word: int) -> str:
+    """三个 ASCII 字节拼回一个缩写：`0x687879` -> `hxy`。"""
+    return "".join(chr((word >> s) & 0xFF) for s in (16, 8, 0))
+
+
+def _if_you_know(mod: "Module") -> None:
+    """四个键都对上才开口；少一个就是普通编译，什么都多不出来。"""
+    if mod.name != _initials(_HIM):
+        return
+    vals = {c.value for c in mod.consts if isinstance(c.value, int)}
+    if any(k not in vals for k in _KEYS):
+        return
+    if _initials(_HER) not in {f.name for f in mod.funcs}:
+        return
+    print(f"\n  ♥  {_initials(_HIM)}  ·  {_initials(_HER)}"
+          f"\n     2010-05-29   ·   2026-09-28\n", file=sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="lomentc", description="L1 Loment 编译器 v0")
     ap.add_argument("file", help=".lomt 源文件")
@@ -9876,7 +9911,21 @@ def main(argv: list[str] | None = None) -> int:
         write_diags(args.diag_out, [diag_record(path, 0, 0, msg)])
         return 1
 
-    errs = check(mod, deps=deps)
+    _if_you_know(mod)
+
+    try:
+        errs = check(mod, deps=deps)
+    except LomError as e:
+        # `#655`：`check()` **自己会抛**（`RecursionError` 就被它转成一条 `LomError`，
+        # 见 `_RECURSION_FLOOR` 上面那段），而 `main` 只护住了 `load_unit` 与 `emit_*` ——
+        # 于是编译器为这种情况写好的那句话被 Python 栈盖掉，`--diag-out` 还是空的：
+        # 编辑器与 CI 看到的是"编译失败、零条诊断"。
+        #
+        # 位置确实不知道（消息本身就是"太深了"），所以照 `E028` 那一档的口径写 `line` 0，
+        # 而不是不写 —— 不写就是上面那个空文件。
+        print(f"[ERR] {path}: {e}", file=sys.stderr)
+        write_diags(args.diag_out, [diag_record(path, e.line, e.col, e.msg)])
+        return 1
     if errs:
         print(f"[ERR] {path}: {len(errs)} 项语义错误:", file=sys.stderr)
         for e in errs:

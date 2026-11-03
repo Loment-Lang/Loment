@@ -4863,6 +4863,34 @@ def test_machine_diagnostics_carry_a_column_when_unambiguous():
 
 
 @test
+def test_a_check_that_raises_becomes_a_diagnostic_not_a_traceback():
+    """`#655`：`check()` **自己会抛** —— 一条两万项的扁平表达式撞上 `RecursionError`，
+    `check` 把它转成一条 `LomError`（`_RECURSION_FLOOR` 上面那段写的就是这件事）。
+
+    `main` 原先只护住了 `load_unit` 与 `emit_*`：那句为这种情况写好话变成了 Python 栈，
+    而 `--diag-out` 还是**空的** —— 编辑器与 CI 看到的是"编译失败、零条诊断"。
+    """
+    import json as _json
+
+    src = ("module m" + chr(10) + "fn f() -> u32 {" + chr(10)
+           + "    return " + "1 + " * 20000 + "1;" + chr(10) + "}" + chr(10))
+    with tempfile.TemporaryDirectory() as t:
+        p = Path(t) / "deep.lomt"
+        p.write_text(src, encoding="utf-8", newline=chr(10))
+        d = Path(t) / "d.jsonl"
+        r = subprocess.run([sys.executable, str(ROOT / "tools" / "lomentc.py"),
+                            str(p), "--check", "--diag-out", str(d)],
+                           capture_output=True, text=True, encoding="utf-8")
+        recs = [_json.loads(x) for x in d.read_text(encoding="utf-8").splitlines() if x]
+    assert r.returncode == 1, r.returncode
+    assert "Traceback" not in r.stderr, r.stderr[-300:]
+    assert "嵌套超过" in r.stderr, r.stderr[-300:]
+    assert len(recs) == 1 and recs[0]["line"] == 0, recs
+    assert recs[0]["code"] == "E023", recs
+    print("      check() 抛出：一条 E023（line 0），不是 Python 栈")
+
+
+@test
 def test_a_use_cycle_is_one_diagnostic_at_the_use_line():
     """`#31`：循环 `use` 报在**那一行**、码是 E018（装载期），不是 E013 指到文件末尾之外。"""
     NL = chr(10)

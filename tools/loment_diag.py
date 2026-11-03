@@ -384,6 +384,12 @@ RULES = [
      "工具链进程死了，没留下诊断",
      "编译器 / 链接器 / 报错器之一在能写出结构化诊断之前就死了（信号或异常退出）。"
      "这不是你源码的语义错 —— 它是**实现自己的失败**，修法与改你那一行无关。"),
+    # E999 是**兜底码**：没有任何规则命中时 `classify()` 才落到它。这条规则**不匹配任何
+    # 东西**（`(?!)` 恒假）—— 它在这里只是为了让 `RULES_BY_CODE` 里有 999，于是报错器
+    # 拿到一张真正的卡片，而不是走"这个码不在表里、多半是工具链版本不齐"那条（`#658`）。
+    # 最后一条：真规则永远先命中。
+    ("E999", r"(?!)", "未分类（请报告）",
+     "报错器没有认出这条消息属于哪一类。把消息原文、源码与命令报告上来，分类表会补一条。"),
 ]
 
 #: 内部码的号段（`#773`）。与用户码分开：`n_codes()` 只给用户码的上界，
@@ -456,6 +462,10 @@ ASCII_ONE_LINER: dict[int, str] = {
     # E9xx: internal. `loment codes` lists this block after the user codes
     # (`#773`: a tool that dies without a record is still a failure that must speak).
     900: "a tool in the chain died before it could report (internal) - report it with the unit",
+    # E999 is the fallback (`classify()` lands here when no rule matches), not a member of
+    # the internal series: it sits at the top of the range on purpose (`loment_diag`'s
+    # emitter excludes it from the "contiguous internal block" invariant too).
+    999: "unclassified - please report it",
 }
 
 
@@ -470,6 +480,7 @@ ASCII_ONE_LINER: dict[int, str] = {
 #: **键集必须与 `RULES` 相等**，由 `loment_tools_test` 钉着 —— 加一个码而只写了中文标题，
 #: 英文默认下那条诊断就会渲染成"只有码号、没有标题"的残件。
 TITLE_EN: dict[int, str] = {
+    999: "unclassified (please report)",
     1: "type mismatch",
     2: "undeclared name",
     3: "wrong number of arguments",
@@ -547,6 +558,18 @@ class Card:
 
 
 CARDS: dict[int, Card] = {
+    999: Card(
+        what="编译器报了一条错，而分类表里没有它 —— 连工具链自己都没认出这条消息属于哪个码。",
+        why="分类表与编译器是同一个仓、同一次构建出来的。消息在这里落空，意思是它还没被归类，"
+            "不是版本不齐：先按原文去改，再把这条消息报上来，下一条规则就补在它上面。",
+        fixes=(
+            "按消息原文去改 —— 它说的仍然是真话，只是此刻缺一张解释卡。",
+            "把消息原文、出错的那几行源码和跑的命令一起报告上来。",
+            "顺手写一下工具链版本（`loment version`），分类表按它对齐。",
+        ),
+        yes="报告之后有专属分类的消息",
+        no="自动猜一个码",
+    ),
     34: Card(
         what="LSPE 放行了一次访问，却说不出来源 —— 没有能力域、没有 guard、没有类型、"
              "也没有人标的假设。",
@@ -1164,6 +1187,20 @@ CARDS: dict[int, Card] = {
 # 每条都能照做）—— 两门语言说**同一件事**，不是两篇各自发挥的文章。
 
 CARDS_EN: dict[int, Card] = {
+    999: Card(
+        what="The compiler reported an error that is not in the classification table -- even "
+             "the toolchain did not recognise which code this message belongs to.",
+        why="The table and the compiler come out of the same repository and the same build. "
+            "A message landing here means it has not been classified yet, not that the "
+            "toolchain versions disagree: fix by the message, then report it so a rule can be added.",
+        fixes=(
+            "Change what the message says -- it is still accurate, it just lacks a card.",
+            "Report the message, the source lines and the command that produced it.",
+            "Include the toolchain version (`loment version`) so the table can be aligned.",
+        ),
+        yes="classified messages after a report lands",
+        no="guessing a code",
+    ),
     34: Card(
         what="LSPE allowed an access but cannot name a source: no capability domain, no guard, "
              "no type, and no assumption supplied by a person.",
@@ -2253,6 +2290,7 @@ LANG_ORDER = ("cpp", "c", "csharp", "java", "go", "rust", "python")
 
 #: `码 -> (码, 中文标题, 中文建议)`，给 `--dump-surface` 用。**从 `RULES` 推导，不另写一份**
 #: —— 又一处"抄第二遍"的诱惑，而这份文件这一节讲的就是别抄。
+
 RULES_BY_CODE: dict[int, tuple[str, str, str]] = {
     code_num(c): (c, t, h) for c, _pat, t, h in RULES
 }
@@ -2446,7 +2484,13 @@ def surface_lomt() -> str:
     )
     codes = sorted(dict(RULES_BY_CODE))
     user_codes = [c for c in codes if not is_internal_code(c)]
-    internal_codes = [c for c in codes if is_internal_code(c)]
+    # E999 是**兜底码**（`#658`）：它有一条恒不匹配的规则（只为让它进 `RULES_BY_CODE`、
+    # 拿到一张卡片），但不在 900..N 那一段连续的"工具链自己崩了"里 —— 所以算号段时把它
+    # 摘出去，再单独确认它确实在表里。
+    FALLBACK = 999
+    internal_codes = [c for c in codes if is_internal_code(c) and c != FALLBACK]
+    if FALLBACK not in codes:
+        raise SystemExit("loment_diag: 兜底码 E999 不在码表里")
     if not user_codes:
         raise SystemExit("loment_diag: 一个用户码都没有")
     # 两个号段各自连续：用户码 1..max，内部码 900..max。
@@ -2511,8 +2555,11 @@ def surface_lomt() -> str:
         f"/// 内部码段的下界（`#773`）。`E{INTERNAL_LO}` 起是\"工具链自己崩了\"那一类。",
         f"pub fn internal_lo() -> u32 {{ return {internal_codes[0]}; }}",
         "",
-        f"/// 内部码段的上界（含）。",
-        f"pub fn internal_hi() -> u32 {{ return {internal_codes[-1]}; }}",
+        # 上界是**号段边界**，不是"最后一条有文字的码"：兜底码 E999 钉在顶端（`#658`），
+        # 中间 901..998 是空号。消费者按"有文字才印"跳过空号（`lomcli` 的 codes/explain），
+        # 所以边界给 `INTERNAL_HI` 才能让 E999 既列得出来、又不把空号印成标题。
+        f"/// 内部码段的上界（含；含兜底码 `E{FALLBACK}`，空号由消费者跳过）。",
+        f"pub fn internal_hi() -> u32 {{ return {INTERNAL_HI}; }}",
         "",
         # 报错器**自己的**版本号 —— 与语言版本是两条线（`docs/182` §17）。
         # **导进来而不是在这里再写一遍**：真源是 `loment_release.LOMENTERR`，而那正是

@@ -252,16 +252,31 @@ def test_restarter_brings_the_program_back() -> None:
 
 
 def test_restarter_checks_the_restart_key() -> None:
-    """第 6 级的彩蛋：设了 `LOMENT_RESTART_KEY` 才核对重启密钥。
+    """第 6 级的彩蛋：设了 `LOMENT_RESTART_KEY` 才核对，三个密钥走三种摘要。
 
-    三个密钥（`19910825` / `linuslinux` / `hiopensource`）各放行一次，且**真的重启**；
-    错的密钥**一次都不重启**，把程序最后的状态原样返回。
+    这条判据要同时钉住三件事，缺一件都能"看起来绿"：
+
+    * **源码里没有明文** —— 只许有盐和摘要；
+    * **摘要不是手抄错的** —— Python `hashlib` 独立算一遍，必须与源码里那个十六进制相等；
+    * **C 的三套实现是对的** —— `--selftest` 的已知答案与 `hashlib` 逐条比，
+      运行时还要真的接受三个密钥（且只接受它们）。
 
     编译时把 `LOMENT_RESTART_MAX` 压到 2、延迟压到 0 —— 这里判的是"放行/拒绝"，
     不是上限；上限由上面那条判据用默认值钉着。
     """
+    import hashlib
     src = ROOT / "restarter" / "loment-restart.c"
     assert src.exists(), "restarter/loment-restart.c 不在 —— 第 6 级没有实物"
+    keys = (
+        ("sha256", "comp.os.minix", "19910825"),
+        ("sha1", "just-for-fun", "linuslinux"),
+        ("md5", "open.source", "hiopensource"),
+    )
+    text = src.read_text(encoding="utf-8")
+    for alg, salt, key in keys:
+        digest = getattr(hashlib, alg)((salt + key).encode()).hexdigest()
+        assert digest in text, f"{alg} 的摘要没写进源码（{salt}+key）"
+        assert key not in text, f"明文密钥 {key!r} 还在源码里 —— 这里只许有盐和摘要"
     linux = sys.platform.startswith("linux")
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
@@ -278,7 +293,17 @@ def test_restarter_checks_the_restart_key() -> None:
         if r.returncode != 0:
             print(f"      SKIP: 没有 C 编译器 ({r.stderr.strip()[:120]})")
             return
-        for key in ("19910825", "linuslinux", "hiopensource"):
+        # 三套实现的已知答案：C 自己比一遍，Python 再独立比一遍（两方相等不算证据）。
+        st = run(f"cd {base} && ./loment-restart --selftest")
+        assert st.returncode == 0, ("C 自检红了", st.stdout, st.stderr)
+        lines = [ln.split() for ln in st.stdout.splitlines() if ln.strip()]
+        assert len(lines) == 9, f"自检应有 9 条已知答案，实际 {len(lines)}"
+        for name, n, got in lines:
+            size = int(n)
+            msg = b"" if size == 0 else (b"abc" if size == 3 else b"a" * size)
+            want = getattr(hashlib, name)(msg).hexdigest()
+            assert got == want, (name, n, got, want)
+        for _alg, _salt, key in keys:
             out = run(f"cd {base} && LOMENT_RESTART_KEY={key} "
                       f"./loment-restart ./always 2>&1; echo rc=$?")
             assert "restart key accepted" in out.stdout, (key, out.stdout)
@@ -289,7 +314,7 @@ def test_restarter_checks_the_restart_key() -> None:
         assert "restart key rejected" in bad.stdout, bad.stdout
         assert "restart 1 after" not in bad.stdout, ("错密钥仍然重启了", bad.stdout)
         assert "rc=7" in bad.stdout, bad.stdout
-    print("      三个密钥放行并真的重启；错密钥拒绝重启（rc=7）")
+    print("      源码只有盐+摘要；三套摘要对上 hashlib；三个密钥放行、错密钥拒绝")
 
 
 def test_the_admin_rule_is_mechanical() -> None:

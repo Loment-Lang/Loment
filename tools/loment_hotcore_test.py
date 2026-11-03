@@ -113,6 +113,13 @@ fn _start() -> u32 {
     let ctx: ptr = ptr_add(buf, 64);
     let data: ptr = ptr_add(buf, 256);
     let save: ptr = ptr_add(buf, 131072);
+    // 一块"索引"：换之前由**旧代码**写满，换之后由**新代码**读回来（`#1155`）。
+    let idx: ptr = ptr_add(buf, 160000);
+    let k: u32 = 0;
+    while k < 256 {
+        store8(idx, k, (k * 7 + 3) as u8);
+        k = k + 1;
+    }
     store32(ctx, 0, 0);
     store32(ctx, 4, 0);
     let n: i64 = syscall4(0, fd as u64, data as u64, 200000);
@@ -125,6 +132,12 @@ fn _start() -> u32 {
     let sg: u32 = load32(data, 12);
     let ep: u32 = load32(sb as ptr, sg + 10);
     let ev: u32 = load32(ep as ptr, 0);
+    let ck: u32 = 0;
+    k = 0;
+    while k < 256 {
+        ck = ck + load8(idx, k);
+        k = k + 1;
+    }
     let _a: i64 = wstr(1, "SUM ");
     let _b: i64 = wdec(1, sum);
     let _c: i64 = wstr(1, " COUNT ");
@@ -135,6 +148,8 @@ fn _start() -> u32 {
     let _h: i64 = wdec(1, done);
     let _i: i64 = wstr(1, " EPOCH ");
     let _j: i64 = wdec(1, ev);
+    let _x: i64 = wstr(1, " IDX ");
+    let _y: i64 = wdec(1, ck);
     let _q: i64 = wstr(1, "\\n");
     return 0;
 }
@@ -263,6 +278,18 @@ def test_every_live_frame_continues_in_the_new_image() -> None:
         assert got.get("DONE") == depth + 2, (depth, got)
         assert got.get("EPOCH") == 1, (depth, got)
     print("      N = 1/2/16：每一帧都接着在新镜像里跑（版本常量逐层读到 2），副作用一次")
+
+
+@test
+def test_the_index_survives_the_swap() -> None:
+    """状态不是代码：换之前写满的一块"索引"，换之后由**新代码**原样读回来（`#1155`）。"""
+    got = _case(PROBE, Q)
+    if _skip(got):
+        return
+    want = sum((k * 7 + 3) % 256 for k in range(256))
+    assert got.get("IDX") == want, (got, want)
+    assert got.get("SUM") == 10, got       # 5 帧 × 版本常量 2
+    print(f"      索引校验和 {want} 换前换后相同 —— 换的是代码，不是状态")
 
 
 @test

@@ -109,5 +109,5 @@ loment_hotline_test 6
 loment_hotmeta_test 7
 loment_hotswap_test 7
 loment_hotload_test 13
-loment_hotcore_test 6
+loment_hotcore_test 7
 loment_hotbuild_test 4

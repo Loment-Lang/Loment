@@ -19,6 +19,7 @@
 | 常量 | 值 | 含义 | 满了会怎样 |
 |---|---|---|---|
 | `MEM_SIZE` | **16 MiB** | 整个 VM 地址空间 | 读/写越界当场抛 `LvmError`（`读越界` / `写越界`） |
+| `MEM_SIZE` vs sealed arena | **16 MiB vs 64 KiB** | VM 地址空间比 Loment 的 sealed arena 大得多 | **arena 的界由分配器守，不由 VM 地址空间守**：越界访存可能仍落在 VM 内存里。`#1027` 因此用**分配耗尽**探针钉墙点（六格 rc=132），不假装 VM 在任意越界地址上都和原生同死 |
 | `GLOBAL_BASE` | 64 KiB | `[0, 64 KiB)` 是零页，全局从这儿起 | —— |
 | `FRAME_SIZE` | 4096 | 每层调用的栈区 | 与堆相撞时抛 `栈溢出` |
 | `SLOT` | 8 | 每个标量一格 | —— |
@@ -29,6 +30,21 @@
 而**宿主 Python 的栈**在 ~200 层就先炸 —— 那之前程序会死在一个 `RecursionError` 上，
 **那不是 VM 的话**。取 128 是两头都留余量：比镜像的 `MAX_DEPTH = 32` 宽松（孪生不会因此更严），
 又远低于宿主栈。（这一条是判据 B 当场抓的：深递归夹具先撞了 Python，而不是撞 VM。）
+
+### 2.1 `llvm.trap` 在 VM 里是**定义好的** 132
+
+`llvm.trap` 不是一个"VM 不接的 extern"（那会让**任何**带 abort 路径的产物在 VM 里整个跑不起来，
+哪怕那条路径走不到）。T0 / T2 / T3 / 紧凑形都把它定成 **132**（与原生 `SIGILL` 同一个数），
+并往 stderr 写一行站点：
+
+```
+lvm: llvm.trap at <函数>:<块>#<指令序号>
+```
+
+判据：`loment_lms_test::test_vm_trap_reports_the_site`（站点格式）、
+`test_memory_exhaustion_hits_the_same_wall_on_four_products`（六格 rc=132）、
+`test_lms_entry_a_rescue_is_executed_by_every_product`（retry 成功时 rc=66，关掉则 132）。
+`#1027` 的第三格（16 MiB vs 64 KiB）就是上表那一行：**不假装地址空间能替 arena 守界**。
 
 ## 3. 自举镜像（`loment/tools/lvm.lomt`）
 

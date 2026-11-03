@@ -567,6 +567,22 @@ class T2Executor(lvm.Executor):
         steps = 0                       # **整个调用**共用一个计数（跨块也算）—— 与镜像同口径
         while True:
             blk = blocks[bi]
+            # phi **并行**求值（与 `lvm._run_body` 同一条注释）：先把整组结果算出来，
+            # 再统一写回；否则后面的 phi 读到前面 phi 本轮刚写的值（`free` 的空闲链
+            # 就靠 `%prev = [%cur, ...]` 读旧值，见 #1027）。
+            if blk and blk[0][0] == _OP_PHI:
+                pending: list[tuple[int, object]] = []
+                for op in blk:
+                    if op[0] != _OP_PHI:
+                        break
+                    _, d, mapping = op
+                    src = mapping.get(prev)
+                    if src is None:
+                        raise lvm.LvmError(f"{name}: phi 没有来自块 {prev} 的入边")
+                    if d >= 0:
+                        pending.append((d, _rd(vals, src)))
+                for d, v in pending:
+                    vals[d] = v
             if prof is not None:
                 prof.block(name, labels[bi])
                 # 记剖面时不融合：那份产物要比逐字节（判据 B）。融合是执行期的事，
@@ -580,6 +596,8 @@ class T2Executor(lvm.Executor):
 
                     if code == _OP_CALL:
                         _, cname, a_ops, d = op
+                        if cname == "llvm.trap":
+                            raise lvm._Trap((name, labels[bi], j))  # noqa: SLF001
                         # ⚠ 别覆盖 `cf` —— 它还是**当前函数**，融合计划按它取
                         # （A4 之后这里踩过一次：覆盖后下一轮拿的是被调方的计划）。
                         callee = self.prog.cfunc(cname)
@@ -621,12 +639,7 @@ class T2Executor(lvm.Executor):
                     if code == _OP_UNREACH:
                         raise lvm.LvmError("执行到 unreachable")
                     if code == _OP_PHI:
-                        _, d, mapping = op
-                        src = mapping.get(prev)
-                        if src is None:
-                            raise lvm.LvmError(f"{name}: phi 没有来自块 {prev} 的入边")
-                        if d >= 0:
-                            vals[d] = _rd(vals, src)
+                        # 已经在块入口**并行**算完（见 `_body` 开头那一段）。
                         continue
                     if code == _OP_ALLOCA:
                         _, size, d = op
@@ -717,6 +730,8 @@ class T2Executor(lvm.Executor):
                         break
                     if code == _OP_CALL:
                         _, cname, a_ops, d = op
+                        if cname == "llvm.trap":
+                            raise lvm._Trap((name, labels[bi], j))  # noqa: SLF001
                         callee = self.prog.cfunc(cname)
                         if len(a_ops) != len(callee.params):
                             raise lvm.LvmError("实参个数与形参不符")
@@ -737,12 +752,7 @@ class T2Executor(lvm.Executor):
                         prev, bi = bi, tgt
                         break
                     if code == _OP_PHI:
-                        _, d, mapping = op
-                        src = mapping.get(prev)
-                        if src is None:
-                            raise lvm.LvmError(f"{name}: phi 没有来自块 {prev} 的入边")
-                        if d >= 0:
-                            vals[d] = _rd(vals, src)
+                        # 同上：块入口已经并行算完。
                         continue
                     if code == _OP_UNREACH:
                         raise lvm.LvmError("执行到 unreachable")
@@ -864,4 +874,6 @@ def run_ir_t2(text: str, out, profile=None, argv: list[str] | None = None,
         vm.call_t2(start, [], entry=True)
     except lvm._Exit as e:                                  # noqa: SLF001
         return e.code
+    except lvm._Trap as e:                                  # noqa: SLF001
+        return lvm.trap_exit(e.site)
     return 0

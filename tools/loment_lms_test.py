@@ -13,12 +13,19 @@
 
 外加两条登记处一致性：`_admin` 规则（`docs/262` §10.1）与"三张表是同一张"。
 
+**0.1.5.1 收尾（#1024 / #1027）**：LMS 形状与内存耗尽的四份产物（原生 / T0 / T2 / T3）
+必须逐字节同答；入口 A 的 retry 块要真的执行；`llvm.trap` 在 VM 里是**定义好的**
+132 + 站点，不是一句 extern 拒绝。
+
 用法: python tools/loment_lms_test.py
 """
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -26,7 +33,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import loment_suite  # noqa: E402
+import lomc  # noqa: E402
+import lomelf  # noqa: E402
 import lomentc  # noqa: E402
+import lvm  # noqa: E402
+import lvm_t2  # noqa: E402
+import lvm_t3  # noqa: E402
+import lvm_test  # noqa: E402
 import potato  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -264,6 +277,229 @@ def test_the_admin_rule_is_mechanical() -> None:
     assert tuple(potato.LMS_LEVEL_KEYS) == tuple(lomentc.LMS_TOGGLES), (
         potato.LMS_LEVEL_KEYS, lomentc.LMS_TOGGLES)
     print("      非满档一律带 `_admin`；编译器 / 校验器 / 七级键序是同一张表")
+
+
+# ---------------------------------------------------------------- 四产物对拍（#1024 / #1027）
+
+def _native_ok() -> bool:
+    """Windows 上原生 ELF 要借 WSL 跑；没有就 SKIP（与 `lvm_test` 同一条门）。"""
+    return sys.platform != "win32" or bool(lvm_test.ELF._wsl())
+
+
+def _emit_lms(src: str) -> str:
+    m = lomentc.Parser(lomc.lex(src), src).parse()
+    lomentc._gc_alpha_pass(m, [])
+    errs = lomentc.check(m, deps=[])
+    assert not errs, errs
+    return lomentc.emit_llvm(m, ROOT, [])
+
+
+def _run_four(ir: str, tag: str) -> dict[str, tuple[int, bytes, str]]:
+    """同一份 IR 跑四份产物：原生 / T0 / T2 / T3。
+
+    返回 `{产物: (退出码, stdout, stderr)}`。原生那一路没有 VM 的 stderr（它由信号死），
+    所以第三格是空串 —— 比的仍是**退出码 + stdout**（`lvm_test` 判 A 的同一把尺子）。
+    """
+    got: dict[str, tuple[int, bytes, str]] = {}
+    for name, fn in (("T0", lvm.run_ir), ("T2", lvm_t2.run_ir_t2),
+                     ("T3", lvm_t3.run_ir_t3)):
+        buf, err = io.BytesIO(), io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = fn(ir, buf, None, [tag])
+        got[name] = (rc, buf.getvalue(), err.getvalue())
+    blob, _ = lomelf.compile_ll(ir, [])
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / f"{tag}.elf"
+        p.write_bytes(blob)
+        rc, out = lvm_test._run_native(p, Path(td), tag)
+    got["native"] = (rc, out, "")
+    return got
+
+
+#: LMS 的三种回答（`lomentc_test::_LMS_RUN` 的同一形状）：界内写 1、界外写 7 与界外读
+#: **都越过 `alloc(8)` 的界**。第 4 级跳过那两条 ⇒ 答案 1；第 5 级接手 ⇒ 进程自己死。
+_LMS_SHAPE = """module m
+choose runtime
+const N: u32 = 8;
+%s
+
+fn _start() -> u32 {
+    let p: ptr = alloc(N);
+    store8(p, 0, 1);
+    store8(p, 9, 7);
+    let x: u32 = load8(p, 0);
+    let y: u32 = load8(p, 9);
+    let v: u32 = x + y;
+    syscall4(60, v as u64, 0, 0);
+    return 0;
+}
+"""
+
+
+def test_lms_shape_matches_native_on_four_products() -> None:
+    """#1024：LMS 的三种回答在**四份产物**上同答。
+
+    三个格子，每个都同时跑原生 / T0 / T2 / T3：
+
+    * 默认满档 ⇒ 越界访存被**跳过**，rc=1（界内那一半照算）；
+    * `choose close lms_reject` ⇒ `llvm.trap`，rc=132；
+    * `choose close lms_guard` ⇒ 一条检查都不发，rc=8。
+
+    ⚠ **不许只看"没崩"**：只断言退出码不够，还要断言 stdout 与答案**恰好**是那个数
+    （`docs/253` §5.4 那条"跳过之后没更坏"的判据）。
+    """
+    if not _native_ok():
+        print("      SKIP: Windows 上没有 WSL —— 原生 ELF 跑不了")
+        return
+    cells = (
+        ("reject", "", 1),
+        ("crash", "choose close lms_reject", 132),
+        ("guard_off", "choose close lms_guard", 8),
+    )
+    for tag, chooses, want in cells:
+        got = _run_four(_emit_lms(_LMS_SHAPE % chooses), tag)
+        bad = {k: v for k, v in got.items() if v[0] != want or v[1] != b""}
+        assert not bad, (tag, f"期望 rc={want} / stdout 空", bad)
+    print("      默认跳过 rc=1 / 关掉拒绝器 rc=132 / 关掉保证器 rc=8 —— 四产物同答")
+
+
+#: 入口 A 的运行时探针：65 个 1000 字节的块正好填满 64 KiB arena（65×1008=65520），
+#: 第 66 个再要 1008 字节就撞墙。**一次回收**把前 65 个死块里的垃圾还回来，retry 就
+#: 装得下 —— 请求是**小块**，所以回收后的空闲链能直接复用（收集器不做压实）。
+#: lms_guard 开着 ⇒ rc=66（66 次读回 1）；关着 ⇒ 第 66 次直接 abort（rc=132）。
+_RESCUE = """module m
+choose runtime
+choose gc_auto
+%s
+const SMALL: u32 = 1000;
+
+fn _start() -> u32 {
+    let i: i32 = 0;
+    let sum: u32 = 0;
+    while i < 66 {
+        let p: ptr = alloc(SMALL);
+        store8(p, 0, 1);
+        sum = sum + (load8(p, 0) as u32);
+        i = i + 1;
+    }
+    syscall4(60, sum as u64, 0, 0);
+    return 0;
+}
+"""
+
+
+def test_lms_entry_a_rescue_is_executed_by_every_product() -> None:
+    """#1024：入口 A 的 retry 块要**真的跑**，不是只出现在 IR 里。
+
+    把 `__loment_maybe_collect` 的调用从探针里删掉（否则 50 KB 的请求会**先**触发一次
+    常规回收，入口 A 就成了摆设）。剩下的唯一回收点就是 `alloc` 失败后的 retry 块：
+
+    * `lms_guard` 开 ⇒ retry 收集 24 个垃圾块，50 KB 装得下，rc=9；
+    * `lms_guard` 关 ⇒ 没有 retry，rc=132。
+
+    **四份产物都判**。这条红了就说明 retry 块没执行（或者 VM 没走它）。
+    """
+    if not _native_ok():
+        print("      SKIP: Windows 上没有 WSL —— 原生 ELF 跑不了")
+        return
+    for on, want in ((True, 66), (False, 132)):
+        src = _RESCUE % ("" if on else "choose close lms_guard")
+        ir = re.sub(r"^\s*call void @__loment_maybe_collect\([^)]*\)\n", "",
+                    _emit_lms(src), flags=re.M)
+        assert "call void @__loment_maybe_collect" not in ir, "常规触发没被拿掉，探针不纯"
+        got = _run_four(ir, "rescue_on" if on else "rescue_off")
+        bad = {k: v for k, v in got.items() if v[0] != want or v[1] != b""}
+        assert not bad, ("lms_guard 开" if on else "lms_guard 关", bad)
+    print("      retry 块执行：开 ⇒ rc=66（拉回成功）/ 关 ⇒ rc=132（拉不回就死）")
+
+
+#: 内存墙：一次要 70000 字节，比整个 64 KiB arena 还大 —— 回收也救不了。
+_WALL = """module m
+choose runtime
+choose %s
+%s
+const BIG: u32 = 70000;
+
+fn _start() -> u32 {
+    let p: ptr = alloc(BIG);
+    store8(p, 0, 1);
+    syscall4(60, 0, 0, 0);
+    return 0;
+}
+"""
+
+
+def test_memory_exhaustion_hits_the_same_wall_on_four_products() -> None:
+    """#1027：六个格子（三档回收 × lms_guard 开关）都撞同一堵墙：rc=132。
+
+    `gc_manual` 没有收集器，入口 A 本来就不在那里；`gc_auto` / `gc_auto_alpha`
+    有收集器，但 70 KB 的单块**回收也装不下** —— 六格都必须到 `llvm.trap`。
+    四份产物的退出码与 stdout 必须逐字节相同。
+    """
+    if not _native_ok():
+        print("      SKIP: Windows 上没有 WSL —— 原生 ELF 跑不了")
+        return
+    for gc in ("gc_manual", "gc_auto", "gc_auto_alpha"):
+        for lms in ("", "choose close lms_guard"):
+            got = _run_four(_emit_lms(_WALL % (gc, lms)), f"wall_{gc}")
+            bad = {k: v for k, v in got.items() if v[0] != 132 or v[1] != b""}
+            assert not bad, (gc, bool(lms), bad)
+    print("      三档回收 × 保证器开/关：六格都是 rc=132（四产物同答）")
+
+
+#: 空闲链复用：1000 轮、每轮 100 字节（尺寸走运行时变量，避免 alpha 的 L0 提升）。
+#: 64 KiB arena 装不下 100 KB；只有回收把死块挂回空闲链并**被下一次 alloc 复用**，
+#: 程序才跑得完（1000 次读回 1 ⇒ rc=232）。
+_SURVIVOR = """module m
+choose runtime
+choose gc_auto
+choose close lms_guard
+
+fn _start() -> u32 {
+    let n: u32 = 100;
+    let i: i32 = 0;
+    let sum: u32 = 0;
+    while i < 1000 {
+        let p: ptr = alloc(n);
+        store8(p, 0, 1);
+        sum = sum + (load8(p, 0) as u32);
+        i = i + 1;
+    }
+    syscall4(60, sum as u64, 0, 0);
+    return 0;
+}
+"""
+
+
+def test_gc_auto_reuses_freed_blocks_on_every_product() -> None:
+    """#1027：回收之后的空闲链**真的被复用**，四份产物都跑完 1000 轮。
+
+    这一条钉的是 VM 的 `phi` **并行**语义：`free` 的插入循环里
+    `%prev = phi [0, %link], [%cur, %lcont]` 必须读到入边的旧 `%cur`；顺序求值会
+    读到本轮刚写的 0，于是每一轮都把空闲链重置成单块，arena 提前耗尽。删掉那条
+    并行求值 ⇒ VM 在 600 轮左右 abort（原生仍跑完），这条当场红。
+    """
+    if not _native_ok():
+        print("      SKIP: Windows 上没有 WSL —— 原生 ELF 跑不了")
+        return
+    got = _run_four(_emit_lms(_SURVIVOR), "survivor")
+    bad = {k: v for k, v in got.items() if v[0] != 232 or v[1] != b""}
+    assert not bad, ("1000 轮应读回 1000 ⇒ rc=232", bad)
+    print("      1000 轮分配 + 回收 + 复用：四产物都 rc=232")
+
+
+def test_vm_trap_reports_the_site() -> None:
+    """#1027：`llvm.trap` 在 VM 里是**定义好的** 132，且说得出死在哪一条。
+
+    原生那边是 `SIGILL`（shell 报 132），没有消息；VM 这边必须把
+    `函数:块#指令序号` 写出来 —— 两个实现"都死了"不算证据。
+    """
+    got = _run_four(_emit_lms(_LMS_SHAPE % "choose close lms_reject"), "trap_site")
+    for name in ("T0", "T2", "T3"):
+        rc, out, err = got[name]
+        assert rc == 132 and out == b"", (name, rc, out)
+        assert re.search(r"llvm\.trap at [^:\s]+:[^#\s]+#\d+", err), (name, err)
+    print("      T0/T2/T3 都报 `llvm.trap at 函数:块#指令`，退出码 132")
 
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

@@ -33,14 +33,14 @@ def test(fn):
     return fn
 
 
-CYCLES = 6
+CYCLES = 16
 
 PROBE = """module hotstress
 choose runtime
 use bytes
 use hotswap
 
-const CYCLES: u32 = 6;
+const CYCLES: u32 = 16;
 const TAG: u32 = 1;
 
 fn write_all(fd: u64, p: ptr, n: u64) -> i64 {
@@ -276,7 +276,7 @@ def _case(versions: list[str], plan: list[tuple], *, tamper: tuple[int, ...] = (
 
 
 @test
-def test_six_back_to_back_swaps() -> None:
+def test_back_to_back_swaps() -> None:
     versions = [_source(k, CYCLES) for k in range(1, CYCLES + 2)]
     plan = []
     for k in range(1, CYCLES + 1):

@@ -1,4 +1,4 @@
-# 284 · Java AOT 语料实测：70 只真实 jar
+# 293 · Java AOT 语料实测：70 只真实 jar
 
 > 状态：**实测报告**（2026-11-03）。工具 `tools/lomjava_corpus.py`，语料坐标与哈希在
 > `tools/fixtures/java-corpus.txt`（jar 本身不入树）。上游设计见 `docs/282`（AOT 内核）

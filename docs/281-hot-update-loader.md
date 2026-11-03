@@ -66,7 +66,7 @@ reloc 38 8388608
 
 `tools/loment_hotcore_test.py` 让一个真的 Loment 探针**换掉自己**：`nest()` 递归到第 N 层，
 在最里面把装载件交给固定核，然后每一层接着跑 —— 每层读到的版本常量必须来自**新**构建
-（`docs/282`）。`hot_restore` / `hot_release` 留在这里，但一次成功的强制重映射之后调用者
+（`docs/284`）。`hot_restore` / `hot_release` 留在这里，但一次成功的强制重映射之后调用者
 已经在新槽里执行，它们不再是"装完再撤"的那条路。
 
 epoch 的发布顺序是 **`SWAPPING`(2) → 改槽表 → `READY`(1)**。两个 store 都是对齐的 32 位写
@@ -76,7 +76,7 @@ epoch 的发布顺序是 **`SWAPPING`(2) → 改槽表 → `READY`(1)**。两个
 `hot_install` 把每个槽**原来的目标**存进调用方给的 `save`（每槽 4 字节），`hot_restore`
 用它 + 候选的函数表改回去。**只有在没有任何东西指向候选槽时才能 `hot_release`** ——
 而 `#1152` 的强制重映射之后，调用者本身就在候选槽里跑，`munmap` 它等于撤掉正在执行的页
-（`docs/282` §6）。
+（`docs/284` §6）。
 
 ### 3.2 构建管线：`loment build --profile hotswap`
 

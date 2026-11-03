@@ -35,7 +35,7 @@ def digest_file(path: Path) -> str:
 
     准入判据要由**工具链自己**在进程里算（`loment/tools/update.lomt`），而工具链里只有
     `sha256.lomt`。选一个它算不出来的算法，等于把准入判据锁在 Python 里 —— 那正好是
-    `docs/278` §2 拒绝的形状。差异记在 `docs/283` §2。
+    `docs/278` §2 拒绝的形状。差异记在 `docs/285` §2。
     """
     h = hashlib.sha256()
     with path.open("rb") as f:

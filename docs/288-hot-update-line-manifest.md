@@ -21,7 +21,7 @@ projection {
 - 同一个 sha 不能同时在 `line` 与 `evicted` 里 —— 那是自相矛盾的清单，同样拒。
 - `projection.baseline` 必须等于跑着的构建的基线（`projection-baseline`），
   `projection.release` 必须等于清单的 `release`（`projection-release`）。
-- `tree` 是投影树的哈希：重放同一条线得到同一个值（`docs/285` 判据 5）。
+- `tree` 是投影树的哈希：重放同一条线得到同一个值（`docs/287` 判据 5）。
 
 ## 2. `loment update status`
 
@@ -55,7 +55,7 @@ restart required
 ## 4. 这一版**不**做到的
 
 1. **`status` 只读本机的 `applied/`。** 它不知道别的机器上装过什么（没有中心台账）。
-2. **回滚是"再装一次前一个点"。** `hot_restore` 在强制重映射之后不适用（`docs/282` §6）；
+2. **回滚是"再装一次前一个点"。** `hot_restore` 在强制重映射之后不适用（`docs/284` §6）；
    所以回滚走的是同一条 fetch → stage → 换 的路，只是候选更旧，且要显式
    `allow_rollback`。
 3. **`restart required` 只报最后一份清单的。** 历史上被剔除的 fix 不重复报 —— 它们要么

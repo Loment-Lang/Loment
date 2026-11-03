@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import loment_hotfix as hf  # noqa: E402
 
-#: 接口面摘要的五个量（`docs/283` §3）。任何一个动了就不是热更新，是功能。
+#: 接口面摘要的五个量（`docs/285` §3）。任何一个动了就不是热更新，是功能。
 DIGEST_KEYS = ("language", "contract", "capabilities", "surface", "cli")
 
 

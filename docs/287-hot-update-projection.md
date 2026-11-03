@@ -1,4 +1,4 @@
-# 285 · 热线与投影：一次 Pre-Release 只带走它自己的 fix（`#1156`）
+# 287 · 热线与投影：一次 Pre-Release 只带走它自己的 fix（`#1156`）
 
 > 上游：`#1146`（伞）、`#1147`（准入）、`#1153`（清单）。实现：
 > `tools/loment_projection.py`；判据：`tools/loment_projection_test.py`（6 条）。

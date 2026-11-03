@@ -113,8 +113,8 @@ def test(fn):
 #: （`HOT_STRIDE` / `HOT_RELOC`）、一个是记录长度（`HOT_FUNC`）、三个是装载件的头长 /
 #: 摘要长度 / 槽表上限。它们都在 `EXPLAINED` 里写清来路（装载器用**返回码**点名，
 #: 不在这里终止进程）。条数 239 → **245**、沉默 155 → **161**。
-CAPACITY_SITES = 245
-SILENT_SITES = 161
+CAPACITY_SITES = 247
+SILENT_SITES = 163
 
 #: 第二类：字面量上界（`#770`）。`[T; N]` 与 `literal:<N>` 各自钉住总数与沉默的那一份。
 LITERAL_SITES = 63
@@ -164,7 +164,9 @@ SILENT_NAMES = frozenset((
     "H",
     "HASH_LEN",
     "IN_CAP",
+    "HOT_CALL",
     "HOT_DIG",
+    "HOT_FRAMES",
     "HOT_FUNC",
     "HOT_HDR",
     "HOT_MAX_FN",

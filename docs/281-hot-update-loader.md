@@ -1,7 +1,7 @@
 # 281 · 双槽装载器（`#1151`）
 
 > 上游：`#1146`（伞）、`#1151`（切片 4）。参考模型：`tools/loment_hotload.py`；
-> 判据：`tools/loment_hotload_test.py`（8 条）。元数据格式见 `docs/279`、`docs/280`。
+> 判据：`tools/loment_hotload_test.py`（13 条）。元数据格式见 `docs/279`、`docs/280`。
 
 ## 1. 装载器要做的四件事
 
@@ -64,9 +64,10 @@ reloc 38 8388608
   6 内存 / 7 摘要 / 8 mmap / 9 地址 / 10 mprotect / 11 槽号 / 12 入口 / 13-14 自改），
   由调用方点名。探针把返回码与结果一起打出来。
 
-`tools/loment_hotcore_test.py` 让一个真的 Loment 探针**换掉自己**：先调 `add(1,2)` 得 3，
-把装载件交给固定核，再调一次得 4（epoch=1）；然后 `hot_restore` 把槽表改回（再调得 3），
-`hot_release` 把候选那一槽 `munmap` 掉（epoch 回到 0）。
+`tools/loment_hotcore_test.py` 让一个真的 Loment 探针**换掉自己**：`nest()` 递归到第 N 层，
+在最里面把装载件交给固定核，然后每一层接着跑 —— 每层读到的版本常量必须来自**新**构建
+（`docs/282`）。`hot_restore` / `hot_release` 留在这里，但一次成功的强制重映射之后调用者
+已经在新槽里执行，它们不再是"装完再撤"的那条路。
 
 epoch 的发布顺序是 **`SWAPPING`(2) → 改槽表 → `READY`(1)**。两个 store 都是对齐的 32 位写
 （x86-64 上原子），TSO 保证 store-store 顺序；语言层面没有 release/acquire，换到弱内存序的
@@ -74,7 +75,8 @@ epoch 的发布顺序是 **`SWAPPING`(2) → 改槽表 → `READY`(1)**。两个
 
 `hot_install` 把每个槽**原来的目标**存进调用方给的 `save`（每槽 4 字节），`hot_restore`
 用它 + 候选的函数表改回去。**只有在没有任何东西指向候选槽时才能 `hot_release`** ——
-今天就是 restore 之后；帧的重映射（`#1152`）之前，运行中的旧镜像那一槽永远不能还。
+而 `#1152` 的强制重映射之后，调用者本身就在候选槽里跑，`munmap` 它等于撤掉正在执行的页
+（`docs/282` §6）。
 
 ### 3.2 构建管线：`loment build --profile hotswap`
 

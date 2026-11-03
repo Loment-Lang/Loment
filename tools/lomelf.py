@@ -1375,13 +1375,33 @@ class Emitter:
             self.asm.emit(b"\x90" * (HOT_STRIDE - 5))
 
     def emit_gate(self) -> None:
-        """入口闸（`#1150`）：读全局 epoch，非零就走候选那条路（真正的换在 `#1151`）。"""
+        """入口闸（`#1150`）：读全局 epoch；顺手把调用者的 `rbp` 记下来（`#1152`）。
+
+        帧链只能从闸里拿到：语言没有"取当前帧指针"的内建，而闸在**每一个**函数入口
+        被调用，`[rbp]` 正好是那个函数的帧指针。固定核的 `hot_install` 从 `epoch + 8`
+        读出它，再沿 `[rbp]` 一路走到根，把每一帧的返回地址改指到新镜像。
+
+        字节布局（`self_gate` 是 text 相对偏移）：
+
+        ```
+        0   55                 push rbp
+        1   48 89 E5           mov rbp, rsp
+        4   48 8B 4D 00        mov rcx, [rbp]      ; 调用者的帧指针
+        8   48 B8 <imm64>      movabs rax, &epoch  ; imm64 在 +10
+        18  48 89 48 08        mov [rax+8], rcx    ; 帧指针存进 epoch+8
+        22  83 38 00           cmp dword [rax], 0
+        25  74 00              je +0
+        27  5D C3              pop rbp; ret
+        ```
+        """
         start = self.asm.here()
         self.hot_header["gate"] = start - TEXT_VADDR
         self.asm.label("__loment_hot_gate")
         self.asm.emit(b"\x55")                  # push rbp
         self.asm.emit(b"\x48\x89\xE5")          # mov rbp, rsp
+        self.asm.emit(b"\x48\x8B\x4D\x00")      # mov rcx, [rbp]
         self.asm.mov_abs(RAX, "__loment_hot_epoch")
+        self.asm.emit(b"\x48\x89\x48\x08")      # mov [rax+8], rcx
         self.asm.emit(b"\x83\x38\x00")          # cmp dword [rax], 0
         self.asm.jcc("e", "__loment_hot_gate_ret")
         self.asm.label("__loment_hot_gate_pending")
@@ -6457,9 +6477,10 @@ def compile_ll(text: str, objects: list | None = None,
     em = Emitter(globals_, {x for x in externs if not x.startswith("llvm.")},
                  hotswap=hotswap, swappable=[f.name for f in funcs])
     if hotswap:
-        # 入口闸读的那个 epoch 字；候选在等时非零（`#1151` 写它）。
+        # 入口闸写/读的两个字：epoch（`#1151`）与调用者的帧指针（`#1152`）。
+        # 它们必须相邻且相隔 8 —— 闸里用 `[rax+8]` 存，固定核按 `epoch+8` 读。
         em.asm.labels["__loment_hot_epoch"] = DATA_VADDR + len(data) + bss
-        bss += 8
+        bss += 16
     for g in globals_:
         em.asm.labels[g.name] = g.addr
     # **TLS 只在"没有 loader 替我们管"的时候才自己装**。

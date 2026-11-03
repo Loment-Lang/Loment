@@ -17,6 +17,21 @@ from pathlib import Path
 
 SLOT_STRIDE = 16
 
+#: 装载件的头（`loment/lib/hotswap.lomt` 文件头的表）。`#1152` 加了函数表与调用点配对：
+#: 重映射要知道"这个返回地址是哪个函数的第几个调用点"，两侧各一格才能换成新偏移。
+MAGIC = 0x4C544F48
+HDR = 56
+FUNC = 24
+CALL = 8
+RELOC = 12
+GATE_LEN = 33
+SAVE_N = 16384
+
+FLAG_OK = 0
+FLAG_LAYOUT = 1
+FLAG_CALLS = 2
+FLAG_MISSING = 3
+
 
 class Refused(Exception):
     def __init__(self, code: str, detail: str = "") -> None:
@@ -145,3 +160,87 @@ def flip(old_text: bytearray, old_base: int, old_slots: int,
 def new_entries(new_meta: dict, slot_base: int) -> dict[int, int]:
     return {fn["tramp"]: slot_base + fn["entry"]
             for fn in new_meta["funcs"].values()}
+
+
+def remap_rows(old: dict, new: dict) -> list[dict]:
+    """每个槽一行：能不能重映射，以及逐调用点的（旧偏移，新偏移）。
+
+    **可重映射的两个条件**（`docs/279` §4）：帧布局哈希相同（新代码读得到旧帧里的槽）、
+    调用点 id 序列相同（返回地址一一对上）。任一不同就整份拒绝 —— 但只有**真的在栈上**
+    的函数才触发（`hot_remap` 在走到那一帧时才看 `flags`）。
+
+    不可映射的函数也照写旧偏移：不认识那一帧，就没法拒绝它。
+    """
+    old_by_slot = {fn["tramp"]: (name, fn) for name, fn in old["funcs"].items()}
+    new_by_slot = {fn["tramp"]: (name, fn) for name, fn in new["funcs"].items()}
+    rows: list[dict] = []
+    for slot in sorted(set(old_by_slot) | set(new_by_slot)):
+        o = old_by_slot.get(slot)
+        n = new_by_slot.get(slot)
+        if o is None or n is None:
+            rows.append({"slot": slot, "flag": FLAG_MISSING,
+                         "self_entry": o[1]["entry"] if o else 0,
+                         "cand_entry": n[1]["entry"] if n else 0,
+                         "pairs": [(off, 0) for _id, off in (o[1]["calls"] if o else [])]})
+            continue
+        ofn, nfn = o[1], n[1]
+        if ofn["layout"] != nfn["layout"]:
+            flag = FLAG_LAYOUT
+        elif [c for c, _ in ofn["calls"]] != [c for c, _ in nfn["calls"]]:
+            flag = FLAG_CALLS
+        else:
+            flag = FLAG_OK
+        if flag == FLAG_OK:
+            pairs = [(a[1], b[1]) for a, b in zip(ofn["calls"], nfn["calls"])]
+        else:
+            pairs = [(off, 0) for _id, off in ofn["calls"]]
+        rows.append({"slot": slot, "flag": flag, "self_entry": ofn["entry"],
+                     "cand_entry": nfn["entry"], "pairs": pairs})
+    return rows
+
+
+def build_blob(old: dict, new: dict, new_text: bytes) -> bytes:
+    """把两份 `.lomhot` 与候选文本拼成固定核吃的装载件。"""
+    rows = remap_rows(old, new)
+    ncalls = sum(len(r["pairs"]) for r in rows)
+    out = struct.pack("<14I", MAGIC, old["base"], old["fixed"]["slots"],
+                      old["fixed"]["gate"], GATE_LEN, new["base"],
+                      new["fixed"]["slots"], new["fixed"]["gate"], len(new_text),
+                      len(new["relocs"]), len(rows), len(new_text), ncalls, 0)
+    for r in rows:
+        out += struct.pack("<6I", r["slot"], r["self_entry"], r["cand_entry"],
+                           r["flag"], len(r["pairs"]), 0)
+    for r in rows:
+        for so, co in r["pairs"]:
+            out += struct.pack("<II", so, co)
+    for off, tgt in new["relocs"]:
+        out += struct.pack("<III", off, tgt & 0xFFFFFFFF, tgt >> 32)
+    return out + new_text
+
+
+def remap(old_meta: dict, new_meta: dict, returns: list[int], slot: int) -> tuple[list[int], int]:
+    """把一条返回地址链按装载件的规则换掉（模型，不碰进程）。
+
+    返回 `(新链, 拒绝码)`；`0` 表示整条链都能映射。拒绝码与固定核一致：
+    `(flags << 12) | 槽号`。
+    """
+    rows = remap_rows(old_meta, new_meta)
+    base = old_meta["base"]
+    out: list[int] = []
+    for ra in returns:
+        hit = None
+        for r in rows:
+            for so, co in r["pairs"]:
+                if base + r["self_entry"] + so == ra:
+                    hit = (r, co)
+                    break
+            if hit:
+                break
+        if hit is None:
+            out.append(ra)          # 入口桩/外部代码：不动
+            continue
+        r, co = hit
+        if r["flag"] != FLAG_OK:
+            return out, (r["flag"] << 12) + r["slot"]
+        out.append(slot + r["cand_entry"] + co)
+    return out, 0

@@ -257,7 +257,8 @@ def _parse_vti(r: Reader) -> tuple:
     if tag == 7:
         return (SM_OBJ, r.u2())
     if tag == 8:
-        return (SM_UNINIT, r.u1())
+        # JVMS §4.7.4.3: Uninitialized_variable_info 的 offset 是 **u2**（不是 u1）。
+        return (SM_UNINIT, r.u2())
     if 0 <= tag <= 6:
         return (tag, 0)
     raise JavaError(f"StackMapTable: bad verification type {tag}")
@@ -441,6 +442,8 @@ _UNSUPPORTED_OPCODE = {
     0xA8: "jsr", 0xA9: "ret", 0xAA: "tableswitch", 0xAB: "lookupswitch",
     0xBA: "invokedynamic", 0xC2: "monitorenter", 0xC3: "monitorexit",
     0xC0: "checkcast", 0xC1: "instanceof", 0xC4: "wide", 0xC5: "multianewarray",
+    0x5B: "dup_x2", 0x5C: "dup2", 0x5D: "dup2_x1", 0x5E: "dup2_x2",
+    0x5F: "swap",
 }
 
 _OPS: dict[int, tuple[str, str, int]] = {}
@@ -453,7 +456,9 @@ def _op(code: int, name: str, fmt: str = "", delta: int = 0) -> None:
 def _init_ops() -> None:
     for i, name in enumerate(("nop", "aconst_null", "iconst_m1", "iconst_0", "iconst_1",
                               "iconst_2", "iconst_3", "iconst_4", "iconst_5")):
-        _op(i, name, "", 1 if 2 <= i <= 8 else 0)
+        # `aconst_null` 也**推一个**（操作数栈高度 +1）；早先只给了 1..8 里的常量，
+        # 于是 `null` 之后的高度少一 —— 这正是 `ifnull` 走到时"栈下溢"的来源。
+        _op(i, name, "", 1 if 1 <= i <= 8 else 0)
     _op(9, "lconst_0", "", 1)
     _op(10, "lconst_1", "", 1)
     _op(11, "fconst_0", "", 1)
@@ -513,9 +518,11 @@ def _init_ops() -> None:
     _op(83, "aastore", "", -3)
     _op(84, "bastore", "", -3); _op(85, "castore", "", -3); _op(86, "sastore", "", -3)
     _op(188, "newarray", "b", 0); _op(190, "arraylength", "", 0)
+    _op(198, "ifnull", "h", -1); _op(199, "ifnonnull", "h", -1)
     _op(189, "anewarray", "h", 0)
     _op(192, "checkcast", "h", 0); _op(193, "instanceof", "h", 0)
     _op(187, "new", "h", 1); _op(89, "dup", "", 1)
+    _op(90, "dup_x1", "", 1)
     _op(87, "pop", "", -1); _op(88, "pop2", "", -2)
     _op(180, "getfield", "h", 0); _op(181, "putfield", "h", -2)
     _op(178, "getstatic", "h", 1); _op(179, "putstatic", "h", -1)
@@ -813,7 +820,7 @@ T_NULL = "null"
 T_UTHIS = "uninitialized-this"
 
 #: 一个 jar 最多带这么多个类（编译期资源上限的一部分）。
-MAX_CLASSES = 1024
+MAX_CLASSES = 8192
 #: 单方法代码长度 —— 与 JVM 自己的上限一致，也挡住"一个方法撑爆工具"。
 MAX_CODE = 65535
 #: 一份 IR 的字节上限 —— 防止一个 jar 在编译期把产物撑到不可用。
@@ -920,8 +927,14 @@ def _vstep(cf: ClassFile, m: Method, x: Insn, st: list, lc: list) -> list[int]:
             _vpush(st, T_I32, m, ctx, x.off)
         elif ent and ent[0] == CP_STRING:
             _vpush(st, T_REF, m, ctx, x.off)
-        elif ent and ent[0] in (CP_FLOAT, CP_METHOD_HANDLE, CP_METHOD_TYPE):
-            raise JavaError(f"J003: {ctx} @{x.off}: ldc of a constant this slice does not support")
+        elif ent and ent[0] == CP_CLASS:
+            # `Foo.class`：这个子集没有 `Class` 对象，只把它降成**类号 token**
+            # （引用格）。反射本来就被拒，所以它只出现在"传下去但不用"的位置。
+            _vpush(st, T_REF, m, ctx, x.off)
+        elif ent and ent[0] in (CP_FLOAT, CP_METHOD_HANDLE, CP_METHOD_TYPE,
+                                CP_DYNAMIC, CP_INVOKE_DYNAMIC):
+            raise JavaError(
+                f"J003: {ctx} @{x.off}: ldc of constant tag {ent[0]} is not supported")
         else:
             raise JavaError(f"J002: {ctx} @{x.off}: bad ldc constant #{idx}")
     elif name == "ldc2_w":
@@ -1022,6 +1035,9 @@ def _vstep(cf: ClassFile, m: Method, x: Insn, st: list, lc: list) -> list[int]:
         _vpop(st, T_REF, ctx, x.off)
         _vpop(st, T_REF, ctx, x.off)
         branch = x.args[0]
+    elif name in ("ifnull", "ifnonnull"):
+        _vpop(st, T_REF, ctx, x.off)
+        branch = x.args[0]
     elif name == "goto":
         return [x.args[0]]
     elif name in ("tableswitch", "lookupswitch"):
@@ -1034,6 +1050,31 @@ def _vstep(cf: ClassFile, m: Method, x: Insn, st: list, lc: list) -> list[int]:
         if st[-1] == T_I64:
             raise JavaError(f"J002: {ctx} @{x.off}: dup of a long")
         _vpush(st, st[-1], m, ctx, x.off)
+    elif name == "dup_x1":
+        if len(st) < 2:
+            raise JavaError(f"J002: {ctx} @{x.off}: dup_x1 needs two values")
+        v1 = st.pop()
+        v2 = st.pop()
+        if v1 == T_I64 or v2 == T_I64:
+            raise JavaError(f"J002: {ctx} @{x.off}: dup_x1 with a long")
+        st.extend([v1, v2, v1])
+        if len(st) > m.max_stack:
+            raise JavaError(f"J002: {ctx} @{x.off}: operand stack exceeds max_stack")
+    elif name == "dup2":
+        if not st:
+            raise JavaError(f"J002: {ctx} @{x.off}: dup2 on an empty stack")
+        if st[-1] == T_I64:
+            _vpush(st, T_I64, m, ctx, x.off)
+        else:
+            if len(st) < 2:
+                raise JavaError(f"J002: {ctx} @{x.off}: dup2 needs two values")
+            v1 = st.pop()
+            v2 = st.pop()
+            if v1 == T_I64 or v2 == T_I64:
+                raise JavaError(f"J002: {ctx} @{x.off}: dup2 with a long")
+            st.extend([v2, v1, v2, v1])
+            if len(st) > m.max_stack:
+                raise JavaError(f"J002: {ctx} @{x.off}: operand stack exceeds max_stack")
     elif name == "pop":
         _vpop(st, st[-1] if st else T_I32, ctx, x.off)
     elif name == "pop2":
@@ -1070,7 +1111,15 @@ def _vstep(cf: ClassFile, m: Method, x: Insn, st: list, lc: list) -> list[int]:
             _vpush(st, ty, m, ctx, x.off)
         else:
             _vpop(st, ty, ctx, x.off)
-            _vpop(st, T_REF, ctx, x.off)
+            # 匿名内部类的构造器会先 `putfield this$0` 再调超类构造器（JVMS §4.10.1.9
+            # 允许 uninitializedThis 作为**本类字段**的 putfield 目标）。
+            if st and st[-1] == T_UTHIS:
+                if cls != cf.name:
+                    raise JavaError(
+                        f"J002: {ctx} @{x.off}: putfield {cls}.{fname} on uninitialized this")
+                st.pop()
+            else:
+                _vpop(st, T_REF, ctx, x.off)
     elif name in ("invokestatic", "invokevirtual", "invokespecial", "invokeinterface"):
         cls, mname, desc = methodref(cf.pool, x.args[0])
         params, ret = parse_method_descriptor(desc)
@@ -1197,7 +1246,7 @@ def _verify_method(cf: ClassFile, m: Method) -> None:
 
     state: dict[int, tuple] = {}
     hstate: dict[int, tuple] = {}
-    for _round in range(64):
+    for _round in range(256):
         changed = False
         state = {}
         work = [(0, ((), tuple(lc0)))]
@@ -1233,7 +1282,12 @@ def _verify_method(cf: ClassFile, m: Method) -> None:
             if loc is None:
                 continue
             new = ((T_REF,), tuple(loc))
-            if hstate.get(target) != new:
+            prev = hstate.get(target)
+            if prev is not None:
+                # 单调：只允许往 `top` 走，否则重算出来的状态会来回摆，永远不收敛。
+                new = ((T_REF,),
+                       tuple(_vmerge(a, b, ctx) for a, b in zip(prev[1], new[1])))
+            if prev != new:
                 hstate[target] = new
                 changed = True
         if not changed:
@@ -1509,6 +1563,7 @@ declare void @jrt_println_i64(i64, i64)
 declare void @jrt_print_s(i64, ptr)
 declare void @jrt_println_s(i64, ptr)
 declare void @jrt_println(i64)
+declare void @jrt_write_bytes(i64, ptr, i32)
 declare ptr @jrt_sb_new()
 declare void @jrt_sb_c(ptr, i32)
 declare void @jrt_sb_i32(ptr, i32)
@@ -1917,6 +1972,8 @@ class Emitter:
             self.emit("ret void")
         elif self.ret in ("i32", "i64"):
             self.emit(f"ret {self.ret} 0")
+        elif self.ret == "ptr":
+            self.emit("ret ptr null")
         else:
             raise JavaError(f"exception propagation does not support a {self.ret} return")
         self.lines.append(f"N{x.off}:")
@@ -1927,8 +1984,12 @@ class Emitter:
         if h0 is None:
             return  # unreachable
         self.lines.append(f"L{x.off}:")
-        if name in ("iconst_m1", "iconst_0", "iconst_1", "iconst_2", "iconst_3",
-                    "iconst_4", "iconst_5"):
+        if name == "aconst_null":
+            v = self.t()
+            self.emit(f"{v} = inttoptr i64 0 to ptr")
+            self._push("ptr", v, h0)
+        elif name in ("iconst_m1", "iconst_0", "iconst_1", "iconst_2", "iconst_3",
+                      "iconst_4", "iconst_5"):
             v = {"iconst_m1": -1, "iconst_0": 0, "iconst_1": 1, "iconst_2": 2,
                  "iconst_3": 3, "iconst_4": 4, "iconst_5": 5}[name]
             self._push("i32", str(v), h0)
@@ -1945,6 +2006,11 @@ class Emitter:
             ent = self.pool[x.args[0]] if x.args[0] < len(self.pool) else None
             if ent and ent[0] == CP_INTEGER:
                 self._push("i32", str(ent[1]), h0)
+            elif ent and ent[0] == CP_CLASS:
+                cname = _class_name(self.pool, ent[1])
+                v = self.t()
+                self.emit(f"{v} = inttoptr i64 {self.class_ids.get(cname, 0)} to ptr")
+                self._push("ptr", v, h0)
             elif ent and ent[0] == CP_STRING:
                 s = _utf8(self.pool, ent[1])
                 data = s.encode("utf-16-le")
@@ -2081,6 +2147,12 @@ class Emitter:
             self.emit(f"{t0} = trunc i32 {a} to {narrow[0]}")
             self.emit(f"{r} = {narrow[1]} {narrow[0]} {t0} to i32")
             self._push("i32", r, h0 - 1)
+        elif name in ("ifnull", "ifnonnull"):
+            v = self._pop("ptr", h0 - 1)
+            c = self.t()
+            op = "eq" if name == "ifnull" else "ne"
+            self.emit(f"{c} = icmp {op} ptr {v}, null")
+            self.emit(f"br i1 {c}, label %L{x.args[0]}, label %L{x.off + x.size}")
         elif name in ("ifeq", "ifne", "iflt", "ifge", "ifgt", "ifle"):
             v = self._pop("i32", h0 - 1)
             cond = {"ifeq": "eq", "ifne": "ne", "iflt": "slt",
@@ -2102,6 +2174,14 @@ class Emitter:
             v = self.t()
             self.emit(f"{v} = load i64, ptr %stk{h0 - 1}")
             self.emit(f"store i64 {v}, ptr %stk{h0}")
+        elif name == "dup_x1":
+            t1 = self.t()
+            t2 = self.t()
+            self.emit(f"{t1} = load i64, ptr %stk{h0 - 1}")
+            self.emit(f"{t2} = load i64, ptr %stk{h0 - 2}")
+            self.emit(f"store i64 {t1}, ptr %stk{h0 - 2}")
+            self.emit(f"store i64 {t2}, ptr %stk{h0 - 1}")
+            self.emit(f"store i64 {t1}, ptr %stk{h0}")
         elif name in ("pop", "pop2"):
             pass
         elif name == "new":
@@ -2183,11 +2263,17 @@ class Emitter:
             for i in range(n - 1, -1, -1):
                 vals[i] = self._pop(params[i], h0 - n + i)
             recv = self._pop("ptr", h0 - n - 1)
-            if cls == "java/io/PrintStream" and mname in ("print", "println"):
+            if cls == "java/io/PrintStream" and mname in ("print", "println", "write"):
                 fd = self.t()
                 self.emit(f"{fd} = ptrtoint ptr {recv} to i64")
                 nl = "ln" if mname == "println" else ""
-                if n == 0 and mname == "println":
+                if mname == "write" and desc == "([B)V":
+                    cnt = self.t()
+                    data = self.t()
+                    self.emit(f"{cnt} = load i32, ptr {vals[0]}")
+                    self.emit(f"{data} = getelementptr i8, ptr {vals[0]}, i32 8")
+                    self.emit(f"call void @jrt_write_bytes(i64 {fd}, ptr {data}, i32 {cnt})")
+                elif n == 0 and mname == "println":
                     self.emit(f"call void @jrt_println(i64 {fd})")
                 elif n == 1 and params[0] == "i32":
                     self.emit(f"call void @jrt_print{nl}_i32(i64 {fd}, i32 {vals[0]})")
@@ -2542,8 +2628,11 @@ class Emitter:
             self.emit(f"ret i64 {v}")
         elif name == "return":
             self.emit("ret void")
-        elif name in ("freturn", "dreturn", "areturn"):
-            raise JavaError(f"{name} is not supported in the first slice")
+        elif name == "areturn":
+            v = self._pop("ptr", h0 - 1)
+            self.emit(f"ret ptr {v}")
+        elif name in ("freturn", "dreturn"):
+            raise JavaError(f"J003: {name} is not supported in the first slice")
         else:
             raise JavaError(f"opcode {name} at {x.off} is not supported in the first slice")
 
@@ -2563,7 +2652,7 @@ def emit_method_ir(module: str, cls: str, m: Method, pool: list,
     if m.code is None:
         return None
     desc_params, ret = parse_method_descriptor(m.desc)
-    if ret not in ("i32", "i64", "void"):
+    if ret not in ("i32", "i64", "void", "ptr"):
         raise JavaError(f"{cls}.{m.name}: unsupported return type in {m.desc}")
     if is_ctor:
         if ret != "void":

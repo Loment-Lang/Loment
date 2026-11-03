@@ -225,6 +225,11 @@ pub fn jrt_println_s(fd: i64, s: ptr) {
     jstr(fd, s, 1);
 }
 
+/// `PrintStream.write(byte[])`：数组布局是 `[count:i32 @0][bytes @8]`。
+pub fn jrt_write_bytes(fd: i64, p: ptr, n: u32) {
+    wr(fd, p, n);
+}
+
 pub fn jrt_println(fd: i64) {
     let b: ptr = jrt_alloc(4);
     store8(b, 0, 10 as u8);

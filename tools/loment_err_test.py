@@ -1822,7 +1822,8 @@ def test_launcher_synthesizes_a_record_when_the_compiler_dies_silently():
     修之前：`report_diags` 看到空文件就只把驱动的 stderr 原样回吐（而崩溃时它是空的），
     于是用户拿到一个退出码 1 与**零行**输出 —— 正好是"最需要解释"的那种失败。
     修之后：启动器拿到 139（128+SIGSEGV），写一条 `line:0` 的记录（没有源码位置），
-    渲染器照常渲染；包里没有渲染器时，同一句话以裸行出现。
+    渲染器照常渲染；包里没有渲染器时，同一句话以裸行出现。退出码也**照实**回 139
+    （`#673`），不再压成 1。
 
     判据跑**真启动器 + 会崩的桩驱动**，并且让桩渲染器 `cat` 出它拿到的文件 ——
     所以"记录真的被写出来、真的交到了渲染器手里"是直接看得到的，不是读源码猜的。
@@ -1833,10 +1834,12 @@ def test_launcher_synthesizes_a_record_when_the_compiler_dies_silently():
         return
 
     # ① 有渲染器：它收到的是那份合成了 E900 的 JSONL。
+    # 退出码是驱动自己的 139（`#673`：不再压成 1 —— 1 的意思是"源码有错"，
+    # 而这里编译器根本没跑完）。
     pf = _launcher_crash_pkg('#!/bin/sh\ncat "$1"\n')
     r = _launcher_run(bash, pf, [])
     out = r.stdout + r.stderr
-    assert r.returncode == 1, (r.returncode, out[-300:])
+    assert r.returncode == 139, (r.returncode, out[-300:])
     recs = [json.loads(ln) for ln in r.stdout.splitlines() if ln.strip().startswith("{")]
     assert recs, f"渲染器没拿到 JSONL（或一条都没合成）: {out[-400:]!r}"
     rec = recs[0]
@@ -1850,7 +1853,7 @@ def test_launcher_synthesizes_a_record_when_the_compiler_dies_silently():
     pf = _launcher_crash_pkg(None)
     r = _launcher_run(bash, pf, [])
     out = r.stdout + r.stderr
-    assert r.returncode == 1, (r.returncode, out[-300:])
+    assert r.returncode == 139, (r.returncode, out[-300:])
     assert "E900" in out and "SIGSEGV" in out and "loment-driver" in out, (
         f"崩溃在无渲染器的包里又变成了零行: {out[-400:]!r}")
     assert "no lomenterr" in out, f"没有渲染器这件事本身也要说: {out[-300:]!r}"
@@ -1859,7 +1862,7 @@ def test_launcher_synthesizes_a_record_when_the_compiler_dies_silently():
     pf = _launcher_crash_pkg('#!/bin/sh\nkill -SEGV $$\n')
     r = _launcher_run(bash, pf, [])
     out = r.stdout + r.stderr
-    assert r.returncode == 1, (r.returncode, out[-300:])
+    assert r.returncode == 139, (r.returncode, out[-300:])
     assert "lomenterr died" in out and "E900" in out, (
         f"报错器崩了而启动器装作没事: {out[-400:]!r}")
     assert "loment-driver was killed" in out, (

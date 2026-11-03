@@ -7151,6 +7151,42 @@ fn _start() -> u32 {
     return die(rc as u64);
 }
 
+/// `--merge FILE`（`#1061`）：把其余 IR 接到输入文本后面，返回新的长度。
+///
+/// 单独成一个函数而不是塞进 `run()`：`run()` 已经贴着自举检查器的容量走，往里
+/// 加二十来行会让**后面的**代码读不到内建函数（表面症状是 `ptr_add` 报 E1）。
+fn merge_inputs(pbuf: ptr, inb: ptr, n0: u64, nmerge: u32, obase: u32) -> u64 {
+    let n: u64 = n0;
+    let mbase: u32 = obase + 32768;
+    let mn: u32 = 0;
+    while mn < nmerge {
+        let moff: u32 = mbase + mn * 1024;
+        let mp: ptr = ptr_add(pbuf, moff);
+        let mfd: i64 = open_ro(mp);
+        if mfd < 0 {
+            let _fd: u32 = fail("cannot open a --merge input file");
+            return n;
+        }
+        let sep: u32 = n as u32;
+        store8(inb, sep, 10 as u8);
+        let dstart: u32 = sep + 1;
+        let room: u64 = (IN_CAP as u64) - (dstart as u64) - 2;
+        let got: u64 = read_all(mfd as u64, ptr_add(inb, dstart), room);
+        syscall4(3, mfd as u64, 0, 0);
+        if got == 0 {
+            let _fe: u32 = fail("a --merge input file is empty");
+            return n;
+        }
+        if got >= room {
+            let _ff: u32 = fail("the merged .ll does not fit in the input buffer (too large for this linker)");
+            return n;
+        }
+        n = (dstart as u64) + got;
+        mn = mn + 1;
+    }
+    return n;
+}
+
 fn run(mem: ptr) -> u32 {
     let ab: ptr = ptr_add(mem, M_ARGV);
     let mb: ptr = ptr_add(mem, M_META);
@@ -7183,6 +7219,10 @@ fn run(mem: ptr) -> u32 {
     // 打到 5/7 (两条都是"镜像退出 2")。
     let pbuf: ptr = ptr_add(mem, M_TXT);
     let nlink: u32 = 0;
+    // `--merge FILE`（`#1061`）：再多读一份 IR，接到输入文本后面。镜像与参考的
+    // 多输入语义都是**先合并再链接**，所以这里就是拼接；合并后的 `declare` 由
+    // 已有的 `ext_drop_defined` 落到定义上。路径放在 `--link` 那串之后的一段。
+    let nmerge: u32 = 0;
     // `--allow-ports`（`docs/222` §4 的端口门）：默认**不收**带未定义符号的外源对象。
     // 开发通道与判据显式写它；发行版启动器永不写（`tools/loment_dist.py`）。
     let ap: u32 = 0;
@@ -7220,6 +7260,26 @@ fn run(mem: ptr) -> u32 {
                 }
                 store8(pbuf, dst + lo32(pv), 0 as u8);
                 nlink = nlink + 1;
+                ok = ok + 2;
+            } else if lo32(av) == 7
+                    && lit_at(ab, hi32(av), hi32(av) + 7, "--merge") == 1 {
+                let pv: u64 = argv_n(ab, 8192, ok + 1);
+                if lo32(pv) == 0 {
+                    wstr(2, "loment: --merge needs a file name\n");
+                    return die(2);
+                }
+                let mdst: u32 = obase + 32768 + nmerge * 1024;
+                if mdst + 1024 > DIAGB_OFF {
+                    wstr(2, "loment: too many --merge files\n");
+                    return die(2);
+                }
+                let mj: u32 = 0;
+                while mj < lo32(pv) {
+                    store8(pbuf, mdst + mj, load8(ab, hi32(pv) + mj) as u8);
+                    mj = mj + 1;
+                }
+                store8(pbuf, mdst + lo32(pv), 0 as u8);
+                nmerge = nmerge + 1;
                 ok = ok + 2;
             } else if lo32(av) == 10
                     && lit_at(ab, hi32(av), hi32(av) + 10, "--hot-meta") == 1 {
@@ -7313,6 +7373,8 @@ fn run(mem: ptr) -> u32 {
     if n >= IN_CAP as u64 {
         return fail("the input .ll does not fit in the input buffer (it is too large for this linker)");
     }
+    // `--merge`：把其余 IR 接在后面（中间留一个换行，免得两份的最后/第一行粘成一行）。
+    n = merge_inputs(pbuf, inb, n, nmerge, obase);
     let tab: ptr = ptr_add(mem, M_TAB);
     let gb: ptr = ptr_add(mem, M_GB);
     let tlsbuf: ptr = ptr_add(mem, M_TLS);

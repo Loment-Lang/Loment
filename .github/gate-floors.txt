@@ -106,6 +106,7 @@ loment_hotfix_test 7
 loment_staging_test 6
 loment_projection_test 6
 loment_hotline_test 6
+loment_hotart_test 4
 loment_hotmeta_test 7
 loment_hotswap_test 7
 loment_hotload_test 13

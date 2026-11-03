@@ -405,6 +405,8 @@ tools/loment_staging_test.py
 tools/loment_projection.py
 tools/loment_projection_test.py
 tools/loment_hotline_test.py
+tools/loment_hotart.py
+tools/loment_hotart_test.py
 tools/loment_hotmeta_test.py
 tools/loment_hotswap_test.py
 tools/loment_hotload.py

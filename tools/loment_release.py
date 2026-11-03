@@ -384,6 +384,8 @@ GLOBS = [
     "tools/loment_projection.py", "tools/loment_projection_test.py",
     # 投影清单与 status（`#1157`）。**同位置**。
     "tools/loment_hotline_test.py",
+    # 投影树 → 热更新件（`#1155`）：编两份 hotswap 档，拼装载件。**同位置**。
+    "tools/loment_hotart.py", "tools/loment_hotart_test.py",
     # 元数据（`#1149`）：帧布局哈希 + 调用点表。**插入位置与 lomrel.lomt 逐行对齐**。
     "tools/loment_hotmeta_test.py",
     # 构建档（`#1150`）：槽表 + 入口闸。**插入位置与 lomrel.lomt 逐行对齐**。

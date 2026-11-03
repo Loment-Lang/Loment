@@ -4497,6 +4497,47 @@ def test_selfhost_mirror_emits_identical_hot_metadata():
 
 
 @test
+def test_selfhost_mirror_merges_a_second_ir_input():
+    """#1061: a `--merge` input is linked exactly like the reference's text merge.
+
+    The reference links several IR inputs by merging the texts and resolving a
+    `declare` against a `define` in another input; the mirror reads the first
+    input and appends each `--merge` file before parsing. Same bytes out.
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    mir = _mirror()
+    app = """declare i32 @lib_f()
+define i32 @_start() {
+entry:
+  %r = call i32 @lib_f()
+  ret i32 %r
+}
+"""
+    lib = """define i32 @lib_f() {
+entry:
+  ret i32 7
+}
+"""
+    app_rel = "loment/build/_merge_app.ll"
+    lib_rel = "loment/build/_merge_lib.ll"
+    out_rel = "loment/build/_merge_out.elf"
+    (ROOT / app_rel).write_text(app, encoding="utf-8", newline=chr(10))
+    (ROOT / lib_rel).write_text(lib, encoding="utf-8", newline=chr(10))
+    try:
+        want, _info = lomelf.compile_ll(
+            lomelf.merge_ir_texts([app, lib], [app_rel, lib_rel]))
+        rc, err = _mirror_run(mir, app_rel, out_rel, flags=f" --merge {lib_rel}")
+        assert rc == 0, f"镜像退出 {rc}: {err[-300:]}"
+        got = (ROOT / out_rel).read_bytes()
+    finally:
+        for nm in (app_rel, lib_rel, out_rel):
+            (ROOT / nm).unlink(missing_ok=True)
+    assert got == want, f"多输入镜像与参考不同 ({len(got)}B vs {len(want)}B)"
+
+
+@test
 def test_selfhost_mirror_hotswap_profile():
     """镜像的 `--profile hotswap`（`#1150`）：槽表、入口闸、元数据三样都相同，且跑起来一样。"""
     if not (_clang() and _wsl()):

@@ -3316,6 +3316,15 @@ def emit(only: set[str] | None, want_exe: bool, out_dir: Path | None = None,
         _unlink_retry(p)
         print(f"  [陈旧] 删掉 {p.name} (不是本次产物)")
 
+    # 热更新的清单（`#1153`）：**先落盘再算校验和** —— 签名锚覆盖的是整个 dist，
+    # 后写的文件不在 `SHA256SUMS` 里，等于没有签。tag 从 workflow 传进来
+    # （`LOMENT_RELEASE_TAG`），本机 `--emit` 就用 `v<RELEASE>`。
+    import os
+    import loment_hotfix
+    tag = os.environ.get("LOMENT_RELEASE_TAG") or f"v{VER}"
+    hf = loment_hotfix.write(ROOT, tag, out / "hotfix.json")
+    print(f"  [{hf.name}] {hf.stat().st_size} 字节 (热更新清单, {tag})")
+
     sums = write_sums(out)
     print(f"  [{sums.name}] {len(made)} 行")
     return 0

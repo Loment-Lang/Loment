@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 import loment_suite  # noqa: E402
 import loment_update as lu  # noqa: E402
+import loment_hotfix as hf  # noqa: E402
 
 TESTS: list = []
 
@@ -128,7 +129,7 @@ def test_manifest_is_computed_from_the_tree() -> None:
     man = lu.manifest(ROOT, "v0.1.5-hot.1")
     lom = sorted(ROOT.glob("lom/*.lom"))
     assert set(man["contract"]) == {p.relative_to(ROOT).as_posix() for p in lom}
-    assert man["contract"]["lom/fuai.lom"] == lu.sha256_file(ROOT / "lom" / "fuai.lom")
+    assert man["contract"]["lom/fuai.lom"] == hf.digest_file(ROOT / "lom" / "fuai.lom")
     assert man["language"] == lu.read_release(ROOT)
     assert man["baseline"] == "0.1.5"
     assert man["capabilities"] == []
@@ -166,20 +167,25 @@ def test_language_change_is_rejected() -> None:
         t = Path(t)
         base = _tree(t / "base")
         cand_tree = _tree(t / "cand", release="0.1.6")
-        cand = _candidate(t / "cand-dir", cand_tree, "v0.1.5-hot.1")
+        # 0.1.6 的构建自然打 v0.1.6 的 tag；跑着的 0.1.5 必须拒绝它。
+        cand = _candidate(t / "cand-dir", cand_tree, "v0.1.6-hot.1")
         assert _reject(cand, base) == "language"
         print("      语言版本变了（树里 RELEASE 改）—— 拒绝")
 
 
 @test
 def test_baseline_change_is_rejected() -> None:
+    """基线变了（tag 说 0.1.6，树里 RELEASE 还是 0.1.5）—— 生产侧就不许出这份清单。"""
     with tempfile.TemporaryDirectory() as t:
         t = Path(t)
-        base = _tree(t / "base")
         cand_tree = _tree(t / "cand")
-        cand = _candidate(t / "cand-dir", cand_tree, "v0.1.6-hot.1")
-        assert _reject(cand, base) == "baseline"
-        print("      基线变了（tag 说 0.1.6，条子还说 0.1.5）—— 拒绝")
+        try:
+            hf.build(cand_tree, "v0.1.6-hot.1")
+        except SystemExit as e:
+            assert "基线" in str(e), str(e)
+        else:
+            raise AssertionError("tag 与树里的 RELEASE 不一致，清单却出出来了")
+        print("      tag 说 0.1.6、RELEASE 说 0.1.5 —— 生产侧拒绝")
 
 
 @test

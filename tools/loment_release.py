@@ -376,6 +376,8 @@ GLOBS = [
     # 热更新的准入判据（`#1147`）：五个等式 + 签名 + 单调 + 重放。
     # **插入位置与 `loment/tools/lomrel.lomt` 的 `globs_text()` 逐行对齐**。
     "tools/loment_update.py", "tools/loment_update_test.py",
+    # 发布侧的清单（`#1153`）：`hotfix.json` 由树算出来，先落盘再算校验和。**同位置**。
+    "tools/loment_hotfix.py", "tools/loment_hotfix_test.py",
     # 元数据（`#1149`）：帧布局哈希 + 调用点表。**插入位置与 lomrel.lomt 逐行对齐**。
     "tools/loment_hotmeta_test.py",
     # 构建档（`#1150`）：槽表 + 入口闸。**插入位置与 lomrel.lomt 逐行对齐**。

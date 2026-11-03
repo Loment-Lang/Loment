@@ -19,7 +19,7 @@
 //   40  u32 nfunc
 //   44  u32 text_len
 //   48  u32 ncalls           调用点配对总数
-//   52  u32 cand_slot       候选装到哪个槽（`#1152`：两个槽轮流，见 docs/290）
+//   52  u32 cand_slot       候选装到哪个槽（`#1152`：两个槽轮流，见 docs/292）
 //   HOT_HDR  nfunc × (slot, self_entry, cand_entry, flags, ncalls, pad)
 //   ...      ncalls × (self_off, cand_off)     —— 按函数顺序、按调用点顺序
 //   ...      nreloc × (off, target_lo, target_hi)
@@ -40,7 +40,7 @@ use sha256
 
 const HOT_MAGIC: u32 = 1280593736;   // "HOTL"（0x4C544F48）
 const HOT_SLOT: u32 = 268435456;     // 0x10000000（第一个候选槽）
-const HOT_SLOT2: u32 = 536870912;    // 0x20000000（第二个：两个槽轮流，见 docs/290）
+const HOT_SLOT2: u32 = 536870912;    // 0x20000000（第二个：两个槽轮流，见 docs/292）
 const HOT_STRIDE: u32 = 16;
 const HOT_MAX_FN: u32 = 4096;
 const HOT_HDR: u32 = 56;             // 装载件头
@@ -54,7 +54,7 @@ const HOT_FRAMES: u32 = 4096;        // 帧链最多走这么深
 const HOT_SAVE_N: u32 = 16384;       // `save` 里记"改了几帧"的位置（每槽 4 字节之后的空地）
 //: 摘要把一个 sha256 上下文（624 B）+ 两个 32 B 摘要放在 `save` 的这一段里。
 //: **不在装载路径上申请堆**：bump 堆只有 64 KiB，每次 `alloc` 都是一次泄漏 ——
-//: 实测第 14 次热更新就把堆耗尽、撞进相邻的 .bss（`docs/290` §2 第 4 条）。
+//: 实测第 14 次热更新就把堆耗尽、撞进相邻的 .bss（`docs/292` §2 第 4 条）。
 const HOT_SAVE_SCRATCH: u32 = 32768;
 const HOT_SWAPPING: u32 = 2;         // epoch：正在改槽表（这个窗口里别进来）
 const HOT_READY: u32 = 1;            // epoch：新实现已经发布

@@ -11,7 +11,7 @@
 # （`loment_update.check` 的 `progress` 回调），更新按进程退出前后。不是动画。
 #
 # 传输在进程外（这里从 `--from` 给的目录复制，等价于把 GitHub 的资产下到本地），
-# 换的那条路只在本地读一个文件 —— 与 `docs/286` 的分工一致。
+# 换的那条路只在本地读一个文件 —— 与 `docs/288` 的分工一致。
 
 from __future__ import annotations
 

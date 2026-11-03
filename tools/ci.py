@@ -425,7 +425,7 @@ SHARD_COST = {
     # 2026-11-03（#1155）：本机 Windows 实测 1.6s（每支编两份小程序）。
     "loment_hotart_test": 1.6,
     # 2026-11-03（#1152）：本机 Windows 实测 9.0s（十七份源各编一次 + 两次真进程）。
-    # 循环钉在 16：原来每装一次泄漏 4 KiB，第 14 次撞上 64 KiB 的堆（docs/290 §2）。
+    # 循环钉在 16：原来每装一次泄漏 4 KiB，第 14 次撞上 64 KiB 的堆（docs/292 §2）。
     "loment_hotstress_test": 9.0,
     # 2026-10-21（#1149）：本机 Windows 实测 0.8s（四份小源各编一次 + 一次 CLI）。
     "loment_hotmeta_test": 0.8,

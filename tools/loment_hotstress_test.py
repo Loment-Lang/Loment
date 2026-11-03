@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# loment_hotstress_test.py — 稳定性模拟：同一个进程连着换好几次（`docs/290`）。
+# loment_hotstress_test.py — 稳定性模拟：同一个进程连着换好几次（`docs/292`）。
 #
 # 一个真进程从 v1 起，循环 N 次：读第 k 份候选 → 装进**不在跑**的那个槽 → 检查版本常量、
 # 索引、epoch、映射数量 → 把上一个槽还掉。装完第 k 次之后跑的是 v(k+1) 的代码，

@@ -1,4 +1,4 @@
-# 288 · 投影清单与 `loment update status`（`#1157`）
+# 290 · 投影清单与 `loment update status`（`#1157`）
 
 > 上游：`#1153`（清单）、`#1156`（投影）。实现：`tools/loment_hotfix.py` 的
 > `projection` 字段、`tools/loment_update.py` 的准入检查、`tools/loment_staging.py` 的
@@ -21,7 +21,7 @@ projection {
 - 同一个 sha 不能同时在 `line` 与 `evicted` 里 —— 那是自相矛盾的清单，同样拒。
 - `projection.baseline` 必须等于跑着的构建的基线（`projection-baseline`），
   `projection.release` 必须等于清单的 `release`（`projection-release`）。
-- `tree` 是投影树的哈希：重放同一条线得到同一个值（`docs/287` 判据 5）。
+- `tree` 是投影树的哈希：重放同一条线得到同一个值（`docs/289` 判据 5）。
 
 ## 2. `loment update status`
 

@@ -17,7 +17,7 @@ from pathlib import Path
 
 SLOT_STRIDE = 16
 
-#: 两个候选槽（`docs/290`）：装进**不**在跑的那一个，然后整条帧链改指过去。
+#: 两个候选槽（`docs/292`）：装进**不**在跑的那一个，然后整条帧链改指过去。
 SLOT_A = 0x10000000
 SLOT_B = 0x20000000
 
@@ -207,7 +207,7 @@ def build_blob(old: dict, new: dict, new_text: bytes, *, self_base: int | None =
                cand_slot: int = SLOT_A) -> bytes:
     """把两份 `.lomhot` 与候选文本拼成固定核吃的装载件。
 
-    `cand_slot` 是这一份候选要装进哪个槽 —— 两个槽轮流用（`docs/290`）。
+    `cand_slot` 是这一份候选要装进哪个槽 —— 两个槽轮流用（`docs/292`）。
     `self_base` 是**跑着的镜像**在哪个地址：第一次是链接基址，之后就是上一个槽。
     """
     rows = remap_rows(old, new)

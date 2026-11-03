@@ -10,7 +10,7 @@
 #              然后把候选放进 `$LOMENT_HOT_HOME/<baseline>/incoming/<tag>/`。
 #   3. `run`   跑**基线**那个二进制；它在安全点读暂存目录里那一份候选，交给固定核。
 #
-# 传输在进程外，换的那条路只在本地读一个文件 —— 与 `docs/286` 的分工一致。
+# 传输在进程外，换的那条路只在本地读一个文件 —— 与 `docs/288` 的分工一致。
 
 from __future__ import annotations
 

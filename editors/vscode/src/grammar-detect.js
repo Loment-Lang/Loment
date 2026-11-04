@@ -21,6 +21,8 @@
 const GRAMMAR_ALIASES = {
   loment: 'loment',
   tur: 'tur',
+  // Tur 2 是**版次名**，不是第四门语法（docs/296）：同一条原生读法，多一个 profile。
+  tur2: 'tur2',
   c: 'c',
   py: 'python', python: 'python',
   java: 'java',
@@ -32,10 +34,11 @@ const GRAMMAR_ALIASES = {
 };
 
 //: 读法就是原生语法的规范名 —— 它们**不需要**另立一份语法文件：
-//: `loment` 是默认拼法，`tur` 是本语言自己的正式语法名（2026-11-03，`docs/295`）。
+//: `loment` 是默认拼法，`tur` 是本语言自己的正式语法名（2026-11-03，`docs/295`），
+//: `tur2` 是它的第二个版次（2026-11-04，`docs/296`）—— 上色用的是同一套。
 //: **`rust` 不在这里**：它退回成一门表层语法（与 C/Java/Go 同级），所以它有
 //: `loment-rust` 那一套语法文件。
-const NATIVE_GRAMMARS = ['loment', 'tur'];
+const NATIVE_GRAMMARS = ['loment', 'tur', 'tur2'];
 
 //: 声明里那三个词 —— **与参考实现同一份词序契约**（`GRAMMAR_DECL_WORDS`）。
 const GRAMMAR_DECL_WORDS = ['choose', 'write', 'grammar'];

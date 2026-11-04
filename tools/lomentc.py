@@ -9764,6 +9764,9 @@ def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3) -> Modu
     # 基础语法的一种拼法、归到 `loment`；别的写法给的是那一门的规范名）。
     # 与 `dialects` 同一个做法：不是 dataclass 字段，是装载时挂上去的。
     mod.grammar = _fu.grammar
+    # **版次**（`docs/296`）：`tur1` / `tur2`。与 `grammar` 不同 —— 后者说的是"哪一门写法"，
+    # 前者说的是"这一门写法的哪一版"。Tur 1 的文件永远读作 `tur1`，行为不变。
+    mod.profile = _fu.profile
     mod.own_switches = own      # 本模块**自己**写的 —— 只有"库不许 choose"用它
     # `addin` 的行单独记一份 —— 它被抹掉了，而"库里写了 `addin` 却没生效"要能报出来。
     _d = 0

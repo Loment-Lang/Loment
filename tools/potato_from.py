@@ -1731,6 +1731,8 @@ EXT = {".py": "python", ".c": "c", ".h": "c", ".rs": "rust", ".go": "go",
 GRAMMAR_ALIASES: dict[str, str] = {
     "loment": "loment",
     "tur": "tur",
+    # Tur 2（docs/296）：版次名。旧 `tur` 永久冻结，新语法只进 `tur2`。
+    "tur2": "tur2",
     "c": "c",
     "py": "python", "python": "python",
     "java": "java",
@@ -1757,7 +1759,9 @@ GRAMMAR_ALIASES: dict[str, str] = {
 #: 一门**表层语法**：`choose write grammar rust` 与 `.rs` 后缀走同一条 `from_rust`
 #: 路径（`docs/179` 抽接口那条路）。于是 "`grammar rust` 是严格 Rust 子集" 这件事
 #: **由读法本身保证** —— 我们给 Tur 加的修改不会漏到它那一面去。
-NATIVE_GRAMMARS = ("loment", "tur")
+#: `tur2` 是 **Tur 2**（`docs/296`）：与 `tur` 同一条原生路，只是多一个版次 profile。
+#: 版次只加不改 —— `tur` 的语法与语义永久冻结，新特性只在 `tur2` 里出现。
+NATIVE_GRAMMARS = ("loment", "tur", "tur2")
 
 #: **声明的词序**：`choose write grammar <别名>`。
 #:
@@ -2012,13 +2016,17 @@ class FrontUnit:
     调用方据此可以说清"这些行号指的是哪一份"（`docs/179` §6.5 那类"把人引向错方向"）。
     """
 
-    __slots__ = ("grammar", "source", "translated", "path")
+    __slots__ = ("grammar", "source", "translated", "path", "profile")
 
-    def __init__(self, grammar: str, source: str, translated: bool, path: Path):
+    def __init__(self, grammar: str, source: str, translated: bool, path: Path,
+                 profile: str = "tur1"):
         self.grammar = grammar
         self.source = source
         self.translated = translated
         self.path = path
+        #: **版次**（`docs/296`）：`tur1`（缺省）或 `tur2`。它只影响"哪些拼法被当语法读"，
+        #: 不影响 `grammar`（抹掉声明后两者都是本语言）。译出来的那几门一律是 `tur1`。
+        self.profile = profile
 
 
 #: **Loment 自己的源文件后缀**。这些后缀说的是"这是一份 **Loment 的源文件**"，
@@ -2177,9 +2185,10 @@ def front_door(path: Path, lang: str = "auto", mode: str = "strict") -> FrontUni
             # 这是一次**表层拼法**的改写，与另外几门翻译器做的事同类；行号与偏移
             # 一字不动（见 `_strip_tur_mut`）。
             body = strip_grammar_decl(src)
-            if g == "tur":
+            if g in ("tur", "tur2"):
                 body = _strip_tur_mut(body)
-            return FrontUnit("loment", body, False, path)
+            return FrontUnit("loment", body, False, path,
+                             profile=("tur2" if g == "tur2" else "tur1"))
         lang, why = g, "文件头声明 `choose write grammar`"
     else:
         lang, why = resolve_lang(path, lang)

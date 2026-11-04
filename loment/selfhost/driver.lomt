@@ -1924,6 +1924,9 @@ fn _start() -> u32 {
     store32(scr, PROF_OFF, 0);          // 缺省是 Tur 1（docs/296）
     store32(scr, DECLK_OFF, 0);         // 缺省：没写 `choose write grammar`
     let pmode: u32 = 0;
+    // `--no-edition-notice`：**工具**（`lomcomefor` 这类把驱动当子进程、把它的输出
+    // 整段比对的程序）用它关掉编译期那一行版次提示。人敲命令时照旧打（docs/296 §1.2）。
+    let quiet: u32 = 0;
     let a2: u64 = argv_at(argv_buf as ptr, 65536, scr, 2);
     if a2 != 0 {
         let p2: ptr = ptr_add(argv_buf as ptr, (a2 >> 32) as u32);
@@ -1936,6 +1939,8 @@ fn _start() -> u32 {
                 copy_bytes(ptr_add(scr, DIAG_OFF), 0, p3, 0, n3);
                 store8(scr, DIAG_OFF + n3, 0 as u8);
             }
+        } else if streq(p2, n2, "--no-edition-notice") == 1 {
+            quiet = 1;
         } else if streq(p2, n2, "--emit-potato") == 1 {
             pmode = 1;
         } else if streq(p2, n2, "--print-command") == 1 {
@@ -2026,7 +2031,7 @@ fn _start() -> u32 {
     // 把用户写的拼法展开成规范名。短名（`tur2`）跨年之后不再被接受，这一行是用户
     // 排查"我到底用的哪一版"的第一手信息。工具模式（`--emit-potato`/`--print-command`）
     // 不打，保持它们的输出面不变。
-    if pmode == 0 {
+    if pmode == 0 && quiet == 0 {
         let pk: u32 = load32(scr, DECLK_OFF);
         if pk == 0 {
             wstr(2, "loment: grammar default -> tur2026.1 (Tur 1)\n");

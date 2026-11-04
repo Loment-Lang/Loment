@@ -65,7 +65,8 @@ Tur 现在的parser是"位置识别"的：**没有关键字表**，`defer` / `an
 1. **编译期**：`check` / `build` / `run` / `ir` 在 stderr 打一行
    `loment: grammar tur2 -> tur2026.2 (Tur 2)`；没写声明时打
    `grammar default -> tur2026.1 (Tur 1)`。短名在这一行展开 —— 跨年后用户能立刻看到
-   "这个旧短名今年已经不被接受了"。
+   "这个旧短名今年已经不被接受了"。**工具**（把驱动当子进程、整段比对输出的程序，如
+   `lomcomefor`）传 `--no-edition-notice` 关掉这一行；人敲命令时它永远在。
 2. **产物里**：每份 IR 全局区最后一条是
    `@loment.tur.edition = global [21 x i8] c"\4C…\00"`，内容 `LOMENT-TUR:` + 规范名。
    用**外部可见**的 `global` 而不是 `private constant`，因为 clang `-O2` 会丢掉没人引用

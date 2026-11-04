@@ -66,9 +66,12 @@ const CG_L05: u32 = 916164;
 const CG_L05_SLOTS: u32 = 256;
 const CG_BYTES: u32 = 918212;      // = CG_L05 + CG_L05_SLOTS*8
 //: 区表的两个标量：`CG_L05_N` = 条数（0 = 本函数不开区），`CG_L05_CAP` = 整块字节数。
-//: 604/608 落在 `CG_PROF`(600) 与函数计数(640) 之间那段没有别的写点的空隙里。
-const CG_L05_N: u32 = 604;
-const CG_L05_CAP: u32 = 608;
+//: **628/632 是 600–640 这一段里最后两个没人认的格** —— 604–624 已经被 Tur 2 的循环
+//: machinery（`CG_BODY0` / `CG_LBRK` / `CG_LCOND` / `CG_LKIND` / `CG_LSV` / `CG_LAUX`）
+//: 占了。两个 PR 各自挑 604 的那次是**静默串写**：`fi_ord` 从 604 读函数体起点，读到
+//: 我们写的站点数，`__tur2_i` 的编号整体错位（`loment_p8_test` 的孪生对拍抓到）。
+const CG_L05_N: u32 = 628;
+const CG_L05_CAP: u32 = 632;
 use bytes
 use lexer
 

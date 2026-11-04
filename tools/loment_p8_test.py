@@ -2372,6 +2372,18 @@ def test_m85_codegen_table_capacity():
     assert nconst <= cap_const, (f"最大单元有 {nconst} 个常量, 超过常量表容量 {cap_const}")
     nenum = sum(1 for tk in unit_toks if tk.kind == "ident" and tk.val == "enum")
     assert nenum <= cap_enum, f"最大单元有 {nenum} 个枚举, 超过枚举表容量 {cap_enum}"
+    # **`CG_*` 的取值不许撞号**：状态块是手工排的，两条线各自挑一个"空"格时可能挑到
+    # 同一处 —— 那是**静默串写**，不是编译错误。2026-11-04 就撞过一次：L0.5 的
+    # `CG_L05_N` 与 Tur 2 的 `CG_BODY0` 都写 604，`fi_ord` 于是从站点数读函数体起点，
+    # `__tur2_i` 的编号整体错位（这条孪生判据抓到）。常量重名不报错，只有行为会歪，
+    # 所以在这里静态钉住。
+    seen_slot: dict[int, str] = {}
+    for _m in _re.finditer(r"const (CG_[A-Z0-9_]+): u32 = (\d+);", src):
+        _v = int(_m.group(2))
+        assert _v not in seen_slot, (
+            f"状态块格 {_v} 被 {seen_slot[_v]} 与 {_m.group(1)} 同时占用 —— "
+            f"两个写点会互相踩")
+        seen_slot[_v] = _m.group(1)
     print(f"      codegen 表容量: {cap} 个函数 (fn {cap_fn}/fk {cap_fk}/形参 {cap_param}), "
           f"最大单元 {nfns} 个; 枚举表 {cap_enum} 格, 单元里 {nenum} 个; "
           f"常量表 {cap_const} 格, 单元里 {nconst} 个")

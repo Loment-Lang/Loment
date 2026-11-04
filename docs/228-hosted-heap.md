@@ -168,6 +168,11 @@ arena 大小是**编译期常量** `1048576`（1 MiB），**并写进产物**：
 `loment_choose_matrix_test::test_hosted_and_lms_compose` 真链真跑一份越界写 + 越界读的
 hosted 产物：拒绝器把两条跳过、界内那一半算出 1。
 
+**判据**：`loment_choose_matrix_test::test_hosted_and_lms_compose`（g1 照发、越界被拒）、
+`test_every_legal_hosted_cell_runs`（`gc_manual` / `gc_auto` × lms 开/关四格**真链真跑**）、
+`test_conflicting_pairs_are_refused_with_the_pair_named`（`gc_auto_alpha × hosted` 的
+诊断必须写成**划窄**并说出"不回卷前沿的 L2"这个开出条件）。
+
 **资源归属**：arena 是**一块** `malloc`，Loment 的 `free` 是这块**里面**的空闲链；宿主的
 `malloc` 是**另一个**分配器。两者对 arena 的字节不会各说各话（Loment 从不把整块还回去，
 进程退出由 OS 收）。宿主库自己 `malloc` 出来的内存**在 arena 之外**，GC 与 LMS 都看不见

@@ -2091,8 +2091,11 @@ MAX_NEST = 64
 class Parser:
     """复用 lomc 的词法器; 只实现 L1 的顶层与语句/表达式。"""
 
-    def __init__(self, toks: list[Tok], src: str):
+    def __init__(self, toks: list[Tok], src: str, profile: str = "tur2026.1"):
         self.toks, self.src, self.i = toks, src, 0
+        #: 版次（`docs/296` §1.1）。只有 Tur 2 认 `elif` 的隐式条件（前门已把
+        #: `elif` 抹成 `else`，这里补上缺的那个 `if`）。
+        self.profile = profile
         self.no_struct = 0  # >0 时禁止结构体字面量 (if/while 条件位置的歧义)
         #: 当前嵌套深度（块 + 表达式共用一个计数）—— 见 `MAX_NEST`。
         self.depth = 0
@@ -2517,6 +2520,39 @@ class Parser:
         finally:
             self.depth -= 1
 
+    def _if_chain(self, line: int):
+        """`if` 头已经吃掉：条件 + 块 + 可选的 `else` 链（含 Tur 2 的隐式 elif）。"""
+        self.no_struct += 1
+        cond = self.parse_expr()
+        self.no_struct -= 1
+        then_at = self.i + 1              # '{' 之后 —— 与自举侧同一个起点
+        then = self.parse_block()
+        then_end = self.i - 1             # '}' 的下标（不含）
+        otherwise = []
+        else_at = 0
+        else_end = 0
+        if self.at("ident", "else"):
+            et = self.next()
+            if self.at("ident", "if"):  # else if 链
+                # **不给跨度**：`else if` 是一条**语句**（`otherwise = [If(...)]`），
+                # 它自己那两支的跨度由它自己的解析填 —— 在这里再包一层，自举侧那一份
+                # 就对不上（它走的是 `stmt()` 递归，没有对应的一层）⇒ 逐字节判据会红。
+                otherwise = []
+                self._append_stmt(otherwise, self.parse_stmt())
+            elif self.profile == "tur2026.2" and not self.at("punct", "{"):
+                # `elif` 被前门抹成 `else`（`docs/296` §2.1）：这里补上隐式的 `if`。
+                # 与 `else if` 同形：它是一条语句，跨度由它自己的解析填。
+                otherwise = []
+                self._append_stmt(otherwise, self._if_chain(et.line))
+            else:
+                else_at = self.i + 1
+                otherwise = self.parse_block()
+                else_end = self.i - 1
+        s = If(cond, then, otherwise, line)
+        s.then_at, s.then_end = then_at, then_end
+        s.else_at, s.else_end = else_at, else_end
+        return s
+
     def parse_stmt(self):
         t = self.peek()
         if t.val == "lspe" and self.peek(1).kind == "ident" and self.peek(1).val == "pass":
@@ -2569,31 +2605,7 @@ class Parser:
                     self.next()
                     otherwise = self.parse_block()
                 return Match(subj, [(EnumPath(en, vn, t.line, bind), then), (None, otherwise)], t.line)
-            self.no_struct += 1
-            cond = self.parse_expr()
-            self.no_struct -= 1
-            then_at = self.i + 1              # '{' 之后 —— 与自举侧同一个起点
-            then = self.parse_block()
-            then_end = self.i - 1             # '}' 的下标（不含）
-            otherwise = []
-            else_at = 0
-            else_end = 0
-            if self.at("ident", "else"):
-                self.next()
-                if self.at("ident", "if"):  # else if 链
-                    # **不给跨度**：`else if` 是一条**语句**（`otherwise = [If(...)]`），
-                    # 它自己那两支的跨度由它自己的解析填 —— 在这里再包一层，自举侧那一份
-                    # 就对不上（它走的是 `stmt()` 递归，没有对应的一层）⇒ 逐字节判据会红。
-                    otherwise = []
-                    self._append_stmt(otherwise, self.parse_stmt())
-                else:
-                    else_at = self.i + 1
-                    otherwise = self.parse_block()
-                    else_end = self.i - 1
-            s = If(cond, then, otherwise, t.line)
-            s.then_at, s.then_end = then_at, then_end
-            s.else_at, s.else_end = else_at, else_end
-            return s
+            return self._if_chain(t.line)
         if t.val == "while":
             self.next()
             self.no_struct += 1
@@ -9779,7 +9791,7 @@ def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3) -> Modu
     import loment_comefor
 
     tt, _dias = loment_comefor.expand(tt, text)
-    mod = Parser(tt, text).parse()
+    mod = Parser(tt, text, profile=_fu.profile).parse()
     # **开关表先挂上**（原先在下面几条之后）：LSPE 的 `bounds` 普查要读 LMS 的档位，
     # 而档位既可能来自档名、也可能来自 `choose close lms_guard` 这种显式覆盖 ——
     # 后者只在表里。挂晚了，普查会退回档名，于是"关着 guard 却记了 g1 站点"（#1021）。

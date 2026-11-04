@@ -508,7 +508,7 @@ extern unsigned int switch_rules(char *src, unsigned char *toks, unsigned char *
 extern unsigned int check_arena(char *src, unsigned char *toks, unsigned char *errs,
                                 unsigned char *syms, unsigned char *scr, unsigned char *ctab,
                                 unsigned char *nc, unsigned char *exs, unsigned char *env,
-                                unsigned char *tyt);
+                                unsigned char *tyt, unsigned int prof);
 int main(int argc, char **argv) {
     FILE *f = fopen(argv[1], "rb");
     if (!f) return 2;
@@ -526,7 +526,8 @@ int main(int argc, char **argv) {
     nt = apply_switches(buf, toks, nt, sw);
     unsigned int m = check_arena(buf, toks, errs, a,
                                  a + chk_arena_scr(), a + chk_arena_ctab(), a + chk_arena_nc(),
-                                 a + chk_arena_exs(), a + chk_arena_env(), a + chk_arena_tyt());
+                                 a + chk_arena_exs(), a + chk_arena_env(), a + chk_arena_tyt(),
+                                 0);   /* 夹具喂的是原始 token：按 Tur 1 查 */
     m += switch_rules(buf, toks, sw, errs, m * 8);
     printf("%u", m);
     for (unsigned int i = 0; i < m; i++) {
@@ -1916,6 +1917,53 @@ def test_m89_tur_edition_is_reported_at_compile_and_run_time():
         assert r.returncode == 0, f"运行退出 {r.returncode}: {r.stderr[-300:]}"
         assert r.stdout == "tur2026.2", f"运行期版次是 {r.stdout!r}"
         print("      版次: 编译期 stderr / 产物元数据 / 运行期 tur_edition() 三处一致 (tur2026.2)")
+
+
+@test
+def test_m90_tur2_sugar_matches_between_implementations():
+    """Tur 2 纯糖（`docs/296` §2.1）在自举侧与参考侧**逐字节相同**，且运行结果对。
+
+    `def` / `and` / `or` / `not` / `elif` 都是前门的等长改写；自举侧那一条在 `load_file`
+    里、参考侧在 `potato_from.front_door` 里，两边改出来的字节必须是同一份。顺带钉：
+    Tur 1 的同一份源仍按老语法拒收（版次隔离不是"只在参考实现里"）。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    sugar = ("module sugar\n\n"
+             "def f(a: bool, b: bool) -> bool {\n"
+             "    return a and b;\n"
+             "}\n\n"
+             "fn main() {\n"
+             "    let a: bool = true;\n"
+             "    let b: bool = false;\n"
+             "    if f(a, b) {\n        print(\"both\\n\");\n"
+             "    } elif a or b {\n        print(\"one\\n\");\n"
+             "    } else {\n        print(\"none\\n\");\n    }\n"
+             "}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "sugar.lomt"
+        p.write_text("choose write grammar tur2\n" + sugar,
+                     encoding="utf-8", newline="\n")
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_sugar")
+        rc, out, err = _run_driver_raw(elf, _wsl_path(p), td, "sugar")
+        assert rc == 0, f"自举侧编不过纯糖: {err[-300:]}"
+        assert out == _unit_ll(p), "纯糖的 IR 两个实现不一致"
+        # 运行：a && b 为假、a || b 为真 -> one
+        art, _ = __import__("lomelf").compile_ll(out)
+        exe = Path(td) / "sugar.elf"
+        exe.write_bytes(art)
+        script = (f"cp {_wsl_path(exe)} {_T}sugar_ed && chmod +x {_T}sugar_ed "
+                  f"&& {_T}sugar_ed")
+        r = subprocess.run([*_WSLCMD, "bash", "-lc", script],
+                           capture_output=True, text=True, timeout=120, shell=False)
+        assert (r.returncode, r.stdout) == (0, "one\n"), (r.returncode, r.stdout, r.stderr)
+        # Tur 1：同一个 `def` 必须照旧拒
+        p1 = Path(td) / "old.lomt"
+        p1.write_text("choose write grammar tur\n" + sugar, encoding="utf-8", newline="\n")
+        rc1, out1, _err1 = _run_driver_raw(elf, _wsl_path(p1), td, "oldsugar")
+        assert rc1 != 0 and out1.strip() == "", "Tur 1 收下了 `def` —— 版次隔离破了"
+        print("      纯糖: 两套实现产物逐字节相同、运行得 one；Tur 1 同一份源仍拒")
 
 
 @test

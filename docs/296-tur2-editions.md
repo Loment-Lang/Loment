@@ -8,7 +8,13 @@
 出厂锁，`FrontUnit.profile` / `mod.profile` / 自举 `PROF_OFF` 都记下了版次，三处出口
 （编译期提示、产物元数据、`tur_edition()`）也一起落地（§1.2）。此时同一份程序的正文与
 代码在 Tur 1 与 Tur 2 下逐字节相同，只有版次元数据按版次取值（判据在
-`loment_grammar_test`、`loment_p8_test` M87/M89）。第 2–5 项按下面的顺序推进。
+`loment_grammar_test`、`loment_p8_test` M87/M89）。
+
+**§4 第 2 项（纯糖）也已落地**：`def` / `and` / `or` / `not` / `elif` 在前门做**等长**
+改写（`potato_from._tur2_sugar` 与驱动的 `tur2_sugar` 同一张规则表），`elif` 缺的那个
+`if` 由解析器/检查器/发射器在 `profile == tur2026.2` 时补上。判据：糖版与手写基础拼法
+IR 逐字节相同（`loment_grammar_test`）、两套实现逐字节相同且能跑（p8 M90）、Tur 1 的
+同一份源仍拒收。第 3–5 项按下面的顺序推进。
 
 ## 1. 兼容法规：语法按**版次**冻结，版次按**年份族**归档
 
@@ -145,6 +151,50 @@ v1 只做**表达式位置的兜底**，且只用于 `let` / 赋值右侧：
 * `res catch d`：`res` 是 `Result<T, E>`，`Err(_)` 取 `d`（`T`）；
 * 需要看错误值的 `catch |e| { ... }`、需要提前传播的 `catch return` 留给 Tur 3。
 
+### 2.5 `break` / `continue`（C / Go / Zig / Python）
+
+```rust
+while go {
+    if done { break; }
+    if skip { continue; }
+    ...
+}
+```
+
+* 作用于**最内层**的 `while` / `for i in lo..hi` / `for x in xs`；
+* `continue` 去该循环的**更新步**（range `for` 是 `i = i + 1`，`for x in xs` 是下标加一，
+  `while` 是条件）；
+* 不在循环里写 `break` / `continue` 是**诊断**（新码），不是静默；
+* 发射时先**关闭体内打开的 L2 epoch** 再跳（`docs/210` —— 跳出去不收尾就是泄漏），
+  两套实现的标签编号必须一致；
+* 只在 Tur 2：Tur 1 里这两个词仍是普通标识符（今天 `break;` 报"使用未声明的变量"，
+  一个合法的变量名 `break` 在 Tur 1 里照旧可用）。
+
+### 2.6 裸 `return`（C / Go / Python）
+
+```rust
+def f() {
+    if bad { return; }     // 只许出现在**没有返回类型**的函数里
+    ...
+}
+```
+
+* `fn f()`（无返回类型）里 `return;` 提前退出；`fn f() -> T` 里 `return;` 仍是错
+  （必须给值），与今天一致；
+* 有 `defer` 时，它按 `defer` 的退出路径执行（§2.3）；
+* 只在 Tur 2。
+
+### 2.7 `print_num`（C / Go 的 `printf("%d")` 那一格）
+
+```rust
+print_num(n);            // 十进制，负数带 '-'，不带换行
+```
+
+* 内建 `print_num(n: i64) -> u32`：十进制、无堆（24 字节栈缓冲）、一次 `write`；
+* 换行仍用 `print("\n")` —— 与 `print` 一样**只写字节**，不擅自加格式；
+* **只在 Tur 2 是内建**：Tur 1 里 `print_num` 仍是普通标识符（用户自己定义的
+  `fn print_num` 不会被顶掉）。
+
 ## 3. 兼容性判据（这一版的"不打断长线"是可验证的）
 
 1. **Tur 1 回归族**：`loment/examples/**` 与 `loment/selfhost/**` 全部在 `tur` 下照旧编译，
@@ -158,6 +208,11 @@ v1 只做**表达式位置的兜底**，且只用于 `let` / 赋值右侧：
    `NATIVE_GRAMMARS` 里放的是规范名（`tur2026.1` / `tur2026.2`）。
 6. **双实现**：每条新语法在 `tools/lomentc.py` 与 `loment/selfhost/*` 上逐字节一致；
    `loment_rule_parity` 的新规则只增不减。
+7. **控制流那一族的版次隔离**：`break` / `continue` / `print_num` 在 Tur 1 里仍是普通
+   标识符（用它们当变量名、或自己定义 `fn print_num`，照旧能编）；`return;` 只在
+   Tur 2 且函数**没有返回类型**时成立，带返回类型的 `return;` 与今天一样报错。
+8. **退出路径**：`break` / `continue` / `return;` / `?` 跳出时都收掉体内打开的 L2
+   epoch；`defer` 的 LIFO、提前退出执行、panic/trap 不执行各有一条运行期判据。
 
 ## 4. 落地顺序（每一笔都可独立回滚）
 
@@ -165,18 +220,32 @@ v1 只做**表达式位置的兜底**，且只用于 `let` / 赋值右侧：
    拼法；`front_door` 返回 profile；自举驱动记录 profile；两套实现都能"接受 Tur 2 但
    不启用任何新语法"（等价于 Tur 1）。判据：短名与全名的产物逐字节相同，且与 Tur 1 相同。
 2. **纯糖**：`def` / `elif` / `and` / `or` / `not`；两套实现；同义糖判据。
-3. **`for x in xs`**：parser + checker + codegen（两套）；负例（非数组/切片）有诊断码。
-4. **`defer`**：parser + checker + codegen（两套）；LIFO/提前返回/不执行的负例。
+3. **`for x in xs` + `break` / `continue`**：循环与"怎么离开循环"是同一条控制流账本，
+   一起做。parser + checker + codegen（两套）；非数组/切片、循环外的 `break` 有诊断码。
+4. **`defer` + 裸 `return`**：提前退出与"退出时做什么"是同一条账本。LIFO / `?` /
+   `return` 都执行、panic/trap 不执行的判据。
 5. **`catch` / `orelse`**：parser + checker + codegen（两套）；`Option`/`Result` 两族。
+6. **`print_num`**：一个内建、两套实现；纯增量，可与任一步并行。
 
 第 3–5 步各自要新增诊断码（`loment_diag.RULES`，只增不改）与
 `loment_rule_parity._CASES` 的负例，`BUDGET` 跟着抬。种子在**独立的 `[生成物]` 提交**里
 重算；手写与生成物分开。
 
-## 5. 非目标（这一版不做，别拿它们当"没做完"）
+## 5. Tur 3（下一个版次）—— 明确**不在**这一版
 
-* `:=` / `auto` 的类型推断（Tur 3）；
-* `class` / `new` / 继承（Tur 3）；
-* `comptime`（Tur 3）；
-* `chan` / `select` / `go` 的运行时（Tur 3+）；
+> 用户说的 "Tur 3" 落到版次名上：现在（2026 年内）是 **`tur2026.3`**；如果跨年，
+> 就是 **`tur2027.1`**。下面这些不是"没做完"，是**有意留给下一版**。
+
+* **生命周期控制（`docs/298`）**：`&T` / `&mut T` 成为一等类型（结构体字段、返回值），
+  区域推断、**零 `'a` 标注**；分叉时只多一个参数名（`&a [u32]`）。保 Rust 的安全性，
+  但把 `'a`/`<'a>`/`where` 全部去掉；
+* `:=` / `auto` 的局部变量类型推断（这条最值钱，但动类型系统，必须单独一版）；
+* `match` 臂与 `if` 当**表达式**用（`0 => 10, _ => 20` / `let x = if c { 1 } else { 2 };`）；
+* 字符串插值 / 格式化（`f"{x}"`），以及随之而来的 `str_concat` 之外的一条路；
+* `args()`：把命令行参数做成内建（今天每个 CLI 自己读 argv）；
+* 结构体字面量简写 `S { a }`；
+* `const NAME: str = "...";`（今天 `const` 只吃整数字面量，命名字符串得写成函数）；
+* `catch |e| { ... }` / `catch return`（需要看错误值或提前传播）；
+* `for x in <表达式>`（不限具名数组/切片）与 `for i, x in xs`；
+* `class` / `new` / 继承；`comptime`；`chan` / `select` / `go` 的运行时；
 * 把 `tur2` 变成 `tur` 的默认：**默认永远是 Tur 1**，除非文件头显式选择。

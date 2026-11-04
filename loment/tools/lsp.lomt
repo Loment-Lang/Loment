@@ -405,7 +405,8 @@ fn run_check(text: ptr, toks: ptr, errs: ptr, chk: ptr) -> u32 {
                        ptr_add(chk, chk_arena_nc()),
                        ptr_add(chk, chk_arena_exs()),
                        ptr_add(chk, chk_arena_env()),
-                       ptr_add(chk, chk_arena_tyt()));
+                       ptr_add(chk, chk_arena_tyt()),
+                       0);   // LSP 不读文件头声明（#262）：按 Tur 1 查；Tur 2 的糖不在这里
 }
 
 /// **开关落定**（`docs/182` §1）: 把 `set choose` 的裁减做在 token 流上, 返回压缩后的条数。

@@ -482,6 +482,72 @@ def test_declared_tur_is_the_native_syntax_and_rust_is_a_surface_grammar():
 
 
 @test
+def test_tur2_sugar_equals_the_explicit_spelling():
+    """`docs/296` §2.1：`def` / `and` / `or` / `not` / `elif` 只改**拼法**。
+
+    四件：
+      * **等长**：前门抹完之后源的长度不变（行号/列号/token 偏移都不动）；
+      * **同义**：糖版与手写基础拼法的 IR 逐字节相同（只有版次元数据那一条不同）；
+      * **版次隔离**：同一份带 `def` 的源在 `tur`（Tur 1）下编不过、在 `tur2` 下编得过；
+      * **名字位置**：这些词在 `tur2` 里仍可作标识符（只抢算子/构造位置）。
+    """
+    body_sugar = ("module m\n\n"
+                  "def is_small(n: u32) -> bool {\n"
+                  "    return n < 10 and n > 0;\n"
+                  "}\n\n"
+                  "fn main() {\n"
+                  "    if is_small(5) {\n        print(\"a\\n\");\n"
+                  "    } elif is_small(50) {\n        print(\"b\\n\");\n"
+                  "    } else {\n        print(\"c\\n\");\n    }\n"
+                  "}\n")
+    body_plain = (body_sugar.replace("def is_small", "fn is_small")
+                  .replace("and n > 0", "&& n > 0").replace("} elif ", "} else if "))
+
+    def _no_meta(ll: str) -> str:
+        return "\n".join(ln for ln in ll.splitlines()
+                         if not ln.startswith("@loment.tur.edition"))
+
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        a = td / "a.lomt"
+        a.write_text("choose write grammar tur2\n" + body_sugar, encoding="utf-8", newline="\n")
+        fu = potato_from.front_door(a)
+        assert (fu.profile, fu.spelling) == ("tur2026.2", "tur2"), (fu.profile, fu.spelling)
+        assert len(fu.source) == len("choose write grammar tur2\n" + body_sugar), \
+            "纯糖改写不是等长的 —— 行/列/偏移会漂"
+        assert "def is_small" not in fu.source and "elif" not in fu.source, \
+            "前门没有把纯糖抹成基础拼法"
+
+        b = td / "b.lomt"
+        b.write_text(body_plain, encoding="utf-8", newline="\n")
+        la = lomentc.emit_llvm(lomentc.load(a), ROOT)
+        lb = lomentc.emit_llvm(lomentc.load(b), ROOT)
+        assert _no_meta(la) == _no_meta(lb), "糖版与手写基础拼法的产物不一致"
+
+        c = td / "c.lomt"
+        c.write_text("choose write grammar tur\n" + body_sugar, encoding="utf-8", newline="\n")
+        assert "def is_small" in potato_from.front_door(c).source, \
+            "Tur 1 也被抹了糖 —— 版次隔离破了"
+        try:
+            lomentc.load(c)
+        except lomentc.LomError:
+            pass
+        else:
+            raise AssertionError("Tur 1 收下了 `def` —— 版次隔离破了")
+
+        d = td / "d.lomt"
+        d.write_text(
+            "choose write grammar tur2\nmodule n\n\nfn main() {\n"
+            "    let and: u32 = 1;\n    let or: u32 = 2;\n    let not: u32 = 3;\n"
+            "    let def: u32 = 4;\n    let elif: u32 = 5;\n"
+            "    print(\"ok\\n\");\n}\n",
+            encoding="utf-8", newline="\n")
+        assert lomentc.emit_llvm(lomentc.load(d), ROOT), \
+            "Tur 2 里这些词不能当标识符了 —— 抢到名字位置了"
+    print("      纯糖: 等长改写、与手写拼法同 IR；Tur 1 拒收；名字位置不受影响")
+
+
+@test
 def test_declared_tur_maps_mut_away_but_keeps_mut_slices():
     """`#77`：`grammar tur` 里**重赋值必须写得出来**。
 

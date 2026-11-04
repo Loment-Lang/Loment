@@ -105,6 +105,8 @@ fn btxt(s: ptr, lvl: u32) -> u32 {
 // 只记**第一处**失败：后面的失败多半是它的连锁反应，多记只会把第一处淹掉。
 const CG_ERR: u32 = 592;
 const CG_ERRTOK: u32 = 596;
+// 版次（`docs/296` §2.1）：Tur 2 的 `else <条件> {` 是隐式 elif。
+const CG_PROF: u32 = 600;
 
 /// 发射器报一条"降不下去"。**不在这里退出**：递归下降的每个返回点都退出会把
 /// 几百处调用点都改成三态；粘性标记 + 末尾作废输出代价小得多，而且不会漏。
@@ -5466,6 +5468,57 @@ fn emit_try_let(s: ptr, out: ptr, src: ptr, toks: ptr, name: u32, ty: u32, eq: u
     return eq;
 }
 
+/// `if` / `else if` 链的发射。`cond` = **条件第一个 token**（不是 `if` 本身）——
+/// Tur 2 的隐式 elif（`else <条件> {`，`docs/296` §2.1）从 `else` 之后直接进来，
+/// 与 `else if` 走同一条路，标签编号因此与参考实现逐字节一致。
+fn emit_if_at(s: ptr, out: ptr, src: ptr, toks: ptr, cond: u32, ret: u32) -> u32 {
+    // 先算条件再占标签: 条件里的 `&&`/除法会自己占标签 (与 lomentc 的 If 同序)
+    let e3: u32 = expr_bin(s, out, src, toks, cond, 1, 0, 0);
+    let base_l: u32 = load32(s, 480) + 1;   // lomentc 从 L1 起编号
+    store32(s, 480, base_l + 2);
+    emit_str(s, out, "  br i1 ");
+    emit_val(s, out, 0);
+    emit_str(s, out, ", label ");
+    lab_ref(s, out, base_l, "then");
+    emit_str(s, out, ", label ");
+    lab_ref(s, out, base_l + 1, "else");
+    emit_str(s, out, "\n");
+    store32(s, 476, 1);
+    lab_def(s, out, base_l, "then");
+    let k: u32 = e3 + 1;   // '{' 之后的第一条语句
+    // **L2 也认 `if` 的两支**（`docs/210` §7 点名的"只认 while/for 的体"）：两支各是一个
+    // 块，规则与循环体同一条（`epoch_open` 内部的 `l2_ok` 就是用这一支的跨度判的）。
+    // `else if` 链**不在这儿开** —— 那是一条语句，它自己那两支会各自开（参考侧同形）。
+    let tv: u32 = epoch_open(s, out, src, toks, e3 + 1, skip_block(src, toks, e3) - 1);
+    while !tok_is(src, toks, k, "}") && tok_kind(toks, k) != 4 {
+        k = stmt(s, out, src, toks, k, ret);
+    }
+    epoch_close(s, out, tv);
+    k = k + 1;
+    jump(s, out, base_l + 2, "end");
+    lab_def(s, out, base_l + 1, "else");
+    if tok_is(src, toks, k, "else") {
+        k = k + 1;
+        if tok_is(src, toks, k, "if") {
+            k = stmt(s, out, src, toks, k, ret);
+        } else if load32(s, CG_PROF) == 1 && !tok_is(src, toks, k, "{") {
+            // Tur 2：`else <条件> {` —— 隐式 elif，直接发下一层（与 `else if` 同形）。
+            k = emit_if_at(s, out, src, toks, k, ret);
+        } else {
+            let ev: u32 = epoch_open(s, out, src, toks, k + 1, skip_block(src, toks, k) - 1);
+            k = k + 1;   // '{'
+            while !tok_is(src, toks, k, "}") && tok_kind(toks, k) != 4 {
+                k = stmt(s, out, src, toks, k, ret);
+            }
+            epoch_close(s, out, ev);
+            k = k + 1;
+        }
+    }
+    jump(s, out, base_l + 2, "end");
+    lab_def(s, out, base_l + 2, "end");
+    return k;
+}
+
 /// 一条语句; 返回下一个待处理 token 下标。
 fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
     if tok_is(src, toks, j, "return") {
@@ -5684,48 +5737,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         return nxt;
     }
     if tok_is(src, toks, j, "if") {
-        // 先算条件再占标签: 条件里的 `&&`/除法会自己占标签 (与 lomentc 的 If 同序)
-        let e3: u32 = expr_bin(s, out, src, toks, j + 1, 1, 0, 0);
-        let base_l: u32 = load32(s, 480) + 1;   // lomentc 从 L1 起编号
-        store32(s, 480, base_l + 2);
-        emit_str(s, out, "  br i1 ");
-        emit_val(s, out, 0);
-        emit_str(s, out, ", label ");
-        lab_ref(s, out, base_l, "then");
-        emit_str(s, out, ", label ");
-        lab_ref(s, out, base_l + 1, "else");
-        emit_str(s, out, "\n");
-        store32(s, 476, 1);
-        lab_def(s, out, base_l, "then");
-        let k: u32 = e3 + 1;   // '{' 之后的第一条语句
-        // **L2 也认 `if` 的两支**（`docs/210` §7 点名的"只认 while/for 的体"）：两支各是一个
-        // 块，规则与循环体同一条（`epoch_open` 内部的 `l2_ok` 就是用这一支的跨度判的）。
-        // `else if` 链**不在这儿开** —— 那是一条语句，它自己那两支会各自开（参考侧同形）。
-        let tv: u32 = epoch_open(s, out, src, toks, e3 + 1, skip_block(src, toks, e3) - 1);
-        while !tok_is(src, toks, k, "}") && tok_kind(toks, k) != 4 {
-            k = stmt(s, out, src, toks, k, ret);
-        }
-        epoch_close(s, out, tv);
-        k = k + 1;
-        jump(s, out, base_l + 2, "end");
-        lab_def(s, out, base_l + 1, "else");
-        if tok_is(src, toks, k, "else") {
-            k = k + 1;
-            if tok_is(src, toks, k, "if") {
-                k = stmt(s, out, src, toks, k, ret);
-            } else {
-                let ev: u32 = epoch_open(s, out, src, toks, k + 1, skip_block(src, toks, k) - 1);
-                k = k + 1;   // '{'
-                while !tok_is(src, toks, k, "}") && tok_kind(toks, k) != 4 {
-                    k = stmt(s, out, src, toks, k, ret);
-                }
-                epoch_close(s, out, ev);
-                k = k + 1;
-            }
-        }
-        jump(s, out, base_l + 2, "end");
-        lab_def(s, out, base_l + 2, "end");
-        return k;
+        return emit_if_at(s, out, src, toks, j + 1, ret);
     }
     if tok_is(src, toks, j, "for") {   // for i in lo..hi { ... }
         let var_tok: u32 = j + 1;
@@ -8728,6 +8740,7 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32) -> u32 {
     // 状态块来自 `brk` 时是零，但夹具里的 `malloc` 会给脏页（见下面替换表那条）。
     store32(s, CG_ERR, 0);
     store32(s, CG_ERRTOK, 0);
+    store32(s, CG_PROF, prof);
     // **替换表的计数必须显式清零**：`sub_clear` 没人调用，这个格原来靠"调用方给的内存
     // 是零"成立 —— brk（真驱动）是零，而夹具里的 `malloc` 在 900 KB 这一档会拿到**脏页**
     // （`loment_p8_test` 的 C 夹具实测：`subst_tok` 读出一个 11 万多的表长，按 `i*8`

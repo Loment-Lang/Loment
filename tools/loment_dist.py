@@ -618,7 +618,9 @@ case "${1:-help}" in
             cat "$tmp/a.ll" > "$tmp/merged.ll"
             printf '\n' >> "$tmp/merged.ll"
             for f in "${deps_ir[@]}"; do
-                cat "$f" >> "$tmp/merged.ll"
+                # 版次属于**程序**（a.ll）：库 IR 自带的那一条会与应用的同名外部定义相撞
+                # （`docs/296` §1.2）。库不是"用哪一版 Tur 写的程序"，它的元数据不参与。
+                sed '/^@loment\.tur\.edition = /d' "$f" >> "$tmp/merged.ll"
                 printf '\n' >> "$tmp/merged.ll"
             done
             link_ir="$tmp/merged.ll"

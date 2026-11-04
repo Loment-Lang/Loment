@@ -374,7 +374,14 @@ def test_runtime_is_a_property_of_the_linked_artifact():
         _blob, info = lomelf.compile_ll(ir, [])
         assert set(info["funcs"]) == {"_start"}, (
             f"`choose no_runtime` 的镜像里有别的东西: {sorted(info['funcs'])}")
-        assert info["data"] == 0 and info["bss"] == 0, f"no_runtime 还有数据段: {info}"
+        # `.bss` 必须为零；`.data` 里只许有那一条**语言元数据**（`docs/296` §1.2）：
+        # 21 字节的 `LOMENT-TUR:...\0`，按 lomelf 的全局对齐（8）占 24 字节。
+        # 运行期那一层（arena/根表/分配器）一个字节都不许进来 —— 那才是这一条要守的。
+        assert info["bss"] == 0, f"no_runtime 带了 .bss: {info}"
+        assert info["data"] == 24, (
+            f"no_runtime 的 .data 只该有版次元数据（21B→24B 对齐）: {info}")
+        assert ir.count("@loment.tur.edition = global [21 x i8]") == 1, (
+            "no_runtime 的产物里没有（或有多条）版次元数据")
 
         rc, diag, ir, _pot = _emit(td, "rt_img_auto",
                                    {"mode": "std", "gc": "gc_auto", "runtime": "runtime"},

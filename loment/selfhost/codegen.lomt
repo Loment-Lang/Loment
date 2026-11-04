@@ -9104,9 +9104,8 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32) -> u32 {
         }
         dx = dx + 1;
     }
-    if nd > 0 && load32(s, 532) != 1 {
-        emit_str(s, out, "\n");
-    }
+    // **这里不再补空行**：版次元数据永远跟在后面（见下面 `emit_tur_meta`），所以
+    // 全局区永远不以 declare 结尾 —— 空行只在整段全局之后补一次。
     if load32(s, 532) == 1 {
         emit_str_globals(s, out, src, toks);
     }

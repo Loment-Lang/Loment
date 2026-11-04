@@ -14,6 +14,10 @@ Two edits are made to the compiler's output before it is written:
 * `__loment_abort` (which jrt does call, for the out-of-memory path) is renamed
   to `__jrt_abort` for the same reason.
 
+The Tur edition blob (`@loment.tur.edition`, `docs/296` §1.2) is **dropped** as
+well: the application unit already carries it, and the build wrapper concatenates
+the two - two external definitions of the same symbol would not link.
+
 Usage:
     python tools/loment_jrt.py --emit    # rewrite loment/lib/jrt/jrt.ll
     python tools/loment_jrt.py --check   # exit 1 if the committed file is stale
@@ -74,6 +78,9 @@ def render() -> str:
         if not re.search(rf"call\b[^\n]*@{re.escape(name)}\(", text):
             text = _drop_fn(text, name)
     text = text.replace("@__loment_abort", "@__jrt_abort")
+    # 版次元数据属于**程序**，不属于这个运行期库：应用单元已经带了，拼接后不能有两个
+    # 同名外部定义（`docs/296` §1.2）。
+    text = re.sub(r"(?m)^@loment\.tur\.edition = global \[[^\n]*\n", "", text)
     return HEADER + text
 
 

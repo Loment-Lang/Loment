@@ -6861,9 +6861,13 @@ def merge_ir_texts(texts: list[str], names: list[str] | None = None) -> str:
         raise Unsupported("合并后的 IR 必须恰好有一个 _start")
 
     out: list[str] = []
-    for text in texts:
+    for idx, text in enumerate(texts):
         kept: list[str] = []
         for line in text.splitlines():
+            # 版次元数据属于**程序**（第一份就是应用）：库/运行期那一份带着它时丢掉，
+            # 否则同名外部定义会撞（`docs/296` §1.2）。第一份照留。
+            if idx > 0 and line.startswith("@loment.tur.edition = "):
+                continue
             m = _IR_DECL_RE.match(line)
             if m and m.group(1) in defined:
                 continue

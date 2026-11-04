@@ -8,8 +8,8 @@
   "genesis": {
     "mode": "100755",
     "name": "lomelf-linux-x64.elf",
-    "sha256": "6baf9ea32ef2735b11a2521f6ab0a9ae4de1eb721afc3adcfe6fd5d70bf72c61",
-    "size": 226952
+    "sha256": "713c4e3df5b3a4ca19301eb82f658b127a77f9582176210f19872ac0fc52e88b",
+    "size": 227248
   },
   "inputs": {
     "mirror": {
@@ -19,13 +19,13 @@
     },
     "seed": {
       "path": "loment/build/selfhost_driver.ll",
-      "sha256": "8611e9fd55e7ca49abad30a13e9768e25e437af2f1cc49ca5f0b1d26bff035a6",
-      "size": 4635123
+      "sha256": "8b3ca28da7e9496b3415d5453bf12cf1630e60de31c7bc271d3971f69efa1058",
+      "size": 4669450
     }
   },
   "mirror_ir": {
-    "sha256": "fbf069cec9534ea7c574233c8fc892949b8832a7d668a1b06c29ab0ca9e9b2da",
-    "size": 1310577
+    "sha256": "a909a5216b4daf124cb50c07375784321c6ea29a06b1694d10cf8ebf63c2cab2",
+    "size": 1311785
   },
   "toolchain": {
     "clang": "clang version 22.1.8 (https://github.com/llvm/llvm-project ca7933e47d3a3451d81e72ac174dcb5aa28b59d1)",

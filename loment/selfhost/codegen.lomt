@@ -5440,6 +5440,116 @@ fn load_var(s: ptr, out: ptr, src: ptr, toks: ptr, name_tok: u32, lvl: u32) -> u
 ///   let __t{line}: <rt> = e;   let x: T;
 ///   match __t{line} { Ok(__v{line}) => { x = __v{line}; }  Err(__e{line}) => { return Err(__e{line}); } }
 /// 标签与临时编号都按同一顺序占号, 所以直发即可 (不重建 AST)。
+/// `x orelse d` / `x catch d` 里那个词的下标（深度 0，遇 `;` `,` `)` `}` 停），没有回 0。
+fn fb_tok(s: ptr, src: ptr, toks: ptr, at: u32) -> u32 {
+    let d: u32 = 0;
+    let k: u32 = at;
+    while tok_kind(toks, k) != 4 {
+        if tok_is(src, toks, k, "(") || tok_is(src, toks, k, "[")
+                || tok_is(src, toks, k, "{") {
+            d = d + 1;
+        } else if tok_is(src, toks, k, ")") || tok_is(src, toks, k, "]")
+                || tok_is(src, toks, k, "}") || tok_is(src, toks, k, ";")
+                || tok_is(src, toks, k, ",") {
+            if d == 0 {
+                return 0;
+            }
+            d = d - 1;
+        } else if d == 0 && tok_kind(toks, k) == 0
+                && (tok_is(src, toks, k, "orelse") || tok_is(src, toks, k, "catch")) {
+            return k;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+/// `let x: T = v orelse d;` / `x = v orelse d;`（`docs/296` §2.4）。
+///
+/// 与参考实现 `_fallback_expr` **同序**：先求枚举值 → `extractvalue` 取 tag → `switch`
+/// （默认落兜底块、`i32 0` 落成功块）→ 成功块取载荷并按需 `trunc` → 兜底块求 `d` →
+/// 合流块 `phi` → `store`。成功变体是枚举的**第一个**变体（预置 Option/Result 都是这个
+/// 形状）。返回 `;` 之后的下标。
+fn emit_fallback(s: ptr, out: ptr, src: ptr, toks: ptr, name_tok: u32, val_at: u32,
+                 fb_at: u32) -> u32 {
+    let sty: u32 = expr_type(s, src, toks, val_at);
+    // 泛型实例（`Option<u32>`）的载荷类型靠**类型实参替换**解出来 —— 与 `let x: P<u32>`
+    // 那条同一个机制（`push_ty_subst` 读类型名后面的 `<…>`）。
+    let ssub: u32 = push_ty_subst(s, src, toks, sty);
+    let ei: u32 = find_enum(s, src, toks, sty);
+    let pty: u32 = 0;
+    if ei != 4294967295 {
+        pty = enum_payload_type(s, src, toks, ei, 0);
+    }
+    pop_subst(s, ssub);
+    if pty == 0 {
+        let _cf: u32 = cg_fail(s, 2, fb_at);
+        return fb_at + 1;
+    }
+    let lv: u32 = 0;
+    let _vend: u32 = expr_bin(s, out, src, toks, val_at, 1, lv, 0);
+    emit_str(s, out, "  ");
+    let tag: u32 = new_temp(s, out);
+    emit_str(s, out, " = extractvalue { i32, i64 } ");
+    emit_val(s, out, lv);
+    emit_str(s, out, ", 0\n");
+    let su: u32 = load32(s, 480) + 1;
+    store32(s, 480, su + 2);
+    emit_str(s, out, "  switch i32 %t");
+    emit_dec(s, out, tag);
+    emit_str(s, out, ", label ");
+    lab_ref(s, out, su + 1, "fbbad");
+    emit_str(s, out, " [\n      i32 0, label ");
+    lab_ref(s, out, su, "fbok");
+    emit_str(s, out, "\n    ]\n");
+    store32(s, 476, 1);
+    lab_def(s, out, su, "fbok");
+    emit_str(s, out, "  ");
+    let raw: u32 = new_temp(s, out);
+    emit_str(s, out, " = extractvalue { i32, i64 } ");
+    emit_val(s, out, lv);
+    emit_str(s, out, ", 1\n");
+    if ty_bits(src, toks, pty) >= 64 {
+        set_temp_val(s, lv, raw);
+    } else {
+        emit_str(s, out, "  ");
+        let tr: u32 = new_temp(s, out);
+        emit_str(s, out, " = trunc i64 %t");
+        emit_dec(s, out, raw);
+        emit_str(s, out, " to ");
+        emit_ty(s, out, src, toks, pty);
+        emit_str(s, out, "\n");
+        set_temp_val(s, lv, tr);
+    }
+    jump(s, out, su + 2, "fbend");
+    lab_def(s, out, su + 1, "fbbad");
+    let semi: u32 = operand_end(s, src, toks, fb_at + 1);
+    let _dv: u32 = expr_bin(s, out, src, toks, fb_at + 1, 1, lv + 1, pty);
+    jump(s, out, su + 2, "fbend");
+    lab_def(s, out, su + 2, "fbend");
+    emit_str(s, out, "  ");
+    let r: u32 = new_temp(s, out);
+    emit_str(s, out, " = phi ");
+    emit_ty(s, out, src, toks, pty);
+    emit_str(s, out, " [ ");
+    emit_val(s, out, lv);
+    emit_str(s, out, ", ");
+    lab_ref(s, out, su, "fbok");
+    emit_str(s, out, " ], [ ");
+    emit_val(s, out, lv + 1);
+    emit_str(s, out, ", ");
+    lab_ref(s, out, su + 1, "fbbad");
+    emit_str(s, out, " ]\n");
+    emit_str(s, out, "  store ");
+    emit_ty(s, out, src, toks, pty);
+    emit_str(s, out, " %t");
+    emit_dec(s, out, r);
+    emit_str(s, out, ", ptr %");
+    emit_name_tok(s, out, src, toks, name_tok);
+    emit_str(s, out, ".addr\n");
+    return semi + 1;
+}
+
 fn emit_try_let(s: ptr, out: ptr, src: ptr, toks: ptr, name: u32, ty: u32, eq: u32, lt: u32) -> u32 {
     let ln: u32 = load32(toks, lt * 20 + 12);
     let rtt: u32 = expr_type(s, src, toks, eq + 1);
@@ -5790,6 +5900,13 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         if qp != 0 {
             emit_try_let(s, out, src, toks, name, ty, eq, j);
             return qp + 2;
+        }
+        // `let x: T = v orelse d;` / `... catch d;`（`docs/296` §2.4）
+        if load32(s, CG_PROF) == 1 {
+            let fbk: u32 = fb_tok(s, src, toks, eq + 1);
+            if fbk != 0 {
+                return emit_fallback(s, out, src, toks, name, eq + 1, fbk);
+            }
         }
         // `let p: Pair<u32>` 的类型实参: 先推入替换, 再处理右侧 (字面量分支也要在表内)
         let lsub: u32 = push_ty_subst(s, src, toks, ty);
@@ -6530,6 +6647,13 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
     }
     // 赋值: NAME = EXPR ;
     if tok_kind(toks, j) == 0 && tok_is(src, toks, j + 1, "=") {
+        // `x = v orelse d;` / `... catch d;`（`docs/296` §2.4）
+        if load32(s, CG_PROF) == 1 {
+            let fbk: u32 = fb_tok(s, src, toks, j + 2);
+            if fbk != 0 {
+                return emit_fallback(s, out, src, toks, j, j + 2, fbk);
+            }
+        }
         let ty2: u32 = var_type(s, src, toks, j);
         let e5: u32 = expr_bin(s, out, src, toks, j + 2, 1, 0, ty2);
         emit_str(s, out, "  store ");

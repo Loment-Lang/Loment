@@ -1248,6 +1248,21 @@ class While:
 
 
 @dataclass
+class Fallback:
+    """Tur 2 的 `x orelse d` / `x catch d`（`docs/296` §2.4）—— **只在 `let`/赋值右侧**。
+
+    `orelse` 认 `Option` 形状（`Some(T)` / `None`），`catch` 认 `Result` 形状
+    （`Ok(T)` / `Err(E)`）；成功那一支取载荷，另一支取 `d`。两支都要求枚举来自预置
+    （`__prelude` 一注入，两个实现在同一份枚举名上工作）。
+    """
+
+    value: object
+    default: object
+    kind: str          # "orelse" | "catch"
+    line: int
+
+
+@dataclass
 class Break:
     line: int
 
@@ -2690,7 +2705,7 @@ class Parser:
             if self.accept("punct", ";"):  # M9: 未初始化声明
                 return Let(name, ty, None, t.line)
             self.expect("punct", "=")
-            e = self.parse_expr()
+            e = self._fallback_rhs(self.parse_expr(), t.line)
             self.expect("punct", ";")
             return Let(name, ty, e, t.line)
         if t.val == "if":
@@ -2811,11 +2826,21 @@ class Parser:
         e = self.parse_expr()
         if self.at("punct", "="):
             self.next()
-            rhs = self.parse_expr()
+            rhs = self._fallback_rhs(self.parse_expr(), t.line)
             self.expect("punct", ";")
             return Assign(e, rhs, t.line)
         self.expect("punct", ";")
         return ExprStmt(e, t.line)
+
+    def _fallback_rhs(self, e, line: int):
+        """Tur 2 的 `x orelse d` / `x catch d`（`docs/296` §2.4）：只认**紧跟**的那一个词。"""
+        if self.profile != "tur2026.2" or not self.at("ident"):
+            return e
+        kind = self.peek(0).val
+        if kind not in ("orelse", "catch"):
+            return e
+        self.next()
+        return Fallback(e, self.parse_expr(), kind, line)
 
     # -- 表达式 (优先级爬升)
     def parse_expr(self, min_prec: int = 0):
@@ -3501,6 +3526,9 @@ def _const_int(e) -> int | None:
 def expr_type(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[str, Struct]) -> str | None:
     if isinstance(e, IntLit):
         return None  # 整型字面量: 由上下文定宽
+    if isinstance(e, Fallback):
+        # 载荷类型由 `_walk_expr` 校验时写回（`expr_type` 手上没有枚举表）。
+        return getattr(e, "ty", None)
     if isinstance(e, BoolLit):
         return "bool"
     if isinstance(e, StrLit):
@@ -3649,6 +3677,28 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
     if isinstance(e, Ident):
         if e.name not in scope:
             errs.append(f"{e.line}: 使用未声明的变量 {e.name}")
+        return
+    if isinstance(e, Fallback):
+        # `docs/296` §2.4：泛型形状 —— **恰好两个变体**，第一个（成功）带载荷、第二个
+        # （失败）不带。预置的 `Option { Some(T), None }` 与 `Result { Ok(T), Err(E) }`
+        # 都是这个形状，所以 `orelse` / `catch` 在检查器里是同一条规则；兜底值必须是
+        # **载荷那个类型**。校验完把载荷类型写回节点 —— `expr_type` 没有枚举表。
+        st = expr_type(e.value, scope, funcs, structs)
+        ed = enums.get(st) if st is not None else None
+        pty = None
+        if ed is None:
+            errs.append(f"{e.line}: `{e.kind}` 左侧是 {st or '未知类型'} —— 要两变体的枚举")
+        elif len(ed.variants) != 2 or ed.variants[0] not in ed.payloads:
+            errs.append(f"{e.line}: 枚举 {st} 不是 Option/Result 形状"
+                        f"（要 `V(载荷), U` 两个变体）")
+        else:
+            pty = ed.payloads[ed.variants[0]]
+            dt = expr_type(e.default, scope, funcs, structs)
+            if dt is not None and dt != pty:
+                errs.append(f"{e.line}: `{e.kind}` 的兜底值类型 {dt}，期望 {pty}")
+        e.ty = pty
+        _walk_expr(e.value, scope, funcs, structs, errs, enums)
+        _walk_expr(e.default, scope, funcs, structs, errs, enums)
         return
     if isinstance(e, EnumPath):
         if e.enum not in enums:
@@ -5625,6 +5675,11 @@ def _expr_rs(e) -> str:
         if e.name == "print_num":  # `docs/296` §2.7
             return f"__loment_print_num({a[0]})"
         return f"({a[0]}.as_bytes()[({a[1]}) as usize] as u32)"
+    if isinstance(e, Fallback):
+        # Rust 侧只是一条 `match`：成功变体取载荷，其余取兜底值（`docs/296` §2.4）。
+        pat = "Some" if e.kind == "orelse" else "Ok"
+        return (f"match {_expr_rs(e.value)} {{ {pat}(__v) => __v, "
+                f"_ => {_expr_rs(e.default)} }}")
     if isinstance(e, Cast):
         return f"(({_expr_rs(e.expr)}) as {_rust_t(e.type)})"
     if isinstance(e, MethodCall):
@@ -8451,6 +8506,8 @@ class _Ir:
 
     # -- 表达式 -> (loment 类型, 值)
     def expr(self, e, want: str | None = None) -> tuple[str, str]:
+        if isinstance(e, Fallback):
+            return self._fallback_expr(e)
         if isinstance(e, IntLit):
             if want == "ptr":  # M73: 空指针字面量
                 return "ptr", "null"
@@ -9182,6 +9239,45 @@ class _Ir:
     def block(self, stmts: list) -> None:
         for s in stmts:
             self.stmt(s)
+
+    def _fallback_expr(self, e) -> tuple[str, str]:
+        """`x orelse d` / `x catch d`（`docs/296` §2.4）：成功支取载荷、另一支取 `d`。
+
+        形状与 `match` 同一条：`switch` 落在成功/兜底两块上，值在两个前驱里各算一次，
+        合流块用 `phi`。载荷在枚举里存成 i64（构造时已按符号扩过），取出来要按载荷类型截。
+        """
+        sty, sv = self.expr(e.value, None)
+        ed = self.enums.get(sty)
+        succ = ed.variants[0] if ed is not None and ed.variants else ""
+        if ed is None or len(ed.variants) != 2 or succ not in ed.payloads:
+            raise LomError(e.line, 1,
+                           f"`{e.kind}` 只接 Option/Result 形状的枚举"
+                           f"（恰好两个变体、第一个带载荷）")
+        pty = ed.payloads[succ]
+        et = self.ll(sty)
+        tag = self.t()
+        self.w(f"{tag} = extractvalue {et} {sv}, 0")
+        succ_l, fail_l, end_l = self.l("fbok"), self.l("fbbad"), self.l("fbend")
+        self.w_raw(f"switch i32 {tag}, label %{fail_l} [")
+        self.w_raw(f"    i32 {ed.variants.index(succ)}, label %{succ_l}")
+        self.w("  ]")
+        self.terminated = True
+        self.label(succ_l)
+        raw = self.t()
+        self.w(f"{raw} = extractvalue {et} {sv}, 1")
+        if self.ll(pty) == "i64":
+            v1 = raw
+        else:
+            v1 = self.t()
+            self.w(f"{v1} = trunc i64 {raw} to {self.ll(pty)}")
+        self.jump(end_l)
+        self.label(fail_l)
+        _, v2 = self.expr(e.default, pty)
+        self.jump(end_l)
+        self.label(end_l)
+        r = self.t()
+        self.w(f"{r} = phi {self.ll(pty)} [ {v1}, %{succ_l} ], [ {v2}, %{fail_l} ]")
+        return pty, r
 
     def _for_step(self, var: str, ty: str, ptr: str, line: int) -> None:
         """区间 `for` 的自增（体尾与 `continue` 各发一次，指令必须同一份）。"""

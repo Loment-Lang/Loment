@@ -2137,6 +2137,65 @@ def test_m94_tur2_bare_return_and_print_num():
 
 
 @test
+def test_m95_tur2_orelse_and_catch():
+    """Tur 2 的 `orelse` / `catch`（`docs/296` §2.4）。
+
+    形状：**第一个变体带载荷 = 成功**，另一个是失败（预置 `Option { Some(T), None }` /
+    `Result { Ok(T), Err(E) }` 都是这个形状）。v1 只收 `let` / 赋值右侧。
+
+    钉四件：
+      * 两套实现**逐字节相同**（`switch` + `phi` 的标签号、截断的类型都要对齐）；
+      * **运行结果**对 —— 成功/失败两支各走一次（只比 IR 会漏掉"两支都发对、
+        但 phi 前驱写反"这种一致地错）；
+      * 兜底值**惰性**：失败那一支才求值（`d` 里放一次 `print_num`，成功路径不该打印）；
+      * Tur 1 里 `orelse` 仍是普通标识符（同一份源解析不过），不是新关键字。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    src = ("module fb\nchoose runtime\n\n"
+           "fn maybe(n: u32) -> Option<u32> {\n"
+           "    if n > 2 {\n        return Option::Some(n);\n    }\n"
+           "    return Option::None;\n"
+           "}\n\n"
+           "fn risky(n: u32) -> Result<u32, u32> {\n"
+           "    if n > 2 {\n        return Result::Ok(n * 2);\n    }\n"
+           "    return Result::Err(1);\n"
+           "}\n\n"
+           "fn main() {\n"
+           "    let a: u32 = maybe(5) orelse 0;\n"
+           "    let b: u32 = maybe(1) orelse 7;\n"
+           "    let c: u32 = risky(5) catch 0;\n"
+           "    let d: u32 = risky(1) catch 9;\n"
+           "    let e: u32 = maybe(5) orelse print_num(1);\n"
+           "    if a == 5 && b == 7 && c == 10 && d == 9 {\n"
+           "        print(\"ok\\n\");\n"
+           "    } else {\n        print(\"bad\\n\");\n    }\n"
+           "}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "fb.lomt"
+        p.write_text("choose write grammar tur2\n" + src, encoding="utf-8", newline="\n")
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_fb")
+        rc, out, err = _run_driver_raw(elf, _wsl_path(p), td, "fb")
+        assert rc == 0, f"自举侧编不过 orelse/catch: {err[-300:]}"
+        assert out == _unit_ll(p), "orelse/catch 的 IR 两个实现不一致"
+        art, _ = __import__("lomelf").compile_ll(out)
+        exe = Path(td) / "fb.elf"
+        exe.write_bytes(art)
+        script = f"cp {_wsl_path(exe)} {_T}fb_ed && chmod +x {_T}fb_ed && {_T}fb_ed"
+        r = subprocess.run([*_WSLCMD, "bash", "-lc", script],
+                           capture_output=True, text=True, timeout=120, shell=False)
+        # `e` 那一行成功走 Some，兜底里的 `print_num(1)` 不该被求值
+        assert (r.returncode, r.stdout) == (0, "ok\n"), (r.returncode, r.stdout, r.stderr)
+        # Tur 1：`orelse` 不是关键字，同一份源解析不过
+        p1 = Path(td) / "old.lomt"
+        p1.write_text("choose write grammar tur\n" + src, encoding="utf-8", newline="\n")
+        rc1, out1, _e1 = _run_driver_raw(elf, _wsl_path(p1), td, "oldfb")
+        assert rc1 != 0 and out1.strip() == "", "Tur 1 收下了 `orelse` —— 版次隔离破了"
+        print("      orelse/catch: 两套实现逐字节相同、跑得 ok、兜底值惰性；Tur 1 拒")
+
+
+@test
 def test_m85_driver_emits_structured_diagnostics():
     """自举驱动的 `--diag-out`: 结构与参考实现同形, **码集相等** (`docs/182` §5)。
 

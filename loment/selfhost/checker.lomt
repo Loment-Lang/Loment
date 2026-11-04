@@ -1544,6 +1544,47 @@ fn chk_lh3c(v: u64) -> u32 {
 ///   - 数组字面量 -> 数组(首元素类型, 个数); 下标 -> 元素类型; 字段 -> 字段类型
 ///   - `f(...)` -> 返回类型; `x.m(...)` -> 方法返回类型; `E::V`/`E::V(x)` -> 枚举类型
 ///   - 复合类型/泛型实例/形参 T -> 0 (见 chk_ty_of_tok 与 TY_* 的说明)
+/// `x orelse d` / `x catch d` 里那个 `orelse`/`catch` 的下标（深度 0），没有回 0。
+fn chk_fb_tok(src: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+    let d: u32 = 0;
+    let k: u32 = lo;
+    while k < hi && chk_tok_kind(t, k) != 4 {
+        if chk_tok_is(src, t, k, "(") || chk_tok_is(src, t, k, "[")
+                || chk_tok_is(src, t, k, "{") {
+            d = d + 1;
+        } else if chk_tok_is(src, t, k, ")") || chk_tok_is(src, t, k, "]")
+                || chk_tok_is(src, t, k, "}") {
+            if d > 0 {
+                d = d - 1;
+            }
+        } else if d == 0 && chk_tok_kind(t, k) == 0
+                && (chk_tok_is(src, t, k, "orelse") || chk_tok_is(src, t, k, "catch")) {
+            return k;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+/// 枚举**第一个变体**的载荷类型（`docs/296` §2.4 的形状）；不是枚举 / 第一个变体
+/// 没有载荷 -> 0。
+fn chk_fb_payload(src: ptr, t: ptr, syms: ptr, n: u32, lt: u32, tyt: ptr) -> u32 {
+    if lt == 0 || chk_ty_kind(lt) != TY_K_NAMED {
+        return 4294967295;                       // 不是具名类型 -> 形状错
+    }
+    let s0: u32 = lt % (1 << TY_KIND_SHIFT);
+    if load32(syms, s0 * 20 + 4) != K_ENUM {
+        return 4294967295;                       // 不是枚举 -> 形状错
+    }
+    let brc: u32 = load32(syms, s0 * 20 + 16);
+    let pr: u64 = chk_epayload_range(src, t, brc, brc + 1);
+    if pr == 0 {
+        return 4294967295;                       // 第一个变体没载荷 -> 形状错
+    }
+    // 0 = 载荷是**泛型形参**（`T`）：类型编码解析不出具体类型，按"未知"返回。
+    return chk_ty_range(src, t, syms, n, tyt, chk_lhlo(pr), chk_lhhi(pr));
+}
+
 fn chk_tex(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
            lh: u64, tyt: ptr, p: ptr, oc: ptr) -> u32 {
     // 诊断偏移格是**形参** oc (调用方从 tyt 块尾拿到) —— 这里再 `let oc = ...` 会把它
@@ -1565,6 +1606,33 @@ fn chk_tex(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             chk_pub(src, t, oc, p, E_Q, hi - 1);
         }
         return chk_tex(src, t, syms, n, env, envc, chk_lh(lo, hi - 1), tyt, p, oc);
+    }
+    // ---- `x orelse d` / `x catch d`（`docs/296` §2.4）：枚举的**第一个**变体是成功
+    // 那一支（预置 `Option { Some(T), None }` / `Result { Ok(T), Err(E) }` 都是这个形状）。
+    // 结果类型 = 第一个变体的载荷类型；兜底值必须是那个类型。
+    if load32(oc, 8) == 1 && hi > lo + 2 {
+        let fbk: u32 = chk_fb_tok(src, t, lo, hi);
+        if fbk != 0 {
+            let lt: u32 = chk_tex(src, t, syms, n, env, envc, chk_lh(lo, fbk), tyt, p, oc);
+            // `lt == 0` = 值那一侧的类型未知（典型是**泛型返回**：自举符号表里的返回
+            // 类型编码只认 token 级简单类型，`Option<u32>` 这一类落 0）。这一格与
+            // `match` 主体那条保守方向一致 —— 不猜，也不报假阳性；右半边照常走一遍。
+            if lt == 0 {
+                chk_tex(src, t, syms, n, env, envc, chk_lh(fbk + 1, hi), tyt, p, oc);
+                return 0;
+            }
+            let pty: u32 = chk_fb_payload(src, t, syms, n, lt, tyt);
+            if pty == 4294967295 {
+                chk_pub(src, t, oc, p, E_TMISMATCH, lo);   // 不是 Option/Result 形状
+            } else if pty != 0 {
+                let rt: u32 = chk_tex(src, t, syms, n, env, envc, chk_lh(fbk + 1, hi), tyt, p, oc);
+                if rt != 0 && chk_ty_eq(tyt, rt, pty) == 0 {
+                    chk_pub(src, t, oc, p, E_TMISMATCH, fbk + 1);
+                }
+            }
+            // `pty == 0` = 载荷是**泛型形参**（`Option<T>` 里的 `T`）—— 同上，当"未知"。
+            return pty;
+        }
     }
     // ---- 单 token 快路径
     if hi == lo + 1 {

@@ -28,8 +28,13 @@ Tur 2 且函数**没有返回类型**时成立（Tur 1 / 有返回类型仍是 E
 同序（L1 该还的还、`gc_auto` 的根表该退的退）。`print_num` 是 Tur 2 的内建，实参任意
 整型、按符号扩到 i64，十进制转换在运行期块里（`no_runtime` 点名拒，E31）。判据：
 p8 M94（两套实现逐字节相同、输出 `0/1234/-98765/i64 上限`、Tur 1 的 `return;` 仍拒而
-用户自己的 `fn print_num` 照常跑、E19/E31 各一条）。第 4 项前半（`defer`）与第 5 项
-（`catch` / `orelse`）按下面的顺序推进。
+用户自己的 `fn print_num` 照常跑、E19/E31 各一条）。
+
+**§4 第 5 项（`catch` / `orelse`）也已落地**：形状是"恰好两个变体、第一个（成功）带
+载荷"—— 预置 `Option` / `Result` 都是这个形状，所以两个词在实现上是同一条规则。只在
+`let` / 赋值右侧；`switch` + `phi` 合流，兜底值**惰性**（失败那一支才求值）。判据：
+p8 M95（两套实现逐字节相同、成功/失败两支各跑一次、兜底里的 `print_num` 不被求值、
+Tur 1 的同一份源解析不过）。只剩第 4 项前半（`defer`）。
 
 ## 1. 兼容法规：语法按**版次**冻结，版次按**年份族**归档
 
@@ -162,8 +167,12 @@ let b: u32 = risky() catch 0;         // Result：Err -> 0
 
 v1 只做**表达式位置的兜底**，且只用于 `let` / 赋值右侧：
 
-* `opt orelse d`：`opt` 是 `Option<T>`，`None` 取 `d`（`T`）；
-* `res catch d`：`res` 是 `Result<T, E>`，`Err(_)` 取 `d`（`T`）；
+* 形状规则（与预置枚举对齐）：**恰好两个变体，第一个（成功）带载荷、第二个不带**。
+  `__prelude` 里 `Option { Some(T), None }` 与 `Result { Ok(T), Err(E) }` 都是这个形状；
+* `opt orelse d`：成功那一支取载荷（`T`），另一支取 `d`（`T`）；
+* `res catch d`：同上（`Ok(T)` 取载荷、`Err(_)` 取 `d`）—— v1 里 `orelse` 与 `catch`
+  是**同一条规则的两个拼法**，分开只为读起来顺；
+* 兜底值**惰性**：只在失败那一支求值（与 Zig 一致）；两支在 `switch` + `phi` 里合流；
 * 需要看错误值的 `catch |e| { ... }`、需要提前传播的 `catch return` 留给 Tur 3。
 
 ### 2.5 `break` / `continue`（C / Go / Zig / Python）

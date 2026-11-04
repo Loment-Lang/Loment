@@ -145,13 +145,35 @@ def _build(tree: Path) -> bytes:
     return blob
 
 
+#: `#371`：能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑，Windows 上经 WSL。
+#: 门禁跑在 Linux 上（`#382`），所以这里**不能写死 `wsl`**。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
+def _wsl_ok() -> bool:
+    if sys.platform.startswith("linux"):
+        return True
+    if not shutil.which("wsl"):
+        return False
+    try:
+        return subprocess.run([*_WSLCMD, "true"], capture_output=True,
+                              text=True, timeout=60, shell=False).returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _wsl(p: Path) -> str:
     s = str(Path(p).resolve()).replace("\\", "/")
+    if sys.platform.startswith("linux"):
+        return s
     return "/mnt/" + s[0].lower() + s[2:]
 
 
 @test
 def test_a_running_lsp_replaces_itself_at_the_safe_point() -> None:
+    if not _wsl_ok():
+        print("      SKIP: 没有 WSL，跑不了 Linux ELF")
+        return
     with tempfile.TemporaryDirectory() as t:
         t = Path(t)
         old = _tree(t / "old")
@@ -177,12 +199,8 @@ def test_a_running_lsp_replaces_itself_at_the_safe_point() -> None:
                   f"cp {_wsl(run / 'cand.tmp')} /tmp/loment-hot/next.hot.tmp && "
                   f"cp {_wsl(run / 'drive.py')} /tmp/loment-hot/drive.py && "
                   f"cd /tmp/loment-hot && python3 drive.py ./lsp /tmp/loment-hot/next.hot")
-        if sys.platform.startswith("linux"):
-            script = script.replace("rm -rf /tmp/loment-hot && ", "rm -rf /tmp/loment-hot && ")
-        r = subprocess.run(["wsl", "-e", "bash", "-lc", script], capture_output=True, text=True)
-    if not shutil.which("wsl") and not sys.platform.startswith("linux"):
-        print("SKIP: 没有 WSL/Linux，跑不了 ELF")
-        return
+        r = subprocess.run([*_WSLCMD, "bash", "-lc", script],
+                           capture_output=True, text=True)
     fields: dict[str, str] = {}
     for line in r.stdout.splitlines():
         w = line.split(" ", 1)

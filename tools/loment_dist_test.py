@@ -1143,7 +1143,7 @@ def test_lvm_ships_and_runs_a_program() -> None:
     没有 clang 就 SKIP：`build_tools` 要先由种子造 stage1，那一步要 clang。
     """
     check("loment-lvm 在 TOOLS 里",
-          any(n == "loment-lvm" for (n, _e, _c) in loment_dist.TOOLS))
+          any(row[0] == "loment-lvm" for row in loment_dist.TOOLS))
     if loment_dist.clang_path() is None:
         print("  SKIP  loment-lvm: 没有 clang —— 要真编一次 stage1 才作数")
         return

@@ -2050,6 +2050,93 @@ def test_m91_tur2_for_in_and_loop_control():
 
 
 @test
+def test_m94_tur2_bare_return_and_print_num():
+    """Tur 2 的裸 `return;`（`docs/296` §2.6）与 `print_num`（§2.7）。
+
+    判据只钉两套实现**逐字节相同**是不够的 —— 一起错的孪生照样绿。所以每一半都同时钉
+    **运行结果**：`return;` 提前退出（后面的 `print` 不该出现），`print_num` 的十进制
+    字节（0 / 正 / 负 / i64 最大值）。
+
+    版次隔离两条，都是"老代码不能被新内建顶掉"那块：
+      * Tur 1 的 `return;` 仍是解析错；
+      * Tur 1 里用户自己的 `fn print_num` 照常编译、照常跑（不被内建顶掉）；
+      * Tur 2 里 `fn f() -> u32 { return; }` 是错；
+      * Tur 2 里 `print_num` 会把运行期拖进产物，默认档 `no_runtime` 点名拒（E31）。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    src = ("module t2out\n"
+           "choose runtime\n\n"
+           "fn early(n: u32) {\n"
+           "    if n > 3 {\n        return;\n    }\n"
+           "    print(\"tail\\n\");\n"
+           "}\n\n"
+           "fn main() {\n"
+           "    early(5);\n"
+           "    print_num(0);\n    print(\"\\n\");\n"
+           "    print_num(1234);\n    print(\"\\n\");\n"
+           "    print_num(-98765);\n    print(\"\\n\");\n"
+           "    print_num(9223372036854775807 as i64);\n    print(\"\\n\");\n"
+           "    early(1);\n"
+           "}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "t2out.lomt"
+        p.write_text("choose write grammar tur2\n" + src, encoding="utf-8", newline="\n")
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_t2out")
+        rc, out, err = _run_driver_raw(elf, _wsl_path(p), td, "t2out")
+        assert rc == 0, f"自举侧编不过裸 return / print_num: {err[-300:]}"
+        assert out == _unit_ll(p), "裸 return / print_num 的 IR 两个实现不一致"
+        art, _ = __import__("lomelf").compile_ll(out)
+        exe = Path(td) / "t2out.elf"
+        exe.write_bytes(art)
+        script = (f"cp {_wsl_path(exe)} {_T}t2out_ed && chmod +x {_T}t2out_ed "
+                  f"&& {_T}t2out_ed")
+        r = subprocess.run([*_WSLCMD, "bash", "-lc", script],
+                           capture_output=True, text=True, timeout=120, shell=False)
+        want = "0\n1234\n-98765\n9223372036854775807\ntail\n"
+        assert (r.returncode, r.stdout) == (0, want), (r.returncode, r.stdout, r.stderr)
+        # Tur 1：裸 `return;` 仍是解析错
+        p1 = Path(td) / "old.lomt"
+        p1.write_text("choose write grammar tur\n" + src, encoding="utf-8", newline="\n")
+        rc1, out1, err1 = _run_driver_raw(elf, _wsl_path(p1), td, "oldt2out")
+        assert rc1 != 0 and out1.strip() == "", "Tur 1 收下了裸 `return;`"
+        assert "E19" in err1, err1[-200:]
+        # Tur 1：用户自己的 `fn print_num` 不被内建顶掉（自己那行也编得过）
+        p2 = Path(td) / "mine.lomt"
+        p2.write_text(
+            "choose write grammar tur\nmodule mine\n\n"
+            "fn print_num(n: u32) {\n    print(\"mine\\n\");\n}\n\n"
+            "fn main() {\n    print_num(7);\n}\n", encoding="utf-8", newline="\n")
+        rc2, out2, err2 = _run_driver_raw(elf, _wsl_path(p2), td, "mine")
+        assert rc2 == 0 and out2 == _unit_ll(p2), f"Tur 1 的 print_num 被顶掉了: {err2[-200:]}"
+        art2, _ = __import__("lomelf").compile_ll(out2)
+        exe2 = Path(td) / "mine.elf"
+        exe2.write_bytes(art2)
+        script2 = f"cp {_wsl_path(exe2)} {_T}mine_ed && chmod +x {_T}mine_ed && {_T}mine_ed"
+        r2 = subprocess.run([*_WSLCMD, "bash", "-lc", script2],
+                            capture_output=True, text=True, timeout=120, shell=False)
+        assert (r2.returncode, r2.stdout) == (0, "mine\n"), (r2.returncode, r2.stdout)
+        # Tur 2：有返回类型的 `return;` 是错
+        p3 = Path(td) / "typed.lomt"
+        p3.write_text("choose write grammar tur2\nmodule typed\n\n"
+                      "fn f() -> u32 {\n    return;\n}\n\nfn main() {\n    f();\n}\n",
+                      encoding="utf-8", newline="\n")
+        rc3, out3, err3 = _run_driver_raw(elf, _wsl_path(p3), td, "typed")
+        assert rc3 != 0 and out3.strip() == "", "有返回类型的 `return;` 被放过去了"
+        assert "E19" in err3, err3[-200:]
+        # Tur 2：`no_runtime` 下 `print_num` 点名拒（运行期保证）
+        p4 = Path(td) / "nort.lomt"
+        p4.write_text("choose write grammar tur2\nmodule nort\n\n"
+                      "fn main() {\n    print_num(7);\n}\n", encoding="utf-8", newline="\n")
+        rc4, out4, err4 = _run_driver_raw(elf, _wsl_path(p4), td, "nort")
+        assert rc4 != 0 and out4.strip() == "", "`no_runtime` 收下了 print_num"
+        assert "E31" in err4, err4[-200:]
+        print("      裸 return / print_num: 产物逐字节相同、输出 0/1234/-98765/i64 上限；"
+              "Tur 1 拒 return 但保住用户 print_num；E19/E31 都对")
+
+
+@test
 def test_m85_driver_emits_structured_diagnostics():
     """自举驱动的 `--diag-out`: 结构与参考实现同形, **码集相等** (`docs/182` §5)。
 

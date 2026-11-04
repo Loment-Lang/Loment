@@ -531,7 +531,9 @@ fn chk_core_dim(src: ptr, t: ptr, k: u32) -> u32 {
 ///
 /// kind 3 = punct（`codegen.runtime_needed` 判除法用的是同一个常量）。
 /// `chk_tok_is` 自己跳过 kind 2（字符串），所以 `"/"` 不会撞上字符串里的斜杠。
-fn chk_rt_site(src: ptr, t: ptr, i: u32) -> u32 {
+/// `prof` = 版次（`docs/296`）：`print_num` 只在 Tur 2 是内建，Tur 1 里同名的用户函数
+/// 不拖运行期（与参考实现 `_runtime_sites` 的 `profile` 参数同一条）。
+fn chk_rt_site(src: ptr, t: ptr, i: u32, prof: u32) -> u32 {
     if chk_tok_kind(t, i) == 3 {
         if chk_tok_is(src, t, i, "/") || chk_tok_is(src, t, i, "%") {
             return 1;
@@ -562,6 +564,10 @@ fn chk_rt_site(src: ptr, t: ptr, i: u32) -> u32 {
             return 1;
         }
         return 0;
+    }
+    // `print_num`（`docs/296` §2.7）：十进制转换在运行期那块里。
+    if prof == 1 && chk_tok_is(src, t, i, "print_num") && chk_tok_is(src, t, i + 1, "(") {
+        return 1;
     }
     return 0;
 }
@@ -2065,6 +2071,11 @@ fn chk_tex_atom_call(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
     let hi: u32 = chk_lhhi(lh);
     let got: u32 = chk_count_args(src, t, lo + 1);
     let bin: u32 = chk_builtin_arity(src, t, lo);
+    // `print_num`（`docs/296` §2.7）**只在 Tur 2 是内建** —— Tur 1 里它是普通标识符，
+    // 用户自己定义的 `fn print_num` 不会被顶掉。
+    if bin == 999999 && load32(oc, 8) == 1 && chk_tok_is(src, t, lo, "print_num") {
+        bin = 1;
+    }
     if bin != 999999 {
         // 内建: 元数 (参考实现另有一条 slice_len 的实参类型规则)
         if bin != got {
@@ -2080,6 +2091,11 @@ fn chk_tex_atom_call(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             if chk_tok_is(src, t, lo, "slice_len") {
                 if at != 0 && chk_ty_is_arr(tyt, at) == 0 && chk_ty_is_slc(tyt, at) == 0 {
                     chk_pub(src, t, oc, p, E_TMISMATCH, lo);   // 不是数组或切片
+                }
+            } else if chk_tok_is(src, t, lo, "print_num") {
+                // 任意整型（字面量也行）；发射时按符号扩到 i64（`docs/296` §2.7）。
+                if at != 0 && chk_ty_is_int(at) == 0 {
+                    chk_pub(src, t, oc, p, E_TMISMATCH, lo);
                 }
             } else if wt != 0 {
                 if at == 0 {
@@ -3443,10 +3459,18 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             }
         } else if chk_tok_is(src, t, j, "return") {
             let semi: u32 = chk_find_at(src, t, j + 1, e, ";");
-            let t3: u32 = chk_tex(src, t, syms, n, env, c,
-                                  ((j + 1) as u64) * 4294967296 + (semi as u64), tyt, p, oc);
-            if t3 != 0 && ret != 0 && chk_ty_eq(tyt, t3, ret) == 0 {
-                chk_pub(src, t, oc, p, E_TMISMATCH, j);
+            if semi == j + 1 {
+                // 裸 `return;`（`docs/296` §2.6）：只在 Tur 2 且函数**没有返回类型**时成立。
+                // Tur 1 / 有返回类型的函数里，参考实现是解析期就拒（E019）。
+                if load32(oc, 8) != 1 || ret != 0 {
+                    chk_pub(src, t, oc, p, E_PARSE, semi);
+                }
+            } else {
+                let t3: u32 = chk_tex(src, t, syms, n, env, c,
+                                      ((j + 1) as u64) * 4294967296 + (semi as u64), tyt, p, oc);
+                if t3 != 0 && ret != 0 && chk_ty_eq(tyt, t3, ret) == 0 {
+                    chk_pub(src, t, oc, p, E_TMISMATCH, j);
+                }
             }
             if semi <= e {
                 j = semi + 1;
@@ -3745,10 +3769,11 @@ fn chk_syntax_prepass(src: ptr, t: ptr, out: ptr, o: u32, tur2: u32) -> u32 {
         } else {
             un_run = 0;
         }
-        // 裸 `return;`（不带值）**不是合法构造** —— `loment syntax` 明说它必须带值。
+        // 裸 `return;`（不带值）：Tur 1 里**不是合法构造** —— `loment syntax` 明说它必须带值，
         // 参考实现报 E019 "期望表达式，得到 ';'"；自举侧原先**段错误、什么都不印**
-        // （issue #335）。
-        if chk_tok_kind(t, i) == 0 && chk_tok_is(src, t, i, "return")
+        // （issue #335）。Tur 2 里它在**没有返回类型**的函数里成立（`docs/296` §2.6）——
+        // 那一格要等函数的返回类型，放在 `chk_body` 的 `return` 分支里判。
+        if tur2 == 0 && chk_tok_kind(t, i) == 0 && chk_tok_is(src, t, i, "return")
                 && chk_tok_is(src, t, i + 1, ";") {
             o = sym_pub(src, t, out, o, E_PARSE, i + 1);
         }
@@ -4186,7 +4211,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
         let hit: u32 = 4294967295;
         let nsites: u32 = 0;
         while chk_tok_kind(t, jr) != 4 {
-            if chk_rt_site(src, t, jr) == 1 {
+            if chk_rt_site(src, t, jr, load32(oc, 8)) == 1 {
                 if nsites == 0 {
                     hit = jr;
                 }
@@ -4284,9 +4309,16 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                         o = sym_pub(src, t, out, o, E_EXCL, i);
                     }
                     let want_b: u32 = chk_builtin_arity(src, t, i);
-                    if want_b != 999999 {
+                    let wb2: u32 = want_b;
+                    // `print_num` 只在 Tur 2 是内建（`docs/296` §2.7）—— 这一趟与
+                    // `chk_tex_atom_call` 是两条路，漏一处就会在 Tur 2 里多报一条 E002。
+                    if wb2 == 999999 && load32(oc, 8) == 1
+                            && chk_tok_is(src, t, i, "print_num") {
+                        wb2 = 1;
+                    }
+                    if wb2 != 999999 {
                         // 内建: 只查实参个数 (形参类型那一半属于表达式类型批次)
-                        if want_b != chk_count_args(src, t, i + 1) {
+                        if wb2 != chk_count_args(src, t, i + 1) {
                             o = sym_pub(src, t, out, o, E_ARITY, i);
                         }
                     } else {

@@ -77,6 +77,23 @@ BUILTINS = {
 }
 BUILTIN_DIVERGES = ("panic",)  # 求值后不可继续 (M19)
 
+#: **只在 Tur 2 是内建**的那些（`docs/296` §2.7）。Tur 1 里这些名字是普通标识符 ——
+#: 用户自己定义的 `fn print_num` 不会被顶掉，所以查表时不能把它们并进 `BUILTINS`。
+#: 解析器见到 `tur2026.2` 里这些名字的调用会给 AST 打一个 `tur2=True`，三处查表
+#: （`expr_type` / `_walk_expr` / 发射器）都认那个标记。
+TUR2_BUILTINS: dict[str, tuple[tuple[str, ...], str]] = {
+    "print_num": (("i64",), "u32"),
+}
+
+
+def _builtin_sig(e) -> tuple[tuple[str, ...], str] | None:
+    """这次调用解析成哪个内建签名；`None` = 不是内建（按用户函数走）。"""
+    if e.name in BUILTINS:
+        return BUILTINS[e.name]
+    if getattr(e, "tur2", False):
+        return TUR2_BUILTINS.get(e.name)
+    return None
+
 #: **产物的版次元数据**（`docs/296` §1.1）：每份 IR 发一个外部可见的只读全局，
 #: 内容是 `LOMENT-TUR:` + 规范版次名 + NUL。两个用途：
 #:   * 运行期 —— `tur_edition()` 内建返回冒号之后那一段（`ptr`/`len` 都从这一条来）；
@@ -162,6 +179,51 @@ define internal void @__loment_abort() {
 }
 
 declare void @llvm.trap()
+
+define internal i32 @__loment_print_num(i64 %v) {
+entry:
+  %buf = alloca [24 x i8]
+  %neg = icmp slt i64 %v, 0
+  br i1 %neg, label %negp, label %pos
+negp:
+  %m0 = sub i64 0, %v
+  br label %conv
+pos:
+  br label %conv
+conv:
+  %m = phi i64 [ %m0, %negp ], [ %v, %pos ]
+  %end0 = getelementptr inbounds [24 x i8], ptr %buf, i64 0, i64 24
+  br label %loop
+loop:
+  %p = phi ptr [ %end0, %conv ], [ %p2, %loop ]
+  %x = phi i64 [ %m, %conv ], [ %q, %loop ]
+  %d = urem i64 %x, 10
+  %q = udiv i64 %x, 10
+  %c = trunc i64 %d to i8
+  %c2 = add i8 %c, 48
+  %pi = ptrtoint ptr %p to i64
+  %pj = sub i64 %pi, 1
+  %p2 = inttoptr i64 %pj to ptr
+  store i8 %c2, ptr %p2
+  %done = icmp eq i64 %q, 0
+  br i1 %done, label %after, label %loop
+after:
+  br i1 %neg, label %sign, label %wr
+sign:
+  %si = ptrtoint ptr %p2 to i64
+  %sj = sub i64 %si, 1
+  %p3 = inttoptr i64 %sj to ptr
+  store i8 45, ptr %p3
+  br label %wr
+wr:
+  %st = phi ptr [ %p2, %after ], [ %p3, %sign ]
+  %sp = ptrtoint ptr %st to i64
+  %ep = ptrtoint ptr %end0 to i64
+  %ln = sub i64 %ep, %sp
+  %r = call i64 asm sideeffect "syscall", "={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}"(i64 1, i64 1, i64 %sp, i64 %ln)
+  %t = trunc i64 %r to i32
+  ret i32 %t
+}
 '''
 
 #: **分配器**（`docs/175` §3.4 的 `gc_manual`）。
@@ -788,6 +850,16 @@ fn __loment_alloc(size: u32) -> *mut u8 {
 fn __loment_load8(p: *mut u8, off: u32) -> u8 {
     unsafe { *p.add(off as usize) }
 }
+// `print_num`（`docs/296` §2.7）。原生后端是运行期里那段不借 libc 的十进制转换；
+// 这一侧 Rust 有 `format!`，用的是同一个十进制写法，输出字节相同。
+fn __loment_print_num(n: i64) -> u32 {
+    let s = format!("{}", n);
+    let mut __r: i64;
+    unsafe { core::arch::asm!("syscall", inlateout("rax") 1i64 => __r,
+        in("rdi") 1i64, in("rsi") s.as_ptr() as i64, in("rdx") s.len() as i64,
+        lateout("rcx") _, lateout("r11") _); }
+    (__r as u32)
+}
 fn __loment_store8(p: *mut u8, off: u32, v: u8) {
     unsafe { *p.add(off as usize) = v; }
 }
@@ -988,6 +1060,8 @@ class Call:
     name: str
     args: list
     line: int
+    #: Tur 2 才有的内建（`TUR2_BUILTINS`）：Tur 1 里同名的用户函数照旧优先。
+    tur2: bool = False
 
 
 @dataclass
@@ -1185,7 +1259,9 @@ class Continue:
 
 @dataclass
 class Return:
-    expr: object
+    #: `None` = Tur 2 的裸 `return;`（`docs/296` §2.6）：只许出现在**没有返回类型**的
+    #: 函数里，发射成 `ret void`。
+    expr: object | None
     line: int
     #: **L1**（`docs/210` §2.5）：本 `return` **求值之后、`ret` 之前**要还掉的名字。
     l1: list = field(default_factory=list)
@@ -1286,7 +1362,8 @@ def _rename_self(stmts: list) -> None:
             for _, b in s.arms:
                 _rename_self(b)
         elif isinstance(s, Return):
-            rx(s.expr)
+            if s.expr is not None:
+                rx(s.expr)
         elif isinstance(s, ExprStmt):
             rx(s.expr)
 
@@ -1375,7 +1452,8 @@ def _resolve_methods(mods, funcs_map: dict, structs: dict, enums: dict) -> None:
                 for _, b in s.arms:
                     walk(b, dict(scope))
             elif isinstance(s, Return):
-                rx(s.expr, scope)
+                if s.expr is not None:
+                    rx(s.expr, scope)
             elif isinstance(s, ExprStmt):
                 rx(s.expr, scope)
             elif isinstance(s, Guard):
@@ -2221,7 +2299,7 @@ class Parser:
         mod.toks = self.toks
         # **拖运行期的构造**（`docs/227`）：与 `f.deref` 同一条理由 —— 规则定义在
         # token 流上，解析器是唯一能一次扫全模块的地方（`check()` 里再扫就要第二份实现）。
-        mod.rt_sites = _runtime_sites(self.toks)
+        mod.rt_sites = _runtime_sites(self.toks, self.profile)
         return mod
 
     def parse_items(self, mod: Module, nested: bool = False) -> None:
@@ -2713,6 +2791,10 @@ class Parser:
             return Match(subj, arms, t.line)
         if t.val == "return":
             self.next()
+            if self.profile == "tur2026.2" and self.at("punct", ";"):
+                # 裸 `return;`（`docs/296` §2.6）：只在没有返回类型的函数里成立，由检查器判。
+                self.next()
+                return Return(None, t.line)
             e = self.parse_expr()
             self.expect("punct", ";")
             return Return(e, t.line)
@@ -2824,7 +2906,10 @@ class Parser:
                     if not self.accept("punct", ","):
                         break
                 self.expect("punct", ")")
-                return self.parse_postfix(Call(name, args, t.line))
+                c = Call(name, args, t.line)
+                if self.profile == "tur2026.2" and name in TUR2_BUILTINS:
+                    c.tur2 = True
+                return self.parse_postfix(c)
             if self.at("punct", "{") and self.no_struct == 0:
                 self.next()
                 inits: list[tuple[str, object]] = []
@@ -3102,7 +3187,8 @@ def _mono_stmts(stmts, scope, generics, insts, structs, enums) -> None:
             for _, b in s.arms:
                 _mono_stmts(b, dict(scope), generics, insts, structs, enums)
         elif isinstance(s, Return):
-            _mono_expr(s.expr, scope, generics, insts, structs, enums)
+            if s.expr is not None:
+                _mono_expr(s.expr, scope, generics, insts, structs, enums)
         elif isinstance(s, ExprStmt):
             _mono_expr(s.expr, scope, generics, insts, structs, enums)
         elif isinstance(s, Guard):
@@ -3200,7 +3286,8 @@ def _fix_generic_literals(mods, bases: set[str]) -> None:
             elif isinstance(s, For):
                 walk(s.body, dict(scope))
             elif isinstance(s, Return):
-                if isinstance(s.expr, (EnumCtor, EnumPath)) and s.expr.enum in bases:
+                if s.expr is not None and isinstance(s.expr, (EnumCtor, EnumPath)) \
+                        and s.expr.enum in bases:
                     s.expr.enum = f.ret  # 按函数返回类型解析
             elif isinstance(s, Assign):
                 if isinstance(s.target, Ident) and isinstance(s.expr, (EnumCtor, EnumPath)) \
@@ -3421,8 +3508,9 @@ def expr_type(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[st
     if isinstance(e, Ident):
         return scope.get(e.name)
     if isinstance(e, Call):
-        if e.name in BUILTINS:
-            return BUILTINS[e.name][1]
+        sig = _builtin_sig(e)
+        if sig is not None:
+            return sig[1]
         if e.name == "slice_len":
             return "u32"
         return funcs[e.name].ret if e.name in funcs else None
@@ -3628,8 +3716,19 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
             for a in e.args:
                 _walk_expr(a, scope, funcs, structs, errs, enums)
             return
-        if e.name in BUILTINS:
-            want_t, _ret = BUILTINS[e.name]
+        if e.name == "print_num" and getattr(e, "tur2", False):
+            # `docs/296` §2.7：实参是**任意整型**（字面量也可以），发射时按符号扩到 i64。
+            if len(e.args) != 1:
+                errs.append(f"{e.line}: 内建 print_num 需要 1 个实参，得到 {len(e.args)}")
+            else:
+                at = expr_type(e.args[0], scope, funcs, structs)
+                if at is not None and at not in INT_TYPES:
+                    errs.append(f"{e.line}: 内建 print_num 实参期望整型，得到 {at}")
+                _walk_expr(e.args[0], scope, funcs, structs, errs, enums)
+            return
+        sig = _builtin_sig(e)
+        if sig is not None:
+            want_t, _ret = sig
             if len(e.args) != len(want_t):
                 errs.append(f"{e.line}: 内建 {e.name} 需要 {len(want_t)} 个实参，得到 {len(e.args)}")
             else:
@@ -4507,6 +4606,9 @@ _RUNTIME_SITES: dict[str, str] = {
     "str_concat": "`str_concat`",
     "str_eq": "`str_eq`",
     "panic": "`panic`",
+    # `docs/296` §2.7：`print_num` 的十进制转换在运行期那一块里（24 字节栈缓冲、一次
+    # `write`），所以它和 `print` 不同 —— **它会把运行期拖进产物**，`no_runtime` 要拒。
+    "print_num": "`print_num`",
     "guard": "`guard`（能力域守卫）",
     # `#778`：真线程要把运行期的锁与活线程计数带进产物（`alloc`/`free`/根表在
     # 线程之间共享）。所以它和 `alloc` 一样，是"会把运行期拖进来"的构造。
@@ -4514,7 +4616,7 @@ _RUNTIME_SITES: dict[str, str] = {
 }
 
 
-def _runtime_sites(toks: list) -> list[tuple[str, int]]:
+def _runtime_sites(toks: list, profile: str = "tur2026.1") -> list[tuple[str, int]]:
     """扫出本单元里所有**会把运行期拖进产物**的构造（`docs/217`）。
 
     **为什么是 token 而不是 AST**：同 `_l0_promotable`。自举侧没有 AST，只有 token 流；
@@ -4530,6 +4632,10 @@ def _runtime_sites(toks: list) -> list[tuple[str, int]]:
             out.append((_RUNTIME_SITES[t.val], t.line))
             continue
         if t.kind != "ident" or t.val not in _RUNTIME_SITES:
+            continue
+        # `print_num` **只在 Tur 2 是内建**（`docs/296` §2.7）：Tur 1 里同名的用户函数
+        # 不拖运行期，拒它就是拒一份本来编得过的老代码。
+        if t.val == "print_num" and profile != "tur2026.2":
             continue
         # **只有"用"才触发，名字本身不触发**。这一条是被两处**实测的假阳性**逼出来的：
         #   * 一份 Java 语料的接口单元里有 `pub extern fn guard(...)` —— **方法叫 `guard`**；
@@ -5148,10 +5254,15 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                                 f"{s.line}: match 不穷尽，缺 {', '.join(missing)}（或加 _ 通配）"
                             )
                 elif isinstance(s, Return):
-                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums)
-                    t = expr_type(s.expr, fscope, funcs, structs)
-                    if t is not None and t != f.ret:
-                        errs.append(f"{s.line}: return 类型 {t}，函数 {f.name} 声明 {f.ret}")
+                    if s.expr is None:
+                        # 裸 `return;`（`docs/296` §2.6）：只在没有返回类型的函数里成立。
+                        if f.ret != "()":
+                            errs.append(f"{s.line}: `return;` 不带值，函数 {f.name} 声明 {f.ret}")
+                    else:
+                        _walk_expr(s.expr, fscope, funcs, structs, errs, enums)
+                        t = expr_type(s.expr, fscope, funcs, structs)
+                        if t is not None and t != f.ret:
+                            errs.append(f"{s.line}: return 类型 {t}，函数 {f.name} 声明 {f.ret}")
                 elif isinstance(s, ExprStmt):
                     _walk_expr(s.expr, fscope, funcs, structs, errs, enums)
 
@@ -5428,7 +5539,7 @@ def _expr_rs(e) -> str:
         return _rs_name(e.name)
     if isinstance(e, StrLit):
         return json.dumps(e.value, ensure_ascii=False)  # Rust 字面量与 JSON 转义兼容
-    if isinstance(e, Call) and (e.name in BUILTINS or e.name == "slice_len"):
+    if isinstance(e, Call) and (_builtin_sig(e) is not None or e.name == "slice_len"):
         a = [_expr_rs(x) for x in e.args]
         if e.name == "slice_len":
             return f"({a[0]}.len() as u32)"
@@ -5511,6 +5622,8 @@ def _expr_rs(e) -> str:
         if e.name == "str_concat":  # M2: v0 的 str 是 &'static str -> 只能漏内存
             return (f"(Box::leak(format!(\"{{}}{{}}\", {a[0]}, {a[1]}).into_boxed_str()) "
                     f"as &'static str)")
+        if e.name == "print_num":  # `docs/296` §2.7
+            return f"__loment_print_num({a[0]})"
         return f"({a[0]}.as_bytes()[({a[1]}) as usize] as u32)"
     if isinstance(e, Cast):
         return f"(({_expr_rs(e.expr)}) as {_rust_t(e.type)})"
@@ -5592,7 +5705,8 @@ def _stmts_rs(stmts: list, indent: int) -> list[str]:
                 out.append(f"{pad}    }}")
             out.append(f"{pad}}}")
         elif isinstance(s, Return):
-            out.append(f"{pad}return {_expr_rs(s.expr)};")
+            out.append(f"{pad}return {_expr_rs(s.expr)};" if s.expr is not None
+                       else f"{pad}return;")
         elif isinstance(s, (Break, Continue)):
             out.append(f"{pad}{'break' if isinstance(s, Break) else 'continue'};")
         elif isinstance(s, ExprStmt):
@@ -8446,7 +8560,7 @@ class _Ir:
             r = self.t()
             self.w(f"{r} = call {self.ll(fn.ret)} @{fn.name}({', '.join(args)})")
             return fn.ret, r
-        if isinstance(e, Call) and (e.name in BUILTINS or e.name == "slice_len"):
+        if isinstance(e, Call) and (_builtin_sig(e) is not None or e.name == "slice_len"):
             return self.builtin(e)
         if isinstance(e, Call):
             fn = self.funcs.get(e.name)
@@ -8882,6 +8996,27 @@ class _Ir:
             r = self.t()
             self.w(f"{r} = getelementptr inbounds i8, ptr {pv}, i64 {n64}")
             return "ptr", r
+        if e.name == "print_num" and getattr(e, "tur2", False):
+            # `docs/296` §2.7：十进制、无堆（运行期函数里 24 字节栈缓冲）、一次 write。
+            # 进位/符号/回绕都在 `__loment_print_num` 里，调用点只有一条 `call`。
+            # 实参是**任意整型**：按它自己的类型求值，再按符号扩到 i64。没有类型的两半
+            # 与语言里别处同侧 —— **单个字面量**落 i32（有符号，`expr(IntLit, None)` 那条），
+            # **其余无类型表达式**落 u32（参考实现 `Bin` 的 `want or "u32"` 那条）。
+            a0 = e.args[0]
+            lit = isinstance(a0, IntLit) or (
+                isinstance(a0, Un) and a0.op == "-" and isinstance(a0.expr, IntLit))
+            at, v = self.expr(a0, "i32" if lit else "u32")
+            if at in ("u8", "u16", "u32"):
+                r0 = self.t()
+                self.w(f"{r0} = zext {self.ll(at)} {v} to i64")
+                v = r0
+            elif at in ("i8", "i16", "i32"):
+                r0 = self.t()
+                self.w(f"{r0} = sext {self.ll(at)} {v} to i64")
+                v = r0
+            r = self.t()
+            self.w(f"{r} = call i32 @__loment_print_num(i64 {v})")
+            return "u32", r
         if e.name == "print":  # 写 stdout: write(1, ptr, len)
             _, sv = self.expr(e.args[0], "str")
             p = self.t()
@@ -9308,6 +9443,14 @@ class _Ir:
             self.w(f"store i64 {new}, ptr {p}")
             return
         if isinstance(s, Return):
+            if s.expr is None:
+                # 裸 `return;`（`docs/296` §2.6）：函数没有返回类型，退出路径与带值的
+                # 那条一样（L1 该还的还、gc_auto 的根表该退的退），只是 `ret void`。
+                self.l1_free(s.l1)
+                self.roots_pop()
+                self.w("ret void")
+                self.terminated = True
+                return
             _, v = self.expr(s.expr, self.f.ret)
             self.l1_free(s.l1)   # L1：返回值**已经读出来**了，现在可以还那块
             self.roots_pop()   # gc_auto：离开本帧前把根表游标退回去

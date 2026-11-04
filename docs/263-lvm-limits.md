@@ -42,9 +42,24 @@ lvm: llvm.trap at <函数>:<块>#<指令序号>
 ```
 
 判据：`loment_lms_test::test_vm_trap_reports_the_site`（站点格式）、
+`test_the_vm_guards_mem_size_not_the_arena`（§2.2 那条边界的钉子）、
 `test_memory_exhaustion_hits_the_same_wall_on_four_products`（六格 rc=132）、
 `test_lms_entry_a_rescue_is_executed_by_every_product`（retry 成功时 rc=66，关掉则 132）。
 `#1027` 的第三格（16 MiB vs 64 KiB）就是上表那一行：**不假装地址空间能替 arena 守界**。
+
+### 2.2 同一批常量，两个执行点（`#1027`）
+
+| 量 | 原生（`sealed`） | VM（T0 / T2 / T3） |
+|---|---|---|
+| arena 大小 | 产物里那个 **64 KiB** 静态数组 | **同一个 64 KiB** —— 分配器是 IR，VM 只是执行它 |
+| arena 的界 | 分配器自己守（超出 ⇒ `alloc` 失败 ⇒ `llvm.trap`） | **同上**（walk 的是同一段 IR） |
+| 地址空间 | 进程地址空间 | `MEM_SIZE` = **16 MiB**；越界抛 `读越界` / `写越界` |
+| 写穿 arena 之后 | 静态数组之外是 UB | 仍在 VM 内存里，**照写不误** |
+
+⇒ **"同点撞墙"只在分配耗尽那一格成立**（六格 rc=132 的判据）；任意越界地址上，两边
+不承诺同一个死法。这一条是**明写**的边界，不是漏掉的一格：判据
+`loment_lms_test::test_the_vm_guards_mem_size_not_the_arena` 钉住"arena 之外照写、
+`MEM_SIZE` 之外点名拒"。
 
 ## 3. 自举镜像（`loment/tools/lvm.lomt`）
 

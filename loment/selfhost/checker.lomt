@@ -80,8 +80,19 @@ const E_DEEP: u32 = 23;    // E023 源码太深 —— 嵌套超过 64 层 (issu
 /// 拖运行期的构造**有几个** —— 检查器数好放这儿，驱动取来拼报文的"另有 N 处"那半句
 /// （与参考实现 `_runtime_sites` 的 `len(_sites) - 1` 同口径）。见 issue #321。
 /// 槽位在 tyt 块的**最后一个 16 字节**里：`[4096..4100)` 是诊断偏移格（`chk_pub` 专用），
-/// `[4100..4112)` 空着 —— `chk_arena_tyt() = 95856`、下一块 99968，合计 4112 字节。
+/// `[4100..4112)` 留给运行期站点数与丢弃数 —— `chk_arena_tyt() = 138576`、下一块 142688，
+/// 合计 4112 字节，所以这 16 字节**一格也不能再往里塞**（塞了就写穿 arena）。
 pub const RT_N_SITES: u32 = 4100;
+/// 诊断缓冲**丢了多少条**（`#656`/`#663`）。与 `RT_N_SITES` 同一块 16 字节里的下一个格：
+/// `[4096..4100)` 偏移、`[4100..4104)` 运行期站点数、`[4104..4108)` 丢弃数、
+/// `[4108..4112)` 空着。驱动器读这一格说出来（"另有 N 条没写进来"）。
+///
+/// 偏移**相对 `tyt` 块的起点**（`RT_N_SITES` 同）。`chk_pub` 手上的是 `oc = tyt + 4096`，
+/// 所以它用的是 `ERR_DROP_OC` —— 拿 `ERR_DROP` 直接加到 `oc` 上会落到块外 4 KiB 处
+/// （arena 到 `oc + 16` 就结束了），缓冲第一次满的时候当场段错误（2026-11-04 实测）。
+pub const ERR_DROP: u32 = 4104;
+/// `ERR_DROP` **相对 `oc`** 的偏移（`oc` = `tyt + 4096`）。
+pub const ERR_DROP_OC: u32 = 8;
 // E005 = 使用了 excluded 的空间。**与 E_CAP(4) 分开**：参考实现的 `loment_diag` 按消息
 // 分码 —— "能力…域/重复" 归 E004、"使用了 excluded 的空间" 归 E005。原先那两条分支
 // 都发 E_CAP，而参考侧同一条消息归类成 5，码集对不上（`loment_rule_parity` 里没有探针，
@@ -386,6 +397,12 @@ fn sym_get(t: ptr, s: ptr, n: u32, i: u32) -> u32 {
 }
 
 fn sym_pub(src: ptr, t: ptr, p: ptr, o: u32, code: u32, tok: u32) -> u32 {
+    // **满了就不写、偏移也不动**（`#663`）。上限与分配同一个数（`switches.err_max()`）：
+    // 从前缓冲只有 8 KiB 而这里没有边界，第 1025 条会落在紧挨着的 arena 头上 ——
+    // 那是**符号表**，于是检查器一边写诊断一边改自己还在读的表。
+    if o >= err_max() {
+        return o;
+    }
     store32(p, o, code);
     store32(p, o + 4, tok);
     return o + 8;
@@ -2758,7 +2775,14 @@ fn chk_arr_count(src: ptr, t: ptr, ni: u32) -> u32 {
 /// 追加一条诊断 (错误缓冲 + **偏移格**)。偏移用一格内存回传, 而不是让每一层递归都
 /// 多回传一个 u32 —— Loment 没有 out 参数, 返回值只有一个。
 fn chk_pub(src: ptr, t: ptr, oc: ptr, p: ptr, code: u32, tok: u32) {
-    store32(oc, 0, sym_pub(src, t, p, load32(oc, 0), code, tok));
+    let o: u32 = load32(oc, 0);
+    let n: u32 = sym_pub(src, t, p, o, code, tok);
+    if n == o {
+        // 缓冲满了：这一条被丢掉。**丢也要有个数**（`#656`）—— 从前它既不写也不说，
+        // 用户看到的错误条数是"前 64 条"，而没有第二个人知道一共几条。
+        store32(oc, ERR_DROP_OC, load32(oc, ERR_DROP_OC) + 1);
+    }
+    store32(oc, 0, n);
 }
 
 /// 偏移格 -> 类型表块基址 (两者在同一个块里, 见 chk_arena_tyt)。
@@ -4655,6 +4679,12 @@ pub fn chk_arena_env() -> u32 { return 105808; }
 /// 448 条/函数对语料最重的函数 (152 let) 仍有 3 倍余量。
 pub fn chk_arena_tyt() -> u32 { return 138576; }
 pub fn chk_arena_bytes() -> u32 { return 142688; }
+/// 诊断缓冲该分配多少字节（与写它的两个模块同一个数，`#663`）。
+pub fn chk_err_bytes() -> u32 { return err_max(); }
+/// 诊断缓冲丢了多少条（读 `chk_pub` 数出来的那一格，`#656`）。
+pub fn chk_err_dropped(tyt: ptr) -> u32 { return load32(tyt, ERR_DROP); }
+/// 诊断缓冲能装多少条（报"另有 N 条"时一起说出来）。
+pub fn chk_err_cap() -> u32 { return ERR_CAP; }
 
 // 原先这里有个 `check(src, t, out)` 薄包装 (自己开 arena)。**去掉了**: arena 现在 ~100 KB,
 // 语言自带的 64 KiB bump 堆放不下, 而"在调用方进程里改 brk"这条路对 C 夹具是**危险**的

@@ -113,12 +113,18 @@ def test(fn):
 #: （`HOT_STRIDE` / `HOT_RELOC`）、一个是记录长度（`HOT_FUNC`）、三个是装载件的头长 /
 #: 摘要长度 / 槽表上限。它们都在 `EXPLAINED` 里写清来路（装载器用**返回码**点名，
 #: 不在这里终止进程）。条数 239 → **245**、沉默 155 → **161**。
-CAPACITY_SITES = 250
-SILENT_SITES = 167
+#:
+#: 2026-11-04（`#1155`）：LSP 安全点（`hot_tick`）补了两个常量 —— `HOT_READ_MAX`
+#: （读候选的 8 MiB 缓冲上界，截断件由装载器的检查拒掉、调用方按返回码点名）与
+#: `HOT_MMAP_ANON`（没有 `MAP_FIXED` 的一套 flags，只作 syscall 实参，**不**是容量）。
+#: `lsp.lomt` 多了一处 `i < 4000`（`--hot` 路径拷进 4096 B 暂存，到界即停）。条数
+#: 250 → **251**、沉默 167 → **168**；字面量 63 → **64**。
+CAPACITY_SITES = 251
+SILENT_SITES = 168
 
 #: 第二类：字面量上界（`#770`）。`[T; N]` 与 `literal:<N>` 各自钉住总数与沉默的那一份。
-LITERAL_SITES = 64
-LITERAL_SILENT = 63
+LITERAL_SITES = 65
+LITERAL_SILENT = 64
 ARRAY_SITES = 17
 ARRAY_SILENT = 16
 
@@ -173,6 +179,7 @@ SILENT_NAMES = frozenset((
     "HOT_FUNC",
     "HOT_HDR",
     "HOT_MAX_FN",
+    "HOT_READ_MAX",
     "HOT_RELOC",
     "HOT_STRIDE",
     "J_NODE_STRIDE",
@@ -320,7 +327,7 @@ SILENT_LITERALS = {
     ("loment/tools/lomzwframe.lomt", "literal:8"): 1,
     ("loment/tools/lsp.lomt", "literal:200"): 1,
     ("loment/tools/lsp.lomt", "literal:400"): 1,
-    ("loment/tools/lsp.lomt", "literal:4000"): 1,
+    ("loment/tools/lsp.lomt", "literal:4000"): 2,
     ("loment/tools/lsp.lomt", "literal:60"): 2,
 }
 
@@ -460,7 +467,13 @@ def test_literal_caps_and_static_arrays_are_visible():
     盘点里 —— 这条判据就是"现在在了"的兑现，而且钉的是**行级**事实。
     """
     lits = {(r["file"], r["line"], r["name"]) for r in loment_caps.scan_literals()}
-    for f, line, name in (("loment/selfhost/driver.lomt", 1040, "literal:200"),
+    # 行号**从源里现数**：`driver.lomt` 每天都在长，把 1040 写死的话每改一次它上方的
+    # 代码这条判据就红一次，而红的原因与它要保的事实（"这一处被看见"）无关。
+    # 数出来再比，钉的仍是行级事实 —— 扫描器把它记到别的行上照样红。
+    drv = (ROOT / "loment/selfhost/driver.lomt").read_text(encoding="utf-8").splitlines()
+    drv_line = 1 + next(i for i, ln in enumerate(drv)
+                        if "while j < 200 && load8(dent, nm + j)" in ln)
+    for f, line, name in (("loment/selfhost/driver.lomt", drv_line, "literal:200"),
                           ("loment/tools/lomfmt.lomt", 497, "literal:16"),
                           ("loment/tools/lomc.lomt", 501, "literal:4000")):
         assert (f, line, name) in lits, (

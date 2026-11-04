@@ -24,7 +24,8 @@
 #  12. `no_std + hosted` 在**两个前端**都被拒（参考点名两个取值，自举锚在后写那行）；
 #  13. `gc` 档位是**链接后镜像**的性质（函数集按档不同；`no_gc` 与 `manual` 逐字节同）；
 #  14. `runtime` 的闭包按格子算（不调用的运行期层也在；堆按需；`no_runtime` 只有入口）；
-#  15. `hosted` × `lms` 的合法格：g1 检查照发，越界写/读被拒，界内那一半算出 1（#1025）。
+#  15. `hosted` × `lms` 的合法格：g1 检查照发，越界写/读被拒，界内那一半算出 1（#1025）；
+#  16. `hosted` × {manual, auto} × lms 开/关：**每一格**都真链真跑（#1025）。
 
 from __future__ import annotations
 
@@ -243,6 +244,11 @@ def test_conflicting_pairs_are_refused_with_the_pair_named():
             # 理由必须**针对这一对**，不能是泛泛的"取值非法"
             assert any(w in diag for w in ("不能同时选", "冲突")), \
                 f"{pair}: 诊断没说清是冲突\n{diag[-400:]}"
+            if set(pair) == {"gc_auto_alpha", "hosted"}:
+                # `#1025`：这一对是**划窄（narrowing）**，不是"非法组合" —— 诊断必须
+                # 说出开出的条件，否则读者只能把它读成"永远不行"。
+                assert "划窄" in diag and "不回卷" in diag, (
+                    f"{pair}: 诊断没写成 narrowing / 没说开出的条件\n{diag[-500:]}")
             assert why, f"{pair}: CORE_CONFLICTS 那一项没有理由文本"
     print(f"      {len(lomentc.CORE_CONFLICTS)} 对冲突: 全部被点名拒绝")
 
@@ -503,6 +509,62 @@ def test_hosted_and_lms_compose():
                 f"{gc}+hosted+lms 跑出 {r.returncode}（期望 1：越界被拒、界内那一半照算）"
                 f"：{r.stderr[-300:]!r}")
     print("      hosted × {manual, auto} × lms 开/关都编得过；lms 开的两格真链真跑 rc=1")
+
+
+#: `#1025` 的"每一格都跑"探针：只做**界内**访问，答案与 lms 开不开无关（都是 1）。
+HOSTED_PLAIN_BODY = """fn _start() {
+    let p: ptr = alloc(8);
+    store8(p, 0, 1);
+    let x: u32 = load8(p, 0);
+    syscall4(60, x as u64, 0, 0);
+}
+"""
+
+
+@test
+def test_every_legal_hosted_cell_runs():
+    """`#1025`：`hosted` × {`gc_manual`, `gc_auto`} × lms 开/关 —— **每一格都真链真跑**。
+
+    上面那一格只跑了 lms 开的两个（越界被拒是检查器的证据）；"每个合法 hosted 格都有一个
+    能跑的探针"是这条 issue 的另一半验收。这一份探针只做界内读写：四格都该 rc=1。
+    """
+    values = lomentc.CORE_DIMS["lms"]
+    gi = lomentc.LMS_TOGGLES.index("lms_guard")
+    off = next(v for v in values if not lomentc.LMS_TIERS[v][gi])
+    on = next(v for v in values if lomentc.LMS_TIERS[v][gi])
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        irs = {}
+        for gc in ("gc_manual", "gc_auto"):
+            for lms in (off, on):
+                cell = {"mode": "std", "gc": gc, "runtime": "runtime",
+                        "port": "hosted", "lms": lms}
+                rc, diag, ir, pot = _emit(td, f"hosted-run-{gc}-{lms}", cell,
+                                          HOSTED_PLAIN_BODY)
+                assert rc == 0, f"{gc}+hosted+{lms}: 编不过\n{diag[-400:]}"
+                assert pot.get("port") == "hosted" and pot.get("lms") == lms
+                irs[(gc, lms)] = ir
+        import loment_ffi_test as ffitest  # noqa: PLC0415
+        if not LVMTest.ELF._wsl():
+            print("      SKIP 运行: 需要 WSL（或 Linux）跑 ELF")
+            return
+        libc = ffitest._system_so(td / "libc.so.6", ffitest._LIB6_CANDIDATES)
+        if libc is None:
+            print("      SKIP 运行: 这台机器上没有 libc.so.6")
+            return
+        foreign = lomelf.load_foreign(libc)
+        for (gc, lms) in irs:
+            blob, info = lomelf.compile_ll(irs[(gc, lms)], [foreign], allow_ports=True)
+            assert info["shared"] == ["libc.so.6"], (gc, lms, info)
+            exe = td / f"hosted_run_{gc}_{lms}.elf"
+            exe.write_bytes(blob)
+            r = LVMTest.ELF._sh(
+                f"chmod +x {LVMTest.ELF._wsl_path(exe)} && "
+                f"{LVMTest.ELF._wsl_path(exe)}", 120)
+            assert r.returncode == 1, (
+                f"{gc}+hosted+{lms} 跑出 {r.returncode}（期望 1：界内读回 1）"
+                f"：{r.stderr[-300:]!r}")
+    print("      hosted × {manual, auto} × lms 开/关：四格都真链真跑 rc=1")
 
 
 @test

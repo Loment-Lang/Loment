@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -169,6 +170,81 @@ def _run_mirror(mir: Path, ll: Path, prof: Path | None = None,
     except ValueError:
         rc = -1
     return rc, outp.read_bytes(), p
+
+
+def _run_mirror_stderr(mir: Path, arg: str, timeout: int = 180) -> tuple[int, str]:
+    """跑镜像一次，把 **stderr** 要回来（`_run_mirror` 只收 stdout + 剖面）。
+
+    `arg` 是**镜像看到的那个字符串** —— Windows 上它必须是 WSL 里真存在（或真不存在）
+    的路径，所以由调用方先备好（见下面那条判据）。被解释程序那侧它就是 `argv[0]`
+    （`docs/243` §3.4）；这条判据比的是**报文**，名字只求两边一致。
+    """
+    if sys.platform != "win32":
+        r = subprocess.run([str(mir), arg], capture_output=True, timeout=timeout,
+                           shell=False)
+        return r.returncode, r.stderr.decode("utf-8", "replace")
+    tag = f"/tmp/lvm_twin_err_{os.getpid()}"
+    script = (f"rm -f {tag}.bin {tag}.err && cp {ELF._wsl_path(mir)} {tag}.bin && "
+              f"chmod +x {tag}.bin && cd /tmp && timeout {timeout} {tag}.bin "
+              f"{shlex.quote(arg)} > /dev/null 2>{tag}.err; echo -n $?")
+    r = subprocess.run([*_WSLCMD, "bash", "-lc", script], capture_output=True,
+                       timeout=timeout + 180, shell=False)
+    try:
+        rc = int(r.stdout.decode().strip())
+    except ValueError:
+        rc = -1
+    b = subprocess.run([*_WSLCMD, "bash", "-lc", f"base64 -w0 {tag}.err 2>/dev/null || true"],
+                       capture_output=True, timeout=120, shell=False)
+    import base64  # noqa: PLC0415
+    err = base64.b64decode(b.stdout).decode("utf-8", "replace") if b.stdout.strip() else ""
+    return rc, err
+
+
+def test_a_zero_byte_input_is_empty_not_unreadable() -> None:
+    """issue #718: **0 字节**是一个合法的长度，不是"读不了输入"。
+
+    `read_file` 原先把"打不开"与"读到 0 字节"都回成 `0`，于是空 IR 文件被报成
+    「读不了输入」—— 它**读得了**，只是里面没有 `_start`。同一条路径上 T0/T2 一直报对
+    （"这份 IR 里没有 `_start`"），差别只在这句判断。
+
+    两面都钉：**空文件**说得出"没有 `_start`"、**缺文件**仍说"读不了输入" —— 修的是把
+    两者分开，不是把报错换成另一句。参考实现（`tools/lvm.py`）在同一份输入上给的是同一
+    句话，这里一并对齐，免得"孪生一致"变成"两边一起换了个说法"。
+    """
+    if not (_clang() and (sys.platform != "win32" or _wsl())):
+        print("      SKIP: 没有 clang（这条判据要它把种子编成 stage1）")
+        return
+    import io  # noqa: PLC0415
+    mir = _mirror()
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        if sys.platform == "win32":
+            tag = f"/tmp/lvm_twin_zero_{os.getpid()}"
+            empty_arg, missing_arg = f"{tag}.ll", f"{tag}.missing.ll"
+            subprocess.run([*_WSLCMD, "bash", "-lc",
+                            f": > {empty_arg} && rm -f {missing_arg}"],
+                           capture_output=True, timeout=60, shell=False)
+        else:
+            empty = td / "empty.ll"
+            empty.write_text("", encoding="utf-8", newline="\n")
+            empty_arg, missing_arg = str(empty), str(td / "no-such.ll")
+
+        rc, err = _run_mirror_stderr(mir, empty_arg)
+        assert rc == 2, f"空 IR 应当退 2（LVM 的失败码）, 得到 {rc}: {err[-300:]}"
+        assert "没有 `_start`" in err, f"空文件没有说成「没有 _start」: {err[-300:]!r}"
+        assert "读不了输入" not in err, f"空文件仍被说成读不了（#718）: {err[-300:]!r}"
+
+        rc, err = _run_mirror_stderr(mir, missing_arg)
+        assert rc == 2, f"缺文件应当退 2, 得到 {rc}: {err[-300:]}"
+        assert "读不了输入" in err, f"缺文件不再说「读不了」: {err[-300:]!r}"
+        assert "没有 `_start`" not in err, f"缺文件被说成空文件: {err[-300:]!r}"
+
+    try:
+        lvm.run_ir("", io.BytesIO())
+    except lvm.LvmError as e:
+        assert "没有 `_start`" in str(e), f"参考实现的说法变了: {e}"
+    else:
+        raise AssertionError("参考实现对空 IR 没有报错 —— 那这本就不该走到这里")
 
 
 def _ref_ir(src: Path, td: Path) -> Path:

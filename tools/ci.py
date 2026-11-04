@@ -159,6 +159,8 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "lspe_test", "potato_
                  "loment_hotline_test",
                  # 投影树 → 热更新件（`#1155`）：两份真 hotswap 档拼出的装载件过准入。
                  "loment_hotart_test",
+                 # 端到端（`#1155`）：真的 `loment lsp` 在事件循环顶部换掉自己。
+                 "loment_lsp_hot_test",
                  # 稳定性模拟（`#1152` 追加）：连换六次、两槽轮流、被拒的一轮不扰动。
                  "loment_hotstress_test",
                  # 热更新的元数据（`#1149`）：帧布局哈希 + 调用点表，且采集是加性的。
@@ -431,6 +433,8 @@ SHARD_COST = {
     # 2026-11-03（#1152）：本机 Windows 实测 9.0s（十七份源各编一次 + 两次真进程）。
     # 循环钉在 16：原来每装一次泄漏 4 KiB，第 14 次撞上 64 KiB 的堆（docs/292 §2）。
     "loment_hotstress_test": 9.0,
+    # 2026-11-04（#1155）：本机 Windows 实测 25s（两棵树的 LSP 各编一次 + 真 LSP 会话）。
+    "loment_lsp_hot_test": 25.0,
     # 2026-10-21（#1149）：本机 Windows 实测 0.8s（四份小源各编一次 + 一次 CLI）。
     "loment_hotmeta_test": 0.8,
     # 2026-10-21（#1150）：本机 Windows 实测 1.7s（含一次 WSL 跑两个 ELF）。

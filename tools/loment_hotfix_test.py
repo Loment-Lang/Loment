@@ -178,7 +178,11 @@ def test_the_release_workflow_builds_it_before_signing() -> None:
     i_sums = dist.index("sums = write_sums(out)")
     assert i_hf < i_sums, "清单必须在算 SHA256SUMS **之前**落盘，否则签名锚不覆盖它"
     assert "SHA256SUMS.asc" in wf and "loment/dist/*" in wf
-    print("      workflow 传 tag；清单先落盘、后算校验和；签名覆盖整个 dist")
+    # 热更新件（`#1155`）：只在给了 `hot_base` 时做，且落在 dist **之外**。
+    assert "loment_projection.py" in wf and "loment_hotart.py" in wf,         "workflow 没有热更新投影/打包那一步"
+    assert "hot_base" in wf and "loment/build/hot" in wf,         "热更新件应该由 hot_base 触发、落在 loment/build/hot（不碰发行资产）"
+    print("      workflow 传 tag；清单先落盘、后算校验和；签名覆盖整个 dist;"
+          " 热更新件由 hot_base 触发、不碰发行资产")
 
 
 def main() -> int:

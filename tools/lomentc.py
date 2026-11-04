@@ -1062,6 +1062,23 @@ class For:
 
 
 @dataclass
+class ForEach:
+    """Tur 2 的 `for x in xs { }`（`docs/296` §2.2）：**只存在于解析到反糖之间**。
+
+    反糖（`_desugar_foreach`）把它变成普通的 `let __i$N` + `while`，所以检查器、代码生成、
+    Rust 后端、L0/L1/L2 那些按语句类型分派的趟**一行都不用认识它**。
+    v1 只收**具名的数组/切片变量**，元素类型在反糖时按声明文本定下来。
+    """
+
+    var: str
+    src: str
+    body: list
+    line: int
+    tok_at: int = 0
+    tok_end: int = 0
+
+
+@dataclass
 class ConstDecl:
     name: str
     type: str
@@ -1151,6 +1168,19 @@ class While:
     l2: bool = False
     #: **L1**（`docs/210` §2.5）：本循环之后要还掉的名字（"最后一次用处"落在体内）。
     l1: list = field(default_factory=list)
+    #: **`continue` 的更新步**（`docs/296` §2.5）：Tur 2 的 for-in 反糖成 while 之后，
+    #: 下标自增放在这里 —— `continue` 先跑它再回到条件，用户 while 里这里是空的。
+    step: list = field(default_factory=list)
+
+
+@dataclass
+class Break:
+    line: int
+
+
+@dataclass
+class Continue:
+    line: int
 
 
 @dataclass
@@ -2103,6 +2133,8 @@ class Parser:
         self.no_struct = 0  # >0 时禁止结构体字面量 (if/while 条件位置的歧义)
         #: 当前嵌套深度（块 + 表达式共用一个计数）—— 见 `MAX_NEST`。
         self.depth = 0
+        #: 循环嵌套层数（Tur 2 的 `break`/`continue` 只在循环里合法）。
+        self.loop_depth = 0
 
     # -- 基础
     def peek(self, k: int = 0) -> Tok:
@@ -2616,13 +2648,32 @@ class Parser:
             cond = self.parse_expr()
             self.no_struct -= 1
             at = self.i + 1                  # '{' 之后 —— 与自举侧同一个起点
-            w = While(cond, self.parse_block(), t.line)
+            self.loop_depth += 1
+            try:
+                body = self.parse_block()
+            finally:
+                self.loop_depth -= 1
+            w = While(cond, body, t.line)
             w.tok_at, w.tok_end = at, self.i - 1
             return w
         if t.val == "for":
             self.next()
             var = self.ident("循环变量")
             self.expect("ident", "in")
+            # Tur 2：`for x in xs {`（具名数组/切片）。只看一眼就够了 —— 区间是
+            # `for i in lo..hi`，`in` 后面紧跟一个 ident、再紧跟 `{` 才可能是 for-in。
+            if (self.profile == "tur2026.2" and self.at("ident")
+                    and self.peek(1).kind == "punct" and self.peek(1).val == "{"):
+                src = self.next().val
+                at = self.i + 1
+                self.loop_depth += 1
+                try:
+                    body = self.parse_block()
+                finally:
+                    self.loop_depth -= 1
+                fe = ForEach(var, src, body, t.line)
+                fe.tok_at, fe.tok_end = at, self.i - 1
+                return fe
             self.no_struct += 1
             lo = self.parse_expr()
             self.expect("punct", ".")
@@ -2630,7 +2681,12 @@ class Parser:
             hi = self.parse_expr()
             self.no_struct -= 1
             at = self.i + 1                  # '{' 之后
-            fl = For(var, lo, hi, self.parse_block(), t.line)
+            self.loop_depth += 1
+            try:
+                body = self.parse_block()
+            finally:
+                self.loop_depth -= 1
+            fl = For(var, lo, hi, body, t.line)
             fl.tok_at, fl.tok_end = at, self.i - 1
             return fl
         if t.val == "match":
@@ -2664,6 +2720,15 @@ class Parser:
             e = self.parse_expr()
             self.expect("punct", ";")
             return Return(e, t.line)
+        if t.val in ("break", "continue") and self.profile == "tur2026.2":
+            # Tur 2 的循环控制（`docs/296` §2.5）；Tur 1 里它们是普通标识符，照旧报
+            # "未声明的变量"。
+            self.next()
+            self.expect("punct", ";")
+            if self.loop_depth == 0:
+                raise LomError(t.line, t.col,
+                               f"`{t.val}` can only be used inside a loop (docs/296 s2.5)")
+            return Break(t.line) if t.val == "break" else Continue(t.line)
         # 表达式语句或赋值 (左值: 标识符 / 下标)
         e = self.parse_expr()
         if self.at("punct", "="):
@@ -3486,6 +3551,29 @@ def _check_borrows(args: list, line: int, errs: list[str]) -> None:
                 errs.append(f"{line}: 变量 {name} 被可变借用两次 (不允许别名)")
 
 
+def _is_int_const(e) -> bool:
+    """**整型常量表达式**：只由整数字面量与整型算子组成（issue #703）。
+
+    `expr_type` 对整数字面量返回 `None`（"由上下文定宽"），所以**全是字面量的算式**也返回
+    `None`。`as` 那一格要问的是"这个操作数**是不是整型**" —— `(1 + 1)` 当然是，判 `None`
+    就把它当成"不知道类型"，于是 `(1 << 20) as u64` 被说成"不是整型"，而同一式子带一个
+    变量就放行。自举侧（`checker.lomt` 同处按 `chk_ty_is_int`）一直放行它，所以那还是
+    一处**孪生分歧**：同一份源一个实现能编、另一个拒，而且报文说的是假的理由。
+
+    **只对 `as` 那一格用它**，不动 `expr_type` 本身：`expr_type` 返回 `None` 有它自己的
+    用处（绑定、实参按上下文定宽），在那儿硬塞一个宽度会让 `let x: u64 = (1 + 1) * 大数`
+    这类式子走错路。
+    """
+    if isinstance(e, IntLit):
+        return True
+    if isinstance(e, Un):
+        return e.op == "-" and _is_int_const(e.expr)
+    if isinstance(e, Bin):
+        return (e.op in ("+", "-", "*", "/", "%", "<<", ">>", "&", "|", "^")
+                and _is_int_const(e.left) and _is_int_const(e.right))
+    return False
+
+
 def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[str, Struct],
                errs: list[str], enums: dict[str, EnumDecl] | None = None) -> None:
     """结构性问题 (未声明变量 / 未知函数 / 结构体字段 / 枚举变体) 的递归报告。
@@ -3529,11 +3617,16 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
             return
         if e.type == "ptr" and st in INT_TYPES:  # M83: 整数 -> 指针 (brk/mmap 取内存)
             return
-        if st is None and isinstance(e.expr, IntLit):  # 整型字面量按目标定宽
+        if st is None and _is_int_const(e.expr):  # 整型字面量/常量式按目标定宽
             # `ptr` 也算: 字面量的类型是 None, 所以上面那条 `e.type == "ptr" and st in
             # INT_TYPES` 够不着它 —— 于是 `0 as ptr`(空指针的惯用写法) 被当成非法目标。
             # 镜那边 (selfhost/checker.lomt, 同处按 `chk_ty_is_int`) 一直是放行的, 于是
             # 同一份源码**参考报错、打包版能编**。2026-09-15 由 lompi 的 `0 as ptr` 实测抓到。
+            #
+            # **`_is_int_const` 而不是 `IntLit`**（issue #703）：全是字面量的算式
+            # （`(1 + 1)`、`(1 << 20)`、`(3 * 1024)`）也是整型，可 `expr_type` 按
+            # "字面量由上下文定宽"给的是 `None` —— 于是 `as` 把它们说成"不是整型"，
+            # 而同一式子带一个变量就放行。自举侧一直放行，那是一处**孪生分歧**。
             if e.type not in INT_TYPES and e.type != "ptr":
                 errs.append(f"{e.line}: as 目标类型非法 {e.type}")
             return
@@ -4311,7 +4404,8 @@ def prescan_switches(entry: Path, root: Path, proj: Path | None,
 
 def resolve_deps(mod: Module, root: Path, base: Path, entry: Path | None = None,
                  sw: SwitchTable | None = None,
-                 addin_paths: list[Path] | None = None) -> list[Module]:
+                 addin_paths: list[Path] | None = None,
+                 profile: str | None = None) -> list[Module]:
     """按依赖序返回导入的 L1 模块 (被依赖者在前), 去重 + 循环检测。
 
     `proj` 是**项目根** (= 入口文件所在目录), 名字形式的第 1 层 `deps/` 相对**它** ——
@@ -4385,7 +4479,7 @@ def resolve_deps(mod: Module, root: Path, base: Path, entry: Path | None = None,
                 continue
             seen.add(rp)
             stack.add(rp)
-            sub = load(rp, sw=sw)
+            sub = load(rp, sw=sw, profile=profile)
             m.dep_ids.append(_unit_id(sub))
             if is_addin:
                 sub.from_addin = True
@@ -4415,7 +4509,7 @@ def load_unit(path: Path, root: Path, lspe_level: int = 3) -> tuple[Module, list
         sw, addin_paths = prescan_switches(path, root, path.parent, tool_dir, ext)
         mod = load(path, sw=sw, lspe_level=lspe_level)
         deps = resolve_deps(mod, root, path.parent, entry=path, sw=sw,
-                            addin_paths=addin_paths)
+                            addin_paths=addin_paths, profile=mod.profile)
     except (FrontDoorRefused, NotRepresentable) as e:
         # **前门拒了这份源**（声明非法 / 这门拼法翻不出来）。它抛的**本来就是给人看的话**，
         # 不是给栈看的 —— 在**这一处**（读单元的**唯一入口**）翻成编译器自己的 `LomError`，
@@ -5363,7 +5457,7 @@ def _expr_rs(e) -> str:
     if isinstance(e, BoolLit):
         return "true" if e.value else "false"
     if isinstance(e, Ident):
-        return e.name
+        return _rs_name(e.name)
     if isinstance(e, StrLit):
         return json.dumps(e.value, ensure_ascii=False)  # Rust 字面量与 JSON 转义兼容
     if isinstance(e, Call) and (e.name in BUILTINS or e.name == "slice_len"):
@@ -5483,15 +5577,24 @@ def _expr_rs(e) -> str:
     raise AssertionError(f"未知表达式 {e!r}")
 
 
+def _rs_name(name: str) -> str:
+    """合成名（`docs/296` §2.2 的 `__tur2_i$N`）要有合法的 Rust 拼法。
+
+    `.` 是 LLVM 与两只链接器都收的字符、源码里却写不出来 —— IR 用它保证不与用户变量
+    撞面；Rust 后端只把点换成 `_`（那条路不参与逐字节判据）。
+    """
+    return name.replace(".", "_")
+
+
 def _stmts_rs(stmts: list, indent: int) -> list[str]:
     pad = "    " * indent
     out: list[str] = []
     for s in stmts:
         if isinstance(s, Let):
             if s.expr is None:  # M9: 未初始化声明
-                out.append(f"{pad}let mut {s.name}: {_rust_t(s.type)};")
+                out.append(f"{pad}let mut {_rs_name(s.name)}: {_rust_t(s.type)};")
             else:
-                out.append(f"{pad}let mut {s.name}: {_rust_t(s.type)} = {_expr_rs(s.expr)};")
+                out.append(f"{pad}let mut {_rs_name(s.name)}: {_rust_t(s.type)} = {_expr_rs(s.expr)};")
         elif isinstance(s, Assign):
             out.append(f"{pad}{_expr_rs(s.target)} = {_expr_rs(s.expr)};")
         elif isinstance(s, If):
@@ -5506,7 +5609,7 @@ def _stmts_rs(stmts: list, indent: int) -> list[str]:
             out += _stmts_rs(s.body, indent + 1)
             out.append(f"{pad}}}")
         elif isinstance(s, For):
-            out.append(f"{pad}for {s.var} in {_expr_rs(s.lo)}..{_expr_rs(s.hi)} {{")
+            out.append(f"{pad}for {_rs_name(s.var)} in {_expr_rs(s.lo)}..{_expr_rs(s.hi)} {{")
             out += _stmts_rs(s.body, indent + 1)
             out.append(f"{pad}}}")
         elif isinstance(s, Match):
@@ -5522,6 +5625,8 @@ def _stmts_rs(stmts: list, indent: int) -> list[str]:
             out.append(f"{pad}}}")
         elif isinstance(s, Return):
             out.append(f"{pad}return {_expr_rs(s.expr)};")
+        elif isinstance(s, (Break, Continue)):
+            out.append(f"{pad}{'break' if isinstance(s, Break) else 'continue'};")
         elif isinstance(s, ExprStmt):
             out.append(f"{pad}{_expr_rs(s.expr)};")
         elif isinstance(s, Guard):  # P4: 能力域守卫 (编译期已查字面量)
@@ -7981,6 +8086,9 @@ class _Ir:
         self.funcs, self.consts, self.f = funcs, consts, f
         #: 本程序读的是 Tur 的哪一版（`docs/296` §1.1）。`tur_edition()` 内建取它。
         self.tur_edition = tur_edition
+        #: 循环栈（Tur 2 的 `break`/`continue`）：`brk` 落点、`cond` 条件、`step` 更新步、
+        #: `fstep` 区间 for 的自增三元组、`epoch` 体入口的分配器前沿。
+        self.loops: list[dict] = []
         self.structs = structs or {}
         self.enums = enums or {}
         self.out: list[str] = []
@@ -9045,6 +9153,14 @@ class _Ir:
         for s in stmts:
             self.stmt(s)
 
+    def _for_step(self, var: str, ty: str, ptr: str, line: int) -> None:
+        """区间 `for` 的自增（体尾与 `continue` 各发一次，指令必须同一份）。"""
+        it = _ir_t(ty)
+        _, cur = self.expr(Ident(var, line), ty)
+        nxt = self.t()
+        self.w(f"{nxt} = add {it} {cur}, 1")
+        self.w(f"store {it} {nxt}, ptr {ptr}")
+
     def stmt(self, s) -> None:
         line = getattr(s, "line", None)
         if line:
@@ -9242,8 +9358,16 @@ class _Ir:
             self.terminated = True
             self.label(body_l)
             sv = self.epoch_open(s)
+            self.loops.append({"node": s, "brk": end_l, "cond": cond_l, "step": s.step,
+                               "fstep": None, "epoch": sv})
             self.block(s.body)
+            self.loops.pop()
+            # 体尾顺序：**先关纪元、再走更新步** —— 与自举侧 `fi_step` 的那一行同序
+            # （`continue` 那条才是"先跑更新步再关纪元"）。
             self.epoch_close(s, sv)
+            if not self.terminated:     # 体以 `break`/`continue`/`return` 收尾时这一格到不了
+                for st in s.step:       # for-in 的下标自增（脱糖时放进 `While.step`）
+                    self.stmt(st)
             self.jump(cond_l)
             self.label(end_l)
             self.l1_free(s.l1)          # L1：落点就在**循环之后**（体内那次是最后一次用）
@@ -9264,12 +9388,16 @@ class _Ir:
             self.terminated = True
             self.label(body_l)
             sv = self.epoch_open(s)
+            self.loops.append({"node": s, "brk": end_l, "cond": cond_l, "step": [],
+                               "fstep": (s.var, ty, ptr, s.line), "epoch": sv})
             self.block(s.body)
+            self.loops.pop()
+            # 体尾的顺序与 `While` 一致：**先关纪元再走更新步**（自举侧同一份顺序）。
+            # `continue` 那条路才是"先跑更新步再关纪元"（`docs/296` §2.5）—— 它走的是
+            # 循环上下文里那份 `fstep`，不经过这里。
             self.epoch_close(s, sv)
-            _, cur = self.expr(Ident(s.var, s.line), ty)
-            nxt = self.t()
-            self.w(f"{nxt} = add {it} {cur}, 1")
-            self.w(f"store {it} {nxt}, ptr {ptr}")
+            if not self.terminated:     # 同上：体已经 `break`/`continue` 时这格到不了
+                self._for_step(s.var, ty, ptr, s.line)
             self.jump(cond_l)
             self.label(end_l)
             self.l1_free(s.l1)          # L1：落点就在**循环之后**（体内那次是最后一次用）
@@ -9309,6 +9437,16 @@ class _Ir:
             return
         if isinstance(s, ExprStmt):
             self.expr(s.expr, None)
+            return
+        if isinstance(s, (Break, Continue)):
+            ctx = self.loops[-1]        # 解析器保证只在循环里
+            if isinstance(s, Continue):
+                for st in ctx["step"]:  # for-in：先自增（与体尾同一份指令）
+                    self.stmt(st)
+                if ctx["fstep"] is not None:
+                    self._for_step(*ctx["fstep"])
+            self.epoch_close(ctx["node"], ctx["epoch"])
+            self.jump(ctx["brk"] if isinstance(s, Break) else ctx["cond"])
             return
         raise LomError(getattr(s, "line", 1), 1, f"这个后端不支持这条语句: {type(s).__name__}")
 
@@ -9840,7 +9978,89 @@ pub enum Result<T, E> { Ok(T), Err(E) }
 """
 
 
-def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3) -> Module:
+def _split_seq_type(ty: str) -> tuple[str, int | None] | None:
+    """`[T; N]` -> `(T, N)`；`[T]` -> `(T, None)`；不是这两种返回 None。"""
+    if not ty.startswith("[") or ty.startswith("mut [") or not ty.endswith("]"):
+        return None
+    inner = ty[1:-1]
+    depth = 0
+    for k, ch in enumerate(inner):
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+        elif ch == ";" and depth == 0:
+            elem, num = inner[:k].strip(), inner[k + 1:].strip()
+            return (elem, int(num)) if elem and num.isdigit() else None
+    return inner.strip(), None
+
+
+def _desugar_foreach(mod: Module) -> None:
+    """把 `ForEach` 反糖成 `let __tur2_i.N: u32 = 0; while __tur2_i.N < len { ... }`。
+
+    **只给 Tur 2**（调用方按 profile 决定）。元素类型与长度在**声明文本**上定下来
+    （v1 只收具名变量，所以这够用，也是自举侧唯一做得到的口径）。循环变量 `x` 与下标
+    都是普通局部：代码生成、L0/L1/L2、Rust 后端都不必认识 for-in。
+    """
+    def walk_seq(stmts: list, env: dict[str, str], cnt: list[int]) -> list:
+        out: list = []
+        env = dict(env)
+        for s in stmts:
+            if isinstance(s, Let):
+                out.append(s)
+                env[s.name] = s.type
+            elif isinstance(s, ForEach):
+                seq = _split_seq_type(env.get(s.src, ""))
+                if seq is None:
+                    raise LomError(s.line, 1,
+                                   f"`for {s.var} in {s.src}`: `{s.src}` is not a named "
+                                   f"array or slice -- v1 takes `[T; N]` / `[T]` variables "
+                                   f"(docs/296 s2.2)")
+                elem, n = seq
+                cnt[0] += 1
+                idx = f"__tur2_i.{cnt[0]}"
+                ln = s.line
+                cond = Bin("<", Ident(idx, ln),
+                           IntLit(n, ln) if n is not None
+                           else Call("slice_len", [Ident(s.src, ln)], ln), ln)
+                inner = dict(env)
+                inner[s.var] = elem
+                body = [Let(s.var, elem,
+                            Index(Ident(s.src, ln), Ident(idx, ln), ln), ln)]
+                body += walk_seq(s.body, inner, cnt)
+                # 自增放进 `step`，不放进体：`continue` 必须先自增再回条件，否则跳过
+                # 自增就是死循环（`Step` 由 While 发射器在体后与 continue 处各发一次）。
+                step = Assign(Ident(idx, ln),
+                              Bin("+", Ident(idx, ln), IntLit(1, ln), ln), ln)
+                out.append(Let(idx, "u32", IntLit(0, ln), ln))
+                w = While(cond, body, ln, tok_at=s.tok_at, tok_end=s.tok_end)
+                w.step = [step]
+                out.append(w)
+            elif isinstance(s, If):
+                s.then = walk_seq(s.then, env, cnt)
+                s.otherwise = walk_seq(s.otherwise, env, cnt)
+                out.append(s)
+            elif isinstance(s, While):
+                s.body = walk_seq(s.body, env, cnt)
+                out.append(s)
+            elif isinstance(s, For):
+                s.body = walk_seq(s.body, env, cnt)
+                out.append(s)
+            elif isinstance(s, Match):
+                for _, b in s.arms:
+                    b[:] = walk_seq(b, env, cnt)
+                out.append(s)
+            else:
+                out.append(s)
+        return out
+
+    for f in mod.funcs:
+        env = {p.name: p.type for p in f.params}
+        f.body = walk_seq(f.body, env, [0])
+
+
+def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3,
+         profile: str | None = None) -> Module:
     # **前门**（`docs/188` §7.2）：读法由**声明**决定，不由后缀或嗅探。
     # 一份 `choose write grammar python` 的 `.lomt` 按 `docs/188` §0 **仍然是 Loment**，
     # 只是拼法不同 —— 所以这里先把它**翻成 Loment 源码**再往下走。
@@ -9852,7 +10072,14 @@ def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3) -> Modu
     from potato_from import front_door          # noqa: PLC0415
 
     _fu = front_door(path)
+    # **版次是整程序属性**（`docs/296` §1.1）：依赖按根单元那一档读。根没声明时用它
+    # 自己的（Tur 1）。自举侧一直是这个口径（`PROF_OFF` 只由根写）。
+    _eff = profile or _fu.profile
     text = _fu.source
+    if _eff == "tur2026.2" and _fu.profile != "tur2026.2":
+        # 依赖自己没有 tur2 声明，但程序是 tur2：纯糖照样要抹（与自举侧同一个口径）。
+        from potato_from import _tur2_sugar      # noqa: PLC0415
+        text = _tur2_sugar(text)
     # 开关**在词法流上**落定（`docs/182` §2）：`set choose X {…}` 开着就把体摊到顶层、
     # 关着就整段抹掉, 那两行本身不进 AST。**这一步必须在 parse 之前** —— 顺序问题
     # （取值可能写在体的后面）在 token 流上就消失了。
@@ -9877,7 +10104,7 @@ def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3) -> Modu
     import loment_comefor
 
     tt, _dias = loment_comefor.expand(tt, text)
-    mod = Parser(tt, text, profile=_fu.profile).parse()
+    mod = Parser(tt, text, profile=_eff).parse()
     # **开关表先挂上**（原先在下面几条之后）：LSPE 的 `bounds` 普查要读 LMS 的档位，
     # 而档位既可能来自档名、也可能来自 `choose close lms_guard` 这种显式覆盖 ——
     # 后者只在表里。挂晚了，普查会退回档名，于是"关着 guard 却记了 g1 站点"（#1021）。
@@ -9901,8 +10128,11 @@ def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3) -> Modu
     # **版次**（`docs/296` §1.1）：规范名 `tur2026.1` / `tur2026.2`。与 `grammar` 不同 ——
     # 后者说的是"哪一门写法"，前者说的是"这一门写法的哪一版"。Tur 1 的文件永远读作
     # `tur2026.1`，行为不变。
-    mod.profile = _fu.profile
+    mod.profile = _eff
     mod.spelling = _fu.spelling    # 源里写的拼法（空 = 没写）；编译期提示用
+    if _eff == "tur2026.2":
+        # Tur 2 的 `for x in xs`（`docs/296` §2.2）：反糖成普通 While，下游不必认识它。
+        _desugar_foreach(mod)
     mod.own_switches = own      # 本模块**自己**写的 —— 只有"库不许 choose"用它
     # `addin` 的行单独记一份 —— 它被抹掉了，而"库里写了 `addin` 却没生效"要能报出来。
     _d = 0

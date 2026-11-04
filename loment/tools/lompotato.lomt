@@ -2076,6 +2076,9 @@ fn validate(mem: ptr, tot: u32) -> u32 {
         if eq_lit(t, l, "v18") == 1 {
             ver = 18;
         }
+        if eq_lit(t, l, "v19") == 1 {
+            ver = 19;
+        }
     }
     if ver == NOTFOUND {
         let _c: u32 = bad(mem);
@@ -2131,7 +2134,7 @@ fn validate(mem: ptr, tot: u32) -> u32 {
         chk_boundary(mem, doc);
     }
     if ver >= 10 {
-        chk_gc_ladder(mem, doc);
+        chk_gc_ladder(mem, doc, ver);
     }
     if ver >= 12 {
         chk_surfaces(mem, doc);
@@ -2200,11 +2203,11 @@ fn bnd_part(mem: ptr, b: u32, key: str) -> u32 {
     return json_as_u32(ptr_add(mem, M_IN), ptr_add(mem, M_ARENA), v);
 }
 
-/// `gc_ladder`（`docs/210` §3/§5, v10）: 四个**分层计数**都是非负整数, 四项之和等于
-/// `total_sites`, 而且没有不认识的键。**与 `chk_boundary` 同形** —— 这是校验器
+/// `gc_ladder`（`docs/210` §3/§5, v10；v19 起多一格 `l0_5`）: **分层计数**都是非负整数,
+/// 各格之和等于 `total_sites`, 而且没有不认识的键。**与 `chk_boundary` 同形** —— 这是校验器
 /// **独立判得了**的那部分: 读不到源码, 判不了"数得对不对", 但判得了"它们自相矛盾"。
 /// 逐条与 Python 的 `potato.validate` 对齐, **连错的条数都要一致**。
-fn chk_gc_ladder(mem: ptr, doc: u32) -> u32 {
+fn chk_gc_ladder(mem: ptr, doc: u32, ver: u32) -> u32 {
     let gl: u32 = jget(mem, doc, "gc_ladder");
     if gl == NOTFOUND || jkind(mem, gl) != 1 {
         let _b: u32 = bad(mem);
@@ -2214,11 +2217,17 @@ fn chk_gc_ladder(mem: ptr, doc: u32) -> u32 {
     let n1: u32 = gl_part(mem, gl, "l1");
     let n2: u32 = gl_part(mem, gl, "l2");
     let n3: u32 = gl_part(mem, gl, "l3");
+    // v19 起多一格 `l0_5`（`docs/210` §2.10）：v10–v18 的对象仍然只有四格。
+    let n5: u32 = 0;
+    if ver >= 19 {
+        n5 = gl_part(mem, gl, "l0_5");
+    }
     let tot: u32 = gl_part(mem, gl, "total_sites");
     // 分量不合法时 `gl_part` 已经记过一次错, 这里**不再重复记** —— 与 Python 那边的
-    // `elif` 同形: 和数只在五项都是合法整数时才去对。
+    // `elif` 同形: 和数只在每一格都是合法整数时才去对。
     if n0 != NOTFOUND && n1 != NOTFOUND && n2 != NOTFOUND && n3 != NOTFOUND
-            && tot != NOTFOUND && tot != n0 + n1 + n2 + n3 {
+            && n5 != NOTFOUND && tot != NOTFOUND
+            && tot != n0 + n5 + n1 + n2 + n3 {
         let _t: u32 = bad(mem);
     }
     // 不认识的键: **一整批只记一次错**（Python 那边是 `sorted(set(gl) - …)` 一条消息）。
@@ -2229,6 +2238,7 @@ fn chk_gc_ladder(mem: ptr, doc: u32) -> u32 {
         let kl: u32 = jstr(mem, kn, ptr_add(mem, M_SB2), 4096);
         let known: u32 = 0;
         if eq_lit(ptr_add(mem, M_SB2), kl, "l0") == 1
+                || (ver >= 19 && eq_lit(ptr_add(mem, M_SB2), kl, "l0_5") == 1)
                 || eq_lit(ptr_add(mem, M_SB2), kl, "l1") == 1
                 || eq_lit(ptr_add(mem, M_SB2), kl, "l2") == 1
                 || eq_lit(ptr_add(mem, M_SB2), kl, "l3") == 1

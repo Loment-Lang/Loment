@@ -21,6 +21,7 @@ choose runtime
 use bytes
 use sha256
 use surface_data
+use turegg
 
 // ---------------------------------------------------------------- 内存布局
 // 单块 brk 内存 + 命名偏移。Loment 没有可变全局也没有 out 参数, 所以跨函数共享的状态
@@ -2622,6 +2623,15 @@ fn dispatch(mem: ptr, ab: ptr, argc: u32) -> u32 {
     }
     if eq_cstr(cmd, n, "skill") {
         return delegate_note(mem, cmd, n, "share/loment/skill/SKILL.md");
+    }
+
+    // HXY easter egg: `loment <64 字符>` —— 不是命令名，所以放在所有已知命令之后、
+    // 未知命令之前。键不对就照常报 unknown（不提示这里有东西）。
+    if n == 64 {
+        if turegg_key1_ok(cmd, n) != 0 {
+            return turegg_vault(ptr_add(mem, M_FILE), ptr_add(mem, M_TMP),
+                                ptr_add(mem, M_STB), ab);
+        }
     }
 
     red(mem, 2);

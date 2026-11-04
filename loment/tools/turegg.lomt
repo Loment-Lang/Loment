@@ -1,0 +1,376 @@
+module turegg
+choose runtime
+
+use bytes
+use turegg_data
+
+// ---------------------------------------------------------------- HXY easter egg
+//
+// 入口：`loment <64 字符>`。第一个密钥是 **love520** 经下面这套派生得到的 64 个符号；
+// loment 从不打印它。进来之后依次核对五个词（每个词 5 种加密、逐字符对），最后核对
+// 机器密钥：机器信息 + 本二进制 + 安装/更新标记压成 64 个符号，每次安装/更新都会变。
+//
+// 它**可解**：算法就在这里，肯读的人可以复算；它只是不主动告诉你答案。
+
+const EG_SALT1: u32 = 520;
+const EG_SALT2: u32 = 2013;
+
+fn eg_alpha() -> str {
+    return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+}
+const EG_LINE_CAP: u32 = 128;
+const EG_MAT_CAP: u32 = 8192;
+const EG_BIN_HEAD: u32 = 4096;
+const EG_UNAME_LEN: u32 = 390;
+
+fn eg_idx(ch: u32) -> u32 {
+    let i: u32 = 0;
+    while i < 64 {
+        if str_byte(eg_alpha(), i) == ch {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn eg_rail_of(i: u32) -> u32 {
+    let q: u32 = i % 4;
+    if q == 0 {
+        return 0;
+    }
+    if q == 2 {
+        return 2;
+    }
+    return 1;
+}
+
+// 三轨栅栏里第 j 个输出字符来自输入的哪个下标（0..n-1）。
+fn eg_rail_src(j: u32, n: u32) -> u32 {
+    let seen: u32 = 0;
+    let rail: u32 = 0;
+    while rail < 3 {
+        let i: u32 = 0;
+        while i < n {
+            if eg_rail_of(i) == rail {
+                if seen == j {
+                    return i;
+                }
+                seen = seen + 1;
+            }
+            i = i + 1;
+        }
+        rail = rail + 1;
+    }
+    return 0;
+}
+
+// 第 m 种加密：把 w 加密后与 want 逐字符比。m = 0..4。
+fn eg_verify_m(w: ptr, wn: u32, m: u32, want: ptr, wl: u32) -> u32 {
+    if wn != wl {
+        return 0;
+    }
+    let i: u32 = 0;
+    let prev: u32 = 0;
+    if m == 1 {
+        prev = 23;
+    }
+    while i < wn {
+        let ch: u32 = load8(w, i);
+        let c: u32 = 0;
+        if m == 0 {
+            c = (eg_idx(ch) + 7 * i + 13) % 64;
+        }
+        if m == 1 {
+            c = (eg_idx(ch) + prev + 31 * i + 22) % 64;
+            prev = c;
+        }
+        if m == 2 {
+            let src: u32 = eg_rail_src(i, wn);
+            c = (eg_idx(load8(w, src)) * 37 + i * 11 + 29) % 64;
+        }
+        if m == 3 {
+            let src: u32 = wn - 1 - i;
+            let x: u32 = eg_idx(load8(w, src));
+            let rot: u32 = ((x << 3) | (x >> 3)) & 63;
+            c = (rot + prev * 3 + 41) % 64;
+            prev = c;
+        }
+        if m == 4 {
+            let h: u64 = 11400714819323198485;
+            let r: u32 = 0;
+            while r < 64 {
+                let mix: u64 = (eg_idx(ch) as u64)
+                             + (131 as u64) * (r as u64)
+                             + (17 as u64) * (i as u64);
+                h = (h ^ mix) * (1099511628211 as u64);
+                h = h ^ (h >> 29);
+                r = r + 1;
+            }
+            c = (h % 64) as u32;
+        }
+        if load8(want, i) != str_byte(eg_alpha(), c) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+// want 形如 "c0|c1|c2|c3|c4"：五种都要过。
+fn eg_check_word(w: ptr, wn: u32, want: str) -> u32 {
+    let wl: u32 = str_len(want);
+    let m: u32 = 0;
+    let s: u32 = 0;
+    let i: u32 = 0;
+    let ok: u32 = 1;
+    while i <= wl {
+        let cut: u32 = 0;
+        if i == wl {
+            cut = 1;
+        }
+        if i < wl {
+            if str_byte(want, i) == 124 {
+                cut = 1;
+            }
+        }
+        if cut == 1 {
+            if eg_verify_m(w, wn, m, ptr_add(str_ptr(want), s), i - s) == 0 {
+                ok = 0;
+            }
+            m = m + 1;
+            s = i + 1;
+        }
+        i = i + 1;
+    }
+    if m != 5 {
+        ok = 0;
+    }
+    return ok;
+}
+
+fn eg_key_ok(inp: ptr, inl: u32, mat: ptr, mlen: u32, salt: u32) -> u32 {
+    if inl != 64 {
+        return 0;
+    }
+    let h: u64 = 14695981039346656037;
+    h = h ^ (salt as u64);
+    h = h * (1099511628211 as u64);
+    h = h ^ (h >> 29);
+    let r: u32 = 0;
+    while r < 520 {
+        let i: u32 = 0;
+        while i < mlen {
+            let b: u64 = load8(mat, i) as u64;
+            let mix: u64 = b + (131 as u64) * (r as u64) + (17 as u64) * (i as u64);
+            h = (h ^ mix) * (1099511628211 as u64);
+            h = h ^ (h >> 29);
+            i = i + 1;
+        }
+        r = r + 1;
+    }
+    let k: u32 = 0;
+    while k < 64 {
+        h = h ^ (((k as u64) + 1) * (11400714819323198485 as u64));
+        h = (h ^ (h >> 33)) * (18397679294719823053 as u64);
+        h = (h ^ (h >> 33)) * (14181476777654086739 as u64);
+        h = h ^ (h >> 33);
+        if load8(inp, k) != str_byte(eg_alpha(), (h % 64) as u32) {
+            return 0;
+        }
+        k = k + 1;
+    }
+    return 1;
+}
+
+fn eg_open_ro(p: ptr) -> i64 {
+    return syscall4(257, (0 as u64) - 100, p as u64, 0);
+}
+
+// 机器材料：love520 + uname + 自身路径 + 自身前 4 KiB + 安装/更新标记（stat 的 mtime）。
+fn eg_machine(ab: ptr, out: ptr, stb: ptr) -> u32 {
+    let n: u32 = 0;
+    let k: u32 = 0;
+    while k < 7 {
+        store8(out, k, load8(str_ptr("love520"), k) as u8);
+        k = k + 1;
+    }
+    n = 7;
+    if n + EG_UNAME_LEN <= EG_MAT_CAP {
+        let ur: i64 = syscall4(63, (out as u64) + (n as u64), 0, 0);
+        if ur == 0 {
+            n = n + EG_UNAME_LEN;
+        }
+    }
+    let pn: u32 = 0;
+    while pn < 1024 && load8(ab, pn) != 0 {
+        pn = pn + 1;
+    }
+    if n + pn <= EG_MAT_CAP {
+        let j: u32 = 0;
+        while j < pn {
+            store8(out, n + j, load8(ab, j) as u8);
+            j = j + 1;
+        }
+        n = n + pn;
+    }
+    let fd: i64 = eg_open_ro(ab);
+    if fd >= 0 {
+        if n + EG_BIN_HEAD <= EG_MAT_CAP {
+            let got: i64 = syscall4(0, fd as u64, (out as u64) + (n as u64),
+                                   EG_BIN_HEAD as u64);
+            if got > 0 {
+                n = n + (got as u32);
+            }
+        }
+        let _c: i64 = syscall4(3, fd as u64, 0, 0);
+    }
+    // 安装/更新标记：二进制的 mtime。`syscall4` 递不到 newfstatat 的 flags（r10），
+    // 用 `syscall6` 把它显式置 0；否则残留 flags 会让这条路时对时错。
+    store32(stb, 88, 0);
+    store32(stb, 96, 0);
+    let _s: i64 = syscall6(262, (0 as u64) - 100, ab as u64, stb as u64, 0, 0);
+    if n + 8 <= EG_MAT_CAP {
+        store32(out, n, load32(stb, 88));
+        store32(out, n + 4, load32(stb, 96));
+        n = n + 8;
+    }
+    return n;
+}
+
+fn eg_read_line(out: ptr, cap: u32) -> u32 {
+    let n: u32 = 0;
+    let done: u32 = 0;
+    while done == 0 && n < cap {
+        let r: i64 = syscall4(0, 0, (out as u64) + (n as u64), 1);
+        if r <= 0 {
+            done = 1;
+        } else {
+            let ch: u32 = load8(out, n);
+            if ch == 10 {
+                done = 1;
+            } else {
+                n = n + 1;
+            }
+        }
+    }
+    if n > 0 {
+        if load8(out, n - 1) == 13 {
+            n = n - 1;
+        }
+    }
+    return n;
+}
+
+fn eg_write(p: ptr, n: u32) {
+    let _w: i64 = syscall4(1, 1, p as u64, n as u64);
+}
+
+fn eg_word(i: u32) -> str {
+    if i == 0 {
+        return egg_word0();
+    }
+    if i == 1 {
+        return egg_word1();
+    }
+    if i == 2 {
+        return egg_word2();
+    }
+    if i == 3 {
+        return egg_word3();
+    }
+    return egg_word4();
+}
+
+fn eg_chunk(i: u32) -> str {
+    if i == 0 {
+        return egg_cells0();
+    }
+    if i == 1 {
+        return egg_cells1();
+    }
+    if i == 2 {
+        return egg_cells2();
+    }
+    if i == 3 {
+        return egg_cells3();
+    }
+    if i == 4 {
+        return egg_cells4();
+    }
+    if i == 5 {
+        return egg_cells5();
+    }
+    if i == 6 {
+        return egg_cells6();
+    }
+    if i == 7 {
+        return egg_cells7();
+    }
+    if i == 8 {
+        return egg_cells8();
+    }
+    if i == 9 {
+        return egg_cells9();
+    }
+    if i == 10 {
+        return egg_cells10();
+    }
+    if i == 11 {
+        return egg_cells11();
+    }
+    return egg_cells12();
+}
+
+/// 入口键：love520 的 64 符号翻译。
+pub fn turegg_key1_ok(cmd: ptr, n: u32) -> u32 {
+    return eg_key_ok(cmd, n, str_ptr("love520"), 7, EG_SALT1);
+}
+
+/// 进去之后：五词 → 机器钥匙 → 520 格。
+pub fn turegg_vault(lin: ptr, mat: ptr, stb: ptr, ab: ptr) -> u32 {
+    let mlen: u32 = eg_machine(ab, mat, stb);
+    let i: u32 = 0;
+    while i < 5 {
+        store8(lin, 0, (49 + i) as u8);
+        eg_write(lin, 1);
+        eg_write(str_ptr("/5 "), 3);
+        let ln: u32 = eg_read_line(lin, EG_LINE_CAP);
+        if eg_check_word(lin, ln, eg_word(i)) == 0 {
+            eg_write(str_ptr("no\n"), 3);
+            return 1;
+        }
+        i = i + 1;
+    }
+    eg_write(str_ptr("key "), 4);
+    let kn: u32 = eg_read_line(lin, EG_LINE_CAP);
+    if eg_key_ok(lin, kn, mat, mlen, EG_SALT2) == 0 {
+        eg_write(str_ptr("no\n"), 3);
+        return 1;
+    }
+    // 520 个散字符按画布顺序收拢：p 是画布位置，g 是它在数据里的存放位置。
+    let p: u32 = 0;
+    while p < 520 {
+        let ch: u32 = eg_cell(eg_perm(p));
+        if ch == 46 {
+            store8(lin, p % 40, 32 as u8);
+        } else {
+            store8(lin, p % 40, ch as u8);
+        }
+        if p % 40 == 39 {
+            eg_write(lin, 40);
+            eg_write(str_ptr("\n"), 1);
+        }
+        p = p + 1;
+    }
+    return 0;
+}
+
+fn eg_perm(p: u32) -> u32 {
+    return (p * 211 + 97) % 520;
+}
+
+fn eg_cell(g: u32) -> u32 {
+    let chunk: str = eg_chunk(g / 40);
+    return str_byte(chunk, g % 40);
+}

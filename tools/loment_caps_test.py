@@ -113,12 +113,12 @@ def test(fn):
 #: （`HOT_STRIDE` / `HOT_RELOC`）、一个是记录长度（`HOT_FUNC`）、三个是装载件的头长 /
 #: 摘要长度 / 槽表上限。它们都在 `EXPLAINED` 里写清来路（装载器用**返回码**点名，
 #: 不在这里终止进程）。条数 239 → **245**、沉默 155 → **161**。
-CAPACITY_SITES = 247
-SILENT_SITES = 164
+CAPACITY_SITES = 250
+SILENT_SITES = 167
 
 #: 第二类：字面量上界（`#770`）。`[T; N]` 与 `literal:<N>` 各自钉住总数与沉默的那一份。
-LITERAL_SITES = 63
-LITERAL_SILENT = 62
+LITERAL_SITES = 64
+LITERAL_SILENT = 63
 ARRAY_SITES = 17
 ARRAY_SILENT = 16
 
@@ -146,6 +146,9 @@ SILENT_NAMES = frozenset((
     "DIRQ",
     "DOC_CAP",
     "DOC_MAX",
+    "EG_BIN_HEAD",
+    "EG_MAT_CAP",
+    "EG_UNAME_LEN",
     "EMAX",
     "ENTS_CAP",
     "ENT_CAP",
@@ -270,6 +273,7 @@ SILENT_NAMES = frozenset((
 #: 字面量上界里**沉默**的那一份，键是 `(文件, literal:<N>)`，值是**条数**
 #: （同一个值在同一文件里出现几次都要钉住 —— 只钉名字会让"多拷了一处"漏过去）。
 SILENT_LITERALS = {
+    ("loment/tools/turegg.lomt", "literal:520"): 1,
     ("loment/examples/fuc_node.lomt", "literal:64"): 1,
     ("loment/examples/gc_heap/main.lomt", "literal:8"): 1,
     ("loment/lib/lumtui_doc.lomt", "literal:64"): 1,

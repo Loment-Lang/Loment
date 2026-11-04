@@ -63,6 +63,8 @@ LOCKED_ALIASES = {
     "loment": "loment",
     # 2026-11-03: Tur 是本语言自己的正式语法名（从 Rust 直接修改）。这是一笔**改锁**。
     "tur": "tur",
+    # 2026-11-04: Tur 2 是**版次名**，不是第四门语法（`docs/296`）。同上，是一笔改锁。
+    "tur2": "tur2",
     "c": "c",
     "py": "python", "python": "python",
     "java": "java",
@@ -128,6 +130,7 @@ def test_aliases_spell_the_same_canonical_name():
                              (("rs", "rust"), "rust"),
                              (("loment",), "loment"),
                              (("tur",), "tur"),
+                             (("tur2",), "tur2"),
                              (("c",), "c"),
                              (("java",), "java")):
         for s in spellings:
@@ -410,6 +413,24 @@ def test_declared_tur_is_the_native_syntax_and_rust_is_a_surface_grammar():
         assert "Traceback" not in out, f"抛栈了 —— 话到不了用户眼前：\n{out[-400:]}"
         assert "define " in out and "@f(" in out, f"IR 里没有那个函数：{out[-300:]}"
 
+        # **`tur2` 是同一支读法的另一个版次**（`docs/296` §4.1）：脚手架阶段它不启用
+        # 任何新语法，所以同一份程序在 `tur` 与 `tur2` 下**产物必须逐字节相同**。
+        assert fa.profile == "tur1", f"没写版次的 tur 被读成了 {fa.profile!r}"
+        a2 = td / "a2.lomt"
+        a2.write_text("choose write grammar tur2\n" + body, encoding="utf-8", newline="\n")
+        fa2 = potato_from.front_door(a2)
+        assert (fa2.grammar, fa2.profile, fa2.translated) == ("loment", "tur2", False), \
+            (fa2.grammar, fa2.profile, fa2.translated)
+        # 声明那一行的**长度不同**（`tur` / `tur2`），抹完之后各自等长；比的是正文本身。
+        assert fa2.source.endswith(body) and fa2.source[:-len(body)].strip() == "", \
+            "tur2 的正文没原样留着 / 声明行没抹干净"
+        r2 = subprocess.run([sys.executable, str(ROOT / "tools" / "lomentc.py"),
+                             "--print", "llvm", str(a2)],
+                            capture_output=True, text=True, shell=False)
+        assert r2.returncode == 0, f"`grammar tur2` 该编得过：{(r2.stderr or r2.stdout)[-300:]}"
+        assert r2.stdout == r.stdout, (
+            "脚手架阶段的 tur2 产物与 tur 不一致 —— 版次隔离破了（docs/296 §4.1）")
+
         # **`rust` 不再是原生语法**：完整程序必须走 `from_rust` 的既有失败模式。
         r2 = td / "r.lomt"
         r2.write_text("choose write grammar rust\n" + body, encoding="utf-8", newline="\n")
@@ -432,6 +453,8 @@ def test_declared_tur_is_the_native_syntax_and_rust_is_a_surface_grammar():
         # `potato.GRAMMARS` 之外的名字，否则"源里能写"与"对象里合法"就分家了。
         assert "loment" in potato_from.NATIVE_GRAMMARS
         assert "tur" in potato_from.NATIVE_GRAMMARS
+        assert "tur2" in potato_from.NATIVE_GRAMMARS, (
+            "`tur2` 不在原生集里 —— 它是 Tur 1 的**版次**（docs/296），不是表层语法")
         assert "rust" not in potato_from.NATIVE_GRAMMARS, (
             "`rust` 还在原生集里 —— 它已退回成和 C/Java/Go 同级的表层语法")
         assert set(potato_from.NATIVE_GRAMMARS) <= set(potato.GRAMMARS), (

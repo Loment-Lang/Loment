@@ -256,7 +256,7 @@ ABIS = ("c", "rust", "python", "go", "java")
 #: 那六门是别人已有的语言，这一门是**我们自己发明的**，所以子集线是**画出来的**，
 #: 不是**碰上的**。之所以仍记在这里，是因为它守的规矩一模一样：
 #: **只让拼法与形状，不让语义**（`docs/188` §0）。
-GRAMMARS = ("loment", "tur", "c", "python", "java", "go", "rust", "csharp", "cpp",
+GRAMMARS = ("loment", "tur", "tur2", "c", "python", "java", "go", "rust", "csharp", "cpp",
             "natural")
 
 

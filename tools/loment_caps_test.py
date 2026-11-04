@@ -456,7 +456,7 @@ def test_literal_caps_and_static_arrays_are_visible():
     盘点里 —— 这条判据就是"现在在了"的兑现，而且钉的是**行级**事实。
     """
     lits = {(r["file"], r["line"], r["name"]) for r in loment_caps.scan_literals()}
-    for f, line, name in (("loment/selfhost/driver.lomt", 868, "literal:200"),
+    for f, line, name in (("loment/selfhost/driver.lomt", 879, "literal:200"),
                           ("loment/tools/lomfmt.lomt", 497, "literal:16"),
                           ("loment/tools/lomc.lomt", 501, "literal:4000")):
         assert (f, line, name) in lits, (

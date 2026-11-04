@@ -2038,8 +2038,8 @@ def test_lomelf_reports_unsupported_instead_of_miscompiling():
          "define void @_start() {\nentry:\n  %p = alloca { i32, i32 }\n  %i = load i32, ptr %p\n  %q = getelementptr { i32, i32 }, ptr %p, i32 %i\n  ret void\n}\n"),
         ("间接调用",
          "define void @_start() {\nentry:\n  %f = alloca ptr\n  %g = load ptr, ptr %f\n  call void %g()\n  ret void\n}\n"),
-        ("没有 _start",
-         "define void @main() {\nentry:\n  ret void\n}\n"),
+        ("没有 _start 或 main",
+         "define void @helper() {\nentry:\n  ret void\n}\n"),
     ]
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
@@ -2373,10 +2373,10 @@ def test_both_linkers_agree_on_a_negative_immediate():
         td = Path(tds)
         ll = _ref_ir(ROOT / "loment" / "examples" / "user_hello.lomt", td)
         text = ll.read_text(encoding="utf-8")
-        old = "(i64 1, i64 %t1, i64 %t4, i64 %t8)"
+        old = "(i64 60, i64 0, i64 0, i64 0)"
         assert text.count(old) == 1, f"夹具漂了: user_hello 的 IR 里那个实参串出现 {text.count(old)} 次"
         neg = td / "_neg.ll"
-        neg.write_text(text.replace(old, "(i64 -1, i64 %t1, i64 %t4, i64 %t8)"),
+        neg.write_text(text.replace(old, "(i64 -60, i64 0, i64 0, i64 0)"),
                        encoding="utf-8")
         want, _info = lomelf.compile_ll(neg.read_text(encoding="utf-8"))
         llrepo = ROOT / "loment" / "build" / "_neg_imm.ll"
@@ -4570,6 +4570,59 @@ def test_selfhost_mirror_hotswap_profile():
             for p in (llrepo, elfrepo, metarepo):
                 p.unlink(missing_ok=True)
     print("      镜像 hotswap 档：ELF、元数据、实跑三者都与参考一致")
+
+
+@test
+def test_main_is_an_entry_when_start_is_absent():
+    """没有 `_start` 时 `main` 接手；带形参的 `main` 被链接器拒。
+
+    **Why**：hello world 不该逼用户认识 `_start`。入口桩对 `main` 的调用是**无参 ABI**，
+    所以带形参的 `main` 必须**当场拒**，不能让它读到寄存器里的残留值（那是静默错）。
+    **How to apply**：这条走的是**参考链接器**（`lomelf.compile_ll`），真跑在 WSL 里；
+    自举镜像对同一份 IR 的逐字节一致由孪生判据覆盖。
+    """
+    if not _wsl():
+        print("      SKIP: 无 WSL")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        src = td / "m.lomt"
+        src.write_text("module m\n\nfn main() {\n    print(\"main-entry-ok\\n\");\n}\n",
+                       encoding="utf-8", newline="\n")
+        ll = _ref_ir(src, td)
+        blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+        nat = td / "m.native"
+        nat.write_bytes(blob)
+        rc, out = _run_bin(nat, "main_entry", td)
+        assert (rc, out) == (0, b"main-entry-ok\n"), (rc, out)
+
+        bad = td / "b.lomt"
+        bad.write_text("module b\n\nfn main(x: u32) {\n    print(\"x\\n\");\n}\n",
+                       encoding="utf-8", newline="\n")
+        irb = _ref_ir(bad, td).read_text(encoding="utf-8")
+        try:
+            lomelf.compile_ll(irb)
+        except lomelf.Unsupported as e:
+            assert "main" in str(e), e
+        else:
+            raise AssertionError("带形参的 `main` 被链接器收下了 —— 入口桩会喂它残留值")
+
+        # **自举镜像**必须对同一份 IR 产出逐字节相同的 ELF（入口名回退是两边共用的规则）。
+        if _clang():
+            mir = _mirror()
+            llrepo = ROOT / "loment" / "build" / "_main_entry.ll"
+            elfrepo = ROOT / "loment" / "build" / "_main_entry.elf"
+            try:
+                llrepo.write_bytes(ll.read_bytes())
+                rcm, errm = _mirror_run(
+                    mir, "loment/build/_main_entry.ll", "loment/build/_main_entry.elf")
+                assert rcm == 0, f"镜像退出 {rcm}: {errm[-200:]}"
+                assert elfrepo.read_bytes() == blob, (
+                    "镜像与参考对 `main` 入口的产物不同 —— 两边入口名回退没对齐")
+            finally:
+                elfrepo.unlink(missing_ok=True)
+                llrepo.unlink(missing_ok=True)
+    print("      `main` 入口真跑出输出；带形参的 `main` 被拒；镜像产物逐字节相同")
 
 
 def main() -> int:

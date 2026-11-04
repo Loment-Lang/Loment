@@ -347,8 +347,8 @@ def _boundary_counts(text: str) -> dict[str, int]:
             i += 3
             continue
         i += 1
-    syscalls = sum(calls(b) for b in potato.BOUNDARY_BUILTINS if b.startswith("syscall"))
-    ptrs = sum(calls(b) for b in potato.BOUNDARY_BUILTINS if not b.startswith("syscall"))
+    syscalls = sum(calls(b) for b in potato.BOUNDARY_SYSCALLS)
+    ptrs = sum(calls(b) for b in potato.BOUNDARY_PTR_TRANSFORMS)
     extc = sum(calls(nm) for nm in externs)
     return {"extern fn declared": len(externs), "extern call sites": extc,
             "syscalls": syscalls, "raw ptr transforms": ptrs,
@@ -491,7 +491,8 @@ def test_new_writes_a_skeleton_that_compiles():
     deps = lomentc.resolve_deps(mod, ROOT, f.parent, entry=f)
     assert not lomentc.check(mod, deps=deps), "生成的骨架检查不过"
     assert lomentc.emit_llvm(mod, ROOT, deps), "生成的骨架发射不出 IR"
-    assert "_start" in f.read_text(encoding="utf-8")
+    text = f.read_text(encoding="utf-8")
+    assert "fn main" in text and "print(" in text, f"骨架不是新的 hello world:\n{text}"
 
 
 @test

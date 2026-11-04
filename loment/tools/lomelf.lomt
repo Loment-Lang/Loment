@@ -5981,12 +5981,13 @@ fn copy_n(dst: ptr, doff: u32, src: ptr, soff: u32, n: u32) {
 
 // ---------------------------------------------------------------- 函数发射
 
-/// 入口桩: `call _start; mov eax,60; mov edi,0; syscall` —— 用户态入口不能 return。
-fn find_start(t: ptr, n: u32) -> u32 {
+/// 按名字找一处 `@名字`（取**最后一处**，与旧 `find_start` 同口径），返回它的偏移；
+/// 找不到返回 `NO`。`nl` 是名字长度（`_start` = 6，`main` = 4）。
+fn find_entry_named(t: ptr, n: u32, name: str, nl: u32) -> u32 {
     let i: u32 = 0;
     let r: u32 = NO;
-    while i + 6 < n {
-        if lit_at(t, i, n, "_start") == 1 {
+    while i + nl < n {
+        if lit_at(t, i, n, name) == 1 {
             if load8(t, i - 1) == 64 {
                 r = i;
             }
@@ -5996,12 +5997,48 @@ fn find_start(t: ptr, n: u32) -> u32 {
     return r;
 }
 
+/// 用户态入口：`_start` 优先；没有它时 `main` 接手（用户写 `fn main()`）。
+/// 返回 `(偏移 << 32) | 名字长度`；0 = 两个都没有。
+fn find_entry(t: ptr, n: u32) -> u64 {
+    let s: u32 = find_entry_named(t, n, "_start", 6);
+    if s != NO {
+        return ((s as u64) << 32) | 6;
+    }
+    let m: u32 = find_entry_named(t, n, "main", 4);
+    if m == NO {
+        return 0;
+    }
+    return ((m as u64) << 32) | 4;
+}
+
+/// `main` 后面必须紧跟 `()`（跳过空白）—— 入口桩按无参 ABI 调它。
+fn entry_bare(t: ptr, n: u32, after: u32) -> u32 {
+    let i: u32 = after;
+    while i < n && (load8(t, i) == 32 || load8(t, i) == 9) {
+        i = i + 1;
+    }
+    if i >= n || load8(t, i) != 40 {
+        return 0;                                  // '('
+    }
+    i = i + 1;
+    while i < n && (load8(t, i) == 32 || load8(t, i) == 9) {
+        i = i + 1;
+    }
+    if i >= n {
+        return 0;
+    }
+    if load8(t, i) == 41 {
+        return 1;                                  // ')'
+    }
+    return 0;
+}
+
 /// ELF 入口桩。`tlsn`/`tls` **带外部对象时才用**（`docs/219` S2）：
 /// `-fstack-protector` 编出来的库（发行版的 zlib 就是）会读 **`fs:0x28`** 取栈金丝雀，
 /// 而没有 TLS 时 `fs` 是 0 —— 那是去读地址 `0x28`，未映射，**一进去就段错误**。
 /// 所以先 `arch_prctl(ARCH_SET_FS, &__loment_tls)` 把 `fs` 指过来。
 /// 金丝雀**不需要是随机数**：入口存一次、出口比一次，中间没人改，永远相等。
-fn em_entry_stub(out: ptr, c: u32, tab: ptr, ss: u32, tlsn: u32, tls: u32,
+fn em_entry_stub(out: ptr, c: u32, tab: ptr, ss: u32, nl: u32, tlsn: u32, tls: u32,
                  mb: ptr, t: ptr) -> u32 {
     let d: u32 = c;
     if tls != 0 {
@@ -6019,14 +6056,14 @@ fn em_entry_stub(out: ptr, c: u32, tab: ptr, ss: u32, tlsn: u32, tls: u32,
         d = e1(out, d, 5);                         // 05  -> syscall
     }
     if load32(hot_sc(mb), HS_HRUN) == 1 {
-        let sl: u32 = hs_find(mb, tab, t, ss, 6);
+        let sl: u32 = hs_find(mb, tab, t, ss, nl);
         if sl != NO {
             d = em_call_abs(out, d, txt_base(tab) + sl * 16, txt_base(tab));
         } else {
-            d = em_call_lbl(out, d, tab, ss, 6);
+            d = em_call_lbl(out, d, tab, ss, nl);
         }
     } else {
-        d = em_call_lbl(out, d, tab, ss, 6);
+        d = em_call_lbl(out, d, tab, ss, nl);
     }
     d = em_mov_ri32(out, d, RAX, 60);
     d = em_mov_ri32(out, d, RDI, 0);
@@ -6037,12 +6074,12 @@ fn em_entry_stub(out: ptr, c: u32, tab: ptr, ss: u32, tlsn: u32, tls: u32,
 /// PE 入口桩: `sub rsp,0x28; call _start; mov eax,60; mov edi,0; call __win_syscall; ud2`。
 /// 长度固定（26 字节）—— 最后那个 `call` 的 rel32 恒为 +2（跳过 ud2 落到 shim 上），
 /// 所以入口桩不需要知道 shim 的绝对位置；返回后 `d` 正好就是 shim 起点。
-fn em_entry_stub_pe(out: ptr, c: u32, tab: ptr, ss: u32) -> u32 {
+fn em_entry_stub_pe(out: ptr, c: u32, tab: ptr, ss: u32, nl: u32) -> u32 {
     let d: u32 = e1(out, c, 72);                // 48
     d = e1(out, d, 131);                        // 83
     d = e1(out, d, 236);                        // EC
     d = e1(out, d, 40);                         // 28   sub rsp, 0x28
-    d = em_call_lbl(out, d, tab, ss, 6);        // call _start
+    d = em_call_lbl(out, d, tab, ss, nl);       // call <entry>
     d = em_mov_ri32(out, d, RAX, 60);           // mov eax, 60
     d = em_mov_ri32(out, d, RDI, 0);            // mov edi, 0
     d = e1(out, d, 232);                        // E8   call __win_syscall
@@ -7048,9 +7085,14 @@ fn emit_conscript(tab: ptr, out: ptr, c: u32, t: ptr) -> u32 {
 
 fn emit_all(tab: ptr, out: ptr, c: u32, t: ptr, n: u32, tlsn: u32, tls: u32,
             mb: ptr) -> u32 {
-    let ss: u32 = find_start(t, n);
-    if ss == NO {
-        return fail("the unit has no `_start` entry point -- declare `fn _start()`, or `command_main` together with a command declaration");
+    let ep: u64 = find_entry(t, n);
+    if ep == 0 {
+        return fail("the unit has no `_start` or `main` entry point -- declare `fn main()`, `fn _start()`, or `command_main` together with a command declaration");
+    }
+    let ss: u32 = (ep >> 32) as u32;
+    let nl: u32 = (ep & 4294967295) as u32;
+    if nl == 4 && entry_bare(t, n, ss + nl) == 0 {
+        return fail("`main` must not take parameters -- the entry stub calls it with none");
     }
     let d: u32 = c;
     if load32(hot_sc(mb), HS_HRUN) == 1 {
@@ -7078,7 +7120,7 @@ fn emit_all(tab: ptr, out: ptr, c: u32, t: ptr, n: u32, tlsn: u32, tls: u32,
     }
     store32(hot_sc(mb), HS_ENTRY, d);
     if cell(tab, C_PE) == 1 {
-        d = em_entry_stub_pe(out, d, tab, ss);
+        d = em_entry_stub_pe(out, d, tab, ss, nl);
         setcell(tab, C_SHIM, d);                // syscall 站点按这个偏移算 rel32
         let rn: u32 = n_shim();
         let k: u32 = 0;
@@ -7087,7 +7129,7 @@ fn emit_all(tab: ptr, out: ptr, c: u32, t: ptr, n: u32, tlsn: u32, tls: u32,
             k = k + 1;
         }
     } else {
-        d = em_entry_stub(out, d, tab, ss, tlsn, tls, mb, t);
+        d = em_entry_stub(out, d, tab, ss, nl, tlsn, tls, mb, t);
     }
     let i: u32 = 0;
     while i < n {

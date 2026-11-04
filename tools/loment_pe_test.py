@@ -445,8 +445,8 @@ def test_pe_reports_unsupported_instead_of_miscompiling():
         ("间接调用",
          "define void @_start() {\nentry:\n  %f = alloca ptr\n  %g = load ptr, ptr %f\n"
          "  call void %g()\n  ret void\n}\n"),
-        ("没有 _start",
-         "define void @main() {\nentry:\n  ret void\n}\n"),
+        ("没有 _start 或 main",
+         "define void @helper() {\nentry:\n  ret void\n}\n"),
     ]
     for label, text in bad:
         try:

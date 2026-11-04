@@ -294,7 +294,7 @@
       "patterns": [
         {
           "name": "support.function.builtin.loment",
-          "match": "\\b(alloc|free|load8|store8|str_len|str_eq|str_concat|str_byte|str_ptr|slice_len|ptr_add|ptr_sub|atomic_add|get_bits|set_bits|panic|syscall4|syscall6|syscall7|thread_spawn|inb|outb)\\b(?=\\s*\\()"
+          "match": "\\b(alloc|free|load8|store8|str_len|str_eq|str_concat|str_byte|str_ptr|print|slice_len|ptr_add|ptr_sub|atomic_add|get_bits|set_bits|panic|syscall4|syscall6|syscall7|thread_spawn|inb|outb)\\b(?=\\s*\\()"
         }
       ]
     },

@@ -1971,6 +1971,7 @@ fn chk_v1(mem: ptr, doc: u32, ver: u32) -> u32 {
         if gr != NOTFOUND && jkind(mem, gr) == 3 {
             let l2: u32 = jstr(mem, gr, ptr_add(mem, M_SB), 4096);
             if eq_lit(ptr_add(mem, M_SB), l2, "loment") == 1
+                    || eq_lit(ptr_add(mem, M_SB), l2, "tur") == 1
                     || eq_lit(ptr_add(mem, M_SB), l2, "c") == 1
                     || eq_lit(ptr_add(mem, M_SB), l2, "python") == 1
                     || eq_lit(ptr_add(mem, M_SB), l2, "java") == 1

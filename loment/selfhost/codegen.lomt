@@ -3781,6 +3781,38 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
             }
             return k12 + 1;
         }
+        if tok_is(src, toks, j, "print") {   // 写 stdout: write(1, ptr, len)
+            let kp: u32 = arg1(s, out, src, toks, j + 2, lvl);
+            emit_str(s, out, "  ");
+            let ep: u32 = new_temp(s, out);
+            emit_str(s, out, " = extractvalue { ptr, i64 } ");
+            emit_val(s, out, lvl);
+            emit_str(s, out, ", 0\n  ");
+            let el: u32 = new_temp(s, out);
+            emit_str(s, out, " = extractvalue { ptr, i64 } ");
+            emit_val(s, out, lvl);
+            emit_str(s, out, ", 1\n  ");
+            let ip: u32 = new_temp(s, out);
+            emit_str(s, out, " = ptrtoint ptr %t");
+            emit_dec(s, out, ep);
+            emit_str(s, out, " to i64\n  ");
+            let rr: u32 = new_temp(s, out);
+            emit_str(s, out, " = call i64 asm sideeffect \"syscall\", \"={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}\"(i64 1, i64 1, i64 %t");
+            emit_dec(s, out, ip);
+            emit_str(s, out, ", i64 %t");
+            emit_dec(s, out, el);
+            emit_str(s, out, ")\n  ");
+            let tt: u32 = new_temp(s, out);
+            emit_str(s, out, " = trunc i64 %t");
+            emit_dec(s, out, rr);
+            emit_str(s, out, " to i32\n");
+            set_temp_val(s, lvl, tt);
+            if tok_is(src, toks, kp + 1, "as") {
+                apply_cast_b(s, out, src, toks, 3, 0, kp + 2, lvl);
+                return kp + 3;
+            }
+            return kp + 1;
+        }
         if tok_is(src, toks, j, "str_byte") {   // 字节指针 + 下标
             // 顺序同 lomentc: 取指针 (extractvalue 0) 落在**第 2 个实参之前**
             let k13: u32 = arg1(s, out, src, toks, j + 2, lvl);

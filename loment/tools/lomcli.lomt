@@ -1495,7 +1495,7 @@ fn do_syntax(mem: ptr, ab: ptr, argc: u32) -> u32 {
     termrow(mem, 1, "cast", "`x as u64` - int<->pointer casts must be written explicitly");
     termrow(mem, 1, "string", "\"...\", escapes are only \\n \\t \\\" \\\\ - there is NO \\x escape");
     termrow(mem, 1, "comment", "// and /* */, /// is a doc comment (loment doc extracts it)");
-    termrow(mem, 1, "entry", "freestanding entry is `_start`, it takes no arguments; exit with syscall4(60, ...)");
+    termrow(mem, 1, "entry", "`fn main()` is the entry (no arguments, no return type); `_start` is the freestanding entry and wins when both exist");
     wstr(1, "\n  ");
     gray(mem, 1);
     wstr(1, "traps: loment cheat   .   builtins: loment builtins   .   error codes: loment codes");
@@ -1516,6 +1516,7 @@ fn do_builtins(mem: ptr, ab: ptr, argc: u32) -> u32 {
     termrow(mem, 1, "str_eq", "str_eq(a: str, b: str) -> bool   content comparison");
     termrow(mem, 1, "str_concat", "str_concat(a, b) -> str   concatenation (bump heap is only 64 KiB)");
     termrow(mem, 1, "str_ptr", "str_ptr(s: str) -> ptr   data pointer (feed it to syscall)");
+    termrow(mem, 1, "print", "print(s: str) -> u32   write s to stdout (one write syscall)");
     termrow(mem, 1, "alloc", "alloc(n: u32) -> ptr   bump heap (64 KiB ceiling)");
     termrow(mem, 1, "free", "free(p: ptr) -> u32   placeholder, the bump heap does not reclaim");
     termrow(mem, 1, "load8", "load8(p: ptr, off: u32) -> u32   read a byte");
@@ -1852,7 +1853,8 @@ fn do_stat(mem: ptr, ab: ptr, argc: u32) -> u32 {
     // 数的全是**写出来了没有**, 不是"危不危险" —— 后者要类型, 那是编译器的事。
     let n_sys: u32 = cnt_calls(p, n, str_ptr("syscall4"), str_len("syscall4"))
                    + cnt_calls(p, n, str_ptr("syscall6"), str_len("syscall6"))
-                   + cnt_calls(p, n, str_ptr("syscall7"), str_len("syscall7"));
+                   + cnt_calls(p, n, str_ptr("syscall7"), str_len("syscall7"))
+                   + cnt_calls(p, n, str_ptr("print"), str_len("print"));
     let n_ptr: u32 = cnt_calls(p, n, str_ptr("ptr_add"), str_len("ptr_add"))
                    + cnt_calls(p, n, str_ptr("ptr_sub"), str_len("ptr_sub"))
                    + cnt_calls(p, n, str_ptr("str_ptr"), str_len("str_ptr"));
@@ -2349,9 +2351,7 @@ fn do_new(mem: ptr, ab: ptr, argc: u32) -> u32 {
     }
     wfd(fd, "module ");
     wfdp(fd, nm);
-    wfd(fd, "\n\nfn _start() {\n    let s: str = \"hello from Loment\\n\";\n");
-    wfd(fd, "    syscall4(1, 1, str_ptr(s) as u64, str_len(s) as u64);\n");
-    wfd(fd, "    syscall4(60, 0, 0, 0);\n}\n");
+    wfd(fd, "\n\nfn main() {\n    print(\"hello from Loment\\n\");\n}\n");
     close_fd(fd);
     green(mem, 1);
     wstr(1, "  wrote ");

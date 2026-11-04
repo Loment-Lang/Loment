@@ -46,10 +46,8 @@ Create `hello.lomt`:
 ```rust,run
 module hello
 
-fn _start() {
-    let s: str = "hello from Loment\n";
-    syscall4(1, 1, str_ptr(s) as u64, str_len(s) as u64);
-    syscall4(60, 0, 0, 0);
+fn main() {
+    print("hello from Loment\n");
 }
 ```
 <!-- expect: hello from Loment -->

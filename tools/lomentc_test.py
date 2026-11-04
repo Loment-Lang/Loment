@@ -1007,6 +1007,46 @@ def test_str_builtins_m1_m2():
 
 
 @test
+def test_print_builtin_and_main_entry():
+    """`print` 是一个内建（写 fd 1）；`fn main` 是正常入口（没有 `_start` 时由链接器接手）。
+
+    **Why**：hello world 原先要写 `let` + `str_ptr as u64` + 两条 `syscall4` —— 那是
+    系统调用的细节，不该由第一个程序承担。`print` 把"写 stdout"收成一个内建；`main`
+    让用户程序不必知道 `_start`。两者都必须**两套实现**一致，所以这条判据同时钉：
+    参考实现的类型/边界、IR 里 `print` 真的落成 `write(1, …)`、以及 `main` 不被编译器
+    改写成 `_start`（合成入口是链接器的事，IR 里凭空多一个 `_start` 会和自举侧分叉）。
+    """
+    src = "module hello\n\nfn main() {\n    print(\"hi\\n\");\n}\n"
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        p = td / "hello.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        mod = lomentc.load(p)
+        deps = lomentc.resolve_deps(mod, ROOT, p.parent, entry=p)
+        assert lomentc.check(mod, deps=deps) == []
+        ir = lomentc.emit_llvm(mod, ROOT, deps)
+        assert "define void @main()" in ir, ir[:400]
+        assert "@_start" not in ir, "合成入口是链接器的事，IR 里不该凭空多一个 `_start`"
+        assert 'asm sideeffect "syscall"' in ir and "(i64 1, i64 1," in ir, (
+            "`print` 必须落成 write(1, ptr, len)")
+        assert "ptrtoint ptr" in ir, "str 的数据指针要转成整数交给 syscall"
+
+        # 类型：print 只吃 str
+        bad = td / "bad.lomt"
+        bad.write_text("module bad\n\nfn main() {\n    print(1);\n}\n",
+                       encoding="utf-8", newline="\n")
+        bm = lomentc.load(bad)
+        bd = lomentc.resolve_deps(bm, ROOT, bad.parent, entry=bad)
+        errs = lomentc.check(bm, deps=bd)
+        assert any("print" in e for e in errs), errs
+
+        # 边界计数：print 是**机调用**，不是裸指针变换
+        b = lomentc._count_boundary(mod)
+        assert (b["syscalls"], b["ptr_transforms"]) == (1, 0), b
+    print("      `print`：类型/IR/边界都对；`fn main` 不被改写成 `_start`")
+
+
+@test
 def test_unit_wide_unique_names():
     """跨模块同名顶层符号 -> 编译错误 (发射符号是平的, 见 docs/150 缺口①)。
 

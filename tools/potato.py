@@ -48,7 +48,12 @@ IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 #: ⚠ **本文件里连"编译器那个模块的名字"都不能出现**：`potato_test` 的独立性判据
 #: （M47）是对**这份源码做子串搜索**的, 而它要找的那个模块名恰好就是那两个字 ——
 #: 2026-09-23 实测: 这段注释原来写了那个名字, 判据当场红。所以这里一律只写"编译器"。
-BOUNDARY_BUILTINS = ("syscall4", "syscall6", "syscall7", "ptr_add", "ptr_sub", "str_ptr")
+#: 机调用那一类。**`print` 也算**：它落地就是一次 `write(1, …)`，与手写 syscall
+#: 越过的语言保证是同一层（`docs/205` R5 的口径是"这个名字被调用了没有"）。
+BOUNDARY_SYSCALLS = ("syscall4", "syscall6", "syscall7", "print")
+#: 裸指针变换那一类。
+BOUNDARY_PTR_TRANSFORMS = ("ptr_add", "ptr_sub", "str_ptr")
+BOUNDARY_BUILTINS = BOUNDARY_SYSCALLS + BOUNDARY_PTR_TRANSFORMS
 # v0 顶层字段; v1 = v0 + 泛型/实例/trait/impl (M45); v2 = v1 + 项目模式 (docs/143 §3.2);
 # v3 = v2 + **开关取值** (docs/182 §1);
 # v4 = v3 + **方言** (docs/184 §9 S4.3): 这份单元用了 `comefor` 定义的那些语法；
@@ -251,7 +256,7 @@ ABIS = ("c", "rust", "python", "go", "java")
 #: 那六门是别人已有的语言，这一门是**我们自己发明的**，所以子集线是**画出来的**，
 #: 不是**碰上的**。之所以仍记在这里，是因为它守的规矩一模一样：
 #: **只让拼法与形状，不让语义**（`docs/188` §0）。
-GRAMMARS = ("loment", "c", "python", "java", "go", "rust", "csharp", "cpp",
+GRAMMARS = ("loment", "tur", "c", "python", "java", "go", "rust", "csharp", "cpp",
             "natural")
 
 

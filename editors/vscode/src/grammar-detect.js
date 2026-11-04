@@ -20,6 +20,7 @@
 // 判据逐条对拍。源侧宽松（`py` / `python` 都收）、对象侧只许一个拼法（docs/188 §1.2）。
 const GRAMMAR_ALIASES = {
   loment: 'loment',
+  tur: 'tur',
   c: 'c',
   py: 'python', python: 'python',
   java: 'java',
@@ -31,9 +32,10 @@ const GRAMMAR_ALIASES = {
 };
 
 //: 读法就是原生语法的规范名 —— 它们**不需要**另立一份语法文件：
-//: `loment` 是显然那一个；`rust` 也是（2026-09-22 的裁定："rust 语法是 Loment 基础语法，
-//: 不需要翻译"）。
-const NATIVE_GRAMMARS = ['loment', 'rust'];
+//: `loment` 是默认拼法，`tur` 是本语言自己的正式语法名（2026-11-03，`docs/295`）。
+//: **`rust` 不在这里**：它退回成一门表层语法（与 C/Java/Go 同级），所以它有
+//: `loment-rust` 那一套语法文件。
+const NATIVE_GRAMMARS = ['loment', 'tur'];
 
 //: 声明里那三个词 —— **与参考实现同一份词序契约**（`GRAMMAR_DECL_WORDS`）。
 const GRAMMAR_DECL_WORDS = ['choose', 'write', 'grammar'];

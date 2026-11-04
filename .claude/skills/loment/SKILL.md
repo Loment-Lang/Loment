@@ -11,14 +11,26 @@ names / the operators all match Rust) and it adds exactly one layer of semantics
 domains** (`capability` + `guard`). It compiles straight to a **native x86-64 executable**
 (Linux ELF / Windows PE) with **no Python runtime**.
 
-**The surface syntax is not the only one** (`docs/188`): the same program can be written with C /
-C++ / Java / C# / Go / Python spelling, **changing the spelling and nothing else**. It is
-recognised two ways - **by extension** (`.c` / `.cpp` / `.java` / `.cs` / `.py` / `.go`), or with
-an explicit declaration at the top of the file:
+**The language's own syntax is called Tur** (`docs/188`). It is **derived directly from Rust**
+(types, expressions, `fn`, `let`, control flow keep Rust's spelling) and **adds what Rust does
+not have**: `module`, `choose`, `capability`, `guard`, `extern fn`, `comefor`, and the `print`
+builtin. Everything in this guide is Tur.
+
+A file is read as Tur when it has **no declaration** (the default), `choose write grammar tur`,
+or `choose write grammar loment` (the historical spelling of the same grammar). The same program
+can also be written with C / C++ / Java / C# / Go / Python spelling, **changing the spelling and
+nothing else** - recognised **by extension** (`.c` / `.cpp` / `.java` / `.cs` / `.py` / `.go`),
+or with an explicit declaration at the top of the file:
 
 ```rust
 choose write grammar python     // must come before `module`; once per file
 ```
+
+**Rust is not Tur.** `.rs` files and `choose write grammar rust` are a *surface grammar* like the
+others: `from_rust` reads them as Rust and extracts the interface (declarations), not a
+translated body - a complete `choose write grammar rust` program is refused. That is what keeps
+"the Rust surface is a strict subset" true: it is literally Rust, and Tur's additions never leak
+into it. To write Tur with Rust's spelling, declare `grammar tur`.
 
 > **The two toolchains accept different sets today - read this before you start.**
 > **The reference compiler in the source repository** (`tools/lomentc.py`, which is also what
@@ -30,12 +42,11 @@ choose write grammar python     // must come before `module`; once per file
 > translators have no Loment twin yet (`docs/189` section 4.1). So "write `.py` inside the
 > package and it runs" **is not true today**.
 
-The alias table is **frozen at the factory**: six foreign grammars plus `loment` and `rust` are
-the eight names that parse today. A ninth canonical name, `natural` (`.nl`, `docs/197`), is
-already in the table but **not parsed yet** - declaring it is refused loudly, not silently
-mis-read. The table cannot be extended or overridden (`docs/188` section 1.1). Getting it wrong
-is one of four errors: the name is not in the table / it is written after `module` / it is
-written twice / no name follows it.
+The alias table is **frozen at the factory**: the native grammar (`loment` / `tur`) plus the
+foreign grammars (`c`, `cpp`, `java`, `csharp`, `go`, `python`, `rust`, and the not-yet-parsed
+`natural`). It cannot be extended or overridden (`docs/188` section 1.1). Getting it wrong is one
+of four errors: the name is not in the table / it is written after `module` / it is written twice
+/ no name follows it.
 
 **Boundaries to know before writing in one of those spellings** (measured; each one saves a
 round trip):
@@ -181,17 +192,17 @@ touching neither clang nor WSL.
 ```rust
 module hello
 
-fn _start() {
-    let s: str = "hello from Loment\n";
-    syscall4(1, 1, str_ptr(s) as u64, str_len(s) as u64);
-    syscall4(60, 0, 0, 0);
+fn main() {
+    print("hello from Loment\n");
 }
 ```
 
-`loment run hello.lomt` prints `hello from Loment`. It already settles three things: **the entry
-point is `_start`** (not `main`, and it takes no arguments), **`let` needs a type**, and **there
-is no printf** (output goes through `syscall4`, with `str_ptr` / `str_len` turning a string into
-a raw pointer and a length).
+`loment run hello.lomt` prints `hello from Loment`. It settles three things: **the entry point
+is `fn main()`** (no arguments, no return type), **`print` writes a string to stdout** (one
+`write` syscall; there is no printf and no formatting), and **`let` needs a type** when you do
+declare a local. The freestanding entry is still `_start` (kernel / no-libc code): it takes no
+arguments and wins when both exist. A normal user program should use `main` — the linker's entry
+stub calls it and exits 0.
 
 Below is the whole thing (it is called `tour`; the walkthrough follows the program):
 
@@ -331,6 +342,7 @@ Running it should print `42 10 9 6 2 3` and `TOUR RESULT: PASS`.
 | `struct Entry { … }` | A struct; every field carries a type |
 | `enum Kind { Small, Big(u32) }` | An enum; a variant may carry **one** payload |
 | `fn write_str(fd: u64, s: str) -> i64` | A function; **every parameter needs a type**, returns are written `-> T`, no return type means none |
+| `print(s)` | Write a string to stdout (one `write` syscall). Use `syscall4` only when you need another fd or another call |
 | `syscall4(1, fd, str_ptr(s) as u64, str_len(s) as u64)` | A raw syscall: `(number, args…)`; **there is no printf** |
 | `fn write_dec(…)` | The standard way to print a decimal: `alloc` + `store8` + reverse |
 | `let buf: ptr = alloc(12)` | **`let` always needs a type**; `ptr` is a raw pointer |
@@ -341,7 +353,8 @@ Running it should print `42 10 9 6 2 3` and `TOUR RESULT: PASS`.
 | `Kind::Big(w)` | A payload-carrying variant pattern; `w` is the binding |
 | `fn sum_slice(xs: [u32])` | A slice parameter; `&xs` passes an array as a slice; `slice_len(xs)` is its length |
 | `guard slots(slot);` | A capability-domain guard (section 5) |
-| `fn _start()` | The **freestanding entry point**: no `main`, and no arguments. **It must not `return`** - the stack holds argc/argv rather than a return address, so a `ret` jumps into garbage (symptom: segfault, not one byte printed). End it with `syscall4(60, 0, 0, 0)`, never with `return 0` |
+| `fn main()` | The **normal entry point**: no arguments, no return type. The linker's entry stub calls it and exits 0 |
+| `fn _start()` | The **freestanding entry point** (kernel / no-libc): no arguments. If both exist, `_start` wins. When you link it yourself with `-Wl,-e,_start`, end it with `syscall4(60, 0, 0, 0)` - there is no return address |
 | `let xs: [u32; 3] = [1, 2, 3]` | A fixed-size array; `xs[0]` reads and writes |
 | `for i in 0..LIMIT { … }` | A range loop (upper bound **exclusive**) |
 | `while i < n { … }` | A loop |
@@ -602,6 +615,7 @@ each bring in one module, see 3.1 at the end of this section.
 | `str_eq(a: str, b: str) -> bool` | Content comparison |
 | `str_concat(a: str, b: str) -> str` | Concatenation (**the compile-time bump heap, which is only 64 KiB** - do not build big strings) |
 | `str_ptr(s: str) -> ptr` | The data pointer (for feeding syscalls) |
+| `print(s: str) -> u32` | Write the string's bytes to stdout (one `write` syscall) |
 | `alloc(n: u32) -> ptr` | Bump-heap allocation (the same 64 KiB cap - **and read 6.2.14 before relying on it**) |
 | `free(p: ptr) -> u32` | Returns the block to the allocator (bump pointer + address-ordered free list); it cannot grow past 64 KiB and does not coalesce (`docs/210` section 2.8) |
 | `load8(p: ptr, off: u32) -> u32` | Read a byte |

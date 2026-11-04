@@ -1,7 +1,7 @@
 module ir_builtin
 choose runtime
 
-// M82 目标文件 (指针/位域内建子集): alloc/free/atomic_add/ptr_add/ptr_sub/get_bits/set_bits/panic;
+// M82 目标文件 (指针/位域内建子集): alloc/free/atomic_add/ptr_add/ptr_sub/get_bits/set_bits/panic/print;
 // 生成的 .ll 必须与 lomentc 的 --emit-llvm 逐字节一致 (含堆全局与运行时的位置)。
 
 fn heap_alloc(n: u32) -> ptr {
@@ -43,4 +43,8 @@ fn wide(b: u8) -> u64 {
 fn boom(n: u32) -> u32 {
     panic(n);
     return n;
+}
+
+fn say() -> u32 {
+    return print("ir\n");
 }

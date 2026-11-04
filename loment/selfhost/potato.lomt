@@ -44,7 +44,7 @@
 //     顺序也要对上：参考实现"每轮过一遍池子、只走没走过的"＝这里"每轮走上一轮新建的"，
 //     而实例的创建顺序是逐字节判据的一部分。见 `pt_mono_all` / `pt_mono_inst`。
 //     ⚠ 顺带补上的一格：`K as T` 的 K **原先只认标识符**（kind 0），于是 `1 as u32`
-//     这种字面量实参落到"实参形态超出这一节"上 —— `native_chain.lomt` 的 `main` 正是
+//     这种字面量实参落到"实参形态超出这一节"上 —— `native_chain.lomt` 的 `chain_main` 正是
 //     那么写的，只是它以前排在 `REFUSED` 里，碰不到。
 //   * **嵌套泛型实参**(`Outer<Inner<u32>>`)—— 2026-09-23 做掉。**规则先定，代码后写**：
 //     `docs/147` §2「命名层」定下"**分隔的长度 = 嵌套深度**"（`Outer_Inner__u32`），
@@ -1010,11 +1010,32 @@ fn pt_surf_count(unit: ptr, t: ptr, lo: u32, hi: u32, name: str, table: u32, cod
     return n;
 }
 
-/// 某个面（`code`）在这份单元里的站点数 —— 三个机调用内建各数一遍。
+/// `print(...)` 是一次 `write(1, …)` —— 面是 file (1)。它没有"第一个实参是号"这回事，
+/// 所以不走 `pt_surf_count` 的号表，直接按名字数（与参考实现 `_machine_call_sites`
+/// 里给 print 填号 1 是同一条）。
+fn pt_surf_print(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+    let n: u32 = 0;
+    let i: u32 = lo;
+    while i < hi && pt_kind(t, i) != 4 {
+        if pt_kind(t, i) == 0 && pt_tis(unit, t, i, "print") && pt_tis(unit, t, i + 1, "(")
+                && !(i > lo && pt_tis(unit, t, i - 1, "fn")) {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 某个面（`code`）在这份单元里的站点数 —— 三个机调用内建各数一遍；`print` 补在 file 面。
 fn pt_surf_total(unit: ptr, t: ptr, lo: u32, hi: u32, code: u32) -> u32 {
+    let p: u32 = 0;
+    if code == 1 {
+        p = pt_surf_print(unit, t, lo, hi);
+    }
     return pt_surf_count(unit, t, lo, hi, "syscall4", 0, code)
          + pt_surf_count(unit, t, lo, hi, "syscall6", 0, code)
-         + pt_surf_count(unit, t, lo, hi, "syscall7", 0, code);
+         + pt_surf_count(unit, t, lo, hi, "syscall7", 0, code)
+         + p;
 }
 
 // ---------------------------------------------------------------- 宽度组成 (docs/237, v14)
@@ -3600,7 +3621,7 @@ fn pt_arg_ty(sc: ptr, unit: ptr, t: ptr, i: u32, hi: u32) -> u64 {
     // `K as T`：K 只要求"个值" —— **字面量也算**（`outer(1 as u32, 2 as u32)` 那种形状）。
     // 参考实现按表达式的类型推，不管操作数是标识符还是字面量；这一格原先只认 kind 0，
     // 于是 `1 as u32` 落到"实参形态超出这一节"上 —— 直到 R4 这一轮才撞出来
-    // （`native_chain.lomt` 的 `main` 就是那么写的，而它以前排在 `REFUSED` 里，碰不到）。
+    // （`native_chain.lomt` 的 `chain_main` 就是那么写的，而它以前排在 `REFUSED` 里，碰不到）。
     if (pt_kind(t, j) == 0 || pt_kind(t, j) == 1) && pt_kind(t, j + 1) == 0
             && pt_tis(unit, t, j + 1, "as") {
         let ts: u32 = j + 2;
@@ -5623,7 +5644,8 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     // 是同一组数（`loment_cli_test` 另拿参考实现的**真词法器**对过 `loment stat` 那一份）。
     let nbd_sys: u32 = pt_cnt_boundary_call(unit, t, lo, hi, "syscall4")
                      + pt_cnt_boundary_call(unit, t, lo, hi, "syscall6")
-                     + pt_cnt_boundary_call(unit, t, lo, hi, "syscall7");
+                     + pt_cnt_boundary_call(unit, t, lo, hi, "syscall7")
+                     + pt_cnt_boundary_call(unit, t, lo, hi, "print");
     let nbd_ptr: u32 = pt_cnt_boundary_call(unit, t, lo, hi, "ptr_add")
                      + pt_cnt_boundary_call(unit, t, lo, hi, "ptr_sub")
                      + pt_cnt_boundary_call(unit, t, lo, hi, "str_ptr");

@@ -2977,7 +2977,7 @@ README_MD = """# Loment {DISPLAY}
 | `bin/lomenterr` | 报错器：吃编译器 `--diag-out` 的 JSONL，补上标题、源行与修复建议（`loment/tools/lomenterr.lomt`，`docs/182`）。**由启动器自动调用**，不是 `loment` 的子命令。它有**自己的版本号**（与语言版本是两条线）：`lomenterr version` |
 | `bin/lompi` | **Loment 库的包管理器**（Loment 自己写的，`lompi/`）。**独立命令，不是 `loment` 的子命令** —— `loment help` 里没有它，直接敲 `lompi` |
 | `share/loment/seed.ll` | 自举种子：只用 clang 就能从它重建整套工具链 |
-| `share/loment/examples/user_hello.lomt` | 示例程序（用 syscall 打印） |
+| `share/loment/examples/user_hello.lomt` | 示例程序（用 `print` 打印） |
 | `share/loment/skill/SKILL.md` | **给 AI agent 的 Loment 说明书**（见下） |
 | `share/lompi/skill/SKILL.md` | **lompi 的说明书**（同一种装法：进 `~/.claude/skills/lompi/`，并往 Codex 的 AGENTS.md 写指针） |
 | `share/lompi/store/` | **lompi 的标准库**：`std` / `host` / `internet` / `os` 四个包，共 **160** 个文件（这个数**钉在** `loment_lompi_test.STORE_FILES`，别在这行手抄第二份）。装的时候会一并拷进 **lompi 自己认的全局 store**（问 `lompi config`），装完就能直接 `lompi index` / `use std` |

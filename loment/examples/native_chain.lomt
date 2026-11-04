@@ -11,7 +11,7 @@ fn outer<T>(a: T, b: T) -> T {
     return pick(a, b);
 }
 
-fn main() -> u32 {
+fn chain_main() -> u32 {
     let x: u32 = outer(1 as u32, 2 as u32);
     return x;
 }

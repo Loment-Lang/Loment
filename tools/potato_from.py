@@ -1730,6 +1730,7 @@ EXT = {".py": "python", ".c": "c", ".h": "c", ".rs": "rust", ".go": "go",
 # 源侧宽松（`py` / `python` 都收）、对象侧只许一个拼法，否则同一份源出两串字节。
 GRAMMAR_ALIASES: dict[str, str] = {
     "loment": "loment",
+    "tur": "tur",
     "c": "c",
     "py": "python", "python": "python",
     "java": "java",
@@ -1747,18 +1748,16 @@ GRAMMAR_ALIASES: dict[str, str] = {
 
 #: **读法就是原生语法的那几个规范名。**
 #:
-#: `loment` 是显然的那一个。**`rust` 也在这里** —— 用户 2026-09-22 的裁定：
-#: **「rust 语法是 Loment 基础语法，不需要翻译」**。本语言的原生拼法本来就是 Rust 风味
-#: （`CLAUDE.md` 那条"不发明语法、规避 LLM 零语料"买到的就是它），所以
-#: `choose write grammar rust` 说的是"**按基础语法读这份 Loment**"，
-#: 而不是"把一份外国 Rust 模块抽成接口"。
+#: `loment` 是基础语法；**`tur` 是本语言自己的正式语法名**（2026-11-03 用户定）——
+#: 它是从 Rust **直接修改**出来的：共享 Rust 的拼法与类型语法，但有自己的入口
+#: （`fn main`）、内建（`print`）和扩展构造（`capability` / `guard` / `choose`）。
+#: 两者都**不经过任何翻译器**：抹掉声明那一行就交给原生 lexer/parser。
 #:
-#: **一处刻意的不对称，要说清**（`docs/188` §2 那条分工）：**后缀** `.rs` 与
-#: **`--lang rust`** 照旧走 `from_rust`（`docs/179` 抽接口那条路 —— `kernel/src/*.rs`
-#: 与 `lompotc --rust` 那条孪生判据都靠它）。两者不冲突：**后缀说"这是哪个语言的文件"，
-#: 声明说"这份 Loment 用哪种写法"**。于是 `.lomt` 里写 `grammar rust` 是原生读法，
-#: 而一份 `.rs` 仍然是"Rust 的文件，抽它的接口"。
-NATIVE_GRAMMARS = ("loment", "rust")
+#: **`rust` 不在这里**（2026-11-03 用户定："rust 和其他几种语法一样"）。它退回成
+#: 一门**表层语法**：`choose write grammar rust` 与 `.rs` 后缀走同一条 `from_rust`
+#: 路径（`docs/179` 抽接口那条路）。于是 "`grammar rust` 是严格 Rust 子集" 这件事
+#: **由读法本身保证** —— 我们给 Tur 加的修改不会漏到它那一面去。
+NATIVE_GRAMMARS = ("loment", "tur")
 
 #: **声明的词序**：`choose write grammar <别名>`。
 #:
@@ -1830,19 +1829,19 @@ def strip_grammar_decl(src: str) -> str:
     return _GRAMMAR_LINE.sub(_blank_keep_off, src)
 
 
-def _strip_rust_mut(src: str) -> str:
-    """`grammar rust` 的**表层改写**：把 Rust 的 `mut` 声明标记映射掉（`#77`）。
+def _strip_tur_mut(src: str) -> str:
+    """`grammar tur` 的**表层改写**：把 Rust 的 `mut` 声明标记映射掉（`#77`）。
 
-    Rust 与本语言在"本地变量怎么声明"上没有交集：
+    Tur 与 Rust 在"本地变量怎么声明"上没有交集：
 
-        Rust                     本语言
+        Rust                      Tur
         let mut v: T = e;        let v: T = e;      （本地变量本来就可变）
         fn f(mut a: T)           fn f(a: T)
 
-    于是 `grammar rust`（**原生读法**，见 `NATIVE_GRAMMARS`）里**每一个有状态循环都
-    写不出来**：写 `let mut` 解析不过（`期望 :，得到 'v'`），去掉 `mut` 又被 rustc 拒
-    （`cannot assign twice to immutable variable`）。这一门与另外五门的区别只是"它不
-    经过翻译器"，而这件事本来就是**拼法**、不是语义 —— 所以在**前门**做一次等长改写。
+    于是 `grammar tur`（**原生读法**，见 `NATIVE_GRAMMARS`）里**每一个有状态循环都
+    写不出来**：写 `let mut` 解析不过（`期望 :，得到 'v'`），去掉 `mut` 又不是原汁
+    原味的 Rust 拼法。这一门与另外几门的区别只是"它不经过翻译器"，而这件事本来
+    就是**拼法**、不是语义 —— 所以在**前门**做一次等长改写。
 
     **只抹两种位置**，别的 `mut` 一个字节都不动：
 
@@ -1857,7 +1856,7 @@ def _strip_rust_mut(src: str) -> str:
     指回用户写的那一行。词法失败（源本身就读不通）时原样返回 —— 让编译器报它自己的
     语法错，而不是在这里吞掉。
     """
-    import lomc  # noqa: PLC0415  (只有 rust 这一支要用它)
+    import lomc  # noqa: PLC0415  (只有 tur 这一支要用它)
     try:
         toks = lomc.lex(src)
     except Exception:                                                # noqa: BLE001
@@ -1942,7 +1941,7 @@ def refuse_foreign_grammar(src: str, tool: str) -> None:
     `lomfmt --write` 是**原地写回**，用户那份源就这么被改坏了。
 
     所以这里**认出非原生写法就拒** —— 与 `loment check` 对同一份文件的处置一致。
-    `rust` 是**原生**（`NATIVE_GRAMMARS`，2026-09-22 的裁定），照旧放行。
+    `tur` 是**原生**（`NATIVE_GRAMMARS`，2026-11-03 的裁定），照旧放行。
 
     **放在这里、不是各入口各写一份**：这是一条**规则**，抄两份必然漂。
     """
@@ -2112,9 +2111,9 @@ def front_door(path: Path, lang: str = "auto", mode: str = "strict") -> FrontUni
 
     按 `resolve_lang` 的次序（**声明 > 后缀 > 内容**）定读法，然后分两条路：
 
-    * **原生拼法（`loment` / `rust`，含没写声明）** —— 它就是 Loment。把声明那一行
-      **抹成等长空白**再交出去。`rust` 在这一支里是因为**它是基础语法的一种拼法**，
-      不需要翻译器 —— 见 `NATIVE_GRAMMARS` 的注解（用户 2026-09-22 的裁定）。
+    * **原生拼法（`loment` / `tur`，含没写声明）** —— 它就是本语言。把声明那一行
+      **抹成等长空白**再交出去。`tur` 在这一支里是因为**它是本语言自己的正式语法**，
+      不需要翻译器 —— 见 `NATIVE_GRAMMARS` 的注解（用户 2026-11-03 的裁定）。
     * **别的写法** —— 那份源按 `docs/188` §0 **仍然是 Loment**，只是拼法不同。所以走
       `potato_from` + `lomt_from --impl` **翻成 Loment 源码**再交出去。
       **全程在本进程里算，不拉起 python / java / …** —— 那是用户定的死要求
@@ -2168,19 +2167,18 @@ def front_door(path: Path, lang: str = "auto", mode: str = "strict") -> FrontUni
         if err:
             raise FrontDoorRefused(err)
         if not declared or g in NATIVE_GRAMMARS:
-            # `rust` 与 `loment` 都落这一支：**它就是基础语法**（见 `NATIVE_GRAMMARS`
+            # `loment` 与 `tur` 都落这一支：**它就是本语言**（见 `NATIVE_GRAMMARS`
             # 的注解）—— 不经过任何翻译器，抹掉声明那一行原样交出去。
             #
-            # **`rust` 还要把 `mut` 映射掉**（`#77`）：这一门是**原生读法**，语法就是
+            # **`tur` 还要把 `mut` 映射掉**（`#77`）：这一门是**原生读法**，语法就是
             # 本语言的语法 —— 而两种语言恰好在"本地变量怎么声明"上写不到一起去
             # （Rust `let mut v: T` / `fn f(mut a: T)`，本语言 `let v: T` / `fn f(a: T)`，
-            # 本地变量本来就可变）。不映射的话**每一个有状态循环都写不出来**：
-            # `let mut v` 在 `mut` 上解析不过，去掉 `mut` 又被 rustc 拒（不可重赋值）。
-            # 这是一次**表层拼法**的改写，与另外五门翻译器做的事同类；行号与偏移
-            # 一字不动（见 `_strip_rust_mut`）。
+            # 本地变量本来就可变）。不映射的话**每一个有状态循环都写不出来**。
+            # 这是一次**表层拼法**的改写，与另外几门翻译器做的事同类；行号与偏移
+            # 一字不动（见 `_strip_tur_mut`）。
             body = strip_grammar_decl(src)
-            if g == "rust":
-                body = _strip_rust_mut(body)
+            if g == "tur":
+                body = _strip_tur_mut(body)
             return FrontUnit("loment", body, False, path)
         lang, why = g, "文件头声明 `choose write grammar`"
     else:

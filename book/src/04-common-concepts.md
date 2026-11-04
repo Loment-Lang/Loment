@@ -24,7 +24,7 @@ fn total(a: u32, b: u32) -> u32 {
 }
 
 fn log_line(msg: str) {
-    syscall4(1, 1, str_ptr(msg) as u64, str_len(msg) as u64);
+    print(msg);
 }
 ```
 

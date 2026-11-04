@@ -720,13 +720,13 @@ fn strip_grammar_decl(buf: ptr, n: u32, scr: ptr, file: ptr, fnam: u32) -> u32 {
                     && load8(buf, ae) != 59 {
                 ae = ae + 1;
             }
-            // **原生拼法有两个**（`potato_from.NATIVE_GRAMMARS`）：`loment` 与 `rust`。
-            // `rust` 在这里**不需要别的东西配** —— 它就是基础语法的一种拼法（用户
-            // 2026-09-22 的裁定），所以自举侧收它的**理由与收 `loment` 是同一条**：
-            // 抹掉那一行之后交给原生的 lexer/parser，**没有翻译器参与**。
-            // （别的拼法仍要等翻译器的 Loment 孪生，docs/189 §4.1。）
+            // **原生拼法有两个**（`potato_from.NATIVE_GRAMMARS`）：`loment` 与 `tur`。
+            // `tur` 是本语言自己的正式语法名（用户 2026-11-03 的裁定），所以自举侧收它
+            // 的**理由与收 `loment` 是同一条**：抹掉那一行之后交给原生的
+            // lexer/parser，**没有翻译器参与**。（`rust` 已退回表层语法；别的拼法仍要
+            // 等翻译器的 Loment 孪生，docs/189 §4.1。）
             let nat: u32 = streq(ptr_add(buf, al), ae - al, "loment")
-                          + streq(ptr_add(buf, al), ae - al, "rust");
+                          + streq(ptr_add(buf, al), ae - al, "tur");
             if saw_module == 0 && seen == 0 && nat != 0 {
                 // **抹成等长空白**（保留换行 ⇒ 行号不漂，报错仍指得到那一行）
                 let z: u32 = i;
@@ -738,7 +738,7 @@ fn strip_grammar_decl(buf: ptr, n: u32, scr: ptr, file: ptr, fnam: u32) -> u32 {
                 }
                 seen = 1;
             } else {
-                let dm: str = "this source's `choose write grammar` is one the self-hosted compiler does not take -- it takes `choose write grammar loment` (or `rust`) only, written before `module` and once. Other spellings wait on the translator having a Loment twin. Run `loment skill --print` for the grammar rules, or compile this file with a toolchain that has the translator.";
+                let dm: str = "this source's `choose write grammar` is one the self-hosted compiler does not take -- it takes `choose write grammar loment` (or `tur`) only, written before `module` and once. Other spellings wait on the translator having a Loment twin. Run `loment skill --print` for the grammar rules, or compile this file with a toolchain that has the translator.";
                 wdiag_file(diagfd(scr), scr, file, fnam, 23, str_ptr(dm), str_len(dm));
                 return fail(dm);
             }

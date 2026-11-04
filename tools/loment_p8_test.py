@@ -1815,8 +1815,8 @@ def test_m87_driver_strips_grammar_decl():
       * **抹掉之后不留痕**: 带声明的那份与不带的那份 **产物逐字节相同**。对照面是
         **另一个单元**, 不是参考实现 —— 两个实现**一起**错(比如都多抹了一行)时,
         "自举 == 参考"照样绿 (`docs/182` §1.9 那条形状)。**原生拼法有两个, 两个都验**:
-        `decl.lomt`(拼 `loment`) 与 `rust.lomt`(拼 `rust`)。后者进这一组, 根据是
-        用户 2026-09-22 的裁定「**rust 语法是 Loment 基础语法, 不需要翻译**」——
+        `decl.lomt`(拼 `loment`) 与 `tur.lomt`(拼 `tur`)。后者进这一组, 根据是
+        用户 2026-11-03 的裁定「**Tur 是本语言自己的正式语法, 从 Rust 直接修改**」——
         它抹掉之后走的是**同一条原生路**, 所以该有**同一份产物**(三个单元同一个模块名);
       * **别的拼法拒**: 参考实现是**真收**那份 `grammar python` 的(它按 Python 读),
         自举侧拒 —— 拒得说清"这门写法还没接上"(`docs/189` §4.1), **不是**"未定义的开关
@@ -1829,13 +1829,13 @@ def test_m87_driver_strips_grammar_decl():
     with tempfile.TemporaryDirectory() as td:
         elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_grammar")
         outs = {}
-        for name in ("plain", "decl", "rust"):
+        for name in ("plain", "decl", "tur"):
             f = GDECL / f"{name}.lomt"
             rc, out, err = _run_driver_raw(elf, f.relative_to(ROOT).as_posix(), td, name)
             assert rc == 0, f"{name}.lomt: 自举侧退出 {rc}: {err[-300:]}"
             assert out == _unit_ll(f), f"{name}.lomt: 产物与参考不一致"
             outs[name] = out
-        for name, spelling in (("decl", "loment"), ("rust", "rust")):
+        for name, spelling in (("decl", "loment"), ("tur", "tur")):
             assert outs[name] == outs["plain"], (
                 f"带着 `choose write grammar {spelling}` 编译的产物与不带的不一样 —— "
                 f"抹掉之后留痕了")
@@ -1847,7 +1847,7 @@ def test_m87_driver_strips_grammar_decl():
         assert "does not take" in err, f"foreign.lomt: 没说到点子上: {err[:200]}"
         assert "未定义的开关" not in err, f"foreign.lomt: 报成了词法/语法错: {err[:200]}"
         assert out.strip() == "", "被拒时不该产出 IR"
-        print("      声明: 两个原生拼法(loment/rust)抹掉后都与不带那份逐字节一致; "
+        print("      声明: 两个原生拼法(loment/tur)抹掉后都与不带那份逐字节一致; "
               "别的拼法拒且指对原因")
 
 

@@ -19,8 +19,9 @@ builtin. Everything in this guide is Tur.
 A file is read as **Tur 1** when it has **no declaration** (the default) or says
 `choose write grammar loment` / `tur` / `tur1` / `tur2026.1`. Editions are **two-level**:
 `tur<year>.<n>` (`docs/296`). The canonical name never changes meaning; `tur1` / `tur2` are the
-2026 shorthands for `tur2026.1` / `tur2026.2` and are only accepted in their release year -
-`loment fmt` expands them when it writes. **Every `check` / `build` / `run` prints the resolved
+2026 shorthands for `tur2026.1` / `tur2026.2` and are only accepted in their release year;
+write the full name in new files (`loment fmt` does not take files with a grammar declaration
+yet). **Every `check` / `build` / `run` prints the resolved
 edition on stderr** (e.g. `grammar tur2 -> tur2026.2 (Tur 2)`); `tur_edition()` returns it at
 runtime, and `loment version <exe>` reads it back from the artifact.
 

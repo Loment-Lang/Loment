@@ -9248,9 +9248,12 @@ class _Ir:
                                "fstep": None, "epoch": sv})
             self.block(s.body)
             self.loops.pop()
-            for st in s.step:           # `continue` 的更新步（for-in 的下标自增）
-                self.stmt(st)
+            # 体尾顺序：**先关纪元、再走更新步** —— 与自举侧 `fi_step` 的那一行同序
+            # （`continue` 那条才是"先跑更新步再关纪元"）。
             self.epoch_close(s, sv)
+            if not self.terminated:     # 体以 `break`/`continue`/`return` 收尾时这一格到不了
+                for st in s.step:       # for-in 的下标自增（脱糖时放进 `While.step`）
+                    self.stmt(st)
             self.jump(cond_l)
             self.label(end_l)
             self.l1_free(s.l1)          # L1：落点就在**循环之后**（体内那次是最后一次用）
@@ -9275,8 +9278,12 @@ class _Ir:
                                "fstep": (s.var, ty, ptr, s.line), "epoch": sv})
             self.block(s.body)
             self.loops.pop()
-            self._for_step(s.var, ty, ptr, s.line)
+            # 体尾的顺序与 `While` 一致：**先关纪元再走更新步**（自举侧同一份顺序）。
+            # `continue` 那条路才是"先跑更新步再关纪元"（`docs/296` §2.5）—— 它走的是
+            # 循环上下文里那份 `fstep`，不经过这里。
             self.epoch_close(s, sv)
+            if not self.terminated:     # 同上：体已经 `break`/`continue` 时这格到不了
+                self._for_step(s.var, ty, ptr, s.line)
             self.jump(cond_l)
             self.label(end_l)
             self.l1_free(s.l1)          # L1：落点就在**循环之后**（体内那次是最后一次用）

@@ -701,6 +701,51 @@ def test_bad_class_is_rejected():
 
 
 @test
+def test_stack_map_uninitialized_offset_is_two_bytes():
+    """`Uninitialized` 的偏移在 StackMapTable 里是 u2（JVMS §4.7.4.3）。
+
+    真实 jar 里（commons-collections4 的 LRUMap）就是这一条把帧流读歪的：按 u1
+    读会多吃掉下一项的第一个字节，然后报一个和现场无关的 "bad verification type"。
+    """
+    import struct
+    # full_frame: delta 0, 0 locals, 2 stack items: uninitialized(0x00c2), Object #1
+    smt = (struct.pack(">H", 1) + b"\xff" + struct.pack(">H", 0) +
+           struct.pack(">H", 0) + struct.pack(">H", 2) +
+           b"" + struct.pack(">H", 0x00C2) + b"" + struct.pack(">H", 1))
+    cf = lomjava.parse_class(_mk_class("A", b"\xb1", smt=smt))
+    assert cf.name == "A", cf.name
+    print("      uninitialized offset -> u2")
+
+
+@test
+def test_ifnull_lowers():
+    """`ifnull` / `ifnonnull` are ordinary branches and must not be J003."""
+    # aconst_null; ifnonnull -> 4; return
+    code = b"\x01\xc7\x00\x03\xb1"
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        lomjava.emit("probe", [lomjava.parse_class(_mk_class("A", code))],
+                     d / "p.ll", d / "p.lomt")
+    print("      ifnull/ifnonnull lowered")
+
+
+@test
+def test_reference_returns_lower():
+    """A method returning a reference (`String`, arrays, objects) is not J003.
+
+    Real libraries return objects everywhere; without `areturn` nothing but the
+    int-only slice could ever compile.
+    """
+    # static Object f() { return null; }
+    code = b"\x01\xb0"
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        lomjava.emit("probe", [lomjava.parse_class(
+            _mk_class("A", code, desc="()Ljava/lang/Object;"))], d / "p.ll", d / "p.lomt")
+    print("      areturn -> ret ptr")
+
+
+@test
 def test_jar_bomb_is_rejected():
     """#1057: entry sizes and compression ratios are capped before inflating."""
     import zipfile

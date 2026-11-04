@@ -1125,6 +1125,12 @@ fn _start() {
     let g: u64 = 18446744073709551615 as u64;
     let h: u8 = 300 as u8;
     let i: i32 = 4294967296 as i32;
+    // issue #703: 全是字面量的算式也是整型 —— 参考曾经把它说成"不是整型"（自举侧照收），
+    // 这条孪生判据要同时钉住"两边都收"与"产物逐字节相同"。
+    let j: u64 = (1 + 1) as u64;
+    let k: u64 = (1 << 20) as u64;
+    let l: u64 = (3 * 1024 - 1) as u64;
+    let m2: u8 = (255 + 1) as u8;
     syscall4(60, 0, 0, 0);
 }
 """
@@ -2875,6 +2881,140 @@ def _gap_breakdown(diff: list[str]) -> dict[str, list[str]]:
             if re.search(pat, text):
                 out.setdefault(feat, []).append(name)
     return dict(sorted(out.items(), key=lambda kv: -len(kv[1])))
+
+
+def _run_driver_shell(elf: Path, script: str, td: str, name: str) -> tuple[int, str]:
+    """跑自举驱动一次，`script` 里的 `$DRV` 指那份二进制（重定向由调用方自己写）。
+
+    `_run_driver_raw` 只递一个入口、只把 stdout 收进文件；下面几条要的是**别的**重定向
+    （`> /dev/full`、`--diag-out` 与空文件的组合），所以单独一条。Linux 上原生跑、
+    Windows 上经 WSL —— 与 `test_m85_entry_load_distinguishes_empty_file_from_directory`
+    同一个前缀写法。
+    """
+    drv = f"{_T}{name}"
+    full = (f"rm -f {drv} && cp {_wsl_path(elf)} {drv} && chmod +x {drv} && "
+            f"cd {_wsl_path(ROOT)} && " + script.replace("$DRV", drv))
+    r = subprocess.run([*_WSLCMD, "bash", "-lc", full],
+                       capture_output=True, text=True, timeout=600, shell=False)
+    return r.returncode, r.stderr
+
+
+def _driver_or_skip(td: str, tag: str):
+    """编一份驱动；缺 clang / 缺 Linux 通道就返回 None（调用方打印 SKIP）。"""
+    if not _clang() or not (sys.platform.startswith("linux") or _wsl()):
+        print("      SKIP: 需要 clang, 以及本机 Linux 或 WSL")
+        return None
+    return _build_linux_elf(_unit_ll(DRIVER_LOMT), td, tag)
+
+
+@test
+def test_m85_a_short_write_is_not_success():
+    """issue #674: 产物**写不出去**时不能退 0。
+
+    驱动把 IR / Potato / `--print-command` 的名字写在 stdout 上，而 `write_all` 原先把
+    "只写出去一部分"当成正常返回 —— 于是 `loment build > /dev/full`（盘满、配额用尽、
+    管道另一头已关）**退 0** 且一句话没有：一份被截断的产物，构建系统认定它成功了。
+    现在那几条流走 `write_checked`：短写就点名是哪一条流、并退非零。
+
+    `/dev/full` 是 Linux 的"永远 ENOSPC 的写端" —— 不需要真把盘写满，也不需要 root。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        elf = _driver_or_skip(td, "fujocs_short")
+        if elf is None:
+            return
+        work = Path(td)
+        unit = work / "one.lomt"
+        unit.write_text("module b\n\nfn main() -> u32 {\n    return 0;\n}\n",
+                        encoding="utf-8", newline="\n")
+        out = work / "one.ll"
+        rc, err = _run_driver_shell(elf, f"$DRV {_wsl_path(unit)} > {_wsl_path(out)}",
+                                    td, "short_ok")
+        assert rc == 0, f"对照组（写普通文件）应当退 0, 得到 {rc}: {err[-300:]}"
+        assert out.exists() and out.stat().st_size > 0, "对照组没有产物"
+
+        rc, err = _run_driver_shell(elf, f"$DRV {_wsl_path(unit)} > /dev/full", td, "short_full")
+        assert rc != 0, f"写不出去却退 0（#674）: {err[-300:]}"
+        assert "cannot write" in err, f"没有说清是写失败: {err[-300:]}"
+        assert "the IR" in err, f"没点名是哪一条流: {err[-300:]}"
+
+
+@test
+def test_m85_a_parse_failure_reaches_diag_out():
+    """issue #657: 失败的**每一条**路径都要有结构化那一份（`--diag-out`）。
+
+    `comefor` / `byuse` 那九支失败原先只写 stderr —— 启动器（`--json` / `--short` 的读者）
+    拿到的是一个**空文件**配一个非零退出码，而那正是差错系统存在要避免的组合。
+    这里喂 `byuse` 写在函数体里的单元（自举侧的 `re == 5`），两面都钉：给人看的那一句
+    在 stderr，结构化那一份在 JSONL 里，且**码与参考实现一致**（`E999`，见
+    `tools/lomentc.py` 的 `Wdiag` 那一档 —— 没有专属码的构造归这里）。
+
+    `line` 断言成 `0`：自举侧的 comefor 展开只回**种类**、不回 token 下标，所以这一格
+    现在是"没有位置"。这是**登记在案的缺口**，不是"对" —— 哪天 `expand_comefor` 把
+    token 带上，这条会红，逼着把断言改成真行号（参考实现给的是 4:5）。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        elf = _driver_or_skip(td, "fujocs_diagout")
+        if elf is None:
+            return
+        work = Path(td)
+        unit = work / "byuse.lomt"
+        unit.write_text('module b\n\nfn f() -> u32 {\n    byuse "reg" done\n    return 1;\n}\n\nfn main() -> u32 {\n    return f();\n}\n',
+                        encoding="utf-8", newline="\n")
+        dj = work / "d.jsonl"
+        rc, err = _run_driver_shell(
+            elf, f"$DRV {_wsl_path(unit)} --diag-out {_wsl_path(dj)} > /dev/null",
+            td, "diagout")
+        assert rc == 1, f"`byuse` 写在块里应当退 1, 得到 {rc}: {err[-300:]}"
+        assert "byuse must be written at the top level" in err, (
+            f"给人看的那一句没了: {err[-300:]}")
+        assert dj.exists(), "没有结构化诊断文件"
+        recs = [json.loads(x) for x in dj.read_text(encoding="utf-8").splitlines() if x.strip()]
+        assert recs, "结构化诊断是空的（启动器只能回吐裸行）—— 正是 #657 的症状"
+        assert recs[0]["code"] == "E999", f"码与参考实现不一致: {recs[0]}"
+        assert "byuse must be written at the top level" in recs[0]["message"], recs[0]
+        assert recs[0]["line"] == 0, (
+            f"没有位置的失败这一格必须是 0（登记在案的缺口, 见 docstring）: {recs[0]}")
+
+
+@test
+def test_m85_the_diagnostic_buffer_is_bounded_and_says_what_it_dropped():
+    """issue #663 + #656: 诊断缓冲**有上限**，满了要**说出来**。
+
+    `#663`：缓冲原先是 8 KiB = 1024 格，第 1025 条写到偏移 8192 —— 那是紧挨着的检查器
+    arena 的起点，而它的头 104000 字节是**符号表**。于是从第 1025 条起，检查器一边写
+    诊断一边改自己还在读的表。它不崩，所以一直没人发现。
+    `#656`：上限之外那一段原先**静默丢掉**，用户看到的条数就是"前 64 条"，没有第二个人
+    知道一共几条。
+
+    这里喂 2100 个各带一处未定义调用的函数（> `ERR_CAP` = 4096 条）：
+      * 退出码 1（不是段错误 —— 修之前这份输入是 **SIGSEGV**，一条诊断都出不来）；
+      * 结构化那一条**恰好 4096 段**（= `ERR_CAP`，既没写穿也没多写）；
+      * stderr 里**说得出**丢了几条、缓冲能装几条。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        elf = _driver_or_skip(td, "fujocs_drop")
+        if elf is None:
+            return
+        work = Path(td)
+        n = 2100
+        lines = ["module big", ""]
+        for i in range(n):
+            lines += [f"fn f{i}() -> u32 {{", f"    return nope{i}();", "}"]
+        lines += ["", "fn main() -> u32 {", "    return 0;", "}"]
+        unit = work / "big.lomt"
+        unit.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+        dj = work / "big.jsonl"
+        rc, err = _run_driver_shell(
+            elf, f"$DRV {_wsl_path(unit)} --diag-out {_wsl_path(dj)} > /dev/null",
+            td, "drop")
+        assert rc == 1, f"检查失败应当退 1（不是 {rc} —— 修之前这一格是 139/SIGSEGV）: {err[-300:]}"
+        kept = [x for x in dj.read_text(encoding="utf-8").splitlines() if x.strip()]
+        assert len(kept) == 4096, f"结构化诊断应当恰好 4096 条（ERR_CAP）, 得到 {len(kept)}"
+        m = re.search(r"loment: (\d+) more diagnostics were dropped \(the buffer holds (\d+)\)",
+                      err)
+        assert m, f"没有说丢了几条: {err[-400:]}"
+        assert int(m.group(1)) > 0, "丢的条数是 0，说明这份输入没越界（判据测错了东西）"
+        assert int(m.group(2)) == 4096, f"报文说的容量不是 ERR_CAP: {m.group(0)}"
 
 
 def main() -> int:

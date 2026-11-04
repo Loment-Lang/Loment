@@ -16,17 +16,24 @@
 投影那半边（`docs/289`/`docs/290`）：一个 fix 进线、一个标错的关键词被摘要剔除、
 一个依赖 feature 的 fix 被剔除并点名、零 fix 没有产物、回滚标成 rollback。
 
-## 2. 这条判据**不**证明什么
+## 2. 真的 `loment lsp`：在事件循环顶部换掉自己
 
-**它跑的不是发行版里的 `loment lsp`。** 发行版的那个二进制还没有在事件循环顶部调用
-安全点（`hot_tick`），也没有用 `--profile hotswap` 构建。要让它成立，还差两步：
+`tools/loment_lsp_hot_test.py` 驱动**发行版那个语言服务**（`loment/tools/lsp.lomt`）：
 
-1. `loment lsp` 的 `while go == 1` 顶部加一次调用：看一眼暂存目录，有候选就交给固定核；
-2. 发行包的 `lsp` 用 `--profile hotswap` 构建（槽表与入口闸就位）。
+1. 基线树与"投影后"的树各编一次（hotswap 档），候选由 `loment_hotart` 打出来；
+2. 起 LSP（`lsp --hot <候选路径>`），`initialize` → `didOpen` → `textDocument/definition`；
+3. 把候选**改名就位**（模拟"GitHub 那边出现了"），发一条 hover（这条还由旧代码回答）；
+4. 下一条请求之前，事件循环顶部那一眼把候选装上 —— 之后的 `definition` 由**新代码**回答。
 
-这两步都是**小改动**，但它们改变的是"发行版的行为"，不是这条线的判据 —— 所以没有塞进
-这一版：判据在这里用的是同一个固定核、同一套准入、同一份投影，只是宿主程序是一个
-最小的 LSP 形状的探针。
+旧代码给定义范围起点 `hc - 1`（第 3 列），新代码给 `hc`（第 4 列）。判据断言 3 → 4：
+**只有返回地址真的被改写、新代码真的在跑**才会变。
+
+> 为什么不用改版本字符串来证明？字符串在 `.data` 里，而**数据是共享状态**、不随候选换
+> （见 §4 第 1 条）。改一个立即数才是"代码换了"的真凭据 —— 这一条是被执行面判据逼出来的。
+
+`--hot` 只在**hotswap 档**上有意义；发行包里 `loment-lsp` 就是按那一档构建的
+（`loment_dist.TOOLS` 的第四格）。默认档的产物里固定核还在，但槽表不存在，`hot_install`
+会先认出这一点并返回 15，一个字节都不动。
 
 ## 3. 判据
 
@@ -39,13 +46,17 @@
 | `test_slot_shape_mismatch_is_refused` | 槽表条数不同 → RC 4？ |
 | `test_frame_layout_change_is_refused_by_name` | 布局变了 → 拒绝码点名槽号？ |
 | `test_call_id_change_is_refused_by_name` | id 序列变了 → 拒绝码点名槽号？ |
+| `test_a_running_lsp_replaces_itself_at_the_safe_point` | 真的 `loment lsp`：换完之后定义范围 3 → 4，索引还在？ |
 
 ## 4. 这一版**不**做到的
 
-1. **发行版 `loment lsp` 不参与热更新**（见 §2）：事件循环顶部还没有安全点调用。
+1. **候选的 `.data` 不换。** 换的是代码与数据里的绝对指针；**字符串字面量与已初始化的
+   全局量保持旧值** —— 数据是共享状态（`docs/284` §2）。所以"修一句提示文案"这种 fix
+   不属于热更新，得重启。`docs/285` 的投影只看摘要不看这一条：一个只改字符串的 fix 能
+   过准入，但装上去看不到效果 —— 这是 v1 的**语义边界**，不是 bug。
 2. ~~没有"树 → 热更新二进制"的构建步骤。~~ `tools/loment_hotart.py` 补上了：两份
    hotswap 档（旧树 + 投影树）→ 两份 `.lomhot` + 新文本 → 装载件 `candidate.hot` +
    含 artifact 的清单；`loment_hotart_test`（4 条）证明它过准入、文本就是投影树的产物。
-   **发行流程还没有调用它** —— 投影跑在哪、什么时候跑，是 workflow 的事（现由
-   `loment_projection` 手工/CI 驱动）。
+   发行流程现在会调用它，但**只在 workflow_dispatch 给了 `hot_base` 时**：投影 → 从投影树
+   打包 → 落 `loment/build/hot/` 并单独上传，**不进 dist**（发行资产一个字节不变）。
 3. **传输仍是进程外**（`docs/288` §4），命令还没挂进启动器。

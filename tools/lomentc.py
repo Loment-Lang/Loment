@@ -7427,6 +7427,8 @@ def _l05_plan(f: Func) -> None:
 
     放不下（合计 > `L05_MAX`）时**只收放得下的**，其余照旧各自 `alloca`（仍在 L0）。
     """
+    f.l05_static = {}
+    f.l05_cap = 0
     if not f.l0:
         return
     budget = L05_MAX

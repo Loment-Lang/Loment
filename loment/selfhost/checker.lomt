@@ -1566,8 +1566,8 @@ fn chk_fb_tok(src: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
     return 0;
 }
 
-/// 枚举**第一个变体**的载荷类型（`docs/296` §2.4 的形状）；不是枚举 / 第一个变体
-/// 没有载荷 -> 0。
+/// 枚举**第一个变体**的载荷类型（`docs/296` §2.4 的形状）。
+/// 不是枚举 / 第一个变体没有载荷 -> `4294967295`（形状错）；载荷是泛型形参 -> `0`（未知）。
 fn chk_fb_payload(src: ptr, t: ptr, syms: ptr, n: u32, lt: u32, tyt: ptr) -> u32 {
     if lt == 0 || chk_ty_kind(lt) != TY_K_NAMED {
         return 4294967295;                       // 不是具名类型 -> 形状错

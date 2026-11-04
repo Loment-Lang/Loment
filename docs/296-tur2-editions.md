@@ -8,7 +8,13 @@
 出厂锁，`FrontUnit.profile` / `mod.profile` / 自举 `PROF_OFF` 都记下了版次，三处出口
 （编译期提示、产物元数据、`tur_edition()`）也一起落地（§1.2）。此时同一份程序的正文与
 代码在 Tur 1 与 Tur 2 下逐字节相同，只有版次元数据按版次取值（判据在
-`loment_grammar_test`、`loment_p8_test` M87/M89）。第 2–5 项按下面的顺序推进。
+`loment_grammar_test`、`loment_p8_test` M87/M89）。
+
+**§4 第 2 项（纯糖）也已落地**：`def` / `and` / `or` / `not` / `elif` 在前门做**等长**
+改写（`potato_from._tur2_sugar` 与驱动的 `tur2_sugar` 同一张规则表），`elif` 缺的那个
+`if` 由解析器/检查器/发射器在 `profile == tur2026.2` 时补上。判据：糖版与手写基础拼法
+IR 逐字节相同（`loment_grammar_test`）、两套实现逐字节相同且能跑（p8 M90）、Tur 1 的
+同一份源仍拒收。第 3–5 项按下面的顺序推进。
 
 ## 1. 兼容法规：语法按**版次**冻结，版次按**年份族**归档
 

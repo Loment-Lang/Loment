@@ -25,6 +25,12 @@ yet). **Every `check` / `build` / `run` prints the resolved
 edition on stderr** (e.g. `grammar tur2 -> tur2026.2 (Tur 2)`); `tur_edition()` returns it at
 runtime, and `loment version <exe>` reads it back from the artifact.
 
+**Tur 2026.2** (`tur2026.2`, or the 2026 shorthand `tur2`) adds four pieces of pure sugar:
+`def f()` for `fn f()`, `a and b` / `a or b` / `not a` for `&&` / `||` / `!`, and
+`elif cond { }` for `else if cond { }`. They are syntax only in this edition and only in
+operator/declaration position - an identifier named `and` or `def` still works. Tur 1
+(`tur` / `tur2026.1` / no declaration) reads those words exactly as before.
+
 The same program can also be written with C / C++ / Java / C# / Go / Python spelling, **changing
 the spelling and nothing else** - recognised **by extension** (`.c` / `.cpp` / `.java` / `.cs` /
 `.py` / `.go`), or with an explicit declaration at the top of the file:

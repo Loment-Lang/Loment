@@ -1897,6 +1897,91 @@ def _strip_tur_mut(src: str) -> str:
     return "".join(chars)
 
 
+#: 不可能**结束**一个表达式的词。`and` / `or` 的左操作数如果落在这里，那它就是标识符
+#: （`return and` 之类），不是算子。
+_NOT_EXPR_END = frozenset((
+    "return", "if", "else", "while", "for", "in", "match", "let", "const", "fn",
+    "pub", "use", "as", "mut", "and", "or", "not", "def", "elif", "guard",
+    "capability", "excluded", "revocable", "struct", "enum", "trait", "impl",
+    "extern", "break", "continue",
+))
+
+
+def _tur2_sugar(src: str) -> str:
+    """Tur 2 的**纯糖**（`docs/296` §2.1）：`def` / `and` / `or` / `not` / `elif`。
+
+    全部是**等长**改写（`def`→`fn `、`and`→`&& `、`or`→`||`、`not`→`!  `、
+    `elif`→`else`），所以行号、列号、token 偏移一个都不动。`elif` 只改词：缺的那个
+    `if` 由解析器在 `profile` 为 Tur 2 时补上（`Parser._if_chain`）。
+
+    **只在算子/构造位置改写**（`docs/296` §1 规则 4）：这些词在名字位置仍是标识符。
+    判位置用词法 token 而不是正则 —— 字符串与注释里的同名文本不是 token。
+    `def` 只认顶层（本语言没有嵌套函数声明）。
+    """
+    import lomc  # noqa: PLC0415  (只有 Tur 2 这一支要用它)
+    try:
+        toks = lomc.lex(src)
+    except Exception:                                                # noqa: BLE001
+        return src
+
+    def _end(t) -> bool:
+        if t is None:
+            return False
+        if t.kind in ("number", "string"):
+            return True
+        if t.kind == "ident":
+            return t.val not in _NOT_EXPR_END
+        return t.kind == "punct" and t.val in (")", "]")
+
+    def _start(t) -> bool:
+        if t is None:
+            return False
+        if t.kind in ("ident", "number", "string"):
+            return True
+        return t.kind == "punct" and t.val in ("(", "!", "-")
+
+    repl = {"def": "fn ", "and": "&& ", "or": "||", "not": "!  ", "elif": "else"}
+    edits: list[tuple[int, str]] = []
+    depth = 0
+    for i, t in enumerate(toks):
+        if t.kind == "punct":
+            if t.val == "{":
+                depth += 1
+            elif t.val == "}":
+                depth -= 1
+            continue
+        if t.kind != "ident" or t.val not in repl:
+            continue
+        prev = toks[i - 1] if i > 0 else None
+        nxt = toks[i + 1] if i + 1 < len(toks) else None
+        after = toks[i + 2] if i + 2 < len(toks) else None
+        ok = False
+        if t.val == "def":
+            ok = (depth == 0 and nxt is not None and nxt.kind == "ident"
+                  and after is not None and after.kind == "punct" and after.val == "(")
+        elif t.val == "elif":
+            ok = (prev is not None and prev.kind == "punct" and prev.val == "}"
+                  and _start(nxt))
+        elif t.val in ("and", "or"):
+            ok = (_end(prev) and not (prev is not None and prev.kind == "punct"
+                                      and prev.val == ".")
+                  and _start(nxt))
+        else:  # not
+            ok = (_start(nxt)
+                  and not (prev is not None and prev.kind == "punct"
+                           and prev.val == ".")
+                  and not _end(prev))
+        if ok:
+            edits.append((t.off, repl[t.val]))
+    if not edits:
+        return src
+    chars = list(src)
+    for off, word in edits:
+        for k, ch in enumerate(word):
+            chars[off + k] = ch
+    return "".join(chars)
+
+
 def find_decl(src: str) -> tuple[bool, str | None, int]:
     """**只"找"**那一行 —— 与报错器的 `decl_at` **同一个职责**（`docs/188` §1）。
 
@@ -2198,6 +2283,9 @@ def front_door(path: Path, lang: str = "auto", mode: str = "strict") -> FrontUni
             body = strip_grammar_decl(src)
             if g in TUR_EDITIONS:
                 body = _strip_tur_mut(body)
+            if g == "tur2026.2":
+                # Tur 2 的纯糖（`docs/296` §2.1）：等长改写，行/列/偏移不动。
+                body = _tur2_sugar(body)
             # 版次记**规范名**（`tur2026.1` / `tur2026.2`）。`loment` 与没声明都是 Tur 1。
             _word = (find_decl(src)[1] or "").strip().lower() if declared else ""
             return FrontUnit("loment", body, False, path,

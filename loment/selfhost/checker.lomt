@@ -548,7 +548,9 @@ fn chk_core_dim(src: ptr, t: ptr, k: u32) -> u32 {
 ///
 /// kind 3 = punct（`codegen.runtime_needed` 判除法用的是同一个常量）。
 /// `chk_tok_is` 自己跳过 kind 2（字符串），所以 `"/"` 不会撞上字符串里的斜杠。
-fn chk_rt_site(src: ptr, t: ptr, i: u32) -> u32 {
+/// `prof` = 版次（`docs/296`）：`print_num` 只在 Tur 2 是内建，Tur 1 里同名的用户函数
+/// 不拖运行期（与参考实现 `_runtime_sites` 的 `profile` 参数同一条）。
+fn chk_rt_site(src: ptr, t: ptr, i: u32, prof: u32) -> u32 {
     if chk_tok_kind(t, i) == 3 {
         if chk_tok_is(src, t, i, "/") || chk_tok_is(src, t, i, "%") {
             return 1;
@@ -579,6 +581,10 @@ fn chk_rt_site(src: ptr, t: ptr, i: u32) -> u32 {
             return 1;
         }
         return 0;
+    }
+    // `print_num`（`docs/296` §2.7）：十进制转换在运行期那块里。
+    if prof == 1 && chk_tok_is(src, t, i, "print_num") && chk_tok_is(src, t, i + 1, "(") {
+        return 1;
     }
     return 0;
 }
@@ -1555,6 +1561,47 @@ fn chk_lh3c(v: u64) -> u32 {
 ///   - 数组字面量 -> 数组(首元素类型, 个数); 下标 -> 元素类型; 字段 -> 字段类型
 ///   - `f(...)` -> 返回类型; `x.m(...)` -> 方法返回类型; `E::V`/`E::V(x)` -> 枚举类型
 ///   - 复合类型/泛型实例/形参 T -> 0 (见 chk_ty_of_tok 与 TY_* 的说明)
+/// `x orelse d` / `x catch d` 里那个 `orelse`/`catch` 的下标（深度 0），没有回 0。
+fn chk_fb_tok(src: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+    let d: u32 = 0;
+    let k: u32 = lo;
+    while k < hi && chk_tok_kind(t, k) != 4 {
+        if chk_tok_is(src, t, k, "(") || chk_tok_is(src, t, k, "[")
+                || chk_tok_is(src, t, k, "{") {
+            d = d + 1;
+        } else if chk_tok_is(src, t, k, ")") || chk_tok_is(src, t, k, "]")
+                || chk_tok_is(src, t, k, "}") {
+            if d > 0 {
+                d = d - 1;
+            }
+        } else if d == 0 && chk_tok_kind(t, k) == 0
+                && (chk_tok_is(src, t, k, "orelse") || chk_tok_is(src, t, k, "catch")) {
+            return k;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+/// 枚举**第一个变体**的载荷类型（`docs/296` §2.4 的形状）。
+/// 不是枚举 / 第一个变体没有载荷 -> `4294967295`（形状错）；载荷是泛型形参 -> `0`（未知）。
+fn chk_fb_payload(src: ptr, t: ptr, syms: ptr, n: u32, lt: u32, tyt: ptr) -> u32 {
+    if lt == 0 || chk_ty_kind(lt) != TY_K_NAMED {
+        return 4294967295;                       // 不是具名类型 -> 形状错
+    }
+    let s0: u32 = lt % (1 << TY_KIND_SHIFT);
+    if load32(syms, s0 * 20 + 4) != K_ENUM {
+        return 4294967295;                       // 不是枚举 -> 形状错
+    }
+    let brc: u32 = load32(syms, s0 * 20 + 16);
+    let pr: u64 = chk_epayload_range(src, t, brc, brc + 1);
+    if pr == 0 {
+        return 4294967295;                       // 第一个变体没载荷 -> 形状错
+    }
+    // 0 = 载荷是**泛型形参**（`T`）：类型编码解析不出具体类型，按"未知"返回。
+    return chk_ty_range(src, t, syms, n, tyt, chk_lhlo(pr), chk_lhhi(pr));
+}
+
 fn chk_tex(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
            lh: u64, tyt: ptr, p: ptr, oc: ptr) -> u32 {
     // 诊断偏移格是**形参** oc (调用方从 tyt 块尾拿到) —— 这里再 `let oc = ...` 会把它
@@ -1576,6 +1623,33 @@ fn chk_tex(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             chk_pub(src, t, oc, p, E_Q, hi - 1);
         }
         return chk_tex(src, t, syms, n, env, envc, chk_lh(lo, hi - 1), tyt, p, oc);
+    }
+    // ---- `x orelse d` / `x catch d`（`docs/296` §2.4）：枚举的**第一个**变体是成功
+    // 那一支（预置 `Option { Some(T), None }` / `Result { Ok(T), Err(E) }` 都是这个形状）。
+    // 结果类型 = 第一个变体的载荷类型；兜底值必须是那个类型。
+    if load32(oc, 8) == 1 && hi > lo + 2 {
+        let fbk: u32 = chk_fb_tok(src, t, lo, hi);
+        if fbk != 0 {
+            let lt: u32 = chk_tex(src, t, syms, n, env, envc, chk_lh(lo, fbk), tyt, p, oc);
+            // `lt == 0` = 值那一侧的类型未知（典型是**泛型返回**：自举符号表里的返回
+            // 类型编码只认 token 级简单类型，`Option<u32>` 这一类落 0）。这一格与
+            // `match` 主体那条保守方向一致 —— 不猜，也不报假阳性；右半边照常走一遍。
+            if lt == 0 {
+                chk_tex(src, t, syms, n, env, envc, chk_lh(fbk + 1, hi), tyt, p, oc);
+                return 0;
+            }
+            let pty: u32 = chk_fb_payload(src, t, syms, n, lt, tyt);
+            if pty == 4294967295 {
+                chk_pub(src, t, oc, p, E_TMISMATCH, lo);   // 不是 Option/Result 形状
+            } else if pty != 0 {
+                let rt: u32 = chk_tex(src, t, syms, n, env, envc, chk_lh(fbk + 1, hi), tyt, p, oc);
+                if rt != 0 && chk_ty_eq(tyt, rt, pty) == 0 {
+                    chk_pub(src, t, oc, p, E_TMISMATCH, fbk + 1);
+                }
+            }
+            // `pty == 0` = 载荷是**泛型形参**（`Option<T>` 里的 `T`）—— 同上，当"未知"。
+            return pty;
+        }
     }
     // ---- 单 token 快路径
     if hi == lo + 1 {
@@ -2082,6 +2156,11 @@ fn chk_tex_atom_call(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
     let hi: u32 = chk_lhhi(lh);
     let got: u32 = chk_count_args(src, t, lo + 1);
     let bin: u32 = chk_builtin_arity(src, t, lo);
+    // `print_num`（`docs/296` §2.7）**只在 Tur 2 是内建** —— Tur 1 里它是普通标识符，
+    // 用户自己定义的 `fn print_num` 不会被顶掉。
+    if bin == 999999 && load32(oc, 8) == 1 && chk_tok_is(src, t, lo, "print_num") {
+        bin = 1;
+    }
     if bin != 999999 {
         // 内建: 元数 (参考实现另有一条 slice_len 的实参类型规则)
         if bin != got {
@@ -2097,6 +2176,11 @@ fn chk_tex_atom_call(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             if chk_tok_is(src, t, lo, "slice_len") {
                 if at != 0 && chk_ty_is_arr(tyt, at) == 0 && chk_ty_is_slc(tyt, at) == 0 {
                     chk_pub(src, t, oc, p, E_TMISMATCH, lo);   // 不是数组或切片
+                }
+            } else if chk_tok_is(src, t, lo, "print_num") {
+                // 任意整型（字面量也行）；发射时按符号扩到 i64（`docs/296` §2.7）。
+                if at != 0 && chk_ty_is_int(at) == 0 {
+                    chk_pub(src, t, oc, p, E_TMISMATCH, lo);
                 }
             } else if wt != 0 {
                 if at == 0 {
@@ -3467,10 +3551,18 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             }
         } else if chk_tok_is(src, t, j, "return") {
             let semi: u32 = chk_find_at(src, t, j + 1, e, ";");
-            let t3: u32 = chk_tex(src, t, syms, n, env, c,
-                                  ((j + 1) as u64) * 4294967296 + (semi as u64), tyt, p, oc);
-            if t3 != 0 && ret != 0 && chk_ty_eq(tyt, t3, ret) == 0 {
-                chk_pub(src, t, oc, p, E_TMISMATCH, j);
+            if semi == j + 1 {
+                // 裸 `return;`（`docs/296` §2.6）：只在 Tur 2 且函数**没有返回类型**时成立。
+                // Tur 1 / 有返回类型的函数里，参考实现是解析期就拒（E019）。
+                if load32(oc, 8) != 1 || ret != 0 {
+                    chk_pub(src, t, oc, p, E_PARSE, semi);
+                }
+            } else {
+                let t3: u32 = chk_tex(src, t, syms, n, env, c,
+                                      ((j + 1) as u64) * 4294967296 + (semi as u64), tyt, p, oc);
+                if t3 != 0 && ret != 0 && chk_ty_eq(tyt, t3, ret) == 0 {
+                    chk_pub(src, t, oc, p, E_TMISMATCH, j);
+                }
             }
             if semi <= e {
                 j = semi + 1;
@@ -3769,10 +3861,11 @@ fn chk_syntax_prepass(src: ptr, t: ptr, out: ptr, o: u32, tur2: u32) -> u32 {
         } else {
             un_run = 0;
         }
-        // 裸 `return;`（不带值）**不是合法构造** —— `loment syntax` 明说它必须带值。
+        // 裸 `return;`（不带值）：Tur 1 里**不是合法构造** —— `loment syntax` 明说它必须带值，
         // 参考实现报 E019 "期望表达式，得到 ';'"；自举侧原先**段错误、什么都不印**
-        // （issue #335）。
-        if chk_tok_kind(t, i) == 0 && chk_tok_is(src, t, i, "return")
+        // （issue #335）。Tur 2 里它在**没有返回类型**的函数里成立（`docs/296` §2.6）——
+        // 那一格要等函数的返回类型，放在 `chk_body` 的 `return` 分支里判。
+        if tur2 == 0 && chk_tok_kind(t, i) == 0 && chk_tok_is(src, t, i, "return")
                 && chk_tok_is(src, t, i + 1, ";") {
             o = sym_pub(src, t, out, o, E_PARSE, i + 1);
         }
@@ -4210,7 +4303,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
         let hit: u32 = 4294967295;
         let nsites: u32 = 0;
         while chk_tok_kind(t, jr) != 4 {
-            if chk_rt_site(src, t, jr) == 1 {
+            if chk_rt_site(src, t, jr, load32(oc, 8)) == 1 {
                 if nsites == 0 {
                     hit = jr;
                 }
@@ -4308,9 +4401,16 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                         o = sym_pub(src, t, out, o, E_EXCL, i);
                     }
                     let want_b: u32 = chk_builtin_arity(src, t, i);
-                    if want_b != 999999 {
+                    let wb2: u32 = want_b;
+                    // `print_num` 只在 Tur 2 是内建（`docs/296` §2.7）—— 这一趟与
+                    // `chk_tex_atom_call` 是两条路，漏一处就会在 Tur 2 里多报一条 E002。
+                    if wb2 == 999999 && load32(oc, 8) == 1
+                            && chk_tok_is(src, t, i, "print_num") {
+                        wb2 = 1;
+                    }
+                    if wb2 != 999999 {
                         // 内建: 只查实参个数 (形参类型那一半属于表达式类型批次)
-                        if want_b != chk_count_args(src, t, i + 1) {
+                        if wb2 != chk_count_args(src, t, i + 1) {
                             o = sym_pub(src, t, out, o, E_ARITY, i);
                         }
                     } else {

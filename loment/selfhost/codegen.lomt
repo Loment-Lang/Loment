@@ -3895,6 +3895,61 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
             }
             return k12 + 1;
         }
+        if load32(s, CG_PROF) == 1 && tok_is(src, toks, j, "print_num") {
+            // `docs/296` §2.7：实参按它**自己的类型**求值，再按符号扩到 i64 —— 与参考实现
+            // `lomentc._Ir.builtin` 那一支同序（先求值，再 zext/sext，最后一条 call）。
+            let at: u32 = expr_type(s, src, toks, j + 2);
+            let kp: u32 = expr_bin(s, out, src, toks, j + 2, 1, lvl, 0);
+            let widen: u32 = 0;          // 0 = 已是 64 位, 1 = zext, 2 = sext
+            let wty: u32 = 0;            // 扩之前的类型 token; 0 = 字面量 (i32)
+            if at == 0 {
+                // 无类型：**单个字面量**落 i32（有符号），**其余**落 u32 —— 与参考实现
+                // `expr(IntLit, None)` / `Bin` 的 `want or "u32"` 同一条分界。
+                if nat_is_literal(src, toks, j + 2) == 1 {
+                    widen = 2;
+                } else {
+                    widen = 1;
+                }
+            } else if at == CG_WANT_U32 {
+                widen = 1;
+            } else if at < 2147483648 {
+                if tok_is(src, toks, at, "u8") || tok_is(src, toks, at, "u16")
+                        || tok_is(src, toks, at, "u32") {
+                    widen = 1;
+                    wty = at;
+                } else if tok_is(src, toks, at, "i8") || tok_is(src, toks, at, "i16")
+                        || tok_is(src, toks, at, "i32") {
+                    widen = 2;
+                    wty = at;
+                }
+            }
+            if widen == 1 || widen == 2 {
+                emit_str(s, out, "  ");
+                let wv: u32 = new_temp(s, out);
+                emit_str(s, out, " = ");
+                if widen == 1 {
+                    emit_str(s, out, "zext ");
+                } else {
+                    emit_str(s, out, "sext ");
+                }
+                if wty == 0 {
+                    emit_str(s, out, "i32");
+                } else {
+                    emit_ty(s, out, src, toks, wty);
+                }
+                emit_str(s, out, " ");
+                emit_val(s, out, lvl);
+                emit_str(s, out, " to i64\n");
+                set_temp_val(s, lvl, wv);
+            }
+            emit_str(s, out, "  ");
+            let rr2: u32 = new_temp(s, out);
+            emit_str(s, out, " = call i32 @__loment_print_num(i64 ");
+            emit_val(s, out, lvl);
+            emit_str(s, out, ")\n");
+            set_temp_val(s, lvl, rr2);
+            return kp;
+        }
         if tok_is(src, toks, j, "print") {   // 写 stdout: write(1, ptr, len)
             let kp: u32 = arg1(s, out, src, toks, j + 2, lvl);
             emit_str(s, out, "  ");
@@ -5152,6 +5207,30 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
 /// `for x in xs` 的下标自增。**体尾与 `continue` 共用这一份**（`docs/296` §2.5）：
 /// 参考实现把它放在反糖出的 `While.step` 里，`continue` 先跑它再回条件 —— 分叉写两份
 /// 必然有一份漂。`fi` = 合成下标编号（`__tur2_i.N` 的 N）。
+/// 表达式是不是**单个字面量**（可带负号/括号）—— `print_num` 的无类型实参靠它分
+/// i32（字面量）与 u32（其余）。与参考实现 `expr(IntLit, None)` 那条分界同义。
+fn nat_is_literal(src: ptr, toks: ptr, j: u32) -> u32 {
+    let k: u32 = j;
+    while tok_is(src, toks, k, "(") {
+        k = k + 1;
+    }
+    if tok_is(src, toks, k, "-") {
+        k = k + 1;
+    }
+    if tok_kind(toks, k) != 1 {
+        return 0;
+    }
+    k = k + 1;
+    while tok_is(src, toks, k, ")") {
+        k = k + 1;
+    }
+    if tok_is(src, toks, k, ",") || tok_is(src, toks, k, ")") || tok_is(src, toks, k, ";")
+            || tok_kind(toks, k) == 4 {
+        return 1;
+    }
+    return 0;
+}
+
 fn fi_step(s: ptr, out: ptr, fi: u32) -> u32 {
     emit_str(s, out, "  ");
     let iv: u32 = new_temp(s, out);
@@ -5454,6 +5533,116 @@ fn load_var(s: ptr, out: ptr, src: ptr, toks: ptr, name_tok: u32, lvl: u32) -> u
 ///   let __t{line}: <rt> = e;   let x: T;
 ///   match __t{line} { Ok(__v{line}) => { x = __v{line}; }  Err(__e{line}) => { return Err(__e{line}); } }
 /// 标签与临时编号都按同一顺序占号, 所以直发即可 (不重建 AST)。
+/// `x orelse d` / `x catch d` 里那个词的下标（深度 0，遇 `;` `,` `)` `}` 停），没有回 0。
+fn fb_tok(s: ptr, src: ptr, toks: ptr, at: u32) -> u32 {
+    let d: u32 = 0;
+    let k: u32 = at;
+    while tok_kind(toks, k) != 4 {
+        if tok_is(src, toks, k, "(") || tok_is(src, toks, k, "[")
+                || tok_is(src, toks, k, "{") {
+            d = d + 1;
+        } else if tok_is(src, toks, k, ")") || tok_is(src, toks, k, "]")
+                || tok_is(src, toks, k, "}") || tok_is(src, toks, k, ";")
+                || tok_is(src, toks, k, ",") {
+            if d == 0 {
+                return 0;
+            }
+            d = d - 1;
+        } else if d == 0 && tok_kind(toks, k) == 0
+                && (tok_is(src, toks, k, "orelse") || tok_is(src, toks, k, "catch")) {
+            return k;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+/// `let x: T = v orelse d;` / `x = v orelse d;`（`docs/296` §2.4）。
+///
+/// 与参考实现 `_fallback_expr` **同序**：先求枚举值 → `extractvalue` 取 tag → `switch`
+/// （默认落兜底块、`i32 0` 落成功块）→ 成功块取载荷并按需 `trunc` → 兜底块求 `d` →
+/// 合流块 `phi` → `store`。成功变体是枚举的**第一个**变体（预置 Option/Result 都是这个
+/// 形状）。返回 `;` 之后的下标。
+fn emit_fallback(s: ptr, out: ptr, src: ptr, toks: ptr, name_tok: u32, val_at: u32,
+                 fb_at: u32) -> u32 {
+    let sty: u32 = expr_type(s, src, toks, val_at);
+    // 泛型实例（`Option<u32>`）的载荷类型靠**类型实参替换**解出来 —— 与 `let x: P<u32>`
+    // 那条同一个机制（`push_ty_subst` 读类型名后面的 `<…>`）。
+    let ssub: u32 = push_ty_subst(s, src, toks, sty);
+    let ei: u32 = find_enum(s, src, toks, sty);
+    let pty: u32 = 0;
+    if ei != 4294967295 {
+        pty = enum_payload_type(s, src, toks, ei, 0);
+    }
+    pop_subst(s, ssub);
+    if pty == 0 {
+        let _cf: u32 = cg_fail(s, 2, fb_at);
+        return fb_at + 1;
+    }
+    let lv: u32 = 0;
+    let _vend: u32 = expr_bin(s, out, src, toks, val_at, 1, lv, 0);
+    emit_str(s, out, "  ");
+    let tag: u32 = new_temp(s, out);
+    emit_str(s, out, " = extractvalue { i32, i64 } ");
+    emit_val(s, out, lv);
+    emit_str(s, out, ", 0\n");
+    let su: u32 = load32(s, 480) + 1;
+    store32(s, 480, su + 2);
+    emit_str(s, out, "  switch i32 %t");
+    emit_dec(s, out, tag);
+    emit_str(s, out, ", label ");
+    lab_ref(s, out, su + 1, "fbbad");
+    emit_str(s, out, " [\n      i32 0, label ");
+    lab_ref(s, out, su, "fbok");
+    emit_str(s, out, "\n    ]\n");
+    store32(s, 476, 1);
+    lab_def(s, out, su, "fbok");
+    emit_str(s, out, "  ");
+    let raw: u32 = new_temp(s, out);
+    emit_str(s, out, " = extractvalue { i32, i64 } ");
+    emit_val(s, out, lv);
+    emit_str(s, out, ", 1\n");
+    if ty_bits(src, toks, pty) >= 64 {
+        set_temp_val(s, lv, raw);
+    } else {
+        emit_str(s, out, "  ");
+        let tr: u32 = new_temp(s, out);
+        emit_str(s, out, " = trunc i64 %t");
+        emit_dec(s, out, raw);
+        emit_str(s, out, " to ");
+        emit_ty(s, out, src, toks, pty);
+        emit_str(s, out, "\n");
+        set_temp_val(s, lv, tr);
+    }
+    jump(s, out, su + 2, "fbend");
+    lab_def(s, out, su + 1, "fbbad");
+    let semi: u32 = operand_end(s, src, toks, fb_at + 1);
+    let _dv: u32 = expr_bin(s, out, src, toks, fb_at + 1, 1, lv + 1, pty);
+    jump(s, out, su + 2, "fbend");
+    lab_def(s, out, su + 2, "fbend");
+    emit_str(s, out, "  ");
+    let r: u32 = new_temp(s, out);
+    emit_str(s, out, " = phi ");
+    emit_ty(s, out, src, toks, pty);
+    emit_str(s, out, " [ ");
+    emit_val(s, out, lv);
+    emit_str(s, out, ", ");
+    lab_ref(s, out, su, "fbok");
+    emit_str(s, out, " ], [ ");
+    emit_val(s, out, lv + 1);
+    emit_str(s, out, ", ");
+    lab_ref(s, out, su + 1, "fbbad");
+    emit_str(s, out, " ]\n");
+    emit_str(s, out, "  store ");
+    emit_ty(s, out, src, toks, pty);
+    emit_str(s, out, " %t");
+    emit_dec(s, out, r);
+    emit_str(s, out, ", ptr %");
+    emit_name_tok(s, out, src, toks, name_tok);
+    emit_str(s, out, ".addr\n");
+    return semi + 1;
+}
+
 fn emit_try_let(s: ptr, out: ptr, src: ptr, toks: ptr, name: u32, ty: u32, eq: u32, lt: u32) -> u32 {
     let ln: u32 = load32(toks, lt * 20 + 12);
     let rtt: u32 = expr_type(s, src, toks, eq + 1);
@@ -5751,6 +5940,18 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         }
         return j + 2;                      // 跳过 `;`
     }
+    if load32(s, CG_PROF) == 1 && tok_is(src, toks, j, "return")
+            && tok_is(src, toks, j + 1, ";") {
+        // 裸 `return;`（`docs/296` §2.6）：函数没有返回类型（检查器已经核过）。退出路径与
+        // 带值那条同序 —— L1 该还的还、`gc_auto` 的根表该退的退 —— 只是 `ret void`。
+        emit_l1(s, out, src, toks, 1, j, ret_end(src, toks, j, load32(s, 568)));
+        if gc_any(s) == 1 {
+            roots_pop(s, out);
+        }
+        emit_str(s, out, "  ret void\n");
+        store32(s, 476, 1);
+        return j + 2;
+    }
     if tok_is(src, toks, j, "return") {
         // `return Result::Ok(v)` 里的枚举名是**泛型基名**, 实例要靠函数返回类型解析
         // (镜像 lomentc._fix_generic_literals 对 Return 分支做的 e.expr.enum = f.ret)。
@@ -5792,6 +5993,13 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         if qp != 0 {
             emit_try_let(s, out, src, toks, name, ty, eq, j);
             return qp + 2;
+        }
+        // `let x: T = v orelse d;` / `... catch d;`（`docs/296` §2.4）
+        if load32(s, CG_PROF) == 1 {
+            let fbk: u32 = fb_tok(s, src, toks, eq + 1);
+            if fbk != 0 {
+                return emit_fallback(s, out, src, toks, name, eq + 1, fbk);
+            }
         }
         // `let p: Pair<u32>` 的类型实参: 先推入替换, 再处理右侧 (字面量分支也要在表内)
         let lsub: u32 = push_ty_subst(s, src, toks, ty);
@@ -6532,6 +6740,13 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
     }
     // 赋值: NAME = EXPR ;
     if tok_kind(toks, j) == 0 && tok_is(src, toks, j + 1, "=") {
+        // `x = v orelse d;` / `... catch d;`（`docs/296` §2.4）
+        if load32(s, CG_PROF) == 1 {
+            let fbk: u32 = fb_tok(s, src, toks, j + 2);
+            if fbk != 0 {
+                return emit_fallback(s, out, src, toks, j, j + 2, fbk);
+            }
+        }
         let ty2: u32 = var_type(s, src, toks, j);
         let e5: u32 = expr_bin(s, out, src, toks, j + 2, 1, 0, ty2);
         emit_str(s, out, "  store ");
@@ -8889,7 +9104,35 @@ fn emit_runtime(s: ptr, out: ptr) -> u32 {
     emit_str(s, out, "\n; ---- Loment freestanding 运行时 (M31: 无 libc) ----\ndefine internal i32 @__loment_memcmp(ptr %a, ptr %b, i64 %n) {\nentry:\n  br label %loop\nloop:\n  %i = phi i64 [ 0, %entry ], [ %i1, %cont ]\n  %done = icmp uge i64 %i, %n\n  br i1 %done, label %eq, label %body\nbody:\n  %pa = getelementptr i8, ptr %a, i64 %i\n  %pb = getelementptr i8, ptr %b, i64 %i\n  %ca = load i8, ptr %pa\n  %cb = load i8, ptr %pb\n  %ne = icmp ne i8 %ca, %cb\n  br i1 %ne, label %diff, label %cont\ncont:\n  %i1 = add i64 %i, 1\n  br label %loop\ndiff:\n  %da = zext i8 %ca to i32\n  %db = zext i8 %cb to i32\n  %r = sub i32 %da, %db\n  ret i32 %r\neq:\n  ret i32 0\n}\n\n");
     emit_str(s, out, "define internal void @__loment_memset(ptr %p, i8 %v, i64 %n) {\nentry:\n  br label %loop\nloop:\n  %i = phi i64 [ 0, %entry ], [ %i1, %body ]\n  %done = icmp uge i64 %i, %n\n  br i1 %done, label %end, label %body\nbody:\n  %q = getelementptr i8, ptr %p, i64 %i\n  store i8 %v, ptr %q\n  %i1 = add i64 %i, 1\n  br label %loop\nend:\n  ret void\n}\n\n");
     emit_str(s, out, "define internal void @__loment_memcpy(ptr %d, ptr %s, i64 %n) {\nentry:\n  br label %loop\nloop:\n  %i = phi i64 [ 0, %entry ], [ %i1, %body ]\n  %done = icmp uge i64 %i, %n\n  br i1 %done, label %end, label %body\nbody:\n  %sp = getelementptr i8, ptr %s, i64 %i\n  %b = load i8, ptr %sp\n  %dp = getelementptr i8, ptr %d, i64 %i\n  store i8 %b, ptr %dp\n  %i1 = add i64 %i, 1\n  br label %loop\nend:\n  ret void\n}\n\n");
-    return emit_str(s, out, "define internal void @__loment_abort() {\n  call void @llvm.trap()\n  unreachable\n}\n\ndeclare void @llvm.trap()\n\n");
+    emit_str(s, out, "define internal void @__loment_abort() {\n  call void @llvm.trap()\n  unreachable\n}\n\ndeclare void @llvm.trap()\n\n");
+    return 0;
+}
+
+/// 这份单元**调用**了 `print_num` 吗（`docs/296` §2.7）：它的实现带一句 x86 的
+/// `syscall` asm，不能并进目标无关的运行期块（aarch64 交叉编译会当非法汇编拒掉），
+/// 所以单独发。判据与参考实现 `"@__loment_print_num" in text_all` 同义 —— 只有真调用
+/// 才会产生那条 `call`；`fn print_num(` 是声明，不算。
+fn uses_print_num(s: ptr, src: ptr, toks: ptr) -> u32 {
+    if load32(s, CG_PROF) != 1 {
+        return 0;
+    }
+    let i: u32 = 0;
+    while tok_kind(toks, i) != 4 {
+        if tok_is(src, toks, i, "print_num") && tok_is(src, toks, i + 1, "(") {
+            if !(i > 0 && tok_is(src, toks, i - 1, "fn")) {
+                return 1;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// `print_num` 的实现（`docs/296` §2.7）：24 字节栈缓冲、一次 `write`。
+/// **单独发**（不在 `emit_runtime` 里）：它带一句 x86 的 `syscall` asm，目标无关的
+/// 运行期块收不下它（aarch64 交叉编译会当非法汇编拒掉）。
+fn emit_print_num(s: ptr, out: ptr) -> u32 {
+    return emit_str(s, out, "define internal i32 @__loment_print_num(i64 %v) {\nentry:\n  %buf = alloca [24 x i8]\n  %neg = icmp slt i64 %v, 0\n  br i1 %neg, label %negp, label %pos\nnegp:\n  %m0 = sub i64 0, %v\n  br label %conv\npos:\n  br label %conv\nconv:\n  %m = phi i64 [ %m0, %negp ], [ %v, %pos ]\n  %end0 = getelementptr inbounds [24 x i8], ptr %buf, i64 0, i64 24\n  br label %loop\nloop:\n  %p = phi ptr [ %end0, %conv ], [ %p2, %loop ]\n  %x = phi i64 [ %m, %conv ], [ %q, %loop ]\n  %d = urem i64 %x, 10\n  %q = udiv i64 %x, 10\n  %c = trunc i64 %d to i8\n  %c2 = add i8 %c, 48\n  %pi = ptrtoint ptr %p to i64\n  %pj = sub i64 %pi, 1\n  %p2 = inttoptr i64 %pj to ptr\n  store i8 %c2, ptr %p2\n  %done = icmp eq i64 %q, 0\n  br i1 %done, label %after, label %loop\nafter:\n  br i1 %neg, label %sign, label %wr\nsign:\n  %si = ptrtoint ptr %p2 to i64\n  %sj = sub i64 %si, 1\n  %p3 = inttoptr i64 %sj to ptr\n  store i8 45, ptr %p3\n  br label %wr\nwr:\n  %st = phi ptr [ %p2, %after ], [ %p3, %sign ]\n  %sp = ptrtoint ptr %st to i64\n  %ep = ptrtoint ptr %end0 to i64\n  %ln = sub i64 %ep, %sp\n  %r = call i64 asm sideeffect \"syscall\", \"={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}\"(i64 1, i64 1, i64 %sp, i64 %ln)\n  %t = trunc i64 %r to i32\n  ret i32 %t\n}\n\n");
 }
 
 /// 预扫描: 源码里出现过 `/` `%` 运算符 (kind=3 且文本为单字符), 或 `alloc` / `panic`
@@ -8933,6 +9176,12 @@ fn runtime_needed(s: ptr, src: ptr, toks: ptr) -> u32 {
                 || tok_is(src, toks, i, "str_eq") || tok_is(src, toks, i, "str_concat")
                 || tok_is(src, toks, i, "free")
                 || tok_is(src, toks, i, "guard")) {
+            hit = 1;
+        }
+        // `print_num` **只在 Tur 2 是内建**（`docs/296` §2.7）：Tur 1 里同名的用户函数
+        // 不引用运行期，带上它就是多一份块、与参考实现分叉。
+        if load32(s, CG_PROF) == 1 && tok_kind(toks, i) == 0
+                && tok_is(src, toks, i, "print_num") {
             hit = 1;
         }
         if hit == 1 && tok_is(src, toks, i, "alloc") && alloc_is_promoted(s, src, toks, i) == 1 {
@@ -9480,6 +9729,11 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32) -> u32 {
     emit_str(s, out, "\n");
     if load32(s, 512) == 1 {
         emit_runtime(s, out);
+        // `print_num` 的实现**单独发**（`docs/296` §2.7）：那句 x86 的 `syscall` asm
+        // 不能进目标无关的运行期块（aarch64 交叉编译会当非法汇编拒掉）。
+        if uses_print_num(s, src, toks) == 1 {
+            emit_print_num(s, out);
+        }
     }
     if contains_ident(src, toks, "guard") == 1 {   // P4/M38: 审计计数全局
         emit_str(s, out, "@__loment_audit = internal global [16 x i64] zeroinitializer\n\n");

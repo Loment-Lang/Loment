@@ -25,11 +25,26 @@ yet). **Every `check` / `build` / `run` prints the resolved
 edition on stderr** (e.g. `grammar tur2 -> tur2026.2 (Tur 2)`); `tur_edition()` returns it at
 runtime, and `loment version <exe>` reads it back from the artifact.
 
-**Tur 2026.2** (`tur2026.2`, or the 2026 shorthand `tur2`) adds four pieces of pure sugar:
-`def f()` for `fn f()`, `a and b` / `a or b` / `not a` for `&&` / `||` / `!`, and
-`elif cond { }` for `else if cond { }`. They are syntax only in this edition and only in
-operator/declaration position - an identifier named `and` or `def` still works. Tur 1
-(`tur` / `tur2026.1` / no declaration) reads those words exactly as before.
+**Tur 2026.2** (`tur2026.2`, or the 2026 shorthand `tur2`) adds, beyond the pure sugar
+(`def f()` for `fn f()`, `a and b` / `a or b` / `not a`, `elif cond { }`). The block below
+is a **line-per-construct list**, not one compilable unit; the runnable versions are the
+`loment_p8_test` criteria M91 (loops), M94 (bare `return;`, `print_num`) and M95
+(`orelse` / `catch`), specified in `docs/296` §2.
+
+<!-- no-compile: 逐条语法片段；可跑的见 p8 M91/M94/M95 -->
+```rust
+for x in xs { ... }            // named array / slice; `x` is a copy of each element
+while go { if done { break; } if skip { continue; } ... }
+fn early(n: u32) { if n > 3 { return; } ... }      // bare `return;`, unit functions only
+let a: u32 = maybe orelse 0;   // first enum variant = success (`Option`: Some/None)
+let b: u32 = risky() catch 0;  // same shape (`Result`: Ok/Err); fallback is lazy
+print_num(n);                  // decimal, no newline; any integer, widened to i64
+```
+
+`print_num` lives in the runtime block, so it needs `choose runtime` (the default
+`no_runtime` refuses it by name, E31). All of these are **Tur 2 only** - Tur 1 keeps reading
+`break`, `orelse`, `print_num` and friends as ordinary identifiers, so old files keep their
+meaning. (Not in this edition yet: `defer`.)
 
 The same program can also be written with C / C++ / Java / C# / Go / Python spelling, **changing
 the spelling and nothing else** - recognised **by extension** (`.c` / `.cpp` / `.java` / `.cs` /

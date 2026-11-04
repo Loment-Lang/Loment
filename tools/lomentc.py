@@ -3482,6 +3482,29 @@ def _check_borrows(args: list, line: int, errs: list[str]) -> None:
                 errs.append(f"{line}: 变量 {name} 被可变借用两次 (不允许别名)")
 
 
+def _is_int_const(e) -> bool:
+    """**整型常量表达式**：只由整数字面量与整型算子组成（issue #703）。
+
+    `expr_type` 对整数字面量返回 `None`（"由上下文定宽"），所以**全是字面量的算式**也返回
+    `None`。`as` 那一格要问的是"这个操作数**是不是整型**" —— `(1 + 1)` 当然是，判 `None`
+    就把它当成"不知道类型"，于是 `(1 << 20) as u64` 被说成"不是整型"，而同一式子带一个
+    变量就放行。自举侧（`checker.lomt` 同处按 `chk_ty_is_int`）一直放行它，所以那还是
+    一处**孪生分歧**：同一份源一个实现能编、另一个拒，而且报文说的是假的理由。
+
+    **只对 `as` 那一格用它**，不动 `expr_type` 本身：`expr_type` 返回 `None` 有它自己的
+    用处（绑定、实参按上下文定宽），在那儿硬塞一个宽度会让 `let x: u64 = (1 + 1) * 大数`
+    这类式子走错路。
+    """
+    if isinstance(e, IntLit):
+        return True
+    if isinstance(e, Un):
+        return e.op == "-" and _is_int_const(e.expr)
+    if isinstance(e, Bin):
+        return (e.op in ("+", "-", "*", "/", "%", "<<", ">>", "&", "|", "^")
+                and _is_int_const(e.left) and _is_int_const(e.right))
+    return False
+
+
 def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[str, Struct],
                errs: list[str], enums: dict[str, EnumDecl] | None = None) -> None:
     """结构性问题 (未声明变量 / 未知函数 / 结构体字段 / 枚举变体) 的递归报告。
@@ -3525,11 +3548,16 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
             return
         if e.type == "ptr" and st in INT_TYPES:  # M83: 整数 -> 指针 (brk/mmap 取内存)
             return
-        if st is None and isinstance(e.expr, IntLit):  # 整型字面量按目标定宽
+        if st is None and _is_int_const(e.expr):  # 整型字面量/常量式按目标定宽
             # `ptr` 也算: 字面量的类型是 None, 所以上面那条 `e.type == "ptr" and st in
             # INT_TYPES` 够不着它 —— 于是 `0 as ptr`(空指针的惯用写法) 被当成非法目标。
             # 镜那边 (selfhost/checker.lomt, 同处按 `chk_ty_is_int`) 一直是放行的, 于是
             # 同一份源码**参考报错、打包版能编**。2026-09-15 由 lompi 的 `0 as ptr` 实测抓到。
+            #
+            # **`_is_int_const` 而不是 `IntLit`**（issue #703）：全是字面量的算式
+            # （`(1 + 1)`、`(1 << 20)`、`(3 * 1024)`）也是整型，可 `expr_type` 按
+            # "字面量由上下文定宽"给的是 `None` —— 于是 `as` 把它们说成"不是整型"，
+            # 而同一式子带一个变量就放行。自举侧一直放行，那是一处**孪生分歧**。
             if e.type not in INT_TYPES and e.type != "ptr":
                 errs.append(f"{e.line}: as 目标类型非法 {e.type}")
             return

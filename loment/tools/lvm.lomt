@@ -279,16 +279,20 @@ fn fail_tok(a: ptr, msg: str, off: u32, len: u32) -> u32 {
     return die(2);
 }
 
-//: 读整个文件进 dst，返回读到的字节数（0 = 打不开）。
+//: 读整个文件进 dst，返回读到的字节数；**打不开回 -1**（`#718`）。
 //: 用 `open`(2) 而不是 `openat`(257)：前者参数少一格，`syscall4` 正好装得下。
-fn read_file(path: ptr, dst: ptr, cap: u64) -> u64 {
+//:
+//: **0 是一个合法的字节数**（空文件），不能兼作错误码。从前两者共用 0，于是一份 0 字节的
+//: IR 被报成"读不了输入" —— 它读得了，只是里面没有 `_start`（同一条路径上 T0/T2 一直报对，
+//: 差别就在这句判断）。错误码要**分开**：那是"读不到"与"读到了、是空的"两件事。
+fn read_file(path: ptr, dst: ptr, cap: u64) -> i64 {
     let fd: i64 = syscall4(2, path as u64, 0, 0);
     if fd < 0 {
-        return 0;
+        return 0 - 1;
     }
     let got: u64 = read_all(fd as u64, dst, cap);
     syscall4(3, fd as u64, 0, 0);
-    return got;
+    return got as i64;
 }
 
 fn cstr(dst: ptr, s: str) -> ptr {
@@ -3818,8 +3822,8 @@ fn run(a: ptr) -> u32 {
     ctx_set(a, C_ARG0, hi32(f1));
     ctx_set(a, C_ARG0N, lo32(f1) + 1);
     // 路径就在 argv 缓冲里（NUL 结尾），而那个缓冲在输入区**之外** —— 直接用它。
-    let n: u64 = read_file(ptr_add(ab, hi32(f1)), a, SRCCAP as u64);
-    if n == 0 {
+    let n: i64 = read_file(ptr_add(ab, hi32(f1)), a, SRCCAP as u64);
+    if n < 0 {
         return fail("读不了输入");
     }
     // T1（`docs/247`）：第二个实参（有的话）= 剖面写到哪个文件。**不给就不记**。

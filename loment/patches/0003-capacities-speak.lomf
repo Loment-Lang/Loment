@@ -42,7 +42,9 @@ new <<<
     // 等价的写法，但把 `SLOT` **写在比较里**：容量盘点（`tools/loment_caps.py`）认的是
     // "容量名出现在一条序关系比较里"，`raw_n >= sunit` 里那个名字被别名藏起来了。
     if raw_n + 44224 as u64 >= SLOT as u64 {
-        return fail("this source file is 480 KiB or larger -- the per-file slot cannot hold it (its tail keeps this file's path and use lists), and cutting it short yields parse errors unrelated to where it was cut: split the facade") as u64;
+        let dmsg: str = "this source file is 480 KiB or larger -- the per-file slot cannot hold it (its tail keeps this file's path and use lists), and cutting it short yields parse errors unrelated to where it was cut: split the facade";
+        wdiag_at(diagfd(scr), scr, path, n, 0, 999, str_ptr(dmsg), str_len(dmsg));
+        return fail(dmsg) as u64;
     }
     let nb: u32 = strip_cr(slot, raw_n as u32);
 >>>
@@ -65,7 +67,9 @@ fn subdirs_of(dirp: ptr, dl: u32, dst: ptr, scr: ptr) -> u32 {
     // 会去 `openat` 一个不存在的目录，用户看到的是"这个 `use` 找不到"（`docs/188` 的
     // "宁拒勿猜"：宁可报错，也不要让一个截断过的输入伪装成一个查无此物）。
     if dl >= DIR_CAP - 1 {
-        return fail("a directory path is longer than 1024 bytes (the project root / tool dir / version-name limit) -- move the project closer to the filesystem root");
+        let dmsg: str = "a directory path is longer than 1024 bytes (the project root / tool dir / version-name limit) -- move the project closer to the filesystem root";
+        wdiag_at(diagfd(scr), scr, 0 as ptr, 0, 0, 999, str_ptr(dmsg), str_len(dmsg));
+        return fail(dmsg);
     }
     let i: u32 = 0;
     while i < dl && i < DIR_CAP - 1 {
@@ -93,7 +97,9 @@ new <<<
     // 循环是三个条件里哪一个停的？**`e` 撞上沿**就是路径被截断 —— 那时下面这次 `openat`
     // 找的是一个不存在的路径，而调用方只知道"这个名字不是目录"（`#345` 的 (a)）。
     if e >= SUBP_CAP - 1 && load8(dent, nm + j) != 0 {
-        return fail("a subpath is longer than 1472 bytes (one slot per source level) -- shorten the path");
+        let dmsg: str = "a subpath is longer than 1472 bytes (one slot per source level) -- shorten the path";
+        wdiag_at(diagfd(scr), scr, 0 as ptr, 0, 0, 999, str_ptr(dmsg), str_len(dmsg));
+        return fail(dmsg);
     }
     store8(w, e, 0 as u8);
 >>>
@@ -122,7 +128,9 @@ new <<<
     // 同 `SUBP_CAP` 那条：`q` 撞上沿而字符串里还有字节 ⇒ 后缀被截断（`#345` 的 (a)）。
     // 静默截断的后果比"配错了"更难查：截出来的后缀**可能正好又叫中另一个词法档**。
     if q >= EXT_CAP - 1 && q < sl - 2 {
-        return fail("the source extension in loment.conf is longer than 256 bytes");
+        let dmsg: str = "the source extension in loment.conf is longer than 256 bytes";
+        wdiag_at(diagfd(scr), scr, 0 as ptr, 0, 0, 999, str_ptr(dmsg), str_len(dmsg));
+        return fail(dmsg);
     }
     store8(dst, q, 0 as u8);
 >>>

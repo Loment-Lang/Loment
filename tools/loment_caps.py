@@ -220,6 +220,10 @@ EXPLAINED: dict[tuple[str, str], str] = {
         "sha256 摘要的字节数（32），循环上界由算法定",
     ("loment/lib/hotswap.lomt", "HOT_MAX_FN"):
         "槽表条数上限（4096）；越界返回 4，调用方按**返回码**点名",
+    ("loment/lib/hotswap.lomt", "HOT_READ_MAX"):
+        "安全点读候选的缓冲上限（8 MiB）：到界即停、不写穿；装进来的是一份**截断**的"
+        "装载件，`hot_install` 的头长/摘要/重定位检查会拒掉它并按返回码点名 —— "
+        "拒绝的那句话在调用方（`hotupdate` 打 `update refused: <code>`）",
 }
 
 #: 字面量上界 / 定长数组的逐条来路。键是 `(文件, literal:<N>)` / `(文件, array:[T;N])`。

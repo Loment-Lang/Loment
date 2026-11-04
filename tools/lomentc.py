@@ -1352,6 +1352,9 @@ def _rename_self(stmts: list) -> None:
                 rx(fe)
         elif isinstance(e, EnumCtor):
             rx(e.arg)
+        elif isinstance(e, Fallback):
+            rx(e.value)
+            rx(e.default)
         elif isinstance(e, Cast):
             rx(e.expr)
 
@@ -3182,6 +3185,9 @@ def _mono_expr(e, scope, generics, insts, structs, enums) -> None:
             _mono_expr(fe, scope, generics, insts, structs, enums)
     elif isinstance(e, EnumCtor):
         _mono_expr(e.arg, scope, generics, insts, structs, enums)
+    elif isinstance(e, Fallback):
+        _mono_expr(e.value, scope, generics, insts, structs, enums)
+        _mono_expr(e.default, scope, generics, insts, structs, enums)
 
 
 def _mono_stmts(stmts, scope, generics, insts, structs, enums) -> None:
@@ -5477,6 +5483,9 @@ def _move_check(f: Func, funcs: dict, structs: dict, enums: dict,
                 use(fe)
         elif isinstance(e, EnumCtor):
             use(e.arg)
+        elif isinstance(e, Fallback):
+            use(e.value)
+            use(e.default)
 
     def walk(stmts, sc: dict) -> None:
         for s in stmts:

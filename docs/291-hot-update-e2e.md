@@ -57,6 +57,6 @@
 2. ~~没有"树 → 热更新二进制"的构建步骤。~~ `tools/loment_hotart.py` 补上了：两份
    hotswap 档（旧树 + 投影树）→ 两份 `.lomhot` + 新文本 → 装载件 `candidate.hot` +
    含 artifact 的清单；`loment_hotart_test`（4 条）证明它过准入、文本就是投影树的产物。
-   **发行流程还没有调用它** —— 投影跑在哪、什么时候跑，是 workflow 的事（现由
-   `loment_projection` 手工/CI 驱动）。
+   发行流程现在会调用它，但**只在 workflow_dispatch 给了 `hot_base` 时**：投影 → 从投影树
+   打包 → 落 `loment/build/hot/` 并单独上传，**不进 dist**（发行资产一个字节不变）。
 3. **传输仍是进程外**（`docs/288` §4），命令还没挂进启动器。

@@ -107,6 +107,18 @@ const CG_ERR: u32 = 592;
 const CG_ERRTOK: u32 = 596;
 // 版次（`docs/296` §2.1）：Tur 2 的 `else <条件> {` 是隐式 elif。
 const CG_PROF: u32 = 600;
+// 当前函数体的起点（合成名编号要按"函数内词法顺序"数，`docs/296` §2.2）。
+const CG_BODY0: u32 = 604;
+// **循环上下文**（Tur 2 的 `break` / `continue`，`docs/296` §2.5）：进入循环体时把
+// 结束/条件标签、循环种类、纪元 temp、续步参数写进这五格，退出时还原（各发射器用
+// 局部变量保存外层值）—— 所以嵌套循环不需要栈。608 = 0 表示不在循环里。
+const CG_LBRK: u32 = 608;
+const CG_LCOND: u32 = 612;
+const CG_LKIND: u32 = 616;    // 0 = while, 1 = for-in, 2 = range-for
+const CG_LSV: u32 = 620;      // 纪元 temp 号 (0 = 这一格没开)
+const CG_LAUX: u32 = 624;     // for-in: 合成下标编号; range-for: 变量 token
+// 局部表里"类型槽"的哨兵：合成下标 `__tur2_i.N` 的类型是 u32（没有源码 token）。
+const SYN_U32: u32 = 4294967295;
 
 /// 发射器报一条"降不下去"。**不在这里退出**：递归下降的每个返回点都退出会把
 /// 几百处调用点都改成三态；粘性标记 + 末尾作废输出代价小得多，而且不会漏。
@@ -1260,6 +1272,12 @@ fn syn_name(k: u32, line: u32) -> u32 {
 }
 
 fn emit_syn(s: ptr, out: ptr, k: u32, line: u32) -> u32 {
+    if k == 3 {
+        // Tur 2 的 for-in 下标（`docs/296` §2.2）：`__tur2_i.N`。点号是源码里写不出来的
+        // 字符，LLVM 与两只链接器都收 —— 与用户变量不会撞面。
+        emit_str(s, out, "__tur2_i.");
+        return emit_dec(s, out, line);
+    }
     emit_str(s, out, "__");
     if k == 0 {
         emit_str(s, out, "t");
@@ -4883,6 +4901,7 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
     let body_at: u32 = find_body(src, toks, lp);
     let body_end: u32 = skip_block(src, toks, body_at - 1);
     store32(s, 564, body_at);   // L0 分析要函数体的 token 跨度 (两处前导段与 stmt 都用)
+    store32(s, CG_BODY0, body_at);   // for-in 的合成下标按函数内词法顺序编号
     store32(s, 568, body_end);
     let nl: u32 = collect_locals(s, src, toks, body_at, body_end);
     if tok_is(src, toks, base - 1, "interrupt") {   // M33: x86_intrcc 需要中断帧指针, 无参数
@@ -4897,7 +4916,11 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
             emit_str(s, out, "  %");
             emit_local_name(s, out, src, toks, load32(s, CG_LOCAL + bi * 8));
             emit_str(s, out, ".addr = alloca ");
-            emit_ty(s, out, src, toks, load32(s, CG_LOCAL + bi * 8 + 4));
+            if load32(s, CG_LOCAL + bi * 8 + 4) == SYN_U32 {
+                emit_str(s, out, "i32");
+            } else {
+                emit_ty(s, out, src, toks, load32(s, CG_LOCAL + bi * 8 + 4));
+            }
             emit_str(s, out, "\n");
             emit_l0_buf(s, out, src, toks, load32(s, CG_LOCAL + bi * 8));
             bi = bi + 1;
@@ -4984,9 +5007,13 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
         emit_str(s, out, "  %");
         emit_local_name(s, out, src, toks, load32(s, CG_LOCAL + bl * 8));
         emit_str(s, out, ".addr = alloca ");
-        let sl: u32 = push_ty_subst(s, src, toks, load32(s, CG_LOCAL + bl * 8 + 4));
-        emit_ty(s, out, src, toks, load32(s, CG_LOCAL + bl * 8 + 4));
-        pop_subst(s, sl);
+        if load32(s, CG_LOCAL + bl * 8 + 4) == SYN_U32 {
+            emit_str(s, out, "i32");
+        } else {
+            let sl: u32 = push_ty_subst(s, src, toks, load32(s, CG_LOCAL + bl * 8 + 4));
+            emit_ty(s, out, src, toks, load32(s, CG_LOCAL + bl * 8 + 4));
+            pop_subst(s, sl);
+        }
         emit_str(s, out, "\n");
         emit_l0_buf(s, out, src, toks, load32(s, CG_LOCAL + bl * 8));
         bl = bl + 1;
@@ -5028,6 +5055,44 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
 }
 
 // ---------------------------------------------------------------- 语句
+
+/// `for x in xs` 的下标自增。**体尾与 `continue` 共用这一份**（`docs/296` §2.5）：
+/// 参考实现把它放在反糖出的 `While.step` 里，`continue` 先跑它再回条件 —— 分叉写两份
+/// 必然有一份漂。`fi` = 合成下标编号（`__tur2_i.N` 的 N）。
+fn fi_step(s: ptr, out: ptr, fi: u32) -> u32 {
+    emit_str(s, out, "  ");
+    let iv: u32 = new_temp(s, out);
+    emit_str(s, out, " = load i32, ptr %__tur2_i.");
+    emit_dec(s, out, fi);
+    emit_str(s, out, ".addr\n  ");
+    let nv: u32 = new_temp(s, out);
+    emit_str(s, out, " = add i32 %t");
+    emit_dec(s, out, iv);
+    emit_str(s, out, ", 1\n  store i32 %t");
+    emit_dec(s, out, nv);
+    emit_str(s, out, ", ptr %__tur2_i.");
+    emit_dec(s, out, fi);
+    return emit_str(s, out, ".addr\n");
+}
+
+/// range-for 的步进（镜像 `lomentc._for_step`）：load + add 1 + store。
+fn for_step(s: ptr, out: ptr, src: ptr, toks: ptr, var_tok: u32) -> u32 {
+    let ty: u32 = var_type(s, src, toks, var_tok);
+    load_var(s, out, src, toks, var_tok, 0);
+    emit_str(s, out, "  ");
+    let nx: u32 = new_temp(s, out);
+    emit_str(s, out, " = add ");
+    emit_ty(s, out, src, toks, ty);
+    emit_str(s, out, " ");
+    emit_val(s, out, 0);
+    emit_str(s, out, ", 1\n  store ");
+    emit_ty(s, out, src, toks, ty);
+    emit_str(s, out, " %t");
+    emit_dec(s, out, nx);
+    emit_str(s, out, ", ptr %");
+    emit_name_tok(s, out, src, toks, var_tok);
+    return emit_str(s, out, ".addr\n");
+}
 
 fn lab_def(s: ptr, out: ptr, n: u32, tag: str) -> u32 {
     store32(s, 476, 0);           // terminated = false
@@ -5468,6 +5533,43 @@ fn emit_try_let(s: ptr, out: ptr, src: ptr, toks: ptr, name: u32, ty: u32, eq: u
     return eq;
 }
 
+/// `for x in xs` 的合成下标序号：本函数体内按词法顺序数，第几个 for-in 就从 1 起。
+/// 参考实现的反糖按同一顺序编号（`__tur2_i.N`），两边必须一致。
+fn fi_ord(s: ptr, src: ptr, toks: ptr, at: u32) -> u32 {
+    let i: u32 = load32(s, CG_BODY0);
+    let n: u32 = 0;
+    while i < at {
+        if tok_is(src, toks, i, "for") && tok_is(src, toks, i + 2, "in")
+                && load32(toks, (i + 3) * 20) == 0 && tok_is(src, toks, i + 4, "{") {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n + 1;
+}
+
+/// `[T; N]` 里 **N 的 token**（`[T]` / 不是数组返回 0）。元素类型可以嵌套。
+fn array_len_tok(src: ptr, toks: ptr, ty: u32) -> u32 {
+    let i: u32 = ty + 1;
+    let d: u32 = 0;
+    while tok_kind(toks, i) != 4 {
+        if tok_is(src, toks, i, "[") {
+            d = d + 1;
+        }
+        if tok_is(src, toks, i, "]") {
+            if d == 0 {
+                return 0;
+            }
+            d = d - 1;
+        }
+        if d == 0 && tok_is(src, toks, i, ";") {
+            return i + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 /// `if` / `else if` 链的发射。`cond` = **条件第一个 token**（不是 `if` 本身）——
 /// Tur 2 的隐式 elif（`else <条件> {`，`docs/296` §2.1）从 `else` 之后直接进来，
 /// 与 `else if` 走同一条路，标签编号因此与参考实现逐字节一致。
@@ -5521,6 +5623,41 @@ fn emit_if_at(s: ptr, out: ptr, src: ptr, toks: ptr, cond: u32, ret: u32) -> u32
 
 /// 一条语句; 返回下一个待处理 token 下标。
 fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
+    if load32(s, CG_PROF) == 1 && tok_kind(toks, j) == 0
+            && (tok_is(src, toks, j, "break") || tok_is(src, toks, j, "continue")) {
+        // Tur 2 的循环控制（`docs/296` §2.5）。顺序与参考实现一致：`continue` 先跑续步
+        // （for-in 的下标 / range-for 的变量 —— 与体尾同一份指令），再关纪元，最后跳。
+        let lb: u32 = load32(s, CG_LBRK);
+        if lb == 0 {                       // 检查器已经拒了；走到这里是发射器的错
+            return cg_fail(s, 2, j);
+        }
+        let cont: u32 = 0;
+        let kd: u32 = load32(s, CG_LKIND);
+        if tok_is(src, toks, j, "continue") {
+            cont = 1;
+            if kd == 1 {
+                fi_step(s, out, load32(s, CG_LAUX));
+            }
+            if kd == 2 {
+                for_step(s, out, src, toks, load32(s, CG_LAUX));
+            }
+        }
+        epoch_close(s, out, load32(s, CG_LSV));
+        if cont == 1 {
+            if kd == 2 {
+                jump(s, out, load32(s, CG_LCOND), "fcond");
+            } else {
+                jump(s, out, load32(s, CG_LCOND), "wcond");
+            }
+        } else {
+            if kd == 2 {
+                jump(s, out, lb, "fend");
+            } else {
+                jump(s, out, lb, "wend");
+            }
+        }
+        return j + 2;                      // 跳过 `;`
+    }
     if tok_is(src, toks, j, "return") {
         // `return Result::Ok(v)` 里的枚举名是**泛型基名**, 实例要靠函数返回类型解析
         // (镜像 lomentc._fix_generic_literals 对 Return 分支做的 e.expr.enum = f.ret)。
@@ -5739,6 +5876,155 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
     if tok_is(src, toks, j, "if") {
         return emit_if_at(s, out, src, toks, j + 1, ret);
     }
+    if load32(s, CG_PROF) == 1 && tok_is(src, toks, j, "for")
+            && tok_is(src, toks, j + 2, "in") && load32(toks, (j + 3) * 20) == 0
+            && tok_is(src, toks, j + 4, "{") {
+        // Tur 2 的 `for x in xs`（`docs/296` §2.2）。参考实现把它反糖成
+        // `let __tur2_i.N = 0; while __tur2_i.N < len { let x = xs[i]; 体; i = i+1 }`
+        // —— 这里逐条照着发，指令顺序与临时编号才对得上。
+        let st: u32 = j + 3;
+        let sty: u32 = var_type(s, src, toks, st);
+        let et: u32 = elem_tok(src, toks, sty);
+        let is_sl: u32 = is_slice_tok(src, toks, sty);
+        let fi: u32 = fi_ord(s, src, toks, j);
+        if et == 0 || (is_sl == 0 && is_array_tok(src, toks, sty) == 0) {
+            return cg_fail(s, 2, j);
+        }
+        // `let __tur2_i.N: u32 = 0;`
+        emit_str(s, out, "  store i32 0, ptr %__tur2_i.");
+        emit_dec(s, out, fi);
+        emit_str(s, out, ".addr\n");
+        let w: u32 = load32(s, 480) + 1;
+        store32(s, 480, w + 2);
+        jump(s, out, w, "wcond");
+        lab_def(s, out, w, "wcond");
+        // 条件: load idx; 数组取常量 N / 切片取 slice_len(xs)
+        emit_str(s, out, "  ");
+        let iv: u32 = new_temp(s, out);
+        emit_str(s, out, " = load i32, ptr %__tur2_i.");
+        emit_dec(s, out, fi);
+        emit_str(s, out, ".addr\n");
+        let cv: u32 = 0;
+        if is_sl == 1 {
+            load_var(s, out, src, toks, st, 0);
+            emit_str(s, out, "  ");
+            let lv: u32 = new_temp(s, out);
+            emit_str(s, out, " = extractvalue { ptr, i64 } ");
+            emit_val(s, out, 0);
+            emit_str(s, out, ", 1\n  ");
+            let l32: u32 = new_temp(s, out);
+            emit_str(s, out, " = trunc i64 %t");
+            emit_dec(s, out, lv);
+            emit_str(s, out, " to i32\n  ");
+            cv = new_temp(s, out);
+            emit_str(s, out, " = icmp ult i32 %t");
+            emit_dec(s, out, iv);
+            emit_str(s, out, ", %t");
+            emit_dec(s, out, l32);
+            emit_str(s, out, "\n");
+        } else {
+            let nt: u32 = array_len_tok(src, toks, sty);
+            emit_str(s, out, "  ");
+            cv = new_temp(s, out);
+            emit_str(s, out, " = icmp ult i32 %t");
+            emit_dec(s, out, iv);
+            emit_str(s, out, ", ");
+            emit_tok(s, out, src, toks, nt);
+            emit_str(s, out, "\n");
+        }
+        emit_str(s, out, "  br i1 %t");
+        emit_dec(s, out, cv);
+        emit_str(s, out, ", label ");
+        lab_ref(s, out, w + 1, "wbody");
+        emit_str(s, out, ", label ");
+        lab_ref(s, out, w + 2, "wend");
+        emit_str(s, out, "\n");
+        store32(s, 476, 1);
+        lab_def(s, out, w + 1, "wbody");
+        // `let x = xs[idx];`
+        let ev: u32 = 0;
+        if is_sl == 1 {
+            load_var(s, out, src, toks, st, 0);
+            emit_str(s, out, "  ");
+            let sp: u32 = new_temp(s, out);
+            emit_str(s, out, " = extractvalue { ptr, i64 } ");
+            emit_val(s, out, 0);
+            emit_str(s, out, ", 0\n  ");
+            let iv3: u32 = new_temp(s, out);
+            emit_str(s, out, " = load i32, ptr %__tur2_i.");
+            emit_dec(s, out, fi);
+            emit_str(s, out, ".addr\n  ");
+            let gp: u32 = new_temp(s, out);
+            emit_str(s, out, " = getelementptr inbounds ");
+            emit_ty(s, out, src, toks, et);
+            emit_str(s, out, ", ptr %t");
+            emit_dec(s, out, sp);
+            emit_str(s, out, ", i32 %t");
+            emit_dec(s, out, iv3);
+            emit_str(s, out, "\n  ");
+            ev = new_temp(s, out);
+            emit_str(s, out, " = load ");
+            emit_ty(s, out, src, toks, et);
+            emit_str(s, out, ", ptr %t");
+            emit_dec(s, out, gp);
+            emit_str(s, out, "\n");
+        } else {
+            emit_str(s, out, "  ");
+            let iv4: u32 = new_temp(s, out);
+            emit_str(s, out, " = load i32, ptr %__tur2_i.");
+            emit_dec(s, out, fi);
+            emit_str(s, out, ".addr\n  ");
+            let gp2: u32 = new_temp(s, out);
+            emit_str(s, out, " = getelementptr inbounds ");
+            emit_ty(s, out, src, toks, sty);
+            emit_str(s, out, ", ptr %");
+            emit_name_tok(s, out, src, toks, st);
+            emit_str(s, out, ".addr, i32 0, i32 %t");
+            emit_dec(s, out, iv4);
+            emit_str(s, out, "\n  ");
+            ev = new_temp(s, out);
+            emit_str(s, out, " = load ");
+            emit_ty(s, out, src, toks, et);
+            emit_str(s, out, ", ptr %t");
+            emit_dec(s, out, gp2);
+            emit_str(s, out, "\n");
+        }
+        emit_str(s, out, "  store ");
+        emit_ty(s, out, src, toks, et);
+        emit_str(s, out, " %t");
+        emit_dec(s, out, ev);
+        emit_str(s, out, ", ptr %");
+        emit_name_tok(s, out, src, toks, j + 1);
+        emit_str(s, out, ".addr\n");
+        // 体
+        let ob: u32 = load32(s, CG_LBRK);
+        let ocd: u32 = load32(s, CG_LCOND);
+        let okd: u32 = load32(s, CG_LKIND);
+        let osv: u32 = load32(s, CG_LSV);
+        let oax: u32 = load32(s, CG_LAUX);
+        store32(s, CG_LBRK, w + 2);
+        store32(s, CG_LCOND, w);
+        store32(s, CG_LKIND, 1);
+        store32(s, CG_LAUX, fi);
+        let k: u32 = j + 5;
+        let tv: u32 = epoch_open(s, out, src, toks, k, skip_block(src, toks, j + 4) - 1);
+        store32(s, CG_LSV, tv);
+        while !tok_is(src, toks, k, "}") && tok_kind(toks, k) != 4 {
+            k = stmt(s, out, src, toks, k, ret);
+        }
+        epoch_close(s, out, tv);
+        k = k + 1;
+        // `__tur2_i.N = __tur2_i.N + 1;`
+        fi_step(s, out, fi);
+        jump(s, out, w, "wcond");
+        lab_def(s, out, w + 2, "wend");
+        store32(s, CG_LBRK, ob);
+        store32(s, CG_LCOND, ocd);
+        store32(s, CG_LKIND, okd);
+        store32(s, CG_LSV, osv);
+        store32(s, CG_LAUX, oax);
+        return k;
+    }
     if tok_is(src, toks, j, "for") {   // for i in lo..hi { ... }
         let var_tok: u32 = j + 1;
         let le: u32 = j + 3;                       // lo 起始 (跳过 'for' 变量 'in')
@@ -5780,28 +6066,30 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         emit_str(s, out, "\n");
         store32(s, 476, 1);
         lab_def(s, out, w + 1, "fbody");
+        let ob: u32 = load32(s, CG_LBRK);
+        let ocd: u32 = load32(s, CG_LCOND);
+        let okd: u32 = load32(s, CG_LKIND);
+        let osv: u32 = load32(s, CG_LSV);
+        let oax: u32 = load32(s, CG_LAUX);
+        store32(s, CG_LBRK, w + 2);
+        store32(s, CG_LCOND, w);
+        store32(s, CG_LKIND, 2);
+        store32(s, CG_LAUX, var_tok);
         let k: u32 = he + 1;                       // '{' 之后
         let fsv: u32 = epoch_open(s, out, src, toks, k, skip_block(src, toks, k - 1) - 1);
+        store32(s, CG_LSV, fsv);
         while !tok_is(src, toks, k, "}") && tok_kind(toks, k) != 4 {
             k = stmt(s, out, src, toks, k, ret);
         }
         epoch_close(s, out, fsv);
-        load_var(s, out, src, toks, var_tok, 0);
-        emit_str(s, out, "  ");
-        let nx: u32 = new_temp(s, out);
-        emit_str(s, out, " = add ");
-        emit_ty(s, out, src, toks, ty);
-        emit_str(s, out, " ");
-        emit_val(s, out, 0);
-        emit_str(s, out, ", 1\n  store ");
-        emit_ty(s, out, src, toks, ty);
-        emit_str(s, out, " %t");
-        emit_dec(s, out, nx);
-        emit_str(s, out, ", ptr %");
-        emit_name_tok(s, out, src, toks, var_tok);
-        emit_str(s, out, ".addr\n");
+        for_step(s, out, src, toks, var_tok);
         jump(s, out, w, "fcond");
         lab_def(s, out, w + 2, "fend");
+        store32(s, CG_LBRK, ob);
+        store32(s, CG_LCOND, ocd);
+        store32(s, CG_LKIND, okd);
+        store32(s, CG_LSV, osv);
+        store32(s, CG_LAUX, oax);
         return k + 1;
     }
     if tok_is(src, toks, j, "while") {
@@ -5819,14 +6107,29 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         emit_str(s, out, "\n");
         store32(s, 476, 1);
         lab_def(s, out, w + 1, "wbody");
+        let ob: u32 = load32(s, CG_LBRK);
+        let ocd: u32 = load32(s, CG_LCOND);
+        let okd: u32 = load32(s, CG_LKIND);
+        let osv: u32 = load32(s, CG_LSV);
+        let oax: u32 = load32(s, CG_LAUX);
+        store32(s, CG_LBRK, w + 2);
+        store32(s, CG_LCOND, w);
+        store32(s, CG_LKIND, 0);
+        store32(s, CG_LAUX, 0);
         let m: u32 = e4 + 1;   // '{' 之后的第一条语句
         let wsv: u32 = epoch_open(s, out, src, toks, m, skip_block(src, toks, m - 1) - 1);
+        store32(s, CG_LSV, wsv);
         while !tok_is(src, toks, m, "}") && tok_kind(toks, m) != 4 {
             m = stmt(s, out, src, toks, m, ret);
         }
         epoch_close(s, out, wsv);
         jump(s, out, w, "wcond");
         lab_def(s, out, w + 2, "wend");
+        store32(s, CG_LBRK, ob);
+        store32(s, CG_LCOND, ocd);
+        store32(s, CG_LKIND, okd);
+        store32(s, CG_LSV, osv);
+        store32(s, CG_LAUX, oax);
         return m + 1;
     }
     if tok_is(src, toks, j, "match") {   // M26: switch + 载荷绑定
@@ -6313,6 +6616,7 @@ fn add_local(s: ptr, src: ptr, toks: ptr, n: u32, name: u32, ty: u32) -> u32 {
 /// 按序收集局部变量 (let), 去重 —— 镜像 lomentc._collect_locals 的子集 (限于本函数体)。
 fn collect_locals(s: ptr, src: ptr, toks: ptr, i: u32, end: u32) -> u32 {
     let n: u32 = 0;
+    let fic: u32 = 0;
     let j: u32 = i;
     while tok_kind(toks, j) != 4 && j < end {
         if tok_is(src, toks, j, "match") {   // M26: match 载荷绑定也要 alloca
@@ -6337,7 +6641,23 @@ fn collect_locals(s: ptr, src: ptr, toks: ptr, i: u32, end: u32) -> u32 {
                 }
             }
         }
-        if tok_is(src, toks, j, "for") {   // for 变量也需 alloca
+        if tok_is(src, toks, j, "for") && load32(toks, (j + 3) * 20) == 0
+                && tok_is(src, toks, j + 2, "in") && tok_is(src, toks, j + 4, "{") {
+            // Tur 2 的 for-in（`docs/296` §2.2）：**下标在前、循环变量在后** —— 与参考
+            // 实现反糖后的局部顺序一致（`let __tur2_i.N` 在 while 之前，`let x` 在体开头）。
+            let st: u32 = j + 3;
+            // `var_type` 按 `load32(s, 484)` 走局部表 —— 这一趟本身就在填它，所以先把
+            // 当前条数写回去，才看得见前面那些 `let`（末尾还会再写一次最终的 n）。
+            store32(s, 484, n);
+            let sty: u32 = var_type(s, src, toks, st);
+            let et: u32 = elem_tok(src, toks, sty);
+            fic = fic + 1;
+            n = add_local(s, src, toks, n, syn_name(3, fic), SYN_U32);
+            if et != 0 {
+                n = add_local(s, src, toks, n, j + 1, et);
+            }
+            store32(s, 484, n);
+        } else if tok_is(src, toks, j, "for") {   // range for 变量也需 alloca
             let name: u32 = j + 1;
             // 与 lomentc 同规则: 类型 = expr_type(lo) or expr_type(hi) or u32(0)
             let vt: u32 = expr_type(s, src, toks, j + 3);
@@ -8748,6 +9068,7 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32) -> u32 {
     store32(s, 16, 0);
     store32(s, 640, 0);   // 函数个数
     store32(s, 476, 0);   // terminated
+    store32(s, CG_LBRK, 0);   // 不在循环里
     store32(s, 480, 0);   // label 计数
     store32(s, 484, 0);   // 局部数
     store32(s, 572, gc_alpha_tier(src, toks));   // L0 只在 `gc_auto_alpha` 档上跑

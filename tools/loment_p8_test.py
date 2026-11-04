@@ -1967,6 +1967,89 @@ def test_m90_tur2_sugar_matches_between_implementations():
 
 
 @test
+def test_m91_tur2_for_in_and_loop_control():
+    """Tur 2 的 `for x in xs` 与 `break` / `continue`（`docs/296` §2.2 / §2.5）。
+
+    三件，缺一件都不算：
+
+      * **两个实现逐字节一致** —— `for-in` 是反糖成 while 的，续步在体尾与 `continue`
+        上一共两处发射，任何一处顺序差一格 IR 就整段不同；数组与切片两条路都要走；
+      * **运行结果对** —— 只比 IR 会漏掉"两边一起把下标自增发在 `continue` 前面"
+        这种**一致地错**（孪生判据只证明一致，不证明对）；
+      * **版次隔离** —— Tur 1 的同一份源照旧拒（`for x in` 解析不过、`break;` 仍是
+        未声明的标识符），Tur 2 的 `break;` 在循环外是解析错（E19）。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    src = ("module loops\n\n"
+           "fn sum_sl(a: [u32]) -> u32 {\n"
+           "    let s: u32 = 0;\n"
+           "    for x in a {\n"
+           "        if x == 9 { continue; }\n"
+           "        s = s + x;\n"
+           "    }\n"
+           "    return s;\n"
+           "}\n\n"
+           "fn count() -> u32 {\n"
+           "    let xs: [u32; 4] = [7, 8, 9, 10];\n"
+           "    let n: u32 = 0;\n"
+           "    for x in xs {\n"
+           "        if x == 10 { break; }\n"
+           "        n = n + 1;\n"
+           "    }\n"
+           "    let i: u32 = 0;\n"
+           "    let m: u32 = 0;\n"
+           "    while i < 20 {\n"
+           "        i = i + 1;\n"
+           "        if i == 3 { continue; }\n"
+           "        if i == 6 { break; }\n"
+           "        m = m + 1;\n"
+           "    }\n"
+           "    for j in 0..10 {\n"
+           "        if j == 2 { continue; }\n"
+           "        if j == 5 { break; }\n"
+           "        m = m + 1;\n"
+           "    }\n"
+           "    return n + m;\n"
+           "}\n\n"
+           "fn main() {\n"
+           "    let b: [u32; 2] = [4, 9];\n"
+           "    let v: u32 = sum_sl(&b) + count();\n"
+           "    if v == 15 {\n        print(\"ok\\n\");\n"
+           "    } else {\n        print(\"bad\\n\");\n    }\n"
+           "}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "loops.lomt"
+        p.write_text("choose write grammar tur2\n" + src, encoding="utf-8", newline="\n")
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_loops")
+        rc, out, err = _run_driver_raw(elf, _wsl_path(p), td, "loops")
+        assert rc == 0, f"自举侧编不过 for-in/break/continue: {err[-300:]}"
+        assert out == _unit_ll(p), "for-in/break/continue 的 IR 两个实现不一致"
+        art, _ = __import__("lomelf").compile_ll(out)
+        exe = Path(td) / "loops.elf"
+        exe.write_bytes(art)
+        script = (f"cp {_wsl_path(exe)} {_T}loops_ed && chmod +x {_T}loops_ed "
+                  f"&& {_T}loops_ed")
+        r = subprocess.run([*_WSLCMD, "bash", "-lc", script],
+                           capture_output=True, text=True, timeout=120, shell=False)
+        assert (r.returncode, r.stdout) == (0, "ok\n"), (r.returncode, r.stdout, r.stderr)
+        # Tur 1：`for x in` / `break;` 都必须照旧拒
+        p1 = Path(td) / "old.lomt"
+        p1.write_text("choose write grammar tur\n" + src, encoding="utf-8", newline="\n")
+        rc1, out1, _e1 = _run_driver_raw(elf, _wsl_path(p1), td, "oldloops")
+        assert rc1 != 0 and out1.strip() == "", "Tur 1 收下了 for-in —— 版次隔离破了"
+        # Tur 2 的 `break;` 在循环外：解析错（参考侧同样是解析期拒）
+        p2 = Path(td) / "outside.lomt"
+        p2.write_text("choose write grammar tur2\nmodule outside\n\nfn main() {\n"
+                      "    break;\n}\n", encoding="utf-8", newline="\n")
+        rc2, out2, err2 = _run_driver_raw(elf, _wsl_path(p2), td, "outside")
+        assert rc2 != 0 and out2.strip() == "", "循环外的 `break;` 被放过去了"
+        assert "E19" in err2, f"循环外的 `break;` 该是解析错 (E19): {err2[-200:]}"
+        print("      for-in/break/continue: 两套实现逐字节相同、运行得 ok；Tur 1 拒、循环外 E19")
+
+
+@test
 def test_m85_driver_emits_structured_diagnostics():
     """自举驱动的 `--diag-out`: 结构与参考实现同形, **码集相等** (`docs/182` §5)。
 

@@ -113,12 +113,18 @@ def test(fn):
 #: （`HOT_STRIDE` / `HOT_RELOC`）、一个是记录长度（`HOT_FUNC`）、三个是装载件的头长 /
 #: 摘要长度 / 槽表上限。它们都在 `EXPLAINED` 里写清来路（装载器用**返回码**点名，
 #: 不在这里终止进程）。条数 239 → **245**、沉默 155 → **161**。
-CAPACITY_SITES = 250
-SILENT_SITES = 167
+#:
+#: 2026-11-04（`#1155`）：LSP 安全点（`hot_tick`）补了两个常量 —— `HOT_READ_MAX`
+#: （读候选的 8 MiB 缓冲上界，截断件由装载器的检查拒掉、调用方按返回码点名）与
+#: `HOT_MMAP_ANON`（没有 `MAP_FIXED` 的一套 flags，只作 syscall 实参，**不**是容量）。
+#: `lsp.lomt` 多了一处 `i < 4000`（`--hot` 路径拷进 4096 B 暂存，到界即停）。条数
+#: 250 → **251**、沉默 167 → **168**；字面量 63 → **64**。
+CAPACITY_SITES = 251
+SILENT_SITES = 168
 
 #: 第二类：字面量上界（`#770`）。`[T; N]` 与 `literal:<N>` 各自钉住总数与沉默的那一份。
-LITERAL_SITES = 64
-LITERAL_SILENT = 63
+LITERAL_SITES = 65
+LITERAL_SILENT = 64
 ARRAY_SITES = 17
 ARRAY_SILENT = 16
 
@@ -173,6 +179,7 @@ SILENT_NAMES = frozenset((
     "HOT_FUNC",
     "HOT_HDR",
     "HOT_MAX_FN",
+    "HOT_READ_MAX",
     "HOT_RELOC",
     "HOT_STRIDE",
     "J_NODE_STRIDE",
@@ -320,7 +327,7 @@ SILENT_LITERALS = {
     ("loment/tools/lomzwframe.lomt", "literal:8"): 1,
     ("loment/tools/lsp.lomt", "literal:200"): 1,
     ("loment/tools/lsp.lomt", "literal:400"): 1,
-    ("loment/tools/lsp.lomt", "literal:4000"): 1,
+    ("loment/tools/lsp.lomt", "literal:4000"): 2,
     ("loment/tools/lsp.lomt", "literal:60"): 2,
 }
 

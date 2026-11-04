@@ -140,6 +140,57 @@ def test_int_literal_cast_keeps_the_literal_value():
 
 
 @test
+def test_int_constant_expression_cast_is_accepted():
+    """issue #703: **全是字面量的算式**也是整型 —— `(1 << 20) as u64` 不许被拒。
+
+    `expr_type` 对整数字面量返回 `None`（"由上下文定宽"），于是整条算式也是 `None`；
+    `as` 那一格把 `None` 当成"不知道类型"，就把 `(1 + 1) as u64` 说成"不是整型" ——
+    而同一式子带一个变量（`(x + 1) as u64`）照常放行。报文给的理由还是**假的**。
+    自举侧（`checker.lomt` 同处按 `chk_ty_is_int`）一直放行它，所以这同时是一处
+    **孪生分歧**：同一份源码，参考拒、打包版能编。
+
+    钉三面：
+      * 全是字面量的算式被接受（`+ - * / % << >> & | ^` 与一元 `-`）；
+      * 算式**仍在 i32 上算、再按目标放宽**（`zext i32`）—— 与自举侧逐字节一致，
+        不是"在 i64 上算"那种看似更聪明的做法（那会换掉孪生那一侧的产物）；
+      * 非整型操作数照旧被拒（别把 `as` 放宽成什么都不查）。
+    """
+    NL = chr(10)
+    src = NL.join([
+        "module m", "choose runtime", "",
+        "fn _start() {",
+        "    let a: u64 = (1 + 1) as u64;",
+        "    let b: u64 = (1 << 20) as u64;",
+        "    let c: u64 = (3 * 1024 - 1) as u64;",
+        "    let d: i64 = (0 - 7) as i64;",
+        "    let e: u8 = (255 + 1) as u8;",
+        "    let f: u64 = ((1 | 2) & 3 ^ 1) as u64;",
+        "    let g: u64 = (7 / 2 % 3) as u64;",
+        "    syscall4(60, 0, 0, 0);",
+        "}", "",
+    ])
+    assert errs(src) == [], errs(src)
+    ir = lomentc.emit_llvm(parse(src), ROOT, [])
+    assert "zext i32" in ir, f"常量式转型没有先按 i32 算再放宽: {ir}"
+    # 窄目标照旧环绕：`(255 + 1) as u8` 是 256 的一次 `trunc ... to i8`（= 0），
+    # 不是原样存进去的 256（那会发成非法 IR）。
+    assert re.search(r"trunc i32 \S+ to i8", ir), f"窄目标没有环绕: {ir}"
+
+    bad = NL.join([
+        "module m", "choose runtime", "",
+        "struct P { x: u32 }", "",
+        "fn _start() {",
+        "    let p: P = P { x: 1 };",
+        "    let a: u64 = p as u64;",
+        "    syscall4(60, 0, 0, 0);",
+        "}", "",
+    ])
+    got = errs(bad)
+    assert any("as 只能作用于整型" in e for e in got), (
+        f"非整型操作数不再被拒（`as` 被放宽过头了）: {got}")
+
+
+@test
 def test_demo_parses_and_checks():
     mod = lomentc.load(DEMO)
     deps = lomentc.resolve_deps(mod, ROOT, DEMO.parent, entry=DEMO)

@@ -139,6 +139,24 @@ fn write_all(fd: u64, p: ptr, n: u64) -> u64 {
     return off;
 }
 
+/// 写**必须成功**的那几条流（`#674`）：短写 = 失败，说清楚并退非零。
+///
+/// `write_all` 只知道"写了多少"；"少了"这件事只有调用方在乎，而**产物**（stdout 上的
+/// IR / 形式对象）、`--print-command` 都属这一档 —— 它们是"编译成功"这句话的**实物**。
+/// 静默短写的形状是**编译器说产物存在而它不存在**：`loment ir FILE > out.ll` 落到
+/// `/dev/full`（或配额、NFS 掉了、管道那头关了）时从前退出 0、stderr 一个字没有，
+/// 而那条重定向的下一步**没有人替它检查**。参考实现在这里抛 `OSError` 退 1，
+/// 所以那还是一处两个实现的分歧。
+fn write_checked(fd: u64, p: ptr, n: u64, what: str) -> u32 {
+    if write_all(fd, p, n) == n {
+        return 0;
+    }
+    wstr(2, "loment: cannot write ");
+    wstr(2, what);
+    wstr(2, " -- the destination refused the bytes (a full disk, a quota, or a closed pipe\n");
+    return die(1);
+}
+
 /// 面向用户的失败消息: `loment: <msg>` 换行。**前缀与换行在这儿写死**, 50 个用点各写
 /// 一遍迟早写错 —— 其中一处写错了 `write_all(2, str_ptr("fujoc-s: 打不开 "), 20)`:
 /// 那句话是 19 字节, 手数的 20 把字符串常量的 NUL 一起写了出去, 用户拿到的是
@@ -203,23 +221,72 @@ fn has_extblock(src: ptr, t: ptr, nt: u32) -> u32 {
 /// （`divzero` / `oom` / …），而 `fail` 只收一个现成的 `str`，拼不出来 —— 所以直接往
 /// stderr 写三段。种类名走 `cf_err_name`（`comefor` 转出来的 `interp` 那份表），
 /// **不另抄一份**：那张表正是"两边连错误的种类都要一致"的凭据。
-fn comefor_fail(re: u32, code: u32) -> u32 {
+fn comefor_fail(re: u32, code: u32, scr: ptr, dfd: i64, file: ptr, fnam: u32) -> u32 {
     if re == 7 {
         let _a: u64 = wstr(2, "loment: the comefor macro body did not run: ");
         let _b: u64 = wstr(2, cf_err_name(code));
         let _c: u64 = wstr(2, "\n");
         return die(1);
     }
-    if re == 2 { return fail("comefor must be written at the top level"); }
-    if re == 3 { return fail("comefor's body is not closed (missing a `}`)"); }
-    if re == 4 { return fail("too many comefor dialects (limit is 64)"); }
-    if re == 5 { return fail("byuse must be written at the top level (same level as comefor)"); }
-    if re == 6 { return fail("byuse names a dialect that nothing is using"); }
-    if re == 9 { return fail("comefor's macro body is too large (limit is 300 tokens)"); }
-    if re == 10 {
-        return fail("comefor's body does not take `use` yet -- write the helper fn inside the body");
+    if re == 2 {
+        // **两个受众都要有**（`#657`）：给人看的那一行在 stderr，结构化那一份
+        // 进 `--diag-out`。从前这九支只写 stderr —— 于是 `--json` / `--short`
+        // 拿到一个空文件配一个非零退出码，而那正是差错系统存在要避免的组合。
+        let m: str = "comefor must be written at the top level";
+        wdiag_at(dfd, scr, file, fnam, 0, 999, str_ptr(m), str_len(m));
+        return fail(m);
     }
-    return fail("comefor consumed more tokens than were left");
+    if re == 3 {
+        // **两个受众都要有**（`#657`）：给人看的那一行在 stderr，结构化那一份
+        // 进 `--diag-out`。从前这九支只写 stderr —— 于是 `--json` / `--short`
+        // 拿到一个空文件配一个非零退出码，而那正是差错系统存在要避免的组合。
+        let m: str = "comefor's body is not closed (missing a `}`)";
+        wdiag_at(dfd, scr, file, fnam, 0, 999, str_ptr(m), str_len(m));
+        return fail(m);
+    }
+    if re == 4 {
+        // **两个受众都要有**（`#657`）：给人看的那一行在 stderr，结构化那一份
+        // 进 `--diag-out`。从前这九支只写 stderr —— 于是 `--json` / `--short`
+        // 拿到一个空文件配一个非零退出码，而那正是差错系统存在要避免的组合。
+        let m: str = "too many comefor dialects (limit is 64)";
+        wdiag_at(dfd, scr, file, fnam, 0, 999, str_ptr(m), str_len(m));
+        return fail(m);
+    }
+    if re == 5 {
+        // **两个受众都要有**（`#657`）：给人看的那一行在 stderr，结构化那一份
+        // 进 `--diag-out`。从前这九支只写 stderr —— 于是 `--json` / `--short`
+        // 拿到一个空文件配一个非零退出码，而那正是差错系统存在要避免的组合。
+        let m: str = "byuse must be written at the top level (same level as comefor)";
+        wdiag_at(dfd, scr, file, fnam, 0, 999, str_ptr(m), str_len(m));
+        return fail(m);
+    }
+    if re == 6 {
+        // **两个受众都要有**（`#657`）：给人看的那一行在 stderr，结构化那一份
+        // 进 `--diag-out`。从前这九支只写 stderr —— 于是 `--json` / `--short`
+        // 拿到一个空文件配一个非零退出码，而那正是差错系统存在要避免的组合。
+        let m: str = "byuse names a dialect that nothing is using";
+        wdiag_at(dfd, scr, file, fnam, 0, 999, str_ptr(m), str_len(m));
+        return fail(m);
+    }
+    if re == 9 {
+        // **两个受众都要有**（`#657`）：给人看的那一行在 stderr，结构化那一份
+        // 进 `--diag-out`。从前这九支只写 stderr —— 于是 `--json` / `--short`
+        // 拿到一个空文件配一个非零退出码，而那正是差错系统存在要避免的组合。
+        let m: str = "comefor's macro body is too large (limit is 300 tokens)";
+        wdiag_at(dfd, scr, file, fnam, 0, 999, str_ptr(m), str_len(m));
+        return fail(m);
+    }
+    if re == 10 {
+        // **两个受众都要有**（`#657`）：给人看的那一行在 stderr，结构化那一份
+        // 进 `--diag-out`。从前这九支只写 stderr —— 于是 `--json` / `--short`
+        // 拿到一个空文件配一个非零退出码，而那正是差错系统存在要避免的组合。
+        let m: str = "comefor's body does not take `use` yet -- write the helper fn inside the body";
+        wdiag_at(dfd, scr, file, fnam, 0, 999, str_ptr(m), str_len(m));
+        return fail(m);
+    }
+    let m: str = "comefor consumed more tokens than were left";
+    wdiag_at(dfd, scr, file, fnam, 0, 999, str_ptr(m), str_len(m));
+    return fail(m);
 }
 
 /// 写一个 str 到 fd (长度交给 str_len —— 手数字节数会连字符串常量的 NUL 一起写出去)。
@@ -1007,7 +1074,9 @@ fn subdirs_of(dirp: ptr, dl: u32, dst: ptr, scr: ptr) -> u32 {
     // 会去 `openat` 一个不存在的目录，用户看到的是"这个 `use` 找不到"（`docs/188` 的
     // "宁拒勿猜"：宁可报错，也不要让一个截断过的输入伪装成一个查无此物）。
     if dl >= DIR_CAP - 1 {
-        return fail("a directory path is longer than 1024 bytes (the project root / tool dir / version-name limit) -- move the project closer to the filesystem root");
+        let dmsg: str = "a directory path is longer than 1024 bytes (the project root / tool dir / version-name limit) -- move the project closer to the filesystem root";
+        wdiag_at(diagfd(scr), scr, 0 as ptr, 0, 0, 999, str_ptr(dmsg), str_len(dmsg));
+        return fail(dmsg);
     }
     let i: u32 = 0;
     while i < dl && i < DIR_CAP - 1 {
@@ -1125,7 +1194,9 @@ fn is_dir_at(dirp: ptr, dl: u32, dent: ptr, nm: u32, scr: ptr) -> u32 {
     // 循环是三个条件里哪一个停的？**`e` 撞上沿**就是路径被截断 —— 那时下面这次 `openat`
     // 找的是一个不存在的路径，而调用方只知道"这个名字不是目录"（`#345` 的 (a)）。
     if e >= SUBP_CAP - 1 && load8(dent, nm + j) != 0 {
-        return fail("a subpath is longer than 1472 bytes (one slot per source level) -- shorten the path");
+        let dmsg: str = "a subpath is longer than 1472 bytes (one slot per source level) -- shorten the path";
+        wdiag_at(diagfd(scr), scr, 0 as ptr, 0, 0, 999, str_ptr(dmsg), str_len(dmsg));
+        return fail(dmsg);
     }
     store8(w, e, 0 as u8);
     let fd: i64 = syscall4(257, (0 as u64) - 100, w as u64, 65536);
@@ -1557,7 +1628,9 @@ fn cfg_source_ext(dirp: ptr, dl: u32, dst: ptr, scr: ptr, buf: ptr, toks: ptr) -
     // 同 `SUBP_CAP` 那条：`q` 撞上沿而字符串里还有字节 ⇒ 后缀被截断（`#345` 的 (a)）。
     // 静默截断的后果比"配错了"更难查：截出来的后缀**可能正好又叫中另一个词法档**。
     if q >= EXT_CAP - 1 && q < sl - 2 {
-        return fail("the source extension in loment.conf is longer than 256 bytes");
+        let dmsg: str = "the source extension in loment.conf is longer than 256 bytes";
+        wdiag_at(diagfd(scr), scr, 0 as ptr, 0, 0, 999, str_ptr(dmsg), str_len(dmsg));
+        return fail(dmsg);
     }
     store8(dst, q, 0 as u8);
     // 不以 `.` 开头、或带转义的, 一律当没配。转义那条是对着参考实现钉的: 这里拷的是**原始
@@ -1700,30 +1773,31 @@ fn die_chooseset(path: ptr, n: u32, scr: ptr) -> u32 {
 fn print_command(path: ptr, n: u32, scr: ptr) -> u32 {
     let fd: i64 = open_ro(path, n, scr);
     if fd < 0 {
-        return failp("--print-command cannot open the source file: ", path, n);
+        let dmsg: str = "--print-command cannot open the source file: ";
+        wdiag_at(diagfd(scr), scr, path, n, 0, 999, str_ptr(dmsg), str_len(dmsg));
+        return failp(dmsg, path, n);
     }
     let sbuf: ptr = sys_alloc(262144 as u64) as ptr;
     let tbuf: ptr = sys_alloc(262144 as u64) as ptr;
     let raw: u64 = read_all(fd as u64, sbuf, 262144 as u64);
     syscall4(3, fd as u64, 0, 0);
     if raw == 0 {
-        write_all(1, str_ptr("\n"), 1);
-        return 0;
+        return write_checked(1, str_ptr("\n"), 1, "the command name");
     }
     let _nt: u32 = lex_cap(sbuf, raw as u32, tbuf, 65536 as u32);
     let pk: u64 = lex_cmd_label(sbuf, tbuf, ptr_add(scr, CMD_OFF));
     let lt: u32 = (pk / 4294967296) as u32;
     let nl: u32 = (pk % 4294967296) as u32;
     if lt == 0 {
-        write_all(1, str_ptr("\n"), 1);
-        return 0;
+        return write_checked(1, str_ptr("\n"), 1, "the command name");
     }
     if nl == 0 {
-        return fail("the command declaration has the wrong shape -- put the name inside `register <name> { ... }`, or return a string literal from the declaration");
+        let dmsg: str = "the command declaration has the wrong shape -- put the name inside `register <name> { ... }`, or return a string literal from the declaration";
+        wdiag_at(diagfd(scr), scr, path, n, 0, 999, str_ptr(dmsg), str_len(dmsg));
+        return fail(dmsg);
     }
-    write_all(1, ptr_add(scr, CMD_OFF), nl as u64);
-    write_all(1, str_ptr("\n"), 1);
-    return 0;
+    let _pc: u32 = write_checked(1, ptr_add(scr, CMD_OFF), nl as u64, "the command name");
+    return write_checked(1, str_ptr("\n"), 1, "the command name");
 }
 
 fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
@@ -1796,7 +1870,9 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
     // 等价的写法，但把 `SLOT` **写在比较里**：容量盘点（`tools/loment_caps.py`）认的是
     // "容量名出现在一条序关系比较里"，`raw_n >= sunit` 里那个名字被别名藏起来了。
     if raw_n + 44224 as u64 >= SLOT as u64 {
-        return fail("this source file is 480 KiB or larger -- the per-file slot cannot hold it (its tail keeps this file's path and use lists), and cutting it short yields parse errors unrelated to where it was cut: split the facade") as u64;
+        let dmsg: str = "this source file is 480 KiB or larger -- the per-file slot cannot hold it (its tail keeps this file's path and use lists), and cutting it short yields parse errors unrelated to where it was cut: split the facade";
+        wdiag_at(diagfd(scr), scr, path, n, 0, 999, str_ptr(dmsg), str_len(dmsg));
+        return fail(dmsg) as u64;
     }
     let nb: u32 = strip_cr(slot, raw_n as u32);
     // 路径副本: 之后一律指这里 —— 名字形式的候选缓冲 (`scr + NAMTMP_OFF`) 不再能把它改掉。
@@ -2303,7 +2379,7 @@ fn _start() -> u32 {
                                               hpv as ptr, len as u32, rs);
         if re != 0 {
             // `re` 说哪一类错；`re == 7` 时 `rs[0]` 是**解释器**的错误码（宏体没跑成）。
-            return comefor_fail(re, load32(rs, 0));
+            return comefor_fail(re, load32(rs, 0), scr, dfd, ap, an);
         }
         // 下游一律用展开后的那一份 —— 与 `apply_switches` 换掉 `nt` 是同一个做法。
         nt = load32(rs, 0);
@@ -2346,7 +2422,9 @@ fn _start() -> u32 {
     }
     // 先检查再发射: 有诊断就报到 stderr 并以 1 退出, 否则才发 IR。
     // 诊断格式与 p8 的 C 夹具同源: `<码>@<token>:<行> <片段>` 一行一条。
-    let errsv: u64 = sys_alloc(8192);
+    // 缓冲大小与**写它的那两个模块**同一个数（`switches.err_max()`，`#663`）：
+    // "能写多少"与"分到多大"分开挑，迟早会一边多一边少。
+    let errsv: u64 = sys_alloc(chk_err_bytes() as u64);
     if errsv == 0 {
         let dm: str = "out of memory: cannot allocate the diagnostic buffer (brk failed)";
         wdiag_file(dfd, scr, ap, an, 33, str_ptr(dm), str_len(dm));
@@ -2395,7 +2473,7 @@ fn _start() -> u32 {
     if ne2 != 0 {
         wstr(2, "loment: static checks failed\n");
         let e: u32 = 0;
-        while e < ne2 && e < 64 {
+        while e < ne2 {
             let code: u32 = load32(errs, e * 8);
             let tk: u32 = load32(errs, e * 8 + 4);
             wstr(2, "  E");
@@ -2453,6 +2531,16 @@ fn _start() -> u32 {
             }
             e = e + 1;
         }
+        // **丢了多少要说**（`#656`）：缓冲是有限的（`ERR_CAP` 条），满了以后每一条都被
+        // 丢掉 —— 从前连"丢了"这件事都没有第二个人知道，而参考实现一条都不丢。
+        let dn: u32 = chk_err_dropped(tytp);
+        if dn > 0 {
+            wstr(2, "loment: ");
+            wdec(2, scr, dn);
+            wstr(2, " more diagnostics were dropped (the buffer holds ");
+            wdec(2, scr, chk_err_cap());
+            wstr(2, "): split the unit, or fix the first ones\n");
+        }
         return die(1);
     }
     // `--emit-potato` (`docs/189` S1): 发**形式对象**(Potato v5)而不是 IR。
@@ -2473,7 +2561,7 @@ fn _start() -> u32 {
         if pn == 0 {
             return die(1);
         }
-        write_all(1, ir, pn as u64);
+        let _wp: u32 = write_checked(1, ir, pn as u64, "the object");
         return die(0);
     }
     // codegen 的状态块也从 brk 拿: 那几张表按**单元规模**定 (函数表 4600 格), 整块
@@ -2506,6 +2594,6 @@ fn _start() -> u32 {
         wdiag_file(dfd, scr, ap, an, 33, str_ptr(msg), str_len(msg));
         return fail(msg);
     }
-    write_all(1, ir, m as u64);
+    let _w: u32 = write_checked(1, ir, m as u64, "the IR");
     return die(0);
 }

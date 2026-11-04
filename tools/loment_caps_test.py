@@ -460,7 +460,13 @@ def test_literal_caps_and_static_arrays_are_visible():
     盘点里 —— 这条判据就是"现在在了"的兑现，而且钉的是**行级**事实。
     """
     lits = {(r["file"], r["line"], r["name"]) for r in loment_caps.scan_literals()}
-    for f, line, name in (("loment/selfhost/driver.lomt", 1040, "literal:200"),
+    # 行号**从源里现数**：`driver.lomt` 每天都在长，把 1040 写死的话每改一次它上方的
+    # 代码这条判据就红一次，而红的原因与它要保的事实（"这一处被看见"）无关。
+    # 数出来再比，钉的仍是行级事实 —— 扫描器把它记到别的行上照样红。
+    drv = (ROOT / "loment/selfhost/driver.lomt").read_text(encoding="utf-8").splitlines()
+    drv_line = 1 + next(i for i, ln in enumerate(drv)
+                        if "while j < 200 && load8(dent, nm + j)" in ln)
+    for f, line, name in (("loment/selfhost/driver.lomt", drv_line, "literal:200"),
                           ("loment/tools/lomfmt.lomt", 497, "literal:16"),
                           ("loment/tools/lomc.lomt", 501, "literal:4000")):
         assert (f, line, name) in lits, (

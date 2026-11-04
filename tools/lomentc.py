@@ -1189,6 +1189,10 @@ class Func:
     #: 于是泛型参数写成 `T` 的函数在单态化成 `ptr` 之后**仍然不提升**（自举侧同判）。
     tok_at: int = 0
     tok_end: int = 0
+    #: **L0.5**（`docs/210` §2.10）：函数级**栈区**，静态段。`l05_static = {名字: (偏移, 字节)}`；
+    #: `l05_cap` 是整块的字节数。其它档一律为空。
+    l05_static: dict = field(default_factory=dict)
+    l05_cap: int = 0
     #: **L1**（`docs/210` §2.5）：**函数末尾**要还掉的名字 —— "最后一次用处"不落在任何
     #: 循环体内的那些（落点选函数末尾的理由见 `_l1_place`）。
     l1: list = field(default_factory=list)
@@ -5860,15 +5864,16 @@ def _count_net_ladder(mod: Module) -> dict:
 
 
 def _count_gc_ladder(mod: Module) -> dict:
-    """`docs/210` §5 第一条：把 **GC 的组成**写进产物 —— 四层梯各领走几个 `alloc` 站点。
+    """`docs/210` §5 第一条：把 **GC 的组成**写进产物 —— 每一层各领走几个 `alloc` 站点。
 
-    形状**照 `boundary`**（§5 R5 那条自洽规则的同形）：四个非负整数 + `total_sites`，
-    而且 **`l0 + l1 + l2 + l3` 必须等于 `total_sites`**。这一条是**校验器独立判得了的**：
+    形状**照 `boundary`**（§5 R5 那条自洽规则的同形）：五个非负整数 + `total_sites`
+    （v19 起多了 L0.5），而且 **`l0 + l0_5 + l1 + l2 + l3` 必须等于 `total_sites`**。这一条是**校验器独立判得了的**：
     它读不到源码，所以判不了"这几个数数得对不对"，但判得了"它们自相矛盾" —— 这正是
     `docs/210` §3 那句"GC 的组成是一个不读源码可判的数"要的那件事。
 
     口径：本单元**每一处 `alloc`** 从强到弱、先到先得，正好分到一层：
 
+      * **L0.5** —— 被函数级栈区接走的 L0 站点（`Func.l05_static`；`docs/210` §2.10）；
       * **L0** —— `let NAME: ptr = alloc(<字面量>)` 且 `NAME` 只被解引用透过（`Func.l0` 那张表）；
       * **L2** —— 落在某个**开着纪元**的循环体里（那个 `while`/`for` 的 `l2` 为真）；
       * **L1** —— 剩下的里、`NAME` 在 `Func.l1` 上的（定活，插 `free`）；
@@ -5907,17 +5912,19 @@ def _count_gc_ladder(mod: Module) -> dict:
 
     reap(mod)
 
-    l0 = l1 = l2 = 0
+    l0 = l0_5 = l1 = l2 = 0
 
-    def walk(ss: list, in_l2: bool, l0n: set, l1n: set) -> None:
+    def walk(ss: list, in_l2: bool, l0n: set, l05n: set, l1n: set) -> None:
         """可分层站点**只可能是语句级的** `let`（表达式里不嵌语句），所以这里只走语句
         列表：`if` 的两支、`while`/`for` 的体（带上 `l2` 这个"落在纪元里"的标记）、
         `match` 各臂。"""
-        nonlocal l0, l1, l2
+        nonlocal l0, l0_5, l1, l2
         for s in ss:
             if (isinstance(s, Let) and s.type == "ptr"
                     and isinstance(s.expr, Call) and s.expr.name == "alloc"):
-                if s.name in l0n:
+                if s.name in l05n:
+                    l0_5 += 1
+                elif s.name in l0n:
                     l0 += 1
                 elif in_l2:
                     l2 += 1
@@ -5925,15 +5932,15 @@ def _count_gc_ladder(mod: Module) -> dict:
                     l1 += 1
                 # 其余落 L3（在 `l3` 那一格用 total 减出来）
             if isinstance(s, If):
-                walk(s.then, in_l2 or s.then_l2, l0n, l1n)
-                walk(s.otherwise, in_l2 or s.else_l2, l0n, l1n)
+                walk(s.then, in_l2 or s.then_l2, l0n, l05n, l1n)
+                walk(s.otherwise, in_l2 or s.else_l2, l0n, l05n, l1n)
             elif isinstance(s, While):
-                walk(s.body, in_l2 or s.l2, l0n, l1n)
+                walk(s.body, in_l2 or s.l2, l0n, l05n, l1n)
             elif isinstance(s, For):
-                walk(s.body, in_l2 or s.l2, l0n, l1n)
+                walk(s.body, in_l2 or s.l2, l0n, l05n, l1n)
             elif isinstance(s, Match):
                 for _pat, body in s.arms:
-                    walk(body, in_l2, l0n, l1n)
+                    walk(body, in_l2, l0n, l05n, l1n)
 
     def ret_l1(ss: list, out: set) -> None:
         """收本函数体里被 L1 认领的名字 —— `_l1_place` 把 `free` 挂在**最早那条够得着的
@@ -5954,9 +5961,10 @@ def _count_gc_ladder(mod: Module) -> dict:
     for f in list(mod.funcs) + [g for im in mod.impls for g in im.funcs]:
         l1n = set(f.l1)
         ret_l1(f.body, l1n)
-        walk(f.body, False, set(f.l0), l1n)
-    return {"l0": l0, "l1": l1, "l2": l2, "l3": total - l0 - l1 - l2,
-            "total_sites": total}
+        l05n = set(f.l05_static)
+        walk(f.body, False, set(f.l0), l05n, l1n)
+    return {"l0": l0, "l0_5": l0_5, "l1": l1, "l2": l2,
+            "l3": total - l0 - l0_5 - l1 - l2, "total_sites": total}
 
 
 def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -> str:
@@ -6058,7 +6066,10 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # v18 = v17 + **七级的运行期预算** `lms_budgets`（`docs/253` §11.2.1，#1023）：
         # 每一级是 `none` / `instructions` / `state` / `outside`。于是
         # "这份产物承诺没有运行期"是**不读源码可判**的 —— 不是靠七级实现碰巧都轻。
-        "potato": "v18",
+        # v19 = v18 + `gc_ladder` 的第五格 `l0_5`（`docs/210` §2.10）：函数级栈区接走的
+        # 站点。加一格会让 v10–v18 的四数和失效，所以**必须升版**而不是改旧格
+        # （`docs/147` 的台阶只往上加）。
+        "potato": "v19",
         "unit": mod.name,
         "language": "loment",
         # **表层语法**（`docs/188` §2）—— 与 `language` 分工不同, 别混:
@@ -7228,7 +7239,8 @@ def _gc_alpha_pass(mod: Module, deps: list[Module] | None = None) -> None:
             f.l1 = []
             _reset_l1(f.body)
             _l2_loop_epochs(f, toks, frozen)   # L2 在 L0 之后（它要读 f.l0）
-            _l1_place(f, toks, frozen)         # L1 在最后（它要读 f.l0 与 s.l2）
+            _l05_plan(f, toks, frozen)         # L0.5 在 L1 之前（它先把区内的动态站点接走）
+            _l1_place(f, toks, frozen)         # L1 在最后（它要读 f.l0 / s.l2 / L0.5）
         # 层梯走完再算掩码：被 L0/L1/L2 接走的站点根本不落到分配器上，也就不需要它。
         for f in funcs:
             for name, mask in _slot_plan(f, toks, frozen):
@@ -7395,6 +7407,43 @@ def _provably_free(toks: list, s: int, e: int) -> bool:
         return toks[s].kind == "number"
     return (e - s == 2 and toks[s].kind != "string" and toks[s].val == "-"
             and toks[e - 1].kind == "number")
+
+
+#: L0.5 的栈区：静态段 + 动态段一共不超过这么多字节；动态段固定预留这么多。
+#: 上限同时受**根表**约束（`[1024 x i64]`）：整块缓冲的每个 8 字节字都要进根表。
+L05_MAX = 2048
+L05_DYN = 512
+
+
+def _l05_plan(f: Func, toks: list,
+              safe: "dict[str, int] | None" = None) -> None:
+    """`docs/210` §2.10 的 **L0.5**：**一个函数共用一块栈区**（静态段）。
+
+    它**不另立判据**，只重新布局 L0 已经证住的东西：`f.l0` 里的站点字面量尺寸、
+    不外逃、各自要一条 `alloca`；这里把它们按声明序摆进**一条** `[K x i64]`，
+    偏移在编译期算死 —— 于是每个站点的成本从"一条 alloca + 一处根登记"降到
+    "一条 GEP + 共用一次根登记"，而**证明面一个字节都没变**（`f.l0` 不删）。
+
+    **少于两处站点就不开区**：一条 `alloca` 换一条 `alloca`，收益为零。于是 L0 保留
+    "函数里只有一处提升"的那一格 —— 一层不该靠吞掉另一层来显得有用。
+
+    放不下（合计 > `L05_MAX`）时**只收放得下的**，其余照旧各自 `alloca`（仍在 L0）。
+    """
+    if not f.l0:
+        return
+    budget = L05_MAX
+    static: dict[str, tuple[int, int]] = {}
+    total = 0
+    for name, size in f.l0.items():           # 插入序 = token 里的声明序
+        pad = (size + 7) & ~7
+        if total + pad > budget:
+            continue                          # 放不下：留给 L0 自己的 alloca
+        static[name] = (total, size)
+        total += pad
+    if len(static) < 2:
+        return
+    f.l05_static = static
+    f.l05_cap = total
 
 
 def _l0_promotable(f: Func, toks: list,
@@ -7948,7 +7997,13 @@ class _Ir:
         self.dbg_meta = dbg_meta                    # M59: 共享元数据行
         #: **L0 提升表**（`docs/210` §2，只在 `gc_auto_alpha` 下非空）：`{局部名: 字节数}`。
         #: 其余档**一行都不动** —— 默认档不许改变任何现有程序的产物（`docs/175` §3.4 五条之一）。
-        self.l0: dict[str, int] = f.l0 if gc_alpha else {}
+        # **L0.5 的静态站点从 `self.l0` 里拿掉**（`f.l0` 不动 —— 那是分析结果）：
+        # 它们不再各自 `alloca` 一条缓冲，也不按名字登记根，整块区域由 `%l05.buf` 一次登记。
+        self.l0: dict[str, int] = ({n: sz for n, sz in f.l0.items()
+                                    if n not in getattr(f, "l05_static", {})}
+                                   if gc_alpha else {})
+        self.l05_static: dict = getattr(f, "l05_static", {}) if gc_alpha else {}
+        self.l05_cap: int = getattr(f, "l05_cap", 0) if gc_alpha else 0
         #: **块内槽掩码**（`docs/210` §2.9，同样只在 alpha 档非空）：`{局部名: 掩码}`。
         #: 命中就在那条 `alloc` 之后把块头的借出标记改写成 `-(mask + 2)` —— 收集器因此
         #: 知道**这一块哪几个字要扫**。保守站点一个字节都不变（标记还是那个 `-1`）。
@@ -8001,6 +8056,8 @@ class _Ir:
                 # （`ty_size` 认 `[...]`），而且**天然 8 字节对齐** —— 与 `__loment_alloc`
                 # 返回的地址同对齐，于是 `store64` 那条默认对齐假设成立（`[N x i8]` 只对齐 1）。
                 self.w(f"%{name}.buf = alloca [{(n + 7) // 8} x i64]")
+        if self.l05_cap:
+            self.w(f"%l05.buf = alloca [{self.l05_cap // 8} x i64]")
 
     def dbg_for(self, line: int) -> int | None:
         """M59: 行号 -> DILocation id (每函数一份, 由 emit_llvm 分配)。"""
@@ -8163,7 +8220,10 @@ class _Ir:
             n = self.l0.get(name)
             return (n + 7) // 8 if n else 1
 
-        self.rootk = sum(slots(nm) for nm, (ty, _) in self.vars.items() if self._root_ty(ty))
+        #: L0.5 的栈区也要扫：它和 L0 的缓冲一样**可以装堆指针**（`wr64` 那种安全被调）。
+        #: 整块按字登记，口径与 L0 那条一致。
+        self.rootk = (sum(slots(nm) for nm, (ty, _) in self.vars.items() if self._root_ty(ty))
+                      + (self.l05_cap // 8 if self.l05_cap else 0))
         if self.rootk == 0:
             return
         # `#778`：根表的游标与槽是**线程间共享**的。push/pop 各自是一段很短的
@@ -8173,6 +8233,9 @@ class _Ir:
             self.w("call void @__loment_rt_acquire()")
         n0 = self.t()
         self.w(f"{n0} = load i32, ptr @__loment_rootn")
+        #: L0.5 的栈区：**整块的每个 8 字节字各占一格**，与 L0 缓冲同口径（#362）。
+        #: 少了这一段，`rootn` 会跨过一批**从未初始化**的槽 —— 根扫读到的就是上一次
+        #: 递归留在同一段栈上的旧值，于是"区域里装着堆指针"这件事从来没被扫到。
         i = 0
         for name, (ty, slot) in self.vars.items():
             if not self._root_ty(ty):
@@ -8208,6 +8271,20 @@ class _Ir:
             self.w(f"{v} = ptrtoint ptr {slot} to i64")
             self.w(f"store i64 {v}, ptr {gp}")
             i += 1
+        if self.l05_cap:
+            k = self.l05_cap // 8
+            for j in range(k):
+                idx = self.t()
+                self.w(f"{idx} = add i32 {n0}, {i}")
+                gp = self.t()
+                self.w(f"{gp} = getelementptr [1024 x i64], ptr @__loment_roots,"
+                       f" i32 0, i32 {idx}")
+                bp = self.t()
+                self.w(f"{bp} = getelementptr [{k} x i64], ptr %l05.buf, i32 0, i32 {j}")
+                v = self.t()
+                self.w(f"{v} = ptrtoint ptr {bp} to i64")
+                self.w(f"store i64 {v}, ptr {gp}")
+                i += 1
         n1 = self.t()
         self.w(f"{n1} = add i32 {n0}, {self.rootk}")
         self.w(f"store i32 {n1}, ptr @__loment_rootn")
@@ -9070,6 +9147,15 @@ class _Ir:
             return
         if isinstance(s, Let):
             if s.expr is None:  # M9: 未初始化 (alloca 已在入口块)
+                return
+            if s.name in self.l05_static:
+                # **L0.5 静态段**（`docs/210` §2.10）：整函数一块栈区里的一个**编译期偏移**。
+                off, size = self.l05_static[s.name]
+                k = self.l05_cap // 8
+                q = self.t()
+                self.w(f"{q} = getelementptr [{k} x i64], ptr %l05.buf, i32 0, i32 {off // 8}")
+                self.w(f"store ptr {q}, ptr {self.vars[s.name][1]}")
+                self.lms_size[s.name] = size
                 return
             if s.name in self.l0:
                 # **L0**（`docs/210` §2 / `gc_auto_alpha`）：这条 `alloc` 已经**提到栈上**了 ——

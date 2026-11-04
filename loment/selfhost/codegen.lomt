@@ -60,7 +60,15 @@ const CG_SAFE_MASK_OFF: u32 = 18404;   // = (1 + CG_MAXFN) * 4：掩码表相对
 const CG_ARM: u32 = 7680;          // 7680..8192: 能力域表之后、值栈之前的那 512 字节
 const CG_CONST: u32 = 907972;      // 常量表 (8 B/条) 紧跟安全名表
 const CG_MAXCONST: u32 = 1024;
-const CG_BYTES: u32 = 916164;      // 整块大小 = CG_CONST + CG_MAXCONST*8
+//: **L0.5 的区表**（`docs/210` §2.10）：每函数一张，`(name_tok, offset)` 8 B/条。
+//: 256 格 = 2048 B，正好是 `L05_MAX` 的字节预算（最小 8 B 一格也放得下）。
+const CG_L05: u32 = 916164;
+const CG_L05_SLOTS: u32 = 256;
+const CG_BYTES: u32 = 918212;      // = CG_L05 + CG_L05_SLOTS*8
+//: 区表的两个标量：`CG_L05_N` = 条数（0 = 本函数不开区），`CG_L05_CAP` = 整块字节数。
+//: 604/608 落在 `CG_PROF`(600) 与函数计数(640) 之间那段没有别的写点的空隙里。
+const CG_L05_N: u32 = 604;
+const CG_L05_CAP: u32 = 608;
 use bytes
 use lexer
 
@@ -1728,6 +1736,58 @@ fn l0_size(s: ptr, src: ptr, toks: ptr, nm: u32) -> u32 {
                       load32(s, 12), ptr_add(s, CG_CUR), ptr_add(s, CG_SAFE));
 }
 
+/// L0.5 的区表查询：回**偏移 + 1**（0 = 不在区里）。`docs/210` §2.10。
+///
+/// 用 `+1` 当"在区里"的标记，是因为偏移 0 本身合法（第一个站点就在区首）。
+fn l05_off(s: ptr, nm: u32) -> u32 {
+    let n: u32 = load32(s, CG_L05_N);
+    let i: u32 = 0;
+    while i < n {
+        if load32(s, CG_L05 + i * 8) == nm {
+            return load32(s, CG_L05 + i * 8 + 4) + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 本函数的 L0.5 规划：把 **L0 已经认领的**静态站点按声明序摆进一块区。
+///
+/// **与 `lomentc._l05_plan` 同一套规则**：`f.l0` 的插入序 = 声明序；按序累加 8 字节
+/// 对齐后的尺寸，放不下的跳过（留在 L0 自己的 `alloca` 上）；**少于两处就不开区**
+/// —— 一层不该靠吞掉另一层来显得有用。回 1 = 开了区（`CG_L05_CAP` > 0）。
+fn l05_plan(s: ptr, src: ptr, toks: ptr, nl: u32) -> u32 {
+    store32(s, CG_L05_N, 0);
+    store32(s, CG_L05_CAP, 0);
+    if load32(s, 572) == 0 {                       // 非 alpha 档：L0 表根本不建
+        return 0;
+    }
+    let total: u32 = 0;
+    let n: u32 = 0;
+    let i: u32 = 0;
+    while i < nl {
+        let nm: u32 = load32(s, CG_LOCAL + i * 8);
+        let sz: u32 = l0_size(s, src, toks, nm);
+        if sz > 0 && n < CG_L05_SLOTS {
+            let pad: u32 = (sz + 7) & 4294967288;
+            if total + pad <= 2048 {
+                store32(s, CG_L05 + n * 8, nm);
+                store32(s, CG_L05 + n * 8 + 4, total);
+                n = n + 1;
+                total = total + pad;
+            }
+        }
+        i = i + 1;
+    }
+    if n < 2 {
+        store32(s, CG_L05_N, 0);
+        return 0;
+    }
+    store32(s, CG_L05_N, n);
+    store32(s, CG_L05_CAP, total);
+    return 1;
+}
+
 /// 入口块的 L0 缓冲 alloca（紧跟 `.addr` 之后发，与 `lomentc.locals_prologue` 同序）。
 /// 类型是 **`[K x i64]`** 而不是 `[N x i8]`：单条数组类型两个链接器都吃，而且**天然 8 字节
 /// 对齐** —— 与 `__loment_alloc` 返回的地址同对齐，于是 `store64` 那条默认对齐假设成立。
@@ -1736,8 +1796,8 @@ fn emit_l0_buf(s: ptr, out: ptr, src: ptr, toks: ptr, nm: u32) -> u32 {
         return 0;
     }
     let n: u32 = l0_size(s, src, toks, nm);
-    if n == 0 {
-        return 0;
+    if n == 0 || l05_off(s, nm) != 0 {
+        return 0;                                  // L0.5 的区接走了：整函数只有一条缓冲
     }
     emit_str(s, out, "  %");
     emit_local_name(s, out, src, toks, nm);
@@ -1756,6 +1816,23 @@ fn l0_store(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
     let nm: u32 = j + 1;
     if l0_size(s, src, toks, nm) == 0 {
         return 0;
+    }
+    let q: u32 = l05_off(s, nm);
+    if q != 0 {
+        // **L0.5**（`docs/210` §2.10）：整函数一块区里的一个**编译期偏移**。
+        let tq: u32 = alloc_temp(s);
+        emit_str(s, out, "  ");
+        emit_temp_ref(s, out, tq);
+        emit_str(s, out, " = getelementptr [");
+        emit_dec(s, out, load32(s, CG_L05_CAP) / 8);
+        emit_str(s, out, " x i64], ptr %l05.buf, i32 0, i32 ");
+        emit_dec(s, out, (q - 1) / 8);
+        emit_str(s, out, "\n  store ptr ");
+        emit_temp_ref(s, out, tq);
+        emit_str(s, out, ", ptr %");
+        emit_local_name(s, out, src, toks, nm);
+        emit_str(s, out, ".addr\n");
+        return 1;
     }
     emit_str(s, out, "  store ptr %");
     emit_local_name(s, out, src, toks, nm);
@@ -4885,6 +4962,7 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
     store32(s, 564, body_at);   // L0 分析要函数体的 token 跨度 (两处前导段与 stmt 都用)
     store32(s, 568, body_end);
     let nl: u32 = collect_locals(s, src, toks, body_at, body_end);
+    let has05: u32 = l05_plan(s, src, toks, nl);   // L0.5：本函数开不开区
     if tok_is(src, toks, base - 1, "interrupt") {   // M33: x86_intrcc 需要中断帧指针, 无参数
         emit_str(s, out, "; ");
         emit_tok(s, out, src, toks, base + 1);
@@ -4901,6 +4979,12 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
             emit_str(s, out, "\n");
             emit_l0_buf(s, out, src, toks, load32(s, CG_LOCAL + bi * 8));
             bi = bi + 1;
+        }
+        if has05 == 1 {   // L0.5：整函数一块栈区（在局部 `.buf` 之后、根登记之前）
+            emit_str(s, out, "  %l05.buf = alloca [");
+            emit_dec(s, out, load32(s, CG_L05_CAP) / 8);
+            emit_str(s, out, " x i64]
+");
         }
         if gc_any(s) == 1 {   // `gc_auto`：中断函数**没有形参**，只有局部
             roots_push(s, out, src, toks, 0, nl);
@@ -4990,6 +5074,12 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
         emit_str(s, out, "\n");
         emit_l0_buf(s, out, src, toks, load32(s, CG_LOCAL + bl * 8));
         bl = bl + 1;
+    }
+    if has05 == 1 {   // L0.5：整函数一块栈区（与 `lomentc.locals_prologue` 同序）
+        emit_str(s, out, "  %l05.buf = alloca [");
+        emit_dec(s, out, load32(s, CG_L05_CAP) / 8);
+        emit_str(s, out, " x i64]
+");
     }
     let c: u32 = 0;
     while c < k {
@@ -8200,7 +8290,7 @@ fn root_count(s: ptr, src: ptr, toks: ptr, k: u32, nl: u32) -> u32 {
         }
         j = j + 1;
     }
-    return n;
+    return n + load32(s, CG_L05_CAP) / 8;
 }
 
 /// 一个**类型 token** 是不是"槽里有指针"那种（`lomentc._Ir._root_ty` 的 token 版）。
@@ -8260,8 +8350,8 @@ fn l0_bytes(s: ptr, src: ptr, toks: ptr, nm: u32) -> u32 {
 /// 这个名字占几格根表：**L0 提升过的缓冲按它的字数算**（`FujoJTOP/loment#362`），其余一格。
 fn root_slots(s: ptr, src: ptr, toks: ptr, nm: u32) -> u32 {
     let n: u32 = l0_bytes(s, src, toks, nm);
-    if n == 0 {
-        return 1;
+    if n == 0 || l05_off(s, nm) != 0 {
+        return 1;                                  // L0.5 的区整块另记（见 `roots_push`）
     }
     return (n + 7) / 8;
 }
@@ -8340,7 +8430,7 @@ fn roots_push(s: ptr, out: ptr, src: ptr, toks: ptr, k: u32, nl: u32) -> u32 {
         if root_ty_tok(src, toks, load32(s, CG_LOCAL + j * 8 + 4)) == 1 {
             let lnm: u32 = load32(s, CG_LOCAL + j * 8);
             let lsz: u32 = l0_bytes(s, src, toks, lnm);
-            if lsz == 0 {
+            if lsz == 0 || l05_off(s, lnm) != 0 {
                 emit_root_slot(s, out, src, toks, n0, c, lnm, 0);
                 c = c + 1;
             } else {
@@ -8356,6 +8446,51 @@ fn roots_push(s: ptr, out: ptr, src: ptr, toks: ptr, k: u32, nl: u32) -> u32 {
             }
         }
         j = j + 1;
+    }
+    // **L0.5 的区**：整块每个 8 字节字各占一格 —— 与 L0 缓冲同口径（#362）。
+    // 少了这一段，`rootn` 会跨过一批**从未初始化**的槽。
+    let kw05: u32 = load32(s, CG_L05_CAP) / 8;
+    let w05: u32 = 0;
+    while w05 < kw05 {
+        let i05: u32 = alloc_temp(s);
+        emit_str(s, out, "  ");
+        emit_temp_ref(s, out, i05);
+        emit_str(s, out, " = add i32 ");
+        emit_temp_ref(s, out, n0);
+        emit_str(s, out, ", ");
+        emit_dec(s, out, c);
+        emit_str(s, out, "
+");
+        let g05: u32 = alloc_temp(s);
+        emit_str(s, out, "  ");
+        emit_temp_ref(s, out, g05);
+        emit_str(s, out, " = getelementptr [1024 x i64], ptr @__loment_roots, i32 0, i32 ");
+        emit_temp_ref(s, out, i05);
+        emit_str(s, out, "
+");
+        let b05: u32 = alloc_temp(s);
+        emit_str(s, out, "  ");
+        emit_temp_ref(s, out, b05);
+        emit_str(s, out, " = getelementptr [");
+        emit_dec(s, out, kw05);
+        emit_str(s, out, " x i64], ptr %l05.buf, i32 0, i32 ");
+        emit_dec(s, out, w05);
+        emit_str(s, out, "
+");
+        let v05: u32 = alloc_temp(s);
+        emit_str(s, out, "  ");
+        emit_temp_ref(s, out, v05);
+        emit_str(s, out, " = ptrtoint ptr ");
+        emit_temp_ref(s, out, b05);
+        emit_str(s, out, " to i64
+  store i64 ");
+        emit_temp_ref(s, out, v05);
+        emit_str(s, out, ", ptr ");
+        emit_temp_ref(s, out, g05);
+        emit_str(s, out, "
+");
+        c = c + 1;
+        w05 = w05 + 1;
     }
     let n1: u32 = alloc_temp(s);
     emit_str(s, out, "  ");

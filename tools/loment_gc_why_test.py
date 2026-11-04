@@ -57,16 +57,16 @@ def _corpus() -> list[Path]:
 
 @test
 def test_report_agrees_with_the_compiler():
-    """判据 A：**对账**。报告的四层直方图 == `_count_gc_ladder` 的四个数。"""
+    """判据 A：**对账**。报告的分层直方图 == `_count_gc_ladder` 的同一批数。"""
     n = 0
     for p in _corpus():
         m = lomentc.load(p)
         got = W.histogram(W.sites(m))
         want = lomentc._count_gc_ladder(m)
-        got = {k: got[k] for k in ("l0", "l1", "l2", "l3", "total_sites")}
+        got = {k: got[k] for k in ("l0", "l0_5", "l1", "l2", "l3", "total_sites")}
         assert got == want, f"{p.name}: 报告 {got} != 编译器 {want}"
         n += 1
-    print(f"      {n} 份模块：四层直方图与编译器逐份相同")
+    print(f"      {n} 份模块：分层直方图与编译器逐份相同")
 
 
 @test

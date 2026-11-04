@@ -261,7 +261,8 @@ def test_each_gc_tier_drives_the_collector_and_the_ladder():
             out[tier] = {
                 "collector": "__loment_collect" in ir,
                 "roots": "__loment_roots" in ir,
-                "compile_time_rungs": sum(int(ladder.get(k, 0)) for k in ("l0", "l1", "l2")),
+                "compile_time_rungs": sum(int(ladder.get(k, 0))
+                                          for k in ("l0", "l0_5", "l1", "l2")),
             }
     manual, auto, alpha = (out[k] for k in ("gc_manual", "gc_auto", "gc_auto_alpha"))
     assert not manual["collector"] and not manual["roots"], \
@@ -271,7 +272,7 @@ def test_each_gc_tier_drives_the_collector_and_the_ladder():
     assert auto["compile_time_rungs"] == 0, \
         f"gc_auto 不该有编译期梯子（那是 alpha 的）: {auto}"
     assert alpha["compile_time_rungs"] > 0, \
-        f"gc_auto_alpha 的编译期梯子全零 —— L0/L1/L2 没有驱动: {alpha}"
+        f"gc_auto_alpha 的编译期梯子全零 —— L0/L0.5/L1/L2 没有驱动: {alpha}"
     print(f"      manual={manual} auto={auto} alpha={alpha}")
 
 

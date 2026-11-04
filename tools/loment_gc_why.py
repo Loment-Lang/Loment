@@ -42,7 +42,7 @@ import lomentc  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 
 #: 四层梯的档名（顺序 = `_count_gc_ladder` 的分派顺序）。
-RUNGS = ("L0", "L1", "L2", "L3")
+RUNGS = ("L0", "L0.5", "L1", "L2", "L3")
 
 #: `L3` 的**具名原因**。每一条都要能指到"用户该改哪儿"。
 #: 键是稳定标识（进 `--json`），值是人话。
@@ -141,6 +141,8 @@ def _l0_refusal(f, toks: list, s: dict, params: set) -> "str | None":
 def _shape_reason(f, toks: list, s: dict, params: set, l0n: set, l1n: set) -> str:
     """形状合格的站点落在 `L3` 时，**是哪一条挡住的**。"""
     name = s["name"]
+    if name in getattr(f, "l05_static", {}):
+        return "l0_5"                     # L0 的证明结果，只是被函数级栈区接走了
     if name in l0n:
         return "l0"                       # 不该走到这里（调用方已排除）
     if s["in_l2"]:
@@ -197,12 +199,13 @@ def sites(mod) -> list[dict]:
         l0n = set(f.l0)
         l1n = _l1_names(f)
         r = _shape_reason(f, toks, s, params, l0n, l1n)
-        rung = {"l0": "L0", "l2": "L2", "l1": "L1"}.get(r, "L3")
+        rung = {"l0": "L0", "l0_5": "L0.5", "l2": "L2", "l1": "L1"}.get(r, "L3")
         out.append({"line": s["line"], "name": s["name"], "rung": rung,
                     "reason": None if rung != "L3" else r,
                     # 「L0 为什么没收」—— 每一行都给（不是 L3 才给）。一块落在 L1
                     # 而没上栈的程序，用户要看的正是这一句。
-                    "l0_refused": None if rung == "L0" else _l0_refusal(f, toks, s, params)})
+                    "l0_refused": None if rung in ("L0", "L0.5")
+                    else _l0_refusal(f, toks, s, params)})
     # 形状不合的站点：全部 `alloc` 行号里减掉形状合格的那些（同一行可能出现两个，
     # 所以按**多重集**减，不按集合）。
     have = [s["line"] for s in shape]
@@ -238,7 +241,7 @@ def _l1_names(f) -> set:
 
 
 def histogram(rows: list[dict]) -> dict:
-    h = {"l0": 0, "l1": 0, "l2": 0, "l3": 0}
+    h = {"l0": 0, "l0_5": 0, "l1": 0, "l2": 0, "l3": 0}
     for r in rows:
         h[r["rung"].lower()] += 1
     h["total_sites"] = len(rows)
@@ -267,11 +270,12 @@ def main(argv: list[str] | None = None) -> int:
         why = "" if r["reason"] is None else f"   ← {REASONS[r['reason']]}"
         nm = f" `{r['name']}`" if r["name"] else ""
         note = ""
-        if r["rung"] != "L0" and r.get("l0_refused"):
+        if r["rung"] not in ("L0", "L0.5") and r.get("l0_refused"):
             note = f"   （L0 没收：{REASONS[r['l0_refused']]}）"
         print(f"  {r['line']:>5}  {r['rung']}{nm}{why}{note}")
     print(f"\n  共 {h['total_sites']} 处："
-          + " · ".join(f"{RUNGS[i]} {h[k]}" for i, k in enumerate(("l0", "l1", "l2", "l3"))))
+          + " · ".join(f"{RUNGS[i]} {h[k]}"
+                        for i, k in enumerate(("l0", "l0_5", "l1", "l2", "l3"))))
     return 0
 
 

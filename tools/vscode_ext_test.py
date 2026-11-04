@@ -902,7 +902,7 @@ def test_vscode_surface_grammar_switches_language():
         ("loment/examples/multisyntax-projects/c/01-algo/algo.lomt", "loment", "loment-c"),
         ("loment/examples/multisyntax-projects/go/01-digest/digest.lomt", "loment", "loment-go"),
         ("loment/lib/lumtui_math.lomt", "loment", "loment-python"),
-        # `tur` 是**原生**（docs/293）：声明了也不该换语言 id
+        # `tur` 是**原生**（docs/295）：声明了也不该换语言 id
         ("loment/selfhost/grammar_decl/tur.lomt", "loment", "loment"),
         # 没声明 = 原生
         ("loment/examples/tour.lomt", "loment", "loment"),
@@ -918,7 +918,7 @@ def test_vscode_surface_grammar_switches_language():
         # 声明删掉之后要**回**到 `loment`：原先返回 undefined（"不认领"），于是它一直
         # 停在 `loment-<x>` —— 状态栏写着外门语法、语言服务也不接（2026-10-21）。
         (proj / "plain.lomt").write_text("module p\n", encoding="utf-8")
-        # `rust` 已退回**表层语法**（docs/293）：声明了要换到 `loment-rust`
+        # `rust` 已退回**表层语法**（docs/295）：声明了要换到 `loment-rust`
         (proj / "rusty.lomt").write_text(
             "choose write grammar rust\n\nmodule r\n\nfn f() -> i32 {\n    return 1;\n}\n",
             encoding="utf-8")

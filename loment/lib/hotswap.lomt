@@ -58,7 +58,9 @@ const HOT_SAVE_N: u32 = 16384;       // `save` 里记"改了几帧"的位置（�
 const HOT_SAVE_SCRATCH: u32 = 32768;
 const HOT_SWAPPING: u32 = 2;         // epoch：正在改槽表（这个窗口里别进来）
 const HOT_READY: u32 = 1;            // epoch：新实现已经发布
-const HOT_MMAP_FLAGS: u32 = 50;      // PRIVATE 2 | FIXED 0x10 | ANON 0x20
+const HOT_MMAP_FLAGS: u32 = 50;      // PRIVATE 2 | FIXED 0x10 | ANON 0x20（装载槽要定址）
+const HOT_MMAP_ANON: u32 = 34;       // PRIVATE 2 | ANON 0x20（`addr = 0`，让内核挑）
+const HOT_READ_MAX: u32 = 8388608;   // 安全点读候选的上限（8 MiB；LSP 那份 ~0.9 MiB）
 const HOT_PROT_RW: u32 = 3;
 const HOT_PROT_RX: u32 = 5;
 //: 改自己的槽表时**不能撤 EXEC**：装载器自己正从那一页取指。真实的固定核会住在一块
@@ -201,6 +203,11 @@ pub fn hot_install(blob: ptr, n: u32, save: ptr) -> u32 {
         return 2;
     }
     let self_base: u32 = l32(blob, 4);
+    // 没有槽表就不是 hotswap 档（默认档的文本段第一个字节不是 `E9`）。这种产物里
+    // `hot_install` 还在（固定核是普通库），但翻槽表会去改**代码**，所以先拒。
+    if load8(p32(self_base), 0) != 233 as u8 {
+        return 15;
+    }
     let self_slots: u32 = l32(blob, 8);
     let self_gate: u32 = l32(blob, 12);
     let self_gate_len: u32 = l32(blob, 16);
@@ -369,6 +376,50 @@ pub fn hot_restore(blob: ptr, n: u32, save: ptr, self_base: u32) -> u32 {
         return 3;
     }
     return 0;
+}
+
+/// 安全点上的那一眼（`#1155`）：`path` 是一份装载件，有就装，没有就返回 5。
+///
+/// 调用方在事件循环的顶上叫它 —— 一次 `open` 就是这个函数的全部开销；只有在**真有候选**
+/// 的时候才 mmap 一块读缓冲（读完就还，不留在堆上：bump 堆只有 64 KiB，见 `docs/292`）。
+pub fn hot_tick(path: ptr, save: ptr) -> u32 {
+    let fd: i64 = syscall4(2, path as u64, 0, 0);
+    if is_neg(fd) {
+        return 5;
+    }
+    // **不能用 `HOT_MMAP_FLAGS`**：那里面有 MAP_FIXED（装载槽要定址），而这里是
+    // `addr = 0` —— FIXED 加 0 会被内核拒掉（EINVAL），读缓冲根本拿不到。
+    let mp: i64 = syscall7(9, 0, HOT_READ_MAX as u64, HOT_PROT_RW as u64,
+                           HOT_MMAP_ANON as u64, 0, 0);
+    if is_neg(mp) {
+        syscall4(3, fd as u64, 0, 0);
+        return 6;
+    }
+    let buf: ptr = mp as ptr;
+    // **一次 `read` 读不完**：候选是整段文本（LSP 这类程序 800 KB+），单次 read 可能
+    // 只回一部分。读到 EOF 为止，装到读满为止。
+    let total: u32 = 0;
+    let got: i64 = 1;
+    while got > 0 && total < HOT_READ_MAX {
+        got = syscall4(0, fd as u64, ptr_add(buf, total) as u64,
+                       (HOT_READ_MAX - total) as u64);
+        if got > 0 {
+            total = total + got as u32;
+        }
+    }
+    syscall4(3, fd as u64, 0, 0);
+    if total == 0 {
+        let _u: i64 = syscall4(11, mp as u64, HOT_READ_MAX as u64, 0);
+        return 7;
+    }
+    let rc: u32 = hot_install(buf, total, save);
+    let _v: i64 = syscall4(11, mp as u64, HOT_READ_MAX as u64, 0);
+    if rc == 0 {
+        // **吃掉这一份**：下一轮不该再装一遍（同一个候选装两次 = 往正在跑的槽上
+        // `MAP_FIXED` 一遍）。暂存目录那边也是这么做的（`take`/`rejected`）。
+        let _u: i64 = syscall4(87, path as u64, 0, 0);
+    }
+    return rc;
 }
 
 /// 归还一个槽（`munmap`）。**只在没有任何东西指向它时调用** —— 今天就是 `hot_restore`

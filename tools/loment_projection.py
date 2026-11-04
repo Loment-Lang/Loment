@@ -203,10 +203,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--tip", required=True, help="R（Pre-Release 的提交）")
     ap.add_argument("--release", required=True)
     ap.add_argument("--out", default=None)
+    ap.add_argument("--work-dir", default=None,
+                    help="把投影树留在这里（默认临时目录，用完即删）")
     args = ap.parse_args(argv)
     tree = Path(args.at).resolve()
-    with tempfile.TemporaryDirectory() as t:
-        proj = project(tree, args.base, args.tip, Path(t) / "work", release=args.release)
+    if args.work_dir:
+        # 留着：热更新件要从这棵**投影树**编（`loment_hotart --new <这里>`）。
+        proj = project(tree, args.base, args.tip, Path(args.work_dir).resolve(),
+                       release=args.release)
+    else:
+        with tempfile.TemporaryDirectory() as t:
+            proj = project(tree, args.base, args.tip, Path(t) / "work",
+                           release=args.release)
     text = json.dumps(proj.as_dict(), indent=2, sort_keys=True) + "\n"
     if args.out:
         Path(args.out).write_text(text, encoding="utf-8", newline="\n")

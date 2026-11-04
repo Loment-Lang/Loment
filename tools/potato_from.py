@@ -1730,9 +1730,15 @@ EXT = {".py": "python", ".c": "c", ".h": "c", ".rs": "rust", ".go": "go",
 # 源侧宽松（`py` / `python` 都收）、对象侧只许一个拼法，否则同一份源出两串字节。
 GRAMMAR_ALIASES: dict[str, str] = {
     "loment": "loment",
-    "tur": "tur",
-    # Tur 2（docs/296）：版次名。旧 `tur` 永久冻结，新语法只进 `tur2`。
-    "tur2": "tur2",
+    # Tur 的版次是**两级名**（`docs/296` §1.1）：`tur<年份>.<序号>`。规范名永不改义；
+    # `tur` / `tur1` / `tur2` 是**源侧**拼法 —— `tur` 是 Tur 1 的历史名，永久指向
+    # `tur2026.1`；`tur1` / `tur2` 是 2026 年的短名，`loment fmt` 写盘时展开成全名。
+    # 跨年后短名不再接受（换成对应全名报错），绝不复用到新族 —— 否则老文件会被重新解释。
+    "tur": "tur2026.1",
+    "tur1": "tur2026.1",
+    "tur2": "tur2026.2",
+    "tur2026.1": "tur2026.1",
+    "tur2026.2": "tur2026.2",
     "c": "c",
     "py": "python", "python": "python",
     "java": "java",
@@ -1759,9 +1765,11 @@ GRAMMAR_ALIASES: dict[str, str] = {
 #: 一门**表层语法**：`choose write grammar rust` 与 `.rs` 后缀走同一条 `from_rust`
 #: 路径（`docs/179` 抽接口那条路）。于是 "`grammar rust` 是严格 Rust 子集" 这件事
 #: **由读法本身保证** —— 我们给 Tur 加的修改不会漏到它那一面去。
-#: `tur2` 是 **Tur 2**（`docs/296`）：与 `tur` 同一条原生路，只是多一个版次 profile。
-#: 版次只加不改 —— `tur` 的语法与语义永久冻结，新特性只在 `tur2` 里出现。
-NATIVE_GRAMMARS = ("loment", "tur", "tur2")
+#: Tur 的版次（`docs/296` §1.1）是两级名：`tur<年份>.<序号>`。原生读法的**规范名**就是
+#: 这两个；`tur` / `tur1` / `tur2` 在 `GRAMMAR_ALIASES` 里落到它们。版次只加不改 ——
+#: `tur2026.1` 的语法与语义永久冻结，新特性只进新的规范名。
+TUR_EDITIONS = ("tur2026.1", "tur2026.2")
+NATIVE_GRAMMARS = ("loment",) + TUR_EDITIONS
 
 #: **声明的词序**：`choose write grammar <别名>`。
 #:
@@ -2016,16 +2024,19 @@ class FrontUnit:
     调用方据此可以说清"这些行号指的是哪一份"（`docs/179` §6.5 那类"把人引向错方向"）。
     """
 
-    __slots__ = ("grammar", "source", "translated", "path", "profile")
+    __slots__ = ("grammar", "source", "translated", "path", "profile", "spelling")
 
     def __init__(self, grammar: str, source: str, translated: bool, path: Path,
-                 profile: str = "tur1"):
+                 profile: str = "tur2026.1", spelling: str = ""):
         self.grammar = grammar
         self.source = source
         self.translated = translated
         self.path = path
-        #: **版次**（`docs/296`）：`tur1`（缺省）或 `tur2`。它只影响"哪些拼法被当语法读"，
-        #: 不影响 `grammar`（抹掉声明后两者都是本语言）。译出来的那几门一律是 `tur1`。
+        #: 源里**写下的那个拼法**（小写；空 = 没写）。编译期提示要把它展开成规范名。
+        self.spelling = spelling
+        #: **版次**（`docs/296` §1.1）：规范名 `tur2026.1`（缺省）或 `tur2026.2`。
+        #: 它只影响"哪些拼法被当语法读"，不影响 `grammar`（抹掉声明后都是本语言）。
+        #: 译出来的那几门一律是 `tur2026.1`。
         self.profile = profile
 
 
@@ -2185,10 +2196,13 @@ def front_door(path: Path, lang: str = "auto", mode: str = "strict") -> FrontUni
             # 这是一次**表层拼法**的改写，与另外几门翻译器做的事同类；行号与偏移
             # 一字不动（见 `_strip_tur_mut`）。
             body = strip_grammar_decl(src)
-            if g in ("tur", "tur2"):
+            if g in TUR_EDITIONS:
                 body = _strip_tur_mut(body)
+            # 版次记**规范名**（`tur2026.1` / `tur2026.2`）。`loment` 与没声明都是 Tur 1。
+            _word = (find_decl(src)[1] or "").strip().lower() if declared else ""
             return FrontUnit("loment", body, False, path,
-                             profile=("tur2" if g == "tur2" else "tur1"))
+                             profile=(g if g in TUR_EDITIONS else "tur2026.1"),
+                             spelling=_word)
         lang, why = g, "文件头声明 `choose write grammar`"
     else:
         lang, why = resolve_lang(path, lang)

@@ -35,7 +35,7 @@ loment_lms_test 17
 loment_grammar_test 22
 loment_tools_test 61
 loment_p7_test 8
-loment_p8_test 35
+loment_p8_test 36
 loment_p9_test 2
 loment_crash_test 9
 loment_gc_surface_test 3
@@ -73,7 +73,7 @@ loment_door_test 6
 loment_admit_test 8
 loment_zwframe_test 7
 loment_lib_test 15
-loment_cli_test 49
+loment_cli_test 50
 loment_err_test 55
 loment_std_test 4
 loment_libl_test 2

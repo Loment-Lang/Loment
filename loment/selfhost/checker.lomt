@@ -351,7 +351,7 @@ fn chk_builtin_ret(src: ptr, t: ptr, i: u32) -> u32 {
     if chk_tok_is(src, t, i, "str_eq") {
         return (1 << TY_KIND_SHIFT) + 9;          // bool
     }
-    if chk_tok_is(src, t, i, "str_concat") {
+    if chk_tok_is(src, t, i, "str_concat") || chk_tok_is(src, t, i, "tur_edition") {
         return (1 << TY_KIND_SHIFT) + 10;         // str
     }
     if chk_tok_is(src, t, i, "alloc") || chk_tok_is(src, t, i, "str_ptr")
@@ -668,7 +668,7 @@ fn is_base_type(src: ptr, t: ptr, i: u32) -> bool {
 
 fn is_builtin(src: ptr, t: ptr, i: u32) -> bool {
     let k: u32 = 0;
-    let names: str = "str_len str_eq str_concat str_byte slice_len panic alloc free load8 store8 atomic_add inb outb get_bits set_bits str_ptr print ptr_add ptr_sub syscall4 syscall6 syscall7 thread_spawn";
+    let names: str = "str_len str_eq str_concat str_byte slice_len panic alloc free load8 store8 atomic_add inb outb get_bits set_bits str_ptr print tur_edition ptr_add ptr_sub syscall4 syscall6 syscall7 thread_spawn";
     // 逐词比较 (内建名用空格分隔的常量表); 新增内建要同步这里, 否则调用点报假 E-UNKNOWN-FN
     let off: u32 = 0;
     while off < str_len(names) {
@@ -1185,6 +1185,10 @@ fn chk_guard(src: ptr, t: ptr, ctab: ptr, nc: u32, i: u32, p: ptr, o: u32) -> u3
 /// 这张表必须与 `is_builtin` 的名字清单**同增同减** —— `test_m81_builtin_table_matches`
 /// 会逐名比对两边, 漏改一边就红。
 fn chk_builtin_arity(src: ptr, t: ptr, i: u32) -> u32 {
+    // `tur_edition()` 是**零实参**内建（`docs/296` §1.1）。
+    if chk_tok_is(src, t, i, "tur_edition") {
+        return 0;
+    }
     // slice_len 也是内建 (参考实现里它单列一条, 不在 BUILTINS 表里), 但 arity 同口径
     if chk_tok_is(src, t, i, "str_len") || chk_tok_is(src, t, i, "panic")
             || chk_tok_is(src, t, i, "alloc") || chk_tok_is(src, t, i, "free")

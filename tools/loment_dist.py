@@ -618,7 +618,9 @@ case "${1:-help}" in
             cat "$tmp/a.ll" > "$tmp/merged.ll"
             printf '\n' >> "$tmp/merged.ll"
             for f in "${deps_ir[@]}"; do
-                cat "$f" >> "$tmp/merged.ll"
+                # The Tur edition belongs to the program (a.ll). A library IR
+                # carrying the same external global would collide (docs/296 s1.2).
+                sed '/^@loment\.tur\.edition = /d' "$f" >> "$tmp/merged.ll"
                 printf '\n' >> "$tmp/merged.ll"
             done
             link_ir="$tmp/merged.ll"

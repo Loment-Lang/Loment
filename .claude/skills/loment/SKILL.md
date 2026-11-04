@@ -16,11 +16,18 @@ domains** (`capability` + `guard`). It compiles straight to a **native x86-64 ex
 not have**: `module`, `choose`, `capability`, `guard`, `extern fn`, `comefor`, and the `print`
 builtin. Everything in this guide is Tur.
 
-A file is read as Tur when it has **no declaration** (the default), `choose write grammar tur`,
-or `choose write grammar loment` (the historical spelling of the same grammar). The same program
-can also be written with C / C++ / Java / C# / Go / Python spelling, **changing the spelling and
-nothing else** - recognised **by extension** (`.c` / `.cpp` / `.java` / `.cs` / `.py` / `.go`),
-or with an explicit declaration at the top of the file:
+A file is read as **Tur 1** when it has **no declaration** (the default) or says
+`choose write grammar loment` / `tur` / `tur1` / `tur2026.1`. Editions are **two-level**:
+`tur<year>.<n>` (`docs/296`). The canonical name never changes meaning; `tur1` / `tur2` are the
+2026 shorthands for `tur2026.1` / `tur2026.2` and are only accepted in their release year;
+write the full name in new files (`loment fmt` does not take files with a grammar declaration
+yet). **Every `check` / `build` / `run` prints the resolved
+edition on stderr** (e.g. `grammar tur2 -> tur2026.2 (Tur 2)`); `tur_edition()` returns it at
+runtime, and `loment version <exe>` reads it back from the artifact.
+
+The same program can also be written with C / C++ / Java / C# / Go / Python spelling, **changing
+the spelling and nothing else** - recognised **by extension** (`.c` / `.cpp` / `.java` / `.cs` /
+`.py` / `.go`), or with an explicit declaration at the top of the file:
 
 ```rust
 choose write grammar python     // must come before `module`; once per file
@@ -42,8 +49,9 @@ into it. To write Tur with Rust's spelling, declare `grammar tur`.
 > translators have no Loment twin yet (`docs/189` section 4.1). So "write `.py` inside the
 > package and it runs" **is not true today**.
 
-The alias table is **frozen at the factory**: the native grammar (`loment` / `tur`) plus the
-foreign grammars (`c`, `cpp`, `java`, `csharp`, `go`, `python`, `rust`, and the not-yet-parsed
+The alias table is **frozen at the factory**: the native grammar (`loment`, `tur`, `tur1`,
+`tur2`, `tur2026.1`, `tur2026.2`) plus the foreign grammars (`c`, `cpp`, `java`, `csharp`, `go`,
+`python`, `rust`, and the not-yet-parsed
 `natural`). It cannot be extended or overridden (`docs/188` section 1.1). Getting it wrong is one
 of four errors: the name is not in the table / it is written after `module` / it is written twice
 / no name follows it.
@@ -343,6 +351,7 @@ Running it should print `42 10 9 6 2 3` and `TOUR RESULT: PASS`.
 | `enum Kind { Small, Big(u32) }` | An enum; a variant may carry **one** payload |
 | `fn write_str(fd: u64, s: str) -> i64` | A function; **every parameter needs a type**, returns are written `-> T`, no return type means none |
 | `print(s)` | Write a string to stdout (one `write` syscall). Use `syscall4` only when you need another fd or another call |
+| `tur_edition()` | Which Tur edition this source is read as (`tur2026.1` / `tur2026.2`); the compiler also reports it on stderr |
 | `syscall4(1, fd, str_ptr(s) as u64, str_len(s) as u64)` | A raw syscall: `(number, args…)`; **there is no printf** |
 | `fn write_dec(…)` | The standard way to print a decimal: `alloc` + `store8` + reverse |
 | `let buf: ptr = alloc(12)` | **`let` always needs a type**; `ptr` is a raw pointer |
@@ -616,6 +625,7 @@ each bring in one module, see 3.1 at the end of this section.
 | `str_concat(a: str, b: str) -> str` | Concatenation (**the compile-time bump heap, which is only 64 KiB** - do not build big strings) |
 | `str_ptr(s: str) -> ptr` | The data pointer (for feeding syscalls) |
 | `print(s: str) -> u32` | Write the string's bytes to stdout (one `write` syscall) |
+| `tur_edition() -> str` | The Tur edition this program is compiled as, e.g. `tur2026.2` (docs/296). The compiler also prints it on stderr at every check/build/run |
 | `alloc(n: u32) -> ptr` | Bump-heap allocation (the same 64 KiB cap - **and read 6.2.14 before relying on it**) |
 | `free(p: ptr) -> u32` | Returns the block to the allocator (bump pointer + address-ordered free list); it cannot grow past 64 KiB and does not coalesce (`docs/210` section 2.8) |
 | `load8(p: ptr, off: u32) -> u32` | Read a byte |

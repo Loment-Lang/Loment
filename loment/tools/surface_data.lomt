@@ -867,7 +867,7 @@ pub fn decl_word(i: u32) -> str {
     return "";
 }
 
-pub fn alias_count() -> u32 { return 21; }
+pub fn alias_count() -> u32 { return 24; }
 
 /// 第 `i` 个语法别名（报错器按**小写**比 —— 作者写 `C#` 还是 `c#` 都该认）。
 pub fn alias_word(i: u32) -> str {
@@ -891,7 +891,10 @@ pub fn alias_word(i: u32) -> str {
     if i == 17 { return "rs"; }
     if i == 18 { return "rust"; }
     if i == 19 { return "tur"; }
-    if i == 20 { return "tur2"; }
+    if i == 20 { return "tur1"; }
+    if i == 21 { return "tur2"; }
+    if i == 22 { return "tur2026.1"; }
+    if i == 23 { return "tur2026.2"; }
     return "";
 }
 
@@ -916,8 +919,11 @@ pub fn alias_lang(i: u32) -> str {
     if i == 16 { return "python"; }
     if i == 17 { return "rust"; }
     if i == 18 { return "rust"; }
-    if i == 19 { return "tur"; }
-    if i == 20 { return "tur2"; }
+    if i == 19 { return "tur2026.1"; }
+    if i == 20 { return "tur2026.1"; }
+    if i == 21 { return "tur2026.2"; }
+    if i == 22 { return "tur2026.1"; }
+    if i == 23 { return "tur2026.2"; }
     return "";
 }
 

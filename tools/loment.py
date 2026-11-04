@@ -134,6 +134,11 @@ def cmd_err(a) -> int:
 
 def cmd_ir(a) -> int:
     p, mod, deps = _load(a.file)
+    # **编译期告知版次**（`docs/296` §1.1）：用户写的拼法 -> 规范名。
+    _sp = getattr(mod, "spelling", "") or "default"
+    _prof = getattr(mod, "profile", "tur2026.1")
+    print(f"loment: grammar {_sp} -> {_prof} (Tur {_prof.rsplit('.', 1)[-1]})",
+          file=sys.stderr)
     text = lomentc.emit_llvm(mod, ROOT, deps)
     if not a.objdump:
         sys.stdout.write(text)

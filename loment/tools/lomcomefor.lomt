@@ -226,10 +226,10 @@ fn _start() -> u32 {
     let ct: ptr = cv as ptr;
 
     // ---- 1 核心: 方言源与手写源编出的 IR **逐字节相同**（docs/184 §9 的证伪判据）
-    let _a: u32 = run("./driver def_dialect.lomt; r=$?; echo; echo -n \"|rc=$r\"", o1, st);
+    let _a: u32 = run("./driver def_dialect.lomt --no-edition-notice; r=$?; echo; echo -n \"|rc=$r\"", o1, st);
     let rc1: u32 = ld32(st, 0);
     let n1: u32 = ld32(st, 4);
-    let _b: u32 = run("./driver def_hand.lomt; r=$?; echo; echo -n \"|rc=$r\"", o2, st);
+    let _b: u32 = run("./driver def_hand.lomt --no-edition-notice; r=$?; echo; echo -n \"|rc=$r\"", o2, st);
     let rc2: u32 = ld32(st, 0);
     let n2: u32 = ld32(st, 4);
     let ok1: u32 = 0;
@@ -240,7 +240,7 @@ fn _start() -> u32 {
         "方言源与手写源的 IR 不同（或至少一份没编出来）", ct);
 
     // ---- 2 `comefor`/`byuse`/`done`/`to` 都不是保留字: 当标识符用照样编得过
-    let _c: u32 = run("./driver shape_not_word.lomt; r=$?; echo; echo -n \"|rc=$r\"", o1, st);
+    let _c: u32 = run("./driver shape_not_word.lomt --no-edition-notice; r=$?; echo; echo -n \"|rc=$r\"", o1, st);
     let ok2: u32 = 0;
     if ld32(st, 0) == 0 && ld32(st, 4) > 0 {
         ok2 = 1;
@@ -248,19 +248,19 @@ fn _start() -> u32 {
     rep("test_comefor_is_shape_not_reserved_word", ok2, "四个词当标识符用就编不过", ct);
 
     // ---- 3–7 负例: 五类错都要**被拒**
-    let ok3: u32 = rejected("./driver bad_body_use.lomt 2>&1; r=$?; echo; echo -n \"|rc=$r\"",
+    let ok3: u32 = rejected("./driver bad_body_use.lomt --no-edition-notice 2>&1; r=$?; echo; echo -n \"|rc=$r\"",
                              o1, st, "use");
     rep("test_body_rejects_use", ok3, "体里的 use 没被拒", ct);
-    let ok4: u32 = rejected("./driver bad_unknown_byuse.lomt 2>&1; r=$?; echo; echo -n \"|rc=$r\"",
+    let ok4: u32 = rejected("./driver bad_unknown_byuse.lomt --no-edition-notice 2>&1; r=$?; echo; echo -n \"|rc=$r\"",
                              o1, st, "byuse");
     rep("test_byuse_unknown_name_is_rejected", ok4, "byuse 收错名字没被拒", ct);
-    let ok5: u32 = rejected("./driver bad_overconsume.lomt 2>&1; r=$?; echo; echo -n \"|rc=$r\"",
+    let ok5: u32 = rejected("./driver bad_overconsume.lomt --no-edition-notice 2>&1; r=$?; echo; echo -n \"|rc=$r\"",
                              o1, st, "");
     rep("test_overconsumption_is_rejected", ok5, "宏体多吃没被拒", ct);
-    let ok6: u32 = rejected("./driver bad_not_top.lomt 2>&1; r=$?; echo; echo -n \"|rc=$r\"",
+    let ok6: u32 = rejected("./driver bad_not_top.lomt --no-edition-notice 2>&1; r=$?; echo; echo -n \"|rc=$r\"",
                              o1, st, "top level");
     rep("test_definition_must_be_top_level", ok6, "块里的定义没被拒", ct);
-    let ok7: u32 = rejected("./driver bad_entry_params.lomt 2>&1; r=$?; echo; echo -n \"|rc=$r\"",
+    let ok7: u32 = rejected("./driver bad_entry_params.lomt --no-edition-notice 2>&1; r=$?; echo; echo -n \"|rc=$r\"",
                              o1, st, "");
     rep("test_entry_takes_no_params", ok7, "main 带形参没被拒", ct);
 

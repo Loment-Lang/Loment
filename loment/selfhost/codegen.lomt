@@ -61,10 +61,10 @@ const CG_ARM: u32 = 7680;          // 7680..8192: 能力域表之后、值栈之
 const CG_CONST: u32 = 907972;      // 常量表 (8 B/条) 紧跟安全名表
 const CG_MAXCONST: u32 = 1024;
 //: **L0.5 的区表**（`docs/210` §2.10）：每函数一张，`(name_tok, offset)` 8 B/条。
-//: 256 格 = 2048 B，正好是 `L05_MAX` 的字节预算（最小 8 B 一格也放得下）。
+//: **256 格 = 2048 B**，正好是 `L05_MAX` 的字节预算 —— 每格至少 8 字节，所以条目数
+//: 在算术上不会再涨（第 257 处之前预算已经先挡住），表的尺寸本身就是那条证明。
 const CG_L05: u32 = 916164;
-const CG_L05_SLOTS: u32 = 256;
-const CG_BYTES: u32 = 918212;      // = CG_L05 + CG_L05_SLOTS*8
+const CG_BYTES: u32 = 918212;      // = CG_L05 + 2048
 //: 区表的两个标量：`CG_L05_N` = 条数（0 = 本函数不开区），`CG_L05_CAP` = 整块字节数。
 //: **628/632 是 600–640 这一段里最后两个没人认的格** —— 604–624 已经被 Tur 2 的循环
 //: machinery（`CG_BODY0` / `CG_LBRK` / `CG_LCOND` / `CG_LKIND` / `CG_LSV` / `CG_LAUX`）
@@ -1789,7 +1789,11 @@ fn l05_plan(s: ptr, src: ptr, toks: ptr, nl: u32) -> u32 {
     while i < nl {
         let nm: u32 = load32(s, CG_LOCAL + i * 8);
         let sz: u32 = l0_size(s, src, toks, nm);
-        if sz > 0 && n < CG_L05_SLOTS {
+        if sz > 0 {
+            // **不需要格数守卫**：表是 256 格（2048 B），而预算 2048 与"每格至少
+            // 8 字节"一起保证第 257 处之前 `total + pad <= 2048` 已经为假（256 × 8 =
+            // 2048）。也就是说 `n` 永远到不了 256，写表不会越界 —— 这一条是**算术**，
+            // 不是"碰巧"。
             let pad: u32 = (sz + 7) & 4294967288;
             if total + pad <= 2048 {
                 store32(s, CG_L05 + n * 8, nm);

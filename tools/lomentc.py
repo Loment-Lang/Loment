@@ -179,8 +179,12 @@ define internal void @__loment_abort() {
 }
 
 declare void @llvm.trap()
+'''
 
-define internal i32 @__loment_print_num(i64 %v) {
+#: `print_num` 的十进制转换（`docs/296` §2.7）。**不在 `_IR_RUNTIME` 里** —— 那一段是
+#: 目标无关的 freestanding 文本，而这里有一句 x86 的 `syscall` asm；并进去会让 aarch64
+#: 交叉编译收到一段它不懂的汇编（`loment_p9_test` 当场红）。只在真调用 `print_num` 时发。
+_IR_PRINT_NUM = '''define internal i32 @__loment_print_num(i64 %v) {
 entry:
   %buf = alloca [24 x i8]
   %neg = icmp slt i64 %v, 0
@@ -10027,6 +10031,10 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
         out.append("")
     if rt_on or "@__loment_" in text_all:  # M31: 自带运行时 (无 libc)
         out.append(_IR_RUNTIME)
+    # `print_num` 的那段**单独发**（`docs/296` §2.7）：它与 `_IR_RUNTIME` 同处运行时区、
+    # 但只在真的调用了它时才出现 —— 它带一句 x86 的 `syscall` asm。
+    if "@__loment_print_num" in text_all:
+        out.append(_IR_PRINT_NUM)
     if "@__loment_audit" in text_all:  # P4/M38
         out.append("@__loment_audit = internal global [16 x i64] zeroinitializer")
         out.append("")

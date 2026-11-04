@@ -28,6 +28,9 @@ runtime, and `loment version <exe>` reads it back from the artifact.
 **Tur 2026.2** (`tur2026.2`, or the 2026 shorthand `tur2`) adds, beyond the pure sugar
 (`def f()` for `fn f()`, `a and b` / `a or b` / `not a`, `elif cond { }`):
 
+<!-- no-compile: 这一段是**逐条语法片段**（每条一行、各有自己的上下文），不是一个能独立
+     编译的单元。完整可跑的版本在判据里：`loment_p8_test` 的 M91（循环）/ M94（裸 return、
+     print_num）/ M95（orelse、catch），规格在 `docs/296` §2。 -->
 ```rust
 for x in xs { ... }            // named array / slice; `x` is a copy of each element
 while go { if done { break; } if skip { continue; } ... }

@@ -8967,10 +8967,33 @@ fn emit_runtime(s: ptr, out: ptr) -> u32 {
     emit_str(s, out, "define internal void @__loment_memset(ptr %p, i8 %v, i64 %n) {\nentry:\n  br label %loop\nloop:\n  %i = phi i64 [ 0, %entry ], [ %i1, %body ]\n  %done = icmp uge i64 %i, %n\n  br i1 %done, label %end, label %body\nbody:\n  %q = getelementptr i8, ptr %p, i64 %i\n  store i8 %v, ptr %q\n  %i1 = add i64 %i, 1\n  br label %loop\nend:\n  ret void\n}\n\n");
     emit_str(s, out, "define internal void @__loment_memcpy(ptr %d, ptr %s, i64 %n) {\nentry:\n  br label %loop\nloop:\n  %i = phi i64 [ 0, %entry ], [ %i1, %body ]\n  %done = icmp uge i64 %i, %n\n  br i1 %done, label %end, label %body\nbody:\n  %sp = getelementptr i8, ptr %s, i64 %i\n  %b = load i8, ptr %sp\n  %dp = getelementptr i8, ptr %d, i64 %i\n  store i8 %b, ptr %dp\n  %i1 = add i64 %i, 1\n  br label %loop\nend:\n  ret void\n}\n\n");
     emit_str(s, out, "define internal void @__loment_abort() {\n  call void @llvm.trap()\n  unreachable\n}\n\ndeclare void @llvm.trap()\n\n");
-    // `print_num`（`docs/296` §2.7）：24 字节栈缓冲、一次 `write`。文本与参考实现
-    // `_IR_RUNTIME` 的那一段**逐字节相同** —— 判据比的是产物，不是"两边都能跑"。
-    // 负号用 `ptrtoint`/`sub`/`inttoptr` 走，不走负的 `getelementptr` 立即数（包内镜像
-    // 链接器对立即数的处理是这条约束的来路，见 L0 掩码那一段注释）。
+    return 0;
+}
+
+/// 这份单元**调用**了 `print_num` 吗（`docs/296` §2.7）：它的实现带一句 x86 的
+/// `syscall` asm，不能并进目标无关的运行期块（aarch64 交叉编译会当非法汇编拒掉），
+/// 所以单独发。判据与参考实现 `"@__loment_print_num" in text_all` 同义 —— 只有真调用
+/// 才会产生那条 `call`；`fn print_num(` 是声明，不算。
+fn uses_print_num(s: ptr, src: ptr, toks: ptr) -> u32 {
+    if load32(s, CG_PROF) != 1 {
+        return 0;
+    }
+    let i: u32 = 0;
+    while tok_kind(toks, i) != 4 {
+        if tok_is(src, toks, i, "print_num") && tok_is(src, toks, i + 1, "(") {
+            if !(i > 0 && tok_is(src, toks, i - 1, "fn")) {
+                return 1;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// `print_num` 的实现（`docs/296` §2.7）：24 字节栈缓冲、一次 `write`。
+/// **单独发**（不在 `emit_runtime` 里）：它带一句 x86 的 `syscall` asm，目标无关的
+/// 运行期块收不下它（aarch64 交叉编译会当非法汇编拒掉）。
+fn emit_print_num(s: ptr, out: ptr) -> u32 {
     return emit_str(s, out, "define internal i32 @__loment_print_num(i64 %v) {\nentry:\n  %buf = alloca [24 x i8]\n  %neg = icmp slt i64 %v, 0\n  br i1 %neg, label %negp, label %pos\nnegp:\n  %m0 = sub i64 0, %v\n  br label %conv\npos:\n  br label %conv\nconv:\n  %m = phi i64 [ %m0, %negp ], [ %v, %pos ]\n  %end0 = getelementptr inbounds [24 x i8], ptr %buf, i64 0, i64 24\n  br label %loop\nloop:\n  %p = phi ptr [ %end0, %conv ], [ %p2, %loop ]\n  %x = phi i64 [ %m, %conv ], [ %q, %loop ]\n  %d = urem i64 %x, 10\n  %q = udiv i64 %x, 10\n  %c = trunc i64 %d to i8\n  %c2 = add i8 %c, 48\n  %pi = ptrtoint ptr %p to i64\n  %pj = sub i64 %pi, 1\n  %p2 = inttoptr i64 %pj to ptr\n  store i8 %c2, ptr %p2\n  %done = icmp eq i64 %q, 0\n  br i1 %done, label %after, label %loop\nafter:\n  br i1 %neg, label %sign, label %wr\nsign:\n  %si = ptrtoint ptr %p2 to i64\n  %sj = sub i64 %si, 1\n  %p3 = inttoptr i64 %sj to ptr\n  store i8 45, ptr %p3\n  br label %wr\nwr:\n  %st = phi ptr [ %p2, %after ], [ %p3, %sign ]\n  %sp = ptrtoint ptr %st to i64\n  %ep = ptrtoint ptr %end0 to i64\n  %ln = sub i64 %ep, %sp\n  %r = call i64 asm sideeffect \"syscall\", \"={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}\"(i64 1, i64 1, i64 %sp, i64 %ln)\n  %t = trunc i64 %r to i32\n  ret i32 %t\n}\n\n");
 }
 
@@ -9568,6 +9591,11 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32) -> u32 {
     emit_str(s, out, "\n");
     if load32(s, 512) == 1 {
         emit_runtime(s, out);
+        // `print_num` 的实现**单独发**（`docs/296` §2.7）：那句 x86 的 `syscall` asm
+        // 不能进目标无关的运行期块（aarch64 交叉编译会当非法汇编拒掉）。
+        if uses_print_num(s, src, toks) == 1 {
+            emit_print_num(s, out);
+        }
     }
     if contains_ident(src, toks, "guard") == 1 {   // P4/M38: 审计计数全局
         emit_str(s, out, "@__loment_audit = internal global [16 x i64] zeroinitializer\n\n");

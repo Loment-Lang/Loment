@@ -77,9 +77,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--entry", required=True, help="程序入口（相对树的 .lomt 路径）")
     ap.add_argument("--release", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--projection", default=None, help="投影 JSON（`loment_projection --out`）")
     args = ap.parse_args(argv)
+    proj = None
+    if args.projection:
+        proj = json.loads(Path(args.projection).read_text(encoding="utf-8"))
     got = package(Path(args.old).resolve(), Path(args.new).resolve(), args.release,
-                  Path(args.out), entry=args.entry)
+                  Path(args.out), entry=args.entry, projection=proj)
     if got is None:
         print("[SKIP] 投影为空 —— 不产生热更新件")
         return 0

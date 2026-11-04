@@ -102,6 +102,10 @@ on:
         description: '只构建、产物挂成 workflow artifact，不碰 GitHub Release'
         type: boolean
         default: false
+      hot_base:
+        description: '（热更新，`#1156`）基线的 tag，如 v0.1.5。给了才做投影并打热更新件'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -224,6 +228,30 @@ jobs:
           # 自己出的包自己校一遍（`--check` 是拿 SHA256SUMS 对产物目录，
           # 与安装脚本第一步做的是同一件事）。
           python tools/loment_dist.py --check
+
+      # 热更新件（`#1155`/`#1156`）：**只在给了 `hot_base` 时**才做，产物落在
+      # `loment/build/hot/` 并单独上传 —— 不进 `loment/dist/`，所以发行资产一个字节不变。
+      - name: 热更新投影与打包
+        if: ${{ github.event.inputs.hot_base != '' }}
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+          BASE: ${{ github.event.inputs.hot_base }}
+        run: |
+          set -e
+          python tools/loment_projection.py --base "$BASE" --tip HEAD             --release "$TAG" --work-dir loment/build/hot-tree             --out loment/build/hot-projection.json
+          echo '--- 投影：'
+          cat loment/build/hot-projection.json
+          python tools/loment_hotart.py --old . --new loment/build/hot-tree             --entry loment/tools/lsp.lomt --release "$TAG" --out loment/build/hot             --projection loment/build/hot-projection.json || true
+          if [ ! -f loment/build/hot/candidate.hot ]; then
+            echo "这次发布没有 fix 提交（或全被剔除）—— 没有热更新件，这是对的"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ github.event.inputs.hot_base != '' }}
+        with:
+          name: loment-hot-${{ steps.ver.outputs.tag }}
+          path: loment/build/hot/*
+          if-no-files-found: warn
 
       - name: 产物与校验和
         run: |

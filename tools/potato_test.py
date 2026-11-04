@@ -533,6 +533,30 @@ MUTATORS_V16 = [
 ]
 
 
+def fixture_v19() -> dict:
+    """一份合法的 **v19** 形式对象：v18 的再 + `gc_ladder` 的第五格 `l0_5`。
+
+    `l0_5` 是 v19 起才合法的分量（`docs/210` §2.10）：函数级栈区接走的站点。加一格会让
+    v10 的 `l0 + l1 + l2 + l3 == total_sites` 失效，所以**必须升版**，而**旧版对象不被
+    回溯改写** —— `fixture_v18()` 带四格仍然合法，这一条由下面那条判据守着。
+    """
+    d = fixture_v18()
+    d["potato"] = "v19"
+    d["gc_ladder"] = {"l0": 1, "l0_5": 2, "l1": 2, "l2": 3, "l3": 4,
+                      "total_sites": 12}
+    return d
+
+
+#: v19 的 `gc_ladder.l0_5` 那几条规则的反例（`docs/210` §2.10）。作用在 **v19** 的对象上。
+MUTATORS_V19 = [
+    ("l0_5 整个缺掉", lambda d: d["gc_ladder"].pop("l0_5"), "gc_ladder.l0_5"),
+    ("l0_5 是负数", lambda d: d["gc_ladder"].__setitem__("l0_5", -1), "gc_ladder.l0_5"),
+    ("五数之和对不上", lambda d: d["gc_ladder"].__setitem__("total_sites", 11),
+     "项之和"),
+    ("多一格 l0_6", lambda d: d["gc_ladder"].__setitem__("l0_6", 0), "不认识的键"),
+]
+
+
 @test
 def test_v18_requires_the_lms_budgets():
     """v18 的七级预算（`docs/253` §11.2.1，#1023）：正例合法，四条反例各钉一条规则。"""
@@ -543,6 +567,23 @@ def test_v18_requires_the_lms_budgets():
         errs = potato.validate(d)
         assert any(needle in e for e in errs), (name, errs)
 
+
+@test
+def test_v19_adds_l0_5_without_rewriting_old_objects():
+    """v19 的第五格（`docs/210` §2.10）：正例合法、四条反例各钉一条规则；
+    **v18 的四格对象仍然合法** —— 台阶只往上加，不回溯改写。"""
+    assert potato.validate(fixture_v19()) == [], potato.validate(fixture_v19())
+    for name, mut, needle in MUTATORS_V19:
+        d = fixture_v19()
+        mut(d)
+        errs = potato.validate(d)
+        assert any(needle in e for e in errs), (name, errs)
+    # 反方向：v18 的对象没有 `l0_5`，而不是"少了必填项"
+    assert potato.validate(fixture_v18()) == [], potato.validate(fixture_v18())
+    # v18 的对象**也不许**带 `l0_5`（那一版没有这一格）
+    d = fixture_v18()
+    d["gc_ladder"]["l0_5"] = 0
+    assert any("不认识的键" in e for e in potato.validate(d)), potato.validate(d)
 
 @test
 def test_v16_requires_the_lspe_ledger():

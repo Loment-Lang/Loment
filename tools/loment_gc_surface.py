@@ -119,7 +119,7 @@ def measure(dirs=CORPUS) -> list[tuple[str, dict]]:
 
 
 def total(rows) -> dict:
-    t = {"l0": 0, "l1": 0, "l2": 0, "l3": 0, "total_sites": 0}
+    t = {"l0": 0, "l0_5": 0, "l1": 0, "l2": 0, "l3": 0, "total_sites": 0}
     for _rel, gl in rows:
         if gl.get("skipped"):
             continue
@@ -142,13 +142,13 @@ def report(rows) -> str:
             n_skip += 1
             continue
         if gl["total_sites"]:
-            lines.append(f"  {rel:44} l0={gl['l0']} l1={gl['l1']} l2={gl['l2']} "
-                         f"l3={gl['l3']} total={gl['total_sites']}")
-    proved = t["l0"] + t["l1"] + t["l2"]
+            lines.append(f"  {rel:44} l0={gl['l0']} l05={gl['l0_5']} l1={gl['l1']} "
+                         f"l2={gl['l2']} l3={gl['l3']} total={gl['total_sites']}")
+    proved = t["l0"] + t["l0_5"] + t["l1"] + t["l2"]
     lines.append(f"\n汇总（{len(rows) - n_skip} 份，跳过 {n_skip} 份已表态的）：")
-    lines.append(f"  L0={t['l0']}  L1={t['l1']}  L2={t['l2']}  L3={t['l3']}  "
-                 f"total={t['total_sites']}")
-    lines.append(f"  证明面（L0+L1+L2 / total）= {proved}/{t['total_sites']} "
+    lines.append(f"  L0={t['l0']}  L0.5={t['l0_5']}  L1={t['l1']}  L2={t['l2']}  "
+                 f"L3={t['l3']}  total={t['total_sites']}")
+    lines.append(f"  证明面（L0+L0.5+L1+L2 / total）= {proved}/{t['total_sites']} "
                  f"= {_pct(proved, t['total_sites'])}")
     return "\n".join(lines)
 

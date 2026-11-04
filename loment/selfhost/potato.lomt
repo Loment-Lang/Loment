@@ -1238,6 +1238,9 @@ fn pt_gl_fn(sc: ptr, unit: ptr, t: ptr, fat: u32, fend: u32, npar: u32, par: ptr
     let nl0: u32 = 0;
     let nl1: u32 = 0;
     let nl2: u32 = 0;
+    let nl05: u32 = 0;
+    let l05n: u32 = 0;
+    let l05tot: u32 = 0;
     let d: u32 = fat;
     while d < fend {
         let nm: u32 = d + 1;
@@ -1261,9 +1264,20 @@ fn pt_gl_fn(sc: ptr, unit: ptr, t: ptr, fat: u32, fend: u32, npar: u32, par: ptr
                 j = j + 1;
             }
             if done == 1 && pt_tis(unit, t, j, ";") {
-                if l0_size_at(unit, t, nm, fat, fend, npar, par,
-                              ptr_add(sc, PT_GLSAFE)) != 0 {
-                    nl0 = nl0 + 1;
+                let lsz: u32 = l0_size_at(unit, t, nm, fat, fend, npar, par,
+                                          ptr_add(sc, PT_GLSAFE));
+                if lsz != 0 {
+                    // **L0.5**（`docs/210` §2.10）：`_l05_plan` 按声明序把 L0 站点摆进
+                    // 一块区（放不下的留下），而**少于两处就不开区**。这里在 token 流上
+                    // 逐步模拟，于是两处数的是同一批站点。
+                    let pad5: u32 = (lsz + 7) & 4294967288;
+                    if l05tot + pad5 <= 2048 && l05n < 256 {
+                        l05n = l05n + 1;
+                        l05tot = l05tot + pad5;
+                        nl05 = nl05 + 1;
+                    } else {
+                        nl0 = nl0 + 1;
+                    }
                 } else if pt_gl_inrange(nm, ptr_add(sc, PT_GLRNG), nrng) == 1 {
                     nl2 = nl2 + 1;
                 } else if pt_gl_istop(unit, t, fat, nm) == 1
@@ -1276,7 +1290,12 @@ fn pt_gl_fn(sc: ptr, unit: ptr, t: ptr, fat: u32, fend: u32, npar: u32, par: ptr
         }
         d = d + 1;
     }
-    return (nl0 as u64) | ((nl1 as u64) << 16) | ((nl2 as u64) << 32);
+    if l05n < 2 {                                  // 一处站点不值得开区：留在 L0
+        nl0 = nl0 + nl05;
+        nl05 = 0;
+    }
+    return (nl0 as u64) | ((nl1 as u64) << 16) | ((nl2 as u64) << 32)
+            | ((nl05 as u64) << 48);
 }
 
 /// 本单元是不是 `gc_auto_alpha` 档（`docs/175` §3.4）—— 四层梯**只在这一档算**，别的档
@@ -1315,6 +1334,7 @@ fn pt_gl_all(sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32) -> u64 {
     let nl0: u64 = 0;
     let nl1: u64 = 0;
     let nl2: u64 = 0;
+    let nl05: u64 = 0;
     let fi: u32 = lo;
     while fi < hi && pt_kind(t, fi) != 4 {
         if pt_tis(unit, t, fi, "fn")
@@ -1339,13 +1359,14 @@ fn pt_gl_all(sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32) -> u64 {
                         nl0 = nl0 + (pk & 65535);
                         nl1 = nl1 + ((pk >> 16) & 65535);
                         nl2 = nl2 + ((pk >> 32) & 65535);
+                        nl05 = nl05 + ((pk >> 48) & 65535);
                     }
                 }
             }
         }
         fi = fi + 1;
     }
-    return nl0 | (nl1 << 16) | (nl2 << 32);
+    return nl0 | (nl1 << 16) | (nl2 << 32) | (nl05 << 48);
 }
 
 /// 类型形参个数: `Name < A , B >` 里逗号个数 + 1。
@@ -5673,6 +5694,8 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     let ngl_a: u32 = (ngl_pk & 65535) as u32;
     let ngl_b: u32 = ((ngl_pk >> 16) & 65535) as u32;
     let ngl_c: u32 = ((ngl_pk >> 32) & 65535) as u32;
+    // v19 = v18 + `gc_ladder.l0_5`（`docs/210` §2.10）：L0.5 的栈区接走的站点。
+    let ngl_d: u32 = ((ngl_pk >> 48) & 65535) as u32;
     // v12 = v11 + **面的组成**（`docs/224`）：机调用站点按面分一分。
     let nsf_file: u32 = pt_surf_total(unit, t, lo, hi, 1);
     let nsf_mem: u32 = pt_surf_total(unit, t, lo, hi, 2);
@@ -5692,7 +5715,7 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     // v17 = v16 + **实际开着哪几级** `lms_levels`（同一次改判）。
     // 它在**最后** —— 与前面几维同形，且"这份产物在哪一档上"是**不读源码可判**的。
     o = pt_key(out, o, 1, "potato");
-    o = pt_qs(out, o, "v18");
+    o = pt_qs(out, o, "v19");
     o = pt_str(out, o, ",\n");
     // `unit` 是**根**那份源的 `module` 名 —— 依赖在前, 所以它是根那个标记后面的名字
     // (不是第 1 个 token: 那是第一个依赖的名字)。
@@ -5864,6 +5887,9 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     o = pt_key(out, o, 2, "l0");
     o = pt_dec(out, o, ngl_a as u64);
     o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "l0_5");
+    o = pt_dec(out, o, ngl_d as u64);
+    o = pt_str(out, o, ",\n");
     o = pt_key(out, o, 2, "l1");
     o = pt_dec(out, o, ngl_b as u64);
     o = pt_str(out, o, ",\n");
@@ -5871,7 +5897,7 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     o = pt_dec(out, o, ngl_c as u64);
     o = pt_str(out, o, ",\n");
     o = pt_key(out, o, 2, "l3");
-    o = pt_dec(out, o, (ngl_tot - (ngl_a + ngl_b + ngl_c)) as u64);
+    o = pt_dec(out, o, (ngl_tot - (ngl_a + ngl_d + ngl_b + ngl_c)) as u64);
     o = pt_str(out, o, ",\n");
     o = pt_key(out, o, 2, "total_sites");
     o = pt_dec(out, o, ngl_tot as u64);

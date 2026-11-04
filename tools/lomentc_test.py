@@ -2537,9 +2537,16 @@ def test_l0_rule_pair():
     # 缓冲的 `[... x i64]` 计数钉住"尺寸取整"没被改坏。每格现在有 **2 + 字数** 处：
     # `alloca`、那条 `store ptr %N.buf`，以及**根登记的每一个字**
     # （`FujoJTOP/loment#362`：提升缓冲的每个 8 字节字各占一格根表）。
+    #
+    # **`f_partial` 是 L0.5 那一格**（`docs/210` §2.10）：它有两处静态站点，于是不各发
+    # 一条缓冲，而是共用 `%l05.buf`（64 + 32 = 96 B = 12 字）。参照数 = `alloca` 一条 +
+    # 静态站点两条（`getelementptr ... %l05.buf`）+ 根登记 12 字 —— 15 处；对应地，
+    # 那两格的 L0 参照（`2 + 8` 与 `2 + 4`）不再出现。
     want_buf = sum(2 + (sz + 7) // 8
                    for per in L0_WANT.values() for sz in per.values())
+    want_buf += 15 - (2 + 8) - (2 + 4)
     assert alpha_ll.count(".buf") == want_buf, alpha_ll.count(".buf")
+    assert alpha_ll.count("%l05.buf = alloca [12 x i64]") == 1, alpha_ll.count("%l05.buf")
     assert ".buf" not in manual_ll
     # 两份源**只差那一行** —— 不然"差别来自档位"这个说法就不成立
     assert L0_ALPHA_SRC.replace("choose gc_auto_alpha", "X") == \
@@ -2633,13 +2640,62 @@ def test_gc_ladder_rule():
     """
     a = json.loads(lomentc.emit_potato(parse(GC_LADDER_ALPHA_SRC), ROOT))["gc_ladder"]
     m = json.loads(lomentc.emit_potato(parse(GC_LADDER_MANUAL_SRC), ROOT))["gc_ladder"]
-    assert a == {"l0": 1, "l1": 1, "l2": 1, "l3": 1, "total_sites": 4}, f"alpha: {a}"
-    assert m == {"l0": 0, "l1": 0, "l2": 0, "l3": 4, "total_sites": 4}, f"manual: {m}"
+    assert a == {"l0": 1, "l0_5": 0, "l1": 1, "l2": 1, "l3": 1,
+                 "total_sites": 4}, f"alpha: {a}"
+    assert m == {"l0": 0, "l0_5": 0, "l1": 0, "l2": 0, "l3": 4,
+                 "total_sites": 4}, f"manual: {m}"
     for d in (a, m):
-        assert d["l0"] + d["l1"] + d["l2"] + d["l3"] == d["total_sites"], d
+        assert (d["l0"] + d["l0_5"] + d["l1"] + d["l2"] + d["l3"]
+                == d["total_sites"]), d
     # 两份源**只差那一行**
     assert GC_LADDER_ALPHA_SRC.replace("choose gc_auto_alpha", "X") == \
         GC_LADDER_MANUAL_SRC.replace("choose gc_manual", "X")
+
+
+#: L0.5（`docs/210` §2.10）那一对：一个函数两处 L0 站点（成组 ⇒ 开区），另一个只有一处
+#: （不成组 ⇒ 留在 L0）。**只差函数形状**，所以差别只可能来自分组规则。
+L05_SRC = """module l05
+
+choose gc_auto_alpha
+choose runtime
+
+fn two() -> u32 {
+    let a: ptr = alloc(16);
+    let b: ptr = alloc(24);
+    store8(a, 0, 1);
+    store8(b, 0, 2);
+    return load8(a, 0) + load8(b, 0);
+}
+
+fn one() -> u32 {
+    let p: ptr = alloc(16);
+    store8(p, 0, 3);
+    return load8(p, 0);
+}
+"""
+
+
+@test
+def test_l0_5_region_rule():
+    """L0.5：**两处**站点共用一条缓冲，**一处**留在 L0（`docs/210` §2.10）。
+
+    这条钉三件事，缺一条都能让"分组"悄悄退化成"全都分组"或"全都不分组"：
+
+      * `gc_ladder` 里 `two` 的两处算 `l0_5`、`one` 的一处算 `l0`；
+      * IR 里 `%l05.buf` 只有 **一条** `alloca`（40 B = 16 + 24 对齐后），且两处站点的
+        偏移是 **0 与 2**（不是各自一条 `%a.buf` / `%b.buf`）；
+      * `one` 里仍然是 `%p.buf` —— **少于两处不开区**。
+    """
+    doc = json.loads(lomentc.emit_potato(parse(L05_SRC), ROOT))
+    gl = doc["gc_ladder"]
+    assert doc["potato"] == "v19", doc["potato"]
+    assert gl == {"l0": 1, "l0_5": 2, "l1": 0, "l2": 0, "l3": 0,
+                  "total_sites": 3}, gl
+    ir = lomentc.emit_llvm(parse(L05_SRC), ROOT)
+    assert ir.count("%l05.buf = alloca [5 x i64]") == 1, ir.count("%l05.buf")
+    assert "%a.buf" not in ir and "%b.buf" not in ir, "区内站点不该再有各自的缓冲"
+    assert "%p.buf = alloca [2 x i64]" in ir, "单站点函数必须留在 L0"
+    assert "ptr %l05.buf, i32 0, i32 0" in ir and "ptr %l05.buf, i32 0, i32 2" in ir, ir
 
 
 #: 块内精确（`docs/210` §2.9）那张真值表 —— 逐格摆开**什么形状精确、掩码是哪几位**。
@@ -2915,8 +2971,10 @@ def test_gc_safe_argument_position():
     """
     a = json.loads(lomentc.emit_potato(parse(GC_ARGPOS_ALPHA_SRC), ROOT))["gc_ladder"]
     m = json.loads(lomentc.emit_potato(parse(GC_ARGPOS_MANUAL_SRC), ROOT))["gc_ladder"]
-    assert a == {"l0": 0, "l1": 2, "l2": 0, "l3": 1, "total_sites": 3}, f"alpha: {a}"
-    assert m == {"l0": 0, "l1": 0, "l2": 0, "l3": 3, "total_sites": 3}, f"manual: {m}"
+    assert a == {"l0": 0, "l0_5": 0, "l1": 2, "l2": 0, "l3": 1,
+                 "total_sites": 3}, f"alpha: {a}"
+    assert m == {"l0": 0, "l0_5": 0, "l1": 0, "l2": 0, "l3": 3,
+                 "total_sites": 3}, f"manual: {m}"
     ir = lomentc.emit_llvm(parse(GC_ARGPOS_ALPHA_SRC), ROOT)
     ir_m = lomentc.emit_llvm(parse(GC_ARGPOS_MANUAL_SRC), ROOT)
     # alpha 的产物里还有收集器自己的清扫路径也会调 `__loment_free`，所以不钉绝对数；
@@ -4644,7 +4702,7 @@ def test_mixed_width_arithmetic_has_a_common_type():
 def test_lspe_dimension_defaults_open():
     """第七维：不写 `choose` 就是 `lspe_open_admin`，台账随产物一起发出（v16）。"""
     doc = json.loads(lomentc.emit_potato(lomentc.load(DEMO), ROOT))
-    assert doc["potato"] == "v18"
+    assert doc["potato"] == "v19"
     lp = doc["lspe"]
     assert lp["state"] == "lspe_open_admin"
     assert lp["set_by"] == "default"
@@ -4708,7 +4766,7 @@ def test_lspe_close_admin_is_recorded():
         p = Path(td) / "close.lomt"
         p.write_text(src, encoding="utf-8", newline=chr(10))
         doc = json.loads(lomentc.emit_potato(lomentc.load(p), ROOT))
-    assert doc["potato"] == "v18"
+    assert doc["potato"] == "v19"
     assert doc["lspe"]["state"] == "lspe_close_admin"
     assert doc["lspe"]["set_by"] == "source"
     # 关审计：普查不算，计数全零。

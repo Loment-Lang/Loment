@@ -133,7 +133,7 @@ def test_levels_reach_the_artifact() -> None:
     """判 D：`lms_levels` 进 Potato v18，七个布尔与编译器那张表逐条对上。"""
     mod, deps = _load("choose lms_forensic_admin")
     doc = json.loads(lomentc.emit_potato(mod, ROOT, deps))
-    assert doc["potato"] == "v18", doc["potato"]
+    assert doc["potato"] == "v19", doc["potato"]
     assert doc["lms"] == "lms_forensic_admin"
     assert doc["lms_levels"] == {
         "lms_check": True, "lms_manage": True, "lms_guard": True,
@@ -647,7 +647,7 @@ def test_lms_budgets_are_declared_and_recorded() -> None:
     assert tuple(lomentc.LMS_LEVEL_BUDGETS) == lomentc.LMS_TOGGLES
     mod, deps = _load("")
     doc = json.loads(lomentc.emit_potato(mod, ROOT, deps))
-    assert doc["potato"] == "v18", doc["potato"]
+    assert doc["potato"] == "v19", doc["potato"]
     assert doc["lms_budgets"] == want, doc["lms_budgets"]
     assert potato.validate(doc) == [], potato.validate(doc)
     print("      七级预算已声明；Potato v18 的 lms_budgets 与编译器同一张表")

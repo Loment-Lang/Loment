@@ -557,6 +557,66 @@ def test_gc_auto_reuses_freed_blocks_on_every_product() -> None:
     print("      1000 轮分配 + 回收 + 复用：四产物都 rc=232")
 
 
+#: `docs/263` §2.2 的那条边界：VM 的地址检查在 **`MEM_SIZE`（16 MiB）** 上，
+#: 不在 arena（64 KiB）上。`1048576 = 1 MiB`：arena 之外、地址空间之内，也在
+#: 栈区（`MEM_SIZE` 往下 `MAX_DEPTH × FRAME_SIZE` = 512 KiB）之下 —— 写进去不会
+#: 被 syscall 的栈帧覆盖。
+_OUTSIDE_ARENA = """module m
+
+fn _start() -> u32 {
+    let p: ptr = 1048576 as ptr;
+    store8(p, 0, 1);
+    let x: u32 = load8(p, 0);
+    syscall4(60, x as u64, 0, 0);
+    return 0;
+}
+"""
+
+#: `16781312 = MEM_SIZE + 4096`：地址空间之外 —— 这里才该拒。
+_PAST_MEM = """module m
+
+fn _start() -> u32 {
+    let p: ptr = 16781312 as ptr;
+    store8(p, 0, 1);
+    syscall4(60, 0, 0, 0);
+    return 0;
+}
+"""
+
+
+def test_the_vm_guards_mem_size_not_the_arena() -> None:
+    """#1027 第三格：VM 按**自己的地址空间**守界，不按 arena 守。
+
+    `docs/263` §2.2 把这条写成明话：arena 的界由**分配器**守，VM 只知道 16 MiB。
+    两份探针各钉一半，删掉任何一半这条红：
+
+      * 写到 arena 外面、`MEM_SIZE` 里面 —— 三个 VM 档都**照写**，读回 1（rc=1）；
+      * 写到 `MEM_SIZE` 外面 —— 三个 VM 档都抛**具名**的 `写越界`。
+
+    这不是缺陷判据，是**今天行为的钉子**：原生那边越界的静态数组是 UB，而 VM 不会
+    替 arena 守界 —— 两者"同点撞墙"只在**分配耗尽**那一格成立（上一条判据）。
+    """
+    ir = _emit_lms(_OUTSIDE_ARENA)
+    for name, fn in (("T0", lvm.run_ir), ("T2", lvm_t2.run_ir_t2),
+                     ("T3", lvm_t3.run_ir_t3)):
+        buf, err = io.BytesIO(), io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = fn(ir, buf, None, ["outside_arena"])
+        assert rc == 1 and buf.getvalue() == b"" and err.getvalue() == "", (
+            name, rc, buf.getvalue(), err.getvalue())
+    ir = _emit_lms(_PAST_MEM)
+    for name, fn in (("T0", lvm.run_ir), ("T2", lvm_t2.run_ir_t2),
+                     ("T3", lvm_t3.run_ir_t3)):
+        buf = io.BytesIO()
+        try:
+            fn(ir, buf, None, ["past_mem"])
+        except lvm.LvmError as e:
+            assert "写越界" in str(e), (name, e)
+        else:
+            raise AssertionError(f"{name}: 写到 MEM_SIZE 外面居然没被拒")
+    print("      arena 之外照写（rc=1）；MEM_SIZE 之外点名 `写越界` —— 三个 VM 档一致")
+
+
 def test_vm_trap_reports_the_site() -> None:
     """#1027：`llvm.trap` 在 VM 里是**定义好的** 132，且说得出死在哪一条。
 

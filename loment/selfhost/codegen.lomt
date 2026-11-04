@@ -6105,8 +6105,11 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         }
         epoch_close(s, out, tv);
         k = k + 1;
-        // `__tur2_i.N = __tur2_i.N + 1;`
-        fi_step(s, out, fi);
+        // `__tur2_i.N = __tur2_i.N + 1;` —— 体以 `break`/`continue`/`return` 收尾时
+        // 那之后已经是一条终结指令, 再发自增就是**终结符之后还有指令**（非法 IR）。
+        if load32(s, 476) == 0 {
+            fi_step(s, out, fi);
+        }
         jump(s, out, w, "wcond");
         lab_def(s, out, w + 2, "wend");
         store32(s, CG_LBRK, ob);
@@ -6173,7 +6176,9 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
             k = stmt(s, out, src, toks, k, ret);
         }
         epoch_close(s, out, fsv);
-        for_step(s, out, src, toks, var_tok);
+        if load32(s, 476) == 0 {   // 体已终结时自增到不了（同 for-in 那条）
+            for_step(s, out, src, toks, var_tok);
+        }
         jump(s, out, w, "fcond");
         lab_def(s, out, w + 2, "fend");
         store32(s, CG_LBRK, ob);

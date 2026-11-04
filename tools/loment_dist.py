@@ -3898,7 +3898,7 @@ def main(argv: list[str] | None = None) -> int:
         if a.only:
             # 两种写法都收: 工具名 (loment-fmt) 与短名 (fmt)。**lompi 没有 `loment-`
             # 前缀**, 只按短名规则拼会得到 `loment-lompi` 而永远匹配不上, 所以逐个试。
-            known = {n for n, _e, _c in TOOLS}
+            known = {row[0] for row in TOOLS}
             only: set[str] = set()
             unknown: set[str] = set()
             for t in (x for x in a.only.split(",") if x):

@@ -7239,7 +7239,7 @@ def _gc_alpha_pass(mod: Module, deps: list[Module] | None = None) -> None:
             f.l1 = []
             _reset_l1(f.body)
             _l2_loop_epochs(f, toks, frozen)   # L2 在 L0 之后（它要读 f.l0）
-            _l05_plan(f, toks, frozen)         # L0.5 在 L1 之前（它先把区内的动态站点接走）
+            _l05_plan(f)                       # L0.5 只重新布局 L0 的静态站点
             _l1_place(f, toks, frozen)         # L1 在最后（它要读 f.l0 / s.l2 / L0.5）
         # 层梯走完再算掩码：被 L0/L1/L2 接走的站点根本不落到分配器上，也就不需要它。
         for f in funcs:
@@ -7409,14 +7409,12 @@ def _provably_free(toks: list, s: int, e: int) -> bool:
             and toks[e - 1].kind == "number")
 
 
-#: L0.5 的栈区：静态段 + 动态段一共不超过这么多字节；动态段固定预留这么多。
-#: 上限同时受**根表**约束（`[1024 x i64]`）：整块缓冲的每个 8 字节字都要进根表。
+#: L0.5 的栈区上限。**同时受根表约束**（`[1024 x i64]`）：整块缓冲的每个 8 字节字
+#: 都要进根表，所以这块不能随手放大。
 L05_MAX = 2048
-L05_DYN = 512
 
 
-def _l05_plan(f: Func, toks: list,
-              safe: "dict[str, int] | None" = None) -> None:
+def _l05_plan(f: Func) -> None:
     """`docs/210` §2.10 的 **L0.5**：**一个函数共用一块栈区**（静态段）。
 
     它**不另立判据**，只重新布局 L0 已经证住的东西：`f.l0` 里的站点字面量尺寸、

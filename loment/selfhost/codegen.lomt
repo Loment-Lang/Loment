@@ -2503,6 +2503,20 @@ fn emit_str_lit_bytes(s: ptr, out: ptr, src: ptr, toks: ptr, i: u32) -> u32 {
     return k;
 }
 
+/// **版次元数据**（`docs/296` §1.1）：每份产物一条，放在全局区**最后**。
+/// 与参考实现 `emit_llvm` 那一行逐字节相同（字节按 `\XX` 大写十六进制写）。
+/// 两个当前版次的规范名都是 9 字节，所以整条恒为 21 字节（11 字节标记 + 9 + NUL）；
+/// 将来若出现 10 字节版次，这里要跟 `tur_edition()` 的 len 一起改。
+fn emit_tur_meta(s: ptr, out: ptr, prof: u32) -> u32 {
+    emit_str(s, out, "@loment.tur.edition = global [21 x i8] c\"\\4C\\4F\\4D\\45\\4E\\54\\2D\\54\\55\\52\\3A");
+    if prof == 1 {
+        emit_str(s, out, "\\74\\75\\72\\32\\30\\32\\36\\2E\\32");
+    } else {
+        emit_str(s, out, "\\74\\75\\72\\32\\30\\32\\36\\2E\\31");
+    }
+    return emit_str(s, out, "\\00\"\n");
+}
+
 /// 模块级字符串常量 (位于横幅/运行时/堆全局之后、函数之前)。
 /// 顺序 = 逐函数、逐出现 —— 与表达式求值顺序一致 (都是同一 token 流的线性扫描)。
 fn emit_str_globals(s: ptr, out: ptr, src: ptr, toks: ptr) -> u32 {
@@ -3812,6 +3826,21 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
                 return kp + 3;
             }
             return kp + 1;
+        }
+        if tok_is(src, toks, j, "tur_edition") {   // 0 实参; 值来自模块级元数据全局
+            emit_str(s, out, "  ");
+            let gp: u32 = new_temp(s, out);
+            emit_str(s, out, " = getelementptr inbounds [21 x i8], ptr @loment.tur.edition, i64 0, i64 11\n  ");
+            let vv: u32 = new_temp(s, out);
+            emit_str(s, out, " = insertvalue { ptr, i64 } undef, ptr %t");
+            emit_dec(s, out, gp);
+            emit_str(s, out, ", 0\n  ");
+            let v2: u32 = new_temp(s, out);
+            emit_str(s, out, " = insertvalue { ptr, i64 } %t");
+            emit_dec(s, out, vv);
+            emit_str(s, out, ", i64 9, 1\n");
+            set_temp_val(s, lvl, v2);
+            return j + 3;
         }
         if tok_is(src, toks, j, "str_byte") {   // 字节指针 + 下标
             // 顺序同 lomentc: 取指针 (extractvalue 0) 落在**第 2 个实参之前**
@@ -8691,7 +8720,7 @@ out:
 ");
 }
 
-pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
+pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32) -> u32 {
     store32(s, 0, 0);
     store32(s, 4, 0);
     store32(s, 12, 0);
@@ -9093,9 +9122,10 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
     if has_cmd == 1 {
         emit_cmd_globals(s, out);
     }
-    if load32(s, 532) == 1 || has_cmd == 1 {
-        emit_str(s, out, "\n");
-    }
+    // 版次元数据**永远发**（`docs/296` §1.1），所以空行也永远有 —— 与参考实现
+    // `out += globals_; if globals_: out.append("")` 同一个形状。
+    emit_tur_meta(s, out, prof);
+    emit_str(s, out, "\n");
     store32(s, 64, 0);       // 实例表: 按"首次被用到"的顺序追加
     store32(s, 60, 4294967295);   // 当前正在发射的实例 (NONE = 不是实例)
     i = 0;

@@ -256,8 +256,10 @@ ABIS = ("c", "rust", "python", "go", "java")
 #: 那六门是别人已有的语言，这一门是**我们自己发明的**，所以子集线是**画出来的**，
 #: 不是**碰上的**。之所以仍记在这里，是因为它守的规矩一模一样：
 #: **只让拼法与形状，不让语义**（`docs/188` §0）。
-GRAMMARS = ("loment", "tur", "tur2", "c", "python", "java", "go", "rust", "csharp", "cpp",
-            "natural")
+#: Tur 的版次是**两级名**（`docs/296` §1.1）：`tur<年份>.<年内序号>`。这里只放规范名；
+#: 当年短名（`tur1` / `tur2`）与历史拼法（`tur`）是源侧别名，不进对象。
+GRAMMARS = ("loment", "tur2026.1", "tur2026.2", "c", "python", "java", "go", "rust",
+            "csharp", "cpp", "natural")
 
 
 def _is_array_type(t: object) -> bool:

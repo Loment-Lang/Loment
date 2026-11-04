@@ -515,6 +515,28 @@ def test_version_reads_share_version():
 
 
 @test
+def test_version_reads_tur_edition_from_an_artifact():
+    """`loment version <exe>` 读回产物里的版次（`docs/296` §1.2）。
+
+    **跨块那条要留着**：扫描按 `FILE_CAP` 分块，标记正好压在第一块末尾时，
+    一次 `slurp` 的实现会读不到 —— 那正是可执行文件里最常见的位置分布。
+    """
+    d = Path(tempfile.mkdtemp(prefix="lomcli-tur-"))
+    blob = b"LOMENT-TUR:tur2026.2\0"
+    cases = (("small", b"junk" + blob + b"tail"),
+             ("cross", b"x" * 262140 + blob + b"tail"))
+    for name, raw in cases:
+        p = d / f"{name}.bin"
+        p.write_bytes(raw)
+        rc, out, err = _run(["version", str(p)])
+        assert rc == 0 and out.strip() == "tur edition tur2026.2", (name, rc, out, err)
+    p = d / "none.bin"
+    p.write_bytes(b"no metadata here")
+    rc, _, err = _run(["version", str(p)])
+    assert rc == 1 and "Tur edition metadata" in err, (rc, err)
+
+
+@test
 def test_doctor_reports_missing_tools_then_green_when_present():
     """体检必须有**分辨力**: 缺组件时红且退 1, 组件齐了就绿且退 0。"""
     rc, out, _ = _run(["doctor"] + _no_color())

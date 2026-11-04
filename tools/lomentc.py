@@ -52,6 +52,8 @@ BUILTINS = {
     "set_bits": (("u8", "u32", "u32", "u8"), "u8"),  # M22: 位域写
     "str_ptr": (("str",), "ptr"),                    # M67: str 数据指针 (syscall 用)
     "print": (("str",), "u32"),                      # 写 stdout: write(1, ptr, len)
+    # 本程序读的是 **Tur 的哪一版**（`docs/296` §1.1）。值是规范名，编译期定死。
+    "tur_edition": ((), "str"),
     "ptr_add": (("ptr", "u32"), "ptr"),              # M73: 指针字节偏移
     "ptr_sub": (("ptr", "u32"), "ptr"),
     "syscall4": (("u64", "u64", "u64", "u64"), "i64"),  # M67: nr, a0..a2 (rax/rdi/rsi/rdx)
@@ -74,6 +76,15 @@ BUILTINS = {
     "thread_spawn": (("str", "u64", "u64", "u64"), "i64"),
 }
 BUILTIN_DIVERGES = ("panic",)  # 求值后不可继续 (M19)
+
+#: **产物的版次元数据**（`docs/296` §1.1）：每份 IR 发一个外部可见的只读全局，
+#: 内容是 `LOMENT-TUR:` + 规范版次名 + NUL。两个用途：
+#:   * 运行期 —— `tur_edition()` 内建返回冒号之后那一段（`ptr`/`len` 都从这一条来）；
+#:   * 事后 —— `loment version <exe>` 在二进制里找这个标记，报出它属于哪一版。
+#: **不靠 `.note` 段**：两只链接器都不必为它动布局，ELF/PE 两侧同一条路。
+_TUR_MAGIC = "LOMENT-TUR:"
+_TUR_MAGIC_LEN = len(_TUR_MAGIC)
+_TUR_SYM = "loment.tur.edition"
 
 #: `thread_spawn` 的入口名（M84）。**链接器把名字原样当符号用**，所以这里就是能安全落进
 #: `.ll` 的 asm 串、又能被符号表接住的那一类 —— 比"合法标识符"再收一点（不许点，免得与
@@ -5381,6 +5392,8 @@ def _expr_rs(e) -> str:
             return f"(({a[0]}) as *mut u8).add(({a[1]}) as usize)"
         if e.name == "ptr_sub":
             return f"(({a[0]}) as *mut u8).sub(({a[1]}) as usize)"
+        if e.name == "tur_edition":  # 本程序读的是哪一版 Tur（`docs/296` §1.1）
+            return "__LOMENT_TUR"
         if e.name == "print":  # 写 stdout (no_std 友好: 直接 syscall)
             return ("{ let __s: &str = " + a[0] + "; let mut __r: i64; "
                     "unsafe { core::arch::asm!(\"syscall\", "
@@ -5617,7 +5630,10 @@ def _rust_body(mod: Module, lom_root: Path) -> list[str]:
 def emit_rust(mod: Module, lom_root: Path, deps: list[Module] | None = None) -> str:
     """依赖模块先出 (每个一次), 本模块在后 —— 单文件 Rust 产物。"""
     mod, deps = prepare(mod, deps)  # M6
-    out = [BANNER, f"// module {mod.name} (loment v0 -> rust)", _RUST_RUNTIME]
+    out = [BANNER, f"// module {mod.name} (loment v0 -> rust)",
+           # 版次是**整程序**属性：一份 Rust 产物只定义一次，取入口模块的规范名。
+           f'const __LOMENT_TUR: &str = "{getattr(mod, "profile", "tur2026.1")}";',
+           _RUST_RUNTIME]
     for d in deps or []:
         out.append("")
         out.append(f"// ==== 导入模块 {d.name} ====")
@@ -7900,8 +7916,10 @@ class _Ir:
                  gc_alpha: bool = False, gc_auto: bool = False,
                  gc_barrier: bool = True, threads: bool = False,
                  lms_guard: bool = False, lms_reject: bool = False,
-                 lms_crash: bool = False):
+                 lms_crash: bool = False, tur_edition: str = "tur2026.1"):
         self.funcs, self.consts, self.f = funcs, consts, f
+        #: 本程序读的是 Tur 的哪一版（`docs/296` §1.1）。`tur_edition()` 内建取它。
+        self.tur_edition = tur_edition
         self.structs = structs or {}
         self.enums = enums or {}
         self.out: list[str] = []
@@ -8787,6 +8805,17 @@ class _Ir:
             t = self.t()
             self.w(f"{t} = trunc i64 {r} to i32")
             return "u32", t
+        if e.name == "tur_edition":  # 本程序读的是哪一版 Tur（`docs/296` §1.1）
+            # 元数据全局由 `emit_llvm` 每份产物发一次；值在 `LOMENT-TUR:` 之后。
+            n = len(self.tur_edition)
+            p = self.t()
+            self.w(f'{p} = getelementptr inbounds [{_TUR_MAGIC_LEN + n + 1} x i8], '
+                   f'ptr @{_TUR_SYM}, i64 0, i64 {_TUR_MAGIC_LEN}')
+            v = self.t()
+            self.w(f"{v} = insertvalue {{ ptr, i64 }} undef, ptr {p}, 0")
+            v2 = self.t()
+            self.w(f"{v2} = insertvalue {{ ptr, i64 }} {v}, i64 {n}, 1")
+            return "str", v2
         if e.name == "syscall4":  # M67: Linux 系统调用
             vals = [self.expr(a, "u64")[1] for a in e.args]
             r = self.t()
@@ -9208,11 +9237,11 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
                   gc_alpha: bool = False, gc_auto: bool = False,
                   gc_barrier: bool = True, threads: bool = False,
                   lms_guard: bool = False, lms_reject: bool = False,
-                  lms_crash: bool = False
+                  lms_crash: bool = False, tur_edition: str = "tur2026.1"
                   ) -> tuple[list[str], str]:
     ir = _Ir(funcs, consts, f, structs, enums, coverage, cov_counter,
              dbg_scope, dbg_lines, dbg_meta, dbg_types, gc_alpha, gc_auto, gc_barrier,
-             threads, lms_guard, lms_reject, lms_crash)
+             threads, lms_guard, lms_reject, lms_crash, tur_edition)
     if f.interrupt:  # M33: x86_intrcc 需要中断帧指针
         ir.out.append(f"; {f.name} -> interrupt (x86_intrcc)")
         ir.out.append(f"define x86_intrcc void @{f.name}(ptr byval([8 x i8]) %__frame)"
@@ -9573,7 +9602,8 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
                                     cov_counter, scope, lines, meta if debug else None,
                                     dbg_types if debug else None, gc_alpha, gc_auto,
                                     gc_alpha and _has_heap_pre, _has_threads,
-                                    _lms_guard, _lms_reject, _lms_crash)
+                                    _lms_guard, _lms_reject, _lms_crash,
+                                    getattr(mod, "profile", "tur2026.1"))
             globals_ += g
             body.append(text)
     # **命令入口**（`docs/223`）：声明了命令、又没写 `_start` -> 工具链替它发一个。
@@ -9687,6 +9717,12 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
                 # 与 `gc_auto` 同一段 mark-sweep 本体，**触发**换成自适应的那一支。此前
                 # alpha 根本不发收集器（L3 残差没人收）—— 这一步让它有。
                 out.append(_IR_GC_ALPHA)
+    # **版次元数据**（`docs/296` §1.1）：每份产物一条，放在全局区**最后**。
+    # 外部可见（`global`，不是 `private constant`）—— clang `-O2` 会丢掉没人引用的
+    # 私有常量，而这一条正是给 `loment version <exe>` 与 `tur_edition()` 用的。
+    _blob = (_TUR_MAGIC + getattr(mod, "profile", "tur2026.1")).encode("utf-8")
+    _esc = "".join(f"\\{x:02X}" for x in _blob)
+    globals_.append(f'@{_TUR_SYM} = global [{len(_blob) + 1} x i8] c"{_esc}\\00"')
     out += globals_
     if globals_:
         out.append("")
@@ -9764,9 +9800,11 @@ def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3) -> Modu
     # 基础语法的一种拼法、归到 `loment`；别的写法给的是那一门的规范名）。
     # 与 `dialects` 同一个做法：不是 dataclass 字段，是装载时挂上去的。
     mod.grammar = _fu.grammar
-    # **版次**（`docs/296`）：`tur1` / `tur2`。与 `grammar` 不同 —— 后者说的是"哪一门写法"，
-    # 前者说的是"这一门写法的哪一版"。Tur 1 的文件永远读作 `tur1`，行为不变。
+    # **版次**（`docs/296` §1.1）：规范名 `tur2026.1` / `tur2026.2`。与 `grammar` 不同 ——
+    # 后者说的是"哪一门写法"，前者说的是"这一门写法的哪一版"。Tur 1 的文件永远读作
+    # `tur2026.1`，行为不变。
     mod.profile = _fu.profile
+    mod.spelling = _fu.spelling    # 源里写的拼法（空 = 没写）；编译期提示用
     mod.own_switches = own      # 本模块**自己**写的 —— 只有"库不许 choose"用它
     # `addin` 的行单独记一份 —— 它被抹掉了，而"库里写了 `addin` 却没生效"要能报出来。
     _d = 0

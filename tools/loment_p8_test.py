@@ -832,7 +832,8 @@ CODEGEN_DRIVER = """#include <stdio.h>
 #include <stdlib.h>
 extern unsigned int lex(char *src, unsigned int len, unsigned char *out);
 extern unsigned int cg_arena_bytes(void);
-extern unsigned int emit_module(char *src, unsigned char *toks, char *out, unsigned char *st);
+extern unsigned int emit_module(char *src, unsigned char *toks, char *out, unsigned char *st,
+                                unsigned int prof);
 int main(int argc, char **argv) {
     FILE *f = fopen(argv[1], "rb");
     if (!f) return 2;
@@ -849,7 +850,7 @@ int main(int argc, char **argv) {
     /* 状态块按单元规模定 (~500 KB), 不能压在语言堆上 —— 与驱动同一个口径 */
     unsigned char *st = malloc(cg_arena_bytes());
     lex(buf, (unsigned int)n, toks);
-    unsigned int m = emit_module(buf, toks, out, st);
+    unsigned int m = emit_module(buf, toks, out, st, 0);
     printf("%.*s", (int)m, out);
     return 0;
 }
@@ -1814,11 +1815,13 @@ def test_m87_driver_strips_grammar_decl():
 
       * **抹掉之后不留痕**: 带声明的那份与不带的那份 **产物逐字节相同**。对照面是
         **另一个单元**, 不是参考实现 —— 两个实现**一起**错(比如都多抹了一行)时,
-        "自举 == 参考"照样绿 (`docs/182` §1.9 那条形状)。**原生拼法有三个, 三个都验**:
-        `decl.lomt`(拼 `loment`)、`tur.lomt`(拼 `tur`) 与 `tur2.lomt`(拼 `tur2`)。
-        前者根据用户 2026-11-03 的裁定「**Tur 是本语言自己的正式语法, 从 Rust 直接修改**」;
-        `tur2` 是 Tur 1 的**版次**(docs/296) —— 脚手架阶段不启用新语法, 所以也该有
-        **同一份产物**(三个单元同一个模块名);
+        "自举 == 参考"照样绿 (`docs/182` §1.9 那条形状)。**每个原生拼法都验**:
+        `decl.lomt`(拼 `loment`)、`tur.lomt`(拼 `tur`)、`tur1.lomt`(拼 `tur1`)、
+        `tur2.lomt`(拼 `tur2`) 与 `tur2026_2.lomt`(拼 `tur2026.2`)。
+        根据用户 2026-11-03 的裁定「**Tur 是本语言自己的正式语法, 从 Rust 直接修改**」;
+        版次是**两级名** `tur<年份>.<序号>`(docs/296 §1.1) —— 规范名与当年短名是同一
+        版次, 脚手架阶段不启用新语法, 所以正文/代码该**逐字节相同**; 唯一按版次取值的是
+        `docs/296` §1.2 的版次元数据(所以先剥掉它再比);
       * **别的拼法拒**: 参考实现是**真收**那份 `grammar python` 的(它按 Python 读),
         自举侧拒 —— 拒得说清"这门写法还没接上"(`docs/189` §4.1), **不是**"未定义的开关
         `write`"(那是把"还没接上"错报成"你写错了");
@@ -1830,16 +1833,37 @@ def test_m87_driver_strips_grammar_decl():
     with tempfile.TemporaryDirectory() as td:
         elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_grammar")
         outs = {}
-        for name in ("plain", "decl", "tur", "tur2"):
+        for name in ("plain", "decl", "tur", "tur1", "tur2", "tur2026_2"):
             f = GDECL / f"{name}.lomt"
             rc, out, err = _run_driver_raw(elf, f.relative_to(ROOT).as_posix(), td, name)
             assert rc == 0, f"{name}.lomt: 自举侧退出 {rc}: {err[-300:]}"
             assert out == _unit_ll(f), f"{name}.lomt: 产物与参考不一致"
             outs[name] = out
-        for name, spelling in (("decl", "loment"), ("tur", "tur"), ("tur2", "tur2")):
-            assert outs[name] == outs["plain"], (
-                f"带着 `choose write grammar {spelling}` 编译的产物与不带的不一样 —— "
+        # **声明抹掉之后，正文与代码一行都不变**；唯一该变的、也确实是产物的，是
+        # `docs/296` §1.2 那条版次元数据 —— 它按版次取值，所以要先剥掉再逐字节比。
+        def _strip_meta(ll: str) -> str:
+            return re.sub(r"(?m)^@loment\.tur\.edition = global \[21 x i8\] c\""
+                          r"(?:\\[0-9A-F]{2})+\"\n", "", ll)
+
+        def _meta(ll: str) -> str:
+            m = re.search(r'^@loment\.tur\.edition = global \[21 x i8\] c"'
+                          r'((?:\\[0-9A-F]{2})+)"$', ll, re.M)
+            assert m, "产物里没有版次元数据（docs/296 §1.2）"
+            raw = bytes(int(h, 16) for h in re.findall(r"\\([0-9A-F]{2})", m.group(1)))
+            assert raw.startswith(b"LOMENT-TUR:") and raw.endswith(b"\0"), raw
+            return raw[len(b"LOMENT-TUR:"):-1].decode("ascii")
+
+        for name, spelling, ed in (("plain", "（不写）", "tur2026.1"),
+                                   ("decl", "loment", "tur2026.1"),
+                                   ("tur", "tur", "tur2026.1"),
+                                   ("tur1", "tur1", "tur2026.1"),
+                                   ("tur2", "tur2", "tur2026.2"),
+                                   ("tur2026_2", "tur2026.2", "tur2026.2")):
+            assert _strip_meta(outs[name]) == _strip_meta(outs["plain"]), (
+                f"带着 `choose write grammar {spelling}` 编译的正文/代码与不带的不一样 —— "
                 f"抹掉之后留痕了")
+            assert _meta(outs[name]) == ed, (
+                f"{name}.lomt 的版次元数据是 {_meta(outs[name])!r}，期望 {ed!r}")
         f = GDECL / "foreign.lomt"
         rc, out, err = _run_driver_raw(elf, f.relative_to(ROOT).as_posix(), td, "foreign")
         # 参考实现这份是**收**的 (拿它自己的前门按 Python 读) —— 分歧正是 docs/189 §4.1 那句话
@@ -1848,8 +1872,50 @@ def test_m87_driver_strips_grammar_decl():
         assert "does not take" in err, f"foreign.lomt: 没说到点子上: {err[:200]}"
         assert "未定义的开关" not in err, f"foreign.lomt: 报成了词法/语法错: {err[:200]}"
         assert out.strip() == "", "被拒时不该产出 IR"
-        print("      声明: 三个原生拼法(loment/tur/tur2)抹掉后都与不带那份逐字节一致; "
-              "别的拼法拒且指对原因")
+        print("      声明: 五个原生拼法(loment/tur/tur1/tur2/tur2026.2)抹掉后正文逐字节一致, "
+              "只有版次元数据按版次取值; 别的拼法拒且指对原因")
+
+
+@test
+def test_m89_tur_edition_is_reported_at_compile_and_run_time():
+    """版次**自己说出来**（用户 2026-11-04 的要求，`docs/296` §1.2）：三处出口。
+
+    1. **编译期**：自举驱动的 stderr 有 `grammar tur2 -> tur2026.2 (Tur 2)`；
+    2. **产物里**：IR 全局区最后一条是 `LOMENT-TUR:` + 规范名；
+    3. **运行期**：`tur_edition()` 返回同一个规范名，程序打出来能对上。
+
+    参考实现与自举侧**逐字节一致**是前提（IR 相等），否则第 2、3 条各自成立也不算数。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    src = ("choose write grammar tur2\nmodule probe\n\n"
+           "fn main() {\n    print(tur_edition());\n}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "probe.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        ref = _unit_ll(p)
+        assert ('@loment.tur.edition = global [21 x i8] c"'
+                '\\4C\\4F\\4D\\45\\4E\\54\\2D\\54\\55\\52\\3A'
+                '\\74\\75\\72\\32\\30\\32\\36\\2E\\32\\00"') in ref, \
+            "参考实现的产物里没有版次元数据"
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_turmeta")
+        rc, out, err = _run_driver_raw(elf, _wsl_path(p), td, "turmeta")
+        assert rc == 0, f"自举侧退出 {rc}: {err[-300:]}"
+        assert out == ref, "自举侧产物与参考不一致（版次元数据/内建实现漂了）"
+        assert "grammar tur2 -> tur2026.2 (Tur 2)" in err, (
+            f"编译期没有把短名展开成规范名: {err[:200]}")
+        # 运行期：用仓库自己的链接器出 ELF，在 WSL 里跑
+        art, _ = __import__("lomelf").compile_ll(out)
+        exe = Path(td) / "probe.elf"
+        exe.write_bytes(art)
+        script = (f"cp {_wsl_path(exe)} {_T}turmeta_ed && chmod +x {_T}turmeta_ed "
+                  f"&& {_T}turmeta_ed")
+        r = subprocess.run([*_WSLCMD, "bash", "-lc", script],
+                           capture_output=True, text=True, timeout=120, shell=False)
+        assert r.returncode == 0, f"运行退出 {r.returncode}: {r.stderr[-300:]}"
+        assert r.stdout == "tur2026.2", f"运行期版次是 {r.stdout!r}"
+        print("      版次: 编译期 stderr / 产物元数据 / 运行期 tur_edition() 三处一致 (tur2026.2)")
 
 
 @test

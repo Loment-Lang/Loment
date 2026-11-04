@@ -607,7 +607,7 @@ fn catalog(mem: ptr, fd: u64) {
     row(mem, fd, "check", "FILE", "check only, discard IR (diagnostics on stderr)");
     row(mem, fd, "build", "FILE [-o NAME] [--link OBJ...] [--opt] [--profile hotswap]", "compile and link to an executable");
     row(mem, fd, "run", "FILE [--link OBJ...] [--opt]", "compile, link and run");
-    row(mem, fd, "version", "", "print the version line");
+    row(mem, fd, "version", "[FILE]", "print the version line; with FILE, read its Tur edition");
     row(mem, fd, "lsp", "", "language server over stdio");
     sec(mem, fd, "SOURCE TOOLS");
     row(mem, fd, "fmt", "FILE", "format (prints the result, does not touch the file)");
@@ -959,7 +959,76 @@ fn do_commands(mem: ptr, ab: ptr, argc: u32) -> u32 {
     return 0;
 }
 
+/// `p[i..i+n]` 等于字面量 `s` 吗（`n` 是缓冲里还剩多少字节）。
+fn cur_at(p: ptr, i: u32, n: u32, s: str) -> u32 {
+    if n < str_len(s) {
+        return 0;
+    }
+    let j: u32 = 0;
+    while j < str_len(s) {
+        if load8(p, i + j) != str_byte(s, j) {
+            return 0;
+        }
+        j = j + 1;
+    }
+    return 1;
+}
+
+/// 从产物里读回 Tur 版次（`docs/296` §1.1）：找 `LOMENT-TUR:` 标记，打出冒号后那段。
+/// **分块扫**：可执行文件常常大于 `FILE_CAP`，一次 `slurp` 会在中间截断。
+fn tur_edition_of_file(mem: ptr, ab: ptr, k: u32) -> u32 {
+    let path: ptr = ptr_add(mem, M_P1);
+    arg_copy(mem, ab, k, path);
+    let fd: i64 = open_ro(path);
+    if fd < 0 {
+        return err_path(mem, "cannot open ", path);
+    }
+    let buf: ptr = ptr_add(mem, M_FILE);
+    let prev_n: u32 = 0;
+    let keep: u32 = 0;
+    let go: u32 = 1;
+    while go == 1 {
+        // 把上一块的最后 `keep` 字节搬到开头 —— 标记可能跨块。
+        let q: u32 = 0;
+        while q < keep {
+            store8(buf, q, load8(buf, prev_n - keep + q) as u8);
+            q = q + 1;
+        }
+        let got: u64 = read_all(fd as u64, ptr_add(buf, keep), (FILE_CAP - keep) as u64);
+        let n: u32 = keep + got as u32;
+        let i: u32 = 0;
+        while i + 11 <= n {
+            if cur_at(buf, i, n - i, "LOMENT-TUR:") == 1 && i + 21 <= n {
+                let s: u32 = i + 11;
+                let e: u32 = s;
+                while e < n && load8(buf, e) != 0 && e - s < 16 {
+                    e = e + 1;
+                }
+                wstr(1, "tur edition ");
+                wbytes(1, ptr_add(buf, s), e - s);
+                wstr(1, "\n");
+                close_fd(fd);
+                return 0;
+            }
+            i = i + 1;
+        }
+        if got < (FILE_CAP - keep) as u64 {
+            go = 0;
+        }
+        prev_n = n;
+        keep = 21;
+        if n < 21 {
+            keep = n;
+        }
+    }
+    close_fd(fd);
+    return err_path(mem, "no Tur edition metadata in ", path);
+}
+
 fn do_version(mem: ptr, ab: ptr, argc: u32) -> u32 {
+    if argc >= 3 {
+        return tur_edition_of_file(mem, ab, 2);
+    }
     let bindir: ptr = ptr_add(mem, M_P3);
     let ver: ptr = ptr_add(mem, M_P2);
     version_text(mem, bindir_from(mem, ab, bindir), ver);
@@ -1518,6 +1587,7 @@ fn do_builtins(mem: ptr, ab: ptr, argc: u32) -> u32 {
     termrow(mem, 1, "str_concat", "str_concat(a, b) -> str   concatenation (bump heap is only 64 KiB)");
     termrow(mem, 1, "str_ptr", "str_ptr(s: str) -> ptr   data pointer (feed it to syscall)");
     termrow(mem, 1, "print", "print(s: str) -> u32   write s to stdout (one write syscall)");
+    termrow(mem, 1, "tur_edition", "tur_edition() -> str   the Tur edition this program was compiled as (e.g. tur2026.2)");
     termrow(mem, 1, "alloc", "alloc(n: u32) -> ptr   bump heap (64 KiB ceiling)");
     termrow(mem, 1, "free", "free(p: ptr) -> u32   placeholder, the bump heap does not reclaim");
     termrow(mem, 1, "load8", "load8(p: ptr, off: u32) -> u32   read a byte");

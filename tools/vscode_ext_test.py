@@ -764,8 +764,11 @@ _DECL_EDGE = [
     "module m\n\nfn f() -> u32 { return 1; }\n",
     "choose write grammar python\nmodule m\n",
     "choose write grammar rust\nmodule m\n",
-    # Tur 2 是版次名（docs/296）：`tur` 的合法拼法，两边都该认成原生。
+    # Tur 的版次是两级名（docs/296 §1.1）：短名与规范名都是合法拼法，两边都认。
+    "choose write grammar tur1\nmodule m\n",
     "choose write grammar tur2\nmodule m\n",
+    "choose write grammar tur2026.1\nmodule m\n",
+    "choose write grammar tur2026.2\nmodule m\n",
     "choose write grammar c#\nmodule m\n",
     "﻿choose write grammar go\nmodule m\n",
     "   choose write grammar java\nmodule m\n",
@@ -906,8 +909,9 @@ def test_vscode_surface_grammar_switches_language():
         ("loment/lib/lumtui_math.lomt", "loment", "loment-python"),
         # `tur` 是**原生**（docs/295）：声明了也不该换语言 id
         ("loment/selfhost/grammar_decl/tur.lomt", "loment", "loment"),
-        # `tur2` 是它的版次（docs/296），同样停在原生语法
+        # `tur2` / `tur2026.2` 是它的版次（docs/296），同样停在原生语法
         ("loment/selfhost/grammar_decl/tur2.lomt", "loment", "loment"),
+        ("loment/selfhost/grammar_decl/tur2026_2.lomt", "loment", "loment"),
         # 没声明 = 原生
         ("loment/examples/tour.lomt", "loment", "loment"),
         # 用户显式指定过的语言不去抢（`lom` 是 L0，家族之外）

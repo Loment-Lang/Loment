@@ -79,9 +79,12 @@ VER = loment_release.RELEASE                # 机器: 0.1.4
 #: lompi 也写 ".": 它的路径形式 import 靠导入文件所在目录 (修复后的规矩), 而它现在从
 #: 随包 store 里按名字取 `internet` 的模块 —— 自举镜的**开发 checkout** 那一层把 store
 #: 写成 CWD 相对的 `lompi/store`, 只有从仓根编才命中 (issue #375)。
-TOOLS: list[tuple[str, str, str]] = [
+TOOLS: list[tuple] = [
     ("loment-driver", "loment/selfhost/driver.lomt", "."),
-    ("loment-lsp", "loment/tools/lsp.lomt", "."),
+    # 语言服务**随包发的是 hotswap 档**（`#1155`）：入口闸 + 槽表就位，`loment hotupdate`
+    # / `--hot` 才能在事件循环的顶部把它换掉。代价是每函数一次闸调用；换来的是"装上去
+    # 之后还能修"。
+    ("loment-lsp", "loment/tools/lsp.lomt", ".", "hotswap"),
     ("loment-fmt", "loment/tools/lomfmt.lomt", "."),
     ("loment-doc", "loment/tools/lomdoc.lomt", "."),
     # `loment build/run` 的链接器 —— 自举侧的 lomelf 镜像。有它之后 **包里不再需要 clang**:
@@ -3080,13 +3083,18 @@ powershell -File install.ps1 -Uninstall    # Windows（同时清 PATH、文件�
 _LINK_LOCK = threading.Lock()
 
 
-def _lomelf_link(ir_text: str, target: str) -> bytes:
-    """IR -> 可执行文件。用仓库自己的原生后端（`tools/lomelf.py`），**不再经 clang**。"""
+def _lomelf_link(ir_text: str, target: str, profile: str = "") -> bytes:
+    """IR -> 可执行文件。用仓库自己的原生后端（`tools/lomelf.py`），**不再经 clang**。
+
+    `profile="hotswap"` 只对 ELF 有意义（`#1150`：槽表 + 入口闸）；PE 那半边没有它 ——
+    热更新的装载器本来就是 Linux 的 `mmap`/`mprotect`。
+    """
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import lomelf
-    fn = lomelf.compile_pe if target == "pe" else lomelf.compile_ll
+    if target == "pe":
+        return lomelf.compile_pe(ir_text)[0]
     with _LINK_LOCK:
-        return fn(ir_text)[0]
+        return lomelf.compile_ll(ir_text, hotswap=(profile == "hotswap"))[0]
 
 
 def _host_target() -> str:
@@ -3321,24 +3329,29 @@ def build_tools(only: set[str] | None, opt: bool = False) -> dict[str, tuple[byt
     `_link_opt` 的注解）。没有 clang 就**降级并说清楚**，不失败 —— 与启动器的 `--opt`
     同一条口径（"装上 clang 才更快，没有它照样发得出去"）。
     """
-    todo = [(n, e, c) for n, e, c in TOOLS if not only or n in only]
+    todo = []
+    for row in TOOLS:
+        name, entry, cwd = row[0], row[1], row[2]
+        prof = row[3] if len(row) > 3 else ""
+        if not only or name in only:
+            todo.append((name, entry, cwd, prof))
     if not todo:
         return {}
-    if any(n == SEED_TOOL for n, _e, _c in todo) and not ACTIVE_SEED.exists():
+    if any(n == SEED_TOOL for n, _e, _c, _p in todo) and not ACTIVE_SEED.exists():
         raise SystemExit(f"missing seed {ACTIVE_SEED.relative_to(ROOT)} (docs/159)")
     # stage1 只在真需要现场编译时才造 —— 于是 `--only driver` 是秒级
-    stage1 = None if all(n == SEED_TOOL for n, _e, _c in todo) else build_stage1()
+    stage1 = None if all(n == SEED_TOOL for n, _e, _c, _p in todo) else build_stage1()
     cc = clang_path() if opt else None
     if opt and cc is None:
         print("  [--opt] 没找到 clang —— 退回未优化的 lomelf 后端（包照样出得来）")
     optimized: list[str] = []
 
-    def one(name: str, entry: str, cwd: str) -> tuple[str, bytes, bytes]:
+    def one(name: str, entry: str, cwd: str, prof: str = "") -> tuple[str, bytes, bytes]:
         text = (ACTIVE_SEED if name == SEED_TOOL else emit_ir(stage1, entry, cwd)
                 ).read_text(encoding="utf-8")
         elf, why = _link_opt(text, cc) if cc else (None, "")
         if elf is None:
-            elf = _lomelf_link(text, "elf")
+            elf = _lomelf_link(text, "elf", prof)
             if cc:
                 print(f"  [{name}] --opt 降级：clang 没收下这份 IR —— {why}")
         else:

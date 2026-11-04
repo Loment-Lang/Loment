@@ -399,6 +399,8 @@ GLOBS = [
     # 命令行与模拟器（`#1155`）：`loment hotupdate` 与假 Pre-Release 的搭建。**同位置**。
     "tools/loment_hotupdate.py",
     "tools/loment_demo_release.py",
+    # 真的 `loment lsp` 在安全点上换掉自己（`#1155`）。**同位置**。
+    "tools/loment_lsp_hot_test.py",
     # 元数据（`#1149`）：帧布局哈希 + 调用点表。**插入位置与 lomrel.lomt 逐行对齐**。
     "tools/loment_hotmeta_test.py",
     # 构建档（`#1150`）：槽表 + 入口闸。**插入位置与 lomrel.lomt 逐行对齐**。

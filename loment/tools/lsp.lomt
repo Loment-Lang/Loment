@@ -19,6 +19,7 @@ use json
 use lexer
 use checker
 use switches
+use hotswap
 
 // ---------------------------------------------------------------- 尺寸与布局
 
@@ -1201,8 +1202,12 @@ fn _start() -> u32 {
     // `--check` 的源缓冲；LSP 模式下同一块当**入站文档的暂存区**（`#710`：
     // 必须能装下整个 `DOC_CAP`，不能挤在 `SCR_OFF` 的小缓冲里）。两个模式不会同时跑。
     let srcv: u64 = sys_alloc(DOC_CAP as u64);
+    // 热更新的两块（`#1155`）：候选路径（约 4 KiB）与固定核的 `save`（每槽 4 字节 +
+    // 改帧计数 + 摘要临时区，`docs/284` 要求至少 33 KiB）。没有 `--hot` 时都不用。
+    let hotv: u64 = sys_alloc(4096);
+    let savev: u64 = sys_alloc(40960);
     if memv == 0 || inv == 0 || tokv == 0 || arenav == 0 || chkv == 0 || errv == 0
-            || srcv == 0 {
+            || srcv == 0 || hotv == 0 || savev == 0 {
         return die(1);
     }
     let mem: ptr = memv as ptr;
@@ -1225,8 +1230,28 @@ fn _start() -> u32 {
         // argv 在 inb 里, 源文件必须读进**另一块**缓冲 (否则路径被文件内容覆盖)
         return die(check_main(mem, inb, a2, srcb, toks, errs, chk) as u64);
     }
+    // `--hot FILE`：事件循环的顶部就是安全点（`#1155`）。有候选就换，换完继续跑 ——
+    // 换的是代码，索引（文档、符号表）在内存里原样留着。
+    let hotn: u32 = 0;
+    let hotp: ptr = hotv as ptr;
+    let h1: u64 = argv_n(inb, IN_CAP as u64, hdr, 1);
+    if arg_is(inb, h1, "--hot") {
+        let h2: u64 = argv_n(inb, IN_CAP as u64, hdr, 2);
+        let st: u32 = (h2 >> 32) as u32;
+        let ln: u32 = (h2 % 4294967296) as u32;
+        let i: u32 = 0;
+        while i < ln && i < 4000 {
+            store8(hotp, i, load8(inb, st + i) as u8);
+            i = i + 1;
+        }
+        store8(hotp, i, 0 as u8);
+        hotn = i;
+    }
     let go: u32 = 1;
     while go == 1 {
+        if hotn > 0 {
+            let _ht: u32 = hot_tick(hotp, savev as ptr);
+        }
         let n: u32 = read_msg(inb, IN_CAP, hdr);
         if n == 0 {
             go = 0;

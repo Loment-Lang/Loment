@@ -153,13 +153,17 @@ ZCode 的内置查看器用 Shiki（语言集构建期固定）、Claude Code �
 
 **装好 Loment 工具链之后**（`loment version` 能跑），写或改 `.lomt` 之前先读指南：
 
-- 有本仓库时：**`.claude/skills/loment/SKILL.md`**
-- 只有安装包时：**`<前缀>/share/loment/skill/SKILL.md`**（同一份）
+- 有本仓库时：**`.claude/skills/loment/SKILL.md`**（套件入口；专题在同级
+  `.claude/skills/loment-*/SKILL.md`）
+- 只有安装包时：**`<前缀>/share/loment/skill/SKILL.md`**（入口）与
+  `<前缀>/share/loment/skill/loment-*.md`（专题）
 
-内建函数表、语法要点、E1–E17 错误码、以及包内命令 `ir/check/build/run/fmt/doc/lsp`
-全在里面，**自足**，不依赖本仓库其它文件。
+内建函数表、语法要点、E001–E038 错误码、以及包内命令 `ir/check/build/run/fmt/doc/lsp`
+全在套件里，**自足**，不依赖本仓库其它文件。
 
-**正本只有一份**（就是那个文件）—— 别处都只是指针或同字节拷贝。复制出第二份必然漂。
+**每个 skill 只有一份正本**（`.claude/skills/<name>/SKILL.md`）—— 别处都只是指针或同字节拷贝。
+成员清单只登记一处：`tools/loment_dist.py` 的 `SKILL_SUITE`；加一个 skill 要同时过安装器、
+发布清单与 `loment_dist_test`。
 
 **它不是 Claude 专用的**：`.claude/skills/` 只是 Claude Code 的自动发现路径，
 其它 agent（ZCode / Codex / Cursor …）按各自约定读不到它，所以安装器会把**指针**

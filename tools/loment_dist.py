@@ -120,14 +120,31 @@ ICON = "editors/loment.ico"
 #: 取最大的那帧直接当图片用 —— 于是 logo 只有**一个真源**，安装器也不必自带解码器。
 LOGO_NAME = "loment-logo.png"
 LICENSES = ("LICENSE-MIT", "LICENSE-APACHE")
-# 随包的 agent skill —— 装完 Loment, AI agent 读它就会写 Loment。
-# **自足**: 内建函数表/语法/错误码/包内命令都在里面, 不引用仓库路径。原样拷进包,
-# 不做 @VERSION@ 替换 —— 这样"包里的那份 == 仓库里的那份"是可判据的。
+# 随包的 agent skill 套件 —— 装完 Loment, AI agent 读入口就会写 Loment。
+# **自足**: 入口 + 六个专题（语法速查/Tur/陷阱/安全/运行时/FFI/工具链）都在
+# `SKILL_SUITE` 里, 不引用仓库路径。原样拷进包, 不做 @VERSION@ 替换 ——
+# 这样"包里的那份 == 仓库里的那份"是可判据的。
 SKILL = ".claude/skills/loment/SKILL.md"
 #: lompi 的 agent 指南。**与 loment 那份同一套装法**（用户 2026-09-15 要求）：随包发、
 #: 装进 ~/.claude/skills/lompi/、往 Codex 的 AGENTS.md 写一段**独立标记**的指针、卸载摘掉。
 #: 标记用 `lompi:` 前缀而**不复用** loment 的 —— 两份指南是两件事，卸载一份不该动另一份。
 SKILL_LOMPI = ".claude/skills/lompi/SKILL.md"
+#: **The LomentSkill suite** (2026-11-04): the entry guide plus topic skills. The package
+#: keeps them flat under `share/loment/skill/` (the entry stays `SKILL.md`, so `loment
+#: skill` and `loment skill --print` are unchanged); the installer puts each into
+#: `~/.claude/skills/<name>/SKILL.md`, where Claude Code discovers it as its own skill.
+#: **One source per name** -- `loment_publish.py` ships the directories, `loment_dist`
+#: ships the flattened copies, and `loment_dist_test` checks the set does not drift.
+SKILL_SUITE: tuple[tuple[str, str], ...] = (
+    ("loment", SKILL),
+    ("loment-syntax", ".claude/skills/loment-syntax/SKILL.md"),
+    ("loment-tur", ".claude/skills/loment-tur/SKILL.md"),
+    ("loment-traps", ".claude/skills/loment-traps/SKILL.md"),
+    ("loment-safety", ".claude/skills/loment-safety/SKILL.md"),
+    ("loment-runtime", ".claude/skills/loment-runtime/SKILL.md"),
+    ("loment-ffi", ".claude/skills/loment-ffi/SKILL.md"),
+    ("loment-toolchain", ".claude/skills/loment-toolchain/SKILL.md"),
+)
 #: lompi 的**标准库 store**：`std` 128 个 .lomt（127 个模块 + `std.lomt` 门面）与 `host`
 #: 7 个，各带一份 `pkg.lomp`，共 137 个文件。**随 Loment 一起装**（用户 2026-09-16 定），
 #: 落在包里 `share/lompi/store/`，安装时再拷进 lompi 自己认的全局 store。
@@ -1526,7 +1543,10 @@ if [ "$uninstall" = 1 ]; then
     rm -rf "$prefix/share/loment" "$prefix/share/lompi"
     # only what this installer created -- never ~/.claude/skills or AGENTS.md at large
     if [ "$no_skill" != 1 ]; then
-        rm -rf "$HOME/.claude/skills/loment" "$HOME/.claude/skills/lompi"
+        for sk in loment loment-syntax loment-tur loment-traps loment-safety                   loment-runtime loment-ffi loment-toolchain; do
+            rm -rf "$HOME/.claude/skills/$sk"
+        done
+        rm -rf "$HOME/.claude/skills/lompi"
         if [ -f "$HOME/.codex/AGENTS.md" ]; then
             sed -i '/<!-- loment:begin -->/,/<!-- loment:end -->/d' "$HOME/.codex/AGENTS.md" 2>/dev/null || true
             sed -i '/<!-- lompi:begin -->/,/<!-- lompi:end -->/d' "$HOME/.codex/AGENTS.md" 2>/dev/null || true
@@ -1706,8 +1726,15 @@ if [ "$no_skill" = 1 ]; then
 else
     hits=""
     if [ -d "$HOME/.claude" ]; then
-        mkdir -p "$HOME/.claude/skills/loment"
-        cp -f "$skill_src" "$HOME/.claude/skills/loment/SKILL.md"
+        # The whole suite: the entry is share/loment/skill/SKILL.md, the topic skills sit
+        # beside it as <name>.md. Each lands in its own skill directory so Claude Code
+        # discovers it separately.
+        for sk in loment loment-syntax loment-tur loment-traps loment-safety                   loment-runtime loment-ffi loment-toolchain; do
+            if [ "$sk" = loment ]; then srcf="$skill_src"; else srcf="$prefix/share/loment/skill/$sk.md"; fi
+            [ -f "$srcf" ] || continue
+            mkdir -p "$HOME/.claude/skills/$sk"
+            cp -f "$srcf" "$HOME/.claude/skills/$sk/SKILL.md"
+        done
         hits="claude"
     fi
     # Codex CLI reads ~/.codex/AGENTS.md as global instructions. Marker-delimited so a
@@ -2102,8 +2129,11 @@ if ($Uninstall) {
     if (-not $NoFileType) { Unregister-FileType }
     if (-not $NoSkill) {
         # Only what this installer created -- never a skills dir / AGENTS.md at large.
-        Remove-Item -LiteralPath (Join-Path $env:USERPROFILE '.claude\skills\loment') `
-                    -Recurse -Force -ErrorAction SilentlyContinue
+        foreach ($sk in @('loment','loment-syntax','loment-tur','loment-traps','loment-safety',
+                          'loment-runtime','loment-ffi','loment-toolchain')) {
+            Remove-Item -LiteralPath (Join-Path $env:USERPROFILE ".claude\skills\$sk") `
+                        -Recurse -Force -ErrorAction SilentlyContinue
+        }
         Remove-Item -LiteralPath (Join-Path $env:USERPROFILE '.claude\skills\lompi') `
                     -Recurse -Force -ErrorAction SilentlyContinue
         $agents = Join-Path $env:USERPROFILE '.codex\AGENTS.md'
@@ -2161,6 +2191,13 @@ foreach ($rel in @('share/loment/version', 'share/loment/seed.ll',
                    'share/loment/examples/user_hello.lomt',
                    'share/loment/examples/tour.lomt',
                    'share/loment/skill/SKILL.md',
+                   'share/loment/skill/loment-syntax.md',
+                   'share/loment/skill/loment-tur.md',
+                   'share/loment/skill/loment-traps.md',
+                   'share/loment/skill/loment-safety.md',
+                   'share/loment/skill/loment-runtime.md',
+                   'share/loment/skill/loment-ffi.md',
+                   'share/loment/skill/loment-toolchain.md',
                    'share/lompi/skill/SKILL.md')) {
     if ($verified -notcontains $rel) { throw "unlisted file in package: $rel -- refusing to install" }
     $f = Join-Path $Payload $rel.Replace('/', '\')
@@ -2233,9 +2270,15 @@ if ($NoSkill) {
     # Claude Code: user-level skills dir, auto-discovered.
     $claudeDir = Join-Path $env:USERPROFILE '.claude'
     if (Test-Path -LiteralPath $claudeDir) {
-        $skillDir = Join-Path $claudeDir 'skills\loment'
-        New-Item -ItemType Directory -Path $skillDir -Force | Out-Null
-        Copy-Item -LiteralPath $skillSrc -Destination (Join-Path $skillDir 'SKILL.md') -Force
+        # The whole suite: the entry is skill\SKILL.md, the topic skills are skill\<name>.md.
+        foreach ($sk in @('loment','loment-syntax','loment-tur','loment-traps','loment-safety',
+                          'loment-runtime','loment-ffi','loment-toolchain')) {
+            if ($sk -eq 'loment') { $srcf = $skillSrc } else { $srcf = Join-Path $shareDir "skill\$sk.md" }
+            if (-not (Test-Path -LiteralPath $srcf)) { continue }
+            $skillDir = Join-Path $claudeDir "skills\$sk"
+            New-Item -ItemType Directory -Path $skillDir -Force | Out-Null
+            Copy-Item -LiteralPath $srcf -Destination (Join-Path $skillDir 'SKILL.md') -Force
+        }
         $skillHits += "claude"
     }
     # Codex CLI: global instructions at ~/.codex/AGENTS.md. Marker-delimited so re-install
@@ -2983,7 +3026,7 @@ README_MD = """# Loment {DISPLAY}
 | `bin/lompi` | **Loment 库的包管理器**（Loment 自己写的，`lompi/`）。**独立命令，不是 `loment` 的子命令** —— `loment help` 里没有它，直接敲 `lompi` |
 | `share/loment/seed.ll` | 自举种子：只用 clang 就能从它重建整套工具链 |
 | `share/loment/examples/user_hello.lomt` | 示例程序（用 `print` 打印） |
-| `share/loment/skill/SKILL.md` | **给 AI agent 的 Loment 说明书**（见下） |
+| `share/loment/skill/` | **给 AI agent 的 LomentSkill 套件**：入口 `SKILL.md` + 六个专题（`loment-tur.md`、`loment-syntax.md`、`loment-traps.md`、`loment-safety.md`、`loment-runtime.md`、`loment-ffi.md`、`loment-toolchain.md`）（见下） |
 | `share/lompi/skill/SKILL.md` | **lompi 的说明书**（同一种装法：进 `~/.claude/skills/lompi/`，并往 Codex 的 AGENTS.md 写指针） |
 | `share/lompi/store/` | **lompi 的标准库**：`std` / `host` / `internet` / `os` 四个包，共 **160** 个文件（这个数**钉在** `loment_lompi_test.STORE_FILES`，别在这行手抄第二份）。装的时候会一并拷进 **lompi 自己认的全局 store**（问 `lompi config`），装完就能直接 `lompi index` / `use std` |
 
@@ -3027,13 +3070,14 @@ loment-{VERSION}-windows-x64-setup.exe
 
 ## 让 AI agent 写 Loment
 
-包里带一份**自足**的 skill（`share/loment/skill/SKILL.md`）：内建函数表、语法、
-错误码表、以及这个包自己的命令，都在里面，不依赖源码仓库。
+包里带一套**自足**的 LomentSkill 套件（`share/loment/skill/`）：入口 `SKILL.md`，
+加语法速查、Tur 语法、陷阱、安全栈、运行时、FFI、工具链六份专题，不依赖源码仓库。
 
-安装时它会同时被写进 **`~/.claude/skills/loment/`**（用户级），于是**任何工程**里的
-Claude Code 都能读到它 —— 你只要说"用 Loment 写个程序"就行。不想装用 `-NoSkill`
-（Linux: `--no-skill`）；没装 Claude 的话它会留在包里，把那个文件拷到
-`<你的工程>/.claude/skills/loment/SKILL.md` 也一样。卸载时一并摘掉。
+安装时整套会被写进 **`~/.claude/skills/loment*/`**（用户级），于是**任何工程**里的
+Claude Code 都能分别发现它们 —— 你只要说"用 Loment 写个程序"就行。不想装用 `-NoSkill`
+（Linux: `--no-skill`）；没装 Claude 的话它们留在包里，把 `share/loment/skill/` 下的
+`SKILL.md` 与 `<name>.md` 分别拷到 `<你的工程>/.claude/skills/<name>/SKILL.md` 也一样。
+卸载时一并摘掉。
 
 **既没有 Claude 也没有 Codex？** 那就不靠目录约定 —— **跑 CLI 就行**：
 
@@ -3383,6 +3427,16 @@ def _read(p: str) -> bytes:
     return (ROOT / p).read_bytes()
 
 
+def skill_pkg_name(name: str) -> str:
+    """Package file name for one skill: the entry keeps `SKILL.md` (stable CLI path)."""
+    return "SKILL.md" if name == "loment" else f"{name}.md"
+
+
+def skill_package_files() -> dict[str, bytes]:
+    """`share/loment/skill/*` -> bytes. One place, used by payload and by --check."""
+    return {f"share/loment/skill/{skill_pkg_name(n)}": _read(p) for n, p in SKILL_SUITE}
+
+
 def logo_png() -> bytes:
     """`editors/loment.ico` 里最大的那一帧 —— 纯 stdlib 解 ICO 目录，帧本身就是 PNG。
 
@@ -3462,7 +3516,8 @@ def payload(kind: str, bins: dict[str, tuple[bytes, bytes]]) -> dict[str, tuple[
     for name in ("jrt.ll", "jrt.lomt"):
         files[f"share/loment/jrt/0.1.0/{name}"] = (
             _read(f"loment/lib/jrt/{name}"), 0o644)
-    files["share/loment/skill/SKILL.md"] = (_read(SKILL), 0o644)
+    for rel, body in skill_package_files().items():
+        files[rel] = (body, 0o644)
     # lompi 是独立命令，它那份指南也放**自己**的 share 树下，不塞进 share/loment/
     files["share/lompi/skill/SKILL.md"] = (_read(SKILL_LOMPI), 0o644)
     # lompi 的标准库 (std/host/internet/os 四个包, 共 160 个文件 —— 数见 `loment_lompi_test.
@@ -3638,18 +3693,14 @@ def skill_zip() -> bytes:
     一个字段。它咬到的是"同一 tag 在两个 runner 上出两个哈希", 而发布流水线正好要从
     ubuntu 挪到 windows (`release.yml` 的 setup.exe 要 iexpress)。钉死它, 换宿主才**不改产物**。
     """
-    skill_dir = Path(ROOT / SKILL).parent         # 例如 .claude/skills/loment
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        for p in sorted(skill_dir.rglob("*")):
-            if not p.is_file():
-                continue
-            zi = zipfile.ZipInfo(f"loment/{p.relative_to(skill_dir).as_posix()}",
-                                 (1980, 1, 1, 0, 0, 0))
+        for name, rel in SKILL_SUITE:
+            zi = zipfile.ZipInfo(f"loment/{skill_pkg_name(name)}", (1980, 1, 1, 0, 0, 0))
             zi.external_attr = 0o644 << 16
             zi.compress_type = zipfile.ZIP_DEFLATED
             zi.create_system = 3
-            z.writestr(zi, p.read_bytes())
+            z.writestr(zi, _read(rel))
     return buf.getvalue()
 
 
@@ -3797,7 +3848,7 @@ def _fresh_sources(kind: str) -> dict[str, bytes]:
     那时 `--check` 照样报"一致" —— 它只拿归档跟**它自己的** SHA256SUMS 比)。
     """
     out = {
-        "share/loment/skill/SKILL.md": _read(SKILL),
+        **skill_package_files(),
         **{f"share/loment/lib/{p.name}": p.read_bytes()
            for p in sorted((ROOT / "loment" / "lib").glob("*.lomt"))},
         "share/lompi/skill/SKILL.md": _read(SKILL_LOMPI),
@@ -3862,8 +3913,12 @@ def check(out_dir: Path | None = None) -> int:
             elif got[rel] != want:
                 stale.append(f"{arc}:{rel}")
     sz = out / "loment-skill.zip"
-    if sz.exists() and _read_archive(sz).get("SKILL.md") != _read(SKILL):
-        stale.append("loment-skill.zip:SKILL.md")
+    if sz.exists():
+        got = _read_archive(sz)
+        for name, rel in SKILL_SUITE:
+            key = skill_pkg_name(name)
+            if got.get(key) != _read(rel):
+                stale.append(f"loment-skill.zip:{key}")
     for s in stale:
         print(f"[STALE] {s} —— 归档里那份不是当前源码, 重跑 --emit")
     if bad or stale:

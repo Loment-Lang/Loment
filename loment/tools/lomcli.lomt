@@ -612,7 +612,7 @@ fn catalog(mem: ptr, fd: u64) {
     sec(mem, fd, "SOURCE TOOLS");
     row(mem, fd, "fmt", "FILE", "format (prints the result, does not touch the file)");
     row(mem, fd, "doc", "FILE", "API docs from /// comments");
-    row(mem, fd, "skill", "[--print]", "the AI-agent guide (its path, or the whole text)");
+    row(mem, fd, "skill", "[--print]", "the LomentSkill suite entry (its path, or its text)");
     sec(mem, fd, "READ SOURCE");
     row(mem, fd, "cat", "FILE", "print with line numbers");
     row(mem, fd, "stat", "FILE", "lines / bytes / longest line");
@@ -730,7 +730,7 @@ fn help_of(mem: ptr, fd: u64, cmd: ptr, n: u32) -> u32 {
         return 0;
     }
     if eq_cstr(cmd, n, "skill") {
-        usage_line(mem, fd, "skill", "[--print]", "The AI-agent guide. No argument prints its path, --print prints the text.");
+        usage_line(mem, fd, "skill", "[--print]", "The LomentSkill suite entry. No argument prints its path, --print prints its text; the topic skills sit beside it.");
         return 0;
     }
     if eq_cstr(cmd, n, "help") {

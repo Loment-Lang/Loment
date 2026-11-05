@@ -63,7 +63,7 @@ hello from Loment
 | | |
 |---|---|
 | [Quick start](QUICKSTART.md) | Sources, toolchain, the first four commands. |
-| [Language guide](.claude/skills/loment/SKILL.md) | Syntax, built-ins, error codes. Ships inside the package as `loment skill --print`. |
+| [Language guide](.claude/skills/loment/SKILL.md) | The **LomentSkill suite**: entry plus `loment-tur`, `loment-syntax`, `loment-traps`, `loment-safety`, `loment-runtime`, `loment-ffi`, `loment-toolchain`. Ships inside the package (`loment skill --print` prints the entry). |
 | [Standard](standard/LLS.md) | LLS, the *Loment Language Standard* — what is frozen, who decides conformance. |
 | [Manual](docs/manual/index.md) · [Examples](loment/examples/) | The generated reference, and 34 example programs. |
 | [Wiki](https://loment.fandom.com/) | The language, the toolchain and the ecosystem, browsable. |

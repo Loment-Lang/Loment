@@ -64,7 +64,6 @@ const CG_MAXCONST: u32 = 1024;
 //: **256 格 = 2048 B**，正好是 `L05_MAX` 的字节预算 —— 每格至少 8 字节，所以条目数
 //: 在算术上不会再涨（第 257 处之前预算已经先挡住），表的尺寸本身就是那条证明。
 const CG_L05: u32 = 916164;
-const CG_BYTES: u32 = 918212;      // = CG_L05 + 2048
 //: 区表的两个标量：`CG_L05_N` = 条数（0 = 本函数不开区），`CG_L05_CAP` = 整块字节数。
 //: **628/632 是 600–640 这一段里最后两个没人认的格** —— 604–624 已经被 Tur 2 的循环
 //: machinery（`CG_BODY0` / `CG_LBRK` / `CG_LCOND` / `CG_LKIND` / `CG_LSV` / `CG_LAUX`）
@@ -72,6 +71,30 @@ const CG_BYTES: u32 = 918212;      // = CG_L05 + 2048
 //: 我们写的站点数，`__tur2_i` 的编号整体错位（`loment_p8_test` 的孪生对拍抓到）。
 const CG_L05_N: u32 = 628;
 const CG_L05_CAP: u32 = 632;
+//: **循环体那一帧的 defer 帧深**（`docs/296` §2.3）：`break`/`continue` 要跑到这一层为止。
+const CG_LDEPTH: u32 = 636;
+//: **`defer` 的书账台**（`docs/296` §2.3）：站点栈、帧栈、捕获表。帧 = 一层语句表，
+//: 站点 = 一条 `defer`，捕获 = 它的实参值（**文本**，与参考实现的 SSA 捕获同值：重放时
+//: 直接内联进调用行）。上限按"每函数 8 条 `defer`（捕获表 8 站点）、嵌套 64 层、每条 4 个
+//: 实参"定 —— 超了 `cg_fail`，不写穿（站点栈本身留了 32 格，多出来的用不上）。
+//: 常量初值只能是**整数字面量**（语言如此），所以下面的偏移都是算好的数：
+//:   CG_DFR_N=+0 CG_DFR_D=+4 CG_DFR_PLAY=+8 CG_DFR_ACT=+12
+//:   CG_DFR_SITES=+16 (32x4=128) → +144 CG_DFR_FRAMES (64x4=256) → +400 CG_DFR_CAP
+//:   CG_DFR_CAP = 8 站点 x 4 实参 x 84 = 2688 → CG_BYTES = 918212 + 3088 = 921300
+//: （`CG_DFR` 整块从 918212 起，紧跟 L0.5 区表 —— 没有单独的基址常量：
+//: 每个格各自是一个名字。）
+const CG_DFR_N: u32 = 918212;          // 站点数
+const CG_DFR_D: u32 = 918216;          // 帧深
+const CG_DFR_PLAY: u32 = 918220;       // 1 = 正在重放（实参走捕获表）
+const CG_DFR_ACT: u32 = 918224;        // 正在重放的站点序号
+const CG_DFR_SITES: u32 = 918228;      // 站点栈：32 x 4
+const CG_DFR_FRAMES: u32 = 918356;     // 帧栈：64 x 4（每帧记站点数）
+const CG_DFR_CAP: u32 = 918612;        // 捕获表：8 站点 x 4 实参 x 84
+const CG_DFR_STRIDE: u32 = 84;         // start | end | len | pad | text[68]
+const CG_MAXDFR: u32 = 8;     // = 捕获表里能放下的站点数（8 x 4 x 84）
+const CG_MAXDFRAMES: u32 = 64;
+const CG_MAXDFARGS: u32 = 4;
+const CG_BYTES: u32 = 921300;         // = CG_L05 + 2048 + 3088（defer 区整块）
 use bytes
 use lexer
 
@@ -4757,6 +4780,13 @@ fn operand_ty(s: ptr, src: ptr, toks: ptr, k: u32, fallback: u32) -> u32 {
 }
 
 fn expr_bin(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, minp: u32, lvl: u32, want: u32) -> u32 {
+    // `defer` 重放（`docs/296` §2.3）：这个 token 是某个捕获实参的起点 -> 用捕获的值。
+    if load32(s, CG_DFR_PLAY) == 1 {
+        let ck: u32 = dfr_cap_find(s, j);
+        if ck != 4294967295 {
+            return dfr_restore(s, ck, lvl);
+        }
+    }
     let w: u32 = 0;
     if want_is_int(src, toks, want) == 1 {
         w = want;
@@ -5041,6 +5071,10 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
     let body_end: u32 = skip_block(src, toks, body_at - 1);
     store32(s, 564, body_at);   // L0 分析要函数体的 token 跨度 (两处前导段与 stmt 都用)
     store32(s, CG_BODY0, body_at);   // for-in 的合成下标按函数内词法顺序编号
+    // `defer` 的书账按**函数**清零（docs/296 §2.3）：上一函数的站点/帧不能漏过来。
+    store32(s, CG_DFR_N, 0);
+    store32(s, CG_DFR_D, 0);
+    store32(s, CG_DFR_PLAY, 0);
     store32(s, 568, body_end);
     let nl: u32 = collect_locals(s, src, toks, body_at, body_end);
     let has05: u32 = l05_plan(s, src, toks, nl);   // L0.5：本函数开不开区
@@ -5075,9 +5109,11 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
             roots_push(s, out, src, toks, 0, nl);
         }
         let jj: u32 = find_body(src, toks, lp);
+        let fdfr: u32 = dfr_push(s);   // 函数体 = 最外那层语句表（docs/296 §2.3）
         while tok_kind(toks, jj) != 4 {
             if tok_is(src, toks, jj, "}") {
                 if load32(s, 476) == 0 {
+                    let _de: u32 = dfr_end(s, out, src, toks, fdfr, ret);
                     emit_l1(s, out, src, toks, 0, 0, 0);   // L1：函数末尾
                     if gc_any(s) == 1 {
                         roots_pop(s, out);
@@ -5185,9 +5221,11 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
         roots_push(s, out, src, toks, k, nl);
     }
     let j: u32 = find_body(src, toks, lp);
+    let fdfr2: u32 = dfr_push(s);   // 函数体 = 最外那层语句表（docs/296 §2.3）
     while tok_kind(toks, j) != 4 {
         if tok_is(src, toks, j, "}") {
             if load32(s, 476) == 0 {   // 块未终止: unit 函数补 ret void, 其余补 unreachable
+                let _de2: u32 = dfr_end(s, out, src, toks, fdfr2, ret);
                 emit_l1(s, out, src, toks, 0, 0, 0);   // L1：函数末尾（档位门在 emit_l1 里）
                 if is_unit_tok(src, toks, ret) == 1 {
                     if gc_any(s) == 1 {   // `gc_auto`：函数末尾那条隐式 return
@@ -5807,7 +5845,10 @@ fn emit_try_let(s: ptr, out: ptr, src: ptr, toks: ptr, name: u32, ty: u32, eq: u
     emit_dec(s, out, a1);
     emit_str(s, out, ", i64 %t");
     emit_dec(s, out, c1);
-    emit_str(s, out, ", 1\n  ret ");
+    emit_str(s, out, ", 1\n");
+    // `?` 的早退也是一条 `return`（docs/296 §2.3）：defer 在 ret 之前跑
+    let _dfrq: u32 = dfr_run(s, out, src, toks, 0, load32(s, 552));
+    emit_str(s, out, "  ret ");
     emit_ty(s, out, src, toks, load32(s, 552));
     emit_str(s, out, " %t");
     emit_dec(s, out, b1);
@@ -5877,10 +5918,12 @@ fn emit_if_at(s: ptr, out: ptr, src: ptr, toks: ptr, cond: u32, ret: u32) -> u32
     // **L2 也认 `if` 的两支**（`docs/210` §7 点名的"只认 while/for 的体"）：两支各是一个
     // 块，规则与循环体同一条（`epoch_open` 内部的 `l2_ok` 就是用这一支的跨度判的）。
     // `else if` 链**不在这儿开** —— 那是一条语句，它自己那两支会各自开（参考侧同形）。
+    let tdfr: u32 = dfr_push(s);   // 分支体是一层语句表（docs/296 §2.3）
     let tv: u32 = epoch_open(s, out, src, toks, e3 + 1, skip_block(src, toks, e3) - 1);
     while !tok_is(src, toks, k, "}") && tok_kind(toks, k) != 4 {
         k = stmt(s, out, src, toks, k, ret);
     }
+    let _tde: u32 = dfr_end(s, out, src, toks, tdfr, ret);
     epoch_close(s, out, tv);
     k = k + 1;
     jump(s, out, base_l + 2, "end");
@@ -5893,11 +5936,13 @@ fn emit_if_at(s: ptr, out: ptr, src: ptr, toks: ptr, cond: u32, ret: u32) -> u32
             // Tur 2：`else <条件> {` —— 隐式 elif，直接发下一层（与 `else if` 同形）。
             k = emit_if_at(s, out, src, toks, k, ret);
         } else {
+            let edfr: u32 = dfr_push(s);
             let ev: u32 = epoch_open(s, out, src, toks, k + 1, skip_block(src, toks, k) - 1);
             k = k + 1;   // '{'
             while !tok_is(src, toks, k, "}") && tok_kind(toks, k) != 4 {
                 k = stmt(s, out, src, toks, k, ret);
             }
+            let _ede: u32 = dfr_end(s, out, src, toks, edfr, ret);
             epoch_close(s, out, ev);
             k = k + 1;
         }
@@ -5907,8 +5952,160 @@ fn emit_if_at(s: ptr, out: ptr, src: ptr, toks: ptr, cond: u32, ret: u32) -> u32
     return k;
 }
 
+
+// ---------------------------------------------------------------- defer（docs/296 §2.3）
+
+/// 进一层语句表：记下进帧前的站点数，帧深 +1。
+fn dfr_push(s: ptr) -> u32 {
+    let d: u32 = load32(s, CG_DFR_D);
+    if d >= CG_MAXDFRAMES {
+        let _cf: u32 = cg_fail(s, 5, 0);   // 嵌套太深：点亮出来（见 driver 的 5 号消息）
+        return d;
+    }
+    store32(s, CG_DFR_FRAMES + d * 4, load32(s, CG_DFR_N));
+    store32(s, CG_DFR_D, d + 1);
+    return d;
+}
+
+/// 出一层语句表：**正常走到块尾**时按帧内 LIFO 跑完；已经终结（`return`/`break`/
+/// `continue`）时那一支自己跑过（见 `stmt`），这里只把帧收掉。
+fn dfr_end(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32, ret: u32) -> u32 {
+    if load32(s, 476) == 0 {
+        dfr_run(s, out, src, toks, base, ret);
+    }
+    store32(s, CG_DFR_N, load32(s, CG_DFR_FRAMES + base * 4));
+    store32(s, CG_DFR_D, base);
+    return 0;
+}
+
+/// 从最内层帧一路跑到 `base`（含）：帧内逆序，帧间由内向外。**只发指令、不动书账** ——
+/// 一条 `return`/`break` 只是**一条**出口；同一个块尾在别的路径上还要再发一次
+/// （参考实现同一条：`_run_defers` 只读不弹）。书账由 `dfr_end` 在块尾收。
+fn dfr_run(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32, ret: u32) -> u32 {
+    let d: u32 = load32(s, CG_DFR_D);
+    while d > base {
+        let dd: u32 = d - 1;
+        let b: u32 = load32(s, CG_DFR_FRAMES + dd * 4);
+        let n: u32 = load32(s, CG_DFR_N);
+        while n > b {
+            let nn: u32 = n - 1;
+            let site: u32 = load32(s, CG_DFR_SITES + nn * 4);
+            store32(s, CG_DFR_ACT, nn);
+            store32(s, CG_DFR_PLAY, 1);
+            let _e: u32 = stmt(s, out, src, toks, site, ret);
+            store32(s, CG_DFR_PLAY, 0);
+            n = nn;
+        }
+        d = dd;
+    }
+    return 0;
+}
+
+fn dfr_cap_slot(s: ptr, n: u32, k: u32) -> u32 {
+    return CG_DFR_CAP + (n * CG_MAXDFARGS + k) * CG_DFR_STRIDE;
+}
+
+/// 把第 k 个实参的方案 (start, end) 与**值文本**存进捕获表（值在 0 层）。
+fn dfr_cap_store(s: ptr, n: u32, k: u32, start: u32, end: u32) -> u32 {
+    let off: u32 = dfr_cap_slot(s, n, k);
+    let mut_ln: u32 = load32(s, blen(s, 0));
+    if mut_ln > 68 {
+        mut_ln = 68;
+    }
+    store32(s, off, start);
+    store32(s, off + 4, end);
+    store32(s, off + 8, mut_ln);
+    let i: u32 = 0;
+    while i < mut_ln {
+        store8(s, off + 16 + i, load8(s, btxt(s, 0) + i) as u8);
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 正在重放的站点里，`j` 是不是某个捕获实参的起点；是 -> 实参序号，不是 -> 4294967295。
+fn dfr_cap_find(s: ptr, j: u32) -> u32 {
+    let n: u32 = load32(s, CG_DFR_ACT);
+    let k: u32 = 0;
+    while k < CG_MAXDFARGS {
+        let off: u32 = dfr_cap_slot(s, n, k);
+        if load32(s, off + 8) != 0 && load32(s, off) == j {
+            return k;
+        }
+        k = k + 1;
+    }
+    return 4294967295;
+}
+
+/// 把捕获的值放回第 lvl 层，返回那条实参**之后**的 token（调用方据此继续）。
+fn dfr_restore(s: ptr, k: u32, lvl: u32) -> u32 {
+    let off: u32 = dfr_cap_slot(s, load32(s, CG_DFR_ACT), k);
+    let ln: u32 = load32(s, off + 8);
+    let i: u32 = 0;
+    while i < ln {
+        store8(s, btxt(s, lvl) + i, load8(s, off + 16 + i) as u8);
+        i = i + 1;
+    }
+    store32(s, blen(s, lvl), ln);
+    return load32(s, off + 4);
+}
+
+/// 延迟调用的第 k 个实参按什么类型求值：用户函数用**形参类型**（与参考实现同一条），
+/// 其余（内建 / 泛型 / 未知）按自然类型。
+fn dfr_want(s: ptr, src: ptr, toks: ptr, name_tok: u32, k: u32) -> u32 {
+    let fi: u32 = find_fn(s, src, toks, name_tok);
+    if fi == 4294967295 {
+        return 0;
+    }
+    if is_generic_fn(s, src, toks, fi) == 1 {
+        return 0;
+    }
+    return load32(s, CG_PARAM + fi * 160 + k * 8 + 4);
+}
+
+/// `defer CALL;` 本身：**不执行**，只把站点与捕获登记进当前帧；`PLAY` 时为重放，
+/// 跳过关键字让调用照常发出去。
+fn dfr_stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
+    if load32(s, CG_DFR_PLAY) == 1 {
+        return stmt(s, out, src, toks, j + 1, ret);
+    }
+    let n: u32 = load32(s, CG_DFR_N);
+    if n >= CG_MAXDFR {
+        return cg_fail(s, 4, j);   // 一个函数里 defer 太多（捕获表放不下）
+    }
+    store32(s, CG_DFR_SITES + n * 4, j);
+    store32(s, CG_DFR_N, n + 1);
+    let k: u32 = 0;
+    while k < CG_MAXDFARGS {
+        store32(s, dfr_cap_slot(s, n, k), 0);
+        store32(s, dfr_cap_slot(s, n, k) + 8, 0);
+        k = k + 1;
+    }
+    // 实参：`defer NAME ( a, b ) ;` —— j+1 = NAME、j+2 = '('
+    let p: u32 = j + 3;
+    let a: u32 = 0;
+    while !tok_is(src, toks, p, ")") && tok_kind(toks, p) != 4 && a < CG_MAXDFARGS {
+        let w: u32 = dfr_want(s, src, toks, j + 1, a);
+        let at: u32 = expr_bin(s, out, src, toks, p, 1, 0, w);
+        let _s: u32 = dfr_cap_store(s, n, a, p, at);
+        p = at;
+        if tok_is(src, toks, p, ",") {
+            p = p + 1;
+        }
+        a = a + 1;
+    }
+    if a >= CG_MAXDFARGS && !tok_is(src, toks, p, ")") {
+        let _cf: u32 = cg_fail(s, 3, j);   // 多于 4 个实参：说出来，别静默截断
+    }
+    let semi: u32 = operand_end(s, src, toks, p);
+    return semi + 1;
+}
+
 /// 一条语句; 返回下一个待处理 token 下标。
 fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
+    if load32(s, CG_PROF) == 1 && tok_kind(toks, j) == 0 && tok_is(src, toks, j, "defer") {
+        return dfr_stmt(s, out, src, toks, j, ret);
+    }
     if load32(s, CG_PROF) == 1 && tok_kind(toks, j) == 0
             && (tok_is(src, toks, j, "break") || tok_is(src, toks, j, "continue")) {
         // Tur 2 的循环控制（`docs/296` §2.5）。顺序与参考实现一致：`continue` 先跑续步
@@ -5917,6 +6114,8 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         if lb == 0 {                       // 检查器已经拒了；走到这里是发射器的错
             return cg_fail(s, 2, j);
         }
+        // 离开循环体那一块：体内帧的 `defer` 先跑（docs/296 §2.3），再走续步/跳转
+        let _dfr: u32 = dfr_run(s, out, src, toks, load32(s, CG_LDEPTH), ret);
         let cont: u32 = 0;
         let kd: u32 = load32(s, CG_LKIND);
         if tok_is(src, toks, j, "continue") {
@@ -5948,6 +6147,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
             && tok_is(src, toks, j + 1, ";") {
         // 裸 `return;`（`docs/296` §2.6）：函数没有返回类型（检查器已经核过）。退出路径与
         // 带值那条同序 —— L1 该还的还、`gc_auto` 的根表该退的退 —— 只是 `ret void`。
+        let _dfr0: u32 = dfr_run(s, out, src, toks, 0, ret);
         emit_l1(s, out, src, toks, 1, j, ret_end(src, toks, j, load32(s, 568)));
         if gc_any(s) == 1 {
             roots_pop(s, out);
@@ -5963,6 +6163,11 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         let rsub: u32 = push_ty_subst(s, src, toks, ret);
         let e: u32 = expr_bin(s, out, src, toks, j + 1, 1, 0, ret);
         pop_subst(s, rsub);
+        // 返回值先挪到**第 38 层**：`defer` 重放用第 0 层，实参落在 1..N 层，不挪的话
+        // `ret` 印出来的是被 defer 覆盖后的值（实测：`ret i32 %t2` / `ret ... 7`）。
+        move_val(s, 38, 0);
+        // `defer`（`docs/296` §2.3）：离开函数 = 离开所有块，由内向外跑完再 ret
+        let _dfr: u32 = dfr_run(s, out, src, toks, 0, ret);
         // L1 定活：返回值**已经读出来**了，现在可以还那块（档位门在 `emit_l1` 里面）
         emit_l1(s, out, src, toks, 1, j, ret_end(src, toks, j, load32(s, 568)));
         if gc_any(s) == 1 {   // `gc_auto`：离开本帧前退根表（在求值之后、ret 之前）
@@ -5976,7 +6181,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
                 && tok_int(src, toks, j + 1) == 0 && e == j + 2 {
             emit_str(s, out, "null");
         } else {
-            emit_val(s, out, 0);
+            emit_val(s, out, 38);
         }
         emit_str(s, out, "\n");
         store32(s, 476, 1);
@@ -6158,9 +6363,11 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         }
         let tend: u32 = skip_block(src, toks, find_body(src, toks, subj) - 1);
         let k3: u32 = find_body(src, toks, subj);
+        let hdfr: u32 = dfr_push(s);   // 命中臂是一层语句表（docs/296 §2.3）
         while k3 < tend - 1 && !tok_is(src, toks, k3, "}") && tok_kind(toks, k3) != 4 {
             k3 = stmt(s, out, src, toks, k3, load32(s, 552));
         }
+        let _hde: u32 = dfr_end(s, out, src, toks, hdfr, load32(s, 552));
         jump(s, out, mend, "mend");
         lab_def(s, out, lwd, "mwild");
         let nxt: u32 = tend;
@@ -6168,9 +6375,11 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
             let ebody: u32 = find_body(src, toks, nxt + 1);
             let eend: u32 = skip_block(src, toks, ebody - 1);
             let k4: u32 = ebody;
+            let edfr2: u32 = dfr_push(s);
             while k4 < eend - 1 && !tok_is(src, toks, k4, "}") && tok_kind(toks, k4) != 4 {
                 k4 = stmt(s, out, src, toks, k4, load32(s, 552));
             }
+            let _ede2: u32 = dfr_end(s, out, src, toks, edfr2, load32(s, 552));
             nxt = eend;
         }
         jump(s, out, mend, "mend");
@@ -6311,12 +6520,16 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         store32(s, CG_LCOND, w);
         store32(s, CG_LKIND, 1);
         store32(s, CG_LAUX, fi);
+        let odep: u32 = load32(s, CG_LDEPTH);
         let k: u32 = j + 5;
+        let fidf: u32 = dfr_push(s);   // 循环体是一层语句表（docs/296 §2.3）
+        store32(s, CG_LDEPTH, fidf);
         let tv: u32 = epoch_open(s, out, src, toks, k, skip_block(src, toks, j + 4) - 1);
         store32(s, CG_LSV, tv);
         while !tok_is(src, toks, k, "}") && tok_kind(toks, k) != 4 {
             k = stmt(s, out, src, toks, k, ret);
         }
+        let _fde: u32 = dfr_end(s, out, src, toks, fidf, ret);
         epoch_close(s, out, tv);
         k = k + 1;
         // `__tur2_i.N = __tur2_i.N + 1;` —— 体以 `break`/`continue`/`return` 收尾时
@@ -6331,6 +6544,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         store32(s, CG_LKIND, okd);
         store32(s, CG_LSV, osv);
         store32(s, CG_LAUX, oax);
+        store32(s, CG_LDEPTH, odep);
         return k;
     }
     if tok_is(src, toks, j, "for") {   // for i in lo..hi { ... }
@@ -6383,12 +6597,16 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         store32(s, CG_LCOND, w);
         store32(s, CG_LKIND, 2);
         store32(s, CG_LAUX, var_tok);
+        let odep: u32 = load32(s, CG_LDEPTH);
         let k: u32 = he + 1;                       // '{' 之后
+        let fdfr: u32 = dfr_push(s);   // 循环体是一层语句表（docs/296 §2.3）
+        store32(s, CG_LDEPTH, fdfr);
         let fsv: u32 = epoch_open(s, out, src, toks, k, skip_block(src, toks, k - 1) - 1);
         store32(s, CG_LSV, fsv);
         while !tok_is(src, toks, k, "}") && tok_kind(toks, k) != 4 {
             k = stmt(s, out, src, toks, k, ret);
         }
+        let _fde: u32 = dfr_end(s, out, src, toks, fdfr, ret);
         epoch_close(s, out, fsv);
         if load32(s, 476) == 0 {   // 体已终结时自增到不了（同 for-in 那条）
             for_step(s, out, src, toks, var_tok);
@@ -6400,6 +6618,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         store32(s, CG_LKIND, okd);
         store32(s, CG_LSV, osv);
         store32(s, CG_LAUX, oax);
+        store32(s, CG_LDEPTH, odep);
         return k + 1;
     }
     if tok_is(src, toks, j, "while") {
@@ -6426,12 +6645,16 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         store32(s, CG_LCOND, w);
         store32(s, CG_LKIND, 0);
         store32(s, CG_LAUX, 0);
+        let odep: u32 = load32(s, CG_LDEPTH);
         let m: u32 = e4 + 1;   // '{' 之后的第一条语句
+        let wdfr: u32 = dfr_push(s);   // 循环体是一层语句表（docs/296 §2.3）
+        store32(s, CG_LDEPTH, wdfr);
         let wsv: u32 = epoch_open(s, out, src, toks, m, skip_block(src, toks, m - 1) - 1);
         store32(s, CG_LSV, wsv);
         while !tok_is(src, toks, m, "}") && tok_kind(toks, m) != 4 {
             m = stmt(s, out, src, toks, m, ret);
         }
+        let _wde: u32 = dfr_end(s, out, src, toks, wdfr, ret);
         epoch_close(s, out, wsv);
         jump(s, out, w, "wcond");
         lab_def(s, out, w + 2, "wend");
@@ -6440,6 +6663,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         store32(s, CG_LKIND, okd);
         store32(s, CG_LSV, osv);
         store32(s, CG_LAUX, oax);
+        store32(s, CG_LDEPTH, odep);
         return m + 1;
     }
     if tok_is(src, toks, j, "match") {   // M26: switch + 载荷绑定
@@ -6551,9 +6775,11 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
                 emit_dec(s, out, lab3);
                 emit_str(s, out, "_mwild:\n");
                 let s4: u32 = p3 + 3;
+                let wadfr: u32 = dfr_push(s);   // 臂体是一层语句表（docs/296 §2.3）
                 while s4 < be3 - 1 && !tok_is(src, toks, s4, "}") && tok_kind(toks, s4) != 4 {
                     s4 = stmt(s, out, src, toks, s4, load32(s, 552));
                 }
+                let _wae: u32 = dfr_end(s, out, src, toks, wadfr, load32(s, 552));
             } else {
                 store32(s, 476, 0);
                 store32(s, 488, lab3);
@@ -6599,9 +6825,11 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
                 }
                 let be: u32 = skip_block(src, toks, p3 + 2);
                 let s3: u32 = p3 + 3;   // '{' 之后
+                let nadfr: u32 = dfr_push(s);   // 臂体是一层语句表（docs/296 §2.3）
                 while s3 < be - 1 && !tok_is(src, toks, s3, "}") && tok_kind(toks, s3) != 4 {
                     s3 = stmt(s, out, src, toks, s3, load32(s, 552));
                 }
+                let _nae: u32 = dfr_end(s, out, src, toks, nadfr, load32(s, 552));
             }
             jump(s, out, mend, "mend");
             k3 = be3;

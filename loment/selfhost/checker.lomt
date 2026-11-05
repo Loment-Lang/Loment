@@ -3483,6 +3483,19 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 || chk_tok_is(src, t, j, ";")
                 || chk_tok_is(src, t, j, "=>") {
             j = j + 1;
+        } else if load32(oc, 8) == 1 && chk_tok_is(src, t, j, "defer") {
+            // Tur 2 的 `defer f(a, b);`（`docs/296` §2.3）：只收**函数调用**。参考实现在
+            // 解析期就拒（E019）；自举侧原先让 `defer 1;` 一路走到发射器，报出来的是捕获表
+            // 上限（"a defer takes at most 4 arguments"）—— 方向完全错了。
+            let semi: u32 = chk_find_at(src, t, j, e, ";");
+            if chk_tok_kind(t, j + 1) != 0 || !chk_tok_is(src, t, j + 2, "(") {
+                chk_pub(src, t, oc, p, E_PARSE, j);
+            }
+            if semi <= e {
+                j = semi + 1;
+            } else {
+                j = e;
+            }
         } else if load32(oc, 8) == 1 && chk_tok_kind(t, j) == 0
                 && (chk_tok_is(src, t, j, "break") || chk_tok_is(src, t, j, "continue")) {
             // Tur 2 的循环控制（`docs/296` §2.5）—— 语句本身没有可查的东西；"在不在循环里"

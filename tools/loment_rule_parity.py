@@ -72,7 +72,7 @@ import loment_p8_test as H  # noqa: E402  # 复用已验过的构建/运行夹�
 # 报 E022 —— 码是错的、理由也是错的，而别的判据全绿。**这就是这张表存在的理由。**
 # 2026-10-15 同日 `E029`（用完再放）也补齐 ⇒ **104/106**。两条各一个探针，两边码集相等。
 # 2026-10-20（`#786` `lspe pass`）：新增一条"旁路不吞检查"的探针 ⇒ **126/126**。
-BUDGET = 126
+BUDGET = 128
 
 # --------------------------------------------------------------------------- 案例表
 #
@@ -442,6 +442,12 @@ _CASES: list[tuple[str, str]] = [
     ("lspe-duplicate-close",
      "module m\n\nchoose lspe_close_admin\nchoose lspe_close_admin\n\n"
      "fn f() -> u32 {\n    return 1;\n}\n"),
+    # ---- GC 时间控制（docs/306, Tur 2026.3）------------------------------
+    ("lgc-no-gc", "choose write grammar tur2026.3\nmodule m\nchoose no_gc\n"
+     "fn f() { lgc end; }\n"),
+    ("lgc-budget-expr", "choose write grammar tur2026.3\nmodule m\nchoose runtime\n"
+     "fn f() { lgc start(2 + 3) { } }\n"),
+
 ]
 
 

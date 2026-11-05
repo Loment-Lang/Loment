@@ -557,6 +557,60 @@ MUTATORS_V19 = [
 ]
 
 
+def fixture_v20() -> dict:
+    """一份合法的 **v20** 形式对象：v19 的再 + **系统索引** `systems`（#1022）。
+
+    六个系统各一条 `{state, detail, cost}`；`detail` **只写字段名**（明细住在别处），
+    `state` / `cost` 与它们指向的字段逐条相同 —— 这正是校验器不读源码判得到的那部分。
+    """
+    d = fixture_v19()
+    d["potato"] = "v20"
+    d["systems"] = {
+        "gc": {"state": "gc_manual", "detail": "gc_ladder", "cost": {"sites": 12}},
+        "runtime": {"state": "no_runtime", "detail": None, "cost": None},
+        "port": {"state": "sealed", "detail": None, "cost": None},
+        "vm": {"state": "no_vm", "detail": None, "cost": None},
+        "lms": {"state": "lms_full", "detail": "lms_levels", "cost": {"levels": 7}},
+        "lspe": {"state": "lspe_open_admin", "detail": "lspe", "cost": {"sites": 0}},
+    }
+    return d
+
+
+#: v20 的 `systems` 那几条规则的反例（#1022）。作用在 **v20** 的对象上。
+#: 三条验收点各至少一条：**错 state / 错 cost / 缺系统**；另外把"指针"那两格也钉住。
+MUTATORS_V20 = [
+    ("systems 整个缺掉", lambda d: d.pop("systems"), "systems 必须是对象"),
+    ("systems 不是对象", lambda d: d.__setitem__("systems", []), "systems 必须是对象"),
+    ("多一个系统", lambda d: d["systems"].__setitem__("gpu", {"state": "on"}),
+     "不认识的系统"),
+    ("少一个系统", lambda d: d["systems"].pop("lms"), "systems 少了"),
+    ("gc.state 与顶层字段不一致",
+     lambda d: d["systems"]["gc"].__setitem__("state", "gc_auto"), "systems.gc.state"),
+    ("runtime.state 与顶层字段不一致",
+     lambda d: d["systems"]["runtime"].__setitem__("state", "runtime"), "systems.runtime.state"),
+    ("lspe.state 与台账不一致",
+     lambda d: d["systems"]["lspe"].__setitem__("state", "lspe_close_admin"),
+     "systems.lspe.state"),
+    ("gc.detail 指错字段",
+     lambda d: d["systems"]["gc"].__setitem__("detail", "surfaces"), "systems.gc.detail"),
+    ("lms.detail 指错字段",
+     lambda d: d["systems"]["lms"].__setitem__("detail", "lms_budgets"), "systems.lms.detail"),
+    ("gc.cost 与 gc_ladder 总数不一致",
+     lambda d: d["systems"]["gc"]["cost"].__setitem__("sites", 11), "systems.gc.cost.sites"),
+    ("lms.cost 与开着的级数不一致",
+     lambda d: d["systems"]["lms"]["cost"].__setitem__("levels", 6), "systems.lms.cost.levels"),
+    ("lspe.cost 与台账 sites 不一致",
+     lambda d: d["systems"]["lspe"]["cost"].__setitem__("sites", 3), "systems.lspe.cost.sites"),
+    ("cost 键写错", lambda d: d["systems"]["gc"].__setitem__("cost", {"checks": 12}),
+     "键必须恰好是"),
+    ("没有明细的系统带了 cost",
+     lambda d: d["systems"]["runtime"].__setitem__("cost", {"sites": 0}),
+     "必须是 null"),
+    ("条目里多一个键", lambda d: d["systems"]["vm"].__setitem__("bogus", 1),
+     "不认识的键"),
+]
+
+
 @test
 def test_v18_requires_the_lms_budgets():
     """v18 的七级预算（`docs/253` §11.2.1，#1023）：正例合法，四条反例各钉一条规则。"""
@@ -584,6 +638,30 @@ def test_v19_adds_l0_5_without_rewriting_old_objects():
     d = fixture_v18()
     d["gc_ladder"]["l0_5"] = 0
     assert any("不认识的键" in e for e in potato.validate(d)), potato.validate(d)
+
+
+@test
+def test_v20_systems_index_cross_checks_every_link():
+    """v20 的系统索引（#1022）：每条链**逐格**钉住，而且**旧版对象不被回溯改写**。
+
+    验收点三条各有反例：**错 state**、**错 cost**、**缺系统**。另外把 `detail`
+    这个**指针**本身也钉住（指错字段必须红 —— 索引不许变成第二份数字）。
+    """
+    assert potato.validate(fixture_v20()) == [], potato.validate(fixture_v20())
+    for name, mut, needle in MUTATORS_V20:
+        d = fixture_v20()
+        mut(d)
+        errs = potato.validate(d)
+        assert any(needle in e for e in errs), (name, errs)
+    # **v19 的对象没有 `systems`**，仍然合法（台阶只往上加，不回溯改写）。
+    assert potato.validate(fixture_v19()) == [], potato.validate(fixture_v19())
+    # v19 的对象**也不许**带 `systems`（那一版没有这一格）。
+    d = fixture_v19()
+    d["systems"] = fixture_v20()["systems"]
+    assert any("未知顶层字段" in e for e in potato.validate(d)), potato.validate(d)
+    # 索引必须**恰好**是六个系统 —— 少一个、多一个都红。
+    assert set(potato.SYSTEM_KEYS) == {"gc", "runtime", "port", "vm", "lms", "lspe"}
+
 
 @test
 def test_v16_requires_the_lspe_ledger():
@@ -922,7 +1000,8 @@ def _cases() -> list[tuple[str, dict]]:
                                    ("v8", fixture_v8()), ("v9", fixture_v9()),
                                    ("v10", fixture_v10()), ("v11", fixture_v11()),
                                    ("v12", fixture_v12()), ("v16", fixture_v16()),
-                                   ("v17", fixture_v17()), ("v18", fixture_v18())]
+                                   ("v17", fixture_v17()), ("v18", fixture_v18()),
+                                   ("v19", fixture_v19()), ("v20", fixture_v20())]
     # **`gc_manual` + `no_runtime` 是合法档**（"要运行期、但内存我自己管"的反面：
     # 不要运行期、手动回收）—— 它必须**不报错**。上面那张反例表只会钉"该拒的要拒",
     # 钉不住"不该拒的别拒"，所以这一条以**合法样本**的身份过孪生那一关。
@@ -994,6 +1073,17 @@ def _cases() -> list[tuple[str, dict]]:
         d = fixture_v14()
         mut(d)
         out.append((f"v14-{name}", d))
+    # v19 那一组（`gc_ladder.l0_5`, `docs/210` §2.10）。
+    for name, mut, _ in MUTATORS_V19:
+        d = fixture_v19()
+        mut(d)
+        out.append((f"v19-{name}", d))
+    # v20 那一组（`systems`, `#1022`）—— 这一组**必须**过孪生那一关：
+    # 索引的三条交叉不变量在两份实现里各写一遍，判决与错误条数都要一致。
+    for name, mut, _ in MUTATORS_V20:
+        d = fixture_v20()
+        mut(d)
+        out.append((f"v20-{name}", d))
     d0 = fixture()
     for k in ("traits", "impls", "generics", "instances", "guards"):
         d0.pop(k)

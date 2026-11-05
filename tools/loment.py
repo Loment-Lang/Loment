@@ -396,6 +396,12 @@ def cmd_lspe_state(a) -> int:
     doc = json.loads(lomentc.emit_potato(mod, ROOT, deps))
     lp = doc["lspe"]
     print(json.dumps(lp, ensure_ascii=False, indent=2))
+    # LSPC 的贴条（`docs/262` §5.10 / §5.16 / `#786`）：**永不沉默** —— 即使
+    # 一个旁路块都没有，"0 个未审计块"也是一条可核的声明。走 stderr：
+    # stdout 是台账 JSON（上面那一块），机器读它。
+    import lspe
+    for _ln in lspe.lspc_lines(lp):
+        print(_ln, file=sys.stderr)
     if lp["state"] == "lspe_close_admin":
         print("[LSPE] the audit is closed (lspe_close_admin): the checks still ran; "
               "only the ledger is off.", file=sys.stderr)

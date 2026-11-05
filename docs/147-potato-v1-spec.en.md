@@ -1,5 +1,5 @@
 <!-- translated-from: docs/147-potato-v1-spec.md -->
-<!-- source-sha256: d146ad1f921d7fe3e863a2a5209a643263e5179122ce7457787909ad21781bc4 -->
+<!-- source-sha256: 364e7c938300d70cfbb19d1354d6b465bde4f8f5443b5d7f4287cdd697ba8c11 -->
 
 # 147 · Potato v1: formal-object specification and the wave C measurement protocol
 
@@ -132,7 +132,7 @@ formal object and reconciles byte for byte".
 
 ## 5. Versioning and replay (M51)
 
-- the object carries its own version number; the validator accepts `v0` … **`v11`**, and an unknown version =
+- the object carries its own version number; the validator accepts `v0` … **`v20`**, and an unknown version =
   illegal. **A version is a step on the "set of fields" ladder, and the ladder only grows** — adding a
   required field to an old version would turn every existing object illegal, and the old versions are
   **promised to keep replaying** (last bullet in this section), so every new required field costs a version:
@@ -152,8 +152,16 @@ formal object and reconciles byte for byte".
   | `v10` | `gc_ladder` | `docs/210` §3 / §5 |
   | `v11` | `port` | `docs/222` §4 |
   | `v12` | `surfaces` | `docs/224` |
+  | `v13` | `vm` | `docs/231` |
+  | `v14` | `net_ladder` | `docs/237` |
+  | `v15` | `lms` | `docs/253` §11.3 |
+  | `v16` | `lspe` | `docs/262` §8 |
+  | `v17` | `lms_levels` | `docs/253` §11.4 |
+  | `v18` | `lms_budgets` | `docs/253` §11.2.1 |
+  | `v19` | `gc_ladder.l0_5` | `docs/210` §2.10 |
+  | `v20` | **`systems`** (the six-system index; a reader starts here) | `docs/302` |
 
-  The ladder **accumulates**: `v12` requires the fields of every version below it.
+  The ladder **accumulates**: `v20` requires the fields of every version below it.
 
 - **`gc` (v8)**: a **collection tier** — `gc_manual` (the program reclaims explicitly),
   `gc_auto` (the runtime reclaims), or `gc_auto_alpha` (the **hybrid**: static memory

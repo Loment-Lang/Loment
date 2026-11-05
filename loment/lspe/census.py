@@ -169,7 +169,9 @@ def pass_spans(toks: list, sid) -> list[dict]:
         spans.append({"id": sid("pass", f"pass:{toks[i + 2].val}"),
                       "reason": toks[i + 2].val,
                       "open": i + 3, "close": end,
-                      "line": t.line, "end_line": toks[end].line, "sites": 0})
+                      "line": t.line, "end_line": toks[end].line, "sites": 0,
+                      # 每个块就是 LSPC 的一条 **Q013**（`docs/262` §5.10 / §5.16）。
+                      "question": "Q013"})
     for s in spans:
         s["outer"] = not any(o is not s and o["open"] < s["open"] and s["close"] < o["close"]
                              for o in spans)

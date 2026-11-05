@@ -54,3 +54,23 @@ LSPE_OBLIGATIONS: dict[str, dict[str, object]] = {
 LSPE_SITE_KINDS = frozenset({
     "guard", "index", "bounds", "free", "alive", "init", "exclusive", "call",
 })
+
+#: **问题码**（`docs/262` §5.10）。与 `E034–E038` 是两个命名空间：问题**永不阻断**
+#: （`--lspe-mode=strict` 把未答升级成 E034），它们是 LSPC 贴出来的条。
+#: `Q013` 是 `lspe pass "reason" { … }` 的未审计块（`docs/262` §5.16 / `#786`）——
+#: 块跳过的是**审问**，不是收据：LSPC 每次都把它列出来。
+LSPE_QUESTIONS: dict[str, str] = {
+    "Q001": "找不到来源",
+    "Q002": "检查是惰性的（关掉也不红）",
+    "Q003": "两套实现分歧",
+    "Q004": "替换后 WF 未重证（stale_wf）",
+    "Q005": "步数预算耗尽",
+    "Q006": "过程间深度到顶",
+    "Q007": "析构诚实性无法证明",
+    "Q008": "域未知（能力域覆盖不到）",
+    "Q009": "别名不确定",
+    "Q010": "free 所有权歧义",
+    "Q011": "运行期泄漏",
+    "Q012": "假设已过期（源码变了）",
+    "Q013": "未审计块（`lspe pass`）—— 跳过的是审问，不是收据",
+}

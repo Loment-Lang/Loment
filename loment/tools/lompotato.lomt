@@ -736,6 +736,10 @@ fn is_top_key(ver: u32, kp: ptr, kl: u32) -> u32 {
     if ver >= 18 && eq_lit(kp, kl, "lms_budgets") == 1 {
         return 1;
     }
+    // v20 = v19 + **系统索引**（`docs/147` §5 / `#1022`）：`systems` 对象。
+    if ver >= 20 && eq_lit(kp, kl, "systems") == 1 {
+        return 1;
+    }
     return 0;
 }
 
@@ -2079,6 +2083,9 @@ fn validate(mem: ptr, tot: u32) -> u32 {
         if eq_lit(t, l, "v19") == 1 {
             ver = 19;
         }
+        if eq_lit(t, l, "v20") == 1 {
+            ver = 20;
+        }
     }
     if ver == NOTFOUND {
         let _c: u32 = bad(mem);
@@ -2141,6 +2148,249 @@ fn validate(mem: ptr, tot: u32) -> u32 {
     }
     if ver >= 14 {
         chk_net_ladder(mem, doc);
+    }
+    if ver >= 20 {
+        chk_systems(mem, doc);
+    }
+    return 0;
+}
+
+/// 两段缓冲逐字节相等吗（动态字符串比较 —— `eq_lit` 只比字面量）。
+fn mem_eq(a: ptr, na: u32, b: ptr, nb: u32) -> u32 {
+    if na != nb {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < na {
+        if load8(a, i) != load8(b, i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+/// `systems` 里某个条目的 `state` 与顶层字段（`lspe` 取台账的 `state`）相同吗。
+fn sys_state_ok(mem: ptr, doc: u32, e: u32, k: str) -> u32 {
+    let got: u32 = jget(mem, e, "state");
+    if got == NOTFOUND || jkind(mem, got) != 3 {
+        return 0;
+    }
+    let want: u32 = 0;
+    if eq_lit(str_ptr(k), str_len(k), "lspe") == 1 {
+        let lp: u32 = jget(mem, doc, "lspe");
+        if lp == NOTFOUND || jkind(mem, lp) != 1 {
+            return 0;
+        }
+        want = jget(mem, lp, "state");
+    } else {
+        want = jget(mem, doc, k);
+    }
+    if want == NOTFOUND || jkind(mem, want) != 3 {
+        return 0;
+    }
+    let lg: u32 = jstr(mem, got, ptr_add(mem, M_SB), 4096);
+    let lw: u32 = jstr(mem, want, ptr_add(mem, M_SB2), 4096);
+    return mem_eq(ptr_add(mem, M_SB), lg, ptr_add(mem, M_SB2), lw);
+}
+
+/// `detail` 那一格对不对：有明细的系统必须是那个**字段名**，没有的必须是 `null`。
+fn sys_detail_ok(mem: ptr, e: u32, has: u32, det: str) -> u32 {
+    let d: u32 = jget(mem, e, "detail");
+    if has == 0 {
+        if d != NOTFOUND && jkind(mem, d) == 7 {
+            return 1;
+        }
+        return 0;
+    }
+    if d == NOTFOUND || jkind(mem, d) != 3 {
+        return 0;
+    }
+    let l: u32 = jstr(mem, d, ptr_add(mem, M_SB), 4096);
+    return eq_lit(ptr_add(mem, M_SB), l, det);
+}
+
+/// 明细字段**算得出来**的总数；算不出（明细本身不合法）时返回 `NOTFOUND` ——
+/// 与 Python 的 `_system_cost` 同一条：那时上面已经报过，不再级联。
+fn sys_cost_want(mem: ptr, doc: u32, k: str) -> u32 {
+    if eq_lit(str_ptr(k), str_len(k), "gc") == 1 {
+        let gl: u32 = jget(mem, doc, "gc_ladder");
+        if gl == NOTFOUND || jkind(mem, gl) != 1 {
+            return NOTFOUND;
+        }
+        let tot: u32 = jget(mem, gl, "total_sites");
+        if tot == NOTFOUND || jnonneg(mem, tot) == 0 {
+            return NOTFOUND;
+        }
+        return json_as_u32(ptr_add(mem, M_IN), ptr_add(mem, M_ARENA), tot);
+    }
+    if eq_lit(str_ptr(k), str_len(k), "lms") == 1 {
+        // 与 Python 的 `_system_cost` 同一条：只看**七级**那七格，全为布尔才数
+        // "为真的级数"；任何一格缺失/不是布尔 ⇒ 算不出（上面已经报过）。
+        let lv: u32 = jget(mem, doc, "lms_levels");
+        if lv == NOTFOUND || jkind(mem, lv) != 1 {
+            return NOTFOUND;
+        }
+        let n: u32 = 0;
+        let j: u32 = 0;
+        let ix: u32 = 0;
+        while ix < 7 {
+            let nm: str = "lms_check";
+            if ix == 1 { nm = "lms_manage"; }
+            if ix == 2 { nm = "lms_guard"; }
+            if ix == 3 { nm = "lms_reject"; }
+            if ix == 4 { nm = "lms_crash"; }
+            if ix == 5 { nm = "lms_restart"; }
+            if ix == 6 { nm = "lms_seed"; }
+            j = jget(mem, lv, nm);
+            if j == NOTFOUND || jbool(mem, j) == 0 {
+                return NOTFOUND;
+            }
+            if jkind(mem, j) == 5 {
+                n = n + 1;
+            }
+            ix = ix + 1;
+        }
+        return n;
+    }
+    if eq_lit(str_ptr(k), str_len(k), "lspe") == 1 {
+        let lp: u32 = jget(mem, doc, "lspe");
+        if lp == NOTFOUND || jkind(mem, lp) != 1 {
+            return NOTFOUND;
+        }
+        let s: u32 = jget(mem, lp, "sites");
+        if s == NOTFOUND || jnonneg(mem, s) == 0 {
+            return NOTFOUND;
+        }
+        return json_as_u32(ptr_add(mem, M_IN), ptr_add(mem, M_ARENA), s);
+    }
+    return NOTFOUND;
+}
+
+/// 一个系统的 `cost` 那一格（单键对象；没有明细的系统必须是 `null`）。
+fn sys_cost_ok(mem: ptr, doc: u32, e: u32, k: str, has: u32, ck: str) -> u32 {
+    let c: u32 = jget(mem, e, "cost");
+    if has == 0 {
+        if c != NOTFOUND && jkind(mem, c) == 7 {
+            return 1;
+        }
+        return 0;
+    }
+    if c == NOTFOUND || jkind(mem, c) != 1 {
+        return 0;
+    }
+    // 键集合必须**恰好**是 {ck}：多一个、少一个都红（Python 那边是一条消息）。
+    let cm: u32 = jfirst(mem, c);
+    let cnt: u32 = 0;
+    let v: u32 = NOTFOUND;
+    while cm != NOTFOUND {
+        cnt = cnt + 1;
+        let kn: u32 = jmkey(mem, cm);
+        let kl: u32 = jstr(mem, kn, ptr_add(mem, M_SB2), 4096);
+        if eq_lit(ptr_add(mem, M_SB2), kl, ck) == 1 {
+            v = jmval(mem, cm);
+        }
+        cm = jsib(mem, cm);
+    }
+    if cnt != 1 || v == NOTFOUND {
+        return 0;
+    }
+    if jnonneg(mem, v) == 0 {
+        return 0;
+    }
+    let got: u32 = json_as_u32(ptr_add(mem, M_IN), ptr_add(mem, M_ARENA), v);
+    let want: u32 = sys_cost_want(mem, doc, k);
+    if want == NOTFOUND {
+        return 1;                      // 明细不合法：那一条已经报过（不级联）
+    }
+    if got == want {
+        return 1;
+    }
+    return 0;
+}
+
+/// `systems`（v20，`docs/147` §5 / `#1022`）: 六个系统各一条
+/// `{state, detail, cost}`，三格都要与它们指向的字段一致。
+///
+/// 与 Python 的 `potato.validate` **逐条同形**（连错的条数都一致）：未知系统每个一条、
+/// 缺一个一条；条目里未知键**一批**一条；state / detail / cost **各**一条。
+fn chk_systems(mem: ptr, doc: u32) -> u32 {
+    let sy: u32 = jget(mem, doc, "systems");
+    if sy == NOTFOUND || jkind(mem, sy) != 1 {
+        let _b: u32 = bad(mem);
+        return 0;
+    }
+    // 不认识的系统：**每个**一条（Python 是 `for k in sorted(...)` 逐条 append）。
+    let m: u32 = jfirst(mem, sy);
+    while m != NOTFOUND {
+        let kn: u32 = jmkey(mem, m);
+        let kl: u32 = jstr(mem, kn, ptr_add(mem, M_SB2), 4096);
+        let known: u32 = 0;
+        if eq_lit(ptr_add(mem, M_SB2), kl, "gc") == 1
+                || eq_lit(ptr_add(mem, M_SB2), kl, "runtime") == 1
+                || eq_lit(ptr_add(mem, M_SB2), kl, "port") == 1
+                || eq_lit(ptr_add(mem, M_SB2), kl, "vm") == 1
+                || eq_lit(ptr_add(mem, M_SB2), kl, "lms") == 1
+                || eq_lit(ptr_add(mem, M_SB2), kl, "lspe") == 1 {
+            known = 1;
+        }
+        if known == 0 {
+            let _u: u32 = bad(mem);
+        }
+        m = jsib(mem, m);
+    }
+    // 六个系统逐个查。次序与 Python 的 `SYSTEM_KEYS` 相同（不影响条数）。
+    let i: u32 = 0;
+    while i < 6 {
+        let k: str = "gc";
+        let has: u32 = 0;
+        let ck: str = "";
+        if i == 0 { k = "gc"; has = 1; ck = "sites"; }
+        if i == 1 { k = "runtime"; has = 0; ck = ""; }
+        if i == 2 { k = "port"; has = 0; ck = ""; }
+        if i == 3 { k = "vm"; has = 0; ck = ""; }
+        if i == 4 { k = "lms"; has = 1; ck = "levels"; }
+        if i == 5 { k = "lspe"; has = 1; ck = "sites"; }
+        let e: u32 = jget(mem, sy, k);
+        if e == NOTFOUND {
+            let _m: u32 = bad(mem);
+        } else if jkind(mem, e) != 1 {
+            let _n: u32 = bad(mem);
+        } else {
+            // 条目里不认识的键：**一批**一条（Python 是 `sorted(set(e) - …)` 一条消息）。
+            let extra: u32 = 0;
+            let em: u32 = jfirst(mem, e);
+            while em != NOTFOUND {
+                let en: u32 = jmkey(mem, em);
+                let el: u32 = jstr(mem, en, ptr_add(mem, M_SB2), 4096);
+                let kk: u32 = 0;
+                if eq_lit(ptr_add(mem, M_SB2), el, "state") == 1
+                        || eq_lit(ptr_add(mem, M_SB2), el, "detail") == 1
+                        || eq_lit(ptr_add(mem, M_SB2), el, "cost") == 1 {
+                    kk = 1;
+                }
+                if kk == 0 {
+                    extra = extra + 1;
+                }
+                em = jsib(mem, em);
+            }
+            if extra > 0 {
+                let _e2: u32 = bad(mem);
+            }
+            if sys_state_ok(mem, doc, e, k) == 0 {
+                let _s: u32 = bad(mem);
+            }
+            let det: str = "gc_ladder";
+            if i == 4 { det = "lms_levels"; }
+            if i == 5 { det = "lspe"; }
+            if sys_detail_ok(mem, e, has, det) == 0 {
+                let _d: u32 = bad(mem);
+            }
+            if sys_cost_ok(mem, doc, e, k, has, ck) == 0 {
+                let _c: u32 = bad(mem);
+            }
+        }
+        i = i + 1;
     }
     return 0;
 }

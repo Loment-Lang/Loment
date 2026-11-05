@@ -34,6 +34,10 @@ def test_registry_has_14_obligations_and_8_evidence_kinds():
         assert spec["owner"], name
         assert spec["accept"], name
         assert "Differential" not in spec["accept"], name
+    # 问题码（`docs/262` §5.10）：Q013 是 `lspe pass` 的未审计块（#786）。
+    assert len(lspe.LSPE_QUESTIONS) == 13
+    assert lspe.LSPE_QUESTIONS["Q013"]
+    assert "未审计块" in lspe.LSPE_QUESTIONS["Q013"]
 
 
 @test
@@ -103,6 +107,93 @@ def test_pass_block_covers_its_sites_and_shows_up_in_the_ledger():
     assert doc["pass_ratio"] == "1/2"
     assert doc["floors"] == 1 and doc["floor_detail"]["pass"] == 1
     assert doc["per_kind"]["InBounds"] == "1/2"
+
+
+@test
+def test_nested_pass_blocks_count_only_the_outermost():
+    """嵌套**只记最外层**（`#786` 硬规则 2 / `docs/262` §5.16 边界 2）。
+
+    两个块套在一起时：`passes` 只有最外层那一条、`pass_sites` = 1、内层站点照样进
+    `sites` 且 `covered_by` 指向**最外层**的 id（不是各自 `PROVED` —— 一次包装不许让
+    收据翻倍）。
+    """
+    src = ("module m\n\nfn f(a: [u32; 4]) -> u32 {\n"
+           "    lspe pass \"outer\" {\n"
+           "        let p: u32 = a[1];\n"
+           "        lspe pass \"inner\" {\n"
+           "            let q: u32 = a[2];\n"
+           "        }\n"
+           "    }\n"
+           "    return a[0];\n}\n")
+    toks = lomc.lex(src)
+    sites, _, passes = lspe.census(toks, "m")
+    assert len(passes) == 2, passes
+    outer = [p for p in passes if p["outer"]]
+    assert len(outer) == 1 and outer[0]["reason"] == "outer", passes
+    # 两个下标都记在**最外层**块名下（内层不单独计一次）
+    covered = [s for s in sites if s.get("covered_by")]
+    assert len(covered) == 2, sites
+    assert {s["covered_by"] for s in covered} == {outer[0]["id"]}, covered
+    doc = lspe.build_ledger(sites=sites, state="lspe_open_admin", set_by="default",
+                            level=3, toks=toks, unit="m", passes=passes)
+    assert doc["passes"] and len(doc["passes"]) == 1, doc["passes"]
+    assert doc["passes"][0]["reason"] == "outer"
+    assert doc["pass_sites"] == 1, doc
+    assert doc["passed_sites"] == 2, doc
+    assert doc["pass_ratio"] == "2/3", doc
+    # 旁路的站点**不证明**：proved 只剩块外那一个。
+    assert doc["proved"] == 1, doc
+
+
+@test
+def test_every_pass_block_is_a_q013_and_lspc_never_stays_silent():
+    """`Q013` 进普查、进 LSPC 贴条（`#786` 语义表最后一行）。
+
+    * 每个 pass 跨度自带 `question == "Q013"`（普查这一侧）；
+    * `lspc_lines` **永远**先给一条族级通知（0 个块也照写），每个块再一条；
+    * 没有块时只有那条族级通知 —— "0" 是可核的声明，不是沉默。
+    """
+    clean = ("module m\n\nfn f(a: [u32; 4]) -> u32 {\n    return a[0];\n}\n")
+    _, _, no_passes = lspe.census(lomc.lex(clean), "m")
+    d0 = lspe.build_ledger(sites=[], state="lspe_open_admin", set_by="default",
+                           level=3, toks=[], unit="m", passes=no_passes)
+    lines0 = lspe.lspc_lines(d0)
+    assert len(lines0) == 1 and "Q013" in lines0[0] and "0 block" in lines0[0], lines0
+
+    src = ("module m\n\nfn f(a: [u32; 4]) -> u32 {\n"
+           "    lspe pass \"caller checked\" {\n"
+           "        let p: u32 = a[1];\n"
+           "    }\n"
+           "    return a[0];\n}\n")
+    toks = lomc.lex(src)
+    sites, _, passes = lspe.census(toks, "m")
+    assert passes and all(p["question"] == "Q013" for p in passes), passes
+    doc = lspe.build_ledger(sites=sites, state="lspe_open_admin", set_by="default",
+                            level=3, toks=toks, unit="m", passes=passes)
+    lines = lspe.lspc_lines(doc)
+    assert len(lines) == 2, lines
+    assert "Q013" in lines[0] and "1 block" in lines[0]
+    assert "Q013" in lines[1] and "caller checked" in lines[1]
+    assert all(p["question"] == "Q013" for p in passes)
+
+
+@test
+def test_the_formatter_leaves_a_pass_block_alone():
+    """格式化器**不认它是语法构造**（`#786` 验收最后一条 / `docs/262` §5.16）。
+
+    `lspe` / `pass` 都不是保留字，格式化器按普通 token 排版；决策是"原样保留块头、
+    只排缩进"。判据钉两条：块头逐字还在，且格式化**幂等**（跑第二遍不改字节）。
+    """
+    import lomfmt  # noqa: PLC0415
+
+    src = ("module m\n\nfn f(a: [u32; 4]) -> u32 {\n"
+           "    lspe pass \"caller checked\" {\n"
+           "        let p: u32 = a[1];\n"
+           "    }\n"
+           "    return a[0] + p;\n}\n")
+    once = lomfmt.format_source(src)
+    assert 'lspe pass "caller checked" {' in once, once
+    assert lomfmt.format_source(once) == once, "格式化器对含 pass 块的源不幂等"
 
 
 @test

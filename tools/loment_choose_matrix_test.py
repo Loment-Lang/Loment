@@ -2,7 +2,7 @@
 # loment_choose_matrix_test.py — `choose` 的**联动矩阵**（`#940`）
 #
 # 一条判据管一件事：**每一维在产物里真的驱动了某个子系统**，而不只是被检查器收下、
-# 记进 Potato。矩阵的格子从 `lomentc.CORE_DIMS` / `lomentc.CORE_CONFLICTS` **推出来**，
+# 记进 Potato。矩阵的格子从 `lomentc.CORE_DIMS` / `lomentc.core_conflicts()` **推出来**，
 # 不另抄一张表 —— 维或冲突一变，这里的格子跟着变。
 #
 # 判据（每条都对着**用户入口** `tools/lomentc.py` 跑，不直接调内部函数）：
@@ -151,7 +151,7 @@ def _emit(td: Path, stem: str, cell: dict[str, str], body: str
 
 def _legal_cells() -> list[dict[str, str]]:
     """三个核心维的**所有合法格** —— 冲突对直接从编译器那张表读。"""
-    conflicts = [set(p) for p in lomentc.CORE_CONFLICTS]
+    conflicts = [set(p) for p in lomentc.core_conflicts()]
     cells = []
     for combo in itertools.product(*(lomentc.CORE_DIMS[d] for d in MATRIX_DIMS)):
         values = set(combo)
@@ -171,7 +171,7 @@ def _all_legal_cells() -> list[dict[str, str]]:
     与 `_legal_cells` 的区别只在维数：那一条是 `#940` 正文点名的三个核心维（链接与运行
     的那十格），这一条是"每一维都算一格" —— 新维度一进 `CORE_DIMS`，这里自己长。
     """
-    conflicts = [set(p) for p in lomentc.CORE_CONFLICTS]
+    conflicts = [set(p) for p in lomentc.core_conflicts()]
     cells = []
     for combo in itertools.product(*(lomentc.CORE_DIMS[d] for d in lomentc.CORE_DIM_ORDER)):
         values = set(combo)
@@ -214,7 +214,7 @@ def test_every_legal_cell_compiles_and_the_artifact_records_it():
     cells = _legal_cells()
     assert len(cells) == 10, (
         f"合法格应为 10 个（#538 之后），实际 {len(cells)} 个 —— `CORE_DIMS` /"
-        f" `CORE_CONFLICTS` 变了就要同时改这条判据与那条 issue")
+        f" `core_conflicts()` 变了就要同时改这条判据与那条 issue")
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
         for cell in cells:
@@ -234,7 +234,7 @@ def test_conflicting_pairs_are_refused_with_the_pair_named():
     dim_of = lomentc.CORE_DIM_OF
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
-        for pair, why in lomentc.CORE_CONFLICTS.items():
+        for pair, (verdict, why) in lomentc.core_conflicts().items():
             cell = {dim_of[v]: v for v in pair}
             name = "-".join(sorted(pair))
             rc, diag, _ir, _pot = _emit(td, name, cell, PURE_BODY)
@@ -249,8 +249,53 @@ def test_conflicting_pairs_are_refused_with_the_pair_named():
                 # 说出开出的条件，否则读者只能把它读成"永远不行"。
                 assert "划窄" in diag and "不回卷" in diag, (
                     f"{pair}: 诊断没写成 narrowing / 没说开出的条件\n{diag[-500:]}")
-            assert why, f"{pair}: CORE_CONFLICTS 那一项没有理由文本"
-    print(f"      {len(lomentc.CORE_CONFLICTS)} 对冲突: 全部被点名拒绝")
+            assert why, f"{pair}: 冲突表那一项没有理由文本"
+            assert verdict in ("contradiction", "narrowing"), (pair, verdict)
+    print(f"      {len(lomentc.core_conflicts())} 对冲突: 全部被点名拒绝")
+
+
+@test
+def test_removing_a_forbids_entry_drops_the_computed_pair():
+    """冲突**真的是从 needs/forbids 算出来的**（#1019 的变异判据）。
+
+    把 `no_std` 对 `host_libs` 的那一条 `forbids` 拿掉：`no_std` + `hosted` 这一对
+    必须**从算出来的表里消失**，而其它五对原样还在。如果冲突还是手写配对，删一条
+    集合不会改变任何东西 —— 这条当场红。
+    """
+    before = dict(lomentc.core_conflicts())
+    assert ("no_std", "hosted") in before, before.keys()
+    saved = lomentc.CORE_FORBIDS["no_std"]
+    try:
+        lomentc.CORE_FORBIDS["no_std"] = saved - {"host_libs"}
+        after = lomentc.core_conflicts()
+        assert ("no_std", "hosted") not in after, (
+            "删掉一条 `forbids` 之后这一对还在 —— 冲突不是算出来的")
+        # 其余五对不受影响（这一条同时钉住"别把整张表清空"）
+        assert set(after) == set(before) - {("no_std", "hosted")}, set(after) ^ set(before)
+        # `no_std` 还禁止 `runtime`，所以那两对 narrowing 照旧
+        assert after[("no_std", "gc_auto")][0] == "narrowing"
+    finally:
+        lomentc.CORE_FORBIDS["no_std"] = saved
+    assert set(lomentc.core_conflicts()) == set(before), "恢复之后表没回到原样"
+
+
+@test
+def test_a_narrowing_without_its_opening_becomes_a_contradiction():
+    """`narrowing` 与 `contradiction` 的分界**就是**开出条件（#1019 验收第 4 条）。
+
+    拿掉 `(no_std, runtime)` 那条 `CORE_OPENINGS`：同一对冲突的判决必须从 `narrowing`
+    翻成 `contradiction`（形状没变、开出条件没了）。有这一条，narrowing 不会被写成
+    一个"暂时"的空话 —— 它的分类依赖且仅依赖那一格。
+    """
+    assert lomentc.core_conflicts()[("no_std", "gc_auto")][0] == "narrowing"
+    saved = lomentc.CORE_OPENINGS.pop(("no_std", "runtime"))
+    try:
+        got = lomentc.core_conflicts()
+        assert got[("no_std", "gc_auto")][0] == "contradiction", got[("no_std", "gc_auto")]
+        assert got[("no_std", "gc_auto_alpha")][0] == "contradiction", got
+    finally:
+        lomentc.CORE_OPENINGS[("no_std", "runtime")] = saved
+    assert lomentc.core_conflicts()[("no_std", "gc_auto")][0] == "narrowing"
 
 
 @test
@@ -811,7 +856,7 @@ def test_std_hosted_image_carries_the_hosted_layer():
 def test_no_std_with_hosted_is_refused_by_both_front_ends():
     """`#539` 第 3、4 条：`no_std` + `hosted` 的拒绝要发生在**用户入口**，两个前端都要。
 
-    参考实现点名两个取值与那条需求链（`CORE_CONFLICTS` 的原文）；自举驱动拒绝并把
+    参考实现点名两个取值与那条需求链（冲突表里的原文）；自举驱动拒绝并把
     锚点放在**后写的那一行**。两边报文的措辞本来就分叉（`docs/158` §4），这里核的是
     "都拒绝 + 参考点名 + 自举指对行"，不核文本逐字节。
     """

@@ -1554,6 +1554,7 @@ fn do_syntax(mem: ptr, ab: ptr, argc: u32) -> u32 {
     termrow(mem, 1, "let", "`let x: u32 = e;` - the type annotation is mandatory, there is no inference");
     termrow(mem, 1, "control flow", "if / else if / else / while / for i in lo..hi");
     termrow(mem, 1, "return", "`return <expr>;` - it must carry a value, there is no bare `return;`");
+    termrow(mem, 1, "gc timing (2026.3)", "`lgc end;` / `lgc start;` pause and resume the collector; `lgc start(10ms) { }` is a budgeted window");
     termrow(mem, 1, "struct", "`struct S { a: u32 }`, literal `S { a: 1 }`, field access `s.a`");
     termrow(mem, 1, "enum", "`enum E { A, B(u32) }`, construct `E::B(3)`");
     termrow(mem, 1, "match", "arm bodies are BLOCKS, not expressions; must be exhaustive or have `_`");
@@ -1644,6 +1645,7 @@ fn do_keywords(mem: ptr, ab: ptr, argc: u32) -> u32 {
     termrow(mem, 1, "patterns", "if let  _  as  self");
     termrow(mem, 1, "* capability", "capability  guard  revocable  excluded");
     termrow(mem, 1, "* program/ABI", "choose  addin  comefor  byuse  extern  interrupt  register");
+    termrow(mem, 1, "* GC timing (2026.3)", "lgc  (start / end / start(<duration>) { })");
     wstr(1, "\n  ");
     gray(mem, 1);
     wstr(1, "capability domains are the one genuinely new thing: loment caps   .   full table: loment syntax");
@@ -2263,6 +2265,9 @@ fn is_kw(p: ptr, off: u32, n: u32) -> bool {
         return true;
     }
     if eq_cstr(s, n, "revocable") || eq_cstr(s, n, "excluded") {
+        return true;
+    }
+    if eq_cstr(s, n, "lgc") {
         return true;
     }
     return false;

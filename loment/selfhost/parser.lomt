@@ -105,6 +105,46 @@ fn pack(i: u32, o: u32) -> u64 {
     return (i as u64) * 4294967296 + (o as u64);
 }
 
+/// 整数字面量 -> u64（`0x` / `0X` 前缀十六进制，否则十进制）。与参考实现 `_int_lit`
+/// 同一张表 —— `lgc` 的预算在那边是 `IntLit(value)`，dump 出的是**折好的数值**。
+fn lit_u64(src: ptr, t: ptr, i: u32) -> u64 {
+    let s: u32 = tok_start(t, i);
+    let n: u32 = tok_len(t, i);
+    let v: u64 = 0;
+    let k: u32 = 0;
+    if n >= 2 && load8(src, s) == 48 && (load8(src, s + 1) == 120 || load8(src, s + 1) == 88) {
+        k = 2;
+        while k < n {
+            v = v * (16 as u64) + hex_val(load8(src, s + k));
+            k = k + 1;
+        }
+        return v;
+    }
+    while k < n {
+        v = v * (10 as u64) + ((load8(src, s + k) - 48) as u64);
+        k = k + 1;
+    }
+    return v;
+}
+
+/// `lgc` 的时长单位 -> 纳秒倍数（`docs/309`，与参考实现 `LGC_UNITS` 同表；
+/// 裸数字按纳秒收）。
+fn lgc_mult(src: ptr, t: ptr, i: u32) -> u64 {
+    if tok_is(src, t, i, "us") {
+        return 1000 as u64;
+    }
+    if tok_is(src, t, i, "ms") {
+        return 1000000 as u64;
+    }
+    if tok_is(src, t, i, "s") {
+        return 1000000000 as u64;
+    }
+    if tok_is(src, t, i, "m") {
+        return 60000000000 as u64;
+    }
+    return 1 as u64;
+}
+
 /// 字符串字面量 -> `"原文重编码"`。与 tools/lomfmt.py 的 `_render` 同一口径:
 /// 词法 token 给的是**原文**(含引号), 先按 _ESCAPES 解码, 再按 (反斜杠 -> 引号 ->
 /// 换行) 的顺序重转义 —— 这样未知转义 (`\q` -> `q`) 与制表符的归一行为都与参考一致。
@@ -555,6 +595,38 @@ fn parse_stmt(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
         let rp: u64 = parse_stmts(src, t, i + 4, out, o);
         return pack(unpk_i(rp) + 1, unpk_o(rp));
     }
+    // `lgc`（`docs/309`）：与参考实现同形 —— 窗口在 AST 里**摊平**成
+    //   `begin` + 体语句 + `close`
+    // 三个兄弟节点，dump 因此是 `(lgc start [预算])` 后面跟着体语句、最后 ` (lgc close)`。
+    // 预算在参考实现那边是**解析期折好的纳秒 IntLit**，所以这里也要折（`10ms` -> 10000000）。
+    if tok_is(src, t, i, "lgc") {
+        let act: u32 = i + 1;
+        if tok_is(src, t, act, "end") {
+            return pack(act + 2, puts(out, o, "(lgc end)"));
+        }
+        o = puts(out, o, "(lgc start");
+        let k: u32 = act + 1;
+        if tok_is(src, t, k, "(") {
+            o = puts(out, o, " ");
+            let v: u64 = lit_u64(src, t, k + 1);
+            let mm: u64 = 1 as u64;
+            if tok_kind(t, k + 2) == 0 {
+                mm = lgc_mult(src, t, k + 2);
+            }
+            o = put_dec(out, o, v * mm);
+            k = k + 1;
+            while tok_kind(t, k) != 4 && !tok_is(src, t, k, ")") {
+                k = k + 1;
+            }
+            k = k + 1;                        // 跳过 `)`
+        }
+        o = puts(out, o, ")");
+        if tok_is(src, t, k, "{") {
+            let rb: u64 = parse_stmts(src, t, k + 1, out, o);
+            return pack(unpk_i(rb) + 1, puts(out, unpk_o(rb), " (lgc close)"));
+        }
+        return pack(k + 1, o);                // `lgc start;`
+    }
     if tok_is(src, t, i, "let") {
         o = puts(out, o, "(let ");
         i = i + 1;
@@ -893,6 +965,14 @@ fn parse_impl_fn(src: ptr, t: ptr, i: u32, out: ptr, o: u32, ty: u32) -> u64 {
 pub fn parse(src: ptr, t: ptr, out: ptr) -> u32 {
     let i: u32 = 0;
     let o: u32 = 0;
+    // `choose write grammar …` 是**装载器抹掉的声明行**（`driver.strip_grammar_decl`）：
+    // 参考实现的 `lomentc.load` 先抹再解析，所以它的 dump 从 `module` 开始。这里也先
+    // 跳过那一行，两边的 dump 才对得上。
+    if tok_is(src, t, 0, "choose") {
+        while tok_kind(t, i) != 4 && !tok_is(src, t, i, "module") {
+            i = i + 1;
+        }
+    }
     o = puts(out, o, "(module ");
     i = i + 1;
     o = put_tok(out, o, src, t, i);

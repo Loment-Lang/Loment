@@ -16,7 +16,7 @@ if exists('b:current_syntax')
 endif
 
 " ---- 关键字 (与 TextMate 语法同一张表)
-syn keyword lomentKeyword let if else while for in match
+syn keyword lomentKeyword let if else while for in match lgc
 syn keyword lomentKeyword const return mut pub use module as
 " Loment 独有
 syn keyword lomentKeyword guard excluded interrupt

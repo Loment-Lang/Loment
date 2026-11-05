@@ -35,6 +35,13 @@ and every restriction are in `loment-tur` 2.0.4 (the runnable versions are `lome
 M91, M94, M95 and M96). **Tur 2026.2 is closed** (2026-11-05): that list is final; new
 syntax goes to `tur2026.3` (`loment-tur` 2.0.3, `docs/305`).
 
+**Tur 2026.3** (`tur2026.3`, shorthand `tur3`) inherits everything above. Its first feature is
+**`lgc`**: manual GC timing control. `lgc start(10ms) { … }` opens a collection window with a
+cooperative time budget; `lgc start { … }` opens one without a budget; `lgc end;` pauses the
+collector and `lgc start;` resumes it. It works in every `choose gc` mode, but `no_gc` + `lgc` is
+E039 (there is no collector to control). The budget gates *starting* a collection, not preempting
+one already running; see `docs/309`.
+
 The same program can also be written with C / C++ / Java / C# / Go / Python spelling, **changing
 the spelling and nothing else** - recognised **by extension** (`.c` / `.cpp` / `.java` / `.cs` /
 `.py` / `.go`), or with an explicit declaration at the top of the file:
@@ -387,7 +394,7 @@ Running it should print `42 10 9 6 2 3` and `TOUR RESULT: PASS`.
 | `enum Kind { Small, Big(u32) }` | An enum; a variant may carry **one** payload |
 | `fn write_str(fd: u64, s: str) -> i64` | A function; **every parameter needs a type**, returns are written `-> T`, no return type means none |
 | `print(s)` | Write a string to stdout (one `write` syscall). Use `syscall4` only when you need another fd or another call |
-| `tur_edition()` | Which Tur edition this source is read as (`tur2026.1` / `tur2026.2`); the compiler also reports it on stderr |
+| `tur_edition()` | Which Tur edition this source is read as (`tur2026.1` / `tur2026.2` / `tur2026.3`); the compiler also reports it on stderr |
 | `syscall4(1, fd, str_ptr(s) as u64, str_len(s) as u64)` | A raw syscall: `(number, args…)`; **there is no printf** |
 | `fn write_dec(…)` | The standard way to print a decimal: `alloc` + `store8` + reverse |
 | `let buf: ptr = alloc(12)` | **`let` always needs a type**; `ptr` is a raw pointer |
@@ -398,6 +405,7 @@ Running it should print `42 10 9 6 2 3` and `TOUR RESULT: PASS`.
 | `Kind::Big(w)` | A payload-carrying variant pattern; `w` is the binding |
 | `fn sum_slice(xs: [u32])` | A slice parameter; `&xs` passes an array as a slice; `slice_len(xs)` is its length |
 | `guard slots(slot);` | A capability-domain guard (section 5) |
+| `lgc start(2ms) { … }` | **Tur 2026.3**: a GC window — collection is allowed inside, and the budget caps when a *new* collection may start. Also `lgc end;` / `lgc start;` to pause/resume, `lgc start { … }` for an unbudgeted window |
 | `fn main()` | The **normal entry point**: no arguments, no return type. The linker's entry stub calls it and exits 0 |
 | `fn _start()` | The **freestanding entry point** (kernel / no-libc): no arguments. If both exist, `_start` wins. When you link it yourself with `-Wl,-e,_start`, end it with `syscall4(60, 0, 0, 0)` - there is no return address |
 | `let xs: [u32; 3] = [1, 2, 3]` | A fixed-size array; `xs[0]` reads and writes |

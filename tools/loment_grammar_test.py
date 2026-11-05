@@ -67,7 +67,8 @@ LOCKED_ALIASES = {
     # 规范名永不改义；`tur` 是 Tur 1 的历史拼法，`tur1`/`tur2` 是 2026 年的短名。
     # 这几笔都是**改锁**，不是顺手加分支。
     "tur": "tur2026.1", "tur1": "tur2026.1", "tur2": "tur2026.2",
-    "tur2026.1": "tur2026.1", "tur2026.2": "tur2026.2",
+    "tur3": "tur2026.3",
+    "tur2026.1": "tur2026.1", "tur2026.2": "tur2026.2", "tur2026.3": "tur2026.3",
     "c": "c",
     "py": "python", "python": "python",
     "java": "java",
@@ -1241,13 +1242,13 @@ def test_tur2026_2_is_frozen():
     """
     assert potato_from.FROZEN_EDITIONS == ("tur2026.1", "tur2026.2"), (
         "封版清单被改了；开新版次不应该改这里")
-    assert potato_from.TUR_EDITIONS == potato_from.FROZEN_EDITIONS, (
-        "TUR_EDITIONS 与封版清单不一致 —— 开新版次要显式改这条判据")
+    assert potato_from.TUR_EDITIONS == potato_from.FROZEN_EDITIONS + ("tur2026.3",), (
+        "TUR_EDITIONS 应当是「两个封版 + 一个开的 2026.3」—— 开新版次要显式改这条判据")
     digest = hashlib.sha256(
         chr(10).join(potato_from.TUR2026_2_FEATURES).encode()).hexdigest()
     assert digest == FROZEN_TUR2026_2_SHA256, (
         "tur2026.2 的特性面变了 —— 加语法请开 tur2026.3，不是改这一版")
-    for future in ("tur3", "tur2026.3", "tur2027.1"):
+    for future in ("tur2027.1",):
         assert future not in potato_from.GRAMMAR_ALIASES, (
             f"{future} 还没开；开的时候要同时改锁表、NATIVE_GRAMMARS、docs/304 与这条判据")
     print("      tur2026.2 封版：特性面哈希一致，且没有未封版的新版次混进来")

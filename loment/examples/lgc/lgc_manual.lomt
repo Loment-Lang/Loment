@@ -1,0 +1,26 @@
+choose write grammar tur2026.3
+module lgc_manual
+
+// `gc_manual` + `lgc`（`docs/309`）：手动档**默认不收集**，只有窗口里才收。
+// 产物里因此带着固定的收集器正文（gc_manual 平时一个字节都不带），而
+// `@__loment_gc_on` 的初值是 **0**；窗口 `begin` 才置 1，`close` 恢复成 0。
+// 这份文件钉的正是那个初值与"窗口结束后回到 0"的指令序列。
+
+choose gc_manual
+choose runtime
+
+fn fill(n: u32) -> u32 {
+    let acc: u32 = 0;
+    lgc start {
+        let p: ptr = alloc(48);
+        acc = acc + n;
+    }
+    acc = acc + 1;
+    return acc;
+}
+
+fn main() {
+    let a: u32 = fill(3);
+    let b: u32 = fill(5);
+    let c: u32 = a + b;
+}

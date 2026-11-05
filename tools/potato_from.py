@@ -1737,8 +1737,10 @@ GRAMMAR_ALIASES: dict[str, str] = {
     "tur": "tur2026.1",
     "tur1": "tur2026.1",
     "tur2": "tur2026.2",
+    "tur3": "tur2026.3",
     "tur2026.1": "tur2026.1",
     "tur2026.2": "tur2026.2",
+    "tur2026.3": "tur2026.3",
     "c": "c",
     "py": "python", "python": "python",
     "java": "java",
@@ -1768,7 +1770,7 @@ GRAMMAR_ALIASES: dict[str, str] = {
 #: Tur 的版次（`docs/296` §1.1）是两级名：`tur<年份>.<序号>`。原生读法的**规范名**就是
 #: 这两个；`tur` / `tur1` / `tur2` 在 `GRAMMAR_ALIASES` 里落到它们。版次只加不改 ——
 #: `tur2026.1` / `tur2026.2` 的语法与语义永久冻结，新特性只进新的规范名。
-TUR_EDITIONS = ("tur2026.1", "tur2026.2")
+TUR_EDITIONS = ("tur2026.1", "tur2026.2", "tur2026.3")
 NATIVE_GRAMMARS = ("loment",) + TUR_EDITIONS
 
 #: **已封版的版次**（2026-11-05）：这两个版次的语法与语义不再变化。新特性只能开
@@ -2299,10 +2301,12 @@ def front_door(path: Path, lang: str = "auto", mode: str = "strict") -> FrontUni
             body = strip_grammar_decl(src)
             if g in TUR_EDITIONS:
                 body = _strip_tur_mut(body)
-            if g == "tur2026.2":
+            if g in ("tur2026.2", "tur2026.3"):
                 # Tur 2 的纯糖（`docs/296` §2.1）：等长改写，行/列/偏移不动。
+                # Tur 2026.3 继承它（版次是累积的）。
                 body = _tur2_sugar(body)
-            # 版次记**规范名**（`tur2026.1` / `tur2026.2`）。`loment` 与没声明都是 Tur 1。
+            # 版次记**规范名**（`tur2026.1` / `tur2026.2` / `tur2026.3`）。
+            # `loment` 与没声明都是 Tur 1。
             _word = (find_decl(src)[1] or "").strip().lower() if declared else ""
             return FrontUnit("loment", body, False, path,
                              profile=(g if g in TUR_EDITIONS else "tur2026.1"),

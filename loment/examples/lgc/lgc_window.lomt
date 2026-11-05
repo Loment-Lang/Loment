@@ -1,0 +1,33 @@
+choose write grammar tur2026.3
+module lgc_window
+
+// 带预算的窗口 + 嵌套窗口 + 窗口里 `return`（`docs/309`）。
+// `lgc start(10ms) { … }` 的预算是**编译期**时长：解析期折成纳秒，运行期只做一次
+// `now + 预算`，窗口到点之后就不再收集。嵌套窗口各自存一份进入前的开关/预算，
+// `return` 提前离开时按**逆序**恢复（发射器的窗口栈）。
+//
+// `alloc` 让分配点的钩子走 `__loment_maybe_collect_ctl`；`choose runtime` 是它要运行期。
+
+choose runtime
+
+fn make(n: u32) -> u32 {
+    let total: u32 = 0;
+    lgc start(10ms) {
+        let box: ptr = alloc(32);
+        total = total + 1;
+        lgc start {
+            total = total + 2;
+            if n > 0 {
+                return total;
+            }
+        }
+        total = total + 4;
+    }
+    return total;
+}
+
+fn main() {
+    let a: u32 = make(1);
+    let b: u32 = make(0);
+    let c: u32 = a + b;
+}

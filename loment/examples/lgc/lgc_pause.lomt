@@ -1,0 +1,29 @@
+choose write grammar tur2026.3
+module lgc_pause
+
+// `lgc` 的暂停 / 恢复（`docs/309`）：收集器的开关是**运行期状态**，不是词法作用域。
+// 这份单元没写 `choose gc`，也就是 `gc_manual` —— 产物里**会**带收集器（因为写了 `lgc`），
+// 但 `@__loment_gc_on` 初值是 0：手动档"默认不收集"的承诺不变。
+//
+// `lgc` 发的是运行期的控制全局与四个函数，所以它和 `alloc` / `guard` 一样是
+// **会把运行期拖进产物**的构造 —— `choose runtime` 是必需的（默认 `no_runtime` 会报 E031）。
+
+choose runtime
+
+fn sum_to(n: u32) -> u32 {
+    let i: u32 = 0;
+    let acc: u32 = 0;
+    lgc end;
+    while i < n {
+        acc = acc + i;
+        i = i + 1;
+    }
+    lgc start;
+    return acc;
+}
+
+fn main() {
+    let v: u32 = sum_to(4);
+    let w: u32 = sum_to(0);
+    let t: u32 = v + w;
+}

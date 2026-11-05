@@ -22,8 +22,8 @@ A file is read as **Tur 1** when it has **no declaration** (the default) or says
 `choose write grammar loment` / `tur` / `tur1` / `tur2026.1`. Editions are **two-level**:
 `tur<year>.<n>` (`docs/296`). The canonical name never changes meaning; `tur1` / `tur2` are the
 2026 shorthands for `tur2026.1` / `tur2026.2` and are only accepted in their release year;
-write the full name in new files (`loment fmt` does not take files with a grammar declaration
-yet). **Every `check` / `build` / `run` / `ir` prints the resolved edition on stderr** (e.g.
+write the full name in new files (the packaged `loment fmt` refuses `tur*` and foreign
+declarations; see `loment-tur` 2.0.2). **Every `check` / `build` / `run` / `ir` prints the resolved edition on stderr** (e.g.
 `grammar tur2 -> tur2026.2 (Tur 2)`); `tur_edition()` returns it at runtime, and
 `loment version <exe>` reads it back from the artifact.
 
@@ -51,9 +51,10 @@ into it. To write Tur with Rust's spelling, declare `grammar tur`.
 > **The reference compiler in the source repository** (`tools/lomentc.py`, which is also what
 > `loment ir` / `build` use when you run them from a checkout) **accepts** both spellings: it
 > translates the file into Loment **in process** and compiles that, with no external compiler
-> involved. **An installed package (the self-hosted toolchain) accepts the `loment` spelling
-> only**: anything else is refused outright ("这份源的 `choose write grammar` 自举侧收不了…" /
-> *the self-hosted side cannot take this file's `choose write grammar`*), because the six
+> involved. **An installed package (the self-hosted toolchain) accepts the native spellings
+> only** - `loment` and the Tur editions (`tur`, `tur1`, `tur2`, `tur2026.1`, `tur2026.2`) -
+> and refuses every foreign declaration outright ("这份源的 `choose write grammar` 自举侧收不了…"
+> / *the self-hosted side cannot take this file's `choose write grammar`*), because the foreign
 > translators have no Loment twin yet (`docs/189` section 4.1). So "write `.py` inside the
 > package and it runs" **is not true today**.
 
@@ -102,16 +103,23 @@ safe.
 loment version
 ```
 
-You get something like `Loment 0.1.5 (0.1.5), commit <short>`. **The commit is what
-counts**: different checkouts can do different things (this file describes the 0.1.5
-generation; older packages print `0.1.4`, `0.1.4 Alpha` / `0.1.4 Alpha2.3` / `0.1.4 Pre2`).
+You get two lines, for example:
+
+```
+Loment 0.1.5 (0.1.5)
+commit edda7d4e (2026-11-04)
+```
+
+**The commit is what counts**: different checkouts can do different things (this suite
+describes the 0.1.5 generation; older packages print `0.1.4`, `0.1.4 Alpha` / `0.1.4 Alpha2.3`
+/ `0.1.4 Pre2`).
 
 **There are 38 commands; `loment help` lists all of them** (grouped, aligned, coloured) and
 `loment help <command>` documents one. The ones used most:
 
 | Command | What it does |
 |---|---|
-| `loment check FILE` | Check only, produce nothing (diagnostics on stderr - rendered by the reporter `lomenterr`: **position + source line + caret + what went wrong + why + how to fix (at least 3 ways) + supported/not supported**; when the file is not Loment at all it also offers the three ways to `translate it in`. See section 10) |
+| `loment check FILE` | Check only, produce nothing (diagnostics on stderr - rendered by the reporter `lomenterr`: **position + source line + caret + what went wrong + why + how to fix (at least 3 ways) + supported/not supported**; when the file is not Loment at all it also offers the three ways to `translate it in`. See `loment-tur` 2.0.14) |
 | `loment ir FILE` | Print LLVM IR to stdout |
 | `loment build FILE [-o OUT]` | Compile to an executable |
 | `loment run FILE` | Compile and run |
@@ -143,7 +151,9 @@ is meant to be used this way).
 Two more diagnostic outlets are switches on `loment check FILE` (each also turns colour off):
 
 - `--short` - **one line per diagnostic** (`file:line:col: error[code]: message`), for grep and
-  CI logs. Note that the column is reported as `0` today;
+  CI logs. The column is printed only when the compiler knows it; a semantic diagnostic that
+  carries just a line comes out as `file:line: error[code]: message` - the reporter does not
+  invent a `0` column that would make an editor jump to the file start;
 - `--json` - **one object per line**, carrying `title`/`what`/`why`/`fixes`/`yes`/`no` as well as
   the code and position. When the reporter has an applicable fix, the object also carries a
   non-empty `suggestions` array an editor can **apply directly** (`replacement` with
@@ -152,7 +162,8 @@ Two more diagnostic outlets are switches on `loment check FILE` (each also turns
 
 Two more switches cap and capture the same stream:
 
-- `--max N` - render at most `N` diagnostics (`0` = all) and say how many were withheld;
+- `--max N` - render at most `N` diagnostics (default **20**, `0` = all) and say how many were
+  withheld;
 - `--diag-out PATH` - write the raw JSONL records to `PATH` (the file is created even when the
   unit is clean). That file is what the reporter reads, and it is where the `byte_start` /
   `byte_end` autofix fields live.
@@ -230,6 +241,10 @@ is `fn main()`** (no arguments, no return type), **`print` writes a string to st
 declare a local. The freestanding entry is still `_start` (kernel / no-libc code): it takes no
 arguments and wins when both exist. A normal user program should use `main` — the linker's entry
 stub calls it and exits 0.
+
+**The tour needs `choose runtime`.** `alloc` and `guard` both pull in the runtime block; under the
+default `no_runtime` the compiler refuses them with E031. `no_runtime` is a different axis from
+`no_std` - see `loment-syntax` 2.1.
 
 Below is the whole thing (it is called `tour`; the walkthrough follows the program):
 

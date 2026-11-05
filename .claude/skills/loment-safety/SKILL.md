@@ -12,7 +12,7 @@ you are reading. The entry skill (`loment`) carries the map; this file carries i
 
 ```rust
 module blk
-choose runtime
+choose runtime          // `guard` drags the runtime block (E031 otherwise)
 
 capability blk_write : disk[0..4] revocable
 
@@ -21,6 +21,10 @@ fn write_slot(slot: u32) -> u32 {
     return slot;
 }
 ```
+
+**`guard` needs `choose runtime`.** A unit that uses `guard` under the default `no_runtime`
+is refused with E031 ("guard drags the runtime block") - the audit table is runtime state. The
+same is true of anything else that pulls in the runtime block; see `loment-syntax` 2.1.
 
 Semantics: `guard cap(e);` evaluates `e` to an index; outside `[lo, hi]` it **traps** (with no
 other effect), inside it increments the audit table. **A literal out of range is a compile-time
@@ -298,7 +302,7 @@ not a runtime component.
 | Level | Name | What it does | When |
 |---|---|---|---|
 | 1 | **checker** | compile-time E028 (literal index out of bounds) and E029 (use after free) | always (E028), `lms_check` (E029) |
-| 2 | **manager** | `--lms-report PATH` prints the unit's memory map: every `alloc` site with unit/function/line/size | compile time |
+| 2 | **manager** | `python tools/lomentc.py FILE --lms-report PATH` (reference compiler; not on the packaged launcher yet) prints the unit's memory map: every `alloc` site with unit/function/line/size | compile time |
 | 3 | **guard** | inline bound check on `load8`/`store8` from `let p: ptr = alloc(<const>)`; **only direct pointers** - `ptr_add`, slices and struct fields are not checked | runtime, instructions only |
 | 4 | **reject** | out-of-range access is **skipped** (load returns 0, store does not happen) and the program continues | runtime |
 | 5 | **crash** | `llvm.trap` - the process dies with SIGILL (exit 132), the OS reaps it | runtime |

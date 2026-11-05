@@ -13,7 +13,7 @@ you are reading. The entry skill (`loment`) carries the map; this file carries i
 | Tool | What it does |
 |---|---|
 | `loment check` / `ir` / `build` / `run` | the driver; diagnostics from `lomenterr` (position, source line, caret, what/why/at least three fixes, supported/not supported) |
-| `loment lsp` | language server over stdio (completion, definition, diagnostics, formatting); the packaged binary is built in the **hotswap** profile |
+| `loment lsp` | language server over stdio (completion, definition, diagnostics; **no formatting** - it does not declare a formatting provider). The packaged binary is built in the **hotswap** profile |
 | `tools/loment_dap.py` | Debug Adapter Protocol + `ptrace` backend, launched by the VS Code extension so F5 works; it must run on a real Linux kernel (WSL2 yes, WSL1 no). It is **not** a `loment` subcommand |
 | `loment fmt` / `doc` | formatter / API docs from `///` |
 | `loment stat` / `fns` / `grep` / `hash` / `cat` / `tokens` / `todo` | source reading without an editor |

@@ -61,7 +61,9 @@ that works. The boundary is the **port gate** (meeting it produces an **error**,
   shared object on the self-hosted linker, and function symbols (not data symbols) are
   imported. `choose hosted` (section 2.1) is what allows the artifact to reach them.
 - several `--link` flags may be given at once; they are appended in order.
-- the other side's `.o` **may not exceed 4 MiB** (over that is an error, never a truncated build).
+- the linker's input and output text are capped at **4 MiB each** (`docs/192`), so your IR plus
+the linked sections of every `--link` object must fit; over that is an error, never a truncated
+build.
 
 ### 7.3.2 Python / Java / JS (the process bridge)
 

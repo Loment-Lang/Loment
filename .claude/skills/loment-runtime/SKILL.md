@@ -27,6 +27,9 @@ exactly the subset `lomelf` already parses, plus execution.
 
 What matters when you use it:
 
+- **T4 (generational/concurrent collection) is explicitly out of LVM's scope** (`docs/232`
+  §4.4): the VM is a reader of the same IR, not a new runtime with its own collector. The
+  tiers stop at T3.
 - **`choose vm` only records the dimension today.** The artifact is **byte-identical to
   `no_vm`** and carries no bytecode. The interpreter is a separate tool: `loment-lvm FILE`
   (the packaged binary) or `python tools/lvm.py FILE.lomt` in a checkout.

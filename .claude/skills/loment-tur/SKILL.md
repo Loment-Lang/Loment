@@ -48,11 +48,12 @@ choose write grammar tur2026.2   // file head, before `module`, at most once per
 - **The table is a factory lock** (`potato_from.GRAMMAR_ALIASES`): it is compiled in, cannot be
   extended or overridden, and has no user-side unlock. Four mistakes are reported: the name is
   not in the table / the declaration is after `module` / it is written twice / no name follows.
-- **A misspelt keyword is not one of the four.** Measured (`docs/198` §2): `choose language
-  python`, `choose grammar python`, `grammar python` and `choose write grammars python` all
-  silently mean "no declaration", and the file is read as Tur - you then get an error pointing
-  at `def` or `class`, not at the declaration. **If a foreign file reports "unknown top-level
-  keyword", check this line first.**
+- **A misspelt keyword is not one of the four, but it is no longer silent.** The front end
+  recognises the shape and reports it: `choose language python`, `choose grammar python`,
+  `grammar python` and `choose write grammars python` all get "this line looks like
+  `choose write grammar <name>` but the word order or spelling is wrong (got …)", with the
+  correct form in the message. Older packages read the file as Tur instead and pointed at `def`
+  or `class`; if you meet one, check this line first.
 - **The line is stripped before parsing** by an equal-length rewrite, so line/column positions
   do not move; the profile flag travels with the unit.
 - **`loment fmt` is not reliable on a file that carries a declaration.** The packaged (self-hosted)
@@ -114,7 +115,8 @@ Rules that make "old syntax keeps compiling" a fact rather than a promise:
 
 1. **At compile time**: `check` / `build` / `run` / `ir` print one line on stderr -
    `loment: grammar tur2 -> tur2026.2 (Tur 2)`, or `grammar default -> tur2026.1 (Tur 1)`.
-   Tools that treat the driver as a subprocess pass `--no-edition-notice` to suppress it.
+   The **self-hosted driver** accepts `--no-edition-notice` for tools that run it as a
+   subprocess (the reference launcher does not expose that switch yet).
 2. **In the artifact**: the IR carries an externally visible global
    `@loment.tur.edition` holding `LOMENT-TUR:` + the canonical name. It is deliberately
    **not** a private constant - `clang -O2` drops unreferenced private constants, and this one
@@ -189,10 +191,10 @@ only in call arguments (`&xs` / `&mut xs` for a `[T]` / `mut [T]` parameter).
 | Switch definition | `set choose <name> { … }` | section 2.2 |
 | Switch setting unit | `addin <name>` | entry unit only, section 2.2 |
 | Import | `use <name>` / `use "<path>"` | layers, section 2; 300 lines max; several name-form imports allowed in 0.1.5 |
-| Constant | `const NAME: <type> = <literal>` | the initialiser must be constant-foldable; **no string constants** |
+| Constant | `const NAME: <type> = <literal>` | the initialiser must be **one integer literal** (decimal or hex, optional `-`); expressions and string constants are parse errors - see 6.1.8 |
 | Function | `fn f(a: u32, b: str) -> u32 { … }` | every parameter typed; no return type = unit; **≤ 10 parameters** |
 | Generic function | `fn f<T>(a: T) -> T { … }` | monomorphised at compile time |
-| Struct | `struct S { a: u32, b: bool }` | fields are **integer / `bool` scalars only** - no `str`, no `ptr`, no nested struct/array, no reference field (`docs/299` §1). A `str` field is refused by name |
+| Struct | `struct S { a: u32, b: bool }` | fields are **integer / `bool` scalars only** - no `str`, no `ptr`, no nested struct/array, no reference field (`docs/299` §1). A `str`/`ptr` field passes `check` but is refused **at build** when the struct is lowered ("field type … supports scalars only") |
 | Enum | `enum E { A, B(u32) }` | a variant carries **at most one** payload, and the payload is an **integer / `bool` scalar** |
 | Trait | `trait M { fn m(self) -> u32; }` | static dispatch only |
 | Impl | `impl M for S { fn m(self) -> u32 { … } }` | method call `obj.m()` |
@@ -239,7 +241,7 @@ only in call arguments (`&xs` / `&mut xs` for a `[T]` / `mut [T]` parameter).
 | Return | `return <expr>;` | the value is required, **except** bare `return;` in a unit function under Tur 2 |
 | Break / continue | `break;` / `continue;` | **Tur 2 only**, innermost loop |
 | Block | `{ … }` | **blocks do not scope `let`** today: a `let` inside an `if` branch is visible after it (measured; `docs/188` §0.1.1). Do not rely on block scope for correctness |
-| Audit bypass | `lspe pass "reason" { … }` | section 5.2; the reason is mandatory (E038) |
+| Audit bypass | `lspe pass "reason" { … }` | section 5.1.5; the reason is mandatory (E038) |
 | Expression statement | `f(x);` | a call for its effect |
 
 ### 2.0.10 Expressions and precedence
@@ -282,7 +284,7 @@ Only two pattern forms exist:
 | Wildcard | `_` | matches anything |
 
 There are **no literal patterns, no range patterns, no struct patterns, no tuple patterns**.
-`match` on a generic enum uses the **monomorphised** name (`Result_i64_u32::Ok(v)`, trap 6.1.2).
+`match` on a generic enum uses the **plain** enum name (`Result::Ok(v)`); the checker rewrites it to the monomorphised instance (trap 6.1.2).
 
 ### 2.0.12 Entry points, commands, and raw foreign blocks
 
@@ -326,7 +328,7 @@ is why bytes that no string literal can carry (NUL, non-UTF-8) survive.
 | Parameters per function | 10 | E3 for a count mismatch; **more than 10 arguments at a call site** goes through `panic` - **exit 132, no diagnostic** |
 | `use` lines per file | 300 | E20 |
 | Switches per file | 500 | E22 |
-| Nesting | 64 levels in the reference parser | a diagnostic; some deeply nested forms still crash the self-hosted parser (`#868`–`#874`) |
+| Nesting | 64 levels (blocks and brackets share the counter) | a diagnostic (E023) on both implementations |
 | Bump heap | 64 KiB (sealed) / 1 MiB (`hosted`) | SIGILL, exit 132, nothing printed |
 | Root table (`gc_auto`) | 1024 slots | refused by name, never silently written past |
 | Unit size | fixed capacity | E33 |
@@ -363,7 +365,7 @@ program     := grammar_decl? "module" IDENT item*
 grammar_decl:= "choose" "write" "grammar" IDENT
 
 item        := "use" (IDENT | STRING)
-             | "const" IDENT ":" type "=" const_expr ";"
+             | "const" IDENT ":" type "=" const_lit ";"
              | "fn" IDENT generics? "(" params? ")" ("->" type)? block
              | "struct" IDENT "{" (IDENT ":" type),* "}"
              | "enum" IDENT "{" variant,* "}"
@@ -380,6 +382,7 @@ item        := "use" (IDENT | STRING)
              | "command" IDENT | "foruse" IDENT
              | "let"? IDENT "{" raw_bytes "}"
 
+const_lit   := "-"? INT
 params      := param ("," param)*
 param       := "mut"? IDENT ":" type
 generics    := "<" IDENT ">"

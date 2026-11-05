@@ -18,35 +18,37 @@ things, and it is worth knowing which one you are looking at.
 
 ### 6.1 Syntax and types
 
-1. **A `match` arm body is a block, not an expression.** `Kind::A => 0,` is not accepted; write
-   `Kind::A => { return 0; }`. (At this commit the *checker* no longer rejects the expression
-   form, and what you get instead is a build failure from the linker - it stops on the value the
-   codegen emits for it, not on the `match`. Both implementations refuse it; write the block.)
-2. **Generic enum patterns use the monomorphised name.** When the matched value is
-   `Result<i64, u32>`, `Result::Ok(v)` gives `E8 与主体枚举 Result_i64_u32 不符` (*does not match
-   the subject enum*); the answer is **`Result_i64_u32::Ok(v)`**. Non-generic enums are written
-   normally: `Kind::Big(w)`.
+1. **A `match` arm body is a block, not an expression.** `Kind::A => 0,` is a **parse error**
+   ("expected `{`, got `0`"); write `Kind::A => { return 0; }`. Making arms expressions is
+   Tur 2026.3 work, not a switch you can flip.
+2. **Generic enum patterns use the plain enum name.** `Result::Ok(v)` on a `Result<i64, u32>` is
+   accepted; the checker rewrites the pattern's enum to the monomorphised instance
+   (`Result_i64_u32`). If you see `E8 与主体枚举 … 不符` (*does not match the subject enum*), you
+   named a **different** enum, not the wrong instance. Non-generic enums are written normally:
+   `Kind::Big(w)`.
 3. **A valueless `return;` exists only in Tur 2, and only in a unit function.** In Tur 1 (or in
    a `-> T` function) `return;` gives `E19 期望表达式，得到 ';'` (*expected an expression, got
    ';'*). Either `return <expr>;`, finish with if/else, or declare `tur2` and use a `fn f()`
    with no return type.
-4. **Modules read top to bottom**: define before use, do not rely on forward references.
+4. **Forward references work at the top level.** Functions, structs and constants are collected
+   before bodies are checked, so calling `g()` before `fn g` and using `struct S` before its
+   declaration both compile. The exception is a **`const` initialiser**, which must be a literal
+   (see 6.1.8) - it cannot refer to another constant.
 5. **A struct literal cannot be an argument**: `f(S { a: 1 })` is rejected by the native backend
    (`native 后端不支持该表达式: StructLit`). Bind it first - `let x: S = S { a: 1 };` then `f(x)`.
-6. **A struct literal cannot sit in a condition** (`if p { }` is resolved by Rust's ambiguity
-   rule); add parentheses.
+6. **A struct-typed value is not a condition.** `if p { }` with `let p: P` is E001 ("if condition
+   type P, should be bool"); parentheses do not help. Compare a field: `if p.a { }`.
 7. **One parse error stops the whole check** - every diagnostic after it is missing. So change one
    thing at a time and re-run `loment check`; "no other errors" does not mean there are none.
-8. **`const` initialisers are restricted**: the initialiser has to be something the constant
-   folder accepts, and `const B: u32 = A + 1;` is *accepted by the checker* and then fails in the
-   **build** with a backend-internal message (`nalloc=0 nslot=10 …`) rather than a diagnostic.
-   Long tables of offsets end up written out as plain numbers.
-9. **There are no string constants**: `pub const NAME: str = "x";` is an error (E001). For a string
-   label write `pub fn name() -> str { return "x"; }` - that is how `.lomp` manifests do it
-   (section 10).
-10. **`use` takes no semicolon** in the house style. `use parse;` is *accepted* today, but every
-    file in this repository is written without it, and a semicolon there is noise a reader has to
-    wonder about.
+8. **A `const` initialiser must be one integer literal.** Decimal or hexadecimal, optionally
+   negative (`const A: i32 = -1;` and `const M: u32 = 0x10;` both work). It is **not** an
+   expression: `const B: u32 = A + 1;` and `const B: u32 = A;` are parse errors ("expected
+   number, got `A`"). Long tables of offsets end up written out as plain numbers.
+9. **There are no string constants**: `pub const NAME: str = "x";` is a parse error (the
+   initialiser must be an integer literal), not E001. For a string label write
+   `pub fn name() -> str { return "x"; }` - that is how `.lomp` manifests do it (section 10).
+10. **`use` takes no semicolon.** `use parse;` is a parse error ("top level allows
+    use/capability/fn, got `;`"). Write `use parse` on its own line.
 11. **`mut` is only rewritten in the `tur` spelling.** In the default `loment` spelling `mut` is
     an ordinary identifier (`loment/selfhost/checker.lomt` really does have a variable called
     `mut`), so `let mut len: u32 = …` declares a variable named `mut` and then trips over
@@ -150,10 +152,10 @@ knowing costs half a day. The text says which ones 0.1.5 already fixed.
     compiles). Older packages stopped at one with `loment: cannot open <garbage>`, and on those
     the path form was the workaround; a unit with imports also lost most of its string-literal
     capacity (measured: eight ~34-byte literals could bring the old compiler down).
-21. **Deep nesting is still a wall, but the number moved.** The reference parser refuses nesting
-    beyond **64 levels** with a diagnostic ("嵌套超过 64 层"); the self-hosted parser still
-    segfaults on some deeply nested forms (nested parentheses / indexes / generic arguments,
-    #868-#874). Flatten it or split it into functions.
+21. **Deep nesting is capped at 64 levels.** Both implementations now diagnose it (E023,
+    "嵌套超过 64 层") instead of crashing; the 2026-10-18 self-hosted segfaults on nested
+    parentheses / indexes / generic arguments / array types (#868-#874) are closed. Flatten the
+    expression or split it into functions.
 22. **A `.lomt` file with no `module` declaration is a clear diagnostic now** ("期望 module").
     Older packages crashed with SIGSEGV; 0.1.5 does not.
 23. **`use std` is no longer an 18-minute SIGILL.** 0.1.4.6 fixed it; measured in 0.1.5 it

@@ -12,16 +12,16 @@ you are reading. The entry skill (`loment`) carries the map; this file carries i
 
 | Construct | How it is written |
 |---|---|
-| Module | `module <name>` on the first line (no semicolon) |
-| Grammar | `choose write grammar <name>` **before `module`**, once per file; no declaration means Tur 1 - see 2.0 |
+| Module | `module <name>` on the first line after the optional grammar declaration (no semicolon) |
+| Grammar | `choose write grammar <name>` **before `module`**, once per file; no declaration means Tur 1 - see `loment-tur` 2.0 |
 | Entry point | `fn main()` (no parameters, no return type) is the normal entry; `fn _start()` is the freestanding entry and wins if both exist - see 2.0.12 |
 | Project mode | `choose` - **seven dimensions**, each written at most once and **only in the entry unit**; libraries may not write it (E22). `std` / `no_std` · `gc_manual` / `gc_auto` / `gc_auto_alpha` / `no_gc` · `runtime` / `no_runtime` · `sealed` / `hosted` · `vm` / `no_vm` · `lms_full` / `lms_forensic_admin` / `lms_daily_admin` / `lms_manage_only_admin` · `lspe_open_admin` / `lspe_close_admin` - see 2.1 |
 | Switch setting | `addin <name>` (**entry unit only**) - pulls in a "switch settings" unit, see 2.2 |
 | Custom syntax | `comefor let "word" to { … }` … `byuse "word" done` - **define a new syntax at compile time**. The block after `to` is **a Loment program** (`fn main` is its entry; **the return value is how many tokens it ate**) which reads and emits tokens with `ct_n` / `ct_tok` / `ct_out` / `ct_syn`. Definition and terminator are **top-level only** and cannot nest; expansion happens at the token layer **before parsing**, so errors and jumps still point at the line you wrote. See `docs/184` |
-| Import | **Two spellings, neither takes a semicolon**: `use name` (**searched in layers, first hit wins**: (1) project root `<project>/deps/<name>/<name><ext>` (2) the toolchain's own `<tool dir>/../share/lompi/store/<name>/<version>/<name><ext>` (3) the five built-in roots `loment/lib` → `examples` → `selfhost` → `tools` → `lspe`, where **only layer 3 requires the name to be unique**); `use "path/to/other.lomt"` (relative to the current file or the working directory - **use this form for a sibling file in your own directory**). `<ext>` defaults to `.lomt` and a project can change it (section 7). At most **300** `use` lines in one file. **Several name-form `use` lines are allowed in 0.1.5** (older packages stopped at one) - see 6.3 |
+| Import | **Two spellings, neither takes a semicolon**: `use name` resolves in this order - (1) `deps/<name>/<name><ext>` in the project; (2) **exactly one** module named `name` across the five built-in roots `loment/lib` → `examples` → `selfhost` → `tools` → `lspe` (several hits is E18 "ambiguous"); (3) **exactly one** module inside the packaged store `share/lompi/store/` (a module inside a package, e.g. `std/0.1.0/vec.lomt`; several hits is E18). An importer that lives **inside the store** flips (2) and (3). `use "path/to/other.lomt"` is relative to the file or the working directory - **use this form for a sibling file in your own directory**. `<ext>` defaults to `.lomt` and a project can change it (section 7). At most **300** `use` lines in one file. **Several name-form `use` lines are allowed in 0.1.5** (older packages stopped at one) - see 6.3 |
 | Function | `fn f(a: u32, b: str) -> u32 { ... }` (no return value: `fn f()`); **at most 10 parameters** (a hard constraint of the self-hosted side's layout: the parameter table has 10 slots. It fails in two shapes: a count mismatch between parameters and arguments is the normal E3, while **a call site with more than 10 arguments** goes through `panic` - exit code 132 with **no diagnostic**. When you see "no error but exit 132", count your arguments) |
 | Export | Add `pub` for cross-module visibility: `pub fn` / `pub struct` / `pub const` |
-| Constant | `const NAME: u32 = 3` |
+| Constant | `const NAME: u32 = 3` - the initialiser is **one integer literal** (decimal or hex, optional `-`); it is not an expression, and there are no string constants - see 6.1.8 |
 | Variable | `let x: u32 = e;`, assignment `x = e;` - **the type annotation is required**; the language has no type inference |
 | Control flow | `if` / `else if` / `else`, `while`, `for i in lo..hi` (upper bound exclusive), `return <expr>;` (the value is **required**). **Tur 2 adds** `for x in xs`, `break` / `continue`, and bare `return;` in unit functions - see 2.0.4 |
 | Struct | `struct S { a: u32, b: u32 }`; literal `S { a: 1, b: 2 }`; field `s.a` |
@@ -37,7 +37,7 @@ you are reading. The entry skill (`loment`) carries the map; this file carries i
 | Conversion | `x as u64` - integer/pointer conversions are always written out |
 | Strings | `"..."`, escapes exactly `\n \t \r \0 \\ \"`; **any other escape is an error** (E19), not a silent degradation; the operations are the `str_*` builtins in section 3 |
 | Raw foreign block | `let c { …raw bytes… }` / `py { … }`, after `command <lang>` / `foruse <lang>` - see 2.0.12 |
-| Audit bypass | `lspe pass "reason" { … }` - the reason is mandatory (E38), section 5.2 |
+| Audit bypass | `lspe pass "reason" { … }` - the reason is mandatory (E38), section 5.1.5 |
 | Comments | `//`, `/* */`; `///` is a doc comment (`loment doc` extracts those) |
 | Operators | Precedence as in Rust: `\|\| && == != < <= > >= \| ^ & << >> + - * / %`, unary `- !` |
 
@@ -55,9 +55,9 @@ choose no_std          // ← once for the whole program; the default is std
 
 | Dimension | Values | Default | What it decides |
 |---|---|---|---|
-| **Layer** | `std` · `no_std` | `std` | which layer the program may use - `std` unlocks the hosted layer (libc / filesystem / threads / time / network), `no_std` refuses it |
-| **Reclamation** | `gc_manual` · `gc_auto` · `gc_auto_alpha` · `no_gc` | `gc_manual` | how memory is reclaimed - see section 2.1 and `docs/210`; `no_gc` declares the artifact carries no collector |
-| **Runtime** | `runtime` · `no_runtime` | `no_runtime` | whether the artifact may carry a runtime (the heap is still on demand) |
+| **Layer** | `std` · `no_std` | `std` | which layer the program may use - `std` unlocks the host-side modules (filesystem / argv / threads / time / network); `no_std` refuses them. Linking real libc or shared libraries is the separate **Port** dimension |
+| **Reclamation** | `gc_manual` · `gc_auto` · `gc_auto_alpha` · `no_gc` | `gc_manual` | how memory is reclaimed - see `loment-safety` 8.1 and `docs/210`; `no_gc` declares the artifact carries no collector |
+| **Runtime** | `runtime` · `no_runtime` | `no_runtime` | whether the artifact may carry the runtime block. `alloc`, `guard`, `print_num` and the automatic GC tiers need it; `no_runtime` refuses them **by name** (E031) |
 | **Port** | `sealed` · `hosted` | `sealed` | whether the artifact may reach outside itself by linking host libraries |
 | **Execution model** | `vm` · `no_vm` | `no_vm` | which execution model the program is for - see below |
 | **Memory safety** | `lms_full` · `lms_forensic_admin` · `lms_daily_admin` · `lms_manage_only_admin` | `lms_full` | which of the seven LMS levels are on. **The direction is reversed**: the default is full, and a non-full value is a downgrade; every non-full value carries `_admin` |
@@ -75,7 +75,9 @@ What holds for all seven:
 - **Contradictory pairs are named, not lumped.** `gc_auto` with `no_runtime` is refused because
   automatic reclamation *is* that runtime; `hosted` with `no_std` is refused because `no_std` says
   there is nothing underneath and `hosted` says to link against it; both automatic tiers with
-  `no_std` are refused because a collector needs that runtime. The diagnostic names the pair
+  `no_std` are refused because a collector needs that runtime; `hosted` with `gc_auto_alpha` is
+  refused because alpha's block-epoch L2 rolls the allocation frontier back, while a C library
+  keeps pointers in its own structures outside the Loment stack. The diagnostic names the pair
   and the reason; it never says "illegal combination".
 - A value that is not in the table is a typo, and a typo **is E22**.
 
@@ -90,15 +92,18 @@ the default and means you may use host capabilities. **When it is required**: wr
 writing something that runs on bare metal - writing it out is for readers and tools; the
 language does not force it.
 
-**`sealed` is what makes the artifact checkable.** An undefined symbol is an error, not a
-warning, so a sealed artifact provably has no ports to the world. `hosted` is the other path: a
-C-runtime program whose entry point is `fn main() -> u32` rather than `_start`, declared as
-allowed to link real libc and shared libraries. **The door opened on 2026-10-17**: both release
-and development launchers pass `--allow-ports` to the linker, which links real ELF shared
-objects (`.so`) and lets the system loader map and bind them (`docs/183` V2, `docs/219` section
-8c). Remaining limits: ELF only (no PE import path), one shared object on the self-hosted
-linker, function symbols only, and a host `ld.so`/glibc must be present. When you call
-`loment-lomelf` directly rather than through `loment`, add `--allow-ports` yourself.
+**`sealed` and `hosted` are the two declarations of the port dimension.** `sealed` (the
+default) says the product has no hosted runtime and links no host library: the launcher refuses
+`-L` / `-l` / `--cc-arg` under it, and the linker's own default rejects objects with undefined
+symbols and shared objects. **A boundary you can actually hit**: since 2026-10-17 both launchers
+pass `--allow-ports` in **both** channels, so an explicit `--link` of a `.o` or `.so` is still
+accepted under `sealed` - the dimension records intent, and the launcher enforces the `-L`/`-l`
+path rather than every possible `--link`. A name nobody provides is a **link error**, not a
+run-time crash. `hosted` is the other path: `fn main() -> u32` instead of `_start`, allowed to
+link real libc and shared libraries (the door opened on 2026-10-17; `docs/183` V2, `docs/219`
+section 8c). Remaining limits: ELF only (no PE import path), one shared object on the
+self-hosted linker, function symbols only, and a host `ld.so`/glibc must be present. When you
+call `loment-lomelf` directly, add `--allow-ports` yourself.
 
 ### 2.2 Switches `set choose` / `choose` / `addin`
 
@@ -264,12 +269,12 @@ each bring in one module, see 3.1 at the end of this section.
 | `str_len(s: str) -> u32` | Length in bytes |
 | `str_byte(s: str, i: u32) -> u32` | The i-th byte |
 | `str_eq(a: str, b: str) -> bool` | Content comparison |
-| `str_concat(a: str, b: str) -> str` | Concatenation (**the compile-time bump heap, which is only 64 KiB** - do not build big strings) |
+| `str_concat(a: str, b: str) -> str` | Concatenation - **allocates from the same 64 KiB arena at run time**, so do not build big strings (or loop over it) |
 | `str_ptr(s: str) -> ptr` | The data pointer (for feeding syscalls) |
 | `print(s: str) -> u32` | Write the string's bytes to stdout (one `write` syscall) |
 | `tur_edition() -> str` | The Tur edition this program is compiled as, e.g. `tur2026.2` (docs/296). The compiler also prints it on stderr at every check/build/run |
 | `print_num(n) -> u32` | **Tur 2 only** (in Tur 1 the name is an ordinary identifier). Decimal, optional `-`, **no newline**, any integer type widened by sign to `i64`. It lives in the runtime block, so `no_runtime` refuses it by name (E31) |
-| `alloc(n: u32) -> ptr` | Bump-heap allocation (the same 64 KiB cap - **and read 6.2.14 before relying on it**) |
+| `alloc(n: u32) -> ptr` | Heap allocation from the sealed arena (64 KiB; bump pointer + address-ordered free list) - **read 6.2.14 before relying on it** |
 | `free(p: ptr) -> u32` | Returns the block to the allocator (bump pointer + address-ordered free list); it cannot grow past 64 KiB and does not coalesce (`docs/210` section 2.8) |
 | `load8(p: ptr, off: u32) -> u32` | Read a byte |
 | `store8(p: ptr, off: u32, v: u8) -> u32` | Write a byte |
@@ -289,11 +294,15 @@ copy `write_dec` from section 1, or use `fmt` / `numfmt` from the standard libra
 `printf`.
 
 **Syscall numbers**: on the Linux ELF target they are Linux's own (`write`=1, `exit`=60,
-`openat`=257…). **The Windows PE target implements only eight**: `read`(0) / `write`(1) /
-`close`(3) / `brk`(12) / `exit`(60) / `getdents64`(217) / `openat`(257) / `newfstatat`(262), and
-**every other number returns -1 (failing silently)** - stick to those eight if it has to run on
-both. `/proc/self/cmdline` is synthesised by the runtime on PE, so reading argv is the same on
-both.
+`openat`=257…). **The Windows PE target implements 29 numbers** (`PE_SYSCALLS` in
+`tools/lomelf.py`): the file/process eight - `read`(0), `write`(1), `close`(3), `brk`(12),
+`exit`(60), `getdents64`(217), `openat`(257), `newfstatat`(262) - plus the networking family -
+`poll`(7), `select`(23), `socket`(41), `connect`(42), `accept`(43), `accept4`(288),
+`sendto`(44), `recvfrom`(45), `sendmsg`(46), `recvmsg`(47), `shutdown`(48), `bind`(49),
+`listen`(50), `getsockname`(51), `getpeername`(52), `socketpair`(53), `setsockopt`(54),
+`getsockopt`(55), `epoll_wait`(232), `epoll_ctl`(233), `epoll_create1`(291). **Any other number
+returns `-ENOSYS` (-38)** - not `-1`, which would mean EPERM. `/proc/self/cmdline` is
+synthesised by the runtime on PE, so reading argv is the same on both.
 
 ### 3.1 The toolchain's standard library (one module at a time)
 
@@ -326,27 +335,29 @@ fn _start() {
   still large; prefer per-module imports.
 - Only the name form works this way; `store` is a **directory tree** - do not reach into it by
   path unless you mean the path form above.
-- `mem` / `num` / `proc` / `sha256` / `json` exist **on both sides**: `use mem` gets the
-  **toolchain core library** copy (`loment/lib/`), not the one in the `std` package.
+- `mem`, `num` and `sha256` exist in **both** places; `use mem` resolves the **toolchain core
+  library** copy (`loment/lib/`), not the one inside `std`. `proc` and `json` are core-library
+  only (`loment/lib/proc.lomt`, `loment/lib/json.lomt`).
 - The `test_*` functions inside standard-library files are each module's self-check; they may be
   part of the source at no extra cost.
 
 ## 4. How to read the error codes
 
-The compiler prints lines shaped like:
+The **self-hosted driver** (what an installed package runs) prints lines shaped like:
 
 ```
 E2 @13 line 4: 1
 ```
 
-Read it as: `E2` is **E002** in the unified numbering; `@13` is **the 13th token** (not a column);
+The **reference compiler** in a checkout prints `4: message` instead; the reporter turns
+either into the same card. Read the first as: `E2` is **E002** in the unified numbering; `@13` is **the 13th token** (not a column);
 `line 4` is the line; everything after the colon is that token's text. **The codes are grouped by
 what you should do, not by wording**:
 
 | Code | What it asks you to do |
 |---|---|
 | E1 | Types do not line up (including return / payload / builtin arguments) |
-| E2 | **Something is not declared** (undeclared variable / undefined function / unknown type, including use-before-definition) |
+| E2 | **Something is not declared** (undeclared variable / undefined function / unknown struct or enum; a local used before its `let`). An unknown name in a **type position** is E30, not E2 |
 | E3 | **Wrong number of arguments** |
 | E4 | Capability-domain problem (undeclared / out of range / duplicate) |
 | E5 | A space declared out of bounds with `excluded` was used |
@@ -391,7 +402,7 @@ they are not source errors.
 supported) which `loment check` renders; `loment explain E4` gives the ASCII version of one. The
 table above is only an overview.
 
-**The most common ones**: `E2` is nine times out of ten a **missing type annotation** (`let x =
-1;` is not legal; write `let x: u32 = 1;`) or an undefined function name; `E3` is a call with the
-wrong argument count; `E19` see 6.1.
+**The most common ones**: a **missing type annotation** is a **parse error** (E19: expected
+`:`, got `=` for `let x = 1;`), not E2 - write `let x: u32 = 1;`. `E2` is a name that is not
+declared; `E3` is a call with the wrong argument count; `E19` see 6.1.
 

@@ -5302,6 +5302,126 @@ def test_lspe_e4_recursive_summary_terminates_undecided():
     calls = [s for s in mod.lspe_sites if s["kind"] == "call"]
     assert [s["evidence"] for s in calls] == ["none"], calls
 
+def _lgc_load(src: str):
+    """按**声明**装载（`front_door` 读 `choose write grammar tur2026.3`）并返回模块。"""
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "m.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        return lomentc.load(p)
+
+
+#: `lgc`（`docs/306`）的基准源：Tur 2026.3，手动档（默认不收集）。
+LGC_SRC = """choose write grammar tur2026.3
+module lgc
+
+choose runtime
+
+fn churn(n: u32) -> u32 {
+    let i: u32 = 0;
+    lgc end;
+    while i < n {
+        let p: ptr = alloc(64);
+        store8(p, 0, i as u8);
+        i = i + 1;
+    }
+    lgc start(2ms) {
+        let q: ptr = alloc(16);
+        store8(q, 0, 7);
+    }
+    return 0;
+}
+
+fn _start() { syscall4(60, churn(3) as u64, 0, 0); }
+"""
+
+
+@test
+def test_lgc_is_a_tur2026_3_feature():
+    """`lgc` 只在 Tur 2026.3 里是关键字（`docs/306`；2026.2 已封版）。
+
+    三格：2026.3 收下；2026.2 里 `lgc` 仍是普通标识符（报"未声明"）；预算只收
+    **编译期时长**（变量预算要两边一致的类型推断，v1 不做）。
+    """
+    ok = lomentc.check(_lgc_load(LGC_SRC), deps=[])
+    assert ok == [], ok
+    old = LGC_SRC.replace("tur2026.3", "tur2026.2")
+    try:
+        errs = lomentc.check(_lgc_load(old), deps=[])
+    except lomc.LomError as e:      # 2026.2 里 `lgc` 是普通标识符：解析期就拒
+        errs = [str(e)]
+    assert errs, "2026.2 居然收下了 `lgc`"
+    bad = LGC_SRC.replace("lgc start(2ms)", "lgc start(2 + 3)")
+    try:
+        errs = lomentc.check(_lgc_load(bad), deps=[])
+    except lomc.LomError as e:
+        errs = [str(e)]
+    assert errs, "运行期算出来的预算居然被收下了"
+    hard = LGC_SRC.replace("lgc start(2ms) {", "lgc start(2ms);\n    if true {")
+    try:
+        _lgc_load(hard)
+    except Exception as e:
+        assert "必须带块" in str(e), e
+    else:
+        raise AssertionError("带预算的 lgc start 没有带块，居然被收下了")
+
+
+@test
+def test_lgc_is_refused_under_no_gc():
+    """`no_gc` 的产物**没有收集器**，`lgc` 定义上没有东西可控 —— 编译期点名拒（E039）。"""
+    src = LGC_SRC.replace("choose runtime", "choose runtime\nchoose no_gc")
+    errs = lomentc.check(_lgc_load(src), deps=[])
+    assert any("no_gc" in e and "lgc" in e for e in errs), errs
+    import loment_diag  # noqa: PLC0415
+    code, _t, _h = loment_diag.classify(errs[0])
+    assert code == "E039", (code, errs[0])
+
+
+@test
+def test_lgc_control_runtime_appears_only_when_used():
+    """控制运行期**按需发**（`docs/306`）：没写 `lgc` 的程序一个字节都不多。
+
+    `gc_manual` 尤其重要：它的既有承诺是"产物里没有收集器/根表"。用了 `lgc` 的单元
+    才带上收集器（默认关闭），没用的一格照旧 —— 两边都在这里钉住。
+    """
+    plain = LGC_SRC.replace("    lgc end;\n", "").replace(
+        "    lgc start(2ms) {\n        let q: ptr = alloc(16);\n"
+        "        store8(q, 0, 7);\n    }\n", "")
+    ir_plain = lomentc.emit_llvm(_lgc_load(plain), ROOT)
+    for sym in ("@__loment_gc_on", "@__loment_gc_deadline", "__loment_gc_allow",
+                "__loment_maybe_collect_ctl", "__loment_now_ns",
+                "@__loment_roots", "@__loment_collect"):
+        assert sym not in ir_plain, f"没写 lgc 的单元里出现了 {sym}"
+    ir = lomentc.emit_llvm(_lgc_load(LGC_SRC), ROOT)
+    for sym in ("@__loment_gc_on = internal global i32 0",
+                "@__loment_gc_deadline = internal global i64 0",
+                "__loment_gc_allow", "__loment_maybe_collect_ctl",
+                "__loment_now_ns", "@__loment_roots", "@__loment_collect",
+                "call void @__loment_maybe_collect_ctl(i32 64)"):
+        assert sym in ir, f"用了 lgc 的单元缺 {sym}"
+    # 自动档初值是 1（`lgc end` 才是暂停）；manual 初值 0（窗口才收）。
+    auto = LGC_SRC.replace("choose runtime", "choose runtime\nchoose gc_auto")
+    ir_auto = lomentc.emit_llvm(_lgc_load(auto), ROOT)
+    assert "@__loment_gc_on = internal global i32 1" in ir_auto, "gc_auto 的初值不是 1"
+
+
+@test
+def test_lgc_window_saves_and_restores_even_on_return():
+    """窗口在**每条退出路径**上恢复 `on`/`deadline`（`docs/306`）。
+
+    这一格钉 IR 形状：每个 `begin` 在入口块有 `%lgc.on.N` / `%lgc.dl.N` 两个槽；
+    `return` 之前先把它们读回来再 `ret`。嵌套窗口各用各的编号。
+    """
+    ir = lomentc.emit_llvm(_lgc_load(LGC_SRC), ROOT)
+    assert "%lgc.on.0 = alloca i32" in ir and "%lgc.dl.0 = alloca i64" in ir, ir
+    # begin：保存进入前，再置 1 与 deadline（2ms = 2_000_000）
+    assert "store i32 %" in ir and "ptr %lgc.on.0" in ir
+    assert "add i64 %" in ir and "2000000" in ir, "2ms 没有折成 2000000 纳秒"
+    # return 前恢复：`churn` 的 `ret i32 0` 之前能看到 `load ... %lgc.on.0`
+    ret_at = ir.rindex("ret i32 0", 0, ir.index("\n; _start"))
+    head = ir[:ret_at]
+    assert "load i32, ptr %lgc.on.0" in head, "return 前没有恢复 on"
+    assert head.rindex("load i32, ptr %lgc.on.0") > head.index("lgc.on.0 = alloca")
+
 
 def main() -> int:
     return loment_suite.run(TESTS, "lomentc_test")

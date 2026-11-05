@@ -4626,6 +4626,59 @@ def test_main_is_an_entry_when_start_is_absent():
     print("      `main` 入口真跑出输出；带形参的 `main` 被拒；镜像产物逐字节相同")
 
 
+@test
+def test_lgc_pause_and_budget_really_gate_collection():
+    """`lgc` 的暂停与时间预算**真的**改变收集行为（`docs/306`）—— 五只程序，只差控制语句。
+
+    与 `test_gc_auto_collects_while_manual_exhausts` 同一个语料（1.4 MB 请求过 64 KiB
+    arena），只把循环包进不同的控制里：
+
+      * `gc_auto` + `lgc end;`            → **不收**，耗尽（非 7）；
+      * `gc_auto` + `lgc start(1ns)`       → 预算立刻到期，**不收**（非 7）；
+      * `gc_auto` + `lgc start(10s)`       → 收，跑通（7）；
+      * `gc_manual` + `lgc start(10s)`     → 默认关、窗口开，收，跑通（7）；
+      * `gc_manual` + `lgc end;`           → 关，耗尽（非 7）。
+
+    `1ns` 那一格是**证伪**：预算若被忽略，它就会和 `10s` 一样跑通。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    body = ("choose write grammar tur2026.3\nmodule lgcgate\n%s\nchoose runtime\n\n"
+            "fn churn(n: u32) -> u32 {\n%s"
+            "    let i: u32 = 0;\n%s"
+            "    while i < n {\n        let t: ptr = alloc(64);\n"
+            "        store8(t, 0, 1);\n        i = i + 1;\n    }\n%s"
+            "    return 0;\n}\n\n"
+            "fn _start() { syscall4(60, churn(20000) as u64, 0, 0);\n"
+            "    syscall4(60, 3, 0, 0); }\n")
+    cases = [
+        ("auto_paused", "choose gc_auto", "    lgc end;\n", "", ""),
+        ("auto_tiny", "choose gc_auto", "", "    lgc start(1ns) {\n", "    }\n"),
+        ("auto_window", "choose gc_auto", "", "    lgc start(10s) {\n", "    }\n"),
+        ("manual_window", "choose gc_manual", "", "    lgc start(10s) {\n", "    }\n"),
+        ("manual_paused", "choose gc_manual", "    lgc end;\n", "", ""),
+    ]
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        rc = {}
+        for tag, ch, pre, op, cl in cases:
+            src = td / f"{tag}.lomt"
+            src.write_text(body % (ch, pre, op, cl), encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"{tag}.native"
+            nat.write_bytes(blob)
+            rc[tag] = _run_bin(nat, tag, td, timeout=60)[0]
+    assert rc["auto_window"] == 0, f"窗口内的自动档没跑通：{rc}"
+    assert rc["manual_window"] == 0, (
+        f"`gc_manual` + 窗口没跑通（rc={rc['manual_window']}）—— 手动档的开窗收集没生效")
+    for tag in ("auto_paused", "auto_tiny", "manual_paused"):
+        assert rc[tag] != 0, (
+            f"{tag} 也跑通了（rc={rc[tag]}）—— 暂停/预算没有真的挡住收集")
+    print(f"      五个控制格：{rc} —— 窗口收、暂停与到期预算都不收")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_elf_test")
 

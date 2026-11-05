@@ -285,7 +285,7 @@ ABIS = ("c", "rust", "python", "go", "java")
 #: **只让拼法与形状，不让语义**（`docs/188` §0）。
 #: Tur 的版次是**两级名**（`docs/296` §1.1）：`tur<年份>.<年内序号>`。这里只放规范名；
 #: 当年短名（`tur1` / `tur2`）与历史拼法（`tur`）是源侧别名，不进对象。
-GRAMMARS = ("loment", "tur2026.1", "tur2026.2", "c", "python", "java", "go", "rust",
+GRAMMARS = ("loment", "tur2026.1", "tur2026.2", "tur2026.3", "c", "python", "java", "go", "rust",
             "csharp", "cpp", "natural")
 
 

@@ -280,6 +280,8 @@ RULES = [
              # `#33` / `#36`：字符串里的**未知转义**。它原先在词法期**不报**（兜底取原字符），
              # 现在报了 —— 新增的词法期消息必须并进这一码，否则会落到 E999「请报告」。
              r"未知转义|"
+             # Tur 2026.3 的 `lgc`（docs/306）：形状/单位/必带块这几条都是解析期错误。
+             r"`lgc` (只认|后面要跟|的时长|的预算要是)|带预算的 `lgc start|"
              # `docs/296` §2.5 / §2.6：循环控制与裸 `return` 的版次/形状错误
              r"can only be used inside a loop|不带值，函数|"
              # `docs/296` §2.3：`defer` 的形状（只收调用）与位置（只在函数体里）都是解析期
@@ -377,6 +379,10 @@ RULES = [
      "`lspe pass` 缺少理由",
      "`lspe pass` 是**有记录的**审计旁路：块本身进台账。没有理由的旁路就是 LSPE "
      "存在的意义所要防的那种无标签地板，所以它在这里被拒。"),
+    ("E039", r"`lgc` 需要一个收集器",
+     "`lgc` 与 `no_gc` 冲突",
+     "`no_gc` 的定义是「产物里没有收集器」；`lgc` 是控制收集器何时跑的语句。"
+     "两者定义上矛盾，所以在 `no_gc` 单元里是编译期拒绝，而不是运行期无事可做。"),
     # ---- E900（`#773`，2026-10-19）：**工具链进程死了，而且没留下诊断**。
     #
     # 这一条不是编译器说的，是**启动器**在收尸时合成的：编译器（或链接器、报错器自己）
@@ -466,6 +472,7 @@ ASCII_ONE_LINER: dict[int, str] = {
     36: "LSPE's own self-audit failed",
     37: "an LSPE policy lock does not match this artifact",
     38: "an `lspe pass` block with no reason",
+    39: "`lgc` needs a collector, but this unit chose `no_gc`",
     # E9xx: internal. `loment codes` lists this block after the user codes
     # (`#773`: a tool that dies without a record is still a failure that must speak).
     900: "a tool in the chain died before it could report (internal) - report it with the unit",
@@ -528,6 +535,7 @@ TITLE_EN: dict[int, str] = {
     36: "LSPE's self-audit failed",
     37: "an LSPE policy lock does not match",
     38: "`lspe pass` needs a reason",
+    39: "`lgc` conflicts with `no_gc`",
     900: "the tool died without reporting (internal)",
 }
 
@@ -635,6 +643,18 @@ CARDS: dict[int, Card] = {
         ),
         yes="一句非空理由",
         no="空字符串 / 只有空白 / 根本不是字符串",
+    ),
+    39: Card(
+        what="这份单元写了 `lgc`（GC 时间控制），却又声明了 `no_gc` —— 产物里根本没有收集器。",
+        why="`no_gc` 的承诺是「产物不带收集器」，而 `lgc` 的每一条语句都在控制收集器"
+            "何时跑。这两句话不能同时为真：要么开一个有收集器的档，要么不要写 `lgc`。",
+        fixes=(
+            "把 `choose no_gc` 换成 `choose gc_manual`（手动回收，仍可由 `lgc` 开窗收集）。",
+            "要自动回收就写 `choose gc_auto` 或 `choose gc_auto_alpha`。",
+            "如果这块代码只是暂时保留，删掉 `lgc` 语句，或在别的单元里做这件事。",
+        ),
+        yes="`gc_manual` / `gc_auto` / `gc_auto_alpha` 下的 `lgc`",
+        no="`no_gc` 下的 `lgc`",
     ),
     1: Card(
         what="两处类型对不上 —— 返回值与声明、实参与形参、载荷与变体、内建实参、赋值两侧。",
@@ -1273,6 +1293,19 @@ CARDS_EN: dict[int, Card] = {
         ),
         yes="a non-empty reason",
         no="an empty string / whitespace only / not a string",
+    ),
+    39: Card(
+        what="This unit uses `lgc` (GC timing control) but declares `no_gc` - the artifact "
+             "carries no collector at all.",
+        why='`no_gc` promises "the artifact has no collector", while every `lgc` statement ' 
+            "controls when that collector runs. The two cannot both be true.",
+        fixes=(
+            "Use `choose gc_manual` instead of `choose no_gc`; `lgc` can still open collection windows.",
+            "For automatic collection use `choose gc_auto` or `choose gc_auto_alpha`.",
+            "If the statements are only parked here, remove them or move them to another unit.",
+        ),
+        yes="`lgc` under `gc_manual` / `gc_auto` / `gc_auto_alpha`",
+        no="`lgc` under `no_gc`",
     ),
     1: Card(
         what="Two types do not line up - the return value against the declaration, an argument "

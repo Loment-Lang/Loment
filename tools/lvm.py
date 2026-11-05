@@ -584,6 +584,14 @@ class Executor(Vm):
             return 0
         if nr == 201:                                  # time(NULL)
             return int(time.time())
+        if nr == 228:                                  # clock_gettime(id, struct timespec *)
+            # `lgc` 的预算读它（`docs/306`）。**单调**钟：从宿主读，按 Linux x86-64 的
+            # `timespec`（两个 i64：秒、纳秒）写进 guest 内存。钟的**绝对值**不是判决面
+            # （与 201 同一条口径），窗口只比先后与差。
+            ns = time.monotonic_ns()
+            self.mem.put(a[1], (ns // 1_000_000_000).to_bytes(8, "little", signed=True)
+                         + (ns % 1_000_000_000).to_bytes(8, "little", signed=True))
+            return 0
         # ⚠ **317 不是 getrandom** —— 我一开始照 `selfcheck` 的名字猜它是，写了个
         # `os.urandom` 分支。**判据 A 当场把这个臆造纠了出来**：原生产物在 Linux 上拿到
         # 317 = `seccomp`，返回 -1，于是 `selfcheck` 自己报 FAIL；而我的 VM "通过"了。

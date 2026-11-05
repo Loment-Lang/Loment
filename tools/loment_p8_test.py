@@ -51,6 +51,10 @@ atexit.register(shutil.rmtree, _CACHE_DIR, ignore_errors=True)
 
 _MISS = object()
 _UNIT_LL: dict[Path, str | Exception] = {}
+#: `_loment_codes` 为"抹掉 `choose write grammar`"临时写出的单元（进程结束删掉）。
+#: **不落在仓库目录里**：那里的 `*.lomt` 是语料，判据的临时件混进去就是污染。
+_TEMP_UNITS: list[Path] = []
+atexit.register(lambda: [p.unlink(missing_ok=True) for p in _TEMP_UNITS])
 #: 已构建的 Windows 侧可执行文件（词法器/parser/checker/codegen, 按 tag）。产物落在
 #: `_CACHE_DIR`: 每个判据都有自己的 `TemporaryDirectory`, 放进那里的话它一退出就被删,
 #: 后面的判据就无从复用了。
@@ -353,6 +357,16 @@ def _st(s) -> str:
         # `if let` 也走这里 (参考实现把它反糖成两臂 Match: 命中臂 + 通配臂)
         return (f"(match {_ex(s.subject)}"
                 + "".join(_arm_ex(p, b) for p, b in s.arms) + ")")
+    if n == "Lgc":
+        # `docs/306`：窗口在 AST 里**摊平**成 `begin` + 体语句 + `close` 三个兄弟节点。
+        # 预算是解析期折好的纳秒 IntLit，dump 出的是折好之后的数（`10ms` -> 10000000）。
+        if s.action == "begin":
+            return "(lgc start)" if s.budget is None else f"(lgc start {s.budget.value})"
+        if s.action == "pause":
+            return "(lgc end)"
+        if s.action == "resume":
+            return "(lgc start)"
+        return "(lgc close)"
     raise Unsupported(n)
 
 
@@ -426,6 +440,7 @@ def _parser_corpus() -> tuple[list[Path], list[str]]:
     两道棘轮先红**, 逼着先补 dump 口径 (再补 parser 分支), 而不是悄悄少对照一个文件。
     """
     files = sorted(list((ROOT / "loment" / "examples").glob("*.lomt"))
+                   + list((ROOT / "loment" / "examples" / "lgc").glob("*.lomt"))
                    + list((ROOT / "loment" / "selfhost").glob("*.lomt"))
                    + list((ROOT / "loment" / "tools").glob("*.lomt")))
     ok, skip = [], []
@@ -524,10 +539,13 @@ int main(int argc, char **argv) {
     unsigned char *sw = malloc(8008);
     unsigned int nt = lex(buf, (unsigned int)n, toks);
     nt = apply_switches(buf, toks, nt, sw);
+    /* 版次由调用方给（`argv[2]`，缺省 0 = Tur 1）：`choose write grammar` 那一行
+       装载器会抹掉并把版次传下来；夹具绕过装载器，所以得自己补这一格。 */
+    unsigned int prof = (argc > 2) ? (unsigned int)atoi(argv[2]) : 0;
     unsigned int m = check_arena(buf, toks, errs, a,
                                  a + chk_arena_scr(), a + chk_arena_ctab(), a + chk_arena_nc(),
                                  a + chk_arena_exs(), a + chk_arena_env(), a + chk_arena_tyt(),
-                                 0);   /* 夹具喂的是原始 token：按 Tur 1 查 */
+                                 prof);
     m += switch_rules(buf, toks, sw, errs, m * 8);
     printf("%u", m);
     for (unsigned int i = 0; i < m; i++) {
@@ -770,9 +788,53 @@ def _build_checker(td: str) -> Path:
     return exe
 
 
-def _loment_codes(exe: Path, src: Path) -> list[int]:
-    """返回 (错误码列表, 明细字符串) —— 明细用于失败时定位。"""
-    out = subprocess.run([shutil.which(str(exe)) or str(exe), str(src)],
+def _prof_of_text(text: str) -> int:
+    """源里 `choose write grammar` 的版次 -> 自举侧口径（0 = tur2026.1 / 1 = tur2026.2 /
+    2 = tur2026.3）。**与 driver.strip_grammar_decl 同一张别名表**：夹具绕过了装载器，
+    所以它得自己把版次交给 `emit_module` / `check_arena` 的最后一个实参。"""
+    prof = {"tur3": 2, "tur2026.3": 2, "tur2": 1, "tur2026.2": 1}
+    for line in text.split("\n"):
+        h = line.strip().rstrip(";").split()
+        if len(h) == 4 and h[0] == "choose" and h[1] == "write" and h[2] == "grammar":
+            return prof.get(h[3].lower(), 0)
+    return 0
+
+
+def _blank_grammar_decl(text: str) -> str:
+    """把 `choose write grammar …` 抹成等长空白 —— 镜像装载器（`strip_grammar_decl`）。
+
+    夹具绕过装载器直接喂 token 流；不抹的话自举侧的 `choose` 扫描会把 `write` 当成
+    一个不认识的核心取值（E022），而参考实现早在 front_door 就把这一行抹掉了。
+    """
+    out: list[str] = []
+    for line in text.split("\n"):
+        h = line.strip().rstrip(";").split()
+        if len(h) == 4 and h[0] == "choose" and h[1] == "write" and h[2] == "grammar":
+            out.append(" " * len(line))
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
+def _loment_codes(exe: Path, src: Path, prof: int | None = None) -> list[int]:
+    """返回 (错误码列表, 明细字符串) —— 明细用于失败时定位。
+
+    `choose write grammar …` 那一行在这里**抹掉**再喂（镜像装载器）：驱动器是在
+    lex 之前抹的，夹具却把整份源码直接递进去 —— 不抹会把 `write` 当成一个不认识的
+    核心取值（E022）。版次改由 `argv[2]` 交给 `check_arena`。
+    `prof` 显式给定时优先（调用方喂的是**已经抹过**的单元，比如 `_unit_text` 的文本）。
+    """
+    text = src.read_text(encoding="utf-8")
+    if prof is None:
+        prof = _prof_of_text(text)
+    unit = src
+    if "choose write grammar" in text:
+        fd, tmp = tempfile.mkstemp(suffix=".lomt")
+        os.close(fd)
+        unit = Path(tmp)
+        unit.write_text(_blank_grammar_decl(text), encoding="utf-8", newline="\n")
+        _TEMP_UNITS.append(unit)
+    out = subprocess.run([shutil.which(str(exe)) or str(exe), str(unit), str(prof)],
                          capture_output=True, text=True, shell=False)
     assert out.returncode == 0, out.stderr
     parts = out.stdout.split()
@@ -851,7 +913,9 @@ int main(int argc, char **argv) {
     /* 状态块按单元规模定 (~500 KB), 不能压在语言堆上 —— 与驱动同一个口径 */
     unsigned char *st = malloc(cg_arena_bytes());
     lex(buf, (unsigned int)n, toks);
-    unsigned int m = emit_module(buf, toks, out, st, 0);
+    /* 版次由调用方给（`argv[2]`，缺省 0 = Tur 1）—— 同 checker 夹具那条。 */
+    unsigned int prof = (argc > 2) ? (unsigned int)atoi(argv[2]) : 0;
+    unsigned int m = emit_module(buf, toks, out, st, prof);
     printf("%.*s", (int)m, out);
     return 0;
 }
@@ -909,10 +973,16 @@ def test_m85_checker_accepts_corpus_units():
         exe = _build_checker(td)
         ok = []
         for target in sorted([t for d in ("examples", "selfhost", "tools")
-                              for t in (ROOT / "loment" / d).glob("*.lomt")]):
+                              for t in (ROOT / "loment" / d).glob("*.lomt")]
+                             # `examples/lgc/`：带了 `choose write grammar tur2026.3`
+                             # （`docs/306`）—— 单层 glob 够不到，显式收进来。
+                             + list((ROOT / "loment" / "examples" / "lgc").glob("*.lomt"))):
             unit = Path(td) / f"u_{target.stem}.lomt"
             unit.write_text(_unit_text(target), encoding="utf-8", newline="\n")
-            codes, det = _loment_codes(exe, unit)
+            # 版次从**原文件**取：`_unit_text` 把声明行抹了（镜像装载器），抹完之后
+            # `_prof_of_text` 只看得到缺省的 Tur 1。
+            codes, det = _loment_codes(
+                exe, unit, _prof_of_text(target.read_text(encoding="utf-8")))
             if target.name in gaps:
                 assert codes, f"{target.name}: 缺口已消失 —— 请从 gaps 里删掉它"
                 continue
@@ -1473,14 +1543,23 @@ def _unit_text(target: Path) -> str:
     text = ("".join(_blank_core_choose(p.read_text(encoding="utf-8")) + "\n"
                     for p in _dep_paths(target))
             + target.read_text(encoding="utf-8"))
+    # `choose write grammar ...` 是装载器抹掉的声明行（见 `_blank_grammar_decl`）。
+    # 版次不进正文 —— 它由调用方按 `_prof_of_text` 交给 `emit_module` / `check_arena`。
+    text = _blank_grammar_decl(text)
     # 判据要用**注入前**的模块 (lomentc.load 返回值里已经有它们了, 拿它判断永远为真)。
     # **开关也要先落定**（`docs/182` §1）—— 这里绕过了 `lomentc.load` 直接调 `Parser`,
     # 不补这一步的话 `set choose X { … }` 会撞上解析器的"未知顶层关键字"。
     # 实测撞到: 加 `switch.lomt` 之后 `test_m85_checker_accepts_corpus_units` 报
     # `LomError: 25:1: 未知顶层关键字 'set'`。
-    raw = target.read_text(encoding="utf-8")
+    # 这一趟直接调 `Parser`（绕过 `lomentc.load`），所以两样都要自己补：
+    #   * 声明行要抹 —— `Parser.parse` 要求第一个 token 是 `module`；
+    #   * 版次要传 —— 抹掉之后 `Parser` 只看得到缺省的 Tur 1。
+    raw_full = target.read_text(encoding="utf-8")
+    _pname = {2: "tur2026.3", 1: "tur2026.2"}.get(_prof_of_text(raw_full), "tur2026.1")
+    raw = _blank_grammar_decl(raw_full)
     have = {e.name for e in lomentc.Parser(
-        lomentc._apply_switches(lomc.lex(raw), lomentc.SwitchTable()), raw).parse().enums}
+        lomentc._apply_switches(lomc.lex(raw), lomentc.SwitchTable()), raw,
+        profile=_pname).parse().enums}
     if "Option" not in have or "Result" not in have:
         text += "\n" + lomentc._PRELUDE
     _UNIT_TEXT[key] = text
@@ -1497,8 +1576,9 @@ def _run_codegen(exe: Path, target: Path, td: str) -> str:
     # 必须写 LF: 驱动按原始字节读文件, 而 lomentc.load 用 read_text (通用换行) ——
     # CRLF 会让字符串字面量里多出 \0D (自举 codegen 就是这么抓到的)
     unit.write_text(text, encoding="utf-8", newline="\n")
+    prof = _prof_of_text(target.read_text(encoding="utf-8"))
     try:
-        return subprocess.run([shutil.which(str(exe)) or str(exe), str(unit)],
+        return subprocess.run([shutil.which(str(exe)) or str(exe), str(unit), str(prof)],
                               capture_output=True, text=True, timeout=30, shell=False).stdout
     except subprocess.TimeoutExpired:
         return ""
@@ -2597,11 +2677,15 @@ def test_m82_coverage_report():
              "native_concat.lomt",
              # 用**自举编译器**造工具: 格式化器/文档生成器/LSP 与 JSON 库都必须在列表里,
              # 否则"装工具不需要 Python"这条会静默退化 (装法见 scripts/lomc.ps1)
-             "lomfmt.lomt", "lomdoc.lomt", "lsp.lomt", "json.lomt"]
+             "lomfmt.lomt", "lomdoc.lomt", "lsp.lomt", "json.lomt",
+             # Tur 2026.3 的 `lgc`（`docs/306`）：暂停/恢复、窗口、嵌套、窗口里 return、
+             # gc_manual / gc_auto 两档。同一条判据另有专门的一条（`test_lgc_*`）。
+             "lgc_pause.lomt", "lgc_window.lomt", "lgc_manual.lomt", "lgc_auto.lomt"]
     with tempfile.TemporaryDirectory() as td:
         exe = _build_codegen(td)
         ok, diff, unsupported = [], [], []
         for target in sorted(list((ROOT / "loment" / "examples").glob("*.lomt"))
+                             + list((ROOT / "loment" / "examples" / "lgc").glob("*.lomt"))
                              + list((ROOT / "loment" / "selfhost").glob("*.lomt"))
                              + list((ROOT / "loment" / "tools").glob("*.lomt"))
                              + list((ROOT / "loment" / "lib").glob("*.lomt"))):
@@ -3341,6 +3425,93 @@ def test_m85_the_diagnostic_buffer_is_bounded_and_says_what_it_dropped():
         assert m, f"没有说丢了几条: {err[-400:]}"
         assert int(m.group(1)) > 0, "丢的条数是 0，说明这份输入没越界（判据测错了东西）"
         assert int(m.group(2)) == 4096, f"报文说的容量不是 ERR_CAP: {m.group(0)}"
+
+
+#: Tur 2026.3 的 `lgc` 夹具（`docs/306`）：暂停/恢复、带预算的窗口、嵌套窗口、
+#: 窗口里 `return`、`gc_manual` / `gc_auto` 两档。**四份都要逐字节一致** —— 这条
+#: 特征的全部风险都在"两个实现发出不同的窗口指令序列"，而那是只有字节才看得见的。
+LGC_DIR = ROOT / "loment" / "examples" / "lgc"
+LGC_FIXTURES = ("lgc_pause.lomt", "lgc_window.lomt", "lgc_manual.lomt", "lgc_auto.lomt")
+
+
+@test
+def test_lgc_control_matches_between_implementations():
+    """Tur 2026.3 的 `lgc`（`docs/306`）：两个实现逐字节相同，且做到它承诺的那几件事。
+
+    "一致"不难（两边一起不发也是"一致"），所以这里同时钉**做了什么**：
+      * `gc_manual` + `lgc` 的产物**带收集器**，而 `@__loment_gc_on` 初值是 **0**；
+      * `gc_auto` + `lgc` 初值是 **1**，且 LMS 第 3 级入口 A 走 `collect_now`；
+      * 窗口在入口块各开一对 `%lgc.on.N` / `%lgc.dl.N` 槽；
+      * 带预算的窗口有 `now_ns` + 加常数；
+      * 窗口里 `return` 时**先恢复再 ret**（逆序恢复，`lgc_restore_all`）。
+    没写 `lgc` 的程序不受影响 —— 那是既有的每一份语料（`test_m82_coverage_report`）。
+    """
+    if not _clang():
+        print("      SKIP: 无 clang")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        exe = _build_codegen(td)
+        for name in LGC_FIXTURES:
+            target = LGC_DIR / name
+            want = _unit_ll(target)
+            got = _run_codegen(exe, target, td)
+            if got != want:
+                i = next((k for k in range(min(len(got), len(want))) if got[k] != want[k]), None)
+                a = max(0, (i or 0) - 80)
+                raise AssertionError(
+                    f"{name} 首个差异 @{i}:\n"
+                    f" loment {got[a:(i or 0) + 120]!r}\n python {want[a:(i or 0) + 120]!r}")
+            assert "@__loment_gc_on = internal global i32 " in want, f"{name}: 没有控制全局"
+            assert "%lgc.on.0 = alloca i32" in want or name == "lgc_pause.lomt", \
+                f"{name}: 窗口槽没发"
+            assert "define internal i1 @__loment_gc_allow()" in want, f"{name}: 没有 allow 闸"
+            assert "@__loment_maybe_collect_ctl(i32 " in want, f"{name}: 分配点没走 ctl"
+        pause = _unit_ll(LGC_DIR / "lgc_pause.lomt")
+        assert "@__loment_gc_on = internal global i32 0" in pause, "manual 档的初值不是 0"
+        manual = _unit_ll(LGC_DIR / "lgc_manual.lomt")
+        assert "@__loment_gc_on = internal global i32 0" in manual, "gc_manual 的初值不是 0"
+        auto = _unit_ll(LGC_DIR / "lgc_auto.lomt")
+        assert "@__loment_gc_on = internal global i32 1" in auto, "gc_auto 的初值不是 1"
+        # LMS 第 3 级入口 A 在 `lgc` 档必须过同一道闸，否则一次分配失败会**绕过暂停**。
+        assert "call void @__loment_collect_now()" in auto, "OOM 那一支没走 collect_now"
+        window = _unit_ll(LGC_DIR / "lgc_window.lomt")
+        assert "%t" in window and "add i64 %t" in window, "预算没有折成 now + 常数"
+        # 窗口里 `return`：恢复指令必须出现在 `ret` **之前**（逆序恢复）。
+        ret_at = window.rindex("  ret i32 ")
+        assert window.rfind("store i64 %t", 0, ret_at) != -1, "return 前没有恢复窗口"
+        print(f"      lgc: {len(LGC_FIXTURES)} 份夹具逐字节一致；manual 初值 0 / auto 初值 1，"
+              f"窗口槽、allow 闸、ctl 钩子与 OOM 的 collect_now 都在")
+
+
+@test
+def test_lgc_tur2026_3_reaches_the_selfhost_driver():
+    """`tur3` / `tur2026.3` 走**自举驱动**的完整装载链（`docs/306`）。
+
+    p8 那条字节判据把 `prof` 直接递给 `emit_module`，绕过了装载器。这条补的是**用户走
+    的那条路**：`driver.lomt` 的 `strip_grammar_decl` 要认这两个新拼法、把版次记成 2、
+    再把同一份 token 流交给检查器与发射器。三件事缺一件，产物就与参考实现分叉。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    rel = "loment/examples/lgc/lgc_window.lomt"
+    target = ROOT / rel
+    with tempfile.TemporaryDirectory() as td:
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_lgc")
+        rc, out, err = _run_driver_raw(elf, rel, td, "lgc")
+        assert rc == 0, f"自举驱动编不过 tur2026.3: {err[-400:]}"
+        assert out == _unit_ll(target), "驱动装载后的产物与参考实现分叉"
+        assert "grammar tur2026.3 -> tur2026.3 (Tur 2026.3)" in err, (
+            f"编译期没有把拼法展开成规范名: {err[-300:]}")
+        # `tur3` 这个当年短名走同一条路（别名表里两个拼法都认）。
+        short = Path(td) / "short.lomt"
+        short.write_text(target.read_text(encoding="utf-8").replace(
+            "tur2026.3", "tur3", 1), encoding="utf-8", newline="\n")
+        rc2, out2, err2 = _run_driver_raw(elf, _wsl_path(short), td, "lgc_short")
+        assert rc2 == 0, f"`tur3` 短名编不过: {err2[-300:]}"
+        assert out2 == out, "`tur3` 与 `tur2026.3` 的产物不同"
+        assert "grammar tur3 -> tur2026.3" in err2, err2[-300:]
+    print("      驱动: tur2026.3 / tur3 两个拼法都装载成功，产物与参考一致")
 
 
 def main() -> int:

@@ -51,8 +51,8 @@ const SEEN_CAP: u32 = 65536;     // 已装载路径去重表
 //   [21504, 23904) addin 清单 (MAX_ADDIN 条, 每条 8 字节: 起点 + 长度)
 //   [23904, 24160) 命令名 (`--print-command` 抄出来的那一个, 不补 NUL)
 //   [24160, 24164) 这一次的 `--diag-out` fd **加一** (0 = 没给) ← 见 `diagfd`
-//   [24164, 24168) 版次 (0 = tur2026.1, 1 = tur2026.2) ← 见 `PROF_OFF` / `docs/296`
-//   [24168, 24172) 根单元写的拼法 (0 = 没写, 1..6 = loment/tur/tur1/tur2026.1/tur2/tur2026.2)
+//   [24164, 24168) 版次 (0 = tur2026.1, 1 = tur2026.2, 2 = tur2026.3) ← 见 `PROF_OFF`
+//   [24168, 24172) 根单元写的拼法 (0 = 没写, 1..8 = loment/tur/tur1/tur2026.1/tur2/tur2026.2/tur3/tur2026.3)
 const SCR_CAP: u32 = 24184;
 //: 单个文件的 `use` 条数上限 (路径形式 + 名字形式合起来算), **与参考实现同值**。
 //: 超限**报错退出**, 绝不静默丢 —— 原先进程按 8 条布局, 第 9 条起直接不要, 而参考实现
@@ -74,7 +74,7 @@ const SUBP_OFF: u32 = 18752;     // 子路径暂存
 const EXT_OFF: u32 = 20224;      // 源后缀 (loment.conf)
 const DIAG_OFF: u32 = 20480;     // --diag-out 路径
 const DIAGFD_OFF: u32 = 24160;   // 这一次的 --diag-out fd **加一** (0 = 没给)
-const PROF_OFF: u32 = 24164;     // 版次 (docs/296): 0 = tur2026.1, 1 = tur2026.2
+const PROF_OFF: u32 = 24164;     // 版次 (docs/296/306): 0 = 2026.1, 1 = 2026.2, 2 = 2026.3
 const DECLK_OFF: u32 = 24168;    // 根单元的拼法 (0 = 没写; 见 strip_grammar_decl)
 const ADDIN_OFF: u32 = 21504;    // addin 清单起点
 const CMD_OFF: u32 = 23904;      // 命令名 (`--print-command`)
@@ -793,7 +793,8 @@ fn strip_grammar_decl(buf: ptr, n: u32, scr: ptr, file: ptr, fnam: u32, root: u3
             }
             // **原生拼法是规范名 + 当年短名**（`potato_from.GRAMMAR_ALIASES` / `docs/296`
             // §1.1）：`loment`、`tur`、`tur1`、`tur2026.1` 是 Tur 1；`tur2`、`tur2026.2`
-            // 是 Tur 2。抹掉那一行之后交给原生的 lexer/parser，**没有翻译器参与**。
+            // 是 Tur 2；`tur3`、`tur2026.3` 是 Tur 2026.3（`docs/306`，继承 2026.2 的
+            // 全部语法）。抹掉那一行之后交给原生的 lexer/parser，**没有翻译器参与**。
             // （`rust` 已退回表层语法；别的拼法仍要等翻译器的 Loment 孪生，docs/189 §4.1。）
             //
             // **版次是整程序属性**：装载器把各单元拼成一条 token 流，之后一趟读到底，
@@ -804,16 +805,21 @@ fn strip_grammar_decl(buf: ptr, n: u32, scr: ptr, file: ptr, fnam: u32, root: u3
                           + streq(ptr_add(buf, al), ae - al, "tur1")
                           + streq(ptr_add(buf, al), ae - al, "tur2026.1")
                           + streq(ptr_add(buf, al), ae - al, "tur2")
-                          + streq(ptr_add(buf, al), ae - al, "tur2026.2");
+                          + streq(ptr_add(buf, al), ae - al, "tur2026.2")
+                          + streq(ptr_add(buf, al), ae - al, "tur3")
+                          + streq(ptr_add(buf, al), ae - al, "tur2026.3");
             if saw_module == 0 && seen == 0 && nat != 0 {
                 // **先读版次与拼法，再抹**：抹成空白之后别名就没了。
                 let is2: u32 = streq(ptr_add(buf, al), ae - al, "tur2")
                              + streq(ptr_add(buf, al), ae - al, "tur2026.2");
+                let is3: u32 = streq(ptr_add(buf, al), ae - al, "tur3")
+                             + streq(ptr_add(buf, al), ae - al, "tur2026.3");
                 let isl: u32 = streq(ptr_add(buf, al), ae - al, "loment");
                 let ist: u32 = streq(ptr_add(buf, al), ae - al, "tur");
                 let is1a: u32 = streq(ptr_add(buf, al), ae - al, "tur1");
                 let is1b: u32 = streq(ptr_add(buf, al), ae - al, "tur2026.1");
                 let is2a: u32 = streq(ptr_add(buf, al), ae - al, "tur2");
+                let is3a: u32 = streq(ptr_add(buf, al), ae - al, "tur3");
                 // **抹成等长空白**（保留换行 ⇒ 行号不漂，报错仍指得到那一行）
                 let z: u32 = i;
                 while z < e {
@@ -824,8 +830,10 @@ fn strip_grammar_decl(buf: ptr, n: u32, scr: ptr, file: ptr, fnam: u32, root: u3
                 }
                 seen = 1;
                 if root != 0 {
-                    if is2 != 0 {
-                        store32(scr, PROF_OFF, 1);
+                    if is3 != 0 {
+                        store32(scr, PROF_OFF, 2);      // tur3 / tur2026.3
+                    } else if is2 != 0 {
+                        store32(scr, PROF_OFF, 1);      // tur2 / tur2026.2
                     }
                     // 拼法代号：编译期提示要把它展开成规范名（docs/296 §1.1）。
                     if isl != 0 {
@@ -838,12 +846,16 @@ fn strip_grammar_decl(buf: ptr, n: u32, scr: ptr, file: ptr, fnam: u32, root: u3
                         store32(scr, DECLK_OFF, 4);
                     } else if is2a != 0 {
                         store32(scr, DECLK_OFF, 5);
+                    } else if is3a != 0 {
+                        store32(scr, DECLK_OFF, 7);
+                    } else if is3 != 0 {
+                        store32(scr, DECLK_OFF, 8);
                     } else {
                         store32(scr, DECLK_OFF, 6);
                     }
                 }
             } else {
-                let dm: str = "this source's `choose write grammar` is one the self-hosted compiler does not take -- it takes `choose write grammar loment` (or `tur`, `tur1`, `tur2`, `tur2026.1`, `tur2026.2`) only, written before `module` and once. Other spellings wait on the translator having a Loment twin. Run `loment skill --print` for the grammar rules, or compile this file with a toolchain that has the translator.";
+                let dm: str = "this source's `choose write grammar` is one the self-hosted compiler does not take -- it takes `choose write grammar loment` (or `tur`, `tur1`, `tur2`, `tur2026.1`, `tur2026.2`, `tur3`, `tur2026.3`) only, written before `module` and once. Other spellings wait on the translator having a Loment twin. Run `loment skill --print` for the grammar rules, or compile this file with a toolchain that has the translator.";
                 wdiag_file(diagfd(scr), scr, file, fnam, 23, str_ptr(dm), str_len(dm));
                 return fail(dm);
             }
@@ -1900,7 +1912,7 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
     strip_grammar_decl(slot, nb, scr, path, n, isroot);
     // **Tur 2 的纯糖**（`docs/296` §2.1）：先词法一遍判位置，就地等长改写，再正式词法。
     // 版次是**整程序**属性（根单元写的），依赖也按同一版读 —— `PROF_OFF` 全局一格。
-    if load32(scr, PROF_OFF) == 1 {
+    if load32(scr, PROF_OFF) != 0 {
         let _n0: u32 = lex(slot, nb, toks);
         let _ne: u32 = tur2_sugar(slot, toks, _n0);
     }
@@ -2261,8 +2273,12 @@ fn _start() -> u32 {
             wstr(2, "loment: grammar tur2026.1 -> tur2026.1 (Tur 1)\n");
         } else if pk == 5 {
             wstr(2, "loment: grammar tur2 -> tur2026.2 (Tur 2)\n");
-        } else {
+        } else if pk == 6 {
             wstr(2, "loment: grammar tur2026.2 -> tur2026.2 (Tur 2)\n");
+        } else if pk == 7 {
+            wstr(2, "loment: grammar tur3 -> tur2026.3 (Tur 2026.3)\n");
+        } else {
+            wstr(2, "loment: grammar tur2026.3 -> tur2026.3 (Tur 2026.3)\n");
         }
     }
     // 单元的词法缓冲: 按**实测密度**估 —— 仓库 184 个文件合计 4.81 字节/token, 最密的

@@ -2078,6 +2078,21 @@ fn vm_syscall(a: ptr, m: ptr, nr: u64, x1: u64, x2: u64, x3: u64) -> u64 {
     if nr == 201 {                                       // time(NULL)
         return syscall4(201, 0, 0, 0) as u64;
     }
+    if nr == 228 {                                       // clock_gettime(id, struct timespec *)
+        // `lgc` 的预算读它（`docs/306`）。与 `tools/lvm.py` 那一条同一个口径：钟的
+        // **绝对值**不是判决面（窗口只比先后与差），所以直接用宿主那一只。
+        // Linux x86-64 的 `timespec` 是两个 i64（秒、纳秒）—— 按 guest 的字节序写回。
+        let tb: ptr = ctx_get(a, C_TSBUF) as ptr;
+        let rr: i64 = syscall4(228, x1, tb as u64, 0);
+        if rr < 0 {
+            return rr as u64;                            // 与内核同侧：读不到就回负值
+        }
+        let sec: u64 = mr(tb, 0, 8);
+        let nsec: u64 = mr(tb, 8, 8);
+        mw(m, x2 as u32, 8, sec);
+        mw(m, x2 as u32 + 8, 8, nsec);
+        return 0;
+    }
     // ⚠ 317 在这里**不实现** —— 它在 Linux 上是 `seccomp` 不是 `getrandom`
     // （见 `tools/lvm.py` 同一处的注释，那是判据 A 纠出来的）。
     if nr == 257 {                                       // openat(dirfd, path, flags)
@@ -2698,6 +2713,10 @@ const C_NCOP: u32 = 152;                       // 操作数池已用
 const C_NCX: u32 = 156;                        // 附加池已用
 const C_EXEC: u32 = 160;                       // 1 = 正在执行（计数器只在这段里加）
 const C_STATS_FD: u32 = 164;                   // 解码计数写到哪个 fd（0 = 不写）
+//: `clock_gettime`（228）的 timespec 暂存（`docs/306`）：宿主写出 16 字节，解释器再
+//: 按 guest 的 `struct timespec`（两个 i64）搬进 guest 内存。**一块就够** —— VM 是单线程、
+//: 每次调用都当场读完，不跨调用保留。
+const C_TSBUF: u32 = 168;
 
 // ---------------------------------------------------------------- T2：编译表
 //
@@ -3885,5 +3904,11 @@ fn _start() -> u32 {
     if a as u64 == 0 {
         return fail("oom (brk 失败)");
     }
+    // `clock_gettime` 的 timespec 暂存（`docs/306`）：**16 字节，一次就够**。
+    let tsv: u64 = sys_alloc(16);
+    if tsv == 0 {
+        return fail("oom (brk 失败)");
+    }
+    ctx_set(a, C_TSBUF, tsv as u32);
     return die(run(a) as u64);
 }

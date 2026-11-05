@@ -12,12 +12,12 @@
 
 | # | 动作 | 落点 | 门禁怎么看见它 |
 |---|---|---|---|
-| 1 | **声明**（取值 / 默认 / 冲突，两份实现同一张表） | 参考：`tools/lomentc.py` 的 `CORE_DIMS` / `CORE_DEFAULTS` / `CORE_CONFLICTS`；自举：`switches.lomt` 的 `sw_is_core`、`checker.lomt` 的 `chk_core_dim` / `chk_core_val`、`potato.lomt` 的 `pt_<dim>` | `loment_rule_parity`（码集相等）+ `loment_p8_test`（IR 逐字节） |
+| 1 | **声明**（取值 / 默认 / 冲突，两份实现同一张表） | 参考：`tools/lomentc.py` 的 `CORE_DIMS` / `CORE_DEFAULTS` / `CORE_NEEDS` / `CORE_FORBIDS`（`core_conflicts()` 现算）；自举：`switches.lomt` 的 `sw_is_core`、`checker.lomt` 的 `chk_core_dim` / `chk_core_val`、`potato.lomt` 的 `pt_<dim>` | `loment_rule_parity`（码集相等）+ `loment_p8_test`（IR 逐字节） |
 | 2 | **一行联动表**（这一维对每个子系统的含义） | 本文 §2 那张表；新维度的 PR 在这里加一行 | 评审时对着表逐格问"这一格是什么" |
 | 3 | **每个取值一个探针**（它在别的取值下会不同） | `tools/loment_choose_matrix_test.py` 的 `MATRIX_DIMS` / 各行的 `test_...` | 矩阵判据（取值变了，探针必须变） |
-| 4 | **冲突表**（哪两档矛盾、**为什么**，用用户的话） | `CORE_CONFLICTS`；自举侧同一条 `if` | 矩阵的冲突判据（两个取值都点名 + 理由非空） |
+| 4 | **冲突表**（哪两档矛盾、**为什么**，用用户的话） | 每档自己的 `CORE_NEEDS` / `CORE_FORBIDS`（`core_conflicts()` 现算）＋ `CORE_OPENINGS`；自举侧同一条 `if` | 矩阵的冲突判据（两个取值都点名 + 理由非空） |
 | 5 | **产物记录**（不读源码可判） | Potato 的字段（v 号随字段走）；需要时 IR 标记（`; loment-<dim>: <v>`） | `loment_potato*_test` + 各行的 artifact 判据 |
-| 6 | **门禁覆盖整个矩阵**（不是抽样） | 合法格从 `CORE_DIMS` / `CORE_CONFLICTS` 现算：**七维全参与**的 IR 对拍 + 三个核心维的链接/运行 | `loment_choose_matrix_test::test_both_implementations_emit_the_same_ir_on_every_legal_cell`（240 格）+ `loment_elf_test::test_both_linkers_and_pe_agree_on_every_legal_choose_cell` |
+| 6 | **门禁覆盖整个矩阵**（不是抽样） | 合法格从 `CORE_DIMS` / `core_conflicts()` 现算：**七维全参与**的 IR 对拍 + 三个核心维的链接/运行 | `loment_choose_matrix_test::test_both_implementations_emit_the_same_ir_on_every_legal_cell`（240 格）+ `loment_elf_test::test_both_linkers_and_pe_agree_on_every_legal_choose_cell` |
 
 **"写得出、却什么也拿不到"是最坏的一格**（`docs/231` §1.3 对 `vm` 的判词）：
 如果一维在产物上没有任何可分辨的效果，它**要么补上联动，要么别进核心表**。

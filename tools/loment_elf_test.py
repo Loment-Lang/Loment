@@ -3738,8 +3738,9 @@ def test_both_linkers_and_pe_agree_on_every_legal_choose_cell():
 
     对每个合法格：同一份 IR，参考与自举镜像各链一次 —— ELF 产物**逐字节相同**并真跑
     （退出码 7）；PE 产物也逐字节相同（不出运行，PE 不在这台机器上跑）。
-    格子与冲突对都从 `lomentc.CORE_DIMS` / `CORE_CONFLICTS` 现算，不写死 —— 加一维
-    时这张表自己长。`mode` 的 `no_std` 行由上面那条负例钉"声明有牙"。
+    格子与冲突对都从 `lomentc.CORE_DIMS` / `lomentc.core_conflicts()` 现算，不写死 ——
+    加一维时这张表自己长（#1019 之后冲突表是**算出来的**，narrowing 与 contradiction
+    都不算合法格）。`mode` 的 `no_std` 行由上面那条负例钉"声明有牙"。
     """
     clang = _clang()
     if not (clang and _wsl()):
@@ -3748,7 +3749,7 @@ def test_both_linkers_and_pe_agree_on_every_legal_choose_cell():
     import itertools  # noqa: PLC0415
     import lomentc as _c  # noqa: PLC0415
     dims = ("mode", "gc", "runtime")
-    conflicts = [set(p) for p in _c.CORE_CONFLICTS]
+    conflicts = [set(p) for p in _c.core_conflicts()]
     cells = []
     for combo in itertools.product(*(_c.CORE_DIMS[d] for d in dims)):
         if any(pair <= set(combo) for pair in conflicts):

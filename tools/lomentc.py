@@ -1743,7 +1743,7 @@ CORE_DIMS: dict[str, tuple[str, ...]] = {
     #
     # **它不引入运行期组件**（`docs/253` §11.2）：七级的落地都是**指令**
     # （一条 `cmp` / 一个 `llvm.trap` / 一段内联桩），没有表、没有位图 ——
-    # 所以它与 `no_runtime` **不冲突**，`CORE_CONFLICTS` 里因此没有它。
+    # 所以它与 `no_runtime` **不冲突**，`CORE_FORBIDS` 里因此没有它。
     # 取值**刻意不带机制名**：今天是边界检查，明天可能是派生指针追踪 ——
     # 与 `runtime` / `vm` 同一条纪律，装的东西不进值名。
     "lms": ("lms_full", "lms_forensic_admin", "lms_daily_admin",
@@ -1919,9 +1919,40 @@ def _lms_level(mod, name: str) -> bool:
         return writes[name]
     tier = getattr(mod, "chooses", {}).get("lms", CORE_DEFAULTS["lms"])
     return LMS_TIERS.get(tier, LMS_TIERS["lms_full"])[LMS_TOGGLES.index(name)]
-#: **互相冲突的取值对**（`docs/175` §3.4 ⚠）。键是取值，值 = (和它冲突的取值, 为什么)。
-#: 报错要**点名这两档为什么冲突**，不能泛泛说"非法组合"（判据见 `docs/175` §3.4）。
-CORE_CONFLICTS = {
+#: **每个取值"需要什么"**（`docs/175` §3.4 / #1019）。冲突**从这里算**，不再手写配对：
+#: 一个单元生效的取值并起来的 `needs` 与 `forbids` 一相交，冲突就出来了。
+#: 特征名是全表共用的一小组词汇（`runtime` / `collector` / `adaptive` / `host_libs`）——
+#: 加一个值只写它自己的那张小集合，**不加配对行**。
+CORE_NEEDS: dict[str, frozenset[str]] = {
+    "gc_auto": frozenset({"runtime", "collector"}),
+    "gc_auto_alpha": frozenset({"runtime", "collector", "adaptive"}),
+    "hosted": frozenset({"host_libs"}),
+}
+
+#: **每个取值"禁止什么"**。与 `CORE_NEEDS` 同一种词汇。
+#: `no_std` 禁 `runtime` 是**划窄**（核那一层还能有收集器，只是今天没建）；
+#: `no_runtime` 禁 `runtime` 是**定义**（它说的就是"产物里没有运行期"）——
+#: 两者形状一样，判决由 `CORE_OPENINGS` 分开。
+CORE_FORBIDS: dict[str, frozenset[str]] = {
+    "no_std": frozenset({"host_libs", "runtime"}),
+    "no_runtime": frozenset({"runtime"}),
+    "gc_auto_alpha": frozenset({"host_libs"}),
+}
+
+#: **一条 narrowing 的开出条件**。键 = `(禁止方取值, 打架的特征)`。
+#: 不在这里的冲突一律是 **contradiction**（不可满足）。这一格让 narrowing 不会
+#: 悄悄变成永久结论 —— 每条都写着"什么变了它就能开"，而不是"暂时不行"。
+CORE_OPENINGS: dict[tuple[str, str], str] = {
+    ("no_std", "runtime"): "一个不依赖 OS 服务的收集器（`docs/175` §4 的受约束子集）",
+    ("gc_auto_alpha", "host_libs"): "一个不回卷分配器前沿的 L2（`docs/228` §7）",
+}
+
+#: 冲突诊断的**正文**（`docs/175` §3.4 ⚠）。键是**已经算出来**的取值对；
+#: 报错要**点名这两档为什么冲突**，不能泛泛说"非法组合"。
+#: ⚠ 正文是**逐字节**比对的（`loment_choose_matrix_test`），改一个字都是改用户看到的诊断。
+#: 没有正文的冲突（新加的值）会走下面那条通用模板 —— 所以加值本身不需要动这张表，
+#: 想给它一句更好的话时再来这里补。
+CORE_CONFLICT_TEXT: dict[tuple[str, str], str] = {
     ("no_std", "gc_auto"): (
         "自动回收要一个**运行期**，而 `no_std` 的定义是"
         "「只能用核那一层」—— 两者放在一起等于要求**核里带一个收集器**，"
@@ -1960,6 +1991,52 @@ CORE_CONFLICTS = {
         "这是一条**划窄（narrowing）**，不是「非法组合」：开出它的条件是"
         "**一个不回卷前沿的 L2**（`docs/228` §7 的判决表）"),
 }
+
+
+def core_conflicts() -> dict[tuple[str, str], tuple[str, str]]:
+    """**算出来的**冲突表：取值对 → `(verdict, why)`（#1019）。
+
+    `verdict` 是 `"contradiction"`（不可满足）或 `"narrowing"`（合法但还没建，
+    开出的条件在 `CORE_OPENINGS`）。判定只有一条规则：**一边的 `needs` 与另一边的
+    `forbids` 相交即冲突**；相交的特征若有开出条件，就是 narrowing，否则是 contradiction。
+
+    顺序由 `CORE_DIM_ORDER` 决定（报错文本要逐字节比，不能靠集合迭代顺序）——
+    `_pair` 里的两个取值因此**恒按维序**排。
+    """
+    out: dict[tuple[str, str], tuple[str, str]] = {}
+    vals = [w for d in CORE_DIM_ORDER for w in CORE_DIMS[d]]
+    for i, a in enumerate(vals):
+        for b in vals[i + 1:]:
+            if CORE_DIM_OF[a] == CORE_DIM_OF[b]:
+                continue
+            clash: tuple[str, str] | None = None
+            for x, y in ((a, b), (b, a)):
+                both = CORE_NEEDS.get(x, frozenset()) & CORE_FORBIDS.get(y, frozenset())
+                if both:
+                    # 一个取值对今天最多打在一个特征上；`min` 只让顺序确定。
+                    clash = (min(both), y)
+                    break
+            if clash is None:
+                continue
+            feat, forb = clash
+            verdict = ("narrowing" if (forb, feat) in CORE_OPENINGS
+                       else "contradiction")
+            why = CORE_CONFLICT_TEXT.get((a, b))
+            if why is None:
+                # 新值只写 needs/forbids 就能得到一句说得清的话 —— 不加配对行。
+                needer = b if forb == a else a
+                why = (f"`{needer}` 需要 `{feat}`，而 `{forb}` 禁止它 —— "
+                       + ("这一档先划窄" if verdict == "narrowing"
+                          else "两者定义上矛盾"))
+            out[(a, b)] = (verdict, why)
+    return out
+
+
+#: 正文表不许**多出**算不出来的配对 —— 删掉一条 `forbids` 而忘了清正文，这里当场红。
+_STALE_CONFLICT_TEXT = set(CORE_CONFLICT_TEXT) - set(core_conflicts())
+assert not _STALE_CONFLICT_TEXT, (
+    "CORE_CONFLICT_TEXT 里有算不出来的配对（`needs`/`forbids` 变了？）: "
+    f"{sorted(_STALE_CONFLICT_TEXT)}")
 
 
 class SwitchTable:
@@ -4898,11 +4975,15 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     # **两两查**（不是写死 `(mode, gc)` 那一对）：加一维时这一段一行都不用动。
     # 先后由 `CORE_DIM_ORDER` 定 —— 报错文本要比字节，不能靠 dict/set 的迭代顺序。
     _vals = [_eff[d] for d in CORE_DIM_ORDER]
+    # 表是**算出来的**（#1019）：`CORE_NEEDS` / `CORE_FORBIDS` 相交即冲突，
+    # `CORE_OPENINGS` 把 narrowing 与 contradiction 分开。诊断正文一字不改。
+    _conf = core_conflicts()
     for _i in range(len(_vals)):
         for _j in range(_i + 1, len(_vals)):
             _pair = (_vals[_i], _vals[_j])
-            _why = CORE_CONFLICTS.get(_pair)
-            if _why:
+            _entry = _conf.get(_pair)
+            if _entry:
+                _verdict, _why = _entry
                 _ln = next((l for _d, _w, l in reversed(mod.choose_lines)
                             if _w in _pair), 1)
                 errs.append(f"{_ln}: `{_pair[0]}` 与 `{_pair[1]}` 不能同时选 —— {_why}")
@@ -6353,6 +6434,22 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
                            "（`Box<[u8; 4]>` / `Box<[u32]>` / `Box<*mut u8>`）**没有名字规则**，"
                            "而且这个后端先把它们挡住了（结构体的字段类型目前只支持标量）"
                            "—— 所以现在没有东西需要那个名字。见 `docs/147` §2「命名层」")
+    # **系统索引的原料**（v20，#1022）：索引里的 `state` / `cost` 必须与这三个字段
+    # **字面相同**，所以先算一次、两处引用 —— 索引不复制字节，只指过去。
+    # 表的唯一真源是校验器那个模块（它不许反过来 import 编译器，所以方向只有这一边）。
+    import potato as _potato
+    _gc_ladder = _count_gc_ladder(raw_mod)
+    _lms_levels = {_n: _lms_level(mod, _n) for _n in LMS_TOGGLES}
+    _lspe_ledger = lspe.build_ledger(
+        sites=getattr(mod, "lspe_sites", []),
+        state=mod.chooses.get("lspe", CORE_DEFAULTS["lspe"]),
+        set_by=("source" if "lspe" in mod.chooses else "default"),
+        level=int(getattr(mod, "lspe_level", 3)),
+        toks=getattr(mod, "toks", []),
+        unit=mod.name,
+        deps=[getattr(d, "toks", []) for d in (deps or [])],
+        passes=getattr(mod, "lspe_passes", []),
+    )
     doc = {
         # v3 = v2 + **开关取值** (docs/182 §1)。**升版本而不是往 v2 加字段**, 与 v1->v2
         # 那条同一个理由: 新字段是必填的 (删掉它校验器必须红), 而往旧版加必填字段会让
@@ -6398,7 +6495,10 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # v19 = v18 + `gc_ladder` 的第五格 `l0_5`（`docs/210` §2.10）：函数级栈区接走的
         # 站点。加一格会让 v10–v18 的四数和失效，所以**必须升版**而不是改旧格
         # （`docs/147` 的台阶只往上加）。
-        "potato": "v19",
+        # v20 = v19 + **系统索引** `systems`（`docs/147` §5.4 / #1022）：六个系统各一条
+        # `{state, detail, cost}`，`detail` **指向**已有的明细字段、不复制数字。
+        # 于是"这份产物有哪些系统、各自的状态与成本"是**一次查表**读完的。
+        "potato": "v20",
         "unit": mod.name,
         "language": "loment",
         # **表层语法**（`docs/188` §2）—— 与 `language` 分工不同, 别混:
@@ -6435,23 +6535,31 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # **实际开着哪几级**（v17）。档名说"想要哪一档"，显式开关可以覆盖它 ——
         # 于是两者**可以不一致**，而这一格记的是**最后**的结果。
         # 这也是 `docs/253` §9 判据 9/11 唯一能"不读源码可判"的落点。
-        "lms_levels": {_n: _lms_level(mod, _n) for _n in LMS_TOGGLES},
+        "lms_levels": _lms_levels,
         # **七级的运行期预算**（v18，#1023）。键序与 `LMS_TOGGLES` 同一张；值是上面
         # 那张表的四个取值之一。产物里带着它，读者不必知道"今天的实现碰巧没有表"。
         "lms_budgets": {_n: LMS_LEVEL_BUDGETS[_n] for _n in LMS_TOGGLES},
         # **安全审计**（`docs/262`，用户 2026-10-18 定第七维）：台账是 LSPE 的第四件。
         # 计数、`per_kind`、不变量与 `lspe_close_admin` 的归零都在 `lspe/ledger.py`；
         # 编译器只把这个映射写进产物。
-        "lspe": lspe.build_ledger(
-            sites=getattr(mod, "lspe_sites", []),
-            state=mod.chooses.get("lspe", CORE_DEFAULTS["lspe"]),
-            set_by=("source" if "lspe" in mod.chooses else "default"),
-            level=int(getattr(mod, "lspe_level", 3)),
-            toks=getattr(mod, "toks", []),
-            unit=mod.name,
-            deps=[getattr(d, "toks", []) for d in (deps or [])],
-            passes=getattr(mod, "lspe_passes", []),
-        ),
+        "lspe": _lspe_ledger,
+        # **系统索引**（v20，`docs/147` §5.4 / #1022）。六个系统各一条，次序写死；
+        # `state` 与顶层字段（`lspe` 取台账自己的 `state`）、`detail` 与明细字段名、
+        # `cost` 与明细的总数**逐条相同** —— 校验器不读源码也判得了它们打架。
+        # 没有明细字段的三个（`runtime` / `port` / `vm`）detail/cost 是 `null`。
+        "systems": {
+            _sk: {
+                "state": (_lspe_ledger["state"] if _sk == "lspe"
+                          else mod.chooses.get(_sk, CORE_DEFAULTS[_sk])),
+                "detail": _potato.SYSTEM_DETAIL.get(_sk),
+                "cost": (None if _sk not in _potato.SYSTEM_DETAIL else {
+                    _potato.SYSTEM_COST_KEY[_sk]: (
+                        _gc_ladder["total_sites"] if _sk == "gc"
+                        else sum(1 for _v in _lms_levels.values() if _v)
+                        if _sk == "lms" else _lspe_ledger["sites"])}),
+            }
+            for _sk in _potato.SYSTEM_KEYS
+        },
         # 开关取值 (用户 2026-09-17: **"开关的取值是要进 Potato 的"**, docs/182 §1)。
         # **永远是显式的数组**（可为空）—— 与 `mode` 同一条纪律: 不存在"缺这项"的形态,
         # 所以"这台机器上这个开关开没开"是**可回放**的, 不是"看当时的源码猜"。
@@ -6505,7 +6613,7 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         "boundary": _count_boundary(mod),
         # **GC 的组成**（`docs/210` §3/§5, v10）—— 在 `raw_mod`（单态化之前）上数，理由
         # 见 `_count_gc_ladder`：自举侧看到的是**源 token**，只有单态化前那份视图与它对齐。
-        "gc_ladder": _count_gc_ladder(raw_mod),
+        "gc_ladder": _gc_ladder,
         # **面的组成**（`docs/222`, v11）—— 与 `boundary` **同一个视图**（`mod`），
         # 因为那条交叉不变量（`total_sites == boundary.syscalls`）要求两处数的是同一批站点。
         "surfaces": _count_surfaces(mod),
@@ -7240,7 +7348,7 @@ def _arena_indirect(ir: str, nbytes: int) -> str:
 #:
 #: 触发那一段**一个字节都不用换**：`_IR_GC_TRIGGER_FIXED` 按**字节数**触发（32768），
 #: 不看 arena 大小 —— 所以两个端口共用它。`gc_auto_alpha` 不需要第二份 hosted：
-#: `hosted` 与它本来就是**定义上冲突**的（`CORE_CONFLICTS`）。
+#: `hosted` 与它本来就是**定义上冲突**的（`core_conflicts()`）。
 _IR_GC_SHARED_HOSTED = _arena_indirect(_IR_GC_SHARED, HOSTED_ARENA_BYTES)
 _IR_GC_HOSTED = _IR_GC_SHARED_HOSTED + _IR_GC_TRIGGER_FIXED
 
@@ -10235,7 +10343,7 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # 就是 arena/8**，所以换 arena 必须**同时**换表 —— 那就是 `_IR_GC_HOSTED`。此前
     # 这一档留在静态 64 KiB 并靠 `; loment-heap: static 65536` 说出来；现在它也吃平台
     # 那一块，那条"不静默"的记号因此**没有再出现的场合**（判据从"它说了"改成"它涨了"）。
-    # `gc_auto_alpha` 不用管 —— `hosted` 与它**定义上冲突**（`CORE_CONFLICTS`），走不到这儿。
+    # `gc_auto_alpha` 不用管 —— `hosted` 与它**定义上冲突**（`core_conflicts()`），走不到这儿。
     _hosted_grown = _hosted_port
     # **`extern fn` 那一档的 arena**（`docs/219` §8b 的 **S2**，2026-10-15）：根开了运行期、
     # 这份单元声明了 `extern fn`（于是堆按需带上，见 `_heap_needed`）、而且**不是** `hosted`
@@ -10246,7 +10354,7 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # **`gc_auto_alpha` 除外，而且是明写的边界**：那一档的收集器
     # （`_IR_GC_TRIGGER_ADAPT`）是**直接寻址** arena 的（`getelementptr [65536 x i8], ptr
     # @__loment_heap, …`），换 arena 就得连它一起换、也就是**再抄一份那段文本**；而 `hosted`
-    # 与 alpha **定义上冲突**（`CORE_CONFLICTS`），仓库里根本没有"间接寻址的 alpha"这份先例。
+    # 与 alpha **定义上冲突**（`core_conflicts()`），仓库里根本没有"间接寻址的 alpha"这份先例。
     # 所以这一档**留在直接寻址的 64 KiB** —— 与改之前**逐字节相同**，并且**说出来**
     # （`; loment-heap: static 65536`，"不静默"）。留这一格不是因为难：见 `_IR_ARENA_STATIC`
     # 的说明，这是"再抄一份"要不要付的问题，`docs/158` §5 那条孪生纪律要挡的正是它。

@@ -89,3 +89,20 @@ def build(*, sites: list[dict], state: str, set_by: str, level: int,
         },
         "acked": 0,
     }
+
+
+def lspc_lines(ledger: dict) -> list[str]:
+    """LSPC 的**贴条**（`docs/262` §5.10 / §5.16 / `#786`）。
+
+    第一条是**族级**的 —— 即使这一份单元一个旁路块都没有也照写：LSPC 从不沉默，
+    "0 个未审计块"本身就是一条可核的声明。之后每个块一条 **Q013**。
+    """
+    n = ledger.get("pass_sites", 0)
+    passed = ledger.get("passed_sites", 0)
+    total = ledger.get("sites", 0)
+    out = [f"[LSPC] Q013 unchecked-block family: {n} block(s), "
+           f"{passed}/{total} site(s) bypassed"]
+    for p in ledger.get("passes", []):
+        out.append(f"[LSPC] Q013 {p['id']} line {p['line']}-{p['end_line']}: "
+                   f"{p['sites']} site(s) — {p['reason']}")
+    return out

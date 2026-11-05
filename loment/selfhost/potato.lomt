@@ -2333,7 +2333,10 @@ fn pt_lspe_state(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
     return pt_qs(out, o, "lspe_open_admin");
 }
 
-fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+/// `sp` 是**回填地址**：把台账的 `sites` 数写在那里，供紧随其后的 `systems`
+/// 索引引用（索引写 `cost` 时不重算一遍普查 —— 两处数的必须是同一个数）。
+fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
+           sp: ptr) -> u32 {
     let closed: u32 = 0;
     if lspe_val(unit, t, lo, hi) == 2 {
         closed = 1;
@@ -2379,6 +2382,7 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32) -> u3
         bcov = load32(sc, PT_L3CNT + 60);
     }
     let nsite: u32 = gt + it + ft + alt + nt + et + ct + bt;
+    store32(sp, 0, nsite);
     // pass 块里的站点不证明：guard / index / bounds 的 proved 要扣掉覆盖数。
     let nproved: u32 = (gt - gcov) + (ip - icov) + fp + alp + np + ep + cp + (bt - bcov);
     let nund: u32 = nsite - nproved;
@@ -2621,6 +2625,124 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32) -> u3
     o = pt_key(out, o, 2, "acked");
     o = pt_dec(out, o, 0 as u64);
     o = pt_str(out, o, "\n");
+    o = pt_ind(out, o, 1);
+    o = pt_str(out, o, "}");
+    return o;
+}
+
+/// v20（`docs/147` §5 / `#1022`）：**系统索引**。六个系统各一条
+/// `{state, detail, cost}`，次序与参考实现同一张 `SYSTEM_KEYS`（gc / runtime /
+/// port / vm / lms / lspe）。
+///
+/// `detail` **只写字段名** —— 索引不许成为第二份数字；`cost` 从明细现算：
+/// `gc` 是 `gc_ladder.total_sites`、`lms` 是 `lms_levels` 里为真的级数、
+/// `lspe` 是台账的 `sites`（`pt_lspe` 回填在 `PT_GLSCR`）。没有明细的那三个
+/// （`runtime` / `port` / `vm`）`detail` 与 `cost` 都写 `null`。
+fn pt_systems(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
+              gl_tot: u32) -> u32 {
+    o = pt_str(out, o, "{\n");
+    // ---- gc
+    o = pt_key(out, o, 2, "gc");
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 3, "state");
+    o = pt_gc(out, o, unit, t, lo, hi);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "detail");
+    o = pt_qs(out, o, "gc_ladder");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "cost");
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 4, "sites");
+    o = pt_dec(out, o, gl_tot as u64);
+    o = pt_str(out, o, "\n");
+    o = pt_ind(out, o, 3);
+    o = pt_str(out, o, "}\n");
+    o = pt_ind(out, o, 2);
+    o = pt_str(out, o, "},\n");
+    // ---- runtime
+    o = pt_key(out, o, 2, "runtime");
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 3, "state");
+    o = pt_runtime(out, o, unit, t, lo, hi);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "detail");
+    o = pt_str(out, o, "null");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "cost");
+    o = pt_str(out, o, "null\n");
+    o = pt_ind(out, o, 2);
+    o = pt_str(out, o, "},\n");
+    // ---- port
+    o = pt_key(out, o, 2, "port");
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 3, "state");
+    o = pt_port(out, o, unit, t, lo, hi);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "detail");
+    o = pt_str(out, o, "null");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "cost");
+    o = pt_str(out, o, "null\n");
+    o = pt_ind(out, o, 2);
+    o = pt_str(out, o, "},\n");
+    // ---- vm
+    o = pt_key(out, o, 2, "vm");
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 3, "state");
+    o = pt_vm(out, o, unit, t, lo, hi);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "detail");
+    o = pt_str(out, o, "null");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "cost");
+    o = pt_str(out, o, "null\n");
+    o = pt_ind(out, o, 2);
+    o = pt_str(out, o, "},\n");
+    // ---- lms：cost 是**开着的级数**（`lms_levels` 里为真的那七格）
+    let m: u32 = pt_lms_mask(unit, t, lo, hi);
+    let cnt: u32 = 0;
+    let b: u32 = 0;
+    while b < 7 {
+        if (m & (1 << b)) != 0 {
+            cnt = cnt + 1;
+        }
+        b = b + 1;
+    }
+    o = pt_key(out, o, 2, "lms");
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 3, "state");
+    o = pt_lms(out, o, unit, t, lo, hi);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "detail");
+    o = pt_qs(out, o, "lms_levels");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "cost");
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 4, "levels");
+    o = pt_dec(out, o, cnt as u64);
+    o = pt_str(out, o, "\n");
+    o = pt_ind(out, o, 3);
+    o = pt_str(out, o, "}\n");
+    o = pt_ind(out, o, 2);
+    o = pt_str(out, o, "},\n");
+    // ---- lspe：state 取台账自己的 state（顶层 `lspe` 是个对象）
+    o = pt_key(out, o, 2, "lspe");
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 3, "state");
+    o = pt_lspe_state(out, o, unit, t, lo, hi);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "detail");
+    o = pt_qs(out, o, "lspe");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "cost");
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 4, "sites");
+    o = pt_dec(out, o, load32(sc, PT_GLSCR) as u64);
+    o = pt_str(out, o, "\n");
+    o = pt_ind(out, o, 3);
+    o = pt_str(out, o, "}\n");
+    o = pt_ind(out, o, 2);
+    o = pt_str(out, o, "}\n");
     o = pt_ind(out, o, 1);
     o = pt_str(out, o, "}");
     return o;
@@ -5715,7 +5837,8 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     // v17 = v16 + **实际开着哪几级** `lms_levels`（同一次改判）。
     // 它在**最后** —— 与前面几维同形，且"这份产物在哪一档上"是**不读源码可判**的。
     o = pt_key(out, o, 1, "potato");
-    o = pt_qs(out, o, "v19");
+    // v20 = v19 + **系统索引** `systems`（`docs/147` §5 / `#1022`）。
+    o = pt_qs(out, o, "v20");
     o = pt_str(out, o, ",\n");
     // `unit` 是**根**那份源的 `module` 名 —— 依赖在前, 所以它是根那个标记后面的名字
     // (不是第 1 个 token: 那是第一个依赖的名字)。
@@ -5774,7 +5897,14 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     // v16（`docs/262`）：LSPE 台账。**必填**，紧跟在 `lms` 之后 ——
     // ⚠ **次序是判据**：参考实现那边 `"lspe"` 紧跟在 `"lms"` 之后，两串字节逐字节比。
     o = pt_key(out, o, 1, "lspe");
-    o = pt_lspe(out, o, sc, unit, t, lo, hi);
+    // `PT_GLSCR` 是回填地址：`systems.lspe.cost` 要引台账的 `sites`，
+    // 而它在 `pt_lspe` 里边才算得出 —— 那块内存在 gc 梯子算完之后就空着了。
+    o = pt_lspe(out, o, sc, unit, t, lo, hi, ptr_add(sc, PT_GLSCR));
+    o = pt_str(out, o, ",\n");
+    // v20（`docs/147` §5 / `#1022`）：**系统索引**，紧跟在 `lspe` 之后 ——
+    // ⚠ **次序是判据**：参考实现那边 `"systems"` 紧跟在 `"lspe"` 之后。
+    o = pt_key(out, o, 1, "systems");
+    o = pt_systems(out, o, sc, unit, t, lo, hi, ngl_tot);
     o = pt_str(out, o, ",\n");
     o = pt_key(out, o, 1, "switches");
     o = pt_aopen(out, o, ndf);

@@ -2212,6 +2212,39 @@ def test_m77_lspe_state_and_stubs():
         assert "0.1.5.2" in s.stderr, s.stderr
 
 
+@test
+def test_m77b_lspe_state_lists_q013_for_unchecked_blocks():
+    """`loment lspe state` 每次都列 **Q013** 那一族（`docs/262` §5.10 / §5.16 / #786）。
+
+    有旁路块时一条族级 + 每块一条；**没有块时也有族级那一条**（"0 block"）——
+    LSPC 不沉默，沉默不是合法的"没风险"。
+    """
+    import tempfile
+    src = ("module q013\n\nfn f(a: [u32; 4]) -> u32 {\n"
+           "    lspe pass \"caller checked\" {\n"
+           "        let p: u32 = a[1];\n"
+           "    }\n"
+           "    return a[0] + p;\n}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "q013.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        r = subprocess.run([sys.executable, str(ROOT / "tools" / "loment.py"),
+                            "lspe", "state", str(p)],
+                           capture_output=True, text=True, encoding="utf-8", shell=False)
+        assert r.returncode == 0, r.stderr[-400:]
+        doc = json.loads(r.stdout)
+        assert doc["pass_sites"] == 1 and doc["passed_sites"] == 1, doc
+        assert "[LSPC] Q013" in r.stderr, r.stderr
+        assert "1 block" in r.stderr, r.stderr
+        assert "caller checked" in r.stderr, r.stderr
+    # 没有块的单元：仍有一条**族级** Q013（0 是一个可核的声明）。
+    r0 = subprocess.run([sys.executable, str(ROOT / "tools" / "loment.py"),
+                         "lspe", "state", str(EX / "demo.lomt")],
+                        capture_output=True, text=True, encoding="utf-8", shell=False)
+    assert r0.returncode == 0, r0.stderr[-300:]
+    assert "[LSPC] Q013" in r0.stderr and "0 block" in r0.stderr, r0.stderr
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_tools_test")
 

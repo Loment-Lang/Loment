@@ -7,11 +7,12 @@ Potato v16。义务、证据、接收关系与求解器都定义在这个包里�
 from __future__ import annotations
 
 from .census import census, census_e4
-from .ledger import build as build_ledger
+from .ledger import build as build_ledger, lspc_lines
 from .registry import (
     LSPE_EVIDENCE_KINDS,
     LSPE_EVIDENCE_LEVEL,
     LSPE_OBLIGATIONS,
+    LSPE_QUESTIONS,
     LSPE_SITE_KINDS,
 )
 from .solver import LspeSolver
@@ -20,9 +21,11 @@ __all__ = [
     "LSPE_EVIDENCE_KINDS",
     "LSPE_EVIDENCE_LEVEL",
     "LSPE_OBLIGATIONS",
+    "LSPE_QUESTIONS",
     "LSPE_SITE_KINDS",
     "LspeSolver",
     "build_ledger",
     "census",
     "census_e4",
+    "lspc_lines",
 ]

@@ -1704,6 +1704,41 @@ def test_e029_use_after_free():
 
 
 @test
+def test_pass_block_never_skips_a_hard_check():
+    """`lspe pass` 只跳**审计**，不跳**检查**（`#786` 语义表 / 验收第 3 条）。
+
+    E028（字面量越界）与 E029（用完再放）在块里照发 —— 否则旁路就成了语法级的
+    "关掉检查器"，而那正是这条设计明确不做的事。两条都用**块外**的对照样本一起钉：
+    不是"见过 pass 就报"，是检查器根本没被绕开。
+    """
+    e028 = ("module m\nchoose runtime\nfn f() -> u32 {\n"
+            "    let a: [u32; 4] = [1, 2, 3, 4];\n"
+            "    lspe pass \"caller checked\" {\n"
+            "        let x: u32 = a[10];\n"
+            "    }\n"
+            "    return x;\n}\n")
+    got = errs(e028)
+    assert any(loment_diag.classify(x)[0] == "E028" for x in got), got
+    # 对照：同样的形状、下标在界内 ⇒ 不报（证明上面那条不是"见到 pass 就红"）。
+    ok028 = e028.replace("a[10]", "a[3]")
+    assert errs(ok028) == [], errs(ok028)
+
+    e029 = ("module m\nchoose runtime\nfn f() -> u32 {\n"
+            "    let p: ptr = alloc(8);\n"
+            "    lspe pass \"caller checked\" {\n"
+            "        free(p);\n"
+            "        let x: u32 = load8(p, 0);\n"
+            "    }\n"
+            "    return x;\n}\n")
+    got2 = errs(e029)
+    assert any(loment_diag.classify(x)[0] == "E029" for x in got2), got2
+    # 对照：先读后 free ⇒ 块里也不报。
+    ok029 = e029.replace("        free(p);\n        let x: u32 = load8(p, 0);\n",
+                         "        let x: u32 = load8(p, 0);\n        free(p);\n")
+    assert errs(ok029) == [], errs(ok029)
+
+
+@test
 def test_m41_excluded_space_enforced():
     src = ('module m\nexcluded "network: 不申请网络"\n'
            'capability net : network[0..1]\nfn f() -> u32 { return 0; }\n')
@@ -2688,7 +2723,7 @@ def test_l0_5_region_rule():
     """
     doc = json.loads(lomentc.emit_potato(parse(L05_SRC), ROOT))
     gl = doc["gc_ladder"]
-    assert doc["potato"] == "v19", doc["potato"]
+    assert doc["potato"] == "v20", doc["potato"]
     assert gl == {"l0": 1, "l0_5": 2, "l1": 0, "l2": 0, "l3": 0,
                   "total_sites": 3}, gl
     ir = lomentc.emit_llvm(parse(L05_SRC), ROOT)
@@ -4702,7 +4737,7 @@ def test_mixed_width_arithmetic_has_a_common_type():
 def test_lspe_dimension_defaults_open():
     """第七维：不写 `choose` 就是 `lspe_open_admin`，台账随产物一起发出（v16）。"""
     doc = json.loads(lomentc.emit_potato(lomentc.load(DEMO), ROOT))
-    assert doc["potato"] == "v19"
+    assert doc["potato"] == "v20"
     lp = doc["lspe"]
     assert lp["state"] == "lspe_open_admin"
     assert lp["set_by"] == "default"
@@ -4766,7 +4801,7 @@ def test_lspe_close_admin_is_recorded():
         p = Path(td) / "close.lomt"
         p.write_text(src, encoding="utf-8", newline=chr(10))
         doc = json.loads(lomentc.emit_potato(lomentc.load(p), ROOT))
-    assert doc["potato"] == "v19"
+    assert doc["potato"] == "v20"
     assert doc["lspe"]["state"] == "lspe_close_admin"
     assert doc["lspe"]["set_by"] == "source"
     # 关审计：普查不算，计数全零。

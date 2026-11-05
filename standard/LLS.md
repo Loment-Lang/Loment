@@ -49,7 +49,7 @@ These are the single sources of truth. Read the file, not a quotation of it.
 | Capability-domain semantics: what `guard` guarantees, and what it does not | `docs/146-loment-capability-semantics.md` | Chinese |
 | Form objects (Potato): the summary a unit exports | `docs/147-potato-v1-spec.md` | Chinese |
 | The frozen surface, and the procedure for changing it | `docs/158-loment-freeze.md` | Chinese |
-| The switch set and the contradictory pairs | `tools/lomentc.py` — `CORE_DIMS`, `CORE_DEFAULTS`, `CORE_CONFLICTS` | code |
+| The switch set and the contradictory pairs | `tools/lomentc.py` — `CORE_DIMS`, `CORE_DEFAULTS`, `CORE_NEEDS` / `CORE_FORBIDS` (`core_conflicts()`) | code |
 | The diagnostic set: codes and their fixes | `tools/loment_diag.py` — `RULES` | code |
 | The built-in function table | `tools/lomentc.py` — `BUILTINS`, together with `slice_len` | code |
 | The version of the language | `tools/loment_release.py` — `RELEASE` | code |
@@ -165,8 +165,9 @@ Note what is **not** contradictory: `gc_manual` with `no_runtime`. "Reclaim memo
 runtime present" is a position the language must be able to express — a host service or a thread
 may be there while the collector is not.
 
-The authoritative table is `tools/lomentc.py:CORE_CONFLICTS`, and each entry carries its reason in
-the source. The table may **grow** under §6.2; an implementation may not relax it.
+The authoritative verdict is `tools/lomentc.py:core_conflicts()`, computed from each value's
+`CORE_NEEDS` / `CORE_FORBIDS`; every contradictory pair carries its reason in the source. The
+table may **grow** under §6.2; an implementation may not relax it.
 
 ### 4.4 The channel
 

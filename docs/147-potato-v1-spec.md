@@ -138,7 +138,7 @@ Wrap<Outer<Inner<u32>>>  -> Wrap_Outer__Inner___u32
   | `v17` | `lms_levels` | `docs/253` §11.4 |
   | `v18` | `lms_budgets` | `docs/253` §11.2.1 |
   | `v19` | `gc_ladder.l0_5` | `docs/210` §2.10 |
-  | `v20` | **`systems`**（六个系统的索引；读者从这里开始读） | `docs/302` |
+  | `v20` | **`systems`**（六个系统的索引；读者从这里开始读） | `docs/304` |
 
   台阶是**累积**的：`v20` 要求它下面每一版的字段都在。
 

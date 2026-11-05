@@ -1267,6 +1267,26 @@ class Fallback:
 
 
 @dataclass
+class Defer:
+    """Tur 2 的 `defer f(a, b);`（`docs/296` §2.3）：属于**所在块**，块退出时 LIFO 执行。
+
+    v1 只收**函数调用**。参数在**声明处**求值（捕获），调用在块出口重放 —— 所以
+    `defer free(p);` 之后 `p` 被重新赋值，退出时释放的仍是当时那一块。
+    """
+
+    call: object
+    line: int
+
+
+@dataclass
+class Raw:
+    """**已经求值好**的值（`defer` 重放时用）：表达式位置只回 `(类型, 文本)`，不发指令。"""
+
+    ty: str
+    val: str
+
+
+@dataclass
 class Break:
     line: int
 
@@ -2901,6 +2921,16 @@ class Parser:
             e = self.parse_expr()
             self.expect("punct", ";")
             return Return(e, t.line)
+        if t.val == "defer" and self.profile == "tur2026.2":
+            # `defer f(a, b);`（`docs/296` §2.3）。v1 只收**函数调用** —— 参数在声明处
+            # 求值、调用在块出口重放，所以它必须是一条调用（而不是任意语句）。
+            self.next()
+            e = self.parse_expr()
+            self.expect("punct", ";")
+            if not isinstance(e, Call):
+                raise LomError(t.line, t.col,
+                               "defer 只收函数调用（`defer f(a, b);`）—— docs/296 s2.3")
+            return Defer(e, t.line)
         if t.val in ("break", "continue") and self.profile == "tur2026.2":
             # Tur 2 的循环控制（`docs/296` §2.5）；Tur 1 里它们是普通标识符，照旧报
             # "未声明的变量"。
@@ -5438,6 +5468,12 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                             errs.append(f"{s.line}: return 类型 {t}，函数 {f.name} 声明 {f.ret}")
                 elif isinstance(s, ExprStmt):
                     _walk_expr(s.expr, fscope, funcs, structs, errs, enums)
+                elif isinstance(s, Defer):
+                    # `docs/296` §2.3：参数在声明处求值（类型在这里查），调用在块出口重放。
+                    if not isinstance(s.call, Call):
+                        errs.append(f"{s.line}: defer 只收函数调用（`defer f(a, b);`）")
+                    else:
+                        _walk_expr(s.call, fscope, funcs, structs, errs, enums)
 
         walk(f.body, scope)
         errs.extend(_move_check(f, funcs, structs, enums, lms))  # M13 移动检查 + E029
@@ -5888,6 +5924,12 @@ def _stmts_rs(stmts: list, indent: int) -> list[str]:
         elif isinstance(s, Return):
             out.append(f"{pad}return {_expr_rs(s.expr)};" if s.expr is not None
                        else f"{pad}return;")
+        elif isinstance(s, Defer):
+            # Rust 侧没有块退出钩子 —— 这条转译兑现不了，点名拒（与 `free` 同一条纪律：
+            # 承诺落空比拒绝更坏）。
+            raise LomError(s.line, 1,
+                           "rust 后端不支持 defer：那边没有块退出钩子。"
+                           "要 defer 就用原生/IR 后端")
         elif isinstance(s, (Break, Continue)):
             out.append(f"{pad}{'break' if isinstance(s, Break) else 'continue'};")
         elif isinstance(s, ExprStmt):
@@ -8379,6 +8421,8 @@ class _Ir:
         #: 循环栈（Tur 2 的 `break`/`continue`）：`brk` 落点、`cond` 条件、`step` 更新步、
         #: `fstep` 区间 for 的自增三元组、`epoch` 体入口的分配器前沿。
         self.loops: list[dict] = []
+        #: `defer` 的作用域栈（`docs/296` §2.3）：每层语句表一帧，元素是捕获后的 `Call`。
+        self.defers: list[list] = []
         self.structs = structs or {}
         self.enums = enums or {}
         self.out: list[str] = []
@@ -8732,6 +8776,8 @@ class _Ir:
 
     # -- 表达式 -> (loment 类型, 值)
     def expr(self, e, want: str | None = None) -> tuple[str, str]:
+        if isinstance(e, Raw):
+            return e.ty, e.val
         if isinstance(e, Fallback):
             return self._fallback_expr(e)
         if isinstance(e, IntLit):
@@ -9463,8 +9509,34 @@ class _Ir:
 
     # -- 语句
     def block(self, stmts: list) -> None:
+        # `defer`（`docs/296` §2.3）：每层语句表就是一个作用域，帧在块尾按 LIFO 执行。
+        # 块以 `return`/`break`/`continue` 收尾时那几条已经跑过（见 `stmt`），这里只补
+        # 正常走到块尾的那一支。
+        self.defers.append([])
         for s in stmts:
             self.stmt(s)
+        if not self.terminated:
+            self._run_defers(len(self.defers) - 1)
+        self.defers.pop()
+
+    def _run_defers(self, min_depth: int) -> None:
+        """从最内层帧跑到 `min_depth`（含）为止，帧内 LIFO。捕获值做成 `Raw` 重放调用。"""
+        for i in range(len(self.defers) - 1, min_depth - 1, -1):
+            for call in reversed(self.defers[i]):
+                self.expr(call, None)
+
+    def _defer_wants(self, call) -> list:
+        """`defer` 捕获时每个实参的期望类型 —— 与被延迟那次调用同一条规则。"""
+        sig = _builtin_sig(call)
+        if sig is not None:
+            # `print_num` 的实参按它**自己的**类型求值（`docs/296` §2.7），别硬套 i64
+            if call.name == "print_num":
+                return [None] * len(call.args)
+            return list(sig[0])
+        fn = self.funcs.get(call.name)
+        if fn is not None:
+            return [p.type for p in fn.params]
+        return [None] * len(call.args)
 
     def _fallback_expr(self, e) -> tuple[str, str]:
         """`x orelse d` / `x catch d`（`docs/296` §2.4）：成功支取载荷、另一支取 `d`。
@@ -9711,7 +9783,7 @@ class _Ir:
             self.label(body_l)
             sv = self.epoch_open(s)
             self.loops.append({"node": s, "brk": end_l, "cond": cond_l, "step": s.step,
-                               "fstep": None, "epoch": sv})
+                               "fstep": None, "epoch": sv, "depth": len(self.defers)})
             self.block(s.body)
             self.loops.pop()
             # 体尾顺序：**先关纪元、再走更新步** —— 与自举侧 `fi_step` 的那一行同序
@@ -9741,7 +9813,8 @@ class _Ir:
             self.label(body_l)
             sv = self.epoch_open(s)
             self.loops.append({"node": s, "brk": end_l, "cond": cond_l, "step": [],
-                               "fstep": (s.var, ty, ptr, s.line), "epoch": sv})
+                               "fstep": (s.var, ty, ptr, s.line), "epoch": sv,
+                               "depth": len(self.defers)})
             self.block(s.body)
             self.loops.pop()
             # 体尾的顺序与 `While` 一致：**先关纪元再走更新步**（自举侧同一份顺序）。
@@ -9780,6 +9853,18 @@ class _Ir:
             self.w(f"{new} = add i64 {old}, 1")
             self.w(f"store i64 {new}, ptr {p}")
             return
+        if isinstance(s, Defer):
+            # `docs/296` §2.3：参数**现在**求值并捕获；调用等块出口（`_run_defers`）。
+            if not self.defers:
+                raise LomError(s.line, 1, "defer 只在函数体里成立")
+            call = s.call
+            args = []
+            for a, w in zip(call.args, self._defer_wants(call)):
+                ty, v = self.expr(a, w)
+                args.append(Raw(ty, v))
+            self.defers[-1].append(
+                Call(call.name, args, call.line, tur2=getattr(call, "tur2", False)))
+            return
         if isinstance(s, Return):
             if s.expr is None:
                 # 裸 `return;`（`docs/296` §2.6）：函数没有返回类型，退出路径与带值的
@@ -9790,6 +9875,7 @@ class _Ir:
                 self.terminated = True
                 return
             _, v = self.expr(s.expr, self.f.ret)
+            self._run_defers(0)  # `defer`：离开函数就是离开所有块（由内向外、帧内 LIFO）
             self.l1_free(s.l1)   # L1：返回值**已经读出来**了，现在可以还那块
             self.roots_pop()   # gc_auto：离开本帧前把根表游标退回去
             self.w(f"ret {self.ll(self.f.ret)} {v}")
@@ -9800,6 +9886,7 @@ class _Ir:
             return
         if isinstance(s, (Break, Continue)):
             ctx = self.loops[-1]        # 解析器保证只在循环里
+            self._run_defers(ctx["depth"])   # 离开循环体块：体内帧的 defer 先跑
             if isinstance(s, Continue):
                 for st in ctx["step"]:  # for-in：先自增（与体尾同一份指令）
                     self.stmt(st)

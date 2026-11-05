@@ -374,6 +374,98 @@ entry:
     print("      负移位量 ⇒ `移位量是负数`；正的越界照旧（shl/lshr=0、ashr=全 1）")
 
 
+# ---------------------------------------------------------------- 入口形状（#1026）
+#: `docs/243` §3.5 的四种形状，各一条探针。第一二种必须**跑对**，后两种必须
+#: **点名拒** —— 而且不许说"没有 `_start`"（那句话对一份好程序而言真而无用）。
+_ENTRY_START = """define i32 @_start() {
+entry:
+  %r = call i64 asm sideeffect "syscall", "={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}"(i64 60, i64 42, i64 0, i64 0)
+  ret i32 0
+}
+"""
+
+#: `command_main(argv, argc)`：返回 `argc*10 + argv[1][0]`。`argv = ["prog","a","b"]`
+#: ⇒ `3*10 + 'a' = 127` —— 两个形参都真的来自**调用方给的**命令行。
+_ENTRY_COMMAND = """define i32 @command_main(ptr %argv, i32 %argc) {
+entry:
+  %c = mul i32 %argc, 10
+  %p = getelementptr i8, ptr %argv, i64 5
+  %b = load i8, ptr %p
+  %z = zext i8 %b to i32
+  %s = add i32 %c, %z
+  ret i32 %s
+}
+"""
+
+_ENTRY_INTERRUPT = """define x86_intrcc void @isr(ptr byval([8 x i8]) %__frame) {
+entry:
+  ret void
+}
+"""
+
+_ENTRY_THREAD = """define void @spawner() {
+entry:
+  %r = call i64 asm sideeffect "thread_spawn @worker", "={ax},{si},{r9},{r12},~{di},~{dx},~{r10},~{r8},~{cx},~{r11},~{memory}"(i64 0, i64 0, i64 0)
+  ret void
+}
+define void @worker(i64 %arg) {
+entry:
+  ret void
+}
+"""
+
+
+def test_entry_shape_start_runs() -> None:
+    """形状 1：`_start` 照旧是入口（三档同答，rc 来自程序自己的 `exit`）。"""
+    for tier in ("t0", "t2", "t3"):
+        b = io.BytesIO()
+        rc = lvm.run_ir(_ENTRY_START, b, None, ["p"], tier)
+        assert (rc, b.getvalue()) == (42, b""), (tier, rc, b.getvalue())
+    print("      `_start`：t0 / t2 / t3 都跑到 exit(42)")
+
+
+def test_entry_shape_command_main_runs_with_caller_argv() -> None:
+    """形状 2：`command_main(argv, argc)` **支持**，argv 由调用方给（`docs/223` §3.2）。
+
+    证伪很直接：参数没喂进去 ⇒ `argc=0`、`argv` 指向空处，答案不是 127；
+    只喂 `argc` 不铺 cmdline ⇒ 少一个 `'a'`。
+    """
+    for tier in ("t0", "t2", "t3"):
+        b = io.BytesIO()
+        rc = lvm.run_ir(_ENTRY_COMMAND, b, None, ["prog", "a", "b"], tier)
+        assert (rc, b.getvalue()) == (127, b""), (tier, rc, b.getvalue())
+    print("      `command_main`：argc=3、argv[1]='a' ⇒ rc=127（三档同答）")
+
+
+def _entry_refusal(ir: str, tier: str) -> str:
+    try:
+        lvm.run_ir(ir, io.BytesIO(), None, ["p"], tier)
+    except lvm.LvmError as e:
+        return str(e)
+    raise AssertionError(f"{tier}: 这份 IR 跑起来了，而它应当被点名拒")
+
+
+def test_entry_shape_interrupt_is_refused_by_name() -> None:
+    """形状 3：中断入口**点名拒**，报文里有入口名与定义它的文档（`docs/149` M70）。
+
+    关键是否定面：**不许**说"没有 `_start`" —— 程序是好的，是引擎不跑这个形状。
+    """
+    for tier in ("t0", "t2", "t3"):
+        msg = _entry_refusal(_ENTRY_INTERRUPT, tier)
+        assert "isr" in msg and "interrupt" in msg and "docs/149" in msg, (tier, msg)
+        assert "没有 `_start`" not in msg, (tier, msg)
+    print("      中断入口 `isr`：三档都点名拒，报文含入口名 + docs/149，不说「没有 _start」")
+
+
+def test_entry_shape_thread_spawn_target_is_refused_by_name() -> None:
+    """形状 4：线程入口**点名拒**（`docs/245`；并发是后续里程碑）。"""
+    for tier in ("t0", "t2", "t3"):
+        msg = _entry_refusal(_ENTRY_THREAD, tier)
+        assert "worker" in msg and "thread_spawn" in msg and "docs/245" in msg, (tier, msg)
+        assert "没有 `_start`" not in msg, (tier, msg)
+    print("      线程入口 `worker`：三档都点名拒，报文含入口名 + docs/245，不说「没有 _start」")
+
+
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 

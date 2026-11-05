@@ -2580,7 +2580,18 @@ fn _start() -> u32 {
         let ec: u32 = emit_error_code(cg);
         if ec != 0 {
             let et: u32 = emit_error_tok(cg);
+            // 每号一条消息：这一格原先只认"实参超过 20"（1 号），2 号及以后一律套那句话，
+            // 于是 defer 撞上捕获表上限时用户读到的是"参数太多"（错误的方向）。
             let em: str = "the self-hosted emitter cannot lower a call with more than 20 arguments -- split the call into smaller ones";
+            if ec == 3 {
+                em = "a defer takes at most 4 arguments -- bind them to locals first";
+            }
+            if ec == 4 {
+                em = "too many defer statements in one function -- split the function";
+            }
+            if ec == 5 {
+                em = "defer nesting is too deep -- split the function";
+            }
             if dfd >= 0 {
                 wdiag(dfd as u64, scr, ap, an, load32(ctoks, et * 20 + 12), 23,
                       str_ptr(em), str_len(em));

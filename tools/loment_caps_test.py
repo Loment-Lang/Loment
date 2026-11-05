@@ -119,8 +119,13 @@ def test(fn):
 #: `HOT_MMAP_ANON`（没有 `MAP_FIXED` 的一套 flags，只作 syscall 实参，**不**是容量）。
 #: `lsp.lomt` 多了一处 `i < 4000`（`--hot` 路径拷进 4096 B 暂存，到界即停）。条数
 #: 250 → **251**、沉默 167 → **168**；字面量 63 → **64**。
-CAPACITY_SITES = 251
-SILENT_SITES = 168
+#:
+#: 2026-11-04（Tur 2 `defer`，`docs/296` §2.3）：`codegen.lomt` 多出四个常量 ——
+#: 捕获表的步长 `CG_DFR_STRIDE`（84 B/条，**不是**上界，来路写在 `EXPLAINED`）与三个
+#: 真上界 `CG_MAXDFR` / `CG_MAXDFRAMES` / `CG_MAXDFARGS`（都判了 `>=` 并 `cg_fail`）。
+#: 条数 251 → **255**、沉默 168 → **169**（多出来的那一处就是步长本身）。
+CAPACITY_SITES = 255
+SILENT_SITES = 169
 
 #: 第二类：字面量上界（`#770`）。`[T; N]` 与 `literal:<N>` 各自钉住总数与沉默的那一份。
 LITERAL_SITES = 65
@@ -135,6 +140,7 @@ SILENT_NAMES = frozenset((
     "ARENA_CAP",
     "CHK_ENV_MAX",
     "CASES_CAP",
+    "CG_DFR_STRIDE",
     "CG_MAXENUM",
     "CG_MAXFN",
     "CMAX",

@@ -294,7 +294,7 @@
       "patterns": [
         {
           "name": "support.function.builtin.loment",
-          "match": "\\b(alloc|free|load8|store8|str_len|str_eq|str_concat|str_byte|str_ptr|print|slice_len|ptr_add|ptr_sub|atomic_add|get_bits|set_bits|panic|syscall4|syscall6|syscall7|thread_spawn|inb|outb)\\b(?=\\s*\\()"
+          "match": "\\b(alloc|free|load8|store8|str_len|str_eq|str_concat|str_byte|str_ptr|print|print_num|slice_len|ptr_add|ptr_sub|atomic_add|get_bits|set_bits|panic|syscall4|syscall6|syscall7|thread_spawn|inb|outb)\\b(?=\\s*\\()"
         }
       ]
     },
@@ -324,7 +324,7 @@
       "patterns": [
         {
           "name": "keyword.control.loment",
-          "match": "\\b(if|else|while|for|in|match|return|as|break|continue)\\b"
+          "match": "\\b(if|else|elif|while|for|in|match|return|as|break|continue)\\b"
         }
       ]
     },
@@ -347,7 +347,7 @@
       "patterns": [
         {
           "name": "storage.type.declaration.loment",
-          "match": "\\b(use|let|const|where)\\b"
+          "match": "\\b(use|let|const|where|def)\\b"
         }
       ]
     },
@@ -372,6 +372,7 @@
         { "name": "keyword.operator.range.loment", "match": "\\.\\." },
         { "name": "keyword.operator.try.loment", "match": "\\?" },
         { "name": "keyword.operator.logical.loment", "match": "&&|\\|\\||!" },
+        { "name": "keyword.operator.fallback.loment", "match": "\\b(orelse|catch)\\b" },
         { "name": "keyword.operator.comparison.loment", "match": "==|!=|<=|>=|<|>" },
         { "name": "keyword.operator.assignment.loment", "match": "=" },
         { "name": "keyword.operator.arithmetic.loment", "match": "[+\\-*/%]" },

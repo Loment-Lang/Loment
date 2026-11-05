@@ -60,7 +60,8 @@
    全局字符串常量（`c"\4D\36…"`）按八进制转义解成字节。
 4. **调用**：直接调用按名字查表；`asm sideeffect "syscall"` 是**唯一**的对外通道 ——
    解释器实现一小张系统调用表（`write`/`exit`/…），返回值放 `rax` 对应的槽。
-5. **入口**：`_start` 就是入口；`exit` 走系统调用表结束。
+5. **入口**：按 §3.5 那张表认（`_start` / `command_main` 支持，中断 / 线程入口点名拒）；
+   `exit` 走系统调用表结束。
    ⚠ `lomelf` 的桩在**退出码恒 0**，那与本格无关 —— 本格比的是**程序自己**的 stdout 与 rc。
 
 ---
@@ -120,6 +121,39 @@
 所以 `lvm_test` 把 **argv[0] 钉成同一个字符串**再跑（POSIX 上就是 `execve` 的 argv 语义）：
 两边比的才是"**同一份命令行下的行为**"。这属于"固定输入换一个变量"，**不是把差异抹掉** ——
 名字本来就不是这两份产物各自的性质，**命令行才是那个输入**。
+
+### 3.5 入口形状：编译器发**四种**，VM 必须逐种给答案（issue #1026）
+
+> 补于 2026-11-04（0.1.5.1）。在此之前 `lvm.run_ir` 只做一句
+> `next((f for f in funcs if f.name == "_start"), None)`，其余三种形状一律报
+> **「这份 IR 里没有 `_start`」** —— 那句**真而无用**：程序是好的，引擎不是。
+> 这正是 `docs/253` §1.2 说的"没有标签的地板"。
+
+| 形状 | 什么时候发 | 从哪一版起 | 0.1.5.1：VM 怎么答 |
+|---|---|---|---|
+| `_start` | 普通程序 | 一直有 | **支持**（T0 / T2 / T3 同一条前门） |
+| `command_main(argv, argc)` | 单元声明了命令（`pub fn loment_command()`） | 0.1.4.6（`docs/223` §3.2） | **支持**：调用方给 `argv`（`run_ir(..., argv=[...])`），VM 把它按 `/proc/self/cmdline` 的形状铺进内存、`argc = len(argv)`；返回值就是退出码 |
+| `interrupt` 属性（`interrupt fn`） | 内核/中断处理函数（M33） | 0.1.4.x | **点名拒**：`这份 IR 的入口是中断处理函数 `NAME`（interrupt fn，docs/149 §M70）…`。合成 x86 中断帧留给需要它的里程碑 |
+| `thread_spawn` 目标 | `thread_spawn("worker", …)` | 0.1.5（`docs/245`） | **点名拒**：`这份 IR 的入口是线程入口 `NAME`（thread_spawn 的目标，docs/245）…`。并发是后续里程碑 |
+
+**识别规则**（`tools/lvm.py::entry_kind`）：
+
+1. **先认形状、再解析**。按 IR 文本里的 `define` 行与 `asm sideeffect "thread_spawn @…"`
+   认 —— 不等到 `parse_ll` 之后，因为 `interrupt fn` 的 `define x86_intrcc …` 会被
+   解析成一个奇怪的返回类型，而我们要在**解析之前**就能说出"这是中断入口"。
+2. **能跑的优先**：`_start` > `command_main` > 中断 > 线程目标。普通程序里可以有中断
+   处理函数；只要 `_start` 在，它就是进程入口，中断函数只是没被调到。
+3. **四种都不是**才报 `这份 IR 里没有 _start，也没有其它入口形状（command_main /
+   interrupt / thread_spawn 目标）—— 见 docs/243 §3.5`。保留"没有 `_start`"这个子串是
+   有意的（孪生镜像与 `lvm_twin_test` 用它认这句）；#1026 要去掉的是**有别的入口却只说
+   没有 `_start`**，不是这句本身。
+
+**拒文必须点名两样**：入口的**名字**，以及**定义这个形状的文档**（`docs/149` M70 /
+`docs/245`）。只说"不支持"等于没说清是谁不支持。
+
+**判据**（`tools/lvm_test.py`，一种形状一条）：`_start` 跑到 `exit(42)`；
+`command_main` 用 `argv = ["prog","a","b"]` 得到 `argc=3`、`argv[1]='a'`、rc=127；
+中断 / 线程入口在 T0 / T2 / T3 上都点名拒，且报文里**没有**"没有 `_start`"。
 
 ## 4. 判据（照 `tools/loment_elf_test.py` 的体例）
 

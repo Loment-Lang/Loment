@@ -159,7 +159,7 @@ formal object and reconciles byte for byte".
   | `v17` | `lms_levels` | `docs/253` §11.4 |
   | `v18` | `lms_budgets` | `docs/253` §11.2.1 |
   | `v19` | `gc_ladder.l0_5` | `docs/210` §2.10 |
-  | `v20` | **`systems`** (the six-system index; a reader starts here) | `docs/302` |
+  | `v20` | **`systems`** (the six-system index; a reader starts here) | `docs/304` |
 
   The ladder **accumulates**: `v20` requires the fields of every version below it.
 

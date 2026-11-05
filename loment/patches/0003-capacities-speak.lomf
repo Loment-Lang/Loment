@@ -23,6 +23,11 @@ about
 about **2026-10-19**：`#775` 在最后那一块（`emit_module` 的失败分支）里加了发射器自己的诊断通道
 about （E023）；`old -> new` 的文本因此连带更新，`new` 必须与树里逐字一致。
 about 
+about **2026-11-04**（Tur 2 的 `defer`，`docs/296` §2.3）：最后那一块的 `em` 从"一句话"变成
+about 按规则号选消息（3 / 4 / 5 = `defer` 的三个上限）—— 2 号及以后原先一律套"实参超过 20"，
+about 于是 `defer` 撞上捕获表上限时用户读到的是"参数太多"。`new` 块因此再跟树走一次：
+about 这一笔记的是**这一处的最终形状**，不是中间那一版。
+about
 about 棘轮：`loment_caps_test::test_the_front_end_has_no_silent_capacity` 把「前端缺口 0」钉住，
 about `EXPLAINED` 逐条写清每一处排除的来路（见 `tools/loment_caps.py`）。
 
@@ -151,7 +156,18 @@ new <<<
         let ec: u32 = emit_error_code(cg);
         if ec != 0 {
             let et: u32 = emit_error_tok(cg);
+            // 每号一条消息：这一格原先只认"实参超过 20"（1 号），2 号及以后一律套那句话，
+            // 于是 defer 撞上捕获表上限时用户读到的是"参数太多"（错误的方向）。
             let em: str = "the self-hosted emitter cannot lower a call with more than 20 arguments -- split the call into smaller ones";
+            if ec == 3 {
+                em = "a defer takes at most 4 arguments -- bind them to locals first";
+            }
+            if ec == 4 {
+                em = "too many defer statements in one function -- split the function";
+            }
+            if ec == 5 {
+                em = "defer nesting is too deep -- split the function";
+            }
             if dfd >= 0 {
                 wdiag(dfd as u64, scr, ap, an, load32(ctoks, et * 20 + 12), 23,
                       str_ptr(em), str_len(em));

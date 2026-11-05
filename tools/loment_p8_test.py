@@ -2202,6 +2202,169 @@ def test_m95_tur2_orelse_and_catch():
 
 
 @test
+def test_m96_tur2_defer():
+    """Tur 2 的 `defer`（`docs/296` §2.3）。
+
+    钉五件，前四件都要**跑**出来才算：
+
+      * 两套实现**逐字节相同** —— 捕获是"实参此刻的值"，自举侧把它存成文本再内联重放，
+        参考侧存成 SSA 值；两边的编号、层数（返回值挪到第 38 层）差一格就整段不同；
+      * **LIFO**（`30 20 10`）与**块作用域**（内层块先跑，`if` 两支各自负责自己那一条）；
+      * **捕获在声明处**（`n` 在 `defer` 之后被改成 2，退出时打印的仍是 1）；
+      * **三条非正常出口**：`return`、`?` 提前返回、循环里的 `break` / `continue` ——
+        每条都会把体内帧跑到那一层为止；
+      * Tur 1 里 `defer` **仍是普通标识符**（用户自己的 `fn defer` 照常编、照常跑），
+        Tur 2 里 `defer 1;` 是解析错（只收调用）。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    src = r'''module dfr
+choose runtime
+
+fn show(n: i64) {
+    print_num(n);
+    print("\n");
+}
+
+fn maybe(n: u32) -> Result<u32, u32> {
+    if n > 0 {
+        return Result::Ok(n);
+    }
+    return Result::Err(1);
+}
+
+fn cap() -> u32 {
+    let n: u32 = 1;
+    defer show(n as i64);
+    n = 2;
+    return 3;
+}
+
+fn lifo() {
+    defer show(10);
+    defer show(20);
+    show(30);
+}
+
+fn scoped(k: u32) {
+    if k == 1 {
+        defer show(1);
+        show(10);
+    } else {
+        defer show(2);
+        show(20);
+    }
+    defer show(4);
+    show(40);
+}
+
+enum K { A(u32), B }
+
+fn arm(k: K) {
+    match k {
+        K::A(x) => {
+            defer show(x as i64);
+            show(50);
+        }
+        K::B => {
+            show(60);
+        }
+    }
+    show(70);
+}
+
+fn loopdfr() {
+    let i: u32 = 0;
+    while i < 3 {
+        i = i + 1;
+        defer show(100 + i as i64);
+        if i == 2 { continue; }
+        if i == 3 { break; }
+        show(200);
+    }
+}
+
+fn q() -> Result<u32, u32> {
+    defer show(7);
+    let x: u32 = maybe(0)?;
+    return Result::Ok(1);
+}
+
+fn main() {
+    lifo();
+    let r: u32 = cap();
+    scoped(1);
+    scoped(0);
+    arm(K::A(5));
+    arm(K::B);
+    loopdfr();
+    let rr: Result<u32, u32> = q();
+    let xs: [u32; 3] = [1, 2, 3];
+    for x in xs {
+        defer show(100 + x as i64);
+        if x == 2 { continue; }
+        show(x as i64);
+    }
+    if r == 3 {
+        print("ok\n");
+    } else {
+        print("bad\n");
+    }
+}
+'''
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "dfr.lomt"
+        p.write_text("choose write grammar tur2\n" + src, encoding="utf-8", newline="\n")
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_dfr")
+        rc, out, err = _run_driver_raw(elf, _wsl_path(p), td, "dfr")
+        assert rc == 0, f"自举侧编不过 defer: {err[-300:]}"
+        assert out == _unit_ll(p), "defer 的 IR 两个实现不一致"
+        art, _ = __import__("lomelf").compile_ll(out)
+        exe = Path(td) / "dfr.elf"
+        exe.write_bytes(art)
+        script = f"cp {_wsl_path(exe)} {_T}dfr_ed && chmod +x {_T}dfr_ed && {_T}dfr_ed"
+        r = subprocess.run([*_WSLCMD, "bash", "-lc", script],
+                           capture_output=True, text=True, timeout=120, shell=False)
+        want = ("30\n20\n10\n"              # LIFO，函数体那一帧
+                "1\n"                       # 捕获在声明处（n 后来改成 2）
+                "10\n1\n40\n4\n"            # if 那一支的 defer 先跑
+                "20\n2\n40\n4\n"            # else 那一支
+                "50\n5\n70\n"               # match 臂里的块
+                "60\n70\n"                  # 另一条臂
+                "200\n101\n102\n103\n"      # 循环体：continue / break 各跑一次
+                "7\n"                       # `?` 提前返回
+                "1\n101\n102\n3\n103\n"     # for-in 每轮一条
+                "ok\n")
+        assert (r.returncode, r.stdout) == (0, want), (r.returncode, r.stdout, r.stderr)
+        # Tur 1：`defer` 不是关键字 —— 用户自己的 `fn defer` 照常编、照常跑
+        p1 = Path(td) / "mine.lomt"
+        p1.write_text(
+            "choose write grammar tur\nmodule mine\n\n"
+            "fn defer(n: u32) {\n    print(\"d\\n\");\n}\n\n"
+            "fn main() {\n    defer(1);\n}\n", encoding="utf-8", newline="\n")
+        rc1, out1, err1 = _run_driver_raw(elf, _wsl_path(p1), td, "minedfr")
+        assert rc1 == 0 and out1 == _unit_ll(p1), f"Tur 1 的 fn defer 被顶掉了: {err1[-200:]}"
+        art1, _ = __import__("lomelf").compile_ll(out1)
+        exe1 = Path(td) / "mine.elf"
+        exe1.write_bytes(art1)
+        script1 = (f"cp {_wsl_path(exe1)} {_T}minedfr_ed && chmod +x {_T}minedfr_ed "
+                   f"&& {_T}minedfr_ed")
+        r1 = subprocess.run([*_WSLCMD, "bash", "-lc", script1],
+                            capture_output=True, text=True, timeout=120, shell=False)
+        assert (r1.returncode, r1.stdout) == (0, "d\n"), (r1.returncode, r1.stdout)
+        # Tur 2：`defer` 只收函数调用
+        p2 = Path(td) / "notcall.lomt"
+        p2.write_text("choose write grammar tur2\nmodule notcall\n\n"
+                      "fn main() {\n    defer 1;\n}\n", encoding="utf-8", newline="\n")
+        rc2, out2, err2 = _run_driver_raw(elf, _wsl_path(p2), td, "notcall")
+        assert rc2 != 0 and out2.strip() == "", "`defer 1;` 被放过去了"
+        assert "E19" in err2, f"`defer 1;` 该是解析错 (E19): {err2[-200:]}"
+        print("      defer: 产物逐字节相同、LIFO/块作用域/声明处捕获/return·?·break·continue "
+              "全跑对；Tur 1 保住用户 fn defer，`defer 1;` 是 E19")
+
+
+@test
 def test_m85_driver_emits_structured_diagnostics():
     """自举驱动的 `--diag-out`: 结构与参考实现同形, **码集相等** (`docs/182` §5)。
 
@@ -2494,7 +2657,7 @@ def test_m85_codegen_table_capacity():
     param_base, param_stride = cst("CG_PARAM"), 160   # `#265`: 20 槽 x 8
     const_base, const_stride = cst("CG_CONST"), 8     # `#719`: 常量表紧跟安全名表
     const_cap = cst("CG_MAXCONST")
-    bytes_total = cst("CG_BYTES")
+    l05_base = cst("CG_L05")                          # 常量表的**下一张表**是 L0.5 区
     # 守卫必须用**同一个**常量, 否则表放大了守卫还卡在旧数 (或反过来写穿)
     assert f"n >= CG_MAXFN" in src, "函数表的守卫没和容量常量同源"
     assert f"en >= CG_MAXENUM" in src, "枚举表的守卫没和容量常量同源"
@@ -2503,7 +2666,12 @@ def test_m85_codegen_table_capacity():
     cap_fn = (fk_base - fn_base) // fn_stride          # fk 表紧跟函数表
     cap_fk = (cur_base - fk_base) // fk_stride         # 参数替换表紧跟 fk 表
     cap_param = (const_base - param_base) // param_stride   # 常量表紧跟形参类型表
-    cap_const = (bytes_total - const_base) // const_stride
+    # 常量表的上界是**下一张表**（L0.5 区），不是整块尾部 —— 尾部还有 Tur 2 的
+    # defer 捕获区（`CG_DFR_*`），拿 `CG_BYTES` 算会把别人的地盘算成常量表的容量
+    cap_const = (l05_base - const_base) // const_stride
+    assert cap_const == const_cap, (
+        f"常量表容量 {cap_const} 与守卫 `CG_MAXCONST={const_cap}` 不同源 —— "
+        f"表按布局是 {cap_const} 格")
     cap_enum = (local_base - enum_base) // enum_stride  # 枚举表上界 = 局部表基址
     cap = min(cap_fn, cap_fk, cap_param)
     # 最大单元 = driver.lomt 的整单元 (lexer+codegen+checker+driver)。

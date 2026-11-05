@@ -252,7 +252,7 @@ Merkle 非包含证明，不是加载期验证术语；`"absence property"` **�
   找到 ⇒ 这一处不是新的。
 * **从哪儿开始读（v20 / #1022）**：产物里的 **`systems` 索引**是**唯一**入口 ——
   六个系统（`gc` / `runtime` / `port` / `vm` / `lms` / `lspe`）各一条
-  `{state, detail, cost}`，`vm` 就在其中。字段形状与判据见 `docs/302`。
+  `{state, detail, cost}`，`vm` 就在其中。字段形状与判据见 `docs/304`。
 
 ### 4.2 **内部缺席**作为一等可验收主张
 

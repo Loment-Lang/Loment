@@ -94,7 +94,18 @@ const CG_DFR_STRIDE: u32 = 84;         // start | end | len | pad | text[68]
 const CG_MAXDFR: u32 = 8;     // = 捕获表里能放下的站点数（8 x 4 x 84）
 const CG_MAXDFRAMES: u32 = 64;
 const CG_MAXDFARGS: u32 = 4;
-const CG_BYTES: u32 = 921300;         // = CG_L05 + 2048 + 3088（defer 区整块）
+//: **`lgc` 的窗口栈**（`docs/306`，Tur 2026.3）。标量两格放在 640/656 之间的空位
+//: （648/652 —— 644 是常量表条数），栈本身接在 defer 捕获区之后。
+//: 栈深 64 与 E023 的嵌套上限同数：超过 64 层的窗口在**检查器**就拒了，走不到这儿。
+//:   `CG_LGC`   = 1：本单元出现过 `lgc`（决定发不发那一段运行期文本）
+//:   `CG_LGC_N` = 本函数已开过的窗口数（下一个窗口的编号，`emit_fn` 入口清零）
+//:   `CG_LGC_D` = 当前打开着的窗口栈深（`close` 弹、`begin` 压）
+//:   `CG_LGC_STK` = 打开窗口的编号栈：64 x 4
+const CG_LGC: u32 = 648;
+const CG_LGC_N: u32 = 652;
+const CG_LGC_D: u32 = 921300;
+const CG_LGC_STK: u32 = 921304;
+const CG_BYTES: u32 = 921560;         // = CG_LGC_STK + 64*4（defer 区 + 窗口栈）
 use bytes
 use lexer
 
@@ -2638,6 +2649,9 @@ fn emit_tur_meta(s: ptr, out: ptr, prof: u32) -> u32 {
     emit_str(s, out, "@loment.tur.edition = global [21 x i8] c\"\\4C\\4F\\4D\\45\\4E\\54\\2D\\54\\55\\52\\3A");
     if prof == 1 {
         emit_str(s, out, "\\74\\75\\72\\32\\30\\32\\36\\2E\\32");
+    } else if prof == 2 {
+        // `tur2026.3`（`docs/306`）：与 2026.1/2026.2 等长（9 个字符），数组仍是 21。
+        emit_str(s, out, "\\74\\75\\72\\32\\30\\32\\36\\2E\\33");
     } else {
         emit_str(s, out, "\\74\\75\\72\\32\\30\\32\\36\\2E\\31");
     }
@@ -3452,7 +3466,12 @@ fn emit_alloc_seq(s: ptr, out: ptr, szlvl: u32, lvl: u32) -> u32 {
         // 在运行期锁里。非线程程序的产物逐字节不变（参考实现同一条门槛）。
         emit_str(s, out, "  call void @__loment_rt_acquire()\n");
     }
-    if gc_any(s) == 1 {
+    if load32(s, CG_LGC) == 1 {
+        // `lgc` 档（`docs/306`）：先过开关与预算，再问原来的钩子（那两个函数一行不改）。
+        emit_str(s, out, "  call void @__loment_maybe_collect_ctl(i32 ");
+        emit_val(s, out, szlvl);
+        emit_str(s, out, ")\n");
+    } else if gc_any(s) == 1 {
         // 收在**分配之前** -> 不需要"分配失败再重试"那条路, `__loment_alloc` 一字节不动。
         emit_str(s, out, "  call void @__loment_maybe_collect(i32 ");
         emit_val(s, out, szlvl);
@@ -3922,7 +3941,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
             }
             return k12 + 1;
         }
-        if load32(s, CG_PROF) == 1 && tok_is(src, toks, j, "print_num") {
+        if load32(s, CG_PROF) != 0 && tok_is(src, toks, j, "print_num") {
             // `docs/296` §2.7：实参按它**自己的类型**求值，再按符号扩到 i64 —— 与参考实现
             // `lomentc._Ir.builtin` 那一支同序（先求值，再 zext/sext，最后一条 call）。
             let at: u32 = expr_type(s, src, toks, j + 2);
@@ -5075,9 +5094,13 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
     store32(s, CG_DFR_N, 0);
     store32(s, CG_DFR_D, 0);
     store32(s, CG_DFR_PLAY, 0);
+    // `lgc` 的窗口编号与打开栈同样按**函数**清零（`docs/306`）：上一函数的窗口不能漏过来。
+    store32(s, CG_LGC_N, 0);
+    store32(s, CG_LGC_D, 0);
     store32(s, 568, body_end);
     let nl: u32 = collect_locals(s, src, toks, body_at, body_end);
     let has05: u32 = l05_plan(s, src, toks, nl);   // L0.5：本函数开不开区
+    let nlgc: u32 = lgc_windows(src, toks, body_at, body_end);   // 本函数的窗口数（入口块开槽）
     if tok_is(src, toks, base - 1, "interrupt") {   // M33: x86_intrcc 需要中断帧指针, 无参数
         emit_str(s, out, "; ");
         emit_tok(s, out, src, toks, base + 1);
@@ -5105,7 +5128,11 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
             emit_str(s, out, " x i64]
 ");
         }
-        if gc_any(s) == 1 {   // `gc_auto`：中断函数**没有形参**，只有局部
+        if load32(s, CG_LGC) == 1 {
+            // `lgc` 的窗口在入口块各开两个槽（与参考实现 `locals_prologue` 同序）。
+            emit_lgc_slots(s, out, nlgc);
+        }
+        if gc_hook(s) == 1 {   // `gc_auto`：中断函数**没有形参**，只有局部
             roots_push(s, out, src, toks, 0, nl);
         }
         let jj: u32 = find_body(src, toks, lp);
@@ -5114,8 +5141,9 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
             if tok_is(src, toks, jj, "}") {
                 if load32(s, 476) == 0 {
                     let _de: u32 = dfr_end(s, out, src, toks, fdfr, ret);
+                    lgc_restore_all(s, out);   // `lgc`：还开着的窗口按逆序恢复（docs/306）
                     emit_l1(s, out, src, toks, 0, 0, 0);   // L1：函数末尾
-                    if gc_any(s) == 1 {
+                    if gc_hook(s) == 1 {
                         roots_pop(s, out);
                     }
                     emit_str(s, out, "  ret void\n");
@@ -5206,6 +5234,11 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
         emit_str(s, out, " x i64]
 ");
     }
+    if load32(s, CG_LGC) == 1 {
+        // `lgc` 的窗口在入口块各开两个槽 —— 位置对着参考实现的 `locals_prologue`：
+        // 局部/`.buf`/`l05.buf` 之后、形参 store 之前。
+        emit_lgc_slots(s, out, nlgc);
+    }
     let c: u32 = 0;
     while c < k {
         emit_str(s, out, "  store ");
@@ -5217,7 +5250,7 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
         emit_str(s, out, ".addr\n");
         c = c + 1;
     }
-    if gc_any(s) == 1 {   // `gc_auto`：本帧的指针槽登记进根表
+    if gc_hook(s) == 1 {   // `gc_auto`：本帧的指针槽登记进根表
         roots_push(s, out, src, toks, k, nl);
     }
     let j: u32 = find_body(src, toks, lp);
@@ -5226,9 +5259,10 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
         if tok_is(src, toks, j, "}") {
             if load32(s, 476) == 0 {   // 块未终止: unit 函数补 ret void, 其余补 unreachable
                 let _de2: u32 = dfr_end(s, out, src, toks, fdfr2, ret);
+                lgc_restore_all(s, out);   // `lgc`：函数末尾还开着的窗口按逆序恢复
                 emit_l1(s, out, src, toks, 0, 0, 0);   // L1：函数末尾（档位门在 emit_l1 里）
                 if is_unit_tok(src, toks, ret) == 1 {
-                    if gc_any(s) == 1 {   // `gc_auto`：函数末尾那条隐式 return
+                    if gc_hook(s) == 1 {   // `gc_auto`：函数末尾那条隐式 return
                         roots_pop(s, out);
                     }
                     emit_str(s, out, "  ret void\n");
@@ -5932,7 +5966,7 @@ fn emit_if_at(s: ptr, out: ptr, src: ptr, toks: ptr, cond: u32, ret: u32) -> u32
         k = k + 1;
         if tok_is(src, toks, k, "if") {
             k = stmt(s, out, src, toks, k, ret);
-        } else if load32(s, CG_PROF) == 1 && !tok_is(src, toks, k, "{") {
+        } else if load32(s, CG_PROF) != 0 && !tok_is(src, toks, k, "{") {
             // Tur 2：`else <条件> {` —— 隐式 elif，直接发下一层（与 `else if` 同形）。
             k = emit_if_at(s, out, src, toks, k, ret);
         } else {
@@ -6103,10 +6137,14 @@ fn dfr_stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
 
 /// 一条语句; 返回下一个待处理 token 下标。
 fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
-    if load32(s, CG_PROF) == 1 && tok_kind(toks, j) == 0 && tok_is(src, toks, j, "defer") {
+    if load32(s, CG_PROF) == 2 && tok_kind(toks, j) == 0 && tok_is(src, toks, j, "lgc") {
+        // `lgc` 的时间控制（`docs/306`）：只在 Tur 2026.3 是关键字。
+        return lgc_stmt(s, out, src, toks, j, ret);
+    }
+    if load32(s, CG_PROF) != 0 && tok_kind(toks, j) == 0 && tok_is(src, toks, j, "defer") {
         return dfr_stmt(s, out, src, toks, j, ret);
     }
-    if load32(s, CG_PROF) == 1 && tok_kind(toks, j) == 0
+    if load32(s, CG_PROF) != 0 && tok_kind(toks, j) == 0
             && (tok_is(src, toks, j, "break") || tok_is(src, toks, j, "continue")) {
         // Tur 2 的循环控制（`docs/296` §2.5）。顺序与参考实现一致：`continue` 先跑续步
         // （for-in 的下标 / range-for 的变量 —— 与体尾同一份指令），再关纪元，最后跳。
@@ -6143,13 +6181,14 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         }
         return j + 2;                      // 跳过 `;`
     }
-    if load32(s, CG_PROF) == 1 && tok_is(src, toks, j, "return")
+    if load32(s, CG_PROF) != 0 && tok_is(src, toks, j, "return")
             && tok_is(src, toks, j + 1, ";") {
         // 裸 `return;`（`docs/296` §2.6）：函数没有返回类型（检查器已经核过）。退出路径与
         // 带值那条同序 —— L1 该还的还、`gc_auto` 的根表该退的退 —— 只是 `ret void`。
         let _dfr0: u32 = dfr_run(s, out, src, toks, 0, ret);
+        lgc_restore_all(s, out);   // `lgc`：提前离开函数 = 离开所有窗口（docs/306）
         emit_l1(s, out, src, toks, 1, j, ret_end(src, toks, j, load32(s, 568)));
-        if gc_any(s) == 1 {
+        if gc_hook(s) == 1 {
             roots_pop(s, out);
         }
         emit_str(s, out, "  ret void\n");
@@ -6168,9 +6207,10 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         move_val(s, 38, 0);
         // `defer`（`docs/296` §2.3）：离开函数 = 离开所有块，由内向外跑完再 ret
         let _dfr: u32 = dfr_run(s, out, src, toks, 0, ret);
+        lgc_restore_all(s, out);   // `lgc`：提前离开函数 = 离开所有窗口（docs/306）
         // L1 定活：返回值**已经读出来**了，现在可以还那块（档位门在 `emit_l1` 里面）
         emit_l1(s, out, src, toks, 1, j, ret_end(src, toks, j, load32(s, 568)));
-        if gc_any(s) == 1 {   // `gc_auto`：离开本帧前退根表（在求值之后、ret 之前）
+        if gc_hook(s) == 1 {   // `gc_auto`：离开本帧前退根表（在求值之后、ret 之前）
             roots_pop(s, out);
         }
         emit_str(s, out, "  ret ");
@@ -6204,7 +6244,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
             return qp + 2;
         }
         // `let x: T = v orelse d;` / `... catch d;`（`docs/296` §2.4）
-        if load32(s, CG_PROF) == 1 {
+        if load32(s, CG_PROF) != 0 {
             let fbk: u32 = fb_tok(s, src, toks, eq + 1);
             if fbk != 0 {
                 return emit_fallback(s, out, src, toks, name, eq + 1, fbk);
@@ -6390,7 +6430,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
     if tok_is(src, toks, j, "if") {
         return emit_if_at(s, out, src, toks, j + 1, ret);
     }
-    if load32(s, CG_PROF) == 1 && tok_is(src, toks, j, "for")
+    if load32(s, CG_PROF) != 0 && tok_is(src, toks, j, "for")
             && tok_is(src, toks, j + 2, "in") && load32(toks, (j + 3) * 20) == 0
             && tok_is(src, toks, j + 4, "{") {
         // Tur 2 的 `for x in xs`（`docs/296` §2.2）。参考实现把它反糖成
@@ -6973,7 +7013,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
     // 赋值: NAME = EXPR ;
     if tok_kind(toks, j) == 0 && tok_is(src, toks, j + 1, "=") {
         // `x = v orelse d;` / `... catch d;`（`docs/296` §2.4）
-        if load32(s, CG_PROF) == 1 {
+        if load32(s, CG_PROF) != 0 {
             let fbk: u32 = fb_tok(s, src, toks, j + 2);
             if fbk != 0 {
                 return emit_fallback(s, out, src, toks, j, j + 2, fbk);
@@ -7314,7 +7354,7 @@ fn count_args(src: ptr, toks: ptr, lp: u32) -> u32 {
 /// 却没有任何全局可引用 —— **实测**：一份只用整数除法（于是 `@__loment_` 出现、
 /// 运行期被发出）而不用 `alloc` 的单元，编译期直接报
 /// `use of undefined value '@__loment_freehead'`。文本与 `lomentc._IR_HEAP` 同序。
-fn emit_heap(s: ptr, out: ptr, lms: u32) -> u32 {
+fn emit_heap(s: ptr, out: ptr, lms: u32, ctl: u32) -> u32 {
     // **LMS 第 3 级入口 A**（`docs/253` §5.3）：`lms` 开着时，`alloc` 分配不出**先收一次
     // 再试**，还不行才 abort。这段文本与 `lomentc._IR_HEAP_LMS` **逐字节同源** ——
     // 四处增量与参考那一侧的四处改写一一对应：
@@ -7461,8 +7501,17 @@ boom:
   br i1 %lmsdone, label %dead, label %rescue
 rescue:
   store i1 true, ptr %lmsretry
-  call void @__loment_collect()
-  %head2 = load i32, ptr @__loment_freehead
+");
+        if ctl == 1 {
+            // `lgc` 档（`docs/306`）：**OOM 也要过同一道闸** —— 拿 `collect_now` 而不是
+            // `collect`，否则一次分配失败会绕过暂停（参考实现里这是实打实的一个 bug）。
+            o = emit_str(s, out, "  call void @__loment_collect_now()
+");
+        } else {
+            o = emit_str(s, out, "  call void @__loment_collect()
+");
+        }
+        o = emit_str(s, out, "  %head2 = load i32, ptr @__loment_freehead
   br label %floop
 dead:
   call void @__loment_abort()
@@ -7702,7 +7751,7 @@ done:
 /// 那一侧是**同一个变换**套在这两条 IR 上的，所以这里两版（`statik` 0/1）也要一样地套。
 /// ⚠ 四处增量与 `emit_heap` 那四处一一对应：全局声明 / `floop` 的 phi 多一条入边 /
 /// `boom` 换成 `rescue`·`dead` / **两条成功返回前**各清一次重试标记。
-fn emit_heap_indirect(s: ptr, out: ptr, statik: u32, lms: u32) -> u32 {
+fn emit_heap_indirect(s: ptr, out: ptr, statik: u32, lms: u32, ctl: u32) -> u32 {
     let d: u32 = 0;
     d = d + emit_str(s, out, "; ---- 分配器（`docs/228`：arena 从**外面**来的那一份；`docs/175` §3.4）--------------------
 ;
@@ -7856,8 +7905,16 @@ boom:
   br i1 %lmsdone, label %dead, label %rescue
 rescue:
   store i1 true, ptr %lmsretry
-  call void @__loment_collect()
-  %head2 = load i32, ptr @__loment_freehead
+");
+        if ctl == 1 {
+            // `lgc` 档（`docs/306`）：同 `emit_heap` —— OOM 也要过同一道闸。
+            d = d + emit_str(s, out, "  call void @__loment_collect_now()
+");
+        } else {
+            d = d + emit_str(s, out, "  call void @__loment_collect()
+");
+        }
+        d = d + emit_str(s, out, "  %head2 = load i32, ptr @__loment_freehead
   br label %floop
 dead:
   call void @__loment_abort()
@@ -8196,6 +8253,16 @@ fn gc_any(s: ptr) -> u32 {
         return 1;
     }
     return 0;
+}
+
+/// **要不要根表 / 收集器钩子**（镜像参考实现的 `self.gc_hook`）：`gc_auto`、
+/// `gc_auto_alpha`，**或**源里出现 `lgc`（`docs/306`）。后者让 `gc_manual` 也能开窗
+/// 收集 —— 默认开关是关的，只有窗口里才收，`gc_manual` 的承诺因此不变。
+fn gc_hook(s: ptr) -> u32 {
+    if gc_any(s) == 1 {
+        return 1;
+    }
+    return load32(s, CG_LGC);
 }
 
 /// **根表那两个全局** —— 与收集器**分开一段**（见参考实现 `lomentc._IR_ROOTS`）：`gc_any` 档
@@ -8754,6 +8821,95 @@ roots:
     return emit_gc_trigger(s, out);
 }
 
+
+/// **GC 时间控制那一段**（`docs/306`，Tur 2026.3 的 `lgc`）。**只在源里出现 `lgc` 时发**
+/// —— 没写的程序产物一个字节都不变。
+///
+/// 文本与参考实现的 `_IR_GC_CTL_GLOBALS` + `_IR_LGC_NOW` **逐字节同源**：
+///   * `@__loment_gc_on` —— 收集器总开关。`gc_manual` 初值 **0**（手动档的承诺不变：
+///     只有显式开窗才收集），`gc_auto` / `gc_auto_alpha` 初值 **1**（`lgc end` 才是暂停）；
+///   * `@__loment_gc_deadline` —— 窗口的协作式预算（单调时钟纳秒，0 = 不限时）；
+///   * `__loment_now_ns` —— Linux x86-64 的 `clock_gettime(CLOCK_MONOTONIC)`；
+///   * `__loment_gc_allow` / `__loment_collect_now` / `__loment_maybe_collect_ctl`。
+///
+/// 开头那个换行、段与段之间的空行都不是排版：参考实现是把各段 `"\n".join(...)` 拼出来的，
+/// 每个元素自带首尾换行 —— 自举这边逐字节写，得自己补齐（同 `emit_heap` 尾巴那条）。
+fn emit_lgc_runtime(s: ptr, out: ptr) -> u32 {
+    let d: u32 = 0;
+    d = d + emit_str(s, out, "
+@__loment_gc_on = internal global i32 ");
+    if gc_any(s) == 1 {
+        d = d + emit_str(s, out, "1");
+    } else {
+        d = d + emit_str(s, out, "0");
+    }
+    d = d + emit_str(s, out, "
+@__loment_gc_deadline = internal global i64 0
+
+
+define internal i64 @__loment_now_ns() {
+entry:
+  %ts = alloca [2 x i64]
+  %tp = ptrtoint ptr %ts to i64
+  %r = call i64 asm sideeffect \"syscall\", \"={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}\"(i64 228, i64 1, i64 %tp, i64 0)
+  %bad = icmp slt i64 %r, 0
+  br i1 %bad, label %fail, label %ok
+fail:
+  ret i64 0
+ok:
+  %sp = getelementptr [2 x i64], ptr %ts, i32 0, i32 0
+  %s = load i64, ptr %sp
+  %np = getelementptr [2 x i64], ptr %ts, i32 0, i32 1
+  %n = load i64, ptr %np
+  %m = mul i64 %s, 1000000000
+  %v = add i64 %m, %n
+  ret i64 %v
+}
+
+define internal i1 @__loment_gc_allow() {
+entry:
+  %on = load i32, ptr @__loment_gc_on
+  %off = icmp eq i32 %on, 0
+  br i1 %off, label %no, label %chk
+chk:
+  %dl = load i64, ptr @__loment_gc_deadline
+  %timed = icmp ne i64 %dl, 0
+  br i1 %timed, label %time, label %yes
+time:
+  %now = call i64 @__loment_now_ns()
+  %late = icmp uge i64 %now, %dl
+  br i1 %late, label %no, label %yes
+no:
+  ret i1 false
+yes:
+  ret i1 true
+}
+
+define internal void @__loment_collect_now() {
+entry:
+  %ok = call i1 @__loment_gc_allow()
+  br i1 %ok, label %go, label %out
+go:
+  call void @__loment_collect()
+  br label %out
+out:
+  ret void
+}
+
+define internal void @__loment_maybe_collect_ctl(i32 %sz) {
+entry:
+  %ok = call i1 @__loment_gc_allow()
+  br i1 %ok, label %go, label %out
+go:
+  call void @__loment_maybe_collect(i32 %sz)
+  br label %out
+out:
+  ret void
+}
+
+");
+    return d;
+}
 
 /// 收集器的**触发**那一段，按档选一支（`docs/210` §2.4）：
 ///   * `gc_auto`（576）—— **固定**：累计请求量过 32 KiB 收一次；
@@ -9332,6 +9488,206 @@ fn roots_pop(s: ptr, out: ptr) -> u32 {
     return 0;
 }
 
+// ---------------------------------------------------------------- `lgc`（docs/306）
+
+/// 预算字面量 -> u64（`0x`/`0X` 前缀十六进制，否则十进制）。与参考实现 `_int_lit`
+/// 同一张表；**自然环绕**（与那边 `v & 2^64-1` 同义）。
+fn lgc_lit(src: ptr, toks: ptr, i: u32) -> u64 {
+    let st: u32 = load32(toks, i * 20 + 4);
+    let n: u32 = load32(toks, i * 20 + 8);
+    let r: u64 = 0;
+    let k: u32 = 0;
+    if n >= 2 && load8(src, st) == 48 && (load8(src, st + 1) == 120 || load8(src, st + 1) == 88) {
+        k = 2;
+        while k < n {
+            let c: u32 = load8(src, st + k);
+            let d: u32 = 0;
+            if c >= 48 && c <= 57 {
+                d = c - 48;
+            } else if c >= 97 && c <= 102 {
+                d = c - 87;
+            } else if c >= 65 && c <= 70 {
+                d = c - 55;
+            }
+            r = r * (16 as u64) + (d as u64);
+            k = k + 1;
+        }
+        return r;
+    }
+    while k < n {
+        r = r * (10 as u64) + ((load8(src, st + k) - 48) as u64);
+        k = k + 1;
+    }
+    return r;
+}
+
+/// `lgc` 的单位 -> 纳秒倍数（与参考实现 `LGC_UNITS` 同一张表；裸数字按纳秒收）。
+fn lgc_unit(src: ptr, toks: ptr, i: u32) -> u64 {
+    if tok_is(src, toks, i, "us") {
+        return 1000 as u64;
+    }
+    if tok_is(src, toks, i, "ms") {
+        return 1000000 as u64;
+    }
+    if tok_is(src, toks, i, "s") {
+        return 1000000000 as u64;
+    }
+    if tok_is(src, toks, i, "m") {
+        return 60000000000 as u64;
+    }
+    return 1 as u64;                    // `ns` / 裸数字
+}
+
+/// 入口块的窗口槽：每个窗口一对（`%lgc.on.N` i32 / `%lgc.dl.N` i64），编号按源码序。
+/// 与参考实现 `locals_prologue` 里那两行同序、同文本。
+fn emit_lgc_slots(s: ptr, out: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        emit_str(s, out, "  %lgc.on.");
+        emit_dec(s, out, i);
+        emit_str(s, out, " = alloca i32\n  %lgc.dl.");
+        emit_dec(s, out, i);
+        emit_str(s, out, " = alloca i64\n");
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 打开一个窗口：存下进入前的 on / deadline，置 on=1，按需写预算。
+/// 与参考实现 `_Ir._lgc_stmt` 的 `begin` 分支同序、同 temp 号。
+fn lgc_begin(s: ptr, out: ptr, hasb: u32, bval: u64) -> u32 {
+    if load32(s, 476) != 0 {           // 块已终结：参考实现直接返回（不占号、不压栈）
+        return 0;
+    }
+    let idx: u32 = load32(s, CG_LGC_N);
+    store32(s, CG_LGC_N, idx + 1);
+    let d: u32 = load32(s, CG_LGC_D);
+    store32(s, CG_LGC_STK + d * 4, idx);
+    store32(s, CG_LGC_D, d + 1);
+    emit_str(s, out, "  ");
+    let on: u32 = new_temp(s, out);
+    emit_str(s, out, " = load i32, ptr @__loment_gc_on\n  store i32 %t");
+    emit_dec(s, out, on);
+    emit_str(s, out, ", ptr %lgc.on.");
+    emit_dec(s, out, idx);
+    emit_str(s, out, "\n  ");
+    let dl: u32 = new_temp(s, out);
+    emit_str(s, out, " = load i64, ptr @__loment_gc_deadline\n  store i64 %t");
+    emit_dec(s, out, dl);
+    emit_str(s, out, ", ptr %lgc.dl.");
+    emit_dec(s, out, idx);
+    emit_str(s, out, "\n  store i32 1, ptr @__loment_gc_on\n");
+    if hasb == 1 {
+        if bval == 0 as u64 {
+            // 0 = 不限时：不读时钟，也不留预算。
+            emit_str(s, out, "  store i64 0, ptr @__loment_gc_deadline\n");
+        } else {
+            emit_str(s, out, "  ");
+            let now: u32 = new_temp(s, out);
+            emit_str(s, out, " = call i64 @__loment_now_ns()\n  ");
+            let add: u32 = new_temp(s, out);
+            emit_str(s, out, " = add i64 %t");
+            emit_dec(s, out, now);
+            emit_str(s, out, ", ");
+            let _dv: u32 = set_dec_val64(s, 0, bval);
+            emit_val(s, out, 0);
+            emit_str(s, out, "\n  store i64 %t");
+            emit_dec(s, out, add);
+            emit_str(s, out, ", ptr @__loment_gc_deadline\n");
+        }
+    }
+    return 0;
+}
+
+/// 恢复**一个**窗口（按编号）：把进入前存的 on / deadline 写回去。
+fn lgc_restore_one(s: ptr, out: ptr, idx: u32) -> u32 {
+    emit_str(s, out, "  ");
+    let on: u32 = new_temp(s, out);
+    emit_str(s, out, " = load i32, ptr %lgc.on.");
+    emit_dec(s, out, idx);
+    emit_str(s, out, "\n  store i32 %t");
+    emit_dec(s, out, on);
+    emit_str(s, out, ", ptr @__loment_gc_on\n  ");
+    let dl: u32 = new_temp(s, out);
+    emit_str(s, out, " = load i64, ptr %lgc.dl.");
+    emit_dec(s, out, idx);
+    emit_str(s, out, "\n  store i64 %t");
+    emit_dec(s, out, dl);
+    return emit_str(s, out, ", ptr @__loment_gc_deadline\n");
+}
+
+/// `lgc` 的 `close`（窗口体之后那条兄弟语句）：恢复正常就走恢复，块已终结就**只跳过**
+/// （参考实现 `if not self.terminated and self.lgc_open:` —— 终结时连栈都不弹）。
+fn lgc_close(s: ptr, out: ptr) -> u32 {
+    let d: u32 = load32(s, CG_LGC_D);
+    if load32(s, 476) != 0 || d == 0 {
+        return 0;
+    }
+    let idx: u32 = load32(s, CG_LGC_STK + (d - 1) * 4);
+    store32(s, CG_LGC_D, d - 1);
+    return lgc_restore_one(s, out, idx);
+}
+
+/// `return` / 函数末尾：所有**还开着**的窗口按逆序恢复（`docs/306`）。
+fn lgc_restore_all(s: ptr, out: ptr) -> u32 {
+    let d: u32 = load32(s, CG_LGC_D);
+    while d > 0 {
+        let idx: u32 = load32(s, CG_LGC_STK + (d - 1) * 4);
+        lgc_restore_one(s, out, idx);
+        d = d - 1;
+        store32(s, CG_LGC_D, d);
+    }
+    return 0;
+}
+
+/// 一条 `lgc` 语句（`docs/306`）：`end` / `start` / `start { … }` / `start(预算) { … }`。
+///
+/// 窗口体在这里**就地当一个块发**（`while !}` 那条循环，和 if/while 的体同一份做法）——
+/// 参考实现是把体摊平成兄弟语句，两者对**发射出的指令序列**是同一件事。
+/// 返回下一条语句的 token 下标。
+fn lgc_stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
+    let act: u32 = j + 1;
+    if tok_is(src, toks, act, "end") {
+        if load32(s, 476) == 0 {
+            emit_str(s, out, "  store i32 0, ptr @__loment_gc_on\n");
+        }
+        return act + 2;                       // 跳过 `;`
+    }
+    let k: u32 = act + 1;
+    let hb: u32 = 0;
+    let bv: u64 = 0 as u64;
+    if tok_is(src, toks, k, "(") {
+        // `lgc start(10ms)`：**编译期**字面量 + 可选单位（ns/us/ms/s/m，裸数字按 ns）。
+        let ni: u32 = k + 1;
+        let un: u32 = ni + 1;
+        let mm: u64 = 1 as u64;
+        if tok_kind(toks, un) == 0 {
+            mm = lgc_unit(src, toks, un);
+            un = un + 1;
+        }
+        hb = 1;
+        bv = lgc_lit(src, toks, ni) * mm;
+        k = un;
+        if tok_is(src, toks, k, ")") {
+            k = k + 1;                    // 跳过预算的 `)`
+        }
+    }
+    if tok_is(src, toks, k, "{") {
+        lgc_begin(s, out, hb, bv);
+        let m: u32 = k + 1;
+        while !tok_is(src, toks, m, "}") && tok_kind(toks, m) != 4 {
+            m = stmt(s, out, src, toks, m, ret);
+        }
+        lgc_close(s, out);
+        return m + 1;                         // 跳过 `}`
+    }
+    // `lgc start;`：恢复收集器（运行期状态，不做词法恢复）。
+    if load32(s, 476) == 0 {
+        emit_str(s, out, "  store i32 1, ptr @__loment_gc_on\n");
+    }
+    return k + 1;                             // 跳过 `;`
+}
+
 fn emit_runtime(s: ptr, out: ptr) -> u32 {
     emit_str(s, out, "\n; ---- Loment freestanding 运行时 (M31: 无 libc) ----\ndefine internal i32 @__loment_memcmp(ptr %a, ptr %b, i64 %n) {\nentry:\n  br label %loop\nloop:\n  %i = phi i64 [ 0, %entry ], [ %i1, %cont ]\n  %done = icmp uge i64 %i, %n\n  br i1 %done, label %eq, label %body\nbody:\n  %pa = getelementptr i8, ptr %a, i64 %i\n  %pb = getelementptr i8, ptr %b, i64 %i\n  %ca = load i8, ptr %pa\n  %cb = load i8, ptr %pb\n  %ne = icmp ne i8 %ca, %cb\n  br i1 %ne, label %diff, label %cont\ncont:\n  %i1 = add i64 %i, 1\n  br label %loop\ndiff:\n  %da = zext i8 %ca to i32\n  %db = zext i8 %cb to i32\n  %r = sub i32 %da, %db\n  ret i32 %r\neq:\n  ret i32 0\n}\n\n");
     emit_str(s, out, "define internal void @__loment_memset(ptr %p, i8 %v, i64 %n) {\nentry:\n  br label %loop\nloop:\n  %i = phi i64 [ 0, %entry ], [ %i1, %body ]\n  %done = icmp uge i64 %i, %n\n  br i1 %done, label %end, label %body\nbody:\n  %q = getelementptr i8, ptr %p, i64 %i\n  store i8 %v, ptr %q\n  %i1 = add i64 %i, 1\n  br label %loop\nend:\n  ret void\n}\n\n");
@@ -9345,7 +9701,7 @@ fn emit_runtime(s: ptr, out: ptr) -> u32 {
 /// 所以单独发。判据与参考实现 `"@__loment_print_num" in text_all` 同义 —— 只有真调用
 /// 才会产生那条 `call`；`fn print_num(` 是声明，不算。
 fn uses_print_num(s: ptr, src: ptr, toks: ptr) -> u32 {
-    if load32(s, CG_PROF) != 1 {
+    if load32(s, CG_PROF) == 0 {
         return 0;
     }
     let i: u32 = 0;
@@ -9412,7 +9768,7 @@ fn runtime_needed(s: ptr, src: ptr, toks: ptr) -> u32 {
         }
         // `print_num` **只在 Tur 2 是内建**（`docs/296` §2.7）：Tur 1 里同名的用户函数
         // 不引用运行期，带上它就是多一份块、与参考实现分叉。
-        if load32(s, CG_PROF) == 1 && tok_kind(toks, i) == 0
+        if load32(s, CG_PROF) != 0 && tok_kind(toks, i) == 0
                 && tok_is(src, toks, i, "print_num") {
             hit = 1;
         }
@@ -9453,6 +9809,12 @@ fn heap_needed(s: ptr, src: ptr, toks: ptr, rt_on: u32) -> u32 {
             }
             j = j + 1;
         }
+    }
+    // `lgc` 那一档**必然带堆**（参考实现 `_needs_heap` 里那个 `or _gc_ctl`）：
+    // 收集器的正文引用 `@__loment_heap` / `@__loment_off` / `@__loment_free`，
+    // 而窗口要能收集 —— 哪怕这份程序一个 `alloc` 都没写。
+    if load32(s, CG_LGC) == 1 {
+        return 1;
     }
     let i: u32 = 0;
     while tok_kind(toks, i) != 4 {
@@ -9569,6 +9931,54 @@ fn gc_auto_tier(src: ptr, toks: ptr) -> u32 {
         i = i + 1;
     }
     return 0;
+}
+
+/// 本单元出现过 `lgc` 吗（`docs/306`，Tur 2026.3）。`prof` 必须是 2 —— 旧版次里
+/// `lgc` 是**普通标识符**（`lgc end;` 在老版次里只是一个未声明的名字），不拖任何运行期。
+///
+/// 认法与参考实现的 `_lgc_sites` 同义：**一条 `lgc start` / `lgc end` 语句**。
+/// 只看 token 形状（ident `lgc` + ident `start`/`end`），不依赖 AST。
+fn has_lgc(src: ptr, toks: ptr, prof: u32) -> u32 {
+    if prof != 2 {
+        return 0;
+    }
+    let i: u32 = 0;
+    while tok_kind(toks, i) != 4 {
+        if tok_kind(toks, i) == 0 && tok_is(src, toks, i, "lgc")
+                && tok_kind(toks, i + 1) == 0
+                && (tok_is(src, toks, i + 1, "start") || tok_is(src, toks, i + 1, "end")) {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 一个函数体 `[b, e)` 里有多少个 `lgc start { … }` **窗口**（入口块按它开槽）。
+///
+/// 与参考实现的 `_count_lgc_windows` 同值：那边数 AST 里的 `begin` 节点，这边数
+/// token 里的 `lgc start` + 可选的 `(预算)` + `{`。窗口体已经摊平成兄弟语句，
+/// 所以扫平 token 流就够 —— 不需要进任何块。
+fn lgc_windows(src: ptr, toks: ptr, b: u32, e: u32) -> u32 {
+    let n: u32 = 0;
+    let i: u32 = b;
+    while i < e && tok_kind(toks, i) != 4 {
+        if tok_kind(toks, i) == 0 && tok_is(src, toks, i, "lgc")
+                && tok_is(src, toks, i + 1, "start") {
+            let k: u32 = i + 2;
+            if tok_is(src, toks, k, "(") {
+                while k < e && !tok_is(src, toks, k, ")") && tok_kind(toks, k) != 4 {
+                    k = k + 1;
+                }
+                k = k + 1;
+            }
+            if tok_is(src, toks, k, "{") {
+                n = n + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return n;
 }
 
 /// 本单元声明了 `choose runtime` 吗（`docs/217`）—— 那是**强制带**那一半。
@@ -9697,12 +10107,21 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32) -> u32 {
     store32(s, 484, 0);   // 局部数
     store32(s, 572, gc_alpha_tier(src, toks));   // L0 只在 `gc_auto_alpha` 档上跑
     store32(s, 576, gc_auto_tier(src, toks));    // 自动收集只在 `gc_auto` 档上跑
+    // `lgc` 的时间控制（`docs/306`）：只在 Tur 2026.3 且源里真写了 `lgc` 才发那一段。
+    // **在任何预扫描之前定** —— `runtime_needed` / `heap_needed` 都要读它。
+    store32(s, CG_LGC, has_lgc(src, toks, prof));
     // **LMS 七级开关的实际集合**（`docs/253` §11.4，2026-10-18）：档铺初值 + 显式覆盖。
     // 位序 = 七级的次序（check=1 manage=2 guard=4 reject=8 crash=16 restart=32 seed=64）。
     // 与参考实现 `_lms_level` 同一个来源，判据是产物的字节。
     store32(s, 588, lms_mask(src, toks));
     // 这两个预扫描要读 572 —— **顺序不能反** (它们在 alpha 档要跳过被提升的 alloc)
     store32(s, 512, runtime_needed(s, src, toks));
+    if load32(s, CG_LGC) == 1 {
+        // `lgc` 的语句引用 `@__loment_gc_on` / `@__loment_gc_deadline` —— 参考实现按
+        // `"@__loment_" in text_all` 判，于是这一段**一定**被发出。缺了它产物引用
+        // `@__loment_abort` 却没有定义（`__loment_maybe_collect_ctl` 的调用者仍然需要运行时）。
+        store32(s, 512, 1);
+    }
     // `choose runtime` = **强制带**（`docs/217`）：用不到也发 `_IR_RUNTIME`。
     // 参考实现那一半是 `if rt_on or "@__loment_" in text_all:` —— 同一个或。
     let rt_on: u32 = rt_tier(src, toks);
@@ -10001,30 +10420,31 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32) -> u32 {
             if extern_named(s, src, toks, "malloc") == 0 {
                 emit_str(s, out, "declare ptr @malloc(i64)\n");
             }
-            emit_heap_indirect(s, out, 0, lms_rescue);
+            emit_heap_indirect(s, out, 0, lms_rescue, load32(s, CG_LGC));
             indirect = 1;
         } else if load32(s, 544) == 1 && load32(s, 572) != 1 {
             emit_str(s, out, "; loment-heap: ffi 1048576\n");
-            emit_heap_indirect(s, out, 1, lms_rescue);
+            emit_heap_indirect(s, out, 1, lms_rescue, load32(s, CG_LGC));
             indirect = 1;
         } else {
             if load32(s, 544) == 1 {
                 emit_str(s, out, "; loment-heap: static 65536\n");
             }
-            emit_heap(s, out, lms_rescue);
+            emit_heap(s, out, lms_rescue, load32(s, CG_LGC));
         }
     }
     // **线程标志**（`#778`）：收集器读它、`thread_spawn` 置它。参考实现的门槛是
-    // `_has_threads or (gc_any and heap)` —— 这里同一条（次序 HEAP→THREADS→LOCK→ROOTS）。
-    if load32(s, 556) == 1 || (gc_any(s) == 1 && load32(s, 516) == 1) {
+    // `_has_threads or ((gc_auto or gc_alpha or _gc_ctl) and heap)` —— 这里同一条
+    // （次序 HEAP→THREADS→LOCK→ROOTS）。
+    if load32(s, 556) == 1 || (gc_hook(s) == 1 && load32(s, 516) == 1) {
         emit_rt_threads(s, out);
     }
     // **运行期锁**：只有真起线程的产物才发（非线程程序的产物逐字节不变）。
     if load32(s, 556) == 1 {
         emit_rt_lock(s, out);
     }
-    if gc_any(s) == 1 {
-        // **根表跟着 `gc_any` 发**（与参考实现同形）—— 函数里的指针槽会往它写，定义必须在；
+    if gc_hook(s) == 1 {
+        // **根表跟着 `gc_hook` 发**（与参考实现同形）—— 函数里的指针槽会往它写，定义必须在；
         // 而收集器**跟着堆发**（下面那一层 `516` 门）。次序 HEAP→ROOTS→GC。
         emit_roots(s, out);
         if load32(s, 516) == 1 {
@@ -10039,6 +10459,11 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32) -> u32 {
                 emit_gc(s, out);
             }
         }
+    }
+    if load32(s, CG_LGC) == 1 {
+        // **只在源里出现 `lgc` 时发**（`docs/306`）：没写的程序产物一个字节都不变。
+        // 手工档初值 0（默认不收集），自动两档初值 1（`lgc end` 才是暂停）。
+        emit_lgc_runtime(s, out);
     }
     // 外部函数的 `declare` (docs/173): 每个外部符号一条, 按名字去重, **放在函数体之前**。
     // 位置对着参考实现排: `emit_llvm` 把它们追加进 `globals_`, 而 `globals_` = [declares] +

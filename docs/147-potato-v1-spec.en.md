@@ -1,5 +1,5 @@
 <!-- translated-from: docs/147-potato-v1-spec.md -->
-<!-- source-sha256: 6ae38eae2e816b023b996721b79c7ca166f9383d15834dda7057d8ba48a344f1 -->
+<!-- source-sha256: 1c84f63b88933480545906e953d49d33c97d87f2658d3529ae7136d70960b290 -->
 
 # 147 · Potato v1: formal-object specification and the wave C measurement protocol
 

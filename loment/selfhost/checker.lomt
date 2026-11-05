@@ -4524,14 +4524,15 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
             // 关键字 (`return (a)` / `if (b)`) / 枚举构造 (`E::V(x)`) / 域检查
             // (`guard NAME(idx)`) / 方法调用 (`x.m(...)`)。
             // i>0 是必须的: i-1 在下溢时会变成巨大的下标, 读出缓冲区外的垃圾。
+            // `lgc start(10ms)` 的预算**不是一次调用**（`docs/309`）：`start`
+            // 前面那个词是 `lgc`，语法位置上它是语句头。不排掉就会把 `start`
+            // 当成未定义的函数（E002），而参考实现那边它是 `Lgc` 的预算字段。
+            // （注释放进条件中间会让两个格式化器对"续行怎么并"给出不同答案。）
             if i > 0 && chk_tok_kind(t, i) == 0 && chk_tok_is(src, t, i + 1, "(")
                     && chk_is_kw(src, t, i) == 0
                     && !chk_tok_is(src, t, i - 1, ":")
                     && !chk_tok_is(src, t, i - 1, ".")
                     && !chk_tok_is(src, t, i - 1, "guard")
-                    // `lgc start(10ms)` 的预算**不是一次调用**（`docs/309`）：`start`
-                    // 前面那个词是 `lgc`，语法位置上它是语句头。不排掉就会把 `start`
-                    // 当成未定义的函数（E002），而参考实现那边它是 `Lgc` 的预算字段。
                     && !(load32(oc, 8) == 2 && chk_tok_is(src, t, i - 1, "lgc")) {
                 let nl: u32 = tok_len(t, i);
                 if nl > 0 {

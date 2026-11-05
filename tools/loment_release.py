@@ -115,6 +115,9 @@ GLOBS = [
     # 对照物三把不同的尺子 —— L0 字节 / 独立推出的布局 / FreeType。
     "tools/loment_lumtui_test.py",
     "tools/loment_cli_test.py",
+    # 开发套件 (docs/302): 给"改 Loment 本身"的人的 doctor/gate/bootstrap。
+    # **位置与自举那份 `lomrel.lomt` 对齐** —— 见下面那条注解。
+    "tools/loment_dev.py", "tools/loment_dev_test.py",
     # 固定容量盘点 (docs/345 那件事的"数"): 自举侧有多少个固定容量、几个越界时说不出话
     "tools/loment_caps.py", "tools/loment_caps_test.py",
     # 报错器 (docs/182 §6/§8)。**位置与自举那份 `lomrel.lomt` 对齐** —— 两处的条目顺序

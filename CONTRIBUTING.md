@@ -131,6 +131,37 @@ Before writing much Loment, read `.claude/skills/loment/SKILL.md`. It is the lan
 syntax, builtins, the E001–E027 codes, and the traps that cost the most time — and it ships with
 the toolchain (`loment skill --print`).
 
+## The development kit
+
+Changing the language itself has three chores that are not obvious from the tree: which environment
+the gate judges in, which command runs it, and whether the self-hosted bootstrap is working or hung.
+`tools/loment_dev.py` and `.devcontainer/` exist for those three and for nothing else.
+
+**The environment is the CI image.** Every gate job runs in `ghcr.io/loment-lang/loment-ci`, built
+from [.github/ci/Dockerfile](.github/ci/Dockerfile) — Ubuntu 24.04, LLVM 19, Python 3, rustc, Go,
+JDK, Node 20, `gh`, gdb, QEMU. [.devcontainer/devcontainer.json](.devcontainer/devcontainer.json)
+uses the same image digest, so "it fails for me but not on CI" stops being an environment question:
+open the checkout in VS Code and choose **Reopen in Container**, or start a Codespace. The image is
+amd64 only, and it is public so a fork can pull it. On first create the container marks the
+workspace as a safe git directory and runs the doctor below.
+
+Three commands cover the rest:
+
+```
+python3 tools/loment_dev.py doctor      # what this checkout is missing, and how to fix it
+python3 tools/loment_dev.py gate        # = python3 tools/ci.py --static-only -j <cores>
+python3 tools/loment_dev.py bootstrap   # = sh loment/bootstrap.sh (through WSL on Windows)
+```
+
+`doctor` names the missing component and the command that fixes it, and separates the ones that
+stop the gate from the ones that only make some criteria skip. `gate` sets `PYTHONUTF8=1` for its
+child processes — without it a Windows checkout decodes their output as GBK and reports failures
+that have nothing to do with your change. `bootstrap` goes through `wsl -e bash -lc` on Windows and
+states the expected 12–14 minutes before it starts, because a run with no output is not a hung run.
+
+Design notes, what was and was not actually verified, and the criteria that keep the two sides from
+drifting: [docs/302-lomentwork.md](docs/302-lomentwork.md).
+
 ## Run the gate before you open a pull request
 
 The gate is one command, and it is the same one for everyone:

@@ -72,6 +72,8 @@ E001–E038. Trust the codes section of this guide (and `loment explain E34`), n
 - **No PE-side FFI**, no PE threads, no PE `proc` bridge.
 - **No parallel language construct**: `par` is a design (`docs/285`); the compiler is
   single-threaded.
+- **No `lmgr` dimension yet**: `choose lmgr_true` and `loment lmgr` are designed in
+  `docs/303`; `CORE_DIMS` still has seven dimensions and the `lmgr` CLI is not shipped.
 - **No third-party debugger/LLDB path**: the DAP backend is ptrace-based and self-contained
   because this machine has no gdb/lldb.
 
@@ -84,6 +86,8 @@ The repository is FujoOS's Loment line (`loment/`, `lom/`, `tools/loment*.py`,
   repository. The Python tools below are the other set, the older model of `docs/168` (the
   `materialize` path). The two are not the same thing; do not mix them.
 
+- `python tools/loment_dev.py` and `.devcontainer/` - the **development kit** for changing
+  Loment itself (`docs/302`): environment doctor, gate shard plan, bootstrap.
 - `python tools/loment.py lib ...` - **the library system** (`docs/168`): `tree` (dependency tree
   plus each library's instance count), `id` (instance identity), `cap` (capability-requirement
   closure with provenance), `check` (conflicts), `materialize` (flatten nesting and multiple

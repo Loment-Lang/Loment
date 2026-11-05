@@ -33,6 +33,10 @@ What matters when you use it:
 - **`choose vm` only records the dimension today.** The artifact is **byte-identical to
   `no_vm`** and carries no bytecode. The interpreter is a separate tool: `loment-lvm FILE`
   (the packaged binary) or `python tools/lvm.py FILE.lomt` in a checkout.
+- **The VM accepts two entry shapes.** `_start` and `command_main(argv, argc)` (the VM
+  synthesises argv the way `/proc/self/cmdline` looks); an `interrupt fn` entry and a
+  `thread_spawn` target are **refused by name**, not reported as "no `_start`" (`docs/243`
+  §3.5).
 - **T1 does not record types.** The input is typed LLVM IR, so "this `add i32` saw an i32" is
   not new information. It records only what is statically unavailable: block counts, edge
   counts, call-site targets/counts.
@@ -43,6 +47,9 @@ What matters when you use it:
   frames, `STEP_CAP = 50,000,000` instructions **per call**, `MAX_DEPTH = 128` (the mirror uses
   32), and `llvm.trap` is defined as **132** with a site line on stderr
   (`lvm: llvm.trap at <fn>:<block>#<index>`).
+- **Deterministic counters**: `lvm --counters-out PATH` writes instructions / decodes /
+  tuple-reads / specializations / deopts. T0 decodes once per executed instruction; T2
+  decodes once per function and reads compiled tuples per instruction (`docs/226` §2.2.3).
 - **Do not grade it by wall-clock.** The repo's rule is that gates use deterministic counts
   (decode counts, instruction counts), not ratios; the same workload varies 3–5× across
   machines.

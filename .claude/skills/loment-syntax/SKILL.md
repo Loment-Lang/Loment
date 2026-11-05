@@ -23,7 +23,7 @@ you are reading. The entry skill (`loment`) carries the map; this file carries i
 | Export | Add `pub` for cross-module visibility: `pub fn` / `pub struct` / `pub const` |
 | Constant | `const NAME: u32 = 3` - the initialiser is **one integer literal** (decimal or hex, optional `-`); it is not an expression, and there are no string constants - see 6.1.8 |
 | Variable | `let x: u32 = e;`, assignment `x = e;` - **the type annotation is required**; the language has no type inference |
-| Control flow | `if` / `else if` / `else`, `while`, `for i in lo..hi` (upper bound exclusive), `return <expr>;` (the value is **required**). **Tur 2 adds** `for x in xs`, `break` / `continue`, and bare `return;` in unit functions - see 2.0.4 |
+| Control flow | `if` / `else if` / `else`, `while`, `for i in lo..hi` (upper bound exclusive), `return <expr>;` (the value is **required**). **Tur 2 adds** `for x in xs`, `break` / `continue`, bare `return;` in unit functions, and `defer f(a, b);` - see 2.0.4 |
 | Struct | `struct S { a: u32, b: u32 }`; literal `S { a: 1, b: 2 }`; field `s.a` |
 | Enum | `enum E { A, B(u32) }`; construction `E::B(3)`; no payload `E::A` |
 | `match` | `match x { E::A => { … } E::B(v) => { … } _ => { … } }` - **arm bodies are blocks**; exhaustive (or use `_`) |
@@ -38,6 +38,7 @@ you are reading. The entry skill (`loment`) carries the map; this file carries i
 | Strings | `"..."`, escapes exactly `\n \t \r \0 \\ \"`; **any other escape is an error** (E19), not a silent degradation; the operations are the `str_*` builtins in section 3 |
 | Raw foreign block | `let c { …raw bytes… }` / `py { … }`, after `command <lang>` / `foruse <lang>` - see 2.0.12 |
 | Audit bypass | `lspe pass "reason" { … }` - the reason is mandatory (E38), section 5.1.5 |
+| Defer | `defer f(a, b);` (Tur 2) - a **call**, block-scoped, LIFO, arguments evaluated at the `defer`; not run on panic. See 2.0.4 |
 | Comments | `//`, `/* */`; `///` is a doc comment (`loment doc` extracts those) |
 | Operators | Precedence as in Rust: `\|\| && == != < <= > >= \| ^ & << >> + - * / %`, unary `- !` |
 

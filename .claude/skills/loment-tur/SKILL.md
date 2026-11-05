@@ -139,7 +139,7 @@ Everything here is **Tur 2 only**. Each entry says what it lowers to and what it
 | **bare `return;`** | `fn f() { if bad { return; } … }` | early exit from a **unit** function (`fn f()`, no `-> T`) | only in Tur 2 **and** only when the function has no return type; `return;` in a `-> T` function is still E19 |
 | **`orelse` / `catch`** | `let a: u32 = maybe orelse 0;` / `let b: u32 = risky() catch 0;` | switch on the two-variant enum; success takes the payload, failure takes the fallback | v1 is **only the right-hand side of `let` / assignment**, and the enum must have **exactly two variants with the first carrying the payload** (`Option { Some(T), None }`, `Result { Ok(T), Err(E) }`). The fallback is **lazy** (evaluated only on the failing branch). `catch \|e\| { … }` and `catch return` are Tur 3 |
 | **`print_num`** | `print_num(n);` | decimal, optional `-`, **no newline**, one `write` | a **Tur 2 builtin**, any integer type, widened by sign to `i64`. Lives in the runtime block, so `no_runtime` refuses it **by name (E31)** - add `choose runtime`. In Tur 1 the name is an ordinary identifier, so a user-defined `fn print_num` is not shadowed |
-| **`defer stmt;`** | - | - | **designed, not implemented** (`docs/296` §2.3). Do not use it; it is not in this edition |
+| **`defer f(a, b);`** | `defer free(p);` | the **call** runs when the enclosing block exits: normal fall-through, `return`, `?`, `break` / `continue`; the arguments are evaluated where the `defer` is written | v1 accepts a **call only** (`defer 1;`, and `defer` outside a function body, are E19). LIFO within one block; **not** run on panic / trap / process exit. Self-hosted limits: **8 per function, 4 arguments, 64 nesting levels**, refused by name; the reference implementation has no caps. The Rust translation backend refuses `defer` (`docs/296` §2.3) |
 
 Two properties worth stating because they are checked, not assumed:
 
@@ -330,6 +330,7 @@ is why bytes that no string literal can carry (NUL, non-UTF-8) survive.
 | Switches per file | 500 | E22 |
 | Nesting | 64 levels (blocks and brackets share the counter) | a diagnostic (E023) on both implementations |
 | Bump heap | 64 KiB (sealed) / 1 MiB (`hosted`) | SIGILL, exit 132, nothing printed |
+| `defer` captures (self-hosted) | 8 per function, 4 arguments each, 64 nesting levels | named error (`too many defer statements…`) |
 | Root table (`gc_auto`) | 1024 slots | refused by name, never silently written past |
 | Unit size | fixed capacity | E33 |
 
@@ -400,6 +401,7 @@ statement   := "let" "mut"? IDENT ":" type "=" expr ";"
              | "return" expr? ";"
              | "break" ";" | "continue" ";"                  // Tur 2
              | "lspe" "pass" STRING block
+             | "defer" expr ";"                               // Tur 2; the expression must be a call
              | block
              | expr ";"
 

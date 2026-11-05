@@ -163,9 +163,14 @@ knowing costs half a day. The text says which ones 0.1.5 already fixed.
 
 ### 6.4 Tur 2 traps (the ones that are new, not inherited from Rust)
 
-24. **`defer` does not exist yet.** It is designed in `docs/296` §2.3 and listed for Tur 2, but
-    it is not implemented. `defer free(p);` is parsed as an expression statement and fails.
-    Use an explicit `free` on every exit path.
+24. **`defer` is Tur 2 only, call-shaped, and capped.** `defer free(p);` runs the **call** when
+    the enclosing block exits - on normal fall-through, `return`, `?`, and loop `break` /
+    `continue`, but **not** on panic / trap / exit. Arguments are evaluated where the `defer` is
+    written, and multiple defers in one block run LIFO. v1 takes a **call only**: `defer 1;` and
+    a `defer` outside a function body are E19. The self-hosted compiler caps it at **8 per
+    function, 4 arguments, 64 nesting levels** and refuses beyond that by name; the reference
+    compiler has no caps. The Rust translation backend refuses `defer`. In Tur 1 the word is an
+    ordinary identifier, so a user `fn defer` still works.
 25. **`orelse` / `catch` are not general expression operators.** They work only on the right-hand
     side of a `let` or an assignment, and only for an enum with **exactly two variants whose
     first carries the payload** (`Option`, `Result`). `f(a orelse 0)`, `return x orelse 0;` and

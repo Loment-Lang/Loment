@@ -27,11 +27,12 @@ declarations; see `loment-tur` 2.0.2). **Every `check` / `build` / `run` / `ir` 
 `grammar tur2 -> tur2026.2 (Tur 2)`); `tur_edition()` returns it at runtime, and
 `loment version <exe>` reads it back from the artifact.
 
-**Tur 2026.2** adds `for x in xs`, `break` / `continue`, bare `return;` in unit functions,
-`orelse` / `catch`, `print_num`, and the sugar `def` / `elif` / `and` / `or` / `not`. They are
-**Tur 2 only**: Tur 1 keeps those words as ordinary identifiers, so old files keep their
-meaning. `defer` is designed but **not in this edition**. The details and every restriction are
-in `loment-tur`, section 2.0.4.
+**Tur 2026.2** (`tur2026.2`, or the 2026 shorthand `tur2`) adds the sugar (`def f()`, `a and
+b` / `a or b` / `not a`, `elif cond { }`), `for x in xs`, `break` / `continue`, bare `return;`
+in unit functions, `orelse` / `catch`, `print_num`, and **`defer`**. They are **Tur 2 only**:
+Tur 1 keeps those words as ordinary identifiers, so old files keep their meaning. The details
+and every restriction are in `loment-tur` 2.0.4 (the runnable versions are `loment_p8_test`
+M91, M94, M95 and M96).
 
 The same program can also be written with C / C++ / Java / C# / Go / Python spelling, **changing
 the spelling and nothing else** - recognised **by extension** (`.c` / `.cpp` / `.java` / `.cs` /

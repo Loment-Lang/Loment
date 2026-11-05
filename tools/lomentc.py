@@ -4889,6 +4889,8 @@ _RUNTIME_SITES: dict[str, str] = {
     # `#778`：真线程要把运行期的锁与活线程计数带进产物（`alloc`/`free`/根表在
     # 线程之间共享）。所以它和 `alloc` 一样，是"会把运行期拖进来"的构造。
     "thread_spawn": "`thread_spawn`（运行期锁）",
+    # `docs/306`：`lgc` 发的是运行期的控制全局与四个函数 —— 与 `guard` 同级。
+    "lgc": "`lgc`（GC 时间控制）",
 }
 
 
@@ -4926,7 +4928,7 @@ def _runtime_sites(toks: list, profile: str = "tur2026.1") -> list[tuple[str, in
         if prev == "fn":
             continue
         nxt = toks[i + 1] if i + 1 < n else None
-        if t.val == "guard":
+        if t.val == "guard" or t.val == "lgc":
             hit = nxt is not None and nxt.kind == "ident"
         else:
             hit = nxt is not None and nxt.kind == "punct" and nxt.val == "("
@@ -6497,6 +6499,29 @@ def _count_gc_ladder(mod: Module) -> dict:
             "l3": total - l0 - l0_5 - l1 - l2, "total_sites": total}
 
 
+def _count_gc_control(mod: Module) -> dict:
+    """`lgc` 的站点统计（`docs/306`，Potato v21）。
+
+    只数**根单元**的语句（与 `guards` / `boundary` 同一个视图）。`manual_collector`
+    是**交叉**那条：`gc_manual` 且至少一处 `lgc` 时，产物里确实带了收集器 ——
+    这是 `gc_manual` 的旧承诺之外唯一被允许的例外，必须能不看源码读出来。
+    """
+    n = {"pauses": 0, "resumes": 0, "windows": 0, "timed_windows": 0}
+    for s in _lgc_sites(mod):
+        if s.action == "pause":
+            n["pauses"] += 1
+        elif s.action == "resume":
+            n["resumes"] += 1
+        elif s.action == "begin":
+            n["windows"] += 1
+            if s.budget is not None:
+                n["timed_windows"] += 1
+    total = n["pauses"] + n["resumes"] + n["windows"]
+    n["manual_collector"] = (mod.chooses.get("gc", CORE_DEFAULTS["gc"]) == "gc_manual"
+                             and total > 0)
+    return n
+
+
 def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -> str:
     """M45: 形式对象 v1 —— 覆盖泛型/切片/字符串, 并由独立校验器自检 (M46)。"""
     import copy as _c
@@ -6618,7 +6643,7 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # v20 = v19 + **系统索引** `systems`（`docs/147` §5.4 / #1022）：六个系统各一条
         # `{state, detail, cost}`，`detail` **指向**已有的明细字段、不复制数字。
         # 于是"这份产物有哪些系统、各自的状态与成本"是**一次查表**读完的。
-        "potato": "v20",
+        "potato": "v21",
         "unit": mod.name,
         "language": "loment",
         # **表层语法**（`docs/188` §2）—— 与 `language` 分工不同, 别混:
@@ -6734,6 +6759,9 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # **GC 的组成**（`docs/210` §3/§5, v10）—— 在 `raw_mod`（单态化之前）上数，理由
         # 见 `_count_gc_ladder`：自举侧看到的是**源 token**，只有单态化前那份视图与它对齐。
         "gc_ladder": _gc_ladder,
+        # **GC 的时间控制**（v21，`docs/306`）：`lgc` 的暂停/恢复/窗口计数，外加
+        # `manual_collector` —— 手动档下用了 `lgc` 就会带收集器，这条让例外可判。
+        "gc_control": _count_gc_control(mod),
         # **面的组成**（`docs/222`, v11）—— 与 `boundary` **同一个视图**（`mod`），
         # 因为那条交叉不变量（`total_sites == boundary.syscalls`）要求两处数的是同一批站点。
         "surfaces": _count_surfaces(mod),

@@ -2027,6 +2027,57 @@ fn pt_gc(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
     return pt_qs(out, o, "gc_manual");
 }
 
+/// 本单元是不是**默认的手动档**（没写 `choose gc` 也算）—— `gc_control.manual_collector`
+/// 的交叉不变量要它（`docs/306`）。扫描口径与 `pt_gc` 同。
+fn pt_gc_is_manual(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+    let i: u32 = lo;
+    while i < hi && pt_kind(t, i) != 4 {
+        if pt_tis(unit, t, i, "choose")
+                && (pt_tis(unit, t, i + 1, "gc_manual") || pt_tis(unit, t, i + 1, "gc_auto")
+                    || pt_tis(unit, t, i + 1, "gc_auto_alpha")
+                    || pt_tis(unit, t, i + 1, "no_gc")) {
+            if pt_tis(unit, t, i + 1, "gc_manual") {
+                return 1;
+            }
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+/// `lgc` 的四种站点计数（`docs/306`，Potato v21）：回打包
+/// `pauses | resumes<<16 | windows<<32 | timed_windows<<48`。
+///
+/// **窗口** = `lgc start` 后面紧跟 `{` 或 `(`；`timed_windows` 只数带 `(` 的。
+/// 与参考实现 `_count_gc_control` 走同一份 token 形状（那边看 AST，这边看 token）。
+fn pt_lgc_counts(unit: ptr, t: ptr, lo: u32, hi: u32) -> u64 {
+    let np: u64 = 0;
+    let nr: u64 = 0;
+    let nw: u64 = 0;
+    let nt: u64 = 0;
+    let i: u32 = lo;
+    while i < hi && pt_kind(t, i) != 4 {
+        if pt_tis(unit, t, i, "lgc") && pt_kind(t, i + 1) == 0 {
+            if pt_tis(unit, t, i + 1, "end") {
+                np = np + 1;
+            }
+            if pt_tis(unit, t, i + 1, "start") {
+                if pt_tis(unit, t, i + 2, "(") {
+                    nt = nt + 1;
+                    nw = nw + 1;
+                } else if pt_tis(unit, t, i + 2, "{") {
+                    nw = nw + 1;
+                } else {
+                    nr = nr + 1;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return np | (nr << 16) | (nw << 32) | (nt << 48);
+}
+
 /// **运行期在不在**（`docs/175` §3.6, v9）。与 `pt_gc` 同形、同一个理由：开关声明已被
 /// `apply_switches` 吃掉，所以这里只认 `runtime` / `no_runtime` 两个词 ——
 /// 与参考实现的 `CORE_DIMS["runtime"]` 是同一张表。没写就是 `no_runtime`
@@ -5838,7 +5889,7 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     // 它在**最后** —— 与前面几维同形，且"这份产物在哪一档上"是**不读源码可判**的。
     o = pt_key(out, o, 1, "potato");
     // v20 = v19 + **系统索引** `systems`（`docs/147` §5 / `#1022`）。
-    o = pt_qs(out, o, "v20");
+    o = pt_qs(out, o, "v21");
     o = pt_str(out, o, ",\n");
     // `unit` 是**根**那份源的 `module` 名 —— 依赖在前, 所以它是根那个标记后面的名字
     // (不是第 1 个 token: 那是第一个依赖的名字)。
@@ -6032,6 +6083,39 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     o = pt_key(out, o, 2, "total_sites");
     o = pt_dec(out, o, ngl_tot as u64);
     o = pt_str(out, o, "\n");
+    o = pt_ind(out, o, 1);
+    o = pt_str(out, o, "}");
+    o = pt_str(out, o, ",\n");
+    // **GC 的时间控制**（v21，`docs/306`）：`lgc` 的暂停/恢复/窗口计数。
+    let lgcpk: u64 = pt_lgc_counts(unit, t, lo, hi);
+    let lgcnp: u32 = (lgcpk & 65535) as u32;
+    let lgcnr: u32 = ((lgcpk >> 16) & 65535) as u32;
+    let lgcnw: u32 = ((lgcpk >> 32) & 65535) as u32;
+    let lgcnd: u32 = ((lgcpk >> 48) & 65535) as u32;
+    let lgcmc: u32 = 0;
+    if pt_gc_is_manual(unit, t, lo, hi) == 1 && (lgcnp + lgcnr + lgcnw) > 0 {
+        lgcmc = 1;
+    }
+    o = pt_key(out, o, 1, "gc_control");
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 2, "pauses");
+    o = pt_dec(out, o, lgcnp as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "resumes");
+    o = pt_dec(out, o, lgcnr as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "windows");
+    o = pt_dec(out, o, lgcnw as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "timed_windows");
+    o = pt_dec(out, o, lgcnd as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "manual_collector");
+    if lgcmc == 1 {
+        o = pt_str(out, o, "true\n");
+    } else {
+        o = pt_str(out, o, "false\n");
+    }
     o = pt_ind(out, o, 1);
     o = pt_str(out, o, "}");
     o = pt_str(out, o, ",\n");

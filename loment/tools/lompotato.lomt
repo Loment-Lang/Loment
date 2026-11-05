@@ -740,6 +740,10 @@ fn is_top_key(ver: u32, kp: ptr, kl: u32) -> u32 {
     if ver >= 20 && eq_lit(kp, kl, "systems") == 1 {
         return 1;
     }
+    // v21 = v20 + **GC 的时间控制**（`docs/306`）：`gc_control` 对象。
+    if ver >= 21 && eq_lit(kp, kl, "gc_control") == 1 {
+        return 1;
+    }
     return 0;
 }
 
@@ -2086,6 +2090,9 @@ fn validate(mem: ptr, tot: u32) -> u32 {
         if eq_lit(t, l, "v20") == 1 {
             ver = 20;
         }
+        if eq_lit(t, l, "v21") == 1 {
+            ver = 21;
+        }
     }
     if ver == NOTFOUND {
         let _c: u32 = bad(mem);
@@ -2151,6 +2158,9 @@ fn validate(mem: ptr, tot: u32) -> u32 {
     }
     if ver >= 20 {
         chk_systems(mem, doc);
+    }
+    if ver >= 21 {
+        chk_gc_control(mem, doc);
     }
     return 0;
 }
@@ -2305,6 +2315,93 @@ fn sys_cost_ok(mem: ptr, doc: u32, e: u32, k: str, has: u32, ck: str) -> u32 {
     }
     if got == want {
         return 1;
+    }
+    return 0;
+}
+
+/// `gc_control`（v21，`docs/306`）里的一格：非负整数就回值，否则记一次错并回 `NOTFOUND`。
+fn ctl_count(mem: ptr, g: u32, key: str) -> u32 {
+    let v: u32 = jget(mem, g, key);
+    if v == NOTFOUND || jnonneg(mem, v) == 0 {
+        let _b: u32 = bad(mem);
+        return NOTFOUND;
+    }
+    return json_as_u32(ptr_add(mem, M_IN), ptr_add(mem, M_ARENA), v);
+}
+
+/// 顶层 `gc` 的取值是不是 `want`。
+fn gc_is(mem: ptr, doc: u32, want: str) -> u32 {
+    let g: u32 = jget(mem, doc, "gc");
+    if g == NOTFOUND || jkind(mem, g) != 3 {
+        return 0;
+    }
+    let l: u32 = jstr(mem, g, ptr_add(mem, M_SB2), 4096);
+    return eq_lit(ptr_add(mem, M_SB2), l, want);
+}
+
+/// `gc_control`（v21，`docs/306`）: 五个键、四条不变量。
+///
+///   * 四个计数非负；`timed_windows <= windows`；
+///   * `manual_collector` 是布尔，且**恰好**等于"手动档 + 至少一处 `lgc`"；
+///   * `no_gc` 下出现任何 `lgc` 都是自相矛盾（E039 是编译期拒绝）。
+///
+/// 与 Python 的 `potato.validate` 逐条对齐，**连错的条数都要一致**。
+fn chk_gc_control(mem: ptr, doc: u32) -> u32 {
+    let g: u32 = jget(mem, doc, "gc_control");
+    if g == NOTFOUND || jkind(mem, g) != 1 {
+        let _b: u32 = bad(mem);
+        return 0;
+    }
+    let np: u32 = ctl_count(mem, g, "pauses");
+    let nr: u32 = ctl_count(mem, g, "resumes");
+    let nw: u32 = ctl_count(mem, g, "windows");
+    let nt: u32 = ctl_count(mem, g, "timed_windows");
+    let mc: u32 = jget(mem, g, "manual_collector");
+    let mcv: u32 = 0;
+    if mc == NOTFOUND || jbool(mem, mc) == 0 {
+        let _c: u32 = bad(mem);
+        mc = NOTFOUND;
+    } else if jkind(mem, mc) == 5 {
+        mcv = 1;
+    }
+    // 不认识的键: 一整批只记一次错（与 Python 的 `sorted(set - …)` 一条消息同形）。
+    let nextra: u32 = 0;
+    let m: u32 = jfirst(mem, g);
+    while m != NOTFOUND {
+        let kn: u32 = jmkey(mem, m);
+        let kl: u32 = jstr(mem, kn, ptr_add(mem, M_SB2), 4096);
+        let known: u32 = 0;
+        if eq_lit(ptr_add(mem, M_SB2), kl, "pauses") == 1
+                || eq_lit(ptr_add(mem, M_SB2), kl, "resumes") == 1
+                || eq_lit(ptr_add(mem, M_SB2), kl, "windows") == 1
+                || eq_lit(ptr_add(mem, M_SB2), kl, "timed_windows") == 1
+                || eq_lit(ptr_add(mem, M_SB2), kl, "manual_collector") == 1 {
+            known = 1;
+        }
+        if known == 0 {
+            nextra = nextra + 1;
+        }
+        m = jsib(mem, m);
+    }
+    if nextra > 0 {
+        let _x: u32 = bad(mem);
+    }
+    if np != NOTFOUND && nr != NOTFOUND && nw != NOTFOUND && nt != NOTFOUND
+            && mc != NOTFOUND {
+        if nt > nw {
+            let _t: u32 = bad(mem);
+        }
+        let total: u32 = np + nr + nw;
+        if gc_is(mem, doc, "no_gc") == 1 && total > 0 {
+            let _n: u32 = bad(mem);
+        }
+        let want: u32 = 0;
+        if gc_is(mem, doc, "gc_manual") == 1 && total > 0 {
+            want = 1;
+        }
+        if mcv != want {
+            let _m: u32 = bad(mem);
+        }
     }
     return 0;
 }

@@ -2723,7 +2723,7 @@ def test_l0_5_region_rule():
     """
     doc = json.loads(lomentc.emit_potato(parse(L05_SRC), ROOT))
     gl = doc["gc_ladder"]
-    assert doc["potato"] == "v20", doc["potato"]
+    assert doc["potato"] == "v21", doc["potato"]
     assert gl == {"l0": 1, "l0_5": 2, "l1": 0, "l2": 0, "l3": 0,
                   "total_sites": 3}, gl
     ir = lomentc.emit_llvm(parse(L05_SRC), ROOT)
@@ -4737,7 +4737,7 @@ def test_mixed_width_arithmetic_has_a_common_type():
 def test_lspe_dimension_defaults_open():
     """第七维：不写 `choose` 就是 `lspe_open_admin`，台账随产物一起发出（v16）。"""
     doc = json.loads(lomentc.emit_potato(lomentc.load(DEMO), ROOT))
-    assert doc["potato"] == "v20"
+    assert doc["potato"] == "v21"
     lp = doc["lspe"]
     assert lp["state"] == "lspe_open_admin"
     assert lp["set_by"] == "default"
@@ -4801,7 +4801,7 @@ def test_lspe_close_admin_is_recorded():
         p = Path(td) / "close.lomt"
         p.write_text(src, encoding="utf-8", newline=chr(10))
         doc = json.loads(lomentc.emit_potato(lomentc.load(p), ROOT))
-    assert doc["potato"] == "v20"
+    assert doc["potato"] == "v21"
     assert doc["lspe"]["state"] == "lspe_close_admin"
     assert doc["lspe"]["set_by"] == "source"
     # 关审计：普查不算，计数全零。
@@ -5356,6 +5356,10 @@ def test_lgc_is_a_tur2026_3_feature():
     except lomc.LomError as e:
         errs = [str(e)]
     assert errs, "运行期算出来的预算居然被收下了"
+    # `no_runtime` 是**保证**：产物里没有那段运行期，而 `lgc` 要发控制全局与四个函数。
+    nr = ("choose write grammar tur2026.3\nmodule m\nchoose no_runtime\n"
+          "fn f() { lgc end; }\n")
+    assert any("no_runtime" in e for e in lomentc.check(_lgc_load(nr), deps=[]))
     hard = LGC_SRC.replace("lgc start(2ms) {", "lgc start(2ms);\n    if true {")
     try:
         _lgc_load(hard)

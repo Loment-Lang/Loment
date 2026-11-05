@@ -137,7 +137,7 @@ def test_levels_reach_the_artifact() -> None:
     """判 D：`lms_levels` 进 Potato v18，七个布尔与编译器那张表逐条对上。"""
     mod, deps = _load("choose lms_forensic_admin")
     doc = json.loads(lomentc.emit_potato(mod, ROOT, deps))
-    assert doc["potato"] == "v20", doc["potato"]
+    assert doc["potato"] == "v21", doc["potato"]
     assert doc["lms"] == "lms_forensic_admin"
     assert doc["lms_levels"] == {
         "lms_check": True, "lms_manage": True, "lms_guard": True,
@@ -806,7 +806,7 @@ def test_lms_budgets_are_declared_and_recorded() -> None:
     assert tuple(lomentc.LMS_LEVEL_BUDGETS) == lomentc.LMS_TOGGLES
     mod, deps = _load("")
     doc = json.loads(lomentc.emit_potato(mod, ROOT, deps))
-    assert doc["potato"] == "v20", doc["potato"]
+    assert doc["potato"] == "v21", doc["potato"]
     assert doc["lms_budgets"] == want, doc["lms_budgets"]
     assert potato.validate(doc) == [], potato.validate(doc)
     print("      七级预算已声明；Potato v18 的 lms_budgets 与编译器同一张表")
@@ -836,6 +836,35 @@ def test_a_stateful_level_rejects_no_runtime() -> None:
     assert any("lms_manage" in e and "state" in e for e in errs), errs
     assert any("no_runtime" in e for e in errs), errs
     print("      预算改成 state => no_runtime 被拒，报文点名 lms_manage / state")
+
+
+def test_lgc_windows_are_the_same_on_four_products() -> None:
+    """`lgc` 的窗口在**四份产物**上一致（`docs/306`）：时钟走的是 228，T0/T2/T3 共用
+    同一个 `Executor.syscall`。窗口内收集 ⇒ 四份都跑完；暂停 ⇒ 三档 VM 都耗尽。"""
+    def emit(src: str) -> str:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "lgc.lomt"
+            p.write_text(src, encoding="utf-8", newline="\n")
+            m = lomentc.load(p)
+            errs = lomentc.check(m, deps=[])
+            assert not errs, errs
+            return lomentc.emit_llvm(m, ROOT, [])
+
+    base = ("choose write grammar tur2026.3\nmodule lgcwin\nchoose gc_manual\n"
+            "choose runtime\n\nfn churn(n: u32) -> u32 {\n%s"
+            "    let i: u32 = 0;\n    while i < n {\n"
+            "        let p: ptr = alloc(64);\n        store8(p, 0, 1);\n"
+            "        i = i + 1;\n    }\n%s    return 0;\n}\n\n"
+            "fn _start() { syscall4(60, churn(2000) as u64, 0, 0); }\n")
+    win = _run_four(emit(base % ("    lgc start(10s) {\n", "    }\n")), "lgcwin")
+    for name in ("T0", "T2", "T3", "native"):
+        rc, out, _ = win[name]
+        assert (rc, out) == (0, b""), f"窗口内的 {name}: {(rc, out)!r}"
+    paused = _run_four(emit(base % ("    lgc end;\n", "")), "lgcpause")
+    vms = {n: paused[n][0] for n in ("T0", "T2", "T3")}
+    assert vms["T0"] != 0 and vms["T0"] == vms["T2"] == vms["T3"], (
+        f"暂停时三档 VM 的结局应一致且非零：{vms}")
+    print(f"      lgc 窗口：四产物 rc=0；暂停：三档 VM 一致地耗尽 {vms}")
 
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

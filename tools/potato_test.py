@@ -576,6 +576,43 @@ def fixture_v20() -> dict:
     return d
 
 
+def fixture_v21() -> dict:
+    """一份合法的 **v21** 形式对象：v20 的再 + **`lgc` 的时间控制** `gc_control`。
+
+    `fixture_v20` 是 `gc_manual`，所以"至少一处 `lgc`"时 `manual_collector` 必须是
+    `true` —— 这条交叉不变量正是"手动档的收集器例外"能被不读源码读出来的原因。
+    """
+    d = fixture_v20()
+    d["potato"] = "v21"
+    d["gc_control"] = {"pauses": 1, "resumes": 1, "windows": 2,
+                       "timed_windows": 1, "manual_collector": True}
+    return d
+
+
+#: v21 的 `gc_control` 那几条规则的反例（`docs/306`）。作用在 **v21** 的对象上。
+MUTATORS_V21 = [
+    ("gc_control 整个缺掉", lambda d: d.pop("gc_control"), "gc_control 必须是对象"),
+    ("gc_control 多一个键", lambda d: d["gc_control"].__setitem__("budget", 1),
+     "不认识的键"),
+    ("计数为负", lambda d: d["gc_control"].__setitem__("windows", -1),
+     "gc_control.windows"),
+    ("预算窗口多于窗口",
+     lambda d: d["gc_control"].__setitem__("timed_windows", 3),
+     "timed_windows"),
+    ("manual_collector 不是布尔",
+     lambda d: d["gc_control"].__setitem__("manual_collector", 1), "必须是布尔"),
+    ("manual_collector 与档位打架",
+     lambda d: d["gc_control"].__setitem__("manual_collector", False),
+     "manual_collector 是"),
+    ("no_gc 却有 lgc",
+     lambda d: (d.__setitem__("gc", "no_gc"),
+                d.__setitem__("gc_control",
+                              {"pauses": 1, "resumes": 0, "windows": 0,
+                               "timed_windows": 0, "manual_collector": False})),
+     "两者定义上矛盾"),
+]
+
+
 #: v20 的 `systems` 那几条规则的反例（#1022）。作用在 **v20** 的对象上。
 #: 三条验收点各至少一条：**错 state / 错 cost / 缺系统**；另外把"指针"那两格也钉住。
 MUTATORS_V20 = [
@@ -638,6 +675,17 @@ def test_v19_adds_l0_5_without_rewriting_old_objects():
     d = fixture_v18()
     d["gc_ladder"]["l0_5"] = 0
     assert any("不认识的键" in e for e in potato.validate(d)), potato.validate(d)
+
+
+@test
+def test_v21_requires_the_gc_control_counts():
+    """v21 的 `gc_control`（`docs/306`）：正例合法，七条反例各钉一条规则。"""
+    assert potato.validate(fixture_v21()) == [], potato.validate(fixture_v21())
+    for name, mut, needle in MUTATORS_V21:
+        d = fixture_v21()
+        mut(d)
+        errs = potato.validate(d)
+        assert any(needle in e for e in errs), (name, errs)
 
 
 @test
@@ -1001,7 +1049,8 @@ def _cases() -> list[tuple[str, dict]]:
                                    ("v10", fixture_v10()), ("v11", fixture_v11()),
                                    ("v12", fixture_v12()), ("v16", fixture_v16()),
                                    ("v17", fixture_v17()), ("v18", fixture_v18()),
-                                   ("v19", fixture_v19()), ("v20", fixture_v20())]
+                                   ("v19", fixture_v19()), ("v20", fixture_v20()),
+                                   ("v21", fixture_v21())]
     # **`gc_manual` + `no_runtime` 是合法档**（"要运行期、但内存我自己管"的反面：
     # 不要运行期、手动回收）—— 它必须**不报错**。上面那张反例表只会钉"该拒的要拒",
     # 钉不住"不该拒的别拒"，所以这一条以**合法样本**的身份过孪生那一关。

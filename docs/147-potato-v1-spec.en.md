@@ -132,7 +132,7 @@ formal object and reconciles byte for byte".
 
 ## 5. Versioning and replay (M51)
 
-- the object carries its own version number; the validator accepts `v0` … **`v20`**, and an unknown version =
+- the object carries its own version number; the validator accepts `v0` … **`v21`**, and an unknown version =
   illegal. **A version is a step on the "set of fields" ladder, and the ladder only grows** — adding a
   required field to an old version would turn every existing object illegal, and the old versions are
   **promised to keep replaying** (last bullet in this section), so every new required field costs a version:
@@ -160,8 +160,9 @@ formal object and reconciles byte for byte".
   | `v18` | `lms_budgets` | `docs/253` §11.2.1 |
   | `v19` | `gc_ladder.l0_5` | `docs/210` §2.10 |
   | `v20` | **`systems`** (the six-system index; a reader starts here) | `docs/304` |
+  | `v21` | **`gc_control`** (`lgc` pause/resume/window counts + `manual_collector`) | `docs/306` |
 
-  The ladder **accumulates**: `v20` requires the fields of every version below it.
+  The ladder **accumulates**: `v21` requires the fields of every version below it.
 
 - **`gc` (v8)**: a **collection tier** — `gc_manual` (the program reclaims explicitly),
   `gc_auto` (the runtime reclaims), or `gc_auto_alpha` (the **hybrid**: static memory

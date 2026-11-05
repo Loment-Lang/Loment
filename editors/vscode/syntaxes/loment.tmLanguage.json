@@ -324,7 +324,7 @@
       "patterns": [
         {
           "name": "keyword.control.loment",
-          "match": "\\b(if|else|elif|while|for|in|match|return|as|break|continue)\\b"
+          "match": "\\b(if|else|elif|while|for|in|match|return|as|break|continue|lgc)\\b"
         }
       ]
     },

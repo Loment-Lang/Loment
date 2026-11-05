@@ -59,6 +59,19 @@ function out() {
 }
 
 /**
+ * 弹一条错误，**并同时写进输出通道**。
+ *
+ * `showErrorMessage` 只弹窗，不落盘 —— VS Code 的日志目录里只有输出通道与扩展宿主的
+ * 异常，于是"用户截图里那条红字"从磁盘上根本查不到（2026-11-04 就是这么漏的）。
+ * 写进 `LogOutputChannel` 之后它同时出现在「输出 → Loment」与
+ * `logs/<会话>/window1/exthost/<ident>/Loment.log`，`vscode_ext --logs` 能直接读。
+ */
+function fail(detail) {
+  out().error(detail);
+  return vscode.window.showErrorMessage(`Loment: ${detail}`);
+}
+
+/**
  * 工作区根: **包含这个文件的那个文件夹**; 单根工作区就是它自己; 没有文件夹就退回文件目录。
  *
  * 原先一律取 `folders[0]` —— 多根工作区里第二、第三个文件夹中的文件于是用**别人的根**
@@ -421,7 +434,7 @@ async function compileCurrent(action) {
     buildDir: cfg().get('buildDir'),
   });
   if (inv.error) {
-    await vscode.window.showErrorMessage(`Loment: ${inv.error}`);
+    fail(inv.error);
     return;
   }
   await runExec(action === 'run' ? 'Loment: 编译并运行' : 'Loment: 编译', inv.cmd, inv.args,
@@ -498,10 +511,9 @@ function activate(context) {
         await runExec('Loment: 静态检查', inv.cmd, inv.args, r, '$loment');
         return;
       }
-      vscode.window.showErrorMessage(
-        'Loment: no checker found — this window has neither a Loment checkout '
-        + '(`tools/loment.py`) nor a language server (set `loment.serverPath` or '
-        + '`loment.serverCommand`).');
+      fail('no checker found — this window has neither a Loment checkout '
+           + '(`tools/loment.py`) nor a language server (set `loment.serverPath` or '
+           + '`loment.serverCommand`).');
     }),
 
     vscode.commands.registerCommand('loment.runTests', async () => {
@@ -558,7 +570,7 @@ function activate(context) {
         });
         if (inv.error) {
           // 不能返回 undefined（那会是一个"按了没反应"的调试会话）—— 弹出来说清楚。
-          vscode.window.showErrorMessage(`Loment: ${inv.error}`);
+          fail(inv.error);
           return undefined;
         }
         out().appendLine(`Debug adapter: ${inv.cmd} ${inv.args.join(' ')} (${inv.how})`);
@@ -570,7 +582,7 @@ function activate(context) {
     startClient(context).then((c) => {
       client = c;
     }, (e) => {
-      vscode.window.showErrorMessage(`Loment: the language server failed to start: ${e}`);
+      fail(`the language server failed to start: ${e}`);
     });
   }
 }

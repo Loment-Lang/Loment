@@ -249,7 +249,7 @@
         "loment.toolCommand": {
           "type": "string",
           "default": "",
-          "description": "Which Loment executable *Build / Run* uses (**no Python needed**). With the package installed: `loment`; running through WSL on Windows: `wsl`. Empty means: on Windows use scripts/lomc.ps1 from the workspace when present, otherwise the command **reports an explicit error** (it never silently does nothing)."
+          "description": "Which Loment executable *Build / Run* uses (**no Python needed**). Leave it empty to use `loment` found on PATH (the installed package puts it there); on Windows, `scripts/lomc.ps1` from a checkout is preferred when present. Set `wsl` to run the Linux package through WSL, with `loment.toolArgs` = [\"-e\", \"/home/<you>/.local/share/loment/bin/loment\"]."
         },
         "loment.toolArgs": {
           "type": "array",

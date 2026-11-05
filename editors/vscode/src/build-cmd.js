@@ -62,17 +62,27 @@ function findWrapper(startDir, maxUp) {
 }
 
 /**
- * 这个文件里有没有 `fn _start`（ELF 的入口）。
+ * 这个文件里有没有程序入口。
+ *
+ * 三种都算（`docs/295`）：
+ *   * `fn main()` —— 正常入口（无参、无返回类型；链接器的入口桩调它再 `exit(0)`）；
+ *   * `fn _start()` —— 裸机/内核那条路，两者都在时 `_start` 赢；
+ *   * `fn command_main(...)` —— 命令单元（`loment_command` + `command_main`），
+ *     `_start` 由工具链生成。
+ *
+ * 2026-11-03 之前只认 `_start`，于是 `fn main() { print(...) }` 这种**合法程序**被当成
+ * 库模块拦在「编译并运行」外面（2026-11-04 用户截图那条报错）。
  *
  * **必须自己有**：2026-09-18 全仓清点过，**没有一例**是"入口来自 `use` 的模块"
- * （`loment` 下所有 `.lomt` 里，凡定义 `_start` 的文件都自己编成程序）。所以这一条能当判据用，
- * 不用去解 `use` 树。
+ * （`loment` 下所有 `.lomt` 里，凡定义入口的文件都自己编成程序）。所以这一条能当判据用，
+ * 不用去解 `use` 树。注释里的同名文本不算（先抹掉注释再看）。
  *
  * 读不了就不拦（返回 true）—— 宁可让它去编，也不假装它是个库。
  */
 function hasEntry(file) {
   try {
-    return /\bfn\s+_start\b/.test(fs.readFileSync(file, 'utf8'));
+    const text = stripComments(fs.readFileSync(file, 'utf8'));
+    return /\bfn\s+(_start|main|command_main)\b/.test(text);
   } catch (e) {
     return true;
   }
@@ -185,6 +195,78 @@ function usesModules(text) {
   return /^[ \t]*use[ \t]+(?:"|[A-Za-z_])/m.test(stripComments(text));
 }
 
+/**
+ * 在 PATH 里找一个可执行文件，返回**绝对路径**（找不到给 `''`）。
+ *
+ * Windows 上 `loment` 实际是 `loment.cmd` —— 必须按 `PATHEXT` 试后缀才能找到。
+ * `pathEnv` / `pathExt` 可注入（判据要确定，不能看跑测试的机器装没装 Loment）。
+ */
+function findOnPath(name, pathEnv, pathExt, platform) {
+  const probe = (p) => {
+    try {
+      return fs.statSync(p).isFile();
+    } catch (e) {
+      return false;
+    }
+  };
+  const dirs = String(pathEnv === undefined ? process.env.PATH || '' : pathEnv)
+    .split(path.delimiter);
+  const exts = platform === 'win32'
+    ? String(pathExt === undefined ? process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD' : pathExt)
+      .split(';').filter(Boolean)
+    : [''];
+  const hasDirOrExt = path.extname(name) !== '' || /[\\/]/.test(name);
+  for (const d of dirs) {
+    if (!d) {
+      continue;
+    }
+    if (hasDirOrExt) {
+      if (probe(path.join(d, name))) {
+        return path.join(d, name);
+      }
+      continue;
+    }
+    for (const e of exts) {
+      const suffix = e ? (e.startsWith('.') ? e : '.' + e) : '';
+      const cand = path.join(d, name + suffix);
+      if (probe(cand)) {
+        return cand;
+      }
+    }
+  }
+  return '';
+}
+
+/**
+ * 把 `loment.toolCommand` 解析成真正能 spawn 的 argv 前缀。
+ *
+ * **Windows 上批处理不能直接 spawn**：`child_process.spawn('loment')` 找不到
+ * （CreateProcess 只补 `.exe`），`spawn('loment.cmd')` 直接 `EINVAL` —— 而安装包给
+ * 的就是 `loment.cmd`（2026-11-04 实测）。所以解析到 `.cmd`/`.bat` 时交给 `cmd.exe`，
+ * argv 仍是数组，不拼字符串。
+ */
+function resolveTool(tool, o) {
+  const platform = o.platform || process.platform;
+  const isFile = (p) => {
+    try {
+      return fs.statSync(p).isFile();
+    } catch (e) {
+      return false;
+    }
+  };
+  // 已经是绝对/相对路径（自动探测拿回来的就是）就别再进 PATH 目录拼一遍
+  const found = (/[\\/]/.test(tool) && isFile(tool))
+    ? tool
+    : findOnPath(tool, o.pathEnv, o.pathExt, platform);
+  if (!found) {
+    return { cmd: tool, args: [] };
+  }
+  if (platform === 'win32' && /\.(cmd|bat)$/i.test(found)) {
+    return { cmd: process.env.ComSpec || 'cmd.exe', args: ['/d', '/s', '/c', found] };
+  }
+  return { cmd: found, args: [] };
+}
+
 function invocation(o) {
   const file = o.file;
   const action = o.action === 'run' ? 'run' : 'build';
@@ -227,18 +309,22 @@ function invocation(o) {
     };
   }
 
-  // ---- ⓪ 「运行」一个没有 `_start` 的文件，是**没有意义**的（也编不出可执行）
+  // ---- ⓪ 「运行」一个没有入口的文件，是**没有意义**的（也编不出可执行）
   //
   // 实测症状：链接器给一句 `cannot find entry symbol _start; not setting start address`，
   // 然后那个 ELF 一跑就 `exit code 11`（段错误）—— **用户看到的是"跑不动"，而且不知道
   // 为什么**（`lomc.ps1` 自己退出码还是 0）。这里把它变成一句能读懂的话。
   //
+  // 入口有三种：`fn main()`（正常入口）、`fn _start()`（裸机/内核，优先）、
+  // `fn command_main()`（命令单元，入口由工具链生成）—— 见 `docs/295` 与 `hasEntry`。
+  //
   // 例子：`loment/examples/mathutil.lomt` 是个库模块（只有 `pub fn`/`pub const`），
   // 要运行的是**用它的那个入口文件**。**编译**不受影响（出 IR/目标文件是正当的）。
   if (action === 'run' && !hasEntry(file)) {
-    return { error: `This file is not a runnable program — it has no \`fn _start\` (the ELF entry).` +
+    return { error: `This file is not a runnable program — it has no \`fn main()\` (the normal entry), ` +
+                    `no \`fn _start()\` (the freestanding entry), and no \`command_main\` (a command unit).` +
                     `\nIt is most likely a **library module**: what you want to run is the **entry file that uses it**` +
-                    ` (the one with its own \`_start\`, e.g. \`tour.lomt\` next to it).` +
+                    ` (e.g. \`tour.lomt\` next to it).` +
                     `\nTo merely compile it (IR / object file), use "Loment: Build current file".` };
   }
 
@@ -251,11 +337,12 @@ function invocation(o) {
                       + ' Add its directory to the workspace, or open the workspace one level above it.' };
     }
     const extra = Array.isArray(o.toolArgs) ? o.toolArgs.map(String) : [];
-    const args = extra.concat([action, rel]);
+    const tail = [action, rel];
     if (action === 'build') {
-      args.push('-o', outName(o.buildDir, file));
+      tail.push('-o', outName(o.buildDir, file));
     }
-    return { cmd: tool, args, cwd: root, how: 'cli' };
+    const rt = resolveTool(tool, o);
+    return { cmd: rt.cmd, args: rt.args.concat(extra, tail), cwd: root, how: 'cli' };
   }
 
   // ---- ② Windows 开发树：scripts/lomc.ps1（种子 + clang + WSL）
@@ -277,11 +364,30 @@ function invocation(o) {
     }
   }
 
+  // ---- ②' 没配 `toolCommand`，但 PATH 上有装好的 `loment`：直接用。
+  //
+  // 安装包把命令放进 PATH，用户不该再手填一遍设置（2026-11-04：默认空值时，一个
+  // `fn main() { print(...) }` 在普通文件夹里点「编译并运行」只会看到"Nothing to build
+  // with"）。**放在 `lomc.ps1` 之后**：检出里那个包装脚本用的是检出的种子，比 PATH 上
+  // 可能过期的发行版更该赢。
+  const autoTool = findOnPath('loment', o.pathEnv, o.pathExt, platform);
+  if (autoTool) {
+    const rel = posixRel(root, file);
+    if (rel && !rel.startsWith('..')) {
+      const tail = [action, rel];
+      if (action === 'build') {
+        tail.push('-o', outName(o.buildDir, file));
+      }
+      const rt = resolveTool(autoTool, o);
+      return { cmd: rt.cmd, args: rt.args.concat(tail), cwd: root, how: 'cli' };
+    }
+  }
+
   // ---- ③ 两条都没有：说清楚该做什么，别静默
   return {
     error: 'Nothing to build with. Two ways, pick either:\n'
-      + '  · install the toolchain and set `loment.toolCommand`'
-      + ' (with the package installed it is `loment`; to run through WSL on Windows set `wsl`,'
+      + '  · install the toolchain (then `loment` is found on PATH automatically), or set'
+      + ' `loment.toolCommand` (to run through WSL on Windows set `wsl`,'
       + ' with `loment.toolArgs` = ["-e", "/home/<you>/.local/share/loment/bin/loment"]);\n'
       + '  · or put this file inside a Loment checkout (`scripts/lomc.ps1` is then used automatically —'
       + ' **no workspace folder required**, it is searched upward from the file).',

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import sys
@@ -467,6 +468,58 @@ def install(vsix: Path) -> list[str]:
     return out
 
 
+def log_roots() -> list[Path]:
+    """本机 VS Code 写日志的目录（稳定版 / Insiders），环境变量可覆盖。"""
+    out: list[Path] = []
+    override = os.environ.get("LOMENT_VSCODE_LOGS")
+    if override:
+        out.append(Path(override))
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        out.extend([Path(appdata) / "Code" / "logs",
+                    Path(appdata) / "Code - Insiders" / "logs"])
+    return [p for p in out if p.is_dir()]
+
+
+def collect_logs(sessions: int = 3) -> list[str]:
+    """把最近 N 次 VS Code 会话里**与 Loment 有关**的日志行打出来。
+
+    VS Code 把扩展的输出通道落成 `window*/exthost/<ident>/Loment.log`，把扩展宿主的
+    异常落成 `window*/exthost/exthost.log` / `renderer.log`。`showErrorMessage` 只弹窗、
+    不写日志 —— 所以扩展在弹之前会先 `out().error(...)`（2026-11-04 起），这条才看得见。
+
+    这不是"猜"：只按文件与关键字取原文，行首带来源路径，方便直接引用。
+    """
+    roots = log_roots()
+    if not roots:
+        return ["找不到 VS Code 日志目录（可设 LOMENT_VSCODE_LOGS=<logs 目录>）"]
+    lines: list[str] = []
+    seen = 0
+    for root in roots:
+        for session in sorted((p for p in root.iterdir() if p.is_dir()), reverse=True):
+            if seen >= sessions:
+                break
+            hits: list[tuple[Path, list[str]]] = []
+            for pat in ("window*/exthost/*/Loment.log", "window*/exthost/exthost.log",
+                        "window*/renderer.log", "window*/main.log", "window*/tasks.log"):
+                for p in session.glob(pat):
+                    try:
+                        text = p.read_text(encoding="utf-8", errors="replace")
+                    except OSError:
+                        continue
+                    keep = [ln for ln in text.splitlines()
+                            if "loment" in ln.lower() or p.name == "Loment.log"]
+                    if keep:
+                        hits.append((p, keep[-80:]))
+            if hits:
+                seen += 1
+                lines.append(f"### 会话 {session.name}")
+                for p, keep in hits:
+                    lines.append(f"--- {p}")
+                    lines.extend("  " + ln for ln in keep)
+    return lines or ["最近几次会话里没有 Loment 相关日志（先打开一个 .lomt 再跑一次）"]
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="vscode_ext", description="Loment VS Code 扩展打包")
     ap.add_argument("--check", action="store_true")
@@ -476,7 +529,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="重打包并侧载进本机 VS Code (然后 Developer: Reload Window)")
     ap.add_argument("--doctor", action="store_true",
                     help="体检 VS Code 里已装的副本 (语法高亮出问题先跑这个)")
+    ap.add_argument("--logs", nargs="?", const=3, type=int, metavar="N",
+                    help="打印最近 N 次 VS Code 会话里与 Loment 有关的日志（默认 3）")
     a = ap.parse_args(argv)
+    if a.logs:
+        print("\n".join(collect_logs(a.logs)))
+        return 0
     if a.doctor:
         bad = doctor()
         for b in bad:

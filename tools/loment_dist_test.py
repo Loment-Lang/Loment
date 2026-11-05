@@ -1528,6 +1528,7 @@ def main() -> int:
                      ("安装器加固 (0.1.5 security)", test_installer_hardening),
                      ("发布完整性锚与工作流权限面", test_release_integrity_anchor),
                      ("--check 的新鲜度", test_check_detects_staleness),
+                     ("套件清单与盘上目录一致", test_skill_suite_members),
                      ("skill 与示例同步", test_skill_example_sync),
                      ("读者文档里的样例都能编", test_docs_samples_compile)):
         try:

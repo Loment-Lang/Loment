@@ -423,8 +423,11 @@ process.stdout.write(JSON.stringify({
 """
     with tempfile.TemporaryDirectory() as tds:
         tmpbin = Path(tds)
-        # 真实形状：Windows 安装包给的是 `loment.cmd`，Linux 是 `loment` 脚本
+        # 真实形状：Windows 安装包给的是 `loment.cmd`，Linux 是 `loment` 脚本。
+        # **两种大小写都建**：`PATHEXT` 是大写的 `.CMD`，而判据要在**大小写敏感**的
+        # Linux CI 上跑（Windows 的 NTFS 不区分，所以本机只会绿）。
         (tmpbin / "loment.cmd").write_text("@echo off\r\n", encoding="utf-8")
+        (tmpbin / "loment.CMD").write_text("@echo off\r\n", encoding="utf-8")
         (tmpbin / "loment").write_text("#!/bin/sh\n", encoding="utf-8")
         r = subprocess.run([node, "-e", script, str(EXT / "src" / "build-cmd.js"), str(ROOT),
                             str(tmpbin)],

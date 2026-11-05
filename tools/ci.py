@@ -314,7 +314,10 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "lspe_test", "potato_
                  # 权威状态在 `origin`、不在本地树那一条 (CLAUDE.md 第一节): 判据在临时
                  # 夹具仓里验"工具报的是权威那一份还是工作树那一份", 并钉住"无法判定"
                  # 必须是**可见的** rc=2, 不能伪装成同步
-                 "loment_state_test")
+                 "loment_state_test",
+                 # 开发套件 (docs/302): 贡献者的 doctor/gate/bootstrap, 以及
+                 # `.devcontainer` 与门禁镜像摘要三方一致 —— 抬 tag 漏改一处就红。
+                 "loment_dev_test")
 
 
 #: **不能与别的检查同时跑**的那几条 —— 它们**写仓库里的共享位置**。
@@ -355,6 +358,8 @@ SHARD_COST = {
     "loment_ct_test": 1.6,
     "loment_ctrans_test": 63.5,
     "loment_dap_test": 0.0,
+    # 开发套件 (docs/302): 纯函数的体检 + 四条命令形状 + 镜像摘要三方一致, 本机实测 0.4s。
+    "loment_dev_test": 0.4,
     "loment_dist_test": 170.2,
     "loment_doc_test": 57.3,
     "loment_docs_test": 0.1,

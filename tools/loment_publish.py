@@ -107,6 +107,12 @@ REPOS: dict[str, dict] = {
             "loment/", "lom/", "lompi/", "editors/",
             "docs/manual/",
             ".claude/skills/loment/", ".claude/skills/lompi/",
+            # The LomentSkill suite (2026-11-04): topic skills as their own directories,
+            # so the mirror carries the same set Claude Code discovers.
+            ".claude/skills/loment-syntax/", ".claude/skills/loment-tur/",
+            ".claude/skills/loment-traps/", ".claude/skills/loment-safety/",
+            ".claude/skills/loment-runtime/", ".claude/skills/loment-ffi/",
+            ".claude/skills/loment-toolchain/",
             # 工具：`tools/lom*` 一次收全（lomelf / lomentc / lomc / lomdoc / lom_audit …）
             "tools/lom*",
             # 文档：**一条 `docs/*.md` 收全**。
@@ -304,7 +310,7 @@ below.
 
 | | |
 |---|---|
-| `.claude/skills/loment/SKILL.md` | The language guide: syntax, built-ins, error codes, and the deviations from Rust. Self-contained, shipped in the package (`loment skill --print`), and the fastest way in. |
+| `.claude/skills/loment/SKILL.md` | The entry to the **LomentSkill suite**: syntax, built-ins, error codes, the whole-language tour, and the map to `loment-tur`, `loment-syntax`, `loment-traps`, `loment-safety`, `loment-runtime`, `loment-ffi` and `loment-toolchain`. Self-contained as a suite, shipped in the package (`loment skill --print` prints the entry), and the fastest way in. |
 | `loment/examples/tour.lomt` | The whole language in one file, with commentary (`loment example tour`). |
 | `docs/manual/` | The generated manual: specifications, plus a page per example. |
 | `docs/143-l1-loment-v0.md` · `docs/146` · `docs/158` | The specification, capability semantics, and what is frozen. |

@@ -1,6 +1,6 @@
 ---
 name: loment
-description: Read this before writing a program in Loment - FujoOS's own systems language (Rust-flavoured surface syntax plus capability domains; six more surface grammars - C, C++, Java, C#, Go, Python - share its semantics, see docs/188). With the toolchain installed you can write, check and compile native executables with no Python runtime. Use it for: writing a Loment program or a .lomt file; **writing a Loment library** (a library is a directory, dependencies are the `use` lines in the source, exports are `pub`, optional `pkg.lomp` manifest, see section 9); managing or debugging dependencies; compiling or running with the `loment` command; reading the E001-E036 error codes; looking up a builtin or a piece of syntax (`loment builtins` / `loment syntax` / `loment cheat`); expressing a piece of logic in the project's own language; how to write struct / enum / match / capability / guard; **giving a project its own source extension** (`source_ext` in `loment.conf`, section 7.1); **registering a custom `loment` subcommand** (`loment foo` runs `loment-foo` from PATH, section 7.2); and what differs when migrating from another language. **For anything about libraries and dependencies read the lompi guide first** (`~/.claude/skills/lompi/SKILL.md`, or `<prefix>/share/lompi/skill/SKILL.md` when you only have the package) - installing a library, resolving dependencies, which libraries exist on this machine, and what a `use <name>` resolves to all live there. Also use this whenever the task is to author, read or debug Loment source (.lomt / .lom / .lomp) or a Loment library with the toolchain installed.
+description: Entry point of the LomentSkill suite for Loment (FujoOS's own systems language - Tur grammar plus capability domains, native ELF/PE, no Python runtime). Start here for the toolchain check, hello world, the whole-language tour, and the map of the suite. The deep material lives in sibling skills - `loment-syntax` (cheat sheet, builtins, E001-E038), `loment-tur` (editions and full grammar), `loment-traps` (measured traps), `loment-safety` (capabilities, LGC, LMS, LSPE), `loment-runtime` (LVM, Potato, hot update, optimizers, DGT), `loment-ffi` (C ABI, LibL, Java, network, threads), `loment-toolchain` (CLI, editors, L0/LLS, packaging, libraries). Use for writing, reading or debugging Loment source (.lomt / .lom / .lomp) with the toolchain installed. For libraries and dependencies read the lompi guide first (`~/.claude/skills/lompi/SKILL.md`, or `<prefix>/share/lompi/skill/SKILL.md`), because a library is a directory, its identity is a content hash, and its dependencies are the `use` lines in its source.
 ---
 
 # Loment: the language you write programs in
@@ -11,46 +11,28 @@ names / the operators all match Rust) and it adds exactly one layer of semantics
 domains** (`capability` + `guard`). It compiles straight to a **native x86-64 executable**
 (Linux ELF / Windows PE) with **no Python runtime**.
 
-**The language's own syntax is called Tur** (`docs/188`). It is **derived directly from Rust**
-(types, expressions, `fn`, `let`, control flow keep Rust's spelling) and **adds what Rust does
-not have**: `module`, `choose`, `capability`, `guard`, `extern fn`, `comefor`, and the `print`
-builtin. Everything in this guide is Tur.
+**The language's own grammar is called Tur** (`docs/188`, `docs/295`). It is **derived directly
+from Rust** (types, expressions, `fn`, `let`, control flow keep Rust's spelling) and **adds what
+Rust does not have**: `module`, `choose`, `capability`, `guard`, `extern fn`, `comefor`,
+`command`, and the `print` builtin. Everything in this suite is Tur. The **full grammar
+system** - editions, the declaration, every item/statement/expression/pattern, and the seven
+foreign surface grammars - is the **`loment-tur`** skill (sections 2.0.x).
 
 A file is read as **Tur 1** when it has **no declaration** (the default) or says
 `choose write grammar loment` / `tur` / `tur1` / `tur2026.1`. Editions are **two-level**:
 `tur<year>.<n>` (`docs/296`). The canonical name never changes meaning; `tur1` / `tur2` are the
 2026 shorthands for `tur2026.1` / `tur2026.2` and are only accepted in their release year;
-write the full name in new files (`loment fmt` does not take files with a grammar declaration
-yet). **Every `check` / `build` / `run` prints the resolved
-edition on stderr** (e.g. `grammar tur2 -> tur2026.2 (Tur 2)`); `tur_edition()` returns it at
-runtime, and `loment version <exe>` reads it back from the artifact.
+write the full name in new files (the packaged `loment fmt` refuses `tur*` and foreign
+declarations; see `loment-tur` 2.0.2). **Every `check` / `build` / `run` / `ir` prints the resolved edition on stderr** (e.g.
+`grammar tur2 -> tur2026.2 (Tur 2)`); `tur_edition()` returns it at runtime, and
+`loment version <exe>` reads it back from the artifact.
 
-**Tur 2026.2** (`tur2026.2`, or the 2026 shorthand `tur2`) adds, beyond the pure sugar
-(`def f()` for `fn f()`, `a and b` / `a or b` / `not a`, `elif cond { }`). The block below
-is a **line-per-construct list**, not one compilable unit; the runnable versions are the
-`loment_p8_test` criteria M91 (loops), M94 (bare `return;`, `print_num`), M95
-(`orelse` / `catch`) and M96 (`defer`), specified in `docs/296` §2.
-
-<!-- no-compile: 逐条语法片段；可跑的见 p8 M91/M94/M95 -->
-```rust
-for x in xs { ... }            // named array / slice; `x` is a copy of each element
-while go { if done { break; } if skip { continue; } ... }
-fn early(n: u32) { if n > 3 { return; } ... }      // bare `return;`, unit functions only
-defer free(p);                 // runs when this block exits (LIFO); args evaluated **now**
-let a: u32 = maybe orelse 0;   // first enum variant = success (`Option`: Some/None)
-let b: u32 = risky() catch 0;  // same shape (`Result`: Ok/Err); fallback is lazy
-print_num(n);                  // decimal, no newline; any integer, widened to i64
-```
-
-`print_num` lives in the runtime block, so it needs `choose runtime` (the default
-`no_runtime` refuses it by name, E31). `defer f(a, b);` takes a **call** (not a statement):
-the arguments are evaluated where the `defer` is written and the call runs when the block
-exits - on the normal fall-through, `return`, `?`, and loop `break` / `continue`, but not on a
-panic. Multiple `defer`s in one block run in reverse order. The self-hosted compiler keeps the
-captures in a fixed table (8 `defer`s per function, 4 arguments each, 64 levels of nesting)
-and refuses to go past it by name. All of these are **Tur 2 only** - Tur 1 keeps reading
-`defer`, `break`, `orelse`, `print_num` and friends as ordinary identifiers, so old files keep
-their meaning.
+**Tur 2026.2** (`tur2026.2`, or the 2026 shorthand `tur2`) adds the sugar (`def f()`, `a and
+b` / `a or b` / `not a`, `elif cond { }`), `for x in xs`, `break` / `continue`, bare `return;`
+in unit functions, `orelse` / `catch`, `print_num`, and **`defer`**. They are **Tur 2 only**:
+Tur 1 keeps those words as ordinary identifiers, so old files keep their meaning. The details
+and every restriction are in `loment-tur` 2.0.4 (the runnable versions are `loment_p8_test`
+M91, M94, M95 and M96).
 
 The same program can also be written with C / C++ / Java / C# / Go / Python spelling, **changing
 the spelling and nothing else** - recognised **by extension** (`.c` / `.cpp` / `.java` / `.cs` /
@@ -70,18 +52,18 @@ into it. To write Tur with Rust's spelling, declare `grammar tur`.
 > **The reference compiler in the source repository** (`tools/lomentc.py`, which is also what
 > `loment ir` / `build` use when you run them from a checkout) **accepts** both spellings: it
 > translates the file into Loment **in process** and compiles that, with no external compiler
-> involved. **An installed package (the self-hosted toolchain) accepts the `loment` spelling
-> only**: anything else is refused outright ("这份源的 `choose write grammar` 自举侧收不了…" /
-> *the self-hosted side cannot take this file's `choose write grammar`*), because the six
+> involved. **An installed package (the self-hosted toolchain) accepts the native spellings
+> only** - `loment` and the Tur editions (`tur`, `tur1`, `tur2`, `tur2026.1`, `tur2026.2`) -
+> and refuses every foreign declaration outright ("这份源的 `choose write grammar` 自举侧收不了…"
+> / *the self-hosted side cannot take this file's `choose write grammar`*), because the foreign
 > translators have no Loment twin yet (`docs/189` section 4.1). So "write `.py` inside the
 > package and it runs" **is not true today**.
 
 The alias table is **frozen at the factory**: the native grammar (`loment`, `tur`, `tur1`,
 `tur2`, `tur2026.1`, `tur2026.2`) plus the foreign grammars (`c`, `cpp`, `java`, `csharp`, `go`,
-`python`, `rust`, and the not-yet-parsed
-`natural`). It cannot be extended or overridden (`docs/188` section 1.1). Getting it wrong is one
-of four errors: the name is not in the table / it is written after `module` / it is written twice
-/ no name follows it.
+`python`, `rust`, `natural`). It cannot be extended or overridden (`docs/188` section 1.1).
+Getting it wrong is one of four errors: the name is not in the table / it is written after
+`module` / it is written twice / no name follows it.
 
 **Boundaries to know before writing in one of those spellings** (measured; each one saves a
 round trip):
@@ -95,11 +77,23 @@ round trip):
 - **In the Python spelling `int` is `i64`** (bounded, **wrapping** on overflow), not CPython's
   arbitrary precision. Nothing in the source says so - do not expect an error.
 
-> **This file is self-contained**: syntax, builtins, error codes and **the traps that cost the
-> most time** are all here. Do not go looking elsewhere first (the exception is when you have
-> the source repository - that is the last section).
+> **The suite is self-contained; this file is the entry.** Section numbers are **global across
+> the suite** - "section 6.2" or "section 8.3" means the same section whichever skill file you
+> are reading. An installed toolchain puts every skill in `~/.claude/skills/`; the package keeps
+> them beside this file as `loment-tur.md`, `loment-safety.md`, and so on.
 
-**Read the program in section 1 first, then come back to the tables.** It walks the whole
+| Skill | Sections | Read it when you need |
+|---|---|---|
+| **`loment`** (this) | 0-1, 7, 9, suite map | first contact, the tour, entry points, custom commands |
+| **`loment-syntax`** | 2, 3, 4 | the cheat sheet, a builtin signature, an error code |
+| **`loment-tur`** | 2.0 | grammar, editions, syntax details, surface spellings |
+| **`loment-traps`** | 6 | measured traps before writing or debugging |
+| **`loment-safety`** | 5, 5.1, 8.1-8.2 | capabilities, GC, LMS, LSPE |
+| **`loment-runtime`** | 8.3-8.8 | LVM, Potato, hot update, optimizers, DGT |
+| **`loment-ffi`** | 7.3, 8.9-8.10 | C ABI, LibL, Java, network, threads |
+| **`loment-toolchain`** | 8.11-8.13, 10 | CLI, editors, L0/LLS, packaging, libraries, repo paths |
+
+**Read the program in section 1 first, then come back to the reference skills.** It walks the whole
 language in one file, and it **compiles and runs**; what is printed here is the same file as
 `loment/examples/tour.lomt` in the repository (a copy ships in the package), so copying it is
 safe.
@@ -110,25 +104,32 @@ safe.
 loment version
 ```
 
-You get something like `Loment 0.1.5 (0.1.5), commit <short>`. **The commit is what
-counts**: different checkouts can do different things (this file describes the 0.1.5
-generation; older packages print `0.1.4`, `0.1.4 Alpha` / `0.1.4 Alpha2.3` / `0.1.4 Pre2`).
+You get two lines, for example:
+
+```
+Loment 0.1.5 (0.1.5)
+commit edda7d4e (2026-11-04)
+```
+
+**The commit is what counts**: different checkouts can do different things (this suite
+describes the 0.1.5 generation; older packages print `0.1.4`, `0.1.4 Alpha` / `0.1.4 Alpha2.3`
+/ `0.1.4 Pre2`).
 
 **There are 38 commands; `loment help` lists all of them** (grouped, aligned, coloured) and
 `loment help <command>` documents one. The ones used most:
 
 | Command | What it does |
 |---|---|
-| `loment check FILE` | Check only, produce nothing (diagnostics on stderr - rendered by the reporter `lomenterr`: **position + source line + caret + what went wrong + why + how to fix (at least 3 ways) + supported/not supported**; when the file is not Loment at all it also offers the three ways to `translate it in`. See section 9) |
+| `loment check FILE` | Check only, produce nothing (diagnostics on stderr - rendered by the reporter `lomenterr`: **position + source line + caret + what went wrong + why + how to fix (at least 3 ways) + supported/not supported**; when the file is not Loment at all it also offers the three ways to `translate it in`. See `loment-tur` 2.0.14) |
 | `loment ir FILE` | Print LLVM IR to stdout |
 | `loment build FILE [-o OUT]` | Compile to an executable |
 | `loment run FILE` | Compile and run |
 | `loment fmt FILE` | Format (prints the result) |
 | `loment doc FILE` | Generate API docs |
 | `loment lsp` | Language server (LSP over stdio) |
-| `loment skill [--print]` | Print the path to **this guide** / its whole text - depends on no directory convention |
+| `loment skill [--print]` | Print the path to **this suite's entry** / its whole text - depends on no directory convention |
 
-**With no copy of this guide to hand, the language reference is still one command away** (that is
+**With no copy of this suite to hand, the language reference is still one command away** (that is
 what self-contained means here):
 
 | Command | What it does |
@@ -137,7 +138,7 @@ what self-contained means here):
 | `loment syntax` | The syntax cheat sheet |
 | `loment builtins` | The builtin table (all of them, there are no others) |
 | `loment types` / `keywords` / `caps` | Type table / keywords / capability domains |
-| `loment codes` / `loment explain E4` | The E001-E036 table / one code in detail |
+| `loment codes` / `loment explain E4` | The code table / one code in detail (the packaged banner still says "E1-E23"; the reporter knows E001–E038) |
 | `loment new NAME` | Write a skeleton that `loment run` accepts immediately |
 | `loment stat` / `fns` / `grep` / `hash` / `cat` | Read source (lines, signatures, search, sha256, numbered print) |
 | `loment ls` / `tree` / `examples` / `example tour` | Directory and examples |
@@ -151,7 +152,9 @@ is meant to be used this way).
 Two more diagnostic outlets are switches on `loment check FILE` (each also turns colour off):
 
 - `--short` - **one line per diagnostic** (`file:line:col: error[code]: message`), for grep and
-  CI logs. Note that the column is reported as `0` today;
+  CI logs. The column is printed only when the compiler knows it; a semantic diagnostic that
+  carries just a line comes out as `file:line: error[code]: message` - the reporter does not
+  invent a `0` column that would make an editor jump to the file start;
 - `--json` - **one object per line**, carrying `title`/`what`/`why`/`fixes`/`yes`/`no` as well as
   the code and position. When the reporter has an applicable fix, the object also carries a
   non-empty `suggestions` array an editor can **apply directly** (`replacement` with
@@ -160,7 +163,8 @@ Two more diagnostic outlets are switches on `loment check FILE` (each also turns
 
 Two more switches cap and capture the same stream:
 
-- `--max N` - render at most `N` diagnostics (`0` = all) and say how many were withheld;
+- `--max N` - render at most `N` diagnostics (default **20**, `0` = all) and say how many were
+  withheld;
 - `--diag-out PATH` - write the raw JSONL records to `PATH` (the file is created even when the
   unit is clean). That file is what the reporter reads, and it is where the `byte_start` /
   `byte_end` autofix fields live.
@@ -185,7 +189,7 @@ reporter's prose.
 > ### When the task touches "libraries / dependencies", **go read the lompi guide first**
 >
 > lompi is **the package manager for Loment libraries** (it owns the store, the lock file, and
-> `deps/`). Every one of these questions is answered there, and **this guide does not cover
+> `deps/`). Every one of these questions is answered there, and **this suite does not cover
 > them**:
 >
 > - installing or fetching a library, resolving dependencies, writing the lock file;
@@ -238,6 +242,10 @@ is `fn main()`** (no arguments, no return type), **`print` writes a string to st
 declare a local. The freestanding entry is still `_start` (kernel / no-libc code): it takes no
 arguments and wins when both exist. A normal user program should use `main` — the linker's entry
 stub calls it and exits 0.
+
+**The tour needs `choose runtime`.** `alloc` and `guard` both pull in the runtime block; under the
+default `no_runtime` the compiler refuses them with E031. `no_runtime` is a different axis from
+`no_std` - see `loment-syntax` 2.1.
 
 Below is the whole thing (it is called `tour`; the walkthrough follows the program):
 
@@ -365,7 +373,7 @@ Running it should print `42 10 9 6 2 3` and `TOUR RESULT: PASS`.
 > an **older** package `check` and `ir` pass and the build still fails - that is the old build,
 > not your program.
 >
-> **The `hello` skeleton above uses scalars, a string and syscalls only, so it runs inside the
+> **The `hello` skeleton above uses `print`, a string and no runtime, so it runs inside the
 > package** - use it to confirm your environment before going further.
 
 **Walkthrough** (in the order things appear):
@@ -397,558 +405,22 @@ Running it should print `42 10 9 6 2 3` and `TOUR RESULT: PASS`.
 | `if a > b && c == 3 { … }` | The condition must be `bool`; `&&`/`\|\|` short-circuit |
 | `syscall4(60, 0, 0, 0)` | `exit(0)` - a program exits through a syscall |
 
-## 2. Syntax cheat sheet
+## 2-4. Syntax, builtins, error codes
 
-| Construct | How it is written |
-|---|---|
-| Module | `module <name>` on the first line (no semicolon) |
-| Project mode | `choose` - **seven dimensions**, each written at most once and **only in the entry unit**; libraries may not write it (E22). `std` / `no_std` · `gc_manual` / `gc_auto` / `gc_auto_alpha` / `no_gc` · `runtime` / `no_runtime` · `sealed` / `hosted` · `vm` / `no_vm` · `lms_full` / `lms_forensic_admin` / `lms_daily_admin` / `lms_manage_only_admin` · `lspe_open_admin` / `lspe_close_admin` - see 2.1 |
-| Switch setting | `addin <name>` (**entry unit only**) - pulls in a "switch settings" unit, see 2.2 |
-| Custom syntax | `comefor let "word" to { … }` … `byuse "word" done` - **define a new syntax at compile time**. The block after `to` is **a Loment program** (`fn main` is its entry; **the return value is how many tokens it ate**) which reads and emits tokens with `ct_n` / `ct_tok` / `ct_out` / `ct_syn`. Definition and terminator are **top-level only** and cannot nest; expansion happens at the token layer **before parsing**, so errors and jumps still point at the line you wrote. See `docs/184` |
-| Import | **Two spellings, neither takes a semicolon**: `use name` (**searched in layers, first hit wins**: (1) project root `<project>/deps/<name>/<name><ext>` (2) the toolchain's own `<tool dir>/../share/lompi/store/<name>/<version>/<name><ext>` (3) the four built-in roots `loment/lib` → `examples` → `selfhost` → `tools`, where **only layer 3 requires the name to be unique**); `use "path/to/other.lomt"` (relative to the current file or the working directory - **use this form for a sibling file in your own directory**). `<ext>` defaults to `.lomt` and a project can change it (section 7). At most **300** `use` lines in one file. **Several name-form `use` lines are allowed in 0.1.5** (older packages stopped at one) - see 6.3 |
-| Function | `fn f(a: u32, b: str) -> u32 { ... }` (no return value: `fn f()`); **at most 10 parameters** (a hard constraint of the self-hosted side's layout: the parameter table has 10 slots. It fails in two shapes: a count mismatch between parameters and arguments is the normal E3, while **a call site with more than 10 arguments** goes through `panic` - exit code 132 with **no diagnostic**. When you see "no error but exit 132", count your arguments) |
-| Export | Add `pub` for cross-module visibility: `pub fn` / `pub struct` / `pub const` |
-| Constant | `const NAME: u32 = 3` |
-| Variable | `let x: u32 = e;`, assignment `x = e;` - **the type annotation is required**; the language has no type inference |
-| Control flow | `if` / `else if` / `else`, `while`, `for i in lo..hi`, `return <expr>;` (the value is **required**) |
-| Struct | `struct S { a: u32, b: u32 }`; literal `S { a: 1, b: 2 }`; field `s.a` |
-| Enum | `enum E { A, B(u32) }`; construction `E::B(3)`; no payload `E::A` |
-| `match` | `match x { E::A => { … } E::B(v) => { … } _ => { … } }` - **arm bodies are blocks**; exhaustive (or use `_`) |
-| `if let` | `if let E::B(v) = x { … } else { … }` |
-| `Option`/`Result` | Predefined generic enums, with `?` propagation |
-| Array | Type `[u8; 16]`; literal `[1, 2, 3]`; index `xs[0]` (assignment `xs[0] = 1` works) |
-| Slice | Parameter types `[T]` / `mut [T]`, pass `&xs` / `&mut xs`, `slice_len(s)` for the length |
-| Generics | `fn max_of<T>(a: T, b: T) -> T` (monomorphised at compile time) |
-| trait | `trait M { fn m(self) -> u32; }` + `impl M for S { … }`, static dispatch `obj.m()` |
-| Types | `u8 u16 u32 u64 i8 i16 i32 i64 bool ptr str`, a struct name, `[T; N]`, `[T]`, `mut [T]` |
-| Conversion | `x as u64` - integer/pointer conversions are always written out |
-| Strings | `"..."`, escapes `\n \t \" \\` - **and nothing else: read 6.2 before you need a carriage return**; the operations are the `str_*` builtins in section 3 |
-| Comments | `//`, `/* */`; `///` is a doc comment (`loment doc` extracts those) |
-| Operators | Precedence as in Rust: `\|\| && == != < <= > >= \| ^ & << >> + - * / %`, unary `- !` |
+The cheat sheet, the complete builtin table and the E001-E038 code table are the subject of the
+**`loment-syntax`** skill. Read it when you need a signature, a piece of syntax, or a code.
 
-### 2.1 Project mode `choose`
+## 5. Capability domains and the safety stack
 
-`choose` is how a program states a property of **the whole artifact**. There are **seven
-dimensions**, each written at most once, and each one lands in the Potato form object - so
-"what kind of artifact is this" is answerable on the side that does **not** read the source.
+The capability layer, `gc` reclamation, the seven LMS levels and the LSPE audit ledger are the
+subject of the **`loment-safety`** skill. In one line: `capability` declares a domain, `guard`
+bounds the index (not the principal), `gc_*` chooses reclamation, `lms_*` chooses memory safety,
+and `lspe` records why each allowance was granted.
 
-```rust
-module myapp
+## 6. The trap list
 
-choose no_std          // ← once for the whole program; the default is std
-```
-
-| Dimension | Values | Default | What it decides |
-|---|---|---|---|
-| **Layer** | `std` · `no_std` | `std` | which layer the program may use - `std` unlocks the hosted layer (libc / filesystem / threads / time / network), `no_std` refuses it |
-| **Reclamation** | `gc_manual` · `gc_auto` · `gc_auto_alpha` · `no_gc` | `gc_manual` | how memory is reclaimed - see section 2.1 and `docs/210`; `no_gc` declares the artifact carries no collector |
-| **Runtime** | `runtime` · `no_runtime` | `no_runtime` | whether the artifact may carry a runtime (the heap is still on demand) |
-| **Port** | `sealed` · `hosted` | `sealed` | whether the artifact may reach outside itself by linking host libraries |
-| **Execution model** | `vm` · `no_vm` | `no_vm` | which execution model the program is for - see below |
-| **Memory safety** | `lms_full` · `lms_forensic_admin` · `lms_daily_admin` · `lms_manage_only_admin` | `lms_full` | which of the seven LMS levels are on. **The direction is reversed**: the default is full, and a non-full value is a downgrade; every non-full value carries `_admin` |
-| **Audit ledger** | `lspe_open_admin` · `lspe_close_admin` | `lspe_open_admin` | whether LSPE records the ledger (off changes the ledger, never a verdict); the Potato v16 ledger records the site, obligation and evidence |
-
-What holds for all seven:
-
-- **It is a property of the program, not of a file**: each dimension appears at most once, and
-  **only in the entry unit** (a library pulled in by `use` that writes one is E22). Both compilers
-  enforce this.
-- **A default preserves the pre-dimension behaviour - with one recorded exception.** `lms`
-  defaults to `lms_full`, and that tier adds inline bounds checks on `alloc(<const>)`-derived
-  accesses, so it does change the artifact and some out-of-bounds behaviour (`docs/270` section
-  6). Treat that as a documented exception, not as the rule.
-- **Contradictory pairs are named, not lumped.** `gc_auto` with `no_runtime` is refused because
-  automatic reclamation *is* that runtime; `hosted` with `no_std` is refused because `no_std` says
-  there is nothing underneath and `hosted` says to link against it; both automatic tiers with
-  `no_std` are refused because a collector needs that runtime. The diagnostic names the pair
-  and the reason; it never says "illegal combination".
-- A value that is not in the table is a typo, and a typo **is E22**.
-
-**`vm` says "which execution model", not "which tier".** The release gate opened on 2026-10-17
-(`docs/231`), so an installed toolchain accepts `choose vm`. Today it only records the
-dimension: the artifact is **byte-identical to `no_vm`**, and there is no bytecode. The
-interpreted tier is a separate tool - `loment-lvm file.ll` runs the LVM interpreter over LLVM IR
-(`docs/243`) - and the artifact does not carry it.
-
-**`no_std` is what Loment actually is** (it was written for FujoOS in the first place). `std` is
-the default and means you may use host capabilities. **When it is required**: writing systems,
-writing something that runs on bare metal - writing it out is for readers and tools; the
-language does not force it.
-
-**`sealed` is what makes the artifact checkable.** An undefined symbol is an error, not a
-warning, so a sealed artifact provably has no ports to the world. `hosted` is the other path: a
-C-runtime program whose entry point is `fn main() -> u32` rather than `_start`, declared as
-allowed to link real libc and shared libraries. **The door opened on 2026-10-17**: both release
-and development launchers pass `--allow-ports` to the linker, which links real ELF shared
-objects (`.so`) and lets the system loader map and bind them (`docs/183` V2, `docs/219` section
-8c). Remaining limits: ELF only (no PE import path), one shared object on the self-hosted
-linker, function symbols only, and a host `ld.so`/glibc must be present. When you call
-`loment-lomelf` directly rather than through `loment`, add `--allow-ports` yourself.
-
-### 2.2 Switches `set choose` / `choose` / `addin`
-
-A **switch** is code that is only compiled in when it is on. The closed branch **does not even
-reach the parser as tokens** - so "closed means not depended on" is literally true: what the body
-refers to **does not have to exist**.
-
-> **Turning a switch on for this machine** (the `lock` / `chooseunlock.lomlock` mechanism) **does
-> not exist yet** (`docs/182` section 3). It is blocked on an undecided rule: the lock would be
-> **per-machine**, while this repository's identity is "the same source produces the same bytes" -
-> once locked, one source would compile differently on two machines. To make a switch the default
-> today you **write it in the source**. (The package manager's lock file `lompi.lock` is a
-> **different thing** - see the lompi guide.)
-
-```rust
-module myapp
-
-// definition: a name plus "the code compiled in when it is on"
-set choose verbose {
-    pub fn banner() -> u32 { return 0x5EED; }
-}
-
-choose verbose          // the value: on (`choose close verbose` turns it off)
-                        // **absent means off**
-
-fn _start() {
-    syscall4(60, banner() as u64, 0, 0);   // only compiles when verbose is on
-}
-```
-
-The rules (all three are **E22**, enforced by both compilers):
-
-- a file may carry many switches (**the cap is 500**; over that is an error, never a silent
-  drop), but the **same name only once**;
-- a name has to be **defined** with `set choose <name> { … }` before it is used, otherwise you get
-  "undefined switch";
-- a switch declaration may **not nest inside another switch body** (that makes "is it on" an
-  egg-and-chicken question);
-- **libraries may not write `choose`** - a library expresses what it needs by declaring
-  capability requirements and lets the project decide.
-
-**Across files you use `addin`** (`addin chooseset` pulls in a switch-settings unit; written only
-in the entry file). `chooseset.lomt` looks like this (**this block compiles by itself**, so you
-can copy it whole):
-
-```rust
-module chooseset            // chooseset.lomt, in the same directory as the entry
-addin chooseset             // it names itself at the top (the convention)
-
-set choose verbose {
-    pub fn banner() -> u32 { return 0x5EED; }
-}
-```
-
-The entry file is (**this block does not compile on its own** - its definition is in the
-`chooseset.lomt` beside it; only the two halves together are the example, and the runnable pair is
-`loment/examples/addin/` in the repository):
-
-<!-- no-compile -->
-```rust
-module myapp                // the entry
-
-addin chooseset             // pull it in; its `choose` **applies to the whole program**
-choose verbose
-```
-
-- A unit pulled in by `addin` may contain **only choose-related code** (`module` / `addin` / the
-  three `choose` forms); anything else (`fn`/`struct`/`use`) is refused - to load code use `use`
-  (that is a library), `addin` is for switches.
-- **It takes part in compilation**, so a function the entry uses must be `pub`.
-- **Only the entry may write `addin`**; in a library or an addin unit it is refused (and would not
-  take effect anyway).
-- Switch values go into the Potato object (the `switches` field), so "which switches are on" is
-  visible on the side that does **not** read the source.
-
-### 2.3 Custom syntax `comefor` / `byuse`
-
-**Define a new syntax at compile time.** The program in the definition is **run** by the kernel;
-it reads tokens and emits tokens. What follows is a **complete, compiling** example - `def ANSWER
-= 42;` expands to `const ANSWER: u32 = 42;`:
-
-```rust
-module cfdef                    // in the repository: loment/comefor/def_dialect.lomt
-
-comefor let "def" to {
-    /// Write a string literal's bytes into the **macro body's own host memory**, then
-    /// synthesise a token from them.
-    fn emit_s(s: str, k: u64, line: u64, col: u64) -> u64 {
-        let n: u32 = str_len(s) as u32;
-        let p: ptr = alloc(32);
-        let i: u32 = 0;
-        while i < n {
-            store8(p, i, str_byte(s, i) as u8);
-            i = i + 1;
-        }
-        return ct_syn(k, p, n as u64, line, col);
-    }
-
-    /// Eat `name = number ;` (four) and emit `const name : u32 = number ;` (seven).
-    fn main() -> u64 {
-        let buf: ptr = alloc(32);
-        ct_tok(0, buf);                         // the name -> buf
-        let ln: u64 = load8(buf, 12) as u64;    // read line/column off the source token
-        let cl: u64 = load8(buf, 16) as u64;
-        emit_s("const", 0, ln, cl);
-        ct_out(buf);                            // the name: copy the source token
-        emit_s(":", 3, ln, cl);                 // 3 = punct
-        emit_s("u32", 0, ln, cl);
-        ct_tok(1, buf); ct_out(buf);            // `=`
-        ct_tok(2, buf); ct_out(buf);            // `42`
-        ct_tok(3, buf); ct_out(buf);            // `;`
-        return 4;                               // four eaten
-    }
-}
-
-def ANSWER = 42;                // from here to `byuse`, `def` is syntax
-
-fn main() -> u64 { return ANSWER as u64; }
-
-byuse "def" done
-```
-
-**What the body gets** (`docs/184` section 3.2) - these four and nothing else; no other builtin is
-available in this context:
-
-| Signature | Meaning |
-|---|---|
-| `ct_n() -> u64` | How many tokens remain from the cursor |
-| `ct_tok(i: u64, buf: ptr) -> u64` | Write the source token's fields into `buf`; out of range returns 0 |
-| `ct_out(buf: ptr) -> u64` | Append `buf` to the output stream (the text is looked up **in the source** by span) |
-| `ct_syn(k: u64, txt: ptr, ln: u64, line: u64, col: u64) -> u64` | Synthesise a token (the text comes from the **macro body's own heap**) |
-
-A record is **20 bytes**: `+0 kind` (0=ident 1=number 2=string 3=punct 4=eof) `+4 off` `+8 len`
-`+12 line` `+16 col`; read and write it with `load8`/`store8`. `off`/`len` cover the **raw text**
-in the source (the len of `"hello"` is 7, not 5).
-
-**Rules**:
-
-- **Definition and terminator are top-level only** and cannot nest; a word may not be defined
-  twice;
-- `byuse` takes the name from the `comefor` (`comefor let "def"` → `byuse "def" done`);
-- expansion happens at the token layer **before parsing** - so `comefor`/`byuse` are not keywords,
-  and you may use `def` as an ordinary identifier elsewhere (expansion only applies inside the
-  region you declared);
-- **position is the body's responsibility**: a token emitted with `ct_out` automatically gets its
-  position back from the source; a token made by `ct_syn` needs its `line`/`col` filled in. If you
-  get them wrong the kernel **cannot tell**, and errors will point elsewhere;
-- `use` is **not supported inside the body yet** - write helper `fn`s inside it (the body is a
-  complete program).
-
-Runnable example: `loment/comefor/def_dialect.lomt` (its hand-expanded twin is `def_hand.lomt`;
-a criterion checks the two compile to **byte-identical** IR).
-
-## 3. Builtins (all of them, there are no others)
-
-**These are the only builtins.** There are no built-in types like `String` / `Vec` / `HashMap`,
-no I/O wrappers, no string formatting. **But the toolchain ships a standard library**
-(`lompi/store/`, installed with the package, nothing to fetch) - `use vec` / `use map` / `use fs`
-each bring in one module, see 3.1 at the end of this section.
-
-| Signature | Meaning |
-|---|---|
-| `str_len(s: str) -> u32` | Length in bytes |
-| `str_byte(s: str, i: u32) -> u32` | The i-th byte |
-| `str_eq(a: str, b: str) -> bool` | Content comparison |
-| `str_concat(a: str, b: str) -> str` | Concatenation (**the compile-time bump heap, which is only 64 KiB** - do not build big strings) |
-| `str_ptr(s: str) -> ptr` | The data pointer (for feeding syscalls) |
-| `print(s: str) -> u32` | Write the string's bytes to stdout (one `write` syscall) |
-| `tur_edition() -> str` | The Tur edition this program is compiled as, e.g. `tur2026.2` (docs/296). The compiler also prints it on stderr at every check/build/run |
-| `alloc(n: u32) -> ptr` | Bump-heap allocation (the same 64 KiB cap - **and read 6.2.14 before relying on it**) |
-| `free(p: ptr) -> u32` | Returns the block to the allocator (bump pointer + address-ordered free list); it cannot grow past 64 KiB and does not coalesce (`docs/210` section 2.8) |
-| `load8(p: ptr, off: u32) -> u32` | Read a byte |
-| `store8(p: ptr, off: u32, v: u8) -> u32` | Write a byte |
-| `ptr_add(p: ptr, n: u32) -> ptr` / `ptr_sub` | Pointer offset |
-| `slice_len(s: [T]) -> u32` | Slice length |
-| `panic(code: u32) -> u32` | Does not return (the type is a placeholder) |
-| `atomic_add(p: ptr, n: u32) -> u32` | Atomic add |
-| `get_bits(v: u8, shift: u32, width: u32) -> u8` / `set_bits(v: u8, shift: u32, width: u32, x: u8) -> u8` | Bitfield read/write; the second argument is the **shift**, the third is the **width** - not `hi`/`lo` |
-| `inb(port: u16) -> u32` / `outb(port: u16, v: u8) -> u32` | Port I/O (**only on the Rust translation path**, not the native one) |
-| `syscall4(nr: u64, a0: u64, a1: u64, a2: u64) -> i64` | A raw syscall (rax/rdi/rsi/rdx) |
-| `syscall6(nr: u64, a0..a4: u64) -> i64` | The same, with two more arguments |
-| `syscall7(nr: u64, a0..a5: u64) -> i64` | The same, with **all six** argument registers used (`rdi/rsi/rdx/r10/r8/r9`). This is what makes **UDP with addresses writable**: `sendto`(44) / `recvfrom`(45) take a sixth argument (a `socklen_t`), which had nowhere to go on `syscall6` |
-| `thread_spawn("entry", stack_top: u64, arg: u64, done: u64) -> i64` | Start a **real thread** (Linux `clone`). The first argument is the **name** of a function written in this unit that takes exactly one parameter — it becomes a **direct call** in the product, so the call graph stays static. Returns the new thread's tid. You supply the stack (see `thread_stack` in `os/thread`). `done` is the address of a `u32` the product **atomically increments and `futex_wake`s after the entry returns**, before the thread exits (`0` = no notification): the entry itself cannot do this, because the product exits the thread the moment it returns. **ELF target only** (Windows has no `clone`) |
-
-**To print a number**: copy `write_dec` from section 1. There is no `printf`.
-
-**Syscall numbers**: on the Linux ELF target they are Linux's own (`write`=1, `exit`=60,
-`openat`=257…). **The Windows PE target implements only eight**: `read`(0) / `write`(1) /
-`close`(3) / `brk`(12) / `exit`(60) / `getdents64`(217) / `openat`(257) / `newfstatat`(262), and
-**every other number returns -1 (failing silently)** - stick to those eight if it has to run on
-both. `/proc/self/cmdline` is synthesised by the runtime on PE, so reading argv is the same on
-both.
-
-### 3.1 The toolchain's standard library (one module at a time)
-
-It lives under the toolchain prefix in `share/lompi/store/` (in the source repository that is
-`lompi/store/`), and **the name form of `use` brings in one module**:
-
-```rust
-module myapp
-choose runtime
-
-use vec            // dynamic array (u32 elements, the caller owns the buffer)
-use numfmt         // decimal/hex formatting
-
-fn _start() {
-    syscall4(60, 0, 0, 0);
-}
-```
-
-| Package | Roughly what is in it | Examples |
-|---|---|---|
-| `std` | 133 **portable** modules (not one syscall): containers, text, big integers, floating point, hashing and checksums, compression, bit twiddling | `vec` `map` `set` `heap` `deque` `trie` `text` `utf8` `parse` `fmt` `bigint` `f64` `crc32` `deflate` `png` |
-| `host` | The host side (needs syscalls): files, directories, argv, stat, logging | `fs` `io` `dir` `argv` `stat` `log` |
-
-- **Several name-form `use` lines are allowed in 0.1.5** (verified: `use vec` plus `use numfmt`
-  compiles). Older packages limited a unit to one name-form `use`; on those, the **path** form
-  (`use "<prefix>/share/lompi/store/std/0.1.0/text.lomt"`) was the workaround. **Take modules one
-  at a time anyway; a facade is huge and collision-prone.**
-- `use std` exists and drags all **133** modules into one unit. The 0.1.4.6 fix removed the old
-  "18 minutes then SIGILL" failure (measured in 0.1.5: about 16 seconds to IR), but the facade is
-  still large; prefer per-module imports.
-- Only the name form works this way; `store` is a **directory tree** - do not reach into it by
-  path unless you mean the path form above.
-- `mem` / `num` / `proc` / `sha256` / `json` exist **on both sides**: `use mem` gets the
-  **toolchain core library** copy (`loment/lib/`), not the one in the `std` package.
-- The `test_*` functions inside standard-library files are each module's self-check; they may be
-  part of the source at no extra cost.
-
-## 4. How to read the error codes
-
-The compiler prints lines shaped like:
-
-```
-E2 @13 line 4: 1
-```
-
-Read it as: `E2` is **E002** in the unified numbering; `@13` is **the 13th token** (not a column);
-`line 4` is the line; everything after the colon is that token's text. **The codes are grouped by
-what you should do, not by wording**:
-
-| Code | What it asks you to do |
-|---|---|
-| E1 | Types do not line up (including return / payload / builtin arguments) |
-| E2 | **Something is not declared** (undeclared variable / undefined function / unknown type, including use-before-definition) |
-| E3 | **Wrong number of arguments** |
-| E4 | Capability-domain problem (undeclared / out of range / duplicate) |
-| E5 | A space declared out of bounds with `excluded` was used |
-| E6 | Value already moved |
-| E7 | Borrow conflict (mutable borrow alongside a borrow / two mutable borrows) |
-| E8 | `match` / enums (not exhaustive, duplicate pattern, not an enum, wrong payload binding) |
-| E9 | Name collides with a base type / empty struct / empty enum |
-| E10 | `?` used where the value is not `Result`/`Option` |
-| E11 | Slice mutability (writing through a read-only slice, parameter missing `mut`) |
-| E12 | Dangling reference |
-| E13 | Duplicate definition / duplicate name |
-| E14 | Assignment target is not an lvalue |
-| E15 | Fields and indexing (no such field, missing field, duplicate initialisation, field access on a non-struct…) |
-| E16 | Array literals / length disagrees with the declaration |
-| E17 | Illegal `as` conversion |
-| E18 | **`use <name>` does not resolve** (not found, or several hits) - rename it, add the file, or switch to the path form `use "...lomt"` |
-| E19 | **Syntax error (parse time)** - fix the line the message points at with `line:col` |
-| E20 | **More than 300 `use` lines in one file** - split the facade, do not stuff a whole library into one file |
-| E21 | **An `extern fn` signature outside FFI stage 1** (scalars and `ptr` only) - see 7.3.1 |
-| E22 | **`choose` used wrongly** (written twice / misspelled mode / a library wrote it) - see 2.1 |
-| E23 | **Not implemented in this version (a compiler limit)** - **not your source's fault**; write around it, and report it if you cannot. Progress is the milestone table in `docs/145` |
-| E28 | **A literal index is out of range** for a fixed-size array (LMS level 1) |
-| E29 | **Use after free** (LMS level 1, under the default `lms_full`) |
-| E30 | **Unknown name in a type position** |
-| E31 | **A construct that would drag in the runtime** while the artifact says `no_runtime` |
-| E32–E33 | Capacity / internal-limit codes from the safety engines - report them rather than writing around them |
-| E34–E37 | **LSPE audit**: undecided under strict mode (E34), ledger mismatch (E35), self-check (E36), reserved (E37) |
-
-**Every code has a full card** (what went wrong / why / at least three fixes / supported and not
-supported) which `loment check` renders; `loment explain E4` gives the ASCII version of one. The
-table above is only an overview.
-
-**The most common ones**: `E2` is nine times out of ten a **missing type annotation** (`let x =
-1;` is not legal; write `let x: u32 = 1;`) or an undefined function name; `E3` is a call with the
-wrong argument count; `E19` see 6.1.
-
-## 5. Capability domains (the one new thing Loment adds)
-
-```rust
-module blk
-choose runtime
-
-capability blk_write : disk[0..4] revocable
-
-fn write_slot(slot: u32) -> u32 {
-    guard blk_write(slot);   // out of range -> trap; in range -> audit count +1
-    return slot;
-}
-```
-
-Semantics: `guard cap(e);` evaluates `e` to an index; outside `[lo, hi]` it **traps** (with no
-other effect), inside it increments the audit table. **A literal out of range is a compile-time
-error** (E4); a non-literal is a runtime check.
-
-**Honest boundaries.** `guard` constrains **the index** to the domain only; it **is not
-authorisation** - it never asks "does the current principal hold this capability", because the
-principal-to-capability binding lives on the kernel side. `revocable` is currently just a flag in
-the declaration and in the domain-description table.
-
-And the boundary that matters most when you deploy something: **nothing gates the operations that
-actually do things**. `syscall4` / `syscall6` are raw builtins, `alloc` / `load8` / `store8` /
-`ptr_add` are raw, and FFI links arbitrary C. A program - or a library it `use`s - opens a socket,
-reads a file and writes through a raw pointer with **no declaration, no audit entry, and nothing
-in the diagnostics that shows it**. `capability` says what a domain is; it does not stop anyone.
-
-### 5.1 LSPE: the audit layer (0.1.5)
-
-The seventh `choose` dimension, `lspe`, does not change any verdict. `lspe_open_admin` (the
-default) records every allowance in the Potato v16 ledger: the site, the obligation, the
-evidence, and what is still unproved. `lspe_close_admin` turns the **recording** off; LMS / LGC /
-runtime / capability decisions are unchanged. Audit failures are E034-E037, and in strict mode an
-undecided question becomes E034. The subject is the compiler's own decision, not your program
-(`docs/262`).
-
-## 6. The trap list (every entry was measured; **reading this first saves most of the rework**)
-
-Rust intuition carries you through 90% (scalars / strings / slices / control flow / generics /
-traits). **What is left is almost entirely in the part Loment invented.** 6.1 is language and
-syntax, 6.2 is what the runtime does to you, 6.3 is what the toolchain cannot do today - the three
-are different things, and it is worth knowing which one you are looking at.
-
-### 6.1 Syntax and types
-
-1. **A `match` arm body is a block, not an expression.** `Kind::A => 0,` is not accepted; write
-   `Kind::A => { return 0; }`. (At this commit the *checker* no longer rejects the expression
-   form, and what you get instead is a build failure from the linker - it stops on the value the
-   codegen emits for it, not on the `match`. Both implementations refuse it; write the block.)
-2. **Generic enum patterns use the monomorphised name.** When the matched value is
-   `Result<i64, u32>`, `Result::Ok(v)` gives `E8 与主体枚举 Result_i64_u32 不符` (*does not match
-   the subject enum*); the answer is **`Result_i64_u32::Ok(v)`**. Non-generic enums are written
-   normally: `Kind::Big(w)`.
-3. **There is no valueless `return;`.** `return;` gives `E19 期望表达式，得到 ';'` (*expected an
-   expression, got ';'*). Either `return <expr>;` or finish with if/else.
-4. **Modules read top to bottom**: define before use, do not rely on forward references.
-5. **A struct literal cannot be an argument**: `f(S { a: 1 })` is rejected by the native backend
-   (`native 后端不支持该表达式: StructLit`). Bind it first - `let x: S = S { a: 1 };` then `f(x)`.
-6. **A struct literal cannot sit in a condition** (`if p { }` is resolved by Rust's ambiguity
-   rule); add parentheses.
-7. **One parse error stops the whole check** - every diagnostic after it is missing. So change one
-   thing at a time and re-run `loment check`; "no other errors" does not mean there are none.
-8. **`const` initialisers are restricted**: the initialiser has to be something the constant
-   folder accepts, and `const B: u32 = A + 1;` is *accepted by the checker* and then fails in the
-   **build** with a backend-internal message (`nalloc=0 nslot=10 …`) rather than a diagnostic.
-   Long tables of offsets end up written out as plain numbers.
-9. **There are no string constants**: `pub const NAME: str = "x";` is an error (E001). For a string
-   label write `pub fn name() -> str { return "x"; }` - that is how `.lomp` manifests do it
-   (section 9).
-10. **`use` takes no semicolon** in the house style. `use parse;` is *accepted* today, but every
-    file in this repository is written without it, and a semicolon there is noise a reader has to
-    wonder about.
-11. **`mut` in `let mut x: T = …` is not a keyword** - it is an ordinary identifier
-    (`loment/selfhost/checker.lomt` really does have a variable called `mut`). `let mut len: u32 =
-    …` therefore declares a variable named `mut` and then trips over a `len`, and the error points
-    somewhere else. Write `let x: T = ...;`; reassignment needs no marker.
-12. **Non-ASCII output is mojibake in a Windows console.** PE writes bytes **straight to the
-    console** and Windows decodes them with the current code page - 936 (GBK) on a Chinese
-    Windows - so UTF-8 Chinese comes out as `婧愮爜`. **The shim has no `WriteConsoleW`** and the
-    program cannot fix it from its side. Anything a person will read goes out **in ASCII**; that
-    is the only set that decodes the same under every code page. (`loment`'s own help and cheat
-    pages were moved from Chinese to English for exactly this reason, `docs/169` section 3a.)
-
-### 6.2 What the runtime does to you
-
-13. **The string escape set is `\n \t \" \\` - and there is no escape for a carriage return.**
-    Measured on a running program: a literal written `"\r"` compiles to **one byte, `0x72`, the
-    letter `r`**; `"\0"` becomes `0x30`, the digit `0`; `"\x41"` becomes the three bytes `x41`;
-    and an unrecognised escape such as `"\q"` silently loses its backslash and yields `q`.
-    **Nothing warns you** - an unknown escape is not an error. The reference compiler emits the
-    same bytes, so this is the language rather than one implementation.
-
-    What it costs in practice: **you cannot write `\r\n`, the line ending of every text
-    protocol.** An HTTP status line built from a literal comes out `HTTP/1.1 200 OKr\n`, and a
-    search for `"\r\n\r\n"` - the end of HTTP headers - compiles to a search for
-    `0x72 0x0A 0x72 0x0A` that never matches a real request, so the read loop runs to the end of
-    the buffer instead of stopping at the headers. **Write protocol bytes one at a time**:
-    `store8(p, o, 13 as u8); store8(p, o + 1, 10 as u8);`.
-
-14. **The heap is a fixed 64 KiB, and running out aborts the process.** `alloc` returns a bare
-    `ptr`: no null, no error, no `Result`. Measured: `alloc(65536)` succeeds and `alloc(64)` right
-    after it **kills the process with SIGILL** (exit code 132) - nothing is printed and the
-    program has no way to notice. **The ceiling is the constraint, not the reclamation**: `free`
-    does reclaim (a bump pointer plus an address-ordered free list, `docs/210` section 2.8) - what
-    it cannot do is grow past 64 KiB, and it does not coalesce. So a service that allocates ~900
-    bytes **and never frees** dies after about 72 requests, and one request asking for `n = 60000`
-    kills it outright. Two ways out: free as you go, or bring in a host - under `choose hosted`
-    the arena comes from the host's `malloc` and is 1 MiB. If you are writing something that
-    serves, this is the first constraint to design around.
-
-15. **Array and slice indices are not bounds-checked; the default LMS tier checks the
-    alloc-derived accesses it can see.** The answers differ by site:
-    - **Literal index, out of range, fixed-size array** - `xs[5]` on `[u32; 3]` - is
-      **refused by `check` (E028)**, at compile time, in the default tier.
-    - **Any other array/slice index** - a variable, an expression, or anything into a slice
-      `[T]` - is **unchecked at runtime**: a little out of range writes elsewhere with no trap,
-      and `xs[100000] = 1` **segfaults** the process.
-    - **`load8`/`store8` on an `alloc(<const>)` block** are checked under the default
-      `lms_full` (level 3B): level 4 skips the out-of-range access (read returns 0, the write
-      does not happen) or level 5 traps. See `docs/270` section 1.
-
-    An index that comes from outside your program - a request, a file, a length field - is
-    therefore a memory-safety question, and the language will not raise it for you. **Guard it
-    yourself**: a fixed-size array has a compile-time length, so write `if i >= 3 { … }`; a
-    slice carries its own length, so `slice_len(x)` gives it to you. The old `choose lms_open`
-    escape hatch is gone; select a tier with `choose lms_*` (section 2.1).
-
-16. **Integer arithmetic is defined to wrap, there is no checked arithmetic, and division by
-    zero kills the process.** The wrap is a **rule, not an accident**: `4294967295 + 1` is `0`
-    and `0 - 1` is `4294967295`, on purpose, and the emitted IR never carries LLVM's
-    `nsw`/`nuw` - so this is defined behaviour, not the undefined behaviour C leaves you with.
-    Nothing traps and nothing warns, so a length or a size computed from untrusted input can be
-    quietly wrong. There is no `checked_add` / `checked_mul` to reach for; write the guard
-    yourself, *before* the arithmetic, e.g. `if a > 4294967295 - b` for `a + b` on `u32`.
-    `a / b` and `a % b` with `b == 0` **abort the process** (SIGILL, exit code 132) - the
-    compiler emits the trap, so it is a defined abort rather than whatever the CPU happens to do;
-    check the divisor first if a zero can reach you. (Both rules are settled in `docs/144`
-    section 3 - the note there used to read "the rule must be settled before M2".)
-
-17. **A non-`()` function that can fall off its end is refused by `check` (E027).** Write
-    `fn f() -> u32 { … }`, forget the final `return <expr>;`, and `loment check` says so - before
-    2026-10-10 it **passed** and the binary died with `Illegal instruction` when execution reached
-    that path (measured while writing `loment/tools/lomcli.lomt` on 2026-09-15: a 40-line
-    directory walk crashed exactly here). The rule is structural: the body must end with `return`,
-    with an `if`/`else` where both branches return, or with a `match` whose every arm returns.
-    This is also why early exits are written `return 0;` rather than a bare `return;` (6.1.3). A
-    function that exists only to allow early exits can still be declared `-> u32` and end with
-    `return 0;`, and callers ignore the value.
-
-18. **SIGPIPE is not ignored, so a peer that hangs up can kill you.** Writing to a socket whose
-    peer has gone raises SIGPIPE, whose default action terminates the process. Measured: the first
-    write after the peer's RST returns `-104` (ECONNRESET, recoverable), and **the second one kills
-    the process with exit code 13**, printing nothing. A response written as headers-then-body, or
-    any body larger than the socket buffer, puts a write after the RST. Either ignore the signal or
-    use `send`(44) with `MSG_NOSIGNAL` (`0x4000`) instead of `write`.
-
-19. **A blocking `read` on an accepted socket blocks forever unless you set a timeout.** Measured
-    on a live server: one client that connects and sends **nothing** takes the whole service out of
-    service - every other request times out with zero bytes until that client goes away. A
-    half-sent request line and a client dribbling one byte every 300 ms do the same. The primitive
-    to fix it exists - `setsockopt`(54) with `SO_RCVTIMEO` (20) and a `struct timeval` of two
-    64-bit fields, through `syscall6` - and it works: measured, a `read` on a socket nobody writes
-    to returned `-11` (EAGAIN) after 1107 ms with a one-second timeout. This guide used to say
-    nothing about needing it; now it does.
-
-### 6.3 What the toolchain cannot do today
-
-These are defects rather than language rules, and each one is here because meeting it without
-knowing costs half a day. The text says which ones 0.1.5 already fixed.
-
-20. **Several name-form `use` lines are fine in 0.1.5** (verified: `use vec` plus `use numfmt`
-    compiles). Older packages stopped at one with `loment: cannot open <garbage>`, and on those
-    the path form was the workaround; a unit with imports also lost most of its string-literal
-    capacity (measured: eight ~34-byte literals could bring the old compiler down).
-21. **Deep nesting is still a wall, but the number moved.** The reference parser refuses nesting
-    beyond **64 levels** with a diagnostic ("嵌套超过 64 层"); the self-hosted parser still
-    segfaults on some deeply nested forms (nested parentheses / indexes / generic arguments,
-    #868-#874). Flatten it or split it into functions.
-22. **A `.lomt` file with no `module` declaration is a clear diagnostic now** ("期望 module").
-    Older packages crashed with SIGSEGV; 0.1.5 does not.
-23. **`use std` is no longer an 18-minute SIGILL.** 0.1.4.6 fixed it; measured in 0.1.5 it
-    reaches IR in about 16 seconds. It is still a 133-module facade - prefer per-module imports.
+The measured traps are the subject of the **`loment-traps`** skill. Read it before writing a
+nontrivial program; it is the part that saves the most rework.
 
 ## 7. Two openings: your own extension, your own `loment` command
 
@@ -1005,99 +477,39 @@ Two boundaries:
   executable is called `loment-<name>`); there is no registry and no configuration file - install
   it and it works, remove it and it is gone.
 
+**You can also put the registration in the source** (`docs/223`, landed 2026-10-10): a unit
+that declares
+
+```rust
+module mycmd
+
+pub fn loment_command() -> str { return "mycmd"; }
+pub fn command_main(argv: ptr, argc: u32) -> u32 { return 0; }
+```
+
+builds into a `loment-mycmd` program, which the launcher's PATH lookup then finds. Two
+boundaries: the name must be a **function** called `loment_command` (the bare word `command` is
+already a keyword for external code blocks, `docs/185`), and a unit cannot have both
+`command_main` and `_start` (E25) - it is either a command or a normal program. A library may
+not declare a command (E24).
+
 ## 7.3 Libraries written in other languages (FFI)
 
-**Two legs, chosen by what is on the other side** - picking the wrong one wastes the afternoon:
+FFI, the process bridge, LibL, Java AOT, network and threads are the subject of the
+**`loment-ffi`** skill.
 
-| What the other side is | How to use it | Coverage |
-|---|---|---|
-| **A C-ABI library** (C / C++ / Rust / Zig / Go(c-archive) / Swift / C#(NativeAOT) / Fortran…) | Declare `extern fn` and pass `--link that.o` when building | Every language that can export C symbols |
-| **A runtime** (Python / Java / JS / Ruby / Lua…) | `use proc`, then `proc_sh` / `proc_python` starts an interpreter process and you read its output back | Every language with an interpreter |
+## 8. The subsystems
 
-### 7.3.1 The C-ABI family (real linking)
+Split across three skills:
 
-```rust
-module ffi_demo
+- **`loment-safety`** - LGC (8.1), LMS (8.2)
+- **`loment-runtime`** - LVM (8.3), Potato (8.4), hot update (8.5), LomentFaster (8.6),
+  Lomenter (8.7), DGT (8.8)
+- **`loment-ffi`** - foreign libraries (8.9), network and threads (8.10)
+- **`loment-toolchain`** - tools/editors (8.11), L0/LLS/packaging (8.12), what is not there
+  (8.13), and the source-repository paths (10)
 
-extern fn c_add(a: i32, b: i32) -> i32;    // signature only, semicolon at the end
-extern fn c_free(p: ptr);                  // no `-> T` means void
-
-fn _start() {
-    syscall4(60, c_add(3 as i32, 4 as i32) as u64, 0, 0);
-}
-```
-
-```
-$ cc -c -O1 -ffreestanding -fno-pic lib.c -o lib.o      # build the other side yourself
-$ loment build app.lomt --link lib.o -o app             # we link it
-```
-
-**The signature takes scalars only** (`i8..i64` / `u8..u64` / `bool`) **and `ptr`**. `str` is
-"pointer plus length", **not a C string**, and a struct passed by value follows another register
-classification rule entirely - either of those is **E021**, not a silent miscompile. A string
-bound for C has to be assembled in memory as a NUL-terminated byte sequence by you.
-
-Call sites pass arguments by the **platform C ABI** (Linux: the first six integer arguments go in
-`rdi rsi rdx rcx r8 r9`; Windows: `rcx rdx r8 r9`), while Loment-to-Loment calls keep Loment's own
-convention (arguments on the stack).
-
-**What the other side's `.o` may contain, and the one door that is shut.** Relocations are
-applied, several objects may reference each other, and archives (`.a`) are expanded - all of
-that works. The boundary is the **port gate** (meeting it produces an **error**, not a guess):
-
-- an object that carries **undefined symbols** (`printf`/`malloc` being the typical ones) is
-  **refused by the linker by default**. The launchers pass `--allow-ports` in **both** channels
-  since 2026-10-17 (`docs/219` section 8c); calling `loment-lomelf` directly means adding it
-  yourself. With the door open the linker can also supply `memcpy` / `memset` / `memcmp` /
-  `malloc` / `free` / `__stack_chk_fail` from its own runtime.
-- or keep the other side freestanding (`-ffreestanding -fno-stack-protector`) so it calls only
-  itself - still the right choice when you do not want a runtime dependency.
-- dynamic libraries (`.so`) **work on ELF since 2026-10-17**: the product carries
-  `PT_INTERP`/`PT_DYNAMIC`/`DT_NEEDED` and a PLT/GOT, and the host's loader (`ld.so`) performs
-  the mapping and relocation binding. Limits today: ELF only (PE FFI is not implemented), one
-  shared object on the self-hosted linker, and function symbols (not data symbols) are
-  imported. `choose hosted` (section 2.1) is what allows the artifact to reach them.
-- several `--link` flags may be given at once; they are appended in order.
-- the other side's `.o` **may not exceed 4 MiB** (over that is an error, never a truncated build).
-
-### 7.3.2 Python / Java / JS (the process bridge)
-
-```rust
-module py_demo
-choose runtime
-
-use proc
-
-fn _start() {
-    let buf: ptr = alloc(1024);
-    let n: i64 = proc_sh("python3 -c 'import json; print(1)'", buf, 1024);
-    if n > 0 {
-        syscall4(1, 1, buf as u64, n as u64);
-    }
-    syscall4(60, 0, 0, 0);
-}
-```
-
-`proc_python("...")` is sugar for Python. **Changing language means changing the command** -
-nothing on the Loment side moves.
-
-Three boundaries: **what crosses is a byte stream, not a pointer** (no structs); it is
-**Linux/ELF only** (the Windows shim has no `fork`/`pipe` and returns -1 there); and the machine
-has to have that interpreter.
-
-**With the package installed rather than the repository**, `proc` is not in your project and
-`use proc` reports "name import not found". The packaged copy is at
-`<prefix>/share/loment/lib/proc.lomt`, and the regular way to bring it in is to put it in your
-project:
-
-```
-mkdir -p deps/proc && cp <prefix>/share/loment/lib/proc.lomt deps/proc/
-```
-
-(`deps/<name>/<name>.lomt` is the first place the name form searches - and the shape `lompi` uses
-when it installs a library.)
-
-## 8. When you do not have the source repository
+## 9. When you do not have the source repository
 
 - **Copy a working program**: the package's `share/loment/examples/` has `tour.lomt` (the program
   in section 1) and `user_hello.lomt`; more examples are in the repository's `loment/examples/`.
@@ -1106,47 +518,12 @@ when it installs a library.)
   are stuck, **read the IR first** - it carries far more than the error code does.
 - **`loment doc FILE`** prints an API summary of the file in front of you, which is how you check
   an interface you just wrote.
-- **`loment skill --print`** is this guide - on a machine with no Claude/Codex it is the only way
-  in, and it depends on no filesystem convention (if you can run the CLI, you can read it).
-- **This guide is also written for other agents**: installing Loment writes it into Claude's
-  user-level skill directory, writes a **marked pointer** into Codex's `~/.codex/AGENTS.md`, and
-  sets `LOMENT_SKILL` to the packaged copy. There is exactly one original - do not copy it
-  somewhere else and edit that.
+- **`loment skill --print`** prints this entry - on a machine with no Claude/Codex it is the way
+  in, and it depends on no filesystem convention (if you can run the CLI, you can read it). The
+  topic skills are `loment-*.md` **beside that file** in the package, and separate skill
+  directories after installation.
+- **This suite is also written for other agents**: installing Loment writes every skill into
+  Claude's user-level skill directories, writes a **marked pointer** into Codex's
+  `~/.codex/AGENTS.md`, and sets `LOMENT_SKILL` to the packaged entry. There is exactly one
+  original per skill - do not copy one somewhere else and edit that.
 
-## 9. These paths exist **only in the source repository** (do not go looking without one)
-
-The repository is FujoOS's Loment line (`loment/`, `lom/`, `tools/loment*.py`,
-`docs/14?–16?-loment-*.md`). With a checkout you also get:
-
-- **To actually manage libraries, use `lompi`** (section 0) - it is **installed** and needs no
-  repository. The Python tools below are the other set, the older model of `docs/168` (the
-  `materialize` path). The two are not the same thing; do not mix them.
-
-- `python tools/loment.py lib ...` - **the library system** (`docs/168`): `tree` (dependency tree
-  plus each library's instance count), `id` (instance identity), `cap` (capability-requirement
-  closure with provenance), `check` (conflicts), `materialize` (flatten nesting and multiple
-  versions into a tree the compiler eats directly). **Writing a library teaches you nothing new**:
-  a library is a directory; dependencies are the `use` lines in its source (declared nowhere
-  else); exports are `pub`; and the optional `pkg.lomp` carries two labels only -
-  `pub fn name() -> str` and `pub fn version() -> str` (functions rather than `const`, because the
-  language has no string constants);
-- `python tools/loment.py diag FILE` - translates error codes into Chinese repair advice (not in
-  the package);
-- `python tools/loment.py err 诊断.jsonl` - **the reporter itself**
-  (`loment/tools/lomenterr.lomt`): it renders the structured diagnostics the compiler writes with
-  `--diag-out PATH` into the titled / source-line / caret / suggestion form. **The package has it
-  too**, but there the launcher starts it automatically (when `loment check/build/run` fails)
-  rather than exposing a `loment err` subcommand - so this is also its development entry point.
-  See `docs/182` section 6;
-- every example under `loment/examples/` (`tour.lomt` is the whole-language walkthrough);
-  `loment/selfhost/` is "the Loment compiler written in Loment";
-- documentation: `docs/143` (language spec) · `docs/146` (capability-domain formal semantics) ·
-  `docs/148` (toolchain) · `docs/158` (the frozen surface, including what changing the language
-  costs) · `docs/145` (milestones) · `docs/154` (status matrix);
-- the development compile path: `python tools/loment.py ir F.lomt > f.ll` plus
-  `python tools/lomelf.py f.ll --target pe -o f.exe` (**the package has no Python, so this does
-  not apply there**).
-
-**Repository rules** (they apply only with a checkout): `lom/*.lom` is a **cross-line interface
-contract** - changing it takes a commit of its own and telling the compat line; do not change it
-in passing during a refactor. `.lomt` is yours to change.

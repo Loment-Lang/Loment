@@ -131,7 +131,7 @@ $ loment syntax            # syntax summary
 $ loment help              # all 38 commands
 ```
 
-The full guide is `.claude/skills/loment/SKILL.md`, and `loment skill --print` prints it.
+The full guide is the LomentSkill suite, starting at `.claude/skills/loment/SKILL.md`; `loment skill --print` prints that entry.
 It is written to be read start to finish before you write much code, and it is the same
 document that ships inside the package.
 
@@ -322,7 +322,7 @@ they bite.
 | | |
 |---|---|
 | [README](README.md) | What the language is, and the repository layout. |
-| `.claude/skills/loment/SKILL.md` | The language guide. Read this one. |
+| `.claude/skills/loment/SKILL.md` | The suite entry. Read this one, then the topic skill you need. |
 | `docs/manual/` | The specifications, plus a page per example. |
 | `loment/examples/` | 34 example programs; `loment example NAME` prints one. |
 | `docs/158-loment-freeze.md` | What is frozen, and what changing it costs. |

@@ -949,6 +949,20 @@ def test_windows_installer(zipf: Path) -> None:
     check("随包的 skill 也留在前缀里 (share/loment/skill)",
           (pfx / "share/loment/skill/SKILL.md").exists(), "缺 share/loment/skill/SKILL.md")
 
+    # ★ The LomentSkill suite: every topic skill is its own discovered skill, and each
+    #   installed copy is byte-identical to the package copy. A suite member that is
+    #   listed but not shipped would leave the entry's map pointing at nothing.
+    for sname, srel in loment_dist.SKILL_SUITE:
+        pkgrel = f"share/loment/skill/{loment_dist.skill_pkg_name(sname)}"
+        pkg = pfx / pkgrel.replace("/", "\\")
+        inst = home / ".claude" / "skills" / sname / "SKILL.md"
+        check(f"随包套件 {sname} 在 {pkgrel}",
+              pkg.exists() and pkg.read_bytes() == (loment_dist.ROOT / srel).read_bytes(),
+              f"缺或不符: {pkg}")
+        check(f"装完 {sname} 落到 ~/.claude/skills/{sname}/SKILL.md",
+              inst.exists() and inst.read_bytes() == (loment_dist.ROOT / srel).read_bytes(),
+              f"缺或不符: {inst}")
+
     # ★ 跨 agent 广播: 别家 agent 读不到 .claude/skills/, 所以往它自己认的文件里写**指针**。
     #   这条同时钉住"不碰原有内容"与"带标记所以可精确摘除"。
     txt = codex.read_text(encoding="utf-8")
@@ -1212,6 +1226,31 @@ def test_check_detects_staleness() -> None:
           loment_dist._git("rev-parse", "--short", "HEAD") in ver, ver.strip())
 
 
+def test_skill_suite_members() -> None:
+    """The suite table, the directories on disk and each frontmatter `name` agree.
+
+    **Why**: a new topic skill that is not in `SKILL_SUITE` is silently left out of the
+    package and the install; one that is listed but not on disk makes the entry's map point
+    at nothing. Both are cheap to check and expensive to discover from a user's machine.
+    """
+    import re
+    disk = {p.name for p in (ROOT / ".claude/skills").glob("loment-*")
+            if (p / "SKILL.md").exists()}
+    listed = {n for n, _ in loment_dist.SKILL_SUITE if n != "loment"}
+    check("套件的 loment-* 目录 == SKILL_SUITE 清单", disk == listed,
+          f"盘上多 {sorted(disk - listed)}, 清单多 {sorted(listed - disk)}")
+    for name, rel in loment_dist.SKILL_SUITE:
+        f = ROOT / rel
+        check(f"{name}: 文件在", f.exists(), str(f))
+        if not f.exists():
+            continue
+        parts = f.read_text(encoding="utf-8").split("---", 2)
+        fm = parts[1] if len(parts) >= 3 else ""
+        m = re.search(r"^name:\s*(\S+)", fm, re.M)
+        check(f"{name}: frontmatter name 与目录名一致",
+              bool(m) and m.group(1) == name, fm[:100])
+
+
 def test_skill_example_sync() -> None:
     """skill §1 贴的那份 `tour` 必须**逐字节**等于 `loment/examples/tour.lomt`, 而且能过前端。
 
@@ -1253,7 +1292,11 @@ def test_skill_example_sync() -> None:
 #: **`docs/manual/` 也不在**: 它的示例页**就是从 `loment/examples/*.lomt` 生成出来的**
 #: (`tools/loment_manual.py:44-52` 逐个示例 `lomdoc.render`), 所以那些"代码块"由
 #: `loment_p9_test` 与 `loment_elf_test` 覆盖 —— 在这里再扫一遍是重复, 不是覆盖。
-DOC_SAMPLES = [loment_dist.SKILL, "README.md", "QUICKSTART.md"]
+DOC_SAMPLES = [loment_dist.SKILL,
+               *[p for n, p in loment_dist.SKILL_SUITE
+                 if n in ("loment-syntax", "loment-tur", "loment-safety",
+                          "loment-ffi", "loment-toolchain")],
+               "README.md", "QUICKSTART.md"]
 
 
 def test_docs_samples_compile() -> None:
@@ -1485,6 +1528,7 @@ def main() -> int:
                      ("安装器加固 (0.1.5 security)", test_installer_hardening),
                      ("发布完整性锚与工作流权限面", test_release_integrity_anchor),
                      ("--check 的新鲜度", test_check_detects_staleness),
+                     ("套件清单与盘上目录一致", test_skill_suite_members),
                      ("skill 与示例同步", test_skill_example_sync),
                      ("读者文档里的样例都能编", test_docs_samples_compile)):
         try:

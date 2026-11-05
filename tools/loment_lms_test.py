@@ -839,7 +839,7 @@ def test_a_stateful_level_rejects_no_runtime() -> None:
 
 
 def test_lgc_windows_are_the_same_on_four_products() -> None:
-    """`lgc` 的窗口在**四份产物**上一致（`docs/306`）：时钟走的是 228，T0/T2/T3 共用
+    """`lgc` 的窗口在**四份产物**上一致（`docs/309`）：时钟走的是 228，T0/T2/T3 共用
     同一个 `Executor.syscall`。窗口内收集 ⇒ 四份都跑完；暂停 ⇒ 三档 VM 都耗尽。"""
     def emit(src: str) -> str:
         with tempfile.TemporaryDirectory() as td:

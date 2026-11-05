@@ -589,7 +589,7 @@ def fixture_v21() -> dict:
     return d
 
 
-#: v21 的 `gc_control` 那几条规则的反例（`docs/306`）。作用在 **v21** 的对象上。
+#: v21 的 `gc_control` 那几条规则的反例（`docs/309`）。作用在 **v21** 的对象上。
 MUTATORS_V21 = [
     ("gc_control 整个缺掉", lambda d: d.pop("gc_control"), "gc_control 必须是对象"),
     ("gc_control 多一个键", lambda d: d["gc_control"].__setitem__("budget", 1),
@@ -679,7 +679,7 @@ def test_v19_adds_l0_5_without_rewriting_old_objects():
 
 @test
 def test_v21_requires_the_gc_control_counts():
-    """v21 的 `gc_control`（`docs/306`）：正例合法，七条反例各钉一条规则。"""
+    """v21 的 `gc_control`（`docs/309`）：正例合法，七条反例各钉一条规则。"""
     assert potato.validate(fixture_v21()) == [], potato.validate(fixture_v21())
     for name, mut, needle in MUTATORS_V21:
         d = fixture_v21()

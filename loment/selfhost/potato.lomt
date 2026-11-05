@@ -2028,7 +2028,7 @@ fn pt_gc(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
 }
 
 /// 本单元是不是**默认的手动档**（没写 `choose gc` 也算）—— `gc_control.manual_collector`
-/// 的交叉不变量要它（`docs/306`）。扫描口径与 `pt_gc` 同。
+/// 的交叉不变量要它（`docs/309`）。扫描口径与 `pt_gc` 同。
 fn pt_gc_is_manual(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
     let i: u32 = lo;
     while i < hi && pt_kind(t, i) != 4 {
@@ -2046,7 +2046,7 @@ fn pt_gc_is_manual(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
     return 1;
 }
 
-/// `lgc` 的四种站点计数（`docs/306`，Potato v21）：回打包
+/// `lgc` 的四种站点计数（`docs/309`，Potato v21）：回打包
 /// `pauses | resumes<<16 | windows<<32 | timed_windows<<48`。
 ///
 /// **窗口** = `lgc start` 后面紧跟 `{` 或 `(`；`timed_windows` 只数带 `(` 的。
@@ -6086,7 +6086,7 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     o = pt_ind(out, o, 1);
     o = pt_str(out, o, "}");
     o = pt_str(out, o, ",\n");
-    // **GC 的时间控制**（v21，`docs/306`）：`lgc` 的暂停/恢复/窗口计数。
+    // **GC 的时间控制**（v21，`docs/309`）：`lgc` 的暂停/恢复/窗口计数。
     let lgcpk: u64 = pt_lgc_counts(unit, t, lo, hi);
     let lgcnp: u32 = (lgcpk & 65535) as u32;
     let lgcnr: u32 = ((lgcpk >> 16) & 65535) as u32;

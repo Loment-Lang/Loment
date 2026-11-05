@@ -4628,7 +4628,7 @@ def test_main_is_an_entry_when_start_is_absent():
 
 @test
 def test_lgc_pause_and_budget_really_gate_collection():
-    """`lgc` 的暂停与时间预算**真的**改变收集行为（`docs/306`）—— 五只程序，只差控制语句。
+    """`lgc` 的暂停与时间预算**真的**改变收集行为（`docs/309`）—— 五只程序，只差控制语句。
 
     与 `test_gc_auto_collects_while_manual_exhausts` 同一个语料（1.4 MB 请求过 64 KiB
     arena），只把循环包进不同的控制里：

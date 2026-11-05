@@ -358,7 +358,7 @@ def _st(s) -> str:
         return (f"(match {_ex(s.subject)}"
                 + "".join(_arm_ex(p, b) for p, b in s.arms) + ")")
     if n == "Lgc":
-        # `docs/306`：窗口在 AST 里**摊平**成 `begin` + 体语句 + `close` 三个兄弟节点。
+        # `docs/309`：窗口在 AST 里**摊平**成 `begin` + 体语句 + `close` 三个兄弟节点。
         # 预算是解析期折好的纳秒 IntLit，dump 出的是折好之后的数（`10ms` -> 10000000）。
         if s.action == "begin":
             return "(lgc start)" if s.budget is None else f"(lgc start {s.budget.value})"
@@ -975,7 +975,7 @@ def test_m85_checker_accepts_corpus_units():
         for target in sorted([t for d in ("examples", "selfhost", "tools")
                               for t in (ROOT / "loment" / d).glob("*.lomt")]
                              # `examples/lgc/`：带了 `choose write grammar tur2026.3`
-                             # （`docs/306`）—— 单层 glob 够不到，显式收进来。
+                             # （`docs/309`）—— 单层 glob 够不到，显式收进来。
                              + list((ROOT / "loment" / "examples" / "lgc").glob("*.lomt"))):
             unit = Path(td) / f"u_{target.stem}.lomt"
             unit.write_text(_unit_text(target), encoding="utf-8", newline="\n")
@@ -2678,7 +2678,7 @@ def test_m82_coverage_report():
              # 用**自举编译器**造工具: 格式化器/文档生成器/LSP 与 JSON 库都必须在列表里,
              # 否则"装工具不需要 Python"这条会静默退化 (装法见 scripts/lomc.ps1)
              "lomfmt.lomt", "lomdoc.lomt", "lsp.lomt", "json.lomt",
-             # Tur 2026.3 的 `lgc`（`docs/306`）：暂停/恢复、窗口、嵌套、窗口里 return、
+             # Tur 2026.3 的 `lgc`（`docs/309`）：暂停/恢复、窗口、嵌套、窗口里 return、
              # gc_manual / gc_auto 两档。同一条判据另有专门的一条（`test_lgc_*`）。
              "lgc_pause.lomt", "lgc_window.lomt", "lgc_manual.lomt", "lgc_auto.lomt"]
     with tempfile.TemporaryDirectory() as td:
@@ -3427,7 +3427,7 @@ def test_m85_the_diagnostic_buffer_is_bounded_and_says_what_it_dropped():
         assert int(m.group(2)) == 4096, f"报文说的容量不是 ERR_CAP: {m.group(0)}"
 
 
-#: Tur 2026.3 的 `lgc` 夹具（`docs/306`）：暂停/恢复、带预算的窗口、嵌套窗口、
+#: Tur 2026.3 的 `lgc` 夹具（`docs/309`）：暂停/恢复、带预算的窗口、嵌套窗口、
 #: 窗口里 `return`、`gc_manual` / `gc_auto` 两档。**四份都要逐字节一致** —— 这条
 #: 特征的全部风险都在"两个实现发出不同的窗口指令序列"，而那是只有字节才看得见的。
 LGC_DIR = ROOT / "loment" / "examples" / "lgc"
@@ -3436,7 +3436,7 @@ LGC_FIXTURES = ("lgc_pause.lomt", "lgc_window.lomt", "lgc_manual.lomt", "lgc_aut
 
 @test
 def test_lgc_control_matches_between_implementations():
-    """Tur 2026.3 的 `lgc`（`docs/306`）：两个实现逐字节相同，且做到它承诺的那几件事。
+    """Tur 2026.3 的 `lgc`（`docs/309`）：两个实现逐字节相同，且做到它承诺的那几件事。
 
     "一致"不难（两边一起不发也是"一致"），所以这里同时钉**做了什么**：
       * `gc_manual` + `lgc` 的产物**带收集器**，而 `@__loment_gc_on` 初值是 **0**；
@@ -3485,7 +3485,7 @@ def test_lgc_control_matches_between_implementations():
 
 @test
 def test_lgc_tur2026_3_reaches_the_selfhost_driver():
-    """`tur3` / `tur2026.3` 走**自举驱动**的完整装载链（`docs/306`）。
+    """`tur3` / `tur2026.3` 走**自举驱动**的完整装载链（`docs/309`）。
 
     p8 那条字节判据把 `prof` 直接递给 `emit_module`，绕过了装载器。这条补的是**用户走
     的那条路**：`driver.lomt` 的 `strip_grammar_decl` 要认这两个新拼法、把版次记成 2、

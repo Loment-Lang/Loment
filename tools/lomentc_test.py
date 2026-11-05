@@ -5310,7 +5310,7 @@ def _lgc_load(src: str):
         return lomentc.load(p)
 
 
-#: `lgc`（`docs/306`）的基准源：Tur 2026.3，手动档（默认不收集）。
+#: `lgc`（`docs/309`）的基准源：Tur 2026.3，手动档（默认不收集）。
 LGC_SRC = """choose write grammar tur2026.3
 module lgc
 
@@ -5337,7 +5337,7 @@ fn _start() { syscall4(60, churn(3) as u64, 0, 0); }
 
 @test
 def test_lgc_is_a_tur2026_3_feature():
-    """`lgc` 只在 Tur 2026.3 里是关键字（`docs/306`；2026.2 已封版）。
+    """`lgc` 只在 Tur 2026.3 里是关键字（`docs/309`；2026.2 已封版）。
 
     三格：2026.3 收下；2026.2 里 `lgc` 仍是普通标识符（报"未声明"）；预算只收
     **编译期时长**（变量预算要两边一致的类型推断，v1 不做）。
@@ -5382,7 +5382,7 @@ def test_lgc_is_refused_under_no_gc():
 
 @test
 def test_lgc_control_runtime_appears_only_when_used():
-    """控制运行期**按需发**（`docs/306`）：没写 `lgc` 的程序一个字节都不多。
+    """控制运行期**按需发**（`docs/309`）：没写 `lgc` 的程序一个字节都不多。
 
     `gc_manual` 尤其重要：它的既有承诺是"产物里没有收集器/根表"。用了 `lgc` 的单元
     才带上收集器（默认关闭），没用的一格照旧 —— 两边都在这里钉住。
@@ -5410,7 +5410,7 @@ def test_lgc_control_runtime_appears_only_when_used():
 
 @test
 def test_lgc_window_saves_and_restores_even_on_return():
-    """窗口在**每条退出路径**上恢复 `on`/`deadline`（`docs/306`）。
+    """窗口在**每条退出路径**上恢复 `on`/`deadline`（`docs/309`）。
 
     这一格钉 IR 形状：每个 `begin` 在入口块有 `%lgc.on.N` / `%lgc.dl.N` 两个槽；
     `return` 之前先把它们读回来再 `ret`。嵌套窗口各用各的编号。

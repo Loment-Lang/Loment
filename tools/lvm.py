@@ -585,7 +585,7 @@ class Executor(Vm):
         if nr == 201:                                  # time(NULL)
             return int(time.time())
         if nr == 228:                                  # clock_gettime(id, struct timespec *)
-            # `lgc` 的预算读它（`docs/306`）。**单调**钟：从宿主读，按 Linux x86-64 的
+            # `lgc` 的预算读它（`docs/309`）。**单调**钟：从宿主读，按 Linux x86-64 的
             # `timespec`（两个 i64：秒、纳秒）写进 guest 内存。钟的**绝对值**不是判决面
             # （与 201 同一条口径），窗口只比先后与差。
             ns = time.monotonic_ns()

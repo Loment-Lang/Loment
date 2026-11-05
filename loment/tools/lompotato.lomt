@@ -740,7 +740,7 @@ fn is_top_key(ver: u32, kp: ptr, kl: u32) -> u32 {
     if ver >= 20 && eq_lit(kp, kl, "systems") == 1 {
         return 1;
     }
-    // v21 = v20 + **GC 的时间控制**（`docs/306`）：`gc_control` 对象。
+    // v21 = v20 + **GC 的时间控制**（`docs/309`）：`gc_control` 对象。
     if ver >= 21 && eq_lit(kp, kl, "gc_control") == 1 {
         return 1;
     }
@@ -2320,7 +2320,7 @@ fn sys_cost_ok(mem: ptr, doc: u32, e: u32, k: str, has: u32, ck: str) -> u32 {
     return 0;
 }
 
-/// `gc_control`（v21，`docs/306`）里的一格：非负整数就回值，否则记一次错并回 `NOTFOUND`。
+/// `gc_control`（v21，`docs/309`）里的一格：非负整数就回值，否则记一次错并回 `NOTFOUND`。
 fn ctl_count(mem: ptr, g: u32, key: str) -> u32 {
     let v: u32 = jget(mem, g, key);
     if v == NOTFOUND || jnonneg(mem, v) == 0 {
@@ -2340,7 +2340,7 @@ fn gc_is(mem: ptr, doc: u32, want: str) -> u32 {
     return eq_lit(ptr_add(mem, M_SB2), l, want);
 }
 
-/// `gc_control`（v21，`docs/306`）: 五个键、四条不变量。
+/// `gc_control`（v21，`docs/309`）: 五个键、四条不变量。
 ///
 ///   * 四个计数非负；`timed_windows <= windows`；
 ///   * `manual_collector` 是布尔，且**恰好**等于"手动档 + 至少一处 `lgc`"；

@@ -40,7 +40,7 @@ syntax goes to `tur2026.3` (`loment-tur` 2.0.3, `docs/305`).
 cooperative time budget; `lgc start { … }` opens one without a budget; `lgc end;` pauses the
 collector and `lgc start;` resumes it. It works in every `choose gc` mode, but `no_gc` + `lgc` is
 E039 (there is no collector to control). The budget gates *starting* a collection, not preempting
-one already running; see `docs/306`.
+one already running; see `docs/309`.
 
 The same program can also be written with C / C++ / Java / C# / Go / Python spelling, **changing
 the spelling and nothing else** - recognised **by extension** (`.c` / `.cpp` / `.java` / `.cs` /

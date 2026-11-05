@@ -1,7 +1,7 @@
 choose write grammar tur2026.3
 module lgc_auto
 
-// `gc_auto` + `lgc`（`docs/306`）：自动档本来就收集，`lgc end` 才是暂停；
+// `gc_auto` + `lgc`（`docs/309`）：自动档本来就收集，`lgc end` 才是暂停；
 // `@__loment_gc_on` 的初值是 **1**。窗口的预算仍然生效（到点就不收），
 // 而分配点的钩子换成带开关/预算的那一层。LMS 第 3 级入口 A 也在这一档上
 // （`alloc` 失败先收一次再试）——写了 `lgc` 时它必须走 `collect_now`，

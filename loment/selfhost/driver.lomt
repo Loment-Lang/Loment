@@ -793,7 +793,7 @@ fn strip_grammar_decl(buf: ptr, n: u32, scr: ptr, file: ptr, fnam: u32, root: u3
             }
             // **原生拼法是规范名 + 当年短名**（`potato_from.GRAMMAR_ALIASES` / `docs/296`
             // §1.1）：`loment`、`tur`、`tur1`、`tur2026.1` 是 Tur 1；`tur2`、`tur2026.2`
-            // 是 Tur 2；`tur3`、`tur2026.3` 是 Tur 2026.3（`docs/306`，继承 2026.2 的
+            // 是 Tur 2；`tur3`、`tur2026.3` 是 Tur 2026.3（`docs/309`，继承 2026.2 的
             // 全部语法）。抹掉那一行之后交给原生的 lexer/parser，**没有翻译器参与**。
             // （`rust` 已退回表层语法；别的拼法仍要等翻译器的 Loment 孪生，docs/189 §4.1。）
             //

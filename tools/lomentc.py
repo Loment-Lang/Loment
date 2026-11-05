@@ -1306,7 +1306,7 @@ LGC_UNITS = {"ns": 1, "us": 1_000, "ms": 1_000_000, "s": 1_000_000_000,
 
 @dataclass
 class Lgc:
-    """Tur 2026.3 的 GC 时间控制（`docs/306`）。
+    """Tur 2026.3 的 GC 时间控制（`docs/309`）。
 
     * `lgc end;` / `lgc start;` —— 暂停 / 恢复收集器（运行期状态，不做词法恢复）；
     * `lgc start { … }` —— 词法窗口：块内开启收集，出块恢复之前的状态；
@@ -2959,7 +2959,7 @@ class Parser:
                                "defer 只收函数调用（`defer f(a, b);`）—— docs/296 s2.3")
             return Defer(e, t.line)
         if t.val == "lgc" and self.profile == "tur2026.3":
-            # GC 的时间控制（`docs/306`）。只在新开的 2026.3 里是关键字 —— 旧版次里
+            # GC 的时间控制（`docs/309`）。只在新开的 2026.3 里是关键字 —— 旧版次里
             # `lgc` 仍是普通标识符（`lgc end;` 会照旧报"未声明的变量"）。
             self.next()
             if not self.at("ident"):
@@ -2970,7 +2970,7 @@ class Parser:
                 return Lgc("pause", None, t.line)
             if act.val != "start":
                 raise LomError(act.line, act.col,
-                               "`lgc` 只认 `start` 与 `end`（docs/306）")
+                               "`lgc` 只认 `start` 与 `end`（docs/309）")
             budget = None
             if self.accept("punct", "("):
                 budget = self._parse_lgc_budget()
@@ -2983,7 +2983,7 @@ class Parser:
             if budget is not None:
                 raise LomError(t.line, t.col,
                                "带预算的 `lgc start(… )` 必须带块："
-                               "`lgc start(10ms) { … }`（docs/306）")
+                               "`lgc start(10ms) { … }`（docs/309）")
             return Lgc("resume", None, t.line)
         if t.val in ("break", "continue") and self.profile in TUR2_PLUS:
             # Tur 2 的循环控制（`docs/296` §2.5）；Tur 1 里它们是普通标识符，照旧报
@@ -4889,7 +4889,7 @@ _RUNTIME_SITES: dict[str, str] = {
     # `#778`：真线程要把运行期的锁与活线程计数带进产物（`alloc`/`free`/根表在
     # 线程之间共享）。所以它和 `alloc` 一样，是"会把运行期拖进来"的构造。
     "thread_spawn": "`thread_spawn`（运行期锁）",
-    # `docs/306`：`lgc` 发的是运行期的控制全局与四个函数 —— 与 `guard` 同级。
+    # `docs/309`：`lgc` 发的是运行期的控制全局与四个函数 —— 与 `guard` 同级。
     "lgc": "`lgc`（GC 时间控制）",
 }
 
@@ -5548,7 +5548,7 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                 elif isinstance(s, ExprStmt):
                     _walk_expr(s.expr, fscope, funcs, structs, errs, enums)
                 elif isinstance(s, Lgc):
-                    # `docs/306`：预算必须是 u64 纳秒；整数字面量按 u64 收（`10ms` 的糖
+                    # `docs/309`：预算必须是 u64 纳秒；整数字面量按 u64 收（`10ms` 的糖
                     # 已经在解析期折成 IntLit）。窗口体已经摊平成兄弟语句。
                     if s.budget is not None and not isinstance(s.budget, IntLit):
                         errs.append(
@@ -5624,7 +5624,7 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
         if lspe_mode == "strict":
             for line in getattr(mod, "lspe_unsourced_lines", []):
                 errs.append(f"{line}: LSPE 未能为这次放行给出来源（未标注的放行）")
-    # ---- `lgc`（`docs/306`）：`no_gc` 的产物**没有收集器**，开窗无从谈起。
+    # ---- `lgc`（`docs/309`）：`no_gc` 的产物**没有收集器**，开窗无从谈起。
     # 这里判在**检查器**里（与 LMS 同一条纪律）：自举侧的发射器没有报错通道，
     # 放在那边两边就不同构了。
     if not _dep_pass and mod.chooses.get("gc", CORE_DEFAULTS["gc"]) == "no_gc":
@@ -6500,7 +6500,7 @@ def _count_gc_ladder(mod: Module) -> dict:
 
 
 def _count_gc_control(mod: Module) -> dict:
-    """`lgc` 的站点统计（`docs/306`，Potato v21）。
+    """`lgc` 的站点统计（`docs/309`，Potato v21）。
 
     只数**根单元**的语句（与 `guards` / `boundary` 同一个视图）。`manual_collector`
     是**交叉**那条：`gc_manual` 且至少一处 `lgc` 时，产物里确实带了收集器 ——
@@ -6759,7 +6759,7 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # **GC 的组成**（`docs/210` §3/§5, v10）—— 在 `raw_mod`（单态化之前）上数，理由
         # 见 `_count_gc_ladder`：自举侧看到的是**源 token**，只有单态化前那份视图与它对齐。
         "gc_ladder": _gc_ladder,
-        # **GC 的时间控制**（v21，`docs/306`）：`lgc` 的暂停/恢复/窗口计数，外加
+        # **GC 的时间控制**（v21，`docs/309`）：`lgc` 的暂停/恢复/窗口计数，外加
         # `manual_collector` —— 手动档下用了 `lgc` 就会带收集器，这条让例外可判。
         "gc_control": _count_gc_control(mod),
         # **面的组成**（`docs/222`, v11）—— 与 `boundary` **同一个视图**（`mod`），
@@ -7507,7 +7507,7 @@ def _arena_indirect(ir: str, nbytes: int) -> str:
 _IR_GC_SHARED_HOSTED = _arena_indirect(_IR_GC_SHARED, HOSTED_ARENA_BYTES)
 _IR_GC_HOSTED = _IR_GC_SHARED_HOSTED + _IR_GC_TRIGGER_FIXED
 
-#: **GC 时间控制**（`docs/306`，Tur 2026.3 的 `lgc`）。只在源里出现 `lgc` 时发。
+#: **GC 时间控制**（`docs/309`，Tur 2026.3 的 `lgc`）。只在源里出现 `lgc` 时发。
 #: 与收集器正文**分开**：没写 `lgc` 的程序产物一个字节都不变。
 #:
 #:   * `@__loment_gc_on` —— 收集器总开关（`gc_manual` 初值 0：手动档的承诺不变，
@@ -8712,7 +8712,7 @@ class _Ir:
         #: 此前 alpha 的 L3 残差没人收（只有分配器）。`gc_any` = 要根表/收集器的任意一档。
         self.gc_alpha = gc_alpha
         self.gc_any = gc_auto or gc_alpha
-        #: **`lgc` 的 GC 时间控制**（`docs/306`）：源里出现 `lgc` 才为真。收集器、根表、
+        #: **`lgc` 的 GC 时间控制**（`docs/309`）：源里出现 `lgc` 才为真。收集器、根表、
         #: 分配钩子都按 `gc_hook` 走 —— `gc_manual` 因此也能开窗收集（默认关）。
         self.gc_ctl = gc_ctl
         self.gc_hook = self.gc_any or gc_ctl
@@ -9011,7 +9011,7 @@ class _Ir:
             self.w("call void @__loment_rt_release()")
 
     def _lgc_stmt(self, s: Lgc) -> None:
-        """`lgc` 的一条语句（`docs/306`）。窗口是 `begin` / `close` 两个兄弟节点。"""
+        """`lgc` 的一条语句（`docs/309`）。窗口是 `begin` / `close` 两个兄弟节点。"""
         if s.action == "pause":
             if not self.terminated:
                 self.w("store i32 0, ptr @__loment_gc_on")
@@ -9058,7 +9058,7 @@ class _Ir:
         self.w(f"store i64 {dl}, ptr @__loment_gc_deadline")
 
     def lgc_restore_all(self) -> None:
-        """`return` / 函数末尾：所有打开的窗口按逆序恢复（`docs/306`）。"""
+        """`return` / 函数末尾：所有打开的窗口按逆序恢复（`docs/309`）。"""
         while self.lgc_open:
             self._lgc_restore_one(self.lgc_open.pop())
 
@@ -10530,7 +10530,7 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     cov_counter = [0] if coverage else None
     # **L0 只在这一档下开**（`docs/210` §2）：`gc_manual`（默认）与 `gc_auto` 都**一行不动**。
     # 取的是**根单元**的取值 —— 与 Potato 里那个 `gc` 字段同一个来源。
-    #: **`lgc` 时间控制**（`docs/306`）：**任何依赖**里出现都算 —— 它们编进同一份产物。
+    #: **`lgc` 时间控制**（`docs/309`）：**任何依赖**里出现都算 —— 它们编进同一份产物。
     _gc_ctl = any(_lgc_sites(m) for m in mods)
     gc_alpha = mod.chooses.get("gc", CORE_DEFAULTS["gc"]) == "gc_auto_alpha"
     # **`gc_auto`**：自动那一档（`docs/210` §2.1 / §2.4）—— 编译器发精确根表 + 在每个分配点
@@ -10743,7 +10743,7 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
                 # 这两个数是绑在一起的，不是各挑各的（改一个就得改另一个，见那条常量）。
                 out.append(_IR_GC_HOSTED if _indirect else _IR_GC)
     if _gc_ctl:
-        # **只在源里出现 `lgc` 时发**（`docs/306`）：没写的程序产物一个字节都不变。
+        # **只在源里出现 `lgc` 时发**（`docs/309`）：没写的程序产物一个字节都不变。
         # 手工档初值 0（默认不收集），自动两档初值 1（`lgc end` 才是暂停）。
         out.append(_IR_GC_CTL_GLOBALS.replace(
             "__LGC_ON__", "1" if (gc_auto or gc_alpha) else "0"))

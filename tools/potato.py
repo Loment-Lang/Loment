@@ -153,7 +153,7 @@ TOP_KEYS_V19 = TOP_KEYS_V18
 # 相同 —— 校验器**不读源码**就判得了三者是否打架。**v19 的对象仍然合法**：新字段
 # 只从 v20 起必填（台阶只往上加）。
 TOP_KEYS_V20 = TOP_KEYS_V19 | {"systems"}
-# v21 = v20 + **GC 的时间控制** `gc_control`（`docs/306`）：`lgc` 的暂停/恢复/窗口
+# v21 = v20 + **GC 的时间控制** `gc_control`（`docs/309`）：`lgc` 的暂停/恢复/窗口
 # 计数，外加 `manual_collector`（手动档用了 `lgc` 就会带收集器 —— 这条让例外可判）。
 # **单独升一版**：塞进 v20 会让 v20 的单元一起必填（`docs/147` 的台阶）。
 TOP_KEYS_V21 = TOP_KEYS_V20 | {"gc_control"}
@@ -869,7 +869,7 @@ def validate(doc: object) -> list[str]:
                                 f" {want_n}（cost 必须等于明细的总数）")
 
     if ver == "v21":
-        # **GC 的时间控制**（`docs/306`）。五个键、四条不变量 —— 都是**不读源码**判得了的：
+        # **GC 的时间控制**（`docs/309`）。五个键、四条不变量 —— 都是**不读源码**判得了的：
         #   * 计数非负；
         #   * `timed_windows <= windows`（带预算的窗口是窗口的子集）；
         #   * `manual_collector` 是布尔，且**恰好**等于"手动档 + 至少一处 `lgc`"；

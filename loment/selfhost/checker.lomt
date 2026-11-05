@@ -75,7 +75,7 @@ const E_MODE: u32 = 22;    // E022 项目模式 `choose` 用法不对 (docs/143 
 const E_RT: u32 = 31;      // E031 这一档是 `no_runtime`，而这个构造要运行期 (issue #321)
 const E_PARSE: u32 = 19;   // E019 期望表达式 —— 参考实现 `parse_primary` 的口径 (issue #49)
 const E_PASS: u32 = 38;    // E038 `lspe pass` 没有理由（docs/262 §5.16）
-// E039 = **`lgc` 与 `no_gc` 冲突**（`docs/306`）：`no_gc` 的承诺是「产物带收集器」的
+// E039 = **`lgc` 与 `no_gc` 冲突**（`docs/309`）：`no_gc` 的承诺是「产物带收集器」的
 // 反面，而 `lgc` 的每一条语句都在控制那个收集器何时跑。与参考实现同码
 // （`loment_diag.RULES` 的 E039）。
 const E_LGC: u32 = 39;
@@ -544,7 +544,7 @@ fn chk_core_dim(src: ptr, t: ptr, k: u32) -> u32 {
     return 7;
 }
 
-/// `lgc` 的时长单位（`docs/306`）：`ns` / `us` / `ms` / `s` / `m`。与参考实现
+/// `lgc` 的时长单位（`docs/309`）：`ns` / `us` / `ms` / `s` / `m`。与参考实现
 /// `LGC_UNITS` 同一张表；裸数字按纳秒收（所以"没有单位"不是错误）。
 fn chk_lgc_unit(src: ptr, t: ptr, i: u32) -> u32 {
     if chk_tok_is(src, t, i, "ns") || chk_tok_is(src, t, i, "us")
@@ -579,7 +579,7 @@ fn chk_rt_site(src: ptr, t: ptr, i: u32, prof: u32) -> u32 {
         return 0;
     }
     if chk_tok_is(src, t, i, "guard") || chk_tok_is(src, t, i, "lgc") {
-        // `lgc`（`docs/306`）与 `guard` 同一条位置判据：语法里它是**语句**
+        // `lgc`（`docs/309`）与 `guard` 同一条位置判据：语法里它是**语句**
         // （`lgc start;` / `lgc end;` / `lgc start { … }`），后面紧跟一个**名字**才算。
         // 写成 `lgc:` 或 `fn lgc(` 都不符合这两条，自然落选（参考实现
         // `_runtime_sites` 的 `t.val == "guard" or t.val == "lgc"` 那一条）。
@@ -3371,7 +3371,7 @@ fn chk_ret_unit(src: ptr, t: ptr, from: u32, to: u32) -> u32 {
 /// `[cur, e)` 里**一条语句**结束之后的位置（指向下一条语句的第一个 token）。
 /// 控制语句没有结尾 `;`：跳到它（含 `else` 链）的块尾之后。
 fn chk_stmt_end(src: ptr, t: ptr, cur: u32, e: u32) -> u32 {
-    // `lgc start { … }` 也是一条**带块**的语句（`docs/306`）—— 不把它算进这一支，
+    // `lgc start { … }` 也是一条**带块**的语句（`docs/309`）—— 不把它算进这一支，
     // 下面那条"找顶层 `;`"会一路扫到**下一条**语句的分号，`chk_falls` 的判据就错位。
     // `lgc start;` / `lgc end;` 没有块：它们照常落到下面那条。
     let islgc: u32 = 0;
@@ -3532,7 +3532,7 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             }
         } else if load32(oc, 8) == 2 && chk_tok_kind(t, j) == 0
                 && chk_tok_is(src, t, j, "lgc") {
-            // `lgc`（`docs/306`）：形状在前置趟已经判过（E019）。这里只把游标挪到
+            // `lgc`（`docs/309`）：形状在前置趟已经判过（E019）。这里只把游标挪到
             // **头的末尾** —— 窗口停在 `{`（体里的语句照常逐条检查），无块的两条跳过 `;`。
             let act: u32 = j + 1;
             if chk_tok_is(src, t, act, "end") {
@@ -3866,7 +3866,7 @@ fn chk_syntax_prepass(src: ptr, t: ptr, out: ptr, o: u32, tur2: u32) -> u32 {
                     && lend == 0 && chk_tok_kind(t, i) == 0 && o == 0 {
                 o = sym_pub(src, t, out, o, E_PARSE, i);
             }
-            // **`lgc` 的形状**（`docs/306`，只在 Tur 2026.3 是关键字）—— 与参考实现的
+            // **`lgc` 的形状**（`docs/309`，只在 Tur 2026.3 是关键字）—— 与参考实现的
             // `Parser.parse_stmt` 里那一段同一套判据：`start` / `end` 二选一；预算只收
             // **整数字面量 + 可选单位**（ns/us/ms/s/m，裸数字按 ns）；带预算必须带块。
             // 这些都发生在**解析期**，所以码是 E019，且报第一条就整趟不跑。
@@ -4442,7 +4442,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     if eff_gc == 3 && eff_port == 2 {
         o = sym_pub(src, t, out, o, E_MODE, later_line(ln_gc, ln_port));
     }
-    // ---- **`lgc` 与 `no_gc` 冲突**（`docs/306`，E039）：`no_gc` 的定义是「产物里没有
+    // ---- **`lgc` 与 `no_gc` 冲突**（`docs/309`，E039）：`no_gc` 的定义是「产物里没有
     // 收集器」，而 `lgc` 的每一条语句都在控制那个收集器何时跑 —— 两句话不能同时为真。
     // 与参考实现同一条：判在**检查器**里（自举侧的发射器没有报错通道，放那边两边就不同构），
     // 且排在**运行期站点**那条之后（参考实现把它 append 在 `check()` 的末尾）。
@@ -4529,7 +4529,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                     && !chk_tok_is(src, t, i - 1, ":")
                     && !chk_tok_is(src, t, i - 1, ".")
                     && !chk_tok_is(src, t, i - 1, "guard")
-                    // `lgc start(10ms)` 的预算**不是一次调用**（`docs/306`）：`start`
+                    // `lgc start(10ms)` 的预算**不是一次调用**（`docs/309`）：`start`
                     // 前面那个词是 `lgc`，语法位置上它是语句头。不排掉就会把 `start`
                     // 当成未定义的函数（E002），而参考实现那边它是 `Lgc` 的预算字段。
                     && !(load32(oc, 8) == 2 && chk_tok_is(src, t, i - 1, "lgc")) {

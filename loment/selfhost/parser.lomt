@@ -127,7 +127,7 @@ fn lit_u64(src: ptr, t: ptr, i: u32) -> u64 {
     return v;
 }
 
-/// `lgc` 的时长单位 -> 纳秒倍数（`docs/306`，与参考实现 `LGC_UNITS` 同表；
+/// `lgc` 的时长单位 -> 纳秒倍数（`docs/309`，与参考实现 `LGC_UNITS` 同表；
 /// 裸数字按纳秒收）。
 fn lgc_mult(src: ptr, t: ptr, i: u32) -> u64 {
     if tok_is(src, t, i, "us") {
@@ -595,7 +595,7 @@ fn parse_stmt(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
         let rp: u64 = parse_stmts(src, t, i + 4, out, o);
         return pack(unpk_i(rp) + 1, unpk_o(rp));
     }
-    // `lgc`（`docs/306`）：与参考实现同形 —— 窗口在 AST 里**摊平**成
+    // `lgc`（`docs/309`）：与参考实现同形 —— 窗口在 AST 里**摊平**成
     //   `begin` + 体语句 + `close`
     // 三个兄弟节点，dump 因此是 `(lgc start [预算])` 后面跟着体语句、最后 ` (lgc close)`。
     // 预算在参考实现那边是**解析期折好的纳秒 IntLit**，所以这里也要折（`10ms` -> 10000000）。

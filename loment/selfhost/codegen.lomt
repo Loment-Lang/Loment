@@ -94,7 +94,7 @@ const CG_DFR_STRIDE: u32 = 84;         // start | end | len | pad | text[68]
 const CG_MAXDFR: u32 = 8;     // = 捕获表里能放下的站点数（8 x 4 x 84）
 const CG_MAXDFRAMES: u32 = 64;
 const CG_MAXDFARGS: u32 = 4;
-//: **`lgc` 的窗口栈**（`docs/306`，Tur 2026.3）。标量两格放在 640/656 之间的空位
+//: **`lgc` 的窗口栈**（`docs/309`，Tur 2026.3）。标量两格放在 640/656 之间的空位
 //: （648/652 —— 644 是常量表条数），栈本身接在 defer 捕获区之后。
 //: 栈深 64 与 E023 的嵌套上限同数：超过 64 层的窗口在**检查器**就拒了，走不到这儿。
 //:   `CG_LGC`   = 1：本单元出现过 `lgc`（决定发不发那一段运行期文本）
@@ -2650,7 +2650,7 @@ fn emit_tur_meta(s: ptr, out: ptr, prof: u32) -> u32 {
     if prof == 1 {
         emit_str(s, out, "\\74\\75\\72\\32\\30\\32\\36\\2E\\32");
     } else if prof == 2 {
-        // `tur2026.3`（`docs/306`）：与 2026.1/2026.2 等长（9 个字符），数组仍是 21。
+        // `tur2026.3`（`docs/309`）：与 2026.1/2026.2 等长（9 个字符），数组仍是 21。
         emit_str(s, out, "\\74\\75\\72\\32\\30\\32\\36\\2E\\33");
     } else {
         emit_str(s, out, "\\74\\75\\72\\32\\30\\32\\36\\2E\\31");
@@ -3467,7 +3467,7 @@ fn emit_alloc_seq(s: ptr, out: ptr, szlvl: u32, lvl: u32) -> u32 {
         emit_str(s, out, "  call void @__loment_rt_acquire()\n");
     }
     if load32(s, CG_LGC) == 1 {
-        // `lgc` 档（`docs/306`）：先过开关与预算，再问原来的钩子（那两个函数一行不改）。
+        // `lgc` 档（`docs/309`）：先过开关与预算，再问原来的钩子（那两个函数一行不改）。
         emit_str(s, out, "  call void @__loment_maybe_collect_ctl(i32 ");
         emit_val(s, out, szlvl);
         emit_str(s, out, ")\n");
@@ -5094,7 +5094,7 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
     store32(s, CG_DFR_N, 0);
     store32(s, CG_DFR_D, 0);
     store32(s, CG_DFR_PLAY, 0);
-    // `lgc` 的窗口编号与打开栈同样按**函数**清零（`docs/306`）：上一函数的窗口不能漏过来。
+    // `lgc` 的窗口编号与打开栈同样按**函数**清零（`docs/309`）：上一函数的窗口不能漏过来。
     store32(s, CG_LGC_N, 0);
     store32(s, CG_LGC_D, 0);
     store32(s, 568, body_end);
@@ -5141,7 +5141,7 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
             if tok_is(src, toks, jj, "}") {
                 if load32(s, 476) == 0 {
                     let _de: u32 = dfr_end(s, out, src, toks, fdfr, ret);
-                    lgc_restore_all(s, out);   // `lgc`：还开着的窗口按逆序恢复（docs/306）
+                    lgc_restore_all(s, out);   // `lgc`：还开着的窗口按逆序恢复（docs/309）
                     emit_l1(s, out, src, toks, 0, 0, 0);   // L1：函数末尾
                     if gc_hook(s) == 1 {
                         roots_pop(s, out);
@@ -6138,7 +6138,7 @@ fn dfr_stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
 /// 一条语句; 返回下一个待处理 token 下标。
 fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
     if load32(s, CG_PROF) == 2 && tok_kind(toks, j) == 0 && tok_is(src, toks, j, "lgc") {
-        // `lgc` 的时间控制（`docs/306`）：只在 Tur 2026.3 是关键字。
+        // `lgc` 的时间控制（`docs/309`）：只在 Tur 2026.3 是关键字。
         return lgc_stmt(s, out, src, toks, j, ret);
     }
     if load32(s, CG_PROF) != 0 && tok_kind(toks, j) == 0 && tok_is(src, toks, j, "defer") {
@@ -6186,7 +6186,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         // 裸 `return;`（`docs/296` §2.6）：函数没有返回类型（检查器已经核过）。退出路径与
         // 带值那条同序 —— L1 该还的还、`gc_auto` 的根表该退的退 —— 只是 `ret void`。
         let _dfr0: u32 = dfr_run(s, out, src, toks, 0, ret);
-        lgc_restore_all(s, out);   // `lgc`：提前离开函数 = 离开所有窗口（docs/306）
+        lgc_restore_all(s, out);   // `lgc`：提前离开函数 = 离开所有窗口（docs/309）
         emit_l1(s, out, src, toks, 1, j, ret_end(src, toks, j, load32(s, 568)));
         if gc_hook(s) == 1 {
             roots_pop(s, out);
@@ -6207,7 +6207,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         move_val(s, 38, 0);
         // `defer`（`docs/296` §2.3）：离开函数 = 离开所有块，由内向外跑完再 ret
         let _dfr: u32 = dfr_run(s, out, src, toks, 0, ret);
-        lgc_restore_all(s, out);   // `lgc`：提前离开函数 = 离开所有窗口（docs/306）
+        lgc_restore_all(s, out);   // `lgc`：提前离开函数 = 离开所有窗口（docs/309）
         // L1 定活：返回值**已经读出来**了，现在可以还那块（档位门在 `emit_l1` 里面）
         emit_l1(s, out, src, toks, 1, j, ret_end(src, toks, j, load32(s, 568)));
         if gc_hook(s) == 1 {   // `gc_auto`：离开本帧前退根表（在求值之后、ret 之前）
@@ -7503,7 +7503,7 @@ rescue:
   store i1 true, ptr %lmsretry
 ");
         if ctl == 1 {
-            // `lgc` 档（`docs/306`）：**OOM 也要过同一道闸** —— 拿 `collect_now` 而不是
+            // `lgc` 档（`docs/309`）：**OOM 也要过同一道闸** —— 拿 `collect_now` 而不是
             // `collect`，否则一次分配失败会绕过暂停（参考实现里这是实打实的一个 bug）。
             o = emit_str(s, out, "  call void @__loment_collect_now()
 ");
@@ -7907,7 +7907,7 @@ rescue:
   store i1 true, ptr %lmsretry
 ");
         if ctl == 1 {
-            // `lgc` 档（`docs/306`）：同 `emit_heap` —— OOM 也要过同一道闸。
+            // `lgc` 档（`docs/309`）：同 `emit_heap` —— OOM 也要过同一道闸。
             d = d + emit_str(s, out, "  call void @__loment_collect_now()
 ");
         } else {
@@ -8256,7 +8256,7 @@ fn gc_any(s: ptr) -> u32 {
 }
 
 /// **要不要根表 / 收集器钩子**（镜像参考实现的 `self.gc_hook`）：`gc_auto`、
-/// `gc_auto_alpha`，**或**源里出现 `lgc`（`docs/306`）。后者让 `gc_manual` 也能开窗
+/// `gc_auto_alpha`，**或**源里出现 `lgc`（`docs/309`）。后者让 `gc_manual` 也能开窗
 /// 收集 —— 默认开关是关的，只有窗口里才收，`gc_manual` 的承诺因此不变。
 fn gc_hook(s: ptr) -> u32 {
     if gc_any(s) == 1 {
@@ -8822,7 +8822,7 @@ roots:
 }
 
 
-/// **GC 时间控制那一段**（`docs/306`，Tur 2026.3 的 `lgc`）。**只在源里出现 `lgc` 时发**
+/// **GC 时间控制那一段**（`docs/309`，Tur 2026.3 的 `lgc`）。**只在源里出现 `lgc` 时发**
 /// —— 没写的程序产物一个字节都不变。
 ///
 /// 文本与参考实现的 `_IR_GC_CTL_GLOBALS` + `_IR_LGC_NOW` **逐字节同源**：
@@ -9488,7 +9488,7 @@ fn roots_pop(s: ptr, out: ptr) -> u32 {
     return 0;
 }
 
-// ---------------------------------------------------------------- `lgc`（docs/306）
+// ---------------------------------------------------------------- `lgc`（docs/309）
 
 /// 预算字面量 -> u64（`0x`/`0X` 前缀十六进制，否则十进制）。与参考实现 `_int_lit`
 /// 同一张表；**自然环绕**（与那边 `v & 2^64-1` 同义）。
@@ -9628,7 +9628,7 @@ fn lgc_close(s: ptr, out: ptr) -> u32 {
     return lgc_restore_one(s, out, idx);
 }
 
-/// `return` / 函数末尾：所有**还开着**的窗口按逆序恢复（`docs/306`）。
+/// `return` / 函数末尾：所有**还开着**的窗口按逆序恢复（`docs/309`）。
 fn lgc_restore_all(s: ptr, out: ptr) -> u32 {
     let d: u32 = load32(s, CG_LGC_D);
     while d > 0 {
@@ -9640,7 +9640,7 @@ fn lgc_restore_all(s: ptr, out: ptr) -> u32 {
     return 0;
 }
 
-/// 一条 `lgc` 语句（`docs/306`）：`end` / `start` / `start { … }` / `start(预算) { … }`。
+/// 一条 `lgc` 语句（`docs/309`）：`end` / `start` / `start { … }` / `start(预算) { … }`。
 ///
 /// 窗口体在这里**就地当一个块发**（`while !}` 那条循环，和 if/while 的体同一份做法）——
 /// 参考实现是把体摊平成兄弟语句，两者对**发射出的指令序列**是同一件事。
@@ -9933,7 +9933,7 @@ fn gc_auto_tier(src: ptr, toks: ptr) -> u32 {
     return 0;
 }
 
-/// 本单元出现过 `lgc` 吗（`docs/306`，Tur 2026.3）。`prof` 必须是 2 —— 旧版次里
+/// 本单元出现过 `lgc` 吗（`docs/309`，Tur 2026.3）。`prof` 必须是 2 —— 旧版次里
 /// `lgc` 是**普通标识符**（`lgc end;` 在老版次里只是一个未声明的名字），不拖任何运行期。
 ///
 /// 认法与参考实现的 `_lgc_sites` 同义：**一条 `lgc start` / `lgc end` 语句**。
@@ -10107,7 +10107,7 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32) -> u32 {
     store32(s, 484, 0);   // 局部数
     store32(s, 572, gc_alpha_tier(src, toks));   // L0 只在 `gc_auto_alpha` 档上跑
     store32(s, 576, gc_auto_tier(src, toks));    // 自动收集只在 `gc_auto` 档上跑
-    // `lgc` 的时间控制（`docs/306`）：只在 Tur 2026.3 且源里真写了 `lgc` 才发那一段。
+    // `lgc` 的时间控制（`docs/309`）：只在 Tur 2026.3 且源里真写了 `lgc` 才发那一段。
     // **在任何预扫描之前定** —— `runtime_needed` / `heap_needed` 都要读它。
     store32(s, CG_LGC, has_lgc(src, toks, prof));
     // **LMS 七级开关的实际集合**（`docs/253` §11.4，2026-10-18）：档铺初值 + 显式覆盖。
@@ -10461,7 +10461,7 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32) -> u32 {
         }
     }
     if load32(s, CG_LGC) == 1 {
-        // **只在源里出现 `lgc` 时发**（`docs/306`）：没写的程序产物一个字节都不变。
+        // **只在源里出现 `lgc` 时发**（`docs/309`）：没写的程序产物一个字节都不变。
         // 手工档初值 0（默认不收集），自动两档初值 1（`lgc end` 才是暂停）。
         emit_lgc_runtime(s, out);
     }

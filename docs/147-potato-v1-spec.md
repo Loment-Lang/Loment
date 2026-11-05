@@ -139,7 +139,7 @@ Wrap<Outer<Inner<u32>>>  -> Wrap_Outer__Inner___u32
   | `v18` | `lms_budgets` | `docs/253` §11.2.1 |
   | `v19` | `gc_ladder.l0_5` | `docs/210` §2.10 |
   | `v20` | **`systems`**（六个系统的索引；读者从这里开始读） | `docs/304` |
-  | `v21` | **`gc_control`**（`lgc` 的暂停/恢复/窗口计数 + `manual_collector`） | `docs/306` |
+  | `v21` | **`gc_control`**（`lgc` 的暂停/恢复/窗口计数 + `manual_collector`） | `docs/309` |
 
   台阶是**累积**的：`v21` 要求它下面每一版的字段都在。
 

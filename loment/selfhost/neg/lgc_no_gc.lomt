@@ -1,7 +1,7 @@
 choose write grammar tur2026.3
 module neg_lgc_no_gc
 
-// `lgc` 与 `no_gc` 冲突（`docs/306`，E039）：`no_gc` 的承诺是「产物里没有收集器」，
+// `lgc` 与 `no_gc` 冲突（`docs/309`，E039）：`no_gc` 的承诺是「产物里没有收集器」，
 // 而 `lgc` 的每一条语句都在控制那个收集器何时跑 —— 两句话不能同时为真。
 // `choose runtime` 是必需的：`lgc` 本身是运行期站点（E031），不写它就会多一条
 // 与这条冲突无关的诊断。

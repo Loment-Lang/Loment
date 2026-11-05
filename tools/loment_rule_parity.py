@@ -442,7 +442,7 @@ _CASES: list[tuple[str, str]] = [
     ("lspe-duplicate-close",
      "module m\n\nchoose lspe_close_admin\nchoose lspe_close_admin\n\n"
      "fn f() -> u32 {\n    return 1;\n}\n"),
-    # ---- GC 时间控制（docs/306, Tur 2026.3）------------------------------
+    # ---- GC 时间控制（docs/309, Tur 2026.3）------------------------------
     ("lgc-no-gc", "choose write grammar tur2026.3\nmodule m\nchoose no_gc\n"
      "fn f() { lgc end; }\n"),
     ("lgc-budget-expr", "choose write grammar tur2026.3\nmodule m\nchoose runtime\n"

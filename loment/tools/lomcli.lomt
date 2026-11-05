@@ -1588,6 +1588,7 @@ fn do_builtins(mem: ptr, ab: ptr, argc: u32) -> u32 {
     termrow(mem, 1, "str_ptr", "str_ptr(s: str) -> ptr   data pointer (feed it to syscall)");
     termrow(mem, 1, "print", "print(s: str) -> u32   write s to stdout (one write syscall)");
     termrow(mem, 1, "tur_edition", "tur_edition() -> str   the Tur edition this program was compiled as (e.g. tur2026.2)");
+    termrow(mem, 1, "print_num", "print_num(n) -> u32   decimal, no newline; any integer; Tur 2026.2 only, needs choose runtime");
     termrow(mem, 1, "alloc", "alloc(n: u32) -> ptr   bump heap (64 KiB ceiling)");
     termrow(mem, 1, "free", "free(p: ptr) -> u32   placeholder, the bump heap does not reclaim");
     termrow(mem, 1, "load8", "load8(p: ptr, off: u32) -> u32   read a byte");
@@ -1603,7 +1604,9 @@ fn do_builtins(mem: ptr, ab: ptr, argc: u32) -> u32 {
     termrow(mem, 1, "thread_spawn", "thread_spawn(\"worker\", stack_top, arg, done) -> i64   a real thread (ELF only)");
     wstr(1, "\n  ");
     gray(mem, 1);
-    wstr(1, "to print a number, copy write_dec from `loment example tour` - there is no printf.");
+    wstr(1, "to print a number: Tur 2026.2 has print_num (needs `choose runtime`); in Tur 1 copy");
+    wstr(1, "
+  write_dec from `loment example tour` - there is no printf.");
     colr(mem, 1);
     wstr(1, "\n\n");
     return 0;

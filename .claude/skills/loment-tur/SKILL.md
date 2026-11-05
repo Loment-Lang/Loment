@@ -86,8 +86,8 @@ Editions are **two-level**: `tur<year>.<n>` (`docs/296` §1.1).
 | Declaration | Edition | Promise |
 |---|---|---|
 | none / `loment` / `tur` / `tur1` / `tur2026.1` | **Tur 1** (`tur2026.1`) | **permanently frozen** - no new syntax ever enters it, old files keep every byte of meaning |
-| `tur2` / `tur2026.2` | **Tur 2** (`tur2026.2`) | first batch of absorbed Python/Zig/Go syntax; Tur 1 files compile unchanged |
-| future `tur2027.1` … | next year's family | same rule, each edition frozen on release |
+| `tur2` / `tur2026.2` | **Tur 2** (`tur2026.2`) | first batch of absorbed Python/Zig/Go syntax; Tur 1 files compile unchanged. **Closed 2026-11-05** - the set in 2.0.4 is final |
+| future `tur2026.3` / `tur2027.1` … | next edition | same rule, each edition frozen on release |
 
 Rules that make "old syntax keeps compiling" a fact rather than a promise:
 
@@ -110,6 +110,13 @@ Rules that make "old syntax keeps compiling" a fact rather than a promise:
    `GRAMMAR_ALIASES`, `NATIVE_GRAMMARS`, the self-hosted `strip_grammar_decl`, the VS Code
    `NATIVE_GRAMMARS`, and `surface_data` (`docs/296` §1.1 rule 5). It is an explicit act, not a
    branch added in passing.
+
+**Tur 2026.2 is closed (2026-11-05).** The construct list in 2.0.4 is final: `def`, `elif`,
+`and`, `or`, `not`, `for x in xs`, `break`, `continue`, bare `return;`, `orelse`, `catch`,
+`print_num`, `defer`. New syntax goes to **`tur2026.3`** (2026) or **`tur2027.1`** (next year),
+never into `tur2026.2`. The registry is `FROZEN_EDITIONS` / `TUR2026_2_FEATURES` in
+`tools/potato_from.py`, and `loment_grammar_test::test_tur2026_2_is_frozen` pins the feature-set
+hash and refuses an unopened edition (`docs/305`).
 
 **The edition says itself out loud in three places** (`docs/296` §1.2):
 

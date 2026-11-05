@@ -10,9 +10,11 @@
 * **C 执行期**不再解码**（**这一格的**自证**，而且是**确定性的**：把 `lomelf.parse_type` /
   `parse_operand` 包起来数调用次数 —— 编译完的那一趟必须是 **0**，而解档那一趟必须 **> 0**
   （否则这条判据量到的是"包没接上"，不是"没解码"）。
-* **D 确实更快** —— 同一进程里 **T0 / T2 交替跑**、取 `min`（`docs/226` 的记法）。
-  ⚠ **判的是"谁更小"这个符号，不是某个倍数** —— 墙钟比值当门禁会随机器散布
-  （那条教训：同一个量测出 3.2× / 4.13× / 5.4×）。倍数在这里**只打印、记账**，不做判据。
+* **D 一个函数只解一次**（#1028）—— 确定性的工作量计数，与机器无关：`decode_requests`
+  可以很多次，但 `decoded[函数] == 1`；T0 的 `decodes == instructions`（它是**每条重解**），
+  T2 的 `tuple_lookups == instructions`（每条执行到的指令读一次编译好的元组）。
+  ⚠ 墙钟比值**不再是判据**（那条教训：同一个量测出 3.2× / 4.13× / 5.4×）；耗时只在
+  `lvm_perf_test` 里作为绝对天花板与打印报告存在。
 
 用法: python tools/lvm_t2_test.py
 """
@@ -22,7 +24,6 @@ from __future__ import annotations
 import io
 import sys
 import tempfile
-import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -164,25 +165,70 @@ def test_t2_stops_decoding_at_run_time() -> None:
     print(f"      T0 执行期解码 {t0_hits} 次；T2 编译期 {warm_hits} 次、**执行期 0 次**")
 
 
-def test_t2_is_faster() -> None:
-    """判 D：同一进程里交替跑，T2 比 T0 快（**判符号，不判倍数**）。
+#: 一个函数被**调用 1001 次**的夹具：T2 必须只解它一次。删掉 `Program.cfunc` 的缓存，
+#: `decoded["f"]` 会变成 1001 —— 这条判据当场红。
+_DECODE_FIXTURE = """module decodeonce
+choose runtime
 
-    `docs/226` 的记法：固定机器、`min of N`、所有样本在同一次调用里。倍数只打印。
+fn f(x: u32) -> u32 {
+    return x + 1;
+}
+
+fn _start() -> u32 {
+    let i: u32 = 0;
+    let s: u32 = 0;
+    while i < 1001 {
+        s = f(s);
+        i = i + 1;
+    }
+    syscall4(60, s as u64, 0, 0);
+    return 0;
+}
+"""
+
+
+def test_t2_decodes_each_function_at_most_once() -> None:
+    """判 D（#1028）：T2 每个函数**最多真解一次**，即使它被执行上千次。
+
+    这条是**确定性的**：计数由程序与档位决定，与机器负载无关。三个方向都钉：
+
+    * `f` 被执行了 1001 次，但 `decoded["f"] == 1`（删掉 `cfuncs` 缓存 ⇒ 1001，红）；
+    * `decode_requests` 明显多于 `decodes`（缓存真的在挡，而不是没人来问）；
+    * T0 的 `decodes == instructions`（**每条重解**），T2 的 `tuple_lookups == instructions`
+      （每条执行到的指令读一次编译好的元组）—— 否则"计数没接上"也能绿。
     """
-    rel = "loment/examples/lumtui_demo.lomt"
-    ir = _ir(rel)
-    t0s, t2s = [], []
-    for _ in range(3):
-        t = time.perf_counter()
-        lvm.run_ir(ir, io.BytesIO())
-        t0s.append(time.perf_counter() - t)
-        t = time.perf_counter()
-        lvm_t2.run_ir_t2(ir, io.BytesIO())
-        t2s.append(time.perf_counter() - t)
-    a, b = min(t0s), min(t2s)
-    assert b < a, f"T2 没有更快：T0 min={a * 1000:.1f} ms / T2 min={b * 1000:.1f} ms"
-    print(f"      lumtui_demo：T0 min={a * 1000:.1f} ms · T2 min={b * 1000:.1f} ms "
-          f"⇒ {a / b:.2f}×（倍数只记账，不做门禁）")
+    with tempfile.TemporaryDirectory() as tds:
+        src = Path(tds) / "decodeonce.lomt"
+        with src.open("w", encoding="utf-8", newline="\n") as f:
+            f.write(_DECODE_FIXTURE)
+        mod = lomentc.load(src)
+        deps = lomentc.resolve_deps(mod, ROOT, src.parent, entry=src)
+        errs = lomentc.check(mod, deps=deps)
+        assert not errs, errs
+        ir = lomentc.emit_llvm(mod, ROOT, deps)
+
+    c2 = lvm.Counters()
+    rc2 = lvm_t2.run_ir_t2(ir, io.BytesIO(), None, ["decodeonce"], counters=c2)
+    c0 = lvm.Counters()
+    rc0 = lvm.run_ir(ir, io.BytesIO(), None, ["decodeonce"], counters=c0)
+
+    assert rc0 == rc2 == (1001 & 0xFF), (rc0, rc2)
+    assert c2.instructions > 1000, c2.instructions
+    assert c2.decoded.get("f") == 1, (
+        f"`f` 被执行 1001 次，却被解码了 {c2.decoded.get('f')} 次 —— "
+        "`Program.cfunc` 的缓存没在挡")
+    assert all(n == 1 for n in c2.decoded.values()), c2.decoded
+    assert c2.decode_requests > c2.decodes, (
+        f"解码请求 {c2.decode_requests} 次、真解 {c2.decodes} 次 —— 缓存没有命中过，"
+        "这条判据量到的不是「只解一次」")
+    assert c0.decodes == c0.instructions > 0, (
+        f"T0 应当每条指令重解一次：instructions={c0.instructions} decodes={c0.decodes}")
+    assert c2.tuple_lookups == c2.instructions > 0, (
+        f"T2 每条执行到的指令应当读一次元组：instructions={c2.instructions} "
+        f"tuple_lookups={c2.tuple_lookups}")
+    print(f"      f 执行 1001 次、解码 {c2.decoded['f']} 次；"
+          f"T0 decodes==instructions={c0.instructions}；"
+          f"T2 tuple_lookups==instructions={c2.instructions}")
 
 
 _DEAD_CODE = {

@@ -52,6 +52,58 @@ VFD_BASE = 1000
 B_NUL = bytes([0])
 
 
+class Counters:
+    """一次跑的**确定性**工作量计数（issue #1028）。
+
+    墙钟只说明"这一次机器上谁先跑完"；这一格记的是**程序与档位决定、与机器无关**的量：
+
+    * `instructions` —— 执行的 IR 指令条数（三档同口径；融合 / 内联摊平的每一条也算）；
+    * `decodes` —— **把文本解成可执行形状**的次数。T0 每执行一条就重解一次；
+      T2/T3 每个函数只解一次（`decoded[name]` 是每函数的次数）；
+    * `tuple_lookups` —— 读**编译好的 op 元组**的次数。T0 没有元组（恒 0）；
+      T2/T3 每条执行到的指令读一次；
+    * `specialisations` —— T3 真正加上守卫特化的调用点个数；
+    * `deopts` —— 守卫被推翻的次数。
+
+    关着（`counters=None`）时**一个字节都不写**，与 T1 的剖面同一条纪律。
+    """
+
+    __slots__ = ("instructions", "decodes", "tuple_lookups", "specialisations",
+                 "deopts", "decoded", "decode_requests", "specialised_sites")
+
+    def __init__(self) -> None:
+        self.instructions = 0
+        self.decodes = 0
+        self.tuple_lookups = 0
+        self.specialisations = 0
+        self.deopts = 0
+        #: 每个函数**真正被解了几次**（T2/T3 的"一次"判据靠它，而不是靠总数）。
+        self.decoded: dict[str, int] = {}
+        #: 请求解码的次数（含命中缓存）。`decode_requests >= decodes` 才说明缓存真的在挡。
+        self.decode_requests = 0
+        #: T3 加了守卫的站点，按 IR 解析顺序（判据拿它逐点位）。
+        self.specialised_sites: list[tuple] = []
+
+    def decode(self, name: str) -> None:
+        self.decodes += 1
+        self.decoded[name] = self.decoded.get(name, 0) + 1
+
+    def text(self) -> str:
+        """可读的计数报告（与剖面同一条"确定、按名字排序"的纪律）。"""
+        rows = [
+            f"instructions\t{self.instructions}",
+            f"decodes\t{self.decodes}",
+            f"decode_requests\t{self.decode_requests}",
+            f"tuple_lookups\t{self.tuple_lookups}",
+            f"specialisations\t{self.specialisations}",
+            f"deopts\t{self.deopts}",
+        ]
+        per = [f"{name}\t{self.decoded[name]}" for name in sorted(self.decoded)]
+        return "\n".join(["# lvm counters v1",
+                          "# deterministic per run; wall clock is not a criterion",
+                          "[counters]"] + rows + ["[functions]"] + per) + "\n"
+
+
 def _cmdline(argv: list[str]) -> bytes:
     """内核给 `/proc/self/cmdline` 的形状：**每个字段后面跟一个 NUL**。
 
@@ -63,6 +115,83 @@ def _cmdline(argv: list[str]) -> bytes:
 
 class LvmError(Exception):
     """解释器自己的错（**不是**"语言不支持" —— 那种要另说，见 `docs/243` §1）。"""
+
+
+# ---------------------------------------------------------------- 入口形状（#1026）
+#: `docs/243` §3.5 的那张表。编译器发**四种**入口形状，而 VM 原先只认 `_start` ——
+#: 其余三种会被报成"没有 `_start`"，那是一句**真而无用**的话（程序是好的，引擎不是）。
+#: 下面先**按文本认形状**，再决定支持还是点名拒。按文本而不是按 `parse_ll` 的表，理由是
+#: `interrupt fn` 的 `define x86_intrcc` 会被 `lomelf` 解析成一个奇怪的返回类型 ——
+#: 我们要在解析**之前**就能说出"这是中断入口"。
+_DEFINE_START_RE = re.compile(r"^define\b[^\n{]*?@_start\s*\(", re.M)
+_DEFINE_COMMAND_RE = re.compile(r"^define\b[^\n{]*?@command_main\s*\(", re.M)
+_DEFINE_INTERRUPT_RE = re.compile(
+    r"^define\b[^\n{]*?\bx86_intrcc\b[^\n{]*?@([-A-Za-z0-9_.]+)\s*\(", re.M)
+_THREAD_TARGET_RE = re.compile(r'asm sideeffect "thread_spawn @([-A-Za-z0-9_.]+)"')
+
+#: 没有入口时的统一说法。**保留"没有 `_start`"这个子串**（孪生镜像 `loment/tools/lvm.lomt`
+#: 与 `lvm_twin_test` 用它认这句），但把"也没有其它入口形状"说全 —— #1026 要去掉的是
+#: **有别的入口却只说没有 `_start`**，不是这句本身。
+NO_ENTRY = ("这份 IR 里没有 `_start`，也没有其它入口形状（`command_main` / `interrupt` / "
+            "`thread_spawn` 目标）—— 见 `docs/243` §3.5")
+
+
+def entry_kind(text: str) -> tuple[str, str] | None:
+    """从 IR 文本认出入口形状：`(种类, 入口名字)`；四种都不是就 `None`。
+
+    优先级就是**能跑的优先**：`_start` > `command_main` > 中断 > 线程目标。一个普通程序
+    里可以有中断处理函数；只要 `_start` 在，它就是入口，中断函数只是没被调到。
+    """
+    if _DEFINE_START_RE.search(text):
+        return ("_start", "_start")
+    if _DEFINE_COMMAND_RE.search(text):
+        return ("command_main", "command_main")
+    m = _DEFINE_INTERRUPT_RE.search(text)
+    if m:
+        return ("interrupt", m.group(1))
+    m = _THREAD_TARGET_RE.search(text)
+    if m:
+        return ("thread_spawn", m.group(1))
+    return None
+
+
+def entry_refusal(kind: str, name: str) -> str:
+    """不支持的入口形状 -> **点名**它、并指出定义它的那份文档（#1026 的验收）。"""
+    if kind == "interrupt":
+        return (f"这份 IR 的入口是中断处理函数 `{name}`（`interrupt fn`，`docs/149` §M70）"
+                "—— LVM 不跑中断入口：它需要一个合成的 x86 中断帧，这一格没有"
+                "（`docs/243` §3.5）")
+    if kind == "thread_spawn":
+        return (f"这份 IR 的入口是线程入口 `{name}`（`thread_spawn` 的目标，`docs/245`）"
+                "—— LVM 不跑线程入口：并发是后续里程碑（`docs/243` §3.5）")
+    raise LvmError(f"不是一种入口形状: {kind!r}")
+
+
+def entry_values(vm, kind: str, name: str) -> list:
+    """把一个入口变成**调用实参**。不支持的形状在这里点名拒。
+
+    `command_main(argv: ptr, argc: u32)`（`docs/223` §3.2）是**支持**的：调用方给的
+    `argv`（`run_ir(..., argv=[...])`）按内核给 `/proc/self/cmdline` 的形状铺进内存
+    （每个字段后跟一个 NUL），`argc` 就是字段数 —— 这正是工具链生成的 `_start` 会做的
+    那一段，只是这里由调用方直接给。
+    """
+    if kind == "_start":
+        return []
+    if kind == "command_main":
+        fn = vm.funcs.get(name)
+        if fn is None:
+            raise LvmError(f"这份 IR 声明了 `{name}`，但解析表里没有它")
+        if (len(fn.params) != 2 or fn.params[0][0] != "ptr"
+                or fn.params[1][0] != "i32"):
+            raise LvmError(
+                "`command_main` 的签名不是 `(ptr, i32)` —— 入口是 "
+                "`fn command_main(argv: ptr, argc: u32) -> u32`（`docs/223` §3.2）")
+        data = _cmdline(vm.argv)
+        addr = vm.mem.alloc(max(1, len(data)))
+        if data:
+            vm.mem.put(addr, data)
+        return [addr, len(vm.argv)]
+    raise LvmError(entry_refusal(kind, name))
 
 
 # ---------------------------------------------------------------- 值
@@ -311,7 +440,8 @@ class Profile:
 
 class Vm:
     def __init__(self, globals_: list, funcs: list, externs: list, out,
-                 profile: Profile | None = None, argv: list[str] | None = None) -> None:
+                 profile: Profile | None = None, argv: list[str] | None = None,
+                 counters: "Counters | None" = None) -> None:
         self.mem = Mem()
         self.globals = {g.name: g for g in globals_}
         self.funcs = {f.name: f for f in funcs}
@@ -327,6 +457,9 @@ class Vm:
         #: 想知道"我叫什么" —— 那个文件属于**进程**，而进程是解释器。所以这一处必须
         #: **合成**，否则程序会以为自己是 `lvm`。给的就是"VM 被指到的那个输入路径"。
         self.argv = list(argv) if argv is not None else ["<ir>"]
+        #: 确定性工作量计数（#1028）。`None` = 这一趟不记 —— 关掉时每一处记账都是
+        #: `if c is not None`，与剖面同一条纪律。
+        self.counters = counters
         #: 合成文件的 fd —— 解释器**没有真的文件描述符**，只认识这一张表里的。
         self.vfds: dict[int, list] = {}
         self.next_vfd = VFD_BASE
@@ -514,7 +647,12 @@ class Executor(Vm):
         return self.run(fn, args, fr)
 
     # ------------------------------------------------------------ 执行
-    def run(self, fn, argtexts: list[str], caller: Frame | None):
+    def run_entry(self, fn, values: list):
+        """入口调用：形参拿**宿主值**（`command_main` 的 argv/argc，`docs/243` §3.5）。"""
+        return self.run(fn, [], None, values)
+
+    def run(self, fn, argtexts: list[str], caller: Frame | None,
+            entry_vals: list | None = None):
         # ⚠ **每一层调用各占一段自己的栈区**（按深度算基址）。
         # 第一版每层都取 `mem.sp - 4096`，而 `mem.sp` 从不下降 ⇒ **被调用者和调用者
         # 用同一段地址**，被调者的 `alloca` 覆盖了调用者的槽，返回后读回来全是 0 ——
@@ -528,18 +666,22 @@ class Executor(Vm):
             self.depth -= 1
             raise LvmError("栈溢出")
         try:
-            return self._run_body(fn, argtexts, caller, base)
+            return self._run_body(fn, argtexts, caller, base, entry_vals)
         finally:
             self.depth -= 1
 
-    def _run_body(self, fn, argtexts: list[str], caller: Frame | None, base: int):
+    def _run_body(self, fn, argtexts: list[str], caller: Frame | None, base: int,
+                  entry_vals: list | None = None):
         fr = Frame(self.mem, base)
         # 形参与实参：实参在**调用者的**上下文里求值（`docs/243` §3.4）
-        for (pty, pname), a in zip(fn.params, argtexts):
+        for k, (pty, pname) in enumerate(fn.params):
             if caller is None:
-                fr.vals[pname] = 0
+                # 入口：`_start` 的形参一律 0（旧行为）；`command_main` 的两个形参
+                # 由 `entry_values` 直接给（`docs/223` §3.2）。
+                fr.vals[pname] = (entry_vals[k] if entry_vals is not None
+                                  and k < len(entry_vals) else 0)
                 continue
-            _ty, v = self.operand(caller, a)
+            _ty, v = self.operand(caller, argtexts[k])
             fr.vals[pname] = v
         label = fn.blocks[0].label
         prev = None
@@ -565,6 +707,10 @@ class Executor(Vm):
                     # 不给每条指令付一次元组的代价（T1 关掉时"一个字节都不写"）。
                     self.site = (fn.name, blk.label, idx)
                 steps += 1
+                if self.counters is not None:
+                    # T0 的"解码"就是这一条指令本身：每执行一次就把文本重解一次。
+                    self.counters.instructions += 1
+                    self.counters.decodes += 1
                 if steps > STEP_CAP:
                     raise LvmError(
                         f"步数上限 {STEP_CAP}：{fn.name} 的块 {blk.label}，"
@@ -791,8 +937,8 @@ class Executor(Vm):
 
 def run_ir(text: str, out, profile: Profile | None = None,
            argv: list[str] | None = None, tier: str = "t0",
-           values=None, deopts=None) -> int:
-    """IR 文本 -> 跑完 -> 进程该退的码。**入口就是 `_start`**（`docs/243` §3.5）。
+           values=None, deopts=None, counters: "Counters | None" = None) -> int:
+    """IR 文本 -> 跑完 -> 进程该退的码。**入口按 `docs/243` §3.5 那张表认**。
 
     `profile` 传一个 `Profile` 就记账（T1，`docs/247`）；传 `None`（默认）不记 ——
     **关掉时不写任何字节**，而且被记录程序的行为逐字节不变（判据 D）。
@@ -809,22 +955,34 @@ def run_ir(text: str, out, profile: Profile | None = None,
     if tier == "t2":
         import lvm_t2                                       # noqa: PLC0415
 
-        return lvm_t2.run_ir_t2(text, out, profile, argv, values)
+        return lvm_t2.run_ir_t2(text, out, profile, argv, values, counters=counters)
     if tier == "t3":
         import lvm_t3                                       # noqa: PLC0415
 
-        return lvm_t3.run_ir_t3(text, out, profile, argv, values, deopts)
+        return lvm_t3.run_ir_t3(text, out, profile, argv, values, deopts, counters)
     if tier != "t0":
         raise LvmError(f"没有这一档: {tier!r}（只有 t0 / t2 / t3）")
+    shape = entry_kind(text)
+    if shape is None:
+        raise LvmError(NO_ENTRY)
+    kind, name = shape
+    if kind in ("interrupt", "thread_spawn"):
+        raise LvmError(entry_refusal(kind, name))
     globals_, funcs, externs = lomelf.parse_ll(text)
     if profile is not None:
         profile.bind(funcs)
-    vm = Executor(globals_, funcs, externs, out, profile, argv)
-    start = next((f for f in funcs if f.name == "_start"), None)
+    vm = Executor(globals_, funcs, externs, out, profile, argv, counters)
+    start = next((f for f in funcs if f.name == name), None)
     if start is None:
-        raise LvmError("这份 IR 里没有 `_start`")
+        raise LvmError(f"这份 IR 声明了入口 `{name}`，但解析表里没有它")
+    args = entry_values(vm, kind, name)
     try:
-        vm.run(start, [], None)
+        if kind == "_start":
+            vm.run(start, [], None)
+        else:
+            # `command_main` 的返回值就是**进程退出码** —— 工具链生成的 `_start` 正是
+            # 把它交给 `exit(60)`（`docs/223` §3.2）。这里直接照同一个语义收尾。
+            return vm.run_entry(start, args) & 0xFF
     except _Exit as e:
         return e.code
     except _Trap as e:
@@ -834,13 +992,13 @@ def run_ir(text: str, out, profile: Profile | None = None,
 
 def run_source(src: Path, root: Path, out=None, profile: Profile | None = None,
                argv: list[str] | None = None, tier: str = "t0",
-               values=None, deopts=None) -> int:
+               values=None, deopts=None, counters: "Counters | None" = None) -> int:
     """与 `lomelf` 同一条前门：`.lomt` -> IR -> 跑。"""
     if argv is None:
         argv = [str(src)]
     return run_ir(compile_source(src, root),
                   out if out is not None else sys.stdout, profile, argv, tier,
-                  values, deopts)
+                  values, deopts, counters)
 
 
 def compile_source(src: Path, root: Path) -> str:
@@ -878,6 +1036,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="直接跑一份紧凑形产物（与 entry 二选一）")
     ap.add_argument("--profile-out", metavar="PATH", default=None,
                     help="T1：把反馈剖面写到 PATH（`docs/247`）。不写就不记，一个字节都不写")
+    ap.add_argument("--counters-out", metavar="PATH", default=None,
+                    help="把**确定性**工作量计数写到 PATH（issue #1028）：指令 / 解码 / "
+                         "元组读取 / 特化 / 去优化。不写就不记")
     ap.add_argument("--fusion-out", metavar="PATH", default=None,
                     help="A4（docs/266）：把融合报告写到 PATH。不写就不记")
     ap.add_argument("--fusion-profile", metavar="PATH", default=None,
@@ -911,9 +1072,14 @@ def main(argv: list[str] | None = None) -> int:
         print("lvm: 需要一个入口（.lomt / --ir 的 .ll），或 --compact PATH",
               file=sys.stderr)
         return 2
+    if a.counters_out is not None and (a.compact is not None or a.compact_out is not None):
+        print("lvm: --counters-out 只对 T0/T2/T3 有意义（紧凑形是另一格）",
+              file=sys.stderr)
+        return 2
     root = Path(a.root).resolve()
     buf = io.BytesIO()
     prof = Profile() if a.profile_out else None
+    counters = Counters() if a.counters_out else None
     fusion = None
     hot = None
     if a.fusion_out is not None:
@@ -969,19 +1135,19 @@ def main(argv: list[str] | None = None) -> int:
                 import lvm_t2                                # noqa: PLC0415
                 rc = lvm_t2.run_ir_t2(ir, buf, prof, [a.entry], values,
                                       a.fusion_out is not None or a.fusion_profile is not None,
-                                      fusion, hot)
+                                      fusion, hot, counters=counters)
             else:
-                rc = run_ir(ir, buf, prof, [a.entry], a.tier, values, deopts)
+                rc = run_ir(ir, buf, prof, [a.entry], a.tier, values, deopts, counters)
         else:
             if a.tier == "t2":
                 import lvm_t2                                # noqa: PLC0415
                 ir = compile_source(Path(a.entry).resolve(), root)
                 rc = lvm_t2.run_ir_t2(ir, buf, prof, [a.entry], values,
                                       a.fusion_out is not None or a.fusion_profile is not None,
-                                      fusion, hot)
+                                      fusion, hot, counters=counters)
             else:
                 rc = run_source(Path(a.entry).resolve(), root, buf, prof, [a.entry],
-                                a.tier, values, deopts)
+                                a.tier, values, deopts, counters)
     except (LvmError, lomelf.ElfError, lomelf.Unsupported,
             lvm_compact.CompactError) as e:
         sys.stdout.buffer.write(buf.getvalue())
@@ -1001,6 +1167,9 @@ def main(argv: list[str] | None = None) -> int:
         # `newline="\n"`：本机 `write_text` 会写成 CRLF，而剖面要跨平台逐字节可比。
         with Path(a.profile_out).open("w", encoding="utf-8", newline="\n") as f:
             f.write(prof.text())
+    if counters is not None and a.counters_out is not None:
+        with Path(a.counters_out).open("w", encoding="utf-8", newline="\n") as f:
+            f.write(counters.text())
     return rc
 
 

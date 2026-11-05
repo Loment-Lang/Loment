@@ -840,7 +840,10 @@ def test_a_stateful_level_rejects_no_runtime() -> None:
 
 def test_lgc_windows_are_the_same_on_four_products() -> None:
     """`lgc` 的窗口在**四份产物**上一致（`docs/309`）：时钟走的是 228，T0/T2/T3 共用
-    同一个 `Executor.syscall`。窗口内收集 ⇒ 四份都跑完；暂停 ⇒ 三档 VM 都耗尽。"""
+    同一个 `Executor.syscall`。窗口内收集 ⇒ 四份都跑完；暂停 ⇒ 三档 VM 都耗尽。
+
+    窗口预算用 **3600s**：判据只关心"预算远未到期"，不能拿机器速度当变量 —— CI 上
+    T0 跑 2000 次分配可能超过 10 秒，预算会在途中到期，把一条正确的收集器判成耗尽。"""
     def emit(src: str) -> str:
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "lgc.lomt"
@@ -856,7 +859,7 @@ def test_lgc_windows_are_the_same_on_four_products() -> None:
             "        let p: ptr = alloc(64);\n        store8(p, 0, 1);\n"
             "        i = i + 1;\n    }\n%s    return 0;\n}\n\n"
             "fn _start() { syscall4(60, churn(2000) as u64, 0, 0); }\n")
-    win = _run_four(emit(base % ("    lgc start(10s) {\n", "    }\n")), "lgcwin")
+    win = _run_four(emit(base % ("    lgc start(3600s) {\n", "    }\n")), "lgcwin")
     for name in ("T0", "T2", "T3", "native"):
         rc, out, _ = win[name]
         assert (rc, out) == (0, b""), f"窗口内的 {name}: {(rc, out)!r}"

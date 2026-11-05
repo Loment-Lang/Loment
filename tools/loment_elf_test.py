@@ -4635,8 +4635,8 @@ def test_lgc_pause_and_budget_really_gate_collection():
 
       * `gc_auto` + `lgc end;`            → **不收**，耗尽（非 7）；
       * `gc_auto` + `lgc start(1ns)`       → 预算立刻到期，**不收**（非 7）；
-      * `gc_auto` + `lgc start(10s)`       → 收，跑通（7）；
-      * `gc_manual` + `lgc start(10s)`     → 默认关、窗口开，收，跑通（7）；
+      * `gc_auto` + `lgc start(3600s)`       → 收，跑通（7）；
+      * `gc_manual` + `lgc start(3600s)`     → 默认关、窗口开，收，跑通（7）；
       * `gc_manual` + `lgc end;`           → 关，耗尽（非 7）。
 
     `1ns` 那一格是**证伪**：预算若被忽略，它就会和 `10s` 一样跑通。
@@ -4655,8 +4655,8 @@ def test_lgc_pause_and_budget_really_gate_collection():
     cases = [
         ("auto_paused", "choose gc_auto", "    lgc end;\n", "", ""),
         ("auto_tiny", "choose gc_auto", "", "    lgc start(1ns) {\n", "    }\n"),
-        ("auto_window", "choose gc_auto", "", "    lgc start(10s) {\n", "    }\n"),
-        ("manual_window", "choose gc_manual", "", "    lgc start(10s) {\n", "    }\n"),
+        ("auto_window", "choose gc_auto", "", "    lgc start(3600s) {\n", "    }\n"),
+        ("manual_window", "choose gc_manual", "", "    lgc start(3600s) {\n", "    }\n"),
         ("manual_paused", "choose gc_manual", "    lgc end;\n", "", ""),
     ]
     with tempfile.TemporaryDirectory() as tds:

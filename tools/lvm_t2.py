@@ -102,7 +102,8 @@ class Program:
 
     def __init__(self, globals_: list, funcs: list, externs: list,
                  fuse: bool = True, fusion: "FusionReport | None" = None,
-                 hot: set[tuple[str, str]] | None = None) -> None:
+                 hot: set[tuple[str, str]] | None = None,
+                 counters: "lvm.Counters | None" = None) -> None:
         # ⚠ 调用方必须**已经**把全局摆好了（`Global.addr` 有值），否则下面的 `enc`
         # 会把每个 `@global` 编成地址 0 —— 见模块开头那段。
         self.globals = {g.name: g for g in globals_}
@@ -114,9 +115,15 @@ class Program:
         self.fuse = fuse
         self.fusion = fusion
         self.hot = hot
+        #: #1028：确定性工作量计数。**每个函数最多真正解一次** —— `cfuncs` 就是那道
+        #: 缓存，`decode_requests` 记"来问了几次"、`decode(name)` 记"真解了几次"。
+        self.counters = counters
 
     def cfunc(self, name: str) -> "_CFunc":
         """取一个函数编译后的样子；没编过就现在编。错误消息**与 T0 逐字一致**。"""
+        c = self.counters
+        if c is not None:
+            c.decode_requests += 1
         cf = self.cfuncs.get(name)
         if cf is not None:
             return cf
@@ -127,6 +134,8 @@ class Program:
             raise lvm.LvmError(f"没有这个函数: {name}")
         cf = _compile(fn, self)
         self.cfuncs[name] = cf
+        if c is not None:
+            c.decode(name)
         return cf
 
 
@@ -510,14 +519,15 @@ class T2Executor(lvm.Executor):
     def __init__(self, globals_: list, funcs: list, externs: list, out,
                  profile=None, argv: list[str] | None = None, values=None,
                  fuse: bool = True, fusion: "FusionReport | None" = None,
-                 hot: set[tuple[str, str]] | None = None) -> None:
-        super().__init__(globals_, funcs, externs, out, profile, argv)
+                 hot: set[tuple[str, str]] | None = None,
+                 counters: "lvm.Counters | None" = None) -> None:
+        super().__init__(globals_, funcs, externs, out, profile, argv, counters)
         #: T3 的**值观察**（`docs/248` §3.2 的 B1 要"值"，而剖面只记次数）。
         #: 只在开着剖面时才记（那一条路本来就有指令下标 `j`）—— 见 `_OP_CALL` 那一支。
         self.values = values
         # ⚠ **必须在 `super().__init__` 之后**：那里才调 `_place_globals` 给
         # `Global.addr` 赋值，而编译期要拿那个地址去编每个 `@global` 操作数。
-        self.prog = Program(globals_, funcs, externs, fuse, fusion, hot)
+        self.prog = Program(globals_, funcs, externs, fuse, fusion, hot, counters)
 
     # ------------------------------------------------------------ 融合计划
     def _plan(self, cf: _CFunc, bi: int, blk: list) -> list:
@@ -565,6 +575,7 @@ class T2Executor(lvm.Executor):
         nxt = base
         bi, prev = 0, -1
         steps = 0                       # **整个调用**共用一个计数（跨块也算）—— 与镜像同口径
+        cnt = self.counters             # #1028：关着时下面每一处都是 `if cnt`
         while True:
             blk = blocks[bi]
             # phi **并行**求值（与 `lvm._run_body` 同一条注释）：先把整组结果算出来，
@@ -589,6 +600,9 @@ class T2Executor(lvm.Executor):
                 # 开关在不在都不改变被记录的行为。
                 for j, op in enumerate(blk):
                     steps += 1
+                    if cnt is not None:
+                        cnt.instructions += 1
+                        cnt.tuple_lookups += 1
                     if steps > lvm.STEP_CAP:
                         raise lvm.LvmError(
                             f"步数上限 {lvm.STEP_CAP}：{name} 的块 {labels[bi]}，第 {j} 条")
@@ -653,11 +667,17 @@ class T2Executor(lvm.Executor):
                     op = blk[j]
                     if count == 2:
                         steps += 1
+                        if cnt is not None:
+                            cnt.instructions += 1
+                            cnt.tuple_lookups += 1
                         if steps > lvm.STEP_CAP:
                             raise lvm.LvmError(
                                 f"步数上限 {lvm.STEP_CAP}：{name} 的块 {labels[bi]}，"
                                 f"第 {j} 条")
                         steps += 1
+                        if cnt is not None:
+                            cnt.instructions += 1
+                            cnt.tuple_lookups += 1
                         if steps > lvm.STEP_CAP:
                             raise lvm.LvmError(
                                 f"步数上限 {lvm.STEP_CAP}：{name} 的块 {labels[bi]}，"
@@ -692,6 +712,9 @@ class T2Executor(lvm.Executor):
                             break
                         continue
                     steps += 1
+                    if cnt is not None:
+                        cnt.instructions += 1
+                        cnt.tuple_lookups += 1
                     if steps > lvm.STEP_CAP:
                         raise lvm.LvmError(
                             f"步数上限 {lvm.STEP_CAP}：{name} 的块 {labels[bi]}，第 {j} 条")
@@ -845,35 +868,48 @@ def _run_value(vm: T2Executor, vals: list, op: tuple) -> None:
 def run_ir_t2(text: str, out, profile=None, argv: list[str] | None = None,
               values=None, fuse: bool = True,
               fusion: "FusionReport | None" = None,
-              hot: set[tuple[str, str]] | None = None) -> int:
+              hot: set[tuple[str, str]] | None = None,
+              counters: "lvm.Counters | None" = None) -> int:
     """IR 文本 -> **编译一次** -> 跑完 -> 退出码。与 `lvm.run_ir` 同一个契约。
 
     `fuse` 是 A4（`docs/266`，issue #647）：默认开 —— 它只合并纯值指令，没有假设、
     没有守卫，判据是"语义逐字节相同"。`fusion` 给一份报告对象时才记站点（关着不写）；
-    `hot` 限制只在剖面点过名的块里融合。"""
+    `hot` 限制只在剖面点过名的块里融合。
+
+    入口形状按 `docs/243` §3.5 认（#1026）：`_start` / `command_main` 支持，
+    中断 / 线程入口点名拒 —— 与 T0 同一套判断。
+    """
+    shape = lvm.entry_kind(text)
+    if shape is None:
+        raise lvm.LvmError(lvm.NO_ENTRY)
+    kind, name = shape
+    if kind in ("interrupt", "thread_spawn"):
+        raise lvm.LvmError(lvm.entry_refusal(kind, name))
     globals_, funcs, externs = lomelf.parse_ll(text)
     if profile is not None:
         profile.bind(funcs)
     if values is not None:
         values.bind(funcs)                  # 没有它 `text()` 不知道按什么顺序输出
     vm = T2Executor(globals_, funcs, externs, out, profile, argv, values,
-                    fuse, fusion, hot)
-    if "_start" not in vm.prog.funcs:
-        raise lvm.LvmError("这份 IR 里没有 `_start`")
+                    fuse, fusion, hot, counters)
     if fusion is not None:
         # 报告要覆盖**整份程序**：懒编译只编走到的那几个，报告会缺块。编译全部是安全的
         # —— 编不出来的指令变成 `_OP_ERROR`，只有执行到才抛（与 T0 的接受集合一致）。
         # 计划也要在这里**先算一遍**：记剖面时的执行路径不融合（判据 B），不会顺手
         # 算计划，报告就会是空的。
-        for name in list(vm.prog.funcs):
-            cf = vm.prog.cfunc(name)
+        # ⚠ 循环变量**不许叫 `name`** —— 它是入口名，会被这里覆盖掉，于是下一行
+        # `cfunc(name)` 调用的是"最后一个被定义的函数"（#1026 落地时踩过：`tour`
+        # 的剖面只剩 `max_of_u32` 一个块）。
+        for fname in list(vm.prog.funcs):
+            cf = vm.prog.cfunc(fname)
             if cf.blocks:
                 vm._plan(cf, 0, cf.blocks[0])
-    start = vm.prog.cfunc("_start")
+    args = lvm.entry_values(vm, kind, name)
+    start = vm.prog.cfunc(name)
     try:
-        vm.call_t2(start, [], entry=True)
+        ret = vm.call_t2(start, args, entry=True)
     except lvm._Exit as e:                                  # noqa: SLF001
         return e.code
     except lvm._Trap as e:                                  # noqa: SLF001
         return lvm.trap_exit(e.site)
-    return 0
+    return 0 if kind == "_start" else ret & 0xFF

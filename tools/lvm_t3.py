@@ -267,6 +267,7 @@ class T3Executor(lvm_t2.T2Executor):
         frame = [base]                       # 帧的 bump 游标（`alloca` 每执行一次就往上走）
         bi, prev = 0, -1
         steps = 0
+        cnt = self.counters                  # #1028：确定性的指令 / 元组计数
         while True:
             blk = blocks[bi]
             # phi **并行**求值（与 T0/T2 同一条注释，见 #1027）。
@@ -287,6 +288,9 @@ class T3Executor(lvm_t2.T2Executor):
                 prof.block(name, labels[bi])
             for j, op in enumerate(blk):
                 steps += 1
+                if cnt is not None:
+                    cnt.instructions += 1
+                    cnt.tuple_lookups += 1
                 if steps > lvm.STEP_CAP:
                     raise lvm.LvmError(
                         f"步数上限 {lvm.STEP_CAP}：{name} 的块 {labels[bi]}，第 {j} 条")
@@ -304,10 +308,15 @@ class T3Executor(lvm_t2.T2Executor):
                         # 内联把"每次调用一块新帧"这件事弄丢了（`docs/249` §2）。
                         cframe = [lvm.STACK_TOP - (self.depth + 1) * lvm.FRAME_SIZE]
                         for o2 in inline:
+                            if cnt is not None:
+                                cnt.instructions += 1
+                                cnt.tuple_lookups += 1
                             self._one(vals, o2, cframe, site)
                     else:
                         # 假设不成立：记一条，走通用调用（**副作用只发生一次** ——
                         # 摊平的那段还没开始跑，谈不上"重跑"）
+                        if cnt is not None:
+                            cnt.deopts += 1
                         if self.deopts is not None:
                             self.deopts.hit(site, DEOPT_GUARD)
                         self._one(vals, (lvm_t2._OP_CALL, cname,   # noqa: SLF001
@@ -388,26 +397,38 @@ def _rd(vals, op):
 
 # ---------------------------------------------------------------- 前门
 def run_ir_t3(text: str, out, profile=None, argv: list[str] | None = None,
-              values: Values | None = None, deopts: DeoptLog | None = None) -> int:
+              values: Values | None = None, deopts: DeoptLog | None = None,
+              counters: "lvm.Counters | None" = None) -> int:
+    # 入口形状与 T0/T2 同一套判断（`docs/243` §3.5，#1026）。
+    shape = lvm.entry_kind(text)
+    if shape is None:
+        raise lvm.LvmError(lvm.NO_ENTRY)
+    kind, name = shape
+    if kind in ("interrupt", "thread_spawn"):
+        raise lvm.LvmError(lvm.entry_refusal(kind, name))
     globals_, funcs, externs = lomelf.parse_ll(text)
     if profile is not None:
         profile.bind(funcs)
     if deopts is not None:
         deopts.bind(funcs)
-    vm = T3Executor(globals_, funcs, externs, out, profile, argv, deopts=deopts)
+    vm = T3Executor(globals_, funcs, externs, out, profile, argv,
+                    deopts=deopts, counters=counters)
     if values is not None:
         # ⚠ 编译是**懒**的（T2 §3）：此刻 `prog.cfuncs` 还是空的。要把**有观察的那些函数**
         # 先编出来，否则 `specialise` 一个站点都扫不到 —— 而它不会报错，只会静默不特化
         # （第一版就是这样：答案全对、去优化记录空着，判据 B 的"必须真去优化过"当场红）。
         for (_fname, _b, _i) in list(values.sites):
             vm.prog.cfunc(_fname)
-        specialise(vm.prog, values)
-    if "_start" not in vm.prog.funcs:
-        raise lvm.LvmError("这份 IR 里没有 `_start`")
+        done = specialise(vm.prog, values)
+        if counters is not None:
+            # #1028：特化次数 == 过了门槛的站点数（判据逐点位，不看墙钟）。
+            counters.specialisations = len(done)
+            counters.specialised_sites = list(done)
+    args = lvm.entry_values(vm, kind, name)
     try:
-        vm.call_t2(vm.prog.cfunc("_start"), [], entry=True)
+        ret = vm.call_t2(vm.prog.cfunc(name), args, entry=True)
     except lvm._Exit as e:                                      # noqa: SLF001
         return e.code
     except lvm._Trap as e:                                      # noqa: SLF001
         return lvm.trap_exit(e.site)
-    return 0
+    return 0 if kind == "_start" else ret & 0xFF

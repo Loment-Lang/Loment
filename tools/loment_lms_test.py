@@ -17,6 +17,10 @@
 必须逐字节同答；入口 A 的 retry 块要真的执行；`llvm.trap` 在 VM 里是**定义好的**
 132 + 站点，不是一句 extern 拒绝。
 
+**#1024 的四格表**：界内 / 界外+拒绝器 / 界外+崩溃器 / 入口 A 的 retry，四份产物逐格比；
+外加一条**内联交互**探针 —— 带检查的被调是多块的，T3 的单块内联器**不能**把它摊平，
+所以检查不会被内联掉（`_inlinable` 为假就是那个理由；有检查 ⇒ 有 `br`/`phi`）。
+
 用法: python tools/loment_lms_test.py
 """
 
@@ -432,6 +436,155 @@ def test_lms_shape_matches_native_on_four_products() -> None:
     print("      默认跳过 rc=1 / 关掉拒绝器 rc=132 / 关掉保证器 rc=8 —— 四产物同答")
 
 
+#: 四格表的第一格：**只**在界内写/读。检查照发（`lms_guard` 默认开），但每次都应通过。
+_IN_BOUNDS = """module m
+choose runtime
+
+fn _start() -> u32 {
+    let p: ptr = alloc(8);
+    store8(p, 0, 1);
+    let x: u32 = load8(p, 0);
+    syscall4(60, x as u64, 0, 0);
+    return 0;
+}
+"""
+
+#: 第二格：界外写 + 界外读。第 4 级跳过这两条（值取 0），界内那一半照算 ⇒ rc=1。
+#: 如果拒绝器把值漏成垃圾，`x + y` 就不是 1 —— 这条同时钉住"跳过之后没更坏"。
+_OOB_REJECT = """module m
+choose runtime
+%s
+
+fn _start() -> u32 {
+    let p: ptr = alloc(8);
+    store8(p, 0, 1);
+    store8(p, 9, 7);
+    let x: u32 = load8(p, 0);
+    let y: u32 = load8(p, 9);
+    let v: u32 = x + y;
+    syscall4(60, v as u64, 0, 0);
+    return 0;
+}
+"""
+
+
+def test_lms_four_cell_table_across_products() -> None:
+    """#1024 的四格表：界内 / 界外+拒绝器 / 界外+崩溃器 / 入口 A 的 retry。
+
+    每一格都在**四份产物**（原生 / T0 / T2 / T3）上跑，比 `(rc, stdout)`；期望值
+    写在格子里，不是从某一份产物反推出来的：
+
+    | 格 | 程序 | 期望 |
+    |---|---|---|
+    | 界内 | `_IN_BOUNDS` | rc=1（检查通过） |
+    | 界外 + 拒绝器 | `_OOB_REJECT` | rc=1（两条越界都跳过、值为 0） |
+    | 界外 + 崩溃器 | `choose close lms_reject` | rc=132（`llvm.trap`，VM 定义好的数） |
+    | 入口 A retry | `_rescue_ir(True)` | rc=66（回收后被复用） |
+
+    "崩溃"那一格的 VM 答案不是"它崩了"：`llvm.trap` 定成 132，并写出站点（另一条判据
+    钉站点格式）。四份产物在这一格上是**同一个数**。
+    """
+    if not _native_ok():
+        print("      SKIP: Windows 上没有 WSL —— 原生 ELF 跑不了")
+        return
+    cells = (
+        ("in_bounds", _emit_lms(_IN_BOUNDS), 1),
+        ("oob_reject", _emit_lms(_OOB_REJECT % ""), 1),
+        ("oob_crash", _emit_lms(_OOB_REJECT % "choose close lms_reject"), 132),
+        ("entry_a_retry", _rescue_ir(True), 66),
+    )
+    table = []
+    for tag, ir, want in cells:
+        got = _run_four(ir, tag)
+        bad = {k: v for k, v in got.items() if v[0] != want or v[1] != b""}
+        assert not bad, (tag, f"期望 rc={want} / stdout 空", bad)
+        table.append(f"{tag}=rc{want}")
+    print("      四格 × 四产物同答：" + " · ".join(table))
+
+
+#: 内联交互探针：`twice` 单块、可内联（会被特化）；`touch` 里有**带检查的访存**，
+#: 检查展开成 `lmsok` / `lmsbad` / `lmsjoin` 多个块 ⇒ 单块内联器**不能**摊平它。
+#: 每轮 7+7+0：`twice(7)`、界内 `touch(0)`、界外 `touch(9)`（被跳过，取 0）。
+#: 1000 轮用 7、最后一轮用 9（`if i == 999` 改 k）⇒ 特化 1 处、去优化**恰好 1 次**。
+#: 总计 14018 + 7007 = 21025 ⇒ rc = 33。检查若被丢掉，界外那次会读回 7，rc 变大。
+_INLINE_CHECK = """module m
+choose runtime
+
+fn twice(x: u32) -> u32 {
+    return x * 2;
+}
+
+fn touch(i: u32) -> u32 {
+    let p: ptr = alloc(8);
+    store8(p, i, 7);
+    return load8(p, i);
+}
+
+fn _start() -> u32 {
+    let k: u32 = 7;
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i < 1001 {
+        s = s + twice(k);
+        let a: u32 = touch(0);
+        let b: u32 = touch(9);
+        s = s + a + b;
+        if i == 999 {
+            k = 9;
+        }
+        i = i + 1;
+    }
+    syscall4(60, s as u64, 0, 0);
+    return 0;
+}
+"""
+
+
+def test_t3_inlining_cannot_drop_the_checked_access() -> None:
+    """#1024：带检查的被调**不是**单块 —— T3 的内联器没有机会把检查内联掉。
+
+    T3 只内联"单块 + 末尾 `ret` + 无调用"的被调。LMS 的检查把函数展开成
+    `lmsok` / `lmsbad` / `lmsjoin`（至少一个 `br`、一个 `phi`），所以 `touch`
+    在**结构上**就进不了内联器 —— 这就是"检查为什么没被内联丢掉"的理由，而不是
+    "我们恰好没踩到"。`twice` 作为正对照：它被真的特化了（`specialisations == 1`）。
+
+    T3 那份产物仍然要**拒绝**界外访存（rc=33 里 `touch(9)` 贡献 0）；把检查删掉，
+    它会读回 7，rc 变成另一个数，这条红。
+    """
+    if not _native_ok():
+        print("      SKIP: Windows 上没有 WSL —— 原生 ELF 跑不了")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        ir = _emit_lms(_INLINE_CHECK)
+
+    vals = lvm_t3.Values()
+    lvm_t2.run_ir_t2(ir, io.BytesIO(), lvm.Profile(), ["inline"], vals)
+    c = lvm.Counters()
+    d = lvm_t3.DeoptLog()
+    buf = io.BytesIO()
+    rc3 = lvm_t3.run_ir_t3(ir, buf, lvm.Profile(), ["inline"], vals, d, c)
+    assert rc3 == 33 and buf.getvalue() == b"", (rc3, buf.getvalue())
+    assert c.specialisations == 1 and c.deopts == 1, (
+        f"正对照 `twice` 应当特化 1 处、去优化 1 次，得到 "
+        f"{c.specialisations} / {c.deopts}")
+
+    # 结构上的理由：`touch` 不是单块，且有分支/phi（检查的形状）。
+    g, f, e = lomelf.parse_ll(ir)
+    vm = lvm_t3.T3Executor(g, f, e, io.BytesIO())
+    touch = vm.prog.cfunc("touch")
+    assert not lvm_t3._inlinable(touch), (
+        "`touch` 居然是单块可内联的 —— 检查去哪儿了？")
+    assert len(touch.blocks) > 1, len(touch.blocks)
+    assert any(op[0] in (lvm_t2._OP_BR, lvm_t2._OP_PHI)
+               for blk in touch.blocks for op in blk), (
+        "`touch` 里没有分支/phi —— 那它就不是 LMS 检查展开后的形状")
+
+    got = _run_four(ir, "inline_check")
+    bad = {k: v for k, v in got.items() if v[0] != 33 or v[1] != b""}
+    assert not bad, ("四产物应同为 rc=33", bad)
+    print("      四产物 rc=33；`touch` 多块不可内联（检查在），`twice` 特化 1 / 去优化 1")
+
+
 #: 入口 A 的运行时探针：65 个 1000 字节的块正好填满 64 KiB arena（65×1008=65520），
 #: 第 66 个再要 1008 字节就撞墙。**一次回收**把前 65 个死块里的垃圾还回来，retry 就
 #: 装得下 —— 请求是**小块**，所以回收后的空闲链能直接复用（收集器不做压实）。
@@ -457,6 +610,15 @@ fn _start() -> u32 {
 """
 
 
+def _rescue_ir(on: bool) -> str:
+    """入口 A 的纯探针：拿掉常规回收调用，只留下 retry 那一个回收点。"""
+    src = _RESCUE % ("" if on else "choose close lms_guard")
+    ir = re.sub(r"^\s*call void @__loment_maybe_collect\([^)]*\)\n", "",
+                _emit_lms(src), flags=re.M)
+    assert "call void @__loment_maybe_collect" not in ir, "常规触发没被拿掉，探针不纯"
+    return ir
+
+
 def test_lms_entry_a_rescue_is_executed_by_every_product() -> None:
     """#1024：入口 A 的 retry 块要**真的跑**，不是只出现在 IR 里。
 
@@ -472,10 +634,7 @@ def test_lms_entry_a_rescue_is_executed_by_every_product() -> None:
         print("      SKIP: Windows 上没有 WSL —— 原生 ELF 跑不了")
         return
     for on, want in ((True, 66), (False, 132)):
-        src = _RESCUE % ("" if on else "choose close lms_guard")
-        ir = re.sub(r"^\s*call void @__loment_maybe_collect\([^)]*\)\n", "",
-                    _emit_lms(src), flags=re.M)
-        assert "call void @__loment_maybe_collect" not in ir, "常规触发没被拿掉，探针不纯"
+        ir = _rescue_ir(on)
         got = _run_four(ir, "rescue_on" if on else "rescue_off")
         bad = {k: v for k, v in got.items() if v[0] != want or v[1] != b""}
         assert not bad, ("lms_guard 开" if on else "lms_guard 关", bad)

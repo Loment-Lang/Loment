@@ -12,6 +12,9 @@
   加一个 'B'。少了它，"退回去重跑"那种错实现**照样绿**。
 * **D 反例：没被推翻的那一趟，零去优化** —— 把"改成 9"那一行去掉，记录必须是空的。
   少了它，一个"每条守卫都去优化"的实现也能过 B。
+* **E 特化次数 == 过门槛的站点数**（#1028）—— 确定性的计数，不看墙钟：三处调用点里
+  两处占比 ≥ 阈值、一处散开，`counters.specialisations` 必须**恰好**是 2；反例
+  （把阈值判断删掉）会变成 3。
 
 用法: python tools/lvm_t3_test.py
 """
@@ -128,11 +131,16 @@ def test_deopt_happens_and_still_answers_right() -> None:
         ir = _ir_of_text(_FIXTURE, td, "deoptfix")
         values = _values_for(ir)
         d = lvm_t3.DeoptLog()
+        c = lvm.Counters()
         out3, out0 = io.BytesIO(), io.BytesIO()
         r0 = lvm.run_ir(ir, out0, None, ["prog"])
-        r3 = lvm_t3.run_ir_t3(ir, out3, lvm.Profile(), ["prog"], values, d)
+        r3 = lvm_t3.run_ir_t3(ir, out3, lvm.Profile(), ["prog"], values, d, c)
 
     hits = sum(d.hits.values())
+    assert c.specialisations == 1, (
+        f"这一趟应当特化 1 个站点，记到了 {c.specialisations}（#1028）")
+    assert c.deopts == hits == 1, (
+        f"去优化计数 {c.deopts} 与日志 {hits} 对不上 —— 两者量的必须是同一件事")
     assert hits == 1, (
         f"这一次跑应当**恰好**去优化 1 次，记到了 {hits}（`docs/249` §5.1）—— "
         "0 次说明优化器没敢特化（判据是空的），多次说明守卫在反复响")
@@ -159,6 +167,67 @@ def test_no_violation_means_no_deopt() -> None:
         "那条守卫根本没在按观察走")
     assert rc == 14, f"反例的退出码应当是 7*2=14，得到 {rc}"
     print("      没被推翻的那一趟：零去优化，rc=14")
+
+
+#: 判 E 的期望值用**导入时快照**的门槛算 —— 这样把实现里的 `DOMINANT_SHARE` 调成 0
+#: 只会移动实现、不会移动期望（证伪才真能红）。
+_THRESHOLD = lvm_t3.DOMINANT_SHARE
+
+#: 三处调用点，同一个**可内联**的被调（单块 `ret`）：
+#: `%a` 永远是 7、`%b` 永远是 5（两处占比 1.0），`%d` 每轮一个新值（占比 0.001）。
+#: 所以"过门槛的站点数"**独立地**是 2，T3 的特化计数必须与它相等。
+_HOT_SITES = """define i32 @f(i32 %x) {
+entry:
+  %m = mul i32 %x, 2
+  ret i32 %m
+}
+define i32 @_start() {
+entry:
+  br label %loop
+loop:
+  %k = phi i32 [ 0, %entry ], [ %k2, %loop ]
+  %a = call i32 @f(i32 7)
+  %b = call i32 @f(i32 5)
+  %d = call i32 @f(i32 %k)
+  %k2 = add i32 %k, 1
+  %c = icmp ult i32 %k2, 1000
+  br i1 %c, label %loop, label %done
+done:
+  ret i32 0
+}
+"""
+
+
+def test_specialisation_count_equals_sites_over_threshold() -> None:
+    """判 E（#1028）：T3 的特化次数 == 剖面里**过门槛**的站点数，逐点位。
+
+    这是确定性的：同一份 IR + 同一份剖面，计数与机器无关。期望值从 `Values`
+    **独立算出来**（占比 ≥ `DOMINANT_SHARE`），不是复述 `specialise()` 的返回值。
+
+    证伪：把 `specialise()` 里的阈值判断删掉 ⇒ 那个散开的站点也被特化，计数变成 3，
+    这条红；把计数写死成 0 ⇒ 也红。
+    """
+    values = _values_for(_HOT_SITES)
+    assert len(values.sites) == 3, values.sites
+    over = [s for s, seen in values.sites.items()
+            if max(seen.values()) / sum(seen.values()) >= _THRESHOLD]
+    assert len(over) == 2, f"夹具自己不对：过门槛的站点应当是 2 个，得到 {over}"
+    under = [s for s in values.sites if s not in over]
+    assert len(under) == 1, under
+
+    c = lvm.Counters()
+    d = lvm_t3.DeoptLog()
+    out = io.BytesIO()
+    rc = lvm_t3.run_ir_t3(_HOT_SITES, out, lvm.Profile(), ["hot"], values, d, c)
+
+    assert rc == 0 and out.getvalue() == b"", (rc, out.getvalue())
+    assert c.specialisations == len(over) == 2, (
+        f"过门槛的站点 {len(over)} 个，T3 却特化了 {c.specialisations} 个")
+    assert sorted(c.specialised_sites) == sorted(over), (
+        f"特化站点对不上：计数 {c.specialised_sites} / 期望 {over}")
+    assert c.deopts == 0, f"这一趟没有假设被推翻，却记了 {c.deopts} 次去优化"
+    print(f"      3 处调用点：2 处过门槛 ⇒ specialisations={c.specialisations}，"
+          f"散开的那处没被特化；去优化 0 次")
 
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

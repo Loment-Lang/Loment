@@ -135,6 +135,10 @@ EXPLAINED: dict[tuple[str, str], str] = {
         "越界**由调用方报**：守卫这里 `return 0`，驱动器 `fail(\"…codegen 表容量…\")` 说得出来",
     ("loment/selfhost/codegen.lomt", "CG_MAXENUM"):
         "越界**由调用方报**：同 `CG_MAXFN`（一句话点名两张表）",
+    ("loment/selfhost/codegen.lomt", "CG_DFR_STRIDE"):
+        "**步长，不是上界**（`docs/296` §2.3）：捕获表每条记录 84 字节（start|end|len|pad|"
+        "text[68]），能放多少由 `CG_MAXDFR` / `CG_MAXDFARGS` 定 —— 两处都判了 `>=` 并 "
+        "`cg_fail`，多说一句「延迟调用实参多于 4」/「defer 太多」",
     ("loment/tools/lomenterr.lomt", "SUM_CAP"):
         "越界**由调用方报**（`#670`）：表满时只把 `C_SUMDROP` 加一，真正的句子由 "
         "`sum_print` 在汇总行末尾印（`N 个码没有列进这张表` / "

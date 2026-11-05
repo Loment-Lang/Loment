@@ -28,23 +28,29 @@ runtime, and `loment version <exe>` reads it back from the artifact.
 **Tur 2026.2** (`tur2026.2`, or the 2026 shorthand `tur2`) adds, beyond the pure sugar
 (`def f()` for `fn f()`, `a and b` / `a or b` / `not a`, `elif cond { }`). The block below
 is a **line-per-construct list**, not one compilable unit; the runnable versions are the
-`loment_p8_test` criteria M91 (loops), M94 (bare `return;`, `print_num`) and M95
-(`orelse` / `catch`), specified in `docs/296` §2.
+`loment_p8_test` criteria M91 (loops), M94 (bare `return;`, `print_num`), M95
+(`orelse` / `catch`) and M96 (`defer`), specified in `docs/296` §2.
 
 <!-- no-compile: 逐条语法片段；可跑的见 p8 M91/M94/M95 -->
 ```rust
 for x in xs { ... }            // named array / slice; `x` is a copy of each element
 while go { if done { break; } if skip { continue; } ... }
 fn early(n: u32) { if n > 3 { return; } ... }      // bare `return;`, unit functions only
+defer free(p);                 // runs when this block exits (LIFO); args evaluated **now**
 let a: u32 = maybe orelse 0;   // first enum variant = success (`Option`: Some/None)
 let b: u32 = risky() catch 0;  // same shape (`Result`: Ok/Err); fallback is lazy
 print_num(n);                  // decimal, no newline; any integer, widened to i64
 ```
 
 `print_num` lives in the runtime block, so it needs `choose runtime` (the default
-`no_runtime` refuses it by name, E31). All of these are **Tur 2 only** - Tur 1 keeps reading
-`break`, `orelse`, `print_num` and friends as ordinary identifiers, so old files keep their
-meaning. (Not in this edition yet: `defer`.)
+`no_runtime` refuses it by name, E31). `defer f(a, b);` takes a **call** (not a statement):
+the arguments are evaluated where the `defer` is written and the call runs when the block
+exits - on the normal fall-through, `return`, `?`, and loop `break` / `continue`, but not on a
+panic. Multiple `defer`s in one block run in reverse order. The self-hosted compiler keeps the
+captures in a fixed table (8 `defer`s per function, 4 arguments each, 64 levels of nesting)
+and refuses to go past it by name. All of these are **Tur 2 only** - Tur 1 keeps reading
+`defer`, `break`, `orelse`, `print_num` and friends as ordinary identifiers, so old files keep
+their meaning.
 
 The same program can also be written with C / C++ / Java / C# / Go / Python spelling, **changing
 the spelling and nothing else** - recognised **by extension** (`.c` / `.cpp` / `.java` / `.cs` /

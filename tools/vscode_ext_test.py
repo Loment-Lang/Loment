@@ -377,14 +377,22 @@ const {invocation, usesModules} = require(process.argv[1]);
 const fs = require('fs');
 const R = process.argv[2];
 const F = R + '/loment/examples/tour.lomt';
+const TMPBIN = process.argv[3];
 process.stdout.write(JSON.stringify({
   cli_build: invocation({root:R, file:F, action:'build', platform:'win32',
-                         toolCommand:'loment', buildDir:'loment/build'}),
+                         toolCommand:'loment', buildDir:'loment/build',
+                         pathEnv: TMPBIN, pathExt: '.CMD'}),
   cli_run:   invocation({root:R, file:F, action:'run', platform:'win32',
-                         toolCommand:'wsl', toolArgs:['-e','/x/loment']}),
-  dev_build: invocation({root:R, file:F, action:'build', platform:'win32'}),
-  dev_run:   invocation({root:R, file:F, action:'run', platform:'win32'}),
-  none:      invocation({root:R, file:F, action:'build', platform:'linux'}),
+                         toolCommand:'wsl', toolArgs:['-e','/x/loment'],
+                         pathEnv: TMPBIN, pathExt: '.EXE;.CMD'}),
+  // `toolCommand` 空、PATH 上有 `loment` -> **自动用它**（装好包之后不该再手填设置）
+  auto_run:  invocation({root:R, file:F, action:'run', platform:'linux',
+                         pathEnv: TMPBIN, buildDir:'loment/build'}),
+  dev_build: invocation({root:R, file:F, action:'build', platform:'win32',
+                         pathEnv: ''}),
+  dev_run:   invocation({root:R, file:F, action:'run', platform:'win32',
+                         pathEnv: ''}),
+  none:      invocation({root:R, file:F, action:'build', platform:'linux', pathEnv: ''}),
   outside:   invocation({root:R, file:'D:/elsewhere/x.lomt', action:'build', platform:'linux'}),
   // **没打开文件夹**（VS Code 空窗口）：调用方只能给"文件所在目录"，或者干脆给不出
   empty_window: invocation({root:R + '/loment/examples', file:F, action:'run',
@@ -396,6 +404,13 @@ process.stdout.write(JSON.stringify({
                          action:'run', platform:'win32', buildDir:'loment/build'}),
   lib_build: invocation({root:R, file:R + '/loment/examples/mathutil.lomt',
                          action:'build', platform:'win32', buildDir:'loment/build'}),
+  // **`fn main()` 也是入口**（docs/295，2026-11-03）：链接器的入口桩在找不到 `_start`
+  // 时改用 `main`。只认 `_start` 会把 `hello world` 这种合法程序拦在"运行"外面。
+  main_run:  invocation({root:R, file:R + '/exercises/01-hello/main.lomt',
+                         action:'run', platform:'win32', buildDir:'loment/build'}),
+  // **命令单元**（`loment_command` + `command_main`）的入口由工具链生成，同样可运行。
+  cmd_run:   invocation({root:R, file:R + '/loment/examples/cmd_hello.lomt',
+                         action:'run', platform:'win32', buildDir:'loment/build'}),
   // 外门语法：入口自己是（C 写的叶子），或依赖是（原生宿主 use 了它）
   surf_entry: invocation({root:R, file:R + '/loment/examples/cproject/bitkit.lomt',
                           action:'build', platform:'win32', buildDir:'loment/build'}),
@@ -406,23 +421,45 @@ process.stdout.write(JSON.stringify({
   uses_comments_only: usesModules('module t\\n// use "bitkit.lomt"\\n/* use "numkit.lomt" */\\n')
 }));
 """
-    r = subprocess.run([node, "-e", script, str(EXT / "src" / "build-cmd.js"), str(ROOT)],
-                       capture_output=True, text=True, shell=False)
+    with tempfile.TemporaryDirectory() as tds:
+        tmpbin = Path(tds)
+        # 真实形状：Windows 安装包给的是 `loment.cmd`，Linux 是 `loment` 脚本。
+        # **两种大小写都建**：`PATHEXT` 是大写的 `.CMD`，而判据要在**大小写敏感**的
+        # Linux CI 上跑（Windows 的 NTFS 不区分，所以本机只会绿）。
+        (tmpbin / "loment.cmd").write_text("@echo off\r\n", encoding="utf-8")
+        (tmpbin / "loment.CMD").write_text("@echo off\r\n", encoding="utf-8")
+        (tmpbin / "loment").write_text("#!/bin/sh\n", encoding="utf-8")
+        r = subprocess.run([node, "-e", script, str(EXT / "src" / "build-cmd.js"), str(ROOT),
+                            str(tmpbin)],
+                           capture_output=True, text=True, shell=False)
     assert r.returncode == 0, f"build-cmd.js 执行失败: {r.stderr[-300:]}"
     got = json.loads(r.stdout)
 
     # ① 装了 Loment 命令 -> 走它。`build` 带 `-o`（**不带扩展名**，`lomcli.lomt:694`），
     #    `run` 不带 —— 这条差别错了会编出个名字不对的文件，而命令看着是成功的。
     b = got["cli_build"]
-    assert b.get("how") == "cli" and b["cmd"] == "loment", b
-    assert b["args"][0] == "build", b
-    assert "-o" in b["args"] and b["args"][-1].endswith("/tour"), b
-    assert b["args"][1] == "loment/examples/tour.lomt", f"要传相对路径（cwd 是工作区根）: {b}"
+    assert b.get("how") == "cli", b
+    # **Windows 上 `loment` 是 `loment.cmd`**：Node 直接 spawn 它要么 ENOENT（不带后缀）、
+    # 要么 EINVAL（带 .cmd）—— 必须交给 cmd.exe（2026-11-04 实测）。
+    assert b["cmd"].lower().endswith("cmd.exe"), \
+        f"Windows 上 .cmd 必须经 cmd.exe 跑，否则点「编译」是 ENOENT: {b}"
+    assert b["args"][:3] == ["/d", "/s", "/c"], b
+    assert b["args"][3].lower().endswith("loment.cmd"), b
+    tail = b["args"][4:]
+    assert tail[0] == "build", b
+    assert "-o" in tail and tail[-1].endswith("/tour"), b
+    assert tail[1] == "loment/examples/tour.lomt", f"要传相对路径（cwd 是工作区根）: {b}"
 
     # ② 经 WSL 跑同一个命令：toolArgs 在前，子命令在后
     run = got["cli_run"]
     assert run["args"] == ["-e", "/x/loment", "run", "loment/examples/tour.lomt"], run
     assert "-o" not in run["args"], f"`run` 不该带 -o: {run}"
+
+    # ②' 没配 `toolCommand`、PATH 上有 `loment` -> 自动认（装好包的人不该再手填设置）
+    a = got["auto_run"]
+    assert a.get("how") == "cli" and a["cmd"].endswith("loment"), \
+        f"PATH 上的 loment 没被自动认出来: {a}"
+    assert a["args"] == ["run", "loment/examples/tour.lomt"], a
 
     # ③ Windows 开发树 -> scripts/lomc.ps1；**只有 run 带 `-Run`**
     if (ROOT / "scripts" / "lomc.ps1").is_file():
@@ -467,6 +504,15 @@ process.stdout.write(JSON.stringify({
     assert got["lib_build"].get("how") == "lomc", \
         f"库模块只是不能「运行」，编译照旧: {got['lib_build']}"
     print("      库模块：`运行` 拦住并说明缺 `_start`；`编译` 照旧放行")
+
+    # ⑦b **`fn main()` / `command_main` 都是合法入口**（docs/295，2026-11-04 用户实测：
+    #     `fn main() { print(...) }` 被当成库模块，点「编译并运行」弹"No `_start`"）。
+    #     只认 `_start` 在 2026-11-03 之后就是**误拦**。
+    for key in ("main_run", "cmd_run"):
+        e = got[key]
+        assert "error" not in e, f"{key}: 合法入口被当成库模块拦下: {e}"
+        assert e.get("how") == "lomc", f"{key}: 没走到构建分支: {e}"
+    print("      入口：`fn main()` 与命令单元都放行（`_start` 仍优先，库模块仍拦住）")
 
     # ⑧ **外门语法要先说清是哪个文件**（2026-10-21）。自举编译器只会说
     #    "this file does not look like Loment"，而被点名的其实是依赖；入口文件里连

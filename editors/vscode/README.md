@@ -98,8 +98,8 @@ This is an environment question, not a configuration one, so the extension detec
 
 | Order | Condition | What is used |
 |---|---|---|
-| ⓪ | the file has no `fn _start` and you asked to *run* | **refused, with an explanation** — that is a library module: it links into an ELF but segfaults immediately. *Build* still works |
-| ① | `loment.toolCommand` is set | the installed Loment CLI: `<cmd> <args> build FILE [-o NAME]` / `run FILE`. **No Python needed** |
+| ⓪ | the file has no entry (`fn main()`, `fn _start()`, or `fn command_main`) and you asked to *run* | **refused, with an explanation** — that is a library module: it links into an ELF but segfaults immediately. *Build* still works |
+| ① | `loment.toolCommand` is set, or `loment` is on PATH | the installed Loment CLI: `<cmd> <args> build FILE [-o NAME]` / `run FILE`. **No Python needed**. On Windows the launcher is `loment.cmd`, so it is run through `cmd.exe` (Node cannot spawn a batch file directly) |
 | ② | Windows, and `scripts/lomc.ps1` is found by walking up from the workspace or from the file | the development-tree path: seed + clang + WSL, producing `.ll` + `.elf`. **No workspace folder required** — opening a single `.lomt` is enough |
 | ③ | neither | **an explicit error** naming the setting to fill in — never silence (a command that does nothing is the hardest kind of failure to diagnose) |
 

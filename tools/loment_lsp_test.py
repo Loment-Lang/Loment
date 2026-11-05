@@ -1338,5 +1338,33 @@ def test_lsp_names_the_limit_for_a_uri_that_does_not_fit():
     print("      超上限 URI：多一条点名 8176 字节上限的 Info（不再静默）")
 
 
+@test
+def test_diag_titles_match_reference():
+    """`diag_title` 的每个码与 `tools/loment_diag.RULES` **逐字同文**。
+
+    原先这张表只到 17，而自举 checker 会发 18（名字导入）与 19（语法/解析期）——
+    落到表外的码显示成「未分类」，用户看到的是一条没有类别的红错（2026-11-04：
+    `codegen.lomt` 的 E019 就是这样）。这条不需要 WSL：直接读源码比对，永远跑得起来。
+    """
+    import re  # noqa: PLC0415
+    import loment_diag  # noqa: PLC0415
+
+    src = SRC.read_text(encoding="utf-8")
+    block = src.split("fn diag_title(", 1)[1].split("\n}", 1)[0]
+    got = {int(m.group(1)): m.group(2)
+           for m in re.finditer(r'if code == (\d+) \{ return "([^"]*)"; \}', block)}
+    want = {}
+    for code, _pat, title, _fix in loment_diag.RULES:
+        n = int(code[1:])
+        if n <= 38:
+            want.setdefault(n, title)
+    missing = sorted(set(want) - set(got))
+    assert not missing, f"diag_title 缺码: {missing}"
+    diff = {k: (got[k], want[k]) for k in want if got.get(k) != want[k]}
+    assert not diff, f"标题与 loment_diag.RULES 不一致: {diff}"
+    assert "未分类" not in got.values()
+    print(f"      诊断标题：{len(want)} 个码与参考表逐字同文")
+
+
 if __name__ == "__main__":
     sys.exit(main())

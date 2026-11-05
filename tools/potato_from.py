@@ -1767,9 +1767,25 @@ GRAMMAR_ALIASES: dict[str, str] = {
 #: **由读法本身保证** —— 我们给 Tur 加的修改不会漏到它那一面去。
 #: Tur 的版次（`docs/296` §1.1）是两级名：`tur<年份>.<序号>`。原生读法的**规范名**就是
 #: 这两个；`tur` / `tur1` / `tur2` 在 `GRAMMAR_ALIASES` 里落到它们。版次只加不改 ——
-#: `tur2026.1` 的语法与语义永久冻结，新特性只进新的规范名。
+#: `tur2026.1` / `tur2026.2` 的语法与语义永久冻结，新特性只进新的规范名。
 TUR_EDITIONS = ("tur2026.1", "tur2026.2")
 NATIVE_GRAMMARS = ("loment",) + TUR_EDITIONS
+
+#: **已封版的版次**（2026-11-05）：这两个版次的语法与语义不再变化。新特性只能开
+#: `tur2026.3`（2026 年内）或 `tur2027.1`（跨年），**不是**改这里已有的名字。
+#: `TUR_EDITIONS` 是"当前认识的全部版次"，`FROZEN_EDITIONS` 是"其中已封死的"；
+#: 开新版次时前者增长，后者保持不变。判据在 `loment_grammar_test`。
+FROZEN_EDITIONS: tuple[str, ...] = ("tur2026.1", "tur2026.2")
+
+#: **`tur2026.2` 封版时的完整特性面**（`docs/305`）。它是**棘轮**：加一条 = 开新版次，
+#: 不是往这一版里塞。期望的 SHA-256 **不在本文件**，而是作为独立字面量钉在
+#: `loment_grammar_test.py:FROZEN_TUR2026_2_SHA256`（与出厂锁同一套写法）——
+#: 改这里必须同时改那里，那一步就是"承认改了封版面"的显式动作。
+TUR2026_2_FEATURES: tuple[str, ...] = (
+    "def", "elif", "and", "or", "not",
+    "for-in", "break", "continue", "bare-return",
+    "orelse", "catch", "print_num", "defer",
+)
 
 #: **声明的词序**：`choose write grammar <别名>`。
 #:

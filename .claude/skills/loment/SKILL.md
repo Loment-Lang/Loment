@@ -32,7 +32,8 @@ b` / `a or b` / `not a`, `elif cond { }`), `for x in xs`, `break` / `continue`, 
 in unit functions, `orelse` / `catch`, `print_num`, and **`defer`**. They are **Tur 2 only**:
 Tur 1 keeps those words as ordinary identifiers, so old files keep their meaning. The details
 and every restriction are in `loment-tur` 2.0.4 (the runnable versions are `loment_p8_test`
-M91, M94, M95 and M96).
+M91, M94, M95 and M96). **Tur 2026.2 is closed** (2026-11-05): that list is final; new
+syntax goes to `tur2026.3` (`loment-tur` 2.0.3, `docs/305`).
 
 The same program can also be written with C / C++ / Java / C# / Go / Python spelling, **changing
 the spelling and nothing else** - recognised **by extension** (`.c` / `.cpp` / `.java` / `.cs` /

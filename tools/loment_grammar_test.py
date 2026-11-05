@@ -29,6 +29,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -80,6 +81,11 @@ LOCKED_ALIASES = {
     # "少打一个字母就静默换成另一种读法"，而那正是这一门最不该有的失败。
     "nl": "natural", "natural": "natural", "lument": "natural",
 }
+
+
+#: `tur2026.2` 封版特性面的 SHA-256（`docs/305`）。**独立于实现**钉在这里：
+#: 改 `potato_from.TUR2026_2_FEATURES` 而不改这一行，判据会先红。
+FROZEN_TUR2026_2_SHA256 = "e5a54fc18a2ee01718db53cd27b589060ef7b7dd0afcf7f9084f9c8c73695479"
 
 
 @test
@@ -1223,6 +1229,28 @@ def test_a_misspelled_declaration_is_refused_not_guessed_past():
     assert potato_from.read_grammar_decl("module m\nchoose gc_auto\nfn f() { }\n") == \
         ("loment", None, False)
     print("      四种写错的声明都报得出（并给出那一行原文）；缺声明照旧回退")
+
+
+@test
+def test_tur2026_2_is_frozen():
+    """**tur2026.2 已封版**（2026-11-05）：名字、特性面、别名都不再变。
+
+    **Why**: 封版不能只是文档里的一句话。特性面是一个**哈希棘轮** —— 想往这一版
+    加语法，必须同时改这个哈希，于是"这是不是该开 tur2026.3"会被迫问一次。
+    判据同时钉住"当前没有未封版的新版次混进来"。
+    """
+    assert potato_from.FROZEN_EDITIONS == ("tur2026.1", "tur2026.2"), (
+        "封版清单被改了；开新版次不应该改这里")
+    assert potato_from.TUR_EDITIONS == potato_from.FROZEN_EDITIONS, (
+        "TUR_EDITIONS 与封版清单不一致 —— 开新版次要显式改这条判据")
+    digest = hashlib.sha256(
+        chr(10).join(potato_from.TUR2026_2_FEATURES).encode()).hexdigest()
+    assert digest == FROZEN_TUR2026_2_SHA256, (
+        "tur2026.2 的特性面变了 —— 加语法请开 tur2026.3，不是改这一版")
+    for future in ("tur3", "tur2026.3", "tur2027.1"):
+        assert future not in potato_from.GRAMMAR_ALIASES, (
+            f"{future} 还没开；开的时候要同时改锁表、NATIVE_GRAMMARS、docs/304 与这条判据")
+    print("      tur2026.2 封版：特性面哈希一致，且没有未封版的新版次混进来")
 
 
 def main() -> int:

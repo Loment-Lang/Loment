@@ -1,5 +1,5 @@
 <!-- translated-from: docs/146-loment-capability-semantics.md -->
-<!-- source-sha256: b9d99f358b50c64a5c0459bb70e96e9a50bfad41e7b48c76ec30741e054aee28 -->
+<!-- source-sha256: 9bea429cab0e9a022d8ea8edb90e9b580292354b3f12e26fb02b5c8c38d1e0a8 -->
 
 # 146 · Formal semantics of Loment capability domains (M44)
 
@@ -66,3 +66,7 @@ These three are checked by the P4 cases in `tools/lomentc_test.py` and by the M4
   capability-domain model to line up first, and are scheduled for P7.
 - **`guard` is not authorisation**: it checks the index, not "does the current principal hold this
   capability"; the principal-to-capability binding lives on the kernel side.
+
+> **Extension (2026-11-06):** shapes / polarity / time laws are extended in `docs/306`–`docs/308`;
+> ten of them are implemented in both compilers (`docs/306` §12). The semantics of §1–§4 here are
+> the "regular domain + allow" case of those ten, and still hold verbatim.

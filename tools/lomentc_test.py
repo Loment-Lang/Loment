@@ -1467,15 +1467,20 @@ def test_p4_violating_guard_has_no_audit_side_effect():
         rs = lomentc.emit_rust(mod, ROOT)
         ir = lomentc.emit_llvm(mod, ROOT)
 
-    # ---- IR：trap 块在前、审计（getelementptr + store）在后 —— 也就是只在 gok 那支
-    seg = ir[ir.find("define i32 @f("):]
-    abort = seg.find("call void @__loment_abort()")
-    gok = seg.find("_gok:")
-    audit = seg.find("getelementptr [16 x i64], ptr @__loment_audit")
-    store = seg.find("store i64", audit) if audit >= 0 else -1
-    assert 0 <= abort < gok < audit < store, (
-        "IR 里审计不在 gok 块里（abort={} gok={} gep={} store={}）—— "
-        "越界那次会先写审计（属性 1 破了）".format(abort, gok, audit, store))
+    # ---- IR：判决搬进 `@__loment_guard2`（docs/306-308 的十种域共用一个判决点），
+    # 但**属性不变**：审计的 store 仍只在 `pass:` 块里，`fail:` 块只有 abort + unreachable。
+    # 断言比原来更强：它覆盖所有 kind，而不只是调用点那一条。
+    assert "call void @__loment_guard2(" in ir, "调用点没走统一判决"
+    rt = ir[ir.find("define internal void @__loment_guard2("):]
+    fail = rt.find("fail:")
+    abort = rt.find("call void @__loment_abort()", fail)
+    unreach = rt.find("unreachable", abort)
+    pas = rt.find("pass:", unreach)
+    audit = rt.find("getelementptr [16 x i64], ptr @__loment_audit", pas)
+    store = rt.find("store i64", audit) if audit >= 0 else -1
+    assert 0 <= fail < abort < unreach < pas < audit < store, (
+        "IR 里审计不在 pass 块里（fail={} abort={} pass={} gep={} store={}）—— "
+        "越界那次会先写审计（属性 1 破了）".format(fail, abort, pas, audit, store))
 
     # ---- Rust：真跑。没有 rustc 就跳过这一半（环境限制，不改判据的结论面）
     rustc = shutil.which("rustc")
@@ -5425,6 +5430,197 @@ def test_lgc_window_saves_and_restores_even_on_return():
     head = ir[:ret_at]
     assert "load i32, ptr %lgc.on.0" in head, "return 前没有恢复 on"
     assert head.rindex("load i32, ptr %lgc.on.0") > head.index("lgc.on.0 = alloca")
+
+
+@test
+def test_domains_ten_kinds_static():
+    """十种域的静态规则（docs/306 §2–§5）：形状、极性、参数、容量。"""
+    ok = ("module m\nchoose runtime\n"
+          "capability front : disk[()..3]\n"
+          "capability back  : disk[5..()]\n"
+          "capability allc  : disk[()..()]\n"
+          "capability dng   : mem[2..4] danger\n"
+          "capability ep    : quota[0..4] epoch(3)\n"
+          "capability farc  : slot[0..()] far(2)\n"
+          "capability sl    : trace[0..100] sliding(2)\n"
+          "capability dec   : lease[0..4] decaying(3)\n"
+          "capability gr    : cred[0..()] growing(2)\n"
+          "capability cons  : auth[0..1] consumed(1)\n"
+          "fn f() -> u32 { tick; return 0; }\n")
+    assert errs(ok) == [], errs(ok)
+
+    # 形状：前无限只判上界、后无限只判下界
+    assert errs("module m\nchoose runtime\ncapability c : disk[()..3]\n"
+                "fn f() -> u32 { guard c(100); return 0; }\n"), "前无限应当只判上界"
+    assert errs("module m\nchoose runtime\ncapability c : disk[5..()]\n"
+                "fn f() -> u32 { guard c(100); return 0; }\n") == []
+    # 极性的对偶：危险域的字面量落在禁止区内是**编译错误**
+    assert any("危险域" in x for x in errs(
+        "module m\nchoose runtime\ncapability c : mem[2..4] danger\n"
+        "fn f() -> u32 { guard c(3); return 0; }\n"))
+    assert errs("module m\nchoose runtime\ncapability c : mem[2..4] danger\n"
+                "fn f() -> u32 { guard c(9); return 0; }\n") == []
+    # 时律参数必须为正
+    assert any("参数必须为正" in x for x in errs(
+        "module m\nchoose runtime\ncapability c : q[0..4] epoch(0)\n"
+        "fn f() -> u32 { return 0; }\n"))
+    # consumed 必须有界且域宽 <= 64
+    assert any("必须有上下界" in x for x in errs(
+        "module m\nchoose runtime\ncapability c : q[0..()] consumed(1)\n"
+        "fn f() -> u32 { return 0; }\n"))
+    assert any("超过 64" in x for x in errs(
+        "module m\nchoose runtime\ncapability c : q[0..99] consumed(1)\n"
+        "fn f() -> u32 { return 0; }\n"))
+
+
+@test
+def test_domains_ten_kinds_runtime():
+    """十种域真跑一遍：形状 3 + 极性 1 + 时律 6。
+
+    **不是"字符串在不在"**：生成的 Rust 编出来真跑，虚拟钟直接拨到每个用例要的值。
+    """
+    import shutil
+    import subprocess
+    src = ("module m\nchoose runtime\n"
+           "capability reg   : disk[2..4]\n"
+           "capability front : disk[()..3]\n"
+           "capability back  : disk[5..()]\n"
+           "capability allc  : disk[()..()]\n"
+           "capability dng   : mem[2..4] danger\n"
+           "capability ep    : quota[0..4] epoch(3)\n"
+           "capability farc  : slot[0..()] far(2)\n"
+           "capability sl    : trace[0..100] sliding(2)\n"
+           "capability dec   : lease[0..4] decaying(3)\n"
+           "capability gr    : cred[0..()] growing(2)\n"
+           "capability cons  : auth[0..1] consumed(1)\n"
+           "fn f_reg(n: u32) -> u32 { guard reg(n); return n; }\n"
+           "fn f_front(n: u32) -> u32 { guard front(n); return n; }\n"
+           "fn f_back(n: u32) -> u32 { guard back(n); return n; }\n"
+           "fn f_allc(n: u32) -> u32 { guard allc(n); return n; }\n"
+           "fn f_dng(n: u32) -> u32 { guard dng(n); return n; }\n"
+           "fn f_ep(n: u32) -> u32 { guard ep(n); return n; }\n"
+           "fn f_farc(n: u32) -> u32 { guard farc(n); return n; }\n"
+           "fn f_sl(n: u32) -> u32 { guard sl(n); return n; }\n"
+           "fn f_dec(n: u32) -> u32 { guard dec(n); return n; }\n"
+           "fn f_gr(n: u32) -> u32 { guard gr(n); return n; }\n"
+           "fn f_cons(n: u32) -> u32 { guard cons(n); return n; }\n")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "d.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        mod = lomentc.load(p)
+        assert lomentc.check(mod) == [], lomentc.check(mod)
+        rs = lomentc.emit_rust(mod, ROOT)
+        ir = lomentc.emit_llvm(mod, ROOT)
+    # 十种域共用一个判决点；两种后端都得有它
+    assert "@__loment_guard2" in ir and "@__loment_tick" in ir
+    assert "__loment_guard2(" in rs and "__loment_tick()" in rs
+
+    rustc = shutil.which("rustc")
+    if not rustc:
+        print("      SKIP: 无 rustc（运行那一半）")
+        return
+    main = (
+        'include!("m.rs");\n'
+        "fn main() {\n"
+        "    std::panic::set_hook(Box::new(|_| {}));\n"
+        "    let cases: &[(fn(u32) -> u32, u32, u64, bool)] = &[\n"
+        "        (f_reg, 2, 0, true), (f_reg, 9, 0, false),\n"
+        "        (f_front, 1, 0, true), (f_front, 100, 0, false),\n"
+        "        (f_back, 100, 0, true), (f_back, 3, 0, false),\n"
+        "        (f_allc, 999, 0, true),\n"
+        "        (f_dng, 9, 0, true), (f_dng, 3, 0, false),\n"
+        "        (f_ep, 2, 0, true), (f_ep, 2, 3, false),\n"
+        "        (f_farc, 1, 0, true), (f_farc, 9, 0, false),\n"
+        "        (f_farc, 3, 2, true), (f_farc, 1, 2, false),\n"
+        "        (f_sl, 0, 0, true), (f_sl, 5, 0, false),\n"
+        "        (f_sl, 5, 5, true), (f_sl, 0, 5, false),\n"
+        "        (f_dec, 2, 0, true), (f_dec, 2, 4, false),\n"
+        "        (f_gr, 0, 0, true), (f_gr, 1, 0, false),\n"
+        "        (f_gr, 6, 3, true), (f_gr, 7, 3, false),\n"
+        "    ];\n"
+        "    let mut bad = 0;\n"
+        "    for (f, arg, now, want) in cases {\n"
+        "        unsafe { __LOMENT_NOW = *now; }\n"
+        "        let ok = std::panic::catch_unwind(|| f(*arg)).is_ok();\n"
+        "        if ok != *want { bad += 1;\n"
+        '            println!("MISMATCH now={} arg={} ok={} want={}", now, arg, ok, want); }\n'
+        "    }\n"
+        "    unsafe { __LOMENT_NOW = 0; __LOMENT_USED[10] = [0; 64]; }\n"
+        "    let c1 = std::panic::catch_unwind(|| f_cons(0)).is_ok();\n"
+        "    let c2 = std::panic::catch_unwind(|| f_cons(0)).is_ok();\n"
+        "    if !(c1 && !c2) { bad += 1; println!(\"CONSUMED c1={} c2={}\", c1, c2); }\n"
+        '    println!("bad={}", bad);\n'
+        "}\n")
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "m.rs").write_text(rs, encoding="utf-8", newline="\n")
+        (d / "main.rs").write_text(main, encoding="utf-8", newline="\n")
+        exe = d / ("d.exe" if sys.platform == "win32" else "d")
+        r = subprocess.run([rustc, "-O", "-o", str(exe), str(d / "main.rs")],
+                           capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, r.stderr[-800:]
+        out = subprocess.run([str(exe)], capture_output=True, text=True,
+                             shell=False).stdout
+    assert "bad=0" in out and "MISMATCH" not in out, out
+    print("      十种域：形状 3 + 极性 1 + 时律 6，逐例真跑一致")
+
+
+@test
+def test_domains_selfhost_twin():
+    """十种域 + `tick;`：自举镜与参考实现的 IR **逐字节相同**。
+
+    这条真跑自举链（种子 -> stage1），不是字符串比对。没有 clang 就跳过。
+    """
+    import shutil
+    import subprocess
+    import loment_dist
+    clang = shutil.which("clang") or r"C:\Program Files\LLVM\bin\clang.exe"
+    if not (clang and Path(clang).exists()):
+        print("      SKIP: 无 clang")
+        return
+    src = ("module dom_twin\nchoose runtime\n"
+           "capability reg   : disk[2..4]\n"
+           "capability front : disk[()..3]\n"
+           "capability back  : disk[5..()]\n"
+           "capability allc  : disk[()..()]\n"
+           "capability dng   : mem[2..4] danger\n"
+           "capability ep    : quota[0..4] epoch(3)\n"
+           "capability farc  : slot[0..()] far(2)\n"
+           "capability sl    : trace[0..100] sliding(2)\n"
+           "capability dec   : lease[0..4] decaying(3)\n"
+           "capability gr    : cred[0..()] growing(2)\n"
+           "capability cons  : auth[0..1] consumed(1)\n"
+           "fn f_reg(n: u32) -> u32 { guard reg(n); return n; }\n"
+           "fn f_front(n: u32) -> u32 { guard front(n); return n; }\n"
+           "fn f_back(n: u32) -> u32 { guard back(n); return n; }\n"
+           "fn f_allc(n: u32) -> u32 { guard allc(n); return n; }\n"
+           "fn f_dng(n: u32) -> u32 { guard dng(n); return n; }\n"
+           "fn f_ep(n: u32) -> u32 { guard ep(n); return n; }\n"
+           "fn f_farc(n: u32) -> u32 { guard farc(n); return n; }\n"
+           "fn f_sl(n: u32) -> u32 { guard sl(n); return n; }\n"
+           "fn f_dec(n: u32) -> u32 { guard dec(n); return n; }\n"
+           "fn f_gr(n: u32) -> u32 { guard gr(n); return n; }\n"
+           "fn f_cons(n: u32) -> u32 { guard cons(n); return n; }\n"
+           "fn f_tick(n: u32) -> u32 { tick; return n; }\n")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "d.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        mod = lomentc.load(p)
+        deps = lomentc.resolve_deps(mod, ROOT, p.parent, entry=p)
+        assert lomentc.check(mod, deps=deps) == [], lomentc.check(mod, deps=deps)[:2]
+        want = lomentc.emit_llvm(mod, ROOT, deps)
+    stage1 = loment_dist.build_stage1()
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "d.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        r = subprocess.run([str(stage1), str(p)], cwd=str(ROOT), capture_output=True,
+                           text=True, encoding="utf-8", errors="replace",
+                           shell=False, timeout=600)
+    assert r.returncode == 0, f"stage1 编译十种域失败: {r.stderr[-600:]}"
+    got = r.stdout.replace("\r\n", "\n")
+    assert got == want, (
+        f"自举镜与参考的 IR 不一致 (want {len(want)}B got {len(got)}B)")
+    print(f"      种子自举链编译十种域成功，IR 与参考逐字节相同 ({len(want)}B)")
 
 
 def main() -> int:

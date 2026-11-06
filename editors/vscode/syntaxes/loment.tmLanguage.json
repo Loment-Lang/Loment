@@ -324,7 +324,7 @@
       "patterns": [
         {
           "name": "keyword.control.loment",
-          "match": "\\b(if|else|elif|while|for|in|match|return|as|break|continue|lgc)\\b"
+          "match": "\\b(if|else|elif|while|for|in|match|return|as|break|continue|defer|def|lgc)\\b"
         }
       ]
     },
@@ -373,6 +373,7 @@
         { "name": "keyword.operator.try.loment", "match": "\\?" },
         { "name": "keyword.operator.logical.loment", "match": "&&|\\|\\||!" },
         { "name": "keyword.operator.fallback.loment", "match": "\\b(orelse|catch)\\b" },
+        { "name": "keyword.operator.word.loment", "match": "\\b(and|or|not)\\b" },
         { "name": "keyword.operator.comparison.loment", "match": "==|!=|<=|>=|<|>" },
         { "name": "keyword.operator.assignment.loment", "match": "=" },
         { "name": "keyword.operator.arithmetic.loment", "match": "[+\\-*/%]" },

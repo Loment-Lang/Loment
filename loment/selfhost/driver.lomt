@@ -75,7 +75,9 @@ const EXT_OFF: u32 = 20224;      // 源后缀 (loment.conf)
 const DIAG_OFF: u32 = 20480;     // --diag-out 路径
 const DIAGFD_OFF: u32 = 24160;   // 这一次的 --diag-out fd **加一** (0 = 没给)
 const PROF_OFF: u32 = 24164;     // 版次 (docs/296/306): 0 = 2026.1, 1 = 2026.2, 2 = 2026.3
+const PROF_DEFAULT: u32 = 2;     // 缺省 = 最新版次 (potato_from.DEFAULT_EDITION)
 const DECLK_OFF: u32 = 24168;    // 根单元的拼法 (0 = 没写; 见 strip_grammar_decl)
+const FPROF_OFF: u32 = 24172;    // 这份文件自己声明的版次 (0xFFFFFFFF = 没写)
 const ADDIN_OFF: u32 = 21504;    // addin 清单起点
 const CMD_OFF: u32 = 23904;      // 命令名 (`--print-command`)
 const DIAG_CAP: u32 = 1024;      // 路径上限
@@ -777,6 +779,9 @@ fn strip_grammar_decl(buf: ptr, n: u32, scr: ptr, file: ptr, fnam: u32, root: u3
     let saw_module: u32 = 0;
     let seen: u32 = 0;
     let i: u32 = 0;
+    // **这份文件自己写的是哪一版**（`FPROF_OFF`）：-1 = 没写。与整程序的
+    // `PROF_OFF` 分开 —— 碰撞闸要看的是"这份源有没有把读法钉在生效版次上"。
+    store32(scr, FPROF_OFF, 4294967295);
     while i < n {
         let e: u32 = i;
         while e < n && load8(buf, e) != 10 {
@@ -830,11 +835,28 @@ fn strip_grammar_decl(buf: ptr, n: u32, scr: ptr, file: ptr, fnam: u32, root: u3
                     z = z + 1;
                 }
                 seen = 1;
+                // **这份文件声明的版次**（含 `loment` = 默认）。先记下来，
+                // 碰撞闸之后要拿它跟生效版次比（`load_file`）。
+                if is3 != 0 {
+                    store32(scr, FPROF_OFF, 2);
+                } else if is2 != 0 {
+                    store32(scr, FPROF_OFF, 1);
+                } else if (ist + is1a + is1b) != 0 {
+                    store32(scr, FPROF_OFF, 0);
+                } else {
+                    store32(scr, FPROF_OFF, PROF_DEFAULT);
+                }
                 if root != 0 {
+                    // **默认 = 最新那一版**（`potato_from.DEFAULT_EDITION`）：
+                    // `loment` 与没声明都不写 PROF，留在初值上。显式写了旧版次的
+                    // 才往下压 —— `tur` / `tur1` / `tur2026.1` 必须显式压回 0，
+                    // 因为缺省已经不是 Tur 1 了。
                     if is3 != 0 {
                         store32(scr, PROF_OFF, 2);      // tur3 / tur2026.3
                     } else if is2 != 0 {
                         store32(scr, PROF_OFF, 1);      // tur2 / tur2026.2
+                    } else if (ist + is1a + is1b) != 0 {
+                        store32(scr, PROF_OFF, 0);      // tur / tur1 / tur2026.1
                     }
                     // 拼法代号：编译期提示要把它展开成规范名（docs/296 §1.1）。
                     if isl != 0 {
@@ -864,6 +886,68 @@ fn strip_grammar_decl(buf: ptr, n: u32, scr: ptr, file: ptr, fnam: u32, root: u3
         i = e + 1;
     }
     return n;
+}
+
+// ---------------------------------------------------------------- 版次碰撞闸
+//
+// `potato_from.edition_collision_hits` 的自举孪生：无声明单元里**声明**了新版次的
+// 关键字时拒编译（`let break = 1; while c { break; }` 是静默改义的最小一例）。
+// 只看声明位置；**用**这些名字不触发 —— 循环里的 `break;` 正是新版次要的写法。
+
+/// 这个 token 是"被声明的新版关键字"吗？是就返回下标 + 1（0 = 不是）。
+fn coll_hit_at(src: ptr, toks: ptr, nt: u32, i: u32, prof: u32) -> u32 {
+    let p: ptr = ptr_add(src, load32(toks, i * 20 + 4));
+    let n: u32 = load32(toks, i * 20 + 8);
+    let hit: u32 = 0;
+    if prof >= 1 {
+        if streq(p, n, "break") != 0 || streq(p, n, "continue") != 0
+                || streq(p, n, "defer") != 0 || streq(p, n, "print_num") != 0 {
+            hit = 1;
+        }
+    }
+    if prof >= 2 && streq(p, n, "lgc") != 0 {
+        hit = 1;
+    }
+    if hit == 0 {
+        return 0;
+    }
+    // `let` / `const` / `fn` / `for` 后面的那个名字。
+    if i > 0 && load32(toks, (i - 1) * 20) == 0 {
+        let q: ptr = ptr_add(src, load32(toks, (i - 1) * 20 + 4));
+        let m: u32 = load32(toks, (i - 1) * 20 + 8);
+        if streq(q, m, "let") != 0 || streq(q, m, "const") != 0
+                || streq(q, m, "fn") != 0 || streq(q, m, "for") != 0 {
+            return i + 1;
+        }
+    }
+    // `(` / `,` 后面紧跟 `:` 的参数名（字段名也落这一格 —— 宁可多拒一次）。
+    if i > 0 && load32(toks, (i - 1) * 20) == 3
+            && load32(toks, (i - 1) * 20 + 8) == 1 {
+        let c0: u32 = load8(src, load32(toks, (i - 1) * 20 + 4));
+        if (c0 == 40 || c0 == 44) && i + 1 < nt && load32(toks, (i + 1) * 20) == 3
+                && load32(toks, (i + 1) * 20 + 8) == 1 {
+            let c1: u32 = load8(src, load32(toks, (i + 1) * 20 + 4));
+            if c1 == 58 {
+                return i + 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/// 扫整条 token 流；返回第一个碰撞 token 的下标 + 1（0 = 没有）。
+fn coll_scan(src: ptr, toks: ptr, nt: u32, prof: u32) -> u32 {
+    let i: u32 = 0;
+    while i < nt {
+        if load32(toks, i * 20) == 0 {
+            let h: u32 = coll_hit_at(src, toks, nt, i, prof);
+            if h != 0 {
+                return h;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
 }
 
 // ---------------------------------------------------------------- Tur 2 纯糖（docs/296 §2.1）
@@ -1919,6 +2003,18 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
     }
     // 先把本文件的 `use` 全收下来 (递归会复用 toks, 不能一边扫一边递归)
     let ntf: u32 = lex(slot, nb, toks);
+    // **版次不静默**（`potato_from.DEFAULT_EDITION` 的注）：这份文件没把读法钉在
+    // 生效版次上（没写声明，或写的是旧版次），却声明了新版次的关键字 —— 旧读法把
+    // 它当标识符、新读法把它当语法，同一份源会静默改义。宁可响亮地拒。
+    let effp: u32 = load32(scr, PROF_OFF);
+    if effp >= 1 && load32(scr, FPROF_OFF) != effp {
+        if coll_scan(slot, toks, ntf, effp) != 0 {
+            let dm: str = "this source does not pin its reading to the current edition (no `choose write grammar`, or an older one) and it declares a name that a newer Tur edition treats as syntax (break / continue / defer / print_num / lgc). That would silently change what the source means. Rename it, or pin the old reading with `choose write grammar tur2026.1` (or `tur2026.2`).";
+            wdiag_file(dfd, scr, path, n, 40, str_ptr(dm), str_len(dm));
+            failp(dm, path, n);
+            die(1);
+        }
+    }
     // `addin` 拉进来的单元**只许写 choose 相关代码**（`docs/182` §1.4）。
     if from_addin == 1 {
         check_chooseset(slot, toks, ntf, path, n, scr);
@@ -2150,7 +2246,7 @@ fn _start() -> u32 {
     // `--diag-out` 后面跟路径, 这个不跟 —— 对象直接写 stdout (与 IR 同一条出口次序:
     // **一个单元一份产物**)。
     store8(scr, DIAG_OFF, 0 as u8);
-    store32(scr, PROF_OFF, 0);          // 缺省是 Tur 1（docs/296）
+    store32(scr, PROF_OFF, PROF_DEFAULT);   // 缺省 = 最新版次（potato_from.DEFAULT_EDITION）
     store32(scr, DECLK_OFF, 0);         // 缺省：没写 `choose write grammar`
     let pmode: u32 = 0;
     // `--no-edition-notice`：**工具**（`lomcomefor` 这类把驱动当子进程、把它的输出
@@ -2263,9 +2359,9 @@ fn _start() -> u32 {
     if pmode == 0 && quiet == 0 {
         let pk: u32 = load32(scr, DECLK_OFF);
         if pk == 0 {
-            wstr(2, "loment: grammar default -> tur2026.1 (Tur 1)\n");
+            wstr(2, "loment: grammar default -> tur2026.3 (Tur 2026.3)\n");
         } else if pk == 1 {
-            wstr(2, "loment: grammar loment -> tur2026.1 (Tur 1)\n");
+            wstr(2, "loment: grammar loment -> tur2026.3 (Tur 2026.3)\n");
         } else if pk == 2 {
             wstr(2, "loment: grammar tur -> tur2026.1 (Tur 1)\n");
         } else if pk == 3 {

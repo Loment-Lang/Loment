@@ -18,7 +18,7 @@ actually costs time.
 
 | Layer | How a file is recognised | How it is read | Semantics |
 |---|---|---|---|
-| **Tur** (native) | no declaration (default), or `choose write grammar loment` / `tur` / `tur1` / `tur2` / `tur2026.1` / `tur2026.2` | the native lexer and parser, **no translator** | exactly this guide |
+| **Tur** (native) | no declaration (the **newest edition**), or `choose write grammar loment` / `tur` / `tur1` / `tur2` / `tur3` / `tur2026.1` / `tur2026.2` / `tur2026.3` | the native lexer and parser, **no translator** | exactly this guide |
 | **Foreign surface grammars** | `.c` `.cpp` `.java` `.cs` `.go` `.py`, or an explicit `choose write grammar <name>` | translated into Tur **in process by the reference compiler**; the installed package refuses them | **identical** - only spelling and shape change |
 | **Rust** | `.rs`, or `choose write grammar rust` | `from_rust`: **interface extraction only** (declarations), no body translation | a complete program is refused |
 
@@ -85,9 +85,11 @@ Editions are **two-level**: `tur<year>.<n>` (`docs/296` §1.1).
 
 | Declaration | Edition | Promise |
 |---|---|---|
-| none / `loment` / `tur` / `tur1` / `tur2026.1` | **Tur 1** (`tur2026.1`) | **permanently frozen** - no new syntax ever enters it, old files keep every byte of meaning |
+| none / `loment` | **newest edition** (`TUR_EDITIONS[-1]`; today `tur2026.3`) | 2026-11-06: new code gets the newest syntax by default (`docs/312`) |
+| `tur` / `tur1` / `tur2026.1` | **Tur 1** (`tur2026.1`) | **permanently frozen** - no new syntax ever enters it, old files keep every byte of meaning |
 | `tur2` / `tur2026.2` | **Tur 2** (`tur2026.2`) | first batch of absorbed Python/Zig/Go syntax; Tur 1 files compile unchanged. **Closed 2026-11-05** - the set in 2.0.4 is final |
-| future `tur2026.3` / `tur2027.1` … | next edition | same rule, each edition frozen on release |
+| `tur3` / `tur2026.3` | **Tur 2026.3** (`tur2026.3`) | inherits 2026.2; **open** - new syntax lands here (first: `lgc`, `docs/309`) |
+| future `tur2027.1` … | next edition | same rule, each edition frozen on release |
 
 Rules that make "old syntax keeps compiling" a fact rather than a promise:
 
@@ -110,6 +112,12 @@ Rules that make "old syntax keeps compiling" a fact rather than a promise:
    `GRAMMAR_ALIASES`, `NATIVE_GRAMMARS`, the self-hosted `strip_grammar_decl`, the VS Code
    `NATIVE_GRAMMARS`, and `surface_data` (`docs/296` §1.1 rule 5). It is an explicit act, not a
    branch added in passing.
+8. **A new edition may not silently reinterpret an old file.** If a construct has to use a
+   spelling that was a valid identifier in an earlier edition (`break`, `continue`, `defer`,
+   `print_num`, `lgc`), register it in `potato_from.EDITION_COLLISIONS`. An undeclared file that
+   **declares** one of those names is then refused with **E040** ("rename it, or pin the old
+   reading") instead of quietly changing meaning. `loment_grammar_test` requires every open
+   edition to appear in that table (`docs/312`).
 
 **Tur 2026.2 is closed (2026-11-05).** The construct list in 2.0.4 is final: `def`, `elif`,
 `and`, `or`, `not`, `for x in xs`, `break`, `continue`, bare `return;`, `orelse`, `catch`,
@@ -121,7 +129,7 @@ hash and refuses an unopened edition (`docs/305`).
 **The edition says itself out loud in three places** (`docs/296` §1.2):
 
 1. **At compile time**: `check` / `build` / `run` / `ir` print one line on stderr -
-   `loment: grammar tur2 -> tur2026.2 (Tur 2)`, or `grammar default -> tur2026.1 (Tur 1)`.
+   `loment: grammar tur2 -> tur2026.2 (Tur 2)`, or `grammar default -> tur2026.3 (Tur 2026.3)`.
    The **self-hosted driver** accepts `--no-edition-notice` for tools that run it as a
    subprocess (the reference launcher does not expose that switch yet).
 2. **In the artifact**: the IR carries an externally visible global

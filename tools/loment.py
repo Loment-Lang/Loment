@@ -29,6 +29,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lomc  # noqa: E402  (LomError: 把解析/装载期的诊断与内部故障分开)
 import lomentc  # noqa: E402
+import potato_from  # noqa: E402  (DEFAULT_EDITION: 版次表的单一真源)
 
 ROOT = Path(__file__).resolve().parent.parent
 C_TYPES = {"u8": "unsigned char", "u16": "unsigned short", "u32": "unsigned int",
@@ -136,9 +137,11 @@ def cmd_ir(a) -> int:
     p, mod, deps = _load(a.file)
     # **编译期告知版次**（`docs/296` §1.1）：用户写的拼法 -> 规范名。
     _sp = getattr(mod, "spelling", "") or "default"
-    _prof = getattr(mod, "profile", "tur2026.1")
-    print(f"loment: grammar {_sp} -> {_prof} (Tur {_prof.rsplit('.', 1)[-1]})",
-          file=sys.stderr)
+    _prof = getattr(mod, "profile", potato_from.DEFAULT_EDITION)
+    # 标签与自举驱动的措辞对齐（2026.3 说全名：`Tur 3` 会被读成另一个版次）。
+    _label = {"tur2026.1": "1", "tur2026.2": "2", "tur2026.3": "2026.3"}.get(
+        _prof, _prof.rsplit(".", 1)[-1])
+    print(f"loment: grammar {_sp} -> {_prof} (Tur {_label})", file=sys.stderr)
     text = lomentc.emit_llvm(mod, ROOT, deps)
     if not a.objdump:
         sys.stdout.write(text)

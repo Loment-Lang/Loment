@@ -4679,6 +4679,50 @@ def test_lgc_pause_and_budget_really_gate_collection():
     print(f"      五个控制格：{rc} —— 窗口收、暂停与到期预算都不收")
 
 
+@test
+def test_lgc_end_window_pauses_and_restores():
+    """`lgc end { … }` 在自动档里**短暂关闭**收集，出块恢复（`docs/309`）。
+
+    两格，缺一不可：
+
+      * 把 1.4 MB 的分配包进 `lgc end { … }` ⇒ 耗尽（非 0），证明暂停真的生效；
+      * 暂停块里只放一次小分配，**块外**再跑 1.4 MB ⇒ 跑通（0），证明出块把
+        `@__loment_gc_on` 写回了 1；恢复没做的话这一格也会耗尽。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    head = ("choose write grammar tur2026.3\nmodule lgc_off\nchoose gc_auto\n"
+            "choose runtime\n\n")
+    paused = head + (
+        "fn _start() {\n    lgc end {\n        let i: u32 = 0;\n"
+        "        while i < 20000 {\n            let t: ptr = alloc(64);\n"
+        "            store8(t, 0, 1);\n            i = i + 1;\n        }\n    }\n"
+        "    syscall4(60, 7, 0, 0);\n}\n")
+    restored = head + (
+        "fn _start() {\n    lgc end {\n        let a: ptr = alloc(16);\n"
+        "        store8(a, 0, 5);\n    }\n"
+        "    let i: u32 = 0;\n    while i < 20000 {\n"
+        "        let t: ptr = alloc(64);\n        store8(t, 0, 1);\n"
+        "        i = i + 1;\n    }\n    syscall4(60, 7, 0, 0);\n}\n")
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        rc = {}
+        for tag, src in (("paused", paused), ("restored", restored)):
+            p = td / f"{tag}.lomt"
+            p.write_text(src, encoding="utf-8", newline="\n")
+            ll = _ref_ir(p, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"{tag}.native"
+            nat.write_bytes(blob)
+            rc[tag] = _run_bin(nat, tag, td, timeout=60)[0]
+    assert rc["restored"] == 7, (
+        f"暂停块之后的分配没能跑完（rc={rc['restored']}）—— 出块没有恢复收集器")
+    assert rc["paused"] != 7, (
+        f"`lgc end {{ … }}` 里的 1.4 MB 也跑通了（rc={rc['paused']}）—— 暂停没生效")
+    print(f"      窗口暂停：块内耗尽 (rc={rc['paused']})，出块恢复后跑通 (rc={rc['restored']})")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_elf_test")
 

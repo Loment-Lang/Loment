@@ -364,6 +364,8 @@ def _st(s) -> str:
             return "(lgc start)" if s.budget is None else f"(lgc start {s.budget.value})"
         if s.action == "pause":
             return "(lgc end)"
+        if s.action == "off_begin":
+            return "(lgc off)"
         if s.action == "resume":
             return "(lgc start)"
         return "(lgc close)"
@@ -2680,7 +2682,8 @@ def test_m82_coverage_report():
              "lomfmt.lomt", "lomdoc.lomt", "lsp.lomt", "json.lomt",
              # Tur 2026.3 的 `lgc`（`docs/309`）：暂停/恢复、窗口、嵌套、窗口里 return、
              # gc_manual / gc_auto 两档。同一条判据另有专门的一条（`test_lgc_*`）。
-             "lgc_pause.lomt", "lgc_window.lomt", "lgc_manual.lomt", "lgc_auto.lomt"]
+             "lgc_pause.lomt", "lgc_window.lomt", "lgc_manual.lomt", "lgc_auto.lomt",
+             "lgc_off_window.lomt"]
     with tempfile.TemporaryDirectory() as td:
         exe = _build_codegen(td)
         ok, diff, unsupported = [], [], []
@@ -3431,7 +3434,8 @@ def test_m85_the_diagnostic_buffer_is_bounded_and_says_what_it_dropped():
 #: 窗口里 `return`、`gc_manual` / `gc_auto` 两档。**四份都要逐字节一致** —— 这条
 #: 特征的全部风险都在"两个实现发出不同的窗口指令序列"，而那是只有字节才看得见的。
 LGC_DIR = ROOT / "loment" / "examples" / "lgc"
-LGC_FIXTURES = ("lgc_pause.lomt", "lgc_window.lomt", "lgc_manual.lomt", "lgc_auto.lomt")
+LGC_FIXTURES = ("lgc_pause.lomt", "lgc_window.lomt", "lgc_manual.lomt",
+                "lgc_auto.lomt", "lgc_off_window.lomt")
 
 
 @test

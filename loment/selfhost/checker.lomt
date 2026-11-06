@@ -3876,7 +3876,11 @@ fn chk_syntax_prepass(src: ptr, t: ptr, out: ptr, o: u32, tur2: u32) -> u32 {
                 if chk_tok_kind(t, act) != 0 {
                     o = sym_pub(src, t, out, o, E_PARSE, i);       // `lgc` 后面要跟 start/end
                 } else if chk_tok_is(src, t, act, "end") {
-                    if !chk_tok_is(src, t, act + 1, ";") {
+                    // `lgc end;` 或 `lgc end { … }`（短暂暂停窗口）；`lgc end(…)` 不接受。
+                    if chk_tok_is(src, t, act + 1, "(") {
+                        o = sym_pub(src, t, out, o, E_PARSE, act);
+                    } else if !chk_tok_is(src, t, act + 1, ";")
+                            && !chk_tok_is(src, t, act + 1, "{") {
                         o = sym_pub(src, t, out, o, E_PARSE, i);
                     }
                 } else if !chk_tok_is(src, t, act, "start") {

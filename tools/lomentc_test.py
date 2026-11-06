@@ -5427,6 +5427,35 @@ def test_lgc_window_saves_and_restores_even_on_return():
     assert head.rindex("load i32, ptr %lgc.on.0") > head.index("lgc.on.0 = alloca")
 
 
+@test
+def test_lgc_end_window_is_a_scoped_pause():
+    """`lgc end { … }`：短暂暂停窗口（`docs/309`），与 `lgc start { … }` 对称。
+
+    三件事：形状收下（`end(1ms)` 不收）；IR 里块内置 0、出块恢复进入前的值；
+    Potato 把它记成"一次暂停 + 一个窗口"。
+    """
+    src = ("choose write grammar tur2026.3\nmodule m\nchoose gc_auto\nchoose runtime\n"
+           "fn f() {\n    lgc end {\n        let p: ptr = alloc(16);\n"
+           "        store8(p, 0, 1);\n    }\n}\n")
+    mod = _lgc_load(src)
+    assert lomentc.check(mod, deps=[]) == [], lomentc.check(mod, deps=[])
+    ir = lomentc.emit_llvm(mod, ROOT)
+    assert "%lgc.on.0 = alloca i32" in ir and "%lgc.dl.0 = alloca i64" in ir, ir
+    assert "store i32 0, ptr @__loment_gc_on" in ir, "暂停窗口没有把 on 置 0"
+    # 出块恢复：close 之后有一条把保存值写回 on 的 load/store
+    zero = ir.index("store i32 0, ptr @__loment_gc_on")
+    tail = ir[zero:]
+    assert "load i32, ptr %lgc.on.0" in tail, "出块没有恢复 on"
+    gl = lomentc._count_gc_control(mod)
+    assert (gl["pauses"], gl["windows"]) == (1, 1), gl
+    try:
+        _lgc_load(src.replace("lgc end {", "lgc end(1ms) {"))
+    except Exception as e:
+        assert "不接受时长" in str(e), e
+    else:
+        raise AssertionError("`lgc end(1ms)` 居然被收下了")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "lomentc_test")
 

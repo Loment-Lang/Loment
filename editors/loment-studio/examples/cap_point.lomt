@@ -1,0 +1,10 @@
+// 最小能力域：点域 [7..7]（docs/306 §2.2 里最简单的形状）。
+module cap_point
+choose runtime
+
+capability one_slot : disk[7..7] revocable
+
+fn main() {
+    let slot: u32 = 7;
+    guard one_slot(slot);
+}

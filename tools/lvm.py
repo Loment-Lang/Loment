@@ -68,11 +68,15 @@ class Counters:
     关着（`counters=None`）时**一个字节都不写**，与 T1 的剖面同一条纪律。
     """
 
-    __slots__ = ("instructions", "decodes", "tuple_lookups", "specialisations",
-                 "deopts", "decoded", "decode_requests", "specialised_sites")
+    __slots__ = ("instructions", "dispatches", "decodes", "tuple_lookups",
+                 "specialisations", "deopts", "decoded", "decode_requests",
+                 "specialised_sites")
 
     def __init__(self) -> None:
         self.instructions = 0
+        #: **分派次数**：解释器主循环每取一次"下一步要做什么"记一。融合把两条合成一条，
+        #: 于是 `dispatches` 降而 `instructions` 不变 —— 这是 A4 省下的那个量，确定性可比。
+        self.dispatches = 0
         self.decodes = 0
         self.tuple_lookups = 0
         self.specialisations = 0
@@ -92,6 +96,7 @@ class Counters:
         """可读的计数报告（与剖面同一条"确定、按名字排序"的纪律）。"""
         rows = [
             f"instructions\t{self.instructions}",
+            f"dispatches\t{self.dispatches}",
             f"decodes\t{self.decodes}",
             f"decode_requests\t{self.decode_requests}",
             f"tuple_lookups\t{self.tuple_lookups}",
@@ -718,6 +723,7 @@ class Executor(Vm):
                 if self.counters is not None:
                     # T0 的"解码"就是这一条指令本身：每执行一次就把文本重解一次。
                     self.counters.instructions += 1
+                    self.counters.dispatches += 1
                     self.counters.decodes += 1
                 if steps > STEP_CAP:
                     raise LvmError(

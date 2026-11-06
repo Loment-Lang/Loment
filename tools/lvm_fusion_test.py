@@ -68,9 +68,11 @@ def _ir(rel: str) -> str:
     return lomentc.emit_llvm(mod, ROOT, deps)
 
 
-def _run(ir: str, fuse: bool, prof=None, fusion=None, hot=None, argv=None):
+def _run(ir: str, fuse: bool, prof=None, fusion=None, hot=None, argv=None,
+         counters=None):
     buf = io.BytesIO()
-    rc = lvm_t2.run_ir_t2(ir, buf, prof, argv or ["<fusion-test>"], None, fuse, fusion, hot)
+    rc = lvm_t2.run_ir_t2(ir, buf, prof, argv or ["<fusion-test>"], None, fuse, fusion,
+                          hot, counters)
     return buf.getvalue(), rc
 
 
@@ -143,7 +145,20 @@ def test_hot_blocks_restrict_fusion() -> None:
 
 
 def test_fused_is_faster_on_a_dispatch_bound_loop() -> None:
-    """判 D：同一进程交替跑、取 min；**只判符号**。"""
+    """判 D：融合省的是**分派**；用确定性计数判，墙钟只记账（`docs/226`）。
+
+    在这个夹具上墙钟差只有 ~1%，而同一台机器重复跑的抖动也是 ~1%（本地 5 次里红过 3 次）。
+    所以判据落在 `lvm.Counters.dispatches`：一次计划项 = 一次分派，融合把两条并成一条，
+    这个数**确定地**变小；`instructions` 两者相同（融合不改变执行了多少条 IR）。
+    """
+    c_off, c_on = lvm.Counters(), lvm.Counters()
+    _run(DISPATCH_LOOP, False, counters=c_off)
+    _run(DISPATCH_LOOP, True, counters=c_on)
+    assert c_on.dispatches < c_off.dispatches, (
+        f"融合没有减少分派：unfused {c_off.dispatches} / fused {c_on.dispatches}")
+    assert c_on.instructions == c_off.instructions, (
+        f"融合改变了执行条数：unfused {c_off.instructions} / fused {c_on.instructions}")
+    # 墙钟：只记账。同一进程交替跑、取 min，倍数写出来给人看，不当门禁。
     off, on = [], []
     for _ in range(3):
         t = time.perf_counter()
@@ -152,10 +167,9 @@ def test_fused_is_faster_on_a_dispatch_bound_loop() -> None:
         t = time.perf_counter()
         _run(DISPATCH_LOOP, True)
         on.append(time.perf_counter() - t)
-    assert min(on) < min(off), \
-        f"融合没有更快：unfused {min(off)*1000:.0f} ms / fused {min(on)*1000:.0f} ms"
-    print(f"      分派密集夹具：unfused {min(off)*1000:.0f} ms · fused {min(on)*1000:.0f} ms "
-          f"⇒ {min(off)/min(on):.2f}x（只判符号，倍数记账）")
+    print(f"      分派密集夹具：dispatches {c_off.dispatches} → {c_on.dispatches} "
+          f"（{c_off.dispatches / c_on.dispatches:.2f}x，判据）；"
+          f"墙钟 {min(off)*1000:.0f} → {min(on)*1000:.0f} ms（只记账）")
 
 
 def test_errors_and_step_cap_keep_the_original_index() -> None:

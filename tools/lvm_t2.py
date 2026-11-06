@@ -647,6 +647,7 @@ class T2Executor(lvm.Executor):
                     steps += 1
                     if cnt is not None:
                         cnt.instructions += 1
+                        cnt.dispatches += 1
                         cnt.tuple_lookups += 1
                     if steps > lvm.STEP_CAP:
                         raise lvm.LvmError(
@@ -710,6 +711,9 @@ class T2Executor(lvm.Executor):
                 # **热路径**：没有剖面时，整条链上每一步都只碰整数。
                 for (j, count, _sh) in self._plan(cf, bi, blk):
                     op = blk[j]
+                    if cnt is not None:
+                        # 一次计划项 = 一次分派。融合把两条并成一条，这里就少一。
+                        cnt.dispatches += 1
                     if count == 2:
                         steps += 1
                         if cnt is not None:

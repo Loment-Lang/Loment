@@ -184,6 +184,124 @@ define internal void @__loment_abort() {
 declare void @llvm.trap()
 '''
 
+#: 能力域运行时（`docs/306`–`docs/308`）：虚拟钟 + 形状/极性/时律的统一判决。
+#: **只在真用到 `guard` / `tick;` 时发**（与自举侧 `emit_guard_runtime` 同位置）。
+_IR_GUARD_RUNTIME = '''; ---- 能力域运行时 (docs/306-308): 虚拟钟 + 十种域 ----
+@__loment_now = internal global i64 0
+@__loment_used = internal global [16 x [64 x i64]] zeroinitializer
+
+define internal void @__loment_tick() {
+entry:
+  %n = load i64, ptr @__loment_now
+  %n1 = add i64 %n, 1
+  store i64 %n1, ptr @__loment_now
+  ret void
+}
+
+define internal void @__loment_guard2(i64 %cap, i64 %idx, i64 %lo, i64 %hi, i64 %kind, i64 %param, i64 %flags) {
+entry:
+  %now = load i64, ptr @__loment_now
+  %pm0 = icmp eq i64 %param, 0
+  %pmz = zext i1 %pm0 to i64
+  %pm = or i64 %param, %pmz
+  %fl = and i64 %flags, 1
+  %linf = icmp ne i64 %fl, 0
+  %fh = and i64 %flags, 2
+  %hinf = icmp ne i64 %fh, 0
+  %ge = icmp uge i64 %idx, %lo
+  %lob = or i1 %linf, %ge
+  %le = icmp ule i64 %idx, %hi
+  %hib = or i1 %hinf, %le
+  %bound = and i1 %lob, %hib
+  %nb = xor i1 %bound, true
+  %k1 = icmp eq i64 %kind, 1
+  %nk1 = xor i1 %k1, true
+  %p1a = and i1 %nb, %k1
+  %p1b = and i1 %bound, %nk1
+  %a1 = or i1 %p1a, %p1b
+  %k2 = icmp eq i64 %kind, 2
+  %et = icmp ult i64 %now, %pm
+  %e = and i1 %et, %bound
+  %nk2 = xor i1 %k2, true
+  %p2a = and i1 %e, %k2
+  %p2b = and i1 %a1, %nk2
+  %a2 = or i1 %p2a, %p2b
+  %k3 = icmp eq i64 %kind, 3
+  %seg = udiv i64 %now, %pm
+  %sego = mul i64 %seg, %pm
+  %org = add i64 %lo, %sego
+  %end = add i64 %org, %pm
+  %o1 = icmp uge i64 %idx, %org
+  %o2 = icmp ult i64 %idx, %end
+  %ow = and i1 %o1, %o2
+  %o = and i1 %ow, %bound
+  %nk3 = xor i1 %k3, true
+  %p3a = and i1 %o, %k3
+  %p3b = and i1 %a2, %nk3
+  %a3 = or i1 %p3a, %p3b
+  %k4 = icmp eq i64 %kind, 4
+  %slt = icmp ult i64 %now, %pm
+  %slo = sub i64 %now, %pm
+  %zs = zext i1 %slt to i64
+  %ms = sub i64 %zs, 1
+  %slo2 = and i64 %slo, %ms
+  %s1 = icmp uge i64 %idx, %slo2
+  %s2 = icmp ule i64 %idx, %now
+  %s = and i1 %s1, %s2
+  %nk4 = xor i1 %k4, true
+  %p4a = and i1 %s, %k4
+  %p4b = and i1 %a3, %nk4
+  %a4 = or i1 %p4a, %p4b
+  %k5 = icmp eq i64 %kind, 5
+  %dt = icmp ule i64 %now, %pm
+  %d = and i1 %dt, %bound
+  %nk5 = xor i1 %k5, true
+  %p5a = and i1 %d, %k5
+  %p5b = and i1 %a4, %nk5
+  %a5 = or i1 %p5a, %p5b
+  %k6 = icmp eq i64 %kind, 6
+  %gr = mul i64 %now, %pm
+  %gend = add i64 %lo, %gr
+  %g1 = icmp ule i64 %idx, %gend
+  %g = and i1 %g1, %bound
+  %nk6 = xor i1 %k6, true
+  %p6a = and i1 %g, %k6
+  %p6b = and i1 %a5, %nk6
+  %a6 = or i1 %p6a, %p6b
+  %off0 = sub i64 %idx, %lo
+  %big = icmp uge i64 %off0, 64
+  %zb = zext i1 %big to i64
+  %mbo = sub i64 %zb, 1
+  %off = and i64 %off0, %mbo
+  %up = getelementptr [16 x [64 x i64]], ptr @__loment_used, i64 0, i64 %cap, i64 %off
+  %uv = load i64, ptr %up
+  %uc = icmp ult i64 %uv, %pm
+  %k7 = icmp eq i64 %kind, 7
+  %c = and i1 %uc, %bound
+  %nk7 = xor i1 %k7, true
+  %p7a = and i1 %c, %k7
+  %p7b = and i1 %a6, %nk7
+  %a7 = or i1 %p7a, %p7b
+  br i1 %a7, label %pass, label %fail
+fail:
+  call void @__loment_abort()
+  unreachable
+pass:
+  %ap = getelementptr [16 x i64], ptr @__loment_audit, i64 0, i64 %cap
+  %av = load i64, ptr %ap
+  %av1 = add i64 %av, 1
+  store i64 %av1, ptr %ap
+  br i1 %k7, label %consume, label %done
+consume:
+  %cv = load i64, ptr %up
+  %cv1 = add i64 %cv, 1
+  store i64 %cv1, ptr %up
+  br label %done
+done:
+  ret void
+}
+'''
+
 #: `print_num` 的十进制转换（`docs/296` §2.7）。**不在 `_IR_RUNTIME` 里** —— 那一段是
 #: 目标无关的 freestanding 文本，而这里有一句 x86 的 `syscall` asm；并进去会让 aarch64
 #: 交叉编译收到一段它不懂的汇编（`loment_p9_test` 当场红）。只在真调用 `print_num` 时发。
@@ -888,6 +1006,49 @@ fn __loment_audit(cap: usize) {
 fn __loment_trap(cap: usize, idx: u64) {
     panic!("loment: capability {} violation at {}", cap, idx);
 }
+
+// ---- 能力域：虚拟钟与十种判决（docs/306-308）----
+#[allow(static_mut_refs)]
+static mut __LOMENT_NOW: u64 = 0;
+#[allow(static_mut_refs)]
+static mut __LOMENT_USED: [[u64; 64]; 16] = [[0; 64]; 16];
+
+fn __loment_tick() {
+    unsafe {
+        __LOMENT_NOW += 1;
+    }
+}
+
+fn __loment_guard2(cap: usize, idx: u64, lo: u64, hi: u64, kind: u64, param: u64, flags: u64) {
+    let pm = if param == 0 { 1 } else { param };
+    let bound = ((flags & 1) != 0 || idx >= lo) && ((flags & 2) != 0 || idx <= hi);
+    let now = unsafe { __LOMENT_NOW };
+    let ok = match kind {
+        1 => !bound,
+        2 => now < pm && bound,
+        3 => {
+            let org = lo + (now / pm) * pm;
+            idx >= org && idx < org + pm && bound
+        }
+        4 => {
+            let lo0 = if now > pm { now - pm } else { 0 };
+            idx >= lo0 && idx <= now
+        }
+        5 => now <= pm && bound,
+        6 => bound && idx <= lo + pm * now,
+        7 => bound && unsafe { __LOMENT_USED[cap][(idx - lo) as usize] } < pm,
+        _ => bound,
+    };
+    if !ok {
+        __loment_trap(cap, idx);
+    }
+    __loment_audit(cap);
+    if kind == 7 {
+        unsafe {
+            __LOMENT_USED[cap][(idx - lo) as usize] += 1;
+        }
+    }
+}
 '''
 
 
@@ -1002,6 +1163,35 @@ class Capability:
     hi: int
     revocable: bool
     line: int
+    #: 时律 / 极性（`docs/306` §2–§5）。`regular` = 一般类闭区间，今天的行为。
+    kind: str = "regular"
+    #: 时律参数（窗口 / 周期 / 预算 / 次数）。`0` = 该律不吃参数。
+    param: int = 0
+    #: 形状的开端：true = 该侧无界（`[()..hi]` / `[lo..()]` / `[()..()]`）。
+    lo_inf: bool = False
+    hi_inf: bool = False
+
+
+#: 时律 / 极性 → 运行期编号（`tools/lomentc.py` 与 `loment/selfhost/codegen.lomt` 必须一致）。
+CAP_KIND_ID = {
+    "regular": 0,
+    "danger": 1,
+    "epoch": 2,
+    "far": 3,
+    "sliding": 4,
+    "decaying": 5,
+    "growing": 6,
+    "consumed": 7,
+}
+#: 吃一个整型参数的律。
+CAP_PARAM_KINDS = ("epoch", "far", "sliding", "decaying", "growing", "consumed")
+
+
+def _cap_shape(c: Capability) -> str:
+    """形状的源码写法，用于诊断（`[()..hi]` / `[lo..()]` / `[()..()]`）。"""
+    lo = "()" if c.lo_inf else str(c.lo)
+    hi = "()" if c.hi_inf else str(c.hi)
+    return f"[{lo}..{hi}]"
 
 
 @dataclass
@@ -1189,6 +1379,16 @@ class Guard:
     cap_id: int = 0   # 解析后填充
     lo: int = 0
     hi: int = 0
+    #: 解析后填充：时律编号、参数、形状标志（bit0 = 下端无界，bit1 = 上端无界）。
+    kind_id: int = 0
+    param: int = 0
+    flags: int = 0
+
+
+@dataclass
+class Tick:
+    """`tick;` —— 推进一次虚拟钟（`docs/308` §2.1）。"""
+    line: int
 
 
 @dataclass
@@ -1448,7 +1648,7 @@ def _resolve_guards(mods, caps_map: dict) -> None:
             if isinstance(s, Guard):
                 info = caps_map.get(s.cap)
                 if info:
-                    s.cap_id, s.lo, s.hi = info
+                    s.cap_id, s.lo, s.hi, s.kind_id, s.param, s.flags = info
             elif isinstance(s, If):
                 walk(s.then)
                 walk(s.otherwise)
@@ -2696,13 +2896,35 @@ class Parser:
         self.expect("punct", ":")
         space = self.ident("能力空间")
         self.expect("punct", "[")
-        lo = self.int_lit()
+        # 形状（`docs/306` §2）：`()` 表示该侧无界。
+        lo_inf = False
+        hi_inf = False
+        if self.at("punct", "("):
+            self.next()
+            self.expect("punct", ")")
+            lo_inf, lo = True, 0
+        else:
+            lo = self.int_lit()
         self.expect("punct", ".")
         self.expect("punct", ".")
-        hi = self.int_lit()
+        if self.at("punct", "("):
+            self.next()
+            self.expect("punct", ")")
+            hi_inf, hi = True, 0
+        else:
+            hi = self.int_lit()
         self.expect("punct", "]")
+        # 时律 / 极性（`docs/306` §3、§5）：可选尾巴词，吃参数时写 `law(N)`。
+        kind = "regular"
+        param = 0
+        if self.peek().kind == "ident" and self.peek().val in CAP_KIND_ID:
+            kind = self.next().val
+            if kind in CAP_PARAM_KINDS:
+                self.expect("punct", "(")
+                param = self.int_lit()
+                self.expect("punct", ")")
         revocable = bool(self.accept("ident", "revocable"))
-        return Capability(name, space, lo, hi, revocable, kw.line)
+        return Capability(name, space, lo, hi, revocable, kw.line, kind, param, lo_inf, hi_inf)
 
     def parse_fn(self, extern: bool = False) -> Func:
         kw = self.expect("ident", "fn")
@@ -2832,6 +3054,10 @@ class Parser:
             self.expect("punct", ")")
             self.expect("punct", ";")
             return Guard(cap, e, t.line)
+        if t.val == "tick":
+            self.next()
+            self.expect("punct", ";")
+            return Tick(t.line)
         if t.val == "let":
             self.next()
             name = self.ident("变量名")
@@ -3709,7 +3935,10 @@ def prepare(mod: Module, deps: list[Module] | None = None) -> tuple[Module, list
     if _has_try(allmods):  # M9: ? 语法糖
         _desugar_try(allmods, funcs_map, structs_map)
     if _has_guard(allmods):  # P4: guard 解析
-        _resolve_guards(allmods, {c.name: (i, c.lo, c.hi) for i, c in enumerate(mod.caps)})
+        _resolve_guards(allmods, {
+            c.name: (i, c.lo, c.hi, CAP_KIND_ID[c.kind], c.param,
+                     (1 if c.lo_inf else 0) | (2 if c.hi_inf else 0))
+            for i, c in enumerate(mod.caps)})
     return mod, deps
 
 
@@ -4895,6 +5124,7 @@ _RUNTIME_SITES: dict[str, str] = {
     # `write`），所以它和 `print` 不同 —— **它会把运行期拖进产物**，`no_runtime` 要拒。
     "print_num": "`print_num`",
     "guard": "`guard`（能力域守卫）",
+    "tick": "`tick`（虚拟钟）",
     # `#778`：真线程要把运行期的锁与活线程计数带进产物（`alloc`/`free`/根表在
     # 线程之间共享）。所以它和 `alloc` 一样，是"会把运行期拖进来"的构造。
     "thread_spawn": "`thread_spawn`（运行期锁）",
@@ -4939,6 +5169,8 @@ def _runtime_sites(toks: list, profile: str = "tur2026.1") -> list[tuple[str, in
         nxt = toks[i + 1] if i + 1 < n else None
         if t.val == "guard" or t.val == "lgc":
             hit = nxt is not None and nxt.kind == "ident"
+        elif t.val == "tick":
+            hit = nxt is not None and nxt.kind == "punct" and nxt.val == ";"
         else:
             hit = nxt is not None and nxt.kind == "punct" and nxt.val == "("
         if hit:
@@ -5398,10 +5630,22 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
         if c.name in seen_caps:
             errs.append(f"{c.line}: 能力 {c.name} 重复声明")
         seen_caps.add(c.name)
-        if c.lo > c.hi:
+        if not (c.lo_inf or c.hi_inf) and c.lo > c.hi:
             errs.append(f"{c.line}: 能力 {c.name} 域下界 {c.lo} > 上界 {c.hi}")
-        if c.lo < 0:
+        if not c.lo_inf and c.lo < 0:
             errs.append(f"{c.line}: 能力 {c.name} 域下界为负")
+        # 时律的参数与容量（`docs/306` §5）：参数必须为正；`consumed` 还要放得下计数器。
+        if c.kind in CAP_PARAM_KINDS and c.param <= 0:
+            errs.append(f"{c.line}: 能力 {c.name} 的 {c.kind} 参数必须为正")
+        if c.kind in CAP_PARAM_KINDS and c.param >= (1 << 24):
+            # 自举侧把 kind/flags/param 打包进表项剩下的 4 字节（param 占 24 位）。
+            errs.append(f"{c.line}: 能力 {c.name} 的 {c.kind} 参数必须小于 2^24")
+        if c.kind == "consumed":
+            if c.lo_inf or c.hi_inf:
+                errs.append(f"{c.line}: 能力 {c.name} 是 consumed，域必须有上下界")
+            elif c.hi - c.lo + 1 > 64:
+                errs.append(
+                    f"{c.line}: 能力 {c.name} 是 consumed，域宽 {c.hi - c.lo + 1} 超过 64")
         for ex in mod.excluded:  # M41: 出界声明的空间不得被能力使用
             space = ex.split(":")[0].strip()
             if space and space == c.space:
@@ -5488,10 +5732,18 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                     _walk_expr(s.expr, fscope, funcs, structs, errs, enums)
                     if cap is None:
                         errs.append(f"{s.line}: guard 引用了未声明的能力 {s.cap}")
-                    elif isinstance(s.expr, IntLit) and not (cap.lo <= s.expr.value <= cap.hi):
-                        errs.append(
-                            f"{s.line}: 能力 {s.cap} 域 [{cap.lo}..{cap.hi}]，索引 {s.expr.value} 越界"
-                        )
+                    elif isinstance(s.expr, IntLit) and cap.kind in ("regular", "danger"):
+                        # 静态可判的只有一般类与危险域：时律依赖虚拟钟，字面量判不了。
+                        # 危险域是**对偶**：落在禁止区里的字面量是错误，不是踩线。
+                        v = s.expr.value
+                        inside = ((cap.lo_inf or v >= cap.lo)
+                                  and (cap.hi_inf or v <= cap.hi))
+                        if cap.kind == "regular" and not inside:
+                            errs.append(
+                                f"{s.line}: 能力 {s.cap} 域 {_cap_shape(cap)}，索引 {v} 越界")
+                        if cap.kind == "danger" and inside:
+                            errs.append(
+                                f"{s.line}: 能力 {s.cap} 是危险域，索引 {v} 落在禁止区内")
                 elif isinstance(s, For):
                     _walk_expr(s.lo, fscope, funcs, structs, errs, enums)
                     _walk_expr(s.hi, fscope, funcs, structs, errs, enums)
@@ -6065,16 +6317,16 @@ def _stmts_rs(stmts: list, indent: int) -> list[str]:
             out.append(f"{pad}{'break' if isinstance(s, Break) else 'continue'};")
         elif isinstance(s, ExprStmt):
             out.append(f"{pad}{_expr_rs(s.expr)};")
-        elif isinstance(s, Guard):  # P4: 能力域守卫 (编译期已查字面量)
-            # **审计只在放行那一支**（`#162`，与 IR 后端的 `gok` 块逐结构对应）:
-            # 越界时 `__loment_trap` 只 panic，一个字节都不写 —— 属性 1 说的
-            # "traps, with no other side effect" 才字面为真。
+        elif isinstance(s, Guard):  # P4: 能力域守卫
+            # 审计仍在**放行那一支**（`#162`）：`__loment_guard2` 判过之后才加一，
+            # 越界路径只 trap。十种域共用这一个判决点（`docs/306`–`docs/308`）。
             out.append(
                 f"{pad}{{ let __i: u64 = ({_expr_rs(s.expr)}) as u64; "
-                f"if __i < {s.lo} || __i > {s.hi} {{ "
-                f"__loment_trap({s.cap_id}, __i); }} else {{ "
-                f"__loment_audit({s.cap_id}); }} }}"
+                f"__loment_guard2({s.cap_id}, __i, {s.lo}, {s.hi}, "
+                f"{s.kind_id}, {s.param}, {s.flags}); }}"
             )
+        elif isinstance(s, Tick):
+            out.append(f"{pad}__loment_tick();")
         else:
             raise AssertionError(f"未知语句 {s!r}")
     return out
@@ -6115,11 +6367,17 @@ def _rust_body(mod: Module, lom_root: Path) -> list[str]:
         out.append("")
     for c in mod.caps:
         up = c.name.upper()
-        out.append(f"// capability {c.name}: {c.space}[{c.lo}..{c.hi}]" + (" revocable" if c.revocable else ""))
+        # 无界侧在描述表里用 0 / u64::MAX 表示（表仍是四元组，`docs/306` §10 的边界）。
+        lo_e = 0 if c.lo_inf else c.lo
+        hi_e = (1 << 64) - 1 if c.hi_inf else c.hi
+        out.append(f"// capability {c.name}: {c.space}{_cap_shape(c)}" + (" revocable" if c.revocable else ""))
         out.append(f'pub const CAP_{up}_SPACE: &str = "{c.space}";')
-        out.append(f"pub const CAP_{up}_LO: u64 = {c.lo};")
-        out.append(f"pub const CAP_{up}_HI: u64 = {c.hi};")
+        out.append(f"pub const CAP_{up}_LO: u64 = {lo_e};")
+        out.append(f"pub const CAP_{up}_HI: u64 = {hi_e};")
         out.append(f"pub const CAP_{up}_REVOCABLE: bool = {'true' if c.revocable else 'false'};")
+        if c.kind != "regular":  # 时律/极性：只在真用时发，旧程序逐字节不变
+            out.append(f"pub const CAP_{up}_KIND: u64 = {CAP_KIND_ID[c.kind]};")
+            out.append(f"pub const CAP_{up}_PARAM: u64 = {c.param};")
         out.append("")
     if mod.caps:  # P4/M35: 域描述表 (内核可迭代)
         out.append("#[derive(Clone, Copy)]")
@@ -6127,7 +6385,9 @@ def _rust_body(mod: Module, lom_root: Path) -> list[str]:
         out.append("pub static CAP_DOMAINS: &[CapDomain] = &[")
         for c in mod.caps:
             rev = "true" if c.revocable else "false"
-            out.append(f'    CapDomain {{ space: "{c.space}", lo: {c.lo}, hi: {c.hi}, revocable: {rev} }},')
+            lo_e = 0 if c.lo_inf else c.lo
+            hi_e = (1 << 64) - 1 if c.hi_inf else c.hi
+            out.append(f'    CapDomain {{ space: "{c.space}", lo: {lo_e}, hi: {hi_e}, revocable: {rev} }},')
         out.append("];")
         out.append("")
     for c in mod.consts:
@@ -6731,8 +6991,15 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         "capabilities": [
             {
                 "name": c.name,
-                "domain": {"space": c.space, "lo": c.lo, "hi": c.hi},
+                # 无界侧在形式对象里用 0 / 4294967295 表示（schema 要求 lo <= hi）。
+                "domain": {"space": c.space,
+                           "lo": 0 if c.lo_inf else c.lo,
+                           "hi": 4294967295 if c.hi_inf else c.hi},
                 "revocable": c.revocable,
+                # **只在非默认时加键**：旧程序的 Potato 产物逐字节不变。
+                **({"shape": {"lo_inf": c.lo_inf, "hi_inf": c.hi_inf}}
+                   if (c.lo_inf or c.hi_inf) else {}),
+                **({"law": c.kind, "param": c.param} if c.kind != "regular" else {}),
             }
             for c in mod.caps
         ],
@@ -10178,31 +10445,17 @@ class _Ir:
             self.label(end_l)
             self.l1_free(s.l1)          # L1：落点就在**循环之后**（体内那次是最后一次用）
             return
-        if isinstance(s, Guard):  # P4/M36+M38: 域检查 + 审计
+        if isinstance(s, Guard):  # P4/M36+M38: 十种域的统一判决
             _, iv = self.expr(s.expr, "u32")
             v64 = self.t()
             self.w(f"{v64} = zext i32 {iv} to i64")
-            ge = self.t()
-            self.w(f"{ge} = icmp uge i64 {v64}, {s.lo}")
-            le = self.t()
-            self.w(f"{le} = icmp ule i64 {v64}, {s.hi}")
-            ok = self.t()
-            self.w(f"{ok} = and i1 {ge}, {le}")
-            gok, gtrap = self.l("gok"), self.l("gtrap")
-            self.w(f"br i1 {ok}, label %{gok}, label %{gtrap}")
-            self.terminated = True
-            self.label(gtrap)
-            self.w("call void @__loment_abort()")
-            self.w("unreachable")
-            self.terminated = True
-            self.label(gok)
-            p = self.t()
-            self.w(f"{p} = getelementptr [16 x i64], ptr @__loment_audit, i32 0, i32 {s.cap_id}")
-            old = self.t()
-            self.w(f"{old} = load i64, ptr {p}")
-            new = self.t()
-            self.w(f"{new} = add i64 {old}, 1")
-            self.w(f"store i64 {new}, ptr {p}")
+            self.w(
+                f"call void @__loment_guard2(i64 {s.cap_id}, i64 {v64}, "
+                f"i64 {s.lo}, i64 {s.hi}, i64 {s.kind_id}, i64 {s.param}, i64 {s.flags})"
+            )
+            return
+        if isinstance(s, Tick):  # docs/308 §2.1: 回边/显式推进虚拟钟
+            self.w("call void @__loment_tick()")
             return
         if isinstance(s, Defer):
             # `docs/296` §2.3：参数**现在**求值并捕获；调用等块出口（`_run_defers`）。
@@ -10678,13 +10931,20 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # 但只在真的调用了它时才出现 —— 它带一句 x86 的 `syscall` asm。
     if "@__loment_print_num" in text_all:
         out.append(_IR_PRINT_NUM)
-    if "@__loment_audit" in text_all:  # P4/M38
+    # 能力域运行时：`guard` 发 `@__loment_guard2`，`tick;` 发 `@__loment_tick`。
+    # **两者都不用时一个字节不发** —— 旧程序的产物逐字节不变。
+    if "@__loment_guard2" in text_all or "@__loment_tick" in text_all:
+        out.append(_IR_GUARD_RUNTIME)
+    if "@__loment_audit" in text_all or "@__loment_guard2" in text_all:  # P4/M38
         out.append("@__loment_audit = internal global [16 x i64] zeroinitializer")
         out.append("")
     if mod.caps:  # P4/M35: 域描述表 (space 名取 FNV-1a 32 位哈希)
         rows = ", ".join(
             "{ i64, i64, i64, i64 } { i64 %d, i64 %d, i64 %d, i64 %d }"
-            % (_fnv1a32(c.space), c.lo, c.hi, 1 if c.revocable else 0)
+            % (_fnv1a32(c.space),
+               0 if c.lo_inf else c.lo,
+               -1 if c.hi_inf else c.hi,
+               1 if c.revocable else 0)
             for c in mod.caps
         )
         out.append(

@@ -2802,10 +2802,10 @@ fn pt_systems(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
     return o;
 }
 
-/// `capabilities`。形状是**定长**的(检查器也是照这个形状读的):
-/// `capability NAME : SPACE [ LO .. HI ] (revocable)?`
-/// 即 NAME=i+1, `:`=i+2, SPACE=i+3, `[`=i+4, LO=i+5, `..`=i+6,i+7, HI=i+8, `]`=i+9,
-/// `revocable`=i+10(可选)。lo/hi 是**解出来的数**(参考实现 `int_lit()`), 所以走 `pt_num`。
+/// `capabilities`。形状是**动态**的（`docs/306` §2、§5）：
+/// `capability NAME : SPACE [ LO|() .. HI|() ] (LAW ( N ))? (revocable)?`。
+/// `()` 占两个 token，`LAW(N)` 占四个。无界那一侧的 `lo`/`hi` 按参考实现发 **0**。
+/// 键的顺序与参考实现一致：name / domain / revocable / shape? / law? / param?。
 fn pt_caps(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32, n: u32) -> u32 {
     let ix: u32 = 0;
     let d: u32 = 0;
@@ -2821,8 +2821,45 @@ fn pt_caps(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32, n: u32) -> u32
                 d = d - 1;
             }
         } else if d == 0 && pt_tis(unit, t, i, "capability") {
+            // 边界：`()` 那一侧无界。
+            let lof: u32 = 0;
+            let hif: u32 = 0;
+            let lot: u32 = i + 5;
+            let j: u32 = i + 5;
+            if pt_tis(unit, t, j, "(") {
+                lof = 1;
+                j = j + 2;
+            } else {
+                j = j + 1;
+            }
+            j = j + 2;                            // '..'
+            let hit: u32 = j;
+            if pt_tis(unit, t, j, "(") {
+                hif = 1;
+                j = j + 2;
+            } else {
+                j = j + 1;
+            }
+            j = j + 1;                            // ']'
+            let law: u32 = 0;
+            let part: u32 = 0;
+            if pt_tis(unit, t, j, "danger") {
+                law = 1;
+                j = j + 1;
+            } else if pt_tis(unit, t, j, "epoch") || pt_tis(unit, t, j, "far")
+                    || pt_tis(unit, t, j, "sliding") || pt_tis(unit, t, j, "decaying")
+                    || pt_tis(unit, t, j, "growing") || pt_tis(unit, t, j, "consumed") {
+                if pt_tis(unit, t, j, "epoch") { law = 2; }
+                if pt_tis(unit, t, j, "far") { law = 3; }
+                if pt_tis(unit, t, j, "sliding") { law = 4; }
+                if pt_tis(unit, t, j, "decaying") { law = 5; }
+                if pt_tis(unit, t, j, "growing") { law = 6; }
+                if pt_tis(unit, t, j, "consumed") { law = 7; }
+                part = j + 2;
+                j = j + 4;                        // LAW ( N )
+            }
             let rev: u32 = 0;
-            if pt_tis(unit, t, i + 10, "revocable") {
+            if pt_tis(unit, t, j, "revocable") {
                 rev = 1;
             }
             o = pt_aelm(out, o, 2, ix);
@@ -2836,15 +2873,54 @@ fn pt_caps(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32, n: u32) -> u32
             o = pt_q(out, o, unit, pt_off(t, i + 3), pt_tlen(t, i + 3));
             o = pt_str(out, o, ",\n");
             o = pt_key(out, o, 4, "lo");
-            o = pt_num(out, o, unit, t, i + 5);
+            if lof == 1 {
+                o = pt_dec(out, o, 0);
+            } else {
+                o = pt_num(out, o, unit, t, lot);
+            }
             o = pt_str(out, o, ",\n");
             o = pt_key(out, o, 4, "hi");
-            o = pt_num(out, o, unit, t, i + 8);
+            if hif == 1 {
+                o = pt_dec(out, o, 4294967295);
+            } else {
+                o = pt_num(out, o, unit, t, hit);
+            }
             o = pt_str(out, o, "\n");
             o = pt_ind(out, o, 3);
             o = pt_str(out, o, "},\n");
             o = pt_key(out, o, 3, "revocable");
             o = pt_bool(out, o, rev);
+            if lof == 1 || hif == 1 {
+                o = pt_str(out, o, ",\n");
+                o = pt_key(out, o, 3, "shape");
+                o = pt_str(out, o, "{\n");
+                o = pt_key(out, o, 4, "lo_inf");
+                o = pt_bool(out, o, lof);
+                o = pt_str(out, o, ",\n");
+                o = pt_key(out, o, 4, "hi_inf");
+                o = pt_bool(out, o, hif);
+                o = pt_str(out, o, "\n");
+                o = pt_ind(out, o, 3);
+                o = pt_str(out, o, "}");
+            }
+            if law != 0 {
+                o = pt_str(out, o, ",\n");
+                o = pt_key(out, o, 3, "law");
+                if law == 1 { o = pt_qs(out, o, "danger"); }
+                if law == 2 { o = pt_qs(out, o, "epoch"); }
+                if law == 3 { o = pt_qs(out, o, "far"); }
+                if law == 4 { o = pt_qs(out, o, "sliding"); }
+                if law == 5 { o = pt_qs(out, o, "decaying"); }
+                if law == 6 { o = pt_qs(out, o, "growing"); }
+                if law == 7 { o = pt_qs(out, o, "consumed"); }
+                o = pt_str(out, o, ",\n");
+                o = pt_key(out, o, 3, "param");
+                if law == 1 {
+                    o = pt_dec(out, o, 0);
+                } else {
+                    o = pt_num(out, o, unit, t, part);
+                }
+            }
             o = pt_str(out, o, "\n");
             o = pt_ind(out, o, 2);
             o = pt_str(out, o, "}");

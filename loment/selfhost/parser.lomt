@@ -602,6 +602,13 @@ fn parse_stmt(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
     if tok_is(src, t, i, "lgc") {
         let act: u32 = i + 1;
         if tok_is(src, t, act, "end") {
+            if tok_is(src, t, act + 1, "{") {
+                // `lgc end { … }`：短暂暂停窗口（`docs/309`），与 start 一样摊平。
+                o = puts(out, o, "(lgc off)");
+                let rb: u64 = parse_stmts(src, t, act + 2, out, o);
+                return pack(unpk_i(rb) + 1,
+                            puts(out, unpk_o(rb), " (lgc close)"));
+            }
             return pack(act + 2, puts(out, o, "(lgc end)"));
         }
         o = puts(out, o, "(lgc start");

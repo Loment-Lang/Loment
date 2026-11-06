@@ -2966,6 +2966,15 @@ class Parser:
                 raise LomError(t.line, t.col, "`lgc` 后面要跟 `start` 或 `end`")
             act = self.next()
             if act.val == "end":
+                if self.accept("punct", "("):
+                    raise LomError(act.line, act.col,
+                                   "`lgc end` 不接受时长 —— 它是暂停。"
+                                   "要短暂暂停写 `lgc end { … }`；要限时收集写 "
+                                   "`lgc start(10ms) { … }`（docs/309）")
+                if self.at("punct", "{"):
+                    body = self.parse_block()
+                    return [Lgc("off_begin", None, t.line), *body,
+                            Lgc("close", None, t.line)]
                 self.expect("punct", ";")
                 return Lgc("pause", None, t.line)
             if act.val != "start":
@@ -6516,6 +6525,10 @@ def _count_gc_control(mod: Module) -> dict:
             n["windows"] += 1
             if s.budget is not None:
                 n["timed_windows"] += 1
+        elif s.action == "off_begin":
+            # 短暂暂停也是"暂停 + 一个窗口"：读者要能看出这份程序有它。
+            n["pauses"] += 1
+            n["windows"] += 1
     total = n["pauses"] + n["resumes"] + n["windows"]
     n["manual_collector"] = (mod.chooses.get("gc", CORE_DEFAULTS["gc"]) == "gc_manual"
                              and total > 0)
@@ -8642,7 +8655,7 @@ def _count_lgc_windows(body: list) -> int:
     def walk(ss: list) -> None:
         nonlocal n
         for s in ss:
-            if isinstance(s, Lgc) and s.action == "begin":
+            if isinstance(s, Lgc) and s.action in ("begin", "off_begin"):
                 n += 1
             elif isinstance(s, If):
                 walk(s.then)
@@ -9023,6 +9036,22 @@ class _Ir:
         if s.action == "close":
             if not self.terminated and self.lgc_open:
                 self._lgc_restore_one(self.lgc_open.pop())
+            return
+        if s.action == "off_begin":
+            # `lgc end { … }`：与 `lgc start { … }` 对称的**短暂暂停**（`docs/309`）。
+            # 保存 on/deadline，块内置 0，`close` 恢复 —— 自动档里"这一段先别收"。
+            if self.terminated:
+                return
+            idx = self.lgc_next
+            self.lgc_next += 1
+            on = self.t()
+            self.w(f"{on} = load i32, ptr @__loment_gc_on")
+            self.w(f"store i32 {on}, ptr %lgc.on.{idx}")
+            dl = self.t()
+            self.w(f"{dl} = load i64, ptr @__loment_gc_deadline")
+            self.w(f"store i64 {dl}, ptr %lgc.dl.{idx}")
+            self.w("store i32 0, ptr @__loment_gc_on")
+            self.lgc_open.append(idx)
             return
         if self.terminated:
             return

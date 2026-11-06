@@ -405,7 +405,7 @@ Running it should print `42 10 9 6 2 3` and `TOUR RESULT: PASS`.
 | `Kind::Big(w)` | A payload-carrying variant pattern; `w` is the binding |
 | `fn sum_slice(xs: [u32])` | A slice parameter; `&xs` passes an array as a slice; `slice_len(xs)` is its length |
 | `guard slots(slot);` | A capability-domain guard (section 5) |
-| `lgc start(2ms) { … }` | **Tur 2026.3**: a GC window — collection is allowed inside, and the budget caps when a *new* collection may start. Also `lgc end;` / `lgc start;` to pause/resume, `lgc start { … }` for an unbudgeted window |
+| `lgc start(2ms) { … }` | **Tur 2026.3**: a GC window — collection is allowed inside, and the budget caps when a *new* collection may start. Also `lgc end;` / `lgc start;` to pause/resume, `lgc end { … }` for a scoped pause, `lgc start { … }` for an unbudgeted window |
 | `fn main()` | The **normal entry point**: no arguments, no return type. The linker's entry stub calls it and exits 0 |
 | `fn _start()` | The **freestanding entry point** (kernel / no-libc): no arguments. If both exist, `_start` wins. When you link it yourself with `-Wl,-e,_start`, end it with `syscall4(60, 0, 0, 0)` - there is no return address |
 | `let xs: [u32; 3] = [1, 2, 3]` | A fixed-size array; `xs[0]` reads and writes |

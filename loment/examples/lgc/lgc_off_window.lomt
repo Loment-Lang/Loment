@@ -1,0 +1,24 @@
+// `lgc end { … }`：短暂暂停窗口（`docs/309`）。自动档里这一块不收集，出块恢复。
+//
+// 与 `lgc start { … }` 对称：两者都保存进入前的 on/deadline，出块写回；
+// 区别只在块内把 on 置 0 还是 1。`return` 提前离开时同样按逆序恢复。
+choose write grammar tur2026.3
+module lgc_off_window
+
+choose gc_auto
+choose runtime
+
+fn _start() {
+    let i: u32 = 0;
+    lgc end {
+        let a: ptr = alloc(16);
+        store8(a, 0, 1);
+        i = load8(a, 0) as u32;
+    }
+    lgc start(3600s) {
+        let b: ptr = alloc(16);
+        store8(b, 0, 2);
+        i = i + (load8(b, 0) as u32);
+    }
+    syscall4(60, i as u64, 0, 0);
+}

@@ -16,6 +16,7 @@
 
 ```rust
 lgc end;                  // 暂停：此后分配不再触发收集（自动两档也一样）
+lgc end { … }             // 词法窗口：块内暂停，出块恢复进入前的状态
 lgc start;                // 恢复：回到本档的默认状态
 lgc start { … }           // 词法窗口：块内开启收集，出块恢复进入前的状态
 lgc start(10ms) { … }     // 同上，外加一个**协作式**时间预算
@@ -62,7 +63,8 @@ otherwise              -> 按原触发条件
 `continue` 不离开函数，窗口保持打开（它们本来就在窗口的块里）。
 
 `lgc end` / `lgc start` 是**显式状态语句**，不做词法恢复：它们改的就是当前状态，
-直到下一次语句或窗口恢复覆盖它。
+直到下一次语句或窗口恢复覆盖它。`lgc end { … }` 则是**短暂暂停窗口**：保存进入前的
+`on`/`deadline`，块内置 0，出块（或 `return`）恢复 —— 自动档里"这一段先别收"的写法。
 
 ### 2.4 时长
 
@@ -122,6 +124,8 @@ otherwise              -> 按原触发条件
 | `lomentc_test::test_lgc_window_saves_and_restores_even_on_return` | 入口块两个槽；`2ms` 折成 2 000 000；`ret` 前恢复 |
 | `loment_elf_test::test_lgc_pause_and_budget_really_gate_collection` | 五格真跑：窗口收、暂停不收、`1ns` 预算不收 |
 | `loment_p8_test`（孪生） | 同一份源，两个实现逐字节一致 |
+| `lomentc_test::test_lgc_end_window_is_a_scoped_pause` | `lgc end { … }` 收下、`end(时长)` 拒；IR 置 0 并在出块恢复；Potato 记成一次暂停 + 一个窗口 |
+| `loment_elf_test::test_lgc_end_window_pauses_and_restores` | 块内 1.4 MB 耗尽；出块后同样 1.4 MB 跑通（恢复真的发生） |
 | `potato_test::test_v21_requires_the_gc_control_counts` | v21 字段的七条反例；v20 对象仍合法 |
 
 ## 5. 没做的（写明）

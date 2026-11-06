@@ -199,6 +199,7 @@ GLOBS = [
     "tools/loment_spec_oracle_test.py",
     "tools/lvm_t3.py", "tools/lvm_t3_test.py",
     "tools/lvm_stability_test.py",
+    "tools/lvm_a0_test.py",
     "tools/lvm_perf_test.py",
     # `lom/net.lom` 那条 L0 契约的判据 (docs/229): 四处对账 + 自证会红。
     # **位置与自举那份 `lomrel.lomt` 对齐**（两份清单的顺序就是它们的顺序）。
@@ -414,6 +415,14 @@ GLOBS = [
     "tools/loment_hotload.py", "tools/loment_hotload_exec.py",
     "tools/loment_hotload_test.py", "tools/loment_hotcore_test.py",
     "tools/loment_hotbuild_test.py",
+    # 源码参数台 (docs/310): Rust 后端 + 无构建步骤前端。位置与 lomrel.lomt 逐行对齐。
+    "editors/loment-studio/README.md", "editors/loment-studio/param-catalog.json",
+    "editors/loment-studio/Cargo.toml", "editors/loment-studio/Cargo.lock",
+    "editors/loment-studio/crates/params/src/*.rs",
+    "editors/loment-studio/crates/cli/src/*.rs",
+    "editors/loment-studio/crates/server/src/*.rs",
+    "editors/loment-studio/web/*", "editors/loment-studio/examples/*",
+    "tools/loment_studio_test.py",
 ]
 
 

@@ -77,7 +77,7 @@ _CALL_RE = re.compile(r"@([-A-Za-z0-9_.]+)\((.*)\)\s*$", re.S)
 class _CFunc:
     """一个函数编译后的样子。`blocks[i][j]` 就是 IR 里第 i 块的第 j 条指令。"""
 
-    __slots__ = ("name", "nslots", "params", "blocks", "labels", "plan")
+    __slots__ = ("name", "nslots", "params", "blocks", "labels", "plan", "rplan")
 
     def __init__(self, name: str) -> None:
         self.name = name
@@ -89,6 +89,10 @@ class _CFunc:
         #: `[(起始下标, 条数, 形状名), ...]`。**不序列化** —— 它完全由 `blocks` 决定，
         #: 紧凑形解出来的 `_CFunc` 在第一次执行时重算，所以缓存与直编拿到同一张计划。
         self.plan: list[list[tuple[int, int, str]]] | None = None
+        #: **A0 的寄存器计划**（`docs/248` §3.1，issue #648）：每块一张
+        #: `_RBlock`，`None` = 这一块没生成代码（含不支持的 op，退回槽机）。
+        #: 与 `plan` 一样**不序列化** —— 它完全由 `blocks` 决定。
+        self.rplan = None
 
 
 class Program:
@@ -530,6 +534,39 @@ class T2Executor(lvm.Executor):
         self.prog = Program(globals_, funcs, externs, fuse, fusion, hot, counters)
 
     # ------------------------------------------------------------ 融合计划
+    # ------------------------------------------------------------ A0
+    def _rplan(self, cf: _CFunc):
+        """取（并第一次算）这个函数的寄存器计划。`False`/`None` = 退回槽机。"""
+        if cf.rplan is None:
+            # 执行体**没有覆盖** `load`/`store` 才把内存访问摊开 —— 覆盖了还摊，
+            # 就是绕过了那个覆盖（故障注入那一类子类会踩这条）。
+            plain = (type(self).load is lvm.Executor.load
+                     and type(self).store is lvm.Executor.store)
+            cf.rplan = _plan_regs(cf, plain)
+        return cf.rplan or None
+
+    def _body_regs(self, cf: _CFunc, vals: list, base: int, rp: list):
+        """**A0 的执行环**：值住在 `R` 里，`vals` 只在块边界被碰。
+
+        `st` = `[bi, prev, nxt, steps, ret]` —— 用列表而不是对象：这是每次调用都要建的
+        唯一一件东西，属性访问在热路径上比下标贵。
+        """
+        nregs = max((rb.nregs for rb in rp), default=0)
+        R: list = [None] * nregs
+        st = [0, -1, base, 0, 0]
+        bi, prev = 0, -1
+        while True:
+            rb = rp[bi]
+            for (s, r) in rb.lin:
+                R[r] = vals[s]
+            st[0], st[1] = bi, prev
+            nbi = rb.fn(self, R, st, vals)
+            if nbi < 0:
+                return st[4]
+            for (r, s) in rb.lout:
+                vals[s] = R[r]
+            prev, bi = bi, nbi
+
     def _plan(self, cf: _CFunc, bi: int, blk: list) -> list:
         """取（并第一次算）这个函数的融合计划。**按块决定**：热点集里没有的块不融。"""
         if cf.plan is None:
@@ -565,6 +602,14 @@ class T2Executor(lvm.Executor):
                     vals[s] = args[i]
                 elif entry:
                     vals[s] = 0                 # T0 对 `_start` 的形参一律给 0
+            # **A0**（`docs/248` §3.1）：没有剖面、没有计数器时走寄存器那条路。
+            # 有剖面时**必须**走槽机 —— 判据 B 比的是剖面逐字节，而记剖面那条路
+            # 是"每条指令一个下标"的形状，A0 会把它换成另一台机器。
+            # 有计数器时同理（#1028 的确定性计数按槽机口径定义）。
+            if self.profile is None and self.counters is None:
+                rp = self._rplan(cf)
+                if rp:
+                    return self._body_regs(cf, vals, base, rp)
             return self._body(cf, vals, base)
         finally:
             self.depth -= 1
@@ -862,6 +907,603 @@ def _run_value(vm: T2Executor, vals: list, op: tuple) -> None:
         vals[d] = vm.syscall(a[0], a[1:])
     else:
         raise lvm.LvmError(f"T2 不认识这个 op: {op!r}")
+
+
+
+# ---------------------------------------------------------------- A0：寄存器分配
+#
+# `docs/248` §3.1 的 **A0**（issue #648）：把"每个 SSA 值一个栈槽"搬进**寄存器**，
+# 栈槽只在**块边界**与**守卫之前**写。这是 T3 的地基缺口 —— 槽机之下 `docs/249` §4
+# 那条承重不变式（"守卫之前，不可重物化的一律落槽"）是**空成立**的，A0 一落地它才
+# 真的要求写（#649）。
+#
+# 做法（Python 宿主的诚实版）：
+#   1. 每个函数一次**活跃性分析**（块级 use/def + 不动点）⇒ 每块 live-in / live-out；
+#   2. 每块一次**线性扫描**，把活跃的槽分到寄存器号；
+#   3. 每块**生成一段 Python**（一次 `exec`）：值住在 `R` 里，块首从 `vals` 读
+#      live-in、块尾把 live-out 写回 `vals`。于是 `vals` 只在边界被碰。
+#
+# ⚠ **整函数一起上或一起不上**：只要有一块含生成器不认识的 op，这个函数就整份退回
+# 槽机（`rplan = False`）。混着跑会让"块边界落槽"从一条不变式变成一堆特例。
+
+class _RBlock:
+    __slots__ = ("nregs", "lin", "lout", "fn", "source", "guard_spills")
+
+    def __init__(self, nregs, lin, lout, fn, source, guard_spills=None) -> None:
+        self.nregs = nregs
+        #: `[(槽, 寄存器)]`：块首从 `vals` 读进来
+        self.lin = lin
+        #: `[(寄存器, 槽)]`：块尾写回 `vals`
+        self.lout = lout
+        self.fn = fn
+        #: 生成的 Python 源码 —— 判据直接读它（"守卫之前有没有落槽"要**看得见**）
+        self.source = source
+        #: 守卫站点 -> 守卫之前落槽的槽号表（#649 的判据读它）
+        self.guard_spills = guard_spills or {}
+
+
+def _slots_of(op) -> list[int]:
+    """这条指令**读**了哪些槽（kind 0 的操作数）。"""
+    c = op[0]
+    if c == _OP_ARITH:
+        return [x[1] for x in (op[3], op[4]) if x[0] == 0]
+    if c == _OP_LOAD:
+        return [op[2][1]] if op[2][0] == 0 else []
+    if c == _OP_STORE:
+        return [x[1] for x in (op[2], op[3]) if x[0] == 0]
+    if c == _OP_ALLOCA:
+        return []
+    if c == _OP_GEP:
+        out = [op[1][1]] if op[1][0] == 0 else []
+        out += [io_[1] for (io_, _sz) in op[3] if io_[0] == 0]
+        return out
+    if c == _OP_GEP_DYN:
+        out = [op[1][1]] if op[1][0] == 0 else []
+        out += [o[1] for o in op[3] if o[0] == 0]
+        return out
+    if c == _OP_ICMP:
+        return [x[1] for x in (op[4], op[5]) if x[0] == 0]
+    if c == _OP_DIV:
+        return [x[1] for x in (op[3], op[4]) if x[0] == 0]
+    if c == _OP_CAST:
+        return [op[4][1]] if op[4][0] == 0 else []
+    if c == _OP_EXTRACT:
+        return [op[1][1]] if op[1][0] == 0 else []
+    if c == _OP_INSERT:
+        return [x[1] for x in (op[2], op[3]) if x[0] == 0]
+    if c == _OP_RMW:
+        return [x[1] for x in (op[2], op[3]) if x[0] == 0]
+    if c == _OP_CALL:
+        return [o[1] for o in op[2] if o[0] == 0]
+    if c == _OP_ASM:
+        return [o[1] for o in op[1] if o[0] == 0]
+    if c == _OP_PHI:
+        return [v[1] for v in op[2].values() if v[0] == 0]
+    if c == _OP_BR:
+        return [op[1][1]] if op[1] is not None and op[1][0] == 0 else []
+    if c == _OP_SWITCH:
+        return [op[1][1]] if op[1][0] == 0 else []
+    if c == _OP_RET:
+        return [op[1][1]] if op[1] is not None and op[1][0] == 0 else []
+    # ---- T3 的三条（`tools/lvm_t3.py`）。编号是那边写死的 101/102/103，这里只认形状：
+    # 摊平段里的 op 也算**读**，否则它们的来源槽会被分配漏掉。
+    if c == 102:                                    # _OP_COPY
+        return [op[2][1]] if op[2][0] == 0 else []
+    if c == 103:                                    # _OP_GUARDED_CALL
+        out = [op[1][1]] if op[1][0] == 0 else []
+        for o in op[4]:
+            out += _slots_of(o)
+        return out
+    return []
+
+
+def _dest_of(op) -> int:
+    """这条指令**写**哪个槽（-1 = 不写）。"""
+    c = op[0]
+    if c in (_OP_ARITH, _OP_LOAD, _OP_GEP, _OP_GEP_DYN, _OP_ICMP, _OP_DIV,
+             _OP_CAST, _OP_EXTRACT, _OP_INSERT, _OP_RMW, _OP_ASM, _OP_ALLOCA):
+        return op[-1]
+    if c == _OP_CALL:
+        return op[3]
+    if c == _OP_PHI:
+        return op[1]
+    if c == 101:                                    # _OP_STORE_CONST
+        return op[1]
+    if c == 102:                                    # _OP_COPY
+        return op[1]
+    if c == 103:                                    # _OP_GUARDED_CALL
+        last = op[4][-1] if op[4] else None
+        return last[1] if last is not None and last[0] in (101, 102) else -1
+    return -1
+
+
+def _succs(blk) -> list[int]:
+    if not blk:
+        return []
+    op = blk[-1]
+    if op[0] == _OP_BR:
+        return [op[2]] if op[1] is None else [op[2], op[3]]
+    if op[0] == _OP_SWITCH:
+        return [b for (_t, _v, b) in op[2]] + [op[3]]
+    return []
+
+
+def _live(cf: "_CFunc") -> tuple[list[set], list[set]]:
+    """块级活跃性（use/def + 不动点）。**只算到终结指令** —— 之后的 `_OP_DEAD` 不算。"""
+    nb = len(cf.blocks)
+    use = [set() for _ in range(nb)]
+    defs = [set() for _ in range(nb)]
+    for bi, blk in enumerate(cf.blocks):
+        seen_def: set[int] = set()
+        for op in blk:
+            for s in _slots_of(op):
+                if s not in seen_def:
+                    use[bi].add(s)
+            d = _dest_of(op)
+            if d >= 0:
+                seen_def.add(d)
+                defs[bi].add(d)
+            if op[0] in (_OP_BR, _OP_RET, _OP_SWITCH, _OP_UNREACH):
+                break
+    #: **入边上的 phi 操作数**：块 B 的 phi 从 P 进来时读的那个值，在 P 的出口是活的 ——
+    #: 但它不是 B 里"被读"（B 一开始就把它定义了），所以 `use` 抓不到它。少了这一条，
+    #: 前驱就不会把它写回 `vals`，目标块去优化/重入时读到的是上一轮残留的值
+    #: （`free` 的空闲链就是这么崩的：`%prev = phi [0,%link],[%cur,%lcont]`）。
+    edge = [set() for _ in range(nb)]
+    for bi, blk in enumerate(cf.blocks):
+        for op in blk:
+            if op[0] != _OP_PHI:
+                break
+            for (pred, val) in op[2].items():
+                if val[0] == 0 and 0 <= pred < nb:
+                    edge[pred].add(val[1])
+    lin = [set() for _ in range(nb)]
+    lout = [set() for _ in range(nb)]
+    changed = True
+    while changed:
+        changed = False
+        for bi in range(nb - 1, -1, -1):
+            out: set[int] = set(edge[bi])
+            for s in _succs(cf.blocks[bi]):
+                out |= lin[s]
+            new = use[bi] | (out - defs[bi])
+            if new != lin[bi] or out != lout[bi]:
+                lin[bi], lout[bi] = new, out
+                changed = True
+    return lin, lout
+
+
+def _must(cf) -> list[set]:
+    """每块入口**一定已经写过**的槽（正向 must 分析，∩ 过前驱）。
+
+    只为一件事服务：**省掉"读未定义的值"那两行**。可能没写的槽仍然逐次检查 —— 那是
+    T0 的可见行为（读到才报），不能因为"大多数情况下写过"就把它变成"块首统一报"。
+    """
+    nb = len(cf.blocks)
+    preds: list[list[int]] = [[] for _ in range(nb)]
+    for bi, blk in enumerate(cf.blocks):
+        for s in _succs(blk):
+            if bi not in preds[s]:
+                preds[s].append(bi)
+    defs = []
+    for blk in cf.blocks:
+        d = set()
+        for op in blk:
+            x = _dest_of(op)
+            if x >= 0:
+                d.add(x)
+        defs.append(d)
+    top = set(range(cf.nslots))
+    must_in = [set(top) for _ in range(nb)]
+    must_in[0] = set(cf.params)
+    changed = True
+    while changed:
+        changed = False
+        for bi in range(nb):
+            if bi == 0:
+                new = set(cf.params)
+            elif not preds[bi]:
+                new = set(top)
+            else:
+                new = set(top)
+                for p in preds[bi]:
+                    new &= must_in[p] | defs[p]
+            if new != must_in[bi]:
+                must_in[bi] = new
+                changed = True
+    return must_in
+
+
+def _assign(lin: set, defs_use: list[tuple[int, int, int]], nops: int,
+            live_out: set) -> dict[int, int]:
+    """线性扫描：槽 -> 寄存器号。`defs_use` = `[(槽, 首, 尾)]`。"""
+    starts = []
+    for s in lin:
+        starts.append((0, s))
+    for (s, a, _b) in defs_use:
+        if s not in lin:
+            starts.append((a, s))
+    end_of = {s: b for (s, _a, b) in defs_use}
+    for s in live_out:
+        end_of[s] = nops + 1
+    intervals = []
+    for s in set(list(lin) + [s for (s, _a, _b) in defs_use] + list(live_out)):
+        a = 0 if s in lin else min([x for (t, x, _y) in defs_use if t == s] or [0])
+        b = end_of.get(s, nops)
+        intervals.append((a, b, s))
+    intervals.sort()
+    active: list[tuple[int, int]] = []          # (尾, 寄存器)
+    free: list[int] = []
+    rmap: dict[int, int] = {}
+    nxt = 0
+    for (a, b, s) in intervals:
+        active = [(e, r) for (e, r) in active if e >= a]
+        used = {r for (_e, r) in active}
+        free = [r for r in range(nxt) if r not in used]
+        r = free[0] if free else nxt
+        if r == nxt:
+            nxt += 1
+        rmap[s] = r
+        active.append((b, r))
+    return rmap
+
+#: 生成器**不认识**的 op ⇒ 整个函数退回槽机。`ERROR`/`DEAD` 只出现在坏 IR 或死代码里，
+#: 它们的行为（走到才报错）由槽机那条路原样保留。
+_GEN_UNSUPPORTED = frozenset((_OP_ERROR, _OP_DEAD))
+
+
+class _Gen:
+    """一个块的源码生成器。**只拼字符串**，编译交给 `_plan_regs` 一次 `exec`。"""
+
+    def __init__(self, cf, bi: int, rmap: dict, inline_mem: bool = True) -> None:
+        self.cf, self.bi, self.rmap = cf, bi, rmap
+        #: 把 `load`/`store` 摊进生成代码（省掉一次方法查找 + 一次 `_is_agg`）。
+        #: 只在执行体**没有**覆盖它们时开 —— 覆盖了还摊，就是绕过了覆盖。
+        self.inline_mem = inline_mem
+        self.lines: list[str] = []
+        self.tmp = 0
+        #: `read()` 生成的行按这个缩进走 —— phi 的嵌套分支里比块体深一层。
+        self.indent = 4
+        #: 这一刻**一定已经写过**的槽（`_must` 的块入口集合 + 本块已发的定义）。
+        self.assigned: set = set()
+        #: 本块**全部**被分配了寄存器的槽（守卫之前全部落槽 —— 保守，见 #649）。
+        self.all_slots: list = []
+        self.fns: list = []          # ICMP 的谓词（不能写进源码）
+        self.guard_spills: dict = {}
+        #: 块**入口**时活着的槽（`lin`）。phi 的操作数是**入边上的值**，只有它们才在
+        #: 块首的寄存器里 —— 本块自己定义的槽（同块的 phi 目标）那时还在 `vals` 里。
+        self.in_slots: set = set()
+
+    def t(self) -> str:
+        self.tmp += 1
+        return f"v{self.tmp}"
+
+    def read(self, op) -> str:
+        """一个操作数 -> 一个 Python 表达式（槽则先落一个临时，带未定义检查）。"""
+        if op[0] == 0:
+            r = self.rmap[op[1]]
+            if op[1] in self.assigned:
+                return f"R[{r}]"
+            name = op[2] if len(op) > 2 else f"%{op[1]}"
+            n = self.t()
+            pad = " " * self.indent
+            self.lines.append(f"{pad}{n} = R[{r}]")
+            self.lines.append(f"{pad}if {n} is _UNDEF: raise lvm.LvmError('读未定义的值 {name}')")
+            return n
+        if op[0] == 1:
+            return repr(op[1])
+        n = self.t()
+        self.lines.append(" " * self.indent + f"{n} = bytes({op[1]})")
+        return n
+
+    def read_entry(self, op) -> str:
+        """phi 的操作数：**入边上的值**。只有 `lin` 里的槽才在块首寄存器里，其余读 `vals`。"""
+        if op[0] != 0:
+            return self.read(op)
+        s = op[1]
+        name = op[2] if len(op) > 2 else f"%{s}"
+        pad = " " * self.indent
+        n = self.t()
+        if s in self.in_slots and s in self.rmap:
+            self.lines.append(f"{pad}{n} = R[{self.rmap[s]}]")
+        else:
+            self.lines.append(f"{pad}{n} = vals[{s}]")
+        if s not in self.assigned:
+            self.lines.append(
+                f"{pad}if {n} is _UNDEF: raise lvm.LvmError('读未定义的值 {name}')")
+        return n
+
+    def emit(self, op, j: int):
+        """发一条指令；返回终结指令的 `return` 表达式（None = 继续下一条）。"""
+        cf, name = self.cf, self.cf.name
+        c = op[0]
+        lab = cf.labels[self.bi]
+        _d0 = _dest_of(op)
+        if _d0 >= 0:
+            self.assigned.add(_d0)
+        self.lines.append("    steps += 1")
+        self.lines.append("    if steps > cap: raise lvm.LvmError("
+                          f"'步数上限 %d：{name} 的块 {lab}，第 {j} 条' % cap)")
+        if c == _OP_ARITH:
+            _c, opn, ty, a, b, d = op
+            x, y = self.read(a), self.read(b)
+            # 非移位的六条**摊开**：`arith` 那条路唯一多做的是"负移位量"检查，而它只对
+            # 移位有意义。摊开省一次 Python 调用（热路径上每条算术一次）。
+            if opn in ("add", "sub", "mul", "and", "or", "xor"):
+                sym = {"add": "+", "sub": "-", "mul": "*", "and": "&",
+                       "or": "|", "xor": "^"}[opn]
+                self.lines.append(f"    R[{self.rmap[d]}] = ({x} {sym} {y}) & {_mask_int(ty)}")
+            else:
+                self.lines.append(f"    R[{self.rmap[d]}] = lvm.arith({opn!r}, "
+                                  f"{x}, {y}, {ty!r})")
+            return None
+        if c == _OP_LOAD:
+            _c, ty, a, d = op
+            addr = self.read(a)
+            n = lomelf.size_of(ty)
+            if self.inline_mem:
+                if lvm._is_agg(ty):
+                    self.lines.append(f"    R[{self.rmap[d]}] = mem.get({addr}, {n})")
+                else:
+                    self.lines.append(f"    R[{self.rmap[d]}] = int.from_bytes("
+                                      f"mem.get({addr}, {n}), 'little')")
+            else:
+                self.lines.append(f"    R[{self.rmap[d]}] = vm.load({ty!r}, {addr})")
+            return None
+        if c == _OP_STORE:
+            _c, ty, v, a = op
+            addr, val = self.read(a), self.read(v)
+            n = lomelf.size_of(ty)
+            if self.inline_mem:
+                if lvm._is_agg(ty):
+                    self.lines.append(f"    mem.put({addr}, {val} if isinstance({val}, bytes) "
+                                      f"else bytes({val}))")
+                else:
+                    self.lines.append(f"    mem.put({addr}, (int({val}) & {_mask_int(ty)})."
+                                      f"to_bytes({n}, 'little'))")
+            else:
+                self.lines.append(f"    vm.store({ty!r}, {addr}, {val})")
+            return None
+        if c == _OP_ALLOCA:
+            _c, size, d = op
+            self.lines.append(f"    R[{self.rmap[d]}] = nxt")
+            self.lines.append(f"    nxt += {size}")
+            return None
+        if c == _OP_GEP:
+            _c, base, const, stages, d = op
+            expr = self.read(base)
+            parts = [str(const)]
+            for (io_, size) in stages:
+                parts.append(f"({self.read(io_)} * {size})")
+            self.lines.append(f"    R[{self.rmap[d]}] = {expr} + " + " + ".join(parts))
+            return None
+        if c == _OP_GEP_DYN:
+            _c, base, ty, i_ops, text, d = op
+            outs = ", ".join(self.read(o) for o in i_ops)
+            self.lines.append(f"    R[{self.rmap[d]}] = {self.read(base)} + "
+                              f"lvm.gep_offset({ty!r}, [{outs}], {text!r})")
+            return None
+        if c == _OP_ICMP:
+            _c, fn, sg, ty, a, b, d = op
+            self.fns.append(fn)
+            k = len(self.fns) - 1
+            x, y = self.read(a), self.read(b)
+            if sg:
+                x, y = f"lvm.signed({x}, {ty!r})", f"lvm.signed({y}, {ty!r})"
+            self.lines.append(f"    R[{self.rmap[d]}] = 1 if _F[{k}]({x}, {y}) else 0")
+            return None
+        if c == _OP_DIV:
+            _c, kind, ty, a, b, d = op
+            self.lines.append(f"    R[{self.rmap[d]}] = _div({kind!r}, {ty!r}, "
+                              f"{self.read(a)}, {self.read(b)})")
+            return None
+        if c == _OP_CAST:
+            _c, kind, fty, tty, a, d = op
+            v = self.read(a)
+            if kind == "trunc":
+                e = f"lvm.mask({v}, {tty!r})"
+            elif kind == "zext":
+                e = f"lvm.zeroext({v}, {fty!r})"
+            elif kind == "sext":
+                e = f"(lvm.signed({v}, {fty!r}) & {_mask_int(tty)})"
+            else:
+                e = v
+            self.lines.append(f"    R[{self.rmap[d]}] = {e}")
+            return None
+        if c == _OP_EXTRACT:
+            _c, a, off, fty, d = op
+            self.lines.append(f"    R[{self.rmap[d]}] = _extract({self.read(a)}, {off}, {fty!r})")
+            return None
+        if c == _OP_INSERT:
+            _c, ty, a, b, off, fty, d = op
+            self.lines.append(f"    R[{self.rmap[d]}] = _insert({ty!r}, {self.read(a)}, "
+                              f"{self.read(b)}, {off}, {fty!r})")
+            return None
+        if c == _OP_RMW:
+            _c, ty, a, v, d = op
+            self.lines.append(f"    R[{self.rmap[d]}] = _rmw(vm, {ty!r}, "
+                              f"{self.read(a)}, {self.read(v)})")
+            return None
+        if c == _OP_CALL:
+            _c, cname, a_ops, d = op
+            if cname == "llvm.trap":
+                self.lines.append(f"    raise lvm._Trap(({name!r}, {lab!r}, {j}))")
+                return None
+            n = self.t()
+            self.lines.append(f"    {n} = vm.prog.cfunc({cname!r})")
+            self.lines.append(f"    if len({n}.params) != {len(a_ops)}: "
+                              "raise lvm.LvmError('实参个数与形参不符')")
+            args = ", ".join(self.read(o) for o in a_ops)
+            if d >= 0:
+                self.lines.append(f"    R[{self.rmap[d]}] = vm.call_t2({n}, [{args}])")
+            else:
+                self.lines.append(f"    vm.call_t2({n}, [{args}])")
+            return None
+        if c == _OP_ASM:
+            _c, a_ops, d = op
+            vals = [self.read(o) for o in a_ops]
+            head = vals[0]
+            rest = ", ".join(vals[1:])
+            self.lines.append(f"    R[{self.rmap[d]}] = vm.syscall({head}, [{rest}])")
+            return None
+        if c == 101:                                     # T3：_OP_STORE_CONST
+            self.lines.append(f"    R[{self.rmap[op[1]]}] = {op[2]!r}")
+            return None
+        if c == 102:                                     # T3：_OP_COPY
+            self.lines.append(f"    R[{self.rmap[op[1]]}] = {self.read(op[2])}")
+            return None
+        if c == 103:                                     # T3：_OP_GUARDED_CALL
+            _c, arg_op, const, cname, inline, site = op
+            # **#649 的不变式，落地在这里**：守卫之前，本块所有活着的值都写回槽。
+            # 去优化那条路（`_one` 通用调用 / 摊平段）只看 `vals`，所以这一串是承重的。
+            # ⚠ **只落这一刻已经写过的**（`assigned`）：把本块后面才定义的槽也落下去，
+            # 写进 `vals` 的是 `None`/未初始化 —— 那不是"保守"，那是**写坏帧**。
+            live_now = [(sl, self.rmap[sl]) for sl in sorted(self.assigned) if sl in self.rmap]
+            spill = []
+            for (slot, reg) in live_now:
+                self.lines.append(f"    vals[{slot}] = R[{reg}]")
+                spill.append(slot)
+            self.guard_spills[site] = spill
+            n = self.t()
+            self.lines.append(f"    {n} = vm._a0_guarded(_CF, {self.bi}, {j}, vals, nxt)")
+            self.lines.append(f"    nxt = {n}")
+            # 守卫那条路会把结果写进 `vals` —— 寄存器**整个重装**（块内静态可知）。
+            for (slot, reg) in live_now:
+                self.lines.append(f"    R[{reg}] = vals[{slot}]")
+            return None
+        if c == _OP_PHI:
+            return None                      # 块首统一做（并行）
+        if c == _OP_BR:
+            _c, cond, t, f = op
+            if cond is None:
+                return str(t)
+            return f"({t} if {self.read(cond)} else {f})"
+        if c == _OP_SWITCH:
+            _c, v, cases, dft = op
+            n = self.read(v)
+            for k, (cty, cval, cbi) in enumerate(cases):
+                kw = "if" if k == 0 else "elif"
+                self.lines.append(f"    {kw} lvm.mask({n}, {cty!r}) == {cval}: return {cbi}")
+            return str(dft)
+        if c == _OP_RET:
+            v = "0" if op[1] is None else self.read(op[1])
+            self.lines.append(f"    st[4] = {v}")
+            return "-1"
+        if c == _OP_UNREACH:
+            # 非返回的终结：`raise` 之后那一行 `return -9` 是死代码，只为让生成函数
+            # 在语法上有一个返回表达式（harness 只认 >= 0 的块号与 -1 的"已返回"）。
+            self.lines.append("    raise lvm.LvmError('执行到 unreachable')")
+            return "-9"
+        return "UNSUPPORTED"
+
+    def phi(self) -> None:
+        blk = self.cf.blocks[self.bi]
+        ops = []
+        for op in blk:
+            if op[0] != _OP_PHI:
+                break
+            ops.append(op)
+        if not ops:
+            return
+        pend = []
+        for (c, d, mapping) in ops:
+            n = self.t()
+            ks = sorted(mapping)
+            self.lines.append(f"    if st[1] == " + " or st[1] == ".join(str(k) for k in ks) + ":")
+            for i, k in enumerate(ks):
+                kw = "if" if i == 0 else "elif"
+                self.lines.append(f"        {kw} st[1] == {k}:")
+                self.indent = 12
+                self.lines.append(f"            {n} = {self.read_entry(mapping[k])}")
+                self.indent = 4
+            self.lines.append("    else:")
+            self.lines.append(
+                f"        raise lvm.LvmError('{self.cf.name}: phi 没有来自块 %d 的入边' % st[1])")
+            pend.append((self.rmap[d], n))
+        for (r, n) in pend:
+            self.lines.append(f"    R[{r}] = {n}")
+
+
+def _mask_int(ty: str) -> int:
+    n = lomelf.size_of(ty)
+    return (1 << (n * 8)) - 1
+
+
+def _extract(agg, off: int, fty: str):
+    raw = agg[off:off + lomelf.size_of(fty)]
+    return raw if lvm._is_agg(fty) else int.from_bytes(raw, "little")
+
+
+def _insert(ty: str, agg, val, off: int, fty: str) -> bytes:
+    buf = bytearray(agg if isinstance(agg, bytes) else b"\0" * lomelf.size_of(ty))
+    n = lomelf.size_of(fty)
+    buf[off:off + n] = (val if isinstance(val, bytes)
+                        else (int(val) & ((1 << (n * 8)) - 1)).to_bytes(n, "little"))
+    return bytes(buf)
+
+
+def _rmw(vm, ty: str, addr: int, val):
+    old = vm.load(ty, addr)
+    vm.store(ty, addr, lvm.mask(old + val, ty))
+    return old
+
+
+def _plan_regs(cf, inline_mem: bool = True):
+    """给一个函数生成寄存器计划。返回 `[_RBlock|None, ...]` 或 `False`（整份退回槽机）。"""
+    for blk in cf.blocks:
+        for op in blk:
+            if op[0] in _GEN_UNSUPPORTED:
+                return False
+    lin, lout = _live(cf)
+    must = _must(cf)
+    plans = []
+    for bi, blk in enumerate(cf.blocks):
+        first: dict = {}
+        last: dict = {}
+        for j, op in enumerate(blk):
+            for s in _slots_of(op):
+                last[s] = j
+            d = _dest_of(op)
+            if d >= 0 and d not in first:
+                first[d] = j
+        du = [(s, a, last.get(s, len(blk))) for (s, a) in first.items()]
+        rmap = _assign(lin[bi], du, len(blk), lout[bi])
+        nregs = (max(rmap.values()) + 1) if rmap else 0
+        g = _Gen(cf, bi, rmap, inline_mem)
+        g.assigned = set(must[bi])
+        g.in_slots = set(lin[bi])
+        # 守卫之前要落槽的**全部**寄存器（保守：不区分可重物化与否 —— 见 #649）
+        g.all_slots = sorted((sl, rg) for (sl, rg) in rmap.items())
+        g.phi()
+        nxt_ret = None
+        for j, op in enumerate(blk):
+            if op[0] == _OP_PHI:
+                continue
+            r = g.emit(op, j)
+            if r == "UNSUPPORTED":
+                return False
+            if r is not None:
+                nxt_ret = r
+                break
+        if nxt_ret is None:
+            return False
+        src = ["def _b(vm, R, st, vals):",
+               "    cap = lvm.STEP_CAP",
+               "    steps = st[3]",
+               "    nxt = st[2]",
+               "    mem = vm.mem"] + g.lines + [
+               "    st[2] = nxt",
+               "    st[3] = steps",
+               f"    return {nxt_ret}"]
+        source = "\n".join(src)
+        gns = {"lvm": lvm, "lomelf": lomelf, "_UNDEF": _UNDEF, "_F": g.fns,
+               "_div": _do_div, "_extract": _extract, "_insert": _insert, "_rmw": _rmw,
+               "_CF": cf}
+        exec(compile(source, f"<lvm-a0 {cf.name}#{bi}>", "exec"), gns)   # noqa: S102
+        plans.append(_RBlock(nregs, [(s, rmap[s]) for s in lin[bi]],
+                             [(rmap[s], s) for s in lout[bi]],
+                             gns["_b"], source, g.guard_spills))
+    return plans
 
 
 # ---------------------------------------------------------------- 前门

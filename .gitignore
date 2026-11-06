@@ -1,5 +1,7 @@
 /target
 /kernel/target
+# Loment Studio 的 Rust 构建目录（docs/310）
+/editors/loment-studio/target/
 /kernel/fujo-kernel.bin
 /kernel/fujo-kernel-t.bin
 /kernel/boot_blob.bin

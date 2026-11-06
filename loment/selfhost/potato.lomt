@@ -2061,6 +2061,9 @@ fn pt_lgc_counts(unit: ptr, t: ptr, lo: u32, hi: u32) -> u64 {
         if pt_tis(unit, t, i, "lgc") && pt_kind(t, i + 1) == 0 {
             if pt_tis(unit, t, i + 1, "end") {
                 np = np + 1;
+                if pt_tis(unit, t, i + 2, "{") {
+                    nw = nw + 1;              // 短暂暂停也是一个窗口（docs/309）
+                }
             }
             if pt_tis(unit, t, i + 1, "start") {
                 if pt_tis(unit, t, i + 2, "(") {

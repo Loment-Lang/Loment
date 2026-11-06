@@ -12,7 +12,7 @@
 
 
 lomc_test 25
-lomentc_test 201
+lomentc_test 202
 lspe_test 14
 potato_test 17
 loment_ct_test 2
@@ -48,7 +48,7 @@ loment_json_test 4
 loment_pkg_test 3
 loment_lomc_test 4
 loment_lsp_test 23
-loment_elf_test 83
+loment_elf_test 84
 loment_pe_test 17
 loment_genesis_test 8
 loment_status_test 4
@@ -90,6 +90,7 @@ loment_megaproject_test 8
 loment_state_test 8
 lvm_profile_test 4
 lvm_t2_test 7
+lvm_a0_test 6
 lvm_cache_test 6
 lvm_fusion_test 7
 lvm_compact_test 11
@@ -116,3 +117,6 @@ loment_hotload_test 13
 loment_hotcore_test 7
 loment_hotbuild_test 4
 loment_dev_test 7
+
+# 源码参数台 (docs/310)
+loment_studio_test 7

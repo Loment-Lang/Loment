@@ -9535,6 +9535,33 @@ fn emit_lgc_slots(s: ptr, out: ptr, n: u32) -> u32 {
     return 0;
 }
 
+/// `lgc end { … }` 的入口：与 `lgc_begin` 同形（保存 on/deadline、压栈），
+/// 但块内置 **0**、不设预算（`docs/309`）。
+fn lgc_begin_off(s: ptr, out: ptr) -> u32 {
+    if load32(s, 476) != 0 {
+        return 0;
+    }
+    let idx: u32 = load32(s, CG_LGC_N);
+    store32(s, CG_LGC_N, idx + 1);
+    let d: u32 = load32(s, CG_LGC_D);
+    store32(s, CG_LGC_STK + d * 4, idx);
+    store32(s, CG_LGC_D, d + 1);
+    emit_str(s, out, "  ");
+    let on: u32 = new_temp(s, out);
+    emit_str(s, out, " = load i32, ptr @__loment_gc_on\n  store i32 %t");
+    emit_dec(s, out, on);
+    emit_str(s, out, ", ptr %lgc.on.");
+    emit_dec(s, out, idx);
+    emit_str(s, out, "\n  ");
+    let dl: u32 = new_temp(s, out);
+    emit_str(s, out, " = load i64, ptr @__loment_gc_deadline\n  store i64 %t");
+    emit_dec(s, out, dl);
+    emit_str(s, out, ", ptr %lgc.dl.");
+    emit_dec(s, out, idx);
+    emit_str(s, out, "\n  store i32 0, ptr @__loment_gc_on\n");
+    return 0;
+}
+
 /// 打开一个窗口：存下进入前的 on / deadline，置 on=1，按需写预算。
 /// 与参考实现 `_Ir._lgc_stmt` 的 `begin` 分支同序、同 temp 号。
 fn lgc_begin(s: ptr, out: ptr, hasb: u32, bval: u64) -> u32 {
@@ -9630,6 +9657,16 @@ fn lgc_restore_all(s: ptr, out: ptr) -> u32 {
 fn lgc_stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
     let act: u32 = j + 1;
     if tok_is(src, toks, act, "end") {
+        if tok_is(src, toks, act + 1, "{") {
+            // `lgc end { … }`：短暂暂停窗口（`docs/309`）。
+            lgc_begin_off(s, out);
+            let m: u32 = act + 2;
+            while !tok_is(src, toks, m, "}") && tok_kind(toks, m) != 4 {
+                m = stmt(s, out, src, toks, m, ret);
+            }
+            lgc_close(s, out);
+            return m + 1;
+        }
         if load32(s, 476) == 0 {
             emit_str(s, out, "  store i32 0, ptr @__loment_gc_on\n");
         }
@@ -9970,6 +10007,11 @@ fn lgc_windows(src: ptr, toks: ptr, b: u32, e: u32) -> u32 {
     let n: u32 = 0;
     let i: u32 = b;
     while i < e && tok_kind(toks, i) != 4 {
+        // `lgc end { … }` 也是窗口（短暂暂停），入口块同样要两个槽（`docs/309`）。
+        if tok_kind(toks, i) == 0 && tok_is(src, toks, i, "lgc")
+                && tok_is(src, toks, i + 1, "end") && tok_is(src, toks, i + 2, "{") {
+            n = n + 1;
+        }
         if tok_kind(toks, i) == 0 && tok_is(src, toks, i, "lgc")
                 && tok_is(src, toks, i + 1, "start") {
             let k: u32 = i + 2;

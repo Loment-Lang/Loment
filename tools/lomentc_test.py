@@ -5609,6 +5609,7 @@ def test_domains_selfhost_twin():
         deps = lomentc.resolve_deps(mod, ROOT, p.parent, entry=p)
         assert lomentc.check(mod, deps=deps) == [], lomentc.check(mod, deps=deps)[:2]
         want = lomentc.emit_llvm(mod, ROOT, deps)
+        want_p = lomentc.emit_potato(mod, ROOT, deps)
     stage1 = loment_dist.build_stage1()
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "d.lomt"
@@ -5616,11 +5617,18 @@ def test_domains_selfhost_twin():
         r = subprocess.run([str(stage1), str(p)], cwd=str(ROOT), capture_output=True,
                            text=True, encoding="utf-8", errors="replace",
                            shell=False, timeout=600)
+        rp = subprocess.run([str(stage1), str(p), "--emit-potato"], cwd=str(ROOT),
+                            capture_output=True, text=True, encoding="utf-8",
+                            errors="replace", shell=False, timeout=600)
     assert r.returncode == 0, f"stage1 编译十种域失败: {r.stderr[-600:]}"
     got = r.stdout.replace("\r\n", "\n")
     assert got == want, (
         f"自举镜与参考的 IR 不一致 (want {len(want)}B got {len(got)}B)")
-    print(f"      种子自举链编译十种域成功，IR 与参考逐字节相同 ({len(want)}B)")
+    assert rp.returncode == 0, f"stage1 Potato 出口失败: {rp.stderr[-600:]}"
+    got_p = rp.stdout.replace("\r\n", "\n")
+    assert got_p == want_p, (
+        f"自举镜与参考的 Potato 不一致 (want {len(want_p)}B got {len(got_p)}B)")
+    print(f"      种子自举链编译十种域成功，IR 与 Potato 都与参考逐字节相同 ({len(want)}B)")
 
 
 def main() -> int:

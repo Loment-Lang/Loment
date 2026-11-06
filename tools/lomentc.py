@@ -6952,7 +6952,10 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         "capabilities": [
             {
                 "name": c.name,
-                "domain": {"space": c.space, "lo": c.lo, "hi": c.hi},
+                # 无界侧在形式对象里用 0 / 4294967295 表示（schema 要求 lo <= hi）。
+                "domain": {"space": c.space,
+                           "lo": 0 if c.lo_inf else c.lo,
+                           "hi": 4294967295 if c.hi_inf else c.hi},
                 "revocable": c.revocable,
                 # **只在非默认时加键**：旧程序的 Potato 产物逐字节不变。
                 **({"shape": {"lo_inf": c.lo_inf, "hi_inf": c.hi_inf}}

@@ -2878,7 +2878,7 @@ fn pt_caps(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32, n: u32) -> u32
             o = pt_str(out, o, ",\n");
             o = pt_key(out, o, 4, "hi");
             if hif == 1 {
-                o = pt_dec(out, o, 0);
+                o = pt_dec(out, o, 4294967295);
             } else {
                 o = pt_num(out, o, unit, t, hit);
             }

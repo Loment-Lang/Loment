@@ -71,6 +71,17 @@ def test_cargo_tests_pass():
 
 
 @test
+def test_lockfile_stays_v3():
+    """门禁镜像的 apt cargo 是 1.75，读不了 lockfile v4 —— 被 `cargo update` 抬上去要立刻红。"""
+    head = (STUDIO / "Cargo.lock").read_text(encoding="utf-8").splitlines()[:4]
+    assert "version = 3" in head, (
+        "Cargo.lock 不是 v3 了：CI 镜像是 Ubuntu 24.04 的 cargo 1.75。"
+        "用 `cargo +1.75.0 generate-lockfile` 重新生成，别用新版 cargo 抬版本。"
+    )
+    print("      Cargo.lock 仍是 v3（cargo 1.75 可读）")
+
+
+@test
 def test_cli_lists_a_real_selfhost_file():
     """真实自举源：参数要列全，而且目录层的说明/分组要合进去。"""
     if _cargo() is None:

@@ -15,17 +15,26 @@
 2. 前面放一道**守卫**：`实参 != C ⇒ 去优化`；
 3. 守卫不成立时走原来那条通用调用，**记一条去优化**，并继续用解释器的状态往下跑。
 
-⚠ **这里"去优化"便宜得几乎不像话，而原因是写实的**：T2/T3 是**槽机** —— 每个值都已经在
-它自己的槽里，没有寄存器。`docs/249` §4 那条承重不变式（"守卫之前，不可重物化的值必须已经
-在栈槽里"）在这里**空成立**。真正的难点（从优化帧重建解释器状态）是**寄存器分配**的代价，
-而这一格没做寄存器分配。**这不是"我们做对了"，是"这一格的地基让这个问题不存在"** ——
-哪天 T3 真上了寄存器分配，`docs/249` §3 那四档重建就要真写。
+⚠ **"去优化便宜"曾经是写实的**：T2/T3 是**槽机** —— 每个值都已经在它自己的槽里，没有
+寄存器，`docs/249` §4 那条承重不变式（"守卫之前，不可重物化的值必须已经在栈槽里"）
+在那里**空成立**。**那一刻它便宜，是因为地基让问题不存在**，不是因为做对了。
 
-## A 堆一条都没做（天花板写在纸上）
+⚠⚠ **2026-11-05 起它不再空成立**：A0（`docs/248` §3.1，issue #648）把值搬进寄存器 ——
+`tools/lvm_t2.py` 的 `_plan_regs` / `_body_regs` 做活跃性分析、线性扫描分配、每块生成
+Python。于是守卫之前**真的要把帧写出来**：生成代码在每条守卫调用之前逐条落槽
+（`_Gen.emit` 的 `103` 支），去优化那两条路（摊平段 / 通用调用）都只看 `vals`。
+槽机那条路（记剖面、有计数器时）原样保留 —— 判据 B 比的是剖面逐字节。
 
-`docs/248` §3.1 的 A0（寄存器分配）/ A1（一般内联）/ A2（热块布局）/ A3（跳转表）/
-A4（分派消除）**都没做**。本格只交 B1 —— 因为 B1 是唯一能证明去优化这条路的，
-而 `docs/248` §3.2 也写了：没有 B1，T3 就永远不会需要去优化，那时该问的是"这还是不是 T3"。
+## A 堆：A0 已落地，其余没做
+
+| rung | 状态 |
+|---|---|
+| **A0 寄存器分配** | ✅ 2026-11-05（#648）：语料逐字节同、比槽机快（判符号）、守卫之前落槽 |
+| A1 一般内联 | 未做（今天只有 B1 的单块内联） |
+| A2 热块布局 / A3 跳转表 / A4 分派消除 | A4 在 T2 那一侧（`docs/266`）；A2/A3 未做 |
+
+B 堆仍是 B1 —— 它是唯一能证明去优化这条路的一条，而 `docs/248` §3.2 也写了：
+没有 B1，T3 就永远不会需要去优化，那时该问的是"这还是不是 T3"。
 
 ## 值从哪儿来
 
@@ -352,6 +361,36 @@ class T3Executor(lvm_t2.T2Executor):
                 if code == lvm_t2._OP_PHI:                       # noqa: SLF001
                     # 块入口已经按并行语义算完。
                     continue
+
+    # ------------------------------------------------------------ A0（#648/#649）
+    def _a0_guarded(self, cf, bi: int, j: int, vals, nxt: int) -> int:
+        """**寄存器档里的守卫**：假设成立就跑摊平段，不成立就记一条去优化走通用调用。
+
+        调用点**已经**把本块所有寄存器写回了 `vals`（生成代码在调用这一句之前逐条
+        落槽，见 `_Gen.emit` 的 103 支）。这条不变式在这里是**承重**的：下面两条路
+        （摊平段、通用调用）都只看 `vals` —— `docs/249` §4。
+
+        返回值是新的帧 bump 游标（`alloca` 在摊平段里也会走）。
+        """
+        _, arg_op, const, cname, inline, site = cf.blocks[bi][j]
+        if self.profile is not None:
+            self.profile.call_site(site, cname)
+        frame = [nxt]
+        if lvm_t2._rd(vals, arg_op) == const:                 # noqa: SLF001
+            cframe = [lvm.STACK_TOP - (self.depth + 1) * lvm.FRAME_SIZE]
+            for o2 in inline:
+                if self.counters is not None:
+                    self.counters.instructions += 1
+                    self.counters.tuple_lookups += 1
+                self._one(vals, o2, cframe, site)
+        else:
+            if self.counters is not None:
+                self.counters.deopts += 1
+            if self.deopts is not None:
+                self.deopts.hit(site, DEOPT_GUARD)
+            self._one(vals, (lvm_t2._OP_CALL, cname, [arg_op],  # noqa: SLF001
+                             inline_dest(inline)), frame, site)
+        return frame[0]
 
     def _one(self, vals, op, frame, site=None) -> None:
         """一条**普通** op（调用 / 算术 / 内存 / 系统调用…）—— 与 T2 同一套语义。"""

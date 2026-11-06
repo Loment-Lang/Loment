@@ -1045,13 +1045,25 @@ def _live(cf: "_CFunc") -> tuple[list[set], list[set]]:
                 defs[bi].add(d)
             if op[0] in (_OP_BR, _OP_RET, _OP_SWITCH, _OP_UNREACH):
                 break
+    #: **入边上的 phi 操作数**：块 B 的 phi 从 P 进来时读的那个值，在 P 的出口是活的 ——
+    #: 但它不是 B 里"被读"（B 一开始就把它定义了），所以 `use` 抓不到它。少了这一条，
+    #: 前驱就不会把它写回 `vals`，目标块去优化/重入时读到的是上一轮残留的值
+    #: （`free` 的空闲链就是这么崩的：`%prev = phi [0,%link],[%cur,%lcont]`）。
+    edge = [set() for _ in range(nb)]
+    for bi, blk in enumerate(cf.blocks):
+        for op in blk:
+            if op[0] != _OP_PHI:
+                break
+            for (pred, val) in op[2].items():
+                if val[0] == 0 and 0 <= pred < nb:
+                    edge[pred].add(val[1])
     lin = [set() for _ in range(nb)]
     lout = [set() for _ in range(nb)]
     changed = True
     while changed:
         changed = False
         for bi in range(nb - 1, -1, -1):
-            out: set[int] = set()
+            out: set[int] = set(edge[bi])
             for s in _succs(cf.blocks[bi]):
                 out |= lin[s]
             new = use[bi] | (out - defs[bi])
@@ -1158,6 +1170,9 @@ class _Gen:
         self.all_slots: list = []
         self.fns: list = []          # ICMP 的谓词（不能写进源码）
         self.guard_spills: dict = {}
+        #: 块**入口**时活着的槽（`lin`）。phi 的操作数是**入边上的值**，只有它们才在
+        #: 块首的寄存器里 —— 本块自己定义的槽（同块的 phi 目标）那时还在 `vals` 里。
+        self.in_slots: set = set()
 
     def t(self) -> str:
         self.tmp += 1
@@ -1179,6 +1194,23 @@ class _Gen:
             return repr(op[1])
         n = self.t()
         self.lines.append(" " * self.indent + f"{n} = bytes({op[1]})")
+        return n
+
+    def read_entry(self, op) -> str:
+        """phi 的操作数：**入边上的值**。只有 `lin` 里的槽才在块首寄存器里，其余读 `vals`。"""
+        if op[0] != 0:
+            return self.read(op)
+        s = op[1]
+        name = op[2] if len(op) > 2 else f"%{s}"
+        pad = " " * self.indent
+        n = self.t()
+        if s in self.in_slots and s in self.rmap:
+            self.lines.append(f"{pad}{n} = R[{self.rmap[s]}]")
+        else:
+            self.lines.append(f"{pad}{n} = vals[{s}]")
+        if s not in self.assigned:
+            self.lines.append(
+                f"{pad}if {n} is _UNDEF: raise lvm.LvmError('读未定义的值 {name}')")
         return n
 
     def emit(self, op, j: int):
@@ -1382,7 +1414,7 @@ class _Gen:
                 kw = "if" if i == 0 else "elif"
                 self.lines.append(f"        {kw} st[1] == {k}:")
                 self.indent = 12
-                self.lines.append(f"            {n} = {self.read(mapping[k])}")
+                self.lines.append(f"            {n} = {self.read_entry(mapping[k])}")
                 self.indent = 4
             self.lines.append("    else:")
             self.lines.append(
@@ -1439,6 +1471,7 @@ def _plan_regs(cf, inline_mem: bool = True):
         nregs = (max(rmap.values()) + 1) if rmap else 0
         g = _Gen(cf, bi, rmap, inline_mem)
         g.assigned = set(must[bi])
+        g.in_slots = set(lin[bi])
         # 守卫之前要落槽的**全部**寄存器（保守：不区分可重物化与否 —— 见 #649）
         g.all_slots = sorted((sl, rg) for (sl, rg) in rmap.items())
         g.phi()

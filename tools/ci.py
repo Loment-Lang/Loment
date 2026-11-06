@@ -475,7 +475,7 @@ SHARD_COST = {
     "lvm_stability_test": 10.0,
     "lvm_fusion_test": 32.0,
     "lvm_t2_test": 138.6,
-    "lvm_a0_test": 9.4,
+    "lvm_a0_test": 12.0,
     "lvm_t3_test": 24.7,
     "lvm_test": 20.3,
     "lvm_twin_test": 29.2,

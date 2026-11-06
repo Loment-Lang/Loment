@@ -104,6 +104,40 @@ def test_a0_is_faster_than_the_slot_machine() -> None:
     print(f"      槽机 {slot:.2f}s · A0 {a0:.2f}s ⇒ {slot / a0:.2f}×（倍数只记账）")
 
 
+_PHI_IN = """module m
+choose runtime
+choose gc_auto
+choose close lms_guard
+
+fn _start() -> u32 {
+    let i: i32 = 0;
+    while i < 1000 {
+        let p: ptr = alloc(100);
+        store8(p, 0, 1);
+        i = i + 1;
+    }
+    syscall4(60, 7, 0, 0);
+    return 0;
+}
+"""
+
+
+def test_a_phi_may_read_another_phi_of_the_same_block() -> None:
+    """phi 的操作数是**入边上的值**：同一块里后一个 phi 读前一个 phi 的**旧**值。
+
+    `free` 的空闲链就长这样（`%prev = phi [0,%link],[%cur,%lcont]`）。A0 第一版把这个读
+    接成了"目标寄存器"（块首没装填它，`lin` 里也没有），于是每轮读到上一轮的残留，链被
+    重置成单块、arena 提前耗尽。语料 9 份**没有这一形状**（它们的循环走 `alloca` + 载入，
+    不产生 phi），所以判 A 抓不到；这条用**真的回收路径**把它单独钉一次。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        ir = T3T._ir_of_text(_PHI_IN, Path(tds), "a0_phi")
+    slot, a0 = _run_both(ir, ["p"])
+    assert slot == a0, ("槽机", slot[0], "A0", a0[0])
+    assert a0[0] == 7, a0          # 复用空闲链跑完 1000 轮才到 7；链断了会先 abort
+    print("      1000 轮分配 + 回收：A0 与槽机同为 rc=7（phi 的入边值读对了）")
+
+
 def _spec_run(rewrite=None):
     """跑一遍 T3 夹具。`rewrite(cf, bi, rb) -> (source, fn)` 可以换掉某个块的生成代码。
 

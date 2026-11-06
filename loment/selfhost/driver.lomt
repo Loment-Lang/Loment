@@ -456,6 +456,7 @@ fn rt_phrase(slot: ptr, toks: ptr, tk: u32) -> str {
     if tok_is(slot, toks, tk, "str_eq") { return "`str_eq`"; }
     if tok_is(slot, toks, tk, "panic") { return "`panic`"; }
     if tok_is(slot, toks, tk, "guard") { return "`guard`（能力域守卫）"; }
+    if tok_is(slot, toks, tk, "tick") { return "`tick`（虚拟钟）"; }
     return "";
 }
 

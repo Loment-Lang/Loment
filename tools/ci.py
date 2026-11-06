@@ -317,7 +317,9 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "lspe_test", "potato_
                  "loment_state_test",
                  # 开发套件 (docs/302): 贡献者的 doctor/gate/bootstrap, 以及
                  # `.devcontainer` 与门禁镜像摘要三方一致 —— 抬 tag 漏改一处就红。
-                 "loment_dev_test")
+                 "loment_dev_test",
+                 # 源码参数台 (docs/310): 参数解析/拼接/新增/矩阵 + CLI 干跑 + 前端资源。
+                 "loment_studio_test")
 
 
 #: **不能与别的检查同时跑**的那几条 —— 它们**写仓库里的共享位置**。
@@ -452,6 +454,7 @@ SHARD_COST = {
     "loment_hotbuild_test": 1.5,
     "loment_std_test": 3.1,
     "loment_store_twin_test": 261.6,
+    "loment_studio_test": 3.0,
     # 2026-10-19（#772）：本机实测 13.2s（建一次 stage1 + 两个编译器各跑一个 21 格的
     # 程序，Windows 侧）。CI 上还没量到，先按 15 记，量到后替换。
     "loment_spec_oracle_test": 15.0,

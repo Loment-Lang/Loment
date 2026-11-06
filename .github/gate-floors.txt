@@ -116,3 +116,6 @@ loment_hotload_test 13
 loment_hotcore_test 7
 loment_hotbuild_test 4
 loment_dev_test 7
+
+# 源码参数台 (docs/310)
+loment_studio_test 6

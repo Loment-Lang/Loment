@@ -414,6 +414,14 @@ GLOBS = [
     "tools/loment_hotload.py", "tools/loment_hotload_exec.py",
     "tools/loment_hotload_test.py", "tools/loment_hotcore_test.py",
     "tools/loment_hotbuild_test.py",
+    # 源码参数台 (docs/310): Rust 后端 + 无构建步骤前端。位置与 lomrel.lomt 逐行对齐。
+    "editors/loment-studio/README.md", "editors/loment-studio/param-catalog.json",
+    "editors/loment-studio/Cargo.toml", "editors/loment-studio/Cargo.lock",
+    "editors/loment-studio/crates/params/src/*.rs",
+    "editors/loment-studio/crates/cli/src/*.rs",
+    "editors/loment-studio/crates/server/src/*.rs",
+    "editors/loment-studio/web/*", "editors/loment-studio/examples/*",
+    "tools/loment_studio_test.py",
 ]
 
 

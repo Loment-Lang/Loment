@@ -1593,6 +1593,9 @@ fn kw_at(i: u32) -> str {
     if i == 22 { return "as"; }
     if i == 23 { return "register"; }
     if i == 24 { return "lgc"; }
+    if i == 25 { return "tick"; }
+    if i == 26 { return "quality"; }
+    if i == 27 { return "discharge"; }
     return "as";
 }
 
@@ -1618,7 +1621,7 @@ fn emit_words(mem: ptr, o: u32) -> u32 {
     let b: ptr = out_body(mem);
     let o2: u32 = o;
     let i: u32 = 0;
-    while i < 25 {
+    while i < 28 {
         if i > 0 {
             o2 = json_emit_lit(b, o2, ", ");
         }

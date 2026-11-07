@@ -10143,7 +10143,8 @@ fn emit_cmd_globals(s: ptr, out: ptr) -> u32 {
         q = q + 1;
     }
     emit_hex_byte(s, out, 0);
-    return emit_str(s, out, "\"");
+    return emit_str(s, out, "\"
+");
 }
 
 /// 工具链生成的进程入口。**这段文本与 `tools/lomentc.py` 的 `_IR_CMD_ENTRY` 完全一样**

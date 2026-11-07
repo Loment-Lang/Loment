@@ -253,6 +253,19 @@ def test_installer_hardening() -> None:
     check("install.ps1 打印 SHA256SUMS 摘要供离线核对 (#419)",
           "release page" in loww and "digest" in loww)
 
+    # ---- 冒烟编译不能被编译器的 stderr 中止（0.1.5.1 setup.exe 的实际故障）
+    # PowerShell 5.1 在 $ErrorActionPreference='Stop' 下把原生命令写往 stderr 的
+    # 一行（`loment: grammar default -> tur2026.3`）当成终止 RemoteException，
+    # 于是编译成功也会让安装失败。冒烟只看退出码，两个流都必须吞掉。
+    smoke = [ln for ln in win.splitlines()
+             if "'loment.cmd'" in ln]
+    check("install.ps1 的两条冒烟命令都吞掉 stderr 与 stdout (*> $null)",
+          len(smoke) == 2 and all("*> $null" in ln for ln in smoke), str(smoke))
+    check("install.ps1 冒烟期间放宽 $ErrorActionPreference 并还原",
+          "$prevEap = $ErrorActionPreference" in win
+          and "$ErrorActionPreference = 'Continue'" in win
+          and "$ErrorActionPreference = $prevEap" in win)
+
 
 def test_release_integrity_anchor() -> None:
     rel = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")

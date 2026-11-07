@@ -2231,10 +2231,21 @@ if ($NoPath) { Say "[3/6] PATH unchanged (-NoPath)" }
 else { Add-PathEntry $BinDir; Say "[3/6] user PATH += $BinDir" }
 Show-Shadowed
 
-& (Join-Path $BinDir 'loment.cmd') version
-if ($LASTEXITCODE -ne 0) { throw "smoke test failed: 'loment version' exit $LASTEXITCODE" }
-& (Join-Path $BinDir 'loment.cmd') ir (Join-Path $shareDir 'examples\user_hello.lomt') > $null
-if ($LASTEXITCODE -ne 0) { throw "smoke test failed: compiling user_hello.lomt" }
+# The compiler writes notices ("grammar default -> tur2026.3") to stderr. Under
+# $ErrorActionPreference='Stop' PowerShell 5.1 turns that into a terminating
+# RemoteException, so a successful compile would abort the install. The smoke test
+# only needs the exit code: let the streams through and restore the preference.
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+& (Join-Path $BinDir 'loment.cmd') version *> $null
+$versionRc = $LASTEXITCODE
+$ErrorActionPreference = $prevEap
+if ($versionRc -ne 0) { throw "smoke test failed: 'loment version' exit $versionRc" }
+$ErrorActionPreference = 'Continue'
+& (Join-Path $BinDir 'loment.cmd') ir (Join-Path $shareDir 'examples\user_hello.lomt') *> $null
+$compileRc = $LASTEXITCODE
+$ErrorActionPreference = $prevEap
+if ($compileRc -ne 0) { throw "smoke test failed: compiling user_hello.lomt" }
 Say "[5/6] smoke test ok (version + compile)"
 
 # lompi's standard library (std: 127 modules, host: 7 -- 137 files): keep the pristine copy

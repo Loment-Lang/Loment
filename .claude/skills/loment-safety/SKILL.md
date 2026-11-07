@@ -30,6 +30,29 @@ Semantics: `guard cap(e);` evaluates `e` to an index; outside `[lo, hi]` it **tr
 other effect), inside it increments the audit table. **A literal out of range is a compile-time
 error** (E4); a non-literal is a runtime check.
 
+A domain may also carry a **shape**, a **polarity**, or a **time law** (all kinds share one
+decision point; `tick;` advances the virtual clock):
+
+| spelling | guard passes when |
+|---|---|
+| `[a..b]` / `[a..a]` / `[()..b]` / `[a..()]` / `[()..()]` | index in the shape; `()` = that side unbounded |
+| `danger` | index **outside** the shape (a literal inside is a compile error) |
+| `epoch(N)` / `decaying(T)` / `growing(G)` | `now < N` / `now <= T` / index within the growing end |
+| `far(W)` | index in `[origin, origin+W)`, `origin = floor(now/W)*W` |
+| `sliding(W)` | index in `[now-W, now]` |
+| `cyclic(P)` | `(index % P)` in the shape (`P > hi`) |
+| `generational(N)` | the shape holds, but the polarity flips every `N` ticks |
+| `adaptive` | width scales with `quality cap = q;` (0..255, default 255) |
+| `consumed(N)` | each position passes at most `N` times |
+| `subject(MASK)` | `guard cap(x, subj);` - bit `subj` is set in `MASK` |
+| `witnessed(T)` | `guard cap(x, ticket);` - that ticket is used fewer than `T` times |
+| `flow` | `guard cap(src, dst);` - packed edge `(src << 16 \| dst)` is inside the shape |
+| `reachable(K)` | the position is free; reserves it for `K` ticks, `discharge cap(x);` clears it |
+
+`consumed`, `witnessed` and `reachable` keep per-position state, so their domain must be bounded
+and at most 64 wide. `subject` / `witnessed` / `flow` take a second guard argument; every other
+kind refuses one.
+
 **Honest boundaries.** `guard` constrains **the index** to the domain only; it **is not
 authorisation** - it never asks "does the current principal hold this capability", because the
 principal-to-capability binding lives on the kernel side. `revocable` is currently just a flag in

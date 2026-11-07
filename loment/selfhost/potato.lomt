@@ -2843,18 +2843,29 @@ fn pt_caps(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32, n: u32) -> u32
             j = j + 1;                            // ']'
             let law: u32 = 0;
             let part: u32 = 0;
-            if pt_tis(unit, t, j, "danger") {
-                law = 1;
+            if pt_tis(unit, t, j, "danger") || pt_tis(unit, t, j, "adaptive")
+                    || pt_tis(unit, t, j, "flow") {
+                if pt_tis(unit, t, j, "danger") { law = 1; }
+                if pt_tis(unit, t, j, "adaptive") { law = 10; }
+                if pt_tis(unit, t, j, "flow") { law = 13; }
                 j = j + 1;
             } else if pt_tis(unit, t, j, "epoch") || pt_tis(unit, t, j, "far")
                     || pt_tis(unit, t, j, "sliding") || pt_tis(unit, t, j, "decaying")
-                    || pt_tis(unit, t, j, "growing") || pt_tis(unit, t, j, "consumed") {
+                    || pt_tis(unit, t, j, "growing") || pt_tis(unit, t, j, "consumed")
+                    || pt_tis(unit, t, j, "cyclic") || pt_tis(unit, t, j, "generational")
+                    || pt_tis(unit, t, j, "subject") || pt_tis(unit, t, j, "witnessed")
+                    || pt_tis(unit, t, j, "reachable") {
                 if pt_tis(unit, t, j, "epoch") { law = 2; }
                 if pt_tis(unit, t, j, "far") { law = 3; }
                 if pt_tis(unit, t, j, "sliding") { law = 4; }
                 if pt_tis(unit, t, j, "decaying") { law = 5; }
                 if pt_tis(unit, t, j, "growing") { law = 6; }
                 if pt_tis(unit, t, j, "consumed") { law = 7; }
+                if pt_tis(unit, t, j, "cyclic") { law = 8; }
+                if pt_tis(unit, t, j, "generational") { law = 9; }
+                if pt_tis(unit, t, j, "subject") { law = 11; }
+                if pt_tis(unit, t, j, "witnessed") { law = 12; }
+                if pt_tis(unit, t, j, "reachable") { law = 14; }
                 part = j + 2;
                 j = j + 4;                        // LAW ( N )
             }
@@ -2913,9 +2924,16 @@ fn pt_caps(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32, n: u32) -> u32
                 if law == 5 { o = pt_qs(out, o, "decaying"); }
                 if law == 6 { o = pt_qs(out, o, "growing"); }
                 if law == 7 { o = pt_qs(out, o, "consumed"); }
+                if law == 8 { o = pt_qs(out, o, "cyclic"); }
+                if law == 9 { o = pt_qs(out, o, "generational"); }
+                if law == 10 { o = pt_qs(out, o, "adaptive"); }
+                if law == 11 { o = pt_qs(out, o, "subject"); }
+                if law == 12 { o = pt_qs(out, o, "witnessed"); }
+                if law == 13 { o = pt_qs(out, o, "flow"); }
+                if law == 14 { o = pt_qs(out, o, "reachable"); }
                 o = pt_str(out, o, ",\n");
                 o = pt_key(out, o, 3, "param");
-                if law == 1 {
+                if law == 1 || law == 10 || law == 13 {
                     o = pt_dec(out, o, 0);
                 } else {
                     o = pt_num(out, o, unit, t, part);

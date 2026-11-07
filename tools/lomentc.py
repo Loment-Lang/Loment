@@ -189,9 +189,12 @@ declare void @llvm.trap()
 
 #: 能力域运行时（`docs/306`–`docs/308`）：虚拟钟 + 形状/极性/时律的统一判决。
 #: **只在真用到 `guard` / `tick;` 时发**（与自举侧 `emit_guard_runtime` 同位置）。
-_IR_GUARD_RUNTIME = '''; ---- 能力域运行时 (docs/306-308): 虚拟钟 + 十种域 ----
+_IR_GUARD_RUNTIME = '''; ---- 能力域运行时 (docs/306-308): 虚拟钟 + 十五种域 ----
 @__loment_now = internal global i64 0
 @__loment_used = internal global [16 x [64 x i64]] zeroinitializer
+@__loment_wit = internal global [16 x [64 x i64]] zeroinitializer
+@__loment_obl = internal global [16 x [64 x i64]] zeroinitializer
+@__loment_qual = internal global [16 x i64] [i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255]
 
 define internal void @__loment_tick() {
 entry:
@@ -201,7 +204,40 @@ entry:
   ret void
 }
 
-define internal void @__loment_guard2(i64 %cap, i64 %idx, i64 %lo, i64 %hi, i64 %kind, i64 %param, i64 %flags) {
+define internal void @__loment_qual_store(i64 %cap, i64 %v) {
+entry:
+  %big = icmp ugt i64 %v, 255
+  %zb = zext i1 %big to i64
+  %keep = sub i64 %zb, 1
+  %okv = and i64 %v, %keep
+  %sel = sub i64 0, %zb
+  %fif = and i64 %sel, 255
+  %q = or i64 %okv, %fif
+  %p = getelementptr [16 x i64], ptr @__loment_qual, i64 0, i64 %cap
+  store i64 %q, ptr %p
+  ret void
+}
+
+define internal void @__loment_discharge(i64 %cap, i64 %idx) {
+entry:
+  %now = load i64, ptr @__loment_now
+  %slot = and i64 %idx, 63
+  %p = getelementptr [16 x [64 x i64]], ptr @__loment_obl, i64 0, i64 %cap, i64 %slot
+  %v = load i64, ptr %p
+  %have = icmp ne i64 %v, 0
+  %late = icmp ugt i64 %now, %v
+  %none = xor i1 %have, true
+  %bad = or i1 %none, %late
+  br i1 %bad, label %fail, label %ok
+fail:
+  call void @__loment_abort()
+  unreachable
+ok:
+  store i64 0, ptr %p
+  ret void
+}
+
+define internal void @__loment_guard2(i64 %cap, i64 %idx, i64 %aux, i64 %lo, i64 %hi, i64 %kind, i64 %param, i64 %flags) {
 entry:
   %now = load i64, ptr @__loment_now
   %pm0 = icmp eq i64 %param, 0
@@ -285,7 +321,81 @@ entry:
   %p7a = and i1 %c, %k7
   %p7b = and i1 %a6, %nk7
   %a7 = or i1 %p7a, %p7b
-  br i1 %a7, label %pass, label %fail
+  %k8 = icmp eq i64 %kind, 8
+  %c8w = urem i64 %idx, %pm
+  %c8a = icmp uge i64 %c8w, %lo
+  %c8b = icmp ule i64 %c8w, %hi
+  %c8n = and i1 %c8a, %c8b
+  %nk8 = xor i1 %k8, true
+  %p8a = and i1 %c8n, %k8
+  %p8b = and i1 %a7, %nk8
+  %a8 = or i1 %p8a, %p8b
+  %k9 = icmp eq i64 %kind, 9
+  %g9s = udiv i64 %now, %pm
+  %g9o = and i64 %g9s, 1
+  %g9i = icmp ne i64 %g9o, 0
+  %g9n = xor i1 %bound, %g9i
+  %nk9 = xor i1 %k9, true
+  %p9a = and i1 %g9n, %k9
+  %p9b = and i1 %a8, %nk9
+  %a9 = or i1 %p9a, %p9b
+  %k10 = icmp eq i64 %kind, 10
+  %adw = sub i64 %hi, %lo
+  %adp = getelementptr [16 x i64], ptr @__loment_qual, i64 0, i64 %cap
+  %adq = load i64, ptr %adp
+  %adm = mul i64 %adw, %adq
+  %adr = udiv i64 %adm, 255
+  %adh = add i64 %lo, %adr
+  %adb1 = icmp uge i64 %idx, %lo
+  %adb2 = icmp ule i64 %idx, %adh
+  %adn = and i1 %adb1, %adb2
+  %nk10 = xor i1 %k10, true
+  %p10a = and i1 %adn, %k10
+  %p10b = and i1 %a9, %nk10
+  %a10 = or i1 %p10a, %p10b
+  %k11 = icmp eq i64 %kind, 11
+  %sb11 = and i64 %aux, 63
+  %sb11s = lshr i64 %param, %sb11
+  %sb11b = and i64 %sb11s, 1
+  %sb11n = icmp ne i64 %sb11b, 0
+  %sb11p = and i1 %sb11n, %bound
+  %nk11 = xor i1 %k11, true
+  %p11a = and i1 %sb11p, %k11
+  %p11b = and i1 %a10, %nk11
+  %a11 = or i1 %p11a, %p11b
+  %k12 = icmp eq i64 %kind, 12
+  %w12s = and i64 %aux, 63
+  %w12p = getelementptr [16 x [64 x i64]], ptr @__loment_wit, i64 0, i64 %cap, i64 %w12s
+  %w12v = load i64, ptr %w12p
+  %w12c = icmp ult i64 %w12v, %pm
+  %w12n = and i1 %w12c, %bound
+  %w12v1 = add i64 %w12v, 1
+  %nk12 = xor i1 %k12, true
+  %p12a = and i1 %w12n, %k12
+  %p12b = and i1 %a11, %nk12
+  %a12 = or i1 %p12a, %p12b
+  %k13 = icmp eq i64 %kind, 13
+  %f13d = and i64 %aux, 65535
+  %f13s = shl i64 %idx, 16
+  %f13k = or i64 %f13s, %f13d
+  %f13a = icmp uge i64 %f13k, %lo
+  %f13b = icmp ule i64 %f13k, %hi
+  %f13n = and i1 %f13a, %f13b
+  %nk13 = xor i1 %k13, true
+  %p13a = and i1 %f13n, %k13
+  %p13b = and i1 %a12, %nk13
+  %a13 = or i1 %p13a, %p13b
+  %k14 = icmp eq i64 %kind, 14
+  %o14s = and i64 %idx, 63
+  %o14p = getelementptr [16 x [64 x i64]], ptr @__loment_obl, i64 0, i64 %cap, i64 %o14s
+  %o14v = load i64, ptr %o14p
+  %o14f = icmp eq i64 %o14v, 0
+  %o14n = and i1 %o14f, %bound
+  %nk14 = xor i1 %k14, true
+  %p14a = and i1 %o14n, %k14
+  %p14b = and i1 %a13, %nk14
+  %a14 = or i1 %p14a, %p14b
+  br i1 %a14, label %pass, label %fail
 fail:
   call void @__loment_abort()
   unreachable
@@ -294,7 +404,18 @@ pass:
   %av = load i64, ptr %ap
   %av1 = add i64 %av, 1
   store i64 %av1, ptr %ap
-  br i1 %k7, label %consume, label %done
+  br i1 %k7, label %consume, label %wcheck
+wcheck:
+  br i1 %k12, label %witness, label %ocheck
+witness:
+  store i64 %w12v1, ptr %w12p
+  br label %ocheck
+ocheck:
+  br i1 %k14, label %oblige, label %done
+oblige:
+  %odl = add i64 %now, %pm
+  store i64 %odl, ptr %o14p
+  br label %done
 consume:
   %cv = load i64, ptr %up
   %cv1 = add i64 %cv, 1
@@ -1010,11 +1131,17 @@ fn __loment_trap(cap: usize, idx: u64) {
     panic!("loment: capability {} violation at {}", cap, idx);
 }
 
-// ---- 能力域：虚拟钟与十种判决（docs/306-308）----
+// ---- 能力域：虚拟钟与十五种判决（docs/306-308）----
 #[allow(static_mut_refs)]
 static mut __LOMENT_NOW: u64 = 0;
 #[allow(static_mut_refs)]
 static mut __LOMENT_USED: [[u64; 64]; 16] = [[0; 64]; 16];
+#[allow(static_mut_refs)]
+static mut __LOMENT_WIT: [[u64; 64]; 16] = [[0; 64]; 16];
+#[allow(static_mut_refs)]
+static mut __LOMENT_OBL: [[u64; 64]; 16] = [[0; 64]; 16];
+#[allow(static_mut_refs)]
+static mut __LOMENT_QUAL: [u64; 16] = [255; 16];
 
 fn __loment_tick() {
     unsafe {
@@ -1022,7 +1149,25 @@ fn __loment_tick() {
     }
 }
 
-fn __loment_guard2(cap: usize, idx: u64, lo: u64, hi: u64, kind: u64, param: u64, flags: u64) {
+fn __loment_qual_store(cap: usize, v: u64) {
+    let q = if v > 255 { 255 } else { v };
+    unsafe {
+        __LOMENT_QUAL[cap] = q;
+    }
+}
+
+fn __loment_discharge(cap: usize, idx: u64) {
+    let slot = (idx & 63) as usize;
+    let v = unsafe { __LOMENT_OBL[cap][slot] };
+    if v == 0 || unsafe { __LOMENT_NOW } > v {
+        panic!("loment: capability {} has no live obligation", cap);
+    }
+    unsafe {
+        __LOMENT_OBL[cap][slot] = 0;
+    }
+}
+
+fn __loment_guard2(cap: usize, idx: u64, aux: u64, lo: u64, hi: u64, kind: u64, param: u64, flags: u64) {
     let pm = if param == 0 { 1 } else { param };
     let bound = ((flags & 1) != 0 || idx >= lo) && ((flags & 2) != 0 || idx <= hi);
     let now = unsafe { __LOMENT_NOW };
@@ -1040,6 +1185,25 @@ fn __loment_guard2(cap: usize, idx: u64, lo: u64, hi: u64, kind: u64, param: u64
         5 => now <= pm && bound,
         6 => bound && idx <= lo + pm * now,
         7 => bound && unsafe { __LOMENT_USED[cap][(idx - lo) as usize] } < pm,
+        8 => {
+            let w = idx % pm;
+            w >= lo && w <= hi
+        }
+        9 => {
+            let odd = (now / pm) & 1 != 0;
+            bound != odd
+        }
+        10 => {
+            let q = unsafe { __LOMENT_QUAL[cap] };
+            idx >= lo && idx <= lo + ((hi - lo) * q) / 255
+        }
+        11 => ((param >> (aux & 63)) & 1) != 0 && bound,
+        12 => bound && unsafe { __LOMENT_WIT[cap][(aux & 63) as usize] } < pm,
+        13 => {
+            let k = (idx << 16) | (aux & 0xffff);
+            k >= lo && k <= hi
+        }
+        14 => bound && unsafe { __LOMENT_OBL[cap][(idx & 63) as usize] } == 0,
         _ => bound,
     };
     if !ok {
@@ -1049,6 +1213,16 @@ fn __loment_guard2(cap: usize, idx: u64, lo: u64, hi: u64, kind: u64, param: u64
     if kind == 7 {
         unsafe {
             __LOMENT_USED[cap][(idx - lo) as usize] += 1;
+        }
+    }
+    if kind == 12 {
+        unsafe {
+            __LOMENT_WIT[cap][(aux & 63) as usize] += 1;
+        }
+    }
+    if kind == 14 {
+        unsafe {
+            __LOMENT_OBL[cap][(idx & 63) as usize] = now + pm;
         }
     }
 }
@@ -1185,9 +1359,21 @@ CAP_KIND_ID = {
     "decaying": 5,
     "growing": 6,
     "consumed": 7,
+    # 时类剩下的三条（`docs/306` §5.1–§5.2）与语境类四条（`docs/307` §1–§5）。
+    "cyclic": 8,
+    "generational": 9,
+    "adaptive": 10,
+    "subject": 11,
+    "witnessed": 12,
+    "flow": 13,
+    "reachable": 14,
 }
 #: 吃一个整型参数的律。
-CAP_PARAM_KINDS = ("epoch", "far", "sliding", "decaying", "growing", "consumed")
+CAP_PARAM_KINDS = ("epoch", "far", "sliding", "decaying", "growing", "consumed",
+                   "cyclic", "generational", "subject", "witnessed", "reachable")
+#: 守卫要第二个实参（`guard cap(x, aux);`）的律。`flow` 的 aux 是目标节点，
+#: `subject` 的是主体号，`witnessed` 的是票号。
+CAP_AUX_KINDS = ("subject", "witnessed", "flow")
 
 
 def _cap_shape(c: Capability) -> str:
@@ -1386,12 +1572,36 @@ class Guard:
     kind_id: int = 0
     param: int = 0
     flags: int = 0
+    #: 语境类的第二个实参（`docs/307` §1–§5）：主体号 / 票号 / 目标节点。
+    aux: object = None
 
 
 @dataclass
 class Tick:
     """`tick;` —— 推进一次虚拟钟（`docs/308` §2.1）。"""
     line: int
+
+
+@dataclass
+class Quality:
+    """`quality cap = expr;` —— 喂给自适应域的质量（`docs/306` §5.2 第 7 条）。
+
+    0..255，255 = 满宽（默认）。缩立即生效，扩要显式写这一句 —— 与 `docs/306` §3.2
+    的单调律一致：写出来就是那次确认。
+    """
+    cap: str
+    expr: object
+    line: int
+    cap_id: int = 0
+
+
+@dataclass
+class Discharge:
+    """`discharge cap(expr);` —— 结清一条 `reachable(k)` 义务（`docs/307` §5）。"""
+    cap: str
+    expr: object
+    line: int
+    cap_id: int = 0
 
 
 @dataclass
@@ -1652,6 +1862,10 @@ def _resolve_guards(mods, caps_map: dict) -> None:
                 info = caps_map.get(s.cap)
                 if info:
                     s.cap_id, s.lo, s.hi, s.kind_id, s.param, s.flags = info
+            elif isinstance(s, Quality):
+                s.cap_id = caps_map.get(s.cap, (0,))[0]
+            elif isinstance(s, Discharge):
+                s.cap_id = caps_map.get(s.cap, (0,))[0]
             elif isinstance(s, If):
                 walk(s.then)
                 walk(s.otherwise)
@@ -1732,8 +1946,10 @@ def _resolve_methods(mods, funcs_map: dict, structs: dict, enums: dict) -> None:
                     rx(s.expr, scope)
             elif isinstance(s, ExprStmt):
                 rx(s.expr, scope)
-            elif isinstance(s, Guard):
+            elif isinstance(s, (Guard, Quality, Discharge)):
                 rx(s.expr, scope)
+                if isinstance(s, Guard) and s.aux is not None:
+                    rx(s.aux, scope)
 
     for m in mods:
         for f in m.funcs:
@@ -3055,13 +3271,31 @@ class Parser:
             cap = self.ident("能力名")
             self.expect("punct", "(")
             e = self.parse_expr()
+            aux = None
+            if self.accept("punct", ","):  # 语境类（docs/307）：第二个实参
+                aux = self.parse_expr()
             self.expect("punct", ")")
             self.expect("punct", ";")
-            return Guard(cap, e, t.line)
+            return Guard(cap, e, t.line, aux=aux)
         if t.val == "tick":
             self.next()
             self.expect("punct", ";")
             return Tick(t.line)
+        if t.val == "quality":  # docs/306 §5.2 第 7 条：自适应域的质量
+            self.next()
+            cap = self.ident("能力名")
+            self.expect("punct", "=")
+            e = self.parse_expr()
+            self.expect("punct", ";")
+            return Quality(cap, e, t.line)
+        if t.val == "discharge":  # docs/307 §5：结清 reachable 义务
+            self.next()
+            cap = self.ident("能力名")
+            self.expect("punct", "(")
+            e = self.parse_expr()
+            self.expect("punct", ")")
+            self.expect("punct", ";")
+            return Discharge(cap, e, t.line)
         if t.val == "let":
             self.next()
             name = self.ident("变量名")
@@ -3653,8 +3887,10 @@ def _mono_stmts(stmts, scope, generics, insts, structs, enums) -> None:
                 _mono_expr(s.expr, scope, generics, insts, structs, enums)
         elif isinstance(s, ExprStmt):
             _mono_expr(s.expr, scope, generics, insts, structs, enums)
-        elif isinstance(s, Guard):
+        elif isinstance(s, (Guard, Quality, Discharge)):
             _mono_expr(s.expr, scope, generics, insts, structs, enums)
+            if isinstance(s, Guard) and s.aux is not None:
+                _mono_expr(s.aux, scope, generics, insts, structs, enums)
 
 
 def _collect_types(mods) -> set[str]:
@@ -3838,7 +4074,7 @@ def _has_try(mods) -> bool:
 def _has_guard(mods) -> bool:
     def scan(stmts) -> bool:
         for s in stmts:
-            if isinstance(s, Guard):
+            if isinstance(s, (Guard, Quality, Discharge)):
                 return True
             for key in ("then", "otherwise", "body"):
                 sub = getattr(s, key, None)
@@ -5129,6 +5365,8 @@ _RUNTIME_SITES: dict[str, str] = {
     "print_num": "`print_num`",
     "guard": "`guard`（能力域守卫）",
     "tick": "`tick`（虚拟钟）",
+    "quality": "`quality`（自适应域的质量）",
+    "discharge": "`discharge`（可达域义务）",
     # `#778`：真线程要把运行期的锁与活线程计数带进产物（`alloc`/`free`/根表在
     # 线程之间共享）。所以它和 `alloc` 一样，是"会把运行期拖进来"的构造。
     "thread_spawn": "`thread_spawn`（运行期锁）",
@@ -5172,7 +5410,7 @@ def _runtime_sites(toks: list,
         if prev == "fn":
             continue
         nxt = toks[i + 1] if i + 1 < n else None
-        if t.val == "guard" or t.val == "lgc":
+        if t.val in ("guard", "lgc", "quality", "discharge"):
             hit = nxt is not None and nxt.kind == "ident"
         elif t.val == "tick":
             hit = nxt is not None and nxt.kind == "punct" and nxt.val == ";"
@@ -5651,6 +5889,22 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
             elif c.hi - c.lo + 1 > 64:
                 errs.append(
                     f"{c.line}: 能力 {c.name} 是 consumed，域宽 {c.hi - c.lo + 1} 超过 64")
+        # 余下七种（`docs/306` §5.1–§5.2、`docs/307` §1–§5）的形状前提。
+        if c.kind == "cyclic":
+            if c.lo_inf or c.hi_inf:
+                errs.append(f"{c.line}: 能力 {c.name} 是 cyclic，域必须有上下界")
+            elif c.param <= c.hi:
+                errs.append(f"{c.line}: 能力 {c.name} 的 cyclic 周期 {c.param} "
+                            f"必须大于上界 {c.hi}")
+        if c.kind in ("generational", "adaptive", "flow"):
+            if c.lo_inf or c.hi_inf:
+                errs.append(f"{c.line}: 能力 {c.name} 是 {c.kind}，域必须有上下界")
+        if c.kind == "reachable":
+            if c.lo_inf or c.hi_inf:
+                errs.append(f"{c.line}: 能力 {c.name} 是 reachable，域必须有上下界")
+            elif c.hi - c.lo + 1 > 64:
+                errs.append(
+                    f"{c.line}: 能力 {c.name} 是 reachable，域宽 {c.hi - c.lo + 1} 超过 64")
         for ex in mod.excluded:  # M41: 出界声明的空间不得被能力使用
             space = ex.split(":")[0].strip()
             if space and space == c.space:
@@ -5735,20 +5989,52 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                 elif isinstance(s, Guard):  # P4: 能力域检查
                     cap = next((c for c in mod.caps if c.name == s.cap), None)
                     _walk_expr(s.expr, fscope, funcs, structs, errs, enums)
+                    if s.aux is not None:
+                        _walk_expr(s.aux, fscope, funcs, structs, errs, enums)
                     if cap is None:
                         errs.append(f"{s.line}: guard 引用了未声明的能力 {s.cap}")
-                    elif isinstance(s.expr, IntLit) and cap.kind in ("regular", "danger"):
-                        # 静态可判的只有一般类与危险域：时律依赖虚拟钟，字面量判不了。
-                        # 危险域是**对偶**：落在禁止区里的字面量是错误，不是踩线。
+                    elif (cap.kind in CAP_AUX_KINDS) != (s.aux is not None):
+                        # 语境类的三支（subject / witnessed / flow）**必须**带第二个实参；
+                        # 其余一律不带 —— 少给或多给都是把语义写错，不静默降级。
+                        errs.append(
+                            f"{s.line}: 能力 {s.cap} 是 {cap.kind} 域，guard "
+                            f"{'需要' if cap.kind in CAP_AUX_KINDS else '不接受'}第二个实参")
+                    elif isinstance(s.expr, IntLit) and cap.kind in ("regular", "danger", "cyclic"):
+                        # 静态可判的只有不依赖钟、也不依赖第二实参的那几种：
+                        # 字面量直接判；`cyclic(P)` 判的是**回绕后**的位置。
                         v = s.expr.value
+                        if cap.kind == "cyclic" and cap.param > 0:
+                            v = v % cap.param
                         inside = ((cap.lo_inf or v >= cap.lo)
                                   and (cap.hi_inf or v <= cap.hi))
-                        if cap.kind == "regular" and not inside:
+                        if cap.kind in ("regular", "cyclic") and not inside:
                             errs.append(
                                 f"{s.line}: 能力 {s.cap} 域 {_cap_shape(cap)}，索引 {v} 越界")
                         if cap.kind == "danger" and inside:
                             errs.append(
                                 f"{s.line}: 能力 {s.cap} 是危险域，索引 {v} 落在禁止区内")
+                elif isinstance(s, Quality):  # docs/306 §5.2 第 7 条
+                    cap = next((c for c in mod.caps if c.name == s.cap), None)
+                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums)
+                    if cap is None:
+                        errs.append(f"{s.line}: quality 引用了未声明的能力 {s.cap}")
+                    elif cap.kind != "adaptive":
+                        errs.append(f"{s.line}: quality 只用于自适应域，"
+                                    f"能力 {s.cap} 是 {cap.kind}")
+                    qt = expr_type(s.expr, fscope, funcs, structs)
+                    if qt is not None and qt not in INT_TYPES:
+                        errs.append(f"{s.line}: quality 的值类型 {qt}，应为整型")
+                elif isinstance(s, Discharge):  # docs/307 §5
+                    cap = next((c for c in mod.caps if c.name == s.cap), None)
+                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums)
+                    if cap is None:
+                        errs.append(f"{s.line}: discharge 引用了未声明的能力 {s.cap}")
+                    elif cap.kind != "reachable":
+                        errs.append(f"{s.line}: discharge 只用于可达域，"
+                                    f"能力 {s.cap} 是 {cap.kind}")
+                    dt = expr_type(s.expr, fscope, funcs, structs)
+                    if dt is not None and dt not in INT_TYPES:
+                        errs.append(f"{s.line}: discharge 的索引类型 {dt}，应为整型")
                 elif isinstance(s, For):
                     _walk_expr(s.lo, fscope, funcs, structs, errs, enums)
                     _walk_expr(s.hi, fscope, funcs, structs, errs, enums)
@@ -6068,8 +6354,10 @@ def _move_check(f: Func, funcs: dict, structs: dict, enums: dict,
                     errs.append(f"{s.line}: 返回局部变量 {s.expr.expr.name} 的借用（悬垂）")
             elif isinstance(s, ExprStmt):
                 use(s.expr)
-            elif isinstance(s, Guard):
+            elif isinstance(s, (Guard, Quality, Discharge)):
                 use(s.expr)
+                if isinstance(s, Guard) and s.aux is not None:
+                    use(s.aux)
 
     walk(f.body, scope)
     return errs
@@ -6325,11 +6613,18 @@ def _stmts_rs(stmts: list, indent: int) -> list[str]:
         elif isinstance(s, Guard):  # P4: 能力域守卫
             # 审计仍在**放行那一支**（`#162`）：`__loment_guard2` 判过之后才加一，
             # 越界路径只 trap。十种域共用这一个判决点（`docs/306`–`docs/308`）。
+            aux = f"({_expr_rs(s.aux)}) as u64" if s.aux is not None else "0u64"
             out.append(
                 f"{pad}{{ let __i: u64 = ({_expr_rs(s.expr)}) as u64; "
-                f"__loment_guard2({s.cap_id}, __i, {s.lo}, {s.hi}, "
+                f"__loment_guard2({s.cap_id}, __i, {aux}, {s.lo}, {s.hi}, "
                 f"{s.kind_id}, {s.param}, {s.flags}); }}"
             )
+        elif isinstance(s, Quality):
+            out.append(f"{pad}__loment_qual_store({s.cap_id}, "
+                       f"({_expr_rs(s.expr)}) as u64);")
+        elif isinstance(s, Discharge):
+            out.append(f"{pad}__loment_discharge({s.cap_id}, "
+                       f"({_expr_rs(s.expr)}) as u64);")
         elif isinstance(s, Tick):
             out.append(f"{pad}__loment_tick();")
         else:
@@ -10451,14 +10746,32 @@ class _Ir:
             self.label(end_l)
             self.l1_free(s.l1)          # L1：落点就在**循环之后**（体内那次是最后一次用）
             return
-        if isinstance(s, Guard):  # P4/M36+M38: 十种域的统一判决
+        if isinstance(s, Guard):  # P4/M36+M38: 十五种域的统一判决
             _, iv = self.expr(s.expr, "u32")
             v64 = self.t()
             self.w(f"{v64} = zext i32 {iv} to i64")
+            if s.aux is None:
+                a64 = "0"
+            else:
+                _, av = self.expr(s.aux, "u32")
+                a64 = self.t()
+                self.w(f"{a64} = zext i32 {av} to i64")
             self.w(
-                f"call void @__loment_guard2(i64 {s.cap_id}, i64 {v64}, "
+                f"call void @__loment_guard2(i64 {s.cap_id}, i64 {v64}, i64 {a64}, "
                 f"i64 {s.lo}, i64 {s.hi}, i64 {s.kind_id}, i64 {s.param}, i64 {s.flags})"
             )
+            return
+        if isinstance(s, Quality):  # docs/306 §5.2 第 7 条：喂质量
+            _, qv = self.expr(s.expr, "u32")
+            q64 = self.t()
+            self.w(f"{q64} = zext i32 {qv} to i64")
+            self.w(f"call void @__loment_qual_store(i64 {s.cap_id}, i64 {q64})")
+            return
+        if isinstance(s, Discharge):  # docs/307 §5：结清义务
+            _, dv = self.expr(s.expr, "u32")
+            d64 = self.t()
+            self.w(f"{d64} = zext i32 {dv} to i64")
+            self.w(f"call void @__loment_discharge(i64 {s.cap_id}, i64 {d64})")
             return
         if isinstance(s, Tick):  # docs/308 §2.1: 回边/显式推进虚拟钟
             self.w("call void @__loment_tick()")
@@ -10940,9 +11253,13 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
         out.append(_IR_PRINT_NUM)
     # 能力域运行时：`guard` 发 `@__loment_guard2`，`tick;` 发 `@__loment_tick`。
     # **两者都不用时一个字节不发** —— 旧程序的产物逐字节不变。
-    if "@__loment_guard2" in text_all or "@__loment_tick" in text_all:
+    _guard_rt = ("@__loment_guard2" in text_all or "@__loment_tick" in text_all
+                 or "@__loment_qual_store" in text_all
+                 or "@__loment_discharge" in text_all)
+    if _guard_rt:
         out.append(_IR_GUARD_RUNTIME)
-    if "@__loment_audit" in text_all or "@__loment_guard2" in text_all:  # P4/M38
+    if "@__loment_audit" in text_all or "@__loment_guard2" in text_all \
+            or _guard_rt:  # P4/M38
         out.append("@__loment_audit = internal global [16 x i64] zeroinitializer")
         out.append("")
     if mod.caps:  # P4/M35: 域描述表 (space 名取 FNV-1a 32 位哈希)

@@ -27,8 +27,8 @@ import potato_from  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 KEYWORDS = ["fn", "let", "if", "else", "while", "for", "in", "match", "struct", "enum",
             "trait", "impl", "const", "return", "mut", "pub", "use", "module",
-            "capability", "guard", "excluded", "interrupt", "as", "register",
-            "lgc"]
+            "capability", "guard", "tick", "quality", "discharge", "excluded",
+            "interrupt", "as", "register", "lgc"]
 TYPE_KEYWORDS = ["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "bool", "str",
                  "ptr", "()", "Option", "Result"]
 

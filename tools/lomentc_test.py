@@ -5474,6 +5474,45 @@ def test_domains_ten_kinds_static():
 
 
 @test
+def test_domains_remaining_kinds_static():
+    """余下七种域（`docs/306` §5、`docs/307` §1–§5）：形状前提与实参个数。
+
+    每条都必须在**未修**的代码上是红的：这些构造在 0.1.5.1 里根本不存在，
+    参考实现会把 `cyclic(4)` 当成未知尾巴词 —— 所以这条判据的第一版先确认
+    "它现在能报"，不是"它一直能报"。
+    """
+    # cyclic：周期必须大于上界，否则回绕会放进域外的位置
+    assert any("必须大于上界" in x for x in errs(
+        "module m\nchoose runtime\ncapability c : ring[0..3] cyclic(2)\n"
+        "fn f() -> u32 { return 0; }\n"))
+    # adaptive / flow / generational / reachable：形状必须有上下界
+    assert any("必须有上下界" in x for x in errs(
+        "module m\nchoose runtime\ncapability a : t[0..()] adaptive\n"
+        "fn f() -> u32 { return 0; }\n"))
+    # reachable：义务槽按位置取模 64，域宽必须放得下
+    assert any("超过 64" in x for x in errs(
+        "module m\nchoose runtime\ncapability r : lease[0..99] reachable(2)\n"
+        "fn f() -> u32 { return 0; }\n"))
+    # 语境类三支必须带第二个实参
+    assert any("需要第二个实参" in x for x in errs(
+        "module m\nchoose runtime\ncapability s : auth[0..15] subject(3)\n"
+        "fn f(n: u32) -> u32 { guard s(n); return n; }\n"))
+    # 其余律不接受
+    assert any("不接受第二个实参" in x for x in errs(
+        "module m\nchoose runtime\ncapability c : disk[0..4]\n"
+        "fn f(n: u32) -> u32 { guard c(n, 1); return n; }\n"))
+    # quality 只喂自适应域
+    assert any("quality 只用于自适应域" in x for x in errs(
+        "module m\nchoose runtime\ncapability c : disk[0..4]\n"
+        "fn f() -> u32 { quality c = 10; return 0; }\n"))
+    # discharge 只结可达域的义务
+    assert any("discharge 只用于可达域" in x for x in errs(
+        "module m\nchoose runtime\ncapability c : disk[0..4]\n"
+        "fn f() -> u32 { discharge c(1); return 0; }\n"))
+    print("      余下七种域：七条形状/实参规则逐条报错")
+
+
+@test
 def test_domains_ten_kinds_runtime():
     """十种域真跑一遍：形状 3 + 极性 1 + 时律 6。
 
@@ -5566,6 +5605,104 @@ def test_domains_ten_kinds_runtime():
 
 
 @test
+def test_domains_remaining_kinds_runtime():
+    """余下七种域逐例真跑：cyclic / generational / adaptive / subject / witnessed /
+    flow / reachable（`docs/306` §5、`docs/307` §1–§5）。
+
+    虚拟钟、质量、票表、义务表都由 main 直接拨到用例要的值 —— 不是"字符串在不在"。
+    """
+    import shutil
+    import subprocess
+    src = ("module m\nchoose runtime\n"
+           "capability cyc : ring[0..3] cyclic(8)\n"
+           "capability gen : buf[0..7] generational(2)\n"
+           "capability ad  : trust[0..99] adaptive\n"
+           "capability sub : auth[0..15] subject(3)\n"
+           "capability wit : nonce[0..15] witnessed(1)\n"
+           "capability flw : flow[65538..65540] flow\n"
+           "capability rch : lease[0..15] reachable(2)\n"
+           "fn f_cyc(n: u32) -> u32 { guard cyc(n); return n; }\n"
+           "fn f_gen(n: u32) -> u32 { guard gen(n); return n; }\n"
+           "fn f_ad(n: u32) -> u32 { quality ad = 128; guard ad(n); return n; }\n"
+           "fn f_adfull(n: u32) -> u32 { quality ad = 255; guard ad(n); return n; }\n"
+           "fn f_sub(x: u32, s: u32) -> u32 { guard sub(x, s); return x; }\n"
+           "fn f_wit(x: u32, t: u32) -> u32 { guard wit(x, t); return x; }\n"
+           "fn f_flw(a: u32, b: u32) -> u32 { guard flw(a, b); return a; }\n"
+           "fn f_rch(n: u32) -> u32 { guard rch(n); return n; }\n"
+           "fn d_rch(n: u32) -> u32 { discharge rch(n); return n; }\n")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "m.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        mod = lomentc.load(p)
+        assert lomentc.check(mod) == [], lomentc.check(mod)
+        rs = lomentc.emit_rust(mod, ROOT)
+        ir = lomentc.emit_llvm(mod, ROOT)
+    assert "@__loment_qual_store" in ir and "@__loment_discharge" in ir
+    assert "quality ad = 128" in src and "__loment_guard2" in rs
+
+    rustc = shutil.which("rustc")
+    if not rustc:
+        print("      SKIP: 无 rustc（运行那一半）")
+        return
+    main = (
+        'include!("m.rs");\n'
+        "fn main() {\n"
+        "    std::panic::set_hook(Box::new(|_| {}));\n"
+        "    let mut bad = 0;\n"
+        "    macro_rules! want { ($e:expr, $w:expr) => { if ($e).is_ok() != $w { bad += 1; } } }\n"
+        "    unsafe { __LOMENT_NOW = 0; }\n"
+        # cyclic：判的是回绕后的位置
+        "    want!(std::panic::catch_unwind(|| f_cyc(9)), true);\n"
+        "    want!(std::panic::catch_unwind(|| f_cyc(5)), false);\n"
+        "    want!(std::panic::catch_unwind(|| f_cyc(8)), true);\n"
+        # generational：每 N tick 极性翻转
+        "    want!(std::panic::catch_unwind(|| f_gen(3)), true);\n"
+        "    unsafe { __LOMENT_NOW = 2; }\n"
+        "    want!(std::panic::catch_unwind(|| f_gen(3)), false);\n"
+        "    unsafe { __LOMENT_NOW = 4; }\n"
+        "    want!(std::panic::catch_unwind(|| f_gen(3)), true);\n"
+        # adaptive：质量 128 把 [0..99] 缩到 [0..49]
+        "    want!(std::panic::catch_unwind(|| f_ad(49)), true);\n"
+        "    want!(std::panic::catch_unwind(|| f_ad(50)), false);\n"
+        "    want!(std::panic::catch_unwind(|| f_adfull(99)), true);\n"
+        # subject：主体 1 在白名单，主体 2 不在
+        "    want!(std::panic::catch_unwind(|| f_sub(5, 1)), true);\n"
+        "    want!(std::panic::catch_unwind(|| f_sub(5, 2)), false);\n"
+        # witnessed：同一张票第二次用不了
+        "    unsafe { __LOMENT_WIT[4] = [0; 64]; }\n"
+        "    want!(std::panic::catch_unwind(|| f_wit(3, 7)), true);\n"
+        "    want!(std::panic::catch_unwind(|| f_wit(3, 7)), false);\n"
+        "    want!(std::panic::catch_unwind(|| f_wit(3, 8)), true);\n"
+        # flow：只放行声明过的边（(1,2)/(1,3) 在 [65538..65540] 里）
+        "    want!(std::panic::catch_unwind(|| f_flw(1, 2)), true);\n"
+        "    want!(std::panic::catch_unwind(|| f_flw(1, 3)), true);\n"
+        "    want!(std::panic::catch_unwind(|| f_flw(2, 2)), false);\n"
+        # reachable：占用后不能重复登记；过期结清也拒
+        "    unsafe { __LOMENT_NOW = 0; __LOMENT_OBL[6] = [0; 64]; }\n"
+        "    want!(std::panic::catch_unwind(|| f_rch(2)), true);\n"
+        "    want!(std::panic::catch_unwind(|| f_rch(2)), false);\n"
+        "    unsafe { __LOMENT_OBL[6] = [0; 64]; __LOMENT_NOW = 3; }\n"
+        "    want!(std::panic::catch_unwind(|| d_rch(2)), false);\n"
+        "    unsafe { __LOMENT_NOW = 0; }\n"
+        "    want!(std::panic::catch_unwind(|| f_rch(2)), true);\n"
+        "    want!(std::panic::catch_unwind(|| d_rch(2)), true);\n"
+        '    println!("bad={}", bad);\n'
+        "}\n")
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "m.rs").write_text(rs, encoding="utf-8", newline="\n")
+        (d / "main.rs").write_text(main, encoding="utf-8", newline="\n")
+        exe = d / ("d.exe" if sys.platform == "win32" else "d")
+        r = subprocess.run([rustc, "-O", "-o", str(exe), str(d / "main.rs")],
+                           capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, r.stderr[-800:]
+        out = subprocess.run([str(exe)], capture_output=True, text=True,
+                             shell=False).stdout
+    assert "bad=0" in out, out
+    print("      余下七种域：cyclic/generational/adaptive/subject/witnessed/flow/reachable 逐例真跑一致")
+
+
+@test
 def test_domains_selfhost_twin():
     """十种域 + `tick;`：自举镜与参考实现的 IR **逐字节相同**。
 
@@ -5601,7 +5738,23 @@ def test_domains_selfhost_twin():
            "fn f_dec(n: u32) -> u32 { guard dec(n); return n; }\n"
            "fn f_gr(n: u32) -> u32 { guard gr(n); return n; }\n"
            "fn f_cons(n: u32) -> u32 { guard cons(n); return n; }\n"
-           "fn f_tick(n: u32) -> u32 { tick; return n; }\n")
+           "fn f_tick(n: u32) -> u32 { tick; return n; }\n"
+           # 余下七种（docs/306 §5、docs/307 §1–§5）：形状、极性、第二实参、两条语句
+           "capability cyc   : ring[0..3] cyclic(8)\n"
+           "capability gen   : buf[0..7] generational(2)\n"
+           "capability ad    : trust[0..99] adaptive\n"
+           "capability sub   : auth[0..15] subject(3)\n"
+           "capability wit   : nonce[0..15] witnessed(1)\n"
+           "capability flw   : flow[65538..65540] flow\n"
+           "capability rch   : lease[0..15] reachable(2)\n"
+           "fn g_cyc(n: u32) -> u32 { guard cyc(n); return n; }\n"
+           "fn g_gen(n: u32) -> u32 { guard gen(n); return n; }\n"
+           "fn g_ad(n: u32) -> u32 { quality ad = 128; guard ad(n); return n; }\n"
+           "fn g_sub(x: u32, s: u32) -> u32 { guard sub(x, s); return x; }\n"
+           "fn g_wit(x: u32, t: u32) -> u32 { guard wit(x, t); return x; }\n"
+           "fn g_flw(a: u32, b: u32) -> u32 { guard flw(a, b); return a; }\n"
+           "fn g_rch(n: u32) -> u32 { guard rch(n); return n; }\n"
+           "fn g_dis(n: u32) -> u32 { discharge rch(n); return n; }\n")
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "d.lomt"
         p.write_text(src, encoding="utf-8", newline="\n")

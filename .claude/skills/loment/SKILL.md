@@ -18,19 +18,27 @@ Rust does not have**: `module`, `choose`, `capability`, `guard`, `extern fn`, `c
 system** - editions, the declaration, every item/statement/expression/pattern, and the seven
 foreign surface grammars - is the **`loment-tur`** skill (sections 2.0.x).
 
-A file is read as **Tur 1** when it has **no declaration** (the default) or says
-`choose write grammar loment` / `tur` / `tur1` / `tur2026.1`. Editions are **two-level**:
-`tur<year>.<n>` (`docs/296`). The canonical name never changes meaning; `tur1` / `tur2` are the
-2026 shorthands for `tur2026.1` / `tur2026.2` and are only accepted in their release year;
-write the full name in new files (the packaged `loment fmt` refuses `tur*` and foreign
-declarations; see `loment-tur` 2.0.2). **Every `check` / `build` / `run` / `ir` prints the resolved edition on stderr** (e.g.
-`grammar tur2 -> tur2026.2 (Tur 2)`); `tur_edition()` returns it at runtime, and
-`loment version <exe>` reads it back from the artifact.
+A file with **no declaration** (or `choose write grammar loment`) is read as the **newest
+edition** - today **`tur2026.3`** (`docs/312`). Editions are **two-level**: `tur<year>.<n>`
+(`docs/296`). The canonical name never changes meaning; `tur1` / `tur2` / `tur3` are the 2026
+shorthands for `tur2026.1` / `tur2026.2` / `tur2026.3` and are only accepted in their release
+year. To pin an **older** reading, say so explicitly: `choose write grammar tur2026.1` (or
+`tur` / `tur1`) keeps Tur 1. **Every `check` / `build` / `run` / `ir` prints the resolved
+edition on stderr** (e.g. `grammar default -> tur2026.3 (Tur 2026.3)`); `tur_edition()` returns
+it at runtime, and `loment version <exe>` reads it back from the artifact.
+
+**New syntax and old names collide - loudly.** A few words that are syntax in a newer edition
+(`break`, `continue`, `defer`, `print_num`, `lgc`) were ordinary identifiers in an older one.
+If an undeclared file **declares** one of them, the compiler refuses with **E040** instead of
+silently changing what the file means: rename it, or pin the old reading with
+`choose write grammar tur2026.1` / `tur2026.2` (`docs/312`).
 
 **Tur 2026.2** (`tur2026.2`, or the 2026 shorthand `tur2`) adds the sugar (`def f()`, `a and
 b` / `a or b` / `not a`, `elif cond { }`), `for x in xs`, `break` / `continue`, bare `return;`
-in unit functions, `orelse` / `catch`, `print_num`, and **`defer`**. They are **Tur 2 only**:
-Tur 1 keeps those words as ordinary identifiers, so old files keep their meaning. The details
+in unit functions, `orelse` / `catch`, `print_num`, and **`defer`**. They are **Tur 2 and
+later**: Tur 1 keeps those words as ordinary identifiers, so old files keep their meaning (and
+`choose write grammar tur2026.1` pins that reading). Because the default is now the newest
+edition, a new file gets all of them without a declaration. The details
 and every restriction are in `loment-tur` 2.0.4 (the runnable versions are `loment_p8_test`
 M91, M94, M95 and M96). **Tur 2026.2 is closed** (2026-11-05): that list is final; new
 syntax goes to `tur2026.3` (`loment-tur` 2.0.3, `docs/305`).
@@ -61,14 +69,15 @@ into it. To write Tur with Rust's spelling, declare `grammar tur`.
 > `loment ir` / `build` use when you run them from a checkout) **accepts** both spellings: it
 > translates the file into Loment **in process** and compiles that, with no external compiler
 > involved. **An installed package (the self-hosted toolchain) accepts the native spellings
-> only** - `loment` and the Tur editions (`tur`, `tur1`, `tur2`, `tur2026.1`, `tur2026.2`) -
+> only** - `loment` and the Tur editions (`tur`, `tur1`, `tur2`, `tur3`, `tur2026.1`,
+> `tur2026.2`, `tur2026.3`) -
 > and refuses every foreign declaration outright ("这份源的 `choose write grammar` 自举侧收不了…"
 > / *the self-hosted side cannot take this file's `choose write grammar`*), because the foreign
 > translators have no Loment twin yet (`docs/189` section 4.1). So "write `.py` inside the
 > package and it runs" **is not true today**.
 
 The alias table is **frozen at the factory**: the native grammar (`loment`, `tur`, `tur1`,
-`tur2`, `tur2026.1`, `tur2026.2`) plus the foreign grammars (`c`, `cpp`, `java`, `csharp`, `go`,
+`tur2`, `tur3`, `tur2026.1`, `tur2026.2`, `tur2026.3`) plus the foreign grammars (`c`, `cpp`, `java`, `csharp`, `go`,
 `python`, `rust`, `natural`). It cannot be extended or overridden (`docs/188` section 1.1).
 Getting it wrong is one of four errors: the name is not in the table / it is written after
 `module` / it is written twice / no name follows it.

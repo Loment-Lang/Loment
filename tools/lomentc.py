@@ -23,6 +23,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lomc  # noqa: E402
+#: 版次表的**单一真源**（`potato_from`）。这里只借 `DEFAULT_EDITION`：函数签名的
+#: 缺省值不该各自写死一个旧版次名 —— 那会让"默认 = 最新"分散成七处手动同步。
+import potato_from  # noqa: E402
 
 # LSPE 是独立子系统（`loment/lspe/`）：编译器只导入它的语义面与求解器，不在这里定义它们。
 sys.path.append(str(Path(__file__).resolve().parents[1] / "loment"))
@@ -2549,7 +2552,8 @@ MAX_NEST = 64
 class Parser:
     """复用 lomc 的词法器; 只实现 L1 的顶层与语句/表达式。"""
 
-    def __init__(self, toks: list[Tok], src: str, profile: str = "tur2026.1"):
+    def __init__(self, toks: list[Tok], src: str,
+                 profile: str = potato_from.DEFAULT_EDITION):
         self.toks, self.src, self.i = toks, src, 0
         #: 版次（`docs/296` §1.1）。只有 Tur 2 认 `elif` 的隐式条件（前门已把
         #: `elif` 抹成 `else`，这里补上缺的那个 `if`）。
@@ -5133,7 +5137,8 @@ _RUNTIME_SITES: dict[str, str] = {
 }
 
 
-def _runtime_sites(toks: list, profile: str = "tur2026.1") -> list[tuple[str, int]]:
+def _runtime_sites(toks: list,
+                   profile: str = potato_from.DEFAULT_EDITION) -> list[tuple[str, int]]:
     """扫出本单元里所有**会把运行期拖进产物**的构造（`docs/217`）。
 
     **为什么是 token 而不是 AST**：同 `_l0_promotable`。自举侧没有 AST，只有 token 流；
@@ -6449,7 +6454,7 @@ def emit_rust(mod: Module, lom_root: Path, deps: list[Module] | None = None) -> 
     mod, deps = prepare(mod, deps)  # M6
     out = [BANNER, f"// module {mod.name} (loment v0 -> rust)",
            # 版次是**整程序**属性：一份 Rust 产物只定义一次，取入口模块的规范名。
-           f'const __LOMENT_TUR: &str = "{getattr(mod, "profile", "tur2026.1")}";',
+           f'const __LOMENT_TUR: &str = "{getattr(mod, "profile", potato_from.DEFAULT_EDITION)}";',
            _RUST_RUNTIME]
     for d in deps or []:
         out.append("")
@@ -8948,7 +8953,8 @@ class _Ir:
                  gc_alpha: bool = False, gc_auto: bool = False,
                  gc_barrier: bool = True, threads: bool = False,
                  lms_guard: bool = False, lms_reject: bool = False,
-                 lms_crash: bool = False, tur_edition: str = "tur2026.1",
+                 lms_crash: bool = False,
+                 tur_edition: str = potato_from.DEFAULT_EDITION,
                  gc_ctl: bool = False):
         self.funcs, self.consts, self.f = funcs, consts, f
         #: 本程序读的是 Tur 的哪一版（`docs/296` §1.1）。`tur_edition()` 内建取它。
@@ -10529,7 +10535,8 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
                   gc_alpha: bool = False, gc_auto: bool = False,
                   gc_barrier: bool = True, threads: bool = False,
                   lms_guard: bool = False, lms_reject: bool = False,
-                  lms_crash: bool = False, tur_edition: str = "tur2026.1",
+                  lms_crash: bool = False,
+                 tur_edition: str = potato_from.DEFAULT_EDITION,
                   gc_ctl: bool = False
                   ) -> tuple[list[str], str]:
     ir = _Ir(funcs, consts, f, structs, enums, coverage, cov_counter,
@@ -10900,7 +10907,7 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
                                     dbg_types if debug else None, gc_alpha, gc_auto,
                                     gc_alpha and _has_heap_pre, _has_threads,
                                     _lms_guard, _lms_reject, _lms_crash,
-                                    getattr(mod, "profile", "tur2026.1"),
+                                    getattr(mod, "profile", potato_from.DEFAULT_EDITION),
                                     _gc_ctl)
             globals_ += g
             body.append(text)
@@ -11040,7 +11047,7 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # **版次元数据**（`docs/296` §1.1）：每份产物一条，放在全局区**最后**。
     # 外部可见（`global`，不是 `private constant`）—— clang `-O2` 会丢掉没人引用的
     # 私有常量，而这一条正是给 `loment version <exe>` 与 `tur_edition()` 用的。
-    _blob = (_TUR_MAGIC + getattr(mod, "profile", "tur2026.1")).encode("utf-8")
+    _blob = (_TUR_MAGIC + getattr(mod, "profile", potato_from.DEFAULT_EDITION)).encode("utf-8")
     _esc = "".join(f"\\{x:02X}" for x in _blob)
     globals_.append(f'@{_TUR_SYM} = global [{len(_blob) + 1} x i8] c"{_esc}\\00"')
     out += globals_
@@ -11157,7 +11164,8 @@ def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3,
 
     _fu = front_door(path)
     # **版次是整程序属性**（`docs/296` §1.1）：依赖按根单元那一档读。根没声明时用它
-    # 自己的（Tur 1）。自举侧一直是这个口径（`PROF_OFF` 只由根写）。
+    # 自己的 —— 前门已经把它解成**默认版次**（最新那一版，`DEFAULT_EDITION`）。
+    # 自举侧一直是这个口径（`PROF_OFF` 只由根写）。
     _eff = profile or _fu.profile
     text = _fu.source
     if _eff in TUR2_PLUS and _fu.profile not in TUR2_PLUS:
@@ -11176,6 +11184,21 @@ def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3,
     # 混成一张表的话，每个被 `use` 进来的库都会"因为全局表里有定义"而被误判成**库写了
     # choose** —— 那会把 E022 第三条变成对所有库开火。
     toks = lomc.lex(text)
+    # **版次不静默**（`potato_from.DEFAULT_EDITION` 的注）：无声明单元里**声明**了
+    # 新版次的关键字（`break` / `continue` / `defer` / `print_num` / `lgc`）时，
+    # 旧读法会把它当标识符、新读法会把它当语法 —— 同一份源**静默改义**。
+    # 这里响亮地拒：改名，或在文件头写 `choose write grammar <旧版次>` 钉住读法。
+    # 只在**生效版次比这份源自己写的更新**时触发；显式写了当前版次的人已经选过了。
+    if _eff in TUR2_PLUS and (_fu.spelling == "" or _fu.profile != _eff):
+        _hits = potato_from.edition_collision_hits(
+            toks, potato_from.collision_names_through(_eff))
+        if _hits:
+            _ln, _col, _nm = _hits[0]
+            raise potato_from.FrontDoorRefused(
+                f"第 {_ln} 行: `{_nm}` 在新版次里是语法关键字，而这份源没有把读法"
+                f"钉在它上面 —— 旧读法把它当标识符，默认读法把它当语法，"
+                f"两者含义不同。改个名，或在文件头写 `choose write grammar tur2026.1`"
+                f"（或 `tur2026.2`）钉住旧读法。")
     own = SwitchTable()
     _collect_switches(toks, own)
     tbl = sw if sw is not None else own

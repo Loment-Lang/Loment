@@ -383,6 +383,14 @@ RULES = [
      "`lgc` 与 `no_gc` 冲突",
      "`no_gc` 的定义是「产物里没有收集器」；`lgc` 是控制收集器何时跑的语句。"
      "两者定义上矛盾，所以在 `no_gc` 单元里是编译期拒绝，而不是运行期无事可做。"),
+    # E040: **版次碰撞**（`docs/312`）。无声明单元里**声明**了新版次的关键字 ——
+    # 旧读法把它当标识符、默认读法把它当语法，同一份源会**静默改义**。
+    # 这不是"写法错"，是"这份源该说清自己要哪一版"：修法只有改名或钉版次两条。
+    ("E040", r"在新版次里是语法关键字|does not pin its reading to the current edition",
+     "新版关键字与你的名字撞了",
+     "这个拼法在新版次里是语法关键字，而在旧版次里是合法标识符 —— 默认读法会改变"
+     "这份源的含义。**两个修法**：把那个名字改掉；或在文件头写 "
+     "`choose write grammar tur2026.1`（或 `tur2026.2`）把读法钉到旧版次。"),
     # ---- E900（`#773`，2026-10-19）：**工具链进程死了，而且没留下诊断**。
     #
     # 这一条不是编译器说的，是**启动器**在收尸时合成的：编译器（或链接器、报错器自己）
@@ -473,6 +481,7 @@ ASCII_ONE_LINER: dict[int, str] = {
     37: "an LSPE policy lock does not match this artifact",
     38: "an `lspe pass` block with no reason",
     39: "`lgc` needs a collector, but this unit chose `no_gc`",
+    40: "a new-edition keyword collides with a name in an undeclared source",
     # E9xx: internal. `loment codes` lists this block after the user codes
     # (`#773`: a tool that dies without a record is still a failure that must speak).
     900: "a tool in the chain died before it could report (internal) - report it with the unit",
@@ -536,6 +545,7 @@ TITLE_EN: dict[int, str] = {
     37: "an LSPE policy lock does not match",
     38: "`lspe pass` needs a reason",
     39: "`lgc` conflicts with `no_gc`",
+    40: "a new keyword collides with a name",
     900: "the tool died without reporting (internal)",
 }
 
@@ -655,6 +665,21 @@ CARDS: dict[int, Card] = {
         ),
         yes="`gc_manual` / `gc_auto` / `gc_auto_alpha` 下的 `lgc`",
         no="`no_gc` 下的 `lgc`",
+    ),
+    40: Card(
+        what="这份源没有把读法钉在生效版次上，却把一个**新版次的关键字**当名字声明了 —— "
+             "旧读法会把它当标识符，默认读法会把它当语法。",
+        why="新版次只加语法，但有些新语法**必须**用旧版次里的合法标识符（`break` / "
+            "`continue` / `defer` / `print_num` / `lgc`）。同一份源在两种读法下含义不同，"
+            "而默认读法已经是**最新版次** —— 静默按新版读会改变旧文件的含义。"
+            "所以编译器在这里停下来问一句，而不是替你选。",
+        fixes=(
+            "把那个名字改掉（例如 `break` → `halt`、`defer` → `later`）。",
+            "或在文件头写 `choose write grammar tur2026.1`，把整份源钉回旧读法。",
+            "只想要 2026.2 的语法、不要 2026.3 的新词，就写 `choose write grammar tur2026.2`。",
+        ),
+        yes="显式钉住版次的源；把 `break` / `lgc` 当**语法**用（不是当名字）",
+        no="无声明 + 把新版关键字当变量/参数/函数名",
     ),
     1: Card(
         what="两处类型对不上 —— 返回值与声明、实参与形参、载荷与变体、内建实参、赋值两侧。",
@@ -1306,6 +1331,24 @@ CARDS_EN: dict[int, Card] = {
         ),
         yes="`lgc` under `gc_manual` / `gc_auto` / `gc_auto_alpha`",
         no="`lgc` under `no_gc`",
+    ),
+    40: Card(
+        what="This source does not pin its reading to the current edition, yet it declares a "
+             "name that a **newer edition treats as syntax** - the old reading sees an "
+             "identifier, the default reading sees a keyword.",
+        why="Editions only add syntax, but some additions **must** reuse words that were legal "
+            "identifiers in an older edition (`break` / `continue` / `defer` / `print_num` / "
+            "`lgc`). The same source means different things under the two readings, and the "
+            "default is now the **newest edition** - reading it as the new one silently changes "
+            "an old file's meaning. The compiler stops and asks instead of choosing for you.",
+        fixes=(
+            "Rename the identifier (for example `break` -> `halt`, `defer` -> `later`).",
+            "Or pin the whole source to the old reading: `choose write grammar tur2026.1`.",
+            "If you want 2026.2 syntax but not the 2026.3 words, write "
+            "`choose write grammar tur2026.2`.",
+        ),
+        yes="a source that pins its edition; `break` / `lgc` used as **syntax**, not as a name",
+        no="no declaration + a new keyword used as a variable / parameter / function name",
     ),
     1: Card(
         what="Two types do not line up - the return value against the declaration, an argument "

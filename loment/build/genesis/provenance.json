@@ -8,7 +8,7 @@
   "genesis": {
     "mode": "100755",
     "name": "lomelf-linux-x64.elf",
-    "sha256": "6baf9ea32ef2735b11a2521f6ab0a9ae4de1eb721afc3adcfe6fd5d70bf72c61",
+    "sha256": "9394f816352ac09eb1dfbc7f5bb37b7c834d5d583a777a91989655a2c6a72fff",
     "size": 226952
   },
   "inputs": {
@@ -19,12 +19,12 @@
     },
     "seed": {
       "path": "loment/build/selfhost_driver.ll",
-      "sha256": "92c0f022299ba098b2182f714939154b0ba4725842cc5fda40be1b41760d11d8",
-      "size": 5036180
+      "sha256": "76e32aadbed19963f6f7395ab9a6eb087269d47d3d2216ddb5d0925eb026e286",
+      "size": 5054077
     }
   },
   "mirror_ir": {
-    "sha256": "fbf069cec9534ea7c574233c8fc892949b8832a7d668a1b06c29ab0ca9e9b2da",
+    "sha256": "16bc76031014dbaf28dcd77df3fe6145a7c840b85ff216be984acd674031e821",
     "size": 1310577
   },
   "toolchain": {

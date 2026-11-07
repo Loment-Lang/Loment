@@ -1066,8 +1066,10 @@ def test_cli_reports_parse_errors_without_traceback():
     traceback。对"照指南写第一个程序"的人, 这是最坏的第一印象, 而且它看起来像编译器崩了,
     而不是"你写错了"。
     """
+    # 裸 `return;` 从 2026.2 起是合法写法，而**默认已经是最新版次**（`docs/312`）——
+    # 所以这一格显式钉 Tur 1，测的仍是"语法错给一行 [ERR]，不甩回溯"。
     cases = {"漏了分号": "module a\n\nconst X: u32 = 3\n",
-             "无值 return": "module b\n\nfn f() {\n    return;\n}\n"}
+             "无值 return": "choose write grammar tur2026.1\nmodule b\n\nfn f() {\n    return;\n}\n"}
     with tempfile.TemporaryDirectory() as td:
         for name, src in cases.items():
             p = Path(td) / "bad.lomt"

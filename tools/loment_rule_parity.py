@@ -377,7 +377,10 @@ _CASES: list[tuple[str, str]] = [
     # 注意：`let x = 1;`（#7）与 `let a: f64 = 1.0;`（#323）也量过，是 **DIFF** ——
     # 自举报 E002、参考报 E019。DIFF 是"假阳性/口径漂移"那一档，必须为 0，所以这两条
     # **不能**进这份表；它们记在各自的 issue 上，修好（变成 EQUAL）再收进来。
+    # **钉 Tur 1**：默认版次已是最新（`docs/312`），循环里的 `break;` 在那里是语法。
+    # 这条探针要测的仍是「Tur 1 里 `break` 不是关键字、是个未声明的名字」。
     ("break-not-a-name",
+     "choose write grammar tur2026.1\n"
      "module m\n\nfn f() -> u32 {\n    let i: u32 = 0;\n    while i < 3 {\n        break;\n    }\n    return i;\n}\n"),
     ("undeclared-in-return",
      "module m\n\nfn f() -> u32 {\n    return undefined_thing;\n}\n"),
@@ -418,8 +421,9 @@ _CASES: list[tuple[str, str]] = [
      "module m\n\nfn f() -> u32 {\n    let v: u32 = 0b1010;\n    return v;\n}\n"),
     # ---- 自举侧"死给你看"的两条 (issue #335 / #44) --------------------------------
     # 裸 `return;` 参考实现报 E019；自举侧原先**段错误、零输出**。
+    # **钉 Tur 1**：2026.2 起裸 `return;` 是合法写法，而默认已是最新版次（`docs/312`）。
     ("bare-return",
-     "module m\n\nfn f() {\n    return;\n}\n"),
+     "choose write grammar tur2026.1\nmodule m\n\nfn f() {\n    return;\n}\n"),
     # 深层嵌套参考实现报 E023（源码太深，上限 64 层）；自举侧原先走到 codegen 才把栈用穿
     # —— 也是段错误。**表达式要包一层括号**，否则后面的用例会被并进这个元组。
     ("deep-nesting",

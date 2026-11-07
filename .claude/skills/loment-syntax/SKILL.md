@@ -13,7 +13,7 @@ you are reading. The entry skill (`loment`) carries the map; this file carries i
 | Construct | How it is written |
 |---|---|
 | Module | `module <name>` on the first line after the optional grammar declaration (no semicolon) |
-| Grammar | `choose write grammar <name>` **before `module`**, once per file; no declaration means Tur 1 - see `loment-tur` 2.0 |
+| Grammar | `choose write grammar <name>` **before `module`**, once per file; no declaration means the **newest Tur edition** (today `tur2026.3`) - see `loment-tur` 2.0.3 |
 | Entry point | `fn main()` (no parameters, no return type) is the normal entry; `fn _start()` is the freestanding entry and wins if both exist - see 2.0.12 |
 | Project mode | `choose` - **seven dimensions**, each written at most once and **only in the entry unit**; libraries may not write it (E22). `std` / `no_std` · `gc_manual` / `gc_auto` / `gc_auto_alpha` / `no_gc` · `runtime` / `no_runtime` · `sealed` / `hosted` · `vm` / `no_vm` · `lms_full` / `lms_forensic_admin` / `lms_daily_admin` / `lms_manage_only_admin` · `lspe_open_admin` / `lspe_close_admin` - see 2.1 |
 | Switch setting | `addin <name>` (**entry unit only**) - pulls in a "switch settings" unit, see 2.2 |

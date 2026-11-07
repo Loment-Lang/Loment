@@ -17,10 +17,14 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 
 import loment_suite  # noqa: E402
+import loment_release  # noqa: E402
 import loment_hotfix as hf  # noqa: E402
+
 import loment_staging as st  # noqa: E402
 import loment_update as lu  # noqa: E402
 import loment_projection as pr  # noqa: E402
+
+BASE = loment_release.RELEASE
 
 TESTS: list = []
 
@@ -87,7 +91,7 @@ def _keyword(word: str):
     return edit
 
 
-def _project(repo: Path, t: Path, release="v0.1.5-hot.1") -> dict:
+def _project(repo: Path, t: Path, release=f"v{BASE}-hot.1") -> dict:
     with tempfile.TemporaryDirectory() as w:
         proj = pr.project(repo, "B0", "HEAD", Path(w) / "work", release=release)
     return proj.as_dict()
@@ -149,7 +153,7 @@ def test_a_manifest_claiming_a_feature_is_refused() -> None:
         _commit(repo, "fix: real fix\n\nHotfix: yes", _fix)
         proj = _project(repo, t)
         proj["line"][0]["kind"] = "feature"
-        cand = _candidate(t / "cand", repo, "v0.1.5-hot.1", proj)
+        cand = _candidate(t / "cand", repo, f"v{BASE}-hot.1", proj)
         try:
             lu.check(cand, repo)
         except lu.Reject as e:
@@ -168,10 +172,10 @@ def test_status_lists_the_line_and_the_restart_required() -> None:
         good = _commit(repo, "fix: real fix\n\nHotfix: yes", _fix)
         bad = _commit(repo, "fix: adds a keyword\n\nHotfix: yes", _keyword("hotline"))
         proj = _project(repo, t)
-        cand = _candidate(t / "cand", repo, "v0.1.5-hot.1", proj)
-        staged = st.stage(cand, repo, "v0.1.5-hot.1")
+        cand = _candidate(t / "cand", repo, f"v{BASE}-hot.1", proj)
+        staged = st.stage(cand, repo, f"v{BASE}-hot.1")
         st.take(staged)
-        text = st.status("0.1.5")
+        text = st.status(BASE)
         assert good[:12] in text and bad[:12] in text, text
         assert "restart required" in text and "(digest)" in text, text
     print("      status：线上那一条 + 要重启的那一条（带理由）")
@@ -186,7 +190,7 @@ def test_the_tree_hash_reproduces_the_artifact() -> None:
         one = _project(repo, t / "a")
         two = _project(repo, t / "b")
         assert one["tree"] and one["tree"] == two["tree"]
-        man = hf.build(repo, "v0.1.5-hot.1", projection=one)
+        man = hf.build(repo, f"v{BASE}-hot.1", projection=one)
         assert man["projection"]["tree"] == one["tree"]
     print("      清单里的 tree 哈希重放得出来（两次投影同一棵树）")
 
@@ -198,16 +202,16 @@ def test_an_earlier_point_is_a_rollback() -> None:
         _home(t)
         repo = _repo(t)
         _commit(repo, "fix: real fix\n\nHotfix: yes", _fix)
-        proj2 = _project(repo, t / "p2", release="v0.1.5-hot.2")
-        proj1 = _project(repo, t / "p1", release="v0.1.5-hot.1")
-        st.stage(_candidate(t / "c2", repo, "v0.1.5-hot.2", proj2), repo, "v0.1.5-hot.2")
-        st.stage(_candidate(t / "c1", repo, "v0.1.5-hot.1", proj1), repo,
-                 "v0.1.5-hot.1", current="v0.1.5-hot.2", allow_rollback=True)
-        for rel in ("v0.1.5-hot.2", "v0.1.5-hot.1"):
-            got = st.poll("0.1.5")
+        proj2 = _project(repo, t / "p2", release=f"v{BASE}-hot.2")
+        proj1 = _project(repo, t / "p1", release=f"v{BASE}-hot.1")
+        st.stage(_candidate(t / "c2", repo, f"v{BASE}-hot.2", proj2), repo, f"v{BASE}-hot.2")
+        st.stage(_candidate(t / "c1", repo, f"v{BASE}-hot.1", proj1), repo,
+                 f"v{BASE}-hot.1", current=f"v{BASE}-hot.2", allow_rollback=True)
+        for rel in (f"v{BASE}-hot.2", f"v{BASE}-hot.1"):
+            got = st.poll(BASE)
             assert got is not None and got.name == rel, (rel, got)
             st.take(got)
-        text = st.status("0.1.5")
+        text = st.status(BASE)
         assert "(rollback)" in text, text
     print("      回到线上的前一个点：status 标成 rollback，不是 upgrade")
 
@@ -221,7 +225,7 @@ def test_a_manifest_from_another_baseline_is_refused() -> None:
         _commit(repo, "fix: real fix\n\nHotfix: yes", _fix)
         proj = _project(repo, t)
         proj["baseline"] = "0.1.6"
-        cand = _candidate(t / "cand", repo, "v0.1.5-hot.1", proj)
+        cand = _candidate(t / "cand", repo, f"v{BASE}-hot.1", proj)
         try:
             lu.check(cand, repo)
         except lu.Reject as e:

@@ -46,7 +46,8 @@ FIXED_CORE_LIST = "loment/hotswap/fixed.txt"
 
 SIG_FILES = ("SHA256SUMS", "SHA256SUMS.asc", "loment-signing.pub.pem")
 
-_TAG_RE = re.compile(r"^v(?P<base>\d+\.\d+\.\d+)(?:-(?P<kind>[A-Za-z0-9.]+))?$")
+#: 版本可以有**三段以上**（`0.1.5.1` 就是四段）。与 `loment_staging._TAG_RE` 同一条。
+_TAG_RE = re.compile(r"^v(?P<base>\d+(?:\.\d+)*)(?:-(?P<kind>[A-Za-z0-9.]+))?$")
 _SUM_RE = re.compile(r"^([0-9a-f]{64})\s+\*?(.+?)\s*$")
 _CAP_RE = re.compile(r"^\s*capability\s+(.+?)\s*$")
 _RELEASE_RE = re.compile(r'^RELEASE\s*=\s*"([^"]+)"', re.M)

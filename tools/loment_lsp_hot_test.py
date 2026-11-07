@@ -20,8 +20,12 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 
 import loment_suite  # noqa: E402
+import loment_release  # noqa: E402
 import loment_hotart as ha  # noqa: E402
+
 import loment_hotload as hl  # noqa: E402
+
+BASE = loment_release.RELEASE
 
 TESTS: list = []
 
@@ -179,10 +183,10 @@ def test_a_running_lsp_replaces_itself_at_the_safe_point() -> None:
         old = _tree(t / "old")
         new = _tree(t / "new", patch=True)
         elf = _build(old)
-        proj = {"baseline": "0.1.5", "release": "v0.1.5-hot.1", "tree": "lsp",
+        proj = {"baseline": BASE, "release": f"v{BASE}-hot.1", "tree": "lsp",
                 "line": [{"sha": "e" * 40, "subject": "fix: bump the server version",
                           "kind": "fix"}], "evicted": []}
-        out = ha.package(old, new, "v0.1.5-hot.1", t / "art", entry=ENTRY, projection=proj)
+        out = ha.package(old, new, f"v{BASE}-hot.1", t / "art", entry=ENTRY, projection=proj)
         assert out is not None
         cand = out / "candidate.hot"
 

@@ -16,8 +16,12 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 
 import loment_suite  # noqa: E402
+import loment_release  # noqa: E402
 import loment_update as lu  # noqa: E402
+
 import loment_hotfix as hf  # noqa: E402
+
+BASE = loment_release.RELEASE
 
 TESTS: list = []
 
@@ -55,7 +59,7 @@ def _tree(dst: Path, *, append: tuple[str, str] | None = None) -> Path:
 
 def _build(**kw) -> dict:
     with tempfile.TemporaryDirectory() as t:
-        return hf.build(_tree(Path(t) / "tree", **kw), "v0.1.5-hot.1")
+        return hf.build(_tree(Path(t) / "tree", **kw), f"v{BASE}-hot.1")
 
 
 def _candidate(dst: Path, tree: Path, release: str) -> Path:
@@ -95,7 +99,7 @@ def test_every_field_is_computed_from_the_tree() -> None:
     assert set(man) == want, sorted(set(man) ^ want)
     assert man["schema"] == hf.SCHEMA
     assert man["prerelease"] is True
-    assert man["baseline"] == "0.1.5"
+    assert man["baseline"] == BASE
     assert man["language"] == hf.read_release(ROOT)
     assert man["contract"] and all(len(v) == 64 for v in man["contract"].values())
     assert set(man["surface"]) == {"keywords", "syntax", "diagnostics"}
@@ -140,9 +144,9 @@ def test_a_signed_prerelease_manifest_is_accepted() -> None:
     with tempfile.TemporaryDirectory() as t:
         t = Path(t)
         tree = _tree(t / "tree")
-        cand = _candidate(t / "cand", tree, "v0.1.5-hot.1")
+        cand = _candidate(t / "cand", tree, f"v{BASE}-hot.1")
         man = lu.check(cand, tree)
-        assert man["release"] == "v0.1.5-hot.1"
+        assert man["release"] == f"v{BASE}-hot.1"
         payload = json.loads((cand / "hotfix.json").read_text(encoding="utf-8"))
         assert payload["surface"] == hf.surface(tree)
     print("      真签真验：清单 + SHA256SUMS + .asc 一起过准入")
@@ -153,7 +157,7 @@ def test_a_stable_release_manifest_is_refused() -> None:
     with tempfile.TemporaryDirectory() as t:
         t = Path(t)
         tree = _tree(t / "tree")
-        man = hf.build(tree, "v0.1.5")
+        man = hf.build(tree, f"v{BASE}")
         assert man["prerelease"] is False
         dst = t / "cand"
         dst.mkdir()

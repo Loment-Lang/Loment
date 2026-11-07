@@ -370,6 +370,7 @@ jobs:
             "SHA256SUMS.asc" \
             "loment-signing.asc" \
             "FINGERPRINT" \
+            "hotfix.json" \
             "loment-$VER-linux-x64.tar.gz" \
             "loment-$VER-windows-x64-setup.exe" \
             "loment-$VER-windows-x64.zip" \
@@ -381,4 +382,4 @@ jobs:
             exit 1
           fi
           echo "$have"
-          echo "八个 asset 齐了（含归档之外的签名、公钥与指纹）"
+          echo "九个 asset 齐了（含 hotfix.json、归档之外的签名、公钥与指纹）"

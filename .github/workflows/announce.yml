@@ -51,7 +51,8 @@
 #   * 填 `tag`（已经存在的那个）→ 按 release 组一条，**补发**用；
 #   * 或填 `message` → 原样发这段话（不含标签，标签照加）。**不看 tag** ——
 #     "我们接下来做什么" 这种不属于任何 release 的话，走这一支；
-#   * `dry_run` 留 true → 只把两个平台要发的稿子打出来，不碰任何 API。
+#   * `dry_run` 留 true → 只把两个平台要发的稿子打出来，不碰任何 API；
+#   * `platform` 选 both / bluesky / mastodon → 只发选中的一边，另一边完全跳过。
 #
 # 看着顺眼了再跑一遍 dry_run=false，或者干脆等下次发版自动发。
 
@@ -73,6 +74,14 @@ on:
         description: "只打印，不发出去"
         type: boolean
         default: true
+      platform:
+        description: "发到哪个平台"
+        type: choice
+        options:
+          - both
+          - bluesky
+          - mastodon
+        default: both
 
 permissions:
   contents: read
@@ -96,6 +105,7 @@ jobs:
           BODY: ${{ github.event.release.body }}
           URL: ${{ github.event.release.html_url }}
           DRY: ${{ inputs.dry_run }}
+          PLATFORM: ${{ inputs.platform }}
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
@@ -120,8 +130,13 @@ jobs:
           message = (os.environ.get("MESSAGE") or "").strip()
           dry = (os.environ.get("DRY") or "").strip().lower() in ("1", "true", "yes")
 
-          mast_on = bool(instance and token)
-          bsky_on = bool(bsky_handle and bsky_password)
+          platform = (os.environ.get("PLATFORM") or "both").strip().lower()
+          if platform not in ("both", "bluesky", "mastodon"):
+              print("platform 只能是 both / bluesky / mastodon，收到：%s" % platform,
+                    file=sys.stderr)
+              sys.exit(1)
+          mast_on = bool(instance and token) and platform in ("both", "mastodon")
+          bsky_on = bool(bsky_handle and bsky_password) and platform in ("both", "bluesky")
           if not mast_on and not bsky_on:
               print("MASTODON_INSTANCE / MASTODON_TOKEN 与 BSKY_HANDLE / "
                     "BSKY_APP_PASSWORD 都没配齐 —— 跳过播报。")

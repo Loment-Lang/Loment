@@ -319,11 +319,15 @@ jobs:
             set -- --generate-notes
           fi
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG 已存在 —— 只覆盖 asset"
-            gh release upload "$TAG" loment/dist/* --clobber
-          else
-            gh release create "$TAG" --title "Loment $VER" $risk "$@" loment/dist/*
+            # `#438`: 已发布的 tag **不许原地改**。`--clobber` 会让同一个 tag 的
+            # 字节被悄悄换掉, 而 tag、release 页面和 GitHub 的记录都不说变过 ——
+            # 别人按 tag 记下的摘要或缓存就再也对不上。要重发就删掉 release 并
+            # 换一个新 tag; 那才是给外面的"字节变了"信号。
+            echo "::error::Release $TAG 已发布 —— 拒绝覆盖 asset (#438)。"
+            echo "::error::同一个 tag 必须指向同一组字节; 要重发就删掉 release 并换新 tag。"
+            exit 1
           fi
+          gh release create "$TAG" --title "Loment $VER" $risk "$@" loment/dist/*
           # `#419`: 把摘要写进 release **正文** —— 正文与 asset 是两个渠道，用户拿到的
           # 核对点因此不必来自被核对的归档。安装器打印的也是同一份摘要。
           #

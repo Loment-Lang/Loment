@@ -42,7 +42,9 @@
 #
 # 判据是 `loment_hosted_test` 的四个生态那几条：缺哪个包，**哪一条红**（不是静默
 # 少跑一条）。这正是要的效果 —— 少一个包就是一条假红。
-FROM ubuntu:24.04
+# 基础镜像**按 digest 钉住** (#475): `ubuntu:24.04` 是可变 tag, 上游重新推送就能换掉
+# 整张镜像。digest 是 `docker pull ubuntu:24.04` 时拿到的 manifest list 摘要。
+FROM ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
 ENV DEBIAN_FRONTEND=noninteractive
 
 # 这一组与原来 `gate.yml` 那一步**逐字对应**（`qemu-system-x86 qemu-user golang-go
@@ -69,9 +71,12 @@ RUN apt-get update -qq && apt-get install -y -qq \
     && rm -rf /var/lib/apt/lists/*
 
 # `gh`：`loment_publish` 用它（runner 镜像自带，容器里没有）。
+# keyring 是 apt 的信任根 —— 下载后先核 **固定 sha256** 再装进 keyring 目录 (#475)。
 RUN mkdir -p -m 755 /etc/apt/keyrings \
-    && wget -qO /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && wget -qO /tmp/githubcli-archive-keyring.gpg \
          https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    && echo "6084d5d7bd8e288441e0e94fc6275570895da18e6751f70f057485dc2d1a811b  /tmp/githubcli-archive-keyring.gpg" | sha256sum -c - \
+    && mv /tmp/githubcli-archive-keyring.gpg /etc/apt/keyrings/githubcli-archive-keyring.gpg \
     && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
          > /etc/apt/sources.list.d/github-cli.list \
@@ -91,8 +96,12 @@ RUN apt-get update -qq && apt-get install -y -qq gdb && rm -rf /var/lib/apt/list
 # 用固定 tarball 而不是"下载一个 setup 脚本再执行"：前者可复现（`llvm.sh` 那一步是
 # apt.llvm.org 官方给的唯一路子，两回事）。
 RUN arch=$(dpkg --print-architecture); \
-    case "$arch" in amd64) na=x64 ;; arm64) na=arm64 ;; *) echo "不认识的架构 $arch" >&2; exit 1 ;; esac; \
+    case "$arch" in \
+      amd64) na=x64; nsha=b4e336584d62abefad31baecff7af167268be9bb7dd11f1297112e6eed3ca0d5 ;; \
+      arm64) na=arm64; nsha=dbe339e55eb393955a213e6b872066880bb9feceaa494f4d44c7aac205ec2ab9 ;; \
+      *) echo "不认识的架构 $arch" >&2; exit 1 ;; esac; \
     wget -qO /tmp/node.tar.xz "https://nodejs.org/dist/v20.19.0/node-v20.19.0-linux-$na.tar.xz" \
+    && echo "$nsha  /tmp/node.tar.xz" | sha256sum -c - \
     && tar -xJf /tmp/node.tar.xz -C /opt \
     && mv "/opt/node-v20.19.0-linux-$na" /opt/node \
     && for b in node npm npx; do ln -sf "/opt/node/bin/$b" "/usr/local/bin/$b"; done \
@@ -102,7 +111,10 @@ RUN arch=$(dpkg --print-architecture); \
 # LLVM 19 + 不带版本号的符号链接 —— 与原来 `gate.yml` 里那几行**同一套**。
 # 为什么非要 19：仓里发出的 IR 用 `#dbg_declare`（LLVM 19 起的调试记录语法），而 ubuntu
 # 自带的 clang 是 18 → `--debug` 那几条判据会报 `error: expected instruction opcode`。
+# `llvm.sh` 是**下载后执行**的远端脚本 —— 钉住它的 sha256 (#475)。上游一改, 这里就
+# 构建失败, 逼一次 review 再抬钉子, 而不是让新脚本悄悄以 root 跑进门禁的信任根。
 RUN wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh \
+    && echo "03878e08f47b66cc95bc4b544b0db3c6d9ce8d60e6cf2492ae357984330a9eae  /tmp/llvm.sh" | sha256sum -c - \
     && chmod +x /tmp/llvm.sh && /tmp/llvm.sh 19 \
     && for t in clang clang++ lld ld.lld llvm-objdump llvm-nm llvm-ar; do \
          if [ -x "/usr/lib/llvm-19/bin/$t" ]; then ln -sf "/usr/lib/llvm-19/bin/$t" "/usr/local/bin/$t"; fi; \

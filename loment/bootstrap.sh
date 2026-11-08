@@ -40,6 +40,40 @@ fi
 
 # ---- 起点: genesis (无 clang) 优先
 if [ -x "$genesis" ] && [ "${LOMENT_USE_CLANG:-0}" != 1 ]; then
+    # genesis 是**可执行代码**, 且整条链的根就在它身上 —— 执行前先核对
+    # `SHA256SUMS` (#437)。同目录的哈希只防"拿错了文件", 不防恶意替换; 但
+    # "什么都不查就执行"连前者都没有。真正证明它等于源码产物的是
+    # `tools/loment_genesis.py --check/--verify` 与门禁里那条重建判据。
+    sums=loment/build/genesis/SHA256SUMS
+    if [ ! -f "$sums" ]; then
+        echo "FAIL: 缺 $sums —— 无法校验 genesis, 拒绝执行" >&2
+        exit 1
+    fi
+    want=$(head -n 1 "$sums" | cut -d' ' -f1)
+    got=
+    if command -v sha256sum >/dev/null 2>&1; then
+        got=$(sha256sum "$genesis" | cut -d' ' -f1)
+    elif command -v shasum >/dev/null 2>&1; then
+        got=$(shasum -a 256 "$genesis" | cut -d' ' -f1)
+    elif command -v openssl >/dev/null 2>&1; then
+        got=$(openssl dgst -sha256 -r "$genesis" | cut -d' ' -f1)
+    fi
+    if [ -z "$got" ] && [ "${LOMENT_ALLOW_UNVERIFIED_GENESIS:-0}" != 1 ]; then
+        echo "FAIL: 没有 sha256 工具 (sha256sum / shasum / openssl) 可校验 genesis" >&2
+        echo "      set LOMENT_ALLOW_UNVERIFIED_GENESIS=1 to run it unverified" >&2
+        exit 1
+    fi
+    if [ -n "$got" ] && [ "$got" != "$want" ]; then
+        echo "FAIL: genesis 的 sha256 与 SHA256SUMS 不符 —— 拒绝执行" >&2
+        echo "      want $want" >&2
+        echo "      got  $got" >&2
+        exit 1
+    fi
+    if [ -n "$got" ]; then
+        echo "== genesis sha256 verified (${got})"
+    else
+        echo "== WARNING: genesis NOT verified (LOMENT_ALLOW_UNVERIFIED_GENESIS=1)"
+    fi
     work=$(mktemp -d)
     trap 'rm -rf "$work"' EXIT
     link() {   # link IN.ll OUT.bin

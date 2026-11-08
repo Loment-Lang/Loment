@@ -676,6 +676,32 @@ def test_e5_proves_loop_indices_only_with_a_matching_unsigned_guard():
 
 
 @test
+def test_lspe_cache_cold_warm_identical_and_mismatch_is_fatal():
+    """缓存不许改变产物；哈希不一致是硬错误；目录不许落在 GLOB 里（`#752`）。"""
+    src = ("module m\n\nfn f(a: [u32; 4]) -> u32 {\n    return a[0];\n}\n")
+    with tempfile.TemporaryDirectory() as td:
+        dims = {"gc": "gc_manual"}
+        d1, _ = _unit(src, cache=lspe.Cache(td, "m", "h1", dims, 3))
+        d2, _ = _unit(src, cache=lspe.Cache(td, "m", "h1", dims, 3))
+        assert lspe.public(d1) == lspe.public(d2), "冷/热构建的台账必须逐字段相同"
+
+        bad = lspe.Cache(td, "m", "h1", dims, 3)
+        key = next(iter(bad.data))
+        bad.data[key]["hash"] = "deadbeef"
+        try:
+            _unit(src, cache=bad)
+            assert False, "缓存哈希不一致必须是硬错误"
+        except ValueError as e:
+            assert "缓存哈希不一致" in str(e), e
+
+        try:
+            lspe.Cache(ROOT, "m", "h1", dims, 3, directory=ROOT / "loment")
+            assert False, "缓存目录不许落在 GLOB 目录里"
+        except ValueError:
+            pass
+
+
+@test
 def test_i5_divergence_probe_is_caught():
     """I5 的分歧探针：同一份源、把一侧的规则改掉，台账必须**看得出**不同（`#764`）。
 

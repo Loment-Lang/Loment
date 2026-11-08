@@ -1306,9 +1306,24 @@ fn is_dir_at(dirp: ptr, dl: u32, dent: ptr, nm: u32, scr: ptr) -> u32 {
     return 1;
 }
 
+/// 工具链自己拥有的包名 (#980): 项目本地的 `deps/<名字>/` 不许顶掉它们。
+/// 与参考实现 `RESERVED_PACKAGE_NAMES`、lompi 的 `pkg_reserved_name` **一起改**。
+fn name_reserved(s: ptr, off: u32, len: u32) -> u32 {
+    let p: ptr = ptr_add(s, off);
+    if len == 3 && streq(p, 3, "std") == 1 { return 1; }
+    if len == 4 && streq(p, 4, "libl") == 1 { return 1; }
+    if len == 4 && streq(p, 4, "host") == 1 { return 1; }
+    if len == 8 && streq(p, 8, "internet") == 1 { return 1; }
+    if len == 2 && streq(p, 2, "os") == 1 { return 1; }
+    return 0;
+}
+
 /// `<名字>` 是否在 `<根>/deps/<名字>/<名字>.lomt` —— 项目本地的依赖 (lompi 落点)。
 /// 命中写进 tmp 并返回长度; 0 = 没这个目录。
 fn try_deps(root: ptr, rn: u32, src: ptr, off: u32, len: u32, tmp: ptr, scr: ptr) -> u32 {
+    if name_reserved(src, off, len) == 1 {
+        return 0;          // 工具链的名字: 让 store / 四根去解析 (#980)
+    }
     let d: u32 = 0;
     if rn > 0 {
         d = cat(tmp, d, root, rn);
@@ -1476,7 +1491,9 @@ fn try_store_layers(td: ptr, tn: u32, dev: u32, src: ptr, off: u32, len: u32,
 
 /// `use <名字>` -> 真实路径, 写进 dst, 返回长度 (0 = 找不到或有歧义)。
 /// **按层搜, 先命中先用** (与 `lomentc.resolve_name` 同规则):
-///   1.  `<项目根>/deps/<名字>/<名字>.lomt`   项目本地 (包入口)
+///   1.  `<项目根>/deps/<名字>/<名字>.lomt`   项目本地 (包入口) —— **保留名除外**:
+///       `std` / `libl` / `host` / `internet` / `os` 跳过 1 与 1b, 由 store / 四根解析
+///       (`name_reserved`, #980 —— 与参考实现的 `RESERVED_PACKAGE_NAMES` 一起改)
 ///   1b. `<项目根>/deps/<包>/<名字>.lomt`     **项目本地的包内模块**
 ///   2.  内置四根 `<根>/<名字>.lomt` —— **这一层命中必须唯一**
 ///   3.  `<store>/<名字>/<版本>/<名字>.lomt`  随包自带 (包入口)
@@ -1487,6 +1504,8 @@ fn try_store_layers(td: ptr, tn: u32, dev: u32, src: ptr, off: u32, len: u32,
 /// 模块是包的私有名字空间, 让它盖住编译器自己的模块是灾难 (加这一层时真撞上了:
 /// `store/std/0.1.0/interp.lomt` 把 `loment/selfhost/interp.lomt` 顶掉, 驱动直接编不过)。
 /// 项目本地的 `deps/` 不在此列 —— 那是使用者**显式装的**, 理应先于工具链自带的任何东西。
+/// **例外 (#980)**: 导入方自己住在商店里时不看项目本地 —— 否则使用者的 `deps/mem`
+/// 能改掉标准库内部的 `use mem`。
 ///
 /// §归属 (2026-09-20): **第 2 层与第 3 层谁在前面, 看导入方自己住在哪边。** 这不是设计
 /// 出来的, 是加包内模块那一层时撞出来的 —— 两个方向都撞得上真东西:
@@ -1513,18 +1532,25 @@ fn resolve_use_name(src: ptr, off: u32, len: u32, dst: ptr, scr: ptr, ins: u32) 
     // 一边读 base 一边往 tmp 里拼候选路径, 两者不能是同一块。
     let base: ptr = ptr_add(scr, BASE_OFF);
     // 项目本地两层: 路径命中即返回, 不需要判唯一 (参考实现也是"先命中先用")。
-    let r1: u32 = try_deps(proj, pn, src, off, len, tmp, scr);
-    if r1 > 0 {
-        return cat(dst, 0, tmp, r1);
-    }
-    let bl1: u32 = 0;
-    if pn > 0 {
-        bl1 = cat(base, 0, proj, pn);
-    }
-    bl1 = catl(base, bl1, "/deps");
-    let r1b: u32 = try_pkg_module(base, bl1, 0, src, off, len, tmp, dst, scr);
-    if r1b > 0 {
-        return r1b;
+    // **导入方住在商店里时不看项目本地** (#980): store 包自己的 `use` 不能被使用者
+    // 的 `deps/` 劫持 —— 那会让标准库的内部模块也被顶掉。
+    if ins == 0 {
+        let r1: u32 = try_deps(proj, pn, src, off, len, tmp, scr);
+        if r1 > 0 {
+            return cat(dst, 0, tmp, r1);
+        }
+        let bl1: u32 = 0;
+        if pn > 0 {
+            bl1 = cat(base, 0, proj, pn);
+        }
+        bl1 = catl(base, bl1, "/deps");
+        let r1b: u32 = 0;
+        if name_reserved(src, off, len) == 0 {
+            r1b = try_pkg_module(base, bl1, 0, src, off, len, tmp, dst, scr);
+        }
+        if r1b > 0 {
+            return r1b;
+        }
     }
     // 导入方住在商店里: 商店两层提到四根前面 (§归属)。
     if ins == 1 {

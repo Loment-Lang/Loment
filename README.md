@@ -72,8 +72,8 @@ hello from Loment
 ## Getting help
 
 Ask in an [issue](https://github.com/Loment-Lang/loment/issues), on
-[Discord](https://discord.gg/rGw7NRNU) or on [Mastodon](https://mastodon.social/@Loment).
-Questions are as welcome as bug reports.
+[Discord](https://discord.gg/rGw7NRNU), [Mastodon](https://mastodon.social/@Loment) or
+[Bluesky](https://bsky.app/profile/loment.bsky.social). Questions are as welcome as bug reports.
 
 ## Contributing
 

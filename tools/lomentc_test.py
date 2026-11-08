@@ -829,6 +829,28 @@ def test_name_import_package_module_ambiguous_is_rejected():
 
 
 @test
+def test_project_deps_cannot_shadow_the_toolchain_standard_library():
+    """#980: `deps/std` 不能顶掉工具链自带的 `std`。
+
+    依赖混淆的落点就是这一层 —— 项目本地的 `deps/<名字>` 排在 store 前面。保留名
+    (`std` / `libl` / `host` / `internet` / `os`) 跳过这一层；非保留名照旧，项目本地的
+    `geom` 仍然先命中。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td)
+        std = proj / "deps" / "std"
+        std.mkdir(parents=True)
+        (std / "std.lomt").write_text("module std\npub fn magic() -> u32 { return 42; }\n",
+                                      encoding="utf-8")
+        got = lomentc.resolve_name("std", ROOT, proj)
+        assert got == ROOT / "lompi" / "store" / "std" / "0.1.0" / "std.lomt", got
+        geom = proj / "deps" / "geom"
+        geom.mkdir()
+        (geom / "geom.lomt").write_text("module geom\n", encoding="utf-8")
+        assert lomentc.resolve_name("geom", ROOT, proj) == geom / "geom.lomt"
+
+
+@test
 def test_store_modules_resolve_by_name_in_this_checkout():
     """**本仓也是一个 store 消费者**: `lompi/store` 就在仓里, 装出来的前缀才是
     `share/lompi/store`。没有 `<仓根>/lompi/store` 这一条, 在本仓写 `use vec` 一律 E018 ——

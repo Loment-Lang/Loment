@@ -17,10 +17,13 @@
 
 from __future__ import annotations
 
+import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -292,6 +295,52 @@ def test_bootstrap_needs_no_clang():
     assert str(want) in out.replace(" ", "").replace(",", ""), (
         f"bootstrap 复现的种子字节数 != 仓库里那份 ({want}): {out[-200:]!r}")
     print("      PATH 里没有 clang, bootstrap 仍四条全过 (genesis 起头)")
+
+
+@test
+def test_bootstrap_verifies_genesis_before_executing_it():
+    """#437: `bootstrap.sh` 执行 genesis 前必须核对 `SHA256SUMS`。
+
+    不跑完整 bootstrap：只在临时根里放脚本 + 占位种子 + genesis + SUM。
+
+      * 篡改二进制 —— 必须在**执行之前**失败（一个只认"同目录哈希"的检查还不够，
+        但"什么都不查就执行"连它都没有）；
+      * 未篡改 —— 必须先打出 `genesis sha256 verified`（之后执行失败与这条无关）。
+    """
+    if not sys.platform.startswith("linux"):
+        # Windows 上 Git Bash 的 `[ -x ]` 不认 ELF 的执行位，bootstrap 会退回 clang
+        # 分支 —— 这条判据要的是 genesis 那条路，所以走 WSL（与下一条判据同一套）。
+        if not _wsl():
+            print("      SKIP: 无 WSL（Windows 的 sh 不认 ELF 执行位）")
+            return
+    with tempfile.TemporaryDirectory(prefix="genesis-boot-") as td:
+        root = Path(td)
+        gdir = root / "loment" / "build" / "genesis"
+        gdir.mkdir(parents=True)
+        shutil.copy2(ROOT / "loment" / "bootstrap.sh", root / "loment" / "bootstrap.sh")
+        shutil.copy2(loment_genesis.SUMS, gdir / "SHA256SUMS")
+        # 种子只要求"存在"：校验发生在用它之前，这条判据不需要真种子。
+        (root / "loment" / "build" / "selfhost_driver.ll").write_bytes(b"; stub\n")
+        if sys.platform.startswith("linux"):
+            argv: list[str] = ["sh", str(root / "loment" / "bootstrap.sh")]
+            cwd: str | None = str(root)
+        else:
+            script = f"cd {shlex.quote(_wsl_path(root))} && sh loment/bootstrap.sh"
+            argv = [*_WSLCMD, "bash", "-lc", script]
+            cwd = None
+        tam = gdir / loment_genesis.GEN_NAME
+        tam.write_bytes(b"\x7fELF" + b"BACKDOOR" * 100)
+        os.chmod(tam, 0o755)
+        r = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=120)
+        out = (r.stdout or "") + (r.stderr or "")
+        assert r.returncode != 0, f"篡改的 genesis 被放行了: {out[-400:]!r}"
+        assert "sha256" in out and "拒绝执行" in out, out[-400:]
+
+        shutil.copy2(loment_genesis.GEN, tam)
+        os.chmod(tam, 0o755)
+        r2 = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=120)
+        out2 = (r2.stdout or "") + (r2.stderr or "")
+        assert "genesis sha256 verified" in out2, out2[-400:]
 
 
 def main() -> int:

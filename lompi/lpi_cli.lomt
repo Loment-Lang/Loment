@@ -682,6 +682,9 @@ fn cmd_resolve(ws: ptr, buf: ptr, store: ptr, av_spec: u64) -> u32 {
         return 1;
     }
     let sp: u64 = spec_split(buf, av_spec);
+    if pkg_reserved_name(((buf as u64) + (spec_name_off(sp) as u64)) as ptr, spec_name_len(sp)) == 1 {
+        return cli_die("refusing a toolchain-reserved package name (std/libl/host/internet/os)");
+    }
     let idx: u32 = sto_find_bytes2(ws, n,
                                    ((buf as u64) + (spec_name_off(sp) as u64)) as ptr,
                                    spec_name_len(sp), spec_ver_ptr(buf, sp), spec_ver_len(sp));
@@ -690,6 +693,11 @@ fn cmd_resolve(ws: ptr, buf: ptr, store: ptr, av_spec: u64) -> u32 {
         return 1;
     }
     let o: u32 = build_lock(ws, n, idx);
+    let cr: u32 = closure_reserved(ws, n);
+    if cr != PKG_NONE {
+        err_closure_reserved(ws, cr);
+        return 1;
+    }
     sys_write(1, R(ws), o as u64);
     return 0;
 }
@@ -990,6 +998,7 @@ fn print_help() {
     out_lit("  lompi install <name> [--into DIR] [--apply] [--from-lock F]  fetch/validate/install\n");
     out_lit("        --apply        really write the files (target dirs must already exist)\n");
     out_lit("        --from-lock F  install exactly the instances F pins, refuse on mismatch\n");
+    out_lit("        --lock-sha256 HEX  pin the lock out of band (docs/168 §7)\n");
     out_lit("        --into DIR     target DIR\\<name>\\; default is the global store\n");
     out_lit("  lompi check   <dir>                                 is this a valid Loment library?\n");
     out_lit("  lompi fetch   [--registry URL] [--registry-sha256 H]  fetch the registry (H = index sha256)\n");
@@ -1458,7 +1467,26 @@ fn cmd_check(ws: ptr, buf: ptr, m: u32, av_dir: u64) -> u32 {
 
 // ---------------------------------------------------------------- fetch / install
 
-/// 从 URL 取仓库名 (最后一段, 去掉结尾的 .git)。
+/// slug 能不能当**一个目录名**用: `A-Z a-z 0-9 . _ -`, 不以 `.` 开头。
+fn cfg_slug_ok(p: ptr, n: u32) -> u32 {
+    if n == 0 || n > 128 { return 0; }
+    if load8(p, 0) == 46 { return 0; }
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = load8(p, i);
+        let ok: u32 = 0;
+        if c >= 65 && c <= 90 { ok = 1; }
+        if c >= 97 && c <= 122 { ok = 1; }
+        if c >= 48 && c <= 57 { ok = 1; }
+        if c == 46 || c == 95 || c == 45 { ok = 1; }
+        if ok == 0 { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+/// 从 URL 取缓存目录名。**URL 不可信**: 最后一段只有当它是一个安全的目录名时才用,
+/// 否则退回 `reg-<sha256(url) 前 12 位>` —— 绝不让 `..`、分隔符或盘符决定落点 (#14)。
 pub fn cfg_slug(url: ptr, n: u32, out: ptr, outcap: u32) -> u32 {
     let cut: u32 = 4294967295;
     let i: u32 = n;
@@ -1479,12 +1507,69 @@ pub fn cfg_slug(url: ptr, n: u32, out: ptr, outcap: u32) -> u32 {
     if e > 4 && txt_eq_lit(url, s + e - 4, 4, ".git") {
         e2 = e - 4;
     }
-    if e2 == 0 || e2 > outcap {
+    if e2 > 0 && e2 <= outcap {
+        sys_copy(out, 0, url, s, e2);
+        store8(out, e2, 0 as u8);
+        if cfg_slug_ok(out, e2) == 1 {
+            return e2;
+        }
+    }
+    // 兜底: 固定形状的名字, 与 URL 的字符无关
+    if outcap < 20 {
         return 0;
     }
-    sys_copy(out, 0, url, s, e2);
-    store8(out, e2, 0 as u8);
-    return e2;
+    let st: ptr = sys_alloc(sha_state_size() as u64);
+    let dig: ptr = sys_alloc(64);
+    let hex: ptr = sys_alloc(128);
+    sha_init(st);
+    sha_update(st, url, n);
+    sha_final(st, dig);
+    sha_hex(dig, hex);
+    let o: u32 = sys_append_lit(out, 0, "reg-");
+    let k: u32 = 0;
+    while k < 12 {
+        store8(out, o + k, load8(hex, k) as u8);
+        k = k + 1;
+    }
+    store8(out, o + 12, 0 as u8);
+    return o + 12;
+}
+
+/// 打印出来的计划要能安全粘进 shell —— 所以 `--registry` 先过一道:
+/// 只认 http/https/git/ssh/file 前缀、绝对路径或 `user@host:path` 的 scp 形状,
+/// 且字符集里不许有空白、控制字符或 shell 元字符。打印时**另外**再加单引号 (两层)。
+fn cfg_url_ok(p: ptr, n: u32) -> u32 {
+    if n == 0 || n > 1024 { return 0; }
+    if load8(p, 0) == 45 { return 0; }        // 不许以 '-' 开头 (git 会当选项)
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = load8(p, i);
+        if c < 32 || c == 127 { return 0; }
+        if c == 32 || c == 9 { return 0; }
+        if c == 59 || c == 124 || c == 38 || c == 36 || c == 96 { return 0; }
+        if c == 60 || c == 62 || c == 40 || c == 41 || c == 123 || c == 125 { return 0; }
+        if c == 91 || c == 93 || c == 33 || c == 94 || c == 34 || c == 39 { return 0; }
+        if c == 92 { return 0; }
+        i = i + 1;
+    }
+    if load8(p, 0) == 47 { return 1; }                       // 绝对路径
+    if n > 2 && load8(p, 1) == 58 && load8(p, 2) == 47 { return 1; }  // D:/...
+    if n >= 7 && txt_eq_lit(p, 0, 7, "http://") { return 1; }
+    if n >= 8 && txt_eq_lit(p, 0, 8, "https://") { return 1; }
+    if n >= 7 && txt_eq_lit(p, 0, 7, "file://") { return 1; }
+    if n >= 6 && txt_eq_lit(p, 0, 6, "git://") { return 1; }
+    if n >= 6 && txt_eq_lit(p, 0, 6, "ssh://") { return 1; }
+    // scp 形状: '@' 之后有 ':'
+    let at: u32 = 4294967295;
+    let co: u32 = 4294967295;
+    let j: u32 = 0;
+    while j < n {
+        if load8(p, j) == 64 && at == 4294967295 { at = j; }
+        if load8(p, j) == 58 && at != 4294967295 && co == 4294967295 { co = j; }
+        j = j + 1;
+    }
+    if at != 4294967295 && co != 4294967295 && co > at { return 1; }
+    return 0;
 }
 
 // ---------------------------------------------------------------- 联网 (0.2.0)
@@ -2157,9 +2242,107 @@ fn net_basename(p: ptr, n: u32, out: ptr, cap: u32) -> u32 {
     return ln;
 }
 
+/// 索引里的 `name`/`version`: 只许 `A-Z a-z 0-9 . _ + -`, 且不许以 `.` 开头。
+/// 这条挡住 `../..`、绝对路径、盘符与分隔符 —— 它们都会让落点离开
+/// `<dst>/<name>/<ver>/` (#981)。
+fn net_ident_ok(p: ptr, n: u32) -> u32 {
+    if n == 0 { return 0; }
+    if load8(p, 0) == 46 { return 0; }
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = load8(p, i);
+        let ok: u32 = 0;
+        if c >= 65 && c <= 90 { ok = 1; }
+        if c >= 97 && c <= 122 { ok = 1; }
+        if c >= 48 && c <= 57 { ok = 1; }
+        if c == 46 || c == 95 || c == 45 || c == 43 { ok = 1; }
+        if ok == 0 { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+/// 索引里的 `path`: 必须是**包内相对路径**。拒绝绝对路径、反斜杠、盘符、
+/// 空段、`.`/`..` 段与非路径字符。写入时只取 basename, 但下载 URL 直接拼它,
+/// 所以两条都得干净 (#981)。
+fn net_relpath_ok(p: ptr, n: u32) -> u32 {
+    if n == 0 { return 0; }
+    if load8(p, 0) == 47 || load8(p, 0) == 92 { return 0; }
+    if n > 1 && load8(p, 1) == 58 { return 0; }
+    let i: u32 = 0;
+    let seg: u32 = 0;
+    while i < n {
+        let c: u32 = load8(p, i);
+        if c == 92 { return 0; }
+        if c == 47 {
+            if seg == 0 { return 0; }
+            seg = 0;
+        } else {
+            let ok: u32 = 0;
+            if c >= 65 && c <= 90 { ok = 1; }
+            if c >= 97 && c <= 122 { ok = 1; }
+            if c >= 48 && c <= 57 { ok = 1; }
+            if c == 46 || c == 95 || c == 45 || c == 43 { ok = 1; }
+            if ok == 0 { return 0; }
+            seg = seg + 1;
+        }
+        i = i + 1;
+    }
+    if seg == 0 { return 0; }
+    let j: u32 = 0;
+    while j + 1 < n {
+        if load8(p, j) == 46 && load8(p, j + 1) == 46 { return 0; }
+        j = j + 1;
+    }
+    return 1;
+}
+
+/// 工具链自己拥有的包名。注册表里的同名条目与安装时的同名请求都拒 ——
+/// 否则 `use std` 会被项目本地的 `deps/std` 顶掉 (dependency confusion, #980)。
+/// 这张表与 `tools/lomentc.py` 的 `RESERVED_PACKAGE_NAMES`、自举侧
+/// `driver.lomt` 的 `name_reserved` **一起改**。
+pub fn pkg_reserved_name(p: ptr, n: u32) -> u32 {
+    if n == 3 && txt_eq_lit(p, 0, 3, "std") { return 1; }
+    if n == 4 && txt_eq_lit(p, 0, 4, "libl") { return 1; }
+    if n == 4 && txt_eq_lit(p, 0, 4, "host") { return 1; }
+    if n == 8 && txt_eq_lit(p, 0, 8, "internet") { return 1; }
+    if n == 2 && txt_eq_lit(p, 0, 2, "os") { return 1; }
+    return 0;
+}
+
+/// 闭包里第一个保留名实例的下标; 没有就是 `PKG_NONE`。依赖也可以把 `std` 拖进来,
+/// 所以只拦"显式请求的名字"不够 (#980)。
+fn closure_reserved(ws: ptr, n: u32) -> u32 {
+    let inm: ptr = ((ws as u64) + WS_SNAMES as u64) as ptr;
+    let i: u32 = 0;
+    while i < n {
+        if (pkg_flags(ws, i) & PKG_F_INCLOSURE) != 0 {
+            let o: u32 = pkg_name_off(ws, i);
+            let l: u32 = pkg_name_len(ws, i);
+            if pkg_reserved_name(((inm as u64) + (o as u64)) as ptr, l) == 1 {
+                return i;
+            }
+        }
+        i = i + 1;
+    }
+    return PKG_NONE;
+}
+
+/// 打印"闭包里含保留名"的诊断。
+fn err_closure_reserved(ws: ptr, i: u32) {
+    let inm: ptr = ((ws as u64) + WS_SNAMES as u64) as ptr;
+    let o: u32 = pkg_name_off(ws, i);
+    let l: u32 = pkg_name_len(ws, i);
+    err_lit("lompi: refusing -- the closure contains the toolchain-reserved package `");
+    sys_write(2, ((inm as u64) + (o as u64)) as ptr, l as u64);
+    err_lit("`\n");
+}
+
 /// 把注册表拉进 `dst`(一个**已经存在**的目录: `<root>/cache/<slug>`)。
-/// 返回 1 = 全部下完且逐个**校验过索引里写着的 sha256**; 0 = 任一步不成;
-/// 2 = 索引与 `--registry-sha256` 对不上 (**硬失败**, 调用方不许退回到打印计划)。
+/// 返回 1 = 全部下完且逐个**校验过索引里写着的 sha256**; 0 = 网络/环境不成;
+/// 2 = **硬失败** (索引与 `--registry-sha256` 对不上、索引行不安全、摘要不符) ——
+///     调用方不许退回到打印计划: 退回就等于把一次拒绝装成一次成功, 而 git 克隆计划
+///     会绕过这里所有的字段校验 (#981)。
 fn net_fetch_registry(req: ptr, dst: ptr, pin2: ptr, allow_unpinned: u32) -> u32 {
     let base: ptr = txt_load64(req, NETREQ_BASE) as ptr;
     let blen: u32 = txt_len_cstr(base);
@@ -2232,7 +2415,21 @@ fn net_fetch_registry(req: ptr, dst: ptr, pin2: ptr, allow_unpinned: u32) -> u32
             let sl: u32 = net_flen(f3);
             if nl == 0 || vl == 0 || rl == 0 || sl != 64 {
                 sys_write_str(2, "lompi: bad index line (want: name version path sha256)\n");
-                return 0;
+                return 2;
+            }
+            if net_ident_ok(name, nl) == 0 || net_ident_ok(ver, vl) == 0 {
+                sys_write_str(2, "lompi: the index has an unsafe package name or version -- refused\n");
+                return 2;
+            }
+            if net_relpath_ok(rel, rl) == 0 {
+                sys_write_str(2, "lompi: the index has an unsafe path -- refused\n");
+                return 2;
+            }
+            if pkg_reserved_name(name, nl) == 1 {
+                sys_write_str(2, "lompi: the index offers a package that shadows the toolchain (");
+                sys_write(2, name, nl as u64);
+                sys_write_str(2, ") -- refused\n");
+                return 2;
             }
             sys_copy(fpath, 0, base, 0, blen);
             let g1: u32 = blen;              // 基路径已经以 `/` 收尾, 别再加一个
@@ -2253,12 +2450,12 @@ fn net_fetch_registry(req: ptr, dst: ptr, pin2: ptr, allow_unpinned: u32) -> u32
                 sys_write_str(2, "lompi: sha256 mismatch for ");
                 sys_write(2, rel, rl as u64);
                 sys_write_str(2, " -- refused\n");
-                return 0;
+                return 2;
             }
             let bn: u32 = net_basename(rel, rl, fdir, 576);
             if bn == 0 {
                 sys_write_str(2, "lompi: bad path in index\n");
-                return 0;
+                return 2;
             }
             let dlen: u32 = txt_len_cstr(dst);
             sys_copy(ffull, 0, dst, 0, dlen);
@@ -2329,18 +2526,6 @@ fn net_fetch_registry(req: ptr, dst: ptr, pin2: ptr, allow_unpinned: u32) -> u32
 
 // ---------------------------------------------------------------- 外源索引 (docs/283)
 
-/// 路径里有 `..` 段? — 注册表给的是不可信输入, 成员路径不许跳出包目录。
-fn net_has_dotdot(p: ptr, n: u32) -> u32 {
-    let i: u32 = 0;
-    while i + 1 < n {
-        if load8(p, i) == 46 && load8(p, i + 1) == 46 {
-            return 1;
-        }
-        i = i + 1;
-    }
-    return 0;
-}
-
 /// `p[0..n]` 里最后一个 `/` 之前的目录, 带结尾分隔符 (没有分隔符时是空串)。
 fn net_dir_of(p: ptr, n: u32, out: ptr) {
     let cut: u32 = 0;
@@ -2392,7 +2577,7 @@ fn net_fetch_artifacts(req: ptr, body: ptr, n: u32, adir: ptr, outdir: ptr) -> u
                     sys_write_str(2, "lompi: bad artifact line in foreign.txt (want: artifact KIND PATH SHA256 [MERKLE])\n");
                     return 4294967295;
                 }
-                if load8(w2, 0) == 47 || net_has_dotdot(w2, p2) == 1 {
+                if net_relpath_ok(w2, p2) == 0 {
                     sys_write_str(2, "lompi: bad artifact path in foreign.txt\n");
                     return 4294967295;
                 }
@@ -2531,8 +2716,16 @@ fn net_fetch_foreign(req: ptr, dst: ptr, base: ptr, blen: u32,
                 sys_write_str(2, "lompi: bad foreign index line (want: name version manifest-path sha256)\n");
                 return 0;
             }
-            if load8(mpath, 0) == 47 || net_has_dotdot(mpath, pl) == 1 {
+            if net_ident_ok(name, nl) == 0 || net_ident_ok(ver, vl) == 0 {
+                sys_write_str(2, "lompi: the foreign index has an unsafe package name or version -- refused\n");
+                return 0;
+            }
+            if net_relpath_ok(mpath, pl) == 0 {
                 sys_write_str(2, "lompi: bad path in the foreign index\n");
+                return 0;
+            }
+            if pkg_reserved_name(name, nl) == 1 {
+                sys_write_str(2, "lompi: the foreign index offers a package that shadows the toolchain -- refused\n");
                 return 0;
             }
             sys_copy(mfull, 0, base, 0, blen);
@@ -2626,6 +2819,11 @@ fn cmd_fetch(ws: ptr, buf: ptr, m: u32) -> u32 {
     if n == 0 {
         cli_die("no registry configured: pass --registry <url> or put a lompi.conf next to lompi.exe");
         return 1;
+    }
+    // 打印出来的计划要能安全粘进 shell (#14): 先拒掉方案外的 URL 形状与元字符,
+    // 再在打印时加单引号。两层都要 —— 只靠一层, 换一个 shell 就漏。
+    if cfg_url_ok(reg, n) == 0 {
+        return cli_die("unsafe or unsupported registry URL (use http/https/git/ssh/file, an absolute path, or user@host:path; shell metacharacters are refused)");
     }
     cfg_root(exed, scr, root, 1024);
     cfg_join(root, "cache", cache, 1024);
@@ -2737,21 +2935,21 @@ fn cmd_fetch(ws: ptr, buf: ptr, m: u32) -> u32 {
     }
 
     out_lit("# registry: ");
-    sys_write(1, reg, n as u64);
+    sh_word(reg, 0, n);
     if load8(sr, 0) == 0 {
         out_lit("  (from --registry)\n");
     } else {
         out_lit("  (from lompi.conf)\n");
     }
-    out_lit("mkdir -p ");
-    sys_write(1, cache, dn as u64);
+    out_lit("mkdir -p -- ");
+    sh_word(cache, 0, dn);
     out_lit("\n");
-    out_lit("git clone --depth 1 ");
-    sys_write(1, reg, n as u64);
+    out_lit("git clone --depth 1 -- ");
+    sh_word(reg, 0, n);
     out_lit(" ");
-    sys_write(1, dst, o2 as u64);
+    sh_word(dst, 0, o2);
     out_lit("\n# to update later:  git -C ");
-    sys_write(1, dst, o2 as u64);
+    sh_word(dst, 0, o2);
     out_lit(" pull\n");
     out_lit("# (a cache cloned by hand has no completion marker; `lompi install` only uses\n");
     out_lit("#  a cache that `lompi fetch` finished -- docs/236 §7.2)\n");
@@ -2977,6 +3175,9 @@ fn cmd_install(ws: ptr, buf: ptr, m: u32, av_spec: u64) -> u32 {
         return 1;
     }
     let sp: u64 = spec_split(buf, av_spec);
+    if pkg_reserved_name(((buf as u64) + (spec_name_off(sp) as u64)) as ptr, spec_name_len(sp)) == 1 {
+        return cli_die("refusing to install a toolchain-reserved package name (std/libl/host/internet/os)");
+    }
     let idx: u32 = sto_find_bytes2(ws, np,
                                    ((buf as u64) + (spec_name_off(sp) as u64)) as ptr,
                                    spec_name_len(sp), spec_ver_ptr(buf, sp), spec_ver_len(sp));
@@ -3024,6 +3225,30 @@ fn cmd_install(ws: ptr, buf: ptr, m: u32, av_spec: u64) -> u32 {
         if got == SYS_ERR {
             return cli_die("cannot read the lock file");
         }
+        // 锁的信任根 (#17): 锁与包常常来自**同一个**通道, 只比内容等于自证。
+        // 给一个**带外**的 sha256, 锁就有一个通道之外的锚 —— 拿到它的方式与
+        // 拿到注册表索引钉一样 (docs/168 §7: `gpg --verify` 签名后另发摘要)。
+        let lpin: u64 = cfg_flag_arg(buf, m, "--lock-sha256");
+        if lpin != 0 {
+            let want: ptr = sys_alloc(72);
+            if net_pin_take(buf, lpin, want) == 0 {
+                return cli_die("--lock-sha256 wants exactly 64 hex characters");
+            }
+            let pst: ptr = sys_alloc(sha_state_size() as u64);
+            let pdig: ptr = sys_alloc(64);
+            let phx: ptr = sys_alloc(128);
+            sha_init(pst);
+            sha_update(pst, lbuf, got as u32);
+            sha_final(pst, pdig);
+            sha_hex(pdig, phx);
+            if !txt_eq(phx, 0, 64, want, 0, 64) {
+                return cli_die("the lock file does not match --lock-sha256 -- refused");
+            }
+            out_lit("lompi: lock matches the pinned sha256\n");
+        } else {
+            out_lit("lompi: (lock not pinned; it arrived over the same channel as the store)\n");
+            out_lit("lompi: to pin it, get the lock over a trusted channel and pass --lock-sha256 <hex>\n");
+        }
         let ln: u32 = pkg_lock_read(ws, lbuf, got as u32, np2, msg, 256);
         if ln == PKG_ERR {
             err_lit("lompi: lock does not match this store: ");
@@ -3044,6 +3269,13 @@ fn cmd_install(ws: ptr, buf: ptr, m: u32, av_spec: u64) -> u32 {
             err_lit("\n");
             return 1;
         }
+    }
+
+    // 闭包里的**每一个**实例都要过保留名闸 —— 依赖也可以把 `std` 拖进来 (#980)。
+    let cr: u32 = closure_reserved(ws, np2);
+    if cr != PKG_NONE {
+        err_closure_reserved(ws, cr);
+        return 1;
     }
 
     // ---- JVM 类名闭包 (issue #1055): 平命名空间里两个实例给同一个类 = 硬错误。

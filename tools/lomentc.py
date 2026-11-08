@@ -4910,6 +4910,10 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
 #: 于是不存在"这个名字算 L0 还是 L1"的歧义。顺序: 标准库在前, 后面三个覆盖仓库自身。
 #: 这四个根是**仓库自己的纪律** (名字不许重), 见 `resolve_name` 第 3 层。
 NAME_ROOTS = ("loment/lib", "loment/examples", "loment/selfhost", "loment/tools", "loment/lspe")
+#: 工具链自己拥有的包名 (#980): 项目本地的 `deps/<名字>/` 不许顶掉它们 —— 否则一个
+#: 注册表里叫 `std` 的包就替换掉整个标准库。与 `lompi/lpi_cli.lomt` 的
+#: `pkg_reserved_name`、`loment/selfhost/driver.lomt` 的 `name_reserved` **一起改**。
+RESERVED_PACKAGE_NAMES = frozenset(("std", "libl", "host", "internet", "os"))
 #: L0 布局的**唯一**后缀。**L1 没有专属后缀** —— 路径形式里"不是 .lom 就是 L1 模块",
 #: 所以 `use "x.foo"` 是合法的 L1 导入 (用户 2026-09-16 定)。名字形式找的文件后缀见
 #: `L1_EXT`, 那个是可以配的 (`loment.conf`)。
@@ -5252,6 +5256,9 @@ def resolve_name(name: str, root: Path, proj: Path | None = None,
     """`use <名字>` -> 真实文件。**按层搜, 先命中先用** (像 PYTHONPATH):
 
       1. `<项目根>/deps/<名字>/<名字><后缀>`  —— 项目本地 (lompi materialize 的落点)
+         **保留名除外** (`RESERVED_PACKAGE_NAMES`, #980): 工具链自己拥有的包名
+         (`std` / `libl` / `host` / `internet` / `os`) 跳过这一层, 由内置根与 store 解析 ——
+         项目本地的 `deps/std` 不能替换标准库。
       1b. `<项目根>/deps/<包>/<名字><后缀>`   —— 项目本地的**包内模块**
       2. 内置四根 `<仓根>/<根>/<名字><后缀>`  —— **这一层命中必须唯一**
       3. `<store>/<名字>/<版本>/<名字><后缀>`  —— 随包自带 (`store_roots`: 前缀的
@@ -5272,6 +5279,9 @@ def resolve_name(name: str, root: Path, proj: Path | None = None,
     所以规矩是**"在谁的库里, 先用谁的名字"**: 商店里的文件先在商店里找, 其余文件先在
     四根里找。两边各自内部自洽, 而"用户项目里的 `use`"走的是"先四根"那条 (与加这一层
     之前**完全一致** —— 这一层没有改动任何既有解析结果, 它只补上了原先够不着的那些名字)。
+
+    **#980 起, 商店里的文件连项目本地的 `deps/` 也不看** —— 否则使用者的一个
+    `deps/mem` 就能改掉标准库内部的 `use mem`。用户项目自己的 `use` 仍按上面的层序。
 
     1b/3b 这两层**命中多处必须报错**, 理由与第 2 层同 —— 两个包里都有 `<名字>.lomt` 时
     "先搜到哪个"不能变成隐藏语义。
@@ -5327,7 +5337,10 @@ def resolve_name(name: str, root: Path, proj: Path | None = None,
             raise LomError(1, 1, f"名字导入有歧义 {name}: 命中 {rel} 多处")
         return hits[0] if hits else None
 
-    if proj is not None:
+    # **导入方住在商店里时不看项目本地** (#980): store 包自己的 `use` 不能被使用者的
+    # `deps/` 劫持 —— 那会让标准库的内部模块也被顶掉。
+    if proj is not None and name not in RESERVED_PACKAGE_NAMES \
+            and not _in_store_root(importer, stores):
         d = proj / LOCAL_DEPS / name
         if d.is_dir():
             for e in exts:

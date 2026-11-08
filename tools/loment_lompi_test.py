@@ -734,6 +734,182 @@ def test_fetch_prints_the_plan_for_https_and_hostnames():
     assert "resolver" in out2, f"主机名那条没说清是解析器缺: {out2[:300]!r}"
 
 
+@test
+def test_registry_index_fields_cannot_escape_the_cache():
+    """#981: 索引里的 `name` / `version` / `path` 是**不可信输入**。
+
+    注册表（或任何能回答那个明文 HTTP 请求的东西）不能靠 `../..`、盘符或保留名让
+    lompi 写到缓存之外、或替换掉工具链自带的包。每一条都必须**整份拒掉**并点名原因，
+    而不是跳过该行继续装别的。
+    """
+    import hashlib
+    if _build() is None:
+        print(f"      SKIP: {_skip}")
+        return
+    body = b"module ok\n"
+    h = hashlib.sha256(body).hexdigest()
+    cases = [
+        (f"../.. pwned pwned/lompi.txt {h}", "unsafe package name"),
+        (f"std 9.9.9 std/9.9.9/std.lomt {h}", "shadows the toolchain"),
+        (f"ok 1.0.0 ../../evil.lomt {h}", "unsafe path"),
+        (f"ok 1.0.0 C:/evil.lomt {h}", "unsafe path"),
+        (f"ok ../.. ok/1.0.0/ok.lomt {h}", "unsafe package name"),
+    ]
+    for line, want in cases:
+        with tempfile.TemporaryDirectory(prefix="badidx-") as td:
+            root = Path(td)
+            httpd, port = _serve_registry(root, "# malicious\n" + line + "\n", {
+                "pwned/lompi.txt": body,
+                "evil.lomt": body,
+                "std/9.9.9/std.lomt": body,
+                "ok/1.0.0/ok.lomt": body,
+            })
+            try:
+                rc, out = _run(["fetch", "--registry", f"http://127.0.0.1:{port}"])
+            finally:
+                httpd.shutdown()
+            assert rc != 0, f"{line!r} 被接受了: {out[:300]!r}"
+            assert want in out, f"{line!r} 没被点名 ({want}): {out[:300]!r}"
+
+
+@test
+def test_fetch_plan_is_shell_safe():
+    """#14: 打印出来的计划要能安全粘进 shell。
+
+    元字符与方案外 URL 直接拒；合法的值在计划里每个都用单引号包住，并用 `--` 结束选项
+    （否则 `--registry --upload-pack=...` 会被 git 当成选项）。缓存目录也不能由 URL 的
+    `..` 决定。
+    """
+    if _build() is None:
+        print(f"      SKIP: {_skip}")
+        return
+    for url in ("https://a.example/$(whoami).git",
+                "https://x.example/l.git; calc.exe",
+                "https://x.example/l.git|id",
+                "-oProxyCommand=x",
+                "ftp://h/x"):
+        rc, out = _run(["fetch", "--registry", url])
+        assert rc != 0, f"{url!r} 没被拒: {out[:300]!r}"
+        assert "unsafe or unsupported registry URL" in out, (url, out[:300])
+
+    rc, out = _run(["fetch", "--registry", "https://h/.."])
+    assert rc == 0, out[:300]
+    assert "git clone --depth 1 -- 'https://h/..'" in out, out[:400]
+    assert "reg-" in out, f"非法 slug 没退回固定形状: {out[:400]!r}"
+    assert "cache\\.." not in out and "cache/.." not in out, (
+        f"缓存目录被 URL 的 `..` 决定了: {out[:400]!r}")
+
+
+@test
+def test_package_identity_is_injective():
+    """#15: 文件集到身份必须是单射。
+
+    从前按 `名字 \\0 内容 \\0` 喂 sha，而**内容可以含 NUL** —— 两个文件
+    `{a: X, b: Y}` 与 `{a: "X\\0b\\0Y"}` 是同一串字节，两个不同的包拿到同一个身份。
+    这里就用 issue 里的那对构造：身份必须不同。
+    """
+    if _build() is None:
+        print(f"      SKIP: {_skip}")
+        return
+    aaa = b"module aaa\npub fn greet() -> u32 { return 1; }\n//\n"
+    zzz = b"module zzz\npub fn evil() -> u32 { return 666; }\n"
+    with tempfile.TemporaryDirectory(prefix="idA-") as ta, \
+         tempfile.TemporaryDirectory(prefix="idB-") as tb:
+        pa = Path(ta) / "victim" / "1.0.0"
+        pa.mkdir(parents=True)
+        (pa / "aaa.lomt").write_bytes(aaa)
+        (pa / "zzz.lomt").write_bytes(zzz)
+        pb = Path(tb) / "victim" / "1.0.0"
+        pb.mkdir(parents=True)
+        (pb / "aaa.lomt").write_bytes(aaa + b"\x00zzz.lomt\x00" + zzz)
+        rc1, out1 = _run(["hash", str(pa)])
+        rc2, out2 = _run(["hash", str(pb)])
+        assert rc1 == 0 and rc2 == 0, (out1, out2)
+        h1 = re.search(r"self:\s+([0-9a-f]{64})", out1)
+        h2 = re.search(r"self:\s+([0-9a-f]{64})", out2)
+        assert h1 and h2, (out1, out2)
+        assert h1.group(1) != h2.group(1), (
+            f"两个不同的文件集拿到同一个身份 {h1.group(1)} —— 身份不是单射 (#15)")
+        assert "files: 2" in out1 and "files: 1" in out2, (out1, out2)
+
+
+@test
+def test_reserved_package_names_are_refused():
+    """#980: 工具链自己的包名不能被项目本地或依赖闭包顶掉。
+
+    显式请求 `std` 要拒；一个普通包把 `std` 作为依赖拖进闭包也要拒 —— 后一条才是
+    dependency confusion 的实际路径。
+    """
+    if _build() is None:
+        print(f"      SKIP: {_skip}")
+        return
+    rc, out = _run(["resolve", "fixture/store", "std"])
+    assert rc != 0 and "reserved" in out, out[:300]
+    rc2, out2 = _run(["resolve", "fixture/store", "host"])
+    assert rc2 != 0 and "reserved" in out2, out2[:300]
+
+    with tempfile.TemporaryDirectory(prefix="resv-") as td:
+        store = Path(td) / "store"
+        liba = store / "liba" / "1.0.0"
+        std = store / "std" / "1.0.0"
+        liba.mkdir(parents=True)
+        std.mkdir(parents=True)
+        (liba / "liba.lomt").write_text(
+            "module liba\nuse std\npub fn f() -> u32 { return 1; }\n",
+            encoding="utf-8", newline=chr(10))
+        (std / "std.lomt").write_text(
+            "module std\npub fn g() -> u32 { return 2; }\n",
+            encoding="utf-8", newline=chr(10))
+        rc3, out3 = _run(["resolve", str(store), "liba"])
+        assert rc3 != 0, f"闭包里的 std 没被拒: {out3[:400]!r}"
+        assert "toolchain-reserved" in out3 and "`std`" in out3, out3[:400]
+
+
+@test
+def test_lock_pin_is_checked_out_of_band():
+    """#17: 锁要有**通道之外**的锚。
+
+    `--from-lock` 默认只做一致性检查（锁与 store 来自同一个地方，等于自证）。
+    `--lock-sha256` 给一个从另一个通道拿到的摘要：对不上必须拒，对得上才继续。
+    """
+    import hashlib
+    if _build() is None:
+        print(f"      SKIP: {_skip}")
+        return
+    with tempfile.TemporaryDirectory(prefix="lockpin-", dir=str(ROOT)) as td:
+        td = Path(td)
+        # exe 放**再下一层**: `cfg_root` 的兜底规则是「exe 目录的父目录」下 `.lompi`
+        # （见 `cfg_parent(exe_dir)`），所以这样根才落在 td 里，不写到仓根。
+        exe = td / "bin" / ("lompi.exe" if IS_WIN else "lompi")
+        exe.parent.mkdir()
+        shutil.copy2(_build(), exe)
+        exe.chmod(0o755)
+
+        def run(args: list[str]) -> tuple[int, str]:
+            r = subprocess.run([str(exe), *args], cwd=str(SRC_DIR), capture_output=True,
+                               text=True, encoding="utf-8", errors="replace", timeout=180)
+            return r.returncode, (r.stdout or "") + (r.stderr or "")
+
+        # 根落在 `<td>/.lompi`（见上面的两层布局）
+        store = td / ".lompi" / "store"
+        shutil.copytree(SRC_DIR / "fixture" / "store" / "mathutil", store / "mathutil")
+        rc, out = run(["resolve", str(store), "mathutil@0.1.0"])
+        assert rc == 0, out[:300]
+        lock = td / "lock.txt"
+        lock.write_text(out, encoding="utf-8", newline=chr(10))
+        good = hashlib.sha256(lock.read_bytes()).hexdigest()
+
+        rc_bad, out_bad = run(["install", "mathutil", "--from-lock", str(lock),
+                               "--lock-sha256", "0" * 64, "--into", str(td / "into")])
+        assert rc_bad != 0, f"摘要不符的锁被接受了: {out_bad[:300]!r}"
+        assert "does not match --lock-sha256" in out_bad, out_bad[:300]
+
+        rc_ok, out_ok = run(["install", "mathutil", "--from-lock", str(lock),
+                             "--lock-sha256", good, "--into", str(td / "into")])
+        assert rc_ok == 0, out_ok[:400]
+        assert "lock matches the pinned sha256" in out_ok, out_ok[:400]
+
+
 def _fetch_ready(url: str, extra: list[str] | None = None) -> tuple[int, str]:
     """跑一次 `fetch`，照它自己打出来的 `mkdir -p` 提示把目录建好，再跑一次。
 

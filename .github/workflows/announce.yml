@@ -1,4 +1,4 @@
-# 播报 —— release 一发布就往 Mastodon 发一条
+# 播报 —— release 一发布就往 Mastodon 与 Bluesky 各发一条
 #
 # ## 为什么要放在这里，而不是手工发
 #
@@ -9,31 +9,40 @@
 # ## 它发什么
 #
 # 标题一行 + 发布说明的**第一段** + 链接 + 话题标签。**不整篇转**：release notes 是一份
-# 文档（0.1.4.5 那份带安装表、带已知缺陷清单），塞进 500 字符里只会剩下一堆乱码。
+# 文档（0.1.4.5 那份带安装表、带已知缺陷清单），塞进一条嘟文里只会剩下一堆乱码。
 # 想换口吻就在发布说明里把第一段写好 —— 这一条只搬它。
 #
-# 字数按 Mastodon 的口径算：**每个 URL 一律记 23 字符**，不按它真实长度。第一段会被截到
-# 刚好放得下，在词边界断，末尾加省略号。
+# 两个平台各按各的上限组稿：
+#
+# * **Mastodon**：500 字符；URL 一律按 23 字符计。第一段截到刚好放得下，词边界断，加省略号。
+# * **Bluesky**：300 字符；URL 按原长计。链接做成 `app.bsky.embed.external` 卡片，
+#   URL 与 #标签都写进 facets（否则客户端不把它们当链接 / 标签）。
+#
+# 两条稿子由同一份 `name/body/url` 生成，口吻一致，长度各自适配。
 #
 # ## 它刻意**不**做的三件事
 #
 # * **预发布不发**（`prerelease` 直接跳过）。`v0.1.4.5-pre` 那种是预告，把预告发到社交平台
 #   会被读成既成事实 —— 那正是 `docs/202` 记账时最怕的一类错。
-# * **同一条不发两次**：先读自己最近 40 条嘟文，正文里已经有这次 release 的链接就直接退出。
-#   所以重跑 workflow 不会刷屏，补发脚本也不怕手滑跑两遍。
-# * **没配密钥不报错**：`MASTODON_INSTANCE` / `MASTODON_TOKEN` 缺一个就打印一行、退出 0。
+# * **同一条不发两次**：两个平台各自读自己最近的 40 条，正文里已经有这次 release 的链接
+#   就直接跳过。所以重跑 workflow 不会刷屏，补发脚本也不怕手滑跑两遍。
+# * **没配密钥不报错**：每个平台各自判断；缺一个就打印一行、跳过那个平台。
 #   一个社交播报不该让发布流程变红。
 #
 # ## 要配什么
 #
 # 仓库 → Settings → Secrets and variables → Actions：
 #
-#   Variables:  `MASTODON_INSTANCE`  例：https://fosstodon.org（**不带**结尾斜杠也行）
-#               `MASTODON_TAGS`      可选。不填就用下面那串默认标签
-#   Secrets:    `MASTODON_TOKEN`     那个实例上的 access token
+#   Variables:  `MASTODON_INSTANCE`   例：https://fosstodon.org（不带结尾斜杠也行）
+#               `MASTODON_TAGS`       可选。不填就用下面那串默认标签
+#               `BSKY_HANDLE`         例：loment.bsky.social；不填就跳过 Bluesky
+#   Secrets:    `MASTODON_TOKEN`      那个实例上的 access token
+#               `BSKY_APP_PASSWORD`   Bluesky 的 app password（不是登录密码）
 #
-# token 在实例的 Preferences → Development 建，勾 **read:accounts**（用来认自己是谁，
+# Mastodon token 在实例的 Preferences → Development 建，勾 **read:accounts**（用来认自己、
 # 也用来查"这条发过没有"）、**read:statuses**、**write:statuses**。
+# Bluesky 的 app password 在 https://bsky.app/settings/app-passwords 建；它只用于 XRPC，
+# 不需要额外 scope，可以随时撤销。
 #
 # ## 怎么试
 #
@@ -42,7 +51,7 @@
 #   * 填 `tag`（已经存在的那个）→ 按 release 组一条，**补发**用；
 #   * 或填 `message` → 原样发这段话（不含标签，标签照加）。**不看 tag** ——
 #     "我们接下来做什么" 这种不属于任何 release 的话，走这一支；
-#   * `dry_run` 留 true → 只把要发的那段打出来，不碰 Mastodon。
+#   * `dry_run` 留 true → 只把两个平台要发的稿子打出来，不碰任何 API。
 #
 # 看着顺眼了再跑一遍 dry_run=false，或者干脆等下次发版自动发。
 
@@ -69,16 +78,18 @@ permissions:
   contents: read
 
 jobs:
-  toot:
+  announce:
     runs-on: ubuntu-latest
     # 预发布不发。手工触发那一支没有 `release` 对象，`!null` 为真 —— 那条路是显式要发的。
     if: ${{ !github.event.release.prerelease }}
     steps:
-      - name: 组一条，发出去
+      - name: 组稿，各发一条
         env:
           INSTANCE: ${{ vars.MASTODON_INSTANCE }}
           TOKEN: ${{ secrets.MASTODON_TOKEN }}
           TAGS: ${{ vars.MASTODON_TAGS }}
+          BSKY_HANDLE: ${{ vars.BSKY_HANDLE }}
+          BSKY_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
           TAG: ${{ github.event.release.tag_name || inputs.tag }}
           MESSAGE: ${{ inputs.message }}
           NAME: ${{ github.event.release.name }}
@@ -90,13 +101,17 @@ jobs:
         run: |
           python3 - <<'PY'
           import json, os, re, sys, urllib.error, urllib.parse, urllib.request
+          from datetime import datetime, timezone
 
-          LIMIT = 500                      # Mastodon 默认上限
-          SHORT = 23                       # 它给每个 URL 记的字符数
+          MAST_LIMIT = 500             # Mastodon 默认上限
+          MAST_SHORT = 23              # 它给每个 URL 记的字符数
+          BSKY_LIMIT = 300             # Bluesky 的 grapheme 上限
           TAGS_FALLBACK = "#ProgrammingLanguages #SystemsProgramming"
 
           instance = (os.environ.get("INSTANCE") or "").strip().rstrip("/")
           token = (os.environ.get("TOKEN") or "").strip()
+          bsky_handle = (os.environ.get("BSKY_HANDLE") or "").strip()
+          bsky_password = (os.environ.get("BSKY_PASSWORD") or "").strip()
           tags = (os.environ.get("TAGS") or "").strip() or TAGS_FALLBACK
           tag = (os.environ.get("TAG") or "").strip()
           name = (os.environ.get("NAME") or "").strip()
@@ -105,8 +120,11 @@ jobs:
           message = (os.environ.get("MESSAGE") or "").strip()
           dry = (os.environ.get("DRY") or "").strip().lower() in ("1", "true", "yes")
 
-          if not instance or not token:
-              print("MASTODON_INSTANCE / MASTODON_TOKEN 没配齐 —— 跳过播报。")
+          mast_on = bool(instance and token)
+          bsky_on = bool(bsky_handle and bsky_password)
+          if not mast_on and not bsky_on:
+              print("MASTODON_INSTANCE / MASTODON_TOKEN 与 BSKY_HANDLE / "
+                    "BSKY_APP_PASSWORD 都没配齐 —— 跳过播报。")
               sys.exit(0)
 
           # 手工补发那一支：事件里没有 release 对象，就从 GitHub 拉一份。
@@ -125,9 +143,9 @@ jobs:
           name = name or tag
 
 
-          def counted(text):
+          def counted_mast(text):
               """Mastodon 的计长口径：URL 一律算 23。"""
-              return len(text) - sum(len(m) - SHORT for m in re.findall(r"https?://\S+", text))
+              return len(text) - sum(len(m) - MAST_SHORT for m in re.findall(r"https?://\S+", text))
 
 
           def first_paragraph(md):
@@ -146,73 +164,191 @@ jobs:
               return re.sub(r"\s+", " ", text).strip()
 
 
-          if message:
-              # 自由文本那一支：原样发，只把标签接在后面。**不截断** —— 话是人写的，
-              # 超了就该回去改短；机器替人砍句子，只会砍出病句。
-              status = message + ("\n\n" + tags if tags else "")
-              if counted(status) > LIMIT:
-                  print("这段话 %d 字符，超了 %d —— 改短一点。"
-                        % (counted(status), LIMIT), file=sys.stderr)
-                  sys.exit(1)
-              print("---- %d / %d 字符 ----" % (counted(status), LIMIT))
-              print(status)
-              print("----------------------")
-              if dry:
-                  print("dry_run —— 没有发出去。")
-                  sys.exit(0)
-          if not message:
+          para = first_paragraph(body)
+
+
+          def release_status(limit, counted):
+              """标题 + 第一段 + 链接 + 标签；第一段按剩余预算在词边界截断。"""
               head = "%s is out." % name
-              tail = "\n\n%s" % url
+              tail = "\n\n%s" % url if url else ""
               if tags:
                   tail += "\n\n" + tags
-              budget = LIMIT - counted(head) - counted(tail) - 4    # 4 = 两处空行
-
-              para = first_paragraph(body)
-              if counted(para) > budget:
-                  cut = para[:budget]
-                  para = cut.rsplit(" ", 1)[0].rstrip(" ,;:.") + "…"
-
-              status = head + ("\n\n" + para if para else "") + tail
-
-              if counted(status) > LIMIT:
-                  print("组出来的还是超长（%d）—— 不改了，直接报错。"
-                        % counted(status), file=sys.stderr)
-                  sys.exit(1)
-
-              print("---- %d / %d 字符 ----" % (counted(status), LIMIT))
-              print(status)
-              print("----------------------")
-
-              if dry:
-                  print("dry_run —— 没有发出去。")
-                  sys.exit(0)
+              budget = limit - counted(head) - counted(tail) - 4    # 4 = 两处空行
+              body_text = para
+              if counted(body_text) > budget:
+                  cut = body_text[:budget]
+                  body_text = cut.rsplit(" ", 1)[0].rstrip(" ,;:.") + "…"
+              return head + ("\n\n" + body_text if body_text else "") + tail
 
 
-          def api(path, data=None):
+          mast_status = bsky_status = ""
+          if mast_on:
+              if message:
+                  mast_status = message + ("\n\n" + tags if tags else "")
+                  if counted_mast(mast_status) > MAST_LIMIT:
+                      print("Mastodon：这段话 %d 字符，超了 %d —— 改短一点。"
+                            % (counted_mast(mast_status), MAST_LIMIT), file=sys.stderr)
+                      sys.exit(1)
+              else:
+                  mast_status = release_status(MAST_LIMIT, counted_mast)
+                  if counted_mast(mast_status) > MAST_LIMIT:
+                      print("Mastodon：组出来的还是超长（%d）—— 不改了，直接报错。"
+                            % counted_mast(mast_status), file=sys.stderr)
+                      sys.exit(1)
+              print("---- Mastodon %d / %d 字符 ----" % (counted_mast(mast_status), MAST_LIMIT))
+              print(mast_status)
+              print("-------------------------------")
+
+          if bsky_on:
+              if message:
+                  bsky_status = message + ("\n\n" + tags if tags else "")
+                  if len(bsky_status) > BSKY_LIMIT:
+                      bsky_status = message
+                      print("Bluesky：带标签超了 %d，去掉标签再试。" % BSKY_LIMIT,
+                            file=sys.stderr)
+                  if len(bsky_status) > BSKY_LIMIT:
+                      print("Bluesky：这段话 %d 字符，超了 %d —— 这条跳过。"
+                            % (len(bsky_status), BSKY_LIMIT), file=sys.stderr)
+                      bsky_status = ""
+              else:
+                  bsky_status = release_status(BSKY_LIMIT, len)
+                  if len(bsky_status) > BSKY_LIMIT:
+                      print("Bluesky：组出来的还是超长（%d）—— 这条跳过。"
+                            % len(bsky_status), file=sys.stderr)
+                      bsky_status = ""
+              if bsky_status:
+                  print("---- Bluesky %d / %d 字符 ----" % (len(bsky_status), BSKY_LIMIT))
+                  print(bsky_status)
+                  print("------------------------------")
+
+          if dry:
+              print("dry_run —— 两个平台都没有发出去。")
+              sys.exit(0)
+
+          failed = False
+
+          # ---------------------------------------------------------------- Mastodon
+          if mast_on:
+              def mast_api(path, data=None):
+                  req = urllib.request.Request(
+                      instance + path,
+                      data=urllib.parse.urlencode(data).encode() if data else None)
+                  req.add_header("Authorization", "Bearer " + token)
+                  if data:
+                      req.add_header("Content-Type", "application/x-www-form-urlencoded")
+                  with urllib.request.urlopen(req) as r:
+                      return json.loads(r.read().decode())
+
+              # 同一条不发两次。读不到就照发 —— 重一条比漏一条好。
+              already = False
+              try:
+                  me = mast_api("/api/v1/accounts/verify_credentials")
+                  for s in mast_api("/api/v1/accounts/%s/statuses?limit=40" % me["id"]):
+                      if url and url in (s.get("content") or ""):
+                          already = True
+                          break
+              except urllib.error.HTTPError as e:
+                  print("Mastodon：读不到最近的嘟文（%s）—— 直接发。" % e.code, file=sys.stderr)
+              if already:
+                  print("Mastodon：这条已经发过了 —— 跳过。")
+              else:
+                  try:
+                      r = mast_api("/api/v1/statuses",
+                                   {"status": mast_status, "visibility": "public"})
+                      print("Mastodon 发出去了：%s" % (r.get("url") or r.get("uri")))
+                  except urllib.error.HTTPError as e:
+                      print("Mastodon 拒了：%s %s"
+                            % (e.code, e.read().decode()[:400]), file=sys.stderr)
+                      failed = True
+
+          # ----------------------------------------------------------------- Bluesky
+          def bsky_api(path, body=None, jwt=None, query=None):
+              u = "https://bsky.social/xrpc/" + path
+              if query:
+                  u += "?" + urllib.parse.urlencode(query)
               req = urllib.request.Request(
-                  instance + path,
-                  data=urllib.parse.urlencode(data).encode() if data else None)
-              req.add_header("Authorization", "Bearer " + token)
-              if data:
-                  req.add_header("Content-Type", "application/x-www-form-urlencoded")
-              with urllib.request.urlopen(req) as r:
+                  u,
+                  data=json.dumps(body).encode("utf-8") if body is not None else None,
+                  method="POST" if body is not None else "GET")
+              if body is not None:
+                  req.add_header("Content-Type", "application/json")
+              if jwt:
+                  req.add_header("Authorization", "Bearer " + jwt)
+              with urllib.request.urlopen(req, timeout=30) as r:
                   return json.loads(r.read().decode())
 
+          def facets(text):
+              """URL 与 #标签的可点击区间；偏移按 UTF-8 字节算。"""
+              spans = []
+              for m in re.finditer(r"https?://\S+", text):
+                  spans.append((m.start(), m.end(),
+                                {"$type": "app.bsky.richtext.facet#link",
+                                 "uri": m.group(0)}))
+              for m in re.finditer(r"(?<![A-Za-z0-9_])#([A-Za-z0-9_]+)", text):
+                  if any(s <= m.start() < e for s, e, _ in spans):
+                      continue
+                  spans.append((m.start(), m.end(),
+                                {"$type": "app.bsky.richtext.facet#tag",
+                                 "tag": m.group(1)}))
+              out = []
+              for s, e, feat in sorted(spans):
+                  out.append({"index": {
+                      "byteStart": len(text[:s].encode("utf-8")),
+                      "byteEnd": len(text[:e].encode("utf-8"))},
+                      "features": [feat]})
+              return out
 
-          # 同一条不发两次。读不到就照发 —— 重一条比漏一条好。
-          try:
-              me = api("/api/v1/accounts/verify_credentials")
-              for s in api("/api/v1/accounts/%s/statuses?limit=40" % me["id"]):
-                  if url and url in (s.get("content") or ""):
-                      print("这条已经发过了 —— 什么都不做。")
-                      sys.exit(0)
-          except urllib.error.HTTPError as e:
-              print("读不到最近的嘟文（%s）—— 直接发。" % e.code, file=sys.stderr)
+          if bsky_on and bsky_status:
+              try:
+                  session = bsky_api("com.atproto.server.createSession",
+                                     {"identifier": bsky_handle,
+                                      "password": bsky_password})
+                  jwt, did = session["accessJwt"], session["did"]
 
-          try:
-              r = api("/api/v1/statuses", {"status": status, "visibility": "public"})
-          except urllib.error.HTTPError as e:
-              print("Mastodon 拒了：%s %s" % (e.code, e.read().decode()[:400]), file=sys.stderr)
-              sys.exit(1)
-          print("发出去了：%s" % (r.get("url") or r.get("uri")))
+                  already = False
+                  try:
+                      recs = bsky_api("com.atproto.repo.listRecords", jwt=jwt,
+                                      query={"repo": did,
+                                             "collection": "app.bsky.feed.post",
+                                             "limit": "40"})
+                      for rec in recs.get("records", []):
+                          if url and url in (rec.get("value", {}).get("text") or ""):
+                              already = True
+                              break
+                  except urllib.error.HTTPError as e:
+                      print("Bluesky：读不到最近的帖子（%s）—— 直接发。" % e.code,
+                            file=sys.stderr)
+
+                  if already:
+                      print("Bluesky：这条已经发过了 —— 跳过。")
+                  else:
+                      record = {
+                          "$type": "app.bsky.feed.post",
+                          "text": bsky_status,
+                          "langs": ["en"],
+                          "createdAt": datetime.now(timezone.utc)
+                                       .strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                          "facets": facets(bsky_status),
+                      }
+                      if url:
+                          record["embed"] = {
+                              "$type": "app.bsky.embed.external",
+                              "external": {
+                                  "uri": url,
+                                  "title": name,
+                                  "description": para[:200],
+                              },
+                          }
+                      res = bsky_api("com.atproto.repo.createRecord",
+                                     {"repo": did,
+                                      "collection": "app.bsky.feed.post",
+                                      "record": record},
+                                     jwt=jwt)
+                      print("Bluesky 发出去了：%s" % res.get("uri"))
+              except urllib.error.HTTPError as e:
+                  print("Bluesky 拒了：%s %s"
+                        % (e.code, e.read().decode()[:400]), file=sys.stderr)
+                  failed = True
+
+          sys.exit(1 if failed else 0)
           PY

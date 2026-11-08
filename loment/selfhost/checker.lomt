@@ -588,8 +588,10 @@ fn chk_rt_site(src: ptr, t: ptr, i: u32, prof: u32) -> u32 {
         }
         return 0;
     }
-    if chk_tok_is(src, t, i, "quality") || chk_tok_is(src, t, i, "discharge")
-            || chk_tok_is(src, t, i, "domain") {
+    if chk_tok_is(src, t, i, "domain") {
+        return chk_is_dom_block(src, t, i);
+    }
+    if chk_tok_is(src, t, i, "quality") || chk_tok_is(src, t, i, "discharge") {
         // 与 `guard` 同一位置判据：后面紧跟一个名字才算（参考实现同一条）。
         if chk_tok_kind(t, i + 1) == 0 {
             return 1;
@@ -871,8 +873,10 @@ fn chk_find_paren(src: ptr, t: ptr, i: u32) -> u32 {
 /// 前缀 `chk_` 的理由同 `chk_find_paren` (扁平符号表)。
 fn chk_skip_type(src: ptr, t: ptr, i: u32) -> u32 {
     let e: u32 = chk_skip_type0(src, t, i);
-    // docs/313：类型后面可以跟 `in SPACE`（值的空间标签）
-    if chk_tok_is(src, t, e, "in") && chk_tok_kind(t, e + 1) == 0 {
+    // docs/313：类型后面可以跟 `in SPACE`（值的空间标签）。
+    // 先确认 `e` 还在（类型可能正好在单元末尾），再读 `e + 1`。
+    if chk_tok_kind(t, e) != 4 && chk_tok_is(src, t, e, "in")
+            && chk_tok_kind(t, e + 1) == 0 {
         return e + 2;
     }
     return e;
@@ -930,7 +934,6 @@ fn chk_is_kw(src: ptr, t: ptr, i: u32) -> u32 {
             || chk_tok_is(src, t, i, "match") || chk_tok_is(src, t, i, "guard")
             || chk_tok_is(src, t, i, "tick")
             || chk_tok_is(src, t, i, "quality") || chk_tok_is(src, t, i, "discharge")
-            || chk_tok_is(src, t, i, "domain")
             || chk_tok_is(src, t, i, "let") || chk_tok_is(src, t, i, "fn")
             || chk_tok_is(src, t, i, "struct") || chk_tok_is(src, t, i, "enum")
             || chk_tok_is(src, t, i, "const") || chk_tok_is(src, t, i, "use")
@@ -1449,8 +1452,26 @@ fn chk_dom_name_at(src: ptr, t: ptr, hdr: u32, nt: u32) -> u32 {
     if chk_tok_kind(t, k) != 0 {
         return 0;
     }
-    if chk_tok_is(src, t, k + 1, ":") {
+    // `domain NAME : SPACE[` —— 名字后面还得是 `: SPACE[`，否则只是个同名标识符
+    if chk_tok_is(src, t, k + 1, ":") && chk_tok_kind(t, k + 2) == 0
+            && chk_tok_is(src, t, k + 3, "[") {
         return same(src, t, k, nt) as u32;
+    }
+    return 0;
+}
+
+/// `domain` 是上下文关键字（同 codegen 的 `is_dom_block`）。
+fn chk_is_dom_block(src: ptr, t: ptr, i: u32) -> u32 {
+    let a: u32 = i + 1;
+    if chk_tok_kind(t, a) != 0 {
+        return 0;
+    }
+    if chk_tok_is(src, t, a + 1, ":") && chk_tok_kind(t, a + 2) == 0
+            && chk_tok_is(src, t, a + 3, "[") {
+        return 1;
+    }
+    if chk_tok_is(src, t, a + 1, "[") {
+        return 1;
     }
     return 0;
 }
@@ -3710,7 +3731,8 @@ fn chk_stmt_end(src: ptr, t: ptr, cur: u32, e: u32) -> u32 {
     }
     if chk_tok_is(src, t, cur, "if") || chk_tok_is(src, t, cur, "while")
             || chk_tok_is(src, t, cur, "for") || chk_tok_is(src, t, cur, "match")
-            || chk_tok_is(src, t, cur, "domain") || islgc == 1 {
+            || (chk_tok_is(src, t, cur, "domain") && chk_is_dom_block(src, t, cur) == 1)
+            || islgc == 1 {
         let k0: u32 = chk_skip_body(src, t, cur);
         let k: u32 = k0;
         while k < e && chk_tok_is(src, t, k, "else") {
@@ -3751,7 +3773,7 @@ fn chk_falls(src: ptr, t: ptr, b: u32, e: u32) -> u32 {
     if chk_tok_is(src, t, last, "return") {
         return 0;
     }
-    if chk_tok_is(src, t, last, "domain") {
+    if chk_tok_is(src, t, last, "domain") && chk_is_dom_block(src, t, last) == 1 {
         // docs/313：块的末尾就是函数的末尾 —— 块里不掉，函数就不掉
         let lb: u32 = chk_find_at(src, t, last + 1, e, "{");
         if lb >= e {
@@ -3849,7 +3871,7 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 || chk_tok_is(src, t, j, ";")
                 || chk_tok_is(src, t, j, "=>") {
             j = j + 1;
-        } else if chk_tok_is(src, t, j, "domain") {
+        } else if chk_tok_is(src, t, j, "domain") && chk_is_dom_block(src, t, j) == 1 {
             // `docs/313`：`domain … {` 的头不是代码 —— 只把游标挪到 `{`，
             // 体里的语句照常逐条检查（作用域由 `chk_dom_has` 那把反向扫描认）。
             let k: u32 = j + 1;
@@ -4886,7 +4908,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
             i = chk_cap_end(src, t, i);
             skipped = 1;
         }
-        if chk_tok_is(src, t, i, "domain") {
+        if chk_tok_is(src, t, i, "domain") && chk_is_dom_block(src, t, i) == 1 {
             // docs/313：域块的头不是代码（`consumed(1)` / `epoch(3)` 长得像调用）——
             // 跳到 `{`，体里的语句下一轮照常扫。
             while chk_tok_kind(t, i) != 4 && !chk_tok_is(src, t, i, "{") {

@@ -3354,6 +3354,14 @@ class Parser:
         revocable = bool(self.accept("ident", "revocable"))
         return Capability(name, space, lo, hi, revocable, kw.line, kind, param, lo_inf, hi_inf)
 
+    def _at_domain_block(self) -> bool:
+        """`domain` 是**上下文关键字**：只有 `domain NAME : SPACE[` / `domain SPACE[`
+        才是块。别处的 `domain`（比如 `sock_new(domain: u64, …)`）照旧是普通名字。"""
+        a, b, c, d = self.peek(1), self.peek(2), self.peek(3), self.peek(4)
+        if a.kind == "ident" and b.val == ":" and c.kind == "ident" and d.val == "[":
+            return True
+        return a.kind == "ident" and b.val == "["
+
     def parse_domain_block(self) -> "DomainBlock":
         """`domain [NAME :] SPACE[lo..hi] [law]? { … }`（`docs/313` §2）。"""
         kw = self.expect("ident", "domain")
@@ -3505,7 +3513,7 @@ class Parser:
             self.expect("punct", ")")
             self.expect("punct", ";")
             return Guard(cap, e, t.line, aux=aux)
-        if t.val == "domain":  # docs/313 §2：块级域
+        if t.val == "domain" and self._at_domain_block():  # docs/313 §2：块级域
             return self.parse_domain_block()
         if t.val == "tick":
             self.next()
@@ -5657,7 +5665,18 @@ def _runtime_sites(toks: list,
         if prev == "fn":
             continue
         nxt = toks[i + 1] if i + 1 < n else None
-        if t.val in ("guard", "lgc", "quality", "discharge", "domain"):
+        if t.val == "domain":
+            # `domain` 是**上下文关键字**：只有 `domain NAME : SPACE[` / `domain SPACE[`
+            # 才是块；`sock_new(domain: u64, …)` 那样的名字不算（也不拖运行期）。
+            a = toks[i + 1] if i + 1 < n else None
+            b = toks[i + 2] if i + 2 < n else None
+            c = toks[i + 3] if i + 3 < n else None
+            d = toks[i + 4] if i + 4 < n else None
+            hit = (a is not None and a.kind == "ident" and (
+                (b is not None and b.val == ":" and c is not None and c.kind == "ident"
+                 and d is not None and d.val == "[")
+                or (b is not None and b.val == "[")))
+        elif t.val in ("guard", "lgc", "quality", "discharge"):
             hit = nxt is not None and nxt.kind == "ident"
         elif t.val == "tick":
             hit = nxt is not None and nxt.kind == "punct" and nxt.val == ";"

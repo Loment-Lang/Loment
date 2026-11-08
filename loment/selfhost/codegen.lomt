@@ -2816,7 +2816,9 @@ fn array_len_of(src: ptr, toks: ptr, tt: u32) -> u32 {
 /// `docs/313`：类型后面可以跟 `in SPACE`（值的空间标签），一并跳过。
 fn skip_type(src: ptr, toks: ptr, i: u32) -> u32 {
     let e: u32 = skip_type0(src, toks, i);
-    if tok_is(src, toks, e, "in") && tok_kind(toks, e + 1) == 0 {
+    // 先确认 `e` 还在（类型可能正好在单元末尾），再读 `e + 1`
+    if tok_kind(toks, e) != 4 && tok_is(src, toks, e, "in")
+            && tok_kind(toks, e + 1) == 0 {
         return e + 2;
     }
     return e;
@@ -2874,6 +2876,23 @@ fn cap_base(i: u32) -> u32 {
 /// 6 flags / 7 state temp。
 fn dom_at(lvl: u32, f: u32) -> u32 {
     return CG_DOM + lvl * 40 + f * 4;
+}
+
+/// `docs/313`：`domain` 是**上下文关键字**。只有 `domain NAME : SPACE[` 或
+/// `domain SPACE[` 才是块；`sock_new(domain: u64, …)` 里的名字不算。
+fn is_dom_block(src: ptr, toks: ptr, i: u32) -> u32 {
+    let a: u32 = i + 1;
+    if tok_kind(toks, a) != 0 {
+        return 0;
+    }
+    if tok_is(src, toks, a + 1, ":") && tok_kind(toks, a + 2) == 0
+            && tok_is(src, toks, a + 3, "[") {
+        return 1;
+    }
+    if tok_is(src, toks, a + 1, "[") {
+        return 1;
+    }
+    return 0;
 }
 
 fn dsp_get(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
@@ -6297,6 +6316,163 @@ fn dfr_stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
 }
 
 /// 一条语句; 返回下一个待处理 token 下标。
+/// `docs/313` §2：域块。单独一支函数 —— 它自己的局部变量不该压进 `stmt` 的栈帧
+/// （PE 默认栈 1 MB；放进 `stmt` 会把大单元推过界，实测 ansi/tui）。
+fn dom_stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
+        let k: u32 = j + 1;
+        let nm: u32 = 0;
+        if tok_kind(toks, k) == 0 && tok_is(src, toks, k + 1, ":") {
+            nm = k;
+            k = k + 2;
+        }
+        let sp: u32 = k;
+        let q: u32 = sp + 2;
+        let lof: u32 = 0;
+        let lo: u32 = 0;
+        if tok_is(src, toks, q, "(") {
+            lof = 1;
+            q = q + 2;
+        } else {
+            lo = tok_int(src, toks, q);
+            q = q + 1;
+        }
+        q = q + 2;
+        let hif: u32 = 0;
+        let hi: u32 = 0;
+        if tok_is(src, toks, q, "(") {
+            hif = 1;
+            q = q + 2;
+        } else {
+            hi = tok_int(src, toks, q);
+            q = q + 1;
+        }
+        q = q + 1;
+        let kind: u32 = 0;
+        let param: u32 = 0;
+        if tok_is(src, toks, q, "danger") || tok_is(src, toks, q, "adaptive")
+                || tok_is(src, toks, q, "flow") {
+            if tok_is(src, toks, q, "danger") { kind = 1; }
+            if tok_is(src, toks, q, "adaptive") { kind = 10; }
+            if tok_is(src, toks, q, "flow") { kind = 13; }
+            q = q + 1;
+        } else if tok_is(src, toks, q, "epoch") || tok_is(src, toks, q, "far")
+                || tok_is(src, toks, q, "sliding") || tok_is(src, toks, q, "decaying")
+                || tok_is(src, toks, q, "growing") || tok_is(src, toks, q, "consumed")
+                || tok_is(src, toks, q, "cyclic") || tok_is(src, toks, q, "generational")
+                || tok_is(src, toks, q, "subject") || tok_is(src, toks, q, "witnessed")
+                || tok_is(src, toks, q, "reachable") {
+            if tok_is(src, toks, q, "epoch") { kind = 2; }
+            if tok_is(src, toks, q, "far") { kind = 3; }
+            if tok_is(src, toks, q, "sliding") { kind = 4; }
+            if tok_is(src, toks, q, "decaying") { kind = 5; }
+            if tok_is(src, toks, q, "growing") { kind = 6; }
+            if tok_is(src, toks, q, "consumed") { kind = 7; }
+            if tok_is(src, toks, q, "cyclic") { kind = 8; }
+            if tok_is(src, toks, q, "generational") { kind = 9; }
+            if tok_is(src, toks, q, "subject") { kind = 11; }
+            if tok_is(src, toks, q, "witnessed") { kind = 12; }
+            if tok_is(src, toks, q, "reachable") { kind = 14; }
+            param = tok_int(src, toks, q + 2);
+            q = q + 4;
+        }
+        if tok_is(src, toks, q, "revocable") {
+            q = q + 1;
+        }
+        while tok_kind(toks, q) != 4 && !tok_is(src, toks, q, "{") {
+            q = q + 1;
+        }
+        let d: u32 = load32(s, CG_DOM_N);
+        if d >= CG_DOM_MAX {
+            return cg_fail(s, 2, j);
+        }
+        let id: u32 = load32(s, CG_DOM_ID);
+        store32(s, CG_DOM_ID, id + 1);
+        store32(s, dom_at(d, 0), id);
+        store32(s, dom_at(d, 1), sp);
+        store32(s, dom_at(d, 2), lo);
+        store32(s, dom_at(d, 3), hi);
+        store32(s, dom_at(d, 4), kind);
+        store32(s, dom_at(d, 5), param);
+        store32(s, dom_at(d, 6), lof | (hif << 1));
+        store32(s, dom_at(d, 7), 0);
+        store32(s, dom_at(d, 8), nm);
+        if kind == 7 || kind == 10 || kind == 12 || kind == 14 {
+            emit_str(s, out, "  ");
+            let pt: u32 = new_temp(s, out);
+            emit_str(s, out, " = alloca [64 x i64]
+  ");
+            let ct: u32 = new_temp(s, out);
+            emit_str(s, out, " = alloca i64
+  store i64 0, ptr %t");
+            emit_dec(s, out, ct);
+            emit_str(s, out, "
+");
+            let l1: u32 = load32(s, 480) + 1;
+            store32(s, 480, l1 + 2);
+            jump(s, out, l1, "dzc");
+            lab_def(s, out, l1, "dzc");
+            emit_str(s, out, "  ");
+            let vt: u32 = new_temp(s, out);
+            emit_str(s, out, " = load i64, ptr %t");
+            emit_dec(s, out, ct);
+            emit_str(s, out, "
+  ");
+            let cmpt: u32 = new_temp(s, out);
+            emit_str(s, out, " = icmp ult i64 %t");
+            emit_dec(s, out, vt);
+            emit_str(s, out, ", 64
+  br i1 %t");
+            emit_dec(s, out, cmpt);
+            emit_str(s, out, ", label ");
+            lab_ref(s, out, l1 + 1, "dzb");
+            emit_str(s, out, ", label ");
+            lab_ref(s, out, l1 + 2, "dzd");
+            emit_str(s, out, "
+");
+            lab_def(s, out, l1 + 1, "dzb");
+            emit_str(s, out, "  ");
+            let gt: u32 = new_temp(s, out);
+            emit_str(s, out, " = getelementptr [64 x i64], ptr %t");
+            emit_dec(s, out, pt);
+            emit_str(s, out, ", i64 0, i64 %t");
+            emit_dec(s, out, vt);
+            emit_str(s, out, "
+  store i64 0, ptr %t");
+            emit_dec(s, out, gt);
+            emit_str(s, out, "
+  ");
+            let vt1: u32 = new_temp(s, out);
+            emit_str(s, out, " = add i64 %t");
+            emit_dec(s, out, vt);
+            emit_str(s, out, ", 1
+  store i64 %t");
+            emit_dec(s, out, vt1);
+            emit_str(s, out, ", ptr %t");
+            emit_dec(s, out, ct);
+            emit_str(s, out, "
+");
+            jump(s, out, l1, "dzc");
+            lab_def(s, out, l1 + 2, "dzd");
+            if kind == 10 {
+                emit_str(s, out, "  store i64 255, ptr %t");
+                emit_dec(s, out, pt);
+                emit_str(s, out, "
+");
+            }
+            store32(s, dom_at(d, 7), pt);
+        }
+        store32(s, CG_DOM_N, d + 1);
+        // 块体是一层语句表：体内的 `defer` 在块尾按 LIFO 跑（与参考的 `self.block` 同序）
+        let dfr: u32 = dfr_push(s);
+        let k2: u32 = q + 1;
+        while !tok_is(src, toks, k2, "}") && tok_kind(toks, k2) != 4 {
+            k2 = stmt(s, out, src, toks, k2, ret);
+        }
+        let _de: u32 = dfr_end(s, out, src, toks, dfr, ret);
+        store32(s, CG_DOM_N, d);
+        return k2 + 1;
+}
+
 fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
     if load32(s, CG_PROF) == 2 && tok_kind(toks, j) == 0 && tok_is(src, toks, j, "lgc") {
         // `lgc` 的时间控制（`docs/309`）：只在 Tur 2026.3 是关键字。
@@ -7041,159 +7217,8 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         store32(s, 548, md);
         return stop;
     }
-    if tok_is(src, toks, j, "domain") {   // docs/313 §2：块级域
-        let k: u32 = j + 1;
-        let nm: u32 = 0;
-        if tok_kind(toks, k) == 0 && tok_is(src, toks, k + 1, ":") {
-            nm = k;
-            k = k + 2;
-        }
-        let sp: u32 = k;
-        let q: u32 = sp + 2;
-        let lof: u32 = 0;
-        let lo: u32 = 0;
-        if tok_is(src, toks, q, "(") {
-            lof = 1;
-            q = q + 2;
-        } else {
-            lo = tok_int(src, toks, q);
-            q = q + 1;
-        }
-        q = q + 2;
-        let hif: u32 = 0;
-        let hi: u32 = 0;
-        if tok_is(src, toks, q, "(") {
-            hif = 1;
-            q = q + 2;
-        } else {
-            hi = tok_int(src, toks, q);
-            q = q + 1;
-        }
-        q = q + 1;
-        let kind: u32 = 0;
-        let param: u32 = 0;
-        if tok_is(src, toks, q, "danger") || tok_is(src, toks, q, "adaptive")
-                || tok_is(src, toks, q, "flow") {
-            if tok_is(src, toks, q, "danger") { kind = 1; }
-            if tok_is(src, toks, q, "adaptive") { kind = 10; }
-            if tok_is(src, toks, q, "flow") { kind = 13; }
-            q = q + 1;
-        } else if tok_is(src, toks, q, "epoch") || tok_is(src, toks, q, "far")
-                || tok_is(src, toks, q, "sliding") || tok_is(src, toks, q, "decaying")
-                || tok_is(src, toks, q, "growing") || tok_is(src, toks, q, "consumed")
-                || tok_is(src, toks, q, "cyclic") || tok_is(src, toks, q, "generational")
-                || tok_is(src, toks, q, "subject") || tok_is(src, toks, q, "witnessed")
-                || tok_is(src, toks, q, "reachable") {
-            if tok_is(src, toks, q, "epoch") { kind = 2; }
-            if tok_is(src, toks, q, "far") { kind = 3; }
-            if tok_is(src, toks, q, "sliding") { kind = 4; }
-            if tok_is(src, toks, q, "decaying") { kind = 5; }
-            if tok_is(src, toks, q, "growing") { kind = 6; }
-            if tok_is(src, toks, q, "consumed") { kind = 7; }
-            if tok_is(src, toks, q, "cyclic") { kind = 8; }
-            if tok_is(src, toks, q, "generational") { kind = 9; }
-            if tok_is(src, toks, q, "subject") { kind = 11; }
-            if tok_is(src, toks, q, "witnessed") { kind = 12; }
-            if tok_is(src, toks, q, "reachable") { kind = 14; }
-            param = tok_int(src, toks, q + 2);
-            q = q + 4;
-        }
-        if tok_is(src, toks, q, "revocable") {
-            q = q + 1;
-        }
-        while tok_kind(toks, q) != 4 && !tok_is(src, toks, q, "{") {
-            q = q + 1;
-        }
-        let d: u32 = load32(s, CG_DOM_N);
-        if d >= CG_DOM_MAX {
-            return cg_fail(s, 2, j);
-        }
-        let id: u32 = load32(s, CG_DOM_ID);
-        store32(s, CG_DOM_ID, id + 1);
-        store32(s, dom_at(d, 0), id);
-        store32(s, dom_at(d, 1), sp);
-        store32(s, dom_at(d, 2), lo);
-        store32(s, dom_at(d, 3), hi);
-        store32(s, dom_at(d, 4), kind);
-        store32(s, dom_at(d, 5), param);
-        store32(s, dom_at(d, 6), lof | (hif << 1));
-        store32(s, dom_at(d, 7), 0);
-        store32(s, dom_at(d, 8), nm);
-        if kind == 7 || kind == 10 || kind == 12 || kind == 14 {
-            emit_str(s, out, "  ");
-            let pt: u32 = new_temp(s, out);
-            emit_str(s, out, " = alloca [64 x i64]
-  ");
-            let ct: u32 = new_temp(s, out);
-            emit_str(s, out, " = alloca i64
-  store i64 0, ptr %t");
-            emit_dec(s, out, ct);
-            emit_str(s, out, "
-");
-            let l1: u32 = load32(s, 480) + 1;
-            store32(s, 480, l1 + 2);
-            jump(s, out, l1, "dzc");
-            lab_def(s, out, l1, "dzc");
-            emit_str(s, out, "  ");
-            let vt: u32 = new_temp(s, out);
-            emit_str(s, out, " = load i64, ptr %t");
-            emit_dec(s, out, ct);
-            emit_str(s, out, "
-  ");
-            let cmpt: u32 = new_temp(s, out);
-            emit_str(s, out, " = icmp ult i64 %t");
-            emit_dec(s, out, vt);
-            emit_str(s, out, ", 64
-  br i1 %t");
-            emit_dec(s, out, cmpt);
-            emit_str(s, out, ", label ");
-            lab_ref(s, out, l1 + 1, "dzb");
-            emit_str(s, out, ", label ");
-            lab_ref(s, out, l1 + 2, "dzd");
-            emit_str(s, out, "
-");
-            lab_def(s, out, l1 + 1, "dzb");
-            emit_str(s, out, "  ");
-            let gt: u32 = new_temp(s, out);
-            emit_str(s, out, " = getelementptr [64 x i64], ptr %t");
-            emit_dec(s, out, pt);
-            emit_str(s, out, ", i64 0, i64 %t");
-            emit_dec(s, out, vt);
-            emit_str(s, out, "
-  store i64 0, ptr %t");
-            emit_dec(s, out, gt);
-            emit_str(s, out, "
-  ");
-            let vt1: u32 = new_temp(s, out);
-            emit_str(s, out, " = add i64 %t");
-            emit_dec(s, out, vt);
-            emit_str(s, out, ", 1
-  store i64 %t");
-            emit_dec(s, out, vt1);
-            emit_str(s, out, ", ptr %t");
-            emit_dec(s, out, ct);
-            emit_str(s, out, "
-");
-            jump(s, out, l1, "dzc");
-            lab_def(s, out, l1 + 2, "dzd");
-            if kind == 10 {
-                emit_str(s, out, "  store i64 255, ptr %t");
-                emit_dec(s, out, pt);
-                emit_str(s, out, "
-");
-            }
-            store32(s, dom_at(d, 7), pt);
-        }
-        store32(s, CG_DOM_N, d + 1);
-        // 块体是一层语句表：体内的 `defer` 在块尾按 LIFO 跑（与参考的 `self.block` 同序）
-        let dfr: u32 = dfr_push(s);
-        let k2: u32 = q + 1;
-        while !tok_is(src, toks, k2, "}") && tok_kind(toks, k2) != 4 {
-            k2 = stmt(s, out, src, toks, k2, ret);
-        }
-        let _de: u32 = dfr_end(s, out, src, toks, dfr, ret);
-        store32(s, CG_DOM_N, d);
-        return k2 + 1;
+    if tok_is(src, toks, j, "domain") && is_dom_block(src, toks, j) == 1 {   // docs/313
+        return dom_stmt(s, out, src, toks, j, ret);
     }
     if tok_is(src, toks, j, "guard") {   // P4/M36+M38 / docs/313
         let dw: u32 = dom_by_name(s, src, toks, j + 1);
@@ -10193,7 +10218,7 @@ fn guard_rt_needed(s: ptr, src: ptr, toks: ptr) -> u32 {
         if tok_is(src, toks, i, "quality") && tok_kind(toks, i + 1) == 0 {
             return 1;
         }
-        if tok_is(src, toks, i, "domain") {
+        if tok_is(src, toks, i, "domain") && is_dom_block(src, toks, i) == 1 {
             return 1;
         }
         if tok_is(src, toks, i, "discharge") && tok_kind(toks, i + 1) == 0 {

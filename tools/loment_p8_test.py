@@ -899,7 +899,7 @@ CODEGEN_DRIVER = """#include <stdio.h>
 extern unsigned int lex(char *src, unsigned int len, unsigned char *out);
 extern unsigned int cg_arena_bytes(void);
 extern unsigned int emit_module(char *src, unsigned char *toks, char *out, unsigned char *st,
-                                unsigned int prof);
+                                unsigned int prof, unsigned int tickx);
 int main(int argc, char **argv) {
     FILE *f = fopen(argv[1], "rb");
     if (!f) return 2;
@@ -918,7 +918,9 @@ int main(int argc, char **argv) {
     lex(buf, (unsigned int)n, toks);
     /* 版次由调用方给（`argv[2]`，缺省 0 = Tur 1）—— 同 checker 夹具那条。 */
     unsigned int prof = (argc > 2) ? (unsigned int)atoi(argv[2]) : 0;
-    unsigned int m = emit_module(buf, toks, out, st, prof);
+    /* `docs/315`：第三个实参 = `domain_clock_explicit`（1 = 关掉"回边即 tick"）。 */
+    unsigned int tickx = (argc > 3) ? (unsigned int)atoi(argv[3]) : 0;
+    unsigned int m = emit_module(buf, toks, out, st, prof, tickx);
     printf("%.*s", (int)m, out);
     return 0;
 }

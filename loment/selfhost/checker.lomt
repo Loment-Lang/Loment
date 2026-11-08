@@ -1476,6 +1476,14 @@ fn chk_is_dom_block(src: ptr, t: ptr, i: u32) -> u32 {
     return 0;
 }
 
+/// `domain:for …`（`docs/315`）—— 与 `domain … {` 区分开。
+fn chk_is_dom_for(src: ptr, t: ptr, i: u32) -> u32 {
+    if chk_tok_is(src, t, i + 1, ":") && chk_tok_is(src, t, i + 2, "for") {
+        return 1;
+    }
+    return 0;
+}
+
 /// `guard/quality/discharge NAME` 的 NAME 是不是某个外层 `domain` 块声明的。
 /// 反向走 token：`}` 加深，`{` 变浅；在深度 0 的 `{` 处回头看它的头。
 fn chk_dom_has(src: ptr, t: ptr, at: u32, nt: u32) -> u32 {
@@ -1497,9 +1505,15 @@ fn chk_dom_has(src: ptr, t: ptr, at: u32, nt: u32) -> u32 {
                         if chk_dom_name_at(src, t, h, nt) == 1 {
                             return 1;
                         }
-                        stop = 1;
+                        // `domain:for … {` 不是域块 —— 它是**透明**的一层（`docs/315`）：
+                        // 循环体里的 `guard` 照样能看见外面那个域。
+                        if chk_is_dom_for(src, t, h) == 0 {
+                            stop = 1;
+                        }
                     }
-                    if chk_tok_is(src, t, h, ";") || chk_tok_is(src, t, h, "{")
+                    if chk_tok_is(src, t, h, "for") && h >= 2 && chk_is_dom_for(src, t, h - 2) == 1 {
+                        // 同上：这是 `domain:for` 的 `for`，不是普通循环头。
+                    } else if chk_tok_is(src, t, h, ";") || chk_tok_is(src, t, h, "{")
                             || chk_tok_is(src, t, h, "}") || chk_tok_is(src, t, h, "if")
                             || chk_tok_is(src, t, h, "while") || chk_tok_is(src, t, h, "for")
                             || chk_tok_is(src, t, h, "match") || chk_tok_is(src, t, h, "else") {
@@ -3399,6 +3413,11 @@ fn chk_moves(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             } else {
                 j = e;
             }
+        } else if chk_tok_is(src, t, j, "domain")
+                && (chk_is_dom_block(src, t, j) == 1 || chk_is_dom_for(src, t, j) == 1) {
+            // 域块 / 域循环的头不是表达式（`docs/314`/`docs/315`）—— 跳到 `{`。
+            let lb: u32 = chk_find_at(src, t, j + 1, e, "{");
+            j = lb;
         } else if chk_tok_is(src, t, j, "if") || chk_tok_is(src, t, j, "while") {
             let lb: u32 = chk_find_at(src, t, j + 1, e, "{");
             chk_use(src, t, syms, n, env, envc, chk_lh(j + 1, lb), tyt, p, oc);
@@ -3732,6 +3751,7 @@ fn chk_stmt_end(src: ptr, t: ptr, cur: u32, e: u32) -> u32 {
     if chk_tok_is(src, t, cur, "if") || chk_tok_is(src, t, cur, "while")
             || chk_tok_is(src, t, cur, "for") || chk_tok_is(src, t, cur, "match")
             || (chk_tok_is(src, t, cur, "domain") && chk_is_dom_block(src, t, cur) == 1)
+            || (chk_tok_is(src, t, cur, "domain") && chk_is_dom_for(src, t, cur) == 1)
             || islgc == 1 {
         let k0: u32 = chk_skip_body(src, t, cur);
         let k: u32 = k0;
@@ -3772,6 +3792,10 @@ fn chk_falls(src: ptr, t: ptr, b: u32, e: u32) -> u32 {
     }
     if chk_tok_is(src, t, last, "return") {
         return 0;
+    }
+    if chk_tok_is(src, t, last, "domain") && chk_is_dom_for(src, t, last) == 1 {
+        // docs/315：循环**会**掉出去（区间可能是空的）—— 与 while 同判。
+        return 1;
     }
     if chk_tok_is(src, t, last, "domain") && chk_is_dom_block(src, t, last) == 1 {
         // docs/314：块的末尾就是函数的末尾 —— 块里不掉，函数就不掉
@@ -3871,6 +3895,16 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 || chk_tok_is(src, t, j, ";")
                 || chk_tok_is(src, t, j, "=>") {
             j = j + 1;
+        } else if chk_tok_is(src, t, j, "domain") && chk_is_dom_for(src, t, j) == 1 {
+            // `docs/315`：`domain:for VAR …` 的头不是代码；变量要进环境（类型未知 ——
+            // 反糖出来的是 u32，源里没有可指的 token；下游按未知处理，不误报）。
+            c = chk_env_add(t, env, c, j + 3, 0);
+            store32(tyt, 3520, c);
+            let k: u32 = j + 4;
+            while chk_tok_kind(t, k) != 4 && !chk_tok_is(src, t, k, "{") {
+                k = k + 1;
+            }
+            j = k;
         } else if chk_tok_is(src, t, j, "domain") && chk_is_dom_block(src, t, j) == 1 {
             // `docs/314`：`domain … {` 的头不是代码 —— 只把游标挪到 `{`，
             // 体里的语句照常逐条检查（作用域由 `chk_dom_has` 那把反向扫描认）。
@@ -4911,6 +4945,13 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
         if chk_tok_is(src, t, i, "domain") && chk_is_dom_block(src, t, i) == 1 {
             // docs/314：域块的头不是代码（`consumed(1)` / `epoch(3)` 长得像调用）——
             // 跳到 `{`，体里的语句下一轮照常扫。
+            while chk_tok_kind(t, i) != 4 && !chk_tok_is(src, t, i, "{") {
+                i = i + 1;
+            }
+            skipped = 1;
+        }
+        if chk_tok_is(src, t, i, "domain") && chk_is_dom_for(src, t, i) == 1 {
+            // docs/315：`domain:for VAR [in NAME] [step N]` 的头同样不是调用。
             while chk_tok_kind(t, i) != 4 && !chk_tok_is(src, t, i, "{") {
                 i = i + 1;
             }

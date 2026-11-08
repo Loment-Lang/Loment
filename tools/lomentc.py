@@ -1738,6 +1738,10 @@ class While:
     #: **`continue` 的更新步**（`docs/296` §2.5）：Tur 2 的 for-in 反糖成 while 之后，
     #: 下标自增放在这里 —— `continue` 先跑它再回到条件，用户 while 里这里是空的。
     step: list = field(default_factory=list)
+    #: **`domain:for` 已证的位置**（`docs/315`）：`(变量名, 空间名)`。循环头已经守卫过
+    #: 这个位置，体内对同空间值的 `x[变量]` **不再**挂自动守卫 —— 有状态的域否则会被
+    #: 扣两次（循环头一次、每个访问一次）。
+    proven: tuple = ()
 
 
 @dataclass
@@ -1966,6 +1970,9 @@ def _resolve_domains(mod) -> None:
       挂上**同空间**的域链（外→内），发射器据此在取址前插判决。
     """
     nxt = [len(mod.caps)]
+    #: `domain:for` 在体内**已经证过**的位置（`While.proven`）。栈式保存/恢复：
+    #: 进入这种循环的体时设上，离开时还原 —— 嵌套循环各自的那一份互不覆盖。
+    cur_prov: list = [()]
 
     def ex(e, stack, vs) -> None:
         if isinstance(e, Index):
@@ -1973,7 +1980,10 @@ def _resolve_domains(mod) -> None:
             ex(e.idx, stack, vs)
             if isinstance(e.obj, Ident):
                 sp = vs.get(e.obj.name, "")
-                if sp:
+                prov = cur_prov[0]
+                proven = (prov and sp == prov[1] and isinstance(e.idx, Ident)
+                          and e.idx.name == prov[0])
+                if sp and not proven:
                     e.doms = [
                         (d.audit_id, d.lo, d.hi, CAP_KIND_ID[d.kind], d.param,
                          (1 if d.lo_inf else 0) | (2 if d.hi_inf else 0))
@@ -2068,7 +2078,12 @@ def _resolve_domains(mod) -> None:
                 walk(s.otherwise, stack, dict(vs))
             elif isinstance(s, While):
                 ex(s.cond, stack, vs)
-                walk(s.body, stack, dict(vs))
+                old = cur_prov[0]
+                cur_prov[0] = getattr(s, "proven", ())
+                try:
+                    walk(s.body, stack, dict(vs))
+                finally:
+                    cur_prov[0] = old
             elif isinstance(s, For):
                 ex(s.lo, stack, vs)
                 ex(s.hi, stack, vs)
@@ -2986,6 +3001,10 @@ class Parser:
         self.depth = 0
         #: 循环嵌套层数（Tur 2 的 `break`/`continue` 只在循环里合法）。
         self.loop_depth = 0
+        #: 正在解析的 `domain` 块（`docs/315`）：`domain:for` 要靠它拿形状。
+        self.dom_stack: list = []
+        #: 匿名域块的内部编号（`__dom$N`，用户写不出来；名字不进 IR）。
+        self.dom_seq = 0
 
     # -- 基础
     def peek(self, k: int = 0) -> Tok:
@@ -3369,6 +3388,84 @@ class Parser:
             return True
         return a.kind == "ident" and b.val == "["
 
+    def _at_domain_loop(self) -> bool:
+        """`domain:for …`（`docs/315`）—— `domain` 后面紧跟 `:` 再紧跟 `for`。
+
+        与 `_at_domain_block` 一样是**上下文**判定：`domain` 本身不进关键字表，
+        `sock_new(domain: u64, …)` 照旧编得过。"""
+        a, b = self.peek(1), self.peek(2)
+        return (a.kind == "punct" and a.val == ":" and b.kind == "ident"
+                and b.val == "for")
+
+    def parse_domain_for(self):
+        """`domain:for VAR [in NAME] [step N] { … }`（`docs/315` §2）。
+
+        反糖成普通的 `while`：`let VAR: u64 = lo; while VAR <= hi { guard NAME(VAR);
+        …; VAR = VAR + N; }`。反糖带来三件事，都不用下游知道这是新语法：
+
+        - 守卫落在**循环头**（一轮一次），体内的同位置下标不再挂自动守卫
+          （`While.proven`，`_resolve_domains` 据此跳过）；
+        - 回边由 `While` 自己的发射路径处理，自动 tick 因此**一条都不少**；
+        - 检查器、IR、Rust 后端、token 扫描的那些趟都不必认识 `domain:for`。
+
+        只收**有限、可顺序遍历**的域：无界形状（`[()..hi]` / `[lo..()]`）与
+        `danger` 极性没有"第一个位置"，`subject` / `witnessed` / `flow` 还要第二个实参
+        —— 这五类都在这里拒。
+        """
+        kw = self.expect("ident", "domain")
+        self.expect("punct", ":")
+        self.expect("ident", "for")
+        var = self.ident("循环变量")
+        dom = None
+        if self.accept("ident", "in"):
+            dn = self.ident("域名")
+            for d in reversed(self.dom_stack):
+                if d.name == dn:
+                    dom = d
+                    break
+            if dom is None:
+                raise LomError(kw.line, 1,
+                               f"`domain:for` 的域名 {dn} 不在作用域里（块名只在它的 {{}} 内可见）")
+        else:
+            if not self.dom_stack:
+                raise LomError(kw.line, 1,
+                               "`domain:for` 要么写在 `domain` 块里，要么写成 `domain:for i in 名字`")
+            dom = self.dom_stack[-1]
+        step = 1
+        if self.accept("ident", "step"):
+            step = self.int_lit()
+            if step <= 0:
+                raise LomError(kw.line, 1, "`domain:for` 的步长必须大于 0")
+        if dom.lo_inf or dom.hi_inf:
+            raise LomError(kw.line, 1,
+                           "`domain:for` 只能遍历有限形状 —— 无界的那一侧没有终点")
+        if dom.kind == "danger":
+            raise LomError(kw.line, 1,
+                           "`domain:for` 不能遍历危险域 —— 它补集的那一部分没有顺序")
+        if dom.kind in ("subject", "witnessed", "flow"):
+            raise LomError(kw.line, 1,
+                           f"`domain:for` 不能在 {CAP_KIND_NAME[CAP_KIND_ID[dom.kind]]} 域上跑"
+                           " —— 它的判决还要第二个实参")
+        body_at = self.i + 1              # '{' 之后 —— 与普通循环同一个起点
+        self.loop_depth += 1
+        try:
+            body = self.parse_block()
+        finally:
+            self.loop_depth -= 1
+        # 反糖：循环头一条守卫 + 体 + 更新步。
+        head = Guard(dom.name, Ident(var, kw.line), kw.line)
+        w = While(Bin("<=", Ident(var, kw.line), IntLit(dom.hi, kw.line), kw.line),
+                  [head] + body, kw.line)
+        w.step = [Assign(Ident(var, kw.line),
+                         Bin("+", Ident(var, kw.line), IntLit(step, kw.line), kw.line),
+                         kw.line)]
+        w.proven = (var, dom.space)
+        w.tok_at, w.tok_end = body_at, self.i - 1
+        # 变量取 **u32**：域的判决口 `@__loment_guard2` 收的是 i64，而守卫发射走的是
+        # `zext i32 … to i64`（与所有显式 `guard` 同一条路）。用 u64 会发出一条
+        # `zext i32 %i64值` —— 非法 IR，两侧都过不了 clang。
+        return [Let(var, "u32", IntLit(dom.lo, kw.line), kw.line), w]
+
     def parse_domain_block(self) -> "DomainBlock":
         """`domain [NAME :] SPACE[lo..hi] [law]? { … }`（`docs/313` §2）。"""
         kw = self.expect("ident", "domain")
@@ -3381,9 +3478,19 @@ class Parser:
         lo, hi, lo_inf, hi_inf = self.parse_shape()
         kind, param = self.parse_law_tail()
         revocable = bool(self.accept("ident", "revocable"))
-        body = self.parse_block()
-        return DomainBlock(name, space, lo, hi, lo_inf, hi_inf, kind, param,
-                           revocable, body, kw.line)
+        if not name:
+            # 匿名块也要能被 `domain:for` 点到 —— 给它一个用户写不出来的名字
+            # （`$` 不在标识符字符集里）。名字不进 IR，两个实现的编号各走各的。
+            self.dom_seq += 1
+            name = f"__dom${self.dom_seq}"
+        blk = DomainBlock(name, space, lo, hi, lo_inf, hi_inf, kind, param,
+                          revocable, [], kw.line)
+        self.dom_stack.append(blk)
+        try:
+            blk.body = self.parse_block()
+        finally:
+            self.dom_stack.pop()
+        return blk
 
     def parse_fn(self, extern: bool = False) -> Func:
         kw = self.expect("ident", "fn")
@@ -3520,6 +3627,8 @@ class Parser:
             self.expect("punct", ")")
             self.expect("punct", ";")
             return Guard(cap, e, t.line, aux=aux)
+        if t.val == "domain" and self._at_domain_loop():  # docs/315：域循环
+            return self.parse_domain_for()
         if t.val == "domain" and self._at_domain_block():  # docs/313 §2：块级域
             return self.parse_domain_block()
         if t.val == "tick":
@@ -5391,6 +5500,22 @@ def _lms_tier_of(toks: list) -> str:
     return CORE_DEFAULTS["lms"]
 
 
+#: **编译器定义的开关**（用户不必也不该用 `set choose` 定义它们）。与 LMS 那七个
+#: 细开关同一个位置：它们是某一维的细分，定义写在编译器里。
+#: `domain_clock_explicit`（`docs/315`）：关掉"回边即 tick"，回到显式 `tick;`。
+DOMAIN_SWITCHES: tuple[str, ...] = ("domain_clock_explicit",)
+
+
+def _seed_domain_switches(tbl: SwitchTable) -> None:
+    """`docs/315`：默认**自动**（回边即 tick）；写这一句才是显式。
+
+    与 `_seed_lms` 同一个规矩：初值行号记 `0`，用户显式写会覆盖它而不被判成"写两遍"。
+    """
+    for name in DOMAIN_SWITCHES:
+        tbl.vals[name] = (False, 0)
+        tbl.seeded.add(name)
+
+
 def _seed_lms(tbl: SwitchTable, tier: str) -> None:
     """**档铺初值**（`docs/253` §11.4 叠加规则的第二步）。
 
@@ -5472,6 +5597,7 @@ def prescan_switches(entry: Path, root: Path, proj: Path | None,
         else:
             # **`lms` 档铺初值，且必须在收开关之前**（`docs/253` §11.4 叠加规则）。
             _seed_lms(tbl, _lms_tier_of(toks))
+        _seed_domain_switches(tbl)
         _collect_switches(toks, tbl)
         i = 0
         while i < len(toks):
@@ -6012,7 +6138,8 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
         for name, (_on, line) in sorted(sw.vals.items()):
             # **LMS 的七个细开关由编译器定义**（`docs/253` §11.4）：它们是这一维的
             # 细分，不需要用户再写一遍 `set choose lms_check { … }`。
-            if name not in sw.defs and name not in sw.seeded and name not in LMS_TOGGLES:
+            if (name not in sw.defs and name not in sw.seeded
+                    and name not in LMS_TOGGLES and name not in DOMAIN_SWITCHES):
                 errs.append(f"{line}: 未定义的开关 `{name}` —— 先写 "
                             f"`set choose {name} {{ … }}` 定义它")
         for d in deps:
@@ -9590,6 +9717,8 @@ def _collect_locals(f: Func, enums: dict | None = None,
                 walk(s.otherwise)
             elif isinstance(s, While):
                 walk(s.body)
+            elif isinstance(s, DomainBlock):   # docs/313：块里的 `let` 也是这一帧的
+                walk(s.body)
             elif isinstance(s, For):
                 vt = (expr_type(s.lo, scope, funcs, structs)
                       or expr_type(s.hi, scope, funcs, structs) or "u32")
@@ -9650,8 +9779,11 @@ class _Ir:
                  lms_guard: bool = False, lms_reject: bool = False,
                  lms_crash: bool = False,
                  tur_edition: str = potato_from.DEFAULT_EDITION,
-                 gc_ctl: bool = False):
+                 gc_ctl: bool = False, tick_auto: bool = False):
         self.funcs, self.consts, self.f = funcs, consts, f
+        #: **回边即 tick**（`docs/315` §2）：整个单元用了虚拟钟（守卫 / `tick;` / 域块）
+        #: 时，每条循环回边推进一次钟。都没用的单元一个字节不发 —— 旧产物逐字节不变。
+        self.tick_auto = tick_auto
         #: 本程序读的是 Tur 的哪一版（`docs/296` §1.1）。`tur_edition()` 内建取它。
         self.tur_edition = tur_edition
         #: 循环栈（Tur 2 的 `break`/`continue`）：`brk` 落点、`cond` 条件、`step` 更新步、
@@ -11169,6 +11301,8 @@ class _Ir:
             if not self.terminated:     # 体以 `break`/`continue`/`return` 收尾时这一格到不了
                 for st in s.step:       # for-in 的下标自增（脱糖时放进 `While.step`）
                     self.stmt(st)
+                if self.tick_auto:      # `docs/315` §2：回边即 tick
+                    self.w("call void @__loment_tick()")
             self.jump(cond_l)
             self.label(end_l)
             self.l1_free(s.l1)          # L1：落点就在**循环之后**（体内那次是最后一次用）
@@ -11200,6 +11334,8 @@ class _Ir:
             self.epoch_close(s, sv)
             if not self.terminated:     # 同上：体已经 `break`/`continue` 时这格到不了
                 self._for_step(s.var, ty, ptr, s.line)
+                if self.tick_auto:      # `docs/315` §2：回边即 tick
+                    self.w("call void @__loment_tick()")
             self.jump(cond_l)
             self.label(end_l)
             self.l1_free(s.l1)          # L1：落点就在**循环之后**（体内那次是最后一次用）
@@ -11318,6 +11454,8 @@ class _Ir:
                     self.stmt(st)
                 if ctx["fstep"] is not None:
                     self._for_step(*ctx["fstep"])
+                if self.tick_auto:      # `docs/315` §2：`continue` 也是回边
+                    self.w("call void @__loment_tick()")
             self.epoch_close(ctx["node"], ctx["epoch"])
             self.jump(ctx["brk"] if isinstance(s, Break) else ctx["cond"])
             return
@@ -11348,11 +11486,11 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
                   lms_guard: bool = False, lms_reject: bool = False,
                   lms_crash: bool = False,
                  tur_edition: str = potato_from.DEFAULT_EDITION,
-                  gc_ctl: bool = False
+                  gc_ctl: bool = False, tick_auto: bool = False
                   ) -> tuple[list[str], str]:
     ir = _Ir(funcs, consts, f, structs, enums, coverage, cov_counter,
              dbg_scope, dbg_lines, dbg_meta, dbg_types, gc_alpha, gc_auto, gc_barrier,
-             threads, lms_guard, lms_reject, lms_crash, tur_edition, gc_ctl)
+             threads, lms_guard, lms_reject, lms_crash, tur_edition, gc_ctl, tick_auto)
     if f.interrupt:  # M33: x86_intrcc 需要中断帧指针
         ir.out.append(f"; {f.name} -> interrupt (x86_intrcc)")
         ir.out.append(f"define x86_intrcc void @{f.name}(ptr byval([8 x i8]) %__frame)"
@@ -11558,6 +11696,36 @@ def _uses_threads(mods: list) -> bool:
     return False
 
 
+def _uses_clock(mods: list) -> bool:
+    """这个单元用不用虚拟钟（`docs/306` §4 / `docs/315` §2）。
+
+    **回边即 tick 的门**：用了域的单元才让循环回边推钟；一个守卫都没有的单元
+    产物逐字节不变（那条"默认档不改现有产物"的纪律）。判据与"要不要发域运行时"
+    同一件事，所以扫描的就是那四类语句 —— 保守一点（多扫到只用 `tick;` 的单元也无妨）。
+    """
+    from dataclasses import fields, is_dataclass
+    seen: set[int] = set()
+    #: 只看函数体：`module.toks` 是整份 token 流（驱动那 5 MB 走一遍就白花几秒），
+    #: 而守卫 / `tick;` / 域块只可能出现在语句里。
+    todo = [f for m in mods for f in getattr(m, "funcs", [])]
+    while todo:
+        o = todo.pop()
+        if o is None or isinstance(o, (str, bytes, int, float, bool)):
+            continue
+        if id(o) in seen:
+            continue
+        seen.add(id(o))
+        if isinstance(o, (Guard, Tick, DomainBlock, Quality, Discharge)):
+            return True
+        if is_dataclass(o):
+            todo.extend(getattr(o, f.name) for f in fields(o))
+        elif isinstance(o, (list, tuple)):
+            todo.extend(o)
+        elif isinstance(o, dict):
+            todo.extend(o.values())
+    return False
+
+
 def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
               coverage: bool = False, debug: bool = False) -> str:
     """原生后端: LLVM IR。M0 标量 + M23–M26 聚合 + M1/M2 str + M3/M4 切片。"""
@@ -11667,6 +11835,11 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     #: **这份产物起不起线程**（`#778`）：true 才发运行期锁、才给 alloc/free/根表加锁。
     #: 与 `_heap_needed` 同一个地方算 —— 两者都要在**发射函数体之前**定下来。
     _has_threads = _uses_threads([mod, *deps])
+    #: **回边即 tick**（`docs/315` §2）：单元用了虚拟钟才让回边推钟；`domain_clock`
+    #: 的 `explicit` 档把它关掉（`docs/308` 里"只有显式 `tick;` 推进时间"的旧语义）。
+    _sw = getattr(mod, "switches", None)
+    _tick_explicit = bool(_sw is not None and _sw.state("domain_clock_explicit"))
+    _tick_auto = _uses_clock([mod, *deps]) and not _tick_explicit
     meta: list[str] = []
     dbg_types: dict = {}  # M59: 局部变量类型 -> DIBasicType (全模块共享一份)
 
@@ -11719,7 +11892,7 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
                                     gc_alpha and _has_heap_pre, _has_threads,
                                     _lms_guard, _lms_reject, _lms_crash,
                                     getattr(mod, "profile", potato_from.DEFAULT_EDITION),
-                                    _gc_ctl)
+                                    _gc_ctl, _tick_auto)
             globals_ += g
             body.append(text)
     # **命令入口**（`docs/223`）：声明了命令、又没写 `_start` -> 工具链替它发一个。

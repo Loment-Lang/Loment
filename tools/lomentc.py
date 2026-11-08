@@ -1619,6 +1619,13 @@ class Guard:
     #: ⚠ **不要**在这里放回指 DomainBlock 的字段：`_machine_call_sites` 是通用
     #: dataclass 遍历，回指会成环（实测：递归上限当场炸）。
     is_block: bool = False
+    #: **竖向树的整条链**（`docs/315` §4.1）：`(audit_id, lo, hi, kind, param, flags,
+    #: is_leaf)`，外→内。显式 `guard leaf(x)` 也判祖先 —— 与自动守卫同一条事务性规则
+    #: （`docs/308` §1.2：任一为假即拒绝，只有被点名的那层记账 / 转移）。
+    chain: list = field(default_factory=list)
+    #: **联动边 `⇄` 的伙伴**（`docs/315` §5.1）：`(cap_id, lo, hi, kind, param, flags,
+    #: is_block)`。判决自己的那条之后，每个伙伴再判一次（silent：只判成员，不记账）。
+    partners: list = field(default_factory=list)
 
 
 @dataclass
@@ -1639,7 +1646,31 @@ class Quality:
     line: int
     cap_id: int = 0
     is_block: bool = False
+    #: 联动组里的其它成员（`docs/315` §5）：质量写到整组。
+    partners: list = field(default_factory=list)
     dom_kind_id: int = -1
+
+
+@dataclass
+class Couple:
+    """`couple A, B;` —— 联动边 `⇄`（`docs/306` §6.2 / `docs/315` §5.1）。
+
+    联动 = 同一个续期单位：对任一成员的守卫还要（**静默地**）确认其余成员在同一个
+    位置上也仍然有效；`quality` 写到任一自适应成员上时，整组一起写。若干条 `couple`
+    连成一片就求强连通分量 —— 一个分量就是一个**原子续期单位**（`docs/308` §2.5）。
+    """
+    names: list
+    line: int
+
+
+@dataclass
+class Mutex:
+    """`mutex A, B;` —— 互斥边 `⊥`（`docs/306` §6.2）：两个域的形状必须可证不相交。
+
+    这是**编译期**的承诺（常量形状），运行期不产生任何指令。
+    """
+    names: list
+    line: int
 
 
 @dataclass
@@ -1683,6 +1714,8 @@ class DomainBlock:
     line: int
     #: 审计槽号（模块内唯一；参考实现的 `_resolve_domains` 填）。
     audit_id: int = 0
+    #: 显式的树边 `child_of PARENT`（`docs/315` §4.1）。空 = 只由括号隐含。
+    child_of: str = ""
 
 
 @dataclass
@@ -1970,6 +2003,9 @@ def _resolve_domains(mod) -> None:
       挂上**同空间**的域链（外→内），发射器据此在取址前插判决。
     """
     nxt = [len(mod.caps)]
+    #: 联动组（`docs/315` §5）：第一遍 walk 时还是空的，`couple` 收完之后第二遍再填。
+    comp_of: dict = {}
+    members: dict = {}
     #: `domain:for` 在体内**已经证过**的位置（`While.proven`）。栈式保存/恢复：
     #: 进入这种循环的体时设上，离开时还原 —— 嵌套循环各自的那一份互不覆盖。
     cur_prov: list = [()]
@@ -1980,19 +2016,31 @@ def _resolve_domains(mod) -> None:
             ex(e.idx, stack, vs)
             if isinstance(e.obj, Ident):
                 sp = vs.get(e.obj.name, "")
-                prov = cur_prov[0]
+                provs = cur_prov[0]
                 chain = [d for d in stack if d.space == sp]
                 # **只有点到最内层那个域**才算"已证"：`domain:for i in 外层` 走在外层
-                # 的形状上，体内的访问仍归最内层域判（它可能更窄）。
-                proven = (prov and sp == prov[1] and chain
-                          and chain[-1].name == prov[2] and isinstance(e.idx, Ident)
-                          and e.idx.name == prov[0])
+                # 的形状上，体内的访问仍归最内层域判（它可能更窄）。并行的几个域各算一条。
+                proven = bool(chain) and isinstance(e.idx, Ident) and any(
+                    sp == p[1] and chain[-1].name == p[2] and e.idx.name == p[0]
+                    for p in provs)
                 if sp and not proven:
                     e.doms = [
                         (d.audit_id, d.lo, d.hi, CAP_KIND_ID[d.kind], d.param,
-                         (1 if d.lo_inf else 0) | (2 if d.hi_inf else 0))
+                         (1 if d.lo_inf else 0) | (2 if d.hi_inf else 0), True)
                         for d in chain
                     ]
+                    # 联动组的伙伴插在**叶子之前**：发射器把最后一条当叶子（记账），
+                    # 其余 silent —— 伙伴因此只判成员、不转移（`docs/315` §5）。
+                    if chain and comp_of:
+                        key = ("b", chain[-1].audit_id)
+                        seen = {t[0] for t in e.doms}
+                        extra = [members[k][1:] for k in comp_of.get(key, ())
+                                 if k != key and k not in
+                                 {("b", x.audit_id) for x in chain}
+                                 and members.get(k) is not None
+                                 and members[k][1] not in seen]
+                        if extra:
+                            e.doms = e.doms[:-1] + extra + e.doms[-1:]
             return
         if isinstance(e, (IntLit, BoolLit, StrLit, Ident, EnumPath, EnumCtor)):
             if isinstance(e, EnumCtor):
@@ -2062,6 +2110,15 @@ def _resolve_domains(mod) -> None:
                     s.kind_id = CAP_KIND_ID[d.kind]
                     s.param = d.param
                     s.flags = (1 if d.lo_inf else 0) | (2 if d.hi_inf else 0)
+                    # 竖向链（`docs/315` §4.1）：同空间、从根到被点名的那个域。
+                    # 祖先只判成员（silent），只有叶子上账 / 转移。
+                    idx = next(i for i, x in enumerate(stack) if x is d)
+                    s.chain = [
+                        (x.audit_id, x.lo, x.hi, CAP_KIND_ID[x.kind], x.param,
+                         (1 if x.lo_inf else 0) | (2 if x.hi_inf else 0),
+                         1 if x is d else 0)
+                        for x in stack[:idx + 1] if x.space == d.space
+                    ]
             elif isinstance(s, Quality):
                 ex(s.expr, stack, vs)
                 d = find(stack, s.cap)
@@ -2102,10 +2159,151 @@ def _resolve_domains(mod) -> None:
             elif isinstance(s, (Tick, Break, Continue)):
                 pass
 
-    for f in mod.funcs:
-        vs = {p.name: p.space for p in f.params if p.space}
-        walk(f.body, [], vs)
+    def run_walk() -> None:
+        nxt[0] = len(mod.caps)
+        for f in mod.funcs:
+            vs = {p.name: p.space for p in f.params if p.space}
+            walk(f.body, [], vs)
+
+    run_walk()
     mod.domain_slots = nxt[0]
+
+    # ---- 域图（`docs/315` §5）：联动 `⇄` 与互斥 `⊥`
+    #
+    # 联动组按**函数**求连通分量（一个分量 = 一个原子续期单位，`docs/308` §2.5）。
+    # 互斥是编译期的承诺：形状必须可证不相交，运行期一条指令都不发。
+    parent: dict = {}
+
+    def uf_find(k):
+        parent.setdefault(k, k)
+        while parent[k] != k:
+            parent[k] = parent[parent[k]]
+            k = parent[k]
+        return k
+
+    def uf_union(a, b):
+        ra, rb = uf_find(a), uf_find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    def desc_of(name, stack):
+        d = find(stack, name)
+        if d is not None:
+            return (("b", d.audit_id), d.audit_id, d.lo, d.hi,
+                    CAP_KIND_ID[d.kind], d.param,
+                    (1 if d.lo_inf else 0) | (2 if d.hi_inf else 0), True)
+        for i, c in enumerate(mod.caps):
+            if c.name == name:
+                return (("c", i), i, c.lo, c.hi, CAP_KIND_ID[c.kind], c.param,
+                        (1 if c.lo_inf else 0) | (2 if c.hi_inf else 0), False)
+        return None
+
+    descs: dict = {}
+
+    def scan(stmts, stack) -> None:
+        for s in stmts:
+            if isinstance(s, DomainBlock):
+                stack.append(s)
+                scan(s.body, stack)
+                stack.pop()
+            elif isinstance(s, (If,)):
+                scan(s.then, stack)
+                scan(s.otherwise, stack)
+            elif isinstance(s, (While, For)):
+                scan(s.body, stack)
+            elif isinstance(s, Match):
+                for _p, arm in s.arms:
+                    scan(arm, stack)
+            elif isinstance(s, Couple):
+                ds = []
+                for n in s.names:
+                    d = desc_of(n, stack)
+                    if d is None:
+                        raise LomError(s.line, 1,
+                                       f"`couple` 引用了不在作用域里的域 {n}")
+                    ds.append(d)
+                    descs[d[0]] = d
+                # 联动是**同一位置**上的同生共死：形状至少得有一个共同位置。
+                for i in range(len(ds)):
+                    for j in range(i + 1, len(ds)):
+                        x, y = ds[i], ds[j]
+                        if not (x[6] & 3 or y[6] & 3) and (x[3] < y[2] or y[3] < x[2]):
+                            raise LomError(
+                                s.line, 1,
+                                f"`couple` 的两个域没有共同位置（{s.names[i]} 与 "
+                                f"{s.names[j]}）—— 联动是同一位置上一起续期")
+                for d in ds[1:]:
+                    uf_union(ds[0][0], d[0])
+            elif isinstance(s, Mutex):
+                ds = []
+                for n in s.names:
+                    d = desc_of(n, stack)
+                    if d is None:
+                        raise LomError(s.line, 1, f"`mutex` 引用了不在作用域里的域 {n}")
+                    ds.append(d)
+                for i in range(len(ds)):
+                    for j in range(i + 1, len(ds)):
+                        a, b = ds[i], ds[j]
+                        if a[5] == 1 or b[5] == 1 or a[6] & 3 or b[6] & 3:
+                            raise LomError(
+                                s.line, 1,
+                                "`mutex` 需要可证不相交的有限形状 —— 无界 / danger 的那一侧证不了")
+                        if not (a[3] < b[2] or b[3] < a[2]):
+                            raise LomError(
+                                s.line, 1,
+                                f"`mutex` 的两个域重叠了（{s.names[i]} 与 {s.names[j]}）"
+                                " —— 互斥是两个永不相交的形状")
+
+    for f in mod.funcs:
+        scan(f.body, [])
+
+    # 分量：根 -> 成员描述（按 key 排序，确定性）
+    comps: dict = {}
+    for k in sorted(parent):
+        comps.setdefault(uf_find(k), []).append(k)
+    for root, ks in comps.items():
+        for k in ks:
+            comp_of[k] = tuple(sorted(ks))
+            members[k] = descs.get(k)
+    # 组件已知 —— 再走一遍，让自动守卫在下标上也挂上伙伴（`docs/315` §5）。
+    run_walk()
+    mod.domain_slots = nxt[0]
+
+    def attach(stmts, stack) -> None:
+        for s in stmts:
+            if isinstance(s, DomainBlock):
+                stack.append(s)
+                attach(s.body, stack)
+                stack.pop()
+                continue
+            if isinstance(s, (If,)):
+                attach(s.then, stack)
+                attach(s.otherwise, stack)
+                continue
+            if isinstance(s, (While, For)):
+                attach(s.body, stack)
+                continue
+            if isinstance(s, Match):
+                for _p, arm in s.arms:
+                    attach(arm, stack)
+                continue
+            if isinstance(s, Guard):
+                key = ("b", s.cap_id) if s.is_block else ("c", s.cap_id)
+                if key in comp_of:
+                    seen = {c[0] for c in s.chain}
+                    s.partners = [members[k][1:] for k in comp_of[key]
+                                  if k != key and k not in seen
+                                  and members.get(k) is not None]
+            elif isinstance(s, Quality):
+                key = ("b", s.cap_id) if s.is_block else ("c", s.cap_id)
+                if key in comp_of:
+                    # 质量只写给自适应成员：普通域没有"宽度"可缩（`docs/306` §5.2）。
+                    s.partners = [members[k][1:] for k in comp_of[key]
+                                  if k != key and members.get(k) is not None
+                                  and members[k][4] == 10]
+
+    for f in mod.funcs:
+        attach(f.body, [])
 
 
 def _resolve_methods(mods, funcs_map: dict, structs: dict, enums: dict) -> None:
@@ -3401,11 +3599,21 @@ class Parser:
         return (a.kind == "punct" and a.val == ":" and b.kind == "ident"
                 and b.val == "for")
 
-    def parse_domain_for(self):
-        """`domain:for VAR [in NAME] [step N] { … }`（`docs/315` §2）。
+    def _dom_named(self, kw, name: str):
+        for d in reversed(self.dom_stack):
+            if d.name == name:
+                return d
+        raise LomError(kw.line, 1,
+                       f"`domain:for` 的域名 {name} 不在作用域里（块名只在它的 {{}} 内可见）")
 
-        反糖成普通的 `while`：`let VAR: u64 = lo; while VAR <= hi { guard NAME(VAR);
-        …; VAR = VAR + N; }`。反糖带来三件事，都不用下游知道这是新语法：
+    def parse_domain_for(self):
+        """`domain:for VAR[, VAR]* [in NAME[, NAME]*] [step N] { … }`（`docs/315` §2）。
+
+        反糖成普通的 `while`：`let VAR: u32 = lo; while VAR <= hi { guard NAME(VAR); …;
+        VAR = VAR + N; }`。`step -N` 反向（从 hi 走到 lo）。多个「变量, 域」是**横向并行**
+        （`docs/315` §4.2）：跨度必须相同，一轮里每个域各判一次。
+
+        反糖带来三件事，都不用下游知道这是新语法：
 
         - 守卫落在**循环头**（一轮一次），体内的同位置下标不再挂自动守卫
           （`While.proven`，`_resolve_domains` 据此跳过）；
@@ -3419,58 +3627,76 @@ class Parser:
         kw = self.expect("ident", "domain")
         self.expect("punct", ":")
         self.expect("ident", "for")
-        var = self.ident("循环变量")
-        dom = None
+        vars_ = [self.ident("循环变量")]
+        while self.accept("punct", ","):
+            vars_.append(self.ident("循环变量"))
+        doms = []
         if self.accept("ident", "in"):
-            dn = self.ident("域名")
-            for d in reversed(self.dom_stack):
-                if d.name == dn:
-                    dom = d
-                    break
-            if dom is None:
-                raise LomError(kw.line, 1,
-                               f"`domain:for` 的域名 {dn} 不在作用域里（块名只在它的 {{}} 内可见）")
+            doms.append(self._dom_named(kw, self.ident("域名")))
+            while self.accept("punct", ","):
+                doms.append(self._dom_named(kw, self.ident("域名")))
         else:
             if not self.dom_stack:
                 raise LomError(kw.line, 1,
                                "`domain:for` 要么写在 `domain` 块里，要么写成 `domain:for i in 名字`")
-            dom = self.dom_stack[-1]
+            doms = [self.dom_stack[-1]]
+        if len(doms) != len(vars_):
+            raise LomError(kw.line, 1,
+                           f"`domain:for` 有 {len(vars_)} 个变量、{len(doms)} 个域 —— "
+                           "并行的变量与域必须一一对应")
+        if len(set(vars_)) != len(vars_):
+            raise LomError(kw.line, 1, "`domain:for` 的循环变量重名了")
         step = 1
+        reverse = False
         if self.accept("ident", "step"):
+            if self.accept("punct", "-"):
+                reverse = True            # 反向：从 hi 走到 lo
             step = self.int_lit()
             if step <= 0:
-                raise LomError(kw.line, 1, "`domain:for` 的步长必须大于 0")
-        if dom.lo_inf or dom.hi_inf:
-            raise LomError(kw.line, 1,
-                           "`domain:for` 只能遍历有限形状 —— 无界的那一侧没有终点")
-        if dom.kind == "danger":
-            raise LomError(kw.line, 1,
-                           "`domain:for` 不能遍历危险域 —— 它补集的那一部分没有顺序")
-        if dom.kind in ("subject", "witnessed", "flow"):
-            raise LomError(kw.line, 1,
-                           f"`domain:for` 不能在 {CAP_KIND_NAME[CAP_KIND_ID[dom.kind]]} 域上跑"
-                           " —— 它的判决还要第二个实参")
+                raise LomError(kw.line, 1, "`domain:for` 的步长必须大于 0（反向写成 `step -N`）")
+            if reverse:
+                step = -step
+        for d in doms:
+            if d.lo_inf or d.hi_inf:
+                raise LomError(kw.line, 1,
+                               "`domain:for` 只能遍历有限形状 —— 无界的那一侧没有终点")
+            if d.kind == "danger":
+                raise LomError(kw.line, 1,
+                               "`domain:for` 不能遍历危险域 —— 它补集的那一部分没有顺序")
+            if d.kind in ("subject", "witnessed", "flow"):
+                raise LomError(kw.line, 1,
+                               f"`domain:for` 不能在 {CAP_KIND_NAME[CAP_KIND_ID[d.kind]]} 域上跑"
+                               " —— 它的判决还要第二个实参")
+        if len(doms) > 1:
+            spans = {d.hi - d.lo for d in doms}
+            if len(spans) != 1:
+                raise LomError(kw.line, 1,
+                               "并行的几个域跨度不一致 —— 一轮里每个位置都要对得上")
         body_at = self.i + 1              # '{' 之后 —— 与普通循环同一个起点
         self.loop_depth += 1
         try:
             body = self.parse_block()
         finally:
             self.loop_depth -= 1
-        # 反糖：循环头一条守卫 + 体 + 更新步。
-        head = Guard(dom.name, Ident(var, kw.line), kw.line)
-        w = While(Bin("<=", Ident(var, kw.line), IntLit(dom.hi, kw.line), kw.line),
-                  [head] + body, kw.line)
-        w.step = [Assign(Ident(var, kw.line),
-                         Bin("+", Ident(var, kw.line), IntLit(step, kw.line), kw.line),
-                         kw.line)]
+        heads = [Guard(d.name, Ident(v, kw.line), kw.line) for v, d in zip(vars_, doms)]
+        first = doms[0]
+        cond = Bin(">=" if reverse else "<=",
+                   Ident(vars_[0], kw.line),
+                   IntLit(first.lo if reverse else first.hi, kw.line), kw.line)
+        w = While(cond, heads + body, kw.line)
+        w.step = [Assign(Ident(v, kw.line),
+                         Bin("+", Ident(v, kw.line), IntLit(step, kw.line), kw.line),
+                         kw.line) for v in vars_]
         # 名字也要记：`in NAME` 点到**外层**域时，体内同空间的下标**不能**免卫士
         # （最内层域可能更窄 —— 见 `_resolve_domains` 的比对）。
-        w.proven = (var, dom.space, dom.name)
+        w.proven = tuple((v, d.space, d.name) for v, d in zip(vars_, doms))
         w.tok_at, w.tok_end = body_at, self.i - 1
         # 变量取 **u32**：域的判决口 `@__loment_guard2` 收的是 i64，而守卫发射走的是
         # `zext i32 … to i64`（与所有显式 `guard` 同一条路）。用 u64 会发出一条
         # `zext i32 %i64值` —— 非法 IR，两侧都过不了 clang。
-        return [Let(var, "u32", IntLit(dom.lo, kw.line), kw.line), w]
+        lets = [Let(v, "u32", IntLit(d.hi if reverse else d.lo, kw.line), kw.line)
+                for v, d in zip(vars_, doms)]
+        return lets + [w]
 
     def parse_domain_block(self) -> "DomainBlock":
         """`domain [NAME :] SPACE[lo..hi] [law]? { … }`（`docs/313` §2）。"""
@@ -3484,13 +3710,29 @@ class Parser:
         lo, hi, lo_inf, hi_inf = self.parse_shape()
         kind, param = self.parse_law_tail()
         revocable = bool(self.accept("ident", "revocable"))
+        child_of = ""
+        if self.accept("ident", "child_of"):
+            child_of = self.ident("父域名")
         if not name:
             # 匿名块也要能被 `domain:for` 点到 —— 给它一个用户写不出来的名字
             # （`$` 不在标识符字符集里）。名字不进 IR，两个实现的编号各走各的。
             self.dom_seq += 1
             name = f"__dom${self.dom_seq}"
         blk = DomainBlock(name, space, lo, hi, lo_inf, hi_inf, kind, param,
-                          revocable, [], kw.line)
+                          revocable, [], kw.line, child_of=child_of)
+        if child_of:
+            par = next((d for d in reversed(self.dom_stack) if d.name == child_of), None)
+            if par is None:
+                raise LomError(kw.line, 1,
+                               f"`child_of {child_of}` 的父域不在外层作用域里 —— "
+                               "树边只能连到一个**正在包围它**的域")
+            if par.space != space:
+                raise LomError(kw.line, 1,
+                               f"`child_of` 的父子必须同一空间（{par.space} vs {space}）")
+            if ((not par.lo_inf and lo < par.lo) or (not par.hi_inf and hi > par.hi)
+                    or (lo_inf and not par.lo_inf) or (hi_inf and not par.hi_inf)):
+                raise LomError(kw.line, 1,
+                               "`child_of` 的子域形状必须在父域之内（C1）")
         self.dom_stack.append(blk)
         try:
             blk.body = self.parse_block()
@@ -3633,6 +3875,16 @@ class Parser:
             self.expect("punct", ")")
             self.expect("punct", ";")
             return Guard(cap, e, t.line, aux=aux)
+        if t.val in ("couple", "mutex") and self.peek(1).kind == "ident"                 and self.peek(2).val in (",", ";"):
+            # 上下文关键字（`docs/315` §5）：`couple A, B;` / `mutex A, B;`。
+            # 单独一个叫 `couple` 的变量照旧是普通名字。
+            kw = self.next()
+            names = [self.ident("域名")]
+            while self.accept("punct", ","):
+                names.append(self.ident("域名"))
+            self.expect("punct", ";")
+            return (Couple(names, kw.line) if kw.val == "couple"
+                    else Mutex(names, kw.line))
         if t.val == "domain" and self._at_domain_loop():  # docs/315：域循环
             return self.parse_domain_for()
         if t.val == "domain" and self._at_domain_block():  # docs/313 §2：块级域
@@ -6901,10 +7153,10 @@ def _rs_state(kind_id: int, is_block: bool, cap_id: int) -> str:
 def _rs_guard_calls(doms, g: str) -> str:
     calls = ""
     n = len(doms)
-    for i, (aid, lo, hi, kid, param, flags) in enumerate(doms):
+    for i, (aid, lo, hi, kid, param, flags, blk) in enumerate(doms):
         leaf = i == n - 1
         k = kid if leaf else (kid | 128)
-        st = _rs_state(kid, True, aid) if leaf else "&mut []"
+        st = _rs_state(kid, blk, aid) if leaf else "&mut []"
         calls += (f"__loment_guard2({st}, {aid}, {g}, 0, {lo}, {hi}, {k}, {param}, {flags}); ")
     return calls
 
@@ -7138,18 +7390,34 @@ def _stmts_rs(stmts: list, indent: int) -> list[str]:
             out.append(f"{pad}}}")
         elif isinstance(s, Guard):  # P4: 能力域守卫
             # 审计仍在**放行那一支**（`#162`）：`__loment_guard2` 判过之后才加一，
-            # 越界路径只 trap。所有域共用这一个判决点（`docs/306`–`docs/313`）。
+            # 越界路径只 trap。所有域共用这一个判决点（`docs/306`–`docs/315`）。
             aux = f"({_expr_rs(s.aux)}) as u64" if s.aux is not None else "0u64"
-            st = _rs_state(s.kind_id, s.is_block, s.cap_id)
-            out.append(
-                f"{pad}{{ let __i: u64 = ({_expr_rs(s.expr)}) as u64; "
-                f"__loment_guard2({st}, {s.cap_id}, __i, {aux}, {s.lo}, {s.hi}, "
-                f"{s.kind_id}, {s.param}, {s.flags}); }}"
-            )
+            calls = ""
+            chain = ([(cid, lo, hi, k, param, flags, leaf, True)
+                      for cid, lo, hi, k, param, flags, leaf in s.chain]
+                     or [(s.cap_id, s.lo, s.hi, s.kind_id, s.param, s.flags, 1,
+                          s.is_block)])
+            for cid, lo, hi, k, param, flags, leaf, blk in chain:
+                kk = k if leaf else (k | 128)
+                st = _rs_state(k, blk, cid) if leaf else "&mut []"
+                calls += (f"__loment_guard2({st}, {cid}, __i, {aux}, {lo}, {hi}, "
+                          f"{kk}, {param}, {flags}); ")
+            for cid, lo, hi, k, param, flags, is_block in s.partners:
+                st = _rs_state(k, is_block, cid)
+                calls += (f"__loment_guard2({st}, {cid}, __i, {aux}, {lo}, {hi}, "
+                          f"{k | 128}, {param}, {flags}); ")
+            out.append(f"{pad}{{ let __i: u64 = ({_expr_rs(s.expr)}) as u64; "
+                       f"{calls}}}")
+        elif isinstance(s, (Couple, Mutex)):
+            pass
         elif isinstance(s, Quality):
             st = _rs_state(10, s.is_block, s.cap_id)
             out.append(f"{pad}__loment_qual_store({st}, "
                        f"({_expr_rs(s.expr)}) as u64);")
+            for cid, lo, hi, k, param, flags, is_block in s.partners:
+                st = _rs_state(10, is_block, cid)
+                out.append(f"{pad}__loment_qual_store({st}, "
+                           f"({_expr_rs(s.expr)}) as u64);")
         elif isinstance(s, Discharge):
             st = _rs_state(14, s.is_block, s.cap_id)
             out.append(f"{pad}__loment_discharge({st}, {s.cap_id}, "
@@ -10988,10 +11256,10 @@ class _Ir:
             v64 = self.t()
             self.w(f"{v64} = zext {self.ll(it)} {iv} to i64")
         n = len(e.doms)
-        for i, (aid, lo, hi, kid, param, flags) in enumerate(e.doms):
+        for i, (aid, lo, hi, kid, param, flags, blk) in enumerate(e.doms):
             leaf = i == n - 1
             k = kid if leaf else (kid | 128)
-            st = self.state_ptr(kid, True, aid) if leaf else "@__loment_qual"
+            st = self.state_ptr(kid, blk, aid) if leaf else "@__loment_qual"
             self.w(f"call void @__loment_guard2(ptr {st}, i64 {aid}, i64 {v64}, i64 0, "
                    f"i64 {lo}, i64 {hi}, i64 {k}, i64 {param}, i64 {flags})")
 
@@ -11397,11 +11665,28 @@ class _Ir:
                 _, av = self.expr(s.aux, "u32")
                 a64 = self.t()
                 self.w(f"{a64} = zext i32 {av} to i64")
-            st = self.state_ptr(s.kind_id, s.is_block, s.cap_id)
-            self.w(
-                f"call void @__loment_guard2(ptr {st}, i64 {s.cap_id}, i64 {v64}, i64 {a64}, "
-                f"i64 {s.lo}, i64 {s.hi}, i64 {s.kind_id}, i64 {s.param}, i64 {s.flags})"
-            )
+            if s.chain:
+                # `docs/315` §4.1：外→内逐层判；祖先带 silent 位（只判成员，不记账 / 不转移）。
+                for cid, lo, hi, k, param, flags, leaf in s.chain:
+                    kk = k if leaf else (k | 128)
+                    st = self.state_ptr(k, True, cid)
+                    self.w(
+                        f"call void @__loment_guard2(ptr {st}, i64 {cid}, i64 {v64}, "
+                        f"i64 {a64}, i64 {lo}, i64 {hi}, i64 {kk}, i64 {param}, i64 {flags})"
+                    )
+            else:
+                st = self.state_ptr(s.kind_id, s.is_block, s.cap_id)
+                self.w(
+                    f"call void @__loment_guard2(ptr {st}, i64 {s.cap_id}, i64 {v64}, i64 {a64}, "
+                    f"i64 {s.lo}, i64 {s.hi}, i64 {s.kind_id}, i64 {s.param}, i64 {s.flags})"
+                )
+            # 联动边 `⇄`（`docs/315` §5）：伙伴也要在同一位置上有效 —— silent，不记账。
+            for cid, lo, hi, k, param, flags, is_block in s.partners:
+                st = self.state_ptr(k, is_block, cid)
+                self.w(
+                    f"call void @__loment_guard2(ptr {st}, i64 {cid}, i64 {v64}, i64 {a64}, "
+                    f"i64 {lo}, i64 {hi}, i64 {k | 128}, i64 {param}, i64 {flags})"
+                )
             return
         if isinstance(s, Quality):  # docs/306 §5.2 第 7 条：喂质量
             _, qv = self.expr(s.expr, "u32")
@@ -11409,6 +11694,10 @@ class _Ir:
             self.w(f"{q64} = zext i32 {qv} to i64")
             st = self.state_ptr(10, s.is_block, s.cap_id)
             self.w(f"call void @__loment_qual_store(ptr {st}, i64 {q64})")
+            # 联动组共享质量（`docs/315` §5.2）：整组一起写。
+            for cid, lo, hi, k, param, flags, is_block in s.partners:
+                st = self.state_ptr(10, is_block, cid)
+                self.w(f"call void @__loment_qual_store(ptr {st}, i64 {q64})")
             return
         if isinstance(s, Discharge):  # docs/307 §5：结清义务
             _, dv = self.expr(s.expr, "u32")
@@ -11416,6 +11705,9 @@ class _Ir:
             self.w(f"{d64} = zext i32 {dv} to i64")
             st = self.state_ptr(14, s.is_block, s.cap_id)
             self.w(f"call void @__loment_discharge(ptr {st}, i64 {s.cap_id}, i64 {d64})")
+            return
+        if isinstance(s, (Couple, Mutex)):
+            # `docs/315` §5：联动与互斥都是**声明** —— 判决点已经长在 guard 里。
             return
         if isinstance(s, Tick):  # docs/308 §2.1: 回边/显式推进虚拟钟
             self.w("call void @__loment_tick()")

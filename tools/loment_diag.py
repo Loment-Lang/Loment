@@ -115,7 +115,7 @@ RULES = [
              r"|discharge 引用了未声明的能力|quality 只用于自适应域"
              r"|discharge 只用于可达域|能力 .*域|能力 .*重复|能力 .*参数必须"
              r"|能力 .* 的 cyclic 周期|^\d+: 域 .*"
-             r"|不能带空间|第二个实参|domain:for",
+             r"|不能带空间|第二个实参|domain:for|child_of|couple|mutex|并行的几个域",
      "能力域非法", "在模块顶层声明 `capability name : space[lo..hi]`，并保证 lo ≤ hi。"),
     ("E005", r"使用了 excluded 的空间",
      "与出界声明冲突",

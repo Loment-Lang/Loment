@@ -88,11 +88,37 @@ fn sum(a: [u32; 8] in disk) -> u32 {
 ```
 
 - `domain:for i` walks the innermost block's domain; `domain:for i in NAME` names one;
-  `step N` walks every Nth position.
+  `step N` walks every Nth position, `step -N` walks backwards; `domain:for i, j in A, B`
+  walks two same-shaped domains in parallel (one guard each per round).
 - Only bounded, orderable domains can be walked: infinite shapes, `danger`, and
   `subject` / `witnessed` / `flow` (they need a second guard argument) are compile errors.
 - `choose domain_clock_explicit` turns the automatic back-edge tick off; then only an explicit
   `tick;` advances the clock.
+
+**Trees and graphs (`docs/315`).** Nested blocks are the vertical tree. Two declarations say it
+out loud:
+
+```rust
+module domain_graph
+choose runtime
+capability ring  : disk[0..15] adaptive
+capability other : mem[16..19]
+
+fn pump(a: [u32; 16] in disk) -> u32 {
+    domain outer : disk[0..15] {
+        couple outer, ring;   // ⇄ one renewal unit: same position, together
+        mutex  ring, other;   // ⊥ shapes must be provably disjoint
+        domain leaf : disk[0..3] child_of outer { a[0] = 1; }   // explicit tree edge
+    }
+    return a[0];
+}
+```
+
+- `child_of PARENT` requires the parent to be lexically enclosing, the same space, and the child
+  shape to sit inside it.
+- `couple A, B, …` makes one renewal unit: a guard on any member also (silently) checks the
+  others at the same position, and a `quality` write goes to every adaptive member.
+- `mutex A, B` is a compile-time promise (finite, non-danger, disjoint shapes); it emits no code.
 
 - `let a: [u32; 64] in disk` / `a: [u32; 64] in disk` (parameter) tags a value's space
   (arrays, slices, pointers only). The tag does not travel through a call - the callee sees a

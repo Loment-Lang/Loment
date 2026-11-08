@@ -29,9 +29,9 @@ choose runtime
 // **这一格是被撞出来的**（2026-10-11）：`codegen.lomt` 涨到 262858 字节，而槽是 262144
 // —— 只差 714，症状是**自举段错误**（`loment_seed_test` 的退出码 139），不是一句报错。
 // 槽的用途就是「装得下最大的那份源」，所以源长了就抬它（同 `TB_LBL_MAX` 那两次）。
-const SLOT: u32 = 524288;        // 每层源文件槽 (够装最大的 codegen.lomt)
+const SLOT: u32 = 786432;        // 每层源文件槽 (够装最大的 codegen.lomt；2026-11-08 490 KB -> 抬到 768 KiB)
 const MAXDEPTH: u32 = 8;         // 依赖深度上限
-const UNIT_CAP: u32 = 8388608;   // 单元缓冲 (含顶部 MAXDEPTH*SLOT 的槽区)
+const UNIT_CAP: u32 = 12582912;  // 单元缓冲 (含顶部 MAXDEPTH*SLOT = 6 MiB 的槽区)
 const IR_CAP: u32 = 16777216;    // IR 输出缓冲 (上界 8*单元 + 8192, 留足余量)
 const SEEN_CAP: u32 = 65536;     // 已装载路径去重表
 // 小暂存的布局 (改了偏移必须所有用点一起改 —— 它们写在同一块内存上):
@@ -85,7 +85,7 @@ const EXT_CAP: u32 = 256;        // 源后缀上限
 const DIR_CAP: u32 = 1024;       // 项目根 / 工具目录 / 版本名 各自的上限
 const DENT_CAP: u32 = 1024;      // 目录项缓冲上限 (PE 垫片一次只回一条记录)
 const SUBP_CAP: u32 = 1472;      // 子路径上限
-const TOKS_CAP: u32 = 5244160;   // (SLOT + 64) * 20 = 单文件词法缓冲
+const TOKS_CAP: u32 = 15729920;  // (SLOT + 64) * 20 = 单文件词法缓冲
 
 use lexer
 use codegen

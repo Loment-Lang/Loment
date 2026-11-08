@@ -1,0 +1,132 @@
+# One-off Bluesky post, dispatched from a branch.
+#
+# The repo already has `announce.yml`, but that one posts to Mastodon and
+# Bluesky together. This one exists so a message can go to Bluesky alone,
+# using the same `BSKY_HANDLE` variable and `BSKY_APP_PASSWORD` secret.
+name: bsky-post
+
+on:
+  workflow_dispatch:
+    inputs:
+      message:
+        description: "Text to post on Bluesky"
+        required: true
+      dry_run:
+        description: "Print only; do not call the API"
+        type: boolean
+        default: true
+
+permissions: {}
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post to Bluesky
+        env:
+          BSKY_HANDLE: ${{ vars.BSKY_HANDLE }}
+          BSKY_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
+          MESSAGE: ${{ inputs.message }}
+          DRY: ${{ inputs.dry_run }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, sys, urllib.error, urllib.parse, urllib.request
+          from datetime import datetime, timezone
+
+          LIMIT = 300
+          handle = (os.environ.get("BSKY_HANDLE") or "").strip()
+          password = (os.environ.get("BSKY_PASSWORD") or "").strip()
+          text = (os.environ.get("MESSAGE") or "").strip()
+          dry = (os.environ.get("DRY") or "").strip().lower() in ("1", "true", "yes")
+
+          if not handle or not password:
+              print("BSKY_HANDLE / BSKY_APP_PASSWORD 没配齐。", file=sys.stderr)
+              sys.exit(1)
+          if not text:
+              print("message 为空。", file=sys.stderr)
+              sys.exit(1)
+          if len(text) > LIMIT:
+              print("Bluesky：%d 字符，超过 %d。" % (len(text), LIMIT), file=sys.stderr)
+              sys.exit(1)
+
+          def api(path, body=None, jwt=None, query=None):
+              url = "https://bsky.social/xrpc/" + path
+              if query:
+                  url += "?" + urllib.parse.urlencode(query)
+              req = urllib.request.Request(
+                  url,
+                  data=json.dumps(body).encode("utf-8") if body is not None else None,
+                  method="POST" if body is not None else "GET")
+              if body is not None:
+                  req.add_header("Content-Type", "application/json")
+              if jwt:
+                  req.add_header("Authorization", "Bearer " + jwt)
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  return json.loads(r.read().decode())
+
+          def facets(value):
+              spans = []
+              for m in re.finditer(r"https?://\S+", value):
+                  spans.append((m.start(), m.end(),
+                                {"$type": "app.bsky.richtext.facet#link",
+                                 "uri": m.group(0)}))
+              for m in re.finditer(r"(?<![A-Za-z0-9_])#([A-Za-z0-9_]+)", value):
+                  if any(s <= m.start() < e for s, e, _ in spans):
+                      continue
+                  spans.append((m.start(), m.end(),
+                                {"$type": "app.bsky.richtext.facet#tag",
+                                 "tag": m.group(1)}))
+              out = []
+              for s, e, feat in sorted(spans):
+                  out.append({"index": {
+                      "byteStart": len(value[:s].encode("utf-8")),
+                      "byteEnd": len(value[:e].encode("utf-8"))},
+                      "features": [feat]})
+              return out
+
+          print("---- Bluesky %d / %d ----" % (len(text), LIMIT))
+          print(text)
+          print("--------------------------")
+          if dry:
+              print("dry_run —— 没有发出去。")
+              sys.exit(0)
+
+          try:
+              session = api("com.atproto.server.createSession",
+                            {"identifier": handle, "password": password})
+              jwt, did = session["accessJwt"], session["did"]
+
+              already = False
+              try:
+                  recs = api("com.atproto.repo.listRecords", jwt=jwt,
+                             query={"repo": did,
+                                    "collection": "app.bsky.feed.post",
+                                    "limit": "40"})
+                  for rec in recs.get("records", []):
+                      if (rec.get("value", {}).get("text") or "").strip() == text:
+                          already = True
+                          break
+              except urllib.error.HTTPError as e:
+                  print("读不到最近的帖子（%s）—— 直接发。" % e.code, file=sys.stderr)
+
+              if already:
+                  print("这条已经发过了 —— 跳过。")
+                  sys.exit(0)
+
+              record = {
+                  "$type": "app.bsky.feed.post",
+                  "text": text,
+                  "langs": ["en"],
+                  "createdAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                  "facets": facets(text),
+              }
+              res = api("com.atproto.repo.createRecord",
+                        {"repo": did,
+                         "collection": "app.bsky.feed.post",
+                         "record": record},
+                        jwt=jwt)
+              print("Bluesky 发出去了：%s" % res.get("uri"))
+          except urllib.error.HTTPError as e:
+              print("Bluesky 拒了：%s %s" % (e.code, e.read().decode()[:400]), file=sys.stderr)
+              sys.exit(1)
+          PY

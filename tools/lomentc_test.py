@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import loment_suite  # noqa: E402
 import lomc  # noqa: E402
 import loment_diag  # noqa: E402
+import loment_geometry  # noqa: E402
 import lomentc  # noqa: E402
 import lspe  # noqa: E402
 import potato  # noqa: E402
@@ -5830,6 +5831,136 @@ def test_domain_blocks_per_instance_state():
 
 
 @test
+def test_domain_for_is_the_loop_head():
+    """`docs/315` §2：`domain:for` 是**域上的循环**，不是体里另一次守卫。
+
+    - 守卫只落在循环头**一次** —— 体内对同一位置的 `a[i]` 不再挂钩（有状态的域
+      否则会被扣两次）；
+    - 回边推虚拟钟（`@__loment_tick`）；`choose domain_clock_explicit` 关掉它；
+    - 无界形状 / `danger` / 要第二实参的语境类没有"下一个位置"，编译期拒。
+    """
+    def load(src):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "d.lomt"
+            p.write_text(src, encoding="utf-8", newline="\n")
+            m = lomentc.load(p)
+            return m, lomentc.check(m)
+
+    def fbody(ir: str) -> str:
+        return ir[ir.index("define i32 @f"):]
+
+    m, e = load("module m\nchoose runtime\n"
+                "fn f(a: [u32; 8] in disk) -> u32 {\n"
+                "    domain d : disk[0..7] consumed(1) {\n"
+                "        domain:for i { a[i] = a[i] + 1; }\n"
+                "    }\n    return a[0];\n}\n")
+    assert e == [], e
+    body = fbody(lomentc.emit_llvm(m, ROOT))
+    assert body.count("call void @__loment_guard2") == 1, (
+        "循环头该只有一次守卫（体内那个下标已被证过）\n" + body)
+    assert "icmp ule i32" in body, "循环上界不是域的形状"
+    assert "call void @__loment_tick()" in body, "回边没有推钟"
+
+    m2, e2 = load("module m\nchoose runtime\nchoose domain_clock_explicit\n"
+                  "fn f(a: [u32; 8] in disk) -> u32 {\n"
+                  "    domain d : disk[0..7] {\n"
+                  "        domain:for i { a[i] = 1; }\n"
+                  "    }\n    return a[0];\n}\n")
+    assert e2 == [], e2
+    assert "call void @__loment_tick()" not in fbody(lomentc.emit_llvm(m2, ROOT)), (
+        "`domain_clock_explicit` 没关掉回边推钟")
+
+    m3, e3 = load("module m\nchoose runtime\n"
+                  "fn f(a: [u32; 8] in disk) -> u32 {\n"
+                  "    domain d : disk[0..7] {\n"
+                  "        domain:for i step 2 { a[i] = 1; }\n"
+                  "    }\n    return a[0];\n}\n")
+    assert e3 == [], e3
+    b3 = fbody(lomentc.emit_llvm(m3, ROOT))
+    assert "add i32" in b3 and ", 2" in b3, "步长没进更新步"
+
+    # 嵌套：`domain:for` 是透明的一层 —— 体内照旧能看见外面的域
+    m4, e4 = load("module m\nchoose runtime\n"
+                  "fn f(a: [u32; 8] in disk) -> u32 {\n"
+                  "    domain whole : disk[0..7] {\n"
+                  "        domain half : disk[0..3] consumed(1) {\n"
+                  "            domain:for i { guard half(i); a[i] = 1; }\n"
+                  "        }\n"
+                  "    }\n    return a[0];\n}\n")
+    assert e4 == [], e4
+
+    # `in 外层`：循环走外层的形状，但**最内层仍更窄** —— 体内访问不能被免掉。
+    m5, e5 = load("module m\nchoose runtime\n"
+                  "fn f(a: [u32; 8] in disk) -> u32 {\n"
+                  "    domain whole : disk[0..7] {\n"
+                  "        domain half : disk[0..3] {\n"
+                  "            domain:for i in whole { a[i] = 1; }\n"
+                  "        }\n"
+                  "    }\n    return a[0];\n}\n")
+    assert e5 == [], e5
+    b5 = fbody(lomentc.emit_llvm(m5, ROOT))
+    assert b5.count("call void @__loment_guard2") == 3, (
+        "外层循环头 1 条 + 体内整条链 2 条（外层 silent + 内层记账）\n" + b5)
+
+    for bad, frag in [
+        ("domain d : disk[()..7] { domain:for i { } }", "有限形状"),
+        ("domain d : disk[0..7] danger { domain:for i { } }", "危险域"),
+        ("domain d : auth[0..7] subject(3) { domain:for i { } }", "第二个实参"),
+    ]:
+        try:
+            parse("module m\nchoose runtime\nfn f() -> u32 {\n    "
+                  + bad + "\n    return 0;\n}\n")
+        except lomentc.LomError as ex:
+            assert frag in str(ex), (frag, str(ex))
+        else:
+            raise AssertionError(f"没有拒：{bad}")
+    print("      域循环：头一次守卫 / 回边 tick / 显式档 / 步长 / 透明嵌套 / 三类拒绝")
+
+
+@test
+def test_domain_geometry_reads_trees_and_graphs():
+    """`docs/315` §4–§5：横/竖树、平/立体图 —— 从代码里读出来的**确定性**形状。
+
+    一棵三层竖链（`contains`）+ 一条兄弟边（`sibling`）+ 一个分支 + 一条
+    `domain:for` 的位置轴；立体图多出父 → 孙的 `cross` 边。
+    """
+    src = ("module geo\nchoose runtime\n"
+           "fn f(a: [u32; 8] in disk) -> u32 {\n"
+           "    domain whole : disk[0..7] {\n"
+           "        domain half : disk[0..3] {\n"
+           "            domain leaf : disk[0..1] consumed(1) {\n"
+           "                domain:for i step 2 { a[i] = 1; }\n"
+           "            }\n"
+           "        }\n"
+           "        domain tail : disk[4..7] { a[4] = 2; }\n"
+           "    }\n"
+           "    if a[0] > 0 { domain side : mem[0..1] { a[1] = 3; } }\n"
+           "    return a[0];\n}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "g.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        mod = lomentc.load(p)
+        assert lomentc.check(mod) == [], lomentc.check(mod)
+        lomentc._resolve_domains(mod)
+        g = loment_geometry.geometry(mod)
+        out1 = g.to_json()
+        out2 = loment_geometry.geometry(mod).to_json()
+    assert out1 == out2, "几何不是确定性的"
+    d = json.loads(out1)
+    names = {n["name"]: n for n in d["nodes"]}
+    assert set(names) == {"whole", "half", "leaf", "tail", "side"}, names
+    kinds = sorted(e["kind"] for e in d["edges"])
+    assert kinds.count("contains") == 3, kinds          # whole→half→leaf + whole→tail
+    assert kinds.count("sibling") == 1, kinds           # half 与 tail 同层
+    assert kinds.count("cross") == 1, kinds             # 立体图：whole → leaf
+    assert d["branches"] == ["f:12"], d["branches"]
+    (loop,) = d["loops"]
+    assert loop["domain"] == names["leaf"]["id"] and loop["step"] == 2, loop
+    assert loop["positions"] == 1, loop                 # 0..1 间隔 2：只有一个位置
+    print("      域几何：三层竖链 / 兄弟 / 分支 / 位置轴 / 立体跨层边，确定性成立")
+
+
+@test
 def test_domains_selfhost_twin():
     """十种域 + `tick;`：自举镜与参考实现的 IR **逐字节相同**。
 
@@ -5886,6 +6017,22 @@ def test_domains_selfhost_twin():
            "fn h_dom(a: [u32; 8] in disk, i: u32) -> u32 {\n"
            "    domain whole : disk[0..7] {\n"
            "        domain half : disk[0..3] consumed(1) { a[i] = 1; }\n"
+           "    }\n"
+           "    return a[0];\n"
+           "}\n"
+           # docs/315：域循环（循环头一次守卫 + 回边 tick；体内不重复守卫）
+           "fn h_loop(a: [u32; 8] in disk) -> u32 {\n"
+           "    domain loopd : disk[0..7] consumed(1) {\n"
+           "        domain:for i step 2 { a[i] = a[i] + 1; }\n"
+           "    }\n"
+           "    return a[0];\n"
+           "}\n"
+           # `in 外层`：最内层更窄，体内访问仍挂整条链（docs/315 §1.4）
+           "fn h_loop2(a: [u32; 8] in disk) -> u32 {\n"
+           "    domain outer2 : disk[0..7] {\n"
+           "        domain inner2 : disk[0..3] {\n"
+           "            domain:for i in outer2 { a[i] = 1; }\n"
+           "        }\n"
            "    }\n"
            "    return a[0];\n"
            "}\n")

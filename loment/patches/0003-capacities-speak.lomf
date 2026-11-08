@@ -152,7 +152,9 @@ old <<<
         return fail(msg);
 >>>
 new <<<
-    let m: u32 = emit_module(unit, ctoks, ir, cg, load32(scr, PROF_OFF));
+    // `docs/315`：`domain_clock_explicit` 关掉"回边即 tick"（默认自动）。
+    let m: u32 = emit_module(unit, ctoks, ir, cg, load32(scr, PROF_OFF),
+                             sw_state_named(unit, sw, "domain_clock_explicit"));
     if m == 0 {
         // **发射器自己的诊断通道**（`#775`）：先问它是不是"有一条规则降不下去"。
         // 那条比容量溢出更具体 —— 有规则号、有 token 位置，能指出是哪一处。

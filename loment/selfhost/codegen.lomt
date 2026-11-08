@@ -117,7 +117,17 @@ const CG_VSP_MAX: u32 = 512;
 const CG_VSP_N: u32 = 926136;         // 空间表条数（每函数清零）
 const CG_DOM_N: u32 = 926140;         // 当前域栈深
 const CG_DOM_ID: u32 = 926144;        // 下一个审计槽号（单元级，不随函数清零）
-const CG_BYTES: u32 = 926148;         // = CG_DOM_ID + 4
+//: `domain:for` 已证的位置（`docs/315`）：循环变量 token 与它的空间 token。
+//: 体内同空间的 `x[变量]` 不再挂自动守卫 —— 否则有状态的域会被扣两次。
+const CG_DPV: u32 = 926148;
+const CG_DPS: u32 = 926152;
+//: **回边即 tick**（`docs/315`）：`CG_CLOCK` = 这个单元用了虚拟钟（`emit_module` 扫出来），
+//: `CG_TICKX` = 用户写了 `choose domain_clock_explicit`（驱动在调用前放好）。
+const CG_CLOCK: u32 = 926156;
+const CG_TICKX: u32 = 926160;
+//: `domain:for` 点到的那个域的审计槽号 —— 只有**最内层**的那个才算"已证"。
+const CG_DPD: u32 = 926164;
+const CG_BYTES: u32 = 926168;         // = CG_DPD + 4
 use bytes
 use lexer
 
@@ -379,6 +389,11 @@ const CG_WANT_U32: u32 = 4294967293;
 //: 非法 IR, 且与参考实现的 `ptrtoint` 分叉 (#679)。
 const CG_CAST_PTR: u32 = 4294967292;
 
+//: **`4294967291` = "u32, 但源里没有那个词可以指"（`domain:for` 的循环变量）** ——
+//: 变量由反糖产生（参考实现写的是 `let i: u32`），源码里不一定出现 `u32` 那个词可以指。
+//: 与上面三个哨兵同一条纪律：`tok_is` / `tok_kind` 都在 2^31 处设了门。
+const CG_TY_U64: u32 = 4294967291;
+
 fn emit_ty(s: ptr, out: ptr, src: ptr, toks: ptr, tt: u32) -> u32 {
     if tt == CG_WANT_U32 {
         return emit_str(s, out, "i32");
@@ -392,6 +407,9 @@ fn emit_ty(s: ptr, out: ptr, src: ptr, toks: ptr, tt: u32) -> u32 {
     }
     if tt == CG_TY_BOOL {
         return emit_str(s, out, "i1");
+    }
+    if tt == CG_TY_U64 {      // `domain:for` 的循环变量（docs/315）
+        return emit_str(s, out, "i32");
     }
     if tt == 0 {
         return emit_str(s, out, "i32");
@@ -455,6 +473,9 @@ fn is_signed(src: ptr, toks: ptr, tt: u32) -> u32 {
 /// 整型的位宽 (非整型 / 未定型 = 0)。`u32` 与 `i32` 同宽 —— LLVM 里也是同一个类型。
 fn ty_bits(src: ptr, toks: ptr, tt: u32) -> u32 {
     if tt == CG_WANT_U32 {
+        return 32;
+    }
+    if tt == CG_TY_U64 {
         return 32;
     }
     if tok_is(src, toks, tt, "u8") || tok_is(src, toks, tt, "i8") { return 8; }
@@ -541,6 +562,9 @@ fn emitted_name(s: ptr, out: ptr, src: ptr, toks: ptr, tt: u32) -> u32 {
     }
     if tt == CG_CAST_PTR {
         return emit_str(s, out, "ptr");
+    }
+    if tt == CG_TY_U64 {
+        return emit_str(s, out, "u32");
     }
     let stn: u32 = subst_tok(s, src, toks, tt);   // 泛型实例: 注释里也要用具体类型
     if stn != tt {
@@ -2897,6 +2921,56 @@ fn is_dom_block(src: ptr, toks: ptr, i: u32) -> u32 {
     return 0;
 }
 
+/// `domain:for …`（`docs/315`）。
+fn is_dom_for(src: ptr, toks: ptr, i: u32) -> u32 {
+    if tok_is(src, toks, i + 1, ":") && tok_is(src, toks, i + 2, "for") {
+        return 1;
+    }
+    return 0;
+}
+
+/// 这个单元用不用虚拟钟（`docs/315` §2）。与参考实现的 `_uses_clock`（AST 上四类语句）
+/// 同一条门：没有这四类东西的单元，循环回边**一个字节都不多发**。
+fn clock_sites(src: ptr, toks: ptr) -> u32 {
+    let i: u32 = 0;
+    while tok_kind(toks, i) != 4 {
+        if tok_kind(toks, i) == 0 {
+            if (tok_is(src, toks, i, "guard") || tok_is(src, toks, i, "quality")
+                    || tok_is(src, toks, i, "discharge"))
+                    && tok_kind(toks, i + 1) == 0 {
+                return 1;
+            }
+            if tok_is(src, toks, i, "tick") && tok_is(src, toks, i + 1, ";") {
+                return 1;
+            }
+            if tok_is(src, toks, i, "domain")
+                    && (is_dom_block(src, toks, i) == 1 || is_dom_for(src, toks, i) == 1) {
+                return 1;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 回边要不要推钟（`docs/315`）：单元用了钟、且没有写 `domain_clock_explicit`。
+fn tick_on(s: ptr) -> u32 {
+    if load32(s, CG_CLOCK) == 0 {
+        return 0;
+    }
+    if load32(s, CG_TICKX) != 0 {
+        return 0;
+    }
+    return 1;
+}
+
+fn emit_tick(s: ptr, out: ptr) -> u32 {
+    if tick_on(s) == 1 {
+        return emit_str(s, out, "  call void @__loment_tick()\n");
+    }
+    return 0;
+}
+
 fn dsp_get(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
     let i: u32 = 0;
     while i < load32(s, CG_VSP_N) {
@@ -2958,14 +3032,23 @@ fn dom_find(s: ptr, src: ptr, toks: ptr, space_tok: u32) -> u32 {
 }
 
 /// 下标访问的自动守卫链（外→内；只有最内层记账 / 转移，`docs/314` §3）。
+/// `idx_tok` 是下标那个 token（`docs/315`：`domain:for` 的变量位置已由循环头证过，
+/// 这里跳过 —— 否则有状态的域会被扣两次）。
 fn dom_auto_guard(s: ptr, out: ptr, src: ptr, toks: ptr, name_tok: u32,
-                  it: u32, lvl: u32) -> u32 {
+                  idx_tok: u32, it: u32, lvl: u32) -> u32 {
     let sp: u32 = dsp_get(s, src, toks, name_tok);
     if sp == 0 {
         return 0;
     }
     let top: u32 = dom_find(s, src, toks, sp);
     if top == 0 {
+        return 0;
+    }
+    let pv: u32 = load32(s, CG_DPV);
+    if pv != 0 && tok_eq(src, toks, idx_tok, pv)
+            && tok_eq(src, toks, sp, load32(s, CG_DPS))
+            && load32(s, dom_at(top - 1, 0)) == load32(s, CG_DPD) {
+        // 已证 —— 但只当循环点到的就是**最内层**那个域（`in 外层` 时最内层可能更窄）。
         return 0;
     }
     emit_str(s, out, "  ");
@@ -3089,6 +3172,9 @@ fn emit_caps_table(s: ptr, out: ptr, src: ptr, toks: ptr) -> u32 {
 
 fn bit_width(tt: u32, src: ptr, toks: ptr) -> u32 {
     if tt == CG_WANT_U32 {
+        return 32;
+    }
+    if tt == CG_TY_U64 {
         return 32;
     }
     if tt == CG_TY_BOOL {
@@ -4711,7 +4797,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
         emit_str(s, out, ", 0\n");
         let itx: u32 = expr_type(s, src, toks, dot + 1);   // 下标**自己的类型**（不写死 i32）
         let iv: u32 = expr_bin(s, out, src, toks, dot + 1, 1, lvl + 1, 0);
-        let _g1: u32 = dom_auto_guard(s, out, src, toks, j, itx, lvl + 1);   // docs/314
+        let _g1: u32 = dom_auto_guard(s, out, src, toks, j, dot + 1, itx, lvl + 1);   // docs/314
         emit_str(s, out, "  ");
         let g: u32 = new_temp(s, out);
         emit_str(s, out, " = getelementptr inbounds ");
@@ -4742,7 +4828,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
         let et2: u32 = elem_tok(src, toks, ty);
         let itx2: u32 = expr_type(s, src, toks, dot + 1);   // 下标**自己的类型**
         let iv2: u32 = expr_bin(s, out, src, toks, dot + 1, 1, lvl, 0);
-        let _g2: u32 = dom_auto_guard(s, out, src, toks, j, itx2, lvl);   // docs/314
+        let _g2: u32 = dom_auto_guard(s, out, src, toks, j, dot + 1, itx2, lvl);   // docs/314
         emit_str(s, out, "  ");
         let gp: u32 = new_temp(s, out);
         emit_str(s, out, " = getelementptr inbounds ");
@@ -6319,6 +6405,148 @@ fn dfr_stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
     return semi + 1;
 }
 
+/// `docs/315` §2：`domain:for VAR [in NAME] [step N] { … }`。
+///
+/// 发射形状与参考实现的反糖**逐条对齐**：
+///   `let VAR: u32 = lo;  while VAR <= hi { guard NAME(VAR); …; VAR = VAR + N; }`
+/// —— 守卫在循环头一次，体内同位置的下标不再重复守卫（`CG_DPV` / `CG_DPS`）。
+fn dom_for(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
+    let var_tok: u32 = j + 3;
+    let k: u32 = j + 4;
+    let dname: u32 = 0;
+    if tok_is(src, toks, k, "in") {
+        dname = k + 1;
+        k = k + 2;
+    }
+    let stp: u32 = 1;
+    if tok_is(src, toks, k, "step") {
+        stp = tok_int(src, toks, k + 1);
+        k = k + 2;
+    }
+    let dw: u32 = 0;
+    if dname != 0 {
+        dw = dom_by_name(s, src, toks, dname);
+    } else {
+        dw = load32(s, CG_DOM_N);
+    }
+    if dw == 0 {
+        return cg_fail(s, 2, j);
+    }
+    let lo: u32 = load32(s, dom_at(dw - 1, 2));
+    let hi: u32 = load32(s, dom_at(dw - 1, 3));
+    let ci: u32 = load32(s, dom_at(dw - 1, 0));
+    let ck: u32 = load32(s, dom_at(dw - 1, 4));
+    let cp: u32 = load32(s, dom_at(dw - 1, 5));
+    let cf: u32 = load32(s, dom_at(dw - 1, 6));
+    let cst: u32 = load32(s, dom_at(dw - 1, 7));
+    // let VAR: u32 = lo
+    emit_str(s, out, "  store i32 ");
+    emit_dec(s, out, lo);
+    emit_str(s, out, ", ptr %");
+    emit_name_tok(s, out, src, toks, var_tok);
+    emit_str(s, out, ".addr\n");
+    let w: u32 = load32(s, 480) + 1;
+    store32(s, 480, w + 2);
+    jump(s, out, w, "wcond");
+    lab_def(s, out, w, "wcond");
+    let _lv: u32 = load_var(s, out, src, toks, var_tok, 0);
+    emit_str(s, out, "  ");
+    let cn: u32 = new_temp(s, out);
+    emit_str(s, out, " = icmp ule i32 ");
+    emit_val(s, out, 0);
+    emit_str(s, out, ", ");
+    emit_dec(s, out, hi);
+    emit_str(s, out, "\n  br i1 %t");
+    emit_dec(s, out, cn);
+    emit_str(s, out, ", label ");
+    lab_ref(s, out, w + 1, "wbody");
+    emit_str(s, out, ", label ");
+    lab_ref(s, out, w + 2, "wend");
+    emit_str(s, out, "\n");
+    store32(s, 476, 1);
+    lab_def(s, out, w + 1, "wbody");
+    // 循环头已证：体内同空间的 `x[VAR]` 不再挂自动守卫
+    let opv: u32 = load32(s, CG_DPV);
+    let ops: u32 = load32(s, CG_DPS);
+    let opd: u32 = load32(s, CG_DPD);
+    store32(s, CG_DPV, var_tok);
+    store32(s, CG_DPS, load32(s, dom_at(dw - 1, 1)));
+    store32(s, CG_DPD, ci);
+    let _gv: u32 = load_var(s, out, src, toks, var_tok, 0);
+    emit_str(s, out, "  ");
+    let g64: u32 = new_temp(s, out);
+    emit_str(s, out, " = zext i32 ");
+    emit_val(s, out, 0);
+    emit_str(s, out, " to i64\n");
+    emit_str(s, out, "  call void @__loment_guard2(ptr ");
+    if cst != 0 {
+        emit_str(s, out, "%t");
+        emit_dec(s, out, cst);
+    } else {
+        emit_str(s, out, "@__loment_qual");
+    }
+    emit_str(s, out, ", i64 ");
+    emit_dec(s, out, ci);
+    emit_str(s, out, ", i64 %t");
+    emit_dec(s, out, g64);
+    emit_str(s, out, ", i64 0, i64 ");
+    emit_dec(s, out, lo);
+    emit_str(s, out, ", i64 ");
+    emit_dec(s, out, hi);
+    emit_str(s, out, ", i64 ");
+    emit_dec(s, out, ck);
+    emit_str(s, out, ", i64 ");
+    emit_dec(s, out, cp);
+    emit_str(s, out, ", i64 ");
+    emit_dec(s, out, cf);
+    emit_str(s, out, ")\n");
+    let ob: u32 = load32(s, CG_LBRK);
+    let ocd: u32 = load32(s, CG_LCOND);
+    let okd: u32 = load32(s, CG_LKIND);
+    let osv: u32 = load32(s, CG_LSV);
+    let oax: u32 = load32(s, CG_LAUX);
+    store32(s, CG_LBRK, w + 2);
+    store32(s, CG_LCOND, w);
+    store32(s, CG_LKIND, 0);
+    store32(s, CG_LAUX, 0);
+    let odep: u32 = load32(s, CG_LDEPTH);
+    let dfr: u32 = dfr_push(s);
+    store32(s, CG_LDEPTH, dfr);
+    let b: u32 = k + 1;                        // '{' 之后
+    while !tok_is(src, toks, b, "}") && tok_kind(toks, b) != 4 {
+        b = stmt(s, out, src, toks, b, ret);
+    }
+    let _de: u32 = dfr_end(s, out, src, toks, dfr, ret);
+    // VAR = VAR + N
+    let _sv: u32 = load_var(s, out, src, toks, var_tok, 0);
+    emit_str(s, out, "  ");
+    let an: u32 = new_temp(s, out);
+    emit_str(s, out, " = add i32 ");
+    emit_val(s, out, 0);
+    emit_str(s, out, ", ");
+    emit_dec(s, out, stp);
+    emit_str(s, out, "\n  store i32 %t");
+    emit_dec(s, out, an);
+    emit_str(s, out, ", ptr %");
+    emit_name_tok(s, out, src, toks, var_tok);
+    emit_str(s, out, ".addr\n");
+    if load32(s, 476) == 0 {
+        let _t: u32 = emit_tick(s, out);       // docs/315：回边即 tick
+    }
+    jump(s, out, w, "wcond");
+    lab_def(s, out, w + 2, "wend");
+    store32(s, CG_LBRK, ob);
+    store32(s, CG_LCOND, ocd);
+    store32(s, CG_LKIND, okd);
+    store32(s, CG_LSV, osv);
+    store32(s, CG_LAUX, oax);
+    store32(s, CG_LDEPTH, odep);
+    store32(s, CG_DPV, opv);
+    store32(s, CG_DPS, ops);
+    store32(s, CG_DPD, opd);
+    return b + 1;
+}
+
 /// 一条语句; 返回下一个待处理 token 下标。
 /// `docs/314` §2：域块。单独一支函数 —— 它自己的局部变量不该压进 `stmt` 的栈帧
 /// （PE 默认栈 1 MB；放进 `stmt` 会把大单元推过界，实测 ansi/tui）。
@@ -6505,6 +6733,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
             if kd == 2 {
                 for_step(s, out, src, toks, load32(s, CG_LAUX));
             }
+            let _tk3: u32 = emit_tick(s, out);   // docs/315：continue 也是回边
         }
         epoch_close(s, out, load32(s, CG_LSV));
         if cont == 1 {
@@ -6928,6 +7157,9 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         store32(s, CG_LDEPTH, odep);
         return k;
     }
+    if tok_is(src, toks, j, "domain") && is_dom_for(src, toks, j) == 1 {   // docs/315
+        return dom_for(s, out, src, toks, j, ret);
+    }
     if tok_is(src, toks, j, "for") {   // for i in lo..hi { ... }
         let var_tok: u32 = j + 1;
         let le: u32 = j + 3;                       // lo 起始 (跳过 'for' 变量 'in')
@@ -6991,6 +7223,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         epoch_close(s, out, fsv);
         if load32(s, 476) == 0 {   // 体已终结时自增到不了（同 for-in 那条）
             for_step(s, out, src, toks, var_tok);
+            let _tk1: u32 = emit_tick(s, out);   // docs/315：回边即 tick
         }
         jump(s, out, w, "fcond");
         lab_def(s, out, w + 2, "fend");
@@ -7037,6 +7270,9 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         }
         let _wde: u32 = dfr_end(s, out, src, toks, wdfr, ret);
         epoch_close(s, out, wsv);
+        if load32(s, 476) == 0 {
+            let _tk2: u32 = emit_tick(s, out);    // docs/315：回边即 tick
+        }
         jump(s, out, w, "wcond");
         lab_def(s, out, w + 2, "wend");
         store32(s, CG_LBRK, ob);
@@ -7441,7 +7677,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
             emit_str(s, out, ", 0\n");
             let sitx: u32 = expr_type(s, src, toks, j + 2);   // 下标**自己的类型**
             let siv: u32 = expr_bin(s, out, src, toks, j + 2, 1, 1, 0);
-            let _w1: u32 = dom_auto_guard(s, out, src, toks, j, sitx, 1);   // docs/314
+            let _w1: u32 = dom_auto_guard(s, out, src, toks, j, j + 2, sitx, 1);   // docs/314
             emit_str(s, out, "  ");
             let sgp: u32 = new_temp(s, out);
             emit_str(s, out, " = getelementptr inbounds ");
@@ -7466,7 +7702,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         if is_array_tok(src, toks, sty) == 1 {
             let aitx: u32 = expr_type(s, src, toks, j + 2);   // 下标**自己的类型**
             let aiv: u32 = expr_bin(s, out, src, toks, j + 2, 1, 0, 0);
-            let _w2: u32 = dom_auto_guard(s, out, src, toks, j, aitx, 0);   // docs/314
+            let _w2: u32 = dom_auto_guard(s, out, src, toks, j, j + 2, aitx, 0);   // docs/314
             emit_str(s, out, "  ");
             let agp: u32 = new_temp(s, out);
             emit_str(s, out, " = getelementptr inbounds ");
@@ -7684,6 +7920,12 @@ fn collect_locals(s: ptr, src: ptr, toks: ptr, i: u32, end: u32) -> u32 {
     let fic: u32 = 0;
     let j: u32 = i;
     while tok_kind(toks, j) != 4 && j < end {
+        if tok_is(src, toks, j, "domain") && is_dom_for(src, toks, j) == 1 {
+            // `docs/315`：循环变量由反糖产生（参考实现写 `let VAR: u32`）——
+            // 类型是**没有 token 的 u32**，用哨兵。
+            n = add_local(s, src, toks, n, j + 3, CG_TY_U64);
+            j = j + 3;                       // 跳过 `domain : for`
+        }
         if tok_is(src, toks, j, "match") {   // M26: match 载荷绑定也要 alloca
             let st: u32 = expr_type(s, src, toks, j + 1);
             let mei: u32 = find_enum(s, src, toks, st);
@@ -10659,7 +10901,7 @@ out:
 ");
 }
 
-pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32) -> u32 {
+pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32, tickx: u32) -> u32 {
     store32(s, 0, 0);
     store32(s, 4, 0);
     store32(s, 12, 0);
@@ -10668,6 +10910,9 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32) -> u32 {
     store32(s, CG_ERR, 0);
     store32(s, CG_ERRTOK, 0);
     store32(s, CG_PROF, prof);
+    // `docs/315`：单元用不用虚拟钟 + 用户有没有关掉"回边即 tick"。
+    store32(s, CG_CLOCK, clock_sites(src, toks));
+    store32(s, CG_TICKX, tickx);
     // **替换表的计数必须显式清零**：`sub_clear` 没人调用，这个格原来靠"调用方给的内存
     // 是零"成立 —— brk（真驱动）是零，而夹具里的 `malloc` 在 900 KB 这一档会拿到**脏页**
     // （`loment_p8_test` 的 C 夹具实测：`subst_tok` 读出一个 11 万多的表长，按 `i*8`
@@ -11019,7 +11264,8 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32) -> u32 {
         let nd: u32 = 0;
         let ti: u32 = 0;
         while tok_kind(toks, ti) != 4 {
-            if tok_is(src, toks, ti, "domain") {
+            // 只数**块**：`domain:for` 不占审计槽（它的判决落在外面那个域上，`docs/315`）。
+            if tok_is(src, toks, ti, "domain") && is_dom_block(src, toks, ti) == 1 {
                 nd = nd + 1;
             }
             ti = ti + 1;

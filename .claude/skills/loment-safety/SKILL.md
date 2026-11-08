@@ -69,6 +69,31 @@ fn fill(a: [u32; 64] in disk, i: u32) {
 }
 ```
 
+**Walking a domain (`docs/315`).** `domain:for` iterates the positions of a domain. The guard is
+checked once at the loop head (not once per access), and every back edge advances the virtual
+clock:
+
+```rust
+module walk_domain
+choose runtime
+
+fn sum(a: [u32; 8] in disk) -> u32 {
+    domain buf : disk[0..7] consumed(1) {
+        domain:for i {
+            a[i] = a[i] + 1;   // head guard covers this position; no second guard
+        }
+    }
+    return a[0];
+}
+```
+
+- `domain:for i` walks the innermost block's domain; `domain:for i in NAME` names one;
+  `step N` walks every Nth position.
+- Only bounded, orderable domains can be walked: infinite shapes, `danger`, and
+  `subject` / `witnessed` / `flow` (they need a second guard argument) are compile errors.
+- `choose domain_clock_explicit` turns the automatic back-edge tick off; then only an explicit
+  `tick;` advances the clock.
+
 - `let a: [u32; 64] in disk` / `a: [u32; 64] in disk` (parameter) tags a value's space
   (arrays, slices, pointers only). The tag does not travel through a call - the callee sees a
   plain type.

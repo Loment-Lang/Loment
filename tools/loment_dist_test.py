@@ -1469,7 +1469,10 @@ def test_java_dependency_autolinks() -> None:
                 no = off(name_rva)
                 dlls.append(blob[no:blob.index(b"\0", no)].decode().lower())
                 k += 1
-            check("PE 导入表是 kernel32 + ws2_32", dlls == ["kernel32.dll", "ws2_32.dll"], str(dlls))
+            # `#1493`（lmgr）给 Windows 产物加了 PDH / PSAPI（cpu.load / mem.phys 走的
+            # 就是它们）。断言跟着链接器的**实际**导入表走，不钉旧的那两个。
+            check("PE 导入表是 kernel32 + ws2_32 + pdh + psapi",
+                  dlls == ["kernel32.dll", "ws2_32.dll", "pdh.dll", "psapi.dll"], str(dlls))
             check("PE 导入表里没有 jvm.dll / java.dll",
                   not ({"jvm.dll", "java.dll"} & set(dlls)), str(dlls))
 

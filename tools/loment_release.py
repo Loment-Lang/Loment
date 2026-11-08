@@ -281,6 +281,8 @@ GLOBS = [
     "tools/loment_filetype.py", "tools/loment_filetype_test.py",
     # 行尾门禁 (docs/161): 本清单的 sha 对 CRLF 免疫, 但自举判据按原始字节读源码 —— 两者配对
     "tools/loment_eol.py",
+    # 域几何（docs/315）：树 / 图从代码里读出来的报告（判据在 lomentc_test）
+    "tools/loment_geometry.py",
     # 发行包 (docs/162): 命令安装 + 自解压安装包
     "tools/loment_dist.py", "tools/loment_dist_test.py",
     # 签名 (docs/163): Authenticode + SHA256SUMS 分离签名

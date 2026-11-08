@@ -1,7 +1,7 @@
 # 315 · 域循环与域几何：`domain:for`、横/竖树、平/立体图
 
 > 状态: **域循环已实装（`domain:for` + 回边 tick）；域嵌套在块这一层已实装；
-> 树/图是本文的设计，尚未进语言**
+> 树/图的**报告**已实装（`tools/loment_geometry.py`）；声明式语法仍是设计**
 > 上游: `docs/306`（代数）· `docs/307`（语境类）· `docs/308`（嵌套与环）· `docs/314`（域块）
 > 一句话: **域不只围住一段代码，它能被遍历；遍历的骨架就是域的树与图。**
 
@@ -220,6 +220,10 @@ while i <= hi {
 - 循环体内的守卫抑制（已证位置）—— 两个实现；
 - 审计表只数块（`domain:for` 不占槽）—— 两个实现；
 - 判据 8 条（见 §6），其中运行那两条是实测；
+- **域几何的报告**：`tools/loment_geometry.py` 从 AST 导出竖链（`contains`）、
+  兄弟（`sibling`）、先后（`flow`）、守卫（`guard`）、立体图的跨层边（`cross`）
+  与 `domain:for` 的位置轴（`step` / `positions`）；输出是确定性的 JSON。
+  判据在 `lomentc_test::test_domain_geometry_reads_trees_and_graphs`；
 - 种子 / genesis / 地板按流程重算。
 
 **下一步**（按依赖顺序）：

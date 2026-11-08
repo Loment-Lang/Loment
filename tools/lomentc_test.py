@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import loment_suite  # noqa: E402
 import lomc  # noqa: E402
 import loment_diag  # noqa: E402
+import loment_geometry  # noqa: E402
 import lomentc  # noqa: E402
 import lspe  # noqa: E402
 import potato  # noqa: E402
@@ -5901,6 +5902,49 @@ def test_domain_for_is_the_loop_head():
         else:
             raise AssertionError(f"没有拒：{bad}")
     print("      域循环：头一次守卫 / 回边 tick / 显式档 / 步长 / 透明嵌套 / 三类拒绝")
+
+
+@test
+def test_domain_geometry_reads_trees_and_graphs():
+    """`docs/315` §4–§5：横/竖树、平/立体图 —— 从代码里读出来的**确定性**形状。
+
+    一棵三层竖链（`contains`）+ 一条兄弟边（`sibling`）+ 一个分支 + 一条
+    `domain:for` 的位置轴；立体图多出父 → 孙的 `cross` 边。
+    """
+    src = ("module geo\nchoose runtime\n"
+           "fn f(a: [u32; 8] in disk) -> u32 {\n"
+           "    domain whole : disk[0..7] {\n"
+           "        domain half : disk[0..3] {\n"
+           "            domain leaf : disk[0..1] consumed(1) {\n"
+           "                domain:for i step 2 { a[i] = 1; }\n"
+           "            }\n"
+           "        }\n"
+           "        domain tail : disk[4..7] { a[4] = 2; }\n"
+           "    }\n"
+           "    if a[0] > 0 { domain side : mem[0..1] { a[1] = 3; } }\n"
+           "    return a[0];\n}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "g.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        mod = lomentc.load(p)
+        assert lomentc.check(mod) == [], lomentc.check(mod)
+        lomentc._resolve_domains(mod)
+        g = loment_geometry.geometry(mod)
+        out1 = g.to_json()
+        out2 = loment_geometry.geometry(mod).to_json()
+    assert out1 == out2, "几何不是确定性的"
+    d = json.loads(out1)
+    names = {n["name"]: n for n in d["nodes"]}
+    assert set(names) == {"whole", "half", "leaf", "tail", "side"}, names
+    kinds = sorted(e["kind"] for e in d["edges"])
+    assert kinds.count("contains") == 3, kinds          # whole→half→leaf + whole→tail
+    assert kinds.count("sibling") == 1, kinds           # half 与 tail 同层
+    assert kinds.count("cross") == 1, kinds             # 立体图：whole → leaf
+    assert d["branches"] == ["f:12"], d["branches"]
+    (loop,) = d["loops"]
+    assert loop["domain"] == names["leaf"]["id"] and loop["step"] == 2, loop
+    assert loop["positions"] == 1, loop                 # 0..1 间隔 2：只有一个位置
+    print("      域几何：三层竖链 / 兄弟 / 分支 / 位置轴 / 立体跨层边，确定性成立")
 
 
 @test

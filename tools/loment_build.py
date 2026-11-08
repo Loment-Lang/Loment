@@ -4,7 +4,12 @@
 # 判据:
 #   M65 增量编译: 改动单文件只重编该文件及其下游, 其余命中缓存;
 #   M66 构建缓存: 冷/热构建时间对照 (内容哈希命中率)。
-# 缓存键 = sha256(源文件 + 递归 use 的 .lomt 内容); 键不变则跳过生成。
+# 缓存键 = sha256(编译器身份 + 源文件 + 递归 use 的 .lomt 内容); 键不变则跳过生成。
+# **编译器身份**（`#900`）：参考实现那几份源的字节。只哈希源文件时，工具链升级后同一份
+# 源仍会命中**上一个编译器**的产物 —— 缓存在这里必须失效。
+# **产物完整性**（`#901`）：命中的前提不只是"路径存在"，还要**内容哈希与记录一致**——
+# 否则任何能往 `build/` 写字的东西（提交进来的构建目录、另一个工具）都能占据那个名字，
+# 而每次构建都报 `[HOT]`。
 #
 # 用法:
 #   python tools/loment_build.py DIR [--out OUT] [--report] [--clean]
@@ -16,6 +21,7 @@ import argparse
 import hashlib
 import json
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -58,18 +64,74 @@ def dep_files(p: Path, root: Path, seen: set[Path]) -> list[Path]:
     return out
 
 
-def cache_key(files: list[Path]) -> str:
+#: 编译器身份由**这几份源**决定（`#900`）。参考实现的发射面就在这三个文件里；
+#: `loment/lspe/` 是检查阶段会读的语义面，跟着算进去。清单变短（少算一份）就是
+#: "工具链换了而缓存仍然命中" —— 那正是这条要堵的洞。
+COMPILER_SOURCES = ("tools/lomentc.py", "tools/lomc.py", "tools/potato_from.py")
+COMPILER_DIRS = ("loment/lspe",)
+
+
+def compiler_id(root: Path | None = None) -> str:
+    """工具链身份：编译器那几份源的 sha256（路径名 + 字节，次序固定）。"""
+    root = root or ROOT
     h = hashlib.sha256()
+    paths: list[Path] = [root / rel for rel in COMPILER_SOURCES]
+    for rel in COMPILER_DIRS:
+        paths += sorted((root / rel).rglob("*.py"))
+    for p in paths:
+        h.update(p.relative_to(root).as_posix().encode())
+        h.update(b"\0")
+        h.update(p.read_bytes())
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def _sha256_file(p: Path) -> str:
+    return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+def cache_key(files: list[Path], toolchain: str = "") -> str:
+    h = hashlib.sha256()
+    h.update(b"loment-build-2\0")
+    h.update(toolchain.encode())
+    h.update(b"\0")
     for p in sorted(files):
         h.update(p.read_bytes())
         h.update(b"\0")
     return h.hexdigest()
 
 
-def build_one(p: Path, out: Path, root: Path) -> dict:
-    key = cache_key(dep_files(p, root, set()))
-    rec = {"file": _rel(p), "key": key, "artifacts": [], "ok": True,
-           "error": ""}
+def _hit(prev: dict, key: str, toolchain: str, out: Path) -> bool:
+    """缓存命中 = 键相同 **且** 每份产物还在、内容没被换过（`#901`）。"""
+    if not prev or prev.get("key") != key or prev.get("toolchain") != toolchain:
+        return False
+    arts = prev.get("artifacts") or []
+    hashes = prev.get("hashes") or {}
+    if not arts or set(hashes) != set(arts):
+        return False
+    for name in arts:
+        p = out / name
+        if not p.is_file() or _sha256_file(p) != hashes[name]:
+            return False
+    return True
+
+
+def _git_tracked(out: Path) -> list[str]:
+    """`out` 里被 git 跟踪的文件。非空 = 这是个**提交进仓库**的构建目录（`#901`）。"""
+    try:
+        r = subprocess.run(["git", "-C", str(out), "ls-files", "--", "."],
+                           capture_output=True, text=True, shell=False)
+    except OSError:
+        return []
+    if r.returncode != 0:
+        return []
+    return [ln for ln in r.stdout.splitlines() if ln.strip()]
+
+
+def build_one(p: Path, out: Path, root: Path, toolchain: str = "") -> dict:
+    key = cache_key(dep_files(p, root, set()), toolchain)
+    rec = {"file": _rel(p), "key": key, "toolchain": toolchain,
+           "artifacts": [], "hashes": {}, "ok": True, "error": ""}
     try:
         mod, deps = lomentc.load_unit(p, root)      # 唯一入口（docs/182 §1.10）
         errs = lomentc.check(mod, deps=deps)
@@ -93,6 +155,7 @@ def build_one(p: Path, out: Path, root: Path) -> dict:
             rec["artifacts"].append(f"{p.stem}.ll")
         except lomentc.LomError as e:  # 原生后端不支持的部分: 记录但不失败
             rec["error"] = f"IR: {e}"
+        rec["hashes"] = {name: _sha256_file(out / name) for name in rec["artifacts"]}
     except Exception as e:  # noqa: BLE001
         rec["ok"] = False
         rec["error"] = str(e)
@@ -112,6 +175,17 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[ERR] 目录不存在: {src_dir}", file=sys.stderr)
         return 2
     out.mkdir(parents=True, exist_ok=True)
+    tracked = _git_tracked(out)
+    if tracked:
+        # `#901`: 提交进仓库的构建目录里，索引和产物**可以一起**被伪造 —— 那份缓存
+        # 不是"上次构建留下的"，而是别人写好的。拒绝，而不是"小心地命中"。
+        print(f"[ERR] 构建目录被 git 跟踪（{len(tracked)} 个文件）: {out}\n"
+              f"      提交进仓库的 build/ 不能当缓存用 —— 换 --out，或先把它移出版本控制。",
+              file=sys.stderr)
+        if tracked[:3]:
+            print("      " + "\n      ".join(tracked[:3]), file=sys.stderr)
+        return 2
+    toolchain = compiler_id(ROOT)
     index_path = out / ".loment-cache.json"
     old: dict[str, dict] = {}
     if index_path.exists() and not a.clean:
@@ -127,14 +201,13 @@ def main(argv: list[str] | None = None) -> int:
     for p in files:
         rel = _rel(p)
         prev = old.get(rel)
-        key = cache_key(dep_files(p, ROOT, set()))
-        if prev and prev.get("key") == key and all(
-                (out / x).exists() for x in prev.get("artifacts", [])):
+        key = cache_key(dep_files(p, ROOT, set()), toolchain)
+        if _hit(prev, key, toolchain, out):
             hit += 1
             records.append(prev)
             continue
         miss += 1
-        rec = build_one(p, out, ROOT)
+        rec = build_one(p, out, ROOT, toolchain)
         rec["file"] = rel
         records.append(rec)
         if not rec["ok"]:

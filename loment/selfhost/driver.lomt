@@ -2701,6 +2701,9 @@ fn _start() -> u32 {
             if ec == 3 {
                 em = "a defer takes at most 4 arguments -- bind them to locals first";
             }
+            if ec == 2 {
+                em = "too many `in SPACE` bindings in one function -- split the function";
+            }
             if ec == 4 {
                 em = "too many defer statements in one function -- split the function";
             }

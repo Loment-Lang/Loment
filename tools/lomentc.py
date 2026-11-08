@@ -1376,6 +1376,10 @@ CAP_PARAM_KINDS = ("epoch", "far", "sliding", "decaying", "growing", "consumed",
 CAP_AUX_KINDS = ("subject", "witnessed", "flow")
 #: 有状态（每个域实例一份）的律：消耗 / 自适应 / 见证 / 可达（`docs/313` §4）。
 _STATEFUL_KINDS = (7, 10, 12, 14)
+#: 编号 → 律名（检查器拿回字符串用）。
+CAP_KIND_NAME = {v: k for k, v in CAP_KIND_ID.items()}
+#: 要第二个实参的那三种（编号版）。
+_AUX_KIND_IDS = (CAP_KIND_ID["subject"], CAP_KIND_ID["witnessed"], CAP_KIND_ID["flow"])
 
 
 def _cap_shape(c: Capability) -> str:
@@ -1612,9 +1616,9 @@ class Guard:
     #: 语境类的第二个实参（`docs/307` §1–§5）：主体号 / 票号 / 目标节点。
     aux: object = None
     #: true = 指向块级域（`docs/313`），false = 顶层 capability。
+    #: ⚠ **不要**在这里放回指 DomainBlock 的字段：`_machine_call_sites` 是通用
+    #: dataclass 遍历，回指会成环（实测：递归上限当场炸）。
     is_block: bool = False
-    #: 解析后填充：块级域本身（检查器与发射器要拿它的空间 / 状态）。
-    dom: object = None
 
 
 @dataclass
@@ -1635,6 +1639,7 @@ class Quality:
     line: int
     cap_id: int = 0
     is_block: bool = False
+    dom_kind_id: int = -1
 
 
 @dataclass
@@ -1645,6 +1650,7 @@ class Discharge:
     line: int
     cap_id: int = 0
     is_block: bool = False
+    dom_kind_id: int = -1
 
 
 @dataclass
@@ -2037,7 +2043,6 @@ def _resolve_domains(mod) -> None:
                 d = find(stack, s.cap)
                 if d is not None:
                     s.is_block = True
-                    s.dom = d
                     s.cap_id = d.audit_id
                     s.lo, s.hi = d.lo, d.hi
                     s.kind_id = CAP_KIND_ID[d.kind]
@@ -2049,12 +2054,14 @@ def _resolve_domains(mod) -> None:
                 if d is not None:
                     s.cap_id = d.audit_id
                     s.is_block = True
+                    s.dom_kind_id = CAP_KIND_ID[d.kind]
             elif isinstance(s, Discharge):
                 ex(s.expr, stack, vs)
                 d = find(stack, s.cap)
                 if d is not None:
                     s.cap_id = d.audit_id
                     s.is_block = True
+                    s.dom_kind_id = CAP_KIND_ID[d.kind]
             elif isinstance(s, If):
                 ex(s.cond, stack, vs)
                 walk(s.then, stack, dict(vs))
@@ -6266,22 +6273,22 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                     if s.aux is not None:
                         _walk_expr(s.aux, fscope, funcs, structs, errs, enums)
                     if s.is_block:  # docs/313：块级域，名字只在这个 {} 里
-                        d = s.dom
-                        if (d.kind in CAP_AUX_KINDS) != (s.aux is not None):
+                        k = s.kind_id
+                        if (k in _AUX_KIND_IDS) != (s.aux is not None):
                             errs.append(
-                                f"{s.line}: 域 {s.cap} 是 {d.kind} 域，guard "
-                                f"{'需要' if d.kind in CAP_AUX_KINDS else '不接受'}第二个实参")
-                        elif isinstance(s.expr, IntLit) and d.kind in ("regular", "danger", "cyclic"):
+                                f"{s.line}: 域 {s.cap} 是 {CAP_KIND_NAME[k]} 域，guard "
+                                f"{'需要' if k in _AUX_KIND_IDS else '不接受'}第二个实参")
+                        elif isinstance(s.expr, IntLit) and k in (0, 1, 8):
                             v = s.expr.value
-                            if d.kind == "cyclic" and d.param > 0:
-                                v = v % d.param
-                            inside = ((d.lo_inf or v >= d.lo)
-                                      and (d.hi_inf or v <= d.hi))
-                            if d.kind in ("regular", "cyclic") and not inside:
+                            if k == 8 and s.param > 0:
+                                v = v % s.param
+                            inside = ((s.flags & 1 != 0 or v >= s.lo)
+                                      and (s.flags & 2 != 0 or v <= s.hi))
+                            if k in (0, 8) and not inside:
                                 errs.append(
                                     f"{s.line}: 域 {s.cap} 索引 {v} 越界"
-                                    f"（形状 [{d.lo}..{d.hi}]）")
-                            if d.kind == "danger" and inside:
+                                    f"（形状 [{s.lo}..{s.hi}]）")
+                            if k == 1 and inside:
                                 errs.append(
                                     f"{s.line}: 域 {s.cap} 是危险域，索引 {v} 落在禁止区内")
                         continue

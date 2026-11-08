@@ -5942,7 +5942,9 @@ fn build_pe(ob: ptr, txt: ptr, tlen: u32, gb: ptr, dlen: u32, idata: ptr, ilen: 
     w32(ob, opt + 60, toff);                             // SizeOfHeaders (PE32+: 60)
     store8(ob, opt + 68, 3 as u8);                       // Subsystem: console
     w32(ob, opt + 72, 16777216);                         // StackReserve 16 MiB
-    w32(ob, opt + 80, 1048576);                          // StackCommit 1 MiB
+    // 提交 8 MiB：**保留够、提交不够时 Windows 不替进程长栈**，自举编译器在大单元
+    // （`std/ansi.lomt`）上会直接访问违例。与 `tools/lomelf.py` 同一个数。
+    w32(ob, opt + 80, 8388608);                          // StackCommit 8 MiB
     w32(ob, opt + 88, 1048576);                          // HeapReserve
     w32(ob, opt + 96, 4096);                             // HeapCommit
     w32(ob, opt + 108, 16);                              // NumberOfRvaAndSizes

@@ -109,13 +109,15 @@ const CG_LGC_STK: u32 = 921304;
 //:   帧（8 层 × 8 格）：audit_id / space_tok / lo / hi / kind / param / flags / state_temp
 //:   空间表（每函数清零）：(name_tok, space_tok) 8 B/条
 const CG_DOM: u32 = 921560;
-const CG_DOM_MAX: u32 = 8;
-const CG_VSP: u32 = 921880;           // = CG_DOM + CG_DOM_MAX*40（每帧 10 格）
+// ⚠ 取 12 不取 8：`CG_MAXDFR` 已经是 8，而 `loment_p8_test` 把每个 `CG_*` 的**取值**
+// 都当成状态块格子查重（计数常量也在内）—— 撞号会被判成"两个写点互相踩"。
+const CG_DOM_MAX: u32 = 12;
+const CG_VSP: u32 = 922040;           // = CG_DOM + CG_DOM_MAX*40（每帧 10 格）
 const CG_VSP_MAX: u32 = 512;
-const CG_VSP_N: u32 = 925976;         // 空间表条数（每函数清零）
-const CG_DOM_N: u32 = 925980;         // 当前域栈深
-const CG_DOM_ID: u32 = 925984;        // 下一个审计槽号（单元级，不随函数清零）
-const CG_BYTES: u32 = 925988;         // = CG_DOM_ID + 4
+const CG_VSP_N: u32 = 926136;         // 空间表条数（每函数清零）
+const CG_DOM_N: u32 = 926140;         // 当前域栈深
+const CG_DOM_ID: u32 = 926144;        // 下一个审计槽号（单元级，不随函数清零）
+const CG_BYTES: u32 = 926148;         // = CG_DOM_ID + 4
 use bytes
 use lexer
 
@@ -2919,6 +2921,8 @@ fn dsp_set(s: ptr, src: ptr, toks: ptr, name_tok: u32, space_tok: u32) -> u32 {
         i = i + 1;
     }
     if load32(s, CG_VSP_N) >= CG_VSP_MAX {
+        // 满了要**说话**（`#345`）：静默丢弃会让后面那条访问不受检 —— 比崩更坏。
+        let _f: u32 = cg_fail(s, 2, name_tok);
         return 0;
     }
     let n: u32 = load32(s, CG_VSP_N);

@@ -57,6 +57,9 @@ kind refuses one.
 lifetime; values can carry a space, and accesses into that space are guarded for you:
 
 ```rust
+module fill_scope
+choose runtime
+
 fn fill(a: [u32; 64] in disk, i: u32) {
     domain buf : disk[0..63] consumed(1) {
         a[i] = 1;        // implicit guard buf(i)

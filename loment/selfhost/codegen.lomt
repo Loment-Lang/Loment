@@ -119,15 +119,21 @@ const CG_DOM_N: u32 = 926140;         // 当前域栈深
 const CG_DOM_ID: u32 = 926144;        // 下一个审计槽号（单元级，不随函数清零）
 //: `domain:for` 已证的位置（`docs/315`）：循环变量 token 与它的空间 token。
 //: 体内同空间的 `x[变量]` 不再挂自动守卫 —— 否则有状态的域会被扣两次。
-const CG_DPV: u32 = 926148;
-const CG_DPS: u32 = 926152;
 //: **回边即 tick**（`docs/315`）：`CG_CLOCK` = 这个单元用了虚拟钟（`emit_module` 扫出来），
 //: `CG_TICKX` = 用户写了 `choose domain_clock_explicit`（驱动在调用前放好）。
 const CG_CLOCK: u32 = 926156;
 const CG_TICKX: u32 = 926160;
-//: `domain:for` 点到的那个域的审计槽号 —— 只有**最内层**的那个才算"已证"。
-const CG_DPD: u32 = 926164;
-const CG_BYTES: u32 = 926168;         // = CG_DPD + 4
+//: `domain:for` 已证位置表（`docs/315` §2）：每条 12 B = (var_tok, space_tok, dom_id)。
+//: 并行的 `domain:for i, j in a, b` 会一次压进多条；离开循环时按计数还原。
+const CG_DPT: u32 = 926164;
+const CG_DPT_MAX: u32 = 10;
+const CG_DPN: u32 = 926284;           // = CG_DPT + 120
+//: 联动 `⇄` 的边（`docs/315` §5）：每对 8 B = (name_tok_a, name_tok_b)，最多 32 条。
+//: 相邻两条按名字首尾相连，一片就是一条链；查询按深度 8 的连通性递归。
+const CG_CPP: u32 = 926288;
+const CG_CPP_MAX: u32 = 32;
+const CG_CPN: u32 = 926544;           // = CG_CPP + 256
+const CG_BYTES: u32 = 926548;         // = CG_CPN + 4
 use bytes
 use lexer
 
@@ -3034,6 +3040,47 @@ fn dom_find(s: ptr, src: ptr, toks: ptr, space_tok: u32) -> u32 {
 /// 下标访问的自动守卫链（外→内；只有最内层记账 / 转移，`docs/314` §3）。
 /// `idx_tok` 是下标那个 token（`docs/315`：`domain:for` 的变量位置已由循环头证过，
 /// 这里跳过 —— 否则有状态的域会被扣两次）。
+/// 一条块级域的判决调用（`silent` = 只判成员，不记账 / 不转移）。
+fn dom_one(s: ptr, out: ptr, k: u32, v64: u32, has_aux: u32, a64: u32,
+           silent: u32, use_state: u32) -> u32 {
+    let kk: u32 = load32(s, dom_at(k - 1, 4));
+    if silent == 1 {
+        kk = kk + 128;
+    }
+    emit_str(s, out, "  call void @__loment_guard2(ptr ");
+    let stt: u32 = load32(s, dom_at(k - 1, 7));
+    if use_state == 1 && stt != 0 {
+        emit_str(s, out, "%t");
+        emit_dec(s, out, stt);
+    } else {
+        emit_str(s, out, "@__loment_qual");
+    }
+    emit_str(s, out, ", i64 ");
+    emit_dec(s, out, load32(s, dom_at(k - 1, 0)));
+    emit_str(s, out, ", i64 %t");
+    emit_dec(s, out, v64);
+    emit_str(s, out, ", i64 ");
+    if has_aux == 1 {
+        emit_str(s, out, "%t");
+        emit_dec(s, out, a64);
+    } else {
+        emit_str(s, out, "0");
+    }
+    emit_str(s, out, ", i64 ");
+    emit_dec(s, out, load32(s, dom_at(k - 1, 2)));
+    emit_str(s, out, ", i64 ");
+    emit_dec(s, out, load32(s, dom_at(k - 1, 3)));
+    emit_str(s, out, ", i64 ");
+    emit_dec(s, out, kk);
+    emit_str(s, out, ", i64 ");
+    emit_dec(s, out, load32(s, dom_at(k - 1, 5)));
+    emit_str(s, out, ", i64 ");
+    emit_dec(s, out, load32(s, dom_at(k - 1, 6)));
+    emit_str(s, out, ")
+");
+    return 0;
+}
+
 fn dom_auto_guard(s: ptr, out: ptr, src: ptr, toks: ptr, name_tok: u32,
                   idx_tok: u32, it: u32, lvl: u32) -> u32 {
     let sp: u32 = dsp_get(s, src, toks, name_tok);
@@ -3044,12 +3091,17 @@ fn dom_auto_guard(s: ptr, out: ptr, src: ptr, toks: ptr, name_tok: u32,
     if top == 0 {
         return 0;
     }
-    let pv: u32 = load32(s, CG_DPV);
-    if pv != 0 && tok_eq(src, toks, idx_tok, pv)
-            && tok_eq(src, toks, sp, load32(s, CG_DPS))
-            && load32(s, dom_at(top - 1, 0)) == load32(s, CG_DPD) {
-        // 已证 —— 但只当循环点到的就是**最内层**那个域（`in 外层` 时最内层可能更窄）。
-        return 0;
+    // 已证位置表（`docs/315`）：只有循环点到的就是**最内层**那个域才算数
+    // （`in 外层` 时最内层可能更窄）。
+    let pn: u32 = load32(s, CG_DPN);
+    let pi: u32 = 0;
+    while pi < pn {
+        if tok_eq(src, toks, idx_tok, load32(s, CG_DPT + pi * 12))
+                && tok_eq(src, toks, sp, load32(s, CG_DPT + pi * 12 + 4))
+                && load32(s, dom_at(top - 1, 0)) == load32(s, CG_DPT + pi * 12 + 8) {
+            return 0;
+        }
+        pi = pi + 1;
     }
     emit_str(s, out, "  ");
     let v64: u32 = new_temp(s, out);
@@ -3057,44 +3109,18 @@ fn dom_auto_guard(s: ptr, out: ptr, src: ptr, toks: ptr, name_tok: u32,
     emit_ty(s, out, src, toks, it);
     emit_str(s, out, " ");
     emit_val(s, out, lvl);
-    emit_str(s, out, " to i64\n");
+    emit_str(s, out, " to i64
+");
+    // 祖先（外→内，silent）→ 联动伙伴（silent）→ 叶子（记账）。与参考实现同序。
     let d: u32 = 1;
-    while d <= top {
+    while d < top {
         if tok_eq(src, toks, load32(s, dom_at(d - 1, 1)), sp) {
-            let leaf: u32 = 0;
-            if d == top {
-                leaf = 1;
-            }
-            let kk: u32 = load32(s, dom_at(d - 1, 4));
-            if leaf == 0 {
-                kk = kk + 128;
-            }
-            emit_str(s, out, "  call void @__loment_guard2(ptr ");
-            let stt: u32 = load32(s, dom_at(d - 1, 7));
-            if leaf == 1 && stt != 0 {
-                emit_str(s, out, "%t");
-                emit_dec(s, out, stt);
-            } else {
-                emit_str(s, out, "@__loment_qual");
-            }
-            emit_str(s, out, ", i64 ");
-            emit_dec(s, out, load32(s, dom_at(d - 1, 0)));
-            emit_str(s, out, ", i64 %t");
-            emit_dec(s, out, v64);
-            emit_str(s, out, ", i64 0, i64 ");
-            emit_dec(s, out, load32(s, dom_at(d - 1, 2)));
-            emit_str(s, out, ", i64 ");
-            emit_dec(s, out, load32(s, dom_at(d - 1, 3)));
-            emit_str(s, out, ", i64 ");
-            emit_dec(s, out, kk);
-            emit_str(s, out, ", i64 ");
-            emit_dec(s, out, load32(s, dom_at(d - 1, 5)));
-            emit_str(s, out, ", i64 ");
-            emit_dec(s, out, load32(s, dom_at(d - 1, 6)));
-            emit_str(s, out, ")\n");
+            let _r: u32 = dom_one(s, out, d, v64, 0, 0, 1, 0);
         }
         d = d + 1;
     }
+    let _p: u32 = dom_partners(s, out, src, toks, top, v64, 0, 0, 0);
+    let _l: u32 = dom_one(s, out, top, v64, 0, 0, 0, 1);
     return 1;
 }
 
@@ -6405,57 +6431,313 @@ fn dfr_stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
     return semi + 1;
 }
 
-/// `docs/315` §2：`domain:for VAR [in NAME] [step N] { … }`。
-///
-/// 发射形状与参考实现的反糖**逐条对齐**：
-///   `let VAR: u32 = lo;  while VAR <= hi { guard NAME(VAR); …; VAR = VAR + N; }`
-/// —— 守卫在循环头一次，体内同位置的下标不再重复守卫（`CG_DPV` / `CG_DPS`）。
-fn dom_for(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
-    let var_tok: u32 = j + 3;
-    let k: u32 = j + 4;
-    let dname: u32 = 0;
-    if tok_is(src, toks, k, "in") {
-        dname = k + 1;
-        k = k + 2;
+/// 联动组里从 `a` 能不能走到 `b`（深度 8 的递归；表最多 32 条边）。
+fn cp_conn(s: ptr, src: ptr, toks: ptr, a: u32, b: u32, depth: u32) -> u32 {
+    if tok_eq(src, toks, a, b) {
+        return 1;
     }
-    let stp: u32 = 1;
-    if tok_is(src, toks, k, "step") {
-        stp = tok_int(src, toks, k + 1);
-        k = k + 2;
+    if depth == 0 {
+        return 0;
     }
-    let dw: u32 = 0;
-    if dname != 0 {
-        dw = dom_by_name(s, src, toks, dname);
+    let n: u32 = load32(s, CG_CPN);
+    let i: u32 = 0;
+    while i < n {
+        let x: u32 = load32(s, CG_CPP + i * 8);
+        let y: u32 = load32(s, CG_CPP + i * 8 + 4);
+        if tok_eq(src, toks, a, x) || tok_eq(src, toks, a, y) {
+            let o: u32 = y;
+            if tok_eq(src, toks, a, y) {
+                o = x;
+            }
+            if cp_conn(s, src, toks, o, b, depth - 1) == 1 {
+                return 1;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn dom_partner_cap(s: ptr, out: ptr, c: u32, v64: u32, has_aux: u32,
+                   a64: u32, own_state: u32) -> u32 {
+    let pk: u32 = load32(s, cap_base(c) + 20);
+    let ck: u32 = pk & 15;
+    let stg: u32 = 0;
+    if own_state == 1 && (ck == 7 || ck == 12 || ck == 14) {
+        emit_str(s, out, "  ");
+        stg = new_temp(s, out);
+        emit_str(s, out, " = getelementptr [64 x i64], ptr ");
+        if ck == 7 { emit_str(s, out, "@__loment_used"); }
+        if ck == 12 { emit_str(s, out, "@__loment_wit"); }
+        if ck == 14 { emit_str(s, out, "@__loment_obl"); }
+        emit_str(s, out, ", i64 ");
+        emit_dec(s, out, c);
+        emit_str(s, out, "
+");
+    } else if own_state == 1 && ck == 10 {
+        emit_str(s, out, "  ");
+        stg = new_temp(s, out);
+        emit_str(s, out, " = getelementptr i64, ptr @__loment_qual, i64 ");
+        emit_dec(s, out, c);
+        emit_str(s, out, "
+");
+    }
+    emit_str(s, out, "  call void @__loment_guard2(ptr ");
+    if stg != 0 {
+        emit_str(s, out, "%t");
+        emit_dec(s, out, stg);
     } else {
-        dw = load32(s, CG_DOM_N);
+        emit_str(s, out, "@__loment_qual");
     }
-    if dw == 0 {
+    emit_str(s, out, ", i64 ");
+    emit_dec(s, out, c);
+    emit_str(s, out, ", i64 %t");
+    emit_dec(s, out, v64);
+    emit_str(s, out, ", i64 ");
+    if has_aux == 1 {
+        emit_str(s, out, "%t");
+        emit_dec(s, out, a64);
+    } else {
+        emit_str(s, out, "0");
+    }
+    emit_str(s, out, ", i64 ");
+    emit_dec(s, out, load32(s, cap_base(c) + 8));
+    emit_str(s, out, ", i64 ");
+    emit_dec(s, out, load32(s, cap_base(c) + 12));
+    emit_str(s, out, ", i64 ");
+    emit_dec(s, out, ck + 128);
+    emit_str(s, out, ", i64 ");
+    emit_dec(s, out, pk >> 8);
+    emit_str(s, out, ", i64 ");
+    emit_dec(s, out, (pk >> 4) & 3);
+    emit_str(s, out, ")
+");
+    return 0;
+}
+
+/// 质量写到整组（`docs/315` §5.2）：只给 **adaptive** 成员写，块在前、能力在后。
+fn dom_qual_partners(s: ptr, out: ptr, src: ptr, toks: ptr, nm: u32,
+                     dw: u32, tci: u32, q64: u32) -> u32 {
+    if nm == 0 || load32(s, CG_CPN) == 0 {
+        return 0;
+    }
+    let n: u32 = load32(s, CG_DOM_N);
+    let k: u32 = 1;
+    while k <= n {
+        if k != dw && load32(s, dom_at(k - 1, 4)) == 10
+                && cp_conn(s, src, toks, nm, load32(s, dom_at(k - 1, 8)), 8) == 1 {
+            emit_str(s, out, "  call void @__loment_qual_store(ptr ");
+            let stt: u32 = load32(s, dom_at(k - 1, 7));
+            if stt != 0 {
+                emit_str(s, out, "%t");
+                emit_dec(s, out, stt);
+            } else {
+                emit_str(s, out, "@__loment_qual");
+            }
+            emit_str(s, out, ", i64 %t");
+            emit_dec(s, out, q64);
+            emit_str(s, out, ")
+");
+        }
+        k = k + 1;
+    }
+    let nc: u32 = load32(s, 536);
+    let c: u32 = 0;
+    while c < nc {
+        let pk: u32 = load32(s, cap_base(c) + 20);
+        if c != tci && (pk & 15) == 10
+                && cp_conn(s, src, toks, nm, load32(s, cap_base(c)), 8) == 1 {
+            emit_str(s, out, "  ");
+            let pg: u32 = new_temp(s, out);
+            emit_str(s, out, " = getelementptr i64, ptr @__loment_qual, i64 ");
+            emit_dec(s, out, c);
+            emit_str(s, out, "
+");
+            emit_str(s, out, "  call void @__loment_qual_store(ptr %t");
+            emit_dec(s, out, pg);
+            emit_str(s, out, ", i64 %t");
+            emit_dec(s, out, q64);
+            emit_str(s, out, ")
+");
+        }
+        c = c + 1;
+    }
+    return 0;
+}
+
+/// 目标域 `top` 的联动伙伴（块的按声明序、能力的按表序 —— 与参考实现的排序一致）。
+fn dom_partners(s: ptr, out: ptr, src: ptr, toks: ptr, top: u32,
+                v64: u32, has_aux: u32, a64: u32, own_state: u32) -> u32 {
+    let nm: u32 = load32(s, dom_at(top - 1, 8));
+    if nm == 0 || load32(s, CG_CPN) == 0 {
+        return 0;
+    }
+    let sp: u32 = load32(s, dom_at(top - 1, 1));
+    let n: u32 = load32(s, CG_DOM_N);
+    let k: u32 = 1;
+    while k <= n {
+        let same_chain: u32 = 0;
+        if k <= top && tok_eq(src, toks, load32(s, dom_at(k - 1, 1)), sp) {
+            same_chain = 1;
+        }
+        let kn: u32 = load32(s, dom_at(k - 1, 8));
+        if k != top && kn != 0 && same_chain == 0
+                && cp_conn(s, src, toks, nm, kn, 8) == 1 {
+            let _r: u32 = dom_one(s, out, k, v64, has_aux, a64, 1, own_state);
+        }
+        k = k + 1;
+    }
+    let nc: u32 = load32(s, 536);
+    let c: u32 = 0;
+    while c < nc {
+        let cn2: u32 = load32(s, cap_base(c));
+        if cp_conn(s, src, toks, nm, cn2, 8) == 1 {
+            let _r2: u32 = dom_partner_cap(s, out, c, v64, has_aux, a64, own_state);
+        }
+        c = c + 1;
+    }
+    return 0;
+}
+
+/// 显式 `guard NAME(x)` 的**整条链**（外→内；只有被点名的那层记账 / 转移，
+/// `docs/315` §4.1）。祖先带 silent 位 —— 与自动守卫 `dom_auto_guard` 同一条规则。
+fn dom_chain(s: ptr, out: ptr, src: ptr, toks: ptr, top: u32,
+             v64: u32, has_aux: u32, a64: u32) -> u32 {
+    let sp: u32 = load32(s, dom_at(top - 1, 1));
+    let d: u32 = 1;
+    while d <= top {
+        if tok_eq(src, toks, load32(s, dom_at(d - 1, 1)), sp) {
+            let silent: u32 = 1;
+            if d == top {
+                silent = 0;
+            }
+            let _r: u32 = dom_one(s, out, d, v64, has_aux, a64, silent, 1);
+        }
+        d = d + 1;
+    }
+    // 联动伙伴跟在被点名的那层之后（参考实现的顺序：链 → 伙伴）。
+    let _p: u32 = dom_partners(s, out, src, toks, top, v64, has_aux, a64, 1);
+    return 0;
+}
+
+fn df_nvars(src: ptr, toks: ptr, j: u32) -> u32 {
+    let n: u32 = 1;
+    let q: u32 = j + 4;
+    while tok_is(src, toks, q, ",") {
+        n = n + 1;
+        q = q + 2;
+    }
+    return n;
+}
+
+/// 域名列表的起点（0 = 没有 `in`，用最内层那个域）。
+fn df_dstart(src: ptr, toks: ptr, j: u32) -> u32 {
+    // 变量列表之后的那个 token：首个变量在 j+3，每多一个占 2 格（`,` + 名字）。
+    let q: u32 = j + 2 + df_nvars(src, toks, j) * 2;
+    if tok_is(src, toks, q, "in") {
+        return q + 1;
+    }
+    return 0;
+}
+
+fn df_ndoms(src: ptr, toks: ptr, j: u32) -> u32 {
+    let d: u32 = df_dstart(src, toks, j);
+    if d == 0 {
+        return 1;
+    }
+    let n: u32 = 1;
+    let q: u32 = d + 1;
+    while tok_is(src, toks, q, ",") {
+        n = n + 1;
+        q = q + 2;
+    }
+    return n;
+}
+
+fn dom_for(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
+    let nv: u32 = df_nvars(src, toks, j);
+    let ds: u32 = df_dstart(src, toks, j);
+    let nd: u32 = df_ndoms(src, toks, j);
+    if nd != nv {
         return cg_fail(s, 2, j);
     }
-    let lo: u32 = load32(s, dom_at(dw - 1, 2));
-    let hi: u32 = load32(s, dom_at(dw - 1, 3));
-    let ci: u32 = load32(s, dom_at(dw - 1, 0));
-    let ck: u32 = load32(s, dom_at(dw - 1, 4));
-    let cp: u32 = load32(s, dom_at(dw - 1, 5));
-    let cf: u32 = load32(s, dom_at(dw - 1, 6));
-    let cst: u32 = load32(s, dom_at(dw - 1, 7));
-    // let VAR: u32 = lo
-    emit_str(s, out, "  store i32 ");
-    emit_dec(s, out, lo);
-    emit_str(s, out, ", ptr %");
-    emit_name_tok(s, out, src, toks, var_tok);
-    emit_str(s, out, ".addr\n");
+    let after: u32 = 0;
+    if ds != 0 {
+        after = ds + nd * 2 - 1;
+    } else {
+        after = j + 2 + nv * 2;
+    }
+    let rev: u32 = 0;
+    let stp: u32 = 1;
+    let k: u32 = after;
+    if tok_is(src, toks, k, "step") {
+        k = k + 1;
+        if tok_is(src, toks, k, "-") {
+            rev = 1;
+            k = k + 1;
+        }
+        stp = tok_int(src, toks, k);
+        k = k + 1;
+    }
+    // 目标域 + 跨度一致
+    let dw0: u32 = 0;
+    if ds != 0 {
+        dw0 = dom_by_name(s, src, toks, ds);
+    } else {
+        dw0 = load32(s, CG_DOM_N);
+    }
+    if dw0 == 0 {
+        return cg_fail(s, 2, j);
+    }
+    let span0: u32 = load32(s, dom_at(dw0 - 1, 3)) - load32(s, dom_at(dw0 - 1, 2));
+    let i: u32 = 1;
+    while i < nv {
+        let dwi: u32 = dom_by_name(s, src, toks, ds + i * 2);
+        if dwi == 0 {
+            return cg_fail(s, 2, j);
+        }
+        if load32(s, dom_at(dwi - 1, 3)) - load32(s, dom_at(dwi - 1, 2)) != span0 {
+            return cg_fail(s, 2, j);
+        }
+        i = i + 1;
+    }
+    // let VAR: u32 = 起点（反向从 hi 开始）
+    i = 0;
+    while i < nv {
+        let dwi: u32 = dw0;
+        if i != 0 {
+            dwi = dom_by_name(s, src, toks, ds + i * 2);
+        }
+        emit_str(s, out, "  store i32 ");
+        if rev == 1 {
+            emit_dec(s, out, load32(s, dom_at(dwi - 1, 3)));
+        } else {
+            emit_dec(s, out, load32(s, dom_at(dwi - 1, 2)));
+        }
+        emit_str(s, out, ", ptr %");
+        emit_name_tok(s, out, src, toks, j + 3 + i * 2);
+        emit_str(s, out, ".addr\n");
+        i = i + 1;
+    }
     let w: u32 = load32(s, 480) + 1;
     store32(s, 480, w + 2);
     jump(s, out, w, "wcond");
     lab_def(s, out, w, "wcond");
-    let _lv: u32 = load_var(s, out, src, toks, var_tok, 0);
+    let _lv: u32 = load_var(s, out, src, toks, j + 3, 0);
     emit_str(s, out, "  ");
     let cn: u32 = new_temp(s, out);
-    emit_str(s, out, " = icmp ule i32 ");
+    if rev == 1 {
+        emit_str(s, out, " = icmp uge i32 ");
+    } else {
+        emit_str(s, out, " = icmp ule i32 ");
+    }
     emit_val(s, out, 0);
     emit_str(s, out, ", ");
-    emit_dec(s, out, hi);
+    if rev == 1 {
+        emit_dec(s, out, load32(s, dom_at(dw0 - 1, 2)));
+    } else {
+        emit_dec(s, out, load32(s, dom_at(dw0 - 1, 3)));
+    }
     emit_str(s, out, "\n  br i1 %t");
     emit_dec(s, out, cn);
     emit_str(s, out, ", label ");
@@ -6465,41 +6747,41 @@ fn dom_for(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
     emit_str(s, out, "\n");
     store32(s, 476, 1);
     lab_def(s, out, w + 1, "wbody");
-    // 循环头已证：体内同空间的 `x[VAR]` 不再挂自动守卫
-    let opv: u32 = load32(s, CG_DPV);
-    let ops: u32 = load32(s, CG_DPS);
-    let opd: u32 = load32(s, CG_DPD);
-    store32(s, CG_DPV, var_tok);
-    store32(s, CG_DPS, load32(s, dom_at(dw - 1, 1)));
-    store32(s, CG_DPD, ci);
-    let _gv: u32 = load_var(s, out, src, toks, var_tok, 0);
-    emit_str(s, out, "  ");
-    let g64: u32 = new_temp(s, out);
-    emit_str(s, out, " = zext i32 ");
-    emit_val(s, out, 0);
-    emit_str(s, out, " to i64\n");
-    emit_str(s, out, "  call void @__loment_guard2(ptr ");
-    if cst != 0 {
-        emit_str(s, out, "%t");
-        emit_dec(s, out, cst);
-    } else {
-        emit_str(s, out, "@__loment_qual");
+    // 循环头已证的位置入表（并行的每对都记），离开时按计数还原
+    let opn: u32 = load32(s, CG_DPN);
+    if opn + nv > CG_DPT_MAX {
+        return cg_fail(s, 2, j);
     }
-    emit_str(s, out, ", i64 ");
-    emit_dec(s, out, ci);
-    emit_str(s, out, ", i64 %t");
-    emit_dec(s, out, g64);
-    emit_str(s, out, ", i64 0, i64 ");
-    emit_dec(s, out, lo);
-    emit_str(s, out, ", i64 ");
-    emit_dec(s, out, hi);
-    emit_str(s, out, ", i64 ");
-    emit_dec(s, out, ck);
-    emit_str(s, out, ", i64 ");
-    emit_dec(s, out, cp);
-    emit_str(s, out, ", i64 ");
-    emit_dec(s, out, cf);
-    emit_str(s, out, ")\n");
+    i = 0;
+    while i < nv {
+        let dwi: u32 = dw0;
+        if i != 0 {
+            dwi = dom_by_name(s, src, toks, ds + i * 2);
+        }
+        if opn + i < CG_DPT_MAX {
+            store32(s, CG_DPT + (opn + i) * 12, j + 3 + i * 2);
+            store32(s, CG_DPT + (opn + i) * 12 + 4, load32(s, dom_at(dwi - 1, 1)));
+            store32(s, CG_DPT + (opn + i) * 12 + 8, load32(s, dom_at(dwi - 1, 0)));
+        }
+        i = i + 1;
+    }
+    store32(s, CG_DPN, opn + nv);
+    // 头守卫：每对一条整链（外→内，只有被点名的那层记账）
+    i = 0;
+    while i < nv {
+        let dwi: u32 = dw0;
+        if i != 0 {
+            dwi = dom_by_name(s, src, toks, ds + i * 2);
+        }
+        let _gv: u32 = load_var(s, out, src, toks, j + 3 + i * 2, 0);
+        emit_str(s, out, "  ");
+        let g64: u32 = new_temp(s, out);
+        emit_str(s, out, " = zext i32 ");
+        emit_val(s, out, 0);
+        emit_str(s, out, " to i64\n");
+        let _ch: u32 = dom_chain(s, out, src, toks, dwi, g64, 0, 0);
+        i = i + 1;
+    }
     let ob: u32 = load32(s, CG_LBRK);
     let ocd: u32 = load32(s, CG_LCOND);
     let okd: u32 = load32(s, CG_LKIND);
@@ -6517,19 +6799,29 @@ fn dom_for(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         b = stmt(s, out, src, toks, b, ret);
     }
     let _de: u32 = dfr_end(s, out, src, toks, dfr, ret);
-    // VAR = VAR + N
-    let _sv: u32 = load_var(s, out, src, toks, var_tok, 0);
-    emit_str(s, out, "  ");
-    let an: u32 = new_temp(s, out);
-    emit_str(s, out, " = add i32 ");
-    emit_val(s, out, 0);
-    emit_str(s, out, ", ");
-    emit_dec(s, out, stp);
-    emit_str(s, out, "\n  store i32 %t");
-    emit_dec(s, out, an);
-    emit_str(s, out, ", ptr %");
-    emit_name_tok(s, out, src, toks, var_tok);
-    emit_str(s, out, ".addr\n");
+    // VAR = VAR ± N
+    i = 0;
+    while i < nv {
+        let _sv: u32 = load_var(s, out, src, toks, j + 3 + i * 2, 0);
+        emit_str(s, out, "  ");
+        let an: u32 = new_temp(s, out);
+        emit_str(s, out, " = add i32 ");
+        emit_val(s, out, 0);
+        emit_str(s, out, ", ");
+        if rev == 1 {
+            // 参考实现把负步长按 **u32 回绕**印出来（`-2` -> `4294967294`）——
+            // 两边逐字节比，所以这里也印回绕后的值。
+            emit_dec(s, out, 0 - stp);
+        } else {
+            emit_dec(s, out, stp);
+        }
+        emit_str(s, out, "\n  store i32 %t");
+        emit_dec(s, out, an);
+        emit_str(s, out, ", ptr %");
+        emit_name_tok(s, out, src, toks, j + 3 + i * 2);
+        emit_str(s, out, ".addr\n");
+        i = i + 1;
+    }
     if load32(s, 476) == 0 {
         let _t: u32 = emit_tick(s, out);       // docs/315：回边即 tick
     }
@@ -6541,11 +6833,10 @@ fn dom_for(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
     store32(s, CG_LSV, osv);
     store32(s, CG_LAUX, oax);
     store32(s, CG_LDEPTH, odep);
-    store32(s, CG_DPV, opv);
-    store32(s, CG_DPS, ops);
-    store32(s, CG_DPD, opd);
+    store32(s, CG_DPN, opn);
     return b + 1;
 }
+
 
 /// 一条语句; 返回下一个待处理 token 下标。
 /// `docs/314` §2：域块。单独一支函数 —— 它自己的局部变量不该压进 `stmt` 的栈帧
@@ -7160,6 +7451,16 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
     if tok_is(src, toks, j, "domain") && is_dom_for(src, toks, j) == 1 {   // docs/315
         return dom_for(s, out, src, toks, j, ret);
     }
+    if (tok_is(src, toks, j, "couple") || tok_is(src, toks, j, "mutex"))
+            && tok_kind(toks, j + 1) == 0
+            && (tok_is(src, toks, j + 2, ",") || tok_is(src, toks, j + 2, ";")) {
+        // 图边（`docs/315` §5）：声明，不产生指令；判决点长在 guard 里。
+        let ck2: u32 = j + 3;
+        while tok_kind(toks, ck2) != 4 && !tok_is(src, toks, ck2, ";") {
+            ck2 = ck2 + 1;
+        }
+        return ck2 + 1;
+    }
     if tok_is(src, toks, j, "for") {   // for i in lo..hi { ... }
         let var_tok: u32 = j + 1;
         let le: u32 = j + 3;                       // lo 起始 (跳过 'for' 变量 'in')
@@ -7510,6 +7811,10 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
 ");
             a64 = at;
         }
+        if dw != 0 {
+            let _ch: u32 = dom_chain(s, out, src, toks, dw, v64, has_aux, a64);
+            return ce2 + 1;
+        }
         let stt: u32 = 0;
         let stg: u32 = 0;
         if dw != 0 && cst != 0 {
@@ -7613,6 +7918,13 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         emit_dec(s, out, q64);
         emit_str(s, out, ")
 ");
+        let qnm: u32 = 0;
+        if dw != 0 {
+            qnm = load32(s, dom_at(dw - 1, 8));
+        } else if ci != 4294967295 {
+            qnm = load32(s, cap_base(ci));
+        }
+        let _qp: u32 = dom_qual_partners(s, out, src, toks, qnm, dw, ci, q64);
         return qe + 1;
     }
     if tok_is(src, toks, j, "discharge") {   // docs/307 §5
@@ -7922,8 +8234,13 @@ fn collect_locals(s: ptr, src: ptr, toks: ptr, i: u32, end: u32) -> u32 {
     while tok_kind(toks, j) != 4 && j < end {
         if tok_is(src, toks, j, "domain") && is_dom_for(src, toks, j) == 1 {
             // `docs/315`：循环变量由反糖产生（参考实现写 `let VAR: u32`）——
-            // 类型是**没有 token 的 u32**，用哨兵。
-            n = add_local(s, src, toks, n, j + 3, CG_TY_U64);
+            // 类型是**没有 token 的 u32**，用哨兵。并行的每对都要登记。
+            let vn: u32 = df_nvars(src, toks, j);
+            let vi: u32 = 0;
+            while vi < vn {
+                n = add_local(s, src, toks, n, j + 3 + vi * 2, CG_TY_U64);
+                vi = vi + 1;
+            }
             j = j + 3;                       // 跳过 `domain : for`
         }
         if tok_is(src, toks, j, "match") {   // M26: match 载荷绑定也要 alloca
@@ -11177,6 +11494,31 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32, tickx: u32)
         i = i + 1;
     }
     store32(s, 536, cn);
+    // 联动边 `⇄`（`docs/315` §5）：`couple A, B, C;` 展成相邻对，供判决点查连通性。
+    let cpn: u32 = 0;
+    let cq: u32 = 0;
+    while tok_kind(toks, cq) != 4 {
+        if tok_is(src, toks, cq, "couple") && tok_kind(toks, cq + 1) == 0
+                && (tok_is(src, toks, cq + 2, ",") || tok_is(src, toks, cq + 2, ";")) {
+            let q: u32 = cq + 1;
+            let prev: u32 = q;
+            while tok_kind(toks, q) != 4 && !tok_is(src, toks, q, ";") {
+                if tok_kind(toks, q) == 0 && q != prev {
+                    if cpn >= CG_CPP_MAX {
+                        return cg_fail(s, 2, cq);
+                    }
+                    store32(s, CG_CPP + cpn * 8, prev);
+                    store32(s, CG_CPP + cpn * 8 + 4, q);
+                    cpn = cpn + 1;
+                    prev = q;
+                }
+                q = q + 1;
+            }
+            cq = q;
+        }
+        cq = cq + 1;
+    }
+    store32(s, CG_CPN, cpn);
     store32(s, CG_DOM_ID, cn);   // docs/314：块级域的审计槽号接在能力之后
     // 枚举表: name_tok | nvariants | has_payload | pad | 8 × (variant_tok, payload_tok)
     let en: u32 = 0;

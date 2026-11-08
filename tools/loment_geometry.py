@@ -86,7 +86,17 @@ def _step_of(while_node) -> int:
 
 def geometry(mod: lomentc.Module) -> Geometry:
     """把一份已解析的单元读成几何。审计槽号来自 `_resolve_domains`（要先跑 check/emit）。"""
+    # 审计槽号 / 链 / 联动组都由这一趟填；它是幂等的，重复调用只会重算同一组号。
+    lomentc._resolve_domains(mod)
     g = Geometry()
+    # 顶层 capability 也是图的顶点（联动 / 互斥主要就长在它们之间）。
+    cap_node = {}
+    for i, c in enumerate(mod.caps):
+        n = Node(id=f"cap:{i}", fn="", name=c.name, space=c.space, lo=c.lo, hi=c.hi,
+                 kind=lomentc.CAP_KIND_ID[c.kind], param=c.param, depth=-1,
+                 adaptive=c.kind == "adaptive")
+        g.nodes.append(n)
+        cap_node[c.name] = n
     for fn in mod.funcs:
         stack: list[Node] = []
         seq: dict[int, list[str]] = {}     # 父层 -> 这一层的节点（按声明顺序）
@@ -106,7 +116,9 @@ def geometry(mod: lomentc.Module) -> Geometry:
                     n = node_of(s, len(stack), parent)
                     g.nodes.append(n)
                     if parent:
-                        g.edges.append(Edge(parent, n.id, "contains", s.line))
+                        g.edges.append(Edge(parent, n.id,
+                                            "child_of" if getattr(s, "child_of", "")
+                                            else "contains", s.line))
                     if scope:
                         g.edges.append(Edge(scope[-1], n.id, "sibling", s.line))
                     scope.append(n.id)
@@ -124,17 +136,34 @@ def geometry(mod: lomentc.Module) -> Geometry:
                     for _pat, arm in s.arms:
                         walk(arm, floor + 1, [])
                 elif isinstance(s, (lomentc.While, lomentc.For)):
-                    prov = getattr(s, "proven", ())
-                    if prov:
-                        # prov = (变量, 空间, 域名)：`in NAME` 可以点到外层域
+                    # prov = ((变量, 空间, 域名), …)：并行的 `domain:for i, j in a, b`
+                    # 一轮里每个域各算一条（`docs/315` §4.2）。
+                    for prov in getattr(s, "proven", ()) or ():
                         target = next((n for n in reversed(stack)
                                        if n.name == prov[2] and n.space == prov[1]), None)
-                        if target is not None:
-                            step = _step_of(s)
-                            span = target.hi - target.lo + 1
-                            g.loops.append(Loop(fn.name, target.id, prov[0], step,
-                                                (span + step - 1) // step, s.line))
+                        if target is None:
+                            continue
+                        step = abs(_step_of(s)) or 1
+                        span = target.hi - target.lo + 1
+                        g.loops.append(Loop(fn.name, target.id, prov[0], step,
+                                            (span + step - 1) // step, s.line))
                     walk(s.body, floor + 1, [])
+                elif isinstance(s, (lomentc.Couple, lomentc.Mutex)):
+                    # 图的边（`docs/315` §5）：联动 `⇄` / 互斥 `⊥`。只记**块级**节点 ——
+                    # 顶层 capability 不在几何的顶点集里。
+                    ids = []
+                    for nm in s.names:
+                        tgt = next((x for x in stack if x.name == nm), None)
+                        if tgt is not None:
+                            ids.append(tgt.id)
+                        elif nm in cap_node:
+                            ids.append(cap_node[nm].id)
+                    for i in range(len(ids)):
+                        for j in range(i + 1, len(ids)):
+                            a_, b_ = sorted((ids[i], ids[j]))
+                            g.edges.append(Edge(
+                                a_, b_, "couple" if isinstance(s, lomentc.Couple) else "mutex",
+                                s.line))
                 elif isinstance(s, lomentc.Guard) and s.is_block:
                     # 守卫用它所在的块（最内层）作为使用者
                     user = stack[-1].id if stack else ""

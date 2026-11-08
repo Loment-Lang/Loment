@@ -5918,33 +5918,166 @@ def test_domain_for_is_the_loop_head():
 
 
 @test
+def test_domain_tree_and_graph_edges():
+    """`docs/315` §4–§5：树边（显式链 / `child_of`）与图边（`couple` / `mutex`）。
+
+    - 显式 `guard half(x)` 也判祖先（silent），只有叶子记账；
+    - `child_of` 必须连到包围它的同空间父域、且子 ⊆ 父；
+    - `couple` 的两个域必须共享位置；守卫多出一条 silent 的伙伴判决；自动守卫同理；
+    - `mutex` 要求两个形状可证不相交。
+    """
+    NL = chr(10)
+
+    def S(*lines):
+        return NL.join(lines)
+
+    def load(src):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "d.lomt"
+            p.write_text(src, encoding="utf-8", newline=NL)
+            m = lomentc.load(p)
+            return m, lomentc.check(m)
+
+    def fbody(ir):
+        return ir[ir.index("define i32 @f"):]
+
+    # 1) 显式守卫走整条链
+    m, e = load(S("module m", "choose runtime",
+                  "fn f(a: [u32; 8] in disk) -> u32 {",
+                  "    domain whole : disk[0..7] {",
+                  "        domain half : disk[0..3] { guard half(2); }",
+                  "    }",
+                  "    return a[0];", "}", ""))
+    assert e == [], e
+    b = fbody(lomentc.emit_llvm(m, ROOT))
+    assert b.count("call void @__loment_guard2") == 2, b
+    assert ", i64 128, i64" in b, "祖先没有 silent 位"
+
+    # 2) child_of：好形状 / 三种拒绝
+    m2, e2 = load(S("module m", "choose runtime",
+                    "fn f(a: [u32; 8] in disk) -> u32 {",
+                    "    domain whole : disk[0..7] {",
+                    "        domain half : disk[0..3] child_of whole { a[0] = 1; }",
+                    "    }",
+                    "    return a[0];", "}", ""))
+    assert e2 == [], e2
+    for bad, frag in [
+        ("domain whole : disk[0..7] { domain half : disk[0..9] child_of whole { } }",
+         "C1"),
+        ("domain whole : disk[0..7] { domain half : mem[0..3] child_of whole { } }",
+         "同一空间"),
+        ("domain half : disk[0..3] child_of ghost { }", "不在外层作用域"),
+    ]:
+        try:
+            parse(S("module m", "choose runtime", "fn f() -> u32 {", "    " + bad,
+                    "    return 0;", "}", ""))
+        except lomentc.LomError as ex:
+            assert frag in str(ex), (frag, str(ex))
+        else:
+            raise AssertionError("没有拒：" + bad)
+
+    # 3) couple：共享位置 + 伙伴 silent 判决（显式与自动两条路）+ 质量整组
+    m3, e3 = load(S("module m", "choose runtime",
+                    "capability top : disk[0..15] adaptive",
+                    "fn f(a: [u32; 16] in disk) -> u32 {",
+                    "    domain d : disk[0..7] adaptive {",
+                    "        couple d, top;",
+                    "        guard d(2);",
+                    "        a[2] = 1;",
+                    "        quality d = 128;",
+                    "    }",
+                    "    return a[2];", "}", ""))
+    assert e3 == [], e3
+    b3 = fbody(lomentc.emit_llvm(m3, ROOT))
+    assert b3.count("i64 138, i64") >= 2, "伙伴没有 silent 判决（kind|128）"
+    assert b3.count("call void @__loment_qual_store") >= 2, "质量没有写到整组"
+    def rejects(src_bad, frag):
+        try:
+            m_, _e = load(src_bad)
+        except lomentc.LomError as ex:
+            assert frag in str(ex), (frag, str(ex))
+            return
+        raise AssertionError("没有拒：" + frag)
+
+    rejects(S("module m", "choose runtime", "capability top : disk[8..15]",
+              "fn f() -> u32 { domain d : disk[0..7] { couple d, top; } return 0; }", ""),
+            "共同位置")
+
+    # 4) mutex：可证不相交才行
+    parse(S("module m", "choose runtime", "capability x : disk[0..3]",
+            "capability y : disk[4..7]",
+            "fn f() -> u32 { mutex x, y; return 0; }", ""))
+    rejects(S("module m", "choose runtime", "capability x : disk[0..5]",
+              "capability y : disk[4..7]",
+              "fn f() -> u32 { mutex x, y; return 0; }", ""), "重叠")
+
+    # 5) 横向并行 / 反向
+    m5, e5 = load(S("module m", "choose runtime",
+                    "fn f(a: [u32; 8] in disk, b: [u32; 8] in mem) -> u32 {",
+                    "    domain da : disk[0..3] {",
+                    "        domain db : mem[0..3] {",
+                    "            domain:for i, j in da, db { a[i] = 1; b[j] = 2; }",
+                    "        }",
+                    "    }",
+                    "    domain rv : disk[0..3] { domain:for i step -2 { a[i] = 3; } }",
+                    "    return a[0];", "}", ""))
+    assert e5 == [], e5
+    b5 = fbody(lomentc.emit_llvm(m5, ROOT))
+    assert "icmp uge i32" in b5, "反向步长没有翻条件"
+    assert b5.count("call void @__loment_guard2") >= 3, "并行循环每轮该判两个域"
+    for bad, frag in [
+        ("domain p : disk[0..3] { domain q : mem[0..7] { domain:for i, j in p, q { } } }",
+         "跨度不一致"),
+        ("domain p : disk[0..3] { domain:for i, k in p { } }", "一一对应"),
+    ]:
+        try:
+            parse(S("module m", "choose runtime",
+                    "fn f(a: [u32; 8] in disk, b: [u32; 8] in mem) -> u32 {",
+                    "    " + bad, "    return 0;", "}", ""))
+        except lomentc.LomError as ex:
+            assert frag in str(ex), (frag, str(ex))
+        else:
+            raise AssertionError("没有拒：" + bad)
+    print("      树/图：显式链 / child_of / couple / mutex / 并行 / 反向，逐条成立")
+
+
+@test
 def test_domain_geometry_reads_trees_and_graphs():
     """`docs/315` §4–§5：横/竖树、平/立体图 —— 从代码里读出来的**确定性**形状。
 
     一棵三层竖链（`contains`）+ 一条兄弟边（`sibling`）+ 一个分支 + 一条
-    `domain:for` 的位置轴；立体图多出父 → 孙的 `cross` 边。
+    `domain:for` 的位置轴；立体图多出父 → 孙的 `cross` 边。图那一半再加上顶层
+    capability 顶点、`child_of` / `couple` / `mutex` 三种边。
     """
-    src = ("module geo\nchoose runtime\n"
-           "fn f(a: [u32; 8] in disk) -> u32 {\n"
-           "    domain whole : disk[0..7] {\n"
-           "        domain half : disk[0..3] {\n"
-           "            domain leaf : disk[0..1] consumed(1) {\n"
-           "                domain:for i step 2 { a[i] = 1; }\n"
-           "            }\n"
-           "        }\n"
-           "        domain tail : disk[4..7] { a[4] = 2; }\n"
-           "    }\n"
-           "    if a[0] > 0 { domain side : mem[0..1] { a[1] = 3; } }\n"
-           "    return a[0];\n}\n")
-    with tempfile.TemporaryDirectory() as td:
-        p = Path(td) / "g.lomt"
-        p.write_text(src, encoding="utf-8", newline="\n")
-        mod = lomentc.load(p)
-        assert lomentc.check(mod) == [], lomentc.check(mod)
-        lomentc._resolve_domains(mod)
-        g = loment_geometry.geometry(mod)
-        out1 = g.to_json()
-        out2 = loment_geometry.geometry(mod).to_json()
+    NL = chr(10)
+
+    def S(*lines):
+        return NL.join(lines)
+
+    def load(src):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "g.lomt"
+            p.write_text(src, encoding="utf-8", newline=NL)
+            m = lomentc.load(p)
+            return m, lomentc.check(m)
+
+    src = S("module geo", "choose runtime",
+            "fn f(a: [u32; 8] in disk) -> u32 {",
+            "    domain whole : disk[0..7] {",
+            "        domain half : disk[0..3] {",
+            "            domain leaf : disk[0..1] consumed(1) {",
+            "                domain:for i step 2 { a[i] = 1; }",
+            "            }",
+            "        }",
+            "        domain tail : disk[4..7] { a[4] = 2; }",
+            "    }",
+            "    if a[0] > 0 { domain side : mem[0..1] { a[1] = 3; } }",
+            "    return a[0];", "}", "")
+    mod, e = load(src)
+    assert e == [], e
+    g = loment_geometry.geometry(mod)
+    out1 = g.to_json()
+    out2 = loment_geometry.geometry(mod).to_json()
     assert out1 == out2, "几何不是确定性的"
     d = json.loads(out1)
     names = {n["name"]: n for n in d["nodes"]}
@@ -5957,7 +6090,32 @@ def test_domain_geometry_reads_trees_and_graphs():
     (loop,) = d["loops"]
     assert loop["domain"] == names["leaf"]["id"] and loop["step"] == 2, loop
     assert loop["positions"] == 1, loop                 # 0..1 间隔 2：只有一个位置
-    print("      域几何：三层竖链 / 兄弟 / 分支 / 位置轴 / 立体跨层边，确定性成立")
+
+    # 图边：顶层 capability 也是顶点；child_of / couple / mutex 各自成边
+    src2 = S("module g", "choose runtime",
+             "capability top : disk[0..15] adaptive",
+             "capability other : mem[16..19]",
+             "fn f(a: [u32; 16] in disk) -> u32 {",
+             "    domain d : disk[0..7] {",
+             "        domain inner : disk[0..3] child_of d {",
+             "            domain twin : mem[0..3] {",
+             "                couple d, top;",
+             "                mutex top, other;",
+             "                domain:for i, j in inner, twin { a[i] = 1; }",
+             "            }",
+             "        }",
+             "    }",
+             "    return a[0];", "}", "")
+    m2, e2 = load(src2)
+    assert e2 == [], e2
+    g2 = json.loads(loment_geometry.geometry(m2).to_json())
+    kinds2 = {(x["src"], x["dst"], x["kind"]) for x in g2["edges"]}
+    ids2 = {n["name"]: n["id"] for n in g2["nodes"]}
+    assert (ids2["top"], ids2["other"], "mutex") in kinds2, kinds2
+    assert (ids2["top"], ids2["d"], "couple") in kinds2, kinds2   # 边按 (src, dst) 排序
+    assert (ids2["d"], ids2["inner"], "child_of") in kinds2, kinds2
+    assert len(g2["loops"]) == 2, g2["loops"]            # 并行的两个位置轴
+    print("      域几何：竖链 / 兄弟 / 分支 / 位置轴 / 跨层 / couple / mutex，确定性成立")
 
 
 @test
@@ -6034,6 +6192,26 @@ def test_domains_selfhost_twin():
            "            domain:for i in outer2 { a[i] = 1; }\n"
            "        }\n"
            "    }\n"
+           "    return a[0];\n"
+           "}\n"
+           # docs/315 §4–§5：树边与图边（child_of / couple / mutex / 并行 / 反向）
+           "capability cpa : disk[0..15] adaptive\n"
+           "capability cpb : mem[16..19]\n"
+           "fn h_graph(a: [u32; 16] in disk, b: [u32; 4] in mem) -> u32 {\n"
+           "    mutex cpa, cpb;\n"
+           "    domain p : disk[0..3] {\n"
+           "        couple p, cpa;\n"
+           "        domain q : mem[0..3] {\n"
+           "            domain:for i, j in p, q { a[i] = 1; b[j] = 2; }\n"
+           "        }\n"
+           "    }\n"
+           "    return a[0];\n"
+           "}\n"
+           "fn h_child(a: [u32; 8] in disk) -> u32 {\n"
+           "    domain outer3 : disk[0..7] {\n"
+           "        domain leaf3 : disk[0..3] child_of outer3 { a[0] = 1; }\n"
+           "    }\n"
+           "    domain rv3 : disk[0..3] { domain:for i step -2 { a[i] = 3; } }\n"
            "    return a[0];\n"
            "}\n")
     with tempfile.TemporaryDirectory() as td:

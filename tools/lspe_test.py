@@ -676,6 +676,26 @@ def test_e5_proves_loop_indices_only_with_a_matching_unsigned_guard():
 
 
 @test
+def test_i5_divergence_probe_is_caught():
+    """I5 的分歧探针：同一份源、把一侧的规则改掉，台账必须**看得出**不同（`#764`）。
+
+    这不是"孪生证明了对"，而是一条反向判据：如果比较对象对规则改动**不敏感**，
+    那"两边逐字节相同"就只是噪声。
+    """
+    import importlib  # noqa: PLC0415
+
+    cmod = importlib.import_module("lspe.census")
+    src = "module m\n\nfn f(a: [u32; 4]) -> u32 {\n    return a[0];\n}\n"
+    toks = lomc.lex(src)
+    base, _u, _p = lspe.census(toks, "m")
+    patched = set(cmod.LSPE_BRACKET_KW) | {"a"}
+    with mock.patch.object(cmod, "LSPE_BRACKET_KW", frozenset(patched)):
+        twin, _u, _p = lspe.census(toks, "m")
+    assert {s["id"] for s in base} != {s["id"] for s in twin}, \
+        "改了一条普查规则，站点集合却一点没变 —— 比较对象对规则不敏感"
+
+
+@test
 def test_safe_set_converges_past_256_rounds():
     """E4 的安全表不动点没有轮数上限（`#1093`）。
 

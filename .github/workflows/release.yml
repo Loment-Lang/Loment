@@ -272,8 +272,13 @@ jobs:
             echo "::error::没有 LOMENT_RELEASE_SIGNING_KEY —— 拒绝发布一个没有外部完整性锚的包"
             exit 1
           fi
-          export GNUPGHOME="$RUNNER_TEMP/gnupg"
-          rm -rf "$GNUPGHOME"; mkdir -p "$GNUPGHOME"; chmod 700 "$GNUPGHOME"
+          # Git Bash 在 Windows 上把 `$RUNNER_TEMP` 看成 `D:\a\_temp`；把它拼进
+          # POSIX 路径会得到 `/d/a/.../D:\a\_temp/gnupg`，gpg 在那建不了 keyring
+          # （`no writable keyring found`，v0.1.5 与 v0.1.5.1 都死在这一步）。
+          # `mktemp -d` 在两个宿主上都给纯 POSIX 路径。
+          GNUPGHOME="$(mktemp -d)"
+          export GNUPGHOME
+          chmod 700 "$GNUPGHOME"
           printf '%s\n' "$SIGNING_KEY" | gpg --batch --quiet --import
           fpr=$(gpg --batch --with-colons --list-secret-keys \
             | awk -F: '/^fpr:/ {print $10; exit}')
@@ -314,18 +319,24 @@ jobs:
             set -- --generate-notes
           fi
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG 已存在 —— 只覆盖 asset"
-            gh release upload "$TAG" loment/dist/* --clobber
-          else
-            gh release create "$TAG" --title "Loment $VER" $risk "$@" loment/dist/*
+            # `#438`: 已发布的 tag **不许原地改**。`--clobber` 会让同一个 tag 的
+            # 字节被悄悄换掉, 而 tag、release 页面和 GitHub 的记录都不说变过 ——
+            # 别人按 tag 记下的摘要或缓存就再也对不上。要重发就删掉 release 并
+            # 换一个新 tag; 那才是给外面的"字节变了"信号。
+            echo "::error::Release $TAG 已发布 —— 拒绝覆盖 asset (#438)。"
+            echo "::error::同一个 tag 必须指向同一组字节; 要重发就删掉 release 并换新 tag。"
+            exit 1
           fi
+          gh release create "$TAG" --title "Loment $VER" $risk "$@" loment/dist/*
           # `#419`: 把摘要写进 release **正文** —— 正文与 asset 是两个渠道，用户拿到的
           # 核对点因此不必来自被核对的归档。安装器打印的也是同一份摘要。
           #
           # **只列载荷**：锚文件自己的摘要（`SHA256SUMS` / 它的签名 / 公钥 / 指纹）是
           # **自指**的 —— 把它们列在这里既没有锚定意义，又容易被读成"正文里有密钥"。
           # 公钥与指纹的公开面是那三个 asset，正文只留一行指纹供人对照。
-          gh release view "$TAG" --json body -q .body > "$RUNNER_TEMP/body.md"
+          # 同一类坑：`$RUNNER_TEMP` 在 Git Bash 里是 `D:\...`。这里只在 shell 与
+          # `gh` 之间传，用工作区（POSIX 路径）最省事；`gh` 是原生程序，MSYS 会转。
+          gh release view "$TAG" --json body -q .body > "$PWD/body.md"
           {
             echo
             echo "## Integrity anchors"
@@ -343,8 +354,8 @@ jobs:
             echo '```'
             echo
             echo "Signing key fingerprint: \`$(cat loment/dist/FINGERPRINT)\`"
-          } >> "$RUNNER_TEMP/body.md"
-          gh release edit "$TAG" --notes-file "$RUNNER_TEMP/body.md"
+          } >> "$PWD/body.md"
+          gh release edit "$TAG" --notes-file "$PWD/body.md"
 
       # 发布之后**回头核对**：文件到底上去没有。`gh release create` 不报错不等于
       # 该有的 asset 都在（0.1.4 那份是手工核过的，这里把那次核对固定下来）。
@@ -363,6 +374,7 @@ jobs:
             "SHA256SUMS.asc" \
             "loment-signing.asc" \
             "FINGERPRINT" \
+            "hotfix.json" \
             "loment-$VER-linux-x64.tar.gz" \
             "loment-$VER-windows-x64-setup.exe" \
             "loment-$VER-windows-x64.zip" \
@@ -374,4 +386,4 @@ jobs:
             exit 1
           fi
           echo "$have"
-          echo "八个 asset 齐了（含归档之外的签名、公钥与指纹）"
+          echo "九个 asset 齐了（含 hotfix.json、归档之外的签名、公钥与指纹）"

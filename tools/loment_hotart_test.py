@@ -17,10 +17,14 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 
 import loment_suite  # noqa: E402
+import loment_release  # noqa: E402
 import loment_hotart as ha  # noqa: E402
+
 import loment_hotfix as hf  # noqa: E402
 import loment_hotload as hl  # noqa: E402
 import loment_update as lu  # noqa: E402
+
+BASE = loment_release.RELEASE
 
 TESTS: list = []
 
@@ -90,7 +94,7 @@ def _sign(out: Path) -> None:
 
 
 def _projection(*shas: str) -> dict:
-    return {"baseline": "0.1.5", "release": "v0.1.5-hot.1", "tree": "t",
+    return {"baseline": BASE, "release": f"v{BASE}-hot.1", "tree": "t",
             "line": [{"sha": s, "subject": "fix", "kind": "fix"} for s in shas],
             "evicted": []}
 
@@ -101,7 +105,7 @@ def test_the_package_is_admitted_by_the_consumer() -> None:
         t = Path(t)
         old = _tree(t / "old")
         new = _tree(t / "new", source=PROG.replace("return a + b;", "return a + b + 1;"))
-        out = ha.package(old, new, "v0.1.5-hot.1", t / "art", entry="loment/tools/hotprog.lomt",
+        out = ha.package(old, new, f"v{BASE}-hot.1", t / "art", entry="loment/tools/hotprog.lomt",
                          projection=_projection("a" * 40))
         assert out is not None
         assert (out / "candidate.hot").is_file() and (out / "hotfix.json").is_file()
@@ -119,7 +123,7 @@ def test_the_artifact_comes_from_the_projected_tree() -> None:
         new = _tree(t / "new", source=PROG.replace("return a + b;", "return a + b + 1;"))
         _eb, _em, old_text = ha.compile_hotswap(old, "loment/tools/hotprog.lomt")
         _nb, new_meta, new_text = ha.compile_hotswap(new, "loment/tools/hotprog.lomt")
-        out = ha.package(old, new, "v0.1.5-hot.1", t / "art",
+        out = ha.package(old, new, f"v{BASE}-hot.1", t / "art",
                          entry="loment/tools/hotprog.lomt", projection=_projection("b" * 40))
         blob = (out / "candidate.hot").read_bytes()
         meta = hl.parse(new_meta)
@@ -134,7 +138,7 @@ def test_the_load_item_carries_both_tables() -> None:
         t = Path(t)
         old = _tree(t / "old")
         new = _tree(t / "new", source=PROG.replace("return a + b;", "return a + b + 1;"))
-        out = ha.package(old, new, "v0.1.5-hot.1", t / "art",
+        out = ha.package(old, new, f"v{BASE}-hot.1", t / "art",
                          entry="loment/tools/hotprog.lomt", projection=_projection("c" * 40))
         blob = (out / "candidate.hot").read_bytes()
         import struct
@@ -152,7 +156,7 @@ def test_a_projection_without_fixes_produces_nothing() -> None:
         t = Path(t)
         old = _tree(t / "old")
         new = _tree(t / "new")
-        out = ha.package(old, new, "v0.1.5-hot.1", t / "art",
+        out = ha.package(old, new, f"v{BASE}-hot.1", t / "art",
                          entry="loment/tools/hotprog.lomt", projection=_projection())
         assert out is None and not (t / "art").exists()
     print("      零 fix → 不产生热更新件")

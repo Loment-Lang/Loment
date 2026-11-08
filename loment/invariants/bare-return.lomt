@@ -1,4 +1,6 @@
 // `#335`：裸 `return;`。今天**有声**拒绝（这是它该有的样子）。
+// 钉 Tur 1：2026.2 起裸 `return;` 是合法写法，默认版次已是最新（`docs/312`）。
+choose write grammar tur2026.1
 module bare_return
 
 fn f() {

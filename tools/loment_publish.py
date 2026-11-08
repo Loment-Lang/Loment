@@ -115,6 +115,8 @@ REPOS: dict[str, dict] = {
             ".claude/skills/loment-toolchain/",
             # 工具：`tools/lom*` 一次收全（lomelf / lomentc / lomc / lomdoc / lom_audit …）
             "tools/lom*",
+            # lmgr：套件源与它的判据（`docs/303`）。名字不以 `lom` 开头，所以单独收。
+            "lmgr/", "tools/lmgr*",
             # 文档：**一条 `docs/*.md` 收全**。
             #
             # 原文是按名字分段收（`docs/14*-loment-*.md` + 一串 explicit 补漏），那是在
@@ -199,6 +201,7 @@ REPOS: dict[str, dict] = {
             "tools/lvm_fusion_test.py", "tools/lvm_mirror_t2_test.py",
             "tools/lvm_t3.py", "tools/lvm_t3_test.py",
             "tools/lvm_stability_test.py",
+            "tools/lvm_a0_test.py",
             "tools/lvm_perf_test.py",
             # **L0 契约的对照物**（见文件顶部 `COUNTERPARTS` 的说明）。整目录收不得：
             # `kernel/` 其余是 FujoOS 内核（几 MB 的 Rust），`sdk/` 其余是 ISO/字库/驱动。

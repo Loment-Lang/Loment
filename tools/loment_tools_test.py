@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import re
 import shutil
@@ -19,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import loment_suite  # noqa: E402
 import lomc  # noqa: E402
 import lomentc  # noqa: E402
+import loment_build  # noqa: E402  (缓存的两处信任缺口: #900 / #901)
 
 ROOT = Path(__file__).resolve().parent.parent
 EX = ROOT / "loment" / "examples"
@@ -1066,8 +1069,10 @@ def test_cli_reports_parse_errors_without_traceback():
     traceback。对"照指南写第一个程序"的人, 这是最坏的第一印象, 而且它看起来像编译器崩了,
     而不是"你写错了"。
     """
+    # 裸 `return;` 从 2026.2 起是合法写法，而**默认已经是最新版次**（`docs/312`）——
+    # 所以这一格显式钉 Tur 1，测的仍是"语法错给一行 [ERR]，不甩回溯"。
     cases = {"漏了分号": "module a\n\nconst X: u32 = 3\n",
-             "无值 return": "module b\n\nfn f() {\n    return;\n}\n"}
+             "无值 return": "choose write grammar tur2026.1\nmodule b\n\nfn f() {\n    return;\n}\n"}
     with tempfile.TemporaryDirectory() as td:
         for name, src in cases.items():
             p = Path(td) / "bad.lomt"
@@ -1232,6 +1237,135 @@ def test_m65_m66_incremental_and_cache():
         victim = out.parent / "victim.lomt"
         victim.write_text((EX / "mathutil.lomt").read_text(encoding="utf-8"), encoding="utf-8")
         assert loment_build.main([str(out.parent), "--out", str(out)]) == 0
+
+
+# ---------------------------------------------------------------- 缓存的信任缺口 (#900/#901)
+#
+# 下面四条都不是"缓存慢了一点"，是"缓存给了错的东西还报成功"：
+#   * `#900`：键只哈希源文件 —— 换了编译器，同一份源照样命中**上一个编译器**的产物；
+#   * `#901`：命中只看产物**路径存在** —— 任何能往 `build/` 写字的东西都能占住
+#     `main.ll` 这个名字，而每次构建都打印 `[HOT]`。
+# 判据跑**真工具**（`loment_build.main`），不测复制出来的小模型：那两条缺陷原本就在
+# `main()` 的分支里，绕开它测等于没测。
+
+#: 一个够小、够真、三个后端都发得出来的单元。
+_BUILD_SRC = """module m
+
+fn add(a: u32, b: u32) -> u32 {
+    return a + b;
+}
+"""
+
+
+def _build_project(td: Path) -> Path:
+    src = td / "src"
+    src.mkdir()
+    (src / "m.lomt").write_text(_BUILD_SRC, encoding="utf-8", newline="\n")
+    return src
+
+
+def _build(argv: list[str]) -> tuple[int, str]:
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+        rc = loment_build.main(argv)
+    return rc, buf.getvalue()
+
+
+def _build_index(out: Path) -> dict:
+    return json.loads((out / ".loment-cache.json").read_text(encoding="utf-8"))
+
+
+@test
+def test_a_poisoned_artifact_is_not_a_hit():
+    """产物内容被换掉之后，下一次构建必须**重编**（`#901`）。
+
+    旧行为：命中只查 `(out / x).exists()` —— 把 `m.ll` 写成 CANARY 之后 `[HOT]` 照报，
+    CANARY 留在盘上被下游消费。新行为：记录里带每份产物的 sha256，对不上就是 miss。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        src, out = _build_project(td), td / "build"
+        rc, log = _build([str(src), "--out", str(out)])
+        assert rc == 0, log
+        assert "[COLD" in log, log
+
+        target = out / "m.ll"
+        assert target.exists(), f"没有 .ll 产物: {sorted(p.name for p in out.iterdir())}"
+        target.write_text("CANARY\n", encoding="utf-8", newline="\n")
+
+        rc, log = _build([str(src), "--out", str(out)])
+        assert rc == 0, log
+        assert "[HOT " not in log, f"被换过的产物仍然命中: {log}"
+        assert target.read_text(encoding="utf-8") != "CANARY\n", (
+            "CANARY 还在盘上 —— 构建报成功却把别人的内容留给下游")
+        rec = next(r for r in _build_index(out)["records"] if r["file"].endswith("m.lomt"))
+        assert rec["hashes"]["m.ll"] == loment_build._sha256_file(target), rec["hashes"]
+        print("      换过的产物被重编，记录里的哈希跟着更新")
+
+
+@test
+def test_a_foreign_toolchain_does_not_hit():
+    """记录里的工具链与本机不同 ⇒ 全部重编（`#900`）。
+
+    直接改索引里的 `toolchain`：那是"上一个编译器写下的记录"的可控替身 ——
+    真的升级工具链没法在一条判据里做，但分支判的是同一个字段。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        src, out = _build_project(td), td / "build"
+        assert _build([str(src), "--out", str(out)])[0] == 0
+        idx = _build_index(out)
+        for r in idx["records"]:
+            r["toolchain"] = "0" * 64
+        (out / ".loment-cache.json").write_text(
+            json.dumps(idx), encoding="utf-8", newline="\n")
+
+        rc, log = _build([str(src), "--out", str(out)])
+        assert rc == 0, log
+        assert "[HOT " not in log, f"换过工具链的记录仍然命中: {log}"
+        rec = next(r for r in _build_index(out)["records"] if r["file"].endswith("m.lomt"))
+        assert rec["toolchain"] == loment_build.compiler_id(ROOT)
+        print("      外来工具链的记录被判成 miss")
+
+
+@test
+def test_the_cache_key_carries_the_toolchain():
+    """同一个文件、两个工具链身份 ⇒ 两个键（`#900` 的单元那一半）。"""
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        f = td / "a.lomt"
+        f.write_text("module a\n", encoding="utf-8", newline="\n")
+        a = loment_build.cache_key([f], "toolchain-a")
+        b = loment_build.cache_key([f], "toolchain-b")
+        assert a != b, "工具链没有进键 —— 升级编译器后旧产物会继续命中"
+        assert a == loment_build.cache_key([f], "toolchain-a"), "键不稳定"
+        assert loment_build.compiler_id(ROOT) == loment_build.compiler_id(ROOT)
+        print("      键随工具链变，且同输入稳定")
+
+
+@test
+def test_a_git_tracked_build_dir_is_refused():
+    """提交进仓库的 `build/` 直接拒绝（`#901`）。
+
+    `#901` 的"至少"那一条：索引和产物可以**一起**被伪造，内容哈希挡不住它。
+    拒绝而不是"小心地命中"，因为那份目录根本不是本机构建留下的。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        src, out = _build_project(td), td / "build"
+        out.mkdir()
+        (out / "shipped.txt").write_text("来自仓库\n", encoding="utf-8", newline="\n")
+        r = subprocess.run(["git", "init", "-q", str(td)], capture_output=True,
+                           text=True, shell=False)
+        assert r.returncode == 0, r.stderr
+        r = subprocess.run(["git", "-C", str(td), "add", "build/shipped.txt"],
+                           capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, r.stderr
+
+        rc, log = _build([str(src), "--out", str(out)])
+        assert rc == 2, f"被跟踪的构建目录没有被拒绝: rc={rc}\n{log}"
+        assert "git" in log, log
+        print("      被跟踪的 build/ 被判用法错误")
 
 
 @test

@@ -794,12 +794,13 @@ def _prof_of_text(text: str) -> int:
     """源里 `choose write grammar` 的版次 -> 自举侧口径（0 = tur2026.1 / 1 = tur2026.2 /
     2 = tur2026.3）。**与 driver.strip_grammar_decl 同一张别名表**：夹具绕过了装载器，
     所以它得自己把版次交给 `emit_module` / `check_arena` 的最后一个实参。"""
-    prof = {"tur3": 2, "tur2026.3": 2, "tur2": 1, "tur2026.2": 1}
+    prof = {"tur3": 2, "tur2026.3": 2, "tur2": 1, "tur2026.2": 1,
+            "tur": 0, "tur1": 0, "tur2026.1": 0, "loment": 2}
     for line in text.split("\n"):
         h = line.strip().rstrip(";").split()
         if len(h) == 4 and h[0] == "choose" and h[1] == "write" and h[2] == "grammar":
-            return prof.get(h[3].lower(), 0)
-    return 0
+            return prof.get(h[3].lower(), 2)
+    return 2      # 没声明 = 最新版次（potato_from.DEFAULT_EDITION）
 
 
 def _blank_grammar_decl(text: str) -> str:
@@ -898,7 +899,7 @@ CODEGEN_DRIVER = """#include <stdio.h>
 extern unsigned int lex(char *src, unsigned int len, unsigned char *out);
 extern unsigned int cg_arena_bytes(void);
 extern unsigned int emit_module(char *src, unsigned char *toks, char *out, unsigned char *st,
-                                unsigned int prof);
+                                unsigned int prof, unsigned int tickx);
 int main(int argc, char **argv) {
     FILE *f = fopen(argv[1], "rb");
     if (!f) return 2;
@@ -917,7 +918,9 @@ int main(int argc, char **argv) {
     lex(buf, (unsigned int)n, toks);
     /* 版次由调用方给（`argv[2]`，缺省 0 = Tur 1）—— 同 checker 夹具那条。 */
     unsigned int prof = (argc > 2) ? (unsigned int)atoi(argv[2]) : 0;
-    unsigned int m = emit_module(buf, toks, out, st, prof);
+    /* `docs/315`：第三个实参 = `domain_clock_explicit`（1 = 关掉"回边即 tick"）。 */
+    unsigned int tickx = (argc > 3) ? (unsigned int)atoi(argv[3]) : 0;
+    unsigned int m = emit_module(buf, toks, out, st, prof, tickx);
     printf("%.*s", (int)m, out);
     return 0;
 }
@@ -1922,7 +1925,8 @@ def test_m87_driver_strips_grammar_decl():
     with tempfile.TemporaryDirectory() as td:
         elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_grammar")
         outs = {}
-        for name in ("plain", "decl", "tur", "tur1", "tur2", "tur2026_2"):
+        for name in ("plain", "decl", "tur", "tur1", "tur2", "tur2026_2",
+                     "tur3", "tur2026_3"):
             f = GDECL / f"{name}.lomt"
             rc, out, err = _run_driver_raw(elf, f.relative_to(ROOT).as_posix(), td, name)
             assert rc == 0, f"{name}.lomt: 自举侧退出 {rc}: {err[-300:]}"
@@ -1942,12 +1946,14 @@ def test_m87_driver_strips_grammar_decl():
             assert raw.startswith(b"LOMENT-TUR:") and raw.endswith(b"\0"), raw
             return raw[len(b"LOMENT-TUR:"):-1].decode("ascii")
 
-        for name, spelling, ed in (("plain", "（不写）", "tur2026.1"),
-                                   ("decl", "loment", "tur2026.1"),
+        for name, spelling, ed in (("plain", "（不写）", "tur2026.3"),
+                                   ("decl", "loment", "tur2026.3"),
                                    ("tur", "tur", "tur2026.1"),
                                    ("tur1", "tur1", "tur2026.1"),
                                    ("tur2", "tur2", "tur2026.2"),
-                                   ("tur2026_2", "tur2026.2", "tur2026.2")):
+                                   ("tur2026_2", "tur2026.2", "tur2026.2"),
+                                   ("tur3", "tur3", "tur2026.3"),
+                                   ("tur2026_3", "tur2026.3", "tur2026.3")):
             assert _strip_meta(outs[name]) == _strip_meta(outs["plain"]), (
                 f"带着 `choose write grammar {spelling}` 编译的正文/代码与不带的不一样 —— "
                 f"抹掉之后留痕了")
@@ -1961,7 +1967,7 @@ def test_m87_driver_strips_grammar_decl():
         assert "does not take" in err, f"foreign.lomt: 没说到点子上: {err[:200]}"
         assert "未定义的开关" not in err, f"foreign.lomt: 报成了词法/语法错: {err[:200]}"
         assert out.strip() == "", "被拒时不该产出 IR"
-        print("      声明: 五个原生拼法(loment/tur/tur1/tur2/tur2026.2)抹掉后正文逐字节一致, "
+        print("      声明: 八个原生拼法(loment/tur/tur1/tur2/tur2026.2/tur3/tur2026.3)抹掉后正文逐字节一致, "
               "只有版次元数据按版次取值; 别的拼法拒且指对原因")
 
 
@@ -3516,6 +3522,47 @@ def test_lgc_tur2026_3_reaches_the_selfhost_driver():
         assert out2 == out, "`tur3` 与 `tur2026.3` 的产物不同"
         assert "grammar tur3 -> tur2026.3" in err2, err2[-300:]
     print("      驱动: tur2026.3 / tur3 两个拼法都装载成功，产物与参考一致")
+
+
+@test
+def test_m97_edition_collision_gate_matches_between_implementations():
+    """**版次不静默**（`docs/312`）：默认 = 最新版次后，两个实现的拒/收必须一致。
+
+    `let break = 1; while c { break; }` 在 Tur 1 里是一条空表达式语句，在 2026.2+
+    里是循环控制 —— 同一份源**含义不同**。无声明时必须两边都**拒**；显式钉 Tur 1
+    时两边都收。少一边，用户换个工具链就得到另一个意思。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    collide = ("module m\n\nfn main() -> u32 {\n    let break: u32 = 1;\n"
+               "    let c: u32 = 3;\n    while c > 0 {\n        break;\n"
+               "        c = c - 1;\n    }\n    return 0;\n}\n")
+    lgc_src = ("module m\n\nchoose gc_manual\nchoose runtime\n\nfn main() {\n"
+               "    let lgc: u32 = 1;\n    print_num(lgc);\n}\n")
+    cases = (("collide", collide, False),
+             ("collide_pinned", "choose write grammar tur2026.1\n" + collide, True),
+             ("lgc", lgc_src, False),
+             ("ok", "module m\n\nfn main() {\n    while 1 > 0 {\n"
+                    "        break;\n    }\n}\n", True))
+    with tempfile.TemporaryDirectory() as td:
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_collgate")
+        for name, src, want_ok in cases:
+            p = Path(td) / f"{name}.lomt"
+            p.write_text(src, encoding="utf-8", newline="\n")
+            try:
+                lomentc.load(p)
+                ref_ok = True
+            except Exception:                                    # noqa: BLE001
+                ref_ok = False
+            rc, _out, err = _run_driver_raw(elf, _wsl_path(p), td, name)
+            assert ref_ok == want_ok, f"参考实现 {name}: 收={ref_ok} 期望={want_ok}"
+            assert (rc == 0) == want_ok, (
+                f"自举侧 {name}: 收={rc == 0} 期望={want_ok} (rc={rc}) {err[-300:]}")
+            if not want_ok:
+                assert "does not pin its reading" in err, err[-300:]
+    print("      碰撞闸: `let break` / `let lgc` 无声明 -> 两边都拒；"
+          "钉 Tur 1 都收；用不拒")
 
 
 def main() -> int:

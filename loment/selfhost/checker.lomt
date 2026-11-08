@@ -588,6 +588,23 @@ fn chk_rt_site(src: ptr, t: ptr, i: u32, prof: u32) -> u32 {
         }
         return 0;
     }
+    if chk_tok_is(src, t, i, "domain") {
+        return chk_is_dom_block(src, t, i);
+    }
+    if chk_tok_is(src, t, i, "quality") || chk_tok_is(src, t, i, "discharge") {
+        // 与 `guard` 同一位置判据：后面紧跟一个名字才算（参考实现同一条）。
+        if chk_tok_kind(t, i + 1) == 0 {
+            return 1;
+        }
+        return 0;
+    }
+    // `tick;` 是语句（`docs/308` §2.1）：后面紧跟 `;` 才算（参考实现同一条）。
+    if chk_tok_is(src, t, i, "tick") {
+        if chk_tok_is(src, t, i + 1, ";") {
+            return 1;
+        }
+        return 0;
+    }
     // `#778`：真线程要把运行期锁与 `@__loment_rt_threads` 带进产物 ——
     // 与参考实现 `_RUNTIME_SITES` 同一条（`no_runtime` 下点名拒）。
     // 注释写在 `if` **之前**，不夹进 `||` 链中间：两个格式化器对"表达式中间的
@@ -855,6 +872,17 @@ fn chk_find_paren(src: ptr, t: ptr, i: u32) -> u32 {
 /// 于是一串假 E-TYPE (codegen 的 `skip_type` 当初也是漏了 `<...>` 才踩同一个坑)。
 /// 前缀 `chk_` 的理由同 `chk_find_paren` (扁平符号表)。
 fn chk_skip_type(src: ptr, t: ptr, i: u32) -> u32 {
+    let e: u32 = chk_skip_type0(src, t, i);
+    // docs/314：类型后面可以跟 `in SPACE`（值的空间标签）。
+    // 先确认 `e` 还在（类型可能正好在单元末尾），再读 `e + 1`。
+    if chk_tok_kind(t, e) != 4 && chk_tok_is(src, t, e, "in")
+            && chk_tok_kind(t, e + 1) == 0 {
+        return e + 2;
+    }
+    return e;
+}
+
+fn chk_skip_type0(src: ptr, t: ptr, i: u32) -> u32 {
     let j: u32 = i;
     if chk_tok_is(src, t, j, "mut") {
         j = j + 1;
@@ -904,6 +932,8 @@ fn chk_is_kw(src: ptr, t: ptr, i: u32) -> u32 {
     if chk_tok_is(src, t, i, "return") || chk_tok_is(src, t, i, "if")
             || chk_tok_is(src, t, i, "while") || chk_tok_is(src, t, i, "for")
             || chk_tok_is(src, t, i, "match") || chk_tok_is(src, t, i, "guard")
+            || chk_tok_is(src, t, i, "tick")
+            || chk_tok_is(src, t, i, "quality") || chk_tok_is(src, t, i, "discharge")
             || chk_tok_is(src, t, i, "let") || chk_tok_is(src, t, i, "fn")
             || chk_tok_is(src, t, i, "struct") || chk_tok_is(src, t, i, "enum")
             || chk_tok_is(src, t, i, "const") || chk_tok_is(src, t, i, "use")
@@ -1050,23 +1080,150 @@ fn chk_enum_body(src: ptr, t: ptr, s: ptr, n: u32, lb: u32, name_tok: u32,
     return ((j + 1) as u64) * 4294967296 + (o as u64);
 }
 
-/// `capability NAME : SPACE [ LO .. HI ] (revocable)?` —— **只登记不判错**。
-/// 判错必须等整个单元扫完: 参考实现是在 parse 完成后拿 mod.caps / mod.excluded
-/// 一起比的, 所以"先写能力再用 excluded 声明同一空间"也必须报 (顺序无关)。
-/// token 布局是**定长**的 (parser 的形状固定): NAME=i+1, ':'=i+2, SPACE=i+3,
-/// '['=i+4, LO=i+5, '.'=i+6, '.'=i+7, HI=i+8, ']'=i+9。返回后一项下标。
+/// `capability NAME : SPACE [ LO|() .. HI|() ] (LAW ( N ))? (revocable)?` ——
+/// **只登记不判错**。判错必须等整个单元扫完: 参考实现是在 parse 完成后拿
+/// mod.caps / mod.excluded 一起比的, 所以"先写能力再用 excluded 声明同一空间"也必须报。
+///
+/// 形状不再是定长 token：`()` 占两个 token，`LAW(N)` 占四个（`docs/306` §2、§5）。
+/// 无界那一侧把 lo/hi 的**位 31** 置 1（值本身远小于 2^31），供 `chk_caps_verify`
+/// 与 `chk_guard` 区分"0"与"无界"。
 fn chk_cap_collect(src: ptr, t: ptr, ctab: ptr, nc: ptr, i: u32) -> u32 {
     let n0: u32 = load32(nc, 0);
     store32(ctab, n0 * 16, i + 1);                    // 名字 token
-    store32(ctab, n0 * 16 + 4, chk_dec(src, t, i + 5));   // lo
-    store32(ctab, n0 * 16 + 8, chk_dec(src, t, i + 8));   // hi
     store32(ctab, n0 * 16 + 12, i + 3);               // 空间 token
+    let j: u32 = i + 5;
+    let lof: u32 = 0;
+    let lo: u32 = 0;
+    if chk_tok_is(src, t, j, "(") {
+        lof = 1;
+        j = j + 2;
+    } else {
+        lo = chk_dec(src, t, j);
+        j = j + 1;
+    }
+    j = j + 2;                                        // '..' 两个点
+    let hif: u32 = 0;
+    let hi: u32 = 0;
+    if chk_tok_is(src, t, j, "(") {
+        hif = 1;
+        j = j + 2;
+    } else {
+        hi = chk_dec(src, t, j);
+        j = j + 1;
+    }
+    j = j + 1;                                        // ']'
+    store32(ctab, n0 * 16 + 4, lo | (lof << 31));
+    store32(ctab, n0 * 16 + 8, hi | (hif << 31));
     store32(nc, 0, n0 + 1);
-    i = i + 10;
-    if chk_tok_is(src, t, i, "revocable") {
+    if chk_tok_is(src, t, j, "epoch") || chk_tok_is(src, t, j, "far")
+            || chk_tok_is(src, t, j, "sliding") || chk_tok_is(src, t, j, "decaying")
+            || chk_tok_is(src, t, j, "growing") || chk_tok_is(src, t, j, "consumed")
+            || chk_tok_is(src, t, j, "cyclic") || chk_tok_is(src, t, j, "generational")
+            || chk_tok_is(src, t, j, "subject") || chk_tok_is(src, t, j, "witnessed")
+            || chk_tok_is(src, t, j, "reachable") {
+        j = j + 4;                                    // LAW ( N )
+    } else if chk_tok_is(src, t, j, "danger") || chk_tok_is(src, t, j, "adaptive")
+            || chk_tok_is(src, t, j, "flow") {
+        j = j + 1;
+    }
+    if chk_tok_is(src, t, j, "revocable") {
+        j = j + 1;
+    }
+    return j;
+}
+
+/// 能力的时律编号（与参考实现 `CAP_KIND_ID` 同编号）：0 regular / 1 danger /
+/// 2 epoch / 3 far / 4 sliding / 5 decaying / 6 growing / 7 consumed。
+fn chk_cap_law(src: ptr, t: ptr, name_tok: u32) -> u32 {
+    let i: u32 = 0;
+    while chk_tok_kind(t, i) != 4 {
+        if chk_tok_is(src, t, i, "capability") && same(src, t, i + 1, name_tok) {
+            let j: u32 = i + 5;
+            if chk_tok_is(src, t, j, "(") {
+                j = j + 4;                            // ( ) . .
+            } else {
+                j = j + 3;                            // LO . .
+            }
+            if chk_tok_is(src, t, j, "(") {
+                j = j + 3;                            // ( ) ]
+            } else {
+                j = j + 2;                            // HI ]
+            }
+            if chk_tok_is(src, t, j, "danger") { return 1; }
+            if chk_tok_is(src, t, j, "epoch") { return 2; }
+            if chk_tok_is(src, t, j, "far") { return 3; }
+            if chk_tok_is(src, t, j, "sliding") { return 4; }
+            if chk_tok_is(src, t, j, "decaying") { return 5; }
+            if chk_tok_is(src, t, j, "growing") { return 6; }
+            if chk_tok_is(src, t, j, "consumed") { return 7; }
+            if chk_tok_is(src, t, j, "cyclic") { return 8; }
+            if chk_tok_is(src, t, j, "generational") { return 9; }
+            if chk_tok_is(src, t, j, "adaptive") { return 10; }
+            if chk_tok_is(src, t, j, "subject") { return 11; }
+            if chk_tok_is(src, t, j, "witnessed") { return 12; }
+            if chk_tok_is(src, t, j, "flow") { return 13; }
+            if chk_tok_is(src, t, j, "reachable") { return 14; }
+            return 0;
+        }
         i = i + 1;
     }
-    return i;
+    return 0;
+}
+
+/// 能力的时律参数（不是参数律 -> 0）。与 `chk_cap_law` 同一趟扫描。
+fn chk_cap_param(src: ptr, t: ptr, name_tok: u32) -> u32 {
+    let i: u32 = 0;
+    while chk_tok_kind(t, i) != 4 {
+        if chk_tok_is(src, t, i, "capability") && same(src, t, i + 1, name_tok) {
+            let j: u32 = i + 5;
+            if chk_tok_is(src, t, j, "(") {
+                j = j + 4;                            // ( ) . .
+            } else {
+                j = j + 3;                            // LO . .
+            }
+            if chk_tok_is(src, t, j, "(") {
+                j = j + 3;                            // ( ) ]
+            } else {
+                j = j + 2;                            // HI ]
+            }
+            return chk_dec(src, t, j + 2);            // LAW ( N )
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 跳过一整条能力声明，返回它之后的下标。**不登记** —— 给"声明体不是代码"的扫描用
+/// （`epoch(3)` 长得像调用，不跳就会被调用检查当成未定义函数）。
+fn chk_cap_end(src: ptr, t: ptr, i: u32) -> u32 {
+    let j: u32 = i + 5;
+    if chk_tok_is(src, t, j, "(") {
+        j = j + 2;
+    } else {
+        j = j + 1;
+    }
+    j = j + 2;                                    // '..'
+    if chk_tok_is(src, t, j, "(") {
+        j = j + 2;
+    } else {
+        j = j + 1;
+    }
+    j = j + 1;                                    // ']'
+    if chk_tok_is(src, t, j, "epoch") || chk_tok_is(src, t, j, "far")
+            || chk_tok_is(src, t, j, "sliding") || chk_tok_is(src, t, j, "decaying")
+            || chk_tok_is(src, t, j, "growing") || chk_tok_is(src, t, j, "consumed")
+            || chk_tok_is(src, t, j, "cyclic") || chk_tok_is(src, t, j, "generational")
+            || chk_tok_is(src, t, j, "subject") || chk_tok_is(src, t, j, "witnessed")
+            || chk_tok_is(src, t, j, "reachable") {
+        j = j + 4;                                // LAW ( N )
+    } else if chk_tok_is(src, t, j, "danger") || chk_tok_is(src, t, j, "adaptive")
+            || chk_tok_is(src, t, j, "flow") {
+        j = j + 1;
+    }
+    if chk_tok_is(src, t, j, "revocable") {
+        j = j + 1;
+    }
+    return j;
 }
 
 /// 能力表判错 (参考实现 2094-2107): 重复声明 / LO>HI / 占用 excluded 空间 -> E-CAP。
@@ -1074,8 +1231,47 @@ fn chk_caps_verify(src: ptr, t: ptr, ctab: ptr, n0: u32, exs: ptr, nexs: u32, p:
     let k: u32 = 0;
     while k < n0 {
         let nt: u32 = load32(ctab, k * 16);
-        if load32(ctab, k * 16 + 4) > load32(ctab, k * 16 + 8) {
+        let lv: u32 = load32(ctab, k * 16 + 4);
+        let hv: u32 = load32(ctab, k * 16 + 8);
+        if (lv >> 31) == 0 && (hv >> 31) == 0
+                && (lv & 2147483647) > (hv & 2147483647) {
             o = sym_pub(src, t, p, o, E_CAP, nt);
+        }
+        // 时律的参数与容量（docs/306 §12、docs/307 §1–§5，参考实现同口径）。
+        // adaptive(10) 与 flow(13) 不吃参数 —— 它们的参数位永远是 0。
+        let law: u32 = chk_cap_law(src, t, nt);
+        if law >= 2 && law != 10 && law != 13 {
+            let pr: u32 = chk_cap_param(src, t, nt);
+            if pr == 0 || pr >= 16777216 {
+                o = sym_pub(src, t, p, o, E_CAP, nt);
+            }
+        }
+        if law == 7 || law == 14 {
+            if (lv >> 31) != 0 || (hv >> 31) != 0 {
+                o = sym_pub(src, t, p, o, E_CAP, nt);
+            } else {
+                let l2: u32 = lv & 2147483647;
+                let h2: u32 = hv & 2147483647;
+                if l2 <= h2 && (h2 - l2 + 1) > 64 {
+                    o = sym_pub(src, t, p, o, E_CAP, nt);
+                }
+            }
+        }
+        if law == 8 {
+            // cyclic：有界，且周期必须大于上界（否则回绕会把域外的位置放进来）。
+            if (lv >> 31) != 0 || (hv >> 31) != 0 {
+                o = sym_pub(src, t, p, o, E_CAP, nt);
+            } else {
+                let pr8: u32 = chk_cap_param(src, t, nt);
+                if pr8 > 0 && pr8 <= (hv & 2147483647) {
+                    o = sym_pub(src, t, p, o, E_CAP, nt);
+                }
+            }
+        }
+        if law == 9 || law == 10 || law == 13 {
+            if (lv >> 31) != 0 || (hv >> 31) != 0 {
+                o = sym_pub(src, t, p, o, E_CAP, nt);
+            }
         }
         // 与**之前**的每个能力比名字: 每个重复项各报一次 (与 set 的"每项都报"同口径)
         let k2: u32 = 0;
@@ -1201,16 +1397,178 @@ fn chk_syscall_net(src: ptr, t: ptr, i: u32) -> u32 {
 
 /// guard 的能力与索引: 未声明 -> E-CAP; 字面量索引越界 -> E-CAP。
 /// i 指向 `guard`, i+1 = 能力名, i+2 = '(' , i+3 = 索引 (可选)。
-fn chk_guard(src: ptr, t: ptr, ctab: ptr, nc: u32, i: u32, p: ptr, o: u32) -> u32 {
+/// `guard cap( ... )` 的一级实参里有没有逗号（语境类的第二个实参）。
+fn chk_guard_has_aux(src: ptr, t: ptr, i: u32) -> u32 {
+    let j: u32 = i + 3;
+    let depth: u32 = 0;
+    let has: u32 = 0;
+    while chk_tok_kind(t, j) != 4 {
+        if chk_tok_is(src, t, j, "(") || chk_tok_is(src, t, j, "[")
+                || chk_tok_is(src, t, j, "{") {
+            depth = depth + 1;
+        } else if chk_tok_is(src, t, j, ")") || chk_tok_is(src, t, j, "]")
+                || chk_tok_is(src, t, j, "}") {
+            if depth == 0 {
+                return has;
+            }
+            depth = depth - 1;
+        } else if depth == 0 && chk_tok_is(src, t, j, ",") {
+            has = 1;
+        } else if depth == 0 && chk_tok_is(src, t, j, ";") {
+            return has;
+        }
+        j = j + 1;
+    }
+    return has;
+}
+
+/// `quality` / `discharge` 只能点名叫对应时律的能力（参考实现同一条规则）。
+fn chk_cap_law_is(src: ptr, t: ptr, ctab: ptr, nc: u32, i: u32, want: u32,
+                  p: ptr, o: u32) -> u32 {
     let nt: u32 = i + 1;
+    if chk_dom_has(src, t, i, nt) == 1 {
+        return o;
+    }
     let k: u32 = 0;
     let found: u32 = 0;
     while k < nc {
         if same(src, t, load32(ctab, k * 16), nt) {
             found = 1;
-            if chk_tok_kind(t, i + 3) == 1 {
-                let v: u32 = chk_dec(src, t, i + 3);
-                if v < load32(ctab, k * 16 + 4) || v > load32(ctab, k * 16 + 8) {
+            if chk_cap_law(src, t, nt) != want {
+                o = sym_pub(src, t, p, o, E_CAP, nt);
+            }
+        }
+        k = k + 1;
+    }
+    if found == 0 {
+        o = sym_pub(src, t, p, o, E_CAP, nt);
+    }
+    return o;
+}
+
+/// `domain NAME : ...{` 的一个头，名字是否等于 nt（`docs/314`）。
+fn chk_dom_name_at(src: ptr, t: ptr, hdr: u32, nt: u32) -> u32 {
+    let k: u32 = hdr + 1;
+    if chk_tok_kind(t, k) != 0 {
+        return 0;
+    }
+    // `domain NAME : SPACE[` —— 名字后面还得是 `: SPACE[`，否则只是个同名标识符
+    if chk_tok_is(src, t, k + 1, ":") && chk_tok_kind(t, k + 2) == 0
+            && chk_tok_is(src, t, k + 3, "[") {
+        return same(src, t, k, nt) as u32;
+    }
+    return 0;
+}
+
+/// `domain` 是上下文关键字（同 codegen 的 `is_dom_block`）。
+fn chk_is_dom_block(src: ptr, t: ptr, i: u32) -> u32 {
+    let a: u32 = i + 1;
+    if chk_tok_kind(t, a) != 0 {
+        return 0;
+    }
+    if chk_tok_is(src, t, a + 1, ":") && chk_tok_kind(t, a + 2) == 0
+            && chk_tok_is(src, t, a + 3, "[") {
+        return 1;
+    }
+    if chk_tok_is(src, t, a + 1, "[") {
+        return 1;
+    }
+    return 0;
+}
+
+/// `domain:for …`（`docs/315`）—— 与 `domain … {` 区分开。
+fn chk_is_dom_for(src: ptr, t: ptr, i: u32) -> u32 {
+    if chk_tok_is(src, t, i + 1, ":") && chk_tok_is(src, t, i + 2, "for") {
+        return 1;
+    }
+    return 0;
+}
+
+/// `guard/quality/discharge NAME` 的 NAME 是不是某个外层 `domain` 块声明的。
+/// 反向走 token：`}` 加深，`{` 变浅；在深度 0 的 `{` 处回头看它的头。
+fn chk_dom_has(src: ptr, t: ptr, at: u32, nt: u32) -> u32 {
+    let depth: u32 = 0;
+    let k: u32 = at;
+    while k > 0 {
+        k = k - 1;
+        if chk_tok_is(src, t, k, "}") {
+            depth = depth + 1;
+        } else if chk_tok_is(src, t, k, "{") {
+            if depth > 0 {
+                depth = depth - 1;
+            } else {
+                let h: u32 = k;
+                let stop: u32 = 0;
+                while h > 0 && stop == 0 {
+                    h = h - 1;
+                    if chk_tok_is(src, t, h, "domain") {
+                        if chk_dom_name_at(src, t, h, nt) == 1 {
+                            return 1;
+                        }
+                        // `domain:for … {` 不是域块 —— 它是**透明**的一层（`docs/315`）：
+                        // 循环体里的 `guard` 照样能看见外面那个域。
+                        if chk_is_dom_for(src, t, h) == 0 {
+                            stop = 1;
+                        }
+                    }
+                    if chk_tok_is(src, t, h, "for") && h >= 2 && chk_is_dom_for(src, t, h - 2) == 1 {
+                        // 同上：这是 `domain:for` 的 `for`，不是普通循环头。
+                    } else if chk_tok_is(src, t, h, ";") || chk_tok_is(src, t, h, "{")
+                            || chk_tok_is(src, t, h, "}") || chk_tok_is(src, t, h, "if")
+                            || chk_tok_is(src, t, h, "while") || chk_tok_is(src, t, h, "for")
+                            || chk_tok_is(src, t, h, "match") || chk_tok_is(src, t, h, "else") {
+                        stop = 1;
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+fn chk_guard(src: ptr, t: ptr, ctab: ptr, nc: u32, i: u32, p: ptr, o: u32) -> u32 {
+    let nt: u32 = i + 1;
+    if chk_dom_has(src, t, i, nt) == 1 {
+        return o;   // 块级域：名字在作用域里，实参规则由发射器按同一份源再判
+    }
+    let k: u32 = 0;
+    let found: u32 = 0;
+    while k < nc {
+        if same(src, t, load32(ctab, k * 16), nt) {
+            found = 1;
+            // 静态可判的只有一般类与危险域（`docs/306` §1.2）：时律依赖虚拟钟。
+            let law: u32 = chk_cap_law(src, t, nt);
+            // 语境类三支必须带第二实参，其余不许带（与参考实现同一条规则）。
+            let hasaux: u32 = chk_guard_has_aux(src, t, i);
+            let needaux: u32 = 0;
+            if law == 11 || law == 12 || law == 13 {
+                needaux = 1;
+            }
+            if needaux != hasaux {
+                o = sym_pub(src, t, p, o, E_CAP, nt);
+            }
+            if chk_tok_kind(t, i + 3) == 1 && (law == 0 || law == 1 || law == 8) {
+                let lv: u32 = load32(ctab, k * 16 + 4);
+                let hv: u32 = load32(ctab, k * 16 + 8);
+                let mut_v: u32 = chk_dec(src, t, i + 3);
+                if law == 8 {                 // cyclic：判的是回绕后的位置
+                    let pr8: u32 = chk_cap_param(src, t, nt);
+                    if pr8 > 0 {
+                        mut_v = mut_v % pr8;
+                    }
+                }
+                let v: u32 = mut_v;
+                let mut_inside: u32 = 1;
+                if (lv >> 31) == 0 && v < (lv & 2147483647) {
+                    mut_inside = 0;
+                }
+                if (hv >> 31) == 0 && v > (hv & 2147483647) {
+                    mut_inside = 0;
+                }
+                if (law == 0 || law == 8) && mut_inside == 0 {
+                    o = sym_pub(src, t, p, o, E_CAP, nt);
+                }
+                if law == 1 && mut_inside == 1 {
                     o = sym_pub(src, t, p, o, E_CAP, nt);
                 }
             }
@@ -3055,6 +3413,20 @@ fn chk_moves(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             } else {
                 j = e;
             }
+        } else if (chk_tok_is(src, t, j, "couple") || chk_tok_is(src, t, j, "mutex"))
+                && chk_tok_kind(t, j + 1) == 0
+                && (chk_tok_is(src, t, j + 2, ",") || chk_tok_is(src, t, j + 2, ";")) {
+            let semi: u32 = chk_find_at(src, t, j, e, ";");
+            if semi <= e {
+                j = semi + 1;
+            } else {
+                j = e;
+            }
+        } else if chk_tok_is(src, t, j, "domain")
+                && (chk_is_dom_block(src, t, j) == 1 || chk_is_dom_for(src, t, j) == 1) {
+            // 域块 / 域循环的头不是表达式（`docs/314`/`docs/315`）—— 跳到 `{`。
+            let lb: u32 = chk_find_at(src, t, j + 1, e, "{");
+            j = lb;
         } else if chk_tok_is(src, t, j, "if") || chk_tok_is(src, t, j, "while") {
             let lb: u32 = chk_find_at(src, t, j + 1, e, "{");
             chk_use(src, t, syms, n, env, envc, chk_lh(j + 1, lb), tyt, p, oc);
@@ -3387,6 +3759,8 @@ fn chk_stmt_end(src: ptr, t: ptr, cur: u32, e: u32) -> u32 {
     }
     if chk_tok_is(src, t, cur, "if") || chk_tok_is(src, t, cur, "while")
             || chk_tok_is(src, t, cur, "for") || chk_tok_is(src, t, cur, "match")
+            || (chk_tok_is(src, t, cur, "domain") && chk_is_dom_block(src, t, cur) == 1)
+            || (chk_tok_is(src, t, cur, "domain") && chk_is_dom_for(src, t, cur) == 1)
             || islgc == 1 {
         let k0: u32 = chk_skip_body(src, t, cur);
         let k: u32 = k0;
@@ -3427,6 +3801,19 @@ fn chk_falls(src: ptr, t: ptr, b: u32, e: u32) -> u32 {
     }
     if chk_tok_is(src, t, last, "return") {
         return 0;
+    }
+    if chk_tok_is(src, t, last, "domain") && chk_is_dom_for(src, t, last) == 1 {
+        // docs/315：循环**会**掉出去（区间可能是空的）—— 与 while 同判。
+        return 1;
+    }
+    if chk_tok_is(src, t, last, "domain") && chk_is_dom_block(src, t, last) == 1 {
+        // docs/314：块的末尾就是函数的末尾 —— 块里不掉，函数就不掉
+        let lb: u32 = chk_find_at(src, t, last + 1, e, "{");
+        if lb >= e {
+            return 1;
+        }
+        let le: u32 = chk_skip_body(src, t, lb) - 1;
+        return chk_falls(src, t, lb, le);
     }
     if chk_tok_is(src, t, last, "if") {
         let lb: u32 = chk_find_at(src, t, last + 1, e, "{");
@@ -3517,6 +3904,34 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 || chk_tok_is(src, t, j, ";")
                 || chk_tok_is(src, t, j, "=>") {
             j = j + 1;
+        } else if chk_tok_is(src, t, j, "domain") && chk_is_dom_for(src, t, j) == 1 {
+            // `docs/315`：`domain:for VAR[, VAR]* …` 的头不是代码；变量要进环境（类型未知
+            // —— 反糖出来的是 u32，源里没有可指的 token；下游按未知处理，不误报）。
+            let vn: u32 = 1;
+            let vq: u32 = j + 4;
+            while chk_tok_is(src, t, vq, ",") {
+                vn = vn + 1;
+                vq = vq + 2;
+            }
+            let vi: u32 = 0;
+            while vi < vn {
+                c = chk_env_add(t, env, c, j + 3 + vi * 2, 0);
+                vi = vi + 1;
+            }
+            store32(tyt, 3520, c);
+            let k: u32 = j + 4;
+            while chk_tok_kind(t, k) != 4 && !chk_tok_is(src, t, k, "{") {
+                k = k + 1;
+            }
+            j = k;
+        } else if chk_tok_is(src, t, j, "domain") && chk_is_dom_block(src, t, j) == 1 {
+            // `docs/314`：`domain … {` 的头不是代码 —— 只把游标挪到 `{`，
+            // 体里的语句照常逐条检查（作用域由 `chk_dom_has` 那把反向扫描认）。
+            let k: u32 = j + 1;
+            while chk_tok_kind(t, k) != 4 && !chk_tok_is(src, t, k, "{") {
+                k = k + 1;
+            }
+            j = k;
         } else if load32(oc, 8) != 0 && chk_tok_is(src, t, j, "defer") {
             // Tur 2 的 `defer f(a, b);`（`docs/296` §2.3）：只收**函数调用**。参考实现在
             // 解析期就拒（E019）；自举侧原先让 `defer 1;` 一路走到发射器，报出来的是捕获表
@@ -3551,6 +3966,41 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 j = act + 1;
             } else {
                 j = act + 2;                  // `lgc start;`
+            }
+        } else if (chk_tok_is(src, t, j, "couple") || chk_tok_is(src, t, j, "mutex"))
+                && chk_tok_kind(t, j + 1) == 0
+                && (chk_tok_is(src, t, j + 2, ",") || chk_tok_is(src, t, j + 2, ";")) {
+            // `docs/315` §5：图边是**声明**，语句本身没有可查的表达式 —— 跳到 `;`。
+            let semi: u32 = chk_find_at(src, t, j, e, ";");
+            if semi <= e {
+                j = semi + 1;
+            } else {
+                j = e;
+            }
+        } else if chk_tok_is(src, t, j, "quality") {
+            // `quality CAP = EXPR ;` —— 能力名不是变量，跳过它，只查值表达式。
+            let semi: u32 = chk_find_at(src, t, j, e, ";");
+            let eq: u32 = chk_find_assign(src, t, j, e);
+            if eq != 0 && eq < semi {
+                chk_tex(src, t, syms, n, env, c,
+                        ((eq + 1) as u64) * 4294967296 + (semi as u64), tyt, p, oc);
+            }
+            if semi <= e {
+                j = semi + 1;
+            } else {
+                j = e;
+            }
+        } else if chk_tok_is(src, t, j, "discharge") {
+            // `discharge CAP ( EXPR ) ;` —— 括号里的才是表达式。
+            let semi: u32 = chk_find_at(src, t, j, e, ";");
+            if chk_tok_is(src, t, j + 2, "(") {
+                chk_tex(src, t, syms, n, env, c,
+                        ((j + 3) as u64) * 4294967296 + (semi as u64), tyt, p, oc);
+            }
+            if semi <= e {
+                j = semi + 1;
+            } else {
+                j = e;
             }
         } else if load32(oc, 8) != 0 && chk_tok_kind(t, j) == 0
                 && (chk_tok_is(src, t, j, "break") || chk_tok_is(src, t, j, "continue")) {
@@ -3792,7 +4242,11 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 // 表达式求值, 于是"未声明的变量"当场就报; 这里原先一声不吭 —— 已发布编译器
                 // 对 `break;` 完全静默、退出码 0 (issue #322)。词法上 `break` 就是 ident,
                 // 所以判据就是"声明过没有"。
-                if semi2 == j + 1 && chk_tok_kind(t, j) == 0 {
+                // `tick;` 是语句（`docs/308` §2.1），不是"未声明的变量"。
+                // **只排除它**：`break;` / `continue;` 在 Tur 1 里仍要报 E002 ——
+                // 那是 `break-not-a-name` 这条对拍钉住的（issue #322）。
+                if semi2 == j + 1 && chk_tok_kind(t, j) == 0
+                        && !chk_tok_is(src, t, j, "tick") {
                     if chk_env_get(src, t, env, c, j) == 0 {
                         chk_pub(src, t, oc, p, E_TYPE, j);
                     }
@@ -4511,11 +4965,38 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
             i = chk_skip_body(src, t, i);
             skipped = 1;
         }
+        // 能力声明也不是代码：`epoch(3)` / `far(2)` 长得像调用，不整条跳过就会在
+        // 调用检查里报"未定义的函数 epoch"（实测：孪生对拍第一版就红在这里）。
+        if chk_tok_is(src, t, i, "capability") {
+            i = chk_cap_end(src, t, i);
+            skipped = 1;
+        }
+        if chk_tok_is(src, t, i, "domain") && chk_is_dom_block(src, t, i) == 1 {
+            // docs/314：域块的头不是代码（`consumed(1)` / `epoch(3)` 长得像调用）——
+            // 跳到 `{`，体里的语句下一轮照常扫。
+            while chk_tok_kind(t, i) != 4 && !chk_tok_is(src, t, i, "{") {
+                i = i + 1;
+            }
+            skipped = 1;
+        }
+        if chk_tok_is(src, t, i, "domain") && chk_is_dom_for(src, t, i) == 1 {
+            // docs/315：`domain:for VAR [in NAME] [step N]` 的头同样不是调用。
+            while chk_tok_kind(t, i) != 4 && !chk_tok_is(src, t, i, "{") {
+                i = i + 1;
+            }
+            skipped = 1;
+        }
         if skipped == 0 {
             // guard NAME(idx) —— 能力未声明或字面量索引越界 -> E-CAP。
             // 排在调用检查之前, 并靠 `i-1 != "guard"` 把随后的 `NAME(` 排除掉。
             if chk_tok_is(src, t, i, "guard") {
                 o = chk_guard(src, t, ctab, load32(nc, 0), i, out, o);
+            }
+            if chk_tok_is(src, t, i, "quality") {
+                o = chk_cap_law_is(src, t, ctab, load32(nc, 0), i, 10, out, o);
+            }
+            if chk_tok_is(src, t, i, "discharge") {
+                o = chk_cap_law_is(src, t, ctab, load32(nc, 0), i, 14, out, o);
             }
             // `if let E::V(x) = e` 里的 `let` 是**模式**不是带类型的绑定 (它的 `Result`
             // 后面跟的是 `::` 而不是 `:`) —— 不排掉就会把 `::` 里的第二个 `:` 当类型报 E-TYPE。
@@ -4537,6 +5018,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                     && !chk_tok_is(src, t, i - 1, ":")
                     && !chk_tok_is(src, t, i - 1, ".")
                     && !chk_tok_is(src, t, i - 1, "guard")
+                    && !chk_tok_is(src, t, i - 1, "discharge")
                     && !(load32(oc, 8) == 2 && chk_tok_is(src, t, i - 1, "lgc")) {
                 let nl: u32 = tok_len(t, i);
                 if nl > 0 {

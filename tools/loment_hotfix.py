@@ -130,7 +130,7 @@ def build(tree: Path, release: str, *, projection: dict | None = None) -> dict:
     #: 基线是 `<major>.<minor>.<patch>`，**从 `RELEASE` 读**，不从 tag 猜 —— tag 上
     #: 还挂着 `-hot.N` 那一截，猜出来的东西与 `loment_update` 那边的基线不是同一个量。
     base = read_release(tree)
-    m = re.match(r"^v(\d+\.\d+\.\d+)", release)
+    m = re.match(r"^v(\d+(?:\.\d+)*)", release)
     if not m:
         raise SystemExit(f"release tag 不是 v<major>.<minor>.<patch>[-...]：{release}")
     if m.group(1) != base:

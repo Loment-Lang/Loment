@@ -253,6 +253,19 @@ def test_installer_hardening() -> None:
     check("install.ps1 打印 SHA256SUMS 摘要供离线核对 (#419)",
           "release page" in loww and "digest" in loww)
 
+    # ---- 冒烟编译不能被编译器的 stderr 中止（0.1.5.1 setup.exe 的实际故障）
+    # PowerShell 5.1 在 $ErrorActionPreference='Stop' 下把原生命令写往 stderr 的
+    # 一行（`loment: grammar default -> tur2026.3`）当成终止 RemoteException，
+    # 于是编译成功也会让安装失败。冒烟只看退出码，两个流都必须吞掉。
+    smoke = [ln for ln in win.splitlines()
+             if "'loment.cmd'" in ln]
+    check("install.ps1 的两条冒烟命令都吞掉 stderr 与 stdout (*> $null)",
+          len(smoke) == 2 and all("*> $null" in ln for ln in smoke), str(smoke))
+    check("install.ps1 冒烟期间放宽 $ErrorActionPreference 并还原",
+          "$prevEap = $ErrorActionPreference" in win
+          and "$ErrorActionPreference = 'Continue'" in win
+          and "$ErrorActionPreference = $prevEap" in win)
+
 
 def test_release_integrity_anchor() -> None:
     rel = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
@@ -1456,7 +1469,10 @@ def test_java_dependency_autolinks() -> None:
                 no = off(name_rva)
                 dlls.append(blob[no:blob.index(b"\0", no)].decode().lower())
                 k += 1
-            check("PE 导入表是 kernel32 + ws2_32", dlls == ["kernel32.dll", "ws2_32.dll"], str(dlls))
+            # `#1493`（lmgr）给 Windows 产物加了 PDH / PSAPI（cpu.load / mem.phys 走的
+            # 就是它们）。断言跟着链接器的**实际**导入表走，不钉旧的那两个。
+            check("PE 导入表是 kernel32 + ws2_32 + pdh + psapi",
+                  dlls == ["kernel32.dll", "ws2_32.dll", "pdh.dll", "psapi.dll"], str(dlls))
             check("PE 导入表里没有 jvm.dll / java.dll",
                   not ({"jvm.dll", "java.dll"} & set(dlls)), str(dlls))
 

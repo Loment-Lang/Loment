@@ -45,7 +45,6 @@ loment_pe_test test_pe_runs_the_selfhost_compiler_natively  # 环境: 非 Window
 loment_pe_test test_pe_selfhost_mirror_matches_reference  # 环境: 无 clang/WSL
 loment_sign_test 分离签名  # 环境: 见该判据打的 SKIP 行
 loment_sign_test 签PE  # 环境: 见该判据打的 SKIP 行
-loment_state_test test_real_repo_state_is_coherent  # 环境: 这个检出没有 origin/main（tarball 检出？）
 loment_tools_test test_m30_bare_metal_object_and_link  # 环境: 无 clang
 lompi_sync lompi_sync[指南]  # 环境: 见该判据打的 SKIP 行
 lompi_sync lompi_sync[标准库]  # 环境: 见该判据打的 SKIP 行

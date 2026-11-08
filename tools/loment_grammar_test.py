@@ -1233,6 +1233,105 @@ def test_a_misspelled_declaration_is_refused_not_guessed_past():
 
 
 @test
+def test_the_default_edition_is_the_newest_open_one():
+    """**没声明 = 最新版次**（2026-11-06 用户裁定，`docs/312`）。
+
+    用户要的是"写新代码不必先背一行声明"：Tur 1 缺掉的 `def` / `for x in xs` /
+    `break` / `orelse` / `defer` / `lgc` 都在最新版里。显式钉旧版次仍然可以
+    （`tur` / `tur1` / `tur2026.1`）—— 那是**作者明确要的**，不是默认。
+    """
+    assert potato_from.DEFAULT_EDITION == potato_from.TUR_EDITIONS[-1], (
+        "默认版次不是最新那一版 —— 用户 2026-11-06 的口径是「永远用最新」")
+    body = "module m\n\ndef f() -> u32 { return 1 and 1; }\n"
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        plain = td / "plain.lomt"
+        plain.write_text(body, encoding="utf-8", newline="\n")
+        fu = potato_from.front_door(plain)
+        assert (fu.grammar, fu.profile, fu.spelling) == (
+            "loment", potato_from.DEFAULT_EDITION, ""), (fu.grammar, fu.profile, fu.spelling)
+        assert "def f" not in fu.source and " and " not in fu.source, \
+            "没声明的那份没过纯糖 —— 默认版次没生效"
+        for word, prof in (("loment", potato_from.DEFAULT_EDITION),
+                           ("tur3", "tur2026.3"),
+                           ("tur2", "tur2026.2"),
+                           ("tur", "tur2026.1"),
+                           ("tur1", "tur2026.1")):
+            p = td / f"{word.replace('.', '_')}.lomt"
+            p.write_text(f"choose write grammar {word}\n" + body,
+                         encoding="utf-8", newline="\n")
+            fu = potato_from.front_door(p)
+            assert fu.profile == prof, (word, fu.profile, prof)
+    print("      默认 = 最新版次；`tur` / `tur1` 仍显式钉 Tur 1，`loment` 跟默认走")
+
+
+@test
+def test_collision_names_are_refused_when_the_reading_is_not_pinned():
+    """**版次不静默**（`docs/312`）：无声明单元里**声明**了新版关键字 -> 拒，不是改义。
+
+    最小的一例是 `let break = 1; while c { break; }`：Tur 1 里 `break;` 是一条空
+    表达式语句，2026.2 起它退出循环。默认改到最新版次之后，这份源必须**响亮地**
+    被拒 —— 改名，或显式 `choose write grammar tur2026.1` 钉回旧读法。
+    """
+    body = ("module m\n\nfn main() -> u32 {\n"
+            "    let break: u32 = 1;\n"
+            "    let c: u32 = 3;\n"
+            "    while c > 0 {\n        break;\n        c = c - 1;\n    }\n"
+            "    return 0;\n}\n")
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        plain = td / "plain.lomt"
+        plain.write_text(body, encoding="utf-8", newline="\n")
+        try:
+            lomentc.load(plain)
+        except potato_from.FrontDoorRefused as e:
+            assert "break" in str(e), e
+        else:
+            raise AssertionError("无声明 + `let break` 被收下了 —— 旧源会静默改义")
+        # `lgc` 是 2026.3 的关键字，旧版次里是合法标识符 —— 同一闸。
+        lgc = td / "lgc.lomt"
+        lgc.write_text("module m\n\nfn main() {\n    let lgc: u32 = 1;\n    print_num(lgc);\n}\n",
+                       encoding="utf-8", newline="\n")
+        try:
+            lomentc.load(lgc)
+        except potato_from.FrontDoorRefused as e:
+            assert "lgc" in str(e), e
+        else:
+            raise AssertionError("无声明 + `let lgc` 被收下了")
+        # 显式钉旧版次 -> 照旧编（这才是"响亮地拒"而不是"一刀切禁掉"）。
+        for word in ("tur2026.1", "tur1", "tur"):
+            p = td / f"{word.replace('.', '_')}.lomt"
+            p.write_text(f"choose write grammar {word}\n" + body,
+                         encoding="utf-8", newline="\n")
+            assert lomentc.load(p).profile == "tur2026.1", word
+        # **用**这些名字不触发：循环里的 `break;` 正是新版次要的写法。
+        ok = td / "ok.lomt"
+        ok.write_text("module m\n\nfn main() {\n    while 1 > 0 {\n        break;\n    }\n}\n",
+                      encoding="utf-8", newline="\n")
+        assert lomentc.load(ok).profile == potato_from.DEFAULT_EDITION
+    print("      `let break` / `let lgc`：无声明 -> 拒；显式钉旧版次 -> 照旧编；用不拒")
+
+
+@test
+def test_every_open_edition_declares_its_collision_set():
+    """开新版次时必须回答"它有没有跟旧标识符撞车"（`docs/312`）。
+
+    这不是风格检查：`EDITION_COLLISIONS` 是前门那一闸的输入。新版次如果用了旧版次里
+    能当标识符的拼法却不登记，默认读法就会**静默改义** —— 而那是"默认 = 最新"
+    唯一不能接受的事。**空元组也算登记**（明确回答"没有撞车"）。
+    """
+    for ed in potato_from.TUR_EDITIONS:
+        if ed in potato_from.FROZEN_EDITIONS:
+            continue
+        assert ed in potato_from.EDITION_COLLISIONS, (
+            f"{ed} 是未封版的新版次，但 `EDITION_COLLISIONS` 里没有它 —— "
+            f"开版次时要明确回答「它有没有跟旧标识符撞车」，空也要写成 ()")
+    assert set(potato_from.EDITION_COLLISIONS) <= set(potato_from.TUR_EDITIONS), (
+        "碰撞表里有不存在的版次名")
+    print("      未封版的版次都有碰撞登记（空元组 = 明确回答没有）")
+
+
+@test
 def test_tur2026_2_is_frozen():
     """**tur2026.2 已封版**（2026-11-05）：名字、特性面、别名都不再变。
 

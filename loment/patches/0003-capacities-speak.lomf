@@ -23,6 +23,9 @@ about
 about **2026-10-19**：`#775` 在最后那一块（`emit_module` 的失败分支）里加了发射器自己的诊断通道
 about （E023）；`old -> new` 的文本因此连带更新，`new` 必须与树里逐字一致。
 about 
+about **2026-11-07**（域块，`docs/314`）：`codegen` 的**空间绑定表**也成了会满的一条，发射器用
+about 2 号报它 —— 最后那一块因此多一条 `ec == 2` 分支，`new` 再跟树走一次。
+about
 about **2026-11-04**（Tur 2 的 `defer`，`docs/296` §2.3）：最后那一块的 `em` 从"一句话"变成
 about 按规则号选消息（3 / 4 / 5 = `defer` 的三个上限）—— 2 号及以后原先一律套"实参超过 20"，
 about 于是 `defer` 撞上捕获表上限时用户读到的是"参数太多"。`new` 块因此再跟树走一次：
@@ -149,7 +152,9 @@ old <<<
         return fail(msg);
 >>>
 new <<<
-    let m: u32 = emit_module(unit, ctoks, ir, cg, load32(scr, PROF_OFF));
+    // `docs/315`：`domain_clock_explicit` 关掉"回边即 tick"（默认自动）。
+    let m: u32 = emit_module(unit, ctoks, ir, cg, load32(scr, PROF_OFF),
+                             sw_state_named(unit, sw, "domain_clock_explicit"));
     if m == 0 {
         // **发射器自己的诊断通道**（`#775`）：先问它是不是"有一条规则降不下去"。
         // 那条比容量溢出更具体 —— 有规则号、有 token 位置，能指出是哪一处。
@@ -161,6 +166,9 @@ new <<<
             let em: str = "the self-hosted emitter cannot lower a call with more than 20 arguments -- split the call into smaller ones";
             if ec == 3 {
                 em = "a defer takes at most 4 arguments -- bind them to locals first";
+            }
+            if ec == 2 {
+                em = "too many `in SPACE` bindings in one function -- split the function";
             }
             if ec == 4 {
                 em = "too many defer statements in one function -- split the function";

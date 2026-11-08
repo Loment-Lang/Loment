@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://loment-lang.github.io/loment-site/">Website</a> ·
-  <a href="https://github.com/Loment-Lang/loment/releases/tag/v0.1.5">Download 0.1.5</a> ·
+  <a href="https://github.com/Loment-Lang/loment/releases/tag/v0.1.5.1">Download 0.1.5.1</a> ·
   <a href="QUICKSTART.md">Quick start</a> ·
   <a href=".claude/skills/loment/SKILL.md">Language guide</a> ·
   <a href="standard/LLS.md">Standard</a> ·
@@ -72,8 +72,8 @@ hello from Loment
 ## Getting help
 
 Ask in an [issue](https://github.com/Loment-Lang/loment/issues), on
-[Discord](https://discord.gg/rGw7NRNU) or on [Mastodon](https://mastodon.social/@Loment).
-Questions are as welcome as bug reports.
+[Discord](https://discord.gg/rGw7NRNU), [Mastodon](https://mastodon.social/@Loment) or
+[Bluesky](https://bsky.app/profile/loment.bsky.social). Questions are as welcome as bug reports.
 
 ## Contributing
 

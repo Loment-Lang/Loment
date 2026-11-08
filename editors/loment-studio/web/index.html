@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Loment Studio · 源码参数台</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Loment<span>Studio</span></div>
+    <div class="filebar">
+      <input id="path" value="loment/selfhost/codegen.lomt" spellcheck="false" autocomplete="off">
+      <button id="open">打开</button>
+    </div>
+    <button id="add" class="ghost" title="新增一个参数">+ 新增</button>
+    <div class="spacer"></div>
+    <button id="check">校验</button>
+    <button id="apply" class="commit" disabled>应用 <span id="pending" class="num">0</span></button>
+    <div class="status" id="status"></div>
+  </header>
+
+  <aside class="rail">
+    <section class="rail-block">
+      <h3>文件</h3>
+      <div id="fileinfo" class="fileinfo"></div>
+    </section>
+    <section class="rail-block">
+      <h3>从这里开始</h3>
+      <ol class="guide">
+        <li>顶部填一个 <code>.lomt</code> 路径，点 <b>打开</b>。</li>
+        <li>改值只会进入 <em>待应用</em>，右侧先看差异。</li>
+        <li>点 <b>应用</b> 写回，再点 <b>校验</b> 跑 <code>lomentc --check</code>。</li>
+      </ol>
+    </section>
+    <section class="rail-block" id="railnav"></section>
+  </aside>
+
+  <main class="main">
+    <div class="modes" role="tablist">
+      <button data-mode="params" class="on" role="tab">参数</button>
+      <button data-mode="env" role="tab">环境矩阵</button>
+      <span class="spacer"></span>
+      <input id="search" placeholder="搜索参数名或说明" autocomplete="off">
+      <span id="count" class="muted num"></span>
+    </div>
+    <div class="body" id="body">
+      <div class="params" id="params">
+        <div class="empty">
+          <p class="eyebrow">参数台</p>
+          <h2>把一份源码的开关与数值摊开</h2>
+          <p>打开一个 <code>.lomt</code>，这里会列出它的运行模式、开关、能力域、常量和项目配置；每一项都能直接改，并且只替换那一个值。</p>
+          <p class="suggest">
+            <button data-path="loment/selfhost/codegen.lomt">codegen.lomt</button>
+            <button data-path="loment/tools/lomelf.lomt">lomelf.lomt</button>
+            <button data-path="loment/lib/lumtui.lomt">lumtui.lomt</button>
+          </p>
+        </div>
+      </div>
+      <div class="matrix" id="matrix" hidden></div>
+    </div>
+  </main>
+
+  <aside class="aside">
+    <section class="aside-block diffpane">
+      <h3>待应用</h3>
+      <div id="diff" class="diff"><span class="muted">没有改动</span></div>
+    </section>
+    <section class="aside-block helppane">
+      <h3>说明</h3>
+      <div id="help" class="help"><span class="muted">点一行参数，或点矩阵里的一格。</span></div>
+    </section>
+  </aside>
+
+  <footer class="diags">
+    <h3>诊断</h3>
+    <div id="diags" class="diaglist"><span class="muted">还没有校验。</span></div>
+  </footer>
+
+  <div class="modal" id="modal" hidden>
+    <form class="card" id="addform">
+      <h2>新增参数</h2>
+      <label>种类
+        <select id="addkind">
+          <option value="const">常量 const</option>
+          <option value="switch">开关 set choose</option>
+          <option value="capability">能力域 capability</option>
+          <option value="conf">项目配置 loment.conf</option>
+        </select>
+      </label>
+      <div id="addfields"></div>
+      <div class="modal-actions">
+        <button type="button" id="addcancel">取消</button>
+        <button type="button" id="addpreview">预览</button>
+        <button type="button" id="addcommit" class="commit">写入</button>
+      </div>
+      <p class="hint" id="addhint"></p>
+    </form>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

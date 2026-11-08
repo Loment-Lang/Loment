@@ -20,6 +20,11 @@ sys.path.insert(0, str(ROOT / "tools"))
 import loment_suite  # noqa: E402
 import loment_update as lu  # noqa: E402
 import loment_hotfix as hf  # noqa: E402
+import loment_release  # noqa: E402
+
+#: 夹具的基线跟着**树里的版本**走。写死 `0.1.5` 会在下一次升版本时让 11 条判据一起红
+#: —— 那不是被测行为变了，是夹具忘了自己是哪个基线。
+BASE = loment_release.RELEASE
 
 TESTS: list = []
 
@@ -126,12 +131,12 @@ def _reject(candidate: Path, tree: Path, **kw) -> str:
 
 @test
 def test_manifest_is_computed_from_the_tree() -> None:
-    man = lu.manifest(ROOT, "v0.1.5-hot.1")
+    man = lu.manifest(ROOT, f"v{BASE}-hot.1")
     lom = sorted(ROOT.glob("lom/*.lom"))
     assert set(man["contract"]) == {p.relative_to(ROOT).as_posix() for p in lom}
     assert man["contract"]["lom/fuai.lom"] == hf.digest_file(ROOT / "lom" / "fuai.lom")
     assert man["language"] == lu.read_release(ROOT)
-    assert man["baseline"] == "0.1.5"
+    assert man["baseline"] == BASE
     assert man["capabilities"] == []
     assert len(man["identity"]) == 64
     assert man["fixed_core"] == lu.fixed_core_digest(ROOT)
@@ -144,7 +149,7 @@ def test_implementation_only_candidate_is_accepted() -> None:
         t = Path(t)
         base = _tree(t / "base")
         cand_tree = _tree(t / "cand", tool_append="\n// one implementation fix\n")
-        cand = _candidate(t / "cand-dir", cand_tree, "v0.1.5-hot.1")
+        cand = _candidate(t / "cand-dir", cand_tree, f"v{BASE}-hot.1")
         man = lu.check(cand, base)
         assert man["identity"] != lu.identity(base)
         print("      只改实现的候选被接受，且身份变了")
@@ -156,7 +161,7 @@ def test_contract_change_is_rejected() -> None:
         t = Path(t)
         base = _tree(t / "base")
         cand_tree = _tree(t / "cand", contract_append="\n")
-        cand = _candidate(t / "cand-dir", cand_tree, "v0.1.5-hot.1")
+        cand = _candidate(t / "cand-dir", cand_tree, f"v{BASE}-hot.1")
         assert _reject(cand, base) == "contract"
         print("      契约（lom/*.lom）动一个字节 —— 拒绝")
 
@@ -167,7 +172,7 @@ def test_language_change_is_rejected() -> None:
         t = Path(t)
         base = _tree(t / "base")
         cand_tree = _tree(t / "cand", release="0.1.6")
-        # 0.1.6 的构建自然打 v0.1.6 的 tag；跑着的 0.1.5 必须拒绝它。
+        # 0.1.6 的构建自然打 v0.1.6 的 tag；跑着的当前版本必须拒绝它。
         cand = _candidate(t / "cand-dir", cand_tree, "v0.1.6-hot.1")
         assert _reject(cand, base) == "language"
         print("      语言版本变了（树里 RELEASE 改）—— 拒绝")
@@ -175,7 +180,7 @@ def test_language_change_is_rejected() -> None:
 
 @test
 def test_baseline_change_is_rejected() -> None:
-    """基线变了（tag 说 0.1.6，树里 RELEASE 还是 0.1.5）—— 生产侧就不许出这份清单。"""
+    """基线变了（tag 说 0.1.6，树里还是当前版本）—— 生产侧就不许出这份清单。"""
     with tempfile.TemporaryDirectory() as t:
         t = Path(t)
         cand_tree = _tree(t / "cand")
@@ -185,7 +190,7 @@ def test_baseline_change_is_rejected() -> None:
             assert "基线" in str(e), str(e)
         else:
             raise AssertionError("tag 与树里的 RELEASE 不一致，清单却出出来了")
-        print("      tag 说 0.1.6、RELEASE 说 0.1.5 —— 生产侧拒绝")
+        print(f"      tag 说 0.1.6、RELEASE 说 {BASE} —— 生产侧拒绝")
 
 
 @test
@@ -194,7 +199,7 @@ def test_capability_change_is_rejected() -> None:
         t = Path(t)
         base = _tree(t / "base")
         cand_tree = _tree(t / "cand", tool_append="\ncapability fs : fs[0..1]\n")
-        cand = _candidate(t / "cand-dir", cand_tree, "v0.1.5-hot.1")
+        cand = _candidate(t / "cand-dir", cand_tree, f"v{BASE}-hot.1")
         assert _reject(cand, base) == "capabilities"
         print("      能力清单多一条 —— 拒绝")
 
@@ -206,7 +211,7 @@ def test_fixed_core_change_is_rejected() -> None:
         fixed = ["loment/tools/lomcli.lomt"]
         base = _tree(t / "base", fixed=fixed)
         cand_tree = _tree(t / "cand", fixed=fixed, tool_append="\n// fix\n")
-        cand = _candidate(t / "cand-dir", cand_tree, "v0.1.5-hot.1")
+        cand = _candidate(t / "cand-dir", cand_tree, f"v{BASE}-hot.1")
         assert _reject(cand, base) == "fixed-core"
         print("      不可换的核动了 —— 拒绝")
 
@@ -217,7 +222,7 @@ def test_signature_tamper_is_rejected() -> None:
         t = Path(t)
         base = _tree(t / "base")
         cand_tree = _tree(t / "cand", tool_append="\n// fix\n")
-        cand = _candidate(t / "cand-dir", cand_tree, "v0.1.5-hot.1")
+        cand = _candidate(t / "cand-dir", cand_tree, f"v{BASE}-hot.1")
         lu.check(cand, base)
         sums = cand / "SHA256SUMS"
         sums.write_text(sums.read_text(encoding="utf-8") + "\n", encoding="utf-8")
@@ -231,7 +236,7 @@ def test_stable_release_is_rejected() -> None:
         t = Path(t)
         base = _tree(t / "base")
         cand_tree = _tree(t / "cand", tool_append="\n// fix\n")
-        cand = _candidate(t / "cand-dir", cand_tree, "v0.1.5")
+        cand = _candidate(t / "cand-dir", cand_tree, f"v{BASE}")
         assert _reject(cand, base) == "not-prerelease"
         print("      稳定版带着清单 —— 拒绝（只有 Pre-Release 是热更新）")
 
@@ -242,7 +247,7 @@ def test_announcement_only_tag_is_rejected() -> None:
         t = Path(t)
         base = _tree(t / "base")
         cand_tree = _tree(t / "cand", tool_append="\n// fix\n")
-        cand = _candidate(t / "cand-dir", cand_tree, "v0.1.5-pre")
+        cand = _candidate(t / "cand-dir", cand_tree, f"v{BASE}-pre")
         assert _reject(cand, base) == "announcement-only"
         print("      `-pre` 宣告版（今天不出包）—— 拒绝")
 
@@ -253,7 +258,7 @@ def test_replay_is_rejected() -> None:
         t = Path(t)
         base = _tree(t / "base")
         cand_tree = _tree(t / "cand", tool_append="\n// fix\n")
-        cand = _candidate(t / "cand-dir", cand_tree, "v0.1.5-hot.1")
+        cand = _candidate(t / "cand-dir", cand_tree, f"v{BASE}-hot.1")
         state = t / "state.json"
         lu.check(cand, base, state=state)
         assert _reject(cand, base, state=state) == "replay"
@@ -266,9 +271,9 @@ def test_version_must_move_forward() -> None:
         t = Path(t)
         base = _tree(t / "base")
         cand_tree = _tree(t / "cand", tool_append="\n// fix\n")
-        cand = _candidate(t / "cand-dir", cand_tree, "v0.1.5-hot.1")
-        assert _reject(cand, base, current="v0.1.5-hot.2") == "version"
-        lu.check(cand, base, current="v0.1.5-hot.2", allow_rollback=True)
+        cand = _candidate(t / "cand-dir", cand_tree, f"v{BASE}-hot.1")
+        assert _reject(cand, base, current=f"v{BASE}-hot.2") == "version"
+        lu.check(cand, base, current=f"v{BASE}-hot.2", allow_rollback=True)
         print("      版本不前进 —— 拒绝；显式回滚 —— 放行")
 
 
@@ -278,14 +283,14 @@ def test_cli_accepts_the_same_candidate() -> None:
         t = Path(t)
         base = _tree(t / "base")
         cand_tree = _tree(t / "cand", tool_append="\n// fix\n")
-        cand = _candidate(t / "cand-dir", cand_tree, "v0.1.5-hot.1")
+        cand = _candidate(t / "cand-dir", cand_tree, f"v{BASE}-hot.1")
         r = subprocess.run(
             [sys.executable, str(ROOT / "tools" / "loment_update.py"), "check",
              "--from", str(cand), "--at", str(base)],
             capture_output=True, text=True,
         )
         assert r.returncode == 0, r.stderr
-        assert r.stdout.startswith("ACCEPT v0.1.5-hot.1"), r.stdout
+        assert r.stdout.startswith(f"ACCEPT v{BASE}-hot.1"), r.stdout
         print("      命令行入口给出同一个答案")
 
 

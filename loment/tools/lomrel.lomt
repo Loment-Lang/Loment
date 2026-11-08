@@ -273,6 +273,7 @@ tools/loment_spec_oracle_test.py
 tools/lvm_t3.py
 tools/lvm_t3_test.py
 tools/lvm_stability_test.py
+tools/lvm_a0_test.py
 tools/lvm_perf_test.py
 tools/loment_net_test.py
 tools/lomt_from.py
@@ -326,6 +327,7 @@ editors/vim/ftplugin/*.vim
 tools/loment_filetype.py
 tools/loment_filetype_test.py
 tools/loment_eol.py
+tools/loment_geometry.py
 tools/loment_dist.py
 tools/loment_dist_test.py
 tools/loment_sign.py
@@ -426,6 +428,17 @@ tools/loment_hotload_exec.py
 tools/loment_hotload_test.py
 tools/loment_hotcore_test.py
 tools/loment_hotbuild_test.py
+editors/loment-studio/README.md
+editors/loment-studio/param-catalog.json
+editors/loment-studio/Cargo.toml
+editors/loment-studio/Cargo.lock
+editors/loment-studio/crates/params/src/*.rs
+editors/loment-studio/crates/cli/src/*.rs
+editors/loment-studio/crates/server/src/*.rs
+editors/loment-studio/web/*
+editors/loment-studio/examples/*
+tools/loment_studio_test.py
+tools/lmgr_test.py
 ";
 }
 
@@ -779,7 +792,7 @@ fn emit_json(mem: ptr, n: u32, out: ptr) -> u32 {
     k = put_str(k, out, " \"release\": \"");
     // 与 tools/loment_release.py 的 RELEASE 必须**逐字节一致** —— 版本名有两个实现,
     // 这里是自举镜像那一份; 判据 loment_rel_test 会对着比。
-    k = put_str(k, out, "0.1.5");
+    k = put_str(k, out, "0.1.5.1");
     k = put_str(k, out, "\",\n");
     k = put_str(k, out, " \"files\": [\n");
     let i: u32 = 0;

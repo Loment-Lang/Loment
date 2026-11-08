@@ -66,8 +66,8 @@ OUT = ROOT / "loment" / "build" / "release-manifest.json"
 # **工具链本身一个字没动**（那八个二进制与 0.1.4.5 逐字节相同），所以这是补丁不是新版。
 # tag = `v0.1.4.5-quickfix`（`release.yml` 只对 `-pre` 结尾的 tag 整条跳过；这一版带产物，
 # 与那种"只发通知"的宣告版不是一回事）。
-RELEASE = "0.1.5"
-RELEASE_NAME = "0.1.5"  # 人读显示名 (发行包/文档用同一个真源)
+RELEASE = "0.1.5.1"
+RELEASE_NAME = "0.1.5.1"  # 人读显示名 (发行包/文档用同一个真源)
 
 # 报错器 (`lomenterr`) **自己的版本号** —— 与语言版本是**两条线** (2026-10-13 用户定)。
 #
@@ -199,6 +199,7 @@ GLOBS = [
     "tools/loment_spec_oracle_test.py",
     "tools/lvm_t3.py", "tools/lvm_t3_test.py",
     "tools/lvm_stability_test.py",
+    "tools/lvm_a0_test.py",
     "tools/lvm_perf_test.py",
     # `lom/net.lom` 那条 L0 契约的判据 (docs/229): 四处对账 + 自证会红。
     # **位置与自举那份 `lomrel.lomt` 对齐**（两份清单的顺序就是它们的顺序）。
@@ -280,6 +281,8 @@ GLOBS = [
     "tools/loment_filetype.py", "tools/loment_filetype_test.py",
     # 行尾门禁 (docs/161): 本清单的 sha 对 CRLF 免疫, 但自举判据按原始字节读源码 —— 两者配对
     "tools/loment_eol.py",
+    # 域几何（docs/315）：树 / 图从代码里读出来的报告（判据在 lomentc_test）
+    "tools/loment_geometry.py",
     # 发行包 (docs/162): 命令安装 + 自解压安装包
     "tools/loment_dist.py", "tools/loment_dist_test.py",
     # 签名 (docs/163): Authenticode + SHA256SUMS 分离签名
@@ -414,6 +417,16 @@ GLOBS = [
     "tools/loment_hotload.py", "tools/loment_hotload_exec.py",
     "tools/loment_hotload_test.py", "tools/loment_hotcore_test.py",
     "tools/loment_hotbuild_test.py",
+    # 源码参数台 (docs/310): Rust 后端 + 无构建步骤前端。位置与 lomrel.lomt 逐行对齐。
+    "editors/loment-studio/README.md", "editors/loment-studio/param-catalog.json",
+    "editors/loment-studio/Cargo.toml", "editors/loment-studio/Cargo.lock",
+    "editors/loment-studio/crates/params/src/*.rs",
+    "editors/loment-studio/crates/cli/src/*.rs",
+    "editors/loment-studio/crates/server/src/*.rs",
+    "editors/loment-studio/web/*", "editors/loment-studio/examples/*",
+    "tools/loment_studio_test.py",
+    # lmgr 套件（docs/303）：38 槽注册表与能力表。**与 lomrel.lomt 同一位置（末尾）**。
+    "tools/lmgr_test.py",
 ]
 
 

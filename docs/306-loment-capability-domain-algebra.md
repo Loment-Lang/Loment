@@ -1,6 +1,6 @@
 # 306 · Loment 能力域代数：安全/危险 × 一般/时类
 
-> 状态: **设计稿（未实装）**（2026-11-05）
+> 状态: **设计稿；18 种已全部实装**（2026-11-05 设计 / 2026-11-06 实装前 10 种 / 2026-11-07 补齐余下 8 种，见 §12）
 > 上游: `docs/146`（现行能力域语义）· `docs/208`（声明式不可观测）· `docs/246`（安全点）·
 > `docs/262`（LSPE）· `docs/303`（LomentManager 的域/槽）· `lom/fuai.lom`（`dom_*` / `qual_*`）
 > 一句话: 现行 `capability x : space[lo..hi]` 是**一个闭区间常量**；本文把它拆成四个正交维度
@@ -476,3 +476,61 @@ guard@3 heap(i);     // 钉住第 3 代；换代后这里抛"陈旧实例"
    枚举域被放进"空间种类"这一维；若你更想要枚举，两者可以换位。
 4. **第八条时律用"代域"还是"租约域"？**（§5.2）——本文选代域（它接已有安全点），
    租约被降成"纪元 ⊕ 扩展"的复合。
+
+---
+
+## 12. 实装状态（2026-11-06）
+
+**已实装全部 18 种**，两套实现（`tools/lomentc.py` + `loment/selfhost/*.lomt`）逐字节对齐：
+
+| 维度 | 已实装 | 写法 |
+|---|---|---|
+| 形状 | 常规 / 点 / 前无限 / 后无限 / 全域 | `[a..b]` / `[a..a]` / `[()..HI]` / `[LO..()]` / `[()..()]` |
+| 极性 | 危险域 | `... danger` |
+| 时律 | 纪元 / 遥远 / 滑窗 / 周期 / 衰减 / 生长 / 自适应 / 代 | `epoch(N)` / `far(N)` / `sliding(N)` / `cyclic(P)` / `decaying(N)` / `growing(N)` / `adaptive` / `generational(N)` |
+| 语境类 | 消耗 / 主体 / 见证 / 流向 / 可达 | `consumed(N)` / `subject(MASK)` / `witnessed(N)` / `flow` / `reachable(K)` |
+
+**虚拟钟**：`tick;` 语句把 `@__loment_now` 加一。除 `consumed` / `witnessed` / `reachable`
+外，所有时律都是 `now`（或位置）的**纯函数**。
+
+**判决点**：两个后端都发
+`@__loment_guard2(cap, idx, aux, lo, hi, kind, param, flags)`（Rust 侧同名函数）。
+`aux` 是语境类的第二个实参（主体号 / 票号 / 目标节点），其余一律 0；`flags` 的 bit0 / bit1
+是下端 / 上端无界。审计仍只在**放行支**加一（`docs/146` 属性 1/2 不变）。
+
+**七种新域的可观察语义**（`kind` 编号见 `CAP_KIND_ID`）：
+
+| # | 写法 | 通过条件 |
+|---|---|---|
+| 8 | `cyclic(P)` | `(idx % P)` 落在形状里；要求 `P > hi`（静态检查） |
+| 9 | `generational(N)` | 形状不变，**极性随代数翻转**：`in(idx) ≠ ((now/N) & 1)` |
+| 10 | `adaptive` | 宽度随质量缩放：`idx ≤ lo + (hi−lo)·q/255`；`quality cap = q;` 喂 0..255，默认 255 |
+| 11 | `subject(MASK)` | `in(idx) ∧ (MASK >> (aux & 63)) & 1`（`aux` = 主体号） |
+| 12 | `witnessed(T)` | `in(idx) ∧ wit[cap][aux & 63] < T`，放行后该票计数 +1（`aux` = 票号） |
+| 13 | `flow` | `(idx << 16 | aux & 0xffff)` 落在形状里（形状是**打包后的边**，`idx` = 源、`aux` = 目标） |
+| 14 | `reachable(K)` | `in(idx) ∧ obl[cap][idx & 63] = 0`，放行后登记 `now+K`；`discharge cap(x);` 结清，过期或未登记都 trap |
+
+**语言侧约束**（两套实现都判）：
+
+- 时律参数 ∈ (0, 2^24)（自举侧把它打包进表项剩下的 24 位）；
+- `consumed` 与 `reachable` 必须有界，且域宽 ≤ 64（每格一个计数器 / 义务槽）；
+- `cyclic` 要求有界且周期 > 上界；`generational` / `adaptive` / `flow` 必须有界；
+- `subject` / `witnessed` / `flow` **必须**带第二个实参，其余律**不接受**第二个实参；
+- `quality` 只用于 `adaptive`，`discharge` 只用于 `reachable`；
+- 静态字面量检查覆盖 `regular` / `danger` / `cyclic`（回绕后判）——其余依赖钟或第二实参；
+- 无界侧在 `CapDomain` / `@__loment_caps` 里用 0 / MAX 表示（表仍是四元组）。
+
+**诚实边界**（这七条都是"语言侧可判的那一半"，不是完整语义）：
+
+- `subject` 的主体号是**调用方给的实参**，不是不可伪造的令牌（那要线性值，见 `docs/307` §10）；
+- `witnessed` 的票号同样是实参：语言只保证"同一张票只能用 T 次"，不保证票不可伪造；
+- `flow` 的形状是**打包边的一个区间**，不是任意边集（一般边集要改 IR 数据形状，见 §10 C4）；
+- `reachable` 是 `docs/308` §2.4 的 **dynamic 档**：登记 + 期限 + 结清，不是有界模型检查；
+  期限在"该域的下一次事件"（guard / discharge）上核，不靠 `tick` 扫描；
+- 周期域没有"每格时间戳"，代域没有接 GC/热更新的安全点 —— 它们是时钟的纯函数。
+
+**仍未实装**：域树 / 域图 / 扩展域 / 工具域（§6）、`docs/308` 的嵌套与驱动环、
+以及 `reachable` 的静态有界检查（C5，独立工具）。**没有动 `lom/*.lom`**。
+
+**域进入代码**：块级域（`domain NAME : SPACE[lo..hi] { … }`）、值的空间标签
+（`let a: [u32; 64] in disk`）与自动守卫见 `docs/314`；顶层 `capability` 仍是整单元的形式。

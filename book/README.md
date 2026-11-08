@@ -4,7 +4,7 @@ Two books, one language.
 
 | Book | What it is | Start here |
 |---|---|---|
-| **Using Loment** (this book) | How to install the toolchain, write programs, and use the language from first principles, with a project in every part. | [book/src/00-introduction.md](src/00-introduction.md) |
+| **Using Loment** (this book) | How to install the toolchain, write programs, and use the language from first principles. Eight parts, from the first program to capability domains, the artifact's dimensions, and the interfaces that leave the language. | [book/src/00-introduction.md](src/00-introduction.md) |
 | **Loment Development Contribution Plan** | How the project is built and how to change it: the repository, the gate, the two compilers, the bootstrap chain, releases, the roadmap, and the architecture tour. | [contributing/src/00-introduction.md](../contributing/src/00-introduction.md) |
 
 Two practice tracks go with the usage book:
@@ -23,10 +23,15 @@ quietly. `tools/loment_book_site.py` renders the two books into the Pages site, 
 
 ## The one thing that is different
 
-Loment is a systems language with capabilities. Everything else — the Rust-flavoured syntax,
-structs, enums, `match`, `Result`, generics, traits — is familiar. The part worth slowing down for
-is [capability domains](src/11-capabilities.md): a unit declares what it may reach, and `guard`
-is a runtime check against that declaration.
+Loment is a systems language with capabilities. Everything else — the Tur syntax, structs, enums,
+`match`, `Result`, generics, traits — is familiar. The part worth slowing down for is the
+[domains unit](src/23-general-domains.md): a unit declares what it may reach, and `guard` is a
+runtime check against that declaration. The unit has four chapters — general, temporal and
+context domains, then a chapter on using them together — because the same declaration grows a
+clock and then a context.
+
+The book is written for the default grammar, **Tur 2026.3**. Chapter 5 covers the editions, and
+chapter 20 covers the syntax that Tur 2026.2 added.
 
 ## What the usage book does not cover
 

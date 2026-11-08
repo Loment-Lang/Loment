@@ -1,11 +1,36 @@
 # Hello, world
 
-The first chapter printed a fixed string. A program that can only print one string is not a
-language, so this chapter adds numbers — and in doing so shows why Loment has no `printf`.
+The first chapter printed a fixed string. A language needs numbers as well, and Loment has no
+`printf`, so this chapter builds the two pieces of output the rest of the book uses: `print` for
+text and `print_num` for integers.
+
+## A program has a module and an entry
+
+```rust,run
+module hello
+
+choose runtime
+
+fn main() {
+    print("hello from Loment\n");
+    print_num(2026);
+    print("\n");
+}
+```
+<!-- expect: hello from Loment
+2026 -->
+
+Every file starts with `module <name>`. The name identifies the unit; it does not have to match
+the filename. `choose runtime` is a project dimension (chapter 30): it asks for the runtime block,
+which carries `print_num`, `alloc`, `guard` and the collector. A program that writes only
+`print` can omit it; the examples in this book include it because they also print numbers.
+
+`fn main()` takes no parameters and returns nothing. The linker's stub calls it and exits with
+status 0 when it returns.
 
 ## Values and types
 
-Every `let` carries a type:
+Every binding carries a type:
 
 ```rust
 let count: u32 = 42;
@@ -20,102 +45,125 @@ let a: [u32; 3] = [1, 2, 3];
 | Type | What it holds |
 |---|---|
 | `u8 u16 u32 u64 i8 i16 i32 i64` | integers, unsigned and signed |
-| `bool` | `true` / `false` |
+| `bool` | `true` or `false` |
 | `str` | a pointer plus a byte length |
 | `ptr` | a raw address |
 | `[T; N]` | a fixed-size array |
-| `[T]` / `mut [T]` | a slice parameter (a borrowed view) |
-| a struct or enum name | your own type |
+| `[T]` and `mut [T]` | a borrowed slice, used as a parameter type |
+| a struct or enum name | a value of that type |
 
-There are no floats. If you need fractional values, scale them into integers (`314` for `3.14`) or
-keep them on the other side of an `extern fn` boundary.
+There are no floats. If you need fractional values, scale them into integers (`314` for `3.14`),
+or use the standard library's `f64` module, which stores IEEE-754 bit patterns in a `u64`. There
+is no `char` either: text is UTF-8 bytes, and a character is a byte or a codepoint you decode
+yourself.
 
-Conversions never happen by themselves. `x as u64` is the whole story; the two sides must be
+Conversions never happen by themselves. `x as u64` is the whole story, and both sides must be
 integers or a pointer.
 
 ## Printing a number
 
-`write` takes bytes. To print `42` you have to produce the two bytes `4` and `2` yourself. The
-standard shape, used all over this project, is: allocate a small buffer, fill it from the end, then
-write it.
+`print` takes a `str` and writes its bytes to standard output. `print_num` takes any integer
+type, writes its decimal form, and adds no newline:
 
 ```rust,run
 module numbers
 
 choose runtime
 
-fn write_str(fd: u64, s: str) -> i64 {
-    return syscall4(1, fd, str_ptr(s) as u64, str_len(s) as u64);
+fn main() {
+    let a: u32 = 7;
+    let b: i32 = -3;
+    print("a=");
+    print_num(a);
+    print(" b=");
+    print_num(b);
+    print("\n");
 }
+```
+<!-- expect: a=7 b=-3 -->
 
-fn write_dec(fd: u64, v: u32) {
-    let buf: ptr = alloc(12);
-    let n: u32 = 0;
-    let x: u32 = v;
-    if x == 0 {
-        store8(buf, 0, 48 as u8);
-        n = 1;
-    }
-    while x > 0 {
-        store8(buf, n, (48 + x % 10) as u8);
-        x = x / 10;
-        n = n + 1;
-    }
-    // the digits came out backwards; reverse them in place
-    let i: u32 = 0;
-    while i < n / 2 {
-        let lo: u8 = load8(buf, i) as u8;
-        let hi: u8 = load8(buf, n - 1 - i) as u8;
-        store8(buf, i, hi);
-        store8(buf, n - 1 - i, lo);
-        i = i + 1;
-    }
-    syscall4(1, fd, buf as u64, n as u64);
+The two calls are builtins, and they are the whole output layer of the language. Everything else
+is a system call or a library.
+
+Before `print_num` existed, every program carried its own decimal printer: allocate a buffer, fill
+it from the end, reverse it, call `write`. Chapter 8 shows that version, because the same
+technique is what you need for hexadecimal and for fixed-width fields. For ordinary debugging,
+`print_num` is the shorter path.
+
+## String escapes
+
+String literals accept exactly five escapes:
+
+| Escape | Byte |
+|---|---|
+| `\n` | newline |
+| `\t` | tab |
+| `\r` | carriage return |
+| `\0` | NUL |
+| `\\` | backslash |
+| `\"` | double quote |
+
+Any other escape is a syntax error, and the diagnostic names the accepted set. `"\x41"` is
+refused; write `"A"`. The restriction is deliberate: a string literal is a byte sequence, and a
+silent interpretation of an unknown escape would change those bytes.
+
+```rust,run
+module escapes
+
+fn main() {
+    print("tab:\there\nquote:\" done\n");
 }
+```
+<!-- expect: tab:	here
+quote:" done -->
 
-fn _start() {
-    write_dec(1, 42);
-    write_str(1, " ");
-    write_dec(1, 7);
-    write_str(1, "\n");
+## Comments and layout
+
+```rust
+// a line comment
+/* a block comment */
+/// a doc comment; `loment doc` extracts these
+```
+
+Whitespace is free-form. Statements end with `;`. `module` and `use` take no semicolon. There is
+no semicolon after a `struct`, `enum`, `fn`, `trait` or `impl` body.
+
+## Exit status
+
+A program that returns from `main` exits 0. A program can choose the status itself:
+
+```rust,run
+module status
+
+fn main() {
+    print("exiting with 0\n");
     syscall4(60, 0, 0, 0);
 }
 ```
-<!-- expect: 42 7 -->
+<!-- expect: exiting with 0 -->
 
-Read the loop: `let` declares, assignment updates, `while` loops, `%` and `/` are integer
-operators, `as u8` converts, and `alloc` hands you a pointer into the program's heap.
+The second argument of the `exit` call is the status. Replace `0` with `3` to exit with 3; the
+book's gate requires a runnable block to end at 0, so the example keeps the successful value.
+Chapter 19 turns that number into a test result.
 
-## Arithmetic and comparison
+## The shape you will see again
 
-```rust
-let a: u32 = 17;
-let b: u32 = 5;
-let q: u32 = a / b;        // 3, integer division truncates
-let r: u32 = a % b;        // 2
-let ok: bool = a > b && b != 0;
-```
-
-Operators, in precedence order as in Rust: `|| && == != < <= > >= | ^ & << >> + - * / %`, with
-unary `-` and `!`.
-
-Two rules that surprise people:
-
-- **Both sides of an operator must have the same width.** `u32 + u64` is not “promoted”; it is a
-  diagnostic. Convert explicitly.
-- **A shift count must have the same width as the shifted value** in the current backend; write
-  `x >> (n as u32)` rather than mixing `u64` and `u32`.
-
-## Comments
+Almost every program in this book follows the same outline:
 
 ```rust
-// line comment
-/* block comment */
-/// doc comment — `loment doc` extracts these
+module <name>
+
+choose runtime
+
+fn helper(...) -> T { ... }
+
+fn main() {
+    // build values
+    // call helpers
+    // print the result
+}
 ```
 
-## What about `main`?
-
-You may see `fn main() -> i32` in examples. `main` is an ordinary function name; it is **not** an
-entry point. A program that must run from a process entry point uses `_start`. `loment run` starts
-at `_start`; a unit with only `main` has no entry and cannot be executed by itself.
+The module names the unit, `choose` states a property of the whole artifact, helpers carry the
+logic, and `main` is a thin driver. When a chapter introduces a new construct, it slots into one
+of those four places.

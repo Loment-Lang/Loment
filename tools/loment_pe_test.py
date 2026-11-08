@@ -172,9 +172,11 @@ def _sections(blob: bytes) -> tuple[dict, list[tuple]]:
     size_hdr = struct.unpack_from("<I", blob, opt + 60)[0]
     entry = struct.unpack_from("<I", blob, opt + 16)[0]
     sec_align, file_align = struct.unpack_from("<II", blob, opt + 32)
+    stack_commit = struct.unpack_from("<Q", blob, opt + 80)[0]
     head = {"machine": machine, "nsec": nsec, "size_image": size_img,
             "size_headers": size_hdr, "entry": entry,
-            "sec_align": sec_align, "file_align": file_align}
+            "sec_align": sec_align, "file_align": file_align,
+            "stack_commit": stack_commit}
     st = opt + struct.unpack_from("<H", blob, pe + 20)[0]
     secs = []
     for i in range(nsec):
@@ -204,6 +206,11 @@ def test_pe_image_is_structurally_sane():
             assert head["size_headers"] and head["size_headers"] % head["file_align"] == 0, \
                 f"{src.name}: SizeOfHeaders 未按 FileAlignment 对齐 ({head['size_headers']})"
             assert head["size_image"] % head["sec_align"] == 0, f"{src.name}: SizeOfImage 未对齐"
+            # 自举编译器的递归下降要得深：提交不够时 Windows **不替我们长**（只给保留额度），
+            # 大单元（`std/ansi.lomt`）直接访问违例。8 MB 是实测的下限余量。
+            assert head["stack_commit"] >= 8 * 1024 * 1024, (
+                f"{src.name}: 栈只提交了 {head['stack_commit']} 字节 —— "
+                f"自举编译器在大单元上会崩")
             # 节区按 RVA 升序且互不重叠（早先 .text 固定 0x1000 / .data 固定 0x2000，
             # 文本一过一页两节就重叠）
             end = 0
@@ -1884,8 +1891,8 @@ def test_pe_surface_table_matches_the_artifact_counter():
 
 
 @test
-def test_pe_imports_two_dlls_with_the_socket_surface():
-    """导入表：两条描述符 + 终止项、两个 DLL 名、整个 ws2_32 面，且塞得进孪生那块落点。"""
+def test_pe_imports_every_dll_with_the_socket_surface():
+    """导入表：每个 DLL 一条描述符 + 终止项，ws2_32 与 pdh 的函数都在，且塞得进孪生那块落点。"""
     idata, slots = lomelf.build_pe_idata()
     d = lomelf.PE_IDATA_RVA
     got, k = [], 0
@@ -1898,7 +1905,13 @@ def test_pe_imports_two_dlls_with_the_socket_surface():
     assert got == [n for n, _f in lomelf.PE_DLLS], f"描述符指向的 DLL 不对: {got}"
     for nm in lomelf.PE_IMPORTS_WS2:
         assert nm in slots, f"ws2_32 少了 `{nm}`"
-    assert len(slots) == len(lomelf.PE_IMPORTS) + len(lomelf.PE_IMPORTS_WS2), \
+    for nm in lomelf.PE_IMPORTS_PDH:
+        assert nm in slots, f"pdh 少了 `{nm}`"
+    for nm in lomelf.PE_IMPORTS_PSAPI:
+        assert nm in slots, f"psapi 少了 `{nm}`"
+    assert len(slots) == (len(lomelf.PE_IMPORTS) + len(lomelf.PE_IMPORTS_WS2)
+                          + len(lomelf.PE_IMPORTS_PDH)
+                          + len(lomelf.PE_IMPORTS_PSAPI)), \
         "函数名有重名（`slots` 是按名字索引的平表，重名会静默覆盖）"
     # Import Directory 的 size 必须跟着描述符条数走（原先写死 40 = 一条 + 终止项）
     assert lomelf.PE_IMPORT_DESC_BYTES == 20 * (len(lomelf.PE_DLLS) + 1)

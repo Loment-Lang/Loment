@@ -358,6 +358,119 @@ def test_gc_l2_epoch_bounds_the_heap():
     print(f"      alpha 跑通 (rc={got[0]})；manual 耗尽 (rc={got[1]}) —— 块纪元是真的")
 
 
+#: 深链探针（`#1444`）：10 个节点，**从链尾往链头建** —— 于是每条边都指向**低地址**，
+#: 而链头（根）是**最高地址**的那一块。传播每一趟按地址顺序扫：先在中间标上新的一块，
+#: 再扫到链头，链头指向的那块**已经是标记状态**。`markp` 对已标记块回 0 ——
+#: 若这一趟的累加器被这个 0 **覆盖**，外层"还有新标记吗"就读成否，不动点提前停，
+#: 剩下的链被清扫掉（use-after-free，不是泄漏）。
+#:
+#: 链头放在 `ptr` 局部里（根表只登记 `ptr`/`str`/切片槽）—— 不然它根本不算活根，
+#: 判据就测不到传播，只测到"没根的东西当然会被收"。
+_GCDEEP_SRC = """module gcdeep
+choose %s
+choose runtime
+
+fn w64(p: ptr, off: u32, v: u64) {
+    let i: u32 = 0;
+    while i < 8 {
+        store8(p, off + i, ((v >> (i * 8)) & 255) as u8);
+        i = i + 1;
+    }
+}
+
+fn r64(p: ptr, off: u32) -> u64 {
+    let v: u64 = 0;
+    let i: u32 = 0;
+    while i < 8 {
+        let b: u64 = load8(p, off + i) as u64;
+        v = v + (b << (i * 8));
+        i = i + 1;
+    }
+    return v;
+}
+
+fn push(head: ptr, v: u32) -> ptr {
+    let p: ptr = alloc(16);
+    store8(p, 0, (v & 255) as u8);
+    w64(p, 8, head as u64);
+    return p;
+}
+
+fn walk(head: ptr) -> u32 {
+    let acc: u32 = 0;
+    let cur: u64 = head as u64;
+    let rounds: u32 = 0;
+    while cur != 0 && rounds < 64 {
+        let p: ptr = cur as ptr;
+        acc = acc + (load8(p, 0) as u32);
+        cur = r64(p, 8);
+        rounds = rounds + 1;
+    }
+    return acc;
+}
+
+fn _start() {
+    let head: ptr = alloc(16);
+    store8(head, 0, (1 & 255) as u8);
+    w64(head, 8, 0);
+    let i: u32 = 0;
+    while i < 9 {
+        head = push(head, i + 2);
+        i = i + 1;
+    }
+    let n: u32 = 32;
+    let j: u32 = 0;
+    while j < 4000 {
+        let t: ptr = alloc(n);
+        store8(t, 0, 0);
+        j = j + 1;
+    }
+    let sum: u32 = walk(head);
+    if sum == 55 {
+        syscall4(60, 55, 0, 0);
+    }
+    syscall4(60, 3, 0, 0);
+}
+"""
+
+
+@test
+def test_gc_marks_a_deep_backward_chain():
+    """`gc_auto` / `gc_auto_alpha` 下，**反向地址的深链**整条都要活下来（`#1444`）。
+
+    **Why**：传播的不动点累加器曾经写成 `phi [... , %wr]` —— `markp` 对**已标记**的块
+    返回 0，于是同一趟里"先标上新块、再扫到指向已标记块的链头"会把累加器清零，
+    外层循环以为没有新标记就停了。剩下的链被 `__loment_sweep` 收回，
+    后续分配把那些块重写 —— **可达对象被释放**。
+
+    **How to apply**：10 个节点从尾往头建（`push` 每次把新节点插在头前），
+    值 1..10；链头存在 `ptr` 局部里，所以它是根。用**动态尺寸**的 `alloc(n)` 冲掉
+    128 KB（4000 × 32 B）触发多次回收 —— 字面量尺寸会被 L0 提走，压根不落到堆上。
+    走完整条链的和必须是 55；少一个节点、或半路读到被重写的块，退出码就是 3。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = []
+        for tier in ("gc_auto", "gc_auto_alpha"):
+            src = td / f"{tier}.lomt"
+            src.write_text(_GCDEEP_SRC % tier, encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"{tier}.native"
+            nat.write_bytes(blob)
+            got.append(_run_bin(nat, tier, td, timeout=30)[0])
+    assert got[0] == 55, (
+        f"`gc_auto` 下深链被扫断了：退出码 {got[0]}（期望 55 = 1+…+10）。"
+        "要么传播的不动点提前停（累加器被 `markp` 的 0 抹掉），要么清扫把可达块收了")
+    assert got[1] == 55, (
+        f"`gc_auto_alpha` 下深链被扫断了：退出码 {got[1]}（期望 55）。"
+        "两档共用 `__loment_propagate`，只修一档这里就会红")
+    print(f"      两个档位都走完 10 个节点（rc={got[0]}/{got[1]}）—— 传播的不动点是完整的")
+
+
 #: 块内精确（`docs/210` §2.9）**动态那一半为什么不在这个文件里**：
 #: 掩码今天只有**写**那一半（编在块头那个字里；`free` 只看它的**符号**）。而收集器的判据是
 #: **值** —— "这个数看起来像不像地址"；编译器证得出"不是指针"的值本来就不会长得像地址

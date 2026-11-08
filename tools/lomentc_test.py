@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import loment_suite  # noqa: E402
 import lomc  # noqa: E402
 import loment_diag  # noqa: E402
+import loment_geometry  # noqa: E402
 import lomentc  # noqa: E402
 import lspe  # noqa: E402
 import potato  # noqa: E402
@@ -829,6 +830,28 @@ def test_name_import_package_module_ambiguous_is_rejected():
 
 
 @test
+def test_project_deps_cannot_shadow_the_toolchain_standard_library():
+    """#980: `deps/std` 不能顶掉工具链自带的 `std`。
+
+    依赖混淆的落点就是这一层 —— 项目本地的 `deps/<名字>` 排在 store 前面。保留名
+    (`std` / `libl` / `host` / `internet` / `os`) 跳过这一层；非保留名照旧，项目本地的
+    `geom` 仍然先命中。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td)
+        std = proj / "deps" / "std"
+        std.mkdir(parents=True)
+        (std / "std.lomt").write_text("module std\npub fn magic() -> u32 { return 42; }\n",
+                                      encoding="utf-8")
+        got = lomentc.resolve_name("std", ROOT, proj)
+        assert got == ROOT / "lompi" / "store" / "std" / "0.1.0" / "std.lomt", got
+        geom = proj / "deps" / "geom"
+        geom.mkdir()
+        (geom / "geom.lomt").write_text("module geom\n", encoding="utf-8")
+        assert lomentc.resolve_name("geom", ROOT, proj) == geom / "geom.lomt"
+
+
+@test
 def test_store_modules_resolve_by_name_in_this_checkout():
     """**本仓也是一个 store 消费者**: `lompi/store` 就在仓里, 装出来的前缀才是
     `share/lompi/store`。没有 `<仓根>/lompi/store` 这一条, 在本仓写 `use vec` 一律 E018 ——
@@ -1467,15 +1490,25 @@ def test_p4_violating_guard_has_no_audit_side_effect():
         rs = lomentc.emit_rust(mod, ROOT)
         ir = lomentc.emit_llvm(mod, ROOT)
 
-    # ---- IR：trap 块在前、审计（getelementptr + store）在后 —— 也就是只在 gok 那支
-    seg = ir[ir.find("define i32 @f("):]
-    abort = seg.find("call void @__loment_abort()")
-    gok = seg.find("_gok:")
-    audit = seg.find("getelementptr [16 x i64], ptr @__loment_audit")
-    store = seg.find("store i64", audit) if audit >= 0 else -1
-    assert 0 <= abort < gok < audit < store, (
-        "IR 里审计不在 gok 块里（abort={} gok={} gep={} store={}）—— "
-        "越界那次会先写审计（属性 1 破了）".format(abort, gok, audit, store))
+    # ---- IR：判决搬进 `@__loment_guard2`（docs/306-308 的十种域共用一个判决点），
+    # 但**属性不变**：审计的 store 仍只在 `pass:` 块里，`fail:` 块只有 abort + unreachable。
+    # 断言比原来更强：它覆盖所有 kind，而不只是调用点那一条。
+    assert "call void @__loment_guard2(" in ir, "调用点没走统一判决"
+    rt = ir[ir.find("define internal void @__loment_guard2("):]
+    fail = rt.find("fail:")
+    abort = rt.find("call void @__loment_abort()", fail)
+    unreach = rt.find("unreachable", abort)
+    pas = rt.find("pass:", unreach)
+    # `docs/313`：`pass` 之后先分一次"要不要记账"（链上的祖先只判成员），
+    # 审计在 `aaudit` 块里 —— 仍然只有 `pass` 这一条路能到它。
+    aaudit = rt.find("aaudit:", pas)
+    audit = rt.find("getelementptr i64, ptr @__loment_audit", aaudit)
+    store = rt.find("store i64", audit) if audit >= 0 else -1
+    assert 0 <= fail < abort < unreach < pas < aaudit < audit < store, (
+        "IR 里审计不在 pass 块里（fail={} abort={} pass={} aaudit={} gep={} store={}）—— "
+        "越界那次会先写审计（属性 1 破了）".format(fail, abort, pas, aaudit, audit, store))
+    assert "br i1 %sn, label %done, label %aaudit" in rt[pas:aaudit], (
+        "`aaudit` 不是从 `pass` 的唯一那一支进来的")
 
     # ---- Rust：真跑。没有 rustc 就跳过这一半（环境限制，不改判据的结论面）
     rustc = shutil.which("rustc")
@@ -5483,6 +5516,788 @@ def test_lgc_window_saves_and_restores_even_on_return():
     assert "load i32, ptr %lgc.on.0" in head, "return 前没有恢复 on"
     assert head.rindex("load i32, ptr %lgc.on.0") > head.index("lgc.on.0 = alloca")
 
+
+@test
+def test_domains_ten_kinds_static():
+    """十种域的静态规则（docs/306 §2–§5）：形状、极性、参数、容量。"""
+    ok = ("module m\nchoose runtime\n"
+          "capability front : disk[()..3]\n"
+          "capability back  : disk[5..()]\n"
+          "capability allc  : disk[()..()]\n"
+          "capability dng   : mem[2..4] danger\n"
+          "capability ep    : quota[0..4] epoch(3)\n"
+          "capability farc  : slot[0..()] far(2)\n"
+          "capability sl    : trace[0..100] sliding(2)\n"
+          "capability dec   : lease[0..4] decaying(3)\n"
+          "capability gr    : cred[0..()] growing(2)\n"
+          "capability cons  : auth[0..1] consumed(1)\n"
+          "fn f() -> u32 { tick; return 0; }\n")
+    assert errs(ok) == [], errs(ok)
+
+    # 形状：前无限只判上界、后无限只判下界
+    assert errs("module m\nchoose runtime\ncapability c : disk[()..3]\n"
+                "fn f() -> u32 { guard c(100); return 0; }\n"), "前无限应当只判上界"
+    assert errs("module m\nchoose runtime\ncapability c : disk[5..()]\n"
+                "fn f() -> u32 { guard c(100); return 0; }\n") == []
+    # 极性的对偶：危险域的字面量落在禁止区内是**编译错误**
+    assert any("危险域" in x for x in errs(
+        "module m\nchoose runtime\ncapability c : mem[2..4] danger\n"
+        "fn f() -> u32 { guard c(3); return 0; }\n"))
+    assert errs("module m\nchoose runtime\ncapability c : mem[2..4] danger\n"
+                "fn f() -> u32 { guard c(9); return 0; }\n") == []
+    # 时律参数必须为正
+    assert any("参数必须为正" in x for x in errs(
+        "module m\nchoose runtime\ncapability c : q[0..4] epoch(0)\n"
+        "fn f() -> u32 { return 0; }\n"))
+    # consumed 必须有界且域宽 <= 64
+    assert any("必须有上下界" in x for x in errs(
+        "module m\nchoose runtime\ncapability c : q[0..()] consumed(1)\n"
+        "fn f() -> u32 { return 0; }\n"))
+    assert any("超过 64" in x for x in errs(
+        "module m\nchoose runtime\ncapability c : q[0..99] consumed(1)\n"
+        "fn f() -> u32 { return 0; }\n"))
+
+
+@test
+def test_domains_remaining_kinds_static():
+    """余下七种域（`docs/306` §5、`docs/307` §1–§5）：形状前提与实参个数。
+
+    每条都必须在**未修**的代码上是红的：这些构造在 0.1.5.1 里根本不存在，
+    参考实现会把 `cyclic(4)` 当成未知尾巴词 —— 所以这条判据的第一版先确认
+    "它现在能报"，不是"它一直能报"。
+    """
+    # cyclic：周期必须大于上界，否则回绕会放进域外的位置
+    assert any("必须大于上界" in x for x in errs(
+        "module m\nchoose runtime\ncapability c : ring[0..3] cyclic(2)\n"
+        "fn f() -> u32 { return 0; }\n"))
+    # adaptive / flow / generational / reachable：形状必须有上下界
+    assert any("必须有上下界" in x for x in errs(
+        "module m\nchoose runtime\ncapability a : t[0..()] adaptive\n"
+        "fn f() -> u32 { return 0; }\n"))
+    # reachable：义务槽按位置取模 64，域宽必须放得下
+    assert any("超过 64" in x for x in errs(
+        "module m\nchoose runtime\ncapability r : lease[0..99] reachable(2)\n"
+        "fn f() -> u32 { return 0; }\n"))
+    # 语境类三支必须带第二个实参
+    assert any("需要第二个实参" in x for x in errs(
+        "module m\nchoose runtime\ncapability s : auth[0..15] subject(3)\n"
+        "fn f(n: u32) -> u32 { guard s(n); return n; }\n"))
+    # 其余律不接受
+    assert any("不接受第二个实参" in x for x in errs(
+        "module m\nchoose runtime\ncapability c : disk[0..4]\n"
+        "fn f(n: u32) -> u32 { guard c(n, 1); return n; }\n"))
+    # quality 只喂自适应域
+    assert any("quality 只用于自适应域" in x for x in errs(
+        "module m\nchoose runtime\ncapability c : disk[0..4]\n"
+        "fn f() -> u32 { quality c = 10; return 0; }\n"))
+    # discharge 只结可达域的义务
+    assert any("discharge 只用于可达域" in x for x in errs(
+        "module m\nchoose runtime\ncapability c : disk[0..4]\n"
+        "fn f() -> u32 { discharge c(1); return 0; }\n"))
+    print("      余下七种域：七条形状/实参规则逐条报错")
+
+
+@test
+def test_domains_ten_kinds_runtime():
+    """十种域真跑一遍：形状 3 + 极性 1 + 时律 6。
+
+    **不是"字符串在不在"**：生成的 Rust 编出来真跑，虚拟钟直接拨到每个用例要的值。
+    """
+    import shutil
+    import subprocess
+    src = ("module m\nchoose runtime\n"
+           "capability reg   : disk[2..4]\n"
+           "capability front : disk[()..3]\n"
+           "capability back  : disk[5..()]\n"
+           "capability allc  : disk[()..()]\n"
+           "capability dng   : mem[2..4] danger\n"
+           "capability ep    : quota[0..4] epoch(3)\n"
+           "capability farc  : slot[0..()] far(2)\n"
+           "capability sl    : trace[0..100] sliding(2)\n"
+           "capability dec   : lease[0..4] decaying(3)\n"
+           "capability gr    : cred[0..()] growing(2)\n"
+           "capability cons  : auth[0..1] consumed(1)\n"
+           "fn f_reg(n: u32) -> u32 { guard reg(n); return n; }\n"
+           "fn f_front(n: u32) -> u32 { guard front(n); return n; }\n"
+           "fn f_back(n: u32) -> u32 { guard back(n); return n; }\n"
+           "fn f_allc(n: u32) -> u32 { guard allc(n); return n; }\n"
+           "fn f_dng(n: u32) -> u32 { guard dng(n); return n; }\n"
+           "fn f_ep(n: u32) -> u32 { guard ep(n); return n; }\n"
+           "fn f_farc(n: u32) -> u32 { guard farc(n); return n; }\n"
+           "fn f_sl(n: u32) -> u32 { guard sl(n); return n; }\n"
+           "fn f_dec(n: u32) -> u32 { guard dec(n); return n; }\n"
+           "fn f_gr(n: u32) -> u32 { guard gr(n); return n; }\n"
+           "fn f_cons(n: u32) -> u32 { guard cons(n); return n; }\n")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "d.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        mod = lomentc.load(p)
+        assert lomentc.check(mod) == [], lomentc.check(mod)
+        rs = lomentc.emit_rust(mod, ROOT)
+        ir = lomentc.emit_llvm(mod, ROOT)
+    # 十种域共用一个判决点；两种后端都得有它
+    assert "@__loment_guard2" in ir and "@__loment_tick" in ir
+    assert "__loment_guard2(" in rs and "__loment_tick()" in rs
+
+    rustc = shutil.which("rustc")
+    if not rustc:
+        print("      SKIP: 无 rustc（运行那一半）")
+        return
+    main = (
+        'include!("m.rs");\n'
+        "fn main() {\n"
+        "    std::panic::set_hook(Box::new(|_| {}));\n"
+        "    let cases: &[(fn(u32) -> u32, u32, u64, bool)] = &[\n"
+        "        (f_reg, 2, 0, true), (f_reg, 9, 0, false),\n"
+        "        (f_front, 1, 0, true), (f_front, 100, 0, false),\n"
+        "        (f_back, 100, 0, true), (f_back, 3, 0, false),\n"
+        "        (f_allc, 999, 0, true),\n"
+        "        (f_dng, 9, 0, true), (f_dng, 3, 0, false),\n"
+        "        (f_ep, 2, 0, true), (f_ep, 2, 3, false),\n"
+        "        (f_farc, 1, 0, true), (f_farc, 9, 0, false),\n"
+        "        (f_farc, 3, 2, true), (f_farc, 1, 2, false),\n"
+        "        (f_sl, 0, 0, true), (f_sl, 5, 0, false),\n"
+        "        (f_sl, 5, 5, true), (f_sl, 0, 5, false),\n"
+        "        (f_dec, 2, 0, true), (f_dec, 2, 4, false),\n"
+        "        (f_gr, 0, 0, true), (f_gr, 1, 0, false),\n"
+        "        (f_gr, 6, 3, true), (f_gr, 7, 3, false),\n"
+        "    ];\n"
+        "    let mut bad = 0;\n"
+        "    for (f, arg, now, want) in cases {\n"
+        "        unsafe { __LOMENT_NOW = *now; }\n"
+        "        let ok = std::panic::catch_unwind(|| f(*arg)).is_ok();\n"
+        "        if ok != *want { bad += 1;\n"
+        '            println!("MISMATCH now={} arg={} ok={} want={}", now, arg, ok, want); }\n'
+        "    }\n"
+        "    unsafe { __LOMENT_NOW = 0; __LOMENT_USED[10] = [0; 64]; }\n"
+        "    let c1 = std::panic::catch_unwind(|| f_cons(0)).is_ok();\n"
+        "    let c2 = std::panic::catch_unwind(|| f_cons(0)).is_ok();\n"
+        "    if !(c1 && !c2) { bad += 1; println!(\"CONSUMED c1={} c2={}\", c1, c2); }\n"
+        '    println!("bad={}", bad);\n'
+        "}\n")
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "m.rs").write_text(rs, encoding="utf-8", newline="\n")
+        (d / "main.rs").write_text(main, encoding="utf-8", newline="\n")
+        exe = d / ("d.exe" if sys.platform == "win32" else "d")
+        r = subprocess.run([rustc, "-O", "-o", str(exe), str(d / "main.rs")],
+                           capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, r.stderr[-800:]
+        out = subprocess.run([str(exe)], capture_output=True, text=True,
+                             shell=False).stdout
+    assert "bad=0" in out and "MISMATCH" not in out, out
+    print("      十种域：形状 3 + 极性 1 + 时律 6，逐例真跑一致")
+
+
+@test
+def test_domains_remaining_kinds_runtime():
+    """余下七种域逐例真跑：cyclic / generational / adaptive / subject / witnessed /
+    flow / reachable（`docs/306` §5、`docs/307` §1–§5）。
+
+    虚拟钟、质量、票表、义务表都由 main 直接拨到用例要的值 —— 不是"字符串在不在"。
+    """
+    import shutil
+    import subprocess
+    src = ("module m\nchoose runtime\n"
+           "capability cyc : ring[0..3] cyclic(8)\n"
+           "capability gen : buf[0..7] generational(2)\n"
+           "capability ad  : trust[0..99] adaptive\n"
+           "capability sub : auth[0..15] subject(3)\n"
+           "capability wit : nonce[0..15] witnessed(1)\n"
+           "capability flw : flow[65538..65540] flow\n"
+           "capability rch : lease[0..15] reachable(2)\n"
+           "fn f_cyc(n: u32) -> u32 { guard cyc(n); return n; }\n"
+           "fn f_gen(n: u32) -> u32 { guard gen(n); return n; }\n"
+           "fn f_ad(n: u32) -> u32 { quality ad = 128; guard ad(n); return n; }\n"
+           "fn f_adfull(n: u32) -> u32 { quality ad = 255; guard ad(n); return n; }\n"
+           "fn f_sub(x: u32, s: u32) -> u32 { guard sub(x, s); return x; }\n"
+           "fn f_wit(x: u32, t: u32) -> u32 { guard wit(x, t); return x; }\n"
+           "fn f_flw(a: u32, b: u32) -> u32 { guard flw(a, b); return a; }\n"
+           "fn f_rch(n: u32) -> u32 { guard rch(n); return n; }\n"
+           "fn d_rch(n: u32) -> u32 { discharge rch(n); return n; }\n")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "m.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        mod = lomentc.load(p)
+        assert lomentc.check(mod) == [], lomentc.check(mod)
+        rs = lomentc.emit_rust(mod, ROOT)
+        ir = lomentc.emit_llvm(mod, ROOT)
+    assert "@__loment_qual_store" in ir and "@__loment_discharge" in ir
+    assert "quality ad = 128" in src and "__loment_guard2" in rs
+
+    rustc = shutil.which("rustc")
+    if not rustc:
+        print("      SKIP: 无 rustc（运行那一半）")
+        return
+    main = (
+        'include!("m.rs");\n'
+        "fn main() {\n"
+        "    std::panic::set_hook(Box::new(|_| {}));\n"
+        "    let mut bad = 0;\n"
+        "    macro_rules! want { ($e:expr, $w:expr) => { if ($e).is_ok() != $w { bad += 1; } } }\n"
+        "    unsafe { __LOMENT_NOW = 0; }\n"
+        # cyclic：判的是回绕后的位置
+        "    want!(std::panic::catch_unwind(|| f_cyc(9)), true);\n"
+        "    want!(std::panic::catch_unwind(|| f_cyc(5)), false);\n"
+        "    want!(std::panic::catch_unwind(|| f_cyc(8)), true);\n"
+        # generational：每 N tick 极性翻转
+        "    want!(std::panic::catch_unwind(|| f_gen(3)), true);\n"
+        "    unsafe { __LOMENT_NOW = 2; }\n"
+        "    want!(std::panic::catch_unwind(|| f_gen(3)), false);\n"
+        "    unsafe { __LOMENT_NOW = 4; }\n"
+        "    want!(std::panic::catch_unwind(|| f_gen(3)), true);\n"
+        # adaptive：质量 128 把 [0..99] 缩到 [0..49]
+        "    want!(std::panic::catch_unwind(|| f_ad(49)), true);\n"
+        "    want!(std::panic::catch_unwind(|| f_ad(50)), false);\n"
+        "    want!(std::panic::catch_unwind(|| f_adfull(99)), true);\n"
+        # subject：主体 1 在白名单，主体 2 不在
+        "    want!(std::panic::catch_unwind(|| f_sub(5, 1)), true);\n"
+        "    want!(std::panic::catch_unwind(|| f_sub(5, 2)), false);\n"
+        # witnessed：同一张票第二次用不了
+        "    unsafe { __LOMENT_WIT[4] = [0; 64]; }\n"
+        "    want!(std::panic::catch_unwind(|| f_wit(3, 7)), true);\n"
+        "    want!(std::panic::catch_unwind(|| f_wit(3, 7)), false);\n"
+        "    want!(std::panic::catch_unwind(|| f_wit(3, 8)), true);\n"
+        # flow：只放行声明过的边（(1,2)/(1,3) 在 [65538..65540] 里）
+        "    want!(std::panic::catch_unwind(|| f_flw(1, 2)), true);\n"
+        "    want!(std::panic::catch_unwind(|| f_flw(1, 3)), true);\n"
+        "    want!(std::panic::catch_unwind(|| f_flw(2, 2)), false);\n"
+        # reachable：占用后不能重复登记；过期结清也拒
+        "    unsafe { __LOMENT_NOW = 0; __LOMENT_OBL[6] = [0; 64]; }\n"
+        "    want!(std::panic::catch_unwind(|| f_rch(2)), true);\n"
+        "    want!(std::panic::catch_unwind(|| f_rch(2)), false);\n"
+        "    unsafe { __LOMENT_OBL[6] = [0; 64]; __LOMENT_NOW = 3; }\n"
+        "    want!(std::panic::catch_unwind(|| d_rch(2)), false);\n"
+        "    unsafe { __LOMENT_NOW = 0; }\n"
+        "    want!(std::panic::catch_unwind(|| f_rch(2)), true);\n"
+        "    want!(std::panic::catch_unwind(|| d_rch(2)), true);\n"
+        '    println!("bad={}", bad);\n'
+        "}\n")
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "m.rs").write_text(rs, encoding="utf-8", newline="\n")
+        (d / "main.rs").write_text(main, encoding="utf-8", newline="\n")
+        exe = d / ("d.exe" if sys.platform == "win32" else "d")
+        r = subprocess.run([rustc, "-O", "-o", str(exe), str(d / "main.rs")],
+                           capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, r.stderr[-800:]
+        out = subprocess.run([str(exe)], capture_output=True, text=True,
+                             shell=False).stdout
+    assert "bad=0" in out, out
+    print("      余下七种域：cyclic/generational/adaptive/subject/witnessed/flow/reachable 逐例真跑一致")
+
+
+@test
+def test_domain_blocks_scope_and_auto_guard():
+    """`docs/313`：`domain … { }` 的作用域、自动守卫、空间标签、嵌套链。
+
+    - 块外 `guard` -> 编译错误；
+    - 同空间的内层必须落在（或等于）外层形状里；
+    - `in SPACE` 只许给数组 / 切片 / ptr；
+    - 块内只有**同空间**的下标访问自动受检；
+    - 嵌套链只有最内层记账（外层带 silent 位）。
+    """
+    def load(src):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "d.lomt"
+            p.write_text(src, encoding="utf-8", newline="\n")
+            m = lomentc.load(p)
+            return m, lomentc.check(m)
+
+    _, e1 = load("module m\nchoose runtime\n"
+                 "fn f(i: u32) -> u32 { domain d : disk[0..4] { } guard d(i); return i; }\n")
+    assert any("guard 引用了未声明的能力" in x for x in e1), e1
+    _, e2 = load("module m\nchoose runtime\n"
+                 "fn f(i: u32) -> u32 { domain o : disk[0..3] { domain n : disk[0..5] { } }"
+                 " return i; }\n")
+    assert any("不在外层" in x for x in e2), e2
+    _, e3 = load("module m\nchoose runtime\n"
+                 "fn f() -> u32 { let x: u32 in disk = 1; return x; }\n")
+    assert any("不能带空间" in x for x in e3), e3
+
+    m, e = load("module m\nchoose runtime\n"
+                "fn f(a: [u32; 8] in disk, b: [u32; 8] in mem, i: u32) -> u32 {\n"
+                "    domain d : disk[0..7] { a[i] = 1; b[i] = 2; }\n"
+                "    return a[0];\n}\n")
+    assert e == [], e
+    body = lomentc.emit_llvm(m, ROOT)
+    body = body[body.index("define i32 @f"):]
+    assert body.count("call void @__loment_guard2") == 1, (
+        "自动守卫只该落在同空间的那个访问上")
+
+    m2, e2b = load("module m\nchoose runtime\n"
+                   "fn f(a: [u32; 8] in disk, i: u32) -> u32 {\n"
+                   "    domain whole : disk[0..7] {\n"
+                   "        domain half : disk[0..3] { a[i] = 1; }\n"
+                   "    }\n    return a[0];\n}\n")
+    assert e2b == [], e2b
+    ir2 = lomentc.emit_llvm(m2, ROOT)
+    assert ", i64 128, i64 0, i64 0)" in ir2, "外层没有 silent 位"
+    assert ", i64 0, i64 0, i64 0)" in ir2, "内层不是正常记账那一支"
+    print("      块级域：作用域 / 嵌套包含 / 空间标签 / 自动守卫链，逐条成立")
+
+
+@test
+def test_domain_blocks_per_instance_state():
+    """`docs/313` §4：块 = 实例。循环每轮、递归每层各自一份状态（Rust 后端真跑）。"""
+    import shutil
+    import subprocess
+    src = ("module m\nchoose runtime\n"
+           "fn f(n: u32) -> u32 {\n"
+           "    let a: [u32; 4] in disk = [0, 0, 0, 0];\n"
+           "    let i: u32 = 0;\n"
+           "    while i < n {\n"
+           "        domain tok : disk[0..3] consumed(1) { a[0] = i; }\n"
+           "        i = i + 1;\n"
+           "    }\n    return n;\n}\n"
+           "fn g(n: u32) -> u32 {\n"
+           "    if n == 0 { return 0; }\n"
+           "    let a: [u32; 4] in disk = [0, 0, 0, 0];\n"
+           "    domain one : disk[0..3] consumed(1) { a[0] = 1; }\n"
+           "    return g(n - 1);\n}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "m.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        mod = lomentc.load(p)
+        assert lomentc.check(mod) == [], lomentc.check(mod)
+        rs = lomentc.emit_rust(mod, ROOT)
+    rustc = shutil.which("rustc")
+    if not rustc:
+        print("      SKIP: 无 rustc（运行那一半）")
+        return
+    main = ('include!("m.rs");\n'
+            "fn main() {\n"
+            "    std::panic::set_hook(Box::new(|_| {}));\n"
+            "    let mut bad = 0;\n"
+            "    if std::panic::catch_unwind(|| f(3)).is_err() { bad += 1; }\n"
+            "    if std::panic::catch_unwind(|| g(3)).is_err() { bad += 1; }\n"
+            '    println!("bad={}", bad);\n'
+            "}\n")
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "m.rs").write_text(rs, encoding="utf-8", newline="\n")
+        (d / "main.rs").write_text(main, encoding="utf-8", newline="\n")
+        exe = d / ("d.exe" if sys.platform == "win32" else "d")
+        r = subprocess.run([rustc, "-O", "-o", str(exe), str(d / "main.rs")],
+                           capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, r.stderr[-800:]
+        out = subprocess.run([str(exe)], capture_output=True, text=True,
+                             shell=False).stdout
+    assert "bad=0" in out, out
+    print("      块级域：循环每轮 / 递归每层都是新实例（consumed 每轮都通过）")
+
+
+@test
+def test_domain_for_is_the_loop_head():
+    """`docs/315` §2：`domain:for` 是**域上的循环**，不是体里另一次守卫。
+
+    - 守卫只落在循环头**一次** —— 体内对同一位置的 `a[i]` 不再挂钩（有状态的域
+      否则会被扣两次）；
+    - 回边推虚拟钟（`@__loment_tick`）；`choose domain_clock_explicit` 关掉它；
+    - 无界形状 / `danger` / 要第二实参的语境类没有"下一个位置"，编译期拒。
+    """
+    def load(src):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "d.lomt"
+            p.write_text(src, encoding="utf-8", newline="\n")
+            m = lomentc.load(p)
+            return m, lomentc.check(m)
+
+    def fbody(ir: str) -> str:
+        return ir[ir.index("define i32 @f"):]
+
+    m, e = load("module m\nchoose runtime\n"
+                "fn f(a: [u32; 8] in disk) -> u32 {\n"
+                "    domain d : disk[0..7] consumed(1) {\n"
+                "        domain:for i { a[i] = a[i] + 1; }\n"
+                "    }\n    return a[0];\n}\n")
+    assert e == [], e
+    body = fbody(lomentc.emit_llvm(m, ROOT))
+    assert body.count("call void @__loment_guard2") == 1, (
+        "循环头该只有一次守卫（体内那个下标已被证过）\n" + body)
+    assert "icmp ule i32" in body, "循环上界不是域的形状"
+    assert "call void @__loment_tick()" in body, "回边没有推钟"
+
+    m2, e2 = load("module m\nchoose runtime\nchoose domain_clock_explicit\n"
+                  "fn f(a: [u32; 8] in disk) -> u32 {\n"
+                  "    domain d : disk[0..7] {\n"
+                  "        domain:for i { a[i] = 1; }\n"
+                  "    }\n    return a[0];\n}\n")
+    assert e2 == [], e2
+    assert "call void @__loment_tick()" not in fbody(lomentc.emit_llvm(m2, ROOT)), (
+        "`domain_clock_explicit` 没关掉回边推钟")
+
+    m3, e3 = load("module m\nchoose runtime\n"
+                  "fn f(a: [u32; 8] in disk) -> u32 {\n"
+                  "    domain d : disk[0..7] {\n"
+                  "        domain:for i step 2 { a[i] = 1; }\n"
+                  "    }\n    return a[0];\n}\n")
+    assert e3 == [], e3
+    b3 = fbody(lomentc.emit_llvm(m3, ROOT))
+    assert "add i32" in b3 and ", 2" in b3, "步长没进更新步"
+
+    # 嵌套：`domain:for` 是透明的一层 —— 体内照旧能看见外面的域
+    m4, e4 = load("module m\nchoose runtime\n"
+                  "fn f(a: [u32; 8] in disk) -> u32 {\n"
+                  "    domain whole : disk[0..7] {\n"
+                  "        domain half : disk[0..3] consumed(1) {\n"
+                  "            domain:for i { guard half(i); a[i] = 1; }\n"
+                  "        }\n"
+                  "    }\n    return a[0];\n}\n")
+    assert e4 == [], e4
+
+    # `in 外层`：循环走外层的形状，但**最内层仍更窄** —— 体内访问不能被免掉。
+    m5, e5 = load("module m\nchoose runtime\n"
+                  "fn f(a: [u32; 8] in disk) -> u32 {\n"
+                  "    domain whole : disk[0..7] {\n"
+                  "        domain half : disk[0..3] {\n"
+                  "            domain:for i in whole { a[i] = 1; }\n"
+                  "        }\n"
+                  "    }\n    return a[0];\n}\n")
+    assert e5 == [], e5
+    b5 = fbody(lomentc.emit_llvm(m5, ROOT))
+    assert b5.count("call void @__loment_guard2") == 3, (
+        "外层循环头 1 条 + 体内整条链 2 条（外层 silent + 内层记账）\n" + b5)
+
+    for bad, frag in [
+        ("domain d : disk[()..7] { domain:for i { } }", "有限形状"),
+        ("domain d : disk[0..7] danger { domain:for i { } }", "危险域"),
+        ("domain d : auth[0..7] subject(3) { domain:for i { } }", "第二个实参"),
+    ]:
+        try:
+            parse("module m\nchoose runtime\nfn f() -> u32 {\n    "
+                  + bad + "\n    return 0;\n}\n")
+        except lomentc.LomError as ex:
+            assert frag in str(ex), (frag, str(ex))
+        else:
+            raise AssertionError(f"没有拒：{bad}")
+    print("      域循环：头一次守卫 / 回边 tick / 显式档 / 步长 / 透明嵌套 / 三类拒绝")
+
+
+@test
+def test_domain_tree_and_graph_edges():
+    """`docs/315` §4–§5：树边（显式链 / `child_of`）与图边（`couple` / `mutex`）。
+
+    - 显式 `guard half(x)` 也判祖先（silent），只有叶子记账；
+    - `child_of` 必须连到包围它的同空间父域、且子 ⊆ 父；
+    - `couple` 的两个域必须共享位置；守卫多出一条 silent 的伙伴判决；自动守卫同理；
+    - `mutex` 要求两个形状可证不相交。
+    """
+    NL = chr(10)
+
+    def S(*lines):
+        return NL.join(lines)
+
+    def load(src):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "d.lomt"
+            p.write_text(src, encoding="utf-8", newline=NL)
+            m = lomentc.load(p)
+            return m, lomentc.check(m)
+
+    def fbody(ir):
+        return ir[ir.index("define i32 @f"):]
+
+    # 1) 显式守卫走整条链
+    m, e = load(S("module m", "choose runtime",
+                  "fn f(a: [u32; 8] in disk) -> u32 {",
+                  "    domain whole : disk[0..7] {",
+                  "        domain half : disk[0..3] { guard half(2); }",
+                  "    }",
+                  "    return a[0];", "}", ""))
+    assert e == [], e
+    b = fbody(lomentc.emit_llvm(m, ROOT))
+    assert b.count("call void @__loment_guard2") == 2, b
+    assert ", i64 128, i64" in b, "祖先没有 silent 位"
+
+    # 2) child_of：好形状 / 三种拒绝
+    m2, e2 = load(S("module m", "choose runtime",
+                    "fn f(a: [u32; 8] in disk) -> u32 {",
+                    "    domain whole : disk[0..7] {",
+                    "        domain half : disk[0..3] child_of whole { a[0] = 1; }",
+                    "    }",
+                    "    return a[0];", "}", ""))
+    assert e2 == [], e2
+    for bad, frag in [
+        ("domain whole : disk[0..7] { domain half : disk[0..9] child_of whole { } }",
+         "C1"),
+        ("domain whole : disk[0..7] { domain half : mem[0..3] child_of whole { } }",
+         "同一空间"),
+        ("domain half : disk[0..3] child_of ghost { }", "不在外层作用域"),
+    ]:
+        try:
+            parse(S("module m", "choose runtime", "fn f() -> u32 {", "    " + bad,
+                    "    return 0;", "}", ""))
+        except lomentc.LomError as ex:
+            assert frag in str(ex), (frag, str(ex))
+        else:
+            raise AssertionError("没有拒：" + bad)
+
+    # 3) couple：共享位置 + 伙伴 silent 判决（显式与自动两条路）+ 质量整组
+    m3, e3 = load(S("module m", "choose runtime",
+                    "capability top : disk[0..15] adaptive",
+                    "fn f(a: [u32; 16] in disk) -> u32 {",
+                    "    domain d : disk[0..7] adaptive {",
+                    "        couple d, top;",
+                    "        guard d(2);",
+                    "        a[2] = 1;",
+                    "        quality d = 128;",
+                    "    }",
+                    "    return a[2];", "}", ""))
+    assert e3 == [], e3
+    b3 = fbody(lomentc.emit_llvm(m3, ROOT))
+    assert b3.count("i64 138, i64") >= 2, "伙伴没有 silent 判决（kind|128）"
+    assert b3.count("call void @__loment_qual_store") >= 2, "质量没有写到整组"
+    def rejects(src_bad, frag):
+        try:
+            m_, _e = load(src_bad)
+        except lomentc.LomError as ex:
+            assert frag in str(ex), (frag, str(ex))
+            return
+        raise AssertionError("没有拒：" + frag)
+
+    rejects(S("module m", "choose runtime", "capability top : disk[8..15]",
+              "fn f() -> u32 { domain d : disk[0..7] { couple d, top; } return 0; }", ""),
+            "共同位置")
+
+    # 4) mutex：可证不相交才行
+    parse(S("module m", "choose runtime", "capability x : disk[0..3]",
+            "capability y : disk[4..7]",
+            "fn f() -> u32 { mutex x, y; return 0; }", ""))
+    rejects(S("module m", "choose runtime", "capability x : disk[0..5]",
+              "capability y : disk[4..7]",
+              "fn f() -> u32 { mutex x, y; return 0; }", ""), "重叠")
+
+    # 5) 横向并行 / 反向
+    m5, e5 = load(S("module m", "choose runtime",
+                    "fn f(a: [u32; 8] in disk, b: [u32; 8] in mem) -> u32 {",
+                    "    domain da : disk[0..3] {",
+                    "        domain db : mem[0..3] {",
+                    "            domain:for i, j in da, db { a[i] = 1; b[j] = 2; }",
+                    "        }",
+                    "    }",
+                    "    domain rv : disk[0..3] { domain:for i step -2 { a[i] = 3; } }",
+                    "    return a[0];", "}", ""))
+    assert e5 == [], e5
+    b5 = fbody(lomentc.emit_llvm(m5, ROOT))
+    assert "icmp uge i32" in b5, "反向步长没有翻条件"
+    assert b5.count("call void @__loment_guard2") >= 3, "并行循环每轮该判两个域"
+    for bad, frag in [
+        ("domain p : disk[0..3] { domain q : mem[0..7] { domain:for i, j in p, q { } } }",
+         "跨度不一致"),
+        ("domain p : disk[0..3] { domain:for i, k in p { } }", "一一对应"),
+    ]:
+        try:
+            parse(S("module m", "choose runtime",
+                    "fn f(a: [u32; 8] in disk, b: [u32; 8] in mem) -> u32 {",
+                    "    " + bad, "    return 0;", "}", ""))
+        except lomentc.LomError as ex:
+            assert frag in str(ex), (frag, str(ex))
+        else:
+            raise AssertionError("没有拒：" + bad)
+    print("      树/图：显式链 / child_of / couple / mutex / 并行 / 反向，逐条成立")
+
+
+@test
+def test_domain_geometry_reads_trees_and_graphs():
+    """`docs/315` §4–§5：横/竖树、平/立体图 —— 从代码里读出来的**确定性**形状。
+
+    一棵三层竖链（`contains`）+ 一条兄弟边（`sibling`）+ 一个分支 + 一条
+    `domain:for` 的位置轴；立体图多出父 → 孙的 `cross` 边。图那一半再加上顶层
+    capability 顶点、`child_of` / `couple` / `mutex` 三种边。
+    """
+    NL = chr(10)
+
+    def S(*lines):
+        return NL.join(lines)
+
+    def load(src):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "g.lomt"
+            p.write_text(src, encoding="utf-8", newline=NL)
+            m = lomentc.load(p)
+            return m, lomentc.check(m)
+
+    src = S("module geo", "choose runtime",
+            "fn f(a: [u32; 8] in disk) -> u32 {",
+            "    domain whole : disk[0..7] {",
+            "        domain half : disk[0..3] {",
+            "            domain leaf : disk[0..1] consumed(1) {",
+            "                domain:for i step 2 { a[i] = 1; }",
+            "            }",
+            "        }",
+            "        domain tail : disk[4..7] { a[4] = 2; }",
+            "    }",
+            "    if a[0] > 0 { domain side : mem[0..1] { a[1] = 3; } }",
+            "    return a[0];", "}", "")
+    mod, e = load(src)
+    assert e == [], e
+    g = loment_geometry.geometry(mod)
+    out1 = g.to_json()
+    out2 = loment_geometry.geometry(mod).to_json()
+    assert out1 == out2, "几何不是确定性的"
+    d = json.loads(out1)
+    names = {n["name"]: n for n in d["nodes"]}
+    assert set(names) == {"whole", "half", "leaf", "tail", "side"}, names
+    kinds = sorted(e["kind"] for e in d["edges"])
+    assert kinds.count("contains") == 3, kinds          # whole→half→leaf + whole→tail
+    assert kinds.count("sibling") == 1, kinds           # half 与 tail 同层
+    assert kinds.count("cross") == 1, kinds             # 立体图：whole → leaf
+    assert d["branches"] == ["f:12"], d["branches"]
+    (loop,) = d["loops"]
+    assert loop["domain"] == names["leaf"]["id"] and loop["step"] == 2, loop
+    assert loop["positions"] == 1, loop                 # 0..1 间隔 2：只有一个位置
+
+    # 图边：顶层 capability 也是顶点；child_of / couple / mutex 各自成边
+    src2 = S("module g", "choose runtime",
+             "capability top : disk[0..15] adaptive",
+             "capability other : mem[16..19]",
+             "fn f(a: [u32; 16] in disk) -> u32 {",
+             "    domain d : disk[0..7] {",
+             "        domain inner : disk[0..3] child_of d {",
+             "            domain twin : mem[0..3] {",
+             "                couple d, top;",
+             "                mutex top, other;",
+             "                domain:for i, j in inner, twin { a[i] = 1; }",
+             "            }",
+             "        }",
+             "    }",
+             "    return a[0];", "}", "")
+    m2, e2 = load(src2)
+    assert e2 == [], e2
+    g2 = json.loads(loment_geometry.geometry(m2).to_json())
+    kinds2 = {(x["src"], x["dst"], x["kind"]) for x in g2["edges"]}
+    ids2 = {n["name"]: n["id"] for n in g2["nodes"]}
+    assert (ids2["top"], ids2["other"], "mutex") in kinds2, kinds2
+    assert (ids2["top"], ids2["d"], "couple") in kinds2, kinds2   # 边按 (src, dst) 排序
+    assert (ids2["d"], ids2["inner"], "child_of") in kinds2, kinds2
+    assert len(g2["loops"]) == 2, g2["loops"]            # 并行的两个位置轴
+    print("      域几何：竖链 / 兄弟 / 分支 / 位置轴 / 跨层 / couple / mutex，确定性成立")
+
+
+@test
+def test_domains_selfhost_twin():
+    """十种域 + `tick;`：自举镜与参考实现的 IR **逐字节相同**。
+
+    这条真跑自举链（种子 -> stage1），不是字符串比对。没有 clang 就跳过。
+    """
+    import shutil
+    import subprocess
+    import loment_dist
+    clang = shutil.which("clang") or r"C:\Program Files\LLVM\bin\clang.exe"
+    if not (clang and Path(clang).exists()):
+        print("      SKIP: 无 clang")
+        return
+    src = ("module dom_twin\nchoose runtime\n"
+           "capability reg   : disk[2..4]\n"
+           "capability front : disk[()..3]\n"
+           "capability back  : disk[5..()]\n"
+           "capability allc  : disk[()..()]\n"
+           "capability dng   : mem[2..4] danger\n"
+           "capability ep    : quota[0..4] epoch(3)\n"
+           "capability farc  : slot[0..()] far(2)\n"
+           "capability sl    : trace[0..100] sliding(2)\n"
+           "capability dec   : lease[0..4] decaying(3)\n"
+           "capability gr    : cred[0..()] growing(2)\n"
+           "capability cons  : auth[0..1] consumed(1)\n"
+           "fn f_reg(n: u32) -> u32 { guard reg(n); return n; }\n"
+           "fn f_front(n: u32) -> u32 { guard front(n); return n; }\n"
+           "fn f_back(n: u32) -> u32 { guard back(n); return n; }\n"
+           "fn f_allc(n: u32) -> u32 { guard allc(n); return n; }\n"
+           "fn f_dng(n: u32) -> u32 { guard dng(n); return n; }\n"
+           "fn f_ep(n: u32) -> u32 { guard ep(n); return n; }\n"
+           "fn f_farc(n: u32) -> u32 { guard farc(n); return n; }\n"
+           "fn f_sl(n: u32) -> u32 { guard sl(n); return n; }\n"
+           "fn f_dec(n: u32) -> u32 { guard dec(n); return n; }\n"
+           "fn f_gr(n: u32) -> u32 { guard gr(n); return n; }\n"
+           "fn f_cons(n: u32) -> u32 { guard cons(n); return n; }\n"
+           "fn f_tick(n: u32) -> u32 { tick; return n; }\n"
+           # 余下七种（docs/306 §5、docs/307 §1–§5）：形状、极性、第二实参、两条语句
+           "capability cyc   : ring[0..3] cyclic(8)\n"
+           "capability gen   : buf[0..7] generational(2)\n"
+           "capability ad    : trust[0..99] adaptive\n"
+           "capability sub   : auth[0..15] subject(3)\n"
+           "capability wit   : nonce[0..15] witnessed(1)\n"
+           "capability flw   : flow[65538..65540] flow\n"
+           "capability rch   : lease[0..15] reachable(2)\n"
+           "fn g_cyc(n: u32) -> u32 { guard cyc(n); return n; }\n"
+           "fn g_gen(n: u32) -> u32 { guard gen(n); return n; }\n"
+           "fn g_ad(n: u32) -> u32 { quality ad = 128; guard ad(n); return n; }\n"
+           "fn g_sub(x: u32, s: u32) -> u32 { guard sub(x, s); return x; }\n"
+           "fn g_wit(x: u32, t: u32) -> u32 { guard wit(x, t); return x; }\n"
+           "fn g_flw(a: u32, b: u32) -> u32 { guard flw(a, b); return a; }\n"
+           "fn g_rch(n: u32) -> u32 { guard rch(n); return n; }\n"
+           "fn g_dis(n: u32) -> u32 { discharge rch(n); return n; }\n"
+           # docs/313：块级域 + 空间标签 + 自动守卫（嵌套链、有状态实例）
+           "fn h_dom(a: [u32; 8] in disk, i: u32) -> u32 {\n"
+           "    domain whole : disk[0..7] {\n"
+           "        domain half : disk[0..3] consumed(1) { a[i] = 1; }\n"
+           "    }\n"
+           "    return a[0];\n"
+           "}\n"
+           # docs/315：域循环（循环头一次守卫 + 回边 tick；体内不重复守卫）
+           "fn h_loop(a: [u32; 8] in disk) -> u32 {\n"
+           "    domain loopd : disk[0..7] consumed(1) {\n"
+           "        domain:for i step 2 { a[i] = a[i] + 1; }\n"
+           "    }\n"
+           "    return a[0];\n"
+           "}\n"
+           # `in 外层`：最内层更窄，体内访问仍挂整条链（docs/315 §1.4）
+           "fn h_loop2(a: [u32; 8] in disk) -> u32 {\n"
+           "    domain outer2 : disk[0..7] {\n"
+           "        domain inner2 : disk[0..3] {\n"
+           "            domain:for i in outer2 { a[i] = 1; }\n"
+           "        }\n"
+           "    }\n"
+           "    return a[0];\n"
+           "}\n"
+           # docs/315 §4–§5：树边与图边（child_of / couple / mutex / 并行 / 反向）
+           "capability cpa : disk[0..15] adaptive\n"
+           "capability cpb : mem[16..19]\n"
+           "fn h_graph(a: [u32; 16] in disk, b: [u32; 4] in mem) -> u32 {\n"
+           "    mutex cpa, cpb;\n"
+           "    domain p : disk[0..3] {\n"
+           "        couple p, cpa;\n"
+           "        domain q : mem[0..3] {\n"
+           "            domain:for i, j in p, q { a[i] = 1; b[j] = 2; }\n"
+           "        }\n"
+           "    }\n"
+           "    return a[0];\n"
+           "}\n"
+           "fn h_child(a: [u32; 8] in disk) -> u32 {\n"
+           "    domain outer3 : disk[0..7] {\n"
+           "        domain leaf3 : disk[0..3] child_of outer3 { a[0] = 1; }\n"
+           "    }\n"
+           "    domain rv3 : disk[0..3] { domain:for i step -2 { a[i] = 3; } }\n"
+           "    return a[0];\n"
+           "}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "d.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        mod = lomentc.load(p)
+        deps = lomentc.resolve_deps(mod, ROOT, p.parent, entry=p)
+        assert lomentc.check(mod, deps=deps) == [], lomentc.check(mod, deps=deps)[:2]
+        want = lomentc.emit_llvm(mod, ROOT, deps)
+        want_p = lomentc.emit_potato(mod, ROOT, deps)
+    stage1 = loment_dist.build_stage1()
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "d.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        r = subprocess.run([str(stage1), str(p)], cwd=str(ROOT), capture_output=True,
+                           text=True, encoding="utf-8", errors="replace",
+                           shell=False, timeout=600)
+        rp = subprocess.run([str(stage1), str(p), "--emit-potato"], cwd=str(ROOT),
+                            capture_output=True, text=True, encoding="utf-8",
+                            errors="replace", shell=False, timeout=600)
+    assert r.returncode == 0, f"stage1 编译十种域失败: {r.stderr[-600:]}"
+    got = r.stdout.replace("\r\n", "\n")
+    assert got == want, (
+        f"自举镜与参考的 IR 不一致 (want {len(want)}B got {len(got)}B)")
+    assert rp.returncode == 0, f"stage1 Potato 出口失败: {rp.stderr[-600:]}"
+    got_p = rp.stdout.replace("\r\n", "\n")
+    assert got_p == want_p, (
+        f"自举镜与参考的 Potato 不一致 (want {len(want_p)}B got {len(got_p)}B)")
+    print(f"      种子自举链编译十种域成功，IR 与 Potato 都与参考逐字节相同 ({len(want)}B)")
 
 @test
 def test_lgc_end_window_is_a_scoped_pause():

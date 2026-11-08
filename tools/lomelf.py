@@ -2035,14 +2035,52 @@ PE_LIT_VA = PE_IMAGE_BASE + PE_IDATA_RVA + PE_LIT_OFF
 PE_CMDLINE = b"/proc/self/cmdline\x00"
 PE_IMPORTS = ["ExitProcess", "GetStdHandle", "ReadFile", "WriteFile", "CloseHandle",
               "CreateFileA", "GetFileAttributesA", "VirtualAlloc", "GetCommandLineA",
-              "FindFirstFileA", "FindNextFileA", "Sleep"]
+              "FindFirstFileA", "FindNextFileA", "Sleep",
+              # 系统与进程信息（`docs/303` §2.3/§2.6）：全部平 C API、无回调。
+              "GlobalMemoryStatusEx", "OpenProcess", "CreateToolhelp32Snapshot",
+              "Process32First", "Process32Next", "Thread32First", "Thread32Next",
+              "OpenThread", "GetProcessIoCounters", "GetProcessHandleCount",
+              "GetSystemTimes", "GetTickCount64", "QueryPerformanceCounter",
+              "GetSystemTimeAsFileTime"]
 # 第二个导入 DLL：联网。名字与上一组无一重名，所以 `slots` 仍是一张按函数名索引的平表。
 PE_IMPORTS_WS2 = ["WSAStartup", "socket", "connect", "bind", "listen", "accept",
                   "send", "recv", "sendto", "recvfrom", "closesocket", "shutdown",
                   "setsockopt", "getsockopt", "getpeername", "getsockname",
                   "ioctlsocket", "select", "WSAGetLastError"]
+# 第三个导入 DLL：性能计数器（PDH）。它是平 C API —— 无 COM、无回调 —— 所以一张
+# 导入表就能解开 CPU/GPU/磁盘/网络/温度九类计数器（`docs/303` §2）。
+# 只用 A 版：本语言的字符串是字节，没有 UTF-16。
+PE_IMPORTS_PDH = ["PdhOpenQueryA", "PdhAddEnglishCounterA", "PdhCollectQueryData",
+                  "PdhGetFormattedCounterValue", "PdhCloseQuery"]
+# 第四个导入 DLL：进程与系统信息（psapi）。
+PE_IMPORTS_PSAPI = ["EnumProcesses", "GetProcessMemoryInfo", "GetPerformanceInfo"]
 # 描述符表 = 每个 DLL 一条 + 一条全零终止项（少了终止项加载器会把 ILT 当第二条描述符）。
-PE_DLLS = [("kernel32.dll", PE_IMPORTS), ("ws2_32.dll", PE_IMPORTS_WS2)]
+PE_DLLS = [("kernel32.dll", PE_IMPORTS), ("ws2_32.dll", PE_IMPORTS_WS2),
+           ("pdh.dll", PE_IMPORTS_PDH), ("psapi.dll", PE_IMPORTS_PSAPI)]
+
+#: 通用 Win32 调用器（号 4097）的函数表。号 → 导入名；顺序就是 `__ws_win32` 里那条
+#: 比较链的顺序。一条 (号, 名字) 只花 ~15 字节机器码：共享的四参数装载在前，各分支只
+#: 剩 `mov rax,[iat]; call rax`。**加一个函数 = 一行导入 + 这里一行**。
+WIN32_CALLS = (
+    (1, "GlobalMemoryStatusEx"),
+    (2, "GetPerformanceInfo"),
+    (3, "EnumProcesses"),
+    (4, "OpenProcess"),
+    (5, "GetProcessMemoryInfo"),
+    (6, "CloseHandle"),
+    (7, "CreateToolhelp32Snapshot"),
+    (8, "Process32First"),
+    (9, "Process32Next"),
+    (10, "GetProcessIoCounters"),
+    (11, "GetProcessHandleCount"),
+    (12, "GetSystemTimes"),
+    (13, "OpenThread"),
+    (14, "Thread32First"),
+    (15, "Thread32Next"),
+    (16, "GetTickCount64"),
+    (17, "QueryPerformanceCounter"),
+    (18, "GetSystemTimeAsFileTime"),
+)
 PE_IMPORT_DESC_BYTES = 20 * (len(PE_DLLS) + 1)
 PE_STD_INPUT, PE_STD_OUTPUT, PE_STD_ERROR = -10, -11, -12
 SYS_READ, SYS_WRITE, SYS_CLOSE, SYS_BRK, SYS_EXIT = 0, 1, 3, 12, 60
@@ -2054,6 +2092,17 @@ SYS_BIND, SYS_LISTEN, SYS_GETSOCKNAME, SYS_GETPEERNAME = 49, 50, 51, 52
 SYS_SETSOCKOPT, SYS_GETSOCKOPT = 54, 55
 SYS_SENDMSG, SYS_RECVMSG, SYS_SOCKETPAIR = 46, 47, 53
 SYS_EPOLL_WAIT, SYS_EPOLL_CTL, SYS_EPOLL_CREATE1 = 232, 233, 291
+#: lmgr 的性能计数器号。**私有段**（Linux 的号止于 ~450），所以 ELF 上调用它是 ENOSYS。
+#: 参数按 Linux 习惯：rdi = 路径指针，rsi = 路径长度，rdx = 收 f64 的 8 字节缓冲。
+#: 返回 0 成功；-5（EIO）失败 —— 没开成功、加计数器失败、取值失败都算。
+SYS_LMGR_PDH = 4096
+#: 通用 Win32 调用器：rdi = 函数号（`WIN32_CALLS`），rsi = 四个 u64 实参的缓冲。
+#: 返回值就是那个 API 的原始返回值（BOOL / HANDLE / ULONGLONG）。
+SYS_WIN32 = 4097
+#: **运行时私有号**：不在 `lom/net.lom` 那份 L0 契约里。它们不是 Linux 系统调用，
+#: 而是本仓运行时给自己调用者的一组入口（`docs/303` 的 lmgr）。审计对账时显式跳过
+#: 这几个号 —— 契约要收它们得走单独的 L0 PR（`lom/` 禁区那道门）。
+PE_PRIVATE_SYSCALLS = frozenset({SYS_LMGR_PDH, SYS_WIN32})
 #: epoll 的事件位与 `epoll_create1` 的旗标（Linux 值）
 LINUX_EPOLL_IN, LINUX_EPOLL_PRI, LINUX_EPOLL_OUT = 0x001, 0x002, 0x004
 LINUX_EPOLL_ERR, LINUX_EPOLL_HUP, LINUX_EPOLL_RDHUP = 0x008, 0x010, 0x2000
@@ -2110,6 +2159,9 @@ PE_SYSCALLS = (
     (SYS_EPOLL_WAIT, "net", "__ws_epoll_wait"),
     (SYS_EPOLL_CTL, "net", "__ws_epoll_ctl"),
     (SYS_EPOLL_CREATE1, "net", "__ws_epoll_create1"),
+    # 面归 `proc`：面是**粗分桶**，新开一面会改 Potato 的 `surfaces` 键与全部孪生夹具。
+    (SYS_LMGR_PDH, "proc", "__ws_pdh"),
+    (SYS_WIN32, "proc", "__ws_win32"),
 )
 #: 从表派生 —— 别手写第二份（那样两处会漂，而这是个只需要一处的信息）。
 PE_DISPATCH = [num for num, _surface, _label in PE_SYSCALLS]
@@ -2356,6 +2408,9 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
 
     def st8(base, disp, src):
         a.emit(rex(0, src, 0, base) + b"\x88" + _mem(src, base, disp))
+
+    def lea_rsp(reg, disp):                     # lea r64, [rsp+disp]
+        a.emit(rex(1, reg, 0, RSP) + b"\x8D" + _mem(reg, RSP, disp))
 
     def test_rax():
         a.emit(b"\x48\x85\xC0")
@@ -2935,6 +2990,109 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
     st32(RDX, 24, RCX)                          # st_mode
     a.emit(b"\x31\xC0")
     jmp_l("__ws_ret")
+
+    # ---- lmgr pdh(path_ptr, path_len, out_f64) --------------------------
+    # 一次采样开一个查询：open -> add -> collect -> read -> close。PDH 的
+    # PDH_FMT_COUNTERVALUE 是 CStatus(DWORD) + 4 字节填充 + union，double 在偏移 8，
+    # 所以 value 缓冲给 16 字节、结果从 +8 取。
+    a.label("__ws_pdh")
+    st(RSP, 0x28, RDX)                          # out
+    movi(R8, PE_STATE_VA + WS_TMP)              # dst
+    a.emit(mov_rr(R9, RSI))                     # len
+    a.emit(mov_rr(R10, RDI))                    # src
+    a.label("__ws_pdh_cp")
+    test_rr(R9, R9)
+    jcc_l("e", "__ws_pdh_cp_done")
+    load_al(R10)
+    store_al(R8)
+    add_ri(R10, 1)
+    add_ri(R8, 1)
+    sub_ri(R9, 1)
+    jmp_l("__ws_pdh_cp")
+    a.label("__ws_pdh_cp_done")
+    a.emit(b"\x41\xC6\x00\x00")                 # mov byte [r8], 0
+    a.emit(b"\x31\xC9")                         # xor ecx, ecx
+    a.emit(b"\x31\xD2")                         # xor edx, edx
+    lea_rsp(R8, 0x30)                           # &query
+    api("PdhOpenQueryA")
+    a.emit(b"\x85\xC0")                         # test eax, eax
+    jcc_l("ne", "__ws_pdh_fail")
+    ld(RCX, RSP, 0x30)
+    movi(RDX, PE_STATE_VA + WS_TMP)
+    a.emit(b"\x45\x31\xC0")                     # xor r8d, r8d
+    lea_rsp(R9, 0x38)                           # &counter
+    api("PdhAddEnglishCounterA")
+    a.emit(b"\x85\xC0")
+    jcc_l("ne", "__ws_pdh_e6")
+    ld(RCX, RSP, 0x30)
+    api("PdhCollectQueryData")
+    a.emit(b"\x85\xC0")
+    jcc_l("ne", "__ws_pdh_e7")
+    ld(RCX, RSP, 0x38)
+    movi32(RDX, 0x400)                          # PDH_FMT_LARGE（整数）
+    lea_rsp(R8, 0x40)                           # &type
+    lea_rsp(R9, 0x48)                           # &value（16 字节）
+    api("PdhGetFormattedCounterValue")
+    a.emit(b"\x85\xC0")
+    jcc_l("e", "__ws_pdh_ok")
+    # 速率型计数器首采没有增量：等一个采样间隔再采一次，再取。
+    movi32(RCX, 100)
+    api("Sleep")
+    ld(RCX, RSP, 0x30)
+    api("PdhCollectQueryData")
+    a.emit(b"\x85\xC0")
+    jcc_l("ne", "__ws_pdh_e7")
+    ld(RCX, RSP, 0x38)
+    movi32(RDX, 0x400)
+    lea_rsp(R8, 0x40)
+    lea_rsp(R9, 0x48)
+    api("PdhGetFormattedCounterValue")
+    a.emit(b"\x85\xC0")
+    jcc_l("ne", "__ws_pdh_e8")
+    a.label("__ws_pdh_ok")
+    ld(RCX, RSP, 0x30)
+    api("PdhCloseQuery")
+    ld(RDX, RSP, 0x28)
+    ld(RAX, RSP, 0x50)                          # double 在 value + 8
+    a.emit(b"\x48\x89\x02")                     # mov [rdx], rax
+    a.emit(b"\x31\xC0")                         # xor eax, eax
+    jmp_l("__ws_ret")
+    a.label("__ws_pdh_e8")
+    a.emit(mov_ri_se(RAX, -8))
+    jmp_l("__ws_pdh_close")
+    a.label("__ws_pdh_e7")
+    a.emit(mov_ri_se(RAX, -7))
+    jmp_l("__ws_pdh_close")
+    a.label("__ws_pdh_e6")
+    a.emit(mov_ri_se(RAX, -6))
+    a.label("__ws_pdh_close")
+    st(RSP, 0x60, RAX)                          # 保住错误码
+    ld(RCX, RSP, 0x30)
+    api("PdhCloseQuery")
+    ld(RAX, RSP, 0x60)
+    jmp_l("__ws_ret")
+    a.label("__ws_pdh_fail")
+    a.emit(mov_ri_se(RAX, -5))                  # -EIO（连查询都开不了）
+    jmp_l("__ws_ret")
+
+    # ---- generic Win32 call(fn_id, args) --------------------------------
+    # 四个实参照 Linux 习惯装在 rdi/rsi/rdx/r10，但这里只用 rdi（号）与 rsi（数组）。
+    # 装载四个参数到 Windows 的 rcx/rdx/r8/r9，然后按号跳到对应导入槽。
+    # 参数少于四个的函数忽略多装的那几个；**五参数函数这个调用器不接**（第五个要上栈）。
+    a.label("__ws_win32")
+    ld(RCX, RSI, 0)
+    ld(RDX, RSI, 8)
+    ld(R8, RSI, 16)
+    ld(R9, RSI, 24)
+    for _id, _name in WIN32_CALLS:
+        cmp_edi(_id)
+        jcc_l("e", f"__ws_w{_id}")
+    a.emit(mov_ri_se(RAX, -38))                 # 表外的号 -> -ENOSYS
+    jmp_l("__ws_ret")
+    for _id, _name in WIN32_CALLS:
+        a.label(f"__ws_w{_id}")
+        api(_name)
+        jmp_l("__ws_ret")
 
     # ---- getdents64(fd, buf, n) -----------------------------------------
     # 一次发一条 linux_dirent64（消费方本来就是 while 循环读到 0 为止）。
@@ -5338,7 +5496,9 @@ def build_pe(text: bytes, data: bytes, entry_rva: int, idata: bytes) -> bytes:
     struct.pack_into("<H", opt, 68, 3)                       # Subsystem: console
     # 栈留 16 MB：编译器自己的递归下降比小工具深得多（Linux 那侧默认 8 MB，本来就够宽）。
     struct.pack_into("<Q", opt, 72, 16 * 1024 * 1024)
-    struct.pack_into("<Q", opt, 80, 0x100000)
+    # 提交 8 MB：**保留够但提交不够时加载器不替我们长**（实测：`std/ansi.lomt` 这类
+    # 大单元在 1 MB 提交上直接访问违例；自举编译器自己的递归下降要得更深）。
+    struct.pack_into("<Q", opt, 80, 8 * 1024 * 1024)
     struct.pack_into("<Q", opt, 88, 0x100000)
     struct.pack_into("<Q", opt, 96, 0x1000)
     struct.pack_into("<I", opt, 108, 16)

@@ -30,6 +30,105 @@ Semantics: `guard cap(e);` evaluates `e` to an index; outside `[lo, hi]` it **tr
 other effect), inside it increments the audit table. **A literal out of range is a compile-time
 error** (E4); a non-literal is a runtime check.
 
+A domain may also carry a **shape**, a **polarity**, or a **time law** (all kinds share one
+decision point; `tick;` advances the virtual clock):
+
+| spelling | guard passes when |
+|---|---|
+| `[a..b]` / `[a..a]` / `[()..b]` / `[a..()]` / `[()..()]` | index in the shape; `()` = that side unbounded |
+| `danger` | index **outside** the shape (a literal inside is a compile error) |
+| `epoch(N)` / `decaying(T)` / `growing(G)` | `now < N` / `now <= T` / index within the growing end |
+| `far(W)` | index in `[origin, origin+W)`, `origin = floor(now/W)*W` |
+| `sliding(W)` | index in `[now-W, now]` |
+| `cyclic(P)` | `(index % P)` in the shape (`P > hi`) |
+| `generational(N)` | the shape holds, but the polarity flips every `N` ticks |
+| `adaptive` | width scales with `quality cap = q;` (0..255, default 255) |
+| `consumed(N)` | each position passes at most `N` times |
+| `subject(MASK)` | `guard cap(x, subj);` - bit `subj` is set in `MASK` |
+| `witnessed(T)` | `guard cap(x, ticket);` - that ticket is used fewer than `T` times |
+| `flow` | `guard cap(src, dst);` - packed edge `(src << 16 \| dst)` is inside the shape |
+| `reachable(K)` | the position is free; reserves it for `K` ticks, `discharge cap(x);` clears it |
+
+`consumed`, `witnessed` and `reachable` keep per-position state, so their domain must be bounded
+and at most 64 wide. `subject` / `witnessed` / `flow` take a second guard argument; every other
+kind refuses one.
+
+**Scoped domains (`docs/314`).** A `domain` block is the same algebra with a lexical scope and a
+lifetime; values can carry a space, and accesses into that space are guarded for you:
+
+```rust
+module fill_scope
+choose runtime
+
+fn fill(a: [u32; 64] in disk, i: u32) {
+    domain buf : disk[0..63] consumed(1) {
+        a[i] = 1;        // implicit guard buf(i)
+        guard buf(i);    // explicit form; same decision point
+    }
+    // guard buf(i);     // compile error: buf is out of scope
+}
+```
+
+**Walking a domain (`docs/315`).** `domain:for` iterates the positions of a domain. The guard is
+checked once at the loop head (not once per access), and every back edge advances the virtual
+clock:
+
+```rust
+module walk_domain
+choose runtime
+
+fn sum(a: [u32; 8] in disk) -> u32 {
+    domain buf : disk[0..7] consumed(1) {
+        domain:for i {
+            a[i] = a[i] + 1;   // head guard covers this position; no second guard
+        }
+    }
+    return a[0];
+}
+```
+
+- `domain:for i` walks the innermost block's domain; `domain:for i in NAME` names one;
+  `step N` walks every Nth position, `step -N` walks backwards; `domain:for i, j in A, B`
+  walks two same-shaped domains in parallel (one guard each per round).
+- Only bounded, orderable domains can be walked: infinite shapes, `danger`, and
+  `subject` / `witnessed` / `flow` (they need a second guard argument) are compile errors.
+- `choose domain_clock_explicit` turns the automatic back-edge tick off; then only an explicit
+  `tick;` advances the clock.
+
+**Trees and graphs (`docs/315`).** Nested blocks are the vertical tree. Two declarations say it
+out loud:
+
+```rust
+module domain_graph
+choose runtime
+capability ring  : disk[0..15] adaptive
+capability other : mem[16..19]
+
+fn pump(a: [u32; 16] in disk) -> u32 {
+    domain outer : disk[0..15] {
+        couple outer, ring;   // ⇄ one renewal unit: same position, together
+        mutex  ring, other;   // ⊥ shapes must be provably disjoint
+        domain leaf : disk[0..3] child_of outer { a[0] = 1; }   // explicit tree edge
+    }
+    return a[0];
+}
+```
+
+- `child_of PARENT` requires the parent to be lexically enclosing, the same space, and the child
+  shape to sit inside it.
+- `couple A, B, …` makes one renewal unit: a guard on any member also (silently) checks the
+  others at the same position, and a `quality` write goes to every adaptive member.
+- `mutex A, B` is a compile-time promise (finite, non-danger, disjoint shapes); it emits no code.
+
+- `let a: [u32; 64] in disk` / `a: [u32; 64] in disk` (parameter) tags a value's space
+  (arrays, slices, pointers only). The tag does not travel through a call - the callee sees a
+  plain type.
+- Inside a block, an index into a value of that block's space is guarded automatically. Nested
+  same-space domains check the whole chain; only the innermost one audits or transfers.
+- Stateful kinds (`consumed`, `adaptive`, `witnessed`, `reachable`) get a **fresh instance per
+  entry**: the next loop iteration and a recursive call each start from zero.
+- A top-level `capability` still means the whole unit; the block form is the local one.
+
 **Honest boundaries.** `guard` constrains **the index** to the domain only; it **is not
 authorisation** - it never asks "does the current principal hold this capability", because the
 principal-to-capability binding lives on the kernel side. `revocable` is currently just a flag in

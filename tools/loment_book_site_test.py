@@ -42,7 +42,7 @@ def test_every_chapter_has_a_page():
         missing = [book["slug"] + "/" + rel[:-3] + ".html" for _, _, rel in entries
                    if book["slug"] + "/" + rel[:-3] + ".html" not in have]
         assert not missing, f"{book['slug']}: 这些条目没有页面: " + ", ".join(missing[:8])
-    assert total == 46, f"条目数变了: {total}（两本书 + by-example）"
+    assert total == 68, f"条目数变了: {total}（两本书 + by-example）"
 
 
 @test
@@ -61,7 +61,7 @@ def test_code_fences_are_preserved_and_escaped():
     with tempfile.TemporaryDirectory(prefix="lomsite_") as tds:
         out = Path(tds) / "site"
         _build(Path(tds))
-        page = (out / "usage" / "src" / "07-option-result.html").read_text(encoding="utf-8")
+        page = (out / "usage" / "src" / "12-option-result.html").read_text(encoding="utf-8")
     assert '<pre><code class="language-rust">' in page, "围栏块的语言类丢了"
     assert "Result&lt;u32, u32&gt;" in page, "尖括号没有转义"
     assert not re.search(r"Result<u32", page), "代码块里有未转义的小于号"
@@ -73,10 +73,10 @@ def test_toc_marks_the_current_chapter():
     with tempfile.TemporaryDirectory(prefix="lomsite_") as tds:
         out = Path(tds) / "site"
         _build(Path(tds))
-        page = (out / "usage" / "src" / "07-option-result.html").read_text(encoding="utf-8")
+        page = (out / "usage" / "src" / "12-option-result.html").read_text(encoding="utf-8")
         other = (out / "contributing" / "src" / "04-the-gate.html").read_text(encoding="utf-8")
     assert page.count('class="current"') == 2, "当前书 + 当前章应当各有一条标记"
-    assert 'class="current">Option, Result and <code>?</code></a>' in page, \
+    assert 'class="current">Option, Result and error flow</a>' in page, \
         "当前章的标题没被选中"
     assert 'class="current">Loment Development Contribution Plan</a>' in other, \
         "贡献书里没标出当前书"

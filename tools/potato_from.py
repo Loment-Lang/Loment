@@ -1789,6 +1789,75 @@ TUR2026_2_FEATURES: tuple[str, ...] = (
     "orelse", "catch", "print_num", "defer",
 )
 
+#: **默认版次 = 最新的那一版**（2026-11-06 用户裁定）。
+#:
+#: 旧口径是"没声明 = Tur 1，永远不变"。它把最保守的读法给了**新写的代码**，而 Tur 1
+#: 缺掉的正是今天要用的那批构造（`def` / `for x in xs` / `break` / `orelse` / `defer` /
+#: `lgc` …）—— 于是每一份新文件都得先背一行声明。
+#:
+#: 新口径：**没声明 = 当前最新版次**（`TUR_EDITIONS[-1]`）。要钉旧读法仍然随时可钉：
+#: `choose write grammar tur2026.1`（或 `tur1`）。`tur` / `tur1` 是**显式**的历史拼法，
+#: 不跟默认走；`loment` 是语言名，跟默认走。
+#:
+#: **代价与对策**：新版次只加不改，但"加"的拼法如果本该是旧版里的合法标识符
+#: （`break` / `continue` / `defer` / `print_num` / `lgc`），同一份旧源就会**静默改义**。
+#: 对策不是把默认退回去，而是 `EDITION_COLLISIONS` + 前门那一闸：无声明单元里
+#: **声明**了这些名字就拒编译，要求改名或显式钉版次 —— 宁可响亮地拒，不做安静的改义。
+DEFAULT_EDITION: str = TUR_EDITIONS[-1]
+
+#: **新版次里"从拼法变成语法"的那些词**（按引入它们的版次分组）。
+#:
+#: 这些词在更早的版次里是**合法标识符**，所以"新版次接受它们当关键字"会让一份旧源
+#: 在默认读法下改变含义。最小的一例是 `let break = 1; while c { break; }`：旧版里
+#: `break;` 是一条空表达式语句，新版里它退出循环。前门据此拒掉"无声明单元里声明了
+#: 这些名字"的源（`edition_collision_hits`），**用**它们不触发 —— 循环里的 `break;`
+#: 正是新版次想要的写法。
+#:
+#: **加新构造时要更新这里**：新语法若用了旧版次里能当标识符的拼法，就把词加进对应
+#: 版次那一行；判据 `test_every_open_edition_declares_its_collision_set` 钉着这条。
+EDITION_COLLISIONS: dict[str, tuple[str, ...]] = {
+    "tur2026.2": ("break", "continue", "defer", "print_num"),
+    "tur2026.3": ("lgc",),
+}
+
+
+def collision_names_through(edition: str) -> tuple[str, ...]:
+    """到 `edition` 为止（含）所有"新版拼法"的名字 —— 无声明单元要躲开的那一批。"""
+    names: list[str] = []
+    for ed in TUR_EDITIONS:
+        names.extend(EDITION_COLLISIONS.get(ed, ()))
+        if ed == edition:
+            break
+    return tuple(dict.fromkeys(names))
+
+
+#: 这些词后面紧跟的那个标识符是一次**名字声明**。
+_DECL_WORDS = frozenset(("let", "const", "fn", "for"))
+
+
+def edition_collision_hits(toks, names) -> list:
+    """无声明单元里**声明**了新版次关键字的位置（`(line, col, name)`）。
+
+    **只看声明位置**：`let` / `const` / `fn` / `for` 后面的那个名字，以及 `(` / `,`
+    之后紧跟 `:` 的参数名（字段名也落这一格 —— 宁可多拒一次，不做安静的改义）。
+    **用**这些名字不触发：`break;` 在循环里正是新版次要的写法。
+    """
+    want = frozenset(names)
+    hits: list = []
+    n = len(toks)
+    for i, t in enumerate(toks):
+        if t.kind != "ident" or t.val not in want:
+            continue
+        prev = toks[i - 1] if i else None
+        if prev is not None and prev.kind == "ident" and prev.val in _DECL_WORDS:
+            hits.append((t.line, t.col, t.val))
+            continue
+        if (prev is not None and prev.kind == "punct" and prev.val in ("(", ",")
+                and i + 1 < n and toks[i + 1].kind == "punct"
+                and toks[i + 1].val == ":"):
+            hits.append((t.line, t.col, t.val))
+    return hits
+
 #: **声明的词序**：`choose write grammar <别名>`。
 #:
 #: **这是与报错器共享的一份契约，不是随便三个词。** 报错器是个**独立的 Loment 程序**
@@ -2130,16 +2199,16 @@ class FrontUnit:
     __slots__ = ("grammar", "source", "translated", "path", "profile", "spelling")
 
     def __init__(self, grammar: str, source: str, translated: bool, path: Path,
-                 profile: str = "tur2026.1", spelling: str = ""):
+                 profile: str = DEFAULT_EDITION, spelling: str = ""):
         self.grammar = grammar
         self.source = source
         self.translated = translated
         self.path = path
         #: 源里**写下的那个拼法**（小写；空 = 没写）。编译期提示要把它展开成规范名。
         self.spelling = spelling
-        #: **版次**（`docs/296` §1.1）：规范名 `tur2026.1`（缺省）或 `tur2026.2`。
-        #: 它只影响"哪些拼法被当语法读"，不影响 `grammar`（抹掉声明后都是本语言）。
-        #: 译出来的那几门一律是 `tur2026.1`。
+        #: **版次**（`docs/296` §1.1）：规范名；**缺省 = 最新那一版**
+        #: （`DEFAULT_EDITION`，见它的注）。它只影响"哪些拼法被当语法读"，
+        #: 不影响 `grammar`（抹掉声明后都是本语言）。
         self.profile = profile
 
 
@@ -2301,16 +2370,19 @@ def front_door(path: Path, lang: str = "auto", mode: str = "strict") -> FrontUni
             body = strip_grammar_decl(src)
             if g in TUR_EDITIONS:
                 body = _strip_tur_mut(body)
-            if g in ("tur2026.2", "tur2026.3"):
+            # 纯糖按**生效版次**算，不按拼法算：`loment` / 没声明现在都落到默认
+            # （最新版），它们也必须有 `def` / `and` / `or` / `not` / `elif`。
+            _prof = g if g in TUR_EDITIONS else DEFAULT_EDITION
+            if _prof in ("tur2026.2", "tur2026.3"):
                 # Tur 2 的纯糖（`docs/296` §2.1）：等长改写，行/列/偏移不动。
                 # Tur 2026.3 继承它（版次是累积的）。
                 body = _tur2_sugar(body)
             # 版次记**规范名**（`tur2026.1` / `tur2026.2` / `tur2026.3`）。
-            # `loment` 与没声明都是 Tur 1。
+            # **`loment` 与没声明都跟默认走**（`DEFAULT_EDITION`）—— 把旧读法写死在
+            # 默认上，等于让每一份新文件先背一行声明；见 `DEFAULT_EDITION` 的注。
             _word = (find_decl(src)[1] or "").strip().lower() if declared else ""
             return FrontUnit("loment", body, False, path,
-                             profile=(g if g in TUR_EDITIONS else "tur2026.1"),
-                             spelling=_word)
+                             profile=_prof, spelling=_word)
         lang, why = g, "文件头声明 `choose write grammar`"
     else:
         lang, why = resolve_lang(path, lang)

@@ -29,9 +29,9 @@ choose runtime
 // **这一格是被撞出来的**（2026-10-11）：`codegen.lomt` 涨到 262858 字节，而槽是 262144
 // —— 只差 714，症状是**自举段错误**（`loment_seed_test` 的退出码 139），不是一句报错。
 // 槽的用途就是「装得下最大的那份源」，所以源长了就抬它（同 `TB_LBL_MAX` 那两次）。
-const SLOT: u32 = 524288;        // 每层源文件槽 (够装最大的 codegen.lomt)
+const SLOT: u32 = 786432;        // 每层源文件槽 (够装最大的 codegen.lomt；2026-11-08 490 KB -> 抬到 768 KiB)
 const MAXDEPTH: u32 = 8;         // 依赖深度上限
-const UNIT_CAP: u32 = 8388608;   // 单元缓冲 (含顶部 MAXDEPTH*SLOT 的槽区)
+const UNIT_CAP: u32 = 12582912;  // 单元缓冲 (含顶部 MAXDEPTH*SLOT = 6 MiB 的槽区)
 const IR_CAP: u32 = 16777216;    // IR 输出缓冲 (上界 8*单元 + 8192, 留足余量)
 const SEEN_CAP: u32 = 65536;     // 已装载路径去重表
 // 小暂存的布局 (改了偏移必须所有用点一起改 —— 它们写在同一块内存上):
@@ -75,7 +75,9 @@ const EXT_OFF: u32 = 20224;      // 源后缀 (loment.conf)
 const DIAG_OFF: u32 = 20480;     // --diag-out 路径
 const DIAGFD_OFF: u32 = 24160;   // 这一次的 --diag-out fd **加一** (0 = 没给)
 const PROF_OFF: u32 = 24164;     // 版次 (docs/296/306): 0 = 2026.1, 1 = 2026.2, 2 = 2026.3
+const PROF_DEFAULT: u32 = 2;     // 缺省 = 最新版次 (potato_from.DEFAULT_EDITION)
 const DECLK_OFF: u32 = 24168;    // 根单元的拼法 (0 = 没写; 见 strip_grammar_decl)
+const FPROF_OFF: u32 = 24172;    // 这份文件自己声明的版次 (0xFFFFFFFF = 没写)
 const ADDIN_OFF: u32 = 21504;    // addin 清单起点
 const CMD_OFF: u32 = 23904;      // 命令名 (`--print-command`)
 const DIAG_CAP: u32 = 1024;      // 路径上限
@@ -83,7 +85,7 @@ const EXT_CAP: u32 = 256;        // 源后缀上限
 const DIR_CAP: u32 = 1024;       // 项目根 / 工具目录 / 版本名 各自的上限
 const DENT_CAP: u32 = 1024;      // 目录项缓冲上限 (PE 垫片一次只回一条记录)
 const SUBP_CAP: u32 = 1472;      // 子路径上限
-const TOKS_CAP: u32 = 5244160;   // (SLOT + 64) * 20 = 单文件词法缓冲
+const TOKS_CAP: u32 = 15729920;  // (SLOT + 64) * 20 = 单文件词法缓冲
 
 use lexer
 use codegen
@@ -456,6 +458,9 @@ fn rt_phrase(slot: ptr, toks: ptr, tk: u32) -> str {
     if tok_is(slot, toks, tk, "str_eq") { return "`str_eq`"; }
     if tok_is(slot, toks, tk, "panic") { return "`panic`"; }
     if tok_is(slot, toks, tk, "guard") { return "`guard`（能力域守卫）"; }
+    if tok_is(slot, toks, tk, "tick") { return "`tick`（虚拟钟）"; }
+    if tok_is(slot, toks, tk, "quality") { return "`quality`（自适应域的质量）"; }
+    if tok_is(slot, toks, tk, "discharge") { return "`discharge`（可达域义务）"; }
     return "";
 }
 
@@ -776,6 +781,9 @@ fn strip_grammar_decl(buf: ptr, n: u32, scr: ptr, file: ptr, fnam: u32, root: u3
     let saw_module: u32 = 0;
     let seen: u32 = 0;
     let i: u32 = 0;
+    // **这份文件自己写的是哪一版**（`FPROF_OFF`）：-1 = 没写。与整程序的
+    // `PROF_OFF` 分开 —— 碰撞闸要看的是"这份源有没有把读法钉在生效版次上"。
+    store32(scr, FPROF_OFF, 4294967295);
     while i < n {
         let e: u32 = i;
         while e < n && load8(buf, e) != 10 {
@@ -829,11 +837,28 @@ fn strip_grammar_decl(buf: ptr, n: u32, scr: ptr, file: ptr, fnam: u32, root: u3
                     z = z + 1;
                 }
                 seen = 1;
+                // **这份文件声明的版次**（含 `loment` = 默认）。先记下来，
+                // 碰撞闸之后要拿它跟生效版次比（`load_file`）。
+                if is3 != 0 {
+                    store32(scr, FPROF_OFF, 2);
+                } else if is2 != 0 {
+                    store32(scr, FPROF_OFF, 1);
+                } else if (ist + is1a + is1b) != 0 {
+                    store32(scr, FPROF_OFF, 0);
+                } else {
+                    store32(scr, FPROF_OFF, PROF_DEFAULT);
+                }
                 if root != 0 {
+                    // **默认 = 最新那一版**（`potato_from.DEFAULT_EDITION`）：
+                    // `loment` 与没声明都不写 PROF，留在初值上。显式写了旧版次的
+                    // 才往下压 —— `tur` / `tur1` / `tur2026.1` 必须显式压回 0，
+                    // 因为缺省已经不是 Tur 1 了。
                     if is3 != 0 {
                         store32(scr, PROF_OFF, 2);      // tur3 / tur2026.3
                     } else if is2 != 0 {
                         store32(scr, PROF_OFF, 1);      // tur2 / tur2026.2
+                    } else if (ist + is1a + is1b) != 0 {
+                        store32(scr, PROF_OFF, 0);      // tur / tur1 / tur2026.1
                     }
                     // 拼法代号：编译期提示要把它展开成规范名（docs/296 §1.1）。
                     if isl != 0 {
@@ -863,6 +888,68 @@ fn strip_grammar_decl(buf: ptr, n: u32, scr: ptr, file: ptr, fnam: u32, root: u3
         i = e + 1;
     }
     return n;
+}
+
+// ---------------------------------------------------------------- 版次碰撞闸
+//
+// `potato_from.edition_collision_hits` 的自举孪生：无声明单元里**声明**了新版次的
+// 关键字时拒编译（`let break = 1; while c { break; }` 是静默改义的最小一例）。
+// 只看声明位置；**用**这些名字不触发 —— 循环里的 `break;` 正是新版次要的写法。
+
+/// 这个 token 是"被声明的新版关键字"吗？是就返回下标 + 1（0 = 不是）。
+fn coll_hit_at(src: ptr, toks: ptr, nt: u32, i: u32, prof: u32) -> u32 {
+    let p: ptr = ptr_add(src, load32(toks, i * 20 + 4));
+    let n: u32 = load32(toks, i * 20 + 8);
+    let hit: u32 = 0;
+    if prof >= 1 {
+        if streq(p, n, "break") != 0 || streq(p, n, "continue") != 0
+                || streq(p, n, "defer") != 0 || streq(p, n, "print_num") != 0 {
+            hit = 1;
+        }
+    }
+    if prof >= 2 && streq(p, n, "lgc") != 0 {
+        hit = 1;
+    }
+    if hit == 0 {
+        return 0;
+    }
+    // `let` / `const` / `fn` / `for` 后面的那个名字。
+    if i > 0 && load32(toks, (i - 1) * 20) == 0 {
+        let q: ptr = ptr_add(src, load32(toks, (i - 1) * 20 + 4));
+        let m: u32 = load32(toks, (i - 1) * 20 + 8);
+        if streq(q, m, "let") != 0 || streq(q, m, "const") != 0
+                || streq(q, m, "fn") != 0 || streq(q, m, "for") != 0 {
+            return i + 1;
+        }
+    }
+    // `(` / `,` 后面紧跟 `:` 的参数名（字段名也落这一格 —— 宁可多拒一次）。
+    if i > 0 && load32(toks, (i - 1) * 20) == 3
+            && load32(toks, (i - 1) * 20 + 8) == 1 {
+        let c0: u32 = load8(src, load32(toks, (i - 1) * 20 + 4));
+        if (c0 == 40 || c0 == 44) && i + 1 < nt && load32(toks, (i + 1) * 20) == 3
+                && load32(toks, (i + 1) * 20 + 8) == 1 {
+            let c1: u32 = load8(src, load32(toks, (i + 1) * 20 + 4));
+            if c1 == 58 {
+                return i + 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/// 扫整条 token 流；返回第一个碰撞 token 的下标 + 1（0 = 没有）。
+fn coll_scan(src: ptr, toks: ptr, nt: u32, prof: u32) -> u32 {
+    let i: u32 = 0;
+    while i < nt {
+        if load32(toks, i * 20) == 0 {
+            let h: u32 = coll_hit_at(src, toks, nt, i, prof);
+            if h != 0 {
+                return h;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
 }
 
 // ---------------------------------------------------------------- Tur 2 纯糖（docs/296 §2.1）
@@ -1219,9 +1306,24 @@ fn is_dir_at(dirp: ptr, dl: u32, dent: ptr, nm: u32, scr: ptr) -> u32 {
     return 1;
 }
 
+/// 工具链自己拥有的包名 (#980): 项目本地的 `deps/<名字>/` 不许顶掉它们。
+/// 与参考实现 `RESERVED_PACKAGE_NAMES`、lompi 的 `pkg_reserved_name` **一起改**。
+fn name_reserved(s: ptr, off: u32, len: u32) -> u32 {
+    let p: ptr = ptr_add(s, off);
+    if len == 3 && streq(p, 3, "std") == 1 { return 1; }
+    if len == 4 && streq(p, 4, "libl") == 1 { return 1; }
+    if len == 4 && streq(p, 4, "host") == 1 { return 1; }
+    if len == 8 && streq(p, 8, "internet") == 1 { return 1; }
+    if len == 2 && streq(p, 2, "os") == 1 { return 1; }
+    return 0;
+}
+
 /// `<名字>` 是否在 `<根>/deps/<名字>/<名字>.lomt` —— 项目本地的依赖 (lompi 落点)。
 /// 命中写进 tmp 并返回长度; 0 = 没这个目录。
 fn try_deps(root: ptr, rn: u32, src: ptr, off: u32, len: u32, tmp: ptr, scr: ptr) -> u32 {
+    if name_reserved(src, off, len) == 1 {
+        return 0;          // 工具链的名字: 让 store / 四根去解析 (#980)
+    }
     let d: u32 = 0;
     if rn > 0 {
         d = cat(tmp, d, root, rn);
@@ -1389,7 +1491,9 @@ fn try_store_layers(td: ptr, tn: u32, dev: u32, src: ptr, off: u32, len: u32,
 
 /// `use <名字>` -> 真实路径, 写进 dst, 返回长度 (0 = 找不到或有歧义)。
 /// **按层搜, 先命中先用** (与 `lomentc.resolve_name` 同规则):
-///   1.  `<项目根>/deps/<名字>/<名字>.lomt`   项目本地 (包入口)
+///   1.  `<项目根>/deps/<名字>/<名字>.lomt`   项目本地 (包入口) —— **保留名除外**:
+///       `std` / `libl` / `host` / `internet` / `os` 跳过 1 与 1b, 由 store / 四根解析
+///       (`name_reserved`, #980 —— 与参考实现的 `RESERVED_PACKAGE_NAMES` 一起改)
 ///   1b. `<项目根>/deps/<包>/<名字>.lomt`     **项目本地的包内模块**
 ///   2.  内置四根 `<根>/<名字>.lomt` —— **这一层命中必须唯一**
 ///   3.  `<store>/<名字>/<版本>/<名字>.lomt`  随包自带 (包入口)
@@ -1400,6 +1504,8 @@ fn try_store_layers(td: ptr, tn: u32, dev: u32, src: ptr, off: u32, len: u32,
 /// 模块是包的私有名字空间, 让它盖住编译器自己的模块是灾难 (加这一层时真撞上了:
 /// `store/std/0.1.0/interp.lomt` 把 `loment/selfhost/interp.lomt` 顶掉, 驱动直接编不过)。
 /// 项目本地的 `deps/` 不在此列 —— 那是使用者**显式装的**, 理应先于工具链自带的任何东西。
+/// **例外 (#980)**: 导入方自己住在商店里时不看项目本地 —— 否则使用者的 `deps/mem`
+/// 能改掉标准库内部的 `use mem`。
 ///
 /// §归属 (2026-09-20): **第 2 层与第 3 层谁在前面, 看导入方自己住在哪边。** 这不是设计
 /// 出来的, 是加包内模块那一层时撞出来的 —— 两个方向都撞得上真东西:
@@ -1426,18 +1532,25 @@ fn resolve_use_name(src: ptr, off: u32, len: u32, dst: ptr, scr: ptr, ins: u32) 
     // 一边读 base 一边往 tmp 里拼候选路径, 两者不能是同一块。
     let base: ptr = ptr_add(scr, BASE_OFF);
     // 项目本地两层: 路径命中即返回, 不需要判唯一 (参考实现也是"先命中先用")。
-    let r1: u32 = try_deps(proj, pn, src, off, len, tmp, scr);
-    if r1 > 0 {
-        return cat(dst, 0, tmp, r1);
-    }
-    let bl1: u32 = 0;
-    if pn > 0 {
-        bl1 = cat(base, 0, proj, pn);
-    }
-    bl1 = catl(base, bl1, "/deps");
-    let r1b: u32 = try_pkg_module(base, bl1, 0, src, off, len, tmp, dst, scr);
-    if r1b > 0 {
-        return r1b;
+    // **导入方住在商店里时不看项目本地** (#980): store 包自己的 `use` 不能被使用者
+    // 的 `deps/` 劫持 —— 那会让标准库的内部模块也被顶掉。
+    if ins == 0 {
+        let r1: u32 = try_deps(proj, pn, src, off, len, tmp, scr);
+        if r1 > 0 {
+            return cat(dst, 0, tmp, r1);
+        }
+        let bl1: u32 = 0;
+        if pn > 0 {
+            bl1 = cat(base, 0, proj, pn);
+        }
+        bl1 = catl(base, bl1, "/deps");
+        let r1b: u32 = 0;
+        if name_reserved(src, off, len) == 0 {
+            r1b = try_pkg_module(base, bl1, 0, src, off, len, tmp, dst, scr);
+        }
+        if r1b > 0 {
+            return r1b;
+        }
     }
     // 导入方住在商店里: 商店两层提到四根前面 (§归属)。
     if ins == 1 {
@@ -1918,6 +2031,18 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
     }
     // 先把本文件的 `use` 全收下来 (递归会复用 toks, 不能一边扫一边递归)
     let ntf: u32 = lex(slot, nb, toks);
+    // **版次不静默**（`potato_from.DEFAULT_EDITION` 的注）：这份文件没把读法钉在
+    // 生效版次上（没写声明，或写的是旧版次），却声明了新版次的关键字 —— 旧读法把
+    // 它当标识符、新读法把它当语法，同一份源会静默改义。宁可响亮地拒。
+    let effp: u32 = load32(scr, PROF_OFF);
+    if effp >= 1 && load32(scr, FPROF_OFF) != effp {
+        if coll_scan(slot, toks, ntf, effp) != 0 {
+            let dm: str = "this source does not pin its reading to the current edition (no `choose write grammar`, or an older one) and it declares a name that a newer Tur edition treats as syntax (break / continue / defer / print_num / lgc). That would silently change what the source means. Rename it, or pin the old reading with `choose write grammar tur2026.1` (or `tur2026.2`).";
+            wdiag_file(dfd, scr, path, n, 40, str_ptr(dm), str_len(dm));
+            failp(dm, path, n);
+            die(1);
+        }
+    }
     // `addin` 拉进来的单元**只许写 choose 相关代码**（`docs/182` §1.4）。
     if from_addin == 1 {
         check_chooseset(slot, toks, ntf, path, n, scr);
@@ -2149,7 +2274,7 @@ fn _start() -> u32 {
     // `--diag-out` 后面跟路径, 这个不跟 —— 对象直接写 stdout (与 IR 同一条出口次序:
     // **一个单元一份产物**)。
     store8(scr, DIAG_OFF, 0 as u8);
-    store32(scr, PROF_OFF, 0);          // 缺省是 Tur 1（docs/296）
+    store32(scr, PROF_OFF, PROF_DEFAULT);   // 缺省 = 最新版次（potato_from.DEFAULT_EDITION）
     store32(scr, DECLK_OFF, 0);         // 缺省：没写 `choose write grammar`
     let pmode: u32 = 0;
     // `--no-edition-notice`：**工具**（`lomcomefor` 这类把驱动当子进程、把它的输出
@@ -2262,9 +2387,9 @@ fn _start() -> u32 {
     if pmode == 0 && quiet == 0 {
         let pk: u32 = load32(scr, DECLK_OFF);
         if pk == 0 {
-            wstr(2, "loment: grammar default -> tur2026.1 (Tur 1)\n");
+            wstr(2, "loment: grammar default -> tur2026.3 (Tur 2026.3)\n");
         } else if pk == 1 {
-            wstr(2, "loment: grammar loment -> tur2026.1 (Tur 1)\n");
+            wstr(2, "loment: grammar loment -> tur2026.3 (Tur 2026.3)\n");
         } else if pk == 2 {
             wstr(2, "loment: grammar tur -> tur2026.1 (Tur 1)\n");
         } else if pk == 3 {
@@ -2589,7 +2714,9 @@ fn _start() -> u32 {
         return fail(dm);
     }
     let cg: ptr = cgv as ptr;
-    let m: u32 = emit_module(unit, ctoks, ir, cg, load32(scr, PROF_OFF));
+    // `docs/315`：`domain_clock_explicit` 关掉"回边即 tick"（默认自动）。
+    let m: u32 = emit_module(unit, ctoks, ir, cg, load32(scr, PROF_OFF),
+                             sw_state_named(unit, sw, "domain_clock_explicit"));
     if m == 0 {
         // **发射器自己的诊断通道**（`#775`）：先问它是不是"有一条规则降不下去"。
         // 那条比容量溢出更具体 —— 有规则号、有 token 位置，能指出是哪一处。
@@ -2601,6 +2728,9 @@ fn _start() -> u32 {
             let em: str = "the self-hosted emitter cannot lower a call with more than 20 arguments -- split the call into smaller ones";
             if ec == 3 {
                 em = "a defer takes at most 4 arguments -- bind them to locals first";
+            }
+            if ec == 2 {
+                em = "too many `in SPACE` bindings in one function -- split the function";
             }
             if ec == 4 {
                 em = "too many defer statements in one function -- split the function";

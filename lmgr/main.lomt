@@ -1,0 +1,352 @@
+// lmgr — LomentManager：开发者本位的实时资源管理器套件（docs/303）
+//
+// 第一版：38 个槽位的注册表、真实能力探测、list / doctor 两条命令。
+// 槽位状态由**探针**决定，不由写死的表决定 —— 不知道就报 unavailable。
+
+module lmgr
+choose runtime
+
+use "lompi/store/host/0.1.0/argv.lomt"
+
+// ---------------------------------------------------------------- 能力位
+const CAP_FS_READ: u32 = 1;
+const CAP_FS_STAT: u32 = 2;
+const CAP_NET_TCP: u32 = 4;
+const CAP_TIME_MONO: u32 = 8;
+const CAP_WIN_CPU: u32 = 16;
+const CAP_PDH: u32 = 32;
+const CAP_PROC: u32 = 64;
+const CAP_MEM: u32 = 128;
+const CAP_DISK: u32 = 256;
+const CAP_NET: u32 = 512;
+const CAP_GPU: u32 = 1024;
+const CAP_POWER: u32 = 2048;
+const CAP_ENV: u32 = 4096;
+const CAP_DEVICEIO: u32 = 8192;
+const CAP_CONSOLE: u32 = 16384;
+const CAP_BUILD_CACHE: u32 = 32768;
+const CAP_BUILD_TIME: u32 = 65536;
+const CAP_THREAD: u32 = 131072;
+const CAP_ETW: u32 = 262144;
+
+const CAP_N: u32 = 19;
+
+const AT_FDCWD: u64 = 18446744073709551516;
+
+const N_SLOTS: u32 = 38;
+
+// ---------------------------------------------------------------- 小工具
+fn w(p: ptr, off: u32, n: u32) {
+    if n > 0 {
+        syscall4(1, 1, p as u64 + off as u64, n as u64);
+    }
+}
+
+fn pad(n: u32) {
+    let k: u32 = 0;
+    while k < n {
+        print(" ");
+        k = k + 1;
+    }
+}
+
+fn pad_to(cur: u32, target: u32) {
+    if cur < target {
+        pad(target - cur);
+    }
+}
+
+fn state_name(s: u32) -> str {
+    if s == 0 {
+        return "available";
+    }
+    if s == 1 {
+        return "degraded";
+    }
+    return "unavailable";
+}
+
+fn state_of(req: u32, ok: u32) -> u32 {
+    if req == 0 {
+        return 0;
+    }
+    if (req & ok) == req {
+        return 0;
+    }
+    return 2;
+}
+
+// ---------------------------------------------------------------- 探针
+// 每个探针返回自己的能力位（可用）或 0（不可用）。没有对应 syscall 的能力
+// 直接返回 0 —— 编造的“可用”比缺失更坏。
+
+fn probe_fs_read() -> u32 {
+    let path: str = "/proc/self/cmdline";
+    let fd: i64 = syscall4(257, AT_FDCWD, str_ptr(path) as u64, 0);
+    if fd >= 0 {
+        syscall4(3, fd as u64, 0, 0);
+        return CAP_FS_READ;
+    }
+    return 0;
+}
+
+fn probe_fs_stat() -> u32 {
+    let path: str = ".";
+    let st: ptr = alloc(256);
+    let r: i64 = syscall6(262, AT_FDCWD, str_ptr(path) as u64, st as u64, 0, 0);
+    if r == 0 {
+        return CAP_FS_STAT;
+    }
+    return 0;
+}
+
+fn probe_net_tcp() -> u32 {
+    let fd: i64 = syscall4(41, 2, 1, 0);
+    if fd >= 0 {
+        syscall4(3, fd as u64, 0, 0);
+        return CAP_NET_TCP;
+    }
+    return 0;
+}
+
+fn probe_time_mono() -> u32 {
+    let ts: ptr = alloc(16);
+    let r: i64 = syscall4(228, 1, ts as u64, 0);
+    if r == 0 {
+        return CAP_TIME_MONO;
+    }
+    return 0;
+}
+
+fn probes() -> u32 {
+    let caps: [u32; 19] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                           0, 0, 0, 0, 0, 0, 0, 0, 0];
+    caps[0] = probe_fs_read();
+    caps[1] = probe_fs_stat();
+    caps[2] = probe_net_tcp();
+    caps[3] = probe_time_mono();
+    let ok: u32 = 0;
+    let i: u32 = 0;
+    while i < CAP_N {
+        ok = ok | caps[i];
+        i = i + 1;
+    }
+    return ok;
+}
+
+// ---------------------------------------------------------------- 注册表
+// 记录格式：`name,requires;` —— 名字里没有逗号或分号，解析只要两路分支。
+
+fn registry() -> str {
+    return "cpu.freq,32;cpu.load,16;cpu.sched,48;gpu.util,1056;gpu.mem,1056;gpu.clock,1024;gpu.therm,1024;gpu.proc,1056;mem.phys,128;mem.proc,192;mem.page,128;mem.leak,192;storage.space,256;storage.io,288;storage.proc,320;storage.cache,288;storage.smart,8192;storage.watch,8192;net.link,512;net.sock,512;net.bw,544;net.lat,4;proc.tree,64;proc.fd,64;proc.thread,131136;proc.sys,262208;power.batt,2048;power.rapl,2080;power.therm,2080;power.budget,2080;build.cache,32769;build.time,65537;build.dep,1;build.artifact,3;env.tool,4097;env.port,512;env.svc,4;env.watch,8193;";
+}
+
+fn caps_blob() -> str {
+    return "fs.read,1;fs.stat,2;net.tcp,4;time.mono,8;win.cpu,16;win.pdh,32;win.proc,64;win.mem,128;win.disk,256;win.net,512;win.gpu,1024;win.power,2048;win.env,4096;win.deviceio,8192;win.console,16384;build.cache,32768;build.timing,65536;win.thread,131072;win.etw,262144;";
+}
+
+// ---------------------------------------------------------------- list
+fn cmd_list(json: u32, ok: u32) {
+    let reg: str = registry();
+    let n: u32 = str_len(reg);
+    let i: u32 = 0;
+    let s: u32 = 0;
+    let ne: u32 = 0;
+    let mask: u32 = 0;
+    let in_mask: bool = false;
+    let first: bool = true;
+    let avail: u32 = 0;
+
+    if json == 1 {
+        print("{\"schema\":\"lmgr/v1\",\"manager\":\"list\",\"rows\":[");
+    } else {
+        print("KEY               STATE        REQUIRES\n");
+    }
+
+    while i < n {
+        let c: u32 = str_byte(reg, i);
+        if c == 44 {
+            ne = i;
+            in_mask = true;
+            mask = 0;
+        } else {
+            if c == 59 {
+                let st: u32 = state_of(mask, ok);
+                if st == 0 {
+                    avail = avail + 1;
+                }
+                if json == 1 {
+                    if !first {
+                        print(",");
+                    }
+                    print("{\"key\":\"");
+                    w(str_ptr(reg), s, ne - s);
+                    print("\",\"state\":\"");
+                    print(state_name(st));
+                    print("\",\"requires\":");
+                    print_num(mask);
+                    print("}");
+                } else {
+                    w(str_ptr(reg), s, ne - s);
+                    pad_to(ne - s, 18);
+                    print(state_name(st));
+                    pad_to(str_len(state_name(st)), 13);
+                    print_num(mask);
+                    print("\n");
+                }
+                first = false;
+                s = i + 1;
+                in_mask = false;
+            } else {
+                if in_mask {
+                    mask = mask * 10 + (c - 48);
+                }
+            }
+        }
+        i = i + 1;
+    }
+
+    if json == 1 {
+        print("],\"meta\":{\"slots\":");
+        print_num(N_SLOTS);
+        print(",\"available\":");
+        print_num(avail);
+        print("},\"degraded\":false,\"missing\":[]}\n");
+    } else {
+        print("\n");
+        print_num(avail);
+        print(" of ");
+        print_num(N_SLOTS);
+        print(" slots available on this platform\n");
+    }
+}
+
+// ---------------------------------------------------------------- doctor
+fn cmd_doctor(json: u32, ok: u32) {
+    let reg: str = caps_blob();
+    let n: u32 = str_len(reg);
+    let i: u32 = 0;
+    let s: u32 = 0;
+    let ne: u32 = 0;
+    let bit: u32 = 0;
+    let in_bit: bool = false;
+    let first: bool = true;
+    let good: u32 = 0;
+    let total: u32 = 0;
+
+    if json == 1 {
+        print("{\"schema\":\"lmgr/v1\",\"manager\":\"doctor\",\"capabilities\":[");
+    } else {
+        print("CAPABILITY        STATE\n");
+    }
+
+    while i < n {
+        let c: u32 = str_byte(reg, i);
+        if c == 44 {
+            ne = i;
+            in_bit = true;
+            bit = 0;
+        } else {
+            if c == 59 {
+                total = total + 1;
+                let has: bool = (bit & ok) == bit;
+                if has {
+                    good = good + 1;
+                }
+                if json == 1 {
+                    if !first {
+                        print(",");
+                    }
+                    print("{\"name\":\"");
+                    w(str_ptr(reg), s, ne - s);
+                    print("\",\"ok\":");
+                    if has {
+                        print("true");
+                    } else {
+                        print("false");
+                    }
+                    print("}");
+                } else {
+                    w(str_ptr(reg), s, ne - s);
+                    pad_to(ne - s, 18);
+                    if has {
+                        print("ok\n");
+                    } else {
+                        print("missing\n");
+                    }
+                }
+                first = false;
+                s = i + 1;
+                in_bit = false;
+            } else {
+                if in_bit {
+                    bit = bit * 10 + (c - 48);
+                }
+            }
+        }
+        i = i + 1;
+    }
+
+    if json == 1 {
+        print("],\"meta\":{\"ok\":");
+        print_num(good);
+        print(",\"total\":");
+        print_num(total);
+        print("},\"degraded\":");
+        if good < total {
+            print("true");
+        } else {
+            print("false");
+        }
+        print("}\n");
+    } else {
+        print("\n");
+        print_num(good);
+        print(" of ");
+        print_num(total);
+        print(" capabilities present\n");
+    }
+}
+
+// ---------------------------------------------------------------- 入口
+fn usage() {
+    print("lmgr — LomentManager (docs/303)\n");
+    print("\n");
+    print("  lmgr list [--json]      the 38-slot registry and per-slot state\n");
+    print("  lmgr doctor [--json]    one row per capability, with the probe result\n");
+    print("\n");
+}
+
+fn main() {
+    let buf: ptr = alloc(512);
+    let scr: ptr = alloc(256);
+    let a1: u64 = argv_scan(buf, 512 as u64, scr, 1);
+    let a2: u64 = argv_scan(buf, 512 as u64, scr, 2);
+    let ok: u32 = probes();
+    let json: u32 = 0;
+
+    if a2 != 0 {
+        if argv_eq(buf, a2, "--json") {
+            json = 1;
+        }
+    }
+
+    if a1 == 0 {
+        usage();
+        cmd_list(0, ok);
+        return;
+    }
+    if argv_eq(buf, a1, "list") {
+        cmd_list(json, ok);
+        return;
+    }
+    if argv_eq(buf, a1, "doctor") {
+        cmd_doctor(json, ok);
+        return;
+    }
+    if argv_eq(buf, a1, "--json") {
+        cmd_list(1, ok);
+        return;
+    }
+    usage();
+}

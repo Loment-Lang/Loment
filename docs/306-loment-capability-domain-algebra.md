@@ -533,4 +533,4 @@ guard@3 heap(i);     // 钉住第 3 代；换代后这里抛"陈旧实例"
 以及 `reachable` 的静态有界检查（C5，独立工具）。**没有动 `lom/*.lom`**。
 
 **域进入代码**：块级域（`domain NAME : SPACE[lo..hi] { … }`）、值的空间标签
-（`let a: [u32; 64] in disk`）与自动守卫见 `docs/313`；顶层 `capability` 仍是整单元的形式。
+（`let a: [u32; 64] in disk`）与自动守卫见 `docs/314`；顶层 `capability` 仍是整单元的形式。

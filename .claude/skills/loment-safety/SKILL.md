@@ -53,7 +53,7 @@ decision point; `tick;` advances the virtual clock):
 and at most 64 wide. `subject` / `witnessed` / `flow` take a second guard argument; every other
 kind refuses one.
 
-**Scoped domains (`docs/313`).** A `domain` block is the same algebra with a lexical scope and a
+**Scoped domains (`docs/314`).** A `domain` block is the same algebra with a lexical scope and a
 lifetime; values can carry a space, and accesses into that space are guarded for you:
 
 ```rust

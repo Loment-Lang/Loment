@@ -105,7 +105,7 @@ const CG_LGC: u32 = 648;
 const CG_LGC_N: u32 = 652;
 const CG_LGC_D: u32 = 921300;
 const CG_LGC_STK: u32 = 921304;
-//: **块级域**（`docs/313`）：作用域栈 + 变量空间表。
+//: **块级域**（`docs/314`）：作用域栈 + 变量空间表。
 //:   帧（8 层 × 8 格）：audit_id / space_tok / lo / hi / kind / param / flags / state_temp
 //:   空间表（每函数清零）：(name_tok, space_tok) 8 B/条
 const CG_DOM: u32 = 921560;
@@ -2815,7 +2815,7 @@ fn array_len_of(src: ptr, toks: ptr, tt: u32) -> u32 {
 }
 
 /// 跳过一个类型 (`T` / `[T]` / `[T; N]` / `mut [T]` / `()`), 返回其后的位置。
-/// `docs/313`：类型后面可以跟 `in SPACE`（值的空间标签），一并跳过。
+/// `docs/314`：类型后面可以跟 `in SPACE`（值的空间标签），一并跳过。
 fn skip_type(src: ptr, toks: ptr, i: u32) -> u32 {
     let e: u32 = skip_type0(src, toks, i);
     // 先确认 `e` 还在（类型可能正好在单元末尾），再读 `e + 1`
@@ -2872,7 +2872,7 @@ fn cap_base(i: u32) -> u32 {
     return 6144 + i * 24;
 }
 
-// ---------------------------------------------------------------- 块级域 (docs/313)
+// ---------------------------------------------------------------- 块级域 (docs/314)
 
 /// 域帧字段（第 lvl 层，0 基）：0 id / 1 space / 2 lo / 3 hi / 4 kind / 5 param /
 /// 6 flags / 7 state temp。
@@ -2880,7 +2880,7 @@ fn dom_at(lvl: u32, f: u32) -> u32 {
     return CG_DOM + lvl * 40 + f * 4;
 }
 
-/// `docs/313`：`domain` 是**上下文关键字**。只有 `domain NAME : SPACE[` 或
+/// `docs/314`：`domain` 是**上下文关键字**。只有 `domain NAME : SPACE[` 或
 /// `domain SPACE[` 才是块；`sock_new(domain: u64, …)` 里的名字不算。
 fn is_dom_block(src: ptr, toks: ptr, i: u32) -> u32 {
     let a: u32 = i + 1;
@@ -2957,7 +2957,7 @@ fn dom_find(s: ptr, src: ptr, toks: ptr, space_tok: u32) -> u32 {
     return 0;
 }
 
-/// 下标访问的自动守卫链（外→内；只有最内层记账 / 转移，`docs/313` §3）。
+/// 下标访问的自动守卫链（外→内；只有最内层记账 / 转移，`docs/314` §3）。
 fn dom_auto_guard(s: ptr, out: ptr, src: ptr, toks: ptr, name_tok: u32,
                   it: u32, lvl: u32) -> u32 {
     let sp: u32 = dsp_get(s, src, toks, name_tok);
@@ -4711,7 +4711,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
         emit_str(s, out, ", 0\n");
         let itx: u32 = expr_type(s, src, toks, dot + 1);   // 下标**自己的类型**（不写死 i32）
         let iv: u32 = expr_bin(s, out, src, toks, dot + 1, 1, lvl + 1, 0);
-        let _g1: u32 = dom_auto_guard(s, out, src, toks, j, itx, lvl + 1);   // docs/313
+        let _g1: u32 = dom_auto_guard(s, out, src, toks, j, itx, lvl + 1);   // docs/314
         emit_str(s, out, "  ");
         let g: u32 = new_temp(s, out);
         emit_str(s, out, " = getelementptr inbounds ");
@@ -4742,7 +4742,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
         let et2: u32 = elem_tok(src, toks, ty);
         let itx2: u32 = expr_type(s, src, toks, dot + 1);   // 下标**自己的类型**
         let iv2: u32 = expr_bin(s, out, src, toks, dot + 1, 1, lvl, 0);
-        let _g2: u32 = dom_auto_guard(s, out, src, toks, j, itx2, lvl);   // docs/313
+        let _g2: u32 = dom_auto_guard(s, out, src, toks, j, itx2, lvl);   // docs/314
         emit_str(s, out, "  ");
         let gp: u32 = new_temp(s, out);
         emit_str(s, out, " = getelementptr inbounds ");
@@ -5256,7 +5256,7 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
         }
     }
     store32(s, 12, k);
-    // docs/313：空间表与域栈按函数清零；形参的 `in SPACE` 登记进来
+    // docs/314：空间表与域栈按函数清零；形参的 `in SPACE` 登记进来
     store32(s, CG_VSP_N, 0);
     store32(s, CG_DOM_N, 0);
     let psp: u32 = 0;
@@ -6320,7 +6320,7 @@ fn dfr_stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
 }
 
 /// 一条语句; 返回下一个待处理 token 下标。
-/// `docs/313` §2：域块。单独一支函数 —— 它自己的局部变量不该压进 `stmt` 的栈帧
+/// `docs/314` §2：域块。单独一支函数 —— 它自己的局部变量不该压进 `stmt` 的栈帧
 /// （PE 默认栈 1 MB；放进 `stmt` 会把大单元推过界，实测 ansi/tui）。
 fn dom_stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         let k: u32 = j + 1;
@@ -7221,10 +7221,10 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         store32(s, 548, md);
         return stop;
     }
-    if tok_is(src, toks, j, "domain") && is_dom_block(src, toks, j) == 1 {   // docs/313
+    if tok_is(src, toks, j, "domain") && is_dom_block(src, toks, j) == 1 {   // docs/314
         return dom_stmt(s, out, src, toks, j, ret);
     }
-    if tok_is(src, toks, j, "guard") {   // P4/M36+M38 / docs/313
+    if tok_is(src, toks, j, "guard") {   // P4/M36+M38 / docs/314
         let dw: u32 = dom_by_name(s, src, toks, j + 1);
         let ci: u32 = 4294967295;
         let clo: u32 = 0;
@@ -7441,7 +7441,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
             emit_str(s, out, ", 0\n");
             let sitx: u32 = expr_type(s, src, toks, j + 2);   // 下标**自己的类型**
             let siv: u32 = expr_bin(s, out, src, toks, j + 2, 1, 1, 0);
-            let _w1: u32 = dom_auto_guard(s, out, src, toks, j, sitx, 1);   // docs/313
+            let _w1: u32 = dom_auto_guard(s, out, src, toks, j, sitx, 1);   // docs/314
             emit_str(s, out, "  ");
             let sgp: u32 = new_temp(s, out);
             emit_str(s, out, " = getelementptr inbounds ");
@@ -7466,7 +7466,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         if is_array_tok(src, toks, sty) == 1 {
             let aitx: u32 = expr_type(s, src, toks, j + 2);   // 下标**自己的类型**
             let aiv: u32 = expr_bin(s, out, src, toks, j + 2, 1, 0, 0);
-            let _w2: u32 = dom_auto_guard(s, out, src, toks, j, aitx, 0);   // docs/313
+            let _w2: u32 = dom_auto_guard(s, out, src, toks, j, aitx, 0);   // docs/314
             emit_str(s, out, "  ");
             let agp: u32 = new_temp(s, out);
             emit_str(s, out, " = getelementptr inbounds ");
@@ -7754,7 +7754,7 @@ fn collect_locals(s: ptr, src: ptr, toks: ptr, i: u32, end: u32) -> u32 {
             let ty: u32 = j + 3;
             let eq2: u32 = skip_type(src, toks, ty);
             if tok_is(src, toks, eq2 - 2, "in") && tok_kind(toks, eq2 - 1) == 0 {
-                let _ds1: u32 = dsp_set(s, src, toks, name, eq2 - 1);   // docs/313
+                let _ds1: u32 = dsp_set(s, src, toks, name, eq2 - 1);   // docs/314
             }
             let qs: u32 = find_try_q(src, toks, eq2 + 1);
             if qs != 0 {
@@ -10932,7 +10932,7 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32) -> u32 {
         i = i + 1;
     }
     store32(s, 536, cn);
-    store32(s, CG_DOM_ID, cn);   // docs/313：块级域的审计槽号接在能力之后
+    store32(s, CG_DOM_ID, cn);   // docs/314：块级域的审计槽号接在能力之后
     // 枚举表: name_tok | nvariants | has_payload | pad | 8 × (variant_tok, payload_tok)
     let en: u32 = 0;
     i = 0;
@@ -11014,7 +11014,7 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32) -> u32 {
     if guard_rt_needed(s, src, toks) == 1 {   // docs/306-308: 十种域的判决点
         emit_guard_runtime(s, out);
     }
-    if guard_rt_needed(s, src, toks) == 1 {   // P4/M38 / docs/313：审计计数全局
+    if guard_rt_needed(s, src, toks) == 1 {   // P4/M38 / docs/314：审计计数全局
         // 槽数 = 顶层能力 + 块级域（与参考实现的 max(16, slots) 同一口径）
         let nd: u32 = 0;
         let ti: u32 = 0;

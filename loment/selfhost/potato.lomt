@@ -1936,6 +1936,9 @@ fn pt_params(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lp: u32, n: u32, its:
             let rq: u64 = pt_tymq(sc, out, o, unit, t, j + 2);
             o = (rq % 4294967296) as u32;
             j = (rq / 4294967296) as u32;
+            if pt_tis(unit, t, j, "in") && pt_kind(t, j + 1) == 0 {
+                j = j + 2;   // docs/313：值的空间标签（`in SPACE`）
+            }
         } else if has_ty == 2 {
             let rq2: u64 = pt_tymq(sc, out, o, unit, t, its);
             o = (rq2 % 4294967296) as u32;

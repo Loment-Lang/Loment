@@ -172,9 +172,11 @@ def _sections(blob: bytes) -> tuple[dict, list[tuple]]:
     size_hdr = struct.unpack_from("<I", blob, opt + 60)[0]
     entry = struct.unpack_from("<I", blob, opt + 16)[0]
     sec_align, file_align = struct.unpack_from("<II", blob, opt + 32)
+    stack_commit = struct.unpack_from("<Q", blob, opt + 80)[0]
     head = {"machine": machine, "nsec": nsec, "size_image": size_img,
             "size_headers": size_hdr, "entry": entry,
-            "sec_align": sec_align, "file_align": file_align}
+            "sec_align": sec_align, "file_align": file_align,
+            "stack_commit": stack_commit}
     st = opt + struct.unpack_from("<H", blob, pe + 20)[0]
     secs = []
     for i in range(nsec):
@@ -204,6 +206,11 @@ def test_pe_image_is_structurally_sane():
             assert head["size_headers"] and head["size_headers"] % head["file_align"] == 0, \
                 f"{src.name}: SizeOfHeaders 未按 FileAlignment 对齐 ({head['size_headers']})"
             assert head["size_image"] % head["sec_align"] == 0, f"{src.name}: SizeOfImage 未对齐"
+            # 自举编译器的递归下降要得深：提交不够时 Windows **不替我们长**（只给保留额度），
+            # 大单元（`std/ansi.lomt`）直接访问违例。8 MB 是实测的下限余量。
+            assert head["stack_commit"] >= 8 * 1024 * 1024, (
+                f"{src.name}: 栈只提交了 {head['stack_commit']} 字节 —— "
+                f"自举编译器在大单元上会崩")
             # 节区按 RVA 升序且互不重叠（早先 .text 固定 0x1000 / .data 固定 0x2000，
             # 文本一过一页两节就重叠）
             end = 0

@@ -386,7 +386,9 @@ fn probe_mem() -> u32 {
     zero_bytes(args, 32);
     wr64(args, 0, mem as u64);
     let r: i64 = syscall4(SYS_WIN32, 1, args as u64, 0);
-    if r != 0 {
+    // BOOL 成功是**正数**；失败是 0。表外的 syscall 号在别的平台回 -ENOSYS（负数）——
+    // 用 `!= 0` 会把它当成成功，于是能力说"有"、槽位输出一排 0。
+    if r > 0 {
         return CAP_MEM;
     }
     return 0;
@@ -405,7 +407,7 @@ fn probe_proc() -> u32 {
     let args: ptr = alloc(32);
     zero_bytes(needed, 4);
     let r: i64 = win32_into(args, 3, pids as u64, 256, needed as u64);
-    if r != 0 {
+    if r > 0 {
         if rd32(needed, 0) > 0 {
             return CAP_PROC;
         }
@@ -430,7 +432,7 @@ fn cmd_mem_proc(json: u32, ok: u32) {
     let pmc: ptr = alloc(80);
     zero_bytes(needed, 4);
     let r: i64 = win32_into(args, 3, pids as u64, 1024, needed as u64);
-    if r == 0 {
+    if r <= 0 {
         print("lmgr: mem.proc enumeration failed\n");
         syscall4(60, 2, 0, 0);
         return;
@@ -537,7 +539,7 @@ fn cmd_mem_phys(json: u32, ok: u32) {
     zero_bytes(args, 32);
     wr64(args, 0, mem as u64);
     let r: i64 = syscall4(SYS_WIN32, 1, args as u64, 0);
-    if r == 0 {
+    if r <= 0 {
         print("lmgr: mem.phys probe failed\n");
         syscall4(60, 2, 0, 0);
         return;

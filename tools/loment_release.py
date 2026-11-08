@@ -423,6 +423,8 @@ GLOBS = [
     "editors/loment-studio/crates/server/src/*.rs",
     "editors/loment-studio/web/*", "editors/loment-studio/examples/*",
     "tools/loment_studio_test.py",
+    # lmgr 套件（docs/303）：38 槽注册表与能力表。**与 lomrel.lomt 同一位置（末尾）**。
+    "tools/lmgr_test.py",
 ]
 
 

@@ -2099,6 +2099,10 @@ SYS_LMGR_PDH = 4096
 #: 通用 Win32 调用器：rdi = 函数号（`WIN32_CALLS`），rsi = 四个 u64 实参的缓冲。
 #: 返回值就是那个 API 的原始返回值（BOOL / HANDLE / ULONGLONG）。
 SYS_WIN32 = 4097
+#: **运行时私有号**：不在 `lom/net.lom` 那份 L0 契约里。它们不是 Linux 系统调用，
+#: 而是本仓运行时给自己调用者的一组入口（`docs/303` 的 lmgr）。审计对账时显式跳过
+#: 这几个号 —— 契约要收它们得走单独的 L0 PR（`lom/` 禁区那道门）。
+PE_PRIVATE_SYSCALLS = frozenset({SYS_LMGR_PDH, SYS_WIN32})
 #: epoll 的事件位与 `epoll_create1` 的旗标（Linux 值）
 LINUX_EPOLL_IN, LINUX_EPOLL_PRI, LINUX_EPOLL_OUT = 0x001, 0x002, 0x004
 LINUX_EPOLL_ERR, LINUX_EPOLL_HUP, LINUX_EPOLL_RDHUP = 0x008, 0x010, 0x2000

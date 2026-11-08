@@ -138,6 +138,15 @@ domain whole : disk[0..63] {
 | 自举 | 同上，按 token 扫；变量的空间表 + 域作用域栈 + 下标发射时插守卫 |
 | 生成物 | 种子与 genesis provenance 按既有流程重算 |
 
+两条实装时撞出来的约束，记在这里：
+
+- **`domain` 是上下文关键字**，不是保留字：只有 `domain NAME : SPACE[` / `domain SPACE[`
+  才算块。理由很实际 —— `lompi/store/internet/0.1.0/sock.lomt` 有 `sock_new(domain: u64, …)`，
+  把 `domain` 整个收走会让一份已经发布的库编不过。
+- **PE 的栈提交抬到 8 MB**（`tools/lomelf.py`）：Windows 在"保留够、提交不够"时**不替
+  进程长栈**，而自举编译器的递归下降在 `std/ansi.lomt` 这类大单元上要得更深 ——
+  1 MB 直接访问违例（ELF 的 8 MB 默认栈没这个问题）。判据在 `loment_pe_test` 的头部自洽里。
+
 ---
 
 ## 7. 判据（每条先红）

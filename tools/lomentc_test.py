@@ -1498,11 +1498,16 @@ def test_p4_violating_guard_has_no_audit_side_effect():
     abort = rt.find("call void @__loment_abort()", fail)
     unreach = rt.find("unreachable", abort)
     pas = rt.find("pass:", unreach)
-    audit = rt.find("getelementptr [16 x i64], ptr @__loment_audit", pas)
+    # `docs/313`：`pass` 之后先分一次"要不要记账"（链上的祖先只判成员），
+    # 审计在 `aaudit` 块里 —— 仍然只有 `pass` 这一条路能到它。
+    aaudit = rt.find("aaudit:", pas)
+    audit = rt.find("getelementptr i64, ptr @__loment_audit", aaudit)
     store = rt.find("store i64", audit) if audit >= 0 else -1
-    assert 0 <= fail < abort < unreach < pas < audit < store, (
-        "IR 里审计不在 pass 块里（fail={} abort={} pass={} gep={} store={}）—— "
-        "越界那次会先写审计（属性 1 破了）".format(fail, abort, pas, audit, store))
+    assert 0 <= fail < abort < unreach < pas < aaudit < audit < store, (
+        "IR 里审计不在 pass 块里（fail={} abort={} pass={} aaudit={} gep={} store={}）—— "
+        "越界那次会先写审计（属性 1 破了）".format(fail, abort, pas, aaudit, audit, store))
+    assert "br i1 %sn, label %done, label %aaudit" in rt[pas:aaudit], (
+        "`aaudit` 不是从 `pass` 的唯一那一支进来的")
 
     # ---- Rust：真跑。没有 rustc 就跳过这一半（环境限制，不改判据的结论面）
     rustc = shutil.which("rustc")
@@ -5725,6 +5730,106 @@ def test_domains_remaining_kinds_runtime():
 
 
 @test
+def test_domain_blocks_scope_and_auto_guard():
+    """`docs/313`：`domain … { }` 的作用域、自动守卫、空间标签、嵌套链。
+
+    - 块外 `guard` -> 编译错误；
+    - 同空间的内层必须落在（或等于）外层形状里；
+    - `in SPACE` 只许给数组 / 切片 / ptr；
+    - 块内只有**同空间**的下标访问自动受检；
+    - 嵌套链只有最内层记账（外层带 silent 位）。
+    """
+    def load(src):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "d.lomt"
+            p.write_text(src, encoding="utf-8", newline="\n")
+            m = lomentc.load(p)
+            return m, lomentc.check(m)
+
+    _, e1 = load("module m\nchoose runtime\n"
+                 "fn f(i: u32) -> u32 { domain d : disk[0..4] { } guard d(i); return i; }\n")
+    assert any("guard 引用了未声明的能力" in x for x in e1), e1
+    _, e2 = load("module m\nchoose runtime\n"
+                 "fn f(i: u32) -> u32 { domain o : disk[0..3] { domain n : disk[0..5] { } }"
+                 " return i; }\n")
+    assert any("不在外层" in x for x in e2), e2
+    _, e3 = load("module m\nchoose runtime\n"
+                 "fn f() -> u32 { let x: u32 in disk = 1; return x; }\n")
+    assert any("不能带空间" in x for x in e3), e3
+
+    m, e = load("module m\nchoose runtime\n"
+                "fn f(a: [u32; 8] in disk, b: [u32; 8] in mem, i: u32) -> u32 {\n"
+                "    domain d : disk[0..7] { a[i] = 1; b[i] = 2; }\n"
+                "    return a[0];\n}\n")
+    assert e == [], e
+    body = lomentc.emit_llvm(m, ROOT)
+    body = body[body.index("define i32 @f"):]
+    assert body.count("call void @__loment_guard2") == 1, (
+        "自动守卫只该落在同空间的那个访问上")
+
+    m2, e2b = load("module m\nchoose runtime\n"
+                   "fn f(a: [u32; 8] in disk, i: u32) -> u32 {\n"
+                   "    domain whole : disk[0..7] {\n"
+                   "        domain half : disk[0..3] { a[i] = 1; }\n"
+                   "    }\n    return a[0];\n}\n")
+    assert e2b == [], e2b
+    ir2 = lomentc.emit_llvm(m2, ROOT)
+    assert ", i64 128, i64 0, i64 0)" in ir2, "外层没有 silent 位"
+    assert ", i64 0, i64 0, i64 0)" in ir2, "内层不是正常记账那一支"
+    print("      块级域：作用域 / 嵌套包含 / 空间标签 / 自动守卫链，逐条成立")
+
+
+@test
+def test_domain_blocks_per_instance_state():
+    """`docs/313` §4：块 = 实例。循环每轮、递归每层各自一份状态（Rust 后端真跑）。"""
+    import shutil
+    import subprocess
+    src = ("module m\nchoose runtime\n"
+           "fn f(n: u32) -> u32 {\n"
+           "    let a: [u32; 4] in disk = [0, 0, 0, 0];\n"
+           "    let i: u32 = 0;\n"
+           "    while i < n {\n"
+           "        domain tok : disk[0..3] consumed(1) { a[0] = i; }\n"
+           "        i = i + 1;\n"
+           "    }\n    return n;\n}\n"
+           "fn g(n: u32) -> u32 {\n"
+           "    if n == 0 { return 0; }\n"
+           "    let a: [u32; 4] in disk = [0, 0, 0, 0];\n"
+           "    domain one : disk[0..3] consumed(1) { a[0] = 1; }\n"
+           "    return g(n - 1);\n}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "m.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        mod = lomentc.load(p)
+        assert lomentc.check(mod) == [], lomentc.check(mod)
+        rs = lomentc.emit_rust(mod, ROOT)
+    rustc = shutil.which("rustc")
+    if not rustc:
+        print("      SKIP: 无 rustc（运行那一半）")
+        return
+    main = ('include!("m.rs");\n'
+            "fn main() {\n"
+            "    std::panic::set_hook(Box::new(|_| {}));\n"
+            "    let mut bad = 0;\n"
+            "    if std::panic::catch_unwind(|| f(3)).is_err() { bad += 1; }\n"
+            "    if std::panic::catch_unwind(|| g(3)).is_err() { bad += 1; }\n"
+            '    println!("bad={}", bad);\n'
+            "}\n")
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "m.rs").write_text(rs, encoding="utf-8", newline="\n")
+        (d / "main.rs").write_text(main, encoding="utf-8", newline="\n")
+        exe = d / ("d.exe" if sys.platform == "win32" else "d")
+        r = subprocess.run([rustc, "-O", "-o", str(exe), str(d / "main.rs")],
+                           capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, r.stderr[-800:]
+        out = subprocess.run([str(exe)], capture_output=True, text=True,
+                             shell=False).stdout
+    assert "bad=0" in out, out
+    print("      块级域：循环每轮 / 递归每层都是新实例（consumed 每轮都通过）")
+
+
+@test
 def test_domains_selfhost_twin():
     """十种域 + `tick;`：自举镜与参考实现的 IR **逐字节相同**。
 
@@ -5776,7 +5881,14 @@ def test_domains_selfhost_twin():
            "fn g_wit(x: u32, t: u32) -> u32 { guard wit(x, t); return x; }\n"
            "fn g_flw(a: u32, b: u32) -> u32 { guard flw(a, b); return a; }\n"
            "fn g_rch(n: u32) -> u32 { guard rch(n); return n; }\n"
-           "fn g_dis(n: u32) -> u32 { discharge rch(n); return n; }\n")
+           "fn g_dis(n: u32) -> u32 { discharge rch(n); return n; }\n"
+           # docs/313：块级域 + 空间标签 + 自动守卫（嵌套链、有状态实例）
+           "fn h_dom(a: [u32; 8] in disk, i: u32) -> u32 {\n"
+           "    domain whole : disk[0..7] {\n"
+           "        domain half : disk[0..3] consumed(1) { a[i] = 1; }\n"
+           "    }\n"
+           "    return a[0];\n"
+           "}\n")
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "d.lomt"
         p.write_text(src, encoding="utf-8", newline="\n")

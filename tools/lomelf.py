@@ -5496,7 +5496,9 @@ def build_pe(text: bytes, data: bytes, entry_rva: int, idata: bytes) -> bytes:
     struct.pack_into("<H", opt, 68, 3)                       # Subsystem: console
     # 栈留 16 MB：编译器自己的递归下降比小工具深得多（Linux 那侧默认 8 MB，本来就够宽）。
     struct.pack_into("<Q", opt, 72, 16 * 1024 * 1024)
-    struct.pack_into("<Q", opt, 80, 0x100000)
+    # 提交 8 MB：**保留够但提交不够时加载器不替我们长**（实测：`std/ansi.lomt` 这类
+    # 大单元在 1 MB 提交上直接访问违例；自举编译器自己的递归下降要得更深）。
+    struct.pack_into("<Q", opt, 80, 8 * 1024 * 1024)
     struct.pack_into("<Q", opt, 88, 0x100000)
     struct.pack_into("<Q", opt, 96, 0x1000)
     struct.pack_into("<I", opt, 108, 16)

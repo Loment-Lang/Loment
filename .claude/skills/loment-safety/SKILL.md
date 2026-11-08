@@ -53,6 +53,31 @@ decision point; `tick;` advances the virtual clock):
 and at most 64 wide. `subject` / `witnessed` / `flow` take a second guard argument; every other
 kind refuses one.
 
+**Scoped domains (`docs/314`).** A `domain` block is the same algebra with a lexical scope and a
+lifetime; values can carry a space, and accesses into that space are guarded for you:
+
+```rust
+module fill_scope
+choose runtime
+
+fn fill(a: [u32; 64] in disk, i: u32) {
+    domain buf : disk[0..63] consumed(1) {
+        a[i] = 1;        // implicit guard buf(i)
+        guard buf(i);    // explicit form; same decision point
+    }
+    // guard buf(i);     // compile error: buf is out of scope
+}
+```
+
+- `let a: [u32; 64] in disk` / `a: [u32; 64] in disk` (parameter) tags a value's space
+  (arrays, slices, pointers only). The tag does not travel through a call - the callee sees a
+  plain type.
+- Inside a block, an index into a value of that block's space is guarded automatically. Nested
+  same-space domains check the whole chain; only the innermost one audits or transfers.
+- Stateful kinds (`consumed`, `adaptive`, `witnessed`, `reachable`) get a **fresh instance per
+  entry**: the next loop iteration and a recursive call each start from zero.
+- A top-level `capability` still means the whole unit; the block form is the local one.
+
 **Honest boundaries.** `guard` constrains **the index** to the domain only; it **is not
 authorisation** - it never asks "does the current principal hold this capability", because the
 principal-to-capability binding lives on the kernel side. `revocable` is currently just a flag in

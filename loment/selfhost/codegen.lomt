@@ -105,7 +105,19 @@ const CG_LGC: u32 = 648;
 const CG_LGC_N: u32 = 652;
 const CG_LGC_D: u32 = 921300;
 const CG_LGC_STK: u32 = 921304;
-const CG_BYTES: u32 = 921560;         // = CG_LGC_STK + 64*4（defer 区 + 窗口栈）
+//: **块级域**（`docs/314`）：作用域栈 + 变量空间表。
+//:   帧（8 层 × 8 格）：audit_id / space_tok / lo / hi / kind / param / flags / state_temp
+//:   空间表（每函数清零）：(name_tok, space_tok) 8 B/条
+const CG_DOM: u32 = 921560;
+// ⚠ 取 12 不取 8：`CG_MAXDFR` 已经是 8，而 `loment_p8_test` 把每个 `CG_*` 的**取值**
+// 都当成状态块格子查重（计数常量也在内）—— 撞号会被判成"两个写点互相踩"。
+const CG_DOM_MAX: u32 = 12;
+const CG_VSP: u32 = 922040;           // = CG_DOM + CG_DOM_MAX*40（每帧 10 格）
+const CG_VSP_MAX: u32 = 512;
+const CG_VSP_N: u32 = 926136;         // 空间表条数（每函数清零）
+const CG_DOM_N: u32 = 926140;         // 当前域栈深
+const CG_DOM_ID: u32 = 926144;        // 下一个审计槽号（单元级，不随函数清零）
+const CG_BYTES: u32 = 926148;         // = CG_DOM_ID + 4
 use bytes
 use lexer
 
@@ -2803,9 +2815,20 @@ fn array_len_of(src: ptr, toks: ptr, tt: u32) -> u32 {
 }
 
 /// 跳过一个类型 (`T` / `[T]` / `[T; N]` / `mut [T]` / `()`), 返回其后的位置。
+/// `docs/314`：类型后面可以跟 `in SPACE`（值的空间标签），一并跳过。
 fn skip_type(src: ptr, toks: ptr, i: u32) -> u32 {
+    let e: u32 = skip_type0(src, toks, i);
+    // 先确认 `e` 还在（类型可能正好在单元末尾），再读 `e + 1`
+    if tok_kind(toks, e) != 4 && tok_is(src, toks, e, "in")
+            && tok_kind(toks, e + 1) == 0 {
+        return e + 2;
+    }
+    return e;
+}
+
+fn skip_type0(src: ptr, toks: ptr, i: u32) -> u32 {
     if tok_is(src, toks, i, "mut") {
-        return skip_type(src, toks, i + 1);
+        return skip_type0(src, toks, i + 1);
     }
     if tok_is(src, toks, i, "[") || tok_is(src, toks, i, "(") {
         let j: u32 = i + 1;
@@ -2847,6 +2870,149 @@ fn skip_type(src: ptr, toks: ptr, i: u32) -> u32 {
 /// 域表项基址: name_tok | space_tok | lo | hi | revocable (24B/项, 64 项)
 fn cap_base(i: u32) -> u32 {
     return 6144 + i * 24;
+}
+
+// ---------------------------------------------------------------- 块级域 (docs/314)
+
+/// 域帧字段（第 lvl 层，0 基）：0 id / 1 space / 2 lo / 3 hi / 4 kind / 5 param /
+/// 6 flags / 7 state temp。
+fn dom_at(lvl: u32, f: u32) -> u32 {
+    return CG_DOM + lvl * 40 + f * 4;
+}
+
+/// `docs/314`：`domain` 是**上下文关键字**。只有 `domain NAME : SPACE[` 或
+/// `domain SPACE[` 才是块；`sock_new(domain: u64, …)` 里的名字不算。
+fn is_dom_block(src: ptr, toks: ptr, i: u32) -> u32 {
+    let a: u32 = i + 1;
+    if tok_kind(toks, a) != 0 {
+        return 0;
+    }
+    if tok_is(src, toks, a + 1, ":") && tok_kind(toks, a + 2) == 0
+            && tok_is(src, toks, a + 3, "[") {
+        return 1;
+    }
+    if tok_is(src, toks, a + 1, "[") {
+        return 1;
+    }
+    return 0;
+}
+
+fn dsp_get(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
+    let i: u32 = 0;
+    while i < load32(s, CG_VSP_N) {
+        if tok_eq(src, toks, load32(s, CG_VSP + i * 8), name_tok) {
+            return load32(s, CG_VSP + i * 8 + 4);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn dsp_set(s: ptr, src: ptr, toks: ptr, name_tok: u32, space_tok: u32) -> u32 {
+    if space_tok == 0 {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < load32(s, CG_VSP_N) {
+        if tok_eq(src, toks, load32(s, CG_VSP + i * 8), name_tok) {
+            store32(s, CG_VSP + i * 8 + 4, space_tok);
+            return 1;
+        }
+        i = i + 1;
+    }
+    if load32(s, CG_VSP_N) >= CG_VSP_MAX {
+        // 满了要**说话**（`#345`）：静默丢弃会让后面那条访问不受检 —— 比崩更坏。
+        let _f: u32 = cg_fail(s, 2, name_tok);
+        return 0;
+    }
+    let n: u32 = load32(s, CG_VSP_N);
+    store32(s, CG_VSP + n * 8, name_tok);
+    store32(s, CG_VSP + n * 8 + 4, space_tok);
+    store32(s, CG_VSP_N, n + 1);
+    return 1;
+}
+
+/// 按名字找最内层的块级域（1..N 的栈深；0 = 没有）。
+fn dom_by_name(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
+    let d: u32 = load32(s, CG_DOM_N);
+    while d > 0 {
+        let nt: u32 = load32(s, dom_at(d - 1, 8));
+        if nt != 0 && tok_eq(src, toks, nt, name_tok) {
+            return d;
+        }
+        d = d - 1;
+    }
+    return 0;
+}
+
+/// 最内层同空间的域（返回 1..N 的栈深；0 = 没有）。
+fn dom_find(s: ptr, src: ptr, toks: ptr, space_tok: u32) -> u32 {
+    let d: u32 = load32(s, CG_DOM_N);
+    while d > 0 {
+        if tok_eq(src, toks, load32(s, dom_at(d - 1, 1)), space_tok) {
+            return d;
+        }
+        d = d - 1;
+    }
+    return 0;
+}
+
+/// 下标访问的自动守卫链（外→内；只有最内层记账 / 转移，`docs/314` §3）。
+fn dom_auto_guard(s: ptr, out: ptr, src: ptr, toks: ptr, name_tok: u32,
+                  it: u32, lvl: u32) -> u32 {
+    let sp: u32 = dsp_get(s, src, toks, name_tok);
+    if sp == 0 {
+        return 0;
+    }
+    let top: u32 = dom_find(s, src, toks, sp);
+    if top == 0 {
+        return 0;
+    }
+    emit_str(s, out, "  ");
+    let v64: u32 = new_temp(s, out);
+    emit_str(s, out, " = zext ");
+    emit_ty(s, out, src, toks, it);
+    emit_str(s, out, " ");
+    emit_val(s, out, lvl);
+    emit_str(s, out, " to i64\n");
+    let d: u32 = 1;
+    while d <= top {
+        if tok_eq(src, toks, load32(s, dom_at(d - 1, 1)), sp) {
+            let leaf: u32 = 0;
+            if d == top {
+                leaf = 1;
+            }
+            let kk: u32 = load32(s, dom_at(d - 1, 4));
+            if leaf == 0 {
+                kk = kk + 128;
+            }
+            emit_str(s, out, "  call void @__loment_guard2(ptr ");
+            let stt: u32 = load32(s, dom_at(d - 1, 7));
+            if leaf == 1 && stt != 0 {
+                emit_str(s, out, "%t");
+                emit_dec(s, out, stt);
+            } else {
+                emit_str(s, out, "@__loment_qual");
+            }
+            emit_str(s, out, ", i64 ");
+            emit_dec(s, out, load32(s, dom_at(d - 1, 0)));
+            emit_str(s, out, ", i64 %t");
+            emit_dec(s, out, v64);
+            emit_str(s, out, ", i64 0, i64 ");
+            emit_dec(s, out, load32(s, dom_at(d - 1, 2)));
+            emit_str(s, out, ", i64 ");
+            emit_dec(s, out, load32(s, dom_at(d - 1, 3)));
+            emit_str(s, out, ", i64 ");
+            emit_dec(s, out, kk);
+            emit_str(s, out, ", i64 ");
+            emit_dec(s, out, load32(s, dom_at(d - 1, 5)));
+            emit_str(s, out, ", i64 ");
+            emit_dec(s, out, load32(s, dom_at(d - 1, 6)));
+            emit_str(s, out, ")\n");
+        }
+        d = d + 1;
+    }
+    return 1;
 }
 
 /// FNV-1a 32 位 (对 space 名 token 的字节) —— 与 lomentc._fnv1a32 同算法。
@@ -4545,6 +4711,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
         emit_str(s, out, ", 0\n");
         let itx: u32 = expr_type(s, src, toks, dot + 1);   // 下标**自己的类型**（不写死 i32）
         let iv: u32 = expr_bin(s, out, src, toks, dot + 1, 1, lvl + 1, 0);
+        let _g1: u32 = dom_auto_guard(s, out, src, toks, j, itx, lvl + 1);   // docs/314
         emit_str(s, out, "  ");
         let g: u32 = new_temp(s, out);
         emit_str(s, out, " = getelementptr inbounds ");
@@ -4575,6 +4742,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
         let et2: u32 = elem_tok(src, toks, ty);
         let itx2: u32 = expr_type(s, src, toks, dot + 1);   // 下标**自己的类型**
         let iv2: u32 = expr_bin(s, out, src, toks, dot + 1, 1, lvl, 0);
+        let _g2: u32 = dom_auto_guard(s, out, src, toks, j, itx2, lvl);   // docs/314
         emit_str(s, out, "  ");
         let gp: u32 = new_temp(s, out);
         emit_str(s, out, " = getelementptr inbounds ");
@@ -5088,6 +5256,17 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
         }
     }
     store32(s, 12, k);
+    // docs/314：空间表与域栈按函数清零；形参的 `in SPACE` 登记进来
+    store32(s, CG_VSP_N, 0);
+    store32(s, CG_DOM_N, 0);
+    let psp: u32 = 0;
+    while psp < k {
+        let pe: u32 = skip_type(src, toks, load32(s, CG_CUR + psp * 8 + 4));
+        if tok_is(src, toks, pe - 2, "in") && tok_kind(toks, pe - 1) == 0 {
+            let _ds0: u32 = dsp_set(s, src, toks, load32(s, CG_CUR + psp * 8), pe - 1);
+        }
+        psp = psp + 1;
+    }
     store32(s, 528, base + 1);   // 当前函数名 token (字符串全局命名用)
     store32(s, 552, ret);        // 当前函数返回类型 token (match 臂体里 return 用)
     store32(s, 524, 0);          // 字符串全局序号随函数复位
@@ -6141,6 +6320,163 @@ fn dfr_stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
 }
 
 /// 一条语句; 返回下一个待处理 token 下标。
+/// `docs/314` §2：域块。单独一支函数 —— 它自己的局部变量不该压进 `stmt` 的栈帧
+/// （PE 默认栈 1 MB；放进 `stmt` 会把大单元推过界，实测 ansi/tui）。
+fn dom_stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
+        let k: u32 = j + 1;
+        let nm: u32 = 0;
+        if tok_kind(toks, k) == 0 && tok_is(src, toks, k + 1, ":") {
+            nm = k;
+            k = k + 2;
+        }
+        let sp: u32 = k;
+        let q: u32 = sp + 2;
+        let lof: u32 = 0;
+        let lo: u32 = 0;
+        if tok_is(src, toks, q, "(") {
+            lof = 1;
+            q = q + 2;
+        } else {
+            lo = tok_int(src, toks, q);
+            q = q + 1;
+        }
+        q = q + 2;
+        let hif: u32 = 0;
+        let hi: u32 = 0;
+        if tok_is(src, toks, q, "(") {
+            hif = 1;
+            q = q + 2;
+        } else {
+            hi = tok_int(src, toks, q);
+            q = q + 1;
+        }
+        q = q + 1;
+        let kind: u32 = 0;
+        let param: u32 = 0;
+        if tok_is(src, toks, q, "danger") || tok_is(src, toks, q, "adaptive")
+                || tok_is(src, toks, q, "flow") {
+            if tok_is(src, toks, q, "danger") { kind = 1; }
+            if tok_is(src, toks, q, "adaptive") { kind = 10; }
+            if tok_is(src, toks, q, "flow") { kind = 13; }
+            q = q + 1;
+        } else if tok_is(src, toks, q, "epoch") || tok_is(src, toks, q, "far")
+                || tok_is(src, toks, q, "sliding") || tok_is(src, toks, q, "decaying")
+                || tok_is(src, toks, q, "growing") || tok_is(src, toks, q, "consumed")
+                || tok_is(src, toks, q, "cyclic") || tok_is(src, toks, q, "generational")
+                || tok_is(src, toks, q, "subject") || tok_is(src, toks, q, "witnessed")
+                || tok_is(src, toks, q, "reachable") {
+            if tok_is(src, toks, q, "epoch") { kind = 2; }
+            if tok_is(src, toks, q, "far") { kind = 3; }
+            if tok_is(src, toks, q, "sliding") { kind = 4; }
+            if tok_is(src, toks, q, "decaying") { kind = 5; }
+            if tok_is(src, toks, q, "growing") { kind = 6; }
+            if tok_is(src, toks, q, "consumed") { kind = 7; }
+            if tok_is(src, toks, q, "cyclic") { kind = 8; }
+            if tok_is(src, toks, q, "generational") { kind = 9; }
+            if tok_is(src, toks, q, "subject") { kind = 11; }
+            if tok_is(src, toks, q, "witnessed") { kind = 12; }
+            if tok_is(src, toks, q, "reachable") { kind = 14; }
+            param = tok_int(src, toks, q + 2);
+            q = q + 4;
+        }
+        if tok_is(src, toks, q, "revocable") {
+            q = q + 1;
+        }
+        while tok_kind(toks, q) != 4 && !tok_is(src, toks, q, "{") {
+            q = q + 1;
+        }
+        let d: u32 = load32(s, CG_DOM_N);
+        if d >= CG_DOM_MAX {
+            return cg_fail(s, 2, j);
+        }
+        let id: u32 = load32(s, CG_DOM_ID);
+        store32(s, CG_DOM_ID, id + 1);
+        store32(s, dom_at(d, 0), id);
+        store32(s, dom_at(d, 1), sp);
+        store32(s, dom_at(d, 2), lo);
+        store32(s, dom_at(d, 3), hi);
+        store32(s, dom_at(d, 4), kind);
+        store32(s, dom_at(d, 5), param);
+        store32(s, dom_at(d, 6), lof | (hif << 1));
+        store32(s, dom_at(d, 7), 0);
+        store32(s, dom_at(d, 8), nm);
+        if kind == 7 || kind == 10 || kind == 12 || kind == 14 {
+            emit_str(s, out, "  ");
+            let pt: u32 = new_temp(s, out);
+            emit_str(s, out, " = alloca [64 x i64]
+  ");
+            let ct: u32 = new_temp(s, out);
+            emit_str(s, out, " = alloca i64
+  store i64 0, ptr %t");
+            emit_dec(s, out, ct);
+            emit_str(s, out, "
+");
+            let l1: u32 = load32(s, 480) + 1;
+            store32(s, 480, l1 + 2);
+            jump(s, out, l1, "dzc");
+            lab_def(s, out, l1, "dzc");
+            emit_str(s, out, "  ");
+            let vt: u32 = new_temp(s, out);
+            emit_str(s, out, " = load i64, ptr %t");
+            emit_dec(s, out, ct);
+            emit_str(s, out, "
+  ");
+            let cmpt: u32 = new_temp(s, out);
+            emit_str(s, out, " = icmp ult i64 %t");
+            emit_dec(s, out, vt);
+            emit_str(s, out, ", 64
+  br i1 %t");
+            emit_dec(s, out, cmpt);
+            emit_str(s, out, ", label ");
+            lab_ref(s, out, l1 + 1, "dzb");
+            emit_str(s, out, ", label ");
+            lab_ref(s, out, l1 + 2, "dzd");
+            emit_str(s, out, "
+");
+            lab_def(s, out, l1 + 1, "dzb");
+            emit_str(s, out, "  ");
+            let gt: u32 = new_temp(s, out);
+            emit_str(s, out, " = getelementptr [64 x i64], ptr %t");
+            emit_dec(s, out, pt);
+            emit_str(s, out, ", i64 0, i64 %t");
+            emit_dec(s, out, vt);
+            emit_str(s, out, "
+  store i64 0, ptr %t");
+            emit_dec(s, out, gt);
+            emit_str(s, out, "
+  ");
+            let vt1: u32 = new_temp(s, out);
+            emit_str(s, out, " = add i64 %t");
+            emit_dec(s, out, vt);
+            emit_str(s, out, ", 1
+  store i64 %t");
+            emit_dec(s, out, vt1);
+            emit_str(s, out, ", ptr %t");
+            emit_dec(s, out, ct);
+            emit_str(s, out, "
+");
+            jump(s, out, l1, "dzc");
+            lab_def(s, out, l1 + 2, "dzd");
+            if kind == 10 {
+                emit_str(s, out, "  store i64 255, ptr %t");
+                emit_dec(s, out, pt);
+                emit_str(s, out, "
+");
+            }
+            store32(s, dom_at(d, 7), pt);
+        }
+        store32(s, CG_DOM_N, d + 1);
+        // 块体是一层语句表：体内的 `defer` 在块尾按 LIFO 跑（与参考的 `self.block` 同序）
+        let dfr: u32 = dfr_push(s);
+        let k2: u32 = q + 1;
+        while !tok_is(src, toks, k2, "}") && tok_kind(toks, k2) != 4 {
+            k2 = stmt(s, out, src, toks, k2, ret);
+        }
+        let _de: u32 = dfr_end(s, out, src, toks, dfr, ret);
+        store32(s, CG_DOM_N, d);
+        return k2 + 1;
+}
+
 fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
     if load32(s, CG_PROF) == 2 && tok_kind(toks, j) == 0 && tok_is(src, toks, j, "lgc") {
         // `lgc` 的时间控制（`docs/309`）：只在 Tur 2026.3 是关键字。
@@ -6885,28 +7221,44 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         store32(s, 548, md);
         return stop;
     }
-    if tok_is(src, toks, j, "guard") {   // P4/M36+M38: 十种域的统一判决
-        let ci: u32 = find_cap(s, src, toks, j + 1);
-        let ce: u32 = expr_bin(s, out, src, toks, j + 3, 1, 0, 0);
+    if tok_is(src, toks, j, "domain") && is_dom_block(src, toks, j) == 1 {   // docs/314
+        return dom_stmt(s, out, src, toks, j, ret);
+    }
+    if tok_is(src, toks, j, "guard") {   // P4/M36+M38 / docs/314
+        let dw: u32 = dom_by_name(s, src, toks, j + 1);
+        let ci: u32 = 4294967295;
         let clo: u32 = 0;
         let chi: u32 = 0;
         let ck: u32 = 0;
         let cp: u32 = 0;
         let cf: u32 = 0;
-        if ci != 4294967295 {
-            clo = load32(s, cap_base(ci) + 8);
-            chi = load32(s, cap_base(ci) + 12);
-            let pk: u32 = load32(s, cap_base(ci) + 20);
-            ck = pk & 15;
-            cf = (pk >> 4) & 3;
-            cp = pk >> 8;
+        let cst: u32 = 0;
+        if dw != 0 {
+            ci = load32(s, dom_at(dw - 1, 0));
+            clo = load32(s, dom_at(dw - 1, 2));
+            chi = load32(s, dom_at(dw - 1, 3));
+            ck = load32(s, dom_at(dw - 1, 4));
+            cp = load32(s, dom_at(dw - 1, 5));
+            cf = load32(s, dom_at(dw - 1, 6));
+            cst = load32(s, dom_at(dw - 1, 7));
+        } else {
+            ci = find_cap(s, src, toks, j + 1);
+            if ci != 4294967295 {
+                clo = load32(s, cap_base(ci) + 8);
+                chi = load32(s, cap_base(ci) + 12);
+                let pk: u32 = load32(s, cap_base(ci) + 20);
+                ck = pk & 15;
+                cf = (pk >> 4) & 3;
+                cp = pk >> 8;
+            }
         }
+        let ce: u32 = expr_bin(s, out, src, toks, j + 3, 1, 0, 0);
         emit_str(s, out, "  ");
         let v64: u32 = new_temp(s, out);
         emit_str(s, out, " = zext i32 ");
         emit_val(s, out, 0);
-        emit_str(s, out, " to i64\n");
-        // 语境类的第二个实参（`docs/307` §1–§5）：`guard cap(x, aux);`
+        emit_str(s, out, " to i64
+");
         let has_aux: u32 = 0;
         let a64: u32 = 0;
         let ce2: u32 = ce;
@@ -6918,10 +7270,44 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
             let at: u32 = new_temp(s, out);
             emit_str(s, out, " = zext i32 ");
             emit_val(s, out, 0);
-            emit_str(s, out, " to i64\n");
+            emit_str(s, out, " to i64
+");
             a64 = at;
         }
-        emit_str(s, out, "  call void @__loment_guard2(i64 ");
+        let stt: u32 = 0;
+        let stg: u32 = 0;
+        if dw != 0 && cst != 0 {
+            stt = cst;
+        } else if dw == 0 && (ck == 7 || ck == 12 || ck == 14) {
+            emit_str(s, out, "  ");
+            stg = new_temp(s, out);
+            emit_str(s, out, " = getelementptr [64 x i64], ptr ");
+            if ck == 7 { emit_str(s, out, "@__loment_used"); }
+            if ck == 12 { emit_str(s, out, "@__loment_wit"); }
+            if ck == 14 { emit_str(s, out, "@__loment_obl"); }
+            emit_str(s, out, ", i64 ");
+            emit_dec(s, out, ci);
+            emit_str(s, out, "
+");
+        } else if dw == 0 && ck == 10 {
+            emit_str(s, out, "  ");
+            stg = new_temp(s, out);
+            emit_str(s, out, " = getelementptr i64, ptr @__loment_qual, i64 ");
+            emit_dec(s, out, ci);
+            emit_str(s, out, "
+");
+        }
+        emit_str(s, out, "  call void @__loment_guard2(ptr ");
+        if stt != 0 {
+            emit_str(s, out, "%t");
+            emit_dec(s, out, stt);
+        } else if stg != 0 {
+            emit_str(s, out, "%t");
+            emit_dec(s, out, stg);
+        } else {
+            emit_str(s, out, "@__loment_qual");
+        }
+        emit_str(s, out, ", i64 ");
         emit_dec(s, out, ci);
         emit_str(s, out, ", i64 %t");
         emit_dec(s, out, v64);
@@ -6942,39 +7328,99 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         emit_dec(s, out, cp);
         emit_str(s, out, ", i64 ");
         emit_dec(s, out, cf);
-        emit_str(s, out, ")\n");
+        emit_str(s, out, ")
+");
         return ce2 + 1;
     }
     if tok_is(src, toks, j, "tick") && tok_is(src, toks, j + 1, ";") {
-        emit_str(s, out, "  call void @__loment_tick()\n");
+        emit_str(s, out, "  call void @__loment_tick()
+");
         return j + 2;
     }
-    if tok_is(src, toks, j, "quality") {   // docs/306 §5.2 第 7 条：喂质量
-        let ci: u32 = find_cap(s, src, toks, j + 1);
+    if tok_is(src, toks, j, "quality") {   // docs/306 §5.2 第 7 条
+        let dw: u32 = dom_by_name(s, src, toks, j + 1);
+        let ci: u32 = 0;
+        let cst: u32 = 0;
+        if dw != 0 {
+            ci = load32(s, dom_at(dw - 1, 0));
+            cst = load32(s, dom_at(dw - 1, 7));
+        } else {
+            ci = find_cap(s, src, toks, j + 1);
+        }
         let qe: u32 = expr_bin(s, out, src, toks, j + 3, 1, 0, 0);
         emit_str(s, out, "  ");
         let q64: u32 = new_temp(s, out);
         emit_str(s, out, " = zext i32 ");
         emit_val(s, out, 0);
-        emit_str(s, out, " to i64\n  call void @__loment_qual_store(i64 ");
-        emit_dec(s, out, ci);
+        emit_str(s, out, " to i64
+");
+        let pg: u32 = 0;
+        if cst == 0 && dw == 0 {
+            emit_str(s, out, "  ");
+            pg = new_temp(s, out);
+            emit_str(s, out, " = getelementptr i64, ptr @__loment_qual, i64 ");
+            emit_dec(s, out, ci);
+            emit_str(s, out, "
+");
+        }
+        emit_str(s, out, "  call void @__loment_qual_store(ptr ");
+        if cst != 0 {
+            emit_str(s, out, "%t");
+            emit_dec(s, out, cst);
+        } else if pg != 0 {
+            emit_str(s, out, "%t");
+            emit_dec(s, out, pg);
+        } else {
+            emit_str(s, out, "@__loment_qual");
+        }
         emit_str(s, out, ", i64 %t");
         emit_dec(s, out, q64);
-        emit_str(s, out, ")\n");
+        emit_str(s, out, ")
+");
         return qe + 1;
     }
-    if tok_is(src, toks, j, "discharge") {   // docs/307 §5：结清 reachable 义务
-        let ci: u32 = find_cap(s, src, toks, j + 1);
+    if tok_is(src, toks, j, "discharge") {   // docs/307 §5
+        let dw: u32 = dom_by_name(s, src, toks, j + 1);
+        let ci: u32 = 0;
+        let cst: u32 = 0;
+        if dw != 0 {
+            ci = load32(s, dom_at(dw - 1, 0));
+            cst = load32(s, dom_at(dw - 1, 7));
+        } else {
+            ci = find_cap(s, src, toks, j + 1);
+        }
         let de: u32 = expr_bin(s, out, src, toks, j + 3, 1, 0, 0);
         emit_str(s, out, "  ");
         let d64: u32 = new_temp(s, out);
         emit_str(s, out, " = zext i32 ");
         emit_val(s, out, 0);
-        emit_str(s, out, " to i64\n  call void @__loment_discharge(i64 ");
+        emit_str(s, out, " to i64
+");
+        let pg2: u32 = 0;
+        if cst == 0 && dw == 0 {
+            emit_str(s, out, "  ");
+            pg2 = new_temp(s, out);
+            emit_str(s, out, " = getelementptr [64 x i64], ptr @__loment_obl, i64 ");
+            emit_dec(s, out, ci);
+            emit_str(s, out, "
+");
+        }
+        emit_str(s, out, "  call void @__loment_discharge(ptr ");
+        if cst != 0 {
+            emit_str(s, out, "%t");
+            emit_dec(s, out, cst);
+        } else if pg2 != 0 {
+            emit_str(s, out, "%t");
+            emit_dec(s, out, pg2);
+        } else {
+            emit_str(s, out, "@__loment_qual");
+        }
+        emit_str(s, out, ", i64 ");
         emit_dec(s, out, ci);
         emit_str(s, out, ", i64 %t");
         emit_dec(s, out, d64);
-        emit_str(s, out, ")\n");
+        emit_str(s, out, ")
+");
         return de + 1;
     }
     // 表达式语句 (调用/内建): NAME ( ... ) ;
@@ -6995,6 +7441,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
             emit_str(s, out, ", 0\n");
             let sitx: u32 = expr_type(s, src, toks, j + 2);   // 下标**自己的类型**
             let siv: u32 = expr_bin(s, out, src, toks, j + 2, 1, 1, 0);
+            let _w1: u32 = dom_auto_guard(s, out, src, toks, j, sitx, 1);   // docs/314
             emit_str(s, out, "  ");
             let sgp: u32 = new_temp(s, out);
             emit_str(s, out, " = getelementptr inbounds ");
@@ -7019,6 +7466,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         if is_array_tok(src, toks, sty) == 1 {
             let aitx: u32 = expr_type(s, src, toks, j + 2);   // 下标**自己的类型**
             let aiv: u32 = expr_bin(s, out, src, toks, j + 2, 1, 0, 0);
+            let _w2: u32 = dom_auto_guard(s, out, src, toks, j, aitx, 0);   // docs/314
             emit_str(s, out, "  ");
             let agp: u32 = new_temp(s, out);
             emit_str(s, out, " = getelementptr inbounds ");
@@ -7305,6 +7753,9 @@ fn collect_locals(s: ptr, src: ptr, toks: ptr, i: u32, end: u32) -> u32 {
             let name: u32 = j + 1;
             let ty: u32 = j + 3;
             let eq2: u32 = skip_type(src, toks, ty);
+            if tok_is(src, toks, eq2 - 2, "in") && tok_kind(toks, eq2 - 1) == 0 {
+                let _ds1: u32 = dsp_set(s, src, toks, name, eq2 - 1);   // docs/314
+            }
             let qs: u32 = find_try_q(src, toks, eq2 + 1);
             if qs != 0 {
                 // M9: `let x: T = e?;` 反糖成 `let __t{line} / let x / match { Ok=>x=v; Err=>return Err(e) }`
@@ -9779,6 +10230,9 @@ fn guard_rt_needed(s: ptr, src: ptr, toks: ptr) -> u32 {
         if tok_is(src, toks, i, "quality") && tok_kind(toks, i + 1) == 0 {
             return 1;
         }
+        if tok_is(src, toks, i, "domain") && is_dom_block(src, toks, i) == 1 {
+            return 1;
+        }
         if tok_is(src, toks, i, "discharge") && tok_kind(toks, i + 1) == 0 {
             return 1;
         }
@@ -9790,14 +10244,14 @@ fn guard_rt_needed(s: ptr, src: ptr, toks: ptr) -> u32 {
 /// 能力域运行时（`docs/306`–`docs/308`）：虚拟钟 + 十种域。
 /// **与 `tools/lomentc.py` 的 `_IR_GUARD_RUNTIME` 逐字相同**（孪生判据）。
 fn emit_guard_runtime(s: ptr, out: ptr) -> u32 {
-    emit_str(s, out, "; ---- 能力域运行时 (docs/306-308): 虚拟钟 + 十五种域 ----\n@__loment_now = internal global i64 0\n@__loment_used = internal global [16 x [64 x i64]] zeroinitializer\n@__loment_wit = internal global [16 x [64 x i64]] zeroinitializer\n@__loment_obl = internal global [16 x [64 x i64]] zeroinitializer\n@__loment_qual = internal global [16 x i64] [i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255]\n\ndefine internal void @__loment_tick() {\nentry:\n  %n = load i64, ptr @__loment_now\n  %n1 = add i64 %n, 1\n  store i64 %n1, ptr @__loment_now\n  ret void\n}\n\ndefine internal void @__loment_qual_store(i64 %cap, i64 %v) {\nentry:\n  %big = icmp ugt i64 %v, 255\n  %zb = zext i1 %big to i64\n  %keep = sub i64 %zb, 1\n  %okv = and i64 %v, %keep\n  %sel = sub i64 0, %zb\n  %fif = and i64 %sel, 255\n  %q = or i64 %okv, %fif\n");
-    emit_str(s, out, "  %p = getelementptr [16 x i64], ptr @__loment_qual, i64 0, i64 %cap\n  store i64 %q, ptr %p\n  ret void\n}\n\ndefine internal void @__loment_discharge(i64 %cap, i64 %idx) {\nentry:\n  %now = load i64, ptr @__loment_now\n  %slot = and i64 %idx, 63\n  %p = getelementptr [16 x [64 x i64]], ptr @__loment_obl, i64 0, i64 %cap, i64 %slot\n  %v = load i64, ptr %p\n  %have = icmp ne i64 %v, 0\n  %late = icmp ugt i64 %now, %v\n  %none = xor i1 %have, true\n  %bad = or i1 %none, %late\n  br i1 %bad, label %fail, label %ok\nfail:\n  call void @__loment_abort()\n  unreachable\nok:\n  store i64 0, ptr %p\n  ret void\n}\n\ndefine internal void @__loment_guard2(i64 %cap, i64 %idx, i64 %aux, i64 %lo, i64 %hi, i64 %kind, i64 %param, i64 %flags) {\nentry:\n  %now = load i64, ptr @__loment_now\n  %pm0 = icmp eq i64 %param, 0\n  %pmz = zext i1 %pm0 to i64\n  %pm = or i64 %param, %pmz\n  %fl = and i64 %flags, 1\n");
-    emit_str(s, out, "  %linf = icmp ne i64 %fl, 0\n  %fh = and i64 %flags, 2\n  %hinf = icmp ne i64 %fh, 0\n  %ge = icmp uge i64 %idx, %lo\n  %lob = or i1 %linf, %ge\n  %le = icmp ule i64 %idx, %hi\n  %hib = or i1 %hinf, %le\n  %bound = and i1 %lob, %hib\n  %nb = xor i1 %bound, true\n  %k1 = icmp eq i64 %kind, 1\n  %nk1 = xor i1 %k1, true\n  %p1a = and i1 %nb, %k1\n  %p1b = and i1 %bound, %nk1\n  %a1 = or i1 %p1a, %p1b\n  %k2 = icmp eq i64 %kind, 2\n  %et = icmp ult i64 %now, %pm\n  %e = and i1 %et, %bound\n  %nk2 = xor i1 %k2, true\n  %p2a = and i1 %e, %k2\n  %p2b = and i1 %a1, %nk2\n  %a2 = or i1 %p2a, %p2b\n  %k3 = icmp eq i64 %kind, 3\n  %seg = udiv i64 %now, %pm\n  %sego = mul i64 %seg, %pm\n  %org = add i64 %lo, %sego\n  %end = add i64 %org, %pm\n  %o1 = icmp uge i64 %idx, %org\n  %o2 = icmp ult i64 %idx, %end\n  %ow = and i1 %o1, %o2\n  %o = and i1 %ow, %bound\n  %nk3 = xor i1 %k3, true\n  %p3a = and i1 %o, %k3\n");
-    emit_str(s, out, "  %p3b = and i1 %a2, %nk3\n  %a3 = or i1 %p3a, %p3b\n  %k4 = icmp eq i64 %kind, 4\n  %slt = icmp ult i64 %now, %pm\n  %slo = sub i64 %now, %pm\n  %zs = zext i1 %slt to i64\n  %ms = sub i64 %zs, 1\n  %slo2 = and i64 %slo, %ms\n  %s1 = icmp uge i64 %idx, %slo2\n  %s2 = icmp ule i64 %idx, %now\n  %s = and i1 %s1, %s2\n  %nk4 = xor i1 %k4, true\n  %p4a = and i1 %s, %k4\n  %p4b = and i1 %a3, %nk4\n  %a4 = or i1 %p4a, %p4b\n  %k5 = icmp eq i64 %kind, 5\n  %dt = icmp ule i64 %now, %pm\n  %d = and i1 %dt, %bound\n  %nk5 = xor i1 %k5, true\n  %p5a = and i1 %d, %k5\n  %p5b = and i1 %a4, %nk5\n  %a5 = or i1 %p5a, %p5b\n  %k6 = icmp eq i64 %kind, 6\n  %gr = mul i64 %now, %pm\n  %gend = add i64 %lo, %gr\n  %g1 = icmp ule i64 %idx, %gend\n  %g = and i1 %g1, %bound\n  %nk6 = xor i1 %k6, true\n  %p6a = and i1 %g, %k6\n  %p6b = and i1 %a5, %nk6\n  %a6 = or i1 %p6a, %p6b\n  %off0 = sub i64 %idx, %lo\n");
-    emit_str(s, out, "  %big = icmp uge i64 %off0, 64\n  %zb = zext i1 %big to i64\n  %mbo = sub i64 %zb, 1\n  %off = and i64 %off0, %mbo\n  %up = getelementptr [16 x [64 x i64]], ptr @__loment_used, i64 0, i64 %cap, i64 %off\n  %uv = load i64, ptr %up\n  %uc = icmp ult i64 %uv, %pm\n  %k7 = icmp eq i64 %kind, 7\n  %c = and i1 %uc, %bound\n  %nk7 = xor i1 %k7, true\n  %p7a = and i1 %c, %k7\n  %p7b = and i1 %a6, %nk7\n  %a7 = or i1 %p7a, %p7b\n  %k8 = icmp eq i64 %kind, 8\n  %c8w = urem i64 %idx, %pm\n  %c8a = icmp uge i64 %c8w, %lo\n  %c8b = icmp ule i64 %c8w, %hi\n  %c8n = and i1 %c8a, %c8b\n  %nk8 = xor i1 %k8, true\n  %p8a = and i1 %c8n, %k8\n  %p8b = and i1 %a7, %nk8\n  %a8 = or i1 %p8a, %p8b\n  %k9 = icmp eq i64 %kind, 9\n  %g9s = udiv i64 %now, %pm\n  %g9o = and i64 %g9s, 1\n  %g9i = icmp ne i64 %g9o, 0\n  %g9n = xor i1 %bound, %g9i\n  %nk9 = xor i1 %k9, true\n  %p9a = and i1 %g9n, %k9\n  %p9b = and i1 %a8, %nk9\n");
-    emit_str(s, out, "  %a9 = or i1 %p9a, %p9b\n  %k10 = icmp eq i64 %kind, 10\n  %adw = sub i64 %hi, %lo\n  %adp = getelementptr [16 x i64], ptr @__loment_qual, i64 0, i64 %cap\n  %adq = load i64, ptr %adp\n  %adm = mul i64 %adw, %adq\n  %adr = udiv i64 %adm, 255\n  %adh = add i64 %lo, %adr\n  %adb1 = icmp uge i64 %idx, %lo\n  %adb2 = icmp ule i64 %idx, %adh\n  %adn = and i1 %adb1, %adb2\n  %nk10 = xor i1 %k10, true\n  %p10a = and i1 %adn, %k10\n  %p10b = and i1 %a9, %nk10\n  %a10 = or i1 %p10a, %p10b\n  %k11 = icmp eq i64 %kind, 11\n  %sb11 = and i64 %aux, 63\n  %sb11s = lshr i64 %param, %sb11\n  %sb11b = and i64 %sb11s, 1\n  %sb11n = icmp ne i64 %sb11b, 0\n  %sb11p = and i1 %sb11n, %bound\n  %nk11 = xor i1 %k11, true\n  %p11a = and i1 %sb11p, %k11\n  %p11b = and i1 %a10, %nk11\n  %a11 = or i1 %p11a, %p11b\n  %k12 = icmp eq i64 %kind, 12\n  %w12s = and i64 %aux, 63\n  %w12p = getelementptr [16 x [64 x i64]], ptr @__loment_wit, i64 0, i64 %cap, i64 %w12s\n");
-    emit_str(s, out, "  %w12v = load i64, ptr %w12p\n  %w12c = icmp ult i64 %w12v, %pm\n  %w12n = and i1 %w12c, %bound\n  %w12v1 = add i64 %w12v, 1\n  %nk12 = xor i1 %k12, true\n  %p12a = and i1 %w12n, %k12\n  %p12b = and i1 %a11, %nk12\n  %a12 = or i1 %p12a, %p12b\n  %k13 = icmp eq i64 %kind, 13\n  %f13d = and i64 %aux, 65535\n  %f13s = shl i64 %idx, 16\n  %f13k = or i64 %f13s, %f13d\n  %f13a = icmp uge i64 %f13k, %lo\n  %f13b = icmp ule i64 %f13k, %hi\n  %f13n = and i1 %f13a, %f13b\n  %nk13 = xor i1 %k13, true\n  %p13a = and i1 %f13n, %k13\n  %p13b = and i1 %a12, %nk13\n  %a13 = or i1 %p13a, %p13b\n  %k14 = icmp eq i64 %kind, 14\n  %o14s = and i64 %idx, 63\n  %o14p = getelementptr [16 x [64 x i64]], ptr @__loment_obl, i64 0, i64 %cap, i64 %o14s\n  %o14v = load i64, ptr %o14p\n  %o14f = icmp eq i64 %o14v, 0\n  %o14n = and i1 %o14f, %bound\n  %nk14 = xor i1 %k14, true\n  %p14a = and i1 %o14n, %k14\n");
-    emit_str(s, out, "  %p14b = and i1 %a13, %nk14\n  %a14 = or i1 %p14a, %p14b\n  br i1 %a14, label %pass, label %fail\nfail:\n  call void @__loment_abort()\n  unreachable\npass:\n  %ap = getelementptr [16 x i64], ptr @__loment_audit, i64 0, i64 %cap\n  %av = load i64, ptr %ap\n  %av1 = add i64 %av, 1\n  store i64 %av1, ptr %ap\n  br i1 %k7, label %consume, label %wcheck\nwcheck:\n  br i1 %k12, label %witness, label %ocheck\nwitness:\n  store i64 %w12v1, ptr %w12p\n  br label %ocheck\nocheck:\n  br i1 %k14, label %oblige, label %done\noblige:\n  %odl = add i64 %now, %pm\n  store i64 %odl, ptr %o14p\n  br label %done\nconsume:\n  %cv = load i64, ptr %up\n  %cv1 = add i64 %cv, 1\n  store i64 %cv1, ptr %up\n  br label %done\ndone:\n  ret void\n}\n");
+    emit_str(s, out, "; ---- 能力域运行时 (docs/306-308, 313): 虚拟钟 + 块级域 ----\n@__loment_now = internal global i64 0\n@__loment_used = internal global [16 x [64 x i64]] zeroinitializer\n@__loment_wit = internal global [16 x [64 x i64]] zeroinitializer\n@__loment_obl = internal global [16 x [64 x i64]] zeroinitializer\n@__loment_qual = internal global [16 x i64] [i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255]\n\ndefine internal void @__loment_tick() {\nentry:\n  %n = load i64, ptr @__loment_now\n  %n1 = add i64 %n, 1\n  store i64 %n1, ptr @__loment_now\n  ret void\n}\n\ndefine internal void @__loment_qual_store(ptr %st, i64 %v) {\nentry:\n  %big = icmp ugt i64 %v, 255\n  %zb = zext i1 %big to i64\n  %keep = sub i64 %zb, 1\n  %okv = and i64 %v, %keep\n  %sel = sub i64 0, %zb\n  %fif = and i64 %sel, 255\n");
+    emit_str(s, out, "  %q = or i64 %okv, %fif\n  store i64 %q, ptr %st\n  ret void\n}\n\ndefine internal void @__loment_discharge(ptr %st, i64 %cap, i64 %idx) {\nentry:\n  %now = load i64, ptr @__loment_now\n  %slot = and i64 %idx, 63\n  %p = getelementptr [64 x i64], ptr %st, i64 0, i64 %slot\n  %v = load i64, ptr %p\n  %have = icmp ne i64 %v, 0\n  %late = icmp ugt i64 %now, %v\n  %none = xor i1 %have, true\n  %bad = or i1 %none, %late\n  br i1 %bad, label %fail, label %ok\nfail:\n  call void @__loment_abort()\n  unreachable\nok:\n  store i64 0, ptr %p\n  ret void\n}\n\ndefine internal void @__loment_guard2(ptr %st, i64 %cap, i64 %idx, i64 %aux, i64 %lo, i64 %hi, i64 %kind, i64 %param, i64 %flags) {\nentry:\n  %now = load i64, ptr @__loment_now\n  %pm0 = icmp eq i64 %param, 0\n  %pmz = zext i1 %pm0 to i64\n  %pm = or i64 %param, %pmz\n  %fl = and i64 %flags, 1\n  %linf = icmp ne i64 %fl, 0\n");
+    emit_str(s, out, "  %fh = and i64 %flags, 2\n  %hinf = icmp ne i64 %fh, 0\n  %ge = icmp uge i64 %idx, %lo\n  %lob = or i1 %linf, %ge\n  %le = icmp ule i64 %idx, %hi\n  %hib = or i1 %hinf, %le\n  %bound = and i1 %lob, %hib\n  %nb = xor i1 %bound, true\n  %ks = and i64 %kind, 127\n  %sil = and i64 %kind, 128\n  %sn = icmp ne i64 %sil, 0\n  %k1 = icmp eq i64 %ks, 1\n  %nk1 = xor i1 %k1, true\n  %p1a = and i1 %nb, %k1\n  %p1b = and i1 %bound, %nk1\n  %a1 = or i1 %p1a, %p1b\n  %k2 = icmp eq i64 %ks, 2\n  %et = icmp ult i64 %now, %pm\n  %e = and i1 %et, %bound\n  %nk2 = xor i1 %k2, true\n  %p2a = and i1 %e, %k2\n  %p2b = and i1 %a1, %nk2\n  %a2 = or i1 %p2a, %p2b\n  %k3 = icmp eq i64 %ks, 3\n  %seg = udiv i64 %now, %pm\n  %sego = mul i64 %seg, %pm\n  %org = add i64 %lo, %sego\n  %end = add i64 %org, %pm\n  %o1 = icmp uge i64 %idx, %org\n  %o2 = icmp ult i64 %idx, %end\n  %ow = and i1 %o1, %o2\n");
+    emit_str(s, out, "  %o = and i1 %ow, %bound\n  %nk3 = xor i1 %k3, true\n  %p3a = and i1 %o, %k3\n  %p3b = and i1 %a2, %nk3\n  %a3 = or i1 %p3a, %p3b\n  %k4 = icmp eq i64 %ks, 4\n  %slt = icmp ult i64 %now, %pm\n  %slo = sub i64 %now, %pm\n  %zs = zext i1 %slt to i64\n  %ms = sub i64 %zs, 1\n  %slo2 = and i64 %slo, %ms\n  %s1 = icmp uge i64 %idx, %slo2\n  %s2 = icmp ule i64 %idx, %now\n  %s = and i1 %s1, %s2\n  %nk4 = xor i1 %k4, true\n  %p4a = and i1 %s, %k4\n  %p4b = and i1 %a3, %nk4\n  %a4 = or i1 %p4a, %p4b\n  %k5 = icmp eq i64 %ks, 5\n  %dt = icmp ule i64 %now, %pm\n  %d = and i1 %dt, %bound\n  %nk5 = xor i1 %k5, true\n  %p5a = and i1 %d, %k5\n  %p5b = and i1 %a4, %nk5\n  %a5 = or i1 %p5a, %p5b\n  %k6 = icmp eq i64 %ks, 6\n  %gr = mul i64 %now, %pm\n  %gend = add i64 %lo, %gr\n  %g1 = icmp ule i64 %idx, %gend\n  %g = and i1 %g1, %bound\n  %nk6 = xor i1 %k6, true\n  %p6a = and i1 %g, %k6\n");
+    emit_str(s, out, "  %p6b = and i1 %a5, %nk6\n  %a6 = or i1 %p6a, %p6b\n  %off0 = sub i64 %idx, %lo\n  %big = icmp uge i64 %off0, 64\n  %zb = zext i1 %big to i64\n  %mbo = sub i64 %zb, 1\n  %off = and i64 %off0, %mbo\n  %up = getelementptr [64 x i64], ptr %st, i64 0, i64 %off\n  %uv = load i64, ptr %up\n  %uc = icmp ult i64 %uv, %pm\n  %k7 = icmp eq i64 %ks, 7\n  %c = and i1 %uc, %bound\n  %nk7 = xor i1 %k7, true\n  %p7a = and i1 %c, %k7\n  %p7b = and i1 %a6, %nk7\n  %a7 = or i1 %p7a, %p7b\n  %k8 = icmp eq i64 %ks, 8\n  %c8w = urem i64 %idx, %pm\n  %c8a = icmp uge i64 %c8w, %lo\n  %c8b = icmp ule i64 %c8w, %hi\n  %c8n = and i1 %c8a, %c8b\n  %nk8 = xor i1 %k8, true\n  %p8a = and i1 %c8n, %k8\n  %p8b = and i1 %a7, %nk8\n  %a8 = or i1 %p8a, %p8b\n  %k9 = icmp eq i64 %ks, 9\n  %g9s = udiv i64 %now, %pm\n  %g9o = and i64 %g9s, 1\n  %g9i = icmp ne i64 %g9o, 0\n  %g9n = xor i1 %bound, %g9i\n");
+    emit_str(s, out, "  %nk9 = xor i1 %k9, true\n  %p9a = and i1 %g9n, %k9\n  %p9b = and i1 %a8, %nk9\n  %a9 = or i1 %p9a, %p9b\n  %k10 = icmp eq i64 %ks, 10\n  %adw = sub i64 %hi, %lo\n  %adq = load i64, ptr %st\n  %adm = mul i64 %adw, %adq\n  %adr = udiv i64 %adm, 255\n  %adh = add i64 %lo, %adr\n  %adb1 = icmp uge i64 %idx, %lo\n  %adb2 = icmp ule i64 %idx, %adh\n  %adn = and i1 %adb1, %adb2\n  %nk10 = xor i1 %k10, true\n  %p10a = and i1 %adn, %k10\n  %p10b = and i1 %a9, %nk10\n  %a10 = or i1 %p10a, %p10b\n  %k11 = icmp eq i64 %ks, 11\n  %sb11 = and i64 %aux, 63\n  %sb11s = lshr i64 %param, %sb11\n  %sb11b = and i64 %sb11s, 1\n  %sb11n = icmp ne i64 %sb11b, 0\n  %sb11p = and i1 %sb11n, %bound\n  %nk11 = xor i1 %k11, true\n  %p11a = and i1 %sb11p, %k11\n  %p11b = and i1 %a10, %nk11\n  %a11 = or i1 %p11a, %p11b\n  %k12 = icmp eq i64 %ks, 12\n  %w12s = and i64 %aux, 63\n  %w12p = getelementptr [64 x i64], ptr %st, i64 0, i64 %w12s\n");
+    emit_str(s, out, "  %w12v = load i64, ptr %w12p\n  %w12c = icmp ult i64 %w12v, %pm\n  %w12n = and i1 %w12c, %bound\n  %w12v1 = add i64 %w12v, 1\n  %nk12 = xor i1 %k12, true\n  %p12a = and i1 %w12n, %k12\n  %p12b = and i1 %a11, %nk12\n  %a12 = or i1 %p12a, %p12b\n  %k13 = icmp eq i64 %ks, 13\n  %f13d = and i64 %aux, 65535\n  %f13s = shl i64 %idx, 16\n  %f13k = or i64 %f13s, %f13d\n  %f13a = icmp uge i64 %f13k, %lo\n  %f13b = icmp ule i64 %f13k, %hi\n  %f13n = and i1 %f13a, %f13b\n  %nk13 = xor i1 %k13, true\n  %p13a = and i1 %f13n, %k13\n  %p13b = and i1 %a12, %nk13\n  %a13 = or i1 %p13a, %p13b\n  %k14 = icmp eq i64 %ks, 14\n  %o14s = and i64 %idx, 63\n  %o14p = getelementptr [64 x i64], ptr %st, i64 0, i64 %o14s\n  %o14v = load i64, ptr %o14p\n  %o14f = icmp eq i64 %o14v, 0\n  %o14n = and i1 %o14f, %bound\n  %nk14 = xor i1 %k14, true\n  %p14a = and i1 %o14n, %k14\n  %p14b = and i1 %a13, %nk14\n");
+    emit_str(s, out, "  %a14 = or i1 %p14a, %p14b\n  br i1 %a14, label %pass, label %fail\nfail:\n  call void @__loment_abort()\n  unreachable\npass:\n  br i1 %sn, label %done, label %aaudit\naaudit:\n  %ap = getelementptr i64, ptr @__loment_audit, i64 %cap\n  %av = load i64, ptr %ap\n  %av1 = add i64 %av, 1\n  store i64 %av1, ptr %ap\n  br i1 %k7, label %consume, label %wcheck\nwcheck:\n  br i1 %k12, label %witness, label %ocheck\nwitness:\n  store i64 %w12v1, ptr %w12p\n  br label %ocheck\nocheck:\n  br i1 %k14, label %oblige, label %done\noblige:\n  %odl = add i64 %now, %pm\n  store i64 %odl, ptr %o14p\n  br label %done\nconsume:\n  %cv = load i64, ptr %up\n  %cv1 = add i64 %cv, 1\n  store i64 %cv1, ptr %up\n  br label %done\ndone:\n  ret void\n}\n");
     return emit_str(s, out, "\n");
 }
 
@@ -10478,6 +10932,7 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32) -> u32 {
         i = i + 1;
     }
     store32(s, 536, cn);
+    store32(s, CG_DOM_ID, cn);   // docs/314：块级域的审计槽号接在能力之后
     // 枚举表: name_tok | nvariants | has_payload | pad | 8 × (variant_tok, payload_tok)
     let en: u32 = 0;
     i = 0;
@@ -10559,8 +11014,23 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32) -> u32 {
     if guard_rt_needed(s, src, toks) == 1 {   // docs/306-308: 十种域的判决点
         emit_guard_runtime(s, out);
     }
-    if guard_rt_needed(s, src, toks) == 1 {   // P4/M38: 审计计数全局
-        emit_str(s, out, "@__loment_audit = internal global [16 x i64] zeroinitializer\n\n");
+    if guard_rt_needed(s, src, toks) == 1 {   // P4/M38 / docs/314：审计计数全局
+        // 槽数 = 顶层能力 + 块级域（与参考实现的 max(16, slots) 同一口径）
+        let nd: u32 = 0;
+        let ti: u32 = 0;
+        while tok_kind(toks, ti) != 4 {
+            if tok_is(src, toks, ti, "domain") {
+                nd = nd + 1;
+            }
+            ti = ti + 1;
+        }
+        let slots: u32 = load32(s, 536) + nd;
+        if slots < 16 {
+            slots = 16;
+        }
+        emit_str(s, out, "@__loment_audit = internal global [");
+        emit_dec(s, out, slots);
+        emit_str(s, out, " x i64] zeroinitializer\n\n");
     }
     if load32(s, 536) != 0 {   // P4/M35: 域描述表 (space 取 FNV-1a 32 位)
         emit_caps_table(s, out, src, toks);

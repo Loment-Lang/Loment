@@ -5889,6 +5889,19 @@ def test_domain_for_is_the_loop_head():
                   "    }\n    return a[0];\n}\n")
     assert e4 == [], e4
 
+    # `in 外层`：循环走外层的形状，但**最内层仍更窄** —— 体内访问不能被免掉。
+    m5, e5 = load("module m\nchoose runtime\n"
+                  "fn f(a: [u32; 8] in disk) -> u32 {\n"
+                  "    domain whole : disk[0..7] {\n"
+                  "        domain half : disk[0..3] {\n"
+                  "            domain:for i in whole { a[i] = 1; }\n"
+                  "        }\n"
+                  "    }\n    return a[0];\n}\n")
+    assert e5 == [], e5
+    b5 = fbody(lomentc.emit_llvm(m5, ROOT))
+    assert b5.count("call void @__loment_guard2") == 3, (
+        "外层循环头 1 条 + 体内整条链 2 条（外层 silent + 内层记账）\n" + b5)
+
     for bad, frag in [
         ("domain d : disk[()..7] { domain:for i { } }", "有限形状"),
         ("domain d : disk[0..7] danger { domain:for i { } }", "危险域"),
@@ -6011,6 +6024,15 @@ def test_domains_selfhost_twin():
            "fn h_loop(a: [u32; 8] in disk) -> u32 {\n"
            "    domain loopd : disk[0..7] consumed(1) {\n"
            "        domain:for i step 2 { a[i] = a[i] + 1; }\n"
+           "    }\n"
+           "    return a[0];\n"
+           "}\n"
+           # `in 外层`：最内层更窄，体内访问仍挂整条链（docs/315 §1.4）
+           "fn h_loop2(a: [u32; 8] in disk) -> u32 {\n"
+           "    domain outer2 : disk[0..7] {\n"
+           "        domain inner2 : disk[0..3] {\n"
+           "            domain:for i in outer2 { a[i] = 1; }\n"
+           "        }\n"
            "    }\n"
            "    return a[0];\n"
            "}\n")

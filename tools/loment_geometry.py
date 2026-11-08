@@ -126,7 +126,9 @@ def geometry(mod: lomentc.Module) -> Geometry:
                 elif isinstance(s, (lomentc.While, lomentc.For)):
                     prov = getattr(s, "proven", ())
                     if prov:
-                        target = next((n for n in reversed(stack) if n.space == prov[1]), None)
+                        # prov = (变量, 空间, 域名)：`in NAME` 可以点到外层域
+                        target = next((n for n in reversed(stack)
+                                       if n.name == prov[2] and n.space == prov[1]), None)
                         if target is not None:
                             step = _step_of(s)
                             span = target.hi - target.lo + 1

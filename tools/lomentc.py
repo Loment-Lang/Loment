@@ -1981,13 +1981,17 @@ def _resolve_domains(mod) -> None:
             if isinstance(e.obj, Ident):
                 sp = vs.get(e.obj.name, "")
                 prov = cur_prov[0]
-                proven = (prov and sp == prov[1] and isinstance(e.idx, Ident)
+                chain = [d for d in stack if d.space == sp]
+                # **只有点到最内层那个域**才算"已证"：`domain:for i in 外层` 走在外层
+                # 的形状上，体内的访问仍归最内层域判（它可能更窄）。
+                proven = (prov and sp == prov[1] and chain
+                          and chain[-1].name == prov[2] and isinstance(e.idx, Ident)
                           and e.idx.name == prov[0])
                 if sp and not proven:
                     e.doms = [
                         (d.audit_id, d.lo, d.hi, CAP_KIND_ID[d.kind], d.param,
                          (1 if d.lo_inf else 0) | (2 if d.hi_inf else 0))
-                        for d in stack if d.space == sp
+                        for d in chain
                     ]
             return
         if isinstance(e, (IntLit, BoolLit, StrLit, Ident, EnumPath, EnumCtor)):
@@ -3459,7 +3463,9 @@ class Parser:
         w.step = [Assign(Ident(var, kw.line),
                          Bin("+", Ident(var, kw.line), IntLit(step, kw.line), kw.line),
                          kw.line)]
-        w.proven = (var, dom.space)
+        # 名字也要记：`in NAME` 点到**外层**域时，体内同空间的下标**不能**免卫士
+        # （最内层域可能更窄 —— 见 `_resolve_domains` 的比对）。
+        w.proven = (var, dom.space, dom.name)
         w.tok_at, w.tok_end = body_at, self.i - 1
         # 变量取 **u32**：域的判决口 `@__loment_guard2` 收的是 i64，而守卫发射走的是
         # `zext i32 … to i64`（与所有显式 `guard` 同一条路）。用 u64 会发出一条

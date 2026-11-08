@@ -125,7 +125,9 @@ const CG_DPS: u32 = 926152;
 //: `CG_TICKX` = 用户写了 `choose domain_clock_explicit`（驱动在调用前放好）。
 const CG_CLOCK: u32 = 926156;
 const CG_TICKX: u32 = 926160;
-const CG_BYTES: u32 = 926164;         // = CG_TICKX + 4
+//: `domain:for` 点到的那个域的审计槽号 —— 只有**最内层**的那个才算"已证"。
+const CG_DPD: u32 = 926164;
+const CG_BYTES: u32 = 926168;         // = CG_DPD + 4
 use bytes
 use lexer
 
@@ -3038,13 +3040,15 @@ fn dom_auto_guard(s: ptr, out: ptr, src: ptr, toks: ptr, name_tok: u32,
     if sp == 0 {
         return 0;
     }
-    let pv: u32 = load32(s, CG_DPV);
-    if pv != 0 && tok_eq(src, toks, idx_tok, pv)
-            && tok_eq(src, toks, sp, load32(s, CG_DPS)) {
-        return 0;
-    }
     let top: u32 = dom_find(s, src, toks, sp);
     if top == 0 {
+        return 0;
+    }
+    let pv: u32 = load32(s, CG_DPV);
+    if pv != 0 && tok_eq(src, toks, idx_tok, pv)
+            && tok_eq(src, toks, sp, load32(s, CG_DPS))
+            && load32(s, dom_at(top - 1, 0)) == load32(s, CG_DPD) {
+        // 已证 —— 但只当循环点到的就是**最内层**那个域（`in 外层` 时最内层可能更窄）。
         return 0;
     }
     emit_str(s, out, "  ");
@@ -6464,8 +6468,10 @@ fn dom_for(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
     // 循环头已证：体内同空间的 `x[VAR]` 不再挂自动守卫
     let opv: u32 = load32(s, CG_DPV);
     let ops: u32 = load32(s, CG_DPS);
+    let opd: u32 = load32(s, CG_DPD);
     store32(s, CG_DPV, var_tok);
     store32(s, CG_DPS, load32(s, dom_at(dw - 1, 1)));
+    store32(s, CG_DPD, ci);
     let _gv: u32 = load_var(s, out, src, toks, var_tok, 0);
     emit_str(s, out, "  ");
     let g64: u32 = new_temp(s, out);
@@ -6537,6 +6543,7 @@ fn dom_for(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
     store32(s, CG_LDEPTH, odep);
     store32(s, CG_DPV, opv);
     store32(s, CG_DPS, ops);
+    store32(s, CG_DPD, opd);
     return b + 1;
 }
 

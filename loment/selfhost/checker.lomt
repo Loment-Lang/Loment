@@ -4564,10 +4564,23 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                 let kk: u32 = 1;
                 while kk + 1 < sl {
                     let ch: u32 = load8(src, tok_start(t, pi + 2) + kk) as u32;
-                    if ch != 32 && ch != 9 {
-                        nonblank = 1;
+                    // **解码**再判空白（`#1090`）：`"\t"` 的原文里有反斜杠和字母 t，
+                    // 按原文看它"非空"，可解码后整条理由是空白 —— 参考实现拒它。
+                    if ch == 92 && kk + 2 < sl {
+                        let e: u32 = load8(src, tok_start(t, pi + 2) + kk + 1) as u32;
+                        let d: u32 = e;
+                        if e == 110 { d = 10; } else if e == 116 { d = 9; }
+                        else if e == 114 { d = 13; } else if e == 48 { d = 0; }
+                        if d != 32 && d != 9 && d != 10 && d != 13 {
+                            nonblank = 1;
+                        }
+                        kk = kk + 2;
+                    } else {
+                        if ch != 32 && ch != 9 && ch != 10 && ch != 13 {
+                            nonblank = 1;
+                        }
+                        kk = kk + 1;
                     }
-                    kk = kk + 1;
                 }
             }
             if nonblank == 0 {

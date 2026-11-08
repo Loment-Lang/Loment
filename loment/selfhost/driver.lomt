@@ -2280,12 +2280,18 @@ fn _start() -> u32 {
     // `--no-edition-notice`：**工具**（`lomcomefor` 这类把驱动当子进程、把它的输出
     // 整段比对的程序）用它关掉编译期那一行版次提示。人敲命令时照旧打（docs/296 §1.2）。
     let quiet: u32 = 0;
-    let a2: u64 = argv_at(argv_buf as ptr, 65536, scr, 2);
-    if a2 != 0 {
-        let p2: ptr = ptr_add(argv_buf as ptr, (a2 >> 32) as u32);
-        let n2: u32 = (a2 % 4294967296) as u32;
+    // `--lspe-level 0..4`（`#1091`）：上下文敏感度，默认 3（`docs/262` §5.6）。
+    let lvl: u32 = 3;
+    // 参数从 argv[2] 起**逐个**看（`#1091`：`--lspe-level N` 要能和 `--emit-potato`
+    // 同时给）。`argv_at` 越过末尾回 0，所以这就是 argc 的边界。
+    let ai: u32 = 2;
+    let av2: u64 = argv_at(argv_buf as ptr, 65536, scr, ai);
+    while av2 != 0 {
+        let p2: ptr = ptr_add(argv_buf as ptr, (av2 >> 32) as u32);
+        let n2: u32 = (av2 % 4294967296) as u32;
         if streq(p2, n2, "--diag-out") == 1 {
-            let a3: u64 = argv_at(argv_buf as ptr, 65536, scr, 3);
+            ai = ai + 1;
+            let a3: u64 = argv_at(argv_buf as ptr, 65536, scr, ai);
             if a3 != 0 {
                 let p3: ptr = ptr_add(argv_buf as ptr, (a3 >> 32) as u32);
                 let n3: u32 = (a3 % 4294967296) as u32;
@@ -2300,7 +2306,28 @@ fn _start() -> u32 {
             // `--print-command` (docs/223): 这个单元注册了哪条命令 —— 构建前端拿它去命名
             // 产物（`loment-<名字>`）。**不装载**，只词法扫一遍（见 print_command）。
             pmode = 2;
+        } else if streq(p2, n2, "--lspe-level") == 1 {
+            ai = ai + 1;
+            let a3: u64 = argv_at(argv_buf as ptr, 65536, scr, ai);
+            if a3 != 0 {
+                let p3: ptr = ptr_add(argv_buf as ptr, (a3 >> 32) as u32);
+                let n3: u32 = (a3 % 4294967296) as u32;
+                let v: u32 = 0;
+                let z: u32 = 0;
+                while z < n3 {
+                    let c: u32 = load8(p3, z) as u32;
+                    if c >= 48 && c <= 57 {
+                        v = v * 10 + (c - 48);
+                    }
+                    z = z + 1;
+                }
+                if v <= 4 {
+                    lvl = v;
+                }
+            }
         }
+        ai = ai + 1;
+        av2 = argv_at(argv_buf as ptr, 65536, scr, ai);
     }
     // 工具目录: argv[0] 所在目录 (自带 store 相对它)。**先取它** —— 下一次 argv_at 会把
     // 同一块 argv_buf 重写一遍, 而后面 ap 指进 argv_buf, 顺序反了内容会被抹掉。
@@ -2698,7 +2725,7 @@ fn _start() -> u32 {
             wdiag_file(dfd, scr, ap, an, 23, str_ptr(dm), str_len(dm));
             return fail(dm);
         }
-        let pn: u32 = potato_emit(unit, toks2, nt, sw, ir);
+        let pn: u32 = potato_emit(unit, toks2, nt, sw, ir, lvl);
         if pn == 0 {
             return die(1);
         }

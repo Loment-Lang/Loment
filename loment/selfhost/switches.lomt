@@ -434,10 +434,23 @@ pub fn desugar_lspe_pass(unit: ptr, toks: ptr, a: u32, b: u32, out: ptr, o: u32)
                 let k: u32 = 1;
                 while k + 1 < ln {
                     let ch: u32 = load8(unit, st + k) as u32;
-                    if ch != 32 && ch != 9 {
-                        nonblank = 1;
+                    // **解码**再判空白（`#1090`）：`"\t"` 原文里有反斜杠和字母 t，
+                    // 按原文会被当成"有理由"而拆平 —— 头一拆，E038 就再也看不见它。
+                    if ch == 92 && k + 2 < ln {
+                        let e: u32 = load8(unit, st + k + 1) as u32;
+                        let d: u32 = e;
+                        if e == 110 { d = 10; } else if e == 116 { d = 9; }
+                        else if e == 114 { d = 13; } else if e == 48 { d = 0; }
+                        if d != 32 && d != 9 && d != 10 && d != 13 {
+                            nonblank = 1;
+                        }
+                        k = k + 2;
+                    } else {
+                        if ch != 32 && ch != 9 && ch != 10 && ch != 13 {
+                            nonblank = 1;
+                        }
+                        k = k + 1;
                     }
-                    k = k + 1;
                 }
                 if nonblank == 1 {
                     // 括号不配对时不拆：原样留给语法前置趟（拆了会把 `{` 吞掉，

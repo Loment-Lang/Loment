@@ -4780,18 +4780,29 @@ def test_lspe_dimension_defaults_open():
     assert lp["obligations"] == lp["sites"]
     assert lp["sites"] == lp["proved"] + lp["undecided"]
     assert "InBounds" in lp["per_kind"]
-    assert lp["floors"] == 0
-    # `#786` 起 `floor_detail` 多一格 `pass`（`docs/262` §5.16），`passes` 恒为数组。
-    assert lp["floor_detail"] == {"assumed": 0, "stale_wf": 0, "budget": 0,
-                                  "drop_honest": 0, "pass": 0}
+    # LSPE v2（0.1.5.2）：默认档下每条没被 pass 覆盖的 UNDECIDED 都有一条
+    # `Assumed` 地板（`docs/262` §6"允许但标注"），所以 `floors == undecided`。
+    assert lp["floors"] == lp["floor_detail"]["assumed"] == lp["undecided"]
+    # `#786` 起 `floor_detail` 多一格 `pass`；`#750` 再加 `depth`。
+    assert lp["floor_detail"] == {"assumed": lp["undecided"], "stale_wf": 0,
+                                  "budget": 0, "depth": 0, "drop_honest": 0,
+                                  "pass": 0}, lp["floor_detail"]
     assert lp["passes"] == [] and lp["pass_ratio"] == f"0/{lp['sites']}"
-    assert lp["invariants"]["i1"] == "ok"
+    assert lp["invariants"] == {"i1": "ok", "i2": "ok", "i3": "ok",
+                                "i4": "ok", "i5": "ok"}, lp["invariants"]
+    assert lp["interrogations"] == {"provenance": lp["proved"],
+                                    "falsification": lp["sites"],
+                                    "cross_exam": lp["sites"]}
+    assert lp["lspc"] == "full" and lp["acked"] == 0
     assert potato.validate(doc) == []
     # QIR 骨架：每个站点有 Site / Claim / Obligation / Evidence 四格。
     s0 = lomentc.load(DEMO).lspe_sites[0]
     assert s0["claim"] == "allow"
     assert s0["obligation"] in ("GuardHolds", "InBounds")
-    assert s0["evidence"] == (s0["source"] or "none")
+    # 证据可以是 E5 的 `GlobalInvariant`（demo 的两个循环下标），所以不比名字：
+    # 证成的站点必须**有来源** —— 这才是"每个放行都有出处"那一格。
+    assert s0["proved"] and s0["source"], s0
+    assert s0["evidence"] not in (None, "none"), s0
 
 
 @test

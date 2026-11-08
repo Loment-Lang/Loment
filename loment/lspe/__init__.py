@@ -2,30 +2,75 @@
 
 编译器是这里的**客户端**：它把 token 流与站点交给 `lspe`，再把返回的台账写进
 Potato v16。义务、证据、接收关系与求解器都定义在这个包里，不定义在编译器里。
+
+v2（0.1.5.2）把四件都补齐：质疑器（E1–E8）的判决、反问器（Q 码与回答通道）、
+警察 LSPC（预检单与模式）、台账（派生树与证明哈希、五条不变量）。
 """
 
 from __future__ import annotations
 
+from .cache import Cache
 from .census import census, census_e4
-from .ledger import build as build_ledger, lspc_lines
+from .derive import (build_trees, derivation, proof_hash, proof_root, sidecar,
+                     verify, why_lines)
+from .invariants import check as check_invariants
+from .ledger import build as build_ledger, lspc_lines, public
+from .lspc import (LSPC_MODES, default_mode as lspc_default,
+                   parse_acks, previous_items, render_text as lspc_text,
+                   sheet as lspc_sheet)
+from .questions import LspeError, ask, load_answers, parse_answers
 from .registry import (
+    LSPE_CAPACITIES,
     LSPE_EVIDENCE_KINDS,
     LSPE_EVIDENCE_LEVEL,
+    LSPE_FLOOR_KEYS,
+    LSPE_INTERROGATIONS,
+    LSPE_LSPC_FAMILIES,
     LSPE_OBLIGATIONS,
+    LSPE_PROBED_OBLIGATIONS,
+    LSPE_QUESTION_TEMPLATES,
     LSPE_QUESTIONS,
     LSPE_SITE_KINDS,
 )
-from .solver import LspeSolver
+from .solver import LSPE_DEFAULT_BUDGET, LSPE_DEFAULT_DEPTH, LspeSolver
 
 __all__ = [
+    "Cache",
+    "LSPC_MODES",
+    "LSPE_DEFAULT_BUDGET",
+    "LSPE_DEFAULT_DEPTH",
+    "LSPE_CAPACITIES",
     "LSPE_EVIDENCE_KINDS",
     "LSPE_EVIDENCE_LEVEL",
+    "LSPE_FLOOR_KEYS",
+    "LSPE_INTERROGATIONS",
+    "LSPE_LSPC_FAMILIES",
     "LSPE_OBLIGATIONS",
+    "LSPE_PROBED_OBLIGATIONS",
+    "LSPE_QUESTION_TEMPLATES",
     "LSPE_QUESTIONS",
     "LSPE_SITE_KINDS",
+    "LspeError",
     "LspeSolver",
+    "ask",
     "build_ledger",
+    "build_trees",
     "census",
     "census_e4",
+    "check_invariants",
+    "derivation",
+    "load_answers",
+    "lspc_default",
     "lspc_lines",
+    "lspc_sheet",
+    "lspc_text",
+    "parse_acks",
+    "parse_answers",
+    "previous_items",
+    "proof_hash",
+    "proof_root",
+    "public",
+    "sidecar",
+    "verify",
+    "why_lines",
 ]

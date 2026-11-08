@@ -228,13 +228,20 @@ LSPE_INVARIANTS = ("i1", "i2", "i3", "i4", "i5")
 LSPE_COUNTS = ("sites", "obligations", "proved", "undecided",
                "deferred", "refused", "floors", "acked",
                "pass_sites", "passed_sites")
-LSPE_FLOOR_KEYS = ("assumed", "stale_wf", "budget", "drop_honest", "pass")
+#: 地板明细（`docs/262` §8.1）。`depth` 是 `#750` 加的第二条预算轴（步数之外）。
+#: **旧产物可以缺 `depth`**（回放承诺）：缺项按 0 算，identity 仍然成立。
+LSPE_FLOOR_KEYS = ("assumed", "stale_wf", "budget", "depth", "drop_honest", "pass")
 #: `lspe` 是一个**封闭**对象：未知键必须报，不能静默扩展（与 `gc_ladder` 同一条纪律）。
+#: `interrogations` / `lspc` / `proof_root` 是 v2（0.1.5.2）的可选字段：
+#: 新发射器都写，旧产物缺了也照样合法（回放）。
 LSPE_KEYS = frozenset({
     "state", "set_by", "mode", "level", "sites", "obligations", "proved",
     "undecided", "deferred", "refused", "floors", "floor_detail", "per_kind",
     "invariants", "acked", "passes", "pass_sites", "passed_sites", "pass_ratio",
+    "interrogations", "lspc", "proof_root",
 })
+#: LSPC 的四个模式（`docs/262` §7.6）。`off` 是**构建旋钮**，不是第八维。
+LSPC_MODES = ("full", "quiet", "strict", "off")
 #: **系统索引的六个系统**（v20，`docs/147` §5 / #1022）。次序 = 顶层字段的次序，
 #: 两份发射器逐字节比，所以它**写死**。`boundary` / `surfaces` **不是系统**：它们是
 #: 跨系统的计数面，不是"这份产物有哪一个系统"。
@@ -758,14 +765,16 @@ def validate(doc: object) -> list[str]:
                 for k in sorted(set(fd) - set(LSPE_FLOOR_KEYS)):
                     errs.append(f"{ver}: lspe.floor_detail 里有不认识的键 {k!r}")
                 for k in LSPE_FLOOR_KEYS:
+                    if k == "depth" and k not in fd:
+                        continue          # 旧产物可以缺 `depth`（回放承诺）
                     v = fd.get(k)
                     if not isinstance(v, int) or isinstance(v, bool) or v < 0:
                         errs.append(f"{ver}: lspe.floor_detail.{k} 必须是非负整数，得到 {v!r}")
                 fl = lp.get("floors")
-                if (all(isinstance(fd.get(k), int) and not isinstance(fd.get(k), bool)
-                        and fd.get(k) >= 0 for k in LSPE_FLOOR_KEYS)
+                if (all(isinstance(fd.get(k, 0), int) and not isinstance(fd.get(k, 0), bool)
+                        and fd.get(k, 0) >= 0 for k in LSPE_FLOOR_KEYS)
                         and isinstance(fl, int) and not isinstance(fl, bool) and fl >= 0):
-                    want = sum(fd[k] for k in LSPE_FLOOR_KEYS)
+                    want = sum(fd.get(k, 0) for k in LSPE_FLOOR_KEYS)
                     if fl != want:
                         errs.append(f"{ver}: lspe.floors 是 {fl!r}，"
                                     f"但地板明细之和是 {want}（floors 必须等于明细之和）")
@@ -804,6 +813,91 @@ def validate(doc: object) -> list[str]:
                         v = e.get(k)
                         if not isinstance(v, int) or isinstance(v, bool) or v < 0:
                             errs.append(f"{ver}: lspe.passes[{i}].{k} 必须是非负整数，得到 {v!r}")
+            # ---- v2（0.1.5.2）的可选字段 ----
+            it = lp.get("interrogations")
+            if it is not None:
+                if not isinstance(it, dict):
+                    errs.append(f"{ver}: lspe.interrogations 必须是对象，得到 {it!r}")
+                else:
+                    for k in sorted(set(it) - {"provenance", "falsification",
+                                               "cross_exam"}):
+                        errs.append(f"{ver}: lspe.interrogations 里有不认识的键 {k!r}")
+                    for k in ("provenance", "falsification", "cross_exam"):
+                        v = it.get(k)
+                        if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+                            errs.append(f"{ver}: lspe.interrogations.{k} "
+                                        f"必须是非负整数，得到 {v!r}")
+            lc = lp.get("lspc")
+            if lc is not None and lc not in LSPC_MODES:
+                errs.append(f"{ver}: lspe.lspc 必须是 {LSPC_MODES} 之一，得到 {lc!r}")
+            prf = lp.get("proof_root")
+            if prf is not None and (not isinstance(prf, str)
+                                    or not re.fullmatch(r"[0-9a-f]{8}", prf)):
+                errs.append(f"{ver}: lspe.proof_root 必须是 8 位十六进制串，得到 {prf!r}")
+            # ---- 台账自洽（`#1084`）：计数、`per_kind`、不变量、pass_ratio ----
+            # 这些全是**产物自己说的数**，校验器不需要重编译就能判它们打架。
+            def _ints(*names):
+                out = []
+                for n in names:
+                    v = lp.get(n)
+                    if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+                        return None
+                    out.append(v)
+                return out
+            four = _ints("sites", "obligations", "proved", "undecided")
+            if four is not None:
+                sites_n, ob_n, proved_n, und_n = four
+                if proved_n + und_n != sites_n:
+                    errs.append(f"{ver}: lspe.proved + undecided = {proved_n + und_n}，"
+                                f"但 sites = {sites_n}（必须相等）")
+                if ob_n != sites_n:
+                    errs.append(f"{ver}: lspe.obligations = {ob_n}，但 sites = {sites_n}")
+                two = _ints("passed_sites", "pass_sites")
+                if two is not None:
+                    passed_n, _blocks = two
+                    if passed_n > sites_n:
+                        errs.append(f"{ver}: lspe.passed_sites = {passed_n} > sites = {sites_n}")
+                if isinstance(pr, str) and re.fullmatch(r"[0-9]+/[0-9]+", pr):
+                    a_s, b_s = pr.split("/")
+                    a_i, b_i = int(a_s), int(b_s)
+                    if b_i != sites_n:
+                        errs.append(f"{ver}: lspe.pass_ratio 的分母是 {b_i}，"
+                                    f"但 sites = {sites_n}")
+                    if two is not None and a_i != two[0]:
+                        errs.append(f"{ver}: lspe.pass_ratio 的分子是 {a_i}，"
+                                    f"但 passed_sites = {two[0]}")
+                if isinstance(fd, dict) and isinstance(lp.get("pass_sites"), int) \
+                        and fd.get("pass", 0) != lp.get("pass_sites"):
+                    errs.append(f"{ver}: lspe.floor_detail.pass = {fd.get('pass')}，"
+                                f"但 pass_sites = {lp.get('pass_sites')}")
+                pkk = lp.get("per_kind")
+                if isinstance(pkk, dict):
+                    tp = ts = 0
+                    bad = False
+                    for k, v in pkk.items():
+                        if not isinstance(v, str) or not re.fullmatch(r"[0-9]+/[0-9]+", v):
+                            errs.append(f"{ver}: lspe.per_kind.{k} 必须是 \"p/t\"，得到 {v!r}")
+                            bad = True
+                            continue
+                        p_s, t_s = v.split("/")
+                        tp += int(p_s)
+                        ts += int(t_s)
+                    if not bad:
+                        if ts != sites_n:
+                            errs.append(f"{ver}: lspe.per_kind 的分母和是 {ts}，"
+                                        f"但 sites = {sites_n}")
+                        if tp != proved_n:
+                            errs.append(f"{ver}: lspe.per_kind 的分子和是 {tp}，"
+                                        f"但 proved = {proved_n}")
+                invv = lp.get("invariants")
+                if isinstance(invv, dict):
+                    for k, v in invv.items():
+                        if v not in ("ok", "fail", "not_run"):
+                            errs.append(f"{ver}: lspe.invariants.{k} 必须是 "
+                                        f"ok/fail/not_run，得到 {v!r}")
+                if lp.get("state") == "lspe_close_admin" and four is not None:
+                    if any(four) or lp.get("floors"):
+                        errs.append(f"{ver}: lspe_close_admin 下计数必须全零")
 
     if ver in ("v20", "v21"):
         # **系统索引**（`docs/147` §5 / #1022）。它是**一个开始读的地方**：

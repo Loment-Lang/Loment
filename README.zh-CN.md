@@ -68,8 +68,9 @@ hello from Loment
 
 ## 获取帮助
 
-在 [issue](https://github.com/Loment-Lang/loment/issues)、[Discord](https://discord.gg/rGw7NRNU)
-或 [Mastodon](https://mastodon.social/@Loment) 上提问。问问题和报 bug 一样受欢迎。
+在 [issue](https://github.com/Loment-Lang/loment/issues)、[Discord](https://discord.gg/rGw7NRNU)、
+[Mastodon](https://mastodon.social/@Loment) 或 [Bluesky](https://bsky.app/profile/loment.bsky.social)
+上提问。问问题和报 bug 一样受欢迎。
 
 ## 参与贡献
 

@@ -2035,7 +2035,13 @@ PE_LIT_VA = PE_IMAGE_BASE + PE_IDATA_RVA + PE_LIT_OFF
 PE_CMDLINE = b"/proc/self/cmdline\x00"
 PE_IMPORTS = ["ExitProcess", "GetStdHandle", "ReadFile", "WriteFile", "CloseHandle",
               "CreateFileA", "GetFileAttributesA", "VirtualAlloc", "GetCommandLineA",
-              "FindFirstFileA", "FindNextFileA", "Sleep"]
+              "FindFirstFileA", "FindNextFileA", "Sleep",
+              # 系统与进程信息（`docs/303` §2.3/§2.6）：全部平 C API、无回调。
+              "GlobalMemoryStatusEx", "OpenProcess", "CreateToolhelp32Snapshot",
+              "Process32First", "Process32Next", "Thread32First", "Thread32Next",
+              "OpenThread", "GetProcessIoCounters", "GetProcessHandleCount",
+              "GetSystemTimes", "GetTickCount64", "QueryPerformanceCounter",
+              "GetSystemTimeAsFileTime"]
 # 第二个导入 DLL：联网。名字与上一组无一重名，所以 `slots` 仍是一张按函数名索引的平表。
 PE_IMPORTS_WS2 = ["WSAStartup", "socket", "connect", "bind", "listen", "accept",
                   "send", "recv", "sendto", "recvfrom", "closesocket", "shutdown",
@@ -2046,9 +2052,35 @@ PE_IMPORTS_WS2 = ["WSAStartup", "socket", "connect", "bind", "listen", "accept",
 # 只用 A 版：本语言的字符串是字节，没有 UTF-16。
 PE_IMPORTS_PDH = ["PdhOpenQueryA", "PdhAddEnglishCounterA", "PdhCollectQueryData",
                   "PdhGetFormattedCounterValue", "PdhCloseQuery"]
+# 第四个导入 DLL：进程与系统信息（psapi）。
+PE_IMPORTS_PSAPI = ["EnumProcesses", "GetProcessMemoryInfo", "GetPerformanceInfo"]
 # 描述符表 = 每个 DLL 一条 + 一条全零终止项（少了终止项加载器会把 ILT 当第二条描述符）。
 PE_DLLS = [("kernel32.dll", PE_IMPORTS), ("ws2_32.dll", PE_IMPORTS_WS2),
-           ("pdh.dll", PE_IMPORTS_PDH)]
+           ("pdh.dll", PE_IMPORTS_PDH), ("psapi.dll", PE_IMPORTS_PSAPI)]
+
+#: 通用 Win32 调用器（号 4097）的函数表。号 → 导入名；顺序就是 `__ws_win32` 里那条
+#: 比较链的顺序。一条 (号, 名字) 只花 ~15 字节机器码：共享的四参数装载在前，各分支只
+#: 剩 `mov rax,[iat]; call rax`。**加一个函数 = 一行导入 + 这里一行**。
+WIN32_CALLS = (
+    (1, "GlobalMemoryStatusEx"),
+    (2, "GetPerformanceInfo"),
+    (3, "EnumProcesses"),
+    (4, "OpenProcess"),
+    (5, "GetProcessMemoryInfo"),
+    (6, "CloseHandle"),
+    (7, "CreateToolhelp32Snapshot"),
+    (8, "Process32First"),
+    (9, "Process32Next"),
+    (10, "GetProcessIoCounters"),
+    (11, "GetProcessHandleCount"),
+    (12, "GetSystemTimes"),
+    (13, "OpenThread"),
+    (14, "Thread32First"),
+    (15, "Thread32Next"),
+    (16, "GetTickCount64"),
+    (17, "QueryPerformanceCounter"),
+    (18, "GetSystemTimeAsFileTime"),
+)
 PE_IMPORT_DESC_BYTES = 20 * (len(PE_DLLS) + 1)
 PE_STD_INPUT, PE_STD_OUTPUT, PE_STD_ERROR = -10, -11, -12
 SYS_READ, SYS_WRITE, SYS_CLOSE, SYS_BRK, SYS_EXIT = 0, 1, 3, 12, 60
@@ -2064,6 +2096,9 @@ SYS_EPOLL_WAIT, SYS_EPOLL_CTL, SYS_EPOLL_CREATE1 = 232, 233, 291
 #: 参数按 Linux 习惯：rdi = 路径指针，rsi = 路径长度，rdx = 收 f64 的 8 字节缓冲。
 #: 返回 0 成功；-5（EIO）失败 —— 没开成功、加计数器失败、取值失败都算。
 SYS_LMGR_PDH = 4096
+#: 通用 Win32 调用器：rdi = 函数号（`WIN32_CALLS`），rsi = 四个 u64 实参的缓冲。
+#: 返回值就是那个 API 的原始返回值（BOOL / HANDLE / ULONGLONG）。
+SYS_WIN32 = 4097
 #: epoll 的事件位与 `epoll_create1` 的旗标（Linux 值）
 LINUX_EPOLL_IN, LINUX_EPOLL_PRI, LINUX_EPOLL_OUT = 0x001, 0x002, 0x004
 LINUX_EPOLL_ERR, LINUX_EPOLL_HUP, LINUX_EPOLL_RDHUP = 0x008, 0x010, 0x2000
@@ -2122,6 +2157,7 @@ PE_SYSCALLS = (
     (SYS_EPOLL_CREATE1, "net", "__ws_epoll_create1"),
     # 面归 `proc`：面是**粗分桶**，新开一面会改 Potato 的 `surfaces` 键与全部孪生夹具。
     (SYS_LMGR_PDH, "proc", "__ws_pdh"),
+    (SYS_WIN32, "proc", "__ws_win32"),
 )
 #: 从表派生 —— 别手写第二份（那样两处会漂，而这是个只需要一处的信息）。
 PE_DISPATCH = [num for num, _surface, _label in PE_SYSCALLS]
@@ -3034,6 +3070,25 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
     a.label("__ws_pdh_fail")
     a.emit(mov_ri_se(RAX, -5))                  # -EIO（连查询都开不了）
     jmp_l("__ws_ret")
+
+    # ---- generic Win32 call(fn_id, args) --------------------------------
+    # 四个实参照 Linux 习惯装在 rdi/rsi/rdx/r10，但这里只用 rdi（号）与 rsi（数组）。
+    # 装载四个参数到 Windows 的 rcx/rdx/r8/r9，然后按号跳到对应导入槽。
+    # 参数少于四个的函数忽略多装的那几个；**五参数函数这个调用器不接**（第五个要上栈）。
+    a.label("__ws_win32")
+    ld(RCX, RSI, 0)
+    ld(RDX, RSI, 8)
+    ld(R8, RSI, 16)
+    ld(R9, RSI, 24)
+    for _id, _name in WIN32_CALLS:
+        cmp_edi(_id)
+        jcc_l("e", f"__ws_w{_id}")
+    a.emit(mov_ri_se(RAX, -38))                 # 表外的号 -> -ENOSYS
+    jmp_l("__ws_ret")
+    for _id, _name in WIN32_CALLS:
+        a.label(f"__ws_w{_id}")
+        api(_name)
+        jmp_l("__ws_ret")
 
     # ---- getdents64(fd, buf, n) -----------------------------------------
     # 一次发一条 linux_dirent64（消费方本来就是 while 循环读到 0 为止）。

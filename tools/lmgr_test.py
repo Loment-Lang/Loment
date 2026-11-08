@@ -54,7 +54,7 @@ def test_registry_has_38_slots():
         if done == "1":
             implemented.append(name)
     # 只有真能出数的槽位才许写 1；能力齐了但没实现也是 0。
-    assert implemented == ["cpu.load"], implemented
+    assert implemented == ["cpu.load", "mem.phys", "mem.proc"], implemented
 
 
 @test
@@ -119,6 +119,26 @@ def test_cpu_load_reports_a_percentage_or_refuses():
     assert doc["manager"] == "cpu.load"
     v = doc["rows"][0]["fields"]["busy_pct"]
     assert 0 <= v <= 100, v
+
+
+@test
+def test_mem_slots_report_or_refuse():
+    with tempfile.TemporaryDirectory(prefix="lmgr-test-") as d:
+        exe = _build(Path(d))
+        for slot, cap in (("phys", "win.mem"), ("proc", "win.proc")):
+            out = subprocess.run([str(exe), "mem", slot, "--json"],
+                                 capture_output=True, text=True, encoding="utf-8")
+            if out.returncode == 2:
+                assert cap in out.stdout, out.stdout
+                continue
+            assert out.returncode == 0, out.stderr
+            doc = json.loads(out.stdout)
+            assert doc["manager"] == f"mem.{slot}"
+            assert doc["rows"], doc
+            if slot == "phys":
+                fields = doc["rows"][0]["fields"]
+                assert fields["total_mib"] > 0
+                assert 0 <= fields["load_pct"] <= 100
 
 
 @test

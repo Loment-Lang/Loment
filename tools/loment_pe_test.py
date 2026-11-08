@@ -1900,8 +1900,11 @@ def test_pe_imports_every_dll_with_the_socket_surface():
         assert nm in slots, f"ws2_32 少了 `{nm}`"
     for nm in lomelf.PE_IMPORTS_PDH:
         assert nm in slots, f"pdh 少了 `{nm}`"
+    for nm in lomelf.PE_IMPORTS_PSAPI:
+        assert nm in slots, f"psapi 少了 `{nm}`"
     assert len(slots) == (len(lomelf.PE_IMPORTS) + len(lomelf.PE_IMPORTS_WS2)
-                          + len(lomelf.PE_IMPORTS_PDH)), \
+                          + len(lomelf.PE_IMPORTS_PDH)
+                          + len(lomelf.PE_IMPORTS_PSAPI)), \
         "函数名有重名（`slots` 是按名字索引的平表，重名会静默覆盖）"
     # Import Directory 的 size 必须跟着描述符条数走（原先写死 40 = 一条 + 终止项）
     assert lomelf.PE_IMPORT_DESC_BYTES == 20 * (len(lomelf.PE_DLLS) + 1)

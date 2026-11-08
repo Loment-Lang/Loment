@@ -139,6 +139,8 @@ fn probes() -> u32 {
     caps[2] = probe_net_tcp();
     caps[3] = probe_time_mono();
     caps[5] = probe_pdh();
+    caps[6] = probe_proc();
+    caps[7] = probe_mem();
     let ok: u32 = 0;
     let i: u32 = 0;
     while i < CAP_N {
@@ -153,7 +155,7 @@ fn probes() -> u32 {
 
 // 每条记录三个字段：name,requires,implemented; —— implemented=0 时能力再全也报 unavailable。
 fn registry() -> str {
-    return "cpu.freq,32,0;cpu.load,32,1;cpu.sched,48,0;gpu.util,1056,0;gpu.mem,1056,0;gpu.clock,1024,0;gpu.therm,1024,0;gpu.proc,1056,0;mem.phys,128,0;mem.proc,192,0;mem.page,128,0;mem.leak,192,0;storage.space,256,0;storage.io,288,0;storage.proc,320,0;storage.cache,288,0;storage.smart,8192,0;storage.watch,8192,0;net.link,512,0;net.sock,512,0;net.bw,544,0;net.lat,4,0;proc.tree,64,0;proc.fd,64,0;proc.thread,131136,0;proc.sys,262208,0;power.batt,2048,0;power.rapl,2080,0;power.therm,2080,0;power.budget,2080,0;build.cache,32769,0;build.time,65537,0;build.dep,1,0;build.artifact,3,0;env.tool,4097,0;env.port,512,0;env.svc,4,0;env.watch,8193,0;";
+    return "cpu.freq,32,0;cpu.load,32,1;cpu.sched,48,0;gpu.util,1056,0;gpu.mem,1056,0;gpu.clock,1024,0;gpu.therm,1024,0;gpu.proc,1056,0;mem.phys,128,1;mem.proc,192,1;mem.page,128,0;mem.leak,192,0;storage.space,256,0;storage.io,288,0;storage.proc,320,0;storage.cache,288,0;storage.smart,8192,0;storage.watch,8192,0;net.link,512,0;net.sock,512,0;net.bw,544,0;net.lat,4,0;proc.tree,64,0;proc.fd,64,0;proc.thread,131136,0;proc.sys,262208,0;power.batt,2048,0;power.rapl,2080,0;power.therm,2080,0;power.budget,2080,0;build.cache,32769,0;build.time,65537,0;build.dep,1,0;build.artifact,3,0;env.tool,4097,0;env.port,512,0;env.svc,4,0;env.watch,8193,0;";
 }
 
 fn caps_blob() -> str {
@@ -339,6 +341,230 @@ fn cmd_doctor(json: u32, ok: u32) {
     }
 }
 
+// ---------------------------------------------------------------- 通用 Win32 调用
+// 号 4097：rdi = 函数号，rsi = 四个 u64 实参的缓冲。参数数组必须**独立于**结构体
+// 输出缓冲 —— 混用会把结构体第一个字段当成指针传进去（实测直接段错误）。
+const SYS_WIN32: u64 = 4097;
+
+fn wr32(p: ptr, off: u32, v: u32) {
+    store8(p, off, (v & 255 as u32) as u8);
+    store8(p, off + 1, ((v >> 8) & 255 as u32) as u8);
+    store8(p, off + 2, ((v >> 16) & 255 as u32) as u8);
+    store8(p, off + 3, ((v >> 24) & 255 as u32) as u8);
+}
+
+fn wr64(p: ptr, off: u32, v: u64) {
+    let i: u32 = 0;
+    while i < 8 {
+        let sh: u64 = (i * 8) as u64;
+        store8(p, off + i, ((v >> sh) & 255 as u64) as u8);
+        i = i + 1;
+    }
+}
+
+fn rd32(p: ptr, off: u32) -> u32 {
+    let v: u32 = load8(p, off) as u32;
+    v = v + (load8(p, off + 1) as u32) * 256;
+    v = v + (load8(p, off + 2) as u32) * 65536;
+    v = v + (load8(p, off + 3) as u32) * 16777216;
+    return v;
+}
+
+fn zero_bytes(p: ptr, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        store8(p, i, 0 as u8);
+        i = i + 1;
+    }
+}
+
+fn probe_mem() -> u32 {
+    let mem: ptr = alloc(64);
+    zero_bytes(mem, 64);
+    wr32(mem, 0, 64);
+    let args: ptr = alloc(32);
+    zero_bytes(args, 32);
+    wr64(args, 0, mem as u64);
+    let r: i64 = syscall4(SYS_WIN32, 1, args as u64, 0);
+    if r != 0 {
+        return CAP_MEM;
+    }
+    return 0;
+}
+
+fn win32_into(args: ptr, id: u64, a0: u64, a1: u64, a2: u64) -> i64 {
+    wr64(args, 0, a0);
+    wr64(args, 8, a1);
+    wr64(args, 16, a2);
+    return syscall4(SYS_WIN32, id, args as u64, 0);
+}
+
+fn probe_proc() -> u32 {
+    let pids: ptr = alloc(256);
+    let needed: ptr = alloc(4);
+    let args: ptr = alloc(32);
+    zero_bytes(needed, 4);
+    let r: i64 = win32_into(args, 3, pids as u64, 256, needed as u64);
+    if r != 0 {
+        if rd32(needed, 0) > 0 {
+            return CAP_PROC;
+        }
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 槽位：mem.proc
+fn mib_of(p: ptr, off: u32) -> u32 {
+    return (rd32(p, off + 4) << 12) | (rd32(p, off) >> 20);
+}
+
+fn cmd_mem_proc(json: u32, ok: u32) {
+    if (CAP_PROC & ok) != CAP_PROC {
+        print("lmgr: mem.proc needs win.proc, which this platform does not provide\n");
+        syscall4(60, 2, 0, 0);
+        return;
+    }
+    let pids: ptr = alloc(1024);
+    let needed: ptr = alloc(4);
+    let args: ptr = alloc(32);
+    let pmc: ptr = alloc(80);
+    zero_bytes(needed, 4);
+    let r: i64 = win32_into(args, 3, pids as u64, 1024, needed as u64);
+    if r == 0 {
+        print("lmgr: mem.proc enumeration failed\n");
+        syscall4(60, 2, 0, 0);
+        return;
+    }
+    let n: u32 = rd32(needed, 0) / 4;
+    if n > 256 {
+        n = 256;
+    }
+    // 两列先摊平成数组，再按工作集选前 15 名打印。
+    let ws: ptr = alloc(1024);
+    let pv: ptr = alloc(1024);
+    let cnt: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let pid: u32 = rd32(pids, i * 4);
+        if pid != 0 {
+            let h: i64 = win32_into(args, 4, 4096, 0, pid as u64);
+            if h != 0 {
+                zero_bytes(pmc, 80);
+                wr32(pmc, 0, 80);
+                let g: i64 = win32_into(args, 5, h as u64, pmc as u64, 80);
+                win32_into(args, 6, h as u64, 0, 0);
+                if g != 0 {
+                    wr32(pids, cnt * 4, pid);
+                    wr32(ws, cnt * 4, mib_of(pmc, 16));
+                    wr32(pv, cnt * 4, mib_of(pmc, 72));
+                    cnt = cnt + 1;
+                }
+            }
+        }
+        i = i + 1;
+    }
+
+    let limit: u32 = cnt;
+    if limit > 15 {
+        limit = 15;
+    }
+    if json == 1 {
+        print("{\"schema\":\"lmgr/v1\",\"manager\":\"mem.proc\",\"rows\":[");
+    } else {
+        print("KEY          WORKING_MIB  PRIVATE_MIB\n");
+    }
+    let k: u32 = 0;
+    while k < limit {
+        // 选当前最大的那一行（打印过就把它清零）。
+        let best: u32 = 0;
+        let best_i: u32 = 0;
+        let j: u32 = 0;
+        while j < cnt {
+            let v: u32 = rd32(ws, j * 4);
+            if v > best {
+                best = v;
+                best_i = j;
+            }
+            j = j + 1;
+        }
+        let pid: u32 = rd32(pids, best_i * 4);
+        let pvx: u32 = rd32(pv, best_i * 4);
+        if best == 0 {
+            k = limit;                    // 剩下的都是 0，不再打印
+        } else {
+        if json == 1 {
+            if k > 0 {
+                print(",");
+            }
+            print("{\"key\":\"pid:");
+            print_num(pid);
+            print("\",\"fields\":{\"working_mib\":");
+            print_num(best);
+            print(",\"private_mib\":");
+            print_num(pvx);
+            print("}}");
+        } else {
+            print("pid:");
+            print_num(pid);
+            pad_to(12, 18);
+            print_num(best);
+            print("          ");
+            print_num(pvx);
+            print("\n");
+        }
+        wr32(ws, best_i * 4, 0);
+        k = k + 1;
+        }
+    }
+    if json == 1 {
+        print("],\"meta\":{\"processes\":");
+        print_num(cnt);
+        print("},\"degraded\":false,\"missing\":[]}\n");
+    }
+}
+
+// ---------------------------------------------------------------- 槽位：mem.phys
+fn cmd_mem_phys(json: u32, ok: u32) {
+    if (CAP_MEM & ok) != CAP_MEM {
+        print("lmgr: mem.phys needs win.mem, which this platform does not provide\n");
+        syscall4(60, 2, 0, 0);
+        return;
+    }
+    let mem: ptr = alloc(64);
+    zero_bytes(mem, 64);
+    wr32(mem, 0, 64);
+    let args: ptr = alloc(32);
+    zero_bytes(args, 32);
+    wr64(args, 0, mem as u64);
+    let r: i64 = syscall4(SYS_WIN32, 1, args as u64, 0);
+    if r == 0 {
+        print("lmgr: mem.phys probe failed\n");
+        syscall4(60, 2, 0, 0);
+        return;
+    }
+    let load: u32 = rd32(mem, 4);
+    let total_mib: u32 = (rd32(mem, 12) << 12) | (rd32(mem, 8) >> 20);
+    let avail_mib: u32 = (rd32(mem, 20) << 12) | (rd32(mem, 16) >> 20);
+    if json == 1 {
+        print("{\"schema\":\"lmgr/v1\",\"manager\":\"mem.phys\",\"rows\":[{\"key\":\"mem\",\"fields\":{\"total_mib\":");
+        print_num(total_mib);
+        print(",\"avail_mib\":");
+        print_num(avail_mib);
+        print(",\"load_pct\":");
+        print_num(load);
+        print("}}],\"degraded\":false,\"missing\":[]}\n");
+    } else {
+        print("KEY    TOTAL_MIB  AVAIL_MIB  LOAD_PCT\n");
+        print("mem    ");
+        print_num(total_mib);
+        print("       ");
+        print_num(avail_mib);
+        print("      ");
+        print_num(load);
+        print("\n");
+    }
+}
+
 // ---------------------------------------------------------------- 槽位：cpu.load
 fn read_u32_le(p: ptr) -> u32 {
     let v: u32 = load8(p, 0) as u32;
@@ -384,6 +610,8 @@ fn usage() {
     print("  lmgr list [--json]      the 38-slot registry and per-slot state\n");
     print("  lmgr doctor [--json]    one row per capability, with the probe result\n");
     print("  lmgr cpu load [--json]  overall CPU busy percentage (PDH)\n");
+    print("  lmgr mem phys [--json]  physical memory: total, available, load\n");
+    print("  lmgr mem proc [--json]  top processes by working set\n");
     print("\n");
 }
 
@@ -428,6 +656,21 @@ fn main() {
             }
         }
         print("lmgr: cpu needs a slot (e.g. `lmgr cpu load`)\n");
+        syscall4(60, 64, 0, 0);
+        return;
+    }
+    if argv_eq(buf, a1, "mem") {
+        if a2 != 0 {
+            if argv_eq(buf, a2, "phys") {
+                cmd_mem_phys(json, ok);
+                return;
+            }
+            if argv_eq(buf, a2, "proc") {
+                cmd_mem_proc(json, ok);
+                return;
+            }
+        }
+        print("lmgr: mem needs a slot (e.g. `lmgr mem phys`)\n");
         syscall4(60, 64, 0, 0);
         return;
     }

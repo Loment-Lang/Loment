@@ -10096,6 +10096,39 @@ def _collect_locals(f: Func, enums: dict | None = None,
     return out
 
 
+def _alloc_site_map(body: list) -> dict[int, int]:
+    """本函数体里**分配站点** → 序号（**源码序**），入口块按它开 spill 槽（`#1465`）。
+
+    站点 = `alloc(…)` / `str_concat(…)` 的 `Call` —— 与 `alloc_ir` 的两个调用点一一
+    对应。自举侧的 `alloc_sites`（token 扫）数的是同一批：方法调用走 `MethodCall`，
+    不是 `Call`，所以 `p.alloc(x)` 两边都不算。
+
+    **按源码序而不是发射序**：`defer` 会把同一个调用在每条退出路径上各发一次，按发射序
+    编号会越界；按源码序则同一站点复用同一格 —— 两次发射的值本来也不会同时活着。
+
+    为什么要它：根表登记的是**具名槽**的地址，表达式里的 SSA 临时值从来不是根 ——
+    `f(tag(alloc(sz)), alloc(sz))` 的第一块活不过第二次分配里的那次收集。给每个站点
+    一个槽、分配完立刻存进去，收集器就看得见它。
+    """
+    import dataclasses as _dc
+    m: dict[int, int] = {}
+
+    def reap(v) -> None:
+        if isinstance(v, Call) and v.name in ("alloc", "str_concat"):
+            m[id(v)] = len(m)
+        if _dc.is_dataclass(v) and not isinstance(v, type):
+            for fd in _dc.fields(v):
+                if fd.name in ("line", "col", "off", "len"):
+                    continue
+                reap(getattr(v, fd.name))
+        elif isinstance(v, (list, tuple)):
+            for y in v:
+                reap(y)
+
+    reap(body)
+    return m
+
+
 def _count_lgc_windows(body: list) -> int:
     """这个函数里有多少个 `lgc start { … }` 窗口（`begin` 节点数）。入口块按它开槽。"""
     n = 0
@@ -10184,6 +10217,16 @@ class _Ir:
         #: 分配钩子都按 `gc_hook` 走 —— `gc_manual` 因此也能开窗收集（默认关）。
         self.gc_ctl = gc_ctl
         self.gc_hook = self.gc_any or gc_ctl
+        #: **分配站点的 spill 槽**（`#1465`）：根表只登记具名槽，表达式里的 SSA 临时值
+        #: 不是根 —— `f(tag(alloc(sz)), alloc(sz))` 的第一块活不过第二次分配里的收集。
+        #: 每个站点一个 `ptr` 槽，分配完立刻存进去；槽本身按**具名槽**登记。
+        #: 编号按**源码序**（`defer` 会把同一次调用发多次，发射序会越界；自举侧按 token
+        #: 位置数，两边得到同一个序号）。
+        self.gc_site_map = _alloc_site_map(f.body) if self.gc_hook else {}
+        self.gc_sites = len(self.gc_site_map)
+        #: 本语句已经写过的最大的槽号 + 1（0 = 本语句没分配过）。语句边界清零，
+        #: 见 `stmt()` 顶上那次 `_gc_flush` —— 槽只活一条语句，不活到帧尾。
+        self.gc_dirty = 0
         #: 当前打开的窗口（`begin` 的编号栈）。`return` 提前离开时按它逆序恢复。
         self.lgc_open: list[int] = []
         self.lgc_next = 0
@@ -10235,6 +10278,23 @@ class _Ir:
             for i in range(_count_lgc_windows(f.body)):
                 self.w(f"%lgc.on.{i} = alloca i32")
                 self.w(f"%lgc.dl.{i} = alloca i64")
+        for i in range(self.gc_sites):
+            # **分配站点的 spill 槽**（`#1465`）：入口清零，之后每次分配把结果写回来。
+            # 清零是必需的 —— 根扫会把槽里的字当候选指针读，栈上的旧值不是指针也得像
+            # 一个"不像"的值（0 让那次比较直接落空）。
+            self.w(f"%gc.sp.{i} = alloca ptr")
+            self.w(f"store ptr null, ptr %gc.sp.{i}")
+
+    def _gc_flush(self) -> None:
+        """语句边界：把本语句用过的 spill 槽写回 `null`（`#1465`）。
+
+        只清 `0 .. gc_dirty-1`：那之外的槽本语句没碰过，内容在上一条语句结束时已经清过。
+        """
+        if not self.gc_sites or self.gc_dirty <= 0:
+            return
+        for k in range(self.gc_dirty):
+            self.w(f"store ptr null, ptr %gc.sp.{k}")
+        self.gc_dirty = 0
 
     def dbg_for(self, line: int) -> int | None:
         """M59: 行号 -> DILocation id (每函数一份, 由 emit_llvm 分配)。"""
@@ -10400,7 +10460,8 @@ class _Ir:
         #: L0.5 的栈区也要扫：它和 L0 的缓冲一样**可以装堆指针**（`wr64` 那种安全被调）。
         #: 整块按字登记，口径与 L0 那条一致。
         self.rootk = (sum(slots(nm) for nm, (ty, _) in self.vars.items() if self._root_ty(ty))
-                      + (self.l05_cap // 8 if self.l05_cap else 0))
+                      + (self.l05_cap // 8 if self.l05_cap else 0)
+                      + self.gc_sites)
         if self.rootk == 0:
             return
         # `#778`：根表的游标与槽是**线程间共享**的。push/pop 各自是一段很短的
@@ -10462,6 +10523,18 @@ class _Ir:
                 self.w(f"{v} = ptrtoint ptr {bp} to i64")
                 self.w(f"store i64 {v}, ptr {gp}")
                 i += 1
+        # **分配站点的 spill 槽**（`#1465`）：一格一个槽的地址，与具名槽同口径 ——
+        # 收集器读那一格、看它像不像堆内地址。放在最后，两边的次序才一致。
+        for j in range(self.gc_sites):
+            idx = self.t()
+            self.w(f"{idx} = add i32 {n0}, {i}")
+            gp = self.t()
+            self.w(f"{gp} = getelementptr [1024 x i64], ptr @__loment_roots,"
+                   f" i32 0, i32 {idx}")
+            v = self.t()
+            self.w(f"{v} = ptrtoint ptr %gc.sp.{j} to i64")
+            self.w(f"store i64 {v}, ptr {gp}")
+            i += 1
         n1 = self.t()
         self.w(f"{n1} = add i32 {n0}, {self.rootk}")
         self.w(f"store i32 {n1}, ptr @__loment_rootn")
@@ -10912,7 +10985,7 @@ class _Ir:
         raise LomError(e.line, 1, f"这个后端不支持运算符 {op}")
 
     # -- 内建 (M1/M2)
-    def alloc_ir(self, size_var: str) -> str:
+    def alloc_ir(self, size_var: str, site: object) -> str:
         """分配 `size_var` 字节, 返回指针 (alloc 与 str_concat 共用, M15/M2)。
 
         走运行期的 `__loment_alloc`（bump + 地址序空闲链表 + 拆分 + 前沿回退）——
@@ -10941,6 +11014,14 @@ class _Ir:
             self.w(f"call void @__loment_maybe_collect(i32 {size_var})")
         p = self.t()
         self.w(f"{p} = call ptr @__loment_alloc(i32 {size_var})")
+        if self.gc_sites:
+            # **先把结果存进本帧的 spill 槽**（`#1465`）：这个值接下来可能在寄存器里
+            # 活过下一次分配，而根表只看得见槽 —— 不存就等于把一块活着的内存交给收集器。
+            # 槽按**源码序**编号（与自举侧按 token 位置数出来的那个号一致），
+            # 并在本语句结束时清掉（`_gc_flush`）。
+            k = self.gc_site_map[id(site)]
+            self.w(f"store ptr {p}, ptr %gc.sp.{k}")
+            self.gc_dirty = max(self.gc_dirty, k + 1)
         if self.threads:
             self.w("call void @__loment_rt_release()")
         return p
@@ -10977,7 +11058,7 @@ class _Ir:
         """str_len / str_eq / str_concat / str_byte / slice_len 的 IR 降级。"""
         if e.name == "alloc":  # M15: bump 分配器
             _, sz = self.expr(e.args[0], "u32")
-            return "ptr", self.alloc_ir(sz)
+            return "ptr", self.alloc_ir(sz, e)
         if e.name == "free":
             _, p = self.expr(e.args[0], "ptr")
             if self.threads:
@@ -11292,7 +11373,7 @@ class _Ir:
             self.w(f"{n} = add i64 {al}, {bl}")
             nu = self.t()
             self.w(f"{nu} = trunc i64 {n} to i32")   # 堆计数是 u32
-            p = self.alloc_ir(nu)
+            p = self.alloc_ir(nu, e)
             self.w(f"call void @__loment_memcpy(ptr {p}, ptr {ap}, i64 {al})")
             g = self.t()
             self.w(f"{g} = getelementptr i8, ptr {p}, i64 {al}")
@@ -11445,6 +11526,11 @@ class _Ir:
         self.w(f"store {it} {nxt}, ptr {ptr}")
 
     def stmt(self, s) -> None:
+        # **语句边界清 spill 槽**（`#1465`）：一个分配结果只要活得比本条语句长，
+        # 就是**泄漏**（`docs/210` §2 的 L3 残差本来就该没人认领才能收回）。根扫看得见
+        # 槽是为了"同一表达式里的下一次分配别把它当垃圾"，不是为了把它钉死到函数末尾。
+        if not self.terminated:
+            self._gc_flush()
         line = getattr(s, "line", None)
         if line:
             loc = self.dbg_for(line)

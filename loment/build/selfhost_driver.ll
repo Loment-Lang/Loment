@@ -98881,12 +98881,21 @@ L86_sc_short:
   br label %L87_sc_end
 L87_sc_end:
   %t86 = phi i1 [ %t85, %L85_sc_rhs ], [ true, %L86_sc_short ]
-  br i1 %t86, label %L88_then, label %L89_else
-L88_then:
+  br i1 %t86, label %L89_sc_short, label %L88_sc_rhs
+L88_sc_rhs:
+  %t87 = load i32, ptr %num.addr
+  %t88 = icmp eq i32 %t87, 4097
+  br label %L90_sc_end
+L89_sc_short:
+  br label %L90_sc_end
+L90_sc_end:
+  %t89 = phi i1 [ %t88, %L88_sc_rhs ], [ true, %L89_sc_short ]
+  br i1 %t89, label %L91_then, label %L92_else
+L91_then:
   ret i32 4
-L89_else:
-  br label %L90_end
-L90_end:
+L92_else:
+  br label %L93_end
+L93_end:
   ret i32 0
 }
 ; pt_tok_num -> u32

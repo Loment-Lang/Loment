@@ -3737,6 +3737,63 @@ def test_gc_auto_collector_text():
     assert ".buf" in alpha, "alpha 那一份该有提升的缓冲 —— 那说明档位判据在这儿失效了"
 
 
+#: `#1465` 的那份源：两个 `alloc` 挤在**同一个表达式**里，第一个的结果只活在 SSA
+#: 临时值中。第二个 `alloc` 的钩子若正好在这一刻收，第一个块就被当成垃圾。
+_SPILL_SRC = """module gc_spill
+@@CHOOSE@@
+choose runtime
+
+fn tag(a: ptr) -> ptr {
+    store8(a, 0, 7);
+    return a;
+}
+
+fn check(a: ptr, b: ptr) -> u32 {
+    store8(b, 0, 9);
+    return load8(a, 0) as u32;
+}
+
+fn _start() {
+    let sz: u32 = 16;
+    let r: u32 = check(tag(alloc(sz)), alloc(sz));
+    syscall4(60, r as u64, 0, 0);
+}
+"""
+
+
+@test
+def test_alloc_results_are_spilled_into_the_root_table():
+    """`#1465`：分配结果写进本帧的 spill 槽，槽按具名槽登记进根表。
+
+    根表只认具名槽 —— 表达式里的 SSA 临时值不是根，`f(tag(alloc(sz)), alloc(sz))`
+    的第一块活不过第二次分配里的那次收集。每个分配站点一格、**发射序**编号；入口清零，
+    分配完立刻落槽。默认档（`gc_manual`）不发槽，产物一个字节都不多。
+
+    动态那一半在 `loment_elf_test::test_a_temporary_allocation_survives_a_collection`：
+    这条只核"槽在不在、挂没挂"，对"收集器真的看得见它"照样绿。
+    """
+    auto = _gc_emit(_SPILL_SRC.replace("@@CHOOSE@@", "choose gc_auto"))
+    manual = _gc_emit(_SPILL_SRC.replace("@@CHOOSE@@", "choose gc_manual"))
+    assert "%gc.sp.0 = alloca ptr" in auto and "%gc.sp.1 = alloca ptr" in auto, (
+        "两个分配站点该各开一个 spill 槽")
+    assert "%gc.sp.2" not in auto, "槽按站点数开，不多开"
+    for i in (0, 1):
+        assert f"store ptr null, ptr %gc.sp.{i}" in auto, f"槽 {i} 没有入口清零"
+        assert f"ptrtoint ptr %gc.sp.{i} to i64" in auto, f"槽 {i} 没登记进根表"
+    # 每个 `alloc` 的**下一条**就是落槽（值在寄存器里活过下一次分配之前必须进槽）。
+    lines = auto.splitlines()
+    hit = []
+    for k, ln in enumerate(lines):
+        if ln.strip().startswith("%") and "= call ptr @__loment_alloc(i32 " in ln:
+            reg = ln.split("=")[0].strip()
+            hit.append((reg, lines[k + 1].strip()))
+    assert len(hit) == 2, hit
+    for k, (reg, nxt) in enumerate(hit):
+        assert nxt == f"store ptr {reg}, ptr %gc.sp.{k}", (
+            f"第 {k} 个分配站点没有立刻落槽，下一行是 {nxt!r}")
+    assert "gc.sp" not in manual, "`gc_manual` 的产物里不该有 spill 槽 —— 默认档不许变"
+
+
 #: `gc_auto_alpha` 的**自适应收集器**那一份源（`docs/210` §2.4 的"策略池"那一半）。
 #: `chew` 里那块 `p` 是 **L3**（尺寸是变量 ⇒ 不是 L0；`let q: ptr = p` 是外逃 ⇒ 不是 L1），
 #: 所以 alpha 这一档**非得有收集器**不可 —— 此前它根本没有（L3 残差没人收，只有分配器）。

@@ -800,6 +800,69 @@ def test_gc_auto_collects_while_manual_exhausts():
           f"manual 耗尽 (rc={got[1]}) —— 自动回收是真的")
 
 
+#: `#1465` 的语料：两个 `alloc` 挤在**同一个表达式**里。`tag` 往第一块写哨兵 7，第二个
+#: `alloc` 的钩子若正好在两者之间收，第一块没有被任何具名槽引用（它只在 `%tN` 里）——
+#: 修之前它在 12000 轮里丢 11 次（退出码就是次数），修之后一次都不丢。
+_SPILL_SRC = ("module gcspill\n%s\nchoose runtime\n\n"
+              "fn tag(a: ptr) -> ptr {\n"
+              "    store8(a, 0, 7);\n"
+              "    return a;\n"
+              "}\n\n"
+              "fn check(a: ptr, b: ptr) -> u32 {\n"
+              "    store8(b, 0, 9);\n"
+              "    return load8(a, 0) as u32;\n"
+              "}\n\n"
+              "fn _start() {\n"
+              "    let i: u32 = 0;\n"
+              "    let bad: u32 = 0;\n"
+              "    let sz: u32 = 16;\n"
+              "    while i < 12000 {\n"
+              "        let r: u32 = check(tag(alloc(sz)), alloc(sz));\n"
+              "        if r != 7 {\n            bad = bad + 1;\n        }\n"
+              "        i = i + 1;\n"
+              "    }\n"
+              "    syscall4(60, bad as u64, 0, 0);\n"
+              "}\n")
+
+
+@test
+def test_a_temporary_allocation_survives_a_collection():
+    """只活在 SSA 临时值里的分配结果**活得过收集**（`#1465`）—— 退出码 0。
+
+    **Why**：根表登记的是**具名槽**的地址；表达式里的临时值不是根。`f(tag(alloc(sz)),
+    alloc(sz))` 的第一块因此活不过第二次分配里的那次收集 —— 被清扫、载荷被 `free`
+    擦成 0（`#789`），读回来是 0 而不是哨兵 7。修法给每个分配站点一个 spill 槽。
+
+    **配对的另一半**：同一份源换 `gc_manual` **必然耗尽**（退出码 132）—— 它证明这次
+    跑的分配量真的超过了 64 KiB arena，所以 `gc_auto` 那只跑完就意味着收集确实发生了。
+
+    **红过的证据**：修之前 `gc_auto` 那只退出码是 **11**（12000 轮、约 11 次收集落在
+    两次分配之间）；把第一块换成具名局部（`let a: ptr = tag(alloc(sz))`）就回到 0。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = []
+        for tag, ch in (("auto", "choose gc_auto"), ("alpha", "choose gc_auto_alpha"),
+                        ("manual", "choose gc_manual")):
+            src = td / f"{tag}.lomt"
+            src.write_text(_SPILL_SRC % ch, encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"{tag}.native"
+            nat.write_bytes(blob)
+            got.append(_run_bin(nat, f"spill_{tag}", td, timeout=60)[0])
+    assert got[0] == 0, (
+        f"`gc_auto` 那只丢了 {got[0]} 次哨兵 —— 分配结果没进根表，收集器把它当垃圾收了")
+    assert got[1] == 0, f"`gc_auto_alpha` 那只丢了 {got[1]} 次哨兵（根表是两档共用的）"
+    assert got[2] != 0, (
+        f"**`gc_manual` 那只也跑通了**（退出码 {got[2]}）—— 那这条判据测不出收集："
+        "12000 轮 × 2 次 32 字节 ≈ 768 KB，arena 只有 64 KiB，必然耗尽")
+    print(f"      auto/alpha 哨兵一次没丢 (rc=0)；manual 耗尽 (rc={got[2]})")
+
+
 #: `#367` 的语料：**一次 `alloc` 都不写**，只靠 `str_concat` 分配。6000 次拼接 × 16 字节
 #: （8 的请求取整成 16）≈ 94 KB，**远远**过 64 KiB arena。
 #:

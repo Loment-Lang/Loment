@@ -7185,10 +7185,13 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
             store32(s, dom_at(d, 7), pt);
         }
         store32(s, CG_DOM_N, d + 1);
+        // 块体是一层语句表：体内的 `defer` 在块尾按 LIFO 跑（与参考的 `self.block` 同序）
+        let dfr: u32 = dfr_push(s);
         let k2: u32 = q + 1;
         while !tok_is(src, toks, k2, "}") && tok_kind(toks, k2) != 4 {
             k2 = stmt(s, out, src, toks, k2, ret);
         }
+        let _de: u32 = dfr_end(s, out, src, toks, dfr, ret);
         store32(s, CG_DOM_N, d);
         return k2 + 1;
     }

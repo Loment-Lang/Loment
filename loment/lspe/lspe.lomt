@@ -13,7 +13,7 @@ const LS_NONE: u32 = 4294967295;
 // token 原语：与 `potato.lomt` 的 `pt_*` 同一形状（同一份驱动器 token 数组，
 // 每条 20 字节：kind / off / len）。复制这四支，是为了不让 `lspe` 反向 `use potato`
 // 形成环。
-fn lspe_kind(t: ptr, i: u32) -> u32 {
+pub fn lspe_kind(t: ptr, i: u32) -> u32 {
     return load32(t, i * 20);
 }
 
@@ -25,7 +25,7 @@ fn lspe_tlen(t: ptr, i: u32) -> u32 {
     return load32(t, i * 20 + 8);
 }
 
-fn lspe_tis(src: ptr, t: ptr, i: u32, s: str) -> bool {
+pub fn lspe_tis(src: ptr, t: ptr, i: u32, s: str) -> bool {
     if load32(t, i * 20) == 2 {
         return false;
     }
@@ -167,7 +167,7 @@ pub fn lspe_index_total(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
 }
 
 /// 有来源的 index 站点：下标是**裸字面量**（`[ N ]` 三个 token），来源 `lms(g0)`。
-pub fn lspe_index_proved(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+pub fn lspe_index_proved(unit: ptr, t: ptr, lo: u32, hi: u32, lvl: u32) -> u32 {
     let n: u32 = 0;
     let i: u32 = lo;
     while i < hi && lspe_kind(t, i) != 4 {
@@ -191,10 +191,215 @@ pub fn lspe_index_proved(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
             if ok == 1 && lspe_kind(t, i + 1) == 1 && lspe_tis(unit, t, i + 2, "]") == 1 {
                 n = n + 1;
             }
+            // E5（`#765`）：循环不变量证明的非字面量下标。只在 L3+ 被承认。
+            if lvl >= 3 && ok == 1 && lspe_kind(t, i + 1) == 0
+                    && lspe_e5_hit(unit, t, lo, hi, i) == 1 {
+                n = n + 1;
+            }
         }
         i = i + 1;
     }
     return n;
+}
+
+/// token 里的非负整数（十进制，或 `0x` 十六进制）。与参考 `_lspe_int` 同口径。
+pub fn lspe_num(src: ptr, t: ptr, i: u32) -> u32 {
+    let off: u32 = load32(t, i * 20 + 4);
+    let n: u32 = load32(t, i * 20 + 8);
+    let v: u32 = 0;
+    let k: u32 = 0;
+    if n >= 2 {
+        if (load8(src, off) as u32) == 48
+                && ((load8(src, off + 1) as u32) == 120
+                    || (load8(src, off + 1) as u32) == 88) {
+            k = 2;
+            while k < n {
+                let c: u32 = load8(src, off + k) as u32;
+                let dgt: u32 = 0;
+                if c >= 48 && c <= 57 {
+                    dgt = c - 48;
+                }
+                if c >= 97 && c <= 102 {
+                    dgt = c - 87;
+                }
+                if c >= 65 && c <= 70 {
+                    dgt = c - 55;
+                }
+                v = v * 16 + dgt;
+                k = k + 1;
+            }
+            return v;
+        }
+    }
+    while k < n {
+        let c: u32 = load8(src, off + k) as u32;
+        if c >= 48 && c <= 57 {
+            v = v * 10 + (c - 48);
+        }
+        k = k + 1;
+    }
+    return v;
+}
+
+/// E5（`#765`）：`a[i]` 在 `for i in A..N {` / `while i < N {` 里，且
+/// `a: [T; N]` 的长度也是 N ⇒ 1。只认**字面量界**（与参考实现同一条边界）。
+pub fn lspe_e5_hit(unit: ptr, t: ptr, lo: u32, hi: u32, br: u32) -> u32 {
+    let arr: u32 = 0;
+    let var: u32 = 0;
+    let q: u32 = 0;
+    let s: u32 = 0;
+    let num: u32 = 0;
+    let found: u32 = 0;
+    let hit: u32 = 0;
+    let bound: u32 = 0;
+    let brace: u32 = 0;
+    let isfor: u32 = 0;
+    let dots: u32 = 0;
+    let d: u32 = 0;
+    let k: u32 = 0;
+    let endb: u32 = 0;
+    let fin: u32 = 0;
+    let uns: u32 = 0;
+    let w: u32 = 0;
+    let start0: u32 = 0;
+    if br == 0 || br + 2 >= hi {
+        return 0;
+    }
+    if lspe_kind(t, br + 1) != 0 {
+        return 0;
+    }
+    if !(lspe_kind(t, br + 2) == 3 && lspe_tis(unit, t, br + 2, "]") == 1) {
+        return 0;
+    }
+    arr = br - 1;
+    var = br + 1;
+    num = LS_NONE;
+    // 1) `a: [T; N]` 的长度（只认字面量）。
+    q = lo;
+    while q + 5 < hi && found == 0 {
+        if lspe_kind(t, q) == 0 && lspe_teq(unit, t, q, arr) == 1
+                && lspe_kind(t, q + 1) == 3 && lspe_tis(unit, t, q + 1, ":") == 1
+                && lspe_kind(t, q + 2) == 3 && lspe_tis(unit, t, q + 2, "[") == 1 {
+            s = q + 3;
+            while s + 1 < hi {
+                if lspe_kind(t, s) == 3 && lspe_tis(unit, t, s, ";") == 1
+                        && lspe_kind(t, s + 1) == 1 {
+                    num = lspe_num(unit, t, s + 1);
+                    found = 1;
+                }
+                if lspe_kind(t, s) == 3 && lspe_tis(unit, t, s, "]") == 1 {
+                    s = hi;
+                }
+                s = s + 1;
+            }
+        }
+        q = q + 1;
+    }
+    if found == 0 {
+        return 0;
+    }
+    // 2) 循环界 = 长度，且 `[` 落在循环体里。
+    q = lo;
+    while q + 3 < hi && hit == 0 {
+        bound = LS_NONE;
+        brace = 0;
+        isfor = 0;
+        if lspe_kind(t, q) == 0 && lspe_tis(unit, t, q, "for") == 1
+                && lspe_kind(t, q + 1) == 0
+                && lspe_kind(t, q + 2) == 0 && lspe_tis(unit, t, q + 2, "in") == 1
+                && lspe_teq(unit, t, q + 1, var) == 1 {
+            isfor = 1;
+            s = q + 3;
+            dots = 0;
+            while s + 1 < hi && dots == 0 {
+                if lspe_kind(t, s) == 3 && lspe_tis(unit, t, s, ".") == 1
+                        && lspe_kind(t, s + 1) == 3
+                        && lspe_tis(unit, t, s + 1, ".") == 1 {
+                    dots = 1;
+                } else {
+                    s = s + 1;
+                }
+            }
+            if dots == 1 {
+                // 基例必须是 0：`for i in 2..N` 不证。
+                start0 = 0;
+                if s > lo && lspe_kind(t, s - 1) == 1 && lspe_num(unit, t, s - 1) == 0 {
+                    start0 = 1;
+                }
+                if start0 == 0 {
+                    isfor = 0;
+                }
+                s = s + 2;
+                if s < hi && lspe_kind(t, s) == 1 {
+                    bound = lspe_num(unit, t, s);
+                }
+                while s < hi && brace == 0 {
+                    if lspe_kind(t, s) == 3 && lspe_tis(unit, t, s, "{") == 1 {
+                        brace = s;
+                    }
+                    s = s + 1;
+                }
+            }
+        }
+        if lspe_kind(t, q) == 0 && lspe_tis(unit, t, q, "while") == 1
+                && q + 4 < hi && lspe_kind(t, q + 1) == 0
+                && lspe_teq(unit, t, q + 1, var) == 1
+                && lspe_kind(t, q + 2) == 3 && lspe_tis(unit, t, q + 2, "<") == 1 {
+            // `i < N` 对**无符号**就是 `0 <= i < N`；有符号可能为负，不证。
+            uns = 0;
+            w = lo;
+            while w + 2 < hi && uns == 0 {
+                if lspe_kind(t, w) == 0 && lspe_teq(unit, t, w, var) == 1
+                        && lspe_kind(t, w + 1) == 3 && lspe_tis(unit, t, w + 1, ":") == 1
+                        && lspe_kind(t, w + 2) == 0
+                        && (lspe_tis(unit, t, w + 2, "u8") == 1
+                            || lspe_tis(unit, t, w + 2, "u16") == 1
+                            || lspe_tis(unit, t, w + 2, "u32") == 1
+                            || lspe_tis(unit, t, w + 2, "u64") == 1
+                            || lspe_tis(unit, t, w + 2, "usize") == 1) {
+                    uns = 1;
+                }
+                w = w + 1;
+            }
+            if uns == 1 {
+                isfor = 1;
+                if lspe_kind(t, q + 3) == 1 {
+                    bound = lspe_num(unit, t, q + 3);
+                }
+                s = q + 4;
+                while s < hi && brace == 0 {
+                    if lspe_kind(t, s) == 3 && lspe_tis(unit, t, s, "{") == 1 {
+                        brace = s;
+                    }
+                    s = s + 1;
+                }
+            }
+        }
+        if isfor == 1 && brace != 0 && bound == num {
+            d = 0;
+            k = brace;
+            endb = hi;
+            fin = 0;
+            while k < hi && fin == 0 {
+                if lspe_kind(t, k) == 3 && lspe_tis(unit, t, k, "{") == 1 {
+                    d = d + 1;
+                }
+                if lspe_kind(t, k) == 3 && lspe_tis(unit, t, k, "}") == 1 {
+                    d = d - 1;
+                    if d == 0 {
+                        endb = k;
+                        fin = 1;
+                    }
+                }
+                k = k + 1;
+            }
+            if brace < br && br < endb {
+                hit = 1;
+            }
+        }
+        q = q + 1;
+    }
+    return hit;
 }
 
 /// guard 站点里被 pass 覆盖的个数（证明数要扣掉它）。
@@ -239,6 +444,50 @@ pub fn lspe_index_covered(unit: ptr, t: ptr, lo: u32, hi: u32, pbuf: ptr) -> u32
                 let cb: u32 = lspe_cover(i, pbuf) * 16;
                 store32(pbuf, cb + 8, load32(pbuf, cb + 8) + 1);
                 n = n + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 被 pass 覆盖、**而且本来能证**的 index 站点数（`#1080`）。
+///
+/// 不能拿 `lspe_index_covered` 去减 `lspe_index_proved`：前者数的是"所有被覆盖的
+/// 下标"，后者数的是"能证的（字面量 / E5）"。一个被覆盖的**非字面量**下标会让
+/// `ip - icov` 无符号回绕，台账写出 4294967295 个已证站点。
+pub fn lspe_index_covered_proved(unit: ptr, t: ptr, lo: u32, hi: u32,
+                                 pbuf: ptr, lvl: u32) -> u32 {
+    let n: u32 = 0;
+    let i: u32 = lo;
+    while i < hi && lspe_kind(t, i) != 4 {
+        if lspe_kind(t, i) == 3 && lspe_tis(unit, t, i, "[") == 1 && i > lo {
+            let ok: u32 = 0;
+            if lspe_kind(t, i - 1) == 0 && lspe_kw(unit, t, i - 1) == 0 {
+                ok = 1;
+            }
+            if lspe_kind(t, i - 1) == 3
+                    && (lspe_tis(unit, t, i - 1, ")") == 1
+                        || lspe_tis(unit, t, i - 1, "]") == 1) {
+                ok = 1;
+            }
+            if ok == 1 && i + 3 < hi && lspe_kind(t, i + 1) == 1
+                    && lspe_tis(unit, t, i + 2, ".") == 1
+                    && lspe_tis(unit, t, i + 3, ".") == 1 {
+                ok = 0;
+            }
+            if ok == 1 && lspe_cover(i, pbuf) != 0 {
+                let prov: u32 = 0;
+                if lspe_kind(t, i + 1) == 1 && lspe_tis(unit, t, i + 2, "]") == 1 {
+                    prov = 1;
+                }
+                if prov == 0 && lvl >= 3 && lspe_kind(t, i + 1) == 0
+                        && lspe_e5_hit(unit, t, lo, hi, i) == 1 {
+                    prov = 1;
+                }
+                if prov == 1 {
+                    n = n + 1;
+                }
             }
         }
         i = i + 1;
@@ -404,8 +653,19 @@ pub fn lspe_fnv_pass(unit: ptr, t: ptr, tok: u32, occ: u32) -> u32 {
     let n: u32 = lspe_tlen(t, tok);
     let k: u32 = 1;
     while k + 1 < n {
-        h = lspe_fnv_byte(h, load8(unit, off + k - 1) as u32);
-        k = k + 1;
+        let c: u32 = load8(unit, off + k - 1) as u32;
+        if c == 92 && k + 2 < n {
+            // **解码转义**（`#1082`）：参考实现哈希的是解码后的理由。
+            let e: u32 = load8(unit, off + k) as u32;
+            let d: u32 = e;
+            if e == 110 { d = 10; } else if e == 116 { d = 9; }
+            else if e == 114 { d = 13; } else if e == 48 { d = 0; }
+            h = lspe_fnv_byte(h, d);
+            k = k + 2;
+        } else {
+            h = lspe_fnv_byte(h, c);
+            k = k + 1;
+        }
     }
     h = lspe_fnv_byte(h, 35);                       // '#'
     return lspe_fnv_dec(h, occ);
@@ -479,9 +739,70 @@ pub fn lspe_engine(unit: ptr, t: ptr, lo: u32, hi: u32, lm: u32,
             store32(pbuf, b + 4, pend);
             store32(pbuf, b + 8, 0);
             store32(pbuf, 0, pc + 1);
-            pi = pend;
+            // **不跳过块体**（`#1100`）：嵌套块也要进表 —— 理由相同的块靠"先出现过
+            // 几次"编号，只记最外层会让后面每个同理由块的 id 与参考实现分叉。
+            // 输出仍只写最外层（`lspe_span_outer`）。
         }
         pi = pi + 1;
+    }
+    // ---- 依赖单元的首参表（`#1081`）----
+    // 根对依赖里 `ptr` 首参函数的调用点也是站点：首参表必须问整棵调用树，
+    // 但 E3/E4 的站点仍然只扫根（依赖不是这份产物的审计面）。
+    let dq: u32 = 0;
+    let dlp: u32 = 0;
+    let dk: u32 = 0;
+    let dg: u32 = 0;
+    let drp: u32 = 0;
+    let dd: u32 = 0;
+    let dj: u32 = 0;
+    let dc: u32 = 0;
+    while dq < lo && lspe_kind(t, dq) != 4 {
+        if lspe_kind(t, dq) == 0 && lspe_tis(unit, t, dq, "fn") == 1
+                && !(dq > 0 && lspe_tis(unit, t, dq - 1, "extern") == 1) {
+            dlp = LS_NONE;
+            dk = dq + 2;
+            dg = 0;
+            while dk < lo && lspe_kind(t, dk) != 4 && dg < 64 && dlp == LS_NONE {
+                if lspe_kind(t, dk) == 3 && lspe_tis(unit, t, dk, "(") == 1 {
+                    dlp = dk;
+                }
+                if lspe_kind(t, dk) == 3
+                        && (lspe_tis(unit, t, dk, ";") == 1
+                            || lspe_tis(unit, t, dk, "{") == 1) {
+                    dg = 64;
+                }
+                dk = dk + 1;
+            }
+            drp = LS_NONE;
+            if dlp != LS_NONE {
+                dd = 0;
+                dj = dlp;
+                while dj < lo && lspe_kind(t, dj) != 4 && drp == LS_NONE {
+                    if lspe_kind(t, dj) == 3 && lspe_tis(unit, t, dj, "(") == 1 {
+                        dd = dd + 1;
+                    }
+                    if lspe_kind(t, dj) == 3 && lspe_tis(unit, t, dj, ")") == 1 {
+                        dd = dd - 1;
+                        if dd == 0 {
+                            drp = dj;
+                        }
+                    }
+                    dj = dj + 1;
+                }
+            }
+            if drp != LS_NONE && dlp + 3 < lo && lspe_kind(t, dlp + 1) == 0
+                    && lspe_tis(unit, t, dlp + 1, "self") == 0
+                    && lspe_tis(unit, t, dlp + 2, ":") == 1
+                    && lspe_tis(unit, t, dlp + 3, "ptr") == 1 {
+                dc = load32(pft, 0);
+                if dc >= 1024 {
+                    return 1;
+                }
+                store32(pft, (dc + 1) * 4, dq + 1);
+                store32(pft, 0, dc + 1);
+            }
+        }
+        dq = dq + 1;
     }
     // ---- 每个函数：首参表 + 体内 E3 ----
     let i: u32 = lo;
@@ -555,7 +876,11 @@ pub fn lspe_engine(unit: ptr, t: ptr, lo: u32, hi: u32, lm: u32,
                         while kk > body_at && stop == 0 {
                             kk = kk - 1;
                             let eq: u32 = 0;
-                            if lspe_kind(t, kk) == 0 && lspe_kind(t, kk) == lspe_kind(t, a + 2) {
+                            // 名字相等 = **长度**与字节都相等。少了长度这一条，
+                            // `ptr` 会因为前 1 个字节是 `p` 而被当成 `p`（前缀匹配）——
+                            // 于是 `let p: ptr = …` 里的 `ptr` 被读成"p 后面跟着 ="。
+                            if lspe_kind(t, kk) == 0 && lspe_kind(t, kk) == lspe_kind(t, a + 2)
+                                    && lspe_tlen(t, kk) == lspe_tlen(t, a + 2) {
                                 eq = 1;
                                 let z: u32 = 0;
                                 while z < lspe_tlen(t, a + 2) {
@@ -576,13 +901,18 @@ pub fn lspe_engine(unit: ptr, t: ptr, lo: u32, hi: u32, lm: u32,
                                         && lspe_tis(unit, t, kk + 5, "(") == 1 {
                                     owned = 1;
                                 }
+                            } else if eq == 1 && lspe_tis(unit, t, kk + 1, "=") == 1
+                                    && !(lspe_tis(unit, t, kk + 2, "=") == 1) {
+                                // 重新指向（`#1180`）：所有权在赋值处就丢了。
+                                stop = 1;
                             }
                         }
                         let reach: u32 = 0;
                         let j: u32 = a + 4;
                         while j < body_end {
                             let eq: u32 = 0;
-                            if lspe_kind(t, j) == 0 && lspe_kind(t, j) == lspe_kind(t, a + 2) {
+                            if lspe_kind(t, j) == 0 && lspe_kind(t, j) == lspe_kind(t, a + 2)
+                                    && lspe_tlen(t, j) == lspe_tlen(t, a + 2) {
                                 eq = 1;
                                 let z: u32 = 0;
                                 while z < lspe_tlen(t, a + 2) {
@@ -610,7 +940,35 @@ pub fn lspe_engine(unit: ptr, t: ptr, lo: u32, hi: u32, lm: u32,
                                         }
                                     } else if lspe_kind(t, z) == 0 && d3 == 0
                                             && lspe_tis(unit, t, z, "return") == 1 {
-                                        dead = 1;
+                                        // use 在 return 的**表达式里**时，这句 return
+                                        // 不是"之前"（`#1097`）：看同层 `;` 在不在。
+                                        let ended: u32 = 0;
+                                        let dz: u32 = 0;
+                                        let mm: u32 = z + 1;
+                                        while mm < j {
+                                            if lspe_kind(t, mm) == 3 {
+                                                if lspe_tis(unit, t, mm, "(") == 1
+                                                        || lspe_tis(unit, t, mm, "[") == 1
+                                                        || lspe_tis(unit, t, mm, "{") == 1 {
+                                                    dz = dz + 1;
+                                                }
+                                                if lspe_tis(unit, t, mm, ")") == 1
+                                                        || lspe_tis(unit, t, mm, "]") == 1
+                                                        || lspe_tis(unit, t, mm, "}") == 1 {
+                                                    if dz > 0 {
+                                                        dz = dz - 1;
+                                                    }
+                                                }
+                                                if lspe_tis(unit, t, mm, ";") == 1
+                                                        && dz == 0 {
+                                                    ended = 1;
+                                                }
+                                            }
+                                            mm = mm + 1;
+                                        }
+                                        if ended == 1 {
+                                            dead = 1;
+                                        }
                                     }
                                     z = z - 1;
                                 }

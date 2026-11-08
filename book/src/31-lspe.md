@@ -93,29 +93,49 @@ The ledger is part of the Potato form object. With `lspe_open_admin` it records,
 - `state`: which dimension value was chosen;
 - `set_by`: where the choice was made;
 - the sites, obligations and evidence;
-- counts for the allowances.
+- counts for the allowances, and `interrogations` (how many sites passed provenance,
+  falsification and cross-examination);
+- `floor_detail`: where the unproved allowances went (`assumed`, `stale_wf`, `budget`,
+  `depth`, `drop_honest`, `pass`).
 
-Five invariants audit the ledger itself. Only the first is evaluated today; the other four are
-emitted as `"not_run"`. That is a stated boundary, not a silent pass.
+The floors add up: `floors == assumed + stale_wf + budget + depth + drop_honest + pass`.
+Five invariants audit the ledger itself: I1 site reconciliation, I2 source coverage,
+I3 dimension consistency, I4 floor accounting (a corrupted ledger is E036) and I5 twin parity.
+When the audit is closed the invariants are `"not_run"` — a stated boundary, not a silent pass.
+
+`TypeWellFormed` is keyed by `(type, substitution)`: the same type under two substitutions is two
+sites, so evidence cannot be reused across a substitution. `DropHonest` is one site per
+destructor, discharged by the labelled `Assumed` floor or by a hand-written proof
+(`drop:<type>=prove` in `lspe.answers`).
+
+## The counter-asker and LSPC
+
+An `UNDECIDED` site becomes a **question** (Q001–Q013) only after three interrogations have run:
+provenance, falsification and cross-examination. The default answer is *allow but label*: the site
+stays unproved and the ledger records an `Assumed` floor. `defer(reason)` and `refuse` are recorded
+too. Under `--lspe-mode=strict` an unanswered question becomes E034 and the build stops.
+
+LSPC is the before-codegen sheet: twelve risk families, five columns each, and a final row that
+reports the closure of the audit itself. It never blocks by default; `--lspc=strict` blocks only
+unacknowledged high-risk families, `--lspc=off` is written into the artifact.
 
 ## What the toolchain exposes
 
-| Command | Today |
+| Command | What it does |
 |---|---|
-| `loment lspe state FILE` | prints one unit's ledger (checkout launcher) |
-| `loment lspe why SITE` | placeholder; derivation trees are not shipped |
-| `loment lspe verify ARTIFACT` | placeholder; proof hashes and the sidecar are not shipped |
+| `loment lspe state FILE` | prints one unit's ledger, plus the LSPC strip |
+| `loment lspe why SITE FILE` | rebuilds and prints that site's derivation chain |
+| `loment lspe verify ARTIFACT SIDECAR` | checks per-site proof hashes without recompiling |
+| `loment lspc check FILE` | runs the front end, prints the pre-flight sheet, stops before codegen |
 
-`--lspe-mode=full|quiet|strict` exists in the driver's parameter table but is not exposed by the
-CLI yet, so E034 (an allowance with no source, under strict) is not reachable from the command
-line.
+`--lspe-mode=full|quiet|strict`, `--lspe-level 0..4`, `--answer SITE=B` and `lspe.answers` are all
+wired through the CLI. `loment build --lspe-sidecar` writes the `.lspe` sidecar.
 
 ## What LSPE does not do
 
 - It does not change a verdict. Two artifacts that differ only in `lspe` have the same behaviour.
 - It does not replace the checker; the enforcers run with the audit closed.
-- It does not ship proof objects yet; the ledger is the record, and the derivation tree is a
-  later layer.
+- It does not promise that an `Assumed` site is safe. It promises that the assumption is printed.
 - It does not audit the user. The subject is the compiler's judgement.
 
 ## When to turn it off

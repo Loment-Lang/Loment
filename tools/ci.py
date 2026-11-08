@@ -471,7 +471,8 @@ SHARD_COST = {
     "loment_trans_test": 111.1,
     "loment_zwframe_test": 2.5,
     "lomentc_test": 10.5,
-    "lspe_test": 1.0,
+    # 2026-11-08（LSPE v2）：本机 Windows 实测 4.9s（36 条判据 + 两条棘轮的语料扫描）。
+    "lspe_test": 5.0,
     "lompi_sync": 0.0,
     "lompicheck_test": 1.1,
     "lvm_cache_test": 1.0,

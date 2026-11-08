@@ -89,13 +89,60 @@ def dump_baseline(rows: dict[str, tuple[int, int]], path: Path = BASELINE) -> No
     path.write_text(head + body, encoding="utf-8", newline="\n")
 
 
+#: 每种义务的覆盖率地板（`docs/262` §5.15 / `#767`）。一份单元一种义务一行：
+#: `<路径> <义务> <proved> <total>`。**比值只许升不许降** —— 与 `pass_ratio`
+#: 那条方向相反：旁路率是"欠债"，覆盖率是"还债"。
+COVERAGE = ROOT / ".github" / "lspe-coverage-baseline.txt"
+
+
+def measure_coverage(units: list[str] | None = None) -> dict[tuple[str, str], tuple[int, int]]:
+    """`{(单元, 义务): (proved, total)}`。"""
+    out: dict[tuple[str, str], tuple[int, int]] = {}
+    for rel in (units or corpus()):
+        doc = ledger_for(rel)
+        for ob, v in doc.get("per_kind", {}).items():
+            p, t = v.split("/")
+            out[(rel, ob)] = (int(p), int(t))
+    return out
+
+
+def load_coverage(path: Path = COVERAGE) -> dict[tuple[str, str], tuple[int, int]]:
+    out: dict[tuple[str, str], tuple[int, int]] = {}
+    if not path.is_file():
+        return out
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        rel, ob, p, t = line.split()
+        out[(rel, ob)] = (int(p), int(t))
+    return out
+
+
+def dump_coverage(rows: dict[tuple[str, str], tuple[int, int]],
+                  path: Path = COVERAGE) -> None:
+    head = (
+        "# 每种义务的覆盖率地板（`docs/262` §5.15 / #767）。\n"
+        "#\n"
+        "# 一行：<路径> <义务> <proved> <total>。**比值不许变小** —— 降了就红。\n"
+        "# 重算：`python tools/lspe_ratchet.py --emit`\n"
+    )
+    body = "".join(f"{rel} {ob} {rows[(rel, ob)][0]} {rows[(rel, ob)][1]}\n"
+                   for rel, ob in sorted(rows))
+    path.write_text(head + body, encoding="utf-8", newline="\n")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = argv if argv is not None else sys.argv[1:]
     rows = measure()
+    cov = measure_coverage()
     if "--emit" in args:
         dump_baseline(rows)
-        print(f"lspe_ratchet: 写了 {len(rows)} 份单元的基线 -> "
+        dump_coverage(cov)
+        print(f"lspe_ratchet: 写了 {len(rows)} 份单元的旁路率基线 -> "
               f"{BASELINE.relative_to(ROOT)}")
+        print(f"lspe_ratchet: 写了 {len(cov)} 条义务覆盖率地板 -> "
+              f"{COVERAGE.relative_to(ROOT)}")
         return 0
     passed = sum(p for p, _ in rows.values())
     sites = sum(s for _, s in rows.values())
@@ -104,6 +151,7 @@ def main(argv: list[str] | None = None) -> int:
         p, s = rows[rel]
         if p:
             print(f"  {rel}: {p}/{s}")
+    print(f"lspe_ratchet: {len(cov)} 条 (单元, 义务) 覆盖率")
     return 0
 
 

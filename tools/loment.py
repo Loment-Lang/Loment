@@ -385,17 +385,54 @@ def cmd_dbg(a) -> int:
     return 0
 
 
+def _lspe_answers(a) -> dict:
+    """`--answers FILE` 与 `--answer SITE=B`（可重复）合成一张表（`#755`）。"""
+    import lspe
+    out: dict = {}
+    if getattr(a, "answers", None):
+        out.update(lspe.load_answers(a.answers))
+    for raw in (getattr(a, "answer", None) or []):
+        site, _, ans = raw.partition("=")
+        if not site or not ans:
+            raise SystemExit(f"loment: --answer 要写成 SITE=B，得到 {raw!r}")
+        out[site.strip()] = ans.strip()
+    return out
+
+
+def _lspe_input(a, *, check_it: bool = True):
+    """装载一份单元并**把前门的拒绝变成一行话**（`#1087` / `#1181`）。
+
+    目录、缺文件、前门拒（`FrontDoorRefused` / `NotRepresentable`）都不该甩 Python
+    栈 —— 用户看到的是 `[ERR] …` 而不是 traceback。
+    """
+    p = Path(a.file)
+    if not p.exists():
+        raise SystemExit(f"loment: 文件不存在：{p}")
+    if p.is_dir():
+        raise SystemExit(f"loment: 这是目录，不是一份单元：{p}")
+    try:
+        mod, deps = lomentc.load_unit(
+            p, ROOT, lspe_level=getattr(a, "lspe_level", 3),
+            lspe_mode=getattr(a, "lspe_mode", "full"),
+            answers=_lspe_answers(a))
+    except OSError as e:
+        raise SystemExit(f"loment: 读不了 {p}: {e.strerror or e}")
+    except lomentc.LomError as e:
+        print(f"[ERR] {e}", file=sys.stderr)
+        raise SystemExit(1)
+    if check_it:
+        errs = lomentc.check(mod, deps=deps)
+        if errs:
+            for e in errs:
+                print(f"[ERR] {e}", file=sys.stderr)
+            raise SystemExit(1)
+    return p, mod, deps
+
+
 def cmd_lspe_state(a) -> int:
     """`loment lspe state FILE` —— 打印这份单元的 LSPE 台账（`docs/262` §8）。"""
     import json
-    p = Path(a.file)
-    mod = lomentc.load(p, lspe_level=a.lspe_level)
-    deps = lomentc.resolve_deps(mod, ROOT, p.parent, entry=p)
-    errs = lomentc.check(mod, deps=deps)
-    if errs:
-        for e in errs:
-            print(f"[ERR] {e}", file=sys.stderr)
-        return 1
+    p, mod, deps = _lspe_input(a)
     doc = json.loads(lomentc.emit_potato(mod, ROOT, deps))
     lp = doc["lspe"]
     print(json.dumps(lp, ensure_ascii=False, indent=2))
@@ -412,17 +449,144 @@ def cmd_lspe_state(a) -> int:
 
 
 def cmd_lspe_why(a) -> int:
-    """派生树在 0.1.5.2 落地；今天只有计数，所以这里明说而不是假装答得出来。"""
-    print("[LSPE] `lspe why` lands in 0.1.5.2 (derivation trees). "
-          "Today the ledger is counts only.", file=sys.stderr)
-    return 2
+    """`loment lspe why <site> FILE` —— 重建并打印那个站点的派生链（`#749`）。"""
+    import lspe
+    file = getattr(a, "file", None)
+    if not file:
+        print("用法: loment lspe why <site> <file>", file=sys.stderr)
+        return 2
+    a.file = file
+    p, mod, deps = _lspe_input(a, check_it=False)
+    ledger = lspe.build_ledger(
+        sites=getattr(mod, "lspe_sites", []),
+        state=mod.chooses.get("lspe", lomentc.CORE_DEFAULTS["lspe"]),
+        set_by=("source" if "lspe" in mod.chooses else "default"),
+        level=int(getattr(mod, "lspe_level", 3)),
+        toks=getattr(mod, "toks", []), unit=mod.name,
+        deps=[getattr(d, "toks", []) for d in deps],
+        passes=getattr(mod, "lspe_passes", []),
+        mode=str(getattr(mod, "lspe_mode", "full")),
+        answers=getattr(mod, "lspe_answers", None),
+        sidecar=True)
+    trees = ledger.get("_trees") or {}
+    want = a.site.strip()
+    hit = want if want in trees else None
+    if hit is None:
+        cand = sorted(sid for sid in trees if sid.startswith(want) or want in sid)
+        if len(cand) == 1:
+            hit = cand[0]
+        elif not cand:
+            print(f"[LSPE] 没有站点 {want!r}（这份单元有 {len(trees)} 个站点）",
+                  file=sys.stderr)
+            return 1
+        else:
+            print(f"[LSPE] {want!r} 命中 {len(cand)} 个站点，写全一点：",
+                  file=sys.stderr)
+            for sid in cand[:8]:
+                print("  " + sid, file=sys.stderr)
+            return 1
+    for line in lspe.why_lines(trees[hit]["tree"]):
+        print(line)
+    print(f"proof_hash   {trees[hit]['hash']}")
+    return 0
 
 
 def cmd_lspe_verify(a) -> int:
-    """证明哈希与 `.lspe` 旁挂在 0.1.5.2 落地。"""
-    print("[LSPE] `lspe verify` lands in 0.1.5.2 (proof hashes and the .lspe sidecar).",
-          file=sys.stderr)
-    return 2
+    """`loment lspe verify <artifact> <sidecar>` —— **不重编译**地核对旁挂（`#749`）。"""
+    import json
+    import lspe
+    if not getattr(a, "sidecar", None):
+        print("用法: loment lspe verify <artifact> <sidecar>", file=sys.stderr)
+        return 2
+    try:
+        artifact = json.loads(Path(a.artifact).read_text(encoding="utf-8"))
+        side = json.loads(Path(a.sidecar).read_text(encoding="utf-8"))
+    except OSError as e:
+        print(f"[ERR] 读不了：{e}", file=sys.stderr)
+        return 2
+    except json.JSONDecodeError as e:
+        print(f"[ERR] 不是 JSON：{e}", file=sys.stderr)
+        return 2
+    bad = lspe.verify(artifact, side)
+    if bad:
+        for b in bad:
+            print(f"[LSPE] {b}", file=sys.stderr)
+        return 1
+    print(f"[LSPE] ok: {len(side.get('sites') or {})} site(s), "
+          f"root {side.get('root')}")
+    return 0
+
+
+def _lspc_mode(a, mod) -> str:
+    import lspe
+    if getattr(a, "lspc", None):
+        return a.lspc
+    return lspe.lspc_default(mod.chooses.get("lspe", lomentc.CORE_DEFAULTS["lspe"]),
+                             str(getattr(mod, "lspe_mode", "full")))
+
+
+def cmd_lspc_check(a) -> int:
+    """`loment lspc check FILE` —— 只跑前端，出预检单，**不写文件**（`#758`）。
+
+    默认退出码 0；`--lspc=strict` 只对**未 ack 的高风险族**阻断。
+    这也是"编译前"的操作形态：类型检查跑过、代码生成没跑。
+    """
+    import json
+    import lspe
+    p, mod, deps = _lspe_input(a, check_it=False)
+    # **检查错误不妨碍出单**（`#758` 验收第 1 条）：LSPC 是告知，不是闸门。
+    errs = lomentc.check(mod, deps=deps)
+    ledger = lspe.build_ledger(
+        sites=getattr(mod, "lspe_sites", []),
+        state=mod.chooses.get("lspe", lomentc.CORE_DEFAULTS["lspe"]),
+        set_by=("source" if "lspe" in mod.chooses else "default"),
+        level=int(getattr(mod, "lspe_level", 3)),
+        toks=getattr(mod, "toks", []), unit=mod.name,
+        deps=[getattr(d, "toks", []) for d in deps],
+        passes=getattr(mod, "lspe_passes", []),
+        mode=str(getattr(mod, "lspe_mode", "full")),
+        answers=getattr(mod, "lspe_answers", None),
+        dims={k: mod.chooses.get(k, lomentc.CORE_DEFAULTS[k])
+              for k in lomentc.CORE_DIM_ORDER},
+        facts=lomentc._lspe_facts(mod, deps),
+        sidecar=bool(getattr(a, "previous_sidecar", None)))
+    # 跨构建记忆（`#760`）：上一轮的 deferred / 过期假设 / close_admin。
+    prev_art = prev_side = None
+    for attr, fname in (("previous", "artifact"), ("previous_sidecar", "sidecar")):
+        path = getattr(a, attr, None)
+        if not path:
+            continue
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"[ERR] 读不了 {fname} {path}: {e}", file=sys.stderr)
+            raise SystemExit(2)
+        if attr == "previous":
+            prev_art = data
+        else:
+            prev_side = data
+    previous = lspe.previous_items(prev_art, prev_side, ledger.get("_trees"))
+    mode = _lspc_mode(a, mod)
+    sheet = lspe.lspc_sheet(
+        getattr(mod, "lspe_sites", []), ledger,
+        dims={k: mod.chooses.get(k, lomentc.CORE_DEFAULTS[k])
+              for k in lomentc.CORE_DIM_ORDER},
+        facts=lomentc._lspe_facts(mod, deps),
+        previous=previous,
+        mode=mode,
+        acks=lspe.parse_acks(getattr(mod, "lspe_answers", {}) or {}))
+    if getattr(a, "json", False):
+        print(json.dumps(sheet, ensure_ascii=False, indent=2))
+    else:
+        for line in lspe.lspc_text(sheet):
+            print(line)
+        for e in errs:
+            print(f"[ERR] {e}", file=sys.stderr)
+    if mode == "strict" and sheet["blocking"]:
+        print("[LSPC] strict: 未 ack 的高风险族阻断 —— " + ", ".join(sheet["blocking"]),
+              file=sys.stderr)
+        return 1
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -458,15 +622,37 @@ def main(argv: list[str] | None = None) -> int:
     lps = lsub.add_parser("state")
     lps.add_argument("file")
     lps.add_argument("--lspe-level", type=int, default=3, choices=(0, 1, 2, 3, 4))
+    lps.add_argument("--lspe-mode", default="full", choices=("full", "quiet", "strict"))
+    lps.add_argument("--answer", action="append", metavar="SITE=B")
+    lps.add_argument("--answers", default=None, metavar="FILE")
     lps.set_defaults(fn=cmd_lspe_state)
     lpw = lsub.add_parser("why")
     lpw.add_argument("site")
     lpw.add_argument("file", nargs="?")
+    lpw.add_argument("--lspe-level", type=int, default=3, choices=(0, 1, 2, 3, 4))
+    lpw.add_argument("--lspe-mode", default="full", choices=("full", "quiet", "strict"))
+    lpw.add_argument("--answer", action="append", metavar="SITE=B")
+    lpw.add_argument("--answers", default=None, metavar="FILE")
     lpw.set_defaults(fn=cmd_lspe_why)
     lpv = lsub.add_parser("verify")
     lpv.add_argument("artifact")
     lpv.add_argument("sidecar", nargs="?")
     lpv.set_defaults(fn=cmd_lspe_verify)
+    lc = sub.add_parser("lspc")
+    lcsub = lc.add_subparsers(dest="lspc_cmd", required=True)
+    lcc = lcsub.add_parser("check")
+    lcc.add_argument("file")
+    lcc.add_argument("--json", action="store_true")
+    lcc.add_argument("--lspc", default=None, choices=("full", "quiet", "strict", "off"))
+    lcc.add_argument("--lspe-level", type=int, default=3, choices=(0, 1, 2, 3, 4))
+    lcc.add_argument("--lspe-mode", default="full", choices=("full", "quiet", "strict"))
+    lcc.add_argument("--answer", action="append", metavar="SITE=B")
+    lcc.add_argument("--answers", default=None, metavar="FILE")
+    lcc.add_argument("--previous", default=None, metavar="ARTIFACT",
+                     help="上一轮的 potato.json（跨构建记忆，`#760`）")
+    lcc.add_argument("--previous-sidecar", default=None, metavar="FILE",
+                     help="上一轮的 .lspe 旁挂（判『过期假设』用）")
+    lcc.set_defaults(fn=cmd_lspc_check)
     for name in ("build", "pkg", "lsp", "lib"):
         s = sub.add_parser(name)
         s.add_argument("rest", nargs=argparse.REMAINDER)

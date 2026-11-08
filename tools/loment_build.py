@@ -128,7 +128,8 @@ def _git_tracked(out: Path) -> list[str]:
     return [ln for ln in r.stdout.splitlines() if ln.strip()]
 
 
-def build_one(p: Path, out: Path, root: Path, toolchain: str = "") -> dict:
+def build_one(p: Path, out: Path, root: Path, toolchain: str = "",
+              lspe_sidecar: bool = False, lspe_cache: bool = True) -> dict:
     key = cache_key(dep_files(p, root, set()), toolchain)
     rec = {"file": _rel(p), "key": key, "toolchain": toolchain,
            "artifacts": [], "hashes": {}, "ok": True, "error": ""}
@@ -140,7 +141,18 @@ def build_one(p: Path, out: Path, root: Path, toolchain: str = "") -> dict:
             rec["error"] = errs[0]
             return rec
         rust = lomentc.emit_rust(mod, root, deps)
-        potato = lomentc.emit_potato(mod, root, deps)
+        side: dict = {}
+        diag: dict = {}
+        cache = None
+        if lspe_cache:
+            import lspe as _lspe
+            cache = _lspe.Cache(
+                ROOT, mod.name, key, {k: mod.chooses.get(k, lomentc.CORE_DEFAULTS[k])
+                                      for k in lomentc.CORE_DIM_ORDER},
+                int(getattr(mod, "lspe_level", 3)))
+        potato = lomentc.emit_potato(mod, root, deps, sidecar=lspe_sidecar,
+                                     sidecar_out=side, diag_out=diag, cache=cache)
+        rec["lspe"] = diag
         # **`newline="\n"` 不能省**: 默认会按平台转换, 于是在 Windows 上写出的产物是 CRLF,
         # 而 `.gitattributes` 对 `*.rs`/`*.json`/`*.ll` 定的是 `eol=lf` —— 检出回来是 LF。
         # 两者一比就"不一致", 于是**"重生成的产物 == 仓库里的"这条判据在 Windows 上必然假红**。
@@ -149,6 +161,12 @@ def build_one(p: Path, out: Path, root: Path, toolchain: str = "") -> dict:
         (out / f"{p.stem}.rs").write_text(rust, encoding="utf-8", newline="\n")
         (out / f"{p.stem}.potato.json").write_text(potato, encoding="utf-8", newline="\n")
         rec["artifacts"] = [f"{p.stem}.rs", f"{p.stem}.potato.json"]
+        if lspe_sidecar and side:
+            import json as _json
+            (out / f"{p.stem}.lspe").write_text(
+                _json.dumps(side, ensure_ascii=False, indent=1, sort_keys=True) + "\n",
+                encoding="utf-8", newline="\n")
+            rec["artifacts"].append(f"{p.stem}.lspe")
         try:
             ll = lomentc.emit_llvm(mod, root, deps)
             (out / f"{p.stem}.ll").write_text(ll, encoding="utf-8", newline="\n")
@@ -168,6 +186,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", default=None)
     ap.add_argument("--clean", action="store_true")
     ap.add_argument("--report", action="store_true")
+    ap.add_argument("--json", action="store_true",
+                    help="输出每条记录的 JSON（含 LSPE 问题与不变量，`#753`）")
+    ap.add_argument("--no-lspe-cache", action="store_true",
+                    help="关掉站点级 LSPE 缓存（`#752`，默认开）")
+    ap.add_argument("--lspe-sidecar", action="store_true",
+                    help="同时写 <单元>.lspe 旁挂（派生树 + 证明哈希，`#748`/`#749`）")
     a = ap.parse_args(argv)
     src_dir = Path(a.dir).resolve()
     out = Path(a.out).resolve() if a.out else src_dir / "build"
@@ -207,7 +231,8 @@ def main(argv: list[str] | None = None) -> int:
             records.append(prev)
             continue
         miss += 1
-        rec = build_one(p, out, ROOT, toolchain)
+        rec = build_one(p, out, ROOT, toolchain, lspe_sidecar=a.lspe_sidecar,
+                        lspe_cache=not a.no_lspe_cache)
         rec["file"] = rel
         records.append(rec)
         if not rec["ok"]:
@@ -217,6 +242,8 @@ def main(argv: list[str] | None = None) -> int:
                           + "\n", encoding="utf-8", newline="\n")
     print(f"[{'COLD' if hit == 0 else 'HOT '}] {len(files)} 个单元: "
           f"{hit} 命中 / {miss} 重编 / {bad} 失败 — {dt * 1000:.1f} ms")
+    if a.json:
+        print(json.dumps({"records": records}, ensure_ascii=False, indent=1))
     if a.report:
         print("| 文件 | 缓存 | 产物 | 备注 |")
         print("|---|---|---|---|")

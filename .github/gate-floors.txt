@@ -13,8 +13,8 @@
 
 lomc_test 25
 lomentc_test 211
-lspe_test 14
-potato_test 17
+lspe_test 39
+potato_test 18
 loment_ct_test 2
 loment_comefor_test 12
 loment_choose_matrix_test 24

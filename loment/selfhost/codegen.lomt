@@ -8919,9 +8919,13 @@ wscan:
 wmk2:
   %wd32 = trunc i64 %wdo to i32
   %wr = call i32 @__loment_markp(i32 %wd32)
+  ; **累加器只增不减**（`#1444`）：`markp` 对**已标记**的块回 0，直接把它当这一趟的结果
+  ; 会把同一趟里先前找到的新标记**抹掉** —— 于是「这一趟没有新东西」误报，不动点提前停，
+  ; 更深的可达链被当成垃圾扫掉（use-after-free）。
+  %wacc3 = or i32 %wacc, %wr
   br label %wlc2
 wlc2:
-  %wacc2 = phi i32 [ %wacc, %wx ], [ %wacc, %wscan ], [ %wr, %wmk2 ]
+  %wacc2 = phi i32 [ %wacc, %wx ], [ %wacc, %wscan ], [ %wacc3, %wmk2 ]
   %wj2 = add i32 %wj, 8
   br label %wl
 wn:
@@ -9196,9 +9200,13 @@ wscan:
 wmk2:
   %wd32 = trunc i64 %wdo to i32
   %wr = call i32 @__loment_markp(i32 %wd32)
+  ; **累加器只增不减**（`#1444`）：`markp` 对**已标记**的块回 0，直接把它当这一趟的结果
+  ; 会把同一趟里先前找到的新标记**抹掉** —— 于是「这一趟没有新东西」误报，不动点提前停，
+  ; 更深的可达链被当成垃圾扫掉（use-after-free）。
+  %wacc3 = or i32 %wacc, %wr
   br label %wlc2
 wlc2:
-  %wacc2 = phi i32 [ %wacc, %wx ], [ %wacc, %wscan ], [ %wr, %wmk2 ]
+  %wacc2 = phi i32 [ %wacc, %wx ], [ %wacc, %wscan ], [ %wacc3, %wmk2 ]
   %wj2 = add i32 %wj, 8
   br label %wl
 wn:

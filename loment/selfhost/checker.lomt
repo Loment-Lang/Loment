@@ -588,6 +588,14 @@ fn chk_rt_site(src: ptr, t: ptr, i: u32, prof: u32) -> u32 {
         }
         return 0;
     }
+    if chk_tok_is(src, t, i, "quality") || chk_tok_is(src, t, i, "discharge")
+            || chk_tok_is(src, t, i, "domain") {
+        // 与 `guard` 同一位置判据：后面紧跟一个名字才算（参考实现同一条）。
+        if chk_tok_kind(t, i + 1) == 0 {
+            return 1;
+        }
+        return 0;
+    }
     // `tick;` 是语句（`docs/308` §2.1）：后面紧跟 `;` 才算（参考实现同一条）。
     if chk_tok_is(src, t, i, "tick") {
         if chk_tok_is(src, t, i + 1, ";") {
@@ -862,6 +870,15 @@ fn chk_find_paren(src: ptr, t: ptr, i: u32) -> u32 {
 /// 于是一串假 E-TYPE (codegen 的 `skip_type` 当初也是漏了 `<...>` 才踩同一个坑)。
 /// 前缀 `chk_` 的理由同 `chk_find_paren` (扁平符号表)。
 fn chk_skip_type(src: ptr, t: ptr, i: u32) -> u32 {
+    let e: u32 = chk_skip_type0(src, t, i);
+    // docs/313：类型后面可以跟 `in SPACE`（值的空间标签）
+    if chk_tok_is(src, t, e, "in") && chk_tok_kind(t, e + 1) == 0 {
+        return e + 2;
+    }
+    return e;
+}
+
+fn chk_skip_type0(src: ptr, t: ptr, i: u32) -> u32 {
     let j: u32 = i;
     if chk_tok_is(src, t, j, "mut") {
         j = j + 1;
@@ -913,6 +930,7 @@ fn chk_is_kw(src: ptr, t: ptr, i: u32) -> u32 {
             || chk_tok_is(src, t, i, "match") || chk_tok_is(src, t, i, "guard")
             || chk_tok_is(src, t, i, "tick")
             || chk_tok_is(src, t, i, "quality") || chk_tok_is(src, t, i, "discharge")
+            || chk_tok_is(src, t, i, "domain")
             || chk_tok_is(src, t, i, "let") || chk_tok_is(src, t, i, "fn")
             || chk_tok_is(src, t, i, "struct") || chk_tok_is(src, t, i, "enum")
             || chk_tok_is(src, t, i, "const") || chk_tok_is(src, t, i, "use")
@@ -1405,6 +1423,9 @@ fn chk_guard_has_aux(src: ptr, t: ptr, i: u32) -> u32 {
 fn chk_cap_law_is(src: ptr, t: ptr, ctab: ptr, nc: u32, i: u32, want: u32,
                   p: ptr, o: u32) -> u32 {
     let nt: u32 = i + 1;
+    if chk_dom_has(src, t, i, nt) == 1 {
+        return o;
+    }
     let k: u32 = 0;
     let found: u32 = 0;
     while k < nc {
@@ -1422,8 +1443,59 @@ fn chk_cap_law_is(src: ptr, t: ptr, ctab: ptr, nc: u32, i: u32, want: u32,
     return o;
 }
 
+/// `domain NAME : ...{` 的一个头，名字是否等于 nt（`docs/313`）。
+fn chk_dom_name_at(src: ptr, t: ptr, hdr: u32, nt: u32) -> u32 {
+    let k: u32 = hdr + 1;
+    if chk_tok_kind(t, k) != 0 {
+        return 0;
+    }
+    if chk_tok_is(src, t, k + 1, ":") {
+        return same(src, t, k, nt) as u32;
+    }
+    return 0;
+}
+
+/// `guard/quality/discharge NAME` 的 NAME 是不是某个外层 `domain` 块声明的。
+/// 反向走 token：`}` 加深，`{` 变浅；在深度 0 的 `{` 处回头看它的头。
+fn chk_dom_has(src: ptr, t: ptr, at: u32, nt: u32) -> u32 {
+    let depth: u32 = 0;
+    let k: u32 = at;
+    while k > 0 {
+        k = k - 1;
+        if chk_tok_is(src, t, k, "}") {
+            depth = depth + 1;
+        } else if chk_tok_is(src, t, k, "{") {
+            if depth > 0 {
+                depth = depth - 1;
+            } else {
+                let h: u32 = k;
+                let stop: u32 = 0;
+                while h > 0 && stop == 0 {
+                    h = h - 1;
+                    if chk_tok_is(src, t, h, "domain") {
+                        if chk_dom_name_at(src, t, h, nt) == 1 {
+                            return 1;
+                        }
+                        stop = 1;
+                    }
+                    if chk_tok_is(src, t, h, ";") || chk_tok_is(src, t, h, "{")
+                            || chk_tok_is(src, t, h, "}") || chk_tok_is(src, t, h, "if")
+                            || chk_tok_is(src, t, h, "while") || chk_tok_is(src, t, h, "for")
+                            || chk_tok_is(src, t, h, "match") || chk_tok_is(src, t, h, "else") {
+                        stop = 1;
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
 fn chk_guard(src: ptr, t: ptr, ctab: ptr, nc: u32, i: u32, p: ptr, o: u32) -> u32 {
     let nt: u32 = i + 1;
+    if chk_dom_has(src, t, i, nt) == 1 {
+        return o;   // 块级域：名字在作用域里，实参规则由发射器按同一份源再判
+    }
     let k: u32 = 0;
     let found: u32 = 0;
     while k < nc {
@@ -3638,7 +3710,7 @@ fn chk_stmt_end(src: ptr, t: ptr, cur: u32, e: u32) -> u32 {
     }
     if chk_tok_is(src, t, cur, "if") || chk_tok_is(src, t, cur, "while")
             || chk_tok_is(src, t, cur, "for") || chk_tok_is(src, t, cur, "match")
-            || islgc == 1 {
+            || chk_tok_is(src, t, cur, "domain") || islgc == 1 {
         let k0: u32 = chk_skip_body(src, t, cur);
         let k: u32 = k0;
         while k < e && chk_tok_is(src, t, k, "else") {
@@ -3678,6 +3750,15 @@ fn chk_falls(src: ptr, t: ptr, b: u32, e: u32) -> u32 {
     }
     if chk_tok_is(src, t, last, "return") {
         return 0;
+    }
+    if chk_tok_is(src, t, last, "domain") {
+        // docs/313：块的末尾就是函数的末尾 —— 块里不掉，函数就不掉
+        let lb: u32 = chk_find_at(src, t, last + 1, e, "{");
+        if lb >= e {
+            return 1;
+        }
+        let le: u32 = chk_skip_body(src, t, lb) - 1;
+        return chk_falls(src, t, lb, le);
     }
     if chk_tok_is(src, t, last, "if") {
         let lb: u32 = chk_find_at(src, t, last + 1, e, "{");
@@ -3768,6 +3849,14 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 || chk_tok_is(src, t, j, ";")
                 || chk_tok_is(src, t, j, "=>") {
             j = j + 1;
+        } else if chk_tok_is(src, t, j, "domain") {
+            // `docs/313`：`domain … {` 的头不是代码 —— 只把游标挪到 `{`，
+            // 体里的语句照常逐条检查（作用域由 `chk_dom_has` 那把反向扫描认）。
+            let k: u32 = j + 1;
+            while chk_tok_kind(t, k) != 4 && !chk_tok_is(src, t, k, "{") {
+                k = k + 1;
+            }
+            j = k;
         } else if load32(oc, 8) != 0 && chk_tok_is(src, t, j, "defer") {
             // Tur 2 的 `defer f(a, b);`（`docs/296` §2.3）：只收**函数调用**。参考实现在
             // 解析期就拒（E019）；自举侧原先让 `defer 1;` 一路走到发射器，报出来的是捕获表
@@ -4795,6 +4884,14 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
         // 调用检查里报"未定义的函数 epoch"（实测：孪生对拍第一版就红在这里）。
         if chk_tok_is(src, t, i, "capability") {
             i = chk_cap_end(src, t, i);
+            skipped = 1;
+        }
+        if chk_tok_is(src, t, i, "domain") {
+            // docs/313：域块的头不是代码（`consumed(1)` / `epoch(3)` 长得像调用）——
+            // 跳到 `{`，体里的语句下一轮照常扫。
+            while chk_tok_kind(t, i) != 4 && !chk_tok_is(src, t, i, "{") {
+                i = i + 1;
+            }
             skipped = 1;
         }
         if skipped == 0 {

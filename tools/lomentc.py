@@ -10150,6 +10150,9 @@ class _Ir:
         #: 位置数，两边得到同一个序号）。
         self.gc_site_map = _alloc_site_map(f.body) if self.gc_hook else {}
         self.gc_sites = len(self.gc_site_map)
+        #: 本语句已经写过的最大的槽号 + 1（0 = 本语句没分配过）。语句边界清零，
+        #: 见 `stmt()` 顶上那次 `_gc_flush` —— 槽只活一条语句，不活到帧尾。
+        self.gc_dirty = 0
         #: 当前打开的窗口（`begin` 的编号栈）。`return` 提前离开时按它逆序恢复。
         self.lgc_open: list[int] = []
         self.lgc_next = 0
@@ -10207,6 +10210,17 @@ class _Ir:
             # 一个"不像"的值（0 让那次比较直接落空）。
             self.w(f"%gc.sp.{i} = alloca ptr")
             self.w(f"store ptr null, ptr %gc.sp.{i}")
+
+    def _gc_flush(self) -> None:
+        """语句边界：把本语句用过的 spill 槽写回 `null`（`#1465`）。
+
+        只清 `0 .. gc_dirty-1`：那之外的槽本语句没碰过，内容在上一条语句结束时已经清过。
+        """
+        if not self.gc_sites or self.gc_dirty <= 0:
+            return
+        for k in range(self.gc_dirty):
+            self.w(f"store ptr null, ptr %gc.sp.{k}")
+        self.gc_dirty = 0
 
     def dbg_for(self, line: int) -> int | None:
         """M59: 行号 -> DILocation id (每函数一份, 由 emit_llvm 分配)。"""
@@ -10929,9 +10943,11 @@ class _Ir:
         if self.gc_sites:
             # **先把结果存进本帧的 spill 槽**（`#1465`）：这个值接下来可能在寄存器里
             # 活过下一次分配，而根表只看得见槽 —— 不存就等于把一块活着的内存交给收集器。
-            # 槽按**源码序**编号（与自举侧按 token 位置数出来的那个号一致）。
+            # 槽按**源码序**编号（与自举侧按 token 位置数出来的那个号一致），
+            # 并在本语句结束时清掉（`_gc_flush`）。
             k = self.gc_site_map[id(site)]
             self.w(f"store ptr {p}, ptr %gc.sp.{k}")
+            self.gc_dirty = max(self.gc_dirty, k + 1)
         if self.threads:
             self.w("call void @__loment_rt_release()")
         return p
@@ -11436,6 +11452,11 @@ class _Ir:
         self.w(f"store {it} {nxt}, ptr {ptr}")
 
     def stmt(self, s) -> None:
+        # **语句边界清 spill 槽**（`#1465`）：一个分配结果只要活得比本条语句长，
+        # 就是**泄漏**（`docs/210` §2 的 L3 残差本来就该没人认领才能收回）。根扫看得见
+        # 槽是为了"同一表达式里的下一次分配别把它当垃圾"，不是为了把它钉死到函数末尾。
+        if not self.terminated:
+            self._gc_flush()
         line = getattr(s, "line", None)
         if line:
             loc = self.dbg_for(line)

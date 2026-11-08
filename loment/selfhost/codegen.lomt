@@ -135,7 +135,9 @@ const CG_CPP_MAX: u32 = 32;
 const CG_CPN: u32 = 926544;           // = CG_CPP + 256
 const CG_BYTES: u32 = 926548;         // = CG_CPN + 4
 //: **分配站点的 spill 槽**（`#1465`）：根表只登记具名槽，表达式里的 SSA 临时值不是根。
-//: 本函数第 k 次 `__loment_alloc` 把结果写进 `%gc.sp.k`，槽本身按具名槽登记。
+//: 每个站点一格 `%gc.sp.k`（k 按**源码序**），分配完立刻写进去、**语句边界清零**。
+//:   `CG_GCDIRTY` = 本语句写过的最大的站点号 + 1（0 = 本语句没分配过）
+const CG_GCDIRTY: u32 = 784;
 use bytes
 use lexer
 
@@ -3778,6 +3780,10 @@ fn emit_alloc_seq(s: ptr, out: ptr, src: ptr, toks: ptr,
         emit_str(s, out, ", ptr %gc.sp.");
         emit_dec(s, out, site);
         emit_str(s, out, "\n");
+        let want: u32 = site + 1;
+        if want > load32(s, CG_GCDIRTY) {
+            store32(s, CG_GCDIRTY, want);
+        }
     }
     if load32(s, 556) == 1 {
         emit_str(s, out, "  call void @__loment_rt_release()\n");
@@ -5412,6 +5418,7 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
     let has05: u32 = l05_plan(s, src, toks, nl);   // L0.5：本函数开不开区
     let nlgc: u32 = lgc_windows(src, toks, body_at, body_end);   // 本函数的窗口数（入口块开槽）
     let nsite: u32 = alloc_sites(src, toks, body_at, body_end);  // 分配站点数（spill 槽）
+    store32(s, CG_GCDIRTY, 0);   // spill 槽的脏标记按**函数**清零（`#1465`）
     if tok_is(src, toks, base - 1, "interrupt") {   // M33: x86_intrcc 需要中断帧指针, 无参数
         emit_str(s, out, "; ");
         emit_tok(s, out, src, toks, base + 1);
@@ -7018,6 +7025,10 @@ fn dom_stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
 }
 
 fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
+    // **语句边界清 spill 槽**（`#1465`）：分配结果只活到本条语句结束，不活到帧尾。
+    if load32(s, 476) == 0 && gc_hook(s) == 1 {
+        gc_flush(s, out);
+    }
     if load32(s, CG_PROF) == 2 && tok_kind(toks, j) == 0 && tok_is(src, toks, j, "lgc") {
         // `lgc` 的时间控制（`docs/309`）：只在 Tur 2026.3 是关键字。
         return lgc_stmt(s, out, src, toks, j, ret);
@@ -11165,6 +11176,24 @@ fn alloc_sites(src: ptr, toks: ptr, b: u32, e: u32) -> u32 {
         i = i + 1;
     }
     return n;
+}
+
+/// 语句边界：把本语句用过的 spill 槽写回 `null`（`#1465`）。只清 `0 .. CG_GCDIRTY-1`，
+/// 与参考实现的 `_Ir._gc_flush` 同序、同文本。
+fn gc_flush(s: ptr, out: ptr) -> u32 {
+    let n: u32 = load32(s, CG_GCDIRTY);
+    if n == 0 {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < n {
+        emit_str(s, out, "  store ptr null, ptr %gc.sp.");
+        emit_dec(s, out, i);
+        emit_str(s, out, "\n");
+        i = i + 1;
+    }
+    store32(s, CG_GCDIRTY, 0);
+    return 0;
 }
 
 /// 入口块里的 spill 槽（`#1465`）：一个站点一格，**入口清零**。

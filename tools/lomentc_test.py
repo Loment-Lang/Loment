@@ -3813,6 +3813,10 @@ def test_alloc_results_are_spilled_into_the_root_table():
     for i in (0, 1):
         assert f"store ptr null, ptr %gc.sp.{i}" in auto, f"槽 {i} 没有入口清零"
         assert f"ptrtoint ptr %gc.sp.{i} to i64" in auto, f"槽 {i} 没登记进根表"
+        # 入口一次 + 语句边界一次（`#1465`：槽只活一条语句，不活到帧尾）
+        assert auto.count(f"store ptr null, ptr %gc.sp.{i}") == 2, (
+            f"槽 {i} 的清零次数是 {auto.count(f'store ptr null, ptr %gc.sp.{i}')}，"
+            "该是两次（入口 + 语句边界）—— 少的那次就是泄漏")
     # 每个 `alloc` 的**下一条**就是落槽（值在寄存器里活过下一次分配之前必须进槽）。
     lines = auto.splitlines()
     hit = []

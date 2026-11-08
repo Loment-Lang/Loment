@@ -66,7 +66,10 @@ fn state_name(s: u32) -> str {
     return "unavailable";
 }
 
-fn state_of(req: u32, ok: u32) -> u32 {
+fn state_of(req: u32, ok: u32, impl: u32) -> u32 {
+    if impl == 0 {
+        return 2;                 // 能力齐了但槽位还没实现，也是 unavailable
+    }
     if req == 0 {
         return 0;
     }
@@ -118,6 +121,16 @@ fn probe_time_mono() -> u32 {
     return 0;
 }
 
+fn probe_pdh() -> u32 {
+    let path: str = "\\Processor Information(_Total)\\% Processor Time";
+    let out: ptr = alloc(16);
+    let r: i64 = syscall4(4096, str_ptr(path) as u64, str_len(path) as u64, out as u64);
+    if r == 0 {
+        return CAP_PDH;
+    }
+    return 0;
+}
+
 fn probes() -> u32 {
     let caps: [u32; 19] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                            0, 0, 0, 0, 0, 0, 0, 0, 0];
@@ -125,6 +138,7 @@ fn probes() -> u32 {
     caps[1] = probe_fs_stat();
     caps[2] = probe_net_tcp();
     caps[3] = probe_time_mono();
+    caps[5] = probe_pdh();
     let ok: u32 = 0;
     let i: u32 = 0;
     while i < CAP_N {
@@ -137,8 +151,9 @@ fn probes() -> u32 {
 // ---------------------------------------------------------------- 注册表
 // 记录格式：`name,requires;` —— 名字里没有逗号或分号，解析只要两路分支。
 
+// 每条记录三个字段：name,requires,implemented; —— implemented=0 时能力再全也报 unavailable。
 fn registry() -> str {
-    return "cpu.freq,32;cpu.load,16;cpu.sched,48;gpu.util,1056;gpu.mem,1056;gpu.clock,1024;gpu.therm,1024;gpu.proc,1056;mem.phys,128;mem.proc,192;mem.page,128;mem.leak,192;storage.space,256;storage.io,288;storage.proc,320;storage.cache,288;storage.smart,8192;storage.watch,8192;net.link,512;net.sock,512;net.bw,544;net.lat,4;proc.tree,64;proc.fd,64;proc.thread,131136;proc.sys,262208;power.batt,2048;power.rapl,2080;power.therm,2080;power.budget,2080;build.cache,32769;build.time,65537;build.dep,1;build.artifact,3;env.tool,4097;env.port,512;env.svc,4;env.watch,8193;";
+    return "cpu.freq,32,0;cpu.load,32,1;cpu.sched,48,0;gpu.util,1056,0;gpu.mem,1056,0;gpu.clock,1024,0;gpu.therm,1024,0;gpu.proc,1056,0;mem.phys,128,0;mem.proc,192,0;mem.page,128,0;mem.leak,192,0;storage.space,256,0;storage.io,288,0;storage.proc,320,0;storage.cache,288,0;storage.smart,8192,0;storage.watch,8192,0;net.link,512,0;net.sock,512,0;net.bw,544,0;net.lat,4,0;proc.tree,64,0;proc.fd,64,0;proc.thread,131136,0;proc.sys,262208,0;power.batt,2048,0;power.rapl,2080,0;power.therm,2080,0;power.budget,2080,0;build.cache,32769,0;build.time,65537,0;build.dep,1,0;build.artifact,3,0;env.tool,4097,0;env.port,512,0;env.svc,4,0;env.watch,8193,0;";
 }
 
 fn caps_blob() -> str {
@@ -153,7 +168,8 @@ fn cmd_list(json: u32, ok: u32) {
     let s: u32 = 0;
     let ne: u32 = 0;
     let mask: u32 = 0;
-    let in_mask: bool = false;
+    let impl: u32 = 0;
+    let field: u32 = 0;
     let first: bool = true;
     let avail: u32 = 0;
 
@@ -166,12 +182,17 @@ fn cmd_list(json: u32, ok: u32) {
     while i < n {
         let c: u32 = str_byte(reg, i);
         if c == 44 {
-            ne = i;
-            in_mask = true;
-            mask = 0;
+            if field == 0 {
+                ne = i;
+                field = 1;
+                mask = 0;
+            } else {
+                field = 2;
+                impl = 0;
+            }
         } else {
             if c == 59 {
-                let st: u32 = state_of(mask, ok);
+                let st: u32 = state_of(mask, ok, impl);
                 if st == 0 {
                     avail = avail + 1;
                 }
@@ -183,7 +204,13 @@ fn cmd_list(json: u32, ok: u32) {
                     w(str_ptr(reg), s, ne - s);
                     print("\",\"state\":\"");
                     print(state_name(st));
-                    print("\",\"requires\":");
+                    print("\",\"implemented\":");
+                    if impl == 1 {
+                        print("true");
+                    } else {
+                        print("false");
+                    }
+                    print(",\"requires\":");
                     print_num(mask);
                     print("}");
                 } else {
@@ -196,10 +223,14 @@ fn cmd_list(json: u32, ok: u32) {
                 }
                 first = false;
                 s = i + 1;
-                in_mask = false;
+                field = 0;
             } else {
-                if in_mask {
+                if field == 1 {
                     mask = mask * 10 + (c - 48);
+                } else {
+                    if field == 2 {
+                        impl = impl * 10 + (c - 48);
+                    }
                 }
             }
         }
@@ -308,12 +339,51 @@ fn cmd_doctor(json: u32, ok: u32) {
     }
 }
 
+// ---------------------------------------------------------------- 槽位：cpu.load
+fn read_u32_le(p: ptr) -> u32 {
+    let v: u32 = load8(p, 0) as u32;
+    v = v + (load8(p, 1) as u32) * 256;
+    v = v + (load8(p, 2) as u32) * 65536;
+    v = v + (load8(p, 3) as u32) * 16777216;
+    return v;
+}
+
+fn cmd_cpu_load(json: u32, ok: u32) {
+    if (CAP_PDH & ok) != CAP_PDH {
+        print("lmgr: cpu.load needs win.pdh, which this platform does not provide\n");
+        syscall4(60, 2, 0, 0);
+        return;
+    }
+    let path: str = "\\Processor Information(_Total)\\% Processor Time";
+    let out: ptr = alloc(16);
+    let r: i64 = syscall4(4096, str_ptr(path) as u64, str_len(path) as u64, out as u64);
+    if r != 0 {
+        print("lmgr: cpu.load probe failed (");
+        print_num(r as u32);
+        print(")\n");
+        syscall4(60, 2, 0, 0);
+        return;
+    }
+    let v: u32 = read_u32_le(out);
+    if json == 1 {
+        print("{\"schema\":\"lmgr/v1\",\"manager\":\"cpu.load\",\"rows\":[{\"key\":\"total\",\"fields\":{\"busy_pct\":");
+        print_num(v);
+        print("}}],\"degraded\":false,\"missing\":[]}\n");
+    } else {
+        print("KEY    BUSY_PCT\n");
+        print("total  ");
+        print_num(v);
+        print("\n");
+    }
+}
+
 // ---------------------------------------------------------------- 入口
 fn usage() {
     print("lmgr — LomentManager (docs/303)\n");
     print("\n");
     print("  lmgr list [--json]      the 38-slot registry and per-slot state\n");
     print("  lmgr doctor [--json]    one row per capability, with the probe result\n");
+    print("  lmgr cpu load [--json]  overall CPU busy percentage (PDH)\n");
     print("\n");
 }
 
@@ -322,11 +392,17 @@ fn main() {
     let scr: ptr = alloc(256);
     let a1: u64 = argv_scan(buf, 512 as u64, scr, 1);
     let a2: u64 = argv_scan(buf, 512 as u64, scr, 2);
+    let a3: u64 = argv_scan(buf, 512 as u64, scr, 3);
     let ok: u32 = probes();
     let json: u32 = 0;
 
     if a2 != 0 {
         if argv_eq(buf, a2, "--json") {
+            json = 1;
+        }
+    }
+    if a3 != 0 {
+        if argv_eq(buf, a3, "--json") {
             json = 1;
         }
     }
@@ -342,6 +418,17 @@ fn main() {
     }
     if argv_eq(buf, a1, "doctor") {
         cmd_doctor(json, ok);
+        return;
+    }
+    if argv_eq(buf, a1, "cpu") {
+        if a2 != 0 {
+            if argv_eq(buf, a2, "load") {
+                cmd_cpu_load(json, ok);
+                return;
+            }
+        }
+        print("lmgr: cpu needs a slot (e.g. `lmgr cpu load`)\n");
+        syscall4(60, 64, 0, 0);
         return;
     }
     if argv_eq(buf, a1, "--json") {

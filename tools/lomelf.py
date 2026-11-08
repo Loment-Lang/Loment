@@ -2041,8 +2041,14 @@ PE_IMPORTS_WS2 = ["WSAStartup", "socket", "connect", "bind", "listen", "accept",
                   "send", "recv", "sendto", "recvfrom", "closesocket", "shutdown",
                   "setsockopt", "getsockopt", "getpeername", "getsockname",
                   "ioctlsocket", "select", "WSAGetLastError"]
+# 第三个导入 DLL：性能计数器（PDH）。它是平 C API —— 无 COM、无回调 —— 所以一张
+# 导入表就能解开 CPU/GPU/磁盘/网络/温度九类计数器（`docs/303` §2）。
+# 只用 A 版：本语言的字符串是字节，没有 UTF-16。
+PE_IMPORTS_PDH = ["PdhOpenQueryA", "PdhAddEnglishCounterA", "PdhCollectQueryData",
+                  "PdhGetFormattedCounterValue", "PdhCloseQuery"]
 # 描述符表 = 每个 DLL 一条 + 一条全零终止项（少了终止项加载器会把 ILT 当第二条描述符）。
-PE_DLLS = [("kernel32.dll", PE_IMPORTS), ("ws2_32.dll", PE_IMPORTS_WS2)]
+PE_DLLS = [("kernel32.dll", PE_IMPORTS), ("ws2_32.dll", PE_IMPORTS_WS2),
+           ("pdh.dll", PE_IMPORTS_PDH)]
 PE_IMPORT_DESC_BYTES = 20 * (len(PE_DLLS) + 1)
 PE_STD_INPUT, PE_STD_OUTPUT, PE_STD_ERROR = -10, -11, -12
 SYS_READ, SYS_WRITE, SYS_CLOSE, SYS_BRK, SYS_EXIT = 0, 1, 3, 12, 60
@@ -2054,6 +2060,10 @@ SYS_BIND, SYS_LISTEN, SYS_GETSOCKNAME, SYS_GETPEERNAME = 49, 50, 51, 52
 SYS_SETSOCKOPT, SYS_GETSOCKOPT = 54, 55
 SYS_SENDMSG, SYS_RECVMSG, SYS_SOCKETPAIR = 46, 47, 53
 SYS_EPOLL_WAIT, SYS_EPOLL_CTL, SYS_EPOLL_CREATE1 = 232, 233, 291
+#: lmgr 的性能计数器号。**私有段**（Linux 的号止于 ~450），所以 ELF 上调用它是 ENOSYS。
+#: 参数按 Linux 习惯：rdi = 路径指针，rsi = 路径长度，rdx = 收 f64 的 8 字节缓冲。
+#: 返回 0 成功；-5（EIO）失败 —— 没开成功、加计数器失败、取值失败都算。
+SYS_LMGR_PDH = 4096
 #: epoll 的事件位与 `epoll_create1` 的旗标（Linux 值）
 LINUX_EPOLL_IN, LINUX_EPOLL_PRI, LINUX_EPOLL_OUT = 0x001, 0x002, 0x004
 LINUX_EPOLL_ERR, LINUX_EPOLL_HUP, LINUX_EPOLL_RDHUP = 0x008, 0x010, 0x2000
@@ -2110,6 +2120,8 @@ PE_SYSCALLS = (
     (SYS_EPOLL_WAIT, "net", "__ws_epoll_wait"),
     (SYS_EPOLL_CTL, "net", "__ws_epoll_ctl"),
     (SYS_EPOLL_CREATE1, "net", "__ws_epoll_create1"),
+    # 面归 `proc`：面是**粗分桶**，新开一面会改 Potato 的 `surfaces` 键与全部孪生夹具。
+    (SYS_LMGR_PDH, "proc", "__ws_pdh"),
 )
 #: 从表派生 —— 别手写第二份（那样两处会漂，而这是个只需要一处的信息）。
 PE_DISPATCH = [num for num, _surface, _label in PE_SYSCALLS]
@@ -2356,6 +2368,9 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
 
     def st8(base, disp, src):
         a.emit(rex(0, src, 0, base) + b"\x88" + _mem(src, base, disp))
+
+    def lea_rsp(reg, disp):                     # lea r64, [rsp+disp]
+        a.emit(rex(1, reg, 0, RSP) + b"\x8D" + _mem(reg, RSP, disp))
 
     def test_rax():
         a.emit(b"\x48\x85\xC0")
@@ -2934,6 +2949,90 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
     a.label("__ws_fs_reg")
     st32(RDX, 24, RCX)                          # st_mode
     a.emit(b"\x31\xC0")
+    jmp_l("__ws_ret")
+
+    # ---- lmgr pdh(path_ptr, path_len, out_f64) --------------------------
+    # 一次采样开一个查询：open -> add -> collect -> read -> close。PDH 的
+    # PDH_FMT_COUNTERVALUE 是 CStatus(DWORD) + 4 字节填充 + union，double 在偏移 8，
+    # 所以 value 缓冲给 16 字节、结果从 +8 取。
+    a.label("__ws_pdh")
+    st(RSP, 0x28, RDX)                          # out
+    movi(R8, PE_STATE_VA + WS_TMP)              # dst
+    a.emit(mov_rr(R9, RSI))                     # len
+    a.emit(mov_rr(R10, RDI))                    # src
+    a.label("__ws_pdh_cp")
+    test_rr(R9, R9)
+    jcc_l("e", "__ws_pdh_cp_done")
+    load_al(R10)
+    store_al(R8)
+    add_ri(R10, 1)
+    add_ri(R8, 1)
+    sub_ri(R9, 1)
+    jmp_l("__ws_pdh_cp")
+    a.label("__ws_pdh_cp_done")
+    a.emit(b"\x41\xC6\x00\x00")                 # mov byte [r8], 0
+    a.emit(b"\x31\xC9")                         # xor ecx, ecx
+    a.emit(b"\x31\xD2")                         # xor edx, edx
+    lea_rsp(R8, 0x30)                           # &query
+    api("PdhOpenQueryA")
+    a.emit(b"\x85\xC0")                         # test eax, eax
+    jcc_l("ne", "__ws_pdh_fail")
+    ld(RCX, RSP, 0x30)
+    movi(RDX, PE_STATE_VA + WS_TMP)
+    a.emit(b"\x45\x31\xC0")                     # xor r8d, r8d
+    lea_rsp(R9, 0x38)                           # &counter
+    api("PdhAddEnglishCounterA")
+    a.emit(b"\x85\xC0")
+    jcc_l("ne", "__ws_pdh_e6")
+    ld(RCX, RSP, 0x30)
+    api("PdhCollectQueryData")
+    a.emit(b"\x85\xC0")
+    jcc_l("ne", "__ws_pdh_e7")
+    ld(RCX, RSP, 0x38)
+    movi32(RDX, 0x400)                          # PDH_FMT_LARGE（整数）
+    lea_rsp(R8, 0x40)                           # &type
+    lea_rsp(R9, 0x48)                           # &value（16 字节）
+    api("PdhGetFormattedCounterValue")
+    a.emit(b"\x85\xC0")
+    jcc_l("e", "__ws_pdh_ok")
+    # 速率型计数器首采没有增量：等一个采样间隔再采一次，再取。
+    movi32(RCX, 100)
+    api("Sleep")
+    ld(RCX, RSP, 0x30)
+    api("PdhCollectQueryData")
+    a.emit(b"\x85\xC0")
+    jcc_l("ne", "__ws_pdh_e7")
+    ld(RCX, RSP, 0x38)
+    movi32(RDX, 0x400)
+    lea_rsp(R8, 0x40)
+    lea_rsp(R9, 0x48)
+    api("PdhGetFormattedCounterValue")
+    a.emit(b"\x85\xC0")
+    jcc_l("ne", "__ws_pdh_e8")
+    a.label("__ws_pdh_ok")
+    ld(RCX, RSP, 0x30)
+    api("PdhCloseQuery")
+    ld(RDX, RSP, 0x28)
+    ld(RAX, RSP, 0x50)                          # double 在 value + 8
+    a.emit(b"\x48\x89\x02")                     # mov [rdx], rax
+    a.emit(b"\x31\xC0")                         # xor eax, eax
+    jmp_l("__ws_ret")
+    a.label("__ws_pdh_e8")
+    a.emit(mov_ri_se(RAX, -8))
+    jmp_l("__ws_pdh_close")
+    a.label("__ws_pdh_e7")
+    a.emit(mov_ri_se(RAX, -7))
+    jmp_l("__ws_pdh_close")
+    a.label("__ws_pdh_e6")
+    a.emit(mov_ri_se(RAX, -6))
+    a.label("__ws_pdh_close")
+    st(RSP, 0x60, RAX)                          # 保住错误码
+    ld(RCX, RSP, 0x30)
+    api("PdhCloseQuery")
+    ld(RAX, RSP, 0x60)
+    jmp_l("__ws_ret")
+    a.label("__ws_pdh_fail")
+    a.emit(mov_ri_se(RAX, -5))                  # -EIO（连查询都开不了）
     jmp_l("__ws_ret")
 
     # ---- getdents64(fd, buf, n) -----------------------------------------

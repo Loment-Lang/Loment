@@ -45,10 +45,16 @@ def test_registry_has_38_slots():
     assert len(recs) == 38, len(recs)
     keys = [r.split(",")[0] for r in recs]
     assert len(set(keys)) == 38, "duplicate slot keys"
+    implemented = []
     for r in recs:
-        name, mask = r.split(",")
+        name, mask, done = r.split(",")
         assert "." in name, r
         assert int(mask) > 0, r
+        assert done in ("0", "1"), r
+        if done == "1":
+            implemented.append(name)
+    # 只有真能出数的槽位才许写 1；能力齐了但没实现也是 0。
+    assert implemented == ["cpu.load"], implemented
 
 
 @test
@@ -96,6 +102,23 @@ def test_list_json_names_every_slot_once():
     assert doc["meta"]["slots"] == 38
     for r in doc["rows"]:
         assert r["state"] in ("available", "degraded", "unavailable"), r
+
+
+@test
+def test_cpu_load_reports_a_percentage_or_refuses():
+    with tempfile.TemporaryDirectory(prefix="lmgr-test-") as d:
+        exe = _build(Path(d))
+        out = subprocess.run([str(exe), "cpu", "load", "--json"],
+                             capture_output=True, text=True, encoding="utf-8")
+    if out.returncode == 2:
+        # 没有 PDH 的平台必须**点名拒绝**，不是输出一个假设的数。
+        assert "win.pdh" in out.stdout or "failed" in out.stdout, out.stdout
+        return
+    assert out.returncode == 0, out.stderr
+    doc = json.loads(out.stdout)
+    assert doc["manager"] == "cpu.load"
+    v = doc["rows"][0]["fields"]["busy_pct"]
+    assert 0 <= v <= 100, v
 
 
 @test

@@ -909,8 +909,8 @@ fn pt_surf_code(num: u32) -> u32 {
             || num == 46 || num == 47 || num == 53 || num == 232 || num == 233 || num == 291 {
         return 3;                                   // net
     }
-    if num == 60 {
-        return 4;                                   // proc
+    if num == 60 || num == 4096 {
+        return 4;                                   // proc（4096 = lmgr 的 PDH）
     }
     return 0;                                       // other（含"号不是字面量"）
 }

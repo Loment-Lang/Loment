@@ -130,6 +130,8 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "lspe_test", "potato_
                  "loment_potato_emit_test",
                  # `choose write grammar`: 读法由声明决定、出厂锁的取值表、声明先抹掉
                  "loment_grammar_test",
+                 # `lmgr`: 38 槽注册表与 19 项能力表，以及二进制如实说出去（docs/303）
+                 "lmgr_test",
                  "loment_tools_test", "loment_p7_test", "loment_p8_test", "loment_p9_test",
                  # 崩溃批次（`#805` / `#868`–`#874`）：深度/容量越界**只许出诊断**。
                  # 每条都跑种子链出来的自举驱动（真入口），不是拿 Python 实现代替。
@@ -354,6 +356,7 @@ SHARD_COST = {
     "loment_book_site_test": 2.0,
     "loment_capasserts_test": 4.0,
     "loment_caps_test": 99.9,
+    "lmgr_test": 6.0,
     "loment_channel_test": 92.8,
     "loment_choose_matrix_test": 16.7,
     "loment_cli_test": 29.5,

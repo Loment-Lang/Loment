@@ -299,15 +299,21 @@ def audit_net(diffs: list[str]) -> None:
     nd_variants = nd.variants if nd is not None else []
     want = {v.value: v.meta.get("surface") for v in sc.variants}
 
+    # 运行时**私有号**（4096+）不在 L0 契约里：它们不是 Linux 系统调用，而是运行时给
+    # 自己调用者的入口（`docs/303` 的 lmgr）。契约要收它们得走单独的 L0 PR，所以这里
+    # 显式跳过；它们两边算不算同一面仍由
+    # `loment_pe_test::test_pe_surface_table_matches_the_artifact_counter` 钉住。
+    priv = set(getattr(lomelf, "PE_PRIVATE_SYSCALLS", ()))
+
     # (a) 编译器那一份 —— 计数词汇（`surfaces` 按面分类用的就是它）
     got_c = dict(lomentc.SURFACE_NUMBERS)
-    for n in sorted(set(want) | set(got_c)):
+    for n in sorted((set(want) | set(got_c)) - priv):
         if want.get(n) != got_c.get(n):
             diffs.append(f"[net/lomentc] 号 {n}: .lom={want.get(n)!r} lomentc={got_c.get(n)!r}")
 
     # (b) 链接器那一份 —— PE 真正派发哪些号 + 各属哪一面
     pe = {n: s for n, s, _label in lomelf.PE_SYSCALLS}
-    for n in sorted(set(want) | set(pe)):
+    for n in sorted((set(want) | set(pe)) - priv):
         if want.get(n) != pe.get(n):
             diffs.append(f"[net/lomelf ] 号 {n}: .lom={want.get(n)!r} PE_SYSCALLS={pe.get(n)!r}")
 
@@ -343,7 +349,9 @@ def audit_net(diffs: list[str]) -> None:
         by_surface: dict[str, list[int]] = {}
         for n, s in want.items():
             by_surface.setdefault(s, []).append(n)
-        got_groups = sorted(sorted(v) for v in by_code.values())
+        # 私有号不算契约的一部分（同 (a)/(b)）：从自举那侧的分块里剔掉再比。
+        got_groups = sorted(g for g in (sorted(x for x in v if x not in priv)
+                                        for v in by_code.values()) if g)
         want_groups = sorted(sorted(v) for v in by_surface.values())
         if got_groups != want_groups:
             diffs.append(f"[net/twin   ] {path.name} 的 {fn}(): 分块 {got_groups} "

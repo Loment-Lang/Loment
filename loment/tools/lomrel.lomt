@@ -437,6 +437,7 @@ editors/loment-studio/crates/server/src/*.rs
 editors/loment-studio/web/*
 editors/loment-studio/examples/*
 tools/loment_studio_test.py
+tools/lmgr_test.py
 ";
 }
 

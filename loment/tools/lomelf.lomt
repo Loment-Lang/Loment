@@ -44,8 +44,8 @@ const PE_FILE_ALIGN: u32 = 0x200;
 const PE_WS_SIZE: u32 = 1139984;   // 与参考实现的 WS_SIZE 对齐（`poll`/`select` 的
                                    // fd_set 与影子集 + `sendmsg`/`recvmsg` 的 64 KiB
                                    // 散列暂存 + `epoll` 的实例表）
-const PE_IMPORT_DESC: u32 = 60;    // 导入描述符表的字节数 = 20 × (DLL 数 + 全零终止项)
-                                   // （kernel32 + ws2_32 ⇒ 两条描述符；写死 40 会让
+const PE_IMPORT_DESC: u32 = 100;   // 导入描述符表的字节数 = 20 × (DLL 数 + 全零终止项)
+                                   // （kernel32 + ws2_32 + pdh + psapi ⇒ 四条描述符；写死旧值会让
                                    //   镜像的 PE 与参考差这一格 —— 判据当场抓）
 const PE_LIT_OFF: u32 = 0x1000;    // "/proc/self/cmdline" 在 .idata 内的偏移
 const PE_IMG_BASE: u64 = 5368709120;   // 0x140000000 —— 只在实际落绝对地址时才加

@@ -1626,6 +1626,9 @@ class Guard:
     #: **联动边 `⇄` 的伙伴**（`docs/315` §5.1）：`(cap_id, lo, hi, kind, param, flags,
     #: is_block)`。判决自己的那条之后，每个伙伴再判一次（silent：只判成员，不记账）。
     partners: list = field(default_factory=list)
+    #: 反糖产生的守卫（`domain:for` 的循环头）。审计站点数**不数**它 —— 它不是用户
+    #: 写的 `guard`，而自举侧只看得见源 token。
+    synthetic: bool = False
 
 
 @dataclass
@@ -1660,6 +1663,22 @@ class Couple:
     连成一片就求强连通分量 —— 一个分量就是一个**原子续期单位**（`docs/308` §2.5）。
     """
     names: list
+    line: int
+
+
+@dataclass
+class Solid:
+    """`solid NAME : A, B, …;` —— 立体图的**体**（`docs/315` §5.2）。
+
+    一条 `solid` 等于：`couple A, B, …;` + 一个**名字**。名字解析到**第一个成员**
+    （"体的根"）：`guard NAME(x)` 于是 = "判根本身 + 静默判其余成员"（剩下的由联动
+    已经做了），`quality NAME = q;` 写到整组。体的审计落在根成员那一格 —— 一个体
+    因此只多一条审计，不多占槽。
+
+    三条轴由成员与它们的关系给出：位置（形状）、时间（律 / 续期）、质量（adaptive
+    成员）。跨层（祖先与后代同体）允许 —— 祖先本来就在链上，后代作为伙伴再判一次。
+    """
+    names: list      # [体名, 成员0, 成员1, …]
     line: int
 
 
@@ -2031,14 +2050,15 @@ def _resolve_domains(mod) -> None:
                     ]
                     # 联动组的伙伴插在**叶子之前**：发射器把最后一条当叶子（记账），
                     # 其余 silent —— 伙伴因此只判成员、不转移（`docs/315` §5）。
-                    if chain and comp_of:
+                    cf_, mf_ = comp_by_fn.get(cur_fn[0], ({}, {}))
+                    if chain and cf_:
                         key = ("b", chain[-1].audit_id)
                         seen = {t[0] for t in e.doms}
-                        extra = [members[k][1:] for k in comp_of.get(key, ())
+                        extra = [mf_[k][1:] for k in cf_.get(key, ())
                                  if k != key and k not in
                                  {("b", x.audit_id) for x in chain}
-                                 and members.get(k) is not None
-                                 and members[k][1] not in seen]
+                                 and mf_.get(k) is not None
+                                 and mf_[k][1] not in seen]
                         if extra:
                             e.doms = e.doms[:-1] + extra + e.doms[-1:]
             return
@@ -2102,6 +2122,9 @@ def _resolve_domains(mod) -> None:
             elif isinstance(s, Guard):
                 ex(s.expr, stack, vs)
                 ex(s.aux, stack, vs)
+                al = aliases.get(cur_fn[0], {}).get(s.cap)
+                if al:
+                    s.cap = al        # 体的判决落在根成员上（其余由联动判）
                 d = find(stack, s.cap)
                 if d is not None:
                     s.is_block = True
@@ -2121,6 +2144,9 @@ def _resolve_domains(mod) -> None:
                     ]
             elif isinstance(s, Quality):
                 ex(s.expr, stack, vs)
+                al = aliases.get(cur_fn[0], {}).get(s.cap)
+                if al:
+                    s.cap = al
                 d = find(stack, s.cap)
                 if d is not None:
                     s.cap_id = d.audit_id
@@ -2159,9 +2185,36 @@ def _resolve_domains(mod) -> None:
             elif isinstance(s, (Tick, Break, Continue)):
                 pass
 
+    # 立体图的体（`docs/315` §5.2）：`solid 名 : A, B;` 是 couple + 别名（名 -> A）。
+    # 别名按函数作用域，先扫一遍 —— 判决点的名字要在 walk 里就能换成根成员。
+    def alias_scan(stmts, out) -> None:
+        for s in stmts:
+            if isinstance(s, Solid) and len(s.names) > 1:
+                out[s.names[0]] = s.names[1]
+            elif isinstance(s, DomainBlock):
+                alias_scan(s.body, out)
+            elif isinstance(s, If):
+                alias_scan(s.then, out)
+                alias_scan(s.otherwise, out)
+            elif isinstance(s, (While, For)):
+                alias_scan(s.body, out)
+            elif isinstance(s, Match):
+                for _p, arm in s.arms:
+                    alias_scan(arm, out)
+
+    aliases: dict = {}
+    for f in mod.funcs:
+        d: dict = {}
+        alias_scan(f.body, d)
+        aliases[f.name] = d
+    cur_fn: list = [""]
+    #: 函数名 -> (comp_of, members)；第一遍 walk 时还是空的（空 = 没有伙伴）。
+    comp_by_fn: dict = {}
+
     def run_walk() -> None:
         nxt[0] = len(mod.caps)
         for f in mod.funcs:
+            cur_fn[0] = f.name
             vs = {p.name: p.space for p in f.params if p.space}
             walk(f.body, [], vs)
 
@@ -2170,122 +2223,132 @@ def _resolve_domains(mod) -> None:
 
     # ---- 域图（`docs/315` §5）：联动 `⇄` 与互斥 `⊥`
     #
-    # 联动组按**函数**求连通分量（一个分量 = 一个原子续期单位，`docs/308` §2.5）。
-    # 互斥是编译期的承诺：形状必须可证不相交，运行期一条指令都不发。
-    parent: dict = {}
+    # **每个函数一份**联动图：跨函数共享会把另一帧里的块域算进伙伴 —— 那个状态在
+    # 这里根本没有活的那一份，判决点会引用一个悬空的槽（2026-11-08 抓到）。
+    # 一个分量 = 一个原子续期单位（`docs/308` §2.5）；互斥是编译期承诺。
+    def build_components(f) -> None:
+        parent: dict = {}
 
-    def uf_find(k):
-        parent.setdefault(k, k)
-        while parent[k] != k:
-            parent[k] = parent[parent[k]]
-            k = parent[k]
-        return k
+        def uf_find(k):
+            parent.setdefault(k, k)
+            while parent[k] != k:
+                parent[k] = parent[parent[k]]
+                k = parent[k]
+            return k
 
-    def uf_union(a, b):
-        ra, rb = uf_find(a), uf_find(b)
-        if ra != rb:
-            parent[rb] = ra
+        def uf_union(a, b):
+            ra, rb = uf_find(a), uf_find(b)
+            if ra != rb:
+                parent[rb] = ra
 
-    def desc_of(name, stack):
-        d = find(stack, name)
-        if d is not None:
-            return (("b", d.audit_id), d.audit_id, d.lo, d.hi,
-                    CAP_KIND_ID[d.kind], d.param,
-                    (1 if d.lo_inf else 0) | (2 if d.hi_inf else 0), True)
-        for i, c in enumerate(mod.caps):
-            if c.name == name:
-                return (("c", i), i, c.lo, c.hi, CAP_KIND_ID[c.kind], c.param,
-                        (1 if c.lo_inf else 0) | (2 if c.hi_inf else 0), False)
-        return None
+        def desc_of(name, stack):
+            d = find(stack, name)
+            if d is not None:
+                return (("b", d.audit_id), d.audit_id, d.lo, d.hi,
+                        CAP_KIND_ID[d.kind], d.param,
+                        (1 if d.lo_inf else 0) | (2 if d.hi_inf else 0), True)
+            for i, c in enumerate(mod.caps):
+                if c.name == name:
+                    return (("c", i), i, c.lo, c.hi, CAP_KIND_ID[c.kind], c.param,
+                            (1 if c.lo_inf else 0) | (2 if c.hi_inf else 0), False)
+            return None
 
-    descs: dict = {}
+        descs: dict = {}
 
-    def scan(stmts, stack) -> None:
-        for s in stmts:
-            if isinstance(s, DomainBlock):
-                stack.append(s)
-                scan(s.body, stack)
-                stack.pop()
-            elif isinstance(s, (If,)):
-                scan(s.then, stack)
-                scan(s.otherwise, stack)
-            elif isinstance(s, (While, For)):
-                scan(s.body, stack)
-            elif isinstance(s, Match):
-                for _p, arm in s.arms:
-                    scan(arm, stack)
-            elif isinstance(s, Couple):
-                ds = []
-                for n in s.names:
-                    d = desc_of(n, stack)
-                    if d is None:
-                        raise LomError(s.line, 1,
-                                       f"`couple` 引用了不在作用域里的域 {n}")
-                    ds.append(d)
-                    descs[d[0]] = d
-                # 联动是**同一位置**上的同生共死：形状至少得有一个共同位置。
-                for i in range(len(ds)):
-                    for j in range(i + 1, len(ds)):
-                        x, y = ds[i], ds[j]
-                        if not (x[6] & 3 or y[6] & 3) and (x[3] < y[2] or y[3] < x[2]):
-                            raise LomError(
-                                s.line, 1,
-                                f"`couple` 的两个域没有共同位置（{s.names[i]} 与 "
-                                f"{s.names[j]}）—— 联动是同一位置上一起续期")
-                for d in ds[1:]:
-                    uf_union(ds[0][0], d[0])
-            elif isinstance(s, Mutex):
-                ds = []
-                for n in s.names:
-                    d = desc_of(n, stack)
-                    if d is None:
-                        raise LomError(s.line, 1, f"`mutex` 引用了不在作用域里的域 {n}")
-                    ds.append(d)
-                for i in range(len(ds)):
-                    for j in range(i + 1, len(ds)):
-                        a, b = ds[i], ds[j]
-                        if a[5] == 1 or b[5] == 1 or a[6] & 3 or b[6] & 3:
-                            raise LomError(
-                                s.line, 1,
-                                "`mutex` 需要可证不相交的有限形状 —— 无界 / danger 的那一侧证不了")
-                        if not (a[3] < b[2] or b[3] < a[2]):
-                            raise LomError(
-                                s.line, 1,
-                                f"`mutex` 的两个域重叠了（{s.names[i]} 与 {s.names[j]}）"
-                                " —— 互斥是两个永不相交的形状")
+        def scan(stmts, stack) -> None:
+            for s in stmts:
+                if isinstance(s, DomainBlock):
+                    stack.append(s)
+                    scan(s.body, stack)
+                    stack.pop()
+                elif isinstance(s, If):
+                    scan(s.then, stack)
+                    scan(s.otherwise, stack)
+                elif isinstance(s, (While, For)):
+                    scan(s.body, stack)
+                elif isinstance(s, Match):
+                    for _p, arm in s.arms:
+                        scan(arm, stack)
+                elif isinstance(s, (Couple, Solid)):
+                    names = s.names[1:] if isinstance(s, Solid) else s.names
+                    ds = []
+                    for n in names:
+                        d = desc_of(n, stack)
+                        if d is None:
+                            raise LomError(s.line, 1,
+                                           f"`couple` 引用了不在作用域里的域 {n}")
+                        ds.append(d)
+                        descs[d[0]] = d
+                    # 联动是**同一位置**上的同生共死：形状至少得有一个共同位置。
+                    for i in range(len(ds)):
+                        for j in range(i + 1, len(ds)):
+                            x, y = ds[i], ds[j]
+                            if (not (x[6] & 3 or y[6] & 3)
+                                    and (x[3] < y[2] or y[3] < x[2])):
+                                raise LomError(
+                                    s.line, 1,
+                                    f"`couple` 的两个域没有共同位置（{names[i]} 与 "
+                                    f"{names[j]}）—— 联动是同一位置上一起续期")
+                    for d in ds[1:]:
+                        uf_union(ds[0][0], d[0])
+                elif isinstance(s, Mutex):
+                    ds = []
+                    for n in s.names:
+                        d = desc_of(n, stack)
+                        if d is None:
+                            raise LomError(s.line, 1,
+                                           f"`mutex` 引用了不在作用域里的域 {n}")
+                        ds.append(d)
+                    for i in range(len(ds)):
+                        for j in range(i + 1, len(ds)):
+                            a, b = ds[i], ds[j]
+                            if a[5] == 1 or b[5] == 1 or a[6] & 3 or b[6] & 3:
+                                raise LomError(
+                                    s.line, 1,
+                                    "`mutex` 需要可证不相交的有限形状 —— "
+                                    "无界 / danger 的那一侧证不了")
+                            if not (a[3] < b[2] or b[3] < a[2]):
+                                raise LomError(
+                                    s.line, 1,
+                                    f"`mutex` 的两个域重叠了（{s.names[i]} 与 {s.names[j]}）"
+                                    " —— 互斥是两个永不相交的形状")
+
+        scan(f.body, [])
+        comps: dict = {}
+        for k in sorted(parent):
+            comps.setdefault(uf_find(k), []).append(k)
+        comp_of, members = {}, {}
+        for _root, ks in comps.items():
+            ks = sorted(ks)
+            for k in ks:
+                comp_of[k] = tuple(ks)
+                members[k] = descs.get(k)
+        comp_by_fn[f.name] = (comp_of, members)
 
     for f in mod.funcs:
-        scan(f.body, [])
+        build_components(f)
 
-    # 分量：根 -> 成员描述（按 key 排序，确定性）
-    comps: dict = {}
-    for k in sorted(parent):
-        comps.setdefault(uf_find(k), []).append(k)
-    for root, ks in comps.items():
-        for k in ks:
-            comp_of[k] = tuple(sorted(ks))
-            members[k] = descs.get(k)
     # 组件已知 —— 再走一遍，让自动守卫在下标上也挂上伙伴（`docs/315` §5）。
     run_walk()
     mod.domain_slots = nxt[0]
 
-    def attach(stmts, stack) -> None:
+    def attach(stmts, stack, comp_of, members) -> None:
         for s in stmts:
             if isinstance(s, DomainBlock):
                 stack.append(s)
-                attach(s.body, stack)
+                attach(s.body, stack, comp_of, members)
                 stack.pop()
                 continue
-            if isinstance(s, (If,)):
-                attach(s.then, stack)
-                attach(s.otherwise, stack)
+            if isinstance(s, If):
+                attach(s.then, stack, comp_of, members)
+                attach(s.otherwise, stack, comp_of, members)
                 continue
             if isinstance(s, (While, For)):
-                attach(s.body, stack)
+                attach(s.body, stack, comp_of, members)
                 continue
             if isinstance(s, Match):
                 for _p, arm in s.arms:
-                    attach(arm, stack)
+                    attach(arm, stack, comp_of, members)
                 continue
             if isinstance(s, Guard):
                 key = ("b", s.cap_id) if s.is_block else ("c", s.cap_id)
@@ -2303,7 +2366,8 @@ def _resolve_domains(mod) -> None:
                                   and members[k][4] == 10]
 
     for f in mod.funcs:
-        attach(f.body, [])
+        cf, mf = comp_by_fn.get(f.name, ({}, {}))
+        attach(f.body, [], cf, mf)
 
 
 def _resolve_methods(mods, funcs_map: dict, structs: dict, enums: dict) -> None:
@@ -3713,6 +3777,8 @@ class Parser:
         finally:
             self.loop_depth -= 1
         heads = [Guard(d.name, Ident(v, kw.line), kw.line) for v, d in zip(vars_, doms)]
+        for h in heads:
+            h.synthetic = True
         first = doms[0]
         cond = Bin(">=" if reverse else "<=",
                    Ident(vars_[0], kw.line),
@@ -3909,6 +3975,16 @@ class Parser:
             self.expect("punct", ")")
             self.expect("punct", ";")
             return Guard(cap, e, t.line, aux=aux)
+        if t.val == "solid" and self.peek(1).kind == "ident"                 and self.peek(2).val == ":":
+            # `solid NAME : A, B, …;`（`docs/315` §5.2）—— 上下文体关键字。
+            kw = self.next()
+            name = self.ident("体的名字")
+            self.expect("punct", ":")
+            members = [self.ident("域名")]
+            while self.accept("punct", ","):
+                members.append(self.ident("域名"))
+            self.expect("punct", ";")
+            return Solid([name] + members, kw.line)
         if t.val in ("couple", "mutex") and self.peek(1).kind == "ident"                 and self.peek(2).val in (",", ";"):
             # 上下文关键字（`docs/315` §5）：`couple A, B;` / `mutex A, B;`。
             # 单独一个叫 `couple` 的变量照旧是普通名字。
@@ -4749,6 +4825,49 @@ def _has_guard(mods) -> bool:
     return any(scan(f.body) for m in mods for f in m.funcs)
 
 
+def _resolve_solid_aliases(mod: Module) -> None:
+    """`solid 名 : A, B;` 的判决点名字换成根成员（`docs/315` §5.2）。
+
+    **必须排在 `_resolve_guards` 之前**：能力型成员的 `cap_id / lo / hi / kind` 是那一趟
+    填的；晚了就会留下一条 lo=hi=0、kind=regular 的空判决（实测：`guard body(3)`
+    在参考实现里发出一条空形状的调用，与自举分叉）。
+    """
+    def scan(stmts, out) -> None:
+        for s in stmts:
+            if isinstance(s, Solid) and len(s.names) > 1:
+                out[s.names[0]] = s.names[1]
+            elif isinstance(s, DomainBlock):
+                scan(s.body, out)
+            elif isinstance(s, If):
+                scan(s.then, out)
+                scan(s.otherwise, out)
+            elif isinstance(s, (While, For)):
+                scan(s.body, out)
+            elif isinstance(s, Match):
+                for _p, arm in s.arms:
+                    scan(arm, out)
+
+    def apply(stmts, al) -> None:
+        for s in stmts:
+            if isinstance(s, (Guard, Quality)) and s.cap in al:
+                s.cap = al[s.cap]
+            elif isinstance(s, DomainBlock):
+                apply(s.body, al)
+            elif isinstance(s, If):
+                apply(s.then, al)
+                apply(s.otherwise, al)
+            elif isinstance(s, (While, For)):
+                apply(s.body, al)
+            elif isinstance(s, Match):
+                for _p, arm in s.arms:
+                    apply(arm, al)
+
+    for f in mod.funcs:
+        al: dict = {}
+        scan(f.body, al)
+        apply(f.body, al)
+
+
 def prepare(mod: Module, deps: list[Module] | None = None) -> tuple[Module, list[Module]]:
     """M6/M7: 单态化 —— 泛型函数与泛型类型展开为具体副本 (幂等)。"""
     import copy as _c
@@ -4835,6 +4954,7 @@ def prepare(mod: Module, deps: list[Module] | None = None) -> tuple[Module, list
         _resolve_methods(allmods, funcs_map, structs_map, enums_map)
     if _has_try(allmods):  # M9: ? 语法糖
         _desugar_try(allmods, funcs_map, structs_map)
+    _resolve_solid_aliases(mod)
     if _has_guard(allmods):  # P4: guard 解析
         _resolve_guards(allmods, {
             c.name: (i, c.lo, c.hi, CAP_KIND_ID[c.kind], c.param,
@@ -7481,7 +7601,7 @@ def _stmts_rs(stmts: list, indent: int) -> list[str]:
                           f"{k | 128}, {param}, {flags}); ")
             out.append(f"{pad}{{ let __i: u64 = ({_expr_rs(s.expr)}) as u64; "
                        f"{calls}}}")
-        elif isinstance(s, (Couple, Mutex)):
+        elif isinstance(s, (Couple, Mutex, Solid)):
             pass
         elif isinstance(s, Quality):
             st = _rs_state(10, s.is_block, s.cap_id)
@@ -7637,13 +7757,18 @@ def _count_guards(mod: Module) -> int:
         n = 0
         for s in stmts:
             if isinstance(s, Guard):
-                n += 1
+                if not getattr(s, "synthetic", False):
+                    n += 1
             elif isinstance(s, If):
                 n += walk(s.then) + walk(s.otherwise)
             elif isinstance(s, (While, For)):
                 n += walk(s.body)
             elif isinstance(s, Match):
                 n += sum(walk(b) for _, b in s.arms)
+            elif isinstance(s, DomainBlock):
+                # 块里的 `guard` 也是审计站点（`docs/313`）；少了这一支，形式对象会
+                # 少报块内的守卫数 —— 自举侧数 token，一对就现形。
+                n += walk(s.body)
         return n
 
     return sum(walk(f.body) for f in mod.funcs)
@@ -11937,8 +12062,8 @@ class _Ir:
             st = self.state_ptr(14, s.is_block, s.cap_id)
             self.w(f"call void @__loment_discharge(ptr {st}, i64 {s.cap_id}, i64 {d64})")
             return
-        if isinstance(s, (Couple, Mutex)):
-            # `docs/315` §5：联动与互斥都是**声明** —— 判决点已经长在 guard 里。
+        if isinstance(s, (Couple, Mutex, Solid)):
+            # `docs/315` §5：联动 / 互斥 / 体都是**声明** —— 判决点已经长在 guard 里。
             return
         if isinstance(s, Tick):  # docs/308 §2.1: 回边/显式推进虚拟钟
             self.w("call void @__loment_tick()")
@@ -12340,9 +12465,11 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # **LMS 第 3 级入口 A**（`docs/253` §5.3）：`alloc` 分配不出时**先收一次再试**，
     # 而不是直接 abort。⚠ **两个条件缺一不可**：
     #   * `lms` 开着 —— 它属于 LMS 第 3 级，不是回收档的事；
-    #   * **这份产物里真的有收集器**（`gc_auto` / `gc_auto_alpha`）—— `gc_manual` 下
-    #     没有东西可收，"拉回"在那里是一句空话。这是这一级**明写的边界**。
-    _lms_rescue = _lms_level(mod, "lms_guard") and (gc_auto or gc_alpha)
+    #   * **这份产物里真的有收集器**（`gc_auto` / `gc_auto_alpha` / **`lgc`**）——
+    #     `gc_manual` 单独不满足（没有东西可收）；但 `lgc` 落地之后 manual 档**也有**
+    #     收集器（`gc_control`），窗口里那句"开"就是它被允许收的时刻。漏掉这一支，
+    #     manual 档的窗口一撞 OOM 就直接 abort，而窗口的语义是"这一段可以收"。
+    _lms_rescue = _lms_level(mod, "lms_guard") and (gc_auto or gc_alpha or _gc_ctl)
     # **第 3/4/5 级在访存点上的三档**（`docs/253` §5.3–§5.5）：检查 / 跳过 / 退出。
     # 三个都不开就一条检查都不发 —— 没有回答的检查比没有检查更坏。
     _lms_guard = _lms_level(mod, "lms_guard")

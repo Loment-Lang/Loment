@@ -4607,10 +4607,14 @@ def test_lms_entry_a_rescue_needs_both_lms_and_a_collector():
     """LMS 第 3 级入口 A（`docs/253` §5.3）：`alloc` 分配不出时**先收一次再试**。
 
     **两个条件缺一不可** —— `lms` 开着（它属于 LMS 第 3 级）**而且**这份产物里真有
-    收集器（`gc_auto` / `gc_auto_alpha`）。`gc_manual` 下**没有东西可收**，
+    收集器（`gc_auto` / `gc_auto_alpha` / **`lgc`**）。`gc_manual` 单独**没有东西可收**，
     "拉回"在那里是一句空话 —— 所以那一格**必须一个字都不加**。这是这一级明写的边界。
 
-    网格：{gc_manual, gc_auto, gc_auto_alpha} × {关着, 开着}。
+    **`gc_manual` + `lgc` 有收集器**（`#1461`）：窗口一开，`__loment_gc_allow` 就放行，
+    OOM 那一刻先收一次再试是窗口该有的行为；漏掉这一支，窗口里撞 OOM 直接 abort。
+    所以那一格必须有 `lmsretry`。
+
+    网格：{gc_manual, gc_auto, gc_auto_alpha} × {关着, 开着}，外加 `gc_manual` + `lgc` 两格。
     """
     # ⚠ **尺寸必须走 `const` 名，不能是字面量**：`gc_auto_alpha` 会把
     # `let p: ptr = alloc(<字面量>)` **静态提升到栈上**（L0），于是这份产物**根本不需要堆**
@@ -4640,6 +4644,18 @@ def test_lms_entry_a_rescue_needs_both_lms_and_a_collector():
             assert "@__loment_lms_retry" not in on, (gc, "不许再长出全局符号")
             # **只许重来一次**：重试标记在**每一条成功返回前**都要清掉（1 次初始化 + 2 次清）。
             assert on.count("store i1 false, ptr %lmsretry") == 3, on
+
+    # **`gc_manual` + `lgc`**（`#1461`）：manual 档也有收集器了 —— 窗口里那句"开"就是
+    # 它被允许收的时刻，OOM 救援因此必须在场。
+    manual_lgc = lomentc.emit_llvm(_lgc_load(
+        "choose write grammar tur2026.3\nmodule m\nchoose runtime\n"
+        "choose gc_manual\nchoose lms_guard\nconst N: u32 = 64;\n\n"
+        "fn _s() {\n    lgc start {\n        let q: ptr = alloc(N);\n"
+        "        store8(q, 0, 1);\n    }\n}\n"), ROOT, [])
+    assert "%lmsretry = alloca i1" in manual_lgc, (
+        "`gc_manual` + `lgc` 的产物里该有 LMS 第 3 级入口 —— 窗口里撞 OOM 要先收一次")
+    assert "call void @__loment_collect_now()" in manual_lgc, (
+        "救援必须走 `collect_now` —— 它才尊重窗口的开关")
 
 
 #: g1 探针：`alloc` **直接发出**的指针上，一个越界写 + 一个界内读。
@@ -6158,6 +6174,70 @@ def test_domain_tree_and_graph_edges():
 
 
 @test
+def test_solid_body_is_a_first_class_unit():
+    """`docs/315` §5.2：`solid 名 : A, B;` —— 立体图的体。
+
+    体 = couple + 名字：`guard 名(x)` 判根成员、其余静默；`quality 名 = q` 写到整组；
+    几何报告里成一条 `solids` 条目。体的图**按函数**求分量 —— 另一个函数里的块域
+    不能被算进伙伴（那会引用一个悬空的槽）。
+    """
+    NL = chr(10)
+
+    def S(*lines):
+        return NL.join(lines)
+
+    def load(src):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "d.lomt"
+            p.write_text(src, encoding="utf-8", newline=NL)
+            m = lomentc.load(p)
+            return m, lomentc.check(m)
+
+    src = S("module m", "choose runtime",
+            "capability ring    : disk[0..15] adaptive",
+            "capability partner : disk[0..15] adaptive",
+            "fn f(a: [u32; 16] in disk) -> u32 {",
+            "    solid body : ring, partner;",
+            "    guard body(3);",
+            "    quality body = 128;",
+            "    return a[0];", "}", "")
+    m, e = load(src)
+    assert e == [], e
+    ir = lomentc.emit_llvm(m, ROOT)
+    body = ir[ir.index("define i32 @f"):]
+    assert body.count("call void @__loment_guard2") == 2, body     # 根 + 静默伙伴
+    assert "i64 138, i64" in body, "伙伴不是 silent（kind|128）"
+    assert body.count("call void @__loment_qual_store") == 2, body  # 质量整组
+    g = json.loads(loment_geometry.geometry(m).to_json())
+    assert [x["name"] for x in g["solids"]] == ["body"], g["solids"]
+    assert g["solids"][0]["root"] == g["solids"][0]["members"][0], g["solids"]
+
+    # 按函数隔离：g 里把 ring 和块域 d 结成一个体，f 的守卫不能把 d 算进去
+    src2 = S("module m", "choose runtime",
+             "capability ring    : disk[0..15] adaptive",
+             "capability partner : disk[0..15]", "",
+             "fn f(a: [u32; 16] in disk) -> u32 {",
+             "    couple ring, partner;",
+             "    guard ring(3);",
+             "    return a[0];", "}",
+             "fn g(a: [u32; 16] in disk) -> u32 {",
+             "    domain d : disk[0..7] {",
+             "        solid inner_body : d, ring;",
+             "        guard inner_body(2);",
+             "    }",
+             "    return a[0];", "}", "")
+    m2, e2 = load(src2)
+    assert e2 == [], e2
+    ir2 = lomentc.emit_llvm(m2, ROOT)
+    f_ir = ir2[ir2.index("define i32 @f"):ir2.index("define i32 @g")]
+    # d 的审计槽号 = 能力数 2 + 第一个块 = 2；f 的守卫不该出现它
+    assert "i64 2, i64 %" not in f_ir, "f 的守卫把另一个函数的块算进了伙伴"
+    g_ir = ir2[ir2.index("define i32 @g"):]
+    assert "i64 0, i64 %" in g_ir, g_ir
+    print("      体的图：根 + 静默成员 / 质量整组 / 几何 solids / 按函数隔离，逐条成立")
+
+
+@test
 def test_domain_geometry_reads_trees_and_graphs():
     """`docs/315` §4–§5：横/竖树、平/立体图 —— 从代码里读出来的**确定性**形状。
 
@@ -6328,6 +6408,21 @@ def test_domains_selfhost_twin():
            "        domain leaf3 : disk[0..3] child_of outer3 { a[0] = 1; }\n"
            "    }\n"
            "    domain rv3 : disk[0..3] { domain:for i step -2 { a[i] = 3; } }\n"
+           "    return a[0];\n"
+           "}\n"
+           # docs/315 §5.2：立体图的体（根 + 静默成员 / 质量整组 / 按函数隔离）
+           "capability cpc : disk[0..15] adaptive\n"
+           "fn h_solid(a: [u32; 16] in disk) -> u32 {\n"
+           "    solid body : cpa, cpc;\n"
+           "    guard body(4);\n"
+           "    quality body = 64;\n"
+           "    return a[0];\n"
+           "}\n"
+           "fn h_solid2(a: [u32; 16] in disk) -> u32 {\n"
+           "    domain dd : disk[0..7] {\n"
+           "        solid b2 : dd, cpa;\n"
+           "        guard b2(2);\n"
+           "    }\n"
            "    return a[0];\n"
            "}\n")
     with tempfile.TemporaryDirectory() as td:

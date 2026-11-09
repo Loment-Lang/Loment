@@ -173,7 +173,11 @@ def bootstrap() -> int:
     else:
         print("[ERR] 既无 wsl 也无 sh")
         return 2
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=900,
+    # 上限 1800s（2026-11-08 抬，原 900s）：这一步的墙钟**随种子长大**，而 900s
+    # 是种子 4 MB 时代的数。实测本机 5.71 MB 的种子要 **7 分 14 秒**（434s），
+    # CI runner 更慢 —— PR #1505 上 900s 被跑穿，判据报成 TimeoutExpired。
+    # 抬到 1800s 留出 ~2.5 倍余量；分片 job 的 60 分钟上限仍装得下（该套件独占一片）。
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800,
                        shell=False, cwd=str(ROOT))
     sys.stdout.write(r.stdout)
     if r.returncode:

@@ -265,6 +265,12 @@ def rule_duplicate_blocks(root: Path, added: dict[str, list[tuple[int, str]]],
             win = [x[0] for x in seq[i:i + min_lines]]
             if sum(1 for x in win if len(x) >= 8) < min_lines:
                 continue
+            # 纯 import / 注释头不算"复制粘贴"：每个 Python 文件的头都一样，
+            # 抓它只会让检查器对着模板喊（这条是它自己的第一份报告教出来的）。
+            if sum(1 for x in win
+                   if not re.match(r"^(import|from)\s", x) and not x.startswith("#")
+                   ) < 3:
+                continue
             key = max(win, key=len)
             # 每个文件只看有限个窗口：一条 `git grep` 一次进程，语料大时要封顶。
             if len(key) < 16 or key in keys or len(keys) >= 48:

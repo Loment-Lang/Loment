@@ -95,6 +95,23 @@ def test_duplicate_block_flags_copy_paste():
 
 
 @test
+def test_import_headers_are_not_copy_paste():
+    """每个文件都一样的 import 头不是 slop —— 检查器自己的第一份报告教出来的。"""
+    header = """import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+"""
+    with tempfile.TemporaryDirectory() as td:
+        root = _repo(td, {"pkg/a.py": header + "X = 1\n"})
+        _write(root, "pkg/b.py", header + "Y = 2\n")
+        rep = slop.check(root, "HEAD", worktree=True)
+        assert "duplicates.block" not in _kinds(rep), rep
+
+
+@test
 def test_unused_public_fn_is_flagged_but_a_used_one_is_not():
     with tempfile.TemporaryDirectory() as td:
         root = _repo(td, {"pkg/keep.txt": "x\n"})

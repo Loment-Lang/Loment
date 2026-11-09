@@ -26,7 +26,7 @@ slop 的特征在**变更层**（PR / diff），而 LSPE 的站点在**单元层
 |---|---|---|---|
 | S1 | `scope.size` / `scope.outside_area` | 一次改动太大（>400 行 / >12 文件），或改到了声明范围之外 | 生成物单独提交、拆分 PR 就能消；阈值是政策，写在常量里 |
 | S2 | `tests.trivial` | `assert True` / `assert 1 == 1` / `assert x == x` —— 恒真的"测试" | 只匹配**逐字**形状；`assert x == 2` 不碰 |
-| S3 | `duplicates.block` | 新加的连续 5 行在 base 树里已有一份逐字相同的 | 只比**同语言代码**；`neg/`、语料、vendored、docs 全部跳过 |
+| S3 | `duplicates.block` | 新加的连续 5 行在 base 树里已有一份逐字相同的 | 只比**同语言代码**；`neg/`、语料、vendored、docs 全部跳过；纯 import 头不算 |
 | S4 | `comments.restate` | 注释与下一行代码**逐字相同**（去掉 `#`/`//` 与标点） | 只抓完全相同；"解释为什么"的注释不会被撞上 |
 | S5 | `api.unused` | 新加的 `pub fn` 在代码里一次都没被调用（只在定义处出现） | 只在 `.lomt` / `.lom` 上判；文档提到不算调用点 |
 | S6 | `tests.missing` / `deps.new` | 新增源文件没有判据；或依赖/锁文件被改 | 新增文件是 medium，改 30 行以上没有测试是 low |

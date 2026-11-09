@@ -69,7 +69,7 @@ loment_eol_test 4
 loment_syscalls_test 3
 loment_capasserts_test 4
 loment_i18n_test 2
-loment_slop_test 8
+loment_slop_test 9
 loment_docs_test 7
 loment_door_test 6
 loment_admit_test 8

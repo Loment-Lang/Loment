@@ -48,6 +48,19 @@ def parse(src: str) -> lomentc.Module:
 def errs(src: str) -> list[str]:
     return lomentc.check(parse(src))
 
+def _compile_dep_unit(files: dict[str, str], entry: str = "app.lomt"):
+    """Compile a multi-file unit with the reference; return (errs, IR)."""
+    with tempfile.TemporaryDirectory(prefix="lomentc-1175-") as td:
+        d = Path(td)
+        for name, text in files.items():
+            (d / name).write_text(text, encoding="utf-8", newline="\n")
+        src = (d / entry).resolve()
+        mod = lomentc.load(src)
+        deps = lomentc.resolve_deps(mod, ROOT, src.parent, entry=src)
+        errs = lomentc.check(mod, deps=deps)
+        ir = lomentc.emit_llvm(mod, ROOT, deps) if not errs else None
+        return errs, ir
+
 
 # ---------------------------------------------------------------- 正例
 
@@ -1556,6 +1569,133 @@ def test_p4_guard_bounds():
     e = errs("module m\nchoose runtime\nfn f() -> u32 { guard nope(0); return 0; }\n")
     assert any("未声明的能力" in x for x in e), e
 
+
+
+@test
+def test_1175_dependency_guard_uses_the_dependency_bound():
+    """#1175: a guard in a dependency uses **that file's** `lo/hi`.
+
+    Before the fix the reference resolved by bare name against the entry's
+    table only, left `Guard` at its default `[0..0]`, and the emitted binary
+    trapped at the first in-range index.
+    """
+    lib = """module lib
+
+choose runtime
+
+capability blk : disk[0..4] revocable
+
+pub fn touch(i: u32) -> u32 {
+    guard blk(i);
+    return i;
+}
+"""
+    app = """module app
+
+choose runtime
+
+use "./lib.lomt"
+
+fn _start() {
+    let x: u32 = touch(3);
+    syscall4(60, x as u64, 0, 0);
+}
+"""
+    e, ir = _compile_dep_unit({"lib.lomt": lib, "app.lomt": app})
+    assert e == [], e
+    call = next(l for l in ir.splitlines() if "call void @__loment_guard2" in l)
+    assert call.rstrip().endswith("i64 0, i64 4, i64 0, i64 0, i64 0)"), call
+    table = next(l for l in ir.splitlines() if "@__loment_caps =" in l)
+    assert "[1 x" in table and "i64 0, i64 4, i64 1" in table, table
+
+
+@test
+def test_1175_literal_guard_in_dependency_uses_the_declared_bound():
+    """The literal check and the emitted bound must be the same declaration."""
+    lib = """module lib
+
+choose runtime
+
+capability blk : disk[0..4] revocable
+
+pub fn touch() -> u32 {
+    guard blk(3);
+    return 3;
+}
+"""
+    app = """module app
+
+choose runtime
+
+use "./lib.lomt"
+
+fn _start() {
+    syscall4(60, touch() as u64, 0, 0);
+}
+"""
+    e, ir = _compile_dep_unit({"lib.lomt": lib, "app.lomt": app})
+    assert e == [], e
+    call = next(l for l in ir.splitlines() if "call void @__loment_guard2" in l)
+    assert call.rstrip().endswith("i64 0, i64 4, i64 0, i64 0, i64 0)"), call
+
+
+@test
+def test_1175_duplicate_capability_across_files_is_e004():
+    """The entry may not redeclare a dependency's capability name (#1175)."""
+    lib = """module lib
+
+choose runtime
+
+capability blk : disk[0..4] revocable
+
+pub fn touch(i: u32) -> u32 {
+    guard blk(i);
+    return i;
+}
+"""
+    app = """module app
+
+choose runtime
+
+use "./lib.lomt"
+capability blk : disk[0..100] revocable
+
+fn _start() {
+    let x: u32 = touch(3);
+    syscall4(60, x as u64, 0, 0);
+}
+"""
+    e, _ = _compile_dep_unit({"lib.lomt": lib, "app.lomt": app})
+    assert any("同名声明重复" in x for x in e), e
+    msg = next(x for x in e if "同名声明重复" in x)
+    assert "app.lomt" in msg and "lib.lomt" in msg and ": 6:" in msg, msg
+
+
+@test
+def test_1175_guard_without_any_declaration_is_an_error():
+    """A guard whose name is nowhere in the unit must not become `[0..0]`."""
+    lib = """module lib
+
+choose runtime
+
+pub fn touch(i: u32) -> u32 {
+    guard blk(i);
+    return i;
+}
+"""
+    app = """module app
+
+choose runtime
+
+use "./lib.lomt"
+
+fn _start() {
+    let x: u32 = touch(3);
+    syscall4(60, x as u64, 0, 0);
+}
+"""
+    e, _ = _compile_dep_unit({"lib.lomt": lib, "app.lomt": app})
+    assert any("未声明的能力" in x for x in e), e
 
 @test
 def test_e028_literal_index_over_a_fixed_array():
@@ -5916,6 +6056,91 @@ def test_domain_blocks_scope_and_auto_guard():
     assert ", i64 128, i64 0, i64 0)" in ir2, "外层没有 silent 位"
     assert ", i64 0, i64 0, i64 0)" in ir2, "内层不是正常记账那一支"
     print("      块级域：作用域 / 嵌套包含 / 空间标签 / 自动守卫链，逐条成立")
+
+
+@test
+def test_borrow_domains_phase1_rules():
+    """`docs/318` 期 1：`borrow(x)` / `borrow_mut(x)` 两种区域形状 + 三条规则。
+
+    R1 寿命：源必须是可见的名字；R2 权威：共享域不许写、独占域不许再借；
+    R3 逃逸：域里借出去的不能 `return`，仍被借用时不能 `free`。
+
+    判据末尾把 `_borrow_domain_errs` **临时关掉**，六个负例必须全部放行 —— 红的
+    位置因此确定在这条规则上，不是别的地方。形状本身是新增的，所以"先红后绿"
+    这一格只能这样证明（关掉规则 ⇒ 绿的对照），不能靠旧主干。
+    """
+    def errs(body: str) -> list[str]:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "b.lomt"
+            p.write_text("choose write grammar tur2026.3\nmodule b\nchoose runtime\n\n" + body,
+                         encoding="utf-8", newline="\n")
+            m = lomentc.load(p)
+            return lomentc.check(m, deps=[])
+
+    # 正例：共享域只读；独占域可写（源是 mut 切片）
+    assert errs("fn f(xs: [u32]) -> u32 {\n"
+                "    domain v : borrow(xs) {\n        return xs[0];\n    }\n}\n") == []
+    assert errs("fn f(xs: mut [u32]) -> u32 {\n"
+                "    domain e : borrow_mut(xs) {\n        xs[0] = 1;\n        return xs[0];\n"
+                "    }\n}\n") == []
+    # `freeze` 就是共享域套在 mut 源上：读可以
+    assert errs("fn f(xs: mut [u32]) -> u32 {\n"
+                "    domain z : borrow(xs) {\n        return xs[0];\n    }\n}\n") == []
+
+    # R2a 共享域不许写（下标 / 内建两条路）
+    assert any("只能读 xs" in x for x in errs(
+        "fn f(xs: mut [u32]) -> u32 {\n    domain v : borrow(xs) {\n        xs[0] = 1;\n"
+        "        return 0;\n    }\n}\n"))
+    assert any("只能读 p" in x for x in errs(
+        "fn f(p: ptr) -> u32 {\n    domain v : borrow(p) {\n        store8(p, 0, 1);\n"
+        "    }\n    return 0;\n}\n"))
+    # R2b 独占域不许再借（别名）
+    assert any("不能再借 xs" in x for x in errs(
+        "fn f(xs: mut [u32]) -> u32 {\n    domain e : borrow_mut(xs) {\n"
+        "        let w: [u32] = &xs;\n        return w[0];\n    }\n}\n"))
+    # R2a 共享域里连 `&mut` 也不行
+    assert any("不能再借 &mut xs" in x for x in errs(
+        "fn f(xs: [u32]) -> u32 {\n    domain v : borrow(xs) {\n"
+        "        let w: mut [u32] = &mut xs;\n        return w[0];\n    }\n}\n"))
+    # R3 借用不能带出、仍被借用时不能 free
+    assert any("不能带出" in x for x in errs(
+        "fn f(xs: [u32]) -> [u32] {\n    domain v : borrow(xs) {\n        return &xs;\n"
+        "    }\n}\n"))
+    assert any("不能 free" in x for x in errs(
+        "const N: u32 = 8;\nfn f() -> u32 {\n    let p: ptr = alloc(N);\n"
+        "    domain v : borrow_mut(p) {\n        free(p);\n    }\n    return 0;\n}\n"))
+    # R1 源必须可见
+    assert any("不在作用域里" in x for x in errs(
+        "fn f(xs: [u32]) -> u32 {\n    domain v : borrow(nope) {\n        return 0;\n}\n}\n"))
+    # `domain(` 仍然可以是普通调用 —— 上下文关键字不被抢
+    assert not any("域" in x for x in errs(
+        "fn f() -> u32 { return 0; }\n"))
+
+    # **红必须红在这条规则上**：把 `_borrow_domain_errs` 临时关掉，所有负例都得能编过
+    # —— 否则判据测的是别的东西（`docs/243` 那条"空判据"教训）。
+    negatives = (
+        "fn f(xs: mut [u32]) -> u32 {\n    domain v : borrow(xs) {\n        xs[0] = 1;\n"
+        "        return 0;\n    }\n}\n",
+        "fn f(p: ptr) -> u32 {\n    domain v : borrow(p) {\n        store8(p, 0, 1);\n"
+        "    }\n    return 0;\n}\n",
+        "fn f(xs: mut [u32]) -> u32 {\n    domain e : borrow_mut(xs) {\n"
+        "        let w: [u32] = &xs;\n        return w[0];\n    }\n}\n",
+        "fn f(xs: [u32]) -> u32 {\n    domain v : borrow(xs) {\n"
+        "        let w: mut [u32] = &mut xs;\n        return w[0];\n    }\n}\n",
+        "fn f(xs: [u32]) -> [u32] {\n    domain v : borrow(xs) {\n        return &xs;\n"
+        "    }\n}\n",
+        "const N: u32 = 8;\nfn f() -> u32 {\n    let p: ptr = alloc(N);\n"
+        "    domain v : borrow_mut(p) {\n        free(p);\n    }\n    return 0;\n}\n",
+    )
+    orig = lomentc._borrow_domain_errs
+    lomentc._borrow_domain_errs = lambda f: []
+    try:
+        for body in negatives:
+            assert errs(body) == [], (
+                "关掉这条规则之后仍然红 —— 那这一格测的不是它:\n" + body + str(errs(body)))
+    finally:
+        lomentc._borrow_domain_errs = orig
+    print("      借用域期 1：view / freeze / exclusive 三条规则逐格成立（关掉即放行）")
 
 
 @test

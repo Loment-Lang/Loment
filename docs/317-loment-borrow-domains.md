@@ -1,6 +1,9 @@
 # 317 · 借用生命周期域：十个
 
-> 状态: **设计稿**（2026-11-09）
+> 状态: **期 1 参考侧已落**（2026-11-09）：`borrow(x)` / `borrow_mut(x)` 两种形状与
+> R1/R2/R3 三条规则在 `tools/lomentc.py` 上实装（`view` / `freeze` / `exclusive` 三个域），
+> 判据 `lomentc_test::test_borrow_domains_phase1_rules`。**自举侧本期未跟上**（下一期），
+> 期 2/3 未开始。
 > 上游: `docs/299`（借用区域）· `docs/306`（域代数）· `docs/307`（语境类）·
 > `docs/314`（域块）· `docs/315`（域循环与几何）
 > 一句话: 域的形状那一格原来只收**位置**（`space[lo..hi]`）与**时律**（`epoch(N)` /
@@ -286,11 +289,17 @@ E041: 封印域外不能把 buf 交给外部
 
 ## 8. 实现成本与分期
 
-| 期 | 内容 | 依赖 |
-|---|---|---|
-| 1 | `borrow` / `borrow_mut` 两种形状 + R1/R2/R3 三条检查 + `view` / `exclusive` / `freeze` | `docs/299` 的区域环境 |
-| 2 | 形状运算：`split` / `window` / `cursor`（子区域、越窗、回边） | 期 1 + `docs/315` 的 `mutex` 边 |
-| 3 | `loan` / `epoch` / `session` / `seal`（退出路径、线性、外部调用表） | 期 1–2 |
+| 期 | 内容 | 依赖 | 状态 |
+|---|---|---|---|
+| 1 | `borrow` / `borrow_mut` 两种形状 + R1/R2/R3 三条检查 + `view` / `exclusive` / `freeze` | `docs/299` 的区域环境 | **参考侧已落**；自举侧下一期 |
+| 2 | 形状运算：`split` / `window` / `cursor`（子区域、越窗、回边） | 期 1 + `docs/315` 的 `mutex` 边 | 未开始 |
+| 3 | `loan` / `epoch` / `session` / `seal`（退出路径、线性、外部调用表） | 期 1–2 | 未开始 |
+
+期 1 的落地形状：`domain [NAME :] borrow(NAME) { … }` / `borrow_mut(NAME) { … }`，
+`DomainBlock` 多两个字段（`borrow_src` / `borrow_mut`），时律固定 `regular` ——
+**进 IR 与普通块同形**，所以接受这份程序的两个实现产物逐字节不变（种子不变）。
+三条规则落在 `_borrow_domain_errs`：写（赋值 / `store8`…）、再借（`&` / `&mut`）、
+`return` 借用、借用期间 `free`、源不可见。
 
 自举侧的检查器是 token 级的：区域环境挂在现有 env 上，域的名字表按块建、按块销毁 ——
 这与 `docs/314` 已经落地的域栈是同一套机械，不需要新的 AST。

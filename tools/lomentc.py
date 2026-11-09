@@ -1787,6 +1787,12 @@ class DomainBlock:
     audit_id: int = 0
     #: 显式的树边 `child_of PARENT`（`docs/315` §4.1）。空 = 只由括号隐含。
     child_of: str = ""
+    #: **借用生命周期域**（`docs/317` §1）：`domain v : borrow(xs) { … }` 的 `xs`。
+    #: 非空时 `space` 是 `borrow` / `borrow_mut`，形状的 lo/hi 不参与判断 —— 域的形状
+    #: 是**区域**，不是位置。空 = 今天那种位置/时律形状。
+    borrow_src: str = ""
+    #: `borrow_mut(xs)` = 独占域；`borrow(xs)` = 共享域（`view` / `freeze` 都是它）。
+    borrow_mut: bool = False
 
 
 @dataclass
@@ -3799,6 +3805,12 @@ class Parser:
         a, b, c, d = self.peek(1), self.peek(2), self.peek(3), self.peek(4)
         if a.kind == "ident" and b.val == ":" and c.kind == "ident" and d.val == "[":
             return True
+        # `docs/317`：区域形状 —— `domain V : borrow(xs)` / `domain borrow_mut(xs)`。
+        # 只认 `borrow` / `borrow_mut` 这两个名字（`domain(...)` 仍可以是普通调用）。
+        if a.kind == "ident" and b.val == ":" and c.kind == "ident" and d.val == "(":
+            return c.val in ("borrow", "borrow_mut")
+        if a.kind == "ident" and b.val == "(" and a.val in ("borrow", "borrow_mut"):
+            return True
         return a.kind == "ident" and b.val == "["
 
     def _at_domain_loop(self) -> bool:
@@ -3919,6 +3931,26 @@ class Parser:
                 and self.peek(1).val == ":"):
             name = self.next().val
             self.next()
+        # **区域形状**（`docs/317` §1）：`borrow(xs)` / `borrow_mut(xs)`。形状是区域，
+        # 不是位置 —— lo/hi 不参与判断，时律固定成 `regular`（本期的三个域都不用状态）。
+        if (self.at("ident", "borrow") or self.at("ident", "borrow_mut")) \
+                and self.peek(1).val == "(":
+            mode = self.next().val
+            self.expect("punct", "(")
+            src = self.ident("被借用的名字")
+            self.expect("punct", ")")
+            if not name:
+                self.dom_seq += 1
+                name = f"__dom${self.dom_seq}"
+            blk = DomainBlock(name, mode, 0, 0, False, False, "regular", 0, False, [],
+                              kw.line, borrow_src=src,
+                              borrow_mut=(mode == "borrow_mut"))
+            self.dom_stack.append(blk)
+            try:
+                blk.body = self.parse_block()
+            finally:
+                self.dom_stack.pop()
+            return blk
         space = self.ident("空间名")
         lo, hi, lo_inf, hi_inf = self.parse_shape()
         kind, param = self.parse_law_tail()
@@ -7491,6 +7523,7 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
 
         walk(f.body, scope)
         errs.extend(_move_check(f, funcs, structs, enums, lms))  # M13 移动检查 + E029
+        errs.extend(_borrow_domain_errs(f))  # docs/317 期 1：借用生命周期域的三条规则
         if lifetime != "lifetime_no":
             _pn = [(p.name, p.type) for p in f.params]
             for _p in f.params:
@@ -7750,6 +7783,96 @@ def _move_check(f: Func, funcs: dict, structs: dict, enums: dict,
                     use(s.aux)
 
     walk(f.body, scope)
+    return errs
+
+
+# ---------------------------------------------------------------- 借用生命周期域（docs/317）
+#
+# 期 1：`domain x : borrow(v) { … }` / `borrow_mut(v)` 两种**区域形状**，三条规则：
+#   R1 寿命 —— 源必须是本函数可见的名字（形参或 `let`）；
+#   R2 权威 —— 共享域里不许写 v；独占域里不许再借 v（别名）；
+#   R3 逃逸 —— 域里借出去的值不能 `return` 出去；v 在仍被借用时不能 `free`。
+#
+# 三条都只是**检查器**的事：块本身进 IR 与普通 `{ }` 同形（`kind=regular`），
+# 所以接受这份程序的两个实现产物逐字节不变。
+
+_STORE_BUILTINS = ("store8", "store16", "store32", "store64", "store128")
+
+
+def _borrow_domain_errs(f: Func) -> list[str]:
+    """`docs/317` 期 1 的三条规则。每条都点名**域 / 名字 / 行号**。"""
+    import dataclasses as _dc
+
+    def reap(v, fn) -> None:
+        if _dc.is_dataclass(v) and not isinstance(v, type):
+            fn(v)
+            for fd in _dc.fields(v):
+                if fd.name in ("line", "col", "off", "len"):
+                    continue
+                reap(getattr(v, fd.name), fn)
+        elif isinstance(v, (list, tuple)):
+            for y in v:
+                reap(y, fn)
+
+    visible = {p.name for p in f.params}
+
+    def note(v) -> None:
+        if isinstance(v, Let):
+            visible.add(v.name)
+
+    reap(f.body, note)
+
+    blocks: list[DomainBlock] = []
+
+    def pick(v) -> None:
+        if isinstance(v, DomainBlock) and v.borrow_src:
+            blocks.append(v)
+
+    reap(f.body, pick)
+    errs: list[str] = []
+    for b in blocks:
+        src = b.borrow_src
+        if src not in visible:
+            errs.append(f"{b.line}: 域 {b.name} 要借用的 {src} 不在作用域里 —— "
+                        "区域形状只能绑到一个可见的名字")
+            continue
+
+        def scan(v, _b=b, _src=src) -> None:
+            ln = getattr(v, "line", _b.line)
+            if isinstance(v, Assign):
+                r = _place_root(v.target)
+                if r is not None and r.name == _src and not _b.borrow_mut:
+                    errs.append(f"{ln}: borrow 域 {_b.name} 里只能读 {_src}，不能写")
+            elif isinstance(v, Call) and v.name in _STORE_BUILTINS and v.args:
+                r = _place_root(v.args[0])
+                if r is not None and r.name == _src and not _b.borrow_mut:
+                    errs.append(f"{ln}: borrow 域 {_b.name} 里只能读 {_src}，不能写")
+            elif isinstance(v, Call) and v.name == "free" and v.args:
+                a0 = v.args[0]
+                if isinstance(a0, Ident) and a0.name == _src:
+                    errs.append(f"{ln}: {_src} 还在域 {_b.name} 里被借用，不能 free")
+            elif isinstance(v, Un) and v.op in ("&", "&mut"):
+                r = _place_root(v.expr)
+                if r is not None and r.name == _src:
+                    if _b.borrow_mut:
+                        errs.append(f"{ln}: 独占域 {_b.name} 里不能再借 {_src}（别名）")
+                    elif v.op == "&mut":
+                        errs.append(f"{ln}: 共享域 {_b.name} 里不能再借 &mut {_src}")
+            elif isinstance(v, Return) and v.expr is not None:
+                hit = []
+
+                def find(x) -> None:
+                    # 只有**借出去**的形状才算逃逸：`return xs[0]` 读的是值，不是借用。
+                    if isinstance(x, Un) and x.op in ("&", "&mut"):
+                        r = _place_root(x.expr)
+                        if r is not None and r.name == _src:
+                            hit.append(x)
+
+                reap(v.expr, find)
+                if hit:
+                    errs.append(f"{ln}: 域 {_b.name} 里的借用不能带出（来源 {_src}）")
+
+        reap(b.body, scan)
     return errs
 
 

@@ -613,6 +613,29 @@ MUTATORS_V21 = [
 ]
 
 
+def fixture_v22() -> dict:
+    """一份合法的 **v22** 形式对象：v21 的再 + **生命周期档** `lifetime`。
+
+    默认档是 `lifetime_auto`（2026.3 起）—— 这份夹具用的就是默认值；
+    `lifetime_no` / `lifetime_manual` 在另一个方向上也必须过。
+    """
+    d = fixture_v21()
+    d["potato"] = "v22"
+    d["lifetime"] = "lifetime_auto"
+    return d
+
+
+#: v22 的 `lifetime` 那几条规则的反例（`docs/299`）。作用在 **v22** 的对象上。
+MUTATORS_V22 = [
+    ("lifetime 整个缺掉", lambda d: d.pop("lifetime"), "lifetime 必须是"),
+    ("lifetime 拼错", lambda d: d.__setitem__("lifetime", "lifetime_automatic"),
+     "lifetime 必须是"),
+    ("lifetime 用了不存在的旧开关名",
+     lambda d: d.__setitem__("lifetime", "lifetime_true"), "lifetime 必须是"),
+    ("lifetime 不是字符串", lambda d: d.__setitem__("lifetime", 1), "lifetime 必须是"),
+]
+
+
 #: v20 的 `systems` 那几条规则的反例（#1022）。作用在 **v20** 的对象上。
 #: 三条验收点各至少一条：**错 state / 错 cost / 缺系统**；另外把"指针"那两格也钉住。
 MUTATORS_V20 = [
@@ -683,6 +706,20 @@ def test_v21_requires_the_gc_control_counts():
     assert potato.validate(fixture_v21()) == [], potato.validate(fixture_v21())
     for name, mut, needle in MUTATORS_V21:
         d = fixture_v21()
+        mut(d)
+        errs = potato.validate(d)
+        assert any(needle in e for e in errs), (name, errs)
+
+
+@test
+def test_v22_requires_the_lifetime_tier():
+    """v22 的 `lifetime`（`docs/299`）：三个合法档都过，反例各钉一条规则。"""
+    for lt in ("lifetime_no", "lifetime_auto", "lifetime_manual"):
+        d = fixture_v22()
+        d["lifetime"] = lt
+        assert potato.validate(d) == [], (lt, potato.validate(d))
+    for name, mut, needle in MUTATORS_V22:
+        d = fixture_v22()
         mut(d)
         errs = potato.validate(d)
         assert any(needle in e for e in errs), (name, errs)
@@ -1101,7 +1138,7 @@ def _cases() -> list[tuple[str, dict]]:
                                    ("v12", fixture_v12()), ("v16", fixture_v16()),
                                    ("v17", fixture_v17()), ("v18", fixture_v18()),
                                    ("v19", fixture_v19()), ("v20", fixture_v20()),
-                                   ("v21", fixture_v21())]
+                                   ("v21", fixture_v21()), ("v22", fixture_v22())]
     # **`gc_manual` + `no_runtime` 是合法档**（"要运行期、但内存我自己管"的反面：
     # 不要运行期、手动回收）—— 它必须**不报错**。上面那张反例表只会钉"该拒的要拒",
     # 钉不住"不该拒的别拒"，所以这一条以**合法样本**的身份过孪生那一关。
@@ -1184,6 +1221,15 @@ def _cases() -> list[tuple[str, dict]]:
         d = fixture_v20()
         mut(d)
         out.append((f"v20-{name}", d))
+    # v22 那一组（`lifetime`，`docs/299`）：三个合法档各来一份，再挂反例。
+    for lt in potato.LIFETIMES:
+        dv = fixture_v22()
+        dv["lifetime"] = lt
+        out.append((f"v22-{lt}", dv))
+    for name, mut, _ in MUTATORS_V22:
+        d = fixture_v22()
+        mut(d)
+        out.append((f"v22-{name}", d))
     d0 = fixture()
     for k in ("traits", "impls", "generics", "instances", "guards"):
         d0.pop(k)

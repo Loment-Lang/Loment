@@ -166,14 +166,21 @@ def _body(cell: dict[str, str]) -> str:
 
 
 def _all_legal_cells() -> list[dict[str, str]]:
-    """**整张矩阵**的合法格（`#940` 第 1 行 / `#943`）：七维全部参与，冲突对现读。
+    """**整张矩阵**的合法格（`#940` 第 1 行 / `#943`）：八维全部参与，冲突对现读。
 
     与 `_legal_cells` 的区别只在维数：那一条是 `#940` 正文点名的三个核心维（链接与运行
     的那十格），这一条是"每一维都算一格" —— 新维度一进 `CORE_DIMS`，这里自己长。
     """
     conflicts = [set(p) for p in lomentc.core_conflicts()]
+    #: 大扫描里每维只取**一个代表值**（`docs/299` 第八维之后）：
+    #: `lifetime` 的三个取值对这份**不含借用**的探针不改变 IR，三个都扫是 3× 墙钟；
+    #: "每个取值都进产物"由下面的 `test_lifetime_values_are_recorded...` 逐值钉住。
+    #: 这不是抽样放水 —— 别的维照旧全参与。
+    sweep_value = {"lifetime": "lifetime_auto"}
+    dims = [(d, (sweep_value[d],) if d in sweep_value else lomentc.CORE_DIMS[d])
+            for d in lomentc.CORE_DIM_ORDER]
     cells = []
-    for combo in itertools.product(*(lomentc.CORE_DIMS[d] for d in lomentc.CORE_DIM_ORDER)):
+    for combo in itertools.product(*(vals for _, vals in dims)):
         values = set(combo)
         if any(pair <= values for pair in conflicts):
             continue
@@ -786,10 +793,13 @@ def test_no_std_is_a_claim_the_linker_checks():
 def test_both_implementations_emit_the_same_ir_on_every_legal_cell():
     """`#940` 第 1 行 / `#943`：**整张矩阵**的每个合法格，两份实现的 IR 逐字节相同。
 
-    `#940` 正文写的"六格"是 `mode × gc × runtime`；现在 `CORE_DIMS` 是七维，合法格
+    `#940` 正文写的"六格"是 `mode × gc × runtime`；现在 `CORE_DIMS` 是八维，合法格
     由编译器自己的表**现算**（当前 240 个）。格子**不写死** —— 加一维、改一对冲突，
     这条判据自己跟着长。要的是"每一格都有人答"，所以**不抽样**：抽样的绿灯证明不了
-    没被抽到的那一格。自举驱动是种子现链的那一只，与用户拿到的 dev 通道同一份实现。
+    没被抽到的那一格。（唯一的例外是 `lifetime`：它的三个取值对这份**不含借用**的
+    探针不改变 IR，大扫描只取一个代表值；"每个取值都被产物记下"由
+    `test_lifetime_values_are_recorded_and_ir_identical` 逐值钉住。）
+    自举驱动是种子现链的那一只，与用户拿到的 dev 通道同一份实现。
     """
     cells = _all_legal_cells()
     assert len(cells) >= 100, (
@@ -1028,6 +1038,29 @@ def test_interlock_free_is_seen_by_the_checker():
         assert rc != 0, "`free` 之后再用没有被拒"
         assert "free" in diag and "不能再用" in diag, f"诊断没点名 use-after-free：{diag[-400:]}"
     print("      free × LMS：用后使用被检查器点名拒绝")
+
+
+@test
+def test_lifetime_values_are_recorded_and_ir_identical():
+    """第八维的三个取值：各自进 Potato，且两个实现的 IR 逐字节相同（`docs/299`）。
+
+    大扫描（`test_both_implementations_emit_the_same_ir_on_every_legal_cell`）里
+    `lifetime` 只取一个代表值 —— 这份探针没有借用，三个取值的 IR 本来就一样；
+    这条补上"每个取值都被产物如实记下"那一格。
+    """
+    for value in lomentc.CORE_DIMS["lifetime"]:
+        with tempfile.TemporaryDirectory() as tds:
+            td = Path(tds)
+            cell = {"mode": "std", "gc": "gc_manual", "runtime": "no_runtime",
+                    "lifetime": value}
+            rc, diag, ir, pot = _emit(td, f"lifetime-{value}", cell, PURE_BODY)
+            assert rc == 0, f"{value}: 参考实现编不过\n{diag[-400:]}"
+            assert pot.get("lifetime") == value, (value, pot.get("lifetime"))
+            src = td / f"lifetime-{value}.lomt"
+            sh_rc, sh_ir, sh_err = _selfhost_ir(td, src)
+            assert sh_rc == 0, f"{value}: 自举侧编不过\n{sh_err[-400:]}"
+            assert sh_ir == ir, f"{value}: 两个实现的 IR 不同"
+    print("      lifetime 三档：都进 Potato，且两实现 IR 逐字节相同")
 
 
 def main() -> int:

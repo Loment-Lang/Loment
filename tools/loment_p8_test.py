@@ -1510,7 +1510,10 @@ def _dep_paths(target: Path) -> list[Path]:
 #: `port` 的 `sealed`/`hosted`**（`docs/222` 那次没跟上），这一处**不在本次范围**，
 #: 留着可见；真要收口就把三份变成一份推导的。
 _CORE_CHOOSE = ("std", "no_std", "gc_manual", "gc_auto", "gc_auto_alpha",
-                "runtime", "no_runtime", "vm", "no_vm")
+                "runtime", "no_runtime", "vm", "no_vm",
+                # 第八维（`docs/299`）：三个取值也要认出来，否则夹具会把
+                # `choose lifetime_auto` 当普通开关跳过。
+                "lifetime_no", "lifetime_auto", "lifetime_manual")
 
 
 def _blank_core_choose(text: str) -> str:

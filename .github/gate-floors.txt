@@ -12,12 +12,12 @@
 
 
 lomc_test 25
-lomentc_test 213
+lomentc_test 223
 lspe_test 44
-potato_test 18
+potato_test 19
 loment_ct_test 2
 loment_comefor_test 12
-loment_choose_matrix_test 25
+loment_choose_matrix_test 26
 lmgr_test 6
 loment_extblock_test 7
 loment_multilang_test 2

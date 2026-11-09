@@ -173,10 +173,11 @@ def bootstrap() -> int:
     else:
         print("[ERR] 既无 wsl 也无 sh")
         return 2
-    # 上限 1800s（2026-11-08 抬，原 900s）：这一步的墙钟**随种子长大**，而 900s
-    # 是种子 4 MB 时代的数。实测本机 5.71 MB 的种子要 **7 分 14 秒**（434s），
-    # CI runner 更慢 —— PR #1505 上 900s 被跑穿，判据报成 TimeoutExpired。
-    # 抬到 1800s 留出 ~2.5 倍余量；分片 job 的 60 分钟上限仍装得下（该套件独占一片）。
+    # 900 -> 1800（2026-11-09）：种子到 5.63 MB 之后，三阶段定点在 CI 的
+    # ubuntu runner 上撞了 15 分钟。这里有**两个**慢步骤（stage1 与 stage2 各编一遍
+    # driver.lomt），而它们是定点判据本身，不能抽掉。1800 是**存活护栏**，不是性能
+    # 指标：真挂死仍然会在半小时内报出来。本机同树实测 5.71 MB / 7 分 14 秒（434s），
+    # 与"CI 比本机慢一倍多"对得上 —— 抬上限是修那个过时的数，不是掩盖变慢。
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800,
                        shell=False, cwd=str(ROOT))
     sys.stdout.write(r.stdout)

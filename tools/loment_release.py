@@ -104,6 +104,8 @@ GLOBS = [
     # std 核的行为判据 (docs/180): lib/ 里那些函数算得对不对 —— 与
     # `loment_lib_test`(库系统) 是两件事, 原先只测了后者
     "tools/loment_std_test.py",
+    # 领域包的行为判据 (docs/317/318/319): 八个领域包逐个探针对 Python 对跑
+    "tools/loment_domains_test.py",
     # LibL 的 libc 面 (docs/232): 与真 glibc 逐字节对跑
     "tools/loment_libl_test.py",
     # LibL 家族第三个包 internet (docs/241): 对 CPython 标准库 + 真 http.server 对跑

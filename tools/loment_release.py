@@ -93,7 +93,7 @@ GLOBS = [
     "tools/lomentc_test.py", "tools/lspe_test.py", "tools/lspe_ratchet.py",
     # E8 的反证探针登记表（`docs/262` §5.4 / `#766`）：机械生成，检查漏探针的判据也靠它。
     "tools/lspe_probes.py",
-    # AI slop 的机械代理判据（`docs/318`）：检查器 + 它自己的判据。
+    # AI slop 的机械代理判据（`docs/319`）：检查器 + 它自己的判据。
     "tools/loment_slop.py", "tools/loment_slop_test.py",
     "tools/potato.py", "tools/potato_test.py",
     "tools/potato_cross.py", "tools/potato_from.py", "tools/potato_measure.py",

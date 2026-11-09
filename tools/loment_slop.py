@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""loment_slop.py — **AI slop 的机械代理判据**（`docs/318`）。
+"""loment_slop.py — **AI slop 的机械代理判据**（`docs/319`）。
 
 ## 它修的是什么
 

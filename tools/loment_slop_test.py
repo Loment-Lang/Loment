@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""`tools/loment_slop.py` 的判据（`docs/318`）。
+"""`tools/loment_slop.py` 的判据（`docs/319`）。
 
 每条代理判据都有**正例**（必须命中）与**反例**（不许误报），因为一个只会喊的
 检查器与一个不跑的检查器一样没用。夹具是临时 git 仓：判据量的就是"变更"。

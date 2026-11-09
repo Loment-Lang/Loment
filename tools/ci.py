@@ -261,7 +261,7 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "lspe_test", "potato_
                  # `docs/NNN` 的编号：**不许出现新的撞号**，且基线只许变短
                  # (2026-10-11 实测 main 上有 7 个号被两份以上文档共用) —— `tools/loment_docs.py`
                  "loment_docs_test",
-                 # AI slop 的机械代理判据（`docs/318`）：范围、空转测试、复制粘贴、
+                 # AI slop 的机械代理判据（`docs/319`）：范围、空转测试、复制粘贴、
                  # 无调用点的公开 API、注释复述。模型只做提示，不在这里跑。
                  "loment_slop_test",
                  # `lom/` 那道禁区自己的判据（把 gate.yml 里那段脚本抠出来跑）

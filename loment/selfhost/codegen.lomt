@@ -11770,9 +11770,10 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32, tickx: u32)
     // 并且**说出来**（`; loment-heap: static 65536`，"不静默"）。
     // 与参考实现 `_ffi_heap` / `_ffi_grown` 同一条规则。
     // **LMS 第 3 级入口 A**（`docs/253` §5.3）：两个条件缺一不可 —— `lms` 开着
-    // **且** 这份产物里有收集器（`gc_any`）。三支共用同一个判断，见 `lms_mask`。
+    // **且** 这份产物里有收集器（`gc_any`，或 `lgc` —— manual 档也有收集器了，窗口里
+    // 那句"开"就是它被允许收的时刻）。三支共用同一个判断，见 `lms_mask`。
     let lms_rescue: u32 = 0;
-    if load32(s, 588) & 4 != 0 && gc_any(s) == 1 {
+    if load32(s, 588) & 4 != 0 && (gc_any(s) == 1 || load32(s, CG_LGC) == 1) {
         lms_rescue = 1;
     }
     let indirect: u32 = 0;

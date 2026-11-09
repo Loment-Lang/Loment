@@ -797,7 +797,7 @@ def test_every_surface_grammar_refuses_unrecognised_material():
 
 @test
 def test_front_memo_does_not_survive_a_source_edit():
-    """**同一个路径换了内容就要重翻**（#1512）。
+    """**同一个路径换了内容就要重翻**（#1518）。
 
     `_FRONT_MEMO` 原先只按 `(路径, 语言, 模式)` 记。它的前提是"一次编译里文件不会
     变" —— 对 `lomentc.load` 的两次读（装载 + 开关预扫）成立，对**同一个进程里反复

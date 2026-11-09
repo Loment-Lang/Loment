@@ -2487,7 +2487,7 @@ def front_door(path: Path, lang: str = "auto", mode: str = "strict") -> FrontUni
     # **别的写法**：翻成 Loment。`lomt_from` 按需 import —— 它会把各门翻译器拉进来，
     # 而这条路不是每个调用方都走得到（与 `lomt_from` 自己那条注解同一个道理）。
     import lomt_from  # noqa: PLC0415
-    #: **内容也进键**（`#1512`）。原先只有 `(路径, 语言, 模式)`，前提是"一次编译里
+    #: **内容也进键**（`#1518`）。原先只有 `(路径, 语言, 模式)`，前提是"一次编译里
     #: 文件不会变" —— 对 `lomentc.load` 的两次读（装载 + 开关预扫）成立，对
     #: **同一个进程里反复改同一个路径**的调用方不成立：Playground 每次运行都写
     #: `playground.lomt`，于是先跑一个能过的程序、再把源改成坏的，拿回来的仍是

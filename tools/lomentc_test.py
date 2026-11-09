@@ -4269,6 +4269,45 @@ def test_runtime_dep_must_declare_and_agree():
 
 
 @test
+def test_a_slot_is_root_only_wherever_the_dimension_is():
+    """槽（`choose lspe_aicheck_true`）与维度同一条边界：**整个程序**的格，不是单元的。
+
+    这一条钉三件事：`addin` 单元里写了要报（①，否则那行静默无效）、
+    依赖写了要按**需求**核（②，根不满足就报、两边点名）、根满足时不许拒（③）。
+    """
+    import tempfile
+    NL = chr(10)
+    body = NL + "pub fn f() -> u32 {" + NL + "    return 1;" + NL + "}" + NL
+
+    def run(files: dict[str, str], root: str) -> list[str]:
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            for name, text in files.items():
+                (d / name).write_text(text, encoding="utf-8")
+            rp = d / "root.lomt"
+            rp.write_text(root, encoding="utf-8")
+            # 走**唯一入口**（`load_unit`）：`addin` 是预扫期落定的，
+            # 自己拼 `load()` + `resolve_deps()` 会让它白写 —— 那条库注释就在讲这件事。
+            m, deps = lomentc.load_unit(rp, ROOT)
+            return lomentc.check(m, None, deps)
+
+    # ① `addin` 单元里写槽 ⇒ 报（前缀与核心维度那条相同，诊断码照旧 E022）
+    e = run({"sw.lomt": "module sw" + NL + "choose lspe_aicheck_true" + NL},
+            "module root" + NL + "addin sw" + NL + body)
+    assert any("`addin` 单元不许声明核心模式" in x and "aicheck" in x for x in e), e
+
+    # ② 依赖写 `lspe_aicheck_true`、根没有 ⇒ 报，两边点名，并给出要补的那一行
+    lib = "module lib" + NL + "choose lspe_aicheck_true" + NL + body
+    tail = NL + 'use "lib.lomt"' + NL + body
+    e = run({"lib.lomt": lib}, "module root" + tail)
+    assert any("aicheck" in x and "根" in x and "lspe_aicheck_true" in x for x in e), e
+
+    # ③ 根满足它 ⇒ 这一格**不许**报（"合法的那一对不许拒"）
+    e = run({"lib.lomt": lib}, "module root" + NL + "choose lspe_aicheck_true" + tail)
+    assert [x for x in e if "aicheck" in x] == [], e
+
+
+@test
 def test_a_sibling_dependency_is_not_every_units_requirement():
     """#726：体检一个依赖时，**它的兄弟**不是它的依赖。
 
@@ -4930,11 +4969,13 @@ def test_lspe_dimension_defaults_open():
     assert lp["obligations"] == lp["sites"]
     assert lp["sites"] == lp["proved"] + lp["undecided"]
     assert "InBounds" in lp["per_kind"]
-    # LSPE v2（0.1.5.2）：默认档下每条没被 pass 覆盖的 UNDECIDED 都有一条
-    # `Assumed` 地板（`docs/262` §6"允许但标注"），所以 `floors == undecided`。
-    assert lp["floors"] == lp["floor_detail"]["assumed"] == lp["undecided"]
+    # demo 有一条 `capability blk_write … revocable`：E9 给它一条 `InDomain`（Typed）
+    # 和一条 `CapabilityLive`（Assumed），所以地板是 1（撤销域），不是 0。
+    assert lp["per_kind"]["InDomain"] == "1/1", lp["per_kind"]
+    assert lp["per_kind"]["CapabilityLive"] == "1/1", lp["per_kind"]
+    assert lp["floors"] == lp["floor_detail"]["assumed"] == 1
     # `#786` 起 `floor_detail` 多一格 `pass`；`#750` 再加 `depth`。
-    assert lp["floor_detail"] == {"assumed": lp["undecided"], "stale_wf": 0,
+    assert lp["floor_detail"] == {"assumed": 1, "stale_wf": 0,
                                   "budget": 0, "depth": 0, "drop_honest": 0,
                                   "pass": 0}, lp["floor_detail"]
     assert lp["passes"] == [] and lp["pass_ratio"] == f"0/{lp['sites']}"
@@ -5022,9 +5063,11 @@ def test_lspe_q1_provenance_and_strict_e034():
         assert any("未标注的放行" in e for e in errs), errs
         doc = json.loads(lomentc.emit_potato(lomentc.load(p), ROOT))
     lp = doc["lspe"]
-    assert lp["sites"] == 3, lp
-    assert lp["proved"] == 2 and lp["undecided"] == 1, lp
-    assert lp["per_kind"] == {"GuardHolds": "1/1", "InBounds": "1/2"}, lp
+    # 3 条 E1/E2 站点 + E9 的两条（域声明 + `guard d(i)` 的包含性）。
+    assert lp["sites"] == 5, lp
+    assert lp["proved"] == 3 and lp["undecided"] == 2, lp
+    assert lp["per_kind"] == {"GuardHolds": "1/1", "InBounds": "1/2",
+                             "InDomain": "1/2"}, lp
     assert potato.validate(doc) == []
 
 
@@ -5361,9 +5404,10 @@ def test_lspe_level_only_lowers_proved():
         d0 = json.loads(lomentc.emit_potato(lomentc.load(p, lspe_level=0), ROOT))
         d3 = json.loads(lomentc.emit_potato(lomentc.load(p, lspe_level=3), ROOT))
     assert d0["lspe"]["level"] == 0 and d3["lspe"]["level"] == 3
-    # L0：guard 的 Typed 证据被级别挡掉，只剩裸字面量下标那条 Syntactic。
+    # L0：guard 的 Typed 与域声明的 Typed 都被级别挡掉，只剩裸字面量下标那条
+    # Syntactic；L3 把两条 Typed 都放回来（guard + 域声明）。
     assert d0["lspe"]["proved"] == 1, d0["lspe"]
-    assert d3["lspe"]["proved"] == 2, d3["lspe"]
+    assert d3["lspe"]["proved"] == 3, d3["lspe"]
     assert d0["lspe"]["proved"] <= d3["lspe"]["proved"]
 
 
@@ -5939,6 +5983,91 @@ def test_domain_blocks_scope_and_auto_guard():
     assert ", i64 128, i64 0, i64 0)" in ir2, "外层没有 silent 位"
     assert ", i64 0, i64 0, i64 0)" in ir2, "内层不是正常记账那一支"
     print("      块级域：作用域 / 嵌套包含 / 空间标签 / 自动守卫链，逐条成立")
+
+
+@test
+def test_borrow_domains_phase1_rules():
+    """`docs/318` 期 1：`borrow(x)` / `borrow_mut(x)` 两种区域形状 + 三条规则。
+
+    R1 寿命：源必须是可见的名字；R2 权威：共享域不许写、独占域不许再借；
+    R3 逃逸：域里借出去的不能 `return`，仍被借用时不能 `free`。
+
+    判据末尾把 `_borrow_domain_errs` **临时关掉**，六个负例必须全部放行 —— 红的
+    位置因此确定在这条规则上，不是别的地方。形状本身是新增的，所以"先红后绿"
+    这一格只能这样证明（关掉规则 ⇒ 绿的对照），不能靠旧主干。
+    """
+    def errs(body: str) -> list[str]:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "b.lomt"
+            p.write_text("choose write grammar tur2026.3\nmodule b\nchoose runtime\n\n" + body,
+                         encoding="utf-8", newline="\n")
+            m = lomentc.load(p)
+            return lomentc.check(m, deps=[])
+
+    # 正例：共享域只读；独占域可写（源是 mut 切片）
+    assert errs("fn f(xs: [u32]) -> u32 {\n"
+                "    domain v : borrow(xs) {\n        return xs[0];\n    }\n}\n") == []
+    assert errs("fn f(xs: mut [u32]) -> u32 {\n"
+                "    domain e : borrow_mut(xs) {\n        xs[0] = 1;\n        return xs[0];\n"
+                "    }\n}\n") == []
+    # `freeze` 就是共享域套在 mut 源上：读可以
+    assert errs("fn f(xs: mut [u32]) -> u32 {\n"
+                "    domain z : borrow(xs) {\n        return xs[0];\n    }\n}\n") == []
+
+    # R2a 共享域不许写（下标 / 内建两条路）
+    assert any("只能读 xs" in x for x in errs(
+        "fn f(xs: mut [u32]) -> u32 {\n    domain v : borrow(xs) {\n        xs[0] = 1;\n"
+        "        return 0;\n    }\n}\n"))
+    assert any("只能读 p" in x for x in errs(
+        "fn f(p: ptr) -> u32 {\n    domain v : borrow(p) {\n        store8(p, 0, 1);\n"
+        "    }\n    return 0;\n}\n"))
+    # R2b 独占域不许再借（别名）
+    assert any("不能再借 xs" in x for x in errs(
+        "fn f(xs: mut [u32]) -> u32 {\n    domain e : borrow_mut(xs) {\n"
+        "        let w: [u32] = &xs;\n        return w[0];\n    }\n}\n"))
+    # R2a 共享域里连 `&mut` 也不行
+    assert any("不能再借 &mut xs" in x for x in errs(
+        "fn f(xs: [u32]) -> u32 {\n    domain v : borrow(xs) {\n"
+        "        let w: mut [u32] = &mut xs;\n        return w[0];\n    }\n}\n"))
+    # R3 借用不能带出、仍被借用时不能 free
+    assert any("不能带出" in x for x in errs(
+        "fn f(xs: [u32]) -> [u32] {\n    domain v : borrow(xs) {\n        return &xs;\n"
+        "    }\n}\n"))
+    assert any("不能 free" in x for x in errs(
+        "const N: u32 = 8;\nfn f() -> u32 {\n    let p: ptr = alloc(N);\n"
+        "    domain v : borrow_mut(p) {\n        free(p);\n    }\n    return 0;\n}\n"))
+    # R1 源必须可见
+    assert any("不在作用域里" in x for x in errs(
+        "fn f(xs: [u32]) -> u32 {\n    domain v : borrow(nope) {\n        return 0;\n}\n}\n"))
+    # `domain(` 仍然可以是普通调用 —— 上下文关键字不被抢
+    assert not any("域" in x for x in errs(
+        "fn f() -> u32 { return 0; }\n"))
+
+    # **红必须红在这条规则上**：把 `_borrow_domain_errs` 临时关掉，所有负例都得能编过
+    # —— 否则判据测的是别的东西（`docs/243` 那条"空判据"教训）。
+    negatives = (
+        "fn f(xs: mut [u32]) -> u32 {\n    domain v : borrow(xs) {\n        xs[0] = 1;\n"
+        "        return 0;\n    }\n}\n",
+        "fn f(p: ptr) -> u32 {\n    domain v : borrow(p) {\n        store8(p, 0, 1);\n"
+        "    }\n    return 0;\n}\n",
+        "fn f(xs: mut [u32]) -> u32 {\n    domain e : borrow_mut(xs) {\n"
+        "        let w: [u32] = &xs;\n        return w[0];\n    }\n}\n",
+        "fn f(xs: [u32]) -> u32 {\n    domain v : borrow(xs) {\n"
+        "        let w: mut [u32] = &mut xs;\n        return w[0];\n    }\n}\n",
+        "fn f(xs: [u32]) -> [u32] {\n    domain v : borrow(xs) {\n        return &xs;\n"
+        "    }\n}\n",
+        "const N: u32 = 8;\nfn f() -> u32 {\n    let p: ptr = alloc(N);\n"
+        "    domain v : borrow_mut(p) {\n        free(p);\n    }\n    return 0;\n}\n",
+    )
+    orig = lomentc._borrow_domain_errs
+    lomentc._borrow_domain_errs = lambda f: []
+    try:
+        for body in negatives:
+            assert errs(body) == [], (
+                "关掉这条规则之后仍然红 —— 那这一格测的不是它:\n" + body + str(errs(body)))
+    finally:
+        lomentc._borrow_domain_errs = orig
+    print("      借用域期 1：view / freeze / exclusive 三条规则逐格成立（关掉即放行）")
 
 
 @test

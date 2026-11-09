@@ -12,7 +12,7 @@ loment/examples/allocator.lomt 0 9
 loment/examples/bootprobe.lomt 0 1
 loment/examples/bytes.lomt 0 4
 loment/examples/cmd_hello.lomt 0 0
-loment/examples/demo.lomt 0 2
+loment/examples/demo.lomt 0 4
 loment/examples/fuc_node.lomt 0 5
 loment/examples/gc_ladder/main.lomt 0 2
 loment/examples/lumtui_demo.lomt 0 84
@@ -21,7 +21,7 @@ loment/examples/native.lomt 0 0
 loment/examples/native_agg.lomt 0 3
 loment/examples/native_bits.lomt 0 0
 loment/examples/native_brk.lomt 0 2
-loment/examples/native_cap.lomt 0 2
+loment/examples/native_cap.lomt 0 6
 loment/examples/native_chain.lomt 0 0
 loment/examples/native_concat.lomt 0 0
 loment/examples/native_entry.lomt 0 0
@@ -40,7 +40,7 @@ loment/examples/register_hello.lomt 0 0
 loment/examples/selfcheck.lomt 0 0
 loment/examples/switch.lomt 0 0
 loment/examples/toolchain.lomt 0 0
-loment/examples/tour.lomt 0 8
+loment/examples/tour.lomt 0 11
 loment/examples/user_hello.lomt 0 0
 loment/lib/lumtui.lomt 0 22
 loment/lib/mem.lomt 0 5

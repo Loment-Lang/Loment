@@ -383,6 +383,27 @@ fn emit_val(s: ptr, out: ptr, lvl: u32) -> u32 {
     return emit_mem(s, out, s, btxt(s, lvl), load32(s, blen(s, lvl)));
 }
 
+/// 把第 lvl 层的值设成 `%<name>.addr` —— 非切片借用的值就是那块地方的地址
+/// （`docs/299` §3.1：产物里 `&T` 是一个 `ptr`，且不额外落一个临时）。
+fn set_addr_val(s: ptr, src: ptr, toks: ptr, lvl: u32, name_tok: u32) -> u32 {
+    let base: u32 = btxt(s, lvl);
+    store8(s, base, 37 as u8);                      // '%'
+    let off: u32 = load32(toks, name_tok * 20 + 4);
+    let n: u32 = load32(toks, name_tok * 20 + 8);
+    let i: u32 = 0;
+    while i < n {
+        store8(s, base + 1 + i, load8(src, off + i) as u8);
+        i = i + 1;
+    }
+    store8(s, base + 1 + n, 46 as u8);              // "."
+    store8(s, base + 2 + n, 97 as u8);              // "a"
+    store8(s, base + 3 + n, 100 as u8);             // "d"
+    store8(s, base + 4 + n, 100 as u8);             // "d"
+    store8(s, base + 5 + n, 114 as u8);             // "r"
+    store32(s, blen(s, lvl), 6 + n);
+    return 6 + n;
+}
+
 // ---------------------------------------------------------------- 类型
 
 //: 类型记号里的哨兵: `0` = 未知 (调用方落到**期望类型**)、`4294967295` = unit (`void`)。
@@ -409,6 +430,11 @@ const CG_CAST_PTR: u32 = 4294967292;
 //: 与上面三个哨兵同一条纪律：`tok_is` / `tok_kind` 都在 2^31 处设了门。
 const CG_TY_U64: u32 = 4294967291;
 
+//: **`4294967290` = "u8, 但源里没有那个词可以指"** —— `*p` 解一个**裸 `ptr`** 时按字节读
+//: （参考实现 `expr(Un("*"))` 同一条：`et = "u8" if ty == "ptr"`）。借用类型的 `*`
+//: 不需要它 —— 被借类型本身就有 token。
+const CG_TY_U8: u32 = 4294967290;
+
 fn emit_ty(s: ptr, out: ptr, src: ptr, toks: ptr, tt: u32) -> u32 {
     if tt == CG_WANT_U32 {
         return emit_str(s, out, "i32");
@@ -428,6 +454,18 @@ fn emit_ty(s: ptr, out: ptr, src: ptr, toks: ptr, tt: u32) -> u32 {
     }
     if tt == 0 {
         return emit_str(s, out, "i32");
+    }
+    if tt == CG_TY_U8 {
+        return emit_str(s, out, "i8");
+    }
+    // 借用类型（`docs/299`）：值是一个指针。切片借用（`&[T]` / `&mut [T]`）在参考
+    // 实现里**规范化**成切片本身，产物仍是 `{ ptr, i64 }`。
+    if is_ref_tok(src, toks, tt) == 1 {
+        let et: u32 = ref_elem_tok(src, toks, tt);
+        if is_slice_tok(src, toks, et) == 1 {
+            return emit_str(s, out, "{ ptr, i64 }");
+        }
+        return emit_str(s, out, "ptr");
     }
     if tok_is(src, toks, tt, "(") {   // unit 类型 `()`
         return emit_str(s, out, "void");
@@ -593,6 +631,26 @@ fn emitted_name(s: ptr, out: ptr, src: ptr, toks: ptr, tt: u32) -> u32 {
     }
     if tok_is(src, toks, tt, "(") {   // 注释里 unit 写作 `()`
         return emit_str(s, out, "()");
+    }
+    // 借用（`docs/299`）：注释里写 `&T` / `&mut T`（区域标记也照写）。
+    // 切片借用**规范化**——`&[T]` 印成 `[T]`（与参考实现的解析期规范化同一条）。
+    if is_ref_tok(src, toks, tt) == 1 {
+        let et: u32 = ref_elem_tok(src, toks, tt);
+        if is_slice_tok(src, toks, et) == 1 {
+            return emitted_name(s, out, src, toks, et);
+        }
+        emit_str(s, out, "&");
+        if tok_is(src, toks, tt + 1, "mut") {
+            emit_str(s, out, "mut ");
+        }
+        if et > tt + 1 && !tok_is(src, toks, tt + 1, "mut") {
+            emit_tok(s, out, src, toks, tt + 1);   // 区域标记 `&a T`
+            emit_str(s, out, " ");
+        } else if et > tt + 2 && tok_is(src, toks, tt + 1, "mut") {
+            emit_tok(s, out, src, toks, tt + 2);   // `&mut a T`
+            emit_str(s, out, " ");
+        }
+        return emitted_name(s, out, src, toks, et);
     }
     if is_slice_tok(src, toks, tt) == 1 {   // 切片的注释形式与源码一致 (`[T]` / `mut [T]`)
         if tok_is(src, toks, tt, "mut") {
@@ -1113,7 +1171,8 @@ fn expr_type_atom(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
             return as_chain_end(src, toks, j + 2);
         }
         if tok_is(src, toks, j + 1, ".") {   // M23: 字段类型
-            let vt: u32 = var_type(s, src, toks, j);
+            // `r.field`：`r: &S` 自动解一层（`docs/299` §3.4）。
+            let vt: u32 = deref_tok(src, toks, var_type(s, src, toks, j));
             let si: u32 = find_struct(s, src, toks, vt);
             if si != 4294967295 {
                 let fi: u32 = field_index(s, src, toks, si, j + 2);
@@ -1142,7 +1201,8 @@ fn expr_type_atom(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
             return 0;
         }
         if tok_is(src, toks, j + 1, "[") {   // M3/M24: 下标 -> **元素类型**，不是数组/切片类型
-            let at: u32 = var_type(s, src, toks, j);
+            // `r[i]`：`r: &[T; N]` 自动解一层（`docs/299` §3.4）。
+            let at: u32 = deref_tok(src, toks, var_type(s, src, toks, j));
             if is_array_tok(src, toks, at) == 1 || is_slice_tok(src, toks, at) == 1 {
                 return elem_tok(src, toks, at);
             }
@@ -1158,6 +1218,28 @@ fn expr_type_atom(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
         // `operand_bin_type`): 直接递归到 `j+1` 会把 `(a < 0)` 判成 `a` 的类型,
         // 而它的值是 `bool` (`#316`)。
         return operand_bin_type(s, src, toks, j, rp2);
+    }
+    // 借用（`docs/299`）：`&x` 的类型就是 `&` 这个 token 起的那段。
+    // **数组的借用例外**：`&xs` 的值是切片（`{ ptr, i64 }`），不是 `ptr` —— 那个形状
+    // 与 `&` token 对不上，所以照旧回 0（调用方落到期望类型，与改之前同一条路）。
+    if tok_is(src, toks, j, "&") {
+        let mutf: u32 = 0;
+        if tok_is(src, toks, j + 1, "mut") {
+            mutf = 1;
+        }
+        let inr: u32 = expr_type(s, src, toks, j + 1 + mutf);
+        if inr != 0 && is_array_tok(src, toks, inr) == 1 {
+            return 0;
+        }
+        return j;
+    }
+    // `*r`：解一层（`ptr` 按字节读 -> u8）。
+    if tok_is(src, toks, j, "*") {
+        let it: u32 = expr_type(s, src, toks, j + 1);
+        if tok_is(src, toks, it, "ptr") {
+            return CG_TY_U8;
+        }
+        return deref_tok(src, toks, it);
     }
     if tok_is(src, toks, j, "-") || tok_is(src, toks, j, "!") {
         return expr_type(s, src, toks, j + 1);
@@ -2856,6 +2938,36 @@ fn elem_tok(src: ptr, toks: ptr, tt: u32) -> u32 {
     return tt + 1;
 }
 
+/// 类型 token 是否为借用 `&T` / `&mut T` / `&a T`（`docs/299`）。
+fn is_ref_tok(src: ptr, toks: ptr, tt: u32) -> u32 {
+    if tok_is(src, toks, tt, "&") {
+        return 1;
+    }
+    return 0;
+}
+
+/// 借用类型的**被借类型** token（跳过 `&` `mut` 与区域标记 `&a T` 里的 `a`）。
+/// 区域标记的消歧与参考实现同一条（`&a T` / `&a [T]`：标记之后紧跟类型或 `[`）。
+fn ref_elem_tok(src: ptr, toks: ptr, tt: u32) -> u32 {
+    let j: u32 = tt + 1;
+    if tok_is(src, toks, j, "mut") {
+        j = j + 1;
+    }
+    if tok_kind(toks, j) == 0
+            && (tok_kind(toks, j + 1) == 0 || tok_is(src, toks, j + 1, "[")) {
+        j = j + 1;
+    }
+    return j;
+}
+
+/// 自动解一层借用（`r.field` / `r[i]` 用，`docs/299` §3.4）。非借用原样返回。
+fn deref_tok(src: ptr, toks: ptr, tt: u32) -> u32 {
+    if is_ref_tok(src, toks, tt) == 1 {
+        return ref_elem_tok(src, toks, tt);
+    }
+    return tt;
+}
+
 /// 定长数组长度 (字面量); 非数组返回 0。
 fn array_len_of(src: ptr, toks: ptr, tt: u32) -> u32 {
     if is_array_tok(src, toks, tt) == 1 {
@@ -2877,6 +2989,11 @@ fn skip_type(src: ptr, toks: ptr, i: u32) -> u32 {
 }
 
 fn skip_type0(src: ptr, toks: ptr, i: u32) -> u32 {
+    // 借用类型（`docs/299`）：`&` [mut] [区域标记] 被借类型 —— **整段跳掉**，
+    // 否则 `v: &V` 里的 `V` 会被当成下一个形参名（与 checker 的同一个坑）。
+    if tok_is(src, toks, i, "&") {
+        return skip_type0(src, toks, ref_elem_tok(src, toks, i));
+    }
     if tok_is(src, toks, i, "mut") {
         return skip_type0(src, toks, i + 1);
     }
@@ -4847,10 +4964,13 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
     }
     // 变量 (参数或局部): load
     let ty: u32 = var_type(s, src, toks, j);
+    // `r[i]` / `r.f` 的**形状**类型：借用自动解一层（`docs/299` §3.4）。声明类型 `ty`
+    // 仍用于取值本身（`&[T]` 的 `emit_ty` 是 `{ ptr, i64 }`，和切片一样）。
+    let sty: u32 = deref_tok(src, toks, ty);
     let dot: u32 = j + 1;
-    if tok_is(src, toks, dot, "[") && is_slice_tok(src, toks, ty) == 1 {
+    if tok_is(src, toks, dot, "[") && is_slice_tok(src, toks, sty) == 1 {
         // M3: 切片下标 xs[i] -> extractvalue 0 + GEP(元素) + load
-        let et: u32 = elem_tok(src, toks, ty);
+        let et: u32 = elem_tok(src, toks, sty);
         load_var(s, out, src, toks, j, lvl);
         emit_str(s, out, "  ");
         let sp: u32 = new_temp(s, out);
@@ -4885,19 +5005,36 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
         }
         return ie;
     }
-    if tok_is(src, toks, dot, "[") && is_array_tok(src, toks, ty) == 1 {
+    if tok_is(src, toks, dot, "[") && is_array_tok(src, toks, sty) == 1 {
         // M24: 数组下标 a[i] -> GEP(数组, 0, i) + load
-        let et2: u32 = elem_tok(src, toks, ty);
+        let et2: u32 = elem_tok(src, toks, sty);
         let itx2: u32 = expr_type(s, src, toks, dot + 1);   // 下标**自己的类型**
         let iv2: u32 = expr_bin(s, out, src, toks, dot + 1, 1, lvl, 0);
         let _g2: u32 = dom_auto_guard(s, out, src, toks, j, dot + 1, itx2, lvl);   // docs/314
+        // `r: &[T; N]` 的 `r[i]`：先取指针（与参考实现 `_addr_of` 自动解一层同序）。
+        let aref: u32 = 4294967295;
+        if is_ref_tok(src, toks, ty) == 1 {
+            emit_str(s, out, "  ");
+            let ap0: u32 = new_temp(s, out);
+            emit_str(s, out, " = load ptr, ptr %");
+            emit_name_tok(s, out, src, toks, j);
+            emit_str(s, out, ".addr\n");
+            aref = ap0;
+        }
         emit_str(s, out, "  ");
         let gp: u32 = new_temp(s, out);
         emit_str(s, out, " = getelementptr inbounds ");
-        emit_ty(s, out, src, toks, ty);
-        emit_str(s, out, ", ptr %");
-        emit_name_tok(s, out, src, toks, j);
-        emit_str(s, out, ".addr, i32 0, ");
+        emit_ty(s, out, src, toks, sty);
+        emit_str(s, out, ", ptr ");
+        if aref == 4294967295 {
+            emit_str(s, out, "%");
+            emit_name_tok(s, out, src, toks, j);
+            emit_str(s, out, ".addr");
+        } else {
+            emit_str(s, out, "%t");
+            emit_dec(s, out, aref);
+        }
+        emit_str(s, out, ", i32 0, ");
         emit_ty(s, out, src, toks, itx2);
         emit_str(s, out, " ");
         emit_val(s, out, lvl);
@@ -4960,16 +5097,34 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
         return me;
     }
     if tok_is(src, toks, dot, ".") {   // M23: 字段访问 p.a -> GEP + load
-        let si: u32 = find_struct(s, src, toks, ty);
+        // `r.field`：`r: &S` 自动解一层（`docs/299` §3.4）—— 先取指针，再 GEP。
+        let sty: u32 = deref_tok(src, toks, ty);
+        let si: u32 = find_struct(s, src, toks, sty);
         let fi: u32 = field_index(s, src, toks, si, dot + 1);
         let ft: u32 = field_type(s, src, toks, si, fi);
+        let bref: u32 = 4294967295;
+        if is_ref_tok(src, toks, ty) == 1 {
+            emit_str(s, out, "  ");
+            let bp: u32 = new_temp(s, out);
+            emit_str(s, out, " = load ptr, ptr %");
+            emit_name_tok(s, out, src, toks, j);
+            emit_str(s, out, ".addr\n");
+            bref = bp;
+        }
         emit_str(s, out, "  ");
         let gp: u32 = new_temp(s, out);
         emit_str(s, out, " = getelementptr inbounds ");
-        emit_ty(s, out, src, toks, ty);
-        emit_str(s, out, ", ptr %");
-        emit_name_tok(s, out, src, toks, j);
-        emit_str(s, out, ".addr, i32 0, i32 ");
+        emit_ty(s, out, src, toks, sty);
+        emit_str(s, out, ", ptr ");
+        if bref == 4294967295 {
+            emit_str(s, out, "%");
+            emit_name_tok(s, out, src, toks, j);
+            emit_str(s, out, ".addr");
+        } else {
+            emit_str(s, out, "%t");
+            emit_dec(s, out, bref);
+        }
+        emit_str(s, out, ", i32 0, i32 ");
         emit_dec(s, out, fi);
         emit_str(s, out, "\n  ");
         let rv: u32 = new_temp(s, out);
@@ -5004,12 +5159,36 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
 
 /// 一元: -x (sub ty 0, v) / !b (xor i1 v, true) / &a / &mut a (数组 -> 切片)
 fn expr_unary(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32) -> u32 {
+    // `*r` 解引用一层（`docs/299` §3.8）。只在**操作数开头**认 `*`：二元乘法走
+    // `expr_bin` 的优先级那一支，到不了这里。
+    if tok_is(src, toks, j, "*") {
+        let it: u32 = expr_type(s, src, toks, j + 1);
+        let e: u32 = expr_unary(s, out, src, toks, j + 1, lvl, 0);
+        let et: u32 = deref_tok(src, toks, it);
+        if tok_is(src, toks, et, "ptr") {
+            et = CG_TY_U8;             // 裸 `ptr` 的 `*` 按字节读（与参考实现同一条）
+        }
+        emit_str(s, out, "  ");
+        let r: u32 = new_temp(s, out);
+        emit_str(s, out, " = load ");
+        emit_ty(s, out, src, toks, et);
+        emit_str(s, out, ", ptr ");
+        emit_val(s, out, lvl);
+        emit_str(s, out, "\n");
+        set_temp_val(s, lvl, r);
+        return e;
+    }
     if tok_is(src, toks, j, "&") {   // M3/M4: 数组 -> 切片 (元素指针 + 个数)
         let nm: u32 = j + 1;
         if tok_is(src, toks, nm, "mut") {
             nm = nm + 1;
         }
         let ty: u32 = var_type(s, src, toks, nm);
+        // 非数组的借用（`docs/299`）：值就是那块地方的地址，不额外落临时。
+        if is_array_tok(src, toks, ty) != 1 {
+            let _a: u32 = set_addr_val(s, src, toks, lvl, nm);
+            return nm + 1;
+        }
         emit_str(s, out, "  ");
         let p0: u32 = new_temp(s, out);
         emit_str(s, out, " = getelementptr inbounds ");
@@ -8210,6 +8389,69 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
             return ave + 1;
         }
         return j + 1;
+    }
+    // 写穿字段: NAME . FIELD = EXPR ;（`docs/299` §3.4；`r: &mut S` 自动解一层）
+    if tok_kind(toks, j) == 0 && tok_is(src, toks, j + 1, ".")
+            && tok_kind(toks, j + 2) == 0 && tok_is(src, toks, j + 3, "=") {
+        let dty: u32 = var_type(s, src, toks, j);
+        let fsty: u32 = deref_tok(src, toks, dty);
+        let fsi: u32 = find_struct(s, src, toks, fsty);
+        let ffi: u32 = field_index(s, src, toks, fsi, j + 2);
+        let fft: u32 = field_type(s, src, toks, fsi, ffi);
+        let fref: u32 = 4294967295;
+        if is_ref_tok(src, toks, dty) == 1 {
+            emit_str(s, out, "  ");
+            let fp0: u32 = new_temp(s, out);
+            emit_str(s, out, " = load ptr, ptr %");
+            emit_name_tok(s, out, src, toks, j);
+            emit_str(s, out, ".addr\n");
+            fref = fp0;
+        }
+        emit_str(s, out, "  ");
+        let fgp: u32 = new_temp(s, out);
+        emit_str(s, out, " = getelementptr inbounds ");
+        emit_ty(s, out, src, toks, fsty);
+        emit_str(s, out, ", ptr ");
+        if fref == 4294967295 {
+            emit_str(s, out, "%");
+            emit_name_tok(s, out, src, toks, j);
+            emit_str(s, out, ".addr");
+        } else {
+            emit_str(s, out, "%t");
+            emit_dec(s, out, fref);
+        }
+        emit_str(s, out, ", i32 0, i32 ");
+        emit_dec(s, out, ffi);
+        emit_str(s, out, "\n");
+        let fe5: u32 = expr_bin(s, out, src, toks, j + 4, 1, 0, fft);
+        emit_str(s, out, "  store ");
+        emit_ty(s, out, src, toks, fft);
+        emit_str(s, out, " ");
+        emit_val(s, out, 0);
+        emit_str(s, out, ", ptr %t");
+        emit_dec(s, out, fgp);
+        emit_str(s, out, "\n");
+        return fe5 + 1;
+    }
+    // 写穿解引用: `* NAME = EXPR ;`（`docs/299` §3.8）
+    if tok_is(src, toks, j, "*") && tok_kind(toks, j + 1) == 0
+            && tok_is(src, toks, j + 2, "=") {
+        let dty2: u32 = var_type(s, src, toks, j + 1);
+        let ety2: u32 = deref_tok(src, toks, dty2);
+        emit_str(s, out, "  ");
+        let pv: u32 = new_temp(s, out);
+        emit_str(s, out, " = load ptr, ptr %");
+        emit_name_tok(s, out, src, toks, j + 1);
+        emit_str(s, out, ".addr\n");
+        let de5: u32 = expr_bin(s, out, src, toks, j + 3, 1, 0, ety2);
+        emit_str(s, out, "  store ");
+        emit_ty(s, out, src, toks, ety2);
+        emit_str(s, out, " ");
+        emit_val(s, out, 0);
+        emit_str(s, out, ", ptr %t");
+        emit_dec(s, out, pv);
+        emit_str(s, out, "\n");
+        return de5 + 1;
     }
     // 赋值: NAME = EXPR ;
     if tok_kind(toks, j) == 0 && tok_is(src, toks, j + 1, "=") {
@@ -11673,14 +11915,16 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32, tickx: u32)
                 store32(s, struct_base(sn) + 8 + nf * 8, fld);
                 store32(s, struct_base(sn) + 8 + nf * 8 + 4, fld + 2);
                 nf = nf + 1;
-                // `#11`：**末字段可以没有尾逗号**。步长 4 假设有（`name ':' type ','`）——
-                // 没有那个逗号时它会**越过 `}` 一个 token**，于是把后面的 `fn` 当成字段继续
-                // 往下读，读到源尾就是自举驱动上的**段错误、零输出**。没有逗号时落在 `}` 上，
-                // 循环条件当场结束。
-                if tok_is(src, toks, fld + 3, ",") {
-                    fld = fld + 4;
+                // 步长按**类型自己有多长**算（`skip_type`）：`&T` / `[T; N]` / `Pair<u32>`
+                // 都不是一个 token。原来写死 `fld + 3`，字段写成 `data: &u32,` 时
+                // 会落在 `u32` 上，把它当成下一个字段名（`docs/299` 落地时撞到）。
+                // `#11`：**末字段可以没有尾逗号** —— 没有逗号时 `skip_type` 停在 `}`，
+                // 循环条件当场结束（不会越过 `}` 读成字段）。
+                let fend: u32 = skip_type(src, toks, fld + 2);
+                if tok_is(src, toks, fend, ",") {
+                    fld = fend + 1;
                 } else {
-                    fld = fld + 3;
+                    fld = fend;
                 }
             }
             store32(s, struct_base(sn) + 4, nf);

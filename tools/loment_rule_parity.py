@@ -72,7 +72,10 @@ import loment_p8_test as H  # noqa: E402  # 复用已验过的构建/运行夹�
 # 报 E022 —— 码是错的、理由也是错的，而别的判据全绿。**这就是这张表存在的理由。**
 # 2026-10-15 同日 `E029`（用完再放）也补齐 ⇒ **104/106**。两条各一个探针，两边码集相等。
 # 2026-10-20（`#786` `lspe pass`）：新增一条"旁路不吞检查"的探针 ⇒ **126/126**。
-BUDGET = 128
+# 2026-11-08 借用生命周期（`docs/299` 第八维 `lifetime`）自举侧落地：五条 ——
+# 悬垂（经调用，E012）、无引用形参（E041）、auto 档写区域标记（E041）、
+# `free` 时仍被借（E041）、存下来的 `&mut` 独家（E007）⇒ **133/133**。
+BUDGET = 133
 
 # --------------------------------------------------------------------------- 案例表
 #
@@ -451,6 +454,22 @@ _CASES: list[tuple[str, str]] = [
      "fn f() { lgc end; }\n"),
     ("lgc-budget-expr", "choose write grammar tur2026.3\nmodule m\nchoose runtime\n"
      "fn f() { lgc start(2 + 3) { } }\n"),
+    # ---- 借用生命周期（docs/299，第八维 `lifetime`）--------------------------
+    # 这五条是"借用从**声明**走到**判据**"的证据：只有参考实现收不算落地，
+    # 自举侧必须给出**同一组码**。每一条都对应 `docs/299` §8 的一条 v1 语义。
+    ("lifetime-dangle-via-call",
+     "module m\n\nfn id(p: &u32) -> &u32 {\n    return p;\n}\n\n"
+     "fn f(p: &u32) -> &u32 {\n    let x: u32 = 1;\n    return id(&x);\n}\n"),
+    ("lifetime-no-refparam",
+     "module m\n\nfn f(x: u32) -> &u32 {\n    return &x;\n}\n"),
+    ("lifetime-marker-in-auto",
+     "module m\n\nfn f(a: &u32) -> &a u32 {\n    return a;\n}\n"),
+    ("lifetime-free-while-borrowed",
+     "module m\nchoose runtime\n\nfn f(p: ptr) -> u32 {\n    let r: &ptr = &p;\n"
+     "    free(p);\n    return 0;\n}\n"),
+    ("lifetime-stored-mut-alias",
+     "module m\n\nstruct V {\n    a: u32,\n}\n\nfn f(v: V) -> u32 {\n"
+     "    let m: &mut V = &mut v;\n    let s: &V = &v;\n    return s.a;\n}\n"),
 
 ]
 

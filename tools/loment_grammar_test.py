@@ -671,6 +671,170 @@ def test_front_door_translates_a_foreign_grammar_into_loment_in_process():
 
 
 @test
+def test_python_top_level_statements_are_refused():
+    """顶层可执行语句必须拒，不能变成"0 个函数的合法单元"（issue #1510）。
+
+    原先 `from_python` 只认函数、类和全大写常量；顶层的 `print(...)` / 赋值 /
+    `if` 落在所有分支之外，被静默丢掉。`check` 于是对一份空单元报绿，LVM 才说
+    "没有 `_start`"——错误指向了下游。这里钉住**前门**这一层：拒，并点名行号。
+    模块 docstring 不是可执行状态，仍然放行。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        cases = [
+            ('print("hello")\n', 3),
+            ("print_num(42)\n\ndef _start() -> int:\n    return 0\n", 3),
+            ("x = 1\n", 3),
+            ("if True:\n    x = 1\n", 3),
+        ]
+        for i, (body, line) in enumerate(cases):
+            p = td / f"top{i}.lomt"
+            p.write_text("choose write grammar python\n\n" + body,
+                         encoding="utf-8", newline="\n")
+            try:
+                potato_from.front_door(p)
+            except (lomt_from.NotRepresentable, ValueError) as e:
+                msg = str(e)
+                assert f"第 {line} 行" in msg, f"要点名顶层语句所在行: {msg}"
+                assert "顶层" in msg, f"要说清是顶层语句: {msg}"
+            else:
+                raise AssertionError(f"顶层语句被静默吞掉了: {body!r}")
+        # A module docstring is metadata, not executable state.
+        p = td / "docstring.lomt"
+        p.write_text(
+            'choose write grammar python\n\n"""module doc"""\n\n'
+            "def _start() -> int:\n    return 0\n",
+            encoding="utf-8", newline="\n")
+        fu = potato_from.front_door(p)
+        assert "fn _start" in fu.source, fu.source[:200]
+    print("      顶层 print/赋值/if 拒得带行号；模块 docstring 放行")
+
+
+@test
+def test_java_class_body_tail_is_not_silently_dropped():
+    """类体末尾没有 `;`/`}` 的残句也要拒（与 #1510 同一类）。
+
+    `_class_members` 原先只把以 `;` 或 `}}` 结束的片段算成员，类体最后一行如果两样
+    都没有，就在循环结束时被丢掉 —— `system out println('helloworld')` 这种坏行于是
+    既不进产物也不进 `skipped`，整份单元看起来是 OK 的。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        bad = td / "bad_java.lomt"
+        bad.write_text(
+            "choose write grammar java\n\npublic class Main {\n"
+            "    system out println('helloworld')\n}\n",
+            encoding="utf-8", newline="\n")
+        try:
+            potato_from.front_door(bad)
+        except (lomt_from.NotRepresentable, ValueError) as e:
+            msg = str(e)
+            assert "第 4 行" in msg, f"要点名残句所在行: {msg}"
+            assert "类 Main" in msg, f"要说清是哪个类体里的残句: {msg}"
+        else:
+            raise AssertionError("类体尾部残句被静默吞掉了")
+
+        good = td / "good_java.lomt"
+        good.write_text(
+            "choose write grammar java\n\npublic class Main {\n"
+            "    public static int _start() {\n        return 42;\n    }\n}\n",
+            encoding="utf-8", newline="\n")
+        fu = potato_from.front_door(good)
+        assert "fn _start" in fu.source, fu.source[:200]
+    print("      类体尾部残句拒得带行号；合法 Java 类仍放行")
+
+
+@test
+def test_every_surface_grammar_refuses_unrecognised_material():
+    """同一张矩阵：每门写法塞一条不认识的语句/成员，都必须拒（不是静默少一块）。
+
+    这是 #1510 那一类缺陷的跨语言版本：解析器只认自己那几种构造，认不出的残句
+    如果既不进产物也不进 `skipped`，整份单元就会带着少掉的一块被编过去。
+    """
+    cases = [
+        ("python-top", "python",
+         'choose write grammar python\n\ndef _start() -> int:\n    return 42\n\nprint("JUNK")\n'),
+        ("python-class", "python",
+         'choose write grammar python\n\nclass C:\n    x: int\n\n    def f(self) -> int:\n'
+         '        return 1\n\ndef _start() -> int:\n    return 42\n'),
+        ("java-tail", "java",
+         'choose write grammar java\n\npublic class Main {\n'
+         '    public static int _start() { return 42; }\n'
+         '    system out println(1)\n}\n'),
+        ("csharp-tail", "csharp",
+         'choose write grammar csharp\n\npublic class Main {\n'
+         '    public static int _start() { return 42; }\n'
+         '    system out println(1)\n}\n'),
+        ("c-top", "c",
+         'choose write grammar c\n\nint _start() { return 42; }\n\nJUNK;\n'),
+        ("cpp-top", "cpp",
+         'choose write grammar cpp\n\nint _start() { return 42; }\n\nJUNK;\n'),
+        ("c-struct", "c",
+         'choose write grammar c\n\nstruct S {\n    int x;\n    JUNK;\n};\n\n'
+         'int _start() { return 42; }\n'),
+        ("go-top", "go",
+         'choose write grammar go\n\npackage main\n\nfunc _start() int { return 42 }\n\nJUNK()\n'),
+        ("go-struct", "go",
+         'choose write grammar go\n\npackage main\n\ntype S struct {\n    x int\n    JUNK\n}\n\n'
+         'func _start() int { return 42 }\n'),
+        ("rust-top", "rust",
+         'choose write grammar rust\n\npub struct P { pub x: i32 }\n\nJUNK;\n'),
+    ]
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        for name, lang, src in cases:
+            p = td / f"{name}.lomt"
+            p.write_text(src, encoding="utf-8", newline="\n")
+            try:
+                potato_from.front_door(p)
+            except (lomt_from.NotRepresentable, ValueError) as e:
+                msg = str(e)
+                assert "第" in msg, f"{name}（{lang}）拒了但没点名行号: {msg}"
+            else:
+                raise AssertionError(f"{name}（{lang}）把不认识的残句静默吞掉了")
+    print(f"      {len(cases)} 组跨语法残句全部拒得带行号")
+
+
+@test
+def test_front_memo_does_not_survive_a_source_edit():
+    """**同一个路径换了内容就要重翻**（#1518）。
+
+    `_FRONT_MEMO` 原先只按 `(路径, 语言, 模式)` 记。它的前提是"一次编译里文件不会
+    变" —— 对 `lomentc.load` 的两次读（装载 + 开关预扫）成立，对**同一个进程里反复
+    写同一个路径**的调用方不成立：Playground 每次运行都写 `playground.lomt`，于是
+    先跑一个能过的程序、再把源改成坏的，前门返回的仍是**上一份译文**。屏幕上那个
+    42 就是这么来的 —— 它跟眼前的源码没关系，却看着像"这段代码跑出了 42"。
+
+    这里钉的是键里的**内容**：同一份源再来一次照样命中（预扫那趟还得省），换了源
+    必然重翻（该拒的要拒）。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        p = Path(t) / "work.lomt"
+        good = ("choose write grammar python\n\n"
+                "def _start() -> int:\n    print_num(42)\n    return 0\n")
+        p.write_text(good, encoding="utf-8", newline="\n")
+        first = potato_from.front_door(p)
+        again = potato_from.front_door(p)
+        assert first.source == again.source, "同一份源应当命中记忆（内容没变）"
+        assert "print_num" in first.source
+        # 同一个路径、换了内容：必须重翻 —— 这份是顶层残句，应当被拒
+        p.write_text("choose write grammar python\n\nprint('boom')\n",
+                     encoding="utf-8", newline="\n")
+        try:
+            potato_from.front_door(p)
+        except (lomt_from.NotRepresentable, ValueError) as e:
+            assert "第 3 行" in str(e), f"要点名行号: {e}"
+        else:
+            raise AssertionError(
+                "改了源还拿回上一份译文 —— 输出会看着像这段代码跑出来的")
+        # 改回原来的内容：应当重新可用（记忆不是"这个路径只有第一次算数"）
+        p.write_text(good, encoding="utf-8", newline="\n")
+        back = potato_from.front_door(p)
+        assert back.source == first.source
+    print("      同一路径换源必须重翻；内容没变仍命中；改回来还能用")
+
+
+@test
 def test_front_door_refuses_loudly_when_a_unit_cannot_be_translated():
     """**翻不出来的单元要拒，不能给一份"少算一步却照样能编"的。**
 

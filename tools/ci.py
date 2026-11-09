@@ -429,7 +429,9 @@ SHARD_COST = {
     "loment_register_test": 0.8,
     "loment_rel_test": 268.7,
     "loment_rule_parity": 4.3,
-    "loment_seed_test": 63.9,
+    # 2026-11-08（#1505）：种子 5.71 MB 时本机实测 434s（7:14，WSL 走 genesis）。
+    # 旧值 63.9 是种子 4 MB 时代的数 —— 实测差了一个数量级，与"没量过"一样误导。
+    "loment_seed_test": 434.0,
     "loment_sign_test": 0.1,
     "loment_src": 1.3,
     "loment_state_test": 0.3,

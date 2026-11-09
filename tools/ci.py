@@ -463,8 +463,8 @@ SHARD_COST = {
     # 2026-10-22（#1151）：本机 Windows 实测 1.5s（启动器在 WSL 的原生 /tmp 里真跑三次）。
     "loment_hotbuild_test": 1.5,
     "loment_std_test": 3.1,
-    # 2026-11-08: 本机三组探针（每组一次 clang 链接 + 一次 WSL 真跑），约 8s。
-    "loment_domains_test": 8.0,
+    # 2026-11-08: 本机五组探针（每组一次 clang 链接 + 一次 WSL 真跑），约 10s。
+    "loment_domains_test": 10.0,
     "loment_store_twin_test": 261.6,
     "loment_studio_test": 3.0,
     # 2026-10-19（#772）：本机实测 13.2s（建一次 stage1 + 两个编译器各跑一个 21 格的

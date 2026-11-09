@@ -1,0 +1,100 @@
+// world/slug.lomt — 标题/文件名 -> URL slug
+//
+// 为什么现实世界需要它: 文章标题、商品名、上传文件名要变成 URL 里的那一段。
+// 规则看着简单（小写、非字母数字换连字符），但三个边界天天出错：首尾的连字符、
+// 连续的分隔符、以及非 ASCII 字符（直接丢掉还是保留？）。
+//
+// 规则:
+//   * ASCII 大写 -> 小写；`a-z0-9` 保留；
+//   * 其余字节（含 UTF-8 多字节）当作分隔符，**不保留**（这是 URL 最安全的一档）；
+//   * 连续分隔符合并成一个 `-`；首尾 `-` 去掉；空结果返回空串。
+//
+// 命名: 公开 sl_*, 内部 sg_*。自检 test_slug_*。
+
+module slug
+choose runtime
+
+fn sg_lower(c: u32) -> u32 {
+    if c >= 65 && c <= 90 {
+        return c + 32;
+    }
+    return c;
+}
+
+fn sg_keep(c: u32) -> bool {
+    let l: u32 = sg_lower(c);
+    return (l >= 97 && l <= 122) || (l >= 48 && l <= 57);
+}
+
+fn sg_put(out: ptr, cap: u32, pos: u32, c: u32) -> u32 {
+    if pos < cap {
+        store8(out, pos, c as u8);
+    }
+    return pos + 1;
+}
+
+/// 生成 slug。返回长度；首尾不留 `-`，没有可保留字符时返回 0 且不写。
+pub fn sl_make(s: str, out: ptr, cap: u32) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    let pos: u32 = 0;
+    let pending: u32 = 0;
+    while i < n {
+        let c: u32 = str_byte(s, i);
+        if sg_keep(c) {
+            if pending == 1 && pos > 0 {
+                pos = sg_put(out, cap, pos, 45);
+            }
+            pending = 0;
+            pos = sg_put(out, cap, pos, sg_lower(c));
+        } else if pos > 0 {
+            pending = 1;
+        }
+        i = i + 1;
+    }
+    return pos;
+}
+
+/// 两个 slug 是否相同（大小写/分隔符不敏感）；空 slug 不等于空 slug。
+pub fn sl_same(a: str, b: str) -> bool {
+    let x: ptr = alloc(64);
+    let y: ptr = alloc(64);
+    let xn: u32 = sl_make(a, x, 64);
+    let yn: u32 = sl_make(b, y, 64);
+    if xn != yn {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < xn {
+        if load8(x, i) != load8(y, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_slug_basic() -> bool {
+    let o: ptr = alloc(64);
+    let n: u32 = sl_make("  Hello, World!  ", o, 64);
+    let want: str = "hello-world";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_slug_edges() -> bool {
+    return sl_make("---", alloc(8), 8) == 0
+        && sl_make("a---b", alloc(16), 16) == 3
+        && sl_same("Hello World", "hello-world");
+}

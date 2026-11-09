@@ -674,6 +674,214 @@ def test_dev_tooling_packages():
     print(f"      dev tooling: {len(want.splitlines())} 项与 Python 逐字节一致")
 
 
+PROBE_WORLD = _PROBE_HEAD + r'''
+use calendar
+use holiday
+use tzoff
+use dateparse
+use timeago
+use geohash
+use flag
+use langtag
+use phone
+use postal
+use isbn
+use ean
+use iban
+use luhn
+use slug
+use translit
+use namefmt
+use words
+use roman
+
+fn _start() {
+    let o: ptr = alloc(128);
+    let c: ptr = alloc(24);
+    let ok: ptr = alloc(4);
+
+    say("days=", cd_days_from_civil(1970 as i64, 1 as i64, 1 as i64) as u64);
+    say("wd=", cd_weekday(0 as i64) as u64);
+    let yw: ptr = alloc(4);
+    say("isow=", cd_iso_week(2021 as i64, 1 as i64, 1 as i64, yw) as u64);
+    say("isoy=", mem_load32(yw, 0) as u64);
+    cd_add_months(2024 as i64, 1 as i64, 31 as i64, 1 as i64, c);
+    let amm: u64 = (mem_load32(c, 4) as u64) * 100;
+    say("am=", amm + (mem_load32(c, 8) as u64));
+
+    cd_civil_from_days(hd_easter(2024 as i64), c);
+    let em: u64 = (mem_load32(c, 4) as u64) * 100;
+    say("easter=", em + (mem_load32(c, 8) as u64));
+    cd_civil_from_days(hd_last_weekday(2024 as i64, 5 as i64, 1), c);
+    say("memday=", mem_load32(c, 8) as u64);
+
+    say("tzp=", tz_parse("+08:00", ok) as u64);
+    let nf: u32 = tz_format(0 as i32 - 330 as i32, o, 128);
+    say_cstr("tzf=", o, nf);
+    tz_civil(0 as i64, 480 as i32, c);
+    say("tzh=", mem_load32(c, 12) as u64);
+
+    say("dp=", dp_parse_date("2024-02-29", ok) as u64);
+    let ni: u32 = dp_format_iso(0 as i64, o, 128);
+    say_cstr("iso=", o, ni);
+    say("ep=", dp_parse_iso("2026-11-08T10:30:00Z", ok) as u64);
+
+    let ta: u32 = ta_format(10800 as i64, o, 128);
+    say_cstr("ta=", o, ta);
+    let tb: u32 = ta_format(0 as i64 - 7200 as i64, o, 128);
+    say_cstr("tb=", o, tb);
+
+    let gn: u32 = gh_encode(57649110 as i32, 10407440 as i32, 8, o, 128);
+    say_cstr("gh=", o, gn);
+
+    let f: ptr = alloc(16);
+    let fc: ptr = alloc(8);
+    let _fr: u32 = fg_from_code("jp", f, 16);
+    let fn2: u32 = fg_code(f, fc, 8);
+    say_cstr("fg=", fc, fn2);
+
+    let lt: u32 = lgt_canonical("zh-hant-tw", o, 128);
+    say_cstr("lt=", o, lt);
+    say("ltv=", lgt_is_valid("en-US") as u64);
+
+    let pn: u32 = tel_parse("+1 (202) 555-0147", o, 128);
+    say_cstr("tel=", o, pn);
+    let pp: u32 = tel_pretty("+12025550147", o, 128);
+    say_cstr("tp=", o, pp);
+
+    say("z1=", zip_valid("US", "94103-1234") as u64);
+    say("z2=", zip_valid("CA", "K1A 0B1") as u64);
+    say("z3=", zip_valid("DE", "ABCDE") as u64);
+
+    say("i1=", isbn_valid("0-306-40615-2") as u64);
+    say("i2=", isbn_valid("978-0-306-40615-7") as u64);
+    let i3: u32 = isbn10_to_13("0306406152", o, 128);
+    say_cstr("i3=", o, i3);
+    say("e1=", ean_valid("4006381333931") as u64);
+    say("e2=", ean_check_digit("03600029145") as u64);
+
+    say("b1=", iban_valid("DE89370400440532013000") as u64);
+    say("b2=", iban_valid("GB82WEST12345698765432") as u64);
+    say("b3=", iban_valid("DE89370400440532013001") as u64);
+    say("b4=", iban_country_len("DE") as u64);
+    say("l1=", luhn_ok("4111111111111111") as u64);
+    let lb: u32 = luhn_brand("4111111111111111", o, 128);
+    say_cstr("lb=", o, lb);
+    let lb2: u32 = luhn_brand("5555555555554444", o, 128);
+    say_cstr("lb2=", o, lb2);
+
+    let sn: u32 = sl_make("  Hello, World!  ", o, 128);
+    say_cstr("sl=", o, sn);
+    let tr1: u32 = tl_translit("Москва", o, 128);
+    say_cstr("tr1=", o, tr1);
+    let tr2: u32 = tl_translit("Αθήνα", o, 128);
+    say_cstr("tr2=", o, tr2);
+
+    let nm: u32 = nmf_family_first("Ada Lovelace Jr.", o, 128);
+    say_cstr("nm=", o, nm);
+    let ns: ptr = alloc(32);
+    say("nfl=", nmf_parse("Dr. Ada Lovelace Jr.", ns) as u64);
+
+    let w1: u32 = nw_cardinal(123 as i64, o, 128);
+    say_cstr("w1=", o, w1);
+    let w2: u32 = nw_cardinal(1000000 as i64, o, 128);
+    say_cstr("w2=", o, w2);
+    let w3: u32 = nw_ordinal(21 as i64, o, 128);
+    say_cstr("w3=", o, w3);
+    let w4: u32 = nw_cardinal(0 as i64 - 5 as i64, o, 128);
+    say_cstr("w4=", o, w4);
+    say("r1=", rm_to_int("MCMXCIV") as u64);
+    let r2: u32 = rm_from_int(2026, o, 128);
+    say_cstr("r2=", o, r2);
+
+    syscall4(60, 0, 0, 0);
+}
+
+fn fg_code(flag: ptr, out: ptr, cap: u32) -> u32 {
+    let a: u32 = load8(flag, 3);
+    let b: u32 = load8(flag, 7);
+    if cap < 2 {
+        return 2;
+    }
+    store8(out, 0, (65 + (a - 166)) as u8);
+    store8(out, 1, (65 + (b - 166)) as u8);
+    return 2;
+}
+'''
+
+
+def _expected_world() -> str:
+    import datetime as dt
+
+    out = io.StringIO()
+
+    def say(tag, v):
+        out.write(f"{tag}{v}\n")
+
+    epoch = dt.date(1970, 1, 1)
+    say("days=", 0)
+    say("wd=", 4)
+    say("isow=", 53)
+    say("isoy=", 2020)
+    say("am=", 229)
+    say("easter=", 331)
+    say("memday=", 27)
+    say("tzp=", 480)
+    say("tzf=", "-05:30")
+    say("tzh=", 8)
+    say("dp=", (dt.date(2024, 2, 29) - epoch).days)
+    say("iso=", "1970-01-01T00:00:00Z")
+    say("ep=", int(dt.datetime(2026, 11, 8, 10, 30, tzinfo=dt.timezone.utc).timestamp()))
+    say("ta=", "3 hours ago")
+    say("tb=", "in 2 hours")
+    say("gh=", "u4pruydq")
+    say("fg=", "JP")
+    say("lt=", "zh-Hant-TW")
+    say("ltv=", 1)
+    say("tel=", "+12025550147")
+    say("tp=", "+1 202 555 0147")
+    say("z1=", 1)
+    say("z2=", 1)
+    say("z3=", 0)
+    say("i1=", 1)
+    say("i2=", 1)
+    say("i3=", "9780306406157")
+    say("e1=", 1)
+    say("e2=", 2)
+    say("b1=", 1)
+    say("b2=", 1)
+    say("b3=", 0)
+    say("b4=", 22)
+    say("l1=", 1)
+    say("lb=", "visa")
+    say("lb2=", "mastercard")
+    say("sl=", "hello-world")
+    say("tr1=", "Moskva")
+    say("tr2=", "Athina")
+    say("nm=", "Lovelace, Ada, Jr.")
+    say("nfl=", 15)
+    say("w1=", "one hundred twenty-three")
+    say("w2=", "one million")
+    say("w3=", "twenty-first")
+    say("w4=", "minus five")
+    say("r1=", 1994)
+    say("r2=", "MMXXVI")
+    return out.getvalue()
+
+
+@test
+def test_world_reference_packages():
+    """world 包的现实对照：日期、编码、证件号、文字渲染与 Python 逐字节一致。"""
+    try:
+        got = _run_probe("world", PROBE_WORLD)
+    except _Skip as e:
+        print(f"      SKIP: {e}")
+        return
+    want = _expected_world()
+    _compare(got, want)
+    print(f"      world reference: {len(want.splitlines())} 项与 Python 逐字节一致")
+
+
 def main(argv: list[str] | None = None) -> int:
     import loment_suite
     return loment_suite.run(TESTS, "loment_domains_test", only=(argv[0] if argv else None))

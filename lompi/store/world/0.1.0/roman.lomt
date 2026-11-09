@@ -1,0 +1,190 @@
+// world/roman.lomt — 罗马数字 <-> 整数
+//
+// 为什么现实世界需要它: 世纪、君主序号、版权年份、章节号还在用罗马数字
+// （`MMXXVI`、`Elizabeth II`）。解析的坑在**减法记法**：`IV` 是 4 不是 6，
+// 而且不是任意小的在大的前面都合法（`IL` 不是 49）。
+//
+// 约定: 标准形 1..3999；解析接受标准减法对（IV/IX/XL/XC/CD/CM），
+// 其它"非标准但可读"的写法（IIII）**拒绝** —— 宁可报错也不猜。
+//
+// 命名: 公开 rm_*, 内部 rr_*。自检 test_roman_*。
+
+module roman
+choose runtime
+
+pub const RM_ERR: u32 = 4294967295;
+
+fn rr_val(c: u32) -> u32 {
+    if c == 73 { return 1; }      // I
+    if c == 86 { return 5; }      // V
+    if c == 88 { return 10; }     // X
+    if c == 76 { return 50; }     // L
+    if c == 67 { return 100; }    // C
+    if c == 68 { return 500; }    // D
+    if c == 77 { return 1000; }   // M
+    return 0;
+}
+
+fn rr_pair(a: u32, b: u32) -> u32 {
+    if a == 73 && b == 86 { return 4; }
+    if a == 73 && b == 88 { return 9; }
+    if a == 88 && b == 76 { return 40; }
+    if a == 88 && b == 67 { return 90; }
+    if a == 67 && b == 68 { return 400; }
+    if a == 67 && b == 77 { return 900; }
+    return 0;
+}
+
+/// 解析罗马数字。失败返回 RM_ERR。
+pub fn rm_to_int(s: str) -> u32 {
+    let n: u32 = str_len(s);
+    if n == 0 || n > 15 {
+        return RM_ERR;
+    }
+    let i: u32 = 0;
+    let total: u32 = 0;
+    let prev: u32 = 0;
+    let run: u32 = 0;
+    while i < n {
+        let c: u32 = str_byte(s, i);
+        let v: u32 = rr_val(c);
+        if v == 0 {
+            return RM_ERR;
+        }
+        if i + 1 < n {
+            let p: u32 = rr_pair(c, str_byte(s, i + 1));
+            if p != 0 {
+                if prev != 0 && prev < p {
+                    return RM_ERR;
+                }
+                total = total + p;
+                prev = p;
+                run = 0;
+                i = i + 2;
+            } else {
+                if prev != 0 && prev < v {
+                    return RM_ERR;
+                }
+                total = total + v;
+                if c == prev {
+                    run = run + 1;
+                    if run > 3 && v < 1000 {
+                        return RM_ERR; // IIII / XXXX 这类不标准写法
+                    }
+                } else {
+                    run = 1;
+                }
+                prev = v;
+                i = i + 1;
+            }
+        } else {
+            if prev != 0 && prev < v {
+                return RM_ERR;
+            }
+            total = total + v;
+            i = i + 1;
+        }
+    }
+    if total < 1 || total > 3999 {
+        return RM_ERR;
+    }
+    return total;
+}
+
+fn rr_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+fn rr_rep(out: ptr, cap: u32, pos0: u32, lit: str, n: u32) -> u32 {
+    let pos: u32 = pos0;
+    let i: u32 = 0;
+    while i < n {
+        pos = rr_put(out, cap, pos, lit);
+        i = i + 1;
+    }
+    return pos;
+}
+
+/// 1..3999 -> 罗马数字。返回长度；越界返回 RM_ERR。
+pub fn rm_from_int(v: u32, out: ptr, cap: u32) -> u32 {
+    if v < 1 || v > 3999 {
+        return RM_ERR;
+    }
+    let x: u32 = v;
+    let pos: u32 = 0;
+    pos = rr_rep(out, cap, pos, "M", x / 1000);
+    x = x % 1000;
+    if x >= 900 {
+        pos = rr_put(out, cap, pos, "CM");
+        x = x - 900;
+    } else if x >= 500 {
+        pos = rr_put(out, cap, pos, "D");
+        x = x - 500;
+    } else if x >= 400 {
+        pos = rr_put(out, cap, pos, "CD");
+        x = x - 400;
+    }
+    pos = rr_rep(out, cap, pos, "C", x / 100);
+    x = x % 100;
+    if x >= 90 {
+        pos = rr_put(out, cap, pos, "XC");
+        x = x - 90;
+    } else if x >= 50 {
+        pos = rr_put(out, cap, pos, "L");
+        x = x - 50;
+    } else if x >= 40 {
+        pos = rr_put(out, cap, pos, "XL");
+        x = x - 40;
+    }
+    pos = rr_rep(out, cap, pos, "X", x / 10);
+    x = x % 10;
+    if x == 9 {
+        pos = rr_put(out, cap, pos, "IX");
+        x = 0;
+    } else if x >= 5 {
+        pos = rr_put(out, cap, pos, "V");
+        x = x - 5;
+    } else if x == 4 {
+        pos = rr_put(out, cap, pos, "IV");
+        x = 0;
+    }
+    pos = rr_rep(out, cap, pos, "I", x);
+    return pos;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_roman_parse() -> bool {
+    return rm_to_int("MCMXCIV") == 1994
+        && rm_to_int("MMXXVI") == 2026
+        && rm_to_int("XLII") == 42
+        && rm_to_int("IIII") == RM_ERR
+        && rm_to_int("IL") == RM_ERR;
+}
+
+fn test_roman_format() -> bool {
+    let o: ptr = alloc(32);
+    let n: u32 = rm_from_int(2026, o, 32);
+    let want: str = "MMXXVI";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}

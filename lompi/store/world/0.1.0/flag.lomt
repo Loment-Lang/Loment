@@ -1,0 +1,93 @@
+// world/flag.lomt — ISO 3166-1 两位国家码 <-> 国旗 emoji
+//
+// 为什么现实世界需要它: 国旗 emoji 不是图片，是**两个区域指示符**（U+1F1E6..U+1F1FF）；
+// 也就是说 `JP` -> 🇯🇵 是一条纯算术规则，不需要任何图标表。反过来把用户贴的旗
+// 变回国家码，是"从聊天里抽国家"最省事的一步。
+//
+// 约定: 只认 ASCII 字母；大小写都接受；输出 8 字节 UTF-8（两个 4 字节码点）。
+//
+// 命名: 公开 fg_*, 内部 ff_*。自检 test_flag_*。
+
+module flag
+choose runtime
+
+pub const FG_ERR: u32 = 4294967295;
+
+fn ff_upper(c: u32) -> u32 {
+    if c >= 97 && c <= 122 {
+        return c - 32;
+    }
+    return c;
+}
+
+fn ff_letter(c: u32) -> bool {
+    let u: u32 = ff_upper(c);
+    return u >= 65 && u <= 90;
+}
+
+/// 两位国家码 -> 国旗。返回 8；输入不合法返回 FG_ERR。
+pub fn fg_from_code(code: str, out: ptr, cap: u32) -> u32 {
+    if str_len(code) != 2 {
+        return FG_ERR;
+    }
+    let a: u32 = ff_upper(str_byte(code, 0));
+    let b: u32 = ff_upper(str_byte(code, 1));
+    if !ff_letter(a) || !ff_letter(b) {
+        return FG_ERR;
+    }
+    if cap < 8 {
+        return 8;
+    }
+    store8(out, 0, 240 as u8);
+    store8(out, 1, 159 as u8);
+    store8(out, 2, 135 as u8);
+    store8(out, 3, (166 + (a - 65)) as u8);
+    store8(out, 4, 240 as u8);
+    store8(out, 5, 159 as u8);
+    store8(out, 6, 135 as u8);
+    store8(out, 7, (166 + (b - 65)) as u8);
+    return 8;
+}
+
+/// 国旗 -> 两位国家码（大写）。返回 2；不是国旗返回 FG_ERR。
+pub fn fg_to_code(flag: str, out: ptr, cap: u32) -> u32 {
+    if str_len(flag) != 8 {
+        return FG_ERR;
+    }
+    if str_byte(flag, 0) != 240 || str_byte(flag, 1) != 159 || str_byte(flag, 2) != 135 {
+        return FG_ERR;
+    }
+    if str_byte(flag, 4) != 240 || str_byte(flag, 5) != 159
+        || str_byte(flag, 6) != 135 {
+        return FG_ERR;
+    }
+    let a: u32 = str_byte(flag, 3);
+    let b: u32 = str_byte(flag, 7);
+    if a < 166 || a > 191 || b < 166 || b > 191 {
+        return FG_ERR;
+    }
+    if cap < 2 {
+        return 2;
+    }
+    store8(out, 0, (65 + (a - 166)) as u8);
+    store8(out, 1, (65 + (b - 166)) as u8);
+    return 2;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_flag_roundtrip() -> bool {
+    let f: ptr = alloc(16);
+    let c: ptr = alloc(8);
+    if fg_from_code("jp", f, 16) != 8 {
+        return false;
+    }
+    if load8(f, 3) != 175 || load8(f, 7) != 181 {
+        return false;
+    }
+    let flag: str = "🇯🇵";
+    if fg_to_code(flag, c, 8) != 2 {
+        return false;
+    }
+    return load8(c, 0) == 74 && load8(c, 1) == 80;
+}

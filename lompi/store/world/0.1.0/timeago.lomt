@@ -1,0 +1,156 @@
+// world/timeago.lomt — 相对时间的人话（"3 hours ago" / "in 2 days"）
+//
+// 为什么现实世界需要它: 时间戳对人没用 —— "2026-11-08T09:12:00Z" 要脑子换算。
+// 界面上的"刚刚/5 分钟前/昨天"有一套约定：**越是近的越要精确，越远的越要粗**；
+// 单复数与冠词（"a minute ago" 而不是 "1 minutes ago"）也是规则的一部分。
+//
+// 约定:
+//   * 输入 `seconds` = 现在 - 目标时刻（正数表示过去）；
+//   * 过去输出 `... ago`，未来输出 `in ...`；
+//   * 阈值: 45s / 90s / 45min / 90min / 24h / 42h / 30d / 45d / 365d / 545d。
+//
+// 命名: 公开 ta_*, 内部 tt_*。自检 test_timeago_*。
+
+module timeago
+choose runtime
+
+fn ti_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+fn ti_num(out: ptr, cap: u32, pos: u32, v: u64) -> u32 {
+    let buf: ptr = alloc(24);
+    let n: u32 = 0;
+    let x: u64 = v;
+    if x == (0 as u64) {
+        store8(buf, 0, 48 as u8);
+        n = 1;
+    }
+    while x > (0 as u64) {
+        store8(buf, n, (48 + (x % 10)) as u8);
+        x = x / 10;
+        n = n + 1;
+    }
+    let p: u32 = pos;
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, load8(buf, n - 1 - i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+fn ti_suffix(out: ptr, cap: u32, pos: u32, ago: u32) -> u32 {
+    if ago == 1 {
+        return ti_put(out, cap, pos, " ago");
+    }
+    return pos;
+}
+
+fn ti_phrase(delta: u64, out: ptr, cap: u32, pos0: u32, ago: u32) -> u32 {
+    let pos: u32 = pos0;
+    if delta < 45 {
+        if ago == 1 {
+            return ti_put(out, cap, pos, "just now");
+        }
+        return ti_put(out, cap, pos, "in a moment");
+    }
+    if delta < 90 {
+        pos = ti_put(out, cap, pos, "a minute");
+        return ti_suffix(out, cap, pos, ago);
+    }
+    if delta < 2700 {
+        pos = ti_num(out, cap, pos, delta / 60);
+        pos = ti_put(out, cap, pos, " minutes");
+        return ti_suffix(out, cap, pos, ago);
+    }
+    if delta < 5400 {
+        pos = ti_put(out, cap, pos, "an hour");
+        return ti_suffix(out, cap, pos, ago);
+    }
+    if delta < 86400 {
+        pos = ti_num(out, cap, pos, delta / 3600);
+        pos = ti_put(out, cap, pos, " hours");
+        return ti_suffix(out, cap, pos, ago);
+    }
+    if delta < 151200 {
+        pos = ti_put(out, cap, pos, "a day");
+        return ti_suffix(out, cap, pos, ago);
+    }
+    if delta < 2592000 {
+        pos = ti_num(out, cap, pos, delta / 86400);
+        pos = ti_put(out, cap, pos, " days");
+        return ti_suffix(out, cap, pos, ago);
+    }
+    if delta < 3888000 {
+        pos = ti_put(out, cap, pos, "a month");
+        return ti_suffix(out, cap, pos, ago);
+    }
+    if delta < 31536000 {
+        pos = ti_num(out, cap, pos, delta / 2592000);
+        pos = ti_put(out, cap, pos, " months");
+        return ti_suffix(out, cap, pos, ago);
+    }
+    if delta < 47088000 {
+        pos = ti_put(out, cap, pos, "a year");
+        return ti_suffix(out, cap, pos, ago);
+    }
+    pos = ti_num(out, cap, pos, delta / 31536000);
+    pos = ti_put(out, cap, pos, " years");
+    return ti_suffix(out, cap, pos, ago);
+}
+
+/// 生成相对时间短语。返回完整长度。
+pub fn ta_format(seconds: i64, out: ptr, cap: u32) -> u32 {
+    let d: u64 = 0 as u64;
+    let future: u32 = 0;
+    if seconds < (0 as i64) {
+        future = 1;
+        d = ((0 as i64) - seconds) as u64;
+    } else {
+        d = seconds as u64;
+    }
+    if future == 1 {
+        let pos: u32 = ti_put(out, cap, 0, "in ");
+        return ti_phrase(d, out, cap, pos, 0);
+    }
+    return ti_phrase(d, out, cap, 0, 1);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_timeago_past() -> bool {
+    let o: ptr = alloc(64);
+    let n: u32 = ta_format(3600 as i64 * 3 as i64, o, 64);
+    let want: str = "3 hours ago";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_timeago_edges() -> bool {
+    let o: ptr = alloc(64);
+    return ta_format(10 as i64, o, 64) == 8
+        && ta_format(86400 as i64 * 2 as i64, o, 64) == 10;
+}

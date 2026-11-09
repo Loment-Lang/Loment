@@ -1,0 +1,246 @@
+// world/translit.lomt — 西里尔 / 希腊字母 -> 拉丁字母
+//
+// 为什么现实世界需要它: 名字、地名、文件名跨系统时，`Москва` 要能变成
+// `Moskva`，`Αθήνα` 要能变成 `Athina`。这不是"翻译"，是一张**逐字母**的表 ——
+// 表要稳定、可预期，别在运行时猜。
+//
+// 规则:
+//   * 输入按 UTF-8 解码；只处理西里尔（U+0400..U+04FF）与希腊（U+0370..U+03FF）；
+//   * 其它字符（含 ASCII 与中文）原样复制；
+//   * 大写输入给首字母大写的结果，小写输入给全小写（`Ж` -> `Zh`，`ж` -> `zh`）。
+//
+// 方案: 俄语用实务上最常见的 BGN/PCGN 近似（Х=Kh、Ц=Ts、Щ=Shch、Ю=Yu、Я=Ya）。
+//
+// 命名: 公开 tl_*, 内部 tt_*。自检 test_translit_*。
+
+module translit
+choose runtime
+
+fn tt_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+fn tt_lower(s: str, out: ptr, cap: u32, pos: u32) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = str_byte(s, i);
+        if c >= 65 && c <= 90 {
+            c = c + 32;
+        }
+        if p < cap {
+            store8(out, p, c as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+fn tt_ru(cp: u32) -> str {
+    if cp == 1025 { return "Yo"; }   // Ё
+    if cp == 1040 { return "A"; }
+    if cp == 1041 { return "B"; }
+    if cp == 1042 { return "V"; }
+    if cp == 1043 { return "G"; }
+    if cp == 1044 { return "D"; }
+    if cp == 1045 { return "E"; }
+    if cp == 1046 { return "Zh"; }
+    if cp == 1047 { return "Z"; }
+    if cp == 1048 { return "I"; }
+    if cp == 1049 { return "Y"; }
+    if cp == 1050 { return "K"; }
+    if cp == 1051 { return "L"; }
+    if cp == 1052 { return "M"; }
+    if cp == 1053 { return "N"; }
+    if cp == 1054 { return "O"; }
+    if cp == 1055 { return "P"; }
+    if cp == 1056 { return "R"; }
+    if cp == 1057 { return "S"; }
+    if cp == 1058 { return "T"; }
+    if cp == 1059 { return "U"; }
+    if cp == 1060 { return "F"; }
+    if cp == 1061 { return "Kh"; }
+    if cp == 1062 { return "Ts"; }
+    if cp == 1063 { return "Ch"; }
+    if cp == 1064 { return "Sh"; }
+    if cp == 1065 { return "Shch"; }
+    if cp == 1066 { return ""; }     // Ъ
+    if cp == 1067 { return "Y"; }
+    if cp == 1068 { return ""; }     // Ь
+    if cp == 1069 { return "E"; }
+    if cp == 1070 { return "Yu"; }
+    if cp == 1071 { return "Ya"; }
+    return "";
+}
+
+fn tt_el(cp: u32) -> str {
+    if cp == 913 { return "A"; }
+    if cp == 914 { return "V"; }
+    if cp == 915 { return "G"; }
+    if cp == 916 { return "D"; }
+    if cp == 917 { return "E"; }
+    if cp == 918 { return "Z"; }
+    if cp == 919 { return "I"; }
+    if cp == 920 { return "Th"; }
+    if cp == 921 { return "I"; }
+    if cp == 922 { return "K"; }
+    if cp == 923 { return "L"; }
+    if cp == 924 { return "M"; }
+    if cp == 925 { return "N"; }
+    if cp == 926 { return "X"; }
+    if cp == 927 { return "O"; }
+    if cp == 928 { return "P"; }
+    if cp == 929 { return "R"; }
+    if cp == 931 { return "S"; }
+    if cp == 932 { return "T"; }
+    if cp == 933 { return "Y"; }
+    if cp == 934 { return "F"; }
+    if cp == 935 { return "Ch"; }
+    if cp == 936 { return "Ps"; }
+    if cp == 937 { return "O"; }
+    return "";
+}
+
+/// 转写。返回完整长度（可能大于 cap）。
+pub fn tl_translit(s: str, out: ptr, cap: u32) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    let pos: u32 = 0;
+    while i < n {
+        let b: u32 = str_byte(s, i);
+        if b < 128 {
+            if pos < cap {
+                store8(out, pos, b as u8);
+            }
+            pos = pos + 1;
+            i = i + 1;
+        } else if b == 208 || b == 209 { // 2 字节: D0 xx / D1 xx
+            let c2: u32 = str_byte(s, i + 1);
+            let cp: u32 = ((b - 192) * 64) + (c2 - 128);
+            let lower: u32 = 0;
+            let base: u32 = cp;
+            if cp >= 1072 && cp <= 1103 { // а..я
+                base = cp - 32;
+                lower = 1;
+            } else if cp == 1105 { // ё
+                base = 1025;
+                lower = 1;
+            }
+            let m: str = tt_ru(base);
+            if str_len(m) == 0 {
+                // Ъ/Ь 以及未映射的码点：吃掉，不输出
+                if base == 1066 || base == 1068 {
+                    lower = 0;
+                    i = i + 2;
+                } else {
+                    if pos < cap { store8(out, pos, b as u8); }
+                    pos = pos + 1;
+                    if pos < cap { store8(out, pos, c2 as u8); }
+                    pos = pos + 1;
+                    i = i + 2;
+                }
+            } else {
+                if lower == 1 {
+                    pos = tt_lower(m, out, cap, pos);
+                } else {
+                    pos = tt_put(out, cap, pos, m);
+                }
+                i = i + 2;
+            }
+        } else if b == 206 || b == 207 { // 希腊: CE xx / CF xx
+            let c2: u32 = str_byte(s, i + 1);
+            let cp: u32 = ((b - 192) * 64) + (c2 - 128);
+            let lower: u32 = 0;
+            let base: u32 = cp;
+            if cp >= 945 && cp <= 969 { // α..ω
+                base = cp - 32;
+                lower = 1;
+            } else if cp == 962 { // ς
+                base = 931;
+                lower = 1;
+            } else if cp == 902 { base = 913; }
+            else if cp == 940 { base = 913; lower = 1; }
+            else if cp == 904 { base = 917; }
+            else if cp == 941 { base = 917; lower = 1; }
+            else if cp == 905 { base = 919; }
+            else if cp == 942 { base = 919; lower = 1; }
+            else if cp == 906 { base = 921; }
+            else if cp == 943 { base = 921; lower = 1; }
+            else if cp == 908 { base = 927; }
+            else if cp == 972 { base = 927; lower = 1; }
+            else if cp == 909 { base = 933; }
+            else if cp == 973 { base = 933; lower = 1; }
+            else if cp == 910 { base = 937; }
+            else if cp == 974 { base = 937; lower = 1; }
+            else if cp == 911 || cp == 970 || cp == 912 { base = 921; lower = 1; }
+            else if cp == 938 || cp == 971 || cp == 944 { base = 933; lower = 1; }
+            let m: str = tt_el(base);
+            if str_len(m) == 0 {
+                if pos < cap { store8(out, pos, b as u8); }
+                pos = pos + 1;
+                if pos < cap { store8(out, pos, c2 as u8); }
+                pos = pos + 1;
+            } else if lower == 1 {
+                pos = tt_lower(m, out, cap, pos);
+            } else {
+                pos = tt_put(out, cap, pos, m);
+            }
+            i = i + 2;
+        } else {
+            if pos < cap {
+                store8(out, pos, b as u8);
+            }
+            pos = pos + 1;
+            i = i + 1;
+        }
+    }
+    return pos;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_translit_ru() -> bool {
+    let o: ptr = alloc(64);
+    let n: u32 = tl_translit("Москва", o, 64);
+    let want: str = "Moskva";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_translit_el() -> bool {
+    let o: ptr = alloc(64);
+    let n: u32 = tl_translit("Αθήνα", o, 64);
+    let want: str = "Athina";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}

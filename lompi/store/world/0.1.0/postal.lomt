@@ -1,0 +1,156 @@
+// world/postal.lomt — 各国邮政编码的**形状**检查
+//
+// 为什么现实世界需要它: 邮编没有国际标准。美国的 5 位数字、加拿大的
+// `A1A 1A1`、英国的 `SW1A 1AA`、荷兰的 `1234 AB` 是四套不同的字母表。
+// 下单/注册表单里"邮编格式不对"是最常见的一类脏数据。
+//
+// 范围: 只做**形状**（字符类别与长度），不查该邮编是否真实存在 —— 那需要
+// 各国邮政数据库，且会变。支持的国家见 `zip_supported` 注释。
+//
+// 约定: 输入里的空格与连字符先被去掉，再做形状匹配；返回 1/0。
+//
+// 命名: 公开 zip_*, 内部 zc_*。自检 test_postal_*。
+
+module postal
+choose runtime
+
+fn zc_upper(c: u32) -> u32 {
+    if c >= 97 && c <= 122 {
+        return c - 32;
+    }
+    return c;
+}
+
+fn zc_alpha(c: u32) -> bool {
+    let u: u32 = zc_upper(c);
+    return u >= 65 && u <= 90;
+}
+
+fn zc_digit(c: u32) -> bool {
+    return c >= 48 && c <= 57;
+}
+
+/// 去掉空格与连字符、转大写，写进 out。返回长度。
+fn zc_compact(code: str, out: ptr, cap: u32) -> u32 {
+    let n: u32 = str_len(code);
+    let i: u32 = 0;
+    let p: u32 = 0;
+    while i < n {
+        let c: u32 = str_byte(code, i);
+        if c != 32 && c != 45 && c != 9 {
+            if p < cap {
+                store8(out, p, zc_upper(c) as u8);
+            }
+            p = p + 1;
+        }
+        i = i + 1;
+    }
+    return p;
+}
+
+fn zc_all_digit(p: ptr, n: u32) -> bool {
+    let i: u32 = 0;
+    while i < n {
+        if !zc_digit(load8(p, i)) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn zc_all_alpha(p: ptr, n: u32) -> bool {
+    let i: u32 = 0;
+    while i < n {
+        if !zc_alpha(load8(p, i)) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn zc_pattern_ldldld(p: ptr) -> bool {
+    return zc_alpha(load8(p, 0)) && zc_digit(load8(p, 1)) && zc_alpha(load8(p, 2))
+        && zc_digit(load8(p, 3)) && zc_alpha(load8(p, 4)) && zc_digit(load8(p, 5));
+}
+
+fn zc_eq2(a: str, b: str) -> bool {
+    if str_len(a) != str_len(b) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < str_len(a) {
+        if zc_upper(str_byte(a, i)) != zc_upper(str_byte(b, i)) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// 邮编形状是否合法。支持: US CA GB DE FR IT ES NL BE AT CH PL SE NO DK FI
+/// PT GR CZ SK HU RO JP CN AU BR IN RU KR MX ZA AR。
+pub fn zip_valid(country: str, code: str) -> bool {
+    let b: ptr = alloc(16);
+    let n: u32 = zc_compact(code, b, 16);
+    if n < 3 || n > 9 {
+        return false;
+    }
+    if zc_eq2(country, "US") {
+        return (n == 5 || n == 9) && zc_all_digit(b, n);
+    }
+    if zc_eq2(country, "CA") {
+        return n == 6 && zc_pattern_ldldld(b);
+    }
+    if zc_eq2(country, "GB") {
+        // 5..7 位：首字母、倒数第三位是数字、最后两位是字母（inward code）
+        return n >= 5 && n <= 7 && zc_alpha(load8(b, 0))
+            && zc_digit(load8(b, n - 3)) && zc_alpha(load8(b, n - 2))
+            && zc_alpha(load8(b, n - 1));
+    }
+    if zc_eq2(country, "NL") {
+        return n == 6 && zc_all_digit(b, 4)
+            && zc_alpha(load8(b, 4)) && zc_alpha(load8(b, 5));
+    }
+    if zc_eq2(country, "DE") || zc_eq2(country, "FR") || zc_eq2(country, "IT")
+        || zc_eq2(country, "ES") || zc_eq2(country, "CZ") || zc_eq2(country, "SK")
+        || zc_eq2(country, "KR") || zc_eq2(country, "MX")
+        || zc_eq2(country, "PL") || zc_eq2(country, "SE") || zc_eq2(country, "NO")
+        || zc_eq2(country, "DK") || zc_eq2(country, "FI") || zc_eq2(country, "PT")
+        || zc_eq2(country, "GR") || zc_eq2(country, "HU") || zc_eq2(country, "RO") {
+        return n == 5 && zc_all_digit(b, n);
+    }
+    if zc_eq2(country, "AT") || zc_eq2(country, "CH") || zc_eq2(country, "BE")
+        || zc_eq2(country, "AU") || zc_eq2(country, "ZA") || zc_eq2(country, "AR") {
+        return n == 4 && zc_all_digit(b, n);
+    }
+    if zc_eq2(country, "JP") {
+        return n == 7 && zc_all_digit(b, n);
+    }
+    if zc_eq2(country, "CN") || zc_eq2(country, "IN") || zc_eq2(country, "RU") {
+        return n == 6 && zc_all_digit(b, n);
+    }
+    if zc_eq2(country, "BR") {
+        return n == 8 && zc_all_digit(b, n);
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_postal_basic() -> bool {
+    return zip_valid("US", "94103")
+        && zip_valid("US", "94103-1234")
+        && zip_valid("CA", "K1A 0B1")
+        && zip_valid("GB", "SW1A 1AA")
+        && zip_valid("NL", "1234 AB")
+        && zip_valid("DE", "10115");
+}
+
+fn test_postal_rejects() -> bool {
+    return !zip_valid("US", "9410")
+        && !zip_valid("CA", "K1A0B")
+        && !zip_valid("DE", "ABCDE")
+        && !zip_valid("ZZ", "12345");
+}

@@ -9,7 +9,9 @@ Potato 字段一个确定的形状：
 * **平面图**：顶点 = 域实例，边 = `contains`（竖向包含）/ `sibling`（同层并列）/
   `flow`（同一层里按声明顺序的先后）/ `guard`（一条守卫用了哪个域的权威）；
 * **立体图**：在平面图之上加第三轴（`quality`：`adaptive` 域的质量）与跨层边
-  （父域直接连到孙域）。
+  （父域直接连到孙域）；
+* **撤销**（`docs/306` §6.1 C2）：`revokes` 列表记下每个 `revoke` 撤了哪些顶点、
+  带不带位置 —— 顶点上的 `revocable` 标记说明它能不能被撤。
 
 输出的 JSON 是**确定性**的：节点按 (函数, 审计槽号) 排，边按 (from, to, kind) 排，
 不依赖 dict 迭代顺序。
@@ -36,6 +38,7 @@ class Node:
     depth: int
     parent: str = ""
     adaptive: bool = False     # 立体图的第三轴：这条域的质量可调
+    revocable: bool = False    # `docs/306` §6.1 C2：能被 `revoke`（撤父 ⇒ 子树拒绝）
 
 
 @dataclass
@@ -65,12 +68,22 @@ class SolidBody:
 
 
 @dataclass
+class RevokeSite:
+    """一次撤销（`docs/306` §6.1 C2）：撤了哪些域、带不带位置。"""
+    fn: str
+    line: int
+    targets: list
+    position: bool
+
+
+@dataclass
 class Geometry:
     nodes: list = field(default_factory=list)
     edges: list = field(default_factory=list)
     loops: list = field(default_factory=list)
     branches: list = field(default_factory=list)
     solids: list = field(default_factory=list)
+    revokes: list = field(default_factory=list)
 
     def to_json(self) -> str:
         nodes = sorted((n.__dict__ for n in self.nodes), key=lambda d: d["id"])
@@ -80,8 +93,11 @@ class Geometry:
                        key=lambda d: (d["fn"], d["line"], d["var"]))
         branches = sorted(self.branches)
         solids = sorted((x.__dict__ for x in self.solids), key=lambda d: d["name"])
-        return json.dumps({"nodes": nodes, "edges": edges,
-                           "loops": loops, "branches": branches, "solids": solids},
+        revokes = sorted((r.__dict__ for r in self.revokes),
+                         key=lambda d: (d["fn"], d["line"], d["targets"]))
+        return json.dumps({"nodes": nodes, "edges": edges, "loops": loops,
+                           "branches": branches, "solids": solids,
+                           "revokes": revokes},
                           ensure_ascii=False, indent=1, sort_keys=True)
 
 
@@ -104,7 +120,7 @@ def geometry(mod: lomentc.Module) -> Geometry:
     for i, c in enumerate(mod.caps):
         n = Node(id=f"cap:{i}", fn="", name=c.name, space=c.space, lo=c.lo, hi=c.hi,
                  kind=lomentc.CAP_KIND_ID[c.kind], param=c.param, depth=-1,
-                 adaptive=c.kind == "adaptive")
+                 adaptive=c.kind == "adaptive", revocable=c.revocable)
         g.nodes.append(n)
         cap_node[c.name] = n
     for fn in mod.funcs:
@@ -116,7 +132,8 @@ def geometry(mod: lomentc.Module) -> Geometry:
                         space=blk.space, lo=blk.lo, hi=blk.hi,
                         kind=lomentc.CAP_KIND_ID[blk.kind], param=blk.param,
                         depth=depth, parent=parent,
-                        adaptive=blk.kind == "adaptive")
+                        adaptive=blk.kind == "adaptive",
+                        revocable=getattr(blk, "revocable", False))
 
         def walk(stmts, floor: int, scope: list) -> None:
             prev: str = ""
@@ -197,6 +214,13 @@ def geometry(mod: lomentc.Module) -> Geometry:
                 elif isinstance(s, lomentc.Quality) and s.is_block:
                     if stack:
                         stack[-1].adaptive = True
+                elif isinstance(s, lomentc.Revoke):
+                    # 撤销（`docs/306` §6.1 C2）：目标已经在 `_resolve_domains` 里
+                    # 解析成 (is_block, account) —— 体名在这里已经展开成全组成员。
+                    tgt = [f"{fn.name}#{aid}" if isb else f"cap:{aid}"
+                           for isb, aid in s.targets]
+                    g.revokes.append(RevokeSite(fn.name, s.line, tgt,
+                                                s.expr is not None))
                 elif isinstance(s, lomentc.Discharge) and s.is_block:
                     user = stack[-1].id if stack else ""
                     target = next((n for n in stack if n.name == s.cap), None)

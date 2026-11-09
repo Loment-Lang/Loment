@@ -127,6 +127,29 @@ fn pump(a: [u32; 16] in disk) -> u32 {
   rest silently, `quality name = q;` writes the whole group. A body's audit entry lands on its
   root member; coupling components are per function.
 
+**Revoking (`docs/306` C2).** `revoke NAME;` rejects the whole instance from then on;
+`revoke NAME(x);` rejects one position. Only a domain declared `revocable` can be revoked.
+
+```rust
+module domain_revoke
+choose runtime
+capability ring : disk[0..15] revocable
+
+fn pump(a: [u32; 16] in disk) -> u32 {
+    guard ring(3);          // allowed
+    revoke ring;            // this instance is dead from here on
+    guard ring(4);          // traps
+    return a[0];
+}
+```
+
+- Revoking a parent rejects the **whole subtree**: every guard walks its vertical chain, and each
+  level carries its own revocation pair, so no propagation code is needed.
+- A top-level capability's revocation is permanent for the artifact (a tombstone). A block
+  domain's revocation lives in that block's frame and is cleared on entry - the next loop
+  iteration is a new instance.
+- A body name revokes **every member** (a body is atomic: renewed together or rejected together).
+
 - `let a: [u32; 64] in disk` / `a: [u32; 64] in disk` (parameter) tags a value's space
   (arrays, slices, pointers only). The tag does not travel through a call - the callee sees a
   plain type.

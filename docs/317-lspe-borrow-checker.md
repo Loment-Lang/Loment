@@ -1,6 +1,6 @@
 # 317 · LSPE 借用检查器（E10）：把 loan 变成一等对象
 
-> 状态: **设计稿**（2026-11-08）· 上游: `docs/262`（LSPE）· `docs/299`（Tur 2026.3
+> 状态: **A0/A1 参考侧已落地（报告面）**（2026-11-09）· 上游: `docs/262`（LSPE）· `docs/299`（Tur 2026.3
 > 生命周期）· `docs/305`（2026.2 封版）· `docs/306`–`308`（E9 域检查器，形状先例）
 > 一句话: 在 LSPE 里加**第十个引擎**，把 v1 的"借用活到函数末尾"换成**以 loan 为
 > 一等对象的流敏感分析**；它只产证据，不投票，证不出来的每一条都变成问题与地板。
@@ -470,6 +470,28 @@ LSPE 的"温柔"不是"不拒"，而是**判决只出三种，每一种都带收
 的落地顺序同形（先把事实变成站点，再让事实改变判决）。
 
 ---
+
+## 9.5 落地记录（2026-11-09）：A0/A1 的参考侧
+
+这一轮落了**分析核心与查看入口**，没有接 Potato 台账，也没有动自举侧：
+
+| 内容 | 位置 | 判据 |
+|---|---|---|
+| loan 图（place / create / kill / uses） | `loment/lspe/loans.py` | `test_loan_sites_are_first_class_and_deterministic` |
+| kill = **最后一次使用**（A1） | 同上 | `test_flow_sensitive_kill_accepts_the_conditional_case` |
+| 同 place、区间相交、一方 `mut` ⇒ 冲突 | 同上 | `test_conflict_when_a_shared_loan_outlives_a_mut_borrow`、`test_shared_loans_do_not_conflict` |
+| 悬垂（返回到局部的借用） | 同上 | `test_dangling_return_names_the_local` |
+| `free` 时仍有借用 | 同上 | `test_free_while_borrowed_is_reported` |
+| 站点/三问/LSPC 四族登记 | `loment/lspe/registry.py` | `test_loan_registry_entries_are_complete` |
+| 查看入口 `loment lspe loans FILE [--json] [--strict]` | `tools/loment.py` | `test_loans_cli_is_a_report_and_respects_lifetime_no` |
+
+**为什么先不接台账**：`docs/262` 的孪生要求参考侧与自举侧的台账逐字节一致。
+loan 站点一旦进 Potato，自举侧必须同计数，而自举检查器是 token 级、没有 AST ——
+那是一次独立的、要重算种子与 genesis 的改动。所以这一轮把**判决**做成报告面，
+默认构建的产物与台账一个字节都不变；下一步才是 A0b（两侧同计数）与 A2/A3。
+
+**已知边界**（与 §4.7、§6.2 一致）：字段级借用不区分；重借用/两阶段未建模；
+跨函数摘要是 A4，`get(m, k)` 这类返回借用目前**不产生 loan**。
 
 ## 10. 我不主张
 

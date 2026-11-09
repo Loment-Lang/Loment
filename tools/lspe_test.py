@@ -54,7 +54,8 @@ def test_registry_has_14_obligations_and_8_evidence_kinds():
         assert spec["accept"], name
         assert "Differential" not in spec["accept"], name
     # 问题码（`docs/262` §5.10）：Q013 是 `lspe pass` 的未审计块（#786）。
-    assert len(lspe.LSPE_QUESTIONS) == 14
+    # 17 = Q001–Q014（LSPE v2）+ Q015–Q017（E10 借用检查器，`docs/317` §5.4）。
+    assert len(lspe.LSPE_QUESTIONS) == 17
     assert lspe.LSPE_QUESTIONS["Q013"]
     assert "未审计块" in lspe.LSPE_QUESTIONS["Q013"]
     assert "Q014" in lspe.LSPE_QUESTIONS and "不是证据" in lspe.LSPE_QUESTIONS["Q014"]
@@ -564,10 +565,14 @@ def test_budget_and_depth_floors_are_counted_separately():
 
 
 @test
-def test_lspc_sheet_has_twelve_families_and_five_columns():
-    """12 族 × 五列；最后一行是递归的"审计自己被关掉"（`#757`）。"""
+def test_lspc_sheet_has_sixteen_families_and_five_columns():
+    """16 族 × 五列；最后一行是递归的"审计自己被关掉"（`#757`）。
+
+    12 族是 LSPE v2 的；另 4 族是 E10 借用检查器的（`docs/317` §5.5），
+    在接上站点之前 `present` 恒为假 —— 但族与五列先登记齐。
+    """
     sh = lspe.lspc_sheet([], {"state": "lspe_open_admin", "lspc": "full"})
-    assert sh["families"] == 12 and len(sh["rows"]) == 12, sh
+    assert sh["families"] == 16 and len(sh["rows"]) == 16, sh
     for r in sh["rows"]:
         for k in ("protects", "if_fails", "fix", "cost", "bearer"):
             assert r[k], (r["id"], k)
@@ -1102,6 +1107,133 @@ def test_aicheck_channel_errors_are_clean_and_never_tracebacks():
             assert False, "没有密钥必须报错"
         except lspe.LspeError as e:
             assert "ANTHROPIC_API_KEY" in str(e) or "LOMENT_AI_KEY" in str(e), e
+
+
+def _loans(src: str, unit: str = "m") -> dict:
+    return lspe.loans_analyze(lomc.lex(src), unit)
+
+
+@test
+def test_loan_sites_are_first_class_and_deterministic():
+    """E10（`docs/317`）：`&x` / `&mut x` 各是一笔 loan，站点按内容寻址、可复现。"""
+    src = ("module m\n\nfn f(a: u32, b: u32) -> u32 {\n"
+           "    let x: &u32 = &a;\n"
+           "    let y: &mut u32 = &mut b;\n"
+           "    return *x + *y;\n}\n")
+    a = _loans(src)
+    b = _loans(src)
+    assert a["summary"]["loans"] == 2, a["summary"]
+    assert a["summary"]["shared"] == 1 and a["summary"]["mut"] == 1, a["summary"]
+    kinds = {s["kind"] for s in a["sites"]}
+    assert {"loan", "loan_use", "loan_kill"} <= kinds, kinds
+    assert json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True), "必须确定性"
+
+
+@test
+def test_flow_sensitive_kill_accepts_the_conditional_case():
+    """NLL Problem Case #3 的 Loment 形状：借用在前一支用尽，后一支的 `&mut` 不冲突。
+
+    v1 的「活到函数末尾」会拒；E10 的 kill = 最后一次使用会收。
+    """
+    src = ("module m\n\nfn bump(m: &mut Map) -> u32 {\n"
+           "    let cur: &u32 = &m.data[0];\n"
+           "    if *cur > 0 {\n        return *cur;\n    }\n"
+           "    let y: &mut Map = &mut m;\n"
+           "    *y = m;\n"
+           "    return 1;\n}\n")
+    rep = _loans(src)
+    assert rep["conflicts"] == [], rep["conflicts"]
+    assert rep["summary"]["loans"] == 2, rep["summary"]
+
+
+@test
+def test_conflict_when_a_shared_loan_outlives_a_mut_borrow():
+    src = ("module m\n\nfn f(m: &mut Map) -> u32 {\n"
+           "    let cur: &u32 = &m.data[0];\n"
+           "    let y: &mut Map = &mut m;\n"
+           "    *y = m;\n"
+           "    return *cur;\n}\n")
+    rep = _loans(src)
+    assert len(rep["conflicts"]) == 1, rep["conflicts"]
+    assert rep["conflicts"][0]["place"] == "m", rep["conflicts"]
+    assert rep["questions"][0]["code"] == "Q001", rep["questions"]
+
+
+@test
+def test_shared_loans_do_not_conflict():
+    src = ("module m\n\nfn f(a: u32, b: u32) -> u32 {\n"
+           "    let x: &u32 = &a;\n"
+           "    let y: &u32 = &b;\n"
+           "    return *x + *y;\n}\n")
+    rep = _loans(src)
+    assert rep["conflicts"] == [], rep["conflicts"]
+
+
+@test
+def test_dangling_return_names_the_local():
+    src = ("module m\n\nfn bad() -> &u32 {\n"
+           "    let x: u32 = 7;\n"
+           "    let r: &u32 = &x;\n"
+           "    return *r;\n}\n")
+    rep = _loans(src)
+    kinds = [f["kind"] for f in rep["findings"]]
+    assert "dangling_return" in kinds, rep
+    f = [x for x in rep["findings"] if x["kind"] == "dangling_return"][0]
+    assert f["place"] == "x" and f["line"] == 6, f
+
+
+@test
+def test_free_while_borrowed_is_reported():
+    src = ("module m\n\nfn f(p: ptr) -> u32 {\n"
+           "    let r: &u32 = &p;\n"
+           "    free(p);\n"
+           "    return *r;\n}\n")
+    rep = _loans(src)
+    assert any(f["kind"] == "free_while_borrowed" for f in rep["findings"]), rep
+
+
+@test
+def test_loan_registry_entries_are_complete():
+    """站点种类、三问与四个 LSPC 族都登记了；Q015–Q017 有定形模板（q014 除外）。"""
+    for kind in ("loan", "loan_use", "loan_kill", "loan_conflict"):
+        assert kind in lspe.LSPE_SITE_KINDS, kind
+    for code in ("Q015", "Q016", "Q017"):
+        assert code in lspe.LSPE_QUESTIONS, code
+        tpl = lspe.LSPE_QUESTION_TEMPLATES[code]
+        assert set(tpl["tried"]) == set(lspe.LSPE_INTERROGATIONS), code
+        assert tpl["options"] and tpl["default"] in tpl["options"], code
+    fams = {f["id"] for f in lspe.LSPE_LSPC_FAMILIES}
+    assert {"loan_conditional", "loan_two_phase", "loan_loop",
+            "loan_escape"} <= fams, fams
+
+
+@test
+def test_loans_cli_is_a_report_and_respects_lifetime_no():
+    """`lspe loans` 只报告：`lifetime_no` 时没东西可查；报告不改任何文件。"""
+    good = ("module m\n\nfn f(a: u32) -> u32 {\n"
+            "    let x: &u32 = &a;\n    return *x;\n}\n")
+    off = ("module m\nchoose lifetime_no\n\nfn f(a: u32) -> u32 {\n"
+           "    return a;\n}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "m.lomt"
+        p.write_text(good, encoding="utf-8", newline="\n")
+        before = p.read_bytes()
+        r = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "loment.py"),
+             "lspe", "loans", str(p), "--json"],
+            cwd=str(ROOT), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", shell=False, timeout=120)
+        assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+        assert json.loads(r.stdout)["summary"]["loans"] == 1, r.stdout
+        assert p.read_bytes() == before, "报告不能改源码"
+
+        p.write_text(off, encoding="utf-8", newline="\n")
+        r2 = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "loment.py"),
+             "lspe", "loans", str(p)],
+            cwd=str(ROOT), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", shell=False, timeout=120)
+        assert r2.returncode == 0 and "lifetime_no" in r2.stderr, r2.stderr
 
 
 def main() -> int:

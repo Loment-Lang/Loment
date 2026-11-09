@@ -2487,10 +2487,18 @@ def front_door(path: Path, lang: str = "auto", mode: str = "strict") -> FrontUni
     # **别的写法**：翻成 Loment。`lomt_from` 按需 import —— 它会把各门翻译器拉进来，
     # 而这条路不是每个调用方都走得到（与 `lomt_from` 自己那条注解同一个道理）。
     import lomt_from  # noqa: PLC0415
-    _key = (str(path), lang, mode)
+    #: **内容也进键**（`#1518`）。原先只有 `(路径, 语言, 模式)`，前提是"一次编译里
+    #: 文件不会变" —— 对 `lomentc.load` 的两次读（装载 + 开关预扫）成立，对
+    #: **同一个进程里反复改同一个路径**的调用方不成立：Playground 每次运行都写
+    #: `playground.lomt`，于是先跑一个能过的程序、再把源改成坏的，拿回来的仍是
+    #: 上一份译文 —— 屏幕上那 42 是**上一次的运行结果**，跟眼前的源码没关系。
+    #: 键里带内容就没有这个分叉：同一份源仍然命中（预扫那趟照样省），换了源必然重翻。
+    _key = (str(path), lang, mode, hash(src))
     _hit = _FRONT_MEMO.get(_key)
     if _hit is not None:
         return _hit
+    if len(_FRONT_MEMO) > 64:
+        _FRONT_MEMO.clear()          # 长命进程（LSP / Playground）里别无限涨
     # **核心声明先摘出来**（`_take_core_choose`）：翻译器不认识那几行，交给它就是
     # "子集外的一条"（C 门直接拒）或者被当成本门语法吃掉（别的门）。摘出来之后接回译文。
     _body, _core = _take_core_choose(strip_grammar_decl(src))

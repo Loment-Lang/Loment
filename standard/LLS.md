@@ -197,6 +197,23 @@ carried — `no_gc` on `gc`, "the artifact carries no collector" — shipped in 
 lives in §4; the plan behind it is `docs/269`, and the claim is checked by both linkers against
 the IR (a `no_gc` artifact that carries `@__loment_collect` is refused).
 
+### 4.6 Slots after a dimension
+
+A dimension may carry a **slot** in a second position: `<dimension>_<slot>_<value>`. A slot is
+orthogonal to the dimension's value — it may be written together with it, it does not count as a
+second value of that dimension (§4.1.1), and it does not change the default. An implementation
+must accept both lines:
+
+```rust
+choose lspe_open_admin
+choose lspe_aicheck_true
+```
+
+The first slot is `lspe_aicheck_true` / `lspe_aicheck_false` (`lspe`, default `false`): it turns
+on the AI checker, which is a **question source** for the LSPE ledger (Q014) and never evidence.
+The slot set is `tools/lomentc.py:CORE_SLOTS`; adding one is a change to the frozen surface under
+§6.2, exactly like adding a dimension.
+
 ---
 
 ## 5. Conformance

@@ -108,6 +108,20 @@ sites, so evidence cannot be reused across a substitution. `DropHonest` is one s
 destructor, discharged by the labelled `Assumed` floor or by a hand-written proof
 (`drop:<type>=prove` in `lspe.answers`).
 
+## The domain checker
+
+E9 makes capability domains part of the ledger instead of a separate check:
+
+| Site | Obligation | Evidence |
+|---|---|---|
+| every `capability` / block `domain` | `InDomain` | `Typed` |
+| every `guard d(x)` | `InDomain` | a literal inside `[lo..hi]` is `Syntactic`; a loop over the domain is `GlobalInvariant`; anything else is a hole (Q008) |
+| every `revocable` domain | `CapabilityLive` | `Assumed` — revocation has no runtime semantics yet, so the assumption is labelled |
+
+The loop forms it accepts are `for i in A..B`, unsigned `while i < B` and unsigned
+`while i <= B`; signed loops are not proved. It adds no error code: what it cannot prove goes to
+the counter-asker and to LSPC, never to a rejection.
+
 ## The counter-asker and LSPC
 
 An `UNDECIDED` site becomes a **question** (Q001–Q013) only after three interrogations have run:

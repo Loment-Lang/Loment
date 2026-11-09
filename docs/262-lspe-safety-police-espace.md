@@ -488,7 +488,7 @@ LSPE **不发明语义**，只负责把已有的语义判决变成可证子目�
 > **为什么不用"强度"全序**：那会逼着回答"类型证明和语法证明谁更强"，
 > 而这个问题没有语义答案。**接收关系是语义的；强度不是。**
 
-### 5.4 八个引擎
+### 5.4 九个引擎
 
 每个引擎是一个 `solve(obligation, ctx) -> P(Evidence)`。引擎只**产证据**，不投票。
 
@@ -502,6 +502,7 @@ LSPE **不发明语义**，只负责把已有的语义判决变成可证子目�
 | **E6 替换/WF** | 替换后的良构性重证 | 中 | **L1（强制）** | 替换日志全序 |
 | **E7 差分对质** | 两套实现的判决+来源一致 | 高 | L3 | 逐字节 |
 | **E8 反证探针** | 关掉检查有没有探针变红 | 低（离线） | L0 | 探针注册表机械生成 |
+| **E9 域检查器** | 域声明的良构、`guard` 的静态包含性、撤销 | 低 | L0/L1/L3 | 词法 + 循环归纳 |
 
 **三条硬规则**：
 
@@ -530,9 +531,28 @@ LSPE **不发明语义**，只负责把已有的语义判决变成可证子目�
 - **E4（摘要）**：首参是 `ptr` 的函数的**每个调用点**一条 `SummaryContract`。摘要在
   deref-only 安全表里 ⇒ `Interproc`，否则是洞。安全表是**根 + 依赖**的不动点
   （`load32 -> load16 -> load8` 常跨模块），与自举侧 `compute_safe` 扫整个单元一致；
-  首参表只看根。摘要键是**调用点的实际实参 token 文本**，不是只有函数名 —— 推断式泛型的
-  替换由实参决定，`f(q, a)` 与 `f(q, b)` 是两个键。递归环没有基例时不进安全表，
-  调用点停在 UNDECIDED（深度上限 256 轮，不静默）。
+  首参表覆盖**根 + 依赖**（根对依赖函数的调用点也是站点）。摘要键是**调用点的实际实参
+  token 文本**，不是只有函数名 —— 推断式泛型的替换由实参决定，`f(q, a)` 与 `f(q, b)`
+  是两个键。递归环没有基例时不进安全表，调用点停在 UNDECIDED；不动点**不设轮数上限**
+  （集合只增不减、名字有限，所以一定收敛 —— `#1093`）。
+
+#### 5.4.2 E9 域检查器（`docs/306`–`308`，2026-11-08）
+
+E9 不是第二套运行时，也不新增错误码。它把**域的事实**变成 LSPE 的站点与义务：
+
+| 站点 | 义务 | 证据 | 证不出来时 |
+|---|---|---|---|
+| `domain`（每个 `capability` / 块级 `domain`） | `InDomain` | `Typed` | ——（解析器已拒坏声明） |
+| `domain_access`（每个 `guard d(x)`） | `InDomain` | 字面量落在 `[lo..hi]` ⇒ `Syntactic`；循环归纳 ⇒ `GlobalInvariant` | **Q008**，LSPC「非字面量 guard」 |
+| `revoke`（每个 `revocable` 域） | `CapabilityLive` | `Assumed`（`#floor-revoke-<名字>`） | ——（撤销只有表示，`docs/146` §3） |
+
+循环归纳认三种形状：`for i in A..B`（`i ∈ [A, B-1]`）、无符号 `while i < B`
+（`i ∈ [0, B-1]`）、无符号 `while i <= B`（`i ∈ [0, B]`）；无界侧（`(..` / `..)`）
+按无界处理。有符号的 `i < B` 不证 —— `i` 可以为负。只有**裸循环变量**才认，
+`i + 1` 交给反问器。
+
+撤销域是**设计上的假设**：每个 `revocable` 域进 `floor_detail.assumed`，并在 LSPC 的
+「revocable 能力」一行里点名。撤销本身的运行期语义今天不存在，E9 的作用是**不许它静默**。
 
 **已知边界**（写出来，不假装没有）：`&mut` 实参在自举侧前门报 E15，到不了台账那一层；
 所以 `Exclusive` 的孪生没有夹具（参考侧有判据）。泛型调用没有显式 `f<T>(...)` 写法，
@@ -1312,6 +1332,52 @@ LSPE 两样都不动。
   同一条棘轮。
 - **用户看得见**：报的是 E022（`choose` 那一族），不是一条静默的空实现。
 
+### 10.7 AI 检查器：维度之后的第二位置（2026-11-08）
+
+`choose` 的取值可以有**第二个位置**：
+
+```
+<维>_<槽>_<值>          lspe_aicheck_true
+```
+
+槽与主取值**正交**：`choose lspe_open_admin` 与 `choose lspe_aicheck_true` 可以同时写，
+不触发"这一维写了两次"；同一格写两次仍然报。槽不覆盖 `chooses`，只记进
+`Module.slots` / 产物的 `lspe.aicheck`。默认 `false`（关）。
+
+**槽与维度同一条边界**：它声明的是**整个程序**的台账，所以只有根单元能定 ——
+`addin` 单元里写报 E022（否则那行**静默无效**），库写则按"需求"核（根不满足才报，
+两边点名）。判据 `lomentc_test::test_a_slot_is_root_only_wherever_the_dimension_is`。
+
+今天只有一格 `aicheck`。它属于 `lspe` 维，因为**审计的产物**是它唯一的出口。
+
+**AI 是问题源，不是证据源。** 这条边界是它进 LSPE 的方式：
+
+| 它能做的 | 它不能做的 |
+|---|---|
+| 为**已经存在**的洞（反问器问过的站点）准备一份确定性的审查请求 | 产生任何证据、改变 `proved` / `floors` / `per_kind` |
+| 它的回答变成 **Q014「AI 提出的怀疑」**，进 LSPC/CLI | 销掉任何义务、让构建变绿或变红（`--strict` 只影响退出码） |
+| 回答写进版本库、可评审、可重放 | 在编译期联网 |
+
+通道是文件，但**送请求的路有三条**（`loment/lspe/aiask.py`，2026-11-09）：
+
+```
+loment lspe aicheck FILE --emit PATH            # 只出请求（确定性，可进版本库）
+loment lspe aicheck FILE --ask-cmd CMD          # 外部程序：bundle 进 stdin、replies 出 stdout
+loment lspe aicheck FILE --ask --model NAME     # 内置 Anthropic 通道（密钥只从环境读）
+loment lspe aicheck FILE --replies PATH         # 吃一份已有的回答
+```
+
+请求按站点 id 排序、两次生成逐字节相同；回答只能引用已存在的站点 id（未知 id 是
+"未知"，不是新发现；单元不符是 E036）。`--ask-cmd` **不经 shell**（参数表），可用任何
+语言实现；`--ask` 的密钥只读 `ANTHROPIC_API_KEY` / `LOMENT_AI_KEY`，模型读
+`--model` / `LOMENT_AI_MODEL`。两条通道都能用 `--replies-out PATH` 把归一化后的回答
+落盘 —— 回答进版本库、可评审、可重放。模型调用不在编译期发生，所以 CI 是确定性的。
+
+回答的落点也是两条常规入口：`loment lspe state FILE --replies PATH` 把 Q014 一并列出
+（stderr），`loment lspc check FILE --replies PATH` 把 Q014 贴在预检单后面（stdout）。
+两处都**只读**台账：带不带回答，State 的台账 JSON 逐字节相同（判据
+`lspe_test::test_aicheck_asks_an_external_model_and_keeps_it_out_of_the_ledger`）。
+
 ---
 
 ## 11. 落地：五级 + 登记处
@@ -1461,6 +1527,7 @@ LSPE 在它之上：
 | §5.4 E6 替换与 WF 重证 | **已实现**：证据键 `(type, subst)`；`stale_wf`/Q004 走同一求解器 | `census_wf` |
 | §5.4 E7 差分闸门 | **已实现**：`Differential` 永不销义务 | `solver.py` + 双实现判据 |
 | §5.4 E8 反证探针 | **已实现**：登记表由 `tools/lspe_probes.py` 从判据树机械生成 | `tools/lspe_probes.py` |
+| §5.4 E9 域检查器 | **已实现**：声明 / `guard` 包含性 / 撤销，两侧同计数 | `census_domain` / `lspe_domain` |
 | §5.5 工作列表 + 预算 | **已实现**：步数预算、深度上限、确定性截断 | `solver.py` |
 | §5.6 五级上下文 | **已实现**：`--lspe-level 0..4`，两侧都读 | `lomentc.py` / `driver.lomt` |
 | §5.7 替换日志与重证 | **部分**：日志 = 单态化实例表；`stale_wf` 由站点标记驱动（编译器今天不产出 stale） | `census_wf` |

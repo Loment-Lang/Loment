@@ -250,6 +250,9 @@ LSPE_KEYS = frozenset({
     "undecided", "deferred", "refused", "floors", "floor_detail", "per_kind",
     "invariants", "acked", "passes", "pass_sites", "passed_sites", "pass_ratio",
     "interrogations", "lspc", "proof_root",
+    # `aicheck`（`choose lspe_aicheck_true`，`docs/262` §10.4）：AI 检查器开没开。
+    # 旧产物缺这一格仍然合法（回放）；新发射器都写。
+    "aicheck",
 })
 #: LSPC 的四个模式（`docs/262` §7.6）。`off` 是**构建旋钮**，不是第八维。
 LSPC_MODES = ("full", "quiet", "strict", "off")
@@ -860,6 +863,9 @@ def validate(doc: object) -> list[str]:
             lc = lp.get("lspc")
             if lc is not None and lc not in LSPC_MODES:
                 errs.append(f"{ver}: lspe.lspc 必须是 {LSPC_MODES} 之一，得到 {lc!r}")
+            ac = lp.get("aicheck")
+            if ac is not None and not isinstance(ac, bool):
+                errs.append(f"{ver}: lspe.aicheck 必须是 true/false，得到 {ac!r}")
             prf = lp.get("proof_root")
             if prf is not None and (not isinstance(prf, str)
                                     or not re.fullmatch(r"[0-9a-f]{8}", prf)):

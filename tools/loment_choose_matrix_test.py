@@ -680,6 +680,27 @@ def test_lspe_audit_switch_changes_the_ledger_not_the_code():
 
 
 @test
+def test_aicheck_slot_changes_the_ledger_not_the_code():
+    """维度后的槽 `lspe_aicheck_true`（`docs/262` §10.4）：只改台账，IR 不动。
+
+    槽与主取值是两条串 —— 这里同时写 `lspe_open_admin`，证明二者可以共存。
+    """
+    base = {"mode": "std", "gc": "gc_manual", "runtime": "runtime",
+            "lspe": "lspe_open_admin"}
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        rc0, d0, ir0, pot0 = _emit(td, "aioff", dict(base), ALLOC_BODY)
+        rc1, d1, ir1, pot1 = _emit(
+            td, "aion", dict(base, aicheck="lspe_aicheck_true"), ALLOC_BODY)
+        assert rc0 == 0, d0[-400:]
+        assert rc1 == 0, d1[-400:]
+        assert (pot0.get("lspe") or {}).get("aicheck") is False, pot0.get("lspe")
+        assert (pot1.get("lspe") or {}).get("aicheck") is True, pot1.get("lspe")
+        assert ir0 == ir1, "aicheck 只该改台账，不该改产物"
+    print("      aicheck 槽：台账 true/false，IR 逐字节相同")
+
+
+@test
 def test_gc_vm_lspe_and_lvm_agree_on_every_tier():
     """GC × VM × LSPE × LVM：三档 GC 在 **VM 上**跑出的行为与原生相同，而 `vm` / `lspe`
     两维**不改 IR**、只进 Potato（`docs/231` §1.3、`docs/243` §4.5、`docs/262` §10.1）。

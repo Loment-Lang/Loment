@@ -31,6 +31,8 @@ TESTS: list[tuple[str, object]] = []
 # lspe-probe: Exclusive
 # lspe-probe: TypeWellFormed
 # lspe-probe: DropHonest
+# lspe-probe: InDomain
+# lspe-probe: CapabilityLive
 
 import json  # noqa: E402
 import subprocess  # noqa: E402
@@ -52,9 +54,10 @@ def test_registry_has_14_obligations_and_8_evidence_kinds():
         assert spec["accept"], name
         assert "Differential" not in spec["accept"], name
     # 问题码（`docs/262` §5.10）：Q013 是 `lspe pass` 的未审计块（#786）。
-    assert len(lspe.LSPE_QUESTIONS) == 13
+    assert len(lspe.LSPE_QUESTIONS) == 14
     assert lspe.LSPE_QUESTIONS["Q013"]
     assert "未审计块" in lspe.LSPE_QUESTIONS["Q013"]
+    assert "Q014" in lspe.LSPE_QUESTIONS and "不是证据" in lspe.LSPE_QUESTIONS["Q014"]
 
 
 @test
@@ -367,7 +370,9 @@ def _unit(src: str, **kw):
 @test
 def test_question_registry_templates_are_fixed_and_safe():
     """每一问都有固定字段；文本里不出现威胁词（`docs/262` §6 硬规则 4 / `#753`）。"""
-    assert set(lspe.LSPE_QUESTION_TEMPLATES) == set(lspe.LSPE_QUESTIONS)
+    # Q014 是 **AI 检查器**的怀疑（`docs/262` §10.7），不由反问器发问，
+    # 所以它没有"选项 / 默认"模板；其余每个 Q 码都有。
+    assert set(lspe.LSPE_QUESTION_TEMPLATES) == set(lspe.LSPE_QUESTIONS) - {"Q014"}
     for code, tpl in lspe.LSPE_QUESTION_TEMPLATES.items():
         assert tpl["claim"] and tpl["chain"], code
         assert set(tpl["tried"]) == set(lspe.LSPE_INTERROGATIONS), code
@@ -741,6 +746,159 @@ def test_safe_set_converges_past_256_rounds():
 
 
 @test
+def test_domain_checker_becomes_lspe_sites():
+    """E9 域检查器（`docs/306`–`308`）：域、守卫的包含性、撤销都进 LSPE 的账。
+
+    它不新增错误码：证不出来时走反问器 Q008 / LSPC，而不是拒绝。
+    """
+    src = ("module m\n\nchoose runtime\n\n"
+           "capability d : disk[0..4] revocable\n\n"
+           "fn f(slot: u32) -> u32 {\n"
+           "    guard d(2);\n"
+           "    guard d(slot);\n"
+           "    return slot;\n}\n")
+    doc, sites = _unit(src)
+    kinds = sorted(s["kind"] for s in sites)
+    assert kinds.count("domain") == 1, kinds
+    assert kinds.count("domain_access") == 2, kinds
+    assert kinds.count("revoke") == 1, kinds
+    assert doc["per_kind"]["InDomain"] == "2/3", doc["per_kind"]   # 域 + 字面量
+    assert doc["per_kind"]["CapabilityLive"] == "1/1", doc["per_kind"]
+    assert doc["floor_detail"]["assumed"] == 2, doc["floor_detail"]  # 撤销 + 非字面量
+
+    bad = [s for s in sites if s["kind"] == "domain_access" and not s["proved"]]
+    assert len(bad) == 1 and bad[0]["reason"] == "unknown_domain", bad
+    q = lspe.ask([dict(bad[0])], lspe.LspeSolver([dict(bad[0])], 3).run())
+    assert q["questions"][0]["code"] == "Q008", q
+
+
+@test
+def test_domain_checker_proves_loop_containment_at_L3():
+    """`for i in 0..5 { guard d(i) }` 对 `[0..4]` 是 `GlobalInvariant`；L2 不认。"""
+    def access(src):
+        _doc, sites = _unit(src, level=3)
+        a = [s for s in sites if s["kind"] == "domain_access"]
+        assert len(a) == 1, sites
+        return a[0]
+
+    for_ = access("module m\n\nchoose runtime\n\n"
+                  "capability d : disk[0..4]\n\n"
+                  "fn f() -> u32 {\n    let s: u32 = 0;\n"
+                  "    for i in 0..5 {\n        guard d(i);\n"
+                  "        s = s + i;\n    }\n    return s;\n}\n")
+    assert for_["evidence"] == "GlobalInvariant" and for_["proved"], for_
+
+    while_le = access("module m\n\nchoose runtime\n\n"
+                      "capability d : disk[0..4]\n\n"
+                      "fn f() -> u32 {\n    let s: u32 = 0;\n"
+                      "    let i: u32 = 0;\n    while i <= 4 {\n"
+                      "        guard d(i);\n        i = i + 1;\n"
+                      "    }\n    return s;\n}\n")
+    assert while_le["evidence"] == "GlobalInvariant", while_le
+
+    # 有符号的 `i < 5` 不证（`i` 可以为负）。
+    signed = access("module m\n\nchoose runtime\n\n"
+                    "capability d : disk[0..4]\n\n"
+                    "fn f() -> u32 {\n    let s: u32 = 0;\n"
+                    "    let i: i32 = 0;\n    while i < 5 {\n"
+                    "        guard d(i);\n        i = i + 1;\n"
+                    "    }\n    return s;\n}\n")
+    assert signed["evidence"] == "none", signed
+
+    # L2 不认 GlobalInvariant。
+    _d, sites2 = _unit("module m\n\nchoose runtime\n\n"
+                       "capability d : disk[0..4]\n\n"
+                       "fn f() -> u32 {\n    let s: u32 = 0;\n"
+                       "    for i in 0..5 {\n        guard d(i);\n"
+                       "        s = s + i;\n    }\n    return s;\n}\n", level=2)
+    a2 = [s for s in sites2 if s["kind"] == "domain_access"][0]
+    assert not lspe.LspeSolver([a2], 2).run().proved(a2)
+
+
+@test
+def test_domain_checker_feeds_lspc_rows():
+    """LSPC 的 revocable / 非字面量 guard 两行以**站点**为准（不再是词法计数）。"""
+    src = ("module m\n\nchoose runtime\n\n"
+           "capability d : disk[0..4] revocable\n\n"
+           "fn f(slot: u32) -> u32 {\n    guard d(slot);\n    return slot;\n}\n")
+    _doc, sites = _unit(src)
+    sh = lspe.lspc_sheet(sites, {"state": "lspe_open_admin", "lspc": "full"})
+    rows = {r["id"]: r for r in sh["rows"]}
+    assert any(s.startswith("m:revoke:") for s in rows["revocable"]["sites"]), rows["revocable"]
+    assert any(s.startswith("m:domain_access:") for s in rows["nonliteral_guard"]["sites"]), \
+        rows["nonliteral_guard"]
+
+
+@test
+def test_aicheck_slot_is_orthogonal_to_the_lspe_state():
+    """`lspe_aicheck_true` 是维度后的**第二位置**（`docs/262` §10.7）。
+
+    它与 `lspe_open_admin` / `lspe_close_admin` 正交：可以同时写，不触发
+    "这一维写了两次"；同一格写两次仍然报。
+    """
+    import lomentc  # noqa: PLC0415
+    src = ("module m\n\nchoose lspe_open_admin\nchoose lspe_aicheck_true\n\n"
+           "fn f() -> u32 {\n    return 0;\n}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "m.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        mod, deps = lomentc.load_unit(p, ROOT)
+        assert lomentc.check(mod, deps=deps) == [], lomentc.check(mod, deps=deps)
+        assert mod.slots.get("aicheck") == "true", mod.slots
+        assert mod.chooses.get("lspe") == "lspe_open_admin", mod.chooses
+        doc = json.loads(lomentc.emit_potato(mod, ROOT, deps))
+        assert doc["lspe"]["aicheck"] is True, doc["lspe"]
+
+        p2 = Path(td) / "dup.lomt"
+        p2.write_text(src.replace("choose lspe_aicheck_true",
+                                  "choose lspe_aicheck_true\nchoose lspe_aicheck_false"),
+                      encoding="utf-8", newline="\n")
+        mod2, deps2 = lomentc.load_unit(p2, ROOT)
+        errs = lomentc.check(mod2, deps=deps2)
+        assert any("这一格只能声明一次" in e for e in errs), errs
+
+
+@test
+def test_aicheck_is_a_question_source_never_evidence():
+    """AI 检查器（`docs/262` §10.7）：请求确定性；回答只产 Q014，不改判决。"""
+    src = ("module m\n\nfn f(a: [u32; 4], i: u32) -> u32 {\n"
+           "    return a[i];\n}\n")
+    doc, sites = _unit(src)
+    by_id = {s["id"]: s for s in sites}
+    lines = src.splitlines()
+    b1 = lspe.aicheck_bundle("m", doc["_questions"], by_id, lines, model="mod")
+    b2 = lspe.aicheck_bundle("m", doc["_questions"], by_id, lines, model="mod")
+    assert lspe.aicheck_dumps(b1) == lspe.aicheck_dumps(b2), "请求必须确定性"
+    assert len(b1["requests"]) == 1, b1
+    req = b1["requests"][0]
+    assert req["excerpt"] and str(req["line"]) in req["excerpt"], req
+
+    replies = {"format": "lspe-aicheck-replies", "version": 1, "unit": "m",
+               "model": "mod",
+               "findings": [{"site": req["site"], "verdict": "suspicious",
+                             "note": "i 可能越界"}]}
+    out = lspe.aicheck_ingest(replies, sites, "m")
+    assert out["findings"][0]["code"] == "Q014", out
+    assert out["findings"][0]["source"] == "ai:mod", out
+
+    # 回答不改变台账：同一份源再算一次，判决与问题完全一样。
+    doc2, _ = _unit(src)
+    assert doc2["proved"] == doc["proved"], (doc2["proved"], doc["proved"])
+    assert doc2["_questions"] == doc["_questions"]
+
+    # 单元不对 / 站点不存在：前者是错误，后者只是一条"未知"。
+    try:
+        lspe.aicheck_ingest(dict(replies, unit="other"), sites, "m")
+        assert False, "别的单元的回答必须被拒"
+    except lspe.LspeError as e:
+        assert e.code == "E036", e
+    unknown = lspe.aicheck_ingest(
+        dict(replies, findings=[{"site": "m:nope", "verdict": "clean"}]),
+        sites, "m")
+    assert unknown["unknown"] == ["m:nope"] and not unknown["findings"], unknown
+
+
+@test
 def test_e7_e8_differential_and_probe_registry():
     """E7 只证一致不证对；E8 的登记表机械生成，缺探针 ⇒ Q002（`#766`）。"""
     twin = {"id": "m:index:1", "kind": "index", "obligation": "InBounds",
@@ -751,7 +909,7 @@ def test_e7_e8_differential_and_probe_registry():
     assert lspe_probes.missing() == [], lspe_probes.missing()
     assert lspe_probes.unknown() == [], lspe_probes.unknown()
 
-    inert = {"id": "m:index:2", "kind": "index", "obligation": "CapabilityLive",
+    inert = {"id": "m:index:2", "kind": "index", "obligation": "LadderLiability",
              "evidence": "none", "line": 2}
     solver = lspe.LspeSolver([inert], 3).run()
     q = lspe.ask([inert], solver)["questions"][0]
@@ -859,6 +1017,91 @@ def test_selfhost_ledger_emits_the_v2_fields():
         assert f'"{field}"' in mod, field
     mod2 = (ROOT / "loment" / "lspe" / "lspe.lomt").read_text(encoding="utf-8")
     assert "pub fn lspe_e5_hit" in mod2 and "pub fn lspe_num" in mod2
+
+
+@test
+def test_aicheck_asks_an_external_model_and_keeps_it_out_of_the_ledger():
+    """`--ask-cmd` 端到端：请求 → 外部程序 → Q014 → state/LSPC；判决一个字节不变。
+
+    这条补的是"通道层"（`docs/262` §10.7）：从前只有出请求与吃回答两个动作，
+    没有**把请求送出去**的路。外部程序是确定性的，所以它可以进判据。
+    """
+    src = ("module m\n\nchoose lspe_aicheck_true\n\n"
+           "fn f(a: [u32; 4], i: u32) -> u32 {\n"
+           "    return a[i];\n}\n")
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        p = d / "m.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        fake = d / "fake_ai.py"
+        fake.write_text(
+            "import json, sys\n"
+            "b = json.load(sys.stdin)\n"
+            "req = b['requests'][0]\n"
+            "print(json.dumps({'findings': [{'site': req['site'],\n"
+            "  'verdict': 'suspicious', 'note': 'i is not guarded'}]}))\n",
+            encoding="utf-8")
+        replies = d / "replies.json"
+        cmd = f"{sys.executable} {fake}"
+
+        def run(*args):
+            return subprocess.run(
+                [sys.executable, str(ROOT / "tools" / "loment.py"), *args],
+                cwd=str(ROOT), capture_output=True, text=True,
+                encoding="utf-8", errors="replace", shell=False, timeout=180)
+
+        r = run("lspe", "aicheck", str(p), "--ask-cmd", cmd,
+                "--replies-out", str(replies))
+        assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+        assert "Q014" in r.stdout and "suspicious" in r.stdout, r.stdout
+        assert replies.exists(), "回答要能落盘进版本库"
+        doc = json.loads(replies.read_text(encoding="utf-8"))
+        assert doc["format"] == "lspe-aicheck-replies", doc
+        assert doc["unit"] == "m" and doc["findings"], doc
+
+        # 判决不变：带不带回答，台账（stdout JSON）逐字节相同。
+        base = run("lspe", "state", str(p))
+        with_ai = run("lspe", "state", str(p), "--replies", str(replies))
+        assert base.returncode == with_ai.returncode == 0, (base.stderr, with_ai.stderr)
+        assert base.stdout == with_ai.stdout, "AI 的回答不许改变台账"
+        assert "Q014" in with_ai.stderr, with_ai.stderr
+
+        sheet = run("lspc", "check", str(p), "--replies", str(replies))
+        assert sheet.returncode == 0, (sheet.returncode, sheet.stderr)
+        assert "[LSPC] Q014" in sheet.stdout, sheet.stdout[-800:]
+
+        # `--strict` 只改退出码，不改判决。
+        strict = run("lspe", "aicheck", str(p), "--ask-cmd", cmd, "--strict")
+        assert strict.returncode == 1, (strict.returncode, strict.stdout)
+
+
+@test
+def test_aicheck_channel_errors_are_clean_and_never_tracebacks():
+    """通道层的坏输入：没有 findings / 命令不存在 / 没有密钥 —— 都是 [ERR]，不是栈。"""
+    import lspe.aiask as aiask
+    bundle = {"format": "lspe-aicheck", "version": 1, "unit": "m",
+              "model": "fake", "requests": []}
+    # 空表必须显式写；缺 `findings` 不等于"没问题"。
+    try:
+        aiask.normalize({"verdict": "clean"}, bundle)
+        assert False, "缺 findings 必须被拒"
+    except lspe.LspeError as e:
+        assert e.code == "E036", e
+    ok = aiask.normalize({"findings": []}, bundle)
+    assert ok["format"] == "lspe-aicheck-replies" and ok["unit"] == "m", ok
+    # 围栏与闲话要能剥掉。
+    assert aiask._first_json('```json\n{"findings": []}\n```') == {"findings": []}
+    try:
+        aiask.run_command("no-such-loment-ai-binary", bundle, timeout=5)
+        assert False, "找不到命令必须报错"
+    except lspe.LspeError as e:
+        assert e.code == "E036", e
+    with mock.patch.dict("os.environ", {}, clear=True):
+        try:
+            aiask.ask_anthropic(bundle, key=None)
+            assert False, "没有密钥必须报错"
+        except lspe.LspeError as e:
+            assert "ANTHROPIC_API_KEY" in str(e) or "LOMENT_AI_KEY" in str(e), e
 
 
 def main() -> int:

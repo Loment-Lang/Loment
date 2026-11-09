@@ -26,7 +26,7 @@ def build(*, sites: list[dict], state: str, set_by: str, level: int,
           lspc_mode: str | None = None, previous: dict | None = None,
           sidecar: bool = False, twin: dict | None = None,
           side_sets: dict[str, set[str]] | None = None,
-          cache=None) -> dict:
+          cache=None, aicheck: bool = False) -> dict:
     """返回 Potato v16 的 `lspe` 台账。
 
     * `sites` 是加载期算出的站点；`lspe_close_admin` 下**关审计** → 计数全零，
@@ -105,6 +105,8 @@ def build(*, sites: list[dict], state: str, set_by: str, level: int,
     drop_floors = sum(1 for s in drop_sites
                       if s.get("evidence") == "Assumed"
                       and str(s.get("source", "")).startswith("#floor-drop-"))
+    # `revocable` 今天只有表示（`docs/146` §3）：每个撤销域是一条有标签的假设。
+    revoke_floors = sum(1 for s in sites if s["kind"] == "revoke")
     # 地板按**原因**分桶，但一个站点只进一个桶：被回答/默认过的站点算 `assumed`，
     # 不再算 budget/depth/stale —— 否则同一条 UNDECIDED 会被数两次，I4 恒等式就假了。
     sf = {"budget": 0, "depth": 0, "stale_wf": 0}
@@ -117,7 +119,7 @@ def build(*, sites: list[dict], state: str, set_by: str, level: int,
         if reason in sf:
             sf[reason] += 1
     floor_detail = {
-        "assumed": len(asked["assumed"]),
+        "assumed": len(asked["assumed"]) + revoke_floors,
         "stale_wf": int(sf.get("stale_wf", 0)),
         "budget": int(sf.get("budget", 0)),
         "depth": int(sf.get("depth", 0)),
@@ -130,6 +132,9 @@ def build(*, sites: list[dict], state: str, set_by: str, level: int,
         "state": state,
         "set_by": set_by,
         "mode": mode,
+        # AI 检查器（`choose lspe_aicheck_true`）：只记"开没开"。
+        # 它产出的怀疑走 Q014 与 CLI，**不给任何义务添证据**。
+        "aicheck": bool(aicheck),
         "level": level,
         "sites": n,
         "obligations": n,

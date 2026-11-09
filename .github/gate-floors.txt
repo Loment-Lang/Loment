@@ -36,7 +36,7 @@ loment_lms_test 21
 loment_grammar_test 31
 loment_tools_test 66
 loment_p7_test 8
-loment_p8_test 47
+loment_p8_test 48
 loment_p9_test 2
 loment_crash_test 9
 loment_gc_surface_test 3

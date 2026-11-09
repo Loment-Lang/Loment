@@ -5,7 +5,10 @@
 > `exclusive`），判据 `lomentc_test::test_borrow_domains_phase1_rules`。
 > 期 2：`window(xs, LO, N)` / `split(xs, LO, N)` / `cursor(xs)` 三种形状，
 > 判据 `lomentc_test::test_borrow_domains_phase2_shapes`。
-> **自举侧两期都未跟上**（下一期），期 3 未开始。
+> **自举侧两期都跟上了**（2026-11-09）：`checker.lomt` 的 `chk_bdom` 按 token 流判同样
+> 三条规则 + 期 2 三种形状，`codegen.lomt` 的 `dom_stmt` 认这五种形状（块与普通块同形）；
+> 孪生判据 `loment_p8_test::test_borrow_domains_are_byte_identical`
+> （`loment/examples/domains/borrow_lifetimes.lomt`）。期 3 未开始。
 > 上游: `docs/299`（借用区域）· `docs/306`（域代数）· `docs/307`（语境类）·
 > `docs/314`（域块）· `docs/315`（域循环与几何）
 > 一句话: 域的形状那一格原来只收**位置**（`space[lo..hi]`）与**时律**（`epoch(N)` /
@@ -296,8 +299,8 @@ E041: 封印域外不能把 buf 交给外部
 
 | 期 | 内容 | 依赖 | 状态 |
 |---|---|---|---|
-| 1 | `borrow` / `borrow_mut` 两种形状 + R1/R2/R3 三条检查 + `view` / `exclusive` / `freeze` | `docs/299` 的区域环境 | **参考侧已落**；自举侧下一期 |
-| 2 | 形状运算：`split` / `window` / `cursor`（子区域、越窗、回边） | 期 1 + `docs/315` 的 `mutex` 边 | **参考侧已落**（区间形式；双名糖与动态界进期 3） |
+| 1 | `borrow` / `borrow_mut` 两种形状 + R1/R2/R3 三条检查 + `view` / `exclusive` / `freeze` | `docs/299` 的区域环境 | **两侧都已落** |
+| 2 | 形状运算：`split` / `window` / `cursor`（子区域、越窗、回边） | 期 1 + `docs/315` 的 `mutex` 边 | **两侧都已落**（区间形式；双名糖与动态界进期 3） |
 | 3 | `loan` / `epoch` / `session` / `seal`（退出路径、线性、外部调用表） | 期 1–2 | 未开始 |
 
 期 1 的落地形状：`domain [NAME :] borrow(NAME) { … }` / `borrow_mut(NAME) { … }`，

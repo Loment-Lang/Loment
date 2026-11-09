@@ -3061,6 +3061,20 @@ fn is_dom_block(src: ptr, toks: ptr, i: u32) -> u32 {
     if tok_is(src, toks, a + 1, "[") {
         return 1;
     }
+    // `docs/318`：区域形状 —— `domain V : borrow(xs)` / `domain borrow_mut(xs)` 等五种。
+    if tok_kind(toks, a + 2) == 0 && tok_is(src, toks, a + 3, "(") {
+        if (tok_is(src, toks, a + 2, "borrow") || tok_is(src, toks, a + 2, "borrow_mut")
+                || tok_is(src, toks, a + 2, "window") || tok_is(src, toks, a + 2, "split")
+                || tok_is(src, toks, a + 2, "cursor")) {
+            return 1;
+        }
+    }
+    if tok_is(src, toks, a + 1, "(")
+            && (tok_is(src, toks, a, "borrow") || tok_is(src, toks, a, "borrow_mut")
+                || tok_is(src, toks, a, "window") || tok_is(src, toks, a, "split")
+                || tok_is(src, toks, a, "cursor")) {
+        return 1;
+    }
     return 0;
 }
 
@@ -7172,6 +7186,20 @@ fn dom_stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
             k = k + 2;
         }
         let sp: u32 = k;
+        // `docs/318`：五种**区域形状**（borrow / borrow_mut / window / split / cursor）。
+        // 形状是区域不是位置 —— 参考实现那边它们是 `kind=regular`、只发体，这里同样
+        // 跳过形状直接跑到 `{`，收尾与普通域块同一段。
+        if tok_kind(toks, sp) == 0
+                && (tok_is(src, toks, sp, "borrow") || tok_is(src, toks, sp, "borrow_mut")
+                    || tok_is(src, toks, sp, "window") || tok_is(src, toks, sp, "split")
+                    || tok_is(src, toks, sp, "cursor"))
+                && tok_is(src, toks, sp + 1, "(") {
+            let lb: u32 = sp + 1;
+            while tok_kind(toks, lb) != 4 && !tok_is(src, toks, lb, "{") {
+                lb = lb + 1;
+            }
+            return dom_body(s, out, src, toks, lb, ret);
+        }
         let q: u32 = sp + 2;
         let lof: u32 = 0;
         let lo: u32 = 0;
@@ -7308,15 +7336,21 @@ fn dom_stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
             store32(s, dom_at(d, 7), pt);
         }
         store32(s, CG_DOM_N, d + 1);
-        // 块体是一层语句表：体内的 `defer` 在块尾按 LIFO 跑（与参考的 `self.block` 同序）
-        let dfr: u32 = dfr_push(s);
-        let k2: u32 = q + 1;
-        while !tok_is(src, toks, k2, "}") && tok_kind(toks, k2) != 4 {
-            k2 = stmt(s, out, src, toks, k2, ret);
-        }
-        let _de: u32 = dfr_end(s, out, src, toks, dfr, ret);
+        let r: u32 = dom_body(s, out, src, toks, q, ret);
         store32(s, CG_DOM_N, d);
-        return k2 + 1;
+        return r;
+}
+
+/// 域块的收尾：块体是一层语句表，体内的 `defer` 在块尾按 LIFO 跑（与参考的
+/// `self.block` 同序）。`lb` 是 `{` 的位置。普通域块与区域形状（`docs/318`）共用。
+fn dom_body(s: ptr, out: ptr, src: ptr, toks: ptr, lb: u32, ret: u32) -> u32 {
+    let dfr: u32 = dfr_push(s);
+    let k2: u32 = lb + 1;
+    while !tok_is(src, toks, k2, "}") && tok_kind(toks, k2) != 4 {
+        k2 = stmt(s, out, src, toks, k2, ret);
+    }
+    let _de: u32 = dfr_end(s, out, src, toks, dfr, ret);
+    return k2 + 1;
 }
 
 fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {

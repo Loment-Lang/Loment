@@ -1072,15 +1072,16 @@ def _expected_low_sys() -> str:
     import errno as E
     import os
 
-    try:
-        import fcntl as F
-    except ImportError:  # Windows：没有 fcntl，用 Linux 常量
-        class _F:
-            O_WRONLY = 1
-            O_CREAT = 64
-            O_CLOEXEC = 524288
-            O_APPEND = 1024
-        F = _F
+    # `fcntl` 模块**不导出** `O_*`（那些在 `os` 里）。探针是 **Linux ELF**，所以期望值
+    # 也必须是 **Linux 的 ABI 值**：Linux 上直接取 `os.*`（独立对照），Windows 上 `os`
+    # 给的是 Windows 的取值（`O_APPEND`=8），不能拿来当 Linux 的期望 —— 用常量兜底。
+    _linux = sys.platform.startswith("linux")
+    F = type("_F", (), {
+        "O_WRONLY": os.O_WRONLY if _linux else 1,
+        "O_CREAT": os.O_CREAT if _linux else 64,
+        "O_CLOEXEC": getattr(os, "O_CLOEXEC", 524288) if _linux else 524288,
+        "O_APPEND": os.O_APPEND if _linux else 1024,
+    })
 
     try:
         import termios as T

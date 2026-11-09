@@ -53,7 +53,7 @@ const SEEN_CAP: u32 = 65536;     // 已装载路径去重表
 //   [24160, 24164) 这一次的 `--diag-out` fd **加一** (0 = 没给) ← 见 `diagfd`
 //   [24164, 24168) 版次 (0 = tur2026.1, 1 = tur2026.2, 2 = tur2026.3) ← 见 `PROF_OFF`
 //   [24168, 24172) 根单元写的拼法 (0 = 没写, 1..8 = loment/tur/tur1/tur2026.1/tur2/tur2026.2/tur3/tur2026.3)
-const SCR_CAP: u32 = 24184;
+const SCR_CAP: u32 = 24576;
 //: 单个文件的 `use` 条数上限 (路径形式 + 名字形式合起来算), **与参考实现同值**。
 //: 超限**报错退出**, 绝不静默丢 —— 原先进程按 8 条布局, 第 9 条起直接不要, 而参考实现
 //: 无上限: 同一份源码两个实现给出不同的单元 (2026-09-16 发现)。抬到 300 是让 std 那种
@@ -83,6 +83,9 @@ const FPROF_OFF: u32 = 24172;    // 这份文件自己声明的版次 (0xFFFFFFF
 //: 两个都没写（低两位为 0）而包清单要运行期时，装载器在合并单元末尾补一行
 //: `choose runtime` —— 与参考实现的 `mod.chooses` 注入同义。
 const RTDECL_OFF: u32 = 24176;
+//: 同包 `pkg.lomp` 的 `choose()` 词表（空格分隔的 ASCII）—— `cfg_pkg_choose` 写它。
+const PKGCH_OFF: u32 = 24192;
+const PKGCH_CAP: u32 = 256;
 const ADDIN_OFF: u32 = 21504;    // addin 清单起点
 const CMD_OFF: u32 = 23904;      // 命令名 (`--print-command`)
 const DIAG_CAP: u32 = 1024;      // 路径上限
@@ -1779,7 +1782,7 @@ fn cfg_source_ext(dirp: ptr, dl: u32, dst: ptr, scr: ptr, buf: ptr, toks: ptr) -
 ///
 /// 与 `cfg_source_ext` 同一种形状（清单就是一份 Loment 源码），只认
 /// `pub fn runtime() -> str { return "runtime"; }` 里的那个字符串。读不出来当没声明。
-fn cfg_pkg_runtime(dirp: ptr, dl: u32, scr: ptr, buf: ptr, toks: ptr) -> u32 {
+fn cfg_pkg_choose(dirp: ptr, dl: u32, scr: ptr, buf: ptr, toks: ptr) -> u32 {
     let d: u32 = 0;
     if dl > 0 {
         d = cat(scr, d, dirp, dl);
@@ -1797,11 +1800,11 @@ fn cfg_pkg_runtime(dirp: ptr, dl: u32, scr: ptr, buf: ptr, toks: ptr) -> u32 {
         return 0;
     }
     let n: u32 = lex(buf, raw as u32, toks);
+    // 先找 `choose(`（docs/324），没有再退回旧的 `runtime()`。
     let found: u32 = 4294967295;
     let i: u32 = 0;
     while i < n && found == 4294967295 {
-        // `runtime(` 才是那个声明（`fn runtime()` 的 ident 后紧跟 `(`）。
-        if load32(toks, i * 20) == 0 && tok_is(buf, toks, i, "runtime") == 1
+        if load32(toks, i * 20) == 0 && tok_is(buf, toks, i, "choose") == 1
                 && i + 1 < n && load32(toks, (i + 1) * 20) == 3
                 && ptr_eq_char(buf, load32(toks, (i + 1) * 20 + 4), 40) == 1 {
             found = i;
@@ -1809,9 +1812,19 @@ fn cfg_pkg_runtime(dirp: ptr, dl: u32, scr: ptr, buf: ptr, toks: ptr) -> u32 {
         i = i + 1;
     }
     if found == 4294967295 {
+        i = 0;
+        while i < n && found == 4294967295 {
+            if load32(toks, i * 20) == 0 && tok_is(buf, toks, i, "runtime") == 1
+                    && i + 1 < n && load32(toks, (i + 1) * 20) == 3
+                    && ptr_eq_char(buf, load32(toks, (i + 1) * 20 + 4), 40) == 1 {
+                found = i;
+            }
+            i = i + 1;
+        }
+    }
+    if found == 4294967295 {
         return 0;
     }
-    // 往后找第一个字符串：它就是 `return "…"` 的那个值。
     let s: u32 = 4294967295;
     let j: u32 = found + 1;
     while j < n && s == 4294967295 {
@@ -1825,19 +1838,68 @@ fn cfg_pkg_runtime(dirp: ptr, dl: u32, scr: ptr, buf: ptr, toks: ptr) -> u32 {
     }
     let st: u32 = load32(toks, s * 20 + 4);
     let sl: u32 = load32(toks, s * 20 + 8);   // 含两端的引号
-    if sl != 9 {
+    if sl < 3 {
         return 0;
     }
-    // `"runtime"` —— 9 字节（含引号）
-    let want: str = "runtime";
+    let dst: ptr = ptr_add(scr, PKGCH_OFF);
+    let m: u32 = sl - 2;
+    if m >= PKGCH_CAP {
+        m = PKGCH_CAP - 1;
+    }
     let q: u32 = 0;
-    while q < 7 {
-        if load8(buf, st + 1 + q) != str_byte(want, q) {
-            return 0;
-        }
+    while q < m {
+        store8(dst, q, load8(buf, st + 1 + q) as u8);
         q = q + 1;
     }
-    return 4;
+    store8(dst, q, 0 as u8);
+    return q;
+}
+
+/// 一个核心词属于哪一维（`CORE_DIM_ORDER` 的位）。0 = 不认识。
+fn core_word_bit(p: ptr, n: u32) -> u32 {
+    if pkg_eq(p, n, "std") == 1 || pkg_eq(p, n, "no_std") == 1 {
+        return 1;
+    }
+    if pkg_eq(p, n, "gc_manual") == 1 || pkg_eq(p, n, "gc_auto") == 1
+            || pkg_eq(p, n, "gc_auto_alpha") == 1 || pkg_eq(p, n, "no_gc") == 1 {
+        return 2;
+    }
+    if pkg_eq(p, n, "runtime") == 1 || pkg_eq(p, n, "no_runtime") == 1 {
+        return 4;
+    }
+    if pkg_eq(p, n, "sealed") == 1 || pkg_eq(p, n, "hosted") == 1 {
+        return 8;
+    }
+    if pkg_eq(p, n, "vm") == 1 || pkg_eq(p, n, "no_vm") == 1 {
+        return 16;
+    }
+    if pkg_eq(p, n, "lms_full") == 1 || pkg_eq(p, n, "lms_forensic_admin") == 1
+            || pkg_eq(p, n, "lms_daily_admin") == 1
+            || pkg_eq(p, n, "lms_manage_only_admin") == 1 {
+        return 32;
+    }
+    if pkg_eq(p, n, "lspe_open_admin") == 1 || pkg_eq(p, n, "lspe_close_admin") == 1 {
+        return 64;
+    }
+    if pkg_eq(p, n, "lifetime_no") == 1 || pkg_eq(p, n, "lifetime_auto") == 1
+            || pkg_eq(p, n, "lifetime_manual") == 1 {
+        return 128;
+    }
+    return 0;
+}
+
+fn pkg_eq(p: ptr, n: u32, lit: str) -> u32 {
+    if n != str_len(lit) {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(p, i) != str_byte(lit, i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
 }
 
 fn ptr_eq_char(src: ptr, off: u32, ch: u32) -> u32 {
@@ -2158,10 +2220,11 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
         // 记下根/`addin` 单元写没写运行期那一维（docs/323）。依赖写的会被下面抹掉，
         // 而抹掉之后检查器就看不见它了 —— 但它**是**一个需求，所以要在这里记一笔。
         if (depth == 0 || from_addin == 1) && tok_is(slot, toks, i, "choose") {
-            if tok_is(slot, toks, i + 1, "runtime") {
-                store32(scr, RTDECL_OFF, load32(scr, RTDECL_OFF) | 1);
-            } else if tok_is(slot, toks, i + 1, "no_runtime") {
-                store32(scr, RTDECL_OFF, load32(scr, RTDECL_OFF) | 2);
+            let _ws: u32 = load32(toks, (i + 1) * 20 + 4);
+            let _wl: u32 = load32(toks, (i + 1) * 20 + 8);
+            let _bit: u32 = core_word_bit(ptr_add(slot, _ws), _wl);
+            if _bit != 0 {
+                store32(scr, RTDECL_OFF, load32(scr, RTDECL_OFF) | _bit);
             }
         }
         // `choose` 声明的是**整个程序**的模式 (docs/143 §3.2), 所以只有**根单元**能写。
@@ -2471,9 +2534,8 @@ fn _start() -> u32 {
     // 根单元所在包的 `pkg.lomp` 要运行期吗（docs/323）？这一步借 unit/toks 当暂存 ——
     // `load_file` 紧接着就会盖掉它们，与上面读 `loment.conf` 同一个时点。
     store32(scr, RTDECL_OFF, 0);
-    let _rq: u32 = cfg_pkg_runtime(ptr_add(scr, PROJ_OFF),
-                                   cstr_len(ptr_add(scr, PROJ_OFF)), scr, unit, toks);
-    store32(scr, RTDECL_OFF, load32(scr, RTDECL_OFF) | _rq);
+    let _rq: u32 = cfg_pkg_choose(ptr_add(scr, PROJ_OFF),
+                                  cstr_len(ptr_add(scr, PROJ_OFF)), scr, unit, toks);
     let _e0: u32 = cfg_source_ext(ptr_add(scr, PROJ_OFF),
                                   cstr_len(ptr_add(scr, PROJ_OFF)),
                                   ptr_add(scr, EXT_OFF), scr, unit, toks);
@@ -2502,23 +2564,48 @@ fn _start() -> u32 {
         wdiag_file(dfd, scr, ap, an, 31, str_ptr(dm2), str_len(dm2));
         return fail(dm2);
     }
-    // **包清单的运行期需求**（docs/323）：根与 `addin` 单元都没写这一维、而根所在包
-    // 的 `pkg.lomp` 说要运行期时，在合并单元末尾补一行 —— 与参考实现把清单值注入
-    // `mod.chooses` 同义。**显式写的优先**（低两位非 0 就不补）。
+    // **包清单的前置条件**（docs/324）：清单 `choose()` 里写了、根与 `addin` 单元
+    // 都没写的那一维，在合并单元末尾补一行 `choose <词>` —— 与参考实现逐维注入
+    // `mod.chooses` 同义。**显式写的优先**：那位已经置位就跳过。
+    // 逐字节写：不写带换行的字符串字面量 —— 两个词法器对多行字面量的解码
+    // 有过一次可测的分歧（`loment_p8_test::test_m80_loment_parser_ast_dump`）。
     let _fl: u32 = load32(scr, RTDECL_OFF);
-    if (_fl & 3) == 0 && (_fl & 4) != 0 {
-        // 逐字节写：不写带换行的字符串字面量 —— 两个词法器对多行字面量的解码
-        // 有过一次可测的分歧（`loment_p8_test::test_m80_loment_parser_ast_dump`）。
-        let _add: str = "choose runtime";
-        store8(unit, len as u32, 10 as u8);
-        let _k: u32 = 0;
-        while _k < str_len(_add) {
-            store8(unit, (len as u32) + 1 + _k, str_byte(_add, _k) as u8);
-            _k = _k + 1;
+    let _pp: ptr = ptr_add(scr, PKGCH_OFF);
+    let _pn2: u32 = cstr_len(_pp);
+    let _wi: u32 = 0;
+    while _wi < _pn2 {
+        while _wi < _pn2 && load8(_pp, _wi) == 32 {
+            _wi = _wi + 1;
         }
-        store8(unit, (len as u32) + 1 + str_len(_add), 10 as u8);
-        len = len + (str_len(_add) as u64) + (2 as u64);
+        let _ws2: u32 = _wi;
+        while _wi < _pn2 && load8(_pp, _wi) != 32 {
+            _wi = _wi + 1;
+        }
+        let _wl2: u32 = _wi - _ws2;
+        if _wl2 > 0 {
+            let _bit2: u32 = core_word_bit(ptr_add(_pp, _ws2), _wl2);
+            if _bit2 != 0 && (_fl & _bit2) == 0 {
+                store8(unit, len as u32, 10 as u8);
+                let _k: u32 = 0;
+                let _pre: str = "choose ";
+                while _k < str_len(_pre) {
+                    store8(unit, (len as u32) + 1 + _k, str_byte(_pre, _k) as u8);
+                    _k = _k + 1;
+                }
+                let _k2: u32 = 0;
+                while _k2 < _wl2 {
+                    store8(unit, (len as u32) + 1 + str_len(_pre) + _k2,
+                           load8(_pp, _ws2 + _k2) as u8);
+                    _k2 = _k2 + 1;
+                }
+                let _tot: u32 = 2 + str_len(_pre) + _wl2;
+                store8(unit, (len as u32) + _tot - 1, 10 as u8);
+                len = len + (_tot as u64);
+                _fl = _fl | _bit2;
+            }
+        }
     }
+    store32(scr, RTDECL_OFF, _fl);
     // **编译期告知版次**（用户 2026-11-04 的要求，`docs/296` §1.1）：每次编译一行，
     // 把用户写的拼法展开成规范名。短名（`tur2`）跨年之后不再被接受，这一行是用户
     // 排查"我到底用的哪一版"的第一手信息。工具模式（`--emit-potato`/`--print-command`）

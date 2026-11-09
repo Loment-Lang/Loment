@@ -2649,9 +2649,12 @@ class Module:
     #: `parse()` 里做**了 —— 安全表要 root + deps 一起算，那只有 `emit_*` 那一层够得着，
     #: 于是函数体跨度（`f.tok_at/tok_end`）得能重新对着 token 流核。**只在需要时读**。
     toks: list = field(default_factory=list)
-    #: 运行期需求来自包清单（`pkg.lomp` 的 `runtime()`）时，包名写在这里；
-    #: 空串 = 需求来自本模块自己的 `choose runtime`（`docs/323`）。
+    #: 运行期需求来自包清单（`pkg.lomp`）时，包名写在这里；
+    #: 空串 = 需求来自本模块自己的 `choose runtime`（`docs/324`）。
     rt_from_pkg: str = ""
+    #: 同包清单写的 `requires()`（逗号分隔的构造名）。判据拿它与 `package_features`
+    #: 比 —— 清单漏写或多写都当场红（`docs/324`）。
+    pkg_requires: str = ""
     #: **会把运行期拖进产物的构造**（`docs/217`）：`[(点名, 行), …]`，按出现序。
     #: 由**解析器**在 `parse()` 末尾填（与 `Func.deref` 同一个位置、同一个理由：规则定义
     #: 在 token 流上，而解析器是唯一握着它的地方）。`no_runtime` 那条强保证读它。
@@ -6478,46 +6481,119 @@ def _runtime_sites(toks: list,
             out.append((_RUNTIME_SITES[t.val], t.line))
     return out
 
-def _pkg_manifest(src: Path | None) -> tuple[str, str | None]:
-    """同目录 `pkg.lomp` 里的 `(包名, runtime)` —— 没有清单返回 `("", None)`。
+def _manifest_fields(text: str) -> tuple[str, list[str], str]:
+    """从清单源码里读 `(name, choose 词表, requires 串)`。
 
     清单是**一份 Loment 源码**（`docs/168` §3.2），所以用词法器读，不引第二种格式。
-    `runtime()` 是**包级**声明（`docs/323`）：它说"这个包的代码要运行期"，取代每个
-    模块各自写一行 `choose runtime`。模块自己写的那一行**优先**（显式胜过清单）。
+    `choose()` 返回空格分隔的核心词（`"std runtime gc_manual"`），`requires()` 返回
+    逗号分隔的构造名（`"alloc,free"`）。两者都是**包级前置条件**（`docs/324`）。
+    词表为空时退回旧的 `runtime()`（一个词）—— 老清单照样读得懂。
     """
-    if src is None:
-        return "", None
-    mf = src.parent / "pkg.lomp"
-    if not mf.is_file():
-        return "", None
-    try:
-        text = mf.read_text(encoding="utf-8")
-    except OSError:
-        return "", None
     toks = lomc.lex(text)
     name = ""
-    rt: str | None = None
+    words: list[str] = []
+    req = ""
     i = 0
     while i < len(toks):
         t = toks[i]
         if t.kind == "ident" and i + 1 < len(toks) and toks[i + 1].val == "(":
-            if t.val == "name" and name == "":
+            if t.val in ("name", "choose", "requires", "runtime"):
                 j = i + 2
+                val = None
                 while j < len(toks):
                     if toks[j].kind == "string":
-                        name = toks[j].val
+                        val = toks[j].val
+                        break
+                    if j > i + 2 and toks[j].kind == "ident" and toks[j].val == "fn":
                         break
                     j += 1
-            elif t.val == "runtime" and rt is None:
-                j = i + 2
-                while j < len(toks):
-                    if toks[j].kind == "string":
-                        if toks[j].val in ("runtime", "no_runtime"):
-                            rt = toks[j].val
-                        break
-                    j += 1
+                if val is None:
+                    i += 1
+                    continue
+                if t.val == "name" and name == "":
+                    name = val
+                elif t.val == "requires" and req == "":
+                    req = val
+                elif t.val == "choose" and not words:
+                    words = [w for w in val.split() if w]
+                elif t.val == "runtime" and not words:
+                    if val in ("runtime", "no_runtime"):
+                        words = [val]
         i += 1
-    return name, rt
+    return name, words, req
+
+
+def _pkg_manifest(src: Path | None) -> tuple[str, list[str], str]:
+    """同目录 `pkg.lomp` 的 `(包名, choose 词表, requires 串)`；没有清单返回空。"""
+    if src is None:
+        return "", [], ""
+    mf = src.parent / "pkg.lomp"
+    if not mf.is_file():
+        return "", [], ""
+    try:
+        return _manifest_fields(mf.read_text(encoding="utf-8"))
+    except OSError:
+        return "", [], ""
+
+
+#: 包里"用了哪些构造"的词汇表（`docs/324` 的前置条件）。键 = 触发它的 token 写法，
+#: 值 = 清单里写的名字。检测与 `_RUNTIME_SITES` 同一条位置判据（`fn` 后面的名字不算），
+#: 另加三种结构性的：`syscall4/6/7`、`extern fn`、`f64`。
+_PKG_FEATURES: dict[str, str] = {
+    "alloc": "alloc",
+    "free": "free",
+    "str_concat": "str_concat",
+    "str_eq": "str_eq",
+    "panic": "panic",
+    "print_num": "print_num",
+    "guard": "guard",
+    "tick": "tick",
+    "quality": "quality",
+    "domain": "domain",
+    "discharge": "discharge",
+    "thread_spawn": "thread_spawn",
+    "lgc": "lgc",
+}
+
+
+def package_features(mod: Module) -> list[str]:
+    """一个单元**实际用到**的包级构造（排序去重）。清单的 `requires()` 必须与它相等。"""
+    found: set[str] = set()
+    toks = mod.toks
+    n = len(toks)
+    for i, t in enumerate(toks):
+        if t.kind != "ident":
+            continue
+        if i > 0 and toks[i - 1].val == "fn":
+            continue
+        nxt = toks[i + 1] if i + 1 < n else None
+        if t.val in ("syscall4", "syscall6", "syscall7"):
+            if nxt is not None and nxt.val == "(":
+                found.add("syscall")
+            continue
+        if t.val == "extern":
+            if nxt is not None and nxt.val == "fn":
+                found.add("extern")
+            continue
+        if t.val == "f64":
+            found.add("float")
+            continue
+        if t.val in _PKG_FEATURES:
+            if t.val in ("guard", "lgc", "quality", "discharge"):
+                if nxt is not None and nxt.kind == "ident":
+                    found.add(_PKG_FEATURES[t.val])
+            elif t.val == "tick":
+                if nxt is not None and nxt.val == ";":
+                    found.add("tick")
+            elif t.val == "domain":
+                if nxt is not None and nxt.kind == "ident":
+                    found.add("domain")
+            elif t.val == "print_num" and getattr(mod, "profile", "") not in TUR2_PLUS:
+                continue
+            else:
+                if nxt is not None and nxt.val == "(":
+                    found.add(_PKG_FEATURES[t.val])
+    return sorted(found)
 
 
 def _unit_id(m: Module) -> object:
@@ -13192,6 +13268,21 @@ def _uses_clock(mods: list) -> bool:
 def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
               coverage: bool = False, debug: bool = False) -> str:
     """原生后端: LLVM IR。M0 标量 + M23–M26 聚合 + M1/M2 str + M3/M4 切片。"""
+    # **IR 缓存**（`docs/324`）：键覆盖根 + 全部依赖的**字节**、生效维、版次、发射开关
+    # 与编译器自身摘要。任何一个变了就重算 —— 缓存只省时间，不改变输出字节。
+    import loment_cache                      # noqa: PLC0415
+    _ck = loment_cache.key_for(mod, deps, flags={
+        "coverage": coverage,
+        "debug": debug,
+        "lspe_level": getattr(mod, "lspe_level", 0),
+        "lspe_mode": getattr(mod, "lspe_mode", ""),
+        "answers": ";".join(f"{k}={v}" for k, v in
+                            sorted(getattr(mod, "lspe_answers", {}).items())),
+    })
+    if _ck is not None:
+        _hit = loment_cache.get(_ck)
+        if _hit is not None:
+            return _hit
     _gc_alpha_pass(mod, deps)       # L0/L1/L2（`docs/210`）—— **在 prepare 之前**，要跨模块
     mod, deps = prepare(mod, deps)  # M6
     mods = list(deps or []) + [mod]
@@ -13513,7 +13604,10 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     if debug:
         out.append("")
         out += meta
-    return "\n".join(out).rstrip() + "\n"
+    _text = "\n".join(out).rstrip() + "\n"
+    if _ck is not None:
+        loment_cache.put(_ck, _text)
+    return _text
 
 
 # ---------------------------------------------------------------- CLI
@@ -13710,16 +13804,22 @@ def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3,
         # 2026.3 继承（版次累积）。
         _desugar_foreach(mod)
     mod.own_switches = own      # 本模块**自己**写的 —— 只有"库不许 choose"用它
-    # **包清单的 runtime 声明**（`docs/323`）：模块自己没写这一维时，取同包 `pkg.lomp`
-    # 的 `runtime()`。它同时是**根单元的默认档**（店里的模块当根编时照旧编得过）与
-    # **依赖的需求**（根是 `no_runtime` 就报 —— 由 `check()` 那条既有规则发）。
-    # 显式写的 `choose` 优先：`choose_lines` / `own_switches` 都不动它，所以
-    # "这一维写了两次"不会因为清单而误报。
-    if "runtime" not in mod.chooses:
-        _pn, _prt = _pkg_manifest(path)
-        if _prt is not None:
-            mod.chooses["runtime"] = _prt
-            mod.rt_from_pkg = _pn or path.parent.parent.name
+    # **包清单的前置条件**（`docs/324`）：模块自己没写某一维时，取同包 `pkg.lomp`
+    # 的 `choose()`。它同时是**根单元的默认档**（店里的模块当根编时照旧编得过）与
+    # **依赖的需求**（根不满足就报 —— 由 `check()` 那条既有规则发）。
+    # 逐维注入：模块显式写的那一维优先，`choose_lines` / `own_switches` 都不动它，
+    # 所以"这一维写了两次"不会因为清单而误报。
+    mod.pkg_requires = ""
+    _pn, _pwords, _preq = _pkg_manifest(path)
+    if _pwords:
+        for _w in _pwords:
+            _dim = CORE_DIM_OF.get(_w)
+            if _dim is None or _dim in mod.chooses:
+                continue
+            mod.chooses[_dim] = _w
+            if _dim == "runtime":
+                mod.rt_from_pkg = _pn or path.parent.parent.name
+    mod.pkg_requires = _preq
     # `addin` 的行单独记一份 —— 它被抹掉了，而"库里写了 `addin` 却没生效"要能报出来。
     _d = 0
     for _i, _t in enumerate(toks):

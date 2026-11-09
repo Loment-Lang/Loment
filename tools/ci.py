@@ -282,6 +282,8 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "lspe_test", "potato_
                  # 八个领域包的行为判据 (docs/317): math/science/engineering/world/
                  # dev/lowlevel/system/baremetal, 对照物是 Python 与已知常量。
                  "loment_domains_test",
+                 # IR 缓存 (docs/324): 命中/失效/关闭/坏条目四条 —— 缓存错编是最坏的错。
+                 "loment_cache_test",
                  # LibL 的 libc 面 (docs/232): 同一组调用与**真 glibc** 逐字节对跑。
                  # 与 `loment_std_test` 的分界是**对照物**: 那边是 Python, 这边是 libc 自己。
                  "loment_libl_test",
@@ -467,6 +469,8 @@ SHARD_COST = {
     "loment_std_test": 3.1,
     # 2026-11-09: 本机六组探针（每组一次 clang 链接 + 一次 WSL 真跑），约 12s。
     "loment_domains_test": 12.0,
+    # 2026-11-09: 四次小规模 emit（命中/失效/关闭/坏条目），本机实测 1s 内。
+    "loment_cache_test": 1.0,
     "loment_store_twin_test": 261.6,
     "loment_studio_test": 3.0,
     # 2026-10-19（#772）：本机实测 13.2s（建一次 stage1 + 两个编译器各跑一个 21 格的

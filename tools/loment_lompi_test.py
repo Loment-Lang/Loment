@@ -1598,6 +1598,44 @@ def test_package_carries_the_whole_store():
 
 
 @test
+def test_every_package_manifest_matches_its_code():
+    """`pkg.lomp` 的 `choose()` / `requires()` 必须与包里的代码**逐条**对得上（docs/324）。
+
+    清单是包级前置条件：`choose()` 说"这个包依赖哪些核心档"，`requires()` 说"真代码
+    用了哪些构造"。两张表都会漂 —— 所以这条判据把**代码**当唯一真源，清单多写少写
+    都红。检查三件事：
+
+      1. `requires()` 与 `package_features` 的并集逐项相等（排序后比字符串）；
+      2. 有 `rt_sites`（会拖运行期）⇒ `choose()` 里有 `runtime`，反之没有；
+      3. 用了 `free` ⇒ `gc_manual`；用了 `extern fn` ⇒ `hosted`。
+    """
+    store = ROOT / "lompi" / "store"
+    bad: list[str] = []
+    for pkgdir in sorted(p for p in store.glob("*/*") if p.is_dir()):
+        mf = pkgdir / "pkg.lomp"
+        if not mf.is_file():
+            bad.append(f"{pkgdir}: 没有 pkg.lomp")
+            continue
+        _name, words, req = lomentc._manifest_fields(mf.read_text(encoding="utf-8"))
+        mods = [lomentc.load(p) for p in sorted(pkgdir.glob("*.lomt"))]
+        feats = sorted({f for m in mods for f in lomentc.package_features(m)})
+        got = req.split(",") if req else []
+        if got != feats:
+            bad.append(f"{pkgdir.name}: requires()={got} 代码={feats}")
+        elif req and req != ",".join(feats):
+            bad.append(f"{pkgdir.name}: requires() 未排序：{req} != {','.join(feats)}")
+        want_rt = any(m.rt_sites for m in mods)
+        if want_rt != ("runtime" in words):
+            bad.append(f"{pkgdir.name}: runtime 声明 {words} 与代码 rt_sites={want_rt} 不符")
+        if ("free" in feats) != ("gc_manual" in words):
+            bad.append(f"{pkgdir.name}: free 与 gc_manual 不匹配（choose={words}）")
+        if ("extern" in feats) != ("hosted" in words):
+            bad.append(f"{pkgdir.name}: extern 与 hosted 不匹配（choose={words}）")
+    assert not bad, "包清单与代码不一致：\n  " + "\n  ".join(bad)
+    print("      包清单与代码：12 个包的 choose()/requires() 逐条对得上")
+
+
+@test
 def test_release_manifest_covers_every_store_file():
     """发布清单必须**逐条**覆盖随包的 store —— 少一个就是漏发。
 

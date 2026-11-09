@@ -12,6 +12,16 @@ pub fn version() -> str {
 
 /// 这个包对**运行期**的需求（`docs/323`）。编译器读它来判断"`no_runtime` 的根能不能
 /// 用这个包"；模块自己写的 `choose runtime` 优先。取值只有 `runtime` / `no_runtime`。
-pub fn runtime() -> str {
-    return "runtime";
+
+/// 这个包对**程序**的前置条件（`docs/324`）。
+///
+/// `choose()` 列出包里代码依赖的核心档；编译器装载时逐维注入（模块自己写的那一维
+/// 优先），根不满足就**点名这个包**报错。`requires()` 列出包的真代码实际用到的构造，
+/// 判据拿它和代码逐条对，漏写/多写都红。
+pub fn choose() -> str {
+    return "std runtime gc_manual";
+}
+
+pub fn requires() -> str {
+    return "alloc,free,panic,syscall";
 }

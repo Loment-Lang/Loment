@@ -38,7 +38,10 @@ def _present(fid: str, sites: list[dict], facts: dict, ledger: dict,
     elif fid == "drop_honest":
         out = [s["id"] for s in sites if s["kind"] == "drop"]
     elif fid == "revocable":
-        out = [f"revocable:{i}" for i in range(int(facts.get("revocable", 0)))]
+        # E9 起以**站点**为准（`docs/262` §7.2）：词法计数只是旧产物的兜底。
+        out = [s["id"] for s in sites if s["kind"] == "revoke"]
+        if not out:
+            out = [f"revocable:{i}" for i in range(int(facts.get("revocable", 0)))]
     elif fid == "extern":
         out = [f"extern:{i}" for i in range(int(facts.get("extern", 0)))]
     elif fid == "no_runtime":
@@ -46,7 +49,10 @@ def _present(fid: str, sites: list[dict], facts: dict, ledger: dict,
     elif fid == "gc_manual":
         out = [f"alloc:{i}" for i in range(int(facts.get("allocs", 0)))]
     elif fid == "nonliteral_guard":
-        out = [f"guard:{i}" for i in range(int(facts.get("nonliteral_guard", 0)))]
+        out = [s["id"] for s in sites if s["kind"] == "domain_access"
+               and s.get("evidence") in (None, "none")]
+        if not out:
+            out = [f"guard:{i}" for i in range(int(facts.get("nonliteral_guard", 0)))]
     elif fid == "defer":
         out = [f"deferred:{d['site']}" for d in (previous or {}).get("deferred", [])]
     elif fid == "expired":

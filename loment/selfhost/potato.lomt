@@ -1598,12 +1598,16 @@ const PT_PTRFIRST: u32 = 151264;
 const PT_L3CNT: u32 = 155364;
 /// `lspe pass` 的块表：`[count, open, close, sites, pad] × 64`（每块 16 字节）。
 const PT_PASS: u32 = 155428;
+/// E9 域检查器（`docs/306`–`308`）：声明表 `[name_tok, lo, hi, flags] × 64`
+/// + 五个计数 `[域总数, 字面量 guard, 循环 guard, guard 总数, 撤销域数]`。
+const PT_DOMTAB: u32 = 156452;
+const PT_DOMCNT: u32 = 157476;
 const PT_TN: u32 = 46760;          // 收进池子的类型串条数（= 映射表条数）
 const PT_TCUR: u32 = 46764;        // 池子游标
 const PT_TMAX: u32 = 128;
 const PT_TSTRIDE: u32 = 64;
 const PT_TBUF_SZ: u32 = 256;
-const PT_SC_BYTES: u64 = 156452;    // 安全名表 + 首参表 + E3/E4/bounds 计数 + pass 块表
+const PT_SC_BYTES: u64 = 157496;    // 安全名表 + 首参表 + E3/E4/bounds 计数 + pass 块表 + E9 域表
 
 /// 一个类型串在池子里的位置（`i` 是池子下标）。
 fn pt_tkey(sc: ptr, i: u32) -> u32 {
@@ -2509,6 +2513,14 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
     // v2（0.1.5.2）：析构器（`#747`）与替换后的良构（`#745`）。
     let drop_n: u32 = 0;
     let wf_n: u32 = 0;
+    // E9 域检查器（`docs/306`–`308`）。
+    let dtot: u32 = 0;
+    let dlit: u32 = 0;
+    let dloop: u32 = 0;
+    let dacc: u32 = 0;
+    let drev: u32 = 0;
+    let ddom_prov: u32 = 0;
+    let dloop_prov: u32 = 0;
     let di: u32 = 0;
     let b3: u32 = 0;
     let fnd: u32 = 0;
@@ -2539,6 +2551,11 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
         // 只能减"被覆盖**且本来能证**"的那些（`#1080`）：减全部会把非字面量
         // 覆盖站点算成负贡献，无符号回绕。
         icovp = lspe_index_covered_proved(unit, t, lo, hi, ptr_add(sc, PT_PASS), lvl);
+        dtot = load32(sc, PT_DOMCNT + 0);
+        dlit = load32(sc, PT_DOMCNT + 4);
+        dloop = load32(sc, PT_DOMCNT + 8);
+        dacc = load32(sc, PT_DOMCNT + 12);
+        drev = load32(sc, PT_DOMCNT + 16);
         bt = load32(sc, PT_L3CNT + 56);
         bcov = load32(sc, PT_L3CNT + 60);
         // ---- 析构器（`#747`）：`impl Drop for T { … fn drop` 一个一条 ----
@@ -2596,17 +2613,26 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
         // 单态化实例 = 一次替换 ⇒ 一条 `TypeWellFormed`（`#745`）。
         wf_n = wfn;
     }
-    let nsite: u32 = gt + it + ft + alt + nt + et + ct + bt + drop_n + wf_n;
+    // 域声明用 `Typed`（L0 不认）；字面量 guard 是 `Syntactic`；循环归纳从 L3 起。
+    ddom_prov = dtot * g_ok;
+    dloop_prov = 0;
+    if lvl >= 3 {
+        dloop_prov = dloop;
+    }
+    let nsite: u32 = gt + it + ft + alt + nt + et + ct + bt + drop_n + wf_n
+                     + dtot + dacc + drev;
     store32(sp, 0, nsite);
     // WF 的证据是 `Typed`：L0 不认（`docs/262` §5.6）；DropHonest 是 `Assumed`，恒认。
     wf_prov = wf_n * g_ok;
     // pass 块里的站点不证明：guard / index / bounds 的 proved 要扣掉覆盖数。
     let nproved: u32 = (gt - gcov) * g_ok + (ip - icovp)
                        + (fp + alp + np + ep) * g_ok + cp * c_ok
-                       + (bt - bcov) + drop_n + wf_prov;
+                       + (bt - bcov) + drop_n + wf_prov
+                       + ddom_prov + dlit + dloop_prov + drev;
     let nund: u32 = nsite - nproved;
-    // 默认档下每条没被 pass 覆盖的 UNDECIDED 都有一条 Assumed 地板（`docs/262` §6）。
-    let assumed: u32 = nund - passed;
+    // 默认档下每条没被 pass 覆盖的 UNDECIDED 都有一条 Assumed 地板（`docs/262` §6）；
+    // `revocable` 域是**设计上**的假设（`docs/146` §3），也进这一格。
+    let assumed: u32 = nund - passed + drev;
     o = pt_str(out, o, "{\n");
     o = pt_key(out, o, 2, "state");
     o = pt_lspe_state(out, o, unit, t, lo, hi);
@@ -2620,6 +2646,14 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
     o = pt_str(out, o, ",\n");
     o = pt_key(out, o, 2, "mode");
     o = pt_qs(out, o, "full");
+    o = pt_str(out, o, ",\n");
+    // AI 检查器（`choose lspe_aicheck_true`）：**开没开**，与 open/close 正交。
+    o = pt_key(out, o, 2, "aicheck");
+    if lspe_aicheck(unit, t, lo, hi) == 1 {
+        o = pt_bool(out, o, 1);
+    } else {
+        o = pt_bool(out, o, 0);
+    }
     o = pt_str(out, o, ",\n");
     o = pt_key(out, o, 2, "level");
     o = pt_dec(out, o, lvl as u64);
@@ -2685,6 +2719,18 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
             o = pt_str(out, o, "\"");
             first = 0;
         }
+        if drev > 0 {
+            if first == 0 {
+                o = pt_str(out, o, ",\n");
+            }
+            o = pt_key(out, o, 3, "CapabilityLive");
+            o = pt_str(out, o, "\"");
+            o = pt_dec(out, o, drev as u64);
+            o = pt_str(out, o, "/");
+            o = pt_dec(out, o, drev as u64);
+            o = pt_str(out, o, "\"");
+            first = 0;
+        }
         if drop_n > 0 {
             if first == 0 {
                 o = pt_str(out, o, ",\n");
@@ -2746,6 +2792,18 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
             o = pt_dec(out, o, (ip - icovp + bt - bcov) as u64);
             o = pt_str(out, o, "/");
             o = pt_dec(out, o, (it + bt) as u64);
+            o = pt_str(out, o, "\"");
+            first = 0;
+        }
+        if dtot + dacc > 0 {
+            if first == 0 {
+                o = pt_str(out, o, ",\n");
+            }
+            o = pt_key(out, o, 3, "InDomain");
+            o = pt_str(out, o, "\"");
+            o = pt_dec(out, o, (ddom_prov + dlit + dloop_prov) as u64);
+            o = pt_str(out, o, "/");
+            o = pt_dec(out, o, (dtot + dacc) as u64);
             o = pt_str(out, o, "\"");
             first = 0;
         }
@@ -6122,6 +6180,11 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr,
     }
     if lrc == 2 {
         return pt_wfail("--emit-potato: more `lspe pass` blocks than this section takes (64)");
+    }
+    // E9 域检查器（`docs/306`–`308`）：同样**在写对象之前**跑完，超容量点名失败。
+    if lspe_domain(unit, t, lo, hi, ptr_add(sc, PT_DOMTAB),
+                   ptr_add(sc, PT_DOMCNT)) == 1 {
+        return pt_wfail("--emit-potato: more domain declarations than this section takes (64)");
     }
     store32(sc, PT_N, 0);
     store32(sc, PT_PC, 0);

@@ -1239,6 +1239,12 @@ def test_check_detects_staleness() -> None:
           loment_dist._git("rev-parse", "--short", "HEAD") in ver, ver.strip())
 
 
+#: **只给本仓开发者、不随语言包发**的 skill 目录。`loment-dev` 讲的是这个开发仓的
+#: 提交流程（分支/PR/种子），装给终端用户只会是噪声；它与 `SKILL_SUITE` 是两件事，
+#: 所以在这里显式列名，而不是塞进套件让 `loment_dist` 发出去。
+DEV_ONLY_SKILLS = frozenset({"loment-dev"})
+
+
 def test_skill_suite_members() -> None:
     """The suite table, the directories on disk and each frontmatter `name` agree.
 
@@ -1250,8 +1256,10 @@ def test_skill_suite_members() -> None:
     disk = {p.name for p in (ROOT / ".claude/skills").glob("loment-*")
             if (p / "SKILL.md").exists()}
     listed = {n for n, _ in loment_dist.SKILL_SUITE if n != "loment"}
-    check("套件的 loment-* 目录 == SKILL_SUITE 清单", disk == listed,
-          f"盘上多 {sorted(disk - listed)}, 清单多 {sorted(listed - disk)}")
+    check("套件的 loment-* 目录 == SKILL_SUITE 清单",
+          disk - DEV_ONLY_SKILLS == listed,
+          f"盘上多 {sorted((disk - DEV_ONLY_SKILLS) - listed)}, "
+          f"清单多 {sorted(listed - (disk - DEV_ONLY_SKILLS))}")
     for name, rel in loment_dist.SKILL_SUITE:
         f = ROOT / rel
         check(f"{name}: 文件在", f.exists(), str(f))

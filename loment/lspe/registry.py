@@ -85,6 +85,8 @@ LSPE_SITE_KINDS = frozenset({
     "drop", "wf",
     # E9 域检查器：域声明 / 守卫的包含性 / 撤销。
     "domain", "domain_access", "revoke",
+    # E10 借用检查器（`docs/317`）：loan 是一等对象。站点先只进报告面。
+    "loan", "loan_use", "loan_kill", "loan_conflict",
 })
 
 #: **问题码**（`docs/262` §5.10）。与 `E034–E038` 是两个命名空间：问题**永不阻断**
@@ -108,6 +110,10 @@ LSPE_QUESTIONS: dict[str, str] = {
     # AI 检查器（`choose lspe_aicheck_true`，`docs/262` §10.7）：AI 是问题源，
     # 不是证据源 —— 它的输出只有这一种，永远不进求解器。
     "Q014": "AI 提出的怀疑（不是证据）",
+    # E10 借用检查器（`docs/317` §5.4）：三种"证不出来"的形状。
+    "Q015": "条件返回的借用来源不唯一",
+    "Q016": "两阶段借用（保留 / 激活）无法证明",
+    "Q017": "借用要跨迭代活着",
 }
 
 #: 反问器转交前**必须**跑过的三问（`docs/262` §6 硬规则 5）。
@@ -312,7 +318,43 @@ LSPE_QUESTION_TEMPLATES: dict[str, dict[str, object]] = {
         "default": "B",
         "reversible": True,
     },
-}
+
+    "Q015": {
+        "claim": "「{site}」返回的借用来自多个入参，无法唯一归因",
+        "chain": ["NotDangling({kind})", "loan:{place}"],
+        "tried": {"provenance": "流敏感存活算出两个以上来源",
+                  "falsification": "没有 `&a T` 标记可唯一归因",
+                  "cross_exam": "两侧都算不出唯一来源"},
+        "options": {"A": "在签名里写 `&a T` 指定来源（成本：一个参数名）",
+                    "B": "接受这次放行并标注（成本：一条 Assumed 地板）",
+                    "C": "让 LSPE 拒绝（strict 下构建停止）"},
+        "default": "B",
+        "reversible": True,
+    },
+    "Q016": {
+        "claim": "「{site}」的方法调用需要两阶段借用，但保留/激活无法证明",
+        "chain": ["Exclusive({kind})", "loan:{place}"],
+        "tried": {"provenance": "autoref 形状不完整",
+                  "falsification": "没有冲突点的构造性证据",
+                  "cross_exam": "两侧都证不出保留期"},
+        "options": {"A": "拆成两条语句，让保留期显式",
+                    "B": "按两阶段收下并标注（成本：一条 Assumed 地板）",
+                    "C": "让 LSPE 拒绝"},
+        "default": "B",
+        "reversible": True,
+    },
+    "Q017": {
+        "claim": "「{site}」的借用要跨迭代活着，归纳形状不认",
+        "chain": ["Alive({kind})", "loan:{place}"],
+        "tried": {"provenance": "循环归纳只认裸循环变量的无符号形状",
+                  "falsification": "跨迭代使用是构造性反例",
+                  "cross_exam": "两侧都认不出归纳"},
+        "options": {"A": "把借用改成每次迭代新建",
+                    "B": "接受并标注（成本：一条 Assumed 地板）",
+                    "C": "让 LSPE 拒绝"},
+        "default": "C",
+        "reversible": False,
+    },}
 
 #: LSPC 的 **12 个风险族**（`docs/262` §7.2）。每族五列：
 #: `protects`（你现在靠什么）/ `if_fails`（如果不成立）/ `fix`（修法）/
@@ -375,6 +417,22 @@ LSPE_LSPC_FAMILIES: tuple[dict[str, object], ...] = (
      "if_fails": "跨库假设错", "fix": "开 L4 / 读库源",
      "cost": "归你", "bearer": "归你", "risk": "medium",
      "match": "cross_unit"},
+    {"id": "loan_conditional", "family": "条件返回的借用来源",
+     "protects": "Q015 的接受", "if_fails": "来源错认 ⇒ 悬垂",
+     "fix": "写 `&a T` 或标注", "cost": "归你", "bearer": "归你",
+     "risk": "medium", "match": "loan_conditional"},
+    {"id": "loan_two_phase", "family": "方法调用的两阶段借用",
+     "protects": "Q016 的接受", "if_fails": "保守拒（不 UB）",
+     "fix": "拆语句", "cost": "归你", "bearer": "归你",
+     "risk": "low", "match": "loan_two_phase"},
+    {"id": "loan_loop", "family": "循环携带的借用",
+     "protects": "Q017 的拒", "if_fails": "悬垂 / 借用逃逸",
+     "fix": "每次迭代新建", "cost": "归你", "bearer": "归你",
+     "risk": "high", "match": "loan_loop"},
+    {"id": "loan_escape", "family": "跨单元借用摘要（L4 未开）",
+     "protects": "库函数返回的 loan", "if_fails": "跨库假设错",
+     "fix": "开 L4 / 读库源", "cost": "归你", "bearer": "归你",
+     "risk": "high", "match": "loan_escape"},
     {"id": "audit_off", "family": "lspe_close_admin / --lspc=off 本身",
      "protects": "你选择了不审计",
      "if_fails": "上面全部看不见", "fix": "打开",

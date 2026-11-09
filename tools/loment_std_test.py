@@ -509,6 +509,239 @@ def test_std_modules_are_checkable():
     print(f"      {len(libs)} 个 std 模块都过检查: {[p.stem for p in libs]}")
 
 
+# ---------------------------------------------------------------- 2026-11-08 新增的八份
+#
+# 与上面那份同一个形状：**Python 算同一串结果**，逐字节比。覆盖的是
+# `docs/314` 补的八份：pack / uuid / sha3 / blake2 / gzip / tar / jsonw / regex。
+
+NEW_PROBE = r'''
+module newstdprobe
+choose runtime
+
+use pack
+use uuid
+use sha3
+use blake2
+use gzip
+use tar
+use jsonw
+use regex
+use stdlib
+use stdio
+use string
+use hex
+
+fn say(tag: str, v: u64) {
+    let _a: u32 = print(tag);
+    let _b: u32 = print_num(v);
+    let _c: u32 = print("\n");
+}
+
+fn say_hex(tag: str, p: ptr, n: u32, hx: ptr) {
+    let _a: u32 = print(tag);
+    let m: u32 = hex_encode(hx, 0, p, 0, n);
+    let _b: i64 = syscall4(1, 1, hx as u64, m as u64);
+    let _c: u32 = print("\n");
+}
+
+fn _start() {
+    let vals: ptr = alloc(64);
+    let buf: ptr = alloc(64);
+    let out: ptr = alloc(64);
+    let hx: ptr = alloc(512);
+    let t: ptr = alloc(64);
+
+    // pack
+    mem_store64(vals, 0, 305419896);
+    mem_store64(vals, 8, 4660);
+    say("p_size=", pk_size(">IHH") as u64);
+    let pn: u32 = pk_pack(">IH", vals, 2, buf, 64);
+    let pi: u32 = pk_unpack(">IH", buf, pn, out, 8);
+    say("p_items=", pi as u64);
+    say("p_v0=", mem_load64(out, 0));
+    say("p_v1=", mem_load64(out, 8));
+    mem_store64(vals, 0, 4294967295);
+    let mn: u32 = pk_pack("<b", vals, 1, buf, 64);
+    let _mi: u32 = pk_unpack("<b", buf, mn, out, 8);
+    say("p_neg=", mem_load64(out, 0) & 255);
+
+    // uuid
+    let rnd: ptr = alloc(32);
+    let u: ptr = alloc(16);
+    let i: u32 = 0;
+    while i < 32 { store8(rnd, i, (i * 7 + 1) as u8); i = i + 1; }
+    let _v4: u32 = uuid_v4(u, rnd, 32);
+    say("u_ver=", uuid_version(u) as u64);
+    say("u_var=", uuid_variant(u) as u64);
+    say("u_fmt=", uuid_format(t, u) as u64);
+    say("u_parse=", uuid_parse(u, "03142536-4758-697a-8b9c-adbecfe0f102") as u64);
+    say("u_p0=", load8(u, 0) as u64);
+
+    // sha3
+    let d: ptr = alloc(64);
+    let z: ptr = alloc(1);
+    let ctx: ptr = alloc(600);
+    let s3: u32 = sha3_256(z, 0, d, ctx);
+    say_hex("s256=", d, s3, hx);
+    let abc: str = "abc";
+    let s5: u32 = sha3_512(str_ptr(abc), 3, d, ctx);
+    say_hex("s512abc=", d, s5, hx);
+
+    // blake2
+    let cb: ptr = alloc(400);
+    let b6: u32 = blake2b(d, 0, out, 64, cb);
+    say_hex("b2b=", out, b6, hx);
+    let cs: ptr = alloc(200);
+    let b8: u32 = blake2s(str_ptr(abc), 3, out, 32, cs);
+    say_hex("b2s=", out, b8, hx);
+
+    // gzip 往返
+    let src: ptr = alloc(64);
+    let gz: ptr = alloc(256);
+    let dec: ptr = alloc(64);
+    let olen: ptr = alloc(4);
+    let used: ptr = alloc(4);
+    let hello: str = "hello hello hello hello";
+    mem_copy(src, 0, str_ptr(hello), 0, 23);
+    let gn: u32 = gz_deflate(src, 23, gz, 256, 0);
+    let _gr: u32 = gz_inflate(gz, gn, dec, 64, olen, used);
+    let same: u32 = 0;
+    if mem_eq(src, 0, dec, 0, 23) { same = 1; }
+    say("gz_ok=", same as u64);
+    say("gz_len=", mem_load32(olen, 0) as u64);
+
+    // tar
+    let hdr: ptr = alloc(512);
+    let _tw: u32 = tar_write_header(hdr, "dir/hello.txt", 5, 420, TAR_REG, 1700000000);
+    say("t_chk=", tar_checksum_ok(hdr) as u64);
+    say("t_size=", tar_size(hdr));
+    say("t_name=", tar_name(hdr, t, 64) as u64);
+
+    // jsonw
+    let jc: ptr = alloc(4416);
+    let jb: ptr = alloc(512);
+    jw_init(jc, jb, 512);
+    jw_obj(jc);
+    jw_key(jc, "a"); jw_u64(jc, 7);
+    jw_key(jc, "b"); jw_str(jc, "x\"y");
+    jw_key(jc, "c"); jw_arr(jc); jw_bool(jc, 1); jw_null(jc); jw_end(jc);
+    jw_key(jc, "d"); jw_i64(jc, 0 as i64 - 5);
+    jw_end(jc);
+    let jn: u32 = jw_len(jc);
+    say_hex("j_hex=", jb, jn, hx);
+
+    // regex
+    let rc: ptr = alloc(re_ctx_bytes());
+    let r1: u32 = 0;
+    if re_match("[a-c]+", "abcabc", rc) { r1 = 1; }
+    let r2: u32 = 1;
+    if re_match("[a-c]+", "abcd", rc) { r2 = 0; }
+    let r3: u32 = 0;
+    if re_match("(ab|cd)+", "abcdab", rc) { r3 = 1; }
+    let r4: i64 = re_search("hello", "xx hello yy", rc);
+    let r5: u32 = 0;
+    if re_match("\\w+@\\w+\\.\\w+", "a@b.c", rc) { r5 = 1; }
+    let r6: u32 = 0;
+    if re_match("a{2,4}", "aaa", rc) { r6 = 1; }
+    say("r1=", r1 as u64);
+    say("r2=", r2 as u64);
+    say("r3=", r3 as u64);
+    say("r4=", r4 as u64);
+    say("r5=", r5 as u64);
+    say("r6=", r6 as u64);
+
+    // strtod / atof（LibL 的指针形状）与 printf 的浮点
+    let cbuf: ptr = alloc(64);
+    let endp: ptr = alloc(8);
+    let target: ptr = cstr_of(cbuf, "123.45xyz");
+    let sd: u64 = strtod(target, endp);
+    mem_store64(out, 0, sd);
+    say_hex("st=", out, 8, hx);
+    say("st_end=", (mem_load64(endp, 0) - (target as u64)));
+    let fmtb: ptr = alloc(64);
+    let ob: ptr = alloc(256);
+    let args: ptr = alloc(16);
+    mem_store64(args, 0, 0x40091eb851eb851f);
+    let ff: ptr = cstr_of(fmtb, "%.2f");
+    let fn: u32 = snprintf(ob, 256, ff, args, 1);
+    say_hex("pf=", ob, fn, hx);
+    syscall4(60, 0, 0, 0);
+}
+'''
+
+
+def _new_expected() -> str:
+    import hashlib
+    import json
+
+    out = io.StringIO()
+
+    def say(tag, v):
+        out.write(f"{tag}{v}\n")
+
+    say("p_size=", 8)
+    say("p_items=", 2)
+    say("p_v0=", 305419896)
+    say("p_v1=", 4660)
+    say("p_neg=", 255)
+    say("u_ver=", 4)
+    say("u_var=", 1)
+    say("u_fmt=", 36)
+    say("u_parse=", 16)
+    say("u_p0=", 3)
+    say("s256=", hashlib.sha3_256(b"").hexdigest())
+    say("s512abc=", hashlib.sha3_512(b"abc").hexdigest())
+    say("b2b=", hashlib.blake2b(b"").hexdigest())
+    say("b2s=", hashlib.blake2s(b"abc").hexdigest())
+    say("gz_ok=", 1)
+    say("gz_len=", 23)
+    say("t_chk=", 1)
+    say("t_size=", 5)
+    say("t_name=", 13)
+    say("j_hex=", json.dumps({"a": 7, "b": 'x"y', "c": [True, None], "d": -5},
+                            separators=(",", ":")).encode().hex())
+    say("r1=", 1)
+    say("r2=", 1)
+    say("r3=", 1)
+    say("r4=", 3)
+    say("r5=", 1)
+    say("r6=", 1)
+    import struct as _s
+    say("st=", _s.pack("<d", 123.45).hex())
+    say("st_end=", 6)
+    say("pf=", b"3.14".hex())
+    return out.getvalue()
+
+
+@test
+def test_new_stdlib_modules_match_python():
+    """2026-11-08 新增的八份：Loment 算的与 Python 算的**逐字节相同**。"""
+    if not (J._clang() and J._wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    probe = ROOT / "loment" / "build" / "newstd_probe.lomt"
+    probe.parent.mkdir(parents=True, exist_ok=True)
+    with probe.open("w", encoding="utf-8", newline="\n") as f:
+        f.write(NEW_PROBE)
+    try:
+        with tempfile.TemporaryDirectory() as t:
+            td = Path(t)
+            elf = J._compile(probe, td, "newstd_probe")
+            got = J._run(elf, td)
+    finally:
+        probe.unlink(missing_ok=True)
+    want = _new_expected()
+    if got != want:
+        g, w = got.splitlines(), want.splitlines()
+        first = next((i for i in range(max(len(g), len(w)))
+                      if (g[i] if i < len(g) else None) != (w[i] if i < len(w) else None)), None)
+        raise AssertionError(
+            f"新库结果与 Python 不一致 @ 第 {first} 行: "
+            f"Loment={g[first] if first is not None and first < len(g) else '<无>'!r} "
+            f"Python={w[first] if first is not None and first < len(w) else '<无>'!r}")
+    print(f"      新库 8 模块：{len(want.splitlines())} 项与 Python 逐字节一致")
+
+
 def main(argv: list[str] | None = None) -> int:
     return loment_suite.run(TESTS, "loment_std_test", only=(argv[0] if argv else None))
 

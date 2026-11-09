@@ -5,7 +5,7 @@
 // 且 `module std`。它自己不做任何事 —— 作用是把包内全部模块拉进**同一个单元**,
 // 于是 `pub` 的东西对消费方可见 (平名字空间, 前缀是各模块自己的纪律)。
 //
-// 包内 127 个模块, **全部是可移植的**: 一个 syscall 都不发 (numfmt 在最底下)。
+// 包内 140 个模块, **全部是可移植的**: 一个 syscall 都不发 (numfmt 在最底下)。
 // 宿主侧 (syscall/fd/argv/目录/stat/日志) 在另一个包 host 里, 依赖方向单向:
 //     host -> std -> numfmt
 // 所以裸机/无宿主的消费者只依赖 std, 不会把 getdents64 之类的东西拖进来。
@@ -16,13 +16,13 @@
 // `use numfmt` 都是一条 use 就够 (解析这一层见 `lomentc.resolve_name`;
 // 加它之前包内模块只有门面这一个入口, 所以下面那段"按需 use 要写路径形式"已经过时)。
 //
-// **门面为什么不要用**: 它把 127 个模块拼进**同一个单元**, 而单元的发射符号是**平的**
+// **门面为什么不要用**: 它把 140 个模块拼进**同一个单元**, 而单元的发射符号是**平的**
 // (顶层名字在单元内唯一, 不做 mangling) —— 于是包内任何两个模块的同名顶层声明都是硬错。
-// 代价不止于此: 编译时间按模块数**超线性**涨 (自举编译器实测 n=64 已 187 秒, 127 个模块
+// 代价不止于此: 编译时间按模块数**超线性**涨 (自举编译器实测 n=64 已 187 秒, 140 个模块
 // 是几十分钟量级)。门面留着是给"我确实全都要"用的, 也是**平名字唯一性**那条判据的语料
 // (`lomentc_test::test_std_package_is_one_unit_without_name_collisions`)。
 //
-// 顺带纠两处旧注解: 这个文件的 use 是 **127 条不是 61 条**, 包内是 **127 个模块不是 76 个**;
+// 顺带纠两处旧注解: 这个文件的 use 是 **140 条不是 61 条**, 包内是 **140 个模块不是 76 个**;
 // 而"打包版编译器单文件最多 8 条 use、菱形导入会崩"**早已不成立** —— 两个实现的
 // `MAX_USE` 都是 300 且都做去重, 那句里的 `8` 是依赖**嵌套深度** (`MAXDEPTH`, 另一回事)。
 //
@@ -133,6 +133,8 @@ use "sha256.lomt"
 use "sha512.lomt"
 use "hmac.lomt"
 use "kdf.lomt"
+use "sha3.lomt"
+use "blake2.lomt"
 
 // 整数上的数学 (math 是整数版; 浮点版是上面的 mathf)
 use "math.lomt"
@@ -150,6 +152,9 @@ use "toml.lomt"
 use "mpk.lomt"
 use "cbor.lomt"
 use "asn1.lomt"
+use "pack.lomt"
+use "jsonw.lomt"
+use "uuid.lomt"
 
 // 补齐: 上面那几段是按主题手写的, 这一段是全量核对后补上的漏项。
 // (清单以**目录里的实际文件**为准, 由 tools/ 的核对脚本生成。)
@@ -204,3 +209,6 @@ use "unionfind.lomt"
 use "width.lomt"
 use "wrap.lomt"
 use "zlibc.lomt"
+use "gzip.lomt"
+use "tar.lomt"
+use "regex.lomt"

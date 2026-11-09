@@ -397,6 +397,13 @@ fn parse_expr(src: ptr, t: ptr, i: u32, out: ptr, o: u32, minp: u32) -> u64 {
 }
 
 fn parse_unary(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
+    // `*r` 解引用（`docs/299` §3.8）。**只在操作数开头**认它 —— 二元乘法由
+    // `parse_expr` 的优先级环处理，到不了这里。
+    if tok_is(src, t, i, "*") {
+        o = puts(out, o, "(un * ");
+        let r0: u64 = parse_unary(src, t, i + 1, out, o);
+        return pack(unpk_i(r0), puts(out, unpk_o(r0), ")"));
+    }
     if tok_is(src, t, i, "!") {
         o = puts(out, o, "(un ! ");
         let r: u64 = parse_unary(src, t, i + 1, out, o);
@@ -832,6 +839,60 @@ fn parse_stmt(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
 /// `mut [X]` / `[X; N]` / `[X]` / `Name<A, B>`。原先只吃单个 token, 于是
 /// `mut [u32]`、`[u32; 4]` 被拆成"多个形参"、`Pair<u32>` 被截断 (实测 native_mut/native_slice)。
 fn put_type(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
+    // 借用 `&T` / `&mut T` / `&a T`（`docs/299`）。与 `lomentc.type_name` 同口径：
+    // **切片借用规范化**（`&[T]` -> `[T]`、`&mut [T]` -> `mut [T]`），区域标记照写。
+    if tok_is(src, t, i, "&") {
+        let j: u32 = i + 1;
+        let mf: u32 = 0;
+        if tok_is(src, t, j, "mut") {
+            mf = 1;
+            j = j + 1;
+        }
+        let rg: u32 = 0;
+        if tok_kind(t, j) == 0 && (tok_kind(t, j + 1) == 0 || tok_is(src, t, j + 1, "[")) {
+            rg = 1;
+            j = j + 1;
+        }
+        // `[T]` 还是 `[T; N]`：找这个 `[` 的配对 `]`，深度 0 上有没有 `;`。
+        let sep: u32 = 0;
+        if tok_is(src, t, j, "[") {
+            let c: u32 = j + 1;
+            let d: u32 = 0;
+            let done: u32 = 0;
+            while tok_kind(t, c) != 4 && done == 0 {
+                if tok_is(src, t, c, "[") {
+                    d = d + 1;
+                } else if tok_is(src, t, c, "]") {
+                    if d == 0 {
+                        done = 1;
+                    } else {
+                        d = d - 1;
+                    }
+                } else if tok_is(src, t, c, ";") && d == 0 {
+                    sep = 1;
+                }
+                if done == 0 {
+                    c = c + 1;
+                }
+            }
+        }
+        if sep == 0 && tok_is(src, t, j, "[") {
+            // 切片借用 -> 规范化成切片本身
+            if mf == 1 {
+                o = puts(out, o, "mut ");
+            }
+            return put_type(src, t, j, out, o);
+        }
+        o = puts(out, o, "&");
+        if mf == 1 {
+            o = puts(out, o, "mut ");
+        }
+        if rg == 1 {
+            o = put_tok(out, o, src, t, j - 1);
+            o = puts(out, o, " ");
+        }
+        return put_type(src, t, j, out, o);
+    }
     if tok_is(src, t, i, "mut") && tok_is(src, t, i + 1, "[") {
         o = puts(out, o, "mut [");
         let r: u64 = put_type(src, t, i + 2, out, o);

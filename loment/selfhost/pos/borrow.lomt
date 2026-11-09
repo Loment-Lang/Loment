@@ -1,0 +1,53 @@
+module pos_borrow
+
+// `docs/299`：一个**合法**的借用程序 —— 游标视图（`&V` 读字段）、写穿（`&mut V` 写字段）、
+// 借用返回（`&[u32]` 规范化回切片）、`*r` 解引用、结构体里的借用字段。
+// 自举检查器对它必须零诊断（`test_m81_loment_checker_matches_python` 的正例）。
+struct V {
+    a: u32,
+    b: u32,
+}
+
+struct Holder {
+    cur: &u32,
+    tag: u32,
+}
+
+fn get_a(v: &V) -> u32 {
+    return v.a;
+}
+
+fn set_b(v: &mut V, x: u32) {
+    v.b = x;
+}
+
+fn tail(xs: &[u32]) -> [u32] {
+    return xs;
+}
+
+fn peek(p: &u32) -> u32 {
+    return *p;
+}
+
+fn bump(p: &mut u32) {
+    *p = *p + 1;
+}
+
+fn main() -> u32 {
+    let v: V = V { a: 1, b: 2 };
+    let r: &V = &v;
+    let first: u32 = get_a(r);
+    let w: V = V { a: 5, b: 6 };
+    let m: &mut V = &mut w;
+    set_b(m, 9);
+    let xs: [u32; 2] = [3, 4];
+    let s: [u32] = tail(&xs);
+    let n: u32 = 7;
+    let pn: &u32 = &n;
+    let q: u32 = peek(pn);
+    let mutn: u32 = 0;
+    let pm: &mut u32 = &mut mutn;
+    bump(pm);
+    let h: Holder = Holder { cur: &q, tag: q };
+    return first + w.b + s[0] + mutn + h.tag;
+}

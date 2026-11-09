@@ -68,9 +68,9 @@ const E_AS: u32 = 17;      // E017 `as` 转换非法
 const E_SLICE: u32 = 11;   // E011 只读切片不能写 / 形参要求可变切片
 const E_PATTERN: u32 = 8;  // E008 match/变体用法非法
 const E_BORROW: u32 = 7;   // E007 借用冲突 (同一变量既借又可变借 / 可变借两次)
-// E041（`docs/299`，用户 2026-11-08）：生命周期/区域。v1 的**自举侧边界**是
-// "点名拒"：借用类型 `&T` 与 `*` 解引用只有参考实现收（`docs/299` §6 的实现顺序）。
-// 宁拒勿猜 —— 发一条专属码，而不是让它掉进"未知类型"或解析错。
+// E041（`docs/299`，用户 2026-11-08）：生命周期/区域。自举侧已经**实现**这条判据
+// （`chk_life`）：区域标记写错、无引用形参却返回借用、`free` 时仍被借。码值取自
+// `loment_diag.RULES`，与参考实现同一条 —— `loment_rule_parity` 的五条借用探针钉着它。
 const E_LIFETIME: u32 = 41;
 const E_Q: u32 = 10;       // E010 `?` 误用
 const E_MOVE: u32 = 6;     // E006 移动后使用
@@ -256,6 +256,29 @@ fn chk_common_ty(a: u32, b: u32) -> u32 {
 // "未知就报"又会让任何我算不出类型的数组变成假阳性。见 docs/150 下一段那节。
 const TY_ARRAY: u32 = 3;
 const TY_SLICE: u32 = 4;
+// 借用 `&T` / `&mut T`（`docs/299`）：分量 a = 被借类型, b = 1 表示 `&mut`。
+// 区域标记（`&a T`）**不进类型** —— 它只影响函数摘要，参考实现的 `_type_compat` 也是
+// "区域标记不参与比较"。切片借用 `&[T]` 在 `chk_ty_range` 里规范化成 TY_SLICE。
+const TY_REF: u32 = 5;
+
+fn chk_ty_ref(t: ptr, elem: u32, mut: u32) -> u32 {
+    return chk_ty_new(t, TY_REF, elem, mut);
+}
+
+fn chk_ty_is_ref(v: u32) -> u32 {
+    if v != 0 && chk_ty_kind(v) == TY_REF {
+        return 1;
+    }
+    return 0;
+}
+
+/// 自动解一层借用（`r.field` / `r[i]` 用）；非借用原样返回。
+fn chk_ty_deref(t: ptr, v: u32) -> u32 {
+    if chk_ty_is_ref(v) == 1 {
+        return chk_ty_a(t, v);
+    }
+    return v;
+}
 
 fn chk_ty_new(t: ptr, kind: u32, a: u32, b: u32) -> u32 {
     let n: u32 = load32(t, 0);
@@ -311,7 +334,7 @@ fn chk_ty_eq(t: ptr, a: u32, b: u32) -> u32 {
         return 0;
     }
     let k: u32 = chk_ty_kind(a);
-    if k == TY_ARRAY || k == TY_SLICE {
+    if k == TY_ARRAY || k == TY_SLICE || k == TY_REF {
         // bool 不能参与算术 (`x * (a == b)` 会被 clang 拒: i32 * i1), 所以拆成 if
         if chk_ty_b(t, a) != chk_ty_b(t, b) {
             return 0;
@@ -330,6 +353,28 @@ fn chk_ty_range(src: ptr, t: ptr, s: ptr, n: u32, tyt: ptr, lo: u32, hi: u32) ->
     }
     let mut: u32 = 0;
     let i: u32 = lo;
+    // 借用 `&T` / `&mut T` / `&a T`（`docs/299`）。切片借用**规范化**到切片本身
+    // —— 参考实现在解析期就是这么做的，且切片本来就是 ptr+len 的借用视图。
+    if chk_tok_is(src, t, i, "&") {
+        let amut: u32 = 0;
+        let j: u32 = i + 1;
+        if chk_tok_is(src, t, j, "mut") {
+            amut = 1;
+            j = j + 1;
+        }
+        if chk_tok_kind(t, j) == 0
+                && (chk_tok_kind(t, j + 1) == 0 || chk_tok_is(src, t, j + 1, "[")) {
+            j = j + 1;                    // 区域标记 `&a T`
+        }
+        let e: u32 = chk_ty_range(src, t, s, n, tyt, j, hi);
+        if e == 0 {
+            return 0;
+        }
+        if chk_ty_is_slc(tyt, e) == 1 {
+            return chk_ty_slc(tyt, chk_ty_a(tyt, e), amut);
+        }
+        return chk_ty_ref(tyt, e, amut);
+    }
     if chk_tok_is(src, t, i, "mut") {
         mut = 1;
         i = i + 1;
@@ -458,7 +503,7 @@ fn chk_tok_is(src: ptr, t: ptr, i: u32, s: str) -> bool {
 /// 不是表达式。原先检查器走到"赋值或表达式语句"那支时对首 token 不作判断，于是 `@` 被
 /// 静默咽掉 —— 编译通过、退出码 0、什么都不说（issue #49，实测 0.1.4.5 发布版同）。
 /// 参考实现自 2026-09-09 起就报 E019，两侧因此一直分叉。
-fn chk_expr_start(src: ptr, t: ptr, i: u32) -> bool {
+fn chk_expr_start(src: ptr, t: ptr, i: u32, prof: u32) -> bool {
     let k: u32 = chk_tok_kind(t, i);
     if k == 0 || k == 1 || k == 2 {
         return true;
@@ -471,6 +516,11 @@ fn chk_expr_start(src: ptr, t: ptr, i: u32) -> bool {
     }
     if chk_tok_is(src, t, i, "-") || chk_tok_is(src, t, i, "!") {
         return true;
+    }
+    // 一元 `*` 是 tur2026.3 / `choose lifetime_*` 的语法（`docs/299` §3.8）。
+    // 只在真的撞上 `*` 时才扫一遍维度（与 `chk_lms_on` 同一条：稀少形状付扫描钱）。
+    if chk_tok_is(src, t, i, "*") {
+        return chk_life_mode(src, t, prof) != 0;
     }
     return chk_tok_is(src, t, i, "&");
 }
@@ -868,9 +918,18 @@ fn declare(src: ptr, t: ptr, s: ptr, n: u32, name_tok: u32, ka: u32,
 /// **元素类型**从来没被检查过 —— 参考实现会报（`_type_ok` 对数组/切片是递归的），
 /// 自举侧一条不报，也就是**静默放行**一个不存在的类型。
 fn check_type(src: ptr, t: ptr, s: ptr, n: u32, i: u32, p: ptr, o: u32) -> u64 {
-    // 借用类型（`docs/299`）：参考实现收，自举侧 v1 **点名拒**（专属码，不是"未知类型"）。
+    // 借用类型（`docs/299`）：钻进去看被借类型 —— `&f64` 里的 `f64` 一样要查
+    // （与参考实现 `_type_ok` 对借用递归同一条）。
     if chk_tok_is(src, t, i, "&") {
-        return (i as u64) * 4294967296 + (sym_pub(src, t, p, o, E_LIFETIME, i) as u64);
+        let j: u32 = i + 1;
+        if chk_tok_is(src, t, j, "mut") {
+            j = j + 1;
+        }
+        if chk_tok_kind(t, j) == 0
+                && (chk_tok_kind(t, j + 1) == 0 || chk_tok_is(src, t, j + 1, "[")) {
+            j = j + 1;                    // 区域标记 `&a T`
+        }
+        return check_type(src, t, s, n, j, p, o);
     }
     if chk_tok_is(src, t, i, "mut") {
         return check_type(src, t, s, n, i + 1, p, o);
@@ -1893,6 +1952,61 @@ fn chk_lms_on(src: ptr, t: ptr) -> u32 {
     return 1;
 }
 
+/// 生命周期维度（`docs/299`）的**生效档**: 0 = `lifetime_no`, 1 = `lifetime_auto`,
+/// 2 = `lifetime_manual`。
+///
+/// 与 `chk_lms_on` 同一个形状（只扫深度 0 的 `choose`，跳过 `set choose` 的定义），
+/// 理由也一样：`chk_tex` 已经有十个形参，塞不进第二份状态。
+/// **默认值随版次走**（`docs/305` 的封版承诺）：`tur2026.3`（`prof >= 2`）起默认
+/// `auto`，更早的版次仍是 `no`。
+fn chk_life_mode(src: ptr, t: ptr, prof: u32) -> u32 {
+    let d: u32 = 0;
+    let val: u32 = 0;
+    let i: u32 = 0;
+    while chk_tok_kind(t, i) != 4 {
+        let k: u32 = chk_tok_kind(t, i);
+        if k == 3 {
+            let c: u32 = load8(src, tok_start(t, i)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                d = d + 1;
+            }
+            if (c == 125 || c == 41 || c == 93) && d > 0 {
+                d = d - 1;
+            }
+        } else if d == 0 && chk_tok_is(src, t, i, "choose") {
+            let isdef: u32 = 0;
+            if i > 0 {
+                if chk_tok_is(src, t, i - 1, "set") {
+                    isdef = 1;
+                }
+            }
+            if isdef == 0 {
+                if chk_tok_is(src, t, i + 1, "lifetime_no") {
+                    val = 1;
+                } else if chk_tok_is(src, t, i + 1, "lifetime_auto") {
+                    val = 2;
+                } else if chk_tok_is(src, t, i + 1, "lifetime_manual") {
+                    val = 3;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    if val == 1 {
+        return 0;
+    }
+    if val == 2 {
+        return 1;
+    }
+    if val == 3 {
+        return 2;
+    }
+    if prof >= 2 {
+        return 1;      // tur2026.3 起默认 lifetime_auto
+    }
+    return 0;
+}
+
 /// 名字对应的类型: 局部环境优先, 再看顶层符号表 (模块级常量在函数体内可见,
 /// 参考实现是 `scope = dict(const_scope)` 起手)。
 fn chk_name_ty(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32, name_tok: u32) -> u32 {
@@ -2255,6 +2369,25 @@ fn chk_tex(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
     // 源码顺序是 `&` 然后 `mut` (`&mut a`), 解析器据此把 op 记成 "&mut"。原来写成
     // `mut &`, 于是 inner 落在 `mut a` 上、类型推不出来, 每个 `&mut 数组` 都被误报成
     // "只能作用于数组" (native_mut 的 15@96 假报)。
+    // ---- 一元 `*r` 解引用（`docs/299` §3.8）：只在生命周期档非 `no` 时是语法。
+    if chk_tok_is(src, t, lo, "*") {
+        let inner0: u32 = chk_tex(src, t, syms, n, env, envc,
+                                  chk_lh(lo + 1, hi), tyt, p, oc);
+        if chk_life_mode(src, t, load32(oc, 8)) == 0 {
+            return 0;                       // 旧版次：参考实现在解析期就拒，这里不重复报
+        }
+        if inner0 == 0 {
+            return 0;
+        }
+        if chk_ty_is_ref(inner0) == 1 {
+            return chk_ty_a(tyt, inner0);
+        }
+        if chk_ty_kind(inner0) == 1 && inner0 % (1 << TY_KIND_SHIFT) == 11 {
+            return (1 << TY_KIND_SHIFT) + 1;          // 裸 `ptr` 的 `*` 按字节读 (u8)
+        }
+        chk_pub(src, t, oc, p, E_ACCESS, lo);         // `*` 只能解引用借用或 ptr
+        return 0;
+    }
     if chk_tok_is(src, t, lo, "&") {
         let mutf: u32 = 0;
         let a0: u32 = lo + 1;
@@ -2264,13 +2397,30 @@ fn chk_tex(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
         }
         let inner: u32 = chk_tex(src, t, syms, n, env, envc,
                                  chk_lh(a0, hi), tyt, p, oc);
-        // 数组 -> 切片；**切片 -> 再借**（`&mut xs`，xs 已是切片）—— 与参考实现
-        // 的 `expr_type` 同一条：再借不改元素类型，只改可写位。
-        if chk_ty_is_arr(tyt, inner) == 0 && chk_ty_is_slc(tyt, inner) == 0 {
+        // 数组 -> 切片（两个实现都收）。
+        if chk_ty_is_arr(tyt, inner) == 1 {
+            return chk_ty_slc(tyt, chk_ty_a(tyt, inner), mutf);
+        }
+        // **切片 -> 再借**（`&mut xs`，xs 已是切片）：与参考实现的 `expr_type` 同一条
+        // —— 再借不改元素类型，只改可写位。但 `lifetime_no` 里参考实现的 `_walk_expr`
+        // 仍报"只能作用于数组"，所以这一格要按档走。
+        if chk_ty_is_slc(tyt, inner) == 1 {
+            if chk_life_mode(src, t, load32(oc, 8)) != 0 {
+                return chk_ty_slc(tyt, chk_ty_a(tyt, inner), mutf);
+            }
             chk_pub(src, t, oc, p, E_ACCESS, lo);
             return 0;
         }
-        return chk_ty_slc(tyt, chk_ty_a(tyt, inner), mutf);
+        // 既不是数组也不是切片的借用（`docs/299`）：`lifetime_auto` / `lifetime_manual`
+        // 下是 `&T`；`no` 档仍报"只能作用于数组"。
+        if chk_life_mode(src, t, load32(oc, 8)) != 0 {
+            if inner == 0 {
+                return 0;                   // 类型未知 -> 保守跳过
+            }
+            return chk_ty_ref(tyt, inner, mutf);
+        }
+        chk_pub(src, t, oc, p, E_ACCESS, lo);         // 只能作用于数组
+        return 0;
     }
     if chk_tok_is(src, t, lo, "!") {
         return chk_tex(src, t, syms, n, env, envc,
@@ -2292,8 +2442,10 @@ fn chk_tex(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
     // ---- 下标 `x[i]`
     if idx_at != 0 {
         let br: u32 = chk_match_bracket(src, t, idx_at);
-        let ot: u32 = chk_tex(src, t, syms, n, env, envc,
-                              chk_lh(lo, idx_at), tyt, p, oc);
+        let ot0: u32 = chk_tex(src, t, syms, n, env, envc,
+                               chk_lh(lo, idx_at), tyt, p, oc);
+        // `r[i]`：`r: &[T; N]` 自动解一层（`docs/299` §3.4）。
+        let ot: u32 = chk_ty_deref(tyt, ot0);
         chk_tex_sub(src, t, syms, n, env, envc, chk_lh(idx_at + 1, br), tyt, p, oc);
         if ot != 0 && chk_ty_is_arr(tyt, ot) == 0 && chk_ty_is_slc(tyt, ot) == 0 {
             // 参考实现在"类型未知"时也报这条; 这里**只在类型已知且确定不是数组/切片时**报
@@ -2529,8 +2681,10 @@ fn chk_tex_atom_dot(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
     let lo: u32 = chk_lh3a(lh3);
     let hi: u32 = chk_lh3b(lh3);
     let dot_at: u32 = chk_lh3c(lh3);
-    let ot: u32 = chk_tex(src, t, syms, n, env, envc,
-                          chk_lh(lo, dot_at), tyt, p, oc);
+    let ot0: u32 = chk_tex(src, t, syms, n, env, envc,
+                           chk_lh(lo, dot_at), tyt, p, oc);
+    // `r.field`：`r: &S` 自动解一层（`docs/299` §3.4）。
+    let ot: u32 = chk_ty_deref(tyt, ot0);
     let ftok: u32 = dot_at + 1;
     // 方法调用: `name ( ... )` 且右括号正好收到区间末尾
     if chk_tok_kind(t, ftok) == 0 && chk_tok_is(src, t, ftok + 1, "(")
@@ -3432,11 +3586,6 @@ fn chk_moves(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             let dty: u32 = 0;
             if chk_tok_is(src, t, k, ":") {
                 let tl: u32 = k + 1;
-                // 借用类型（`docs/299`）：v1 自举侧点名拒（`check_type` 那一条只覆盖
-                // 签名/字段；`let r: &T = …` 的注解要在这里补上）。
-                if chk_tok_is(src, t, tl, "&") {
-                    chk_pub(src, t, oc, p, E_LIFETIME, tl);
-                }
                 let te: u32 = chk_skip_type(src, t, tl);
                 dty = chk_ty_range(src, t, syms, n, tyt, tl, te);
                 k = te;
@@ -3552,6 +3701,515 @@ fn chk_moves(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 j = semi2 + 1;
             } else {
                 j = e;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------- 生命周期（docs/299）
+//
+// 自举侧的**区域/逃逸判据**。参考实现有 AST（`_lifetime_fn_errs`），这里只有 token 流，
+// 所以规则照抄、形状重做：
+//
+//   * 每个变量带一个**来源档**（0 无 / 1 来自形参 / 2 来自局部）；
+//   * `return <expr>` 的来源里有**局部** ⇒ E012（与参考实现同码同文）；
+//   * 函数返回借用，但签名里没有引用形参 ⇒ E041（摘要按 §3.2 的省略规则算）；
+//   * 显式区域标记 `&a T` 写错（auto 档写了 / 指向不存在的形参 / 指向非引用形参）⇒ E041；
+//   * `free(p)` 时 `p` 仍被借 ⇒ E041；
+//   * **存下来的** `&mut` 与后来的借用重叠 ⇒ E007。
+//
+// 表放在 tyt 块的 `[1028..3520)`：复合类型表一轮只造个位数的新类型（容量 128），
+// 那之后的槽位一直空着。三张表各自带一个计数格。
+
+const CHK_LP: u32 = 1028;   // 形参表: (name_tok, flags) —— 1 = 借用形参
+const CHK_LP_N: u32 = 1024;
+const CHK_LV: u32 = 1548;   // 变量来源表: (name_tok, kind) —— 1 = 形参 / 2 = 局部
+const CHK_LV_N: u32 = 1544;
+const CHK_LR: u32 = 2324;   // 借用/独占表: (name_tok, flags) —— 1 被借 2 存了&mut 4 存了&
+const CHK_LR_N: u32 = 2320;
+const CHK_LV_CAP: u32 = 92;
+const CHK_LR_CAP: u32 = 120;
+/// 本单元里有没有"返回借用"的函数 —— 没有就**不查调用摘要**（语料上零代价）。
+const CHK_HASRET: u32 = 3500;
+
+/// 类型 token 是**借用类**吗（参考实现 `_is_borrowish` 的 token 版）：`&T`、切片、
+/// 或带借用字段的结构体。**数组不算**（它是值）。
+fn chk_ty_borrowish(src: ptr, t: ptr, syms: ptr, n: u32, tt: u32) -> u32 {
+    if chk_tok_is(src, t, tt, "&") {
+        return 1;
+    }
+    if chk_tok_is(src, t, tt, "[") && !chk_tok_is(src, t, tt + 2, ";") {
+        return 1;
+    }
+    if chk_tok_is(src, t, tt, "mut") && chk_tok_is(src, t, tt + 1, "[") {
+        return 1;
+    }
+    if chk_tok_kind(t, tt) == 0 {
+        return chk_struct_borrowish(src, t, syms, n, tt);
+    }
+    return 0;
+}
+
+/// 具名结构体是否带借用字段（声明体里任一字段类型以 `&` 开头）。
+fn chk_struct_borrowish(src: ptr, t: ptr, syms: ptr, n: u32, name_tok: u32) -> u32 {
+    let slot: u32 = chk_lookup_slot(src, t, syms, n, name_tok);
+    if slot == 0 {
+        return 0;
+    }
+    if load32(syms, (slot - 1) * 20 + 4) != K_STRUCT {
+        return 0;
+    }
+    let j: u32 = load32(syms, (slot - 1) * 20 + 16) + 1;   // aux = 声明体的 '{'
+    let at_name: u32 = 1;
+    let d: u32 = 0;
+    let r: u32 = 0;
+    while chk_tok_kind(t, j) != 4 && !chk_tok_is(src, t, j, "}") {
+        if at_name == 1 && chk_tok_kind(t, j) == 0 {
+            if chk_tok_is(src, t, j + 1, ":") && chk_tok_is(src, t, j + 2, "&") {
+                r = 1;
+            }
+            at_name = 0;
+        }
+        if chk_tok_is(src, t, j, "<") || chk_tok_is(src, t, j, "[")
+                || chk_tok_is(src, t, j, "(") {
+            d = d + 1;
+        }
+        if chk_tok_is(src, t, j, ">") || chk_tok_is(src, t, j, "]")
+                || chk_tok_is(src, t, j, ")") {
+            d = d - 1;
+        }
+        if d == 0 && chk_tok_is(src, t, j, ",") {
+            at_name = 1;
+        }
+        j = j + 1;
+    }
+    return r;
+}
+
+/// 小表查找: 命中回值, 否则回 4294967295（"不在表里"）。
+fn chk_tab_get(src: ptr, t: ptr, tab: ptr, base: u32, nbase: u32, nm: u32) -> u32 {
+    let cnt: u32 = load32(tab, nbase);
+    let i: u32 = 0;
+    while i < cnt {
+        if same(src, t, load32(tab, base + i * 8), nm) == 1 {
+            return load32(tab, base + i * 8 + 4);
+        }
+        i = i + 1;
+    }
+    return 4294967295;
+}
+
+fn chk_tab_set(src: ptr, t: ptr, tab: ptr, base: u32, nbase: u32, cap: u32,
+               nm: u32, v: u32) {
+    let cnt: u32 = load32(tab, nbase);
+    let hit: u32 = 0;
+    let i: u32 = 0;
+    while i < cnt {
+        if same(src, t, load32(tab, base + i * 8), nm) == 1 {
+            store32(tab, base + i * 8 + 4, v);
+            hit = 1;
+        }
+        i = i + 1;
+    }
+    if hit == 0 && cnt < cap {
+        store32(tab, base + cnt * 8, nm);
+        store32(tab, base + cnt * 8 + 4, v);
+        store32(tab, nbase, cnt + 1);
+    }
+}
+
+fn chk_tab_or(src: ptr, t: ptr, tab: ptr, base: u32, nbase: u32, cap: u32,
+              nm: u32, bits: u32) {
+    let cur: u32 = chk_tab_get(src, t, tab, base, nbase, nm);
+    if cur == 4294967295 {
+        chk_tab_set(src, t, tab, base, nbase, cap, nm, bits);
+    } else {
+        chk_tab_set(src, t, tab, base, nbase, cap, nm, cur | bits);
+    }
+}
+
+/// 返回类型上的显式区域标记（`&a T` 里的 `a`），没有回 0。
+fn chk_marker_of(src: ptr, t: ptr, rt: u32) -> u32 {
+    if !chk_tok_is(src, t, rt, "&") {
+        return 0;
+    }
+    let j: u32 = rt + 1;
+    let j2: u32 = 0;
+    if chk_tok_is(src, t, j, "mut") {
+        j2 = j + 1;
+    } else {
+        j2 = j;
+    }
+    if chk_tok_kind(t, j2) == 0
+            && (chk_tok_kind(t, j2 + 1) == 0 || chk_tok_is(src, t, j2 + 1, "[")) {
+        return j2;
+    }
+    return 0;
+}
+
+/// 被调函数的**摘要**：高 32 位 = 1 表示"返回借用"，低 32 位 = 来源形参的位掩码。
+/// 0 = 不返回借用（或查不到）。
+fn chk_sum(src: ptr, t: ptr, syms: ptr, n: u32, name_tok: u32) -> u64 {
+    let i: u32 = 0;
+    let r: u64 = 0;
+    let done: u32 = 0;
+    while chk_tok_kind(t, i) != 4 && done == 0 {
+        if chk_tok_is(src, t, i, "fn") && same(src, t, i + 1, name_tok) == 1 {
+            let lp: u32 = chk_find_paren(src, t, i + 2);
+            let rp: u32 = chk_match_paren(src, t, lp);
+            if chk_tok_is(src, t, rp + 1, "-") && chk_tok_is(src, t, rp + 2, ">") {
+                let rt: u32 = rp + 3;
+                if chk_ty_borrowish(src, t, syms, n, rt) == 1 {
+                    done = 1;
+                    let bits: u32 = 0;
+                    let nref: u32 = 0;
+                    let only: u32 = 0;
+                    let k: u32 = 0;
+                    let j: u32 = lp + 1;
+                    while j < rp && k < 31 {
+                        let tt2: u32 = j + 2;
+                        let isr: u32 = 0;
+                        if chk_tok_is(src, t, tt2, "&") {
+                            isr = 1;
+                        } else if chk_tok_is(src, t, tt2, "[")
+                                && !chk_tok_is(src, t, tt2 + 2, ";") {
+                            isr = 1;
+                        } else if chk_tok_is(src, t, tt2, "mut")
+                                && chk_tok_is(src, t, tt2 + 1, "[") {
+                            isr = 1;
+                        }
+                        if isr == 1 {
+                            bits = bits | (1 << k);
+                            nref = nref + 1;
+                            only = k;
+                        }
+                        k = k + 1;
+                        j = chk_skip_type(src, t, tt2);
+                        if chk_tok_is(src, t, j, ",") {
+                            j = j + 1;
+                        }
+                    }
+                    let mk: u32 = chk_marker_of(src, t, rt);
+                    let fb: u32 = 0;
+                    if mk != 0 {
+                        // 标记指向的形参（按名字找下标）
+                        let k2: u32 = 0;
+                        let j2: u32 = lp + 1;
+                        while j2 < rp && k2 < 31 {
+                            if same(src, t, j2, mk) == 1 {
+                                fb = fb | (1 << k2);
+                            }
+                            k2 = k2 + 1;
+                            j2 = chk_skip_type(src, t, j2 + 2);
+                            if chk_tok_is(src, t, j2, ",") {
+                                j2 = j2 + 1;
+                            }
+                        }
+                        if fb == 0 {
+                            fb = bits;          // 坏标记已由 marker 检查报过
+                        }
+                    } else if nref == 1 {
+                        fb = 1 << only;
+                    } else {
+                        fb = bits;              // 多个 -> 全部（"最短"）
+                    }
+                    r = 4294967296 + (fb as u64);
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return r;
+}
+
+/// 表达式 `[lo,hi)` 的**来源档**: 0 = 不借 / 1 = 来自形参 / 2 = 来自局部。
+fn chk_life_prov(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
+                 tyt: ptr, lo: u32, hi: u32) -> u32 {
+    if lo >= hi {
+        return 0;
+    }
+    if chk_tok_is(src, t, lo, "&") {
+        let r: u32 = lo + 1;
+        let r2: u32 = 0;
+        if chk_tok_is(src, t, r, "mut") {
+            r2 = r + 1;
+        } else {
+            r2 = r;
+        }
+        if chk_tok_kind(t, r2) == 0 {
+            let pv: u32 = chk_tab_get(src, t, tyt, CHK_LV, CHK_LV_N, r2);
+            if pv != 4294967295 && pv > 0 {
+                return pv;                 // `&r`（r 自己是借用）-> 借的是 r 的来源
+            }
+            if chk_tab_get(src, t, tyt, CHK_LP, CHK_LP_N, r2) != 4294967295 {
+                return 1;
+            }
+            return 2;
+        }
+        return 0;
+    }
+    if lo + 1 == hi && chk_tok_kind(t, lo) == 0 {
+        let pv2: u32 = chk_tab_get(src, t, tyt, CHK_LV, CHK_LV_N, lo);
+        if pv2 != 4294967295 {
+            return pv2;
+        }
+        return 0;
+    }
+    // 调用: 结果的来源跟着摘要里的形参走（reference `_lifetime_expr_prov(Call)`）
+    if chk_tok_kind(t, lo) == 0 && chk_tok_is(src, t, lo + 1, "(")
+            && chk_match_paren(src, t, lo + 1) == hi - 1 {
+        if load32(tyt, CHK_HASRET) == 0 {
+            return 1;                      // 本单元没有返回借用的函数 -> 不当局部
+        }
+        let sm: u64 = chk_sum(src, t, syms, n, lo);
+        if (sm / 4294967296) as u32 == 1 {
+            let bits: u32 = (sm % 4294967296) as u32;
+            if bits == 0 {
+                return 1;
+            }
+            let got: u32 = chk_count_args(src, t, lo + 1);
+            let rv: u32 = 0;
+            let k: u32 = 0;
+            while k < got {
+                if ((bits >> k) & 1) == 1 {
+                    let er: u64 = chk_arr_elem(src, t, lo + 1, k);
+                    let p1: u32 = chk_life_prov(src, t, syms, n, env, envc, tyt,
+                                                chk_lhlo(er), chk_lhhi(er));
+                    if p1 > rv {
+                        rv = p1;
+                    }
+                }
+                k = k + 1;
+            }
+            return rv;
+        }
+        return 0;
+    }
+    // 字段/下标: 来源跟着对象（`c.data` 借的是 `c` 借的那块）
+    if chk_tok_kind(t, lo) == 0
+            && (chk_tok_is(src, t, lo + 1, ".") || chk_tok_is(src, t, lo + 1, "[")) {
+        return chk_life_prov(src, t, syms, n, env, envc, tyt, lo, lo + 1);
+    }
+    // 结构体字面量 / 数组字面量: 取**各分量**里的借用来源（参考实现只对
+    // `_is_borrowish(ft)` 的字段递归，这里按"字面量里出现的 `&root`"取最大）。
+    // 其余形状一律 0 —— 参考实现的 `_lifetime_expr_prov` 对 `Bin` 之类**直接回空集**，
+    // 在区间里乱扫 `&` 会把 `f(&local)` 之外的临时借用也算成"返回了局部"。
+    let mx: u32 = 0;
+    let lit: u32 = 0;
+    if chk_tok_kind(t, lo) == 0 && chk_tok_is(src, t, lo + 1, "{")
+            && chk_match_brace(src, t, lo + 1) == hi - 1 {
+        lit = 1;
+    }
+    if chk_tok_is(src, t, lo, "[") && chk_match_bracket(src, t, lo) == hi - 1 {
+        lit = 1;
+    }
+    let k2: u32 = lo;
+    while k2 < hi && lit == 1 {
+        if chk_tok_is(src, t, k2, "&") {
+            let r3: u32 = k2 + 1;
+            let r4: u32 = 0;
+            if chk_tok_is(src, t, r3, "mut") {
+                r4 = r3 + 1;
+            } else {
+                r4 = r3;
+            }
+            if chk_tok_kind(t, r4) == 0 {
+                let pv3: u32 = chk_tab_get(src, t, tyt, CHK_LV, CHK_LV_N, r4);
+                let v3: u32 = 0;
+                if pv3 != 4294967295 && pv3 > 0 {
+                    v3 = pv3;
+                } else if chk_tab_get(src, t, tyt, CHK_LP, CHK_LP_N, r4) != 4294967295 {
+                    v3 = 1;
+                } else {
+                    v3 = 2;
+                }
+                if v3 > mx {
+                    mx = v3;
+                }
+            }
+        }
+        k2 = k2 + 1;
+    }
+    return mx;
+}
+
+/// 扫一段语句 `[lo,hi)`：登记"谁被借了"，并在 `free(p)` 时查 `p` 是否仍被借。
+fn chk_life_scan(src: ptr, t: ptr, tyt: ptr, lo: u32, hi: u32, p: ptr, oc: ptr) {
+    let k: u32 = lo;
+    while k < hi {
+        if chk_tok_is(src, t, k, "&") && chk_tok_is(src, t, k + 1, "mut")
+                && chk_tok_kind(t, k + 2) == 0 {
+            chk_tab_or(src, t, tyt, CHK_LR, CHK_LR_N, CHK_LR_CAP, k + 2, 1);
+        } else if chk_tok_is(src, t, k, "&") && chk_tok_kind(t, k + 1) == 0 {
+            chk_tab_or(src, t, tyt, CHK_LR, CHK_LR_N, CHK_LR_CAP, k + 1, 1);
+        }
+        // `free(p)` 时 p 仍被借 -> E041（`docs/299` §3.5）
+        if chk_tok_is(src, t, k, "free") && chk_tok_is(src, t, k + 1, "(")
+                && chk_tok_kind(t, k + 2) == 0 && chk_tok_is(src, t, k + 3, ")") {
+            let br: u32 = chk_tab_get(src, t, tyt, CHK_LR, CHK_LR_N, k + 2);
+            if br != 4294967295 && (br & 1) == 1 {
+                chk_pub(src, t, oc, p, E_LIFETIME, k + 2);
+            }
+        }
+        k = k + 1;
+    }
+}
+
+/// 一个函数的生命周期检查（`docs/299`）。`fi` = `fn` token, `lh` = (body 起 << 32) | 止。
+fn chk_life(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
+            lh: u64, fi: u32, p: ptr, oc: ptr) {
+    let tyt: ptr = chk_tyt_of(oc);
+    let mode: u32 = chk_life_mode(src, t, load32(oc, 8));
+    if mode != 0 {
+        let b: u32 = chk_lhlo(lh);
+        let e: u32 = chk_lhhi(lh);
+        let lp: u32 = chk_find_paren(src, t, fi + 2);
+        let rp: u32 = chk_match_paren(src, t, lp);
+        store32(tyt, CHK_LP_N, 0);
+        store32(tyt, CHK_LV_N, 0);
+        store32(tyt, CHK_LR_N, 0);
+        // ---- 形参表（名字 + 是不是借用形参）
+        let j: u32 = lp + 1;
+        while j < rp {
+            let tt2: u32 = j + 2;
+            // **每个形参**都是"形参来源"（参考实现 `_param_names` 收全部形参）；
+            // 借用形参另外进 `CHK_LP` —— 那张表用来算函数摘要 / 校验区域标记。
+            chk_tab_set(src, t, tyt, CHK_LV, CHK_LV_N, CHK_LV_CAP, j, 1);
+            if chk_ty_borrowish(src, t, syms, n, tt2) == 1 {
+                chk_tab_set(src, t, tyt, CHK_LP, CHK_LP_N, 60, j, 1);
+            }
+            j = chk_skip_type(src, t, tt2);
+            if chk_tok_is(src, t, j, ",") {
+                j = j + 1;
+            }
+        }
+        // ---- 区域标记（`docs/299` §3.3）：形参与返回类型都查
+        let jm: u32 = lp + 1;
+        while jm < rp {
+            let tm: u32 = jm + 2;
+            let mk: u32 = chk_marker_of(src, t, tm);
+            if mk != 0 {
+                if mode != 2 {
+                    chk_pub(src, t, oc, p, E_LIFETIME, mk);   // auto 档不许写标记
+                } else if chk_tab_get(src, t, tyt, CHK_LP, CHK_LP_N, mk) == 4294967295 {
+                    chk_pub(src, t, oc, p, E_LIFETIME, mk);   // 指向不存在的/非引用形参
+                }
+            }
+            jm = chk_skip_type(src, t, tm);
+            if chk_tok_is(src, t, jm, ",") {
+                jm = jm + 1;
+            }
+        }
+        // ---- 返回类型上的区域标记（`&a T`）
+        let retb: u32 = 0;
+        if chk_tok_is(src, t, rp + 1, "-") && chk_tok_is(src, t, rp + 2, ">") {
+            let rt: u32 = rp + 3;
+            let mk2: u32 = chk_marker_of(src, t, rt);
+            if mk2 != 0 {
+                if mode != 2 {
+                    chk_pub(src, t, oc, p, E_LIFETIME, mk2);
+                } else if chk_tab_get(src, t, tyt, CHK_LP, CHK_LP_N, mk2) == 4294967295 {
+                    chk_pub(src, t, oc, p, E_LIFETIME, mk2);
+                }
+            }
+            if chk_ty_borrowish(src, t, syms, n, rt) == 1 {
+                retb = 1;
+            }
+        }
+        // ---- 函数体：来源 / 悬垂 / 释放 / 独占
+        let j2: u32 = b + 1;
+        while j2 < e && chk_tok_kind(t, j2) != 4 {
+            if chk_tok_is(src, t, j2, "{") || chk_tok_is(src, t, j2, "}")
+                    || chk_tok_is(src, t, j2, ";") || chk_tok_is(src, t, j2, "else")
+                    || chk_tok_is(src, t, j2, "=>") {
+                j2 = j2 + 1;
+            } else if chk_tok_is(src, t, j2, "let") && chk_tok_kind(t, j2 + 1) == 0 {
+                let k: u32 = j2 + 2;
+                let kk: u32 = 0;
+                if chk_tok_is(src, t, k, ":") {
+                    kk = chk_skip_type(src, t, k + 1);
+                } else {
+                    kk = k;
+                }
+                let eq: u32 = chk_find_at(src, t, kk, e, "=");
+                let semi: u32 = chk_find_at(src, t, eq + 1, e, ";");
+                if eq < e && semi <= e {
+                    let nm: u32 = j2 + 1;
+                    if chk_tok_is(src, t, k, ":") {
+                        let tt3: u32 = k + 1;
+                        if chk_ty_borrowish(src, t, syms, n, tt3) == 1 {
+                            let pv: u32 = chk_life_prov(src, t, syms, n, env, envc, tyt,
+                                                        eq + 1, semi);
+                            chk_tab_set(src, t, tyt, CHK_LV, CHK_LV_N, CHK_LV_CAP, nm, pv);
+                        } else {
+                            chk_tab_set(src, t, tyt, CHK_LV, CHK_LV_N, CHK_LV_CAP, nm, 0);
+                        }
+                    }
+                    // 存下来的 `&mut` 独占（reference `bind`）
+                    if chk_tok_is(src, t, eq + 1, "&")
+                            && chk_tok_is(src, t, eq + 2, "mut")
+                            && chk_tok_kind(t, eq + 3) == 0 {
+                        let sm3: u32 = chk_tab_get(src, t, tyt, CHK_LR, CHK_LR_N, eq + 3);
+                        if sm3 != 4294967295 && (sm3 & 6) != 0 {
+                            chk_pub(src, t, oc, p, E_BORROW, eq + 1);
+                        }
+                        chk_tab_or(src, t, tyt, CHK_LR, CHK_LR_N, CHK_LR_CAP, eq + 3, 2);
+                    } else if chk_tok_is(src, t, eq + 1, "&")
+                            && chk_tok_kind(t, eq + 2) == 0 {
+                        let sm2: u32 = chk_tab_get(src, t, tyt, CHK_LR, CHK_LR_N, eq + 2);
+                        if sm2 != 4294967295 && (sm2 & 2) == 2 {
+                            chk_pub(src, t, oc, p, E_BORROW, eq + 1);
+                        } else {
+                            chk_tab_or(src, t, tyt, CHK_LR, CHK_LR_N, CHK_LR_CAP, eq + 2, 4);
+                        }
+                    }
+                    chk_life_scan(src, t, tyt, eq + 1, semi, p, oc);
+                    j2 = semi + 1;
+                } else {
+                    j2 = j2 + 1;
+                }
+            } else if chk_tok_is(src, t, j2, "return") {
+                let semi2: u32 = chk_find_at(src, t, j2 + 1, e, ";");
+                let direct: u32 = 0;
+                if chk_tok_is(src, t, j2 + 1, "&")
+                        && (chk_tok_kind(t, j2 + 2) == 0
+                            || (chk_tok_is(src, t, j2 + 2, "mut")
+                                && chk_tok_kind(t, j2 + 3) == 0)) {
+                    direct = 1;            // `return &x` 由 chk_moves 报（同一条 M17）
+                }
+                let pv2: u32 = chk_life_prov(src, t, syms, n, env, envc, tyt,
+                                             j2 + 1, semi2);
+                if direct == 0 && pv2 == 2 {
+                    chk_pub(src, t, oc, p, E_DANGLE, j2);
+                }
+                // **返回借用，但签名里没有引用形参**（E041）：局部来源由 E012 说清根因，
+                // 不再叠一遍；**外部来源**（例如一个返回借用的调用）没有别的诊断，在这里
+                // 点名。与参考实现 `_lifetime_fn_errs` 的 `ret_is_borrow and not has_ref
+                // and not any(kind == "l")` 同一条。
+                if retb == 1 && load32(tyt, CHK_LP_N) == 0 && pv2 != 2 {
+                    chk_pub(src, t, oc, p, E_LIFETIME, j2);
+                }
+                // 借用登记 + 释放点
+                chk_life_scan(src, t, tyt, j2 + 1, semi2, p, oc);
+                if semi2 <= e {
+                    j2 = semi2 + 1;
+                } else {
+                    j2 = e;
+                }
+            } else {
+                let semi3: u32 = chk_find_at(src, t, j2, e, ";");
+                // 给**已登记的**借用变量重新赋值 -> 来源跟着新右式走（reference `bind`）
+                if chk_tok_kind(t, j2) == 0 && chk_tok_is(src, t, j2 + 1, "=")
+                        && semi3 < e {
+                    if chk_tab_get(src, t, tyt, CHK_LV, CHK_LV_N, j2) != 4294967295 {
+                        let pva: u32 = chk_life_prov(src, t, syms, n, env, envc, tyt,
+                                                     j2 + 2, semi3);
+                        chk_tab_set(src, t, tyt, CHK_LV, CHK_LV_N, CHK_LV_CAP, j2, pva);
+                    }
+                }
+                // 逐 token 走（不整条语句跳）—— 嵌套块里的语句也要看见。
+                chk_life_scan(src, t, tyt, j2, j2 + 1, p, oc);
+                j2 = j2 + 1;
             }
         }
     }
@@ -4137,7 +4795,7 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             let semi: u32 = chk_find_at(src, t, eq + 1, e, ";");
             if eq < e && semi <= e {
                 // `=` 后面必须能开始一个表达式 (`let v: u32 = @ 1;`，issue #395/#49 的表达式那半)
-                if !chk_expr_start(src, t, eq + 1) {
+                if !chk_expr_start(src, t, eq + 1, load32(oc, 8)) {
                     chk_pub(src, t, oc, p, E_PARSE, eq + 1);
                 }
                 let t2: u32 = chk_tex(src, t, syms, n, env, c,
@@ -4282,7 +4940,7 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
         } else {
             // 语句起点的 token 必须能开始一个表达式。`@` 这类词法上合法、L1 里却哪一处都不是
             // 表达式的 token，原先在这里被静默咽掉（issue #49）。参考实现是同一条判断，报 E019。
-            if !chk_expr_start(src, t, j) {
+            if !chk_expr_start(src, t, j, load32(oc, 8)) {
                 chk_pub(src, t, oc, p, E_PARSE, j);
             }
             // 赋值或表达式语句: 找深度 0 的 `=` (排除 `==` 的第二个字符与 `=>`)
@@ -4315,12 +4973,30 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                         chk_pub(src, t, oc, p, E_SLICE, j);
                     }
                 }
+                // 写穿（`docs/299` §3.4 / §3.8）：`x.f = v` 与 `*r = v` 在生命周期档
+                // 非 `no` 时是左值；旧版次里它们仍是 E014（与参考实现的 `_lv` 同一条）。
+                let is_field: u32 = 0;
+                if chk_tok_kind(t, j) == 0 && chk_tok_is(src, t, j + 1, ".")
+                        && chk_tok_kind(t, j + 2) == 0 && eq2 == j + 3 {
+                    is_field = 1;
+                }
+                let is_deref: u32 = 0;
+                if chk_tok_is(src, t, j, "*") && chk_tok_kind(t, j + 1) == 0
+                        && eq2 == j + 2 {
+                    is_deref = 1;
+                }
                 if is_ident == 1 {
                     if chk_env_get(src, t, env, c, j) == 0 {
                         chk_pub(src, t, oc, p, E_TYPE, j);        // 赋值未声明的变量
                     }
                 } else if is_index == 0 {
-                    chk_pub(src, t, oc, p, E_LVAL, j);            // 赋值目标不是左值
+                    if is_field == 1 || is_deref == 1 {
+                        if chk_life_mode(src, t, load32(oc, 8)) == 0 {
+                            chk_pub(src, t, oc, p, E_LVAL, j);
+                        }
+                    } else {
+                        chk_pub(src, t, oc, p, E_LVAL, j);        // 赋值目标不是左值
+                    }
                 }
                 if tt != 0 && et != 0 && chk_ty_eq(tyt, tt, et) == 0 {
                     chk_pub(src, t, oc, p, E_TMISMATCH, j);
@@ -4574,7 +5250,7 @@ fn chk_syntax_prepass(src: ptr, t: ptr, out: ptr, o: u32, tur2: u32) -> u32 {
             if !chk_tok_is(src, t, i + 1, "=") && !chk_tok_is(src, t, i + 1, ">") {
                 // `{` 也算能开头: 外来表层里 `String[] NAMES = { … }` 是合法的
                 // （`loment/examples/multilang/03-java/`）。
-                if !chk_tok_is(src, t, i + 1, "{") && !chk_expr_start(src, t, i + 1) {
+                if !chk_tok_is(src, t, i + 1, "{") && !chk_expr_start(src, t, i + 1, tur2) {
                     o = sym_pub(src, t, out, o, E_PARSE, i + 1);
                 }
             }
@@ -5190,6 +5866,23 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     }
     // ---- 第三遍: 语句级类型比对 (批次 2) —— let / return / 赋值 / if / while / for。
     // 每个函数重建一次局部环境; 函数体的范围用花括号匹配切出来。
+    //
+    // `docs/299`：先记一遍"本单元有没有返回借用的函数" —— 没有的话，调用点的来源
+    // 推算不必去扫被调函数的声明（`chk_life_prov` 读这一格）。语料上因此零代价。
+    let hbr: u32 = 0;
+    let ib: u32 = 0;
+    while chk_tok_kind(t, ib) != 4 && hbr == 0 {
+        if chk_tok_is(src, t, ib, "fn") {
+            let lbp: u32 = chk_find_paren(src, t, ib + 2);
+            let rbp: u32 = chk_match_paren(src, t, lbp);
+            if chk_tok_is(src, t, rbp + 1, "-") && chk_tok_is(src, t, rbp + 2, ">")
+                    && chk_ty_borrowish(src, t, syms, n, rbp + 3) == 1 {
+                hbr = 1;
+            }
+        }
+        ib = ib + 1;
+    }
+    store32(tyt, CHK_HASRET, hbr);
     i = 0;
     while chk_tok_kind(t, i) != 4 {
         if chk_tok_is(src, t, i, "fn") {
@@ -5227,6 +5920,10 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                 // 不回读的话 chk_moves 写的诊断在 `return o / 8` 时会被整条丢掉。
                 store32(tyt, 3576, 0);
                 chk_moves(src, t, syms, n, env, load32(tyt, 3520), fbra, fend, out, oc);
+                // 生命周期（`docs/299`）：区域/逃逸判据。放在 `chk_moves` 之后 ——
+                // 那时环境里已经有全部 `let` 的类型（与 E012 那条同一个理由）。
+                chk_life(src, t, syms, n, env, load32(tyt, 3520),
+                         chk_lh(fbra, fend), i, out, oc);
                 o = load32(oc, 0);
                 // 非 `()` 的函数不许从末尾掉出去（issue #22）—— 与参考实现同一条规则。
                 // 放在 chk_body/chk_moves 之后：那两趟可能已经写过诊断，`o` 得先回读。

@@ -15,11 +15,12 @@
 //   f64fmt_shortest 能往返的最短表示 —— 判据是"读回来还是不是原来那个 double",
 //                   而判定本身也是精确的 (交叉相乘比大整数, 不做除法)
 //
-// 已知缺口 (诚实写明): **反向** (十进制 -> double) 没做。它需要大整数**除法**,
-// 而这一层刻意只用乘法。等 T7 的 JSON/TOML 真正需要时再补, 到时叫 f64fmt_parse。
+// 反向 (十进制 -> double): `f64fmt_parse` / `f64fmt_parse_n` 已落地 (2026-11-08,
+// `docs/316` §3)。它是**近似正确舍入**: 尾数最多 19 位, 指数按 22 一段缩放;
+// 常见值与 Python 逐位一致, 大指数会差几个 ulp。正确舍入要 bigint 除法, 仍未做。
 //
-// 临时区: 由调用方给 `f64fmt_scratch_bytes()` 字节。语言里拿不到"局部数组的地址",
-// 所以任何缓冲都只能从外面来 —— 这一层的分区偏移都写死在下面。
+// 临时区: **四种输出/输入都用同一块**, 由调用方给 `f64fmt_scratch_bytes()` 字节。
+// 语言里拿不到"局部数组的地址", 所以任何缓冲都只能从外面来 —— 分区偏移写死在下面。
 //
 // 命名: 公开 f64fmt_*, 内部 ff_*。自检 test_f64fmt_*。
 
@@ -27,6 +28,7 @@ module f64fmt
 choose runtime
 
 use "f64.lomt"
+use "f64conv.lomt"
 use "bigint.lomt"
 
 /// 大整数肢体重数。
@@ -418,7 +420,12 @@ pub fn f64fmt_sci(out: ptr, o: u32, x: u64, sig: u32, sc: ptr) -> u32 {
     } else {
         e2 = ff_put(out, e, 43);
     }
-    return ff_put_uint(out, e2, mag as u32) - o;
+    // C 的 `%e` 指数至少两位（`e+00` 不是 `e+0`）；libc 与 Python 都是这个形状。
+    let e3: u32 = e2;
+    if mag < (10 as i64) {
+        e3 = ff_put(out, e2, 48);
+    }
+    return ff_put_uint(out, e3, mag as u32) - o;
 }
 
 fn ff_sci_zero(out: ptr, o: u32, sig: u32) -> u32 {
@@ -549,6 +556,277 @@ fn ff_emit_sci_from(out: ptr, o: u32, d: ptr, nd: u32, exp10: i64) -> u32 {
         e2 = ff_put(out, e, 43);
     }
     return ff_put_uint(out, e2, mag as u32);
+}
+
+// ------------------------------------------------------------------ 反向：文本 -> double
+
+/// 10.0 的位。
+const FF_TEN: u64 = 4621819117588971520;
+
+fn ff_is_digit(c: u32) -> bool {
+    return c >= 48 && c <= 57;
+}
+
+fn ff_is_space(c: u32) -> bool {
+    return c == 32 || c == 9 || c == 10 || c == 13;
+}
+
+fn ff_lower(c: u32) -> u32 {
+    if c >= 65 && c <= 90 {
+        return c + 32;
+    }
+    return c;
+}
+
+/// 10^k（k 0..=22，逐步乘 10；这一段在 double 里是精确的）。
+fn ff_pow10(k: u32) -> u64 {
+    let x: u64 = F64_ONE;
+    let i: u32 = 0;
+    while i < k {
+        x = f64_mul(x, FF_TEN);
+        i = i + 1;
+    }
+    return x;
+}
+
+fn ff_ok(v: u64, at: u32, used_out: ptr, ok_out: ptr) -> u64 {
+    mem_store32(ok_out, 0, 1);
+    if (used_out as u64) != (0 as u64) {
+        mem_store32(used_out, 0, at);
+    }
+    return v;
+}
+
+fn ff_fail(used_out: ptr, ok_out: ptr) -> u64 {
+    mem_store32(ok_out, 0, 0);
+    if (used_out as u64) != (0 as u64) {
+        mem_store32(used_out, 0, 0);
+    }
+    return 0;
+}
+
+/// 十进制文本 -> double 位。`ok_out`（4 字节）写 1/0。
+///
+/// 接受 C `strtod` 的公共形状：前导空白、可选 `+/-`、`inf` / `infinity` / `nan`
+/// （大小写不敏感）、十进制小数、可选指数 `e±NN`。**整个串必须被消费完**（尾随空白除外），
+/// 否则 `ok_out = 0` —— 这是"解析一个数"的语义，不是 `strtod` 的"取前缀"。
+/// 要 `strtod` 那种"取前缀 + endptr"用 `f64fmt_parse_n`。
+pub fn f64fmt_parse(s: str, ok_out: ptr) -> u64 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n && ff_is_space(str_byte(s, i)) {
+        i = i + 1;
+    }
+    if i >= n {
+        return ff_fail(0 as ptr, ok_out);
+    }
+    return ff_parse_body(str_ptr(s), n, i, 0 as ptr, ok_out, 1);
+}
+
+/// 从 `(p, n)` 解析一个数。`used_out`（4 字节，可为 0）收到**消费到哪儿**（字节下标）。
+///
+/// **舍入**：这是**近似正确舍入**，不是 `strtod` 那种逐位正确 —— 尾数在 u64 里最多留
+/// 19 位有效数字，更多的直接丢弃（不是四舍五入到 19 位）。指数在 ±22 内（或缩放次数少）
+/// 与 Python 的 `float()` 逐位一致；大指数会累积几个 ulp（实测
+/// `1.7976931348623157e308` 差 3 ulp）。正确舍入要 bigint 除法，是单独一件事。
+pub fn f64fmt_parse_n(p: ptr, n: u32, used_out: ptr, ok_out: ptr) -> u64 {
+    mem_store32(ok_out, 0, 0);
+    if (used_out as u64) != (0 as u64) {
+        mem_store32(used_out, 0, 0);
+    }
+    let i: u32 = 0;
+    while i < n && ff_is_space(load8(p, i)) {
+        i = i + 1;
+    }
+    if i >= n {
+        return ff_fail(used_out, ok_out);
+    }
+    return ff_parse_body(p, n, i, used_out, ok_out, 0);
+}
+
+fn ff_parse_body(p: ptr, n: u32, i0: u32, used_out: ptr, ok_out: ptr, strict: u32) -> u64 {
+    let i: u32 = i0;
+    let neg: u32 = 0;
+    if i < n {
+        let c0: u32 = load8(p, i);
+        if c0 == 45 {
+            neg = 1;
+            i = i + 1;
+        } else if c0 == 43 {
+            i = i + 1;
+        }
+    }
+    // inf / infinity / nan（大小写不敏感）
+    if i + 2 < n {
+        let a: u32 = ff_lower(load8(p, i));
+        let b: u32 = ff_lower(load8(p, i + 1));
+        let c: u32 = ff_lower(load8(p, i + 2));
+        if a == 110 && b == 97 && c == 110 { // nan
+            if neg == 1 {
+                return ff_ok(F64_QNAN | F64_SIGN_MASK, i + 3, used_out, ok_out);
+            }
+            return ff_ok(F64_QNAN, i + 3, used_out, ok_out);
+        }
+        if a == 105 && b == 110 && c == 102 { // inf
+            // "infinity" 也收（多 5 个字节）。
+            let end: u32 = i + 3;
+            if i + 7 < n {
+                let i1: u32 = ff_lower(load8(p, i + 3));
+                let i2: u32 = ff_lower(load8(p, i + 4));
+                let i3: u32 = ff_lower(load8(p, i + 5));
+                let i4: u32 = ff_lower(load8(p, i + 6));
+                let i5: u32 = ff_lower(load8(p, i + 7));
+                if i1 == 105 && i2 == 110 && i3 == 105 && i4 == 116 && i5 == 121 {
+                    end = i + 8;
+                }
+            }
+            if neg == 1 {
+                return ff_ok(F64_NEG_INF, end, used_out, ok_out);
+            }
+            return ff_ok(F64_POS_INF, end, used_out, ok_out);
+        }
+    }
+    let mant: u64 = 0;
+    let e10: i64 = 0;
+    let any: u32 = 0;
+    // 整数部分
+    let scanning: u32 = 1;
+    while scanning == 1 && i < n {
+        let c: u32 = load8(p, i);
+        if ff_is_digit(c) {
+            if mant < 1844674407370955161 as u64 {
+                mant = mant * (10 as u64) + ((c - 48) as u64);
+            } else {
+                e10 = e10 + 1; // 尾数放不下了：丢这一位，指数补回来
+            }
+            any = 1;
+            i = i + 1;
+        } else {
+            scanning = 0;
+        }
+    }
+    // 小数部分
+    if i < n && load8(p, i) == 46 { // '.'
+        i = i + 1;
+        let scanning2: u32 = 1;
+        while scanning2 == 1 && i < n {
+            let c2: u32 = load8(p, i);
+            if ff_is_digit(c2) {
+                if mant < 1844674407370955161 as u64 {
+                    mant = mant * (10 as u64) + ((c2 - 48) as u64);
+                    e10 = e10 - 1;
+                }
+                any = 1;
+                i = i + 1;
+            } else {
+                scanning2 = 0;
+            }
+        }
+    }
+    if any == 0 {
+        return ff_fail(used_out, ok_out);
+    }
+    // 指数
+    if i < n {
+        let ce: u32 = load8(p, i);
+        if ce == 101 || ce == 69 { // e E
+            i = i + 1;
+            let eneg: u32 = 0;
+            if i < n {
+                if load8(p, i) == 45 {
+                    eneg = 1;
+                    i = i + 1;
+                } else if load8(p, i) == 43 {
+                    i = i + 1;
+                }
+            }
+            let ex: i64 = 0 as i64;
+            let anye: u32 = 0;
+            let scanning3: u32 = 1;
+            while scanning3 == 1 && i < n {
+                let c3: u32 = load8(p, i);
+                if ff_is_digit(c3) {
+                    if ex < (100000 as i64) {
+                        ex = ex * (10 as i64) + ((c3 - 48) as i64);
+                    }
+                    anye = 1;
+                    i = i + 1;
+                } else {
+                    scanning3 = 0;
+                }
+            }
+            if anye == 0 {
+                return ff_fail(used_out, ok_out);
+            }
+            if eneg == 1 {
+                e10 = e10 - ex;
+            } else {
+                e10 = e10 + ex;
+            }
+        }
+    }
+    let num_end: u32 = i;
+    // `strict`（整串解析）要求后面只剩空白；`f64fmt_parse_n`（strtod 语义）停在数字处。
+    if strict == 1 {
+        let j: u32 = i;
+        while j < n {
+            if ff_is_space(load8(p, j)) {
+                j = j + 1;
+            } else {
+                return ff_fail(used_out, ok_out);
+            }
+        }
+    }
+    if mant == (0 as u64) {
+        if neg == 1 {
+            return ff_ok(F64_NEG_ZERO, num_end, used_out, ok_out);
+        }
+        return ff_ok(F64_POS_ZERO, num_end, used_out, ok_out);
+    }
+    // 极端指数：超出 double 范围就直接给 inf/0，别真跑几十万次循环。
+    if e10 > (400 as i64) {
+        if neg == 1 {
+            return ff_ok(F64_NEG_INF, num_end, used_out, ok_out);
+        }
+        return ff_ok(F64_POS_INF, num_end, used_out, ok_out);
+    }
+    if e10 < (0 as i64 - 400) {
+        if neg == 1 {
+            return ff_ok(F64_NEG_ZERO, num_end, used_out, ok_out);
+        }
+        return ff_ok(F64_POS_ZERO, num_end, used_out, ok_out);
+    }
+    let x0: u64 = f64conv_from_u64(mant);
+    let x: u64 = ff_scale10(x0, e10);
+    if neg == 1 {
+        return ff_ok(f64_neg(x), num_end, used_out, ok_out);
+    }
+    return ff_ok(x, num_end, used_out, ok_out);
+}
+
+/// x * 10^k，按 22 一段缩放（22 是 10^k 在 double 里精确的最大 k）。
+fn ff_scale10(x0: u64, k0: i64) -> u64 {
+    let x: u64 = x0;
+    let k: i64 = k0;
+    let going: u32 = 1;
+    while going == 1 {
+        if k > (22 as i64) {
+            x = f64_mul(x, ff_pow10(22));
+            k = k - 22;
+        } else if k < (0 as i64 - 22) {
+            x = f64_div(x, ff_pow10(22));
+            k = k + 22;
+        } else {
+            going = 0;
+        }
+    }
+    if k > (0 as i64) {
+        return f64_mul(x, ff_pow10(k as u32));
+    }
+    if k < (0 as i64) {
+        return f64_div(x, ff_pow10((0 as i64 - k) as u32));
+    }
+    return x;
 }
 
 // ---------------------------------------------------------------- 自检
@@ -687,10 +965,10 @@ fn test_f64fmt_fixed_zero_and_signs() -> bool {
 fn test_f64fmt_sci_basic_and_rounding() -> bool {
     let o: ptr = alloc(384);
     let sc: ptr = alloc(f64fmt_scratch_bytes());
-    let ok1: bool = ff_sci(o, sc, F64_ONE, 1, "1e+0");
-    let ok2: bool = ff_sci(o, sc, F64_THREE, 2, "3.0e+0");
-    let ok3: bool = ff_sci(o, sc, 0x3FB999999999999A, 3, "1.00e-1");
-    let ok4: bool = ff_sci(o, sc, 0x3FD5555555555555, 4, "3.333e-1");
+    let ok1: bool = ff_sci(o, sc, F64_ONE, 1, "1e+00");
+    let ok2: bool = ff_sci(o, sc, F64_THREE, 2, "3.0e+00");
+    let ok3: bool = ff_sci(o, sc, 0x3FB999999999999A, 3, "1.00e-01");
+    let ok4: bool = ff_sci(o, sc, 0x3FD5555555555555, 4, "3.333e-01");
     let ok5: bool = ff_sci(o, sc, F64_MAX, 17, "1.7976931348623157e+308");
     let ok6: bool = ff_sci(o, sc, F64_MIN_SUB, 1, "5e-324");
     return ok1 && ok2 && ok3 && ok4 && ok5 && ok6;
@@ -699,8 +977,8 @@ fn test_f64fmt_sci_basic_and_rounding() -> bool {
 fn test_f64fmt_sci_zero_and_specials() -> bool {
     let o: ptr = alloc(384);
     let sc: ptr = alloc(f64fmt_scratch_bytes());
-    let ok1: bool = ff_sci(o, sc, F64_POS_ZERO, 1, "0e+0");
-    let ok2: bool = ff_sci(o, sc, F64_POS_ZERO, 3, "0.00e+0");
+    let ok1: bool = ff_sci(o, sc, F64_POS_ZERO, 1, "0e+00");
+    let ok2: bool = ff_sci(o, sc, F64_POS_ZERO, 3, "0.00e+00");
     let ok3: bool = ff_sci(o, sc, F64_NEG_INF, 3, "-inf");
     let ok4: bool = ff_sci(o, sc, F64_QNAN, 3, "nan");
     return ok1 && ok2 && ok3 && ok4;

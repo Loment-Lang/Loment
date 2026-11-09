@@ -206,13 +206,14 @@ pub fn putchar(c: u32) -> i32 {
 /// `getchar` —— 一个字节从 **fd 0**。**文件尾返回 -1**（libc 同）。
 pub fn getchar() -> i32 {
     let one: ptr = alloc(1);
+    store8(one, 0, 0 as u8);
     let got: u64 = io_read_all(0 as i64, one, 1);
+    // 先读、再放：`free` 之后就不该再碰这块（LMS 的 E029 正是这条）。
+    let c: u32 = load8(one, 0);
+    let _fr: u32 = free(one);
     if got == 0 {
-        let _fr: u32 = free(one);
         return 0 as i32 - 1;
     }
-    let c: u32 = load8(one, 0);
-    let _fr2: u32 = free(one);
     return c as i32;
 }
 

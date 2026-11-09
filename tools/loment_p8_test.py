@@ -3532,6 +3532,27 @@ def test_lgc_tur2026_3_reaches_the_selfhost_driver():
 
 
 @test
+def test_borrow_domains_are_byte_identical():
+    """借用生命周期域（`docs/318` 期 1 + 期 2）：两个实现的产物逐字节一致。
+
+    这份语料把五种形状都用了一遍（`borrow` / `borrow_mut` / `window` / `split` /
+    `cursor`），而且是**能编过**的那种 —— 规则违规的那些由 `lomentc_test` 的两条判据
+    逐个钉住，这里钉的是"接受时产物不分叉"：域只在检查器里，块进 IR 与普通块同形。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    rel = "loment/examples/domains/borrow_lifetimes.lomt"
+    target = ROOT / rel
+    with tempfile.TemporaryDirectory() as td:
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_bdom")
+        rc, out, err = _run_driver_raw(elf, rel, td, "bdom")
+        assert rc == 0, f"自举驱动编不过借用生命周期域: {err[-400:]}"
+        assert out == _unit_ll(target), "驱动装载后的产物与参考实现分叉"
+    print("      借用域: 五种形状各一份语料，两个实现逐字节一致")
+
+
+@test
 def test_m97_edition_collision_gate_matches_between_implementations():
     """**版次不静默**（`docs/312`）：默认 = 最新版次后，两个实现的拒/收必须一致。
 

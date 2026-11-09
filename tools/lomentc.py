@@ -1793,6 +1793,12 @@ class DomainBlock:
     borrow_src: str = ""
     #: `borrow_mut(xs)` = 独占域；`borrow(xs)` = 共享域（`view` / `freeze` 都是它）。
     borrow_mut: bool = False
+    #: 期 2 的三种形状（`docs/318` §2.3–§2.5）：`window` / `split` / `cursor`。
+    #: 空串 = 期 1 的两种（`borrow` / `borrow_mut`）。三种的形状都是区域，不是位置。
+    dom_mode: str = ""
+    #: `window(xs, LO, N)` / `split(xs, LO, N)` 的两个**编译期**整数（期 2 只收字面量）。
+    win_lo: int = 0
+    win_n: int = 0
 
 
 @dataclass
@@ -3843,8 +3849,9 @@ class Parser:
         # `docs/318`：区域形状 —— `domain V : borrow(xs)` / `domain borrow_mut(xs)`。
         # 只认 `borrow` / `borrow_mut` 这两个名字（`domain(...)` 仍可以是普通调用）。
         if a.kind == "ident" and b.val == ":" and c.kind == "ident" and d.val == "(":
-            return c.val in ("borrow", "borrow_mut")
-        if a.kind == "ident" and b.val == "(" and a.val in ("borrow", "borrow_mut"):
+            return c.val in ("borrow", "borrow_mut", "window", "split", "cursor")
+        if a.kind == "ident" and b.val == "(" and a.val in (
+                "borrow", "borrow_mut", "window", "split", "cursor"):
             return True
         return a.kind == "ident" and b.val == "["
 
@@ -3966,20 +3973,34 @@ class Parser:
                 and self.peek(1).val == ":"):
             name = self.next().val
             self.next()
-        # **区域形状**（`docs/318` §1）：`borrow(xs)` / `borrow_mut(xs)`。形状是区域，
-        # 不是位置 —— lo/hi 不参与判断，时律固定成 `regular`（本期的三个域都不用状态）。
-        if (self.at("ident", "borrow") or self.at("ident", "borrow_mut")) \
+        # **区域形状**（`docs/318`）：期 1 的 `borrow(xs)` / `borrow_mut(xs)`，
+        # 期 2 的 `window(xs, LO, N)` / `split(xs, LO, N)` / `cursor(xs)`。
+        # 形状是区域，不是位置 —— lo/hi 不参与判断，时律固定成 `regular`。
+        if (self.at("ident") and self.peek().val in
+                ("borrow", "borrow_mut", "window", "split", "cursor")) \
                 and self.peek(1).val == "(":
             mode = self.next().val
             self.expect("punct", "(")
             src = self.ident("被借用的名字")
+            wlo = wn = 0
+            if mode in ("window", "split"):
+                # 期 2 只收**编译期字面量**：动态界要运行期检查，那是期 3。
+                self.expect("punct", ",")
+                wlo = self.int_lit()
+                self.expect("punct", ",")
+                wn = self.int_lit()
+                if wn <= 0:
+                    raise LomError(kw.line, 1,
+                                   f"`{mode}` 的宽度必须是正的编译期整数（得到 {wn}）")
             self.expect("punct", ")")
             if not name:
                 self.dom_seq += 1
                 name = f"__dom${self.dom_seq}"
+            dom_mode = "" if mode in ("borrow", "borrow_mut") else mode
             blk = DomainBlock(name, mode, 0, 0, False, False, "regular", 0, False, [],
                               kw.line, borrow_src=src,
-                              borrow_mut=(mode == "borrow_mut"))
+                              borrow_mut=(mode == "borrow_mut"),
+                              dom_mode=dom_mode, win_lo=wlo, win_n=wn)
             self.dom_stack.append(blk)
             try:
                 blk.body = self.parse_block()
@@ -7904,6 +7925,21 @@ def _borrow_domain_errs(f: Func) -> list[str]:
             for y in v:
                 reap(y, fn)
 
+    def reap_shallow(v, fn) -> None:
+        """同 `reap`，但**不进嵌套的 `DomainBlock`** —— 嵌套域有自己的形状，
+        外层窗口的下标规则不能管到它身上。"""
+        if isinstance(v, DomainBlock):
+            return
+        if _dc.is_dataclass(v) and not isinstance(v, type):
+            fn(v)
+            for fd in _dc.fields(v):
+                if fd.name in ("line", "col", "off", "len"):
+                    continue
+                reap_shallow(getattr(v, fd.name), fn)
+        elif isinstance(v, (list, tuple)):
+            for y in v:
+                reap_shallow(y, fn)
+
     visible = {p.name for p in f.params}
 
     def note(v) -> None:
@@ -7929,11 +7965,13 @@ def _borrow_domain_errs(f: Func) -> list[str]:
 
         def scan(v, _b=b, _src=src) -> None:
             ln = getattr(v, "line", _b.line)
-            if isinstance(v, Assign):
+            # R2（写 / 再借）只对期 1 的两种形状有意义：window / split / cursor 的
+            # 权威来自来源自己的可变性，写是被允许的（窗口/半区只约束**下标**）。
+            if not _b.dom_mode and isinstance(v, Assign):
                 r = _place_root(v.target)
                 if r is not None and r.name == _src and not _b.borrow_mut:
                     errs.append(f"{ln}: borrow 域 {_b.name} 里只能读 {_src}，不能写")
-            elif isinstance(v, Call) and v.name in _STORE_BUILTINS and v.args:
+            elif not _b.dom_mode and isinstance(v, Call) and v.name in _STORE_BUILTINS                     and v.args:
                 r = _place_root(v.args[0])
                 if r is not None and r.name == _src and not _b.borrow_mut:
                     errs.append(f"{ln}: borrow 域 {_b.name} 里只能读 {_src}，不能写")
@@ -7941,7 +7979,7 @@ def _borrow_domain_errs(f: Func) -> list[str]:
                 a0 = v.args[0]
                 if isinstance(a0, Ident) and a0.name == _src:
                     errs.append(f"{ln}: {_src} 还在域 {_b.name} 里被借用，不能 free")
-            elif isinstance(v, Un) and v.op in ("&", "&mut"):
+            elif not _b.dom_mode and isinstance(v, Un) and v.op in ("&", "&mut"):
                 r = _place_root(v.expr)
                 if r is not None and r.name == _src:
                     if _b.borrow_mut:
@@ -7963,6 +8001,45 @@ def _borrow_domain_errs(f: Func) -> list[str]:
                     errs.append(f"{ln}: 域 {_b.name} 里的借用不能带出（来源 {_src}）")
 
         reap(b.body, scan)
+
+        # ---- 期 2（`docs/318` §2.3–§2.5）：window / split / cursor
+        if b.dom_mode in ("window", "split"):
+            wlo, whi = b.win_lo, b.win_lo + b.win_n
+
+            def win_scan(v, _b=b, _src=src, _lo=wlo, _hi=whi) -> None:
+                # 只判**字面量**下标：动态下标要运行期检查，那是期 3。
+                if (isinstance(v, Index) and isinstance(v.obj, Ident)
+                        and v.obj.name == _src and isinstance(v.idx, IntLit)):
+                    k = v.idx.value
+                    if not (_lo <= k < _hi):
+                        errs.append(f"{v.line}: 域 {_b.name} 的窗口是 [{_lo}, {_hi})，"
+                                    f"下标 {k} 越窗")
+
+            reap_shallow(b.body, win_scan)
+        elif b.dom_mode == "cursor":
+
+            def cur_scan(v, _b=b, _src=src) -> None:
+                if isinstance(v, Let) and isinstance(v.expr, Un) \
+                        and v.expr.op in ("&", "&mut"):
+                    r = _place_root(v.expr.expr)
+                    if r is not None and r.name == _src:
+                        errs.append(
+                            f"{v.line}: 游标域 {_b.name} 里不能把 {_src} 的元素借用存进局部"
+                            " —— 直接写 `xs[下标]`，借用只活一轮")
+
+            reap_shallow(b.body, cur_scan)
+
+    # `split` 的互斥（`docs/315` 的 `mutex` 边）：同一来源上两段**重叠**的 split 域
+    # 不能同时开着 —— 那正是"两半"这个说法要排除的形状。
+    splits = [(b.borrow_src, b.win_lo, b.win_lo + b.win_n, b)
+              for b in blocks if b.dom_mode == "split"]
+    for i in range(len(splits)):
+        for j in range(i + 1, len(splits)):
+            s1, lo1, hi1, b1 = splits[i]
+            s2, lo2, hi2, b2 = splits[j]
+            if s1 == s2 and max(lo1, lo2) < min(hi1, hi2):
+                errs.append(f"{b2.line}: split 域 {b1.name} 与 {b2.name} 在 {s1} 上重叠"
+                            f"（[{lo1}, {hi1}) 与 [{lo2}, {hi2})）—— 两半必须互斥")
     return errs
 
 

@@ -5881,7 +5881,9 @@ def test_borrow_domains_phase1_rules():
     R1 寿命：源必须是可见的名字；R2 权威：共享域不许写、独占域不许再借；
     R3 逃逸：域里借出去的不能 `return`，仍被借用时不能 `free`。
 
-    十个负例都必须**先在没这条规则的主干上编得过** —— 否则判据在空转。
+    判据末尾把 `_borrow_domain_errs` **临时关掉**，六个负例必须全部放行 —— 红的
+    位置因此确定在这条规则上，不是别的地方。形状本身是新增的，所以"先红后绿"
+    这一格只能这样证明（关掉规则 ⇒ 绿的对照），不能靠旧主干。
     """
     def errs(body: str) -> list[str]:
         with tempfile.TemporaryDirectory() as td:
@@ -5929,7 +5931,32 @@ def test_borrow_domains_phase1_rules():
     # `domain(` 仍然可以是普通调用 —— 上下文关键字不被抢
     assert not any("域" in x for x in errs(
         "fn f() -> u32 { return 0; }\n"))
-    print("      借用域期 1：view / freeze / exclusive 三条规则逐格成立")
+
+    # **红必须红在这条规则上**：把 `_borrow_domain_errs` 临时关掉，所有负例都得能编过
+    # —— 否则判据测的是别的东西（`docs/243` 那条"空判据"教训）。
+    negatives = (
+        "fn f(xs: mut [u32]) -> u32 {\n    domain v : borrow(xs) {\n        xs[0] = 1;\n"
+        "        return 0;\n    }\n}\n",
+        "fn f(p: ptr) -> u32 {\n    domain v : borrow(p) {\n        store8(p, 0, 1);\n"
+        "    }\n    return 0;\n}\n",
+        "fn f(xs: mut [u32]) -> u32 {\n    domain e : borrow_mut(xs) {\n"
+        "        let w: [u32] = &xs;\n        return w[0];\n    }\n}\n",
+        "fn f(xs: [u32]) -> u32 {\n    domain v : borrow(xs) {\n"
+        "        let w: mut [u32] = &mut xs;\n        return w[0];\n    }\n}\n",
+        "fn f(xs: [u32]) -> [u32] {\n    domain v : borrow(xs) {\n        return &xs;\n"
+        "    }\n}\n",
+        "const N: u32 = 8;\nfn f() -> u32 {\n    let p: ptr = alloc(N);\n"
+        "    domain v : borrow_mut(p) {\n        free(p);\n    }\n    return 0;\n}\n",
+    )
+    orig = lomentc._borrow_domain_errs
+    lomentc._borrow_domain_errs = lambda f: []
+    try:
+        for body in negatives:
+            assert errs(body) == [], (
+                "关掉这条规则之后仍然红 —— 那这一格测的不是它:\n" + body + str(errs(body)))
+    finally:
+        lomentc._borrow_domain_errs = orig
+    print("      借用域期 1：view / freeze / exclusive 三条规则逐格成立（关掉即放行）")
 
 
 @test

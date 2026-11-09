@@ -3049,6 +3049,18 @@ fn dom_at(lvl: u32, f: u32) -> u32 {
 
 /// `docs/314`：`domain` 是**上下文关键字**。只有 `domain NAME : SPACE[` 或
 /// `domain SPACE[` 才是块；`sock_new(domain: u64, …)` 里的名字不算。
+/// 带括号的区域形状（`docs/318`）：borrow / borrow_mut / window / split / cursor /
+/// loan / session / seal。`epoch` 不带括号，由调用点单独认。
+fn is_region_shape(src: ptr, toks: ptr, i: u32) -> u32 {
+    if tok_is(src, toks, i, "borrow") || tok_is(src, toks, i, "borrow_mut")
+            || tok_is(src, toks, i, "window") || tok_is(src, toks, i, "split")
+            || tok_is(src, toks, i, "cursor") || tok_is(src, toks, i, "loan")
+            || tok_is(src, toks, i, "session") || tok_is(src, toks, i, "seal") {
+        return 1;
+    }
+    return 0;
+}
+
 fn is_dom_block(src: ptr, toks: ptr, i: u32) -> u32 {
     let a: u32 = i + 1;
     if tok_kind(toks, a) != 0 {
@@ -3062,17 +3074,14 @@ fn is_dom_block(src: ptr, toks: ptr, i: u32) -> u32 {
         return 1;
     }
     // `docs/318`：区域形状 —— `domain V : borrow(xs)` / `domain borrow_mut(xs)` 等五种。
-    if tok_kind(toks, a + 2) == 0 && tok_is(src, toks, a + 3, "(") {
-        if (tok_is(src, toks, a + 2, "borrow") || tok_is(src, toks, a + 2, "borrow_mut")
-                || tok_is(src, toks, a + 2, "window") || tok_is(src, toks, a + 2, "split")
-                || tok_is(src, toks, a + 2, "cursor")) {
-            return 1;
-        }
+    if tok_kind(toks, a + 2) == 0 && tok_is(src, toks, a + 3, "(") && is_region_shape(src, toks, a + 2) == 1 {
+        return 1;
     }
-    if tok_is(src, toks, a + 1, "(")
-            && (tok_is(src, toks, a, "borrow") || tok_is(src, toks, a, "borrow_mut")
-                || tok_is(src, toks, a, "window") || tok_is(src, toks, a, "split")
-                || tok_is(src, toks, a, "cursor")) {
+    // `domain e : epoch { … }`：不带括号的那种（`docs/318` 期 3）。
+    if tok_is(src, toks, a + 2, "epoch") && tok_is(src, toks, a + 3, "{") {
+        return 1;
+    }
+    if tok_is(src, toks, a + 1, "(") && is_region_shape(src, toks, a) == 1 {
         return 1;
     }
     return 0;
@@ -7273,16 +7282,18 @@ fn dom_stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         // `docs/318`：五种**区域形状**（borrow / borrow_mut / window / split / cursor）。
         // 形状是区域不是位置 —— 参考实现那边它们是 `kind=regular`、只发体，这里同样
         // 跳过形状直接跑到 `{`，收尾与普通域块同一段。
-        if tok_kind(toks, sp) == 0
-                && (tok_is(src, toks, sp, "borrow") || tok_is(src, toks, sp, "borrow_mut")
-                    || tok_is(src, toks, sp, "window") || tok_is(src, toks, sp, "split")
-                    || tok_is(src, toks, sp, "cursor"))
+        if tok_kind(toks, sp) == 0 && is_region_shape(src, toks, sp) == 1
                 && tok_is(src, toks, sp + 1, "(") {
             let lb: u32 = sp + 1;
             while tok_kind(toks, lb) != 4 && !tok_is(src, toks, lb, "{") {
                 lb = lb + 1;
             }
             return dom_body(s, out, src, toks, lb, ret);
+        }
+        // `domain e : epoch { … }`（期 3）：形状是"本块"，块与普通块同形。
+        if tok_kind(toks, sp) == 0 && tok_is(src, toks, sp, "epoch")
+                && tok_is(src, toks, sp + 1, "{") {
+            return dom_body(s, out, src, toks, sp + 1, ret);
         }
         let q: u32 = sp + 2;
         let lof: u32 = 0;

@@ -1,4 +1,4 @@
-# 317 · 借用生命周期域：十个
+# 318 · 借用生命周期域：十个
 
 > 状态: **期 1 参考侧已落**（2026-11-09）：`borrow(x)` / `borrow_mut(x)` 两种形状与
 > R1/R2/R3 三条规则在 `tools/lomentc.py` 上实装（`view` / `freeze` / `exclusive` 三个域），

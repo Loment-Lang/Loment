@@ -82,8 +82,13 @@ pub fn requires() -> str { return "alloc,float"; }
 
 **关掉**：`LOMENT_CACHE=off`；`python tools/loment_cache.py --stats|--clear` 看账与清理。
 
-**边界**：这一层在**参考实现**里。自举链（`loment build/run` 用的 stage1）还没有缓存 ——
-它要先装载才能知道依赖集合，键得等装载完；那是下一步，不假装已经做了。
+**自举侧**（`loment/selfhost/driver.lomt`）用同一套键的变体：`check` 通过之后、
+codegen 之前算键 = 纪元串 + 版次 + **编译器自身**（`/proc/self/exe`）的 128 位 FNV +
+合并后的单元全文；命中就把缓存文件的分块流到 stdout 并跳过 codegen。目录默认 `$HOME/.cache/loment`（没有 `HOME` 才落 `/tmp/loment-cache`），
+`LOMENT_CACHE_DIR` 覆盖、`LOMENT_CACHE=off` 关闭、`--no-cache` 也关。回写走临时名 + `rename`，读到的永远是完整文件。
+判据 `loment_p8_test::test_m98_selfhost_ir_cache` 用**哨兵**而不是计时：第一次跑完把
+缓存文件改写成 `; CACHED`，第二次的 stdout 必须正好是它；再钉 `--no-cache`、
+`LOMENT_CACHE=off` 与"改源换键"三条。
 
 ## 3. 判据
 

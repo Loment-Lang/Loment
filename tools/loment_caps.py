@@ -123,6 +123,16 @@ LOOKAHEAD = 8
 #:   * **第二类的局部常量**：字面量上界 / 定长数组是**局部**的（拷贝到定长目的地、
 #:     定宽编码、算法常量），到界即停、不写穿；哪些是"有意截断"逐条写在下面。
 EXPLAINED: dict[tuple[str, str], str] = {
+    ("loment/selfhost/driver.lomt", "PKGCH_CAP"):
+        "包清单的 `choose()` 词表超过 256 B ⇒ **放弃整份清单**（不截断注入），"
+        "后果只是少一条需求、由 E031/依赖义务接住（`docs/324`）",
+    ("loment/selfhost/driver.lomt", "CACHE_DIR_CAP"):
+        "缓存目录来自 `LOMENT_CACHE_DIR`：超长就是**这次不缓存**（fail-open），"
+        "截断会指到另一个目录，所以宁可不写",
+    ("loment/selfhost/driver.lomt", "CACHE_PATH_CAP"):
+        "缓存路径拼接超宽 ⇒ `cache_path` 返回 0、这次不缓存，不截断出第二条路径",
+    ("loment/selfhost/driver.lomt", "CACHE_BUF"):
+        "`read()` 的分块上界，不是写入容量：内核最多回这么多字节，写路径自己按长度算",
     ("loment/selfhost/checker.lomt", "K_FN"):
         "kind 标签：`K_FN * 256 + argc` 是把它**拼进一个码**，不是「能装多少」",
     ("loment/selfhost/checker.lomt", "K_INT_MIN"):

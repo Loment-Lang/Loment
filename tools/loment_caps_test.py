@@ -124,8 +124,8 @@ def test(fn):
 #: 捕获表的步长 `CG_DFR_STRIDE`（84 B/条，**不是**上界，来路写在 `EXPLAINED`）与三个
 #: 真上界 `CG_MAXDFR` / `CG_MAXDFRAMES` / `CG_MAXDFARGS`（都判了 `>=` 并 `cg_fail`）。
 #: 条数 251 → **255**、沉默 168 → **169**（多出来的那一处就是步长本身）。
-CAPACITY_SITES = 260
-SILENT_SITES = 169
+CAPACITY_SITES = 264
+SILENT_SITES = 173
 
 #: 第二类：字面量上界（`#770`）。`[T; N]` 与 `literal:<N>` 各自钉住总数与沉默的那一份。
 LITERAL_SITES = 65
@@ -148,6 +148,9 @@ SILENT_NAMES = frozenset((
     "CR",
     "CTX_CAP",
     "CUR_CAP",
+    "CACHE_BUF",
+    "CACHE_DIR_CAP",
+    "CACHE_PATH_CAP",
     "CW",
     "C_CAND",
     "DECL_KW",
@@ -227,6 +230,7 @@ SILENT_NAMES = frozenset((
     "N_DOC",
     "OB_CAP",
     "OUT_CAP",
+    "PKGCH_CAP",
     "PATHW",
     "PATH_CAP",
     "POOL_CAP",

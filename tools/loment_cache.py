@@ -81,19 +81,37 @@ def tool_digest() -> str:
     return h.hexdigest()
 
 
-def _unit_sources(units) -> list[tuple[str, bytes]] | None:
-    """所有单元的 `(路径, 字节)`；任何一个没有源文件就返回 None（不缓存）。"""
+def _unit_digests(units) -> list[tuple[str, bytes]] | None:
+    """所有单元的 `(路径, 实际参与编译的 token 流摘要)`；没有 src 就返回 None。
+
+    **不能只哈希盘上的文件字节**：前门会把别的表层语法翻成 Loment（`choose write
+    grammar …`）、`comefor` 会在 token 层展开、发行版注入会把 `LOMENT_CHANNEL` 那一行
+    换掉 —— 这三件事都**不改文件**，却改编译输入。`loment_channel_test` 就是这么抓到
+    第一版的：dev 与 release 两个种子命中了同一条缓存，输出一模一样。
+    """
     out: list[tuple[str, bytes]] = []
     for m in units:
         src = getattr(m, "src", None)
         if src is None:
             return None
         try:
-            data = Path(src).read_bytes()
             key = str(Path(src).resolve())
         except OSError:
             return None
-        out.append((key, data))
+        h = hashlib.sha256()
+        toks = getattr(m, "toks", None)
+        if toks:
+            for t in toks:
+                h.update(t.kind.encode("utf-8"))
+                h.update(b"\x00")
+                h.update(str(t.val).encode("utf-8"))
+                h.update(b"\x00")
+        else:
+            try:
+                h.update(Path(src).read_bytes())
+            except OSError:
+                return None
+        out.append((key, h.digest()))
     out.sort(key=lambda kv: kv[0])
     return out
 
@@ -101,7 +119,7 @@ def _unit_sources(units) -> list[tuple[str, bytes]] | None:
 def key_for(mod, deps, *, flags: dict | None = None) -> str | None:
     """这一份单元 + 这一组开关的缓存键；不可缓存时返回 None。"""
     units = [mod, *(deps or [])]
-    srcs = _unit_sources(units)
+    srcs = _unit_digests(units)
     if srcs is None:
         return None
     import lomentc  # 延迟导入：本模块会在 lomentc 内部被调用

@@ -5919,6 +5919,91 @@ def test_domain_blocks_scope_and_auto_guard():
 
 
 @test
+def test_borrow_domains_phase1_rules():
+    """`docs/318` 期 1：`borrow(x)` / `borrow_mut(x)` 两种区域形状 + 三条规则。
+
+    R1 寿命：源必须是可见的名字；R2 权威：共享域不许写、独占域不许再借；
+    R3 逃逸：域里借出去的不能 `return`，仍被借用时不能 `free`。
+
+    判据末尾把 `_borrow_domain_errs` **临时关掉**，六个负例必须全部放行 —— 红的
+    位置因此确定在这条规则上，不是别的地方。形状本身是新增的，所以"先红后绿"
+    这一格只能这样证明（关掉规则 ⇒ 绿的对照），不能靠旧主干。
+    """
+    def errs(body: str) -> list[str]:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "b.lomt"
+            p.write_text("choose write grammar tur2026.3\nmodule b\nchoose runtime\n\n" + body,
+                         encoding="utf-8", newline="\n")
+            m = lomentc.load(p)
+            return lomentc.check(m, deps=[])
+
+    # 正例：共享域只读；独占域可写（源是 mut 切片）
+    assert errs("fn f(xs: [u32]) -> u32 {\n"
+                "    domain v : borrow(xs) {\n        return xs[0];\n    }\n}\n") == []
+    assert errs("fn f(xs: mut [u32]) -> u32 {\n"
+                "    domain e : borrow_mut(xs) {\n        xs[0] = 1;\n        return xs[0];\n"
+                "    }\n}\n") == []
+    # `freeze` 就是共享域套在 mut 源上：读可以
+    assert errs("fn f(xs: mut [u32]) -> u32 {\n"
+                "    domain z : borrow(xs) {\n        return xs[0];\n    }\n}\n") == []
+
+    # R2a 共享域不许写（下标 / 内建两条路）
+    assert any("只能读 xs" in x for x in errs(
+        "fn f(xs: mut [u32]) -> u32 {\n    domain v : borrow(xs) {\n        xs[0] = 1;\n"
+        "        return 0;\n    }\n}\n"))
+    assert any("只能读 p" in x for x in errs(
+        "fn f(p: ptr) -> u32 {\n    domain v : borrow(p) {\n        store8(p, 0, 1);\n"
+        "    }\n    return 0;\n}\n"))
+    # R2b 独占域不许再借（别名）
+    assert any("不能再借 xs" in x for x in errs(
+        "fn f(xs: mut [u32]) -> u32 {\n    domain e : borrow_mut(xs) {\n"
+        "        let w: [u32] = &xs;\n        return w[0];\n    }\n}\n"))
+    # R2a 共享域里连 `&mut` 也不行
+    assert any("不能再借 &mut xs" in x for x in errs(
+        "fn f(xs: [u32]) -> u32 {\n    domain v : borrow(xs) {\n"
+        "        let w: mut [u32] = &mut xs;\n        return w[0];\n    }\n}\n"))
+    # R3 借用不能带出、仍被借用时不能 free
+    assert any("不能带出" in x for x in errs(
+        "fn f(xs: [u32]) -> [u32] {\n    domain v : borrow(xs) {\n        return &xs;\n"
+        "    }\n}\n"))
+    assert any("不能 free" in x for x in errs(
+        "const N: u32 = 8;\nfn f() -> u32 {\n    let p: ptr = alloc(N);\n"
+        "    domain v : borrow_mut(p) {\n        free(p);\n    }\n    return 0;\n}\n"))
+    # R1 源必须可见
+    assert any("不在作用域里" in x for x in errs(
+        "fn f(xs: [u32]) -> u32 {\n    domain v : borrow(nope) {\n        return 0;\n}\n}\n"))
+    # `domain(` 仍然可以是普通调用 —— 上下文关键字不被抢
+    assert not any("域" in x for x in errs(
+        "fn f() -> u32 { return 0; }\n"))
+
+    # **红必须红在这条规则上**：把 `_borrow_domain_errs` 临时关掉，所有负例都得能编过
+    # —— 否则判据测的是别的东西（`docs/243` 那条"空判据"教训）。
+    negatives = (
+        "fn f(xs: mut [u32]) -> u32 {\n    domain v : borrow(xs) {\n        xs[0] = 1;\n"
+        "        return 0;\n    }\n}\n",
+        "fn f(p: ptr) -> u32 {\n    domain v : borrow(p) {\n        store8(p, 0, 1);\n"
+        "    }\n    return 0;\n}\n",
+        "fn f(xs: mut [u32]) -> u32 {\n    domain e : borrow_mut(xs) {\n"
+        "        let w: [u32] = &xs;\n        return w[0];\n    }\n}\n",
+        "fn f(xs: [u32]) -> u32 {\n    domain v : borrow(xs) {\n"
+        "        let w: mut [u32] = &mut xs;\n        return w[0];\n    }\n}\n",
+        "fn f(xs: [u32]) -> [u32] {\n    domain v : borrow(xs) {\n        return &xs;\n"
+        "    }\n}\n",
+        "const N: u32 = 8;\nfn f() -> u32 {\n    let p: ptr = alloc(N);\n"
+        "    domain v : borrow_mut(p) {\n        free(p);\n    }\n    return 0;\n}\n",
+    )
+    orig = lomentc._borrow_domain_errs
+    lomentc._borrow_domain_errs = lambda f: []
+    try:
+        for body in negatives:
+            assert errs(body) == [], (
+                "关掉这条规则之后仍然红 —— 那这一格测的不是它:\n" + body + str(errs(body)))
+    finally:
+        lomentc._borrow_domain_errs = orig
+    print("      借用域期 1：view / freeze / exclusive 三条规则逐格成立（关掉即放行）")
+
+
+@test
 def test_domain_blocks_per_instance_state():
     """`docs/313` §4：块 = 实例。循环每轮、递归每层各自一份状态（Rust 后端真跑）。"""
     import shutil

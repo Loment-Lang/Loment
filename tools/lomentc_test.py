@@ -48,6 +48,19 @@ def parse(src: str) -> lomentc.Module:
 def errs(src: str) -> list[str]:
     return lomentc.check(parse(src))
 
+def _compile_dep_unit(files: dict[str, str], entry: str = "app.lomt"):
+    """Compile a multi-file unit with the reference; return (errs, IR)."""
+    with tempfile.TemporaryDirectory(prefix="lomentc-1175-") as td:
+        d = Path(td)
+        for name, text in files.items():
+            (d / name).write_text(text, encoding="utf-8", newline="\n")
+        src = (d / entry).resolve()
+        mod = lomentc.load(src)
+        deps = lomentc.resolve_deps(mod, ROOT, src.parent, entry=src)
+        errs = lomentc.check(mod, deps=deps)
+        ir = lomentc.emit_llvm(mod, ROOT, deps) if not errs else None
+        return errs, ir
+
 
 # ---------------------------------------------------------------- 正例
 
@@ -1556,6 +1569,133 @@ def test_p4_guard_bounds():
     e = errs("module m\nchoose runtime\nfn f() -> u32 { guard nope(0); return 0; }\n")
     assert any("未声明的能力" in x for x in e), e
 
+
+
+@test
+def test_1175_dependency_guard_uses_the_dependency_bound():
+    """#1175: a guard in a dependency uses **that file's** `lo/hi`.
+
+    Before the fix the reference resolved by bare name against the entry's
+    table only, left `Guard` at its default `[0..0]`, and the emitted binary
+    trapped at the first in-range index.
+    """
+    lib = """module lib
+
+choose runtime
+
+capability blk : disk[0..4] revocable
+
+pub fn touch(i: u32) -> u32 {
+    guard blk(i);
+    return i;
+}
+"""
+    app = """module app
+
+choose runtime
+
+use "./lib.lomt"
+
+fn _start() {
+    let x: u32 = touch(3);
+    syscall4(60, x as u64, 0, 0);
+}
+"""
+    e, ir = _compile_dep_unit({"lib.lomt": lib, "app.lomt": app})
+    assert e == [], e
+    call = next(l for l in ir.splitlines() if "call void @__loment_guard2" in l)
+    assert call.rstrip().endswith("i64 0, i64 4, i64 0, i64 0, i64 0)"), call
+    table = next(l for l in ir.splitlines() if "@__loment_caps =" in l)
+    assert "[1 x" in table and "i64 0, i64 4, i64 1" in table, table
+
+
+@test
+def test_1175_literal_guard_in_dependency_uses_the_declared_bound():
+    """The literal check and the emitted bound must be the same declaration."""
+    lib = """module lib
+
+choose runtime
+
+capability blk : disk[0..4] revocable
+
+pub fn touch() -> u32 {
+    guard blk(3);
+    return 3;
+}
+"""
+    app = """module app
+
+choose runtime
+
+use "./lib.lomt"
+
+fn _start() {
+    syscall4(60, touch() as u64, 0, 0);
+}
+"""
+    e, ir = _compile_dep_unit({"lib.lomt": lib, "app.lomt": app})
+    assert e == [], e
+    call = next(l for l in ir.splitlines() if "call void @__loment_guard2" in l)
+    assert call.rstrip().endswith("i64 0, i64 4, i64 0, i64 0, i64 0)"), call
+
+
+@test
+def test_1175_duplicate_capability_across_files_is_e004():
+    """The entry may not redeclare a dependency's capability name (#1175)."""
+    lib = """module lib
+
+choose runtime
+
+capability blk : disk[0..4] revocable
+
+pub fn touch(i: u32) -> u32 {
+    guard blk(i);
+    return i;
+}
+"""
+    app = """module app
+
+choose runtime
+
+use "./lib.lomt"
+capability blk : disk[0..100] revocable
+
+fn _start() {
+    let x: u32 = touch(3);
+    syscall4(60, x as u64, 0, 0);
+}
+"""
+    e, _ = _compile_dep_unit({"lib.lomt": lib, "app.lomt": app})
+    assert any("同名声明重复" in x for x in e), e
+    msg = next(x for x in e if "同名声明重复" in x)
+    assert "app.lomt" in msg and "lib.lomt" in msg and ": 6:" in msg, msg
+
+
+@test
+def test_1175_guard_without_any_declaration_is_an_error():
+    """A guard whose name is nowhere in the unit must not become `[0..0]`."""
+    lib = """module lib
+
+choose runtime
+
+pub fn touch(i: u32) -> u32 {
+    guard blk(i);
+    return i;
+}
+"""
+    app = """module app
+
+choose runtime
+
+use "./lib.lomt"
+
+fn _start() {
+    let x: u32 = touch(3);
+    syscall4(60, x as u64, 0, 0);
+}
+"""
+    e, _ = _compile_dep_unit({"lib.lomt": lib, "app.lomt": app})
+    assert any("未声明的能力" in x for x in e), e
 
 @test
 def test_e028_literal_index_over_a_fixed_array():

@@ -1,5 +1,5 @@
 <!-- translated-from: docs/146-loment-capability-semantics.md -->
-<!-- source-sha256: 4b66a9699dfe6b4ffeb7bc57187afafa0e7904f0f942983ecc478a45ca16bba1 -->
+<!-- source-sha256: e2c08b96a02fb4c35c3b181eb393d5f13206d401f6f3d7c49e208c63c568ba74 -->
 
 # 146 · Formal semantics of Loment capability domains (M44)
 
@@ -20,6 +20,13 @@ In Loment it is declared with `capability <name> : <space>[<lo>..<hi>] [revocabl
 a `CapDomain` table (Rust) / an `@__loment_caps` constant table (IR), and the kernel and Potato read the same
 one.
 
+**A capability name is unit-wide, not file-wide**: the dependencies' declarations come first and the entry's
+last, and they form one table; a `guard` resolves by name in that table and uses the `lo/hi` of the file that
+declared it. A dependency's `guard` therefore cannot fall back to `[0..0]` because the entry did not repeat
+the name, and the entry cannot silently widen the library's bound. The same name declared in two files is a
+compile error (E004, positioned at the later declaration). The reference and the self-hosted implementation
+share this rule (#1175).
+
 ## 2. Semantics of the guard statement
 
 ```
@@ -37,7 +44,8 @@ guard <cap>(e);
 | `e` is an integer literal and `idx ∉ [lo, hi]` | **compile error** (`能力 X 域 [lo..hi]，索引 idx 越界` — "capability X has domain [lo..hi], index idx out of range") |
 | `e` is an integer literal and `idx ∈ [lo, hi]` | allowed (the run-time check is still generated, and may be optimised away) |
 | `e` is not a literal | allowed, run-time check |
-| `<cap>` is undeclared | compile error |
+| `<cap>` is undeclared (no such name **anywhere in the unit**) | compile error |
+| the same capability name is declared in two files | compile error (E004, at the later declaration) |
 | `<cap>.space` hits some `excluded "<space>: ..."` | compile error (M41) |
 
 ## 4. Soundness assertions (checkable, not a formal proof)

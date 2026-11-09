@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from . import aicheck as _aicheck
 from . import aiask as _aiask
+from . import loans as _loans
 from .cache import Cache
 from .census import census, census_e4
 from .derive import (build_trees, derivation, proof_hash, proof_root, sidecar,
@@ -44,6 +45,9 @@ aicheck_render = _aicheck.render_text
 #: 通道层（`docs/262` §10.7）：`--ask-cmd` / `--ask` 把请求送出去。
 aicheck_ask = _aiask.ask
 aicheck_prompt = _aiask.prompt
+#: E10 借用检查器（`docs/317`）：loan 图分析（报告面）。
+loans_analyze = _loans.analyze
+loans_text = _loans.text_lines
 
 __all__ = [
     "Cache",
@@ -81,6 +85,8 @@ __all__ = [
     "lspc_lines",
     "lspc_sheet",
     "lspc_text",
+    "loans_analyze",
+    "loans_text",
     "parse_acks",
     "parse_answers",
     "previous_items",

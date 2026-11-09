@@ -871,7 +871,9 @@ def test_m81_loment_checker_matches_python():
            # (拿后面 `struct` 的 `{` 当函数体), 所以它必须在正例里当钉子。
            ROOT / "loment" / "examples" / "native_trait.lomt",
            # `#538`：`no_gc` 是核心取值 —— 自举 checker 必须**收**它（只有参考收不算落地）。
-           ROOT / "loment" / "selfhost" / "pos" / "no_gc.lomt"]
+           ROOT / "loment" / "selfhost" / "pos" / "no_gc.lomt",
+           # `docs/299`：借用类型不再是"点名拒" —— 一份合法的借用程序必须零诊断。
+           ROOT / "loment" / "selfhost" / "pos" / "borrow.lomt"]
     with tempfile.TemporaryDirectory() as td:
         exe = _build_checker(td)
         exact = 0
@@ -1018,7 +1020,9 @@ def test_m82_loment_codegen_byte_identical():
                        # `#941`：`choose no_std` 的那行 IR 标记两份实现必须逐字节同。
                        ROOT / "loment" / "selfhost" / "ir_no_std.lomt",
                        # `#538`：`choose no_gc` 的那行 IR 标记两份实现必须逐字节同。
-                       ROOT / "loment" / "selfhost" / "ir_no_gc.lomt"):
+                       ROOT / "loment" / "selfhost" / "ir_no_gc.lomt",
+                       # `docs/299`：借用类型（`&T` / `&mut T` / `*r` / 写穿字段 / 借用字段）。
+                       ROOT / "loment" / "selfhost" / "ir_borrow.lomt"):
             want = _unit_ll(target)
             got = _run_codegen(exe, target, td)
             if got != want:

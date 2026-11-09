@@ -1,0 +1,12 @@
+module neg_lifetime_dangle
+
+// `docs/299` §3.2：`id` 的返回借用来自它的形参，于是 `id(&x)` 的来源是**局部** `x` ——
+// 返回它就是悬垂（E012）。参考实现与自举侧同一条。
+fn id(p: &u32) -> &u32 {
+    return p;
+}
+
+fn f(p: &u32) -> &u32 {
+    let x: u32 = 1;
+    return id(&x);
+}

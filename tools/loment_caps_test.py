@@ -130,8 +130,8 @@ SILENT_SITES = 169
 #: 第二类：字面量上界（`#770`）。`[T; N]` 与 `literal:<N>` 各自钉住总数与沉默的那一份。
 LITERAL_SITES = 65
 LITERAL_SILENT = 64
-ARRAY_SITES = 17
-ARRAY_SILENT = 16
+ARRAY_SITES = 19
+ARRAY_SILENT = 18
 
 #: 越界时**说不出话**的那些具名常量（`--silent` 去重、按字节序）。136 个。
 #: ⚠ 这里按**筛子**的口径（`not speaks`），所以那些"来路已写明"的也在内 ——
@@ -350,6 +350,8 @@ SILENT_ARRAYS = {
     ("loment/nltrans/Surface.lomt", "array:[i64;3]"): 1,
     ("loment/selfhost/codegen.lomt", "array:[u32;16]"): 1,
     ("loment/selfhost/ir_index.lomt", "array:[u64;4]"): 2,
+    ("loment/selfhost/ir_borrow.lomt", "array:[u32;2]"): 1,
+    ("loment/selfhost/pos/borrow.lomt", "array:[u32;2]"): 1,
     ("loment/selfhost/lexer.lomt", "array:[u32;16]"): 1,
     ("loment/selfhost/pos/ok.lomt", "array:[u32;4]"): 1,
     ("loment/tools/lomeol.lomt", "array:[u32;32]"): 1,

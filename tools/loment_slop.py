@@ -28,14 +28,16 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
-import shlex
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+#: 通道层复用 LSPE 的 `aiask`（`docs/262` §10.7）：argv 拆分、Windows 反斜杠、
+#: 围栏 JSON —— 同一套坑只踩一次。这里只定义**自己的**提示形状。
+sys.path.insert(0, str(ROOT / "loment"))
+from lspe import aiask as _aiask  # noqa: E402
 
 #: 默认阈值。数字是**政策**，不是自然常数 —— 调它们要改这一行并说明理由。
 MAX_LINES = 400
@@ -472,49 +474,11 @@ def ai_ingest(replies: dict, report: dict) -> dict:
     return {"hints": hints, "unknown": unknown, "extra": extra}
 
 
-def _argv(command) -> list[str]:
-    """参数表，不经 shell。Windows 上用 `posix=False`，否则 `C:\...` 的反斜杠会被吃掉。"""
-    if isinstance(command, (list, tuple)):
-        return [str(x) for x in command]
-    if os.name == "nt":
-        parts = shlex.split(command, posix=False)
-        return [p[1:-1] if len(p) >= 2 and p[0] == p[-1] and p[0] in "\"'"
-                else p for p in parts]
-    return shlex.split(command)
-
-
-def _first_json(text: str) -> dict:
-    """外部程序输出里的第一个 JSON 对象（容忍 ```json 围栏与前后闲话）。"""
-    t = text.strip()
-    if t.startswith("```"):
-        lines = t.splitlines()[1:]
-        if lines and lines[-1].startswith("```"):
-            lines = lines[:-1]
-        t = "\n".join(lines).strip()
-    lo, hi = t.find("{"), t.rfind("}")
-    if lo < 0 or hi <= lo:
-        raise SlopError("提示里没有 JSON 对象")
-    obj = json.loads(t[lo:hi + 1])
-    if not isinstance(obj, dict):
-        raise SlopError("提示必须是 JSON 对象")
-    return obj
-
-
 def _ai_ask(command, bundle: dict, timeout: float) -> dict:
     """外部模型提示：bundle 进 stdin、hints 出 stdout。**这一层永不阻断**（见 main）。"""
     payload = json.dumps({"system": AI_SYSTEM, "bundle": bundle},
                          ensure_ascii=False, sort_keys=True)
-    argv = _argv(command)
-    if not argv:
-        raise SlopError("`--ask-cmd` 是空的")
-    r = subprocess.run(argv, input=payload, capture_output=True, text=True,
-                       encoding="utf-8", errors="replace", shell=False,
-                       timeout=timeout)
-    if r.returncode != 0:
-        tail = (r.stderr or r.stdout or "").strip().splitlines()
-        raise SlopError(f"提示命令退出 {r.returncode}："
-                        f"{(tail[-1][:200] if tail else '（无输出）')}")
-    return _first_json(r.stdout)
+    return _aiask.parse_json_text(_aiask.run_raw(command, payload, timeout))
 
 
 def main(argv: list[str] | None = None) -> int:

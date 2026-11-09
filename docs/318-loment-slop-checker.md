@@ -64,6 +64,10 @@ loment slop check --ask-cmd 'any-model --json'
 - 提示层坏掉（模型没回、不是 JSON、进程失败）只打一行 `[slop] 提示层跳过`，
   报告照出。
 
+通道层也**复用** `loment/lspe/aiask.py`（`run_raw` / `parse_json_text`）：argv 拆分、
+Windows 反斜杠、围栏 JSON 只在一个地方踩坑。两份检查器共用一条通道，
+但各自定义自己的提示形状 —— Q014 回答与 slop 提示不是一回事。
+
 这条纪律与 LSPE 的 AI 检查器**同一条**（`docs/262` §10.7）：非确定性的外部工具
 只能产问题，不能产证据。判据
 `loment_slop_test::test_ai_hints_never_change_findings_or_exit_code` 钉住它 ——

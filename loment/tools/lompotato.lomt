@@ -744,6 +744,10 @@ fn is_top_key(ver: u32, kp: ptr, kl: u32) -> u32 {
     if ver >= 21 && eq_lit(kp, kl, "gc_control") == 1 {
         return 1;
     }
+    // v22 = v21 + **生命周期档**（`docs/299`）：`lifetime`。
+    if ver >= 22 && eq_lit(kp, kl, "lifetime") == 1 {
+        return 1;
+    }
     return 0;
 }
 
@@ -2094,6 +2098,9 @@ fn validate(mem: ptr, tot: u32) -> u32 {
         if eq_lit(t, l, "v21") == 1 {
             ver = 21;
         }
+        if eq_lit(t, l, "v22") == 1 {
+            ver = 22;
+        }
     }
     if ver == NOTFOUND {
         let _c: u32 = bad(mem);
@@ -2162,6 +2169,9 @@ fn validate(mem: ptr, tot: u32) -> u32 {
     }
     if ver >= 21 {
         chk_gc_control(mem, doc);
+    }
+    if ver >= 22 {
+        chk_lifetime(mem, doc);
     }
     return 0;
 }
@@ -2338,6 +2348,21 @@ fn gc_is(mem: ptr, doc: u32, want: str) -> u32 {
     }
     let l: u32 = jstr(mem, g, ptr_add(mem, M_SB2), 4096);
     return eq_lit(ptr_add(mem, M_SB2), l, want);
+}
+
+/// `lifetime`（v22，`docs/299`）：三个合法档名。**必填** —— 与 `gc` / `lms` 同一条
+/// 纪律，所以"这份产物有没有静态借用证明"是**不读源码可判的**。
+fn chk_lifetime(mem: ptr, doc: u32) -> u32 {
+    let ok: u32 = 0;
+    if jstr_field_is(mem, doc, "lifetime", "lifetime_no") == 1
+            || jstr_field_is(mem, doc, "lifetime", "lifetime_auto") == 1
+            || jstr_field_is(mem, doc, "lifetime", "lifetime_manual") == 1 {
+        ok = 1;
+    }
+    if ok == 0 {
+        let _b: u32 = bad(mem);
+    }
+    return 0;
 }
 
 /// `gc_control`（v21，`docs/309`）: 五个键、四条不变量。

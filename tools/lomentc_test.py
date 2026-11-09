@@ -24,6 +24,7 @@ import loment_geometry  # noqa: E402
 import lomentc  # noqa: E402
 import lspe  # noqa: E402
 import potato  # noqa: E402
+import potato_from  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 DEMO = ROOT / "loment" / "examples" / "demo.lomt"
@@ -2756,7 +2757,7 @@ def test_l0_5_region_rule():
     """
     doc = json.loads(lomentc.emit_potato(parse(L05_SRC), ROOT))
     gl = doc["gc_ladder"]
-    assert doc["potato"] == "v21", doc["potato"]
+    assert doc["potato"] == potato.VERSIONS[-1], doc["potato"]
     assert gl == {"l0": 1, "l0_5": 2, "l1": 0, "l2": 0, "l3": 0,
                   "total_sites": 3}, gl
     ir = lomentc.emit_llvm(parse(L05_SRC), ROOT)
@@ -4831,7 +4832,7 @@ def test_mixed_width_arithmetic_has_a_common_type():
 def test_lspe_dimension_defaults_open():
     """第七维：不写 `choose` 就是 `lspe_open_admin`，台账随产物一起发出（v16）。"""
     doc = json.loads(lomentc.emit_potato(lomentc.load(DEMO), ROOT))
-    assert doc["potato"] == "v21"
+    assert doc["potato"] == potato.VERSIONS[-1]
     lp = doc["lspe"]
     assert lp["state"] == "lspe_open_admin"
     assert lp["set_by"] == "default"
@@ -4906,7 +4907,7 @@ def test_lspe_close_admin_is_recorded():
         p = Path(td) / "close.lomt"
         p.write_text(src, encoding="utf-8", newline=chr(10))
         doc = json.loads(lomentc.emit_potato(lomentc.load(p), ROOT))
-    assert doc["potato"] == "v21"
+    assert doc["potato"] == potato.VERSIONS[-1]
     assert doc["lspe"]["state"] == "lspe_close_admin"
     assert doc["lspe"]["set_by"] == "source"
     # 关审计：普查不算，计数全零。
@@ -6341,6 +6342,128 @@ def test_lgc_end_window_is_a_scoped_pause():
         assert "不接受时长" in str(e), e
     else:
         raise AssertionError("`lgc end(1ms)` 居然被收下了")
+
+
+# ---------------------------------------------------------------- 生命周期（docs/299）
+
+def _with_profile(src: str, profile: str) -> lomentc.Module:
+    """按指定版次解析（`load()` 才设 `mod.profile`，判据里直接给）。"""
+    m = lomentc.Parser(lomc.lex(src), src, profile=profile).parse()
+    m.profile = profile
+    return m
+
+
+@test
+def test_lifetime_dimension_defaults_follow_the_edition():
+    """`lifetime` 是第八维：2026.3 默认 `auto`，旧版次默认 `no`（`docs/305`）。"""
+    src = "module m\nfn main() -> i32 { return 7; }\n"
+    m = parse(src)
+    assert m.profile == potato_from.DEFAULT_EDITION, m.profile
+    doc = json.loads(lomentc.emit_potato(m, ROOT))
+    assert doc["potato"] == potato.VERSIONS[-1], doc["potato"]
+    assert doc["lifetime"] == "lifetime_auto", doc.get("lifetime")
+
+    old = _with_profile(src, "tur2026.2")
+    doc2 = json.loads(lomentc.emit_potato(old, ROOT))
+    assert doc2["lifetime"] == "lifetime_no", doc2.get("lifetime")
+
+
+@test
+def test_lifetime_words_are_refused_before_2026_3():
+    """旧版次写 `lifetime_*` → 点名拒（不是"未知取值"那种泛泛的报错）。"""
+    src = "module m\nchoose lifetime_auto\nfn main() -> i32 { return 7; }\n"
+    e = lomentc.check(_with_profile(src, "tur2026.2"))
+    assert any("生命周期控制从" in x for x in e), e
+    # 2026.3 的同一份源是合法的
+    assert lomentc.check(parse(src)) == []
+
+
+@test
+def test_lifetime_dimension_is_declared_once():
+    src = ("module m\nchoose lifetime_auto\nchoose lifetime_no\n"
+           "fn main() -> i32 { return 7; }\n")
+    e = errs(src)
+    assert any("核心模式这一维只能声明一次" in x for x in e), e
+
+
+@test
+def test_lifetime_borrow_types_lower_to_pointers():
+    """`&T` 进签名/字段，`r.field` 自动解一层，产物是 `ptr`。"""
+    src = ("module m\n"
+           "struct V { x: u32, y: u32 }\n"
+           "fn get(v: &V) -> u32 { return v.x; }\n"
+           "fn main() -> i32 { let a: V = V { x: 3, y: 4 }; return get(&a) as i32; }\n")
+    assert errs(src) == [], errs(src)
+    ir = lomentc.emit_llvm(parse(src), ROOT, [])
+    assert "define i32 @get(ptr %v)" in ir, ir
+    assert "call i32 @get(ptr %a.addr)" in ir, ir
+
+
+@test
+def test_lifetime_rejects_escaping_local_borrow():
+    """悬垂：直接返回、经别名、经调用传回来、经结构体字段 —— 四条路都要拦。"""
+    for src in (
+        "module m\nfn f() -> &u32 { let a: u32 = 1; return &a; }\n",
+        "module m\nfn f() -> &u32 { let a: u32 = 1; let r: &u32 = &a; return r; }\n",
+        "module m\nfn id(p: &u32) -> &u32 { return p; }\n"
+        "fn f() -> &u32 { let a: u32 = 1; return id(&a); }\n",
+        "module m\nstruct V { p: &u32 }\n"
+        "fn f() -> V { let x: u32 = 1; return V { p: &x }; }\n",
+    ):
+        e = errs(src)
+        assert any("悬垂" in x for x in e), (src, e)
+
+
+@test
+def test_lifetime_return_borrow_needs_a_source_parameter():
+    """没有引用形参却返回借用 ⇒ 区域无从推断（E041）。"""
+    e = errs("module m\nfn f() -> &u32 { let a: u32 = 1; return &a; }\n")
+    assert any("签名里没有引用形参" in x for x in e), e
+
+
+@test
+def test_lifetime_manual_markers():
+    """`&a T` 只在 manual 档可用，且必须指向一个真实存在的引用形参。"""
+    manual = ("module m\nchoose lifetime_manual\n"
+              "fn pick(a: &u32, b: &u32) -> &a u32 { return a; }\n")
+    assert errs(manual) == [], errs(manual)
+    auto = manual.replace("choose lifetime_manual\n", "")
+    e = errs(auto)
+    assert any("不写区域标记" in x for x in e), e
+    bad = manual.replace("&a u32 {", "&zz u32 {")
+    e2 = errs(bad)
+    assert any("不存在的形参" in x for x in e2), e2
+    bad2 = manual.replace("fn pick(a: &u32, b: &u32)", "fn pick(a: u32, b: &u32)")
+    e3 = errs(bad2)
+    assert any("不是引用形参" in x for x in e3), e3
+
+
+@test
+def test_lifetime_free_while_borrowed_is_rejected():
+    src = ("module m\nchoose runtime\n"
+           "fn f() -> u32 { let p: ptr = alloc(8); let r: &u8 = &*p; free(p); return 1; }\n")
+    e = errs(src)
+    assert any("仍被借用时释放" in x for x in e), e
+
+
+@test
+def test_lifetime_stored_mut_borrow_is_exclusive():
+    src = ("module m\nfn f() -> u32 { let a: u32 = 1; let r: &mut u32 = &mut a;\n"
+           "    let s: &u32 = &a; return 1; }\n")
+    e = errs(src)
+    assert any("既被可变借用又被借用" in x for x in e), e
+
+
+@test
+def test_lifetime_no_rejects_borrow_types():
+    """`lifetime_no` 是**绝对关闭**：`&T` 还是今天的解析错误。"""
+    src = "module m\nchoose lifetime_no\nfn f(p: &u32) -> u32 { return 1; }\n"
+    try:
+        parse(src)
+    except Exception as e:
+        assert "&" in str(e), e
+    else:
+        raise AssertionError("`lifetime_no` 下 `&u32` 居然被收下了")
 
 
 def main() -> int:

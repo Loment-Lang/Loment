@@ -50,6 +50,20 @@ collector and `lgc start;` resumes it. It works in every `choose gc` mode, but `
 E039 (there is no collector to control). The budget gates *starting* a collection, not preempting
 one already running; see `docs/309`.
 
+Its second feature is **borrow lifetimes**: `&T` / `&mut T` are first-class types (parameters,
+returns, struct fields, generic arguments), with region inference and **zero lifetime
+annotations**. The dimension is `choose lifetime_no | lifetime_auto | lifetime_manual`:
+`lifetime_auto` is the default from `tur2026.3` on (older editions default to `lifetime_no`,
+so their artifacts do not change); `lifetime_manual` adds the borrow-source marker `&a T`
+(`a` must be a reference parameter), and `lifetime_no` is today's shape (`&` in a type
+position is a parse error). `*r` dereferences one borrow; `r.field` and `*r = v` auto-deref.
+A borrow is a `ptr` in the artifact; slice borrows `&[T]` / `&mut [T]` normalise to the
+existing `[T]` / `mut [T]` views. A returned borrow must come from a parameter, `free(p)`
+while `p` is borrowed is E041, and a **stored** `&mut` excludes later borrows (E007).
+The self-hosted compiler currently refuses borrow types by name (E041) - the dimension and
+Potato v22 are on both sides, the type surface and region pass are reference-first; see
+`docs/299` §8.
+
 The same program can also be written with C / C++ / Java / C# / Go / Python spelling, **changing
 the spelling and nothing else** - recognised **by extension** (`.c` / `.cpp` / `.java` / `.cs` /
 `.py` / `.go`), or with an explicit declaration at the top of the file:

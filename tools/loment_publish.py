@@ -167,6 +167,8 @@ REPOS: dict[str, dict] = {
             "tools/lspe_ratchet.py",
             # E8 的反证探针登记表（`docs/262` §5.4 / `#766`）—— `lspe_test` import 它。
             "tools/lspe_probes.py",
+            # AI slop 的机械代理判据（`docs/318`）。
+            "tools/loment_slop.py", "tools/loment_slop_test.py",
             # 花括号族的共享前端核（`docs/188` §7.1）。同样不以 `lom` 开头。
             "tools/trans_core.py",
             # C -> Loment 的翻译器（`docs/186` Stage A）。名字**不以 `lom` 开头**，

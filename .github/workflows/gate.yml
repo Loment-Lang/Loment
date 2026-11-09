@@ -712,6 +712,40 @@ jobs:
   #   2. 一句话报出全貌（绿/红/新红/假红/过期基线）。
   # **它不拉镜像**：它只用 runner 上的 `cat`/`grep`/`sort`/`python3` 数一遍条数，
   # 拉一个 1GB 的镜像只为这个就是纯加墙钟。
+  # AI slop 的机械代理判据（`docs/318`）。**只报告，不阻断**：一个还没校准的判据
+  # 直接挡 PR，第一次误报就会被人关掉——之后等于不存在。校准路径写在 docs/318 §5。
+  slop:
+    name: slop report
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          fetch-depth: 0
+
+      - name: 机械代理判据（报告）
+        run: |
+          set +e
+          python3 tools/loment_slop.py check --base "origin/${{ github.base_ref }}" --json > slop.json
+          python3 - <<'PY'
+          import json
+          try:
+              d = json.load(open("slop.json", encoding="utf-8"))
+          except Exception as e:
+              print(f"::warning::slop 报告读不了：{e}")
+              raise SystemExit(0)
+          s = d["summary"]
+          print(f"slop: {s['findings']} finding(s) — high {s['high']}, "
+                f"medium {s['medium']}, low {s['low']}, info {s['info']}")
+          for f in d["findings"]:
+              where = f["file"] or "-"
+              if f.get("line"):
+                  where += f":{f['line']}"
+              print(f"[{f['severity']}] {f['kind']} {where} — {f['message']}")
+          PY
+
   static:
     name: ci.py --static-only
     needs: [static-exclusive, static-shard]

@@ -3770,6 +3770,67 @@ def test_gc_auto_collector_text():
     assert ".buf" in alpha, "alpha 那一份该有提升的缓冲 —— 那说明档位判据在这儿失效了"
 
 
+#: `#1465` 的那份源：两个 `alloc` 挤在**同一个表达式**里，第一个的结果只活在 SSA
+#: 临时值中。第二个 `alloc` 的钩子若正好在这一刻收，第一个块就被当成垃圾。
+_SPILL_SRC = """module gc_spill
+@@CHOOSE@@
+choose runtime
+
+fn tag(a: ptr) -> ptr {
+    store8(a, 0, 7);
+    return a;
+}
+
+fn check(a: ptr, b: ptr) -> u32 {
+    store8(b, 0, 9);
+    return load8(a, 0) as u32;
+}
+
+fn _start() {
+    let sz: u32 = 16;
+    let r: u32 = check(tag(alloc(sz)), alloc(sz));
+    syscall4(60, r as u64, 0, 0);
+}
+"""
+
+
+@test
+def test_alloc_results_are_spilled_into_the_root_table():
+    """`#1465`：分配结果写进本帧的 spill 槽，槽按具名槽登记进根表。
+
+    根表只认具名槽 —— 表达式里的 SSA 临时值不是根，`f(tag(alloc(sz)), alloc(sz))`
+    的第一块活不过第二次分配里的那次收集。每个分配站点一格、**发射序**编号；入口清零，
+    分配完立刻落槽。默认档（`gc_manual`）不发槽，产物一个字节都不多。
+
+    动态那一半在 `loment_elf_test::test_a_temporary_allocation_survives_a_collection`：
+    这条只核"槽在不在、挂没挂"，对"收集器真的看得见它"照样绿。
+    """
+    auto = _gc_emit(_SPILL_SRC.replace("@@CHOOSE@@", "choose gc_auto"))
+    manual = _gc_emit(_SPILL_SRC.replace("@@CHOOSE@@", "choose gc_manual"))
+    assert "%gc.sp.0 = alloca ptr" in auto and "%gc.sp.1 = alloca ptr" in auto, (
+        "两个分配站点该各开一个 spill 槽")
+    assert "%gc.sp.2" not in auto, "槽按站点数开，不多开"
+    for i in (0, 1):
+        assert f"store ptr null, ptr %gc.sp.{i}" in auto, f"槽 {i} 没有入口清零"
+        assert f"ptrtoint ptr %gc.sp.{i} to i64" in auto, f"槽 {i} 没登记进根表"
+        # 入口一次 + 语句边界一次（`#1465`：槽只活一条语句，不活到帧尾）
+        assert auto.count(f"store ptr null, ptr %gc.sp.{i}") == 2, (
+            f"槽 {i} 的清零次数是 {auto.count(f'store ptr null, ptr %gc.sp.{i}')}，"
+            "该是两次（入口 + 语句边界）—— 少的那次就是泄漏")
+    # 每个 `alloc` 的**下一条**就是落槽（值在寄存器里活过下一次分配之前必须进槽）。
+    lines = auto.splitlines()
+    hit = []
+    for k, ln in enumerate(lines):
+        if ln.strip().startswith("%") and "= call ptr @__loment_alloc(i32 " in ln:
+            reg = ln.split("=")[0].strip()
+            hit.append((reg, lines[k + 1].strip()))
+    assert len(hit) == 2, hit
+    for k, (reg, nxt) in enumerate(hit):
+        assert nxt == f"store ptr {reg}, ptr %gc.sp.{k}", (
+            f"第 {k} 个分配站点没有立刻落槽，下一行是 {nxt!r}")
+    assert "gc.sp" not in manual, "`gc_manual` 的产物里不该有 spill 槽 —— 默认档不许变"
+
+
 #: `gc_auto_alpha` 的**自适应收集器**那一份源（`docs/210` §2.4 的"策略池"那一半）。
 #: `chew` 里那块 `p` 是 **L3**（尺寸是变量 ⇒ 不是 L0；`let q: ptr = p` 是外逃 ⇒ 不是 L1），
 #: 所以 alpha 这一档**非得有收集器**不可 —— 此前它根本没有（L3 残差没人收，只有分配器）。
@@ -4507,10 +4568,14 @@ def test_lms_entry_a_rescue_needs_both_lms_and_a_collector():
     """LMS 第 3 级入口 A（`docs/253` §5.3）：`alloc` 分配不出时**先收一次再试**。
 
     **两个条件缺一不可** —— `lms` 开着（它属于 LMS 第 3 级）**而且**这份产物里真有
-    收集器（`gc_auto` / `gc_auto_alpha`）。`gc_manual` 下**没有东西可收**，
+    收集器（`gc_auto` / `gc_auto_alpha` / **`lgc`**）。`gc_manual` 单独**没有东西可收**，
     "拉回"在那里是一句空话 —— 所以那一格**必须一个字都不加**。这是这一级明写的边界。
 
-    网格：{gc_manual, gc_auto, gc_auto_alpha} × {关着, 开着}。
+    **`gc_manual` + `lgc` 有收集器**（`#1461`）：窗口一开，`__loment_gc_allow` 就放行，
+    OOM 那一刻先收一次再试是窗口该有的行为；漏掉这一支，窗口里撞 OOM 直接 abort。
+    所以那一格必须有 `lmsretry`。
+
+    网格：{gc_manual, gc_auto, gc_auto_alpha} × {关着, 开着}，外加 `gc_manual` + `lgc` 两格。
     """
     # ⚠ **尺寸必须走 `const` 名，不能是字面量**：`gc_auto_alpha` 会把
     # `let p: ptr = alloc(<字面量>)` **静态提升到栈上**（L0），于是这份产物**根本不需要堆**
@@ -4540,6 +4605,18 @@ def test_lms_entry_a_rescue_needs_both_lms_and_a_collector():
             assert "@__loment_lms_retry" not in on, (gc, "不许再长出全局符号")
             # **只许重来一次**：重试标记在**每一条成功返回前**都要清掉（1 次初始化 + 2 次清）。
             assert on.count("store i1 false, ptr %lmsretry") == 3, on
+
+    # **`gc_manual` + `lgc`**（`#1461`）：manual 档也有收集器了 —— 窗口里那句"开"就是
+    # 它被允许收的时刻，OOM 救援因此必须在场。
+    manual_lgc = lomentc.emit_llvm(_lgc_load(
+        "choose write grammar tur2026.3\nmodule m\nchoose runtime\n"
+        "choose gc_manual\nchoose lms_guard\nconst N: u32 = 64;\n\n"
+        "fn _s() {\n    lgc start {\n        let q: ptr = alloc(N);\n"
+        "        store8(q, 0, 1);\n    }\n}\n"), ROOT, [])
+    assert "%lmsretry = alloca i1" in manual_lgc, (
+        "`gc_manual` + `lgc` 的产物里该有 LMS 第 3 级入口 —— 窗口里撞 OOM 要先收一次")
+    assert "call void @__loment_collect_now()" in manual_lgc, (
+        "救援必须走 `collect_now` —— 它才尊重窗口的开关")
 
 
 #: g1 探针：`alloc` **直接发出**的指针上，一个越界写 + 一个界内读。
@@ -4780,18 +4857,29 @@ def test_lspe_dimension_defaults_open():
     assert lp["obligations"] == lp["sites"]
     assert lp["sites"] == lp["proved"] + lp["undecided"]
     assert "InBounds" in lp["per_kind"]
-    assert lp["floors"] == 0
-    # `#786` 起 `floor_detail` 多一格 `pass`（`docs/262` §5.16），`passes` 恒为数组。
-    assert lp["floor_detail"] == {"assumed": 0, "stale_wf": 0, "budget": 0,
-                                  "drop_honest": 0, "pass": 0}
+    # LSPE v2（0.1.5.2）：默认档下每条没被 pass 覆盖的 UNDECIDED 都有一条
+    # `Assumed` 地板（`docs/262` §6"允许但标注"），所以 `floors == undecided`。
+    assert lp["floors"] == lp["floor_detail"]["assumed"] == lp["undecided"]
+    # `#786` 起 `floor_detail` 多一格 `pass`；`#750` 再加 `depth`。
+    assert lp["floor_detail"] == {"assumed": lp["undecided"], "stale_wf": 0,
+                                  "budget": 0, "depth": 0, "drop_honest": 0,
+                                  "pass": 0}, lp["floor_detail"]
     assert lp["passes"] == [] and lp["pass_ratio"] == f"0/{lp['sites']}"
-    assert lp["invariants"]["i1"] == "ok"
+    assert lp["invariants"] == {"i1": "ok", "i2": "ok", "i3": "ok",
+                                "i4": "ok", "i5": "ok"}, lp["invariants"]
+    assert lp["interrogations"] == {"provenance": lp["proved"],
+                                    "falsification": lp["sites"],
+                                    "cross_exam": lp["sites"]}
+    assert lp["lspc"] == "full" and lp["acked"] == 0
     assert potato.validate(doc) == []
     # QIR 骨架：每个站点有 Site / Claim / Obligation / Evidence 四格。
     s0 = lomentc.load(DEMO).lspe_sites[0]
     assert s0["claim"] == "allow"
     assert s0["obligation"] in ("GuardHolds", "InBounds")
-    assert s0["evidence"] == (s0["source"] or "none")
+    # 证据可以是 E5 的 `GlobalInvariant`（demo 的两个循环下标），所以不比名字：
+    # 证成的站点必须**有来源** —— 这才是"每个放行都有出处"那一格。
+    assert s0["proved"] and s0["source"], s0
+    assert s0["evidence"] not in (None, "none"), s0
 
 
 @test

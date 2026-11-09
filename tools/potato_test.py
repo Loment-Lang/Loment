@@ -689,6 +689,57 @@ def test_v21_requires_the_gc_control_counts():
 
 
 @test
+def test_lspe_ledger_cross_checks_reject_self_contradiction():
+    """LSPE 台账自洽（`#1084`）：计数、`per_kind`、地板、`pass_ratio` 互相打架必须红。
+
+    这些都是**产物自己说的数**：校验器不重编译，也判得了它们对不上。
+    """
+    def good():
+        d = fixture_v21()
+        d["lspe"].update({"sites": 2, "obligations": 2, "proved": 1,
+                          "undecided": 1, "floors": 1,
+                          "per_kind": {"InBounds": "1/2"},
+                          "pass_ratio": "0/2",
+                          "interrogations": {"provenance": 1,
+                                             "falsification": 2,
+                                             "cross_exam": 2},
+                          "lspc": "full"})
+        d["lspe"]["floor_detail"]["assumed"] = 1
+        d["systems"]["lspe"]["cost"]["sites"] = 2
+        return d
+
+    assert potato.validate(good()) == [], potato.validate(good())
+    muts = [
+        ("undecided 与 sites 不等",
+         lambda d: d["lspe"].__setitem__("undecided", 2), "proved + undecided"),
+        ("per_kind 分母和",
+         lambda d: d["lspe"]["per_kind"].__setitem__("InBounds", "0/3"),
+         "per_kind 的分母和"),
+        ("floors 与明细和",
+         lambda d: d["lspe"].__setitem__("floors", 2), "地板明细之和"),
+        ("pass_ratio 分母",
+         lambda d: d["lspe"].__setitem__("pass_ratio", "0/3"),
+         "pass_ratio 的分母"),
+        ("interrogations 负值",
+         lambda d: d["lspe"]["interrogations"].__setitem__("cross_exam", -1),
+         "interrogations.cross_exam"),
+        ("lspc 模式",
+         lambda d: d["lspe"].__setitem__("lspc", "sometimes"), "lspe.lspc"),
+    ]
+    for name, mut, needle in muts:
+        d = good()
+        mut(d)
+        errs = potato.validate(d)
+        assert any(needle in e for e in errs), (name, errs)
+
+    # `lspe_close_admin` 下计数必须全零（"审计关了"与"审了 2 个"不能同时成立）。
+    d = good()
+    d["lspe"]["state"] = "lspe_close_admin"
+    d["systems"]["lspe"]["state"] = "lspe_close_admin"
+    assert any("全零" in e for e in potato.validate(d)), potato.validate(d)
+
+
+@test
 def test_v20_systems_index_cross_checks_every_link():
     """v20 的系统索引（#1022）：每条链**逐格**钉住，而且**旧版对象不被回溯改写**。
 

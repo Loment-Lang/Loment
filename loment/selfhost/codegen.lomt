@@ -139,6 +139,10 @@ const CG_ALS: u32 = 926548;
 const CG_ALS_MAX: u32 = 16;
 const CG_ALN: u32 = 926676;           // = CG_ALS + 128
 const CG_BYTES: u32 = 926680;         // = CG_ALN + 4
+//: **分配站点的 spill 槽**（`#1465`）：根表只登记具名槽，表达式里的 SSA 临时值不是根。
+//: 每个站点一格 `%gc.sp.k`（k 按**源码序**），分配完立刻写进去、**语句边界清零**。
+//:   `CG_GCDIRTY` = 本语句写过的最大的站点号 + 1（0 = 本语句没分配过）
+const CG_GCDIRTY: u32 = 784;
 use bytes
 use lexer
 
@@ -1670,6 +1674,17 @@ fn safe_mark_fn(src: ptr, toks: ptr, nm: u32, tbl: ptr) -> u32 {
     }
     let at: u32 = b + 1;
     let end: u32 = skip_block(src, toks, b) - 1;
+    // 带 `lspe pass` 的函数是 `Unchecked` 摘要：**不进安全表**（`#1098` / `#786` 第 3 条）。
+    // 这一步必须在不动点**里面**：先算安全集再摘名，调用它的包装函数会留下来 ——
+    // 旁路于是顺着调用链传下去，而参考实现是在不动点里就把它挡住的。
+    let pb: u32 = at;
+    while pb < end {
+        if tok_kind(toks, pb) == 0 && tok_is(src, toks, pb, "lspe")
+                && tok_is(src, toks, pb + 1, "pass") {
+            return 0;
+        }
+        pb = pb + 1;
+    }
     // **逐形参**：位置 pi 从 0 数（`self` 也占一位，与方法调用点的实参位一致）。
     let mask: u32 = 0;
     let pi: u32 = 0;
@@ -1759,10 +1774,10 @@ fn safe_mark_fn(src: ptr, toks: ptr, nm: u32, tbl: ptr) -> u32 {
 pub fn compute_safe(src: ptr, toks: ptr, tbl: ptr) -> u32 {
     store32(tbl, 0, 0);
     let ch: u32 = 1;
-    let rounds: u32 = 0;
-    while ch == 1 && rounds < 256 {
+    // 不设轮数上限（`#1093`）：集合只增不减、名字有限，一定收敛。256 轮在一张
+    // 300 函数的 deref-only 链上会提前停下，把后半截记成"未决定"——假的洞。
+    while ch == 1 {
         ch = 0;
-        rounds = rounds + 1;
         let i: u32 = 0;
         while tok_kind(toks, i) != 4 {
             if tok_is(src, toks, i, "fn") && !(i > 0 && tok_is(src, toks, i - 1, "extern"))
@@ -3748,7 +3763,8 @@ fn find_const(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
 /// 程序**一次收集都不跑**（alpha 也救不了: 它的阈值与空间触发都住在
 /// `__loment_maybe_collect` 里, 而那个函数一次都不会被调用）。挪到这儿之后**每一次**
 /// 分配都计数; 同一段文本、同一顺序、同一个实参, 所以只含 `alloc` 的程序产物字节不变。
-fn emit_alloc_seq(s: ptr, out: ptr, szlvl: u32, lvl: u32) -> u32 {
+fn emit_alloc_seq(s: ptr, out: ptr, src: ptr, toks: ptr,
+                  szlvl: u32, lvl: u32, j: u32) -> u32 {
     if load32(s, 556) == 1 {
         // `#778`：线程程序里分配器的链表是**共享**的 —— 计数 + 可能收集 + 分配整段
         // 在运行期锁里。非线程程序的产物逐字节不变（参考实现同一条门槛）。
@@ -3770,6 +3786,21 @@ fn emit_alloc_seq(s: ptr, out: ptr, szlvl: u32, lvl: u32) -> u32 {
     emit_str(s, out, " = call ptr @__loment_alloc(i32 ");
     emit_val(s, out, szlvl);
     emit_str(s, out, ")\n");
+    if gc_hook(s) == 1 {
+        // **先把结果存进本帧的 spill 槽**（`#1465`）：这个值接下来可能在寄存器里活过
+        // 下一次分配，而根表只看得见槽。编号按**源码序**（`defer` 会把同一次调用发多次，
+        // 发射序会越界；同一个站点复用同一格）。与参考实现 `_alloc_site_map` 同号。
+        let site: u32 = alloc_sites(src, toks, load32(s, 564), j);
+        emit_str(s, out, "  store ptr ");
+        emit_temp_ref(s, out, p);
+        emit_str(s, out, ", ptr %gc.sp.");
+        emit_dec(s, out, site);
+        emit_str(s, out, "\n");
+        let want: u32 = site + 1;
+        if want > load32(s, CG_GCDIRTY) {
+            store32(s, CG_GCDIRTY, want);
+        }
+    }
     if load32(s, 556) == 1 {
         emit_str(s, out, "  call void @__loment_rt_release()\n");
     }
@@ -4012,7 +4043,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
         }
         if tok_is(src, toks, j, "alloc") {   // M15: bump 分配器
             let k1: u32 = arg1(s, out, src, toks, j + 2, lvl);
-            emit_alloc_seq(s, out, lvl, lvl);
+            emit_alloc_seq(s, out, src, toks, lvl, lvl, j);
             if tok_is(src, toks, k1 + 1, "as") {
                 apply_cast_b(s, out, src, toks, 5, 0, k1 + 2, lvl);
                 return k1 + 3;
@@ -4393,7 +4424,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
             emit_dec(s, out, nn);
             emit_str(s, out, " to i32\n");
             set_temp_val(s, lvl + 2, nu);          // 堆计数是 u32
-            let cp: u32 = emit_alloc_seq(s, out, lvl + 2, lvl);
+            let cp: u32 = emit_alloc_seq(s, out, src, toks, lvl + 2, lvl, j);
             emit_str(s, out, "  call void @__loment_memcpy(ptr %t");
             emit_dec(s, out, cp);
             emit_str(s, out, ", ptr %t");
@@ -5406,6 +5437,8 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
     let nl: u32 = collect_locals(s, src, toks, body_at, body_end);
     let has05: u32 = l05_plan(s, src, toks, nl);   // L0.5：本函数开不开区
     let nlgc: u32 = lgc_windows(src, toks, body_at, body_end);   // 本函数的窗口数（入口块开槽）
+    let nsite: u32 = alloc_sites(src, toks, body_at, body_end);  // 分配站点数（spill 槽）
+    store32(s, CG_GCDIRTY, 0);   // spill 槽的脏标记按**函数**清零（`#1465`）
     if tok_is(src, toks, base - 1, "interrupt") {   // M33: x86_intrcc 需要中断帧指针, 无参数
         emit_str(s, out, "; ");
         emit_tok(s, out, src, toks, base + 1);
@@ -5436,6 +5469,9 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
         if load32(s, CG_LGC) == 1 {
             // `lgc` 的窗口在入口块各开两个槽（与参考实现 `locals_prologue` 同序）。
             emit_lgc_slots(s, out, nlgc);
+        }
+        if gc_hook(s) == 1 {   // 分配站点的 spill 槽（`#1465`，与参考实现同序）
+            emit_gc_slots(s, out, nsite);
         }
         if gc_hook(s) == 1 {   // `gc_auto`：中断函数**没有形参**，只有局部
             roots_push(s, out, src, toks, 0, nl);
@@ -5543,6 +5579,9 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
         // `lgc` 的窗口在入口块各开两个槽 —— 位置对着参考实现的 `locals_prologue`：
         // 局部/`.buf`/`l05.buf` 之后、形参 store 之前。
         emit_lgc_slots(s, out, nlgc);
+    }
+    if gc_hook(s) == 1 {   // 分配站点的 spill 槽（`#1465`，位置与参考实现同序）
+        emit_gc_slots(s, out, nsite);
     }
     let c: u32 = 0;
     while c < k {
@@ -7102,6 +7141,10 @@ fn dom_stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
 }
 
 fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
+    // **语句边界清 spill 槽**（`#1465`）：分配结果只活到本条语句结束，不活到帧尾。
+    if load32(s, 476) == 0 && gc_hook(s) == 1 {
+        gc_flush(s, out);
+    }
     if load32(s, CG_PROF) == 2 && tok_kind(toks, j) == 0 && tok_is(src, toks, j, "lgc") {
         // `lgc` 的时间控制（`docs/309`）：只在 Tur 2026.3 是关键字。
         return lgc_stmt(s, out, src, toks, j, ret);
@@ -10447,6 +10490,35 @@ fn emit_root_slot(s: ptr, out: ptr, src: ptr, toks: ptr, n0: u32, c: u32,
     return emit_str(s, out, "\n");
 }
 
+/// 登记分配站点的 spill 槽 `%gc.sp.<j>`（`#1465`）：四条 temp 的次序与
+/// `emit_root_slot` 一致（`idx` / `gp` / `v` + `store`），名字不带 `.addr`。
+fn emit_root_gcsp(s: ptr, out: ptr, n0: u32, c: u32, j: u32) -> u32 {
+    let idx: u32 = alloc_temp(s);
+    emit_str(s, out, "  ");
+    emit_temp_ref(s, out, idx);
+    emit_str(s, out, " = add i32 ");
+    emit_temp_ref(s, out, n0);
+    emit_str(s, out, ", ");
+    emit_dec(s, out, c);
+    emit_str(s, out, "\n");
+    let gp: u32 = alloc_temp(s);
+    emit_str(s, out, "  ");
+    emit_temp_ref(s, out, gp);
+    emit_str(s, out, " = getelementptr [1024 x i64], ptr @__loment_roots, i32 0, i32 ");
+    emit_temp_ref(s, out, idx);
+    emit_str(s, out, "\n");
+    let v: u32 = alloc_temp(s);
+    emit_str(s, out, "  ");
+    emit_temp_ref(s, out, v);
+    emit_str(s, out, " = ptrtoint ptr %gc.sp.");
+    emit_dec(s, out, j);
+    emit_str(s, out, " to i64\n  store i64 ");
+    emit_temp_ref(s, out, v);
+    emit_str(s, out, ", ptr ");
+    emit_temp_ref(s, out, gp);
+    return emit_str(s, out, "\n");
+}
+
 /// 这个名字是不是"L0 提升过"的：是就回它的**字节数**，不是回 0。
 ///
 /// **两道闸与 `emit_l0_buf` 同一份**：非 alpha 档（槽 572 为 0）L0 表根本不建 —— 而
@@ -10514,7 +10586,10 @@ fn emit_root_word(s: ptr, out: ptr, src: ptr, toks: ptr, n0: u32, c: u32,
 /// 槽 580 存**本帧**的 `rootk`：它必须**每次都写**（哪怕是 0），否则上一个函数留下的
 /// 旧值会让 `roots_pop` 发一条无主的退表。
 fn roots_push(s: ptr, out: ptr, src: ptr, toks: ptr, k: u32, nl: u32) -> u32 {
-    let n: u32 = root_count(s, src, toks, k, nl);
+    //: 分配站点的 spill 槽也占根表（`#1465`）：一格一个槽的地址，与具名槽同口径，
+    //: 放在最后 —— 次序必须与参考实现一致（逐字节判据）。
+    let ns: u32 = alloc_sites(src, toks, load32(s, 564), load32(s, 568));
+    let n: u32 = root_count(s, src, toks, k, nl) + ns;
     store32(s, 580, n);
     if n == 0 {
         return 0;
@@ -10602,6 +10677,13 @@ fn roots_push(s: ptr, out: ptr, src: ptr, toks: ptr, k: u32, nl: u32) -> u32 {
 ");
         c = c + 1;
         w05 = w05 + 1;
+    }
+    // **分配站点的 spill 槽**（`#1465`）：一格一个槽的地址，与具名槽同形。
+    let qs: u32 = 0;
+    while qs < ns {
+        emit_root_gcsp(s, out, n0, c, qs);
+        c = c + 1;
+        qs = qs + 1;
     }
     let n1: u32 = alloc_temp(s);
     emit_str(s, out, "  ");
@@ -11211,6 +11293,66 @@ fn has_lgc(src: ptr, toks: ptr, prof: u32) -> u32 {
     return 0;
 }
 
+/// 一个函数体 `[b, e)` 里有多少个**分配站点**（入口块按它开 spill 槽，`#1465`）。
+///
+/// 站点 = 标识符 `alloc` / `str_concat` **紧跟** `(`，且前面不是 `.`（方法调用在参考
+/// 实现那边是 `MethodCall`，不是 `Call`）。与参考实现的 `_alloc_site_count` 同值：
+/// 两边都按**发射序**编号，所以只要求数量相等。
+fn alloc_sites(src: ptr, toks: ptr, b: u32, e: u32) -> u32 {
+    let n: u32 = 0;
+    let i: u32 = b;
+    while i < e && tok_kind(toks, i) != 4 {
+        let hit: u32 = 0;
+        if tok_kind(toks, i) == 0 {
+            if tok_is(src, toks, i, "alloc") || tok_is(src, toks, i, "str_concat") {
+                if tok_is(src, toks, i + 1, "(") {
+                    hit = 1;
+                }
+            }
+        }
+        if hit == 1 && i > b && tok_is(src, toks, i - 1, ".") {
+            hit = 0;
+        }
+        n = n + hit;
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 语句边界：把本语句用过的 spill 槽写回 `null`（`#1465`）。只清 `0 .. CG_GCDIRTY-1`，
+/// 与参考实现的 `_Ir._gc_flush` 同序、同文本。
+fn gc_flush(s: ptr, out: ptr) -> u32 {
+    let n: u32 = load32(s, CG_GCDIRTY);
+    if n == 0 {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < n {
+        emit_str(s, out, "  store ptr null, ptr %gc.sp.");
+        emit_dec(s, out, i);
+        emit_str(s, out, "\n");
+        i = i + 1;
+    }
+    store32(s, CG_GCDIRTY, 0);
+    return 0;
+}
+
+/// 入口块里的 spill 槽（`#1465`）：一个站点一格，**入口清零**。
+///
+/// 清零是必需的 —— 根扫把槽里的字当候选指针读，栈上的旧值必须是个"不像指针"的值。
+fn emit_gc_slots(s: ptr, out: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        emit_str(s, out, "  %gc.sp.");
+        emit_dec(s, out, i);
+        emit_str(s, out, " = alloca ptr\n  store ptr null, ptr %gc.sp.");
+        emit_dec(s, out, i);
+        emit_str(s, out, "\n");
+        i = i + 1;
+    }
+    return 0;
+}
+
 /// 一个函数体 `[b, e)` 里有多少个 `lgc start { … }` **窗口**（入口块按它开槽）。
 ///
 /// 与参考实现的 `_count_lgc_windows` 同值：那边数 AST 里的 `begin` 节点，这边数
@@ -11747,9 +11889,10 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32, tickx: u32)
     // 并且**说出来**（`; loment-heap: static 65536`，"不静默"）。
     // 与参考实现 `_ffi_heap` / `_ffi_grown` 同一条规则。
     // **LMS 第 3 级入口 A**（`docs/253` §5.3）：两个条件缺一不可 —— `lms` 开着
-    // **且** 这份产物里有收集器（`gc_any`）。三支共用同一个判断，见 `lms_mask`。
+    // **且** 这份产物里有收集器（`gc_any`，或 `lgc` —— manual 档也有收集器了，窗口里
+    // 那句"开"就是它被允许收的时刻）。三支共用同一个判断，见 `lms_mask`。
     let lms_rescue: u32 = 0;
-    if load32(s, 588) & 4 != 0 && gc_any(s) == 1 {
+    if load32(s, 588) & 4 != 0 && (gc_any(s) == 1 || load32(s, CG_LGC) == 1) {
         lms_rescue = 1;
     }
     let indirect: u32 = 0;

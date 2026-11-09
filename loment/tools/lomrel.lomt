@@ -175,6 +175,7 @@ tools/lomentc.py
 tools/lomentc_test.py
 tools/lspe_test.py
 tools/lspe_ratchet.py
+tools/lspe_probes.py
 tools/potato.py
 tools/potato_test.py
 tools/potato_cross.py

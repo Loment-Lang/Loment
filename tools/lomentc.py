@@ -6090,7 +6090,9 @@ def resolve_deps(mod: Module, root: Path, base: Path, entry: Path | None = None,
     return order
 
 
-def load_unit(path: Path, root: Path, lspe_level: int = 3) -> tuple[Module, list[Module]]:
+def load_unit(path: Path, root: Path, lspe_level: int = 3,
+              lspe_mode: str = "full",
+              answers: dict[str, str] | None = None) -> tuple[Module, list[Module]]:
     """**读一个编译单元的唯一入口**：预扫 → 装载 → 解析依赖（`docs/182` §1.10）。
 
     **别处别再自己拼 `load()` + `resolve_deps()`。** 少了预扫那一趟，`addin` 就白写了 ——
@@ -6106,7 +6108,8 @@ def load_unit(path: Path, root: Path, lspe_level: int = 3) -> tuple[Module, list
     from potato_from import FrontDoorRefused        # noqa: PLC0415
     try:
         sw, addin_paths = prescan_switches(path, root, path.parent, tool_dir, ext)
-        mod = load(path, sw=sw, lspe_level=lspe_level)
+        mod = load(path, sw=sw, lspe_level=lspe_level, lspe_mode=lspe_mode,
+                   answers=answers)
         deps = resolve_deps(mod, root, path.parent, entry=path, sw=sw,
                             addin_paths=addin_paths, profile=mod.profile)
     except (FrontDoorRefused, NotRepresentable) as e:
@@ -8021,7 +8024,39 @@ def _count_gc_control(mod: Module) -> dict:
     return n
 
 
-def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -> str:
+def _lspe_facts(mod: Module, deps: list[Module]) -> dict[str, int]:
+    """LSPC 预检单要的**在场事实**（`docs/262` §7.2 / `#757`）。
+
+    只数 token 层面的东西：这些格没有自己的语义，是"这一族在不在场"的判据。
+    `runtime_sites` / `hosted_calls` 今天没有表示（E031 与 `sealed` 在检查器里
+    就已经拒了），恒 0 —— 写成 0 而不是不写：缺项会被读成"没检查"。
+    """
+    toks = getattr(mod, "toks", []) or []
+    n = len(toks)
+    revocable = sum(1 for t in toks if t.kind == "ident" and t.val == "revocable")
+    extern = sum(1 for i, t in enumerate(toks)
+                 if t.kind == "ident" and t.val == "extern"
+                 and i + 1 < n and toks[i + 1].kind == "ident"
+                 and toks[i + 1].val == "fn")
+    allocs = sum(1 for i, t in enumerate(toks)
+                 if t.kind == "ident" and t.val == "alloc"
+                 and i + 1 < n and toks[i + 1].kind == "punct"
+                 and toks[i + 1].val == "(")
+    nonliteral_guard = sum(1 for i, t in enumerate(toks)
+                           if t.kind == "ident" and t.val == "guard"
+                           and i + 2 < n
+                           and not (toks[i + 2].kind == "punct"
+                                    and toks[i + 2].val == "["))
+    return {"revocable": revocable, "extern": extern, "allocs": allocs,
+            "nonliteral_guard": nonliteral_guard, "runtime_sites": 0,
+            "hosted_calls": 0, "cross_unit": len(deps)}
+
+
+def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None,
+                sidecar: bool = False,
+                sidecar_out: dict | None = None,
+                diag_out: dict | None = None,
+                cache=None) -> str:
     """M45: 形式对象 v1 —— 覆盖泛型/切片/字符串, 并由独立校验器自检 (M46)。"""
     import copy as _c
 
@@ -8084,6 +8119,8 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
     import potato as _potato
     _gc_ladder = _count_gc_ladder(raw_mod)
     _lms_levels = {_n: _lms_level(mod, _n) for _n in LMS_TOGGLES}
+    _dims = {k: mod.chooses.get(k, CORE_DEFAULTS[k]) for k in CORE_DIM_ORDER}
+    _facts = _lspe_facts(mod, deps or [])
     _lspe_ledger = lspe.build_ledger(
         sites=getattr(mod, "lspe_sites", []),
         state=mod.chooses.get("lspe", CORE_DEFAULTS["lspe"]),
@@ -8093,7 +8130,44 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         unit=mod.name,
         deps=[getattr(d, "toks", []) for d in (deps or [])],
         passes=getattr(mod, "lspe_passes", []),
+        # 单态化实例 = 一次替换（`#745`）；LSPE v2 用它算 `TypeWellFormed`。
+        instances=instances,
+        mode=str(getattr(mod, "lspe_mode", "full")),
+        answers=getattr(mod, "lspe_answers", None),
+        dims=_dims, facts=_facts,
+        budget=getattr(mod, "lspe_budget", None),
+        depth=getattr(mod, "lspe_depth", None),
+        sidecar=sidecar,
+        cache=cache,
     )
+    if sidecar and sidecar_out is not None:
+        sidecar_out.update(lspe.sidecar(mod.name, int(getattr(mod, "lspe_level", 3)),
+                                        _lspe_ledger.get("_trees", {})))
+    # 台账自检（`docs/262` §8 / #763）：E035/E036 是**审计器自己的**错误，
+    # 不是用户代码的错误 —— 但它们不能静默地随产物出去。E034 走 strict 的检查器那条。
+    # E034（无来源放行）只在 strict 下阻断 —— 默认档是"温柔"的（`docs/262` §6）。
+    _codes = {"E035", "E036"}
+    if str(getattr(mod, "lspe_mode", "full")) == "strict":
+        _codes.add("E034")
+    _bad = [p for p in _lspe_ledger.get("_problems", [])
+            if p.get("code") in _codes]
+    if _bad:
+        # 消息模板的首段必须是**常量**：`loment_diag` 的分类表按前缀认码
+        # （`test_m64_all_reference_messages_are_classified` 逐条钉住）。
+        if _bad[0]["code"] == "E034":
+            raise LomError(0, 0, f"LSPE 未能为这次放行给出来源: {_bad[0]['message']}")
+        if _bad[0]["code"] == "E035":
+            raise LomError(0, 0, f"LSPE 台账矛盾: {_bad[0]['message']}")
+        raise LomError(0, 0, f"LSPE 自检失败: {_bad[0]['message']}")
+    if diag_out is not None:
+        diag_out.update({
+            "questions": _lspe_ledger.get("_questions", []),
+            "deferred": _lspe_ledger.get("_deferred", []),
+            "refused": _lspe_ledger.get("_refused", []),
+            "assumed": _lspe_ledger.get("_assumed", []),
+            "problems": _lspe_ledger.get("_problems", []),
+            "invariants": _lspe_ledger.get("invariants"),
+        })
     doc = {
         # v3 = v2 + **开关取值** (docs/182 §1)。**升版本而不是往 v2 加字段**, 与 v1->v2
         # 那条同一个理由: 新字段是必填的 (删掉它校验器必须红), 而往旧版加必填字段会让
@@ -8186,7 +8260,7 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # **安全审计**（`docs/262`，用户 2026-10-18 定第七维）：台账是 LSPE 的第四件。
         # 计数、`per_kind`、不变量与 `lspe_close_admin` 的归零都在 `lspe/ledger.py`；
         # 编译器只把这个映射写进产物。
-        "lspe": _lspe_ledger,
+        "lspe": lspe.public(_lspe_ledger),
         # **系统索引**（v20，`docs/147` §5.4 / #1022）。六个系统各一条，次序写死；
         # `state` 与顶层字段（`lspe` 取台账自己的 `state`）、`detail` 与明细字段名、
         # `cost` 与明细的总数**逐条相同** —— 校验器不读源码也判得了它们打架。
@@ -10147,6 +10221,39 @@ def _collect_locals(f: Func, enums: dict | None = None,
     return out
 
 
+def _alloc_site_map(body: list) -> dict[int, int]:
+    """本函数体里**分配站点** → 序号（**源码序**），入口块按它开 spill 槽（`#1465`）。
+
+    站点 = `alloc(…)` / `str_concat(…)` 的 `Call` —— 与 `alloc_ir` 的两个调用点一一
+    对应。自举侧的 `alloc_sites`（token 扫）数的是同一批：方法调用走 `MethodCall`，
+    不是 `Call`，所以 `p.alloc(x)` 两边都不算。
+
+    **按源码序而不是发射序**：`defer` 会把同一个调用在每条退出路径上各发一次，按发射序
+    编号会越界；按源码序则同一站点复用同一格 —— 两次发射的值本来也不会同时活着。
+
+    为什么要它：根表登记的是**具名槽**的地址，表达式里的 SSA 临时值从来不是根 ——
+    `f(tag(alloc(sz)), alloc(sz))` 的第一块活不过第二次分配里的那次收集。给每个站点
+    一个槽、分配完立刻存进去，收集器就看得见它。
+    """
+    import dataclasses as _dc
+    m: dict[int, int] = {}
+
+    def reap(v) -> None:
+        if isinstance(v, Call) and v.name in ("alloc", "str_concat"):
+            m[id(v)] = len(m)
+        if _dc.is_dataclass(v) and not isinstance(v, type):
+            for fd in _dc.fields(v):
+                if fd.name in ("line", "col", "off", "len"):
+                    continue
+                reap(getattr(v, fd.name))
+        elif isinstance(v, (list, tuple)):
+            for y in v:
+                reap(y)
+
+    reap(body)
+    return m
+
+
 def _count_lgc_windows(body: list) -> int:
     """这个函数里有多少个 `lgc start { … }` 窗口（`begin` 节点数）。入口块按它开槽。"""
     n = 0
@@ -10235,6 +10342,16 @@ class _Ir:
         #: 分配钩子都按 `gc_hook` 走 —— `gc_manual` 因此也能开窗收集（默认关）。
         self.gc_ctl = gc_ctl
         self.gc_hook = self.gc_any or gc_ctl
+        #: **分配站点的 spill 槽**（`#1465`）：根表只登记具名槽，表达式里的 SSA 临时值
+        #: 不是根 —— `f(tag(alloc(sz)), alloc(sz))` 的第一块活不过第二次分配里的收集。
+        #: 每个站点一个 `ptr` 槽，分配完立刻存进去；槽本身按**具名槽**登记。
+        #: 编号按**源码序**（`defer` 会把同一次调用发多次，发射序会越界；自举侧按 token
+        #: 位置数，两边得到同一个序号）。
+        self.gc_site_map = _alloc_site_map(f.body) if self.gc_hook else {}
+        self.gc_sites = len(self.gc_site_map)
+        #: 本语句已经写过的最大的槽号 + 1（0 = 本语句没分配过）。语句边界清零，
+        #: 见 `stmt()` 顶上那次 `_gc_flush` —— 槽只活一条语句，不活到帧尾。
+        self.gc_dirty = 0
         #: 当前打开的窗口（`begin` 的编号栈）。`return` 提前离开时按它逆序恢复。
         self.lgc_open: list[int] = []
         self.lgc_next = 0
@@ -10286,6 +10403,23 @@ class _Ir:
             for i in range(_count_lgc_windows(f.body)):
                 self.w(f"%lgc.on.{i} = alloca i32")
                 self.w(f"%lgc.dl.{i} = alloca i64")
+        for i in range(self.gc_sites):
+            # **分配站点的 spill 槽**（`#1465`）：入口清零，之后每次分配把结果写回来。
+            # 清零是必需的 —— 根扫会把槽里的字当候选指针读，栈上的旧值不是指针也得像
+            # 一个"不像"的值（0 让那次比较直接落空）。
+            self.w(f"%gc.sp.{i} = alloca ptr")
+            self.w(f"store ptr null, ptr %gc.sp.{i}")
+
+    def _gc_flush(self) -> None:
+        """语句边界：把本语句用过的 spill 槽写回 `null`（`#1465`）。
+
+        只清 `0 .. gc_dirty-1`：那之外的槽本语句没碰过，内容在上一条语句结束时已经清过。
+        """
+        if not self.gc_sites or self.gc_dirty <= 0:
+            return
+        for k in range(self.gc_dirty):
+            self.w(f"store ptr null, ptr %gc.sp.{k}")
+        self.gc_dirty = 0
 
     def dbg_for(self, line: int) -> int | None:
         """M59: 行号 -> DILocation id (每函数一份, 由 emit_llvm 分配)。"""
@@ -10451,7 +10585,8 @@ class _Ir:
         #: L0.5 的栈区也要扫：它和 L0 的缓冲一样**可以装堆指针**（`wr64` 那种安全被调）。
         #: 整块按字登记，口径与 L0 那条一致。
         self.rootk = (sum(slots(nm) for nm, (ty, _) in self.vars.items() if self._root_ty(ty))
-                      + (self.l05_cap // 8 if self.l05_cap else 0))
+                      + (self.l05_cap // 8 if self.l05_cap else 0)
+                      + self.gc_sites)
         if self.rootk == 0:
             return
         # `#778`：根表的游标与槽是**线程间共享**的。push/pop 各自是一段很短的
@@ -10513,6 +10648,18 @@ class _Ir:
                 self.w(f"{v} = ptrtoint ptr {bp} to i64")
                 self.w(f"store i64 {v}, ptr {gp}")
                 i += 1
+        # **分配站点的 spill 槽**（`#1465`）：一格一个槽的地址，与具名槽同口径 ——
+        # 收集器读那一格、看它像不像堆内地址。放在最后，两边的次序才一致。
+        for j in range(self.gc_sites):
+            idx = self.t()
+            self.w(f"{idx} = add i32 {n0}, {i}")
+            gp = self.t()
+            self.w(f"{gp} = getelementptr [1024 x i64], ptr @__loment_roots,"
+                   f" i32 0, i32 {idx}")
+            v = self.t()
+            self.w(f"{v} = ptrtoint ptr %gc.sp.{j} to i64")
+            self.w(f"store i64 {v}, ptr {gp}")
+            i += 1
         n1 = self.t()
         self.w(f"{n1} = add i32 {n0}, {self.rootk}")
         self.w(f"store i32 {n1}, ptr @__loment_rootn")
@@ -10963,7 +11110,7 @@ class _Ir:
         raise LomError(e.line, 1, f"这个后端不支持运算符 {op}")
 
     # -- 内建 (M1/M2)
-    def alloc_ir(self, size_var: str) -> str:
+    def alloc_ir(self, size_var: str, site: object) -> str:
         """分配 `size_var` 字节, 返回指针 (alloc 与 str_concat 共用, M15/M2)。
 
         走运行期的 `__loment_alloc`（bump + 地址序空闲链表 + 拆分 + 前沿回退）——
@@ -10992,6 +11139,14 @@ class _Ir:
             self.w(f"call void @__loment_maybe_collect(i32 {size_var})")
         p = self.t()
         self.w(f"{p} = call ptr @__loment_alloc(i32 {size_var})")
+        if self.gc_sites:
+            # **先把结果存进本帧的 spill 槽**（`#1465`）：这个值接下来可能在寄存器里
+            # 活过下一次分配，而根表只看得见槽 —— 不存就等于把一块活着的内存交给收集器。
+            # 槽按**源码序**编号（与自举侧按 token 位置数出来的那个号一致），
+            # 并在本语句结束时清掉（`_gc_flush`）。
+            k = self.gc_site_map[id(site)]
+            self.w(f"store ptr {p}, ptr %gc.sp.{k}")
+            self.gc_dirty = max(self.gc_dirty, k + 1)
         if self.threads:
             self.w("call void @__loment_rt_release()")
         return p
@@ -11028,7 +11183,7 @@ class _Ir:
         """str_len / str_eq / str_concat / str_byte / slice_len 的 IR 降级。"""
         if e.name == "alloc":  # M15: bump 分配器
             _, sz = self.expr(e.args[0], "u32")
-            return "ptr", self.alloc_ir(sz)
+            return "ptr", self.alloc_ir(sz, e)
         if e.name == "free":
             _, p = self.expr(e.args[0], "ptr")
             if self.threads:
@@ -11343,7 +11498,7 @@ class _Ir:
             self.w(f"{n} = add i64 {al}, {bl}")
             nu = self.t()
             self.w(f"{nu} = trunc i64 {n} to i32")   # 堆计数是 u32
-            p = self.alloc_ir(nu)
+            p = self.alloc_ir(nu, e)
             self.w(f"call void @__loment_memcpy(ptr {p}, ptr {ap}, i64 {al})")
             g = self.t()
             self.w(f"{g} = getelementptr i8, ptr {p}, i64 {al}")
@@ -11496,6 +11651,11 @@ class _Ir:
         self.w(f"store {it} {nxt}, ptr {ptr}")
 
     def stmt(self, s) -> None:
+        # **语句边界清 spill 槽**（`#1465`）：一个分配结果只要活得比本条语句长，
+        # 就是**泄漏**（`docs/210` §2 的 L3 残差本来就该没人认领才能收回）。根扫看得见
+        # 槽是为了"同一表达式里的下一次分配别把它当垃圾"，不是为了把它钉死到函数末尾。
+        if not self.terminated:
+            self._gc_flush()
         line = getattr(s, "line", None)
         if line:
             loc = self.dbg_for(line)
@@ -12234,9 +12394,11 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # **LMS 第 3 级入口 A**（`docs/253` §5.3）：`alloc` 分配不出时**先收一次再试**，
     # 而不是直接 abort。⚠ **两个条件缺一不可**：
     #   * `lms` 开着 —— 它属于 LMS 第 3 级，不是回收档的事；
-    #   * **这份产物里真的有收集器**（`gc_auto` / `gc_auto_alpha`）—— `gc_manual` 下
-    #     没有东西可收，"拉回"在那里是一句空话。这是这一级**明写的边界**。
-    _lms_rescue = _lms_level(mod, "lms_guard") and (gc_auto or gc_alpha)
+    #   * **这份产物里真的有收集器**（`gc_auto` / `gc_auto_alpha` / **`lgc`**）——
+    #     `gc_manual` 单独不满足（没有东西可收）；但 `lgc` 落地之后 manual 档**也有**
+    #     收集器（`gc_control`），窗口里那句"开"就是它被允许收的时刻。漏掉这一支，
+    #     manual 档的窗口一撞 OOM 就直接 abort，而窗口的语义是"这一段可以收"。
+    _lms_rescue = _lms_level(mod, "lms_guard") and (gc_auto or gc_alpha or _gc_ctl)
     # **第 3/4/5 级在访存点上的三档**（`docs/253` §5.3–§5.5）：检查 / 跳过 / 退出。
     # 三个都不开就一条检查都不发 —— 没有回答的检查比没有检查更坏。
     _lms_guard = _lms_level(mod, "lms_guard")
@@ -12568,7 +12730,8 @@ def _desugar_foreach(mod: Module) -> None:
 
 
 def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3,
-         profile: str | None = None) -> Module:
+         profile: str | None = None, lspe_mode: str = "full",
+         answers: dict[str, str] | None = None) -> Module:
     # **前门**（`docs/188` §7.2）：读法由**声明**决定，不由后缀或嗅探。
     # 一份 `choose write grammar python` 的 `.lomt` 按 `docs/188` §0 **仍然是 Loment**，
     # 只是拼法不同 —— 所以这里先把它**翻成 Loment 源码**再往下走。
@@ -12641,6 +12804,17 @@ def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3,
     mod.lspe_sites, mod.lspe_unsourced_lines, mod.lspe_passes = lspe.census(
         tt, mod.name, lms=_lms_on)
     mod.lspe_level = lspe_level
+    mod.lspe_mode = lspe_mode
+    # 回答通道（`docs/262` §6 / `#755`）：同目录的 `lspe.answers` 是团队共享、可评审、
+    # 进版本库的那一份；显式传入的（`--answer`）优先。
+    if answers is None:
+        _ap = path.parent / "lspe.answers"
+        if _ap.is_file():
+            import lspe as _lspe_q
+            answers = _lspe_q.parse_answers(_ap.read_text(encoding="utf-8"))
+        else:
+            answers = {}
+    mod.lspe_answers = answers
     # 方言清单挂在模块上，供 Potato v4 用（`docs/184` §9 S4.3）。**定义那一段已经被
     # 抹掉了**，所以这是唯一还记得"这份源用了哪些自定义语法"的地方。
     mod.dialects = _dias

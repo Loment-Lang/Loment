@@ -2328,22 +2328,51 @@ def test_lomf_never_applies_on_a_guess():
 
 
 @test
-def test_m77_lspe_state_and_stubs():
-    """`loment lspe state` 打出台账；why/verify 是 0.1.5.2 的桩，必须非零且点名。"""
+def test_m77_lspe_state_why_and_verify_are_real():
+    """`lspe state` 打台账；`why` 打派生链；`verify` 核旁挂（0.1.5.2 起不再是桩）。"""
+    src = str(EX / "demo.lomt")
     r = subprocess.run([sys.executable, str(ROOT / "tools" / "loment.py"),
-                        "lspe", "state", str(EX / "demo.lomt")],
+                        "lspe", "state", src],
                        capture_output=True, text=True, encoding="utf-8", shell=False)
     assert r.returncode == 0, r.stderr[-300:]
     doc = json.loads(r.stdout)
     assert doc["state"] == "lspe_open_admin", doc
     assert doc["sites"] == doc["proved"] + doc["undecided"], doc
-    for sub in ("why", "verify"):
-        args = [sys.executable, str(ROOT / "tools" / "loment.py"), "lspe", sub]
-        args += ["S47"] if sub == "why" else ["x"]
-        s = subprocess.run(args, capture_output=True, text=True,
-                           encoding="utf-8", shell=False)
-        assert s.returncode == 2, (sub, s.returncode)
-        assert "0.1.5.2" in s.stderr, s.stderr
+
+    # `why`：拿一个真实站点 id，派生链要打出 claim / obligation / proof_hash。
+    mod, deps = lomentc.load_unit(EX / "demo.lomt", ROOT)
+    sid = mod.lspe_sites[0]["id"]
+    s = subprocess.run([sys.executable, str(ROOT / "tools" / "loment.py"),
+                        "lspe", "why", sid, src],
+                       capture_output=True, text=True, encoding="utf-8", shell=False)
+    assert s.returncode == 0, s.stderr[-300:]
+    assert ("claim" in s.stdout and "obligation" in s.stdout
+            and "proof_hash" in s.stdout), s.stdout
+
+    # `why` 不给文件 = 用法错（不是"0.1.5.2 的桩"）。
+    s = subprocess.run([sys.executable, str(ROOT / "tools" / "loment.py"),
+                        "lspe", "why", "S47"],
+                       capture_output=True, text=True, encoding="utf-8", shell=False)
+    assert s.returncode == 2 and "用法" in s.stderr, (s.returncode, s.stderr)
+
+    # `verify`：进程内出旁挂，再离线核 —— 不重编译。
+    side: dict = {}
+    potato = lomentc.emit_potato(mod, ROOT, deps, sidecar=True, sidecar_out=side)
+    with tempfile.TemporaryDirectory() as td:
+        art = Path(td) / "demo.potato.json"
+        sc = Path(td) / "demo.lspe"
+        art.write_text(potato, encoding="utf-8", newline="\n")
+        sc.write_text(json.dumps(side, ensure_ascii=False), encoding="utf-8")
+        v = subprocess.run([sys.executable, str(ROOT / "tools" / "loment.py"),
+                            "lspe", "verify", str(art), str(sc)],
+                           capture_output=True, text=True, encoding="utf-8", shell=False)
+        assert v.returncode == 0, v.stderr[-300:]
+        assert "[LSPE] ok" in v.stdout, v.stdout
+
+    s = subprocess.run([sys.executable, str(ROOT / "tools" / "loment.py"),
+                        "lspe", "verify", "x"],
+                       capture_output=True, text=True, encoding="utf-8", shell=False)
+    assert s.returncode == 2 and "用法" in s.stderr, (s.returncode, s.stderr)
 
 
 @test

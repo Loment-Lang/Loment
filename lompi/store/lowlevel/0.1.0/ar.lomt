@@ -1,0 +1,205 @@
+// lowlevel/ar.lomt — Unix `ar` 归档（`.a` 静态库）的成员遍历
+//
+// 为什么底层工具需要它: 链接器吃 `.a` 时第一件事就是"把成员表读出来"。
+// `.a` 的格式比它看起来老：全局头 8 字节 `!<arch>\n`，之后每个成员是
+// **60 字节定宽头** + 数据，数据按**偶数**对齐；名字、大小都是空格填充的
+// 十进制/ASCII，不是二进制整数。
+//
+// 支持: 普通成员名（`[16]`、尾随空格）、GNU 长名表 `//`（名字存为 `/offset`）、
+// BSD `#1/len`（名字在数据前面）。不支持: 符号表成员（`/`、`__.SYMDEF`）会被
+// 当成普通成员返回，调用方自己跳过。
+//
+// 命名: 公开 ar_*, 内部 aq_*。自检 test_ar_*。
+
+module ar
+choose runtime
+
+use mem
+
+fn aq_dec(p: ptr, off: u32, len: u32) -> u32 {
+    let v: u32 = 0;
+    let i: u32 = 0;
+    while i < len {
+        let c: u32 = load8(p, off + i);
+        if c < 48 || c > 57 {
+            i = len;
+        } else {
+            v = v * 10 + (c - 48);
+            i = i + 1;
+        }
+    }
+    return v;
+}
+
+/// 是否是 `ar` 归档。
+pub fn ar_is(p: ptr, n: u32) -> bool {
+    if n < 8 {
+        return false;
+    }
+    return load8(p, 0) == 33 && load8(p, 1) == 60 && load8(p, 2) == 97
+        && load8(p, 3) == 114 && load8(p, 4) == 99 && load8(p, 5) == 104
+        && load8(p, 6) == 62 && load8(p, 7) == 10;
+}
+
+fn aq_header_ok(p: ptr, off: u32, n: u32) -> bool {
+    if off + 60 > n {
+        return false;
+    }
+    return load8(p, off + 58) == 96 && load8(p, off + 59) == 10;
+}
+
+/// 成员总数。
+pub fn ar_count(p: ptr, n: u32) -> u32 {
+    if !ar_is(p, n) {
+        return 0;
+    }
+    let off: u32 = 8;
+    let c: u32 = 0;
+    while aq_header_ok(p, off, n) {
+        let size: u32 = aq_dec(p, off + 48, 10);
+        off = off + 60 + size;
+        if size % 2 == 1 {
+            off = off + 1;
+        }
+        c = c + 1;
+        if off >= n {
+            off = n;
+        }
+    }
+    return c;
+}
+
+fn aq_name_len(p: ptr, off: u32) -> u32 {
+    let i: u32 = 0;
+    while i < 16 {
+        if load8(p, off + i) == 32 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 16;
+}
+
+/// 第 idx 个成员（0 起）。out 写 [name_off, name_len, data_off, size] 四个 u32。
+/// 成功返回 1。
+pub fn ar_member(p: ptr, n: u32, idx: u32, out: ptr) -> u32 {
+    if !ar_is(p, n) {
+        return 0;
+    }
+    let off: u32 = 8;
+    let k: u32 = 0;
+    while aq_header_ok(p, off, n) {
+        let size: u32 = aq_dec(p, off + 48, 10);
+        if k == idx {
+            let nl: u32 = aq_name_len(p, off);
+            let doff: u32 = off + 60;
+            let noff: u32 = off;
+            let nlen: u32 = nl;
+            if nl > 1 && load8(p, off) == 47 {
+                // 长名表: "//" 是表本身, "/<digits>" 是引用
+                if nl == 2 && load8(p, off + 1) == 47 {
+                    noff = off;
+                    nlen = 2;
+                }
+            }
+            mem_store32(out, 0, noff);
+            mem_store32(out, 4, nlen);
+            mem_store32(out, 8, doff);
+            mem_store32(out, 12, size);
+            return 1;
+        }
+        off = off + 60 + size;
+        if size % 2 == 1 {
+            off = off + 1;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+/// 按名字找成员（只认 16 字节内、尾随空格的名字）。返回数据偏移；找不到返回 0。
+pub fn ar_find(p: ptr, n: u32, name: str) -> u32 {
+    let want: u32 = str_len(name);
+    if want > 16 {
+        return 0;
+    }
+    let off: u32 = 8;
+    while aq_header_ok(p, off, n) {
+        let size: u32 = aq_dec(p, off + 48, 10);
+        let nl: u32 = aq_name_len(p, off);
+        let ncmp: u32 = nl;
+        while ncmp > 0 && load8(p, off + ncmp - 1) == 47 {
+            ncmp = ncmp - 1;
+        }
+        if ncmp == want {
+            let hit: u32 = 1;
+            let i: u32 = 0;
+            while i < want {
+                if load8(p, off + i) != str_byte(name, i) {
+                    hit = 0;
+                }
+                i = i + 1;
+            }
+            if hit == 1 {
+                return off + 60;
+            }
+        }
+        off = off + 60 + size;
+        if size % 2 == 1 {
+            off = off + 1;
+        }
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn aq_test_hdr(b: ptr, off: u32, name: str, size: u32) {
+    let i: u32 = 0;
+    while i < 60 { store8(b, off + i, 32 as u8); i = i + 1; }
+    let nl: u32 = str_len(name);
+    i = 0;
+    while i < nl { store8(b, off + i, str_byte(name, i) as u8); i = i + 1; }
+    // size 是 10 字节十进制，右对齐
+    let digits: ptr = alloc(16);
+    let dn: u32 = 0;
+    let v: u32 = size;
+    if v == 0 {
+        store8(digits, 0, 48 as u8);
+        dn = 1;
+    }
+    while v > 0 {
+        store8(digits, dn, (48 + (v % 10)) as u8);
+        v = v / 10;
+        dn = dn + 1;
+    }
+    i = 0;
+    while i < dn {
+        store8(b, off + 48 + (dn - 1 - i), load8(digits, i) as u8);
+        i = i + 1;
+    }
+    store8(b, off + 58, 96 as u8);
+    store8(b, off + 59, 10 as u8);
+}
+
+fn test_ar_parse() -> bool {
+    let b: ptr = alloc(256);
+    let hdr: str = "!<arch>
+";
+    let i: u32 = 0;
+    while i < 8 { store8(b, i, str_byte(hdr, i) as u8); i = i + 1; }
+    aq_test_hdr(b, 8, "a.o/", 3);
+    store8(b, 68, 120 as u8);
+    store8(b, 69, 121 as u8);
+    store8(b, 70, 122 as u8);
+    store8(b, 71, 0 as u8); // 3 -> 补 1 对齐
+    aq_test_hdr(b, 72, "b.o/", 4);
+    store8(b, 132, 49 as u8);
+    store8(b, 133, 50 as u8);
+    store8(b, 134, 51 as u8);
+    store8(b, 135, 52 as u8);
+    if ar_count(b, 136) != 2 {
+        return false;
+    }
+    return ar_find(b, 136, "b.o") == 132;
+}

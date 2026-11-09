@@ -1,0 +1,195 @@
+// system/procfs.lomt — `/proc` 里两种最常见的文本格式
+//
+// 为什么系统工具需要它: Linux 上"这个进程怎么样"几乎都从 `/proc/<pid>/stat`
+// 与 `/proc/meminfo` 读。前者是**空格分隔的 50 多个字段、且第 2 个字段是
+// 带括号的进程名**（名字里可以有空格与括号）—— 按空格切一定错位；后者是
+// `Key:    value kB` 的定宽文本。
+//
+// 约定:
+//   * `pf_stat` 写 [pid, state(字符), ppid, utime, stime]；
+//   * `pf_line_value` 找以 `key` 开头的行，返回冒号后的值（去首尾空白）。
+//
+// 命名: 公开 pf_*, 内部 pq2_*。自检 test_procfs_*。
+
+module procfs
+choose runtime
+
+use mem
+
+fn pq2_digit(c: u32) -> bool {
+    return c >= 48 && c <= 57;
+}
+
+fn pq2_uint(p: ptr, st: u32, e: u32) -> u64 {
+    let v: u64 = 0;
+    let i: u32 = st;
+    while i < e {
+        let c: u32 = load8(p, i);
+        if pq2_digit(c) {
+            v = v * (10 as u64) + ((c - 48) as u64);
+        }
+        i = i + 1;
+    }
+    return v;
+}
+
+/// 解析 `/proc/<pid>/stat`。成功返回 1。
+pub fn pf_stat(p: ptr, n: u32, out: ptr) -> u32 {
+    let i: u32 = 0;
+    while i < n && load8(p, i) != 32 {
+        if !pq2_digit(load8(p, i)) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    if i >= n {
+        return 0;
+    }
+    let pid: u64 = pq2_uint(p, 0, i);
+    // 找 comm 的左括号与最后一个右括号
+    while i < n && load8(p, i) != 40 {
+        i = i + 1;
+    }
+    if i >= n {
+        return 0;
+    }
+    let close: u32 = 0;
+    let k: u32 = i + 1;
+    while k < n {
+        if load8(p, k) == 41 {
+            close = k;
+        }
+        k = k + 1;
+    }
+    if close == 0 {
+        return 0;
+    }
+    // comm 之后按空白切字段：第 1 个是 state，第 2 个是 ppid，第 12 个 utime，第 13 个 stime
+    let pos: u32 = close + 1;
+    let state: u32 = 0;
+    let ppid: u64 = 0;
+    let utime: u64 = 0;
+    let stime: u64 = 0;
+    let tok: u32 = 0;
+    while pos < n {
+        while pos < n && (load8(p, pos) == 32 || load8(p, pos) == 10) {
+            pos = pos + 1;
+        }
+        if pos >= n {
+            // 结束
+            pos = n;
+        } else {
+            let st: u32 = pos;
+            while pos < n && load8(p, pos) != 32 && load8(p, pos) != 10 {
+                pos = pos + 1;
+            }
+            tok = tok + 1;
+            if tok == 1 {
+                state = load8(p, st);
+            } else if tok == 2 {
+                ppid = pq2_uint(p, st, pos);
+            } else if tok == 12 {
+                utime = pq2_uint(p, st, pos);
+            } else if tok == 13 {
+                stime = pq2_uint(p, st, pos);
+            }
+        }
+    }
+    mem_store32(out, 0, pid as u32);
+    mem_store32(out, 4, state);
+    mem_store32(out, 8, ppid as u32);
+    mem_store32(out, 12, utime as u32);
+    mem_store32(out, 16, stime as u32);
+    return 1;
+}
+
+fn pq2_eq_prefix(p: ptr, st: u32, n: u32, key: str) -> bool {
+    let kn: u32 = str_len(key);
+    if st + kn > n {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < kn {
+        if load8(p, st + i) != str_byte(key, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// 找以 `key` 开头的行，写冒号后的值（去首尾空白）。返回长度；没找到返回 0。
+pub fn pf_line_value(p: ptr, n: u32, key: str, out: ptr, cap: u32) -> u32 {
+    let line: u32 = 0;
+    while line < n {
+        if pq2_eq_prefix(p, line, n, key) {
+            let e: u32 = line;
+            while e < n && load8(p, e) != 10 {
+                e = e + 1;
+            }
+            let eline: u32 = e;
+            // 跳过 key 与冒号
+            let vst: u32 = line + str_len(key);
+            let s: u32 = vst;
+            let t: u32 = s;
+            while t < eline && (load8(p, t) == 32 || load8(p, t) == 9 || load8(p, t) == 58) {
+                t = t + 1;
+            }
+            let vstart: u32 = t;
+            let vend: u32 = eline;
+            while vend > vstart && (load8(p, vend - 1) == 32 || load8(p, vend - 1) == 9
+                || load8(p, vend - 1) == 13) {
+                vend = vend - 1;
+            }
+            let len: u32 = vend - vstart;
+            let i: u32 = 0;
+            while i < len {
+                if i < cap {
+                    store8(out, i, load8(p, vstart + i) as u8);
+                }
+                i = i + 1;
+            }
+            return len;
+        }
+        while line < n && load8(p, line) != 10 {
+            line = line + 1;
+        }
+        line = line + 1;
+    }
+    return 0;
+}
+
+/// `MemTotal` 这类键的便捷入口。
+pub fn pf_meminfo_total(p: ptr, n: u32, out: ptr, cap: u32) -> u32 {
+    return pf_line_value(p, n, "MemTotal", out, cap);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_procfs_stat() -> bool {
+    let s: str = "1234 (my proc (x)) S 1 1234 1234 0 -1 4194304 100 0 0 0 55 66 0 0 20 0 1\n";
+    let o: ptr = alloc(24);
+    if pf_stat(str_ptr(s), str_len(s), o) != 1 {
+        return false;
+    }
+    return mem_load32(o, 0) == 1234 && mem_load32(o, 4) == 83
+        && mem_load32(o, 8) == 1 && mem_load32(o, 12) == 55;
+}
+
+fn test_procfs_meminfo() -> bool {
+    let s: str = "MemFree:   12345 kB\nMemTotal:  654321 kB\n";
+    let o: ptr = alloc(32);
+    let n: u32 = pf_meminfo_total(str_ptr(s), str_len(s), o, 32);
+    let want: str = "654321 kB";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}

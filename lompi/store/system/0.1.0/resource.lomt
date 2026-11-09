@@ -1,0 +1,78 @@
+// system/resource.lomt — getrlimit / setrlimit 的资源名与结构
+//
+// 为什么系统工具需要它: "too many open files" 是 `RLIMIT_NOFILE`（7）；
+// 栈溢出是 `RLIMIT_STACK`（3）。排查资源问题时先要问"哪一条限额"，
+// 答案是一个 0..15 的整数。`struct rlimit` 本身只有两个 u64（cur / max）。
+//
+// 覆盖: Linux 通用 RLIMIT 编号（0..15）。不同架构一致。
+//
+// 命名: 公开 rlim_*, 内部 rq_*。自检 test_resource_*。
+
+module resource
+choose runtime
+
+use mem
+
+pub const RLIM_INFINITY: u64 = 18446744073709551615;
+
+fn rq_put(out: ptr, cap: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if i < cap {
+            store8(out, i, str_byte(s, i) as u8);
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 资源编号 -> 名字。
+pub fn rlim_name(which: u32, out: ptr, cap: u32) -> u32 {
+    let s: str = "RLIMIT_unknown";
+    if which == 0 { s = "RLIMIT_CPU"; }
+    else if which == 1 { s = "RLIMIT_FSIZE"; }
+    else if which == 2 { s = "RLIMIT_DATA"; }
+    else if which == 3 { s = "RLIMIT_STACK"; }
+    else if which == 4 { s = "RLIMIT_CORE"; }
+    else if which == 5 { s = "RLIMIT_RSS"; }
+    else if which == 6 { s = "RLIMIT_NPROC"; }
+    else if which == 7 { s = "RLIMIT_NOFILE"; }
+    else if which == 8 { s = "RLIMIT_MEMLOCK"; }
+    else if which == 9 { s = "RLIMIT_AS"; }
+    else if which == 10 { s = "RLIMIT_LOCKS"; }
+    else if which == 11 { s = "RLIMIT_SIGPENDING"; }
+    else if which == 12 { s = "RLIMIT_MSGQUEUE"; }
+    else if which == 13 { s = "RLIMIT_NICE"; }
+    else if which == 14 { s = "RLIMIT_RTPRIO"; }
+    else if which == 15 { s = "RLIMIT_RTTIME"; }
+    return rq_put(out, cap, s);
+}
+
+/// 读 `struct rlimit`（两个 u64）。out 写 [cur, max]。
+pub fn rlim_read(p: ptr, out: ptr) {
+    mem_store64(out, 0, mem_load64(p, 0));
+    mem_store64(out, 8, mem_load64(p, 8));
+}
+
+/// 当前值是否无限。
+pub fn rlim_is_inf(v: u64) -> bool {
+    return v == RLIM_INFINITY;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_resource_name() -> bool {
+    let o: ptr = alloc(32);
+    let n: u32 = rlim_name(7, o, 32);
+    return n == 13 && load8(o, 0) == 82; // "RLIMIT_NOFILE"
+}
+
+fn test_resource_read() -> bool {
+    let p: ptr = alloc(16);
+    mem_store64(p, 0, 1024 as u64);
+    mem_store64(p, 8, RLIM_INFINITY);
+    let o: ptr = alloc(16);
+    rlim_read(p, o);
+    return mem_load64(o, 0) == 1024 as u64 && rlim_is_inf(mem_load64(o, 8));
+}

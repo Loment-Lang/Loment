@@ -882,6 +882,291 @@ def test_world_reference_packages():
     print(f"      world reference: {len(want.splitlines())} 项与 Python 逐字节一致")
 
 
+PROBE_LOW_SYS = _PROBE_HEAD + r'''
+use leb128
+use bitpack
+use ar
+use macho
+use coff
+use dwarf
+use reloc
+use calling
+use errno
+use syscalls
+use fcntl
+use mmap
+use poll
+use resource
+use procfs
+use ioctl
+
+fn ar_test_hdr(b: ptr, off: u32, name: str, size: u32) {
+    let i: u32 = 0;
+    while i < 60 { store8(b, off + i, 32 as u8); i = i + 1; }
+    let nl: u32 = str_len(name);
+    i = 0;
+    while i < nl { store8(b, off + i, str_byte(name, i) as u8); i = i + 1; }
+    let digits: ptr = alloc(16);
+    let dn: u32 = 0;
+    let v: u32 = size;
+    if v == 0 {
+        store8(digits, 0, 48 as u8);
+        dn = 1;
+    }
+    while v > 0 {
+        store8(digits, dn, (48 + (v % 10)) as u8);
+        v = v / 10;
+        dn = dn + 1;
+    }
+    i = 0;
+    while i < dn {
+        store8(b, off + 48 + (dn - 1 - i), load8(digits, i) as u8);
+        i = i + 1;
+    }
+    store8(b, off + 58, 96 as u8);
+    store8(b, off + 59, 10 as u8);
+}
+
+fn _start() {
+    let o: ptr = alloc(256);
+    let used: ptr = alloc(4);
+    let buf: ptr = alloc(256);
+
+    // leb128
+    let lb: u32 = lb_enc_u64(300 as u64, buf, 256);
+    say("lb_len=", lb as u64);
+    say("lb_b0=", load8(buf, 0) as u64);
+    say("lb_back=", lb_dec_u64(buf, lb, used));
+    let ls: u32 = lb_enc_i64(0 as i64 - 300 as i64, buf, 256);
+    say("lb_slen=", ls as u64);
+    say("lb_sback=", lb_dec_i64(buf, ls, used) as u64);
+
+    // bitpack
+    store8(buf, 0, 177 as u8);
+    store8(buf, 1, 2 as u8);
+    say("bp=", bp_get_le(buf, 4, 8));
+    store8(buf, 0, 0 as u8); store8(buf, 1, 0 as u8);
+    bp_set_be(buf, 3, 10, 981 as u64);
+    say("bp_rt=", bp_get_be(buf, 3, 10));
+
+    // ar
+    let a: ptr = alloc(256);
+    let hdr: str = "!<arch>\n";
+    let i: u32 = 0;
+    while i < 8 { store8(a, i, str_byte(hdr, i) as u8); i = i + 1; }
+    ar_test_hdr(a, 8, "a.o/", 3);
+    store8(a, 68, 1 as u8); store8(a, 69, 2 as u8); store8(a, 70, 3 as u8);
+    ar_test_hdr(a, 72, "b.o/", 4);
+    store8(a, 132, 9 as u8);
+    say("ar_c=", ar_count(a, 136) as u64);
+    say("ar_f=", ar_find(a, 136, "b.o") as u64);
+
+    // macho
+    let m: ptr = alloc(64);
+    store8(m, 0, 207 as u8); store8(m, 1, 250 as u8);
+    store8(m, 2, 237 as u8); store8(m, 3, 254 as u8);
+    store8(m, 4, 7 as u8); store8(m, 5, 0 as u8);
+    store8(m, 6, 0 as u8); store8(m, 7, 1 as u8);
+    store8(m, 12, 2 as u8); store8(m, 16, 3 as u8);
+    let mo: ptr = alloc(32);
+    let _mr: u32 = mc_parse(m, 32, mo);
+    say("mc_cpu=", mem_load32(mo, 4) as u64);
+    say("mc_ft=", mem_load32(mo, 12) as u64);
+    say("mc_n=", mem_load32(mo, 16) as u64);
+
+    // coff
+    let c: ptr = alloc(64);
+    store8(c, 0, 100 as u8); store8(c, 1, 134 as u8);
+    store8(c, 2, 1 as u8);
+    let co: ptr = alloc(24);
+    let _cr: u32 = coff_parse(c, 64, co);
+    say("co_m=", mem_load32(co, 0) as u64);
+    let cn: u32 = coff_machine_name(mem_load32(co, 0), o, 256);
+    say_cstr("co_n=", o, cn);
+
+    // dwarf
+    let d: ptr = alloc(64);
+    store8(d, 0, 40 as u8); store8(d, 4, 5 as u8);
+    store8(d, 6, 1 as u8); store8(d, 7, 8 as u8); store8(d, 8, 12 as u8);
+    let do_: ptr = alloc(24);
+    let _dr: u32 = dw_unit_header(d, 64, do_);
+    say("dw_v=", mem_load32(do_, 4) as u64);
+    say("dw_as=", mem_load32(do_, 12) as u64);
+    say("dw_ab=", mem_load32(do_, 16) as u64);
+
+    // reloc / calling
+    let rn: u32 = rc_name(62, 4, o, 256);
+    say_cstr("rc1=", o, rn);
+    let rn2: u32 = rc_machine_name(183, o, 256);
+    say_cstr("rc2=", o, rn2);
+    let ca: u32 = reg_int_arg(REG_SYSV, 3, o, 256);
+    say_cstr("ca1=", o, ca);
+    let cb: u32 = reg_int_arg(REG_WIN64, 0, o, 256);
+    say_cstr("ca2=", o, cb);
+    let cc: u32 = reg_int_arg(REG_AAPCS64, 7, o, 256);
+    say_cstr("ca3=", o, cc);
+    say("ca4=", reg_int_arg(REG_WIN64, 4, o, 256) as u64);
+
+    // errno
+    let e1: u32 = er_name(2 as i64, o, 256);
+    say_cstr("er1=", o, e1);
+    let e2: u32 = er_name(13 as i64, o, 256);
+    say_cstr("er2=", o, e2);
+    let e3: u32 = er_name(111 as i64, o, 256);
+    say_cstr("er3=", o, e3);
+    let e4: u32 = er_text(13 as i64, o, 256);
+    say_cstr("er4=", o, e4);
+
+    // syscalls
+    let s1: u32 = scn_name(1 as i64, o, 256);
+    say_cstr("sc1=", o, s1);
+    let s2: u32 = scn_name(257 as i64, o, 256);
+    say_cstr("sc2=", o, s2);
+    say("sc3=", scn_num("openat") as u64);
+    say("sc4=", scn_num("nope") as u64);
+
+    // fcntl / mmap / poll / resource
+    let f1: u32 = fcnt_open_flags(1 + 64 + 524288, o, 256);
+    say_cstr("fc1=", o, f1);
+    say("fc2=", fcnt_lookup("O_APPEND") as u64);
+    let p1: u32 = mm_prot_text(3, o, 256);
+    say_cstr("mm1=", o, p1);
+    let p2: u32 = mm_map_text(34, o, 256);
+    say_cstr("mm2=", o, p2);
+    say("mm3=", mm_anon_rw_mask() as u64);
+    let w1: u32 = pw_events_text(17, o, 256);
+    say_cstr("pw1=", o, w1);
+    let w2: u32 = pw_epoll_text(2147483652, o, 256);
+    say_cstr("pw2=", o, w2);
+    let r1: u32 = rlim_name(7, o, 256);
+    say_cstr("rl1=", o, r1);
+    say("rl2=", rlim_is_inf(RLIM_INFINITY) as u64);
+
+    // procfs
+    let st: str = "1234 (my proc (x)) S 1 1234 1234 0 -1 4194304 100 0 0 0 55 66 0 0 20 0 1\n";
+    let po: ptr = alloc(24);
+    let _pr: u32 = pf_stat(str_ptr(st), str_len(st), po);
+    say("pf1=", mem_load32(po, 0) as u64);
+    say("pf2=", mem_load32(po, 8) as u64);
+    say("pf3=", mem_load32(po, 12) as u64);
+    say("pf4=", mem_load32(po, 16) as u64);
+    let mi: str = "MemFree:   12345 kB\nMemTotal:  654321 kB\n";
+    let mn: u32 = pf_meminfo_total(str_ptr(mi), str_len(mi), o, 256);
+    say_cstr("pf5=", o, mn);
+
+    // ioctl
+    say("io1=", iol_tiocgwinsz());
+    let ws: ptr = alloc(8);
+    store8(ws, 0, 40 as u8); store8(ws, 2, 120 as u8);
+    let wo: ptr = alloc(16);
+    iol_winsize(ws, wo);
+    say("io2=", mem_load32(wo, 0) as u64);
+    say("io3=", mem_load32(wo, 4) as u64);
+
+    syscall4(60, 0, 0, 0);
+}
+'''
+
+
+def _expected_low_sys() -> str:
+    import errno as E
+    import os
+
+    try:
+        import fcntl as F
+    except ImportError:  # Windows：没有 fcntl，用 Linux 常量
+        class _F:
+            O_WRONLY = 1
+            O_CREAT = 64
+            O_CLOEXEC = 524288
+            O_APPEND = 1024
+        F = _F
+
+    try:
+        import termios as T
+    except ImportError:  # Windows：没有 termios
+        class _T:
+            TIOCGWINSZ = 0x5413
+        T = _T
+
+    out = io.StringIO()
+
+    def say(tag, v):
+        out.write(f"{tag}{v}\n")
+
+    say("lb_len=", 2)
+    say("lb_b0=", 0xAC)
+    say("lb_back=", 300)
+    say("lb_slen=", 2)
+    say("lb_sback=", -300)
+    say("bp=", 43)
+    say("bp_rt=", 981)
+    say("ar_c=", 2)
+    say("ar_f=", 132)
+    say("mc_cpu=", 0x01000007)
+    say("mc_ft=", 2)
+    say("mc_n=", 3)
+    say("co_m=", 0x8664)
+    say("co_n=", "amd64")
+    say("dw_v=", 5)
+    say("dw_as=", 8)
+    say("dw_ab=", 12)
+    say("rc1=", "R_X86_64_PLT32")
+    say("rc2=", "AArch64")
+    say("ca1=", "rcx")
+    say("ca2=", "rcx")
+    say("ca3=", "x7")
+    say("ca4=", 0)
+    linux = sys.platform.startswith("linux")
+    say("er1=", E.errorcode[2] if linux else "ENOENT")
+    say("er2=", E.errorcode[13] if linux else "EACCES")
+    say("er3=", E.errorcode[111] if linux else "ECONNREFUSED")
+    say("er4=", os.strerror(13).lower() if linux else "permission denied")
+    say("sc1=", "write")
+    say("sc2=", "openat")
+    say("sc3=", 257)
+    say("sc4=", -1)
+    mask = F.O_WRONLY | F.O_CREAT | F.O_CLOEXEC
+    names = []
+    if (mask & 3) == F.O_WRONLY:
+        names.append("O_WRONLY")
+    if mask & F.O_CREAT:
+        names.append("O_CREAT")
+    if mask & F.O_CLOEXEC:
+        names.append("O_CLOEXEC")
+    say("fc1=", "|".join(names))
+    say("fc2=", F.O_APPEND)
+    say("mm1=", "PROT_READ|PROT_WRITE")
+    say("mm2=", "MAP_PRIVATE|MAP_ANONYMOUS")
+    say("mm3=", 34)  # MAP_PRIVATE|MAP_ANONYMOUS
+    say("pw1=", "POLLIN|POLLHUP")
+    say("pw2=", "EPOLLOUT|EPOLLET")
+    say("rl1=", "RLIMIT_NOFILE")
+    say("rl2=", 1)
+    say("pf1=", 1234)
+    say("pf2=", 1)
+    say("pf3=", 55)
+    say("pf4=", 66)
+    say("pf5=", "654321 kB")
+    say("io1=", T.TIOCGWINSZ)
+    say("io2=", 40)
+    say("io3=", 120)
+    return out.getvalue()
+
+
+@test
+def test_lowlevel_and_system_packages():
+    """lowlevel/system：二进制格式与内核常量，与 Python 标准库/常量逐字节一致。"""
+    try:
+        got = _run_probe("lowsys", PROBE_LOW_SYS)
+    except _Skip as e:
+        print(f"      SKIP: {e}")
+        return
+    want = _expected_low_sys()
+    _compare(got, want)
+    print(f"      lowlevel/system: {len(want.splitlines())} 项与 Python 逐字节一致")
+
+
 def main(argv: list[str] | None = None) -> int:
     import loment_suite
     return loment_suite.run(TESTS, "loment_domains_test", only=(argv[0] if argv else None))

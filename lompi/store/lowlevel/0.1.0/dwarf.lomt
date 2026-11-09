@@ -1,0 +1,154 @@
+// lowlevel/dwarf.lomt — DWARF 编译单元头与常用标签名
+//
+// 为什么底层工具需要它: 调试信息是**一层套一层的自描述结构**：.debug_info 里
+// 每一个编译单元先是一段头（长度、版本、地址宽度、abbrev 偏移），随后才是
+// DIE 树。头读错一个字节，后面整棵树都错位 —— 而它恰恰是版本差异最大的一块
+// （DWARF 5 在版本号后插了 unit_type 与 address_size）。
+//
+// 覆盖: 32 位 DWARF（`.debug_info` 初始长度 4 字节，非 0xffffffff），版本 2–5。
+// 64 位 DWARF 返回 0（长度字段本身是 8 字节，另有一套读法）。
+//
+// 命名: 公开 dw_*, 内部 dq_*。自检 test_dwarf_*。
+
+module dwarf
+choose runtime
+
+use mem
+
+fn dq_le16(p: ptr, off: u32) -> u32 {
+    return (load8(p, off) as u32) + ((load8(p, off + 1) as u32) * 256);
+}
+
+fn dq_le32(p: ptr, off: u32) -> u32 {
+    return (load8(p, off) as u32)
+        + ((load8(p, off + 1) as u32) * 256)
+        + ((load8(p, off + 2) as u32) * 65536)
+        + ((load8(p, off + 3) as u32) * 16777216);
+}
+
+/// 解析 `.debug_info` 单元头。out 写
+/// [unit_length, version, unit_type, address_size, abbrev_off]。成功返回 1。
+pub fn dw_unit_header(p: ptr, n: u32, out: ptr) -> u32 {
+    if n < 11 {
+        return 0;
+    }
+    let len: u32 = dq_le32(p, 0);
+    if len == 4294967295 {
+        return 0; // 64 位 DWARF
+    }
+    let ver: u32 = dq_le16(p, 4);
+    if ver < 2 || ver > 5 {
+        return 0;
+    }
+    let utype: u32 = 0;
+    let asize: u32 = 0;
+    let aoff: u32 = 0;
+    if ver >= 5 {
+        if n < 12 {
+            return 0;
+        }
+        utype = load8(p, 6);
+        asize = load8(p, 7);
+        aoff = dq_le32(p, 8);
+    } else {
+        aoff = dq_le32(p, 6);
+        asize = load8(p, 10);
+    }
+    if asize != 4 && asize != 8 {
+        return 0;
+    }
+    mem_store32(out, 0, len);
+    mem_store32(out, 4, ver);
+    mem_store32(out, 8, utype);
+    mem_store32(out, 12, asize);
+    mem_store32(out, 16, aoff);
+    return 1;
+}
+
+/// 单元头字节数（不含长度字段本身）。
+pub fn dw_unit_header_size(version: u32) -> u32 {
+    if version >= 5 {
+        return 8;
+    }
+    return 7;
+}
+
+fn dq_put(out: ptr, cap: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if i < cap {
+            store8(out, i, str_byte(s, i) as u8);
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// DW_TAG 常用名字。
+pub fn dw_tag_name(tag: u32, out: ptr, cap: u32) -> u32 {
+    let s: str = "DW_TAG_unknown";
+    if tag == 1 { s = "DW_TAG_array_type"; }
+    else if tag == 2 { s = "DW_TAG_class_type"; }
+    else if tag == 4 { s = "DW_TAG_enumeration_type"; }
+    else if tag == 5 { s = "DW_TAG_formal_parameter"; }
+    else if tag == 11 { s = "DW_TAG_lexical_block"; }
+    else if tag == 13 { s = "DW_TAG_member"; }
+    else if tag == 15 { s = "DW_TAG_pointer_type"; }
+    else if tag == 16 { s = "DW_TAG_reference_type"; }
+    else if tag == 17 { s = "DW_TAG_compile_unit"; }
+    else if tag == 19 { s = "DW_TAG_structure_type"; }
+    else if tag == 21 { s = "DW_TAG_subroutine_type"; }
+    else if tag == 22 { s = "DW_TAG_typedef"; }
+    else if tag == 23 { s = "DW_TAG_union_type"; }
+    else if tag == 46 { s = "DW_TAG_subprogram"; }
+    else if tag == 52 { s = "DW_TAG_variable"; }
+    return dq_put(out, cap, s);
+}
+
+/// DW_AT 常用名字。
+pub fn dw_attr_name(at: u32, out: ptr, cap: u32) -> u32 {
+    let s: str = "DW_AT_unknown";
+    if at == 1 { s = "DW_AT_sibling"; }
+    else if at == 2 { s = "DW_AT_location"; }
+    else if at == 3 { s = "DW_AT_name"; }
+    else if at == 11 { s = "DW_AT_byte_size"; }
+    else if at == 13 { s = "DW_AT_language"; }
+    else if at == 16 { s = "DW_AT_stmt_list"; }
+    else if at == 17 { s = "DW_AT_low_pc"; }
+    else if at == 18 { s = "DW_AT_high_pc"; }
+    else if at == 27 { s = "DW_AT_comp_dir"; }
+    else if at == 37 { s = "DW_AT_producer"; }
+    else if at == 58 { s = "DW_AT_decl_file"; }
+    else if at == 59 { s = "DW_AT_decl_line"; }
+    return dq_put(out, cap, s);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_dwarf_v5_header() -> bool {
+    let b: ptr = alloc(32);
+    store8(b, 0, 40 as u8); // length 40
+    store8(b, 4, 5 as u8);  // version 5
+    store8(b, 6, 1 as u8);  // unit_type DW_UT_compile
+    store8(b, 7, 8 as u8);  // address_size
+    store8(b, 8, 12 as u8); // abbrev off 12
+    let o: ptr = alloc(24);
+    if dw_unit_header(b, 32, o) != 1 {
+        return false;
+    }
+    return mem_load32(o, 0) == 40 && mem_load32(o, 4) == 5
+        && mem_load32(o, 8) == 1 && mem_load32(o, 12) == 8
+        && mem_load32(o, 16) == 12;
+}
+
+fn test_dwarf_v4_header() -> bool {
+    let b: ptr = alloc(32);
+    store8(b, 0, 30 as u8);
+    store8(b, 4, 4 as u8);   // version 4
+    store8(b, 6, 7 as u8);   // abbrev off 7
+    store8(b, 10, 8 as u8);  // address_size
+    let o: ptr = alloc(24);
+    return dw_unit_header(b, 32, o) == 1 && mem_load32(o, 16) == 7
+        && mem_load32(o, 12) == 8;
+}

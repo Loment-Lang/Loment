@@ -1,0 +1,146 @@
+// lowlevel/coff.lomt — COFF 目标文件（Windows `.obj` / MSVC 工具链）
+//
+// 为什么底层工具需要它: PE 是"加载后的镜像"，而 `.obj` 是**链接前**的 COFF：
+// 20 字节文件头 + 若干 40 字节节头 + 重定位 + 符号表。链接器、`dumpbin`、
+// 符号检查都在这一层工作。
+//
+// 约定:
+//   * `coff_parse` 写 [machine, nsections, symptr, nsyms]；
+//   * `coff_section` 写 [name_off, raw_off, raw_size, characteristics]；
+//   * 长节名（`/123` 指向字符串表）**原样返回斜杠形式**，调用方自己解；
+//   * 只读 20 字节头，不假设可选头存在（对象文件通常没有）。
+//
+// 命名: 公开 coff_*, 内部 cf_*。自检 test_coff_*。
+
+module coff
+choose runtime
+
+use mem
+
+fn cf_le16(p: ptr, off: u32) -> u32 {
+    return (load8(p, off) as u32) + ((load8(p, off + 1) as u32) * 256);
+}
+
+fn cf_le32(p: ptr, off: u32) -> u32 {
+    return (load8(p, off) as u32)
+        + ((load8(p, off + 1) as u32) * 256)
+        + ((load8(p, off + 2) as u32) * 65536)
+        + ((load8(p, off + 3) as u32) * 16777216);
+}
+
+/// 解析文件头。成功返回 1。
+pub fn coff_parse(p: ptr, n: u32, out: ptr) -> u32 {
+    if n < 20 {
+        return 0;
+    }
+    mem_store32(out, 0, cf_le16(p, 0));
+    mem_store32(out, 4, cf_le16(p, 2));
+    mem_store32(out, 8, cf_le32(p, 8));
+    mem_store32(out, 12, cf_le32(p, 12));
+    return 1;
+}
+
+/// 第 idx 个节头。out 写 [name_off, raw_off, raw_size, characteristics]。
+pub fn coff_section(p: ptr, n: u32, idx: u32, out: ptr) -> u32 {
+    if n < 20 {
+        return 0;
+    }
+    let nsect: u32 = cf_le16(p, 2);
+    if idx >= nsect {
+        return 0;
+    }
+    let opthdr: u32 = cf_le16(p, 16);
+    let base: u32 = 20 + opthdr + idx * 40;
+    if base + 40 > n {
+        return 0;
+    }
+    mem_store32(out, 0, base);
+    mem_store32(out, 4, cf_le32(p, base + 20));
+    mem_store32(out, 8, cf_le32(p, base + 16));
+    mem_store32(out, 12, cf_le32(p, base + 36));
+    return 1;
+}
+
+fn cf_put(out: ptr, cap: u32, s: str) -> u32 {
+    let m: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < m {
+        if i < cap {
+            store8(out, i, str_byte(s, i) as u8);
+        }
+        i = i + 1;
+    }
+    return m;
+}
+
+/// machine 名。
+pub fn coff_machine_name(machine: u32, out: ptr, cap: u32) -> u32 {
+    let s: str = "unknown";
+    if machine == 332 { s = "i386"; }
+    else if machine == 34404 { s = "amd64"; }
+    else if machine == 43620 { s = "arm64"; }
+    else if machine == 448 { s = "arm"; }
+    else if machine == 452 { s = "armnt"; }
+    else if machine == 512 { s = "ia64"; }
+    return cf_put(out, cap, s);
+}
+
+/// 节名（8 字节，尾随 NUL 截断）写进 out，返回名字长度。
+pub fn coff_section_name(p: ptr, n: u32, idx: u32, out: ptr, cap: u32) -> u32 {
+    let h: ptr = alloc(16);
+    if coff_section(p, n, idx, h) == 0 {
+        return 0;
+    }
+    let base: u32 = mem_load32(h, 0);
+    let len: u32 = 0;
+    while len < 8 && load8(p, base + len) != 0 {
+        len = len + 1;
+    }
+    let i: u32 = 0;
+    while i < len {
+        if i < cap {
+            store8(out, i, load8(p, base + i) as u8);
+        }
+        i = i + 1;
+    }
+    return len;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_coff_header() -> bool {
+    let b: ptr = alloc(128);
+    // machine = 0x8664 (amd64), nsections = 1, symptr = 100, nsyms = 3
+    store8(b, 0, 100 as u8); store8(b, 1, 134 as u8);
+    store8(b, 2, 1 as u8);   store8(b, 3, 0 as u8);
+    store8(b, 16, 0 as u8);  store8(b, 17, 0 as u8); // opthdr 0
+    store8(b, 8, 100 as u8);
+    store8(b, 12, 3 as u8);
+    let o: ptr = alloc(24);
+    if coff_parse(b, 128, o) != 1 {
+        return false;
+    }
+    return mem_load32(o, 0) == 34404 && mem_load32(o, 4) == 1
+        && mem_load32(o, 8) == 100 && mem_load32(o, 12) == 3;
+}
+
+fn test_coff_section() -> bool {
+    let b: ptr = alloc(256);
+    store8(b, 2, 1 as u8);
+    let base: u32 = 20;
+    store8(b, base, 46 as u8); store8(b, base + 1, 116 as u8); // ".t"
+    store8(b, base + 2, 101 as u8); store8(b, base + 3, 120 as u8); // "ext"
+    store8(b, base + 16, 64 as u8);  // raw_size 64
+    store8(b, base + 20, 512 as u8); // raw_off 512 (低字节)
+    store8(b, base + 21, 2 as u8);   // 512 = 0x200 的高字节
+    let o: ptr = alloc(24);
+    if coff_section(b, 256, 0, o) != 1 {
+        return false;
+    }
+    if mem_load32(o, 8) != 64 || mem_load32(o, 4) != 512 {
+        return false;
+    }
+    let name: ptr = alloc(16);
+    let nl: u32 = coff_section_name(b, 256, 0, name, 16);
+    return nl == 5 && load8(name, 0) == 46;
+}

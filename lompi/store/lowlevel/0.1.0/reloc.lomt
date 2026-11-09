@@ -1,0 +1,147 @@
+// lowlevel/reloc.lomt — ELF 重定位类型的名字
+//
+// 为什么底层工具需要它: 重定位表读出来是两个整数 `(offset, type)`；`type` 是
+// **按机器各自编号**的枚举。同一张表在 x86-64 上 `4` 是 `R_X86_64_PLT32`，
+// 在 AArch64 上 `4` 什么都不是。报错/反汇编里给人看必须换成名字。
+//
+// 覆盖: EM_X86_64 (62) 与 EM_AARCH64 (183) 的常用项；其余返回 "UNKNOWN"。
+//
+// 命名: 公开 rc_*, 内部 rl_*。自检 test_reloc_*。
+
+module reloc
+choose runtime
+
+fn rl_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+fn rl_x86_64(t: u32) -> str {
+    if t == 0 { return "R_X86_64_NONE"; }
+    if t == 1 { return "R_X86_64_64"; }
+    if t == 2 { return "R_X86_64_PC32"; }
+    if t == 3 { return "R_X86_64_GOT32"; }
+    if t == 4 { return "R_X86_64_PLT32"; }
+    if t == 5 { return "R_X86_64_COPY"; }
+    if t == 6 { return "R_X86_64_GLOB_DAT"; }
+    if t == 7 { return "R_X86_64_JUMP_SLOT"; }
+    if t == 8 { return "R_X86_64_RELATIVE"; }
+    if t == 9 { return "R_X86_64_GOTPCREL"; }
+    if t == 10 { return "R_X86_64_32"; }
+    if t == 11 { return "R_X86_64_32S"; }
+    if t == 12 { return "R_X86_64_16"; }
+    if t == 13 { return "R_X86_64_PC16"; }
+    if t == 14 { return "R_X86_64_8"; }
+    if t == 15 { return "R_X86_64_PC8"; }
+    if t == 16 { return "R_X86_64_DTPMOD64"; }
+    if t == 17 { return "R_X86_64_DTPOFF64"; }
+    if t == 18 { return "R_X86_64_TPOFF64"; }
+    if t == 19 { return "R_X86_64_TLSGD"; }
+    if t == 20 { return "R_X86_64_TLSLD"; }
+    if t == 21 { return "R_X86_64_DTPOFF32"; }
+    if t == 22 { return "R_X86_64_GOTTPOFF"; }
+    if t == 23 { return "R_X86_64_TPOFF32"; }
+    if t == 24 { return "R_X86_64_PC64"; }
+    if t == 25 { return "R_X86_64_GOTOFF64"; }
+    if t == 26 { return "R_X86_64_GOTPC32"; }
+    if t == 27 { return "R_X86_64_GOT64"; }
+    if t == 28 { return "R_X86_64_GOTPCREL64"; }
+    if t == 29 { return "R_X86_64_GOTPC64"; }
+    if t == 30 { return "R_X86_64_GOTPLT64"; }
+    if t == 31 { return "R_X86_64_PLTOFF64"; }
+    if t == 32 { return "R_X86_64_SIZE32"; }
+    if t == 33 { return "R_X86_64_SIZE64"; }
+    if t == 36 { return "R_X86_64_TLSDESC"; }
+    if t == 37 { return "R_X86_64_IRELATIVE"; }
+    if t == 38 { return "R_X86_64_RELATIVE64"; }
+    if t == 41 { return "R_X86_64_GOTPCRELX"; }
+    if t == 42 { return "R_X86_64_REX_GOTPCRELX"; }
+    return "UNKNOWN";
+}
+
+fn rl_aarch64(t: u32) -> str {
+    if t == 0 { return "R_AARCH64_NONE"; }
+    if t == 257 { return "R_AARCH64_ABS64"; }
+    if t == 258 { return "R_AARCH64_ABS32"; }
+    if t == 259 { return "R_AARCH64_PREL64"; }
+    if t == 260 { return "R_AARCH64_PREL32"; }
+    if t == 261 { return "R_AARCH64_PREL16"; }
+    if t == 262 { return "R_AARCH64_ADR_PREL_LO21"; }
+    if t == 263 { return "R_AARCH64_ADR_PREL_PG_HI21"; }
+    if t == 264 { return "R_AARCH64_ADR_PREL_PG_HI21_NC"; }
+    if t == 265 { return "R_AARCH64_ADD_ABS_LO12_NC"; }
+    if t == 266 { return "R_AARCH64_LDST8_ABS_LO12_NC"; }
+    if t == 275 { return "R_AARCH64_LDST128_ABS_LO12_NC"; }
+    if t == 277 { return "R_AARCH64_LDST16_ABS_LO12_NC"; }
+    if t == 278 { return "R_AARCH64_LDST32_ABS_LO12_NC"; }
+    if t == 279 { return "R_AARCH64_LDST64_ABS_LO12_NC"; }
+    if t == 282 { return "R_AARCH64_JUMP26"; }
+    if t == 283 { return "R_AARCH64_CALL26"; }
+    if t == 1025 { return "R_AARCH64_GLOB_DAT"; }
+    if t == 1026 { return "R_AARCH64_JUMP_SLOT"; }
+    if t == 1027 { return "R_AARCH64_RELATIVE"; }
+    if t == 1028 { return "R_AARCH64_TLS_DTPMOD64"; }
+    if t == 1029 { return "R_AARCH64_TLS_DTPREL64"; }
+    if t == 1030 { return "R_AARCH64_TLS_TPREL64"; }
+    if t == 1031 { return "R_AARCH64_TLSDESC"; }
+    return "UNKNOWN";
+}
+
+/// 类型名。machine: 62=x86-64, 183=AArch64。
+pub fn rc_name(machine: u32, typ: u32, out: ptr, cap: u32) -> u32 {
+    let n: str = "UNKNOWN";
+    if machine == 62 {
+        n = rl_x86_64(typ);
+    } else if machine == 183 {
+        n = rl_aarch64(typ);
+    }
+    return rl_put(out, cap, 0, n);
+}
+
+/// 机器名。
+pub fn rc_machine_name(machine: u32, out: ptr, cap: u32) -> u32 {
+    let n: str = "UNKNOWN";
+    if machine == 3 { n = "i386"; }
+    else if machine == 8 { n = "MIPS"; }
+    else if machine == 20 { n = "PPC"; }
+    else if machine == 21 { n = "PPC64"; }
+    else if machine == 40 { n = "ARM"; }
+    else if machine == 62 { n = "x86_64"; }
+    else if machine == 183 { n = "AArch64"; }
+    else if machine == 243 { n = "RISC-V"; }
+    return rl_put(out, cap, 0, n);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_reloc_x86_64() -> bool {
+    let o: ptr = alloc(64);
+    let n: u32 = rc_name(62, 4, o, 64);
+    let want: str = "R_X86_64_PLT32";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_reloc_aarch64() -> bool {
+    let o: ptr = alloc(64);
+    let n: u32 = rc_name(183, 283, o, 64);
+    return n == 16 && load8(o, 0) == 82; // "R_AARCH64_CALL26"
+}

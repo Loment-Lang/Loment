@@ -796,6 +796,45 @@ def test_every_surface_grammar_refuses_unrecognised_material():
 
 
 @test
+def test_front_memo_does_not_survive_a_source_edit():
+    """**同一个路径换了内容就要重翻**（#1512）。
+
+    `_FRONT_MEMO` 原先只按 `(路径, 语言, 模式)` 记。它的前提是"一次编译里文件不会
+    变" —— 对 `lomentc.load` 的两次读（装载 + 开关预扫）成立，对**同一个进程里反复
+    写同一个路径**的调用方不成立：Playground 每次运行都写 `playground.lomt`，于是
+    先跑一个能过的程序、再把源改成坏的，前门返回的仍是**上一份译文**。屏幕上那个
+    42 就是这么来的 —— 它跟眼前的源码没关系，却看着像"这段代码跑出了 42"。
+
+    这里钉的是键里的**内容**：同一份源再来一次照样命中（预扫那趟还得省），换了源
+    必然重翻（该拒的要拒）。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        p = Path(t) / "work.lomt"
+        good = ("choose write grammar python\n\n"
+                "def _start() -> int:\n    print_num(42)\n    return 0\n")
+        p.write_text(good, encoding="utf-8", newline="\n")
+        first = potato_from.front_door(p)
+        again = potato_from.front_door(p)
+        assert first.source == again.source, "同一份源应当命中记忆（内容没变）"
+        assert "print_num" in first.source
+        # 同一个路径、换了内容：必须重翻 —— 这份是顶层残句，应当被拒
+        p.write_text("choose write grammar python\n\nprint('boom')\n",
+                     encoding="utf-8", newline="\n")
+        try:
+            potato_from.front_door(p)
+        except (lomt_from.NotRepresentable, ValueError) as e:
+            assert "第 3 行" in str(e), f"要点名行号: {e}"
+        else:
+            raise AssertionError(
+                "改了源还拿回上一份译文 —— 输出会看着像这段代码跑出来的")
+        # 改回原来的内容：应当重新可用（记忆不是"这个路径只有第一次算数"）
+        p.write_text(good, encoding="utf-8", newline="\n")
+        back = potato_from.front_door(p)
+        assert back.source == first.source
+    print("      同一路径换源必须重翻；内容没变仍命中；改回来还能用")
+
+
+@test
 def test_front_door_refuses_loudly_when_a_unit_cannot_be_translated():
     """**翻不出来的单元要拒，不能给一份"少算一步却照样能编"的。**
 

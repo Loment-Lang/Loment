@@ -23,8 +23,10 @@ LSPE_OBLIGATIONS: dict[str, dict[str, object]] = {
                             "GlobalInvariant", "Assumed")},
     "Alive": {"owner": "docs/210 / E029",
               "accept": ("LocalFlow", "Interproc", "Assumed")},
+    # 字面量落在 `[lo..hi]` 里是**语法事实**（E9 的 Syntactic）；循环归纳给
+    # GlobalInvariant；其余交给反问器 Q008。
     "InDomain": {"owner": "docs/146",
-                 "accept": ("Typed", "GlobalInvariant", "Assumed")},
+                 "accept": ("Syntactic", "Typed", "GlobalInvariant", "Assumed")},
     "Exclusive": {"owner": "docs/206 / E007",
                   "accept": ("LocalFlow", "Interproc", "Assumed")},
     "Initialized": {"owner": "docs/206 / E006",
@@ -57,6 +59,9 @@ LSPE_OBLIGATIONS: dict[str, dict[str, object]] = {
 LSPE_PROBED_OBLIGATIONS: frozenset[str] = frozenset({
     "InBounds", "Alive", "FreeOwnership", "SummaryContract", "GuardHolds",
     "Initialized", "Exclusive", "TypeWellFormed", "DropHonest",
+    # E9 域检查器（`docs/306`–`308`）：包含性有配对反证（越界字面量必须红），
+    # 撤销有"撤销后仍 guard"的探针。
+    "InDomain", "CapabilityLive",
 })
 
 #: LSPE 自己的固定容量（`docs/262` §5.12 / `#751`）。**每一个都要有一条会说话的路**：
@@ -68,6 +73,8 @@ LSPE_CAPACITIES: dict[str, tuple[int, str]] = {
     "obligations_per_unit": (65536, "求解器步数预算耗尽 -> Q005，不静默"),
     "derivation_nodes": (65536, "证明哈希只对站点数（预算内）算，越界先报预算"),
     "substitution_log": (65536, "WF 站点数受预算约束；越界 -> Q005"),
+    # E9 域检查器（`docs/306`–`308`）。
+    "domain_declarations": (64, "lspe_domain 回 1 -> pt_wfail（点名）"),
 }
 
 #: 普查里允许出现的站点种类（I1 的第一半）。加一种站点要同时登记在这里。
@@ -76,6 +83,8 @@ LSPE_SITE_KINDS = frozenset({
     "guard", "index", "bounds", "free", "alive", "init", "exclusive", "call",
     # v2：析构器（`#747`）与替换后的类型良构性（`#745`）。
     "drop", "wf",
+    # E9 域检查器：域声明 / 守卫的包含性 / 撤销。
+    "domain", "domain_access", "revoke",
 })
 
 #: **问题码**（`docs/262` §5.10）。与 `E034–E038` 是两个命名空间：问题**永不阻断**
@@ -96,6 +105,9 @@ LSPE_QUESTIONS: dict[str, str] = {
     "Q011": "运行期泄漏",
     "Q012": "假设已过期（源码变了）",
     "Q013": "未审计块（`lspe pass`）—— 跳过的是审问，不是收据",
+    # AI 检查器（`choose lspe_aicheck_true`，`docs/262` §10.7）：AI 是问题源，
+    # 不是证据源 —— 它的输出只有这一种，永远不进求解器。
+    "Q014": "AI 提出的怀疑（不是证据）",
 }
 
 #: 反问器转交前**必须**跑过的三问（`docs/262` §6 硬规则 5）。

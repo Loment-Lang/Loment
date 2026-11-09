@@ -109,18 +109,30 @@ def from_go(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
     # 2026-09-18 做 Go 那一门时撞到 —— 原先是 `sub(" ", src)`，整份文件的下标全错。
     body = _C_COMMENT.sub(_blank_keep_off, src)
     known: set[str] = set()
+    consumed: list[tuple[int, int]] = []
+    for m in re.finditer(r"(?ms)^[ 	]*import[ 	]*\((.*?)^[ 	]*\)", body):
+        consumed.append((m.start(), m.end()))
     for m in _GO_STRUCT.finditer(body):
+        consumed.append((m.start(), m.end()))
         sname, inner = m.group(1), m.group(2)
         fields = []
-        for line in inner.splitlines():
-            line = line.strip()
+        base_line = src[:m.start(2)].count("\n") + 1
+        for off, raw_line in enumerate(inner.splitlines()):
+            line = raw_line.strip()
             if not line or line.startswith("//"):
                 continue
+            ln = base_line + off
             parts = line.split()
             if len(parts) < 2 or parts[0].startswith("//"):
+                rep.skip("field", sname,
+                         f"第 {ln} 行: Go struct {sname} 里这一条不是 `名字 类型` —— "
+                         f"原文：{line[:60]!r}")
                 continue
             fname = parts[0]
             if not IDENT_RE.match(fname):
+                rep.skip("field", sname,
+                         f"第 {ln} 行: Go struct {sname} 的字段名非法 —— "
+                         f"原文：{line[:60]!r}")
                 continue
             t = _go_type(" ".join(parts[1:]), mode, known)
             if t is None:
@@ -139,6 +151,12 @@ def from_go(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
         # **`//export` 是源码显式宣称的 C ABI，留**；没写的那种原来记 `"go"`，
         # 那是"因为这是个 Go 文件"的**推断** —— 按 `docs/188` §3 删掉（详见 `from_java`）。
         abi = "c" if fn in exported else None
+        close = _block_end(body, m.end() - 1)
+        if close < 0:
+            rep.skip("fn", fn, "花括号不配平（原文到这里就断了）")
+            consumed.append((m.start(), m.end()))
+            continue
+        consumed.append((m.start(), close + 1))
         if ret.startswith("("):
             rep.skip("fn", fn, "多返回值 —— Potato 是单返回")
             continue
@@ -185,15 +203,18 @@ def from_go(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
         # `_GO_FN` 的尾巴就是那个 `{`，所以 `close` 由它往下配平；切开的是**原文**
         # （注释与格式都在），靠的是上面那句"抹注释保长度"。
         if abi is None:
-            close = _block_end(body, m.end() - 1)
-            if close < 0:
-                rep.skip("fn", fn, "花括号不配平（原文到这里就断了）")
-                continue
             raw = src[m.start():close + 1]
             ent["body"] = raw.strip()
             ent["body_line"] = _body_at(src, m.start(), raw)
         doc["functions"].append(ent)
         rep.ok += 1
+    for ln, txt in _c_leftover_lines(body, consumed):
+        if _SHELL_LINE.match(txt):
+            continue
+        rep.skip("decl", (txt.split() or ["?"])[0][:24],
+                 f"第 {ln} 行: 顶层这一条没有对应的规则 —— Go 这一门只认 "
+                 f"`package` / `import` / `func` / `type … struct`；"
+                 f"顶层 `var` / `const` / 散落的调用都在子集外。原文：{txt[:60]}")
     return _finish(doc, rep)
 
 
@@ -287,6 +308,12 @@ def _class_members(body: str) -> list[tuple[str, str, int]]:
         elif depth == 0:
             cur.append(c)
         i += 1
+    # A class body can end without `;` or a closing block. That tail used to be
+    # discarded here, so `system out println(...)` vanished before the member
+    # loop ever saw it. Keep it as a member; the loop will reject it loudly.
+    tail = "".join(cur)
+    if tail.strip():
+        out.append((tail, begin))
     return [(" ".join(m.split()), m, off) for m, off in out]
 
 
@@ -434,9 +461,11 @@ def _from_class_lang(src: str, name: str, mode: str,
             # **类里这一条谁也不认识**（`#75`）：不是常量、不是字段、也不是方法 ——
             # 原先它**静默消失**（方法头写坏成 `static int bad( { … }`、嵌套类、
             # 静态初始化块、带注解的方法…）。整份单元少一块内容，而 `check` 判 OK。
+            lead = len(mem_raw) - len(mem_raw.lstrip())
+            line = src[:open_idx + 1 + mem_off + lead].count("\n") + 1
             rep.skip("member", (mem.split() or ["?"])[0][:24],
-                     f"类 {cname} 里这一条不是常量 / 字段 / 方法 —— 这一门只认那三种；"
-                     f"原文：{mem[:60]!r}")
+                     f"第 {line} 行: 类 {cname} 里这一条不是常量 / 字段 / 方法 —— "
+                     f"这一门只认那三种；原文：{mem[:60]!r}")
         # ---- 常量 (类里先取, 因为它们的类型也会进 known 的判断)
         for ty, cn, val in consts:
             if cn in {c["name"] for c in doc["consts"]}:
@@ -987,6 +1016,11 @@ def from_python(src: str, name: str, mode: str = "strict") -> tuple[dict, Report
             rep.skip("const", cname, why)
 
     for node in tree.body:
+        # Module docstrings (and bare string expressions) are metadata / no-ops.
+        # They are not executable state, so dropping them changes nothing.
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) \
+                and isinstance(node.value.value, str):
+            continue
         if isinstance(node, ast.ClassDef):
             fields = []
             for st in node.body:
@@ -996,6 +1030,16 @@ def from_python(src: str, name: str, mode: str = "strict") -> tuple[dict, Report
                         rep.skip_field(node.name, st.target.id, "无可用类型映射")
                         continue
                     fields.append({"name": st.target.id, "type": t})
+                    continue
+                if isinstance(st, ast.Pass):
+                    continue
+                if isinstance(st, ast.Expr) and isinstance(st.value, ast.Constant) \
+                        and isinstance(st.value.value, str):
+                    continue
+                seg = ast.get_source_segment(src, st) or ""
+                rep.skip("member", (seg.split() or ["?"])[0][:24],
+                         f"第 {st.lineno} 行: 类 {node.name} 里这一条不是带注解的字段 —— "
+                         f"Python 写法只把类当作结构体；方法 / 类级语句不在子集里")
             if not fields:
                 rep.skip("type", node.name, "无注解字段")
                 continue
@@ -1046,6 +1090,14 @@ def from_python(src: str, name: str, mode: str = "strict") -> tuple[dict, Report
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) \
                 and node.target.id.isupper():
             _put_const(node.target.id, node.value, node.annotation)
+        else:
+            # Top-level executable statements used to disappear here. A Python
+            # script's `print(...)` became a module with zero functions, check
+            # passed, and the LVM then blamed a missing `_start` (issue #1510).
+            seg = ast.get_source_segment(src, node) or ""
+            rep.skip("decl", (seg.split() or ["?"])[0][:24],
+                     f"第 {node.lineno} 行: 顶层语句或赋值不在 Python 写法的 Loment 单元里 —— "
+                     f"把它放进 def _start()；模块级只收全大写常量、函数与类型")
     return _finish(doc, rep)
 
 
@@ -1211,9 +1263,18 @@ def _from_c(src: str, name: str, mode: str, grammar: str,
         consumed.append((m.start(), _past_semi(body, m.end())))
         sname, inner = m.group(1), m.group(2)
         fields = []
+        used = bytearray(len(inner))
         for fm in _C_FIELD.finditer(inner):
+            used[fm.start():fm.end()] = b"\x01" * (fm.end() - fm.start())
             ft, fn, arr = fm.group(1), fm.group(2), fm.group(3)
             if fn in ("if", "while", "for", "return"):
+                continue
+            if not ft.strip():
+                lead = len(fm.group(0)) - len(fm.group(0).lstrip())
+                ln = src[:m.start(2) + fm.start() + lead].count("\n") + 1
+                rep.skip("field", sname,
+                         f"第 {ln} 行: struct {sname} 里这一条不是字段 —— "
+                         f"原文：{fm.group(0).strip()[:60]!r}")
                 continue
             t = _c_type(ft, mode, known, types)
             if arr and t:
@@ -1222,6 +1283,21 @@ def _from_c(src: str, name: str, mode: str, grammar: str,
                 rep.skip_field(sname, fn, f"字段类型 {ft!r} 无映射")
                 continue
             fields.append({"name": fn, "type": t})
+        inner_start = m.start(2)
+        seen_lines: set[int] = set()
+        for ch in re.finditer(r"[^\s]", inner):
+            if used[ch.start()]:
+                continue
+            ln = src[:inner_start + ch.start()].count("\n") + 1
+            if ln in seen_lines:
+                continue
+            seen_lines.add(ln)
+            txt = src.splitlines()[ln - 1].strip()
+            if not txt.strip(" ;\t"):
+                continue
+            rep.skip("field", sname,
+                     f"第 {ln} 行: struct {sname} 里这一条不是字段 —— "
+                     f"原文：{txt[:60]!r}")
         if not fields:
             rep.skip("type", sname, "无可用字段")
             continue
@@ -1466,9 +1542,11 @@ def _rs_type(t: str, mode: str, known: set[str]) -> str | None:
 def from_rust(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
     rep = Report(name, "rust", mode)
     doc = _blank(_ident(Path(name).stem), "rust")
-    body = re.sub(r"//[^\n]*", "", src)
+    body = re.sub(r"//[^\n]*", _blank_keep_off, src)
     known: set[str] = set()
+    consumed: list[tuple[int, int]] = []
     for m in _RS_STRUCT.finditer(body):
+        consumed.append((m.start(), m.end()))
         sname, inner = m.group(1), m.group(2)
         fields = []
         for line in inner.split(","):
@@ -1498,6 +1576,7 @@ def from_rust(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
         known.add(sname)
         rep.ok += 1
     for m in _RS_ENUM.finditer(body):
+        consumed.append((m.start(), m.end()))
         ename, inner = m.group(1), m.group(2)
         if "(" in inner or "{" in inner:
             rep.skip("type", ename, "带载荷变体")
@@ -1510,6 +1589,7 @@ def from_rust(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
         known.add(ename)
         rep.ok += 1
     for m in _RS_CONST.finditer(body):
+        consumed.append((m.start(), m.end()))
         c, why = _rs_const(m.group(1), m.group(2), m.group(3), mode, known)
         if c:
             doc["consts"].append(c)
@@ -1517,6 +1597,8 @@ def from_rust(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
         else:
             rep.skip("const", m.group(1), why)
     for m in _RS_FN.finditer(body):
+        close = _block_end(body, m.end() - 1)
+        consumed.append((m.start(), close + 1 if close >= 0 else m.end()))
         abi_g, fn, generics, params, ret = (m.group(1), m.group(2), m.group(3),
                                             m.group(4), m.group(5))
         #: 只有 `extern "C"` 才是 C ABI —— **不能拿普通 `pub fn` 当 FFI 声明**:
@@ -1560,6 +1642,13 @@ def from_rust(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
             ent["abi"] = abi
         doc["functions"].append(ent)
         rep.ok += 1
+    for ln, txt in _c_leftover_lines(body, consumed):
+        if _SHELL_LINE.match(txt) or re.match(r"^\s*(?:use|mod)\b", txt):
+            continue
+        rep.skip("decl", (txt.split() or ["?"])[0][:24],
+                 f"第 {ln} 行: 顶层这一条没有对应的规则 —— Rust 这一门只抽接口"
+                 f"（`struct` / `enum` / `const` / `fn`）；散落的语句在子集外。"
+                 f"原文：{txt[:60]}")
     return _finish(doc, rep)
 
 

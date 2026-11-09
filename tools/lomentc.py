@@ -2449,6 +2449,12 @@ class Module:
     #: 每一维**写在第几行**（`(维, 取值, 行)`）。**留成列表而不是只留最后一个**：
     #: "这一维写了两次"要能报出第一次在哪一行、写的是什么。
     choose_lines: list[tuple[str, str, int]] = field(default_factory=list)
+    #: **维度之后的第二位置**（`CORE_SLOTS` / `docs/262` §10.7）：`<维>_<槽>_<值>`，
+    #: 例如 `lspe_aicheck_true`。它与该维的主取值**正交**，所以不占"每维一次"，
+    #: 也不覆盖 `chooses`。今天只有 `aicheck` 一格。
+    slots: dict[str, str] = field(default_factory=dict)
+    #: 每一格写在第几行（`(槽, 取值, 行)`），理由同 `choose_lines`。
+    slot_lines: list[tuple[str, str, int]] = field(default_factory=list)
     #: **开关表**（`docs/182` §1）: `set choose <名字> {…}` 定义, `choose <名字>` /
     #: `choose close <名字>` 取值。由 `_apply_switches` 在**词法流上**落定后挂上来 ——
     #: 开关是**编译期**的事, 它的行不进 AST（关着的那段体连 token 都不进 parser）。
@@ -2626,12 +2632,32 @@ CORE_DIMS: dict[str, tuple[str, ...]] = {
     # 取值**带维名前缀**（`lspe_*`），理由同 `lms_*`：`open` / `close` 单独太泛。
     "lspe": ("lspe_open_admin", "lspe_close_admin"),
 }
+#: **维度之后的第二位置**（用户 2026-11-08）：`<维>_<槽>_<值>`。
+#:
+#: 主取值是"这一维是什么"（`lspe_open_admin` / `lspe_close_admin`）；槽是**正交**的
+#: 构建旋钮，所以它可以和主取值**同时写**，不触发"这一维写了两次"。
+#: 两个理由必须写在名字里：**属哪一维**（`lspe_` 前缀）与**哪一格**（`aicheck`）。
+#:
+#: 今天只有一格：`lspe_aicheck_true|false` —— AI 检查器是外部、非确定的，
+#: 默认关；打开它只让台账/CLI 多一类**问题**（Q014），不给任何义务添证据。
+CORE_SLOTS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "aicheck": ("lspe", ("true", "false")),
+}
+CORE_SLOT_WORDS = frozenset(f"{dim}_{slot}_{v}"
+                            for slot, (dim, vs) in CORE_SLOTS.items() for v in vs)
+#: 槽取值 → `(槽, 值)`。与 `CORE_DIM_OF` 分开：报错时"这一维写了两次"不适用于槽。
+CORE_SLOT_OF = {f"{dim}_{slot}_{v}": (slot, v)
+                for slot, (dim, vs) in CORE_SLOTS.items() for v in vs}
+
 #: 冲突**两两查**时的维序。**写死的** —— 报错文本里两个取值的先后由它决定，
 #: 而两个实现比的是字节，所以它不能是集合迭代顺序。
 #: `lms` 排在最后：它**没有冲突对**，追加在尾部不会改动任何既有配对的先后。
 CORE_DIM_ORDER: tuple[str, ...] = ("mode", "gc", "runtime", "port", "vm", "lms", "lspe")
 #: 所有核心模式的取值 —— "这一个 `choose` 是核心模式还是开关"就看它在不在这里面。
-CORE_WORDS = frozenset(w for _ws in CORE_DIMS.values() for w in _ws)
+#: 槽取值也算核心写法（否则它会被当成**用户开关**吞掉，`choose lspe_aicheck_true`
+#: 就变成一次未定义的开关取值）。
+CORE_WORDS = (frozenset(w for _ws in CORE_DIMS.values() for w in _ws)
+              | CORE_SLOT_WORDS)
 #: 取值 → 属于哪一维（报错要说清是**哪一维**写了两次）。
 CORE_DIM_OF = {w: d for d, ws in CORE_DIMS.items() for w in ws}
 #: 每一维**不写**时的取值 —— 默认档，且默认**不改变任何现有程序的行为**。
@@ -3413,6 +3439,11 @@ class Parser:
                 if w.val in CORE_DIM_OF:
                     mod.chooses[CORE_DIM_OF[w.val]] = w.val
                     mod.choose_lines.append((CORE_DIM_OF[w.val], w.val, line))
+                elif w.val in CORE_SLOT_OF:
+                    # 维度之后的第二位置（`lspe_aicheck_true`）：**不碰** `chooses`。
+                    _slot, _sv = CORE_SLOT_OF[w.val]
+                    mod.slots[_slot] = _sv
+                    mod.slot_lines.append((_slot, _sv, line))
                 elif w.val == "close":
                     # `choose close <名字>`：整个语句都是开关，吃掉名字。
                     if self.peek(0).kind == "ident":
@@ -6202,6 +6233,16 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                         f"{CORE_DIM_ZH[dim]}（第一次在第 {l0} 行，写的是 `{w0}`；"
                         f"这一行写的是 `{w1}`）。它声明的是**整个程序**的这一维。"
                         f"要开关请用 `set choose <名字> {{ … }}`")
+    # **槽位**（维度之后的第二位置）同样"每格一次"（`docs/262` §10.7）。它和主取值
+    # 是两条串，所以 `choose lspe_open_admin` + `choose lspe_aicheck_true` 合法。
+    per_slot: dict[str, list[tuple[str, int]]] = {}
+    for slot, word, line in mod.slot_lines:
+        per_slot.setdefault(slot, []).append((word, line))
+    for slot, ws in sorted(per_slot.items()):
+        if len(ws) > 1:
+            (w0, l0), (w1, l1) = ws[0], ws[1]
+            errs.append(f"{l1}: `choose {slot}` 这一格只能声明一次 —— "
+                        f"第一次在第 {l0} 行（`{w0}`），这一行是 `{w1}`")
     # **互相冲突的取值**（`docs/175` §3.4 ⚠）：`no_std` + `gc_auto` **暂时**报错。
     # 看的是**生效值**（显式写的，或那一维的默认档）—— 因为冲突说的是"这个程序最后
     # 是哪两档"，不是"源码里写了哪两行"。报错要**点名为什么冲突**，泛泛的"非法组合"
@@ -8012,6 +8053,7 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None,
         dims=_dims, facts=_facts,
         budget=getattr(mod, "lspe_budget", None),
         depth=getattr(mod, "lspe_depth", None),
+        aicheck=(getattr(mod, "slots", {}) or {}).get("aicheck") == "true",
         sidecar=sidecar,
         cache=cache,
     )

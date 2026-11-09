@@ -2615,6 +2615,14 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
     o = pt_key(out, o, 2, "mode");
     o = pt_qs(out, o, "full");
     o = pt_str(out, o, ",\n");
+    // AI 检查器（`choose lspe_aicheck_true`）：**开没开**，与 open/close 正交。
+    o = pt_key(out, o, 2, "aicheck");
+    if lspe_aicheck(unit, t, lo, hi) == 1 {
+        o = pt_bool(out, o, 1);
+    } else {
+        o = pt_bool(out, o, 0);
+    }
+    o = pt_str(out, o, ",\n");
     o = pt_key(out, o, 2, "level");
     o = pt_dec(out, o, lvl as u64);
     o = pt_str(out, o, ",\n");

@@ -188,6 +188,15 @@ pub fn sw_is_core(unit: ptr, toks: ptr, k: u32) -> bool {
     if sw_tok_is(unit, toks, k, "lspe_close_admin") {
         return true;
     }
+    // 维度之后的**第二位置**（`docs/262` §10.7）：`<维>_<槽>_<值>`。
+    // `lspe_aicheck_true|false` 与 `lspe_open|close_admin` 正交，可同时写。
+    // 同一处的教训：漏了它，`choose lspe_aicheck_true` 会被当成开关 ⇒ E022。
+    if sw_tok_is(unit, toks, k, "lspe_aicheck_true") {
+        return true;
+    }
+    if sw_tok_is(unit, toks, k, "lspe_aicheck_false") {
+        return true;
+    }
     return false;
 }
 

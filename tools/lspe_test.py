@@ -54,9 +54,10 @@ def test_registry_has_14_obligations_and_8_evidence_kinds():
         assert spec["accept"], name
         assert "Differential" not in spec["accept"], name
     # 问题码（`docs/262` §5.10）：Q013 是 `lspe pass` 的未审计块（#786）。
-    assert len(lspe.LSPE_QUESTIONS) == 13
+    assert len(lspe.LSPE_QUESTIONS) == 14
     assert lspe.LSPE_QUESTIONS["Q013"]
     assert "未审计块" in lspe.LSPE_QUESTIONS["Q013"]
+    assert "Q014" in lspe.LSPE_QUESTIONS and "不是证据" in lspe.LSPE_QUESTIONS["Q014"]
 
 
 @test
@@ -369,7 +370,9 @@ def _unit(src: str, **kw):
 @test
 def test_question_registry_templates_are_fixed_and_safe():
     """每一问都有固定字段；文本里不出现威胁词（`docs/262` §6 硬规则 4 / `#753`）。"""
-    assert set(lspe.LSPE_QUESTION_TEMPLATES) == set(lspe.LSPE_QUESTIONS)
+    # Q014 是 **AI 检查器**的怀疑（`docs/262` §10.7），不由反问器发问，
+    # 所以它没有"选项 / 默认"模板；其余每个 Q 码都有。
+    assert set(lspe.LSPE_QUESTION_TEMPLATES) == set(lspe.LSPE_QUESTIONS) - {"Q014"}
     for code, tpl in lspe.LSPE_QUESTION_TEMPLATES.items():
         assert tpl["claim"] and tpl["chain"], code
         assert set(tpl["tried"]) == set(lspe.LSPE_INTERROGATIONS), code
@@ -824,6 +827,75 @@ def test_domain_checker_feeds_lspc_rows():
     assert any(s.startswith("m:revoke:") for s in rows["revocable"]["sites"]), rows["revocable"]
     assert any(s.startswith("m:domain_access:") for s in rows["nonliteral_guard"]["sites"]), \
         rows["nonliteral_guard"]
+
+
+@test
+def test_aicheck_slot_is_orthogonal_to_the_lspe_state():
+    """`lspe_aicheck_true` 是维度后的**第二位置**（`docs/262` §10.7）。
+
+    它与 `lspe_open_admin` / `lspe_close_admin` 正交：可以同时写，不触发
+    "这一维写了两次"；同一格写两次仍然报。
+    """
+    import lomentc  # noqa: PLC0415
+    src = ("module m\n\nchoose lspe_open_admin\nchoose lspe_aicheck_true\n\n"
+           "fn f() -> u32 {\n    return 0;\n}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "m.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        mod, deps = lomentc.load_unit(p, ROOT)
+        assert lomentc.check(mod, deps=deps) == [], lomentc.check(mod, deps=deps)
+        assert mod.slots.get("aicheck") == "true", mod.slots
+        assert mod.chooses.get("lspe") == "lspe_open_admin", mod.chooses
+        doc = json.loads(lomentc.emit_potato(mod, ROOT, deps))
+        assert doc["lspe"]["aicheck"] is True, doc["lspe"]
+
+        p2 = Path(td) / "dup.lomt"
+        p2.write_text(src.replace("choose lspe_aicheck_true",
+                                  "choose lspe_aicheck_true\nchoose lspe_aicheck_false"),
+                      encoding="utf-8", newline="\n")
+        mod2, deps2 = lomentc.load_unit(p2, ROOT)
+        errs = lomentc.check(mod2, deps=deps2)
+        assert any("这一格只能声明一次" in e for e in errs), errs
+
+
+@test
+def test_aicheck_is_a_question_source_never_evidence():
+    """AI 检查器（`docs/262` §10.7）：请求确定性；回答只产 Q014，不改判决。"""
+    src = ("module m\n\nfn f(a: [u32; 4], i: u32) -> u32 {\n"
+           "    return a[i];\n}\n")
+    doc, sites = _unit(src)
+    by_id = {s["id"]: s for s in sites}
+    lines = src.splitlines()
+    b1 = lspe.aicheck_bundle("m", doc["_questions"], by_id, lines, model="mod")
+    b2 = lspe.aicheck_bundle("m", doc["_questions"], by_id, lines, model="mod")
+    assert lspe.aicheck_dumps(b1) == lspe.aicheck_dumps(b2), "请求必须确定性"
+    assert len(b1["requests"]) == 1, b1
+    req = b1["requests"][0]
+    assert req["excerpt"] and str(req["line"]) in req["excerpt"], req
+
+    replies = {"format": "lspe-aicheck-replies", "version": 1, "unit": "m",
+               "model": "mod",
+               "findings": [{"site": req["site"], "verdict": "suspicious",
+                             "note": "i 可能越界"}]}
+    out = lspe.aicheck_ingest(replies, sites, "m")
+    assert out["findings"][0]["code"] == "Q014", out
+    assert out["findings"][0]["source"] == "ai:mod", out
+
+    # 回答不改变台账：同一份源再算一次，判决与问题完全一样。
+    doc2, _ = _unit(src)
+    assert doc2["proved"] == doc["proved"], (doc2["proved"], doc["proved"])
+    assert doc2["_questions"] == doc["_questions"]
+
+    # 单元不对 / 站点不存在：前者是错误，后者只是一条"未知"。
+    try:
+        lspe.aicheck_ingest(dict(replies, unit="other"), sites, "m")
+        assert False, "别的单元的回答必须被拒"
+    except lspe.LspeError as e:
+        assert e.code == "E036", e
+    unknown = lspe.aicheck_ingest(
+        dict(replies, findings=[{"site": "m:nope", "verdict": "clean"}]),
+        sites, "m")
+    assert unknown["unknown"] == ["m:nope"] and not unknown["findings"], unknown
 
 
 @test

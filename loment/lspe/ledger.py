@@ -26,7 +26,7 @@ def build(*, sites: list[dict], state: str, set_by: str, level: int,
           lspc_mode: str | None = None, previous: dict | None = None,
           sidecar: bool = False, twin: dict | None = None,
           side_sets: dict[str, set[str]] | None = None,
-          cache=None) -> dict:
+          cache=None, aicheck: bool = False) -> dict:
     """返回 Potato v16 的 `lspe` 台账。
 
     * `sites` 是加载期算出的站点；`lspe_close_admin` 下**关审计** → 计数全零，
@@ -132,6 +132,9 @@ def build(*, sites: list[dict], state: str, set_by: str, level: int,
         "state": state,
         "set_by": set_by,
         "mode": mode,
+        # AI 检查器（`choose lspe_aicheck_true`）：只记"开没开"。
+        # 它产出的怀疑走 Q014 与 CLI，**不给任何义务添证据**。
+        "aicheck": bool(aicheck),
         "level": level,
         "sites": n,
         "obligations": n,

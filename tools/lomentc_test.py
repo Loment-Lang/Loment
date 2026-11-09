@@ -4841,11 +4841,13 @@ def test_lspe_dimension_defaults_open():
     assert lp["obligations"] == lp["sites"]
     assert lp["sites"] == lp["proved"] + lp["undecided"]
     assert "InBounds" in lp["per_kind"]
-    # LSPE v2（0.1.5.2）：默认档下每条没被 pass 覆盖的 UNDECIDED 都有一条
-    # `Assumed` 地板（`docs/262` §6"允许但标注"），所以 `floors == undecided`。
-    assert lp["floors"] == lp["floor_detail"]["assumed"] == lp["undecided"]
+    # demo 有一条 `capability blk_write … revocable`：E9 给它一条 `InDomain`（Typed）
+    # 和一条 `CapabilityLive`（Assumed），所以地板是 1（撤销域），不是 0。
+    assert lp["per_kind"]["InDomain"] == "1/1", lp["per_kind"]
+    assert lp["per_kind"]["CapabilityLive"] == "1/1", lp["per_kind"]
+    assert lp["floors"] == lp["floor_detail"]["assumed"] == 1
     # `#786` 起 `floor_detail` 多一格 `pass`；`#750` 再加 `depth`。
-    assert lp["floor_detail"] == {"assumed": lp["undecided"], "stale_wf": 0,
+    assert lp["floor_detail"] == {"assumed": 1, "stale_wf": 0,
                                   "budget": 0, "depth": 0, "drop_honest": 0,
                                   "pass": 0}, lp["floor_detail"]
     assert lp["passes"] == [] and lp["pass_ratio"] == f"0/{lp['sites']}"
@@ -4933,9 +4935,11 @@ def test_lspe_q1_provenance_and_strict_e034():
         assert any("未标注的放行" in e for e in errs), errs
         doc = json.loads(lomentc.emit_potato(lomentc.load(p), ROOT))
     lp = doc["lspe"]
-    assert lp["sites"] == 3, lp
-    assert lp["proved"] == 2 and lp["undecided"] == 1, lp
-    assert lp["per_kind"] == {"GuardHolds": "1/1", "InBounds": "1/2"}, lp
+    # 3 条 E1/E2 站点 + E9 的两条（域声明 + `guard d(i)` 的包含性）。
+    assert lp["sites"] == 5, lp
+    assert lp["proved"] == 3 and lp["undecided"] == 2, lp
+    assert lp["per_kind"] == {"GuardHolds": "1/1", "InBounds": "1/2",
+                             "InDomain": "1/2"}, lp
     assert potato.validate(doc) == []
 
 
@@ -5272,9 +5276,10 @@ def test_lspe_level_only_lowers_proved():
         d0 = json.loads(lomentc.emit_potato(lomentc.load(p, lspe_level=0), ROOT))
         d3 = json.loads(lomentc.emit_potato(lomentc.load(p, lspe_level=3), ROOT))
     assert d0["lspe"]["level"] == 0 and d3["lspe"]["level"] == 3
-    # L0：guard 的 Typed 证据被级别挡掉，只剩裸字面量下标那条 Syntactic。
+    # L0：guard 的 Typed 与域声明的 Typed 都被级别挡掉，只剩裸字面量下标那条
+    # Syntactic；L3 把两条 Typed 都放回来（guard + 域声明）。
     assert d0["lspe"]["proved"] == 1, d0["lspe"]
-    assert d3["lspe"]["proved"] == 2, d3["lspe"]
+    assert d3["lspe"]["proved"] == 3, d3["lspe"]
     assert d0["lspe"]["proved"] <= d3["lspe"]["proved"]
 
 

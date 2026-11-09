@@ -517,6 +517,63 @@ def cmd_lspe_verify(a) -> int:
     return 0
 
 
+def cmd_lspe_aicheck(a) -> int:
+    """`loment lspe aicheck FILE [--emit PATH] [--replies PATH]` —— AI 检查器的文件通道。
+
+    **AI 是问题源，不是证据源**（`docs/262` §10.7）：这里生成一份确定性的审查请求，
+    或者吃掉一份模型回答、把它变成 Q014。回答永远不改变台账的判决。
+    """
+    import json
+    import lspe
+    p, mod, deps = _lspe_input(a, check_it=False)
+    ledger = lspe.build_ledger(
+        sites=getattr(mod, "lspe_sites", []),
+        state=mod.chooses.get("lspe", lomentc.CORE_DEFAULTS["lspe"]),
+        set_by=("source" if "lspe" in mod.chooses else "default"),
+        level=int(getattr(mod, "lspe_level", 3)),
+        toks=getattr(mod, "toks", []), unit=mod.name,
+        deps=[getattr(d, "toks", []) for d in deps],
+        passes=getattr(mod, "lspe_passes", []),
+        mode=str(getattr(mod, "lspe_mode", "full")),
+        answers=getattr(mod, "lspe_answers", None),
+        aicheck=(getattr(mod, "slots", {}) or {}).get("aicheck") == "true")
+    if not ledger.get("aicheck"):
+        print("[LSPE] 这个单元没有 `choose lspe_aicheck_true` —— AI 检查器没开",
+              file=sys.stderr)
+        return 2
+    sites = getattr(mod, "lspe_sites", [])
+    if not getattr(a, "replies", None):
+        lines = Path(p).read_text(encoding="utf-8").splitlines()
+        by_id = {s["id"]: s for s in sites}
+        bundle = lspe.aicheck_bundle(mod.name, ledger.get("_questions", []),
+                                     by_id, lines)
+        text = lspe.aicheck_dumps(bundle)
+        if getattr(a, "emit", None):
+            Path(a.emit).write_text(text, encoding="utf-8", newline="\n")
+            print(f"[LSPE] aicheck: {len(bundle['requests'])} 个请求 -> {a.emit}")
+        else:
+            print(text, end="")
+        return 0
+    try:
+        replies = json.loads(Path(a.replies).read_text(encoding="utf-8"))
+        result = lspe.aicheck_ingest(replies, sites, mod.name)
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"[ERR] 读不了回答：{e}", file=sys.stderr)
+        return 2
+    except lspe.LspeError as e:
+        print(f"[ERR] {e}", file=sys.stderr)
+        return 1
+    if getattr(a, "json", False):
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        for line in lspe.aicheck_render(result):
+            print(line)
+    if getattr(a, "strict", False) and any(
+            f["verdict"] == "suspicious" for f in result["findings"]):
+        return 1
+    return 0
+
+
 def _lspc_mode(a, mod) -> str:
     import lspe
     if getattr(a, "lspc", None):
@@ -638,6 +695,20 @@ def main(argv: list[str] | None = None) -> int:
     lpv.add_argument("artifact")
     lpv.add_argument("sidecar", nargs="?")
     lpv.set_defaults(fn=cmd_lspe_verify)
+    lpa = lsub.add_parser("aicheck")
+    lpa.add_argument("file")
+    lpa.add_argument("--emit", default=None, metavar="PATH",
+                     help="写一份审查请求（默认打到 stdout）")
+    lpa.add_argument("--replies", default=None, metavar="PATH",
+                     help="吃一份模型回答（只产 Q014，不改进判决）")
+    lpa.add_argument("--json", action="store_true")
+    lpa.add_argument("--strict", action="store_true",
+                     help="有 suspicious 时退出码 1")
+    lpa.add_argument("--lspe-level", type=int, default=3, choices=(0, 1, 2, 3, 4))
+    lpa.add_argument("--lspe-mode", default="full", choices=("full", "quiet", "strict"))
+    lpa.add_argument("--answer", action="append", metavar="SITE=B")
+    lpa.add_argument("--answers", default=None, metavar="FILE")
+    lpa.set_defaults(fn=cmd_lspe_aicheck)
     lc = sub.add_parser("lspc")
     lcsub = lc.add_subparsers(dest="lspc_cmd", required=True)
     lcc = lcsub.add_parser("check")

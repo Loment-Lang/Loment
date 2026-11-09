@@ -261,6 +261,9 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "lspe_test", "potato_
                  # `docs/NNN` 的编号：**不许出现新的撞号**，且基线只许变短
                  # (2026-10-11 实测 main 上有 7 个号被两份以上文档共用) —— `tools/loment_docs.py`
                  "loment_docs_test",
+                 # AI slop 的机械代理判据（`docs/319`）：范围、空转测试、复制粘贴、
+                 # 无调用点的公开 API、注释复述。模型只做提示，不在这里跑。
+                 "loment_slop_test",
                  # `lom/` 那道禁区自己的判据（把 gate.yml 里那段脚本抠出来跑）
                  "loment_door_test",
                  # 准入判定（`docs/238`）：两个实现逐字节相同 + 那条不对称
@@ -377,6 +380,7 @@ SHARD_COST = {
     "loment_dist_test": 170.2,
     "loment_doc_test": 57.3,
     "loment_docs_test": 0.1,
+    "loment_slop_test": 9.0,
     "loment_door_test": 0.2,
     "loment_editors_test": 0.3,
     # `#435` 的主角：55 条判据（那一轮 34 条）, **每条都编一个 ELF 再执行**。量到

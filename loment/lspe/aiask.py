@@ -132,6 +132,23 @@ def _argv(command) -> list[str]:
     return shlex.split(command)
 
 
+def run_raw(command, payload: str, timeout: float = 120.0) -> str:
+    """跑一条外部命令、拿回 stdout —— 通用通道（`loment slop` 也用它）。
+
+    与 `run_command` 的区别只有一层：这里**不认** LSPE 的回答形状。调用方自己
+    校验自己的 JSON（slop 的提示格式与 Q014 回答不是一回事）。
+    """
+    argv = _argv(command)
+    if not argv:
+        raise LspeError("E036", "命令是空的")
+    return _run(argv, payload, timeout)
+
+
+def parse_json_text(text: str) -> dict:
+    """一段输出里的第一个 JSON 对象（围栏与闲话都容忍）。"""
+    return _first_json(text)
+
+
 def run_command(command, bundle: dict, timeout: float = 120.0) -> dict:
     """`--ask-cmd`：外部程序读 bundle、写 replies。不经 shell。"""
     argv = _argv(command)
@@ -192,4 +209,4 @@ def ask(bundle: dict, *, cmd: str | None = None, model: str | None = None,
 
 
 __all__ = ["DEFAULT_MODEL", "FORMAT", "SYSTEM", "ask", "ask_anthropic",
-           "normalize", "prompt", "run_command"]
+           "normalize", "parse_json_text", "prompt", "run_command", "run_raw"]

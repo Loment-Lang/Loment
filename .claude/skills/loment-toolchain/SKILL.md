@@ -44,11 +44,13 @@ E001–E038. Trust the codes section of this guide (and `loment explain E34`), n
   spec files and checked by `fuai_contract_check`. **Changing it is a contract change**: its own
   commit, naming who depends on it, what changed and whether downstream must move - never a
   drive-by edit during a compiler refactor.
-- **`standard/LLS.md` is the language standard.** It is one "frame", not a second
-  specification, and **its version is the language version - one number**. §4 is the **switch**
-  table: Loment is defined by what it switches on, not by what it lacks (`no_gc` moved from
-  "planned" to a core value; `no_runtime` is a guarantee the linker checks; `vm` is accepted but
-  does not change the artifact yet, because the interpreter is a separate tool).
+- **`standard/LLS.md` is the language standard, and the sole normative original** (Edition 2,
+  2026-11-09). It defines the grammar, types, semantics, safety layers, artifact contract, and
+  implementation qualification; `docs/` is informative. **Its version is the language version -
+  one number**. §4 is **implementation qualification** (what a compiler/checker/runtime/toolchain
+  must do to be called a Loment implementation); §25 is the **switch** table: Loment is defined by
+  what it switches on, not by what it lacks (`no_runtime` is a guarantee the linker checks; `vm`
+  is accepted but does not change the artifact yet, because the interpreter is a separate tool).
 - **`lompi` is the package manager**, and it is a **separate command**, not `loment lompi`.
   A library is a directory, its identity is a content hash, and its dependencies are the `use`
   lines in its source. Read the lompi guide before touching dependencies.

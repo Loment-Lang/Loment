@@ -1,9 +1,14 @@
 # 318 · 借用生命周期域：十个
 
-> 状态: **期 1 参考侧已落**（2026-11-09）：`borrow(x)` / `borrow_mut(x)` 两种形状与
-> R1/R2/R3 三条规则在 `tools/lomentc.py` 上实装（`view` / `freeze` / `exclusive` 三个域），
-> 判据 `lomentc_test::test_borrow_domains_phase1_rules`。**自举侧本期未跟上**（下一期），
-> 期 2/3 未开始。
+> 状态: **期 1、期 2 参考侧已落**（2026-11-09）。
+> 期 1：`borrow(x)` / `borrow_mut(x)` 两种形状与 R1/R2/R3 三条规则（`view` / `freeze` /
+> `exclusive`），判据 `lomentc_test::test_borrow_domains_phase1_rules`。
+> 期 2：`window(xs, LO, N)` / `split(xs, LO, N)` / `cursor(xs)` 三种形状，
+> 判据 `lomentc_test::test_borrow_domains_phase2_shapes`。
+> **自举侧两期都跟上了**（2026-11-09）：`checker.lomt` 的 `chk_bdom` 按 token 流判同样
+> 三条规则 + 期 2 三种形状，`codegen.lomt` 的 `dom_stmt` 认这五种形状（块与普通块同形）；
+> 孪生判据 `loment_p8_test::test_borrow_domains_are_byte_identical`
+> （`loment/examples/domains/borrow_lifetimes.lomt`）。期 3 未开始。
 > 上游: `docs/299`（借用区域）· `docs/306`（域代数）· `docs/307`（语境类）·
 > `docs/314`（域块）· `docs/315`（域循环与几何）
 > 一句话: 域的形状那一格原来只收**位置**（`space[lo..hi]`）与**时律**（`epoch(N)` /
@@ -90,19 +95,23 @@ domain e : borrow_mut(xs) {
 ### 2.3 `split(xs, at k)` —— 拆分域
 
 ```rust
-domain:split (lo, hi) from xs at k {
-    lo[0] = 1;
-    hi[0] = 2;          // 两侧同时写：区域互斥
-}
+domain a : split(xs, 0, k) { xs[0] = 1; }      // 两段区间各开一个域
+domain b : split(xs, k, 8) { xs[k] = 2; }      // 区间不重叠 ⇒ mutex 边成立
 ```
+
+> **落地形状（2026-11-09）**：期 2 收的是**区间形式** `split(xs, LO, N)`，不是上面那
+> 个 `domain:split (lo, hi) from xs at k` 的双名糖。原因是双名要真的造两个子切片值
+> （`lo[i]` → `xs[i]`、`hi[j]` → `xs[K+j]` 的位移），那是分配与代码生成的事；区间形式
+> 用**同一个源 + 两段下标区间**把"两半互斥"这条规则先立起来，且产物一个字节不变。
+> 双名糖进期 3。
 
 * **保证**：两个子域来自同一个来源、区域互不重叠（`docs/315` 的 `mutex` 边由这里自动
   导出，不手写）；跨两侧的借用是 E041。
 * **区域**：`lo = xs[0..k]`、`hi = xs[k..len]`；`k` 是编译期常量时**零运行期代价**，
   是动态值时发一次 `k <= len` 的检查。
 * **违规**：`split 的两半重叠` / `下标越界`。
-* **判据**：字面量 `k` 时交叉访问失败；动态 `k` 时 `k > len` 运行期报错；两侧并行
-  （`couple`）能编译并跑对。
+* **判据**：两个字面量区间**重叠** → E041（`lomentc_test::test_borrow_domains_phase2_shapes`
+  的 overlap 那一格）；不重叠的两段各自可写；**动态**下标的运行期检查是期 3。
 
 ### 2.4 `window(xs, lo, n)` —— 窗口域
 
@@ -122,15 +131,14 @@ domain w : borrow(xs[lo .. lo + n]) {
 
 ```rust
 domain c : cursor(xs) {
-    while c.has {
-        let x: &u32 = c.next();   // 借用只活一轮
-        s = s + *x;
-    }
+    let i: u32 = 0;
+    while i < 4 { s = s + xs[i]; i = i + 1; }   // 直接取用，不存借用
 }
 ```
 
-* **保证**：`next()` 交出的借用**只活到本轮回边**（`docs/299` 的区域在循环回边结束）；
-  同时持有两个元素的引用是 E041。
+* **保证**：域里**不能把元素借用存进局部**（`let p: &u32 = &xs[0];` 是 E041）。没有 NLL
+  就证不出"只活一轮"，所以期 2 取最保守的那条：存下来就可能跨轮。直接 `xs[下标]`
+  照常可读可写（来源可变时）。
 * **区域**：每一轮一个子区域，来源是游标持有的独占借用。
 * **违规**：`游标的一轮里不能同时持有两个元素`。
 * **判据**：把上一轮的 `x` 存进域外局部 → 失败；只在本轮用 → 通过；与 `domain:for`
@@ -291,8 +299,8 @@ E041: 封印域外不能把 buf 交给外部
 
 | 期 | 内容 | 依赖 | 状态 |
 |---|---|---|---|
-| 1 | `borrow` / `borrow_mut` 两种形状 + R1/R2/R3 三条检查 + `view` / `exclusive` / `freeze` | `docs/299` 的区域环境 | **参考侧已落**；自举侧下一期 |
-| 2 | 形状运算：`split` / `window` / `cursor`（子区域、越窗、回边） | 期 1 + `docs/315` 的 `mutex` 边 | 未开始 |
+| 1 | `borrow` / `borrow_mut` 两种形状 + R1/R2/R3 三条检查 + `view` / `exclusive` / `freeze` | `docs/299` 的区域环境 | **两侧都已落** |
+| 2 | 形状运算：`split` / `window` / `cursor`（子区域、越窗、回边） | 期 1 + `docs/315` 的 `mutex` 边 | **两侧都已落**（区间形式；双名糖与动态界进期 3） |
 | 3 | `loan` / `epoch` / `session` / `seal`（退出路径、线性、外部调用表） | 期 1–2 | 未开始 |
 
 期 1 的落地形状：`domain [NAME :] borrow(NAME) { … }` / `borrow_mut(NAME) { … }`，

@@ -76,8 +76,8 @@ stabilisation release.
 
 - `lompi` is the package manager: content-addressed identities, a store, locks and a registry
   client. Its guide ships as `lompi skill`.
-- `standard/LLS.md` is the Loment Language Standard: a frame around the language, not a second
-  specification. Its version number is the language version.
+- `standard/LLS.md` is the Loment Language Standard: the **sole normative original** (Edition 2).
+  Its version number is the language version; `docs/` is informative.
 - The L0 interface (`lom/`) is the contract with the kernel side; see
   [Working agreements](03-working-agreements.md).
 

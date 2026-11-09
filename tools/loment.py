@@ -806,7 +806,7 @@ def main(argv: list[str] | None = None) -> int:
     lcc.add_argument("--previous-sidecar", default=None, metavar="FILE",
                      help="上一轮的 .lspe 旁挂（判『过期假设』用）")
     lcc.set_defaults(fn=cmd_lspc_check)
-    for name in ("build", "pkg", "lsp", "lib"):
+    for name in ("build", "pkg", "lsp", "lib", "slop"):
         s = sub.add_parser(name)
         s.add_argument("rest", nargs=argparse.REMAINDER)
         s.set_defaults(fn=None, delegate=name)
@@ -818,6 +818,9 @@ def main(argv: list[str] | None = None) -> int:
         if a.delegate == "lib":
             import lomlib
             return lomlib.main(a.rest)
+        if a.delegate == "slop":
+            import loment_slop
+            return loment_slop.main(a.rest)
         if a.delegate == "lsp":
             import loment_lsp
             return loment_lsp.main(a.rest)

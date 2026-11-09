@@ -6218,7 +6218,7 @@ def test_borrow_domains_phase1_rules():
         "    domain v : borrow_mut(p) {\n        free(p);\n    }\n    return 0;\n}\n",
     )
     orig = lomentc._borrow_domain_errs
-    lomentc._borrow_domain_errs = lambda f: []
+    lomentc._borrow_domain_errs = lambda f, funcs=None: []
     try:
         for body in negatives:
             assert errs(body) == [], (
@@ -6283,7 +6283,7 @@ def test_borrow_domains_phase2_shapes():
     assert errs(nested) == [], errs(nested)
 
     orig = lomentc._borrow_domain_errs
-    lomentc._borrow_domain_errs = lambda f: []
+    lomentc._borrow_domain_errs = lambda f, funcs=None: []
     try:
         for body in (over, under, overlap, stored):
             assert errs(body) == [], ("关掉这条规则之后仍然红 —— 那这一格测的不是它:\n"
@@ -6291,6 +6291,61 @@ def test_borrow_domains_phase2_shapes():
     finally:
         lomentc._borrow_domain_errs = orig
     print("      借用域期 2：window / split / cursor 三种形状逐格成立（关掉即放行）")
+
+
+@test
+def test_borrow_domains_phase3_shapes():
+    """`docs/318` 期 3：`loan` / `epoch` / `session` / `seal`。
+
+    - loan：块内**不能用**被借出的名字（块外恢复）；
+    - epoch：块内借出去的值不能 `return` 带出；
+    - session：块内恰好用一次；块**之后**不许再用（所有权已经走了）；
+    - seal：块内可以把 buf 交给外部，块**之后**不行。
+    """
+    def errs(body: str) -> list[str]:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "b3.lomt"
+            p.write_text("choose write grammar tur2026.3\nmodule b3\nchoose runtime\n\n" + body,
+                         encoding="utf-8", newline="\n")
+            m = lomentc.load(p)
+            return lomentc.check(m, deps=[])
+
+    # 正例
+    assert errs("fn f(xs: [u32], p: [u32]) -> u32 {\n    domain l : loan(xs) {\n"
+                "        return p[0];\n    }\n}\n") == []
+    assert errs("fn f(xs: [u32]) -> u32 {\n    domain ep : epoch {\n"
+                "        return xs[0];\n    }\n}\n") == []
+    assert errs("fn f(c: u32) -> u32 {\n    domain s : session(c) {\n"
+                "        return c;\n    }\n}\n") == []
+    assert errs("fn f(buf: ptr) -> u32 {\n    domain sl : seal(buf) {\n"
+                "        syscall4(0, 1, buf as u64, 8);\n    }\n    return 0;\n}\n") == []
+
+    loan = ("fn f(xs: [u32]) -> u32 {\n    domain l : loan(xs) {\n"
+            "        return xs[0];\n    }\n}\n")
+    epoch = ("fn f(xs: [u32]) -> [u32] {\n    domain ep : epoch {\n"
+             "        return &xs;\n    }\n}\n")
+    twice = ("fn f(c: u32) -> u32 {\n    domain s : session(c) {\n"
+             "        let a: u32 = c;\n        let b: u32 = c;\n        return a + b;\n    }\n}\n")
+    after = ("fn f(c: u32) -> u32 {\n    domain s : session(c) {\n"
+             "        let a: u32 = c;\n        return a;\n    }\n    return c;\n}\n")
+    unsealed = ("fn f(buf: ptr) -> u32 {\n    domain sl : seal(buf) {\n"
+                "        let x: u32 = 1;\n    }\n    syscall4(0, 1, buf as u64, 8);\n"
+                "    return 0;\n}\n")
+    assert any("块内不能再用" in x for x in errs(loan))
+    assert any("不能带出" in x for x in errs(epoch))
+    assert any("已经移交过" in x for x in errs(twice))
+    assert any("所有权已经随" in x for x in errs(after))
+    assert any("不能把 buf 交给外部" in x for x in errs(unsealed))
+
+    orig = lomentc._borrow_domain_errs
+    lomentc._borrow_domain_errs = lambda f, funcs=None: []
+    try:
+        for body in (loan, epoch, twice, after, unsealed):
+            assert errs(body) == [], ("关掉这条规则之后仍然红 —— 那这一格测的不是它:\n"
+                                      + body + str(errs(body)))
+    finally:
+        lomentc._borrow_domain_errs = orig
+    print("      借用域期 3：loan / epoch / session / seal 逐格成立（关掉即放行）")
 
 
 @test

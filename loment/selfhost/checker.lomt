@@ -1608,6 +1608,17 @@ fn chk_dom_name_at(src: ptr, t: ptr, hdr: u32, nt: u32) -> u32 {
 }
 
 /// `domain` 是上下文关键字（同 codegen 的 `is_dom_block`）。
+/// 带括号的区域形状（`docs/318`），与 codegen 的 `is_region_shape` 同表。
+fn chk_region_shape(src: ptr, t: ptr, i: u32) -> u32 {
+    if chk_tok_is(src, t, i, "borrow") || chk_tok_is(src, t, i, "borrow_mut")
+            || chk_tok_is(src, t, i, "window") || chk_tok_is(src, t, i, "split")
+            || chk_tok_is(src, t, i, "cursor") || chk_tok_is(src, t, i, "loan")
+            || chk_tok_is(src, t, i, "session") || chk_tok_is(src, t, i, "seal") {
+        return 1;
+    }
+    return 0;
+}
+
 fn chk_is_dom_block(src: ptr, t: ptr, i: u32) -> u32 {
     let a: u32 = i + 1;
     if chk_tok_kind(t, a) != 0 {
@@ -1620,17 +1631,16 @@ fn chk_is_dom_block(src: ptr, t: ptr, i: u32) -> u32 {
     if chk_tok_is(src, t, a + 1, "[") {
         return 1;
     }
-    // `docs/318`：区域形状（borrow / borrow_mut / window / split / cursor）。
+    // `docs/318`：区域形状（borrow / borrow_mut / window / split / cursor /
+    // loan / session / seal），外加不带括号的 `epoch`。
     if chk_tok_kind(t, a + 2) == 0 && chk_tok_is(src, t, a + 3, "(")
-            && (chk_tok_is(src, t, a + 2, "borrow") || chk_tok_is(src, t, a + 2, "borrow_mut")
-                || chk_tok_is(src, t, a + 2, "window") || chk_tok_is(src, t, a + 2, "split")
-                || chk_tok_is(src, t, a + 2, "cursor")) {
+            && chk_region_shape(src, t, a + 2) == 1 {
         return 1;
     }
-    if chk_tok_is(src, t, a + 1, "(")
-            && (chk_tok_is(src, t, a, "borrow") || chk_tok_is(src, t, a, "borrow_mut")
-                || chk_tok_is(src, t, a, "window") || chk_tok_is(src, t, a, "split")
-                || chk_tok_is(src, t, a, "cursor")) {
+    if chk_tok_is(src, t, a + 2, "epoch") && chk_tok_is(src, t, a + 3, "{") {
+        return 1;
+    }
+    if chk_tok_is(src, t, a + 1, "(") && chk_region_shape(src, t, a) == 1 {
         return 1;
     }
     return 0;
@@ -4504,6 +4514,10 @@ fn chk_bdom_mode(src: ptr, t: ptr, sp: u32) -> u32 {
     if chk_tok_is(src, t, sp, "window") { return 3; }
     if chk_tok_is(src, t, sp, "split") { return 4; }
     if chk_tok_is(src, t, sp, "cursor") { return 5; }
+    if chk_tok_is(src, t, sp, "loan") { return 6; }
+    if chk_tok_is(src, t, sp, "epoch") { return 7; }
+    if chk_tok_is(src, t, sp, "session") { return 8; }
+    if chk_tok_is(src, t, sp, "seal") { return 9; }
     return 0;
 }
 
@@ -4528,10 +4542,11 @@ fn chk_bdom_one(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
     // 从 `(` 起扫（`chk_find_at` 按括号深度找，跳过 `(` 会让深度从 0 掉到 -1）
     let lb: u32 = chk_find_at(src, t, sp + 1, e, "{");
     let rb: u32 = chk_match_brace(src, t, lb);
-    // R1：源必须是函数里看得见的名字
-    if chk_env_has(src, t, env, envc, st) == 0 {
+    // R1：源必须是函数里看得见的名字（`epoch` 没有源）
+    if m != 7 && chk_env_has(src, t, env, envc, st) == 0 {
         chk_pub(src, t, oc, out, E_LIFETIME, st);
     }
+    let sess_n: u32 = 0;
     let j: u32 = lb + 1;
     while j < rb && chk_tok_kind(t, j) != 4 {
         if chk_tok_is(src, t, j, "domain") && chk_is_dom_block(src, t, j) == 1 {
@@ -4590,6 +4605,30 @@ fn chk_bdom_one(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                     }
                 }
             }
+            // 期 3 loan：块内不能用被借出的名字（块外恢复）
+            if m == 6 && same(src, t, j, st) {
+                chk_pub(src, t, oc, out, E_LIFETIME, j);
+            }
+            // 期 3 epoch：块里借出去的值不能 `return` 带出
+            if m == 7 && chk_tok_is(src, t, j, "return") {
+                let q7: u32 = j + 1;
+                let d7: u32 = 0;
+                while q7 < rb && d7 == 0 && !chk_tok_is(src, t, q7, ";")
+                        && !chk_tok_is(src, t, q7, "}") {
+                    if chk_tok_is(src, t, q7, "&") {
+                        chk_pub(src, t, oc, out, E_LIFETIME, q7);
+                        d7 = 1;
+                    }
+                    q7 = q7 + 1;
+                }
+            }
+            // 期 3 session：块内恰好用一次
+            if m == 8 && same(src, t, j, st) {
+                sess_n = sess_n + 1;
+                if sess_n == 2 {
+                    chk_pub(src, t, oc, out, E_LIFETIME, j);
+                }
+            }
             // R3：`return … & [mut] xs` 不能带出域
             if chk_tok_is(src, t, j, "return") {
                 let q3: u32 = j + 1;
@@ -4610,6 +4649,30 @@ fn chk_bdom_one(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 }
             }
             j = j + 1;
+        }
+    }
+    // 期 3：块**之后**的用法（同一函数体内按 token 序；参考实现只走同一层语句表，
+    // 这里更宽一档 —— 语料上不影响，写在 `docs/318` §8 的边界里）。
+    if m == 8 || m == 9 {
+        let q8: u32 = rb + 1;
+        while q8 < e && chk_tok_kind(t, q8) != 4 {
+            if m == 8 && same(src, t, q8, st) {
+                chk_pub(src, t, oc, out, E_LIFETIME, q8);
+            }
+            // seal：块外把 buf 交给系统调用（`syscall*`）—— `extern fn` 那一支要符号
+            // 表，自举侧今天没有，边界写在 `docs/318`。
+            if m == 9 && chk_tok_is(src, t, q8, "syscall4") {
+                let q9: u32 = q8 + 1;
+                let d9: u32 = 0;
+                while q9 < e && d9 == 0 && !chk_tok_is(src, t, q9, ")") {
+                    if same(src, t, q9, st) {
+                        chk_pub(src, t, oc, out, E_LIFETIME, q8);
+                        d9 = 1;
+                    }
+                    q9 = q9 + 1;
+                }
+            }
+            q8 = q8 + 1;
         }
     }
     return rb + 1;

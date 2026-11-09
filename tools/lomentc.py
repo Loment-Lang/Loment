@@ -4068,9 +4068,11 @@ class Parser:
         # `docs/318`：区域形状 —— `domain V : borrow(xs)` / `domain borrow_mut(xs)`。
         # 只认 `borrow` / `borrow_mut` 这两个名字（`domain(...)` 仍可以是普通调用）。
         if a.kind == "ident" and b.val == ":" and c.kind == "ident" and d.val == "(":
-            return c.val in ("borrow", "borrow_mut", "window", "split", "cursor")
-        if a.kind == "ident" and b.val == "(" and a.val in (
-                "borrow", "borrow_mut", "window", "split", "cursor"):
+            return c.val in _REGION_SHAPES
+        # `domain e : epoch { … }`（期 3）：不带括号的那种 —— 形状是"本块"。
+        if a.kind == "ident" and b.val == ":" and c.val == "epoch" and d.val == "{":
+            return True
+        if a.kind == "ident" and b.val == "(" and a.val in _REGION_SHAPES:
             return True
         return a.kind == "ident" and b.val == "["
 
@@ -4193,11 +4195,24 @@ class Parser:
             name = self.next().val
             self.next()
         # **区域形状**（`docs/318`）：期 1 的 `borrow(xs)` / `borrow_mut(xs)`，
-        # 期 2 的 `window(xs, LO, N)` / `split(xs, LO, N)` / `cursor(xs)`。
+        # 期 2 的 `window(xs, LO, N)` / `split(xs, LO, N)` / `cursor(xs)`，
+        # 期 3 的 `loan(x)` / `session(x)` / `seal(x)`；`epoch` 不带括号，单独认。
         # 形状是区域，不是位置 —— lo/hi 不参与判断，时律固定成 `regular`。
-        if (self.at("ident") and self.peek().val in
-                ("borrow", "borrow_mut", "window", "split", "cursor")) \
-                and self.peek(1).val == "(":
+        if self.at("ident") and self.peek().val == "epoch" and self.peek(1).val == "{":
+            self.next()
+            if not name:
+                self.dom_seq += 1
+                name = f"__dom${self.dom_seq}"
+            blk = DomainBlock(name, "epoch", 0, 0, False, False, "regular", 0, False, [],
+                              kw.line, dom_mode="epoch")
+            self.dom_stack.append(blk)
+            try:
+                blk.body = self.parse_block()
+            finally:
+                self.dom_stack.pop()
+            return blk
+        if (self.at("ident") and self.peek().val in _REGION_SHAPES
+                and self.peek(1).val == "("):
             mode = self.next().val
             self.expect("punct", "(")
             src = self.ident("被借用的名字")
@@ -7943,7 +7958,7 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
 
         walk(f.body, scope)
         errs.extend(_move_check(f, funcs, structs, enums, lms))  # M13 移动检查 + E029
-        errs.extend(_borrow_domain_errs(f))  # docs/318 期 1：借用生命周期域的三条规则
+        errs.extend(_borrow_domain_errs(f, funcs))  # docs/318：借用生命周期域
         if lifetime != "lifetime_no":
             _pn = [(p.name, p.type) for p in f.params]
             for _p in f.params:
@@ -8217,10 +8232,88 @@ def _move_check(f: Func, funcs: dict, structs: dict, enums: dict,
 # 所以接受这份程序的两个实现产物逐字节不变。
 
 _STORE_BUILTINS = ("store8", "store16", "store32", "store64", "store128")
+#: 区域形状的五个带括号拼法（`docs/318`）。`epoch` 那个不带括号，单独认。
+_REGION_SHAPES = ("borrow", "borrow_mut", "window", "split", "cursor",
+                  "loan", "session", "seal")
 
 
-def _borrow_domain_errs(f: Func) -> list[str]:
-    """`docs/318` 期 1 的三条规则。每条都点名**域 / 名字 / 行号**。"""
+def _nodes(x):
+    """深度遍历一个 AST 片段，逐个产出节点（期 3 的小工具）。"""
+    import dataclasses as _dc
+    if _dc.is_dataclass(x) and not isinstance(x, type):
+        yield x
+        for fd in _dc.fields(x):
+            if fd.name in ("line", "col", "off", "len"):
+                continue
+            yield from _nodes(getattr(x, fd.name))
+    elif isinstance(x, (list, tuple)):
+        for y in x:
+            yield from _nodes(y)
+
+
+def _has_borrow(e) -> bool:
+    """这个表达式里有没有借用（`&` / `&mut`）。"""
+    return any(isinstance(n, Un) and n.op in ("&", "&mut") for n in _nodes(e))
+
+
+def _child_lists(s) -> list[list]:
+    """一条语句里的**子语句表**（期 3 的"块之后"只走同一层 + 这些子层）。"""
+    if isinstance(s, If):
+        return [s.then, s.otherwise]
+    if isinstance(s, (While, For)):
+        return [s.body]
+    if isinstance(s, Match):
+        return [b for _p, b in s.arms]
+    if isinstance(s, DomainBlock):
+        return [s.body]
+    return []
+
+
+def _after_in(body: list, block: DomainBlock, name: str,
+              external: bool = False, funcs: dict | None = None) -> list:
+    """`block` **之后**在同一层（以及同层语句的子层）里用到 `name` 的节点。
+
+    `external=True` 时只收"交给外部"的用法：`syscall*` 内建，或 `extern fn` 的实参里。
+    """
+    out: list = []
+
+    def hit(s) -> list:
+        ns = [n for n in _nodes(s) if isinstance(n, Ident) and n.name == name]
+        if not external:
+            return ns
+        res = []
+        # 只看调用实参：`syscall*(… name …)` 或 `extern fn(… name …)`
+        for n in _nodes(s):
+            if isinstance(n, Call) and n.args:
+                is_ext = n.name.startswith("syscall") or bool(
+                    funcs and funcs.get(n.name) is not None and funcs[n.name].extern)
+                if is_ext:
+                    for a in n.args:
+                        if any(isinstance(x, Ident) and x.name == name for x in _nodes(a)):
+                            res.append(n)
+        return res
+
+    found = False
+
+    def walk(ss: list) -> None:
+        nonlocal found
+        for s in ss:
+            if s is block:
+                found = True
+                continue
+            if found:
+                out.extend(hit(s))
+            else:
+                for cl in _child_lists(s):
+                    walk(cl)
+
+    walk(body)
+    return out
+
+
+def _borrow_domain_errs(f: Func, funcs: dict | None = None) -> list[str]:
+    """`docs/318` 的三条规则 + 期 2/3 的形状规则。每条都点名**域 / 名字 / 行号**。"""
+    funcs = funcs or {}
     import dataclasses as _dc
 
     def reap(v, fn) -> None:
@@ -8260,14 +8353,15 @@ def _borrow_domain_errs(f: Func) -> list[str]:
     blocks: list[DomainBlock] = []
 
     def pick(v) -> None:
-        if isinstance(v, DomainBlock) and v.borrow_src:
+        # `epoch` 没有源（形状是"本块"），也要进表 —— 它的规则在下面单独判。
+        if isinstance(v, DomainBlock) and (v.borrow_src or v.dom_mode == "epoch"):
             blocks.append(v)
 
     reap(f.body, pick)
     errs: list[str] = []
     for b in blocks:
         src = b.borrow_src
-        if src not in visible:
+        if src and src not in visible:
             errs.append(f"{b.line}: 域 {b.name} 要借用的 {src} 不在作用域里 —— "
                         "区域形状只能绑到一个可见的名字")
             continue
@@ -8280,7 +8374,8 @@ def _borrow_domain_errs(f: Func) -> list[str]:
                 r = _place_root(v.target)
                 if r is not None and r.name == _src and not _b.borrow_mut:
                     errs.append(f"{ln}: borrow 域 {_b.name} 里只能读 {_src}，不能写")
-            elif not _b.dom_mode and isinstance(v, Call) and v.name in _STORE_BUILTINS                     and v.args:
+            elif not _b.dom_mode and isinstance(v, Call) and v.name in _STORE_BUILTINS \
+                    and v.args:
                 r = _place_root(v.args[0])
                 if r is not None and r.name == _src and not _b.borrow_mut:
                     errs.append(f"{ln}: borrow 域 {_b.name} 里只能读 {_src}，不能写")
@@ -8337,6 +8432,36 @@ def _borrow_domain_errs(f: Func) -> list[str]:
                             " —— 直接写 `xs[下标]`，借用只活一轮")
 
             reap_shallow(b.body, cur_scan)
+
+        # ---- 期 3（`docs/318` §2.7–§2.10）：loan / epoch / session / seal
+        if b.dom_mode == "loan":
+
+            def loan_scan(v, _b=b, _src=src) -> None:
+                if isinstance(v, Ident) and v.name == _src:
+                    errs.append(f"{getattr(v, 'line', _b.line)}: {_src} 已经借给域 "
+                                f"{_b.name}，块内不能再用")
+
+            reap(b.body, loan_scan)
+        elif b.dom_mode == "epoch":
+
+            def ep_scan(v, _b=b) -> None:
+                if isinstance(v, Return) and v.expr is not None and _has_borrow(v.expr):
+                    errs.append(f"{v.line}: epoch 域 {_b.name} 里的借用不能带出")
+
+            reap(b.body, ep_scan)
+        elif b.dom_mode == "session":
+            uses = [v for v in _nodes(b.body)
+                    if isinstance(v, Ident) and v.name == src]
+            if len(uses) > 1:
+                errs.append(f"{uses[1].line}: session 域 {b.name} 里 {src} 已经移交过 —— "
+                            "一次会话只交一次手")
+            for t in _after_in(f.body, b, src):
+                errs.append(f"{t.line}: {src} 的所有权已经随 session 域 {b.name} 走了，"
+                            "不能再用")
+        elif b.dom_mode == "seal":
+            for t in _after_in(f.body, b, src, external=True, funcs=funcs):
+                errs.append(f"{t.line}: 封印域 {b.name} 之外不能把 {src} 交给外部 —— "
+                            f"先开一个 `seal({src})` 域")
 
     # `split` 的互斥（`docs/315` 的 `mutex` 边）：同一来源上两段**重叠**的 split 域
     # 不能同时开着 —— 那正是"两半"这个说法要排除的形状。

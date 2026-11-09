@@ -5059,13 +5059,17 @@ def expr_type(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[st
             if inner == "ptr":
                 return "u8"
             return _ref_elem(inner) if inner and _is_ref(inner) else None
-        if e.op == "&":  # M3: 数组 -> 只读切片；其余 -> 借用（`docs/299`）
+        if e.op == "&":  # M3: 数组 -> 只读切片；切片 -> 再借；其余 -> 借用
             if inner and _is_array(inner):
                 return f"[{_array_elem(inner)}]"
+            if inner and _is_slice(inner):
+                return f"[{_slice_elem(inner)}]"      # `&xs`（xs 已是切片）= 只读再借
             return f"&{inner}" if inner else None
-        if e.op == "&mut":  # M4: 数组 -> 可变切片；其余 -> 可变借用
+        if e.op == "&mut":  # M4: 数组 -> 可变切片；切片 -> 再借；其余 -> 可变借用
             if inner and _is_array(inner):
                 return f"mut [{_array_elem(inner)}]"
+            if inner and _is_slice(inner):
+                return f"mut [{_slice_elem(inner)}]"  # `&mut xs`（xs 已是切片）= 可变再借
             return f"&mut {inner}" if inner else None
         if e.op == "!":
             if inner == "bool":
@@ -6404,10 +6408,10 @@ def _lifetime_summary(f: Func, structs: dict, lifetime: str,
             src.add(refs[0])
         elif len(refs) > 1:
             src.update(refs)              # "最短者" = 所有入参的交集
-        else:
-            errs.append(
-                f"{f.line}: 函数 {f.name} 返回借用，但签名里没有引用形参 —— "
-                f"区域无法推断。加一个引用形参，或用 `choose lifetime_manual` 写 `&a T`")
+        # 没有引用形参 ⇒ 摘要为空；**错误在函数体那一趟报**（`_lifetime_fn_errs`），
+        # 因为那时才知道返回值是不是一个局部借用 —— 是的话 E012 已经把根因说清楚了，
+        # 再来一条 E041 只是同一处报两遍（`loment_rule_parity` 的 dangling-return
+        # 探针就是这么抓到的）。
     return frozenset(src)
 
 
@@ -6508,6 +6512,8 @@ def _lifetime_fn_errs(f: Func, funcs: dict, structs: dict, enums: dict,
     scope: dict[str, str] = {p.name: p.type for p in f.params}
     _LIFETIME_PARAM_NAMES[id(scope)] = params
     prov: dict[str, frozenset] = {p.name: frozenset({("p", p.name)}) for p in f.params}
+    ret_is_borrow = bool(_borrow_leaf_types(f.ret, structs))
+    has_ref = any(_is_borrowish(p.type, structs) for p in f.params)
     borrowed: set[str] = set()       # 被借过的根变量名（`free` 那条用）
     stored_mut: dict[str, int] = {}
     stored_shared: set[str] = set()
@@ -6588,9 +6594,18 @@ def _lifetime_fn_errs(f: Func, funcs: dict, structs: dict, enums: dict,
                 note_borrows(s.expr)
                 # `return &x;` 那一格由 M17 报（`_move_check`，E012）；这里只补
                 # 别名/字段/经调用传回来那些它看不见的形状，免得同一处报两遍。
+                _prov = prov_of(s.expr)
                 if not (isinstance(s.expr, Un) and s.expr.op in ("&", "&mut")
                         and isinstance(s.expr.expr, Ident)):
-                    err_local(prov_of(s.expr), s.line)
+                    err_local(_prov, s.line)
+                # **没有引用形参却返回借用**（E041）：局部来源由 E012 说清，不再叠一遍；
+                # 外部来源（例如一个返回借用的 extern 调用）没有别的诊断，在这里点名。
+                if ret_is_borrow and not has_ref \
+                        and not any(kind == "l" for kind, _ in _prov):
+                    errs.append(
+                        f"{s.line}: 函数 {f.name} 返回借用，但签名里没有引用形参 —— "
+                        f"区域无法推断。加一个引用形参，或用 `choose lifetime_manual` "
+                        f"写 `&a T`")
             elif isinstance(s, ExprStmt):
                 note_borrows(s.expr)
             elif isinstance(s, If):

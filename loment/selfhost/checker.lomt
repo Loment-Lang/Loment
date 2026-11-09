@@ -2239,8 +2239,10 @@ fn chk_tex(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
         }
         let inner: u32 = chk_tex(src, t, syms, n, env, envc,
                                  chk_lh(a0, hi), tyt, p, oc);
-        if chk_ty_is_arr(tyt, inner) == 0 {
-            chk_pub(src, t, oc, p, E_ACCESS, lo);         // 只能作用于数组
+        // 数组 -> 切片；**切片 -> 再借**（`&mut xs`，xs 已是切片）—— 与参考实现
+        // 的 `expr_type` 同一条：再借不改元素类型，只改可写位。
+        if chk_ty_is_arr(tyt, inner) == 0 && chk_ty_is_slc(tyt, inner) == 0 {
+            chk_pub(src, t, oc, p, E_ACCESS, lo);
             return 0;
         }
         return chk_ty_slc(tyt, chk_ty_a(tyt, inner), mutf);

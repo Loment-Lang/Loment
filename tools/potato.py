@@ -329,7 +329,7 @@ def _slice_elem(t: str) -> str:
 
 
 #: 借用类型（`docs/299`）的**形状**：`&` [mut ] [区域名 ] 被借类型。
-#: 与 `lomentc._REF_RE` 同一条规则（两份实现各一份；改了要一起改）。
+#: 与编译器那条 `_REF_RE` 同一条规则（两份实现各一份；改了要一起改）。
 _REF_TYPE_RE = re.compile(r"^&(mut )?(?:([A-Za-z_]\w*) )?(.+)$")
 
 

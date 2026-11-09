@@ -1231,9 +1231,14 @@ def test_slice_m3():
 
 @test
 def test_slice_type_errors():
-    e = errs("module m\nfn f() -> u32 { let x: u32 = 1; return slice_len(&x); }\n")
+    # `lifetime_no` 是"绝对关闭"：`&x` 仍只作用于数组（`docs/299` §8）。
+    e = errs("module m\nchoose lifetime_no\n"
+             "fn f() -> u32 { let x: u32 = 1; return slice_len(&x); }\n")
     assert any("& 只能作用于数组" in x for x in e), e
     e = errs("module m\nfn f() -> u32 { let x: u32 = 1; return slice_len(x); }\n")
+    assert any("不是数组或切片" in x for x in e), e
+    # 默认档（`lifetime_auto`）里 `&x` 是一个借用，`slice_len` 仍然不收它。
+    e = errs("module m\nfn f() -> u32 { let x: u32 = 1; return slice_len(&x); }\n")
     assert any("不是数组或切片" in x for x in e), e
 
 
@@ -6416,9 +6421,17 @@ def test_lifetime_rejects_escaping_local_borrow():
 
 @test
 def test_lifetime_return_borrow_needs_a_source_parameter():
-    """没有引用形参却返回借用 ⇒ 区域无从推断（E041）。"""
-    e = errs("module m\nfn f() -> &u32 { let a: u32 = 1; return &a; }\n")
-    assert any("签名里没有引用形参" in x for x in e), e
+    """没有引用形参却返回借用 ⇒ 区域无从推断（E041）。
+
+    局部来源那一路由 E012 说清根因，不再叠一条 E041（同一处报两遍会把根因埋掉）；
+    外部来源（例如返回借用的 extern 调用）没有别的诊断，由 E041 点名。
+    """
+    local = errs("module m\nfn f() -> &u32 { let a: u32 = 1; return &a; }\n")
+    assert any("悬垂" in x for x in local), local
+    assert not any("签名里没有引用形参" in x for x in local), local
+    ext = errs("module m\nextern fn ext() -> &u32;\n"
+               "fn f() -> &u32 { return ext(); }\n")
+    assert any("签名里没有引用形参" in x for x in ext), ext
 
 
 @test

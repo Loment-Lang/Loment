@@ -144,7 +144,7 @@ RULES = [
      "赋值目标非法", "赋值左边必须是变量、字段或下标（左值）；先把结果存进变量。"),
     ("E015", r"无字段|缺字段|重复初始化|对非结构体类型取字段|对非数组/切片类型取下标|"
              r"只能作用于数组|`\*` 只能解引用借用|借用的目标类型未知|"
-             r"只能作用于变量、字段或下标",
+             r"只能作用于变量、字段或下标|借用的目标必须是变量、字段或",
      "字段/下标/取址非法", "字段名与顺序按声明补齐；下标与 `&`/`&mut` 只能作用于数组或切片；"
      "`*` 只能解一层借用。"),
     ("E016", r"数组字面量|数组长度不符",
@@ -499,6 +499,7 @@ ASCII_ONE_LINER: dict[int, str] = {
     38: "an `lspe pass` block with no reason",
     39: "`lgc` needs a collector, but this unit chose `no_gc`",
     40: "a new-edition keyword collides with a name in an undeclared source",
+    41: "a borrow's region does not hold",
     # E9xx: internal. `loment codes` lists this block after the user codes
     # (`#773`: a tool that dies without a record is still a failure that must speak).
     900: "a tool in the chain died before it could report (internal) - report it with the unit",
@@ -563,6 +564,7 @@ TITLE_EN: dict[int, str] = {
     38: "`lspe pass` needs a reason",
     39: "`lgc` conflicts with `no_gc`",
     40: "a new keyword collides with a name",
+    41: "a borrow's region does not hold",
     900: "the tool died without reporting (internal)",
 }
 
@@ -697,6 +699,20 @@ CARDS: dict[int, Card] = {
         ),
         yes="显式钉住版次的源；把 `break` / `lgc` 当**语法**用（不是当名字）",
         no="无声明 + 把新版关键字当变量/参数/函数名",
+    ),
+    41: Card(
+        what="一个借用值的**区域**不成立：它想活得比来源长，或者它的来源说不清。",
+        why="借用是一条**静态**承诺：`&T` 只在来源还活着时有效。Loment 从区域推出来源 —— "
+            "返回值只能借自**形参**（局部变量出了函数就不存在），显式标记 `&a T` 只能指向"
+            "签名里的一个引用形参。`free(p)` 也会结束 `p` 的区域，所以释放时不能再有指向它的借用。",
+        fixes=(
+            "把值返回（按值），不要在返回值里借一个局部变量。",
+            "让来源活得更久：把来源做成形参传进来，再从形参借出去。",
+            "确需指定来源时写 `choose lifetime_manual`，用 `&a T` 指向那个引用形参。",
+            "释放之前先让借用结束：把 `free(p)` 挪到借用最后一次用处之后。",
+        ),
+        yes="返回借自形参的引用；在借用结束后再释放",
+        no="返回局部变量的借用；`free` 一块仍被借用的内存",
     ),
     1: Card(
         what="两处类型对不上 —— 返回值与声明、实参与形参、载荷与变体、内建实参、赋值两侧。",
@@ -1366,6 +1382,23 @@ CARDS_EN: dict[int, Card] = {
         ),
         yes="a source that pins its edition; `break` / `lgc` used as **syntax**, not as a name",
         no="no declaration + a new keyword used as a variable / parameter / function name",
+    ),
+    41: Card(
+        what="A borrow's **region** does not hold: it would outlive its source, or its "
+             "source cannot be named.",
+        why="A borrow is a **static** promise: `&T` is valid only while the source is alive. "
+            "Loment infers the source from regions - a returned borrow may only come from a "
+            "**parameter** (a local dies with the call), and an explicit `&a T` marker may only "
+            "name a reference parameter in the signature. `free(p)` also ends p's region, so no "
+            "borrow may still point at it.",
+        fixes=(
+            "Return the value itself, not a borrow of a local variable.",
+            "Make the source live longer: pass it in as a parameter and borrow from that.",
+            "When the source must be named, choose `lifetime_manual` and use `&a T`.",
+            "Move `free(p)` after the last use of any borrow of p.",
+        ),
+        yes="returning a borrow of a parameter; freeing after the borrow ends",
+        no="returning a local borrow; freeing a block that is still borrowed",
     ),
     1: Card(
         what="Two types do not line up - the return value against the declaration, an argument "

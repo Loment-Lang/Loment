@@ -86,6 +86,8 @@ pub fn requires() -> str { return "alloc,float"; }
 `loment_seed_test` 的"种子 + 256 KiB 余量要装进 lomelf 的输入缓冲"顶穿了 600 多字节。
 因此 `loment/tools/lomelf.lomt` 的输入/代码/输出三块从 6 MiB 抬到 **6.5 MiB**，其后各块
 整体后移 512 KiB，表区尺寸不变（`docs/192` / `docs/200` 的同一条式子）。
+`loment/tools/lomrel.lomt` 的归一化缓冲是同一个病：`NORM_CAP` 与 `IN_CAP` 同步抬到
+6.5 MiB，`M_CUR` / `ARENA` 依次后移（余量 703,918 B，判据要求 ≥ 256 KiB）。
 
 **自举侧**（`loment/selfhost/driver.lomt`）用同一套键的变体：`check` 通过之后、
 codegen 之前算键 = 纪元串 + 版次 + **编译器自身**（`/proc/self/exe`）的 128 位 FNV +

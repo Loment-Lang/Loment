@@ -1,0 +1,7 @@
+module neg_lifetime_marker
+
+// `docs/299` §3.3 / §8：`lifetime_auto`（tur2026.3 起的默认档）**不许**写区域标记
+// `&a T` —— 自动档要求零标注（E041）。要显式绑定得 `choose lifetime_manual`。
+fn f(a: &u32) -> &a u32 {
+    return a;
+}

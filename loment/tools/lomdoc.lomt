@@ -305,6 +305,58 @@ fn pack(i: u32, o: u32) -> u64 {
 
 /// 类型名 -> 规范化文本 (`mut [X]` / `[X; N]` / `Name<A, B>`), 与 lomentc.type_name 同口径。
 fn ptype(mem: ptr, src: ptr, t: ptr, i: u32) -> u64 {
+    // 借用 `&T` / `&mut T` / `&a T`（`docs/299`），与 `lomentc.type_name` 同口径：
+    // 切片借用规范化（`&[T]` -> `[T]`、`&mut [T]` -> `mut [T]`），区域标记照写。
+    if tk_is(src, t, i, "&") {
+        let j: u32 = i + 1;
+        let mf: u32 = 0;
+        if tk_is(src, t, j, "mut") {
+            mf = 1;
+            j = j + 1;
+        }
+        let rg: u32 = 0;
+        if tk_kind(t, j) == 0 && (tk_kind(t, j + 1) == 0 || tk_is(src, t, j + 1, "[")) {
+            rg = 1;
+            j = j + 1;
+        }
+        let sep: u32 = 0;
+        if tk_is(src, t, j, "[") {
+            let c: u32 = j + 1;
+            let d: u32 = 0;
+            let done: u32 = 0;
+            while tk_kind(t, c) != 4 && done == 0 {
+                if tk_is(src, t, c, "[") {
+                    d = d + 1;
+                } else if tk_is(src, t, c, "]") {
+                    if d == 0 {
+                        done = 1;
+                    } else {
+                        d = d - 1;
+                    }
+                } else if tk_is(src, t, c, ";") && d == 0 {
+                    sep = 1;
+                }
+                if done == 0 {
+                    c = c + 1;
+                }
+            }
+        }
+        if sep == 0 && tk_is(src, t, j, "[") {
+            if mf == 1 {
+                em(mem, "mut ");
+            }
+            return ptype(mem, src, t, j);
+        }
+        em(mem, "&");
+        if mf == 1 {
+            em(mem, "mut ");
+        }
+        if rg == 1 {
+            em_tok(mem, src, t, j - 1);
+            em(mem, " ");
+        }
+        return ptype(mem, src, t, j);
+    }
     if tk_is(src, t, i, "mut") && tk_is(src, t, i + 1, "[") {
         em(mem, "mut [");
         let r1: u64 = ptype(mem, src, t, i + 2);

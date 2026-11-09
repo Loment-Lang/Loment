@@ -191,6 +191,46 @@ def _uses(t: list, name: str, lo: int, hi: int) -> list[int]:
     return out
 
 
+def count(toks: list) -> dict:
+    """台账里的 loan 计数（A0b）：只数**借用表达式**，不建图。
+
+    规则 R，两套实现逐条同形（自举侧 `lspe_loans`）：
+
+    * 只看 `&`；前一个 token 是 `:` 或 `->` 的是**类型位置**，不算；
+    * `&mut` 看下一个 token 是不是 `mut`；
+    * 再下一个必须是标识符，且不是 `self`（`&self` 是方法签名，不是借用表达式）。
+
+    只数**创建**：uses / kills / 冲突仍在 `analyze()` 里，接台账是 A0b 之后的事。
+    """
+    total = shared = mut = 0
+    for i, tok in enumerate(toks):
+        if not (tok.kind == "punct" and tok.val == "&"):
+            continue
+        type_pos = False
+        if i > 0:
+            prev = toks[i - 1]
+            if prev.kind == "punct" and prev.val == ":":
+                type_pos = True
+            if (prev.kind == "punct" and prev.val == ">"
+                    and i > 1 and toks[i - 2].kind == "punct"
+                    and toks[i - 2].val == "-"):
+                type_pos = True
+        if type_pos:
+            continue
+        j = i + 1
+        is_mut = False
+        if _is(toks, j, "ident", "mut"):
+            is_mut = True
+            j += 1
+        if _ident(toks, j) and toks[j].val != "self":
+            total += 1
+            if is_mut:
+                mut += 1
+            else:
+                shared += 1
+    return {"total": total, "shared": shared, "mut": mut}
+
+
 def analyze(toks: list, unit: str = "m") -> dict:
     """返回 `{unit, loans, sites, conflicts, findings, questions, summary}`。"""
     fnv = _fnv1a32

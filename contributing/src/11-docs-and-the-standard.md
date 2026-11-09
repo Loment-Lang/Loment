@@ -19,15 +19,18 @@ cite the implementation, not the design.
 
 ## `standard/LLS.md`
 
-The LLS is a frame around the language, not a second specification. It says what the language is
-made of, which dimensions and switches exist, and what a conforming implementation must do. It does
-not restate the tutorial.
+The LLS is the **sole normative original** (Edition 2). It defines what Loment is — the surface
+language, editions, type system, semantics, safety layers, artifact contract, and what a program
+must do to be called a Loment implementation. `docs/` is **informative**: rationale, history, and
+measurement, never the rule.
 
 - The standard's version number is the language version. There is one number, not two.
-- Section 4 is about **switches**: Loment is defined by what can be turned on and off, not by what
-  is missing. A dimension that is closed in release builds is still part of the standard.
-- Changing the standard is a language-level change: it follows the two-implementation rule and the
-  generated-seed rule.
+- Section 4 is **implementation qualification** (conformance classes, the common MUSTs, how to
+  claim and withdraw). Section 25 is the **switch** system. Section 38 is the conformance suite.
+- Changing the standard is a language-level change: it follows §6.2 (LLS first, criterion second,
+  both implementations in one commit, then the gate) and the generated-seed rule.
+- A criterion that contradicts the standard is a defect in the criterion. Neither the suite nor an
+  implementation is a second reading of the language.
 
 ## Displaying source
 

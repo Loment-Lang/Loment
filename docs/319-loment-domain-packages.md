@@ -1,4 +1,4 @@
-# 318 · 领域库独立成包：std 只留核心（2026-11-08）
+# 319 · 领域库独立成包：std 只留核心（2026-11-08）
 
 > 状态：**已落地**（`lompi/store/` 新增 8 个包，共 41 个 `.lomt`）
 > 判据：`loment_domains_test`（3 组、57 项）· `loment_store_twin_test`（全 store）·

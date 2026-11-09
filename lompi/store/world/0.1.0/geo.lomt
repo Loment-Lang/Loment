@@ -1,0 +1,232 @@
+// std/geo.lomt — 经纬度：球面距离、方位角、度分秒、包围盒
+//
+// 为什么标准库要有它: 经纬度是**角度**，不是平面坐标；直接拿 `sqrt(dlat²+dlon²)`
+// 算距离，在高纬度会把 1 公里算成好几公里。球面公式本身只有几行，但它对
+// 弧度/度、经度环绕、极点的处理每一处都能错。
+//
+// 约定:
+//   * 输入/输出经纬度都是**度**（double）；内部换弧度；
+//   * 地球半径用 **6371 km**（球面近似）；需要椭球精度请用 WGS84 的另一套公式；
+//   * `geo_bbox` 输出顺序是 `[min_lat, min_lon, max_lat, max_lon]`（各 8 字节）。
+//
+// 不做的: 大圆航线插值、UTM/MGRS 投影、地址解析、时区。
+//
+// 命名: 公开 geo_*, 内部 gg_*。自检 test_geo_*。
+
+module geo
+choose runtime
+
+use f64
+use f64conv
+use mathf
+use round
+use numfmt
+
+const GG_DEG: u64 = 0x3F91DF46A2529D39;  // pi/180
+const GG_RAD: u64 = 0x404CA5DC1A63C1F8;  // 180/pi
+const GG_R: u64 = 0x41584DAE00000000;    // 6371000
+const GG_M_PER_DEG: u64 = 0x40FB2D8000000000; // 111320
+const GG_60: u64 = 0x404E000000000000;
+const GG_360: u64 = 0x4076800000000000;
+
+/// 球面距离（米），haversine。
+pub fn geo_haversine(lat1: u64, lon1: u64, lat2: u64, lon2: u64) -> u64 {
+    let p1: u64 = f64_mul(lat1, GG_DEG);
+    let p2: u64 = f64_mul(lat2, GG_DEG);
+    let dlat: u64 = f64_mul(f64_sub(lat2, lat1), GG_DEG);
+    let dlon: u64 = f64_mul(f64_sub(lon2, lon1), GG_DEG);
+    let sh: u64 = mathf_sin(f64_mul(dlat, F64_HALF));
+    let sg: u64 = mathf_sin(f64_mul(dlon, F64_HALF));
+    let a: u64 = f64_add(f64_mul(sh, sh),
+                         f64_mul(f64_mul(mathf_cos(p1), mathf_cos(p2)), f64_mul(sg, sg)));
+    let c: u64 = f64_mul(F64_TWO, mathf_atan2(mathf_sqrt(a), mathf_sqrt(f64_sub(F64_ONE, a))));
+    return f64_mul(GG_R, c);
+}
+
+/// 从点 1 到点 2 的初始方位角（度，0..360，北为 0）。
+pub fn geo_bearing(lat1: u64, lon1: u64, lat2: u64, lon2: u64) -> u64 {
+    let p1: u64 = f64_mul(lat1, GG_DEG);
+    let p2: u64 = f64_mul(lat2, GG_DEG);
+    let dl: u64 = f64_mul(f64_sub(lon2, lon1), GG_DEG);
+    let y: u64 = f64_mul(mathf_sin(dl), mathf_cos(p2));
+    let x: u64 = f64_sub(f64_mul(mathf_cos(p1), mathf_sin(p2)),
+                         f64_mul(f64_mul(mathf_sin(p1), mathf_cos(p2)), mathf_cos(dl)));
+    let b: u64 = f64_mul(mathf_atan2(y, x), GG_RAD);
+    if f64_lt(b, F64_POS_ZERO) {
+        return f64_add(b, GG_360);
+    }
+    return b;
+}
+
+fn gg_num_at(s: str, st: u32, n: u32, out: ptr) -> u64 {
+    // 从 st 起跳过分隔符，读一个整数；返回 `[新下标:32][数值:32]`，没读到数值则数值=0。
+    let i: u32 = st;
+    while i < n {
+        let c: u32 = str_byte(s, i);
+        if c >= 48 && c <= 57 {
+            let v: u32 = 0;
+            while i < n {
+                let d: u32 = str_byte(s, i);
+                if d >= 48 && d <= 57 {
+                    v = v * 10 + (d - 48);
+                    i = i + 1;
+                } else {
+                    return ((i as u64) << 32) | (v as u64);
+                }
+            }
+            return ((i as u64) << 32) | (v as u64);
+        }
+        i = i + 1;
+    }
+    return ((i as u64) << 32) | 0 as u64;
+}
+
+/// 度分秒文本 -> 度。接受 `40 26 46 N` / `40°26'46"N` / `-40 26 46`。
+/// 无法解析返回 NaN。
+pub fn geo_dms_parse(s: str) -> u64 {
+    let n: u32 = str_len(s);
+    let neg: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = str_byte(s, i);
+        if c == 45 {
+            neg = 1;
+        } else if c == 83 || c == 115 || c == 87 || c == 119 { // S s W w
+            neg = 1;
+        }
+        i = i + 1;
+    }
+    let vals: ptr = alloc(12);
+    let got: u32 = 0;
+    i = 0;
+    while i < n && got < 3 {
+        let c: u32 = str_byte(s, i);
+        if c >= 48 && c <= 57 {
+            let r: u64 = gg_num_at(s, i, n, vals);
+            mem_store32(vals, got * 4, (r & 4294967295) as u32);
+            got = got + 1;
+            i = (r >> 32) as u32;
+        } else {
+            i = i + 1;
+        }
+    }
+    if got == 0 {
+        return 0x7FF8000000000000;
+    }
+    let d: u64 = f64conv_from_u32(mem_load32(vals, 0));
+    let m: u64 = F64_POS_ZERO;
+    let sec: u64 = F64_POS_ZERO;
+    if got >= 2 {
+        m = f64conv_from_u32(mem_load32(vals, 4));
+    }
+    if got >= 3 {
+        sec = f64conv_from_u32(mem_load32(vals, 8));
+    }
+    let deg: u64 = f64_add(d, f64_add(f64_div(m, GG_60), f64_div(sec, f64_mul(GG_60, GG_60))));
+    if neg == 1 {
+        return f64_neg(deg);
+    }
+    return deg;
+}
+
+fn gg_put(out: ptr, cap: u32, pos: u32, c: u32) -> u32 {
+    if pos < cap {
+        store8(out, pos, c as u8);
+    }
+    return pos + 1;
+}
+
+/// 度 -> `40°26'46"N`（`is_lat != 0` 用 N/S，否则 E/W）。返回写出的字节数；
+/// cap 不够时返回 0（不写半截）。
+pub fn geo_dms_format(deg: u64, is_lat: u32, out: ptr, cap: u32) -> u32 {
+    let neg: bool = f64_lt(deg, F64_POS_ZERO);
+    let a: u64 = f64_abs(deg);
+    let dd: u64 = round_floor(a);
+    let rem: u64 = f64_mul(f64_sub(a, dd), GG_60);
+    let mm: u64 = round_floor(rem);
+    let ss: u64 = round_half_away(f64_mul(f64_sub(rem, mm), GG_60));
+    let d: u64 = dd;
+    let m: u64 = mm;
+    let s2: u64 = ss;
+    if f64_ge(s2, GG_60) {
+        s2 = F64_POS_ZERO;
+        m = f64_add(m, F64_ONE);
+    }
+    if f64_ge(m, GG_60) {
+        m = F64_POS_ZERO;
+        d = f64_add(d, F64_ONE);
+    }
+    // 先写进一块足够大的临时区，再按 cap 拷贝 —— numfmt 不知道 cap，不能直接写 out。
+    let tmp: ptr = alloc(96);
+    let pos: u32 = 0;
+    pos = pos + numfmt_dec_into(ptr_add(tmp, pos), f64conv_to_u64(d));
+    pos = gg_put(tmp, 96, pos, 194); // UTF-8 度数符号 0xC2 0xB0
+    pos = gg_put(tmp, 96, pos, 176);
+    pos = pos + numfmt_dec_into(ptr_add(tmp, pos), f64conv_to_u64(m));
+    pos = gg_put(tmp, 96, pos, 39); // '
+    pos = pos + numfmt_dec_into(ptr_add(tmp, pos), f64conv_to_u64(s2));
+    pos = gg_put(tmp, 96, pos, 34); // "
+    let h: u32 = 0;
+    if is_lat != 0 {
+        h = 78; // N
+        if neg {
+            h = 83; // S
+        }
+    } else {
+        h = 69; // E
+        if neg {
+            h = 87; // W
+        }
+    }
+    pos = gg_put(tmp, 96, pos, h);
+    if pos + 1 > cap {
+        return 0;
+    }
+    mem_copy(out, 0, tmp, 0, pos);
+    store8(out, pos, 0 as u8);
+    return pos;
+}
+
+/// 包围盒：`radius` 米，写 `[min_lat, min_lon, max_lat, max_lon]`（各 8 字节）。
+pub fn geo_bbox(lat: u64, lon: u64, radius: u64, out: ptr) {
+    let dlat: u64 = f64_div(radius, GG_M_PER_DEG);
+    let cl: u64 = mathf_cos(f64_mul(lat, GG_DEG));
+    let dlon: u64 = dlat;
+    if f64_gt(f64_abs(cl), 0x3F50624DD2F1A9FC) { // |cos| > 1e-3
+        dlon = f64_div(dlat, f64_abs(cl));
+    }
+    mem_store64(out, 0, f64_sub(lat, dlat));
+    mem_store64(out, 8, f64_sub(lon, dlon));
+    mem_store64(out, 16, f64_add(lat, dlat));
+    mem_store64(out, 24, f64_add(lon, dlon));
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_geo_haversine() -> bool {
+    // (0,0) -> (0,1) ≈ 111.19 km（6371km * pi/180）
+    let d: u64 = geo_haversine(F64_POS_ZERO, F64_POS_ZERO, F64_POS_ZERO, F64_ONE);
+    let d2: u64 = f64_abs(f64_sub(d, 0x40FB25AED3893EAC)); // 111194.9
+    return f64_lt(d2, 0x4014000000000000); // < 5 m
+}
+
+fn test_geo_bearing() -> bool {
+    // 正北：0 度
+    let b: u64 = geo_bearing(F64_POS_ZERO, F64_POS_ZERO, F64_ONE, F64_POS_ZERO);
+    return f64_eq(b, F64_POS_ZERO);
+}
+
+fn test_geo_dms_roundtrip() -> bool {
+    let d: u64 = geo_dms_parse("40 26 46 N");
+    let e: u64 = f64_abs(f64_sub(d, 0x4044391A2B3C4D5E)); // 40.446111...
+    return f64_lt(e, 0x3E7AD7F29ABCAF48); // 1e-7
+}
+
+fn test_geo_bbox() -> bool {
+    let b: ptr = alloc(32);
+    geo_bbox(F64_POS_ZERO, F64_POS_ZERO, GG_M_PER_DEG, b);
+    // 1 度纬度 ≈ 111.32 km -> min_lat ≈ -1, max_lat ≈ 1
+    let mn: u64 = mem_load64(b, 0);
+    let mx: u64 = mem_load64(b, 16);
+    return f64_lt(mn, F64_POS_ZERO) && f64_gt(mx, F64_POS_ZERO);
+}

@@ -1,0 +1,84 @@
+// baremetal/vga.lomt — VGA 文本模式（0xB8000）的字符/属性编码
+//
+// 为什么标准库要有它: 文本模式下每个格子是 **u16**：低字节字符、高字节属性
+// （高 4 位背景、低 4 位前景）。看起来简单，但"红底白字"到底是 0x4F 还是 0xF4
+// 每次都要想一下；而颜色编号 0..15 的顺序不是"彩虹顺序"（蓝在绿前面）。
+//
+// 不做的: 实际写显存（那是内存映射 I/O，地址由引导/显示初始化给）、光标硬件
+// （`outb` 0x3D4/0x3D5）、VGA 图形模式、字体。
+//
+// 命名: 公开 vga_*, 内部 vg_*。自检 test_vga_*。
+
+module vga
+choose runtime
+
+use mem
+
+/// 属性字节 = (背景 << 4) | 前景。
+pub fn vga_attr(fg: u32, bg: u32) -> u32 {
+    return ((bg & 15) << 4) | (fg & 15);
+}
+
+/// 一个文本格子 = (属性 << 8) | 字符。
+pub fn vga_cell(ch: u32, attr: u32) -> u32 {
+    return ((attr & 255) << 8) | (ch & 255);
+}
+
+/// 80×25 文本缓冲里的下标。
+pub fn vga_index(col: u32, row: u32, width: u32) -> u32 {
+    return row * width + col;
+}
+
+/// 颜色名 -> 编号（0..15）。未知返回 0xFFFFFFFF。
+pub fn vga_color(name: str) -> u32 {
+    if str_eq(name, "black") { return 0; }
+    if str_eq(name, "blue") { return 1; }
+    if str_eq(name, "green") { return 2; }
+    if str_eq(name, "cyan") { return 3; }
+    if str_eq(name, "red") { return 4; }
+    if str_eq(name, "magenta") { return 5; }
+    if str_eq(name, "brown") { return 6; }
+    if str_eq(name, "light_grey") { return 7; }
+    if str_eq(name, "dark_grey") { return 8; }
+    if str_eq(name, "light_blue") { return 9; }
+    if str_eq(name, "light_green") { return 10; }
+    if str_eq(name, "light_cyan") { return 11; }
+    if str_eq(name, "light_red") { return 12; }
+    if str_eq(name, "light_magenta") { return 13; }
+    if str_eq(name, "yellow") { return 14; }
+    if str_eq(name, "white") { return 15; }
+    return 4294967295;
+}
+
+/// 把 n 个格子填成同一个 cell（文本缓冲按 u16 存）。
+pub fn vga_fill(buf: ptr, cells: u32, cell: u32) {
+    let i: u32 = 0;
+    while i < cells {
+        mem_store16(buf, i * 2, cell & 65535);
+        i = i + 1;
+    }
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_vga_attr_cell() -> bool {
+    // 白字（15）红底（4） = 0x4F
+    let a: u32 = vga_attr(15, 4);
+    if a != 79 {
+        return false;
+    }
+    // 'A' (65) + 0x4F -> 0x4F41
+    return vga_cell(65, a) == 20289;
+}
+
+fn test_vga_colors_index() -> bool {
+    return vga_color("blue") == 1 && vga_color("red") == 4
+        && vga_color("white") == 15 && vga_color("nope") == 4294967295
+        && vga_index(79, 24, 80) == 1999;
+}
+
+fn test_vga_fill() -> bool {
+    let b: ptr = alloc(8);
+    vga_fill(b, 4, 20289);
+    return mem_load16(b, 0) == 20289 && mem_load16(b, 6) == 20289;
+}

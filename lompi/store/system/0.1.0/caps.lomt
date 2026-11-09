@@ -1,0 +1,235 @@
+// system/caps.lomt — Linux capabilities：名字表与位集合
+//
+// 为什么标准库要有它: capability 是"把 root 的权限切成小块"的那套接口；它的名字
+// 与编号经常在代码里手写（`capset` 的掩码、日志里的名字），而 **0..40 的编号是
+// 内核 ABI**，写错一位就是给了另一项权限 —— 静默、且危险。
+//
+// 形状:
+//   * 名字表（`|` 分隔，下标就是编号）—— `cap_name` / `cap_find`；
+//   * 位集合是调用方给的 **8 字节**（u64），`cap_add` / `cap_has` / `cap_count_bits`；
+//   * `cap_parse` 把 `"chown net_bind_service"` 这样的列表并进位集合。
+//
+// 不做的: 读/写当前进程的 capability（那要 syscall）、文件的 xattr、ambient/bounding
+// 的语义 —— 这一层只做"名字 <-> 位"。
+//
+// 命名: 公开 cap_*, 内部 cp_*。自检 test_caps_*。
+
+module caps
+choose runtime
+
+use mem
+
+pub const CAP_NONE: u32 = 4294967295;
+
+fn cp_names() -> str {
+    return "chown|dac_override|dac_read_search|fowner|fsetid|kill|setgid|setuid|setpcap|linux_immutable|net_bind_service|net_broadcast|net_admin|net_raw|ipc_lock|ipc_owner|sys_module|sys_rawio|sys_chroot|sys_ptrace|sys_pacct|sys_admin|sys_boot|sys_nice|sys_resource|sys_time|sys_tty_config|mknod|lease|audit_write|audit_control|setfcap|mac_override|mac_admin|syslog|wake_alarm|block_suspend|audit_read|perfmon|bpf|checkpoint_restore";
+}
+
+pub fn cap_count() -> u32 {
+    let s: str = cp_names();
+    let n: u32 = str_len(s);
+    let c: u32 = 1;
+    let i: u32 = 0;
+    while i < n {
+        if str_byte(s, i) == 124 {
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    return c;
+}
+
+/// 第 c 个名字的 `[起点:32][长度:32]`（打包，不分配）。
+fn cp_tok(c: u32) -> u64 {
+    let s: str = cp_names();
+    let n: u32 = str_len(s);
+    let idx: u32 = 0;
+    let st: u32 = 0;
+    let i: u32 = 0;
+    while i <= n {
+        if i == n || str_byte(s, i) == 124 {
+            if idx == c {
+                return ((st as u64) << 32) | ((i - st) as u64);
+            }
+            idx = idx + 1;
+            st = i + 1;
+        }
+        i = i + 1;
+    }
+    return 0 as u64;
+}
+
+fn cp_eq(s: str, st: u32, ln: u32, t: str, ts: u32, tl: u32) -> bool {
+    if ln != tl {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < ln {
+        if str_byte(s, st + i) != str_byte(t, ts + i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// 编号 -> 名字。写进 out，返回长度；越界返回 0。
+pub fn cap_name(c: u32, out: ptr, cap: u32) -> u32 {
+    if c >= cap_count() {
+        return 0;
+    }
+    let t: u64 = cp_tok(c);
+    let st: u32 = (t >> 32) as u32;
+    let ln: u32 = (t & 4294967295) as u32;
+    let s: str = cp_names();
+    let m: u32 = ln;
+    if m > cap {
+        m = cap;
+    }
+    let i: u32 = 0;
+    while i < m {
+        store8(out, i, str_byte(s, st + i) as u8);
+        i = i + 1;
+    }
+    return ln;
+}
+
+/// 一个名字片段 -> 编号；未知返回 CAP_NONE。
+pub fn cap_find_span(name: str, st0: u32, ln0: u32) -> u32 {
+    let c: u32 = 0;
+    let total: u32 = cap_count();
+    while c < total {
+        let t: u64 = cp_tok(c);
+        if cp_eq(cp_names(), (t >> 32) as u32, (t & 4294967295) as u32, name, st0, ln0) {
+            return c;
+        }
+        c = c + 1;
+    }
+    return CAP_NONE;
+}
+
+pub fn cap_find(name: str) -> u32 {
+    return cap_find_span(name, 0, str_len(name));
+}
+
+pub fn cap_add(set: ptr, c: u32) {
+    if c >= 64 {
+        return;
+    }
+    let v: u64 = mem_load64(set, 0);
+    mem_store64(set, 0, v | ((1 as u64) << (c as u32)));
+}
+
+pub fn cap_has(set: ptr, c: u32) -> bool {
+    if c >= 64 {
+        return false;
+    }
+    let v: u64 = mem_load64(set, 0);
+    return ((v >> (c as u32)) & (1 as u64)) != (0 as u64);
+}
+
+pub fn cap_count_bits(set: ptr) -> u32 {
+    let v: u64 = mem_load64(set, 0);
+    let n: u32 = 0;
+    let i: u32 = 0;
+    while i < 64 {
+        if ((v >> (i as u32)) & (1 as u64)) != (0 as u64) {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+fn cp_sep(c: u32) -> bool {
+    return c == 32 || c == 9 || c == 44;
+}
+
+/// 解析空格/逗号分隔的名字列表，写进 8 字节位集合。返回识别出的个数。
+pub fn cap_parse(names: str, set: ptr) -> u32 {
+    mem_store64(set, 0, 0);
+    let n: u32 = str_len(names);
+    let i: u32 = 0;
+    let got: u32 = 0;
+    let going: u32 = 1;
+    while going == 1 {
+        // 跳过分隔符
+        let sep: u32 = 1;
+        while sep == 1 && i < n {
+            if cp_sep(str_byte(names, i)) {
+                i = i + 1;
+            } else {
+                sep = 0;
+            }
+        }
+        if i >= n {
+            going = 0;
+        } else {
+            let st: u32 = i;
+            let stop: u32 = 0;
+            while stop == 0 && i < n {
+                if cp_sep(str_byte(names, i)) {
+                    stop = 1;
+                } else {
+                    i = i + 1;
+                }
+            }
+            let idx: u32 = cap_find_span(names, st, i - st);
+            if idx != CAP_NONE {
+                cap_add(set, idx);
+                got = got + 1;
+            }
+        }
+    }
+    return got;
+}
+
+/// 位集合 -> "chown net_admin"（空格分隔）。返回写出的字节数。
+pub fn cap_format(set: ptr, out: ptr, cap: u32) -> u32 {
+    let pos: u32 = 0;
+    let i: u32 = 0;
+    let first: u32 = 1;
+    while i < 64 {
+        if cap_has(set, i) {
+            if first == 0 && pos < cap {
+                store8(out, pos, 32 as u8);
+                pos = pos + 1;
+            }
+            let room: u32 = 0;
+            if pos < cap {
+                room = cap - pos;
+            }
+            let n: u32 = cap_name(i, ptr_add(out, pos), room);
+            pos = pos + n;
+            first = 0;
+        }
+        i = i + 1;
+    }
+    if pos < cap {
+        store8(out, pos, 0 as u8);
+    }
+    return pos;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_caps_names() -> bool {
+    return cap_count() == 41 && cap_find("chown") == 0 && cap_find("bpf") == 39
+        && cap_find("checkpoint_restore") == 40 && cap_find("nope") == CAP_NONE;
+}
+
+fn test_caps_set() -> bool {
+    let s: ptr = alloc(8);
+    mem_store64(s, 0, 0);
+    cap_add(s, 0);
+    cap_add(s, 12);
+    cap_add(s, 40);
+    return cap_has(s, 0) && cap_has(s, 12) && cap_has(s, 40)
+        && !cap_has(s, 1) && cap_count_bits(s) == 3;
+}
+
+fn test_caps_parse() -> bool {
+    let s: ptr = alloc(8);
+    let n: u32 = cap_parse("chown, net_admin bpf", s);
+    return n == 3 && cap_has(s, 0) && cap_has(s, 12) && cap_has(s, 39);
+}

@@ -1,0 +1,328 @@
+// std/linalg.lomt — 小矩阵线性代数（3×3 / 4×4，double）
+//
+// 为什么不是通用 N×N: 这门语言**没有函数指针、没有泛型容器**，而 N×N 需要调用方
+// 同时给"元素类型 + 维度 + 运算"，那套形状在库里会变成一个解释器。现实里 90% 的需求
+// 是 2D/3D 变换（3×3 / 4×4）与"解一个三元一次方程组"—— 这两个可以写成**定长循环**，
+// 编译器能把下标全展开。
+//
+// 元素是 **IEEE 754 double 的位**（u64），与 `f64*.lomt` 一致；矩阵按**行主序**连续
+// 存放（`a[i*3+j]` / `a[i*4+j]`）。调用方给目标缓冲，函数返回状态。
+//
+// 不做的（如实列）:
+//   * LU/QR/SVD/特征值 —— 4×4 逆用**代数余子式**，不做分解；N×N 的稳定性问题不在这一层；
+//   * 奇异判定用 `det == 0`（精确零）；近奇异矩阵请调用方自己看条件数；
+//   * 不做 2×2 / 5×5 以上 —— 需要时按同一形状加一份，别搞成通用解释器。
+//
+// 命名: 公开 la_*, 内部 la_*。自检 test_linalg_*。
+
+module linalg
+choose runtime
+
+use f64
+use f64conv
+
+pub const LA_OK: u32 = 0;
+pub const LA_ERR: u32 = 4294967295;
+
+fn la_m(m: ptr, r: u32, c: u32, cols: u32) -> u64 {
+    return mem_load64(m, (r * cols + c) * 8);
+}
+
+// ---------------------------------------------------------------- 3×3
+
+/// r = a × b（3×3 行主序）。
+pub fn la_mul3(r: ptr, a: ptr, b: ptr) {
+    let i: u32 = 0;
+    while i < 3 {
+        let j: u32 = 0;
+        while j < 3 {
+            let s: u64 = f64_add(
+                f64_add(f64_mul(la_m(a, i, 0, 3), la_m(b, 0, j, 3)),
+                        f64_mul(la_m(a, i, 1, 3), la_m(b, 1, j, 3))),
+                f64_mul(la_m(a, i, 2, 3), la_m(b, 2, j, 3)));
+            mem_store64(r, (i * 3 + j) * 8, s);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+}
+
+pub fn la_transpose3(r: ptr, a: ptr) {
+    let i: u32 = 0;
+    while i < 3 {
+        let j: u32 = 0;
+        while j < 3 {
+            mem_store64(r, (j * 3 + i) * 8, la_m(a, i, j, 3));
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+}
+
+pub fn la_det3(m: ptr) -> u64 {
+    let a: u64 = la_m(m, 0, 0, 3);
+    let b: u64 = la_m(m, 0, 1, 3);
+    let c: u64 = la_m(m, 0, 2, 3);
+    let d: u64 = la_m(m, 1, 0, 3);
+    let e: u64 = la_m(m, 1, 1, 3);
+    let f: u64 = la_m(m, 1, 2, 3);
+    let g: u64 = la_m(m, 2, 0, 3);
+    let h: u64 = la_m(m, 2, 1, 3);
+    let i: u64 = la_m(m, 2, 2, 3);
+    let m0: u64 = f64_sub(f64_mul(e, i), f64_mul(f, h));
+    let m1: u64 = f64_sub(f64_mul(d, i), f64_mul(f, g));
+    let m2: u64 = f64_sub(f64_mul(d, h), f64_mul(e, g));
+    return f64_sub(f64_add(f64_mul(a, m0), f64_mul(c, m2)), f64_mul(b, m1));
+}
+
+/// r = inv(m)。奇异（det 精确 0）返回 LA_ERR 且不写 r。
+pub fn la_inv3(r: ptr, m: ptr) -> u32 {
+    let det: u64 = la_det3(m);
+    if f64_eq(det, F64_POS_ZERO) {
+        return LA_ERR;
+    }
+    // 伴随矩阵（行主序）：元素是代数余子式，再除以 det。
+    let a: u64 = la_m(m, 0, 0, 3);
+    let b: u64 = la_m(m, 0, 1, 3);
+    let c: u64 = la_m(m, 0, 2, 3);
+    let d: u64 = la_m(m, 1, 0, 3);
+    let e: u64 = la_m(m, 1, 1, 3);
+    let f: u64 = la_m(m, 1, 2, 3);
+    let g: u64 = la_m(m, 2, 0, 3);
+    let h: u64 = la_m(m, 2, 1, 3);
+    let i: u64 = la_m(m, 2, 2, 3);
+    mem_store64(r, 0, f64_div(f64_sub(f64_mul(e, i), f64_mul(f, h)), det));
+    mem_store64(r, 8, f64_div(f64_sub(f64_mul(c, h), f64_mul(b, i)), det));
+    mem_store64(r, 16, f64_div(f64_sub(f64_mul(b, f), f64_mul(c, e)), det));
+    mem_store64(r, 24, f64_div(f64_sub(f64_mul(f, g), f64_mul(d, i)), det));
+    mem_store64(r, 32, f64_div(f64_sub(f64_mul(a, i), f64_mul(c, g)), det));
+    mem_store64(r, 40, f64_div(f64_sub(f64_mul(c, d), f64_mul(a, f)), det));
+    mem_store64(r, 48, f64_div(f64_sub(f64_mul(d, h), f64_mul(e, g)), det));
+    mem_store64(r, 56, f64_div(f64_sub(f64_mul(b, g), f64_mul(a, h)), det));
+    mem_store64(r, 64, f64_div(f64_sub(f64_mul(a, e), f64_mul(b, d)), det));
+    return LA_OK;
+}
+
+/// 解 A x = b（3 元）。成功 LA_OK，失败 LA_ERR。
+pub fn la_solve3(x: ptr, a: ptr, b: ptr) -> u32 {
+    let inv: ptr = alloc(72);
+    let rc: u32 = la_inv3(inv, a);
+    if rc != LA_OK {
+        return LA_ERR;
+    }
+    mem_store64(x, 0, f64_add(f64_add(f64_mul(la_m(inv, 0, 0, 3), mem_load64(b, 0)),
+                                     f64_mul(la_m(inv, 0, 1, 3), mem_load64(b, 8))),
+                              f64_mul(la_m(inv, 0, 2, 3), mem_load64(b, 16))));
+    mem_store64(x, 8, f64_add(f64_add(f64_mul(la_m(inv, 1, 0, 3), mem_load64(b, 0)),
+                                     f64_mul(la_m(inv, 1, 1, 3), mem_load64(b, 8))),
+                              f64_mul(la_m(inv, 1, 2, 3), mem_load64(b, 16))));
+    mem_store64(x, 16, f64_add(f64_add(f64_mul(la_m(inv, 2, 0, 3), mem_load64(b, 0)),
+                                      f64_mul(la_m(inv, 2, 1, 3), mem_load64(b, 8))),
+                               f64_mul(la_m(inv, 2, 2, 3), mem_load64(b, 16))));
+    return LA_OK;
+}
+
+// ---------------------------------------------------------------- 4×4
+
+pub fn la_mul4(r: ptr, a: ptr, b: ptr) {
+    let i: u32 = 0;
+    while i < 4 {
+        let j: u32 = 0;
+        while j < 4 {
+            let s: u64 = F64_POS_ZERO;
+            let k: u32 = 0;
+            while k < 4 {
+                s = f64_add(s, f64_mul(la_m(a, i, k, 4), la_m(b, k, j, 4)));
+                k = k + 1;
+            }
+            mem_store64(r, (i * 4 + j) * 8, s);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+}
+
+pub fn la_transpose4(r: ptr, a: ptr) {
+    let i: u32 = 0;
+    while i < 4 {
+        let j: u32 = 0;
+        while j < 4 {
+            mem_store64(r, (j * 4 + i) * 8, la_m(a, i, j, 4));
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+}
+
+/// 4×4 里划掉第 `sr` 行、第 `sc` 列之后的 3×3 行列式。
+fn la_minor3(m: ptr, sr: u32, sc: u32) -> u64 {
+    // 把剩下的 9 个元素按行主序挑出来，算 3×3 det（不分配：直接按公式取）。
+    let v0: u64 = la_pick(m, sr, sc, 0, 0);
+    let v1: u64 = la_pick(m, sr, sc, 0, 1);
+    let v2: u64 = la_pick(m, sr, sc, 0, 2);
+    let v3: u64 = la_pick(m, sr, sc, 1, 0);
+    let v4: u64 = la_pick(m, sr, sc, 1, 1);
+    let v5: u64 = la_pick(m, sr, sc, 1, 2);
+    let v6: u64 = la_pick(m, sr, sc, 2, 0);
+    let v7: u64 = la_pick(m, sr, sc, 2, 1);
+    let v8: u64 = la_pick(m, sr, sc, 2, 2);
+    let m0: u64 = f64_sub(f64_mul(v4, v8), f64_mul(v5, v7));
+    let m1: u64 = f64_sub(f64_mul(v3, v8), f64_mul(v5, v6));
+    let m2: u64 = f64_sub(f64_mul(v3, v7), f64_mul(v4, v6));
+    return f64_sub(f64_add(f64_mul(v0, m0), f64_mul(v2, m2)), f64_mul(v1, m1));
+}
+
+/// 跳过第 `sr` 行与第 `sc` 列后，第 (i,j) 个元素在原矩阵里的值。
+fn la_pick(m: ptr, sr: u32, sc: u32, i: u32, j: u32) -> u64 {
+    let r: u32 = i;
+    if i >= sr {
+        r = i + 1;
+    }
+    let c: u32 = j;
+    if j >= sc {
+        c = j + 1;
+    }
+    return la_m(m, r, c, 4);
+}
+
+pub fn la_det4(m: ptr) -> u64 {
+    let s0: u64 = f64_mul(la_m(m, 0, 0, 4), la_minor3(m, 0, 0));
+    let s1: u64 = f64_mul(la_m(m, 0, 1, 4), la_minor3(m, 0, 1));
+    let s2: u64 = f64_mul(la_m(m, 0, 2, 4), la_minor3(m, 0, 2));
+    let s3: u64 = f64_mul(la_m(m, 0, 3, 4), la_minor3(m, 0, 3));
+    return f64_sub(f64_add(s0, s2), f64_add(s1, s3));
+}
+
+/// r = inv(m)（4×4）。奇异返回 LA_ERR。
+pub fn la_inv4(r: ptr, m: ptr) -> u32 {
+    let det: u64 = la_det4(m);
+    if f64_eq(det, F64_POS_ZERO) {
+        return LA_ERR;
+    }
+    let i: u32 = 0;
+    while i < 4 {
+        let j: u32 = 0;
+        while j < 4 {
+            // inv[i][j] = cofactor[j][i] / det
+            let cof: u64 = la_minor3(m, j, i);
+            let sign: u64 = cof;
+            if ((i + j) % 2) == 1 {
+                sign = f64_neg(cof);
+            }
+            mem_store64(r, (i * 4 + j) * 8, f64_div(sign, det));
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return LA_OK;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_linalg_identity3() -> bool {
+    let a: ptr = alloc(72);
+    let r: ptr = alloc(72);
+    let i: u32 = 0;
+    while i < 9 { mem_store64(a, i * 8, F64_POS_ZERO); i = i + 1; }
+    mem_store64(a, 0, F64_ONE);
+    mem_store64(a, 32, F64_ONE);
+    mem_store64(a, 64, F64_ONE);
+    la_mul3(r, a, a);
+    return f64_eq(mem_load64(r, 0), F64_ONE) && f64_eq(mem_load64(r, 32), F64_ONE)
+        && f64_eq(mem_load64(r, 64), F64_ONE);
+}
+
+fn test_linalg_det3() -> bool {
+    let a: ptr = alloc(72);
+    // 对角 2,3,4 -> det 24
+    mem_store64(a, 0, f64conv_from_i64(2 as i64));
+    mem_store64(a, 32, f64conv_from_i64(3 as i64));
+    mem_store64(a, 64, f64conv_from_i64(4 as i64));
+    return f64_eq(la_det3(a), f64conv_from_i64(24 as i64));
+}
+
+fn test_linalg_inv3_solve() -> bool {
+    let a: ptr = alloc(72);
+    let b: ptr = alloc(24);
+    let x: ptr = alloc(24);
+    // A = [[2,0,0],[0,3,0],[0,0,4]], b = [2,6,8] -> x = [1,2,2]
+    mem_store64(a, 0, f64conv_from_i64(2 as i64));
+    mem_store64(a, 32, f64conv_from_i64(3 as i64));
+    mem_store64(a, 64, f64conv_from_i64(4 as i64));
+    mem_store64(b, 0, f64conv_from_i64(2 as i64));
+    mem_store64(b, 8, f64conv_from_i64(6 as i64));
+    mem_store64(b, 16, f64conv_from_i64(8 as i64));
+    if la_solve3(x, a, b) != LA_OK {
+        return false;
+    }
+    return f64_eq(mem_load64(x, 0), F64_ONE)
+        && f64_eq(mem_load64(x, 8), f64conv_from_i64(2 as i64))
+        && f64_eq(mem_load64(x, 16), f64conv_from_i64(2 as i64));
+}
+
+fn test_linalg_singular() -> bool {
+    let a: ptr = alloc(72);
+    let r: ptr = alloc(72);
+    // 两行相同 -> 奇异
+    mem_store64(a, 0, F64_ONE);
+    mem_store64(a, 8, F64_ONE);
+    mem_store64(a, 24, F64_ONE);
+    mem_store64(a, 32, F64_ONE);
+    return la_inv3(r, a) == LA_ERR;
+}
+
+fn test_linalg_identity4() -> bool {
+    let a: ptr = alloc(128);
+    let r: ptr = alloc(128);
+    let i: u32 = 0;
+    while i < 16 { mem_store64(a, i * 8, F64_POS_ZERO); i = i + 1; }
+    mem_store64(a, 0, F64_ONE);
+    mem_store64(a, 40, F64_ONE);
+    mem_store64(a, 80, F64_ONE);
+    mem_store64(a, 120, F64_ONE);
+    if !f64_eq(la_det4(a), F64_ONE) {
+        return false;
+    }
+    if la_inv4(r, a) != LA_OK {
+        return false;
+    }
+    return f64_eq(mem_load64(r, 0), F64_ONE) && f64_eq(mem_load64(r, 120), F64_ONE);
+}
+
+fn test_linalg_inv4_roundtrip() -> bool {
+    let a: ptr = alloc(128);
+    let inv: ptr = alloc(128);
+    let prod: ptr = alloc(128);
+    let vals: ptr = alloc(16);
+    // 一个可逆的整数矩阵（det != 0），逐元素给值。
+    let i: u32 = 0;
+    while i < 16 {
+        mem_store64(vals, 0, f64conv_from_i64((i + 1) as i64));
+        mem_store64(a, i * 8, mem_load64(vals, 0));
+        i = i + 1;
+    }
+    // 对 row sums 的主对角线做一点偏置，保证非奇异。
+    mem_store64(a, 0, f64conv_from_i64(10 as i64));
+    mem_store64(a, 40, f64conv_from_i64(10 as i64));
+    mem_store64(a, 80, f64conv_from_i64(10 as i64));
+    mem_store64(a, 120, f64conv_from_i64(10 as i64));
+    if la_inv4(inv, a) != LA_OK {
+        return false;
+    }
+    la_mul4(prod, a, inv);
+    // 对角应当是 1，非对角是 0（软浮点误差允许 1e-12）。
+    let k: u32 = 0;
+    while k < 16 {
+        let v: u64 = mem_load64(prod, k * 8);
+        let want: u64 = F64_POS_ZERO;
+        if k == 0 || k == 5 || k == 10 || k == 15 {
+            want = F64_ONE;
+        }
+        let d: u64 = f64_abs(f64_sub(v, want));
+        if f64_gt(d, 0x3D719799812DEA11) { // 1e-12
+            return false;
+        }
+        k = k + 1;
+    }
+    return true;
+}

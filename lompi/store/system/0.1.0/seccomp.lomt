@@ -1,0 +1,153 @@
+// system/seccomp.lomt — seccomp 的经典 BPF 过滤器构造器
+//
+// 为什么标准库要有它: seccomp 的过滤器是一串 `struct sock_filter`（8 字节一条），
+// 而"允许/拒绝某个 syscall"要手写 `BPF_LD|BPF_W|BPF_ABS` + `BPF_JMP|BPF_JEQ|BPF_K`
+// + `BPF_RET|BPF_K` 的序列。位或的常量写错一位，过滤器就变成"全部放行"或"全部杀死"，
+// 而且**内核不会报错** —— 它只是一条不同的程序。
+//
+// 形状: 状态是 `[buf ptr, cap, len, err]`（24 字节），调用方给指令缓冲。
+//   `sec_emit` 是最底层的一条；`sec_ld_abs` / `sec_jeq` / `sec_ret_*` 是常用的几条。
+//
+// 不做的: 构造完整的安全策略（那要 syscall 白名单 + 参数检查）、eBPF（另一种指令集）、
+// 安装过滤器（`prctl`/`seccomp` 是 syscall，属于宿主层）。
+//
+// 命名: 公开 sec_*, 内部 sec_*。自检 test_seccomp_*。
+
+module seccomp
+choose runtime
+
+use mem
+use endian
+
+pub const SEC_ERR: u32 = 4294967295;
+pub const SEC_STATE: u32 = 24;
+
+// 经典 BPF 指令码
+pub const BPF_LD_ABS: u32 = 32;   // BPF_LD | BPF_W | BPF_ABS
+pub const BPF_LD_IMM: u32 = 0;    // BPF_LD | BPF_W | BPF_IMM
+pub const BPF_JEQ: u32 = 21;      // BPF_JMP | BPF_JEQ | BPF_K
+pub const BPF_JGE: u32 = 53;      // BPF_JMP | BPF_JGE | BPF_K
+pub const BPF_JGT: u32 = 37;      // BPF_JMP | BPF_JGT | BPF_K
+pub const BPF_RET_K: u32 = 6;     // BPF_RET | BPF_K
+
+// seccomp 返回值
+pub const SEC_RET_KILL_PROCESS: u32 = 2147483648; // 0x80000000
+pub const SEC_RET_KILL_THREAD: u32 = 0;
+pub const SEC_RET_TRAP: u32 = 196608;             // 0x00030000
+pub const SEC_RET_ERRNO: u32 = 327680;            // 0x00050000
+pub const SEC_RET_USER_NOTIF: u32 = 2143289344;   // 0x7fc00000
+pub const SEC_RET_TRACE: u32 = 2146435072;        // 0x7ff00000
+pub const SEC_RET_LOG: u32 = 2147221504;          // 0x7ffc0000
+pub const SEC_RET_ALLOW: u32 = 2147418112;        // 0x7fff0000
+
+// seccomp_data 的字段偏移
+pub const SEC_DATA_NR: u32 = 0;
+pub const SEC_DATA_ARCH: u32 = 4;
+pub const SEC_DATA_IP: u32 = 8;
+pub const SEC_DATA_ARGS: u32 = 16;
+
+fn sec_buf(st: ptr) -> ptr {
+    return mem_load64(st, 0) as ptr;
+}
+
+fn sec_len(st: ptr) -> u32 {
+    return mem_load32(st, 12);
+}
+
+pub fn sec_init(st: ptr, buf: ptr, cap_instr: u32) {
+    mem_store64(st, 0, buf as u64);
+    mem_store32(st, 8, cap_instr);
+    mem_store32(st, 12, 0);
+    mem_store32(st, 16, 0);
+}
+
+pub fn sec_count(st: ptr) -> u32 {
+    return sec_len(st);
+}
+
+pub fn sec_err(st: ptr) -> u32 {
+    return mem_load32(st, 16);
+}
+
+/// 发一条指令。成功返回新长度；缓冲满返回 SEC_ERR。
+pub fn sec_emit(st: ptr, code: u32, jt: u32, jf: u32, k: u32) -> u32 {
+    let n: u32 = sec_len(st);
+    if n >= mem_load32(st, 8) {
+        mem_store32(st, 16, 1);
+        return SEC_ERR;
+    }
+    let b: ptr = sec_buf(st);
+    let o: u32 = n * 8;
+    endian_store16le(b, o, code as u32);
+    store8(b, o + 2, jt as u8);
+    store8(b, o + 3, jf as u8);
+    endian_store32le(b, o + 4, k);
+    mem_store32(st, 12, n + 1);
+    return n + 1;
+}
+
+pub fn sec_ld_abs(st: ptr, off: u32) -> u32 {
+    return sec_emit(st, BPF_LD_ABS, 0, 0, off);
+}
+
+pub fn sec_ld_imm(st: ptr, v: u32) -> u32 {
+    return sec_emit(st, BPF_LD_IMM, 0, 0, v);
+}
+
+pub fn sec_jeq(st: ptr, k: u32, jt: u32, jf: u32) -> u32 {
+    return sec_emit(st, BPF_JEQ, jt, jf, k);
+}
+
+pub fn sec_jge(st: ptr, k: u32, jt: u32, jf: u32) -> u32 {
+    return sec_emit(st, BPF_JGE, jt, jf, k);
+}
+
+pub fn sec_jgt(st: ptr, k: u32, jt: u32, jf: u32) -> u32 {
+    return sec_emit(st, BPF_JGT, jt, jf, k);
+}
+
+pub fn sec_ret(st: ptr, v: u32) -> u32 {
+    return sec_emit(st, BPF_RET_K, 0, 0, v);
+}
+
+pub fn sec_ret_allow(st: ptr) -> u32 {
+    return sec_ret(st, SEC_RET_ALLOW);
+}
+
+pub fn sec_ret_kill(st: ptr) -> u32 {
+    return sec_ret(st, SEC_RET_KILL_PROCESS);
+}
+
+/// `SECCOMP_RET_ERRNO | (errno & 0xffff)`。
+pub fn sec_ret_errno(st: ptr, errno: u32) -> u32 {
+    return sec_ret(st, SEC_RET_ERRNO | (errno & 65535));
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_seccomp_emit() -> bool {
+    let buf: ptr = alloc(64);
+    let st: ptr = alloc(SEC_STATE);
+    sec_init(st, buf, 8);
+    // 如果 arch == x86_64 就跳到下一条，否则跳过 1 条
+    sec_ld_abs(st, SEC_DATA_ARCH);
+    sec_jeq(st, 3221225534, 0, 1); // AUDIT_ARCH_X86_64 = 0xC000003E
+    sec_ret_errno(st, 1);
+    sec_ret_allow(st);
+    if sec_count(st) != 4 || sec_err(st) != 0 {
+        return false;
+    }
+    // 第一条：code=0x20, k=4
+    return endian_load16le(buf, 0) == 32 && endian_load32le(buf, 4) == 4
+        && endian_load16le(buf, 8) == 21 && load8(buf, 11) == 1;
+}
+
+fn test_seccomp_full() -> bool {
+    let buf: ptr = alloc(8);
+    let st: ptr = alloc(SEC_STATE);
+    sec_init(st, buf, 1);
+    if sec_ret_allow(st) == SEC_ERR {
+        return false;
+    }
+    return sec_ret_allow(st) == SEC_ERR && sec_err(st) == 1;
+}

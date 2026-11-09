@@ -1,0 +1,10 @@
+// baremetal/pkg.lomp — 库清单（给人看的两个标签；机器身份是内容哈希）。
+module pkg
+
+pub fn name() -> str {
+    return "baremetal";
+}
+
+pub fn version() -> str {
+    return "0.1.0";
+}

@@ -1,0 +1,91 @@
+// baremetal/gdt.lomt — x86-64 全局描述符表（GDT）条目编码
+//
+// 为什么标准库要有它: 长模式下的代码段/数据段描述符仍然是 8 字节的老格式，只是
+// 语义变了（L 位决定 64 位代码段，基址必须为 0）。手写这几个字节的位布局，错一位
+// 就是 **#GP 三重故障**，而 QEMU 的报错不会告诉你是哪个位。
+//
+// 描述符布局（8 字节，小端）:
+//   limit[15:0] base[15:0] base[23:16] access flags+limit[19:16] base[31:24]
+//   access: P(7) DPL(6:5) S(4) type(3:0)
+//   flags : G(7) D/B(6) L(5) AVL(4) limit[19:16](3:0)
+//
+// 不做的: 加载 GDTR（`lgdt` 是特权指令）、TSS 的 IST 栈表、LDT —— 这一层只编码。
+//
+// 命名: 公开 gd_*, 内部 gd_*。自检 test_gdt_*。
+
+module gdt
+choose runtime
+
+use mem
+
+pub fn gd_null(d: ptr) {
+    mem_fill(d, 0, 8, 0);
+}
+
+fn gd_put(d: ptr, base: u32, limit: u32, access: u32, flags: u32) {
+    store8(d, 0, (limit & 255) as u8);
+    store8(d, 1, ((limit >> 8) & 255) as u8);
+    store8(d, 2, (base & 255) as u8);
+    store8(d, 3, ((base >> 8) & 255) as u8);
+    store8(d, 4, ((base >> 16) & 255) as u8);
+    store8(d, 5, access as u8);
+    store8(d, 6, (((limit >> 16) & 15) | (flags & 240)) as u8);
+    store8(d, 7, ((base >> 24) & 255) as u8);
+}
+
+/// 64 位代码段（L=1, D=0, G=1）。`dpl` 0..3。
+pub fn gd_code(d: ptr, dpl: u32) {
+    let access: u32 = 154 | ((dpl & 3) << 5); // P=1 S=1 type=1010(执行/读)
+    gd_put(d, 0, 0, access, 160);             // 0xA0 = G=1,L=1
+}
+
+/// 数据段（D/B=1, G=1）。
+pub fn gd_data(d: ptr, dpl: u32) {
+    let access: u32 = 144 | ((dpl & 3) << 5) | 2; // type=0010(读/写)
+    gd_put(d, 0, 0, access, 192);                 // 0xC0 = G=1,D=1
+}
+
+/// 16 字节的 TSS 描述符（x86-64 的 TSS 是"低 8 字节 + 高 8 字节"）。
+pub fn gd_tss(d: ptr, base: u64, limit: u32) {
+    mem_fill(d, 0, 16, 0);
+    let access: u32 = 137; // P=1 type=1001(可用 TSS)
+    gd_put(d, (base & 4294967295) as u32, limit, access, 0);
+    store8(d, 8, ((base >> 32) & 255) as u8);
+    store8(d, 9, ((base >> 40) & 255) as u8);
+    store8(d, 10, ((base >> 48) & 255) as u8);
+    store8(d, 11, ((base >> 56) & 255) as u8);
+}
+
+/// 选择子 = (index << 3) | rpl。
+pub fn gd_selector(index: u32, rpl: u32) -> u32 {
+    return (index << 3) | (rpl & 3);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_gdt_null_code_data() -> bool {
+    let d: ptr = alloc(16);
+    gd_null(d);
+    let i: u32 = 0;
+    while i < 8 {
+        if load8(d, i) != 0 {
+            return false;
+        }
+        i = i + 1;
+    }
+    gd_code(d, 0);
+    if load8(d, 5) != 154 || load8(d, 6) != 160 {
+        return false;
+    }
+    gd_data(d, 3);
+    return load8(d, 5) == 242 && load8(d, 6) == 192; // DPL=3: 0xF2
+}
+
+fn test_gdt_tss_and_selector() -> bool {
+    let d: ptr = alloc(16);
+    gd_tss(d, 0x100000000, 103);
+    if load8(d, 8) != 1 || load8(d, 9) != 0 {
+        return false;
+    }
+    return gd_selector(1, 0) == 8 && gd_selector(2, 3) == 19;
+}

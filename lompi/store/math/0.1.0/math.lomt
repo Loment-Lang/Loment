@@ -1,0 +1,15 @@
+// math/math.lomt — 包入口（门面）。
+//
+// 领域库各自成包，`std` 只留可移植核心。按模块取用 `use <module>`（包内模块按名字
+// 可达，docs/199 §2）；这个门面只给"我确实全都要"的场合，会把整包拉进同一个单元。
+module math
+choose runtime
+
+use "linalg.lomt"
+use "poly.lomt"
+use "calc.lomt"
+use "prob.lomt"
+use "complex.lomt"
+use "geometry.lomt"
+use "bitstream.lomt"
+use "toposort.lomt"

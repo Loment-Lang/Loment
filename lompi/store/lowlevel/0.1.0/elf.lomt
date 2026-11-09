@@ -1,0 +1,150 @@
+// lowlevel/elf.lomt — ELF64 头/程序头/节头读取（x86-64 小端）
+//
+// 为什么单独成包: 读 ELF 是"底层开发"的第一件事，而 `std` 的可移植层承诺**一个 syscall
+// 都不发**、也不假设目标文件格式。把它放进 `lowlevel`，`std` 的承诺不变。
+//
+// 口径: **ELF64 + 小端**（x86-64 的 ELF）。class 不是 2 或 data 不是 1 一律拒绝，
+// 不去猜 32 位/大端的字段宽度 —— 猜错的后果是整张表错位。
+//
+// 输出布局（调用方给的缓冲，字节偏移）:
+//   elf_header  60 字节: type@0 machine@4 entry@8 phoff@16 shoff@24 flags@32
+//                        ehsize@36 phentsize@40 phnum@44 shentsize@48 shnum@52 shstrndx@56
+//   elf_phdr    56 字节: type@0 flags@4 offset@8 vaddr@16 paddr@24 filesz@32 memsz@40 align@48
+//   elf_shdr    56 字节: name@0 type@4 flags@8 addr@16 offset@24 size@32 link@36 info@40
+//                        addralign@44 entsize@48
+//
+// 不做的: 符号表字符串解析、重定位、动态段、节内容解压 —— 这一层只把"表"读出来。
+//
+// 命名: 公开 elf_*, 内部 el_*。自检 test_elf_*。
+
+module elf
+choose runtime
+
+use mem
+use endian
+
+pub const ELF_ERR: u32 = 4294967295;
+pub const ELF_HEADER: u32 = 60;
+pub const ELF_PHDR: u32 = 56;
+pub const ELF_SHDR: u32 = 56;
+
+/// 是不是 ELF64 小端。
+pub fn elf_valid(src: ptr, n: u32) -> bool {
+    if n < 64 {
+        return false;
+    }
+    return load8(src, 0) == 127 && load8(src, 1) == 69 && load8(src, 2) == 76
+        && load8(src, 3) == 70 && load8(src, 4) == 2 && load8(src, 5) == 1;
+}
+
+/// 读 ELF 头。不是合法 ELF64 返回 ELF_ERR。
+pub fn elf_header(src: ptr, n: u32, out: ptr) -> u32 {
+    if !elf_valid(src, n) {
+        return ELF_ERR;
+    }
+    mem_store32(out, 0, endian_load16le(src, 16) as u32); // e_type
+    mem_store32(out, 4, endian_load16le(src, 18) as u32); // e_machine
+    mem_store64(out, 8, endian_load64le(src, 24));         // e_entry
+    mem_store64(out, 16, endian_load64le(src, 32));        // e_phoff
+    mem_store64(out, 24, endian_load64le(src, 40));        // e_shoff
+    mem_store32(out, 32, endian_load32le(src, 48));        // e_flags
+    mem_store32(out, 36, endian_load16le(src, 52) as u32); // e_ehsize
+    mem_store32(out, 40, endian_load16le(src, 54) as u32); // e_phentsize
+    mem_store32(out, 44, endian_load16le(src, 56) as u32); // e_phnum
+    mem_store32(out, 48, endian_load16le(src, 58) as u32); // e_shentsize
+    mem_store32(out, 52, endian_load16le(src, 60) as u32); // e_shnum
+    mem_store32(out, 56, endian_load16le(src, 62) as u32); // e_shstrndx
+    return 0;
+}
+
+/// 读第 idx 个程序头（56 字节）。越界/格式错返回 ELF_ERR。
+pub fn elf_phdr(src: ptr, n: u32, phoff: u64, phentsize: u32, phnum: u32, idx: u32, out: ptr) -> u32 {
+    if idx >= phnum || phentsize < ELF_PHDR {
+        return ELF_ERR;
+    }
+    let off: u64 = phoff + (idx as u64) * (phentsize as u64);
+    if off + (56 as u64) > (n as u64) {
+        return ELF_ERR;
+    }
+    let o: u32 = off as u32;
+    mem_store32(out, 0, endian_load32le(src, o));
+    mem_store32(out, 4, endian_load32le(src, o + 4));
+    mem_store64(out, 8, endian_load64le(src, o + 8));
+    mem_store64(out, 16, endian_load64le(src, o + 16));
+    mem_store64(out, 24, endian_load64le(src, o + 24));
+    mem_store64(out, 32, endian_load64le(src, o + 32));
+    mem_store64(out, 40, endian_load64le(src, o + 40));
+    mem_store64(out, 48, endian_load64le(src, o + 48));
+    return 0;
+}
+
+/// 读第 idx 个节头（56 字节）。越界/格式错返回 ELF_ERR。
+pub fn elf_shdr(src: ptr, n: u32, shoff: u64, shentsize: u32, shnum: u32, idx: u32, out: ptr) -> u32 {
+    if idx >= shnum || shentsize < 64 {
+        return ELF_ERR;
+    }
+    let off: u64 = shoff + (idx as u64) * (shentsize as u64);
+    if off + (64 as u64) > (n as u64) {
+        return ELF_ERR;
+    }
+    let o: u32 = off as u32;
+    mem_store32(out, 0, endian_load32le(src, o));
+    mem_store32(out, 4, endian_load32le(src, o + 4));
+    mem_store64(out, 8, endian_load64le(src, o + 8));
+    mem_store64(out, 16, endian_load64le(src, o + 16));
+    mem_store64(out, 24, endian_load64le(src, o + 24));
+    mem_store64(out, 32, endian_load64le(src, o + 32));
+    mem_store32(out, 40, endian_load32le(src, o + 40));
+    mem_store32(out, 44, endian_load32le(src, o + 44));
+    mem_store32(out, 48, endian_load32le(src, o + 48));
+    mem_store32(out, 52, endian_load32le(src, o + 52));
+    return 0;
+}
+
+/// 节名：`sh` 是节头输出，`strtab_off` 是 `.shstrtab` 的文件偏移。写进 out，返回长度。
+pub fn elf_section_name(src: ptr, n: u32, strtab_off: u32, sh: ptr, out: ptr, cap: u32) -> u32 {
+    let no: u32 = mem_load32(sh, 0);
+    let st: u32 = strtab_off + no;
+    let i: u32 = 0;
+    while st + i < n {
+        let c: u32 = load8(src, st + i);
+        if c == 0 {
+            if i < cap {
+                store8(out, i, 0 as u8);
+            }
+            return i;
+        }
+        if i < cap {
+            store8(out, i, c as u8);
+        }
+        i = i + 1;
+    }
+    return ELF_ERR;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_elf_bad_magic() -> bool {
+    let b: ptr = alloc(64);
+    mem_fill(b, 0, 64, 0);
+    return !elf_valid(b, 64);
+}
+
+fn test_elf_header_roundtrip() -> bool {
+    let b: ptr = alloc(64);
+    let out: ptr = alloc(60);
+    mem_fill(b, 0, 64, 0);
+    store8(b, 0, 127 as u8); store8(b, 1, 69 as u8); store8(b, 2, 76 as u8); store8(b, 3, 70 as u8);
+    store8(b, 4, 2 as u8); store8(b, 5, 1 as u8);
+    endian_store16le(b, 16, 2);      // ET_EXEC
+    endian_store16le(b, 18, 62);     // EM_X86_64
+    endian_store64le(b, 24, 4194304); // entry
+    endian_store16le(b, 54, 56);     // phentsize
+    endian_store16le(b, 56, 2);      // phnum
+    if elf_header(b, 64, out) != 0 {
+        return false;
+    }
+    return mem_load32(out, 0) == 2 && mem_load32(out, 4) == 62
+        && mem_load64(out, 8) == 4194304 && mem_load32(out, 40) == 56
+        && mem_load32(out, 44) == 2;
+}

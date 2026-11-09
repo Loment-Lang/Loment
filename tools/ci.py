@@ -279,6 +279,9 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "lspe_test", "potato_
                  "loment_invariant_test",
                  # std 核的行为判据 (docs/180): lib/ 里的函数算得对不对
                  "loment_std_test",
+                 # 八个领域包的行为判据 (docs/317): math/science/engineering/world/
+                 # dev/lowlevel/system/baremetal, 对照物是 Python 与已知常量。
+                 "loment_domains_test",
                  # LibL 的 libc 面 (docs/232): 同一组调用与**真 glibc** 逐字节对跑。
                  # 与 `loment_std_test` 的分界是**对照物**: 那边是 Python, 这边是 libc 自己。
                  "loment_libl_test",
@@ -460,6 +463,8 @@ SHARD_COST = {
     # 2026-10-22（#1151）：本机 Windows 实测 1.5s（启动器在 WSL 的原生 /tmp 里真跑三次）。
     "loment_hotbuild_test": 1.5,
     "loment_std_test": 3.1,
+    # 2026-11-08: 本机三组探针（每组一次 clang 链接 + 一次 WSL 真跑），约 8s。
+    "loment_domains_test": 8.0,
     "loment_store_twin_test": 261.6,
     "loment_studio_test": 3.0,
     # 2026-10-19（#772）：本机实测 13.2s（建一次 stage1 + 两个编译器各跑一个 21 格的

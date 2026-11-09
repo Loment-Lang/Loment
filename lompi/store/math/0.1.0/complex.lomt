@@ -1,0 +1,143 @@
+// std/complex.lomt — 复数（double 对：实部在 +0，虚部在 +8）
+//
+// 为什么不是语言类型: 语言层没有 `complex`（`#1406` 是那条 gap）。库这一层能给的是
+// **一对 double + 一组函数**：调用方给 16 字节缓冲，函数读它写它。与 `f64` 的
+// "值就是位"同一个约定 —— 没有隐藏分配，也没有运算符重载。
+//
+// 不做的: 复矩阵、复多项式、复 FFT（`dsp` 只做实数）；本层只给标量复数的四则与初等函数。
+//
+// 命名: 公开 cx_*, 内部 cx_*。自检 test_complex_*。
+
+module complex
+choose runtime
+
+use f64
+use f64conv
+use mathf
+
+fn cx_re(z: ptr) -> u64 {
+    return mem_load64(z, 0);
+}
+
+fn cx_im(z: ptr) -> u64 {
+    return mem_load64(z, 8);
+}
+
+pub fn cx_set(r: ptr, re: u64, im: u64) {
+    mem_store64(r, 0, re);
+    mem_store64(r, 8, im);
+}
+
+pub fn cx_add(r: ptr, a: ptr, b: ptr) {
+    cx_set(r, f64_add(cx_re(a), cx_re(b)), f64_add(cx_im(a), cx_im(b)));
+}
+
+pub fn cx_sub(r: ptr, a: ptr, b: ptr) {
+    cx_set(r, f64_sub(cx_re(a), cx_re(b)), f64_sub(cx_im(a), cx_im(b)));
+}
+
+pub fn cx_mul(r: ptr, a: ptr, b: ptr) {
+    let re: u64 = f64_sub(f64_mul(cx_re(a), cx_re(b)), f64_mul(cx_im(a), cx_im(b)));
+    let im: u64 = f64_add(f64_mul(cx_re(a), cx_im(b)), f64_mul(cx_im(a), cx_re(b)));
+    cx_set(r, re, im);
+}
+
+/// r = a / b。b 为 0 时写 NaN。
+pub fn cx_div(r: ptr, a: ptr, b: ptr) {
+    let d: u64 = f64_add(f64_mul(cx_re(b), cx_re(b)), f64_mul(cx_im(b), cx_im(b)));
+    if f64_eq(d, F64_POS_ZERO) {
+        cx_set(r, 0x7FF8000000000000, 0x7FF8000000000000);
+        return;
+    }
+    let re: u64 = f64_div(f64_add(f64_mul(cx_re(a), cx_re(b)), f64_mul(cx_im(a), cx_im(b))), d);
+    let im: u64 = f64_div(f64_sub(f64_mul(cx_im(a), cx_re(b)), f64_mul(cx_re(a), cx_im(b))), d);
+    cx_set(r, re, im);
+}
+
+pub fn cx_neg(r: ptr, a: ptr) {
+    cx_set(r, f64_neg(cx_re(a)), f64_neg(cx_im(a)));
+}
+
+pub fn cx_conj(r: ptr, a: ptr) {
+    cx_set(r, cx_re(a), f64_neg(cx_im(a)));
+}
+
+pub fn cx_abs(a: ptr) -> u64 {
+    let s: u64 = f64_add(f64_mul(cx_re(a), cx_re(a)), f64_mul(cx_im(a), cx_im(a)));
+    return mathf_sqrt(s);
+}
+
+pub fn cx_arg(a: ptr) -> u64 {
+    return mathf_atan2(cx_im(a), cx_re(a));
+}
+
+pub fn cx_exp(r: ptr, a: ptr) {
+    let e: u64 = mathf_exp(cx_re(a));
+    cx_set(r, f64_mul(e, mathf_cos(cx_im(a))), f64_mul(e, mathf_sin(cx_im(a))));
+}
+
+/// log(z) = ln|z| + i arg(z)。z=0 时实部 -inf。
+pub fn cx_log(r: ptr, a: ptr) {
+    let m: u64 = cx_abs(a);
+    let lr: u64 = mathf_log(m);
+    cx_set(r, lr, cx_arg(a));
+}
+
+pub fn cx_sqrt(r: ptr, a: ptr) {
+    let m: u64 = cx_abs(a);
+    let rr: u64 = mathf_sqrt(m);
+    let th: u64 = f64_mul(cx_arg(a), F64_HALF);
+    cx_set(r, f64_mul(rr, mathf_cos(th)), f64_mul(rr, mathf_sin(th)));
+}
+
+/// a^b = exp(b log a)。
+pub fn cx_pow(r: ptr, a: ptr, b: ptr) {
+    let lg: ptr = alloc(16);
+    let t: ptr = alloc(16);
+    cx_log(lg, a);
+    cx_mul(t, b, lg);
+    cx_exp(r, t);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_complex_mul() -> bool {
+    // (1+2i)(3+4i) = -5 + 10i
+    let a: ptr = alloc(16);
+    let b: ptr = alloc(16);
+    let r: ptr = alloc(16);
+    cx_set(a, F64_ONE, F64_TWO);
+    cx_set(b, F64_THREE, 0x4010000000000000); // 4.0
+    cx_mul(r, a, b);
+    return f64_eq(mem_load64(r, 0), f64conv_from_i64(0 as i64 - 5))
+        && f64_eq(mem_load64(r, 8), 0x4024000000000000); // 10.0
+}
+
+fn test_complex_div() -> bool {
+    // (1+i)/(1-i) = i
+    let a: ptr = alloc(16);
+    let b: ptr = alloc(16);
+    let r: ptr = alloc(16);
+    cx_set(a, F64_ONE, F64_ONE);
+    cx_set(b, F64_ONE, f64conv_from_i64(0 as i64 - 1));
+    cx_div(r, a, b);
+    return f64_eq(mem_load64(r, 0), F64_POS_ZERO)
+        && f64_eq(mem_load64(r, 8), F64_ONE);
+}
+
+fn test_complex_abs() -> bool {
+    // |3+4i| = 5
+    let a: ptr = alloc(16);
+    cx_set(a, F64_THREE, 0x4010000000000000);
+    return f64_eq(cx_abs(a), 0x4014000000000000);
+}
+
+fn test_complex_exp_identity() -> bool {
+    // e^{i*pi} = -1（误差 < 1e-9）
+    let a: ptr = alloc(16);
+    let r: ptr = alloc(16);
+    cx_set(a, F64_POS_ZERO, MF_PI);
+    cx_exp(r, a);
+    let d: u64 = f64_abs(f64_add(mem_load64(r, 0), F64_ONE));
+    return f64_lt(d, 0x3E112E0BE826D695); // 1e-9
+}

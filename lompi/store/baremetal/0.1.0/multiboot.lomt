@@ -1,0 +1,111 @@
+// baremetal/multiboot.lomt — Multiboot 1 头与信息结构
+//
+// 为什么标准库要有它: 裸机上第一件事是"引导器把内存图放在哪"。Multiboot 1 的头
+// 只有 12 个字节（magic / flags / checksum），但 **checksum 必须让三者相加为 0**，
+// 写错引导器就不会加载内核；信息结构里 `mmap_length`/`mmap_addr` 的偏移又分别
+// 在 44/48，不在连续的字段里。
+//
+// 口径: Multiboot 1（GRUB/QEMU 的 `-kernel` 都认）。小端。
+//
+// 不做的: Multiboot 2（另一套 tag 结构）、模块加载、VBE 模式设置 —— 那些是引导器/
+// 显示初始化的另一半。
+//
+// 命名: 公开 mb_*, 内部 mb_*。自检 test_multiboot_*。
+
+module multiboot
+choose runtime
+
+use mem
+use endian
+
+pub const MB_BOOT_MAGIC: u32 = 455221250;   // 0x1BADB002
+pub const MB_INFO_MAGIC: u32 = 732872706;   // 0x2BADB002
+
+/// 写一个 Multiboot 头（flags 由调用方给，例如 0x3 = 对齐 + 内存信息）。
+pub fn mb_header_write(h: ptr, flags: u32) -> u32 {
+    endian_store32le(h, 0, MB_BOOT_MAGIC);
+    endian_store32le(h, 4, flags);
+    let sum: u32 = MB_BOOT_MAGIC + flags;
+    endian_store32le(h, 8, (0 as u32) - sum); // 三者相加为 0
+    return 12;
+}
+
+pub fn mb_header_valid(h: ptr) -> bool {
+    if endian_load32le(h, 0) != MB_BOOT_MAGIC {
+        return false;
+    }
+    let sum: u32 = endian_load32le(h, 0) + endian_load32le(h, 4) + endian_load32le(h, 8);
+    return sum == 0;
+}
+
+/// 信息结构里没有 magic —— `MB_INFO_MAGIC` 是引导器放在 **EAX** 里的值，调用方
+/// 自己比。这里只回答"内存图字段有效吗"（flags 的第 0 位）。
+pub fn mb_info_has_mem(info: ptr) -> bool {
+    return (endian_load32le(info, 0) & 1) != 0;
+}
+
+/// 读信息结构。写 48 字节:
+/// flags@0 mem_lower@4 mem_upper@8 boot_device@12 cmdline@16(u64)
+/// mods_count@24 mmap_length@28 mmap_addr@32(u64) mods_addr@40(u64)
+pub fn mb_info(info: ptr, out: ptr) -> u32 {
+    mem_store32(out, 0, endian_load32le(info, 0));
+    mem_store32(out, 4, endian_load32le(info, 4));
+    mem_store32(out, 8, endian_load32le(info, 8));
+    mem_store32(out, 12, endian_load32le(info, 12));
+    mem_store64(out, 16, endian_load32le(info, 16) as u64);
+    mem_store32(out, 24, endian_load32le(info, 20));
+    mem_store32(out, 28, endian_load32le(info, 44));
+    mem_store64(out, 32, endian_load32le(info, 48) as u64);
+    mem_store64(out, 40, endian_load32le(info, 24) as u64);
+    return 0;
+}
+
+/// 一条 mmap 记录。写 24 字节: size@0 base@4(u64) length@12(u64) type@20。
+pub fn mb_mmap_entry(e: ptr, out: ptr) -> u32 {
+    let sz: u32 = endian_load32le(e, 0);
+    mem_store32(out, 0, sz);
+    mem_store64(out, 4, endian_load64le(e, 4));
+    mem_store64(out, 12, endian_load64le(e, 12));
+    mem_store32(out, 20, endian_load32le(e, 20));
+    return 0;
+}
+
+/// 下一条记录 = 当前 + size + 4（size 不含自身那 4 字节）。
+pub fn mb_mmap_next(e: u64) -> u64 {
+    let p: ptr = e as ptr;
+    let sz: u32 = endian_load32le(p, 0);
+    return e + (sz as u64) + 4;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_multiboot_header() -> bool {
+    let h: ptr = alloc(16);
+    if mb_header_write(h, 3) != 12 {
+        return false;
+    }
+    return mb_header_valid(h) && endian_load32le(h, 0) == MB_BOOT_MAGIC;
+}
+
+fn test_multiboot_bad_checksum() -> bool {
+    let h: ptr = alloc(16);
+    mb_header_write(h, 3);
+    endian_store32le(h, 8, 1);
+    return !mb_header_valid(h);
+}
+
+fn test_multiboot_info() -> bool {
+    let i: ptr = alloc(64);
+    let o: ptr = alloc(48);
+    mem_fill(i, 0, 64, 0);
+    endian_store32le(i, 0, 3);
+    endian_store32le(i, 4, 639);
+    endian_store32le(i, 8, 130048);
+    endian_store32le(i, 44, 96);
+    endian_store32le(i, 48, 4096);
+    if mb_info(i, o) != 0 {
+        return false;
+    }
+    return mem_load32(o, 0) == 3 && mem_load32(o, 4) == 639
+        && mem_load32(o, 28) == 96 && mem_load64(o, 32) == 4096;
+}

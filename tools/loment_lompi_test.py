@@ -1548,9 +1548,14 @@ def test_install_scripts_stay_pure_ascii():
 #: 与 `#401`），整棵树随之 159 -> 160。
 #: **2026-11-08 起 std 是 141** —— 补了 8 份：`pack` `uuid` `sha3` `blake2` `gzip`
 #: `tar` `jsonw` `regex`（`docs/316`），整棵树随之 160 -> 168。
+#: **2026-11-08 起多八个领域包**（`math`/`science`/`engineering`/`world`/`dev`/
+#: `lowlevel`/`system`/`baremetal`，`docs/317`），41 个 `.lomt` + 8 个 `pkg.lomp`，
+#: 整棵树 168 -> **217**。`std` 仍然是 141（领域库不进 std）。
 STORE_DIR = ROOT / "lompi" / "store"
-STORE_MODULES = {"std": 141, "host": 8, "internet": 8, "os": 7}
-STORE_FILES = 168
+STORE_MODULES = {"std": 141, "host": 8, "internet": 8, "os": 7,
+                 "math": 9, "science": 6, "engineering": 4, "world": 3,
+                 "dev": 5, "lowlevel": 4, "system": 4, "baremetal": 6}
+STORE_FILES = 217
 
 
 def _store_line(out: str) -> str:

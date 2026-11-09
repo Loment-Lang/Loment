@@ -12,7 +12,7 @@ and the teaching material. This chapter is the directory map.
 | `loment/build/` | The bootstrap seed (`selfhost_driver.ll`) and the genesis binary. Generated artifacts. | Only by regenerating, never by hand. |
 | `lom/` | The L0 interface contract: syscall and primitive declarations shared with the kernel side. | **No** — cross-line contract, frozen threshold. |
 | `docs/` | Numbered design records (`NNN-slug.md`). | Yes, with a number from the tool. |
-| `standard/LLS.md` | The Loment Language Standard: a frame, not a second spec. | Carefully; it tracks the language version. |
+| `standard/LLS.md` | The Loment Language Standard: the **sole normative original** (Edition 2). | Carefully; it tracks the language version. |
 | `book/`, `exercises/`, `contributing/` | Teaching material: the usage book, the practice tracks, and this book. | Yes. |
 | `compare/` | The defect survey against Rust, CPython and OpenJDK. | Append-only historical record. |
 | `lompi/` | The package manager and the store format. | Yes. |

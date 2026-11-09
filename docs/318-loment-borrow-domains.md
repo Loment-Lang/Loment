@@ -1,6 +1,6 @@
 # 318 · 借用生命周期域：十个
 
-> 状态: **期 1、期 2 参考侧已落**（2026-11-09）。
+> 状态: **期 1–3 两侧都已落**（2026-11-09）。
 > 期 1：`borrow(x)` / `borrow_mut(x)` 两种形状与 R1/R2/R3 三条规则（`view` / `freeze` /
 > `exclusive`），判据 `lomentc_test::test_borrow_domains_phase1_rules`。
 > 期 2：`window(xs, LO, N)` / `split(xs, LO, N)` / `cursor(xs)` 三种形状，
@@ -8,7 +8,14 @@
 > **自举侧两期都跟上了**（2026-11-09）：`checker.lomt` 的 `chk_bdom` 按 token 流判同样
 > 三条规则 + 期 2 三种形状，`codegen.lomt` 的 `dom_stmt` 认这五种形状（块与普通块同形）；
 > 孪生判据 `loment_p8_test::test_borrow_domains_are_byte_identical`
-> （`loment/examples/domains/borrow_lifetimes.lomt`）。期 3 未开始。
+> （`loment/examples/domains/borrow_lifetimes.lomt`，三种期 3 形状也在里面）。
+> 期 3：`loan` / `epoch` / `session` / `seal`，判据
+> `lomentc_test::test_borrow_domains_phase3_shapes`。
+>
+> **期 3 的边界（写明）**：`session` / `seal` 的"块之后"参考侧只走**同一层语句表**
+> （加同层语句的子层），自举侧按 token 序更宽一档；`seal` 的"外部"自举侧只认
+> `syscall*`（`extern fn` 要符号表，自举检查器今天没有）。三者都不改变"接受时产物
+> 逐字节相同"，只是拒的边界略有宽窄。
 > 上游: `docs/299`（借用区域）· `docs/306`（域代数）· `docs/307`（语境类）·
 > `docs/314`（域块）· `docs/315`（域循环与几何）
 > 一句话: 域的形状那一格原来只收**位置**（`space[lo..hi]`）与**时律**（`epoch(N)` /
@@ -300,8 +307,9 @@ E041: 封印域外不能把 buf 交给外部
 | 期 | 内容 | 依赖 | 状态 |
 |---|---|---|---|
 | 1 | `borrow` / `borrow_mut` 两种形状 + R1/R2/R3 三条检查 + `view` / `exclusive` / `freeze` | `docs/299` 的区域环境 | **两侧都已落** |
-| 2 | 形状运算：`split` / `window` / `cursor`（子区域、越窗、回边） | 期 1 + `docs/315` 的 `mutex` 边 | **两侧都已落**（区间形式；双名糖与动态界进期 3） |
-| 3 | `loan` / `epoch` / `session` / `seal`（退出路径、线性、外部调用表） | 期 1–2 | 未开始 |
+| 2 | 形状运算：`split` / `window` / `cursor`（子区域、越窗、回边） | 期 1 + `docs/315` 的 `mutex` 边 | **两侧都已落**（区间形式） |
+| 3 | `loan` / `epoch` / `session` / `seal`（退出路径、线性、外部调用表） | 期 1–2 | **两侧都已落**（边界见上） |
+| 4 | **未做**：`domain:split (lo, hi) from xs at k` 双名糖（要造两个子切片值）；窗口/半区的**动态**下标运行期检查；`seal` 的 `extern fn` 一支（自举侧要符号表） | 期 2–3 | 未开始 |
 
 期 1 的落地形状：`domain [NAME :] borrow(NAME) { … }` / `borrow_mut(NAME) { … }`，
 `DomainBlock` 多两个字段（`borrow_src` / `borrow_mut`），时律固定 `regular` ——

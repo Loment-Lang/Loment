@@ -1018,7 +1018,7 @@ def test_lspc_check_runs_before_codegen_and_never_writes():
 def test_selfhost_ledger_emits_the_v2_fields():
     mod = (ROOT / "loment" / "selfhost" / "potato.lomt").read_text(encoding="utf-8")
     for field in ("interrogations", "lspc", "drop_honest", "depth",
-                  "TypeWellFormed", "DropHonest", "assumed"):
+                  "TypeWellFormed", "DropHonest", "assumed", "loans"):
         assert f'"{field}"' in mod, field
     mod2 = (ROOT / "loment" / "lspe" / "lspe.lomt").read_text(encoding="utf-8")
     assert "pub fn lspe_e5_hit" in mod2 and "pub fn lspe_num" in mod2
@@ -1234,6 +1234,23 @@ def test_loans_cli_is_a_report_and_respects_lifetime_no():
             cwd=str(ROOT), capture_output=True, text=True,
             encoding="utf-8", errors="replace", shell=False, timeout=120)
         assert r2.returncode == 0 and "lifetime_no" in r2.stderr, r2.stderr
+
+
+@test
+def test_loans_are_counted_in_the_ledger_and_zeroed_when_closed():
+    """A0b（`docs/317` §9.5）：台账里有 `loans` 三格；`lspe_close_admin` 下归零。
+
+    这格只数**借用表达式**（创建），不算类型位置的 `&`；它不产生义务、不加地板。
+    """
+    src = ("module m\n\nfn f(a: u32, b: u32) -> u32 {\n"
+           "    let x: &u32 = &a;\n"
+           "    let y: &mut u32 = &mut b;\n"
+           "    return *x + *y;\n}\n")
+    doc, _ = _unit(src)
+    assert doc["loans"] == {"total": 2, "shared": 1, "mut": 1}, doc["loans"]
+    # 只数表达式：`let x: &u32` 的类型位置那两个 `&` 不算。
+    closed, _ = _unit(src, state="lspe_close_admin")
+    assert closed["loans"] == {"total": 0, "shared": 0, "mut": 0}, closed["loans"]
 
 
 def main() -> int:

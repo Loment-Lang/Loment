@@ -719,6 +719,7 @@ reversible  能不能撤销 / 撤销后回到什么状态
 | `assumed` | 靠 `Assumed` 销掉 |
 | `floors` | `assumed` + `stale_wf` + `budget`（**所有替人背书或被截断的格子**） |
 | `per_kind` | 每种义务的 proved/total |
+| `loans` | E10 A0b（`docs/317` §9.5）：借用表达式的**创建**计数（total / shared / mut）。只记数，不产生义务、不加地板 |
 
 **三条用法**：
 

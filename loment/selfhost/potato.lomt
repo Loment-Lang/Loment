@@ -1602,12 +1602,16 @@ const PT_PASS: u32 = 155428;
 /// + 五个计数 `[域总数, 字面量 guard, 循环 guard, guard 总数, 撤销域数]`。
 const PT_DOMTAB: u32 = 156452;
 const PT_DOMCNT: u32 = 157476;
+/// E10（`docs/317`）A0b：借用计数的三个格子 `[total, shared, mut]`。
+/// **不能借用 `PT_L3CNT` 后面的空位** —— 那 64 字节之后紧接着就是 `PT_PASS`
+/// （155428 = 155364 + 64）。第一版写在那里，症状是 pass 表凭空多出一个块。
+const PT_LOANCNT: u32 = 157496;
 const PT_TN: u32 = 46760;          // 收进池子的类型串条数（= 映射表条数）
 const PT_TCUR: u32 = 46764;        // 池子游标
 const PT_TMAX: u32 = 128;
 const PT_TSTRIDE: u32 = 64;
 const PT_TBUF_SZ: u32 = 256;
-const PT_SC_BYTES: u64 = 157496;    // 安全名表 + 首参表 + E3/E4/bounds 计数 + pass 块表 + E9 域表
+const PT_SC_BYTES: u64 = 157512;    // 安全名表 + 首参表 + E3/E4/bounds 计数 + pass 块表 + E9 域表 + loan 计数
 
 /// 一个类型串在池子里的位置（`i` 是池子下标）。
 fn pt_tkey(sc: ptr, i: u32) -> u32 {
@@ -2499,6 +2503,9 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
     let bcov: u32 = 0;
     let psites: u32 = 0;
     let passed: u32 = 0;
+    let ltot: u32 = 0;
+    let lsh: u32 = 0;
+    let lmu: u32 = 0;
     // 上下文级别（`#1091`）：证据按级别截断 —— Typed/LocalFlow 从 L1 起，
     // Interproc 从 L2 起，GlobalInvariant（E5）从 L3 起（`docs/262` §5.6）。
     let g_ok: u32 = 0;
@@ -2558,6 +2565,9 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
         drev = load32(sc, PT_DOMCNT + 16);
         bt = load32(sc, PT_L3CNT + 56);
         bcov = load32(sc, PT_L3CNT + 60);
+        ltot = load32(sc, PT_LOANCNT + 0);
+        lsh = load32(sc, PT_LOANCNT + 4);
+        lmu = load32(sc, PT_LOANCNT + 8);
         // ---- 析构器（`#747`）：`impl Drop for T { … fn drop` 一个一条 ----
         di = lo;
         while di < hi {
@@ -2660,6 +2670,21 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
     o = pt_str(out, o, ",\n");
     o = pt_key(out, o, 2, "sites");
     o = pt_dec(out, o, nsite as u64);
+    o = pt_str(out, o, ",\n");
+    // E10（`docs/317`）A0b：借用表达式的创建计数。
+    o = pt_key(out, o, 2, "loans");
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 3, "total");
+    o = pt_dec(out, o, ltot as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "shared");
+    o = pt_dec(out, o, lsh as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "mut");
+    o = pt_dec(out, o, lmu as u64);
+    o = pt_str(out, o, "\n");
+    o = pt_ind(out, o, 2);
+    o = pt_str(out, o, "}");
     o = pt_str(out, o, ",\n");
     o = pt_key(out, o, 2, "obligations");
     o = pt_dec(out, o, nsite as u64);
@@ -6174,7 +6199,7 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr,
     let lrc: u32 = lspe_engine(unit, t, lo, hi, pt_lms_mask(unit, t, lo, hi),
                                ptr_add(sc, PT_GLSAFE),
                                ptr_add(sc, PT_PTRFIRST), ptr_add(sc, PT_L3CNT),
-                               ptr_add(sc, PT_PASS));
+                               ptr_add(sc, PT_PASS), ptr_add(sc, PT_LOANCNT));
     if lrc == 1 {
         return pt_wfail("--emit-potato: more functions with a pointer first parameter than this section takes (1024)");
     }

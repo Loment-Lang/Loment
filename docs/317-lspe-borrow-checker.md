@@ -485,6 +485,16 @@ LSPE 的"温柔"不是"不拒"，而是**判决只出三种，每一种都带收
 | 站点/三问/LSPC 四族登记 | `loment/lspe/registry.py` | `test_loan_registry_entries_are_complete` |
 | 查看入口 `loment lspe loans FILE [--json] [--strict]` | `tools/loment.py` | `test_loans_cli_is_a_report_and_respects_lifetime_no` |
 
+### A0b（同一页的下一步，2026-11-09）
+
+`lspe.loans` 已进 Potato：`{total, shared, mut}`，只数**借用表达式**（创建），
+不产生义务、不加地板。参考侧在 `ledger.build` 里调 `loans.count`，自举侧是
+`lspe.loans` 的 token 扫描（`lspe.lomt`）+ `potato.lomt` 的 `PT_LOANCNT` 三格；
+两侧逐字节相同（`loment_potato_emit_test` 9/9）。
+
+计数规则 R（两侧逐条同形）：只看 `&`；前一个是 `:` 或 `->` 的是类型位置；
+`&mut` 看下一个是不是 `mut`；再下一个必须是标识符且不是 `self`。
+
 **为什么先不接台账**：`docs/262` 的孪生要求参考侧与自举侧的台账逐字节一致。
 loan 站点一旦进 Potato，自举侧必须同计数，而自举检查器是 token 级、没有 AST ——
 那是一次独立的、要重算种子与 genesis 的改动。所以这一轮把**判决**做成报告面，

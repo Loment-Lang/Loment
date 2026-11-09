@@ -253,6 +253,9 @@ LSPE_KEYS = frozenset({
     # `aicheck`（`choose lspe_aicheck_true`，`docs/262` §10.4）：AI 检查器开没开。
     # 旧产物缺这一格仍然合法（回放）；新发射器都写。
     "aicheck",
+    # `loans`（E10，`docs/317` §9.5）：借用表达式的**创建**计数（A0b）。
+    # 旧产物缺这一格仍然合法；新发射器都写。
+    "loans",
 })
 #: LSPC 的四个模式（`docs/262` §7.6）。`off` 是**构建旋钮**，不是第八维。
 LSPC_MODES = ("full", "quiet", "strict", "off")
@@ -863,6 +866,23 @@ def validate(doc: object) -> list[str]:
             lc = lp.get("lspc")
             if lc is not None and lc not in LSPC_MODES:
                 errs.append(f"{ver}: lspe.lspc 必须是 {LSPC_MODES} 之一，得到 {lc!r}")
+            ln_ = lp.get("loans")
+            if ln_ is not None:
+                if not isinstance(ln_, dict) or set(ln_) != {"total", "shared", "mut"}:
+                    errs.append(f"{ver}: lspe.loans 必须是 {{total,shared,mut}} 对象，"
+                                f"得到 {ln_!r}")
+                else:
+                    for k in ("total", "shared", "mut"):
+                        v = ln_.get(k)
+                        if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+                            errs.append(f"{ver}: lspe.loans.{k} 必须是非负整数，"
+                                        f"得到 {v!r}")
+                    if (isinstance(ln_.get("total"), int)
+                            and isinstance(ln_.get("shared"), int)
+                            and isinstance(ln_.get("mut"), int)
+                            and ln_["total"] != ln_["shared"] + ln_["mut"]):
+                        errs.append(f"{ver}: lspe.loans.total={ln_['total']}，"
+                                    f"但 shared+mut={ln_['shared'] + ln_['mut']}")
             ac = lp.get("aicheck")
             if ac is not None and not isinstance(ac, bool):
                 errs.append(f"{ver}: lspe.aicheck 必须是 true/false，得到 {ac!r}")

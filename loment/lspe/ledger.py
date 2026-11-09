@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from . import invariants as _inv
 from .census import census_e4, census_wf
+from .loans import count as loan_count
 from .lspc import default_mode as _lspc_default
 from .questions import ask as _ask
 from .registry import LSPE_PROBED_OBLIGATIONS
@@ -137,6 +138,10 @@ def build(*, sites: list[dict], state: str, set_by: str, level: int,
         "aicheck": bool(aicheck),
         "level": level,
         "sites": n,
+        # E10（`docs/317`）：借用的**创建**计数。只记数，不产生义务、不添证据 ——
+        # A0b 的口径；uses / kills / 冲突仍是 `loment lspe loans` 的报告面。
+        "loans": ({"total": 0, "shared": 0, "mut": 0}
+                  if state == "lspe_close_admin" else loan_count(toks)),
         "obligations": n,
         "proved": proved,
         "undecided": n - proved,

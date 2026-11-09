@@ -1099,7 +1099,7 @@ fn lspe_note_covered(i: u32, pbuf: ptr, out: ptr) -> u32 {
 /// `bounds` 站点只在 `lms_guard` **且**（`lms_reject` 或 `lms_crash`）时存在）。
 /// 返回 1 = 首参表超容量（调用方 `pt_wfail`）。
 pub fn lspe_engine(unit: ptr, t: ptr, lo: u32, hi: u32, lm: u32,
-                  sft: ptr, pft: ptr, out: ptr, pbuf: ptr) -> u32 {
+                  sft: ptr, pft: ptr, out: ptr, pbuf: ptr, lbuf: ptr) -> u32 {
     let q: u32 = 0;
     while q < 16 {
         store32(out, q * 4, 0);
@@ -1632,6 +1632,57 @@ pub fn lspe_engine(unit: ptr, t: ptr, lo: u32, hi: u32, lm: u32,
     store32(out, 52, icov2);
     store32(out, 44, load32(out, 44) + gcov + icov2);
     store32(out, 40, lspe_pass_outer(pbuf));
+    // E10（`docs/317`）A0b：借用的**创建**计数。
+    lspe_loans(unit, t, lo, hi, lbuf);
+    return 0;
+}
+
+/// A0b 的 loan 计数：只数借用表达式，规则与参考侧 `loans.count` 逐条同形。
+///
+/// * 前一个 token 是 `:` 或 `->`（`-` `>`）的是**类型位置**；
+/// * `&mut` 看下一个是不是 `mut`；
+/// * 再下一个必须是标识符，且不是 `self`（`&self` 是签名）。
+///
+/// 输出三格：`out[0]` 总数 / `out[4]` shared / `out[8]` mut。
+pub fn lspe_loans(unit: ptr, t: ptr, lo: u32, hi: u32, out: ptr) -> u32 {
+    let tot: u32 = 0;
+    let sh: u32 = 0;
+    let mu: u32 = 0;
+    let i: u32 = lo;
+    while i < hi && lspe_kind(t, i) != 4 {
+        if lspe_kind(t, i) == 3 && lspe_tis(unit, t, i, "&") == 1 {
+            let type_pos: u32 = 0;
+            if i > lo {
+                if lspe_tis(unit, t, i - 1, ":") == 1 {
+                    type_pos = 1;
+                }
+                if lspe_tis(unit, t, i - 1, ">") == 1 && i > lo + 1
+                        && lspe_tis(unit, t, i - 2, "-") == 1 {
+                    type_pos = 1;
+                }
+            }
+            if type_pos == 0 {
+                let j: u32 = i + 1;
+                let ismut: u32 = 0;
+                if lspe_kind(t, j) == 0 && lspe_tis(unit, t, j, "mut") == 1 {
+                    ismut = 1;
+                    j = j + 1;
+                }
+                if lspe_kind(t, j) == 0 && lspe_tis(unit, t, j, "self") == 0 {
+                    tot = tot + 1;
+                    if ismut == 1 {
+                        mu = mu + 1;
+                    } else {
+                        sh = sh + 1;
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    store32(out, 0, tot);
+    store32(out, 4, sh);
+    store32(out, 8, mu);
     return 0;
 }
 

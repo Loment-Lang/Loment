@@ -6145,6 +6145,71 @@ def test_borrow_domains_phase1_rules():
 
 
 @test
+def test_borrow_domains_phase2_shapes():
+    """`docs/318` 期 2：`window(xs, LO, N)` / `split(xs, LO, N)` / `cursor(xs)`。
+
+    - window：**字面量**下标必须在 `[LO, LO+N)` 内；域里借出去的值仍然不能带出。
+    - split：同来源上两段 split **重叠** → E041（`docs/315` 的 `mutex` 边）。
+    - cursor：不能把元素借用**存进局部**（没有 NLL，存下来就可能跨轮）。
+    - 嵌套域的下标不受外层窗口管（各自的形状各管各的）。
+
+    仍然把规则临时关掉，确认每一格的红都红在这条规则上。
+    """
+    def errs(body: str) -> list[str]:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "b2.lomt"
+            p.write_text("choose write grammar tur2026.3\nmodule b2\nchoose runtime\n\n" + body,
+                         encoding="utf-8", newline="\n")
+            m = lomentc.load(p)
+            return lomentc.check(m, deps=[])
+
+    # 正例
+    assert errs("fn f(xs: mut [u32]) -> u32 {\n    domain w : window(xs, 4, 4) {\n"
+                "        xs[5] = 1;\n        return xs[6];\n    }\n}\n") == []
+    assert errs("fn f(xs: mut [u32]) -> u32 {\n    domain a : split(xs, 0, 4) {\n"
+                "        xs[1] = 1;\n    }\n    domain b : split(xs, 4, 4) {\n"
+                "        return xs[5];\n    }\n}\n") == []
+    assert errs("fn f(xs: [u32]) -> u32 {\n    domain c : cursor(xs) {\n"
+                "        let i: u32 = 0;\n        let s: u32 = 0;\n"
+                "        while i < 4 { s = s + xs[i]; i = i + 1; }\n        return s;\n"
+                "    }\n}\n") == []
+    # 动态下标期 2 不判（运行期检查是期 3）—— 这一格钉住"不误报"
+    assert errs("fn f(xs: mut [u32], i: u32) -> u32 {\n    domain w : window(xs, 4, 4) {\n"
+                "        return xs[i];\n    }\n}\n") == []
+
+    # 负例
+    over = ("fn f(xs: mut [u32]) -> u32 {\n    domain w : window(xs, 4, 4) {\n"
+            "        return xs[9];\n    }\n}\n")
+    under = ("fn f(xs: mut [u32]) -> u32 {\n    domain w : window(xs, 4, 4) {\n"
+             "        return xs[1];\n    }\n}\n")
+    overlap = ("fn f(xs: mut [u32]) -> u32 {\n    domain a : split(xs, 0, 5) {\n"
+               "        return xs[1];\n    }\n    domain b : split(xs, 4, 4) {\n"
+               "        return xs[5];\n    }\n}\n")
+    stored = ("fn f(xs: [u32]) -> u32 {\n    domain c : cursor(xs) {\n"
+              "        let p: [u32] = &xs;\n        return p[0];\n    }\n}\n")
+    assert any("越窗" in x for x in errs(over))
+    assert any("越窗" in x for x in errs(under))
+    assert any("重叠" in x for x in errs(overlap))
+    assert any("游标域" in x for x in errs(stored))
+
+    # 嵌套：内层窗口的下标不受外层窗口管
+    nested = ("fn f(xs: mut [u32]) -> u32 {\n    domain a : split(xs, 0, 4) {\n"
+              "        domain b : split(xs, 4, 4) {\n            return xs[5];\n"
+              "        }\n    }\n}\n")
+    assert errs(nested) == [], errs(nested)
+
+    orig = lomentc._borrow_domain_errs
+    lomentc._borrow_domain_errs = lambda f: []
+    try:
+        for body in (over, under, overlap, stored):
+            assert errs(body) == [], ("关掉这条规则之后仍然红 —— 那这一格测的不是它:\n"
+                                      + body + str(errs(body)))
+    finally:
+        lomentc._borrow_domain_errs = orig
+    print("      借用域期 2：window / split / cursor 三种形状逐格成立（关掉即放行）")
+
+
+@test
 def test_domain_blocks_per_instance_state():
     """`docs/313` §4：块 = 实例。循环每轮、递归每层各自一份状态（Rust 后端真跑）。"""
     import shutil

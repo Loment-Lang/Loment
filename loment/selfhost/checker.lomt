@@ -1623,6 +1623,19 @@ fn chk_is_dom_block(src: ptr, t: ptr, i: u32) -> u32 {
     if chk_tok_is(src, t, a + 1, "[") {
         return 1;
     }
+    // `docs/318`：区域形状（borrow / borrow_mut / window / split / cursor）。
+    if chk_tok_kind(t, a + 2) == 0 && chk_tok_is(src, t, a + 3, "(")
+            && (chk_tok_is(src, t, a + 2, "borrow") || chk_tok_is(src, t, a + 2, "borrow_mut")
+                || chk_tok_is(src, t, a + 2, "window") || chk_tok_is(src, t, a + 2, "split")
+                || chk_tok_is(src, t, a + 2, "cursor")) {
+        return 1;
+    }
+    if chk_tok_is(src, t, a + 1, "(")
+            && (chk_tok_is(src, t, a, "borrow") || chk_tok_is(src, t, a, "borrow_mut")
+                || chk_tok_is(src, t, a, "window") || chk_tok_is(src, t, a, "split")
+                || chk_tok_is(src, t, a, "cursor")) {
+        return 1;
+    }
     return 0;
 }
 
@@ -4453,6 +4466,166 @@ fn chk_match(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
     return eb;
 }
 
+// ---------------------------------------------------------------- 借用生命周期域（docs/318）
+//
+// 参考实现有 AST（`_borrow_domain_errs`），这里只有 token 流。规则照抄、形状重做：
+//
+//   R1 源必须是函数里可见的名字（`chk_env_has`）；
+//   R2 共享域不许写（下标赋值 / `storeN`）、独占域不许再借（`&` / `&mut`）；
+//   R3 域里借出去的值不能 `return` 带走、源仍被借用时不能 `free`；
+//   期 2：窗口的字面量下标越界、游标域里把元素借用存进局部。
+//
+// 嵌套域整块跳过 —— 各自的形状各管各的（与参考实现的 `reap_shallow` 同一条）。
+
+/// 十进制字面量 token 的值；不是纯数字就回 `4294967295`（当"取不到"）。
+fn chk_dec_val(src: ptr, t: ptr, i: u32) -> u32 {
+    if chk_tok_kind(t, i) != 1 {
+        return 4294967295;
+    }
+    let v: u32 = 0;
+    let k: u32 = 0;
+    while k < tok_len(t, i) {
+        let c: u32 = load8(src, tok_start(t, i) + k) as u32;
+        if c < 48 || c > 57 {
+            return 4294967295;
+        }
+        v = v * 10 + (c - 48);
+        k = k + 1;
+    }
+    return v;
+}
+
+/// 区域形状的模式号：0 = 不是区域形状，1 borrow，2 borrow_mut，3 window，4 split，5 cursor。
+fn chk_bdom_mode(src: ptr, t: ptr, sp: u32) -> u32 {
+    if chk_tok_is(src, t, sp, "borrow") { return 1; }
+    if chk_tok_is(src, t, sp, "borrow_mut") { return 2; }
+    if chk_tok_is(src, t, sp, "window") { return 3; }
+    if chk_tok_is(src, t, sp, "split") { return 4; }
+    if chk_tok_is(src, t, sp, "cursor") { return 5; }
+    return 0;
+}
+
+fn chk_bdom_one(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
+                d: u32, e: u32, out: ptr, oc: ptr) -> u32 {
+    let k: u32 = d + 1;
+    let sp: u32 = k;
+    if chk_tok_kind(t, k) == 0 && chk_tok_is(src, t, k + 1, ":") {
+        sp = k + 2;
+    }
+    let m: u32 = chk_bdom_mode(src, t, sp);
+    if m == 0 {
+        return d + 1;
+    }
+    let st: u32 = sp + 2;
+    let wlo: u32 = 0;
+    let wn: u32 = 0;
+    if m == 3 || m == 4 {
+        wlo = chk_dec_val(src, t, sp + 4);
+        wn = chk_dec_val(src, t, sp + 6);
+    }
+    // 从 `(` 起扫（`chk_find_at` 按括号深度找，跳过 `(` 会让深度从 0 掉到 -1）
+    let lb: u32 = chk_find_at(src, t, sp + 1, e, "{");
+    let rb: u32 = chk_match_brace(src, t, lb);
+    // R1：源必须是函数里看得见的名字
+    if chk_env_has(src, t, env, envc, st) == 0 {
+        chk_pub(src, t, oc, out, E_LIFETIME, st);
+    }
+    let j: u32 = lb + 1;
+    while j < rb && chk_tok_kind(t, j) != 4 {
+        if chk_tok_is(src, t, j, "domain") && chk_is_dom_block(src, t, j) == 1 {
+            // 嵌套域整块跳过
+            let nb: u32 = chk_find_at(src, t, j + 1, rb, "{");
+            j = chk_match_brace(src, t, nb) + 1;
+        } else {
+            // R2a：共享域不许写 —— `xs[...] = ...`
+            if m == 1 && same(src, t, j, st) && chk_tok_is(src, t, j + 1, "[") {
+                let cb: u32 = chk_match_bracket(src, t, j + 1);
+                if chk_tok_is(src, t, cb + 1, "=") {
+                    chk_pub(src, t, oc, out, E_LIFETIME, j);
+                }
+            }
+            // R2a：共享域不许写 —— `storeN(xs, …)`
+            if m == 1 && (chk_tok_is(src, t, j, "store8") || chk_tok_is(src, t, j, "store16")
+                          || chk_tok_is(src, t, j, "store32")
+                          || chk_tok_is(src, t, j, "store64")) {
+                if chk_tok_is(src, t, j + 1, "(") && same(src, t, j + 2, st) {
+                    chk_pub(src, t, oc, out, E_LIFETIME, j);
+                }
+            }
+            // R3：借用期间不能 free
+            if chk_tok_is(src, t, j, "free") && chk_tok_is(src, t, j + 1, "(")
+                    && same(src, t, j + 2, st) && chk_tok_is(src, t, j + 3, ")") {
+                chk_pub(src, t, oc, out, E_LIFETIME, j);
+            }
+            // R2b：独占域里不许再借（`&` / `&mut`）
+            if m == 2 && chk_tok_is(src, t, j, "&") {
+                let q: u32 = j + 1;
+                if chk_tok_is(src, t, q, "mut") {
+                    q = q + 1;
+                }
+                if same(src, t, q, st) {
+                    chk_pub(src, t, oc, out, E_LIFETIME, j);
+                }
+            }
+            // 期 2 window / split：字面量下标越界
+            if (m == 3 || m == 4) && same(src, t, j, st)
+                    && chk_tok_is(src, t, j + 1, "[") && chk_tok_is(src, t, j + 3, "]") {
+                let iv: u32 = chk_dec_val(src, t, j + 2);
+                if iv != 4294967295 && (iv < wlo || iv >= wlo + wn) {
+                    chk_pub(src, t, oc, out, E_LIFETIME, j);
+                }
+            }
+            // 期 2 cursor：`let NAME … = & [mut] xs`（把元素借用存进局部）
+            if m == 5 && chk_tok_is(src, t, j, "let") {
+                let asg: u32 = chk_find_assign(src, t, j + 1, rb);
+                if asg != 0 && chk_tok_is(src, t, asg + 1, "&") {
+                    let q2: u32 = asg + 2;
+                    if chk_tok_is(src, t, q2, "mut") {
+                        q2 = q2 + 1;
+                    }
+                    if same(src, t, q2, st) {
+                        chk_pub(src, t, oc, out, E_LIFETIME, j);
+                    }
+                }
+            }
+            // R3：`return … & [mut] xs` 不能带出域
+            if chk_tok_is(src, t, j, "return") {
+                let q3: u32 = j + 1;
+                let done: u32 = 0;
+                while q3 < rb && done == 0 && !chk_tok_is(src, t, q3, ";")
+                        && !chk_tok_is(src, t, q3, "}") {
+                    if chk_tok_is(src, t, q3, "&") {
+                        let q4: u32 = q3 + 1;
+                        if chk_tok_is(src, t, q4, "mut") {
+                            q4 = q4 + 1;
+                        }
+                        if same(src, t, q4, st) {
+                            chk_pub(src, t, oc, out, E_LIFETIME, q3);
+                            done = 1;
+                        }
+                    }
+                    q3 = q3 + 1;
+                }
+            }
+            j = j + 1;
+        }
+    }
+    return rb + 1;
+}
+
+/// 函数体（`b..e`）里所有借用生命周期域，逐个判。
+fn chk_bdom(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
+            b: u32, e: u32, out: ptr, oc: ptr) {
+    let i: u32 = b;
+    while i < e && chk_tok_kind(t, i) != 4 {
+        if chk_tok_is(src, t, i, "domain") && chk_is_dom_block(src, t, i) == 1 {
+            i = chk_bdom_one(src, t, syms, n, env, envc, i, e, out, oc);
+        } else {
+            i = i + 1;
+        }
+    }
+}
+
 // ---------------------------------------------------------------- 末尾掉出（issue #22）
 
 /// **非 `()` 的函数不许从末尾掉出去**（issue #22）。规则是**纯结构**的，与参考实现
@@ -5955,6 +6128,9 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                 // 那时环境里已经有全部 `let` 的类型（与 E012 那条同一个理由）。
                 chk_life(src, t, syms, n, env, load32(tyt, 3520),
                          chk_lh(fbra, fend), i, out, oc);
+                // 借用生命周期域（`docs/318`）：区域形状的三条规则 + 期 2 三种形状。
+                chk_bdom(src, t, syms, n, env, load32(tyt, 3520),
+                         fbra, fend, out, oc);
                 o = load32(oc, 0);
                 // 非 `()` 的函数不许从末尾掉出去（issue #22）—— 与参考实现同一条规则。
                 // 放在 chk_body/chk_moves 之后：那两趟可能已经写过诊断，`o` 得先回读。

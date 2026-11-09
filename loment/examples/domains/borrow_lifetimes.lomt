@@ -1,0 +1,58 @@
+// `docs/318`：借用生命周期域（期 1 的三种 + 期 2 的三种）—— 两个实现必须逐字节相同。
+//
+// 这些域只活在检查器里：块进 IR 与普通块同形，所以这份语料同时也是"新形状不改变
+// 产物"的那一格。
+choose write grammar tur2026.3
+module borrow_domains
+choose runtime
+
+fn read_only(xs: [u32]) -> u32 {
+    domain v : borrow(xs) {
+        return xs[0];
+    }
+}
+
+fn write_back(xs: mut [u32]) -> u32 {
+    domain e : borrow_mut(xs) {
+        xs[0] = 7;
+        return xs[0];
+    }
+}
+
+fn windowed(xs: mut [u32]) -> u32 {
+    domain w : window(xs, 2, 2) {
+        xs[2] = 5;
+        return xs[3];
+    }
+}
+
+fn halved(xs: mut [u32]) -> u32 {
+    domain a : split(xs, 0, 2) {
+        xs[0] = 1;
+    }
+    domain b : split(xs, 2, 2) {
+        return xs[2];
+    }
+}
+
+fn cursored(xs: [u32]) -> u32 {
+    domain c : cursor(xs) {
+        let i: u32 = 0;
+        let s: u32 = 0;
+        while i < 2 {
+            s = s + xs[i];
+            i = i + 1;
+        }
+        return s;
+    }
+}
+
+fn _start() {
+    let a: [u32; 4] = [1, 2, 3, 4];
+    let r: u32 = read_only(&a);
+    let w: u32 = write_back(&mut a);
+    let q: u32 = windowed(&mut a);
+    let h: u32 = halved(&mut a);
+    let c: u32 = cursored(&a);
+    syscall4(60, (r + w + q + h + c) as u64, 0, 0);
+}

@@ -12,8 +12,8 @@
 
 
 lomc_test 25
-lomentc_test 229
-lspe_test 46
+lomentc_test 230
+lspe_test 54
 potato_test 19
 loment_ct_test 2
 loment_comefor_test 12
@@ -23,7 +23,7 @@ loment_extblock_test 7
 loment_multilang_test 2
 loment_ctrans_test 21
 loment_pytrans_test 5
-loment_jtrans_test 9
+loment_jtrans_test 8
 loment_java_test 45
 loment_cstrans_test 6
 loment_cpptrans_test 6

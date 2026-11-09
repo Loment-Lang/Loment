@@ -158,16 +158,6 @@ def _run(exe: Path) -> int:
     return int(r.stdout.strip() or -1)
 
 
-def _run_io(exe: Path) -> tuple[int, bytes]:
-    """跑一次，返回 (退出码, stdout **原始字节**) —— 输出那条判据要的就是字节。"""
-    r = subprocess.run(
-        [*_WSLCMD, "bash", "-lc",
-         f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}; echo -n \";$?\""],
-        capture_output=True, timeout=300, shell=False)
-    payload, _, rc = r.stdout.rpartition(b";")
-    return int(rc.strip() or -1), payload
-
-
 def _harness(cls: str) -> str:
     """**对照组那一边的入口**。Java 要一个 `main` 才能起，而要拿"数"出来得走
     `System.exit` —— 那是属性访问，本子集不收。所以夹具补一个 `Harness`。
@@ -179,20 +169,6 @@ def _harness(cls: str) -> str:
             "    public static void main(String[] a) {\n"
             f"        System.exit({cls}.entry() % 256);\n"
             "    }\n}\n")
-
-
-def _javac_io(td: Path, src: Path, cls: str = "Sample") -> tuple[int, bytes]:
-    """Java 侧：javac 编「语料 + 夹具」，java 跑，读 **(退出码, stdout 字节)**。"""
-    (td / "Harness.java").write_text(_harness(cls), encoding="utf-8", newline="\n")
-    (td / src.name).write_text(src.read_text(encoding="utf-8"),
-                               encoding="utf-8", newline="\n")
-    r = subprocess.run([_javac(), "-d", str(td), str(td / src.name),
-                        str(td / "Harness.java")],
-                       capture_output=True, text=True, shell=False, timeout=300)
-    assert r.returncode == 0, f"javac 失败: {r.stderr[-400:]}"
-    r = subprocess.run([_java(), "-cp", str(td), "Harness"],
-                       capture_output=True, shell=False, timeout=300)
-    return r.returncode, r.stdout
 
 
 def _javac_run(td: Path, src: Path, cls: str = "Sample") -> int:
@@ -301,42 +277,6 @@ def test_bits_translation_runs_same_as_javac():
         f"**翻译出来的 Loment 与 javac 编的 Java 结果不同**: {l_rc} != {j_rc}。\n"
         f"  （两个都对不上 {want} 的话是语料问题；只有一边对不上就是翻译翻错了）")
     print(f"      javac -> {j_rc}，翻译成 Loment -> {l_rc}，独立期望 -> {want}（三数相等）")
-
-
-@test
-def test_printing_matches_javac_stdout():
-    """**写出去的字节**也要与 `javac`/`java` 逐字节相同（不是只比退出码）。
-
-    上面两条比的是**数**。只比数的话，"数算对了、写出去的字不对"这一类看不见 ——
-    而 Java 写法的第一件事就是往屏幕上写。`Print.java` 把几条形状并排放：
-    `println` 的换行、`println(int)` 走 `print_num`、`String` 拼接、`print` 后面
-    不自动换行、转义 `\\t`。
-
-    两边各有一个入口（Java 是 `Harness.main`，Loment 是 `_L_ENTRY`），比的是
-    **(退出码, stdout 原始字节)** 这一对。
-    """
-    if not _javac() or not _java() or not _wsl():
-        print("      SKIP: 需要 javac + java + WSL")
-        return
-    src = EX / "Print.java"
-    with tempfile.TemporaryDirectory() as t:
-        td = Path(t)
-        doc, rep = potato_from.from_java(src.read_text(encoding="utf-8"), "Print.java",
-                                         "strict")
-        assert not potato.validate(doc), potato.validate(doc)[:3]
-        lost = [s for s in rep.skipped if s["kind"] == "fn"]
-        assert not lost, f"转写那一步丢了函数: {lost}"
-        j_rc, j_out = _javac_io(td, src, "Print")
-        l_rc, l_out = _run_io(_build_loment(td, doc))
-    # `println` 的换行是**平台的**（Windows 上是 `\r\n`，Linux 上是 `\n`），而
-    # 译文写的是 `\n`。比的是"程序让写什么"，不是"宿主怎么换行" —— 所以在 Windows
-    # 上把 javac 那侧规范化一次（Linux 上这行是空操作，CI 就是 Linux）。
-    j_out = j_out.replace(b"\r\n", b"\n")
-    assert (l_rc, l_out) == (j_rc, j_out), (
-        f"**stdout 或退出码与 javac 不同**\n"
-        f"  javac  -> rc={j_rc}, {j_out!r}\n"
-        f"  译文   -> rc={l_rc}, {l_out!r}")
-    print(f"      javac 与译文都是 stdout={j_out!r} rc={j_rc}（逐字节相同）")
 
 
 @test

@@ -188,14 +188,6 @@ class Dialect:
     #: **必须保持行号与偏移**（换成等长空白，别抽出来拼一拼）—— 报错里的行号
     #: 就是源里的行号，漂了就指不到点子。
     pre: object = None
-    #: **收不收字符串字面量**。Loment 有 `str`（`print` / `str_len` / `str_eq` /
-    #: `str_concat` 都在），所以字符串本身表示得了；要拒的从来是"这一门把字符串
-    #: 当什么"—— C 的 `char *` 是另一个东西（指针算术、没有长度）。按门开关。
-    str_lits: bool = False
-    #: **认不认 `System.out.print/println`**（Java）。它是这一族里唯一"写出去"的
-    #: 构造，而本语言的对应物是内建 `print` / `print_num` —— 不是函数调用，
-    #: 所以要在**语句**那一层翻，不能当普通调用发出去。
-    system_out: bool = False
 
     def safe(self, name: str) -> str:
         """撞上 Loment 保留字就加后缀。
@@ -309,7 +301,7 @@ _TOKEN = re.compile(r"""
     | (?P<str>"(?:\\.|[^"\\])*")
     | (?P<id>[A-Za-z_][A-Za-z0-9_]*)
     | (?P<num>0[xX][0-9a-fA-F_]+[lL]?|0[bB][01_]+[lL]?|0[oO][0-7_]+[lL]?|[0-9][0-9_]*[lL]?)
-    | (?P<op>>>=|>>>|<<=|>>=|\+=|-=|\*=|/=|%=|&=|\|=|\^=|\.\.\.|<<|>>|<=|>=|==|!=|&&|\|\||\+\+|--|[-+*/%&|^~!<>=();,{}\[\]?:#.])
+    | (?P<op>>>=|>>>|<<=|>>=|\+=|-=|\*=|/=|%=|&=|\|=|\^=|\.\.\.|<<|>>|<=|>=|==|!=|&&|\|\||\+\+|--|[-+*/%&|^~!<>=();,{}\[\]?:#])
 """, re.X | re.S)
 
 #: 本子集不收的运算符：**必须**在分词那一步**整个**认出来再点名拒掉。
@@ -377,21 +369,6 @@ class Lit:
 
     def __init__(self, v: int, line: int, b: bool = False) -> None:
         self.v, self.line, self.b = v, line, b
-
-
-class Str:
-    """字符串字面量。`raw` 是**源里的原文**（含两个引号，转义还没动）。
-
-    **为什么留原文而不是先解码**：两个语言的转义集不一样（Loment 只认
-    `\\n \\t \\r \\0 \\\\ \\"`，Java 还多 `\\' \\b \\f \\uXXXX`），解码再编码会在
-    "这边解不了、那边其实认"的字符上造假。留原文，发射时逐段翻译 —— 认不出的那条
-    转义**点名拒**，而不是悄悄吞掉。
-    """
-
-    __slots__ = ("raw", "line")
-
-    def __init__(self, raw: str, line: int) -> None:
-        self.raw, self.line = raw, line
 
 
 class Var:
@@ -619,12 +596,9 @@ class Parser:
             self.i += 1
             return Lit(_char_value(t[1], t[2]), t[2])
         if t[0] == "str":
-            if not self.d.str_lits:
-                raise Unsupported(
-                    f"第 {t[2]} 行: 不支持字符串字面量（这一族把字符串值当引用类型，"
-                    f"而 Stage A 的子集没有字符串值；`String` 本身也不在类型表里）。")
-            self.i += 1
-            return Str(t[1], t[2])
+            raise Unsupported(
+                f"第 {t[2]} 行: 不支持字符串字面量（这一族把字符串值当引用类型，"
+                f"而 Stage A 的子集没有字符串值；`String` 本身也不在类型表里）。")
         if t[0] == "num":
             self.i += 1
             return Lit(_parse_int_lit(t[1], t[2], self.d), t[2])
@@ -639,8 +613,6 @@ class Parser:
             if t[1] in self.d.kw:
                 raise Unsupported(f"第 {t[2]} 行: 表达式里不支持关键字 `{t[1]}`")
             self.i += 1
-            if self.at(".") and self.d.system_out and t[1] == "System":
-                return self.system_out(t[2])
             if self.at("."):
                 # 属性/字段访问（Java 的 `System.exit`、`this.w`、C++ 的 `ns::f`）。
                 # **点名**它 —— 不点的话会掉进"`System` 后面期望 `=` 或 `(`"，指不到点子。
@@ -658,35 +630,6 @@ class Parser:
                 return Call(t[1], args, t[2])
             return Var(t[1], t[2])
         raise CError(f"第 {t[2]} 行: 期望表达式，得到 {t[1] or '<结束>'!r}")
-
-    def system_out(self, line: int) -> object:
-        """`System . out . print|println ( … )` —— 调用方**已经吃掉了 `System`**。
-
-        这是这一族里唯一"写出去"的构造。本语言的对应物是**内建** `print` /
-        `print_num`（不是函数），所以它不能当普通调用发出去 —— 这里认成一个带
-        特殊名字的 `Call`，由 `Emitter.emit_print` 在**语句**那一层翻。
-        """
-        if self.at("out", 1) and self.at(".", 2) \
-                and (self.at("println", 3) or self.at("print", 3)):
-            nm = "System.out." + self.peek(3)[1]
-            self.i += 4                          # `. out . println`
-            self.want("(")
-            args = []
-            if not self.at(")"):
-                args.append(self.expr())
-                while self.at(","):
-                    self.i += 1
-                    args.append(self.expr())
-            self.want(")")
-            if len(args) > 1:
-                raise Unsupported(
-                    f"第 {line} 行: `{nm}` 只收一个实参"
-                    f"（本语言的内建 `print` / `print_num` 都是单个；"
-                    f"要用拼接请写 `+`）")
-            return Call(nm, args, line)
-        raise Unsupported(
-            f"第 {line} 行: 不支持 `System.{self.peek(1)[1]}…`"
-            f"（这一门只认 `System.out.print` / `System.out.println`）")
 
     # ---- 语句
     def stmt(self) -> object:
@@ -768,11 +711,6 @@ class Parser:
         if t[1] in self.d.kw:
             raise Unsupported(f"第 {t[2]} 行: 这里不支持 `{t[1]}`")
         name, line = self.ident()
-        if self.at(".") and self.d.system_out and name == "System":
-            stmt = ExprStmt(self.system_out(line), line)
-            if semi:
-                self.want(";")
-            return stmt
         if self.at("="):
             self.i += 1
             e = self.expr()
@@ -946,46 +884,6 @@ def _char_value(text: str, line: int) -> int:
         return ord(body)
     raise Unsupported(
         f"第 {line} 行: 读不了这个字符字面量 `{text}`（只收单字符与常见转义）。")
-
-
-#: 源语言的转义 -> 本语言认的那六个（`\n \t \r \0 \\ \"`）。
-_STR_ESC = {"n": "\\n", "t": "\\t", "r": "\\r", "0": "\\0",
-            "\\": "\\\\", '"': '\\"'}
-
-
-def _str_lit(raw: str, line: int) -> str:
-    """字符串字面量（含引号的原文）-> 本语言的写法。
-
-    **认不出的转义点名拒**，不吞：`\\uXXXX` / `\\b` / `\\f` 在本语言里没有写法，
-    悄悄原样发过去的话，词法器会把它当"未知转义"报在**生成出来的那一份源码**上 ——
-    行号对着另一份文件，等于没报。
-    """
-    body = raw[1:-1]
-    out = []
-    i = 0
-    while i < len(body):
-        c = body[i]
-        if c == "\n" or c == "\r":
-            raise Unsupported(f"第 {line} 行: 字符串字面量里有真的换行")
-        if c != "\\":
-            out.append(c)
-            i += 1
-            continue
-        i += 1
-        if i >= len(body):
-            raise CError(f"第 {line} 行: 字符串以反转义符结尾")
-        e = body[i]
-        if e in _STR_ESC:
-            out.append(_STR_ESC[e])
-        elif e == "'":
-            out.append("'")          # `\'` 与 `'` 同义；本语言的单引号不用转义
-        else:
-            raise Unsupported(
-                f"第 {line} 行: 不认识字符串转义 `\\{e}`"
-                f"（本语言只认 `\\n \\t \\r \\0 \\\\ \\\"`；`\\uXXXX`、`\\b`、`\\f` "
-                f"没有对应写法）")
-        i += 1
-    return '"' + "".join(out) + '"'
 
 
 def _lit32(e: object) -> None:
@@ -1199,17 +1097,10 @@ class Emitter:
         if isinstance(e, Lit):
             # `true` / `false` 是**布尔字面量**，不是 `1` / `0`（见 `Lit`）
             return "bool" if e.b else "int"
-        if isinstance(e, Str):
-            return "str"
         if isinstance(e, Var):
             # **看它声明时是什么**（见 `self.varty`），不是一律当整数
-            t = self.varty.get(e.name)
-            if t in ("bool", "str"):
-                return t
-            return "int"
+            return "bool" if self.varty.get(e.name) == "bool" else "int"
         if isinstance(e, Call):
-            if e.name.startswith("System.out."):
-                return "void"           # 写出去的那两个不返回值
             r = self.fns.get(e.name)
             if r is None:
                 raise Unsupported(
@@ -1219,9 +1110,6 @@ class Emitter:
         if isinstance(e, Un):
             return "bool" if e.op == "!" else "int"
         if isinstance(e, Bin):
-            # `+` 在 Java 里对字符串是**拼接**（`String` 不是数值类型）
-            if e.op == "+" and (self.ty_of(e.l) == "str" or self.ty_of(e.r) == "str"):
-                return "str"
             return "bool" if self.d.bin[e.op][2] else "int"
         raise AssertionError(type(e))
 
@@ -1281,11 +1169,7 @@ class Emitter:
         `let ok: bool = (x > 0) as i32;`：左边声明是 `bool`、右边是 `i32`，
         本语言的类型错。这一族里只有 `bool` 与整数两档要分（见 `self.varty`）。
         """
-        if ty == "bool":
-            return "bool"
-        if ty == "str":
-            return "str"
-        return "int"
+        return "bool" if ty == "bool" else "int"
 
     def sink(self, e: object, ty: str) -> str:
         """表达式放进一个**声明类型为 `ty` 的位置**（赋值 / 返回 / 实参 / `for` 初值）。
@@ -1347,14 +1231,6 @@ class Emitter:
             # 而这是子集内的普通 C（比较套比较），换个不成功的写法（`+ 1`）就没事 ——
             # 所以 `loment/ctrans/coerce.c` 那份专挑这条缝的语料一直没照到它。
             return f"(({raw}) as {self.d.int_default})"
-        if got == "str" or want == "str":
-            # **字符串不参与数值转换**。这里点名拒，别落进最后那句 `AssertionError`
-            # —— 那会是一段 Python 栈，而不是"第几行、要什么、给了什么"。
-            raise Unsupported(
-                f"第 {e.line} 行: 这里是**{'字符串' if want == 'str' else '数值/条件'}**"
-                f"场合，给的却是**{'字符串' if got == 'str' else '数值/条件'}**"
-                f"（本语言没有字符串与数值之间的隐式转换；"
-                f"要输出数字用 `print_num`，要拼字符串用 `+`）")
         raise AssertionError((got, want))
 
     def pinned(self, e: object, ty: str | None = None) -> str:
@@ -1408,8 +1284,6 @@ class Emitter:
 
     def raw(self, e: object) -> str:
         """表达式在**它自己的类型**下的写法。括号一律加上 —— 别让读者去猜优先级。"""
-        if isinstance(e, Str):
-            return _str_lit(e.raw, e.line)
         if isinstance(e, Lit):
             if e.b:
                 return "true" if e.v else "false"
@@ -1450,16 +1324,6 @@ class Emitter:
                 # Loment 的 `!` 只收 bool，而 C 的 `!x` 收 int —— 直接写成 `x == 0`
                 return f"({self.ex(e.e, 'int')} == 0)"
             return f"({e.op}{self.ex(e.e, 'int')})"
-        if isinstance(e, Bin) and e.op == "+" \
-                and (self.ty_of(e.l) == "str" or self.ty_of(e.r) == "str"):
-            # 字符串拼接。**两边都必须是字符串**：`"a" + 1` 在 Java 里是把整数转成
-            # 字符串再拼，而本语言没有整数转字符串的写法（`print_num` 只往 stdout 写，
-            # 不产出 `str`）—— 这一处点名拒，别发出一份编不过的 `str_concat("a", 1)`。
-            if self.ty_of(e.l) != "str" or self.ty_of(e.r) != "str":
-                raise Unsupported(
-                    f"第 {e.line} 行: 字符串只能和字符串拼（Java 会把数字自动转成字符串，"
-                    f"本语言没有这个转换）—— 拆成两次输出，或先拼好再打印")
-            return f"str_concat({self.ex(e.l, 'str')}, {self.ex(e.r, 'str')})"
         if isinstance(e, Bin):
             op, want, _b = self.d.bin[e.op]
             if self.d.reject_const_zero_div and e.op in ("/", "%"):
@@ -1528,8 +1392,7 @@ class Emitter:
             self.varty[s.name] = s.ty
             if init is None:
                 # 见文件头 §语义选择 1：C 的未初始化在这里变成确定的零值
-                empty = '""' if s.ty == "str" else "0"
-                self.out(f"let {nm}: {s.ty} = {empty};", depth)
+                self.out(f"let {nm}: {s.ty} = 0;", depth)
             else:
                 self.out(f"let {nm}: {s.ty} = {init};", depth)
             return
@@ -1583,40 +1446,9 @@ class Emitter:
         if isinstance(s, ExprStmt):
             if not isinstance(s.e, Call):
                 raise Unsupported(f"第 {s.line} 行: 表达式语句只收函数调用")
-            if s.e.name.startswith("System.out."):
-                self.emit_print(s.e, depth)
-                return
             self.out(f"{self.raw(s.e)};", depth)
             return
         raise AssertionError(type(s))
-
-    def emit_print(self, call: Call, depth: int) -> None:
-        """`System.out.print/println` -> 本语言的内建 `print` / `print_num`。
-
-        **按实参的类型选内建**，不是按名字：`print` 收 `str`、`print_num` 收整数，
-        本语言把这两件事分成两个内建（`print` 不做任何格式化）。`println` 是
-        "写完再来一个换行"，所以它发两行 —— 本语言的 `print` **不自动换行**
-        （playground 的示例里 `print("…\\n")` 那个 `\\n` 是手写的）。
-        """
-        nl = call.name.endswith("println")
-        if not call.args:
-            if not nl:
-                raise Unsupported(f"第 {call.line} 行: `System.out.print()` 没有实参可写")
-            self.out('print("\\n");', depth)
-            return
-        a = call.args[0]
-        kind = self.ty_of(a)
-        if kind == "str":
-            self.out(f"print({self.ex(a, 'str')});", depth)
-        elif kind == "int":
-            self.out(f"print_num({self.ex(a, 'int')});", depth)
-        else:
-            raise Unsupported(
-                f"第 {call.line} 行: 不能直接输出"
-                f"{'布尔值' if kind == 'bool' else '这个表达式'}"
-                f"（`print` 收字符串、`print_num` 收整数；布尔没有对应的内建）")
-        if nl:
-            self.out('print("\\n");', depth)
 
     def for_(self, s: For, depth: int) -> None:
         """`for (init; cond; step) body` -> `init; while cond { body; step; }`。

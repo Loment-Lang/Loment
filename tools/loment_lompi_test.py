@@ -1551,11 +1551,11 @@ def test_install_scripts_stay_pure_ascii():
 #: **2026-11-08 起多八个领域包**（`math`/`science`/`engineering`/`world`/`dev`/
 #: `lowlevel`/`system`/`baremetal`，`docs/317`），41 个 `.lomt` + 8 个 `pkg.lomp`，
 #: 整棵树 168 -> **217**。`std` 仍然是 141（领域库不进 std）。
-#: **2026-11-08 再补 `dev`**（`docs/318`）：10 个开发者工具模块，`dev` 5 -> 15，
+#: **2026-11-08 再补 `dev`**（`docs/320`）：10 个开发者工具模块，`dev` 5 -> 15，
 #: 整棵树 217 -> 227。
-#: **2026-11-08 补 `world`**（`docs/319`）：19 个现实世界模块，`world` 3 -> 22，
+#: **2026-11-08 补 `world`**（`docs/321`）：19 个现实世界模块，`world` 3 -> 22，
 #: 整棵树 227 -> 246。
-#: **2026-11-09 补 `lowlevel` / `system`**（`docs/320`）：各 8 个模块，
+#: **2026-11-09 补 `lowlevel` / `system`**（`docs/322`）：各 8 个模块，
 #: 两个包 4 -> 12，整棵树 246 -> **262**。
 STORE_DIR = ROOT / "lompi" / "store"
 STORE_MODULES = {"std": 141, "host": 8, "internet": 8, "os": 7,

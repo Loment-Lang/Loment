@@ -2649,7 +2649,7 @@ class Module:
     #: 于是函数体跨度（`f.tok_at/tok_end`）得能重新对着 token 流核。**只在需要时读**。
     toks: list = field(default_factory=list)
     #: 运行期需求来自包清单（`pkg.lomp` 的 `runtime()`）时，包名写在这里；
-    #: 空串 = 需求来自本模块自己的 `choose runtime`（`docs/321`）。
+    #: 空串 = 需求来自本模块自己的 `choose runtime`（`docs/323`）。
     rt_from_pkg: str = ""
     #: **会把运行期拖进产物的构造**（`docs/217`）：`[(点名, 行), …]`，按出现序。
     #: 由**解析器**在 `parse()` 末尾填（与 `Func.deref` 同一个位置、同一个理由：规则定义
@@ -6397,7 +6397,7 @@ def load_unit(path: Path, root: Path, lspe_level: int = 3,
 #: 两边的代价不对称，所以往保守那边偏。`tools/loment_runtime_test.py` 在全仓语料上核
 #: "被拒 ⟺ 产物真带运行期"，把这笔保守账钉成可证伪的。
 _RUNTIME_SITES: dict[str, str] = {
-    # `/` 与 `%` **不在表里**（docs/321）：整数除法发的是裸 `udiv`/`sdiv`，
+    # `/` 与 `%` **不在表里**（docs/323）：整数除法发的是裸 `udiv`/`sdiv`，
     # 产物里一个 `@__loment_*` 都不多 —— 它不拖运行期，只是早先被保守地算了进来。
     "alloc": "`alloc`",
     "free": "`free`",
@@ -6477,7 +6477,7 @@ def _pkg_manifest(src: Path | None) -> tuple[str, str | None]:
     """同目录 `pkg.lomp` 里的 `(包名, runtime)` —— 没有清单返回 `("", None)`。
 
     清单是**一份 Loment 源码**（`docs/168` §3.2），所以用词法器读，不引第二种格式。
-    `runtime()` 是**包级**声明（`docs/321`）：它说"这个包的代码要运行期"，取代每个
+    `runtime()` 是**包级**声明（`docs/323`）：它说"这个包的代码要运行期"，取代每个
     模块各自写一行 `choose runtime`。模块自己写的那一行**优先**（显式胜过清单）。
     """
     if src is None:
@@ -7101,7 +7101,7 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
             # 当依赖又不许写（`loment/lib/proc.lomt` 实测就卡在这儿）。新规矩：依赖的声明
             # **是需求**，根单元的取值**必须满足它**（一致）；不一致才报，报的时候两边都点名。
             #
-            # **读 `chooses` 而不是 `choose_lines`**（`docs/321`）：包清单（`pkg.lomp`
+            # **读 `chooses` 而不是 `choose_lines`**（`docs/323`）：包清单（`pkg.lomp`
             # 的 `runtime()`）注入的需求没有源码行 —— 它照样是需求，漏读它会让
             # `no_runtime` 的根静默用上要运行期的包。
             _seen: set[str] = set()
@@ -7109,7 +7109,7 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                 if dim0 in _seen:
                     continue        # 同一维写两次是**依赖自己**的错，不在这儿重复报
                 _seen.add(dim0)
-                # 同一个包只报一次（`docs/321`）：一张 `use` 图里 calendar 会带进 mem，
+                # 同一个包只报一次（`docs/323`）：一张 `use` 图里 calendar 会带进 mem，
                 # 而两条说的是同一件事 —— 包级需求报包级一次就够。
                 if d.rt_from_pkg and dim0 == "runtime":
                     if d.rt_from_pkg in _pkg_reported:
@@ -13688,7 +13688,7 @@ def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3,
         # 2026.3 继承（版次累积）。
         _desugar_foreach(mod)
     mod.own_switches = own      # 本模块**自己**写的 —— 只有"库不许 choose"用它
-    # **包清单的 runtime 声明**（`docs/321`）：模块自己没写这一维时，取同包 `pkg.lomp`
+    # **包清单的 runtime 声明**（`docs/323`）：模块自己没写这一维时，取同包 `pkg.lomp`
     # 的 `runtime()`。它同时是**根单元的默认档**（店里的模块当根编时照旧编得过）与
     # **依赖的需求**（根是 `no_runtime` 就报 —— 由 `check()` 那条既有规则发）。
     # 显式写的 `choose` 优先：`choose_lines` / `own_switches` 都不动它，所以

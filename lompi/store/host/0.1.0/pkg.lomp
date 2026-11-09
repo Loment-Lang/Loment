@@ -10,7 +10,7 @@ pub fn version() -> str {
     return "0.1.0";
 }
 
-/// 这个包对**运行期**的需求（`docs/321`）。编译器读它来判断"`no_runtime` 的根能不能
+/// 这个包对**运行期**的需求（`docs/323`）。编译器读它来判断"`no_runtime` 的根能不能
 /// 用这个包"；模块自己写的 `choose runtime` 优先。取值只有 `runtime` / `no_runtime`。
 pub fn runtime() -> str {
     return "runtime";

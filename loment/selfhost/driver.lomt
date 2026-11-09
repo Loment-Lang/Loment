@@ -78,7 +78,7 @@ const PROF_OFF: u32 = 24164;     // 版次 (docs/296/306): 0 = 2026.1, 1 = 2026.
 const PROF_DEFAULT: u32 = 2;     // 缺省 = 最新版次 (potato_from.DEFAULT_EDITION)
 const DECLK_OFF: u32 = 24168;    // 根单元的拼法 (0 = 没写; 见 strip_grammar_decl)
 const FPROF_OFF: u32 = 24172;    // 这份文件自己声明的版次 (0xFFFFFFFF = 没写)
-//: 根单元/`addin` 写没写运行期那一维（docs/321）。位：1 = 写了 `runtime`，
+//: 根单元/`addin` 写没写运行期那一维（docs/323）。位：1 = 写了 `runtime`，
 //: 2 = 写了 `no_runtime`，4 = 同包 `pkg.lomp` 的 `runtime()` 说 `runtime`。
 //: 两个都没写（低两位为 0）而包清单要运行期时，装载器在合并单元末尾补一行
 //: `choose runtime` —— 与参考实现的 `mod.chooses` 注入同义。
@@ -2155,7 +2155,7 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
         die(1);
     }
     while load32(toks, i * 20) != 4 {
-        // 记下根/`addin` 单元写没写运行期那一维（docs/321）。依赖写的会被下面抹掉，
+        // 记下根/`addin` 单元写没写运行期那一维（docs/323）。依赖写的会被下面抹掉，
         // 而抹掉之后检查器就看不见它了 —— 但它**是**一个需求，所以要在这里记一笔。
         if (depth == 0 || from_addin == 1) && tok_is(slot, toks, i, "choose") {
             if tok_is(slot, toks, i + 1, "runtime") {
@@ -2468,7 +2468,7 @@ fn _start() -> u32 {
     // 入口文件所在目录), 再是工具链旁边那份; 都没配就用默认 `.lomt`。这时 unit/toks
     // 还空着, 借它们当读配置的暂存 —— load_file 紧接着就会盖掉它们。
     store8(scr, EXT_OFF, 0 as u8);
-    // 根单元所在包的 `pkg.lomp` 要运行期吗（docs/321）？这一步借 unit/toks 当暂存 ——
+    // 根单元所在包的 `pkg.lomp` 要运行期吗（docs/323）？这一步借 unit/toks 当暂存 ——
     // `load_file` 紧接着就会盖掉它们，与上面读 `loment.conf` 同一个时点。
     store32(scr, RTDECL_OFF, 0);
     let _rq: u32 = cfg_pkg_runtime(ptr_add(scr, PROJ_OFF),
@@ -2502,7 +2502,7 @@ fn _start() -> u32 {
         wdiag_file(dfd, scr, ap, an, 31, str_ptr(dm2), str_len(dm2));
         return fail(dm2);
     }
-    // **包清单的运行期需求**（docs/321）：根与 `addin` 单元都没写这一维、而根所在包
+    // **包清单的运行期需求**（docs/323）：根与 `addin` 单元都没写这一维、而根所在包
     // 的 `pkg.lomp` 说要运行期时，在合并单元末尾补一行 —— 与参考实现把清单值注入
     // `mod.chooses` 同义。**显式写的优先**（低两位非 0 就不补）。
     let _fl: u32 = load32(scr, RTDECL_OFF);

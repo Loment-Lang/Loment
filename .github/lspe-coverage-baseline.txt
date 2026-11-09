@@ -1,0 +1,32 @@
+# 每种义务的覆盖率地板（`docs/262` §5.15 / #767）。
+#
+# 一行：<路径> <义务> <proved> <total>。**比值不许变小** —— 降了就红。
+# 重算：`python tools/lspe_ratchet.py --emit`
+loment/examples/ahci.lomt SummaryContract 6 6
+loment/examples/all_loment.lomt InBounds 6 6
+loment/examples/allocator.lomt SummaryContract 9 9
+loment/examples/bootprobe.lomt InBounds 1 1
+loment/examples/bytes.lomt SummaryContract 4 4
+loment/examples/demo.lomt InBounds 2 2
+loment/examples/fuc_node.lomt SummaryContract 5 5
+loment/examples/gc_ladder/main.lomt InBounds 2 2
+loment/examples/lumtui_demo.lomt SummaryContract 10 84
+loment/examples/native_agg.lomt InBounds 3 3
+loment/examples/native_brk.lomt SummaryContract 1 2
+loment/examples/native_cap.lomt GuardHolds 2 2
+loment/examples/native_match_full.lomt InBounds 6 6
+loment/examples/native_mem.lomt InBounds 5 5
+loment/examples/native_mut.lomt Exclusive 2 2
+loment/examples/native_mut.lomt InBounds 3 4
+loment/examples/native_slice.lomt InBounds 1 2
+loment/examples/tour.lomt GuardHolds 1 1
+loment/examples/tour.lomt InBounds 6 7
+loment/lib/lumtui.lomt SummaryContract 22 22
+loment/lib/mem.lomt SummaryContract 5 5
+loment/tools/lomcli.lomt SummaryContract 246 723
+loment/tools/lomsyscalls.lomt InBounds 6 6
+loment/tools/lomsyscalls.lomt SummaryContract 28 28
+lompi/store/host/0.1.0/fs.lomt SummaryContract 3 9
+lompi/store/std/0.1.0/hash.lomt SummaryContract 30 30
+lompi/store/std/0.1.0/text.lomt InBounds 17 17
+lompi/store/std/0.1.0/text.lomt SummaryContract 30 30

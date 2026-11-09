@@ -1669,6 +1669,17 @@ fn safe_mark_fn(src: ptr, toks: ptr, nm: u32, tbl: ptr) -> u32 {
     }
     let at: u32 = b + 1;
     let end: u32 = skip_block(src, toks, b) - 1;
+    // 带 `lspe pass` 的函数是 `Unchecked` 摘要：**不进安全表**（`#1098` / `#786` 第 3 条）。
+    // 这一步必须在不动点**里面**：先算安全集再摘名，调用它的包装函数会留下来 ——
+    // 旁路于是顺着调用链传下去，而参考实现是在不动点里就把它挡住的。
+    let pb: u32 = at;
+    while pb < end {
+        if tok_kind(toks, pb) == 0 && tok_is(src, toks, pb, "lspe")
+                && tok_is(src, toks, pb + 1, "pass") {
+            return 0;
+        }
+        pb = pb + 1;
+    }
     // **逐形参**：位置 pi 从 0 数（`self` 也占一位，与方法调用点的实参位一致）。
     let mask: u32 = 0;
     let pi: u32 = 0;
@@ -1758,10 +1769,10 @@ fn safe_mark_fn(src: ptr, toks: ptr, nm: u32, tbl: ptr) -> u32 {
 pub fn compute_safe(src: ptr, toks: ptr, tbl: ptr) -> u32 {
     store32(tbl, 0, 0);
     let ch: u32 = 1;
-    let rounds: u32 = 0;
-    while ch == 1 && rounds < 256 {
+    // 不设轮数上限（`#1093`）：集合只增不减、名字有限，一定收敛。256 轮在一张
+    // 300 函数的 deref-only 链上会提前停下，把后半截记成"未决定"——假的洞。
+    while ch == 1 {
         ch = 0;
-        rounds = rounds + 1;
         let i: u32 = 0;
         while tok_kind(toks, i) != 4 {
             if tok_is(src, toks, i, "fn") && !(i > 0 && tok_is(src, toks, i - 1, "extern"))

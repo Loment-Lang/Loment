@@ -20,6 +20,23 @@ import lspe  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 TESTS: list[tuple[str, object]] = []
 
+# E8 的反证探针标记（`#766`）。**由 `tools/lspe_probes.py` 机械扫出来** ——
+# 每个义务至少一条；加义务不补探针，`test_e8_probe_registry` 会红。
+# lspe-probe: InBounds
+# lspe-probe: Alive
+# lspe-probe: FreeOwnership
+# lspe-probe: SummaryContract
+# lspe-probe: GuardHolds
+# lspe-probe: Initialized
+# lspe-probe: Exclusive
+# lspe-probe: TypeWellFormed
+# lspe-probe: DropHonest
+
+import json  # noqa: E402
+import subprocess  # noqa: E402
+import tempfile  # noqa: E402
+from unittest import mock  # noqa: E402
+
 
 def test(fn):
     TESTS.append((fn.__name__, fn))
@@ -333,6 +350,515 @@ def test_selfhost_half_lives_under_loment_lspe():
     potato = (ROOT / "loment" / "selfhost" / "potato.lomt").read_text(encoding="utf-8")
     assert "use lspe" in potato
     assert "pub fn lspe_engine" not in potato, "普查引擎不该还留在发射器里"
+
+
+def _unit(src: str, **kw):
+    """装载一份小夹具的 LSPE 台账（不经过代码生成）。"""
+    toks = lomc.lex(src)
+    inst = kw.pop("instances", ())
+    sites, _unsourced, passes = lspe.census(toks, "m", instances=inst)
+    doc = lspe.build_ledger(
+        sites=sites, state=kw.pop("state", "lspe_open_admin"),
+        set_by=kw.pop("set_by", "default"), level=kw.pop("level", 3),
+        toks=toks, unit="m", passes=passes, instances=inst, **kw)
+    return doc, sites
+
+
+@test
+def test_question_registry_templates_are_fixed_and_safe():
+    """每一问都有固定字段；文本里不出现威胁词（`docs/262` §6 硬规则 4 / `#753`）。"""
+    assert set(lspe.LSPE_QUESTION_TEMPLATES) == set(lspe.LSPE_QUESTIONS)
+    for code, tpl in lspe.LSPE_QUESTION_TEMPLATES.items():
+        assert tpl["claim"] and tpl["chain"], code
+        assert set(tpl["tried"]) == set(lspe.LSPE_INTERROGATIONS), code
+        assert tpl["options"] and tpl["default"] in tpl["options"], code
+        assert isinstance(tpl["reversible"], bool), code
+        text = json.dumps(tpl, ensure_ascii=False).lower()
+        assert "unsafe" not in text and "undefined behavior" not in text, code
+
+
+@test
+def test_counter_asker_asks_once_and_defaults_to_assumed_not_proved():
+    """同站点同原因只问一次；默认是"允许但标注"，**不是** PROVED（§6 规则 2/3）。"""
+    site = {"id": "m:index:1", "kind": "index", "obligation": "InBounds",
+            "evidence": "none", "line": 1}
+    solver = lspe.LspeSolver([site], 3).run()
+    out = lspe.ask([site, dict(site)], solver)
+    assert len(out["questions"]) == 1, out
+    q = out["questions"][0]
+    assert q["state"] == "assumed" and q["default"] == "B", q
+    assert out["assumed"] == ["m:index:1"]
+    assert not solver.proved(site), "标注不是证明"
+
+
+@test
+def test_e036_when_tried_does_not_cover_the_three_interrogations():
+    """转交前必须三问都跑过；缺一问就是 E036（§6 硬规则 5 / `#755`）。"""
+    tpl = dict(lspe.LSPE_QUESTION_TEMPLATES["Q001"])
+    tpl["tried"] = {"provenance": "只剩这一问"}
+    site = {"id": "m:index:1", "kind": "index", "obligation": "InBounds",
+            "evidence": "none", "line": 1}
+    with mock.patch.dict(lspe.LSPE_QUESTION_TEMPLATES, {"Q001": tpl}):
+        solver = lspe.LspeSolver([site], 3).run()
+        out = lspe.ask([site], solver)
+        assert out["errors"] and out["errors"][0]["code"] == "E036", out
+
+
+@test
+def test_answer_channels_defer_refuse_and_strict():
+    """`answer` / `defer(reason)` / `refuse` 都进账；strict 下未答是 E034（`#755`/`#756`）。"""
+    def fresh():
+        return {"id": "m:index:1", "kind": "index", "obligation": "InBounds",
+                "evidence": "none", "line": 1}
+
+    s1 = lspe.LspeSolver([fresh()], 3).run()
+    out = lspe.ask([fresh()], s1, {"m:index:1": "defer(manual check)"})
+    assert out["deferred"] == [{"site": "m:index:1", "reason": "manual check"}], out
+
+    s2 = lspe.LspeSolver([fresh()], 3).run()
+    out = lspe.ask([fresh()], s2, {"m:index:1": "refuse"})
+    assert out["refused"] == ["m:index:1"], out
+
+    s3 = lspe.LspeSolver([fresh()], 3).run()
+    out = lspe.ask([fresh()], s3, None, "strict")
+    assert out["errors"] and out["errors"][0]["code"] == "E034", out
+    assert not out["assumed"]
+
+    assert lspe.parse_answers(
+        "m:index:1=B\n# 注释\ndrop:Guard=prove\n") == {
+            "m:index:1": "B", "drop:Guard": "prove"}
+
+
+@test
+def test_drop_honest_is_one_floor_per_destructor_and_hand_proof_clears_it():
+    """每个析构器恰一条 `DropHonest`；手写证明让标签消失（`#747`）。"""
+    src = ("module m\n\nstruct G { id: u32 }\n\n"
+           "impl Drop for G {\n    fn drop(self) {\n"
+           "        let x: u32 = self.id;\n    }\n}\n\n"
+           "fn f() -> u32 {\n    return 0;\n}\n")
+    doc, sites = _unit(src)
+    drop = [s for s in sites if s["kind"] == "drop"]
+    assert len(drop) == 1 and drop[0]["obligation"] == "DropHonest", sites
+    assert doc["floor_detail"]["drop_honest"] == 1, doc["floor_detail"]
+    assert doc["per_kind"]["DropHonest"] == "1/1", doc["per_kind"]
+
+    proved, _ = _unit(src, answers={"drop:G": "prove"})
+    assert proved["floor_detail"]["drop_honest"] == 0, proved["floor_detail"]
+    assert proved["per_kind"]["DropHonest"] == "1/1", proved["per_kind"]
+
+
+@test
+def test_type_well_formed_is_keyed_by_substitution():
+    """同一类型在两个替换下是**两个**站点，证据不共享（`#745`）。"""
+    src = "module m\n\nfn f() -> u32 {\n    return 0;\n}\n"
+    inst = [{"kind": "fn", "name": "id_u32", "of": "id", "args": ["u32"]},
+            {"kind": "fn", "name": "id_u8", "of": "id", "args": ["u8"]}]
+    doc, sites = _unit(src, instances=inst)
+    wf = [s for s in sites if s["kind"] == "wf"]
+    assert len(wf) == 2 and len({s["id"] for s in wf}) == 2, wf
+    assert {s["subst"] for s in wf} == {"u32", "u8"}, wf
+    assert doc["per_kind"]["TypeWellFormed"] == "2/2", doc["per_kind"]
+
+    bad = [{"id": "m:wf:dead", "kind": "wf", "obligation": "TypeWellFormed",
+            "evidence": "Typed", "source": "x", "line": 1}]
+    try:
+        lspe.build_ledger(sites=bad, state="lspe_open_admin", set_by="default",
+                          level=3, toks=[], unit="m")
+        assert False, "没有 substitution 键的 WF 义务必须被拒"
+    except ValueError:
+        pass
+
+
+@test
+def test_stale_wf_is_q004_and_never_proved():  # noqa: D401
+    """替换前证过、替换后没重证 ⇒ UNDECIDED(stale_wf) / Q004（`#746`）。"""
+    site = {"id": "m:wf:1", "kind": "wf", "obligation": "TypeWellFormed",
+            "evidence": "Typed", "source": "monomorphise", "subst": "u32",
+            "stale_wf": True, "line": 1}
+    solver = lspe.LspeSolver([site], 3).run()
+    assert not solver.proved(site) and solver.reason(site) == "stale_wf"
+    q = lspe.ask([dict(site)], solver)["questions"][0]
+    assert q["code"] == "Q004", q
+
+    twin = dict(site, evidence="Differential")
+    assert not lspe.LspeSolver([twin], 3).run().proved(twin), \
+        "Differential 不能销 stale_wf"
+
+
+@test
+def test_derivation_hash_is_canonical_and_evidence_bound():
+    """同一棵树同一哈希；证据一变哈希就变；零证据的 PROVED 被拒（`#748`）。"""
+    site = {"id": "m:index:1", "kind": "index", "obligation": "InBounds",
+            "evidence": "Syntactic", "source": "lms(g0)",
+            "span": [3, 4, 3, 4], "line": 3, "proved": True}
+    t1 = lspe.derivation(site)
+    t2 = lspe.derivation(dict(site))
+    assert lspe.proof_hash(t1) == lspe.proof_hash(t2)
+    assert t1["evidence"][0]["span"] == [3, 4, 3, 4]
+    t3 = lspe.derivation(site, [{"kind": "Syntactic", "source": "other",
+                                 "span": [3, 4, 3, 4]}])
+    assert lspe.proof_hash(t1) != lspe.proof_hash(t3)
+    try:
+        lspe.derivation(dict(site), [])
+        assert False, "PROVED 且零证据必须被拒"
+    except ValueError:
+        pass
+
+
+@test
+def test_sidecar_verify_detects_mutation_missing_and_foreign_unit():
+    """`verify` 不重编译：改过的旁挂、少站点、别的单元都要拒（`#749`）。"""
+    src = ("module m\n\nfn f(a: [u32; 4]) -> u32 {\n    return a[0];\n}\n")
+    doc, _ = _unit(src, sidecar=True)
+    artifact = {"unit": "m", "lspe": lspe.public(doc)}
+    side = lspe.sidecar("m", 3, doc["_trees"])
+    assert doc["proof_root"] == side["root"]
+    assert lspe.verify(artifact, side) == []
+
+    s2 = json.loads(json.dumps(side))
+    k = sorted(s2["sites"])[0]
+    s2["sites"][k]["hash"] = "deadbeef"
+    assert lspe.verify(artifact, s2)
+
+    s3 = json.loads(json.dumps(side))
+    s3["sites"].pop(sorted(s3["sites"])[0])
+    assert lspe.verify(artifact, s3)
+
+    s4 = json.loads(json.dumps(side))
+    s4["unit"] = "other"
+    assert lspe.verify(artifact, s4)
+
+
+@test
+def test_budget_and_depth_floors_are_counted_separately():
+    """步数预算与深度上限各自成桶；降低预算只许把 PROVED 变成 UNDECIDED（`#750`）。"""
+    sites = [{"id": f"m:index:{i:02d}", "kind": "index",
+              "obligation": "InBounds", "evidence": "none", "line": i}
+             for i in range(6)]
+    s = lspe.LspeSolver(sites, 3, budget=2).run()
+    assert len(s.budget_hits) == 4, s.budget_hits
+
+    deep = [dict(x, depth=9) for x in sites]
+    s2 = lspe.LspeSolver(deep, 3, depth=6).run()
+    assert len(s2.depth_hits) == 6, s2.depth_hits
+
+    doc = lspe.build_ledger(sites=[dict(x) for x in sites],
+                            state="lspe_open_admin", set_by="default", level=3,
+                            toks=[], unit="m", mode="strict", budget=2)
+    assert doc["floor_detail"]["budget"] == 4, doc["floor_detail"]
+    assert doc["floor_detail"]["assumed"] == 0, doc["floor_detail"]
+
+    # 直接证据不受预算影响；需要传播的才受影响 —— 预算只许**去掉**证明。
+    dep = [{"id": "m:index:00", "kind": "index", "obligation": "InBounds",
+            "evidence": "Syntactic", "source": "s", "line": 1},
+           {"id": "m:index:01", "kind": "index", "obligation": "InBounds",
+            "evidence": "none", "line": 1, "depends_on": ["m:index:00"]}]
+    hi = lspe.LspeSolver(dep, 3, budget=100).run()
+    lo = lspe.LspeSolver([dict(x) for x in dep], 3, budget=1).run()
+    assert hi.proved(dep[1]) and not lo.proved(dep[1]), (hi.evidence, lo.evidence)
+
+
+@test
+def test_lspc_sheet_has_twelve_families_and_five_columns():
+    """12 族 × 五列；最后一行是递归的"审计自己被关掉"（`#757`）。"""
+    sh = lspe.lspc_sheet([], {"state": "lspe_open_admin", "lspc": "full"})
+    assert sh["families"] == 12 and len(sh["rows"]) == 12, sh
+    for r in sh["rows"]:
+        for k in ("protects", "if_fails", "fix", "cost", "bearer"):
+            assert r[k], (r["id"], k)
+    assert sh["rows"][-1]["id"] == "audit_off"
+    assert lspe.lspc_text(sh)
+
+    off = lspe.lspc_sheet([], {"state": "lspe_close_admin", "lspc": "off"},
+                          mode="off")
+    assert off["rows"][-1]["present"], off["rows"][-1]
+
+    sites = [{"id": "m:index:1", "kind": "index", "obligation": "InBounds",
+              "evidence": "none", "line": 1}]
+    strict = lspe.lspc_sheet(sites, {"state": "lspe_open_admin", "lspc": "full"},
+                             mode="strict")
+    assert "nonliteral_index" in strict["blocking"], strict["blocking"]
+
+
+@test
+def test_lspc_modes_acknowledgements_and_quiet():
+    """不修 = 默认 ack；`--lspc=off` 要进产物；quiet 只给总数（`#759`）。"""
+    sites = [{"id": "m:index:1", "kind": "index", "obligation": "InBounds",
+              "evidence": "none", "line": 1}]
+    sh = lspe.lspc_sheet(sites, {"state": "lspe_open_admin", "lspc": "full"},
+                         mode="strict", acks={"nonliteral_index": "ack"})
+    assert sh["blocking"] == [] and sh["acked"] == 1, sh
+    quiet = lspe.lspc_sheet(sites, {"state": "lspe_open_admin", "lspc": "full"},
+                            mode="quiet")
+    assert len(lspe.lspc_text(quiet)) == 1
+    assert lspe.lspc_default("lspe_close_admin") == "off"
+    assert lspe.parse_acks({"lspc:drop_honest": "ack"}) == {"drop_honest": "ack"}
+
+
+@test
+def test_lspc_reads_the_previous_build():
+    """上一轮的 defer / 过期假设 / close_admin 都要出现在这一轮（`#760`）。"""
+    prev_art = {"lspe": {"state": "lspe_close_admin", "deferred": 2}}
+    prev_side = {"sites": {"m:index:1": {"hash": "aaaa"}}}
+    items = lspe.previous_items(prev_art, prev_side, {"m:index:2": {"hash": "bbbb"}})
+    assert items["close_admin"] and len(items["deferred"]) == 2, items
+    assert items["expired"] == ["m:index:1"], items
+
+    sh = lspe.lspc_sheet([], {"state": "lspe_open_admin", "lspc": "full"},
+                         previous=items)
+    rows = {r["id"]: r for r in sh["rows"]}
+    assert rows["defer"]["present"] and rows["expired"]["present"], rows
+    assert rows["audit_off"]["present"], rows["audit_off"]
+
+
+@test
+def test_invariants_detect_corrupted_ledgers():
+    """I1–I5 都是**对安全系统自己**的判据；坏台账必须红（`#761`–`#764`）。"""
+    good = {"id": "m:index:1", "kind": "index", "obligation": "InBounds",
+            "evidence": "Syntactic", "source": "lms(g0)", "line": 1}
+    solver = lspe.LspeSolver([good], 3).run()
+    ledger = {"sites": 1, "proved": 1, "floors": 0,
+              "floor_detail": {"assumed": 0, "stale_wf": 0, "budget": 0,
+                               "depth": 0, "drop_honest": 0, "pass": 0}}
+    inv, probs = lspe.check_invariants([good], solver, ledger)
+    assert inv == {"i1": "ok", "i2": "ok", "i3": "ok", "i4": "ok", "i5": "ok"}, inv
+    assert not probs
+
+    bad_i4 = dict(ledger, floors=1)
+    inv, probs = lspe.check_invariants([good], solver, bad_i4)
+    assert inv["i4"] == "fail" and probs[0]["code"] == "E036", (inv, probs)
+
+    free = {"id": "m:free:1", "kind": "free", "obligation": "FreeOwnership",
+            "evidence": "none", "line": 1}
+    fs = lspe.LspeSolver([free], 3).run()
+    inv, probs = lspe.check_invariants([free], fs, ledger, dims={"gc": "gc_manual"})
+    assert inv["i2"] == "fail" and any(p["code"] == "E034" for p in probs), inv
+
+    inv, _ = lspe.check_invariants([good], solver, ledger,
+                                   twin={"m:index:1": (False, None)})
+    assert inv["i5"] == "fail", inv
+
+
+@test
+def test_e5_proves_loop_indices_only_with_a_matching_unsigned_guard():
+    """`for i in 0..N` / 无符号 `while i < N` 与数组长度相等才证（`#765`）。"""
+    def evidence(src):
+        sites, _u, _p = lspe.census(lomc.lex(src), "m")
+        idx = [s for s in sites if s["kind"] == "index"]
+        assert len(idx) == 1, sites
+        return idx[0]
+
+    for_ = evidence("module m\n\nfn f(a: [u32; 4]) -> u32 {\n"
+                    "    let s: u32 = 0;\n    for i in 0..4 {\n"
+                    "        s = s + a[i];\n    }\n    return s;\n}\n")
+    assert for_["evidence"] == "GlobalInvariant" and for_["proved"], for_
+
+    while_ = evidence("module m\n\nfn f(a: [u32; 4]) -> u32 {\n"
+                      "    let s: u32 = 0;\n    let i: u32 = 0;\n"
+                      "    while i < 4 {\n        s = s + a[i];\n"
+                      "        i = i + 1;\n    }\n    return s;\n}\n")
+    assert while_["evidence"] == "GlobalInvariant", while_
+
+    signed = evidence("module m\n\nfn f(a: [u32; 4]) -> u32 {\n"
+                      "    let s: u32 = 0;\n    let i: i32 = 0;\n"
+                      "    while i < 4 {\n        s = s + a[i];\n"
+                      "        i = i + 1;\n    }\n    return s;\n}\n")
+    assert signed["evidence"] == "none", signed
+
+    start2 = evidence("module m\n\nfn f(a: [u32; 4]) -> u32 {\n"
+                      "    let s: u32 = 0;\n    for i in 2..4 {\n"
+                      "        s = s + a[i];\n    }\n    return s;\n}\n")
+    assert start2["evidence"] == "none", start2
+
+    # E5 不在 L0/L1 跑（GlobalInvariant 从 L3 起被承认）。
+    assert not lspe.LspeSolver([for_], 2).run().proved(for_)
+    assert lspe.LspeSolver([for_], 3).run().proved(for_)
+
+
+@test
+def test_lspe_cache_cold_warm_identical_and_mismatch_is_fatal():
+    """缓存不许改变产物；哈希不一致是硬错误；目录不许落在 GLOB 里（`#752`）。"""
+    src = ("module m\n\nfn f(a: [u32; 4]) -> u32 {\n    return a[0];\n}\n")
+    with tempfile.TemporaryDirectory() as td:
+        dims = {"gc": "gc_manual"}
+        d1, _ = _unit(src, cache=lspe.Cache(td, "m", "h1", dims, 3))
+        d2, _ = _unit(src, cache=lspe.Cache(td, "m", "h1", dims, 3))
+        assert lspe.public(d1) == lspe.public(d2), "冷/热构建的台账必须逐字段相同"
+
+        bad = lspe.Cache(td, "m", "h1", dims, 3)
+        key = next(iter(bad.data))
+        bad.data[key]["hash"] = "deadbeef"
+        try:
+            _unit(src, cache=bad)
+            assert False, "缓存哈希不一致必须是硬错误"
+        except ValueError as e:
+            assert "缓存哈希不一致" in str(e), e
+
+        try:
+            lspe.Cache(ROOT, "m", "h1", dims, 3, directory=ROOT / "loment")
+            assert False, "缓存目录不许落在 GLOB 目录里"
+        except ValueError:
+            pass
+
+
+@test
+def test_i5_divergence_probe_is_caught():
+    """I5 的分歧探针：同一份源、把一侧的规则改掉，台账必须**看得出**不同（`#764`）。
+
+    这不是"孪生证明了对"，而是一条反向判据：如果比较对象对规则改动**不敏感**，
+    那"两边逐字节相同"就只是噪声。
+    """
+    import importlib  # noqa: PLC0415
+
+    cmod = importlib.import_module("lspe.census")
+    src = "module m\n\nfn f(a: [u32; 4]) -> u32 {\n    return a[0];\n}\n"
+    toks = lomc.lex(src)
+    base, _u, _p = lspe.census(toks, "m")
+    patched = set(cmod.LSPE_BRACKET_KW) | {"a"}
+    with mock.patch.object(cmod, "LSPE_BRACKET_KW", frozenset(patched)):
+        twin, _u, _p = lspe.census(toks, "m")
+    assert {s["id"] for s in base} != {s["id"] for s in twin}, \
+        "改了一条普查规则，站点集合却一点没变 —— 比较对象对规则不敏感"
+
+
+@test
+def test_safe_set_converges_past_256_rounds():
+    """E4 的安全表不动点没有轮数上限（`#1093`）。
+
+    300 层 deref-only 链：旧上限 256 轮会把后 44 个调用点记成"未决定"——
+    那不是预算耗尽，是**假的洞**。
+    """
+    lines = ["module m", "", "fn f0(p: ptr) -> u32 {",
+             "    return load8(p, 0);", "}", ""]
+    for i in range(1, 300):
+        lines += [f"fn f{i}(p: ptr) -> u32 {{", f"    return f{i-1}(p);", "}", ""]
+    toks = lomc.lex("\n".join(lines))
+    sites, _u, _p = lspe.census(toks, "m")
+    calls = [s for s in sites if s["kind"] == "call"]
+    assert len(calls) == 299, len(calls)
+    assert all(s["proved"] for s in calls), \
+        f"{sum(1 for s in calls if not s['proved'])} 个调用点停在 256 轮"
+
+
+@test
+def test_e7_e8_differential_and_probe_registry():
+    """E7 只证一致不证对；E8 的登记表机械生成，缺探针 ⇒ Q002（`#766`）。"""
+    twin = {"id": "m:index:1", "kind": "index", "obligation": "InBounds",
+            "evidence": "Differential", "source": "twin", "line": 1}
+    assert not lspe.LspeSolver([twin], 3).run().proved(twin)
+
+    import lspe_probes  # noqa: PLC0415
+    assert lspe_probes.missing() == [], lspe_probes.missing()
+    assert lspe_probes.unknown() == [], lspe_probes.unknown()
+
+    inert = {"id": "m:index:2", "kind": "index", "obligation": "CapabilityLive",
+             "evidence": "none", "line": 2}
+    solver = lspe.LspeSolver([inert], 3).run()
+    q = lspe.ask([inert], solver)["questions"][0]
+    assert q["code"] == "Q002", q
+
+
+@test
+def test_capacity_declarations_have_a_loud_path():
+    """每个新容量都有一条会说话的路，没有一个"写穿就完"（`#751`）。"""
+    for name, (cap, how) in lspe.LSPE_CAPACITIES.items():
+        assert cap > 0 and how.strip(), name
+    mod = (ROOT / "loment" / "lspe" / "lspe.lomt").read_text(encoding="utf-8")
+    assert "return 1;" in mod and "return 2;" in mod, "自举侧的两个容量失败要还在"
+
+
+@test
+def test_coverage_ratchet_never_decreases():
+    """每种义务的覆盖率只许升不许降（`docs/262` §5.15 / `#767`）。"""
+    from fractions import Fraction  # noqa: PLC0415
+
+    import lspe_ratchet as R  # noqa: PLC0415
+    base = R.load_coverage()
+    cur = R.measure_coverage()
+    assert base, "缺覆盖率基线：`python tools/lspe_ratchet.py --emit`"
+    stale = sorted(set(base) ^ set(cur))
+    assert not stale, ("覆盖率基线与语料对不上：" + " ".join(
+        f"{a}:{b}" for a, b in stale[:8]) + "\n  重算：python tools/lspe_ratchet.py --emit")
+    worse = []
+    for key in sorted(cur):
+        if Fraction(*cur[key]) < Fraction(*base[key]):
+            worse.append(f"{key[0]} {key[1]}: {base[key][0]}/{base[key][1]} -> "
+                         f"{cur[key][0]}/{cur[key][1]}")
+    assert not worse, "覆盖率降了：\n  " + "\n  ".join(worse)
+
+
+@test
+def test_reverse_size_criterion_removing_wf_makes_the_case_invisible():
+    """反向判据：把 `TypeWellFormed` 塌掉，#164250 形状重新变回不可见（`#767`）。
+
+    这不是"更严的检查器"的广告 —— 它证明**尺寸是挣来的**：少一类义务，
+    那一类缺陷就没有任何地方能表示它。
+    """
+    src = "module m\n\nfn f() -> u32 {\n    return 0;\n}\n"
+    inst = [{"kind": "fn", "name": "id_u32", "of": "id", "args": ["u32"]}]
+    toks = lomc.lex(src)
+    full, _u, _p = lspe.census(toks, "m", instances=inst)
+    assert [s for s in full if s["kind"] == "wf"], full
+
+    collapsed = {k: v for k, v in lspe.LSPE_OBLIGATIONS.items()
+                 if k != "TypeWellFormed"}
+    with mock.patch.dict(lspe.registry.LSPE_OBLIGATIONS, collapsed, clear=True):
+        blind, _u, _p = lspe.census(toks, "m", instances=inst)
+        assert not [s for s in blind if s["kind"] == "wf"], blind
+
+
+@test
+def test_lspe_cli_refuses_cleanly_never_a_traceback():
+    """缺文件 / 目录 / 前门拒都不甩 Python 栈（`#1087` / `#1181`）。"""
+    def run(*args):
+        return subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "loment.py"), *args],
+            cwd=str(ROOT), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", shell=False, timeout=120)
+
+    for target in (str(ROOT / "no-such-file.lomt"), str(ROOT / "loment")):
+        r = run("lspe", "state", target)
+        assert r.returncode != 0, r
+        assert "Traceback" not in r.stdout + r.stderr, r.stdout + r.stderr
+
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "bad.lomt"
+        p.write_text("module m\nchoose write grammar klingon\n\n"
+                     "fn f() -> u32 {\n    return 0;\n}\n", encoding="utf-8")
+        r = run("lspe", "state", str(p))
+        assert r.returncode != 0, r
+        assert "Traceback" not in r.stdout + r.stderr, r.stdout + r.stderr
+        assert "[ERR]" in r.stderr, r.stderr
+
+
+@test
+def test_lspc_check_runs_before_codegen_and_never_writes():
+    """`lspc check` 在有后续代码生成错误的单元上也出单；不写文件（`#758`）。"""
+    src = ("module m\n\nstruct S { a: u32 }\n\n"
+           "fn f(s: S) -> u32 {\n    return s.a;\n}\n\n"
+           "fn g() -> u32 {\n    return f(S { a: 1 });\n}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "m.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        before = p.read_bytes()
+        r = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "loment.py"),
+             "lspc", "check", str(p)],
+            cwd=str(ROOT), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", shell=False, timeout=120)
+        assert r.returncode == 0, (r.returncode, r.stdout[-500:], r.stderr[-500:])
+        assert "pre-flight sheet" in r.stdout, r.stdout[-500:]
+        assert p.read_bytes() == before, "预检单不能改源码"
+
+
+@test
+def test_selfhost_ledger_emits_the_v2_fields():
+    mod = (ROOT / "loment" / "selfhost" / "potato.lomt").read_text(encoding="utf-8")
+    for field in ("interrogations", "lspc", "drop_honest", "depth",
+                  "TypeWellFormed", "DropHonest", "assumed"):
+        assert f'"{field}"' in mod, field
+    mod2 = (ROOT / "loment" / "lspe" / "lspe.lomt").read_text(encoding="utf-8")
+    assert "pub fn lspe_e5_hit" in mod2 and "pub fn lspe_num" in mod2
 
 
 def main() -> int:

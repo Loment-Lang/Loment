@@ -165,6 +165,8 @@ REPOS: dict[str, dict] = {
             # `pass_ratio` 棘轮的度量与基线导出（`docs/262` §5.16 / #1065）——
             # `lspe_test` import 它，闭包判据会点名。
             "tools/lspe_ratchet.py",
+            # E8 的反证探针登记表（`docs/262` §5.4 / `#766`）—— `lspe_test` import 它。
+            "tools/lspe_probes.py",
             # 花括号族的共享前端核（`docs/188` §7.1）。同样不以 `lom` 开头。
             "tools/trans_core.py",
             # C -> Loment 的翻译器（`docs/186` Stage A）。名字**不以 `lom` 开头**，

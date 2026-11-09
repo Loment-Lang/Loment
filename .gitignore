@@ -145,3 +145,7 @@ ahci_events.txt
 # a local directory and pushed to https://loment.fandom.com/ over the MediaWiki
 # API; the README links to the wiki itself rather than to its sources.
 /wiki/
+
+# LSPE 的站点级缓存（`docs/262` §5.13 / #752）。**必须在任何 GLOB 目录之外**：
+# 它落进 `loment/**` 或 `tools/**` 会让"树干净"变成假话，也会污染发布清单。
+/.lspe-cache/

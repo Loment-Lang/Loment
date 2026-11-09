@@ -5970,7 +5970,9 @@ def resolve_deps(mod: Module, root: Path, base: Path, entry: Path | None = None,
     return order
 
 
-def load_unit(path: Path, root: Path, lspe_level: int = 3) -> tuple[Module, list[Module]]:
+def load_unit(path: Path, root: Path, lspe_level: int = 3,
+              lspe_mode: str = "full",
+              answers: dict[str, str] | None = None) -> tuple[Module, list[Module]]:
     """**读一个编译单元的唯一入口**：预扫 → 装载 → 解析依赖（`docs/182` §1.10）。
 
     **别处别再自己拼 `load()` + `resolve_deps()`。** 少了预扫那一趟，`addin` 就白写了 ——
@@ -5986,7 +5988,8 @@ def load_unit(path: Path, root: Path, lspe_level: int = 3) -> tuple[Module, list
     from potato_from import FrontDoorRefused        # noqa: PLC0415
     try:
         sw, addin_paths = prescan_switches(path, root, path.parent, tool_dir, ext)
-        mod = load(path, sw=sw, lspe_level=lspe_level)
+        mod = load(path, sw=sw, lspe_level=lspe_level, lspe_mode=lspe_mode,
+                   answers=answers)
         deps = resolve_deps(mod, root, path.parent, entry=path, sw=sw,
                             addin_paths=addin_paths, profile=mod.profile)
     except (FrontDoorRefused, NotRepresentable) as e:
@@ -7896,7 +7899,39 @@ def _count_gc_control(mod: Module) -> dict:
     return n
 
 
-def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -> str:
+def _lspe_facts(mod: Module, deps: list[Module]) -> dict[str, int]:
+    """LSPC 预检单要的**在场事实**（`docs/262` §7.2 / `#757`）。
+
+    只数 token 层面的东西：这些格没有自己的语义，是"这一族在不在场"的判据。
+    `runtime_sites` / `hosted_calls` 今天没有表示（E031 与 `sealed` 在检查器里
+    就已经拒了），恒 0 —— 写成 0 而不是不写：缺项会被读成"没检查"。
+    """
+    toks = getattr(mod, "toks", []) or []
+    n = len(toks)
+    revocable = sum(1 for t in toks if t.kind == "ident" and t.val == "revocable")
+    extern = sum(1 for i, t in enumerate(toks)
+                 if t.kind == "ident" and t.val == "extern"
+                 and i + 1 < n and toks[i + 1].kind == "ident"
+                 and toks[i + 1].val == "fn")
+    allocs = sum(1 for i, t in enumerate(toks)
+                 if t.kind == "ident" and t.val == "alloc"
+                 and i + 1 < n and toks[i + 1].kind == "punct"
+                 and toks[i + 1].val == "(")
+    nonliteral_guard = sum(1 for i, t in enumerate(toks)
+                           if t.kind == "ident" and t.val == "guard"
+                           and i + 2 < n
+                           and not (toks[i + 2].kind == "punct"
+                                    and toks[i + 2].val == "["))
+    return {"revocable": revocable, "extern": extern, "allocs": allocs,
+            "nonliteral_guard": nonliteral_guard, "runtime_sites": 0,
+            "hosted_calls": 0, "cross_unit": len(deps)}
+
+
+def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None,
+                sidecar: bool = False,
+                sidecar_out: dict | None = None,
+                diag_out: dict | None = None,
+                cache=None) -> str:
     """M45: 形式对象 v1 —— 覆盖泛型/切片/字符串, 并由独立校验器自检 (M46)。"""
     import copy as _c
 
@@ -7959,6 +7994,8 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
     import potato as _potato
     _gc_ladder = _count_gc_ladder(raw_mod)
     _lms_levels = {_n: _lms_level(mod, _n) for _n in LMS_TOGGLES}
+    _dims = {k: mod.chooses.get(k, CORE_DEFAULTS[k]) for k in CORE_DIM_ORDER}
+    _facts = _lspe_facts(mod, deps or [])
     _lspe_ledger = lspe.build_ledger(
         sites=getattr(mod, "lspe_sites", []),
         state=mod.chooses.get("lspe", CORE_DEFAULTS["lspe"]),
@@ -7968,7 +8005,44 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         unit=mod.name,
         deps=[getattr(d, "toks", []) for d in (deps or [])],
         passes=getattr(mod, "lspe_passes", []),
+        # 单态化实例 = 一次替换（`#745`）；LSPE v2 用它算 `TypeWellFormed`。
+        instances=instances,
+        mode=str(getattr(mod, "lspe_mode", "full")),
+        answers=getattr(mod, "lspe_answers", None),
+        dims=_dims, facts=_facts,
+        budget=getattr(mod, "lspe_budget", None),
+        depth=getattr(mod, "lspe_depth", None),
+        sidecar=sidecar,
+        cache=cache,
     )
+    if sidecar and sidecar_out is not None:
+        sidecar_out.update(lspe.sidecar(mod.name, int(getattr(mod, "lspe_level", 3)),
+                                        _lspe_ledger.get("_trees", {})))
+    # 台账自检（`docs/262` §8 / #763）：E035/E036 是**审计器自己的**错误，
+    # 不是用户代码的错误 —— 但它们不能静默地随产物出去。E034 走 strict 的检查器那条。
+    # E034（无来源放行）只在 strict 下阻断 —— 默认档是"温柔"的（`docs/262` §6）。
+    _codes = {"E035", "E036"}
+    if str(getattr(mod, "lspe_mode", "full")) == "strict":
+        _codes.add("E034")
+    _bad = [p for p in _lspe_ledger.get("_problems", [])
+            if p.get("code") in _codes]
+    if _bad:
+        # 消息模板的首段必须是**常量**：`loment_diag` 的分类表按前缀认码
+        # （`test_m64_all_reference_messages_are_classified` 逐条钉住）。
+        if _bad[0]["code"] == "E034":
+            raise LomError(0, 0, f"LSPE 未能为这次放行给出来源: {_bad[0]['message']}")
+        if _bad[0]["code"] == "E035":
+            raise LomError(0, 0, f"LSPE 台账矛盾: {_bad[0]['message']}")
+        raise LomError(0, 0, f"LSPE 自检失败: {_bad[0]['message']}")
+    if diag_out is not None:
+        diag_out.update({
+            "questions": _lspe_ledger.get("_questions", []),
+            "deferred": _lspe_ledger.get("_deferred", []),
+            "refused": _lspe_ledger.get("_refused", []),
+            "assumed": _lspe_ledger.get("_assumed", []),
+            "problems": _lspe_ledger.get("_problems", []),
+            "invariants": _lspe_ledger.get("invariants"),
+        })
     doc = {
         # v3 = v2 + **开关取值** (docs/182 §1)。**升版本而不是往 v2 加字段**, 与 v1->v2
         # 那条同一个理由: 新字段是必填的 (删掉它校验器必须红), 而往旧版加必填字段会让
@@ -8061,7 +8135,7 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # **安全审计**（`docs/262`，用户 2026-10-18 定第七维）：台账是 LSPE 的第四件。
         # 计数、`per_kind`、不变量与 `lspe_close_admin` 的归零都在 `lspe/ledger.py`；
         # 编译器只把这个映射写进产物。
-        "lspe": _lspe_ledger,
+        "lspe": lspe.public(_lspe_ledger),
         # **系统索引**（v20，`docs/147` §5.4 / #1022）。六个系统各一条，次序写死；
         # `state` 与顶层字段（`lspe` 取台账自己的 `state`）、`detail` 与明细字段名、
         # `cost` 与明细的总数**逐条相同** —— 校验器不读源码也判得了它们打架。
@@ -12531,7 +12605,8 @@ def _desugar_foreach(mod: Module) -> None:
 
 
 def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3,
-         profile: str | None = None) -> Module:
+         profile: str | None = None, lspe_mode: str = "full",
+         answers: dict[str, str] | None = None) -> Module:
     # **前门**（`docs/188` §7.2）：读法由**声明**决定，不由后缀或嗅探。
     # 一份 `choose write grammar python` 的 `.lomt` 按 `docs/188` §0 **仍然是 Loment**，
     # 只是拼法不同 —— 所以这里先把它**翻成 Loment 源码**再往下走。
@@ -12604,6 +12679,17 @@ def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3,
     mod.lspe_sites, mod.lspe_unsourced_lines, mod.lspe_passes = lspe.census(
         tt, mod.name, lms=_lms_on)
     mod.lspe_level = lspe_level
+    mod.lspe_mode = lspe_mode
+    # 回答通道（`docs/262` §6 / `#755`）：同目录的 `lspe.answers` 是团队共享、可评审、
+    # 进版本库的那一份；显式传入的（`--answer`）优先。
+    if answers is None:
+        _ap = path.parent / "lspe.answers"
+        if _ap.is_file():
+            import lspe as _lspe_q
+            answers = _lspe_q.parse_answers(_ap.read_text(encoding="utf-8"))
+        else:
+            answers = {}
+    mod.lspe_answers = answers
     # 方言清单挂在模块上，供 Potato v4 用（`docs/184` §9 S4.3）。**定义那一段已经被
     # 抹掉了**，所以这是唯一还记得"这份源用了哪些自定义语法"的地方。
     mod.dialects = _dias

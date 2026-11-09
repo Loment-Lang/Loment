@@ -7,6 +7,8 @@ L0/L1/L2 的安全谓词或 syscall 借用语义 —— 那些是编译器的事
 
 from __future__ import annotations
 
+from .registry import LSPE_OBLIGATIONS
+
 _L0_SAFE_BUILTINS: frozenset = frozenset()
 _syscall_borrow_ok = None
 _fnv1a32 = None
@@ -33,6 +35,15 @@ LSPE_BRACKET_KW = frozenset({
 #: 与自举侧 `pt_lspe_call_kw` **逐字同表** —— 两边普查的调用点计数不能漂。
 LSPE_CALL_KW = LSPE_BRACKET_KW | frozenset({"extern", "true", "false", "self"})
 
+
+
+def _sp(tok) -> list[int]:
+    """证据节点要的源跨度（`docs/262` §5.9）：`[line, col, line, col]`。
+
+    token 只带起点；单 token 站点的终点就是它的起点（长度不进跨度 —— 跨度答的是
+    "在哪一行哪一列"，不是"有多长"）。
+    """
+    return [int(tok.line), int(tok.col), int(tok.line), int(tok.col)]
 
 
 def census_bounds(toks: list, sid, sites: list[dict], cover=lambda _i: None,
@@ -81,7 +92,7 @@ def census_bounds(toks: list, sid, sites: list[dict], cover=lambda _i: None,
                           f"bounds:{toks[fn[0]].val}:{toks[a].val}:{t.val}:{size}"),
                 "kind": "bounds", "claim": "allow", "obligation": "InBounds",
                 "evidence": "Syntactic", "source": "lms(g1)",
-                "line": t.line, "proved": True}
+                "line": t.line, "span": _sp(t), "proved": True}
         cid = cover(i)
         if cid:
             site["covered_by"] = cid
@@ -194,14 +205,18 @@ def _mark(site: dict, cover, i: int) -> dict:
 
 
 def census(toks: list, unit: str,
-           lms=frozenset()) -> tuple[list[dict], list[int], list[dict]]:
-    """站点普查（`docs/262` §5.1）：E1/E2（guard + 下标）、E3、E4、pass 块。
+           lms=frozenset(),
+           instances: list[dict] | tuple = ()) -> tuple[list[dict], list[int], list[dict]]:
+    """站点普查（`docs/262` §5.1）：E1/E2（guard + 下标）、E3、E4、E5、pass 块。
 
     口径是**词法的**，且两套实现用**同一条规则** —— 参考侧吃 `lomc.lex` 的 token，
     自举侧吃驱动器的 token 数组。这样 twin 的计数不会因为 AST 形状不同而漂。
 
     线性 CFG：语句按 token 顺序执行，`return` 结束它所在块剩下一段。这是 E3 的
     "固定顺序"定义（`docs/262` §5.4）——没有分支敏感，只有块结构。
+
+    `instances` 是单态化实例（`of` + `args`）：每个实例是一个替换，`TypeWellFormed`
+    按 `(type, substitution)` 键记账（`#745`）。
     """
     _ensure_compiler_facts()
     sites: list[dict] = []
@@ -220,10 +235,12 @@ def census(toks: list, unit: str,
     def cover(i: int) -> str | None:
         return _covered(spans, i)
 
-    census_e1e2(toks, sid, sites, unsourced, cover)
+    census_e1e2(toks, sid, sites, unsourced, cover, _loops(toks), _array_lens(toks))
     census_bounds(toks, sid, sites, cover, lms)
     census_e3(toks, sid, sites, cover)
     census_e4(toks, sid, sites, (), cover)
+    census_drop(toks, sid, sites)
+    census_wf(instances, sid, sites)
     for s in sites:
         cid = s.get("covered_by")
         if cid:
@@ -233,13 +250,204 @@ def census(toks: list, unit: str,
     return sites, unsourced, spans
 
 
+def _array_lens(toks: list) -> dict[str, int]:
+    """`NAME: [T; N]` 的 N（形参与 `let` 都算）。E5 用它把 `a[i]` 与循环界对上。"""
+    out: dict[str, int] = {}
+    n = len(toks)
+    for i, t in enumerate(toks):
+        if t.kind != "ident" or i + 4 >= n:
+            continue
+        if not (toks[i + 1].kind == "punct" and toks[i + 1].val == ":"
+                and toks[i + 2].kind == "punct" and toks[i + 2].val == "["):
+            continue
+        d = 0
+        j = i + 2
+        semi = -1
+        while j < n:
+            v = toks[j].val if toks[j].kind == "punct" else None
+            if v == "[":
+                d += 1
+            elif v == "]":
+                d -= 1
+                if d == 0:
+                    break
+            elif v == ";" and d == 1:
+                semi = j
+            j += 1
+        if semi > 0 and j < n and semi + 1 < j:
+            arg = toks[semi + 1]
+            # 只认**字面量**：自举侧没有 const 求值那一层，认别的会让孪生漂。
+            val = _lspe_int(arg) if arg.kind == "number" else None
+            if val is not None:
+                out[t.val] = val
+    return out
+
+
+def _unsigned(toks: list, name: str) -> bool:
+    """`NAME` 是不是声明成无符号整数（`while i < N` 的可靠性前提）。"""
+    n = len(toks)
+    for i, t in enumerate(toks):
+        if (t.kind == "ident" and t.val == name and i + 2 < n
+                and toks[i + 1].kind == "punct" and toks[i + 1].val == ":"
+                and toks[i + 2].kind == "ident"
+                and toks[i + 2].val in ("u8", "u16", "u32", "u64", "usize")):
+            return True
+    return False
+
+
+def _loops(toks: list) -> list[dict]:
+    """`for i in 0..N {` / `while i < N {` 的简单归纳（E5，`docs/262` §5.4）。
+
+    只认**字面量界**：
+
+    * `for`：起点必须是字面量 0（这是归纳的基例，`for i in 2..N` 不证）；
+    * `while`：循环变量必须声明成**无符号** —— `i < N` 对无符号就是 `0 <= i < N`，
+      与 `i` 在体内怎么变无关；有符号的 `i < N` 可能为负，不证。
+
+    `..` 在词法层是两个 `.` token。
+    """
+    out: list[dict] = []
+    n = len(toks)
+    for i, t in enumerate(toks):
+        if t.kind != "ident":
+            continue
+        if t.val == "for":
+            if not (i + 3 < n and toks[i + 1].kind == "ident"
+                    and toks[i + 2].kind == "ident" and toks[i + 2].val == "in"):
+                continue
+            name = toks[i + 1].val
+            j = i + 3
+            # 找 `..`
+            dots = -1
+            while j + 1 < n:
+                if (toks[j].kind == "punct" and toks[j].val == "."
+                        and toks[j + 1].kind == "punct" and toks[j + 1].val == "."):
+                    dots = j
+                    break
+                if toks[j].kind == "punct" and toks[j].val in ("{", ";"):
+                    break
+                j += 1
+            if dots < 0:
+                continue
+            # 基例必须是 0：`for i in 2..N` 不证（`i` 可能已越过数组头）。
+            start = toks[dots - 1] if dots > 0 else None
+            if start is None or start.kind != "number" or _lspe_int(start) != 0:
+                continue
+            j = dots + 2
+            bound_tok = j
+            while j < n and not (toks[j].kind == "punct" and toks[j].val == "{"):
+                j += 1
+            if j >= n or j == bound_tok:
+                continue
+            bound = _lspe_int(toks[bound_tok]) if toks[bound_tok].kind == "number" else None
+            brace = j
+        elif t.val == "while":
+            if not (i + 4 < n and toks[i + 1].kind == "ident"
+                    and toks[i + 2].kind == "punct" and toks[i + 2].val == "<"):
+                continue
+            name = toks[i + 1].val
+            if not _unsigned(toks, name):
+                continue
+            bound_tok = i + 3
+            bound = _lspe_int(toks[bound_tok]) if toks[bound_tok].kind == "number" else None
+            brace = next((k for k in range(i + 4, n)
+                          if toks[k].kind == "punct" and toks[k].val == "{"), -1)
+            if brace < 0:
+                continue
+        else:
+            continue
+        if bound is None:
+            continue
+        end = _lspe_match_brace(toks, brace)
+        if end is None:
+            continue
+        out.append({"name": name, "bound": bound, "brace": brace, "end": end})
+    return out
+
+
+def census_drop(toks: list, sid, sites: list[dict]) -> None:
+    """`impl Drop for T { fn drop(self) { … } }` = 一个 `DropHonest`（`#747`）。
+
+    析构器诚实性**今天证不出来**（`docs/253` §1.2）：证据是 `Assumed`，
+    来源写成 `#floor-drop-<类型>`，与`floor_detail.drop_honest` 同一个数。
+    手写证明走 answers 文件（`drop:<类型>=prove`），由台账把证据换成 `Syntactic`
+    并把它从地板里移走 —— 标签消失，不是布尔翻转。
+    """
+    n = len(toks)
+    for i, t in enumerate(toks):
+        if not (t.kind == "ident" and t.val == "impl" and i + 4 < n):
+            continue
+        if not (toks[i + 1].kind == "ident" and toks[i + 1].val == "Drop"
+                and toks[i + 2].kind == "ident" and toks[i + 2].val == "for"
+                and toks[i + 3].kind == "ident"):
+            continue
+        name = toks[i + 3].val
+        brace = next((k for k in range(i + 4, n)
+                      if toks[k].kind == "punct" and toks[k].val == "{"), -1)
+        if brace < 0:
+            continue
+        end = _lspe_match_brace(toks, brace)
+        if end is None:
+            continue
+        has_drop = any(toks[k].kind == "ident" and toks[k].val == "fn"
+                       and k + 1 < end and toks[k + 1].kind == "ident"
+                       and toks[k + 1].val == "drop" for k in range(brace, end))
+        if not has_drop:
+            continue
+        sites.append({"id": sid("drop", f"drop:{name}"), "kind": "drop",
+                      "claim": "allow", "obligation": "DropHonest",
+                      "evidence": "Assumed", "source": f"#floor-drop-{name}",
+                      "destructor": name, "line": t.line, "span": _sp(t),
+                      "proved": True})
+
+
+def census_wf(instances, sid, sites: list[dict]) -> None:
+    """单态化实例 = 一次替换 ⇒ 一条 `TypeWellFormed`（`#745` / `#746`）。
+
+    证据键是 `(type, substitution)`，不是 `(type)`：`Box<T>` 在 `T=u32` 与 `T=u8`
+    下是**两个**站点 —— Rust #164250 那一类"替换前的良构被替换后复用"因此**按构造
+    不可能**。
+
+    手写的 `instances` 若自带 `stale_wf`（替换后没有重证），站点原样记下，
+    求解器把它压成 `UNDECIDED(stale_wf)` / Q004。
+    """
+    # 义务被塌掉（`#767` 的反向判据）时，WF 站点根本不该存在 —— 这就是
+    # "把尺寸拿走，那一类缺陷重新变回不可见"的落点。
+    if "TypeWellFormed" not in LSPE_OBLIGATIONS:
+        return
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    for inst in sorted(instances or (),
+                       key=lambda x: (str(x.get("of", "")),
+                                      tuple(x.get("args") or ()),
+                                      str(x.get("name", "")))):
+        args = tuple(str(a) for a in (inst.get("args") or ()))
+        of = str(inst.get("of") or "")
+        if not of or not args or (of, args) in seen:
+            continue
+        seen.add((of, args))
+        line = int(inst.get("line", 0) or 0)
+        site_id = sid("wf", f"wf:{of}<{','.join(args)}>")
+        if any(s.get("id") == site_id for s in sites):
+            continue          # 调用方可能已经把普查结果给它了：不重复计
+        sites.append({
+            "id": site_id,
+            "kind": "wf", "claim": "allow", "obligation": "TypeWellFormed",
+            "evidence": "Typed", "source": f"monomorphise:{inst.get('name', of)}",
+            "subst": ",".join(args), "stale_wf": bool(inst.get("stale_wf")),
+            "line": line, "span": [line, 0, line, 0], "proved": True,
+        })
+
+
 def census_e1e2(toks: list, sid, sites: list[dict], unsourced: list[int],
-                cover=lambda _i: None) -> None:
+                cover=lambda _i: None, loops: list[dict] | None = None,
+                lens: dict[str, int] | None = None) -> None:
     """E1 常量 + E2 类型（`docs/262` §5.4）。
 
     * `guard` 关键字 = 一个 guard 站点，来源 `capability`；
     * `[` 且前一个 token 是**非关键字标识符 / `)` / `]`** = 一个 index 站点；
       下标是**裸字面量**（`[ N ]` 三个 token）时来源 `lms(g0)`，否则无来源。
+    * E5（`#765`）：非字面量下标落在 `for i in 0..N` / `while i < N` 里，且数组声明
+      的长度也是 N ⇒ `GlobalInvariant`。只在 L3+ 被承认（求解器按证据级别截）。
     """
     n = len(toks)
     for i, t in enumerate(toks):
@@ -248,7 +456,8 @@ def census_e1e2(toks: list, sid, sites: list[dict], unsourced: list[int],
             site = {"id": sid("guard", f"guard:{cap}"), "kind": "guard",
                     "claim": "allow", "obligation": "GuardHolds",
                     "evidence": "Typed",
-                    "source": "capability", "line": t.line, "proved": True}
+                    "source": "capability", "line": t.line, "span": _sp(t),
+                    "proved": True}
             cid = cover(i)
             if cid:
                 site["covered_by"] = cid
@@ -285,17 +494,23 @@ def census_e1e2(toks: list, sid, sites: list[dict], unsourced: list[int],
         # 只用**紧邻的前一个 token** 作 LHS。往前多抓几个 token 会把上一条语句
         # （`;`、`return` …）也卷进键里 —— 插入一个无关站点就会让 id 变。
         lhs = prev.val
+        evidence, source = ("Syntactic", "lms(g0)") if literal else ("none", None)
+        if not literal and len(inner) == 1 and lens and lhs in lens:
+            for lp in loops or ():
+                if (lp["name"] == inner[0] and lp["bound"] == lens[lhs]
+                        and lp["brace"] < i < lp["end"]):
+                    evidence, source = "GlobalInvariant", "loop-invariant"
+                    break
         site = {"id": sid("index", f"index:{lhs}[{''.join(inner)}]"),
                 "kind": "index",
                 "claim": "allow", "obligation": "InBounds",
-                "evidence": ("Syntactic" if literal else "none"),
-                "source": ("lms(g0)" if literal else None),
-                "line": t.line, "proved": literal}
+                "evidence": evidence, "source": source,
+                "line": t.line, "span": _sp(t), "proved": evidence != "none"}
         cid = cover(i)
         if cid:
             site["covered_by"] = cid
         sites.append(site)
-        if not literal:
+        if evidence == "none":
             unsourced.append(t.line)
 
 
@@ -368,6 +583,10 @@ def _lspe_unreachable(toks: list, free_i: int, use_i: int) -> bool:
     """从 use 反向走到 free：同一块或**外层**块里出现过 `return` ⇒ 这句不可达。
 
     反向走法自然区分兄弟块：兄弟块里的 `return` 会遇到它的 `}` 被记进深度，不算。
+
+    ⚠ **use 本身在 `return` 的表达式里时，那句 return 不是"之前"**（`#1097`）：
+    `return load8(x, 0);` 里的读是可达的。判法：从 return 往后看，在 use 之前
+    有没有同层的 `;` —— 有，return 已经结束；没有，use 就在它的表达式里。
     """
     d = 0
     k = use_i - 1
@@ -379,15 +598,38 @@ def _lspe_unreachable(toks: list, free_i: int, use_i: int) -> bool:
             elif t.val == "{" and d > 0:
                 d -= 1
         elif t.kind == "ident" and d == 0 and t.val == "return":
-            return True
+            # 同层的 `;` 在 use 之前？有 ⇒ return 已经结束，use 不可达。
+            dd = 0
+            ended = False
+            for m in range(k + 1, use_i):
+                v = toks[m].val if toks[m].kind == "punct" else None
+                if v in ("(", "[", "{"):
+                    dd += 1
+                elif v in (")", "]", "}"):
+                    if dd > 0:
+                        dd -= 1
+                elif v == ";" and dd == 0:
+                    ended = True
+                    break
+            if ended:
+                return True
+            # use 在这个 return 的表达式里：它可达，继续往前找更早的 return。
         k -= 1
     return False
 
 
 def _lspe_owned(toks: list, at: int, free_i: int, name_i: int) -> bool:
-    """`free(x)` 之前最近一处 `let x` 是不是 `let x : ptr = alloc (`。"""
+    """`free(x)` 之前最近一处 `let x` 是不是 `let x : ptr = alloc (`。
+
+    ⚠ **`x` 在中间被重新赋值过就不是同一块内存**（`#1180`）：
+    `let p = alloc(4); p = 0 as ptr; free(p);` 里 free 收到的是空指针，
+    不是 `let p` 那一块 —— 所有权在赋值处就丢了。
+    """
     k = free_i - 1
     while k > at:
+        if toks[k].kind == "ident" and toks[k].val == toks[name_i].val:
+            if _lspe_is_write(toks, k):
+                return False               # 重新指向：所有权不再属于这次 alloc
         if (toks[k].kind == "ident" and toks[k].val == toks[name_i].val
                 and toks[k - 1].kind == "ident" and toks[k - 1].val == "let"):
             n = len(toks)
@@ -433,7 +675,8 @@ def census_e3(toks: list, sid, sites: list[dict],
                                     "obligation": "FreeOwnership",
                                     "evidence": ("LocalFlow" if owned and not reachable else "none"),
                                     "source": ("local-flow" if owned and not reachable else None),
-                                    "line": t.line, "proved": owned and not reachable},
+                                    "line": t.line, "span": _sp(t),
+                                    "proved": owned and not reachable},
                                    cover, i))
                 for j in uses:
                     un = _lspe_unreachable(toks, i + 3, j)
@@ -442,7 +685,8 @@ def census_e3(toks: list, sid, sites: list[dict],
                                         "obligation": "Alive",
                                         "evidence": ("LocalFlow" if un else "none"),
                                         "source": ("local-flow" if un else None),
-                                        "line": toks[j].line, "proved": un},
+                                        "line": toks[j].line, "span": _sp(toks[j]),
+                                        "proved": un},
                                        cover, j))
             # ---- Initialized（`let x: T;` 之后的读） ----
             if (t.kind == "ident" and t.val == "let" and i + 1 < end
@@ -485,7 +729,8 @@ def census_e3(toks: list, sid, sites: list[dict],
                                         "obligation": "Initialized",
                                         "evidence": ("LocalFlow" if assigned else "none"),
                                         "source": ("local-flow" if assigned else None),
-                                        "line": toks[k].line, "proved": assigned},
+                                        "line": toks[k].line, "span": _sp(toks[k]),
+                                        "proved": assigned},
                                        cover, k))
             # ---- Exclusive（`&mut x` 与同一语句里的另一次使用重叠） ----
             if (t.kind == "punct" and t.val == "&" and i + 2 < end
@@ -505,7 +750,8 @@ def census_e3(toks: list, sid, sites: list[dict],
                                     "obligation": "Exclusive",
                                     "evidence": ("none" if other else "LocalFlow"),
                                     "source": (None if other else "local-flow"),
-                                    "line": t.line, "proved": not other},
+                                    "line": t.line, "span": _sp(t),
+                                    "proved": not other},
                                    cover, i))
 
 
@@ -521,11 +767,12 @@ def _lspe_safe_set(toks: list, fns: list[tuple[int, int, int, int]],
     """
     units = [(toks, fns)] + list(extra)
     safe: set[str] = set(_L0_SAFE_BUILTINS)
+    # 不设轮数上限（`#1093`）：集合只增不减，名字有限，所以一定收敛。
+    # 原来的 256 轮在一张 300 函数的 deref-only 链上会提前停下，把后半截记成
+    # "未决定" —— 那不是预算，是**假的洞**。
     changed = True
-    rounds = 0
-    while changed and rounds < 256:
+    while changed:
         changed = False
-        rounds += 1
         for utoks, ufns in units:
             for name_i, p_i, at, end in ufns:
                 name = utoks[name_i].val
@@ -585,10 +832,19 @@ def census_e4(toks: list, sid, sites: list[dict],
     """
     _ensure_compiler_facts()
     fns = _lspe_functions(toks)
-    ptr_first = {toks[n].val for (n, p, _at, end) in fns
-                 if p + 2 < end and toks[p].kind == "ident"
-                 and toks[p + 1].kind == "punct" and toks[p + 1].val == ":"
-                 and toks[p + 2].kind == "ident" and toks[p + 2].val == "ptr"}
+
+    def _ptr_first(utoks, ufns):
+        return {utoks[n].val for (n, p, _at, end) in ufns
+                if p + 2 < end and utoks[p].kind == "ident"
+                and utoks[p + 1].kind == "punct" and utoks[p + 1].val == ":"
+                and utoks[p + 2].kind == "ident" and utoks[p + 2].val == "ptr"}
+
+    # ⚠ 首参表要看**依赖**（`#1081`）：根对依赖里 `ptr` 首参函数的调用点也是站点。
+    # 站点本身只扫根（依赖的函数不是这份产物要审计的站点），但"这个被调是不是
+    # ptr-first"必须问整棵调用树 —— 否则一旦有 `use`，所有调用点都从台账里消失。
+    ptr_first = _ptr_first(toks, fns)
+    for utoks in extra:
+        ptr_first |= _ptr_first(utoks, _lspe_functions(utoks))
     if not ptr_first:
         return
     safe = _lspe_safe_set(toks, fns, [(u, _lspe_functions(u)) for u in extra])
@@ -620,6 +876,6 @@ def census_e4(toks: list, sid, sites: list[dict],
                             "obligation": "SummaryContract",
                             "evidence": ("Interproc" if proved else "none"),
                             "source": (t.val if proved else None),
-                            "line": t.line, "proved": proved},
+                            "line": t.line, "span": _sp(t), "proved": proved},
                            cover, i))
 

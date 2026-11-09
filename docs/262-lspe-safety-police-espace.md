@@ -1,6 +1,6 @@
 # 262 · LSPE：Loment Safety Police Espace —— 安全系统的自我审查
 
-> 状态: **设计**（2026-10-18，第三稿）· 落点: `docs/262` · 输入: `docs/205`（R1/R5/C5）、
+> 状态: **已实现（0.1.5.2）**（2026-10-18 设计；2026-11-08 落地）· 落点: `docs/262` · 输入: `docs/205`（R1/R5/C5）、
 > `docs/253`（LMS 七级）、`docs/210`（LGC 四层梯）、`docs/206`（所有权边界）、
 > `docs/208`（声明式不可观察）、`docs/182`（`choose` 与诊断码）、`docs/191`（错误报告）
 >
@@ -1448,6 +1448,59 @@ LSPE 在它之上：
     E037 只保留、不发出（§10.4）。
 
 ---
+
+## 14.5 落地状态（0.1.5.2，2026-11-08）
+
+| 节 | 状态 | 落点 |
+|---|---|---|
+| §5.1 站点普查、内容寻址 id | **已实现** | `loment/lspe/census.py`、`loment/lspe/lspe.lomt` |
+| §5.2 十四种义务 | **已实现**（登记表） | `loment/lspe/registry.py` |
+| §5.3 证据与接收关系 | **已实现** | 同上 + `solver.py` |
+| §5.4 E1–E4 | **已实现** | `census_e1e2/e3/e4` + 自举 `lspe_engine` |
+| §5.4 E5 全局不变量（循环归纳） | **已实现（窄）**：`for i in 0..N` / 无符号 `while i < N` | `_loops` / `lspe_e5_hit` |
+| §5.4 E6 替换与 WF 重证 | **已实现**：证据键 `(type, subst)`；`stale_wf`/Q004 走同一求解器 | `census_wf` |
+| §5.4 E7 差分闸门 | **已实现**：`Differential` 永不销义务 | `solver.py` + 双实现判据 |
+| §5.4 E8 反证探针 | **已实现**：登记表由 `tools/lspe_probes.py` 从判据树机械生成 | `tools/lspe_probes.py` |
+| §5.5 工作列表 + 预算 | **已实现**：步数预算、深度上限、确定性截断 | `solver.py` |
+| §5.6 五级上下文 | **已实现**：`--lspe-level 0..4`，两侧都读 | `lomentc.py` / `driver.lomt` |
+| §5.7 替换日志与重证 | **部分**：日志 = 单态化实例表；`stale_wf` 由站点标记驱动（编译器今天不产出 stale） | `census_wf` |
+| §5.8 `DropHonest` | **已实现**：每个析构器一条；手写证明走 `answers` | `census_drop` |
+| §5.9 派生树与 `proof_hash` | **已实现**（参考侧 + 旁挂）；自举侧不产派生树 | `derive.py` |
+| §5.10 Q 码 | **已实现**：13 个模板 + 固定字段 | `registry.py` / `questions.py` |
+| §5.11 覆盖率 | **已实现**：`pass_ratio` 与逐义务覆盖率两条棘轮 | `.github/lspe-*-baseline.txt` |
+| §5.12 容量 | **已实现**：`LSPE_CAPACITIES` + 自举两张表的点名失败 | `registry.py` |
+| §5.13 增量缓存 | **已实现**：`proof_hash` 相等性、深度不复用、目录在 GLOB 外 | `cache.py` |
+| §5.14 双实现 | **已实现**：49 份语料逐字节相同 | `loment_potato_emit_test` |
+| §5.15 反向判据 | **已实现**：塌掉 `TypeWellFormed` 后 #164250 形状重新不可见 | `lspe_test` |
+| §5.16 `lspe pass` | **已实现**（0.1.5.1 起） | `census.pass_spans` |
+| §6 反问器与回答通道 | **已实现**：`lspe.answers` / `--answer` / defer / refuse / strict | `questions.py` |
+| §7 LSPC 预检单 | **已实现**：12 族 × 五列；`loment lspc check` | `lspc.py` |
+| §7.6 模式 | **已实现**：`full/quiet/strict/off`，`off` 进产物 | 同上 |
+| §7.7 跨构建记忆 | **已实现**：`--previous` / `--previous-sidecar` | 同上 |
+| §8 I1–I5 | **已实现**；E035/E036 在发射期拒 | `invariants.py` |
+| 自举侧派生树 / Q 码全文 | **不做**：台账只带计数与不变量；问题与派生树走旁挂/CLI | —— |
+
+**已知边界**（写出来比藏起来好）：
+
+* `stale_wf` 的端到端触发需要编译器记录"替换前证过"的事件；今天它由站点标记与
+  API 测试驱动，真实源码还造不出这条路径。
+* 自举侧不解析未知转义（`\q`）：参考实现拒、自举收（`#1083`），
+  属于自举词法器的报错通道缺口，不在台账语义里。
+* `no_runtime` / `hosted` 的运行期站点今天没有表示，I3 对它们恒 `ok`；
+  E031 与 `sealed` 在检查器里已经先拒。
+
+### 14.6 发行清单（0.1.5.x）
+
+* **台账字段**：`potato.lspe`（v16 起）。v2 新增 `interrogations`、`lspc`、
+  `proof_root`（仅 `--lspe-sidecar`）与 `floor_detail.depth`；旧产物的缺项按 0 / 不在场读，
+  回放不受影响。
+* **开关**：`choose lspe_open_admin`（默认）/ `choose lspe_close_admin`；
+  构建旋钮 `--lspe-level 0..4`、`--lspe-mode full|quiet|strict`、`--lspc full|quiet|strict|off`。
+* **手动页**：`book/src/31-lspe.md`（手册站）；`loment cheat` 末行给出三条命令。
+* **门禁**：`lspe_test`（36 条，含两条棘轮与 E8 探针登记）在静态检查分片里；
+  `loment_potato_emit_test` 的逐字节孪生是 I5 的落地判据。
+* **`lms` 的 `_admin` 迁移**：LMS 的关闭档从 0.1.5 起统一带 `_admin`
+  （`lms_*_admin`），默认档 `lms_full` 不变；没有待迁移的旧名。
 
 ## 15. 与其它文档的关系
 

@@ -2648,6 +2648,9 @@ CORE_SLOT_WORDS = frozenset(f"{dim}_{slot}_{v}"
 #: 槽取值 → `(槽, 值)`。与 `CORE_DIM_OF` 分开：报错时"这一维写了两次"不适用于槽。
 CORE_SLOT_OF = {f"{dim}_{slot}_{v}": (slot, v)
                 for slot, (dim, vs) in CORE_SLOTS.items() for v in vs}
+#: 每一格**不写**时的取值 —— 与 `CORE_DEFAULTS` 同一条纪律（默认不改变行为）。
+#: 依赖要核"根满足了吗"，核的就是这张表补出来的**生效值**。
+CORE_SLOT_DEFAULTS = {"aicheck": "false"}
 
 #: 冲突**两两查**时的维序。**写死的** —— 报错文本里两个取值的先后由它决定，
 #: 而两个实现比的是字节，所以它不能是集合迭代顺序。
@@ -6249,6 +6252,9 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     # 正是判据点名的反面（`docs/188` 的"宁拒勿猜"）。
     _eff = dict(CORE_DEFAULTS)
     _eff.update(mod.chooses)
+    # 槽的生效值（依赖要核"根满足了吗"，与 `_eff` 同一趟落定）。
+    _slot_eff = dict(CORE_SLOT_DEFAULTS)
+    _slot_eff.update(mod.slots)
     # **两两查**（不是写死 `(mode, gc)` 那一对）：加一维时这一段一行都不用动。
     # 先后由 `CORE_DIM_ORDER` 定 —— 报错文本要比字节，不能靠 dict/set 的迭代顺序。
     _vals = [_eff[d] for d in CORE_DIM_ORDER]
@@ -6345,6 +6351,14 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                 errs.append(f"`addin` 单元不许声明核心模式"
                             f"（在 {_unit_where(d)} / `{d.name}` 里，`{word0}`）—— "
                             f"{CORE_DIM_ZH[dim0]}是整个程序的，只有根单元能定")
+            if d.slots:
+                # **槽同一条**（`#1505` 之后补）：`choose lspe_aicheck_true` 写在 addin 里
+                # 同样**静默无效** —— 它决定的是整个程序的台账，不是这个单元的。
+                # 与上一段共用前缀，所以诊断码照旧是 E022。
+                _s0, _sv0, _ = d.slot_lines[0]
+                errs.append(f"`addin` 单元不许声明核心模式"
+                            f"（在 {_unit_where(d)} / `{d.name}` 里，`{_s0}`=`{_sv0}`）—— "
+                            f"槽也是整个程序的，只有根单元能定")
             continue
         # **库要声明它的运行期需求**（`docs/217`）：上面那条"根必须满足依赖"只对
         # **声明了**的依赖有效 —— 一个用了除法却什么都不写的库，会在根写着 `no_runtime`
@@ -6376,6 +6390,21 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                         f"而根单元这一维是 `{_eff[dim0]}` —— 依赖的声明是**需求**，"
                         f"根必须满足它（在 {_unit_where(d)} 里）。"
                         f"在根单元写一行 `choose {word0}`")
+        if d.slots:
+            # **槽也按"需求"办**：它决定整个程序的台账，所以库声明的是"我希望
+            # 这个程序开着/关着"，根必须满足 —— 与上面那条同一形状。静默忽略会
+            # 让 `choose lspe_aicheck_true` 在库里变成一行没人读的注释。
+            _sseen: set[str] = set()
+            for _s0, _sv0, _line0 in d.slot_lines:
+                if _s0 in _sseen:
+                    continue
+                _sseen.add(_s0)
+                if _slot_eff[_s0] != _sv0:
+                    errs.append(
+                        f"依赖 `{d.name}` 要求 核心模式的槽 `{_s0}`=`{_sv0}`，"
+                        f"而根单元这一格是 `{_slot_eff[_s0]}` —— 依赖的声明是**需求**，"
+                        f"根必须满足它（在 {_unit_where(d)} 里）。"
+                        f"在根单元写一行 `choose lspe_{_s0}_{_sv0}`")
         if d.addin_lines:
             _nm, _ln = d.addin_lines[0]
             errs.append(f"库不许 `addin`（在 {_unit_where(d)} / `{d.name}` 里，"

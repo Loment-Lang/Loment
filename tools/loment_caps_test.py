@@ -124,7 +124,7 @@ def test(fn):
 #: 捕获表的步长 `CG_DFR_STRIDE`（84 B/条，**不是**上界，来路写在 `EXPLAINED`）与三个
 #: 真上界 `CG_MAXDFR` / `CG_MAXDFRAMES` / `CG_MAXDFARGS`（都判了 `>=` 并 `cg_fail`）。
 #: 条数 251 → **255**、沉默 168 → **169**（多出来的那一处就是步长本身）。
-CAPACITY_SITES = 259
+CAPACITY_SITES = 260
 SILENT_SITES = 169
 
 #: 第二类：字面量上界（`#770`）。`[T; N]` 与 `literal:<N>` 各自钉住总数与沉默的那一份。

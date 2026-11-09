@@ -1,0 +1,402 @@
+// std/jsonw.lomt — JSON 写出（RFC 8259）
+//
+// 为什么 `jsn` 不够: `jsn.lomt` 是**游标式只读**（"从原文的某个下标走到值"），它明确
+// 不做生成（见那份文件的头注第 1 条）。现实里"读一份、改一处、写回去"是同一个任务，
+// 只有读的那一半，用户就得自己拼引号与逗号 —— 而那正是 JSON 写出最容易错的地方
+// （转义、最后一个元素多一个逗号、对象里少一个冒号）。
+//
+// 形状: 一个**显式状态机**，状态放在调用方给的 `ctx` 里（本语言没有模块级可变全局）。
+// 这不是"树"API: 你按顺序说 `jw_obj` / `jw_key` / `jw_value` / `jw_end`，它负责
+// 逗号、冒号与括号。与 `jsn` 的游标 API 是同一种设计取向。
+//
+// 不做（如实列）:
+//   * 不建 DOM、不排序键、不美化（没有缩进/换行）—— 需要的话是另一个"格式化器"；
+//   * 不把浮点转成"最短往返"以外的形式：`jw_f64` 只用 `f64fmt_shortest` 的结果
+//     （那是与 Python `repr(float)` 对齐的那条路，见 f64fmt）；
+//   * 不验证输入字符串是不是合法 UTF-8 —— 本层把字节原样写出（JSON 的 UTF-8 约束
+//     由调用方保证；验证是 `utf8.lomt` 的事）。
+//
+// 命名: 公开 jw_*, 内部 jw_*。自检 test_jsonw_*。
+
+module jsonw
+choose runtime
+
+use "mem.lomt"
+use "numfmt.lomt"
+use "f64fmt.lomt"
+
+/// 状态区大小 = 64 字节标量 + `f64fmt_scratch_bytes()`（当前 4352）。
+/// 有 `jw_ctx_bytes()` 这个函数当唯一真源；常量只是给"不想调函数"的调用方一个同值。
+pub const JW_CTX: u32 = 4416;
+
+pub fn jw_ctx_bytes() -> u32 {
+    return 64 + f64fmt_scratch_bytes();
+}
+
+const JW_OUT: u32 = 0;
+const JW_CAP: u32 = 8;
+const JW_LEN: u32 = 12;
+const JW_DEPTH: u32 = 16;
+const JW_ERR: u32 = 20;
+const JW_PENDING: u32 = 24;
+const JW_TYPES: u32 = 28;   // 8 层，每层 1 字节：0 = object，1 = array
+const JW_HAS: u32 = 36;     // 8 层，每层 1 字节
+const JW_SC: u32 = 64;
+
+pub const JW_MAX_DEPTH: u32 = 8;
+pub const JW_ERR_FULL: u32 = 1;
+pub const JW_ERR_STATE: u32 = 2;
+
+/// 初始化。`out` 是调用方给的输出缓冲，`cap` 是它的字节数。
+pub fn jw_init(ctx: ptr, out: ptr, cap: u32) {
+    mem_fill(ctx, 0, 64, 0);
+    mem_store64(ctx, JW_OUT, out as u64);
+    mem_store32(ctx, JW_CAP, cap);
+    mem_store32(ctx, JW_LEN, 0);
+    mem_store32(ctx, JW_DEPTH, 0);
+    mem_store32(ctx, JW_ERR, 0);
+    mem_store32(ctx, JW_PENDING, 0);
+}
+
+fn jw_out(ctx: ptr) -> ptr {
+    return mem_load64(ctx, JW_OUT) as ptr;
+}
+
+fn jw_putc(ctx: ptr, c: u32) {
+    if mem_load32(ctx, JW_ERR) != 0 {
+        return;
+    }
+    let len: u32 = mem_load32(ctx, JW_LEN);
+    if len >= mem_load32(ctx, JW_CAP) {
+        mem_store32(ctx, JW_ERR, JW_ERR_FULL);
+        return;
+    }
+    store8(jw_out(ctx), len, c as u8);
+    mem_store32(ctx, JW_LEN, len + 1);
+}
+
+fn jw_puts(ctx: ptr, s: str) {
+    let n: u32 = str_len(s);
+    let p: ptr = str_ptr(s);
+    let i: u32 = 0;
+    while i < n {
+        jw_putc(ctx, load8(p, i));
+        i = i + 1;
+    }
+}
+
+fn jw_put_hex4(ctx: ptr, v: u32) {
+    let i: u32 = 3;
+    let scanning: u32 = 1;
+    while scanning == 1 {
+        let d: u32 = (v >> (i * 4)) & 15;
+        if d < 10 {
+            jw_putc(ctx, 48 + d);
+        } else {
+            jw_putc(ctx, 87 + d);
+        }
+        if i == 0 {
+            scanning = 0;
+        } else {
+            i = i - 1;
+        }
+    }
+}
+
+fn jw_escaped(ctx: ptr, s: str) {
+    jw_putc(ctx, 34); // '"'
+    let n: u32 = str_len(s);
+    let p: ptr = str_ptr(s);
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = load8(p, i);
+        if c == 34 {
+            jw_putc(ctx, 92);
+            jw_putc(ctx, 34);
+        } else if c == 92 {
+            jw_putc(ctx, 92);
+            jw_putc(ctx, 92);
+        } else if c == 10 {
+            jw_putc(ctx, 92);
+            jw_putc(ctx, 110); // n
+        } else if c == 13 {
+            jw_putc(ctx, 92);
+            jw_putc(ctx, 114); // r
+        } else if c == 9 {
+            jw_putc(ctx, 92);
+            jw_putc(ctx, 116); // t
+        } else if c == 8 {
+            jw_putc(ctx, 92);
+            jw_putc(ctx, 98);  // b
+        } else if c == 12 {
+            jw_putc(ctx, 92);
+            jw_putc(ctx, 102); // f
+        } else if c < 32 {
+            jw_putc(ctx, 92);
+            jw_putc(ctx, 117); // u
+            jw_put_hex4(ctx, c);
+        } else {
+            jw_putc(ctx, c);
+        }
+        i = i + 1;
+    }
+    jw_putc(ctx, 34);
+}
+
+fn jw_type_at(ctx: ptr, d: u32) -> u32 {
+    return load8(ctx, JW_TYPES + d);
+}
+
+fn jw_has_at(ctx: ptr, d: u32) -> u32 {
+    return load8(ctx, JW_HAS + d);
+}
+
+fn jw_set_has(ctx: ptr, d: u32, v: u32) {
+    store8(ctx, JW_HAS + d, v as u8);
+}
+
+/// 一个值开始：负责对象/数组里的逗号与"对象里必须有键"。
+fn jw_value_start(ctx: ptr) -> u32 {
+    if mem_load32(ctx, JW_ERR) != 0 {
+        return JW_ERR_STATE;
+    }
+    let depth: u32 = mem_load32(ctx, JW_DEPTH);
+    if depth == 0 {
+        if mem_load32(ctx, JW_LEN) != 0 {
+            return JW_ERR_STATE; // 一个根值
+        }
+        return 0;
+    }
+    if mem_load32(ctx, JW_PENDING) != 0 {
+        mem_store32(ctx, JW_PENDING, 0);
+        return 0; // 键已经写了冒号
+    }
+    if jw_type_at(ctx, depth - 1) == 0 {
+        return JW_ERR_STATE; // 对象里的值必须先有键
+    }
+    if jw_has_at(ctx, depth - 1) != 0 {
+        jw_putc(ctx, 44); // ','
+    }
+    jw_set_has(ctx, depth - 1, 1);
+    return 0;
+}
+
+fn jw_open(ctx: ptr, type: u32) -> u32 {
+    if jw_value_start(ctx) != 0 {
+        mem_store32(ctx, JW_ERR, JW_ERR_STATE);
+        return JW_ERR_STATE;
+    }
+    let depth: u32 = mem_load32(ctx, JW_DEPTH);
+    if depth >= JW_MAX_DEPTH {
+        mem_store32(ctx, JW_ERR, JW_ERR_STATE);
+        return JW_ERR_STATE;
+    }
+    store8(ctx, JW_TYPES + depth, type as u8);
+    jw_set_has(ctx, depth, 0);
+    mem_store32(ctx, JW_DEPTH, depth + 1);
+    if type == 0 {
+        jw_putc(ctx, 123); // '{'
+    } else {
+        jw_putc(ctx, 91);  // '['
+    }
+    return 0;
+}
+
+pub fn jw_obj(ctx: ptr) -> u32 {
+    return jw_open(ctx, 0);
+}
+
+pub fn jw_arr(ctx: ptr) -> u32 {
+    return jw_open(ctx, 1);
+}
+
+/// 收一层。返回 0 成功。
+pub fn jw_end(ctx: ptr) -> u32 {
+    let depth: u32 = mem_load32(ctx, JW_DEPTH);
+    if depth == 0 || mem_load32(ctx, JW_PENDING) != 0 {
+        mem_store32(ctx, JW_ERR, JW_ERR_STATE);
+        return JW_ERR_STATE;
+    }
+    let t: u32 = jw_type_at(ctx, depth - 1);
+    mem_store32(ctx, JW_DEPTH, depth - 1);
+    if t == 0 {
+        jw_putc(ctx, 125); // '}'
+    } else {
+        jw_putc(ctx, 93);  // ']'
+    }
+    return 0;
+}
+
+/// 对象里的键。写 `,`（需要时）+ 字符串 + `:`。
+pub fn jw_key(ctx: ptr, s: str) -> u32 {
+    let depth: u32 = mem_load32(ctx, JW_DEPTH);
+    if depth == 0 || jw_type_at(ctx, depth - 1) != 0 || mem_load32(ctx, JW_PENDING) != 0 {
+        mem_store32(ctx, JW_ERR, JW_ERR_STATE);
+        return JW_ERR_STATE;
+    }
+    if jw_has_at(ctx, depth - 1) != 0 {
+        jw_putc(ctx, 44);
+    }
+    jw_set_has(ctx, depth - 1, 1);
+    jw_escaped(ctx, s);
+    jw_putc(ctx, 58); // ':'
+    mem_store32(ctx, JW_PENDING, 1);
+    return 0;
+}
+
+pub fn jw_str(ctx: ptr, s: str) -> u32 {
+    if jw_value_start(ctx) != 0 {
+        mem_store32(ctx, JW_ERR, JW_ERR_STATE);
+        return JW_ERR_STATE;
+    }
+    jw_escaped(ctx, s);
+    return 0;
+}
+
+pub fn jw_u64(ctx: ptr, v: u64) -> u32 {
+    if jw_value_start(ctx) != 0 {
+        mem_store32(ctx, JW_ERR, JW_ERR_STATE);
+        return JW_ERR_STATE;
+    }
+    let len: u32 = mem_load32(ctx, JW_LEN);
+    if mem_load32(ctx, JW_CAP) - len < 24 {
+        mem_store32(ctx, JW_ERR, JW_ERR_FULL);
+        return JW_ERR_FULL;
+    }
+    let n: u32 = numfmt_dec_into(ptr_add(jw_out(ctx), len), v);
+    mem_store32(ctx, JW_LEN, len + n);
+    return 0;
+}
+
+pub fn jw_i64(ctx: ptr, v: i64) -> u32 {
+    if jw_value_start(ctx) != 0 {
+        mem_store32(ctx, JW_ERR, JW_ERR_STATE);
+        return JW_ERR_STATE;
+    }
+    if v < 0 as i64 {
+        jw_putc(ctx, 45);
+        // 取绝对值用补码取反，避免 i64 最小值取负溢出。
+        let m: u64 = ((v as u64) ^ 18446744073709551615) + 1;
+        let len: u32 = mem_load32(ctx, JW_LEN);
+        if mem_load32(ctx, JW_CAP) - len < 24 {
+            mem_store32(ctx, JW_ERR, JW_ERR_FULL);
+            return JW_ERR_FULL;
+        }
+        let n: u32 = numfmt_dec_into(ptr_add(jw_out(ctx), len), m);
+        mem_store32(ctx, JW_LEN, len + n);
+        return 0;
+    }
+    return jw_u64(ctx, v as u64);
+}
+
+pub fn jw_bool(ctx: ptr, v: u32) -> u32 {
+    if jw_value_start(ctx) != 0 {
+        mem_store32(ctx, JW_ERR, JW_ERR_STATE);
+        return JW_ERR_STATE;
+    }
+    if v != 0 {
+        jw_puts(ctx, "true");
+    } else {
+        jw_puts(ctx, "false");
+    }
+    return 0;
+}
+
+pub fn jw_null(ctx: ptr) -> u32 {
+    if jw_value_start(ctx) != 0 {
+        mem_store32(ctx, JW_ERR, JW_ERR_STATE);
+        return JW_ERR_STATE;
+    }
+    jw_puts(ctx, "null");
+    return 0;
+}
+
+/// 原样写一段文本（调用方保证它是合法 JSON 值）。用于已经格式化好的数字/子文档。
+pub fn jw_raw(ctx: ptr, s: str) -> u32 {
+    if jw_value_start(ctx) != 0 {
+        mem_store32(ctx, JW_ERR, JW_ERR_STATE);
+        return JW_ERR_STATE;
+    }
+    jw_puts(ctx, s);
+    return 0;
+}
+
+/// 浮点（IEEE 754 位）。用 `f64fmt_shortest`，与 Python 的 `repr(float)` 对齐。
+pub fn jw_f64(ctx: ptr, bits: u64) -> u32 {
+    if jw_value_start(ctx) != 0 {
+        mem_store32(ctx, JW_ERR, JW_ERR_STATE);
+        return JW_ERR_STATE;
+    }
+    let len: u32 = mem_load32(ctx, JW_LEN);
+    let cap: u32 = mem_load32(ctx, JW_CAP);
+    if cap - len < 64 {
+        mem_store32(ctx, JW_ERR, JW_ERR_FULL);
+        return JW_ERR_FULL;
+    }
+    let n: u32 = f64fmt_shortest(jw_out(ctx), len, bits, ptr_add(ctx, JW_SC));
+    mem_store32(ctx, JW_LEN, len + n);
+    return 0;
+}
+
+/// 写出的字节数。
+pub fn jw_len(ctx: ptr) -> u32 {
+    return mem_load32(ctx, JW_LEN);
+}
+
+/// 非 0 = 出错（缓冲满 / 状态错）。
+pub fn jw_err(ctx: ptr) -> u32 {
+    return mem_load32(ctx, JW_ERR);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_jsonw_ctx_matches() -> bool {
+    return JW_CTX == jw_ctx_bytes();
+}
+
+fn test_jsonw_object() -> bool {
+    let ctx: ptr = alloc(JW_CTX);
+    let out: ptr = alloc(256);
+    jw_init(ctx, out, 256);
+    jw_obj(ctx);
+    jw_key(ctx, "a");
+    jw_u64(ctx, 7);
+    jw_key(ctx, "b");
+    jw_str(ctx, "x\"y");
+    jw_key(ctx, "c");
+    jw_arr(ctx);
+    jw_bool(ctx, 1);
+    jw_null(ctx);
+    jw_end(ctx);
+    jw_end(ctx);
+    let want: str = "{\"a\":7,\"b\":\"x\\\"y\",\"c\":[true,null]}";
+    let n: u32 = jw_len(ctx);
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(out, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_jsonw_rejects_value_in_object() -> bool {
+    let ctx: ptr = alloc(JW_CTX);
+    let out: ptr = alloc(64);
+    jw_init(ctx, out, 64);
+    jw_obj(ctx);
+    jw_u64(ctx, 1);
+    return jw_err(ctx) != 0;
+}
+
+fn test_jsonw_full() -> bool {
+    let ctx: ptr = alloc(JW_CTX);
+    let out: ptr = alloc(4);
+    jw_init(ctx, out, 4);
+    jw_str(ctx, "abcdef");
+    return jw_err(ctx) != 0;
+}

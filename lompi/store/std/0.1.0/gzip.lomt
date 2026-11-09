@@ -1,0 +1,277 @@
+// std/gzip.lomt — gzip 容器（RFC 1952）：头 + 裸 DEFLATE + CRC-32/ISIZE
+//
+// 为什么 zlibc 不够: zlib（RFC 1950）与 gzip（RFC 1952）**都裹着同一种 DEFLATE**，
+// 但外衣不同 —— 头长度、校验算法（Adler-32 vs CRC-32）、尾部字段、可选字段都不一样。
+// 把 gzip 数据喂给 `zc_inflate` 会在第一个字节就失败；反过来也一样。
+//
+// 格式:
+//   ID1 ID2 CM FLG MTIME(4 LE) XFL OS        —— 10 字节定长头
+//   [FEXTRA: XLEN(2 LE) + 数据] [FNAME: 0 结尾] [FCOMMENT: 0 结尾] [FHCRC: 2 LE]
+//   ... 裸 DEFLATE ...
+//   CRC-32(4 LE) · ISIZE(4 LE，未压缩长度 mod 2^32)
+//
+// 四条**必须做对**的东西（都是"静默错"的高发区）:
+//   1. FLG 的保留位（bit 5..7）非零 —— 拒绝，不要猜；
+//   2. FNAME/FCOMMENT 的 0 可能落在缓冲区外 —— 先判边界再扫；
+//   3. FHCRC 是**头部的 CRC-32 的低 16 位**，不是 CRC-16；
+//   4. ISIZE 是**未压缩长度**（不是压缩后长度），且 mod 2^32。
+//
+// 不做的（如实列）:
+//   * 多成员（concatenated）流：一次调用解一个成员，成员之后的数据由 `consumed_out`
+//     自己接 —— 把循环留给调用方（与 zlibc 的边界一致）。
+//   * FEXTRA / FNAME / FCOMMENT 的内容不解释、不返回；只负责跳过。
+//
+// 命名: 公开 gz_*, 内部 gz_*。自检 test_gzip_*。
+
+module gzip
+choose runtime
+
+use "mem.lomt"
+use "endian.lomt"
+use "inflate.lomt"
+use "deflate.lomt"
+use "crc32.lomt"
+
+pub const GZ_OK: u32 = 0;
+pub const GZ_ERR: u32 = 4294967295;
+
+/// 解压入口要的工作区：inflate 的 + 两个 4 字节输出槽。
+pub fn gz_scratch_bytes() -> u32 {
+    return inf_scratch_bytes() + 8;
+}
+
+/// 压缩入口要的工作区（按输入长度）。
+pub fn gz_deflate_scratch(n: u32) -> u32 {
+    return df_scratch_bytes(n);
+}
+
+/// 是不是 gzip 魔数（只看前两个字节）。
+pub fn gz_is_gzip(src: ptr, n: u32) -> bool {
+    if n < 2 {
+        return false;
+    }
+    return load8(src, 0) == 31 && load8(src, 1) == 139;
+}
+
+fn gz_scan_zero(src: ptr, n: u32, from: u32) -> u32 {
+    let i: u32 = from;
+    while i < n {
+        if load8(src, i) == 0 {
+            return i + 1;
+        }
+        i = i + 1;
+    }
+    return 0; // 没找到
+}
+
+/// 头部长度（含可选字段与 FHCRC）；不是合法 gzip 头返回 0。
+pub fn gz_header_len(src: ptr, n: u32) -> u32 {
+    if n < 10 {
+        return 0;
+    }
+    if load8(src, 0) != 31 || load8(src, 1) != 139 {
+        return 0;
+    }
+    if load8(src, 2) != 8 {
+        return 0; // CM 只认 deflate
+    }
+    let flg: u32 = load8(src, 3);
+    if (flg & 224) != 0 {
+        return 0; // 保留位必须为 0
+    }
+    let o0: u32 = 10;
+    let o: u32 = o0;
+    if (flg & 4) != 0 {
+        if o + 2 > n {
+            return 0;
+        }
+        let xlen: u32 = endian_load16le(src, o);
+        o = o + 2;
+        if o + xlen > n {
+            return 0;
+        }
+        o = o + xlen;
+    }
+    if (flg & 8) != 0 {
+        o = gz_scan_zero(src, n, o);
+        if o == 0 {
+            return 0;
+        }
+    }
+    if (flg & 16) != 0 {
+        o = gz_scan_zero(src, n, o);
+        if o == 0 {
+            return 0;
+        }
+    }
+    if (flg & 2) != 0 {
+        if o + 2 > n {
+            return 0;
+        }
+        let want: u32 = endian_load16le(src, o);
+        let got: u32 = crc32(src, 0, o) & 65535;
+        if want != got {
+            return 0;
+        }
+        o = o + 2;
+    }
+    return o;
+}
+
+/// 头里的 MTIME（Unix 秒，0 = 未给）。不是 gzip 头返回 0。
+pub fn gz_mtime(src: ptr, n: u32) -> u32 {
+    if gz_header_len(src, n) == 0 {
+        return 0;
+    }
+    return endian_load32le(src, 4);
+}
+
+/// 完整解压。成功返回 GZ_OK，并把解出长度写进 `out_len_out`、把**吃掉的输入字节数**
+/// （头 + DEFLATE + 8 字节尾）写进 `consumed_out`；CRC/ISIZE 任一不符返回 GZ_ERR，
+/// 此时两个输出都不写。`ws` 至少 `gz_scratch_bytes()`。
+pub fn gz_inflate_full(src: ptr, sn: u32, out: ptr, out_cap: u32, out_len_out: ptr, consumed_out: ptr, ws: ptr) -> u32 {
+    let h: u32 = gz_header_len(src, sn);
+    if h == 0 {
+        return GZ_ERR;
+    }
+    let sb: u32 = inf_scratch_bytes();
+    let iws: ptr = ws;
+    let olen: ptr = ptr_add(ws, sb);
+    let used: ptr = ptr_add(ws, sb + 4);
+    let body_n: u32 = sn - h;
+    let body: ptr = ptr_add(src, h);
+    let r: u32 = inf_inflate_full(body, body_n, out, out_cap, olen, used, iws);
+    if r != 0 {
+        return GZ_ERR;
+    }
+    let ol: u32 = mem_load32(olen, 0);
+    let u: u32 = mem_load32(used, 0);
+    if u > body_n {
+        return GZ_ERR;
+    }
+    if body_n - u < 8 {
+        return GZ_ERR;
+    }
+    let want_crc: u32 = endian_load32le(body, u);
+    let want_size: u32 = endian_load32le(body, u + 4);
+    if want_crc != crc32(out, 0, ol) {
+        return GZ_ERR;
+    }
+    if want_size != ol {
+        return GZ_ERR;
+    }
+    mem_store32(out_len_out, 0, ol);
+    mem_store32(consumed_out, 0, h + u + 8);
+    return GZ_OK;
+}
+
+/// 便捷版：自己开工作区（循环解很多成员时别用，bump 堆不回收）。
+pub fn gz_inflate(src: ptr, sn: u32, out: ptr, out_cap: u32, out_len_out: ptr, consumed_out: ptr) -> u32 {
+    let ws: ptr = alloc(gz_scratch_bytes());
+    return gz_inflate_full(src, sn, out, out_cap, out_len_out, consumed_out, ws);
+}
+
+/// 压缩成 gzip。返回写出的总字节数；失败 GZ_ERR。`mtime` 是 Unix 秒（写 0 表示"不给"）。
+/// `ws` 至少 `gz_deflate_scratch(sn)`。
+pub fn gz_deflate_full(src: ptr, sn: u32, out: ptr, out_cap: u32, mtime: u32, ws: ptr) -> u32 {
+    if sn > DF_MAX_INPUT {
+        return GZ_ERR;
+    }
+    if out_cap < 18 {
+        return GZ_ERR;
+    }
+    store8(out, 0, 31 as u8);   // ID1
+    store8(out, 1, 139 as u8);  // ID2
+    store8(out, 2, 8 as u8);    // CM = deflate
+    store8(out, 3, 0 as u8);    // FLG
+    endian_store32le(out, 4, mtime);
+    store8(out, 8, 0 as u8);    // XFL
+    store8(out, 9, 3 as u8);    // OS = Unix
+    let body: ptr = ptr_add(out, 10);
+    let w: u32 = df_deflate_ws(src, sn, body, out_cap - 10, ws);
+    if w == DF_ERR {
+        return GZ_ERR;
+    }
+    if 10 + w + 8 > out_cap {
+        return GZ_ERR;
+    }
+    endian_store32le(out, 10 + w, crc32(src, 0, sn));
+    endian_store32le(out, 10 + w + 4, sn);
+    return 10 + w + 8;
+}
+
+/// 便捷版：自己开工作区。
+pub fn gz_deflate(src: ptr, sn: u32, out: ptr, out_cap: u32, mtime: u32) -> u32 {
+    if sn > DF_MAX_INPUT {
+        return GZ_ERR;
+    }
+    let ws: ptr = alloc(gz_deflate_scratch(sn));
+    return gz_deflate_full(src, sn, out, out_cap, mtime, ws);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_gzip_roundtrip() -> bool {
+    let s: str = "hello hello hello hello";
+    let src: ptr = alloc(64);
+    let gz: ptr = alloc(256);
+    let out: ptr = alloc(64);
+    let ws: ptr = alloc(gz_deflate_scratch(23));
+    let gzs: ptr = alloc(gz_scratch_bytes());
+    let olen: ptr = alloc(4);
+    let used: ptr = alloc(4);
+    mem_copy(src, 0, str_ptr(s), 0, 23);
+    let n: u32 = gz_deflate_full(src, 23, gz, 256, 0, ws);
+    if n == GZ_ERR {
+        return false;
+    }
+    if gz_header_len(gz, n) != 10 {
+        return false;
+    }
+    if gz_inflate_full(gz, n, out, 64, olen, used, gzs) != GZ_OK {
+        return false;
+    }
+    if mem_load32(olen, 0) != 23 || mem_load32(used, 0) != n {
+        return false;
+    }
+    return mem_eq(src, 0, out, 0, 23);
+}
+
+fn test_gzip_header_options() -> bool {
+    // 手搓一个带 FEXTRA + FNAME + FHCRC 的头（只测头，不解压）。
+    let b: ptr = alloc(64);
+    store8(b, 0, 31 as u8);
+    store8(b, 1, 139 as u8);
+    store8(b, 2, 8 as u8);
+    store8(b, 3, 4 as u8 + 8 as u8 + 2 as u8);  // FEXTRA|FNAME|FHCRC
+    endian_store32le(b, 4, 0);
+    store8(b, 8, 0 as u8);
+    store8(b, 9, 3 as u8);
+    endian_store16le(b, 10, 2);   // XLEN
+    store8(b, 12, 65 as u8);
+    store8(b, 13, 66 as u8);
+    store8(b, 14, 120 as u8);     // "x"
+    store8(b, 15, 0 as u8);
+    let o: u32 = 16;
+    let c: u32 = crc32(b, 0, o) & 65535;
+    endian_store16le(b, o, c);
+    return gz_header_len(b, o + 2) == o + 2;
+}
+
+fn test_gzip_rejects_corrupt() -> bool {
+    let s: str = "abcabcabcabc";
+    let src: ptr = alloc(32);
+    let gz: ptr = alloc(128);
+    let out: ptr = alloc(32);
+    let olen: ptr = alloc(4);
+    let used: ptr = alloc(4);
+    mem_copy(src, 0, str_ptr(s), 0, 12);
+    let n: u32 = gz_deflate(src, 12, gz, 128, 0);
+    if n == GZ_ERR {
+        return false;
+    }
+    // 改一个压缩字节：解压或 CRC 必须报错，不能"成功返回坏数据"。
+    let b: u32 = load8(gz, 12);
+    store8(gz, 12, (b ^ 1) as u8);
+    return gz_inflate(gz, n, out, 32, olen, used) == GZ_ERR;
+}

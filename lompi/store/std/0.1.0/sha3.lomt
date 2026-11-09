@@ -1,0 +1,335 @@
+// std/sha3.lomt — SHA-3（FIPS 202）：224 / 256 / 384 / 512
+//
+// 为什么除了 SHA-2 还要它: SHA-3 的构造（Keccak 海绵）与 SHA-2（Merkle–Damgård）
+// **不是同一种结构**。SHA-2 上长度扩展攻击成立、SHA-3 上不成立；两族一起用是"换一条
+// 假设"而不是"再算一遍"。标准库给两族，选择权在调用方。
+//
+// 实现: Keccak-f[1600]（25 个 64 位 lane，24 轮），海绵吸收/挤出。
+//   * 速率（rate）: SHA3-224 = 144、SHA3-256 = 136、SHA3-384 = 104、SHA3-512 = 72 字节；
+//   * 填充: `0x06` + 若干 `0x00` + 末字节 `| 0x80`（FIPS 202 的 `SHA3` 域分隔）；
+//   * lane 是**小端**字节序（这一点与 SHA-2 的大端消息字不同，最容易写反）。
+//
+// 不做的（如实列）:
+//   * SHAKE128 / SHAKE256（可扩展输出）—— 海绵本身支持，但它的 API 是"要多少给多少"，
+//     与定长摘要的调用形状不同；先不混进来。
+//   * KMAC / cSHAKE（自定义域分隔）—— 要字符串参数与更长的域填充，属于下一个模块。
+//
+// 命名: 公开 sha3_*, 内部 k3_*。自检 test_sha3_*。
+
+module sha3
+choose runtime
+
+use "mem.lomt"
+use "hex.lomt"
+
+/// 上下文大小（调用方给这么多字节）。
+/// 布局: [0..200) 状态 lane · [200..344) 块缓冲 · [344..348) 已用 · [348..352) rate
+///       · [352..392) C[5] · [392..592) B[25]
+pub const SHA3_CTX: u32 = 592;
+
+pub const SHA3_224_DIGEST: u32 = 28;
+pub const SHA3_256_DIGEST: u32 = 32;
+pub const SHA3_384_DIGEST: u32 = 48;
+pub const SHA3_512_DIGEST: u32 = 64;
+
+const K3_BUF: u32 = 200;
+const K3_USED: u32 = 344;
+const K3_RATE: u32 = 348;
+const K3_C: u32 = 352;
+const K3_B: u32 = 392;
+
+fn k3_rot_offset(i: u32) -> u32 {
+    // 25 个旋转量，x 变化最快（x + 5y）。查表而不是算，表本身就是规范。
+    let t: str = "00013e1c1b242c063714030a2b1927292d0f150812023d380e";
+    let o: u32 = i * 2;
+    let hi: u32 = load8(str_ptr(t), o);
+    let lo: u32 = load8(str_ptr(t), o + 1);
+    let a: u32 = 0;
+    let b: u32 = 0;
+    if hi >= 48 && hi <= 57 {
+        a = hi - 48;
+    } else {
+        a = hi - 87;
+    }
+    if lo >= 48 && lo <= 57 {
+        b = lo - 48;
+    } else {
+        b = lo - 87;
+    }
+    return (a << 4) | b;
+}
+
+fn k3_rc(round: u32) -> u64 {
+    let t: str = "00000000000000010000000000008082800000000000808a8000000080008000000000000000808b000000008000000180000000800080818000000000008009000000000000008a00000000000000880000000080008009000000008000000a000000008000808b800000000000008b8000000000008089800000000000800380000000000080028000000000000080000000000000800a800000008000000a8000000080008081800000000000808000000000800000018000000080008008";
+    let o: u32 = round * 16;
+    let v: u64 = 0 as u64;
+    let j: u32 = 0;
+    while j < 16 {
+        let c: u32 = str_byte(t, o + j);
+        let d: u64 = 0 as u64;
+        if c >= 48 && c <= 57 {
+            d = (c - 48) as u64;
+        } else {
+            d = (c - 87) as u64;
+        }
+        v = (v << 4) | d;
+        j = j + 1;
+    }
+    return v;
+}
+
+fn k3_rol(x: u64, n: u32) -> u64 {
+    if n == 0 {
+        return x;
+    }
+    return (x << n) | (x >> (64 - n));
+}
+
+fn k3_lane(st: ptr, i: u32) -> u64 {
+    return mem_load64(st, i * 8);
+}
+
+fn k3_set_lane(st: ptr, i: u32, v: u64) {
+    mem_store64(st, i * 8, v);
+}
+
+fn k3_permute(ctx: ptr) {
+    let ones: u64 = 18446744073709551615;
+    let round: u32 = 0;
+    while round < 24 {
+        // theta: C[x] = A[x] ^ A[x+5] ^ A[x+10] ^ A[x+15] ^ A[x+20]
+        let x: u32 = 0;
+        while x < 5 {
+            let v: u64 = k3_lane(ctx, x) ^ k3_lane(ctx, x + 5) ^ k3_lane(ctx, x + 10)
+                ^ k3_lane(ctx, x + 15) ^ k3_lane(ctx, x + 20);
+            mem_store64(ctx, K3_C + x * 8, v);
+            x = x + 1;
+        }
+        x = 0;
+        while x < 5 {
+            let left: u32 = x + 4;
+            if left >= 5 {
+                left = left - 5;
+            }
+            let right: u32 = x + 1;
+            if right >= 5 {
+                right = right - 5;
+            }
+            let d: u64 = mem_load64(ctx, K3_C + left * 8)
+                ^ k3_rol(mem_load64(ctx, K3_C + right * 8), 1);
+            let y: u32 = 0;
+            while y < 5 {
+                let i: u32 = x + 5 * y;
+                k3_set_lane(ctx, i, k3_lane(ctx, i) ^ d);
+                y = y + 1;
+            }
+            x = x + 1;
+        }
+        // rho + pi: B[y + 5*((2x+3y) mod 5)] = rol(A[x + 5y], r[x + 5y])
+        x = 0;
+        while x < 5 {
+            let y: u32 = 0;
+            while y < 5 {
+                let i: u32 = x + 5 * y;
+                let nx: u32 = y;
+                let ny0: u32 = 2 * x + 3 * y;
+                let ny: u32 = ny0 % 5;
+                let dst: u32 = nx + 5 * ny;
+                mem_store64(ctx, K3_B + dst * 8, k3_rol(k3_lane(ctx, i), k3_rot_offset(i)));
+                y = y + 1;
+            }
+            x = x + 1;
+        }
+        // chi: A[x + 5y] = B[x + 5y] ^ ((~B[x+1 + 5y]) & B[x+2 + 5y])
+        x = 0;
+        while x < 5 {
+            let y: u32 = 0;
+            while y < 5 {
+                let a: u64 = mem_load64(ctx, K3_B + (x + 5 * y) * 8);
+                let x1: u32 = x + 1;
+                let x2: u32 = x + 2;
+                if x1 >= 5 {
+                    x1 = x1 - 5;
+                }
+                if x2 >= 5 {
+                    x2 = x2 - 5;
+                }
+                let b: u64 = mem_load64(ctx, K3_B + (x1 + 5 * y) * 8);
+                let c: u64 = mem_load64(ctx, K3_B + (x2 + 5 * y) * 8);
+                k3_set_lane(ctx, x + 5 * y, a ^ ((b ^ ones) & c));
+                y = y + 1;
+            }
+            x = x + 1;
+        }
+        // iota
+        k3_set_lane(ctx, 0, k3_lane(ctx, 0) ^ k3_rc(round));
+        round = round + 1;
+    }
+}
+
+fn k3_absorb_block(ctx: ptr) {
+    let rate: u32 = mem_load32(ctx, K3_RATE);
+    let lanes: u32 = rate / 8;
+    let i: u32 = 0;
+    while i < lanes {
+        let v: u64 = 0 as u64;
+        let j: u32 = 0;
+        while j < 8 {
+            let b: u64 = load8(ctx, K3_BUF + i * 8 + j) as u64;
+            v = v | (b << (8 * j));
+            j = j + 1;
+        }
+        k3_set_lane(ctx, i, k3_lane(ctx, i) ^ v);
+        i = i + 1;
+    }
+    k3_permute(ctx);
+}
+
+/// 初始化。`bits` 只能是 224 / 256 / 384 / 512；返回该变体的 rate（字节），否则 0。
+pub fn sha3_init(ctx: ptr, bits: u32) -> u32 {
+    mem_fill(ctx, 0, SHA3_CTX, 0);
+    let rate: u32 = 0;
+    if bits == 224 {
+        rate = 144;
+    } else if bits == 256 {
+        rate = 136;
+    } else if bits == 384 {
+        rate = 104;
+    } else if bits == 512 {
+        rate = 72;
+    } else {
+        return 0;
+    }
+    mem_store32(ctx, K3_RATE, rate);
+    mem_store32(ctx, K3_USED, 0);
+    return rate;
+}
+
+pub fn sha3_update(ctx: ptr, d: ptr, n: u32) {
+    let rate: u32 = mem_load32(ctx, K3_RATE);
+    let used: u32 = mem_load32(ctx, K3_USED);
+    let i: u32 = 0;
+    while i < n {
+        let room: u32 = rate - used;
+        let take: u32 = n - i;
+        let m: u32 = take;
+        if m > room {
+            m = room;
+        }
+        mem_copy(ctx, K3_BUF + used, d, i, m);
+        used = used + m;
+        i = i + m;
+        if used == rate {
+            k3_absorb_block(ctx);
+            used = 0;
+        }
+    }
+    mem_store32(ctx, K3_USED, used);
+}
+
+/// 收尾并挤出摘要。返回摘要字节数（28 / 32 / 48 / 64）。
+pub fn sha3_final(ctx: ptr, out: ptr) -> u32 {
+    let rate: u32 = mem_load32(ctx, K3_RATE);
+    let used: u32 = mem_load32(ctx, K3_USED);
+    // 填充: 0x06 ... 0x80。rate >= 72，used <= rate-1，所以两个位置不会打架
+    // （used == rate 时 update 已经吸收过，这里 used 必然 < rate）。
+    mem_fill(ctx, K3_BUF + used, rate - used, 0);
+    let b0: u32 = load8(ctx, K3_BUF + used);
+    store8(ctx, K3_BUF + used, (b0 ^ 6) as u8);
+    let bl: u32 = load8(ctx, K3_BUF + rate - 1);
+    store8(ctx, K3_BUF + rate - 1, (bl ^ 128) as u8);
+    k3_absorb_block(ctx);
+    let digest: u32 = 0;
+    if rate == 144 {
+        digest = SHA3_224_DIGEST;
+    } else if rate == 136 {
+        digest = SHA3_256_DIGEST;
+    } else if rate == 104 {
+        digest = SHA3_384_DIGEST;
+    } else {
+        digest = SHA3_512_DIGEST;
+    }
+    let i: u32 = 0;
+    while i < digest {
+        let lane: u64 = k3_lane(ctx, i / 8);
+        let shift: u32 = (i % 8) * 8;
+        let b: u32 = ((lane >> shift) & 255) as u32;
+        store8(out, i, b as u8);
+        i = i + 1;
+    }
+    return digest;
+}
+
+/// 一次算完四个变体。`ctx` 至少 `SHA3_CTX` 字节（可复用）。
+pub fn sha3_224(d: ptr, n: u32, out: ptr, ctx: ptr) -> u32 {
+    let _r: u32 = sha3_init(ctx, 224);
+    sha3_update(ctx, d, n);
+    return sha3_final(ctx, out);
+}
+
+pub fn sha3_256(d: ptr, n: u32, out: ptr, ctx: ptr) -> u32 {
+    let _r: u32 = sha3_init(ctx, 256);
+    sha3_update(ctx, d, n);
+    return sha3_final(ctx, out);
+}
+
+pub fn sha3_384(d: ptr, n: u32, out: ptr, ctx: ptr) -> u32 {
+    let _r: u32 = sha3_init(ctx, 384);
+    sha3_update(ctx, d, n);
+    return sha3_final(ctx, out);
+}
+
+pub fn sha3_512(d: ptr, n: u32, out: ptr, ctx: ptr) -> u32 {
+    let _r: u32 = sha3_init(ctx, 512);
+    sha3_update(ctx, d, n);
+    return sha3_final(ctx, out);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_sha3_init_rates() -> bool {
+    let c: ptr = alloc(SHA3_CTX);
+    return sha3_init(c, 224) == 144 && sha3_init(c, 256) == 136
+        && sha3_init(c, 384) == 104 && sha3_init(c, 512) == 72 && sha3_init(c, 1) == 0;
+}
+
+fn test_sha3_256_empty() -> bool {
+    // FIPS 202 的空输入向量: a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a
+    let c: ptr = alloc(SHA3_CTX);
+    let d: ptr = alloc(64);
+    let z: ptr = alloc(1);
+    if sha3_256(z, 0, d, c) != 32 {
+        return false;
+    }
+    let want: str = "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a";
+    let i: u32 = 0;
+    while i < 32 {
+        let hi: u32 = hex_val(str_byte(want, i * 2));
+        let lo: u32 = hex_val(str_byte(want, i * 2 + 1));
+        if load8(d, i) != ((hi << 4) | lo) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_sha3_256_abc() -> bool {
+    // "abc" 的 SHA3-256: 3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532
+    let c: ptr = alloc(SHA3_CTX);
+    let d: ptr = alloc(64);
+    let s: str = "abc";
+    if sha3_256(str_ptr(s), 3, d, c) != 32 {
+        return false;
+    }
+    return load8(d, 0) == 58 && load8(d, 1) == 152 && load8(d, 31) == 50;
+}
+
+fn test_sha3_512_empty_first_byte() -> bool {
+    // SHA3-512("") 以 0xa6 开头（完整向量在行为判据里与 Python 对跑）。
+    let c: ptr = alloc(SHA3_CTX);
+    let d: ptr = alloc(64);
+    let z: ptr = alloc(1);
+    let n: u32 = sha3_512(z, 0, d, c);
+    return n == 64 && load8(d, 0) == 166;
+}

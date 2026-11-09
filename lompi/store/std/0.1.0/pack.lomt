@@ -1,0 +1,407 @@
+// std/pack.lomt — 二进制打包/解包（格式串，照 Python `struct` 的形状）
+//
+// 为什么要有它: 仓库里读二进制的地方（PNG / BMP / QOI / gzip / tar / zip / DNS / IP）
+// 每一处都在手写 `mem_load32` + 字节序判断。`endian` 给的是**单个宽度**的读写，
+// 而真实格式是"一串字段按一个字节序排下来"—— 那就是 `struct` 的 `>` / `<` + 字段序列。
+// 手写一遍没错，手写十二遍就会有第十二种写法，其中一种把 `>` 写成 `<` 只是时间问题。
+//
+// **格式串**（与 Python `struct` 的公共子集）:
+//
+//   `>` 大端 · `<` 小端 · `!` 网络序（= 大端）· `=` 本机序（默认）
+//   `b` i8 · `B` u8 · `h` i16 · `H` u16 · `i` i32 · `I` u32
+//   `q` i64 · `Q` u64 · `f` f32 · `d` f64 · `x` 填充字节（不占值）
+//   数字前缀表示重复: `4H` = 四个 u16
+//
+// 不做的（如实列）:
+//   - `s` / `p` / `c`：本语言里字符串是 `str`（带长度），不是"定长字节块"；定长字节
+//     请直接 `mem_copy`，那是同一个字节循环，不必绕一层格式串。
+//   - `@` / `n` / `N`：本机对齐与指针大小 —— 用途是 C 结构体镜像，而**这不是 C ABI**
+//     （docs/232 §5.2）。要那件事请走 `extern fn`。
+//   - 变长/对齐修饰：同上，格式串只描述**紧凑**布局。
+//
+// **值的形状**: 没有变参，所以 `vals` 是一个 **u64 数组**（第 k 个值在 `k*8`）。
+// 解包也解到 u64 数组里: 有符号类型**符号扩展**到 64 位，浮点存**原始位**
+// （`f` 的位在低 32 位）—— 浮点的语义解释交给调用方（`f64bits` / `f64conv`）。
+//
+// 命名: 公开 pk_*, 内部 pk_*。自检 test_pack_*。
+//
+// **模块名为什么是 `pack` 不是 `struct`**: `struct` 是本语言的关键字，参考实现收 `module struct`，
+// 自举侧把它读成关键字并拒（E2）—— 两份实现的分歧（issue 见仓库）。换名让两边都成立。
+
+module pack
+choose runtime
+
+use "mem.lomt"
+use "endian.lomt"
+
+/// 格式错 / 缓冲不够 / 值不够。
+pub const PK_ERR: u32 = 4294967295;
+
+/// 一个格式项的宽度；不是合法项返回 0。
+fn pk_width(c: u32) -> u32 {
+    if c == 98 { return 1; }    // b
+    if c == 66 { return 1; }    // B
+    if c == 104 { return 2; }   // h
+    if c == 72 { return 2; }    // H
+    if c == 105 { return 4; }   // i
+    if c == 73 { return 4; }    // I
+    if c == 113 { return 8; }   // q
+    if c == 81 { return 8; }    // Q
+    if c == 102 { return 4; }   // f
+    if c == 100 { return 8; }   // d
+    if c == 120 { return 1; }   // x
+    return 0;
+}
+
+fn pk_signed(c: u32) -> bool {
+    return c == 98 || c == 104 || c == 105 || c == 113;
+}
+
+fn pk_is_digit(c: u32) -> bool {
+    return c >= 48 && c <= 57;
+}
+
+/// 从 `fmt` 的 `i` 起读一个十进制重复数（没有数字则 1）。返回 `[值, 新下标]` 打包进 u64:
+/// 低 32 位是重复数，高 32 位是新下标。格式串本身很短，这个打包不丢信息。
+fn pk_repeat(fmt: str, i0: u32) -> u64 {
+    let n: u32 = str_len(fmt);
+    let i: u32 = i0;
+    let v: u32 = 0;
+    let any: u32 = 0;
+    let scanning: u32 = 1;
+    while scanning == 1 && i < n {
+        let c: u32 = str_byte(fmt, i);
+        if pk_is_digit(c) {
+            // 上限防止恶意的十亿次重复把调用方拖死；一个格式项超过 65535 次没有实际用途。
+            if v > 6553 {
+                return 0 as u64;
+            }
+            v = v * 10 + (c - 48);
+            any = 1;
+            i = i + 1;
+        } else {
+            scanning = 0;
+        }
+    }
+    if any == 0 {
+        v = 1;
+    }
+    return ((i as u64) << 32) | (v as u64);
+}
+
+/// 格式串占多少字节（不含 `x` 的重复展开以外的任何对齐）。
+pub fn pk_size(fmt: str) -> u32 {
+    let n: u32 = str_len(fmt);
+    let i: u32 = 0;
+    if n > 0 {
+        let c0: u32 = str_byte(fmt, 0);
+        if c0 == 62 || c0 == 60 || c0 == 33 || c0 == 61 || c0 == 64 {
+            i = 1;
+        }
+    }
+    let total: u32 = 0;
+    while i < n {
+        let c: u32 = str_byte(fmt, i);
+        if c == 32 || c == 9 {
+            i = i + 1;
+        } else {
+            let rp: u64 = pk_repeat(fmt, i);
+            if rp == 0 {
+                return PK_ERR;
+            }
+            let rep: u32 = (rp & 4294967295) as u32;
+            i = (rp >> 32) as u32;
+            if i >= n {
+                return PK_ERR;
+            }
+            let w: u32 = pk_width(str_byte(fmt, i));
+            if w == 0 {
+                return PK_ERR;
+            }
+            total = total + w * rep;
+            i = i + 1;
+        }
+    }
+    return total;
+}
+
+fn pk_le_of(fmt: str) -> u32 {
+    let native: u32 = 1;
+    if !endian_is_le() {
+        native = 0;
+    }
+    let n: u32 = str_len(fmt);
+    if n == 0 {
+        return native;
+    }
+    let c0: u32 = str_byte(fmt, 0);
+    if c0 == 62 || c0 == 33 {
+        return 0;
+    }
+    if c0 == 60 {
+        return 1;
+    }
+    return native;
+}
+
+fn pk_skip_prefix(fmt: str) -> u32 {
+    let n: u32 = str_len(fmt);
+    if n == 0 {
+        return 0;
+    }
+    let c0: u32 = str_byte(fmt, 0);
+    if c0 == 62 || c0 == 60 || c0 == 33 || c0 == 61 || c0 == 64 {
+        return 1;
+    }
+    return 0;
+}
+
+fn pk_put8(dst: ptr, o: u32, v: u64) {
+    store8(dst, o, v as u8);
+}
+
+fn pk_put16(dst: ptr, o: u32, v: u64, le: u32) {
+    if le == 1 {
+        endian_store16le(dst, o, v as u32);
+    } else {
+        endian_store16be(dst, o, v as u32);
+    }
+}
+
+fn pk_put32(dst: ptr, o: u32, v: u64, le: u32) {
+    if le == 1 {
+        endian_store32le(dst, o, v as u32);
+    } else {
+        endian_store32be(dst, o, v as u32);
+    }
+}
+
+fn pk_put64(dst: ptr, o: u32, v: u64, le: u32) {
+    if le == 1 {
+        endian_store64le(dst, o, v);
+    } else {
+        endian_store64be(dst, o, v);
+    }
+}
+
+/// 按格式串把 `vals` 里的值写进 `dst`。返回写出的字节数；失败 PK_ERR（此时 `dst` 可能
+/// 已被写了一半 —— 格式错在**第一个**项就能看出来时不会写，但值不够只有走到那里才知道）。
+pub fn pk_pack(fmt: str, vals: ptr, nvals: u32, dst: ptr, cap: u32) -> u32 {
+    let n: u32 = str_len(fmt);
+    let i: u32 = pk_skip_prefix(fmt);
+    let le: u32 = pk_le_of(fmt);
+    let written: u32 = 0;
+    let vi: u32 = 0;
+    while i < n {
+        let c: u32 = str_byte(fmt, i);
+        if c == 32 || c == 9 {
+            i = i + 1;
+        } else {
+            let rp: u64 = pk_repeat(fmt, i);
+            if rp == 0 {
+                return PK_ERR;
+            }
+            let rep: u32 = (rp & 4294967295) as u32;
+            i = (rp >> 32) as u32;
+            if i >= n {
+                return PK_ERR;
+            }
+            let item: u32 = str_byte(fmt, i);
+            let w: u32 = pk_width(item);
+            if w == 0 {
+                return PK_ERR;
+            }
+            i = i + 1;
+            if written + w * rep > cap {
+                return PK_ERR;
+            }
+            let k: u32 = 0;
+            while k < rep {
+                if item == 120 {
+                    store8(dst, written, 0 as u8);
+                    written = written + 1;
+                } else {
+                    if vi >= nvals {
+                        return PK_ERR;
+                    }
+                    let v: u64 = mem_load64(vals, vi * 8);
+                    vi = vi + 1;
+                    if w == 1 {
+                        pk_put8(dst, written, v);
+                    } else if w == 2 {
+                        pk_put16(dst, written, v, le);
+                    } else if w == 4 {
+                        pk_put32(dst, written, v, le);
+                    } else {
+                        pk_put64(dst, written, v, le);
+                    }
+                    written = written + w;
+                }
+                k = k + 1;
+            }
+        }
+    }
+    return written;
+}
+
+fn pk_get16(src: ptr, o: u32, le: u32) -> u32 {
+    if le == 1 {
+        return endian_load16le(src, o);
+    }
+    return endian_load16be(src, o);
+}
+
+fn pk_get32(src: ptr, o: u32, le: u32) -> u32 {
+    if le == 1 {
+        return endian_load32le(src, o);
+    }
+    return endian_load32be(src, o);
+}
+
+fn pk_get64(src: ptr, o: u32, le: u32) -> u64 {
+    if le == 1 {
+        return endian_load64le(src, o);
+    }
+    return endian_load64be(src, o);
+}
+
+/// 按格式串从 `src`（`n` 字节）解出值到 `out`（u64 数组，容量 `nout`）。
+/// 返回解出的**项数**（`x` 不计数）；失败 PK_ERR。
+pub fn pk_unpack(fmt: str, src: ptr, n: u32, out: ptr, nout: u32) -> u32 {
+    let fn_: u32 = str_len(fmt);
+    let i: u32 = pk_skip_prefix(fmt);
+    let le: u32 = pk_le_of(fmt);
+    let read: u32 = 0;
+    let vi: u32 = 0;
+    while i < fn_ {
+        let c: u32 = str_byte(fmt, i);
+        if c == 32 || c == 9 {
+            i = i + 1;
+        } else {
+            let rp: u64 = pk_repeat(fmt, i);
+            if rp == 0 {
+                return PK_ERR;
+            }
+            let rep: u32 = (rp & 4294967295) as u32;
+            i = (rp >> 32) as u32;
+            if i >= fn_ {
+                return PK_ERR;
+            }
+            let item: u32 = str_byte(fmt, i);
+            let w: u32 = pk_width(item);
+            if w == 0 {
+                return PK_ERR;
+            }
+            i = i + 1;
+            if read + w * rep > n {
+                return PK_ERR;
+            }
+            let k: u32 = 0;
+            while k < rep {
+                if item == 120 {
+                    read = read + 1;
+                } else {
+                    if vi >= nout {
+                        return PK_ERR;
+                    }
+                    let v: u64 = 0 as u64;
+                    if w == 1 {
+                        let b: u32 = load8(src, read);
+                        if pk_signed(item) {
+                            v = ((b as i8) as i64) as u64;
+                        } else {
+                            v = b as u64;
+                        }
+                    } else if w == 2 {
+                        let h: u32 = pk_get16(src, read, le);
+                        if pk_signed(item) {
+                            v = ((h as i16) as i64) as u64;
+                        } else {
+                            v = h as u64;
+                        }
+                    } else if w == 4 {
+                        let d: u32 = pk_get32(src, read, le);
+                        if pk_signed(item) {
+                            v = ((d as i32) as i64) as u64;
+                        } else {
+                            v = d as u64;
+                        }
+                    } else {
+                        v = pk_get64(src, read, le);
+                    }
+                    mem_store64(out, vi * 8, v);
+                    vi = vi + 1;
+                    read = read + w;
+                }
+                k = k + 1;
+            }
+        }
+    }
+    return vi;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_pack_size() -> bool {
+    let s: str = ">IHH";
+    if pk_size(s) != 8 {
+        return false;
+    }
+    let e: str = "4H";
+    return pk_size(e) == 8;
+}
+
+fn test_pack_pack_be() -> bool {
+    let vals: ptr = alloc(16);
+    let buf: ptr = alloc(16);
+    mem_store64(vals, 0, 305419896);
+    mem_store64(vals, 8, 4660);
+    let n: u32 = pk_pack(">IH", vals, 2, buf, 16);
+    if n != 6 {
+        return false;
+    }
+    return load8(buf, 0) == 18 && load8(buf, 3) == 120 && load8(buf, 4) == 18 && load8(buf, 5) == 52;
+}
+
+fn test_pack_roundtrip() -> bool {
+    let vals: ptr = alloc(32);
+    let out: ptr = alloc(32);
+    let buf: ptr = alloc(32);
+    mem_store64(vals, 0, 1);
+    mem_store64(vals, 8, 2);
+    mem_store64(vals, 16, 3);
+    mem_store64(vals, 24, 4);
+    let n: u32 = pk_pack("<BHIQ", vals, 4, buf, 32);
+    if n != 15 {
+        return false;
+    }
+    let got: u32 = pk_unpack("<BHIQ", buf, n, out, 4);
+    if got != 4 {
+        return false;
+    }
+    return mem_load64(out, 0) == 1 && mem_load64(out, 8) == 2
+        && mem_load64(out, 16) == 3 && mem_load64(out, 24) == 4;
+}
+
+fn test_pack_signed_extends() -> bool {
+    let vals: ptr = alloc(8);
+    let out: ptr = alloc(8);
+    let buf: ptr = alloc(8);
+    mem_store64(vals, 0, 4294967295);
+    let n: u32 = pk_pack("<b", vals, 1, buf, 8);
+    if n != 1 {
+        return false;
+    }
+    let got: u32 = pk_unpack("<b", buf, n, out, 1);
+    if got != 1 {
+        return false;
+    }
+    return mem_load64(out, 0) == 18446744073709551615;
+}
+
+fn test_pack_rejects_short() -> bool {
+    let vals: ptr = alloc(8);
+    let buf: ptr = alloc(2);
+    mem_store64(vals, 0, 1);
+    return pk_pack(">I", vals, 1, buf, 2) == PK_ERR;
+}

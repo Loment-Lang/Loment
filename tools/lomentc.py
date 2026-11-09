@@ -12875,9 +12875,11 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # **LMS 第 3 级入口 A**（`docs/253` §5.3）：`alloc` 分配不出时**先收一次再试**，
     # 而不是直接 abort。⚠ **两个条件缺一不可**：
     #   * `lms` 开着 —— 它属于 LMS 第 3 级，不是回收档的事；
-    #   * **这份产物里真的有收集器**（`gc_auto` / `gc_auto_alpha`）—— `gc_manual` 下
-    #     没有东西可收，"拉回"在那里是一句空话。这是这一级**明写的边界**。
-    _lms_rescue = _lms_level(mod, "lms_guard") and (gc_auto or gc_alpha)
+    #   * **这份产物里真的有收集器**（`gc_auto` / `gc_auto_alpha` / **`lgc`**）——
+    #     `gc_manual` 单独不满足（没有东西可收）；但 `lgc` 落地之后 manual 档**也有**
+    #     收集器（`gc_control`），窗口里那句"开"就是它被允许收的时刻。漏掉这一支，
+    #     manual 档的窗口一撞 OOM 就直接 abort，而窗口的语义是"这一段可以收"。
+    _lms_rescue = _lms_level(mod, "lms_guard") and (gc_auto or gc_alpha or _gc_ctl)
     # **第 3/4/5 级在访存点上的三档**（`docs/253` §5.3–§5.5）：检查 / 跳过 / 退出。
     # 三个都不开就一条检查都不发 —— 没有回答的检查比没有检查更坏。
     _lms_guard = _lms_level(mod, "lms_guard")

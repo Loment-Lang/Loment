@@ -307,8 +307,9 @@ E041: 封印域外不能把 buf 交给外部
 | 期 | 内容 | 依赖 | 状态 |
 |---|---|---|---|
 | 1 | `borrow` / `borrow_mut` 两种形状 + R1/R2/R3 三条检查 + `view` / `exclusive` / `freeze` | `docs/299` 的区域环境 | **两侧都已落** |
-| 2 | 形状运算：`split` / `window` / `cursor`（子区域、越窗、回边） | 期 1 + `docs/315` 的 `mutex` 边 | **两侧都已落**（区间形式；双名糖与动态界进期 3） |
+| 2 | 形状运算：`split` / `window` / `cursor`（子区域、越窗、回边） | 期 1 + `docs/315` 的 `mutex` 边 | **两侧都已落**（区间形式） |
 | 3 | `loan` / `epoch` / `session` / `seal`（退出路径、线性、外部调用表） | 期 1–2 | **两侧都已落**（边界见上） |
+| 4 | **未做**：`domain:split (lo, hi) from xs at k` 双名糖（要造两个子切片值）；窗口/半区的**动态**下标运行期检查；`seal` 的 `extern fn` 一支（自举侧要符号表） | 期 2–3 | 未开始 |
 
 期 1 的落地形状：`domain [NAME :] borrow(NAME) { … }` / `borrow_mut(NAME) { … }`，
 `DomainBlock` 多两个字段（`borrow_src` / `borrow_mut`），时律固定 `regular` ——

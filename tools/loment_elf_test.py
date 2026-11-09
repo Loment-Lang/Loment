@@ -2811,11 +2811,15 @@ def test_a_corrupt_shared_object_is_a_diagnostic_not_a_traceback():
     如此，见 `#167`）。改成它意味着：**用户拿到的是文件名 + 哪张表越界**，而不是
     `struct.error: unpack_from requires a buffer of at least …`。
     """
-    src = next((Path(c) for c in ffitest.LIBZ_SO_CANDIDATES if Path(c).is_file()), None)
-    if src is None:
-        print("      SKIP: 这台机器上没有 libz.so（要 zlib1g）")
-        return
-    good = src.read_bytes()
+    # 走 `_system_so` 的**两条腿**（本机 + WSL）：原先这里是裸 `Path(...).is_file()`，
+    # 于是 Windows 侧永远看不见 WSL 里那份 `libz.so.1` —— 库明明装着，判据却报"要 zlib1g"。
+    # 同一份文件里另外两条 libz 判据用的都是 `_system_so`，只有这一条漏了。
+    with tempfile.TemporaryDirectory() as tds:
+        src = ffitest._system_so(Path(tds) / "libz.so.1", ffitest.LIBZ_SO_CANDIDATES)
+        if src is None:
+            print("      SKIP: 这台机器上没有 libz.so（要 zlib1g）")
+            return
+        good = src.read_bytes()
     if len(good) < 64 or good[:4] != b"\x7fELF":
         print("      SKIP: libz.so 不是 ELF64")
         return

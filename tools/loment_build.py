@@ -147,8 +147,7 @@ def build_one(p: Path, out: Path, root: Path, toolchain: str = "",
         if lspe_cache:
             import lspe as _lspe
             cache = _lspe.Cache(
-                ROOT, mod.name, key, {k: mod.chooses.get(k, lomentc.CORE_DEFAULTS[k])
-                                      for k in lomentc.CORE_DIM_ORDER},
+                ROOT, mod.name, key, lomentc.effective_dims(mod),
                 int(getattr(mod, "lspe_level", 3)))
         potato = lomentc.emit_potato(mod, root, deps, sidecar=lspe_sidecar,
                                      sidecar_out=side, diag_out=diag, cache=cache)

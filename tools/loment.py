@@ -546,8 +546,7 @@ def cmd_lspc_check(a) -> int:
         passes=getattr(mod, "lspe_passes", []),
         mode=str(getattr(mod, "lspe_mode", "full")),
         answers=getattr(mod, "lspe_answers", None),
-        dims={k: mod.chooses.get(k, lomentc.CORE_DEFAULTS[k])
-              for k in lomentc.CORE_DIM_ORDER},
+        dims=lomentc.effective_dims(mod),
         facts=lomentc._lspe_facts(mod, deps),
         sidecar=bool(getattr(a, "previous_sidecar", None)))
     # 跨构建记忆（`#760`）：上一轮的 deferred / 过期假设 / close_admin。
@@ -569,8 +568,7 @@ def cmd_lspc_check(a) -> int:
     mode = _lspc_mode(a, mod)
     sheet = lspe.lspc_sheet(
         getattr(mod, "lspe_sites", []), ledger,
-        dims={k: mod.chooses.get(k, lomentc.CORE_DEFAULTS[k])
-              for k in lomentc.CORE_DIM_ORDER},
+        dims=lomentc.effective_dims(mod),
         facts=lomentc._lspe_facts(mod, deps),
         previous=previous,
         mode=mode,

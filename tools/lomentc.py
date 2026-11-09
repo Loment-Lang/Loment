@@ -1287,10 +1287,62 @@ def _array_len(t: str) -> int:
     return int(t[t.rindex(";") + 1:-1].strip())
 
 
+def _is_ref(t: str) -> bool:
+    """`&T` / `&mut T` / `&a T` / `&mut a T`（`docs/299`）。"""
+    return t.startswith("&")
+
+
+#: 借用类型的**解析式**：`&` [mut ] [区域名 ] 被借类型。
+#: 区域标记与普通类型靠**空格**分开（`&a u32` vs `&u32`；`&Pair<u32, u32>` 里的
+#: 空格前面不是标识符，所以不会被误读成标记）。
+_REF_RE = re.compile(r"^&(mut )?(?:([A-Za-z_]\w*) )?(.+)$")
+
+
+def _ref_parts(t: str) -> tuple[bool, str, str]:
+    """`(可变?, 区域标记, 被借类型)` —— 不是借用类型时抛 `ValueError`。"""
+    m = _REF_RE.match(t)
+    if m is None:
+        raise ValueError(f"不是借用类型: {t!r}")
+    return bool(m.group(1)), (m.group(2) or ""), m.group(3)
+
+
+def _ref_mut(t: str) -> bool:
+    return _ref_parts(t)[0]
+
+
+def _ref_region(t: str) -> str:
+    return _ref_parts(t)[1]
+
+
+def _ref_elem(t: str) -> str:
+    return _ref_parts(t)[2]
+
+
+def _deref_type(t: str | None) -> str | None:
+    """自动解一层借用（字段/下标访问用，`docs/299` §3.4）。"""
+    return _ref_elem(t) if t and _is_ref(t) else t
+
+
+def _type_compat(a: str | None, b: str | None) -> bool:
+    """两个类型**同形**吗（`docs/299`）：区域标记只是来源标注，不参与比较。
+
+    `&a u32` 与 `&u32` 是同一个类型；`&mut T` 与 `&T` 不是。
+    """
+    if a == b:
+        return True
+    if a is None or b is None:
+        return False
+    if _is_ref(a) and _is_ref(b):
+        return _ref_mut(a) == _ref_mut(b) and _type_compat(_ref_elem(a), _ref_elem(b))
+    return False
+
+
 def _type_ok(t: str, known: set[str]) -> bool:
-    """类型是否已声明: 基类型 / struct 名 / 由它们构成的数组或切片。"""
+    """类型是否已声明: 基类型 / struct 名 / 由它们构成的数组、切片或借用。"""
     if t in known:
         return True
+    if _is_ref(t):
+        return _type_ok(_ref_elem(t), known)
     if _is_array(t):
         return _type_ok(_array_elem(t), known)
     if _is_slice(t):
@@ -2689,11 +2741,26 @@ CORE_DIMS: dict[str, tuple[str, ...]] = {
     # **关闭带 `_admin`**：关关键系统是一次管理动作（`docs/262` §10.1）。
     # 取值**带维名前缀**（`lspe_*`），理由同 `lms_*`：`open` / `close` 单独太泛。
     "lspe": ("lspe_open_admin", "lspe_close_admin"),
+    # **生命周期**（`docs/299`，用户 2026-11-08 定第八维）。它与 `gc` / `lms` 都
+    # **正交**：`gc` 管运行期"谁归还"，`lms` 管运行期"谁能碰"，这一维管**编译期**
+    # "这个借用能活到哪"—— 三条是同一张图上的不同方向，互不替代。
+    #
+    # `lifetime_no` 是**绝对关闭**（今天的形状：`&` 不能进类型位置）；`lifetime_auto`
+    # 是默认档（区域推断 + 省略规则，源码零标注）；`lifetime_manual` 才允许写显式的
+    # 借用来源标记 `&a T`。**默认不是"no"** —— 用户 2026-11-08 的裁定：新写的代码
+    # 默认就该有 Rust 同级的内存安全。
+    #
+    # ⚠ **默认值随版次走**：`tur2026.3` 起默认 `lifetime_auto`；2026.1 / 2026.2
+    # 仍默认 `lifetime_no`（`docs/305` 的封版承诺：旧版次一个字节都不变）。
+    # 生效值由 `core_default("lifetime", profile)` 算，**不要**直接读 `CORE_DEFAULTS`。
+    "lifetime": ("lifetime_no", "lifetime_auto", "lifetime_manual"),
 }
 #: 冲突**两两查**时的维序。**写死的** —— 报错文本里两个取值的先后由它决定，
 #: 而两个实现比的是字节，所以它不能是集合迭代顺序。
-#: `lms` 排在最后：它**没有冲突对**，追加在尾部不会改动任何既有配对的先后。
-CORE_DIM_ORDER: tuple[str, ...] = ("mode", "gc", "runtime", "port", "vm", "lms", "lspe")
+#: `lms` / `lspe` / `lifetime` 排在最后：它们**没有冲突对**，追加在尾部不会改动
+#: 任何既有配对的先后。
+CORE_DIM_ORDER: tuple[str, ...] = ("mode", "gc", "runtime", "port", "vm", "lms", "lspe",
+                                   "lifetime")
 #: 所有核心模式的取值 —— "这一个 `choose` 是核心模式还是开关"就看它在不在这里面。
 CORE_WORDS = frozenset(w for _ws in CORE_DIMS.values() for w in _ws)
 #: 取值 → 属于哪一维（报错要说清是**哪一维**写了两次）。
@@ -2701,7 +2768,27 @@ CORE_DIM_OF = {w: d for d, ws in CORE_DIMS.items() for w in ws}
 #: 每一维**不写**时的取值 —— 默认档，且默认**不改变任何现有程序的行为**。
 CORE_DEFAULTS = {"mode": "std", "gc": "gc_manual", "runtime": "no_runtime",
                  "port": "sealed", "vm": "no_vm", "lms": "lms_full",
-                 "lspe": "lspe_open_admin"}
+                 "lspe": "lspe_open_admin", "lifetime": "lifetime_auto"}
+#: 生命周期维在**旧版次**里的默认值（`docs/305`：封版的版次一个字节都不变）。
+#: 2026.3 起才翻到 `lifetime_auto`（用户 2026-11-08 裁）。
+LIFETIME_DEFAULT_EDITION = "tur2026.3"
+
+
+def core_default(dim: str, profile: str = "") -> str:
+    """某一维**不写**时的生效值。
+
+    只有 `lifetime` 跟着版次走 —— 它是 2026.3 的新语义，旧版次必须保持
+    `lifetime_no`。其余维的默认与版次无关，照 `CORE_DEFAULTS` 读。
+    """
+    if dim == "lifetime" and profile and profile < LIFETIME_DEFAULT_EDITION:
+        return "lifetime_no"
+    return CORE_DEFAULTS[dim]
+
+
+def effective_dims(mod, profile: str = "") -> dict[str, str]:
+    """一份单元的**生效维度**：显式写的优先，没写的取 `core_default`。"""
+    prof = profile or getattr(mod, "profile", "") or ""
+    return {d: mod.chooses.get(d, core_default(d, prof)) for d in CORE_DIM_ORDER}
 #: 维的**人话**名字。报错要说清是**哪一维**写了两次 —— `gc` 对用户不是一个词，
 #: 而"核心模式只能声明一次"在有两维之后就**说不清是哪一维**了。
 CORE_DIM_ZH = {
@@ -2713,6 +2800,7 @@ CORE_DIM_ZH = {
     "lms": "内存安全档（`lms_full` / `lms_forensic_admin` / "
            "`lms_daily_admin` / `lms_manage_only_admin`）",
     "lspe": "安全审计（`lspe_open_admin` / `lspe_close_admin`）",
+    "lifetime": "生命周期（`lifetime_no` / `lifetime_auto` / `lifetime_manual`）",
 }
 
 #: **LMS 的七个细开关**（`docs/253` §11.4 ①），次序就是七级的次序 ——
@@ -3253,6 +3341,30 @@ def _apply_switches(toks: list, tbl: SwitchTable, collect: bool = True) -> list:
 MAX_NEST = 64
 
 
+def _prescan_lifetime(toks: list, profile: str) -> str:
+    """解析之前把 `choose lifetime_*` 找出来（`docs/299`）。
+
+    只认**深度 0**、`choose` 后面紧跟三个取值之一的形状。显式写的优先；没写就按
+    版次取默认（2026.3 起 `lifetime_auto`，旧版次 `lifetime_no`）。
+    """
+    depth = 0
+    i = 0
+    while i + 1 < len(toks):
+        t = toks[i]
+        if t.kind == "punct" and t.val in "{[(":
+            depth += 1
+        elif t.kind == "punct" and t.val in "}])":
+            depth -= 1
+        elif depth == 0 and t.kind == "ident" and t.val == "choose":
+            # `set choose X { … }` 是**定义**，不是取值 —— 别把开关名当核心取值。
+            if not (i > 0 and toks[i - 1].kind == "ident" and toks[i - 1].val == "set"):
+                nxt = toks[i + 1]
+                if nxt.kind == "ident" and nxt.val in CORE_DIMS["lifetime"]:
+                    return nxt.val
+        i += 1
+    return core_default("lifetime", profile)
+
+
 class Parser:
     """复用 lomc 的词法器; 只实现 L1 的顶层与语句/表达式。"""
 
@@ -3271,6 +3383,10 @@ class Parser:
         self.dom_stack: list = []
         #: 匿名域块的内部编号（`__dom$N`，用户写不出来；名字不进 IR）。
         self.dom_seq = 0
+        #: **生命周期档**（`docs/299`）。类型位置要不要认 `&` 只看它，而它在
+        #: `choose lifetime_*` 那一行 —— 类型可能在那一行**之前**就被解析（顶层顺序自由），
+        #: 所以在构造时**预扫一遍**，不依赖 `parse_items` 的先后。
+        self.lifetime = _prescan_lifetime(toks, profile)
 
     # -- 基础
     def peek(self, k: int = 0) -> Tok:
@@ -3304,7 +3420,34 @@ class Parser:
         return -v if neg else v
 
     def type_name(self) -> str:
-        """类型名: 基类型 / struct / 数组 [T; N] / 只读切片 [T] / 可变切片 mut [T]。"""
+        """类型名: 基类型 / struct / 数组 [T; N] / 只读切片 [T] / 可变切片 mut [T] /
+        借用 `&T` / `&mut T`（后者只在 `choose lifetime_*` 非 `no` 时，`docs/299`）。"""
+        if self.at("punct", "&") and self.lifetime != "lifetime_no":
+            amp = self.next()
+            mut = False
+            if self.at("ident", "mut"):
+                mut = True
+                self.next()
+            region = ""
+            if self.peek().kind == "ident":
+                nxt = self.peek(1)
+                # `&a T` / `&a [T]`：区域标记后面**紧跟**类型或 `[`。`&u32` / `&Foo<…>`
+                # 的第二个 token 不是这两种，所以不会被误读成标记。
+                if nxt.kind == "ident" or (nxt.kind == "punct" and nxt.val == "["):
+                    region = self.next().val
+            inner = self.type_name()
+            # 切片借用**规范化**到已有的切片类型（它们本来就是 ptr+len 的借用视图）：
+            # `&[T]` → `[T]`，`&mut [T]` → `mut [T]`。区域标记在切片上 v1 不收 ——
+            # 切片自带区域推断，标记是给非切片借用（`&a u32`）用的。
+            if _is_slice(inner):
+                if region:
+                    raise LomError(amp.line, amp.col,
+                                   "区域标记不能写在切片借用上 —— `[T]` / `mut [T]` 自带"
+                                   "区域推断；显式标记（`&a T`）只用于非切片借用"
+                                   "（`docs/299` §3.3）")
+                elem = _slice_elem(inner)
+                return f"mut [{elem}]" if mut else f"[{elem}]"
+            return ("&mut " if mut else "&") + (f"{region} " if region else "") + inner
         if self.at("ident", "mut") and self.peek(1).kind == "punct" and self.peek(1).val == "[":
             self.next()
             self.next()
@@ -3359,6 +3502,10 @@ class Parser:
         # 本模块的**词法流留在模块上** —— L0/L1/L2 的分析搬去了 `_gc_alpha_pass`（发射前），
         # 因为那次放宽要一张**跨模块**的安全表，而解析器手上只有本模块。
         mod.toks = self.toks
+        # **版次挂在模块上**（`docs/296` §1.1）：`load()` 原先自己设一次，但直接
+        # `Parser(...).parse()` 的路径（判据、语言服务）就没有它 —— 而
+        # `lifetime` 的默认值随版次走（`core_default`），缺了它 2026.2 会被当成 2026.3。
+        mod.profile = self.profile
         # **拖运行期的构造**（`docs/227`）：与 `f.deref` 同一条理由 —— 规则定义在
         # token 流上，解析器是唯一能一次扫全模块的地方（`check()` 里再扫就要第二份实现）。
         mod.rt_sites = _runtime_sites(self.toks, self.profile)
@@ -4234,6 +4381,11 @@ class Parser:
 
     def parse_unary(self):
         t = self.peek()
+        # `*r` 解引用（`docs/299`）。只在生命周期档非 `no` 时存在 —— `no` 是绝对关闭，
+        # 连这个符号都不该冒出来（它的二元用法 `a * b` 走优先级那一支，不受影响）。
+        if t.kind == "punct" and t.val == "*" and self.lifetime != "lifetime_no":
+            self.next()
+            return Un("*", self.parse_unary(), t.line)
         if t.kind == "punct" and t.val == "&" and self.peek(1).kind == "ident" \
                 and self.peek(1).val == "mut":
             self.next()
@@ -5003,14 +5155,16 @@ def expr_type(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[st
                 break
         return f"[{et}; {len(e.items)}]" if et else None
     if isinstance(e, Index):
-        ot = expr_type(e.obj, scope, funcs, structs)
+        # 借用自动解一层（`docs/299`）：`r: &[u32; 4]` 的 `r[0]` 与 `a[0]` 同义。
+        ot = _deref_type(expr_type(e.obj, scope, funcs, structs))
         if ot and _is_array(ot):
             return _array_elem(ot)
         if ot and _is_slice(ot):
             return _slice_elem(ot)
         return None
     if isinstance(e, FieldAccess):
-        ot = expr_type(e.obj, scope, funcs, structs)
+        # 借用字段访问自动解一层（Rust 的写法：`r.field`）。
+        ot = _deref_type(expr_type(e.obj, scope, funcs, structs))
         st = structs.get(ot) if ot else None
         if st is None:
             return None
@@ -5020,10 +5174,23 @@ def expr_type(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[st
         return None
     if isinstance(e, Un):
         inner = expr_type(e.expr, scope, funcs, structs)
-        if e.op == "&":  # M3: 数组 -> 只读切片
-            return f"[{_array_elem(inner)}]" if inner and _is_array(inner) else None
-        if e.op == "&mut":  # M4: 数组 -> 可变切片
-            return f"mut [{_array_elem(inner)}]" if inner and _is_array(inner) else None
+        if e.op == "*":
+            # `ptr` 的 `*` 是**逃生舱**：按字节读（`u8`）。借用类型的 `*` 解一层。
+            if inner == "ptr":
+                return "u8"
+            return _ref_elem(inner) if inner and _is_ref(inner) else None
+        if e.op == "&":  # M3: 数组 -> 只读切片；切片 -> 再借；其余 -> 借用
+            if inner and _is_array(inner):
+                return f"[{_array_elem(inner)}]"
+            if inner and _is_slice(inner):
+                return f"[{_slice_elem(inner)}]"      # `&xs`（xs 已是切片）= 只读再借
+            return f"&{inner}" if inner else None
+        if e.op == "&mut":  # M4: 数组 -> 可变切片；切片 -> 再借；其余 -> 可变借用
+            if inner and _is_array(inner):
+                return f"mut [{_array_elem(inner)}]"
+            if inner and _is_slice(inner):
+                return f"mut [{_slice_elem(inner)}]"  # `&mut xs`（xs 已是切片）= 可变再借
+            return f"&mut {inner}" if inner else None
         if e.op == "!":
             if inner == "bool":
                 return "bool"
@@ -5047,6 +5214,21 @@ def expr_type(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[st
         # 有一侧是字面量（None）时维持原样：它按上下文定宽。
         return _common_type(lt, rt) or lt or rt
     return None
+
+
+def _is_place(e) -> bool:
+    """借用只能作用于**有地址的东西**（`docs/299` §3.1）：变量 / 字段 / 下标。
+
+    `&(a + b)` 在 Rust 里合法（临时值也会落内存），Loment 的临时值是 SSA 值、没有
+    地址 —— 所以这一格**明说不收**，而不是悄悄发一个指向临时槽的指针。
+    """
+    if isinstance(e, Ident):
+        return True
+    if isinstance(e, FieldAccess):
+        return _is_place(e.obj)
+    if isinstance(e, Index):
+        return _is_place(e.obj)
+    return False
 
 
 def _borrows_of(e, out: dict[str, set[str]]) -> None:
@@ -5111,7 +5293,8 @@ def _is_int_const(e) -> bool:
 
 
 def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[str, Struct],
-               errs: list[str], enums: dict[str, EnumDecl] | None = None) -> None:
+               errs: list[str], enums: dict[str, EnumDecl] | None = None,
+               lifetime: str = "lifetime_no") -> None:
     """结构性问题 (未声明变量 / 未知函数 / 结构体字段 / 枚举变体) 的递归报告。
 
     **这里没有档参数**（2026-10-16）：`lms` 曾经只喂 `Index` 那一支的 E028，而那条
@@ -5144,8 +5327,8 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
             if dt is not None and dt != pty:
                 errs.append(f"{e.line}: `{e.kind}` 的兜底值类型 {dt}，期望 {pty}")
         e.ty = pty
-        _walk_expr(e.value, scope, funcs, structs, errs, enums)
-        _walk_expr(e.default, scope, funcs, structs, errs, enums)
+        _walk_expr(e.value, scope, funcs, structs, errs, enums, lifetime)
+        _walk_expr(e.default, scope, funcs, structs, errs, enums, lifetime)
         return
     if isinstance(e, EnumPath):
         if e.enum not in enums:
@@ -5166,10 +5349,10 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
             pt = ed.payloads[e.variant]
             if at is not None and at != pt:
                 errs.append(f"{e.line}: 载荷类型 {at}，声明为 {pt}")
-        _walk_expr(e.arg, scope, funcs, structs, errs, enums)
+        _walk_expr(e.arg, scope, funcs, structs, errs, enums, lifetime)
         return
     if isinstance(e, Cast):
-        _walk_expr(e.expr, scope, funcs, structs, errs, enums)
+        _walk_expr(e.expr, scope, funcs, structs, errs, enums, lifetime)
         st = expr_type(e.expr, scope, funcs, structs)
         if st == "ptr" and e.type in ("u64", "i64"):  # M67: 指针转整数
             return
@@ -5197,7 +5380,7 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
         errs.append(f"{e.line}: ? 只能用于 let 绑定 (let x: T = e?;)")
         return
     if isinstance(e, MethodCall):
-        _walk_expr(e.obj, scope, funcs, structs, errs, enums)
+        _walk_expr(e.obj, scope, funcs, structs, errs, enums, lifetime)
         ot = expr_type(e.obj, scope, funcs, structs)
         fn = funcs.get(f"{ot}_{e.name}") if ot else None
         if fn is None:
@@ -5205,7 +5388,7 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
         elif len(e.args) + 1 != len(fn.params):
             errs.append(f"{e.line}: 方法 {e.name} 需要 {len(fn.params) - 1} 个实参，得到 {len(e.args)}")
         for a in e.args:
-            _walk_expr(a, scope, funcs, structs, errs, enums)
+            _walk_expr(a, scope, funcs, structs, errs, enums, lifetime)
         return
     if isinstance(e, Call):
         if e.name == "slice_len":  # M3: 切片长度
@@ -5216,7 +5399,7 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
                 if at is not None and not (_is_slice(at) or _is_array(at)):
                     errs.append(f"{e.line}: slice_len 实参 {at} 不是数组或切片")
             for a in e.args:
-                _walk_expr(a, scope, funcs, structs, errs, enums)
+                _walk_expr(a, scope, funcs, structs, errs, enums, lifetime)
             return
         if e.name == "print_num" and getattr(e, "tur2", False):
             # `docs/296` §2.7：实参是**任意整型**（字面量也可以），发射时按符号扩到 i64。
@@ -5226,7 +5409,7 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
                 at = expr_type(e.args[0], scope, funcs, structs)
                 if at is not None and at not in INT_TYPES:
                     errs.append(f"{e.line}: 内建 print_num 实参期望整型，得到 {at}")
-                _walk_expr(e.args[0], scope, funcs, structs, errs, enums)
+                _walk_expr(e.args[0], scope, funcs, structs, errs, enums, lifetime)
             return
         sig = _builtin_sig(e)
         if sig is not None:
@@ -5277,7 +5460,7 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
                     if at is None:
                         if p.type not in INT_TYPES and not _is_slice(p.type):
                             errs.append(f"{e.line}: {e.name} 实参期望 {p.type}，得到整型字面量")
-                    elif at == p.type:
+                    elif _type_compat(at, p.type):
                         pass
                     elif _is_slice(p.type) and _is_array(at) and _slice_elem(p.type) == _array_elem(at):
                         pass  # 数组 -> 切片 协变 (M3)
@@ -5288,7 +5471,7 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
                     else:
                         errs.append(f"{e.line}: {e.name} 实参类型 {at}，期望 {p.type}")
         for a in e.args:
-            _walk_expr(a, scope, funcs, structs, errs, enums)
+            _walk_expr(a, scope, funcs, structs, errs, enums, lifetime)
         return
     if isinstance(e, StructLit):
         st = structs.get(e.name)
@@ -5303,14 +5486,14 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
             elif fn in got:
                 errs.append(f"{e.line}: 结构体 {e.name} 字段 {fn} 重复初始化")
             got.add(fn)
-            _walk_expr(fe, scope, funcs, structs, errs, enums)
+            _walk_expr(fe, scope, funcs, structs, errs, enums, lifetime)
         for fn in want:
             if fn not in got:
                 errs.append(f"{e.line}: 结构体 {e.name} 缺字段 {fn}")
         return
     if isinstance(e, FieldAccess):
-        _walk_expr(e.obj, scope, funcs, structs, errs, enums)
-        ot = expr_type(e.obj, scope, funcs, structs)
+        _walk_expr(e.obj, scope, funcs, structs, errs, enums, lifetime)
+        ot = _deref_type(expr_type(e.obj, scope, funcs, structs))
         st = structs.get(ot) if ot else None
         if st is None:
             errs.append(f"{e.line}: 对非结构体类型取字段 .{e.name}")
@@ -5322,7 +5505,7 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
             errs.append(f"{e.line}: 数组字面量不能为空")
         ts = []
         for it in e.items:
-            _walk_expr(it, scope, funcs, structs, errs, enums)
+            _walk_expr(it, scope, funcs, structs, errs, enums, lifetime)
             ts.append(expr_type(it, scope, funcs, structs))
         concrete = {t for t in ts if t is not None}
         if len(concrete) > 1:
@@ -5331,8 +5514,8 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
             errs.append(f"{e.line}: 数组字面量元素类型不一致 (整型字面量混入 {sorted(concrete)[0]})")
         return
     if isinstance(e, Index):
-        _walk_expr(e.obj, scope, funcs, structs, errs, enums)
-        _walk_expr(e.idx, scope, funcs, structs, errs, enums)
+        _walk_expr(e.obj, scope, funcs, structs, errs, enums, lifetime)
+        _walk_expr(e.idx, scope, funcs, structs, errs, enums, lifetime)
         ot = expr_type(e.obj, scope, funcs, structs)
         if ot is None or not (_is_array(ot) or _is_slice(ot)):
             errs.append(f"{e.line}: 对非数组/切片类型取下标")
@@ -5368,15 +5551,26 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
                             f"（{ot} 的长度是 {n}）")
         return
     if isinstance(e, Un):
-        _walk_expr(e.expr, scope, funcs, structs, errs, enums)
+        _walk_expr(e.expr, scope, funcs, structs, errs, enums, lifetime)
         if e.op in ("&", "&mut"):
             inner = expr_type(e.expr, scope, funcs, structs)
-            if inner is None or not _is_array(inner):
-                errs.append(f"{e.line}: {e.op} 只能作用于数组 (得到 {inner})")
+            if lifetime == "lifetime_no":
+                if inner is None or not _is_array(inner):
+                    errs.append(f"{e.line}: {e.op} 只能作用于数组 (得到 {inner})")
+            elif inner is None:
+                errs.append(f"{e.line}: 借用的目标类型未知（{e.op}）")
+            elif not _is_place(e.expr):
+                errs.append(
+                    f"{e.line}: {e.op} 只能作用于变量、字段或下标 —— "
+                    f"没有临时值可以借（Rust 允许 `&(a + b)`，Loment 的临时值不落内存）")
+        elif e.op == "*":
+            inner = expr_type(e.expr, scope, funcs, structs)
+            if inner is None or (not _is_ref(inner) and inner != "ptr"):
+                errs.append(f"{e.line}: `*` 只能解引用借用或 `ptr`（得到 {inner}）")
         return
     if isinstance(e, Bin):
-        _walk_expr(e.left, scope, funcs, structs, errs, enums)
-        _walk_expr(e.right, scope, funcs, structs, errs, enums)
+        _walk_expr(e.left, scope, funcs, structs, errs, enums, lifetime)
+        _walk_expr(e.right, scope, funcs, structs, errs, enums, lifetime)
         # **两个整型操作数必须有一个公共类型**（`_common_type`）。没有就点名报 ——
         # 让发射器"挑一个"就是替用户改数：`#133` 里原先挑的是**左操作数**的类型，
         # 于是 `x:i32 + y:i64` 在 32 位里算，同一个子表达式一处等于 2³¹、一处为负。
@@ -6243,6 +6437,329 @@ def _unit_where(m: Module) -> str:
 _RECURSION_FLOOR = 8000
 
 
+# ---------------------------------------------------------------- 生命周期（docs/299）
+#
+# 规则只有一句：**借用的区域不能比来源长**。落地成一个**逃逸分析**：
+#
+#   * 每个表达式带一个**来源集合**（`("p", 形参名)` 或 `("l", 局部名)`）；
+#   * `return` 的表达式若来源里有**局部** ⇒ 悬垂（E012，与今天那条同码同文）；
+#   * 函数摘要（返回值的借用来自哪些形参）按 `docs/299` §3.2 的省略规则算：
+#     一个引用入参 → 全是它；多个 → 取所有入参（"最短"）；显式标记 `&a T` → 它；
+#   * `free(p)` 之后 p 仍被借 ⇒ 编译期诊断（E041）；
+#   * `&mut` 的独占按**存下来的**借用算（行内的 `f(&mut a, &a)` 仍由 E007 那条管）。
+#
+# 这里刻意**不做** NLL：存下来的借用活到函数末尾。代价写在 `docs/299` §7；
+# 好处是规则能在**两套实现**上逐字节镜像（自举侧只有 token 流）。
+
+def _borrow_leaf_types(t: str | None, structs: dict) -> list[str]:
+    """类型里**每一个借用叶子**（顺序 = 字段顺序）。"""
+    if t is None:
+        return []
+    if _is_ref(t) or _is_slice(t):
+        return [t]
+    st = structs.get(t)
+    if st is not None:
+        out: list[str] = []
+        for _, ft in st.fields:
+            out.extend(_borrow_leaf_types(ft, structs))
+        return out
+    return []
+
+
+def _is_borrowish(t: str | None, structs: dict) -> bool:
+    return bool(_borrow_leaf_types(t, structs))
+
+
+def _place_root(e) -> Ident | None:
+    """借用/字段链的**根变量**（`&a.b[0]` → `a`）。"""
+    if isinstance(e, Ident):
+        return e
+    if isinstance(e, (FieldAccess, Index)):
+        return _place_root(e.obj)
+    if isinstance(e, Un) and e.op == "*":
+        return None          # `*p` 的根是一个值，不是一个名字
+    return None
+
+
+def _lifetime_marker_errs(t: str | None, params: list[tuple[str, str]], lifetime: str,
+                          line: int, errs: list[str], where: str) -> None:
+    """显式区域标记 `&a T` 的检查（`docs/299` §3.3）。"""
+    if t is None:
+        return
+    if _is_ref(t):
+        reg = _ref_region(t)
+        if reg:
+            ptypes = dict(params)
+            if lifetime != "lifetime_manual":
+                errs.append(
+                    f"{line}: `lifetime_auto` 下不写区域标记（`&{reg} {_ref_elem(t)}`）—— "
+                    f"自动档要求零标注；要显式绑定请 `choose lifetime_manual`")
+            elif reg not in ptypes:
+                errs.append(
+                    f"{line}: 区域标记 `&{reg} …` 指向不存在的形参（{where}）—— "
+                    f"它必须是签名里的一个引用形参名")
+            elif not (_is_ref(ptypes[reg]) or _is_slice(ptypes[reg])):
+                errs.append(
+                    f"{line}: 区域标记 `&{reg} …` 指向的不是引用形参（{where}）—— "
+                    f"`{reg}` 的类型是 `{ptypes[reg]}`，标记只能绑到 `&T` / `&mut T` / 切片形参")
+        return
+    if _is_array(t):
+        _lifetime_marker_errs(_array_elem(t), params, lifetime, line, errs, where)
+    elif _is_slice(t):
+        _lifetime_marker_errs(_slice_elem(t), params, lifetime, line, errs, where)
+
+
+def _lifetime_summary(f: Func, structs: dict, lifetime: str,
+                      errs: list[str]) -> frozenset[int]:
+    """`f` 的返回值可能借自哪些形参（下标集合）。"""
+    leaves = _borrow_leaf_types(f.ret, structs)
+    if not leaves:
+        return frozenset()
+    pnames = [p.name for p in f.params]
+    refs = [i for i, p in enumerate(f.params) if _is_borrowish(p.type, structs)]
+    src: set[int] = set()
+    for leaf in leaves:
+        reg = _ref_region(leaf) if _is_ref(leaf) else ""
+        if reg:
+            if reg in pnames:
+                src.add(pnames.index(reg))
+            continue                      # 坏标记已由 marker 检查报过
+        if len(refs) == 1:
+            src.add(refs[0])
+        elif len(refs) > 1:
+            src.update(refs)              # "最短者" = 所有入参的交集
+        # 没有引用形参 ⇒ 摘要为空；**错误在函数体那一趟报**（`_lifetime_fn_errs`），
+        # 因为那时才知道返回值是不是一个局部借用 —— 是的话 E012 已经把根因说清楚了，
+        # 再来一条 E041 只是同一处报两遍（`loment_rule_parity` 的 dangling-return
+        # 探针就是这么抓到的）。
+    return frozenset(src)
+
+
+def _lifetime_expr_prov(e, scope: dict[str, str], prov: dict[str, frozenset],
+                        funcs: dict, structs: dict, structs_with_borrow: set[str],
+                        sums: dict[str, frozenset]) -> frozenset:
+    """表达式值的**来源集合**（只对借用有意义）。"""
+    if e is None:
+        return frozenset()
+    if isinstance(e, Ident):
+        return prov.get(e.name, frozenset())
+    if isinstance(e, Un):
+        if e.op in ("&", "&mut"):
+            root = _place_root(e.expr)
+            if root is None and isinstance(e.expr, Un) and e.expr.op == "*":
+                # `&*p`：来源是 p 这个变量（p 是局部 ⇒ 借出函数就悬垂）。
+                root = _place_root(e.expr.expr)
+            if root is None:
+                return frozenset()
+            if root.name in prov and _is_borrowish(scope.get(root.name), structs):
+                # `&r`（r 自己是一个借用）→ 借的是 r 这块地方，来源仍是 r 的来源
+                return prov.get(root.name, frozenset())
+            return frozenset({("p", root.name)}) if root.name in _param_names(scope) \
+                else frozenset({("l", root.name)})
+        if e.op == "*":
+            return _lifetime_expr_prov(e.expr, scope, prov, funcs, structs,
+                                       structs_with_borrow, sums)
+        return frozenset()
+    if isinstance(e, Call):
+        t = expr_type(e, scope, funcs, structs)
+        if not _is_borrowish(t, structs):
+            return frozenset()
+        idx = sums.get(e.name)
+        if idx is None:
+            return frozenset({("e", e.name)})
+        out: set = set()
+        for i in idx:
+            if i < len(e.args):
+                out |= _lifetime_expr_prov(e.args[i], scope, prov, funcs, structs,
+                                           structs_with_borrow, sums)
+        return frozenset(out)
+    if isinstance(e, MethodCall):
+        return frozenset({("e", e.name)})
+    if isinstance(e, FieldAccess):
+        ot = _deref_type(expr_type(e.obj, scope, funcs, structs))
+        if ot in structs_with_borrow:
+            return _lifetime_expr_prov(e.obj, scope, prov, funcs, structs,
+                                       structs_with_borrow, sums)
+        return frozenset()
+    if isinstance(e, StructLit):
+        out = set()
+        st = structs.get(e.name)
+        if st is not None:
+            for fn, ft in st.fields:
+                if _is_borrowish(ft, structs):
+                    v = next((x for n, x in e.inits if n == fn), None)
+                    out |= _lifetime_expr_prov(v, scope, prov, funcs, structs,
+                                               structs_with_borrow, sums)
+        return frozenset(out)
+    if isinstance(e, ArrayLit):
+        out = set()
+        for it in e.items:
+            out |= _lifetime_expr_prov(it, scope, prov, funcs, structs,
+                                       structs_with_borrow, sums)
+        return frozenset(out)
+    if isinstance(e, Cast):
+        return _lifetime_expr_prov(e.expr, scope, prov, funcs, structs,
+                                   structs_with_borrow, sums)
+    if isinstance(e, Fallback):
+        return (_lifetime_expr_prov(e.value, scope, prov, funcs, structs,
+                                    structs_with_borrow, sums)
+                | _lifetime_expr_prov(e.default, scope, prov, funcs, structs,
+                                      structs_with_borrow, sums))
+    if isinstance(e, Try):
+        return _lifetime_expr_prov(e.expr, scope, prov, funcs, structs,
+                                   structs_with_borrow, sums)
+    if isinstance(e, Index):
+        return _lifetime_expr_prov(e.obj, scope, prov, funcs, structs,
+                                   structs_with_borrow, sums)
+    return frozenset()
+
+
+def _param_names(scope: dict[str, str]) -> set[str]:
+    return set(_LIFETIME_PARAM_NAMES.get(id(scope), ()))
+
+
+#: `_lifetime_expr_prov` 要在不看签名的前提下判"这个名字是不是形参" —— 由调用方
+#: 在每个函数开始前挂上（键是 `id(scope)`，函数结束就摘）。这是本模块唯一的**作用域
+#: 旁路**：`scope` 是普通 dict，塞一个特殊键会污染类型查询。
+_LIFETIME_PARAM_NAMES: dict[int, set[str]] = {}
+
+
+def _lifetime_fn_errs(f: Func, funcs: dict, structs: dict, enums: dict,
+                      sums: dict[str, frozenset], lifetime: str) -> list[str]:
+    """一个函数体的生命周期检查（`docs/299` §3.4 / §3.5）。"""
+    errs: list[str] = []
+    params = {p.name for p in f.params}
+    scope: dict[str, str] = {p.name: p.type for p in f.params}
+    _LIFETIME_PARAM_NAMES[id(scope)] = params
+    prov: dict[str, frozenset] = {p.name: frozenset({("p", p.name)}) for p in f.params}
+    ret_is_borrow = bool(_borrow_leaf_types(f.ret, structs))
+    has_ref = any(_is_borrowish(p.type, structs) for p in f.params)
+    borrowed: set[str] = set()       # 被借过的根变量名（`free` 那条用）
+    stored_mut: dict[str, int] = {}
+    stored_shared: set[str] = set()
+    swb = {n for n, s in structs.items()
+           if any(_is_borrowish(ft, structs) for _, ft in s.fields)}
+
+    def err_local(origins: frozenset, line: int) -> None:
+        loc = sorted(name for kind, name in origins if kind == "l")
+        if loc:
+            errs.append(f"{line}: 返回局部变量 {loc[0]} 的借用（悬垂）")
+
+    def prov_of(e):
+        return _lifetime_expr_prov(e, scope, prov, funcs, structs, swb, sums)
+
+    def note_borrows(e) -> None:
+        """收集"谁被借了" + 存下来的 `&mut` 独占。"""
+        if e is None:
+            return
+        if isinstance(e, Un) and e.op in ("&", "&mut"):
+            root = _place_root(e.expr)
+            if root is None and isinstance(e.expr, Un) and e.expr.op == "*":
+                root = _place_root(e.expr.expr)     # `&*p` 借的是 p 指向的块
+            if root is not None:
+                borrowed.add(root.name)
+            note_borrows(e.expr)
+            return
+        if isinstance(e, Call):
+            if e.name == "free" and e.args and isinstance(e.args[0], Ident):
+                if e.args[0].name in borrowed:
+                    errs.append(
+                        f"{e.line}: 在 {e.args[0].name} 仍被借用时释放它 —— "
+                        f"借用的区域必须包在释放点之内（`docs/299` §3.5）")
+            for a in e.args:
+                note_borrows(a)
+            return
+        for attr in ("expr", "obj", "left", "right", "value", "default", "idx"):
+            note_borrows(getattr(e, attr, None))
+        if isinstance(e, ArrayLit):
+            for it in e.items:
+                note_borrows(it)
+        if isinstance(e, StructLit):
+            for _, v in e.inits:
+                note_borrows(v)
+
+    def bind(name: str, ty: str, expr, line: int) -> None:
+        if _is_borrowish(ty, structs):
+            prov[name] = prov_of(expr)
+        else:
+            prov.pop(name, None)
+        # `&mut` 的独占：**存下来**才跨语句（行内的交给 E007）。
+        if isinstance(expr, Un) and expr.op == "&mut":
+            root = _place_root(expr.expr)
+            if root is not None:
+                if root.name in stored_shared or root.name in stored_mut:
+                    errs.append(f"{line}: 变量 {root.name} 被可变借用两次 (不允许别名)")
+                stored_mut[root.name] = line
+        elif isinstance(expr, Un) and expr.op == "&":
+            root = _place_root(expr.expr)
+            if root is not None:
+                if root.name in stored_mut:
+                    errs.append(f"{line}: 变量 {root.name} 既被可变借用又被借用")
+                else:
+                    stored_shared.add(root.name)
+
+    def walk(stmts) -> None:
+        for s in stmts:
+            if isinstance(s, Let):
+                scope[s.name] = s.type
+                note_borrows(s.expr)
+                bind(s.name, s.type, s.expr, s.line)
+            elif isinstance(s, Assign):
+                note_borrows(s.expr)
+                if isinstance(s.target, Ident):
+                    bind(s.target.name, scope.get(s.target.name, ""), s.expr, s.line)
+                else:
+                    note_borrows(s.target)
+            elif isinstance(s, Return):
+                note_borrows(s.expr)
+                # `return &x;` 那一格由 M17 报（`_move_check`，E012）；这里只补
+                # 别名/字段/经调用传回来那些它看不见的形状，免得同一处报两遍。
+                _prov = prov_of(s.expr)
+                if not (isinstance(s.expr, Un) and s.expr.op in ("&", "&mut")
+                        and isinstance(s.expr.expr, Ident)):
+                    err_local(_prov, s.line)
+                # **没有引用形参却返回借用**（E041）：局部来源由 E012 说清，不再叠一遍；
+                # 外部来源（例如一个返回借用的 extern 调用）没有别的诊断，在这里点名。
+                if ret_is_borrow and not has_ref \
+                        and not any(kind == "l" for kind, _ in _prov):
+                    errs.append(
+                        f"{s.line}: 函数 {f.name} 返回借用，但签名里没有引用形参 —— "
+                        f"区域无法推断。加一个引用形参，或用 `choose lifetime_manual` "
+                        f"写 `&a T`")
+            elif isinstance(s, ExprStmt):
+                note_borrows(s.expr)
+            elif isinstance(s, If):
+                note_borrows(s.cond)
+                walk(s.then)
+                walk(s.otherwise)
+            elif isinstance(s, While):
+                note_borrows(s.cond)
+                walk(s.body)
+            elif isinstance(s, For):
+                note_borrows(s.lo)
+                note_borrows(s.hi)
+                scope[s.var] = "u32"
+                walk(s.body)
+            elif isinstance(s, Match):
+                note_borrows(s.subject)
+                for _, body in s.arms:
+                    walk(body)
+            elif isinstance(s, DomainBlock):
+                walk(s.body)
+            elif isinstance(s, Defer):
+                note_borrows(s.call)
+            else:
+                for attr in ("expr", "aux", "target", "cond", "call"):
+                    note_borrows(getattr(s, attr, None))
+                body = getattr(s, "body", None)
+                if isinstance(body, list):
+                    walk(body)
+
+    walk(f.body)
+    _LIFETIME_PARAM_NAMES.pop(id(scope), None)
+    return errs
+
+
 def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
           deps: list[Module] | None = None, _dep_pass: bool = False,
           lspe_mode: str = "full") -> list[str]:
@@ -6315,6 +6832,19 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     per_dim: dict[str, list[tuple[str, int]]] = {}
     for dim, word, line in mod.choose_lines:
         per_dim.setdefault(dim, []).append((word, line))
+    # **版次闸**（`docs/305` / `docs/299`）：生命周期三维是 tur2026.3 的新语义。
+    # 旧版次的源里写它们 → 点名拒（不是"未知取值"那种泛泛的报错），而且**不**让
+    # 2026.2 的默认被动地变成 auto。2026.1 / 2026.2 的产物一个字节都不变。
+    _prof = getattr(mod, "profile", "") or ""
+    if _prof and _prof < LIFETIME_DEFAULT_EDITION:
+        for _dim, _w, _l in mod.choose_lines:
+            if _dim == "lifetime":
+                errs.append(
+                    f"{_l}: 生命周期控制从 `{LIFETIME_DEFAULT_EDITION}` 开始 —— "
+                    f"`{_w}` 在 `{_prof}` 里不存在。这份源要么改写"
+                    f"`choose write grammar {LIFETIME_DEFAULT_EDITION}`，要么删掉这一行"
+                    f"（旧版次按 `lifetime_no` 读）")
+                break
     for dim, ws in sorted(per_dim.items()):
         if len(ws) > 1:
             (w0, l0), (w1, l1) = ws[0], ws[1]
@@ -6326,8 +6856,7 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     # 看的是**生效值**（显式写的，或那一维的默认档）—— 因为冲突说的是"这个程序最后
     # 是哪两档"，不是"源码里写了哪两行"。报错要**点名为什么冲突**，泛泛的"非法组合"
     # 正是判据点名的反面（`docs/188` 的"宁拒勿猜"）。
-    _eff = dict(CORE_DEFAULTS)
-    _eff.update(mod.chooses)
+    _eff = effective_dims(mod)
     # **两两查**（不是写死 `(mode, gc)` 那一对）：加一维时这一段一行都不用动。
     # 先后由 `CORE_DIM_ORDER` 定 —— 报错文本要比字节，不能靠 dict/set 的迭代顺序。
     _vals = [_eff[d] for d in CORE_DIM_ORDER]
@@ -6696,6 +7225,15 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                 errs.append(f"{site_line}: 机调用号 {num} 使用了 excluded 的空间 {space}")
                 break                      # 一个站点只报一次（两个写法都写了也还是一次）
 
+    lifetime = _eff["lifetime"]
+    _lt_sums: dict[str, frozenset[int]] = {}
+    if lifetime != "lifetime_no":
+        for _n, _fn in funcs.items():
+            _lt_sums.setdefault(_n, _lifetime_summary(_fn, structs, lifetime, errs))
+        for _s in mod.structs:
+            for _fnm, _ft in _s.fields:
+                _lifetime_marker_errs(_ft, [], lifetime,
+                                      _s.line, errs, f"结构体 {_s.name}.{_fnm}")
     for f in mod.funcs:
         if not _type_ok(f.ret, known):
             errs.append(f"{f.line}: 未知类型 {f.ret}（函数 {f.name} 的返回类型）")
@@ -6719,7 +7257,7 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
         def walk(stmts: list, fscope: dict[str, str]) -> None:
             for s in stmts:
                 if isinstance(s, Let):
-                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums)
+                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums, lifetime)
                     if not _type_ok(s.type, known):
                         errs.append(f"{s.line}: 未知类型 {s.type}（let {s.name} 的类型）")
                     if _is_array(s.type) and isinstance(s.expr, ArrayLit):
@@ -6729,7 +7267,7 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                                 f"{s.line}: 数组长度不符: 声明 {want}，字面量 {len(s.expr.items)}"
                             )
                     t = expr_type(s.expr, fscope, funcs, structs)
-                    if t is not None and t != s.type:
+                    if t is not None and not _type_compat(t, s.type):
                         errs.append(f"{s.line}: let {s.name}: {s.type} = 表达式类型 {t}")
                     if s.space and not (_is_array(s.type) or _is_slice(s.type)
                                         or s.type == "ptr"):
@@ -6762,8 +7300,8 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                     walk(s.body, dict(fscope))
                     dstack.pop()
                 elif isinstance(s, Assign):
-                    _walk_expr(s.target, fscope, funcs, structs, errs, enums)
-                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums)
+                    _walk_expr(s.target, fscope, funcs, structs, errs, enums, lifetime)
+                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums, lifetime)
                     tt = expr_type(s.target, fscope, funcs, structs)
                     et = expr_type(s.expr, fscope, funcs, structs)
                     if isinstance(s.target, Index):
@@ -6772,27 +7310,33 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                             errs.append(f"{s.line}: 只读切片不能写 (形参需声明 mut [T])")
                     if isinstance(s.target, Ident) and s.target.name not in fscope:
                         errs.append(f"{s.line}: 赋值未声明的变量 {s.target.name}")
-                    elif not isinstance(s.target, (Ident, Index)):
-                        errs.append(f"{s.line}: 赋值目标不是左值")
-                    if tt is not None and et is not None and tt != et:
+                    else:
+                        _lv = isinstance(s.target, (Ident, Index))
+                        if lifetime != "lifetime_no" and (
+                                isinstance(s.target, FieldAccess)
+                                or (isinstance(s.target, Un) and s.target.op == "*")):
+                            _lv = True          # 写穿字段 / `*r = v`（`docs/299`）
+                        if not _lv:
+                            errs.append(f"{s.line}: 赋值目标不是左值")
+                    if tt is not None and et is not None and not _type_compat(tt, et):
                         errs.append(f"{s.line}: 赋值 {tt} = 表达式类型 {et}")
                 elif isinstance(s, If):
-                    _walk_expr(s.cond, fscope, funcs, structs, errs, enums)
+                    _walk_expr(s.cond, fscope, funcs, structs, errs, enums, lifetime)
                     ct = expr_type(s.cond, fscope, funcs, structs)
                     if ct is not None and ct != "bool":
                         errs.append(f"{s.line}: if 条件类型 {ct}，应为 bool")
                     walk(s.then, fscope)
                     walk(s.otherwise, fscope)
                 elif isinstance(s, While):
-                    _walk_expr(s.cond, fscope, funcs, structs, errs, enums)
+                    _walk_expr(s.cond, fscope, funcs, structs, errs, enums, lifetime)
                     ct = expr_type(s.cond, fscope, funcs, structs)
                     if ct is not None and ct != "bool":
                         errs.append(f"{s.line}: while 条件类型 {ct}，应为 bool")
                     walk(s.body, fscope)
                 elif isinstance(s, Guard):  # P4: 能力域检查
-                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums)
+                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums, lifetime)
                     if s.aux is not None:
-                        _walk_expr(s.aux, fscope, funcs, structs, errs, enums)
+                        _walk_expr(s.aux, fscope, funcs, structs, errs, enums, lifetime)
                     if s.is_block:  # docs/313：块级域，名字只在这个 {} 里
                         k = s.kind_id
                         if (k in _AUX_KIND_IDS) != (s.aux is not None):
@@ -6839,7 +7383,7 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                 elif isinstance(s, Quality):  # docs/306 §5.2 第 7 条
                     dom = next((d for d in reversed(dstack) if d.name == s.cap), None)
                     cap = next((c for c in mod.caps if c.name == s.cap), None) if dom is None else None
-                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums)
+                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums, lifetime)
                     if dom is not None:
                         if dom.kind != "adaptive":
                             errs.append(f"{s.line}: quality 只用于自适应域，"
@@ -6855,7 +7399,7 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                 elif isinstance(s, Discharge):  # docs/307 §5
                     dom = next((d for d in reversed(dstack) if d.name == s.cap), None)
                     cap = next((c for c in mod.caps if c.name == s.cap), None) if dom is None else None
-                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums)
+                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums, lifetime)
                     if dom is not None:
                         if dom.kind != "reachable":
                             errs.append(f"{s.line}: discharge 只用于可达域，"
@@ -6869,8 +7413,8 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                     if dt is not None and dt not in INT_TYPES:
                         errs.append(f"{s.line}: discharge 的索引类型 {dt}，应为整型")
                 elif isinstance(s, For):
-                    _walk_expr(s.lo, fscope, funcs, structs, errs, enums)
-                    _walk_expr(s.hi, fscope, funcs, structs, errs, enums)
+                    _walk_expr(s.lo, fscope, funcs, structs, errs, enums, lifetime)
+                    _walk_expr(s.hi, fscope, funcs, structs, errs, enums, lifetime)
                     lt = expr_type(s.lo, fscope, funcs, structs)
                     ht = expr_type(s.hi, fscope, funcs, structs)
                     for bt, bw in ((lt, "下界"), (ht, "上界")):
@@ -6880,7 +7424,7 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                     body_scope[s.var] = lt or ht or "u32"
                     walk(s.body, body_scope)
                 elif isinstance(s, Match):
-                    _walk_expr(s.subject, fscope, funcs, structs, errs, enums)
+                    _walk_expr(s.subject, fscope, funcs, structs, errs, enums, lifetime)
                     st = expr_type(s.subject, fscope, funcs, structs)
                     ed = enums.get(st) if st else None
                     if ed is None:
@@ -6926,12 +7470,12 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                         if f.ret != "()":
                             errs.append(f"{s.line}: `return;` 不带值，函数 {f.name} 声明 {f.ret}")
                     else:
-                        _walk_expr(s.expr, fscope, funcs, structs, errs, enums)
+                        _walk_expr(s.expr, fscope, funcs, structs, errs, enums, lifetime)
                         t = expr_type(s.expr, fscope, funcs, structs)
-                        if t is not None and t != f.ret:
+                        if t is not None and not _type_compat(t, f.ret):
                             errs.append(f"{s.line}: return 类型 {t}，函数 {f.name} 声明 {f.ret}")
                 elif isinstance(s, ExprStmt):
-                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums)
+                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums, lifetime)
                 elif isinstance(s, Lgc):
                     # `docs/309`：预算必须是 u64 纳秒；整数字面量按 u64 收（`10ms` 的糖
                     # 已经在解析期折成 IntLit）。窗口体已经摊平成兄弟语句。
@@ -6943,10 +7487,18 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                     if not isinstance(s.call, Call):
                         errs.append(f"{s.line}: defer 只收函数调用（`defer f(a, b);`）")
                     else:
-                        _walk_expr(s.call, fscope, funcs, structs, errs, enums)
+                        _walk_expr(s.call, fscope, funcs, structs, errs, enums, lifetime)
 
         walk(f.body, scope)
         errs.extend(_move_check(f, funcs, structs, enums, lms))  # M13 移动检查 + E029
+        if lifetime != "lifetime_no":
+            _pn = [(p.name, p.type) for p in f.params]
+            for _p in f.params:
+                _lifetime_marker_errs(_p.type, _pn, lifetime, f.line, errs,
+                                      f"形参 {_p.name}")
+            _lifetime_marker_errs(f.ret, _pn, lifetime, f.line, errs,
+                                  f"函数 {f.name} 的返回类型")
+            errs.extend(_lifetime_fn_errs(f, funcs, structs, enums, _lt_sums, lifetime))
         # **非 `()` 的函数不许从末尾掉出去**（`#22`）。`check` 通过 = "这份程序不会 trap"
         # 是这条命令给人的唯一保证，而"掉出末尾"在发射之后是一条**非法指令**
         # （`SIGILL`）—— 只在**真走到那一支**时才发生，所以静态检查是唯一能在事前说这句
@@ -8119,7 +8671,7 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     import potato as _potato
     _gc_ladder = _count_gc_ladder(raw_mod)
     _lms_levels = {_n: _lms_level(mod, _n) for _n in LMS_TOGGLES}
-    _dims = {k: mod.chooses.get(k, CORE_DEFAULTS[k]) for k in CORE_DIM_ORDER}
+    _dims = effective_dims(mod)
     _facts = _lspe_facts(mod, deps or [])
     _lspe_ledger = lspe.build_ledger(
         sites=getattr(mod, "lspe_sites", []),
@@ -8216,7 +8768,10 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None,
         # v20 = v19 + **系统索引** `systems`（`docs/147` §5.4 / #1022）：六个系统各一条
         # `{state, detail, cost}`，`detail` **指向**已有的明细字段、不复制数字。
         # 于是"这份产物有哪些系统、各自的状态与成本"是**一次查表**读完的。
-        "potato": "v21",
+        # v22 = v21 + **生命周期档** `lifetime`（`docs/299`）：`lifetime_no` /
+        # `lifetime_auto` / `lifetime_manual`。与 `gc` / `lms` 同级同形、**必填**，
+        # 于是"这份产物有没有静态借用证明"是**不读源码可判的**。
+        "potato": "v22",
         "unit": mod.name,
         "language": "loment",
         # **表层语法**（`docs/188` §2）—— 与 `language` 分工不同, 别混:
@@ -8261,6 +8816,11 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None,
         # 计数、`per_kind`、不变量与 `lspe_close_admin` 的归零都在 `lspe/ledger.py`；
         # 编译器只把这个映射写进产物。
         "lspe": lspe.public(_lspe_ledger),
+        # **生命周期档**（v22，`docs/299`，用户 2026-11-08 定第八维）。与 `gc` / `lms`
+        # 同级同形：**必填**，于是"这份产物有没有静态借用证明、以及要不要手写区域标记"
+        # 是**不读源码可判的**。默认值随版次走（`core_default`）—— 2026.3 起
+        # `lifetime_auto`，旧版次 `lifetime_no`。
+        "lifetime": _dims["lifetime"],
         # **系统索引**（v20，`docs/147` §5.4 / #1022）。六个系统各一条，次序写死；
         # `state` 与顶层字段（`lspe` 取台账自己的 `state`）、`detail` 与明细字段名、
         # `cost` 与明细的总数**逐条相同** —— 校验器不读源码也判得了它们打架。
@@ -9252,6 +9812,10 @@ def _ll_type(t: str, structs: dict, enums: dict) -> str:
         return "ptr"
     if t == "()":  # M16: unit
         return "void"
+    if _is_ref(t):
+        # 借用值就是一个指针（`docs/299`）。切片借用已经在解析时规范化回 `[T]` /
+        # `mut [T]`，所以走不到这里。
+        return "ptr"
     if _is_slice(t):
         et = _slice_elem(t)
         if et not in IR_TYPES:
@@ -9260,9 +9824,11 @@ def _ll_type(t: str, structs: dict, enums: dict) -> str:
     if t in structs:
         s = structs[t]
         for _, ft in s.fields:
-            if ft not in IR_TYPES:
+            # 借用字段是一个指针（`docs/299` §3.1）—— 零拷贝视图就靠它。
+            if ft not in IR_TYPES and not _is_ref(ft):
                 raise LomError(s.line, 1, f"结构体 {_display_ty(t)} 的字段类型 {_display_ty(ft)} 目前只支持标量")
-        return "{ " + ", ".join(IR_TYPES[ft] for _, ft in s.fields) + " }"
+        return "{ " + ", ".join(
+            (IR_TYPES[ft] if ft in IR_TYPES else "ptr") for _, ft in s.fields) + " }"
     if t in enums:
         e = enums[t]
         if not e.payloads:
@@ -10776,6 +11342,41 @@ class _Ir:
             self.w("call void @__loment_rt_release()")
 
     # -- 表达式 -> (loment 类型, 值)
+    def _addr_of(self, e, line: int, auto_deref: bool = True) -> tuple[str, str]:
+        """一个**有地址的表达式**的 `(类型, 指针)`（`docs/299` 的借用与写穿用）。
+
+        v1 收三种：变量、字段、带 `*` 的解引用。字段上的借用先要拿到那块字段的
+        地址 —— 这与 `Assign` / `FieldAccess` 走同一个 GEP。
+
+        `auto_deref`：字段访问要（`r.field` / `&r.field` 里 `r: &Foo` 自动解一层），
+        而 `&r` **不能**解 —— 否则 `&r` 与 `r` 是同一个值，`&&T` 就消失了。
+        """
+        if isinstance(e, Ident):
+            ty, ptr = self.vars[e.name]
+            if auto_deref and _is_ref(ty):
+                v = self.t()
+                self.w(f"{v} = load ptr, ptr {ptr}")
+                return _ref_elem(ty), v
+            return ty, ptr
+        if isinstance(e, Un) and e.op == "*":
+            # `&*p`：p 已经是那个地址。`ptr` 按字节（`u8`）算。
+            ty, v = self.expr(e.expr)
+            et = "u8" if ty == "ptr" else (_ref_elem(ty) if _is_ref(ty) else ty)
+            return et, v
+        if isinstance(e, FieldAccess):
+            aty, aptr = self._addr_of(e.obj, e.line, True)
+            st = self.structs.get(aty)
+            if st is None:
+                raise LomError(e.line, 1, f"{_display_ty(aty)} 不是结构体")
+            idx = next((i for i, (fn, _) in enumerate(st.fields) if fn == e.name), None)
+            if idx is None:
+                raise LomError(e.line, 1, f"结构体 {_display_ty(aty)} 没有字段 {e.name}")
+            ft = st.fields[idx][1]
+            gp = self.t()
+            self.w(f"{gp} = getelementptr inbounds {self.ll(aty)}, ptr {aptr}, i32 0, i32 {idx}")
+            return ft, gp
+        raise LomError(line, 1, "借用的目标必须是变量、字段或 `*p`")
+
     def expr(self, e, want: str | None = None) -> tuple[str, str]:
         if isinstance(e, Raw):
             return e.ty, e.val
@@ -10803,20 +11404,27 @@ class _Ir:
             self.w(f"{r} = load {self.ll(ty)}, ptr {ptr}")
             return ty, r
         if isinstance(e, Un):
-            if e.op in ("&", "&mut"):  # M3/M4: 数组 -> 切片值
-                if not isinstance(e.expr, Ident):
-                    raise LomError(e.line, 1, f"native: {e.op} 只支持数组变量")
-                ty, ptr = self.vars[e.expr.name]
-                if not _is_array(ty):
-                    raise LomError(e.line, 1, f"native: {ty} 不是数组")
-                p0 = self.t()
-                self.w(f"{p0} = getelementptr inbounds {self.ll(ty)}, ptr {ptr}, i32 0, i32 0")
-                v1 = self.t()
-                self.w(f"{v1} = insertvalue {{ ptr, i64 }} undef, ptr {p0}, 0")
-                v2 = self.t()
-                self.w(f"{v2} = insertvalue {{ ptr, i64 }} {v1}, i64 {_array_len(ty)}, 1")
-                st = f"mut [{_array_elem(ty)}]" if e.op == "&mut" else f"[{_array_elem(ty)}]"
-                return st, v2
+            if e.op == "*":  # `docs/299`：解引用一层（`ptr` 按字节读）
+                ty, v = self.expr(e.expr)
+                et = "u8" if ty == "ptr" else (_ref_elem(ty) if _is_ref(ty) else ty)
+                r = self.t()
+                self.w(f"{r} = load {self.ll(et)}, ptr {v}")
+                return et, r
+            if e.op in ("&", "&mut"):  # M3/M4: 数组 -> 切片值；其余 -> 借用指针
+                # `docs/299`：非数组的借用是一个**指针**（指向那块地方）。切片的形状
+                # 不变（ptr + len），因为切片本来就是借用视图。
+                aty, aptr = self._addr_of(e.expr, e.line, False)
+                if _is_array(aty):
+                    p0 = self.t()
+                    self.w(f"{p0} = getelementptr inbounds {self.ll(aty)}, ptr {aptr}, i32 0, i32 0")
+                    v1 = self.t()
+                    self.w(f"{v1} = insertvalue {{ ptr, i64 }} undef, ptr {p0}, 0")
+                    v2 = self.t()
+                    self.w(f"{v2} = insertvalue {{ ptr, i64 }} {v1}, i64 {_array_len(aty)}, 1")
+                    st = f"mut [{_array_elem(aty)}]" if e.op == "&mut" else f"[{_array_elem(aty)}]"
+                    return st, v2
+                st = f"&mut {aty}" if e.op == "&mut" else f"&{aty}"
+                return st, aptr
             ty, v = self.expr(e.expr, want)
             it = _ir_t(ty)
             r = self.t()
@@ -10909,18 +11517,8 @@ class _Ir:
             self.w(f"{r} = call {self.ll(fn.ret)} @{fn.name}({', '.join(args)})")
             return fn.ret, r
         if isinstance(e, FieldAccess):
-            if not isinstance(e.obj, Ident):
-                raise LomError(e.line, 1, "这个后端只支持从变量上取字段")
-            ty, ptr = self.vars[e.obj.name]
-            st = self.structs.get(ty)
-            if st is None:
-                raise LomError(e.line, 1, f"{_display_ty(ty)} 不是结构体")
-            idx = next((i for i, (fn, _) in enumerate(st.fields) if fn == e.name), None)
-            if idx is None:
-                raise LomError(e.line, 1, f"结构体 {_display_ty(ty)} 没有字段 {e.name}")
-            ft = st.fields[idx][1]
-            gp = self.t()
-            self.w(f"{gp} = getelementptr inbounds {self.ll(ty)}, ptr {ptr}, i32 0, i32 {idx}")
+            # `r.field`：`r` 是 `&Foo` 时自动解一层（`docs/299` §3.4）。
+            ft, gp = self._addr_of(e, e.line, True)
             r = self.t()
             self.w(f"{r} = load {self.ll(ft)}, ptr {gp}")
             return ft, r
@@ -11814,6 +12412,14 @@ class _Ir:
                 h = self.t()
                 self.w(f"{h} = inttoptr i64 {hs} to ptr")
                 self.w(f"store i32 {-(mask + 2)}, ptr {h}")
+            return
+        if isinstance(s, Assign) and (isinstance(s.target, FieldAccess)
+                                      or (isinstance(s.target, Un)
+                                          and s.target.op == "*")):
+            # 写穿字段 / `*r = v`（`docs/299` 的 `&mut` 用途）。
+            ty, gp = self._addr_of(s.target, s.line, True)
+            _, v = self.expr(s.expr, ty)
+            self.w(f"store {self.ll(ty)} {v}, ptr {gp}")
             return
         if isinstance(s, Assign):
             if not isinstance(s.target, Ident):

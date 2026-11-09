@@ -1742,8 +1742,17 @@ fn unit_name(mem: ptr, argp: ptr, al: u32) -> u32 {
 /// 上游靠"行号不受影响"这条（见 `_from_class_lang` 里那段注解）用 `body` 的下标回
 /// `src` 数行号，本实现照同一口径。
 fn strip_str(src: ptr, n: u32, dst: ptr) -> u32 {
+    // **保长度**：原样复制，只把字面量的**内容**抹成空格（两个引号留着）。
+    //
+    // 原先是压成 `""`（长度变），所以正文只能从这份抹过的副本里取 —— 而那份副本
+    // 里的字面量**已经不是原文了**：`print("hello")` 发出去变成 `print("")`。
+    // 长度不变之后，正文可以按下标回 `M_SRC` 切，字面量原样带过去（2026-11-09）。
+    let i0: u32 = 0;
+    while i0 < n {
+        store8(dst, i0, load8(src, i0) as u8);
+        i0 = i0 + 1;
+    }
     let i: u32 = 0;
-    let o: u32 = 0;
     while i < n {
         let c: u32 = load8(src, i);
         if c == 34 {
@@ -1766,22 +1775,20 @@ fn strip_str(src: ptr, n: u32, dst: ptr) -> u32 {
                 }
             }
             if close != FAIL {
-                store8(dst, o, 34 as u8);
-                store8(dst, o + 1, 34 as u8);
-                o = o + 2;
+                let k: u32 = i + 1;
+                while k < close {
+                    store8(dst, k, 32 as u8);
+                    k = k + 1;
+                }
                 i = close + 1;
             } else {
-                store8(dst, o, 34 as u8);
-                o = o + 1;
                 i = i + 1;
             }
         } else {
-            store8(dst, o, c as u8);
-            o = o + 1;
             i = i + 1;
         }
     }
-    return o;
+    return n;
 }
 
 /// 掐掉尾部空白，返回新终点。
@@ -2714,18 +2721,30 @@ fn j_emit_functions(mem: ptr, out: ptr, o: u32, mode: u32) -> u32 {
                                     q = q + 1;
                                 }
                                 let bs: u32 = ms + lead;
-                                let be: u32 = trim_end(body, bs, me);
+                                // 正文从**原文**里切（字面量要原样带过去，见 `strip_str`）；
+                                // 尾部空白也在原文上算 —— 抹过的副本上，一段尾注释是空格，
+                                // 在原文里不是，两边按各自的副本裁就会差在注释那一段上。
+                                let s0: ptr = ptr_add(mem, M_SRC);
+                                let be: u32 = trim_end(s0, bs, me);
                                 if be > bs {
                                     o = jl(out, o, ", \"body\": ");
-                                    o = jq(out, o, body, bs, be - bs);
+                                    o = jq(out, o, s0, bs, be - bs);
                                     o = jl(out, o, ", \"body_line\": ");
                                     // 上游 `_body_at(src, open_idx+1+mem_off, mem_raw)`：
-                                    // 那个下标是**剥过字面量的 body** 的（Python 的**字符**口径），
-                                    // 数的却是**原文 src** 里的换行。两件事各归各，这里照抄。
+                                    // 那个下标是**字符**口径（Python 的字符串按字素索引），
+                                    // 数的却是**原文 src** 里的换行。
+                                    //
+                                    // `lead` 是**字节**数，而它跳过的领头注释被抹成空格之后
+                                    // 一个汉字占三个字节 —— 先 `chars_n` 再加 `lead` 会把
+                                    // 两个口径混起来（实测 `Bits.java` 那种带中文头注释的
+                                    // 文件整体偏 +2 行）。所以**先把字节偏移加起来再换算**。
+                                    // 换算要在**原文**上做：抹过的副本里，字面量里的汉字
+                                    // 变成了三个空格（三个"字符"），数出来会比原文多
+                                    // （`chars_n` 的 `M_SRC2` 那份只对"没有字面量"的文件成立）。
                                     o = jint(out, o, 0,
                                              line_at_chars(ptr_add(mem, M_SRC),
                                                            ld32(ptr_add(mem, M_SC), 16),
-                                                           chars_n(ptr_add(mem, M_SRC2), ms) + lead));
+                                                           chars_n(ptr_add(mem, M_SRC), ms + lead)));
                                 }
                                 o = jl(out, o, "}");
                             }

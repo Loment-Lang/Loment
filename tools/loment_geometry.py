@@ -57,11 +57,20 @@ class Loop:
 
 
 @dataclass
+class SolidBody:
+    """立体图的**体**（`docs/315` §5.2）：`solid 名 : A, B;` 的成员与根。"""
+    name: str
+    root: str
+    members: list
+
+
+@dataclass
 class Geometry:
     nodes: list = field(default_factory=list)
     edges: list = field(default_factory=list)
     loops: list = field(default_factory=list)
     branches: list = field(default_factory=list)
+    solids: list = field(default_factory=list)
 
     def to_json(self) -> str:
         nodes = sorted((n.__dict__ for n in self.nodes), key=lambda d: d["id"])
@@ -70,8 +79,9 @@ class Geometry:
         loops = sorted((l.__dict__ for l in self.loops),
                        key=lambda d: (d["fn"], d["line"], d["var"]))
         branches = sorted(self.branches)
+        solids = sorted((x.__dict__ for x in self.solids), key=lambda d: d["name"])
         return json.dumps({"nodes": nodes, "edges": edges,
-                           "loops": loops, "branches": branches},
+                           "loops": loops, "branches": branches, "solids": solids},
                           ensure_ascii=False, indent=1, sort_keys=True)
 
 
@@ -148,6 +158,20 @@ def geometry(mod: lomentc.Module) -> Geometry:
                         g.loops.append(Loop(fn.name, target.id, prov[0], step,
                                             (span + step - 1) // step, s.line))
                     walk(s.body, floor + 1, [])
+                elif isinstance(s, lomentc.Solid):
+                    ids = []
+                    for nm in s.names[1:]:
+                        tgt = next((x for x in stack if x.name == nm), None)
+                        if tgt is not None:
+                            ids.append(tgt.id)
+                        elif nm in cap_node:
+                            ids.append(cap_node[nm].id)
+                    for i in range(len(ids)):
+                        for j in range(i + 1, len(ids)):
+                            a_, b_ = sorted((ids[i], ids[j]))
+                            g.edges.append(Edge(a_, b_, "couple", s.line))
+                    if ids:
+                        g.solids.append(SolidBody(s.names[0], ids[0], ids))
                 elif isinstance(s, (lomentc.Couple, lomentc.Mutex)):
                     # 图的边（`docs/315` §5）：联动 `⇄` / 互斥 `⊥`。只记**块级**节点 ——
                     # 顶层 capability 不在几何的顶点集里。

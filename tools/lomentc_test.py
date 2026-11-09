@@ -6130,6 +6130,70 @@ def test_domain_tree_and_graph_edges():
 
 
 @test
+def test_solid_body_is_a_first_class_unit():
+    """`docs/315` §5.2：`solid 名 : A, B;` —— 立体图的体。
+
+    体 = couple + 名字：`guard 名(x)` 判根成员、其余静默；`quality 名 = q` 写到整组；
+    几何报告里成一条 `solids` 条目。体的图**按函数**求分量 —— 另一个函数里的块域
+    不能被算进伙伴（那会引用一个悬空的槽）。
+    """
+    NL = chr(10)
+
+    def S(*lines):
+        return NL.join(lines)
+
+    def load(src):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "d.lomt"
+            p.write_text(src, encoding="utf-8", newline=NL)
+            m = lomentc.load(p)
+            return m, lomentc.check(m)
+
+    src = S("module m", "choose runtime",
+            "capability ring    : disk[0..15] adaptive",
+            "capability partner : disk[0..15] adaptive",
+            "fn f(a: [u32; 16] in disk) -> u32 {",
+            "    solid body : ring, partner;",
+            "    guard body(3);",
+            "    quality body = 128;",
+            "    return a[0];", "}", "")
+    m, e = load(src)
+    assert e == [], e
+    ir = lomentc.emit_llvm(m, ROOT)
+    body = ir[ir.index("define i32 @f"):]
+    assert body.count("call void @__loment_guard2") == 2, body     # 根 + 静默伙伴
+    assert "i64 138, i64" in body, "伙伴不是 silent（kind|128）"
+    assert body.count("call void @__loment_qual_store") == 2, body  # 质量整组
+    g = json.loads(loment_geometry.geometry(m).to_json())
+    assert [x["name"] for x in g["solids"]] == ["body"], g["solids"]
+    assert g["solids"][0]["root"] == g["solids"][0]["members"][0], g["solids"]
+
+    # 按函数隔离：g 里把 ring 和块域 d 结成一个体，f 的守卫不能把 d 算进去
+    src2 = S("module m", "choose runtime",
+             "capability ring    : disk[0..15] adaptive",
+             "capability partner : disk[0..15]", "",
+             "fn f(a: [u32; 16] in disk) -> u32 {",
+             "    couple ring, partner;",
+             "    guard ring(3);",
+             "    return a[0];", "}",
+             "fn g(a: [u32; 16] in disk) -> u32 {",
+             "    domain d : disk[0..7] {",
+             "        solid inner_body : d, ring;",
+             "        guard inner_body(2);",
+             "    }",
+             "    return a[0];", "}", "")
+    m2, e2 = load(src2)
+    assert e2 == [], e2
+    ir2 = lomentc.emit_llvm(m2, ROOT)
+    f_ir = ir2[ir2.index("define i32 @f"):ir2.index("define i32 @g")]
+    # d 的审计槽号 = 能力数 2 + 第一个块 = 2；f 的守卫不该出现它
+    assert "i64 2, i64 %" not in f_ir, "f 的守卫把另一个函数的块算进了伙伴"
+    g_ir = ir2[ir2.index("define i32 @g"):]
+    assert "i64 0, i64 %" in g_ir, g_ir
+    print("      体的图：根 + 静默成员 / 质量整组 / 几何 solids / 按函数隔离，逐条成立")
+
+
+@test
 def test_domain_geometry_reads_trees_and_graphs():
     """`docs/315` §4–§5：横/竖树、平/立体图 —— 从代码里读出来的**确定性**形状。
 
@@ -6300,6 +6364,21 @@ def test_domains_selfhost_twin():
            "        domain leaf3 : disk[0..3] child_of outer3 { a[0] = 1; }\n"
            "    }\n"
            "    domain rv3 : disk[0..3] { domain:for i step -2 { a[i] = 3; } }\n"
+           "    return a[0];\n"
+           "}\n"
+           # docs/315 §5.2：立体图的体（根 + 静默成员 / 质量整组 / 按函数隔离）
+           "capability cpc : disk[0..15] adaptive\n"
+           "fn h_solid(a: [u32; 16] in disk) -> u32 {\n"
+           "    solid body : cpa, cpc;\n"
+           "    guard body(4);\n"
+           "    quality body = 64;\n"
+           "    return a[0];\n"
+           "}\n"
+           "fn h_solid2(a: [u32; 16] in disk) -> u32 {\n"
+           "    domain dd : disk[0..7] {\n"
+           "        solid b2 : dd, cpa;\n"
+           "        guard b2(2);\n"
+           "    }\n"
            "    return a[0];\n"
            "}\n")
     with tempfile.TemporaryDirectory() as td:

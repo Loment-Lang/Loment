@@ -133,7 +133,12 @@ const CG_DPN: u32 = 926284;           // = CG_DPT + 120
 const CG_CPP: u32 = 926288;
 const CG_CPP_MAX: u32 = 32;
 const CG_CPN: u32 = 926544;           // = CG_CPP + 256
-const CG_BYTES: u32 = 926548;         // = CG_CPN + 4
+//: 立体图的**体**（`docs/315` §5.2）：`solid 名 : A, B;` 的别名表（名 -> 根成员），
+//: 每条 8 B，最多 16 条。
+const CG_ALS: u32 = 926548;
+const CG_ALS_MAX: u32 = 16;
+const CG_ALN: u32 = 926676;           // = CG_ALS + 128
+const CG_BYTES: u32 = 926680;         // = CG_ALN + 4
 //: **分配站点的 spill 槽**（`#1465`）：根表只登记具名槽，表达式里的 SSA 临时值不是根。
 //: 每个站点一格 `%gc.sp.k`（k 按**源码序**），分配完立刻写进去、**语句边界清零**。
 //:   `CG_GCDIRTY` = 本语句写过的最大的站点号 + 1（0 = 本语句没分配过）
@@ -5420,6 +5425,10 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
     // `defer` 的书账按**函数**清零（docs/296 §2.3）：上一函数的站点/帧不能漏过来。
     store32(s, CG_DFR_N, 0);
     store32(s, CG_DFR_D, 0);
+    // 联动 / 体的图边按**函数**扫（`docs/315` §5）：另一帧里的块域在这里没有活的状态。
+    store32(s, CG_CPN, 0);
+    store32(s, CG_ALN, 0);
+    let _dgs: u32 = dom_graph_scan(s, src, toks, body_at, body_end);
     store32(s, CG_DFR_PLAY, 0);
     // `lgc` 的窗口编号与打开栈同样按**函数**清零（`docs/309`）：上一函数的窗口不能漏过来。
     store32(s, CG_LGC_N, 0);
@@ -6470,6 +6479,75 @@ fn dfr_stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
     return semi + 1;
 }
 
+/// 体的名字 -> 根成员（`docs/315` §5.2）；找不到返回 0。
+fn cp_alias(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
+    let n: u32 = load32(s, CG_ALN);
+    let i: u32 = 0;
+    while i < n {
+        if tok_eq(src, toks, load32(s, CG_ALS + i * 8), name_tok) {
+            return load32(s, CG_ALS + i * 8 + 4);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 扫一个函数体里的 `couple` / `solid`：联动对 + 体的别名（`docs/315` §5）。
+fn dom_graph_scan(s: ptr, src: ptr, toks: ptr, b: u32, e: u32) -> u32 {
+    let cq: u32 = b;
+    while cq < e && tok_kind(toks, cq) != 4 {
+        if tok_is(src, toks, cq, "solid") && tok_kind(toks, cq + 1) == 0
+                && tok_is(src, toks, cq + 2, ":") {
+            if load32(s, CG_ALN) >= CG_ALS_MAX {
+                return cg_fail(s, 2, cq);
+            }
+            let an: u32 = load32(s, CG_ALN);
+            let q: u32 = cq + 3;
+            if tok_kind(toks, q) != 0 {
+                return cg_fail(s, 2, cq);
+            }
+            store32(s, CG_ALS + an * 8, cq + 1);
+            store32(s, CG_ALS + an * 8 + 4, q);
+            store32(s, CG_ALN, an + 1);
+            let prev: u32 = q;
+            while q < e && tok_kind(toks, q) != 4 && !tok_is(src, toks, q, ";") {
+                if tok_kind(toks, q) == 0 && q != prev {
+                    if load32(s, CG_CPN) >= CG_CPP_MAX {
+                        return cg_fail(s, 2, cq);
+                    }
+                    let cn3: u32 = load32(s, CG_CPN);
+                    store32(s, CG_CPP + cn3 * 8, prev);
+                    store32(s, CG_CPP + cn3 * 8 + 4, q);
+                    store32(s, CG_CPN, cn3 + 1);
+                    prev = q;
+                }
+                q = q + 1;
+            }
+            cq = q;
+        } else if tok_is(src, toks, cq, "couple") && tok_kind(toks, cq + 1) == 0
+                && (tok_is(src, toks, cq + 2, ",") || tok_is(src, toks, cq + 2, ";")) {
+            let q: u32 = cq + 1;
+            let prev: u32 = q;
+            while q < e && tok_kind(toks, q) != 4 && !tok_is(src, toks, q, ";") {
+                if tok_kind(toks, q) == 0 && q != prev {
+                    if load32(s, CG_CPN) >= CG_CPP_MAX {
+                        return cg_fail(s, 2, cq);
+                    }
+                    let cn3: u32 = load32(s, CG_CPN);
+                    store32(s, CG_CPP + cn3 * 8, prev);
+                    store32(s, CG_CPP + cn3 * 8 + 4, q);
+                    store32(s, CG_CPN, cn3 + 1);
+                    prev = q;
+                }
+                q = q + 1;
+            }
+            cq = q;
+        }
+        cq = cq + 1;
+    }
+    return 0;
+}
+
 /// 联动组里从 `a` 能不能走到 `b`（深度 8 的递归；表最多 32 条边）。
 fn cp_conn(s: ptr, src: ptr, toks: ptr, a: u32, b: u32, depth: u32) -> u32 {
     if tok_eq(src, toks, a, b) {
@@ -6551,6 +6629,33 @@ fn dom_partner_cap(s: ptr, out: ptr, c: u32, v64: u32, has_aux: u32,
     emit_dec(s, out, (pk >> 4) & 3);
     emit_str(s, out, ")
 ");
+    return 0;
+}
+
+/// 能力型目标的联动伙伴（`docs/315` §5）：块在前、能力在后 —— 与参考实现同序。
+fn cap_partners(s: ptr, out: ptr, src: ptr, toks: ptr, ci: u32,
+                v64: u32, has_aux: u32, a64: u32) -> u32 {
+    if ci == 4294967295 || load32(s, CG_CPN) == 0 {
+        return 0;
+    }
+    let nm: u32 = load32(s, cap_base(ci));
+    let n: u32 = load32(s, CG_DOM_N);
+    let k: u32 = 1;
+    while k <= n {
+        let kn: u32 = load32(s, dom_at(k - 1, 8));
+        if kn != 0 && cp_conn(s, src, toks, nm, kn, 8) == 1 {
+            let _r: u32 = dom_one(s, out, k, v64, has_aux, a64, 1, 1);
+        }
+        k = k + 1;
+    }
+    let nc: u32 = load32(s, 536);
+    let c: u32 = 0;
+    while c < nc {
+        if c != ci && cp_conn(s, src, toks, nm, load32(s, cap_base(c)), 8) == 1 {
+            let _r2: u32 = dom_partner_cap(s, out, c, v64, has_aux, a64, 1);
+        }
+        c = c + 1;
+    }
     return 0;
 }
 
@@ -7494,6 +7599,14 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
     if tok_is(src, toks, j, "domain") && is_dom_for(src, toks, j) == 1 {   // docs/315
         return dom_for(s, out, src, toks, j, ret);
     }
+    if tok_is(src, toks, j, "solid") && tok_kind(toks, j + 1) == 0
+            && tok_is(src, toks, j + 2, ":") {
+        let sk: u32 = j + 3;
+        while tok_kind(toks, sk) != 4 && !tok_is(src, toks, sk, ";") {
+            sk = sk + 1;
+        }
+        return sk + 1;
+    }
     if (tok_is(src, toks, j, "couple") || tok_is(src, toks, j, "mutex"))
             && tok_kind(toks, j + 1) == 0
             && (tok_is(src, toks, j + 2, ",") || tok_is(src, toks, j + 2, ";")) {
@@ -7806,6 +7919,14 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
     }
     if tok_is(src, toks, j, "guard") {   // P4/M36+M38 / docs/314
         let dw: u32 = dom_by_name(s, src, toks, j + 1);
+        let gn: u32 = j + 1;
+        if dw == 0 {
+            let al: u32 = cp_alias(s, src, toks, j + 1);
+            if al != 0 {
+                gn = al;
+                dw = dom_by_name(s, src, toks, al);
+            }
+        }
         let ci: u32 = 4294967295;
         let clo: u32 = 0;
         let chi: u32 = 0;
@@ -7822,7 +7943,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
             cf = load32(s, dom_at(dw - 1, 6));
             cst = load32(s, dom_at(dw - 1, 7));
         } else {
-            ci = find_cap(s, src, toks, j + 1);
+            ci = find_cap(s, src, toks, gn);
             if ci != 4294967295 {
                 clo = load32(s, cap_base(ci) + 8);
                 chi = load32(s, cap_base(ci) + 12);
@@ -7914,6 +8035,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         emit_dec(s, out, cf);
         emit_str(s, out, ")
 ");
+        let _cp: u32 = cap_partners(s, out, src, toks, ci, v64, has_aux, a64);
         return ce2 + 1;
     }
     if tok_is(src, toks, j, "tick") && tok_is(src, toks, j + 1, ";") {
@@ -7923,13 +8045,21 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
     }
     if tok_is(src, toks, j, "quality") {   // docs/306 §5.2 第 7 条
         let dw: u32 = dom_by_name(s, src, toks, j + 1);
+        let qn: u32 = j + 1;
+        if dw == 0 {
+            let al: u32 = cp_alias(s, src, toks, j + 1);
+            if al != 0 {
+                qn = al;
+                dw = dom_by_name(s, src, toks, al);
+            }
+        }
         let ci: u32 = 0;
         let cst: u32 = 0;
         if dw != 0 {
             ci = load32(s, dom_at(dw - 1, 0));
             cst = load32(s, dom_at(dw - 1, 7));
         } else {
-            ci = find_cap(s, src, toks, j + 1);
+            ci = find_cap(s, src, toks, qn);
         }
         let qe: u32 = expr_bin(s, out, src, toks, j + 3, 1, 0, 0);
         emit_str(s, out, "  ");
@@ -11636,31 +11766,9 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32, tickx: u32)
         i = i + 1;
     }
     store32(s, 536, cn);
-    // 联动边 `⇄`（`docs/315` §5）：`couple A, B, C;` 展成相邻对，供判决点查连通性。
-    let cpn: u32 = 0;
-    let cq: u32 = 0;
-    while tok_kind(toks, cq) != 4 {
-        if tok_is(src, toks, cq, "couple") && tok_kind(toks, cq + 1) == 0
-                && (tok_is(src, toks, cq + 2, ",") || tok_is(src, toks, cq + 2, ";")) {
-            let q: u32 = cq + 1;
-            let prev: u32 = q;
-            while tok_kind(toks, q) != 4 && !tok_is(src, toks, q, ";") {
-                if tok_kind(toks, q) == 0 && q != prev {
-                    if cpn >= CG_CPP_MAX {
-                        return cg_fail(s, 2, cq);
-                    }
-                    store32(s, CG_CPP + cpn * 8, prev);
-                    store32(s, CG_CPP + cpn * 8 + 4, q);
-                    cpn = cpn + 1;
-                    prev = q;
-                }
-                q = q + 1;
-            }
-            cq = q;
-        }
-        cq = cq + 1;
-    }
-    store32(s, CG_CPN, cpn);
+    // 联动 / 体的表按**函数**清零并重扫（见 `emit_fn`）—— 跨函数的伙伴会引用悬空槽。
+    store32(s, CG_CPN, 0);
+    store32(s, CG_ALN, 0);
     store32(s, CG_DOM_ID, cn);   // docs/314：块级域的审计槽号接在能力之后
     // 枚举表: name_tok | nvariants | has_payload | pad | 8 × (variant_tok, payload_tok)
     let en: u32 = 0;

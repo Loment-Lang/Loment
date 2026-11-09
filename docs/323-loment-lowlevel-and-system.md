@@ -1,4 +1,4 @@
-# 322 — `lowlevel` / `system`：从 3 个模块到各 11 个
+# 323 — `lowlevel` / `system`：从 3 个模块到各 11 个
 
 `docs/317` 建这两个包时各只有三个模块（`elf` `pe` `abi`、`caps` `seccomp` `ns`）：
 刚好够"读一个 ELF 头、装一个 seccomp 过滤器"。真正写底层工具时缺的是**中间层** ——

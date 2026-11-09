@@ -471,8 +471,9 @@ def test_the_runtime_refusal_names_the_construct_and_the_reason():
     既看不出正文是 token 还是句子，也看不出它有没有说错话。
     """
     for src, site in (
-        ("module m\nfn f() -> u32 {\n    let a: u32 = 10;\n    return a / 2;\n}\n", "除法 `/`"),
-        ("module m\nfn f() -> u32 {\n    let a: u32 = 10;\n    return a % 3;\n}\n", "取模 `%`"),
+        ("module m\nfn f() -> u32 {\n    panic(1);\n    return 0;\n}\n", "`panic`"),
+        ("module m\nfn f(a: str, b: str) -> bool {\n    return str_eq(a, b);\n}\n",
+         "`str_eq`"),
         ("module m\nfn f() -> ptr {\n    return alloc(8);\n}\n", "`alloc`"),
     ):
         e = errs(src)
@@ -1612,13 +1613,13 @@ def test_e030_the_runtime_refusal_names_its_own_subsystem():
     （"依赖用了却没声明"）走**同一个码**，因为对用户是同一件事。
     """
     import loment_diag
-    src = "module m\n\nfn f() -> u32 {\n    let a: u32 = 10;\n    return a / 2;\n}\n"
+    src = "module m\n\nfn f() -> u32 {\n    panic(1);\n    return 0;\n}\n"
     got = errs(src)
-    assert got, "默认档下 `a / 2` 应当被拒"
+    assert got, "默认档下 `panic` 应当被拒"
     codes = {loment_diag.classify(m)[0] for m in got}
     assert codes == {"E031"}, f"码不是 E031：{codes} —— {got}"
-    # ② 正文是那句话：里面有"除法 `/`"，而不是只有那一格 token
-    assert "除法 `/`" in got[0], got
+    # ② 正文是那句话：里面有"`panic`"，而不是只有那一格 token
+    assert "`panic`" in got[0], got
     # ③ 说明卡四段齐（两张表都写），fixes 至少三条
     for tbl in (loment_diag.CARDS[30], loment_diag.CARDS_EN[30]):
         assert tbl.what and tbl.why and tbl.yes and tbl.no, tbl
@@ -1629,13 +1630,14 @@ def test_e030_the_runtime_refusal_names_its_own_subsystem():
     for one, want in (("fn f() -> u32 {\n    let p: ptr = alloc(8);\n    return 0;\n}\n",
                        "`alloc`"),
                       ("fn f() -> u32 {\n    panic(1);\n    return 0;\n}\n", "`panic`"),
-                      ("fn f(a: u32, b: u32) -> u32 {\n    return a % b;\n}\n", "取模 `%`")):
+                      ("fn f(a: str, b: str) -> bool {\n    return str_eq(a, b);\n}\n",
+                       "`str_eq`")):
         e = errs("module m\n\nchoose no_runtime\n\n" + one)
         assert e and {loment_diag.classify(m)[0] for m in e} == {"E031"}, (want, e)
         assert want in e[0], (want, e)
     # 库那一半：依赖用了却没声明 —— 同一件事，同一个码
-    dep = ("module dep\n\npub fn dep_div(x: u32) -> u32 {\n    return x / 2;\n}\n")
-    root = ("module m\nuse \"dep.lomt\"\n\nfn f() -> u32 {\n    return dep_div(4);\n}\n")
+    dep = ("module dep\n\npub fn dep_alloc() -> ptr {\n    return alloc(8);\n}\n")
+    root = ("module m\nuse \"dep.lomt\"\n\nfn f() -> ptr {\n    return dep_alloc();\n}\n")
     with tempfile.TemporaryDirectory() as t:
         d = Path(t)
         (d / "dep.lomt").write_text(dep, encoding="utf-8")
@@ -4167,6 +4169,71 @@ def test_runtime_is_forced_in_and_absent_by_default():
 
 
 @test
+def test_pkg_manifest_carries_the_runtime_requirement():
+    """包清单（`pkg.lomp` 的 `runtime()`）是**包级**的运行期需求（`docs/321`）。
+
+    四件事一起钉，少一件就测不到这项机制：
+
+      1. 清单说 `runtime`、模块自己没写 `choose` ⇒ 根是默认 `no_runtime` 时**报**，
+         而且正文要点名**包**（不是只有模块）；
+      2. 根写 `choose runtime` ⇒ 放行（需求被满足）；
+      3. 清单说 `no_runtime`、模块是纯的 ⇒ 默认档**放行** —— 这就是"库不必都要运行期"；
+      4. 清单说 `no_runtime` 而模块里有 `alloc` ⇒ 报（清单与代码矛盾，不许静默）。
+
+    另加一条：清单说 `runtime` 时，**模块自己当根编**也用清单的默认档 —— 否则店里每个
+    模块都必须再写一行 `choose runtime`，包级声明就白写了。
+    """
+    import tempfile
+    NL = chr(10)
+
+    def pkg(rt: str) -> str:
+        return ("module pkg" + NL + NL + "pub fn name() -> str {" + NL
+                + '    return "demo";' + NL + "}" + NL + NL
+                + "pub fn version() -> str {" + NL + "    return \"0.1.0\";" + NL + "}"
+                + NL + NL + "pub fn runtime() -> str {" + NL
+                + '    return "' + rt + '";' + NL + "}" + NL)
+
+    pure = "module mod" + NL + NL + "pub fn twice(x: u32) -> u32 {" + NL + "    return x + x;" + NL + "}" + NL
+    heavy = "module mod" + NL + NL + "pub fn mk() -> ptr {" + NL + "    return alloc(8);" + NL + "}" + NL
+
+    def run(manifest: str, mod: str, root_extra: str, body: str) -> tuple[list[str], list[str]]:
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            (d / "demo").mkdir()
+            (d / "demo" / "pkg.lomp").write_text(manifest, encoding="utf-8")
+            (d / "demo" / "mod.lomt").write_text(mod, encoding="utf-8")
+            rp = d / "root.lomt"
+            rp.write_text("module root" + NL + root_extra + NL
+                          + 'use "demo/mod.lomt"' + NL + NL
+                          + "fn f() -> u32 {" + NL + "    " + body + NL + "    return 0;" + NL + "}" + NL,
+                          encoding="utf-8")
+            m = lomentc.load(rp)
+            deps = lomentc.resolve_deps(m, ROOT, rp.parent, entry=rp)
+            root_errs = lomentc.check(m, None, deps)
+            # 模块自己当根编：清单的默认档要生效（否则店里每份模块都得再写一行）
+            mm = lomentc.load(d / "demo" / "mod.lomt")
+            return root_errs, lomentc.check(mm)
+
+    # ① 清单要运行期、模块用它、根没写 ⇒ 报，点名包
+    e, _ = run(pkg("runtime"), heavy, "", "let p: ptr = mk();")
+    assert any("demo" in x and "runtime" in x for x in e), e
+    # ② 根写了 `choose runtime` ⇒ 不报
+    e, _ = run(pkg("runtime"), heavy, "choose runtime", "let p: ptr = mk();")
+    assert e == [], e
+    # ③ 清单说 no_runtime、模块是纯的 ⇒ 默认档放行（库不必都要运行期）
+    e, _ = run(pkg("no_runtime"), pure, "", "let v: u32 = twice(2);")
+    assert e == [], e
+    # ④ 清单说 no_runtime 而模块里有 alloc ⇒ 报（清单与代码矛盾）
+    e, _ = run(pkg("no_runtime"), heavy, "", "let p: ptr = mk();")
+    assert any("alloc" in x for x in e), e
+    # ⑤ 模块自己当根：清单说 runtime ⇒ 不报 E031；说 no_runtime 且纯 ⇒ 也不报
+    _, e2 = run(pkg("runtime"), heavy, "choose runtime", "let p: ptr = mk();")
+    assert e2 == [], e2
+    _, e3 = run(pkg("no_runtime"), pure, "", "let v: u32 = twice(2);")
+    assert e3 == [], e3
+
+
+@test
 def test_runtime_dep_must_declare_and_agree():
     """`docs/227` 判据 D：依赖的**声明是需求** —— 库没写要报，根不满足要报。
 
@@ -4176,9 +4243,9 @@ def test_runtime_dep_must_declare_and_agree():
     """
     import tempfile
     NL = chr(10)
-    lib_div = "module lib" + NL + NL + "pub fn half(x: u32) -> u32 {" + NL + "    return x / 2;" + NL + "}" + NL
-    lib_rt = "module lib" + NL + "choose runtime" + NL + NL + "pub fn half(x: u32) -> u32 {" + NL + "    return x / 2;" + NL + "}" + NL
-    tail = NL + 'use "lib.lomt"' + NL + NL + "fn f() -> u32 {" + NL + "    return half(4);" + NL + "}" + NL
+    lib_div = "module lib" + NL + NL + "pub fn mk() -> ptr {" + NL + "    return alloc(8);" + NL + "}" + NL
+    lib_rt = "module lib" + NL + "choose runtime" + NL + NL + "pub fn mk() -> ptr {" + NL + "    return alloc(8);" + NL + "}" + NL
+    tail = NL + 'use "lib.lomt"' + NL + NL + "fn f() -> ptr {" + NL + "    return mk();" + NL + "}" + NL
 
     def run(lib: str, root: str) -> list[str]:
         with tempfile.TemporaryDirectory() as td:

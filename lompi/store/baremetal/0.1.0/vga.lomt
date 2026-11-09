@@ -10,7 +10,6 @@
 // 命名: 公开 vga_*, 内部 vg_*。自检 test_vga_*。
 
 module vga
-choose runtime
 
 use mem
 

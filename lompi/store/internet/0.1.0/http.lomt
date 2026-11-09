@@ -17,7 +17,6 @@
 // 对照物: CPython 的 `http.client` (`responses` 表、`parse_headers`)。
 
 module http
-choose runtime
 
 /// 失败 / 缺席。
 pub const HTTP_NO: u32 = 4294967295;

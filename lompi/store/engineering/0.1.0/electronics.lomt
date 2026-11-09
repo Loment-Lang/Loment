@@ -10,7 +10,6 @@
 // 命名: 公开 ec_*, 内部 ec_*。自检 test_electronics_*。
 
 module electronics
-choose runtime
 
 use f64
 use f64conv

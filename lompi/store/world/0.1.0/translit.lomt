@@ -14,7 +14,6 @@
 // 命名: 公开 tl_*, 内部 tt_*。自检 test_translit_*。
 
 module translit
-choose runtime
 
 fn tt_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
     let p: u32 = pos;

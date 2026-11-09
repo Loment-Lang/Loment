@@ -13,7 +13,6 @@
 // 命名: 公开 crc16_*, 内部 cr_*。自检 test_crc16_*。
 
 module crc16
-choose runtime
 
 use "mem.lomt"
 

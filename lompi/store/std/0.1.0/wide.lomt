@@ -11,7 +11,6 @@
 // 命名: 公开 wide_*, 内部 wd_*。自检 test_wide_*。
 
 module wide
-choose runtime
 
 use "mem.lomt"
 

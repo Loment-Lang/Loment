@@ -13,7 +13,6 @@
 // 命名: 公开 gm_*, 内部 gm_*。自检 test_geometry_*。
 
 module geometry
-choose runtime
 
 use f64
 use f64conv

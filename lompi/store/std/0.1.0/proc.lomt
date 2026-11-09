@@ -35,7 +35,6 @@
 // 命名: 公开 pr_*, 内部 prf_*。自检 test_proc_*。
 
 module proc
-choose runtime
 
 use "mem.lomt"
 use "hex.lomt"

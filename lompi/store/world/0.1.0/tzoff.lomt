@@ -14,7 +14,6 @@
 // 命名: 公开 tz_*, 内部 tzc_*。自检 test_tzoff_*。
 
 module tzoff
-choose runtime
 
 use mem
 use "calendar.lomt"

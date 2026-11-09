@@ -23,7 +23,6 @@
 // 命名: 公开 fw_*, 内部 fwt_*。自检 test_fw_*。
 
 module fenwick
-choose runtime
 
 use "mem.lomt"
 use "rand.lomt"

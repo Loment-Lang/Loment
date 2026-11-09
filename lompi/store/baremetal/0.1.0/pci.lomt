@@ -12,7 +12,6 @@
 // 命名: 公开 pci_*, 内部 pci_*。自检 test_pci_*。
 
 module pci
-choose runtime
 
 use mem
 use endian

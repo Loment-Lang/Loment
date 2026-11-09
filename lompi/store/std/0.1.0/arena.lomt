@@ -14,7 +14,6 @@
 // 命名: 公开一律 arena_*, 内部一律 ar_*。自检 test_arena_*。
 
 module arena
-choose runtime
 
 use "num.lomt"
 

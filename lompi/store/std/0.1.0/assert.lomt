@@ -15,7 +15,6 @@
 // 命名: 公开 assert_*, 内部 as_*。自检 test_assert_*。
 
 module assert
-choose runtime
 
 use "mem.lomt"
 

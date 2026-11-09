@@ -14,7 +14,6 @@
 // 命名: 公开 geo_*, 内部 gg_*。自检 test_geo_*。
 
 module geo
-choose runtime
 
 use f64
 use f64conv

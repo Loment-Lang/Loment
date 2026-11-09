@@ -13,7 +13,6 @@
 // 命名: 公开 ag_*, 内部 ag_*。自检 test_args_*。
 
 module args
-choose runtime
 
 use mem
 

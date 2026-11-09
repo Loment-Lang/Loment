@@ -12,7 +12,6 @@
 // 命名: 公开一律 varint_*, 内部一律 vi_*。自检 test_varint_*。
 
 module varint
-choose runtime
 
 /// 编码 v 需要几个字节。
 pub fn varint_size(v: u64) -> u32 {

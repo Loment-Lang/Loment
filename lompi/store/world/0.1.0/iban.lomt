@@ -10,7 +10,6 @@
 // 命名: 公开 iban_*, 内部 ib_*。自检 test_iban_*。
 
 module iban
-choose runtime
 
 pub const IBAN_ERR: u32 = 4294967295;
 

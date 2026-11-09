@@ -13,7 +13,6 @@
 // 命名: 公开 ctrl_*, 内部 ctrl_*。自检 test_control_*。
 
 module control
-choose runtime
 
 use f64
 

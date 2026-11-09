@@ -14,7 +14,6 @@
 // 命名: 公开 abi_*, 内部 ab_*。自检 test_abi_*。
 
 module abi
-choose runtime
 
 use mem
 

@@ -13,7 +13,6 @@
 // 命名: 公开 lgt_*, 内部 lc_*。自检 test_langtag_*。
 
 module langtag
-choose runtime
 
 use mem
 

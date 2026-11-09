@@ -9,7 +9,6 @@
 // 命名: 公开 iol_*, 内部 iq_*。自检 test_ioctl_*。
 
 module ioctl
-choose runtime
 
 use mem
 

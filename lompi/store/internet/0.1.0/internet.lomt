@@ -22,7 +22,6 @@
 // (`https://` 依旧不认)。
 
 module internet
-choose runtime
 
 // 纯逻辑那一层 (自下而上: 谁都不依赖谁)
 use "ip.lomt"

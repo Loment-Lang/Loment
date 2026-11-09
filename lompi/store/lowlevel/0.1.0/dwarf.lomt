@@ -11,7 +11,6 @@
 // 命名: 公开 dw_*, 内部 dq_*。自检 test_dwarf_*。
 
 module dwarf
-choose runtime
 
 use mem
 

@@ -10,7 +10,6 @@
 // 命名: 公开 hd_*, 内部 hh_*。自检 test_holiday_*。
 
 module holiday
-choose runtime
 
 use "calendar.lomt"
 

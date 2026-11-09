@@ -13,7 +13,6 @@
 // 命名: 公开 du_*, 内部 du_*。自检 test_duration_*。
 
 module duration
-choose runtime
 
 use numfmt
 use mem

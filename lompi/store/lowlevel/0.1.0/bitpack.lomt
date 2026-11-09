@@ -14,7 +14,6 @@
 // 命名: 公开 bp_*, 内部 bq_*。自检 test_bitpack_*。
 
 module bitpack
-choose runtime
 
 /// LSB-first 取位。
 pub fn bp_get_le(p: ptr, bit_off: u32, width: u32) -> u64 {

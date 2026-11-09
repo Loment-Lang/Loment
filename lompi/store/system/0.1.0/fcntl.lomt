@@ -9,7 +9,6 @@
 // 命名: 公开 fcnt_*, 内部 fq_*。自检 test_fcntl_*。
 
 module fcntl
-choose runtime
 
 pub const FCNT_RDONLY: u32 = 0;
 pub const FCNT_WRONLY: u32 = 1;

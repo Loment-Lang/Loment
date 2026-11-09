@@ -33,7 +33,6 @@
 // 命名: 公开 fl_*, 内部 flf_*。自检 test_flags_*。
 
 module flags
-choose runtime
 
 use "mem.lomt"
 use "bit.lomt"

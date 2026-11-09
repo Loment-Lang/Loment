@@ -20,7 +20,6 @@
 // 命名: 公开 signal_*, 内部 sigp_。
 
 module signal
-choose runtime
 
 pub const SIGNAL_HUP: u32 = 1;
 pub const SIGNAL_INT: u32 = 2;

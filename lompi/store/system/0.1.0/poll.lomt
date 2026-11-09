@@ -9,7 +9,6 @@
 // 命名: 公开 pw_*, 内部 pq_*。自检 test_poll_*。
 
 module poll
-choose runtime
 
 pub const PW_IN: u32 = 1;
 pub const PW_PRI: u32 = 2;

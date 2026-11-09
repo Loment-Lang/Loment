@@ -15,7 +15,6 @@
 // 命名: 公开 pa_*, 内部 pa_*。自检 test_patch_*。
 
 module patch
-choose runtime
 
 use mem
 

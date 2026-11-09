@@ -13,7 +13,6 @@
 // 命名: 公开 mb_*, 内部 mb_*。自检 test_multiboot_*。
 
 module multiboot
-choose runtime
 
 use mem
 use endian

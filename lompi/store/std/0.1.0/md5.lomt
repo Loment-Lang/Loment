@@ -20,7 +20,6 @@
 // 命名: 公开 md5_*, 内部 md_*。自检 test_md5_*。
 
 module md5
-choose runtime
 
 use "mem.lomt"
 

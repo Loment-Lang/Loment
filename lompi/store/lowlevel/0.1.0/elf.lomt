@@ -18,7 +18,6 @@
 // 命名: 公开 elf_*, 内部 el_*。自检 test_elf_*。
 
 module elf
-choose runtime
 
 use mem
 use endian

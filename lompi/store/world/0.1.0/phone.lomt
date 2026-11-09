@@ -14,7 +14,6 @@
 // 命名: 公开 tel_*, 内部 tlc_*。自检 test_phone_*。
 
 module phone
-choose runtime
 
 pub const TEL_ERR: u32 = 4294967295;
 

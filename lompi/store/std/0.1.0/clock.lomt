@@ -39,7 +39,6 @@
 // 命名: 公开 ck_*, 内部 ckf_*。自检 test_clock_*。
 
 module clock
-choose runtime
 
 use "mem.lomt"
 use "numfmt.lomt"

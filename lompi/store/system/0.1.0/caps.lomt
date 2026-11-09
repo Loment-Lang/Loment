@@ -15,7 +15,6 @@
 // 命名: 公开 cap_*, 内部 cp_*。自检 test_caps_*。
 
 module caps
-choose runtime
 
 use mem
 

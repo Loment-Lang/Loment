@@ -9,7 +9,6 @@
 // 命名: 公开 rc_*, 内部 rl_*。自检 test_reloc_*。
 
 module reloc
-choose runtime
 
 fn rl_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
     let p: u32 = pos;

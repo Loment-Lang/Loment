@@ -14,7 +14,6 @@
 // 命名: 公开 sw_*, 内部 sw_*。自检 test_shellwords_*。
 
 module shellwords
-choose runtime
 
 use mem
 

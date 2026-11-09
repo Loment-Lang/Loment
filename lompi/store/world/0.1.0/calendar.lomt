@@ -15,7 +15,6 @@
 // 命名: 公开 cd_*, 内部 cc_*。自检 test_calendar_*。
 
 module calendar
-choose runtime
 
 use mem
 

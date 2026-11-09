@@ -26,7 +26,6 @@
 // 命名: 公开 bl_*, 内部 bm_*。自检 test_bl_*。
 
 module bloom
-choose runtime
 
 use "mem.lomt"
 use "map.lomt"

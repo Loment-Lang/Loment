@@ -12,7 +12,6 @@
 // 命名: 公开 sl_*, 内部 sg_*。自检 test_slug_*。
 
 module slug
-choose runtime
 
 fn sg_lower(c: u32) -> u32 {
     if c >= 65 && c <= 90 {

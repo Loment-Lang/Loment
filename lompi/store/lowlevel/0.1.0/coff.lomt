@@ -13,7 +13,6 @@
 // 命名: 公开 coff_*, 内部 cf_*。自检 test_coff_*。
 
 module coff
-choose runtime
 
 use mem
 

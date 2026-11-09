@@ -12,7 +12,6 @@
 // 命名: 公开 po_*, 内部 po_*。自检 test_poly_*。
 
 module poly
-choose runtime
 
 use f64
 use f64conv

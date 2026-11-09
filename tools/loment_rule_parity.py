@@ -221,9 +221,9 @@ _CASES: list[tuple[str, str]] = [
     # ---- `runtime` 维**兑现**（`docs/227`，2026-10-09）--------------------------------
     # 这一维从"只声明"变成"有保证"：`no_runtime`（默认）说"产物里没有运行期"，于是凡是
     # 会把那段运行期拖进产物的构造，在**这一档下**编译期点名拒。两条负例各钉一边 ——
-    # 一条走**算术**（`/` 拖进 `__loment_abort`）、一条走**分配**（`alloc` 拖进分配器 +
-    # 堆全局），因为参考实现的触发是**分开判**的（`@__loment_` 与 `@__loment_alloc`）。
-    ("choose-no-runtime-div", "module m\n\nfn f() -> u32 {\n    return 10 / 3;\n}\n"),
+    # 一条走**分配**（`alloc` 拖进分配器 + 堆全局）。除法那条 2026-11-09 撤了
+    # （`docs/321`）：整数除法发的是裸 `udiv`/`sdiv`，产物里不多一个 `@__loment_*`。
+    ("choose-no-runtime-panic", "module m\n\nfn f() -> u32 {\n    panic(1);\n    return 0;\n}\n"),
     ("choose-no-runtime-alloc", "module m\n\nchoose no_runtime\n\nfn f() -> u32 {\n    let p: ptr = alloc(8);\n    return 0;\n}\n"),
     # ---- 第四维 `port`（`docs/222` §4）--------------------------------------
     # 与前面三维同一套：按维一次、取值只有两个、与两个档**定义上矛盾**。

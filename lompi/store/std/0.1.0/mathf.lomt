@@ -24,7 +24,6 @@
 // 命名: 公开 mathf_*, 内部 mf_*。自检 test_mathf_*。
 
 module mathf
-choose runtime
 
 use "f64conv.lomt"
 use "round.lomt"

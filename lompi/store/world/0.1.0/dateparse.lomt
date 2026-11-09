@@ -12,7 +12,6 @@
 // 命名: 公开 dp_*, 内部 dq_*。自检 test_dateparse_*。
 
 module dateparse
-choose runtime
 
 use mem
 use "calendar.lomt"

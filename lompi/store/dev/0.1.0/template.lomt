@@ -15,7 +15,6 @@
 // 命名: 公开 tpl_*, 内部 tp_*。自检 test_template_*。
 
 module template
-choose runtime
 
 use mem
 

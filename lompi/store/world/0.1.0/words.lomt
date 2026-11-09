@@ -12,7 +12,6 @@
 // 命名: 公开 nw_*, 内部 wd_*。自检 test_words_*。
 
 module words
-choose runtime
 
 pub const NW_ERR: u32 = 4294967295;
 

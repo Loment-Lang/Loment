@@ -78,6 +78,11 @@ const PROF_OFF: u32 = 24164;     // 版次 (docs/296/306): 0 = 2026.1, 1 = 2026.
 const PROF_DEFAULT: u32 = 2;     // 缺省 = 最新版次 (potato_from.DEFAULT_EDITION)
 const DECLK_OFF: u32 = 24168;    // 根单元的拼法 (0 = 没写; 见 strip_grammar_decl)
 const FPROF_OFF: u32 = 24172;    // 这份文件自己声明的版次 (0xFFFFFFFF = 没写)
+//: 根单元/`addin` 写没写运行期那一维（docs/321）。位：1 = 写了 `runtime`，
+//: 2 = 写了 `no_runtime`，4 = 同包 `pkg.lomp` 的 `runtime()` 说 `runtime`。
+//: 两个都没写（低两位为 0）而包清单要运行期时，装载器在合并单元末尾补一行
+//: `choose runtime` —— 与参考实现的 `mod.chooses` 注入同义。
+const RTDECL_OFF: u32 = 24176;
 const ADDIN_OFF: u32 = 21504;    // addin 清单起点
 const CMD_OFF: u32 = 23904;      // 命令名 (`--print-command`)
 const DIAG_CAP: u32 = 1024;      // 路径上限
@@ -1770,6 +1775,78 @@ fn cfg_source_ext(dirp: ptr, dl: u32, dst: ptr, scr: ptr, buf: ptr, toks: ptr) -
     return q;
 }
 
+/// 从 `<dirp>/pkg.lomp` 读 `runtime()` 的取值：4 = `runtime`，0 = 没声明/不是它。
+///
+/// 与 `cfg_source_ext` 同一种形状（清单就是一份 Loment 源码），只认
+/// `pub fn runtime() -> str { return "runtime"; }` 里的那个字符串。读不出来当没声明。
+fn cfg_pkg_runtime(dirp: ptr, dl: u32, scr: ptr, buf: ptr, toks: ptr) -> u32 {
+    let d: u32 = 0;
+    if dl > 0 {
+        d = cat(scr, d, dirp, dl);
+        d = catl(scr, d, "/");
+    }
+    d = catl(scr, d, "pkg.lomp");
+    store8(scr, d, 0 as u8);
+    let fd: i64 = syscall4(257, (0 as u64) - 100, scr as u64, 0);
+    if fd < 0 {
+        return 0;
+    }
+    let raw: u64 = read_all(fd as u64, buf, 65536);
+    syscall4(3, fd as u64, 0, 0);
+    if raw == 0 {
+        return 0;
+    }
+    let n: u32 = lex(buf, raw as u32, toks);
+    let found: u32 = 4294967295;
+    let i: u32 = 0;
+    while i < n && found == 4294967295 {
+        // `runtime(` 才是那个声明（`fn runtime()` 的 ident 后紧跟 `(`）。
+        if load32(toks, i * 20) == 0 && tok_is(buf, toks, i, "runtime") == 1
+                && i + 1 < n && load32(toks, (i + 1) * 20) == 3
+                && ptr_eq_char(buf, load32(toks, (i + 1) * 20 + 4), 40) == 1 {
+            found = i;
+        }
+        i = i + 1;
+    }
+    if found == 4294967295 {
+        return 0;
+    }
+    // 往后找第一个字符串：它就是 `return "…"` 的那个值。
+    let s: u32 = 4294967295;
+    let j: u32 = found + 1;
+    while j < n && s == 4294967295 {
+        if load32(toks, j * 20) == 2 {
+            s = j;
+        }
+        j = j + 1;
+    }
+    if s == 4294967295 {
+        return 0;
+    }
+    let st: u32 = load32(toks, s * 20 + 4);
+    let sl: u32 = load32(toks, s * 20 + 8);   // 含两端的引号
+    if sl != 9 {
+        return 0;
+    }
+    // `"runtime"` —— 9 字节（含引号）
+    let want: str = "runtime";
+    let q: u32 = 0;
+    while q < 7 {
+        if load8(buf, st + 1 + q) != str_byte(want, q) {
+            return 0;
+        }
+        q = q + 1;
+    }
+    return 4;
+}
+
+fn ptr_eq_char(src: ptr, off: u32, ch: u32) -> u32 {
+    if load8(src, off) == ch {
+        return 1;
+    }
+    return 0;
+}
+
 fn is_lomt(src: ptr, sp: u32, sl: u32) -> u32 {
     // **L0 只有 `.lom` 一种后缀**, 别的任何后缀都算 L1 源 —— 后缀不是语言的一部分, 只是
     // 习惯 (用户 2026-09-16: "Loment 也可以作为其他文件名后缀的诞生地")。别把这条改回
@@ -2078,6 +2155,15 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
         die(1);
     }
     while load32(toks, i * 20) != 4 {
+        // 记下根/`addin` 单元写没写运行期那一维（docs/321）。依赖写的会被下面抹掉，
+        // 而抹掉之后检查器就看不见它了 —— 但它**是**一个需求，所以要在这里记一笔。
+        if (depth == 0 || from_addin == 1) && tok_is(slot, toks, i, "choose") {
+            if tok_is(slot, toks, i + 1, "runtime") {
+                store32(scr, RTDECL_OFF, load32(scr, RTDECL_OFF) | 1);
+            } else if tok_is(slot, toks, i + 1, "no_runtime") {
+                store32(scr, RTDECL_OFF, load32(scr, RTDECL_OFF) | 2);
+            }
+        }
         // `choose` 声明的是**整个程序**的模式 (docs/143 §3.2), 所以只有**根单元**能写。
         // 这条只能在这里判: 装载器是唯一分得清"这一层是根还是被 use 进来的"的地方 ——
         // 单元拼完之后检查器看到的是一整块 token, 模块边界已经没了 (docs/158 §5 记过)。
@@ -2382,6 +2468,12 @@ fn _start() -> u32 {
     // 入口文件所在目录), 再是工具链旁边那份; 都没配就用默认 `.lomt`。这时 unit/toks
     // 还空着, 借它们当读配置的暂存 —— load_file 紧接着就会盖掉它们。
     store8(scr, EXT_OFF, 0 as u8);
+    // 根单元所在包的 `pkg.lomp` 要运行期吗（docs/321）？这一步借 unit/toks 当暂存 ——
+    // `load_file` 紧接着就会盖掉它们，与上面读 `loment.conf` 同一个时点。
+    store32(scr, RTDECL_OFF, 0);
+    let _rq: u32 = cfg_pkg_runtime(ptr_add(scr, PROJ_OFF),
+                                   cstr_len(ptr_add(scr, PROJ_OFF)), scr, unit, toks);
+    store32(scr, RTDECL_OFF, load32(scr, RTDECL_OFF) | _rq);
     let _e0: u32 = cfg_source_ext(ptr_add(scr, PROJ_OFF),
                                   cstr_len(ptr_add(scr, PROJ_OFF)),
                                   ptr_add(scr, EXT_OFF), scr, unit, toks);
@@ -2409,6 +2501,23 @@ fn _start() -> u32 {
         let dm2: str = "cannot load the entry file (is the path right?)";
         wdiag_file(dfd, scr, ap, an, 31, str_ptr(dm2), str_len(dm2));
         return fail(dm2);
+    }
+    // **包清单的运行期需求**（docs/321）：根与 `addin` 单元都没写这一维、而根所在包
+    // 的 `pkg.lomp` 说要运行期时，在合并单元末尾补一行 —— 与参考实现把清单值注入
+    // `mod.chooses` 同义。**显式写的优先**（低两位非 0 就不补）。
+    let _fl: u32 = load32(scr, RTDECL_OFF);
+    if (_fl & 3) == 0 && (_fl & 4) != 0 {
+        // 逐字节写：不写带换行的字符串字面量 —— 两个词法器对多行字面量的解码
+        // 有过一次可测的分歧（`loment_p8_test::test_m80_loment_parser_ast_dump`）。
+        let _add: str = "choose runtime";
+        store8(unit, len as u32, 10 as u8);
+        let _k: u32 = 0;
+        while _k < str_len(_add) {
+            store8(unit, (len as u32) + 1 + _k, str_byte(_add, _k) as u8);
+            _k = _k + 1;
+        }
+        store8(unit, (len as u32) + 1 + str_len(_add), 10 as u8);
+        len = len + (str_len(_add) as u64) + (2 as u64);
     }
     // **编译期告知版次**（用户 2026-11-04 的要求，`docs/296` §1.1）：每次编译一行，
     // 把用户写的拼法展开成规范名。短名（`tur2`）跨年之后不再被接受，这一行是用户

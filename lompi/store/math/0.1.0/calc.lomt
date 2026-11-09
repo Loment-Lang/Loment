@@ -15,7 +15,6 @@
 // 命名: 公开 ca_*, 内部 ca_*。自检 test_calc_*。
 
 module calc
-choose runtime
 
 use f64
 use f64conv

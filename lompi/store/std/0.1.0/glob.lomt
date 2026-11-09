@@ -32,7 +32,6 @@
 // 命名: 公开 glob_*, 内部 g_*。自检 test_glob_*。
 
 module glob
-choose runtime
 
 use "case.lomt"
 

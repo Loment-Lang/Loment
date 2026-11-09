@@ -14,7 +14,6 @@
 // 命名: 公开 pe_*, 内部 pe_*。自检 test_pe_*。
 
 module pe
-choose runtime
 
 use mem
 use endian

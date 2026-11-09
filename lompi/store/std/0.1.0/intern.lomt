@@ -32,7 +32,6 @@
 // 命名: 公开 in_*, 内部 in_* 里的私有辅助用同前缀 (本模块没有第二个概念要区分)。自检 test_intern_*。
 
 module intern
-choose runtime
 
 use "mem.lomt"
 

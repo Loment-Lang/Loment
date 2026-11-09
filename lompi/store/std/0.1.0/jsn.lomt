@@ -18,7 +18,6 @@
 // (**注意前缀是 jsn_ 不是 json_**: 仓库的 loment/lib/json.lomt 占了 json_。)
 
 module jsn
-choose runtime
 
 use "mem.lomt"
 

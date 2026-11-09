@@ -16,7 +16,6 @@
 // 命名: 公开 bt_*, 内部 bt_*。自检 test_bitstream_*。
 
 module bitstream
-choose runtime
 
 use mem
 

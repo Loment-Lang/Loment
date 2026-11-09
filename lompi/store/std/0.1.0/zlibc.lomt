@@ -31,7 +31,6 @@
 // 命名: 公开 zc_*, 内部 zc_*。自检 test_zlibc_*。
 
 module zlibc
-choose runtime
 
 use "mem.lomt"
 use "inflate.lomt"

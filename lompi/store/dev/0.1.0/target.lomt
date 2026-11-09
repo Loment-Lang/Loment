@@ -17,7 +17,6 @@
 // 命名: 公开 tgt_*, 内部 tg_*。自检 test_target_*。
 
 module target
-choose runtime
 
 use mem
 

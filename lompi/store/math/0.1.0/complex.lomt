@@ -9,7 +9,6 @@
 // 命名: 公开 cx_*, 内部 cx_*。自检 test_complex_*。
 
 module complex
-choose runtime
 
 use f64
 use f64conv

@@ -13,7 +13,6 @@
 // 命名: 公开 jp_*, 内部 jp_*。自检 test_jsonptr_*。
 
 module jsonptr
-choose runtime
 
 use mem
 use jsn

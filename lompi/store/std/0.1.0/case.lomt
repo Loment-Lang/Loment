@@ -31,7 +31,6 @@
 // 命名: 公开 case_*, 内部 c_*。自检 test_case_*。
 
 module case
-choose runtime
 
 use "mem.lomt"
 use "utf8.lomt"

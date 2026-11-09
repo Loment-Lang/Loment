@@ -12,7 +12,6 @@
 // 命名: 公开 pb_*, 内部 pb_*。自检 test_prob_*。
 
 module prob
-choose runtime
 
 use f64
 use f64conv

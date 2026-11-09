@@ -19,7 +19,6 @@
 // 命名: 公开 trie_*, 内部 tr_*。自检 test_trie_*。
 
 module trie
-choose runtime
 
 use "mem.lomt"
 

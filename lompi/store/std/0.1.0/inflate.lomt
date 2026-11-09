@@ -93,7 +93,6 @@
 // 命名: 公开 inf_*, 内部 nf_*。自检 test_inflate_*。
 
 module inflate
-choose runtime
 
 use "mem.lomt"
 use "huffman.lomt"

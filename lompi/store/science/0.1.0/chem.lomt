@@ -17,7 +17,6 @@
 // 命名: 公开 ch_*, 内部 ch_*。自检 test_chem_*。
 
 module chem
-choose runtime
 
 use "elements.lomt"
 use f64

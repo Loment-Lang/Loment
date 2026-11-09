@@ -15,7 +15,6 @@
 // 命名: 公开 gh_*, 内部 gg_*。自检 test_geohash_*。
 
 module geohash
-choose runtime
 
 use mem
 

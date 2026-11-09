@@ -31,7 +31,6 @@
 // 自检 test_interp_*。
 
 module interp
-choose runtime
 
 /// 千分比的上界 (t = 1024 表示"终点")。
 const IP_S: i64 = 1024;

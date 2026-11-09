@@ -18,7 +18,6 @@
 // 命名: 公开 sha512_*, 内部 s5_*。自检 test_sha512_*。
 
 module sha512
-choose runtime
 
 use "mem.lomt"
 

@@ -12,7 +12,6 @@
 // 命名: 公开 mo_*, 内部 mo_*。自检 test_money_*。
 
 module money
-choose runtime
 
 use mem
 use numfmt

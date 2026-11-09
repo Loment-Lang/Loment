@@ -14,7 +14,6 @@
 // 命名: 公开 ns_*, 内部 ns_*。自检 test_ns_*。
 
 module ns
-choose runtime
 
 use mem
 

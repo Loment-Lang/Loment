@@ -13,7 +13,6 @@
 // 命名: 公开 mc_*, 内部 mq_*。自检 test_macho_*。
 
 module macho
-choose runtime
 
 use mem
 

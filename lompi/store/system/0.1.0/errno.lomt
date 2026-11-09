@@ -10,7 +10,6 @@
 // 命名: 公开 er_*, 内部 eq_*。自检 test_errno_*。
 
 module errno
-choose runtime
 
 fn eq_put(out: ptr, cap: u32, s: str) -> u32 {
     let n: u32 = str_len(s);

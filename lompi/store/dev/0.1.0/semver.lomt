@@ -14,7 +14,6 @@
 // 命名: 公开 sv_*, 内部 sv_*。自检 test_semver_*。
 
 module semver
-choose runtime
 
 use mem
 use numfmt

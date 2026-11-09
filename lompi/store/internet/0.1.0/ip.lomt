@@ -17,7 +17,6 @@
 // 对照物: CPython 的 `ipaddress` (判据逐字节比), 不是手写的期望值。
 
 module ip
-choose runtime
 
 /// 内部哨兵: 只用于**模块内部**的辅助函数。
 ///

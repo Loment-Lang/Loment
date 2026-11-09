@@ -2636,6 +2636,9 @@ class Module:
     #: `parse()` 里做**了 —— 安全表要 root + deps 一起算，那只有 `emit_*` 那一层够得着，
     #: 于是函数体跨度（`f.tok_at/tok_end`）得能重新对着 token 流核。**只在需要时读**。
     toks: list = field(default_factory=list)
+    #: 运行期需求来自包清单（`pkg.lomp` 的 `runtime()`）时，包名写在这里；
+    #: 空串 = 需求来自本模块自己的 `choose runtime`（`docs/321`）。
+    rt_from_pkg: str = ""
     #: **会把运行期拖进产物的构造**（`docs/217`）：`[(点名, 行), …]`，按出现序。
     #: 由**解析器**在 `parse()` 末尾填（与 `Func.deref` 同一个位置、同一个理由：规则定义
     #: 在 token 流上，而解析器是唯一握着它的地方）。`no_runtime` 那条强保证读它。
@@ -6328,8 +6331,8 @@ def load_unit(path: Path, root: Path, lspe_level: int = 3,
 #: 两边的代价不对称，所以往保守那边偏。`tools/loment_runtime_test.py` 在全仓语料上核
 #: "被拒 ⟺ 产物真带运行期"，把这笔保守账钉成可证伪的。
 _RUNTIME_SITES: dict[str, str] = {
-    "/": "除法 `/`",
-    "%": "取模 `%`",
+    # `/` 与 `%` **不在表里**（docs/321）：整数除法发的是裸 `udiv`/`sdiv`，
+    # 产物里一个 `@__loment_*` 都不多 —— 它不拖运行期，只是早先被保守地算了进来。
     "alloc": "`alloc`",
     "free": "`free`",
     "str_concat": "`str_concat`",
@@ -6364,9 +6367,6 @@ def _runtime_sites(toks: list,
     out: list[tuple[str, int]] = []
     n = len(toks)
     for i, t in enumerate(toks):
-        if t.kind == "punct" and t.val in ("/", "%"):
-            out.append((_RUNTIME_SITES[t.val], t.line))
-            continue
         if t.kind != "ident" or t.val not in _RUNTIME_SITES:
             continue
         # `print_num` **只在 Tur 2 是内建**（`docs/296` §2.7）：Tur 1 里同名的用户函数
@@ -6406,6 +6406,48 @@ def _runtime_sites(toks: list,
         if hit:
             out.append((_RUNTIME_SITES[t.val], t.line))
     return out
+
+def _pkg_manifest(src: Path | None) -> tuple[str, str | None]:
+    """同目录 `pkg.lomp` 里的 `(包名, runtime)` —— 没有清单返回 `("", None)`。
+
+    清单是**一份 Loment 源码**（`docs/168` §3.2），所以用词法器读，不引第二种格式。
+    `runtime()` 是**包级**声明（`docs/321`）：它说"这个包的代码要运行期"，取代每个
+    模块各自写一行 `choose runtime`。模块自己写的那一行**优先**（显式胜过清单）。
+    """
+    if src is None:
+        return "", None
+    mf = src.parent / "pkg.lomp"
+    if not mf.is_file():
+        return "", None
+    try:
+        text = mf.read_text(encoding="utf-8")
+    except OSError:
+        return "", None
+    toks = lomc.lex(text)
+    name = ""
+    rt: str | None = None
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        if t.kind == "ident" and i + 1 < len(toks) and toks[i + 1].val == "(":
+            if t.val == "name" and name == "":
+                j = i + 2
+                while j < len(toks):
+                    if toks[j].kind == "string":
+                        name = toks[j].val
+                        break
+                    j += 1
+            elif t.val == "runtime" and rt is None:
+                j = i + 2
+                while j < len(toks):
+                    if toks[j].kind == "string":
+                        if toks[j].val in ("runtime", "no_runtime"):
+                            rt = toks[j].val
+                        break
+                    j += 1
+        i += 1
+    return name, rt
+
 
 def _unit_id(m: Module) -> object:
     """单元的**身份** —— 判"两份文件是不是同一个单元"用它, **不用名字** (`#139`)。
@@ -6939,6 +6981,7 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     # 棘轮：`loment_channel_test` 里那条探针**留着**、期望**反转**（发行版必须收它），
     # 与 `use libl` 放开时（`#358`）同一个做法。
 
+    _pkg_reported: set[str] = set()
     for d in deps:
         if d.from_addin:
             # `addin` 拉的是**开关设定** —— `choose` 正是它存在的理由，所以那两条
@@ -6970,17 +7013,29 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
             # "库不许 `choose`" —— 那让一个要除法的库**两面堵死**：当根编要 `choose runtime`，
             # 当依赖又不许写（`loment/lib/proc.lomt` 实测就卡在这儿）。新规矩：依赖的声明
             # **是需求**，根单元的取值**必须满足它**（一致）；不一致才报，报的时候两边都点名。
+            #
+            # **读 `chooses` 而不是 `choose_lines`**（`docs/321`）：包清单（`pkg.lomp`
+            # 的 `runtime()`）注入的需求没有源码行 —— 它照样是需求，漏读它会让
+            # `no_runtime` 的根静默用上要运行期的包。
             _seen: set[str] = set()
-            for dim0, word0, _line0 in d.choose_lines:
+            for dim0, word0 in d.chooses.items():
                 if dim0 in _seen:
                     continue        # 同一维写两次是**依赖自己**的错，不在这儿重复报
                 _seen.add(dim0)
+                # 同一个包只报一次（`docs/321`）：一张 `use` 图里 calendar 会带进 mem，
+                # 而两条说的是同一件事 —— 包级需求报包级一次就够。
+                if d.rt_from_pkg and dim0 == "runtime":
+                    if d.rt_from_pkg in _pkg_reported:
+                        continue
+                    _pkg_reported.add(d.rt_from_pkg)
                 if _eff[dim0] != word0:
                     # 位置见上面 `#702`：`_line0` 是依赖文件里的行号，不是入口的。
                     # 措辞保住 `依赖 \`X\` 要求 ` 这个前缀 —— `loment_diag.RULES` 的
                     # E022 按它锚（`test_every_message_the_compiler_can_print_has_a_code`）。
+                    _pkg = (f"（需求来自包 `{d.rt_from_pkg}` 的 `pkg.lomp`）"
+                            if dim0 == "runtime" and d.rt_from_pkg else "")
                     errs.append(
-                        f"依赖 `{d.name}` 要求 {CORE_DIM_ZH[dim0]}=`{word0}`，"
+                        f"依赖 `{d.name}` 要求 {CORE_DIM_ZH[dim0]}=`{word0}`{_pkg}，"
                         f"而根单元这一维是 `{_eff[dim0]}` —— 依赖的声明是**需求**，"
                         f"根必须满足它（在 {_unit_where(d)} 里）。"
                         f"在根单元写一行 `choose {word0}`")
@@ -13439,6 +13494,16 @@ def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3,
         # 2026.3 继承（版次累积）。
         _desugar_foreach(mod)
     mod.own_switches = own      # 本模块**自己**写的 —— 只有"库不许 choose"用它
+    # **包清单的 runtime 声明**（`docs/321`）：模块自己没写这一维时，取同包 `pkg.lomp`
+    # 的 `runtime()`。它同时是**根单元的默认档**（店里的模块当根编时照旧编得过）与
+    # **依赖的需求**（根是 `no_runtime` 就报 —— 由 `check()` 那条既有规则发）。
+    # 显式写的 `choose` 优先：`choose_lines` / `own_switches` 都不动它，所以
+    # "这一维写了两次"不会因为清单而误报。
+    if "runtime" not in mod.chooses:
+        _pn, _prt = _pkg_manifest(path)
+        if _prt is not None:
+            mod.chooses["runtime"] = _prt
+            mod.rt_from_pkg = _pn or path.parent.parent.name
     # `addin` 的行单独记一份 —— 它被抹掉了，而"库里写了 `addin` 却没生效"要能报出来。
     _d = 0
     for _i, _t in enumerate(toks):

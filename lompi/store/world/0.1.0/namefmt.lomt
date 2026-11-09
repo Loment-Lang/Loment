@@ -15,7 +15,6 @@
 // 命名: 公开 nmf_*, 内部 nn_*。自检 test_namefmt_*。
 
 module namefmt
-choose runtime
 
 use mem
 

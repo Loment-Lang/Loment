@@ -13,7 +13,6 @@
 // 命名: 公开 gi_*, 内部 gi_*。自检 test_gitignore_*。
 
 module gitignore
-choose runtime
 
 use mem
 

@@ -15,7 +15,6 @@
 // 命名: 公开一律 dir_*, 内部一律 di_*。自检 test_dir_*。
 
 module dir
-choose runtime
 
 use "io.lomt"
 

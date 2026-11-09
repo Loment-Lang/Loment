@@ -9,7 +9,6 @@
 // 命名: 公开 tm_*, 内部 tm_*。自检 test_thermo_*。
 
 module thermo
-choose runtime
 
 use f64
 use f64conv

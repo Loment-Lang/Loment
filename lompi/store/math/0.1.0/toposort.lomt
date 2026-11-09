@@ -15,7 +15,6 @@
 // 命名: 公开 tp_*, 内部 tp_*。自检 test_toposort_*。
 
 module toposort
-choose runtime
 
 use mem
 

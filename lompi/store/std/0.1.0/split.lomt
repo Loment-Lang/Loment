@@ -11,7 +11,6 @@
 // 命名: 公开一律 split_*, 内部一律 sp_*。自检 test_split_*。
 
 module split
-choose runtime
 
 use "num.lomt"
 

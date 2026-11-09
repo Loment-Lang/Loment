@@ -10,7 +10,6 @@
 // 命名: 公开 reg_*, 内部 rg_*。自检 test_calling_*。
 
 module calling
-choose runtime
 
 pub const REG_SYSV: u32 = 0;
 pub const REG_WIN64: u32 = 1;

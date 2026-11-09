@@ -52,7 +52,6 @@
 // 命名: 公开 sp_*, 内部无。自检 test_sp_*。
 
 module spin
-choose runtime
 
 use "mem.lomt"
 use "atomics.lomt"

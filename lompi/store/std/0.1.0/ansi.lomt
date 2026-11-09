@@ -34,7 +34,6 @@
 // 自检 test_ansi_*。
 
 module ansi
-choose runtime
 
 use "mem.lomt"
 

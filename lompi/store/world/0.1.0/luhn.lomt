@@ -11,7 +11,6 @@
 // 命名: 公开 luhn_*, 内部 lc2_*。自检 test_luhn_*。
 
 module luhn
-choose runtime
 
 fn lc2_digit(c: u32) -> bool {
     return c >= 48 && c <= 57;

@@ -18,7 +18,6 @@
 // 命名: 公开 der_*, 内部 a_*。自检 test_der_*。
 
 module asn1
-choose runtime
 
 use "mem.lomt"
 

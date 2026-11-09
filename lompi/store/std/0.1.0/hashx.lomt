@@ -26,7 +26,6 @@
 // 命名: 公开 hx_*, 内部 hx_* (私有名也占全局拼写, 不带前缀会按 E13 撞车)。自检 test_hashx_*。
 
 module hashx
-choose runtime
 
 use "mem.lomt"
 

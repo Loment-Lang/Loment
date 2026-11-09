@@ -9,7 +9,6 @@
 // 命名: 公开 mm_*, 内部 ma_*。自检 test_mmap_*。
 
 module mmap
-choose runtime
 
 pub const MM_PROT_READ: u32 = 1;
 pub const MM_PROT_WRITE: u32 = 2;

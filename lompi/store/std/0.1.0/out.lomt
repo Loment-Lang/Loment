@@ -20,7 +20,6 @@
 // 而两边都叫 test_dec_zero / test_dec_u64_max。规则很简单: 顶层名 (含 test_) 一律带模块前缀。
 
 module out
-choose runtime
 
 use "numfmt.lomt"
 

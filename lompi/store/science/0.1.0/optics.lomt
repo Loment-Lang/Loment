@@ -9,7 +9,6 @@
 // 命名: 公开 op_*, 内部 op_*。自检 test_optics_*。
 
 module optics
-choose runtime
 
 use f64
 use f64conv

@@ -13,7 +13,6 @@
 // 命名: 公开 ph_*, 内部 ph_*。自检 test_physics_*。
 
 module physics
-choose runtime
 
 use f64
 use f64conv

@@ -10,7 +10,6 @@
 // 命名: 公开 scn_*, 内部 sq_*。自检 test_syscalls_*。
 
 module syscalls
-choose runtime
 
 fn sq_put(out: ptr, cap: u32, s: str) -> u32 {
     let n: u32 = str_len(s);

@@ -14,7 +14,6 @@
 // 命名: 公开 spdx_*, 内部 sx_*。自检 test_spdx_*。
 
 module spdx
-choose runtime
 
 use mem
 

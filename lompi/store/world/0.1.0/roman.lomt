@@ -10,7 +10,6 @@
 // 命名: 公开 rm_*, 内部 rr_*。自检 test_roman_*。
 
 module roman
-choose runtime
 
 pub const RM_ERR: u32 = 4294967295;
 

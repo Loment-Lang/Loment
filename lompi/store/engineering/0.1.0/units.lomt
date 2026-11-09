@@ -14,7 +14,6 @@
 // 命名: 公开 un_*, 内部 un_*。自检 test_units_*。
 
 module units
-choose runtime
 
 use f64
 

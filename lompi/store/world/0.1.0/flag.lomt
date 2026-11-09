@@ -9,7 +9,6 @@
 // 命名: 公开 fg_*, 内部 ff_*。自检 test_flag_*。
 
 module flag
-choose runtime
 
 pub const FG_ERR: u32 = 4294967295;
 

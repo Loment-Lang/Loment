@@ -12,7 +12,6 @@
 // 命名: 公开 isbn_*, 内部 ic_*。自检 test_isbn_*。
 
 module isbn
-choose runtime
 
 fn ic_val(c: u32) -> i32 {
     if c >= 48 && c <= 57 {

@@ -14,7 +14,6 @@
 // 命名: 公开 deque_*, 内部 dq_*。自检 test_deque_*。
 
 module deque
-choose runtime
 
 use "mem.lomt"
 

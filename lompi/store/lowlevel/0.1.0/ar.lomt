@@ -12,7 +12,6 @@
 // 命名: 公开 ar_*, 内部 aq_*。自检 test_ar_*。
 
 module ar
-choose runtime
 
 use mem
 

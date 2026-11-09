@@ -10,7 +10,6 @@
 // 命名: 公开 ean_*, 内部 ec_*。自检 test_ean_*。
 
 module ean
-choose runtime
 
 fn ec_digit(c: u32) -> bool {
     return c >= 48 && c <= 57;

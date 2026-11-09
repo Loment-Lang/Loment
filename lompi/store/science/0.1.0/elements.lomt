@@ -15,7 +15,6 @@
 // 命名: 公开 el_*, 内部 el_*。自检 test_elements_*。
 
 module elements
-choose runtime
 
 
 pub const EL_COUNT: u32 = 118;

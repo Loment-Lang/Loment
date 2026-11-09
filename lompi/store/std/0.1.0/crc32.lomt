@@ -10,7 +10,6 @@
 // 命名: 公开一律 crc32_*, 内部一律 cr_*。自检 test_crc32_*。
 
 module crc32
-choose runtime
 
 /// 初始值 (未取反)。
 pub fn crc32_init() -> u32 {

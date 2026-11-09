@@ -13,7 +13,6 @@
 // 命名: 公开 pg_*, 内部 pg_*。自检 test_paging_*。
 
 module paging
-choose runtime
 
 use mem
 

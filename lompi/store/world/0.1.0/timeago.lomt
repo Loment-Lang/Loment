@@ -12,7 +12,6 @@
 // 命名: 公开 ta_*, 内部 tt_*。自检 test_timeago_*。
 
 module timeago
-choose runtime
 
 fn ti_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
     let p: u32 = pos;

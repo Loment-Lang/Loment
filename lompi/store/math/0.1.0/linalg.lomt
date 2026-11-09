@@ -16,7 +16,6 @@
 // 命名: 公开 la_*, 内部 la_*。自检 test_linalg_*。
 
 module linalg
-choose runtime
 
 use f64
 use f64conv

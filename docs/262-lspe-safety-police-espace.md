@@ -1344,6 +1344,10 @@ LSPE 两样都不动。
 不触发"这一维写了两次"；同一格写两次仍然报。槽不覆盖 `chooses`，只记进
 `Module.slots` / 产物的 `lspe.aicheck`。默认 `false`（关）。
 
+**槽与维度同一条边界**：它声明的是**整个程序**的台账，所以只有根单元能定 ——
+`addin` 单元里写报 E022（否则那行**静默无效**），库写则按"需求"核（根不满足才报，
+两边点名）。判据 `lomentc_test::test_a_slot_is_root_only_wherever_the_dimension_is`。
+
 今天只有一格 `aicheck`。它属于 `lspe` 维，因为**审计的产物**是它唯一的出口。
 
 **AI 是问题源，不是证据源。** 这条边界是它进 LSPE 的方式：

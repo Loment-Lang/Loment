@@ -194,6 +194,7 @@ _IR_GUARD_RUNTIME = '''; ---- 能力域运行时 (docs/306-308, 313): 虚拟钟 
 @__loment_used = internal global [16 x [64 x i64]] zeroinitializer
 @__loment_wit = internal global [16 x [64 x i64]] zeroinitializer
 @__loment_obl = internal global [16 x [64 x i64]] zeroinitializer
+@__loment_gen = internal global [16 x [64 x i64]] zeroinitializer
 @__loment_qual = internal global [16 x i64] [i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255]
 
 define internal void @__loment_tick() {
@@ -233,6 +234,60 @@ fail:
   unreachable
 ok:
   store i64 0, ptr %p
+  ret void
+}
+
+define internal i64 @__loment_gen_read(ptr %st, i64 %idx, i64 %lo, i64 %hi, i64 %flags) {
+entry:
+  %fl = and i64 %flags, 1
+  %linf = icmp ne i64 %fl, 0
+  %fh = and i64 %flags, 2
+  %hinf = icmp ne i64 %fh, 0
+  %ge = icmp uge i64 %idx, %lo
+  %lob = or i1 %linf, %ge
+  %le = icmp ule i64 %idx, %hi
+  %hib = or i1 %hinf, %le
+  %bound = and i1 %lob, %hib
+  br i1 %bound, label %ok, label %bad
+bad:
+  call void @__loment_abort()
+  unreachable
+ok:
+  %off0 = sub i64 %idx, %lo
+  %big = icmp uge i64 %off0, 64
+  %zb = zext i1 %big to i64
+  %mbo = sub i64 %zb, 1
+  %off = and i64 %off0, %mbo
+  %p = getelementptr [64 x i64], ptr %st, i64 0, i64 %off
+  %v = load i64, ptr %p
+  ret i64 %v
+}
+
+define internal void @__loment_gen_bump(ptr %st, i64 %idx, i64 %lo, i64 %hi, i64 %flags) {
+entry:
+  %fl = and i64 %flags, 1
+  %linf = icmp ne i64 %fl, 0
+  %fh = and i64 %flags, 2
+  %hinf = icmp ne i64 %fh, 0
+  %ge = icmp uge i64 %idx, %lo
+  %lob = or i1 %linf, %ge
+  %le = icmp ule i64 %idx, %hi
+  %hib = or i1 %hinf, %le
+  %bound = and i1 %lob, %hib
+  br i1 %bound, label %ok, label %bad
+bad:
+  call void @__loment_abort()
+  unreachable
+ok:
+  %off0 = sub i64 %idx, %lo
+  %big = icmp uge i64 %off0, 64
+  %zb = zext i1 %big to i64
+  %mbo = sub i64 %zb, 1
+  %off = and i64 %off0, %mbo
+  %p = getelementptr [64 x i64], ptr %st, i64 0, i64 %off
+  %v = load i64, ptr %p
+  %v1 = add i64 %v, 1
+  store i64 %v1, ptr %p
   ret void
 }
 
@@ -396,7 +451,21 @@ entry:
   %p14a = and i1 %o14n, %k14
   %p14b = and i1 %a13, %nk14
   %a14 = or i1 %p14a, %p14b
-  br i1 %a14, label %pass, label %fail
+  %k15 = icmp eq i64 %ks, 15
+  %g15o0 = sub i64 %idx, %lo
+  %g15b = icmp uge i64 %g15o0, 64
+  %g15z = zext i1 %g15b to i64
+  %g15m = sub i64 %g15z, 1
+  %g15o = and i64 %g15o0, %g15m
+  %g15p = getelementptr [64 x i64], ptr %st, i64 0, i64 %g15o
+  %g15v = load i64, ptr %g15p
+  %g15e = icmp eq i64 %g15v, %aux
+  %g15n = and i1 %g15e, %bound
+  %nk15 = xor i1 %k15, true
+  %p15a = and i1 %g15n, %k15
+  %p15b = and i1 %a14, %nk15
+  %a15 = or i1 %p15a, %p15b
+  br i1 %a15, label %pass, label %fail
 fail:
   call void @__loment_abort()
   unreachable
@@ -1144,7 +1213,26 @@ static mut __LOMENT_WIT: [[u64; 64]; 16] = [[0; 64]; 16];
 #[allow(static_mut_refs)]
 static mut __LOMENT_OBL: [[u64; 64]; 16] = [[0; 64]; 16];
 #[allow(static_mut_refs)]
+static mut __LOMENT_GEN: [[u64; 64]; 16] = [[0; 64]; 16];
+#[allow(static_mut_refs)]
 static mut __LOMENT_QUAL: [u64; 16] = [255; 16];
+
+// `docs/320` S1：对象代。读与翻页都先判界；界外 panic，不静默回绕。
+fn __loment_gen_read(st: &[u64], idx: u64, lo: u64, hi: u64, flags: u64) -> u64 {
+    let bound = ((flags & 1) != 0 || idx >= lo) && ((flags & 2) != 0 || idx <= hi);
+    if !bound {
+        panic!("loment: generation index {} out of [{}, {}]", idx, lo, hi);
+    }
+    st[(idx - lo) as usize]
+}
+
+fn __loment_gen_bump(st: &mut [u64], idx: u64, lo: u64, hi: u64, flags: u64) {
+    let bound = ((flags & 1) != 0 || idx >= lo) && ((flags & 2) != 0 || idx <= hi);
+    if !bound {
+        panic!("loment: generation index {} out of [{}, {}]", idx, lo, hi);
+    }
+    st[(idx - lo) as usize] += 1;
+}
 
 fn __loment_tick() {
     unsafe {
@@ -1207,6 +1295,7 @@ fn __loment_guard2(st: &mut [u64], cap: usize, idx: u64, aux: u64, lo: u64, hi: 
             key >= lo && key <= hi
         }
         14 => bound && st[(idx & 63) as usize] == 0,
+        15 => bound && st[(idx - lo) as usize] == aux,
         _ => bound,
     };
     if !ok {
@@ -1419,19 +1508,22 @@ CAP_KIND_ID = {
     "witnessed": 12,
     "flow": 13,
     "reachable": 14,
+    #: `docs/320` S1：对象代。第二个实参是**期望的代**，不是主体/票号。
+    "revision": 15,
 }
 #: 吃一个整型参数的律。
 CAP_PARAM_KINDS = ("epoch", "far", "sliding", "decaying", "growing", "consumed",
                    "cyclic", "generational", "subject", "witnessed", "reachable")
 #: 守卫要第二个实参（`guard cap(x, aux);`）的律。`flow` 的 aux 是目标节点，
-#: `subject` 的是主体号，`witnessed` 的是票号。
-CAP_AUX_KINDS = ("subject", "witnessed", "flow")
-#: 有状态（每个域实例一份）的律：消耗 / 自适应 / 见证 / 可达（`docs/313` §4）。
-_STATEFUL_KINDS = (7, 10, 12, 14)
+#: `subject` 的是主体号，`witnessed` 的是票号，`revision` 的是对象代。
+CAP_AUX_KINDS = ("subject", "witnessed", "flow", "revision")
+#: 有状态（每个域实例一份）的律：消耗 / 自适应 / 见证 / 可达 / 对象代（`docs/313` §4）。
+_STATEFUL_KINDS = (7, 10, 12, 14, 15)
 #: 编号 → 律名（检查器拿回字符串用）。
 CAP_KIND_NAME = {v: k for k, v in CAP_KIND_ID.items()}
-#: 要第二个实参的那三种（编号版）。
-_AUX_KIND_IDS = (CAP_KIND_ID["subject"], CAP_KIND_ID["witnessed"], CAP_KIND_ID["flow"])
+#: 要第二个实参的那几种（编号版）。
+_AUX_KIND_IDS = (CAP_KIND_ID["subject"], CAP_KIND_ID["witnessed"], CAP_KIND_ID["flow"],
+                 CAP_KIND_ID["revision"])
 
 
 def _cap_shape(c: Capability) -> str:
@@ -1468,6 +1560,15 @@ def _cap_constraint_errors(noun: str, name: str, lo: int, hi: int, lo_inf: bool,
             out.append(f"{line}: {noun} {name} 是 reachable，域必须有上下界")
         elif hi - lo + 1 > 64:
             out.append(f"{line}: {noun} {name} 是 reachable，域宽 {hi - lo + 1} 超过 64")
+    if kind == "revision":
+        if noun == "域":
+            # `docs/320` S1：对象代只挂在顶层 capability 上。块级域是每帧实例，
+            # 它的"对象代"就是块的寿命，不需要再开一张表。
+            out.append(f"{line}: {noun} {name} 不能是 revision（对象代只用于顶层 capability）")
+        if lo_inf or hi_inf:
+            out.append(f"{line}: {noun} {name} 是 revision，域必须有上下界")
+        elif hi - lo + 1 > 64:
+            out.append(f"{line}: {noun} {name} 是 revision，域宽 {hi - lo + 1} 超过 64")
     return out
 
 
@@ -1538,6 +1639,24 @@ class Call:
     line: int
     #: Tur 2 才有的内建（`TUR2_BUILTINS`）：Tur 1 里同名的用户函数照旧优先。
     tur2: bool = False
+
+
+@dataclass
+class GenOf:
+    """`generation CAP(EXPR)` —— 读一个 `revision` 槽的当前对象代（`docs/320` S1）。
+
+    返回 `u64`。这是"对象代"在源码里的最小入口：调用方把读到的代随引用一起保存，
+    之后用 `guard CAP(idx, gen)` 判它还是不是同一个对象。
+    """
+    cap: str
+    expr: object
+    line: int
+    cap_id: int = 0
+    is_block: bool = False
+    kind_id: int = -1
+    lo: int = 0
+    hi: int = 0
+    flags: int = 0
 
 
 @dataclass
@@ -1753,6 +1872,24 @@ class Discharge:
     cap_id: int = 0
     is_block: bool = False
     dom_kind_id: int = -1
+
+
+@dataclass
+class Retire:
+    """`retire CAP(EXPR);` —— 把一个槽的对象代翻一页（O(1)，`docs/320` S1）。
+
+    与 `free` 不是同一件事：`free` 归还存储，`retire` 只宣告"这个指称物的这条命结束了"。
+    之后所有携带旧代的引用在下一次 `guard` 上失败。
+    """
+    cap: str
+    expr: object
+    line: int
+    cap_id: int = 0
+    is_block: bool = False
+    kind_id: int = -1
+    lo: int = 0
+    hi: int = 0
+    flags: int = 0
 
 
 @dataclass
@@ -2048,29 +2185,92 @@ def _rename_self(stmts: list) -> None:
 
 
 def _resolve_guards(mods, caps_map: dict) -> None:
-    """P4: guard 语句按能力表填充 id/lo/hi (供后端发射, 避免再传上下文)。"""
+    """P4: guard 语句按能力表填充 id/lo/hi (供后端发射, 避免再传上下文)。
+
+    `docs/320` S1：`generation` / `retire` 也在这趟里拿顶层能力的 id/界；
+    块级域的那一份由 `_resolve_domains` 覆盖（它后跑，且能看见块作用域）。
+    """
+    def ex(e) -> None:
+        if isinstance(e, GenOf):
+            info = caps_map.get(e.cap)
+            if info:
+                e.cap_id, e.lo, e.hi, e.kind_id, _param, e.flags = info
+            ex(e.expr)
+            return
+        if isinstance(e, Bin):
+            ex(e.left)
+            ex(e.right)
+        elif isinstance(e, Un):
+            ex(e.expr)
+        elif isinstance(e, Cast):
+            ex(e.expr)
+        elif isinstance(e, Try):
+            ex(e.expr)
+        elif isinstance(e, Call):
+            for a in e.args:
+                ex(a)
+        elif isinstance(e, MethodCall):
+            ex(e.obj)
+            for a in e.args:
+                ex(a)
+        elif isinstance(e, FieldAccess):
+            ex(e.obj)
+        elif isinstance(e, Index):
+            ex(e.obj)
+            ex(e.idx)
+        elif isinstance(e, ArrayLit):
+            for it in e.items:
+                ex(it)
+        elif isinstance(e, StructLit):
+            for _, fe in e.inits:
+                ex(fe)
+        elif isinstance(e, Fallback):
+            ex(e.value)
+            ex(e.default)
+
     def walk(stmts) -> None:
         for s in stmts:
             if isinstance(s, Guard):
                 info = caps_map.get(s.cap)
                 if info:
                     s.cap_id, s.lo, s.hi, s.kind_id, s.param, s.flags = info
+                ex(s.expr)
+                ex(s.aux)
             elif isinstance(s, Quality):
                 s.cap_id = caps_map.get(s.cap, (0,))[0]
+                ex(s.expr)
             elif isinstance(s, Discharge):
                 s.cap_id = caps_map.get(s.cap, (0,))[0]
+                ex(s.expr)
+            elif isinstance(s, Retire):  # docs/320 S1
+                info = caps_map.get(s.cap)
+                if info:
+                    s.cap_id, s.lo, s.hi, s.kind_id, _param, s.flags = info
+                ex(s.expr)
+            elif isinstance(s, Let):
+                ex(s.expr)
+            elif isinstance(s, Assign):
+                ex(s.target)
+                ex(s.expr)
             elif isinstance(s, If):
+                ex(s.cond)
                 walk(s.then)
                 walk(s.otherwise)
             elif isinstance(s, While):
+                ex(s.cond)
                 walk(s.body)
             elif isinstance(s, For):
+                ex(s.lo)
+                ex(s.hi)
                 walk(s.body)
             elif isinstance(s, DomainBlock):
                 walk(s.body)   # 块里的顶层能力名照常解析；块域名由 _resolve_domains 接管
             elif isinstance(s, Match):
+                ex(s.subject)
                 for _, b in s.arms:
                     walk(b)
+            elif isinstance(s, (Return, ExprStmt)):
+                ex(s.expr)
 
     for m in mods:
         for f in m.funcs:
@@ -2126,6 +2326,16 @@ def _resolve_domains(mod, cap_base: int | None = None) -> None:
                                  and mf_[k][1] not in seen]
                         if extra:
                             e.doms = e.doms[:-1] + extra + e.doms[-1:]
+            return
+        if isinstance(e, GenOf):  # docs/320 S1
+            ex(e.expr, stack, vs)
+            d = find(stack, e.cap)
+            if d is not None:
+                e.is_block = True
+                e.cap_id = d.audit_id
+                e.kind_id = CAP_KIND_ID[d.kind]
+                e.lo, e.hi = d.lo, d.hi
+                e.flags = (1 if d.lo_inf else 0) | (2 if d.hi_inf else 0)
             return
         if isinstance(e, (IntLit, BoolLit, StrLit, Ident, EnumPath, EnumCtor)):
             if isinstance(e, EnumCtor):
@@ -2224,6 +2434,15 @@ def _resolve_domains(mod, cap_base: int | None = None) -> None:
                     s.cap_id = d.audit_id
                     s.is_block = True
                     s.dom_kind_id = CAP_KIND_ID[d.kind]
+            elif isinstance(s, Retire):  # docs/320 S1
+                ex(s.expr, stack, vs)
+                d = find(stack, s.cap)
+                if d is not None:
+                    s.cap_id = d.audit_id
+                    s.is_block = True
+                    s.kind_id = CAP_KIND_ID[d.kind]
+                    s.lo, s.hi = d.lo, d.hi
+                    s.flags = (1 if d.lo_inf else 0) | (2 if d.hi_inf else 0)
             elif isinstance(s, If):
                 ex(s.cond, stack, vs)
                 walk(s.then, stack, dict(vs))
@@ -4219,6 +4438,14 @@ class Parser:
             self.expect("punct", ")")
             self.expect("punct", ";")
             return Discharge(cap, e, t.line)
+        if t.val == "retire":  # docs/320 S1：对象代翻页
+            self.next()
+            cap = self.ident("能力名")
+            self.expect("punct", "(")
+            e = self.parse_expr()
+            self.expect("punct", ")")
+            self.expect("punct", ";")
+            return Retire(cap, e, t.line)
         if t.val == "let":
             self.next()
             name = self.ident("变量名")
@@ -4505,6 +4732,16 @@ class Parser:
             self.expect("punct", "]")
             return self.parse_postfix(ArrayLit(items, t.line))
         if t.kind == "ident":
+            # `generation CAP(EXPR)`（`docs/320` S1）—— 上下文形式：`generation` 后面
+            # 紧跟一个名字再紧跟 `(`。写成普通函数调用 `generation(x)` 的照旧走调用。
+            if (t.val == "generation" and self.peek(1).kind == "ident"
+                    and self.peek(2).kind == "punct" and self.peek(2).val == "("):
+                self.next()
+                cap = self.ident("能力名")
+                self.expect("punct", "(")
+                e = self.parse_expr()
+                self.expect("punct", ")")
+                return self.parse_postfix(GenOf(cap, e, t.line))
             if t.val == "true":
                 self.next()
                 return self.parse_postfix(BoolLit(True, t.line))
@@ -5015,9 +5252,51 @@ def _has_try(mods) -> bool:
 
 
 def _has_guard(mods) -> bool:
+    """这份单元有没有"要拿能力表才能解析"的判决点（含 `docs/320` 的 `generation`）。"""
+    def gen_expr(e) -> bool:
+        if e is None:
+            return False
+        if isinstance(e, GenOf):
+            return True
+        if isinstance(e, Bin):
+            return gen_expr(e.left) or gen_expr(e.right)
+        if isinstance(e, Un):
+            return gen_expr(e.expr)
+        if isinstance(e, (Cast, Try)):
+            return gen_expr(e.expr)
+        if isinstance(e, Call):
+            return any(gen_expr(a) for a in e.args)
+        if isinstance(e, MethodCall):
+            return gen_expr(e.obj) or any(gen_expr(a) for a in e.args)
+        if isinstance(e, FieldAccess):
+            return gen_expr(e.obj)
+        if isinstance(e, Index):
+            return gen_expr(e.obj) or gen_expr(e.idx)
+        if isinstance(e, ArrayLit):
+            return any(gen_expr(i) for i in e.items)
+        if isinstance(e, StructLit):
+            return any(gen_expr(v) for _, v in e.inits)
+        if isinstance(e, Fallback):
+            return gen_expr(e.value) or gen_expr(e.default)
+        return False
+
     def scan(stmts) -> bool:
         for s in stmts:
-            if isinstance(s, (Guard, Quality, Discharge)):
+            if isinstance(s, (Guard, Quality, Discharge, Retire)):
+                return True
+            if isinstance(s, Let) and gen_expr(s.expr):
+                return True
+            if isinstance(s, Assign) and (gen_expr(s.target) or gen_expr(s.expr)):
+                return True
+            if isinstance(s, (Return, ExprStmt)) and gen_expr(s.expr):
+                return True
+            if isinstance(s, If) and gen_expr(s.cond):
+                return True
+            if isinstance(s, While) and gen_expr(s.cond):
+                return True
+            if isinstance(s, For) and (gen_expr(s.lo) or gen_expr(s.hi)):
+                return True
+            if isinstance(s, Match) and gen_expr(s.subject):
                 return True
             for key in ("then", "otherwise", "body"):
                 sub = getattr(s, key, None)
@@ -5165,11 +5444,12 @@ def prepare(mod: Module, deps: list[Module] | None = None) -> tuple[Module, list
     # 从前这里只取 `mod.caps`，于是依赖里的 guard 查不到，`Guard` 保留默认
     # `[0..0]` —— 安全边界随安装的编译器变化（#1175）。
     all_caps = [c for m in allmods for c in m.caps]
-    if _has_guard(allmods):  # P4: guard 解析
-        _resolve_guards(allmods, {
-            c.name: (i, c.lo, c.hi, CAP_KIND_ID[c.kind], c.param,
-                     (1 if c.lo_inf else 0) | (2 if c.hi_inf else 0))
-            for i, c in enumerate(all_caps)})
+    # `generation` / `retire`（`docs/320`）也要拿能力表，所以这一趟不能只在
+    # "有 guard" 时跑 —— 一份只有 `retire` 的单元同样要解析。
+    _resolve_guards(allmods, {
+        c.name: (i, c.lo, c.hi, CAP_KIND_ID[c.kind], c.param,
+                 (1 if c.lo_inf else 0) | (2 if c.hi_inf else 0))
+        for i, c in enumerate(all_caps)})
     _resolve_domains(mod, len(all_caps))  # docs/313：块级域、自动守卫链、审计槽号
     return mod, deps
 
@@ -5203,6 +5483,8 @@ def expr_type(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[st
         return "str"
     if isinstance(e, Ident):
         return scope.get(e.name)
+    if isinstance(e, GenOf):
+        return "u64"
     if isinstance(e, Call):
         sig = _builtin_sig(e)
         if sig is not None:
@@ -5399,6 +5681,15 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
     if isinstance(e, Ident):
         if e.name not in scope:
             errs.append(f"{e.line}: 使用未声明的变量 {e.name}")
+        return
+    if isinstance(e, GenOf):
+        _walk_expr(e.expr, scope, funcs, structs, errs, enums, lifetime)
+        at = expr_type(e.expr, scope, funcs, structs)
+        if at is not None and at not in INT_TYPES:
+            errs.append(f"{e.line}: generation 的索引类型 {at}，应为整型")
+        if getattr(e, "kind_id", -1) not in (-1, CAP_KIND_ID["revision"]):
+            errs.append(f"{e.line}: generation 只用于 revision 域，"
+                        f"能力 {e.cap} 是 {CAP_KIND_NAME.get(e.kind_id, '未声明')}")
         return
     if isinstance(e, Fallback):
         # `docs/296` §2.4：泛型形状 —— **恰好两个变体**，第一个（成功）带载荷、第二个
@@ -6435,6 +6726,8 @@ _RUNTIME_SITES: dict[str, str] = {
     "quality": "`quality`（自适应域的质量）",
     "domain": "`domain`（块级域）",
     "discharge": "`discharge`（可达域义务）",
+    "generation": "`generation`（对象代）",
+    "retire": "`retire`（对象代翻页）",
     # `#778`：真线程要把运行期的锁与活线程计数带进产物（`alloc`/`free`/根表在
     # 线程之间共享）。所以它和 `alloc` 一样，是"会把运行期拖进来"的构造。
     "thread_spawn": "`thread_spawn`（运行期锁）",
@@ -6489,7 +6782,7 @@ def _runtime_sites(toks: list,
                 (b is not None and b.val == ":" and c is not None and c.kind == "ident"
                  and d is not None and d.val == "[")
                 or (b is not None and b.val == "[")))
-        elif t.val in ("guard", "lgc", "quality", "discharge"):
+        elif t.val in ("guard", "lgc", "quality", "discharge", "generation", "retire"):
             hit = nxt is not None and nxt.kind == "ident"
         elif t.val == "tick":
             hit = nxt is not None and nxt.kind == "punct" and nxt.val == ";"
@@ -7555,6 +7848,22 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                     dt = expr_type(s.expr, fscope, funcs, structs)
                     if dt is not None and dt not in INT_TYPES:
                         errs.append(f"{s.line}: discharge 的索引类型 {dt}，应为整型")
+                elif isinstance(s, Retire):  # docs/320 S1
+                    dom = next((d for d in reversed(dstack) if d.name == s.cap), None)
+                    cap = unit_caps.get(s.cap) if dom is None else None
+                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums, lifetime)
+                    if dom is not None:
+                        if dom.kind != "revision":
+                            errs.append(f"{s.line}: retire 只用于 revision 域，"
+                                        f"域 {s.cap} 是 {dom.kind}")
+                    elif cap is None:
+                        errs.append(f"{s.line}: retire 引用了未声明的能力 {s.cap}")
+                    elif cap.kind != "revision":
+                        errs.append(f"{s.line}: retire 只用于 revision 域，"
+                                    f"能力 {s.cap} 是 {cap.kind}")
+                    rt = expr_type(s.expr, fscope, funcs, structs)
+                    if rt is not None and rt not in INT_TYPES:
+                        errs.append(f"{s.line}: retire 的索引类型 {rt}，应为整型")
                 elif isinstance(s, For):
                     _walk_expr(s.lo, fscope, funcs, structs, errs, enums, lifetime)
                     _walk_expr(s.hi, fscope, funcs, structs, errs, enums, lifetime)
@@ -8112,6 +8421,8 @@ def _rs_state(kind_id: int, is_block: bool, cap_id: int) -> str:
         return f"unsafe {{ &mut __LOMENT_WIT[{cap_id}] }}"
     if k == 14:
         return f"unsafe {{ &mut __LOMENT_OBL[{cap_id}] }}"
+    if k == 15:
+        return f"unsafe {{ &mut __LOMENT_GEN[{cap_id}] }}"
     return f"unsafe {{ &mut __LOMENT_QUAL[{cap_id}..] }}"
 
 
@@ -8137,6 +8448,10 @@ def _rs_auto_guards(e, obj: str, idx: str) -> str:
 
 
 def _expr_rs(e) -> str:
+    if isinstance(e, GenOf):  # docs/320 S1
+        st = _rs_state(CAP_KIND_ID["revision"], e.is_block, e.cap_id)
+        return (f"__loment_gen_read({st}, ({_expr_rs(e.expr)}) as u64, "
+                f"{e.lo}u64, {e.hi}u64, {e.flags}u64)")
     if isinstance(e, IntLit):
         return str(e.value)
     if isinstance(e, BoolLit):
@@ -8387,6 +8702,10 @@ def _stmts_rs(stmts: list, indent: int) -> list[str]:
             st = _rs_state(14, s.is_block, s.cap_id)
             out.append(f"{pad}__loment_discharge({st}, {s.cap_id}, "
                        f"({_expr_rs(s.expr)}) as u64);")
+        elif isinstance(s, Retire):  # docs/320 S1
+            st = _rs_state(CAP_KIND_ID["revision"], s.is_block, s.cap_id)
+            out.append(f"{pad}__loment_gen_bump({st}, ({_expr_rs(s.expr)}) as u64, "
+                       f"{s.lo}u64, {s.hi}u64, {s.flags}u64);")
         elif isinstance(s, Tick):
             out.append(f"{pad}__loment_tick();")
         else:
@@ -11674,6 +11993,15 @@ class _Ir:
             return e.ty, e.val
         if isinstance(e, Fallback):
             return self._fallback_expr(e)
+        if isinstance(e, GenOf):  # docs/320 S1：读对象代
+            _, iv = self.expr(e.expr, "u32")
+            v64 = self.t()
+            self.w(f"{v64} = zext i32 {iv} to i64")
+            st = self.state_ptr(CAP_KIND_ID["revision"], e.is_block, e.cap_id)
+            r = self.t()
+            self.w(f"{r} = call i64 @__loment_gen_read(ptr {st}, i64 {v64}, "
+                   f"i64 {e.lo}, i64 {e.hi}, i64 {e.flags})")
+            return "u64", r
         if isinstance(e, IntLit):
             if want == "ptr":  # M73: 空指针字面量
                 return "ptr", "null"
@@ -12458,6 +12786,10 @@ class _Ir:
             p = self.t()
             self.w(f"{p} = getelementptr [64 x i64], ptr @__loment_obl, i64 {cap_id}")
             return p
+        if k == 15:
+            p = self.t()
+            self.w(f"{p} = getelementptr [64 x i64], ptr @__loment_gen, i64 {cap_id}")
+            return p
         # adaptive：质量表按声明点一格
         p = self.t()
         self.w(f"{p} = getelementptr i64, ptr @__loment_qual, i64 {cap_id}")
@@ -12888,6 +13220,14 @@ class _Ir:
             self.w(f"{d64} = zext i32 {dv} to i64")
             st = self.state_ptr(14, s.is_block, s.cap_id)
             self.w(f"call void @__loment_discharge(ptr {st}, i64 {s.cap_id}, i64 {d64})")
+            return
+        if isinstance(s, Retire):  # docs/320 S1：对象代翻页
+            _, rv = self.expr(s.expr, "u32")
+            r64 = self.t()
+            self.w(f"{r64} = zext i32 {rv} to i64")
+            st = self.state_ptr(CAP_KIND_ID["revision"], s.is_block, s.cap_id)
+            self.w(f"call void @__loment_gen_bump(ptr {st}, i64 {r64}, "
+                   f"i64 {s.lo}, i64 {s.hi}, i64 {s.flags})")
             return
         if isinstance(s, (Couple, Mutex, Solid)):
             # `docs/315` §5：联动 / 互斥 / 体都是**声明** —— 判决点已经长在 guard 里。
@@ -13413,7 +13753,9 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # **两者都不用时一个字节不发** —— 旧程序的产物逐字节不变。
     _guard_rt = ("@__loment_guard2" in text_all or "@__loment_tick" in text_all
                  or "@__loment_qual_store" in text_all
-                 or "@__loment_discharge" in text_all)
+                 or "@__loment_discharge" in text_all
+                 or "@__loment_gen_read" in text_all
+                 or "@__loment_gen_bump" in text_all)
     if _guard_rt:
         out.append(_IR_GUARD_RUNTIME)
     if "@__loment_audit" in text_all or "@__loment_guard2" in text_all \

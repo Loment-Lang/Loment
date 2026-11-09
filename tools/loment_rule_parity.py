@@ -75,7 +75,9 @@ import loment_p8_test as H  # noqa: E402  # 复用已验过的构建/运行夹�
 # 2026-11-08 借用生命周期（`docs/299` 第八维 `lifetime`）自举侧落地：五条 ——
 # 悬垂（经调用，E012）、无引用形参（E041）、auto 档写区域标记（E041）、
 # `free` 时仍被借（E041）、存下来的 `&mut` 独家（E007）⇒ **133/133**。
-BUDGET = 133
+# 2026-11-09 对象代（`docs/320` S1）：两条 —— 非 revision 域上读代、revision 守卫
+# 缺第二实参 ⇒ **135/135**。
+BUDGET = 135
 
 # --------------------------------------------------------------------------- 案例表
 #
@@ -119,6 +121,13 @@ _CASES: list[tuple[str, str]] = [
     ("cap-lo-gt-hi", "module m\n\ncapability c : space[5..2]\n"),
     ("cap-unknown-guard",
      "module m\n\nfn f() -> u32 {\n    guard nope(0);\n    return 1;\n}\n"),
+    # `docs/320` S1：对象代只对 `revision` 域有意义；守卫必须带代。
+    ("cap-revision-regular",
+     "module m\n\ncapability c : disk[0..4]\n\n"
+     "fn f(i: u32) -> u64 {\n    let g: u64 = generation c(i);\n    return g;\n}\n"),
+    ("cap-revision-guard-no-gen",
+     "module m\n\ncapability c : disk[0..4] revision\n\n"
+     "fn f(i: u32) -> u32 {\n    guard c(i);\n    return 1;\n}\n"),
     # ---- 调用 (E002 / E003 / E001) ----------------------------------------
     ("call-unknown-fn", "module m\n\nfn f() -> u32 {\n    return g(1);\n}\n"),
     ("call-arity", "module m\n\nfn g(a: u32) -> u32 {\n    return a;\n}\n\nfn f() -> u32 {\n    return g(1, 2);\n}\n"),

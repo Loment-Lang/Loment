@@ -1,6 +1,6 @@
 # 320 · Loment 最终态：权能的时序安全
 
-> 状态: **设计稿**（2026-11-09）
+> 状态: **设计稿；S1 已落地（见 §12）**（2026-11-09）
 > 上游: `docs/146`（guard 语义）· `docs/306`（一般类/时类）· `docs/307`（语境类）·
 > `docs/308`（嵌套/循环）· `docs/314`（块域）· `docs/315`（域循环）· `docs/206`（所有权边界）·
 > `docs/299`（生命周期）· `docs/210`（LGC）· `docs/253`（LMS）· `docs/262`（LSPE）· `docs/207`（逆回收）
@@ -782,3 +782,52 @@ ptr     标注的地板           不检查，责任在写的人
 
 同一次 `guard`，回答三个问题。
 **这就是"权能的时序安全"在 Loment 里的最终形态。**
+
+---
+
+## 12. S1 落地记录（2026-11-09）
+
+S1 落地的是"对象代"的最小面：**显式 `(idx, gen)`**，还没有 `ref` 类型。
+
+### 12.1 语法
+
+```rust
+capability blk : disk[0..7] revision      // 新的第九种时律：对象代
+
+let g: u64 = generation blk(i);           // 读当前代（u64）
+guard blk(i, g);                          // 域 ∧ 代 == g（第二实参是期望的代）
+retire blk(i);                            // 代 +1（O(1)）
+```
+
+`revision` 的约束与 `consumed` / `reachable` 同档：**必须有界、域宽 ≤64、只用于顶层
+`capability`**。块级域的寿命已经由块本身给出，不需要第二张代。
+`generation` / `retire` 用在非 `revision` 域上是编译错误；`revision` 的 `guard`
+不带第二实参也是编译错误。
+
+### 12.2 运行期
+
+| 层 | 形状 |
+|---|---|
+| IR | `@__loment_gen: [16 x [64 x i64]]`；`@__loment_guard2` 的 `kind == 15`；`@__loment_gen_read` / `@__loment_gen_bump` |
+| Rust | `__LOMENT_GEN: [[u64; 64]; 16]`；同一个 `__loment_guard2` 的 `15 =>` 分支；同两个函数 |
+| 判决 | `kind 15`：`bound && gen[idx-lo] == aux`；失败 trap，放行才记审计 |
+| 翻代 | `retire`：`gen[idx-lo] += 1`；越界 trap，不静默回绕 |
+
+### 12.3 判据
+
+- `lomentc_test::test_s1_revision_generation_catches_stale_reference`：Rust 后端**真跑**——
+  `g=0` 放行；`retire` 后旧 `g` trap；新代 `g=1` 放行。IR 侧钉住 gen 表与两个运行时符号。
+- `lomentc_test::test_s1_revision_requires_the_right_domain_kind`：非 `revision` 域上的
+  `generation` / `retire`、缺第二实参的 `guard`、域宽 >64，各一条编译错误。
+- 自举侧：`loment/selfhost/pos/revision.lomt`（正例）、
+  `neg/revision_regular.lomt`、`neg/revision_no_gen.lomt`（负例）。
+- 双实现对拍：同一份 `revision` 程序，参考实现与自举 `codegen` 的 IR **逐字节相同**
+  （实测 11,656 字节）。
+
+### 12.4 没做的
+
+- `ref` 类型（引用携带代的那一层）仍是 S1.5；
+- 撤销代（`e`）与 C2 级联仍是 S3；
+- 静默（线程 EBR / FFI barrier）仍是 S4；
+- 无界域与块级域的 `revision` 不在 S1；
+- `lom/*.lom` 一行未动。

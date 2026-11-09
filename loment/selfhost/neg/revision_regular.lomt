@@ -1,0 +1,11 @@
+module neg_revision_regular
+
+// `generation` 只对 `revision` 域有意义。参考实现与自举检查器都要报 E-CAP。
+choose runtime
+
+capability c : disk[0..4]
+
+fn f(i: u32) -> u64 {
+    let g: u64 = generation c(i);
+    return g;
+}

@@ -661,7 +661,8 @@ fn chk_rt_site(src: ptr, t: ptr, i: u32, prof: u32) -> u32 {
     if chk_tok_is(src, t, i, "domain") {
         return chk_is_dom_block(src, t, i);
     }
-    if chk_tok_is(src, t, i, "quality") || chk_tok_is(src, t, i, "discharge") {
+    if chk_tok_is(src, t, i, "quality") || chk_tok_is(src, t, i, "discharge")
+            || chk_tok_is(src, t, i, "generation") || chk_tok_is(src, t, i, "retire") {
         // 与 `guard` 同一位置判据：后面紧跟一个名字才算（参考实现同一条）。
         if chk_tok_kind(t, i + 1) == 0 {
             return 1;
@@ -1229,7 +1230,7 @@ fn chk_cap_collect(src: ptr, t: ptr, ctab: ptr, nc: ptr, i: u32) -> u32 {
             || chk_tok_is(src, t, j, "reachable") {
         j = j + 4;                                    // LAW ( N )
     } else if chk_tok_is(src, t, j, "danger") || chk_tok_is(src, t, j, "adaptive")
-            || chk_tok_is(src, t, j, "flow") {
+            || chk_tok_is(src, t, j, "flow") || chk_tok_is(src, t, j, "revision") {
         j = j + 1;
     }
     if chk_tok_is(src, t, j, "revocable") {
@@ -1269,6 +1270,7 @@ fn chk_cap_law(src: ptr, t: ptr, name_tok: u32) -> u32 {
             if chk_tok_is(src, t, j, "witnessed") { return 12; }
             if chk_tok_is(src, t, j, "flow") { return 13; }
             if chk_tok_is(src, t, j, "reachable") { return 14; }
+            if chk_tok_is(src, t, j, "revision") { return 15; }
             return 0;
         }
         i = i + 1;
@@ -1323,7 +1325,7 @@ fn chk_cap_end(src: ptr, t: ptr, i: u32) -> u32 {
             || chk_tok_is(src, t, j, "reachable") {
         j = j + 4;                                // LAW ( N )
     } else if chk_tok_is(src, t, j, "danger") || chk_tok_is(src, t, j, "adaptive")
-            || chk_tok_is(src, t, j, "flow") {
+            || chk_tok_is(src, t, j, "flow") || chk_tok_is(src, t, j, "revision") {
         j = j + 1;
     }
     if chk_tok_is(src, t, j, "revocable") {
@@ -1346,13 +1348,13 @@ fn chk_caps_verify(src: ptr, t: ptr, ctab: ptr, n0: u32, exs: ptr, nexs: u32, p:
         // 时律的参数与容量（docs/306 §12、docs/307 §1–§5，参考实现同口径）。
         // adaptive(10) 与 flow(13) 不吃参数 —— 它们的参数位永远是 0。
         let law: u32 = chk_cap_law(src, t, nt);
-        if law >= 2 && law != 10 && law != 13 {
+        if law >= 2 && law != 10 && law != 13 && law != 15 {
             let pr: u32 = chk_cap_param(src, t, nt);
             if pr == 0 || pr >= 16777216 {
                 o = sym_pub(src, t, p, o, E_CAP, nt);
             }
         }
-        if law == 7 || law == 14 {
+        if law == 7 || law == 14 || law == 15 {
             if (lv >> 31) != 0 || (hv >> 31) != 0 {
                 o = sym_pub(src, t, p, o, E_CAP, nt);
             } else {
@@ -1568,6 +1570,29 @@ fn chk_cap_law_is(src: ptr, t: ptr, ctab: ptr, nc: u32, i: u32, want: u32,
     return o;
 }
 
+/// `generation` / `retire` 只认**顶层**能力：块级域不参与（`docs/320` S1 的
+/// `revision` 只允许顶层 `capability`）。不经过 `chk_dom_has`，否则同名块域会把
+/// 顶层规则绕过去。
+fn chk_cap_top_law_is(src: ptr, t: ptr, ctab: ptr, nc: u32, i: u32, want: u32,
+                      p: ptr, o: u32) -> u32 {
+    let nt: u32 = i + 1;
+    let k: u32 = 0;
+    let found: u32 = 0;
+    while k < nc {
+        if same(src, t, load32(ctab, k * 16), nt) {
+            found = 1;
+            if chk_cap_law(src, t, nt) != want {
+                o = sym_pub(src, t, p, o, E_CAP, nt);
+            }
+        }
+        k = k + 1;
+    }
+    if found == 0 {
+        o = sym_pub(src, t, p, o, E_CAP, nt);
+    }
+    return o;
+}
+
 /// `domain NAME : ...{` 的一个头，名字是否等于 nt（`docs/314`）。
 fn chk_dom_name_at(src: ptr, t: ptr, hdr: u32, nt: u32) -> u32 {
     let k: u32 = hdr + 1;
@@ -1679,7 +1704,7 @@ fn chk_guard(src: ptr, t: ptr, ctab: ptr, nc: u32, i: u32, p: ptr, o: u32) -> u3
             // 语境类三支必须带第二实参，其余不许带（与参考实现同一条规则）。
             let hasaux: u32 = chk_guard_has_aux(src, t, i);
             let needaux: u32 = 0;
-            if law == 11 || law == 12 || law == 13 {
+            if law == 11 || law == 12 || law == 13 || law == 15 {
                 needaux = 1;
             }
             if needaux != hasaux {
@@ -2181,6 +2206,13 @@ fn chk_tex(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
     let hi: u32 = chk_lhhi(lh);
     if lo >= hi {
         return 0;
+    }
+    // ---- `generation CAP(EXPR)`（`docs/320` S1）：返回 u64，索引照常查。
+    if chk_tok_is(src, t, lo, "generation") && hi > lo + 4
+            && chk_tok_kind(t, lo + 1) == 0 && chk_tok_is(src, t, lo + 2, "(")
+            && chk_tok_is(src, t, hi - 1, ")") {
+        chk_tex(src, t, syms, n, env, envc, chk_lh(lo + 3, hi - 1), tyt, p, oc);
+        return (1 << TY_KIND_SHIFT) + 4;          // u64
     }
     // ---- `expr ?` (M9 错误传播): 参考实现只在 `let x: T = <Result 实例>?;` 里解糖,
     // 其余位置一律 E010。这里**只在能确定"不是 Result"时**报, 免得假阳性:
@@ -4924,6 +4956,18 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             } else {
                 j = e;
             }
+        } else if chk_tok_is(src, t, j, "retire") {
+            // `retire CAP ( EXPR ) ;`（`docs/320` S1）—— 括号里的才是表达式。
+            let semi: u32 = chk_find_at(src, t, j, e, ";");
+            if chk_tok_is(src, t, j + 2, "(") {
+                chk_tex(src, t, syms, n, env, c,
+                        ((j + 3) as u64) * 4294967296 + (semi as u64), tyt, p, oc);
+            }
+            if semi <= e {
+                j = semi + 1;
+            } else {
+                j = e;
+            }
         } else if load32(oc, 8) != 0 && chk_tok_kind(t, j) == 0
                 && (chk_tok_is(src, t, j, "break") || chk_tok_is(src, t, j, "continue")) {
             // Tur 2 的循环控制（`docs/296` §2.5）—— 语句本身没有可查的东西；"在不在循环里"
@@ -5975,6 +6019,12 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
             if chk_tok_is(src, t, i, "discharge") {
                 o = chk_cap_law_is(src, t, ctab, load32(nc, 0), i, 14, out, o);
             }
+            if chk_tok_is(src, t, i, "generation") {
+                o = chk_cap_top_law_is(src, t, ctab, load32(nc, 0), i, 15, out, o);
+            }
+            if chk_tok_is(src, t, i, "retire") {
+                o = chk_cap_top_law_is(src, t, ctab, load32(nc, 0), i, 15, out, o);
+            }
             // `if let E::V(x) = e` 里的 `let` 是**模式**不是带类型的绑定 (它的 `Result`
             // 后面跟的是 `::` 而不是 `:`) —— 不排掉就会把 `::` 里的第二个 `:` 当类型报 E-TYPE。
             if chk_tok_is(src, t, i, "let") && !(i > 0 && chk_tok_is(src, t, i - 1, "if")) {
@@ -5996,6 +6046,8 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                     && !chk_tok_is(src, t, i - 1, ".")
                     && !chk_tok_is(src, t, i - 1, "guard")
                     && !chk_tok_is(src, t, i - 1, "discharge")
+                    && !chk_tok_is(src, t, i - 1, "generation")
+                    && !chk_tok_is(src, t, i - 1, "retire")
                     && !(load32(oc, 8) == 2 && chk_tok_is(src, t, i - 1, "lgc")) {
                 let nl: u32 = tok_len(t, i);
                 if nl > 0 {

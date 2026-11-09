@@ -1794,6 +1794,7 @@ A law refines when a guard passes. The kinds are:
 | witnessed | `witnessed(T)` | the shape holds and ticket `aux` has been used fewer than `T` times; a pass increments it |
 | flow | `flow` | the packed edge `(i << 16 | aux)` is in the shape; `i` is the source, `aux` the target |
 | reachable | `reachable(K)` | the position is free; a pass reserves it for `K` ticks; `discharge cap(i);` clears it |
+| revision | `revision` | the slot's **object generation** equals `aux`; `guard cap(i, aux);` |
 | consumed | `consumed(N)` | each position passes at most `N` times |
 | danger | `danger` | the index is **outside** the shape (a literal inside is a compile-time error) |
 
@@ -1804,10 +1805,14 @@ declaration flag of §21.2.
 
 * `epoch`, `far`, `sliding`, `decaying`, `growing`, `consumed`, `cyclic`, `generational`,
   `subject`, `witnessed`, and `reachable` take one integer parameter.
-* `subject`, `witnessed`, and `flow` require a **second guard argument**:
+* `subject`, `witnessed`, `flow`, and `revision` require a **second guard argument**:
   `guard cap(i, aux);`. Every other law MUST reject a second argument.
-* `consumed`, `adaptive`, `witnessed`, and `reachable` keep **per-position state**. Their
-  domain MUST be bounded and at most 64 positions wide.
+* `consumed`, `adaptive`, `witnessed`, `reachable`, and `revision` keep **per-position
+  state**. Their domain MUST be bounded and at most 64 positions wide.
+* `revision` is the **object generation** (`docs/320`): `generation cap(i)` reads it,
+  `retire cap(i);` increments it, and `guard cap(i, g)` passes only when the slot's
+  current generation is `g`. In this edition it is available on top-level
+  `capability` declarations only.
 * `cyclic` requires a bounded shape and `P > hi`.
 * `generational`, `adaptive`, and `flow` require a bounded shape.
 * `quality` applies only to `adaptive`; `discharge` applies only to `reachable`.
@@ -1819,8 +1824,13 @@ declaration flag of §21.2.
 
 ```
 guard CAP(EXPR);
-guard CAP(EXPR, AUX);   // subject / witnessed / flow only
+guard CAP(EXPR, AUX);   // subject / witnessed / flow / revision only
 ```
+
+For a `revision` domain the second argument is the **expected object generation**
+(`docs/320`). `generation CAP(EXPR)` is an expression of type `u64` that reads the
+slot's current generation; `retire CAP(EXPR);` increments it in O(1). A guard with a
+stale generation traps, and only a passing guard increments the audit entry.
 
 An implementation MUST:
 
@@ -1896,7 +1906,9 @@ is a tick unless `choose domain_clock_explicit` is set.
 * `guard` constrains the **index**; it is not authorisation. It does not ask "does the
   current principal hold this capability"; that binding is on the kernel side.
 * `revocable` is a flag in the declaration and the domain table; revocation is not
-  implemented in the language.
+  implemented in the language. `revision` is different: its generation table and
+  `generation` / `retire` are implemented (`docs/320`), but only for bounded top-level
+  capabilities, and only inside the guarded subset.
 * `subject`'s subject number and `witnessed`'s ticket number are **caller-supplied
   arguments**, not unforgeable tokens.
 * `flow`'s shape is an interval over packed edges, not an arbitrary edge set.

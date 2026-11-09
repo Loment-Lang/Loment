@@ -5299,14 +5299,15 @@ def test_refusals_do_not_leak_milestone_ids_or_mangled_names():
     assert "Box<[u32]>" in msg, msg[:200]
     for leak in ("native M", "M23", "Box_["):
         assert leak not in msg, f"用户可见的拒绝话里漏了内部记号 {leak!r}: {msg[:200]}"
-    # ② 原生 IR 那一层：人写的类型 + 真正的卡点
+    # ② 原生 IR 那一层：**同一条**名字规则（`docs/299` 之后切片字段已经能落，
+    #    所以第一个卡点从"字段只支持标量"前移到了"实例名没有规则"）。
     try:
         lomentc.emit_llvm(mod, ROOT, deps)
     except lomc.LomError as e:
         msg2 = e.msg
     else:
         raise AssertionError("IR 后端居然发出来了？这一格要重判")
-    assert "Box<u32>" in msg2 and "只支持标量" in msg2, msg2[:200]
+    assert "Box<[u32]>" in msg2, msg2[:200]
     for leak in ("native M", "M23", "Box_["):
         assert leak not in msg2, f"IR 侧拒绝话里漏了内部记号 {leak!r}: {msg2[:200]}"
     print("      两条拒绝话：写出来的类型 + 真正的卡点，无里程碑号 / mangled 名")
@@ -6841,6 +6842,101 @@ def test_lifetime_no_rejects_borrow_types():
         assert "&" in str(e), e
     else:
         raise AssertionError("`lifetime_no` 下 `&u32` 居然被收下了")
+
+
+@test
+def test_lifetime_stored_borrow_excludes_later_inline_borrows():
+    """存下来的借用活到函数末尾：之后的**行内**借用也算重叠（E007）。
+
+    之前只判“两次存下来的借用”，`let r = &mut a; g(&a)` 一条都不报 —— 那是漏判。
+    字段路径让不相交的字段免于误报。
+    """
+    head = ("module m\nfn g(p: &u32) -> u32 { return *p; }\n"
+            "fn gm(p: &mut u32) -> u32 { return *p; }\n")
+    cases = {
+        "stored mut + inline shared":
+            head + "fn f() -> u32 { let a: u32 = 1; let r: &mut u32 = &mut a;"
+                   " return g(&a); }\n",
+        "stored mut + inline mut":
+            head + "fn f() -> u32 { let a: u32 = 1; let r: &mut u32 = &mut a;"
+                   " return gm(&mut a); }\n",
+        "stored shared + inline mut":
+            head + "fn f() -> u32 { let a: u32 = 1; let r: &u32 = &a;"
+                   " return gm(&mut a); }\n",
+    }
+    for name, src in cases.items():
+        e = errs(src)
+        assert any("借用" in x and "两次" in x or "既被可变借用又被借用" in x for x in e), (name, e)
+    # 两把共享借用可以共存
+    ok = head + "fn f() -> u32 { let a: u32 = 1; let r: &u32 = &a; return g(&a); }\n"
+    assert errs(ok) == [], errs(ok)
+    # 不相交的字段各借各的（Rust 允许）
+    disjoint = ("module m\nstruct V { x: u32, y: u32 }\n"
+                "fn f() -> u32 { let v: V = V { x: 1, y: 2 };"
+                " let a: &mut u32 = &mut v.x; let b: &mut u32 = &mut v.y; return 1; }\n")
+    assert errs(disjoint) == [], errs(disjoint)
+    # 但根与字段是重叠的
+    overlap = ("module m\nstruct V { x: u32, y: u32 }\n"
+               "fn f() -> u32 { let v: V = V { x: 1, y: 2 };"
+               " let a: &mut V = &mut v; let b: &mut u32 = &mut v.x; return 1; }\n")
+    assert any("两次" in x or "既被可变借用又被借用" in x for x in errs(overlap)), errs(overlap)
+    # 借用**存进字段**也算存下来（`R { p: &mut a }` 活到绑定结束）
+    stored_field = ("module m\nstruct R { p: &mut u32 }\n"
+                    "fn f() -> u32 { let a: u32 = 1; let r: R = R { p: &mut a };"
+                    " return g(&a); }\n")
+    assert any("既被可变借用又被借用" in x for x in errs(stored_field)), errs(stored_field)
+
+
+@test
+def test_lifetime_slice_field_is_a_zero_copy_view():
+    """`struct C { data: &[u32] }` 要能落成 `{ { ptr, i64 }, i32 }`，字段能取长度/取下标。"""
+    src = ("module m\n"
+           "struct C { data: &[u32], n: u32 }\n"
+           "fn mk(a: &[u32]) -> C { let c: C = C { data: a, n: slice_len(a) }; return c; }\n"
+           "fn use(c: &C) -> u32 { return slice_len(c.data) + c.data[0]; }\n"
+           "fn f() -> u32 { let a: [u32; 2] = [1, 2]; let c: C = mk(&a); return use(&c); }\n")
+    assert errs(src) == [], errs(src)
+    ir = lomentc.emit_llvm(parse(src), ROOT, [])
+    assert "define { { ptr, i64 }, i32 } @mk" in ir, ir[:500]
+    assert "extractvalue { ptr, i64 }" in ir, "字段里的切片没有按 {ptr,i64} 落"
+
+
+@test
+def test_lifetime_generic_borrow_instantiates():
+    """`Box<&u32>` 要单态化成一个**标识符**实例名，并落成 `{ ptr }`。"""
+    src = ("module m\nstruct Box<T> { v: T }\n"
+           "fn mk(p: &u32) -> Box<&u32> { let b: Box<&u32> = Box { v: p }; return b; }\n"
+           "fn get(b: &Box<&u32>) -> u32 { return *b.v; }\n"
+           "fn f() -> u32 { let a: u32 = 7; let b: Box<&u32> = mk(&a); return get(&b); }\n")
+    assert errs(src) == [], errs(src)
+    ir = lomentc.emit_llvm(parse(src), ROOT, [])
+    assert "define { ptr } @mk(ptr %p)" in ir, ir[:400]
+    assert "define i32 @get(ptr %b)" in ir, ir[:400]
+
+
+@test
+def test_lifetime_index_through_reference():
+    """`p: &[u32; 2]` 的 `p[0]` 读写都要解一层借用。"""
+    read = "module m\nfn f(p: &[u32; 2]) -> u32 { return p[0]; }\n"
+    assert errs(read) == [], errs(read)
+    assert "getelementptr inbounds [2 x i32]" in lomentc.emit_llvm(parse(read), ROOT, [])
+    write = ("module m\nfn f(p: &mut [u32; 2]) -> u32 { p[1] = 7; return p[1]; }\n")
+    assert errs(write) == [], errs(write)
+    assert "store i32 7" in lomentc.emit_llvm(parse(write), ROOT, [])
+
+
+@test
+def test_lifetime_verdicts_are_the_same_on_every_gc_tier():
+    """GC 三档不改变借用的判决（`docs/299` §3.5 / #1247）。"""
+    bad = ("module m\nchoose runtime\nchoose {gc}\n"
+           "fn g(p: &u32) -> u32 {{ return *p; }}\n"
+           "fn f() -> u32 {{ let a: u32 = 1; let r: &mut u32 = &mut a; return g(&a); }}\n")
+    good = ("module m\nchoose runtime\nchoose {gc}\n"
+            "fn id(p: &u32) -> &u32 {{ return p; }}\n")
+    for gc in ("gc_manual", "gc_auto", "gc_auto_alpha"):
+        e = errs(bad.format(gc=gc))
+        assert any("借用" in x for x in e), (gc, e)
+        assert errs(good.format(gc=gc)) == [], (gc, errs(good.format(gc=gc)))
 
 
 def main() -> int:

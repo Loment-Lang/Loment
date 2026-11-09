@@ -1,6 +1,6 @@
 # 325 — 包清单的逐维前置条件 + IR 编译缓存
 
-`docs/323` 把运行期需求从 248 个模块上移到 `pkg.lomp`，但只移了一维。这一份把**所有
+`docs/324` 把运行期需求从 248 个模块上移到 `pkg.lomp`，但只移了一维。这一份把**所有
 核心维**和**构造级前置条件**都搬进清单，并给参考链路加一层按内容哈希寻址的 IR 缓存。
 
 ## 1. `pkg.lomp` 的两个函数
@@ -57,7 +57,7 @@ pub fn requires() -> str { return "alloc,float"; }
 | system | std runtime | alloc,str_eq |
 | world | std runtime | alloc,float |
 
-（"为什么都还是 runtime"的诚实账在 `docs/323` §4：自检里的 `alloc` 是今天唯一的墙。）
+（"为什么都还是 runtime"的诚实账在 `docs/324` §4：自检里的 `alloc` 是今天唯一的墙。）
 
 ## 2. IR 缓存
 
@@ -81,6 +81,11 @@ pub fn requires() -> str { return "alloc,float"; }
 能犯的最坏的错。
 
 **关掉**：`LOMENT_CACHE=off`；`python tools/loment_cache.py --stats|--clear` 看账与清理。
+
+**代价**：缓存代码进了自举种子，种子从 5.93 MB 长到 6.10 MB，把
+`loment_seed_test` 的"种子 + 256 KiB 余量要装进 lomelf 的输入缓冲"顶穿了 600 多字节。
+因此 `loment/tools/lomelf.lomt` 的输入/代码/输出三块从 6 MiB 抬到 **6.5 MiB**，其后各块
+整体后移 512 KiB，表区尺寸不变（`docs/192` / `docs/200` 的同一条式子）。
 
 **自举侧**（`loment/selfhost/driver.lomt`）用同一套键的变体：`check` 通过之后、
 codegen 之前算键 = 纪元串 + 版次 + **编译器自身**（`/proc/self/exe`）的 128 位 FNV +

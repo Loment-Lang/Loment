@@ -1599,7 +1599,7 @@ def test_package_carries_the_whole_store():
 
 @test
 def test_every_package_manifest_matches_its_code():
-    """`pkg.lomp` 的 `choose()` / `requires()` 必须与包里的代码**逐条**对得上（docs/324）。
+    """`pkg.lomp` 的 `choose()` / `requires()` 必须与包里的代码**逐条**对得上（docs/325）。
 
     清单是包级前置条件：`choose()` 说"这个包依赖哪些核心档"，`requires()` 说"真代码
     用了哪些构造"。两张表都会漂 —— 所以这条判据把**代码**当唯一真源，清单多写少写

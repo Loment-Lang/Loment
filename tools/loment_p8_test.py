@@ -2562,7 +2562,7 @@ def test_m83_selfhosted_driver_compiles_itself():
 
 @test
 def test_m98_selfhost_ir_cache():
-    """自举驱动的 IR 缓存（`docs/324`）：命中跳过 codegen，键按内容失效。
+    """自举驱动的 IR 缓存（`docs/325`）：命中跳过 codegen，键按内容失效。
 
     判据不靠计时（计时在 CI 上不稳），靠**哨兵**：第一次跑完把缓存文件改写成
     `; CACHED`，再跑一次 —— 如果走的是命中路径，stdout 就必须**正好**是那个哨兵。

@@ -78,7 +78,7 @@ const PROF_OFF: u32 = 24164;     // 版次 (docs/296/306): 0 = 2026.1, 1 = 2026.
 const PROF_DEFAULT: u32 = 2;     // 缺省 = 最新版次 (potato_from.DEFAULT_EDITION)
 const DECLK_OFF: u32 = 24168;    // 根单元的拼法 (0 = 没写; 见 strip_grammar_decl)
 const FPROF_OFF: u32 = 24172;    // 这份文件自己声明的版次 (0xFFFFFFFF = 没写)
-//: 根单元/`addin` 写没写运行期那一维（docs/323）。位：1 = 写了 `runtime`，
+//: 根单元/`addin` 写没写运行期那一维（docs/324）。位：1 = 写了 `runtime`，
 //: 2 = 写了 `no_runtime`，4 = 同包 `pkg.lomp` 的 `runtime()` 说 `runtime`。
 //: 两个都没写（低两位为 0）而包清单要运行期时，装载器在合并单元末尾补一行
 //: `choose runtime` —— 与参考实现的 `mod.chooses` 注入同义。
@@ -86,7 +86,7 @@ const RTDECL_OFF: u32 = 24176;
 //: 同包 `pkg.lomp` 的 `choose()` 词表（空格分隔的 ASCII）—— `cfg_pkg_choose` 写它。
 const PKGCH_OFF: u32 = 24192;
 const PKGCH_CAP: u32 = 256;
-//: 编译缓存（`docs/324`）的暂存区。键 = 单元全文 + 版次 + **编译器自身**的哈希；
+//: 编译缓存（`docs/325`）的暂存区。键 = 单元全文 + 版次 + **编译器自身**的哈希；
 //: 命中就跳过 codegen、把缓存里的 IR 字节流到 stdout。
 // 字符串常量不存在（`const` 只吃整数）—— 用两个小函数。
 fn cache_epoch() -> str {
@@ -1821,7 +1821,7 @@ fn cfg_pkg_choose(dirp: ptr, dl: u32, scr: ptr, buf: ptr, toks: ptr) -> u32 {
         return 0;
     }
     let n: u32 = lex(buf, raw as u32, toks);
-    // 先找 `choose(`（docs/324），没有再退回旧的 `runtime()`。
+    // 先找 `choose(`（docs/325），没有再退回旧的 `runtime()`。
     let found: u32 = 4294967295;
     let i: u32 = 0;
     while i < n && found == 4294967295 {
@@ -1864,7 +1864,7 @@ fn cfg_pkg_choose(dirp: ptr, dl: u32, scr: ptr, buf: ptr, toks: ptr) -> u32 {
     }
     let dst: ptr = ptr_add(scr, PKGCH_OFF);
     let m: u32 = sl - 2;
-    // 清单太长 ⇒ **放弃整份清单**，不截断注入：截断可能正好丢掉一维（`docs/324`）。
+    // 清单太长 ⇒ **放弃整份清单**，不截断注入：截断可能正好丢掉一维（`docs/325`）。
     if m >= PKGCH_CAP {
         return 0;
     }
@@ -2239,7 +2239,7 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
         die(1);
     }
     while load32(toks, i * 20) != 4 {
-        // 记下根/`addin` 单元写没写运行期那一维（docs/323）。依赖写的会被下面抹掉，
+        // 记下根/`addin` 单元写没写运行期那一维（docs/324）。依赖写的会被下面抹掉，
         // 而抹掉之后检查器就看不见它了 —— 但它**是**一个需求，所以要在这里记一笔。
         if (depth == 0 || from_addin == 1) && tok_is(slot, toks, i, "choose") {
             let _ws: u32 = load32(toks, (i + 1) * 20 + 4);
@@ -2423,7 +2423,7 @@ fn append_prelude(dst: ptr, off: u64) -> u64 {
     return off + str_len(s) as u64;
 }
 
-// ---------------------------------------------------------------- 编译缓存（`docs/324`）
+// ---------------------------------------------------------------- 编译缓存（`docs/325`）
 
 /// 在 `/proc/self/environ` 里找一个环境变量，值写进 dst（NUL 结尾）；返回长度。
 fn cache_env(scr: ptr, buf: ptr, key: str, dst: ptr, cap: u32) -> u32 {
@@ -2476,7 +2476,7 @@ fn cache_env(scr: ptr, buf: ptr, key: str, dst: ptr, cap: u32) -> u32 {
 }
 
 /// FNV-1a 64 位一条车道。缓存键不需要抗碰撞密码学，但需要**足够宽**：两条车道
-/// （不同初值）给 128 位 —— 几千条缓存里撞上的概率可以忽略（`docs/324`）。
+/// （不同初值）给 128 位 —— 几千条缓存里撞上的概率可以忽略（`docs/325`）。
 fn cache_fnv(h0: u64, p: ptr, n: u32) -> u64 {
     let h: u64 = h0;
     let i: u32 = 0;
@@ -2881,7 +2881,7 @@ fn _start() -> u32 {
     // 入口文件所在目录), 再是工具链旁边那份; 都没配就用默认 `.lomt`。这时 unit/toks
     // 还空着, 借它们当读配置的暂存 —— load_file 紧接着就会盖掉它们。
     store8(scr, EXT_OFF, 0 as u8);
-    // 根单元所在包的 `pkg.lomp` 要运行期吗（docs/323）？这一步借 unit/toks 当暂存 ——
+    // 根单元所在包的 `pkg.lomp` 要运行期吗（docs/324）？这一步借 unit/toks 当暂存 ——
     // `load_file` 紧接着就会盖掉它们，与上面读 `loment.conf` 同一个时点。
     store32(scr, RTDECL_OFF, 0);
     let _rq: u32 = cfg_pkg_choose(ptr_add(scr, PROJ_OFF),
@@ -2914,7 +2914,7 @@ fn _start() -> u32 {
         wdiag_file(dfd, scr, ap, an, 31, str_ptr(dm2), str_len(dm2));
         return fail(dm2);
     }
-    // **包清单的前置条件**（docs/324）：清单 `choose()` 里写了、根与 `addin` 单元
+    // **包清单的前置条件**（docs/325）：清单 `choose()` 里写了、根与 `addin` 单元
     // 都没写的那一维，在合并单元末尾补一行 `choose <词>` —— 与参考实现逐维注入
     // `mod.chooses` 同义。**显式写的优先**：那位已经置位就跳过。
     // 逐字节写：不写带换行的字符串字面量 —— 两个词法器对多行字面量的解码
@@ -3282,7 +3282,7 @@ fn _start() -> u32 {
         let _wp: u32 = write_checked(1, ir, pn as u64, "the object");
         return die(0);
     }
-    // ---- 编译缓存（`docs/324`）：check 已经过了，命中就跳过 codegen。
+    // ---- 编译缓存（`docs/325`）：check 已经过了，命中就跳过 codegen。
     // 键 = 纪元 + 版次 + **编译器自身**摘要 + 合并后的单元全文 —— 任何一项变了就重算。
     let cache_state: u32 = 0;
     let cbv: u64 = 0;

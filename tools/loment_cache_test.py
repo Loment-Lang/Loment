@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""loment_cache_test.py — IR 缓存的行为判据（docs/324）。
+"""loment_cache_test.py — IR 缓存的行为判据（docs/325）。
 
 四条，各钉一个会**静默错编**的方向：
 

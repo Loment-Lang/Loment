@@ -2656,10 +2656,10 @@ class Module:
     #: 于是函数体跨度（`f.tok_at/tok_end`）得能重新对着 token 流核。**只在需要时读**。
     toks: list = field(default_factory=list)
     #: 运行期需求来自包清单（`pkg.lomp`）时，包名写在这里；
-    #: 空串 = 需求来自本模块自己的 `choose runtime`（`docs/324`）。
+    #: 空串 = 需求来自本模块自己的 `choose runtime`（`docs/325`）。
     rt_from_pkg: str = ""
     #: 同包清单写的 `requires()`（逗号分隔的构造名）。判据拿它与 `package_features`
-    #: 比 —— 清单漏写或多写都当场红（`docs/324`）。
+    #: 比 —— 清单漏写或多写都当场红（`docs/325`）。
     pkg_requires: str = ""
     #: **会把运行期拖进产物的构造**（`docs/217`）：`[(点名, 行), …]`，按出现序。
     #: 由**解析器**在 `parse()` 末尾填（与 `Func.deref` 同一个位置、同一个理由：规则定义
@@ -6426,7 +6426,7 @@ def load_unit(path: Path, root: Path, lspe_level: int = 3,
 #: 两边的代价不对称，所以往保守那边偏。`tools/loment_runtime_test.py` 在全仓语料上核
 #: "被拒 ⟺ 产物真带运行期"，把这笔保守账钉成可证伪的。
 _RUNTIME_SITES: dict[str, str] = {
-    # `/` 与 `%` **不在表里**（docs/323）：整数除法发的是裸 `udiv`/`sdiv`，
+    # `/` 与 `%` **不在表里**（docs/324）：整数除法发的是裸 `udiv`/`sdiv`，
     # 产物里一个 `@__loment_*` 都不多 —— 它不拖运行期，只是早先被保守地算了进来。
     "alloc": "`alloc`",
     "free": "`free`",
@@ -6507,7 +6507,7 @@ def _manifest_fields(text: str) -> tuple[str, list[str], str]:
 
     清单是**一份 Loment 源码**（`docs/168` §3.2），所以用词法器读，不引第二种格式。
     `choose()` 返回空格分隔的核心词（`"std runtime gc_manual"`），`requires()` 返回
-    逗号分隔的构造名（`"alloc,free"`）。两者都是**包级前置条件**（`docs/324`）。
+    逗号分隔的构造名（`"alloc,free"`）。两者都是**包级前置条件**（`docs/325`）。
     词表为空时退回旧的 `runtime()`（一个词）—— 老清单照样读得懂。
     """
     toks = lomc.lex(text)
@@ -6557,7 +6557,7 @@ def _pkg_manifest(src: Path | None) -> tuple[str, list[str], str]:
         return "", [], ""
 
 
-#: 包里"用了哪些构造"的词汇表（`docs/324` 的前置条件）。键 = 触发它的 token 写法，
+#: 包里"用了哪些构造"的词汇表（`docs/325` 的前置条件）。键 = 触发它的 token 写法，
 #: 值 = 清单里写的名字。检测与 `_RUNTIME_SITES` 同一条位置判据（`fn` 后面的名字不算），
 #: 另加三种结构性的：`syscall4/6/7`、`extern fn`、`f64`。
 _PKG_FEATURES: dict[str, str] = {
@@ -7204,7 +7204,7 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
             # 当依赖又不许写（`loment/lib/proc.lomt` 实测就卡在这儿）。新规矩：依赖的声明
             # **是需求**，根单元的取值**必须满足它**（一致）；不一致才报，报的时候两边都点名。
             #
-            # **读 `chooses` 而不是 `choose_lines`**（`docs/323`）：包清单（`pkg.lomp`
+            # **读 `chooses` 而不是 `choose_lines`**（`docs/324`）：包清单（`pkg.lomp`
             # 的 `runtime()`）注入的需求没有源码行 —— 它照样是需求，漏读它会让
             # `no_runtime` 的根静默用上要运行期的包。
             _seen: set[str] = set()
@@ -7212,7 +7212,7 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                 if dim0 in _seen:
                     continue        # 同一维写两次是**依赖自己**的错，不在这儿重复报
                 _seen.add(dim0)
-                # 同一个包只报一次（`docs/323`）：一张 `use` 图里 calendar 会带进 mem，
+                # 同一个包只报一次（`docs/324`）：一张 `use` 图里 calendar 会带进 mem，
                 # 而两条说的是同一件事 —— 包级需求报包级一次就够。
                 if d.rt_from_pkg and dim0 == "runtime":
                     if d.rt_from_pkg in _pkg_reported:
@@ -13345,7 +13345,7 @@ def _uses_clock(mods: list) -> bool:
 def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
               coverage: bool = False, debug: bool = False) -> str:
     """原生后端: LLVM IR。M0 标量 + M23–M26 聚合 + M1/M2 str + M3/M4 切片。"""
-    # **IR 缓存**（`docs/324`）：键覆盖根 + 全部依赖的**字节**、生效维、版次、发射开关
+    # **IR 缓存**（`docs/325`）：键覆盖根 + 全部依赖的**字节**、生效维、版次、发射开关
     # 与编译器自身摘要。任何一个变了就重算 —— 缓存只省时间，不改变输出字节。
     import loment_cache                      # noqa: PLC0415
     _ck = loment_cache.key_for(mod, deps, flags={
@@ -13881,7 +13881,7 @@ def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3,
         # 2026.3 继承（版次累积）。
         _desugar_foreach(mod)
     mod.own_switches = own      # 本模块**自己**写的 —— 只有"库不许 choose"用它
-    # **包清单的前置条件**（`docs/324`）：模块自己没写某一维时，取同包 `pkg.lomp`
+    # **包清单的前置条件**（`docs/325`）：模块自己没写某一维时，取同包 `pkg.lomp`
     # 的 `choose()`。它同时是**根单元的默认档**（店里的模块当根编时照旧编得过）与
     # **依赖的需求**（根不满足就报 —— 由 `check()` 那条既有规则发）。
     # 逐维注入：模块显式写的那一维优先，`choose_lines` / `own_switches` 都不动它，

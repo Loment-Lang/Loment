@@ -4310,7 +4310,7 @@ def test_runtime_is_forced_in_and_absent_by_default():
 
 @test
 def test_pkg_manifest_carries_the_runtime_requirement():
-    """包清单（`pkg.lomp` 的 `runtime()`）是**包级**的运行期需求（`docs/323`）。
+    """包清单（`pkg.lomp` 的 `runtime()`）是**包级**的运行期需求（`docs/324`）。
 
     四件事一起钉，少一件就测不到这项机制：
 

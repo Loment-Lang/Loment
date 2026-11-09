@@ -285,7 +285,7 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "lspe_test", "potato_
                  # 八个领域包的行为判据 (docs/317): math/science/engineering/world/
                  # dev/lowlevel/system/baremetal, 对照物是 Python 与已知常量。
                  "loment_domains_test",
-                 # IR 缓存 (docs/324): 命中/失效/关闭/坏条目四条 —— 缓存错编是最坏的错。
+                 # IR 缓存 (docs/325): 命中/失效/关闭/坏条目四条 —— 缓存错编是最坏的错。
                  "loment_cache_test",
                  # LibL 的 libc 面 (docs/232): 同一组调用与**真 glibc** 逐字节对跑。
                  # 与 `loment_std_test` 的分界是**对照物**: 那边是 Python, 这边是 libc 自己。

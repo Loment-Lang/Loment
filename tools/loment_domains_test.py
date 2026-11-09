@@ -527,6 +527,153 @@ def test_lowlevel_system_and_baremetal_packages():
     print(f"      lowlevel/system/baremetal: {len(want.splitlines())} 项逐字节一致")
 
 
+PROBE_DEV = _PROBE_HEAD + r'''
+use duration
+use target
+use shellwords
+use dotenv
+use template
+use commit
+use changelog
+use jsonptr
+use gitignore
+use patch
+
+fn _start() {
+    let out: ptr = alloc(256);
+    let ok: ptr = alloc(4);
+
+    // duration
+    say("dur=", du_parse("1h30m", ok) as u64);
+    let dn: u32 = du_format(5400000000000 as i64, out, 256);
+    say_cstr("dufmt=", out, dn);
+
+    // target
+    let tt: ptr = alloc(32);
+    let _tr: u32 = tgt_parse("x86_64-unknown-linux-gnu", tt);
+    say("tos=", mem_load32(tt, 20) as u64);
+    say("tenv=", mem_load32(tt, 28) as u64);
+
+    // shellwords
+    let swb: ptr = alloc(64);
+    let sws: ptr = alloc(32);
+    say("swc=", sw_split("a 'b c'", swb, 64, sws, 4) as u64);
+    say("sw2=", mem_load32(sws, 12) as u64);
+    let qn: u32 = sw_quote("a b", out, 256);
+    say_cstr("swq=", out, qn);
+
+    // dotenv
+    let de: str = "X='a b'\nY=2\n";
+    let dv: u32 = de_get(str_ptr(de), str_len(de), "X", out, 256);
+    say_cstr("de=", out, dv);
+
+    // template
+    let keys: ptr = alloc(8);
+    let vals: ptr = alloc(8);
+    let kb: ptr = alloc(8);
+    let vb: ptr = alloc(8);
+    store8(kb, 0, 110 as u8); store8(kb, 1, 0 as u8); // "n"
+    store8(vb, 0, 119 as u8); store8(vb, 1, 111 as u8); store8(vb, 2, 114 as u8);
+    store8(vb, 3, 108 as u8); store8(vb, 4, 100 as u8); store8(vb, 5, 0 as u8);
+    mem_store64(keys, 0, kb as u64);
+    mem_store64(vals, 0, vb as u64);
+    let tp: str = "hi {{n}}";
+    let tn: u32 = tpl_render(tp, keys, vals, 1, out, 256);
+    say_cstr("tpl=", out, tn);
+
+    // commit
+    let co: ptr = alloc(48);
+    let cs: str = "feat(x)!: y";
+    let _cr: u32 = cm_parse(cs, co);
+    say("cm_type=", mem_load32(co, CM_TYPE_LEN) as u64);
+    say("cm_scope=", mem_load32(co, CM_SCOPE_LEN) as u64);
+    say("cm_bang=", mem_load32(co, CM_BANG) as u64);
+    say("cm_desc=", mem_load32(co, CM_DESC_LEN) as u64);
+
+    // changelog
+    let m1: ptr = alloc(16);
+    let m2: ptr = alloc(16);
+    let msgs: ptr = alloc(16);
+    let s1: str = "feat: add";
+    let s2: str = "fix: bug";
+    let l1: u32 = str_len(s1);
+    let l2: u32 = str_len(s2);
+    mem_copy(m1, 0, str_ptr(s1), 0, l1); store8(m1, l1, 0 as u8);
+    mem_copy(m2, 0, str_ptr(s2), 0, l2); store8(m2, l2, 0 as u8);
+    mem_store64(msgs, 0, m1 as u64);
+    mem_store64(msgs, 8, m2 as u64);
+    let cln: u32 = cl_generate(msgs, 2, out, 256);
+    say_cstr("cl=", out, cln);
+
+    // jsonptr
+    let doc: str = "{\"a\":[10,20]}";
+    let jv: u64 = jp_get_u64(str_ptr(doc), str_len(doc), "/a/1", ok);
+    say("jp=", jv);
+
+    // gitignore
+    let p1: ptr = alloc(8);
+    let p2: ptr = alloc(16);
+    let pats: ptr = alloc(16);
+    store8(p1, 0, 42 as u8); store8(p1, 1, 46 as u8); store8(p1, 2, 111 as u8); store8(p1, 3, 0 as u8); // *.o
+    store8(p2, 0, 33 as u8); store8(p2, 1, 107 as u8); store8(p2, 2, 101 as u8); store8(p2, 3, 101 as u8);
+    store8(p2, 4, 112 as u8); store8(p2, 5, 46 as u8); store8(p2, 6, 111 as u8); store8(p2, 7, 0 as u8); // !keep.o
+    mem_store64(pats, 0, p1 as u64);
+    mem_store64(pats, 8, p2 as u64);
+    let g1: str = "x.o";
+    let g2: str = "keep.o";
+    say("gi1=", gi_match(pats, 2, g1, 0) as u64);
+    say("gi2=", gi_match(pats, 2, g2, 0) as u64);
+
+    // patch
+    let src: str = "a\nc\n";
+    let dif: str = "@@ -1,2 +1,3 @@\n a\n+b\n c\n";
+    let pn: u32 = pa_apply(str_ptr(src), str_len(src), str_ptr(dif), str_len(dif), out, 256);
+    say_cstr("pa=", out, pn);
+    syscall4(60, 0, 0, 0);
+}
+'''
+
+
+def _expected_dev() -> str:
+    out = io.StringIO()
+
+    def say(tag, v):
+        out.write(f"{tag}{v}\n")
+
+    say("dur=", 5400000000000)
+    say("dufmt=", "1h30m0s")
+    say("tos=", 5)
+    say("tenv=", 3)
+    say("swc=", 2)
+    say("sw2=", 3)
+    say("swq=", "'a b'")
+    say("de=", "a b")
+    say("tpl=", "hi world")
+    say("cm_type=", 4)
+    say("cm_scope=", 1)
+    say("cm_bang=", 1)
+    say("cm_desc=", 1)
+    say("cl=", "### Features\n\n- add\n\n### Bug Fixes\n\n- bug\n\n")
+    say("jp=", 20)
+    say("gi1=", 1)
+    say("gi2=", 0)
+    say("pa=", "a\nb\nc\n")
+    return out.getvalue()
+
+
+@test
+def test_dev_tooling_packages():
+    """dev 的开发者工具：与 Python 的预期逐字节一致。"""
+    try:
+        got = _run_probe("dev", PROBE_DEV)
+    except _Skip as e:
+        print(f"      SKIP: {e}")
+        return
+    want = _expected_dev()
+    _compare(got, want)
+    print(f"      dev tooling: {len(want.splitlines())} 项与 Python 逐字节一致")
+
+
 def main(argv: list[str] | None = None) -> int:
     import loment_suite
     return loment_suite.run(TESTS, "loment_domains_test", only=(argv[0] if argv else None))

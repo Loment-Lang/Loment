@@ -1,0 +1,277 @@
+// dev/dotenv.lomt — `.env` 文件的读取（KEY=VALUE）
+//
+// 为什么开发者工具需要它: 本地运行、测试夹具、部署脚本几乎都用 `.env`。它的语法
+// 小但坑集中：`export` 前缀、单引号**没有转义**、双引号里 `\n` 要解码、未加引号的
+// 值里 `#` 只有**前面是空白**时才是注释、行尾空白要去掉。
+//
+// 形状: 不解成表、不分配。`de_get` 按行扫描并解码一个键；`de_key_at` 用来枚举。
+// 同一个键出现多次时取**最后一次**（与 dotenv 的常见实现一致）。
+//
+// 不做的: `${VAR}` 插值（那是模板/求值，走 `template`）、多行值、`KEY` 不带 `=`。
+//
+// 命名: 公开 de_*, 内部 de_*。自检 test_dotenv_*。
+
+module dotenv
+choose runtime
+
+use mem
+
+pub const DE_NO: u32 = 4294967295;
+
+fn de_space(c: u32) -> bool {
+    return c == 32 || c == 9;
+}
+
+fn de_alpha(c: u32) -> bool {
+    return (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95;
+}
+
+fn de_alnum(c: u32) -> bool {
+    return de_alpha(c) || (c >= 48 && c <= 57);
+}
+
+fn de_line_end(p: ptr, i0: u32, n: u32) -> u32 {
+    let i: u32 = i0;
+    while i < n && load8(p, i) != 10 {
+        i = i + 1;
+    }
+    return i;
+}
+
+fn de_put(out: ptr, cap: u32, pos: u32, c: u32) -> u32 {
+    if pos < cap {
+        store8(out, pos, c as u8);
+    }
+    return pos + 1;
+}
+
+fn de_key_eq(p: ptr, st: u32, ln: u32, key: str) -> bool {
+    if ln != str_len(key) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < ln {
+        if load8(p, st + i) != str_byte(key, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// 解出 `[vs, ve)` 这段值的**解码后**内容，写进 out，返回长度。
+fn de_decode(p: ptr, vs: u32, ve: u32, out: ptr, cap: u32) -> u32 {
+    let pos: u32 = 0;
+    let i: u32 = vs;
+    if vs < ve && load8(p, vs) == 39 { // '
+        i = vs + 1;
+        while i < ve && load8(p, i) != 39 {
+            pos = de_put(out, cap, pos, load8(p, i));
+            i = i + 1;
+        }
+        return pos;
+    }
+    if vs < ve && load8(p, vs) == 34 { // "
+        i = vs + 1;
+        while i < ve && load8(p, i) != 34 {
+            let c: u32 = load8(p, i);
+            if c == 92 && i + 1 < ve {
+                let e: u32 = load8(p, i + 1);
+                let d: u32 = e;
+                if e == 110 { d = 10; }
+                else if e == 114 { d = 13; }
+                else if e == 116 { d = 9; }
+                pos = de_put(out, cap, pos, d);
+                i = i + 2;
+            } else {
+                pos = de_put(out, cap, pos, c);
+                i = i + 1;
+            }
+        }
+        return pos;
+    }
+    // 未加引号
+    while i < ve {
+        pos = de_put(out, cap, pos, load8(p, i));
+        i = i + 1;
+    }
+    return pos;
+}
+
+fn de_value_range(p: ptr, vs0: u32, le: u32) -> u64 {
+    // 返回 `[起点:32][终点:32]`。去掉未加引号值的行尾空白。
+    let vs: u32 = vs0;
+    let ve: u32 = le;
+    if vs < le && (load8(p, vs) == 39 || load8(p, vs) == 34) {
+        let q: u32 = load8(p, vs);
+        let i: u32 = vs + 1;
+        while i < le {
+            if load8(p, i) == q {
+                return ((vs as u64) << 32) | ((i + 1) as u64);
+            }
+            if q == 34 && load8(p, i) == 92 {
+                i = i + 2;
+            } else {
+                i = i + 1;
+            }
+        }
+        return ((vs as u64) << 32) | (le as u64);
+    }
+    // 未加引号：注释 `#` 前面必须是空白
+    let i2: u32 = vs;
+    while i2 < le {
+        let c: u32 = load8(p, i2);
+        if c == 35 && (i2 == vs || de_space(load8(p, i2 - 1))) {
+            ve = i2;
+            i2 = le;
+        } else {
+            i2 = i2 + 1;
+        }
+    }
+    // 去尾空白
+    while ve > vs && de_space(load8(p, ve - 1)) {
+        ve = ve - 1;
+    }
+    return ((vs as u64) << 32) | (ve as u64);
+}
+
+/// 按行扫描。返回 1 表示这一行是有效键值，并写 key/value 范围。
+fn de_line(p: ptr, i0: u32, n: u32, krange: ptr, vrange: ptr) -> u32 {
+    let le: u32 = de_line_end(p, i0, n);
+    let mut_i: u32 = i0;
+    while mut_i < le && de_space(load8(p, mut_i)) {
+        mut_i = mut_i + 1;
+    }
+    if mut_i >= le || load8(p, mut_i) == 35 { // '#' 或空行
+        return 0;
+    }
+    // export 前缀
+    if mut_i + 6 <= le && load8(p, mut_i) == 101 && load8(p, mut_i + 1) == 120
+        && load8(p, mut_i + 2) == 112 && load8(p, mut_i + 3) == 111
+        && load8(p, mut_i + 4) == 114 && load8(p, mut_i + 5) == 116
+        && mut_i + 6 < le && de_space(load8(p, mut_i + 6)) {
+        mut_i = mut_i + 7;
+        while mut_i < le && de_space(load8(p, mut_i)) {
+            mut_i = mut_i + 1;
+        }
+    }
+    if mut_i >= le || !de_alpha(load8(p, mut_i)) {
+        return 0;
+    }
+    let ks: u32 = mut_i;
+    while mut_i < le && de_alnum(load8(p, mut_i)) {
+        mut_i = mut_i + 1;
+    }
+    let ke: u32 = mut_i;
+    while mut_i < le && de_space(load8(p, mut_i)) {
+        mut_i = mut_i + 1;
+    }
+    if mut_i >= le || load8(p, mut_i) != 61 { // '='
+        return 0;
+    }
+    mem_store32(krange, 0, ks);
+    mem_store32(krange, 4, ke - ks);
+    mut_i = mut_i + 1;
+    while mut_i < le && de_space(load8(p, mut_i)) {
+        mut_i = mut_i + 1;
+    }
+    let vr: u64 = de_value_range(p, mut_i, le);
+    mem_store32(vrange, 0, (vr >> 32) as u32);
+    mem_store32(vrange, 4, (vr & 4294967295) as u32);
+    return 1;
+}
+
+/// 取一个键的值。找到返回解码后的长度（可能大于 cap，表示被截断）；没有返回 DE_NO。
+pub fn de_get(text: ptr, n: u32, key: str, out: ptr, cap: u32) -> u32 {
+    let kr: ptr = alloc(8);
+    let vr: ptr = alloc(8);
+    let i: u32 = 0;
+    let found: u32 = 0;
+    let vs: u32 = 0;
+    let ve: u32 = 0;
+    while i < n {
+        let le: u32 = de_line_end(text, i, n);
+        if de_line(text, i, n, kr, vr) == 1 {
+            if de_key_eq(text, mem_load32(kr, 0), mem_load32(kr, 4), key) {
+                found = 1;
+                vs = mem_load32(vr, 0);
+                ve = mem_load32(vr, 4);
+            }
+        }
+        i = le + 1;
+    }
+    if found == 0 {
+        return DE_NO;
+    }
+    return de_decode(text, vs, ve, out, cap);
+}
+
+/// 有效键值行数。
+pub fn de_count(text: ptr, n: u32) -> u32 {
+    let kr: ptr = alloc(8);
+    let vr: ptr = alloc(8);
+    let i: u32 = 0;
+    let c: u32 = 0;
+    while i < n {
+        let le: u32 = de_line_end(text, i, n);
+        if de_line(text, i, n, kr, vr) == 1 {
+            c = c + 1;
+        }
+        i = le + 1;
+    }
+    return c;
+}
+
+/// 第 idx 个键写进 out，返回长度；越界返回 DE_NO。
+pub fn de_key_at(text: ptr, n: u32, idx: u32, out: ptr, cap: u32) -> u32 {
+    let kr: ptr = alloc(8);
+    let vr: ptr = alloc(8);
+    let i: u32 = 0;
+    let seen: u32 = 0;
+    while i < n {
+        let le: u32 = de_line_end(text, i, n);
+        if de_line(text, i, n, kr, vr) == 1 {
+            if seen == idx {
+                let st: u32 = mem_load32(kr, 0);
+                let ln: u32 = mem_load32(kr, 4);
+                let m: u32 = ln;
+                if m > cap {
+                    m = cap;
+                }
+                let k: u32 = 0;
+                while k < m {
+                    store8(out, k, load8(text, st + k) as u8);
+                    k = k + 1;
+                }
+                return ln;
+            }
+            seen = seen + 1;
+        }
+        i = le + 1;
+    }
+    return DE_NO;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_dotenv_simple() -> bool {
+    let s: str = "A=1\n# c\nB = hello world \n";
+    let b: ptr = alloc(32);
+    let n: u32 = de_get(str_ptr(s), str_len(s), "B", b, 32);
+    return n == 11 && load8(b, 0) == 104 && de_count(str_ptr(s), str_len(s)) == 2;
+}
+
+fn test_dotenv_quotes() -> bool {
+    let s: str = "X='a b'\nY=\"l1\\nl2\"\nexport Z=ok # tail\n";
+    let b: ptr = alloc(32);
+    let x: u32 = de_get(str_ptr(s), str_len(s), "X", b, 32);
+    let y: u32 = de_get(str_ptr(s), str_len(s), "Y", b, 32);
+    let z: u32 = de_get(str_ptr(s), str_len(s), "Z", b, 32);
+    return x == 3 && y == 5 && z == 2;
+}
+
+fn test_dotenv_missing() -> bool {
+    let s: str = "A=1\n";
+    let b: ptr = alloc(8);
+    return de_get(str_ptr(s), str_len(s), "B", b, 8) == DE_NO;
+}

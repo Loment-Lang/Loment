@@ -1,0 +1,200 @@
+// dev/commit.lomt — Conventional Commits 1.0.0 的解析
+//
+// 为什么开发者工具需要它: changelog 生成、版本号推导、PR 标题校验，都建立在
+// `type(scope)!: description` 这一行上。它的语法只有一行，但边界不少：
+// `!` 可以出现在 scope 后、`: ` 必须有一个空格、`BREAKING CHANGE:` 在正文里
+// 也算破坏性变更（不一定带 `!`）。
+//
+// 形状: 解析结果写进 48 字节——类型/作用域/描述/正文的**原文偏移与长度**，
+// 外加 `bang` 与 `breaking` 两个标志。不复制字符串。
+//
+// 不做的: 校验 type 是否在某个白名单里（`cl` 自己按名字分组）、footer 的键值解析
+// （只判断 breaking）、多行 footer 合并。
+//
+// 命名: 公开 cm_*, 内部 cm_*。自检 test_commit_*。
+
+module commit
+choose runtime
+
+use mem
+
+pub const CM_OK: u32 = 0;
+pub const CM_ERR: u32 = 1;
+
+// 输出布局（48 字节）
+pub const CM_TYPE_OFF: u32 = 0;
+pub const CM_TYPE_LEN: u32 = 4;
+pub const CM_SCOPE_OFF: u32 = 8;
+pub const CM_SCOPE_LEN: u32 = 12;
+pub const CM_BANG: u32 = 16;
+pub const CM_DESC_OFF: u32 = 20;
+pub const CM_DESC_LEN: u32 = 24;
+pub const CM_BODY_OFF: u32 = 28;
+pub const CM_BODY_LEN: u32 = 32;
+pub const CM_BREAKING: u32 = 36;
+
+fn cm_letter(c: u32) -> bool {
+    return c >= 97 && c <= 122;
+}
+
+/// 从 `p[st..en)` 里找一个以行首出现的 `BREAKING CHANGE:` 或 `BREAKING-CHANGE:`。
+fn cm_has_breaking(p: ptr, st: u32, en: u32) -> u32 {
+    let i: u32 = st;
+    while i + 15 <= en {
+        let line_start: u32 = 0;
+        if i == st || load8(p, i - 1) == 10 {
+            line_start = 1;
+        }
+        if line_start == 1 && load8(p, i) == 66 && load8(p, i + 1) == 82
+            && load8(p, i + 2) == 69 && load8(p, i + 3) == 65
+            && load8(p, i + 4) == 75 && load8(p, i + 5) == 73
+            && load8(p, i + 6) == 78 && load8(p, i + 7) == 71
+            && load8(p, i + 8) == 32 {
+            // "BREAKING " + "CHANGE:" 或 "CHANGE-..."
+            if load8(p, i + 9) == 67 && load8(p, i + 10) == 72
+                && load8(p, i + 11) == 65 && load8(p, i + 12) == 78
+                && load8(p, i + 13) == 71 && load8(p, i + 14) == 69
+                && i + 15 < en
+                && (load8(p, i + 15) == 58 || load8(p, i + 15) == 45) {
+                return 1;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 指针 + 长度版本的解析。成功返回 CM_OK。
+pub fn cm_parse_ptr(p: ptr, n: u32, out: ptr) -> u32 {
+    mem_store32(out, CM_BANG, 0);
+    mem_store32(out, CM_BREAKING, 0);
+    mem_store32(out, CM_SCOPE_LEN, 0);
+    mem_store32(out, CM_BODY_LEN, 0);
+    let i: u32 = 0;
+    let ts: u32 = 0;
+    while i < n && cm_letter(load8(p, i)) {
+        i = i + 1;
+    }
+    let te: u32 = i;
+    if te == ts {
+        return CM_ERR;
+    }
+    let scope_s: u32 = 0;
+    let scope_e: u32 = 0;
+    if i < n && load8(p, i) == 40 { // '('
+        i = i + 1;
+        scope_s = i;
+        while i < n && load8(p, i) != 41 && load8(p, i) != 10 {
+            i = i + 1;
+        }
+        if i >= n || load8(p, i) != 41 {
+            return CM_ERR;
+        }
+        scope_e = i;
+        i = i + 1;
+    }
+    let bang: u32 = 0;
+    if i < n && load8(p, i) == 33 { // '!'
+        bang = 1;
+        i = i + 1;
+    }
+    if i + 1 >= n || load8(p, i) != 58 || load8(p, i + 1) != 32 { // ": "
+        return CM_ERR;
+    }
+    i = i + 2;
+    let ds: u32 = i;
+    while i < n && load8(p, i) != 10 {
+        i = i + 1;
+    }
+    let de: u32 = i;
+    // 正文：跳过一个空行之后
+    let bs: u32 = 0;
+    let be: u32 = 0;
+    if i < n {
+        if i + 1 < n && load8(p, i) == 10 && load8(p, i + 1) == 10 {
+            i = i + 2;
+        } else if i + 2 < n && load8(p, i) == 10 && load8(p, i + 1) == 13
+            && load8(p, i + 2) == 10 {
+            i = i + 3;
+        } else {
+            i = n;
+        }
+        if i < n {
+            bs = i;
+            be = n;
+        }
+    }
+    mem_store32(out, CM_TYPE_OFF, ts);
+    mem_store32(out, CM_TYPE_LEN, te - ts);
+    mem_store32(out, CM_SCOPE_OFF, scope_s);
+    mem_store32(out, CM_SCOPE_LEN, scope_e - scope_s);
+    mem_store32(out, CM_BANG, bang);
+    mem_store32(out, CM_DESC_OFF, ds);
+    mem_store32(out, CM_DESC_LEN, de - ds);
+    mem_store32(out, CM_BODY_OFF, bs);
+    mem_store32(out, CM_BODY_LEN, be - bs);
+    let br: u32 = 0;
+    if bang == 1 {
+        br = 1;
+    }
+    if bs != 0 && be > bs {
+        if cm_has_breaking(p, bs, be) == 1 {
+            br = 1;
+        }
+    }
+    mem_store32(out, CM_BREAKING, br);
+    return CM_OK;
+}
+
+/// 字符串版本的解析。
+pub fn cm_parse(s: str, out: ptr) -> u32 {
+    return cm_parse_ptr(str_ptr(s), str_len(s), out);
+}
+
+/// `p[st..st+ln)` 是否等于 `name`。
+pub fn cm_span_eq(p: ptr, st: u32, ln: u32, name: str) -> bool {
+    if ln != str_len(name) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < ln {
+        if load8(p, st + i) != str_byte(name, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_commit_basic() -> bool {
+    let o: ptr = alloc(48);
+    let s: str = "feat(parser)!: support arrays";
+    if cm_parse(s, o) != CM_OK {
+        return false;
+    }
+    return mem_load32(o, CM_TYPE_LEN) == 4
+        && cm_span_eq(str_ptr(s), mem_load32(o, CM_TYPE_OFF), 4, "feat")
+        && mem_load32(o, CM_SCOPE_LEN) == 6
+        && mem_load32(o, CM_BANG) == 1
+        && mem_load32(o, CM_DESC_LEN) == 14
+        && mem_load32(o, CM_BREAKING) == 1;
+}
+
+fn test_commit_body_breaking() -> bool {
+    let o: ptr = alloc(48);
+    let s: str = "fix: x\n\nBREAKING CHANGE: y";
+    if cm_parse(s, o) != CM_OK {
+        return false;
+    }
+    return mem_load32(o, CM_BANG) == 0 && mem_load32(o, CM_BREAKING) == 1
+        && mem_load32(o, CM_BODY_LEN) > 0;
+}
+
+fn test_commit_rejects() -> bool {
+    let o: ptr = alloc(48);
+    return cm_parse("feat no colon", o) == CM_ERR
+        && cm_parse("feat:x", o) == CM_ERR
+        && cm_parse(": x", o) == CM_ERR;
+}

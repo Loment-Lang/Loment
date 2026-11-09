@@ -3039,7 +3039,7 @@ README_MD = """# Loment {DISPLAY}
 | `share/loment/examples/user_hello.lomt` | 示例程序（用 `print` 打印） |
 | `share/loment/skill/` | **给 AI agent 的 LomentSkill 套件**：入口 `SKILL.md` + 六个专题（`loment-tur.md`、`loment-syntax.md`、`loment-traps.md`、`loment-safety.md`、`loment-runtime.md`、`loment-ffi.md`、`loment-toolchain.md`）（见下） |
 | `share/lompi/skill/SKILL.md` | **lompi 的说明书**（同一种装法：进 `~/.claude/skills/lompi/`，并往 Codex 的 AGENTS.md 写指针） |
-| `share/lompi/store/` | **lompi 的标准库**：`std` / `host` / `internet` / `os` 四个包，共 **160** 个文件（这个数**钉在** `loment_lompi_test.STORE_FILES`，别在这行手抄第二份）。装的时候会一并拷进 **lompi 自己认的全局 store**（问 `lompi config`），装完就能直接 `lompi index` / `use std` |
+| `share/lompi/store/` | **lompi 的标准库**：`std` / `host` / `internet` / `os` 四个包，共 **168** 个文件（这个数**钉在** `loment_lompi_test.STORE_FILES`，别在这行手抄第二份）。装的时候会一并拷进 **lompi 自己认的全局 store**（问 `lompi config`），装完就能直接 `lompi index` / `use std` |
 
 ## 安装（三种方式，装出来一样）
 
@@ -3531,7 +3531,7 @@ def payload(kind: str, bins: dict[str, tuple[bytes, bytes]]) -> dict[str, tuple[
         files[rel] = (body, 0o644)
     # lompi 是独立命令，它那份指南也放**自己**的 share 树下，不塞进 share/loment/
     files["share/lompi/skill/SKILL.md"] = (_read(SKILL_LOMPI), 0o644)
-    # lompi 的标准库 (std/host/internet/os 四个包, 共 160 个文件 —— 数见 `loment_lompi_test.
+    # lompi 的标准库 (std/host/internet/os 四个包, 共 168 个文件 —— 数见 `loment_lompi_test.
     # STORE_FILES`, 别在这儿手抄第二份)。放在包里是**纯净的那一份**,
     # 安装器再照 lompi 自己认的全局 store 拷过去 (见 install.sh / install.ps1) —— 于是
     # 装完就能直接用, 同时"这一版 Loment 到底随包发了哪一版库"有据可查。

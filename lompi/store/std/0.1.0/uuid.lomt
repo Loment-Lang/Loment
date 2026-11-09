@@ -1,0 +1,253 @@
+// std/uuid.lomt — UUID（RFC 9562）的字节、文本与两个常用版本
+//
+// 为什么标准库要有它: UUID 是"一个不依赖中心分配的名字"的最常见答案 —— 日志关联、
+// 幂等键、临时表名、跨进程消息 id。手写的版本通常只做 v4（填 16 字节随机 + 改两位），
+// 而真正容易错的是**文本/字节两条路**（大小写、连字符位置、变体位）与 **v7 的时间序**。
+//
+// 本模块**不产生随机数**: 随机字节由调用方给（`os/random` 的 `os_random_fill`，或
+// 测试里的确定序列）。理由与 `rng` / `rand` 一样 —— 可移植层一个 syscall 都不发。
+//
+// 两个版本:
+//   * **v4**：16 字节随机；第 6 字节高 4 位 = 0100，第 8 字节高 2 位 = 10。
+//   * **v7**：前 6 字节是**毫秒时间戳（大端 48 位）**，后面随机；第 6 字节高 4 位 = 0111。
+//     它的排序性质是"按字节比较 = 按时间比较"，这正是日志/数据库要的。
+//
+// 不做的（如实列）:
+//   * v1/v2/v3/v5 —— v1/v2 要 MAC 地址与时钟序列（本层没有），v3/v5 要 MD5/SHA-1
+//     的命名空间哈希（能拼，但那是"另一个模块的组合"，不是 UUID 的字节格式）。
+//   * 不校验 v7 的单调性（同一毫秒内多次生成可能乱序）—— 那需要状态，本模块无状态。
+//
+// 命名: 公开 uuid_*, 内部 u_*。自检 test_uuid_*。
+
+module uuid
+choose runtime
+
+use "mem.lomt"
+use "hex.lomt"
+
+pub const UUID_LEN: u32 = 16;
+/// 带连字符的文本长度（不含结尾 NUL —— 本模块从不写 NUL）。
+pub const UUID_TEXT: u32 = 36;
+pub const UUID_ERR: u32 = 4294967295;
+
+fn uu_hexval(c: u32) -> u32 {
+    return hex_val(c);
+}
+
+fn uu_hex2(hi: u32, lo: u32) -> u32 {
+    let a: u32 = uu_hexval(hi);
+    let b: u32 = uu_hexval(lo);
+    if a == HEX_NONE || b == HEX_NONE {
+        return UUID_ERR;
+    }
+    return (a << 4) | b;
+}
+
+/// 生成 v4。`rnd` 至少 16 字节。成功返回 `UUID_LEN`；随机源不够返回 `UUID_ERR`。
+pub fn uuid_v4(out: ptr, rnd: ptr, rn: u32) -> u32 {
+    if rn < UUID_LEN {
+        return UUID_ERR;
+    }
+    mem_copy(out, 0, rnd, 0, UUID_LEN);
+    let b6: u32 = load8(out, 6);
+    let b8: u32 = load8(out, 8);
+    store8(out, 6, ((b6 & 15) | 64) as u8);
+    store8(out, 8, ((b8 & 63) | 128) as u8);
+    return UUID_LEN;
+}
+
+/// 生成 v7。`unix_ms` 是毫秒时间戳（只取低 48 位）；`rnd` 至少 10 字节
+/// （第 6..15 字节的随机部分）。成功返回 `UUID_LEN`；不够返回 `UUID_ERR`。
+pub fn uuid_v7(out: ptr, unix_ms: u64, rnd: ptr, rn: u32) -> u32 {
+    if rn < 10 {
+        return UUID_ERR;
+    }
+    let ms: u64 = unix_ms & 281474976710655;
+    store8(out, 0, ((ms >> 40) & 255) as u8);
+    store8(out, 1, ((ms >> 32) & 255) as u8);
+    store8(out, 2, ((ms >> 24) & 255) as u8);
+    store8(out, 3, ((ms >> 16) & 255) as u8);
+    store8(out, 4, ((ms >> 8) & 255) as u8);
+    store8(out, 5, (ms & 255) as u8);
+    mem_copy(out, 6, rnd, 0, 10);
+    let b6: u32 = load8(out, 6);
+    let b8: u32 = load8(out, 8);
+    store8(out, 6, ((b6 & 15) | 112) as u8);
+    store8(out, 8, ((b8 & 63) | 128) as u8);
+    return UUID_LEN;
+}
+
+/// 全零 UUID（"空值"那个）。
+pub fn uuid_nil(out: ptr) {
+    mem_fill(out, 0, UUID_LEN, 0);
+}
+
+pub fn uuid_is_nil(b: ptr) -> bool {
+    let i: u32 = 0;
+    while i < UUID_LEN {
+        if load8(b, i) != 0 {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// 第 6 字节的高 4 位（v4 -> 4，v7 -> 7）。
+pub fn uuid_version(b: ptr) -> u32 {
+    return load8(b, 6) >> 4;
+}
+
+/// 变体：0 = NCS，1 = RFC 4122/9562，2 = Microsoft，3 = 保留。
+pub fn uuid_variant(b: ptr) -> u32 {
+    let c: u32 = load8(b, 8);
+    if (c & 128) == 0 {
+        return 0;
+    }
+    if (c & 64) == 0 {
+        return 1;
+    }
+    if (c & 32) == 0 {
+        return 2;
+    }
+    return 3;
+}
+
+/// 16 字节 -> 36 字符的小写文本（`8-4-4-4-12`）。返回写出的字节数（36）。
+pub fn uuid_format(out: ptr, b: ptr) -> u32 {
+    let i: u32 = 0;
+    let o: u32 = 0;
+    while i < UUID_LEN {
+        if i == 4 || i == 6 || i == 8 || i == 10 {
+            store8(out, o, 45 as u8); // '-'
+            o = o + 1;
+        }
+        let v: u32 = load8(b, i);
+        store8(out, o, hex_digit(v >> 4) as u8);
+        store8(out, o + 1, hex_digit(v & 15) as u8);
+        o = o + 2;
+        i = i + 1;
+    }
+    return UUID_TEXT;
+}
+
+/// 文本 -> 16 字节。接受 36 字符（带连字符）或 32 字符（不带），大小写都行。
+/// 成功返回 `UUID_LEN`，否则 `UUID_ERR`。
+pub fn uuid_parse(out: ptr, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    if n == 36 {
+        if str_byte(s, 8) != 45 || str_byte(s, 13) != 45
+            || str_byte(s, 18) != 45 || str_byte(s, 23) != 45 {
+            return UUID_ERR;
+        }
+    } else if n != 32 {
+        return UUID_ERR;
+    }
+    let i: u32 = 0;
+    let j: u32 = 0;
+    while j < UUID_LEN {
+        // 跳过 36 字符形式里的四个连字符。
+        if n == 36 && (i == 8 || i == 13 || i == 18 || i == 23) {
+            i = i + 1;
+        }
+        let v: u32 = uu_hex2(str_byte(s, i), str_byte(s, i + 1));
+        if v == UUID_ERR {
+            return UUID_ERR;
+        }
+        store8(out, j, v as u8);
+        i = i + 2;
+        j = j + 1;
+    }
+    return UUID_LEN;
+}
+
+/// 按字节比较（与文本排序一致，因为十六进制是定宽大端）。
+pub fn uuid_cmp(a: ptr, b: ptr) -> i32 {
+    let i: u32 = 0;
+    while i < UUID_LEN {
+        let x: u32 = load8(a, i);
+        let y: u32 = load8(b, i);
+        if x < y {
+            return 0 as i32 - 1;
+        }
+        if x > y {
+            return 1 as i32;
+        }
+        i = i + 1;
+    }
+    return 0 as i32;
+}
+
+pub fn uuid_eq(a: ptr, b: ptr) -> bool {
+    return mem_eq(a, 0, b, 0, UUID_LEN);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_uuid_v4_bits() -> bool {
+    let rnd: ptr = alloc(16);
+    let u: ptr = alloc(16);
+    mem_fill(rnd, 0, 16, 255);
+    if uuid_v4(u, rnd, 16) != UUID_LEN {
+        return false;
+    }
+    return uuid_version(u) == 4 && uuid_variant(u) == 1 && uuid_is_nil(u) == false;
+}
+
+fn test_uuid_v7_time() -> bool {
+    let rnd: ptr = alloc(16);
+    let u: ptr = alloc(16);
+    mem_fill(rnd, 0, 16, 0);
+    if uuid_v7(u, 1700000000123, rnd, 10) != UUID_LEN {
+        return false;
+    }
+    // 1700000000123 = 0x018B_CFE5_B7B：高字节 1，最低字节 123。
+    return uuid_version(u) == 7 && load8(u, 0) == 1 && load8(u, 5) == 123;
+}
+
+fn test_uuid_format_parse_roundtrip() -> bool {
+    let b: ptr = alloc(16);
+    let t: ptr = alloc(40);
+    let c: ptr = alloc(16);
+    let i: u32 = 0;
+    while i < 16 {
+        store8(b, i, (i * 17 + 3) as u8);
+        i = i + 1;
+    }
+    if uuid_format(t, b) != UUID_TEXT {
+        return false;
+    }
+    // 0351425... 的期望文本: 03 14 25 36 - 47 58 - 69 7a - 8b 9c - ad be cf e0 f1 02
+    let want: str = "03142536-4758-697a-8b9c-adbecfe0f102";
+    let k: u32 = 0;
+    while k < UUID_TEXT {
+        if load8(t, k) != str_byte(want, k) {
+            return false;
+        }
+        k = k + 1;
+    }
+    if uuid_parse(c, want) != UUID_LEN {
+        return false;
+    }
+    return uuid_eq(b, c);
+}
+
+fn test_uuid_parse_rejects_bad() -> bool {
+    let c: ptr = alloc(16);
+    if uuid_parse(c, "000102030405060708090a0b0c0d0e0") != UUID_ERR {
+        return false;
+    }
+    if uuid_parse(c, "00010203-0405-0607-0809-0a0b0c0d0e0z") != UUID_ERR {
+        return false;
+    }
+    return true;
+}
+
+fn test_uuid_cmp() -> bool {
+    let a: ptr = alloc(16);
+    let b: ptr = alloc(16);
+    uuid_nil(a);
+    uuid_nil(b);
+    store8(b, 15, 1 as u8);
+    return uuid_cmp(a, b) == 0 as i32 - 1 && uuid_cmp(b, a) == 1 as i32 && uuid_cmp(a, a) == 0 as i32;
+}

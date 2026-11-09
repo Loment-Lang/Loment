@@ -1546,9 +1546,11 @@ def test_install_scripts_stay_pure_ascii():
 #: **2026-10-14 起 `os` 是 7**（多一个 `thread`，`docs/245`），整棵树随之 158 -> 159。
 #: **2026-10-15 起 `host` 是 8**（多一个 `libl_host.lomt` —— LibL 的宿主脸，`docs/232` §5.1
 #: 与 `#401`），整棵树随之 159 -> 160。
+#: **2026-11-08 起 std 是 141** —— 补了 8 份：`pack` `uuid` `sha3` `blake2` `gzip`
+#: `tar` `jsonw` `regex`（`docs/316`），整棵树随之 160 -> 168。
 STORE_DIR = ROOT / "lompi" / "store"
-STORE_MODULES = {"std": 133, "host": 8, "internet": 8, "os": 7}
-STORE_FILES = 160
+STORE_MODULES = {"std": 141, "host": 8, "internet": 8, "os": 7}
+STORE_FILES = 168
 
 
 def _store_line(out: str) -> str:

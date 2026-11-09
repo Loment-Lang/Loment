@@ -8,6 +8,7 @@
 //   | 那一半 | 函数 | 落不落得下来 |
 //   |---|---|---|
 //   | 转换 | `atoi` `atol` `strtol` `strtoul` | ✅ 纯函数 |
+//   | 浮点转换 | `strtod` `atof` `strtof` | ✅ 软浮点（`f64fmt_parse_n`；近似正确舍入） |
 //   | 整数 | `abs` `labs` `llabs` | ✅ 纯函数 |
 //   | 排序/查找 | `qsort` `bsearch` | ✅ 见下面"没有函数指针" |
 //   | **分配** | `malloc` `calloc` | ✅ 内建堆上的 libc 拼法（见 §分配） |
@@ -41,6 +42,8 @@ choose runtime
 use "mem.lomt"
 use "string.lomt"
 use "ctype.lomt"
+use "f64fmt.lomt"
+use "f64conv.lomt"
 
 // ---------------------------------------------------------------- 转换
 
@@ -215,6 +218,38 @@ pub fn atoi(s: ptr) -> i64 {
 /// `atol` —— 等价于 `strtol(s, NULL, 10)`。
 pub fn atol(s: ptr) -> i64 {
     return strtol(s, sd_null(), 10);
+}
+
+/// `strtod` —— C 字符串 -> double（IEEE 754 位）。`endp` 非空时写入"停下的位置"。
+///
+/// 解析在 `f64fmt_parse_n` 里（软浮点）；这里是 libc 的**指针形状**：输入是 NUL 结尾，
+/// 输出是可选的 `char **`。失败返回 0，并把 `*endp` 指回起点（libc 同）。
+pub fn strtod(s: ptr, endp: ptr) -> u64 {
+    let ws: ptr = alloc(8);
+    let ok: ptr = ptr_add(ws, 4);
+    let n: u32 = strlen(s);
+    let x: u64 = f64fmt_parse_n(s, n, ws, ok);
+    if mem_load32(ok, 0) == 0 {
+        if (endp as u64) != (0 as u64) {
+            mem_store64(endp, 0, s as u64);
+        }
+        return 0 as u64;
+    }
+    let used: u32 = mem_load32(ws, 0);
+    if (endp as u64) != (0 as u64) {
+        mem_store64(endp, 0, (s as u64) + (used as u64));
+    }
+    return x;
+}
+
+/// `atof` —— 等价于 `strtod(s, NULL)`。
+pub fn atof(s: ptr) -> u64 {
+    return strtod(s, 0 as ptr);
+}
+
+/// `strtof` —— 先按 double 解析，再收成 f32 的位。
+pub fn strtof(s: ptr, endp: ptr) -> u32 {
+    return f64conv_to_f32(strtod(s, endp));
 }
 
 /// `abs` —— C 的那个 `abs(int)`。**`INT_MIN` 是未定义的**（libc 同）。

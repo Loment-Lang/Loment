@@ -1,0 +1,324 @@
+// std/tar.lomt — ustar 归档头（POSIX.1-1988 / POSIX ustar）
+//
+// 为什么要有它: tar 是"一串 512 字节头 + 512 字节对齐的文件内容"里最简单的一种，
+// 但它的头**没有长度字段、没有魔数在开头、校验和算的是"把校验和字段当空格"**——
+// 这三件事每一件都能让一个看起来对的解析器读出错位的数据。
+//
+// 头布局（512 字节，全部**八进制文本**，除 typeflag 外）:
+//     0   name[100]        100  mode[8]     108  uid[8]      116  gid[8]
+//     124 size[12]         136  mtime[12]   148  chksum[8]    156 typeflag
+//     157 linkname[100]    257  magic[6]="ustar\0"  263 version[2]="00"
+//     265 uname[32]        297  gname[32]   329  devmajor[8]  337 devminor[8]
+//     345 prefix[155]      500  padding[12]
+//
+// **名字的两段式**: `name` 只有 100 字节，更长的路径要拆成 `prefix[155]` + `/` + `name`。
+// 拼接时**只拆一次**（在某个 `/` 处），不是把整条路径按目录逐层塞。
+//
+// 不做的（如实列）:
+//   * GNU 扩展（`L` 长名、`K` 长链接名、稀疏文件、`././@LongLink`）—— 那是另一套头，
+//     与 ustar 的字段不同；收下它们会让"读到 L 就跳过下一块"这种隐藏规则漏进来。
+//   * pax 扩展头（`x` / `g` 里的 `path=`）—— 同上，先不做。
+//   * 不递归目录、不建文件系统对象：这里只做**头**的读写，内容由调用方按 `tar_size`
+//     自己搬（512 对齐）。
+//
+// 命名: 公开 tar_*, 内部 th_*。自检 test_tar_*。
+
+module tar
+choose runtime
+
+use "mem.lomt"
+
+pub const TAR_BLOCK: u32 = 512;
+pub const TAR_ERR: u32 = 4294967295;
+pub const TAR_OK: u32 = 0;
+
+pub const TAR_REG: u32 = 48;      // '0'
+pub const TAR_LINK: u32 = 49;     // '1'
+pub const TAR_SYMLINK: u32 = 50;  // '2'
+pub const TAR_DIR: u32 = 53;      // '5'
+
+/// 全零块 = 归档结束标记。
+pub fn tar_is_zero(blk: ptr) -> bool {
+    let i: u32 = 0;
+    while i < TAR_BLOCK {
+        if load8(blk, i) != 0 {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// 头校验和（把 148..156 当成空格）。写入时也用同一个函数。
+pub fn tar_checksum(blk: ptr) -> u32 {
+    let sum: u32 = 0;
+    let i: u32 = 0;
+    while i < TAR_BLOCK {
+        if i >= 148 && i < 156 {
+            sum = sum + 32;
+        } else {
+            sum = sum + load8(blk, i);
+        }
+        i = i + 1;
+    }
+    return sum;
+}
+
+pub fn tar_checksum_ok(blk: ptr) -> bool {
+    let want: u64 = th_octal(blk, 148, 8);
+    return want != 18446744073709551615 && want == (tar_checksum(blk) as u64);
+}
+
+/// 一个八进制字段。支持 GNU 的 base-256（首字节高位为 1，用于大文件）。
+/// 解析失败返回 `0xFFFFFFFFFFFFFFFF`。
+fn th_octal(blk: ptr, off: u32, width: u32) -> u64 {
+    let c0: u32 = load8(blk, off);
+    if (c0 & 128) != 0 {
+        // base-256 大端：首字节的低 7 位是最高位。
+        let v: u64 = (c0 & 127) as u64;
+        let i: u32 = 1;
+        while i < width {
+            v = (v << 8) | (load8(blk, off + i) as u64);
+            i = i + 1;
+        }
+        return v;
+    }
+    let v: u64 = 0;
+    let any: u32 = 0;
+    let i: u32 = 0;
+    while i < width {
+        let c: u32 = load8(blk, off + i);
+        if c >= 48 && c <= 55 {
+            v = (v << 3) | ((c - 48) as u64);
+            any = 1;
+        } else if c == 0 || c == 32 {
+            // 结尾的 NUL / 空格：后面应当全是填充，但不必强求。
+        } else {
+            return 18446744073709551615;
+        }
+        i = i + 1;
+    }
+    if any == 0 {
+        return 18446744073709551615;
+    }
+    return v;
+}
+
+fn th_put_octal(blk: ptr, off: u32, width: u32, v: u64) -> u32 {
+    // width-1 个八进制位 + 一个 NUL。
+    let digits: u32 = width - 1;
+    let x: u64 = v;
+    let i: u32 = 0;
+    while i < digits {
+        let pos: u32 = off + digits - 1 - i;
+        store8(blk, pos, (48 + (x & 7)) as u8);
+        x = x >> 3;
+        i = i + 1;
+    }
+    if x != 0 {
+        return TAR_ERR; // 放不下
+    }
+    store8(blk, off + width - 1, 0 as u8);
+    return TAR_OK;
+}
+
+/// 文件大小（未压缩字节数）。
+pub fn tar_size(blk: ptr) -> u64 {
+    return th_octal(blk, 124, 12);
+}
+
+pub fn tar_mtime(blk: ptr) -> u64 {
+    return th_octal(blk, 136, 12);
+}
+
+pub fn tar_mode(blk: ptr) -> u64 {
+    return th_octal(blk, 100, 8);
+}
+
+pub fn tar_type(blk: ptr) -> u32 {
+    return load8(blk, 156);
+}
+
+/// 这个头之后的内容占多少字节（含 512 头 + 512 对齐的内容）；坏头返回 0。
+pub fn tar_entry_len(blk: ptr) -> u64 {
+    let sz: u64 = tar_size(blk);
+    if sz == 18446744073709551615 {
+        return 0;
+    }
+    return (TAR_BLOCK as u64) + ((sz + 511) / 512) * 512;
+}
+
+fn th_name_len(blk: ptr, off: u32, max: u32) -> u32 {
+    let i: u32 = 0;
+    while i < max {
+        if load8(blk, off + i) == 0 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return max;
+}
+
+/// 完整路径（`prefix` + `/` + `name`，若 prefix 非空）。返回写出的字节数；
+/// 输出缓冲不够返回 TAR_ERR。
+pub fn tar_name(blk: ptr, out: ptr, cap: u32) -> u32 {
+    let nl: u32 = th_name_len(blk, 0, 100);
+    let pl: u32 = th_name_len(blk, 345, 155);
+    let need: u32 = nl + pl;
+    let sep: u32 = 0;
+    if pl > 0 {
+        sep = 1;
+    }
+    if need + sep > cap {
+        return TAR_ERR;
+    }
+    let o: u32 = 0;
+    if pl > 0 {
+        mem_copy(out, 0, blk, 345, pl);
+        o = pl;
+        store8(out, o, 47 as u8); // '/'
+        o = o + 1;
+    }
+    mem_copy(out, o, blk, 0, nl);
+    return o + nl;
+}
+
+/// 写一个 ustar 头。成功返回 `TAR_BLOCK`；名字过长/字段放不下返回 TAR_ERR。
+/// `size` 是内容字节数（内容本身由调用方写）；`mode` 例如 420（0644）。
+pub fn tar_write_header(blk: ptr, name: str, size: u64, mode: u32, typeflag: u32, mtime: u64) -> u32 {
+    mem_fill(blk, 0, TAR_BLOCK, 0);
+    let nlen: u32 = str_len(name);
+    let split: u32 = 4294967295;
+    if nlen > 100 {
+        // 找最后一个能拆的位置：prefix <= 155、name <= 100、两边都非空。
+        let i: u32 = 0;
+        while i < nlen {
+            if str_byte(name, i) == 47 {
+                let plen: u32 = i;
+                let slen: u32 = nlen - i - 1;
+                if plen > 0 && plen <= 155 && slen > 0 && slen <= 100 {
+                    split = i;
+                }
+            }
+            i = i + 1;
+        }
+        if split == 4294967295 {
+            return TAR_ERR;
+        }
+    }
+    if split == 4294967295 {
+        mem_copy(blk, 0, str_ptr(name), 0, nlen);
+    } else {
+        mem_copy(blk, 0, str_ptr(name), split + 1, nlen - split - 1);
+        mem_copy(blk, 345, str_ptr(name), 0, split);
+    }
+    if th_put_octal(blk, 100, 8, mode as u64) == TAR_ERR {
+        return TAR_ERR;
+    }
+    if th_put_octal(blk, 108, 8, 0) == TAR_ERR {
+        return TAR_ERR;
+    }
+    if th_put_octal(blk, 116, 8, 0) == TAR_ERR {
+        return TAR_ERR;
+    }
+    if th_put_octal(blk, 124, 12, size) == TAR_ERR {
+        return TAR_ERR;
+    }
+    if th_put_octal(blk, 136, 12, mtime) == TAR_ERR {
+        return TAR_ERR;
+    }
+    store8(blk, 156, typeflag as u8);
+    // magic/version
+    store8(blk, 257, 117 as u8); // u
+    store8(blk, 258, 115 as u8); // s
+    store8(blk, 259, 116 as u8); // t
+    store8(blk, 260, 97 as u8);  // a
+    store8(blk, 261, 114 as u8); // r
+    store8(blk, 262, 0 as u8);
+    store8(blk, 263, 48 as u8);  // 0
+    store8(blk, 264, 48 as u8);  // 0
+    // 校验和：先把字段写成空格再算，然后写 6 位八进制 + NUL + 空格。
+    mem_fill(blk, 148, 8, 32);
+    let sum: u32 = tar_checksum(blk);
+    let i2: u32 = 0;
+    while i2 < 6 {
+        let pos: u32 = 148 + 5 - i2;
+        store8(blk, pos, (48 + ((sum >> (3 * i2)) & 7)) as u8);
+        i2 = i2 + 1;
+    }
+    store8(blk, 154, 0 as u8);
+    store8(blk, 155, 32 as u8);
+    return TAR_BLOCK;
+}
+
+/// 归档结束：两个全零块。
+pub fn tar_write_trailer(out: ptr) -> u32 {
+    mem_fill(out, 0, TAR_BLOCK * 2, 0);
+    return TAR_BLOCK * 2;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_tar_header_roundtrip() -> bool {
+    let h: ptr = alloc(TAR_BLOCK);
+    let name: str = "dir/hello.txt";
+    let n: u32 = tar_write_header(h, name, 1234, 420, TAR_REG, 1700000000);
+    if n != TAR_BLOCK {
+        return false;
+    }
+    if !tar_checksum_ok(h) {
+        return false;
+    }
+    if tar_size(h) != 1234 || tar_mode(h) != 420 || tar_type(h) != TAR_REG {
+        return false;
+    }
+    let out: ptr = alloc(256);
+    let l: u32 = tar_name(h, out, 256);
+    if l != 13 {
+        return false;
+    }
+    let k: u32 = 0;
+    while k < 13 {
+        if load8(out, k) != str_byte(name, k) {
+            return false;
+        }
+        k = k + 1;
+    }
+    return true;
+}
+
+fn test_tar_prefix_split() -> bool {
+    let h: ptr = alloc(TAR_BLOCK);
+    // 121 字符：必须拆成 prefix(60) + '/' + name(60)。
+    let name: str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    if str_len(name) != 121 {
+        return false;
+    }
+    if tar_write_header(h, name, 0, 420, TAR_REG, 0) != TAR_BLOCK {
+        return false;
+    }
+    let out: ptr = alloc(256);
+    let l: u32 = tar_name(h, out, 256);
+    if l != 121 {
+        return false;
+    }
+    let k: u32 = 0;
+    while k < 121 {
+        if load8(out, k) != str_byte(name, k) {
+            return false;
+        }
+        k = k + 1;
+    }
+    return true;
+}
+
+fn test_tar_rejects_corrupt_checksum() -> bool {
+    let h: ptr = alloc(TAR_BLOCK);
+    let _n: u32 = tar_write_header(h, "x", 0, 420, TAR_REG, 0);
+    if !tar_checksum_ok(h) {
+        return false;
+    }
+    let b: u32 = load8(h, 0);
+    store8(h, 0, (b ^ 1) as u8);
+    return !tar_checksum_ok(h);
+}

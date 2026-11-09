@@ -79,7 +79,7 @@ def _declared_grammar(path: Path) -> str:
 #: **已知缺口**（棘轮：只许变短）。键是 `lompi/store` 下的相对路径。
 KNOWN_GAPS: dict[str, str] = {}
 
-#: `std` 的**门面**（`module std` + 127 条 `use`，**零个函数**）。它不单独比：
+#: `std` 的**门面**（`module std` + 140 条 `use`，**零个函数**）。它不单独比：
 #: 它自己的贡献是空的，而它的 127 个模块**每一个**都在本判据里单独比过。
 #: 门面本身要钉的是"平名字空间不撞名"，由
 #: `lomentc_test::test_std_package_is_one_unit_without_name_collisions` 管。
@@ -143,7 +143,7 @@ def test_the_facade_is_still_only_a_facade() -> None:
     assert not hits, (
         f"{FACADE} 里出现了函数（{hits[:3]}）—— 它不再是纯门面："
         f"把它从跳过名单里拿掉，按真模块逐字节比")
-    print("      门面：`std.lomt` 仍然零函数（127 条 use，逐个模块单独比过）")
+    print("      门面：`std.lomt` 仍然零函数（140 条 use，逐个模块单独比过）")
 
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

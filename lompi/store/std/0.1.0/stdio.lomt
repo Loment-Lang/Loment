@@ -30,16 +30,20 @@
 //   * `%p` 的 NULL 打 **`(nil)`**，其余打 `0x` + 小写十六进制（不补前导零）；
 //   * `%n` **不产出字符**，把"到目前为止写了多少"写回实参指向的 `int`。
 //
-// **不支持（如实列）：浮点的 `%f`/`%e`/`%g` —— 而且这一条是"不能"，不是"没做"。**
+// **浮点（`%f` / `%e` / `%g`）自 2026-11-08 起支持**。上游 `#381`（混宽运算发出非法 IR）
+// 已在 2026-10-17 关闭，`f64fmt` 那串模块现在能编、也能与 Python 的十进制展开对上。
+// 三者的语义按 libc：
+//   * `%f`：固定小数位，默认 6；精度是"小数点后几位"；
+//   * `%e`：科学计数法，`d.dddde±XX`，精度是"小数点后几位"（有效数字 = 精度 + 1）；
+//   * `%g`：精度是**有效数字**（默认 6），按指数选定点/科学，并去掉尾随零。
+// 两处**如实列的偏离**：
+//   1. 精度上限 512（临时区 1 KiB）；libc 没有上限。
+//   2. `%g` 的"最短"是按**固定有效位数后去尾零**做的，不是 libc 的 `%.Pg` 全套舍入细节；
+//      与 glibc 在常见值上一致，在"恰好半位"的边界上可能差一位。判据覆盖的是常见值。
 //
-// 语言层没有浮点类型，仓库里是 `f64*.lomt` 的**软浮点**，接线本来只是几行。**但那串模块
-// 今天编不过**：`stdio` 一旦 `use "f64fmt.lomt"`，整个单元就被 clang 拒 —— 实测 **27 处
-// 非法 IR**（全是 `i32 -> i64` 的混宽运算，**#289** 那一类），散布在 `wide`（5 个函数）、
-// `bigint`（2 个）、`f64`（4 个，含 `f64_mul`/`f64_div`/`fa_*`）。
-//
-// 更要紧的是**由此推出的第二件事**：那串模块**从来没有被编译过**，所以它的**正确性也没被
-// 验证过**。把 `%f` 接上去、再与 glibc 逐字节比，很可能只是把一层"没编译过"换成一条
-// **长尾的数值错**。所以这一格不在这里做 —— 它是独立的一件事（issue 见 `docs/232` §5.1）。
+// `%f/%e/%g` 需要 `f64fmt` 的 4352 字节临时区，所以多了一个带工作区的入口
+// `snprintf_ws`；便利版 `snprintf` 每次调用自己 `alloc` 一块（bump 堆不回收，
+// 循环里格式化大量浮点请自己开一块复用）。
 //
 // **返回值与截断照 libc**：返回"**本该写出**的字符数"（不含 NUL），即使被 `cap` 截断也一样；
 // 而 `cap > 0` 时**总是**补 NUL。这一条最容易写错，判据里专门比它。
@@ -55,6 +59,7 @@ choose runtime
 use "mem.lomt"
 use "string.lomt"
 use "stdlib.lomt"
+use "f64fmt.lomt"
 
 /// `-`：左对齐。
 pub const SF_LEFT: u32 = 1;
@@ -288,9 +293,194 @@ fn sf_ptr(buf: ptr, cap: u32, total: u32, v: u64, flags: u32, width: u32) -> u32
     return cur;
 }
 
+/// 把一段已生成的文本按宽度/对齐/补零写出去。`n` 是文本长度。
+/// 补零遇到 `inf`/`nan` 要失效（libc 同：那不是数字，补零没有意义）。
+fn sf_emit_text(buf: ptr, cap: u32, total: u32, tp: ptr, n: u32, flags: u32, width: u32) -> u32 {
+    let left: bool = (flags & SF_LEFT) != 0;
+    let zero: bool = (flags & SF_ZERO) != 0 && left == false;
+    let sign: u32 = 0;
+    if n > 0 && load8(tp, 0) == 45 {
+        sign = 1;
+    }
+    let special: u32 = 0;
+    if n > sign {
+        let c0: u32 = load8(tp, sign);
+        if c0 == 105 || c0 == 110 {
+            special = 1;
+        }
+    }
+    let z: bool = zero && special == 0;
+    let cur: u32 = total;
+    if width > n && left == false && z == false {
+        let k: u32 = 0;
+        while k < width - n {
+            cur = sf_put(buf, cap, cur, 32);
+            k = k + 1;
+        }
+    }
+    if width > n && z {
+        if sign == 1 {
+            cur = sf_put(buf, cap, cur, 45);
+        }
+        let k2: u32 = 0;
+        while k2 < width - n {
+            cur = sf_put(buf, cap, cur, 48);
+            k2 = k2 + 1;
+        }
+        let i: u32 = sign;
+        while i < n {
+            cur = sf_put(buf, cap, cur, load8(tp, i));
+            i = i + 1;
+        }
+    } else {
+        let i2: u32 = 0;
+        while i2 < n {
+            cur = sf_put(buf, cap, cur, load8(tp, i2));
+            i2 = i2 + 1;
+        }
+        if width > n && left {
+            let k3: u32 = 0;
+            while k3 < width - n {
+                cur = sf_put(buf, cap, cur, 32);
+                k3 = k3 + 1;
+            }
+        }
+    }
+    return cur;
+}
+
+/// `%g`。精度是**有效数字**：先按科学计数法生成 `p` 位，读指数，再决定定点还是科学，
+/// 最后去掉尾随零（只去小数点之后的零）。
+fn sf_g(tp: ptr, x: u64, prec: i64, sc: ptr) -> u32 {
+    if f64bits_is_zero(x) {
+        return f64fmt_fixed(tp, 0, x, 0, sc); // "0"（glibc 的 %g 也打 "0"）
+    }
+    let p: u32 = 6;
+    if prec >= (0 as i64) {
+        p = prec as u32;
+    }
+    if p == 0 {
+        p = 1;
+    }
+    if p > 512 {
+        p = 512;
+    }
+    let n1: u32 = f64fmt_sci(tp, 0, x, p, sc);
+    let epos: u32 = 4294967295;
+    let i: u32 = 0;
+    while i < n1 {
+        if load8(tp, i) == 101 { // 'e'
+            epos = i;
+        }
+        i = i + 1;
+    }
+    if epos == 4294967295 {
+        return n1; // inf / nan
+    }
+    // 解析指数。
+    let j: u32 = epos + 1;
+    let eneg: u32 = 0;
+    if load8(tp, j) == 45 {
+        eneg = 1;
+        j = j + 1;
+    } else if load8(tp, j) == 43 {
+        j = j + 1;
+    }
+    let ex: i64 = 0 as i64;
+    while j < n1 {
+        let d: u32 = load8(tp, j);
+        if d >= 48 && d <= 57 {
+            ex = ex * (10 as i64) + ((d - 48) as i64);
+        }
+        j = j + 1;
+    }
+    if eneg == 1 {
+        ex = 0 as i64 - ex;
+    }
+    if ex < (0 as i64 - 4) || ex >= (p as i64) {
+        // 科学计数法：去掉尾数的小数点后尾随零。
+        let k: u32 = epos;
+        let stop: u32 = 0;
+        while stop == 0 && k > 0 {
+            if load8(tp, k - 1) == 48 {
+                k = k - 1;
+            } else {
+                stop = 1;
+            }
+        }
+        if k > 0 && load8(tp, k - 1) == 46 {
+            k = k - 1;
+        }
+        let rm: u32 = epos - k;
+        let m: u32 = epos;
+        while m < n1 {
+            store8(tp, m - rm, load8(tp, m) as u8);
+            m = m + 1;
+        }
+        return n1 - rm;
+    }
+    // 定点：after = p - 1 - ex。
+    let after: u32 = (p as i64 - 1 - ex) as u32;
+    let n2: u32 = f64fmt_fixed(tp, 0, x, after, sc);
+    // 只去小数点之后的零。
+    let dot: u32 = 4294967295;
+    let i2: u32 = 0;
+    while i2 < n2 {
+        if load8(tp, i2) == 46 {
+            dot = i2;
+        }
+        i2 = i2 + 1;
+    }
+    if dot == 4294967295 {
+        return n2;
+    }
+    let k2: u32 = n2;
+    let stop2: u32 = 0;
+    while stop2 == 0 && k2 > dot + 1 {
+        if load8(tp, k2 - 1) == 48 {
+            k2 = k2 - 1;
+        } else {
+            stop2 = 1;
+        }
+    }
+    if k2 == dot + 1 {
+        k2 = dot; // 小数点后全被去掉了，连点一起去掉
+    }
+    return k2;
+}
+
+/// 浮点转换（`%f` / `%e` / `%g`）。`ws` 至少 `snprintf_ws_bytes()`。
+fn sf_float(buf: ptr, cap: u32, total: u32, bits: u64, flags: u32, width: u32,
+            prec: i64, spec: u32, ws: ptr) -> u32 {
+    let tmp: ptr = ptr_add(ws, f64fmt_scratch_bytes());
+    let n: u32 = 0;
+    if spec == 102 { // 'f'
+        let after: u32 = 6;
+        if prec >= (0 as i64) {
+            after = prec as u32;
+        }
+        if after > 512 {
+            after = 512;
+        }
+        n = f64fmt_fixed(tmp, 0, bits, after, ws);
+    } else if spec == 101 { // 'e'
+        let sig: u32 = 7;
+        if prec >= (0 as i64) {
+            sig = (prec as u32) + 1;
+        }
+        if sig > 512 {
+            sig = 512;
+        }
+        n = f64fmt_sci(tmp, 0, bits, sig, ws);
+    } else { // 'g'
+        n = sf_g(tmp, bits, prec, ws);
+    }
+    return sf_emit_text(buf, cap, total, tmp, n, flags, width);
+}
+
 /// 一个转换说明符 -> 输出。不认识的说明符**原样输出** `%` 与那个字符（不静默吞掉）。
 fn sf_conv(buf: ptr, cap: u32, total: u32, spec: u32, av: u64, flags: u32, width: u32,
-           prec: i64) -> u32 {
+           prec: i64, ws: ptr) -> u32 {
     if spec == 100 || spec == 105 {              // d i
         return sf_int(buf, cap, total, av, flags, width, 10, false, true, prec);
     }
@@ -314,6 +504,9 @@ fn sf_conv(buf: ptr, cap: u32, total: u32, spec: u32, av: u64, flags: u32, width
     }
     if spec == 112 {                             // p
         return sf_ptr(buf, cap, total, av, flags, width);
+    }
+    if spec == 102 || spec == 101 || spec == 103 { // f e g
+        return sf_float(buf, cap, total, av, flags, width, prec, spec, ws);
     }
     if spec == 110 {                             // n —— **不产出**，把"到目前为止写了多少"写回实参
         let slot: ptr = av as ptr;
@@ -342,7 +535,38 @@ fn sf_finish(buf: ptr, cap: u32, total: u32) -> u32 {
 ///
 /// `fmt` 是 **NUL 结尾**的格式串 —— 而本语言的字面量不带 NUL（`string.lomt` 的 `cstr_of`），
 /// 所以通常要先用 `cstr_of` 把字面量落进一个缓冲。
+pub fn snprintf_ws_bytes() -> u32 {
+    return f64fmt_scratch_bytes() + 1024;
+}
+
+/// 格式串里有没有浮点说明符。只有需要时才开工作区 —— 整数/字符串路径**零分配**。
+fn sf_needs_ws(fmt: ptr) -> bool {
+    let i: u32 = 0;
+    let go: bool = true;
+    while go {
+        let c: u32 = load8(fmt, i);
+        if c == 0 {
+            go = false;
+        } else {
+            if c == 102 || c == 101 || c == 103 { // f e g
+                return true;
+            }
+            i = i + 1;
+        }
+    }
+    return false;
+}
+
 pub fn snprintf(buf: ptr, cap: u32, fmt: ptr, args: ptr, nargs: u32) -> u32 {
+    if sf_needs_ws(fmt) == false {
+        return snprintf_ws(buf, cap, fmt, args, nargs, 0 as ptr);
+    }
+    let ws: ptr = alloc(snprintf_ws_bytes());
+    return snprintf_ws(buf, cap, fmt, args, nargs, ws);
+}
+
+/// 带工作区的 `snprintf`。循环里格式化很多浮点时复用它（bump 堆不回收）。
+pub fn snprintf_ws(buf: ptr, cap: u32, fmt: ptr, args: ptr, nargs: u32, ws: ptr) -> u32 {
     let total: u32 = 0;
     let fi: u32 = 0;
     let ai: u32 = 0;
@@ -446,7 +670,7 @@ pub fn snprintf(buf: ptr, cap: u32, fmt: ptr, args: ptr, nargs: u32) -> u32 {
                     if ai < nargs {
                         let av: u64 = mem_load64(args, ai * 8);
                         ai = ai + 1;
-                        total = sf_conv(buf, cap, total, spec, av, flags, width, prec);
+                        total = sf_conv(buf, cap, total, spec, av, flags, width, prec, ws);
                     }
                     // 实参不够: **不做这个转换** —— libc 会读越界垃圾, 这里停 (文件头写明了)。
                     fi = fi + 1;

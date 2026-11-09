@@ -2071,7 +2071,7 @@ def _resolve_guards(mods, caps_map: dict) -> None:
             walk(f.body)
 
 
-def _resolve_domains(mod) -> None:
+def _resolve_domains(mod, cap_base: int | None = None) -> None:
     """`docs/313`：块级域的作用域、自动守卫链、审计槽号。
 
     - 审计槽号：顶层能力先占 `0..len(caps)-1`，块按出现顺序接在后面；
@@ -2079,7 +2079,8 @@ def _resolve_domains(mod) -> None:
     - 值带空间标签（`let a: [u32; 64] in disk` / 形参）时，对它的下标访问
       挂上**同空间**的域链（外→内），发射器据此在取址前插判决。
     """
-    nxt = [len(mod.caps)]
+    base = len(mod.caps) if cap_base is None else cap_base
+    nxt = [base]
     #: 联动组（`docs/315` §5）：第一遍 walk 时还是空的，`couple` 收完之后第二遍再填。
     comp_of: dict = {}
     members: dict = {}
@@ -2270,7 +2271,7 @@ def _resolve_domains(mod) -> None:
     comp_by_fn: dict = {}
 
     def run_walk() -> None:
-        nxt[0] = len(mod.caps)
+        nxt[0] = base
         for f in mod.funcs:
             cur_fn[0] = f.name
             vs = {p.name: p.space for p in f.params if p.space}
@@ -5142,12 +5143,16 @@ def prepare(mod: Module, deps: list[Module] | None = None) -> tuple[Module, list
     if _has_try(allmods):  # M9: ? 语法糖
         _desugar_try(allmods, funcs_map, structs_map)
     _resolve_solid_aliases(mod)
+    # 能力名是**单元级**的（与自举侧的 ctab 同一口径）：依赖先、入口后。
+    # 从前这里只取 `mod.caps`，于是依赖里的 guard 查不到，`Guard` 保留默认
+    # `[0..0]` —— 安全边界随安装的编译器变化（#1175）。
+    all_caps = [c for m in allmods for c in m.caps]
     if _has_guard(allmods):  # P4: guard 解析
         _resolve_guards(allmods, {
             c.name: (i, c.lo, c.hi, CAP_KIND_ID[c.kind], c.param,
                      (1 if c.lo_inf else 0) | (2 if c.hi_inf else 0))
-            for i, c in enumerate(mod.caps)})
-    _resolve_domains(mod)  # docs/313：块级域、自动守卫链、审计槽号
+            for i, c in enumerate(all_caps)})
+    _resolve_domains(mod, len(all_caps))  # docs/313：块级域、自动守卫链、审计槽号
     return mod, deps
 
 
@@ -6898,6 +6903,7 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     lms = _lms_level(mod, "lms_check")
     funcs = dict(ext_funcs or {})
     deps = deps or []
+    unit_caps = {c.name: c for m in [*deps, mod] for c in m.caps}
 
     # 依赖模块的导出符号: 先入符号表, 再检查本模块是否重名 (M12: 仅 pub 可见)
     structs: dict[str, Struct] = {}
@@ -7365,6 +7371,20 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
             if space and space == c.space:
                 errs.append(f"{c.line}: 能力 {c.name} 使用了 excluded 的空间 {space}")
 
+    # 能力名在**单元**里唯一（与自举侧的 ctab 同一口径）。同一模块内的重复由上面
+    # 那条 `seen_caps` 报；这里只报**跨文件**的重复 —— 依赖先、入口后，位置写在
+    # 后面那一条声明的文件里（#1175：从前参考实现让入口的范围静默覆盖依赖）。
+    if not _dep_pass:
+        unit_seen: dict[str, Module] = {}
+        for m0 in [*deps, mod]:
+            for c in m0.caps:
+                prev = unit_seen.get(c.name)
+                if prev is not None and prev is not m0:
+                    errs.append(f"{_unit_where(m0)}: {c.line}: 能力 {c.name} 与 "
+                                f"{_unit_where(prev)} 中的同名声明重复")
+                else:
+                    unit_seen[c.name] = m0
+
     # **行为轴**（`docs/218` §7 第 2 件，2026-10-11）：上面那条 M41 比的是**名字**
     # （`excluded "usb"` 对 `capability … : usb[…]`）—— 它**从不看行为**，所以
     # "声明了不碰网络、代码里却在调 `socket`"是它看不见的。补上的就是这一条。
@@ -7514,7 +7534,7 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                                 errs.append(
                                     f"{s.line}: 域 {s.cap} 是危险域，索引 {v} 落在禁止区内")
                         continue
-                    cap = next((c for c in mod.caps if c.name == s.cap), None)
+                    cap = unit_caps.get(s.cap)
                     if cap is None:
                         errs.append(f"{s.line}: guard 引用了未声明的能力 {s.cap}")
                     elif (cap.kind in CAP_AUX_KINDS) != (s.aux is not None):
@@ -7539,7 +7559,7 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                                 f"{s.line}: 能力 {s.cap} 是危险域，索引 {v} 落在禁止区内")
                 elif isinstance(s, Quality):  # docs/306 §5.2 第 7 条
                     dom = next((d for d in reversed(dstack) if d.name == s.cap), None)
-                    cap = next((c for c in mod.caps if c.name == s.cap), None) if dom is None else None
+                    cap = unit_caps.get(s.cap) if dom is None else None
                     _walk_expr(s.expr, fscope, funcs, structs, errs, enums, lifetime)
                     if dom is not None:
                         if dom.kind != "adaptive":
@@ -7555,7 +7575,7 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                         errs.append(f"{s.line}: quality 的值类型 {qt}，应为整型")
                 elif isinstance(s, Discharge):  # docs/307 §5
                     dom = next((d for d in reversed(dstack) if d.name == s.cap), None)
-                    cap = next((c for c in mod.caps if c.name == s.cap), None) if dom is None else None
+                    cap = unit_caps.get(s.cap) if dom is None else None
                     _walk_expr(s.expr, fscope, funcs, structs, errs, enums, lifetime)
                     if dom is not None:
                         if dom.kind != "reachable":
@@ -8864,6 +8884,7 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None,
                                     # 读的就是 raw_mod 那几张表）
     raw_mod, raw_deps = _c.deepcopy(mod), _c.deepcopy(list(deps or []))
     mod, deps = prepare(mod, deps)  # M6
+    all_caps = [c for m in (deps or []) + [mod] for c in m.caps]
     layouts = []
     for u in mod.uses:
         p = (lom_root / u) if not Path(u).is_absolute() else Path(u)
@@ -9110,7 +9131,7 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None,
                    if (c.lo_inf or c.hi_inf) else {}),
                 **({"law": c.kind, "param": c.param} if c.kind != "regular" else {}),
             }
-            for c in mod.caps
+            for c in all_caps
         ],
         "functions": [
             {
@@ -13379,17 +13400,18 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
         _slots = max(16, getattr(mod, "domain_slots", 0))
         out.append(f"@__loment_audit = internal global [{_slots} x i64] zeroinitializer")
         out.append("")
-    if mod.caps:  # P4/M35: 域描述表 (space 名取 FNV-1a 32 位哈希)
+    all_caps = [c for m in (deps or []) + [mod] for c in m.caps]
+    if all_caps:  # P4/M35: 域描述表 (space 名取 FNV-1a 32 位哈希)
         rows = ", ".join(
             "{ i64, i64, i64, i64 } { i64 %d, i64 %d, i64 %d, i64 %d }"
             % (_fnv1a32(c.space),
                0 if c.lo_inf else c.lo,
                -1 if c.hi_inf else c.hi,
                1 if c.revocable else 0)
-            for c in mod.caps
+            for c in all_caps
         )
         out.append(
-            f"@__loment_caps = internal constant [{len(mod.caps)} x {{ i64, i64, i64, i64 }}] [{rows}]"
+            f"@__loment_caps = internal constant [{len(all_caps)} x {{ i64, i64, i64, i64 }}] [{rows}]"
         )
         out.append("")
     # **分配器与它的全局同进同出**（`docs/175` §3.4）：`alloc`/`free` 现在是对运行期的

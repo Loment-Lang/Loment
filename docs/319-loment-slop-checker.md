@@ -1,4 +1,4 @@
-# 318 · AI slop 的机械代理判据（`loment slop`）
+# 319 · AI slop 的机械代理判据（`loment slop`）
 
 > 状态: **已实现（2026-11-09）** · 上游: `docs/262` §10.7（LSPE 的 AI 检查器：问题源不是证据源）
 > · `docs/302`（AI 产出的标注）· `CONTRIBUTING.md`（合并与 review 的纪律）

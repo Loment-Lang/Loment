@@ -29,7 +29,7 @@
 module surface_data
 choose runtime
 
-pub fn n_codes() -> u32 { return 40; }
+pub fn n_codes() -> u32 { return 41; }
 
 /// 内部码段的下界（`#773`）。`E900` 起是"工具链自己崩了"那一类。
 pub fn internal_lo() -> u32 { return 900; }
@@ -122,6 +122,7 @@ pub fn code_title(c: u32, lang: u32) -> str {
     if k == 79 { return "`lgc` 与 `no_gc` 冲突"; }
     if k == 80 { return "a new keyword collides with a name"; }
     if k == 81 { return "新版关键字与你的名字撞了"; }
+    if k == 83 { return "借用区域不成立"; }
     if k == 1800 { return "the tool died without reporting (internal)"; }
     if k == 1801 { return "工具链进程死了，没留下诊断"; }
     if k == 1998 { return "unclassified (please report)"; }
@@ -882,6 +883,7 @@ pub fn code_nfix(c: u32) -> u32 {
     if c == 38 { return 3; }
     if c == 39 { return 3; }
     if c == 40 { return 3; }
+    if c == 41 { return 0; }
     if c == 900 { return 4; }
     if c == 999 { return 3; }
     return 0;

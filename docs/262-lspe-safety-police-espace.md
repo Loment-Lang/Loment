@@ -1358,10 +1358,25 @@ LSPE 两样都不动。
 | 它的回答变成 **Q014「AI 提出的怀疑」**，进 LSPC/CLI | 销掉任何义务、让构建变绿或变红（`--strict` 只影响退出码） |
 | 回答写进版本库、可评审、可重放 | 在编译期联网 |
 
-通道是文件：`loment lspe aicheck FILE --emit PATH` 出请求，
-`--replies PATH` 吃回答。请求按站点 id 排序、两次生成逐字节相同；回答只能引用
-已存在的站点 id（未知 id 是"未知"，不是新发现；单元不符是 E036）。模型调用不在
-编译期发生，所以 CI 是确定性的。
+通道是文件，但**送请求的路有三条**（`loment/lspe/aiask.py`，2026-11-09）：
+
+```
+loment lspe aicheck FILE --emit PATH            # 只出请求（确定性，可进版本库）
+loment lspe aicheck FILE --ask-cmd CMD          # 外部程序：bundle 进 stdin、replies 出 stdout
+loment lspe aicheck FILE --ask --model NAME     # 内置 Anthropic 通道（密钥只从环境读）
+loment lspe aicheck FILE --replies PATH         # 吃一份已有的回答
+```
+
+请求按站点 id 排序、两次生成逐字节相同；回答只能引用已存在的站点 id（未知 id 是
+"未知"，不是新发现；单元不符是 E036）。`--ask-cmd` **不经 shell**（参数表），可用任何
+语言实现；`--ask` 的密钥只读 `ANTHROPIC_API_KEY` / `LOMENT_AI_KEY`，模型读
+`--model` / `LOMENT_AI_MODEL`。两条通道都能用 `--replies-out PATH` 把归一化后的回答
+落盘 —— 回答进版本库、可评审、可重放。模型调用不在编译期发生，所以 CI 是确定性的。
+
+回答的落点也是两条常规入口：`loment lspe state FILE --replies PATH` 把 Q014 一并列出
+（stderr），`loment lspc check FILE --replies PATH` 把 Q014 贴在预检单后面（stdout）。
+两处都**只读**台账：带不带回答，State 的台账 JSON 逐字节相同（判据
+`lspe_test::test_aicheck_asks_an_external_model_and_keeps_it_out_of_the_ledger`）。
 
 ---
 

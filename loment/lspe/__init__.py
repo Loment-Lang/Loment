@@ -10,6 +10,7 @@ v2（0.1.5.2）把四件都补齐：质疑器（E1–E8）的判决、反问器�
 from __future__ import annotations
 
 from . import aicheck as _aicheck
+from . import aiask as _aiask
 from .cache import Cache
 from .census import census, census_e4
 from .derive import (build_trees, derivation, proof_hash, proof_root, sidecar,
@@ -40,6 +41,9 @@ aicheck_bundle = _aicheck.bundle
 aicheck_dumps = _aicheck.dumps
 aicheck_ingest = _aicheck.ingest
 aicheck_render = _aicheck.render_text
+#: 通道层（`docs/262` §10.7）：`--ask-cmd` / `--ask` 把请求送出去。
+aicheck_ask = _aiask.ask
+aicheck_prompt = _aiask.prompt
 
 __all__ = [
     "Cache",
@@ -59,9 +63,11 @@ __all__ = [
     "LSPE_SITE_KINDS",
     "LspeError",
     "LspeSolver",
+    "aicheck_ask",
     "aicheck_bundle",
     "aicheck_dumps",
     "aicheck_ingest",
+    "aicheck_prompt",
     "aicheck_render",
     "ask",
     "build_ledger",

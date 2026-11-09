@@ -1019,6 +1019,91 @@ def test_selfhost_ledger_emits_the_v2_fields():
     assert "pub fn lspe_e5_hit" in mod2 and "pub fn lspe_num" in mod2
 
 
+@test
+def test_aicheck_asks_an_external_model_and_keeps_it_out_of_the_ledger():
+    """`--ask-cmd` 端到端：请求 → 外部程序 → Q014 → state/LSPC；判决一个字节不变。
+
+    这条补的是"通道层"（`docs/262` §10.7）：从前只有出请求与吃回答两个动作，
+    没有**把请求送出去**的路。外部程序是确定性的，所以它可以进判据。
+    """
+    src = ("module m\n\nchoose lspe_aicheck_true\n\n"
+           "fn f(a: [u32; 4], i: u32) -> u32 {\n"
+           "    return a[i];\n}\n")
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        p = d / "m.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        fake = d / "fake_ai.py"
+        fake.write_text(
+            "import json, sys\n"
+            "b = json.load(sys.stdin)\n"
+            "req = b['requests'][0]\n"
+            "print(json.dumps({'findings': [{'site': req['site'],\n"
+            "  'verdict': 'suspicious', 'note': 'i is not guarded'}]}))\n",
+            encoding="utf-8")
+        replies = d / "replies.json"
+        cmd = f"{sys.executable} {fake}"
+
+        def run(*args):
+            return subprocess.run(
+                [sys.executable, str(ROOT / "tools" / "loment.py"), *args],
+                cwd=str(ROOT), capture_output=True, text=True,
+                encoding="utf-8", errors="replace", shell=False, timeout=180)
+
+        r = run("lspe", "aicheck", str(p), "--ask-cmd", cmd,
+                "--replies-out", str(replies))
+        assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+        assert "Q014" in r.stdout and "suspicious" in r.stdout, r.stdout
+        assert replies.exists(), "回答要能落盘进版本库"
+        doc = json.loads(replies.read_text(encoding="utf-8"))
+        assert doc["format"] == "lspe-aicheck-replies", doc
+        assert doc["unit"] == "m" and doc["findings"], doc
+
+        # 判决不变：带不带回答，台账（stdout JSON）逐字节相同。
+        base = run("lspe", "state", str(p))
+        with_ai = run("lspe", "state", str(p), "--replies", str(replies))
+        assert base.returncode == with_ai.returncode == 0, (base.stderr, with_ai.stderr)
+        assert base.stdout == with_ai.stdout, "AI 的回答不许改变台账"
+        assert "Q014" in with_ai.stderr, with_ai.stderr
+
+        sheet = run("lspc", "check", str(p), "--replies", str(replies))
+        assert sheet.returncode == 0, (sheet.returncode, sheet.stderr)
+        assert "[LSPC] Q014" in sheet.stdout, sheet.stdout[-800:]
+
+        # `--strict` 只改退出码，不改判决。
+        strict = run("lspe", "aicheck", str(p), "--ask-cmd", cmd, "--strict")
+        assert strict.returncode == 1, (strict.returncode, strict.stdout)
+
+
+@test
+def test_aicheck_channel_errors_are_clean_and_never_tracebacks():
+    """通道层的坏输入：没有 findings / 命令不存在 / 没有密钥 —— 都是 [ERR]，不是栈。"""
+    import lspe.aiask as aiask
+    bundle = {"format": "lspe-aicheck", "version": 1, "unit": "m",
+              "model": "fake", "requests": []}
+    # 空表必须显式写；缺 `findings` 不等于"没问题"。
+    try:
+        aiask.normalize({"verdict": "clean"}, bundle)
+        assert False, "缺 findings 必须被拒"
+    except lspe.LspeError as e:
+        assert e.code == "E036", e
+    ok = aiask.normalize({"findings": []}, bundle)
+    assert ok["format"] == "lspe-aicheck-replies" and ok["unit"] == "m", ok
+    # 围栏与闲话要能剥掉。
+    assert aiask._first_json('```json\n{"findings": []}\n```') == {"findings": []}
+    try:
+        aiask.run_command("no-such-loment-ai-binary", bundle, timeout=5)
+        assert False, "找不到命令必须报错"
+    except lspe.LspeError as e:
+        assert e.code == "E036", e
+    with mock.patch.dict("os.environ", {}, clear=True):
+        try:
+            aiask.ask_anthropic(bundle, key=None)
+            assert False, "没有密钥必须报错"
+        except lspe.LspeError as e:
+            assert "ANTHROPIC_API_KEY" in str(e) or "LOMENT_AI_KEY" in str(e), e
+
+
 def main() -> int:
     return loment_suite.run([fn for _name, fn in TESTS], "lspe_test")
 

@@ -442,6 +442,18 @@ def cmd_lspe_state(a) -> int:
     import lspe
     for _ln in lspe.lspc_lines(lp):
         print(_ln, file=sys.stderr)
+    # AI 检查器的怀疑（Q014）：只在显式给 `--replies` 时出现，永不改判决。
+    _rep = getattr(a, "replies", None)
+    if _rep:
+        if not lp.get("aicheck"):
+            print("[LSPE] 这份产物没开 `lspe_aicheck_true` —— 不读回答",
+                  file=sys.stderr)
+        else:
+            _res = _ai_ingest(_rep, getattr(mod, "lspe_sites", []), mod.name)
+            if _res is None:
+                return 1
+            for _ln in lspe.aicheck_render(_res):
+                print(_ln, file=sys.stderr)
     if lp["state"] == "lspe_close_admin":
         print("[LSPE] the audit is closed (lspe_close_admin): the checks still ran; "
               "only the ledger is off.", file=sys.stderr)
@@ -517,11 +529,32 @@ def cmd_lspe_verify(a) -> int:
     return 0
 
 
-def cmd_lspe_aicheck(a) -> int:
-    """`loment lspe aicheck FILE [--emit PATH] [--replies PATH]` —— AI 检查器的文件通道。
+def _ai_ingest(path_or_obj, sites, unit):
+    """把一份回答（路径或已解析的 dict）变成 Q014；出错返回 `None` 并打印原因。"""
+    import json
+    import lspe
+    try:
+        replies = (json.loads(Path(path_or_obj).read_text(encoding="utf-8"))
+                   if isinstance(path_or_obj, (str, Path)) else path_or_obj)
+        return lspe.aicheck_ingest(replies, sites, unit)
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"[ERR] 读不了回答：{e}", file=sys.stderr)
+    except lspe.LspeError as e:
+        print(f"[ERR] {e}", file=sys.stderr)
+    return None
 
-    **AI 是问题源，不是证据源**（`docs/262` §10.7）：这里生成一份确定性的审查请求，
-    或者吃掉一份模型回答、把它变成 Q014。回答永远不改变台账的判决。
+
+def cmd_lspe_aicheck(a) -> int:
+    """`loment lspe aicheck FILE` —— AI 检查器（`docs/262` §10.7）。
+
+    三条通道，全部在编译期之外：
+
+      --emit PATH        出请求（确定性；默认打到 stdout）
+      --ask-cmd CMD      外部程序：bundle 进 stdin、replies 出 stdout
+      --ask              内置 Anthropic 通道（密钥只从环境读）
+      --replies PATH     吃一份已存在的回答（版本库/手写）
+
+    **AI 是问题源，不是证据源**：回答只产 Q014，永不改变台账判决。
     """
     import json
     import lspe
@@ -542,26 +575,47 @@ def cmd_lspe_aicheck(a) -> int:
               file=sys.stderr)
         return 2
     sites = getattr(mod, "lspe_sites", [])
-    if not getattr(a, "replies", None):
-        lines = Path(p).read_text(encoding="utf-8").splitlines()
-        by_id = {s["id"]: s for s in sites}
-        bundle = lspe.aicheck_bundle(mod.name, ledger.get("_questions", []),
-                                     by_id, lines)
-        text = lspe.aicheck_dumps(bundle)
-        if getattr(a, "emit", None):
-            Path(a.emit).write_text(text, encoding="utf-8", newline="\n")
-            print(f"[LSPE] aicheck: {len(bundle['requests'])} 个请求 -> {a.emit}")
-        else:
-            print(text, end="")
-        return 0
-    try:
-        replies = json.loads(Path(a.replies).read_text(encoding="utf-8"))
-        result = lspe.aicheck_ingest(replies, sites, mod.name)
-    except (OSError, json.JSONDecodeError) as e:
-        print(f"[ERR] 读不了回答：{e}", file=sys.stderr)
+    by_id = {s["id"]: s for s in sites}
+    lines = Path(p).read_text(encoding="utf-8").splitlines()
+    bundle = lspe.aicheck_bundle(mod.name, ledger.get("_questions"), by_id, lines,
+                                 model=getattr(a, "model", None))
+
+    ask_cmd = getattr(a, "ask_cmd", None)
+    do_ask = bool(getattr(a, "ask", False))
+    replies_path = getattr(a, "replies", None)
+    chosen = int(bool(ask_cmd)) + int(do_ask) + int(bool(replies_path))
+    if chosen > 1:
+        print("[ERR] `--ask-cmd` / `--ask` / `--replies` 三选一",
+              file=sys.stderr)
         return 2
-    except lspe.LspeError as e:
-        print(f"[ERR] {e}", file=sys.stderr)
+
+    if getattr(a, "emit", None):
+        Path(a.emit).write_text(lspe.aicheck_dumps(bundle), encoding="utf-8",
+                                newline="\n")
+        print(f"[LSPE] aicheck: {len(bundle['requests'])} 个请求 -> {a.emit}")
+
+    if ask_cmd or do_ask:
+        try:
+            replies = lspe.aicheck_ask(
+                bundle, cmd=ask_cmd, model=getattr(a, "model", None),
+                timeout=float(getattr(a, "timeout", 120)))
+        except lspe.LspeError as e:
+            print(f"[ERR] {e}", file=sys.stderr)
+            return 2
+        out = getattr(a, "replies_out", None)
+        if out:
+            Path(out).write_text(lspe.aicheck_dumps(replies), encoding="utf-8",
+                                 newline="\n")
+            print(f"[LSPE] aicheck: 回答 -> {out}")
+    elif replies_path:
+        replies = replies_path
+    else:
+        if not getattr(a, "emit", None):
+            print(lspe.aicheck_dumps(bundle), end="")
+        return 0
+
+    result = _ai_ingest(replies, sites, mod.name)
+    if result is None:
         return 1
     if getattr(a, "json", False):
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -605,7 +659,8 @@ def cmd_lspc_check(a) -> int:
         answers=getattr(mod, "lspe_answers", None),
         dims=lomentc.effective_dims(mod),
         facts=lomentc._lspe_facts(mod, deps),
-        sidecar=bool(getattr(a, "previous_sidecar", None)))
+        sidecar=bool(getattr(a, "previous_sidecar", None)),
+        aicheck=(getattr(mod, "slots", {}) or {}).get("aicheck") == "true")
     # 跨构建记忆（`#760`）：上一轮的 deferred / 过期假设 / close_admin。
     prev_art = prev_side = None
     for attr, fname in (("previous", "artifact"), ("previous_sidecar", "sidecar")):
@@ -635,6 +690,21 @@ def cmd_lspc_check(a) -> int:
     else:
         for line in lspe.lspc_text(sheet):
             print(line)
+        # AI 检查器的怀疑（Q014）贴在预检单后面：它是**告知**，不阻断。
+        _rep = getattr(a, "replies", None)
+        if _rep:
+            if not ledger.get("aicheck"):
+                print("[LSPE] 这份单元没开 `lspe_aicheck_true` —— 不读回答",
+                      file=sys.stderr)
+            else:
+                _res = _ai_ingest(_rep, getattr(mod, "lspe_sites", []), mod.name)
+                if _res is None:
+                    return 1
+                for _f in _res["findings"]:
+                    print(f"[LSPC] Q014 {_f['site']} ({_f['verdict']}): "
+                          f"{_f['note']}")
+                for _sid in _res["unknown"]:
+                    print(f"[LSPC] Q014 未知站点 {_sid}")
         for e in errs:
             print(f"[ERR] {e}", file=sys.stderr)
     if mode == "strict" and sheet["blocking"]:
@@ -680,6 +750,8 @@ def main(argv: list[str] | None = None) -> int:
     lps.add_argument("--lspe-mode", default="full", choices=("full", "quiet", "strict"))
     lps.add_argument("--answer", action="append", metavar="SITE=B")
     lps.add_argument("--answers", default=None, metavar="FILE")
+    lps.add_argument("--replies", default=None, metavar="PATH",
+                     help="把 AI 检查器的回答（Q014）一并列出")
     lps.set_defaults(fn=cmd_lspe_state)
     lpw = lsub.add_parser("why")
     lpw.add_argument("site")
@@ -699,6 +771,16 @@ def main(argv: list[str] | None = None) -> int:
                      help="写一份审查请求（默认打到 stdout）")
     lpa.add_argument("--replies", default=None, metavar="PATH",
                      help="吃一份模型回答（只产 Q014，不改进判决）")
+    lpa.add_argument("--ask-cmd", default=None, metavar="CMD",
+                     help="外部程序：bundle 进 stdin、replies 出 stdout（不经 shell）")
+    lpa.add_argument("--ask", action="store_true",
+                     help="用内置 Anthropic 通道（ANTHROPIC_API_KEY / LOMENT_AI_KEY）")
+    lpa.add_argument("--model", default=None, metavar="NAME",
+                     help="模型名（也会记进请求与回答的 model 字段）")
+    lpa.add_argument("--replies-out", default=None, metavar="PATH",
+                     help="把（外部/内置）回答写到这里，便于进版本库")
+    lpa.add_argument("--timeout", type=float, default=120.0, metavar="SECONDS",
+                     help="模型通道的超时（默认 120s）")
     lpa.add_argument("--json", action="store_true")
     lpa.add_argument("--strict", action="store_true",
                      help="有 suspicious 时退出码 1")
@@ -717,6 +799,8 @@ def main(argv: list[str] | None = None) -> int:
     lcc.add_argument("--lspe-mode", default="full", choices=("full", "quiet", "strict"))
     lcc.add_argument("--answer", action="append", metavar="SITE=B")
     lcc.add_argument("--answers", default=None, metavar="FILE")
+    lcc.add_argument("--replies", default=None, metavar="PATH",
+                     help="把 AI 检查器的回答（Q014）贴到预检单后面")
     lcc.add_argument("--previous", default=None, metavar="ARTIFACT",
                      help="上一轮的 potato.json（跨构建记忆，`#760`）")
     lcc.add_argument("--previous-sidecar", default=None, metavar="FILE",

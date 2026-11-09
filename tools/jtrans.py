@@ -50,7 +50,16 @@ Java 的函数住在 `class X { … }` 里，而共享 parser 看的是**顶层*
 ## 子集
 
 Java 的类型：`int`→`i32`、`long`→`i64`、`short`→`i16`、`byte`→`i8`、`char`→`u16`、
-`boolean`→`bool`、`void`→`()`。**`float` / `double` / `String` 拒**（本语言没有浮点与字符串值）。
+`boolean`→`bool`、`String`→`str`、`void`→`()`。**`float` / `double` 拒**（本语言没有浮点）。
+
+**输出**：`System.out.print` / `System.out.println` 是这一门里唯一的"写出去"，
+翻成内建的 `print`（`str`）与 `print_num`（整数）—— `println` 是"写完再补一个换行"，
+因为本语言的 `print` **不自动换行**。实参按**类型**选内建，不按名字：
+`println(42)` 走 `print_num`、`println("x")` 走 `print`，布尔值两者都收不了（点名拒）。
+
+**字符串**：字面量照原文翻（`\n \t \r \0 \\ \"` 认得，`\uXXXX` / `\b` / `\f` 点名拒）；
+`+` 只在**两边都是字符串**时映成 `str_concat` —— Java 的 `"a" + 1` 是自动转字符串再拼，
+本语言没有那个转换，所以拒而不是发一份编不过的 `str_concat("a", 1)`。
 
 修饰词：`public` / `private` / `protected` / `static` / `final` / `synchronized` /
 `abstract` **收下并丢掉**（这里翻的是整个单元的全部函数，可见性在这个语境里没有
@@ -210,17 +219,22 @@ JAVA = Dialect(
         # Java 的 `char` 是 **16 位无符号**整数（不是一个字符串类型）—— 所以它映 `u16`
         "char": "u16",
         "boolean": "bool",
+        # `String` 映 `str`：**不可变、带长度**，与 Java 的 `String` 在值语义这一层
+        # 同形。库面差得多（本语言只有 `str_len` / `str_eq` / `str_concat`，
+        # 没有 `substring` / `indexOf` 那一套），但类型本身表示得了。
+        "String": "str",
         "void": "()",
     },
-    type_words=frozenset({"int", "long", "short", "byte", "char", "boolean", "void"}),
+    type_words=frozenset({"int", "long", "short", "byte", "char", "boolean",
+                          "String", "void"}),
     spec_words=frozenset({
-        "int", "long", "short", "byte", "char", "boolean", "void",
+        "int", "long", "short", "byte", "char", "boolean", "String", "void",
         # 收下并丢掉的修饰词
         "public", "private", "protected", "static", "final", "synchronized", "abstract",
         # 出现就拒的
         "native", "transient", "volatile", "strictfp", "package", "import",
         # 本子集表示不了的类型 —— **认得它们才报得出"这一族的哪个类型不支持"**
-        "float", "double", "String", "Object", "var",
+        "float", "double", "Object", "var",
     }),
     linkage=frozenset({"public", "private", "protected", "static", "final",
                        "synchronized", "abstract"}),
@@ -240,6 +254,10 @@ JAVA = Dialect(
     coerce_int_to_bool=False,
     coerce_bool_to_int=False,
     int_default="i32",
+    #: 字符串字面量与 `System.out.print/println`（见 `trans_core` 那两个开关）。
+    #: 这两条一起才让 Java 写法的程序**第一次有输出**。
+    str_lits=True,
+    system_out=True,
     narrow_literal_check=True,
     reject_const_zero_div=True,
     mask_shift=True,

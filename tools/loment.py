@@ -628,6 +628,34 @@ def cmd_lspe_aicheck(a) -> int:
     return 0
 
 
+def cmd_lspe_loans(a) -> int:
+    """`loment lspe loans FILE` —— E10 借用检查器的 loan 图（`docs/317`）。
+
+    这一层是**报告**：不改编译判决、不写台账。它把 `&x` / `&mut x` 变成 loan，
+    按 A1 的口径（kill = 最后一次使用）算存活，报冲突与悬垂。
+    """
+    import json
+    import lspe
+    p, mod, deps = _lspe_input(a, check_it=False)
+    dims = lomentc.effective_dims(mod)
+    if dims.get("lifetime", "lifetime_no") == "lifetime_no":
+        print("[LSPE] 这份单元关了生命周期（`lifetime_no`）—— 没有 loan 可查",
+              file=sys.stderr)
+        return 0
+    rep = lspe.loans_analyze(getattr(mod, "toks", []), mod.name)
+    if getattr(a, "json", False):
+        print(json.dumps(rep, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        for line in lspe.loans_text(rep):
+            print(line)
+        for q in rep["questions"]:
+            print(f"[LSPE] {q['code']} {q['site']}: {q['claim']}",
+                  file=sys.stderr)
+    if getattr(a, "strict", False) and (rep["conflicts"] or rep["findings"]):
+        return 1
+    return 0
+
+
 def _lspc_mode(a, mod) -> str:
     import lspe
     if getattr(a, "lspc", None):
@@ -789,6 +817,16 @@ def main(argv: list[str] | None = None) -> int:
     lpa.add_argument("--answer", action="append", metavar="SITE=B")
     lpa.add_argument("--answers", default=None, metavar="FILE")
     lpa.set_defaults(fn=cmd_lspe_aicheck)
+    lpl = lsub.add_parser("loans")
+    lpl.add_argument("file")
+    lpl.add_argument("--json", action="store_true")
+    lpl.add_argument("--strict", action="store_true",
+                     help="有冲突/悬垂时退出码 1（报告面，不影响编译）")
+    lpl.add_argument("--lspe-level", type=int, default=3, choices=(0, 1, 2, 3, 4))
+    lpl.add_argument("--lspe-mode", default="full", choices=("full", "quiet", "strict"))
+    lpl.add_argument("--answer", action="append", metavar="SITE=B")
+    lpl.add_argument("--answers", default=None, metavar="FILE")
+    lpl.set_defaults(fn=cmd_lspe_loans)
     lc = sub.add_parser("lspc")
     lcsub = lc.add_subparsers(dest="lspc_cmd", required=True)
     lcc = lcsub.add_parser("check")

@@ -31,6 +31,8 @@ TESTS: list[tuple[str, object]] = []
 # lspe-probe: Exclusive
 # lspe-probe: TypeWellFormed
 # lspe-probe: DropHonest
+# lspe-probe: InDomain
+# lspe-probe: CapabilityLive
 
 import json  # noqa: E402
 import subprocess  # noqa: E402
@@ -741,6 +743,90 @@ def test_safe_set_converges_past_256_rounds():
 
 
 @test
+def test_domain_checker_becomes_lspe_sites():
+    """E9 域检查器（`docs/306`–`308`）：域、守卫的包含性、撤销都进 LSPE 的账。
+
+    它不新增错误码：证不出来时走反问器 Q008 / LSPC，而不是拒绝。
+    """
+    src = ("module m\n\nchoose runtime\n\n"
+           "capability d : disk[0..4] revocable\n\n"
+           "fn f(slot: u32) -> u32 {\n"
+           "    guard d(2);\n"
+           "    guard d(slot);\n"
+           "    return slot;\n}\n")
+    doc, sites = _unit(src)
+    kinds = sorted(s["kind"] for s in sites)
+    assert kinds.count("domain") == 1, kinds
+    assert kinds.count("domain_access") == 2, kinds
+    assert kinds.count("revoke") == 1, kinds
+    assert doc["per_kind"]["InDomain"] == "2/3", doc["per_kind"]   # 域 + 字面量
+    assert doc["per_kind"]["CapabilityLive"] == "1/1", doc["per_kind"]
+    assert doc["floor_detail"]["assumed"] == 2, doc["floor_detail"]  # 撤销 + 非字面量
+
+    bad = [s for s in sites if s["kind"] == "domain_access" and not s["proved"]]
+    assert len(bad) == 1 and bad[0]["reason"] == "unknown_domain", bad
+    q = lspe.ask([dict(bad[0])], lspe.LspeSolver([dict(bad[0])], 3).run())
+    assert q["questions"][0]["code"] == "Q008", q
+
+
+@test
+def test_domain_checker_proves_loop_containment_at_L3():
+    """`for i in 0..5 { guard d(i) }` 对 `[0..4]` 是 `GlobalInvariant`；L2 不认。"""
+    def access(src):
+        _doc, sites = _unit(src, level=3)
+        a = [s for s in sites if s["kind"] == "domain_access"]
+        assert len(a) == 1, sites
+        return a[0]
+
+    for_ = access("module m\n\nchoose runtime\n\n"
+                  "capability d : disk[0..4]\n\n"
+                  "fn f() -> u32 {\n    let s: u32 = 0;\n"
+                  "    for i in 0..5 {\n        guard d(i);\n"
+                  "        s = s + i;\n    }\n    return s;\n}\n")
+    assert for_["evidence"] == "GlobalInvariant" and for_["proved"], for_
+
+    while_le = access("module m\n\nchoose runtime\n\n"
+                      "capability d : disk[0..4]\n\n"
+                      "fn f() -> u32 {\n    let s: u32 = 0;\n"
+                      "    let i: u32 = 0;\n    while i <= 4 {\n"
+                      "        guard d(i);\n        i = i + 1;\n"
+                      "    }\n    return s;\n}\n")
+    assert while_le["evidence"] == "GlobalInvariant", while_le
+
+    # 有符号的 `i < 5` 不证（`i` 可以为负）。
+    signed = access("module m\n\nchoose runtime\n\n"
+                    "capability d : disk[0..4]\n\n"
+                    "fn f() -> u32 {\n    let s: u32 = 0;\n"
+                    "    let i: i32 = 0;\n    while i < 5 {\n"
+                    "        guard d(i);\n        i = i + 1;\n"
+                    "    }\n    return s;\n}\n")
+    assert signed["evidence"] == "none", signed
+
+    # L2 不认 GlobalInvariant。
+    _d, sites2 = _unit("module m\n\nchoose runtime\n\n"
+                       "capability d : disk[0..4]\n\n"
+                       "fn f() -> u32 {\n    let s: u32 = 0;\n"
+                       "    for i in 0..5 {\n        guard d(i);\n"
+                       "        s = s + i;\n    }\n    return s;\n}\n", level=2)
+    a2 = [s for s in sites2 if s["kind"] == "domain_access"][0]
+    assert not lspe.LspeSolver([a2], 2).run().proved(a2)
+
+
+@test
+def test_domain_checker_feeds_lspc_rows():
+    """LSPC 的 revocable / 非字面量 guard 两行以**站点**为准（不再是词法计数）。"""
+    src = ("module m\n\nchoose runtime\n\n"
+           "capability d : disk[0..4] revocable\n\n"
+           "fn f(slot: u32) -> u32 {\n    guard d(slot);\n    return slot;\n}\n")
+    _doc, sites = _unit(src)
+    sh = lspe.lspc_sheet(sites, {"state": "lspe_open_admin", "lspc": "full"})
+    rows = {r["id"]: r for r in sh["rows"]}
+    assert any(s.startswith("m:revoke:") for s in rows["revocable"]["sites"]), rows["revocable"]
+    assert any(s.startswith("m:domain_access:") for s in rows["nonliteral_guard"]["sites"]), \
+        rows["nonliteral_guard"]
+
+
+@test
 def test_e7_e8_differential_and_probe_registry():
     """E7 只证一致不证对；E8 的登记表机械生成，缺探针 ⇒ Q002（`#766`）。"""
     twin = {"id": "m:index:1", "kind": "index", "obligation": "InBounds",
@@ -751,7 +837,7 @@ def test_e7_e8_differential_and_probe_registry():
     assert lspe_probes.missing() == [], lspe_probes.missing()
     assert lspe_probes.unknown() == [], lspe_probes.unknown()
 
-    inert = {"id": "m:index:2", "kind": "index", "obligation": "CapabilityLive",
+    inert = {"id": "m:index:2", "kind": "index", "obligation": "LadderLiability",
              "evidence": "none", "line": 2}
     solver = lspe.LspeSolver([inert], 3).run()
     q = lspe.ask([inert], solver)["questions"][0]

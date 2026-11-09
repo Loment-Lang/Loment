@@ -236,6 +236,7 @@ def census(toks: list, unit: str,
         return _covered(spans, i)
 
     census_e1e2(toks, sid, sites, unsourced, cover, _loops(toks), _array_lens(toks))
+    census_domain(toks, sid, sites, cover)
     census_bounds(toks, sid, sites, cover, lms)
     census_e3(toks, sid, sites, cover)
     census_e4(toks, sid, sites, (), cover)
@@ -399,6 +400,252 @@ def census_drop(toks: list, sid, sites: list[dict]) -> None:
                       "evidence": "Assumed", "source": f"#floor-drop-{name}",
                       "destructor": name, "line": t.line, "span": _sp(t),
                       "proved": True})
+
+
+def _shape_at(toks: list, j: int):
+    """`[lo..hi]` 的词法解析（`docs/306` §2）：`()` 表示该侧无界。
+
+    返回 `(lo, hi, lo_inf, hi_inf, after)`，`after` 是 `]` 之后的下标；不成形回 `None`。
+    """
+    n = len(toks)
+    if j >= n or not (toks[j].kind == "punct" and toks[j].val == "["):
+        return None
+    k = j + 1
+    lo = hi = 0
+    lo_inf = hi_inf = False
+    if k + 1 < n and toks[k].val == "(" and toks[k + 1].val == ")":
+        lo_inf = True
+        k += 2
+    else:
+        v = _lspe_int(toks[k] if k < n else None)
+        if v is None:
+            return None
+        lo = v
+        k += 1
+    if not (k + 1 < n and toks[k].val == "." and toks[k + 1].val == "."):
+        return None
+    k += 2
+    if k + 1 < n and toks[k].val == "(" and toks[k + 1].val == ")":
+        hi_inf = True
+        k += 2
+    else:
+        v = _lspe_int(toks[k] if k < n else None)
+        if v is None:
+            return None
+        hi = v
+        k += 1
+    if k >= n or not (toks[k].kind == "punct" and toks[k].val == "]"):
+        return None
+    return lo, hi, lo_inf, hi_inf, k + 1
+
+
+def _domain_decls(toks: list) -> dict[str, dict]:
+    """`capability NAME : SPACE[shape] [law] [revocable]` 与
+    `domain [NAME :] SPACE[shape] … {` 的声明表（E9 的输入，`docs/306`–`308`）。"""
+    out: dict[str, dict] = {}
+    n = len(toks)
+    for i, t in enumerate(toks):
+        if t.kind != "ident":
+            continue
+        name = ""
+        space = ""
+        sh = None
+        start = 0
+        if t.val == "capability":
+            if (i + 4 < n and toks[i + 1].kind == "ident"
+                    and toks[i + 2].kind == "punct" and toks[i + 2].val == ":"
+                    and toks[i + 3].kind == "ident"
+                    and toks[i + 4].kind == "punct" and toks[i + 4].val == "["):
+                name, space = toks[i + 1].val, toks[i + 3].val
+                sh = _shape_at(toks, i + 4)
+        elif t.val == "domain":
+            if (i + 4 < n and toks[i + 1].kind == "ident"
+                    and toks[i + 2].kind == "punct" and toks[i + 2].val == ":"
+                    and toks[i + 3].kind == "ident"
+                    and toks[i + 4].kind == "punct" and toks[i + 4].val == "["):
+                name, space = toks[i + 1].val, toks[i + 3].val
+                sh = _shape_at(toks, i + 4)
+            elif (i + 2 < n and toks[i + 1].kind == "ident"
+                    and toks[i + 2].kind == "punct" and toks[i + 2].val == "["):
+                name, space = "", toks[i + 1].val      # 匿名块：id 用空间名
+                sh = _shape_at(toks, i + 2)
+        if sh is None:
+            continue
+        lo, hi, lo_inf, hi_inf, after = sh
+        # 尾巴（时律 / `revocable` / `child_of`）只扫到 `{` 或下一个顶层关键字。
+        revocable = False
+        k = after
+        stop = min(n, after + 10)
+        while k < stop:
+            if toks[k].kind == "punct" and toks[k].val in ("{", ";"):
+                break
+            if toks[k].kind == "ident" and toks[k].val == "revocable":
+                revocable = True
+            k += 1
+        key = name or f"${space}"
+        start = i
+        out[key] = {"name": name or f"${space}", "space": space, "lo": lo,
+                    "hi": hi, "lo_inf": lo_inf, "hi_inf": hi_inf,
+                    "revocable": revocable, "line": t.line,
+                    "span": _sp(toks[start])}
+    return out
+
+
+def _guard_loop_ok(toks: list, at: int, arg: str, lo: int, hi: int,
+                   lo_inf: bool, hi_inf: bool) -> bool:
+    """`guard d(i)` 在循环里能否由归纳证明落在 `[lo..hi]` 内（E9 的 GlobalInvariant）。
+
+    * `for i in A..B`：`i ∈ [A, B-1]`；
+    * 无符号 `while i < B`：`i ∈ [0, B-1]`；
+    * 无符号 `while i <= B`：`i ∈ [0, B]`。
+
+    只有**裸循环变量**才认；`i + 1` 这种交给反问器（Q008）。
+    """
+    n = len(toks)
+    for k, t in enumerate(toks):
+        if t.kind != "ident" or t.val not in ("for", "while"):
+            continue
+        if t.val == "for":
+            if not (k + 3 < n and toks[k + 1].kind == "ident"
+                    and toks[k + 1].val == arg and toks[k + 2].kind == "ident"
+                    and toks[k + 2].val == "in"):
+                continue
+            j = k + 3
+            dots = -1
+            while j + 1 < n:
+                if (toks[j].kind == "punct" and toks[j].val == "."
+                        and toks[j + 1].kind == "punct" and toks[j + 1].val == "."):
+                    dots = j
+                    break
+                if toks[j].kind == "punct" and toks[j].val in ("{", ";"):
+                    break
+                j += 1
+            if dots < 0:
+                continue
+            a = _lspe_int(toks[dots - 1] if dots > 0 else None)
+            b = _lspe_int(toks[dots + 2] if dots + 2 < n else None)
+            if a is None or b is None:
+                continue
+            brace = next((q for q in range(dots + 3, n)
+                          if toks[q].kind == "punct" and toks[q].val == "{"), -1)
+            if brace < 0:
+                continue
+            end = _lspe_match_brace(toks, brace)
+            if end is None or not (brace < at < end):
+                continue
+            if (lo_inf or lo <= a) and (hi_inf or b - 1 <= hi):
+                return True
+            continue
+        # while
+        if not (k + 4 < n and toks[k + 1].kind == "ident"
+                and toks[k + 1].val == arg
+                and toks[k + 2].kind == "punct" and toks[k + 2].val == "<"):
+            continue
+        if not _unsigned(toks, arg):
+            continue
+        le = (k + 3 < n and toks[k + 3].kind == "punct" and toks[k + 3].val == "=")
+        btok = k + 4 if le else k + 3
+        b = _lspe_int(toks[btok] if btok < n else None)
+        if b is None:
+            continue
+        brace = next((q for q in range(btok + 1, n)
+                      if toks[q].kind == "punct" and toks[q].val == "{"), -1)
+        if brace < 0:
+            continue
+        end = _lspe_match_brace(toks, brace)
+        if end is None or not (brace < at < end):
+            continue
+        upper = b if le else b - 1
+        if (lo_inf or lo == 0) and (hi_inf or upper <= hi):
+            return True
+    return False
+
+
+def census_domain(toks: list, sid, sites: list[dict], cover=lambda _i: None) -> None:
+    """**E9 域检查器**（`docs/306`–`308`，遵循 `docs/262` 的过程）。
+
+    它不是第二套运行时：判决仍由编译器与 `guard` 的 trap 做。这里做的是把
+    **域的事实**变成 LSPE 的站点与义务：
+
+    * 每个域声明一条 `InDomain`（证据 `Typed`）——域本身可复核；
+    * 每个 `guard d(x)` 一条 `InDomain`：字面量且落在 `[lo..hi]` ⇒ `Syntactic`，
+      循环归纳能证明 ⇒ `GlobalInvariant`，否则**无来源** ⇒ 反问器 Q008；
+    * 每个 `revocable` 域一条 `CapabilityLive`（证据 `Assumed`，
+      来源 `#floor-revoke-<名字>`）——撤销今天只有表示，`docs/146` §3。
+
+    域检查器因此不产生新的错误码：它证不出来时走 Q008 / LSPC，而不是拒绝。
+    """
+    decls = _domain_decls(toks)
+    n = len(toks)
+    by_name = {k: v for k, v in decls.items()}
+
+    def _site_id(kind: str, key: str) -> str:
+        return sid(kind, key)
+
+    # ---- 声明 + 撤销 ----
+    for key in sorted(decls):
+        d = decls[key]
+        proved = d["lo_inf"] or d["hi_inf"] or d["lo"] <= d["hi"]
+        sites.append({
+            "id": _site_id("domain", f"domain:{key}"),
+            "kind": "domain", "claim": "allow", "obligation": "InDomain",
+            "evidence": ("Typed" if proved else "none"),
+            "source": (f"capability:{key}" if proved else None),
+            "domain": d["name"], "space": d["space"],
+            "line": d["line"], "span": d["span"], "proved": proved,
+            "reason": (None if proved else "unknown_domain"),
+        })
+        if d["revocable"]:
+            sites.append({
+                "id": _site_id("revoke", f"revoke:{key}"),
+                "kind": "revoke", "claim": "allow", "obligation": "CapabilityLive",
+                "evidence": "Assumed", "source": f"#floor-revoke-{key}",
+                "domain": d["name"], "line": d["line"], "span": d["span"],
+                "proved": True,
+            })
+
+    # ---- 每个 `guard d(x)` 一条包含性站点 ----
+    for i, t in enumerate(toks):
+        if not (t.kind == "ident" and t.val == "guard" and i + 3 < n):
+            continue
+        if not (toks[i + 1].kind == "ident" and toks[i + 2].kind == "punct"
+                and toks[i + 2].val == "("):
+            continue
+        name = toks[i + 1].val
+        arg = toks[i + 3]
+        d = by_name.get(name)
+        if d is None:
+            # 未声明的能力：检查器已经报错；台账仍记一条无来源站点（不静默）。
+            sites.append({
+                "id": _site_id("domain_access", f"guard:{name}:undeclared"),
+                "kind": "domain_access", "claim": "allow", "obligation": "InDomain",
+                "evidence": "none", "source": None, "domain": name,
+                "line": t.line, "span": _sp(t), "proved": False,
+                "reason": "unknown_domain",
+            })
+            continue
+        evidence = "none"
+        source = None
+        if arg.kind == "number":
+            v = _lspe_int(arg)
+            if v is not None and (d["lo_inf"] or d["lo"] <= v) \
+                    and (d["hi_inf"] or v <= d["hi"]):
+                evidence, source = "Syntactic", f"domain:{name}"
+        elif arg.kind == "ident" and _guard_loop_ok(
+                toks, i, arg.val, d["lo"], d["hi"], d["lo_inf"], d["hi_inf"]):
+            evidence, source = "GlobalInvariant", f"domain:{name}:loop"
+        site = {
+            "id": _site_id("domain_access", f"guard:{name}:{arg.val}"),
+            "kind": "domain_access", "claim": "allow", "obligation": "InDomain",
+            "evidence": evidence, "source": source, "domain": name,
+            "line": t.line, "span": _sp(t), "proved": evidence != "none",
+            "reason": (None if evidence != "none" else "unknown_domain"),
+        }
+        cid = cover(i)
+        if cid:
+            site["covered_by"] = cid
+            site["proved"] = False
+        sites.append(site)
 
 
 def census_wf(instances, sid, sites: list[dict]) -> None:

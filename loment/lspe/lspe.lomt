@@ -402,6 +402,366 @@ pub fn lspe_e5_hit(unit: ptr, t: ptr, lo: u32, hi: u32, br: u32) -> u32 {
     return hit;
 }
 
+/// E9 的循环包含性（`docs/306`–`308`）：`guard d(i)` 在循环里能否由归纳落在
+/// `[dl..dh]` 内。`linf`/`hinf` 是域的无界侧。
+///
+/// * `for i in A..B`：`i ∈ [A, B-1]`；
+/// * 无符号 `while i < B`：`i ∈ [0, B-1]`；`while i <= B`：`i ∈ [0, B]`。
+fn lspe_dom_loop(unit: ptr, t: ptr, lo: u32, hi: u32, at: u32, arg: u32,
+                 dl: u32, dh: u32, linf: u32, hinf: u32) -> u32 {
+    let k: u32 = lo;
+    let j: u32 = 0;
+    let dots: u32 = 0;
+    let brace: u32 = 0;
+    let end: u32 = 0;
+    let d: u32 = 0;
+    let fin: u32 = 0;
+    let a: u32 = 0;
+    let b: u32 = 0;
+    let upper: u32 = 0;
+    let le: u32 = 0;
+    let bt: u32 = 0;
+    let uns: u32 = 0;
+    let w: u32 = 0;
+    while k < hi && lspe_kind(t, k) != 4 {
+        if lspe_kind(t, k) == 0 && lspe_tis(unit, t, k, "for") == 1
+                && k + 3 < hi && lspe_kind(t, k + 1) == 0
+                && lspe_teq(unit, t, k + 1, arg) == 1
+                && lspe_kind(t, k + 2) == 0
+                && lspe_tis(unit, t, k + 2, "in") == 1 {
+            j = k + 3;
+            dots = 0;
+            while j + 1 < hi && dots == 0 {
+                if lspe_kind(t, j) == 3 && lspe_tis(unit, t, j, ".") == 1
+                        && lspe_kind(t, j + 1) == 3
+                        && lspe_tis(unit, t, j + 1, ".") == 1 {
+                    dots = 1;
+                } else {
+                    j = j + 1;
+                }
+            }
+            if dots == 1 && j > 0 && lspe_kind(t, j - 1) == 1
+                    && j + 2 < hi && lspe_kind(t, j + 2) == 1 {
+                a = lspe_num(unit, t, j - 1);
+                b = lspe_num(unit, t, j + 2);
+                brace = 0;
+                j = j + 3;
+                while j < hi && brace == 0 {
+                    if lspe_kind(t, j) == 3 && lspe_tis(unit, t, j, "{") == 1 {
+                        brace = j;
+                    }
+                    j = j + 1;
+                }
+                if brace != 0 {
+                    d = 0;
+                    end = hi;
+                    fin = 0;
+                    j = brace;
+                    while j < hi && fin == 0 {
+                        if lspe_kind(t, j) == 3 && lspe_tis(unit, t, j, "{") == 1 {
+                            d = d + 1;
+                        }
+                        if lspe_kind(t, j) == 3 && lspe_tis(unit, t, j, "}") == 1 {
+                            d = d - 1;
+                            if d == 0 {
+                                end = j;
+                                fin = 1;
+                            }
+                        }
+                        j = j + 1;
+                    }
+                    if brace < at && at < end
+                            && (linf == 1 || dl <= a)
+                            && (hinf == 1 || b <= dh + 1) {
+                        return 1;
+                    }
+                }
+            }
+        }
+        if lspe_kind(t, k) == 0 && lspe_tis(unit, t, k, "while") == 1
+                && k + 3 < hi && lspe_kind(t, k + 1) == 0
+                && lspe_teq(unit, t, k + 1, arg) == 1
+                && lspe_kind(t, k + 2) == 3 && lspe_tis(unit, t, k + 2, "<") == 1 {
+            // 无符号前提（与 E5 同一条）：`i < N` 对无符号就是 `0 <= i < N`。
+            uns = 0;
+            w = lo;
+            while w + 2 < hi && uns == 0 {
+                if lspe_kind(t, w) == 0 && lspe_teq(unit, t, w, arg) == 1
+                        && lspe_kind(t, w + 1) == 3 && lspe_tis(unit, t, w + 1, ":") == 1
+                        && lspe_kind(t, w + 2) == 0
+                        && (lspe_tis(unit, t, w + 2, "u8") == 1
+                            || lspe_tis(unit, t, w + 2, "u16") == 1
+                            || lspe_tis(unit, t, w + 2, "u32") == 1
+                            || lspe_tis(unit, t, w + 2, "u64") == 1
+                            || lspe_tis(unit, t, w + 2, "usize") == 1) {
+                    uns = 1;
+                }
+                w = w + 1;
+            }
+            if uns == 1 {
+                le = 0;
+                bt = k + 3;
+                if k + 3 < hi && lspe_kind(t, k + 3) == 3
+                        && lspe_tis(unit, t, k + 3, "=") == 1 {
+                    le = 1;
+                    bt = k + 4;
+                }
+                if bt < hi && lspe_kind(t, bt) == 1 {
+                    b = lspe_num(unit, t, bt);
+                    upper = b;
+                    if le == 0 {
+                        upper = b - 1;
+                    }
+                    brace = 0;
+                    j = bt + 1;
+                    while j < hi && brace == 0 {
+                        if lspe_kind(t, j) == 3 && lspe_tis(unit, t, j, "{") == 1 {
+                            brace = j;
+                        }
+                        j = j + 1;
+                    }
+                    if brace != 0 {
+                        d = 0;
+                        end = hi;
+                        fin = 0;
+                        j = brace;
+                        while j < hi && fin == 0 {
+                            if lspe_kind(t, j) == 3 && lspe_tis(unit, t, j, "{") == 1 {
+                                d = d + 1;
+                            }
+                            if lspe_kind(t, j) == 3 && lspe_tis(unit, t, j, "}") == 1 {
+                                d = d - 1;
+                                if d == 0 {
+                                    end = j;
+                                    fin = 1;
+                                }
+                            }
+                            j = j + 1;
+                        }
+                        if brace < at && at < end
+                                && (linf == 1 || dl == 0)
+                                && (hinf == 1 || upper <= dh) {
+                            return 1;
+                        }
+                    }
+                }
+            }
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+/// **E9 域检查器**（`docs/306`–`308`，遵循 `docs/262` 的过程）的自举侧。
+///
+/// `tab` 是声明表 `[name_tok, lo, hi, flags] × 64`（flags: 1 下无界 / 2 上无界 /
+/// 4 revocable）；`out` 是五个计数：
+/// `[域总数, 字面量证明的 guard, 循环证明的 guard, guard 总数, 撤销域数]`。
+/// 返回 1 = 声明表超容量（调用方点名失败）。
+pub fn lspe_domain(unit: ptr, t: ptr, lo: u32, hi: u32, tab: ptr, out: ptr) -> u32 {
+    let q: u32 = 0;
+    while q < 5 {
+        store32(out, q * 4, 0);
+        q = q + 1;
+    }
+    let dt: u32 = 0;
+    let i: u32 = lo;
+    let si: u32 = 0;
+    let ntok: u32 = 0;
+    let iscap: u32 = 0;
+    let isdom: u32 = 0;
+    let okc: u32 = 0;
+    let k: u32 = 0;
+    let dl: u32 = 0;
+    let dh: u32 = 0;
+    let linf: u32 = 0;
+    let hinf: u32 = 0;
+    let sok: u32 = 0;
+    let rv: u32 = 0;
+    let z: u32 = 0;
+    let lim: u32 = 0;
+    let e: u32 = 0;
+    let at: u32 = 0;
+    let name: u32 = 0;
+    let arg: u32 = 0;
+    let found: u32 = 0;
+    let dl2: u32 = 0;
+    let dh2: u32 = 0;
+    let linf2: u32 = 0;
+    let hinf2: u32 = 0;
+    while i < hi && lspe_kind(t, i) != 4 {
+        iscap = 0;
+        isdom = 0;
+        if lspe_kind(t, i) == 0 && lspe_tis(unit, t, i, "capability") == 1 {
+            iscap = 1;
+        }
+        if lspe_kind(t, i) == 0 && lspe_tis(unit, t, i, "domain") == 1 {
+            isdom = 1;
+        }
+        if iscap == 1 || isdom == 1 {
+            si = 0;
+            ntok = LS_NONE;
+            okc = 0;
+            if iscap == 1 {
+                if i + 4 < hi && lspe_kind(t, i + 1) == 0
+                        && lspe_kind(t, i + 2) == 3 && lspe_tis(unit, t, i + 2, ":") == 1
+                        && lspe_kind(t, i + 3) == 0
+                        && lspe_kind(t, i + 4) == 3
+                        && lspe_tis(unit, t, i + 4, "[") == 1 {
+                    si = i + 4;
+                    ntok = i + 1;
+                    okc = 1;
+                }
+            } else {
+                if i + 4 < hi && lspe_kind(t, i + 1) == 0
+                        && lspe_kind(t, i + 2) == 3 && lspe_tis(unit, t, i + 2, ":") == 1
+                        && lspe_kind(t, i + 3) == 0
+                        && lspe_kind(t, i + 4) == 3
+                        && lspe_tis(unit, t, i + 4, "[") == 1 {
+                    si = i + 4;
+                    ntok = i + 1;
+                    okc = 1;
+                } else if i + 2 < hi && lspe_kind(t, i + 1) == 0
+                        && lspe_kind(t, i + 2) == 3
+                        && lspe_tis(unit, t, i + 2, "[") == 1 {
+                    si = i + 2;
+                    ntok = LS_NONE;
+                    okc = 1;
+                }
+            }
+            if okc == 1 {
+                // 形状 `[lo..hi]`，两侧都可以是 `()`。
+                k = si + 1;
+                dl = 0;
+                dh = 0;
+                linf = 0;
+                hinf = 0;
+                sok = 0;
+                if k + 1 < hi && lspe_kind(t, k) == 3 && lspe_tis(unit, t, k, "(") == 1
+                        && lspe_kind(t, k + 1) == 3
+                        && lspe_tis(unit, t, k + 1, ")") == 1 {
+                    linf = 1;
+                    k = k + 2;
+                } else if k < hi && lspe_kind(t, k) == 1 {
+                    dl = lspe_num(unit, t, k);
+                    k = k + 1;
+                }
+                if k + 1 < hi && lspe_kind(t, k) == 3 && lspe_tis(unit, t, k, ".") == 1
+                        && lspe_kind(t, k + 1) == 3
+                        && lspe_tis(unit, t, k + 1, ".") == 1 {
+                    k = k + 2;
+                    if k + 1 < hi && lspe_kind(t, k) == 3
+                            && lspe_tis(unit, t, k, "(") == 1
+                            && lspe_kind(t, k + 1) == 3
+                            && lspe_tis(unit, t, k + 1, ")") == 1 {
+                        hinf = 1;
+                        k = k + 2;
+                        if k < hi && lspe_kind(t, k) == 3
+                                && lspe_tis(unit, t, k, "]") == 1 {
+                            sok = 1;
+                            k = k + 1;
+                        }
+                    } else if k < hi && lspe_kind(t, k) == 1 {
+                        dh = lspe_num(unit, t, k);
+                        k = k + 1;
+                        if k < hi && lspe_kind(t, k) == 3
+                                && lspe_tis(unit, t, k, "]") == 1 {
+                            sok = 1;
+                            k = k + 1;
+                        }
+                    }
+                }
+                if sok == 1 {
+                    // 尾巴：时律 / `revocable` / `child_of`。扫到块头或下一条声明。
+                    rv = 0;
+                    z = k;
+                    lim = k + 10;
+                    if lim > hi {
+                        lim = hi;
+                    }
+                    while z < lim {
+                        if lspe_kind(t, z) == 3 && lspe_tis(unit, t, z, "{") == 1 {
+                            z = lim;
+                        } else if lspe_kind(t, z) == 3
+                                && lspe_tis(unit, t, z, ";") == 1 {
+                            z = lim;
+                        } else if lspe_kind(t, z) == 0
+                                && (lspe_tis(unit, t, z, "capability") == 1
+                                    || lspe_tis(unit, t, z, "domain") == 1
+                                    || lspe_tis(unit, t, z, "fn") == 1
+                                    || lspe_tis(unit, t, z, "module") == 1
+                                    || lspe_tis(unit, t, z, "use") == 1) {
+                            z = lim;
+                        } else {
+                            if lspe_kind(t, z) == 0
+                                    && lspe_tis(unit, t, z, "revocable") == 1 {
+                                rv = 1;
+                            }
+                            z = z + 1;
+                        }
+                    }
+                    if dt >= 64 {
+                        return 1;
+                    }
+                    e = dt * 16;
+                    store32(tab, e, ntok);
+                    store32(tab, e + 4, dl);
+                    store32(tab, e + 8, dh);
+                    store32(tab, e + 12, linf + hinf * 2 + rv * 4);
+                    dt = dt + 1;
+                    store32(out, 0, dt);
+                    if rv == 1 {
+                        store32(out, 16, load32(out, 16) + 1);
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    // ---- guard 的包含性 ----
+    i = lo;
+    while i < hi && lspe_kind(t, i) != 4 {
+        if lspe_kind(t, i) == 0 && lspe_tis(unit, t, i, "guard") == 1
+                && lspe_kind(t, i + 1) == 0 && lspe_kind(t, i + 2) == 3
+                && lspe_tis(unit, t, i + 2, "(") == 1 && lspe_kind(t, i + 3) != 4 {
+            name = i + 1;
+            arg = i + 3;
+            store32(out, 12, load32(out, 12) + 1);
+            found = 0;
+            q = 0;
+            dl2 = 0;
+            dh2 = 0;
+            linf2 = 0;
+            hinf2 = 0;
+            while q < dt && found == 0 {
+                if lspe_teq(unit, t, load32(tab, q * 16), name) == 1 {
+                    found = 1;
+                    dl2 = load32(tab, q * 16 + 4);
+                    dh2 = load32(tab, q * 16 + 8);
+                    linf2 = load32(tab, q * 16 + 12) % 2;
+                    hinf2 = (load32(tab, q * 16 + 12) / 2) % 2;
+                }
+                q = q + 1;
+            }
+            if found == 1 {
+                if lspe_kind(t, arg) == 1 {
+                    at = lspe_num(unit, t, arg);
+                    if (linf2 == 1 || dl2 <= at)
+                            && (hinf2 == 1 || at <= dh2) {
+                        store32(out, 4, load32(out, 4) + 1);
+                    }
+                } else if lspe_kind(t, arg) == 0
+                        && lspe_dom_loop(unit, t, lo, hi, i, arg, dl2, dh2,
+                                         linf2, hinf2) == 1 {
+                    store32(out, 8, load32(out, 8) + 1);
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 /// guard 站点里被 pass 覆盖的个数（证明数要扣掉它）。
 pub fn lspe_guard_covered(unit: ptr, t: ptr, lo: u32, hi: u32, pbuf: ptr) -> u32 {
     let n: u32 = 0;

@@ -4899,6 +4899,77 @@ def test_lgc_end_window_pauses_and_restores():
     print(f"      窗口暂停：块内耗尽 (rc={rc['paused']})，出块恢复后跑通 (rc={rc['restored']})")
 
 
+#: `#1461` 的语料：`gc_manual` + `lgc`。5 块 8000 字节是**常活集**（约 40 KB），
+#: 窗口里的 1000 字节块是**垃圾** —— 每 24 块就把剩下那 24 KB 吃光，第 25 次分配
+#: 在计数器到 32768 之前就失败。救援在那一刻收一次，把那批垃圾还给分配器。
+_LGC_OOM_SRC = """choose write grammar tur2026.3
+module lgc_oom
+choose gc_manual
+choose runtime
+
+fn _start() {
+    let a: ptr = alloc(8000);
+    let b: ptr = alloc(8000);
+    let c: ptr = alloc(8000);
+    let d: ptr = alloc(8000);
+    let e: ptr = alloc(8000);
+    store8(a, 0, 7);
+    store8(b, 0, 1);
+    store8(c, 0, 1);
+    store8(d, 0, 1);
+    store8(e, 0, 1);
+%s
+        let i: u32 = 0;
+        while i < 400 {
+            let t: ptr = alloc(1000);
+            store8(t, 0, 1);
+            i = i + 1;
+        }
+    }
+    if load8(a, 0) == 7 {
+        syscall4(60, 7, 0, 0);
+    }
+    syscall4(60, 3, 0, 0);
+}
+"""
+
+
+@test
+def test_manual_with_lgc_collects_when_the_arena_runs_out():
+    """`gc_manual` + `lgc` 的窗口撞 OOM 时**先收一次再试**（`#1461`）。
+
+    **Why**：LMS 第 3 级入口 A 的门控原先写的是"这份产物里有收集器（`gc_auto` /
+    `gc_auto_alpha`）—— `gc_manual` 下没有东西可收"。`lgc` 落地之后这句不成立了：
+    manual 档也有收集器，窗口里那句"开"就是它被允许收的时刻。漏掉那一支，窗口里的
+    OOM 直接 abort，而窗口的语义是"这一段可以收"。
+
+    **两格**：同一份源只差 `lgc start {` / `lgc end {`。窗口开着 ⇒ 救援收一次、
+    跑完（rc=7，且常活块读回的还是 7）；暂停 ⇒ 一次都不许收，必然耗尽（rc=132）。
+    第二格同时是证伪：没有它，"跑完"可能只是 arena 比我以为的大。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        rc = {}
+        for tag, open_ in (("window", "    lgc start {"), ("paused", "    lgc end {")):
+            src = td / f"{tag}.lomt"
+            src.write_text(_LGC_OOM_SRC % open_, encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"{tag}.native"
+            nat.write_bytes(blob)
+            rc[tag] = _run_bin(nat, f"oom_{tag}", td, timeout=60)[0]
+    assert rc["window"] == 7, (
+        f"`gc_manual` + `lgc` 的窗口里 OOM 没被救回来（rc={rc['window']}）—— "
+        "第 3 级入口 A 的门控还停在「只认 auto/alpha」")
+    assert rc["paused"] == 132, (
+        f"暂停窗口里居然跑完了（rc={rc['paused']}）—— 那说明它没收也过来了，"
+        "这一格测不出救援")
+    print(f"      manual+lgc：窗口里 OOM 被救回 (rc=7)；暂停窗口里耗尽 (rc=132)")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_elf_test")
 

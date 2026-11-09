@@ -4568,10 +4568,14 @@ def test_lms_entry_a_rescue_needs_both_lms_and_a_collector():
     """LMS 第 3 级入口 A（`docs/253` §5.3）：`alloc` 分配不出时**先收一次再试**。
 
     **两个条件缺一不可** —— `lms` 开着（它属于 LMS 第 3 级）**而且**这份产物里真有
-    收集器（`gc_auto` / `gc_auto_alpha`）。`gc_manual` 下**没有东西可收**，
+    收集器（`gc_auto` / `gc_auto_alpha` / **`lgc`**）。`gc_manual` 单独**没有东西可收**，
     "拉回"在那里是一句空话 —— 所以那一格**必须一个字都不加**。这是这一级明写的边界。
 
-    网格：{gc_manual, gc_auto, gc_auto_alpha} × {关着, 开着}。
+    **`gc_manual` + `lgc` 有收集器**（`#1461`）：窗口一开，`__loment_gc_allow` 就放行，
+    OOM 那一刻先收一次再试是窗口该有的行为；漏掉这一支，窗口里撞 OOM 直接 abort。
+    所以那一格必须有 `lmsretry`。
+
+    网格：{gc_manual, gc_auto, gc_auto_alpha} × {关着, 开着}，外加 `gc_manual` + `lgc` 两格。
     """
     # ⚠ **尺寸必须走 `const` 名，不能是字面量**：`gc_auto_alpha` 会把
     # `let p: ptr = alloc(<字面量>)` **静态提升到栈上**（L0），于是这份产物**根本不需要堆**
@@ -4601,6 +4605,18 @@ def test_lms_entry_a_rescue_needs_both_lms_and_a_collector():
             assert "@__loment_lms_retry" not in on, (gc, "不许再长出全局符号")
             # **只许重来一次**：重试标记在**每一条成功返回前**都要清掉（1 次初始化 + 2 次清）。
             assert on.count("store i1 false, ptr %lmsretry") == 3, on
+
+    # **`gc_manual` + `lgc`**（`#1461`）：manual 档也有收集器了 —— 窗口里那句"开"就是
+    # 它被允许收的时刻，OOM 救援因此必须在场。
+    manual_lgc = lomentc.emit_llvm(_lgc_load(
+        "choose write grammar tur2026.3\nmodule m\nchoose runtime\n"
+        "choose gc_manual\nchoose lms_guard\nconst N: u32 = 64;\n\n"
+        "fn _s() {\n    lgc start {\n        let q: ptr = alloc(N);\n"
+        "        store8(q, 0, 1);\n    }\n}\n"), ROOT, [])
+    assert "%lmsretry = alloca i1" in manual_lgc, (
+        "`gc_manual` + `lgc` 的产物里该有 LMS 第 3 级入口 —— 窗口里撞 OOM 要先收一次")
+    assert "call void @__loment_collect_now()" in manual_lgc, (
+        "救援必须走 `collect_now` —— 它才尊重窗口的开关")
 
 
 #: g1 探针：`alloc` **直接发出**的指针上，一个越界写 + 一个界内读。

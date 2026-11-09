@@ -101,10 +101,14 @@ out loud:
 ```rust
 module domain_graph
 choose runtime
-capability ring  : disk[0..15] adaptive
-capability other : mem[16..19]
+capability ring    : disk[0..15] adaptive
+capability partner : disk[0..15] adaptive
+capability other   : mem[16..19]
 
 fn pump(a: [u32; 16] in disk) -> u32 {
+    solid body : ring, partner;   // a named renewal unit = one solid body
+    guard body(2);                // check the root; the partner is checked silently
+    quality body = 128;           // quality goes to every adaptive member
     domain outer : disk[0..15] {
         couple outer, ring;   // ⇄ one renewal unit: same position, together
         mutex  ring, other;   // ⊥ shapes must be provably disjoint
@@ -119,6 +123,9 @@ fn pump(a: [u32; 16] in disk) -> u32 {
 - `couple A, B, …` makes one renewal unit: a guard on any member also (silently) checks the
   others at the same position, and a `quality` write goes to every adaptive member.
 - `mutex A, B` is a compile-time promise (finite, non-danger, disjoint shapes); it emits no code.
+- `solid name : A, B, …;` names a body: `guard name(x)` judges the root member and checks the
+  rest silently, `quality name = q;` writes the whole group. A body's audit entry lands on its
+  root member; coupling components are per function.
 
 - `let a: [u32; 64] in disk` / `a: [u32; 64] in disk` (parameter) tags a value's space
   (arrays, slices, pointers only). The tag does not travel through a call - the callee sees a

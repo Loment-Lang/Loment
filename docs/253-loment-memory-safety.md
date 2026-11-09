@@ -509,11 +509,15 @@ E028 初稿是放在**发射器**里的（`_Ir.expr` 的 `Index` 那一支）—
 ⚠ **两个条件缺一不可**，这是这一级**明写的边界**：
 
 * `lms` 开着（它属于 LMS 第 3 级，不是回收档的事）；
-* **这份产物里真的有收集器**（`gc_auto` / `gc_auto_alpha`）——
-  **`gc_manual` 下没有东西可收，"拉回"在那里是一句空话**，所以那一格一个字都不加。
+* **这份产物里真的有收集器**（`gc_auto` / `gc_auto_alpha` / **`lgc`**）——
+  **`gc_manual` 单独没有东西可收，"拉回"在那里是一句空话**，所以那一格一个字都不加。
+  `lgc` 落地之后 manual 档**也有**收集器，窗口里那句"开"就是它被允许收的时刻；
+  漏掉这一支，窗口里撞 OOM 直接 abort（`#1461`）。
 
 判据：`lomentc_test::test_lms_entry_a_rescue_needs_both_lms_and_a_collector`（网格
-3 档 × 2）+ `_TIER_CHOOSES` 新增两格过 clang（**手写 IR 只有过 clang 才算合法**）。
+3 档 × 2，外加 `gc_manual` + `lgc` 那一格）+ `_TIER_CHOOSES` 新增两格过 clang
+（**手写 IR 只有过 clang 才算合法**）+ `loment_elf_test::test_manual_with_lgc_collects_when_the_arena_runs_out`
+（真跑：窗口里 OOM 被救回 rc=7，暂停窗口里耗尽 rc=132）。
 
 ⚠ **写这条判据时当场踩了 L0 那个坑**：第一版探针用 `alloc(64)`（**字面量**尺寸），
 而 `gc_auto_alpha` 会把这种 `alloc` **静态提升到栈上** ⇒ 产物**根本不需要堆** ⇒

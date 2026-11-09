@@ -1522,11 +1522,27 @@ fn chk_guard_has_aux(src: ptr, t: ptr, i: u32) -> u32 {
     return has;
 }
 
+/// `solid NAME : …` 里声明的体名（`docs/315` §5.2）—— 判决点可以用它代替根成员。
+fn chk_is_body_name(src: ptr, t: ptr, nt: u32) -> u32 {
+    let i: u32 = 0;
+    while chk_tok_kind(t, i) != 4 {
+        if chk_tok_is(src, t, i, "solid") && chk_tok_kind(t, i + 1) == 0
+                && chk_tok_is(src, t, i + 2, ":") && same(src, t, i + 1, nt) == 1 {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 /// `quality` / `discharge` 只能点名叫对应时律的能力（参考实现同一条规则）。
 fn chk_cap_law_is(src: ptr, t: ptr, ctab: ptr, nc: u32, i: u32, want: u32,
                   p: ptr, o: u32) -> u32 {
     let nt: u32 = i + 1;
     if chk_dom_has(src, t, i, nt) == 1 {
+        return o;
+    }
+    if chk_is_body_name(src, t, nt) == 1 {
         return o;
     }
     let k: u32 = 0;
@@ -1630,6 +1646,9 @@ fn chk_guard(src: ptr, t: ptr, ctab: ptr, nc: u32, i: u32, p: ptr, o: u32) -> u3
     let nt: u32 = i + 1;
     if chk_dom_has(src, t, i, nt) == 1 {
         return o;   // 块级域：名字在作用域里，实参规则由发射器按同一份源再判
+    }
+    if chk_is_body_name(src, t, nt) == 1 {
+        return o;   // 立体图的体：名字解析到根成员（`docs/315` §5.2）
     }
     let k: u32 = 0;
     let found: u32 = 0;
@@ -2372,19 +2391,26 @@ fn chk_tex(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
         }
         let inner: u32 = chk_tex(src, t, syms, n, env, envc,
                                  chk_lh(a0, hi), tyt, p, oc);
+        // 数组 -> 切片（两个实现都收）。
         if chk_ty_is_arr(tyt, inner) == 1 {
             return chk_ty_slc(tyt, chk_ty_a(tyt, inner), mutf);
         }
-        // 非数组的借用（`docs/299`）：`lifetime_auto` / `lifetime_manual` 下是
-        // `&T`；切片的借用规范化成切片本身（`&[T]` -> `[T]`）。
+        // **切片 -> 再借**（`&mut xs`，xs 已是切片）：与参考实现的 `expr_type` 同一条
+        // —— 再借不改元素类型，只改可写位。但 `lifetime_no` 里参考实现的 `_walk_expr`
+        // 仍报"只能作用于数组"，所以这一格要按档走。
+        if chk_ty_is_slc(tyt, inner) == 1 {
+            if chk_life_mode(src, t, load32(oc, 8)) != 0 {
+                return chk_ty_slc(tyt, chk_ty_a(tyt, inner), mutf);
+            }
+            chk_pub(src, t, oc, p, E_ACCESS, lo);
+            return 0;
+        }
+        // 既不是数组也不是切片的借用（`docs/299`）：`lifetime_auto` / `lifetime_manual`
+        // 下是 `&T`；`no` 档仍报"只能作用于数组"。
         if chk_life_mode(src, t, load32(oc, 8)) != 0 {
             if inner == 0 {
                 return 0;                   // 类型未知 -> 保守跳过
             }
-            // ⚠ **不规范化切片**：规范化只发生在**类型位置**（`type_name` / `chk_ty_range`）。
-            // 表达式里的 `&mut xs`（xs 是 `mut [u32]`）在参考实现里是 `&mut mut [u32]`，
-            // 与形参 `mut [u32]` **不兼容** —— 这是 E001 的来源（rule parity 的
-            // `borrow-mut-twice` / `borrow-mut-and-share` 两条钉着它）。
             return chk_ty_ref(tyt, inner, mutf);
         }
         chk_pub(src, t, oc, p, E_ACCESS, lo);         // 只能作用于数组
@@ -3603,6 +3629,15 @@ fn chk_moves(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             } else {
                 j = e;
             }
+        } else if chk_tok_is(src, t, j, "solid") && chk_tok_kind(t, j + 1) == 0
+                && chk_tok_is(src, t, j + 2, ":") {
+            // 立体图的体（`docs/315` §5.2）：声明，没有表达式可查。
+            let semi: u32 = chk_find_at(src, t, j, e, ";");
+            if semi <= e {
+                j = semi + 1;
+            } else {
+                j = e;
+            }
         } else if (chk_tok_is(src, t, j, "couple") || chk_tok_is(src, t, j, "mutex"))
                 && chk_tok_kind(t, j + 1) == 0
                 && (chk_tok_is(src, t, j + 2, ",") || chk_tok_is(src, t, j + 2, ";")) {
@@ -4059,7 +4094,8 @@ fn chk_life(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 jm = jm + 1;
             }
         }
-        // ---- 返回借用但签名里没有引用形参 -> E041（摘要算不出来）
+        // ---- 返回类型上的区域标记（`&a T`）
+        let retb: u32 = 0;
         if chk_tok_is(src, t, rp + 1, "-") && chk_tok_is(src, t, rp + 2, ">") {
             let rt: u32 = rp + 3;
             let mk2: u32 = chk_marker_of(src, t, rt);
@@ -4071,10 +4107,7 @@ fn chk_life(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 }
             }
             if chk_ty_borrowish(src, t, syms, n, rt) == 1 {
-                let cnt: u32 = load32(tyt, CHK_LP_N);
-                if cnt == 0 && mk2 == 0 {
-                    chk_pub(src, t, oc, p, E_LIFETIME, fi);
-                }
+                retb = 1;
             }
         }
         // ---- 函数体：来源 / 悬垂 / 释放 / 独占
@@ -4138,12 +4171,17 @@ fn chk_life(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                                 && chk_tok_kind(t, j2 + 3) == 0)) {
                     direct = 1;            // `return &x` 由 chk_moves 报（同一条 M17）
                 }
-                if direct == 0 {
-                    let pv2: u32 = chk_life_prov(src, t, syms, n, env, envc, tyt,
-                                                 j2 + 1, semi2);
-                    if pv2 == 2 {
-                        chk_pub(src, t, oc, p, E_DANGLE, j2);
-                    }
+                let pv2: u32 = chk_life_prov(src, t, syms, n, env, envc, tyt,
+                                             j2 + 1, semi2);
+                if direct == 0 && pv2 == 2 {
+                    chk_pub(src, t, oc, p, E_DANGLE, j2);
+                }
+                // **返回借用，但签名里没有引用形参**（E041）：局部来源由 E012 说清根因，
+                // 不再叠一遍；**外部来源**（例如一个返回借用的调用）没有别的诊断，在这里
+                // 点名。与参考实现 `_lifetime_fn_errs` 的 `ret_is_borrow and not has_ref
+                // and not any(kind == "l")` 同一条。
+                if retb == 1 && load32(tyt, CHK_LP_N) == 0 && pv2 != 2 {
+                    chk_pub(src, t, oc, p, E_LIFETIME, j2);
                 }
                 // 借用登记 + 释放点
                 chk_life_scan(src, t, tyt, j2 + 1, semi2, p, oc);
@@ -4662,6 +4700,15 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 j = act + 1;
             } else {
                 j = act + 2;                  // `lgc start;`
+            }
+        } else if chk_tok_is(src, t, j, "solid") && chk_tok_kind(t, j + 1) == 0
+                && chk_tok_is(src, t, j + 2, ":") {
+            // 立体图的体（`docs/315` §5.2）：声明，没有表达式可查。
+            let semi: u32 = chk_find_at(src, t, j, e, ";");
+            if semi <= e {
+                j = semi + 1;
+            } else {
+                j = e;
             }
         } else if (chk_tok_is(src, t, j, "couple") || chk_tok_is(src, t, j, "mutex"))
                 && chk_tok_kind(t, j + 1) == 0

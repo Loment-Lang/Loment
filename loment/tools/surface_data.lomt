@@ -122,6 +122,7 @@ pub fn code_title(c: u32, lang: u32) -> str {
     if k == 79 { return "`lgc` 与 `no_gc` 冲突"; }
     if k == 80 { return "a new keyword collides with a name"; }
     if k == 81 { return "新版关键字与你的名字撞了"; }
+    if k == 82 { return "a borrow's region does not hold"; }
     if k == 83 { return "借用区域不成立"; }
     if k == 1800 { return "the tool died without reporting (internal)"; }
     if k == 1801 { return "工具链进程死了，没留下诊断"; }
@@ -212,6 +213,8 @@ pub fn code_what(c: u32, lang: u32) -> str {
     if k == 79 { return "这份单元写了 `lgc`（GC 时间控制），却又声明了 `no_gc` —— 产物里根本没有收集器。"; }
     if k == 80 { return "This source does not pin its reading to the current edition, yet it declares a name that a **newer edition treats as syntax** - the old reading sees an identifier, the default reading sees a keyword."; }
     if k == 81 { return "这份源没有把读法钉在生效版次上，却把一个**新版次的关键字**当名字声明了 —— 旧读法会把它当标识符，默认读法会把它当语法。"; }
+    if k == 82 { return "A borrow's **region** does not hold: it would outlive its source, or its source cannot be named."; }
+    if k == 83 { return "一个借用值的**区域**不成立：它想活得比来源长，或者它的来源说不清。"; }
     if k == 1800 { return "A process in the toolchain died **before it could write a structured diagnostic** - killed by a signal, or exited abnormally, with no record in `--diag-out`."; }
     if k == 1801 { return "工具链里的一个进程在**能写出结构化诊断之前**就死了 —— 被信号打死，或者以异常状态退出，而 `--diag-out` 一份记录都没写。"; }
     if k == 1998 { return "The compiler reported an error that is not in the classification table -- even the toolchain did not recognise which code this message belongs to."; }
@@ -301,6 +304,8 @@ pub fn code_why(c: u32, lang: u32) -> str {
     if k == 79 { return "`no_gc` 的承诺是「产物不带收集器」，而 `lgc` 的每一条语句都在控制收集器何时跑。这两句话不能同时为真：要么开一个有收集器的档，要么不要写 `lgc`。"; }
     if k == 80 { return "Editions only add syntax, but some additions **must** reuse words that were legal identifiers in an older edition (`break` / `continue` / `defer` / `print_num` / `lgc`). The same source means different things under the two readings, and the default is now the **newest edition** - reading it as the new one silently changes an old file's meaning. The compiler stops and asks instead of choosing for you."; }
     if k == 81 { return "新版次只加语法，但有些新语法**必须**用旧版次里的合法标识符（`break` / `continue` / `defer` / `print_num` / `lgc`）。同一份源在两种读法下含义不同，而默认读法已经是**最新版次** —— 静默按新版读会改变旧文件的含义。所以编译器在这里停下来问一句，而不是替你选。"; }
+    if k == 82 { return "A borrow is a **static** promise: `&T` is valid only while the source is alive. Loment infers the source from regions - a returned borrow may only come from a **parameter** (a local dies with the call), and an explicit `&a T` marker may only name a reference parameter in the signature. `free(p)` also ends p's region, so no borrow may still point at it."; }
+    if k == 83 { return "借用是一条**静态**承诺：`&T` 只在来源还活着时有效。Loment 从区域推出来源 —— 返回值只能借自**形参**（局部变量出了函数就不存在），显式标记 `&a T` 只能指向签名里的一个引用形参。`free(p)` 也会结束 `p` 的区域，所以释放时不能再有指向它的借用。"; }
     if k == 1800 { return "The diagnostics channel can only describe failures that were **successfully serialized before the failure**. A compiler crash, a linker crash, or the renderer crashing on its own all go the same way: the JSONL is empty and there is nothing for the renderer to do. The launcher now closes that gap: it reads the exit status / signal name and synthesizes this record, so \"no record\" no longer means \"nothing happened\" (#773). This is not a semantic error in your source - it is the **implementation failing on itself**."; }
     if k == 1801 { return "诊断系统只能描述**在失败之前已经成功序列化**的失败。编译器崩溃、链接器崩溃、报错器自己崩溃，走的都是这条路：JSONL 是空的，渲染器无事可做。启动器现在替它收尸：拿到退出状态 / 信号名，合成这一条记录，于是「没有任何记录」不再等于「什么都没有发生」（`#773`）。这不是你源码的语义错 —— 它是**实现自己的失败**。"; }
     if k == 1998 { return "The table and the compiler come out of the same repository and the same build. A message landing here means it has not been classified yet, not that the toolchain versions disagree: fix by the message, then report it so a rule can be added."; }
@@ -390,6 +395,8 @@ pub fn code_yes(c: u32, lang: u32) -> str {
     if k == 79 { return "`gc_manual` / `gc_auto` / `gc_auto_alpha` 下的 `lgc`"; }
     if k == 80 { return "a source that pins its edition; `break` / `lgc` used as **syntax**, not as a name"; }
     if k == 81 { return "显式钉住版次的源；把 `break` / `lgc` 当**语法**用（不是当名字）"; }
+    if k == 82 { return "returning a borrow of a parameter; freeing after the borrow ends"; }
+    if k == 83 { return "返回借自形参的引用；在借用结束后再释放"; }
     if k == 1800 { return "a tool exits 0 (no diagnostics) or 1 (diagnostics, and it left a record)"; }
     if k == 1801 { return "工具链以 0 退出（无诊断）或 1 退出（有诊断并留下了记录）"; }
     if k == 1998 { return "classified messages after a report lands"; }
@@ -479,6 +486,8 @@ pub fn code_no(c: u32, lang: u32) -> str {
     if k == 79 { return "`no_gc` 下的 `lgc`"; }
     if k == 80 { return "no declaration + a new keyword used as a variable / parameter / function name"; }
     if k == 81 { return "无声明 + 把新版关键字当变量/参数/函数名"; }
+    if k == 82 { return "returning a local borrow; freeing a block that is still borrowed"; }
+    if k == 83 { return "返回局部变量的借用；`free` 一块仍被借用的内存"; }
     if k == 1800 { return "killed by a signal / exited abnormally without writing any structured diagnostic"; }
     if k == 1801 { return "被信号打死 / 异常退出，而且一份结构化诊断都没写"; }
     if k == 1998 { return "guessing a code"; }
@@ -527,6 +536,7 @@ pub fn code_ascii(c: u32) -> str {
     if c == 38 { return "an `lspe pass` block with no reason"; }
     if c == 39 { return "`lgc` needs a collector, but this unit chose `no_gc`"; }
     if c == 40 { return "a new-edition keyword collides with a name in an undeclared source"; }
+    if c == 41 { return "a borrow's region does not hold"; }
     if c == 900 { return "a tool in the chain died before it could report (internal) - report it with the unit"; }
     if c == 999 { return "unclassified - please report it"; }
     return "";
@@ -823,6 +833,14 @@ pub fn code_fix(c: u32, i: u32, lang: u32) -> str {
     if k == 641 { return "把那个名字改掉（例如 `break` → `halt`、`defer` → `later`）。"; }
     if k == 643 { return "或在文件头写 `choose write grammar tur2026.1`，把整份源钉回旧读法。"; }
     if k == 645 { return "只想要 2026.2 的语法、不要 2026.3 的新词，就写 `choose write grammar tur2026.2`。"; }
+    if k == 656 { return "Return the value itself, not a borrow of a local variable."; }
+    if k == 658 { return "Make the source live longer: pass it in as a parameter and borrow from that."; }
+    if k == 660 { return "When the source must be named, choose `lifetime_manual` and use `&a T`."; }
+    if k == 662 { return "Move `free(p)` after the last use of any borrow of p."; }
+    if k == 657 { return "把值返回（按值），不要在返回值里借一个局部变量。"; }
+    if k == 659 { return "让来源活得更久：把来源做成形参传进来，再从形参借出去。"; }
+    if k == 661 { return "确需指定来源时写 `choose lifetime_manual`，用 `&a T` 指向那个引用形参。"; }
+    if k == 663 { return "释放之前先让借用结束：把 `free(p)` 挪到借用最后一次用处之后。"; }
     if k == 14400 { return "Report the smallest source that reproduces it together with this record - a crash is a compiler defect, not something you can work around in your code."; }
     if k == 14402 { return "Include the exit status / signal name (already in this message) and the output of `loment version`."; }
     if k == 14404 { return "If the message names the **linker** (`loment-lomelf`), also include the `-o` path and the target platform."; }
@@ -883,7 +901,7 @@ pub fn code_nfix(c: u32) -> u32 {
     if c == 38 { return 3; }
     if c == 39 { return 3; }
     if c == 40 { return 3; }
-    if c == 41 { return 0; }
+    if c == 41 { return 4; }
     if c == 900 { return 4; }
     if c == 999 { return 3; }
     return 0;

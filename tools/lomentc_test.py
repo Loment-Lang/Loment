@@ -5920,7 +5920,7 @@ def test_domain_blocks_scope_and_auto_guard():
 
 @test
 def test_borrow_domains_phase1_rules():
-    """`docs/317` 期 1：`borrow(x)` / `borrow_mut(x)` 两种区域形状 + 三条规则。
+    """`docs/318` 期 1：`borrow(x)` / `borrow_mut(x)` 两种区域形状 + 三条规则。
 
     R1 寿命：源必须是可见的名字；R2 权威：共享域不许写、独占域不许再借；
     R3 逃逸：域里借出去的不能 `return`，仍被借用时不能 `free`。

@@ -1787,7 +1787,7 @@ class DomainBlock:
     audit_id: int = 0
     #: 显式的树边 `child_of PARENT`（`docs/315` §4.1）。空 = 只由括号隐含。
     child_of: str = ""
-    #: **借用生命周期域**（`docs/317` §1）：`domain v : borrow(xs) { … }` 的 `xs`。
+    #: **借用生命周期域**（`docs/318` §1）：`domain v : borrow(xs) { … }` 的 `xs`。
     #: 非空时 `space` 是 `borrow` / `borrow_mut`，形状的 lo/hi 不参与判断 —— 域的形状
     #: 是**区域**，不是位置。空 = 今天那种位置/时律形状。
     borrow_src: str = ""
@@ -3839,7 +3839,7 @@ class Parser:
         a, b, c, d = self.peek(1), self.peek(2), self.peek(3), self.peek(4)
         if a.kind == "ident" and b.val == ":" and c.kind == "ident" and d.val == "[":
             return True
-        # `docs/317`：区域形状 —— `domain V : borrow(xs)` / `domain borrow_mut(xs)`。
+        # `docs/318`：区域形状 —— `domain V : borrow(xs)` / `domain borrow_mut(xs)`。
         # 只认 `borrow` / `borrow_mut` 这两个名字（`domain(...)` 仍可以是普通调用）。
         if a.kind == "ident" and b.val == ":" and c.kind == "ident" and d.val == "(":
             return c.val in ("borrow", "borrow_mut")
@@ -3965,7 +3965,7 @@ class Parser:
                 and self.peek(1).val == ":"):
             name = self.next().val
             self.next()
-        # **区域形状**（`docs/317` §1）：`borrow(xs)` / `borrow_mut(xs)`。形状是区域，
+        # **区域形状**（`docs/318` §1）：`borrow(xs)` / `borrow_mut(xs)`。形状是区域，
         # 不是位置 —— lo/hi 不参与判断，时律固定成 `regular`（本期的三个域都不用状态）。
         if (self.at("ident", "borrow") or self.at("ident", "borrow_mut")) \
                 and self.peek(1).val == "(":
@@ -7593,7 +7593,7 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
 
         walk(f.body, scope)
         errs.extend(_move_check(f, funcs, structs, enums, lms))  # M13 移动检查 + E029
-        errs.extend(_borrow_domain_errs(f))  # docs/317 期 1：借用生命周期域的三条规则
+        errs.extend(_borrow_domain_errs(f))  # docs/318 期 1：借用生命周期域的三条规则
         if lifetime != "lifetime_no":
             _pn = [(p.name, p.type) for p in f.params]
             for _p in f.params:
@@ -7856,7 +7856,7 @@ def _move_check(f: Func, funcs: dict, structs: dict, enums: dict,
     return errs
 
 
-# ---------------------------------------------------------------- 借用生命周期域（docs/317）
+# ---------------------------------------------------------------- 借用生命周期域（docs/318）
 #
 # 期 1：`domain x : borrow(v) { … }` / `borrow_mut(v)` 两种**区域形状**，三条规则：
 #   R1 寿命 —— 源必须是本函数可见的名字（形参或 `let`）；
@@ -7870,7 +7870,7 @@ _STORE_BUILTINS = ("store8", "store16", "store32", "store64", "store128")
 
 
 def _borrow_domain_errs(f: Func) -> list[str]:
-    """`docs/317` 期 1 的三条规则。每条都点名**域 / 名字 / 行号**。"""
+    """`docs/318` 期 1 的三条规则。每条都点名**域 / 名字 / 行号**。"""
     import dataclasses as _dc
 
     def reap(v, fn) -> None:

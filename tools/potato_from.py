@@ -1036,9 +1036,10 @@ def from_python(src: str, name: str, mode: str = "strict") -> tuple[dict, Report
                 if isinstance(st, ast.Expr) and isinstance(st.value, ast.Constant) \
                         and isinstance(st.value.value, str):
                     continue
-                raise SyntaxError(
-                    f"第 {st.lineno} 行: 类 {node.name} 里这一条不是带注解的字段 —— "
-                    f"Python 写法只把类当作结构体；方法 / 类级语句不在子集里")
+                seg = ast.get_source_segment(src, st) or ""
+                rep.skip("member", (seg.split() or ["?"])[0][:24],
+                         f"第 {st.lineno} 行: 类 {node.name} 里这一条不是带注解的字段 —— "
+                         f"Python 写法只把类当作结构体；方法 / 类级语句不在子集里")
             if not fields:
                 rep.skip("type", node.name, "无注解字段")
                 continue
@@ -1093,9 +1094,10 @@ def from_python(src: str, name: str, mode: str = "strict") -> tuple[dict, Report
             # Top-level executable statements used to disappear here. A Python
             # script's `print(...)` became a module with zero functions, check
             # passed, and the LVM then blamed a missing `_start` (issue #1510).
-            raise SyntaxError(
-                f"第 {node.lineno} 行: 顶层语句或赋值不在 Python 写法的 Loment 单元里 —— "
-                f"把它放进 def _start()；模块级只收全大写常量、函数与类型")
+            seg = ast.get_source_segment(src, node) or ""
+            rep.skip("decl", (seg.split() or ["?"])[0][:24],
+                     f"第 {node.lineno} 行: 顶层语句或赋值不在 Python 写法的 Loment 单元里 —— "
+                     f"把它放进 def _start()；模块级只收全大写常量、函数与类型")
     return _finish(doc, rep)
 
 

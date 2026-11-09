@@ -3581,6 +3581,10 @@ const RJ_RS: u32 = 112;            // 返回类型起点/长度
 const RJ_RL: u32 = 116;
 const RJ_CS: u32 = 120;            // 常量值文本起点/长度
 const RJ_CL: u32 = 124;
+//: 残句扫描要的**整段范围**（`_c_leftover_lines` 的 `consumed`）。四条 Rust 正则各自
+//: 往这里写自己的 `(起点, 终点)` —— 只是给 `rs_say_leftover` 用，别的读法不看。
+const RM_S: u32 = 60;
+const RM_E: u32 = 64;
 
 /// `re.sub(r"//[^\n]*", "", src)` —— 抹到行尾（**不含换行本身**）。
 fn strip_lc(src: ptr, n: u32, dst: ptr) -> u32 {
@@ -3909,6 +3913,8 @@ fn find_rsstruct(body: ptr, n: u32, from: u32, r: ptr) -> u32 {
                                 let _c: u32 = st32(r, RJ_IS, ob + 1);
                                 let _d: u32 = st32(r, RJ_IE, cl);
                                 let _e: u32 = st32(r, RJ_ME, cl + 1);
+                                let _f: u32 = st32(r, RM_S, i);
+                                let _g: u32 = st32(r, RM_E, cl + 1);
                                 return 1;
                             }
                         }
@@ -3945,6 +3951,8 @@ fn find_rsenum(body: ptr, n: u32, from: u32, r: ptr) -> u32 {
                                 let _c: u32 = st32(r, RJ_IS, ob + 1);
                                 let _d: u32 = st32(r, RJ_IE, cl);
                                 let _e: u32 = st32(r, RJ_ME, cl + 1);
+                                let _f: u32 = st32(r, RM_S, i);
+                                let _g: u32 = st32(r, RM_E, cl + 1);
                                 return 1;
                             }
                         }
@@ -4030,6 +4038,8 @@ fn find_rsconst(body: ptr, n: u32, from: u32, r: ptr) -> u32 {
                                     let _d: u32 = st32(r, J_TL, te - ts);
                                     let _e: u32 = st32(r, RJ_CS, vs);
                                     let _f: u32 = st32(r, RJ_CL, ve - vs);
+                                    let _g: u32 = st32(r, RM_S, i);
+                                    let _h: u32 = st32(r, RM_E, ve0 + 1);
                                     return 1;
                                 }
                             }
@@ -4154,6 +4164,9 @@ fn find_rsfn(body: ptr, n: u32, from: u32, r: ptr) -> u32 {
                                     let _f: u32 = st32(r, RJ_RL, rtl);
                                     let _g: u32 = st32(r, J_VS, hasg);
                                     let _h: u32 = st32(r, RJ_ME, ob);
+                                    // Python 那侧的 `m.end()` 是 `{` 之后那一格；残句扫描要它
+                                    let _i: u32 = st32(r, RM_S, i);
+                                    let _j: u32 = st32(r, RM_E, ob + 1);
                                     return 1;
                                 }
                             }
@@ -4983,6 +4996,258 @@ fn sayf(owner: ptr, oof: u32, ol: u32, field: ptr, fo: u32, fl: u32) -> u64 {
 ");
 }
 
+/// `_block_end(body, open)`：从那个 `{` 配平到它的 `}`。与上游同一条最小实现 ——
+/// **不认字符串里的花括号**（上游也不认；两边一起错的既有行为，不在这里顺手改）。
+fn rs_block_end(body: ptr, open: u32, n: u32) -> u32 {
+    let d: u32 = 0;
+    let k: u32 = open;
+    while k < n {
+        let c: u32 = load8(body, k);
+        if c == 123 {
+            d = d + 1;
+        }
+        if c == 125 {
+            if d == 0 {
+                return FAIL;
+            }
+            d = d - 1;
+            if d == 0 {
+                return k;
+            }
+        }
+        k = k + 1;
+    }
+    return FAIL;
+}
+
+/// 四条 Rust 正则里**下一条**匹配的整段范围 -> `outp`（起点 / 终点各 4 字节）。
+/// `kind`: 1 struct / 2 enum / 3 const / 4 fn。返回 0 = 没有了。
+fn rs_next(mem: ptr, body: ptr, n: u32, from: u32, kind: u32, outp: ptr) -> u32 {
+    let r: ptr = ptr_add(mem, M_R);
+    let ok: u32 = 0;
+    if kind == 1 {
+        ok = find_rsstruct(body, n, from, r);
+    }
+    if kind == 2 {
+        ok = find_rsenum(body, n, from, r);
+    }
+    if kind == 3 {
+        ok = find_rsconst(body, n, from, r);
+    }
+    if kind == 4 {
+        ok = find_rsfn(body, n, from, r);
+    }
+    if ok == 0 {
+        return 0;
+    }
+    let s: u32 = ld32(r, RM_S);
+    let e: u32 = ld32(r, RM_E);
+    if kind == 4 {
+        // 上游把**整个函数体**都算进 consumed：`close = _block_end(body, m.end()-1)`
+        let cl: u32 = rs_block_end(body, e - 1, n);
+        if cl != FAIL {
+            e = cl + 1;
+        }
+    }
+    let _a: u32 = st32(outp, 0, s);
+    let _b: u32 = st32(outp, 4, e);
+    return 1;
+}
+
+/// `[s, e)` 开头是不是 `lit`，且后面紧跟非单词字符或到头（正则的 `\b` / `$`）。
+fn rs_kw_at(body: ptr, s: u32, e: u32, lit: str) -> u32 {
+    let kl: u32 = str_len(lit);
+    if s + kl > e {
+        return 0;
+    }
+    if eq(body, s, lit) == 0 {
+        return 0;
+    }
+    if s + kl == e {
+        return 1;
+    }
+    if is_w(load8(body, s + kl)) == 1 {
+        return 0;
+    }
+    return 1;
+}
+
+/// 结构壳行（上游 `_SHELL_LINE` 与 `^\s*(?:use|mod)\b`）—— 是就不报。
+fn rs_line_shell(body: ptr, s: u32, e: u32) -> u32 {
+    if e - s == 1 {
+        let c: u32 = load8(body, s);
+        if c == 123 || c == 125 {
+            return 1;
+        }
+    }
+    if rs_kw_at(body, s, e, "namespace") == 1 {
+        return 1;
+    }
+    if rs_kw_at(body, s, e, "using") == 1 {
+        return 1;
+    }
+    if rs_kw_at(body, s, e, "package") == 1 {
+        return 1;
+    }
+    if rs_kw_at(body, s, e, "import") == 1 {
+        return 1;
+    }
+    if rs_kw_at(body, s, e, "use") == 1 {
+        return 1;
+    }
+    if rs_kw_at(body, s, e, "mod") == 1 {
+        return 1;
+    }
+    return 0;
+}
+
+fn rs_line_end(body: ptr, i: u32, n: u32) -> u32 {
+    let k: u32 = i;
+    while k < n && load8(body, k) != 10 {
+        k = k + 1;
+    }
+    return k;
+}
+
+fn rs_line_start(body: ptr, i: u32) -> u32 {
+    let k: u32 = i;
+    while k > 0 && load8(body, k - 1) != 10 {
+        k = k - 1;
+    }
+    return k;
+}
+
+/// 报 `[a, b)` 里没被认下的行；返回最后报过那一行的行尾（跨段去重用，一条行只报一次）。
+///
+/// **报的是整行、取行首那个词**（上游 `body.splitlines()[ln-1].strip()` 再 `.split()[0]`）：
+/// 一行里只要有一个非空白字符没被认下，整行就算残句 —— 哪怕行首那几个字已经被认下了
+/// （`enum E { A { x: u32 } }` 就是这种：行首 `enum` 被认下，尾巴那个 `}` 没有，
+/// 上游报出来的名字仍是 `enum`）。
+fn rs_say_span(body: ptr, n: u32, a: u32, b: u32, pl: u32) -> u32 {
+    let i: u32 = a;
+    let ret: u32 = pl;
+    while i < b {
+        let c: u32 = load8(body, i);
+        if c == 32 || c == 9 || c == 10 || c == 13 || c == 11 || c == 12 {
+            i = i + 1;
+        } else {
+            let le: u32 = rs_line_end(body, i, n);
+            if i >= pl {
+                let ls: u32 = rs_line_start(body, i);
+                let ws: u32 = ls;
+                while ws < le && (load8(body, ws) == 32 || load8(body, ws) == 9) {
+                    ws = ws + 1;
+                }
+                let te: u32 = trim_end(body, ws, le);
+                if te > ws && rs_line_shell(body, ws, te) == 0 {
+                    let k: u32 = ws;
+                    while k < te && load8(body, k) != 32 && load8(body, k) != 9 {
+                        k = k + 1;
+                    }
+                    let l: u32 = k - ws;
+                    let l2: u32 = l;
+                    if l2 > 24 {
+                        l2 = 24;
+                    }
+                    let _s: u64 = say2("decl", ptr_add(body, ws), l2);
+                    ret = le;
+                }
+            }
+            i = le;
+        }
+    }
+    return ret;
+}
+
+/// 顶层残句（上游 `_c_leftover_lines` + 那一圈的过滤器）：四类匹配认下来的范围之外，
+/// **任何非空白字符**所在的行都报 `S decl <第一个词>`。
+///
+/// 与上游同一个合并口径：四条流的匹配**取并集**（互相嵌套的也算被认下），
+/// 只有落在并集之外的行才是残句。
+fn rs_say_leftover(mem: ptr, body: ptr, n: u32) -> u64 {
+    let np: ptr = ptr_add(mem, M_R + 64);
+    let a1: u32 = rs_next(mem, body, n, 0, 1, np);
+    let s1: u32 = ld32(np, 0);
+    let e1: u32 = ld32(np, 4);
+    let c1: u32 = e1;
+    let a2: u32 = rs_next(mem, body, n, 0, 2, np);
+    let s2: u32 = ld32(np, 0);
+    let e2: u32 = ld32(np, 4);
+    let c2: u32 = e2;
+    let a3: u32 = rs_next(mem, body, n, 0, 3, np);
+    let s3: u32 = ld32(np, 0);
+    let e3: u32 = ld32(np, 4);
+    let c3: u32 = e3;
+    let a4: u32 = rs_next(mem, body, n, 0, 4, np);
+    let s4: u32 = ld32(np, 0);
+    let e4: u32 = ld32(np, 4);
+    let c4: u32 = e4;
+    let last: u32 = 0;
+    let pl: u32 = 0;
+    let going: u32 = 1;
+    while going == 1 {
+        let best: u32 = 4294967295;
+        let be: u32 = 0;
+        let w: u32 = 0;
+        if a1 == 1 && s1 < best {
+            best = s1;
+            be = e1;
+            w = 1;
+        }
+        if a2 == 1 && s2 < best {
+            best = s2;
+            be = e2;
+            w = 2;
+        }
+        if a3 == 1 && s3 < best {
+            best = s3;
+            be = e3;
+            w = 3;
+        }
+        if a4 == 1 && s4 < best {
+            best = s4;
+            be = e4;
+            w = 4;
+        }
+        if w == 0 {
+            pl = rs_say_span(body, n, last, n, pl);
+            going = 0;
+        } else {
+            pl = rs_say_span(body, n, last, best, pl);
+            if be > last {
+                last = be;
+            } else {
+                last = last + 1;
+            }
+            if w == 1 {
+                a1 = rs_next(mem, body, n, c1, 1, np);
+                s1 = ld32(np, 0);
+                e1 = ld32(np, 4);
+                c1 = e1;
+            }
+            if w == 2 {
+                a2 = rs_next(mem, body, n, c2, 2, np);
+                s2 = ld32(np, 0);
+                e2 = ld32(np, 4);
+                c2 = e2;
+            }
+            if w == 3 {
+                a3 = rs_next(mem, body, n, c3, 3, np);
+                s3 = ld32(np, 0);
+                e3 = ld32(np, 4);
+                c3 = e3;
+            }
+            if w == 4 {
+                a4 = rs_next(mem, body, n, c4, 4, np);
+                s4 = ld32(np, 0);
+                e4 = ld32(np, 4);
+                c4 = e4;
+            }
+        }
+    }
+    return 0;
+}
+
 /// Rust 那一门的主干（`from_rust`）。抹注释**会改长度**（删掉，不是抹平），所以扫描
 /// 全在 `M_SRC2` 上做；这一门**不带正文**，因此不需要回原文的下标。
 fn build_rust(mem: ptr, srcn: u32, argp: ptr, al: u32) -> u32 {
@@ -5007,6 +5272,7 @@ fn build_rust(mem: ptr, srcn: u32, argp: ptr, al: u32) -> u32 {
     let o10: u32 = jl(out, o9, "], \"types\": [");
     let o11: u32 = rs_emit_types(mem, body, out, o10);
     let o12: u32 = jl(out, o11, "], \"traits\": [], \"impls\": [], \"generics\": [], \"instances\": [], \"guards\": 0, \"excluded\": [], \"mode\": \"std\", \"switches\": [], \"dialects\": [], \"bodies\": []}");
+    let _lo: u64 = rs_say_leftover(mem, body, n2);
     return o12;
 }
 
@@ -6242,6 +6508,34 @@ fn py_emit_types(mem: ptr, src: ptr, n: u32, out: ptr, o: u32) -> u32 {
     return o;
 }
 
+/// 类体里这一行不是带注解的字段 -> `S member <第一个词>`（上游 `rep.skip("member", …)`）。
+///
+/// **不报的四类**（上游按 `ast` 的语句算，不是按行算）：
+///   * 空行 / 文档串 / 装饰器行 —— 前两类不是语句，`@deco` 附着在下一条语句上；
+///   * `pass` —— 上游明确放行（`ast.Pass`）；
+///   * `else` / `elif` —— 它们属于前面那条 `if` 的同一个 `ast.If` 节点。
+fn py_say_member(src: ptr, s: u32, b: u32) -> u64 {
+    let c: u32 = load8(src, s);
+    if c == 34 || c == 39 || c == 64 {
+        return 0;
+    }
+    let k: u32 = s;
+    // 冒号也断：`else:` / `if x:` 的第一个词是 `else` / `if`（上游按 `.split()` 取词，
+    // 这边也一样，不然会报出 `else:` 这种上游没有的名字）
+    while k < b && load8(src, k) != 32 && load8(src, k) != 9 && load8(src, k) != 58 {
+        k = k + 1;
+    }
+    let kws: str = "\npass\nelse\nelif\n";
+    if py_word_in(kws, src, s, k - s) == 1 {
+        return 0;
+    }
+    let l: u32 = k - s;
+    if l > 24 {
+        l = 24;
+    }
+    return say2("member", ptr_add(src, s), l);
+}
+
 /// 类体里的一行是不是 `NAME : TYPE [= 值]`；是就往表里加一条（或报一条字段损失）。
 fn py_field_line(mem: ptr, src: ptr, a: u32, b: u32) -> u32 {
     let py: ptr = pym(mem);
@@ -6252,15 +6546,18 @@ fn py_field_line(mem: ptr, src: ptr, a: u32, b: u32) -> u32 {
     let np: ptr = ptr_add(mem, M_R + 96);
     let ne: u32 = py_ident(src, s, b, np);
     if ne == FAIL {
+        let _s: u64 = py_say_member(src, s, b);
         return 0;
     }
     let no: u32 = ld32(np, 0);
     let nl: u32 = ld32(np, 4);
     if py_is_kw(src, no, nl) == 1 {
+        let _s: u64 = py_say_member(src, s, b);
         return 0;
     }
     let t: u32 = py_ws(src, ne, b);
     if t >= b || load8(src, t) != 58 {
+        let _s: u64 = py_say_member(src, s, b);
         return 0;
     }
     let u: u32 = py_ws(src, t + 1, b);
@@ -6282,6 +6579,72 @@ fn py_field_line(mem: ptr, src: ptr, a: u32, b: u32) -> u32 {
     return 1;
 }
 
+/// 顶层**谁也不认识**的那一行 -> `S decl <第一个词>`（上游 `rep.skip("decl", …)`）。
+///
+/// 上游读的是 `ast`：顶层只收文档串、类、函数、全大写常量，其余一律报。这里按行走，
+/// 所以"认下的"要在同一口径上排除：装饰器行（附在下一条）、文档串、`def`/`class`/
+/// `async`（函数那一支认）、全大写 `NAME =` / `NAME: T`（常量那一支认）。
+fn py_say_top(mem: ptr, src: ptr, n: u32) -> u64 {
+    let py: ptr = pym(mem);
+    let i: u32 = 0;
+    let instr: u32 = 0;
+    while i < n {
+        let _r: u32 = py_line(mem, src, n, i, instr);
+        instr = ld32(py, PY_STR);
+        let nxt: u32 = ld32(py, PY_NEXT);
+        let fl: u32 = ld32(py, PY_FL);
+        if (fl & 2) == 0 && (fl & 1) == 0 && ld32(py, PY_IND) == 0 {
+            let s: u32 = ld32(py, PY_FC);
+            let ce: u32 = ld32(py, PY_CE);
+            let c: u32 = load8(src, s);
+            if c != 64 && c != 34 && c != 39 {
+                let np: ptr = ptr_add(mem, M_R + 96);
+                let ne: u32 = py_ident(src, s, ce, np);
+                let note: u32 = 1;
+                if ne != FAIL {
+                    let no: u32 = ld32(np, 0);
+                    let nl: u32 = ld32(np, 4);
+                    if py_word_in("\ndef\nclass\nasync\n", src, no, nl) == 1 {
+                        note = 0;
+                    }
+                    if py_isupper(src, no, nl) == 1 && py_is_kw(src, no, nl) == 0 {
+                        let t: u32 = py_ws(src, ne, ce);
+                        if t < ce && load8(src, t) == 58 {
+                            note = 0;                  // `NAME: T …` 是带注解的常量
+                        }
+                        if t < ce && load8(src, t) == 61 {
+                            // 只有**单目标**赋值才是常量：`A = B = 1` 上游不收（落进
+                            // "顶层语句"那一支），所以值里再出现顶层 `=` 就不算认下
+                            let two: u32 = 0;
+                            if t + 1 < ce && load8(src, t + 1) == 61 {
+                                two = 1;
+                            }
+                            if two == 0 && py_find_top(src, t + 1, ce, 61, 1) >= ce {
+                                note = 0;
+                            }
+                        }
+                    }
+                }
+                if note == 1 {
+                    let k: u32 = s;
+                    while k < ce && load8(src, k) != 32 && load8(src, k) != 9
+                            && load8(src, k) != 58 {
+                        k = k + 1;
+                    }
+                    let l0: u32 = k - s;
+                    let l: u32 = l0;
+                    if l > 24 {
+                        l = 24;
+                    }
+                    let _s: u64 = say2("decl", ptr_add(src, s), l);
+                }
+            }
+        }
+        i = nxt;
+    }
+    return 0;
+}
+
 /// Python 那一门的主干（`from_python`）。这一门**不抹注释**（正文是原文照切）。
 fn build_python(mem: ptr, srcn: u32, argp: ptr, al: u32) -> u32 {
     let src: ptr = ptr_add(mem, M_SRC);
@@ -6301,6 +6664,7 @@ fn build_python(mem: ptr, srcn: u32, argp: ptr, al: u32) -> u32 {
     let o8: u32 = jl(out, o7, "], \"enums\": [], \"types\": [");
     let o9: u32 = py_emit_types(mem, src, n, out, o8);
     let o10: u32 = jl(out, o9, "], \"traits\": [], \"impls\": [], \"generics\": [], \"instances\": [], \"guards\": 0, \"excluded\": [], \"mode\": \"std\", \"switches\": [], \"dialects\": [], \"bodies\": []}");
+    let _t: u64 = py_say_top(mem, src, n);
     return o10;
 }
 

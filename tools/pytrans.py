@@ -112,6 +112,11 @@
 按宽度写 `^ -1`）/ `list`·`dict` /
 `for … else` / `while … else`。理由与 C 那门一样：**跳过 = 产出一份少算一步却照样能编的单元**。
 
+**脚本式写法**（没有 `def`，顶层语句就是程序）不归这一门管：`potato_from._synthesize_start`
+先把顶层语句折成 `def _start() -> None:` 的正文，再交给这里。所以这一门永远只看见
+`def` —— 而且这条规则**只对 `choose write grammar python` 成立**（用户 2026-11-10 的裁定），
+原生 Loment 与别的表层语法一行不动。
+
 ## 两条**决定**（不是翻译）
 
 1. **`int` 映 `i64`**，与 `potato_from.PY_TYPES` 一致。Python 的 `int` 是任意精度、

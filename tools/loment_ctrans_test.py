@@ -1600,6 +1600,13 @@ _PY_BATTERY = {
     "py_empty": "",
     "py_only_comment": "# nothing\n",
     "py_crlf": "def f(x: int) -> int:\r\n    return x\r\n",
+    # ---- 脚本式写法：顶层语句合成入口 `_start`（只有 python 这一门这样收）
+    "py_script_plain": "\nprint('hi')\nprint(6 * 7)\n",
+    "py_script_def_then_code": "\ndef h(n: int) -> int:\n    return n * 2\n\n"
+                               "print(h(21))\n",
+    "py_script_if": "\nif True:\n    print('yes')\n",
+    "py_script_both": "\nprint(1)\n\ndef _start() -> int:\n    return 0\n",
+    "py_script_line1": "print(1)\n",
 }
 
 

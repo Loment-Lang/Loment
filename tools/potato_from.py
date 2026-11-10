@@ -1013,6 +1013,60 @@ def _py_const(name: str, value, ann, mode: str) -> tuple[dict | None, str]:
     return {"name": name, "type": "i64", "value": v}, ""
 
 
+def _synthesize_start(src: str, tree, top: list, doc: dict, rep: Report) -> None:
+    """脚本式写法：顶层可执行语句 -> 入口 `_start` 的正文（**只有 python 这一门**）。
+
+    用户 2026-11-10 的裁定：这份便利只给 `choose write grammar python`，原生 Loment
+    与别的表层语法**一行不动** —— 别的门根本不走 `from_python`，所以这条规则天生
+    只落在这一门里。
+
+    做法：把模块里**不属于这些语句**的行抹成空行（保持行数，行号不动），剩下的
+    那一段就是正文。于是 `def` / `class` / 常量声明被抹掉的只是它们占的那几行，
+    夹在中间的语句仍在原位 —— `body_line` 直接指第一句，报错的行号不用再换算。
+
+    与 `def _start` 同时出现时**拒**：那是两套入口，选哪一个都是替用户做主。
+    """
+    if any(f["name"] == "_start" for f in doc["functions"]):
+        rep.skip("decl", "_start",
+                 f"第 {top[0].lineno} 行: 顶层语句与 `def _start` 只能二选一"
+                 f"（脚本式写法不自己写入口；要写入口就把顶层那几行搬进去）")
+        return
+    first = top[0].lineno
+    if first <= 1:
+        rep.skip("decl", "_start",
+                 f"第 {first} 行: 脚本式写法的第一条语句要留一行给入口头 —— "
+                 f"在文件头写 `choose write grammar python`（那一行会被抹成空白），"
+                 f"或在它前面留一行空行")
+        return
+    keep: set[int] = set()
+    for st in top:
+        for ln in range(st.lineno, (st.end_lineno or st.lineno) + 1):
+            keep.add(ln)
+    lines = src.splitlines()
+    last = top[-1].end_lineno or top[-1].lineno
+    # 入口头放在**第一条语句上面那一行**（那一行按构造不是语句，可能是被抹空的
+    # `def`、空行，或 `choose write grammar` 那一行），于是语句的行号**一行都不挪**。
+    out = []
+    for ln in range(first - 1, last + 1):
+        if ln == first - 1:
+            out.append("def _start() -> None:")
+        elif ln in keep:
+            out.append("    " + lines[ln - 1])
+        else:
+            out.append("")
+    ent = {"name": "_start", "params": [], "ret": "()",
+           "body": "\n".join(out), "body_line": first - 1}
+    # 按**行号**插进表里：`lomt_from._join_bodies` 是"按给定顺序垫空行"的，
+    # 顺序错了后面每一段的行号都会漂。
+    at = len(doc["functions"])
+    for i, f in enumerate(doc["functions"]):
+        if (f.get("body_line") or 0) > first - 1:
+            at = i
+            break
+    doc["functions"].insert(at, ent)
+    rep.ok += 1
+
+
 def from_python(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
     rep = Report(name, "python", mode)
     doc = _blank(_ident(Path(name).stem), "python")
@@ -1027,6 +1081,10 @@ def from_python(src: str, name: str, mode: str = "strict") -> tuple[dict, Report
         where = f"第 {e.lineno} 行" if e.lineno else "文件头附近"
         raise SyntaxError(f"{where}: 这份 Python 解析不过 —— {e.msg}") from None
     known: set[str] = set()
+    #: 顶层的**可执行语句**。Python 写法允许脚本式写法 —— 它们合成入口 `_start`
+    #: 的正文（`_synthesize_start`）。**只有这一门这么收**：原生 Loment 与别的
+    #: 表层语法根本不走这个函数。
+    top: list = []
 
     def _put_const(cname: str, cval, cann) -> None:
         c, why = _py_const(cname, cval, cann, mode)
@@ -1112,13 +1170,12 @@ def from_python(src: str, name: str, mode: str = "strict") -> tuple[dict, Report
                 and node.target.id.isupper():
             _put_const(node.target.id, node.value, node.annotation)
         else:
-            # Top-level executable statements used to disappear here. A Python
-            # script's `print(...)` became a module with zero functions, check
-            # passed, and the LVM then blamed a missing `_start` (issue #1510).
-            seg = ast.get_source_segment(src, node) or ""
-            rep.skip("decl", (seg.split() or ["?"])[0][:24],
-                     f"第 {node.lineno} 行: 顶层语句或赋值不在 Python 写法的 Loment 单元里 —— "
-                     f"把它放进 def _start()；模块级只收全大写常量、函数与类型")
+            # 顶层**可执行语句**：Python 写法的单元允许脚本式写法，它们合成入口
+            # `_start` 的正文（见下面那段）。这**只对 python 这一门**成立 ——
+            # 原生 Loment 与别的表层语法一行不动，`top` 在别处根本不收集。
+            top.append(node)
+    if top:
+        _synthesize_start(src, tree, top, doc, rep)
     return _finish(doc, rep)
 
 

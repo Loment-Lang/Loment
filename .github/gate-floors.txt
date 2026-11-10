@@ -22,7 +22,7 @@ lmgr_test 6
 loment_extblock_test 7
 loment_multilang_test 2
 loment_ctrans_test 21
-loment_pytrans_test 6
+loment_pytrans_test 7
 loment_jtrans_test 8
 loment_java_test 45
 loment_cstrans_test 6

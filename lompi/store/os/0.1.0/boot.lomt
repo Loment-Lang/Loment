@@ -1,0 +1,244 @@
+// os/boot.lomt — 开机事实: `/proc/uptime`、`/proc/cmdline`、`boot_id`
+//
+// 为什么需要它: 有三件事只能从内核的启动记录里读，而且它们各自都有一个细节：
+//   * **跑了多久**：`/proc/uptime` 是 `"12345.67 98765.43"` —— 第一个数是**秒带两位小数**
+//     （不是毫秒），第二个数是所有 CPU 的累计空闲秒数。当成整数读，小数部分就悄悄丢了；
+//   * **内核命令行**：`/proc/cmdline` 是一行空格分隔的 `key=value` / 裸旗标。想找
+//     `console=ttyS0` 得按**词**找，按子串找会把 `xconsole=` 也命中；
+//   * **这一次启动的身份**：`/proc/sys/kernel/random/boot_id` 每次启动都不一样，
+//     日志、临时目录、锁文件用它区分"上一轮"与"这一轮"。
+//
+// 覆盖: 读三个文件 + 命令行按词查找 + 秒.小数 -> 毫秒的解析。
+//
+// 边界（刻意划的）:
+//   * **不缓存** —— 这三个值都很短，每次读一次就好；要不要缓存是调用方的事；
+//   * 不解析 cmdline 的引号（内核自己不解析引号，这里跟着内核）；
+//   * 不提供写入（cmdline 是启动参数，boot_id 是只读的）；
+//   * 号是 x86-64 Linux 的。自检只验解析（纯逻辑）。
+//
+// 命名: 公开 bo_*, 内部 boq_*。自检 test_boot_*。
+
+module boot
+
+const BOQ_SYS_READ: u64 = 0;
+const BOQ_SYS_CLOSE: u64 = 3;
+const BOQ_SYS_OPENAT: u64 = 257;
+const BOQ_AT_FDCWD: u64 = 18446744073709551516;
+
+fn boq_cstr(s: str, out: ptr, cap: u32) -> u32 {
+    let n: u32 = str_len(s);
+    if n + 1 > cap {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < n {
+        store8(out, i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    store8(out, n, 0 as u8);
+    return n + 1;
+}
+
+fn boq_st64(p: ptr, v: u64) -> u32 {
+    let b: u32 = 0;
+    while b < 8 {
+        store8(p, b, ((v >> (8 * b)) & 255) as u8);
+        b = b + 1;
+    }
+    return 8;
+}
+
+fn boq_read(path: str, buf: ptr, cap: u64) -> i64 {
+    let c: ptr = alloc(96);
+    let n: u32 = boq_cstr(path, c, 88);
+    if n == 0 {
+        return 0 - 36;
+    }
+    let fd: i64 = syscall6(BOQ_SYS_OPENAT, BOQ_AT_FDCWD, c as u64, 0, 0, 0);
+    if fd < 0 {
+        return fd;
+    }
+    let r: i64 = syscall4(BOQ_SYS_READ, fd as u64, buf as u64, cap);
+    let _c: i64 = syscall4(BOQ_SYS_CLOSE, fd as u64, 0, 0);
+    return r;
+}
+
+// ---------------------------------------------------------------- 纯解析
+
+/// `"12345.67 ..."` 的第一个数（秒带小数）-> 毫秒。`n` 是缓冲区字节数。
+/// 小数部分取前三位（内核给两位；多给一位也不至于丢量级）。
+pub fn bo_uptime_ms(buf: ptr, n: u64, out_ms: ptr) -> u32 {
+    let i: u64 = 0;
+    let sec: u64 = 0;
+    while i < n && load8(buf, i as u32) >= 48 && load8(buf, i as u32) <= 57 {
+        sec = sec * 10 + (load8(buf, i as u32) as u64 - 48);
+        i = i + 1;
+    }
+    let frac: u64 = 0;
+    let digits: u64 = 0;
+    if i < n && load8(buf, i as u32) == 46 {
+        i = i + 1;
+        while i < n && digits < 3 && load8(buf, i as u32) >= 48 && load8(buf, i as u32) <= 57 {
+            frac = frac * 10 + (load8(buf, i as u32) as u64 - 48);
+            digits = digits + 1;
+            i = i + 1;
+        }
+    }
+    let scale: u64 = 1;
+    let k: u64 = 0;
+    while k < digits {
+        scale = scale * 10;
+        k = k + 1;
+    }
+    let ms: u64 = sec * 1000 + (frac * 1000) / scale;
+    let _s: u32 = boq_st64(out_ms, ms);
+    return 8;
+}
+
+/// 命令行里有没有这个词（按空格 / 换行切词，不按子串）。
+pub fn bo_cmdline_has(buf: ptr, n: u64, key: str) -> bool {
+    let kn: u32 = str_len(key);
+    let i: u64 = 0;
+    while i < n {
+        let at_start: bool = (i == 0) || (load8(buf, (i - 1) as u32) == 32)
+            || (load8(buf, (i - 1) as u32) == 10);
+        if at_start && i + (kn as u64) <= n {
+            let m: u32 = 0;
+            let hit: u32 = 1;
+            while m < kn {
+                if load8(buf, (i + (m as u64)) as u32) != str_byte(key, m) {
+                    hit = 0;
+                }
+                m = m + 1;
+            }
+            let after: u64 = i + (kn as u64);
+            if hit == 1 {
+                if after == n || load8(buf, after as u32) == 32 || load8(buf, after as u32) == 10 {
+                    return true;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+/// 找 `key=value` 里的 value，写进 out。返回长度；没有返回 0。
+pub fn bo_cmdline_value(buf: ptr, n: u64, key: str, out: ptr, cap: u32) -> u32 {
+    let kn: u32 = str_len(key);
+    let i: u64 = 0;
+    while i < n {
+        let at_start: bool = (i == 0) || (load8(buf, (i - 1) as u32) == 32)
+            || (load8(buf, (i - 1) as u32) == 10);
+        if at_start && i + (kn as u64) + 1 <= n {
+            let m: u32 = 0;
+            let hit: u32 = 1;
+            while m < kn {
+                if load8(buf, (i + (m as u64)) as u32) != str_byte(key, m) {
+                    hit = 0;
+                }
+                m = m + 1;
+            }
+            if hit == 1 && load8(buf, (i + (kn as u64)) as u32) == 61 {
+                let vstart: u64 = i + (kn as u64) + 1;
+                let vend: u64 = vstart;
+                while vend < n && load8(buf, vend as u32) != 32 && load8(buf, vend as u32) != 10 {
+                    vend = vend + 1;
+                }
+                let len: u64 = vend - vstart;
+                let j: u64 = 0;
+                while j < len {
+                    if j < (cap as u64) {
+                        store8(out, j as u32, load8(buf, (vstart + j) as u32) as u8);
+                    }
+                    j = j + 1;
+                }
+                return len as u32;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 读文件
+
+/// 读 `/proc/uptime` 原文（`"12345.67 98765.43\n"`）。返回字节数。
+pub fn bo_uptime_text(buf: ptr, cap: u64) -> i64 {
+    return boq_read("/proc/uptime", buf, cap);
+}
+
+/// 读 `/proc/uptime` 并直接把开机时长写成毫秒（`out_ms` 是 8 字节）。返回 8 或负数。
+pub fn bo_uptime(out_ms: ptr) -> i64 {
+    let b: ptr = alloc(128);
+    let n: i64 = boq_read("/proc/uptime", b, 120);
+    if n <= 0 {
+        return n;
+    }
+    let _r: u32 = bo_uptime_ms(b, n as u64, out_ms);
+    return n;
+}
+
+/// 读 `/proc/cmdline`（一行）。
+pub fn bo_cmdline(buf: ptr, cap: u64) -> i64 {
+    return boq_read("/proc/cmdline", buf, cap);
+}
+
+/// 读本次启动的 boot_id（UUID 文本，约 37 字节）。
+pub fn bo_boot_id(buf: ptr, cap: u64) -> i64 {
+    return boq_read("/proc/sys/kernel/random/boot_id", buf, cap);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn boq_fill(dst: ptr, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    return n;
+}
+
+fn test_boot_uptime_parse() -> bool {
+    let b: ptr = alloc(32);
+    let n: u32 = boq_fill(b, "123.45 99.00\n");
+    let o: ptr = alloc(8);
+    let _r: u32 = bo_uptime_ms(b, n as u64, o);
+    let v: u64 = 0;
+    let k: u32 = 0;
+    while k < 8 {
+        v = v | ((load8(o, k) as u64) << (8 * k));
+        k = k + 1;
+    }
+    return v == 123450;
+}
+
+fn test_boot_cmdline_has() -> bool {
+    let b: ptr = alloc(64);
+    let n: u32 = boq_fill(b, "console=ttyS0 quiet mitigations=off");
+    return bo_cmdline_has(b, n as u64, "quiet")
+        && bo_cmdline_has(b, n as u64, "mitigations")
+        && !bo_cmdline_has(b, n as u64, "tty")
+        && !bo_cmdline_has(b, n as u64, "off");
+}
+
+fn test_boot_cmdline_value() -> bool {
+    let b: ptr = alloc(64);
+    let n: u32 = boq_fill(b, "console=ttyS0 quiet");
+    let o: ptr = alloc(32);
+    let vl: u32 = bo_cmdline_value(b, n as u64, "console", o, 32);
+    let want: str = "ttyS0";
+    if vl != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < vl {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}

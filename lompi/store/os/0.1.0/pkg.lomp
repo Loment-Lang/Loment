@@ -31,5 +31,5 @@ pub fn choose() -> str {
 }
 
 pub fn requires() -> str {
-    return "alloc,syscall";
+    return "alloc,str_eq,syscall";
 }

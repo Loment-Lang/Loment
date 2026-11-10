@@ -1,0 +1,147 @@
+// os/interval.lomt — 周期定时器: timerfd
+//
+// 为什么需要它: 定时任务最稳的写法不是"睡一会儿再算下个时间点" —— 那样每次误差
+// 都会累加，而且 `sleep` 被信号打断就少了半拍。timerfd 是**内核记账的定时器**，
+// 到点把一个 64 位**过期次数**写进可读的 fd：睡过头了读回来的不是 1 而是 3，
+// 调用方因此知道"漏了 2 拍"，而不是假装什么都没发生。
+//
+// 三种 fd 行为（与 inotify 同一个形状，别混）:
+//   * **默认阻塞**：没到点 `read` 就挂着；
+//   * `TFD_NONBLOCK`：没到点 `read` 返回 -11（EAGAIN），适合塞进 event loop；
+//   * `TFD_TIMER_ABSTIME`：`value` 被当成**绝对**时间（相对 `CLOCK_MONOTONIC`
+//     的纳秒），适合"每个整分钟都触发"这类对齐。
+//
+// 结构体是内核的 `itimerspec`，32 字节，**两段各 16 字节**:
+//   偏移 0   interval（周期，两段为 0 就是一次性的）
+//   偏移 16  value（第一次到点的时刻）
+//   每段是 `{i64 tv_sec, i64 tv_nsec}` —— 不是 glibc 的 timespec64 之外的任何东西。
+//
+// 边界: 号是 x86-64 Linux 的。这里固定用 `CLOCK_MONOTONIC`（墙钟会跳，定时器
+// 用它会在 NTP 校准时早到/晚到）。自检只验纯逻辑（打包与换算）。
+//
+// 命名: 公开 iv_*, 内部 ivq_。自检 test_interval_*。
+
+module interval
+
+/// 建 fd 时关闭 exec 继承。
+pub const IV_CLOEXEC: u32 = 524288;
+/// 非阻塞读。
+pub const IV_NONBLOCK: u32 = 2048;
+/// `value` 按绝对时间解释。
+pub const IV_TIMER_ABSTIME: u32 = 1;
+/// `CLOCK_MONOTONIC` —— 与 os/time 的 TIME_MONOTONIC 同一个号。
+pub const IV_CLOCK_MONOTONIC: u32 = 1;
+/// `struct itimerspec` 的字节数。
+pub const IV_SPEC_BYTES: u32 = 32;
+
+const IVQ_SYS_READ: u64 = 0;
+const IVQ_SYS_TIMERFD_SETTIME: u64 = 286;
+const IVQ_SYS_TIMERFD_CREATE: u64 = 290;
+
+fn ivq_st64(p: ptr, off: u32, v: u64) -> u32 {
+    let b: u32 = 0;
+    while b < 8 {
+        store8(p, off + b, ((v >> (8 * b)) & 255) as u8);
+        b = b + 1;
+    }
+    return off + 8;
+}
+
+fn ivq_ld64(p: ptr, off: u32) -> u64 {
+    let v: u64 = 0;
+    let b: u32 = 0;
+    while b < 8 {
+        v = v | ((load8(p, off + b) as u64) << (8 * b));
+        b = b + 1;
+    }
+    return v;
+}
+
+fn ivq_st_ts(p: ptr, off: u32, ms: u64) -> u32 {
+    let a: u32 = ivq_st64(p, off, ms / 1000);
+    return ivq_st64(p, a, (ms % 1000) * 1000000);
+}
+
+/// 建一个 timerfd（固定单调时钟）。成功返回 fd。
+pub fn iv_create(flags: u32) -> i64 {
+    return syscall4(IVQ_SYS_TIMERFD_CREATE, IV_CLOCK_MONOTONIC as u64, flags as u64, 0);
+}
+
+/// 把"第一次 first_ms、之后每 period_ms"打进调用方给的 32 字节 spec。
+/// 纯函数：不调系统调用，自检直接验它。
+pub fn iv_build(spec: ptr, first_ms: u64, period_ms: u64) -> u32 {
+    let p: u32 = ivq_st_ts(spec, 0, period_ms);
+    let q: u32 = ivq_st_ts(spec, 16, first_ms);
+    return q;
+}
+
+/// 装上定时器。`first_ms == 0 && period_ms == 0` 就是**撤掉**。
+/// 成功返回 0；负数失败。
+pub fn iv_arm(fd: i64, first_ms: u64, period_ms: u64) -> i64 {
+    let spec: ptr = alloc(IV_SPEC_BYTES);
+    let _n: u32 = iv_build(spec, first_ms, period_ms);
+    return syscall4(IVQ_SYS_TIMERFD_SETTIME, fd as u64, 0, spec as u64);
+}
+
+/// 撤掉定时器（与 `iv_arm(fd, 0, 0)` 同义，名字更直白）。
+pub fn iv_disarm(fd: i64) -> i64 {
+    return iv_arm(fd, 0, 0);
+}
+
+/// 等到下一次到期，返回**自上次读取以来过期的次数**（睡过头 > 1）。
+/// 读失败（非阻塞下 EAGAIN）返回 0 —— 0 也是"没有计时"的自然值。
+pub fn iv_wait(fd: i64) -> u64 {
+    let b: ptr = alloc(8);
+    let r: i64 = syscall4(IVQ_SYS_READ, fd as u64, b as u64, 8);
+    if r < 0 {
+        return 0;
+    }
+    return ivq_ld64(b, 0);
+}
+
+/// 毫秒拆成 `sec` 与 `nsec`，写进调用方给的两块 8 字节。
+pub fn iv_ms_split(ms: u64, sec: ptr, nsec: ptr) -> u32 {
+    let _a: u32 = ivq_st64(sec, 0, ms / 1000);
+    let _b: u32 = ivq_st64(nsec, 0, (ms % 1000) * 1000000);
+    return 16;
+}
+
+/// spec 第 off 段的秒（off 取 0 = interval，16 = value）。
+pub fn iv_spec_sec(spec: ptr, off: u32) -> u64 {
+    return ivq_ld64(spec, off);
+}
+
+/// spec 第 off 段的纳秒。
+pub fn iv_spec_nsec(spec: ptr, off: u32) -> u64 {
+    return ivq_ld64(spec, off + 8);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_interval_build_layout() -> bool {
+    let s: ptr = alloc(32);
+    let n: u32 = iv_build(s, 1500, 250);
+    return n == 32 && iv_spec_sec(s, 16) == 1 && iv_spec_nsec(s, 16) == 500000000
+        && iv_spec_sec(s, 0) == 0 && iv_spec_nsec(s, 0) == 250000000;
+}
+
+fn test_interval_ms_split() -> bool {
+    let a: ptr = alloc(8);
+    let b: ptr = alloc(8);
+    let n: u32 = iv_ms_split(12345, a, b);
+    return n == 16 && ivq_ld64(a, 0) == 12 && ivq_ld64(b, 0) == 345000000;
+}
+
+fn test_interval_zero_is_disarm() -> bool {
+    let s: ptr = alloc(32);
+    iv_build(s, 0, 0);
+    return iv_spec_sec(s, 0) == 0 && iv_spec_sec(s, 16) == 0;
+}
+
+fn test_interval_high_ms() -> bool {
+    // 秒必须走完 64 位 —— 只写低 32 位的话 49 天之后定时器就回绕了。
+    let a: ptr = alloc(8);
+    let b: ptr = alloc(8);
+    iv_ms_split(4294967296000, a, b);
+    return ivq_ld64(a, 0) == 4294967296;
+}

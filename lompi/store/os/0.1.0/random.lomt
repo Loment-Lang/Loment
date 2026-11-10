@@ -1,0 +1,199 @@
+// os/random.lomt — 随机字节: `getrandom` 与无偏取模
+//
+// 为什么需要它: "随便取一个数"在程序里到处都是 (临时名、重试退避、抽样、洗牌), 而
+// 写错的两个地方都是**静默**的:
+//   * 拿 `rdtsc`/时间戳当随机源 —— 可预测, 同一纳秒的两个进程会拿到同一个值;
+//   * 直接 `rand % bound` —— 当 `bound` 不整除 2^64 时, 小的余数出现得更频繁
+//     (偏差最大可以到 2 倍)。除数越小偏差越大。
+//
+// 这一层因此只做一件事: 从内核拿随机 (**getrandom**, 318), 再用**拒绝采样**把
+// 64 位值无偏地压到 [0, bound)。拒绝的那一段是 `2^64 % bound`, 占比小于 bound/2^64,
+// 重试几次就过。
+//
+// 与 `/dev/urandom` 的分工: 两者是同一个池子; getrandom 的好处是**不需要 fd**,
+// 也不会在 fd 用尽时失败, 并且会等到池子初始化完成 (除非给了 GRND_NONBLOCK)。
+//
+// 边界: 号是 x86-64 Linux 的; 自检只验纯逻辑 (十六进制、拒绝阈值、归约), 系统调用
+// 那一半要有内核才能验。
+//
+// 命名: 公开 rn_*, 内部 rnq_。
+
+module random
+
+/// 不等待池子初始化, 没准备好就直接失败。
+pub const RN_GRND_NONBLOCK: u32 = 1;
+/// 从阻塞池 (老接口的 /dev/random 语义) 取。
+pub const RN_GRND_RANDOM: u32 = 2;
+/// 允许非密码学强度 —— 只给"不涉及安全"的场合。
+pub const RN_GRND_INSECURE: u32 = 4;
+
+const RNQ_SYS_GETRANDOM: u64 = 318;
+
+fn rnq_u64(p: ptr) -> u64 {
+    let v: u64 = 0;
+    let b: u32 = 0;
+    while b < 8 {
+        v = v | ((load8(p, b) as u64) << (8 * b));
+        b = b + 1;
+    }
+    return v;
+}
+
+/// `2^64 - 1`。拒绝采样的上界是它减掉余数。
+pub const RN_U64_MAX: u64 = 18446744073709551615;
+
+/// 对 bound 的**可接受上界**: 小于它的值 % bound 是均匀的, 大于等于它的那一小段要拒绝。
+pub fn rn_limit(bound: u64) -> u64 {
+    if bound == 0 {
+        return 0;
+    }
+    return RN_U64_MAX - (RN_U64_MAX % bound);
+}
+
+/// 把任意 u64 归约到 [0, bound) —— **不做拒绝**, 只给调用方算阈值时对照用。
+pub fn rn_reduce(v: u64, bound: u64) -> u64 {
+    if bound == 0 {
+        return 0;
+    }
+    return v % bound;
+}
+
+/// `getrandom(buf, len, flags)`。返回写进去的字节数, <0 是错误。
+pub fn rn_getrandom(buf: ptr, len: u32, flags: u32) -> i64 {
+    return syscall4(RNQ_SYS_GETRANDOM, buf as u64, len as u64, flags as u64);
+}
+
+/// 填 n 个随机字节。返回实际写入的字节数 (正常等于 n)。
+pub fn rn_bytes(buf: ptr, n: u32) -> u32 {
+    let r: i64 = rn_getrandom(buf, n, 0);
+    if r <= 0 {
+        return 0;
+    }
+    return r as u32;
+}
+
+/// 一个 64 位随机值。取失败时返回 0 —— 调用方要是关心, 用 `rn_bytes` 自己看返回值。
+pub fn rn_u64() -> u64 {
+    let b: ptr = alloc(8);
+    let r: i64 = rn_getrandom(b, 8, 0);
+    if r != 8 {
+        return 0;
+    }
+    return rnq_u64(b);
+}
+
+/// [0, bound) 上的无偏随机值。bound 为 0 返回 0。
+pub fn rn_below(bound: u64) -> u64 {
+    if bound <= 1 {
+        return 0;
+    }
+    let limit: u64 = rn_limit(bound);
+    let v: u64 = rn_u64();
+    let cur: u64 = v;
+    let tries: u32 = 0;
+    while cur >= limit && tries < 64 {
+        cur = rn_u64();
+        tries = tries + 1;
+    }
+    return cur % bound;
+}
+
+/// 原地洗牌 (Fisher-Yates), 从后往前, 每一步和 [0, i] 里的一个位置交换。
+pub fn rn_shuffle(buf: ptr, n: u32) -> u32 {
+    if n <= 1 {
+        return n;
+    }
+    let i: u32 = n - 1;
+    while i > 0 {
+        let j: u32 = rn_below((i + 1) as u64) as u32;
+        let a: u32 = load8(buf, i) as u32;
+        let b: u32 = load8(buf, j) as u32;
+        store8(buf, i, b as u8);
+        store8(buf, j, a as u8);
+        i = i - 1;
+    }
+    return n;
+}
+
+/// 小写十六进制。返回写入长度 (每个字节 2 个字符)。
+pub fn rn_hex(buf: ptr, n: u32, out: ptr, cap: u32) -> u32 {
+    let i: u32 = 0;
+    let p: u32 = 0;
+    while i < n {
+        let v: u32 = load8(buf, i) as u32;
+        let hi: u32 = (v >> 4) & 15;
+        let lo: u32 = v & 15;
+        if p < cap {
+            if hi < 10 {
+                store8(out, p, (48 + hi) as u8);
+            } else {
+                store8(out, p, (87 + hi) as u8);
+            }
+        }
+        p = p + 1;
+        if p < cap {
+            if lo < 10 {
+                store8(out, p, (48 + lo) as u8);
+            } else {
+                store8(out, p, (87 + lo) as u8);
+            }
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_random_hex() -> bool {
+    let b: ptr = alloc(4);
+    store8(b, 0, 0 as u8);
+    store8(b, 1, 127 as u8);
+    store8(b, 2, 255 as u8);
+    let out: ptr = alloc(8);
+    let n: u32 = rn_hex(b, 3, out, 8);
+    if n != 6 {
+        return false;
+    }
+    if load8(out, 0) != 48 || load8(out, 1) != 48 {
+        return false;
+    }
+    if load8(out, 2) != 55 || load8(out, 3) != 102 {
+        return false;
+    }
+    if load8(out, 4) != 102 || load8(out, 5) != 102 {
+        return false;
+    }
+    return true;
+}
+
+fn test_random_limit() -> bool {
+    let l10: u64 = rn_limit(10);
+    if l10 != 18446744073709551610 {
+        return false;
+    }
+    if rn_reduce(27, 10) != 7 {
+        return false;
+    }
+    if l10 >= RN_U64_MAX {
+        return false;
+    }
+    if rn_limit(1) != RN_U64_MAX {
+        return false;
+    }
+    return true;
+}
+
+fn test_random_reduce_edge() -> bool {
+    if rn_reduce(5, 0) != 0 {
+        return false;
+    }
+    if rn_limit(0) != 0 {
+        return false;
+    }
+    if rn_reduce(0, 3) != 0 {
+        return false;
+    }
+    return true;
+}

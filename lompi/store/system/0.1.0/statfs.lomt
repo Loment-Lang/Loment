@@ -1,0 +1,224 @@
+// system/statfs.lomt — `statfs(2)` 的结构体布局与文件系统魔数名
+//
+// 为什么系统工具需要它: "这块盘还剩多少"、"这个目录是什么文件系统"、"inode 够不够"
+// 是三个每天都在问的问题，而 `statfs` 返回的是一块**没有类型标注的字节**：
+// `f_type` 在第 0 字节，`f_blocks` 在第 16 字节 —— 每个字段都要自己按偏移读。
+// 更麻烦的是 `f_type`：它是个魔数（ext4 是 61267、tmpfs 是 16914836），
+// 排查"为什么写不进去"时，第一件事往往就是认出它是哪种文件系统。
+//
+// 布局（x86-64 Linux 的 `struct statfs`，不是 glibc 的 `statvfs`）:
+//   f_type 0 · f_bsize 8 · f_blocks 16 · f_bfree 24 · f_bavail 32 ·
+//   f_files 40 · f_ffree 48 · f_fsid 56（8 字节）· f_namelen 64 ·
+//   f_frsize 72 · f_flags 80            —— 共 88 字节，`STATFS_BYTES`。
+//   `f_spare` 在后面，本模块不读。
+//
+// 不做的: 百分比/容量换算（调用方自己算，避免"用哪个块大小"这种口径分歧）、
+// `statvfs`（那是 glibc 封装）、32 位与其它架构的布局（有些字段宽度不同）。
+//
+// 命名: 公开 st_*, 内部 stf_*。自检 test_statfs_*。
+
+module statfs
+
+/// `struct statfs` 的字节数（x86-64）。调用方给缓冲区时至少这么大。
+pub const STATFS_BYTES: u32 = 88;
+
+pub const STATFS_F_TYPE: u32 = 0;
+pub const STATFS_F_BSIZE: u32 = 8;
+pub const STATFS_F_BLOCKS: u32 = 16;
+pub const STATFS_F_BFREE: u32 = 24;
+pub const STATFS_F_BAVAIL: u32 = 32;
+pub const STATFS_F_FILES: u32 = 40;
+pub const STATFS_F_FFREE: u32 = 48;
+pub const STATFS_F_FSID: u32 = 56;
+pub const STATFS_F_NAMELEN: u32 = 64;
+pub const STATFS_F_FRSIZE: u32 = 72;
+pub const STATFS_F_FLAGS: u32 = 80;
+
+const STFP_SYS_STATFS: u64 = 137;
+const STFP_SYS_FSTATFS: u64 = 138;
+
+fn stf_u64(buf: ptr, off: u32) -> u64 {
+    let v: u64 = 0;
+    let b: u32 = 0;
+    while b < 8 {
+        v = v | ((load8(buf, off + b) as u64) << (8 * b));
+        b = b + 1;
+    }
+    return v;
+}
+
+fn stf_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+/// `statfs(path, buf)` —— path 是 C 串，buf 至少 `STATFS_BYTES` 字节。
+pub fn st_statfs(path: ptr, buf: ptr) -> i64 {
+    return syscall4(STFP_SYS_STATFS, path as u64, buf as u64, 0);
+}
+
+/// `fstatfs(fd, buf)` —— 已经开着的文件描述符。
+pub fn st_fstatfs(fd: u64, buf: ptr) -> i64 {
+    return syscall4(STFP_SYS_FSTATFS, fd, buf as u64, 0);
+}
+
+/// 文件系统类型魔数（`f_type`）。
+pub fn st_type(buf: ptr) -> u64 {
+    return stf_u64(buf, STATFS_F_TYPE);
+}
+
+/// 块大小（字节）。
+pub fn st_bsize(buf: ptr) -> u64 {
+    return stf_u64(buf, STATFS_F_BSIZE);
+}
+
+/// 总块数。
+pub fn st_blocks(buf: ptr) -> u64 {
+    return stf_u64(buf, STATFS_F_BLOCKS);
+}
+
+/// 空闲块数（含 root 保留）。
+pub fn st_bfree(buf: ptr) -> u64 {
+    return stf_u64(buf, STATFS_F_BFREE);
+}
+
+/// 非特权用户可用块数 —— "还能写多少"看这个，不看 `bfree`。
+pub fn st_bavail(buf: ptr) -> u64 {
+    return stf_u64(buf, STATFS_F_BAVAIL);
+}
+
+/// inode 总数。
+pub fn st_files(buf: ptr) -> u64 {
+    return stf_u64(buf, STATFS_F_FILES);
+}
+
+/// 空闲 inode 数。
+pub fn st_ffree(buf: ptr) -> u64 {
+    return stf_u64(buf, STATFS_F_FFREE);
+}
+
+/// 文件名长度上限。
+pub fn st_namelen(buf: ptr) -> u64 {
+    return stf_u64(buf, STATFS_F_NAMELEN);
+}
+
+/// 基本块大小（`f_frsize`）。
+pub fn st_frsize(buf: ptr) -> u64 {
+    return stf_u64(buf, STATFS_F_FRSIZE);
+}
+
+/// 挂载标志（与 `MS_*` 同源，见 `system/mount`）。
+pub fn st_flags(buf: ptr) -> u64 {
+    return stf_u64(buf, STATFS_F_FLAGS);
+}
+
+/// 已用块数（`blocks - bfree`），不会下溢。
+pub fn st_used(buf: ptr) -> u64 {
+    let total: u64 = stf_u64(buf, STATFS_F_BLOCKS);
+    let free: u64 = stf_u64(buf, STATFS_F_BFREE);
+    if free >= total {
+        return 0;
+    }
+    return total - free;
+}
+
+/// 魔数 -> 文件系统名。认不出来返回 `"unknown"`。
+pub fn st_magic_name(magic: u64, out: ptr, cap: u32) -> u32 {
+    let m: u32 = magic as u32;
+    if m == 61267 as u32 { return stf_put(out, cap, 0, "ext2/3/4"); }
+    if m == 16914836 as u32 { return stf_put(out, cap, 0, "tmpfs"); }
+    if m == 40864 as u32 { return stf_put(out, cap, 0, "proc"); }
+    if m == 1650812274 as u32 { return stf_put(out, cap, 0, "sysfs"); }
+    if m == 2035054128 as u32 { return stf_put(out, cap, 0, "overlayfs"); }
+    if m == 1481003842 as u32 { return stf_put(out, cap, 0, "xfs"); }
+    if m == 2435016766 as u32 { return stf_put(out, cap, 0, "btrfs"); }
+    if m == 26985 as u32 { return stf_put(out, cap, 0, "nfs"); }
+    if m == 1667723888 as u32 { return stf_put(out, cap, 0, "cgroup2"); }
+    if m == 4979 as u32 { return stf_put(out, cap, 0, "devtmpfs"); }
+    if m == 2240043254 as u32 { return stf_put(out, cap, 0, "ramfs"); }
+    if m == 1936814952 as u32 { return stf_put(out, cap, 0, "squashfs"); }
+    if m == 19780 as u32 { return stf_put(out, cap, 0, "msdos"); }
+    if m == 538032816 as u32 { return stf_put(out, cap, 0, "exfat"); }
+    if m == 1397118030 as u32 { return stf_put(out, cap, 0, "ntfs"); }
+    if m == 4076150800 as u32 { return stf_put(out, cap, 0, "f2fs"); }
+    return stf_put(out, cap, 0, "unknown");
+}
+
+/// 写一个 u64 到缓冲区的第 `off` 字节（自检与调用方造夹具用）。
+pub fn st_set_u64(buf: ptr, off: u32, v: u64) -> u32 {
+    let b: u32 = 0;
+    while b < 8 {
+        store8(buf, off + b, ((v >> (8 * b)) & 255) as u8);
+        b = b + 1;
+    }
+    return 8;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_statfs_fields_decode() -> bool {
+    let b: ptr = alloc(STATFS_BYTES);
+    let _t: u32 = st_set_u64(b, STATFS_F_TYPE, 16914836 as u64);
+    let _bs: u32 = st_set_u64(b, STATFS_F_BSIZE, 4096);
+    let _bk: u32 = st_set_u64(b, STATFS_F_BLOCKS, 1000);
+    let _fr: u32 = st_set_u64(b, STATFS_F_BFREE, 250);
+    let _av: u32 = st_set_u64(b, STATFS_F_BAVAIL, 200);
+    if st_type(b) != 16914836 as u64 {
+        return false;
+    }
+    if st_bsize(b) != 4096 as u64 {
+        return false;
+    }
+    if st_used(b) != 750 as u64 {
+        return false;
+    }
+    if st_bavail(b) != 200 as u64 {
+        return false;
+    }
+    return true;
+}
+
+fn test_statfs_used_does_not_underflow() -> bool {
+    let b: ptr = alloc(STATFS_BYTES);
+    let _bk: u32 = st_set_u64(b, STATFS_F_BLOCKS, 10);
+    let _fr: u32 = st_set_u64(b, STATFS_F_BFREE, 20);
+    return st_used(b) == 0 as u64;
+}
+
+fn test_statfs_magic_names() -> bool {
+    let b: ptr = alloc(32);
+    let n: u32 = st_magic_name(61267 as u64, b, 32);
+    let want: str = "ext2/3/4";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(b, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    let n2: u32 = st_magic_name(12345 as u64, b, 32);
+    let w2: str = "unknown";
+    if n2 != str_len(w2) {
+        return false;
+    }
+    let j: u32 = 0;
+    while j < n2 {
+        if load8(b, j) != str_byte(w2, j) {
+            return false;
+        }
+        j = j + 1;
+    }
+    return true;
+}

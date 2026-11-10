@@ -1,0 +1,189 @@
+// system/timerfd.lomt — timerfd: 把"到点"变成一次可 poll 的读
+//
+// 为什么系统工具需要它: `nanosleep` 只叫醒自己，`alarm` 一个进程只有一个；
+// 而一个事件循环要等"50ms 后重试"与"读这个 socket"里的**任何一个**先发生。
+// timerfd 把定时器做成 fd —— 到点后 fd 可读，`read` 返回**自上次读以来到期的次数**。
+// 这就是为什么它必须进 epoll：定时与 I/O 走同一条等待路径。
+//
+// 结构体（内核的 `struct itimerspec`，2 × timespec = 32 字节）:
+//   interval.sec(0) | interval.nsec(8) | value.sec(16) | value.nsec(24)
+// `interval` 为 0 表示"只响一次"；`value` 为 0 表示"解除定时器"。两者都是 u64。
+//
+// 一条会咬人的语义: **`read` 返回的是 u64 次数，不是时间**。循环里没有读它，
+// 次数会一直累加 —— 于是"每次超时读一次"既是取数，也是**清账**。
+//
+// 不做的: `TFD_TIMER_CANCEL_ON_SET` 的按需启动细节、`clock_gettime` 之外的其他钟、
+// 以及 absolute 时间的换算（调用方用 `os/time` 拼）。
+//
+// 命名: 公开 tf_*, 内部 tq_*。自检 test_timerfd_*。
+
+module timerfd
+
+/// 子进程不继承。
+pub const TF_CLOEXEC: u32 = 524288;
+/// 非阻塞读。
+pub const TF_NONBLOCK: u32 = 2048;
+/// `value` 是绝对时间而不是相对时长。
+pub const TF_TIMER_ABSTIME: u32 = 1;
+/// 用 `TFD_TIMER_ABSTIME` 时，钟被改了就取消。
+pub const TF_TIMER_CANCEL_ON_SET: u32 = 2;
+
+/// itimerspec 的字节数。
+pub const TF_SPEC_BYTES: u32 = 32;
+
+const TQ_SYS_READ: u64 = 0;
+const TQ_SYS_CREATE: u64 = 283;
+const TQ_SYS_SETTIME: u64 = 286;
+const TQ_SYS_GETTIME: u64 = 287;
+
+fn tq_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+fn tq_sep(out: ptr, cap: u32, pos: u32) -> u32 {
+    if pos > 0 {
+        return tq_put(out, cap, pos, "|");
+    }
+    return pos;
+}
+
+fn tq_st64(p: ptr, off: u32, v: u64) -> u32 {
+    let b: u32 = 0;
+    while b < 8 {
+        store8(p, off + b, ((v >> (8 * b)) & 255) as u8);
+        b = b + 1;
+    }
+    return off + 8;
+}
+
+fn tq_ld64(p: ptr, off: u32) -> u64 {
+    let v: u64 = 0;
+    let b: u32 = 0;
+    while b < 8 {
+        v = v | ((load8(p, off + b) as u64) << (8 * b));
+        b = b + 1;
+    }
+    return v;
+}
+
+/// 标志位 -> 名字串。0 返回 `"0"`。
+pub fn tf_flags_text(flags: u32, out: ptr, cap: u32) -> u32 {
+    if flags == 0 {
+        return tq_put(out, cap, 0, "0");
+    }
+    let pos: u32 = 0;
+    if (flags & TF_TIMER_ABSTIME) != 0 {
+        pos = tq_put(out, cap, pos, "TFD_TIMER_ABSTIME");
+    }
+    if (flags & TF_TIMER_CANCEL_ON_SET) != 0 {
+        pos = tq_sep(out, cap, pos);
+        pos = tq_put(out, cap, pos, "TFD_TIMER_CANCEL_ON_SET");
+    }
+    if (flags & TF_CLOEXEC) != 0 {
+        pos = tq_sep(out, cap, pos);
+        pos = tq_put(out, cap, pos, "TFD_CLOEXEC");
+    }
+    if (flags & TF_NONBLOCK) != 0 {
+        pos = tq_sep(out, cap, pos);
+        pos = tq_put(out, cap, pos, "TFD_NONBLOCK");
+    }
+    return pos;
+}
+
+/// `timerfd_create(clockid, flags)` —— clockid 用 `os/time` 的 `TIME_*`。
+pub fn tf_create(clockid: u32, flags: u32) -> i64 {
+    return syscall4(TQ_SYS_CREATE, clockid as u64, flags as u64, 0);
+}
+
+/// 往调用方给的 32 字节里打一份 itimerspec。返回 32。
+pub fn tf_spec_set(spec: ptr, isec: u64, insec: u64, vsec: u64, vnsec: u64) -> u32 {
+    let _a: u32 = tq_st64(spec, 0, isec);
+    let _b: u32 = tq_st64(spec, 8, insec);
+    let _c: u32 = tq_st64(spec, 16, vsec);
+    let _d: u32 = tq_st64(spec, 24, vnsec);
+    return TF_SPEC_BYTES;
+}
+
+pub fn tf_spec_isec(spec: ptr) -> u64 {
+    return tq_ld64(spec, 0);
+}
+
+pub fn tf_spec_insec(spec: ptr) -> u64 {
+    return tq_ld64(spec, 8);
+}
+
+pub fn tf_spec_vsec(spec: ptr) -> u64 {
+    return tq_ld64(spec, 16);
+}
+
+pub fn tf_spec_vnsec(spec: ptr) -> u64 {
+    return tq_ld64(spec, 24);
+}
+
+/// `timerfd_settime(fd, flags, spec)` —— 成功返回 0。
+pub fn tf_settime(fd: u64, flags: u32, spec: ptr) -> i64 {
+    return syscall7(TQ_SYS_SETTIME, fd, flags as u64, spec as u64, 0, 0, 0);
+}
+
+/// `timerfd_gettime(fd, spec)` —— 把剩余时间写进调用方的 32 字节。
+pub fn tf_gettime(fd: u64, spec: ptr) -> i64 {
+    return syscall4(TQ_SYS_GETTIME, fd, spec as u64, 0);
+}
+
+/// `read(fd, out, 8)` —— out 收 u64 到期次数。读这一下就把计数清零。
+pub fn tf_read_expirations(fd: u64, out: ptr) -> i64 {
+    return syscall4(TQ_SYS_READ, fd, out as u64, 8);
+}
+
+/// 读一次并解出到期次数；读失败返回 0。
+pub fn tf_take_expirations(fd: u64) -> u64 {
+    let b: ptr = alloc(8);
+    let r: i64 = syscall4(TQ_SYS_READ, fd, b as u64, 8);
+    if r != 8 {
+        return 0;
+    }
+    return tq_ld64(b, 0);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_timerfd_spec_roundtrip() -> bool {
+    let s: ptr = alloc(32);
+    let n: u32 = tf_spec_set(s, 5, 6, 7, 8);
+    return n == 32 && tf_spec_isec(s) == 5 && tf_spec_insec(s) == 6
+        && tf_spec_vsec(s) == 7 && tf_spec_vnsec(s) == 8 && load8(s, 31) == 0;
+}
+
+fn test_timerfd_spec_wide() -> bool {
+    let s: ptr = alloc(32);
+    let _n: u32 = tf_spec_set(s, 4294967297, 999999999, 0, 1);
+    return tf_spec_isec(s) == 4294967297 && tf_spec_insec(s) == 999999999
+        && tf_spec_vsec(s) == 0 && tf_spec_vnsec(s) == 1;
+}
+
+fn test_timerfd_flags_text() -> bool {
+    let o: ptr = alloc(96);
+    let n: u32 = tf_flags_text(3, o, 96);
+    let want: str = "TFD_TIMER_ABSTIME|TFD_TIMER_CANCEL_ON_SET";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}

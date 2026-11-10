@@ -1,0 +1,267 @@
+// system/mountinfo.lomt — 解析 `/proc/self/mountinfo`
+//
+// 为什么系统工具需要它: 想知道"这个路径在哪个文件系统上、是不是只读、源设备是什么"，
+// 标准答案就是 `/proc/self/mountinfo` —— 容器运行时、`findmnt`、备份工具都在解它。
+// 这份文本有两条**不能按朴素空格切**的规则：
+//   * 字段本身用空格分隔，但字段**内部**的空格被转义成 `\040`（制表符 `\011`、
+//     换行 `\012`、反斜杠 `\134`）—— 挂载点带空格是常态（`/mnt/My Disk`）；
+//   * 从第 7 个字段起是**可选字段组**，用单独一个 `-` 与后面三段
+//     （fstype / source / super options）分开 —— `-` 的**位置不固定**。
+// 这两条各写错一次，得到的就是错的挂载点或错的文件系统名，且不报错。
+//
+// 覆盖: 按序号取字段（并解转义）、解转义、找 `-` 的位置、`major:minor` 拆分、字段计数。
+//
+// 不做: 读文件（`os/io`）、嵌套关系（每条记录的 parent id 指向另一条，遍历是调用方的
+// 事）、`mountinfo` 与 `mounts` 的差异（后者转义规则不同，这里只认 `mountinfo`）。
+//
+// 命名: 公开 mi_*, 内部 miq_*。自检 test_mountinfo_*。
+
+module mountinfo
+
+fn miq_is_oct(c: u32) -> bool {
+    return c >= 48 && c <= 55;
+}
+
+/// 把 `\040` / `\011` / `\012` / `\134` 解回转义前的字符；其它字节原样拷贝。
+/// 返回写入长度（可能大于 cap，被截断的部分只计数不写）。
+pub fn mi_unescape(src: ptr, n: u32, out: ptr, cap: u32) -> u32 {
+    let i: u32 = 0;
+    let pos: u32 = 0;
+    while i < n {
+        let c: u32 = load8(src, i) as u32;
+        if c == 92 && i + 3 < n {
+            let d1: u32 = load8(src, i + 1) as u32;
+            let d2: u32 = load8(src, i + 2) as u32;
+            let d3: u32 = load8(src, i + 3) as u32;
+            if miq_is_oct(d1) && miq_is_oct(d2) && miq_is_oct(d3) {
+                let v: u32 = (d1 - 48) * 64 + (d2 - 48) * 8 + (d3 - 48);
+                if pos < cap {
+                    store8(out, pos, v as u8);
+                }
+                pos = pos + 1;
+                i = i + 4;
+            } else {
+                if pos < cap {
+                    store8(out, pos, c as u8);
+                }
+                pos = pos + 1;
+                i = i + 1;
+            }
+        } else {
+            if pos < cap {
+                store8(out, pos, c as u8);
+            }
+            pos = pos + 1;
+            i = i + 1;
+        }
+    }
+    return pos;
+}
+
+/// 取第 `index` 个字段（0 起），解转义后写进 `out`，返回完整长度。越界返回 0。
+pub fn mi_field(line: ptr, n: u32, index: u32, out: ptr, cap: u32) -> u32 {
+    let i: u32 = 0;
+    let idx: u32 = 0;
+    while i < n {
+        while i < n && load8(line, i) == 32 {
+            i = i + 1;
+        }
+        if i >= n {
+            return 0;
+        }
+        let s: u32 = i;
+        while i < n && load8(line, i) != 32 {
+            i = i + 1;
+        }
+        if idx == index {
+            return mi_unescape(ptr_add(line, s), i - s, out, cap);
+        }
+        idx = idx + 1;
+    }
+    return 0;
+}
+
+/// 字段个数（按空格切，不解转义）。
+pub fn mi_field_count(line: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    let c: u32 = 0;
+    while i < n {
+        while i < n && load8(line, i) == 32 {
+            i = i + 1;
+        }
+        if i < n {
+            c = c + 1;
+            while i < n && load8(line, i) != 32 {
+                i = i + 1;
+            }
+        }
+    }
+    return c;
+}
+
+/// 单独那个 `-` 的字段序号；没有返回 0（字段 0 不可能是 `-`，所以 0 是安全的哨兵）。
+/// 它后面依次是 fstype / source / super options。
+pub fn mi_sep_index(line: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    let idx: u32 = 0;
+    while i < n {
+        while i < n && load8(line, i) == 32 {
+            i = i + 1;
+        }
+        if i >= n {
+            return 0;
+        }
+        let s: u32 = i;
+        while i < n && load8(line, i) != 32 {
+            i = i + 1;
+        }
+        if i - s == 1 && load8(line, s) == 45 {
+            return idx;
+        }
+        idx = idx + 1;
+    }
+    return 0;
+}
+
+fn miq_st32(p: ptr, v: u32) -> u32 {
+    let b: u32 = 0;
+    while b < 4 {
+        store8(p, b, ((v >> (8 * b)) & 255) as u8);
+        b = b + 1;
+    }
+    return 4;
+}
+
+/// 把 `major:minor` 拆成两个 u32 写进调用方给的两块 4 字节。成功返回 1。
+pub fn mi_split_major_minor(field: ptr, n: u32, major: ptr, minor: ptr) -> u32 {
+    let i: u32 = 0;
+    let a: u32 = 0;
+    let da: u32 = 0;
+    while i < n {
+        let c: u32 = load8(field, i) as u32;
+        if c < 48 || c > 57 {
+            i = n;
+        } else {
+            a = a * 10 + (c - 48);
+            da = da + 1;
+            i = i + 1;
+        }
+    }
+    if da == 0 {
+        return 0;
+    }
+    let j: u32 = da;
+    if j >= n {
+        return 0;
+    }
+    if load8(field, j) != 58 {
+        return 0;
+    }
+    let k: u32 = j + 1;
+    let b: u32 = 0;
+    let db: u32 = 0;
+    while k < n {
+        let c2: u32 = load8(field, k) as u32;
+        if c2 < 48 || c2 > 57 {
+            k = n;
+        } else {
+            b = b * 10 + (c2 - 48);
+            db = db + 1;
+            k = k + 1;
+        }
+    }
+    if db == 0 {
+        return 0;
+    }
+    let _ma: u32 = miq_st32(major, a);
+    let _mi: u32 = miq_st32(minor, b);
+    return 1;
+}
+
+/// 把第 `index` 个字段按无符号十进制解析（挂载号、父号）。成功返回 1。
+pub fn mi_field_u32(line: ptr, n: u32, index: u32, out: ptr) -> u32 {
+    let tmp: ptr = alloc(24);
+    let got: u32 = mi_field(line, n, index, tmp, 24);
+    if got == 0 {
+        return 0;
+    }
+    let v: u32 = 0;
+    let i: u32 = 0;
+    let digits: u32 = 0;
+    while i < got {
+        let c: u32 = load8(tmp, i) as u32;
+        if c < 48 || c > 57 {
+            i = got;
+        } else {
+            v = v * 10 + (c - 48);
+            digits = digits + 1;
+            i = i + 1;
+        }
+    }
+    if digits == 0 {
+        return 0;
+    }
+    let _w: u32 = miq_st32(out, v);
+    return 1;
+}
+
+fn miq_eq(p: ptr, n: u32, want: str) -> bool {
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(p, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn miq_ld32(p: ptr) -> u32 {
+    return (load8(p, 0) as u32) | ((load8(p, 1) as u32) << 8)
+        | ((load8(p, 2) as u32) << 16) | ((load8(p, 3) as u32) << 24);
+}
+
+fn test_mountinfo_unescape() -> bool {
+    // "\040" 逐字节构造：反斜杠 92 + '0' 48 + '4' 52 + '0' 48。
+    let s: ptr = alloc(8);
+    store8(s, 0, 92 as u8);
+    store8(s, 1, 48 as u8);
+    store8(s, 2, 52 as u8);
+    store8(s, 3, 48 as u8);
+    let o: ptr = alloc(8);
+    let n: u32 = mi_unescape(s, 4, o, 8);
+    return n == 1 && load8(o, 0) == 32;
+}
+
+fn test_mountinfo_fields() -> bool {
+    let line: str = "36 35 98:0 / /mnt/data rw,nosuid - ext4 /dev/sda1 rw";
+    let o: ptr = alloc(32);
+    let n: u32 = mi_field(str_ptr(line), str_len(line), 4, o, 32);
+    return n == 9 && load8(o, 0) == 47 && load8(o, 4) == 100
+        && mi_field_count(str_ptr(line), str_len(line)) == 10
+        && mi_sep_index(str_ptr(line), str_len(line)) == 6;
+}
+
+fn test_mountinfo_split() -> bool {
+    let line: str = "36 35 98:0 / /mnt/data rw,nosuid - ext4 /dev/sda1 rw";
+    let f: ptr = alloc(16);
+    let n: u32 = mi_field(str_ptr(line), str_len(line), 2, f, 16);
+    let ma: ptr = alloc(4);
+    let mi: ptr = alloc(4);
+    let ok: u32 = mi_split_major_minor(f, n, ma, mi);
+    return ok == 1 && miq_ld32(ma) == 98 && miq_ld32(mi) == 0;
+}
+
+fn test_mountinfo_optional_fields() -> bool {
+    // `-` 前面可以有多段可选字段（这里是 `shared:7`）—— 位置不固定。
+    let line: str = "70 36 8:1 / /mnt/x rw shared:7 master:3 - xfs /dev/sdb1 rw";
+    let f: ptr = alloc(16);
+    let sep: u32 = mi_sep_index(str_ptr(line), str_len(line));
+    let n: u32 = mi_field(str_ptr(line), str_len(line), sep + 1, f, 16);
+    return sep == 8 && n == 3 && miq_eq(f, n, "xfs") == true;
+}

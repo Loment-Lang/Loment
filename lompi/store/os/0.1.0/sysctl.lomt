@@ -1,0 +1,197 @@
+// os/sysctl.lomt — 读 `/proc/sys` 里的内核开关（点号键 -> 文件路径）
+//
+// 为什么需要它: Linux 的 sysctl 不是系统调用，而是**一棵文件树** —— `net.ipv4.ip_forward`
+// 就是 `/proc/sys/net/ipv4/ip_forward`，内容是一行文本。这意味着：
+//   * 读法就是 open/read/close，不需要任何库；
+//   * 但**键到路径的转换**必须一致（点号换斜杠、前缀固定），写错一个点就是另一个开关；
+//   * 值常常带一个换行（`"1\n"`），当整数解析前要把它去掉 —— 不去掉 `atoi` 之后的
+//     代码在严格解析里会失败。
+//
+// 覆盖: 键 -> 路径、读原文、读整数、三个最常用的键（ostype / osrelease / hostname）。
+//
+// 边界（刻意划的）:
+//   * **只读**。写 `/proc/sys` 会改整个机器的行为，一个库不该有那个入口 ——
+//     要写的调用方自己 open/write（并在自己那边承担权限与后果）；
+//   * 键必须是**已经拼好的点号形式**；从命令行参数来的键要调用方先校验
+//     （这里是库，不替调用方做参数校验）；
+//   * 号是 x86-64 Linux 的。自检只验路径转换与数字解析。
+//
+// 命名: 公开 sc2_*, 内部 scq_*（`sysconf` 占了 `sc_` 前缀的想法，见 `os/sysconf`）。
+
+module sysctl
+
+const SCQ_SYS_READ: u64 = 0;
+const SCQ_SYS_CLOSE: u64 = 3;
+const SCQ_SYS_OPENAT: u64 = 257;
+const SCQ_AT_FDCWD: u64 = 18446744073709551516;
+
+fn scq_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+fn scq_cstr(s: str, out: ptr, cap: u32) -> u32 {
+    let n: u32 = str_len(s);
+    if n + 1 > cap {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < n {
+        store8(out, i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    store8(out, n, 0 as u8);
+    return n + 1;
+}
+
+/// 点号键 -> `/proc/sys/...` 路径（`. -> /`）。返回长度（不含 NUL）。
+pub fn sc2_path(key: str, out: ptr, cap: u32) -> u32 {
+    let pos: u32 = scq_put(out, cap, 0, "/proc/sys/");
+    let n: u32 = str_len(key);
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = str_byte(key, i);
+        if c == 46 {
+            if pos < cap {
+                store8(out, pos, 47 as u8);
+            }
+        } else if pos < cap {
+            store8(out, pos, c as u8);
+        }
+        pos = pos + 1;
+        i = i + 1;
+    }
+    return pos;
+}
+
+/// 去掉文本值末尾的换行（`"1\n"` -> `"1"`）。写进 out，返回长度。
+pub fn sc2_trim(buf: ptr, n: u64, out: ptr, cap: u32) -> u32 {
+    let len: u64 = n;
+    let stop: u32 = 0;
+    while len > 0 && stop == 0 {
+        let c: u32 = load8(buf, (len - 1) as u32) as u32;
+        if c == 10 || c == 13 {
+            len = len - 1;
+        } else {
+            stop = 1;
+        }
+    }
+    let i: u64 = 0;
+    while i < len {
+        if i < (cap as u64) {
+            store8(out, i as u32, load8(buf, i as u32) as u8);
+        }
+        i = i + 1;
+    }
+    return len as u32;
+}
+
+/// 解析无符号十进制（可带一个结尾换行）。返回解析到的位数；不合法返回 0。
+pub fn sc2_parse_u64(buf: ptr, n: u64, out: ptr) -> u32 {
+    let v: u64 = 0;
+    let i: u64 = 0;
+    let digits: u32 = 0;
+    while i < n && load8(buf, i as u32) >= 48 && load8(buf, i as u32) <= 57 {
+        v = v * 10 + (load8(buf, i as u32) as u64 - 48);
+        digits = digits + 1;
+        i = i + 1;
+    }
+    let b: u32 = 0;
+    while b < 8 {
+        store8(out, b, ((v >> (8 * b)) & 255) as u8);
+        b = b + 1;
+    }
+    return digits;
+}
+
+// ---------------------------------------------------------------- 读
+
+/// 读一个键的原文，写进 `buf`。返回字节数（负数 = errno 取反）。
+pub fn sc2_read(key: str, buf: ptr, cap: u64) -> i64 {
+    let path: ptr = alloc(192);
+    let plen: u32 = sc2_path(key, path, 180);
+    if plen >= 180 {
+        return 0 - 36;
+    }
+    store8(path, plen, 0 as u8);
+    let fd: i64 = syscall6(SCQ_SYS_OPENAT, SCQ_AT_FDCWD, path as u64, 0, 0, 0);
+    if fd < 0 {
+        return fd;
+    }
+    let r: i64 = syscall4(SCQ_SYS_READ, fd as u64, buf as u64, cap);
+    let _c: i64 = syscall4(SCQ_SYS_CLOSE, fd as u64, 0, 0);
+    return r;
+}
+
+/// 读一个键的整数（`out` 是 8 字节 u64）。成功返回 1，读失败或不是数字返回 0。
+pub fn sc2_read_u64(key: str, out: ptr) -> i64 {
+    let b: ptr = alloc(64);
+    let n: i64 = sc2_read(key, b, 64);
+    if n <= 0 {
+        return 0;
+    }
+    let d: u32 = sc2_parse_u64(b, n as u64, out);
+    if d == 0 {
+        return 0;
+    }
+    return 1;
+}
+
+pub fn sc2_kernel_ostype(buf: ptr, cap: u64) -> i64 {
+    return sc2_read("kernel.ostype", buf, cap);
+}
+
+pub fn sc2_kernel_osrelease(buf: ptr, cap: u64) -> i64 {
+    return sc2_read("kernel.osrelease", buf, cap);
+}
+
+pub fn sc2_hostname(buf: ptr, cap: u64) -> i64 {
+    return sc2_read("kernel.hostname", buf, cap);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_sysctl_path() -> bool {
+    let o: ptr = alloc(64);
+    let n: u32 = sc2_path("net.ipv4.ip_forward", o, 64);
+    let want: str = "/proc/sys/net/ipv4/ip_forward";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_sysctl_parse() -> bool {
+    let b: ptr = alloc(8);
+    store8(b, 0, 52 as u8); // '4'
+    store8(b, 1, 50 as u8); // '2'
+    store8(b, 2, 10 as u8); // '\n'
+    let o: ptr = alloc(8);
+    let d: u32 = sc2_parse_u64(b, 3, o);
+    return d == 2 && load8(o, 0) == 42;
+}
+
+fn test_sysctl_parse_zero() -> bool {
+    let b: ptr = alloc(4);
+    store8(b, 0, 48 as u8);
+    store8(b, 1, 10 as u8);
+    let o: ptr = alloc(8);
+    let d: u32 = sc2_parse_u64(b, 2, o);
+    return d == 1 && load8(o, 0) == 0 && load8(o, 7) == 0;
+}

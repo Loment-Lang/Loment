@@ -1,0 +1,262 @@
+// os/pwd.lomt — `/etc/passwd` 的解析（uid ↔ 名字）
+//
+// 为什么需要它: 日志里写 `uid=1000` 没人看得懂; 反过来 `chown alice` 之前得知道
+// alice 的 uid。两者都要读 `/etc/passwd` —— 一份**冒号分隔、每行一条**的文本,
+// 七个字段依次是 name / password / uid / gid / gecos / home / shell。
+//
+// 为什么解析放在库里: 这个格式三十年没变, 但"切字段"的写法几乎每一份手写代码都会
+// 在**空字段**上翻车（`::` 是两个分隔符, 不是没交界的字段）, 而 gecos 里可以有逗号
+// 与空格。这里按**记录边界**先定行、再按冒号数数, 不靠 `split`。
+//
+// 边界:
+//   * 只读文本, **不读文件** —— 拿 `/etc/passwd` 的内容是调用方的事（这样可以测）。
+//   * 不认 NSS（LDAP / systemd-homed 的用户不在这份文件里）; 要那样得走 getpwnam,
+//     那是 libc 的活。
+//   * 不做密码校验（第二字段在这里只是被跳过）。
+//
+// 命名: 公开 pw_*, 内部 pwq_*。自检 test_pwd_*。
+
+module pwd
+
+fn pwq_rec_start(p: ptr, n: u32, rec: u32) -> u32 {
+    let i: u32 = 0;
+    let r: u32 = 0;
+    while i < n {
+        if r == rec {
+            return i;
+        }
+        if load8(p, i) == 10 {
+            r = r + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+fn pwq_rec_end(p: ptr, n: u32, start: u32) -> u32 {
+    let i: u32 = start;
+    while i < n && load8(p, i) != 10 {
+        i = i + 1;
+    }
+    return i;
+}
+
+/// 记录条数（末尾没有换行也算一条）。
+pub fn pw_count(p: ptr, n: u32) -> u32 {
+    if n == 0 {
+        return 0;
+    }
+    let c: u32 = 1;
+    let i: u32 = 0;
+    while i < n {
+        if load8(p, i) == 10 {
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    if load8(p, n - 1) == 10 {
+        c = c - 1;
+    }
+    return c;
+}
+
+/// 第 rec 条记录的第 field 个字段（0 名字, 1 密码, 2 uid, 3 gid, 4 gecos,
+/// 5 home, 6 shell），写进 out，返回**完整长度**（放不下时只写 cap 字节）。
+pub fn pw_field(p: ptr, n: u32, rec: u32, field: u32, out: ptr, cap: u32) -> u32 {
+    let s: u32 = pwq_rec_start(p, n, rec);
+    if s >= n {
+        return 0;
+    }
+    let e: u32 = pwq_rec_end(p, n, s);
+    let i: u32 = s;
+    let f: u32 = 0;
+    let fs: u32 = s;
+    while i <= e {
+        if i == e || load8(p, i) == 58 {
+            if f == field {
+                let len: u32 = i - fs;
+                let k: u32 = 0;
+                while k < len {
+                    if k < cap {
+                        store8(out, k, load8(p, fs + k) as u8);
+                    }
+                    k = k + 1;
+                }
+                return len;
+            }
+            f = f + 1;
+            fs = i + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn pwq_parse_u32(p: ptr, off: u32, len: u32) -> u32 {
+    let v: u32 = 0;
+    let i: u32 = 0;
+    let ok: u32 = 1;
+    if len == 0 {
+        return 0;
+    }
+    while i < len {
+        let c: u32 = load8(p, off + i) as u32;
+        if c < 48 || c > 57 {
+            ok = 0;
+        }
+        if ok == 1 {
+            v = v * 10 + (c - 48);
+        }
+        i = i + 1;
+    }
+    if ok == 0 {
+        return 0;
+    }
+    return v;
+}
+
+fn pwq_put_u32(out: ptr, cap: u32, pos: u32, v: u32) -> u32 {
+    let d: ptr = alloc(12);
+    let x: u32 = v;
+    let k: u32 = 0;
+    if x == 0 {
+        store8(d, 0, 48 as u8);
+        k = 1;
+    }
+    while x > 0 {
+        store8(d, k, ((x % 10) + 48) as u8);
+        x = x / 10;
+        k = k + 1;
+    }
+    let p: u32 = pos;
+    let r: u32 = k;
+    while r > 0 {
+        r = r - 1;
+        if p < cap {
+            store8(out, p, load8(d, r) as u8);
+        }
+        p = p + 1;
+    }
+    return p;
+}
+
+fn pwq_eq(p: ptr, off: u32, len: u32, s: str) -> bool {
+    if len != str_len(s) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < len {
+        if load8(p, off + i) != str_byte(s, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// 第 rec 条的 uid：解析成功返回 1 并把 u32 小端写进 out（4 字节），失败返回 0。
+pub fn pw_uid_field(p: ptr, n: u32, rec: u32, out: ptr) -> u32 {
+    let b: ptr = alloc(16);
+    let len: u32 = pw_field(p, n, rec, 2, b, 16);
+    if len == 0 {
+        return 0;
+    }
+    let v: u32 = pwq_parse_u32(b, 0, len);
+    store8(out, 0, (v & 255) as u8);
+    store8(out, 1, ((v >> 8) & 255) as u8);
+    store8(out, 2, ((v >> 16) & 255) as u8);
+    store8(out, 3, ((v >> 24) & 255) as u8);
+    return 1;
+}
+
+/// 名字 -> uid 文本（写进 out）。找不到返回 0。
+pub fn pw_by_name(p: ptr, n: u32, name: str, out: ptr, cap: u32) -> u32 {
+    let rec: u32 = 0;
+    let total: u32 = pw_count(p, n);
+    while rec < total {
+        let b: ptr = alloc(64);
+        let l0: u32 = pw_field(p, n, rec, 0, b, 64);
+        if pwq_eq(b, 0, l0, name) {
+            let u: ptr = alloc(16);
+            let lu: u32 = pw_field(p, n, rec, 2, u, 16);
+            let v: u32 = pwq_parse_u32(u, 0, lu);
+            return pwq_put_u32(out, cap, 0, v);
+        }
+        rec = rec + 1;
+    }
+    return 0;
+}
+
+/// 名字 -> uid 数值。找不到返回 -1。
+pub fn pw_uid_of_name(p: ptr, n: u32, name: str) -> i64 {
+    let o: ptr = alloc(16);
+    let len: u32 = pw_by_name(p, n, name, o, 16);
+    if len == 0 {
+        return -1;
+    }
+    return pwq_parse_u32(o, 0, len) as i64;
+}
+
+/// uid -> 名字（写进 out），返回长度；找不到返回 0。
+pub fn pw_name_of_uid(p: ptr, n: u32, uid: u32, out: ptr, cap: u32) -> u32 {
+    let rec: u32 = 0;
+    let total: u32 = pw_count(p, n);
+    while rec < total {
+        let sb: ptr = alloc(16);
+        if pw_uid_field(p, n, rec, sb) == 1 {
+            let v: u32 = (load8(sb, 0) as u32) | ((load8(sb, 1) as u32) << 8)
+                | ((load8(sb, 2) as u32) << 16) | ((load8(sb, 3) as u32) << 24);
+            if v == uid {
+                return pw_field(p, n, rec, 0, out, cap);
+            }
+        }
+        rec = rec + 1;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_pwd_count_and_fields() -> bool {
+    let t: ptr = alloc(64);
+    let s: str = "root:x:0:0:root:/root:/bin/sh\nalice:x:1000:1000:Alice:/home/alice:/bin/bash\n";
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        store8(t, i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    let f: ptr = alloc(32);
+    let fl: u32 = pw_field(t, n, 1, 0, f, 32);
+    return pw_count(t, n) == 2 && fl == 5 && load8(f, 0) == 97
+        && pw_uid_of_name(t, n, "alice") == 1000
+        && pw_uid_of_name(t, n, "bob") == -1;
+}
+
+fn test_pwd_empty_field() -> bool {
+    let t: ptr = alloc(32);
+    let s: str = "x::7:8::/:/bin\n";
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        store8(t, i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    let f: ptr = alloc(8);
+    return pw_field(t, n, 0, 1, f, 8) == 0 && pw_field(t, n, 0, 2, f, 8) == 1
+        && load8(f, 0) == 55;
+}
+
+fn test_pwd_name_of_uid() -> bool {
+    let t: ptr = alloc(48);
+    let s: str = "root:x:0:0::/root:/bin/sh\n";
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        store8(t, i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    let o: ptr = alloc(16);
+    let l: u32 = pw_name_of_uid(t, n, 0, o, 16);
+    return l == 4 && load8(o, 0) == 114 && load8(o, 3) == 116;
+}

@@ -1,0 +1,196 @@
+// os/proc.lomt — `/proc/<pid>/...` 的路径拼装与读取
+//
+// 为什么需要它: Linux 上"看一个进程"的接口就是 `/proc` 里的一堆文件 ——
+// `cmdline` 是 NUL 分隔的参数块，`environ` 是 NUL 分隔的环境块，`status` 是
+// `Key:\tValue` 的文本。要读它们，先要把 `/proc/<pid>/<suffix>` 这条路径拼出来，
+// 再 open/read/close。三件事都短，但每一次手写都要重复一遍"十进制转换 + NUL 补齐 +
+// 短读"。这一层把它们做成三个纯函数加一个读函数。
+//
+// 覆盖: 路径拼装（pid / self）、十进制转换、按后缀读取（cmdline / environ / 任意）。
+//
+// 边界（刻意划的）:
+//   * **不解析**内容 —— `cmdline` 的 NUL 切分在 `os/args`，`status` 的键值解析在
+//     `system/procstatus`，`mountinfo` 在 `system/mountinfo`。这一层只负责拿到字节；
+//   * 不做 pid 复用与生命周期判断 —— `po_exists` 只回答"这个号现在有没有目录"；
+//   * 不写 /proc（sysctl 写口故意不提供，见 `os/sysctl`）；
+//   * 号是 x86-64 Linux 的。自检只验十进制与路径拼装（纯逻辑）。
+//
+// 命名: 公开 po_*, 内部 poq_*。自检 test_proc_*。
+
+module pidinfo
+
+const POQ_SYS_READ: u64 = 0;
+const POQ_SYS_CLOSE: u64 = 3;
+const POQ_SYS_ACCESS: u64 = 21;
+const POQ_SYS_OPENAT: u64 = 257;
+const POQ_AT_FDCWD: u64 = 18446744073709551516;
+
+fn poq_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+/// 十进制写进 out（不带符号、不带 NUL）。返回**数字位数**（超出 cap 时也返回真实位数，
+/// 这样调用方能判断是不是被截断了）。
+pub fn po_decimal(n: u64, out: ptr, cap: u32) -> u32 {
+    if n == 0 {
+        if cap > 0 {
+            store8(out, 0, 48 as u8);
+        }
+        return 1;
+    }
+    let tmp: ptr = alloc(24);
+    let i: u32 = 0;
+    let v: u64 = n;
+    while v > 0 {
+        store8(tmp, i, (48 + (v % 10) as u32) as u8);
+        v = v / 10;
+        i = i + 1;
+    }
+    let j: u32 = 0;
+    while j < i {
+        if j < cap {
+            store8(out, j, load8(tmp, i - 1 - j) as u8);
+        }
+        j = j + 1;
+    }
+    return i;
+}
+
+/// 把 str 拷成 C 串（尾部补 NUL）。放不下返回 0。
+fn poq_cstr(s: str, out: ptr, cap: u32) -> u32 {
+    let n: u32 = str_len(s);
+    if n + 1 > cap {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < n {
+        store8(out, i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    store8(out, n, 0 as u8);
+    return n + 1;
+}
+
+// ---------------------------------------------------------------- 路径（纯）
+
+/// 拼 `/proc/<pid>/<suffix>`，返回长度（不含 NUL；调用方自己补）。
+pub fn po_pid_path(pid: u64, suffix: str, out: ptr, cap: u32) -> u32 {
+    let pos: u32 = poq_put(out, cap, 0, "/proc/");
+    let dn: u32 = po_decimal(pid, ((out as u64) + (pos as u64)) as ptr, cap - pos);
+    let pos2: u32 = pos + dn;
+    let pos3: u32 = poq_put(out, cap, pos2, "/");
+    return poq_put(out, cap, pos3, suffix);
+}
+
+/// 拼 `/proc/self/<suffix>`。
+pub fn po_self_path(suffix: str, out: ptr, cap: u32) -> u32 {
+    let pos: u32 = poq_put(out, cap, 0, "/proc/self/");
+    return poq_put(out, cap, pos, suffix);
+}
+
+// ---------------------------------------------------------------- 读
+
+/// 打开 `/proc/<pid>/<suffix>` 读一次，写进 `buf`。返回读到的字节数（负数 = errno 取反）。
+/// 只读一次 —— proc 里的文件都很短，一次 read 就够；不够就说明 cap 太小。
+pub fn po_read(pid: u64, suffix: str, buf: ptr, cap: u64) -> i64 {
+    let path: ptr = alloc(160);
+    let plen: u32 = po_pid_path(pid, suffix, path, 150);
+    if plen >= 150 {
+        return 0 - 36;
+    }
+    store8(path, plen, 0 as u8);
+    let fd: i64 = syscall6(POQ_SYS_OPENAT, POQ_AT_FDCWD, path as u64, 0, 0, 0);
+    if fd < 0 {
+        return fd;
+    }
+    let r: i64 = syscall4(POQ_SYS_READ, fd as u64, buf as u64, cap);
+    let _c: i64 = syscall4(POQ_SYS_CLOSE, fd as u64, 0, 0);
+    return r;
+}
+
+/// `/proc/<pid>/cmdline` —— NUL 分隔的参数块（末尾通常还多一个 NUL）。
+pub fn po_cmdline(pid: u64, buf: ptr, cap: u64) -> i64 {
+    return po_read(pid, "cmdline", buf, cap);
+}
+
+/// `/proc/<pid>/environ` —— 进程**启动时**的环境块（之后 setenv 的改动看不到）。
+pub fn po_env(pid: u64, buf: ptr, cap: u64) -> i64 {
+    return po_read(pid, "environ", buf, cap);
+}
+
+/// 这个 pid 现在有没有 `/proc/<pid>` 目录。
+pub fn po_exists(pid: u64) -> bool {
+    let path: ptr = alloc(48);
+    let plen: u32 = po_pid_path(pid, "", path, 40);
+    if plen >= 40 {
+        return false;
+    }
+    let cut: u32 = plen;
+    // `po_pid_path` 带上了 "/" 尾巴；访问目录时去掉它。
+    if cut > 0 && load8(path, cut - 1) == 47 {
+        store8(path, cut - 1, 0 as u8);
+    } else {
+        store8(path, cut, 0 as u8);
+    }
+    let acc: i64 = syscall4(POQ_SYS_ACCESS, path as u64, 0, 0);
+    return acc == 0;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_proc_decimal() -> bool {
+    let o: ptr = alloc(24);
+    let n: u32 = po_decimal(1234, o, 24);
+    return n == 4 && load8(o, 0) == 49 && load8(o, 1) == 50
+        && load8(o, 2) == 51 && load8(o, 3) == 52;
+}
+
+fn test_proc_decimal_zero() -> bool {
+    let o: ptr = alloc(4);
+    let n: u32 = po_decimal(0, o, 4);
+    return n == 1 && load8(o, 0) == 48;
+}
+
+fn test_proc_pid_path() -> bool {
+    let o: ptr = alloc(64);
+    let n: u32 = po_pid_path(42, "status", o, 64);
+    let want: str = "/proc/42/status";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_proc_self_path() -> bool {
+    let o: ptr = alloc(64);
+    let n: u32 = po_self_path("maps", o, 64);
+    let want: str = "/proc/self/maps";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}

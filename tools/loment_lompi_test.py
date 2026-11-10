@@ -1556,12 +1556,14 @@ def test_install_scripts_stay_pure_ascii():
 #: **2026-11-08 补 `world`**（`docs/321`）：19 个现实世界模块，`world` 3 -> 22，
 #: 整棵树 227 -> 246。
 #: **2026-11-09 补 `lowlevel` / `system`**（`docs/322`）：各 8 个模块，
-#: 两个包 4 -> 12，整棵树 246 -> **262**。
+#: 两个包 4 -> 12，整棵树 246 -> 262。
+#: **2026-11-09 补 `system` / `os` 到 40**（`docs/327`）：system +28、os +33，
+#: 两包 12 / 7 -> 40 / 40，整棵树 262 -> **323**。
 STORE_DIR = ROOT / "lompi" / "store"
-STORE_MODULES = {"std": 141, "host": 8, "internet": 8, "os": 7,
+STORE_MODULES = {"std": 141, "host": 8, "internet": 8, "os": 40,
                  "math": 9, "science": 6, "engineering": 4,
-                 "dev": 15, "world": 22, "lowlevel": 12, "system": 12, "baremetal": 6}
-STORE_FILES = 262
+                 "dev": 15, "world": 22, "lowlevel": 12, "system": 40, "baremetal": 6}
+STORE_FILES = 323
 
 
 def _store_line(out: str) -> str:
@@ -1595,6 +1597,30 @@ def test_package_carries_the_whole_store():
     fresh = d._fresh_sources("linux")
     missing = [f for f in files if f"share/lompi/store/{f}" not in fresh]
     assert not missing, f"这些 store 文件没被 _fresh_sources 盯住: {missing[:3]}"
+
+
+@test
+def test_every_store_module_compiles_on_its_own():
+    """store 里**每个**模块各自都是合法的 L1 单元（编译到 IR 为止）。
+
+    **Why**：包里的模块只被探针 `use` 到的那几个才会进编译面 —— `docs/327` 一次加了
+    61 个模块，行为探针不可能逐个覆盖。一条全局判据兜住"至少是能编的"：语法、类型、
+    依赖解析、内建实参个数，任何一处错都在这里现形，而不是等到某个用户 `use` 它。
+    """
+    import lomentc
+    store = ROOT / "lompi" / "store"
+    bad: list[str] = []
+    n = 0
+    for pkgdir in sorted(p for p in store.glob("*/*") if p.is_dir()):
+        for p in sorted(pkgdir.glob("*.lomt")):
+            m = lomentc.load(p)
+            deps = lomentc.resolve_deps(m, ROOT, p.parent, entry=p)
+            errs = lomentc.check(m, deps=deps)
+            n += 1
+            if errs:
+                bad.append(f"{p.relative_to(ROOT)}: {errs[:2]}")
+    assert not bad, "store 模块自己编不过：\n  " + "\n  ".join(bad)
+    print(f"      {n} 个 store 模块各自过检查（语法 + 类型 + 依赖 + 内建实参）")
 
 
 @test

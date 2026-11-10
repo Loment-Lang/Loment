@@ -1,0 +1,177 @@
+// os/file.lomt — 文件 I/O 的三条正确循环: 读到底、写到底、算大小
+//
+// 为什么需要它: `read` 与 `write` **不保证**一次做完全部工作。`read` 在管道、终端、
+// socket 上会短读（返回小于请求的字节数），`write` 会被信号打断（返回 -4 EINTR）、
+// 也会部分写。把 `if read(...) == n` 当成功判断的程序，在普通文件上能跑一年，
+// 一接管道就丢数据。这一层把"循环到 EOF / 循环到写完"这两条写对。
+//
+// 覆盖: 打开（相对当前目录）、读到底、写到底（EINTR 重试）、取文件大小（lseek 到
+// 末尾再还原）、逐块拷贝、关闭、EINTR 判定。
+//
+// 不做的: 不做缓冲（不藏一块内存假装是文件）、不做 mmap（那是另一套语义）、不做
+// 路径解析或目录遍历（`os/sys` 与 `os/dir`）。也不替调用方重试**别的**错误码 ——
+// 只有 EINTR 是"没做成，再来一次"，其余都该原样交回去。
+//
+// 边界: 路径是 C 串（系统调用要的就是这个），拷 C 串用 `sys_cstr`。
+//
+// 命名: 公开 fo_*, 内部 foq_*。自检 test_file_*（只验纯逻辑：EINTR 判定与 u64 读写）。
+
+module file
+
+/// 系统调用失败。
+pub const FO_ERR: i64 = -1;
+/// EINTR —— 被信号打断，重试即可。
+pub const FO_EINTR: i64 = -4;
+
+/// `openat` 的 dirfd: 当前工作目录（与 `os/sys` 同一个值）。
+pub const FO_AT_FDCWD: u64 = 18446744073709551516;
+pub const FO_O_RDONLY: u64 = 0;
+/// O_WRONLY|O_CREAT|O_TRUNC。
+pub const FO_O_WRONLY_CREAT_TRUNC: u64 = 577;
+/// O_WRONLY|O_CREAT|O_APPEND。
+pub const FO_O_WRONLY_CREAT_APPEND: u64 = 1089;
+/// 0644。
+pub const FO_MODE_RW: u32 = 420;
+
+const FOQ_SYS_READ: u64 = 0;
+const FOQ_SYS_WRITE: u64 = 1;
+const FOQ_SYS_CLOSE: u64 = 3;
+const FOQ_SYS_LSEEK: u64 = 8;
+const FOQ_SYS_OPENAT: u64 = 257;
+const FOQ_SEEK_END: u32 = 2;
+
+fn foq_st64(p: ptr, v: u64) -> u32 {
+    let i: u32 = 0;
+    while i < 8 {
+        store8(p, i, ((v >> (8 * i)) & 255) as u8);
+        i = i + 1;
+    }
+    return 8;
+}
+
+fn foq_ld64(p: ptr) -> u64 {
+    let v: u64 = 0;
+    let i: u32 = 0;
+    while i < 8 {
+        v = v | ((load8(p, i) as u64) << (8 * i));
+        i = i + 1;
+    }
+    return v;
+}
+
+/// 返回值是不是"被信号打断，重试即可"。
+pub fn fo_is_eintr(rc: i64) -> bool {
+    return rc == FO_EINTR;
+}
+
+/// 打开一个文件（相对当前目录），成功返回 fd。
+pub fn fo_open(path_cstr: ptr, flags: u64, mode: u32) -> i64 {
+    return syscall6(FOQ_SYS_OPENAT, FO_AT_FDCWD, path_cstr as u64, flags, mode as u64, 0);
+}
+
+/// 读到底：一直读到 EOF（返回 0）或出错。返回总字节数；出错返回负的错误码
+/// （已读到的字节数只有在"没有出错"时才可信 —— 出错时调用方应当丢弃缓冲）。
+pub fn fo_read_all(fd: u64, buf: ptr, cap: u64) -> i64 {
+    let total: u64 = 0;
+    let rc: i64 = 0;
+    while total < cap {
+        rc = syscall4(FOQ_SYS_READ, fd, ((buf as u64) + total) as u64, cap - total);
+        if rc == 0 {
+            return total as i64;
+        }
+        if rc < 0 {
+            if rc == FO_EINTR {
+                rc = 0;
+            } else {
+                return rc;
+            }
+        } else {
+            total = total + (rc as u64);
+        }
+    }
+    return total as i64;
+}
+
+/// 写到底：短写接着写，EINTR 重试。返回写出的字节数；出错返回负的错误码。
+pub fn fo_write_all(fd: u64, buf: ptr, n: u64) -> i64 {
+    let total: u64 = 0;
+    let rc: i64 = 0;
+    while total < n {
+        rc = syscall4(FOQ_SYS_WRITE, fd, ((buf as u64) + total) as u64, n - total);
+        if rc < 0 {
+            if rc == FO_EINTR {
+                rc = 0;
+            } else {
+                return rc;
+            }
+        } else if rc == 0 {
+            return total as i64;
+        } else {
+            total = total + (rc as u64);
+        }
+    }
+    return total as i64;
+}
+
+/// 文件大小。结果写进 out（8 字节，u64）；返回字节数，出错返回负的错误码。
+/// 打开后本身就停在 0，`lseek` 到末尾不需要还原 —— 但这里仍然关掉了 fd。
+pub fn fo_size(path_cstr: ptr, out: ptr) -> i64 {
+    let fd: i64 = fo_open(path_cstr, FO_O_RDONLY, 0);
+    let rc: i64 = 0;
+    let _c: i64 = 0;
+    if fd < 0 {
+        return fd;
+    }
+    rc = syscall4(FOQ_SYS_LSEEK, fd as u64, 0, FOQ_SEEK_END as u64);
+    _c = syscall4(FOQ_SYS_CLOSE, fd as u64, 0, 0);
+    if rc < 0 {
+        return rc;
+    }
+    foq_st64(out, rc as u64);
+    return rc;
+}
+
+pub fn fo_close(fd: u64) -> i64 {
+    return syscall4(FOQ_SYS_CLOSE, fd, 0, 0);
+}
+
+/// 从 src_fd 拷到 dst_fd，直到 src 的 EOF。scratch 是调用方给的中间缓冲。
+/// 返回拷贝的总字节数；出错返回负的错误码。
+pub fn fo_copy(src_fd: u64, dst_fd: u64, scratch: ptr, cap: u64) -> i64 {
+    let total: i64 = 0;
+    let got: i64 = 0;
+    let w: i64 = 0;
+    let go: u32 = 1;
+    while go == 1 {
+        got = fo_read_all(src_fd, scratch, cap);
+        if got < 0 {
+            return got;
+        }
+        if got == 0 {
+            return total;
+        }
+        w = fo_write_all(dst_fd, scratch, got as u64);
+        if w < 0 {
+            return w;
+        }
+        total = total + got;
+    }
+    return total;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_file_eintr() -> bool {
+    return fo_is_eintr(-4) && !fo_is_eintr(-11) && !fo_is_eintr(0);
+}
+
+fn test_file_u64_roundtrip() -> bool {
+    let b: ptr = alloc(8);
+    foq_st64(b, 4294967297);
+    return foq_ld64(b) == 4294967297 && load8(b, 4) == 1 && load8(b, 0) == 1;
+}
+
+fn test_file_flag_values() -> bool {
+    // O_WRONLY|O_CREAT|O_TRUNC = 1|64|512；O_APPEND 是 1024。
+    return FO_O_WRONLY_CREAT_TRUNC == 577 && FO_O_WRONLY_CREAT_APPEND == 1089;
+}

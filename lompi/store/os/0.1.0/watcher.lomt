@@ -1,0 +1,203 @@
+// os/watcher.lomt — 目录变更通知: inotify 的最小一圈
+//
+// 为什么需要它: "文件变了就做点什么"用轮询写出来既慢又漏 —— 两次 stat 之间的
+// 第二次改写看不见。inotify 让内核把变更**推**给一个 fd，读它就像读别的流：
+// 一个事件头 + 变长名字，一次 read 可能带回好几个事件。
+//
+// 三件必须知道的事（写在这里，免得调用方踩）:
+//   * **一次 read 是多个事件的拼接**，每个事件按 `len` 对齐到 16 字节。只读第一个
+//     事件、丢掉剩下的，就是"漏事件"最常见的写法 —— `wa2_event_size` 与
+//     `wa2_ev_len` 就是给这个循环用的。
+//   * **watch 是加在 inode 上的**，不是路径上。`IN_MOVED_TO` 把一个新 inode 换进
+//     目录之后，旧 watch 跟着被搬走的那个 inode 走了；要接着盯目录本身，
+//     还得监听 `IN_CREATE`/`IN_DELETE` 并重新加。
+//   * 事件里的 `cookie` 把 `MOVED_FROM` 与 `MOVED_TO` 配成一对 —— 它们可能来自
+//     同一次 rename，也可能是两次不同操作，`0` 表示没有配对。
+//
+// 边界: 号是 x86-64 Linux 的；不做递归监控（inotify 本身就不递归 —— 要递归得
+// 自己遍历目录逐层加 watch）。自检只验纯逻辑（事件头解码、名称渲染）。
+//
+// 命名: 公开 wa2_*, 内部 waq_。自检 test_watcher_*。
+
+module watcher
+
+/// 内容被写。
+pub const WA2_MODIFY: u32 = 2;
+/// 元数据（权限、时间戳、链接数）变了。
+pub const WA2_ATTRIB: u32 = 4;
+/// 一个可写 fd 被关闭 —— "写完了"最可靠的信号。
+pub const WA2_CLOSE_WRITE: u32 = 8;
+/// 从被监视目录里移出（与 MOVED_TO 配 cookie）。
+pub const WA2_MOVED_FROM: u32 = 64;
+/// 移入被监视目录。
+pub const WA2_MOVED_TO: u32 = 128;
+/// 新建。
+pub const WA2_CREATE: u32 = 256;
+/// 删除。
+pub const WA2_DELETE: u32 = 512;
+/// 事件里"这是一个目录"的位（只读，不是 watch 掩码）。
+pub const WA2_ISDIR: u32 = 1073741824;
+
+/// 事件头的字节数（wd i32 | mask u32 | cookie u32 | len u32）。
+pub const WA2_HDR_BYTES: u32 = 16;
+
+const WAQ_SYS_READ: u64 = 0;
+const WAQ_SYS_INOTIFY_INIT1: u64 = 294;
+const WAQ_SYS_INOTIFY_ADD_WATCH: u64 = 254;
+const WAQ_SYS_INOTIFY_RM_WATCH: u64 = 255;
+
+fn waq_ld32(p: ptr, off: u32) -> u32 {
+    let v: u32 = 0;
+    let b: u32 = 0;
+    while b < 4 {
+        v = v | ((load8(p, off + b) as u32) << (8 * b));
+        b = b + 1;
+    }
+    return v;
+}
+
+fn waq_put(out: ptr, cap: u32, pos0: u32, s: str) -> u32 {
+    let pos: u32 = pos0;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if pos < cap {
+            store8(out, pos, str_byte(s, i) as u8);
+        }
+        pos = pos + 1;
+        i = i + 1;
+    }
+    return pos;
+}
+
+/// 建一个 inotify fd。`flags` 常用 `524288`（CLOEXEC）与 `2048`（NONBLOCK）。
+pub fn wa2_init1(flags: u32) -> i64 {
+    return syscall4(WAQ_SYS_INOTIFY_INIT1, flags as u64, 0, 0);
+}
+
+/// 给 `path`（C 串）加 watch。成功返回 watch 描述符（>= 0）。
+pub fn wa2_add(fd: i64, path: ptr, mask: u32) -> i64 {
+    return syscall4(WAQ_SYS_INOTIFY_ADD_WATCH, fd as u64, path as u64, mask as u64);
+}
+
+/// 撤掉一个 watch。
+pub fn wa2_rm(fd: i64, wd: i64) -> i64 {
+    return syscall4(WAQ_SYS_INOTIFY_RM_WATCH, fd as u64, wd as u64, 0);
+}
+
+/// 读事件。返回字节数；缓冲区里的内容按 `wa2_event_size` 逐个走。
+pub fn wa2_read(fd: i64, buf: ptr, cap: u32) -> i64 {
+    return syscall4(WAQ_SYS_READ, fd as u64, buf as u64, cap as u64);
+}
+
+/// 事件头的 watch 描述符（i32，按无符号读）。
+pub fn wa2_ev_wd(ev: ptr) -> u32 {
+    return waq_ld32(ev, 0);
+}
+
+/// 事件掩码（哪些位见上面的 WA2_*）。
+pub fn wa2_ev_mask(ev: ptr) -> u32 {
+    return waq_ld32(ev, 4);
+}
+
+/// 配对 cookie（0 = 没有配对）。
+pub fn wa2_ev_cookie(ev: ptr) -> u32 {
+    return waq_ld32(ev, 8);
+}
+
+/// 名字的字节数（**不含**结尾的 NUL）。
+pub fn wa2_ev_len(ev: ptr) -> u32 {
+    return waq_ld32(ev, 12);
+}
+
+/// 名字的起点（就在事件头之后）。名字是 NUL 结尾的，长度见 `wa2_ev_len`。
+pub fn wa2_ev_name(ev: ptr) -> ptr {
+    return ((ev as u64) + (WA2_HDR_BYTES as u64)) as ptr;
+}
+
+/// 下一个事件相对于当前事件的字节偏移：头 16 字节 + 名字，按 16 字节向上对齐。
+pub fn wa2_event_size(len: u32) -> u32 {
+    return WA2_HDR_BYTES + ((len + 15) / 16) * 16;
+}
+
+/// 掩码 -> 名字串。未知位**不写**（`?` 出现在末尾提示有没认出来的位）。
+pub fn wa2_mask_text(mask: u32, out: ptr, cap: u32) -> u32 {
+    let pos: u32 = 0;
+    if (mask & WA2_MODIFY) != 0 {
+        pos = waq_put(out, cap, pos, "IN_MODIFY");
+    }
+    if (mask & WA2_ATTRIB) != 0 {
+        if pos > 0 {
+            pos = waq_put(out, cap, pos, "|");
+        }
+        pos = waq_put(out, cap, pos, "IN_ATTRIB");
+    }
+    if (mask & WA2_CLOSE_WRITE) != 0 {
+        if pos > 0 {
+            pos = waq_put(out, cap, pos, "|");
+        }
+        pos = waq_put(out, cap, pos, "IN_CLOSE_WRITE");
+    }
+    if (mask & WA2_MOVED_FROM) != 0 {
+        if pos > 0 {
+            pos = waq_put(out, cap, pos, "|");
+        }
+        pos = waq_put(out, cap, pos, "IN_MOVED_FROM");
+    }
+    if (mask & WA2_MOVED_TO) != 0 {
+        if pos > 0 {
+            pos = waq_put(out, cap, pos, "|");
+        }
+        pos = waq_put(out, cap, pos, "IN_MOVED_TO");
+    }
+    if (mask & WA2_CREATE) != 0 {
+        if pos > 0 {
+            pos = waq_put(out, cap, pos, "|");
+        }
+        pos = waq_put(out, cap, pos, "IN_CREATE");
+    }
+    if (mask & WA2_DELETE) != 0 {
+        if pos > 0 {
+            pos = waq_put(out, cap, pos, "|");
+        }
+        pos = waq_put(out, cap, pos, "IN_DELETE");
+    }
+    if (mask & WA2_ISDIR) != 0 {
+        if pos > 0 {
+            pos = waq_put(out, cap, pos, "|");
+        }
+        pos = waq_put(out, cap, pos, "IN_ISDIR");
+    }
+    return pos;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_watcher_event_size() -> bool {
+    return wa2_event_size(0) == 16 && wa2_event_size(1) == 16
+        && wa2_event_size(16) == 32 && wa2_event_size(20) == 48;
+}
+
+fn test_watcher_header_decode() -> bool {
+    let ev: ptr = alloc(32);
+    store8(ev, 0, 3 as u8);
+    store8(ev, 4, 2 as u8);
+    store8(ev, 8, 7 as u8);
+    store8(ev, 12, 5 as u8);
+    return wa2_ev_wd(ev) == 3 && wa2_ev_mask(ev) == 2
+        && wa2_ev_cookie(ev) == 7 && wa2_ev_len(ev) == 5;
+}
+
+fn test_watcher_name_offset() -> bool {
+    let ev: ptr = alloc(32);
+    store8(ev, 16, 105 as u8);
+    let nm: ptr = wa2_ev_name(ev);
+    return load8(nm, 0) == 105;
+}
+
+fn test_watcher_mask_text() -> bool {
+    let b: ptr = alloc(64);
+    let n: u32 = wa2_mask_text(WA2_MODIFY | WA2_CREATE, b, 64);
+    // "IN_MODIFY|IN_CREATE" = 20 字节
+    return n == 20 && load8(b, 0) == 73 && load8(b, 9) == 124 && load8(b, 10) == 73;
+}

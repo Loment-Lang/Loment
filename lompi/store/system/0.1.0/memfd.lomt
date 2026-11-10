@@ -1,0 +1,205 @@
+// system/memfd.lomt — 匿名内存文件与它的封印
+//
+// 为什么系统工具需要它: `memfd_create` 给一块**有文件描述符的内存** —— 不落盘、
+// 没有路径、可以传给别的进程，也能 `mmap` 成可执行（JIT、动态加载器都是这条路）。
+// 而它真正独有的能力是 **seals（封印）**: 文件内容在封印之后**不再改变** ——
+// 这正是"把一段代码交给不受信任的一方执行，同时保证它执行的那份字节没被换过"
+// 所需要的原语。`F_SEAL_WRITE` 之后连 `write` 都返回 EPERM，是**内核**保证的，
+// 不是调用方的自觉。
+//
+// 覆盖:
+//   * `memfd_create` 的标志（cloexec / allow_sealing / hugetlb）;
+//   * 五种 seal 与它们的文本名;
+//   * `F_ADD_SEALS` / `F_GET_SEALS` 两个 fcntl 命令的包装;
+//   * 把 `str` 拷成 C 串（memfd 的名字是 C 串，本语言字面量不带 NUL）。
+//
+// 不做: 写/读内容（那是普通 fd I/O）、`MFD_HUGETLB` 的页大小标志组合、
+// 对普通文件用 seals（内核只对 memfd 与 tmpfs 文件开放）。
+//
+// 命名: 公开 mf_*, 内部 mfq_*。自检 test_memfd_*。
+
+module memfd
+
+pub const MF_CLOEXEC: u32 = 1;
+pub const MF_ALLOW_SEALING: u32 = 2;
+pub const MF_HUGETLB: u32 = 4;
+
+/// 封印住"再加封印"这件事 —— 加了它之后别的 seal 都加不上了。
+pub const MF_SEAL_SEAL: u32 = 1;
+/// 不允许 `ftruncate` 缩小。
+pub const MF_SEAL_SHRINK: u32 = 2;
+/// 不允许 `ftruncate` 放大。
+pub const MF_SEAL_GROW: u32 = 4;
+/// 不允许 `write`/`pwrite`。
+pub const MF_SEAL_WRITE: u32 = 8;
+/// 已存在的可写映射保留，但**新**的可写映射被拒。
+pub const MF_SEAL_FUTURE_WRITE: u32 = 16;
+
+pub const MF_F_ADD_SEALS: u64 = 1033;
+pub const MF_F_GET_SEALS: u64 = 1034;
+pub const MF_SYS_MEMFD_CREATE: u64 = 319;
+pub const MF_SYS_FCNTL: u64 = 72;
+
+fn mfq_st(out: ptr, pos: u32, s: str, cap: u32) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+/// `str` -> NUL 结尾的 C 串。返回字节数（不含 NUL）。`cap` 不够时**截断但仍补 NUL**。
+pub fn mf_cstr(s: str, out: ptr, cap: u32) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if i + 1 < cap {
+            store8(out, i, str_byte(s, i) as u8);
+        }
+        i = i + 1;
+    }
+    if cap > 0 {
+        if n < cap - 1 {
+            store8(out, n, 0 as u8);
+        } else {
+            store8(out, cap - 1, 0 as u8);
+        }
+    }
+    return n;
+}
+
+/// `memfd_create(name, flags)`。名字先按 C 串写进调用方给的 `tmp`（`cap` 字节）。
+/// 返回 fd；失败返回负数（照 `syscall` 的约定，不是 errno）。
+pub fn mf_create(name: str, flags: u32, tmp: ptr, cap: u32) -> i64 {
+    let n: u32 = mf_cstr(name, tmp, cap);
+    if n >= cap {
+        return -1 as i64;
+    }
+    return syscall4(MF_SYS_MEMFD_CREATE, tmp as u64, flags as u64, 0);
+}
+
+/// 给 fd 加封印。失败返回负数 —— `EPERM` 通常是"已经封过 `F_SEAL_SEAL`"。
+pub fn mf_add_seals(fd: i64, seals: u32) -> i64 {
+    return syscall4(MF_SYS_FCNTL, fd as u64, MF_F_ADD_SEALS, seals as u64);
+}
+
+/// 读当前封印集合（位或）。失败返回负数。
+pub fn mf_get_seals(fd: i64) -> i64 {
+    return syscall4(MF_SYS_FCNTL, fd as u64, MF_F_GET_SEALS, 0);
+}
+
+/// `memfd_create` 标志 -> 文本名。0 返回 `"0"`。
+pub fn mf_flag_text(flags: u32, out: ptr, cap: u32) -> u32 {
+    if flags == 0 {
+        return mfq_st(out, 0, "0", cap);
+    }
+    let pos: u32 = 0;
+    if (flags & MF_CLOEXEC) != 0 {
+        pos = mfq_st(out, pos, "MFD_CLOEXEC", cap);
+    }
+    if (flags & MF_ALLOW_SEALING) != 0 {
+        if pos > 0 {
+            pos = mfq_st(out, pos, "|", cap);
+        }
+        pos = mfq_st(out, pos, "MFD_ALLOW_SEALING", cap);
+    }
+    if (flags & MF_HUGETLB) != 0 {
+        if pos > 0 {
+            pos = mfq_st(out, pos, "|", cap);
+        }
+        pos = mfq_st(out, pos, "MFD_HUGETLB", cap);
+    }
+    return pos;
+}
+
+/// 封印集合 -> 文本名。0 返回 `"none"`。
+pub fn mf_seal_text(mask: u32, out: ptr, cap: u32) -> u32 {
+    if mask == 0 {
+        return mfq_st(out, 0, "none", cap);
+    }
+    let pos: u32 = 0;
+    if (mask & MF_SEAL_SEAL) != 0 {
+        pos = mfq_st(out, pos, "SEAL", cap);
+    }
+    if (mask & MF_SEAL_SHRINK) != 0 {
+        if pos > 0 {
+            pos = mfq_st(out, pos, "|", cap);
+        }
+        pos = mfq_st(out, pos, "SHRINK", cap);
+    }
+    if (mask & MF_SEAL_GROW) != 0 {
+        if pos > 0 {
+            pos = mfq_st(out, pos, "|", cap);
+        }
+        pos = mfq_st(out, pos, "GROW", cap);
+    }
+    if (mask & MF_SEAL_WRITE) != 0 {
+        if pos > 0 {
+            pos = mfq_st(out, pos, "|", cap);
+        }
+        pos = mfq_st(out, pos, "WRITE", cap);
+    }
+    if (mask & MF_SEAL_FUTURE_WRITE) != 0 {
+        if pos > 0 {
+            pos = mfq_st(out, pos, "|", cap);
+        }
+        pos = mfq_st(out, pos, "FUTURE_WRITE", cap);
+    }
+    return pos;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_memfd_cstr() -> bool {
+    let b: ptr = alloc(16);
+    if mf_cstr("abc", b, 16) != 3 {
+        return false;
+    }
+    return load8(b, 0) == 97 && load8(b, 1) == 98 && load8(b, 2) == 99 && load8(b, 3) == 0;
+}
+
+fn test_memfd_cstr_truncates_with_nul() -> bool {
+    let b: ptr = alloc(4);
+    mf_cstr("abcdef", b, 4);
+    return load8(b, 0) == 97 && load8(b, 3) == 0;
+}
+
+fn test_memfd_seal_text() -> bool {
+    let b: ptr = alloc(64);
+    let w: str = "SEAL|GROW";
+    let n: u32 = mf_seal_text(MF_SEAL_SEAL | MF_SEAL_GROW, b, 64);
+    if n != str_len(w) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(b, i) != str_byte(w, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return mf_seal_text(0, b, 64) == 4;
+}
+
+fn test_memfd_flag_text() -> bool {
+    let b: ptr = alloc(64);
+    let n: u32 = mf_flag_text(MF_CLOEXEC | MF_ALLOW_SEALING, b, 64);
+    let w: str = "MFD_CLOEXEC|MFD_ALLOW_SEALING";
+    if n != str_len(w) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(b, i) != str_byte(w, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}

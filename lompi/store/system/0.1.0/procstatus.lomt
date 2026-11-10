@@ -1,0 +1,266 @@
+// system/procstatus.lomt — 解析 `/proc/<pid>/status`
+//
+// 为什么系统工具需要它: `/proc/<pid>/status` 是 Linux 上读一个进程"现在怎么样"最稳的
+// 入口 —— 字段名（`Name` / `State` / `VmRSS` / `Threads` / `SigQ` …）是**稳定 ABI**，
+// 而格式是固定的 `Key:\tvalue` 文本。监控、容器运行时、调试器都在读它。
+//
+// 两处容易错的地方，这个模块把它们收进函数里：
+//   * 值的前后是 **制表符与空格**（`VmRSS:` 后面常常是多个空格再跟数字），按"冒号后
+//     直接取值"写会把空白当值的一部分；
+//   * 数值后面可能跟 **` kB`** 后缀，而 `parseint` 到第一个非数字必须停 —— 否则
+//     `"128 kB"` 会被当成 128（碰巧对）或整个失败（取决于实现），两种都不是这里要的。
+//
+// 覆盖: 取值（`ps_value`）、取值并解析无符号十进制（`ps_value_u64`）、进程状态字母
+// （`ps_state_code` / `ps_state_text`）、行数统计。
+//
+// 不做: 打开与读取文件（那是 `os/io` + `os/path` 的事）、`/proc/<pid>/stat` 的
+// 括号字段（`system/procfs` 管那份）、`status` 里各字段的语义解释。
+//
+// 命名: 公开 ps_*, 内部 psq_*。自检 test_procstatus_*。
+
+module procstatus
+
+fn psq_line_end(p: ptr, n: u32, i0: u32) -> u32 {
+    let i: u32 = i0;
+    while i < n {
+        if load8(p, i) == 10 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 行 `[ls, le)` 是否以 `key:` 开头；是就返回值起点（冒号后第一个非空白字节），
+/// 不是返回 0。值起点不可能是 0（key 至少一个字节 + 冒号），所以 0 留作哨兵。
+fn psq_value_at(p: ptr, ls: u32, le: u32, key: str) -> u32 {
+    let klen: u32 = str_len(key);
+    if ls + klen + 1 > le {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < klen {
+        if load8(p, ls + i) != str_byte(key, i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    if load8(p, ls + klen) != 58 {
+        return 0;
+    }
+    let v: u32 = ls + klen + 1;
+    while v < le {
+        if load8(p, v) != 32 && load8(p, v) != 9 {
+            return v;
+        }
+        v = v + 1;
+    }
+    return 0;
+}
+
+fn psq_trim_end(p: ptr, vs: u32, le: u32) -> u32 {
+    let e: u32 = le;
+    while e > vs {
+        let c: u32 = load8(p, e - 1) as u32;
+        if c == 32 || c == 9 || c == 13 {
+            e = e - 1;
+        } else {
+            return e;
+        }
+    }
+    return e;
+}
+
+fn psq_copy(p: ptr, s: u32, e: u32, out: ptr, cap: u32) -> u32 {
+    let i: u32 = s;
+    let pos: u32 = 0;
+    while i < e {
+        if pos < cap {
+            store8(out, pos, load8(p, i) as u8);
+        }
+        pos = pos + 1;
+        i = i + 1;
+    }
+    return pos;
+}
+
+/// 找 `key` 那一行，把值（去首尾空白）写进 `out`，返回**完整**值长度（可能大于 cap）。
+/// 找不到返回 0。
+pub fn ps_value(p: ptr, n: u32, key: str, out: ptr, cap: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        let le: u32 = psq_line_end(p, n, i);
+        let vs: u32 = psq_value_at(p, i, le, key);
+        if vs != 0 {
+            let ve: u32 = psq_trim_end(p, vs, le);
+            return psq_copy(p, vs, ve, out, cap);
+        }
+        i = le + 1;
+    }
+    return 0;
+}
+
+fn psq_ld64(p: ptr) -> u64 {
+    let v: u64 = 0;
+    let b: u32 = 0;
+    while b < 8 {
+        v = v | ((load8(p, b) as u64) << (8 * b));
+        b = b + 1;
+    }
+    return v;
+}
+
+fn psq_st64(p: ptr, v: u64) -> u32 {
+    let b: u32 = 0;
+    while b < 8 {
+        store8(p, b, ((v >> (8 * b)) & 255) as u8);
+        b = b + 1;
+    }
+    return 8;
+}
+
+/// 找 `key` 那一行的值并解析十进制（遇到第一个非数字停，` kB` 后缀天然被忽略）。
+/// 写 8 字节到 `out`；找到返回 1，没有这一行或值里没有数字返回 0。
+pub fn ps_value_u64(p: ptr, n: u32, key: str, out: ptr) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        let le: u32 = psq_line_end(p, n, i);
+        let vs: u32 = psq_value_at(p, i, le, key);
+        if vs != 0 {
+            let v: u64 = 0;
+            let digits: u32 = 0;
+            let j: u32 = vs;
+            while j < le {
+                let c: u32 = load8(p, j) as u32;
+                if c < 48 || c > 57 {
+                    j = le;
+                } else {
+                    v = v * 10 + (c - 48) as u64;
+                    digits = digits + 1;
+                    j = j + 1;
+                }
+            }
+            if digits == 0 {
+                return 0;
+            }
+            let _w: u32 = psq_st64(out, v);
+            return 1;
+        }
+        i = le + 1;
+    }
+    return 0;
+}
+
+/// `State:` 的第一个字母（`R` / `S` / `D` / `Z` / `T` / `I`）。找不到返回 0。
+pub fn ps_state_code(p: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        let le: u32 = psq_line_end(p, n, i);
+        let vs: u32 = psq_value_at(p, i, le, "State");
+        if vs != 0 {
+            return load8(p, vs) as u32;
+        }
+        i = le + 1;
+    }
+    return 0;
+}
+
+/// 状态字母 -> 名字。未知返回 `"unknown"`。
+pub fn ps_state_text(code: u32, out: ptr, cap: u32) -> u32 {
+    let s: str = "unknown";
+    if code == 82 { s = "running"; }
+    else if code == 83 { s = "sleeping"; }
+    else if code == 68 { s = "disk-sleep"; }
+    else if code == 90 { s = "zombie"; }
+    else if code == 84 { s = "stopped"; }
+    else if code == 73 { s = "idle"; }
+    else if code == 88 { s = "dead"; }
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if i < cap {
+            store8(out, i, str_byte(s, i) as u8);
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 非空行数。
+pub fn ps_count_lines(p: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    let c: u32 = 0;
+    while i < n {
+        let le: u32 = psq_line_end(p, n, i);
+        if le > i {
+            c = c + 1;
+        }
+        i = le + 1;
+    }
+    return c;
+}
+
+/// 值是否等于给定字符串（去空白后逐字节比）。找到且相等返回 1。
+pub fn ps_value_is(p: ptr, n: u32, key: str, want: str) -> u32 {
+    let tmp: ptr = alloc(128);
+    let got: u32 = ps_value(p, n, key, tmp, 128);
+    if got != str_len(want) {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < got {
+        if load8(tmp, i) != str_byte(want, i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn psq_sample() -> str {
+    return "Name:\tprobe\nUmask:\t0022\nState:\tR (running)\nVmRSS:\t   128 kB\nThreads:\t3\n";
+}
+
+fn test_procstatus_value() -> bool {
+    let s: str = psq_sample();
+    let o: ptr = alloc(32);
+    let n: u32 = ps_value(str_ptr(s), str_len(s), "VmRSS", o, 32);
+    let want: str = "128 kB";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_procstatus_u64() -> bool {
+    let s: str = psq_sample();
+    let b: ptr = alloc(8);
+    let ok: u32 = ps_value_u64(str_ptr(s), str_len(s), "VmRSS", b);
+    let th: u32 = ps_value_u64(str_ptr(s), str_len(s), "Threads", b);
+    return ok == 1 && load8(b, 0) == 3 && th == 1;
+}
+
+fn test_procstatus_state() -> bool {
+    let s: str = psq_sample();
+    let c: u32 = ps_state_code(str_ptr(s), str_len(s));
+    let o: ptr = alloc(16);
+    let n: u32 = ps_state_text(c, o, 16);
+    return c == 82 && n == 7 && load8(o, 0) == 114;
+}
+
+fn test_procstatus_lines_and_missing() -> bool {
+    let s: str = psq_sample();
+    let n: u32 = str_len(s);
+    return ps_count_lines(str_ptr(s), n) == 5
+        && ps_value(str_ptr(s), n, "Nope", str_ptr(s), 0) == 0
+        && ps_value_is(str_ptr(s), n, "State", "R (running)") == 1;
+}

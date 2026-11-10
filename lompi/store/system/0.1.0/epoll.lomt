@@ -1,0 +1,221 @@
+// system/epoll.lomt — epoll 的事件位、控制字与 12 字节事件结构
+//
+// 为什么系统工具需要它: 一个进程要同时等几十个 fd 时，`epoll_wait` 的事件掩码是
+// 位或出来的整数（`EPOLLIN|EPOLLET` 是 0x80000001）。写错一位的后果不是报错，
+// 而是"边缘触发变成了水平触发"、"读端挂断永远等不到" —— 这两类 bug 都表现为卡住，
+// 而不是崩溃。把位名与结构体摆在这一层，排查时先看得见数。
+//
+// 覆盖: Linux 的公开事件位与控制字（x86-64 / AArch64 一致）。`struct epoll_event`
+// 在 x86-64 上是 **12 字节且 packed**：events u32 在偏移 0，data u64 在偏移 4。
+// 这个布局与 `struct epoll_event` 的 C 声明不同（C 按 8 字节对齐会是 16 字节）——
+// 内核用的是 packed 的那一份，传 16 字节的版本不会报错，但 data 会读错位置。
+//
+// 不做的: `epoll_pwait` 的信号掩码压栈、`EPOLL_CTL_*` 对同一 fd 的语义、epoll 的
+// 唤醒顺序（这些是调用方的状态机）。号是 x86-64 的。
+//
+// 命名: 公开 ep_*, 内部 eq_*。自检 test_epoll_*。
+
+module epoll
+
+pub const EP_IN: u32 = 1;
+pub const EP_PRI: u32 = 2;
+pub const EP_OUT: u32 = 4;
+pub const EP_ERR: u32 = 8;
+pub const EP_HUP: u32 = 16;
+pub const EP_RDNORM: u32 = 64;
+pub const EP_RDBAND: u32 = 128;
+pub const EP_WRNORM: u32 = 256;
+pub const EP_WRBAND: u32 = 512;
+pub const EP_MSG: u32 = 1024;
+pub const EP_RDHUP: u32 = 8192;
+pub const EP_EXCLUSIVE: u32 = 268435456;
+pub const EP_WAKEUP: u32 = 536870912;
+pub const EP_ONESHOT: u32 = 1073741824;
+pub const EP_ET: u32 = 2147483648;
+
+pub const EP_CTL_ADD: u32 = 1;
+pub const EP_CTL_DEL: u32 = 2;
+pub const EP_CTL_MOD: u32 = 3;
+
+/// `epoll_create1` 的 CLOEXEC 位。
+pub const EP_CLOEXEC: u32 = 524288;
+
+/// 事件结构体的字节数。
+pub const EP_EV_BYTES: u32 = 12;
+
+const EQ_SYS_WAIT: u64 = 232;
+const EQ_SYS_CTL: u64 = 233;
+const EQ_SYS_CREATE1: u64 = 291;
+
+fn eq_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+fn eq_sep(out: ptr, cap: u32, pos: u32) -> u32 {
+    if pos > 0 {
+        return eq_put(out, cap, pos, "|");
+    }
+    return pos;
+}
+
+fn eq_st32(p: ptr, off: u32, v: u32) -> u32 {
+    let b: u32 = 0;
+    while b < 4 {
+        store8(p, off + b, ((v >> (8 * b)) & 255) as u8);
+        b = b + 1;
+    }
+    return off + 4;
+}
+
+fn eq_ld32(p: ptr, off: u32) -> u32 {
+    let v: u32 = 0;
+    let b: u32 = 0;
+    while b < 4 {
+        v = v | ((load8(p, off + b) as u32) << (8 * b));
+        b = b + 1;
+    }
+    return v;
+}
+
+fn eq_st64(p: ptr, off: u32, v: u64) -> u32 {
+    let b: u32 = 0;
+    while b < 8 {
+        store8(p, off + b, ((v >> (8 * b)) & 255) as u8);
+        b = b + 1;
+    }
+    return off + 8;
+}
+
+fn eq_ld64(p: ptr, off: u32) -> u64 {
+    let v: u64 = 0;
+    let b: u32 = 0;
+    while b < 8 {
+        v = v | ((load8(p, off + b) as u64) << (8 * b));
+        b = b + 1;
+    }
+    return v;
+}
+
+/// 事件位 -> 名字串。0 返回 `"0"`。
+pub fn ep_mask_text(mask: u32, out: ptr, cap: u32) -> u32 {
+    if mask == 0 {
+        return eq_put(out, cap, 0, "0");
+    }
+    let pos: u32 = 0;
+    if (mask & EP_IN) != 0 {
+        pos = eq_put(out, cap, pos, "EPOLLIN");
+    }
+    if (mask & EP_PRI) != 0 {
+        pos = eq_sep(out, cap, pos);
+        pos = eq_put(out, cap, pos, "EPOLLPRI");
+    }
+    if (mask & EP_OUT) != 0 {
+        pos = eq_sep(out, cap, pos);
+        pos = eq_put(out, cap, pos, "EPOLLOUT");
+    }
+    if (mask & EP_ERR) != 0 {
+        pos = eq_sep(out, cap, pos);
+        pos = eq_put(out, cap, pos, "EPOLLERR");
+    }
+    if (mask & EP_HUP) != 0 {
+        pos = eq_sep(out, cap, pos);
+        pos = eq_put(out, cap, pos, "EPOLLHUP");
+    }
+    if (mask & EP_RDHUP) != 0 {
+        pos = eq_sep(out, cap, pos);
+        pos = eq_put(out, cap, pos, "EPOLLRDHUP");
+    }
+    if (mask & EP_ET) != 0 {
+        pos = eq_sep(out, cap, pos);
+        pos = eq_put(out, cap, pos, "EPOLLET");
+    }
+    if (mask & EP_ONESHOT) != 0 {
+        pos = eq_sep(out, cap, pos);
+        pos = eq_put(out, cap, pos, "EPOLLONESHOT");
+    }
+    if (mask & EP_EXCLUSIVE) != 0 {
+        pos = eq_sep(out, cap, pos);
+        pos = eq_put(out, cap, pos, "EPOLLEXCLUSIVE");
+    }
+    return pos;
+}
+
+/// 控制字 -> 名字。未知返回 `"?"`。
+pub fn ep_op_name(op: u32) -> str {
+    if op == EP_CTL_ADD { return "ADD"; }
+    if op == EP_CTL_DEL { return "DEL"; }
+    if op == EP_CTL_MOD { return "MOD"; }
+    return "?";
+}
+
+/// 把 (events, data) 打进一块 12 字节的事件结构，返回写入的字节数。
+pub fn ep_ev_set(buf: ptr, events: u32, data: u64) -> u32 {
+    let _a: u32 = eq_st32(buf, 0, events);
+    return eq_st64(buf, 4, data);
+}
+
+/// 事件结构里的事件位。
+pub fn ep_ev_events(buf: ptr) -> u32 {
+    return eq_ld32(buf, 0);
+}
+
+/// 事件结构里的 data（通常是 fd 或指针）。
+pub fn ep_ev_data(buf: ptr) -> u64 {
+    return eq_ld64(buf, 4);
+}
+
+/// `epoll_create1(flags)` —— flags 是 `EP_CLOEXEC` 或 0。
+pub fn ep_create1(flags: u32) -> i64 {
+    return syscall4(EQ_SYS_CREATE1, flags as u64, 0, 0);
+}
+
+/// `epoll_ctl(epfd, op, fd, ev)` —— `ev` 可以是 0（DEL 时）。
+pub fn ep_ctl(epfd: u64, op: u32, fd: u64, ev: ptr) -> i64 {
+    return syscall7(EQ_SYS_CTL, epfd, op as u64, fd, ev as u64, 0, 0);
+}
+
+/// `epoll_wait(epfd, evs, max, timeout_ms)` —— 超时是毫秒，-1 表示无限等。
+pub fn ep_wait(epfd: u64, evs: ptr, max: u32, timeout_ms: i64) -> i64 {
+    return syscall7(EQ_SYS_WAIT, epfd, evs as u64, max as u64, timeout_ms as u64, 0, 0);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_epoll_mask() -> bool {
+    let o: ptr = alloc(96);
+    let n: u32 = ep_mask_text(2147483649, o, 96);
+    let want: str = "EPOLLIN|EPOLLET";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_epoll_event_roundtrip() -> bool {
+    let b: ptr = alloc(16);
+    let n: u32 = ep_ev_set(b, 17, 1099511627776 as u64);
+    return n == 12 && ep_ev_events(b) == 17 && ep_ev_data(b) == 1099511627776
+        && load8(b, 11) == 0;
+}
+
+fn test_epoll_op_names() -> bool {
+    return str_eq(ep_op_name(1), "ADD") && str_eq(ep_op_name(3), "MOD")
+        && str_eq(ep_op_name(9), "?") && EP_EV_BYTES == 12 && EP_CTL_DEL == 2;
+}

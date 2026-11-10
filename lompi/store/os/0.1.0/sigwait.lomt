@@ -1,0 +1,255 @@
+// os/sigwait.lomt — 同步收信号: 屏蔽 + signalfd + 读 siginfo
+//
+// 为什么需要它: 信号处理函数有两个老问题 —— 它可以在**任何**指令之间插进来 (于是处理
+// 函数看到的状态可能是半更新的), 而且能安全调用的函数只有 async-signal-safe 那一小撮。
+// 把信号**屏蔽**掉、再用 `signalfd` 把它变成"这个 fd 可读了", 就得到一条同步路径:
+// 循环里读一次、处理完、再读下一次。没有重入, 没有信号栈, 也不需要在处理函数里写代码。
+//
+// 三步的顺序是硬要求:
+//   1. `sw_mask_set` 往 sigset 里置位;
+//   2. `sw_procmask(SW_SIG_BLOCK, ...)` 让内核别再投递这些信号;
+//   3. `sw_signalfd` 把它们接过来 —— **不先屏蔽**的话, 信号会在 signalfd 建好之前被
+//      默认处置掉 (对 SIGTERM 就是直接退出, 什么也读不到)。
+//
+// 结构 (x86-64 Linux):
+//   sigset_t 交给内核时是 **8 字节位图** (64 个信号, 第 n 号在 bit n-1);
+//   siginfo_t 128 字节, 前三个字段固定: signo u32(0) | errno i32(4) | code i32(8)。
+//
+// 边界: 号是 x86-64 Linux 的; 自检只验纯逻辑 (位图与 siginfo 的读写), 系统调用那一半
+// 由调用方的行为判据覆盖。
+//
+// 命名: 公开 sw_*, 内部 swq_。
+
+module sigwait
+
+/// `rt_sigprocmask` 的 how。
+pub const SW_SIG_BLOCK: u32 = 0;
+pub const SW_SIG_UNBLOCK: u32 = 1;
+pub const SW_SIG_SETMASK: u32 = 2;
+
+/// 内核眼里的 sigset_t 大小 (64 位)。
+pub const SW_SIGSET_BYTES: u32 = 8;
+/// siginfo_t 的大小 (x86-64)。
+pub const SW_SIGINFO_BYTES: u32 = 128;
+/// siginfo 前三个字段的偏移。
+pub const SW_INFO_SIGNO: u32 = 0;
+pub const SW_INFO_ERRNO: u32 = 4;
+pub const SW_INFO_CODE: u32 = 8;
+
+/// signalfd4 的旗标。
+pub const SW_SFD_CLOEXEC: u32 = 524288;
+pub const SW_SFD_NONBLOCK: u32 = 2048;
+
+const SWQ_SYS_READ: u64 = 0;
+const SWQ_SYS_RT_SIGPROCMASK: u64 = 14;
+const SWQ_SYS_SIGNALFD4: u64 = 289;
+
+fn swq_zero(buf: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        store8(buf, i, 0 as u8);
+        i = i + 1;
+    }
+    return n;
+}
+
+fn swq_u32(p: ptr, o: u32) -> u32 {
+    let v: u32 = 0;
+    v = load8(p, o) as u32;
+    v = v | ((load8(p, o + 1) as u32) << 8);
+    v = v | ((load8(p, o + 2) as u32) << 16);
+    v = v | ((load8(p, o + 3) as u32) << 24);
+    return v;
+}
+
+fn swq_put(out: ptr, cap: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if i < cap {
+            store8(out, i, str_byte(s, i) as u8);
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+// ---------------------------------------------------------------- 位图
+
+/// 把 signum 置进 8 字节 sigset。1..64; 越界返回 0。
+pub fn sw_mask_set(buf: ptr, signum: u32) -> u32 {
+    if signum == 0 || signum > 64 {
+        return 0;
+    }
+    let idx: u32 = signum - 1;
+    let byte: u32 = idx / 8;
+    let bit: u32 = idx % 8;
+    let cur: u32 = load8(buf, byte) as u32;
+    store8(buf, byte, (cur | (1 << bit)) as u8);
+    return 1;
+}
+
+/// 把 signum 从 sigset 里清掉。1..64; 越界返回 0。
+pub fn sw_mask_clear(buf: ptr, signum: u32) -> u32 {
+    if signum == 0 || signum > 64 {
+        return 0;
+    }
+    let idx: u32 = signum - 1;
+    let byte: u32 = idx / 8;
+    let bit: u32 = idx % 8;
+    let cur: u32 = load8(buf, byte) as u32;
+    store8(buf, byte, (cur & (255 - (1 << bit))) as u8);
+    return 1;
+}
+
+/// signum 在不在 sigset 里。
+pub fn sw_mask_has(buf: ptr, signum: u32) -> u32 {
+    if signum == 0 || signum > 64 {
+        return 0;
+    }
+    let idx: u32 = signum - 1;
+    let byte: u32 = idx / 8;
+    let bit: u32 = idx % 8;
+    if (load8(buf, byte) as u32 & (1 << bit)) != 0 {
+        return 1;
+    }
+    return 0;
+}
+
+/// 把整个 8 字节 sigset 清空。
+pub fn sw_mask_zero(buf: ptr) -> u32 {
+    return swq_zero(buf, SW_SIGSET_BYTES);
+}
+
+// ---------------------------------------------------------------- 系统调用
+
+/// `rt_sigprocmask(how, set, oldset)` —— 第四个实参是 sigsetsize (8)。
+pub fn sw_procmask(how: u32, set: ptr, oldset: ptr) -> i64 {
+    return syscall6(SWQ_SYS_RT_SIGPROCMASK, how as u64, set as u64, oldset as u64,
+                    8, 0);
+}
+
+/// `signalfd4(fd, set, len, flags)` —— fd 传 -1 表示新建一个。
+pub fn sw_signalfd(fd: i64, set: ptr, len: u32, flags: u32) -> i64 {
+    return syscall6(SWQ_SYS_SIGNALFD4, fd as u64, set as u64, len as u64,
+                    flags as u64, 0);
+}
+
+/// 从 signalfd 读一条 siginfo。返回 signo (>0), 0 表示对端关闭, <0 是错误。
+pub fn sw_wait(fd: i64, info: ptr, info_len: u32) -> i64 {
+    let r: i64 = syscall4(SWQ_SYS_READ, fd as u64, info as u64, info_len as u64);
+    if r <= 0 {
+        return r;
+    }
+    return swq_u32(info, SW_INFO_SIGNO) as i64;
+}
+
+/// siginfo 里的信号号。
+pub fn sw_info_signo(info: ptr) -> u32 {
+    return swq_u32(info, SW_INFO_SIGNO);
+}
+
+/// siginfo 里的 `si_errno`。
+pub fn sw_info_errno(info: ptr) -> u32 {
+    return swq_u32(info, SW_INFO_ERRNO);
+}
+
+/// siginfo 里的 `si_code` (低 16 位是负数时表示内核来源, 高位是用户)。
+pub fn sw_info_code(info: ptr) -> u32 {
+    return swq_u32(info, SW_INFO_CODE);
+}
+
+// ---------------------------------------------------------------- 名字
+
+/// 信号号 -> 名字。未知返回 0 长度。
+pub fn sw_signame(signum: u32, out: ptr, cap: u32) -> u32 {
+    let s: str = "";
+    if signum == 1 { s = "SIGHUP"; }
+    else if signum == 2 { s = "SIGINT"; }
+    else if signum == 3 { s = "SIGQUIT"; }
+    else if signum == 4 { s = "SIGILL"; }
+    else if signum == 5 { s = "SIGTRAP"; }
+    else if signum == 6 { s = "SIGABRT"; }
+    else if signum == 7 { s = "SIGBUS"; }
+    else if signum == 8 { s = "SIGFPE"; }
+    else if signum == 9 { s = "SIGKILL"; }
+    else if signum == 10 { s = "SIGUSR1"; }
+    else if signum == 11 { s = "SIGSEGV"; }
+    else if signum == 12 { s = "SIGUSR2"; }
+    else if signum == 13 { s = "SIGPIPE"; }
+    else if signum == 14 { s = "SIGALRM"; }
+    else if signum == 15 { s = "SIGTERM"; }
+    else if signum == 17 { s = "SIGCHLD"; }
+    else if signum == 18 { s = "SIGCONT"; }
+    else if signum == 19 { s = "SIGSTOP"; }
+    else if signum == 20 { s = "SIGTSTP"; }
+    else if signum == 21 { s = "SIGTTIN"; }
+    else if signum == 22 { s = "SIGTTOU"; }
+    else if signum == 23 { s = "SIGURG"; }
+    else if signum == 28 { s = "SIGWINCH"; }
+    else if signum == 29 { s = "SIGIO"; }
+    return swq_put(out, cap, s);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_sigwait_mask() -> bool {
+    let m: ptr = alloc(8);
+    sw_mask_zero(m);
+    if sw_mask_has(m, 2) != 0 {
+        return false;
+    }
+    sw_mask_set(m, 2);
+    sw_mask_set(m, 9);
+    sw_mask_set(m, 64);
+    if sw_mask_has(m, 2) != 1 || sw_mask_has(m, 9) != 1 || sw_mask_has(m, 64) != 1 {
+        return false;
+    }
+    if sw_mask_has(m, 1) != 0 || sw_mask_has(m, 63) != 0 {
+        return false;
+    }
+    sw_mask_clear(m, 2);
+    if sw_mask_has(m, 2) != 0 {
+        return false;
+    }
+    if sw_mask_set(m, 0) != 0 || sw_mask_set(m, 65) != 0 {
+        return false;
+    }
+    return true;
+}
+
+fn test_sigwait_info() -> bool {
+    let info: ptr = alloc(128);
+    swq_zero(info, 128);
+    store8(info, 0, 15 as u8);
+    store8(info, 5, 2 as u8);
+    store8(info, 8, 6 as u8);
+    if sw_info_signo(info) != 15 {
+        return false;
+    }
+    if sw_info_errno(info) != 512 {
+        return false;
+    }
+    if sw_info_code(info) != 6 {
+        return false;
+    }
+    return true;
+}
+
+fn test_sigwait_name() -> bool {
+    let b: ptr = alloc(16);
+    let n: u32 = sw_signame(9, b, 16);
+    if n != 7 {
+        return false;
+    }
+    if load8(b, 0) != 83 || load8(b, 1) != 73 || load8(b, 2) != 71 {
+        return false;
+    }
+    if load8(b, 6) != 76 {
+        return false;
+    }
+    if sw_signame(0, b, 16) != 0 {
+        return false;
+    }
+    return true;
+}

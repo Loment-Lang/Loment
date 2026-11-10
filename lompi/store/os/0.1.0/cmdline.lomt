@@ -1,0 +1,229 @@
+// os/args.lomt — 命令行参数: 从内核给的 NUL 分隔块里取第几个、拼回一行
+//
+// 为什么需要它: 进程拿到的命令行**不是**一行用空格隔开的文本，而是内核给的一块
+// NUL 分隔字节（`/proc/self/cmdline` 就是同一份）。于是"取第一个参数"用空格切一定错：
+// 文件名里可以有空格，空参数是合法的（`prog "" x` 是三个参数，中间那个是空串）。
+// 这一层只做这一块字节上的三件事：数、取、拼回一行给人看。
+//
+// 覆盖: 计数（尾随 NUL / 无尾随 NUL 两种形状都算对）、按序号取、拼回命令行
+// （含空格 / 制表符 / 引号 / 反斜杠的参数加双引号并转义）。
+//
+// 不做的: 不改 argv、不做 getopt 那种选项解析（那是应用层的事），也不提供"程序名"
+// 之外的语义 —— `argv[0]` 是调用方自己决定写什么的，内核不替你保证它是路径。
+//
+// 边界: 自检只验纯逻辑（块上的扫描与拼串）—— 系统调用那一半由
+// `tools/loment_os_test.py` 判（全模块都不在自检里发系统调用）。
+//
+// 命名: 公开 ar_*, 内部 arq_*。自检 test_args_*。
+
+module cmdline
+
+fn arq_st32(p: ptr, off: u32, v: u32) -> u32 {
+    let i: u32 = 0;
+    while i < 4 {
+        store8(p, off + i, ((v >> (8 * i)) & 255) as u8);
+        i = i + 1;
+    }
+    return 4;
+}
+
+fn arq_ld32(p: ptr, off: u32) -> u32 {
+    let v: u32 = 0;
+    let i: u32 = 0;
+    while i < 4 {
+        v = v | ((load8(p, off + i) as u32) << (8 * i));
+        i = i + 1;
+    }
+    return v;
+}
+
+/// 参数个数。块尾有没有 NUL 都算对（最后一个非空段也计一个）。
+pub fn ar_count(p: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    let cnt: u32 = 0;
+    let in_arg: u32 = 0;
+    let b: u32 = 0;
+    while i < n {
+        b = load8(p, i);
+        if b == 0 {
+            if in_arg == 1 {
+                cnt = cnt + 1;
+                in_arg = 0;
+            }
+        } else {
+            in_arg = 1;
+        }
+        i = i + 1;
+    }
+    if in_arg == 1 {
+        cnt = cnt + 1;
+    }
+    return cnt;
+}
+
+/// 第 index 个参数在块里的**起点偏移**写进 start_ptr（4 字节）。返回它的长度；
+/// 越界返回 0 并把起点写成 n。空参数返回 0，起点仍是对的 —— 长度与"没有"要看起点。
+fn arq_span(p: ptr, n: u32, index: u32, start_ptr: ptr) -> u32 {
+    let i: u32 = 0;
+    let k: u32 = 0;
+    let s: u32 = 0;
+    let got: u32 = 0;
+    let len: u32 = 0;
+    let mlen: u32 = 0;
+    let b: u32 = 0;
+    while i <= n {
+        b = 0;
+        if i < n {
+            b = load8(p, i);
+        }
+        if b == 0 {
+            if got == 0 && k == index {
+                got = 1;
+                s = i - len;
+                mlen = len;
+            }
+            k = k + 1;
+            len = 0;
+        } else {
+            len = len + 1;
+        }
+        i = i + 1;
+    }
+    if got == 0 {
+        arq_st32(start_ptr, 0, n);
+        return 0;
+    }
+    arq_st32(start_ptr, 0, s);
+    return mlen;
+}
+
+/// 第 index 个参数写进 out（放不下的部分丢弃）。返回**真实长度**。
+pub fn ar_get(p: ptr, n: u32, index: u32, out: ptr, cap: u32) -> u32 {
+    let sp: ptr = alloc(4);
+    let len: u32 = arq_span(p, n, index, sp);
+    let s: u32 = arq_ld32(sp, 0);
+    let i: u32 = 0;
+    while i < len {
+        if i < cap {
+            store8(out, i, load8(p, s + i) as u8);
+        }
+        i = i + 1;
+    }
+    return len;
+}
+
+/// 拼回一行给人看。参数之间的分隔字节由调用方给（`' '` 是 32）。
+/// 含空格 / 制表符 / 双引号 / 反斜杠的参数加双引号，内部的 `"` 与 `\` 转义。
+/// 返回**完整长度**（可能大于 cap —— 调用方据它判断要不要重来）。
+pub fn ar_join(p: ptr, n: u32, sep: u32, out: ptr, cap: u32) -> u32 {
+    let cnt: u32 = ar_count(p, n);
+    let sp: ptr = alloc(4);
+    let pos: u32 = 0;
+    let idx: u32 = 0;
+    let len: u32 = 0;
+    let s: u32 = 0;
+    let i: u32 = 0;
+    let b: u32 = 0;
+    let need: u32 = 0;
+    while idx < cnt {
+        if idx > 0 {
+            if pos < cap {
+                store8(out, pos, sep as u8);
+            }
+            pos = pos + 1;
+        }
+        len = arq_span(p, n, idx, sp);
+        s = arq_ld32(sp, 0);
+        need = 0;
+        i = 0;
+        while i < len {
+            b = load8(p, s + i);
+            if b == 32 || b == 9 || b == 34 || b == 92 {
+                need = 1;
+            }
+            i = i + 1;
+        }
+        if need == 1 {
+            if pos < cap {
+                store8(out, pos, 34 as u8);
+            }
+            pos = pos + 1;
+            i = 0;
+            while i < len {
+                b = load8(p, s + i);
+                if b == 34 || b == 92 {
+                    if pos < cap {
+                        store8(out, pos, 92 as u8);
+                    }
+                    pos = pos + 1;
+                }
+                if pos < cap {
+                    store8(out, pos, b as u8);
+                }
+                pos = pos + 1;
+                i = i + 1;
+            }
+            if pos < cap {
+                store8(out, pos, 34 as u8);
+            }
+            pos = pos + 1;
+        } else {
+            i = 0;
+            while i < len {
+                if pos < cap {
+                    store8(out, pos, load8(p, s + i) as u8);
+                }
+                pos = pos + 1;
+                i = i + 1;
+            }
+        }
+        idx = idx + 1;
+    }
+    return pos;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_args_count_trailing_nul() -> bool {
+    let b: ptr = alloc(16);
+    store8(b, 0, 97 as u8);
+    store8(b, 1, 0 as u8);
+    store8(b, 2, 98 as u8);
+    store8(b, 3, 99 as u8);
+    store8(b, 4, 0 as u8);
+    return ar_count(b, 5) == 2;
+}
+
+fn test_args_count_without_trailing_nul() -> bool {
+    let b: ptr = alloc(8);
+    store8(b, 0, 120 as u8);
+    store8(b, 1, 121 as u8);
+    return ar_count(b, 2) == 1;
+}
+
+fn test_args_get_second() -> bool {
+    let b: ptr = alloc(16);
+    let o: ptr = alloc(8);
+    store8(b, 0, 97 as u8);
+    store8(b, 1, 0 as u8);
+    store8(b, 2, 98 as u8);
+    store8(b, 3, 99 as u8);
+    store8(b, 4, 0 as u8);
+    let n: u32 = ar_get(b, 5, 1, o, 8);
+    return n == 2 && load8(o, 0) == 98 && load8(o, 1) == 99;
+}
+
+fn test_args_join_quotes_spaces() -> bool {
+    let b: ptr = alloc(32);
+    let o: ptr = alloc(32);
+    store8(b, 0, 97 as u8);
+    store8(b, 1, 32 as u8);
+    store8(b, 2, 98 as u8);
+    store8(b, 3, 0 as u8);
+    store8(b, 4, 99 as u8);
+    store8(b, 5, 0 as u8);
+    let n: u32 = ar_join(b, 6, 32, o, 32);
+    return n == 7 && load8(o, 0) == 34 && load8(o, 1) == 97
+        && load8(o, 2) == 32 && load8(o, 3) == 98 && load8(o, 4) == 34
+        && load8(o, 5) == 32 && load8(o, 6) == 99;
+}

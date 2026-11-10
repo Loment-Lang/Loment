@@ -1,0 +1,218 @@
+// os/mmapfile.lomt — 把一个文件映射进地址空间（open -> lseek -> mmap -> close）
+//
+// 为什么需要它: 读一个 200 MiB 的日志、扫一遍索引文件、把一堆结构化数据当数组用 ——
+// 这三件事用 `read` 都要你自己分配同样大的内存再拷一遍；`mmap` 让页错误去取数据，
+// 读多少取多少，写完还能让内核回刷。代价是**三件事要按顺序做对**：先要知道多长
+// （`lseek(SEEK_END)`），映射长度必须是页的整数倍（内核会补零到页尾），以及映射
+// 与 fd 是**两条命** —— fd 可以立刻关掉，映射还在。
+//
+// 覆盖: 映射（只读 / 可写共享、私有）、解映射、回刷、建议（madvise）。
+//
+// 边界（刻意划的）:
+//   * 不做"按需分块映射"—— 一次映射整个文件，调用方自己决定要不要分段；
+//   * 不做文件锁与并发协议（见 `os/lockfile`）；
+//   * 映射**空文件**会失败（EINVAL），这里原样返回 -1，不替你造一页；
+//   * 号是 x86-64 Linux 的。自检只验常量与文本，映射本身由门禁里的运行时判据判。
+//
+// 命名: 公开 mf2_*, 内部 mfq_*（`mf_` 前缀已经被 `system/memfd` 占了）。
+
+module mmapfile
+
+pub const MF2_PROT_READ: u32 = 1;
+pub const MF2_PROT_WRITE: u32 = 2;
+pub const MF2_PROT_EXEC: u32 = 4;
+
+pub const MF2_MAP_SHARED: u32 = 1;
+pub const MF2_MAP_PRIVATE: u32 = 2;
+pub const MF2_MAP_POPULATE: u32 = 32768;
+
+pub const MF2_MS_ASYNC: u32 = 1;
+pub const MF2_MS_INVALIDATE: u32 = 2;
+pub const MF2_MS_SYNC: u32 = 4;
+
+pub const MF2_MADV_NORMAL: u32 = 0;
+pub const MF2_MADV_RANDOM: u32 = 1;
+pub const MF2_MADV_SEQUENTIAL: u32 = 2;
+pub const MF2_MADV_WILLNEED: u32 = 3;
+pub const MF2_MADV_DONTNEED: u32 = 4;
+
+const MFQ_SYS_MMAP: u64 = 9;
+const MFQ_SYS_MSYNC: u64 = 26;
+const MFQ_SYS_MADVISE: u64 = 28;
+const MFQ_SYS_CLOSE: u64 = 3;
+const MFQ_SYS_LSEEK: u64 = 8;
+const MFQ_SYS_OPENAT: u64 = 257;
+const MFQ_AT_FDCWD: u64 = 18446744073709551516;
+const MFQ_SEEK_END: u64 = 2;
+
+fn mfq_st64(p: ptr, v: u64) -> u32 {
+    let b: u32 = 0;
+    while b < 8 {
+        store8(p, b, ((v >> (8 * b)) & 255) as u8);
+        b = b + 1;
+    }
+    return 8;
+}
+
+fn mfq_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+// ---------------------------------------------------------------- 文本（纯）
+
+/// 保护位 -> `PROT_*` 文本。
+pub fn mf2_prot_text(mask: u32, out: ptr, cap: u32) -> u32 {
+    if mask == 0 {
+        return mfq_put(out, cap, 0, "PROT_NONE");
+    }
+    let pos: u32 = 0;
+    let first: u32 = 0;
+    if (mask & MF2_PROT_READ) != 0 {
+        pos = mfq_put(out, cap, pos, "PROT_READ");
+        first = 1;
+    }
+    if (mask & MF2_PROT_WRITE) != 0 {
+        if first == 1 {
+            pos = mfq_put(out, cap, pos, "|");
+        }
+        pos = mfq_put(out, cap, pos, "PROT_WRITE");
+        first = 1;
+    }
+    if (mask & MF2_PROT_EXEC) != 0 {
+        if first == 1 {
+            pos = mfq_put(out, cap, pos, "|");
+        }
+        pos = mfq_put(out, cap, pos, "PROT_EXEC");
+    }
+    return pos;
+}
+
+/// 映射旗标 -> `MAP_*` 文本。
+pub fn mf2_map_text(mask: u32, out: ptr, cap: u32) -> u32 {
+    if mask == 0 {
+        return mfq_put(out, cap, 0, "0");
+    }
+    let pos: u32 = 0;
+    let first: u32 = 0;
+    if (mask & MF2_MAP_SHARED) != 0 {
+        pos = mfq_put(out, cap, pos, "MAP_SHARED");
+        first = 1;
+    }
+    if (mask & MF2_MAP_PRIVATE) != 0 {
+        if first == 1 {
+            pos = mfq_put(out, cap, pos, "|");
+        }
+        pos = mfq_put(out, cap, pos, "MAP_PRIVATE");
+        first = 1;
+    }
+    if (mask & MF2_MAP_POPULATE) != 0 {
+        if first == 1 {
+            pos = mfq_put(out, cap, pos, "|");
+        }
+        pos = mfq_put(out, cap, pos, "MAP_POPULATE");
+    }
+    return pos;
+}
+
+// ---------------------------------------------------------------- 映射
+
+/// 映射 `path_cstr` 整个文件。返回映射地址（失败 -1），文件长度写进 `out_len`
+/// （8 字节 u64；失败写 0）。`prot` 里有 `PROT_WRITE` 时用 O_RDWR 打开，否则 O_RDONLY。
+/// fd 在映射成功后立刻关掉 —— 映射不依赖它。
+pub fn mf2_map(path_cstr: ptr, prot: u32, flags: u32, out_len: ptr) -> i64 {
+    let oflags: u64 = 0;
+    if (prot & MF2_PROT_WRITE) != 0 {
+        oflags = 2;
+    }
+    let fd: i64 = syscall6(MFQ_SYS_OPENAT, MFQ_AT_FDCWD, path_cstr as u64, oflags, 0, 0);
+    if fd < 0 {
+        mfq_st64(out_len, 0);
+        return fd;
+    }
+    let end: i64 = syscall4(MFQ_SYS_LSEEK, fd as u64, 0 as u64, MFQ_SEEK_END);
+    if end <= 0 {
+        let _c: i64 = syscall4(MFQ_SYS_CLOSE, fd as u64, 0, 0);
+        mfq_st64(out_len, 0);
+        return 0 - 1;
+    }
+    let addr: i64 = syscall7(MFQ_SYS_MMAP, 0, end as u64, prot as u64, flags as u64, fd as u64, 0);
+    let _c2: i64 = syscall4(MFQ_SYS_CLOSE, fd as u64, 0, 0);
+    if addr < 0 {
+        mfq_st64(out_len, 0);
+        return addr;
+    }
+    mfq_st64(out_len, end as u64);
+    return addr;
+}
+
+/// 只读映射 —— 最常见的那一种（解析文件、查找、扫描）。
+pub fn mf2_map_readonly(path_cstr: ptr, out_len: ptr) -> i64 {
+    return mf2_map(path_cstr, MF2_PROT_READ, MF2_MAP_PRIVATE, out_len);
+}
+
+/// 解映射。
+pub fn mf2_unmap(addr: u64, len: u64) -> i64 {
+    return syscall4(11, addr, len, 0);
+}
+
+/// 把脏页写回文件。`MS_SYNC` 等到写完才返回。
+pub fn mf2_sync(addr: u64, len: u64, flags: u32) -> i64 {
+    return syscall4(MFQ_SYS_MSYNC, addr, len, flags as u64);
+}
+
+/// 给内核一个访问模式的建议（不是保证 —— 它有权忽略）。
+pub fn mf2_advise(addr: u64, len: u64, advice: u32) -> i64 {
+    return syscall4(MFQ_SYS_MADVISE, addr, len, advice as u64);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_mmapfile_prot_text() -> bool {
+    let o: ptr = alloc(64);
+    let n: u32 = mf2_prot_text(1, o, 64);
+    let want: str = "PROT_READ";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_mmapfile_map_text() -> bool {
+    let o: ptr = alloc(64);
+    let n: u32 = mf2_map_text(3, o, 64);
+    let want: str = "MAP_SHARED|MAP_PRIVATE";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_mmapfile_st64() -> bool {
+    let p: ptr = alloc(8);
+    mfq_st64(p, 16909060);
+    return load8(p, 0) == 4 && load8(p, 1) == 3 && load8(p, 2) == 2 && load8(p, 3) == 1;
+}

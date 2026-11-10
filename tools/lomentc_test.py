@@ -2410,6 +2410,109 @@ def test_the_store_can_be_bypassed_entirely():
 
 
 @test
+def test_every_core_word_is_registered_in_the_selfhost_tables():
+    """自举侧的三张核心词表必须覆盖 `CORE_DIMS` 的每一个词（docs/331）。
+
+    **Why**：加一维时最容易漏的就是这三处 —— `switches.lomt` 的 `sw_is_core`（漏了会被
+    当**开关**抹掉）、`checker.lomt` 的 `chk_core_dim`（漏了"不是核心词"的哨兵不挪）、
+    `driver.lomt` 的 `core_word_bit`（漏了驱动不认这一维的位）。`vm`、`lms`、`lompi`
+    各栽过一次，症状都一样：E022，**码对、理由错**，而别的判据全绿。
+
+    这条不定"具体几张表"的语义，只做**逐词点名**：少一个词就指到哪张表。
+    """
+    words = sorted({w for dim in lomentc.CORE_DIM_ORDER for w in lomentc.CORE_DIMS[dim]})
+    tables = [
+        ("switches.lomt", "sw_is_core"),
+        ("checker.lomt", "chk_core_dim"),
+        ("driver.lomt", "core_word_bit"),
+    ]
+    missing: list[str] = []
+    for fname, fn in tables:
+        text = (ROOT / "loment" / "selfhost" / fname).read_text(encoding="utf-8")
+        i = text.find("fn " + fn)
+        assert i >= 0, f"{fname} 里找不到 fn {fn}"
+        j = text.find("\n}", i)
+        assert j > i, f"{fname}: fn {fn} 的结尾没找到"
+        body = text[i:j]
+        for w in words:
+            if f'"{w}"' not in body:
+                missing.append(f"{fname}::{fn} 缺 {w}")
+    assert not missing, (
+        f"{len(words)} 个核心词里有没登记的：\n  " + "\n  ".join(missing)
+        + "\n（加一维要同时改这三张表；见 docs/331）")
+    print(f"      {len(words)} 个核心词在三张自举表里都有登记")
+
+
+@test
+def test_every_core_word_is_accepted_and_a_repeat_is_refused():
+    """`CORE_DIMS` 的每个词：参考实现**接受**单独一次、**拒绝**同维写两次（E022）。
+
+    两个特殊：`gc_auto` / `gc_auto_alpha` 与默认的 `no_runtime` 定义上冲突，探针里
+    一并写 `choose runtime`。其余词单独出现就是合法程序。
+    """
+    words = sorted({w for dim in lomentc.CORE_DIM_ORDER for w in lomentc.CORE_DIMS[dim]})
+    needs_runtime = {"gc_auto", "gc_auto_alpha"}
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td)
+        for w in words:
+            extra = "choose runtime\n" if w in needs_runtime else ""
+            ok = proj / f"{w}.lomt"
+            ok.write_text(
+                f"module m\nchoose {w}\n{extra}\nfn f() -> u32 {{\n    return 1;\n}}\n",
+                encoding="utf-8")
+            m = lomentc.load(ok)
+            errs = lomentc.check(m, deps=[])
+            assert not errs, f"{w}: 单独一次应当被接受，却报了 {errs[:1]}"
+            dup = proj / f"{w}_dup.lomt"
+            dup.write_text(
+                f"module m\nchoose {w}\nchoose {w}\n{extra}\n"
+                "fn f() -> u32 {\n    return 1;\n}\n",
+                encoding="utf-8")
+            errs2 = lomentc.check(lomentc.load(dup), deps=[])
+            assert any("只能声明一次" in e for e in errs2), (
+                f"{w}: 同维写两次应当被拒，实际 {errs2[:1]}")
+    print(f"      {len(words)} 个核心词：单独接受、写两次拒绝")
+
+
+@test
+def test_choose_no_lompi_turns_the_store_off():
+    """单元自己写 `choose no_lompi` ⇒ 名字解析不看 store（docs/331）。
+
+    与 `LOMENT_NO_STORE=1` 等价，但它是**程序自己的声明**：裸金属构建不需要外部环境
+    变量，源码本身就是封闭性的证据。`deps/` 与内置四根仍然照常。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td)
+        dep = proj / "deps" / "mine"
+        dep.mkdir(parents=True)
+        (dep / "mine.lomt").write_text("module mine\n", encoding="utf-8")
+        solo = proj / "solo.lomt"
+        solo.write_text(
+            "module solo\nchoose no_lompi\nchoose no_runtime\n\n"
+            "use mine\n\nfn _start() {\n    syscall4(60, 0, 0, 0);\n}\n",
+            encoding="utf-8")
+        m = lomentc.load(solo)
+        deps = lomentc.resolve_deps(m, ROOT, proj, entry=solo)
+        assert [d.name for d in deps] == ["mine"], [d.name for d in deps]
+        assert not lomentc.check(m, deps=deps), lomentc.check(m, deps=deps)[:2]
+        # 同一个项目里，`use vec` 在 no_lompi 下找不到（store 关了）。
+        bad = proj / "bad.lomt"
+        bad.write_text(
+            "module bad\nchoose no_lompi\nuse vec\n\nfn main() -> u32 { return 0; }\n",
+            encoding="utf-8")
+        try:
+            mb = lomentc.load(bad)
+            lomentc.resolve_deps(mb, ROOT, proj, entry=bad)
+        except lomentc.LomError as e:
+            assert "找不到" in str(e), e
+        else:
+            raise AssertionError("no_lompi 下 `use vec` 不该解析成功")
+        # 默认档（不写这一维）仍然看 store。
+        assert lomentc.effective_dims(m).get("lompi") == "no_lompi"
+        assert lomentc.effective_dims(lomentc.load(dep / "mine.lomt")).get("lompi") == "lompi"
+
+
+@test
 def test_community_deps_cannot_take_a_builtin_package_name():
     """`deps/math` 不能顶替 store 里的 `math` 包 —— 保留名是**store 里全部包名**。
 

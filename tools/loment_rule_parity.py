@@ -77,7 +77,10 @@ import loment_p8_test as H  # noqa: E402  # 复用已验过的构建/运行夹�
 # `free` 时仍被借（E041）、存下来的 `&mut` 独家（E007）⇒ **133/133**。
 # 2026-11-09 对象代（`docs/320` S1）：两条 —— 非 revision 域上读代、revision 守卫
 # 缺第二实参 ⇒ **135/135**。
-BUDGET = 135
+# 2026-11-10 库系统维（`docs/331` 第九维 `lompi`）：一条 —— 同维写两次 ⇒ **136/136**。
+# （"接受单次"不是这张表的探针：这里只收两边都报错的用例，接不接受由 `lomentc_test`
+#  与 `loment_lompi_test` 的正向用例钉。）
+BUDGET = 136
 
 # --------------------------------------------------------------------------- 案例表
 #
@@ -479,6 +482,14 @@ _CASES: list[tuple[str, str]] = [
     ("lifetime-stored-mut-alias",
      "module m\n\nstruct V {\n    a: u32,\n}\n\nfn f(v: V) -> u32 {\n"
      "    let m: &mut V = &mut v;\n    let s: &V = &v;\n    return s.a;\n}\n"),
+    # ---- 库系统维（docs/331，第九维 `lompi`）----------------------------------
+    # 自举侧有三张表要同时认这一维：`switches.lomt` 的 `sw_is_core`、`checker.lomt` 的
+    # `chk_core_dim`、`driver.lomt` 的 `core_word_bit`。漏一张，`choose no_lompi` 就被
+    # 当成开关抹掉并报 E022（码对、理由错）—— `lms` / `vm` 都这么被抓到过。
+    # 这张表只收"两边都报错"的用例；单次接受由 `lomentc_test` 与 `loment_lompi_test`
+    # 的正向用例钉（NOPY 不算等价，见 `main` 里的统计）。
+    ("lompi-dim-twice",
+     "module m\nchoose no_lompi\nchoose no_lompi\n\nfn f() -> u32 {\n    return 1;\n}\n"),
 
 ]
 

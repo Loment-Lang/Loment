@@ -1586,7 +1586,7 @@ fn resolve_use_name(src: ptr, off: u32, len: u32, dst: ptr, scr: ptr, ins: u32) 
         }
     }
     // 导入方住在商店里: 商店两层提到四根前面 (§归属)。
-    if ins == 1 {
+    if ins == 1 && no_lompi(scr) == 0 {
         let s0: u32 = try_store_layers(td, tn, 0, src, off, len, tmp, dst, scr);
         if s0 > 0 {
             return s0;
@@ -1637,8 +1637,8 @@ fn resolve_use_name(src: ptr, off: u32, len: u32, dst: ptr, scr: ptr, ins: u32) 
     if hits == 1 {
         return hit_len;
     }
-    // 默认 (导入方不在商店里): 商店两层垫在四根后面。
-    if ins != 1 {
+    // 默认 (导入方不在商店里): 商店两层垫在四根后面。`choose no_lompi` 时这一步消失。
+    if ins != 1 && no_lompi(scr) == 0 {
         let s0: u32 = try_store_layers(td, tn, 0, src, off, len, tmp, dst, scr);
         if s0 > 0 {
             return s0;
@@ -1907,6 +1907,18 @@ fn core_word_bit(p: ptr, n: u32) -> u32 {
     if pkg_eq(p, n, "lifetime_no") == 1 || pkg_eq(p, n, "lifetime_auto") == 1
             || pkg_eq(p, n, "lifetime_manual") == 1 {
         return 128;
+    }
+    // 库系统这一维（docs/331）：位 256。`no_lompi` 让名字解析整体不看 store。
+    if pkg_eq(p, n, "lompi") == 1 || pkg_eq(p, n, "no_lompi") == 1 {
+        return 256;
+    }
+    return 0;
+}
+
+/// 根单元写了 `choose no_lompi` 没有（位 256）。
+fn no_lompi(scr: ptr) -> u32 {
+    if (load32(scr, RTDECL_OFF) & 256) != 0 {
+        return 1;
     }
     return 0;
 }
@@ -2238,6 +2250,21 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
         wdiag_file(dfd, scr, path, n, 24, str_ptr(dm), str_len(dm));
         failp(dm, path, n);
         die(1);
+    }
+    // **`choose no_lompi` 必须先看见再解析 `use`**（docs/331）：`choose` 与 `use` 的
+    // 先后由用户写，不能指望它出现在前面。所以根单元进来先扫一遍，只认这一维的位。
+    if depth == 0 {
+        let _pi: u32 = 0;
+        while load32(toks, _pi * 20) != 4 {
+            if tok_is(slot, toks, _pi, "choose") {
+                let _ws0: u32 = load32(toks, (_pi + 1) * 20 + 4);
+                let _wl0: u32 = load32(toks, (_pi + 1) * 20 + 8);
+                if core_word_bit(ptr_add(slot, _ws0), _wl0) == 256 {
+                    store32(scr, RTDECL_OFF, load32(scr, RTDECL_OFF) | 256);
+                }
+            }
+            _pi = _pi + 1;
+        }
     }
     while load32(toks, i * 20) != 4 {
         // 记下根/`addin` 单元写没写运行期那一维（docs/324）。依赖写的会被下面抹掉，

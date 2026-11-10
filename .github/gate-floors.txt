@@ -12,7 +12,7 @@
 
 
 lomc_test 25
-lomentc_test 242
+lomentc_test 245
 lspe_test 54
 potato_test 19
 loment_ct_test 2
@@ -85,7 +85,7 @@ loment_internet_test 12
 loment_os_test 5
 loment_thread_test 11
 loment_lumtui_test 7
-loment_lompi_test 48
+loment_lompi_test 50
 lompicheck_test 7
 loment_register_test 9
 loment_multisyntax_test 73

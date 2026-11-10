@@ -3114,6 +3114,10 @@ CORE_DIMS: dict[str, tuple[str, ...]] = {
     # 仍默认 `lifetime_no`（`docs/305` 的封版承诺：旧版次一个字节都不变）。
     # 生效值由 `core_default("lifetime", profile)` 算，**不要**直接读 `CORE_DEFAULTS`。
     "lifetime": ("lifetime_no", "lifetime_auto", "lifetime_manual"),
+    # **库系统这一维**（`docs/331`）：`lompi`（默认）允许名字解析看随包的 store；
+    # `no_lompi` 把它整体关掉 —— 只剩项目 `deps/` 与内置四根。裸金属构建用它把
+    # "可达集合只由源码决定"写成程序自己的声明，而不是外部环境变量。
+    "lompi": ("lompi", "no_lompi"),
 }
 #: **维度之后的第二位置**（用户 2026-11-08）：`<维>_<槽>_<值>`。
 #:
@@ -3140,7 +3144,7 @@ CORE_SLOT_DEFAULTS = {"aicheck": "false"}
 #: `lms` / `lspe` / `lifetime` 排在最后：它们**没有冲突对**，追加在尾部不会改动
 #: 任何既有配对的先后。
 CORE_DIM_ORDER: tuple[str, ...] = ("mode", "gc", "runtime", "port", "vm", "lms", "lspe",
-                                   "lifetime")
+                                   "lifetime", "lompi")
 #: 所有核心模式的取值 —— "这一个 `choose` 是核心模式还是开关"就看它在不在这里面。
 #: 槽取值也算核心写法（否则它会被当成**用户开关**吞掉，`choose lspe_aicheck_true`
 #: 就变成一次未定义的开关取值）。
@@ -3151,7 +3155,8 @@ CORE_DIM_OF = {w: d for d, ws in CORE_DIMS.items() for w in ws}
 #: 每一维**不写**时的取值 —— 默认档，且默认**不改变任何现有程序的行为**。
 CORE_DEFAULTS = {"mode": "std", "gc": "gc_manual", "runtime": "no_runtime",
                  "port": "sealed", "vm": "no_vm", "lms": "lms_full",
-                 "lspe": "lspe_open_admin", "lifetime": "lifetime_auto"}
+                 "lspe": "lspe_open_admin", "lifetime": "lifetime_auto",
+                 "lompi": "lompi"}
 #: 生命周期维在**旧版次**里的默认值（`docs/305`：封版的版次一个字节都不变）。
 #: 2026.3 起才翻到 `lifetime_auto`（用户 2026-11-08 裁）。
 LIFETIME_DEFAULT_EDITION = "tur2026.3"
@@ -3184,6 +3189,7 @@ CORE_DIM_ZH = {
            "`lms_daily_admin` / `lms_manage_only_admin`）",
     "lspe": "安全审计（`lspe_open_admin` / `lspe_close_admin`）",
     "lifetime": "生命周期（`lifetime_no` / `lifetime_auto` / `lifetime_manual`）",
+    "lompi": "库系统（`lompi` / `no_lompi`）",
 }
 
 #: **LMS 的七个细开关**（`docs/253` §11.4 ①），次序就是七级的次序 ——
@@ -6532,7 +6538,7 @@ def _in_store_root(importer: Path | None, stores: list[Path]) -> bool:
 
 def resolve_name(name: str, root: Path, proj: Path | None = None,
                  tool_dir: Path | None = None, ext: str = DEFAULT_L1_EXT,
-                 importer: Path | None = None) -> Path:
+                 importer: Path | None = None, allow_store: bool = True) -> Path:
     """`use <名字>` -> 真实文件。**按层搜, 先命中先用** (像 PYTHONPATH):
 
       1. `<项目根>/deps/<名字>/<名字><后缀>`  —— 项目本地 (lompi materialize 的落点)
@@ -6583,7 +6589,9 @@ def resolve_name(name: str, root: Path, proj: Path | None = None,
     （`choose vm` 那条闸**原样留着**：LVM 还没到兑现的时候。）
     """
     exts = _ext_chain(ext)
-    stores = store_roots(root, tool_dir)
+    # `allow_store=False`（单元写了 `choose no_lompi`）与 `LOMENT_NO_STORE=1` 同义：
+    # 这一层整体消失（docs/331）。
+    stores = store_roots(root, tool_dir) if allow_store else []
 
     def in_store() -> Path | None:
         for store in stores:
@@ -6743,7 +6751,7 @@ def prescan_switches(entry: Path, root: Path, proj: Path | None,
             cand = base_dir / f"{name}{e}"
             if cand.is_file():
                 return cand
-        return resolve_name(name, root, proj, tool_dir, ext)
+        return resolve_name(name, root, proj, tool_dir, ext, allow_store=allow_store)
 
     def scan(path: Path, depth: int) -> None:
         nonlocal n_addin
@@ -6812,6 +6820,9 @@ def resolve_deps(mod: Module, root: Path, base: Path, entry: Path | None = None,
     order: list[Module] = []
     seen: set[Path] = set()
     stack: set[Path] = set()
+    # `choose no_lompi`（docs/331）：这一份单元的名字解析**不看 store**。它按根单元
+    # 的声明算，依赖跟随根；环境变量 `LOMENT_NO_STORE=1` 是另一条等价的开关。
+    allow_store = effective_dims(mod, profile or "").get("lompi", "lompi") != "no_lompi"
     proj = Path(entry).resolve().parent if entry is not None else base
     tool_dir = Path(__file__).resolve().parent
     # 名字形式找什么后缀: 项目自己那份 loment.conf 优先, 再工具链旁边那份, 默认 .lomt
@@ -6846,7 +6857,8 @@ def resolve_deps(mod: Module, root: Path, base: Path, entry: Path | None = None,
         paths: list[tuple[str, bool, str]] = [(p, False, p) for p in m.imports]
         for _n in m.name_imports:
             try:
-                _rp = str(resolve_name(_n, root, proj, tool_dir, ext, importer=cur_base))
+                _rp = str(resolve_name(_n, root, proj, tool_dir, ext, importer=cur_base,
+                                        allow_store=allow_store))
             except LomError as _e:
                 raise LomError(use_line(_n), 1, _e.msg) from None
             paths.append((_rp, False, _n))

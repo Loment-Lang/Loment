@@ -793,7 +793,7 @@ def test_no_std_is_a_claim_the_linker_checks():
 def test_both_implementations_emit_the_same_ir_on_every_legal_cell():
     """`#940` 第 1 行 / `#943`：**整张矩阵**的每个合法格，两份实现的 IR 逐字节相同。
 
-    `#940` 正文写的"六格"是 `mode × gc × runtime`；现在 `CORE_DIMS` 是八维，合法格
+    `#940` 正文写的"六格"是 `mode × gc × runtime`；现在 `CORE_DIMS` 是九维，合法格
     由编译器自己的表**现算**（当前 240 个）。格子**不写死** —— 加一维、改一对冲突，
     这条判据自己跟着长。要的是"每一格都有人答"，所以**不抽样**：抽样的绿灯证明不了
     没被抽到的那一格。（唯一的例外是 `lifetime`：它的三个取值对这份**不含借用**的
@@ -811,7 +811,9 @@ def test_both_implementations_emit_the_same_ir_on_every_legal_cell():
             rc, diag, ref, pot = _emit(td, name, cell, _body(cell))
             assert rc == 0, f"{name}: 参考实现编不过\n{diag[-400:]}"
             for dim in lomentc.CORE_DIM_ORDER:
-                assert pot.get(dim) == cell[dim] or dim in ("lms", "lspe"), (
+                # `lms` / `lspe` 不在 Potato 的对象契约里；`lompi`（docs/331）是**解析期**
+                # 的一维（看不看 store），它不改变产物字节，所以也不该被要求记进对象。
+                assert pot.get(dim) == cell[dim] or dim in ("lms", "lspe", "lompi"), (
                     f"{name}: Potato 记的是 {dim}={pot.get(dim)!r}, 请求的是 {cell[dim]!r}")
             src = td / f"{name}.lomt"
             rc2, got, err = _selfhost_ir(td, src)

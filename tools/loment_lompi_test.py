@@ -1960,6 +1960,82 @@ def test_selfhost_reaches_a_module_in_the_dev_checkout_store():
 
 
 @test
+def test_selfhost_accepts_every_core_word_and_refuses_a_repeat():
+    """自举驱动对 `CORE_DIMS` 每个词的行为与参考实现一致：单独一次**接受**、写两次**拒绝**。
+
+    与 `lomentc_test::test_every_core_word_is_registered_in_the_selfhost_tables` 一对：
+    那条查**源码里有没有登记**（三张表逐词点名），这条查**登记之后行为对不对**。
+    加一维只改表不改语义、或只改语义不改表，都会被其中一条抓住。
+    """
+    s = _stage1()
+    if s is None:
+        print("         (跳过: 无 clang, stage1 编不出来)")
+        return
+    words = sorted({w for dim in lomentc.CORE_DIM_ORDER for w in lomentc.CORE_DIMS[dim]})
+    needs_runtime = {"gc_auto", "gc_auto_alpha"}
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td)
+        for w in words:
+            extra = "choose runtime\n" if w in needs_runtime else ""
+            ok = proj / f"{w}.lomt"
+            ok.write_text(
+                f"module m\nchoose {w}\n{extra}\nfn f() -> u32 {{\n    return 1;\n}}\n",
+                encoding="utf-8")
+            r = subprocess.run([str(s), str(ok)], cwd=str(proj), capture_output=True,
+                               timeout=120)
+            assert r.returncode == 0, (
+                f"{w}: 自举侧单独一次应当接受: "
+                + r.stderr.decode("utf-8", "replace")[-200:])
+            dup = proj / f"{w}_dup.lomt"
+            dup.write_text(
+                f"module m\nchoose {w}\nchoose {w}\n{extra}\n"
+                "fn f() -> u32 {\n    return 1;\n}\n",
+                encoding="utf-8")
+            rd = subprocess.run([str(s), str(dup)], cwd=str(proj), capture_output=True,
+                                timeout=120)
+            assert rd.returncode != 0, f"{w}: 自举侧同维写两次应当被拒"
+    print(f"      {len(words)} 个核心词：自举侧单独接受、写两次拒绝")
+
+
+@test
+def test_selfhost_honours_choose_no_lompi():
+    """自举驱动也认 `choose no_lompi`（docs/331）：store 关掉之后 `use vec` 编不过，
+    只用 `deps/` 的单元照常编 —— 与参考实现同一行为。
+
+    **Why 非要跑自举侧**：这一维在自举侧有**三张表**（`switches` / `checker` / `driver`），
+    漏一张就是"参考收、自举拒"或反过来的静默分叉；环境变量那条路也只有参考实现读过。
+    """
+    s = _stage1()
+    if s is None:
+        print("         (跳过: 无 clang, stage1 编不出来)")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td)
+        dep = proj / "deps" / "mine"
+        dep.mkdir(parents=True)
+        (dep / "mine.lomt").write_text(
+            "module mine\n\npub fn m() -> u32 {\n    return 7;\n}\n",
+            encoding="utf-8")
+        solo = proj / "solo.lomt"
+        solo.write_text(
+            "module solo\nchoose no_lompi\nchoose no_runtime\n\nuse mine\n\n"
+            "fn _start() {\n    let v: u32 = m();\n    syscall4(60, v as u64, 0, 0);\n}\n",
+            encoding="utf-8")
+        r = subprocess.run([str(s), str(solo)], cwd=str(proj), capture_output=True,
+                           timeout=300)
+        assert r.returncode == 0, (
+            "no_lompi 下只用 deps/ 的单元应当编得过: "
+            + r.stderr.decode("utf-8", "replace")[-300:])
+        bad = proj / "bad.lomt"
+        bad.write_text(
+            "module bad\nchoose no_lompi\nuse vec\n\nfn main() -> u32 { return 0; }\n",
+            encoding="utf-8")
+        rb = subprocess.run([str(s), str(bad)], cwd=str(proj), capture_output=True,
+                            timeout=300)
+        assert rb.returncode != 0, "no_lompi 下 `use vec` 不该编得过（store 应当关了）"
+
+
+@test
 def test_selfhost_resolves_from_the_toolchains_own_store():
     """名字形式第 2 层: `<工具目录>/../share/lompi/store/<名字>/<版本>/<名字>.lomt`。
 

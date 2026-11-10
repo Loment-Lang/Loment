@@ -561,7 +561,8 @@ fn chk_bad_num_suffix(src: ptr, t: ptr, i: u32) -> bool {
 ///   0 = `mode`（`std` / `no_std`）；1 = `gc`（`gc_manual` / `gc_auto`）；
 ///   2 = `runtime`（`runtime` / `no_runtime`）；3 = `port`（`sealed` / `hosted`）；
 ///   4 = `vm`；5 = `lms`；6 = `lspe`；7 = `lifetime`（`docs/299`）；
-///   8 = **不是核心模式** —— 那是开关那一套（`docs/182` §1.3），这一层不管。
+///   8 = 维度后的槽（`lspe_aicheck_*`）；9 = `lompi`（`docs/331`）；
+///   10 = **不是核心模式** —— 那是开关那一套（`docs/182` §1.3），这一层不管。
 ///
 /// 与参考实现的 `CORE_DIM_OF` 是同一张表；加一维两边一起动。
 fn chk_core_dim(src: ptr, t: ptr, k: u32) -> u32 {
@@ -603,6 +604,10 @@ fn chk_core_dim(src: ptr, t: ptr, k: u32) -> u32 {
             || chk_tok_is(src, t, k, "lifetime_manual") {
         return 7;
     }
+    // 第九维（`docs/331`）：`lompi`。与其它维正交 —— 它只决定名字解析看不看 store。
+    if chk_tok_is(src, t, k, "lompi") || chk_tok_is(src, t, k, "no_lompi") {
+        return 9;
+    }
     // 维度之后的**第二位置**（`docs/262` §10.7）：`<维>_<槽>_<值>`。
     // 8 = 槽位 —— 它有自己的"每格一次"，**不**算进 `lspe` 那一维的重复计数。
     if chk_tok_is(src, t, k, "lspe_aicheck_true")
@@ -611,7 +616,7 @@ fn chk_core_dim(src: ptr, t: ptr, k: u32) -> u32 {
     }
     // ⚠ **这一格是"不是核心词"的哨兵**。加一维就要把它往后挪一格 ——
     // `loment_rule_parity.py:70-72` 记着上一次忘挪（5→6）的症状。
-    return 9;
+    return 10;
 }
 
 /// `lgc` 的时长单位（`docs/309`）：`ns` / `us` / `ms` / `s` / `m`。与参考实现
@@ -5715,6 +5720,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                                 // 不再需要 `ln_lspe` 记行号。）
     let nch_lifetime: u32 = 0;  // 第八维（`docs/299`）：生命周期 —— 只数重复；
                                 // 另加一条**版次闸**（旧版次不接受这三个词）。
+    let nch_lompi: u32 = 0;     // 第九维（`docs/331`）：库系统 —— 只数重复。
     // 生效的取值（0 = 没写），用来判"两档不能同时选"（`docs/175` §3.4 ⚠）。
     // **要等这一遍走完才判** —— 两行谁先写是不定的。
     let v_mode: u32 = 0;        // 1 = std, 2 = no_std
@@ -5945,6 +5951,12 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                 if nch_lifetime > 1 {
                     o = sym_pub(src, t, out, o, E_MODE, i);
                 } else if prof < 2 {
+                    o = sym_pub(src, t, out, o, E_MODE, i);
+                }
+            } else if dim == 9 {
+                // 第九维（`docs/331`）：`lompi`。重复写才是错。
+                nch_lompi = nch_lompi + 1;
+                if nch_lompi > 1 {
                     o = sym_pub(src, t, out, o, E_MODE, i);
                 }
             } else if dim == 8 {

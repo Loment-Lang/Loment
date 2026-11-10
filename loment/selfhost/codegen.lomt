@@ -3087,6 +3087,34 @@ fn is_dom_block(src: ptr, toks: ptr, i: u32) -> u32 {
     return 0;
 }
 
+/// 块域实例撤销位对的引用（`docs/306` §6.1 C2）：可撤的块在自己那帧有一对
+/// （域表字段 9），其余指向共享零格。**不换行** —— 直接嵌进调用实参。
+fn dom_rev_ref(s: ptr, out: ptr, k: u32) -> u32 {
+    let rt: u32 = load32(s, dom_at(k - 1, 9));
+    if rt != 0 {
+        emit_str(s, out, "%t");
+        emit_dec(s, out, rt);
+    } else {
+        emit_str(s, out, "@__loment_revfree");
+    }
+    return 0;
+}
+
+/// 顶层能力撤销位对的引用：`revocable` 的能力在全局表里占一格（要先发一条
+/// getelementptr），其余指向共享零格。返回临时号（0 = 已经写成全局名）。
+fn cap_rev_tmp(s: ptr, out: ptr, c: u32) -> u32 {
+    if load32(s, cap_base(c) + 16) == 0 {
+        return 0;
+    }
+    emit_str(s, out, "  ");
+    let g: u32 = new_temp(s, out);
+    emit_str(s, out, " = getelementptr [64 x [2 x i64]], ptr @__loment_rev, i64 0, i64 ");
+    emit_dec(s, out, c);
+    emit_str(s, out, "
+");
+    return g;
+}
+
 /// `domain:for …`（`docs/315`）。
 fn is_dom_for(src: ptr, toks: ptr, i: u32) -> u32 {
     if tok_is(src, toks, i + 1, ":") && tok_is(src, toks, i + 2, "for") {
@@ -3236,6 +3264,8 @@ fn dom_one(s: ptr, out: ptr, k: u32, v64: u32, has_aux: u32, a64: u32,
     emit_dec(s, out, load32(s, dom_at(k - 1, 5)));
     emit_str(s, out, ", i64 ");
     emit_dec(s, out, load32(s, dom_at(k - 1, 6)));
+    emit_str(s, out, ", ptr ");
+    let _rvr: u32 = dom_rev_ref(s, out, k);
     emit_str(s, out, ")
 ");
     return 0;
@@ -6681,6 +6711,52 @@ fn dfr_stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
     return semi + 1;
 }
 
+/// 撤销一条（块域目标，`docs/306` §6.1 C2）。`pos == 1` = 只撤一个位置。
+fn revoke_blk(s: ptr, out: ptr, pos: u32, v64: u32, k: u32) -> u32 {
+    if load32(s, dom_at(k - 1, 9)) == 0 {
+        return cg_fail(s, 2, load32(s, dom_at(k - 1, 8)));
+    }
+    emit_str(s, out, "  call void @__loment_revoke(ptr ");
+    let _r: u32 = dom_rev_ref(s, out, k);
+    emit_str(s, out, ", i64 ");
+    if pos == 1 {
+        emit_str(s, out, "%t");
+        emit_dec(s, out, v64);
+        emit_str(s, out, ", i64 0)
+");
+    } else {
+        emit_str(s, out, "0, i64 1)
+");
+    }
+    return 0;
+}
+
+/// 撤销一条（能力目标）。
+fn revoke_cap(s: ptr, out: ptr, pos: u32, v64: u32, c: u32) -> u32 {
+    if load32(s, cap_base(c) + 16) == 0 {
+        return cg_fail(s, 2, load32(s, cap_base(c)));
+    }
+    let rv: u32 = cap_rev_tmp(s, out, c);
+    emit_str(s, out, "  call void @__loment_revoke(ptr ");
+    if rv != 0 {
+        emit_str(s, out, "%t");
+        emit_dec(s, out, rv);
+    } else {
+        emit_str(s, out, "@__loment_revfree");
+    }
+    emit_str(s, out, ", i64 ");
+    if pos == 1 {
+        emit_str(s, out, "%t");
+        emit_dec(s, out, v64);
+        emit_str(s, out, ", i64 0)
+");
+    } else {
+        emit_str(s, out, "0, i64 1)
+");
+    }
+    return 0;
+}
+
 /// 体的名字 -> 根成员（`docs/315` §5.2）；找不到返回 0。
 fn cp_alias(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
     let n: u32 = load32(s, CG_ALN);
@@ -6801,6 +6877,7 @@ fn dom_partner_cap(s: ptr, out: ptr, c: u32, v64: u32, has_aux: u32,
         emit_str(s, out, "
 ");
     }
+    let rv: u32 = cap_rev_tmp(s, out, c);
     emit_str(s, out, "  call void @__loment_guard2(ptr ");
     if stg != 0 {
         emit_str(s, out, "%t");
@@ -6829,6 +6906,13 @@ fn dom_partner_cap(s: ptr, out: ptr, c: u32, v64: u32, has_aux: u32,
     emit_dec(s, out, pk >> 8);
     emit_str(s, out, ", i64 ");
     emit_dec(s, out, (pk >> 4) & 3);
+    emit_str(s, out, ", ptr ");
+    if rv != 0 {
+        emit_str(s, out, "%t");
+        emit_dec(s, out, rv);
+    } else {
+        emit_str(s, out, "@__loment_revfree");
+    }
     emit_str(s, out, ")
 ");
     return 0;
@@ -7260,7 +7344,9 @@ fn dom_stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
             param = tok_int(src, toks, q + 2);
             q = q + 4;
         }
+        let rv: u32 = 0;
         if tok_is(src, toks, q, "revocable") {
+            rv = 1;
             q = q + 1;
         }
         while tok_kind(toks, q) != 4 && !tok_is(src, toks, q, "{") {
@@ -7281,6 +7367,27 @@ fn dom_stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         store32(s, dom_at(d, 6), lof | (hif << 1));
         store32(s, dom_at(d, 7), 0);
         store32(s, dom_at(d, 8), nm);
+        store32(s, dom_at(d, 9), 0);
+        // 撤销位对（`docs/306` §6.1 C2）：块入口清零 = **新实例**；位置在状态块之前，
+        // 与参考实现的发射顺序一致（孪生判据逐字节核）。
+        if rv == 1 {
+            emit_str(s, out, "  ");
+            let rvt: u32 = new_temp(s, out);
+            emit_str(s, out, " = alloca [2 x i64]
+  store i64 0, ptr %t");
+            emit_dec(s, out, rvt);
+            emit_str(s, out, "
+  ");
+            let rmt: u32 = new_temp(s, out);
+            emit_str(s, out, " = getelementptr [2 x i64], ptr %t");
+            emit_dec(s, out, rvt);
+            emit_str(s, out, ", i64 0, i64 1
+  store i64 0, ptr %t");
+            emit_dec(s, out, rmt);
+            emit_str(s, out, "
+");
+            store32(s, dom_at(d, 9), rvt);
+        }
         if kind == 7 || kind == 10 || kind == 12 || kind == 14 {
             emit_str(s, out, "  ");
             let pt: u32 = new_temp(s, out);
@@ -8226,6 +8333,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
             emit_str(s, out, "
 ");
         }
+        let rv: u32 = cap_rev_tmp(s, out, ci);
         emit_str(s, out, "  call void @__loment_guard2(ptr ");
         if stt != 0 {
             emit_str(s, out, "%t");
@@ -8257,6 +8365,13 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         emit_dec(s, out, cp);
         emit_str(s, out, ", i64 ");
         emit_dec(s, out, cf);
+        emit_str(s, out, ", ptr ");
+        if rv != 0 {
+            emit_str(s, out, "%t");
+            emit_dec(s, out, rv);
+        } else {
+            emit_str(s, out, "@__loment_revfree");
+        }
         emit_str(s, out, ")
 ");
         let _cp: u32 = cap_partners(s, out, src, toks, ci, v64, has_aux, a64);
@@ -8266,6 +8381,60 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         emit_str(s, out, "  call void @__loment_tick()
 ");
         return j + 2;
+    }
+    if tok_is(src, toks, j, "revoke") && tok_kind(toks, j + 1) == 0
+            && (tok_is(src, toks, j + 2, ";") || tok_is(src, toks, j + 2, "(")) {
+        // 撤销（`docs/306` §6.1 C2）。体名 = **全组成员**：块的按作用域由外到内、
+        // 能力的按声明序 —— 与参考实现的展开顺序一致（孪生判据逐字节核）。
+        let pos: u32 = 0;
+        let v64: u32 = 0;
+        if tok_is(src, toks, j + 2, "(") {
+            let _ie: u32 = expr_bin(s, out, src, toks, j + 3, 1, 0, 0);
+            emit_str(s, out, "  ");
+            v64 = new_temp(s, out);
+            emit_str(s, out, " = zext i32 ");
+            emit_val(s, out, 0);
+            emit_str(s, out, " to i64
+");
+            pos = 1;
+        }
+        let semi: u32 = j;
+        while tok_kind(toks, semi) != 4 && !tok_is(src, toks, semi, ";") {
+            semi = semi + 1;
+        }
+        let al: u32 = cp_alias(s, src, toks, j + 1);
+        if al != 0 {
+            let n: u32 = load32(s, CG_DOM_N);
+            let k: u32 = 1;
+            while k <= n {
+                let kn: u32 = load32(s, dom_at(k - 1, 8));
+                if kn != 0 && cp_conn(s, src, toks, al, kn, 8) == 1 {
+                    let _rb: u32 = revoke_blk(s, out, pos, v64, k);
+                }
+                k = k + 1;
+            }
+            let nc: u32 = load32(s, 536);
+            let c: u32 = 0;
+            while c < nc {
+                if cp_conn(s, src, toks, al, load32(s, cap_base(c)), 8) == 1 {
+                    let _rc: u32 = revoke_cap(s, out, pos, v64, c);
+                }
+                c = c + 1;
+            }
+        } else {
+            let dw: u32 = dom_by_name(s, src, toks, j + 1);
+            if dw != 0 {
+                let _rb2: u32 = revoke_blk(s, out, pos, v64, dw);
+            } else {
+                let ci: u32 = find_cap(s, src, toks, j + 1);
+                if ci == 4294967295 {
+                    let _cf: u32 = cg_fail(s, 2, j);
+                } else {
+                    let _rc2: u32 = revoke_cap(s, out, pos, v64, ci);
+                }
+            }
+        }
+        return semi + 1;
     }
     if tok_is(src, toks, j, "quality") {   // docs/306 §5.2 第 7 条
         let dw: u32 = dom_by_name(s, src, toks, j + 1);
@@ -11288,6 +11457,10 @@ fn guard_rt_needed(s: ptr, src: ptr, toks: ptr) -> u32 {
         if tok_is(src, toks, i, "quality") && tok_kind(toks, i + 1) == 0 {
             return 1;
         }
+        if tok_is(src, toks, i, "revoke") && tok_kind(toks, i + 1) == 0
+                && (tok_is(src, toks, i + 2, ";") || tok_is(src, toks, i + 2, "(")) {
+            return 1;
+        }
         if tok_is(src, toks, i, "domain") && is_dom_block(src, toks, i) == 1 {
             return 1;
         }
@@ -11302,14 +11475,14 @@ fn guard_rt_needed(s: ptr, src: ptr, toks: ptr) -> u32 {
 /// 能力域运行时（`docs/306`–`docs/308`）：虚拟钟 + 十种域。
 /// **与 `tools/lomentc.py` 的 `_IR_GUARD_RUNTIME` 逐字相同**（孪生判据）。
 fn emit_guard_runtime(s: ptr, out: ptr) -> u32 {
-    emit_str(s, out, "; ---- 能力域运行时 (docs/306-308, 313): 虚拟钟 + 块级域 ----\n@__loment_now = internal global i64 0\n@__loment_used = internal global [16 x [64 x i64]] zeroinitializer\n@__loment_wit = internal global [16 x [64 x i64]] zeroinitializer\n@__loment_obl = internal global [16 x [64 x i64]] zeroinitializer\n@__loment_qual = internal global [16 x i64] [i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255]\n\ndefine internal void @__loment_tick() {\nentry:\n  %n = load i64, ptr @__loment_now\n  %n1 = add i64 %n, 1\n  store i64 %n1, ptr @__loment_now\n  ret void\n}\n\ndefine internal void @__loment_qual_store(ptr %st, i64 %v) {\nentry:\n  %big = icmp ugt i64 %v, 255\n  %zb = zext i1 %big to i64\n  %keep = sub i64 %zb, 1\n  %okv = and i64 %v, %keep\n  %sel = sub i64 0, %zb\n  %fif = and i64 %sel, 255\n");
-    emit_str(s, out, "  %q = or i64 %okv, %fif\n  store i64 %q, ptr %st\n  ret void\n}\n\ndefine internal void @__loment_discharge(ptr %st, i64 %cap, i64 %idx) {\nentry:\n  %now = load i64, ptr @__loment_now\n  %slot = and i64 %idx, 63\n  %p = getelementptr [64 x i64], ptr %st, i64 0, i64 %slot\n  %v = load i64, ptr %p\n  %have = icmp ne i64 %v, 0\n  %late = icmp ugt i64 %now, %v\n  %none = xor i1 %have, true\n  %bad = or i1 %none, %late\n  br i1 %bad, label %fail, label %ok\nfail:\n  call void @__loment_abort()\n  unreachable\nok:\n  store i64 0, ptr %p\n  ret void\n}\n\ndefine internal void @__loment_guard2(ptr %st, i64 %cap, i64 %idx, i64 %aux, i64 %lo, i64 %hi, i64 %kind, i64 %param, i64 %flags) {\nentry:\n  %now = load i64, ptr @__loment_now\n  %pm0 = icmp eq i64 %param, 0\n  %pmz = zext i1 %pm0 to i64\n  %pm = or i64 %param, %pmz\n  %fl = and i64 %flags, 1\n  %linf = icmp ne i64 %fl, 0\n");
+    emit_str(s, out, "; ---- 能力域运行时 (docs/306-308, 313): 虚拟钟 + 块级域 ----\n@__loment_now = internal global i64 0\n@__loment_used = internal global [16 x [64 x i64]] zeroinitializer\n@__loment_wit = internal global [16 x [64 x i64]] zeroinitializer\n@__loment_obl = internal global [16 x [64 x i64]] zeroinitializer\n@__loment_rev = internal global [64 x [2 x i64]] zeroinitializer\n@__loment_revfree = internal global [2 x i64] zeroinitializer\n@__loment_qual = internal global [16 x i64] [i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255]\n\ndefine internal void @__loment_tick() {\nentry:\n  %n = load i64, ptr @__loment_now\n  %n1 = add i64 %n, 1\n  store i64 %n1, ptr @__loment_now\n  ret void\n}\n\ndefine internal void @__loment_revoke(ptr %rv, i64 %idx, i64 %all) {\nentry:\n  %isf = icmp ne i64 %all, 0\n  br i1 %isf, label %whole, label %pos\nwhole:\n  store i64 1, ptr %rv\n  ret void\npos:\n  %mp = getelementptr i64, ptr %rv, i64 1\n  %m = load i64, ptr %mp\n  %s = and i64 %idx, 63\n  %b = shl i64 1, %s\n  %m1 = or i64 %m, %b\n  store i64 %m1, ptr %mp\n  ret void\n}\n\ndefine internal void @__loment_qual_store(ptr %st, i64 %v) {\nentry:\n  %big = icmp ugt i64 %v, 255\n  %zb = zext i1 %big to i64\n  %keep = sub i64 %zb, 1\n  %okv = and i64 %v, %keep\n  %sel = sub i64 0, %zb\n  %fif = and i64 %sel, 255\n");
+    emit_str(s, out, "  %q = or i64 %okv, %fif\n  store i64 %q, ptr %st\n  ret void\n}\n\ndefine internal void @__loment_discharge(ptr %st, i64 %cap, i64 %idx) {\nentry:\n  %now = load i64, ptr @__loment_now\n  %slot = and i64 %idx, 63\n  %p = getelementptr [64 x i64], ptr %st, i64 0, i64 %slot\n  %v = load i64, ptr %p\n  %have = icmp ne i64 %v, 0\n  %late = icmp ugt i64 %now, %v\n  %none = xor i1 %have, true\n  %bad = or i1 %none, %late\n  br i1 %bad, label %fail, label %ok\nfail:\n  call void @__loment_abort()\n  unreachable\nok:\n  store i64 0, ptr %p\n  ret void\n}\n\ndefine internal void @__loment_guard2(ptr %st, i64 %cap, i64 %idx, i64 %aux, i64 %lo, i64 %hi, i64 %kind, i64 %param, i64 %flags, ptr %rv) {\nentry:\n  %now = load i64, ptr @__loment_now\n  %pm0 = icmp eq i64 %param, 0\n  %pmz = zext i1 %pm0 to i64\n  %pm = or i64 %param, %pmz\n  %fl = and i64 %flags, 1\n  %linf = icmp ne i64 %fl, 0\n");
     emit_str(s, out, "  %fh = and i64 %flags, 2\n  %hinf = icmp ne i64 %fh, 0\n  %ge = icmp uge i64 %idx, %lo\n  %lob = or i1 %linf, %ge\n  %le = icmp ule i64 %idx, %hi\n  %hib = or i1 %hinf, %le\n  %bound = and i1 %lob, %hib\n  %nb = xor i1 %bound, true\n  %ks = and i64 %kind, 127\n  %sil = and i64 %kind, 128\n  %sn = icmp ne i64 %sil, 0\n  %k1 = icmp eq i64 %ks, 1\n  %nk1 = xor i1 %k1, true\n  %p1a = and i1 %nb, %k1\n  %p1b = and i1 %bound, %nk1\n  %a1 = or i1 %p1a, %p1b\n  %k2 = icmp eq i64 %ks, 2\n  %et = icmp ult i64 %now, %pm\n  %e = and i1 %et, %bound\n  %nk2 = xor i1 %k2, true\n  %p2a = and i1 %e, %k2\n  %p2b = and i1 %a1, %nk2\n  %a2 = or i1 %p2a, %p2b\n  %k3 = icmp eq i64 %ks, 3\n  %seg = udiv i64 %now, %pm\n  %sego = mul i64 %seg, %pm\n  %org = add i64 %lo, %sego\n  %end = add i64 %org, %pm\n  %o1 = icmp uge i64 %idx, %org\n  %o2 = icmp ult i64 %idx, %end\n  %ow = and i1 %o1, %o2\n");
     emit_str(s, out, "  %o = and i1 %ow, %bound\n  %nk3 = xor i1 %k3, true\n  %p3a = and i1 %o, %k3\n  %p3b = and i1 %a2, %nk3\n  %a3 = or i1 %p3a, %p3b\n  %k4 = icmp eq i64 %ks, 4\n  %slt = icmp ult i64 %now, %pm\n  %slo = sub i64 %now, %pm\n  %zs = zext i1 %slt to i64\n  %ms = sub i64 %zs, 1\n  %slo2 = and i64 %slo, %ms\n  %s1 = icmp uge i64 %idx, %slo2\n  %s2 = icmp ule i64 %idx, %now\n  %s = and i1 %s1, %s2\n  %nk4 = xor i1 %k4, true\n  %p4a = and i1 %s, %k4\n  %p4b = and i1 %a3, %nk4\n  %a4 = or i1 %p4a, %p4b\n  %k5 = icmp eq i64 %ks, 5\n  %dt = icmp ule i64 %now, %pm\n  %d = and i1 %dt, %bound\n  %nk5 = xor i1 %k5, true\n  %p5a = and i1 %d, %k5\n  %p5b = and i1 %a4, %nk5\n  %a5 = or i1 %p5a, %p5b\n  %k6 = icmp eq i64 %ks, 6\n  %gr = mul i64 %now, %pm\n  %gend = add i64 %lo, %gr\n  %g1 = icmp ule i64 %idx, %gend\n  %g = and i1 %g1, %bound\n  %nk6 = xor i1 %k6, true\n  %p6a = and i1 %g, %k6\n");
     emit_str(s, out, "  %p6b = and i1 %a5, %nk6\n  %a6 = or i1 %p6a, %p6b\n  %off0 = sub i64 %idx, %lo\n  %big = icmp uge i64 %off0, 64\n  %zb = zext i1 %big to i64\n  %mbo = sub i64 %zb, 1\n  %off = and i64 %off0, %mbo\n  %up = getelementptr [64 x i64], ptr %st, i64 0, i64 %off\n  %uv = load i64, ptr %up\n  %uc = icmp ult i64 %uv, %pm\n  %k7 = icmp eq i64 %ks, 7\n  %c = and i1 %uc, %bound\n  %nk7 = xor i1 %k7, true\n  %p7a = and i1 %c, %k7\n  %p7b = and i1 %a6, %nk7\n  %a7 = or i1 %p7a, %p7b\n  %k8 = icmp eq i64 %ks, 8\n  %c8w = urem i64 %idx, %pm\n  %c8a = icmp uge i64 %c8w, %lo\n  %c8b = icmp ule i64 %c8w, %hi\n  %c8n = and i1 %c8a, %c8b\n  %nk8 = xor i1 %k8, true\n  %p8a = and i1 %c8n, %k8\n  %p8b = and i1 %a7, %nk8\n  %a8 = or i1 %p8a, %p8b\n  %k9 = icmp eq i64 %ks, 9\n  %g9s = udiv i64 %now, %pm\n  %g9o = and i64 %g9s, 1\n  %g9i = icmp ne i64 %g9o, 0\n  %g9n = xor i1 %bound, %g9i\n");
     emit_str(s, out, "  %nk9 = xor i1 %k9, true\n  %p9a = and i1 %g9n, %k9\n  %p9b = and i1 %a8, %nk9\n  %a9 = or i1 %p9a, %p9b\n  %k10 = icmp eq i64 %ks, 10\n  %adw = sub i64 %hi, %lo\n  %adq = load i64, ptr %st\n  %adm = mul i64 %adw, %adq\n  %adr = udiv i64 %adm, 255\n  %adh = add i64 %lo, %adr\n  %adb1 = icmp uge i64 %idx, %lo\n  %adb2 = icmp ule i64 %idx, %adh\n  %adn = and i1 %adb1, %adb2\n  %nk10 = xor i1 %k10, true\n  %p10a = and i1 %adn, %k10\n  %p10b = and i1 %a9, %nk10\n  %a10 = or i1 %p10a, %p10b\n  %k11 = icmp eq i64 %ks, 11\n  %sb11 = and i64 %aux, 63\n  %sb11s = lshr i64 %param, %sb11\n  %sb11b = and i64 %sb11s, 1\n  %sb11n = icmp ne i64 %sb11b, 0\n  %sb11p = and i1 %sb11n, %bound\n  %nk11 = xor i1 %k11, true\n  %p11a = and i1 %sb11p, %k11\n  %p11b = and i1 %a10, %nk11\n  %a11 = or i1 %p11a, %p11b\n  %k12 = icmp eq i64 %ks, 12\n  %w12s = and i64 %aux, 63\n  %w12p = getelementptr [64 x i64], ptr %st, i64 0, i64 %w12s\n");
     emit_str(s, out, "  %w12v = load i64, ptr %w12p\n  %w12c = icmp ult i64 %w12v, %pm\n  %w12n = and i1 %w12c, %bound\n  %w12v1 = add i64 %w12v, 1\n  %nk12 = xor i1 %k12, true\n  %p12a = and i1 %w12n, %k12\n  %p12b = and i1 %a11, %nk12\n  %a12 = or i1 %p12a, %p12b\n  %k13 = icmp eq i64 %ks, 13\n  %f13d = and i64 %aux, 65535\n  %f13s = shl i64 %idx, 16\n  %f13k = or i64 %f13s, %f13d\n  %f13a = icmp uge i64 %f13k, %lo\n  %f13b = icmp ule i64 %f13k, %hi\n  %f13n = and i1 %f13a, %f13b\n  %nk13 = xor i1 %k13, true\n  %p13a = and i1 %f13n, %k13\n  %p13b = and i1 %a12, %nk13\n  %a13 = or i1 %p13a, %p13b\n  %k14 = icmp eq i64 %ks, 14\n  %o14s = and i64 %idx, 63\n  %o14p = getelementptr [64 x i64], ptr %st, i64 0, i64 %o14s\n  %o14v = load i64, ptr %o14p\n  %o14f = icmp eq i64 %o14v, 0\n  %o14n = and i1 %o14f, %bound\n  %nk14 = xor i1 %k14, true\n  %p14a = and i1 %o14n, %k14\n  %p14b = and i1 %a13, %nk14\n");
-    emit_str(s, out, "  %a14 = or i1 %p14a, %p14b\n  br i1 %a14, label %pass, label %fail\nfail:\n  call void @__loment_abort()\n  unreachable\npass:\n  br i1 %sn, label %done, label %aaudit\naaudit:\n  %ap = getelementptr i64, ptr @__loment_audit, i64 %cap\n  %av = load i64, ptr %ap\n  %av1 = add i64 %av, 1\n  store i64 %av1, ptr %ap\n  br i1 %k7, label %consume, label %wcheck\nwcheck:\n  br i1 %k12, label %witness, label %ocheck\nwitness:\n  store i64 %w12v1, ptr %w12p\n  br label %ocheck\nocheck:\n  br i1 %k14, label %oblige, label %done\noblige:\n  %odl = add i64 %now, %pm\n  store i64 %odl, ptr %o14p\n  br label %done\nconsume:\n  %cv = load i64, ptr %up\n  %cv1 = add i64 %cv, 1\n  store i64 %cv1, ptr %up\n  br label %done\ndone:\n  ret void\n}\n");
+    emit_str(s, out, "  %a14 = or i1 %p14a, %p14b\n  %rvf = load i64, ptr %rv\n  %rvmp = getelementptr i64, ptr %rv, i64 1\n  %rvm = load i64, ptr %rvmp\n  %rvs = and i64 %idx, 63\n  %rvsh = lshr i64 %rvm, %rvs\n  %rvb = and i64 %rvsh, 1\n  %rvany = or i64 %rvf, %rvb\n  %rvz = icmp eq i64 %rvany, 0\n  %ok = and i1 %a14, %rvz\n  br i1 %ok, label %pass, label %fail\nfail:\n  call void @__loment_abort()\n  unreachable\npass:\n  br i1 %sn, label %done, label %aaudit\naaudit:\n  %ap = getelementptr i64, ptr @__loment_audit, i64 %cap\n  %av = load i64, ptr %ap\n  %av1 = add i64 %av, 1\n  store i64 %av1, ptr %ap\n  br i1 %k7, label %consume, label %wcheck\nwcheck:\n  br i1 %k12, label %witness, label %ocheck\nwitness:\n  store i64 %w12v1, ptr %w12p\n  br label %ocheck\nocheck:\n  br i1 %k14, label %oblige, label %done\noblige:\n  %odl = add i64 %now, %pm\n  store i64 %odl, ptr %o14p\n  br label %done\nconsume:\n  %cv = load i64, ptr %up\n  %cv1 = add i64 %cv, 1\n  store i64 %cv1, ptr %up\n  br label %done\ndone:\n  ret void\n}\n");
     return emit_str(s, out, "\n");
 }
 

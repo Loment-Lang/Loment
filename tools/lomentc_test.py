@@ -1605,7 +1605,7 @@ fn _start() {
     e, ir = _compile_dep_unit({"lib.lomt": lib, "app.lomt": app})
     assert e == [], e
     call = next(l for l in ir.splitlines() if "call void @__loment_guard2" in l)
-    assert call.rstrip().endswith("i64 0, i64 4, i64 0, i64 0, i64 0)"), call
+    assert "i64 0, i64 4, i64 0, i64 0, i64 0, ptr " in call, call
     table = next(l for l in ir.splitlines() if "@__loment_caps =" in l)
     assert "[1 x" in table and "i64 0, i64 4, i64 1" in table, table
 
@@ -1637,7 +1637,7 @@ fn _start() {
     e, ir = _compile_dep_unit({"lib.lomt": lib, "app.lomt": app})
     assert e == [], e
     call = next(l for l in ir.splitlines() if "call void @__loment_guard2" in l)
-    assert call.rstrip().endswith("i64 0, i64 4, i64 0, i64 0, i64 0)"), call
+    assert "i64 0, i64 4, i64 0, i64 0, i64 0, ptr " in call, call
 
 
 @test
@@ -6121,8 +6121,8 @@ def test_domain_blocks_scope_and_auto_guard():
                    "    }\n    return a[0];\n}\n")
     assert e2b == [], e2b
     ir2 = lomentc.emit_llvm(m2, ROOT)
-    assert ", i64 128, i64 0, i64 0)" in ir2, "外层没有 silent 位"
-    assert ", i64 0, i64 0, i64 0)" in ir2, "内层不是正常记账那一支"
+    assert ", i64 128, i64 0, i64 0, ptr " in ir2, "外层没有 silent 位"
+    assert ", i64 0, i64 0, i64 0, ptr " in ir2, "内层不是正常记账那一支"
     print("      块级域：作用域 / 嵌套包含 / 空间标签 / 自动守卫链，逐条成立")
 
 
@@ -6657,6 +6657,137 @@ def test_solid_body_is_a_first_class_unit():
 
 
 @test
+def test_revoke_cascades_down_the_domain_tree():
+    """`docs/306` §6.1 C2：撤销级联（撤父 ⇒ 整棵子树拒绝）。
+
+    C1（封顶）由形状包含在编译期证；C2 是**运行期**的那一条 —— 它要的是
+    "撤销之后整棵子树再也不放行"，而且撤销位本身不能被复用成"没撤过"。
+
+    四条判据：
+
+    1. `revoke NAME;` 发 `@__loment_revoke(ptr …, i64 0, i64 1)`；带位置那份是
+       `(ptr, %v64, 0)` —— 位置按 `idx & 63` 记在位图里；
+    2. **级联不需要传播指令**：守卫本来就走整条竖向链，链上每一层各自带自己的
+       撤销位对 —— 撤销父之后，子域那条链上的父判决当场就拒；
+    3. 顶层能力的撤销位在全局表（`@__loment_rev`，墓碑）；块域实例的在栈上
+       （`alloca [2 x i64]`，块入口清零 = 新实例）；不可撤的域指向共享零格
+       （`@__loment_revfree`），于是普通程序一个字节不多发；
+    4. 体名撤**全组成员**（块在前、能力在后 —— 与自举侧的枚举同序）。
+    """
+    NL = chr(10)
+
+    def S(*lines):
+        return NL.join(lines)
+
+    def load(src):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "d.lomt"
+            p.write_text(src, encoding="utf-8", newline=NL)
+            m = lomentc.load(p)
+            return m, lomentc.check(m)
+
+    # 1) 顶层能力：整实例撤销 + 撤销后的守卫仍带撤销位
+    m1, e1 = load(S("module m", "choose runtime",
+                    "capability ring  : disk[0..15] revocable",
+                    "capability plain : disk[0..15]",
+                    "fn f(a: [u32; 16] in disk) -> u32 {",
+                    "    guard ring(3);",
+                    "    revoke ring;",
+                    "    guard ring(4);",
+                    "    guard plain(5);",
+                    "    return a[0];", "}", ""))
+    assert e1 == [], e1
+    b1 = lomentc.emit_llvm(m1, ROOT)
+    b1 = b1[b1.index("define i32 @f"):]
+    assert b1.count("call void @__loment_revoke(ptr") == 1, b1
+    assert "call void @__loment_revoke(ptr %t" in b1, "撤销没走可撤域那一格"
+    assert ", i64 0, i64 1)" in b1, "整实例撤销的两个实参不对"
+    # 可撤的能力 → 全局表里的那一格；不可撤的 → 共享零格
+    assert "getelementptr [64 x [2 x i64]], ptr @__loment_rev, i64 0, i64 0" in b1, b1
+    assert "@__loment_revfree" in b1, "不可撤的域应该指向共享零格"
+
+    # 2) 块域 + 位置撤销：位图那一份；块实例的撤销位在栈上
+    m2, e2 = load(S("module m", "choose runtime",
+                    "fn f(a: [u32; 8] in disk) -> u32 {",
+                    "    domain d : disk[0..7] revocable {",
+                    "        revoke d(5);",
+                    "        guard d(6);",
+                    "    }",
+                    "    return a[0];", "}", ""))
+    assert e2 == [], e2
+    b2 = lomentc.emit_llvm(m2, ROOT)
+    b2 = b2[b2.index("define i32 @f"):]
+    assert "alloca [2 x i64]" in b2, "可撤的块没有分撤销位"
+    assert b2.count("call void @__loment_revoke(ptr") == 1, b2
+    assert ", i64 0)" in b2, "位置撤销的第二个实参应该是 0（all）"
+
+    # 3) 级联：父可撤、子不可撤 —— 守卫子的那条链上，父那一层带父的撤销位
+    m3, e3 = load(S("module m", "choose runtime",
+                    "fn f(a: [u32; 8] in disk) -> u32 {",
+                    "    domain outer : disk[0..7] revocable {",
+                    "        domain inner : disk[0..3] child_of outer {",
+                    "            guard inner(2);",
+                    "            revoke outer;",
+                    "            guard inner(3);",
+                    "        }",
+                    "    }",
+                    "    return a[0];", "}", ""))
+    assert e3 == [], e3
+    b3 = lomentc.emit_llvm(m3, ROOT)
+    b3 = b3[b3.index("define i32 @f"):]
+    assert b3.count("call void @__loment_guard2") == 4, b3   # 两次守卫 × 链上两层
+    # 链上父那一层（silent）与子那一层：一个带可撤域、一个指向共享零格
+    for line in b3.splitlines():
+        if "call void @__loment_guard2" in line and "i64 128" in line:
+            assert ", ptr %t" in line, "父那一层没带自己的撤销位：" + line
+
+    # 4) 体名 = 全组成员（块在前、能力在后）
+    m4, e4 = load(S("module m", "choose runtime",
+                    "capability ring : disk[0..15] revocable",
+                    "fn f(a: [u32; 16] in disk) -> u32 {",
+                    "    domain leaf : disk[0..7] revocable {",
+                    "        solid body : leaf, ring;",
+                    "        revoke body;",
+                    "    }",
+                    "    return a[0];", "}", ""))
+    assert e4 == [], e4
+    b4 = lomentc.emit_llvm(m4, ROOT)
+    b4 = b4[b4.index("define i32 @f"):]
+    assert b4.count("call void @__loment_revoke(ptr") == 2, b4
+    i_block = b4.index("call void @__loment_revoke(ptr %t")
+    i_cap = b4.index("call void @__loment_revoke(ptr %t", i_block + 1)
+    assert i_block < i_cap, "体的撤销顺序应是块在前、能力在后"
+
+    # 5) 拒绝：没声明 revocable / 名字不存在 / 体里有不可撤的成员
+    def rejects(src_bad, frag):
+        try:
+            m_, _e = load(src_bad)
+        except lomentc.LomError as ex:
+            assert frag in str(ex), (frag, str(ex))
+            return
+        raise AssertionError("没有拒：" + frag)
+
+    rejects(S("module m", "choose runtime", "capability c : disk[0..15]",
+              "fn f() -> u32 { revoke c; return 0; }", ""), "revocable")
+    rejects(S("module m", "choose runtime",
+              "fn f() -> u32 { revoke nope; return 0; }", ""), "未声明的域")
+    rejects(S("module m", "choose runtime", "capability c : disk[0..15]",
+              "fn f() -> u32 { domain d : disk[0..7] revocable {",
+              "    solid body : d, c;", "    revoke body;", "}",
+              "return 0; }", ""), "revocable")
+
+    # 6) 几何报告里能读出来：可撤标记 + 每个撤销点的目标
+    g = json.loads(loment_geometry.geometry(m4).to_json())
+    nodes = {x["name"]: x for x in g["nodes"]}
+    assert nodes["leaf"]["revocable"] is True, nodes["leaf"]
+    assert nodes["ring"]["revocable"] is True, nodes["ring"]
+    (rv,) = g["revokes"]
+    assert rv["position"] is False, rv
+    assert sorted(rv["targets"]) == sorted([nodes["leaf"]["id"], nodes["ring"]["id"]]), rv
+    print("      C2：撤销 / 级联 / 位置位图 / 体整组 / 解析期拒绝 / 几何 revokes，逐条成立")
+
+
+@test
 def test_domain_geometry_reads_trees_and_graphs():
     """`docs/315` §4–§5：横/竖树、平/立体图 —— 从代码里读出来的**确定性**形状。
 
@@ -6842,6 +6973,19 @@ def test_domains_selfhost_twin():
            "        solid b2 : dd, cpa;\n"
            "        guard b2(2);\n"
            "    }\n"
+           "    return a[0];\n"
+           "}\n"
+           # docs/306 §6.1 C2：撤销（整实例 / 按位置 / 体整组）与链上的级联
+           "capability cpr : disk[0..15] revocable\n"
+           "fn h_rev(a: [u32; 16] in disk) -> u32 {\n"
+           "    domain rd : disk[0..7] revocable {\n"
+           "        solid rb : rd, cpr;\n"
+           "        guard rb(3);\n"
+           "        revoke rb;\n"
+           "        guard rd(4);\n"
+           "    }\n"
+           "    revoke cpr(5);\n"
+           "    guard cpr(6);\n"
            "    return a[0];\n"
            "}\n")
     with tempfile.TemporaryDirectory() as td:

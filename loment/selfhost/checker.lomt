@@ -660,8 +660,10 @@ fn chk_rt_site(src: ptr, t: ptr, i: u32, prof: u32) -> u32 {
     if chk_tok_is(src, t, i, "domain") {
         return chk_is_dom_block(src, t, i);
     }
-    if chk_tok_is(src, t, i, "quality") || chk_tok_is(src, t, i, "discharge") {
+    if chk_tok_is(src, t, i, "quality") || chk_tok_is(src, t, i, "discharge")
+            || chk_tok_is(src, t, i, "revoke") {
         // 与 `guard` 同一位置判据：后面紧跟一个名字才算（参考实现同一条）。
+        // `revoke`（`docs/306` §6.1 C2）发的是运行期的 `@__loment_revoke`。
         if chk_tok_kind(t, i + 1) == 0 {
             return 1;
         }
@@ -1067,6 +1069,7 @@ fn chk_is_kw(src: ptr, t: ptr, i: u32) -> u32 {
             || chk_tok_is(src, t, i, "match") || chk_tok_is(src, t, i, "guard")
             || chk_tok_is(src, t, i, "tick")
             || chk_tok_is(src, t, i, "quality") || chk_tok_is(src, t, i, "discharge")
+            || chk_tok_is(src, t, i, "revoke")
             || chk_tok_is(src, t, i, "let") || chk_tok_is(src, t, i, "fn")
             || chk_tok_is(src, t, i, "struct") || chk_tok_is(src, t, i, "enum")
             || chk_tok_is(src, t, i, "const") || chk_tok_is(src, t, i, "use")
@@ -3705,6 +3708,15 @@ fn chk_moves(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             } else {
                 j = e;
             }
+        } else if chk_tok_is(src, t, j, "revoke") && chk_tok_kind(t, j + 1) == 0
+                && (chk_tok_is(src, t, j + 2, ";") || chk_tok_is(src, t, j + 2, "(")) {
+            // 撤销（`docs/306` §6.1 C2）：名字不是变量 —— 移动到 `;`（与 `couple` 同一条）。
+            let semi: u32 = chk_find_at(src, t, j, e, ";");
+            if semi <= e {
+                j = semi + 1;
+            } else {
+                j = e;
+            }
         } else if chk_tok_is(src, t, j, "domain")
                 && (chk_is_dom_block(src, t, j) == 1 || chk_is_dom_for(src, t, j) == 1) {
             // 域块 / 域循环的头不是表达式（`docs/314`/`docs/315`）—— 跳到 `{`。
@@ -4991,6 +5003,19 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             } else {
                 j = e;
             }
+        } else if chk_tok_is(src, t, j, "revoke") && chk_tok_kind(t, j + 1) == 0
+                && (chk_tok_is(src, t, j + 2, ";") || chk_tok_is(src, t, j + 2, "(")) {
+            // 撤销（`docs/306` §6.1 C2）：名字不是变量；带位置时那一格才是表达式。
+            let semi: u32 = chk_find_at(src, t, j, e, ";");
+            if chk_tok_is(src, t, j + 2, "(") {
+                chk_tex(src, t, syms, n, env, c,
+                        ((j + 3) as u64) * 4294967296 + (semi as u64), tyt, p, oc);
+            }
+            if semi <= e {
+                j = semi + 1;
+            } else {
+                j = e;
+            }
         } else if chk_tok_is(src, t, j, "quality") {
             // `quality CAP = EXPR ;` —— 能力名不是变量，跳过它，只查值表达式。
             let semi: u32 = chk_find_at(src, t, j, e, ";");
@@ -6089,6 +6114,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                     && !chk_tok_is(src, t, i - 1, ".")
                     && !chk_tok_is(src, t, i - 1, "guard")
                     && !chk_tok_is(src, t, i - 1, "discharge")
+                    && !chk_tok_is(src, t, i - 1, "revoke")
                     && !(load32(oc, 8) == 2 && chk_tok_is(src, t, i - 1, "lgc")) {
                 let nl: u32 = tok_len(t, i);
                 if nl > 0 {

@@ -8,23 +8,23 @@
   "genesis": {
     "mode": "100755",
     "name": "lomelf-linux-x64.elf",
-    "sha256": "e7635081d9e220f9e496a74eb25480aeb99a2fb89d1d7fafd83b66ce69eab718",
+    "sha256": "bed330be60d9c341f0541d5d50f405f6c070ef5d7d972af77908f5b15029f11a",
     "size": 228968
   },
   "inputs": {
     "mirror": {
       "path": "loment/tools/lomelf.lomt",
-      "sha256": "1e1ab502666b134b12049b48b6f0c77dad170cfa58032270d3b8f2956ee48933",
-      "size": 312993
+      "sha256": "8e373ed9b680fbd58bd09eb480af776bc4767353a1275877ed97014b5e4fcf93",
+      "size": 313771
     },
     "seed": {
       "path": "loment/build/selfhost_driver.ll",
-      "sha256": "1d47266d0439c906b917b47525b2e9759d2bb72c543c4c6593a674c92ee55741",
-      "size": 6118814
+      "sha256": "cb9424301c931ff9b7e7baeb7b3f1b73d8e1ac1da97187ed2f19197cc207779e",
+      "size": 6166139
     }
   },
   "mirror_ir": {
-    "sha256": "0bb4a7dbce9eb397ac2c3d4206f20a7d4ab77f926170c04c97ff442dd3113ab0",
+    "sha256": "606870c63541665413d926815b714614afbb3d71d1f0dff6cdb2bffc364e1d17",
     "size": 1318205
   },
   "toolchain": {

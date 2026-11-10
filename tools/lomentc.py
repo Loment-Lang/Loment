@@ -194,6 +194,8 @@ _IR_GUARD_RUNTIME = '''; ---- 能力域运行时 (docs/306-308, 313): 虚拟钟 
 @__loment_used = internal global [16 x [64 x i64]] zeroinitializer
 @__loment_wit = internal global [16 x [64 x i64]] zeroinitializer
 @__loment_obl = internal global [16 x [64 x i64]] zeroinitializer
+@__loment_rev = internal global [64 x [2 x i64]] zeroinitializer
+@__loment_revfree = internal global [2 x i64] zeroinitializer
 @__loment_qual = internal global [16 x i64] [i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255, i64 255]
 
 define internal void @__loment_tick() {
@@ -201,6 +203,23 @@ entry:
   %n = load i64, ptr @__loment_now
   %n1 = add i64 %n, 1
   store i64 %n1, ptr @__loment_now
+  ret void
+}
+
+define internal void @__loment_revoke(ptr %rv, i64 %idx, i64 %all) {
+entry:
+  %isf = icmp ne i64 %all, 0
+  br i1 %isf, label %whole, label %pos
+whole:
+  store i64 1, ptr %rv
+  ret void
+pos:
+  %mp = getelementptr i64, ptr %rv, i64 1
+  %m = load i64, ptr %mp
+  %s = and i64 %idx, 63
+  %b = shl i64 1, %s
+  %m1 = or i64 %m, %b
+  store i64 %m1, ptr %mp
   ret void
 }
 
@@ -236,7 +255,7 @@ ok:
   ret void
 }
 
-define internal void @__loment_guard2(ptr %st, i64 %cap, i64 %idx, i64 %aux, i64 %lo, i64 %hi, i64 %kind, i64 %param, i64 %flags) {
+define internal void @__loment_guard2(ptr %st, i64 %cap, i64 %idx, i64 %aux, i64 %lo, i64 %hi, i64 %kind, i64 %param, i64 %flags, ptr %rv) {
 entry:
   %now = load i64, ptr @__loment_now
   %pm0 = icmp eq i64 %param, 0
@@ -396,7 +415,16 @@ entry:
   %p14a = and i1 %o14n, %k14
   %p14b = and i1 %a13, %nk14
   %a14 = or i1 %p14a, %p14b
-  br i1 %a14, label %pass, label %fail
+  %rvf = load i64, ptr %rv
+  %rvmp = getelementptr i64, ptr %rv, i64 1
+  %rvm = load i64, ptr %rvmp
+  %rvs = and i64 %idx, 63
+  %rvsh = lshr i64 %rvm, %rvs
+  %rvb = and i64 %rvsh, 1
+  %rvany = or i64 %rvf, %rvb
+  %rvz = icmp eq i64 %rvany, 0
+  %ok = and i1 %a14, %rvz
+  br i1 %ok, label %pass, label %fail
 fail:
   call void @__loment_abort()
   unreachable
@@ -1756,6 +1784,24 @@ class Discharge:
 
 
 @dataclass
+class Revoke:
+    """`revoke NAME;` / `revoke NAME(x);` —— 撤销（`docs/306` §6.1 的 C2）。
+
+    撤父 ⇒ 整棵子树拒绝：守卫本来就走整条竖向链，链上每一层各自读自己的撤销位，
+    级联因此是链的自然结果，不需要额外的传播指令。顶层能力的撤销是**永久**的
+    （墓碑：同一份产物里不会再被复位）；块域实例的撤销随实例结束而结束 ——
+    下一轮循环是新实例，也就是新的节点（`docs/308` 的"块 = 实例"）。
+
+    体的名字撤**全组成员**（`docs/315` §5.2：体要么整体续期、要么整体拒绝）。
+    """
+    name: str
+    expr: object  # None = 撤整个实例；否则只撤一个位置
+    line: int
+    #: 解析后填（`_resolve_domains`）：[(is_block, audit_id)]，体名展开成全部成员。
+    targets: list = field(default_factory=list)
+
+
+@dataclass
 class Let:
     name: str
     type: str
@@ -2119,10 +2165,12 @@ def _resolve_domains(mod, cap_base: int | None = None) -> None:
                     if chain and cf_:
                         key = ("b", chain[-1].audit_id)
                         seen = {t[0] for t in e.doms}
+                        live = {d.audit_id for d in stack}
                         extra = [mf_[k][1:] for k in cf_.get(key, ())
                                  if k != key and k not in
                                  {("b", x.audit_id) for x in chain}
                                  and mf_.get(k) is not None
+                                 and (k[0] != "b" or k[1] in live)
                                  and mf_[k][1] not in seen]
                         if extra:
                             e.doms = e.doms[:-1] + extra + e.doms[-1:]
@@ -2397,42 +2445,108 @@ def _resolve_domains(mod, cap_base: int | None = None) -> None:
     run_walk()
     mod.domain_slots = nxt[0]
 
-    def attach(stmts, stack, comp_of, members) -> None:
+    def attach(stmts, stack, comp_of, members, al) -> None:
         for s in stmts:
             if isinstance(s, DomainBlock):
                 stack.append(s)
-                attach(s.body, stack, comp_of, members)
+                attach(s.body, stack, comp_of, members, al)
                 stack.pop()
                 continue
             if isinstance(s, If):
-                attach(s.then, stack, comp_of, members)
-                attach(s.otherwise, stack, comp_of, members)
+                attach(s.then, stack, comp_of, members, al)
+                attach(s.otherwise, stack, comp_of, members, al)
                 continue
             if isinstance(s, (While, For)):
-                attach(s.body, stack, comp_of, members)
+                attach(s.body, stack, comp_of, members, al)
                 continue
             if isinstance(s, Match):
                 for _p, arm in s.arms:
-                    attach(arm, stack, comp_of, members)
+                    attach(arm, stack, comp_of, members, al)
                 continue
+            if isinstance(s, Revoke):  # docs/306 §6.1 C2：撤销的目标与级联面
+                s.targets = revoke_targets(s, stack, comp_of, al)
             if isinstance(s, Guard):
                 key = ("b", s.cap_id) if s.is_block else ("c", s.cap_id)
                 if key in comp_of:
                     seen = {c[0] for c in s.chain}
+                    live = {d.audit_id for d in stack}
                     s.partners = [members[k][1:] for k in comp_of[key]
                                   if k != key and k not in seen
+                                  and (k[0] != "b" or k[1] in live)
                                   and members.get(k) is not None]
             elif isinstance(s, Quality):
                 key = ("b", s.cap_id) if s.is_block else ("c", s.cap_id)
                 if key in comp_of:
                     # 质量只写给自适应成员：普通域没有"宽度"可缩（`docs/306` §5.2）。
+                    live = {d.audit_id for d in stack}
                     s.partners = [members[k][1:] for k in comp_of[key]
-                                  if k != key and members.get(k) is not None
+                                  if k != key and (k[0] != "b" or k[1] in live)
+                                  and members.get(k) is not None
                                   and members[k][4] == 10]
+
+    def block_of(stack, name):
+        for d in reversed(stack):
+            if d.name and d.name == name:
+                return d
+        return None
+
+    def cap_of(name):
+        for i, c in enumerate(mod.caps):
+            if c.name == name:
+                return i, c
+        return -1, None
+
+    def need_revocable(name, line) -> None:
+        raise LomError(line, 1,
+                       f"`revoke` 只能撤 `revocable` 的域（{name} 没声明）")
+
+    def revoke_targets(s, stack, comp_of, al) -> list:
+        """`revoke NAME;` 的目标（`docs/306` §6.1 C2）。
+
+        体名 → **全组成员**：块的按作用域由外到内、能力的按声明序 —— 这个顺序
+        与自举侧的枚举一致（`dom_partners` 同序），孪生判据才逐字节对得上。
+        """
+        root = al.get(s.name)
+        if root:
+            rb = block_of(stack, root)
+            if rb is not None:
+                key = ("b", rb.audit_id)
+            else:
+                ci, _c = cap_of(root)
+                if ci < 0:
+                    raise LomError(s.line, 1,
+                                   f"`revoke {s.name}` 的根成员 {root} 不在作用域里")
+                key = ("c", ci)
+            comp = set(comp_of.get(key, (key,)))
+            out = []
+            for d in stack:
+                if d.name and ("b", d.audit_id) in comp:
+                    if not d.revocable:
+                        need_revocable(d.name, s.line)
+                    out.append((True, d.audit_id))
+            for i, c in enumerate(mod.caps):
+                if ("c", i) in comp:
+                    if not c.revocable:
+                        need_revocable(c.name, s.line)
+                    out.append((False, i))
+            if not out:
+                raise LomError(s.line, 1, f"`revoke {s.name}` 找不到任何成员")
+            return out
+        d = block_of(stack, s.name)
+        if d is not None:
+            if not d.revocable:
+                need_revocable(d.name, s.line)
+            return [(True, d.audit_id)]
+        ci, c = cap_of(s.name)
+        if c is None:
+            raise LomError(s.line, 1, f"`revoke` 引用了未声明的域 {s.name}")
+        if not c.revocable:
+            need_revocable(c.name, s.line)
+        return [(False, ci)]
 
     for f in mod.funcs:
         cf, mf = comp_by_fn.get(f.name, ({}, {}))
-        attach(f.body, [], cf, mf)
+        attach(f.body, [], cf, mf, aliases.get(f.name, {}))
 
 
 def _resolve_methods(mods, funcs_map: dict, structs: dict, enums: dict) -> None:
@@ -2499,8 +2613,9 @@ def _resolve_methods(mods, funcs_map: dict, structs: dict, enums: dict) -> None:
                     rx(s.expr, scope)
             elif isinstance(s, ExprStmt):
                 rx(s.expr, scope)
-            elif isinstance(s, (Guard, Quality, Discharge)):
-                rx(s.expr, scope)
+            elif isinstance(s, (Guard, Quality, Discharge, Revoke)):
+                if s.expr is not None:
+                    rx(s.expr, scope)
                 if isinstance(s, Guard) and s.aux is not None:
                     rx(s.aux, scope)
 
@@ -4240,6 +4355,18 @@ class Parser:
             self.expect("punct", ")")
             self.expect("punct", ";")
             return Discharge(cap, e, t.line)
+        if (t.val == "revoke" and self.peek(1).kind == "ident"  # docs/306 §6.1 C2
+                and (self.peek(2).val == ";" or self.peek(2).val == "(")):
+            # `revoke NAME;` / `revoke NAME(x);`。**上下文关键字**：只有这种形状才是
+            # 撤销，《name, `revoke = 1;` 里的 `revoke` 仍是普通标识符。
+            self.next()
+            cap = self.ident("域名")
+            idx = None
+            if self.accept("punct", "("):
+                idx = self.parse_expr()
+                self.expect("punct", ")")
+            self.expect("punct", ";")
+            return Revoke(cap, idx, t.line)
         if t.val == "let":
             self.next()
             name = self.ident("变量名")
@@ -4858,8 +4985,9 @@ def _mono_stmts(stmts, scope, generics, insts, structs, enums) -> None:
                 _mono_expr(s.expr, scope, generics, insts, structs, enums)
         elif isinstance(s, ExprStmt):
             _mono_expr(s.expr, scope, generics, insts, structs, enums)
-        elif isinstance(s, (Guard, Quality, Discharge)):
-            _mono_expr(s.expr, scope, generics, insts, structs, enums)
+        elif isinstance(s, (Guard, Quality, Discharge, Revoke)):
+            if s.expr is not None:
+                _mono_expr(s.expr, scope, generics, insts, structs, enums)
             if isinstance(s, Guard) and s.aux is not None:
                 _mono_expr(s.aux, scope, generics, insts, structs, enums)
 
@@ -6514,6 +6642,8 @@ _RUNTIME_SITES: dict[str, str] = {
     "quality": "`quality`（自适应域的质量）",
     "domain": "`domain`（块级域）",
     "discharge": "`discharge`（可达域义务）",
+    # `docs/306` §6.1 C2：`revoke` 发的是运行期的 `@__loment_revoke` —— 与 `guard` 同级。
+    "revoke": "`revoke`（撤销）",
     # `#778`：真线程要把运行期的锁与活线程计数带进产物（`alloc`/`free`/根表在
     # 线程之间共享）。所以它和 `alloc` 一样，是"会把运行期拖进来"的构造。
     "thread_spawn": "`thread_spawn`（运行期锁）",
@@ -6565,7 +6695,7 @@ def _runtime_sites(toks: list,
                 (b is not None and b.val == ":" and c is not None and c.kind == "ident"
                  and d is not None and d.val == "[")
                 or (b is not None and b.val == "[")))
-        elif t.val in ("guard", "lgc", "quality", "discharge"):
+        elif t.val in ("guard", "lgc", "quality", "discharge", "revoke"):
             hit = nxt is not None and nxt.kind == "ident"
         elif t.val == "tick":
             hit = nxt is not None and nxt.kind == "punct" and nxt.val == ";"
@@ -7827,6 +7957,14 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                     dt = expr_type(s.expr, fscope, funcs, structs)
                     if dt is not None and dt not in INT_TYPES:
                         errs.append(f"{s.line}: discharge 的索引类型 {dt}，应为整型")
+                elif isinstance(s, Revoke):  # docs/306 §6.1 C2
+                    # 目标与 `revocable` 在 `_resolve_domains` 里已经核过（与 `couple`
+                    # 同一条路：解析期就报）；这里只管位置表达式的类型。
+                    if s.expr is not None:
+                        _walk_expr(s.expr, fscope, funcs, structs, errs, enums)
+                        rt = expr_type(s.expr, fscope, funcs, structs)
+                        if rt is not None and rt not in INT_TYPES:
+                            errs.append(f"{s.line}: revoke 的位置类型 {rt}，应为整型")
                 elif isinstance(s, For):
                     _walk_expr(s.lo, fscope, funcs, structs, errs, enums, lifetime)
                     _walk_expr(s.hi, fscope, funcs, structs, errs, enums, lifetime)
@@ -8160,8 +8298,9 @@ def _move_check(f: Func, funcs: dict, structs: dict, enums: dict,
                     errs.append(f"{s.line}: 返回局部变量 {s.expr.expr.name} 的借用（悬垂）")
             elif isinstance(s, ExprStmt):
                 use(s.expr)
-            elif isinstance(s, (Guard, Quality, Discharge)):
-                use(s.expr)
+            elif isinstance(s, (Guard, Quality, Discharge, Revoke)):
+                if s.expr is not None:
+                    use(s.expr)
                 if isinstance(s, Guard) and s.aux is not None:
                     use(s.aux)
 
@@ -8756,6 +8895,10 @@ def _stmts_rs(stmts: list, indent: int) -> list[str]:
             out.append(f"{pad}{{ let __i: u64 = ({_expr_rs(s.expr)}) as u64; "
                        f"{calls}}}")
         elif isinstance(s, (Couple, Mutex, Solid)):
+            pass
+        elif isinstance(s, Revoke):
+            # Rust 后端是自检 / `loment.py test` 的路径，不是交付产物（与"不做回边
+            # tick"同一条）：撤销在这里是空操作，交付路径（IR → ELF/PE）两个实现都做。
             pass
         elif isinstance(s, Quality):
             st = _rs_state(10, s.is_block, s.cap_id)
@@ -11532,8 +11675,11 @@ class _Ir:
                  lms_guard: bool = False, lms_reject: bool = False,
                  lms_crash: bool = False,
                  tur_edition: str = potato_from.DEFAULT_EDITION,
-                 gc_ctl: bool = False, tick_auto: bool = False):
+                 gc_ctl: bool = False, tick_auto: bool = False,
+                 caps: list | None = None):
         self.funcs, self.consts, self.f = funcs, consts, f
+        #: 顶层能力表（撤销位的查找要用；块域的撤销位在 `dom_rev` 里）。
+        self.caps = caps or []
         #: **回边即 tick**（`docs/315` §2）：整个单元用了虚拟钟（守卫 / `tick;` / 域块）
         #: 时，每条循环回边推进一次钟。都没用的单元一个字节不发 —— 旧产物逐字节不变。
         self.tick_auto = tick_auto
@@ -11558,6 +11704,9 @@ class _Ir:
         self.coverage = coverage                    # M63: IR 级块覆盖
         self.cov_counter = cov_counter if cov_counter is not None else [0]
         self.cov_ids: list[int] = []
+        #: 块域实例的撤销位对（审计槽号 -> `[2 x i64]` 的 SSA 名）；块入口登记、出口注销。
+        #: 只有 `revocable` 的块才登记 —— 其余在调用点指向共享零格。
+        self.dom_rev: dict[int, str] = {}
         self.dbg_scope = dbg_scope                  # M59: 本函数的 DISubprogram
         self.dbg_lines = dbg_lines if dbg_lines is not None else {}
         self.dbg_meta = dbg_meta                    # M59: 共享元数据行
@@ -12849,8 +12998,23 @@ class _Ir:
             leaf = i == n - 1
             k = kid if leaf else (kid | 128)
             st = self.state_ptr(kid, blk, aid) if leaf else "@__loment_qual"
+            rv = self.rev_ptr(blk, aid)
             self.w(f"call void @__loment_guard2(ptr {st}, i64 {aid}, i64 {v64}, i64 0, "
-                   f"i64 {lo}, i64 {hi}, i64 {k}, i64 {param}, i64 {flags})")
+                   f"i64 {lo}, i64 {hi}, i64 {k}, i64 {param}, i64 {flags}, ptr {rv})")
+
+    def rev_ptr(self, is_block: bool, cap_id: int) -> str:
+        """撤销位对的指针（`docs/306` §6.1 C2）。
+
+        块域 → 它自己那帧那一对（不可撤的传共享零格）；顶层能力 → 全局表里它那一格。
+        """
+        if is_block:
+            return self.dom_rev.get(cap_id, "@__loment_revfree")
+        if 0 <= cap_id < len(self.caps) and self.caps[cap_id].revocable:
+            p = self.t()
+            self.w(f"{p} = getelementptr [64 x [2 x i64]], ptr @__loment_rev, i64 0, "
+                   f"i64 {cap_id}")
+            return p
+        return "@__loment_revfree"
 
     def state_ptr(self, kind_id: int, is_block: bool, cap_id: int) -> str:
         """`docs/313` §4：域实例的状态指针。
@@ -13255,6 +13419,19 @@ class _Ir:
             return
         if isinstance(s, DomainBlock):  # docs/313 §2：块级域实例
             k = CAP_KIND_ID[s.kind]
+            # 撤销位对（`docs/306` §6.1 C2）：块入口清零 = **新实例**。有状态律那块
+            # 64 槽保持原样 —— 撤销位单独一对，不挤占任何一格。
+            rprev = None
+            if s.revocable:
+                rp = self.t()
+                self.w(f"{rp} = alloca [2 x i64]")
+                self.w(f"store i64 0, ptr {rp}")
+                rmp = self.t()
+                self.w(f"{rmp} = getelementptr [2 x i64], ptr {rp}, i64 0, i64 1")
+                self.w(f"store i64 0, ptr {rmp}")
+                rprev = self.dom_rev.get(s.audit_id)
+                self.dom_rev[s.audit_id] = rp
+            prev = None
             if k in _STATEFUL_KINDS:
                 p = self.t()
                 self.w(f"{p} = alloca [64 x i64]")
@@ -13282,13 +13459,17 @@ class _Ir:
                     self.w(f"store i64 255, ptr {p}")
                 prev = self.dom_state.get(s.audit_id)
                 self.dom_state[s.audit_id] = p
-                self.block(s.body)
+            self.block(s.body)
+            if k in _STATEFUL_KINDS:
                 if prev is None:
                     self.dom_state.pop(s.audit_id, None)
                 else:
                     self.dom_state[s.audit_id] = prev
-            else:
-                self.block(s.body)
+            if s.revocable:
+                if rprev is None:
+                    self.dom_rev.pop(s.audit_id, None)
+                else:
+                    self.dom_rev[s.audit_id] = rprev
             return
         if isinstance(s, Guard):  # P4/M36+M38: 十五种域的统一判决
             _, iv = self.expr(s.expr, "u32")
@@ -13305,22 +13486,27 @@ class _Ir:
                 for cid, lo, hi, k, param, flags, leaf in s.chain:
                     kk = k if leaf else (k | 128)
                     st = self.state_ptr(k, True, cid)
+                    rv = self.rev_ptr(True, cid)
                     self.w(
                         f"call void @__loment_guard2(ptr {st}, i64 {cid}, i64 {v64}, "
-                        f"i64 {a64}, i64 {lo}, i64 {hi}, i64 {kk}, i64 {param}, i64 {flags})"
+                        f"i64 {a64}, i64 {lo}, i64 {hi}, i64 {kk}, i64 {param}, i64 {flags}, "
+                        f"ptr {rv})"
                     )
             else:
                 st = self.state_ptr(s.kind_id, s.is_block, s.cap_id)
+                rv = self.rev_ptr(s.is_block, s.cap_id)
                 self.w(
                     f"call void @__loment_guard2(ptr {st}, i64 {s.cap_id}, i64 {v64}, i64 {a64}, "
-                    f"i64 {s.lo}, i64 {s.hi}, i64 {s.kind_id}, i64 {s.param}, i64 {s.flags})"
+                    f"i64 {s.lo}, i64 {s.hi}, i64 {s.kind_id}, i64 {s.param}, i64 {s.flags}, "
+                    f"ptr {rv})"
                 )
             # 联动边 `⇄`（`docs/315` §5）：伙伴也要在同一位置上有效 —— silent，不记账。
             for cid, lo, hi, k, param, flags, is_block in s.partners:
                 st = self.state_ptr(k, is_block, cid)
+                rv = self.rev_ptr(is_block, cid)
                 self.w(
                     f"call void @__loment_guard2(ptr {st}, i64 {cid}, i64 {v64}, i64 {a64}, "
-                    f"i64 {lo}, i64 {hi}, i64 {k | 128}, i64 {param}, i64 {flags})"
+                    f"i64 {lo}, i64 {hi}, i64 {k | 128}, i64 {param}, i64 {flags}, ptr {rv})"
                 )
             return
         if isinstance(s, Quality):  # docs/306 §5.2 第 7 条：喂质量
@@ -13340,6 +13526,19 @@ class _Ir:
             self.w(f"{d64} = zext i32 {dv} to i64")
             st = self.state_ptr(14, s.is_block, s.cap_id)
             self.w(f"call void @__loment_discharge(ptr {st}, i64 {s.cap_id}, i64 {d64})")
+            return
+        if isinstance(s, Revoke):  # docs/306 §6.1 C2：撤销（体名 = 全组成员）
+            v64 = "0"
+            if s.expr is not None:
+                _, iv = self.expr(s.expr, "u32")
+                v64 = self.t()
+                self.w(f"{v64} = zext i32 {iv} to i64")
+            for is_block, aid in s.targets:
+                rv = self.rev_ptr(is_block, aid)
+                if s.expr is None:
+                    self.w(f"call void @__loment_revoke(ptr {rv}, i64 0, i64 1)")
+                else:
+                    self.w(f"call void @__loment_revoke(ptr {rv}, i64 {v64}, i64 0)")
             return
         if isinstance(s, (Couple, Mutex, Solid)):
             # `docs/315` §5：联动 / 互斥 / 体都是**声明** —— 判决点已经长在 guard 里。
@@ -13423,11 +13622,12 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
                   lms_guard: bool = False, lms_reject: bool = False,
                   lms_crash: bool = False,
                  tur_edition: str = potato_from.DEFAULT_EDITION,
-                  gc_ctl: bool = False, tick_auto: bool = False
+                  gc_ctl: bool = False, tick_auto: bool = False, caps: list | None = None
                   ) -> tuple[list[str], str]:
     ir = _Ir(funcs, consts, f, structs, enums, coverage, cov_counter,
              dbg_scope, dbg_lines, dbg_meta, dbg_types, gc_alpha, gc_auto, gc_barrier,
-             threads, lms_guard, lms_reject, lms_crash, tur_edition, gc_ctl, tick_auto)
+             threads, lms_guard, lms_reject, lms_crash, tur_edition, gc_ctl, tick_auto,
+             caps)
     if f.interrupt:  # M33: x86_intrcc 需要中断帧指针
         ir.out.append(f"; {f.name} -> interrupt (x86_intrcc)")
         ir.out.append(f"define x86_intrcc void @{f.name}(ptr byval([8 x i8]) %__frame)"
@@ -13858,7 +14058,7 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
                                     gc_alpha and _has_heap_pre, _has_threads,
                                     _lms_guard, _lms_reject, _lms_crash,
                                     getattr(mod, "profile", potato_from.DEFAULT_EDITION),
-                                    _gc_ctl, _tick_auto)
+                                    _gc_ctl, _tick_auto, mod.caps)
             globals_ += g
             body.append(text)
     # **命令入口**（`docs/223`）：声明了命令、又没写 `_start` -> 工具链替它发一个。
@@ -13892,7 +14092,8 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # **两者都不用时一个字节不发** —— 旧程序的产物逐字节不变。
     _guard_rt = ("@__loment_guard2" in text_all or "@__loment_tick" in text_all
                  or "@__loment_qual_store" in text_all
-                 or "@__loment_discharge" in text_all)
+                 or "@__loment_discharge" in text_all
+                 or "@__loment_revoke" in text_all)
     if _guard_rt:
         out.append(_IR_GUARD_RUNTIME)
     if "@__loment_audit" in text_all or "@__loment_guard2" in text_all \

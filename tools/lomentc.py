@@ -1768,7 +1768,8 @@ class ForEach:
 
     反糖（`_desugar_foreach`）把它变成普通的 `let __i$N` + `while`，所以检查器、代码生成、
     Rust 后端、L0/L1/L2 那些按语句类型分派的趟**一行都不用认识它**。
-    v1 只收**具名的数组/切片变量**，元素类型在反糖时按声明文本定下来。
+    源可以是**具名的数组/切片变量**（Tur 2），或 2026.3 的**调用**（`src_expr`，
+    返回数组/切片）；元素类型在反糖时定下来。
     """
 
     var: str
@@ -1779,6 +1780,9 @@ class ForEach:
     tok_end: int = 0
     #: Tur 2026.3 的 `for i, x in xs`：`i` 是下标副本（`u32`），`x` 是元素副本。
     idx: str | None = None
+    #: Tur 2026.3 的 `for x in <call> {`：源是表达式时非 None，`src` 为空串。
+    #: v1 只收调用（自举侧只有 `fn_ret` 能给出类型 token，`docs/331`）。
+    src_expr: object | None = None
 
 
 @dataclass
@@ -4677,6 +4681,19 @@ class Parser:
                 return fe
             self.no_struct += 1
             lo = self.parse_expr()
+            # Tur 2026.3：`for x in <call> {` —— 源是一段表达式，不再是具名变量
+            # （`docs/331`）。v1 只收调用，因为自举侧只有调用能拿到返回类型 token。
+            if self.profile in TUR3_PLUS and self.at("punct", "{"):
+                self.no_struct -= 1
+                at = self.i + 1
+                self.loop_depth += 1
+                try:
+                    body = self.parse_block()
+                finally:
+                    self.loop_depth -= 1
+                fe = ForEach(var, "", body, t.line, idx=idx, src_expr=lo)
+                fe.tok_at, fe.tok_end = at, self.i - 1
+                return fe
             self.expect("punct", ".")
             self.expect("punct", ".")
             hi = self.parse_expr()
@@ -14614,10 +14631,14 @@ def _split_seq_type(ty: str) -> tuple[str, int | None] | None:
 def _desugar_foreach(mod: Module) -> None:
     """把 `ForEach` 反糖成 `let __tur2_i.N: u32 = 0; while __tur2_i.N < len { ... }`。
 
-    **只给 Tur 2**（调用方按 profile 决定）。元素类型与长度在**声明文本**上定下来
-    （v1 只收具名变量，所以这够用，也是自举侧唯一做得到的口径）。循环变量 `x` 与下标
-    都是普通局部：代码生成、L0/L1/L2、Rust 后端都不必认识 for-in。
+    **只给 Tur 2+**（调用方按 profile 决定）。元素类型与长度在**声明文本**上定下来：
+    具名变量查作用域；2026.3 的调用源用 `expr_type` 取返回类型，并先插一条
+    `let __tur2_s.N = <call>`（`docs/331`，v1 只收调用）。循环变量 `x` 与下标都是
+    普通局部：代码生成、L0/L1/L2、Rust 后端都不必认识 for-in。
     """
+    funcs = {f.name: f for f in mod.funcs}
+    structs = {s.name: s for s in mod.structs}
+
     def walk_seq(stmts: list, env: dict[str, str], cnt: list[int]) -> list:
         out: list = []
         env = dict(env)
@@ -14626,19 +14647,39 @@ def _desugar_foreach(mod: Module) -> None:
                 out.append(s)
                 env[s.name] = s.type
             elif isinstance(s, ForEach):
-                seq = _split_seq_type(env.get(s.src, ""))
-                if seq is None:
-                    raise LomError(s.line, 1,
-                                   f"`for {s.var} in {s.src}`: `{s.src}` is not a named "
-                                   f"array or slice -- v1 takes `[T; N]` / `[T]` variables "
-                                   f"(docs/296 s2.2)")
+                src_name = s.src
+                src_ty = None
+                if s.src_expr is not None:
+                    # 2026.3 `for x in <call> {`（`docs/331`）：源是一个调用，类型取
+                    # 它的返回类型；v1 只收调用 —— 自举侧只有 `fn_ret` 能给出类型 token。
+                    if not isinstance(s.src_expr, Call):
+                        raise LomError(s.line, 1,
+                                       f"`for {s.var} in <expression>`: v1 takes a function "
+                                       f"call returning an array or slice (`docs/331`)")
+                    src_ty = expr_type(s.src_expr, env, funcs, structs)
+                    seq = _split_seq_type(src_ty or "")
+                    if seq is None:
+                        raise LomError(s.line, 1,
+                                       f"`for {s.var} in <expression>`: the call's return "
+                                       f"type is not an array or slice (`docs/331`)")
+                else:
+                    seq = _split_seq_type(env.get(s.src, ""))
+                    if seq is None:
+                        raise LomError(s.line, 1,
+                                       f"`for {s.var} in {s.src}`: `{s.src}` is not a named "
+                                       f"array or slice -- v1 takes `[T; N]` / `[T]` variables "
+                                       f"(docs/296 s2.2)")
                 elem, n = seq
                 cnt[0] += 1
                 idx = f"__tur2_i.{cnt[0]}"
+                if s.src_expr is not None:
+                    # 源先落一个临时局部：调用只求值一次，循环体里的下标都读它。
+                    src_name = f"__tur2_s.{cnt[0]}"
+                    out.append(Let(src_name, src_ty, s.src_expr, s.line))
                 ln = s.line
                 cond = Bin("<", Ident(idx, ln),
                            IntLit(n, ln) if n is not None
-                           else Call("slice_len", [Ident(s.src, ln)], ln), ln)
+                           else Call("slice_len", [Ident(src_name, ln)], ln), ln)
                 inner = dict(env)
                 if s.idx is not None:
                     inner[s.idx] = "u32"
@@ -14648,7 +14689,7 @@ def _desugar_foreach(mod: Module) -> None:
                     # 下标是 `__tur2_i.N` 的**副本**：体内改 `i` 不影响循环推进。
                     body.append(Let(s.idx, "u32", Ident(idx, ln), ln))
                 body.append(Let(s.var, elem,
-                                Index(Ident(s.src, ln), Ident(idx, ln), ln), ln))
+                                Index(Ident(src_name, ln), Ident(idx, ln), ln), ln))
                 body += walk_seq(s.body, inner, cnt)
                 # 自增放进 `step`，不放进体：`continue` 必须先自增再回条件，否则跳过
                 # 自增就是死循环（`Step` 由 While 发射器在体后与 continue 处各发一次）。

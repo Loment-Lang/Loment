@@ -3751,6 +3751,43 @@ def test_m99_for_index_twin():
     print("      for-index: 两实现逐字节一致；tur2026.2 两边都拒")
 
 
+@test
+def test_m100_for_expression_twin():
+    """Tur 2026.3 `for x in <call>`：两个实现产物逐字节同；旧版次两边都拒。
+
+    `docs/331`。反糖是 `let __tur2_s.N = <call>` + `let __tur2_i.N = 0` +
+    `while …`，两套实现同序；调用只求值一次。v1 只收调用（自举侧只有返回类型
+    token 可用）。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    src = ("module m\n\n"
+           "fn buf(b: [u32]) -> [u32] {\n    return b;\n}\n\n"
+           "fn f() -> u32 {\n"
+           "    let xs: [u32; 3] = [1, 2, 3];\n"
+           "    let s: u32 = 0;\n"
+           "    for x in buf(&xs) {\n"
+           "        s = s + x;\n"
+           "    }\n"
+           "    return s;\n"
+           "}\n")
+    old = "choose write grammar tur2026.2\n" + src
+    with tempfile.TemporaryDirectory() as td:
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_forexpr")
+        p = Path(td) / "new.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        rc, out, err = _run_driver_raw(elf, _wsl_path(p), td, "new")
+        assert rc == 0, f"自举驱动编不过 for-expression: {err[-400:]}"
+        assert out == _unit_ll(p), "for-expression: 自举产物与参考不一致"
+        p = Path(td) / "old.lomt"
+        p.write_text(old, encoding="utf-8", newline="\n")
+        rc, out, err = _run_driver_raw(elf, _wsl_path(p), td, "old")
+        assert rc != 0 and out.strip() == "", (
+            f"tur2026.2 收下了 for-expression (rc={rc}) {err[-300:]}")
+    print("      for-expression: 两实现逐字节一致；tur2026.2 两边都拒")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_p8_test")
 

@@ -3788,6 +3788,36 @@ def test_m100_for_expression_twin():
     print("      for-expression: 两实现逐字节一致；tur2026.2 两边都拒")
 
 
+@test
+def test_m101_if_expression_twin():
+    """Tur 2026.3 `let x: T = if c { a } else { b };`：两实现逐字节同；旧版次两边都拒。
+
+    `docs/332`。参考实现降成 `let x: T;` + `If`，自举侧按同一 token 形状直发同一条
+    序列（条件、L1_then / L2_else / L3_end、两支各一条 store）。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    src = ("module m\n\nfn f(c: bool, d: bool) -> u32 {\n"
+           "    let x: u32 = if c && d { 10 } else { f(false, false) };\n"
+           "    let y: bool = if x > 7 { true } else { false };\n"
+           "    return x;\n}\n")
+    old = "choose write grammar tur2026.2\n" + src
+    with tempfile.TemporaryDirectory() as td:
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_ifexpr")
+        p = Path(td) / "new.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        rc, out, err = _run_driver_raw(elf, _wsl_path(p), td, "new")
+        assert rc == 0, f"自举驱动编不过 if-expression: {err[-400:]}"
+        assert out == _unit_ll(p), "if-expression: 自举产物与参考不一致"
+        p = Path(td) / "old.lomt"
+        p.write_text(old, encoding="utf-8", newline="\n")
+        rc, out, err = _run_driver_raw(elf, _wsl_path(p), td, "old")
+        assert rc != 0 and out.strip() == "", (
+            f"tur2026.2 收下了 if-expression (rc={rc}) {err[-300:]}")
+    print("      if-expression: 两实现逐字节一致；tur2026.2 两边都拒")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_p8_test")
 

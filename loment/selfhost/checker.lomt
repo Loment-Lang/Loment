@@ -5210,19 +5210,37 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             let eq: u32 = chk_find_at(src, t, k, e, "=");
             let semi: u32 = chk_find_at(src, t, eq + 1, e, ";");
             if eq < e && semi <= e {
-                // `=` 后面必须能开始一个表达式 (`let v: u32 = @ 1;`，issue #395/#49 的表达式那半)
-                if !chk_expr_start(src, t, eq + 1, load32(oc, 8)) {
-                    chk_pub(src, t, oc, p, E_PARSE, eq + 1);
-                }
-                let t2: u32 = chk_tex(src, t, syms, n, env, c,
-                                      ((eq + 1) as u64) * 4294967296 + (semi as u64), tyt, p, oc);
-                if t2 != 0 && dty != 0 && chk_ty_eq(tyt, t2, dty) == 0 {
-                    chk_pub(src, t, oc, p, E_TMISMATCH, nm);
-                }
-                // 数组长度 (参考实现只在"声明是数组 且 字面量是数组"时比)
-                if chk_ty_is_arr(tyt, dty) == 1 && chk_tok_is(src, t, eq + 1, "[") {
-                    if chk_ty_b(tyt, dty) != chk_arr_count(src, t, eq + 1) {
-                        chk_pub(src, t, oc, p, E_ARR, nm);
+                if chk_tok_is(src, t, eq + 1, "if") {
+                    // 2026.3 `let x: T = if c { a } else { b };`（`docs/332`）。
+                    if load32(oc, 8) < 2 {
+                        chk_pub(src, t, oc, p, E_PARSE, eq + 1);
+                    } else {
+                        // 三段各查一遍（名字解析）；类型比对交给参考实现的反糖形状。
+                        let lb3: u32 = chk_find_at(src, t, eq + 2, e, "{");
+                        chk_tex(src, t, syms, n, env, c, chk_lh(eq + 2, lb3), tyt, p, oc);
+                        let te3: u32 = chk_match_brace(src, t, lb3);
+                        chk_tex(src, t, syms, n, env, c,
+                                ((lb3 + 1) as u64) * 4294967296 + (te3 as u64), tyt, p, oc);
+                        let eb3: u32 = chk_find_at(src, t, te3 + 2, e, "{");
+                        let ee3: u32 = chk_match_brace(src, t, eb3);
+                        chk_tex(src, t, syms, n, env, c,
+                                ((eb3 + 1) as u64) * 4294967296 + (ee3 as u64), tyt, p, oc);
+                    }
+                } else {
+                    // `=` 后面必须能开始一个表达式 (`let v: u32 = @ 1;`，issue #395/#49 的表达式那半)
+                    if !chk_expr_start(src, t, eq + 1, load32(oc, 8)) {
+                        chk_pub(src, t, oc, p, E_PARSE, eq + 1);
+                    }
+                    let t2: u32 = chk_tex(src, t, syms, n, env, c,
+                                          ((eq + 1) as u64) * 4294967296 + (semi as u64), tyt, p, oc);
+                    if t2 != 0 && dty != 0 && chk_ty_eq(tyt, t2, dty) == 0 {
+                        chk_pub(src, t, oc, p, E_TMISMATCH, nm);
+                    }
+                    // 数组长度 (参考实现只在"声明是数组 且 字面量是数组"时比)
+                    if chk_ty_is_arr(tyt, dty) == 1 && chk_tok_is(src, t, eq + 1, "[") {
+                        if chk_ty_b(tyt, dty) != chk_arr_count(src, t, eq + 1) {
+                            chk_pub(src, t, oc, p, E_ARR, nm);
+                        }
                     }
                 }
             }

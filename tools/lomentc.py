@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass, field
@@ -6185,6 +6186,9 @@ NAME_ROOTS = ("loment/lib", "loment/examples", "loment/selfhost", "loment/tools"
 #: 注册表里叫 `std` 的包就替换掉整个标准库。与 `lompi/lpi_cli.lomt` 的
 #: `pkg_reserved_name`、`loment/selfhost/driver.lomt` 的 `name_reserved` **一起改**。
 RESERVED_PACKAGE_NAMES = frozenset(("std", "libl", "host", "internet", "os"))
+#: `pkg.lomp` 里"这是工具链自带的标准库"的标记（`docs/330`）。**不是密码学签名** ——
+#: 它是声明；配合内容哈希与发行签名才有意义。
+LOMENT_ITEM = "LomentItem"
 #: L0 布局的**唯一**后缀。**L1 没有专属后缀** —— 路径形式里"不是 .lom 就是 L1 模块",
 #: 所以 `use "x.foo"` 是合法的 L1 导入 (用户 2026-09-16 定)。名字形式找的文件后缀见
 #: `L1_EXT`, 那个是可以配的 (`loment.conf`)。
@@ -6485,7 +6489,12 @@ def store_roots(root: Path, tool_dir: Path | None) -> list[Path]:
          一律 E018, 而"本仓能不能用 std"正是加它要回答的问题。
 
     两条都**必须存在**才进候选 (不存在就跳过), 所以发布包里第 2 条自然落空。
+
+    **`LOMENT_NO_STORE=1` 让这一层整体消失**（`docs/330`）：编裸金属时不该有任何
+    "顺手拉一份标准库"的可能。此时名字解析只剩 `deps/` 与内置四根。
     """
+    if _env_truthy("LOMENT_NO_STORE"):
+        return []
     out: list[Path] = []
     if tool_dir is not None:
         out.append(tool_dir.parent.joinpath(*TOOLCHAIN_STORE))
@@ -6583,10 +6592,12 @@ def resolve_name(name: str, root: Path, proj: Path | None = None,
                 if f is not None:
                     if not f.exists():
                         raise LomError(1, 1, f"自带的库里 {name} 缺同名模块 {name}{e}: {f}")
+                    _require_builtin_origin(f, name)
                     return f
         for store in stores:
             h = _pkg_module_hits(store, name, exts, versioned=True)
             if len(h) == 1:
+                _require_builtin_origin(h[0], name)
                 return h[0]
             if len(h) > 1:
                 rel = ", ".join(x.as_posix() for x in h)
@@ -6610,7 +6621,10 @@ def resolve_name(name: str, root: Path, proj: Path | None = None,
 
     # **导入方住在商店里时不看项目本地** (#980): store 包自己的 `use` 不能被使用者的
     # `deps/` 劫持 —— 那会让标准库的内部模块也被顶掉。
-    if proj is not None and name not in RESERVED_PACKAGE_NAMES \
+    # 保留名 = 写死的那几个 + **store 里现有的每一个包名**（`docs/330`）：社区包不能顶替
+    # 标准库；新加一个包时这条自动跟上，不用回来改表。
+    reserved = RESERVED_PACKAGE_NAMES | _store_package_names(stores)
+    if proj is not None and name not in reserved \
             and not _in_store_root(importer, stores):
         d = proj / LOCAL_DEPS / name
         if d.is_dir():
@@ -7052,6 +7066,68 @@ def _pkg_manifest(src: Path | None) -> tuple[str, list[str], str]:
         return _manifest_fields(mf.read_text(encoding="utf-8"))
     except OSError:
         return "", [], ""
+
+
+def _env_truthy(name: str) -> bool:
+    """环境开关：`1` / `on` / `yes` / `true`（不分大小写）算开。"""
+    return os.environ.get(name, "").strip().lower() in ("1", "on", "yes", "true")
+
+
+def _manifest_origin(text: str) -> str:
+    """清单里的 `origin()` 标记（`docs/330`）：`LomentItem` = 工具链自带的标准库。
+
+    **不是一个密码学签名** —— 它是"这个包由工具链发布"的声明；解析器拿它当闸，
+    没有标记的包不进入内置库的解析面。
+    """
+    toks = lomc.lex(text)
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        if t.kind == "ident" and t.val == "origin" and i + 1 < len(toks) \
+                and toks[i + 1].val == "(":
+            j = i + 2
+            while j < len(toks):
+                if toks[j].kind == "string":
+                    return toks[j].val
+                if j > i + 2 and toks[j].kind == "ident" and toks[j].val == "fn":
+                    break
+                j += 1
+            return ""
+        i += 1
+    return ""
+
+
+def _pkg_origin(src: Path | None) -> str:
+    """模块所属包的 `origin()`；没有清单返回空串。"""
+    if src is None:
+        return ""
+    mf = src.parent / "pkg.lomp"
+    if not mf.is_file():
+        return ""
+    try:
+        return _manifest_origin(mf.read_text(encoding="utf-8"))
+    except OSError:
+        return ""
+
+
+def _store_package_names(stores: list[Path]) -> set[str]:
+    """自带 store 里现有的**包名** —— 它们全部是保留名，社区包不能同名顶替。"""
+    out: set[str] = set()
+    for s in stores:
+        for p in s.glob("*/*"):
+            if p.is_dir():
+                out.add(p.parent.name)
+    return out
+
+
+def _require_builtin_origin(f: Path, name: str) -> None:
+    """从自带 store 解析到的模块，所属包必须带 `LomentItem` 标记。"""
+    if _pkg_origin(f) == LOMENT_ITEM:
+        return
+    pkg = f.parent.parent.name
+    raise LomError(1, 1, f"自带的库里 {name} 所属的包 {pkg} 没有 `{LOMENT_ITEM}` 标记 —— "
+                         f"它不是工具链发布的标准库。社区包请改名安装；标准库文件被替换时"
+                         f"这条就是那道闸（docs/330）。")
 
 
 #: 包里"用了哪些构造"的词汇表（`docs/325` 的前置条件）。键 = 触发它的 token 写法，

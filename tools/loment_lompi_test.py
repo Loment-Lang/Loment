@@ -1624,6 +1624,27 @@ def test_every_store_module_compiles_on_its_own():
 
 
 @test
+def test_every_builtin_package_carries_the_lomentitem_mark():
+    """每个随包发的 `pkg.lomp` 都必须带 `origin() == "LomentItem"`（docs/330）。
+
+    **Why**：编译器拿这个标记当闸 —— 没有它的包不进入内置库的解析面，社区包就不能
+    同名顶替标准库。标记是**声明**不是密码学签名；它的价值在于"少了就一定不对"，
+    而完整性仍由内容哈希与发行签名负责。
+    """
+    store = ROOT / "lompi" / "store"
+    bad: list[str] = []
+    n = 0
+    for mf in sorted(store.glob("*/*/pkg.lomp")):
+        n += 1
+        origin = lomentc._manifest_origin(mf.read_text(encoding="utf-8"))
+        if origin != lomentc.LOMENT_ITEM:
+            bad.append(f"{mf.relative_to(ROOT)}: origin()={origin!r}")
+    assert n >= 12, f"store 里只有 {n} 个包清单，扫错目录了"
+    assert not bad, "标准库包缺 LomentItem 标记：\n  " + "\n  ".join(bad)
+    print(f"      {n} 个标准库包都带 LomentItem 标记")
+
+
+@test
 def test_every_package_manifest_matches_its_code():
     """`pkg.lomp` 的 `choose()` / `requires()` 必须与包里的代码**逐条**对得上（docs/325）。
 
@@ -1845,6 +1866,11 @@ def _write_pkg(d: Path, name: str) -> None:
     d.mkdir(parents=True, exist_ok=True)
     (d / "area.lomt").write_bytes(PKG_AREA.encode())
     (d / f"{name}.lomt").write_bytes(PKG_ENTRY.format(n=name).encode())
+    # 这些夹具也用来摆"工具链自带的 store"，所以清单带 `LomentItem`（docs/330）。
+    (d / "pkg.lomp").write_text(
+        ("module pkg\n\npub fn name() -> str {\n    return \"" + name + "\";\n}\n\n"
+         "pub fn origin() -> str {\n    return \"LomentItem\";\n}\n"),
+        encoding="utf-8")
 
 
 @test
@@ -1914,6 +1940,11 @@ def test_selfhost_reaches_a_module_in_the_dev_checkout_store():
         pkg.mkdir(parents=True)
         (pkg / "area.lomt").write_bytes(PKG_AREA.encode())
         (pkg / "geom.lomt").write_bytes(PKG_ENTRY.format(n="geom").encode())
+        # 夹具模拟**工具链自带**的包：清单要带 `LomentItem`，否则解析闸会拒（docs/330）。
+        (pkg / "pkg.lomp").write_text(
+            "module pkg\n\npub fn name() -> str {\n    return \"geom\";\n}\n\n"
+            "pub fn origin() -> str {\n    return \"LomentItem\";\n}\n",
+            encoding="utf-8")
         hi = proj / "hi.lomt"
         hi.write_bytes(USE_AREA.encode())
         r = subprocess.run([str(s), str(hi)], cwd=str(proj), capture_output=True, timeout=300)

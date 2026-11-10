@@ -855,6 +855,7 @@ Tur 2026.3 adds:
 | `lifetime` | `choose lifetime_no` / `lifetime_auto` / `lifetime_manual` | the eighth dimension (§25.7) | the default is `lifetime_auto` from 2026.3; `lifetime_no` in older editions |
 | `&T` in type position | `&[u32]`, `&mut Cursor`, `&str` | a reference type; implicit regions; zero annotations in `lifetime_auto` | in `lifetime_manual`, an explicit region marker `&a T`; unary `*` dereferences |
 | domain blocks and laws | `domain buf : disk[0..63] consumed(1) { … }`, `domain:for i`, `solid`, `couple`, `mutex`, `tick`, `quality`, `discharge` | scoped capability domains, domain loops, groups, and the stateful laws of §21 | only bounded, orderable domains can be walked; §21.6–§21.9 |
+| struct literal shorthand | `S { a }` | identical to `S { a: a }`; the value is the same-named binding | 2026.3+ only; explicit and shorthand fields may be mixed; missing/duplicate/unknown fields remain E015 |
 
 The lifetime dimension is **edition-gated**: writing `choose lifetime_*` in 2026.1 or
 2026.2 is refused; those editions keep the old default (`lifetime_no`) and the old
@@ -1235,7 +1236,10 @@ assignment in 2026.2+.
 ### 12.9 Struct literals
 
 `S { a: 1, b: 2 }` requires every field exactly once (E015). A missing, duplicate, or
-unknown field is an error. Field shorthand (`S { a }`) is not in this edition.
+unknown field is an error. From Tur 2026.3, a field may be written as a bare identifier:
+`S { a, b }` is exactly `S { a: a, b: b }`. The shorthand is **edition-gated**: in 2026.1
+and 2026.2 the same text is a syntax error, so the frozen editions are unchanged. Mixed
+forms (`S { a, b: 2 }`) are allowed.
 
 ### 12.10 Array literals
 
@@ -1622,7 +1626,7 @@ The following table is normative. Each row names the rule, the code, and the bou
 | Every expression's type matches its context (binding, assignment, return, argument, field, index, condition). | E001 | Integer literals are typed by context (§10.6). |
 | `if`/`while` conditions are `bool`; `&&`/`||`/`!` operands are `bool`. | E001 | `bool` and integers do not mix. |
 | Return type matches; a non-unit function cannot fall off the end. | E001 / E027 | Every path must return. |
-| Struct literals initialise every field exactly once; field access names an existing field. | E015 | No field shorthand. |
+| Struct literals initialise every field exactly once; field access names an existing field. | E015 | Field shorthand is 2026.3+ only; missing/duplicate/unknown fields remain E015. |
 | Array literals are non-empty, homogeneous, and match the declared length. | E016 | `N` is a positive constant. |
 | Indexing applies to arrays/slices and an integer index. | E001 / E014 | Bounds are not checked by the type system; E028 catches literal out-of-range. |
 | Assignment targets are lvalues. | E014 | Variable, field, index. |
@@ -2278,6 +2282,7 @@ An implementation that supports several editions MUST keep their surfaces separa
 | `lgc` | — | — | yes |
 | `lifetime` dimension | — | — | yes (default `lifetime_auto`) |
 | `&T` in type position | — | — | yes |
+| struct literal shorthand `S { a }` | — | — | yes |
 | domain blocks, laws, loops | additive | additive | additive |
 
 "Additive" means the construct was previously a syntax error and becomes accepted without
@@ -3125,7 +3130,7 @@ postfix       := primary ("(" args? ")" | "." IDENT | "[" expr "]" | "?")*
 primary       := INT | STRING | "true" | "false"
                | IDENT | IDENT "::" IDENT ("(" expr ")")?
                | "(" expr ")"
-               | IDENT "{" (IDENT ":" expr),* "}"
+               | IDENT "{" (IDENT (":" expr)?),* "}"           // shorthand: 2026.3+
                | "[" (expr),* "]" | "&" ("mut")? expr
 cast          := expr "as" type
 fallback      := expr ("orelse" | "catch") expr

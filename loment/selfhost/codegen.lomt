@@ -8825,6 +8825,28 @@ fn tok_eq(src: ptr, toks: ptr, a: u32, b: u32) -> bool {
 
 /// struct 字面量绑定: `let b: Blk = Blk { off: 3, len: 5 };` (M23)。
 /// 字段按**声明序**逐个 GEP + 求值 + store; 值按字段名在字面量里查。
+/// 结构体字面量里一个字段的结尾：深度 0 的 `,` 或 `}`（不含）。`be` 是 `}` 之后。
+/// 值表达式里的逗号（`f(1, a, 2)`）在括号里，深度不为 0，不当作字段分隔。
+fn struct_field_end(src: ptr, toks: ptr, j: u32, be: u32) -> u32 {
+    let d: u32 = 0;
+    let k: u32 = j;
+    while k < be && tok_kind(toks, k) != 4 {
+        if tok_is(src, toks, k, "(") || tok_is(src, toks, k, "[") || tok_is(src, toks, k, "{") {
+            d = d + 1;
+        } else if tok_is(src, toks, k, ")") || tok_is(src, toks, k, "]")
+                || tok_is(src, toks, k, "}") {
+            if d == 0 {
+                return k;
+            }
+            d = d - 1;
+        } else if d == 0 && tok_is(src, toks, k, ",") {
+            return k;
+        }
+        k = k + 1;
+    }
+    return k;
+}
+
 fn let_struct_lit(s: ptr, out: ptr, src: ptr, toks: ptr, name: u32, ty: u32, i: u32) -> u32 {
     let si: u32 = find_struct(s, src, toks, ty);
     let nf: u32 = load32(s, struct_base(si) + 4);
@@ -8835,11 +8857,28 @@ fn let_struct_lit(s: ptr, out: ptr, src: ptr, toks: ptr, name: u32, ty: u32, i: 
         let ftp: u32 = load32(s, struct_base(si) + 8 + k * 8 + 4);
         let p: u32 = i + 1;
         let vst: u32 = i + 2;
-        while p < be {
-            if tok_eq(src, toks, p, fnm) && tok_is(src, toks, p + 1, ":") {
-                vst = p + 2;
+        while p < be && tok_kind(toks, p) != 4 && !tok_is(src, toks, p, "}") {
+            // **按字段走，不按 token 走**：值表达式里的 `f(1, a, 2)` 也有"逗号 + 标识符"，
+            // 逐 token 找会把那个 `a` 当成字段名（显式字段只认 `:` 时不会）。
+            if tok_eq(src, toks, p, fnm) {
+                if tok_is(src, toks, p + 1, ":") {
+                    vst = p + 2;
+                    p = struct_field_end(src, toks, p + 2, be);
+                } else if load32(s, CG_PROF) >= 2
+                        && (tok_is(src, toks, p + 1, ",") || tok_is(src, toks, p + 1, "}")) {
+                    // 2026.3 字段简写（`docs/296` §5）：值就是同名的那个标识符。
+                    // 只在 2026.3+ 收；旧版次里它是语法错，检查器已经先拒了。
+                    vst = p;
+                    p = p + 1;
+                } else {
+                    p = struct_field_end(src, toks, p + 1, be);
+                }
+            } else {
+                p = struct_field_end(src, toks, p + 1, be);
             }
-            p = p + 1;
+            if tok_is(src, toks, p, ",") {
+                p = p + 1;
+            }
         }
         emit_str(s, out, "  ");
         let gp: u32 = new_temp(s, out);

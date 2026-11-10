@@ -3680,6 +3680,40 @@ def test_m97_edition_collision_gate_matches_between_implementations():
           "钉 Tur 1 都收；用不拒")
 
 
+@test
+def test_m98_struct_literal_shorthand_twin():
+    """Tur 2026.3 字段简写 `S { a }`：两个实现产物逐字节同；旧版次两边都拒。
+
+    它和 2026.2 的纯糖同一类：只改拼法。自举侧的检查器与发射器各自认得
+    "字段名后面没有 `:`"这一格；参考侧在 parser 里就落成 `a: a`。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    short = ("module m\n\nstruct S { a: u32, b: u32 }\n\n"
+             "fn f() -> u32 {\n    let a: u32 = 1;\n    let b: u32 = 2;\n"
+             "    let s: S = S { a, b };\n    return s.a + s.b;\n}\n")
+    long = short.replace("S { a, b }", "S { a: a, b: b }")
+    old = "choose write grammar tur2026.2\n" + short
+    with tempfile.TemporaryDirectory() as td:
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_stlit")
+        outs = []
+        for name, src in (("short", short), ("long", long)):
+            p = Path(td) / f"{name}.lomt"
+            p.write_text(src, encoding="utf-8", newline="\n")
+            rc, out, err = _run_driver_raw(elf, _wsl_path(p), td, name)
+            assert rc == 0, f"自举驱动编不过 {name}: {err[-400:]}"
+            assert out == _unit_ll(p), f"{name}: 自举产物与参考不一致"
+            outs.append(out)
+        assert outs[0] == outs[1], "字段简写与显式写法的产物不同"
+        p = Path(td) / "old.lomt"
+        p.write_text(old, encoding="utf-8", newline="\n")
+        rc, out, err = _run_driver_raw(elf, _wsl_path(p), td, "old")
+        assert rc != 0 and out.strip() == "", (
+            f"tur2026.2 收下了字段简写 (rc={rc}) {err[-300:]}")
+    print("      字段简写: 两实现逐字节一致；tur2026.2 两边都拒")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_p8_test")
 

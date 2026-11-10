@@ -1397,6 +1397,38 @@ def test_a_misspelled_declaration_is_refused_not_guessed_past():
 
 
 @test
+def test_tur2026_3_struct_literal_shorthand():
+    """2026.3 字段简写 `S { a }` ≡ `S { a: a }`；旧版次仍拒（封版不动）。
+
+    `docs/296` §5 把这条列进 Tur 3 的语法优化。它是**纯拼法**：AST 里就是
+    `a: a`，检查、发射、产物与显式写法完全相同。
+    """
+    short = ("module m\n\nstruct S { a: u32, b: u32 }\n\n"
+             "fn f() -> u32 {\n    let a: u32 = 1;\n    let b: u32 = 2;\n"
+             "    let s: S = S { a, b };\n    return s.a + s.b;\n}\n")
+    long = short.replace("S { a, b }", "S { a: a, b: b }")
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        a = td / "short.lomt"
+        a.write_text(short, encoding="utf-8", newline="\n")
+        b = td / "long.lomt"
+        b.write_text(long, encoding="utf-8", newline="\n")
+        la = lomentc.emit_llvm(lomentc.load(a), ROOT)
+        lb = lomentc.emit_llvm(lomentc.load(b), ROOT)
+        assert la == lb, "字段简写与显式写法的 IR 不一致"
+        old = td / "old.lomt"
+        old.write_text("choose write grammar tur2026.2\n" + short,
+                       encoding="utf-8", newline="\n")
+        try:
+            lomentc.load(old)
+        except lomentc.LomError:
+            pass
+        else:
+            raise AssertionError("tur2026.2 收下了字段简写 —— 封版版次被改了")
+    print("      2026.3 `S { a }` 与 `S { a: a }` 产物相同；tur2026.2 仍拒")
+
+
+@test
 def test_the_default_edition_is_the_newest_open_one():
     """**没声明 = 最新版次**（2026-11-06 用户裁定，`docs/312`）。
 

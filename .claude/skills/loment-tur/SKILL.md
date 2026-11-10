@@ -269,8 +269,8 @@ a parse error and struct fields hold scalars only - the pre-2026.3 shape, unchan
 
 Primary expressions: integer / string / `true` / `false` literals, identifiers, `E::Variant`,
 calls `f(a, b)`, method calls `obj.m(a)`, field access `e.f`, indexing `e[i]`, parenthesised
-`(e)`, struct literals `S { a: 1 }`, array literals `[1, 2, 3]`, and `&e` / `&mut e` in
-**call-argument position**.
+`(e)`, struct literals `S { a: 1 }` (2026.3 also accepts the shorthand `S { a }`, meaning
+`S { a: a }`), array literals `[1, 2, 3]`, and `&e` / `&mut e` in **call-argument position**.
 
 Postfix: call, field, index, `?` (propagation).
 
@@ -435,7 +435,7 @@ postfix     := primary ("(" args? ")" | "." IDENT | "[" expr "]" | "?")*
 primary     := INT | STRING | "true" | "false"
              | IDENT | IDENT "::" IDENT ("(" expr ")")?
              | "(" expr ")"
-             | IDENT "{" (IDENT ":" expr),* "}"            // struct literal
+             | IDENT "{" (IDENT (":" expr)?),* "}"         // bare name = 2026.3+ shorthand
              | "[" (expr),* "]" | "&" ("mut")? expr
 cast        := expr "as" type                              // binds tighter than any binop
 fallback    := expr ("orelse" | "catch") expr              // Tur 2, let/assignment RHS

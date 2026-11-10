@@ -87,6 +87,10 @@ BUILTIN_DIVERGES = ("panic",)  # 求值后不可继续 (M19)
 #: 继承 Tur 2 全部语法/内建的版次（版次是累积的：2026.3 ⊃ 2026.2 ⊃ 2026.1）。
 TUR2_PLUS = ("tur2026.2", "tur2026.3")
 
+#: **2026.3 及以后**（版次累积）。目前只有 `tur2026.3` 一个 —— 开新版时把它加进来，
+#: 别写成 `profile >= "..."`：规范名是字符串，词法序不是版次序。
+TUR3_PLUS = ("tur2026.3",)
+
 TUR2_BUILTINS: dict[str, tuple[tuple[str, ...], str]] = {
     "print_num": (("i64",), "u32"),
 }
@@ -4923,9 +4927,18 @@ class Parser:
                 self.next()
                 inits: list[tuple[str, object]] = []
                 while not self.at("punct", "}"):
+                    ftok = self.peek()
                     fn = self.ident("字段名")
-                    self.expect("punct", ":")
-                    inits.append((fn, self.parse_expr()))
+                    if (self.profile in TUR3_PLUS
+                            and (self.at("punct", ",") or self.at("punct", "}"))):
+                        # Tur 2026.3 的字段简写（`docs/296` §5）：`S { a }` 就是
+                        # `S { a: a }`。**只在 2026.3+ 收** —— 旧版次里它仍是语法错，
+                        # 封版版次一个字节都不动。值就是同名的标识符，类型检查、
+                        # 未声明变量、字段类型全部走原来的路。
+                        inits.append((fn, Ident(fn, ftok.line)))
+                    else:
+                        self.expect("punct", ":")
+                        inits.append((fn, self.parse_expr()))
                     if not self.accept("punct", ","):
                         break
                 self.expect("punct", "}")

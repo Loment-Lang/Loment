@@ -66,6 +66,10 @@ separate. `Box<&u32>` instantiates as `Box_ref__u32`; composite generic argument
 (`Box<&T>` / `Box<[T]>`) are refused **by name** on the self-hosted side (E041). Both
 implementations carry the dimension, Potato v22 and the region pass; see `docs/299` §8-§9.
 
+Its third feature is **struct literal shorthand**: in 2026.3, `S { a, b }` means
+`S { a: a, b: b }` (explicit and shorthand fields may be mixed; `docs/329`). It is a spelling
+only - the artifact is identical to the explicit form.
+
 The same program can also be written with C / C++ / Java / C# / Go / Python spelling, **changing
 the spelling and nothing else** - recognised **by extension** (`.c` / `.cpp` / `.java` / `.cs` /
 `.py` / `.go`), or with an explicit declaration at the top of the file:

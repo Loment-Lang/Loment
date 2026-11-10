@@ -1781,7 +1781,7 @@ class ForEach:
     #: Tur 2026.3 的 `for i, x in xs`：`i` 是下标副本（`u32`），`x` 是元素副本。
     idx: str | None = None
     #: Tur 2026.3 的 `for x in <call> {`：源是表达式时非 None，`src` 为空串。
-    #: v1 只收调用（自举侧只有 `fn_ret` 能给出类型 token，`docs/331`）。
+    #: v1 只收调用（自举侧只有 `fn_ret` 能给出类型 token，`docs/334`）。
     src_expr: object | None = None
 
 
@@ -2035,7 +2035,7 @@ class If:
 
 @dataclass
 class IfExpr:
-    """Tur 2026.3 的 `if c { a } else { b }` 表达式（`docs/332`）。
+    """Tur 2026.3 的 `if c { a } else { b }` 表达式（`docs/335`）。
 
     **只存在于解析到反糖之间**：`_desugar_ifexpr` 把它降成一条普通 `If` 语句，
     两支各给目标赋一次值（目标先以 `let x: T;` 声明）。v1 只收 `let` 的初值位置，
@@ -3797,7 +3797,7 @@ class Parser:
         #: `elif` 抹成 `else`，这里补上缺的那个 `if`）。
         self.profile = profile
         self.no_struct = 0  # >0 时禁止结构体字面量 (if/while 条件位置的歧义)
-        #: >0 时才允许 `if` 表达式（2026.3，`docs/332`）：只开在 `let` 的初值位置。
+        #: >0 时才允许 `if` 表达式（2026.3，`docs/335`）：只开在 `let` 的初值位置。
         self.allow_ifexpr = 0
         #: 当前嵌套深度（块 + 表达式共用一个计数）—— 见 `MAX_NEST`。
         self.depth = 0
@@ -4647,7 +4647,7 @@ class Parser:
             if self.accept("punct", ";"):  # M9: 未初始化声明
                 return Let(name, ty, None, t.line, space)
             self.expect("punct", "=")
-            # 2026.3 的 `if` 表达式只在这一格开口（`docs/332`）；解析完再确认它
+            # 2026.3 的 `if` 表达式只在这一格开口（`docs/335`）；解析完再确认它
             # **就是**初值本身，而不是藏在别的表达式里 —— 藏在里面反糖不了。
             self.allow_ifexpr += 1
             try:
@@ -4657,7 +4657,7 @@ class Parser:
             if not isinstance(e, IfExpr) and _contains_ifexpr(e):
                 raise LomError(t.line, 1,
                                "`if` 表达式 v1 只能作 `let` 的整个初值，不能嵌在别的"
-                               "表达式里（docs/332）")
+                               "表达式里（docs/335）")
             self.expect("punct", ";")
             return Let(name, ty, e, t.line, space)
         if t.val == "if":
@@ -4702,7 +4702,7 @@ class Parser:
             var = self.ident("循环变量")
             idx: str | None = None
             if self.profile in TUR3_PLUS and self.at("punct", ","):
-                # Tur 2026.3：`for i, x in xs`（`docs/329` §5 第 2 项）。
+                # Tur 2026.3：`for i, x in xs`（`docs/332` §5 第 2 项）。
                 self.next()
                 idx = var
                 var = self.ident("循环变量")
@@ -4724,7 +4724,7 @@ class Parser:
             self.no_struct += 1
             lo = self.parse_expr()
             # Tur 2026.3：`for x in <call> {` —— 源是一段表达式，不再是具名变量
-            # （`docs/331`）。v1 只收调用，因为自举侧只有调用能拿到返回类型 token。
+            # （`docs/334`）。v1 只收调用，因为自举侧只有调用能拿到返回类型 token。
             if self.profile in TUR3_PLUS and self.at("punct", "{"):
                 self.no_struct -= 1
                 at = self.i + 1
@@ -4933,11 +4933,11 @@ class Parser:
     def parse_primary(self):
         t = self.peek()
         if t.kind == "ident" and t.val == "if" and self.profile in TUR3_PLUS:
-            # 2026.3 的 `if` 表达式（`docs/332`）。语句位置的 `if` 在 `parse_stmt`
+            # 2026.3 的 `if` 表达式（`docs/335`）。语句位置的 `if` 在 `parse_stmt`
             # 就分走了；能走到这里说明它在表达式里 —— v1 只开在 `let` 初值位置。
             if self.allow_ifexpr <= 0:
                 raise LomError(t.line, t.col,
-                               "`if` 表达式 v1 只能作 `let` 的初值（docs/332）")
+                               "`if` 表达式 v1 只能作 `let` 的初值（docs/335）")
             return self.parse_postfix(self.parse_ifexpr(t.line))
         if t.kind == "number":
             return self.parse_postfix(IntLit(self.int_lit(), t.line))
@@ -5021,7 +5021,7 @@ class Parser:
         raise LomError(t.line, t.col, f"期望表达式，得到 {t.val or '<eof>'!r}")
 
     def parse_ifexpr(self, line):
-        """`if c { a } else { b }` —— 两支各**一个表达式**（`docs/332`）。"""
+        """`if c { a } else { b }` —— 两支各**一个表达式**（`docs/335`）。"""
         self.next()                          # `if`
         self.no_struct += 1
         cond = self.parse_expr()
@@ -5033,12 +5033,12 @@ class Parser:
         self.expect("punct", "}")
         if not self.at("ident", "else"):
             t = self.peek()
-            raise LomError(t.line, t.col, "`if` 表达式必须有 `else`（docs/332）")
+            raise LomError(t.line, t.col, "`if` 表达式必须有 `else`（docs/335）")
         self.next()
         if self.at("ident", "if"):
             t = self.peek()
             raise LomError(t.line, t.col,
-                           "`if` 表达式的 v1 不支持 `else if`（docs/332）")
+                           "`if` 表达式的 v1 不支持 `else if`（docs/335）")
         self.expect("punct", "{")
         else_at = self.i
         other = self.parse_expr()
@@ -5046,7 +5046,7 @@ class Parser:
         self.expect("punct", "}")
         if _contains_ifexpr(then) or _contains_ifexpr(other):
             raise LomError(line, 1,
-                           "`if` 表达式的 v1 不支持在分支里再嵌一个 `if` 表达式（docs/332）")
+                           "`if` 表达式的 v1 不支持在分支里再嵌一个 `if` 表达式（docs/335）")
         return IfExpr(cond, then, other, line, then_at, then_end, else_at, else_end)
 
     def parse_postfix(self, e):
@@ -14722,7 +14722,7 @@ def _lower_ifexpr(name: str, ie: IfExpr) -> list:
 def _desugar_ifexpr(mod: Module) -> None:
     """`let x: T = if c { a } else { b };` -> `let x: T; if c { x = a } else { x = b }`。
 
-    2026.3（`docs/332`）。v1 只处理 `let` 的初值；解析期已经保证它不在别的位置。
+    2026.3（`docs/335`）。v1 只处理 `let` 的初值；解析期已经保证它不在别的位置。
     降完的节点都是普通语句 —— 检查、发射、L0/L1/L2、Rust 后端一行都不用认识 `IfExpr`。
     """
     def walk(stmts: list) -> list:
@@ -14761,7 +14761,7 @@ def _desugar_foreach(mod: Module) -> None:
 
     **只给 Tur 2+**（调用方按 profile 决定）。元素类型与长度在**声明文本**上定下来：
     具名变量查作用域；2026.3 的调用源用 `expr_type` 取返回类型，并先插一条
-    `let __tur2_s.N = <call>`（`docs/331`，v1 只收调用）。循环变量 `x` 与下标都是
+    `let __tur2_s.N = <call>`（`docs/334`，v1 只收调用）。循环变量 `x` 与下标都是
     普通局部：代码生成、L0/L1/L2、Rust 后端都不必认识 for-in。
     """
     funcs = {f.name: f for f in mod.funcs}
@@ -14778,18 +14778,18 @@ def _desugar_foreach(mod: Module) -> None:
                 src_name = s.src
                 src_ty = None
                 if s.src_expr is not None:
-                    # 2026.3 `for x in <call> {`（`docs/331`）：源是一个调用，类型取
+                    # 2026.3 `for x in <call> {`（`docs/334`）：源是一个调用，类型取
                     # 它的返回类型；v1 只收调用 —— 自举侧只有 `fn_ret` 能给出类型 token。
                     if not isinstance(s.src_expr, Call):
                         raise LomError(s.line, 1,
                                        f"`for {s.var} in <expression>`: v1 takes a function "
-                                       f"call returning an array or slice (`docs/331`)")
+                                       f"call returning an array or slice (`docs/334`)")
                     src_ty = expr_type(s.src_expr, env, funcs, structs)
                     seq = _split_seq_type(src_ty or "")
                     if seq is None:
                         raise LomError(s.line, 1,
                                        f"`for {s.var} in <expression>`: the call's return "
-                                       f"type is not an array or slice (`docs/331`)")
+                                       f"type is not an array or slice (`docs/334`)")
                 else:
                     seq = _split_seq_type(env.get(s.src, ""))
                     if seq is None:

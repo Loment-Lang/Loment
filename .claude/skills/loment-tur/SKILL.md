@@ -191,16 +191,16 @@ a parse error and struct fields hold scalars only - the pre-2026.3 shape, unchan
 the frozen editions):
 
 - **struct literal field shorthand** `S { a, b: 2 }` - a bare name means `a: a`
-  (`docs/329`);
+  (`docs/332`);
 - **`for i, x in xs`** - the index loop also binds the position: `i` is a `u32` copy
   (0, 1, 2, ...), `x` the element copy. Source is still a named array or slice; assigning
-  to `i` or `x` does not write back (`docs/330`);
+  to `i` or `x` does not write back (`docs/333`);
 - **`for x in <call> { … }`** - the source may be a function call returning an array or
   slice; the call is evaluated once into a temporary and the loop walks that. Array
-  literals and other expressions are not accepted yet (`docs/331`);
+  literals and other expressions are not accepted yet (`docs/334`);
 - **`if` as an expression in a `let` initialiser** - `let x: u32 = if c { 10 } else { 20 };`.
   One expression per arm, `else` required; `else if`, nesting, and other positions are not
-  accepted in this round (`docs/332`).
+  accepted in this round (`docs/335`).
 
 ### 2.0.6 Lexical grammar
 

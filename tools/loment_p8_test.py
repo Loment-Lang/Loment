@@ -3718,7 +3718,7 @@ def test_m98_struct_literal_shorthand_twin():
 def test_m99_for_index_twin():
     """Tur 2026.3 `for i, x in xs`：两个实现产物逐字节同；旧版次两边都拒。
 
-    `docs/329` §5 第 2 项。反糖是 `let __tur2_i.N = 0` + `while` + 体首
+    `docs/332` §5 第 2 项。反糖是 `let __tur2_i.N = 0` + `while` + 体首
     `let i = __tur2_i.N` / `let x = xs[i]`，两套实现同序。用户写的下标在自举侧
     必须记成无 token 的 u32 哨兵（`CG_TY_U64`）—— 用 `SYN_U32` 会与 UNIT 同值，
     印成 `void`（本仓 2026-11-10 实测）。
@@ -3755,7 +3755,7 @@ def test_m99_for_index_twin():
 def test_m100_for_expression_twin():
     """Tur 2026.3 `for x in <call>`：两个实现产物逐字节同；旧版次两边都拒。
 
-    `docs/331`。反糖是 `let __tur2_s.N = <call>` + `let __tur2_i.N = 0` +
+    `docs/334`。反糖是 `let __tur2_s.N = <call>` + `let __tur2_i.N = 0` +
     `while …`，两套实现同序；调用只求值一次。v1 只收调用（自举侧只有返回类型
     token 可用）。
     """
@@ -3792,7 +3792,7 @@ def test_m100_for_expression_twin():
 def test_m101_if_expression_twin():
     """Tur 2026.3 `let x: T = if c { a } else { b };`：两实现逐字节同；旧版次两边都拒。
 
-    `docs/332`。参考实现降成 `let x: T;` + `If`，自举侧按同一 token 形状直发同一条
+    `docs/335`。参考实现降成 `let x: T;` + `If`，自举侧按同一 token 形状直发同一条
     序列（条件、L1_then / L2_else / L3_end、两支各一条 store）。
     """
     if not _clang() or not _wsl():

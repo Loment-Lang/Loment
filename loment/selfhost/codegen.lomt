@@ -1457,7 +1457,7 @@ fn emit_syn(s: ptr, out: ptr, k: u32, line: u32) -> u32 {
         return emit_dec(s, out, line);
     }
     if k == 4 {
-        // 2026.3 `for x in <call>` 的源临时（`docs/331`）：`__tur2_s.N`。
+        // 2026.3 `for x in <call>` 的源临时（`docs/334`）：`__tur2_s.N`。
         emit_str(s, out, "__tur2_s.");
         return emit_dec(s, out, line);
     }
@@ -6228,7 +6228,7 @@ fn load_var(s: ptr, out: ptr, src: ptr, toks: ptr, name_tok: u32, lvl: u32) -> u
     return n;
 }
 
-/// 读一个合成局部（`__tur2_s.N`，`docs/331`）。类型不在 token 表里，由调用方给。
+/// 读一个合成局部（`__tur2_s.N`，`docs/334`）。类型不在 token 表里，由调用方给。
 fn load_syn_var(s: ptr, out: ptr, src: ptr, toks: ptr, ty: u32, fi: u32, lvl: u32) -> u32 {
     emit_str(s, out, "  ");
     let n: u32 = new_temp(s, out);
@@ -6580,7 +6580,7 @@ fn array_len_tok(src: ptr, toks: ptr, ty: u32) -> u32 {
 /// `if` / `else if` 链的发射。`cond` = **条件第一个 token**（不是 `if` 本身）——
 /// Tur 2 的隐式 elif（`else <条件> {`，`docs/296` §2.1）从 `else` 之后直接进来，
 /// 与 `else if` 走同一条路，标签编号因此与参考实现逐字节一致。
-/// `let x: T = if c { a } else { b };` 的发射（2026.3，`docs/332`）。
+/// `let x: T = if c { a } else { b };` 的发射（2026.3，`docs/335`）。
 /// 与参考实现反糖后的 `let x: T;` + `If` 同形：条件、L1_then / L2_else / L3_end
 /// 三个标签、两支各一条 `store <T> …, ptr %x.addr`。
 fn let_ifexpr(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, name: u32,
@@ -7691,7 +7691,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         let ty: u32 = j + 3;
         let eq: u32 = skip_type(src, toks, ty);   // '=' 的位置 (类型可能是 [T; N] / [T])
         if load32(s, CG_PROF) >= 2 && tok_is(src, toks, eq + 1, "if") {
-            // 2026.3 `let x: T = if c { a } else { b };`（`docs/332`）：参考实现把它
+            // 2026.3 `let x: T = if c { a } else { b };`（`docs/335`）：参考实现把它
             // 降成 `let x: T;` + 一条 If，两支各 `x = …`。
             return let_ifexpr(s, out, src, toks, j, name, ty, eq);
         }
@@ -7917,7 +7917,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
                 || (tok_is(src, toks, j + 2, "in") && load32(toks, (j + 3) * 20) == 0
                     && tok_is(src, toks, j + 4, "{"))) {
         // Tur 2 的 `for x in xs` / Tur 2026.3 的 `for i, x in xs`（`docs/296` §2.2、
-        // `docs/329` §5）。参考实现把它反糖成
+        // `docs/332` §5）。参考实现把它反糖成
         // `let __tur2_i.N = 0; while … { let i = __tur2_i.N; let x = xs[i]; 体; i = i+1 }`
         // —— 这里逐条照着发，指令顺序与临时编号才对得上。
         let st: u32 = fi_st;
@@ -7932,7 +7932,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
             return cg_fail(s, 2, j);
         }
         if fi_expr == 1 {
-            // `let __tur2_s.N: <ret> = <call>;` —— 调用只求值一次（`docs/331`）。
+            // `let __tur2_s.N: <ret> = <call>;` —— 调用只求值一次（`docs/334`）。
             let ssub: u32 = push_ty_subst(s, src, toks, sty);
             let _e0: u32 = expr_bin(s, out, src, toks, j + 3, 1, 0, sty);
             pop_subst(s, ssub);
@@ -9162,7 +9162,7 @@ fn collect_locals(s: ptr, src: ptr, toks: ptr, i: u32, end: u32) -> u32 {
                 && load32(toks, (j + 1) * 20) == 0 && tok_is(src, toks, j + 2, "in")
                 && load32(toks, (j + 3) * 20) == 0 && tok_is(src, toks, j + 4, "(")
                 && tok_is(src, toks, skip_parens(src, toks, j + 4) + 1, "{") {
-            // 2026.3 `for x in <call>`（`docs/331`）：局部顺序 = `__tur2_s.N`、
+            // 2026.3 `for x in <call>`（`docs/334`）：局部顺序 = `__tur2_s.N`、
             // `__tur2_i.N`、`x`。源临时后登记，先于循环；类型取调用返回类型 token。
             let sty: u32 = expr_type(s, src, toks, j + 3);
             let et: u32 = elem_tok(src, toks, sty);
@@ -9177,7 +9177,7 @@ fn collect_locals(s: ptr, src: ptr, toks: ptr, i: u32, end: u32) -> u32 {
                 && load32(toks, (j + 1) * 20) == 0 && tok_is(src, toks, j + 2, ",")
                 && load32(toks, (j + 3) * 20) == 0 && tok_is(src, toks, j + 4, "in")
                 && load32(toks, (j + 5) * 20) == 0 && tok_is(src, toks, j + 6, "{") {
-            // 2026.3 `for i, x in xs`（`docs/329` §5）：局部顺序 = `__tur2_i.N`、`i`、`x`。
+            // 2026.3 `for i, x in xs`（`docs/332` §5）：局部顺序 = `__tur2_i.N`、`i`、`x`。
             let st: u32 = j + 5;
             store32(s, 484, n);
             let sty: u32 = var_type(s, src, toks, st);

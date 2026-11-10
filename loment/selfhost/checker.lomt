@@ -3441,7 +3441,7 @@ fn chk_find_at(src: ptr, t: ptr, i: u32, hi: u32, what: str) -> u32 {
     return hi;
 }
 
-/// 2026.3 `for x in <call> {` 的形状：`for IDENT in IDENT ( … ) {`（`docs/331`）。
+/// 2026.3 `for x in <call> {` 的形状：`for IDENT in IDENT ( … ) {`（`docs/334`）。
 /// 必须看配对的 `)` —— 只看 `j + 4` 是 `(` 会把区间 for 的调用下界
 /// （`for i in lo() .. hi() {`）误判成调用源。
 fn chk_is_for_call(src: ptr, t: ptr, j: u32) -> u32 {
@@ -5211,7 +5211,7 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             let semi: u32 = chk_find_at(src, t, eq + 1, e, ";");
             if eq < e && semi <= e {
                 if chk_tok_is(src, t, eq + 1, "if") {
-                    // 2026.3 `let x: T = if c { a } else { b };`（`docs/332`）。
+                    // 2026.3 `let x: T = if c { a } else { b };`（`docs/335`）。
                     if load32(oc, 8) < 2 {
                         chk_pub(src, t, oc, p, E_PARSE, eq + 1);
                     } else {
@@ -5313,7 +5313,7 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 && chk_tok_is(src, t, j + 2, ",") && chk_tok_kind(t, j + 3) == 0
                 && chk_tok_is(src, t, j + 4, "in") && chk_tok_kind(t, j + 5) == 0
                 && chk_tok_is(src, t, j + 6, "{") {
-            // `for i, x in xs`（`docs/329` §5 第 2 项，2026.3）：下标是 u32 副本，
+            // `for i, x in xs`（`docs/332` §5 第 2 项，2026.3）：下标是 u32 副本，
             // 元素类型仍从 `xs` 的声明拿。2026.1 / 2026.2 里它是解析错。
             if load32(oc, 8) < 2 {
                 chk_pub(src, t, oc, p, E_PARSE, j);
@@ -5375,7 +5375,7 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 }
             }
         } else if chk_is_for_call(src, t, j) == 1 {
-            // 2026.3 `for x in <call>`（`docs/331`）：源是调用，类型取返回类型；
+            // 2026.3 `for x in <call>`（`docs/334`）：源是调用，类型取返回类型；
             // 体在配对 `)` 之后第一个深度 0 的 `{`。
             if load32(oc, 8) < 2 {
                 chk_pub(src, t, oc, p, E_PARSE, j);

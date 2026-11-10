@@ -1432,7 +1432,7 @@ def test_tur2026_3_struct_literal_shorthand():
 def test_tur2026_3_for_index():
     """2026.3 `for i, x in xs`：下标 `i` 是 u32 拷贝，元素 `x` 也是拷贝；旧版次仍拒。
 
-    `docs/329` §5 第 2 项。反糖形状与参考实现一致（`__tur2_i.N` + `while` + 体首
+    `docs/332` §5 第 2 项。反糖形状与参考实现一致（`__tur2_i.N` + `while` + 体首
     两条 `let`），自举侧因此能逐字节对拍（`loment_p8_test` M99）。
     """
     body = ("module m\n\n"
@@ -1467,7 +1467,7 @@ def test_tur2026_3_for_index():
 def test_tur2026_3_for_expression():
     """2026.3 `for x in <call>`：调用只求值一次，落到 `__tur2_s.N`；旧版次仍拒。
 
-    `docs/331`：v1 只收调用 —— 自举侧只有 `fn_ret` 能给出类型 token。数组与切片
+    `docs/334`：v1 只收调用 —— 自举侧只有 `fn_ret` 能给出类型 token。数组与切片
     返回都收。
     """
     body = ("module m\n\n"
@@ -1513,7 +1513,7 @@ def test_tur2026_3_for_expression():
 def test_tur2026_3_if_expression():
     """2026.3 `let x: T = if c { a } else { b };` —— 产物与显式 if 语句相同。
 
-    `docs/332`：v1 只收 `let` 的初值、两支各一个表达式、必须有 `else`。
+    `docs/335`：v1 只收 `let` 的初值、两支各一个表达式、必须有 `else`。
     """
     expr_form = ("module m\n\nfn f(c: bool) -> u32 {\n"
                  "    let x: u32 = if c { 10 } else { 20 };\n"

@@ -155,7 +155,7 @@ fn probes() -> u32 {
 
 // 每条记录三个字段：name,requires,implemented; —— implemented=0 时能力再全也报 unavailable。
 fn registry() -> str {
-    return "cpu.freq,32,0;cpu.load,32,1;cpu.sched,48,0;gpu.util,1056,0;gpu.mem,1056,0;gpu.clock,1024,0;gpu.therm,1024,0;gpu.proc,1056,0;mem.phys,128,1;mem.proc,192,1;mem.page,128,0;mem.leak,192,0;storage.space,256,0;storage.io,288,0;storage.proc,320,0;storage.cache,288,0;storage.smart,8192,0;storage.watch,8192,0;net.link,512,0;net.sock,512,0;net.bw,544,0;net.lat,4,0;proc.tree,64,0;proc.fd,64,0;proc.thread,131136,0;proc.sys,262208,0;power.batt,2048,0;power.rapl,2080,0;power.therm,2080,0;power.budget,2080,0;build.cache,32769,0;build.time,65537,0;build.dep,1,0;build.artifact,3,0;env.tool,4097,0;env.port,512,0;env.svc,4,0;env.watch,8193,0;";
+    return "cpu.freq,32,0;cpu.load,32,1;cpu.sched,48,0;gpu.util,1056,0;gpu.mem,1056,0;gpu.clock,1024,0;gpu.therm,1024,0;gpu.proc,1056,0;mem.phys,128,1;mem.proc,192,1;mem.page,128,0;mem.leak,192,0;storage.space,256,0;storage.io,288,0;storage.proc,320,0;storage.cache,288,0;storage.smart,8192,0;storage.watch,8192,0;net.link,512,0;net.sock,512,0;net.bw,544,0;net.lat,4,0;proc.tree,64,1;proc.fd,64,0;proc.thread,131136,0;proc.sys,262208,0;power.batt,2048,0;power.rapl,2080,0;power.therm,2080,0;power.budget,2080,0;build.cache,32769,0;build.time,65537,0;build.dep,1,0;build.artifact,3,0;env.tool,4097,0;env.port,512,0;env.svc,4,0;env.watch,8193,0;";
 }
 
 fn caps_blob() -> str {
@@ -525,6 +525,101 @@ fn cmd_mem_proc(json: u32, ok: u32) {
     }
 }
 
+// ---------------------------------------------------------------- 槽位：proc.tree
+// PROCESSENTRY32（x64，304 字节）：dwSize@0、th32ProcessID@8、th32DefaultHeapID@16、
+// th32ModuleID@24、cntThreads@28、th32ParentProcessID@32、pcPriClassBase@36、
+// dwFlags@40、szExeFile@44（260 字节）。每次调用都要把 dwSize 重新写上。
+fn decimal_width(v: u32) -> u32 {
+    let n: u32 = 1;
+    let x: u32 = v;
+    while x >= 10 {
+        x = x / 10;
+        n = n + 1;
+    }
+    return n;
+}
+
+fn pe32_name_len(p: ptr) -> u32 {
+    let n: u32 = 0;
+    while n < 259 {
+        if load8(p, 44 + n) == 0 {
+            return n;
+        }
+        n = n + 1;
+    }
+    return 259;
+}
+
+fn cmd_proc_tree(json: u32, ok: u32) {
+    if (CAP_PROC & ok) != CAP_PROC {
+        print("lmgr: proc.tree needs win.proc, which this platform does not provide\n");
+        syscall4(60, 2, 0, 0);
+        return;
+    }
+    let args: ptr = alloc(32);
+    let pe: ptr = alloc(320);
+    let h: i64 = win32_into(args, 7, 2, 0, 0);        // TH32CS_SNAPPROCESS
+    if h <= 0 {
+        print("lmgr: proc.tree snapshot failed\n");
+        syscall4(60, 2, 0, 0);
+        return;
+    }
+    let first: u32 = 1;
+    let n: u32 = 0;
+    let more: i64 = 1;
+    if json == 1 {
+        print("{\"schema\":\"lmgr/v1\",\"manager\":\"proc.tree\",\"rows\":[");
+    } else {
+        print("PID      PPID     THREADS  NAME\n");
+    }
+    while more > 0 {
+        zero_bytes(pe, 320);
+        wr32(pe, 0, 304);
+        if first == 1 {
+            more = win32_into(args, 8, h as u64, pe as u64, 0);   // Process32First
+            first = 0;
+        } else {
+            more = win32_into(args, 9, h as u64, pe as u64, 0);   // Process32Next
+        }
+        if more > 0 {
+            let pid: u32 = rd32(pe, 8);
+            let ppid: u32 = rd32(pe, 32);
+            let th: u32 = rd32(pe, 28);
+            let nl: u32 = pe32_name_len(pe);
+            if json == 1 {
+                if n > 0 {
+                    print(",");
+                }
+                print("{\"key\":\"pid:");
+                print_num(pid);
+                print("\",\"fields\":{\"ppid\":");
+                print_num(ppid);
+                print(",\"threads\":");
+                print_num(th);
+                print(",\"name\":\"");
+                w(pe, 44, nl);
+                print("\"}}");
+            } else {
+                print_num(pid);
+                pad_to(decimal_width(pid), 9);
+                print_num(ppid);
+                pad_to(decimal_width(ppid), 9);
+                print_num(th);
+                pad_to(decimal_width(th), 9);
+                w(pe, 44, nl);
+                print("\n");
+            }
+            n = n + 1;
+        }
+    }
+    win32_into(args, 6, h as u64, 0, 0);              // CloseHandle
+    if json == 1 {
+        print("],\"meta\":{\"processes\":");
+        print_num(n);
+        print("},\"degraded\":false,\"missing\":[]}\n");
+    }
+}
+
 // ---------------------------------------------------------------- 槽位：mem.phys
 fn cmd_mem_phys(json: u32, ok: u32) {
     if (CAP_MEM & ok) != CAP_MEM {
@@ -614,6 +709,7 @@ fn usage() {
     print("  lmgr cpu load [--json]  overall CPU busy percentage (PDH)\n");
     print("  lmgr mem phys [--json]  physical memory: total, available, load\n");
     print("  lmgr mem proc [--json]  top processes by working set\n");
+    print("  lmgr proc tree [--json] process tree: pid, ppid, threads, name\n");
     print("\n");
 }
 
@@ -673,6 +769,17 @@ fn main() {
             }
         }
         print("lmgr: mem needs a slot (e.g. `lmgr mem phys`)\n");
+        syscall4(60, 64, 0, 0);
+        return;
+    }
+    if argv_eq(buf, a1, "proc") {
+        if a2 != 0 {
+            if argv_eq(buf, a2, "tree") {
+                cmd_proc_tree(json, ok);
+                return;
+            }
+        }
+        print("lmgr: proc needs a slot (e.g. `lmgr proc tree`)\n");
         syscall4(60, 64, 0, 0);
         return;
     }

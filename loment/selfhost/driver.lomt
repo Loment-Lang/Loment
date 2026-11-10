@@ -1898,7 +1898,8 @@ fn core_word_bit(p: ptr, n: u32) -> u32 {
     }
     if pkg_eq(p, n, "lms_full") == 1 || pkg_eq(p, n, "lms_forensic_admin") == 1
             || pkg_eq(p, n, "lms_daily_admin") == 1
-            || pkg_eq(p, n, "lms_manage_only_admin") == 1 {
+            || pkg_eq(p, n, "lms_manage_only_admin") == 1
+            || pkg_eq(p, n, "lms_close_admin") == 1 {
         return 32;
     }
     if pkg_eq(p, n, "lspe_open_admin") == 1 || pkg_eq(p, n, "lspe_close_admin") == 1 {

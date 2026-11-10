@@ -3092,7 +3092,7 @@ CORE_DIMS: dict[str, tuple[str, ...]] = {
     # 取值**刻意不带机制名**：今天是边界检查，明天可能是派生指针追踪 ——
     # 与 `runtime` / `vm` 同一条纪律，装的东西不进值名。
     "lms": ("lms_full", "lms_forensic_admin", "lms_daily_admin",
-            "lms_manage_only_admin"),
+            "lms_manage_only_admin", "lms_close_admin"),
     # **安全审计**（`docs/262`，用户 2026-10-18 定第七维）。与其它六维**正交**：
     # 它不改变任何判决，只决定"放行有没有来源"的记录在不在。
     # `lspe_open_admin`（开）= 默认；`lspe_close_admin`（关）= **关审计，不关检查** ——
@@ -3233,6 +3233,9 @@ assert set(LMS_LEVEL_BUDGETS.values()) <= set(LMS_BUDGETS), LMS_LEVEL_BUDGETS
 #: 没有任何东西给它喂判决 —— 那不是"便宜一点"，那是一个**不会响的级**。
 LMS_TIERS: dict[str, tuple[bool, ...]] = {
     "lms_full":             (True, True, True, True, True, True, True),
+    # 用户 2026-11-10：**暴力彻底关掉七级** —— 一个都不留。
+    # 「O FUCK WHAT A PUSSY, CLOSE THAT FUCKING LMS」
+    "lms_close_admin":      (False, False, False, False, False, False, False),
     "lms_forensic_admin":   (True, True, True, True, False, False, False),
     "lms_daily_admin":      (True, False, True, True, False, False, False),
     "lms_manage_only_admin": (False, True, False, False, False, False, False),

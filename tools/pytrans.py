@@ -112,6 +112,16 @@
 按宽度写 `^ -1`）/ `list`·`dict` /
 `for … else` / `while … else`。理由与 C 那门一样：**跳过 = 产出一份少算一步却照样能编的单元**。
 
+**条件表达式** `a if c else b` **只在赋值或返回的右边收**：本语言没有表达式级的 `if`，
+那边能摊成两条语句（`x = …` → 先零值再 `if`/`else`；`return …` → 两条 `return`），
+求值顺序与 Python 一致（先算条件）。嵌进别的表达式里没有对应写法，点名拒。
+两个分支**必须同类型** —— 本语言没有公共类型可写。
+
+**脚本式写法**（没有 `def`，顶层语句就是程序）不归这一门管：`potato_from._synthesize_start`
+先把顶层语句折成 `def _start() -> None:` 的正文，再交给这里。所以这一门永远只看见
+`def` —— 而且这条规则**只对 `choose write grammar python` 成立**（用户 2026-11-10 的裁定），
+原生 Loment 与别的表层语法一行不动。
+
 ## 两条**决定**（不是翻译）
 
 1. **`int` 映 `i64`**，与 `potato_from.PY_TYPES` 一致。Python 的 `int` 是任意精度、
@@ -272,6 +282,14 @@ class Emitter:
         if isinstance(e, ast.UnaryOp):
             # Python 的 `not` **永远**出 bool（与 `and`/`or` 不同），所以它可翻。
             return "bool" if isinstance(e.op, ast.Not) else "i64"
+        if isinstance(e, ast.IfExp):
+            # 条件表达式：两个分支**必须同类型**（否则本语言没有共同的类型可写）。
+            a, b = self.ty_of(e.body), self.ty_of(e.orelse)
+            if a != b:
+                raise Unsupported(
+                    f"第 {e.lineno} 行: 条件表达式两个分支类型不同（{a} / {b}）—— "
+                    f"本语言没有公共类型可写，两边写成一样的")
+            return a
         if isinstance(e, ast.BinOp):
             if isinstance(e.op, ast.Add) and (self.ty_of(e.left) == "str"
                                               or self.ty_of(e.right) == "str"):
@@ -316,6 +334,14 @@ class Emitter:
 
     def raw(self, e) -> str:
         """表达式在**它自己的类型**下的写法。括号一律加上 —— 别让读者去猜优先级。"""
+        if isinstance(e, ast.IfExp):
+            # 本语言没有**表达式级**的 if —— 三元只在赋值/返回的右边收（那边能摊成
+            # 两条语句，见 `_bind_ternary` / `stmt(Return)`）。嵌进别的表达式里就没有
+            # 对应的写法了，点名拒，别发一份编不过的源。
+            raise Unsupported(
+                f"第 {e.lineno} 行: 条件表达式只收在**赋值或返回的右边**"
+                f"（`x = a if c else b` / `return a if c else b`）—— 本语言没有"
+                f"表达式级的 `if`，嵌在别的表达式里没有对应写法。先存进一个变量再拼")
         if isinstance(e, ast.Constant):
             if isinstance(e.value, bool):
                 return "true" if e.value else "false"
@@ -484,6 +510,15 @@ class Emitter:
                     f"第 {st.lineno} 行: 不支持不带值的 `return`。本语言的 `()` 函数"
                     f"**没有提前退出**——它跑到末尾就结束。把它改写成 `if`/`else` 让末尾成为"
                     f"唯一出口，或者把函数改成有返回值并用 `return 0`")
+            if isinstance(st.value, ast.IfExp):
+                # `return a if c else b` -> 两条 return（顺序与 Python 一致）。
+                self.out(f"if {self.ex(st.value.test, 'bool')} {{")
+                self.depth += 1
+                self.out(f"return {self.ex(st.value.body, self.ret)};")
+                self.depth -= 1
+                self.out("}")
+                self.out(f"return {self.ex(st.value.orelse, self.ret)};")
+                return
             self.out(f"return {self.ex(st.value, self.ret)};")
             return
         if isinstance(st, ast.If):
@@ -556,12 +591,53 @@ class Emitter:
             raise Unsupported(f"第 {st.lineno} 行: 循环体里给循环变量 `{name}` 赋值"
                               f"—— 见文件头 §`for` 的定义：那条降级式在这种写法下"
                               f"不成立（CPython 每轮都会重置它）。改用 `while`")
+        if isinstance(value, ast.IfExp):
+            # **在"已经赋过值"那一支之前**判：三元要摊成 if/else，纯赋值那条路
+            # 只会把它当表达式发（而本语言没有表达式级 if）。
+            self._bind_ternary(name, value, st)
+            return
         if name in self.vars:
             self.out(f"{sname} = {self.ex(value, self.vars[name])};")
             return
         ty = self._decl_type(st)
         self.vars[name] = ty
         self.out(f"let {sname}: {ty} = {self.ex(value, ty)};")
+
+    def _bind_ternary(self, name: str, value, st) -> None:
+        """`x = a if c else b` -> 先给零值，再 `if`/`else` 两条赋值。
+
+        **顺序不变**：Python 先算条件、再只算命中的那一支；这里也一样（先声明零值，
+        两支各在 `if` 里算一次）。写成 `let x = a; if !c { x = b }` 会先算 `a`，
+        带副作用时就不是同一个程序了。
+        """
+        if name in self._for_targets:
+            raise Unsupported(f"第 {st.lineno} 行: 循环体里给循环变量 `{name}` 赋值"
+                              f"—— 见文件头 §`for` 的定义：那条降级式在这种写法下"
+                              f"不成立（CPython 每轮都会重置它）。改用 `while`")
+        sname = _safe(name)
+        new = name not in self.vars
+        ty = self._decl_type(st) if new else self.vars[name]
+        if new:
+            self.vars[name] = ty
+            self.out(f"let {sname}: {ty} = {self._zero(ty)};")
+        self.out(f"if {self.ex(value.test, 'bool')} {{")
+        self.depth += 1
+        self.out(f"{sname} = {self.ex(value.body, ty)};")
+        self.depth -= 1
+        self.out("} else {")
+        self.depth += 1
+        self.out(f"{sname} = {self.ex(value.orelse, ty)};")
+        self.depth -= 1
+        self.out("}")
+
+    @staticmethod
+    def _zero(ty: str) -> str:
+        """声明用的零值（本语言的 `let` 要初值）。"""
+        if ty == "bool":
+            return "false"
+        if ty == "str":
+            return '""'
+        return "0"
 
     def _decl_type(self, st) -> str:
         """局部变量的类型：注解优先，否则看右值（比较/布尔/`not` 出 `bool`）。"""

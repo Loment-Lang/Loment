@@ -15,9 +15,13 @@
 // 不做的: `TFD_TIMER_CANCEL_ON_SET` 的按需启动细节、`clock_gettime` 之外的其他钟、
 // 以及 absolute 时间的换算（调用方用 `os/time` 拼）。
 //
+// 结构体的字节打包统一在 `timeabi`（timerfd/futex/interval/alarm 共用一份）。
+//
 // 命名: 公开 tf_*, 内部 tq_*。自检 test_timerfd_*。
 
 module timerfd
+
+use timeabi
 
 /// 子进程不继承。
 pub const TF_CLOEXEC: u32 = 524288;
@@ -57,25 +61,6 @@ fn tq_sep(out: ptr, cap: u32, pos: u32) -> u32 {
     return pos;
 }
 
-fn tq_st64(p: ptr, off: u32, v: u64) -> u32 {
-    let b: u32 = 0;
-    while b < 8 {
-        store8(p, off + b, ((v >> (8 * b)) & 255) as u8);
-        b = b + 1;
-    }
-    return off + 8;
-}
-
-fn tq_ld64(p: ptr, off: u32) -> u64 {
-    let v: u64 = 0;
-    let b: u32 = 0;
-    while b < 8 {
-        v = v | ((load8(p, off + b) as u64) << (8 * b));
-        b = b + 1;
-    }
-    return v;
-}
-
 /// 标志位 -> 名字串。0 返回 `"0"`。
 pub fn tf_flags_text(flags: u32, out: ptr, cap: u32) -> u32 {
     if flags == 0 {
@@ -107,27 +92,23 @@ pub fn tf_create(clockid: u32, flags: u32) -> i64 {
 
 /// 往调用方给的 32 字节里打一份 itimerspec。返回 32。
 pub fn tf_spec_set(spec: ptr, isec: u64, insec: u64, vsec: u64, vnsec: u64) -> u32 {
-    let _a: u32 = tq_st64(spec, 0, isec);
-    let _b: u32 = tq_st64(spec, 8, insec);
-    let _c: u32 = tq_st64(spec, 16, vsec);
-    let _d: u32 = tq_st64(spec, 24, vnsec);
-    return TF_SPEC_BYTES;
+    return ta_its_pack(spec, isec, insec, vsec, vnsec);
 }
 
 pub fn tf_spec_isec(spec: ptr) -> u64 {
-    return tq_ld64(spec, 0);
+    return ta_its_interval_sec(spec);
 }
 
 pub fn tf_spec_insec(spec: ptr) -> u64 {
-    return tq_ld64(spec, 8);
+    return ta_its_interval_nsec(spec);
 }
 
 pub fn tf_spec_vsec(spec: ptr) -> u64 {
-    return tq_ld64(spec, 16);
+    return ta_its_value_sec(spec);
 }
 
 pub fn tf_spec_vnsec(spec: ptr) -> u64 {
-    return tq_ld64(spec, 24);
+    return ta_its_value_nsec(spec);
 }
 
 /// `timerfd_settime(fd, flags, spec)` —— 成功返回 0。
@@ -152,7 +133,7 @@ pub fn tf_take_expirations(fd: u64) -> u64 {
     if r != 8 {
         return 0;
     }
-    return tq_ld64(b, 0);
+    return ta_ts_sec(b);
 }
 
 // ---------------------------------------------------------------- 自检

@@ -115,8 +115,9 @@ REPOS: dict[str, dict] = {
             ".claude/skills/loment-toolchain/",
             # 工具：`tools/lom*` 一次收全（lomelf / lomentc / lomc / lomdoc / lom_audit …）
             "tools/lom*",
-            # lmgr：套件源与它的判据（`docs/303`）。名字不以 `lom` 开头，所以单独收。
-            "lmgr/", "tools/lmgr*",
+            # lmgr 的判据（`docs/303`）。源已搬进 `loment/tools/lmgr.lomt`，由上面
+            # 那条 `loment/` 与发布账本的 `loment/tools/*.lomt` 覆盖。
+            "tools/lmgr*",
             # 文档：**一条 `docs/*.md` 收全**。
             #
             # 原文是按名字分段收（`docs/14*-loment-*.md` + 一串 explicit 补漏），那是在

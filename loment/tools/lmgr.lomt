@@ -29,8 +29,6 @@ const CAP_BUILD_TIME: u32 = 65536;
 const CAP_THREAD: u32 = 131072;
 const CAP_ETW: u32 = 262144;
 
-const CAP_N: u32 = 19;
-
 const AT_FDCWD: u64 = 18446744073709551516;
 
 const N_SLOTS: u32 = 38;
@@ -66,8 +64,8 @@ fn state_name(s: u32) -> str {
     return "unavailable";
 }
 
-fn state_of(req: u32, ok: u32, impl: u32) -> u32 {
-    if impl == 0 {
+fn state_of(req: u32, ok: u32, done: u32) -> u32 {
+    if done == 0 {
         return 2;                 // 能力齐了但槽位还没实现，也是 unavailable
     }
     if req == 0 {
@@ -132,22 +130,10 @@ fn probe_pdh() -> u32 {
 }
 
 fn probes() -> u32 {
-    let caps: [u32; 19] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                           0, 0, 0, 0, 0, 0, 0, 0, 0];
-    caps[0] = probe_fs_read();
-    caps[1] = probe_fs_stat();
-    caps[2] = probe_net_tcp();
-    caps[3] = probe_time_mono();
-    caps[5] = probe_pdh();
-    caps[6] = probe_proc();
-    caps[7] = probe_mem();
-    let ok: u32 = 0;
-    let i: u32 = 0;
-    while i < CAP_N {
-        ok = ok | caps[i];
-        i = i + 1;
-    }
-    return ok;
+    // 没有探针的能力返回 0，所以这里只 OR 真的会跑的那几个 —— 不需要一张 19 格的数组
+    // 和它的上界（`docs/345` 的容量口径下，那是一处没有失败路径的定长表）。
+    return probe_fs_read() | probe_fs_stat() | probe_net_tcp() | probe_time_mono()
+         | probe_pdh() | probe_proc() | probe_mem();
 }
 
 // ---------------------------------------------------------------- 注册表
@@ -155,7 +141,7 @@ fn probes() -> u32 {
 
 // 每条记录三个字段：name,requires,implemented; —— implemented=0 时能力再全也报 unavailable。
 fn registry() -> str {
-    return "cpu.freq,32,0;cpu.load,32,1;cpu.sched,48,0;gpu.util,1056,0;gpu.mem,1056,0;gpu.clock,1024,0;gpu.therm,1024,0;gpu.proc,1056,0;mem.phys,128,1;mem.proc,192,1;mem.page,128,0;mem.leak,192,0;storage.space,256,0;storage.io,288,0;storage.proc,320,0;storage.cache,288,0;storage.smart,8192,0;storage.watch,8192,0;net.link,512,0;net.sock,512,0;net.bw,544,0;net.lat,4,0;proc.tree,64,0;proc.fd,64,0;proc.thread,131136,0;proc.sys,262208,0;power.batt,2048,0;power.rapl,2080,0;power.therm,2080,0;power.budget,2080,0;build.cache,32769,0;build.time,65537,0;build.dep,1,0;build.artifact,3,0;env.tool,4097,0;env.port,512,0;env.svc,4,0;env.watch,8193,0;";
+    return "cpu.freq,32,0;cpu.load,32,1;cpu.sched,48,0;gpu.util,1056,0;gpu.mem,1056,0;gpu.clock,1024,0;gpu.therm,1024,0;gpu.proc,1056,0;mem.phys,128,1;mem.proc,192,1;mem.page,128,0;mem.leak,192,0;storage.space,256,0;storage.io,288,0;storage.proc,320,0;storage.cache,288,0;storage.smart,8192,0;storage.watch,8192,0;net.link,512,0;net.sock,512,0;net.bw,544,0;net.lat,4,0;proc.tree,64,1;proc.fd,64,0;proc.thread,131136,0;proc.sys,262208,0;power.batt,2048,0;power.rapl,2080,0;power.therm,2080,0;power.budget,2080,0;build.cache,32769,0;build.time,65537,0;build.dep,1,0;build.artifact,3,0;env.tool,4097,0;env.port,512,0;env.svc,4,0;env.watch,8193,0;";
 }
 
 fn caps_blob() -> str {
@@ -170,7 +156,7 @@ fn cmd_list(json: u32, ok: u32) {
     let s: u32 = 0;
     let ne: u32 = 0;
     let mask: u32 = 0;
-    let impl: u32 = 0;
+    let done: u32 = 0;
     let field: u32 = 0;
     let first: bool = true;
     let avail: u32 = 0;
@@ -190,11 +176,11 @@ fn cmd_list(json: u32, ok: u32) {
                 mask = 0;
             } else {
                 field = 2;
-                impl = 0;
+                done = 0;
             }
         } else {
             if c == 59 {
-                let st: u32 = state_of(mask, ok, impl);
+                let st: u32 = state_of(mask, ok, done);
                 if st == 0 {
                     avail = avail + 1;
                 }
@@ -207,7 +193,7 @@ fn cmd_list(json: u32, ok: u32) {
                     print("\",\"state\":\"");
                     print(state_name(st));
                     print("\",\"implemented\":");
-                    if impl == 1 {
+                    if done == 1 {
                         print("true");
                     } else {
                         print("false");
@@ -231,7 +217,7 @@ fn cmd_list(json: u32, ok: u32) {
                     mask = mask * 10 + (c - 48);
                 } else {
                     if field == 2 {
-                        impl = impl * 10 + (c - 48);
+                        done = done * 10 + (c - 48);
                     }
                 }
             }
@@ -353,13 +339,16 @@ fn wr32(p: ptr, off: u32, v: u32) {
     store8(p, off + 3, ((v >> 24) & 255 as u32) as u8);
 }
 
+// 定宽 8 字节小端：展开写，不设循环上界（`docs/345`）。
 fn wr64(p: ptr, off: u32, v: u64) {
-    let i: u32 = 0;
-    while i < 8 {
-        let sh: u64 = (i * 8) as u64;
-        store8(p, off + i, ((v >> sh) & 255 as u64) as u8);
-        i = i + 1;
-    }
+    store8(p, off, (v & 255 as u64) as u8);
+    store8(p, off + 1, ((v >> 8) & 255 as u64) as u8);
+    store8(p, off + 2, ((v >> 16) & 255 as u64) as u8);
+    store8(p, off + 3, ((v >> 24) & 255 as u64) as u8);
+    store8(p, off + 4, ((v >> 32) & 255 as u64) as u8);
+    store8(p, off + 5, ((v >> 40) & 255 as u64) as u8);
+    store8(p, off + 6, ((v >> 48) & 255 as u64) as u8);
+    store8(p, off + 7, ((v >> 56) & 255 as u64) as u8);
 }
 
 fn rd32(p: ptr, off: u32) -> u32 {
@@ -424,7 +413,6 @@ fn cmd_mem_proc(json: u32, ok: u32) {
     if (CAP_PROC & ok) != CAP_PROC {
         print("lmgr: mem.proc needs win.proc, which this platform does not provide\n");
         syscall4(60, 2, 0, 0);
-        return;
     }
     let pids: ptr = alloc(1024);
     let needed: ptr = alloc(4);
@@ -435,7 +423,6 @@ fn cmd_mem_proc(json: u32, ok: u32) {
     if r <= 0 {
         print("lmgr: mem.proc enumeration failed\n");
         syscall4(60, 2, 0, 0);
-        return;
     }
     let n: u32 = rd32(needed, 0) / 4;
     if n > 256 {
@@ -525,12 +512,104 @@ fn cmd_mem_proc(json: u32, ok: u32) {
     }
 }
 
+// ---------------------------------------------------------------- 槽位：proc.tree
+// PROCESSENTRY32（x64，304 字节）：dwSize@0、th32ProcessID@8、th32DefaultHeapID@16、
+// th32ModuleID@24、cntThreads@28、th32ParentProcessID@32、pcPriClassBase@36、
+// dwFlags@40、szExeFile@44（260 字节）。每次调用都要把 dwSize 重新写上。
+fn decimal_width(v: u32) -> u32 {
+    let n: u32 = 1;
+    let x: u32 = v;
+    while x >= 10 {
+        x = x / 10;
+        n = n + 1;
+    }
+    return n;
+}
+
+fn pe32_name_len(p: ptr) -> u32 {
+    let n: u32 = 0;
+    while n < 259 {
+        if load8(p, 44 + n) == 0 {
+            return n;
+        }
+        n = n + 1;
+    }
+    return 259;
+}
+
+fn cmd_proc_tree(json: u32, ok: u32) {
+    if (CAP_PROC & ok) != CAP_PROC {
+        print("lmgr: proc.tree needs win.proc, which this platform does not provide\n");
+        syscall4(60, 2, 0, 0);
+    }
+    let args: ptr = alloc(32);
+    let pe: ptr = alloc(320);
+    let h: i64 = win32_into(args, 7, 2, 0, 0);        // TH32CS_SNAPPROCESS
+    if h <= 0 {
+        print("lmgr: proc.tree snapshot failed\n");
+        syscall4(60, 2, 0, 0);
+    }
+    let first: u32 = 1;
+    let n: u32 = 0;
+    let more: i64 = 1;
+    if json == 1 {
+        print("{\"schema\":\"lmgr/v1\",\"manager\":\"proc.tree\",\"rows\":[");
+    } else {
+        print("PID      PPID     THREADS  NAME\n");
+    }
+    while more > 0 {
+        zero_bytes(pe, 320);
+        wr32(pe, 0, 304);
+        if first == 1 {
+            more = win32_into(args, 8, h as u64, pe as u64, 0);   // Process32First
+            first = 0;
+        } else {
+            more = win32_into(args, 9, h as u64, pe as u64, 0);   // Process32Next
+        }
+        if more > 0 {
+            let pid: u32 = rd32(pe, 8);
+            let ppid: u32 = rd32(pe, 32);
+            let th: u32 = rd32(pe, 28);
+            let nl: u32 = pe32_name_len(pe);
+            if json == 1 {
+                if n > 0 {
+                    print(",");
+                }
+                print("{\"key\":\"pid:");
+                print_num(pid);
+                print("\",\"fields\":{\"ppid\":");
+                print_num(ppid);
+                print(",\"threads\":");
+                print_num(th);
+                print(",\"name\":\"");
+                w(pe, 44, nl);
+                print("\"}}");
+            } else {
+                print_num(pid);
+                pad_to(decimal_width(pid), 9);
+                print_num(ppid);
+                pad_to(decimal_width(ppid), 9);
+                print_num(th);
+                pad_to(decimal_width(th), 9);
+                w(pe, 44, nl);
+                print("\n");
+            }
+            n = n + 1;
+        }
+    }
+    win32_into(args, 6, h as u64, 0, 0);              // CloseHandle
+    if json == 1 {
+        print("],\"meta\":{\"processes\":");
+        print_num(n);
+        print("},\"degraded\":false,\"missing\":[]}\n");
+    }
+}
+
 // ---------------------------------------------------------------- 槽位：mem.phys
 fn cmd_mem_phys(json: u32, ok: u32) {
     if (CAP_MEM & ok) != CAP_MEM {
         print("lmgr: mem.phys needs win.mem, which this platform does not provide\n");
         syscall4(60, 2, 0, 0);
-        return;
     }
     let mem: ptr = alloc(64);
     zero_bytes(mem, 64);
@@ -542,7 +621,6 @@ fn cmd_mem_phys(json: u32, ok: u32) {
     if r <= 0 {
         print("lmgr: mem.phys probe failed\n");
         syscall4(60, 2, 0, 0);
-        return;
     }
     let load: u32 = rd32(mem, 4);
     let total_mib: u32 = (rd32(mem, 12) << 12) | (rd32(mem, 8) >> 20);
@@ -580,7 +658,6 @@ fn cmd_cpu_load(json: u32, ok: u32) {
     if (CAP_PDH & ok) != CAP_PDH {
         print("lmgr: cpu.load needs win.pdh, which this platform does not provide\n");
         syscall4(60, 2, 0, 0);
-        return;
     }
     let path: str = "\\Processor Information(_Total)\\% Processor Time";
     let out: ptr = alloc(16);
@@ -590,7 +667,6 @@ fn cmd_cpu_load(json: u32, ok: u32) {
         print_num(r as u32);
         print(")\n");
         syscall4(60, 2, 0, 0);
-        return;
     }
     let v: u32 = read_u32_le(out);
     if json == 1 {
@@ -614,7 +690,67 @@ fn usage() {
     print("  lmgr cpu load [--json]  overall CPU busy percentage (PDH)\n");
     print("  lmgr mem phys [--json]  physical memory: total, available, load\n");
     print("  lmgr mem proc [--json]  top processes by working set\n");
+    print("  lmgr proc tree [--json] process tree: pid, ppid, threads, name\n");
     print("\n");
+}
+
+
+// 分派写成**带返回值的函数**：裸 `return;` 自举侧的 parser 还不支持（`docs/345` 那类
+// 工具缺口），而 `return 0;` 两条实现都收。
+fn dispatch(buf: ptr, a1: u64, a2: u64, json: u32, ok: u32) -> u32 {
+    if a1 == 0 {
+        usage();
+        cmd_list(0, ok);
+        return 0;
+    }
+    if argv_eq(buf, a1, "list") {
+        cmd_list(json, ok);
+        return 0;
+    }
+    if argv_eq(buf, a1, "doctor") {
+        cmd_doctor(json, ok);
+        return 0;
+    }
+    if argv_eq(buf, a1, "cpu") {
+        if a2 != 0 {
+            if argv_eq(buf, a2, "load") {
+                cmd_cpu_load(json, ok);
+                return 0;
+            }
+        }
+        print("lmgr: cpu needs a slot (e.g. `lmgr cpu load`)\n");
+        syscall4(60, 64, 0, 0);
+    }
+    if argv_eq(buf, a1, "mem") {
+        if a2 != 0 {
+            if argv_eq(buf, a2, "phys") {
+                cmd_mem_phys(json, ok);
+                return 0;
+            }
+            if argv_eq(buf, a2, "proc") {
+                cmd_mem_proc(json, ok);
+                return 0;
+            }
+        }
+        print("lmgr: mem needs a slot (e.g. `lmgr mem phys`)\n");
+        syscall4(60, 64, 0, 0);
+    }
+    if argv_eq(buf, a1, "proc") {
+        if a2 != 0 {
+            if argv_eq(buf, a2, "tree") {
+                cmd_proc_tree(json, ok);
+                return 0;
+            }
+        }
+        print("lmgr: proc needs a slot (e.g. `lmgr proc tree`)\n");
+        syscall4(60, 64, 0, 0);
+    }
+    if argv_eq(buf, a1, "--json") {
+        cmd_list(1, ok);
+        return 0;
+    }
+    usage();
+    return 0;
 }
 
 fn main() {
@@ -637,48 +773,5 @@ fn main() {
         }
     }
 
-    if a1 == 0 {
-        usage();
-        cmd_list(0, ok);
-        return;
-    }
-    if argv_eq(buf, a1, "list") {
-        cmd_list(json, ok);
-        return;
-    }
-    if argv_eq(buf, a1, "doctor") {
-        cmd_doctor(json, ok);
-        return;
-    }
-    if argv_eq(buf, a1, "cpu") {
-        if a2 != 0 {
-            if argv_eq(buf, a2, "load") {
-                cmd_cpu_load(json, ok);
-                return;
-            }
-        }
-        print("lmgr: cpu needs a slot (e.g. `lmgr cpu load`)\n");
-        syscall4(60, 64, 0, 0);
-        return;
-    }
-    if argv_eq(buf, a1, "mem") {
-        if a2 != 0 {
-            if argv_eq(buf, a2, "phys") {
-                cmd_mem_phys(json, ok);
-                return;
-            }
-            if argv_eq(buf, a2, "proc") {
-                cmd_mem_proc(json, ok);
-                return;
-            }
-        }
-        print("lmgr: mem needs a slot (e.g. `lmgr mem phys`)\n");
-        syscall4(60, 64, 0, 0);
-        return;
-    }
-    if argv_eq(buf, a1, "--json") {
-        cmd_list(1, ok);
-        return;
-    }
-    usage();
+    let rc: u32 = dispatch(buf, a1, a2, json, ok);
 }

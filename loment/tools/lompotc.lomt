@@ -6269,12 +6269,39 @@ fn py_emit_tab(mem: ptr, src: ptr, out: ptr, o: u32) -> u32 {
 }
 
 /// 函数的那个数组。三条扫描共用一台机器：**只认缩进 0 上的行**。
-fn py_emit_functions(mem: ptr, src: ptr, n: u32, out: ptr, o: u32) -> u32 {
+/// 脚本式入口那一条函数：`{"name": "_start", …, "body": <顶层语句>, "body_line": N}`。
+fn py_emit_start(mem: ptr, src: ptr, n: u32, out: ptr, o: u32,
+                 head: u32, stop: u32) -> u32 {
+    let dst: ptr = ptr_add(mem, M_NORM);
+    let bl: u32 = py_start_body(mem, src, n, head, stop, dst);
+    o = jl(out, o, "{\"name\": \"_start\", \"params\": [], \"ret\": \"()\", \"body\": ");
+    o = jq(out, o, dst, 0, bl);
+    o = jl(out, o, ", \"body_line\": ");
+    o = jint(out, o, 0, line_of(src, head));   // 入口头那一行本身就是 body_line
+    return jl(out, o, "}");
+}
+
+fn py_emit_functions(mem: ptr, src: ptr, n: u32, out: ptr, o: u32,
+                     head: u32, stop: u32) -> u32 {
     let py: ptr = pym(mem);
     let i: u32 = 0;
     let instr: u32 = 0;
     let first: u32 = 1;
+    let done: u32 = 0;
+    if head == FAIL {
+        done = 1;
+    }
     while i < n {
+        // 脚本式入口按**行号**插在它该在的位置（`from_python` 也是按行号插的），
+        // 否则 `_join_bodies` 垫完空行之后后面每一段的行号都会漂。
+        if done == 0 && i > head {
+            if first == 0 {
+                o = jl(out, o, ", ");
+            }
+            first = 0;
+            o = py_emit_start(mem, src, n, out, o, head, stop);
+            done = 1;
+        }
         let _r: u32 = py_line(mem, src, n, i, instr);
         instr = ld32(py, PY_STR);
         let nxt: u32 = ld32(py, PY_NEXT);
@@ -6323,6 +6350,12 @@ fn py_emit_functions(mem: ptr, src: ptr, n: u32, out: ptr, o: u32) -> u32 {
             }
         }
         i = nxt;
+    }
+    if done == 0 {
+        if first == 0 {
+            o = jl(out, o, ", ");
+        }
+        o = py_emit_start(mem, src, n, out, o, head, stop);
     }
     return o;
 }
@@ -6604,6 +6637,25 @@ fn py_field_line(mem: ptr, src: ptr, a: u32, b: u32) -> u32 {
 /// 所以"认下的"要在同一口径上排除：装饰器行（附在下一条）、文档串、`def`/`class`/
 /// `async`（函数那一支认）、全大写 `NAME =` / `NAME: T`（常量那一支认）。
 fn py_say_top(mem: ptr, src: ptr, n: u32) -> u64 {
+    // 顶层语句现在是**入口的正文**（脚本式写法，`py_top_scan` / `py_start_body`）——
+    // 只有与 `def _start` 撞车时才报一条，与 `from_python._synthesize_start` 同口径。
+    let sc: ptr = ptr_add(mem, M_R + 112);
+    if py_top_scan(mem, src, n, sc) == 0 {
+        return 0;                       // 没有顶层语句
+    }
+    let ok: u32 = 0;                    // 合成得了吗
+    if ld32(sc, 0) > 1 && ld32(sc, 4) != FAIL {
+        ok = 1;
+    }
+    if ok == 1 && py_has_start(mem, src, n) == 0 {
+        return 0;                       // 有地方放入口头、又没有 `def _start`：正常
+    }
+    let nm: str = "_start";
+    return say2("decl", str_ptr(nm), str_len(nm));
+}
+
+/// 这份源里有没有 `def _start`（脚本式写法与它**二选一**）。
+fn py_has_start(mem: ptr, src: ptr, n: u32) -> u32 {
     let py: ptr = pym(mem);
     let i: u32 = 0;
     let instr: u32 = 0;
@@ -6613,55 +6665,194 @@ fn py_say_top(mem: ptr, src: ptr, n: u32) -> u64 {
         let nxt: u32 = ld32(py, PY_NEXT);
         let fl: u32 = ld32(py, PY_FL);
         if (fl & 2) == 0 && (fl & 1) == 0 && ld32(py, PY_IND) == 0 {
-            let s: u32 = ld32(py, PY_FC);
             let ce: u32 = ld32(py, PY_CE);
-            let c: u32 = load8(src, s);
-            if c != 64 && c != 34 && c != 39 {
-                let np: ptr = ptr_add(mem, M_R + 96);
-                let ne: u32 = py_ident(src, s, ce, np);
-                let note: u32 = 1;
-                if ne != FAIL {
-                    let no: u32 = ld32(np, 0);
-                    let nl: u32 = ld32(np, 4);
-                    if py_word_in("\ndef\nclass\nasync\n", src, no, nl) == 1 {
-                        note = 0;
+            let j: u32 = py_def_head(src, ld32(py, PY_FC), ce);
+            if j != FAIL {
+                if py_signature(mem, src, n, j, ce) == 1 {
+                    let no: u32 = ld32(py, PY_NO);
+                    let nl: u32 = ld32(py, PY_NL);
+                    if nl == 6 && same_n(src, no, str_ptr("_start"), 0, 6) == 1 {
+                        return 1;
                     }
-                    if py_isupper(src, no, nl) == 1 && py_is_kw(src, no, nl) == 0 {
-                        let t: u32 = py_ws(src, ne, ce);
-                        if t < ce && load8(src, t) == 58 {
-                            note = 0;                  // `NAME: T …` 是带注解的常量
-                        }
-                        if t < ce && load8(src, t) == 61 {
-                            // 只有**单目标**赋值才是常量：`A = B = 1` 上游不收（落进
-                            // "顶层语句"那一支），所以值里再出现顶层 `=` 就不算认下
-                            let two: u32 = 0;
-                            if t + 1 < ce && load8(src, t + 1) == 61 {
-                                two = 1;
-                            }
-                            if two == 0 && py_find_top(src, t + 1, ce, 61, 1) >= ce {
-                                note = 0;
-                            }
-                        }
-                    }
-                }
-                if note == 1 {
-                    let k: u32 = s;
-                    while k < ce && load8(src, k) != 32 && load8(src, k) != 9
-                            && load8(src, k) != 58 {
-                        k = k + 1;
-                    }
-                    let l0: u32 = k - s;
-                    let l: u32 = l0;
-                    if l > 24 {
-                        l = 24;
-                    }
-                    let _s: u64 = say2("decl", ptr_add(src, s), l);
                 }
             }
         }
         i = nxt;
     }
     return 0;
+}
+
+/// 顶层这一行是不是**可执行语句**（不是 `def` / `class` / 全大写常量 / 文档串 / 装饰器）。
+///
+/// 与 `py_emit_functions` / `py_emit_consts` 判"谁认领这一行"用的是同一套判据 ——
+/// 只是这里问的是**剩下的那些**，它们合成入口的正文。
+fn py_plain_stmt(mem: ptr, src: ptr, fc: u32, ce: u32) -> u32 {
+    let c: u32 = load8(src, fc);
+    if c == 64 || c == 34 || c == 39 {
+        return 0;                       // 装饰器 / 文档串
+    }
+    if py_def_head(src, fc, ce) != FAIL {
+        return 0;
+    }
+    if py_class_head(src, fc, ce) != FAIL {
+        return 0;
+    }
+    let np: ptr = ptr_add(mem, M_R + 96);
+    let ne: u32 = py_ident(src, fc, ce, np);
+    if ne != FAIL {
+        let no: u32 = ld32(np, 0);
+        let nl: u32 = ld32(np, 4);
+        if py_isupper(src, no, nl) == 1 && py_is_kw(src, no, nl) == 0 {
+            let t: u32 = py_ws(src, ne, ce);
+            if t < ce && load8(src, t) == 58 {
+                return 0;               // `NAME: T = …` 是带注解的常量
+            }
+            if t < ce && load8(src, t) == 61 {
+                // **只有单目标赋值**才是常量：`A = B = 1` 上游落进"顶层语句"那一支
+                let two: u32 = 0;
+                if t + 1 < ce && load8(src, t + 1) == 61 {
+                    two = 1;
+                }
+                if two == 0 && py_find_top(src, t + 1, ce, 61, 1) >= ce {
+                    return 0;
+                }
+            }
+        }
+    }
+    return 1;
+}
+
+/// 第 `ln` 行（1 起）的字节起点；没有那一行时返回 FAIL。
+fn byte_of_line(src: ptr, n: u32, ln: u32) -> u32 {
+    let c: u32 = 1;
+    let i: u32 = 0;
+    while i < n {
+        if c == ln {
+            return i;
+        }
+        if load8(src, i) == 10 {
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    return FAIL;
+}
+
+/// 顶层语句的**范围**：`outp` 收 `[0]` 首行(0 = 没有)、`[4]` 入口头字节起点、
+/// `[8]` 末段字节终点。返回 1 = 有顶层语句。
+///
+/// 入口头放在第一条语句**上面那一行**（按构造它不是语句），于是语句的行号一行不挪。
+fn py_top_scan(mem: ptr, src: ptr, n: u32, outp: ptr) -> u32 {
+    let py: ptr = pym(mem);
+    let i: u32 = 0;
+    let instr: u32 = 0;
+    let head: u32 = FAIL;
+    let firstln: u32 = 0;
+    let last: u32 = 0;
+    let cur: u32 = 0;
+    while i < n {
+        let _r: u32 = py_line(mem, src, n, i, instr);
+        instr = ld32(py, PY_STR);
+        let nxt: u32 = ld32(py, PY_NEXT);
+        let fl: u32 = ld32(py, PY_FL);
+        if (fl & 2) == 0 && (fl & 1) == 0 && ld32(py, PY_IND) == 0 {
+            if py_plain_stmt(mem, src, ld32(py, PY_FC), ld32(py, PY_CE)) == 1 {
+                if head == FAIL {
+                    firstln = line_of(src, i);   // 第一条语句自己那一行（1 起）
+                    // 入口头占**上一行**：按行号反查它的字节起点。别用"上一次循环的
+                    // `i`" 或"往前找上一个换行"——空行不产生记号行，两种都会落到
+                    // 上一个**代码行**上（实测差好几行）。
+                    if firstln > 1 {
+                        head = byte_of_line(src, n, firstln - 1);
+                    }
+                }
+                let _b: u32 = py_block(mem, src, n, i, 0);
+                if ld32(py, PB_FL) == 0 {
+                    cur = ld32(py, PB_END);
+                } else {
+                    cur = nxt;          // 单行语句：就到这一行末尾（含换行）
+                }
+                last = cur;
+            }
+        }
+        i = nxt;
+    }
+    if firstln == 0 {
+        let _a: u32 = st32(outp, 0, 0);
+        return 0;
+    }
+    let _a: u32 = st32(outp, 0, firstln);
+    let _b: u32 = st32(outp, 4, head);
+    let _c: u32 = st32(outp, 8, last);
+    return 1;
+}
+
+/// 脚本式入口的正文：入口头 + 每条顶层语句（缩进四格），其余行留空（行号不挪）。
+/// 返回写进 `dst` 的长度。
+fn py_start_body(mem: ptr, src: ptr, n: u32, head: u32, stop: u32, dst: ptr) -> u32 {
+    let py: ptr = pym(mem);
+    let hdr: str = "def _start() -> None:";
+    let o: u32 = copy_n(dst, 0, str_ptr(hdr), 0, str_len(hdr));
+    let p: u32 = head;
+    let cur: u32 = 0;
+    let instr: u32 = 0;
+    while p < stop {
+        let _r: u32 = py_line(mem, src, n, p, instr);
+        instr = ld32(py, PY_STR);
+        let nxt: u32 = ld32(py, PY_NEXT);
+        let le0: u32 = ifch(nxt, stop);
+        // PY_NEXT 指向**下一行的开头**（含本行的换行符）—— 抄这一行文字时要把它剔掉
+        let le: u32 = le0;
+        if le > p && load8(src, le - 1) == 10 {
+            le = le - 1;
+        }
+        if p == head {
+            // 入口头那一行：文字已经写过，只差换行
+        } else if p < cur {
+            o = py_four(dst, o);
+            let _c3: u32 = copy_n(dst, o, src, p, le - p);
+            o = o + (le - p);
+        } else {
+            let fl: u32 = ld32(py, PY_FL);
+            if (fl & 2) == 0 && (fl & 1) == 0 && ld32(py, PY_IND) == 0 {
+                if py_plain_stmt(mem, src, ld32(py, PY_FC), ld32(py, PY_CE)) == 1 {
+                    let _b: u32 = py_block(mem, src, n, p, 0);
+                    if ld32(py, PB_FL) == 0 {
+                        cur = ld32(py, PB_END);
+                    } else {
+                        cur = nxt;
+                    }
+                    o = py_four(dst, o);
+                    let _c5: u32 = copy_n(dst, o, src, p, le - p);
+                    o = o + (le - p);
+                }
+            }
+        }
+        // 换行写在**行尾**（最后一行不写）—— 与上游的 join 同一个结果
+        if nxt < stop {
+            let _n1: u32 = store8(dst, o, 10 as u8);
+            o = o + 1;
+        }
+        p = nxt;
+    }
+    return o;
+}
+
+/// 写四个空格（脚本式正文的缩进）。
+fn py_four(dst: ptr, o: u32) -> u32 {
+    let _a: u32 = store8(dst, o, 32 as u8);
+    let _b: u32 = store8(dst, o + 1, 32 as u8);
+    let _c: u32 = store8(dst, o + 2, 32 as u8);
+    let _d: u32 = store8(dst, o + 3, 32 as u8);
+    return o + 4;
+}
+
+/// `min(a, b)`（上面那个循环里要"到 stop 就停"）。
+fn ifch(a: u32, b: u32) -> u32 {
+    if a < b {
+        return a;
+    }
+    return b;
 }
 
 /// Python 那一门的主干（`from_python`）。这一门**不抹注释**（正文是原文照切）。
@@ -6677,7 +6868,27 @@ fn build_python(mem: ptr, srcn: u32, argp: ptr, al: u32) -> u32 {
     let o2: u32 = jq(out, o1, idb, 0, un);
     let o3: u32 = jl(out, o2, ", \"language\": \"loment\", \"grammar\": \"python\"");
     let o4: u32 = jl(out, o3, ", \"imports\": [], \"capabilities\": [], \"functions\": [");
-    let o5: u32 = py_emit_functions(mem, src, n, out, o4);
+    // 脚本式写法：顶层语句合成入口（与 `from_python._synthesize_start` 同一口径）。
+    let sc: ptr = ptr_add(mem, M_R + 96);
+    let head: u32 = FAIL;
+    let stop: u32 = 0;
+    if py_top_scan(mem, src, n, sc) == 1 {
+        // 入口头要占**第一条语句上面那一行**；语句就在第 1 行时没地方放，
+        // 这种情况由 `py_say_top` 报出来（与 `from_python._synthesize_start` 同口径）。
+        // 与 `def _start` **二选一**：两套入口时合成的那份不出现，只报一条。
+        // 语句就在第 1 行（`head == FAIL`）时也合成不了 —— 没地方放入口头。
+        // **先把扫描结果读进局部变量**：`py_has_start` 会走 `py_signature`，而那条路
+        // 用 `M_R + 96` 当暂存 —— 等 condition 里调完再读 `sc`，拿到的是**函数名**的偏移
+        // （实测 `head` 变成第二个函数名所在那一行）。
+        let f0: u32 = ld32(sc, 0);
+        let h0: u32 = ld32(sc, 4);
+        let s0: u32 = ld32(sc, 8);
+        if f0 > 1 && h0 != FAIL && py_has_start(mem, src, n) == 0 {
+            head = h0;
+            stop = s0;
+        }
+    }
+    let o5: u32 = py_emit_functions(mem, src, n, out, o4, head, stop);
     let o6: u32 = jl(out, o5, "], \"layouts\": [], \"consts\": [");
     let o7: u32 = py_emit_consts(mem, src, n, out, o6);
     let o8: u32 = jl(out, o7, "], \"enums\": [], \"types\": [");

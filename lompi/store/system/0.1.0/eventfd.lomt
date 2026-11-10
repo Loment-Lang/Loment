@@ -160,8 +160,11 @@ fn test_eventfd_flags_text() -> bool {
 
 fn test_eventfd_max() -> bool {
     // 上界比 u64 最大值小 1 —— 这一位写错就是"永远写不进去"。
+    // 先落成 u64 再比：字面量与 u64 常量直接比会生成 `zext i64 … to i32`，
+    // clang 拒收（同 #1539 那一类）。
     let b: ptr = alloc(8);
-    let _p: u32 = ef_pack(b, EF_MAX);
-    return EF_MAX == 18446744073709551614 && ef_unpack(b) == EF_MAX
-        && EF_MAX < 18446744073709551615;
+    let want: u64 = 18446744073709551614;
+    let n: u32 = ef_pack(b, EF_MAX);
+    let got: u64 = ef_unpack(b);
+    return n == 8 && got == want;
 }

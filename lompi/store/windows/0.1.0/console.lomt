@@ -1,0 +1,141 @@
+// windows/console.lomt — 控制台：标准输入/输出/错误、写读、代码页
+//
+// 为什么标准库要有它: Windows 上 `WriteFile` 写出来的字节会经过控制台的**代码页**
+// 转换，而程序里以为是 UTF-8；想写对就得知道 `SetConsoleOutputCP(65001)` 这件事。
+// 另外 `GetStdHandle` 的参数是三个**负数**（-10/-11/-12），在 u32 里是 0xFFFFFFF6
+// 之类 —— 手抄一遍就是抄错一位。
+//
+// **边界**: 与 `kernel32` 同一条 —— PE 还没有 FFI（#1262）。这里只给签名、常数和
+// 调用形状；链得起来要等 #1262。
+//
+// 约定:
+//   * 句柄 u64；`con_in()/con_out()/con_err()` 是三个标准句柄的取法。
+//   * `con_write` 写的是**字节**（`WriteConsoleA` 按字节计字符），返回写出数，
+//     失败返回 -1。
+//   * 读的一侧同理（`ReadConsoleA`）。
+//
+// 命名: 公开 con_*, 内部 cn_*。自检 test_console_*。
+
+module console
+
+choose runtime
+choose hosted
+
+/// `GetStdHandle(-10)`：标准输入。
+pub const CON_STD_IN: u32 = 4294967286;
+/// `GetStdHandle(-11)`：标准输出。
+pub const CON_STD_OUT: u32 = 4294967285;
+/// `GetStdHandle(-12)`：标准错误。
+pub const CON_STD_ERR: u32 = 4294967284;
+/// UTF-8 代码页。
+pub const CON_CP_UTF8: u32 = 65001;
+/// 默认（系统）代码页。
+pub const CON_CP_DEFAULT: u32 = 0;
+
+extern fn GetStdHandle(which: u32) -> u64;
+extern fn WriteConsoleA(h: u64, buf: ptr, n: u32, put: ptr, reserved: ptr) -> u32;
+extern fn ReadConsoleA(h: u64, buf: ptr, n: u32, got: ptr, reserved: ptr) -> u32;
+extern fn SetConsoleMode(h: u64, mode: u32) -> u32;
+extern fn GetConsoleOutputCP() -> u32;
+extern fn SetConsoleOutputCP(cp: u32) -> u32;
+
+/// 标准输入句柄。
+pub fn con_in() -> u64 {
+    return GetStdHandle(CON_STD_IN);
+}
+
+/// 标准输出句柄。
+pub fn con_out() -> u64 {
+    return GetStdHandle(CON_STD_OUT);
+}
+
+/// 标准错误句柄。
+pub fn con_err() -> u64 {
+    return GetStdHandle(CON_STD_ERR);
+}
+
+/// 写一段字节到控制台。返回写出的字节数；失败返回 -1。
+pub fn con_write(h: u64, buf: ptr, n: u32) -> i64 {
+    let put: ptr = alloc(4);
+    store8(put, 0, 0 as u8);
+    store8(put, 1, 0 as u8);
+    store8(put, 2, 0 as u8);
+    store8(put, 3, 0 as u8);
+    let rc: u32 = WriteConsoleA(h, buf, n, put, 0 as ptr);
+    if rc == 0 {
+        return 0 as i64 - 1 as i64;
+    }
+    return (load8(put, 0) as i64) | ((load8(put, 1) as i64) << 8)
+        | ((load8(put, 2) as i64) << 16) | ((load8(put, 3) as i64) << 24);
+}
+
+/// 从控制台读一段。返回读到的字节数；失败返回 -1。
+pub fn con_read(h: u64, buf: ptr, n: u32) -> i64 {
+    let got: ptr = alloc(4);
+    store8(got, 0, 0 as u8);
+    store8(got, 1, 0 as u8);
+    store8(got, 2, 0 as u8);
+    store8(got, 3, 0 as u8);
+    let rc: u32 = ReadConsoleA(h, buf, n, got, 0 as ptr);
+    if rc == 0 {
+        return 0 as i64 - 1 as i64;
+    }
+    return (load8(got, 0) as i64) | ((load8(got, 1) as i64) << 8)
+        | ((load8(got, 2) as i64) << 16) | ((load8(got, 3) as i64) << 24);
+}
+
+/// 设置控制台输入/输出模式（`ENABLE_*` 位由调用方给）。
+pub fn con_mode(h: u64, mode: u32) -> bool {
+    return SetConsoleMode(h, mode) != 0;
+}
+
+/// 当前输出代码页。
+pub fn con_output_cp() -> u32 {
+    return GetConsoleOutputCP();
+}
+
+/// 设置输出代码页。切换 UTF-8 用 `CON_CP_UTF8`。
+pub fn con_set_output_cp(cp: u32) -> bool {
+    return SetConsoleOutputCP(cp) != 0;
+}
+
+/// 把输出切到 UTF-8，成功返回 true。
+pub fn con_enable_utf8() -> bool {
+    return con_set_output_cp(CON_CP_UTF8);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_console_std_constants() -> bool {
+    if CON_STD_IN != 4294967286 {
+        return false;
+    }
+    if CON_STD_OUT != 4294967285 {
+        return false;
+    }
+    if CON_STD_ERR != 4294967284 {
+        return false;
+    }
+    return true;
+}
+
+fn test_console_std_are_negative_u32() -> bool {
+    // 0xFFFFFFF6 是 -10 的补码形状：高字节全 1。
+    if (CON_STD_IN / 16777216) != 255 {
+        return false;
+    }
+    if (CON_STD_OUT / 16777216) != 255 {
+        return false;
+    }
+    return true;
+}
+
+fn test_console_utf8_constant() -> bool {
+    if CON_CP_UTF8 != 65001 {
+        return false;
+    }
+    if CON_CP_DEFAULT != 0 {
+        return false;
+    }
+    return true;
+}

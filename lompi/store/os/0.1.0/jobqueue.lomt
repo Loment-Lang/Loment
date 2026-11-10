@@ -1,0 +1,340 @@
+// os/jobqueue.lomt — 给用户自建工作者用的阻塞任务队列（u64 槽位）
+//
+// 为什么是"队列"而不是"线程池": 这门语言**没有函数指针**, 而 `thread_spawn` 的第一个
+// 实参是**编译期的函数名**（`docs/245`）。池子里那条"取任务再执行"的循环必须属于
+// 调用方自己的入口函数 —— 一个通用池子会把任务名写死成池子的函数, 那是错的。
+// 所以这一层只提供**池子下面那一格**: 一个有界、可阻塞、多生产者多消费者的 u64 队列。
+// 典型用法: 用户写 `fn worker(...)` 并用 `thread_spawn("worker", ...)` 起 N 个,
+// 每个循环 `jq_pop`; 主线程 `jq_push`。
+//
+// 布局 (调用方给缓冲; 基址 4 字节对齐):
+//   +0   head   u32   已经弹出的个数
+//   +4   tail   u32   已经压入的个数
+//   +8   cap    u32   槽位数
+//   +12  closed u32   0/1
+//   +16  gen    u32   每次状态变化 +1（等待者的 futex 字）
+//   +20  lock   u32   ticket 锁 next
+//   +24  lock   u32   ticket 锁 serving
+//   +28  used   u32   当前槽位里的个数
+//   +32  data   cap × 8 字节，第 i 个槽在 `32 + 8*(i % cap)`
+// 所以 `jq_bytes(n)` 返回 `32 + 8*n`。
+//
+// 与 `std/channel.lomt` 的分界: 那边是**变长字节消息**, 这边是**定长 u64 槽位**。
+// 任务本来就是"一个编号", 定长槽位既省一次长度头也省一次拷贝。
+//
+// 为什么锁和原子读是**本地实现**: 只依赖语言内建 `atomic_add` 与 `syscall6`，不 `use`
+// 任何别的库 —— 平名字导入在 store 与 `loment/lib` 之间有同名候选（`mem` 就有两份）。
+//
+// 三条约束（与 channel 相同，写在这里免得各踩一次）:
+//   * 等待用私有 futex；PE 目标没有 futex，退化成有界自旋，等不到返回 `-11`。
+//   * 超时是**一次有界等待**，不是截止时间。
+//   * 队列关掉之后：`jq_push` 立刻 `-32`；`jq_pop` 把存量取完再 `-32`。
+//
+// 命名: 公开 jq_*, 内部 jqq_*。自检 test_jobqueue_*（纯逻辑，不发起系统调用）。
+
+module jobqueue
+
+pub const JQ_HEAD: u32 = 0;
+pub const JQ_TAIL: u32 = 4;
+pub const JQ_CAP: u32 = 8;
+pub const JQ_CLOSED: u32 = 12;
+pub const JQ_GEN: u32 = 16;
+pub const JQ_LOCK: u32 = 20;
+pub const JQ_USED: u32 = 28;
+pub const JQ_DATA: u32 = 32;
+pub const JQ_SLOT: u32 = 8;
+
+const JQQ_SYS_FUTEX: u64 = 202;
+const JQQ_SYS_EAGAIN: i64 = -11;
+const JQQ_SYS_EPIPE: i64 = -32;
+const JQQ_FUTEX_WAIT_PRIV: u32 = 128;
+const JQQ_FUTEX_WAKE_PRIV: u32 = 129;
+const JQQ_SPIN_TRIES: u32 = 20000;
+const JQQ_NO_TICKET: u32 = 4294967294;
+
+fn jqq_at(p: ptr, off: u32) -> ptr {
+    return ((p as u64) + (off as u64)) as ptr;
+}
+
+fn jqq_ld32(p: ptr, off: u32) -> u32 {
+    let v: u32 = (load8(p, off) as u32)
+        | ((load8(p, off + 1) as u32) << 8)
+        | ((load8(p, off + 2) as u32) << 16)
+        | ((load8(p, off + 3) as u32) << 24);
+    return v;
+}
+
+fn jqq_st32(p: ptr, off: u32, v: u32) {
+    store8(p, off, (v & 255) as u8);
+    store8(p, off + 1, ((v >> 8) & 255) as u8);
+    store8(p, off + 2, ((v >> 16) & 255) as u8);
+    store8(p, off + 3, ((v >> 24) & 255) as u8);
+}
+
+fn jqq_ld64(p: ptr, off: u32) -> u64 {
+    let v: u64 = 0 as u64;
+    let i: u32 = 0;
+    while i < 8 {
+        v = v | ((load8(p, off + i) as u64) << (8 * i));
+        i = i + 1;
+    }
+    return v;
+}
+
+fn jqq_st64(p: ptr, off: u32, v: u64) {
+    let i: u32 = 0;
+    while i < 8 {
+        store8(p, off + i, ((v >> (8 * i)) & 255) as u8);
+        i = i + 1;
+    }
+}
+
+fn jqq_atomic(p: ptr, off: u32) -> u32 {
+    return atomic_add(jqq_at(p, off), 0);
+}
+
+fn jqq_lock(q: ptr) -> u32 {
+    let base: ptr = jqq_at(q, JQ_LOCK);
+    let t: u32 = atomic_add(base, 1);
+    let n: u32 = 0;
+    while n < 1000000 {
+        if atomic_add(jqq_at(base, 4), 0) == t {
+            return t;
+        }
+        n = n + 1;
+    }
+    return JQQ_NO_TICKET;
+}
+
+fn jqq_unlock(q: ptr, t: u32) {
+    let now: u32 = atomic_add(jqq_at(q, JQ_LOCK + 4), 0);
+    if now == t {
+        let _o: u32 = atomic_add(jqq_at(q, JQ_LOCK + 4), 1);
+    }
+}
+
+fn jqq_futex(uaddr: u64, op: u32, val: u32, ts: u64) -> i64 {
+    return syscall7(JQQ_SYS_FUTEX, uaddr, op as u64, val as u64, ts, 0, 0);
+}
+
+fn jqq_wake(q: ptr) {
+    let _n: i64 = jqq_futex(jqq_at(q, JQ_GEN) as u64, JQQ_FUTEX_WAKE_PRIV, 2147483647, 0);
+}
+
+/// `nslots` 个槽位需要多少字节（至少 1 个槽）。
+pub fn jq_bytes(nslots: u32) -> u32 {
+    let n: u32 = nslots;
+    if n == 0 {
+        n = 1;
+    }
+    return JQ_DATA + n * JQ_SLOT;
+}
+
+/// 初始化，返回槽位数。
+pub fn jq_init(q: ptr, nslots: u32) -> u32 {
+    let n: u32 = nslots;
+    if n == 0 {
+        n = 1;
+    }
+    let i: u32 = 0;
+    while i < JQ_DATA {
+        store8(q, i, 0 as u8);
+        i = i + 1;
+    }
+    jqq_st32(q, JQ_CAP, n);
+    return n;
+}
+
+fn jqq_slot_off(cap: u32, index: u32) -> u32 {
+    return JQ_DATA + (index % cap) * JQ_SLOT;
+}
+
+/// 等"代"变化。`want_empty=true` 用在下游（等有货），`false` 用在上游（等有空位）。
+fn jqq_wait_change(q: ptr, timeout_ms: i64, want_empty: bool) -> i64 {
+    let t: u32 = jqq_lock(q);
+    if t == JQQ_NO_TICKET {
+        return -1;
+    }
+    let used: u32 = jqq_ld32(q, JQ_USED);
+    let cap: u32 = jqq_ld32(q, JQ_CAP);
+    let word: u32 = jqq_atomic(q, JQ_GEN);
+    jqq_unlock(q, t);
+    if want_empty {
+        if used != 0 {
+            return 0;
+        }
+    } else {
+        if used != cap {
+            return 0;
+        }
+    }
+    let ts: ptr = alloc(16);
+    let tsu: u64 = 0;
+    if timeout_ms >= 0 {
+        let ms: u64 = timeout_ms as u64;
+        jqq_st64(ts, 0, ms / (1000 as u64));
+        jqq_st64(ts, 8, (ms % (1000 as u64)) * (1000000 as u64));
+        tsu = ts as u64;
+    }
+    let r: i64 = jqq_futex(jqq_at(q, JQ_GEN) as u64, JQQ_FUTEX_WAIT_PRIV, word, tsu);
+    if r == JQQ_SYS_EAGAIN || r == (-4 as i64) {
+        return 0;
+    }
+    if r < 0 {
+        let n: u32 = 0;
+        while n < JQQ_SPIN_TRIES {
+            if jqq_atomic(q, JQ_GEN) != word {
+                return 0;
+            }
+            n = n + 1;
+        }
+        return -1;
+    }
+    return 0;
+}
+
+/// 压入一个任务号。0 成功；满 `-11`；已关闭 `-32`。
+pub fn jq_push(q: ptr, id: u64, timeout_ms: i64) -> i64 {
+    while 1 == 1 {
+        let t: u32 = jqq_lock(q);
+        if t == JQQ_NO_TICKET {
+            return JQQ_SYS_EAGAIN;
+        }
+        if jqq_ld32(q, JQ_CLOSED) != 0 {
+            jqq_unlock(q, t);
+            return JQQ_SYS_EPIPE;
+        }
+        let cap: u32 = jqq_ld32(q, JQ_CAP);
+        let used: u32 = jqq_ld32(q, JQ_USED);
+        if used < cap {
+            let tail: u32 = jqq_ld32(q, JQ_TAIL);
+            jqq_st64(q, jqq_slot_off(cap, tail), id);
+            jqq_st32(q, JQ_TAIL, tail + 1);
+            jqq_st32(q, JQ_USED, used + 1);
+            let _b: u32 = atomic_add(jqq_at(q, JQ_GEN), 1);
+            jqq_unlock(q, t);
+            jqq_wake(q);
+            return 0;
+        }
+        jqq_unlock(q, t);
+        let w: i64 = jqq_wait_change(q, timeout_ms, false);
+        if w != 0 {
+            return JQQ_SYS_EAGAIN;
+        }
+        if timeout_ms >= 0 {
+            return JQQ_SYS_EAGAIN;
+        }
+    }
+    return JQQ_SYS_EAGAIN;
+}
+
+/// 弹出一个任务号。0 成功（写进 `id_out` 前 8 字节）；空 `-11`；关闭且空 `-32`。
+pub fn jq_pop(q: ptr, id_out: ptr, timeout_ms: i64) -> i64 {
+    while 1 == 1 {
+        let t: u32 = jqq_lock(q);
+        if t == JQQ_NO_TICKET {
+            return JQQ_SYS_EAGAIN;
+        }
+        let cap: u32 = jqq_ld32(q, JQ_CAP);
+        let used: u32 = jqq_ld32(q, JQ_USED);
+        if used != 0 {
+            let head: u32 = jqq_ld32(q, JQ_HEAD);
+            jqq_st64(id_out, 0, jqq_ld64(q, jqq_slot_off(cap, head)));
+            jqq_st32(q, JQ_HEAD, head + 1);
+            jqq_st32(q, JQ_USED, used - 1);
+            let _b: u32 = atomic_add(jqq_at(q, JQ_GEN), 1);
+            jqq_unlock(q, t);
+            jqq_wake(q);
+            return 0;
+        }
+        let closed: bool = jqq_ld32(q, JQ_CLOSED) != 0;
+        jqq_unlock(q, t);
+        if closed {
+            return JQQ_SYS_EPIPE;
+        }
+        if timeout_ms >= 0 {
+            return JQQ_SYS_EAGAIN;
+        }
+        let w: i64 = jqq_wait_change(q, timeout_ms, true);
+        if w != 0 && w != -1 {
+            return JQQ_SYS_EAGAIN;
+        }
+    }
+    return JQQ_SYS_EAGAIN;
+}
+
+/// 关掉：唤醒所有等待者。
+pub fn jq_close(q: ptr) {
+    let t: u32 = jqq_lock(q);
+    if t != JQQ_NO_TICKET {
+        jqq_st32(q, JQ_CLOSED, 1);
+        let _b: u32 = atomic_add(jqq_at(q, JQ_GEN), 1);
+        jqq_unlock(q, t);
+        jqq_wake(q);
+    }
+}
+
+/// 当前槽位里的个数。
+pub fn jq_size(q: ptr) -> u32 {
+    return jqq_ld32(q, JQ_USED);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_jobqueue_bytes() -> bool {
+    if jq_bytes(1) != 40 {
+        return false;
+    }
+    if jq_bytes(4) != 64 {
+        return false;
+    }
+    if jq_bytes(0) != 40 {
+        return false;
+    }
+    return true;
+}
+
+fn test_jobqueue_slot_index() -> bool {
+    if jqq_slot_off(4, 0) != 32 {
+        return false;
+    }
+    if jqq_slot_off(4, 3) != 56 {
+        return false;
+    }
+    if jqq_slot_off(4, 4) != 32 {
+        return false;
+    }
+    if jqq_slot_off(4, 9) != 40 {
+        return false;
+    }
+    return true;
+}
+
+fn test_jobqueue_init_state() -> bool {
+    let q: ptr = alloc(128);
+    let n: u32 = jq_init(q, 4);
+    if n != 4 {
+        return false;
+    }
+    if jq_size(q) != 0 {
+        return false;
+    }
+    if jqq_ld32(q, JQ_HEAD) != 0 {
+        return false;
+    }
+    if jqq_ld32(q, JQ_TAIL) != 0 {
+        return false;
+    }
+    return true;
+}
+
+fn test_jobqueue_full_predicate() -> bool {
+    let q: ptr = alloc(128);
+    let _n: u32 = jq_init(q, 2);
+    jqq_st32(q, JQ_USED, 2);
+    if jq_size(q) != 2 {
+        return false;
+    }
+    jqq_st32(q, JQ_USED, 1);
+    return jq_size(q) == 1;
+}

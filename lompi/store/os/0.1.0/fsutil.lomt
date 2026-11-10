@@ -1,0 +1,216 @@
+// os/fsutil.lomt — 小工具：C 串、整文件读写、存在性、路径拼装、十进制
+//
+// 为什么需要它: `os` 里有五六个模块都要"把 str 拷成 C 串、open/read/close 一遍
+// /proc 或 /proc/sys 里的短文件"。每个模块各写一份，就有五份稍有不同的短读循环
+// 与五份 NUL 补法 —— 其中任何一份漏了 EINTR 重试，症状都是"偶尔读到 -4"。
+// 这一份把它们收成一处，其余模块只调这里。
+//
+// 覆盖: C 串拷贝、按路径读整个文件、按路径写整个文件、存在性、目录+名字拼装、
+// 无符号十进制格式化。
+//
+// 边界（刻意划的）:
+//   * **只做整文件**：读是一次 read 循环到 EOF、写是一次 write 循环到写完；不做
+//     偏移读写、不做 mmap、不做缓冲（那是 `fdio` / `mmapfile` / `host/fs`）；
+//   * **只重试 EINTR（-4）**：其余错误码原样交回调用方 —— 把 EAGAIN 也重试就是忙等；
+//   * 路径一律是 C 串（NUL 结尾）；`fu_cstr` 就是那条转换；
+//   * 号是 x86-64 Linux 的。
+//
+// 命名: 公开 fu_*, 内部 fuq_*。自检 test_fsutil_*（纯逻辑：C 串、拼装、十进制）——
+// 三个 I/O 函数由 `tools/loment_domains_test.py` 与 `tools/loment_os_test.py` 那侧真跑。
+
+module fsutil
+
+/// 系统调用失败。
+pub const FU_ERR: i64 = -1;
+/// EINTR —— 被信号打断，重试即可。
+pub const FU_EINTR: i64 = -4;
+/// 打开时的 dirfd: 当前工作目录。
+pub const FU_AT_FDCWD: u64 = 18446744073709551516;
+
+const FUQ_SYS_READ: u64 = 0;
+const FUQ_SYS_WRITE: u64 = 1;
+const FUQ_SYS_CLOSE: u64 = 3;
+const FUQ_SYS_OPENAT: u64 = 257;
+const FUQ_SYS_ACCESS: u64 = 21;
+
+/// `str` -> C 串（尾部补 NUL）。返回写入字节数（含 NUL）；放不下返回 0。
+pub fn fu_cstr(s: str, out: ptr, cap: u32) -> u32 {
+    let n: u32 = str_len(s);
+    if n + 1 > cap {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < n {
+        store8(out, i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    store8(out, n, 0 as u8);
+    return n + 1;
+}
+
+/// 按路径读整个文件。返回字节数；出错返回负的 errno（-4 已在里面重试过）。
+pub fn fu_read_file(path: ptr, buf: ptr, cap: u32) -> i64 {
+    let fd: i64 = syscall6(FUQ_SYS_OPENAT, FU_AT_FDCWD, path as u64, 0, 0, 0);
+    if fd < 0 {
+        return fd;
+    }
+    let total: u64 = 0;
+    let rc: i64 = 0;
+    let going: u32 = 1;
+    while going == 1 && total < (cap as u64) {
+        rc = syscall4(FUQ_SYS_READ, fd as u64, ((buf as u64) + total) as u64,
+                      (cap as u64) - total);
+        if rc == 0 {
+            going = 0;
+        } else if rc < 0 {
+            if rc == FU_EINTR {
+                rc = 0;
+            } else {
+                let _c: i64 = syscall4(FUQ_SYS_CLOSE, fd as u64, 0, 0);
+                return rc;
+            }
+        } else {
+            total = total + (rc as u64);
+        }
+    }
+    let _c: i64 = syscall4(FUQ_SYS_CLOSE, fd as u64, 0, 0);
+    return total as i64;
+}
+
+/// 按路径写整个文件（O_WRONLY|O_CREAT|O_TRUNC）。返回写出的字节数；
+/// 出错返回负的 errno（-4 已重试）。
+pub fn fu_write_file(path: ptr, data: ptr, n: u32, mode: u32) -> i64 {
+    let fd: i64 = syscall6(FUQ_SYS_OPENAT, FU_AT_FDCWD, path as u64, 577 as u64,
+                          mode as u64, 0);
+    if fd < 0 {
+        return fd;
+    }
+    let total: u64 = 0;
+    let rc: i64 = 0;
+    let going: u32 = 1;
+    while going == 1 && total < (n as u64) {
+        rc = syscall4(FUQ_SYS_WRITE, fd as u64, ((data as u64) + total) as u64,
+                      (n as u64) - total);
+        if rc < 0 {
+            if rc == FU_EINTR {
+                rc = 0;
+            } else {
+                let _c: i64 = syscall4(FUQ_SYS_CLOSE, fd as u64, 0, 0);
+                return rc;
+            }
+        } else if rc == 0 {
+            going = 0;
+        } else {
+            total = total + (rc as u64);
+        }
+    }
+    let _c: i64 = syscall4(FUQ_SYS_CLOSE, fd as u64, 0, 0);
+    return total as i64;
+}
+
+/// 路径存在吗（`access(path, F_OK)`）。
+pub fn fu_exists(path: ptr) -> bool {
+    let rc: i64 = syscall4(FUQ_SYS_ACCESS, path as u64, 0, 0);
+    return rc == 0;
+}
+
+/// `dir` + `/` + `name` -> out（恰好一个斜杠）。返回长度（不含 NUL）。
+pub fn fu_join(dir: ptr, dn: u32, name: str, out: ptr, cap: u32) -> u32 {
+    let pos: u32 = 0;
+    let i: u32 = 0;
+    while i < dn {
+        if pos < cap {
+            store8(out, pos, load8(dir, i) as u8);
+        }
+        pos = pos + 1;
+        i = i + 1;
+    }
+    if dn > 0 && load8(dir, dn - 1) != 47 {
+        if pos < cap {
+            store8(out, pos, 47 as u8);
+        }
+        pos = pos + 1;
+    }
+    let n: u32 = str_len(name);
+    let j: u32 = 0;
+    while j < n {
+        if pos < cap {
+            store8(out, pos, str_byte(name, j) as u8);
+        }
+        pos = pos + 1;
+        j = j + 1;
+    }
+    return pos;
+}
+
+/// 无符号十进制写进 out（不带 NUL）。返回**真实位数**（超出 cap 时也一样，
+/// 调用方据此判断是否被截断）。
+pub fn fu_dec(v0: u64, out: ptr, cap: u32) -> u32 {
+    if v0 == 0 {
+        if cap > 0 {
+            store8(out, 0, 48 as u8);
+        }
+        return 1;
+    }
+    let tmp: ptr = alloc(24);
+    let v: u64 = v0;
+    let n: u32 = 0;
+    while v > 0 {
+        store8(tmp, n, (48 + (v % 10) as u32) as u8);
+        v = v / 10;
+        n = n + 1;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if i < cap {
+            store8(out, i, load8(tmp, n - 1 - i) as u8);
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_fsutil_cstr() -> bool {
+    let o: ptr = alloc(8);
+    let n: u32 = fu_cstr("abc", o, 8);
+    return n == 4 && load8(o, 0) == 97 && load8(o, 2) == 99 && load8(o, 3) == 0;
+}
+
+fn test_fsutil_cstr_too_long() -> bool {
+    let o: ptr = alloc(3);
+    return fu_cstr("abc", o, 3) == 0;
+}
+
+fn test_fsutil_join() -> bool {
+    let d: ptr = alloc(8);
+    store8(d, 0, 47 as u8);
+    store8(d, 1, 116 as u8);
+    store8(d, 2, 109 as u8);
+    store8(d, 3, 112 as u8);
+    let o: ptr = alloc(32);
+    let n: u32 = fu_join(d, 4, "x", o, 32);
+    return n == 6 && load8(o, 4) == 47 && load8(o, 5) == 120;
+}
+
+fn test_fsutil_join_trailing_slash() -> bool {
+    let d: ptr = alloc(8);
+    store8(d, 0, 47 as u8);
+    store8(d, 1, 116 as u8);
+    let o: ptr = alloc(32);
+    let n: u32 = fu_join(d, 2, "y", o, 32);
+    return n == 4 && load8(o, 1) == 116 && load8(o, 2) == 47 && load8(o, 3) == 121;
+}
+
+fn test_fsutil_dec() -> bool {
+    let o: ptr = alloc(8);
+    let n: u32 = fu_dec(1234 as u64, o, 8);
+    return n == 4 && load8(o, 0) == 49 && load8(o, 3) == 52;
+}
+
+fn test_fsutil_dec_truncated() -> bool {
+    let o: ptr = alloc(2);
+    let n: u32 = fu_dec(12345 as u64, o, 2);
+    return n == 5 && load8(o, 0) == 49 && load8(o, 1) == 50;
+}

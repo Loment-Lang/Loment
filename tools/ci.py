@@ -282,6 +282,8 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "lspe_test", "potato_
                  "loment_invariant_test",
                  # std 核的行为判据 (docs/180): lib/ 里的函数算得对不对
                  "loment_std_test",
+                 # 密码学原语（docs/328）：Python 独立实现对拍。
+                 "loment_crypto_test",
                  # 八个领域包的行为判据 (docs/317): math/science/engineering/world/
                  # dev/lowlevel/system/baremetal, 对照物是 Python 与已知常量。
                  "loment_domains_test",
@@ -471,6 +473,7 @@ SHARD_COST = {
     # 2026-10-22（#1151）：本机 Windows 实测 1.5s（启动器在 WSL 的原生 /tmp 里真跑三次）。
     "loment_hotbuild_test": 1.5,
     "loment_std_test": 3.1,
+    "loment_crypto_test": 25.0,
     # 2026-11-09: 本机六组探针（每组一次 clang 链接 + 一次 WSL 真跑），约 12s。
     "loment_domains_test": 40.0,
     # 2026-11-09: 四次小规模 emit（命中/失效/关闭/坏条目），本机实测 1s 内。

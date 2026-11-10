@@ -671,34 +671,38 @@ def test_front_door_translates_a_foreign_grammar_into_loment_in_process():
 
 
 @test
-def test_python_top_level_statements_are_refused():
-    """顶层可执行语句必须拒，不能变成"0 个函数的合法单元"（issue #1510）。
+def test_python_top_level_statements_become_the_entry():
+    """Python 写法的顶层语句 -> 入口 `_start`（issue #1510 的落点，2026-11-10 改判）。
 
-    原先 `from_python` 只认函数、类和全大写常量；顶层的 `print(...)` / 赋值 /
-    `if` 落在所有分支之外，被静默丢掉。`check` 于是对一份空单元报绿，LVM 才说
-    "没有 `_start`"——错误指向了下游。这里钉住**前门**这一层：拒，并点名行号。
-    模块 docstring 不是可执行状态，仍然放行。
+    原先 `from_python` 只认函数、类和全大写常量；顶层的 `print(...)` / 赋值 / `if`
+    落在所有分支之外，被**静默丢掉** —— `check` 对一份空单元报绿，LVM 才说
+    "没有 `_start`"。第一批修法是**拒**（不丢东西，但脚本式写法就写不了了）。
+
+    现在按用户 2026-11-10 的裁定：**只对 python 这一门**，顶层语句合成入口的正文。
+    不丢、也不用写 `def`。别的表层语法与原生 Loment 不经过 `from_python`，一行不动。
+
+    与 `def _start` 同时出现时**拒**：两套入口，选哪个都是替用户做主。
     """
     with tempfile.TemporaryDirectory() as t:
         td = Path(t)
-        cases = [
-            ('print("hello")\n', 3),
-            ("print_num(42)\n\ndef _start() -> int:\n    return 0\n", 3),
-            ("x = 1\n", 3),
-            ("if True:\n    x = 1\n", 3),
-        ]
-        for i, (body, line) in enumerate(cases):
+        for i, body in enumerate(['print("hello")\n', "x = 1\n",
+                                  "if True:\n    x = 1\n"]):
             p = td / f"top{i}.lomt"
             p.write_text("choose write grammar python\n\n" + body,
                          encoding="utf-8", newline="\n")
-            try:
-                potato_from.front_door(p)
-            except (lomt_from.NotRepresentable, ValueError) as e:
-                msg = str(e)
-                assert f"第 {line} 行" in msg, f"要点名顶层语句所在行: {msg}"
-                assert "顶层" in msg, f"要说清是顶层语句: {msg}"
-            else:
-                raise AssertionError(f"顶层语句被静默吞掉了: {body!r}")
+            fu = potato_from.front_door(p)
+            assert "fn _start" in fu.source, (body, fu.source[:200])
+        # 两套入口：拒，并说清是二选一
+        p = td / "both.lomt"
+        p.write_text('choose write grammar python\n\nprint_num(42)\n\n'
+                     "def _start() -> int:\n    return 0\n",
+                     encoding="utf-8", newline="\n")
+        try:
+            potato_from.front_door(p)
+        except (lomt_from.NotRepresentable, ValueError) as e:
+            assert "二选一" in str(e), str(e)[:200]
+        else:
+            raise AssertionError("顶层语句与 `def _start` 同时出现没被拒")
         # A module docstring is metadata, not executable state.
         p = td / "docstring.lomt"
         p.write_text(
@@ -707,7 +711,7 @@ def test_python_top_level_statements_are_refused():
             encoding="utf-8", newline="\n")
         fu = potato_from.front_door(p)
         assert "fn _start" in fu.source, fu.source[:200]
-    print("      顶层 print/赋值/if 拒得带行号；模块 docstring 放行")
+    print("      顶层 print/赋值/if 合成 `_start`；与 `def _start` 同时出现则拒；docstring 放行")
 
 
 @test
@@ -752,8 +756,9 @@ def test_every_surface_grammar_refuses_unrecognised_material():
     如果既不进产物也不进 `skipped`，整份单元就会带着少掉的一块被编过去。
     """
     cases = [
-        ("python-top", "python",
-         'choose write grammar python\n\ndef _start() -> int:\n    return 42\n\nprint("JUNK")\n'),
+        # `python-top` 不在这一张矩阵里：python 这一门的顶层语句**是被收的**
+        # （合成入口 `_start`，见 `test_python_top_level_statements_become_the_entry`），
+        # 别门照旧。矩阵要的是"认不出的残句必须拒"。
         ("python-class", "python",
          'choose write grammar python\n\nclass C:\n    x: int\n\n    def f(self) -> int:\n'
          '        return 1\n\ndef _start() -> int:\n    return 42\n'),
@@ -817,8 +822,8 @@ def test_front_memo_does_not_survive_a_source_edit():
         again = potato_from.front_door(p)
         assert first.source == again.source, "同一份源应当命中记忆（内容没变）"
         assert "print_num" in first.source
-        # 同一个路径、换了内容：必须重翻 —— 这份是顶层残句，应当被拒
-        p.write_text("choose write grammar python\n\nprint('boom')\n",
+        # 同一个路径、换了内容：必须重翻 —— 这份解析不过，应当被拒
+        p.write_text("choose write grammar python\n\ndef _start(:\n",
                      encoding="utf-8", newline="\n")
         try:
             potato_from.front_door(p)

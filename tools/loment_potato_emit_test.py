@@ -156,7 +156,9 @@ EXTRA_REFUSED = {
     # 值得记：**先问这东西能不能存在，再吵它叫什么** —— 它**没有名字规则**（`Box_[u32]` 不是
     # 标识符），但更前面的是**后端 M23**（struct 字段暂只支持标量）挡着，`Box<ptr>` 就证明了
     # 这条：名字没问题，IR 照样拒。两个实现现在都**点名拒**。
-    "loment/examples/arg_shape/main.lomt": "this shape of generic argument",
+    # 2026-11-09 起自举侧**更早**就拒：检查器的 `chk_span_arg`（E41）在静态检查里点名，
+    # 走不到形式对象那一句 —— 所以这里比的轴是它的话（`docs/299` §9）。
+    "loment/examples/arg_shape/main.lomt": "自举侧还不收",
 }
 
 TESTS: list = []

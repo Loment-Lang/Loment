@@ -1,0 +1,199 @@
+// windows/process.lomt — 进程：起一个、等它、取退出码、结束
+//
+// 为什么标准库要有它: `CreateProcessA` 是 Windows 上唯一"起一个程序"的入口，而它的
+// 十个参数里有三个是**结构体指针**（STARTUPINFOA / PROCESS_INFORMATION），两个
+// 结构体的布局是 ABI 的一部分：STARTUPINFOA 在 x64 上是 104 字节、`cb` 字段必须在
+// 偏移 0；PROCESS_INFORMATION 是 24 字节（hProcess 0、hThread 8、pid 16、tid 20）。
+// 少写 `cb` 的后果是调用静默失败（ERROR_INVALID_PARAMETER），不是崩溃。
+//
+// **边界**: 与 `kernel32` 同一条 —— PE 还没有 FFI（#1262）。这里给的是**声明面**
+// 与两个结构体的初始化/读取器；真正链成 PE 要等 #1262。
+//
+// 约定:
+//   * 句柄 u64；进程 pid/tid 是 u32。
+//   * `wp_spawn(cmdline, si, pi)` 走"十个参数里其余全空"的常见形状：不继承句柄、
+//     不指定环境块、不指定工作目录。要别的形状就自己调 `CreateProcessA`。
+//   * 返回 true 表示**创建成功**，不是"进程退出码为 0"。
+//
+// 命名: 公开 wp_*, 内部 wq_*。自检 test_process_*。
+
+module process
+
+choose runtime
+choose hosted
+
+/// STARTUPINFOA 在 x64 上的大小。
+pub const WP_SI_BYTES: u32 = 104;
+/// PROCESS_INFORMATION 的大小。
+pub const WP_PI_BYTES: u32 = 24;
+/// 等一个句柄：对象已就绪。
+pub const WP_WAIT_OBJECT_0: u32 = 0;
+/// 等一个句柄：超时。
+pub const WP_WAIT_TIMEOUT: u32 = 258;
+/// 等一个句柄：失败。
+pub const WP_WAIT_FAILED: u32 = 4294967295;
+/// 无限等待（0xFFFFFFFF）。
+pub const WP_INFINITE: u32 = 4294967295;
+/// 完全挂起的进程，只有显式恢复才跑（给人做断点用）。
+pub const WP_CREATE_SUSPENDED: u32 = 4;
+/// 新进程有自己的控制台窗口。
+pub const WP_CREATE_NEW_CONSOLE: u32 = 16;
+
+extern fn CreateProcessA(app: ptr, cmdline: ptr, pa: ptr, ta: ptr, inherit: u32,
+                         flags: u32, env: ptr, dir: ptr, si: ptr, pi: ptr) -> u32;
+extern fn WaitForSingleObject(h: u64, ms: u32) -> u32;
+extern fn GetExitCodeProcess(h: u64, code: ptr) -> u32;
+extern fn TerminateProcess(h: u64, code: u32) -> u32;
+extern fn ExitProcess(code: u32);
+extern fn GetCurrentProcessId() -> u32;
+
+fn wq_zero(p: ptr, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        store8(p, i, 0 as u8);
+        i = i + 1;
+    }
+}
+
+fn wq_st32(p: ptr, off: u32, v: u32) {
+    store8(p, off, (v & 255) as u8);
+    store8(p, off + 1, ((v >> 8) & 255) as u8);
+    store8(p, off + 2, ((v >> 16) & 255) as u8);
+    store8(p, off + 3, ((v >> 24) & 255) as u8);
+}
+
+fn wq_ld32(p: ptr, off: u32) -> u32 {
+    return (load8(p, off) as u32) | ((load8(p, off + 1) as u32) << 8)
+        | ((load8(p, off + 2) as u32) << 16) | ((load8(p, off + 3) as u32) << 24);
+}
+
+fn wq_ld64(p: ptr, off: u32) -> u64 {
+    let v: u64 = 0 as u64;
+    let i: u32 = 0;
+    while i < 8 {
+        v = v | ((load8(p, off + i) as u64) << (8 * i));
+        i = i + 1;
+    }
+    return v;
+}
+
+/// 初始化一个 STARTUPINFOA：整块清零，`cb` 设为 104。
+pub fn wp_startup_init(si: ptr) -> u32 {
+    wq_zero(si, WP_SI_BYTES);
+    wq_st32(si, 0, WP_SI_BYTES);
+    return WP_SI_BYTES;
+}
+
+/// 初始化一个 PROCESS_INFORMATION：整块清零。
+pub fn wp_pi_init(pi: ptr) -> u32 {
+    wq_zero(pi, WP_PI_BYTES);
+    return WP_PI_BYTES;
+}
+
+/// 从 PROCESS_INFORMATION 取进程句柄。
+pub fn wp_pi_process(pi: ptr) -> u64 {
+    return wq_ld64(pi, 0);
+}
+
+/// 从 PROCESS_INFORMATION 取线程句柄。
+pub fn wp_pi_thread(pi: ptr) -> u64 {
+    return wq_ld64(pi, 8);
+}
+
+/// 从 PROCESS_INFORMATION 取 pid。
+pub fn wp_pi_pid(pi: ptr) -> u32 {
+    return wq_ld32(pi, 16);
+}
+
+/// 从 PROCESS_INFORMATION 取 tid。
+pub fn wp_pi_tid(pi: ptr) -> u32 {
+    return wq_ld32(pi, 20);
+}
+
+/// 起一个进程（其余参数全空）。成功返回 true。
+pub fn wp_spawn(cmdline: ptr, si: ptr, pi: ptr) -> bool {
+    return CreateProcessA(0 as ptr, cmdline, 0 as ptr, 0 as ptr, 0 as u32,
+                          0 as u32, 0 as ptr, 0 as ptr, si, pi) != 0;
+}
+
+/// 起一个进程并带上创建标志。成功返回 true。
+pub fn wp_spawn_flags(cmdline: ptr, si: ptr, pi: ptr, flags: u32) -> bool {
+    return CreateProcessA(0 as ptr, cmdline, 0 as ptr, 0 as ptr, 0 as u32,
+                          flags, 0 as ptr, 0 as ptr, si, pi) != 0;
+}
+
+/// 等进程结束。`ms` 用 `WP_INFINITE` 表示一直等。
+pub fn wp_wait(h: u64, ms: u32) -> u32 {
+    return WaitForSingleObject(h, ms);
+}
+
+/// 等进程结束并取退出码。成功返回 true（退出码写进 `code` 指向的 4 字节）。
+pub fn wp_wait_exit(h: u64, code: ptr) -> bool {
+    let w: u32 = WaitForSingleObject(h, WP_INFINITE);
+    if w != WP_WAIT_OBJECT_0 {
+        return false;
+    }
+    return GetExitCodeProcess(h, code) != 0;
+}
+
+/// 强行结束进程。
+pub fn wp_terminate(h: u64, code: u32) -> bool {
+    return TerminateProcess(h, code) != 0;
+}
+
+/// 结束自己（不返回）。
+pub fn wp_exit_now(code: u32) {
+    ExitProcess(code);
+}
+
+/// 自己的 pid。
+pub fn wp_pid() -> u32 {
+    return GetCurrentProcessId();
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_process_startup_layout() -> bool {
+    let si: ptr = alloc(128);
+    let n: u32 = wp_startup_init(si);
+    if n != 104 {
+        return false;
+    }
+    if wq_ld32(si, 0) != 104 {
+        return false;
+    }
+    if load8(si, 64) != 0 || load8(si, 103) != 0 {
+        return false;
+    }
+    return true;
+}
+
+fn test_process_pi_layout() -> bool {
+    let pi: ptr = alloc(32);
+    wp_pi_init(pi);
+    wq_st32(pi, 16, 4321 as u32);
+    wq_st32(pi, 20, 8765 as u32);
+    if wp_pi_pid(pi) != 4321 {
+        return false;
+    }
+    if wp_pi_tid(pi) != 8765 {
+        return false;
+    }
+    if wp_pi_thread(pi) != 0 as u64 {
+        return false;
+    }
+    return true;
+}
+
+fn test_process_wait_constants() -> bool {
+    if WP_WAIT_OBJECT_0 != 0 || WP_WAIT_TIMEOUT != 258 {
+        return false;
+    }
+    if WP_WAIT_FAILED != 4294967295 {
+        return false;
+    }
+    if WP_INFINITE != 4294967295 {
+        return false;
+    }
+    return true;
+}

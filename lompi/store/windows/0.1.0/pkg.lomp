@@ -1,0 +1,26 @@
+// windows/pkg.lomp — 库清单（Win32 面；机器身份是内容哈希）。
+//
+// 这个包全部走 `extern fn` 声明 Kernel32 的导出。PE 目标今天还没有 FFI
+// （`--link` 对 `--target pe` 被拒，#1262），所以它是**声明面**：签名、常数、
+// 结构体布局都是对的、编得过；链成 PE 要等 #1262 落地。
+module pkg
+
+pub fn name() -> str {
+    return "windows";
+}
+
+pub fn version() -> str {
+    return "0.1.0";
+}
+
+/// 这个包对**程序**的前置条件（`docs/325`）。
+///
+/// `choose()` 列出包里代码依赖的核心档；`extern fn` 需要 `hosted`，`alloc`
+/// 需要 `runtime`。`requires()` 与 `lomentc.package_features` 的并集逐项相等。
+pub fn choose() -> str {
+    return "std runtime hosted";
+}
+
+pub fn requires() -> str {
+    return "alloc,extern";
+}

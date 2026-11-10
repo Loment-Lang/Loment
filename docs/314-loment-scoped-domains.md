@@ -134,7 +134,7 @@ domain whole : disk[0..63] {
 |---|---|
 | 语法 | `let` / 形参类型后可选 `in SPACE`；语句 `domain [NAME :] SPACE[shape] [law]? { … }` |
 | 检查器 | 域的词法作用域；嵌套包含（C1）；有状态域宽 ≤ 64；`guard NAME` 先查作用域再查顶层能力；自动守卫的绑定分析 |
-| IR | `@__loment_guard2` 多一个 `state` 指针参数（无状态传 `null`）；块域的 `alloca [W x i64]`；审计表按声明点数定长 |
+| IR | `@__loment_guard2` 多一个 `state` 指针参数（无状态传 `null`）；块域的 `alloca [W x i64]`；审计表按声明点数定长。`docs/315` §1.7 又加了第 10 个参数 `ptr %rv`（撤销位对；不可撤的域传 `@__loment_revfree`） |
 | 自举 | 同上，按 token 扫；变量的空间表 + 域作用域栈 + 下标发射时插守卫 |
 | 生成物 | 种子与 genesis provenance 按既有流程重算 |
 

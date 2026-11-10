@@ -490,6 +490,7 @@ fn rt_phrase(slot: ptr, toks: ptr, tk: u32) -> str {
     if tok_is(slot, toks, tk, "tick") { return "`tick`（虚拟钟）"; }
     if tok_is(slot, toks, tk, "quality") { return "`quality`（自适应域的质量）"; }
     if tok_is(slot, toks, tk, "discharge") { return "`discharge`（可达域义务）"; }
+    if tok_is(slot, toks, tk, "revoke") { return "`revoke`（撤销）"; }
     return "";
 }
 

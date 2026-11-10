@@ -118,7 +118,8 @@ RULES = [
              r"|generation 只用于 revision 域|retire 只用于 revision 域"
              r"|generation 引用了未声明的能力|retire 引用了未声明的能力"
              r"|不能是 revision"
-             r"|不能带空间|第二个实参|domain:for|child_of|couple|mutex|并行的几个域",
+             r"|不能带空间|第二个实参|domain:for|child_of|couple|mutex|并行的几个域"
+             r"|revoke",
      "能力域非法", "在模块顶层声明 `capability name : space[lo..hi]`，并保证 lo ≤ hi。"),
     ("E005", r"使用了 excluded 的空间",
      "与出界声明冲突",

@@ -588,7 +588,8 @@ fn chk_core_dim(src: ptr, t: ptr, k: u32) -> u32 {
     // 默认 `lms_full`，写档是**降级**。非满档一律带 `_admin`（`docs/262` §10.1）。
     if chk_tok_is(src, t, k, "lms_full") || chk_tok_is(src, t, k, "lms_forensic_admin")
             || chk_tok_is(src, t, k, "lms_daily_admin")
-            || chk_tok_is(src, t, k, "lms_manage_only_admin") {
+            || chk_tok_is(src, t, k, "lms_manage_only_admin")
+            || chk_tok_is(src, t, k, "lms_close_admin") {
         return 5;
     }
     // 第七维（`docs/262`，用户 2026-10-18）：`lspe`。与其它六维正交 ——
@@ -762,6 +763,9 @@ fn chk_core_val(src: ptr, t: ptr, k: u32) -> u32 {
     }
     if chk_tok_is(src, t, k, "lms_manage_only_admin") {
         return 4;
+    }
+    if chk_tok_is(src, t, k, "lms_close_admin") {
+        return 5;
     }
     // 第八维（`docs/299`）：`lifetime`。
     if chk_tok_is(src, t, k, "lifetime_no") {
@@ -2011,7 +2015,8 @@ fn chk_lms_on(src: ptr, t: ptr) -> u32 {
                 if chk_tok_is(src, t, i + 1, "close") && chk_tok_is(src, t, i + 2, "lms_check") {
                     ex_off = 1;
                 }
-                if chk_tok_is(src, t, i + 1, "lms_manage_only_admin") {
+                if chk_tok_is(src, t, i + 1, "lms_manage_only_admin")
+                        || chk_tok_is(src, t, i + 1, "lms_close_admin") {
                     tier_off = 1;
                 }
             }

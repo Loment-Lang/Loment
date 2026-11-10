@@ -2278,6 +2278,9 @@ fn pt_lms_val(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
             if pt_tis(unit, t, i + 1, "lms_manage_only_admin") {
                 return 4;
             }
+            if pt_tis(unit, t, i + 1, "lms_close_admin") {
+                return 5;
+            }
         }
         i = i + 1;
     }
@@ -2300,6 +2303,9 @@ fn pt_lms(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
     if v == 4 {
         return pt_qs(out, o, "lms_manage_only_admin");
     }
+    if v == 5 {
+        return pt_qs(out, o, "lms_close_admin");
+    }
     return pt_qs(out, o, "lms_full");
 }
 
@@ -2320,6 +2326,9 @@ fn pt_lms_mask(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
     }
     if v == 4 {
         m = 2;
+    }
+    if v == 5 {
+        m = 0;                           // 七级全关
     }
     let d: u32 = 0;
     let i: u32 = lo;

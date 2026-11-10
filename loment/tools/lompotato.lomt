@@ -1734,7 +1734,8 @@ fn chk_v1(mem: ptr, doc: u32, ver: u32) -> u32 {
             if eq_lit(ptr_add(mem, M_SB), ll, "lms_full") == 1
                     || eq_lit(ptr_add(mem, M_SB), ll, "lms_forensic_admin") == 1
                     || eq_lit(ptr_add(mem, M_SB), ll, "lms_daily_admin") == 1
-                    || eq_lit(ptr_add(mem, M_SB), ll, "lms_manage_only_admin") == 1 {
+                    || eq_lit(ptr_add(mem, M_SB), ll, "lms_manage_only_admin") == 1
+                    || eq_lit(ptr_add(mem, M_SB), ll, "lms_close_admin") == 1 {
                 lok = 1;
             }
         }

@@ -142,7 +142,8 @@ pub fn po_exists(pid: u64) -> bool {
     } else {
         store8(path, cut, 0 as u8);
     }
-    return syscall4(POQ_SYS_ACCESS, path as u64, 0, 0) == 0;
+    let acc: i64 = syscall4(POQ_SYS_ACCESS, path as u64, 0, 0);
+    return acc == 0;
 }
 
 // ---------------------------------------------------------------- 自检

@@ -129,7 +129,10 @@ pub fn ex_path_search(name_cstr: ptr, name_len: u32, path: ptr, path_len: u32,
                 if pos < cap {
                     store8(out, pos, 0 as u8);
                 }
-                if syscall4(EXQ_SYS_ACCESS, out as u64, EX_X_OK as u64, 0) == 0 {
+                // 先落成 i64 再比 0：自举侧对 `调用(...) == 0` 目前直接拿 i64 当 i1
+                // 用（#1539），两边 IR 会分叉；这一行走参考侧的形状。
+                let acc: i64 = syscall4(EXQ_SYS_ACCESS, out as u64, EX_X_OK as u64, 0);
+                if acc == 0 {
                     return pos;
                 }
             }

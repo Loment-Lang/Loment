@@ -97,6 +97,26 @@ def _run(exe: Path) -> int:
     return int(r.stdout.strip() or -1)
 
 
+def _run_io(exe: Path) -> tuple[int, bytes]:
+    """跑一次，返回 `(退出码, stdout 原始字节)` —— 输出那条判据要的就是字节。"""
+    r = subprocess.run(
+        [*_WSLCMD, "bash", "-lc",
+         f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}; echo -n \";$?\""],
+        capture_output=True, timeout=300, shell=False)
+    payload, _, rc = r.stdout.rpartition(b";")
+    return int(rc.strip() or -1), payload
+
+
+def _cpython_io(src: Path) -> tuple[int, bytes]:
+    """对照组：CPython 跑 `main()`，取 `(退出码, stdout 字节)`。"""
+    r = subprocess.run(
+        [_python(), "-c",
+         "import runpy,sys;m=runpy.run_path(sys.argv[1]);sys.exit(m['main']())",
+         str(src)],
+        capture_output=True, timeout=120, shell=False)
+    return r.returncode, r.stdout
+
+
 def _cpython(src: Path) -> int:
     """CPython 跑那份源码的 `main()` —— **对照组**（只在"同意集"里当判据）。"""
     out = subprocess.run(
@@ -281,6 +301,38 @@ def test_agreeing_source_matches_cpython():
             assert l_rc == py_rc, (
                 f"{name}: **翻译出来的 Loment 与 CPython 不同**: {l_rc} != {py_rc}")
             print(f"      {name}: CPython -> {py_rc}，翻译成 Loment -> {l_rc}（相等）")
+
+
+@test
+def test_printing_matches_cpython_stdout():
+    """**写出去的字节**也要与 CPython 逐字节相同（不是只比退出码）。
+
+    上面那两条比的都是**数**。只比数的话，"数算对了、写出去的字不对"这一类看不见 ——
+    而 Python 写法的第一件事就是 `print`。`prints.py` 把几条形状并排放：`print` 的
+    换行、`print(int)` 走 `print_num`、字符串拼接、空 `print()`、转义 `\\t` 与 `\\"`。
+
+    两边各有一个入口（CPython 调 `main()`，Loment 是 `_L_ENTRY`），比的是
+    **(退出码, stdout 原始字节)** 这一对。
+    """
+    if not _wsl() or not _python():
+        print("      SKIP: 需要 WSL + CPython")
+        return
+    name = "prints.py"
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        exe, errs = _build(td, name)
+        assert not errs, f"{name}: 翻译出来的 Loment 检查不过: {errs[:3]}"
+        py_rc, py_out = _cpython_io(EX / name)
+        l_rc, l_out = _run_io(exe)
+    # CPython 的 `print` 换行是**平台的**（Windows 上是 `\r\n`），而译文写的是 `\n`。
+    # 比的是"程序让写什么"，不是"宿主怎么换行" —— 在 Windows 上规范化一次
+    # （Linux 上这行是空操作，CI 就是 Linux）。
+    py_out = py_out.replace(b"\r\n", b"\n")
+    assert (l_rc, l_out) == (py_rc, py_out), (
+        f"**stdout 或退出码与 CPython 不同**\n"
+        f"  CPython -> rc={py_rc}, {py_out!r}\n"
+        f"  译文    -> rc={l_rc}, {l_out!r}")
+    print(f"      CPython 与译文都是 stdout={py_out!r} rc={py_rc}（逐字节相同）")
 
 
 @test

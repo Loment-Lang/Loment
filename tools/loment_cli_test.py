@@ -670,12 +670,12 @@ def test_explain_accepts_three_spellings_and_rejects_junk():
     for c in (top, top - 1, top - 2):
         rc, out, _ = _run(["explain", f"E{c}"] + _no_color())
         # 标题是三位补零的（与 `error[E023]` 一致），所以这里也按那个拼法找。
-        assert rc == 0 and f"E{c:03d}" in out, (c, rc, out[:120])
+        assert rc == 0 and loment_diag._code_str(c) in out, (c, rc, out[:120])
     # 内部码段也要解释得出来（`#773` 那一条记录会渲染成 `error[E0900]`）。
     for c in sorted(c for c in loment_diag.ASCII_ONE_LINER
                     if loment_diag.is_internal_code(c)):
         rc, out, _ = _run(["explain", f"E{c}"] + _no_color())
-        assert rc == 0 and f"E{c:03d}" in out, (c, rc, out[:120])
+        assert rc == 0 and loment_diag._code_str(c) in out, (c, rc, out[:120])
     rc, _, _ = _run(["explain"] + _no_color())
     assert rc == 2
 
@@ -1217,7 +1217,7 @@ r codes $C --no-color codes
 r ex4 $C --no-color explain E4
 r exe4 $C --no-color explain e4
 r ex4b $C --no-color explain 4
-r ex99 $C --no-color explain E99
+r ex300 $C --no-color explain E300
 r exno $C --no-color explain
 r pgsyntax $C --no-color syntax
 r pgbuiltins $C --no-color builtins
@@ -1294,13 +1294,12 @@ def _cli_fixtures(root: Path) -> None:
         lines.pop()
     _w(root / "want_stat.txt", f"{len(yraw)}\n{len(lines)}\n")
     import loment_diag  # noqa: E402
-    # `explain E99` 那条要一个**表外**的码 —— 表长到 99 就该改这里, 所以先钉住。
-    # `#773` 起表里另有一段 E9xx（900 起），所以不能再用 `max < 99` 判：99 本身
-    # 仍是用户码段与内部码段之间的空号。
-    assert 99 not in loment_diag.ASCII_ONE_LINER, "错误码表到 99 了, 换一个表外的码"
-    # 码的拼法是**三位补零**（`#9`）：`loment codes` 与 `explain` 的标题都印 `E001`，
-    # 与诊断正文的 `error[E001]` 一致。夹具照那个拼法写，否则第 18 项会假红。
-    _w(root / "codes.txt", "".join(f"E{c:03d} {d}\n"
+    # `explain E300` 那条要一个**表外**的码 —— 表长到 300 就该改这里，所以先钉住。
+    # 用户码现在到 207（`docs/329`），300 既不在用户段也不在 E9xx 内部段。
+    assert 300 not in loment_diag.ASCII_ONE_LINER, "错误码表到 300 了, 换一个表外的码"
+    # 码的拼法跟真源走（`<100` 是 `E0xx`、`>=100` 是 `E0xxx`，`docs/329`）：
+    # `loment codes` 与 `explain` 的标题都印它，夹具照那个拼法写。
+    _w(root / "codes.txt", "".join(f"{loment_diag._code_str(c)} {d}\n"
                                    for c, d in sorted(loment_diag.ASCII_ONE_LINER.items())))
 
 
@@ -1450,7 +1449,7 @@ def _cli_py_report(pkg: Path, red: Path) -> str:
     e_ok = all(run(["--no-color", "explain", s])[1].find("Capability domain") >= 0
                and run(["--no-color", "explain", s])[0] == 0
                for s in ("E4", "e4", "4"))
-    e_hi = run(["--no-color", "explain", "E99"])[0] == 2
+    e_hi = run(["--no-color", "explain", "E300"])[0] == 2
     e_no = run(["--no-color", "explain"])[0] == 2
     rep("test_explain_accepts_three_spellings_and_rejects_junk", e_ok and e_hi and e_no,
         "explain 的三种拼法 / 越界码 / 缺参 有一处不对")

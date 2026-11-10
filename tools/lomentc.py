@@ -4759,7 +4759,8 @@ def _bit_width(t: str) -> int:
 
 
 def _is_generic_type(t: str) -> bool:
-    return "<" in t and t.endswith(">")
+    # `&Box<u32>` 是**借用**，不是泛型声明；它的 `<` 属于被借的那个类型。
+    return not t.startswith("&") and "<" in t and t.endswith(">")
 
 
 def _generic_parts(t: str) -> tuple[str, list[str]]:
@@ -4808,6 +4809,12 @@ def _mangle_name(t: str, depth: int = 0) -> str:
     旧规则是 `base + "_" + "_".join(args)`，对嵌套会拼出 `Outer_Inner<u32>` —— 那**不是
     标识符**，于是被形式对象自检拒掉（2026-09-23 补夹具时撞到）。
     """
+    if _is_ref(t):
+        # 借用当泛型实参（`Box<&u32>`）也要有**标识符**的实例名。
+        # 区域标记不进名字：它不影响布局，`&a u32` 与 `&u32` 是同一个实例。
+        mut, _region, elem = _ref_parts(t)
+        sep = "_" * (depth + 1)
+        return ("refmut" if mut else "ref") + sep + _mangle_name(elem, depth + 1)
     if not _is_generic_type(t):
         return t.strip()
     base, args = _generic_parts(t)
@@ -4819,6 +4826,10 @@ def _replace_type(t: str, mapping: dict[str, str]) -> str:
     """按映射重写类型串 (含泛型实参递归); mapping 可含 "Pair<u32>" -> "Pair_u32"。"""
     if t in mapping:
         return mapping[t]
+    if _is_ref(t):
+        mut, region, elem = _ref_parts(t)
+        return ("&mut " if mut else "&") + (f"{region} " if region else "") \
+            + _replace_type(elem, mapping)
     if _is_generic_type(t):
         base, args = _generic_parts(t)
         return f"{base}<{', '.join(_replace_type(a, mapping) for a in args)}>"
@@ -4833,6 +4844,10 @@ def _replace_type(t: str, mapping: dict[str, str]) -> str:
 def _subst_type(t: str, m: dict[str, str]) -> str:
     if t in m:
         return m[t]
+    if _is_ref(t):
+        mut, region, elem = _ref_parts(t)
+        return ("&mut " if mut else "&") + (f"{region} " if region else "") \
+            + _subst_type(elem, m)
     if _is_array(t):
         return f"[{_subst_type(_array_elem(t), m)}; {_array_len(t)}]"
     if _is_slice(t):
@@ -4974,10 +4989,29 @@ def _mono_stmts(stmts, scope, generics, insts, structs, enums) -> None:
 def _collect_types(mods) -> set[str]:
     refs: set[str] = set()
 
+    def add(t: str) -> None:
+        """收一个类型，**连它的组成部分一起**收。
+
+        借用/数组/切片/泛型实参里都可能藏着要先实例化的泛型
+        （`&Box<&u32>` 里的 `Box<&u32>`）—— 只收整串会让单态化漏掉它。
+        """
+        if not t or t in refs:
+            return
+        refs.add(t)
+        if _is_ref(t):
+            add(_ref_elem(t))
+        elif _is_generic_type(t):
+            for a in _generic_parts(t)[1]:
+                add(a)
+        elif _is_array(t):
+            add(_array_elem(t))
+        elif _is_slice(t):
+            add(_slice_elem(t))
+
     def walk_stmts(stmts) -> None:
         for s in stmts:
             if isinstance(s, Let):
-                refs.add(s.type)
+                add(s.type)
             elif isinstance(s, If):
                 walk_stmts(s.then)
                 walk_stmts(s.otherwise)
@@ -4993,16 +5027,16 @@ def _collect_types(mods) -> set[str]:
 
     for m in mods:
         for f in m.funcs:
-            refs.add(f.ret)
+            add(f.ret)
             for p in f.params:
-                refs.add(p.type)
+                add(p.type)
             walk_stmts(f.body)
         for s in m.structs:
             for _, ft in s.fields:
-                refs.add(ft)
+                add(ft)
         for e in m.enums:
             for _, pt in e.payloads.items():
-                refs.add(pt)
+                add(pt)
     return refs
 
 
@@ -5466,10 +5500,18 @@ def _is_place(e) -> bool:
     return False
 
 
-def _borrows_of(e, out: dict[str, set[str]]) -> None:
-    """M5: 收集表达式里的借用 (变量 -> {"&","&mut"})。"""
-    if isinstance(e, Un) and e.op in ("&", "&mut") and isinstance(e.expr, Ident):
-        out.setdefault(e.expr.name, set()).add(e.op)
+def _borrows_of(e, out: dict[str, list[str]]) -> None:
+    """收集表达式里的借用（**路径键** -> 借用种类列表，保留次数）。
+
+    键是 `_place_key`：`a` / `a.x` / `a[0]`。于是 `f(&mut v.x, &mut v.y)` 不再被误判成
+    “同一变量借了两次”，而 `f(&mut v.x, &mut v.x)` 会被判到。
+    """
+    if isinstance(e, Un) and e.op in ("&", "&mut"):
+        k = _borrow_key(e.expr)
+        if k is not None:
+            out.setdefault(k, []).append(e.op)
+        # `&&x` 里层也是一次借用
+        _borrows_of(e.expr, out)
         return
     if isinstance(e, Call):
         for a in e.args:
@@ -5490,18 +5532,33 @@ def _borrows_of(e, out: dict[str, set[str]]) -> None:
 
 
 def _check_borrows(args: list, line: int, errs: list[str]) -> None:
-    """M5 借用检查 v0: 同一次调用里同一变量不得既借又可变借, 或可变借两次。"""
-    b: dict[str, set[str]] = {}
+    """同一次调用里的借用冲突（E007），**按地方**而不是按变量名判。
+
+    * 同一个键上既借又可变借 / 可变借两次 -> 报；
+    * 两个键**重叠**（`a` 与 `a.x`）且任一侧是可变借 -> 报；
+    * 不相交的字段（`v.x` 与 `v.y`）互不干扰。
+    """
+    b: dict[str, list[str]] = {}
     for a in args:
         _borrows_of(a, b)
-    for name, kinds in b.items():
-        if len(kinds) > 1:
-            errs.append(f"{line}: 变量 {name} 在同一次调用里既被可变借用又被借用")
-        elif kinds == {"&mut"}:
-            n_mut = sum(1 for a in args if isinstance(a, Un) and a.op == "&mut"
-                        and isinstance(a.expr, Ident) and a.expr.name == name)
-            if n_mut > 1:
-                errs.append(f"{line}: 变量 {name} 被可变借用两次 (不允许别名)")
+    keys = sorted(b)
+    for i, k in enumerate(keys):
+        kinds = b[k]
+        if len(set(kinds)) > 1:
+            errs.append(f"{line}: 变量 {_place_name(k)} 在同一次调用里既被可变借用又被借用")
+            continue
+        if kinds.count("&mut") > 1:
+            errs.append(f"{line}: 变量 {_place_name(k)} 被可变借用两次 (不允许别名)")
+            continue
+        for k2 in keys[i + 1:]:
+            if not _place_overlap(k, k2):
+                continue
+            if "&mut" not in kinds and "&mut" not in b[k2]:
+                continue
+            if "&mut" in kinds and "&mut" in b[k2]:
+                errs.append(f"{line}: 变量 {_place_name(k)} 被可变借用两次 (不允许别名)")
+            else:
+                errs.append(f"{line}: 变量 {_place_name(k)} 在同一次调用里既被可变借用又被借用")
 
 
 def _is_int_const(e) -> bool:
@@ -5751,7 +5808,8 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
     if isinstance(e, Index):
         _walk_expr(e.obj, scope, funcs, structs, errs, enums, lifetime)
         _walk_expr(e.idx, scope, funcs, structs, errs, enums, lifetime)
-        ot = expr_type(e.obj, scope, funcs, structs)
+        # 借用自动解一层（`docs/299`）：`p: &[u32; 2]` 的 `p[0]` 与 `a[0]` 同义。
+        ot = _deref_type(expr_type(e.obj, scope, funcs, structs))
         if ot is None or not (_is_array(ot) or _is_slice(ot)):
             errs.append(f"{e.line}: 对非数组/切片类型取下标")
         it = expr_type(e.idx, scope, funcs, structs)
@@ -6718,6 +6776,69 @@ def _place_root(e) -> Ident | None:
     return None
 
 
+def _place_key(e) -> str | None:
+    """借用/字段链的**路径键**：`a` / `a.x` / `a[0]` / `a[*]`。
+
+    路径只用于**判重叠**：`a.x` 与 `a.y` 不相交（Rust 允许各借各的字段），
+    `a` 与 `a.x` 相交。`*p` 没有名字，回 `None`（裸指针是逃生舱，不参与借用判据）。
+    """
+    if isinstance(e, Ident):
+        return e.name
+    if isinstance(e, FieldAccess):
+        base = _place_key(e.obj)
+        return f"{base}.{e.name}" if base else None
+    if isinstance(e, Index):
+        base = _place_key(e.obj)
+        if not base:
+            return None
+        if isinstance(e.idx, IntLit):
+            return f"{base}[{e.idx.value}]"
+        return f"{base}[*]"
+    return None
+
+
+def _place_overlap(a: str, b: str) -> bool:
+    """两个路径键指向的**地方**是否重叠（相等，或一个是另一个的前缀）。"""
+    if a == b:
+        return True
+    return (a.startswith(b + ".") or a.startswith(b + "[")
+            or b.startswith(a + ".") or b.startswith(a + "["))
+
+
+def _place_name(key: str) -> str:
+    """路径键的根名字（报错时说人话用）。"""
+    return key.split(".", 1)[0].split("[", 1)[0]
+
+
+def _borrow_key(e) -> str | None:
+    """借用操作数的路径键；`&*p` 归到 `p`（指向的那块）。"""
+    k = _place_key(e)
+    if k is None and isinstance(e, Un) and e.op == "*":
+        k = _place_key(e.expr)
+    return k
+
+
+def _stored_borrows(e) -> list[tuple[str, str]]:
+    """值里**存下来**的借用：(路径键, `&`/`&mut`)。
+
+    字面量字段里的借用跟着值一起活（`R { p: &mut a }`）；调用实参里的不算 ——
+    它们只活这一次调用（`f(&x)`）。
+    """
+    if e is None:
+        return []
+    if isinstance(e, Un) and e.op in ("&", "&mut"):
+        k = _borrow_key(e.expr)
+        return [(k, e.op)] if k is not None else []
+    out: list[tuple[str, str]] = []
+    if isinstance(e, StructLit):
+        for _, v in e.inits:
+            out.extend(_stored_borrows(v))
+    elif isinstance(e, ArrayLit):
+        for it in e.items:
+            out.extend(_stored_borrows(it))
+    return out
+
+
 def _lifetime_marker_errs(t: str | None, params: list[tuple[str, str]], lifetime: str,
                           line: int, errs: list[str], where: str) -> None:
     """显式区域标记 `&a T` 的检查（`docs/299` §3.3）。"""
@@ -6886,15 +7007,27 @@ def _lifetime_fn_errs(f: Func, funcs: dict, structs: dict, enums: dict,
         return _lifetime_expr_prov(e, scope, prov, funcs, structs, swb, sums)
 
     def note_borrows(e) -> None:
-        """收集"谁被借了" + 存下来的 `&mut` 独占。"""
+        """收集“谁被借了”，并让**任何**借用（存下来的或行内的）与存下来的借用对账。
+
+        v1 的规则：存下来的借用活到函数末尾；所以只要曾经 `let r = &mut x`，
+        之后任何一次 `&x` / `&mut x`（哪怕只是当实参传一下）都算重叠。
+        路径键让 `v.x` 与 `v.y` 互不干扰。
+        """
         if e is None:
             return
         if isinstance(e, Un) and e.op in ("&", "&mut"):
-            root = _place_root(e.expr)
-            if root is None and isinstance(e.expr, Un) and e.expr.op == "*":
-                root = _place_root(e.expr.expr)     # `&*p` 借的是 p 指向的块
-            if root is not None:
-                borrowed.add(root.name)
+            key = _borrow_key(e.expr)
+            if key is not None:
+                borrowed.add(_place_name(key))
+                mut_hit = [k for k in stored_mut if _place_overlap(key, k)]
+                sh_hit = [k for k in stored_shared if _place_overlap(key, k)]
+                if e.op == "&mut":
+                    if sh_hit:
+                        errs.append(f"{e.line}: 变量 {_place_name(key)} 既被可变借用又被借用")
+                    elif mut_hit:
+                        errs.append(f"{e.line}: 变量 {_place_name(key)} 被可变借用两次 (不允许别名)")
+                elif mut_hit:
+                    errs.append(f"{e.line}: 变量 {_place_name(key)} 既被可变借用又被借用")
             note_borrows(e.expr)
             return
         if isinstance(e, Call):
@@ -6920,20 +7053,13 @@ def _lifetime_fn_errs(f: Func, funcs: dict, structs: dict, enums: dict,
             prov[name] = prov_of(expr)
         else:
             prov.pop(name, None)
-        # `&mut` 的独占：**存下来**才跨语句（行内的交给 E007）。
-        if isinstance(expr, Un) and expr.op == "&mut":
-            root = _place_root(expr.expr)
-            if root is not None:
-                if root.name in stored_shared or root.name in stored_mut:
-                    errs.append(f"{line}: 变量 {root.name} 被可变借用两次 (不允许别名)")
-                stored_mut[root.name] = line
-        elif isinstance(expr, Un) and expr.op == "&":
-            root = _place_root(expr.expr)
-            if root is not None:
-                if root.name in stored_mut:
-                    errs.append(f"{line}: 变量 {root.name} 既被可变借用又被借用")
-                else:
-                    stored_shared.add(root.name)
+        # 存下来的借用：只**记录**；与既有借用的冲突已经在 `note_borrows` 那一趟判过
+        # （同一处只报一次）。字段里的借用（`R { p: &mut a }`）同样存下来。
+        for key, op in _stored_borrows(expr):
+            if op == "&mut":
+                stored_mut[key] = line
+            else:
+                stored_shared.add(key)
 
     def walk(stmts) -> None:
         for s in stmts:
@@ -10384,11 +10510,14 @@ def _ll_type(t: str, structs: dict, enums: dict) -> str:
     if t in structs:
         s = structs[t]
         for _, ft in s.fields:
-            # 借用字段是一个指针（`docs/299` §3.1）—— 零拷贝视图就靠它。
-            if ft not in IR_TYPES and not _is_ref(ft):
+            # 借用字段是一个指针；**切片借用**（规范化后的 `[T]` / `mut [T]`）是
+            # `{ptr, i64}` —— 零拷贝视图结构（`Cursor { data: &[u32] }`）靠这两格。
+            if ft not in IR_TYPES and not _is_ref(ft) and not _is_slice(ft):
                 raise LomError(s.line, 1, f"结构体 {_display_ty(t)} 的字段类型 {_display_ty(ft)} 目前只支持标量")
         return "{ " + ", ".join(
-            (IR_TYPES[ft] if ft in IR_TYPES else "ptr") for _, ft in s.fields) + " }"
+            (IR_TYPES[ft] if ft in IR_TYPES
+             else "{ ptr, i64 }" if _is_slice(ft) else "ptr")
+            for _, ft in s.fields) + " }"
     if t in enums:
         e = enums[t]
         if not e.payloads:
@@ -12089,9 +12218,40 @@ class _Ir:
             self.w(f"{r} = load {self.ll(ft)}, ptr {gp}")
             return ft, r
         if isinstance(e, Index):
+            if isinstance(e.obj, FieldAccess):
+                # `c.data[0]`：切片/数组**字段**取下标（零拷贝视图的读法）。
+                fty, faddr = self._addr_of(e.obj, e.line, True)
+                if _is_slice(fty):
+                    sv = self.t()
+                    self.w(f"{sv} = load {{ ptr, i64 }}, ptr {faddr}")
+                    p = self.t()
+                    self.w(f"{p} = extractvalue {{ ptr, i64 }} {sv}, 0")
+                    et = _slice_elem(fty)
+                    it, iv = self.expr(e.idx)
+                    self.auto_guards(e, it, iv)
+                    g = self.t()
+                    self.w(f"{g} = getelementptr inbounds {self.ll(et)}, ptr {p}, {self.ll(it)} {iv}")
+                    r = self.t()
+                    self.w(f"{r} = load {self.ll(et)}, ptr {g}")
+                    return et, r
+                if _is_array(fty):
+                    et = _array_elem(fty)
+                    it, iv = self.expr(e.idx)
+                    self.auto_guards(e, it, iv)
+                    gp = self.t()
+                    self.w(f"{gp} = getelementptr inbounds {self.ll(fty)}, ptr {faddr}, i32 0, {self.ll(it)} {iv}")
+                    r = self.t()
+                    self.w(f"{r} = load {self.ll(et)}, ptr {gp}")
+                    return et, r
+                raise LomError(e.line, 1, "对非数组/切片类型取下标")
             if not isinstance(e.obj, Ident):
                 raise LomError(e.line, 1, "native: 只支持变量取下标")
             ty, ptr = self.vars[e.obj.name]
+            # `p: &[u32; 2]` 的 `p[0]`：先解一层借用，再按数组取下标（`docs/299`）。
+            if _is_ref(ty) and (_is_array(_ref_elem(ty)) or _is_slice(_ref_elem(ty))):
+                pv = self.t()
+                self.w(f"{pv} = load ptr, ptr {ptr}")
+                ty, ptr = _ref_elem(ty), pv
             if _is_slice(ty):
                 et = _slice_elem(ty)
                 _, sv = self.expr(e.obj, ty)
@@ -12605,7 +12765,10 @@ class _Ir:
             self.label(self.l("dead"))
             return "u32", "0"
         if e.name == "slice_len":
-            at = expr_type(e.args[0], self.type_scope(), self.funcs, {})
+            # 结构体表**要带上**：`slice_len(c.data)` 的类型要从字段表里查出来，
+            # 传空表会把它当成"不知道"并发出一个常量 0（2026-11-09 实测：游标程序
+            # 的 `slice_len(c.data) + c.data[0]` 跑出 1 而不是 3）。
+            at = expr_type(e.args[0], self.type_scope(), self.funcs, self.structs)
             if at and _is_slice(at):
                 _, sv = self.expr(e.args[0], at)
                 p = self.t()
@@ -12865,9 +13028,42 @@ class _Ir:
             return
         if isinstance(s, Assign) and isinstance(s.target, Index):
             base = s.target.obj
+            if isinstance(base, FieldAccess):
+                # `c.data[0] = v`：切片/数组**字段**取下标写。
+                fty, faddr = self._addr_of(base, s.line, True)
+                if _is_slice(fty):
+                    if not _is_mut_slice(fty):
+                        raise LomError(s.line, 1, f"{_display_ty(fty)} 是只读切片，不能写")
+                    et = _slice_elem(fty)
+                    sv = self.t()
+                    self.w(f"{sv} = load {{ ptr, i64 }}, ptr {faddr}")
+                    p = self.t()
+                    self.w(f"{p} = extractvalue {{ ptr, i64 }} {sv}, 0")
+                    it, iv = self.expr(s.target.idx)
+                    self.auto_guards(s.target, it, iv)
+                    gp = self.t()
+                    self.w(f"{gp} = getelementptr inbounds {self.ll(et)}, ptr {p}, {self.ll(it)} {iv}")
+                    _, v = self.expr(s.expr, et)
+                    self.w(f"store {self.ll(et)} {v}, ptr {gp}")
+                    return
+                if _is_array(fty):
+                    et = _array_elem(fty)
+                    it, iv = self.expr(s.target.idx)
+                    self.auto_guards(s.target, it, iv)
+                    gp = self.t()
+                    self.w(f"{gp} = getelementptr inbounds {self.ll(fty)}, ptr {faddr}, i32 0, {self.ll(it)} {iv}")
+                    _, v = self.expr(s.expr, et)
+                    self.w(f"store {self.ll(et)} {v}, ptr {gp}")
+                    return
+                raise LomError(s.line, 1, "对非数组/切片类型取下标")
             if not isinstance(base, Ident):
                 raise LomError(s.line, 1, "native: 只支持数组/切片变量取下标赋值")
             ty, ptr = self.vars[base.name]
+            # `p: &mut [u32; 2]` 的 `p[0] = v`：先解一层借用。
+            if _is_ref(ty) and _is_array(_ref_elem(ty)):
+                pv = self.t()
+                self.w(f"{pv} = load ptr, ptr {ptr}")
+                ty, ptr = _ref_elem(ty), pv
             if _is_slice(ty):
                 if not _is_mut_slice(ty):
                     raise LomError(s.line, 1, f"{_display_ty(ty)} 是只读切片，不能写")
@@ -13542,6 +13738,18 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     _gc_alpha_pass(mod, deps)       # L0/L1/L2（`docs/210`）—— **在 prepare 之前**，要跨模块
     mod, deps = prepare(mod, deps)  # M6
     mods = list(deps or []) + [mod]
+    # 实例名必须是**标识符**（`docs/147` §2）。基类型 / 嵌套泛型 / 借用（`ref_` /
+    # `refmut_`）都有规则；**数组与切片当泛型实参没有** ——
+    # 在这里**按写出来的类型**点名拒，别让下游的布局/取下标报出一条假理由。
+    for _m in mods:
+        for _x in list(_m.funcs) + list(_m.structs) + list(_m.enums):
+            _fg = getattr(_x, "from_generic", "")
+            if _fg and not _x.name.isidentifier():
+                _disp = f"{_fg}<{', '.join(_x.generic_args)}>"
+                raise LomError(getattr(_x, "line", 1), 1,
+                               f"泛型实参的形状这一格不收: `{_disp}` —— "
+                               f"数组/切片当泛型实参没有名字规则（`docs/147` §2）；"
+                               f"用一个具名类型包一层")
     funcs: dict[str, Func] = {}
     consts: dict[str, tuple[str, int]] = {}
     structs: dict[str, Struct] = {}

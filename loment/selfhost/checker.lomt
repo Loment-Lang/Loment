@@ -3441,6 +3441,39 @@ fn chk_find_at(src: ptr, t: ptr, i: u32, hi: u32, what: str) -> u32 {
     return hi;
 }
 
+/// 2026.3 `for x in <call> {` 的形状：`for IDENT in IDENT ( … ) {`（`docs/331`）。
+/// 必须看配对的 `)` —— 只看 `j + 4` 是 `(` 会把区间 for 的调用下界
+/// （`for i in lo() .. hi() {`）误判成调用源。
+fn chk_is_for_call(src: ptr, t: ptr, j: u32) -> u32 {
+    if !chk_tok_is(src, t, j, "for") || chk_tok_kind(t, j + 1) != 0 {
+        return 0;
+    }
+    if !chk_tok_is(src, t, j + 2, "in") || chk_tok_kind(t, j + 3) != 0 {
+        return 0;
+    }
+    if !chk_tok_is(src, t, j + 4, "(") {
+        return 0;
+    }
+    let d: u32 = 0;
+    let k: u32 = j + 4;
+    while chk_tok_kind(t, k) != 4 {
+        if chk_tok_is(src, t, k, "(") {
+            d = d + 1;
+        }
+        if chk_tok_is(src, t, k, ")") {
+            d = d - 1;
+            if d == 0 {
+                if chk_tok_is(src, t, k + 1, "{") {
+                    return 1;
+                }
+                return 0;
+            }
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
 /// 形参表 -> 局部环境 (只记类型, 不报错: 类型检查已在第一遍做过)。
 fn chk_env_params(src: ptr, t: ptr, s: ptr, n: u32, env: ptr, envc: u32,
                   lp: u32, hi: u32, oc2: ptr) -> u32 {
@@ -5321,6 +5354,24 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                     } else {
                         j = e;
                     }
+                }
+            }
+        } else if chk_is_for_call(src, t, j) == 1 {
+            // 2026.3 `for x in <call>`（`docs/331`）：源是调用，类型取返回类型；
+            // 体在配对 `)` 之后第一个深度 0 的 `{`。
+            if load32(oc, 8) < 2 {
+                chk_pub(src, t, oc, p, E_PARSE, j);
+                j = j + 1;
+            } else {
+                // checker 没有调用表达式的一般类型（`chk_tex` 对调用回 0），所以 `x`
+                // 只登记成"未知类型"：名字能解析；元素类型与数组/切片判定由 codegen
+                // 用 `expr_type`（返回类型 token）做，非数组在那边 `cg_fail`。
+                let lb2: u32 = chk_find_at(src, t, j + 3, e, "{");
+                c = chk_env_add(t, env, c, j + 1, 0);
+                if lb2 < e {
+                    j = lb2;
+                } else {
+                    j = e;
                 }
             }
         } else if chk_tok_is(src, t, j, "for") {

@@ -23,7 +23,7 @@ you are reading. The entry skill (`loment`) carries the map; this file carries i
 | Export | Add `pub` for cross-module visibility: `pub fn` / `pub struct` / `pub const` |
 | Constant | `const NAME: u32 = 3` - the initialiser is **one integer literal** (decimal or hex, optional `-`); it is not an expression, and there are no string constants - see 6.1.8 |
 | Variable | `let x: u32 = e;`, assignment `x = e;` - **the type annotation is required**; the language has no type inference |
-| Control flow | `if` / `else if` / `else`, `while`, `for i in lo..hi` (upper bound exclusive), `return <expr>;` (the value is **required**). **Tur 2 adds** `for x in xs`, `break` / `continue`, bare `return;` in unit functions, and `defer f(a, b);` - see 2.0.4. **Tur 2026.3 adds** `for i, x in xs` (index copy + element copy) - see 2.0.5 |
+| Control flow | `if` / `else if` / `else`, `while`, `for i in lo..hi` (upper bound exclusive), `return <expr>;` (the value is **required**). **Tur 2 adds** `for x in xs`, `break` / `continue`, bare `return;` in unit functions, and `defer f(a, b);` - see 2.0.4. **Tur 2026.3 adds** `for i, x in xs` (index copy + element copy) and `for x in <call>` (array/slice return, evaluated once) - see 2.0.5 |
 | Struct | `struct S { a: u32, b: u32 }`; literal `S { a: 1, b: 2 }` (2026.3: `S { a, b }` shorthand); field `s.a` |
 | Enum | `enum E { A, B(u32) }`; construction `E::B(3)`; no payload `E::A` |
 | `match` | `match x { E::A => { … } E::B(v) => { … } _ => { … } }` - **arm bodies are blocks**; exhaustive (or use `_`) |

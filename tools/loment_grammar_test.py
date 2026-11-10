@@ -1464,6 +1464,52 @@ def test_tur2026_3_for_index():
 
 
 @test
+def test_tur2026_3_for_expression():
+    """2026.3 `for x in <call>`：调用只求值一次，落到 `__tur2_s.N`；旧版次仍拒。
+
+    `docs/331`：v1 只收调用 —— 自举侧只有 `fn_ret` 能给出类型 token。数组与切片
+    返回都收。
+    """
+    body = ("module m\n\n"
+            "fn buf(b: [u32]) -> [u32] {\n    return b;\n}\n\n"
+            "fn f() -> u32 {\n"
+            "    let xs: [u32; 3] = [1, 2, 3];\n"
+            "    let s: u32 = 0;\n"
+            "    for x in buf(&xs) {\n"
+            "        s = s + x;\n"
+            "    }\n"
+            "    return s;\n"
+            "}\n")
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        p = td / "new.lomt"
+        p.write_text(body, encoding="utf-8", newline="\n")
+        ll = lomentc.emit_llvm(lomentc.load(p), ROOT)
+        assert "%__tur2_s.1.addr = alloca { ptr, i64 }" in ll, ll[:800]
+        assert ll.count("call { ptr, i64 } @buf") == 1, "调用被求值了不止一次"
+        old = td / "old.lomt"
+        old.write_text("choose write grammar tur2026.2\n" + body,
+                       encoding="utf-8", newline="\n")
+        try:
+            lomentc.load(old)
+        except lomentc.LomError:
+            pass
+        else:
+            raise AssertionError("tur2026.2 收下了 `for x in <call>` —— 封版版次被改了")
+        # 区间 for 的**调用下界**不能被当成调用源：`for i in lo() .. hi() {` 仍是区间。
+        rng = ("module m\n\nfn lo() -> u32 { return 1; }\n"
+               "fn hi() -> u32 { return 3; }\n\n"
+               "fn f() -> u32 {\n    let s: u32 = 0;\n"
+               "    for i in lo() .. hi() {\n        s = s + i;\n    }\n"
+               "    return s;\n}\n")
+        pr = td / "range.lomt"
+        pr.write_text(rng, encoding="utf-8", newline="\n")
+        lr = lomentc.emit_llvm(lomentc.load(pr), ROOT)
+        assert "__tur2_s." not in lr, "区间 for 的调用下界被当成了 for-call 源"
+    print("      2026.3 `for x in <call>` 编得过且只求值一次；tur2026.2 仍拒")
+
+
+@test
 def test_the_default_edition_is_the_newest_open_one():
     """**没声明 = 最新版次**（2026-11-06 用户裁定，`docs/312`）。
 

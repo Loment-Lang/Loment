@@ -1402,6 +1402,163 @@ def test_a_misspelled_declaration_is_refused_not_guessed_past():
 
 
 @test
+def test_tur2026_3_struct_literal_shorthand():
+    """2026.3 字段简写 `S { a }` ≡ `S { a: a }`；旧版次仍拒（封版不动）。
+
+    `docs/296` §5 把这条列进 Tur 3 的语法优化。它是**纯拼法**：AST 里就是
+    `a: a`，检查、发射、产物与显式写法完全相同。
+    """
+    short = ("module m\n\nstruct S { a: u32, b: u32 }\n\n"
+             "fn f() -> u32 {\n    let a: u32 = 1;\n    let b: u32 = 2;\n"
+             "    let s: S = S { a, b };\n    return s.a + s.b;\n}\n")
+    long = short.replace("S { a, b }", "S { a: a, b: b }")
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        a = td / "short.lomt"
+        a.write_text(short, encoding="utf-8", newline="\n")
+        b = td / "long.lomt"
+        b.write_text(long, encoding="utf-8", newline="\n")
+        la = lomentc.emit_llvm(lomentc.load(a), ROOT)
+        lb = lomentc.emit_llvm(lomentc.load(b), ROOT)
+        assert la == lb, "字段简写与显式写法的 IR 不一致"
+        old = td / "old.lomt"
+        old.write_text("choose write grammar tur2026.2\n" + short,
+                       encoding="utf-8", newline="\n")
+        try:
+            lomentc.load(old)
+        except lomentc.LomError:
+            pass
+        else:
+            raise AssertionError("tur2026.2 收下了字段简写 —— 封版版次被改了")
+    print("      2026.3 `S { a }` 与 `S { a: a }` 产物相同；tur2026.2 仍拒")
+
+
+@test
+def test_tur2026_3_for_index():
+    """2026.3 `for i, x in xs`：下标 `i` 是 u32 拷贝，元素 `x` 也是拷贝；旧版次仍拒。
+
+    `docs/332` §5 第 2 项。反糖形状与参考实现一致（`__tur2_i.N` + `while` + 体首
+    两条 `let`），自举侧因此能逐字节对拍（`loment_p8_test` M99）。
+    """
+    body = ("module m\n\n"
+            "fn f() -> u32 {\n"
+            "    let xs: [u32; 4] = [5, 6, 7, 8];\n"
+            "    let s: u32 = 0;\n"
+            "    for i, x in xs {\n"
+            "        s = s + i * 10 + x;\n"
+            "    }\n"
+            "    return s;\n"
+            "}\n")
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        p = td / "new.lomt"
+        p.write_text(body, encoding="utf-8", newline="\n")
+        ll = lomentc.emit_llvm(lomentc.load(p), ROOT)
+        assert "%i.addr = alloca i32" in ll and "%x.addr = alloca i32" in ll, ll[:600]
+        assert "load i32, ptr %i.addr" in ll, "下标不是 i32 拷贝"
+        old = td / "old.lomt"
+        old.write_text("choose write grammar tur2026.2\n" + body,
+                       encoding="utf-8", newline="\n")
+        try:
+            lomentc.load(old)
+        except lomentc.LomError:
+            pass
+        else:
+            raise AssertionError("tur2026.2 收下了 `for i, x in xs` —— 封版版次被改了")
+    print("      2026.3 `for i, x in xs` 编得过且下标为 u32；tur2026.2 仍拒")
+
+
+@test
+def test_tur2026_3_for_expression():
+    """2026.3 `for x in <call>`：调用只求值一次，落到 `__tur2_s.N`；旧版次仍拒。
+
+    `docs/334`：v1 只收调用 —— 自举侧只有 `fn_ret` 能给出类型 token。数组与切片
+    返回都收。
+    """
+    body = ("module m\n\n"
+            "fn buf(b: [u32]) -> [u32] {\n    return b;\n}\n\n"
+            "fn f() -> u32 {\n"
+            "    let xs: [u32; 3] = [1, 2, 3];\n"
+            "    let s: u32 = 0;\n"
+            "    for x in buf(&xs) {\n"
+            "        s = s + x;\n"
+            "    }\n"
+            "    return s;\n"
+            "}\n")
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        p = td / "new.lomt"
+        p.write_text(body, encoding="utf-8", newline="\n")
+        ll = lomentc.emit_llvm(lomentc.load(p), ROOT)
+        assert "%__tur2_s.1.addr = alloca { ptr, i64 }" in ll, ll[:800]
+        assert ll.count("call { ptr, i64 } @buf") == 1, "调用被求值了不止一次"
+        old = td / "old.lomt"
+        old.write_text("choose write grammar tur2026.2\n" + body,
+                       encoding="utf-8", newline="\n")
+        try:
+            lomentc.load(old)
+        except lomentc.LomError:
+            pass
+        else:
+            raise AssertionError("tur2026.2 收下了 `for x in <call>` —— 封版版次被改了")
+        # 区间 for 的**调用下界**不能被当成调用源：`for i in lo() .. hi() {` 仍是区间。
+        rng = ("module m\n\nfn lo() -> u32 { return 1; }\n"
+               "fn hi() -> u32 { return 3; }\n\n"
+               "fn f() -> u32 {\n    let s: u32 = 0;\n"
+               "    for i in lo() .. hi() {\n        s = s + i;\n    }\n"
+               "    return s;\n}\n")
+        pr = td / "range.lomt"
+        pr.write_text(rng, encoding="utf-8", newline="\n")
+        lr = lomentc.emit_llvm(lomentc.load(pr), ROOT)
+        assert "__tur2_s." not in lr, "区间 for 的调用下界被当成了 for-call 源"
+    print("      2026.3 `for x in <call>` 编得过且只求值一次；tur2026.2 仍拒")
+
+
+@test
+def test_tur2026_3_if_expression():
+    """2026.3 `let x: T = if c { a } else { b };` —— 产物与显式 if 语句相同。
+
+    `docs/335`：v1 只收 `let` 的初值、两支各一个表达式、必须有 `else`。
+    """
+    expr_form = ("module m\n\nfn f(c: bool) -> u32 {\n"
+                 "    let x: u32 = if c { 10 } else { 20 };\n"
+                 "    return x;\n}\n")
+    stmt_form = ("module m\n\nfn f(c: bool) -> u32 {\n"
+                 "    let x: u32;\n"
+                 "    if c { x = 10; } else { x = 20; }\n"
+                 "    return x;\n}\n")
+    bad_form = ("module m\n\nfn f(c: bool) -> u32 {\n"
+                "    return if c { 1 } else { 2 };\n}\n")
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        a = td / "expr.lomt"
+        a.write_text(expr_form, encoding="utf-8", newline="\n")
+        b = td / "stmt.lomt"
+        b.write_text(stmt_form, encoding="utf-8", newline="\n")
+        la = lomentc.emit_llvm(lomentc.load(a), ROOT)
+        lb = lomentc.emit_llvm(lomentc.load(b), ROOT)
+        assert la == lb, "if 表达式与显式 if 语句的 IR 不同"
+        old = td / "old.lomt"
+        old.write_text("choose write grammar tur2026.2\n" + expr_form,
+                       encoding="utf-8", newline="\n")
+        try:
+            lomentc.load(old)
+        except lomentc.LomError:
+            pass
+        else:
+            raise AssertionError("tur2026.2 收下了 if 表达式 —— 封版版次被改了")
+        bad = td / "bad.lomt"
+        bad.write_text(bad_form, encoding="utf-8", newline="\n")
+        try:
+            lomentc.load(bad)
+        except lomentc.LomError:
+            pass
+        else:
+            raise AssertionError("`return if …` 被收下了 —— v1 只该收 let 初值")
+    print("      2026.3 if 表达式与显式 if 同产物；非初值位置与 tur2026.2 都拒")
+
+
+@test
 def test_the_default_edition_is_the_newest_open_one():
     """**没声明 = 最新版次**（2026-11-06 用户裁定，`docs/312`）。
 

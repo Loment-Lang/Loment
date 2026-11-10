@@ -3744,6 +3744,144 @@ def test_m97_edition_collision_gate_matches_between_implementations():
           "钉 Tur 1 都收；用不拒")
 
 
+@test
+def test_m98_struct_literal_shorthand_twin():
+    """Tur 2026.3 字段简写 `S { a }`：两个实现产物逐字节同；旧版次两边都拒。
+
+    它和 2026.2 的纯糖同一类：只改拼法。自举侧的检查器与发射器各自认得
+    "字段名后面没有 `:`"这一格；参考侧在 parser 里就落成 `a: a`。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    short = ("module m\n\nstruct S { a: u32, b: u32 }\n\n"
+             "fn f() -> u32 {\n    let a: u32 = 1;\n    let b: u32 = 2;\n"
+             "    let s: S = S { a, b };\n    return s.a + s.b;\n}\n")
+    long = short.replace("S { a, b }", "S { a: a, b: b }")
+    old = "choose write grammar tur2026.2\n" + short
+    with tempfile.TemporaryDirectory() as td:
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_stlit")
+        outs = []
+        for name, src in (("short", short), ("long", long)):
+            p = Path(td) / f"{name}.lomt"
+            p.write_text(src, encoding="utf-8", newline="\n")
+            rc, out, err = _run_driver_raw(elf, _wsl_path(p), td, name)
+            assert rc == 0, f"自举驱动编不过 {name}: {err[-400:]}"
+            assert out == _unit_ll(p), f"{name}: 自举产物与参考不一致"
+            outs.append(out)
+        assert outs[0] == outs[1], "字段简写与显式写法的产物不同"
+        p = Path(td) / "old.lomt"
+        p.write_text(old, encoding="utf-8", newline="\n")
+        rc, out, err = _run_driver_raw(elf, _wsl_path(p), td, "old")
+        assert rc != 0 and out.strip() == "", (
+            f"tur2026.2 收下了字段简写 (rc={rc}) {err[-300:]}")
+    print("      字段简写: 两实现逐字节一致；tur2026.2 两边都拒")
+
+
+@test
+def test_m99_for_index_twin():
+    """Tur 2026.3 `for i, x in xs`：两个实现产物逐字节同；旧版次两边都拒。
+
+    `docs/332` §5 第 2 项。反糖是 `let __tur2_i.N = 0` + `while` + 体首
+    `let i = __tur2_i.N` / `let x = xs[i]`，两套实现同序。用户写的下标在自举侧
+    必须记成无 token 的 u32 哨兵（`CG_TY_U64`）—— 用 `SYN_U32` 会与 UNIT 同值，
+    印成 `void`（本仓 2026-11-10 实测）。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    src = ("module m\n\n"
+           "fn f() -> u32 {\n"
+           "    let xs: [u32; 4] = [5, 6, 7, 8];\n"
+           "    let s: u32 = 0;\n"
+           "    for i, x in xs {\n"
+           "        s = s + i * 10 + x;\n"
+           "    }\n"
+           "    return s;\n"
+           "}\n")
+    old = "choose write grammar tur2026.2\n" + src
+    with tempfile.TemporaryDirectory() as td:
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_foridx")
+        p = Path(td) / "new.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        rc, out, err = _run_driver_raw(elf, _wsl_path(p), td, "new")
+        assert rc == 0, f"自举驱动编不过 for-index: {err[-400:]}"
+        assert out == _unit_ll(p), "for-index: 自举产物与参考不一致"
+        p = Path(td) / "old.lomt"
+        p.write_text(old, encoding="utf-8", newline="\n")
+        rc, out, err = _run_driver_raw(elf, _wsl_path(p), td, "old")
+        assert rc != 0 and out.strip() == "", (
+            f"tur2026.2 收下了 for-index (rc={rc}) {err[-300:]}")
+    print("      for-index: 两实现逐字节一致；tur2026.2 两边都拒")
+
+
+@test
+def test_m100_for_expression_twin():
+    """Tur 2026.3 `for x in <call>`：两个实现产物逐字节同；旧版次两边都拒。
+
+    `docs/334`。反糖是 `let __tur2_s.N = <call>` + `let __tur2_i.N = 0` +
+    `while …`，两套实现同序；调用只求值一次。v1 只收调用（自举侧只有返回类型
+    token 可用）。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    src = ("module m\n\n"
+           "fn buf(b: [u32]) -> [u32] {\n    return b;\n}\n\n"
+           "fn f() -> u32 {\n"
+           "    let xs: [u32; 3] = [1, 2, 3];\n"
+           "    let s: u32 = 0;\n"
+           "    for x in buf(&xs) {\n"
+           "        s = s + x;\n"
+           "    }\n"
+           "    return s;\n"
+           "}\n")
+    old = "choose write grammar tur2026.2\n" + src
+    with tempfile.TemporaryDirectory() as td:
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_forexpr")
+        p = Path(td) / "new.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        rc, out, err = _run_driver_raw(elf, _wsl_path(p), td, "new")
+        assert rc == 0, f"自举驱动编不过 for-expression: {err[-400:]}"
+        assert out == _unit_ll(p), "for-expression: 自举产物与参考不一致"
+        p = Path(td) / "old.lomt"
+        p.write_text(old, encoding="utf-8", newline="\n")
+        rc, out, err = _run_driver_raw(elf, _wsl_path(p), td, "old")
+        assert rc != 0 and out.strip() == "", (
+            f"tur2026.2 收下了 for-expression (rc={rc}) {err[-300:]}")
+    print("      for-expression: 两实现逐字节一致；tur2026.2 两边都拒")
+
+
+@test
+def test_m101_if_expression_twin():
+    """Tur 2026.3 `let x: T = if c { a } else { b };`：两实现逐字节同；旧版次两边都拒。
+
+    `docs/335`。参考实现降成 `let x: T;` + `If`，自举侧按同一 token 形状直发同一条
+    序列（条件、L1_then / L2_else / L3_end、两支各一条 store）。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    src = ("module m\n\nfn f(c: bool, d: bool) -> u32 {\n"
+           "    let x: u32 = if c && d { 10 } else { f(false, false) };\n"
+           "    let y: bool = if x > 7 { true } else { false };\n"
+           "    return x;\n}\n")
+    old = "choose write grammar tur2026.2\n" + src
+    with tempfile.TemporaryDirectory() as td:
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_ifexpr")
+        p = Path(td) / "new.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        rc, out, err = _run_driver_raw(elf, _wsl_path(p), td, "new")
+        assert rc == 0, f"自举驱动编不过 if-expression: {err[-400:]}"
+        assert out == _unit_ll(p), "if-expression: 自举产物与参考不一致"
+        p = Path(td) / "old.lomt"
+        p.write_text(old, encoding="utf-8", newline="\n")
+        rc, out, err = _run_driver_raw(elf, _wsl_path(p), td, "old")
+        assert rc != 0 and out.strip() == "", (
+            f"tur2026.2 收下了 if-expression (rc={rc}) {err[-300:]}")
+    print("      if-expression: 两实现逐字节一致；tur2026.2 两边都拒")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_p8_test")
 

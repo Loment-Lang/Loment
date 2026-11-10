@@ -19,7 +19,7 @@ import json
 import os
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -87,6 +87,10 @@ BUILTIN_DIVERGES = ("panic",)  # 求值后不可继续 (M19)
 #: （`expr_type` / `_walk_expr` / 发射器）都认那个标记。
 #: 继承 Tur 2 全部语法/内建的版次（版次是累积的：2026.3 ⊃ 2026.2 ⊃ 2026.1）。
 TUR2_PLUS = ("tur2026.2", "tur2026.3")
+
+#: **2026.3 及以后**（版次累积）。目前只有 `tur2026.3` 一个 —— 开新版时把它加进来，
+#: 别写成 `profile >= "..."`：规范名是字符串，词法序不是版次序。
+TUR3_PLUS = ("tur2026.3",)
 
 TUR2_BUILTINS: dict[str, tuple[tuple[str, ...], str]] = {
     "print_num": (("i64",), "u32"),
@@ -1765,7 +1769,8 @@ class ForEach:
 
     反糖（`_desugar_foreach`）把它变成普通的 `let __i$N` + `while`，所以检查器、代码生成、
     Rust 后端、L0/L1/L2 那些按语句类型分派的趟**一行都不用认识它**。
-    v1 只收**具名的数组/切片变量**，元素类型在反糖时按声明文本定下来。
+    源可以是**具名的数组/切片变量**（Tur 2），或 2026.3 的**调用**（`src_expr`，
+    返回数组/切片）；元素类型在反糖时定下来。
     """
 
     var: str
@@ -1774,6 +1779,11 @@ class ForEach:
     line: int
     tok_at: int = 0
     tok_end: int = 0
+    #: Tur 2026.3 的 `for i, x in xs`：`i` 是下标副本（`u32`），`x` 是元素副本。
+    idx: str | None = None
+    #: Tur 2026.3 的 `for x in <call> {`：源是表达式时非 None，`src` 为空串。
+    #: v1 只收调用（自举侧只有 `fn_ret` 能给出类型 token，`docs/334`）。
+    src_expr: object | None = None
 
 
 @dataclass
@@ -2022,6 +2032,36 @@ class If:
     #: 与 `While.l2` 同一条规则（`_l2_ok`），只是"体"换成了分支。
     then_l2: bool = False
     else_l2: bool = False
+
+
+@dataclass
+class IfExpr:
+    """Tur 2026.3 的 `if c { a } else { b }` 表达式（`docs/335`）。
+
+    **只存在于解析到反糖之间**：`_desugar_ifexpr` 把它降成一条普通 `If` 语句，
+    两支各给目标赋一次值（目标先以 `let x: T;` 声明）。v1 只收 `let` 的初值位置，
+    两支各是**一个表达式**（没有语句、必须有 `else`）。
+    """
+
+    cond: object
+    then: object
+    otherwise: object
+    line: int
+    then_at: int = 0
+    then_end: int = 0
+    else_at: int = 0
+    else_end: int = 0
+
+
+def _contains_ifexpr(o) -> bool:
+    """这棵 AST 里有没有 `IfExpr`（不论在哪个位置）—— 反糖只能处理初值位置。"""
+    if isinstance(o, IfExpr):
+        return True
+    if isinstance(o, (list, tuple)):
+        return any(_contains_ifexpr(x) for x in o)
+    if is_dataclass(o):
+        return any(_contains_ifexpr(getattr(o, f.name)) for f in fields(o))
+    return False
 
 
 @dataclass
@@ -3758,6 +3798,8 @@ class Parser:
         #: `elif` 抹成 `else`，这里补上缺的那个 `if`）。
         self.profile = profile
         self.no_struct = 0  # >0 时禁止结构体字面量 (if/while 条件位置的歧义)
+        #: >0 时才允许 `if` 表达式（2026.3，`docs/335`）：只开在 `let` 的初值位置。
+        self.allow_ifexpr = 0
         #: 当前嵌套深度（块 + 表达式共用一个计数）—— 见 `MAX_NEST`。
         self.depth = 0
         #: 循环嵌套层数（Tur 2 的 `break`/`continue` 只在循环里合法）。
@@ -4606,7 +4648,17 @@ class Parser:
             if self.accept("punct", ";"):  # M9: 未初始化声明
                 return Let(name, ty, None, t.line, space)
             self.expect("punct", "=")
-            e = self._fallback_rhs(self.parse_expr(), t.line)
+            # 2026.3 的 `if` 表达式只在这一格开口（`docs/335`）；解析完再确认它
+            # **就是**初值本身，而不是藏在别的表达式里 —— 藏在里面反糖不了。
+            self.allow_ifexpr += 1
+            try:
+                e = self._fallback_rhs(self.parse_expr(), t.line)
+            finally:
+                self.allow_ifexpr -= 1
+            if not isinstance(e, IfExpr) and _contains_ifexpr(e):
+                raise LomError(t.line, 1,
+                               "`if` 表达式 v1 只能作 `let` 的整个初值，不能嵌在别的"
+                               "表达式里（docs/335）")
             self.expect("punct", ";")
             return Let(name, ty, e, t.line, space)
         if t.val == "if":
@@ -4649,6 +4701,12 @@ class Parser:
         if t.val == "for":
             self.next()
             var = self.ident("循环变量")
+            idx: str | None = None
+            if self.profile in TUR3_PLUS and self.at("punct", ","):
+                # Tur 2026.3：`for i, x in xs`（`docs/332` §5 第 2 项）。
+                self.next()
+                idx = var
+                var = self.ident("循环变量")
             self.expect("ident", "in")
             # Tur 2：`for x in xs {`（具名数组/切片）。只看一眼就够了 —— 区间是
             # `for i in lo..hi`，`in` 后面紧跟一个 ident、再紧跟 `{` 才可能是 for-in。
@@ -4661,11 +4719,24 @@ class Parser:
                     body = self.parse_block()
                 finally:
                     self.loop_depth -= 1
-                fe = ForEach(var, src, body, t.line)
+                fe = ForEach(var, src, body, t.line, idx=idx)
                 fe.tok_at, fe.tok_end = at, self.i - 1
                 return fe
             self.no_struct += 1
             lo = self.parse_expr()
+            # Tur 2026.3：`for x in <call> {` —— 源是一段表达式，不再是具名变量
+            # （`docs/334`）。v1 只收调用，因为自举侧只有调用能拿到返回类型 token。
+            if self.profile in TUR3_PLUS and self.at("punct", "{"):
+                self.no_struct -= 1
+                at = self.i + 1
+                self.loop_depth += 1
+                try:
+                    body = self.parse_block()
+                finally:
+                    self.loop_depth -= 1
+                fe = ForEach(var, "", body, t.line, idx=idx, src_expr=lo)
+                fe.tok_at, fe.tok_end = at, self.i - 1
+                return fe
             self.expect("punct", ".")
             self.expect("punct", ".")
             hi = self.parse_expr()
@@ -4862,6 +4933,13 @@ class Parser:
 
     def parse_primary(self):
         t = self.peek()
+        if t.kind == "ident" and t.val == "if" and self.profile in TUR3_PLUS:
+            # 2026.3 的 `if` 表达式（`docs/335`）。语句位置的 `if` 在 `parse_stmt`
+            # 就分走了；能走到这里说明它在表达式里 —— v1 只开在 `let` 初值位置。
+            if self.allow_ifexpr <= 0:
+                raise LomError(t.line, t.col,
+                               "`if` 表达式 v1 只能作 `let` 的初值（docs/335）")
+            return self.parse_postfix(self.parse_ifexpr(t.line))
         if t.kind == "number":
             return self.parse_postfix(IntLit(self.int_lit(), t.line))
         if t.kind == "string":
@@ -4924,15 +5002,53 @@ class Parser:
                 self.next()
                 inits: list[tuple[str, object]] = []
                 while not self.at("punct", "}"):
+                    ftok = self.peek()
                     fn = self.ident("字段名")
-                    self.expect("punct", ":")
-                    inits.append((fn, self.parse_expr()))
+                    if (self.profile in TUR3_PLUS
+                            and (self.at("punct", ",") or self.at("punct", "}"))):
+                        # Tur 2026.3 的字段简写（`docs/296` §5）：`S { a }` 就是
+                        # `S { a: a }`。**只在 2026.3+ 收** —— 旧版次里它仍是语法错，
+                        # 封版版次一个字节都不动。值就是同名的标识符，类型检查、
+                        # 未声明变量、字段类型全部走原来的路。
+                        inits.append((fn, Ident(fn, ftok.line)))
+                    else:
+                        self.expect("punct", ":")
+                        inits.append((fn, self.parse_expr()))
                     if not self.accept("punct", ","):
                         break
                 self.expect("punct", "}")
                 return StructLit(name, inits, t.line)
             return self.parse_postfix(Ident(name, t.line))
         raise LomError(t.line, t.col, f"期望表达式，得到 {t.val or '<eof>'!r}")
+
+    def parse_ifexpr(self, line):
+        """`if c { a } else { b }` —— 两支各**一个表达式**（`docs/335`）。"""
+        self.next()                          # `if`
+        self.no_struct += 1
+        cond = self.parse_expr()
+        self.no_struct -= 1
+        self.expect("punct", "{")
+        then_at = self.i
+        then = self.parse_expr()
+        then_end = self.i
+        self.expect("punct", "}")
+        if not self.at("ident", "else"):
+            t = self.peek()
+            raise LomError(t.line, t.col, "`if` 表达式必须有 `else`（docs/335）")
+        self.next()
+        if self.at("ident", "if"):
+            t = self.peek()
+            raise LomError(t.line, t.col,
+                           "`if` 表达式的 v1 不支持 `else if`（docs/335）")
+        self.expect("punct", "{")
+        else_at = self.i
+        other = self.parse_expr()
+        else_end = self.i
+        self.expect("punct", "}")
+        if _contains_ifexpr(then) or _contains_ifexpr(other):
+            raise LomError(line, 1,
+                           "`if` 表达式的 v1 不支持在分支里再嵌一个 `if` 表达式（docs/335）")
+        return IfExpr(cond, then, other, line, then_at, then_end, else_at, else_end)
 
     def parse_postfix(self, e):
         """后缀: 字段访问 a.b / 下标 a[i]"""
@@ -14666,13 +14782,67 @@ def _split_seq_type(ty: str) -> tuple[str, int | None] | None:
     return inner.strip(), None
 
 
+def _lower_ifexpr(name: str, ie: IfExpr) -> list:
+    """把 `if` 表达式降成一条 `If` 语句，两支各给 `name` 赋一次值。"""
+    def arm(e) -> list:
+        if isinstance(e, IfExpr):
+            return _lower_ifexpr(name, e)
+        ln = getattr(e, "line", ie.line)
+        return [Assign(Ident(name, ln), e, ln)]
+
+    return [If(ie.cond, arm(ie.then), arm(ie.otherwise), ie.line,
+               then_at=ie.then_at, then_end=ie.then_end,
+               else_at=ie.else_at, else_end=ie.else_end)]
+
+
+def _desugar_ifexpr(mod: Module) -> None:
+    """`let x: T = if c { a } else { b };` -> `let x: T; if c { x = a } else { x = b }`。
+
+    2026.3（`docs/335`）。v1 只处理 `let` 的初值；解析期已经保证它不在别的位置。
+    降完的节点都是普通语句 —— 检查、发射、L0/L1/L2、Rust 后端一行都不用认识 `IfExpr`。
+    """
+    def walk(stmts: list) -> list:
+        out: list = []
+        for s in stmts:
+            if isinstance(s, Let) and isinstance(s.expr, IfExpr):
+                out.append(Let(s.name, s.type, None, s.line, s.space))
+                out += _lower_ifexpr(s.name, s.expr)
+            elif isinstance(s, If):
+                s.then = walk(s.then)
+                s.otherwise = walk(s.otherwise)
+                out.append(s)
+            elif isinstance(s, While):
+                s.body = walk(s.body)
+                out.append(s)
+            elif isinstance(s, For):
+                s.body = walk(s.body)
+                out.append(s)
+            elif isinstance(s, ForEach):
+                s.body = walk(s.body)
+                out.append(s)
+            elif isinstance(s, Match):
+                for _, b in s.arms:
+                    b[:] = walk(b)
+                out.append(s)
+            else:
+                out.append(s)
+        return out
+
+    for f in mod.funcs:
+        f.body = walk(f.body)
+
+
 def _desugar_foreach(mod: Module) -> None:
     """把 `ForEach` 反糖成 `let __tur2_i.N: u32 = 0; while __tur2_i.N < len { ... }`。
 
-    **只给 Tur 2**（调用方按 profile 决定）。元素类型与长度在**声明文本**上定下来
-    （v1 只收具名变量，所以这够用，也是自举侧唯一做得到的口径）。循环变量 `x` 与下标
-    都是普通局部：代码生成、L0/L1/L2、Rust 后端都不必认识 for-in。
+    **只给 Tur 2+**（调用方按 profile 决定）。元素类型与长度在**声明文本**上定下来：
+    具名变量查作用域；2026.3 的调用源用 `expr_type` 取返回类型，并先插一条
+    `let __tur2_s.N = <call>`（`docs/334`，v1 只收调用）。循环变量 `x` 与下标都是
+    普通局部：代码生成、L0/L1/L2、Rust 后端都不必认识 for-in。
     """
+    funcs = {f.name: f for f in mod.funcs}
+    structs = {s.name: s for s in mod.structs}
+
     def walk_seq(stmts: list, env: dict[str, str], cnt: list[int]) -> list:
         out: list = []
         env = dict(env)
@@ -14681,23 +14851,49 @@ def _desugar_foreach(mod: Module) -> None:
                 out.append(s)
                 env[s.name] = s.type
             elif isinstance(s, ForEach):
-                seq = _split_seq_type(env.get(s.src, ""))
-                if seq is None:
-                    raise LomError(s.line, 1,
-                                   f"`for {s.var} in {s.src}`: `{s.src}` is not a named "
-                                   f"array or slice -- v1 takes `[T; N]` / `[T]` variables "
-                                   f"(docs/296 s2.2)")
+                src_name = s.src
+                src_ty = None
+                if s.src_expr is not None:
+                    # 2026.3 `for x in <call> {`（`docs/334`）：源是一个调用，类型取
+                    # 它的返回类型；v1 只收调用 —— 自举侧只有 `fn_ret` 能给出类型 token。
+                    if not isinstance(s.src_expr, Call):
+                        raise LomError(s.line, 1,
+                                       f"`for {s.var} in <expression>`: v1 takes a function "
+                                       f"call returning an array or slice (`docs/334`)")
+                    src_ty = expr_type(s.src_expr, env, funcs, structs)
+                    seq = _split_seq_type(src_ty or "")
+                    if seq is None:
+                        raise LomError(s.line, 1,
+                                       f"`for {s.var} in <expression>`: the call's return "
+                                       f"type is not an array or slice (`docs/334`)")
+                else:
+                    seq = _split_seq_type(env.get(s.src, ""))
+                    if seq is None:
+                        raise LomError(s.line, 1,
+                                       f"`for {s.var} in {s.src}`: `{s.src}` is not a named "
+                                       f"array or slice -- v1 takes `[T; N]` / `[T]` variables "
+                                       f"(docs/296 s2.2)")
                 elem, n = seq
                 cnt[0] += 1
                 idx = f"__tur2_i.{cnt[0]}"
+                if s.src_expr is not None:
+                    # 源先落一个临时局部：调用只求值一次，循环体里的下标都读它。
+                    src_name = f"__tur2_s.{cnt[0]}"
+                    out.append(Let(src_name, src_ty, s.src_expr, s.line))
                 ln = s.line
                 cond = Bin("<", Ident(idx, ln),
                            IntLit(n, ln) if n is not None
-                           else Call("slice_len", [Ident(s.src, ln)], ln), ln)
+                           else Call("slice_len", [Ident(src_name, ln)], ln), ln)
                 inner = dict(env)
+                if s.idx is not None:
+                    inner[s.idx] = "u32"
                 inner[s.var] = elem
-                body = [Let(s.var, elem,
-                            Index(Ident(s.src, ln), Ident(idx, ln), ln), ln)]
+                body = []
+                if s.idx is not None:
+                    # 下标是 `__tur2_i.N` 的**副本**：体内改 `i` 不影响循环推进。
+                    body.append(Let(s.idx, "u32", Ident(idx, ln), ln))
+                body.append(Let(s.var, elem,
+                                Index(Ident(src_name, ln), Ident(idx, ln), ln), ln))
                 body += walk_seq(s.body, inner, cnt)
                 # 自增放进 `step`，不放进体：`continue` 必须先自增再回条件，否则跳过
                 # 自增就是死循环（`Step` 由 While 发射器在体后与 continue 处各发一次）。
@@ -14832,6 +15028,7 @@ def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3,
     if _eff in TUR2_PLUS:
         # Tur 2 的 `for x in xs`（`docs/296` §2.2）：反糖成普通 While，下游不必认识它。
         # 2026.3 继承（版次累积）。
+        _desugar_ifexpr(mod)     # 先降 if 表达式（它可能出现在 for 体里）
         _desugar_foreach(mod)
     mod.own_switches = own      # 本模块**自己**写的 —— 只有"库不许 choose"用它
     # **包清单的前置条件**（`docs/325`）：模块自己没写某一维时，取同包 `pkg.lomp`

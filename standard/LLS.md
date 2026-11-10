@@ -834,7 +834,7 @@ Tur 2026.2 adds the following constructs. They are **not** available in 2026.1.
 | `def` | `def f(…) { … }` | identical to `fn f(…) { … }` | sugar; same artifact bytes |
 | `elif` | `elif cond { … }` | `else if cond { … }` | sugar |
 | `and`, `or`, `not` | `a and b`, `a or b`, `not a` | `a && b`, `a || b`, `!a` | sugar; same short-circuit |
-| for-in | `for x in xs { … }` | index loop over a named array or slice | v1 accepts only a named array/slice; `x` is a copy; expressions, `mut`, and `for i, x` are later editions |
+| for-in | `for x in xs { … }` | index loop over a named array or slice | v1 accepts a named array/slice, or (2026.3+) a call returning one; `x` is a copy; other expressions and `mut` are later editions; the index-and-element form `for i, x` is 2026.3+ (§8.10) |
 | `break`, `continue` | inside a loop | exit / next iteration of the innermost loop | outside a loop is E019 |
 | bare `return;` | in a unit function | early return | only when the function has no return type |
 | `orelse`, `catch` | `let a: u32 = maybe orelse 0;` | switch on a two-variant enum; success takes the payload, failure the fallback | v1: right-hand side of `let`/assignment only; the enum has exactly two variants, the first carrying the payload; the fallback is lazy |
@@ -855,6 +855,10 @@ Tur 2026.3 adds:
 | `lifetime` | `choose lifetime_no` / `lifetime_auto` / `lifetime_manual` | the eighth dimension (§25.7) | the default is `lifetime_auto` from 2026.3; `lifetime_no` in older editions |
 | `&T` in type position | `&[u32]`, `&mut Cursor`, `&str` | a reference type; implicit regions; zero annotations in `lifetime_auto` | in `lifetime_manual`, an explicit region marker `&a T`; unary `*` dereferences |
 | domain blocks and laws | `domain buf : disk[0..63] consumed(1) { … }`, `domain:for i`, `solid`, `couple`, `mutex`, `tick`, `quality`, `discharge` | scoped capability domains, domain loops, groups, and the stateful laws of §21 | only bounded, orderable domains can be walked; §21.6–§21.9 |
+| struct literal shorthand | `S { a }` | identical to `S { a: a }`; the value is the same-named binding | 2026.3+ only; explicit and shorthand fields may be mixed; missing/duplicate/unknown fields remain E015 |
+| for-index | `for i, x in xs { … }` | an index loop that also binds the position: `i` is a `u32` copy of the current index, `x` a copy of the element | 2026.3+ only; the source is still a named array or slice; `i` and `x` are copies, so assignments to either do not write back |
+| for-call | `for x in buf(&xs) { … }` | a for-in whose source is a call returning an array or slice; the call is evaluated once | 2026.3+ only; the source MUST be a call (array literals and other expressions are later editions); `x` is a copy |
+| if expression | `let x: u32 = if c { 10 } else { 20 };` | a `let` initialiser picks one of two expressions | 2026.3+ only; initialiser position only, one expression per arm, `else` required; no `else if` or nesting |
 
 The lifetime dimension is **edition-gated**: writing `choose lifetime_*` in 2026.1 or
 2026.2 is refused; those editions keep the old default (`lifetime_no`) and the old
@@ -1091,6 +1095,8 @@ correctness. (This is a known limitation, recorded in §39.)
 | while | `while EXPR BLOCK` | |
 | range for | `for IDENT in LO..HI BLOCK` | `HI` exclusive; bounds integer; the loop variable has the bounds' type (`u32` if both are literals) |
 | for-in | `for IDENT in ARRAY_OR_SLICE BLOCK` | 2026.2+; a copy of each element |
+| for-index | `for IDENT "," IDENT in ARRAY_OR_SLICE BLOCK` | 2026.3+; the first name is a `u32` index copy, the second the element copy |
+| for-call | `for IDENT in CALL BLOCK` | 2026.3+; the call MUST return an array or slice and is evaluated once |
 | match | `match EXPR { ARM* }` | §13 |
 | return | `return EXPR;` or bare `return;` | the value is required unless the function is unit and the edition is 2026.2+ |
 | break / continue | `break;` / `continue;` | 2026.2+; innermost loop; outside a loop is E019 |
@@ -1125,12 +1131,23 @@ Conditions MUST be `bool`. `&&` and `||` short-circuit. A struct literal in a co
 position is parsed as a block where the grammar would be ambiguous; the rule is the same
 as the reference parser's "no struct literal in condition" guard.
 
+From Tur 2026.3, `if` is also an expression in **one** position: the whole initialiser of
+a `let` (`let x: T = if c { a } else { b };`). Each arm is a single expression, `else` is
+mandatory, and the construct lowers to `let x: T;` followed by an ordinary `if`. `else if`,
+nested `if` expressions, and `if` in any other expression position are not accepted in
+this edition round (§8.10).
+
 ### 11.6 `for`
 
 Range-for iterates `LO` (inclusive) to `HI` (exclusive). For-in iterates the elements of a
 named array or slice; the element is a **copy**, and mutating the loop variable does not
-write back. The v1 for-in does not accept an arbitrary expression, a `&mut` reference, or
-an index-and-element pair.
+write back. From Tur 2026.3, `for i, x in xs` additionally binds the position to `i`, a
+`u32` copy, before the element is bound; `i` starts at 0 and advances with `x`. Both names
+are ordinary bindings in the loop body's scope, and assigning to either does not write
+back. Also from 2026.3, the source may be a **call** returning an array or slice
+(`for x in buf(&xs) { … }`); the call is evaluated once, into a temporary, and the loop
+walks that temporary. Other expressions (array literals, arithmetic, parenthesised names)
+are not accepted yet. The v1 for-in still does not accept a `&mut` reference.
 
 ### 11.7 `return`, `break`, `continue`
 
@@ -1235,7 +1252,10 @@ assignment in 2026.2+.
 ### 12.9 Struct literals
 
 `S { a: 1, b: 2 }` requires every field exactly once (E015). A missing, duplicate, or
-unknown field is an error. Field shorthand (`S { a }`) is not in this edition.
+unknown field is an error. From Tur 2026.3, a field may be written as a bare identifier:
+`S { a, b }` is exactly `S { a: a, b: b }`. The shorthand is **edition-gated**: in 2026.1
+and 2026.2 the same text is a syntax error, so the frozen editions are unchanged. Mixed
+forms (`S { a, b: 2 }`) are allowed.
 
 ### 12.10 Array literals
 
@@ -1622,7 +1642,7 @@ The following table is normative. Each row names the rule, the code, and the bou
 | Every expression's type matches its context (binding, assignment, return, argument, field, index, condition). | E001 | Integer literals are typed by context (§10.6). |
 | `if`/`while` conditions are `bool`; `&&`/`||`/`!` operands are `bool`. | E001 | `bool` and integers do not mix. |
 | Return type matches; a non-unit function cannot fall off the end. | E001 / E027 | Every path must return. |
-| Struct literals initialise every field exactly once; field access names an existing field. | E015 | No field shorthand. |
+| Struct literals initialise every field exactly once; field access names an existing field. | E015 | Field shorthand is 2026.3+ only; missing/duplicate/unknown fields remain E015. |
 | Array literals are non-empty, homogeneous, and match the declared length. | E016 | `N` is a positive constant. |
 | Indexing applies to arrays/slices and an integer index. | E001 / E014 | Bounds are not checked by the type system; E028 catches literal out-of-range. |
 | Assignment targets are lvalues. | E014 | Variable, field, index. |
@@ -2271,6 +2291,9 @@ An implementation that supports several editions MUST keep their surfaces separa
 | Base Tur syntax | yes | yes | yes |
 | `def`, `elif`, `and`, `or`, `not` | — | yes | yes |
 | `for x in xs`, `break`, `continue` | — | yes | yes |
+| `for i, x in xs` | — | — | yes |
+| `for x in <call>` (array/slice return) | — | — | yes |
+| `if` expression (let initialiser) | — | — | yes |
 | bare `return;` in unit functions | — | yes | yes |
 | `orelse`, `catch` | — | yes | yes |
 | `print_num` | — | yes | yes |
@@ -2278,6 +2301,7 @@ An implementation that supports several editions MUST keep their surfaces separa
 | `lgc` | — | — | yes |
 | `lifetime` dimension | — | — | yes (default `lifetime_auto`) |
 | `&T` in type position | — | — | yes |
+| struct literal shorthand `S { a }` | — | — | yes |
 | domain blocks, laws, loops | additive | additive | additive |
 
 "Additive" means the construct was previously a syntax error and becomes accepted without
@@ -3090,6 +3114,8 @@ statement     := "let" "mut"? IDENT ":" type "=" expr ";"
                | "while" expr block
                | "for" IDENT "in" expr ".." expr block
                | "for" IDENT "in" IDENT block
+               | "for" IDENT "," IDENT "in" IDENT block        // 2026.3+
+               | "for" IDENT "in" IDENT "(" args? ")" block     // 2026.3+ (call source)
                | "match" expr "{" arm* "}"
                | "return" expr? ";"
                | "break" ";" | "continue" ";"
@@ -3125,8 +3151,9 @@ postfix       := primary ("(" args? ")" | "." IDENT | "[" expr "]" | "?")*
 primary       := INT | STRING | "true" | "false"
                | IDENT | IDENT "::" IDENT ("(" expr ")")?
                | "(" expr ")"
-               | IDENT "{" (IDENT ":" expr),* "}"
+               | IDENT "{" (IDENT (":" expr)?),* "}"           // shorthand: 2026.3+
                | "[" (expr),* "]" | "&" ("mut")? expr
+               | "if" expr block "else" block                  // 2026.3+, let initialiser only
 cast          := expr "as" type
 fallback      := expr ("orelse" | "catch") expr
 

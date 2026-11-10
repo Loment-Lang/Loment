@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import loment_suite  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-SRC = ROOT / "lmgr" / "main.lomt"
+SRC = ROOT / "loment" / "tools" / "lmgr.lomt"
 TESTS: list[tuple[str, object]] = []
 
 
@@ -54,7 +54,7 @@ def test_registry_has_38_slots():
         if done == "1":
             implemented.append(name)
     # 只有真能出数的槽位才许写 1；能力齐了但没实现也是 0。
-    assert implemented == ["cpu.load", "mem.phys", "mem.proc"], implemented
+    assert implemented == ["cpu.load", "mem.phys", "mem.proc", "proc.tree"], implemented
 
 
 @test
@@ -139,6 +139,25 @@ def test_mem_slots_report_or_refuse():
                 fields = doc["rows"][0]["fields"]
                 assert fields["total_mib"] > 0
                 assert 0 <= fields["load_pct"] <= 100
+
+
+@test
+def test_proc_tree_reports_or_refuses():
+    with tempfile.TemporaryDirectory(prefix="lmgr-test-") as d:
+        exe = _build(Path(d))
+        out = subprocess.run([str(exe), "proc", "tree", "--json"],
+                             capture_output=True, text=True, encoding="utf-8")
+    if out.returncode == 2:
+        assert "win.proc" in out.stdout, out.stdout
+        return
+    assert out.returncode == 0, out.stderr
+    doc = json.loads(out.stdout)
+    assert doc["manager"] == "proc.tree"
+    assert doc["rows"], doc
+    for r in doc["rows"]:
+        assert r["key"].startswith("pid:")
+        assert r["fields"]["name"], r
+        assert r["fields"]["threads"] >= 0, r
 
 
 @test

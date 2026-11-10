@@ -27,6 +27,8 @@
 
 module alarm
 
+use timeabi
+
 /// 真实时间（墙上时钟）。
 pub const AL_ITIMER_REAL: u32 = 0;
 /// 进程用户态 CPU 时间。
@@ -40,15 +42,6 @@ const ALQ_SYS_PAUSE: u64 = 34;
 const ALQ_SYS_ALARM: u64 = 37;
 const ALQ_SYS_SETITIMER: u64 = 38;
 
-fn alq_st64(p: ptr, off: u32, v: u64) -> u32 {
-    let b: u32 = 0;
-    while b < 8 {
-        store8(p, off + b, ((v >> (8 * b)) & 255) as u8);
-        b = b + 1;
-    }
-    return off + 8;
-}
-
 fn alq_ld64(p: ptr, off: u32) -> u64 {
     let v: u64 = 0;
     let b: u32 = 0;
@@ -61,11 +54,7 @@ fn alq_ld64(p: ptr, off: u32) -> u64 {
 
 /// 打一个完整的 `itimerval`。两段都是"秒 + 微秒"。
 pub fn al_ival_pack(buf: ptr, isec: u64, iusec: u64, vsec: u64, vusec: u64) -> u32 {
-    let a: u32 = alq_st64(buf, 0, isec);
-    let b: u32 = alq_st64(buf, a, iusec);
-    let c: u32 = alq_st64(buf, b, vsec);
-    let d: u32 = alq_st64(buf, c, vusec);
-    return d;
+    return ta_ival_pack(buf, isec, iusec, vsec, vusec);
 }
 
 /// 把 interval 段（前 16 字节）拷进 out，返回 16。
@@ -90,12 +79,18 @@ pub fn al_ival_value(buf: ptr, out: ptr) -> u32 {
 
 /// 第 off 段（0 = interval，16 = value）的秒。
 pub fn al_ival_sec(buf: ptr, off: u32) -> u64 {
-    return alq_ld64(buf, off);
+    if off == 0 {
+        return ta_ival_interval_sec(buf);
+    }
+    return ta_ival_value_sec(buf);
 }
 
 /// 第 off 段的微秒。
 pub fn al_ival_usec(buf: ptr, off: u32) -> u64 {
-    return alq_ld64(buf, off + 8);
+    if off == 0 {
+        return ta_ival_interval_usec(buf);
+    }
+    return ta_ival_value_usec(buf);
 }
 
 /// `alarm(seconds)`：给本进程装一个"seconds 秒后发 SIGALRM"的闹钟。

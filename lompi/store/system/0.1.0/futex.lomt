@@ -17,9 +17,13 @@
 // 超时用的是**相对还是绝对**的判断（`FUTEX_CLOCK_REALTIME` 与 `WAIT_BITSET` 组合
 // 决定，本模块只打包 timespec，不替调用方选）。
 //
+// timespec 的字节打包统一在 `timeabi`（timerfd/futex/interval/alarm 共用一份）。
+//
 // 命名: 公开 fx_*, 内部 fxq_*。自检 test_futex_*。
 
 module futex
+
+use timeabi
 
 pub const FX_WAIT: u32 = 0;
 pub const FX_WAKE: u32 = 1;
@@ -119,35 +123,17 @@ pub fn fx_op_flags(op: u32, private: bool, realtime: bool) -> u32 {
 
 /// 把秒/纳秒写进 16 字节 timespec，返回写入字节数。
 pub fn fx_ts_set(ts: ptr, sec: u64, nsec: u64) -> u32 {
-    let b: u32 = 0;
-    while b < 8 {
-        store8(ts, b, ((sec >> (8 * b)) & 255) as u8);
-        store8(ts, 8 + b, ((nsec >> (8 * b)) & 255) as u8);
-        b = b + 1;
-    }
-    return FX_TS_BYTES;
+    return ta_ts_pack(ts, sec, nsec);
 }
 
 /// 读 timespec 的秒。
 pub fn fx_ts_sec(ts: ptr) -> u64 {
-    let v: u64 = 0;
-    let b: u32 = 0;
-    while b < 8 {
-        v = v | ((load8(ts, b) as u64) << (8 * b));
-        b = b + 1;
-    }
-    return v;
+    return ta_ts_sec(ts);
 }
 
 /// 读 timespec 的纳秒。
 pub fn fx_ts_nsec(ts: ptr) -> u64 {
-    let v: u64 = 0;
-    let b: u32 = 0;
-    while b < 8 {
-        v = v | ((load8(ts, 8 + b) as u64) << (8 * b));
-        b = b + 1;
-    }
-    return v;
+    return ta_ts_nsec(ts);
 }
 
 /// `futex(uaddr, op, val, timeout, uaddr2, val3)` —— 六个参数原样交给内核。

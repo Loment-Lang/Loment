@@ -20,10 +20,8 @@
 
 module sysctl
 
-const SCQ_SYS_READ: u64 = 0;
-const SCQ_SYS_CLOSE: u64 = 3;
-const SCQ_SYS_OPENAT: u64 = 257;
-const SCQ_AT_FDCWD: u64 = 18446744073709551516;
+use fsutil
+
 
 fn scq_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
     let p: u32 = pos;
@@ -37,20 +35,6 @@ fn scq_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
         i = i + 1;
     }
     return p;
-}
-
-fn scq_cstr(s: str, out: ptr, cap: u32) -> u32 {
-    let n: u32 = str_len(s);
-    if n + 1 > cap {
-        return 0;
-    }
-    let i: u32 = 0;
-    while i < n {
-        store8(out, i, str_byte(s, i) as u8);
-        i = i + 1;
-    }
-    store8(out, n, 0 as u8);
-    return n + 1;
 }
 
 /// 点号键 -> `/proc/sys/...` 路径（`. -> /`）。返回长度（不含 NUL）。
@@ -123,13 +107,7 @@ pub fn sc2_read(key: str, buf: ptr, cap: u64) -> i64 {
         return 0 - 36;
     }
     store8(path, plen, 0 as u8);
-    let fd: i64 = syscall6(SCQ_SYS_OPENAT, SCQ_AT_FDCWD, path as u64, 0, 0, 0);
-    if fd < 0 {
-        return fd;
-    }
-    let r: i64 = syscall4(SCQ_SYS_READ, fd as u64, buf as u64, cap);
-    let _c: i64 = syscall4(SCQ_SYS_CLOSE, fd as u64, 0, 0);
-    return r;
+    return fu_read_file(path, buf, cap as u32);
 }
 
 /// 读一个键的整数（`out` 是 8 字节 u64）。成功返回 1，读失败或不是数字返回 0。

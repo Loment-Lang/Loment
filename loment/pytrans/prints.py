@@ -17,5 +17,7 @@ def main() -> int:
     print(s)
     print("tab\there")
     print("say \"hi\"")
+    parity = "even" if n % 2 == 0 else "odd"   # 条件表达式（赋值右边）
+    print(parity)
     print()
     return 7

@@ -432,6 +432,15 @@ _PY_BATTERY = {
     "py_print_bool": "def f() -> int:\n    print(True)\n    return 0\n",
     "py_print_multi": 'def f() -> int:\n    print("a", 1)\n    return 0\n',
     "py_str_as_int": 'def f() -> int:\n    return "a"\n',
+    # ---- 条件表达式（`x if c else y`）：只在赋值/返回的右边收
+    "py_tern_bind": "def f(c: bool) -> int:\n    x = 1 if c else 2\n    return x\n",
+    "py_tern_return": "def f(c: bool, a: int, b: int) -> int:\n    return a if c else b\n",
+    "py_tern_str": 'def f(c: bool) -> str:\n    s = "yes" if c else "no"\n    return s\n',
+    "py_tern_reassign": "def f(c: bool) -> int:\n    x = 1 if c else 2\n"
+                        "    x = 3 if c else x\n    return x\n",
+    "py_tern_nested": "def f(c: bool) -> int:\n    return (1 if c else 2) + 1\n",
+    "py_tern_mismatch": 'def f(c: bool) -> int:\n    x = 1 if c else "no"\n'
+                        "    return x\n",
 }
 
 

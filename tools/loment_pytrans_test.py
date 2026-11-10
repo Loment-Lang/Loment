@@ -336,6 +336,46 @@ def test_printing_matches_cpython_stdout():
 
 
 @test
+def test_script_style_matches_cpython():
+    """**脚本式写法**（不写 `def`，顶层语句就是程序）与 CPython 逐字节相同。
+
+    Python 写法允许这样写 —— 顶层可执行语句合成入口 `_start`。这条规则**只对
+    `choose write grammar python` 成立**：别的表层语法与原生 Loment 不经过
+    `from_python`，它们的顶层语句各自处理（见 `potato_from._synthesize_start`）。
+
+    对照组是 `python script.py`（CPython 跑顶层语句），比 **(退出码, stdout 字节)**。
+    """
+    if not _wsl() or not _python():
+        print("      SKIP: 需要 WSL + CPython")
+        return
+    name = "script.py"
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        src = (EX / name).read_text(encoding="utf-8")
+        p = td / "script.lomt"
+        p.write_text("choose write grammar python\n\n" + src,
+                     encoding="utf-8", newline="\n")
+        fu = potato_from.front_door(p)
+        lp = td / "unit.lomt"
+        lp.write_text(fu.source, encoding="utf-8", newline="\n")
+        mod = lomentc.load(lp)
+        deps = lomentc.resolve_deps(mod, ROOT, lp.parent, entry=lp)
+        errs = lomentc.check(mod, deps=deps)
+        assert not errs, f"翻译出来的 Loment 检查不过: {errs[:3]}"
+        blob, _info = lomelf.compile_ll(lomentc.emit_llvm(mod, ROOT, deps), [])
+        exe = td / "script.elf"
+        exe.write_bytes(blob)
+        l_rc, l_out = _run_io(exe)
+    r = subprocess.run([_python(), str(EX / name)], capture_output=True, timeout=120,
+                       shell=False)
+    py_rc, py_out = r.returncode, r.stdout.replace(b"\r\n", b"\n")
+    assert (l_rc, l_out) == (py_rc, py_out), (
+        f"**脚本式写法与 CPython 不同**\n  CPython -> rc={py_rc}, {py_out!r}\n"
+        f"  译文    -> rc={l_rc}, {l_out!r}")
+    print(f"      脚本式写法：CPython 与译文都是 stdout={py_out!r} rc={py_rc}")
+
+
+@test
 def test_disagreeing_source_follows_loment_not_python():
     """**不同意集**：两边算得不一样，而**照本语言的来**（`docs/188` §0）。
 

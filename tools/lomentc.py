@@ -1777,6 +1777,8 @@ class ForEach:
     line: int
     tok_at: int = 0
     tok_end: int = 0
+    #: Tur 2026.3 的 `for i, x in xs`：`i` 是下标副本（`u32`），`x` 是元素副本。
+    idx: str | None = None
 
 
 @dataclass
@@ -4652,6 +4654,12 @@ class Parser:
         if t.val == "for":
             self.next()
             var = self.ident("循环变量")
+            idx: str | None = None
+            if self.profile in TUR3_PLUS and self.at("punct", ","):
+                # Tur 2026.3：`for i, x in xs`（`docs/329` §5 第 2 项）。
+                self.next()
+                idx = var
+                var = self.ident("循环变量")
             self.expect("ident", "in")
             # Tur 2：`for x in xs {`（具名数组/切片）。只看一眼就够了 —— 区间是
             # `for i in lo..hi`，`in` 后面紧跟一个 ident、再紧跟 `{` 才可能是 for-in。
@@ -4664,7 +4672,7 @@ class Parser:
                     body = self.parse_block()
                 finally:
                     self.loop_depth -= 1
-                fe = ForEach(var, src, body, t.line)
+                fe = ForEach(var, src, body, t.line, idx=idx)
                 fe.tok_at, fe.tok_end = at, self.i - 1
                 return fe
             self.no_struct += 1
@@ -14632,9 +14640,15 @@ def _desugar_foreach(mod: Module) -> None:
                            IntLit(n, ln) if n is not None
                            else Call("slice_len", [Ident(s.src, ln)], ln), ln)
                 inner = dict(env)
+                if s.idx is not None:
+                    inner[s.idx] = "u32"
                 inner[s.var] = elem
-                body = [Let(s.var, elem,
-                            Index(Ident(s.src, ln), Ident(idx, ln), ln), ln)]
+                body = []
+                if s.idx is not None:
+                    # 下标是 `__tur2_i.N` 的**副本**：体内改 `i` 不影响循环推进。
+                    body.append(Let(s.idx, "u32", Ident(idx, ln), ln))
+                body.append(Let(s.var, elem,
+                                Index(Ident(s.src, ln), Ident(idx, ln), ln), ln))
                 body += walk_seq(s.body, inner, cnt)
                 # 自增放进 `step`，不放进体：`continue` 必须先自增再回条件，否则跳过
                 # 自增就是死循环（`Step` 由 While 发射器在体后与 continue 处各发一次）。

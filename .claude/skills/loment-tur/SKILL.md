@@ -149,7 +149,7 @@ Everything here is **Tur 2 only**. Each entry says what it lowers to and what it
 | **`def`** | `def f(a: u32) -> u32 { … }` | `fn f(…)` | pure sugar, identical code |
 | **`elif`** | `elif cond { … }` | `else if cond { … }` | pure sugar |
 | **`and` / `or` / `not`** | `a and b`, `a or b`, `not a` | `a && b`, `a \|\| b`, `!a` | pure sugar, same short-circuit |
-| **`for x in xs`** | `for x in xs { … }` | index loop: `let i = 0; while i < len { let x = xs[i]; body; i = i + 1 }` | v1 accepts **only a named array or slice** (`let xs: [u32; 4]`, or a `[T]` parameter). `x` is a **copy**. Expressions, `mut` references, and `for i, x in xs` are Tur 2026.3 |
+| **`for x in xs`** | `for x in xs { … }` | index loop: `let i = 0; while i < len { let x = xs[i]; body; i = i + 1 }` | v1 accepts **only a named array or slice** (`let xs: [u32; 4]`, or a `[T]` parameter). `x` is a **copy**. Arbitrary source expressions and `mut` references are not accepted yet; `for i, x in xs` landed in Tur 2026.3 (§2.0.5) |
 | **`break` / `continue`** | inside `while` / `for i in lo..hi` / `for x in xs` | jump to the innermost loop's exit / update step | outside a loop is E19. The emitter closes the L2 epoch opened in the body **before** jumping (`docs/210`) - jumping out without closing is a leak |
 | **bare `return;`** | `fn f() { if bad { return; } … }` | early exit from a **unit** function (`fn f()`, no `-> T`) | only in Tur 2 **and** only when the function has no return type; `return;` in a `-> T` function is still E19 |
 | **`orelse` / `catch`** | `let a: u32 = maybe orelse 0;` / `let b: u32 = risky() catch 0;` | switch on the two-variant enum; success takes the payload, failure takes the fallback | v1 is **only the right-hand side of `let` / assignment**, and the enum must have **exactly two variants with the first carrying the payload** (`Option { Some(T), None }`, `Result { Ok(T), Err(E) }`). The fallback is **lazy** (evaluated only on the failing branch). `catch \|e\| { … }` and `catch return` are Tur 3 |
@@ -186,6 +186,15 @@ not change. Design and the standing boundary list: `docs/299`.
 
 With `lifetime_no` (the default before 2026.3, and still selectable) `&` in a type position is
 a parse error and struct fields hold scalars only - the pre-2026.3 shape, unchanged.
+
+2026.3 also adds two spelling-level constructs (no lifetimes involved; both are refused by
+the frozen editions):
+
+- **struct literal field shorthand** `S { a, b: 2 }` - a bare name means `a: a`
+  (`docs/329`);
+- **`for i, x in xs`** - the index loop also binds the position: `i` is a `u32` copy
+  (0, 1, 2, ...), `x` the element copy. Source is still a named array or slice; assigning
+  to `i` or `x` does not write back (`docs/330`).
 
 ### 2.0.6 Lexical grammar
 

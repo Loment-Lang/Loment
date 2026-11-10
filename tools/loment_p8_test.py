@@ -555,7 +555,8 @@ int main(int argc, char **argv) {
         unsigned int tk = *(unsigned int *)(errs + 8 * i + 4);
         unsigned int st = *(unsigned int *)(toks + 20 * tk + 4);
         unsigned int ln = *(unsigned int *)(toks + 20 * tk + 8);
-        printf(" %u@%u:%.*s", code, tk, (int)(ln > 24 ? 24 : ln), buf + st);
+        unsigned int line = *(unsigned int *)(toks + 20 * tk + 12);
+        printf(" %u@%u:%.*s", code, line, (int)(ln > 24 ? 24 : ln), buf + st);
     }
     printf("\\n");
     return 0;
@@ -3111,6 +3112,55 @@ PARSE_LEVEL: set[str] = {
     "bin-literal",
 }
 
+#: 诊断**行号**两侧不一致的已知案例（棘轮：**只许变短**）。码集已经相同（`loment_rule_parity`
+#: 的预算管着那一半），这里管的是用户看得见的另一半：同一条错误指到了另一行，或者自举侧
+#: 多报/少报一条。键是规则名，值是差异的形状。修好一条就删一行 —— 判据会断言条目**仍然**
+#: 不一致，删晚了会红（与 `M85_KNOWN_GAPS` / `PARSE_KNOWN_GAPS` 同一个形状）。
+DIAG_LINE_GAPS: dict[str, str] = {
+    # 开关那五条：`sw_add` 记的是**压缩前**的 token 下标，而 `switch_rules` 跑在
+    # `apply_switches` 压缩之后的 token 流上；`choose` 构造本身被删掉了，于是下标落到
+    # 后面的 token 上（源码第 3 行的 `choose` 被报成第 5 行的 `fn`）。
+    "choose-bad-mode": "E22: 参考 3 行 / 自举 5 行（压缩前 token 下标）",
+    "choose-vm-bad-value": "E22: 参考 3 行 / 自举 5 行（同上）",
+    "switch-undef": "E22: 参考 3 行 / 自举 5 行（同上）",
+    "switch-dup": "E22: 参考 7 行 / 自举 10 行（同上）",
+    "lspe-unknown-value": "E22: 参考 3 行 / 自举 5 行（同上）",
+    # 结构体 / 枚举的声明级错误：参考报**声明起始**那一行，自举报**成员**那一行。
+    "struct-field-dup": "E13: 参考 3 行 / 自举 5 行",
+    "enum-variant-dup": "E13: 参考 3 行 / 自举 5 行",
+    "struct-field-type-unknown": "E30: 参考 3 行 / 自举 4 行",
+    "enum-payload-type-unknown": "E30: 参考 3 行 / 自举 4 行",
+    # match / 结构体字面量：自举多报一条（指向声明行），或把位置挪到模式/字段那一行。
+    "structlit-unknown-field": "E15: 自举多一条第 4 行；参考只有第 8 行",
+    "structlit-missing-field": "E15: 参考 9 行 / 自举 5 行",
+    "match-unknown-variant": "E8: 自举多一条第 4 行；参考只有第 8 行",
+    "match-dup-pattern": "E8: 参考 9 行 / 自举 5、11 两行",
+    "match-nonexhaustive": "E8: 参考 9 行 / 自举 5 行",
+    "match-payload-arity": "E8: 参考 8 行 / 自举 9 行（E2 那一条两边一致）",
+    # 其余两条。
+    "unclosed-brace": "E19: 参考 5 行（EOF）/ 自举 9 行",
+    "deep-nesting": "E23: 参考 67 行 / 自举 68 行（嵌套上限差一层）",
+}
+
+
+def _ref_diag_pairs(src: Path) -> set[tuple[int, int]]:
+    """参考实现的 (码, 行) 集；解析期错误是抛出来的，照样收。"""
+    try:
+        msgs = lomentc.check(lomentc.load(src))
+    except lomentc.LomError as e:
+        msgs = [str(e)]
+    out: set[tuple[int, int]] = set()
+    for m in msgs:
+        code, _t, _h = loment_diag.classify(m)
+        if code == "E999":
+            continue
+        g = re.match(r"^\s*(\d+):", m)
+        out.add((int(code[1:]), int(g.group(1)) if g else -1))
+    return out
+
+
+_DRV_DIAG = re.compile(r"E(\d+)\s+@\d+\s+line\s+(\d+):")
+
 
 @test
 def test_m85_driver_gate_on_probe_cases():
@@ -3136,6 +3186,8 @@ def test_m85_driver_gate_on_probe_cases():
         cases = list(P._CASES)
         bad_signal: list[str] = []
         leaked: list[str] = []
+        line_bad: list[str] = []
+        line_gaps_seen: set[str] = set()
         for rid, src in cases:
             f = Path(td) / f"g_{rid}.lomt"
             f.write_text(src, encoding="utf-8", newline="\n")
@@ -3144,9 +3196,21 @@ def test_m85_driver_gate_on_probe_cases():
                 bad_signal.append(f"{rid}(rc={rc})")
             elif rc == 0 and rid not in PARSE_LEVEL:
                 leaked.append(rid)
+            elif rc == 1:
+                ref = _ref_diag_pairs(f)
+                drv = {(int(c), int(ln)) for c, ln in _DRV_DIAG.findall(_err)}
+                if ref != drv:
+                    if rid in DIAG_LINE_GAPS:
+                        line_gaps_seen.add(rid)
+                    else:
+                        line_bad.append(f"{rid}: ref={sorted(ref)} drv={sorted(drv)}")
         assert not bad_signal, f"驱动器被信号打死: {bad_signal}"
         assert not leaked, (f"这些规则负例驱动器放行了: {leaked} —— 要么检查器漏了这条规则, "
                             f"要么它其实是解析期错误 (请登记进 PARSE_LEVEL)")
+        assert not line_bad, (f"诊断行号不一致且未登记: {line_bad} —— 修掉, 或登记进 "
+                              f"DIAG_LINE_GAPS (棘轮: 只许变短)")
+        stale = sorted(set(DIAG_LINE_GAPS) - line_gaps_seen)
+        assert not stale, (f"这些案例两边行号已经一致, 请从 DIAG_LINE_GAPS 删掉: {stale}")
         print(f"      规则负例经驱动器: {len(cases)} 条全部非零退出且无信号 "
               f"(解析期豁免 {len(PARSE_LEVEL)} 条)")
         # 名字形式 `use <名字>` 装载失败必须**报出来** (镜像侧), 不许静默少装一个依赖 ——

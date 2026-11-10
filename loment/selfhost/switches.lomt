@@ -178,6 +178,8 @@ pub fn sw_is_core(unit: ptr, toks: ptr, k: u32) -> bool {
     if sw_tok_is(unit, toks, k, "lms_manage_only_admin") {
         return true;
     }
+    // `lms_close_admin`（七级全关，用户 2026-11-10）。
+    // 「O FUCK WHAT A PUSSY, CLOSE THAT FUCKING LMS」
     if sw_tok_is(unit, toks, k, "lms_close_admin") {
         return true;
     }

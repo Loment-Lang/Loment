@@ -592,6 +592,8 @@ fn chk_core_dim(src: ptr, t: ptr, k: u32) -> u32 {
     // 第六维（`docs/253`，用户 2026-10-15）：`lms`。与 `gc` **正交**。
     // 2026-10-18（0.1.5.1）：取值从"开/关"改成**档名**（`docs/253` §11.3）——
     // 默认 `lms_full`，写档是**降级**。非满档一律带 `_admin`（`docs/262` §10.1）。
+    // 用户 2026-11-10：`lms_close_admin` = **七级全关**（`docs/253` §11.3）。
+    // 「O FUCK WHAT A PUSSY, CLOSE THAT FUCKING LMS」
     if chk_tok_is(src, t, k, "lms_full") || chk_tok_is(src, t, k, "lms_forensic_admin")
             || chk_tok_is(src, t, k, "lms_daily_admin")
             || chk_tok_is(src, t, k, "lms_manage_only_admin")

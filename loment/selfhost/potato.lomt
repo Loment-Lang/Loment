@@ -2328,7 +2328,9 @@ fn pt_lms_mask(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
         m = 2;
     }
     if v == 5 {
-        m = 0;                           // 七级全关
+        // 七级全关（用户 2026-11-10）。
+        // 「O FUCK WHAT A PUSSY, CLOSE THAT FUCKING LMS」
+        m = 0;
     }
     let d: u32 = 0;
     let i: u32 = lo;

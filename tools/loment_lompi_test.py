@@ -1625,7 +1625,7 @@ def test_every_store_module_compiles_on_its_own():
 
 @test
 def test_every_builtin_package_carries_the_lomentitem_mark():
-    """每个随包发的 `pkg.lomp` 都必须带 `origin() == "LomentItem"`（docs/330）。
+    """每个随包发的 `pkg.lomp` 都必须带 `origin() == "LomentItem"`（docs/331）。
 
     **Why**：编译器拿这个标记当闸 —— 没有它的包不进入内置库的解析面，社区包就不能
     同名顶替标准库。标记是**声明**不是密码学签名；它的价值在于"少了就一定不对"，
@@ -1866,7 +1866,7 @@ def _write_pkg(d: Path, name: str) -> None:
     d.mkdir(parents=True, exist_ok=True)
     (d / "area.lomt").write_bytes(PKG_AREA.encode())
     (d / f"{name}.lomt").write_bytes(PKG_ENTRY.format(n=name).encode())
-    # 这些夹具也用来摆"工具链自带的 store"，所以清单带 `LomentItem`（docs/330）。
+    # 这些夹具也用来摆"工具链自带的 store"，所以清单带 `LomentItem`（docs/331）。
     (d / "pkg.lomp").write_text(
         ("module pkg\n\npub fn name() -> str {\n    return \"" + name + "\";\n}\n\n"
          "pub fn origin() -> str {\n    return \"LomentItem\";\n}\n"),
@@ -1940,7 +1940,7 @@ def test_selfhost_reaches_a_module_in_the_dev_checkout_store():
         pkg.mkdir(parents=True)
         (pkg / "area.lomt").write_bytes(PKG_AREA.encode())
         (pkg / "geom.lomt").write_bytes(PKG_ENTRY.format(n="geom").encode())
-        # 夹具模拟**工具链自带**的包：清单要带 `LomentItem`，否则解析闸会拒（docs/330）。
+        # 夹具模拟**工具链自带**的包：清单要带 `LomentItem`，否则解析闸会拒（docs/331）。
         (pkg / "pkg.lomp").write_text(
             "module pkg\n\npub fn name() -> str {\n    return \"geom\";\n}\n\n"
             "pub fn origin() -> str {\n    return \"LomentItem\";\n}\n",

@@ -6186,7 +6186,7 @@ NAME_ROOTS = ("loment/lib", "loment/examples", "loment/selfhost", "loment/tools"
 #: 注册表里叫 `std` 的包就替换掉整个标准库。与 `lompi/lpi_cli.lomt` 的
 #: `pkg_reserved_name`、`loment/selfhost/driver.lomt` 的 `name_reserved` **一起改**。
 RESERVED_PACKAGE_NAMES = frozenset(("std", "libl", "host", "internet", "os"))
-#: `pkg.lomp` 里"这是工具链自带的标准库"的标记（`docs/330`）。**不是密码学签名** ——
+#: `pkg.lomp` 里"这是工具链自带的标准库"的标记（`docs/331`）。**不是密码学签名** ——
 #: 它是声明；配合内容哈希与发行签名才有意义。
 LOMENT_ITEM = "LomentItem"
 #: L0 布局的**唯一**后缀。**L1 没有专属后缀** —— 路径形式里"不是 .lom 就是 L1 模块",
@@ -6490,7 +6490,7 @@ def store_roots(root: Path, tool_dir: Path | None) -> list[Path]:
 
     两条都**必须存在**才进候选 (不存在就跳过), 所以发布包里第 2 条自然落空。
 
-    **`LOMENT_NO_STORE=1` 让这一层整体消失**（`docs/330`）：编裸金属时不该有任何
+    **`LOMENT_NO_STORE=1` 让这一层整体消失**（`docs/331`）：编裸金属时不该有任何
     "顺手拉一份标准库"的可能。此时名字解析只剩 `deps/` 与内置四根。
     """
     if _env_truthy("LOMENT_NO_STORE"):
@@ -6621,7 +6621,7 @@ def resolve_name(name: str, root: Path, proj: Path | None = None,
 
     # **导入方住在商店里时不看项目本地** (#980): store 包自己的 `use` 不能被使用者的
     # `deps/` 劫持 —— 那会让标准库的内部模块也被顶掉。
-    # 保留名 = 写死的那几个 + **store 里现有的每一个包名**（`docs/330`）：社区包不能顶替
+    # 保留名 = 写死的那几个 + **store 里现有的每一个包名**（`docs/331`）：社区包不能顶替
     # 标准库；新加一个包时这条自动跟上，不用回来改表。
     reserved = RESERVED_PACKAGE_NAMES | _store_package_names(stores)
     if proj is not None and name not in reserved \
@@ -7074,7 +7074,7 @@ def _env_truthy(name: str) -> bool:
 
 
 def _manifest_origin(text: str) -> str:
-    """清单里的 `origin()` 标记（`docs/330`）：`LomentItem` = 工具链自带的标准库。
+    """清单里的 `origin()` 标记（`docs/331`）：`LomentItem` = 工具链自带的标准库。
 
     **不是一个密码学签名** —— 它是"这个包由工具链发布"的声明；解析器拿它当闸，
     没有标记的包不进入内置库的解析面。
@@ -7127,7 +7127,7 @@ def _require_builtin_origin(f: Path, name: str) -> None:
     pkg = f.parent.parent.name
     raise LomError(1, 1, f"自带的库里 {name} 所属的包 {pkg} 没有 `{LOMENT_ITEM}` 标记 —— "
                          f"它不是工具链发布的标准库。社区包请改名安装；标准库文件被替换时"
-                         f"这条就是那道闸（docs/330）。")
+                         f"这条就是那道闸（docs/331）。")
 
 
 #: 包里"用了哪些构造"的词汇表（`docs/325` 的前置条件）。键 = 触发它的 token 写法，

@@ -25,7 +25,6 @@
 // 命名: 公开 toml_*, 内部 t_*。自检 test_toml_*。
 
 module toml
-choose runtime
 
 use "mem.lomt"
 

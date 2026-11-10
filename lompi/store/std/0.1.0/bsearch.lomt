@@ -14,7 +14,6 @@
 // 命名: 公开一律 bsearch_*, 内部一律 bs_*。自检 test_bsearch_*。
 
 module bsearch
-choose runtime
 
 use "mem.lomt"
 

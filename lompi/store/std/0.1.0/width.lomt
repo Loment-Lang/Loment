@@ -19,7 +19,6 @@
 // 命名: 公开 width_*, 内部 w_*。自检 test_width_*。
 
 module width
-choose runtime
 
 use "mem.lomt"
 

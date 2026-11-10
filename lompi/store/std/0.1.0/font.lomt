@@ -37,7 +37,6 @@
 // 命名: 公开 ft_*, 内部 ft_*。自检 test_font_*。
 
 module font
-choose runtime
 
 use "mem.lomt"
 

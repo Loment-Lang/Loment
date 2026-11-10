@@ -32,7 +32,6 @@
 // 命名: 公开 sr_*, 内部 sr_* 辅助 + ts_* 自检。自检 test_search_*。
 
 module search
-choose runtime
 
 use "mem.lomt"
 

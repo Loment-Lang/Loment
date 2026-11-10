@@ -16,7 +16,6 @@
 // 判据文件里两条分开写, 不混。
 
 module dns
-choose runtime
 
 /// 失败 / 找不到。
 pub const DNS_NO: u32 = 4294967295;

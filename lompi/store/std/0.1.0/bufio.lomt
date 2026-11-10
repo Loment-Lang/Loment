@@ -31,7 +31,6 @@
 // 命名: 公开 bufio_* 的缩写 `bi_*`, 内部 `rg_*` / `bi_scan`。自检 test_bufio_*。
 
 module bufio
-choose runtime
 
 use "mem.lomt"
 use "num.lomt"

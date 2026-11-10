@@ -13,7 +13,6 @@
 // 命名: 公开一律 path_*, 内部一律 pa_*。自检 test_path_*。
 
 module path
-choose runtime
 
 use "num.lomt"
 

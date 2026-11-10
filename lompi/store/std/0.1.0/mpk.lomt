@@ -22,7 +22,6 @@
 // 命名: 公开 mpk_*, 内部 m_*。自检 test_mpk_*。
 
 module mpk
-choose runtime
 
 use "mem.lomt"
 

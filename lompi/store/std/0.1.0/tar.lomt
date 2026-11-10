@@ -24,7 +24,6 @@
 // 命名: 公开 tar_*, 内部 th_*。自检 test_tar_*。
 
 module tar
-choose runtime
 
 use "mem.lomt"
 

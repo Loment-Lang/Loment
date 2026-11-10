@@ -16,7 +16,6 @@
 // 命名: 公开 base32_*, 内部 b32_*。自检 test_base32_*。
 
 module base32
-choose runtime
 
 use "mem.lomt"
 

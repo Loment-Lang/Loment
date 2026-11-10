@@ -1,0 +1,136 @@
+// std/calc.lomt — 采样序列上的数值微积分
+//
+// 为什么是"采样序列"而不是"函数": 本语言**没有函数指针**，不能把 f(x) 传进来。
+// 但数值积分/微分在工程里几乎总是拿**已经采好的 y[i]**（传感器、波形、日志）——
+// 那个形状不需要回调。要积一个解析函数，先用 `poly` 或调用方自己的循环采样。
+//
+// 约定: `y` 是 n 个 double 的位（u64）；第 i 个样本对应 x = x0 + i*h。所有函数只读 y。
+//   * 梯形法: n >= 2；
+//   * 辛普森法: n 为奇数且 n >= 3（区间数是偶数）；
+//   * 中心差分: 1 <= i <= n-2；
+//   * 前向/后向差分在端点用。
+//
+// 不做的: 自适应步长、Romberg、误差估计 —— 那些要"再采样"，而采样是调用方的事。
+//
+// 命名: 公开 ca_*, 内部 ca_*。自检 test_calc_*。
+
+module calc
+
+use f64
+use f64conv
+
+fn ca_y(y: ptr, i: u32) -> u64 {
+    return mem_load64(y, i * 8);
+}
+
+/// 梯形法：h * (y0/2 + y1 + ... + y(n-2) + y(n-1)/2)。
+pub fn ca_trapezoid(y: ptr, n: u32, h: u64) -> u64 {
+    if n == 0 {
+        return F64_POS_ZERO;
+    }
+    if n == 1 {
+        return F64_POS_ZERO;
+    }
+    let s: u64 = f64_mul(f64_add(ca_y(y, 0), ca_y(y, n - 1)), F64_HALF);
+    let i: u32 = 1;
+    while i < n - 1 {
+        s = f64_add(s, ca_y(y, i));
+        i = i + 1;
+    }
+    return f64_mul(s, h);
+}
+
+/// 辛普森 1/3 法（n 为奇数）：h/3 * (y0 + 4*奇数项 + 2*偶数项 + yn-1)。
+pub fn ca_simpson(y: ptr, n: u32, h: u64) -> u64 {
+    if n < 3 || (n % 2) == 0 {
+        return 4294967295; // 形状不对
+    }
+    let odd: u64 = F64_POS_ZERO;
+    let even: u64 = F64_POS_ZERO;
+    let i: u32 = 1;
+    while i < n - 1 {
+        if (i % 2) == 1 {
+            odd = f64_add(odd, ca_y(y, i));
+        } else {
+            even = f64_add(even, ca_y(y, i));
+        }
+        i = i + 1;
+    }
+    let inner: u64 = f64_add(f64_add(ca_y(y, 0), ca_y(y, n - 1)),
+                             f64_add(f64_mul(f64_add(F64_TWO, F64_TWO), odd), f64_mul(F64_TWO, even)));
+    return f64_mul(f64_div(h, F64_THREE), inner);
+}
+
+/// 中心差分（内部点）。
+pub fn ca_diff_central(y: ptr, n: u32, i: u32, h: u64) -> u64 {
+    if i == 0 || i + 1 >= n {
+        return 4294967295;
+    }
+    let num: u64 = f64_sub(ca_y(y, i + 1), ca_y(y, i - 1));
+    return f64_div(num, f64_mul(F64_TWO, h));
+}
+
+/// 前向差分（i 到 i+1）。
+pub fn ca_diff_forward(y: ptr, n: u32, i: u32, h: u64) -> u64 {
+    if i + 1 >= n {
+        return 4294967295;
+    }
+    return f64_div(f64_sub(ca_y(y, i + 1), ca_y(y, i)), h);
+}
+
+/// 后向差分（i-1 到 i）。
+pub fn ca_diff_backward(y: ptr, n: u32, i: u32, h: u64) -> u64 {
+    if i == 0 || i >= n {
+        return 4294967295;
+    }
+    return f64_div(f64_sub(ca_y(y, i), ca_y(y, i - 1)), h);
+}
+
+/// 二阶中心差分（内部点）。
+pub fn ca_second_diff(y: ptr, n: u32, i: u32, h: u64) -> u64 {
+    if i == 0 || i + 1 >= n {
+        return 4294967295;
+    }
+    let num: u64 = f64_add(f64_sub(ca_y(y, i + 1), f64_mul(F64_TWO, ca_y(y, i))),
+                           ca_y(y, i - 1));
+    return f64_div(num, f64_mul(h, h));
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_calc_trapezoid_linear() -> bool {
+    // y = 0,1,2,3，h=1 -> 梯形积分 = 4.5
+    let y: ptr = alloc(32);
+    let i: u32 = 0;
+    while i < 4 {
+        mem_store64(y, i * 8, f64conv_from_i64(i as i64));
+        i = i + 1;
+    }
+    return f64_eq(ca_trapezoid(y, 4, F64_ONE), 0x4012000000000000); // 4.5
+}
+
+fn test_calc_simpson_quadratic() -> bool {
+    // y = x^2 在 0..4（h=1，5 点）：辛普森精确 = 64/3 ≈ 21.333333333333332
+    let y: ptr = alloc(40);
+    let i: u32 = 0;
+    while i < 5 {
+        let v: u64 = f64conv_from_i64(i as i64);
+        mem_store64(y, i * 8, f64_mul(v, v));
+        i = i + 1;
+    }
+    let r: u64 = ca_simpson(y, 5, F64_ONE);
+    let d: u64 = f64_abs(f64_sub(r, 0x4035555555555555)); // 21.333...
+    return f64_lt(d, 0x3D719799812DEA11);
+}
+
+fn test_calc_diff() -> bool {
+    let y: ptr = alloc(32);
+    let i: u32 = 0;
+    while i < 4 {
+        mem_store64(y, i * 8, f64_mul(F64_TWO, f64conv_from_i64(i as i64)));
+        i = i + 1;
+    }
+    // y = 2x, h = 1 -> 导数处处 2
+    return f64_eq(ca_diff_central(y, 4, 1, F64_ONE), F64_TWO)
+        && f64_eq(ca_diff_forward(y, 4, 0, F64_ONE), F64_TWO);
+}

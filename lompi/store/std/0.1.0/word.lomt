@@ -30,7 +30,6 @@
 // 命名: 公开 word_*, 内部 w_*。自检 test_word_*。
 
 module word
-choose runtime
 
 use "char.lomt"
 use "num.lomt"

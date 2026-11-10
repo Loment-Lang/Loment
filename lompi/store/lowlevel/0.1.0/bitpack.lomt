@@ -1,0 +1,121 @@
+// lowlevel/bitpack.lomt — 任意位偏移的取位/置位
+//
+// 为什么底层工具需要它: 文件格式里到处都是"第 3 位到第 11 位是一个字段"
+// （页表项、指令编码、压缩块头）。用 `>>` 与 `&` 手写每一处，出错的方式都一样：
+// **跨字节边界时把下一字节的低位当成上一字节的高位**，或者把"位序"和"字节序"
+// 混在一起。
+//
+// 两套位序:
+//   * `bp_get_le`：位流从**最低位**开始数（第 0 位是第一个字节的 bit0）；
+//   * `bp_get_be`：位流从**最高位**开始数（第 0 位是第一个字节的 bit7）。
+//
+// 约定: `width` 1..64；越界的读返回 0，写忽略越界字节。
+//
+// 命名: 公开 bp_*, 内部 bq_*。自检 test_bitpack_*。
+
+module bitpack
+
+/// LSB-first 取位。
+pub fn bp_get_le(p: ptr, bit_off: u32, width: u32) -> u64 {
+    if width < 1 || width > 64 {
+        return 0 as u64;
+    }
+    let v: u64 = 0;
+    let i: u32 = 0;
+    while i < width {
+        let pos: u32 = bit_off + i;
+        let byte: u32 = load8(p, pos / 8);
+        let bit: u32 = (((byte as u64) / bq_pow2(pos % 8)) % 2) as u32;
+        if bit == 1 {
+            v = v + bq_pow2(i);
+        }
+        i = i + 1;
+    }
+    return v;
+}
+
+/// LSB-first 置位。
+pub fn bp_set_le(p: ptr, bit_off: u32, width: u32, v: u64) {
+    if width < 1 || width > 64 {
+        return;
+    }
+    let i: u32 = 0;
+    while i < width {
+        let pos: u32 = bit_off + i;
+        let byte: u32 = load8(p, pos / 8);
+        let m: u32 = bq_pow2(pos % 8) as u32;
+        let want: u32 = ((v / bq_pow2(i)) % 2) as u32;
+        if want == 1 {
+            store8(p, pos / 8, (byte | m) as u8);
+        } else {
+            store8(p, pos / 8, (byte & (255 - m)) as u8);
+        }
+        i = i + 1;
+    }
+}
+
+/// MSB-first 取位（第 0 位是第一个字节的 bit7）。
+pub fn bp_get_be(p: ptr, bit_off: u32, width: u32) -> u64 {
+    if width < 1 || width > 64 {
+        return 0 as u64;
+    }
+    let v: u64 = 0;
+    let i: u32 = 0;
+    while i < width {
+        let pos: u32 = bit_off + i;
+        let byte: u32 = load8(p, pos / 8);
+        let bit: u32 = (((byte as u64) / bq_pow2(7 - (pos % 8))) % 2) as u32;
+        v = v * 2 + (bit as u64);
+        i = i + 1;
+    }
+    return v;
+}
+
+/// MSB-first 置位。
+pub fn bp_set_be(p: ptr, bit_off: u32, width: u32, v: u64) {
+    if width < 1 || width > 64 {
+        return;
+    }
+    let i: u32 = 0;
+    while i < width {
+        let pos: u32 = bit_off + i;
+        let byte: u32 = load8(p, pos / 8);
+        let m: u32 = bq_pow2(7 - (pos % 8)) as u32;
+        let want: u32 = ((v / bq_pow2(width - 1 - i)) % 2) as u32;
+        if want == 1 {
+            store8(p, pos / 8, (byte | m) as u8);
+        } else {
+            store8(p, pos / 8, (byte & (255 - m)) as u8);
+        }
+        i = i + 1;
+    }
+}
+
+fn bq_pow2(k: u32) -> u64 {
+    let v: u64 = 1;
+    let i: u32 = 0;
+    while i < k {
+        v = v * 2;
+        i = i + 1;
+    }
+    return v;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_bitpack_le() -> bool {
+    let p: ptr = alloc(8);
+    store8(p, 0, 177 as u8); // 0xB1 = 1011_0001
+    store8(p, 1, 2 as u8);
+    // bits 0..3 = 0001 = 1；bits 4..8 跨字节: 1011 0000 -> 0b0000_1011 = 11
+    return bp_get_le(p, 0, 4) == 1
+        && bp_get_le(p, 4, 8) == 43;
+}
+
+fn test_bitpack_be_roundtrip() -> bool {
+    let p: ptr = alloc(8);
+    let i: u32 = 0;
+    while i < 8 { store8(p, i, 0 as u8); i = i + 1; }
+    bp_set_be(p, 3, 10, 981 as u64);
+    return bp_get_be(p, 3, 10) == 981;
+}

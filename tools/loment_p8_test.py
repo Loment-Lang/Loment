@@ -1686,6 +1686,12 @@ void *memmove(void *d, const void *s, unsigned long n) {
     else { for (unsigned long i = n; i > 0; i--) dd[i - 1] = ss[i - 1]; }
     return d;
 }
+void *memcpy(void *d, const void *s, unsigned long n) { return memmove(d, s, n); }
+void *memset(void *d, int c, unsigned long n) {
+    unsigned char *dd = d;
+    for (unsigned long i = 0; i < n; i++) dd[i] = (unsigned char)c;
+    return d;
+}
 """
 
 
@@ -2582,6 +2588,57 @@ def test_m83_selfhosted_driver_compiles_itself():
             assert _run_driver(elf1, rel, td, f"u_{target.stem}") == _unit_ll(target), \
                 f"驱动在 {rel} 上与参考不一致"
         print(f"      自举驱动: {len(want)}B 自身单元 -> ELF -> 逐字节相同; 二阶段定点成立; 另 2 例一致")
+
+
+@test
+def test_m98_selfhost_ir_cache():
+    """自举驱动的 IR 缓存（`docs/325`）：命中跳过 codegen，键按内容失效。
+
+    判据不靠计时（计时在 CI 上不稳），靠**哨兵**：第一次跑完把缓存文件改写成
+    `; CACHED`，再跑一次 —— 如果走的是命中路径，stdout 就必须**正好**是那个哨兵。
+    再钉三件事：`--no-cache` 不看缓存、`LOMENT_CACHE=off` 不看缓存、改了源就换键。
+    """
+    if not _clang():
+        print("      SKIP: 无 clang")
+        return
+    if not _wsl():
+        print("      SKIP: 无 WSL, 交叉产物未执行")
+        return
+    prog = "module p" + chr(10) + chr(10) + "fn f() -> u32 {" + chr(10) + "    return 41;" + chr(10) + "}" + chr(10)
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "cache_drv")
+        entry = d / "prog.lomt"
+        entry.write_text(prog, encoding="utf-8")
+        cache = d / "cache"
+
+        def run(extra: str = "", env: str = "") -> tuple[int, str, str]:
+            out = d / "out.ll"
+            out.unlink(missing_ok=True)
+            script = (f"{env}{_wsl_path(elf)} {_wsl_path(entry)} {extra} "
+                      f"> {_wsl_path(out)}")
+            r = subprocess.run([*_WSLCMD, "bash", "-lc", script],
+                               capture_output=True, text=True, timeout=300, shell=False)
+            text = out.read_text(encoding="utf-8") if out.exists() else ""
+            return r.returncode, text, r.stderr
+
+        env = f"LOMENT_CACHE_DIR={_wsl_path(cache)} "
+        rc1, o1, e1 = run(env=env)
+        assert rc1 == 0 and o1.startswith("; 由"), (rc1, e1[-300:], o1[:80])
+        files = sorted(cache.rglob("*.ll"))
+        assert len(files) == 1, [str(p) for p in files]
+        files[0].write_text("; CACHED\n", encoding="utf-8")
+        rc2, o2, _ = run(env=env)
+        assert rc2 == 0 and o2 == "; CACHED\n", o2[:120]
+        _rc3, o3, _ = run(extra="--no-cache", env=env)
+        assert o3 == o1, "`--no-cache` 仍然读了缓存"
+        _rc4, o4, _ = run(env=f"LOMENT_CACHE_DIR={_wsl_path(cache)} LOMENT_CACHE=off ")
+        assert o4 == o1, "`LOMENT_CACHE=off` 仍然读了缓存"
+        entry.write_text(prog.replace("41", "42"), encoding="utf-8")
+        _rc5, o5, _ = run(env=env)
+        assert o5.startswith("; 由") and o5 != o1, "改了源却命中了旧键"
+        assert len(sorted(cache.rglob("*.ll"))) == 2, "新内容没有写新键"
+        print("      自举 IR 缓存：命中读哨兵；--no-cache / off 绕过；改源换键")
 
 
 @test

@@ -12,7 +12,6 @@
 // 这里保持同一语义, 免得同一门语言里两套算术规则。
 
 module math
-choose runtime
 
 /// 最大公约数 (辗转相除)。math_gcd(0, 0) == 0。
 pub fn math_gcd(a: u64, b: u64) -> u64 {

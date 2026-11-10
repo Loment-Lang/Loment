@@ -18,7 +18,6 @@
 // 命名: 公开 sys_*, 内部 sysp_。
 
 module sys
-choose runtime
 
 /// 系统调用失败 (-1)。
 pub const SYS_ERR: i64 = -1;

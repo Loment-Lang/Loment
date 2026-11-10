@@ -1,0 +1,145 @@
+// std/spdx.lomt — SPDX 许可证标识符的校验与家族归类
+//
+// 为什么标准库要有它: "这个依赖是什么许可证"在合规扫描里是必答题，而许可证
+// **标识符是拼写敏感的**（`Apache-2.0` 不是 `Apache 2.0`，`GPL-3.0-only` 与
+// `GPL-3.0-or-later` 是两个 ID）。把常用 ID 收成一份表，至少让"拼错"变成可检测的。
+//
+// 家族（`spdx_family`）是**粗分类**，不是法律意见:
+//   1 宽松（MIT/BSD/Apache/ISC）· 2 弱 copyleft（LGPL/MPL/EPL）·
+//   3 强 copyleft（GPL/AGPL）· 4 公共领域（CC0/Unlicense/WTFPL）·
+//   5 专有/自定义（NOASSERTION/LicenseRef-*）· 0 未知。
+//
+// 不做的: SPDX 表达式（`MIT OR Apache-2.0`）、许可证正文、兼容性矩阵。
+//
+// 命名: 公开 spdx_*, 内部 sx_*。自检 test_spdx_*。
+
+module spdx
+
+use mem
+
+fn sx_ids() -> str {
+    return "0BSD|AFL-3.0|AGPL-3.0-only|AGPL-3.0-or-later|Apache-1.1|Apache-2.0|Artistic-2.0|BSD-2-Clause|BSD-3-Clause|BSD-4-Clause|BSL-1.0|CC0-1.0|CC-BY-4.0|CC-BY-SA-4.0|CDDL-1.0|CDDL-1.1|CECILL-2.1|EPL-1.0|EPL-2.0|EUPL-1.2|GPL-2.0-only|GPL-2.0-or-later|GPL-3.0-only|GPL-3.0-or-later|ISC|LGPL-2.1-only|LGPL-2.1-or-later|LGPL-3.0-only|LGPL-3.0-or-later|MIT|MIT-0|MPL-2.0|MS-PL|NCSA|OFL-1.1|OpenSSL|PostgreSQL|Python-2.0|Ruby|Unlicense|UPL-1.0|WTFPL|Zlib|ZPL-2.1";
+}
+
+fn sx_count() -> u32 {
+    let s: str = sx_ids();
+    let n: u32 = str_len(s);
+    let c: u32 = 1;
+    let i: u32 = 0;
+    while i < n {
+        if str_byte(s, i) == 124 { // '|'
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    return c;
+}
+
+pub fn spdx_count() -> u32 {
+    return sx_count();
+}
+
+fn sx_eq(a: str, b: str) -> bool {
+    if str_len(a) != str_len(b) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < str_len(a) {
+        if str_byte(a, i) != str_byte(b, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// 在 `|` 分隔的表里找 `id`。
+pub fn spdx_valid(id: str) -> bool {
+    if str_len(id) == 0 {
+        return false;
+    }
+    let s: str = sx_ids();
+    let n: u32 = str_len(s);
+    let st: u32 = 0;
+    let i: u32 = 0;
+    while i <= n {
+        if i == n || str_byte(s, i) == 124 {
+            if i - st == str_len(id) {
+                let k: u32 = 0;
+                let same: u32 = 1;
+                while k < i - st {
+                    if str_byte(s, st + k) != str_byte(id, k) {
+                        same = 0;
+                    }
+                    k = k + 1;
+                }
+                if same == 1 {
+                    return true;
+                }
+            }
+            st = i + 1;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+fn sx_has_prefix(s: str, pre: str) -> bool {
+    if str_len(s) < str_len(pre) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < str_len(pre) {
+        if str_byte(s, i) != str_byte(pre, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+pub fn spdx_family(id: str) -> u32 {
+    if sx_has_prefix(id, "AGPL") || sx_has_prefix(id, "GPL") {
+        return 3;
+    }
+    if sx_has_prefix(id, "LGPL") || sx_has_prefix(id, "MPL")
+        || sx_has_prefix(id, "EPL") || sx_has_prefix(id, "CDDL")
+        || sx_has_prefix(id, "EUPL") || sx_has_prefix(id, "CECILL") {
+        return 2;
+    }
+    if sx_has_prefix(id, "CC0") || sx_eq(id, "Unlicense") || sx_eq(id, "WTFPL") {
+        return 4;
+    }
+    if sx_eq(id, "NOASSERTION") || sx_has_prefix(id, "LicenseRef-") {
+        return 5;
+    }
+    if sx_eq(id, "MIT") || sx_eq(id, "MIT-0") || sx_has_prefix(id, "BSD")
+        || sx_eq(id, "Apache-2.0") || sx_eq(id, "Apache-1.1")
+        || sx_eq(id, "ISC") || sx_eq(id, "Zlib") || sx_eq(id, "BSL-1.0")
+        || sx_eq(id, "PostgreSQL") || sx_eq(id, "Python-2.0")
+        || sx_eq(id, "Ruby") || sx_eq(id, "OFL-1.1") || sx_has_prefix(id, "CC-BY")
+        || sx_eq(id, "OpenSSL") || sx_eq(id, "NCSA") || sx_eq(id, "MS-PL")
+        || sx_eq(id, "Artistic-2.0") || sx_eq(id, "AFL-3.0") || sx_eq(id, "UPL-1.0")
+        || sx_eq(id, "ZPL-2.1") || sx_eq(id, "0BSD") {
+        return 1;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_spdx_valid() -> bool {
+    return spdx_valid("MIT") && spdx_valid("Apache-2.0") && spdx_valid("GPL-3.0-only")
+        && !spdx_valid("MIT ") && !spdx_valid("Apache 2.0") && !spdx_valid("");
+}
+
+fn test_spdx_family() -> bool {
+    return spdx_family("MIT") == 1 && spdx_family("MPL-2.0") == 2
+        && spdx_family("GPL-3.0-only") == 3 && spdx_family("AGPL-3.0-or-later") == 3
+        && spdx_family("CC0-1.0") == 4 && spdx_family("LicenseRef-Foo") == 5
+        && spdx_family("Nope") == 0;
+}
+
+fn test_spdx_count() -> bool {
+    return spdx_count() >= 40;
+}

@@ -14,7 +14,6 @@
 // 命名: 公开一律 vec_*, 内部一律 ve_*。自检 test_vec_*。
 
 module vec
-choose runtime
 
 use "mem.lomt"
 

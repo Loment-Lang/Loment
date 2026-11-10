@@ -124,12 +124,12 @@ def test(fn):
 #: 捕获表的步长 `CG_DFR_STRIDE`（84 B/条，**不是**上界，来路写在 `EXPLAINED`）与三个
 #: 真上界 `CG_MAXDFR` / `CG_MAXDFRAMES` / `CG_MAXDFARGS`（都判了 `>=` 并 `cg_fail`）。
 #: 条数 251 → **255**、沉默 168 → **169**（多出来的那一处就是步长本身）。
-CAPACITY_SITES = 260
-SILENT_SITES = 169
+CAPACITY_SITES = 264
+SILENT_SITES = 173
 
 #: 第二类：字面量上界（`#770`）。`[T; N]` 与 `literal:<N>` 各自钉住总数与沉默的那一份。
-LITERAL_SITES = 65
-LITERAL_SILENT = 64
+LITERAL_SITES = 67
+LITERAL_SILENT = 66
 ARRAY_SITES = 20
 ARRAY_SILENT = 19
 
@@ -148,6 +148,9 @@ SILENT_NAMES = frozenset((
     "CR",
     "CTX_CAP",
     "CUR_CAP",
+    "CACHE_BUF",
+    "CACHE_DIR_CAP",
+    "CACHE_PATH_CAP",
     "CW",
     "C_CAND",
     "DECL_KW",
@@ -227,6 +230,7 @@ SILENT_NAMES = frozenset((
     "N_DOC",
     "OB_CAP",
     "OUT_CAP",
+    "PKGCH_CAP",
     "PATHW",
     "PATH_CAP",
     "POOL_CAP",
@@ -286,6 +290,8 @@ SILENT_NAMES = frozenset((
 #: 字面量上界里**沉默**的那一份，键是 `(文件, literal:<N>)`，值是**条数**
 #: （同一个值在同一文件里出现几次都要钉住 —— 只钉名字会让"多拷了一处"漏过去）。
 SILENT_LITERALS = {
+    ("loment/selfhost/driver.lomt", "literal:16"): 1,
+    ("loment/selfhost/driver.lomt", "literal:8"): 1,
     ("loment/tools/turegg.lomt", "literal:520"): 1,
     ("loment/examples/fuc_node.lomt", "literal:64"): 1,
     ("loment/examples/gc_heap/main.lomt", "literal:8"): 1,

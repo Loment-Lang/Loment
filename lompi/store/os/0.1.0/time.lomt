@@ -15,7 +15,6 @@
 // 命名: 公开 time_*, 内部 timep_。
 
 module time
-choose runtime
 
 /// 墙上时钟 (可跳变)。
 pub const TIME_REALTIME: u32 = 0;

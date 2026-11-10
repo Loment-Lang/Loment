@@ -39,7 +39,6 @@
 //  占全局拼写, 撞了会被 E13 拦下, 见 docs/158 §2。)
 
 module hexdump
-choose runtime
 
 use "mem.lomt"
 

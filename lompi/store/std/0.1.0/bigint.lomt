@@ -16,7 +16,6 @@
 // 命名: 公开 bigint_*, 内部 bi_*。自检 test_bigint_*。
 
 module bigint
-choose runtime
 
 use "mem.lomt"
 

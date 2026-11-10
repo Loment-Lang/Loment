@@ -30,7 +30,6 @@
 // 命名: 公开 bl_*, 内部 bl_*。自检 test_blit_*。
 
 module blit
-choose runtime
 
 use "mem.lomt"
 

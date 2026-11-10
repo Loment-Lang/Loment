@@ -24,7 +24,6 @@
 // 命名: 公开 mathf_*, 内部 mf_*。自检 test_mathf_*。
 
 module mathf
-choose runtime
 
 use "f64conv.lomt"
 use "round.lomt"
@@ -191,11 +190,11 @@ pub fn mathf_exp(x: u64) -> u64 {
     if f64_gt(x, mf_i(710)) {
         return F64_POS_INF;
     }
-    if f64_lt(x, mf_i(745)) {
-        let neg: bool = f64bits_is_negative(x);
-        if neg {
-            return F64_POS_ZERO;
-        }
+    // 下溢的快速出口: ln(2^-1074) ~ -745.13。这里原先写成 `x < +745`，于是
+    // **所有负数输入**都直接返回 0（`exp(-1)` 也是 0）—— 2026-11-08 由领域包的
+    // `pb_erf` 对拍抓到。
+    if f64_lt(x, f64_neg(mf_i(745))) {
+        return F64_POS_ZERO;
     }
     // k = round(x / ln2), r = x - k*ln2
     let k: i64 = mf_round_i64(f64_mul(x, MF_LOG2E));
@@ -763,4 +762,10 @@ fn test_mathf_tan_is_sin_over_cos() -> bool {
     let t: u64 = mathf_tan(x);
     let s: u64 = f64_div(mathf_sin(x), mathf_cos(x));
     return mf_close(t, s, MF_TOL);
+}
+
+fn test_mathf_exp_negative() -> bool {
+    // e^-1 = 0.36787944117144233
+    let d: u64 = f64_abs(f64_sub(mathf_exp(f64_neg(F64_ONE)), 0x3FD78B56362CEF38));
+    return f64_lt(d, 0x3D719799812DEA11); // 1e-12
 }

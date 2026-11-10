@@ -62,7 +62,6 @@
 // 命名: 公开 pn_*, 内部 pn_*。自检 test_png_*。
 
 module png
-choose runtime
 
 use "mem.lomt"
 use "crc32.lomt"

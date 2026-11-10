@@ -18,7 +18,6 @@
 // 命名: 公开 sha256_*, 内部 s2_*。自检 test_sha256_*。
 
 module sha256
-choose runtime
 
 use "mem.lomt"
 

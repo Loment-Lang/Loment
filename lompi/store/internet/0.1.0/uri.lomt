@@ -30,7 +30,6 @@
 // 对照物: CPython 的 `urllib.parse` (`urlsplit` / `urljoin`)。
 
 module uri
-choose runtime
 
 /// 缺席 / 失败。
 pub const URI_NO: u32 = 4294967295;

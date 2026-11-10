@@ -33,7 +33,6 @@
 // 命名: 公开 st_*, 内部 st_*。自检 test_stats_*。
 
 module stats
-choose runtime
 
 use "mem.lomt"
 use "intmath.lomt"

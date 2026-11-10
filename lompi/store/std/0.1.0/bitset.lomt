@@ -13,7 +13,6 @@
 // 命名: 公开一律 bitset_*, 内部一律 bse_*。自检 test_bitset_*。
 
 module bitset
-choose runtime
 
 /// 找不到的哨兵。
 pub const BITSET_NONE: u32 = 4294967295;

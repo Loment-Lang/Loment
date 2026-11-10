@@ -7,7 +7,6 @@
 // 命名: 公开一律 fmt_*, 内部一律 fm_*。自检 test_fmt_*。
 
 module fmt
-choose runtime
 
 use "math.lomt"
 use "out.lomt"

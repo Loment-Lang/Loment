@@ -13,7 +13,6 @@
 // 命名: 公开 url_*, 内部 u_*。自检 test_url_*。
 
 module url
-choose runtime
 
 use "mem.lomt"
 

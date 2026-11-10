@@ -25,7 +25,6 @@
 // 命名: 公开 f64fmt_*, 内部 ff_*。自检 test_f64fmt_*。
 
 module f64fmt
-choose runtime
 
 use "f64.lomt"
 use "f64conv.lomt"

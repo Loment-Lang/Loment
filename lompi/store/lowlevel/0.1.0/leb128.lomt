@@ -1,0 +1,176 @@
+// lowlevel/leb128.lomt — LEB128 变长整数（DWARF / wasm / WebAssembly 用）
+//
+// 为什么底层工具需要它: LEB128 是**小端、7 位一组、最高位当续位**的变长编码；
+// DWARF 的每个属性、wasm 的每个长度都靠它。它的坑在于**有符号版本要符号扩展**：
+// `0x7f` 在无符号里是 127，在有符号里是 -1。
+//
+// 约定:
+//   * `lb_enc_*` 返回**完整长度**（缓冲不够时不写半截，长度仍大于 cap）；
+//   * `lb_dec_*` 用 `used` 回报吃掉的字节数；0 表示截断/溢出；
+//   * 无符号超过 10 字节、有符号超过 10 字节都算溢出。
+//
+// 命名: 公开 lb_*, 内部 lq_*。自检 test_leb128_*。
+
+module leb128
+
+use mem
+
+fn lq_pow2(k: u32) -> u64 {
+    let v: u64 = 1;
+    let i: u32 = 0;
+    while i < k {
+        v = v * 2;
+        i = i + 1;
+    }
+    return v;
+}
+
+fn lq_floor_div128(v: i64) -> i64 {
+    let q: i64 = v / (128 as i64);
+    let r: i64 = v % (128 as i64);
+    if r < (0 as i64) {
+        q = q - (1 as i64);
+    }
+    return q;
+}
+
+/// 解无符号 LEB128。`used` 写吃掉的字节数（0 = 失败）。
+pub fn lb_dec_u64(p: ptr, n: u32, used: ptr) -> u64 {
+    let v: u64 = 0;
+    let shift: u32 = 0;
+    let i: u32 = 0;
+    let going: u32 = 1;
+    while going == 1 && i < n {
+        let b: u32 = load8(p, i);
+        v = v + ((b & 127) as u64) * lq_pow2(shift);
+        i = i + 1;
+        if (b & 128) == 0 {
+            going = 0;
+        } else {
+            shift = shift + 7;
+            if shift >= 70 {
+                mem_store32(used, 0, 0);
+                return 0 as u64;
+            }
+        }
+    }
+    if going == 1 {
+        mem_store32(used, 0, 0);
+        return 0 as u64;
+    }
+    mem_store32(used, 0, i);
+    return v;
+}
+
+/// 解有符号 LEB128（符号扩展）。`used` 写吃掉的字节数（0 = 失败）。
+pub fn lb_dec_i64(p: ptr, n: u32, used: ptr) -> i64 {
+    let v: i64 = 0;
+    let shift: u32 = 0;
+    let i: u32 = 0;
+    let last: u32 = 0;
+    let going: u32 = 1;
+    while going == 1 && i < n {
+        let b: u32 = load8(p, i);
+        v = v + ((b & 127) as i64) * (lq_pow2(shift) as i64);
+        i = i + 1;
+        if (b & 128) == 0 {
+            last = b;
+            going = 0;
+        } else {
+            shift = shift + 7;
+            if shift >= 70 {
+                mem_store32(used, 0, 0);
+                return 0 as i64;
+            }
+        }
+    }
+    if going == 1 {
+        mem_store32(used, 0, 0);
+        return 0 as i64;
+    }
+    if shift + 7 < 64 && (last & 64) != 0 {
+        v = v - (lq_pow2(shift + 7) as i64);
+    }
+    mem_store32(used, 0, i);
+    return v;
+}
+
+/// 编无符号 LEB128。返回完整长度。
+pub fn lb_enc_u64(v0: u64, out: ptr, cap: u32) -> u32 {
+    let v: u64 = v0;
+    let pos: u32 = 0;
+    let going: u32 = 1;
+    while going == 1 {
+        let b: u32 = (v % 128) as u32;
+        v = v / 128;
+        if v == (0 as u64) {
+            if pos < cap {
+                store8(out, pos, b as u8);
+            }
+            pos = pos + 1;
+            going = 0;
+        } else {
+            if pos < cap {
+                store8(out, pos, (b + 128) as u8);
+            }
+            pos = pos + 1;
+        }
+    }
+    return pos;
+}
+
+/// 编有符号 LEB128。返回完整长度。
+pub fn lb_enc_i64(v0: i64, out: ptr, cap: u32) -> u32 {
+    let v: i64 = v0;
+    let pos: u32 = 0;
+    let going: u32 = 1;
+    while going == 1 {
+        let b: u32 = (v % (128 as i64)) as u32;
+        b = b & 127;
+        let next: i64 = lq_floor_div128(v);
+        let done: u32 = 0;
+        if next == (0 as i64) && (b & 64) == 0 {
+            done = 1;
+        }
+        if next == (0 as i64) - (1 as i64) && (b & 64) != 0 {
+            done = 1;
+        }
+        if done == 1 {
+            if pos < cap {
+                store8(out, pos, b as u8);
+            }
+            pos = pos + 1;
+            going = 0;
+        } else {
+            if pos < cap {
+                store8(out, pos, (b + 128) as u8);
+            }
+            pos = pos + 1;
+            v = next;
+        }
+    }
+    return pos;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_leb128_unsigned() -> bool {
+    let o: ptr = alloc(16);
+    let used: ptr = alloc(4);
+    let n: u32 = lb_enc_u64(624485 as u64, o, 16);
+    if n != 3 {
+        return false;
+    }
+    return lb_dec_u64(o, n, used) == (624485 as u64) && mem_load32(used, 0) == 3;
+}
+
+fn test_leb128_signed() -> bool {
+    let o: ptr = alloc(16);
+    let used: ptr = alloc(4);
+    let n: u32 = lb_enc_i64(0 as i64 - 123456 as i64, o, 16);
+    if n != 3 {
+        return false;
+    }
+    return lb_dec_i64(o, n, used) == (0 as i64 - 123456 as i64)
+        && mem_load32(used, 0) == 3;
+}

@@ -16,7 +16,6 @@
 // 命名: 公开 base58_*, 内部 b58_*。自检 test_base58_*。
 
 module base58
-choose runtime
 
 use "mem.lomt"
 

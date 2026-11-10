@@ -1,0 +1,219 @@
+// std/chem.lomt — 化学式解析、摩尔质量、理想气体与 pH
+//
+// 为什么要有它: "H2O 的摩尔质量是多少"看起来是查表，实际是**解析**：括号、嵌套、
+// 下标、单字母/双字母符号。写错一处的后果是整批配平都错，而且不会报错 —— 它只是
+// 给出一个看起来像数字的错数。
+//
+// 支持: `H2O` `C6H12O6` `Ca(OH)2` `Fe2(SO4)3` `Al2(SO4)3·18H2O` 的**点号部分不支持**
+// （水合物是另一个约定，见下）；元素符号大小写严格（`Co` 是钴，`CO` 是一氧化碳）。
+//
+// 不做的（如实列）:
+//   * 水合物/加合物的 `·`、电荷 `^2+`、同位素标记 `[13C]` —— 各是独立的小语法；
+//   * 配平（反应式求解）—— 那是线性方程组，属于 `linalg` 的上层；
+//   * 有机命名（IUPAC 名）—— 与分子式是两种文本。
+//
+// 单位: 质量一律 **u × 1e6**（与 `elements` 一致）；摩尔数/体积/温度/浓度是 double 位。
+//
+// 命名: 公开 ch_*, 内部 ch_*。自检 test_chem_*。
+
+module chem
+
+use "elements.lomt"
+use f64
+use f64conv
+use mathf
+
+const CH_R: u64 = 0x4020A1013E883FC4; // 8.314462618 J/(mol K)
+
+fn ch_upper(c: u32) -> bool {
+    return c >= 65 && c <= 90;
+}
+
+fn ch_lower(c: u32) -> bool {
+    return c >= 97 && c <= 122;
+}
+
+fn ch_digit(c: u32) -> bool {
+    return c >= 48 && c <= 57;
+}
+
+/// 从 `i` 起读一个十进制计数；返回 `[新下标:32][计数:32]`，没有数字时计数 1。
+fn ch_count(s: str, i0: u32, n: u32) -> u64 {
+    let i: u32 = i0;
+    let v: u32 = 0;
+    let any: u32 = 0;
+    let scanning: u32 = 1;
+    while scanning == 1 && i < n {
+        let c: u32 = str_byte(s, i);
+        if ch_digit(c) {
+            if v < 1000000 {
+                v = v * 10 + (c - 48);
+            }
+            any = 1;
+            i = i + 1;
+        } else {
+            scanning = 0;
+        }
+    }
+    if any == 0 {
+        v = 1;
+    }
+    return ((i as u64) << 32) | (v as u64);
+}
+
+/// 解析一段序列。`out` 收到 `[新下标, 质量 u×1e6, 原子数]`（各 8 字节）。
+/// 返回 0 = 成功，1 = 语法错。
+fn ch_seq(s: str, i0: u32, n: u32, in_group: u32, out: ptr) -> u32 {
+    let i: u32 = i0;
+    let mass: u64 = 0 as u64;
+    let atoms: u64 = 0 as u64;
+    let going: u32 = 1;
+    while going == 1 && i < n {
+        let c: u32 = str_byte(s, i);
+        if c == 40 { // '('
+            let sub: ptr = alloc(24);
+            if ch_seq(s, i + 1, n, 1, sub) != 0 {
+                return 1;
+            }
+            let j: u32 = mem_load64(sub, 0) as u32;
+            let gm: u64 = mem_load64(sub, 8);
+            let ga: u64 = mem_load64(sub, 16);
+            let k: u64 = ch_count(s, j, n);
+            let cnt: u32 = (k & 4294967295) as u32;
+            i = (k >> 32) as u32;
+            mass = mass + gm * (cnt as u64);
+            atoms = atoms + ga * (cnt as u64);
+        } else if c == 41 { // ')'
+            if in_group == 1 {
+                mem_store64(out, 0, (i + 1) as u64);
+                mem_store64(out, 8, mass);
+                mem_store64(out, 16, atoms);
+                return 0;
+            }
+            return 1;
+        } else if ch_upper(c) {
+            let a: u32 = c;
+            let b: u32 = 0;
+            let j: u32 = i + 1;
+            if j < n && ch_lower(str_byte(s, j)) {
+                b = str_byte(s, j);
+                j = j + 1;
+            }
+            let z: u32 = el_z(a, b);
+            if z == 0 {
+                return 1;
+            }
+            let k: u64 = ch_count(s, j, n);
+            let cnt: u32 = (k & 4294967295) as u32;
+            i = (k >> 32) as u32;
+            mass = mass + el_mass(z) * (cnt as u64);
+            atoms = atoms + (cnt as u64);
+        } else {
+            return 1;
+        }
+    }
+    if in_group == 1 {
+        return 1; // 少了 ')'
+    }
+    mem_store64(out, 0, i as u64);
+    mem_store64(out, 8, mass);
+    mem_store64(out, 16, atoms);
+    return 0;
+}
+
+/// 分子式的摩尔质量（u × 1e6）；语法错返回 0。
+pub fn ch_mass(formula: str) -> u64 {
+    let out: ptr = alloc(24);
+    if ch_seq(formula, 0, str_len(formula), 0, out) != 0 {
+        return 0 as u64;
+    }
+    return mem_load64(out, 8);
+}
+
+/// 分子式里的原子总数；语法错返回 0。
+pub fn ch_atoms(formula: str) -> u64 {
+    let out: ptr = alloc(24);
+    if ch_seq(formula, 0, str_len(formula), 0, out) != 0 {
+        return 0 as u64;
+    }
+    return mem_load64(out, 16);
+}
+
+/// 摩尔数 = 质量 / 摩尔质量（两者都是 u×1e6）。
+pub fn ch_moles(mass_u: u64, molar_u: u64) -> u64 {
+    if molar_u == (0 as u64) {
+        return 0x7FF8000000000000; // NaN
+    }
+    return f64_div(f64conv_from_u64(mass_u), f64conv_from_u64(molar_u));
+}
+
+/// 质量 = 摩尔数 × 摩尔质量（u×1e6）。
+pub fn ch_grams(moles: u64, molar_u: u64) -> u64 {
+    return f64_mul(moles, f64conv_from_u64(molar_u));
+}
+
+/// 理想气体压强 p = nRT/V。
+pub fn ch_ideal_pressure(n: u64, t: u64, v: u64) -> u64 {
+    if f64_eq(v, F64_POS_ZERO) {
+        return 0x7FF8000000000000;
+    }
+    return f64_div(f64_mul(f64_mul(n, CH_R), t), v);
+}
+
+/// 理想气体体积 V = nRT/p。
+pub fn ch_ideal_volume(n: u64, t: u64, p: u64) -> u64 {
+    if f64_eq(p, F64_POS_ZERO) {
+        return 0x7FF8000000000000;
+    }
+    return f64_div(f64_mul(f64_mul(n, CH_R), t), p);
+}
+
+/// pH = -log10([H+])。
+pub fn ch_ph(h: u64) -> u64 {
+    if f64_le(h, F64_POS_ZERO) {
+        return 0x7FF8000000000000;
+    }
+    return f64_neg(mathf_log10(h));
+}
+
+/// pOH = 14 - pH（25 °C 的水）。
+pub fn ch_poh(h: u64) -> u64 {
+    return f64_sub(0x402C000000000000, ch_ph(h)); // 14.0
+}
+
+/// 稀释：C1 V1 = C2 V2，求 C2。
+pub fn ch_dilution(c1: u64, v1: u64, v2: u64) -> u64 {
+    if f64_eq(v2, F64_POS_ZERO) {
+        return 0x7FF8000000000000;
+    }
+    return f64_div(f64_mul(c1, v1), v2);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_chem_water() -> bool {
+    // H2O = 2*1.008 + 15.999 = 18.015 u
+    return ch_mass("H2O") == 18015000 && ch_atoms("H2O") == 3;
+}
+
+fn test_chem_glucose() -> bool {
+    // C6H12O6 = 6*12.011 + 12*1.008 + 6*15.999 = 180.156 u
+    return ch_mass("C6H12O6") == 180156000 && ch_atoms("C6H12O6") == 24;
+}
+
+fn test_chem_group() -> bool {
+    // Ca(OH)2 = 40.078 + 2*(15.999+1.008) = 74.092
+    return ch_mass("Ca(OH)2") == 74092000 && ch_atoms("Ca(OH)2") == 5;
+}
+
+fn test_chem_rejects_bad() -> bool {
+    return ch_mass("H2O)") == (0 as u64) && ch_mass("Xx2") == (0 as u64)
+        && ch_mass("(H2O") == (0 as u64);
+}
+
+fn test_chem_ph() -> bool {
+    // [H+]=1e-7 -> pH 7（1e-7 的位）
+    let h: u64 = 0x3E7AD7F29ABCAF48;
+    let d: u64 = f64_abs(f64_sub(ch_ph(h), 0x401C000000000000)); // 7.0
+    return f64_lt(d, 0x3E112E0BE826D695);
+}

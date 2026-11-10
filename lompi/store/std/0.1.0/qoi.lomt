@@ -55,7 +55,6 @@
 // 命名: 公开 qo_*, 内部 qo_*。自检 test_qoi_*。
 
 module qoi
-choose runtime
 
 use "mem.lomt"
 

@@ -21,10 +21,10 @@ const M_NOFF: u32 = 278528;        // 8192   名字长度 (2048 x 4)
 const M_POFF: u32 = 286720;        // 8192   路径在池里的偏移 (2048 x 4)
 const M_PATHS: u32 = 294912;       // 512 KiB 相对路径池
 const M_IN: u32 = 819200;          // 6 MiB 输入 (种子 selfhost_driver.ll 有 4.15 MB)
-const M_OUT: u32 = 7176192;        // 1 MiB 输出
-const M_SHA: u32 = 8225280;        // 1024 sha 状态
-const M_DIG: u32 = 8226304;        // 32 摘要
-const M_HEX: u32 = 8226336;        // 64 hex
+const M_OUT: u32 = 7110656;        // 1 MiB 输出
+const M_SHA: u32 = 8159744;        // 1024 sha 状态
+const M_DIG: u32 = 8160768;        // 32 摘要
+const M_HEX: u32 = 8160800;        // 64 hex
 // ---- 2026-09-20: 归一化副本从 2 MiB 抬到 4 MiB（`docs/200` §5）
 // ---- 2026-10-19: 输入与归一化副本 4 -> 6 MiB（`#777`，与 lomelf 同一条式子）
 //
@@ -33,14 +33,11 @@ const M_HEX: u32 = 8226336;        // 64 hex
 // 于是症状是"从种子那一条起后面全对不上"，指不到现场。
 // 抬法: `NORM_CAP` 跟 `IN_CAP` **同值**（读得进来的就得归一化得了），`M_CUR` /
 // `ARENA` 依次后移。2026-10-19 的 6 MiB 同样 1:1 抬两块，其余各块的相对间距不变。
-// ---- 2026-11-09: 种子 6,040,912 B + 256 KiB 余量越过 6 MiB（实际余量 250,544 B）；
-// ---- `IN_CAP` / `NORM_CAP` 各 +64 KiB，`M_OUT` 起的各块 +65,536（`M_NORM` 跟着
-// ---- 输入走），`M_CUR` / `ARENA` 因归一化副本也变大再 +65,536（合计 +131,072）。
-const M_NORM: u32 = 8226432;       // 6 MiB 归一化副本
-const M_CUR: u32 = 14583424;       // 1 MiB 现有 manifest
-const ARENA: u64 = 15859712;
+const M_NORM: u32 = 8685184;       // 6.5 MiB 归一化副本
+const M_CUR: u32 = 15500928;       // 1 MiB 现有 manifest
+const ARENA: u64 = 16777216;
 
-const NORM_CAP: u32 = 6356992;
+const NORM_CAP: u32 = 6815744;
 const CUR_CAP: u32 = 1048576;
 
 const C_POOL: u32 = 4080;          // M_TMP 里的池游标格
@@ -48,7 +45,7 @@ const C_POOL: u32 = 4080;          // M_TMP 里的池游标格
 const DENT_CAP: u32 = 131072;
 const POOL_CAP: u32 = 524288;
 
-const IN_CAP: u32 = 6356992;
+const IN_CAP: u32 = 6815744;
 const OUT_CAP: u32 = 1048576;
 
 // ---------------------------------------------------------------- 系统调用
@@ -197,6 +194,9 @@ tools/lompkg.py
 tools/lomlib.py
 tools/loment_lib_test.py
 tools/loment_std_test.py
+tools/loment_domains_test.py
+tools/loment_cache.py
+tools/loment_cache_test.py
 tools/loment_libl_test.py
 tools/loment_internet_test.py
 tools/loment_os_test.py
@@ -213,6 +213,14 @@ lompi/store/std/0.1.0/*
 lompi/store/host/0.1.0/*
 lompi/store/internet/0.1.0/*
 lompi/store/os/0.1.0/*
+lompi/store/math/0.1.0/*
+lompi/store/science/0.1.0/*
+lompi/store/engineering/0.1.0/*
+lompi/store/world/0.1.0/*
+lompi/store/dev/0.1.0/*
+lompi/store/lowlevel/0.1.0/*
+lompi/store/system/0.1.0/*
+lompi/store/baremetal/0.1.0/*
 tools/lompi_sync.py
 tools/loment_lompi_test.py
 tools/loment_publish.py

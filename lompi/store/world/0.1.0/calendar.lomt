@@ -1,0 +1,243 @@
+// world/calendar.lomt — 公历日期换算（儒略日、星期、ISO 周、月份加减）
+//
+// 为什么现实世界需要它: 日期不是"年月日三个整数"，是一套有闰年、有历法起点、
+// 有周编号规则（ISO 8601 的周可以跨年）的编码。每一条都能靠 `y*365` 写出一个
+// 在 2100 年才崩的实现。
+//
+// 算法: Howard Hinnant 的 `days_from_civil` / `civil_from_days`（无分支查表，
+// 对负数年份也成立）。ISO 周按 8601：周一为一周之首，含 1 月 4 日的那周是第 1 周。
+//
+// 约定:
+//   * `cd_days_from_civil` 返回"1970-01-01 起的天数"（可为负）；
+//   * 星期编号 **0=周日 … 6=周六**（与 Unix `tm_wday` 一致，不是 ISO 的 1=周一）；
+//   * 所有 `out` 是 `ptr`，写 i32（年/月/日各 4 字节），月 1..12、日 1..31。
+//
+// 命名: 公开 cd_*, 内部 cc_*。自检 test_calendar_*。
+
+module calendar
+
+use mem
+
+/// 向下取整除法（C 的 `/` 向零截断，这里要的是数学上的 floor）。
+fn cc_floor_div(a: i64, b: i64) -> i64 {
+    let q: i64 = a / b;
+    let r: i64 = a % b;
+    let diff: u32 = 0;
+    if r < (0 as i64) && b > (0 as i64) {
+        diff = 1;
+    }
+    if r > (0 as i64) && b < (0 as i64) {
+        diff = 1;
+    }
+    if diff == 1 {
+        q = q - (1 as i64);
+    }
+    return q;
+}
+
+/// 公历闰年（4 的倍数，除非整百年且不是 400 的倍数）。
+pub fn cd_is_leap(y: i64) -> bool {
+    if y % (4 as i64) != (0 as i64) {
+        return false;
+    }
+    if y % (100 as i64) != (0 as i64) {
+        return true;
+    }
+    return y % (400 as i64) == (0 as i64);
+}
+
+/// 某年某月的天数；月份越界返回 0。
+pub fn cd_days_in_month(y: i64, m: i64) -> u32 {
+    if m < (1 as i64) || m > (12 as i64) {
+        return 0;
+    }
+    if m == (2 as i64) {
+        if cd_is_leap(y) {
+            return 29;
+        }
+        return 28;
+    }
+    if m == (4 as i64) || m == (6 as i64) || m == (9 as i64) || m == (11 as i64) {
+        return 30;
+    }
+    return 31;
+}
+
+/// 1970-01-01 起的天数（可为负）。
+pub fn cd_days_from_civil(y0: i64, m0: i64, d: i64) -> i64 {
+    let y: i64 = y0;
+    if m0 <= (2 as i64) {
+        y = y - (1 as i64);
+    }
+    let era: i64 = cc_floor_div(y, 400 as i64);
+    let yoe: i64 = y - era * (400 as i64);
+    let mp: i64 = 0;
+    if m0 > (2 as i64) {
+        mp = m0 - (3 as i64);
+    } else {
+        mp = m0 + (9 as i64);
+    }
+    let doy: i64 = (153 as i64 * mp + 2 as i64) / (5 as i64) + (d - (1 as i64));
+    let doe: i64 = yoe * (365 as i64) + yoe / (4 as i64) - yoe / (100 as i64) + doy;
+    return era * (146097 as i64) + doe - (719468 as i64);
+}
+
+/// 天数 -> 公历年月日，写进 out（y, m, d 各 i32）。
+pub fn cd_civil_from_days(z0: i64, out: ptr) {
+    let z: i64 = z0 + (719468 as i64);
+    let era: i64 = cc_floor_div(z, 146097 as i64);
+    let doe: i64 = z - era * (146097 as i64);
+    let yoe: i64 = (doe - doe / (1460 as i64) + doe / (36524 as i64) - doe / (146096 as i64))
+        / (365 as i64);
+    let y0: i64 = yoe + era * (400 as i64);
+    let doy: i64 = doe - ((365 as i64) * yoe + yoe / (4 as i64) - yoe / (100 as i64));
+    let mp: i64 = (5 as i64 * doy + 2 as i64) / (153 as i64);
+    let d: i64 = doy - ((153 as i64) * mp + 2 as i64) / (5 as i64) + (1 as i64);
+    let m: i64 = mp + (3 as i64);
+    let y: i64 = y0;
+    if mp >= (10 as i64) {
+        m = mp - (9 as i64);
+        y = y0 + (1 as i64);
+    }
+    mem_store32(out, 0, y as u32);
+    mem_store32(out, 4, m as u32);
+    mem_store32(out, 8, d as u32);
+}
+
+/// 0=周日 … 6=周六。
+pub fn cd_weekday(days: i64) -> u32 {
+    let r: i64 = days % (7 as i64);
+    if r < (0 as i64) {
+        r = r + (7 as i64);
+    }
+    // 1970-01-01 是周四 (4)
+    return ((r + (4 as i64)) % (7 as i64)) as u32;
+}
+
+/// ISO 星期：1=周一 … 7=周日。
+pub fn cd_iso_weekday(days: i64) -> u32 {
+    let w: u32 = cd_weekday(days);
+    if w == 0 {
+        return 7;
+    }
+    return w;
+}
+
+/// 一年中的第几天（1..366）。
+pub fn cd_day_of_year(y: i64, m: i64, d: i64) -> u32 {
+    return (cd_days_from_civil(y, m, d) - cd_days_from_civil(y, 1 as i64, 1 as i64) + 1) as u32;
+}
+
+fn cc_weeks_in_year(y: i64) -> u32 {
+    let jan1: u32 = cd_weekday(cd_days_from_civil(y, 1 as i64, 1 as i64));
+    // 周四 (4) 开头的年有 53 周；闰年且周三 (3) 开头也有
+    if jan1 == 4 {
+        return 53;
+    }
+    if cd_is_leap(y) && jan1 == 3 {
+        return 53;
+    }
+    return 52;
+}
+
+/// ISO 周编号：返回周数，`year_out` 写 ISO 周年（可能不是日历年）。
+pub fn cd_iso_week(y: i64, m: i64, d: i64, year_out: ptr) -> u32 {
+    let days: i64 = cd_days_from_civil(y, m, d);
+    let doy: i64 = (days - cd_days_from_civil(y, 1 as i64, 1 as i64)) + (1 as i64);
+    let dow: i64 = cd_iso_weekday(days) as i64;
+    let week: i64 = (doy - dow + (10 as i64)) / (7 as i64);
+    let iy: i64 = y;
+    let w: i64 = week;
+    if week < (1 as i64) {
+        iy = y - (1 as i64);
+        w = cc_weeks_in_year(iy) as i64;
+    } else if week > cc_weeks_in_year(y) as i64 {
+        iy = y + (1 as i64);
+        w = 1;
+    }
+    mem_store32(year_out, 0, iy as u32);
+    return w as u32;
+}
+
+/// 加若干个月；日超出目标月天数时夹到月末。out 写 y, m, d。
+pub fn cd_add_months(y: i64, m: i64, d: i64, n: i64, out: ptr) {
+    let total: i64 = y * (12 as i64) + (m - (1 as i64)) + n;
+    let ny: i64 = cc_floor_div(total, 12 as i64);
+    let nm: i64 = total - ny * (12 as i64) + (1 as i64);
+    let dim: u32 = cd_days_in_month(ny, nm);
+    let nd: i64 = d;
+    if nd > dim as i64 {
+        nd = dim as i64;
+    }
+    mem_store32(out, 0, ny as u32);
+    mem_store32(out, 4, nm as u32);
+    mem_store32(out, 8, nd as u32);
+}
+
+fn cd_two(out: ptr, cap: u32, pos: u32, v: u32) -> u32 {
+    let p: u32 = pos;
+    if p < cap {
+        store8(out, p, (48 + v / 10) as u8);
+    }
+    p = p + 1;
+    if p < cap {
+        store8(out, p, (48 + v % 10) as u8);
+    }
+    return p + 1;
+}
+
+fn cd_four(out: ptr, cap: u32, pos: u32, v: i64) -> u32 {
+    let p: u32 = pos;
+    let a: i64 = v;
+    if a < (0 as i64) {
+        if p < cap {
+            store8(out, p, 45 as u8);
+        }
+        p = p + 1;
+        a = 0 - a;
+    }
+    let d1: i64 = a / (1000 as i64) % (10 as i64);
+    let d2: i64 = a / (100 as i64) % (10 as i64);
+    let d3: i64 = a / (10 as i64) % (10 as i64);
+    let d4: i64 = a % (10 as i64);
+    if p < cap { store8(out, p, (48 + d1) as u8); }
+    p = p + 1;
+    if p < cap { store8(out, p, (48 + d2) as u8); }
+    p = p + 1;
+    if p < cap { store8(out, p, (48 + d3) as u8); }
+    p = p + 1;
+    if p < cap { store8(out, p, (48 + d4) as u8); }
+    return p + 1;
+}
+
+/// `YYYY-MM-DD`。返回写入长度（超出 cap 时按完整长度返回）。
+pub fn cd_format(y: i64, m: i64, d: i64, out: ptr, cap: u32) -> u32 {
+    let p: u32 = cd_four(out, cap, 0, y);
+    if p < cap { store8(out, p, 45 as u8); }
+    p = p + 1;
+    p = cd_two(out, cap, p, m as u32);
+    if p < cap { store8(out, p, 45 as u8); }
+    p = p + 1;
+    p = cd_two(out, cap, p, d as u32);
+    return p;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_calendar_epoch() -> bool {
+    return cd_days_from_civil(1970 as i64, 1 as i64, 1 as i64) == (0 as i64)
+        && cd_weekday(0 as i64) == 4
+        && cd_iso_weekday(0 as i64) == 4;
+}
+
+fn test_calendar_roundtrip() -> bool {
+    let o: ptr = alloc(12);
+    cd_civil_from_days(cd_days_from_civil(2024 as i64, 2 as i64, 29 as i64), o);
+    return mem_load32(o, 0) == 2024 && mem_load32(o, 4) == 2 && mem_load32(o, 8) == 29;
+}
+
+fn test_calendar_iso_week() -> bool {
+    let o: ptr = alloc(4);
+    let w: u32 = cd_iso_week(2021 as i64, 1 as i64, 1 as i64, o);
+    return w == 53 && mem_load32(o, 0) == 2020;
+}

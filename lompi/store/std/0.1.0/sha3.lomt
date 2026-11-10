@@ -17,7 +17,6 @@
 // 命名: 公开 sha3_*, 内部 k3_*。自检 test_sha3_*。
 
 module sha3
-choose runtime
 
 use "mem.lomt"
 use "hex.lomt"

@@ -20,7 +20,6 @@
 // 命名: 公开 fixed_*, 内部 fx_*。自检 test_fixed_*。
 
 module fixed
-choose runtime
 
 use "mem.lomt"
 

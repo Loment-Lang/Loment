@@ -8,7 +8,6 @@
 // 命名: 公开一律 trim_*, 内部一律 tr_*。自检 test_trim_*。
 
 module trim
-choose runtime
 
 use "char.lomt"
 use "num.lomt"

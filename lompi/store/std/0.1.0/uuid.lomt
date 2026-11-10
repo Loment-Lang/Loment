@@ -20,7 +20,6 @@
 // 命名: 公开 uuid_*, 内部 u_*。自检 test_uuid_*。
 
 module uuid
-choose runtime
 
 use "mem.lomt"
 use "hex.lomt"

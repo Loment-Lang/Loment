@@ -13,7 +13,6 @@
 // 命名: 公开一律 hex_*, 内部一律 hx_*。自检 test_hex_*。
 
 module hex
-choose runtime
 
 /// 不是十六进制字符 (hex_val 的返回值)。
 pub const HEX_NONE: u32 = 4294967295;

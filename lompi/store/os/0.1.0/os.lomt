@@ -25,7 +25,6 @@
 // 依赖方向单向: os 不认识 host / internet, 它们也不认识 os —— 这一层是**叶子**。
 
 module os
-choose runtime
 
 use "sys.lomt"
 use "time.lomt"

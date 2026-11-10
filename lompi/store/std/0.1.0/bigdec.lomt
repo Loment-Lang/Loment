@@ -17,7 +17,6 @@
 // 命名: 公开 bigdec_*, 内部 bd_*。自检 test_bigdec_*。
 
 module bigdec
-choose runtime
 
 use "bigint.lomt"
 use "mem.lomt"

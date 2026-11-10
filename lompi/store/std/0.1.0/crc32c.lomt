@@ -13,7 +13,6 @@
 // 命名: 公开 crc32c_*, 内部 cr_*。自检 test_crc32c_*。
 
 module crc32c
-choose runtime
 
 use "mem.lomt"
 

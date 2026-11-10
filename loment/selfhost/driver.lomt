@@ -53,7 +53,7 @@ const SEEN_CAP: u32 = 65536;     // 已装载路径去重表
 //   [24160, 24164) 这一次的 `--diag-out` fd **加一** (0 = 没给) ← 见 `diagfd`
 //   [24164, 24168) 版次 (0 = tur2026.1, 1 = tur2026.2, 2 = tur2026.3) ← 见 `PROF_OFF`
 //   [24168, 24172) 根单元写的拼法 (0 = 没写, 1..8 = loment/tur/tur1/tur2026.1/tur2/tur2026.2/tur3/tur2026.3)
-const SCR_CAP: u32 = 24184;
+const SCR_CAP: u32 = 27392;
 //: 单个文件的 `use` 条数上限 (路径形式 + 名字形式合起来算), **与参考实现同值**。
 //: 超限**报错退出**, 绝不静默丢 —— 原先进程按 8 条布局, 第 9 条起直接不要, 而参考实现
 //: 无上限: 同一份源码两个实现给出不同的单元 (2026-09-16 发现)。抬到 300 是让 std 那种
@@ -78,6 +78,34 @@ const PROF_OFF: u32 = 24164;     // 版次 (docs/296/306): 0 = 2026.1, 1 = 2026.
 const PROF_DEFAULT: u32 = 2;     // 缺省 = 最新版次 (potato_from.DEFAULT_EDITION)
 const DECLK_OFF: u32 = 24168;    // 根单元的拼法 (0 = 没写; 见 strip_grammar_decl)
 const FPROF_OFF: u32 = 24172;    // 这份文件自己声明的版次 (0xFFFFFFFF = 没写)
+//: 根单元/`addin` 写没写运行期那一维（docs/324）。位：1 = 写了 `runtime`，
+//: 2 = 写了 `no_runtime`，4 = 同包 `pkg.lomp` 的 `runtime()` 说 `runtime`。
+//: 两个都没写（低两位为 0）而包清单要运行期时，装载器在合并单元末尾补一行
+//: `choose runtime` —— 与参考实现的 `mod.chooses` 注入同义。
+const RTDECL_OFF: u32 = 24176;
+//: 同包 `pkg.lomp` 的 `choose()` 词表（空格分隔的 ASCII）—— `cfg_pkg_choose` 写它。
+const PKGCH_OFF: u32 = 24192;
+const PKGCH_CAP: u32 = 256;
+//: 编译缓存（`docs/325`）的暂存区。键 = 单元全文 + 版次 + **编译器自身**的哈希；
+//: 命中就跳过 codegen、把缓存里的 IR 字节流到 stdout。
+// 字符串常量不存在（`const` 只吃整数）—— 用两个小函数。
+fn cache_epoch() -> str {
+    return "loment-ir-cache-v1";
+}
+
+fn cache_default_dir() -> str {
+    return "/tmp/loment-cache";
+}
+const CACHE_DIG_OFF: u32 = 24576;   // 16B 主摘要（两条 64 位 FNV 车道）
+const CACHE_EDG_OFF: u32 = 24592;   // 16B 编译器摘要
+const CACHE_KEY_OFF: u32 = 24608;   // 32B hex 键 + NUL
+const CACHE_DIR_OFF: u32 = 26784;   // 目录（NUL）—— 键占 26688..26753
+const CACHE_DIR_CAP: u32 = 128;
+const CACHE_PATH_OFF: u32 = 26912;  // <dir>/ir/<key>.ll
+const CACHE_PATH_CAP: u32 = 200;
+const CACHE_TMP_OFF: u32 = 27112;   // <dir>/ir/<key>.ll.tmp
+const CACHE_TMP_CAP: u32 = 216;
+const CACHE_BUF: u32 = 65536;
 const ADDIN_OFF: u32 = 21504;    // addin 清单起点
 const CMD_OFF: u32 = 23904;      // 命令名 (`--print-command`)
 const DIAG_CAP: u32 = 1024;      // 路径上限
@@ -90,6 +118,7 @@ const TOKS_CAP: u32 = 15729920;  // (SLOT + 64) * 20 = 单文件词法缓冲
 use lexer
 use codegen
 use checker
+use sha256
 use comefor
 // `--emit-potato`(`docs/189` S1): 形式对象是**另一条出口**, 与 IR 平行 —— 它**不经过**
 // codegen (参考实现的 `emit_potato` 也不经过 IR 后端), 所以聚合类型那种"后端编不了"的
@@ -1770,6 +1799,138 @@ fn cfg_source_ext(dirp: ptr, dl: u32, dst: ptr, scr: ptr, buf: ptr, toks: ptr) -
     return q;
 }
 
+/// 从 `<dirp>/pkg.lomp` 读 `runtime()` 的取值：4 = `runtime`，0 = 没声明/不是它。
+///
+/// 与 `cfg_source_ext` 同一种形状（清单就是一份 Loment 源码），只认
+/// `pub fn runtime() -> str { return "runtime"; }` 里的那个字符串。读不出来当没声明。
+fn cfg_pkg_choose(dirp: ptr, dl: u32, scr: ptr, buf: ptr, toks: ptr) -> u32 {
+    let d: u32 = 0;
+    if dl > 0 {
+        d = cat(scr, d, dirp, dl);
+        d = catl(scr, d, "/");
+    }
+    d = catl(scr, d, "pkg.lomp");
+    store8(scr, d, 0 as u8);
+    let fd: i64 = syscall4(257, (0 as u64) - 100, scr as u64, 0);
+    if fd < 0 {
+        return 0;
+    }
+    let raw: u64 = read_all(fd as u64, buf, 65536);
+    syscall4(3, fd as u64, 0, 0);
+    if raw == 0 {
+        return 0;
+    }
+    let n: u32 = lex(buf, raw as u32, toks);
+    // 先找 `choose(`（docs/325），没有再退回旧的 `runtime()`。
+    let found: u32 = 4294967295;
+    let i: u32 = 0;
+    while i < n && found == 4294967295 {
+        if load32(toks, i * 20) == 0 && tok_is(buf, toks, i, "choose") == 1
+                && i + 1 < n && load32(toks, (i + 1) * 20) == 3
+                && ptr_eq_char(buf, load32(toks, (i + 1) * 20 + 4), 40) == 1 {
+            found = i;
+        }
+        i = i + 1;
+    }
+    if found == 4294967295 {
+        i = 0;
+        while i < n && found == 4294967295 {
+            if load32(toks, i * 20) == 0 && tok_is(buf, toks, i, "runtime") == 1
+                    && i + 1 < n && load32(toks, (i + 1) * 20) == 3
+                    && ptr_eq_char(buf, load32(toks, (i + 1) * 20 + 4), 40) == 1 {
+                found = i;
+            }
+            i = i + 1;
+        }
+    }
+    if found == 4294967295 {
+        return 0;
+    }
+    let s: u32 = 4294967295;
+    let j: u32 = found + 1;
+    while j < n && s == 4294967295 {
+        if load32(toks, j * 20) == 2 {
+            s = j;
+        }
+        j = j + 1;
+    }
+    if s == 4294967295 {
+        return 0;
+    }
+    let st: u32 = load32(toks, s * 20 + 4);
+    let sl: u32 = load32(toks, s * 20 + 8);   // 含两端的引号
+    if sl < 3 {
+        return 0;
+    }
+    let dst: ptr = ptr_add(scr, PKGCH_OFF);
+    let m: u32 = sl - 2;
+    // 清单太长 ⇒ **放弃整份清单**，不截断注入：截断可能正好丢掉一维（`docs/325`）。
+    if m >= PKGCH_CAP {
+        return 0;
+    }
+    let q: u32 = 0;
+    while q < m {
+        store8(dst, q, load8(buf, st + 1 + q) as u8);
+        q = q + 1;
+    }
+    store8(dst, q, 0 as u8);
+    return q;
+}
+
+/// 一个核心词属于哪一维（`CORE_DIM_ORDER` 的位）。0 = 不认识。
+fn core_word_bit(p: ptr, n: u32) -> u32 {
+    if pkg_eq(p, n, "std") == 1 || pkg_eq(p, n, "no_std") == 1 {
+        return 1;
+    }
+    if pkg_eq(p, n, "gc_manual") == 1 || pkg_eq(p, n, "gc_auto") == 1
+            || pkg_eq(p, n, "gc_auto_alpha") == 1 || pkg_eq(p, n, "no_gc") == 1 {
+        return 2;
+    }
+    if pkg_eq(p, n, "runtime") == 1 || pkg_eq(p, n, "no_runtime") == 1 {
+        return 4;
+    }
+    if pkg_eq(p, n, "sealed") == 1 || pkg_eq(p, n, "hosted") == 1 {
+        return 8;
+    }
+    if pkg_eq(p, n, "vm") == 1 || pkg_eq(p, n, "no_vm") == 1 {
+        return 16;
+    }
+    if pkg_eq(p, n, "lms_full") == 1 || pkg_eq(p, n, "lms_forensic_admin") == 1
+            || pkg_eq(p, n, "lms_daily_admin") == 1
+            || pkg_eq(p, n, "lms_manage_only_admin") == 1 {
+        return 32;
+    }
+    if pkg_eq(p, n, "lspe_open_admin") == 1 || pkg_eq(p, n, "lspe_close_admin") == 1 {
+        return 64;
+    }
+    if pkg_eq(p, n, "lifetime_no") == 1 || pkg_eq(p, n, "lifetime_auto") == 1
+            || pkg_eq(p, n, "lifetime_manual") == 1 {
+        return 128;
+    }
+    return 0;
+}
+
+fn pkg_eq(p: ptr, n: u32, lit: str) -> u32 {
+    if n != str_len(lit) {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(p, i) != str_byte(lit, i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn ptr_eq_char(src: ptr, off: u32, ch: u32) -> u32 {
+    if load8(src, off) == ch {
+        return 1;
+    }
+    return 0;
+}
+
 fn is_lomt(src: ptr, sp: u32, sl: u32) -> u32 {
     // **L0 只有 `.lom` 一种后缀**, 别的任何后缀都算 L1 源 —— 后缀不是语言的一部分, 只是
     // 习惯 (用户 2026-09-16: "Loment 也可以作为其他文件名后缀的诞生地")。别把这条改回
@@ -2078,6 +2239,16 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
         die(1);
     }
     while load32(toks, i * 20) != 4 {
+        // 记下根/`addin` 单元写没写运行期那一维（docs/324）。依赖写的会被下面抹掉，
+        // 而抹掉之后检查器就看不见它了 —— 但它**是**一个需求，所以要在这里记一笔。
+        if (depth == 0 || from_addin == 1) && tok_is(slot, toks, i, "choose") {
+            let _ws: u32 = load32(toks, (i + 1) * 20 + 4);
+            let _wl: u32 = load32(toks, (i + 1) * 20 + 8);
+            let _bit: u32 = core_word_bit(ptr_add(slot, _ws), _wl);
+            if _bit != 0 {
+                store32(scr, RTDECL_OFF, load32(scr, RTDECL_OFF) | _bit);
+            }
+        }
         // `choose` 声明的是**整个程序**的模式 (docs/143 §3.2), 所以只有**根单元**能写。
         // 这条只能在这里判: 装载器是唯一分得清"这一层是根还是被 use 进来的"的地方 ——
         // 单元拼完之后检查器看到的是一整块 token, 模块边界已经没了 (docs/158 §5 记过)。
@@ -2252,6 +2423,331 @@ fn append_prelude(dst: ptr, off: u64) -> u64 {
     return off + str_len(s) as u64;
 }
 
+// ---------------------------------------------------------------- 编译缓存（`docs/325`）
+
+/// 在 `/proc/self/environ` 里找一个环境变量，值写进 dst（NUL 结尾）；返回长度。
+fn cache_env(scr: ptr, buf: ptr, key: str, dst: ptr, cap: u32) -> u32 {
+    let hp: str = "/proc/self/environ";
+    let fd: i64 = open_ro(str_ptr(hp), str_len(hp), scr);
+    if fd < 0 {
+        return 0;
+    }
+    let n: i64 = syscall4(0, fd as u64, buf as u64, CACHE_BUF as u64);
+    syscall4(3, fd as u64, 0, 0);
+    if n <= 0 {
+        return 0;
+    }
+    let total: u32 = n as u32;
+    let kn: u32 = str_len(key);
+    let i: u32 = 0;
+    while i < total {
+        let st: u32 = i;
+        while i < total && load8(buf, i) != 0 {
+            i = i + 1;
+        }
+        let ln: u32 = i - st;
+        if ln > kn && load8(buf, st + kn) == 61 {   // '='
+            let ok: u32 = 1;
+            let j: u32 = 0;
+            while j < kn {
+                if load8(buf, st + j) != str_byte(key, j) {
+                    ok = 0;
+                }
+                j = j + 1;
+            }
+            if ok == 1 {
+                let vl: u32 = ln - kn - 1;
+                let m: u32 = vl;
+                if m > cap - 1 {
+                    m = cap - 1;
+                }
+                let k: u32 = 0;
+                while k < m {
+                    store8(dst, k, load8(buf, st + kn + 1 + k) as u8);
+                    k = k + 1;
+                }
+                store8(dst, m, 0 as u8);
+                return m;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// FNV-1a 64 位一条车道。缓存键不需要抗碰撞密码学，但需要**足够宽**：两条车道
+/// （不同初值）给 128 位 —— 几千条缓存里撞上的概率可以忽略（`docs/325`）。
+fn cache_fnv(h0: u64, p: ptr, n: u32) -> u64 {
+    let h: u64 = h0;
+    let i: u32 = 0;
+    while i < n {
+        h = (h ^ (load8(p, i) as u64)) * (1099511628211 as u64);
+        i = i + 1;
+    }
+    return h;
+}
+
+fn cache_lane1() -> u64 {
+    return 14695981039346656037 as u64;
+}
+
+fn cache_lane2() -> u64 {
+    return 1099511628211 as u64;
+}
+
+/// 把一个文件的字节分块喂给两条 FNV 车道，16 字节摘要写进 out。
+fn cache_file_digest(scr: ptr, buf: ptr, out: ptr) -> u32 {
+    let path: str = "/proc/self/exe";
+    let fd: i64 = open_ro(str_ptr(path), str_len(path), scr);
+    if fd < 0 {
+        return 0;
+    }
+    let h1: u64 = cache_lane1();
+    let h2: u64 = cache_lane2();
+    let going: u32 = 1;
+    while going == 1 {
+        let n: i64 = syscall4(0, fd as u64, buf as u64, CACHE_BUF as u64);
+        if n <= 0 {
+            going = 0;
+        } else {
+            h1 = cache_fnv(h1, buf, n as u32);
+            h2 = cache_fnv(h2, buf, n as u32);
+        }
+    }
+    syscall4(3, fd as u64, 0, 0);
+    cache_st64(out, 0, h1);
+    cache_st64(out, 8, h2);
+    return 1;
+}
+
+/// 目录路径复制（NUL 结尾），返回长度。
+fn cache_copy_str(dst: ptr, cap: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let m: u32 = n;
+    if m > cap - 1 {
+        m = cap - 1;
+    }
+    let i: u32 = 0;
+    while i < m {
+        store8(dst, i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    store8(dst, m, 0 as u8);
+    return m;
+}
+
+fn cache_mkdir(scr: ptr, path: ptr, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        store8(scr, i, load8(path, i) as u8);
+        i = i + 1;
+    }
+    store8(scr, n, 0 as u8);
+    // 83 = mkdir；EEXIST 等一律忽略 —— 缓存不可用不该让编译失败。
+    let _r: i64 = syscall4(83, scr as u64, 448 as u64, 0);
+}
+
+/// 定好目录；`LOMENT_CACHE=off` 或建不出目录时返回 0。
+fn cache_prepare(scr: ptr, buf: ptr) -> u32 {
+    let dst: ptr = ptr_add(scr, CACHE_DIR_OFF);
+    let mut_n: u32 = cache_env(scr, buf, "LOMENT_CACHE_DIR", dst, CACHE_DIR_CAP);
+    if mut_n == 0 {
+        // 先试 `$HOME/.cache/loment`（用户私有目录），没有 HOME 才落 `/tmp`。
+        mut_n = cache_env(scr, buf, "HOME", dst, CACHE_DIR_CAP - 32);
+        if mut_n > 0 {
+            let suf: str = "/.cache/loment";
+            let k0: u32 = 0;
+            while k0 < str_len(suf) && mut_n < CACHE_DIR_CAP - 1 {
+                store8(dst, mut_n, str_byte(suf, k0) as u8);
+                mut_n = mut_n + 1;
+                k0 = k0 + 1;
+            }
+            store8(dst, mut_n, 0 as u8);
+        } else {
+            let d: str = cache_default_dir();
+            mut_n = cache_copy_str(dst, CACHE_DIR_CAP, d);
+        }
+    }
+    let offb: ptr = ptr_add(scr, CACHE_TMP_OFF);
+    let offn: u32 = cache_env(scr, buf, "LOMENT_CACHE", offb, 8);
+    if offn == 3 && load8(offb, 0) == 111 && load8(offb, 1) == 102
+            && load8(offb, 2) == 102 {          // "off"
+        return 0;
+    }
+    // 目录太长 ⇒ 不缓存（不截断成另一个目录）。
+    if mut_n + 3 >= CACHE_PATH_CAP - 1 {
+        return 0;
+    }
+    cache_mkdir(scr, dst, mut_n);
+    // <dir>/ir
+    let ip: ptr = ptr_add(scr, CACHE_PATH_OFF);
+    let mut_i: u32 = 0;
+    let k: u32 = 0;
+    while k < mut_n && mut_i < CACHE_PATH_CAP - 1 {
+        store8(ip, mut_i, load8(dst, k) as u8);
+        mut_i = mut_i + 1;
+        k = k + 1;
+    }
+    let sep: str = "/ir";
+    k = 0;
+    while k < 3 && mut_i < CACHE_PATH_CAP - 1 {
+        store8(ip, mut_i, str_byte(sep, k) as u8);
+        mut_i = mut_i + 1;
+        k = k + 1;
+    }
+    store8(ip, mut_i, 0 as u8);
+    cache_mkdir(scr, ip, mut_i);
+    return 1;
+}
+
+/// 键 = 纪元串 + 版次 + 编译器自身摘要 + 单元全文。32 个 hex 字符写进 CACHE_KEY_OFF。
+fn cache_key(scr: ptr, unit: ptr, len: u64, prof: u32, buf: ptr) {
+    let dig: ptr = ptr_add(scr, CACHE_DIG_OFF);
+    let edg: ptr = ptr_add(scr, CACHE_EDG_OFF);
+    let h1: u64 = cache_lane1();
+    let h2: u64 = cache_lane2();
+    let epoc: str = cache_epoch();
+    h1 = cache_fnv(h1, str_ptr(epoc), str_len(epoc));
+    h2 = cache_fnv(h2, str_ptr(epoc), str_len(epoc));
+    let pb: ptr = ptr_add(scr, CACHE_DIG_OFF - 8);
+    store8(pb, 0, (prof % 256) as u8);
+    h1 = cache_fnv(h1, pb, 1);
+    h2 = cache_fnv(h2, pb, 1);
+    if cache_file_digest(scr, buf, edg) == 1 {
+        h1 = cache_fnv(h1, edg, 16);
+        h2 = cache_fnv(h2, edg, 16);
+    }
+    h1 = cache_fnv(h1, unit, len as u32);
+    h2 = cache_fnv(h2, unit, len as u32);
+    cache_st64(dig, 0, h1);
+    cache_st64(dig, 8, h2);
+    let dst: ptr = ptr_add(scr, CACHE_KEY_OFF);
+    let i: u32 = 0;
+    while i < 16 {
+        let b: u32 = load8(dig, i) as u32;
+        store8(dst, i * 2, cache_hexd(b / 16) as u8);
+        store8(dst, i * 2 + 1, cache_hexd(b % 16) as u8);
+        i = i + 1;
+    }
+    store8(dst, 32, 0 as u8);
+}
+
+fn cache_st64(p: ptr, off: u32, v0: u64) {
+    let v: u64 = v0;
+    let i: u32 = 0;
+    while i < 8 {
+        store8(p, off + i, (v % 256) as u8);
+        v = v / 256;
+        i = i + 1;
+    }
+}
+
+fn cache_hexd(v: u32) -> u32 {
+    if v < 10 {
+        return 48 + v;
+    }
+    return 87 + v;
+}
+
+/// 拼 `<dir>/ir/<key><ext>`，返回长度。
+fn cache_path(scr: ptr, ext: str, dst: ptr, cap: u32) -> u32 {
+    let d: ptr = ptr_add(scr, CACHE_DIR_OFF);
+    let dn: u32 = cstr_len(d);
+    let kp: ptr = ptr_add(scr, CACHE_KEY_OFF);
+    let en0: u32 = str_len(ext);
+    // 放不下就返回 0（调用方当"这次不缓存"），不截断出另一个路径。
+    if dn + 4 + 32 + en0 >= cap - 1 {
+        return 0;
+    }
+    let mut_p: u32 = 0;
+    let i: u32 = 0;
+    while i < dn && mut_p < cap - 1 {
+        store8(dst, mut_p, load8(d, i) as u8);
+        mut_p = mut_p + 1;
+        i = i + 1;
+    }
+    let sep: str = "/ir/";
+    i = 0;
+    while i < 4 && mut_p < cap - 1 {
+        store8(dst, mut_p, str_byte(sep, i) as u8);
+        mut_p = mut_p + 1;
+        i = i + 1;
+    }
+    i = 0;
+    while i < 32 && mut_p < cap - 1 {
+        store8(dst, mut_p, load8(kp, i) as u8);
+        mut_p = mut_p + 1;
+        i = i + 1;
+    }
+    i = 0;
+    let en: u32 = str_len(ext);
+    while i < en && mut_p < cap - 1 {
+        store8(dst, mut_p, str_byte(ext, i) as u8);
+        mut_p = mut_p + 1;
+        i = i + 1;
+    }
+    store8(dst, mut_p, 0 as u8);
+    return mut_p;
+}
+
+/// 命中：把 IR 流到 stdout，返回 1。未命中：键/路径已备好，返回 2。
+/// 关掉或不可用：返回 0。
+fn cache_try(scr: ptr, buf: ptr, unit: ptr, len: u64, prof: u32) -> u32 {
+    if cache_prepare(scr, buf) == 0 {
+        return 0;
+    }
+    cache_key(scr, unit, len, prof, buf);
+    let p: ptr = ptr_add(scr, CACHE_PATH_OFF);
+    let pn: u32 = cache_path(scr, ".ll", p, CACHE_PATH_CAP);
+    if pn == 0 {
+        return 0;
+    }
+    let fd: i64 = open_ro(p, pn, scr);
+    if fd < 0 {
+        return 2;
+    }
+    let going: u32 = 1;
+    while going == 1 {
+        let n: i64 = syscall4(0, fd as u64, buf as u64, CACHE_BUF as u64);
+        if n <= 0 {
+            going = 0;
+        } else {
+            let _w: u32 = write_checked(1, buf, n as u64, "the IR");
+        }
+    }
+    syscall4(3, fd as u64, 0, 0);
+    return 1;
+}
+
+/// 发射成功后回写：临时名写满再 rename，读到的永远是完整文件。
+fn cache_save(scr: ptr, ir: ptr, m: u32) {
+    let p: ptr = ptr_add(scr, CACHE_PATH_OFF);
+    let pn: u32 = cache_path(scr, ".ll", p, CACHE_PATH_CAP);
+    let t: ptr = ptr_add(scr, CACHE_TMP_OFF);
+    let tn: u32 = cache_path(scr, ".tmp", t, CACHE_TMP_CAP);
+    if pn == 0 || tn == 0 {
+        // 不缓存这一份（见 `cache_path` 的宽度检查）。
+    } else {
+    let i: u32 = 0;
+    let i: u32 = 0;
+    while i < tn {
+        store8(scr, i, load8(t, i) as u8);
+        i = i + 1;
+    }
+    store8(scr, tn, 0 as u8);
+    // 257 = openat；577 = O_WRONLY|O_CREAT|O_TRUNC；420 = 0644
+    let fd: i64 = syscall6(257, (0 as u64) - 100, scr as u64, 577 as u64, 420 as u64, 0);
+    // 不用裸 `return;`（M80 的 dump 助手没有那个结点；这是它登记的第一课，别为一行绕开就
+    // 让整份 driver.lomt 从 AST 对照语料里掉出去）。
+    if fd >= 0 {
+        let _w: u32 = write_checked(fd as u64, ir, m as u64, "the cache");
+        syscall4(3, fd as u64, 0, 0);
+        // 82 = rename
+        let _r: i64 = syscall4(82, t as u64, p as u64, 0);
+    }
+    }
+}
+
 fn _start() -> u32 {
     let unitv: u64 = sys_alloc(UNIT_CAP as u64);
     let irv: u64 = sys_alloc(IR_CAP as u64);
@@ -2285,6 +2781,7 @@ fn _start() -> u32 {
     let quiet: u32 = 0;
     // `--lspe-level 0..4`（`#1091`）：上下文敏感度，默认 3（`docs/262` §5.6）。
     let lvl: u32 = 3;
+    let nocache: u32 = 0;
     // 参数从 argv[2] 起**逐个**看（`#1091`：`--lspe-level N` 要能和 `--emit-potato`
     // 同时给）。`argv_at` 越过末尾回 0，所以这就是 argc 的边界。
     let ai: u32 = 2;
@@ -2305,6 +2802,8 @@ fn _start() -> u32 {
             quiet = 1;
         } else if streq(p2, n2, "--emit-potato") == 1 {
             pmode = 1;
+        } else if streq(p2, n2, "--no-cache") == 1 {
+            nocache = 1;
         } else if streq(p2, n2, "--print-command") == 1 {
             // `--print-command` (docs/223): 这个单元注册了哪条命令 —— 构建前端拿它去命名
             // 产物（`loment-<名字>`）。**不装载**，只词法扫一遍（见 print_command）。
@@ -2382,6 +2881,11 @@ fn _start() -> u32 {
     // 入口文件所在目录), 再是工具链旁边那份; 都没配就用默认 `.lomt`。这时 unit/toks
     // 还空着, 借它们当读配置的暂存 —— load_file 紧接着就会盖掉它们。
     store8(scr, EXT_OFF, 0 as u8);
+    // 根单元所在包的 `pkg.lomp` 要运行期吗（docs/324）？这一步借 unit/toks 当暂存 ——
+    // `load_file` 紧接着就会盖掉它们，与上面读 `loment.conf` 同一个时点。
+    store32(scr, RTDECL_OFF, 0);
+    let _rq: u32 = cfg_pkg_choose(ptr_add(scr, PROJ_OFF),
+                                  cstr_len(ptr_add(scr, PROJ_OFF)), scr, unit, toks);
     let _e0: u32 = cfg_source_ext(ptr_add(scr, PROJ_OFF),
                                   cstr_len(ptr_add(scr, PROJ_OFF)),
                                   ptr_add(scr, EXT_OFF), scr, unit, toks);
@@ -2410,6 +2914,48 @@ fn _start() -> u32 {
         wdiag_file(dfd, scr, ap, an, 31, str_ptr(dm2), str_len(dm2));
         return fail(dm2);
     }
+    // **包清单的前置条件**（docs/325）：清单 `choose()` 里写了、根与 `addin` 单元
+    // 都没写的那一维，在合并单元末尾补一行 `choose <词>` —— 与参考实现逐维注入
+    // `mod.chooses` 同义。**显式写的优先**：那位已经置位就跳过。
+    // 逐字节写：不写带换行的字符串字面量 —— 两个词法器对多行字面量的解码
+    // 有过一次可测的分歧（`loment_p8_test::test_m80_loment_parser_ast_dump`）。
+    let _fl: u32 = load32(scr, RTDECL_OFF);
+    let _pp: ptr = ptr_add(scr, PKGCH_OFF);
+    let _pn2: u32 = cstr_len(_pp);
+    let _wi: u32 = 0;
+    while _wi < _pn2 {
+        while _wi < _pn2 && load8(_pp, _wi) == 32 {
+            _wi = _wi + 1;
+        }
+        let _ws2: u32 = _wi;
+        while _wi < _pn2 && load8(_pp, _wi) != 32 {
+            _wi = _wi + 1;
+        }
+        let _wl2: u32 = _wi - _ws2;
+        if _wl2 > 0 {
+            let _bit2: u32 = core_word_bit(ptr_add(_pp, _ws2), _wl2);
+            if _bit2 != 0 && (_fl & _bit2) == 0 {
+                store8(unit, len as u32, 10 as u8);
+                let _k: u32 = 0;
+                let _pre: str = "choose ";
+                while _k < str_len(_pre) {
+                    store8(unit, (len as u32) + 1 + _k, str_byte(_pre, _k) as u8);
+                    _k = _k + 1;
+                }
+                let _k2: u32 = 0;
+                while _k2 < _wl2 {
+                    store8(unit, (len as u32) + 1 + str_len(_pre) + _k2,
+                           load8(_pp, _ws2 + _k2) as u8);
+                    _k2 = _k2 + 1;
+                }
+                let _tot: u32 = 2 + str_len(_pre) + _wl2;
+                store8(unit, (len as u32) + _tot - 1, 10 as u8);
+                len = len + (_tot as u64);
+                _fl = _fl | _bit2;
+            }
+        }
+    }
+    store32(scr, RTDECL_OFF, _fl);
     // **编译期告知版次**（用户 2026-11-04 的要求，`docs/296` §1.1）：每次编译一行，
     // 把用户写的拼法展开成规范名。短名（`tur2`）跨年之后不再被接受，这一行是用户
     // 排查"我到底用的哪一版"的第一手信息。工具模式（`--emit-potato`/`--print-command`）
@@ -2736,6 +3282,19 @@ fn _start() -> u32 {
         let _wp: u32 = write_checked(1, ir, pn as u64, "the object");
         return die(0);
     }
+    // ---- 编译缓存（`docs/325`）：check 已经过了，命中就跳过 codegen。
+    // 键 = 纪元 + 版次 + **编译器自身**摘要 + 合并后的单元全文 —— 任何一项变了就重算。
+    let cache_state: u32 = 0;
+    let cbv: u64 = 0;
+    if nocache == 0 {
+        cbv = sys_alloc(CACHE_BUF as u64);
+        if cbv != 0 {
+            cache_state = cache_try(scr, cbv as ptr, unit, len, load32(scr, PROF_OFF));
+            if cache_state == 1 {
+                return die(0);
+            }
+        }
+    }
     // codegen 的状态块也从 brk 拿: 那几张表按**单元规模**定 (函数表 4600 格), 整块
     // 500 KB 上下, 放不进语言自带的 64 KiB bump 堆 (checker 的 arena 早就是这条路)。
     let cgv: u64 = sys_alloc(cg_arena_bytes() as u64);
@@ -2783,5 +3342,8 @@ fn _start() -> u32 {
         return fail(msg);
     }
     let _w: u32 = write_checked(1, ir, m as u64, "the IR");
+    if cache_state == 2 {
+        cache_save(scr, ir, m);
+    }
     return die(0);
 }

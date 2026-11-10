@@ -66,7 +66,6 @@
 // 命名: 公开 sc_*, 内部无。自检 test_sched_*。
 
 module sched
-choose runtime
 
 use "mem.lomt"
 

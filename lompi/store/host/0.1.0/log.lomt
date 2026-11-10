@@ -13,7 +13,6 @@
 // 命名: 公开一律 log_*, 内部一律 lg_*。自检 test_log_*。
 
 module log
-choose runtime
 
 use "io.lomt"
 use numfmt

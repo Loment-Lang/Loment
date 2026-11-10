@@ -40,7 +40,6 @@
 // 命名: 公开 lzss_*, 内部 lz_*。自检 test_lzss_*。
 
 module lzss
-choose runtime
 
 use "mem.lomt"
 

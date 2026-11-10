@@ -29,7 +29,6 @@
 // 顺序: 从最底层往上 —— 顺着读就是依赖方向 (下面每层只 use 比它更早的)。
 
 module std
-choose runtime
 
 // 基础: 内建之外的第一层
 use "mem.lomt"

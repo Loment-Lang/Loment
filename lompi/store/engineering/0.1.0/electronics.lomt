@@ -1,0 +1,214 @@
+// std/electronics.lomt — 欧姆定律、分压、串并联、RC/RL、电阻色环（double）
+//
+// 为什么色环要进标准库: 它是**文本 -> 数值**的解析，而不是"查表" —— 四个颜色词
+// 里有两位有效数字、一个数量级、一个容差，顺序错一位就把 4.7kΩ 读成 47kΩ。
+// 这类"看起来像玩具"的代码恰恰最容易被手写错，而且错了不会报错。
+//
+// 约定: 电阻/电容/电感都是 SI（Ω/F/H）；色环解析返回**欧姆**与**容差百分比**。
+// 不做的: 色环的 5/6 环精密版本、E 系列取值表、交流相量（那要复数）。
+//
+// 命名: 公开 ec_*, 内部 ec_*。自检 test_electronics_*。
+
+module electronics
+
+use f64
+use f64conv
+use mathf
+
+const EC_TEN: u64 = 0x4024000000000000; // 10.0
+
+pub fn ec_ohm_v(i: u64, r: u64) -> u64 {
+    return f64_mul(i, r);
+}
+
+pub fn ec_ohm_i(v: u64, r: u64) -> u64 {
+    if f64_eq(r, F64_POS_ZERO) {
+        return 0x7FF8000000000000;
+    }
+    return f64_div(v, r);
+}
+
+pub fn ec_ohm_r(v: u64, i: u64) -> u64 {
+    if f64_eq(i, F64_POS_ZERO) {
+        return 0x7FF8000000000000;
+    }
+    return f64_div(v, i);
+}
+
+/// 分压：vout = vin * r2 / (r1 + r2)。
+pub fn ec_divider(vin: u64, r1: u64, r2: u64) -> u64 {
+    let den: u64 = f64_add(r1, r2);
+    if f64_eq(den, F64_POS_ZERO) {
+        return 0x7FF8000000000000;
+    }
+    return f64_div(f64_mul(vin, r2), den);
+}
+
+pub fn ec_series(r: ptr, n: u32) -> u64 {
+    let s: u64 = F64_POS_ZERO;
+    let i: u32 = 0;
+    while i < n {
+        s = f64_add(s, mem_load64(r, i * 8));
+        i = i + 1;
+    }
+    return s;
+}
+
+pub fn ec_parallel(r: ptr, n: u32) -> u64 {
+    let inv: u64 = F64_POS_ZERO;
+    let i: u32 = 0;
+    while i < n {
+        let ri: u64 = mem_load64(r, i * 8);
+        if f64_eq(ri, F64_POS_ZERO) {
+            return F64_POS_ZERO;
+        }
+        inv = f64_add(inv, f64_div(F64_ONE, ri));
+        i = i + 1;
+    }
+    if f64_eq(inv, F64_POS_ZERO) {
+        return 0x7FF0000000000000;
+    }
+    return f64_div(F64_ONE, inv);
+}
+
+pub fn ec_rc_tau(r: u64, c: u64) -> u64 {
+    return f64_mul(r, c);
+}
+
+pub fn ec_rl_tau(l: u64, r: u64) -> u64 {
+    if f64_eq(r, F64_POS_ZERO) {
+        return 0x7FF8000000000000;
+    }
+    return f64_div(l, r);
+}
+
+// ---------------------------------------------------------------- 色环
+
+fn ec_tok(s: str, st: u32, ln: u32, name: str) -> bool {
+    if ln != str_len(name) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < ln {
+        if str_byte(s, st + i) != str_byte(name, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// 一个颜色词 -> 数字（0..9；gold=-1、silver=-2 只用于乘数）。未知返回 -99。
+fn ec_color_value(s: str, st: u32, ln: u32) -> i64 {
+    if ec_tok(s, st, ln, "black") { return 0; }
+    if ec_tok(s, st, ln, "brown") { return 1; }
+    if ec_tok(s, st, ln, "red") { return 2; }
+    if ec_tok(s, st, ln, "orange") { return 3; }
+    if ec_tok(s, st, ln, "yellow") { return 4; }
+    if ec_tok(s, st, ln, "green") { return 5; }
+    if ec_tok(s, st, ln, "blue") { return 6; }
+    if ec_tok(s, st, ln, "violet") { return 7; }
+    if ec_tok(s, st, ln, "grey") { return 8; }
+    if ec_tok(s, st, ln, "gray") { return 8; }
+    if ec_tok(s, st, ln, "white") { return 9; }
+    if ec_tok(s, st, ln, "gold") { return 0 as i64 - 1; }
+    if ec_tok(s, st, ln, "silver") { return 0 as i64 - 2; }
+    return 0 as i64 - 99;
+}
+
+fn ec_color_tol(s: str, st: u32, ln: u32) -> u64 {
+    if ec_tok(s, st, ln, "brown") { return 0x3FF0000000000000; }  // 1%
+    if ec_tok(s, st, ln, "red") { return 0x4000000000000000; }    // 2%
+    if ec_tok(s, st, ln, "green") { return 0x3FE0000000000000; }  // 0.5%
+    if ec_tok(s, st, ln, "blue") { return 0x3FD0000000000000; }   // 0.25%
+    if ec_tok(s, st, ln, "violet") { return 0x3FB999999999999A; } // 0.1%
+    if ec_tok(s, st, ln, "grey") || ec_tok(s, st, ln, "gray") {
+        return 0x3FA999999999999A; // 0.05%
+    }
+    if ec_tok(s, st, ln, "gold") { return 0x4014000000000000; }   // 5%
+    if ec_tok(s, st, ln, "silver") { return 0x4024000000000000; } // 10%
+    return F64_POS_ZERO;
+}
+
+/// 解析四色环（空格分隔），写 `out[0]=欧姆`、`out[8]=容差%`。成功返回 1。
+pub fn ec_resistor(bands: str, out: ptr) -> u32 {
+    let n: u32 = str_len(bands);
+    let tok: ptr = alloc(32); // 4 个 [start:u32, len:u32]
+    let count: u32 = 0;
+    let i: u32 = 0;
+    let in_tok: u32 = 0;
+    let st: u32 = 0;
+    while i < n {
+        let c: u32 = str_byte(bands, i);
+        if c == 32 {
+            if in_tok == 1 && count < 4 {
+                mem_store32(tok, count * 8, st);
+                mem_store32(tok, count * 8 + 4, i - st);
+                count = count + 1;
+                in_tok = 0;
+            }
+        } else {
+            if in_tok == 0 {
+                st = i;
+                in_tok = 1;
+            }
+        }
+        i = i + 1;
+    }
+    if in_tok == 1 && count < 4 {
+        mem_store32(tok, count * 8, st);
+        mem_store32(tok, count * 8 + 4, n - st);
+        count = count + 1;
+    }
+    if count != 4 {
+        return 0;
+    }
+    let d1: i64 = ec_color_value(bands, mem_load32(tok, 0), mem_load32(tok, 4));
+    let d2: i64 = ec_color_value(bands, mem_load32(tok, 8), mem_load32(tok, 12));
+    let mul: i64 = ec_color_value(bands, mem_load32(tok, 16), mem_load32(tok, 20));
+    if d1 < 0 || d1 > 9 || d2 < 0 || d2 > 9 {
+        return 0;
+    }
+    let base: u64 = f64conv_from_i64(d1 * (10 as i64) + d2);
+    let v: u64 = base;
+    if mul >= 0 {
+        let k: i64 = 0;
+        while k < mul {
+            v = f64_mul(v, EC_TEN);
+            k = k + 1;
+        }
+    } else {
+        let k2: i64 = 0;
+        while k2 < (0 as i64 - mul) {
+            v = f64_div(v, EC_TEN);
+            k2 = k2 + 1;
+        }
+    }
+    mem_store64(out, 0, v);
+    mem_store64(out, 8, ec_color_tol(bands, mem_load32(tok, 24), mem_load32(tok, 28)));
+    return 1;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_electronics_ohm() -> bool {
+    // 2A * 3Ω = 6V
+    return f64_eq(ec_ohm_v(F64_TWO, F64_THREE), 0x4018000000000000);
+}
+
+fn test_electronics_divider() -> bool {
+    // 10V, 1k + 1k -> 5V
+    let k: u64 = 0x408F400000000000;
+    let v: u64 = ec_divider(0x4024000000000000, k, k);
+    return f64_eq(v, 0x4014000000000000);
+}
+
+fn test_electronics_resistor() -> bool {
+    // brown black red gold = 10 * 100 = 1000Ω, 5%
+    let out: ptr = alloc(16);
+    if ec_resistor("brown black red gold", out) != 1 {
+        return false;
+    }
+    return f64_eq(mem_load64(out, 0), 0x408F400000000000)
+        && f64_eq(mem_load64(out, 8), 0x4014000000000000);
+}

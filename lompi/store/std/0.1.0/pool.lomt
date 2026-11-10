@@ -14,7 +14,6 @@
 // 命名: 公开 pool_*, 内部 pl_*。自检 test_pool_*。
 
 module pool
-choose runtime
 
 use "mem.lomt"
 

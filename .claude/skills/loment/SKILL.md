@@ -58,11 +58,13 @@ so their artifacts do not change); `lifetime_manual` adds the borrow-source mark
 (`a` must be a reference parameter), and `lifetime_no` is today's shape (`&` in a type
 position is a parse error). `*r` dereferences one borrow; `r.field` and `*r = v` auto-deref.
 A borrow is a `ptr` in the artifact; slice borrows `&[T]` / `&mut [T]` normalise to the
-existing `[T]` / `mut [T]` views. A returned borrow must come from a parameter, `free(p)`
-while `p` is borrowed is E041, and a **stored** `&mut` excludes later borrows (E007).
-The self-hosted compiler currently refuses borrow types by name (E041) - the dimension and
-Potato v22 are on both sides, the type surface and region pass are reference-first; see
-`docs/299` §8.
+existing `[T]` / `mut [T]` views, and a borrow may be a struct field (`Cursor { data: &[u32] }`
+is a `{ ptr, i64 }` zero-copy view; `c.data[0]` and `slice_len(c.data)` work). A returned
+borrow must come from a parameter, `free(p)` while `p` is borrowed is E041, and a **stored**
+`&mut` excludes later borrows (E007) - conflicts are judged per place, so `v.x` and `v.y` are
+separate. `Box<&u32>` instantiates as `Box_ref__u32`; composite generic arguments
+(`Box<&T>` / `Box<[T]>`) are refused **by name** on the self-hosted side (E041). Both
+implementations carry the dimension, Potato v22 and the region pass; see `docs/299` §8-§9.
 
 The same program can also be written with C / C++ / Java / C# / Go / Python spelling, **changing
 the spelling and nothing else** - recognised **by extension** (`.c` / `.cpp` / `.java` / `.cs` /

@@ -254,6 +254,16 @@ _JAVA_ENUM = re.compile(r"(?:^|\n)[ \t]*(?:public[ \t]+)?(?:final[ \t]+|static[ 
 _STR_LIT = re.compile(r'"(?:[^"\\\n]|\\.)*"')
 
 
+def _mask_str(m: "re.Match[str]") -> str:
+    """把一段字符串字面量的**内容**换成等长空白，两个引号留着。
+
+    为的是**数花括号**时 `"{"` / `"}"` / `";"` 不算数；长度不变，所以按下标回
+    原文切正文仍然对得上（正文里要的是**原文和它的字面量**，见 `_from_class_lang`）。
+    """
+    t = m.group()
+    return '"' + " " * (len(t) - 2) + '"'
+
+
 def _block_end(text: str, open_idx: int) -> int:
     """`{` 的下标 -> 配对 `}` 的下标; 找不到返回 -1。
 
@@ -383,8 +393,11 @@ def _from_class_lang(src: str, name: str, mode: str,
     # 方法正文的**行号**要拿剥离后的下标回原文里数（`functions[i].body_line`），
     # 而一段多行注释被 `sub(" ", …)` 压成一个空格时行号会**整体上移** ——
     # 报出来的行号就又指到别处了，正是这条修复本身要消灭的那种错。
-    # （`_STR_LIT` 那一层改的是行**内**的长度，不动换行，所以行号不受它影响。）
-    body = _C_COMMENT.sub(_blank_keep_off, _STR_LIT.sub('""', src))
+    # **字符串也要保长度**：`_STR_LIT.sub('""', …)` 会把 `"abc"` 压成 `""`，
+    # 于是后面按下标回原文切出来的正文整体前移 —— 而且**字面量的内容真的没了**，
+    # 翻出来的 `print("hello")` 变成 `print("")`（2026-11-09 实测）。抹成等长的空白、
+    # 两个引号留着：数花括号时 `"{"` 不再是花括号，取正文时按同一组下标回 `src` 切。
+    body = _C_COMMENT.sub(_blank_keep_off, _STR_LIT.sub(_mask_str, src))
     known: set[str] = set()
     #: 两条正则**认下来**的字符范围。扫完之后剩下的非空白内容就是"谁也不认识"的残渣，
     #: 末尾由 `_c_leftover_lines` 报出来（`#121` / `#75` —— C 那一门在 2026-10-20 的
@@ -530,11 +543,19 @@ def _from_class_lang(src: str, name: str, mode: str,
             # 存**整段方法原文** —— 见 `_java_members` 的注解。
             ent: dict = {"name": mname, "params": ps, "ret": rt}
             if mem_raw.strip():
-                ent["body"] = mem_raw.strip()
+                # **正文回原文切，不拿 `mem_raw`**：`body` 里字符串的内容是抹掉的
+                # （为了数花括号），拿它当正文会让 `print("hello")` 变成 `print("")`。
+                # 抹法是**等长**的，所以下标在 `src` 上同样成立（见上面的注解）。
+                _b0 = open_idx + 1 + mem_off
+                # **领头那段空白（含被抹空的注释）要一起跳过**，正文与行号两边对齐：
+                # 正文从 `_b0 + lead` 起，行号也是那一行。只跳正文不跳行号的话，
+                # 体内行号会整体往后错（一条跨行注释能错出三四行，实测 `#1519` 那一批）。
+                _lead = len(mem_raw) - len(mem_raw.lstrip())
+                ent["body"] = src[_b0 + _lead:_b0 + len(mem_raw)].strip()
                 # `mem_off` 是**在 `inner` 里**的下标，`inner` 从 `body` 的
                 # `open_idx + 1` 开始；而 `body` 是等长抹出来的 ⇒ 它的下标就是
                 # 原文的下标（见上面那句"抹注释要保长度"）。
-                ent["body_line"] = _body_at(src, open_idx + 1 + mem_off, mem_raw)
+                ent["body_line"] = _body_line(src, _b0 + _lead)
             doc["functions"].append(ent)
             rep.ok += 1
     # ---- **谁也不认识的顶层行**（`#121` / `#75`）：类 / 枚举两条正则认下来的范围之外

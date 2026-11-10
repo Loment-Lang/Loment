@@ -873,7 +873,9 @@ def test_m81_loment_checker_matches_python():
            # `#538`：`no_gc` 是核心取值 —— 自举 checker 必须**收**它（只有参考收不算落地）。
            ROOT / "loment" / "selfhost" / "pos" / "no_gc.lomt",
            # `docs/299`：借用类型不再是"点名拒" —— 一份合法的借用程序必须零诊断。
-           ROOT / "loment" / "selfhost" / "pos" / "borrow.lomt"]
+           ROOT / "loment" / "selfhost" / "pos" / "borrow.lomt",
+           # `docs/320` S1：对象代的合法形状（generation / guard / retire）。
+           ROOT / "loment" / "selfhost" / "pos" / "revision.lomt"]
     with tempfile.TemporaryDirectory() as td:
         exe = _build_checker(td)
         exact = 0

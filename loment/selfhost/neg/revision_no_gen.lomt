@@ -1,0 +1,11 @@
+module neg_revision_no_gen
+
+// `revision` 的 guard 必须带第二个实参（期望的对象代）。少了就是 E-CAP。
+choose runtime
+
+capability blk : disk[0..7] revision
+
+fn f(i: u32) -> u32 {
+    guard blk(i);
+    return 1;
+}

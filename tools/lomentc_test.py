@@ -1571,6 +1571,91 @@ def test_p4_guard_bounds():
     assert any("未声明的能力" in x for x in e), e
 
 
+@test
+def test_s1_revision_generation_catches_stale_reference():
+    """S1（`docs/320`）：`revision` 域 + `generation` / `retire`。
+
+    这是"对象代"的最小面：引用是显式的 `(idx, gen)`，`retire` 把槽的代翻一页，
+    旧代在下一次 `guard blk(idx, gen)` 上必须 trap。Rust 侧真跑一遍；
+    IR 侧看结构和那三个运行时符号在不在。
+    """
+    src = (
+        "module m\n"
+        "choose runtime\n"
+        "capability blk : disk[0..7] revision\n"
+        "pub fn take(i: u32) -> u64 {\n"
+        "    let g: u64 = generation blk(i);\n"
+        "    return g;\n"
+        "}\n"
+        "pub fn use_it(i: u32, g: u64) -> u32 {\n"
+        "    guard blk(i, g);\n"
+        "    return 1;\n"
+        "}\n"
+        "pub fn drop_it(i: u32) -> u32 {\n"
+        "    retire blk(i);\n"
+        "    return 0;\n"
+        "}\n"
+    )
+    assert errs(src) == [], errs(src)
+    mod = parse(src)
+    ir = lomentc.emit_llvm(mod, ROOT)
+    rs = lomentc.emit_rust(mod, ROOT)
+    assert "@__loment_gen = internal global [16 x [64 x i64]]" in ir, "缺对象代表"
+    assert "call i64 @__loment_gen_read(" in ir, "generation 没走读数"
+    assert "call void @__loment_gen_bump(" in ir, "retire 没走翻代"
+    assert "i64 15" in ir, "guard 没把 revision 的 kind 15 发出去"
+    assert "__LOMENT_GEN" in rs and "__loment_gen_read" in rs and "__loment_gen_bump" in rs
+
+    import shutil
+    import subprocess
+    rustc = shutil.which("rustc")
+    if not rustc:
+        print("      SKIP: 无 rustc（Rust 运行那一半）")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "m.rs").write_text(rs, encoding="utf-8", newline="\n")
+        main = (
+            'include!("m.rs");\n'
+            "fn main() {\n"
+            "    std::panic::set_hook(Box::new(|_| {}));\n"
+            "    let g = take(3);\n"
+            "    let p1 = std::panic::catch_unwind(|| use_it(3, g)).is_ok();\n"
+            "    drop_it(3);\n"
+            "    let p2 = std::panic::catch_unwind(|| use_it(3, g)).is_err();\n"
+            "    let g2 = take(3);\n"
+            "    let p3 = std::panic::catch_unwind(|| use_it(3, g2)).is_ok();\n"
+            '    println!("g={} pass={} stale={} g2={} pass2={}", g, p1, p2, g2, p3);\n'
+            "}\n")
+        (d / "main.rs").write_text(main, encoding="utf-8", newline="\n")
+        exe = d / ("g.exe" if sys.platform == "win32" else "g")
+        r = subprocess.run([rustc, "-O", "-o", str(exe), str(d / "main.rs")],
+                           capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, r.stderr[-800:]
+        out = subprocess.run([str(exe)], capture_output=True, text=True,
+                             shell=False).stdout
+        assert "g=0 pass=true stale=true g2=1 pass2=true" in out, (
+            f"旧的代没有在 retire 后失效: {out!r}")
+    print("      旧代 retire 后 trap，新代放行（Rust）；IR 走 gen 表")
+
+
+@test
+def test_s1_revision_requires_the_right_domain_kind():
+    """`generation` / `retire` 只对 `revision` 域有意义；`guard` 必须带代。"""
+    e = errs("module m\nchoose runtime\ncapability c : disk[0..4]\n"
+             "fn f(i: u32) -> u64 { let g: u64 = generation c(i); return g; }\n")
+    assert any("revision" in x for x in e), e
+    e = errs("module m\nchoose runtime\ncapability c : disk[0..4]\n"
+             "fn f(i: u32) -> u32 { retire c(i); return 0; }\n")
+    assert any("revision" in x for x in e), e
+    e = errs("module m\nchoose runtime\ncapability c : disk[0..4] revision\n"
+             "fn f(i: u32) -> u32 { guard c(i); return 0; }\n")
+    assert any("第二个实参" in x for x in e), e
+    e = errs("module m\nchoose runtime\ncapability c : disk[0..99] revision\n"
+             "fn f(i: u32) -> u32 { return 0; }\n")
+    assert any("64" in x for x in e), e
+
+
 
 @test
 def test_1175_dependency_guard_uses_the_dependency_bound():

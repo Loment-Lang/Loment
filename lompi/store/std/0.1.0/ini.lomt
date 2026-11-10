@@ -17,7 +17,6 @@
 // 命名: 公开 ini_*, 内部 i_*。自检 test_ini_*。
 
 module ini
-choose runtime
 
 use "mem.lomt"
 

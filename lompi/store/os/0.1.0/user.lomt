@@ -21,7 +21,6 @@
 // 命名: 公开 user_*, 内部 userp_*。
 
 module user
-choose runtime
 
 /// getpid。
 pub fn user_getpid() -> u64 {

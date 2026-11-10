@@ -10,7 +10,6 @@
 // 都显式取模或提前返回 —— 这类越界是静默的, 不能靠"调用方不会传 32"。
 
 module bit
-choose runtime
 
 /// 32 位的 1 个数。
 pub fn bit_popcount32(v: u32) -> u32 {

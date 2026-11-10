@@ -24,7 +24,6 @@
 // 命名: 公开 hmac_*, 内部 hm_*。自检 test_hmac_*。
 
 module hmac
-choose runtime
 
 use "sha1.lomt"
 use "sha256.lomt"

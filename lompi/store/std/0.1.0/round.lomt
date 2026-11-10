@@ -11,7 +11,6 @@
 // 命名: 公开 round_*, 内部 ro_*。自检 test_round_*。
 
 module round
-choose runtime
 
 use "f64.lomt"
 

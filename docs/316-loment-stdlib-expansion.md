@@ -1,6 +1,8 @@
 # 316 · 外挂标准库补全：8 份新模块 + 3 处老库对齐（2026-11-08）
 
 > 状态：**已落地**（`lompi/store/std/0.1.0/` 与 `lompi/store/host/0.1.0/`）
+> 后续：`docs/317` 把领域库拆成 8 个独立包，store 从 168 长到 **217** 个文件；
+> 本文的 8 份仍在 `std`（它们是通用核心，不是领域库）。
 > 判据：`loment_std_test`（+1，新增 29 项与 Python 逐字节对拍）· `loment_libl_test`（225 项与 glibc）
 > · `loment_store_twin_test`（全 store 逐模块双实现对拍）· `lomentc_test::test_std_package_…`
 > 上游：`docs/180`（std 的三条约定）· `docs/199`（包内模块按名可达）· `docs/232`（LibL）

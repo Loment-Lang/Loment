@@ -1,0 +1,153 @@
+// world/iban.lomt — IBAN 的结构校验（mod-97）
+//
+// 为什么现实世界需要它: IBAN 的校验位不是装饰 —— 把前四位挪到末尾、字母换成
+// 两位数字（A=10 … Z=35），整串必须 ≡ 1 (mod 97)。这一个式子能拦掉绝大多数
+// 手抄错误，而且不需要银行接口。
+//
+// 覆盖: 30 个常见国家的长度。长度表是**结构**的一部分：`DE` 永远 22 位，
+// 长度不对就是错的，连 mod-97 都不用算。
+//
+// 命名: 公开 iban_*, 内部 ib_*。自检 test_iban_*。
+
+module iban
+
+pub const IBAN_ERR: u32 = 4294967295;
+
+fn ib_upper(c: u32) -> u32 {
+    if c >= 97 && c <= 122 {
+        return c - 32;
+    }
+    return c;
+}
+
+fn ib_alpha(c: u32) -> bool {
+    let u: u32 = ib_upper(c);
+    return u >= 65 && u <= 90;
+}
+
+fn ib_digit(c: u32) -> bool {
+    return c >= 48 && c <= 57;
+}
+
+/// 该国 IBAN 的固定长度；不认识返回 0。
+pub fn iban_country_len(cc: str) -> u32 {
+    if str_len(cc) != 2 {
+        return 0;
+    }
+    let b: ptr = alloc(4);
+    store8(b, 0, ib_upper(str_byte(cc, 0)) as u8);
+    store8(b, 1, ib_upper(str_byte(cc, 1)) as u8);
+    return iban_country_len_bytes(b);
+}
+
+/// 去掉空格、转大写。返回长度（不检查合法性）。
+pub fn iban_normalize(s: str, out: ptr, cap: u32) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    let p: u32 = 0;
+    while i < n {
+        let c: u32 = str_byte(s, i);
+        if c != 32 && c != 9 && c != 45 {
+            if p < cap {
+                store8(out, p, ib_upper(c) as u8);
+            }
+            p = p + 1;
+        }
+        i = i + 1;
+    }
+    return p;
+}
+
+/// 完整校验（国家长度 + mod-97）。
+pub fn iban_valid(s: str) -> bool {
+    let b: ptr = alloc(40);
+    let n: u32 = iban_normalize(s, b, 40);
+    if n < 15 || n > 34 {
+        return false;
+    }
+    if !ib_alpha(load8(b, 0)) || !ib_alpha(load8(b, 1)) {
+        return false;
+    }
+    if !ib_digit(load8(b, 2)) || !ib_digit(load8(b, 3)) {
+        return false;
+    }
+    let want: u32 = iban_country_len_bytes(b);
+    if want == 0 || want != n {
+        return false;
+    }
+    // 前四位挪到末尾后逐字符取模
+    let r: u32 = 0;
+    let i: u32 = 4;
+    while i < n {
+        r = ib_feed(r, load8(b, i));
+        i = i + 1;
+    }
+    let k: u32 = 0;
+    while k < 4 {
+        r = ib_feed(r, load8(b, k));
+        k = k + 1;
+    }
+    return r == 1;
+}
+
+fn ib_feed(r0: u32, c: u32) -> u32 {
+    let r: u32 = r0;
+    if ib_digit(c) {
+        r = (r * 10 + (c - 48)) % 97;
+    } else {
+        let v: u32 = ib_upper(c) - 55; // A=10
+        r = (r * 100 + v) % 97;
+    }
+    return r;
+}
+
+fn iban_country_len_bytes(p: ptr) -> u32 {
+    let a: u32 = load8(p, 0);
+    let b: u32 = load8(p, 1);
+    if a == 68 && b == 69 { return 22; }
+    if a == 70 && b == 82 { return 27; }
+    if a == 71 && b == 66 { return 22; }
+    if a == 78 && b == 76 { return 18; }
+    if a == 69 && b == 83 { return 24; }
+    if a == 73 && b == 84 { return 27; }
+    if a == 67 && b == 72 { return 21; }
+    if a == 65 && b == 84 { return 20; }
+    if a == 66 && b == 69 { return 16; }
+    if a == 80 && b == 76 { return 28; }
+    if a == 83 && b == 69 { return 24; }
+    if a == 78 && b == 79 { return 15; }
+    if a == 68 && b == 75 { return 18; }
+    if a == 70 && b == 73 { return 18; }
+    if a == 73 && b == 69 { return 22; }
+    if a == 80 && b == 84 { return 25; }
+    if a == 71 && b == 82 { return 27; }
+    if a == 67 && b == 90 { return 24; }
+    if a == 83 && b == 75 { return 24; }
+    if a == 72 && b == 85 { return 28; }
+    if a == 82 && b == 79 { return 24; }
+    if a == 66 && b == 71 { return 22; }
+    if a == 72 && b == 82 { return 21; }
+    if a == 83 && b == 73 { return 19; }
+    if a == 76 && b == 85 { return 20; }
+    if a == 69 && b == 69 { return 20; }
+    if a == 76 && b == 86 { return 21; }
+    if a == 76 && b == 84 { return 20; }
+    if a == 77 && b == 84 { return 31; }
+    if a == 67 && b == 89 { return 28; }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_iban_valid() -> bool {
+    return iban_valid("DE89 3704 0044 0532 0130 00")
+        && iban_valid("GB82 WEST 1234 5698 7654 32")
+        && !iban_valid("DE89 3704 0044 0532 0130 01")
+        && !iban_valid("DE89 3704 0044");
+}
+
+fn test_iban_normalize() -> bool {
+    let o: ptr = alloc(40);
+    return iban_normalize("gb82 west 1234", o, 40) == 12
+        && load8(o, 0) == 71 && load8(o, 1) == 66;
+}

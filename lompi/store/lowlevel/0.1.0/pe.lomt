@@ -1,0 +1,131 @@
+// lowlevel/pe.lomt — PE/COFF 头与节表读取（Windows x86-64）
+//
+// 为什么与 `elf` 并列: 同一个"读二进制头"的技能，落在两种容器上。PE 的坑在
+// **两级偏移**（DOS 头里的 `e_lfanew` 指向 PE 签名）与 **PE32/PE32+ 的可选头差异**
+// （`ImageBase` 是 u32 还是 u64）。本模块只认 **PE32+**（0x20B，x86-64）。
+//
+// 输出布局（调用方给的缓冲）:
+//   pe_coff     28 字节: machine@0 sections@4 timestamp@8 symptr@12 nsyms@16 optsize@20 chars@24
+//   pe_opt      40 字节: magic@0 entry@4 imagebase@8 salign@16 falign@20 sizeimage@24
+//   pe_section  28 字节: name[8]@0 vsize@8 vaddr@12 rawsize@16 rawptr@20 chars@24
+//
+// 不做的: 导入表/导出表/重定位/资源目录 —— 那些要按 RVA 再走一层；本层只读头。
+//
+// 命名: 公开 pe_*, 内部 pe_*。自检 test_pe_*。
+
+module pe
+
+use mem
+use endian
+
+pub const PE_ERR: u32 = 4294967295;
+
+fn pe_lfanew(src: ptr, n: u32) -> u32 {
+    if n < 64 {
+        return PE_ERR;
+    }
+    return endian_load32le(src, 60);
+}
+
+pub fn pe_valid(src: ptr, n: u32) -> bool {
+    let lf: u32 = pe_lfanew(src, n);
+    if lf == PE_ERR || lf + 24 > n {
+        return false;
+    }
+    if load8(src, 0) != 77 || load8(src, 1) != 90 { // "MZ"
+        return false;
+    }
+    return load8(src, lf) == 80 && load8(src, lf + 1) == 69
+        && load8(src, lf + 2) == 0 && load8(src, lf + 3) == 0;
+}
+
+/// COFF 头（PE 签名之后 20 字节）。写 24 字节。
+pub fn pe_coff(src: ptr, n: u32, out: ptr) -> u32 {
+    if !pe_valid(src, n) {
+        return PE_ERR;
+    }
+    let o: u32 = pe_lfanew(src, n) + 4;
+    mem_store32(out, 0, endian_load16le(src, o) as u32);
+    mem_store32(out, 4, endian_load16le(src, o + 2) as u32);
+    mem_store32(out, 8, endian_load32le(src, o + 4));
+    mem_store32(out, 12, endian_load32le(src, o + 8));
+    mem_store32(out, 16, endian_load32le(src, o + 12));
+    mem_store32(out, 20, endian_load16le(src, o + 16) as u32);
+    mem_store32(out, 24, endian_load16le(src, o + 18) as u32);
+    return 0;
+}
+
+/// 可选头（PE32+）。写 40 字节。
+pub fn pe_opt(src: ptr, n: u32, out: ptr) -> u32 {
+    if !pe_valid(src, n) {
+        return PE_ERR;
+    }
+    let o: u32 = pe_lfanew(src, n) + 24;
+    let magic: u32 = endian_load16le(src, o);
+    if magic != 523 { // 0x20B = PE32+
+        return PE_ERR;
+    }
+    mem_store32(out, 0, magic);
+    mem_store32(out, 4, endian_load32le(src, o + 16));   // AddressOfEntryPoint
+    mem_store64(out, 8, endian_load64le(src, o + 24));   // ImageBase
+    mem_store32(out, 16, endian_load32le(src, o + 32));  // SectionAlignment
+    mem_store32(out, 20, endian_load32le(src, o + 36));  // FileAlignment
+    mem_store32(out, 24, endian_load32le(src, o + 56));  // SizeOfImage
+    return 0;
+}
+
+fn pe_opt_off(src: ptr, n: u32) -> u32 {
+    let o: u32 = pe_lfanew(src, n) + 24;
+    let optsize: u32 = endian_load16le(src, pe_lfanew(src, n) + 20);
+    return o + optsize;
+}
+
+/// 第 idx 个节头。写 40 字节。
+pub fn pe_section(src: ptr, n: u32, idx: u32, out: ptr) -> u32 {
+    if !pe_valid(src, n) {
+        return PE_ERR;
+    }
+    let count: u32 = endian_load16le(src, pe_lfanew(src, n) + 6);
+    if idx >= count {
+        return PE_ERR;
+    }
+    let o: u32 = pe_opt_off(src, n) + idx * 40;
+    if o + 40 > n {
+        return PE_ERR;
+    }
+    mem_copy(out, 0, src, o, 8); // name
+    mem_store32(out, 8, endian_load32le(src, o + 8));
+    mem_store32(out, 12, endian_load32le(src, o + 12));
+    mem_store32(out, 16, endian_load32le(src, o + 16));
+    mem_store32(out, 20, endian_load32le(src, o + 20));
+    mem_store32(out, 24, endian_load32le(src, o + 36));
+    return 0;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_pe_bad() -> bool {
+    let b: ptr = alloc(128);
+    mem_fill(b, 0, 128, 0);
+    return !pe_valid(b, 128);
+}
+
+fn test_pe_minimal_header() -> bool {
+    let b: ptr = alloc(512);
+    mem_fill(b, 0, 512, 0);
+    store8(b, 0, 77 as u8); // MZ
+    store8(b, 1, 90 as u8);
+    endian_store32le(b, 60, 64); // e_lfanew
+    store8(b, 64, 80 as u8); store8(b, 65, 69 as u8); // PE\0\0
+    endian_store16le(b, 68, 34404); // machine = AMD64
+    endian_store16le(b, 70, 2);     // sections
+    endian_store16le(b, 84, 240);   // sizeOfOptionalHeader
+    endian_store16le(b, 88, 523);   // PE32+
+    endian_store32le(b, 88 + 16, 4096); // entry
+    let out: ptr = alloc(40);
+    if pe_coff(b, 512, out) != 0 {
+        return false;
+    }
+    return mem_load32(out, 0) == 34404 && mem_load32(out, 4) == 2
+        && pe_opt(b, 512, out) == 0 && mem_load32(out, 4) == 4096;
+}

@@ -13,7 +13,6 @@
 // 命名: 公开一律 numfmt_*, 内部一律 nf_*。自检 test_numfmt_*。
 
 module numfmt
-choose runtime
 
 /// `numfmt_dec_into` 最多写出这么多字节 (u64 十进制上限 20 位)。
 pub const NUMFMT_DEC_MAX: u32 = 20;

@@ -27,7 +27,6 @@
 // 命名: 公开 fw_*, 内部 fw_*。自检 test_fwalk_*。
 
 module fwalk
-choose runtime
 
 use "mem.lomt"
 

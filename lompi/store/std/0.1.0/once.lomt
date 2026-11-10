@@ -70,7 +70,6 @@
 // (与 `at_` / `sp_` 分开, 免得和 atomics.lomt、spin.lomt 的私有名撞 E13)。
 
 module once
-choose runtime
 
 use "mem.lomt"
 use "atomics.lomt"

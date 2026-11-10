@@ -14,7 +14,6 @@
 // 命名: 公开一律 utf8_*, 内部一律 u8_*。自检 test_utf8_*。
 
 module utf8
-choose runtime
 
 /// 替换字符 U+FFFD —— 非法码点的落点。
 pub const UTF8_REPLACEMENT: u32 = 65533;

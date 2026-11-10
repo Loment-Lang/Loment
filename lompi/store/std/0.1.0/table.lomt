@@ -49,7 +49,6 @@
 // 命名: 公开 tbl_*, 内部 tb_* (与 deps 的 me_/w_/nu_ 前缀都不撞)。自检 test_tbl_*。
 
 module table
-choose runtime
 
 use "mem.lomt"
 use "width.lomt"

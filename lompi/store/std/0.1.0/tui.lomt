@@ -37,7 +37,6 @@
 // 命名: 公开 tu_*, 内部 tu_*(私有名同样占全局拼写)。自检 test_tui_*。
 
 module tui
-choose runtime
 
 use "mem.lomt"
 use "width.lomt"

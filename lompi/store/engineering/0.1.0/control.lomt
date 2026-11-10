@@ -1,0 +1,110 @@
+// std/control.lomt — PID、一阶低通、限幅、死区、速率限制（double）
+//
+// 为什么控制律要进标准库: 它看起来是四行数学，但**积分饱和**与**微分冲击**是两个
+// 每个新手都会踩一次的坑；把状态（积分、上一次误差）固定成一块内存，至少让"状态放哪"
+// 不再是每个调用点自己发明一遍。
+//
+// 状态（40 字节）: kp at 0 · ki at 8 · kd at 16 · 积分 at 24 · 上次误差 at 32。
+// 这是**位置式 PID**；输出由调用方限幅（`ctrl_clamp`）。
+//
+// 不做的: 抗积分饱和（anti-windup）、微分先行、前馈、自整定 —— 那些是控制器的策略层；
+// 本模块给的是"最小可用"的三种波形工具 + PID 本体。
+//
+// 命名: 公开 ctrl_*, 内部 ctrl_*。自检 test_control_*。
+
+module control
+
+use f64
+
+pub const CTRL_STATE: u32 = 40;
+
+pub fn ctrl_pid_init(st: ptr, kp: u64, ki: u64, kd: u64) {
+    mem_store64(st, 0, kp);
+    mem_store64(st, 8, ki);
+    mem_store64(st, 16, kd);
+    mem_store64(st, 24, F64_POS_ZERO);
+    mem_store64(st, 32, F64_POS_ZERO);
+}
+
+/// 一步 PID：err 是设定值 - 测量值，dt 是秒。返回控制量。
+pub fn ctrl_pid_step(st: ptr, err: u64, dt: u64) -> u64 {
+    let integ: u64 = mem_load64(st, 24);
+    let prev: u64 = mem_load64(st, 32);
+    let deriv: u64 = F64_POS_ZERO;
+    if f64_gt(dt, F64_POS_ZERO) {
+        integ = f64_add(integ, f64_mul(err, dt));
+        deriv = f64_div(f64_sub(err, prev), dt);
+    }
+    mem_store64(st, 24, integ);
+    mem_store64(st, 32, err);
+    let p: u64 = f64_mul(mem_load64(st, 0), err);
+    let i: u64 = f64_mul(mem_load64(st, 8), integ);
+    let d: u64 = f64_mul(mem_load64(st, 16), deriv);
+    return f64_add(f64_add(p, i), d);
+}
+
+/// 一阶低通：prev 是上一次输出，alpha 是 0..1（越大跟得越快）。
+pub fn ctrl_lowpass(prev: u64, x: u64, alpha: u64) -> u64 {
+    return f64_add(prev, f64_mul(alpha, f64_sub(x, prev)));
+}
+
+pub fn ctrl_clamp(x: u64, lo: u64, hi: u64) -> u64 {
+    if f64_lt(x, lo) {
+        return lo;
+    }
+    if f64_gt(x, hi) {
+        return hi;
+    }
+    return x;
+}
+
+/// 死区：|x| <= band 时输出 0，否则原样。
+pub fn ctrl_deadband(x: u64, band: u64) -> u64 {
+    if f64_le(f64_abs(x), band) {
+        return F64_POS_ZERO;
+    }
+    return x;
+}
+
+/// 速率限制：从 prev 向 target 走，每步最多 max_step。
+pub fn ctrl_rate_limit(prev: u64, target: u64, max_step: u64) -> u64 {
+    let diff: u64 = f64_sub(target, prev);
+    if f64_gt(diff, max_step) {
+        return f64_add(prev, max_step);
+    }
+    if f64_lt(diff, f64_neg(max_step)) {
+        return f64_sub(prev, max_step);
+    }
+    return target;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_control_pid_p() -> bool {
+    // 只有 P：kp=2, err=3 -> 6
+    let st: ptr = alloc(CTRL_STATE);
+    ctrl_pid_init(st, F64_TWO, F64_POS_ZERO, F64_POS_ZERO);
+    return f64_eq(ctrl_pid_step(st, F64_THREE, F64_ONE), 0x4018000000000000);
+}
+
+fn test_control_pid_i() -> bool {
+    // 只有 I：ki=1，err=2 连续两秒 -> 输出 2, 4
+    let st: ptr = alloc(CTRL_STATE);
+    ctrl_pid_init(st, F64_POS_ZERO, F64_ONE, F64_POS_ZERO);
+    let a: u64 = ctrl_pid_step(st, F64_TWO, F64_ONE);
+    let b: u64 = ctrl_pid_step(st, F64_TWO, F64_ONE);
+    return f64_eq(a, F64_TWO) && f64_eq(b, 0x4010000000000000); // 4
+}
+
+fn test_control_lowpass() -> bool {
+    // prev=0, x=10, alpha=0.5 -> 5
+    let y: u64 = ctrl_lowpass(F64_POS_ZERO, 0x4024000000000000, F64_HALF);
+    return f64_eq(y, 0x4014000000000000);
+}
+
+fn test_control_limits() -> bool {
+    // clamp(5, 0, 3) = 3；rate_limit(0,10,2) = 2；deadband(0.5,1)=0
+    return f64_eq(ctrl_clamp(0x4014000000000000, F64_POS_ZERO, F64_THREE), F64_THREE)
+        && f64_eq(ctrl_rate_limit(F64_POS_ZERO, 0x4024000000000000, F64_TWO), F64_TWO)
+        && f64_eq(ctrl_deadband(F64_HALF, F64_ONE), F64_POS_ZERO);
+}

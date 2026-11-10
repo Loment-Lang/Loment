@@ -16,7 +16,6 @@
 // 命名: 公开 ilist_*, 内部 il_*。自检 test_ilist_*。
 
 module ilist
-choose runtime
 
 use "mem.lomt"
 

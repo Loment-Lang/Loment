@@ -61,7 +61,6 @@
 // 命名: 公开 co_*, 内部无。自检 test_coro_*。
 
 module coro
-choose runtime
 
 use "mem.lomt"
 

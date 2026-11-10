@@ -636,10 +636,9 @@ fn chk_lgc_unit(src: ptr, t: ptr, i: u32) -> u32 {
 /// `prof` = 版次（`docs/296`）：`print_num` 只在 Tur 2 是内建，Tur 1 里同名的用户函数
 /// 不拖运行期（与参考实现 `_runtime_sites` 的 `profile` 参数同一条）。
 fn chk_rt_site(src: ptr, t: ptr, i: u32, prof: u32) -> u32 {
+    // `/` 与 `%` **不在表里**（docs/324）：整数除法发的是裸 `udiv`/`sdiv`，产物里
+    // 一个 `@__loment_*` 都不多 —— 与参考实现 `_RUNTIME_SITES` 同一条。
     if chk_tok_kind(t, i) == 3 {
-        if chk_tok_is(src, t, i, "/") || chk_tok_is(src, t, i, "%") {
-            return 1;
-        }
         return 0;
     }
     // **只有"用"才触发，名字本身不触发**（参考实现 `_runtime_sites` 同一条，理由见那里）：

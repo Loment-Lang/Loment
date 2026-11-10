@@ -9,7 +9,6 @@
 // 命名: 公开一律 hash_*, 内部一律 hs_*。自检 test_hash_*。
 
 module hash
-choose runtime
 
 /// FNV-1a 32 的偏移基数。
 pub const HASH_FNV32_OFFSET: u32 = 2166136261;

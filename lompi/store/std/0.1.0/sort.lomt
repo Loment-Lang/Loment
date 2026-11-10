@@ -12,7 +12,6 @@
 // 命名: 公开一律 sort_*, 内部一律 so_*。自检 test_sort_*。
 
 module sort
-choose runtime
 
 use "mem.lomt"
 

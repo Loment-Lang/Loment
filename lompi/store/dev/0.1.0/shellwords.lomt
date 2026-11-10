@@ -1,0 +1,278 @@
+// dev/shellwords.lomt — POSIX shell 风格的词法拆分、引用与拼回
+//
+// 为什么开发者工具需要它: 启动子进程、生成脚本、把 `--cmd "make -j8"` 拆成 argv、
+// 把 argv 安全地拼成一行日志 —— 每一件都在和引号/转义打交道。而"看起来对"的实现
+// 通常会漏掉三件事：单引号里**没有转义**、双引号里**只有四个字符可转义**、
+// 空词 `''` 也是一个词。
+//
+// 形状: `sw_split` 解码到**调用方的缓冲**，同时写 `(offset, len)` 对；这样词里
+// 去掉引号/转义后的真实内容与原文下标不再混在一起。
+//
+// 支持: 空白分隔、单引号、双引号、反斜杠转义、空词。不支持: `$VAR` 展开、
+// 通配符展开、命令替换 —— 那些是 shell 的**求值**，不是词法。
+//
+// 命名: 公开 sw_*, 内部 sw_*。自检 test_shellwords_*。
+
+module shellwords
+
+use mem
+
+pub const SW_ERR: u32 = 4294967295;
+
+fn sw_space(c: u32) -> bool {
+    return c == 32 || c == 9 || c == 10 || c == 13;
+}
+
+fn sw_put(buf: ptr, cap: u32, pos: u32, c: u32) -> u32 {
+    if pos < cap {
+        store8(buf, pos, c as u8);
+    }
+    return pos + 1;
+}
+
+/// 拆分。每写一个词就记一对 `(offset, len)` 进 `spans`（各 u32）。
+/// 返回词数；缓冲/词表不够返回 SW_ERR。
+pub fn sw_split(s: str, buf: ptr, buf_cap: u32, spans: ptr, max_words: u32) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    let bp: u32 = 0;
+    let wc: u32 = 0;
+    let going: u32 = 1;
+    while going == 1 {
+        // 跳过空白
+        while i < n && sw_space(str_byte(s, i)) {
+            i = i + 1;
+        }
+        if i >= n {
+            going = 0;
+        } else {
+            if wc >= max_words || bp >= buf_cap {
+                return SW_ERR;
+            }
+            let start: u32 = bp;
+            let inword: u32 = 1;
+            while inword == 1 && i < n {
+                let c: u32 = str_byte(s, i);
+                if sw_space(c) {
+                    inword = 0;
+                } else if c == 39 { // '
+                    i = i + 1;
+                    let closing: u32 = 0;
+                    while closing == 0 && i < n {
+                        let d: u32 = str_byte(s, i);
+                        if d == 39 {
+                            closing = 1;
+                            i = i + 1;
+                        } else {
+                            if bp >= buf_cap {
+                                return SW_ERR;
+                            }
+                            bp = sw_put(buf, buf_cap, bp, d);
+                            i = i + 1;
+                        }
+                    }
+                    if closing == 0 {
+                        return SW_ERR;
+                    }
+                } else if c == 34 { // "
+                    i = i + 1;
+                    let closing2: u32 = 0;
+                    while closing2 == 0 && i < n {
+                        let d: u32 = str_byte(s, i);
+                        if d == 34 {
+                            closing2 = 1;
+                            i = i + 1;
+                        } else if d == 92 && i + 1 < n {
+                            let e: u32 = str_byte(s, i + 1);
+                            if e == 34 || e == 92 || e == 36 || e == 96 {
+                                if bp >= buf_cap {
+                                    return SW_ERR;
+                                }
+                                bp = sw_put(buf, buf_cap, bp, e);
+                                i = i + 2;
+                            } else {
+                                if bp + 1 >= buf_cap {
+                                    return SW_ERR;
+                                }
+                                bp = sw_put(buf, buf_cap, bp, 92);
+                                bp = sw_put(buf, buf_cap, bp, e);
+                                i = i + 2;
+                            }
+                        } else {
+                            if bp >= buf_cap {
+                                return SW_ERR;
+                            }
+                            bp = sw_put(buf, buf_cap, bp, d);
+                            i = i + 1;
+                        }
+                    }
+                    if closing2 == 0 {
+                        return SW_ERR;
+                    }
+                } else if c == 92 { // backslash
+                    if i + 1 >= n {
+                        return SW_ERR;
+                    }
+                    if bp >= buf_cap {
+                        return SW_ERR;
+                    }
+                    bp = sw_put(buf, buf_cap, bp, str_byte(s, i + 1));
+                    i = i + 2;
+                } else {
+                    if bp >= buf_cap {
+                        return SW_ERR;
+                    }
+                    bp = sw_put(buf, buf_cap, bp, c);
+                    i = i + 1;
+                }
+            }
+            mem_store32(spans, wc * 8, start);
+            mem_store32(spans, wc * 8 + 4, bp - start);
+            wc = wc + 1;
+        }
+    }
+    return wc;
+}
+
+fn sw_safe(c: u32) -> bool {
+    return (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57)
+        || c == 95 || c == 64 || c == 37 || c == 43 || c == 61 || c == 58
+        || c == 44 || c == 46 || c == 47 || c == 45;
+}
+
+pub fn sw_needs_quote(s: str) -> bool {
+    let n: u32 = str_len(s);
+    if n == 0 {
+        return true;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if !sw_safe(str_byte(s, i)) {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+/// 把一个片段引用成 shell 安全的形式（需要时加单引号，`'` 写成 `'\''`）。
+pub fn sw_quote_span(s: ptr, off: u32, ln: u32, out: ptr, cap: u32) -> u32 {
+    let need: u32 = 0;
+    if ln == 0 {
+        need = 1;
+    }
+    let k: u32 = 0;
+    while k < ln {
+        if !sw_safe(load8(s, off + k)) {
+            need = 1;
+        }
+        k = k + 1;
+    }
+    if need == 0 {
+        let m: u32 = ln;
+        if m > cap {
+            m = cap;
+        }
+        let i: u32 = 0;
+        while i < m {
+            store8(out, i, load8(s, off + i) as u8);
+            i = i + 1;
+        }
+        return ln;
+    }
+    let pos: u32 = 0;
+    pos = sw_put(out, cap, pos, 39);
+    k = 0;
+    while k < ln {
+        let c: u32 = load8(s, off + k);
+        if c == 39 {
+            // '\''
+            pos = sw_put(out, cap, pos, 39);
+            pos = sw_put(out, cap, pos, 92);
+            pos = sw_put(out, cap, pos, 39);
+            pos = sw_put(out, cap, pos, 39);
+        } else {
+            pos = sw_put(out, cap, pos, c);
+        }
+        k = k + 1;
+    }
+    pos = sw_put(out, cap, pos, 39);
+    return pos;
+}
+
+pub fn sw_quote(s: str, out: ptr, cap: u32) -> u32 {
+    return sw_quote_span(str_ptr(s), 0, str_len(s), out, cap);
+}
+
+/// 用 `sw_split` 的 spans 拼回一行（每个词按需引用）。
+pub fn sw_join(s: ptr, spans: ptr, n: u32, out: ptr, cap: u32) -> u32 {
+    let pos: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        if i > 0 {
+            pos = sw_put(out, cap, pos, 32);
+        }
+        let off: u32 = mem_load32(spans, i * 8);
+        let ln: u32 = mem_load32(spans, i * 8 + 4);
+        let room: u32 = 0;
+        if pos < cap {
+            room = cap - pos;
+        }
+        pos = pos + sw_quote_span(s, off, ln, ptr_add(out, pos), room);
+        i = i + 1;
+    }
+    return pos;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_shellwords_split() -> bool {
+    let buf: ptr = alloc(128);
+    let sp: ptr = alloc(64);
+    let n: u32 = sw_split("a 'b c' \"d\\\"e\" f\\ g", buf, 128, sp, 8);
+    if n != 4 {
+        return false;
+    }
+    // 第 2 个词 "b c"
+    let off: u32 = mem_load32(sp, 8);
+    let ln: u32 = mem_load32(sp, 12);
+    return ln == 3 && load8(buf, off) == 98 && load8(buf, off + 2) == 99;
+}
+
+fn test_shellwords_quote() -> bool {
+    let b: ptr = alloc(64);
+    let n: u32 = sw_quote("a b", b, 64);
+    let want: str = "'a b'";
+    if n != 5 {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < 5 {
+        if load8(b, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_shellwords_join_roundtrip() -> bool {
+    let src: str = "one two";
+    let b: ptr = alloc(64);
+    let sp: ptr = alloc(32);
+    let n: u32 = sw_split(src, b, 64, sp, 4);
+    let o: ptr = alloc(64);
+    let m: u32 = sw_join(b, sp, n, o, 64);
+    if m != 7 {
+        return false;
+    }
+    let want: str = "one two";
+    let i: u32 = 0;
+    while i < 7 {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}

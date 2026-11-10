@@ -9,7 +9,6 @@
 // 命名: 公开一律 num_*, 内部一律 nu_*。自检 test_num_*。
 
 module num
-choose runtime
 
 /// 2^32: 打包时 lo 占低 32 位。
 pub const NUM_SCALE: u64 = 4294967296;

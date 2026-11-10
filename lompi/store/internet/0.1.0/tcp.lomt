@@ -19,7 +19,6 @@
 // 命名: 公开 tcp_*, 内部 tcpp_*。自检 test_tcp_*。
 
 module tcp
-choose runtime
 
 use "sock.lomt"
 

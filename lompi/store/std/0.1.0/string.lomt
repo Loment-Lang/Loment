@@ -32,7 +32,6 @@ module string
 
 // 需求：这一族要用到运行期（除法/取模/`alloc`）—— 库里写 `choose` 是**声明需求**，
 // 根单元要满足它（docs/227 §2.2）。包内 126 个模块已是同一个形状。
-choose runtime
 
 use "mem.lomt"
 

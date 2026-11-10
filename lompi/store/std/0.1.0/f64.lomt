@@ -19,7 +19,6 @@
 // 命名: 公开 f64_*, 内部 fa_*。自检 test_f64_*。
 
 module f64
-choose runtime
 
 use "f64bits.lomt"
 use "wide.lomt"

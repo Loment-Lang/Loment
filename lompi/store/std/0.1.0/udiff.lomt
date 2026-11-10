@@ -26,7 +26,6 @@
 // 命名: 公开 ud_*, 内部 d_*。自检 test_udiff_*。
 
 module udiff
-choose runtime
 
 use "mem.lomt"
 

@@ -9,7 +9,6 @@
 // 命名: 公开一律 b64_*, 内部一律 b6_*。自检 test_b64_*。
 
 module base64
-choose runtime
 
 /// 非法字符 (b64_val 的返回值)。
 pub const B64_NONE: u32 = 4294967295;

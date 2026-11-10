@@ -11,7 +11,6 @@
 // 命名: 公开 sum_*, 内部 su_*。自检 test_sum_*。
 
 module sum
-choose runtime
 
 use "mem.lomt"
 

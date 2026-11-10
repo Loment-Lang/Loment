@@ -8,7 +8,6 @@
 // 不另行声明 —— docs/168 §3.1)。重复写一遍不会更清楚, 只会多一条同名的边。
 
 module host
-choose runtime
 
 use "argv.lomt"
 use "dir.lomt"

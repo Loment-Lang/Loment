@@ -1,0 +1,63 @@
+// system/ioctl.lomt — 终端 ioctl 的请求号与 `struct winsize`
+//
+// 为什么系统工具需要它: "终端多宽"不是从环境变量猜的，是 `ioctl(fd, TIOCGWINSZ)`
+// 问内核要的。请求号是**架构相关的魔数**（`TIOCGWINSZ` = 0x5413），而返回的
+// `struct winsize` 是四个 u16：行、列、像素宽、像素高。
+//
+// 覆盖: Linux 通用 tty ioctl（x86-64 / AArch64 一致）。
+//
+// 命名: 公开 iol_*, 内部 iq_*。自检 test_ioctl_*。
+
+module ioctl
+
+use mem
+
+/// `TIOCGWINSZ`：取窗口大小。
+pub fn iol_tiocgwinsz() -> u64 {
+    return 21523 as u64;
+}
+
+/// `TIOCSWINSZ`：设窗口大小。
+pub fn iol_tiocswinsz() -> u64 {
+    return 21524 as u64;
+}
+
+/// `FIONREAD`：可读字节数。
+pub fn iol_fionread() -> u64 {
+    return 21531 as u64;
+}
+
+/// `TCGETS`：取 termios。
+pub fn iol_tcgets() -> u64 {
+    return 21505 as u64;
+}
+
+/// `TCSETS`：设 termios。
+pub fn iol_tcsets() -> u64 {
+    return 21506 as u64;
+}
+
+/// 从 `struct winsize` 读四个 u16，写进 out 的四个 u32：rows, cols, xpix, ypix。
+pub fn iol_winsize(p: ptr, out: ptr) {
+    mem_store32(out, 0, (load8(p, 0) as u32) + ((load8(p, 1) as u32) * 256));
+    mem_store32(out, 4, (load8(p, 2) as u32) + ((load8(p, 3) as u32) * 256));
+    mem_store32(out, 8, (load8(p, 4) as u32) + ((load8(p, 5) as u32) * 256));
+    mem_store32(out, 12, (load8(p, 6) as u32) + ((load8(p, 7) as u32) * 256));
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_ioctl_numbers() -> bool {
+    return iol_tiocgwinsz() == (0x5413 as u64)
+        && iol_fionread() == (0x541B as u64)
+        && iol_tcgets() == (0x5401 as u64);
+}
+
+fn test_ioctl_winsize() -> bool {
+    let p: ptr = alloc(8);
+    store8(p, 0, 40 as u8);  // rows 40
+    store8(p, 2, 120 as u8); // cols 120
+    let o: ptr = alloc(16);
+    iol_winsize(p, o);
+    return mem_load32(o, 0) == 40 && mem_load32(o, 4) == 120;
+}

@@ -19,7 +19,6 @@
 // 命名: 公开 kdf_*, 内部 kd_*。自检 test_kdf_*。
 
 module kdf
-choose runtime
 
 use "hmac.lomt"
 

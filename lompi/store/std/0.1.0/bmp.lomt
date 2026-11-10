@@ -51,7 +51,6 @@
 // 命名: 公开 bm_*, 内部 bm_*。自检 test_bmp_*。
 
 module bmp
-choose runtime
 
 use "mem.lomt"
 

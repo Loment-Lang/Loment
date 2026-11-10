@@ -19,7 +19,6 @@
 // 命名: 公开 sha1_*, 内部 sh_*。自检 test_sha1_*。
 
 module sha1
-choose runtime
 
 use "mem.lomt"
 

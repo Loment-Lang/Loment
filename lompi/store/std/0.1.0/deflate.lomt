@@ -58,7 +58,6 @@
 // 命名: 公开 df_*, 内部 dfl_*。自检 test_deflate_*。
 
 module deflate
-choose runtime
 
 use "mem.lomt"
 use "inflate.lomt"

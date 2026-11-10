@@ -12,7 +12,6 @@
 // 命名: 公开 udp_*, 内部 udpp_*。自检 test_udp_*。
 
 module udp
-choose runtime
 
 use "sock.lomt"
 

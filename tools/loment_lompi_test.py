@@ -1548,9 +1548,20 @@ def test_install_scripts_stay_pure_ascii():
 #: 与 `#401`），整棵树随之 159 -> 160。
 #: **2026-11-08 起 std 是 141** —— 补了 8 份：`pack` `uuid` `sha3` `blake2` `gzip`
 #: `tar` `jsonw` `regex`（`docs/316`），整棵树随之 160 -> 168。
+#: **2026-11-08 起多八个领域包**（`math`/`science`/`engineering`/`world`/`dev`/
+#: `lowlevel`/`system`/`baremetal`，`docs/317`），41 个 `.lomt` + 8 个 `pkg.lomp`，
+#: 整棵树 168 -> **217**。`std` 仍然是 141（领域库不进 std）。
+#: **2026-11-08 再补 `dev`**（`docs/320`）：10 个开发者工具模块，`dev` 5 -> 15，
+#: 整棵树 217 -> 227。
+#: **2026-11-08 补 `world`**（`docs/321`）：19 个现实世界模块，`world` 3 -> 22，
+#: 整棵树 227 -> 246。
+#: **2026-11-09 补 `lowlevel` / `system`**（`docs/322`）：各 8 个模块，
+#: 两个包 4 -> 12，整棵树 246 -> **262**。
 STORE_DIR = ROOT / "lompi" / "store"
-STORE_MODULES = {"std": 141, "host": 8, "internet": 8, "os": 7}
-STORE_FILES = 168
+STORE_MODULES = {"std": 141, "host": 8, "internet": 8, "os": 7,
+                 "math": 9, "science": 6, "engineering": 4,
+                 "dev": 15, "world": 22, "lowlevel": 12, "system": 12, "baremetal": 6}
+STORE_FILES = 262
 
 
 def _store_line(out: str) -> str:
@@ -1584,6 +1595,44 @@ def test_package_carries_the_whole_store():
     fresh = d._fresh_sources("linux")
     missing = [f for f in files if f"share/lompi/store/{f}" not in fresh]
     assert not missing, f"这些 store 文件没被 _fresh_sources 盯住: {missing[:3]}"
+
+
+@test
+def test_every_package_manifest_matches_its_code():
+    """`pkg.lomp` 的 `choose()` / `requires()` 必须与包里的代码**逐条**对得上（docs/325）。
+
+    清单是包级前置条件：`choose()` 说"这个包依赖哪些核心档"，`requires()` 说"真代码
+    用了哪些构造"。两张表都会漂 —— 所以这条判据把**代码**当唯一真源，清单多写少写
+    都红。检查三件事：
+
+      1. `requires()` 与 `package_features` 的并集逐项相等（排序后比字符串）；
+      2. 有 `rt_sites`（会拖运行期）⇒ `choose()` 里有 `runtime`，反之没有；
+      3. 用了 `free` ⇒ `gc_manual`；用了 `extern fn` ⇒ `hosted`。
+    """
+    store = ROOT / "lompi" / "store"
+    bad: list[str] = []
+    for pkgdir in sorted(p for p in store.glob("*/*") if p.is_dir()):
+        mf = pkgdir / "pkg.lomp"
+        if not mf.is_file():
+            bad.append(f"{pkgdir}: 没有 pkg.lomp")
+            continue
+        _name, words, req = lomentc._manifest_fields(mf.read_text(encoding="utf-8"))
+        mods = [lomentc.load(p) for p in sorted(pkgdir.glob("*.lomt"))]
+        feats = sorted({f for m in mods for f in lomentc.package_features(m)})
+        got = req.split(",") if req else []
+        if got != feats:
+            bad.append(f"{pkgdir.name}: requires()={got} 代码={feats}")
+        elif req and req != ",".join(feats):
+            bad.append(f"{pkgdir.name}: requires() 未排序：{req} != {','.join(feats)}")
+        want_rt = any(m.rt_sites for m in mods)
+        if want_rt != ("runtime" in words):
+            bad.append(f"{pkgdir.name}: runtime 声明 {words} 与代码 rt_sites={want_rt} 不符")
+        if ("free" in feats) != ("gc_manual" in words):
+            bad.append(f"{pkgdir.name}: free 与 gc_manual 不匹配（choose={words}）")
+        if ("extern" in feats) != ("hosted" in words):
+            bad.append(f"{pkgdir.name}: extern 与 hosted 不匹配（choose={words}）")
+    assert not bad, "包清单与代码不一致：\n  " + "\n  ".join(bad)
+    print("      包清单与代码：12 个包的 choose()/requires() 逐条对得上")
 
 
 @test

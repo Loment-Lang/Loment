@@ -31,7 +31,6 @@
 // 命名: 公开 ra_*, 内部 ra_*。自检 test_raster_*。
 
 module raster
-choose runtime
 
 use "mem.lomt"
 

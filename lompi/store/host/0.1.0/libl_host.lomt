@@ -29,7 +29,6 @@
 // 需要偏移时用 `(p as u64) + n` 再转回来。
 
 module libl_host
-choose runtime
 
 use io
 use mem

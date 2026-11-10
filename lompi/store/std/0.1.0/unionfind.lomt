@@ -22,7 +22,6 @@
 // 命名: 公开 uf_*, 内部 fu_* (find-union 的倒序, 避开与 uf_ 前缀混在一起)。自检 test_uf_*。
 
 module unionfind
-choose runtime
 
 use "mem.lomt"
 

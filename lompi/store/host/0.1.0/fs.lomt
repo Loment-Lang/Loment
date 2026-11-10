@@ -13,7 +13,6 @@
 // 命名: 公开一律 fs_*, 内部一律 fsi_*。自检 test_fs_*。
 
 module fs
-choose runtime
 
 use "io.lomt"
 

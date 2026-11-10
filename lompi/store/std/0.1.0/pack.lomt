@@ -29,7 +29,6 @@
 // 自举侧把它读成关键字并拒（E2）—— 两份实现的分歧（issue 见仓库）。换名让两边都成立。
 
 module pack
-choose runtime
 
 use "mem.lomt"
 use "endian.lomt"

@@ -1,0 +1,94 @@
+// baremetal/paging.lomt — x86-64 四级页表项与虚拟地址拆分
+//
+// 为什么标准库要有它: 长模式的页表项是 64 位，其中 **物理地址在 12..51 位**，
+// 位 52..62 是保留位（必须为 0），位 63 是 NX（禁止执行）。"地址直接或上标志"
+// 的写法会把保留位一起带进去，而 CPU 对保留位非零的 PTE 是 **#PF**，不是忽略。
+//
+// 四级（4 KiB 页）: 虚拟地址 48 位 = PML4[9] | PDPT[9] | PD[9] | PT[9] | offset[12]，
+// 从高到低的移位分别是 39/30/21/12。
+//
+// 不做的: 分配页表、建立映射、TLB 刷新（`invlpg`/换 CR3 是特权指令）、
+// 2 MiB/1 GiB 大页的标志组合（给的是位常量，组合由调用方决定）。
+//
+// 命名: 公开 pg_*, 内部 pg_*。自检 test_paging_*。
+
+module paging
+
+use mem
+
+pub const PG_PRESENT: u64 = 1;
+pub const PG_RW: u64 = 2;
+pub const PG_USER: u64 = 4;
+pub const PG_PWT: u64 = 8;
+pub const PG_PCD: u64 = 16;
+pub const PG_ACCESSED: u64 = 32;
+pub const PG_DIRTY: u64 = 64;
+pub const PG_HUGE: u64 = 128;
+pub const PG_GLOBAL: u64 = 256;
+pub const PG_NX: u64 = 9223372036854775808; // 1 << 63
+
+/// 物理地址掩码：12..51 位。
+pub const PG_ADDR_MASK: u64 = 4503599627366400;
+
+pub fn pg_pte(addr: u64, flags: u64) -> u64 {
+    return (addr & PG_ADDR_MASK) | flags;
+}
+
+pub fn pg_addr(e: u64) -> u64 {
+    return e & PG_ADDR_MASK;
+}
+
+pub fn pg_has(e: u64, flag: u64) -> bool {
+    return (e & flag) == flag;
+}
+
+pub fn pg_set(e: u64, flag: u64, on: u32) -> u64 {
+    if on != 0 {
+        return e | flag;
+    }
+    return e & (flag ^ 18446744073709551615);
+}
+
+/// 第 level 级（4 = PML4 … 1 = PT）的索引。
+pub fn pg_index(va: u64, level: u32) -> u32 {
+    let sh: u32 = 12;
+    if level == 4 {
+        sh = 39;
+    } else if level == 3 {
+        sh = 30;
+    } else if level == 2 {
+        sh = 21;
+    }
+    return ((va >> (sh as u32)) & 511) as u32;
+}
+
+/// 拆成 5 个 u32：pml4, pdpt, pd, pt, offset。
+pub fn pg_split(va: u64, out: ptr) {
+    mem_store32(out, 0, pg_index(va, 4));
+    mem_store32(out, 4, pg_index(va, 3));
+    mem_store32(out, 8, pg_index(va, 2));
+    mem_store32(out, 12, pg_index(va, 1));
+    mem_store32(out, 16, (va & 4095) as u32);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_paging_flags() -> bool {
+    let e: u64 = pg_pte(1048576, PG_PRESENT | PG_RW);
+    return pg_addr(e) == 1048576 && pg_has(e, PG_PRESENT) && pg_has(e, PG_RW)
+        && !pg_has(e, PG_USER);
+}
+
+fn test_paging_nx_roundtrip() -> bool {
+    let e: u64 = pg_set(PG_PRESENT, PG_NX, 1);
+    return pg_has(e, PG_NX) && pg_has(e, PG_PRESENT) && !pg_has(pg_set(e, PG_NX, 0), PG_NX);
+}
+
+fn test_paging_split() -> bool {
+    // 0x00007ffffffff000 -> pml4 255, pdpt 511, pd 511, pt 511, off 0
+    let o: ptr = alloc(20);
+    pg_split(140737488355328 as u64 - 4096, o);
+    return mem_load32(o, 0) == 255 && mem_load32(o, 4) == 511
+        && mem_load32(o, 8) == 511 && mem_load32(o, 12) == 511
+        && mem_load32(o, 16) == 0;
+}

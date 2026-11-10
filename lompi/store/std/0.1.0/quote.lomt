@@ -15,7 +15,6 @@
 // 命名: 公开一律 quote_*, 内部一律 qe_*。自检 test_quote_*。
 
 module quote
-choose runtime
 
 use "hex.lomt"
 

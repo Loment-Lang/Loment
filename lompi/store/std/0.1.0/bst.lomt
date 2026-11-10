@@ -15,7 +15,6 @@
 // 命名: 公开 bst_*, 内部 bs_*。自检 test_bst_*。
 
 module bst
-choose runtime
 
 use "mem.lomt"
 

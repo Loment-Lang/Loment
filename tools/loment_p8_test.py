@@ -668,7 +668,8 @@ def test_m81_falling_off_the_end_is_refused():
             f.write_text(src, encoding="utf-8", newline="\n")
             errs = lomentc.check(lomentc.load(f))
             codes = {loment_diag.classify(e)[0] for e in errs}
-            assert "E027" in codes, f"{tag}: 掉出末尾没按 E027 拒: {errs}"
+            # 细分之后"可能从末尾掉出去"是 **E179**（`docs/332`）。
+            assert "E179" in codes, f"{tag}: 掉出末尾没按 E179 拒: {errs}"
         for tag, src in good.items():
             f = d / (tag + ".lomt")
             f.write_text(src, encoding="utf-8", newline="\n")

@@ -319,9 +319,9 @@ def test_lsp_diagnostics_match_selfhosted_checker():
         print("      SKIP: 无 clang/WSL")
         return
     cases = [
-        ("dup", DUP, "E013", [i for i, l in enumerate(DUP.splitlines())
+        ("dup", DUP, "E0134", [i for i, l in enumerate(DUP.splitlines())
                                  if l.startswith("fn a")][-1], 1),   # 报的是**重复**的那个
-        ("undeclared", BAD, "E002", BAD.splitlines().index("    return missing_fn();"), 1),
+        ("undeclared", BAD, "E096", BAD.splitlines().index("    return missing_fn();"), 1),
         ("clean", GOOD, None, 0, 0),
         # `register` 块是新语法：语言服务认不出它就会在这份**编得过**的源上报一条
         # "未知顶层关键字"，而那正是消费方轴要抓的那种假错。
@@ -353,8 +353,9 @@ def test_lsp_diagnostics_match_selfhosted_checker():
                        for d in dg), (name, want_code, want_line, dg)
             assert len(dg) >= want_n, (name, want_n, dg)
         for d in dg:
-            assert d["code"].startswith("E") and len(d["code"]) == 4, d
-    print(f"      {len(cases)} 个用例的码/行号正确 (重名 E013 / 未声明 E002 / 干净 0 条)")
+            # 码的形状（`docs/332`）：< 100 是 `E0xx`、>= 100 是 `E0xxx`，所以长度 4 或 5。
+            assert d["code"].startswith("E") and len(d["code"]) in (4, 5), d
+    print(f"      {len(cases)} 个用例的码/行号正确 (重名 E0134 / 未声明 E096 / 干净 0 条)")
 
 
 @test
@@ -385,8 +386,8 @@ def test_lsp_check_mode_is_python_free():
             out = r.stdout
             assert r.returncode == 1, f"有错文件应当 rc=1, 实得 {r.returncode}: {out!r} {r.stderr[-200:]!r}"
             lines = [ln for ln in out.splitlines() if ": E" in ln]
-            assert any("E013" in ln and ln.startswith(abs_probe) for ln in lines), out
-            assert any("E002" in ln for ln in lines), out
+            assert any("E0134" in ln and ln.startswith(abs_probe) for ln in lines), out
+            assert any("E096" in ln for ln in lines), out
             for ln in lines:
                 head = ln.split(": E")[0]
                 assert head.startswith(abs_probe + ":"), ln
@@ -467,10 +468,11 @@ def test_lsp_check_honours_switches():
                 f"关着的开关体不该被检查, 实得 rc={off.returncode}: {off.stdout!r}"
             on = run(SW_ON_SRC)
             assert on.returncode == 1, f"打开后应当报错, 实得 rc={on.returncode}: {on.stdout!r}"
-            assert "E002" in on.stdout, f"打开后应当报未定义函数 (E002): {on.stdout!r}"
+            # 细分之后"调用未定义的函数"是 **E096**（`docs/332`），LSP 按同一个宽度印。
+            assert "E096" in on.stdout, f"打开后应当报未定义函数 (E096): {on.stdout!r}"
     finally:
         probe.unlink(missing_ok=True)
-    print("      --check: 关着的开关体不报错; `choose` 打开后 E002 照报 (LSP 侧裁减真生效)")
+    print("      --check: 关着的开关体不报错; `choose` 打开后 E096 照报 (LSP 侧裁减真生效)")
 
 
 @test

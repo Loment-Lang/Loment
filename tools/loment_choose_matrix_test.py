@@ -902,7 +902,9 @@ def test_no_std_with_hosted_is_refused_by_both_front_ends():
         src = td / "nostd_hosted.lomt"     # `_emit` 已经把同一份源写在那里
         rc2, _out, err = _selfhost_ir(td, src)
         assert rc2 != 0, "自举驱动收下了 `no_std` + `hosted`"
-        assert "E22" in err, f"自举驱动拒绝时没给 E22：{err[-300:]!r}"
+        # 细分之后这条冲突是 **E161**（「两个模式取值不能同时选」，`docs/332`）；
+        # 参考实现那一侧同一条消息也归 161。
+        assert "E161" in err, f"自举驱动拒绝时没给 E161：{err[-300:]!r}"
         assert "line 3" in err, (
             f"自举驱动的锚点不在后写的那一行（`hosted` 是第 3 行）：{err[-300:]!r}")
     print("      no_std+hosted: 参考点名两个取值与需求链；自举拒绝并锚在第 3 行")

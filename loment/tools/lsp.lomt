@@ -449,6 +449,16 @@ fn switchify(mem: ptr, text: ptr, toks: ptr, nt: u32) -> u32 {
 }
 
 fn emit_e0(b: ptr, o: u32, code: u32) -> u32 {
+    // 码的形状与 `loment_diag._code_str` 同一条规则（`docs/332`）：< 100 是 `E0xx`，
+    // >= 100 是 `E0xxx`。服务端吐的 `code` 与诊断正文必须是同一种拼法 —— 否则编辑器
+    // 里看到的一个码，复制去 `loment explain` 会被当成另一个。
+    if code >= 100 && code < 1000 {
+        store8(b, o, 48 as u8);
+        store8(b, o + 1, (48 + (code / 100) % 10) as u8);
+        store8(b, o + 2, (48 + (code / 10) % 10) as u8);
+        store8(b, o + 3, (48 + code % 10) as u8);
+        return o + 4;
+    }
     store8(b, o, (48 + (code / 100) % 10) as u8);
     store8(b, o + 1, (48 + (code / 10) % 10) as u8);
     store8(b, o + 2, (48 + code % 10) as u8);
@@ -599,12 +609,10 @@ fn publish(mem: ptr, text: ptr, toks: ptr, uri: ptr, un: u32, errs: ptr, ne: u32
         // (直接拼两段会被套上两层引号 -> 非法 JSON)
         let mb: ptr = ptr_add(mem, SCR_OFF + 6144);
         store8(mb, 0, 69 as u8);                       // 'E'
-        store8(mb, 1, (48 + (code / 100) % 10) as u8);
-        store8(mb, 2, (48 + (code / 10) % 10) as u8);
-        store8(mb, 3, (48 + code % 10) as u8);
-        store8(mb, 4, 32 as u8);
+        let pd: u32 = emit_e0(mb, 1, code);            // 宽度跟 `emit_e0` 走
+        store8(mb, pd, 32 as u8);
         let ttl: str = diag_title(code);
-        let mo: u32 = 5;
+        let mo: u32 = pd + 1;
         let q: u32 = 0;
         while q < str_len(ttl) {
             store8(mb, mo, str_byte(ttl, q) as u8);

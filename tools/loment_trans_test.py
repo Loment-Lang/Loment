@@ -419,6 +419,19 @@ _PY_BATTERY = {
     "py_bare_return": "def f(a: int) -> int:\n    if a > 0:\n        return a\n    return\n",
     "py_async": "async def f(a: int) -> int:\n    return a\n",
     "py_class": "class C:\n    pass\n",
+    # ---- 字符串与 `print`（两门都要逐字节同）
+    "py_print_str": 'def f() -> int:\n    print("hi")\n    return 0\n',
+    "py_print_num": "def f() -> int:\n    n = 6 * 7\n    print(n)\n    return 0\n",
+    "py_print_empty": "def f() -> int:\n    print()\n    return 0\n",
+    "py_concat": 'def f() -> int:\n    s = "a" + "b"\n    print(s)\n    return 0\n',
+    "py_concat_chain": 'def f() -> int:\n    print("a" + "b" + "c")\n    return 0\n',
+    "py_escape_tab": 'def f() -> int:\n    print("a\\tb")\n    return 0\n',
+    "py_escape_quote": 'def f() -> int:\n    print("say \\"hi\\"")\n    return 0\n',
+    "py_single_quote": "def f() -> int:\n    print('hi')\n    return 0\n",
+    "py_str_plus_int": 'def f() -> int:\n    print("a" + 1)\n    return 0\n',
+    "py_print_bool": "def f() -> int:\n    print(True)\n    return 0\n",
+    "py_print_multi": 'def f() -> int:\n    print("a", 1)\n    return 0\n',
+    "py_str_as_int": 'def f() -> int:\n    return "a"\n',
 }
 
 

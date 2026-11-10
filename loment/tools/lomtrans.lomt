@@ -944,6 +944,75 @@ fn appn(out: ptr, o: u32, p: ptr, off: u32, l: u32) -> u32 {
     return o + l;
 }
 
+/// 追加一个**字节**（转义里那半截用得上）。
+fn appb(out: ptr, o: u32, c: u32) -> u32 {
+    let _s: u32 = store8(out, o, c as u8);
+    return o + 1;
+}
+
+/// 源里的字符串字面量 -> 本语言的写法（与 `pytrans._str_lit` 同一口径）。
+///
+/// 两个语言认同一组转义（`\n \t \r \0 \\ \"`），所以那几个**原样抄**；只有三处要动：
+/// 定界符一律换成双引号、`\'` 还原成 `'`、认不出的转义**报错**（`\uXXXX` / `\b` /
+/// `\f` 本语言没有写法，照抄过去会让词法器报在生成出来的那一份源上）。
+fn str_lit(mem: ptr, off: u32, n: u32, buf: ptr, o: u32) -> u32 {
+    let src: ptr = ptr_add(mem, M_SCR);   // 源正文在 `M_SCR`（`M_SRC` 放的是路径）
+    let end: u32 = off + n;
+    let q: u32 = load8(src, off);
+    if n < 2 || (q != 34 && q != 39) || load8(src, end - 1) != q {
+        let _e: u32 = em_fail(mem);
+        return o;
+    }
+    let r0: u32 = app(buf, o, "\"");
+    let i: u32 = off + 1;
+    let r: u32 = r0;
+    let ok: u32 = 1;
+    while i < end - 1 && ok == 1 {
+        let c: u32 = load8(src, i);
+        if c == 92 {
+            if i + 1 >= end - 1 {
+                ok = 0;
+            } else {
+                let e2: u32 = load8(src, i + 1);
+                if e2 == 110 || e2 == 116 || e2 == 114 || e2 == 48 || e2 == 92 {
+                    let _a: u32 = appb(buf, r, 92);
+                    let _b: u32 = appb(buf, r + 1, e2);
+                    r = r + 2;
+                    i = i + 2;
+                } else if e2 == 34 {
+                    let _a: u32 = appb(buf, r, 92);
+                    let _b: u32 = appb(buf, r + 1, 34);
+                    r = r + 2;
+                    i = i + 2;
+                } else if e2 == 39 {
+                    let _a: u32 = appb(buf, r, 39);      // `\'` -> `'`
+                    r = r + 1;
+                    i = i + 2;
+                } else {
+                    ok = 0;
+                }
+            }
+        } else if c == 34 {
+            // 源用单引号定界、内容里有 `"` —— 输出是双引号定界，得转义
+            let _a: u32 = appb(buf, r, 92);
+            let _b: u32 = appb(buf, r + 1, 34);
+            r = r + 2;
+            i = i + 1;
+        } else if c == 10 || c == 13 {
+            ok = 0;
+        } else {
+            let _a: u32 = appb(buf, r, c);
+            r = r + 1;
+            i = i + 1;
+        }
+    }
+    if ok == 0 {
+        let _e: u32 = em_fail(mem);
+        return o;
+    }
+    return app(buf, r, "\"");
+}
+
 /// 十进制无符号（暂存在 `M_TMP + 32`）。
 fn appu(mem: ptr, out: ptr, o: u32, v: u32) -> u32 {
     let buf: ptr = ptr_add(mem, M_TMP + 32);
@@ -1629,6 +1698,9 @@ fn ty_id(p: ptr, l: u32) -> u32 {
     if l == 4 && eq(p, 0, "bool") == 1 {
         return 9;
     }
+    if l == 3 && eq(p, 0, "str") == 1 {
+        return TY_STR_ID;
+    }
     if l == 2 && eq(p, 0, "()") == 1 {
         return 10;
     }
@@ -1662,6 +1734,9 @@ fn ty_text(id: u32) -> str {
     }
     if id == 9 {
         return "bool";
+    }
+    if id == TY_STR_ID {
+        return "str";
     }
     return "()";
 }
@@ -2559,6 +2634,12 @@ fn p_unit(mem: ptr, src: ptr, lang: u32, outp: ptr) -> u32 {
 
 const W_INT: u32 = 0;              // 这个上下文要"整数"
 const W_BOOL: u32 = 1;             // 这个上下文要"条件"
+//: **字符串**上下文。本语言的 `str` 是真类型（`print` / `str_len` / `str_eq` /
+//: `str_concat` 都在），但它**不参与数值转换**：`"a" + 1` 在 Python / Java 里是自动
+//: 转字符串再拼，本语言没有那个转换 —— 所以 `ex_want` 见到 `W_STR` 与数值交叉就报错，
+//: 不像 `W_INT`/`W_BOOL` 那样有转换分支。
+const W_STR: u32 = 2;
+const TY_STR_ID: u32 = 11;         // `str` 的类型 id（见 `ty_id`）
 const TY_VOID_ID: u32 = 10;        // `()` 的类型 id（见 `ty_id`）
 const E_VN: u32 = 840;             // 变量表条数
 const E_CN: u32 = 844;             // 常量表条数
@@ -3012,10 +3093,16 @@ fn ty_of(mem: ptr, e: u32) -> u32 {
         }
         return W_INT;
     }
+    if k == NK_STR {
+        return W_STR;
+    }
     if k == NK_VAR {
         let f: u32 = var_find(mem, nd_get(mem, e, ND_A), nd_get(mem, e, ND_B));
         if f > 0 && var_ty(mem, f) == 9 {
             return W_BOOL;
+        }
+        if f > 0 && var_ty(mem, f) == TY_STR_ID {
+            return W_STR;
         }
         return W_INT;
     }
@@ -3298,6 +3385,9 @@ fn em_block(mem: ptr, start: u32, cnt: u32, depth: u32) -> u32 {
 fn raw_ex(mem: ptr, e: u32, buf: ptr, o: u32) -> u32 {
     let s: ptr = ptr_add(mem, M_SCR);
     let k: u32 = nd_get(mem, e, ND_KIND);
+    if k == NK_STR {
+        return str_lit(mem, nd_get(mem, e, ND_A), nd_get(mem, e, ND_B), buf, o);
+    }
     if k == NK_LIT {
         if nd_get(mem, e, ND_B) == 1 {
             if nd_get(mem, e, ND_A) == 0 {
@@ -3534,6 +3624,12 @@ fn ex_want(mem: ptr, e: u32, want: u32, buf: ptr, o: u32) -> u32 {
     }
     if got == want {
         return raw_ex(mem, e, buf, o);
+    }
+    if got == W_STR || want == W_STR {
+        // **字符串不参与数值转换**（与 `pytrans.Emitter.ex` 同一口径）。Python / Java
+        // 会替你做 `"a" + 1`，本语言不会 —— 这里报错，不补转换。
+        let _e: u32 = em_fail(mem);
+        return o;
     }
     if got == W_INT {
         if ld32(st, E_I2B) == 0 {
@@ -4471,6 +4567,9 @@ const NK_PFOR: u32 = 13;
 const NK_DOC: u32 = 14;
 const NK_PASS: u32 = 15;
 const NK_BOOL: u32 = 16;           // `and` / `or` —— **n 元**（`a and b and c` 是一个节点）
+//: 字符串字面量。`ND_A` / `ND_B` 存它在**源里的**起点与长度（含两个引号）—— 原文
+//: 原样留着，发射时逐段翻转子集内的转义（与 `pytrans._str_lit` 同一口径）。
+const NK_STR: u32 = 17;
 
 const UN_SUB: u32 = 1;             // 一元 `-`
 const UN_NOT: u32 = 2;             // `not`
@@ -5151,8 +5250,12 @@ fn pp_primary(mem: ptr, src: ptr) -> u32 {
         return e;
     }
     if kind == PT_STR {
-        let _u: u32 = pp_uns(mem);              // 散落的字符串 / f-string 之外的字面量
-        return 0;
+        // 字符串字面量。存**源里的**起点与长度（含引号），发射时再翻转子集内的转义。
+        let x: u32 = node_new(mem, NK_STR, line);
+        let _a: u32 = nd_set(mem, x, ND_A, pt_off(mem, k));
+        let _b: u32 = nd_set(mem, x, ND_B, pt_len(mem, k));
+        let _n: u32 = pp_next(mem);
+        return x;
     }
     let _e: u32 = pp_err(mem);
     return 0;
@@ -5716,6 +5819,9 @@ fn pye_ty_of(mem: ptr, e: u32) -> u32 {
         }
         return 7;
     }
+    if k == NK_STR {
+        return TY_STR_ID;
+    }
     if k == NK_VAR {
         let o: u32 = nd_get(mem, e, ND_A);
         let l: u32 = nd_get(mem, e, ND_B);
@@ -5748,6 +5854,14 @@ fn pye_ty_of(mem: ptr, e: u32) -> u32 {
         if bin_isbool(nd_get(mem, e, ND_A)) == 1 {
             return 9;
         }
+        // `+` 只要有一边是字符串就是**拼接**（与 `pytrans.ty_of` 同一条）
+        if nd_get(mem, e, ND_A) == 4 {          // `bin_text(4)` == "+"
+            let l: u32 = pye_ty_of(mem, nd_get(mem, e, ND_B));
+            let r: u32 = pye_ty_of(mem, nd_get(mem, e, ND_C));
+            if l == TY_STR_ID || r == TY_STR_ID {
+                return TY_STR_ID;
+            }
+        }
         return 7;
     }
     if k == NK_BOOL {
@@ -5761,6 +5875,9 @@ fn pye_ty_of(mem: ptr, e: u32) -> u32 {
 fn pye_raw(mem: ptr, e: u32, buf: ptr, o: u32) -> u32 {
     let s: ptr = ptr_add(mem, M_SCR);
     let k: u32 = nd_get(mem, e, ND_KIND);
+    if k == NK_STR {
+        return str_lit(mem, nd_get(mem, e, ND_A), nd_get(mem, e, ND_B), buf, o);
+    }
     if k == NK_LIT {
         if nd_get(mem, e, ND_B) == 1 {
             if nd_get(mem, e, ND_A) == 0 {
@@ -5839,6 +5956,21 @@ fn pye_raw(mem: ptr, e: u32, buf: ptr, o: u32) -> u32 {
         // 而那一门**不用 `trans_core`**（它的语法树来自 `ast`，发射器是它自己那份）。
         // 判据逐字节比两边，所以在那边跟上之前，这边照旧。
         let c: u32 = nd_get(mem, e, ND_A);
+        if c == 4 && pye_ty_of(mem, e) == TY_STR_ID {
+            // 字符串拼接。**两边都必须是字符串**（Python 的 `"a" + 1` 要自动转字符串，
+            // 本语言没有那个转换）—— 交叉就报错，不发一份编不过的源。
+            let l: u32 = nd_get(mem, e, ND_B);
+            let r: u32 = nd_get(mem, e, ND_C);
+            if pye_ty_of(mem, l) != TY_STR_ID || pye_ty_of(mem, r) != TY_STR_ID {
+                let _u: u32 = pye_uns(mem);
+                return o;
+            }
+            let o2: u32 = app(buf, o, "str_concat(");
+            let o3: u32 = pye_ex(mem, l, TY_STR_ID, buf, o2);
+            let o4: u32 = app(buf, o3, ", ");
+            let o5: u32 = pye_ex(mem, r, TY_STR_ID, buf, o4);
+            return app(buf, o5, ")");
+        }
         let o2: u32 = app(buf, o, "(");
         let o3: u32 = pye_ex(mem, nd_get(mem, e, ND_B), 7, buf, o2);
         let o4: u32 = app(buf, o3, " ");
@@ -5975,12 +6107,68 @@ fn pye_stmt(mem: ptr, s: u32, depth: u32) -> u32 {
             let _e: u32 = pye_uns(mem);
             return 0;
         }
+        if pye_is_print(mem, c) == 1 {
+            return pye_print(mem, c, depth);
+        }
         let o: u32 = pye_raw(mem, c, eb, 0);
         let o2: u32 = app(eb, o, ";");
         return line_put(mem, o2, depth, 0);
     }
     let _e: u32 = pye_uns(mem);
     return 0;
+}
+
+/// 这一条语句是不是 `print(...)`（且本单元**没有**同名函数）。
+fn pye_is_print(mem: ptr, c: u32) -> u32 {
+    let o: u32 = nd_get(mem, c, ND_A);
+    let l: u32 = nd_get(mem, c, ND_B);
+    if l != 5 {
+        return 0;
+    }
+    let src: ptr = ptr_add(mem, M_SCR);   // 源正文在 `M_SCR`（`M_SRC` 放的是路径）
+    if eq(src, o, "print") == 0 {
+        return 0;
+    }
+    if fn_ret(mem, o, l) != FAIL {
+        return 0;                       // 用户自己定义了 `print`，按普通调用走
+    }
+    return 1;
+}
+
+/// `print(x)` -> 本语言的 `print` / `print_num`，**再补一个换行**
+/// （Python 的 `print` 自己换行，本语言的两个内建都不换行）。
+///
+/// 内建按**类型**选；布尔与多实参没有对应写法，点名拒 —— 与 `pytrans._print` 同一口径。
+fn pye_print(mem: ptr, c: u32, depth: u32) -> u32 {
+    let eb: ptr = ptr_add(mem, M_EB);
+    let as: u32 = nd_get(mem, c, ND_C);
+    let an: u32 = nd_get(mem, c, ND_D);
+    if an > 1 {
+        let _u: u32 = pye_uns(mem);
+        return 0;
+    }
+    if an == 0 {
+        let o0: u32 = app(eb, 0, "print(\"\\n\");");
+        return line_put(mem, o0, depth, 0);
+    }
+    let a: u32 = li_get(mem, as);
+    let t: u32 = pye_ty_of(mem, a);
+    let o: u32 = 0;
+    if t == TY_STR_ID {
+        let o1: u32 = app(eb, 0, "print(");
+        let o2: u32 = pye_ex(mem, a, TY_STR_ID, eb, o1);
+        o = app(eb, o2, ");");
+    } else if t == 7 {
+        let o1: u32 = app(eb, 0, "print_num(");
+        let o2: u32 = pye_ex(mem, a, 7, eb, o1);
+        o = app(eb, o2, ");");
+    } else {
+        let _u: u32 = pye_uns(mem);
+        return 0;
+    }
+    let _l: u32 = line_put(mem, o, depth, 0);
+    let o3: u32 = app(eb, 0, "print(\"\\n\");");
+    return line_put(mem, o3, depth, 0);
 }
 
 /// 赋值一条。`is_ann` = 1 时类型来自注解（`NK_DECL` 的 `ND_A`），

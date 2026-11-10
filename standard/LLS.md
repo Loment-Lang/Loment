@@ -858,6 +858,7 @@ Tur 2026.3 adds:
 | struct literal shorthand | `S { a }` | identical to `S { a: a }`; the value is the same-named binding | 2026.3+ only; explicit and shorthand fields may be mixed; missing/duplicate/unknown fields remain E015 |
 | for-index | `for i, x in xs { … }` | an index loop that also binds the position: `i` is a `u32` copy of the current index, `x` a copy of the element | 2026.3+ only; the source is still a named array or slice; `i` and `x` are copies, so assignments to either do not write back |
 | for-call | `for x in buf(&xs) { … }` | a for-in whose source is a call returning an array or slice; the call is evaluated once | 2026.3+ only; the source MUST be a call (array literals and other expressions are later editions); `x` is a copy |
+| if expression | `let x: u32 = if c { 10 } else { 20 };` | a `let` initialiser picks one of two expressions | 2026.3+ only; initialiser position only, one expression per arm, `else` required; no `else if` or nesting |
 
 The lifetime dimension is **edition-gated**: writing `choose lifetime_*` in 2026.1 or
 2026.2 is refused; those editions keep the old default (`lifetime_no`) and the old
@@ -1129,6 +1130,12 @@ MUST equal the target's type. Assignment to a non-lvalue is E014.
 Conditions MUST be `bool`. `&&` and `||` short-circuit. A struct literal in a condition
 position is parsed as a block where the grammar would be ambiguous; the rule is the same
 as the reference parser's "no struct literal in condition" guard.
+
+From Tur 2026.3, `if` is also an expression in **one** position: the whole initialiser of
+a `let` (`let x: T = if c { a } else { b };`). Each arm is a single expression, `else` is
+mandatory, and the construct lowers to `let x: T;` followed by an ordinary `if`. `else if`,
+nested `if` expressions, and `if` in any other expression position are not accepted in
+this edition round (§8.10).
 
 ### 11.6 `for`
 
@@ -2286,6 +2293,7 @@ An implementation that supports several editions MUST keep their surfaces separa
 | `for x in xs`, `break`, `continue` | — | yes | yes |
 | `for i, x in xs` | — | — | yes |
 | `for x in <call>` (array/slice return) | — | — | yes |
+| `if` expression (let initialiser) | — | — | yes |
 | bare `return;` in unit functions | — | yes | yes |
 | `orelse`, `catch` | — | yes | yes |
 | `print_num` | — | yes | yes |
@@ -3145,6 +3153,7 @@ primary       := INT | STRING | "true" | "false"
                | "(" expr ")"
                | IDENT "{" (IDENT (":" expr)?),* "}"           // shorthand: 2026.3+
                | "[" (expr),* "]" | "&" ("mut")? expr
+               | "if" expr block "else" block                  // 2026.3+, let initialiser only
 cast          := expr "as" type
 fallback      := expr ("orelse" | "catch") expr
 

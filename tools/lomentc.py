@@ -18,7 +18,7 @@ import argparse
 import json
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -2034,6 +2034,36 @@ class If:
 
 
 @dataclass
+class IfExpr:
+    """Tur 2026.3 的 `if c { a } else { b }` 表达式（`docs/332`）。
+
+    **只存在于解析到反糖之间**：`_desugar_ifexpr` 把它降成一条普通 `If` 语句，
+    两支各给目标赋一次值（目标先以 `let x: T;` 声明）。v1 只收 `let` 的初值位置，
+    两支各是**一个表达式**（没有语句、必须有 `else`）。
+    """
+
+    cond: object
+    then: object
+    otherwise: object
+    line: int
+    then_at: int = 0
+    then_end: int = 0
+    else_at: int = 0
+    else_end: int = 0
+
+
+def _contains_ifexpr(o) -> bool:
+    """这棵 AST 里有没有 `IfExpr`（不论在哪个位置）—— 反糖只能处理初值位置。"""
+    if isinstance(o, IfExpr):
+        return True
+    if isinstance(o, (list, tuple)):
+        return any(_contains_ifexpr(x) for x in o)
+    if is_dataclass(o):
+        return any(_contains_ifexpr(getattr(o, f.name)) for f in fields(o))
+    return False
+
+
+@dataclass
 class While:
     cond: object
     body: list
@@ -3767,6 +3797,8 @@ class Parser:
         #: `elif` 抹成 `else`，这里补上缺的那个 `if`）。
         self.profile = profile
         self.no_struct = 0  # >0 时禁止结构体字面量 (if/while 条件位置的歧义)
+        #: >0 时才允许 `if` 表达式（2026.3，`docs/332`）：只开在 `let` 的初值位置。
+        self.allow_ifexpr = 0
         #: 当前嵌套深度（块 + 表达式共用一个计数）—— 见 `MAX_NEST`。
         self.depth = 0
         #: 循环嵌套层数（Tur 2 的 `break`/`continue` 只在循环里合法）。
@@ -4615,7 +4647,17 @@ class Parser:
             if self.accept("punct", ";"):  # M9: 未初始化声明
                 return Let(name, ty, None, t.line, space)
             self.expect("punct", "=")
-            e = self._fallback_rhs(self.parse_expr(), t.line)
+            # 2026.3 的 `if` 表达式只在这一格开口（`docs/332`）；解析完再确认它
+            # **就是**初值本身，而不是藏在别的表达式里 —— 藏在里面反糖不了。
+            self.allow_ifexpr += 1
+            try:
+                e = self._fallback_rhs(self.parse_expr(), t.line)
+            finally:
+                self.allow_ifexpr -= 1
+            if not isinstance(e, IfExpr) and _contains_ifexpr(e):
+                raise LomError(t.line, 1,
+                               "`if` 表达式 v1 只能作 `let` 的整个初值，不能嵌在别的"
+                               "表达式里（docs/332）")
             self.expect("punct", ";")
             return Let(name, ty, e, t.line, space)
         if t.val == "if":
@@ -4890,6 +4932,13 @@ class Parser:
 
     def parse_primary(self):
         t = self.peek()
+        if t.kind == "ident" and t.val == "if" and self.profile in TUR3_PLUS:
+            # 2026.3 的 `if` 表达式（`docs/332`）。语句位置的 `if` 在 `parse_stmt`
+            # 就分走了；能走到这里说明它在表达式里 —— v1 只开在 `let` 初值位置。
+            if self.allow_ifexpr <= 0:
+                raise LomError(t.line, t.col,
+                               "`if` 表达式 v1 只能作 `let` 的初值（docs/332）")
+            return self.parse_postfix(self.parse_ifexpr(t.line))
         if t.kind == "number":
             return self.parse_postfix(IntLit(self.int_lit(), t.line))
         if t.kind == "string":
@@ -4970,6 +5019,35 @@ class Parser:
                 return StructLit(name, inits, t.line)
             return self.parse_postfix(Ident(name, t.line))
         raise LomError(t.line, t.col, f"期望表达式，得到 {t.val or '<eof>'!r}")
+
+    def parse_ifexpr(self, line):
+        """`if c { a } else { b }` —— 两支各**一个表达式**（`docs/332`）。"""
+        self.next()                          # `if`
+        self.no_struct += 1
+        cond = self.parse_expr()
+        self.no_struct -= 1
+        self.expect("punct", "{")
+        then_at = self.i
+        then = self.parse_expr()
+        then_end = self.i
+        self.expect("punct", "}")
+        if not self.at("ident", "else"):
+            t = self.peek()
+            raise LomError(t.line, t.col, "`if` 表达式必须有 `else`（docs/332）")
+        self.next()
+        if self.at("ident", "if"):
+            t = self.peek()
+            raise LomError(t.line, t.col,
+                           "`if` 表达式的 v1 不支持 `else if`（docs/332）")
+        self.expect("punct", "{")
+        else_at = self.i
+        other = self.parse_expr()
+        else_end = self.i
+        self.expect("punct", "}")
+        if _contains_ifexpr(then) or _contains_ifexpr(other):
+            raise LomError(line, 1,
+                           "`if` 表达式的 v1 不支持在分支里再嵌一个 `if` 表达式（docs/332）")
+        return IfExpr(cond, then, other, line, then_at, then_end, else_at, else_end)
 
     def parse_postfix(self, e):
         """后缀: 字段访问 a.b / 下标 a[i]"""
@@ -14628,6 +14706,56 @@ def _split_seq_type(ty: str) -> tuple[str, int | None] | None:
     return inner.strip(), None
 
 
+def _lower_ifexpr(name: str, ie: IfExpr) -> list:
+    """把 `if` 表达式降成一条 `If` 语句，两支各给 `name` 赋一次值。"""
+    def arm(e) -> list:
+        if isinstance(e, IfExpr):
+            return _lower_ifexpr(name, e)
+        ln = getattr(e, "line", ie.line)
+        return [Assign(Ident(name, ln), e, ln)]
+
+    return [If(ie.cond, arm(ie.then), arm(ie.otherwise), ie.line,
+               then_at=ie.then_at, then_end=ie.then_end,
+               else_at=ie.else_at, else_end=ie.else_end)]
+
+
+def _desugar_ifexpr(mod: Module) -> None:
+    """`let x: T = if c { a } else { b };` -> `let x: T; if c { x = a } else { x = b }`。
+
+    2026.3（`docs/332`）。v1 只处理 `let` 的初值；解析期已经保证它不在别的位置。
+    降完的节点都是普通语句 —— 检查、发射、L0/L1/L2、Rust 后端一行都不用认识 `IfExpr`。
+    """
+    def walk(stmts: list) -> list:
+        out: list = []
+        for s in stmts:
+            if isinstance(s, Let) and isinstance(s.expr, IfExpr):
+                out.append(Let(s.name, s.type, None, s.line, s.space))
+                out += _lower_ifexpr(s.name, s.expr)
+            elif isinstance(s, If):
+                s.then = walk(s.then)
+                s.otherwise = walk(s.otherwise)
+                out.append(s)
+            elif isinstance(s, While):
+                s.body = walk(s.body)
+                out.append(s)
+            elif isinstance(s, For):
+                s.body = walk(s.body)
+                out.append(s)
+            elif isinstance(s, ForEach):
+                s.body = walk(s.body)
+                out.append(s)
+            elif isinstance(s, Match):
+                for _, b in s.arms:
+                    b[:] = walk(b)
+                out.append(s)
+            else:
+                out.append(s)
+        return out
+
+    for f in mod.funcs:
+        f.body = walk(f.body)
+
+
 def _desugar_foreach(mod: Module) -> None:
     """把 `ForEach` 反糖成 `let __tur2_i.N: u32 = 0; while __tur2_i.N < len { ... }`。
 
@@ -14824,6 +14952,7 @@ def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3,
     if _eff in TUR2_PLUS:
         # Tur 2 的 `for x in xs`（`docs/296` §2.2）：反糖成普通 While，下游不必认识它。
         # 2026.3 继承（版次累积）。
+        _desugar_ifexpr(mod)     # 先降 if 表达式（它可能出现在 for 体里）
         _desugar_foreach(mod)
     mod.own_switches = own      # 本模块**自己**写的 —— 只有"库不许 choose"用它
     # **包清单的前置条件**（`docs/325`）：模块自己没写某一维时，取同包 `pkg.lomp`

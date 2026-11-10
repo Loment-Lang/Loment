@@ -6580,6 +6580,48 @@ fn array_len_tok(src: ptr, toks: ptr, ty: u32) -> u32 {
 /// `if` / `else if` 链的发射。`cond` = **条件第一个 token**（不是 `if` 本身）——
 /// Tur 2 的隐式 elif（`else <条件> {`，`docs/296` §2.1）从 `else` 之后直接进来，
 /// 与 `else if` 走同一条路，标签编号因此与参考实现逐字节一致。
+/// `let x: T = if c { a } else { b };` 的发射（2026.3，`docs/332`）。
+/// 与参考实现反糖后的 `let x: T;` + `If` 同形：条件、L1_then / L2_else / L3_end
+/// 三个标签、两支各一条 `store <T> …, ptr %x.addr`。
+fn let_ifexpr(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, name: u32,
+              ty: u32, eq: u32) -> u32 {
+    let _e3: u32 = expr_bin(s, out, src, toks, eq + 2, 1, 0, 0);
+    let base_l: u32 = load32(s, 480) + 1;
+    store32(s, 480, base_l + 2);
+    emit_str(s, out, "  br i1 ");
+    emit_val(s, out, 0);
+    emit_str(s, out, ", label ");
+    lab_ref(s, out, base_l, "then");
+    emit_str(s, out, ", label ");
+    lab_ref(s, out, base_l + 1, "else");
+    emit_str(s, out, "\n");
+    store32(s, 476, 1);
+    lab_def(s, out, base_l, "then");
+    // `{` 在 _e3；then 的表达式是 _e3 + 1 那一段，结束于 `}`。
+    let _tv: u32 = expr_bin(s, out, src, toks, _e3 + 1, 1, 0, ty);
+    emit_str(s, out, "  store ");
+    emit_ty(s, out, src, toks, ty);
+    emit_str(s, out, " ");
+    emit_val(s, out, 0);
+    emit_str(s, out, ", ptr %");
+    emit_name_tok(s, out, src, toks, name);
+    emit_str(s, out, ".addr\n");
+    jump(s, out, base_l + 2, "end");
+    lab_def(s, out, base_l + 1, "else");
+    // `}` `else` `{` —— else 的表达式从 `_tv` 之后第 3 个 token 起。
+    let _ev: u32 = expr_bin(s, out, src, toks, _tv + 3, 1, 0, ty);
+    emit_str(s, out, "  store ");
+    emit_ty(s, out, src, toks, ty);
+    emit_str(s, out, " ");
+    emit_val(s, out, 0);
+    emit_str(s, out, ", ptr %");
+    emit_name_tok(s, out, src, toks, name);
+    emit_str(s, out, ".addr\n");
+    jump(s, out, base_l + 2, "end");
+    lab_def(s, out, base_l + 2, "end");
+    return _ev + 2;   // 跳过 `}` 与 `;`
+}
+
 fn emit_if_at(s: ptr, out: ptr, src: ptr, toks: ptr, cond: u32, ret: u32) -> u32 {
     // 先算条件再占标签: 条件里的 `&&`/除法会自己占标签 (与 lomentc 的 If 同序)
     let e3: u32 = expr_bin(s, out, src, toks, cond, 1, 0, 0);
@@ -7648,6 +7690,11 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         }
         let ty: u32 = j + 3;
         let eq: u32 = skip_type(src, toks, ty);   // '=' 的位置 (类型可能是 [T; N] / [T])
+        if load32(s, CG_PROF) >= 2 && tok_is(src, toks, eq + 1, "if") {
+            // 2026.3 `let x: T = if c { a } else { b };`（`docs/332`）：参考实现把它
+            // 降成 `let x: T;` + 一条 If，两支各 `x = …`。
+            return let_ifexpr(s, out, src, toks, j, name, ty, eq);
+        }
         // M9: `let x: T = e?;` -> 临时绑定 + match (Err 早退); 替换表由 emit_try_let 自己管
         let qp: u32 = find_try_q(src, toks, eq + 1);
         if qp != 0 {

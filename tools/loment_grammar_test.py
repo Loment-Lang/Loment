@@ -1510,6 +1510,50 @@ def test_tur2026_3_for_expression():
 
 
 @test
+def test_tur2026_3_if_expression():
+    """2026.3 `let x: T = if c { a } else { b };` —— 产物与显式 if 语句相同。
+
+    `docs/332`：v1 只收 `let` 的初值、两支各一个表达式、必须有 `else`。
+    """
+    expr_form = ("module m\n\nfn f(c: bool) -> u32 {\n"
+                 "    let x: u32 = if c { 10 } else { 20 };\n"
+                 "    return x;\n}\n")
+    stmt_form = ("module m\n\nfn f(c: bool) -> u32 {\n"
+                 "    let x: u32;\n"
+                 "    if c { x = 10; } else { x = 20; }\n"
+                 "    return x;\n}\n")
+    bad_form = ("module m\n\nfn f(c: bool) -> u32 {\n"
+                "    return if c { 1 } else { 2 };\n}\n")
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        a = td / "expr.lomt"
+        a.write_text(expr_form, encoding="utf-8", newline="\n")
+        b = td / "stmt.lomt"
+        b.write_text(stmt_form, encoding="utf-8", newline="\n")
+        la = lomentc.emit_llvm(lomentc.load(a), ROOT)
+        lb = lomentc.emit_llvm(lomentc.load(b), ROOT)
+        assert la == lb, "if 表达式与显式 if 语句的 IR 不同"
+        old = td / "old.lomt"
+        old.write_text("choose write grammar tur2026.2\n" + expr_form,
+                       encoding="utf-8", newline="\n")
+        try:
+            lomentc.load(old)
+        except lomentc.LomError:
+            pass
+        else:
+            raise AssertionError("tur2026.2 收下了 if 表达式 —— 封版版次被改了")
+        bad = td / "bad.lomt"
+        bad.write_text(bad_form, encoding="utf-8", newline="\n")
+        try:
+            lomentc.load(bad)
+        except lomentc.LomError:
+            pass
+        else:
+            raise AssertionError("`return if …` 被收下了 —— v1 只该收 let 初值")
+    print("      2026.3 if 表达式与显式 if 同产物；非初值位置与 tur2026.2 都拒")
+
+
+@test
 def test_the_default_edition_is_the_newest_open_one():
     """**没声明 = 最新版次**（2026-11-06 用户裁定，`docs/312`）。
 

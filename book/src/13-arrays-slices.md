@@ -97,27 +97,30 @@ ownership and the caller is done with it. The same rule applies to structs and e
 
 ## Borrow rules
 
-A borrow exists for the duration of the call. Two borrows of the same array cannot overlap when
-at least one is mutable:
+A borrow (`&T` / `&mut T`) is a first-class type: a parameter, a return type, a struct field, or
+a generic argument. Regions are **inferred** - there are no lifetime annotations to write:
+
+```rust
+struct Cursor { data: &[u32], pos: u32 }
+
+fn first(c: &Cursor) -> u32 {
+    return c.data[0];
+}
+```
+
+Two borrows of the same place cannot overlap when at least one is mutable, and a mutable borrow
+that is **stored** excludes later borrows of that place until the end of the function:
 
 ```rust
 let a: [u32; 2] = [1, 2];
 both(&a, &mut a);        // E007: a read-only and a mutable borrow overlap
 ```
 
-The check is per call and syntactic. There are no lifetime annotations and no references stored
-in a struct; a slice cannot outlive the call it was made for. That restriction is what keeps the
-borrow checker small.
-
-A function that needs to return data derived from a slice returns a value:
-
-```rust
-def first(xs: [u32]) -> u32 {
-    return xs[0];
-}
-```
-
-Returning the slice itself is not possible; return the data or have the caller keep the array.
+The check is static and per region: a borrow may not outlive its source, `free(p)` while `p` is
+borrowed is E041, and a returned borrow must come from a parameter. Disjoint fields (`v.x` and
+`v.y`) can be borrowed separately. Older editions (`tur2026.1` / `tur2026.2`, and
+`choose lifetime_no`) keep the earlier shape: borrows exist only in call arguments and cannot be
+stored or returned.
 
 ## Slices and `for`
 

@@ -896,6 +896,34 @@ def test_m81_loment_checker_matches_python():
             f"; 登记缺口 {len(RULE_GAPS)} 个: {sorted(RULE_GAPS)}" if RULE_GAPS else ""))
 
 
+@test
+def test_the_self_host_refuses_composite_generic_arguments_by_name():
+    """`Box<&u32>` / `Box<[u32]>`：参考侧收，自举侧**点名拒**（E041，一次违例一条）。
+
+    参考侧把 `Box<&u32>` 单态化成 `Box_ref__u32`（`docs/147` §2 的名字规则）；自举侧的
+    类型替换表一格只存**一个 token**，跨度的实参表达不了 —— 放过去就会发出实例名坏掉
+    的 IR（`Box_&u32`），那是一种静默。这条钉住"拒"本身，也钉住**条数**：三处扫描
+    各自再报一遍的旧样子（一次违例三条同样的 E41）是 `docs/299` 第二轮修掉的。
+    """
+    if not _clang():
+        print("      SKIP: 无 clang")
+        return
+    src = ("module probe\n\nstruct Box<T> { v: T }\n\n"
+           "fn mk(p: &u32) -> u32 {\n"
+           "    let b: Box<&u32> = Box { v: p };\n"
+           "    return 0;\n}\n")
+    with tempfile.TemporaryDirectory() as td:
+        f = Path(td) / "generic_borrow.lomt"
+        f.write_text(src, encoding="utf-8", newline="\n")
+        py = _py_codes(f)
+        assert py == [], f"参考侧不该拒 `Box<&u32>`（它单态化成 Box_ref__u32）: {py}"
+        exe = _build_checker(td)
+        got, det = _loment_codes(exe, f)
+        assert got == [41], f"自举侧应点名拒 (E41)，得到 {got}: {det}"
+        assert len(det.split()) == 1, f"一次违例应只有一条诊断，得到 {len(det.split())}: {det}"
+        print("      复合泛型实参: 参考收 / 自举名拒 (E41 ×1)")
+
+
 CODEGEN = ROOT / "loment" / "selfhost" / "codegen.lomt"
 IR_TARGET = ROOT / "loment" / "selfhost" / "ir_const.lomt"
 CODEGEN_DRIVER = """#include <stdio.h>

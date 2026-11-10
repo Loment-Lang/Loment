@@ -164,22 +164,28 @@ Two properties worth stating because they are checked, not assumed:
   name still compiles; the same file declared `tur2` and using `break;` in a loop body does
   loop control. Both directions have criteria (p8 M91/M94/M95).
 
-### 2.0.5 Tur 2026.3: lifetimes (design, **not available today**)
+### 2.0.5 Tur 2026.3: lifetimes (landed in 0.1.5)
 
-The next edition is designed in `docs/299`; nothing below is implemented in 0.1.5. It is listed
-so you do not mistake "Rust has it" for "Tur has it":
+The dimension is `choose lifetime_no | lifetime_auto | lifetime_manual`; `lifetime_auto` is
+the default from `tur2026.3` on, and older editions keep `lifetime_no` so their artifacts do
+not change. Design and the standing boundary list: `docs/299`.
 
-- `&T` / `&mut T` become first-class **type** positions (struct fields, return types, nested,
+- `&T` / `&mut T` are first-class **type** positions (struct fields, return types, nested,
   generic arguments), with an **implicit region parameter** - no `'a`, no `<'a>`, no `where`.
 - Elision: one reference parameter → all reference outputs borrow from it; several reference
   parameters and one output → the output's region is the **shortest** of the inputs; methods
   borrow from `self`. Only a genuine fork needs a **source marker**: `fn pick(a: &[u32], b:
-  &[u32]) -> &a [u32]`.
+  &[u32]) -> &a [u32]` - and that marker exists only in `lifetime_manual`.
+- `*r` dereferences one borrow; `r.field`, `*r = v` and `r[i]` auto-deref. A borrow is a `ptr`
+  in the artifact; slice borrows normalise to the existing `[T]` / `mut [T]` views and can be
+  struct fields (a `{ ptr, i64 }` view, e.g. `Cursor { data: &[u32] }`).
 - Regions are static proofs; GC is run-time reclamation; they do not replace each other.
+- `Box<&u32>` instantiates as `Box_ref__u32`. Composite generic arguments (`Box<&T>` /
+  `Box<[T]>`) are refused **by name**: the self-hosted compiler's substitution table holds one
+  token, and the reference has no naming rule for array/slice arguments (`docs/147` §2).
 
-Today `&` in a type position is a **parse error** (`struct V { data: &str }` and
-`fn f(a: &str) -> &str` both fail), and a struct field holds **scalars only**. Borrowing exists
-only in call arguments (`&xs` / `&mut xs` for a `[T]` / `mut [T]` parameter).
+With `lifetime_no` (the default before 2026.3, and still selectable) `&` in a type position is
+a parse error and struct fields hold scalars only - the pre-2026.3 shape, unchanged.
 
 ### 2.0.6 Lexical grammar
 

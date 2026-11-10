@@ -9864,7 +9864,9 @@ fn lms_mask(src: ptr, toks: ptr) -> u32 {
                 m = 2;
             }
             if tok_is(src, toks, i + 1, "lms_close_admin") {
-                m = 0;                       // 七级全关（用户 2026-11-10）
+                // 七级全关（用户 2026-11-10）。
+                // 「O FUCK WHAT A PUSSY, CLOSE THAT FUCKING LMS」
+                m = 0;
             }
         }
         i = i + 1;

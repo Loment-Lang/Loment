@@ -1,0 +1,256 @@
+// std/aead.lomt — ChaCha20-Poly1305 AEAD (RFC 8439 §2.8)
+//
+// 为什么标准库需要它: 单独的流密码只提供**机密性** —— 攻击者改一个字节, 解密
+// 照样"成功", 只是明文变成垃圾。AEAD 把加密与认证绑在一起: 没有正确标签就
+// **拒绝**输出明文。TLS 1.3 的两种必选密码套件都是 AEAD, 区别只在底层是
+// ChaCha20 还是 AES-GCM。
+//
+// 组帧 (RFC 8439 §2.8.1):
+//   一次性 Poly1305 密钥 = ChaCha20(块 0) 的前 32 字节
+//   密文 = ChaCha20(从块 1 起) 异或明文
+//   标签 = Poly1305(aad || pad16 || 密文 || pad16 || len64(aad) || len64(密文))
+//
+// 边界:
+//   * nonce 12 字节、32 位块计数器; 同一密钥下 nonce 绝不重复是**调用方**的责任
+//     (重复一次, 两次密文的异或就漏出明文);
+//   * 只做 ChaCha20-Poly1305; AES-GCM 在 `aes.lomt` 那一侧, 不要混用;
+//   * `aead_open` 先验标签再解密 —— 不把未经认证的明文交给调用方;
+//   * `sc` 需要 `aead_scratch()` 给出的字节数。
+//
+// 命名: 公开 aead_*, 内部 aq_*。自检 test_aead_*。
+
+module aead
+
+use "mem.lomt"
+use "chacha20.lomt"
+use "poly1305.lomt"
+
+const AQ_BLOCK: u32 = 0;    // 64 字节: 块 0 的输出 (前 32 是 Poly 密钥)
+const AQ_POLY: u32 = 64;    // 80 字节: poly1305 状态
+const AQ_PAD: u32 = 144;    // 16 字节的全零补位缓冲
+const AQ_LENS: u32 = 160;   // 16 字节: 两个 u64 长度
+const AQ_SC: u32 = 192;
+
+fn aq_at(b: ptr, off: u32) -> ptr {
+    return ((b as u64) + (off as u64)) as ptr;
+}
+
+fn aq_zero(p: ptr, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        store8(p, i, 0 as u8);
+        i = i + 1;
+    }
+}
+
+fn aq_st64(p: ptr, off: u32, v: u64) {
+    let i: u32 = 0;
+    while i < 8 {
+        store8(p, off + i, ((v >> (8 * i)) & 255) as u8);
+        i = i + 1;
+    }
+}
+
+/// 补位到 16 的倍数所需的零字节数。
+fn aq_padlen(n: u32) -> u32 {
+    return (16 - (n & 15)) & 15;
+}
+
+/// 把 `aad || 密文`、两段补位与两个长度喂给 Poly1305, 得到标签。
+fn aq_tag(tag: ptr, st: ptr, aad: ptr, aadn: u32, ct: ptr, n: u32, sc: ptr) {
+    let pad: ptr = aq_at(sc, AQ_PAD);
+    let lens: ptr = aq_at(sc, AQ_LENS);
+    aq_zero(pad, 16);
+    let _u1: u32 = poly_update(st, aad, aadn);
+    let _p1: u32 = poly_update(st, pad, aq_padlen(aadn));
+    let _u2: u32 = poly_update(st, ct, n);
+    let _p2: u32 = poly_update(st, pad, aq_padlen(n));
+    aq_st64(lens, 0, aadn as u64);
+    aq_st64(lens, 8, n as u64);
+    let _u3: u32 = poly_update(st, lens, 16);
+    let _f: u32 = poly_final(st, tag);
+}
+
+/// 常数时间比较 16 字节 (不按字节提前返回)。
+fn aq_eq16(a: ptr, b: ptr) -> u32 {
+    let acc: u32 = 0;
+    let i: u32 = 0;
+    while i < 16 {
+        acc = acc | (load8(a, i) ^ load8(b, i));
+        i = i + 1;
+    }
+    if acc == 0 {
+        return 0;
+    }
+    return 1;
+}
+
+/// `sc` 需要这么多字节。
+pub fn aead_scratch(n: u32) -> u32 {
+    return AQ_SC;
+}
+
+/// 加密并认证。成功返回 0。`ct` 与 `msg` 不可重叠; `tag` 16 字节。
+pub fn aead_seal(key: ptr, nonce: ptr, aad: ptr, aadn: u32, msg: ptr, n: u32,
+                 ct: ptr, tag: ptr, sc: ptr) -> u32 {
+    let ctx: ptr = alloc(cc_ctx_bytes());
+    let block: ptr = aq_at(sc, AQ_BLOCK);
+    let st: ptr = aq_at(sc, AQ_POLY);
+    let _s: u32 = cc_setup(ctx, key, nonce, 0);
+    let _b: u32 = cc_block(ctx, block);
+    let _ps: u32 = poly_setup(st, block);
+    let _x: u32 = cc_xor(key, nonce, 1, msg, n, ct);
+    aq_tag(tag, st, aad, aadn, ct, n, sc);
+    return 0;
+}
+
+/// 验证并解密。0 = 通过, 1 = 标签不符 (此时 `pt` 的内容不可用)。
+pub fn aead_open(key: ptr, nonce: ptr, aad: ptr, aadn: u32, ct: ptr, n: u32,
+                 tag: ptr, pt: ptr, sc: ptr) -> u32 {
+    let ctx: ptr = alloc(cc_ctx_bytes());
+    let block: ptr = aq_at(sc, AQ_BLOCK);
+    let st: ptr = aq_at(sc, AQ_POLY);
+    let want: ptr = aq_at(sc, AQ_LENS + 16);
+    let _s: u32 = cc_setup(ctx, key, nonce, 0);
+    let _b: u32 = cc_block(ctx, block);
+    let _ps: u32 = poly_setup(st, block);
+    aq_tag(want, st, aad, aadn, ct, n, sc);
+    let bad: u32 = aq_eq16(want, tag);
+    if bad != 0 {
+        return 1;
+    }
+    let _x: u32 = cc_xor(key, nonce, 1, ct, n, pt);
+    return 0;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn aq_hv(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return c - 48;
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87;
+    }
+    return 0;
+}
+
+fn aq_put_hex(p: ptr, pos0: u32, s: str) -> u32 {
+    let n: u32 = str_len(s) / 2;
+    let pos: u32 = pos0;
+    let i: u32 = 0;
+    while i < n {
+        let hi: u32 = aq_hv(str_byte(s, 2 * i));
+        let lo: u32 = aq_hv(str_byte(s, 2 * i + 1));
+        store8(p, pos, ((hi << 4) | lo) as u8);
+        pos = pos + 1;
+        i = i + 1;
+    }
+    return pos;
+}
+
+fn aq_put_str(p: ptr, pos0: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let pos: u32 = pos0;
+    let i: u32 = 0;
+    while i < n {
+        store8(p, pos, str_byte(s, i) as u8);
+        pos = pos + 1;
+        i = i + 1;
+    }
+    return pos;
+}
+
+fn aq_hexeq(p: ptr, s: str) -> bool {
+    let n: u32 = str_len(s) / 2;
+    let i: u32 = 0;
+    while i < n {
+        let hi: u32 = aq_hv(str_byte(s, 2 * i));
+        let lo: u32 = aq_hv(str_byte(s, 2 * i + 1));
+        if load8(p, i) != ((hi << 4) | lo) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn aq_eq(a: ptr, b: ptr, n: u32) -> bool {
+    let i: u32 = 0;
+    while i < n {
+        if load8(a, i) != load8(b, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_aead_rfc8439_vector() -> bool {
+    let key: ptr = alloc(32);
+    let nonce: ptr = alloc(12);
+    let aad: ptr = alloc(12);
+    let msg: ptr = alloc(160);
+    let ct: ptr = alloc(160);
+    let tag: ptr = alloc(16);
+    let sc: ptr = alloc(AQ_SC);
+    let _k: u32 = aq_put_hex(key, 0, "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f");
+    let _n: u32 = aq_put_hex(nonce, 0, "070000004041424344454647");
+    let _a: u32 = aq_put_hex(aad, 0, "50515253c0c1c2c3c4c5c6c7");
+    let mn: u32 = aq_put_str(msg, 0, "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.");
+    let r: u32 = aead_seal(key, nonce, aad, 12, msg, mn, ct, tag, sc);
+    if r != 0 {
+        return false;
+    }
+    if aq_hexeq(tag, "1ae10b594f09e26a7e902ecbd0600691") == false {
+        return false;
+    }
+    return aq_hexeq(ct, "d31a8d34648e60db7b86afbc53ef7ec2");
+}
+
+fn test_aead_open_and_tamper() -> bool {
+    let key: ptr = alloc(32);
+    let nonce: ptr = alloc(12);
+    let aad: ptr = alloc(12);
+    let msg: ptr = alloc(160);
+    let ct: ptr = alloc(160);
+    let pt: ptr = alloc(160);
+    let tag: ptr = alloc(16);
+    let sc: ptr = alloc(AQ_SC);
+    let _k: u32 = aq_put_hex(key, 0, "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f");
+    let _n: u32 = aq_put_hex(nonce, 0, "070000004041424344454647");
+    let _a: u32 = aq_put_hex(aad, 0, "50515253c0c1c2c3c4c5c6c7");
+    let mn: u32 = aq_put_str(msg, 0, "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.");
+    let _s: u32 = aead_seal(key, nonce, aad, 12, msg, mn, ct, tag, sc);
+    let okr: u32 = aead_open(key, nonce, aad, 12, ct, mn, tag, pt, sc);
+    if okr != 0 {
+        return false;
+    }
+    if aq_eq(msg, pt, mn) == false {
+        return false;
+    }
+    store8(ct, 3, (load8(ct, 3) ^ 1) as u8);
+    let bad: u32 = aead_open(key, nonce, aad, 12, ct, mn, tag, pt, sc);
+    return bad == 1;
+}
+
+fn test_aead_empty_message() -> bool {
+    let key: ptr = alloc(32);
+    let nonce: ptr = alloc(12);
+    let aad: ptr = alloc(8);
+    let ct: ptr = alloc(1);
+    let pt: ptr = alloc(1);
+    let tag: ptr = alloc(16);
+    let sc: ptr = alloc(AQ_SC);
+    let _k: u32 = aq_put_hex(key, 0, "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
+    let _n: u32 = aq_put_hex(nonce, 0, "000000000000000000000001");
+    let _a: u32 = aq_put_str(aad, 0, "abcd");
+    let _s: u32 = aead_seal(key, nonce, aad, 4, ct, 0, ct, tag, sc);
+    let okr: u32 = aead_open(key, nonce, aad, 4, ct, 0, tag, pt, sc);
+    if okr != 0 {
+        return false;
+    }
+    store8(tag, 0, (load8(tag, 0) ^ 128) as u8);
+    let bad: u32 = aead_open(key, nonce, aad, 4, ct, 0, tag, pt, sc);
+    return bad == 1;
+}

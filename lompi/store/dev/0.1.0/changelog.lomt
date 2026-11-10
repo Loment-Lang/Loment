@@ -1,0 +1,195 @@
+// dev/changelog.lomt — 从 Conventional Commits 生成 Markdown 变更段
+//
+// 为什么单独一份: `commit` 只回答"这一行是什么"；changelog 还要回答"按什么顺序
+// 分组、标题叫什么、破坏性变更怎么标"。这些是**约定**，写成代码比每次手写脚本可靠。
+//
+// 分组顺序固定: Features / Bug Fixes / Performance / Refactoring / Documentation / Other。
+// 输入是 `char**`（每条是一个提交的标题行）；解析失败的条目归到 Other 并原样列出。
+//
+// 不做的: 链接 issue/PR（要仓库信息）、日期与版本标题（调用方加）、
+// 正文里的多行条目。
+//
+// 命名: 公开 cl_*, 内部 cl_*。自检 test_changelog_*。
+
+module changelog
+
+use mem
+use "commit.lomt"
+
+fn cl_put(out: ptr, cap: u32, pos: u32, c: u32) -> u32 {
+    if pos < cap {
+        store8(out, pos, c as u8);
+    }
+    return pos + 1;
+}
+
+fn cl_str(out: ptr, cap: u32, pos0: u32, s: str) -> u32 {
+    let pos: u32 = pos0;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        pos = cl_put(out, cap, pos, str_byte(s, i));
+        i = i + 1;
+    }
+    return pos;
+}
+
+fn cl_cstr_len(p: ptr) -> u32 {
+    let i: u32 = 0;
+    while load8(p, i) != 0 {
+        i = i + 1;
+    }
+    return i;
+}
+
+fn cl_msg(msgs: ptr, i: u32) -> ptr {
+    return mem_load64(msgs, i * 8) as ptr;
+}
+
+fn cl_group_of(p: ptr, o: ptr) -> u32 {
+    let off: u32 = mem_load32(o, CM_TYPE_OFF);
+    let ln: u32 = mem_load32(o, CM_TYPE_LEN);
+    if cm_span_eq(p, off, ln, "feat") { return 0; }
+    if cm_span_eq(p, off, ln, "fix") { return 1; }
+    if cm_span_eq(p, off, ln, "perf") { return 2; }
+    if cm_span_eq(p, off, ln, "refactor") { return 3; }
+    if cm_span_eq(p, off, ln, "docs") { return 4; }
+    return 5;
+}
+
+fn cl_emit_one(out: ptr, cap: u32, pos0: u32, p: ptr, o: ptr) -> u32 {
+    let pos: u32 = pos0;
+    pos = cl_str(out, cap, pos, "- ");
+    if mem_load32(o, CM_BREAKING) == 1 {
+        pos = cl_str(out, cap, pos, "**BREAKING** ");
+    }
+    let ds: u32 = mem_load32(o, CM_DESC_OFF);
+    let dl: u32 = mem_load32(o, CM_DESC_LEN);
+    let i: u32 = 0;
+    while i < dl {
+        pos = cl_put(out, cap, pos, load8(p, ds + i));
+        i = i + 1;
+    }
+    let sl: u32 = mem_load32(o, CM_SCOPE_LEN);
+    if sl > 0 {
+        pos = cl_str(out, cap, pos, " (");
+        let so: u32 = mem_load32(o, CM_SCOPE_OFF);
+        let k: u32 = 0;
+        while k < sl {
+            pos = cl_put(out, cap, pos, load8(p, so + k));
+            k = k + 1;
+        }
+        pos = cl_put(out, cap, pos, 41); // ')'
+    }
+    pos = cl_put(out, cap, pos, 10);
+    return pos;
+}
+
+fn cl_has_group(msgs: ptr, n: u32, group: u32, o: ptr) -> bool {
+    let i: u32 = 0;
+    while i < n {
+        let p: ptr = cl_msg(msgs, i);
+        let ln: u32 = cl_cstr_len(p);
+        if cm_parse_ptr(p, ln, o) != CM_OK {
+            if group == 5 {
+                return true;
+            }
+        } else if cl_group_of(p, o) == group {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+fn cl_section(out: ptr, cap: u32, pos0: u32, msgs: ptr, n: u32, group: u32, title: str, o: ptr) -> u32 {
+    if !cl_has_group(msgs, n, group, o) {
+        return pos0;
+    }
+    let pos: u32 = pos0;
+    pos = cl_str(out, cap, pos, "### ");
+    pos = cl_str(out, cap, pos, title);
+    pos = cl_str(out, cap, pos, "\n\n");
+    let i: u32 = 0;
+    while i < n {
+        let p: ptr = cl_msg(msgs, i);
+        let ln: u32 = cl_cstr_len(p);
+        let r: u32 = cm_parse_ptr(p, ln, o);
+        if r == CM_OK {
+            if cl_group_of(p, o) == group {
+                pos = cl_emit_one(out, cap, pos, p, o);
+            }
+        } else if group == 5 {
+            // 原样列出
+            pos = cl_str(out, cap, pos, "- ");
+            let k: u32 = 0;
+            while k < ln && load8(p, k) != 10 {
+                pos = cl_put(out, cap, pos, load8(p, k));
+                k = k + 1;
+            }
+            pos = cl_put(out, cap, pos, 10);
+        }
+        i = i + 1;
+    }
+    pos = cl_put(out, cap, pos, 10);
+    return pos;
+}
+
+/// 生成 Markdown。返回**完整长度**（可能大于 cap，表示被截断）。
+pub fn cl_generate(msgs: ptr, n: u32, out: ptr, cap: u32) -> u32 {
+    let o: ptr = alloc(48);
+    let pos: u32 = 0;
+    pos = cl_section(out, cap, pos, msgs, n, 0, "Features", o);
+    pos = cl_section(out, cap, pos, msgs, n, 1, "Bug Fixes", o);
+    pos = cl_section(out, cap, pos, msgs, n, 2, "Performance", o);
+    pos = cl_section(out, cap, pos, msgs, n, 3, "Refactoring", o);
+    pos = cl_section(out, cap, pos, msgs, n, 4, "Documentation", o);
+    pos = cl_section(out, cap, pos, msgs, n, 5, "Other", o);
+    if cap > 0 {
+        let end: u32 = pos;
+        if end > cap - 1 {
+            end = cap - 1;
+        }
+        store8(out, end, 0 as u8);
+    }
+    return pos;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_changelog_groups() -> bool {
+    let a: ptr = alloc(32);
+    let b: ptr = alloc(32);
+    let c: ptr = alloc(32);
+    let msgs: ptr = alloc(24);
+    let s1: str = "feat: add x";
+    let s2: str = "fix(core): y";
+    let s3: str = "docs: z";
+    let l1: u32 = str_len(s1);
+    let l2: u32 = str_len(s2);
+    let l3: u32 = str_len(s3);
+    mem_copy(a, 0, str_ptr(s1), 0, l1); store8(a, l1, 0 as u8);
+    mem_copy(b, 0, str_ptr(s2), 0, l2); store8(b, l2, 0 as u8);
+    mem_copy(c, 0, str_ptr(s3), 0, l3); store8(c, l3, 0 as u8);
+    mem_store64(msgs, 0, a as u64);
+    mem_store64(msgs, 8, b as u64);
+    mem_store64(msgs, 16, c as u64);
+    let out: ptr = alloc(256);
+    let n: u32 = cl_generate(msgs, 3, out, 256);
+    if n == 0 {
+        return false;
+    }
+    // 第一段必须是 Features，且第一行是 - add x
+    let want: str = "### Features\n\n- add x\n\n";
+    if n < str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < str_len(want) {
+        if load8(out, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}

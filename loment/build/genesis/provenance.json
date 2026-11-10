@@ -14,13 +14,13 @@
   "inputs": {
     "mirror": {
       "path": "loment/tools/lomelf.lomt",
-      "sha256": "2bb637fdfb377482e87447233b44d068a135e30a5af5b58cdf8c4f4a3dcde139",
-      "size": 313241
+      "sha256": "8e373ed9b680fbd58bd09eb480af776bc4767353a1275877ed97014b5e4fcf93",
+      "size": 313771
     },
     "seed": {
       "path": "loment/build/selfhost_driver.ll",
-      "sha256": "32950da0be55f197befc1d111a0fb2c80b36e313a3bc9a67571492f938d766d0",
-      "size": 6041045
+      "sha256": "cb9424301c931ff9b7e7baeb7b3f1b73d8e1ac1da97187ed2f19197cc207779e",
+      "size": 6166139
     }
   },
   "mirror_ir": {

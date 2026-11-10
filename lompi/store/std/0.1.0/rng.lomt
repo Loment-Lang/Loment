@@ -25,7 +25,6 @@
 // (splitmix64 与 xoshiro256** 的 C 参考都在公有领域, 复算比抄网上的值可靠)。
 
 module rng
-choose runtime
 
 use "mem.lomt"
 

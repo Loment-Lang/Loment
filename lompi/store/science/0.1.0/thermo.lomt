@@ -1,0 +1,111 @@
+// std/thermo.lomt — 温度换算、量热、理想气体、卡诺效率（double）
+//
+// 温度换算是"看起来最简单、实际最容易写错"的一类：C/F/K 三个刻度里只有 K 是
+// 绝对温度，C→F 的偏移是 +32 而不是 +273.15，F→K 要经过 C。写在一处、只写一次。
+//
+// 约定: 温度一律用 **K** 参与物理公式；`tm_*_to_*` 只做刻度换算。
+// 不做: 真实气体（van der Waals）、相变潜热表、热传导方程 —— 那些要物性数据表。
+//
+// 命名: 公开 tm_*, 内部 tm_*。自检 test_thermo_*。
+
+module thermo
+
+use f64
+use f64conv
+use "physics.lomt"
+
+const TM_K0: u64 = 0x4071126666666666; // 273.15
+const TM_32: u64 = 0x4040000000000000; // 32.0
+const TM_18: u64 = 0x3FFCCCCCCCCCCCCD; // 1.8
+const TM_59: u64 = 0x3FE1C71C71C71C72; // 5/9
+
+pub fn tm_c_to_k(c: u64) -> u64 {
+    return f64_add(c, TM_K0);
+}
+
+pub fn tm_k_to_c(k: u64) -> u64 {
+    return f64_sub(k, TM_K0);
+}
+
+pub fn tm_c_to_f(c: u64) -> u64 {
+    return f64_add(f64_mul(c, TM_18), TM_32);
+}
+
+pub fn tm_f_to_c(f: u64) -> u64 {
+    return f64_mul(f64_sub(f, TM_32), TM_59);
+}
+
+pub fn tm_k_to_f(k: u64) -> u64 {
+    return tm_c_to_f(tm_k_to_c(k));
+}
+
+pub fn tm_f_to_k(f: u64) -> u64 {
+    return tm_c_to_k(tm_f_to_c(f));
+}
+
+/// 卡诺效率 1 - Tc/Th（两个温度都必须是 K）。
+pub fn tm_carnot_efficiency(t_hot: u64, t_cold: u64) -> u64 {
+    if f64_le(t_hot, F64_POS_ZERO) {
+        return 0x7FF8000000000000;
+    }
+    return f64_sub(F64_ONE, f64_div(t_cold, t_hot));
+}
+
+/// 热量 Q = m c ΔT（c 的单位是 J/(kg K)）。
+pub fn tm_heat(mass: u64, specific_heat: u64, delta_t: u64) -> u64 {
+    return f64_mul(mass, f64_mul(specific_heat, delta_t));
+}
+
+/// 熵变 ΔS = Q / T（T 必须是 K）。
+pub fn tm_entropy(q: u64, t: u64) -> u64 {
+    if f64_le(t, F64_POS_ZERO) {
+        return 0x7FF8000000000000;
+    }
+    return f64_div(q, t);
+}
+
+/// 理想气体压强 p = nRT/V。
+pub fn tm_ideal_pressure(n: u64, t: u64, v: u64) -> u64 {
+    if f64_eq(v, F64_POS_ZERO) {
+        return 0x7FF8000000000000;
+    }
+    return f64_div(f64_mul(f64_mul(n, PH_R), t), v);
+}
+
+/// 理想气体体积 V = nRT/p。
+pub fn tm_ideal_volume(n: u64, t: u64, p: u64) -> u64 {
+    if f64_eq(p, F64_POS_ZERO) {
+        return 0x7FF8000000000000;
+    }
+    return f64_div(f64_mul(f64_mul(n, PH_R), t), p);
+}
+
+/// 理想气体温度 T = pV/(nR)。
+pub fn tm_ideal_temp(p: u64, v: u64, n: u64) -> u64 {
+    let den: u64 = f64_mul(n, PH_R);
+    if f64_eq(den, F64_POS_ZERO) {
+        return 0x7FF8000000000000;
+    }
+    return f64_div(f64_mul(p, v), den);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_thermo_water_freezes() -> bool {
+    // 0 C = 273.15 K = 32 F
+    return f64_eq(tm_c_to_k(F64_POS_ZERO), TM_K0)
+        && f64_eq(tm_c_to_f(F64_POS_ZERO), TM_32);
+}
+
+fn test_thermo_boils() -> bool {
+    // 100 C = 212 F = 373.15 K
+    let f: u64 = tm_c_to_f(0x4059000000000000); // 100
+    return f64_eq(f, 0x406A800000000000) // 212
+        && f64_eq(tm_c_to_k(0x4059000000000000), 0x4077526666666666); // 373.15
+}
+
+fn test_thermo_carnot() -> bool {
+    // Th=500K, Tc=300K -> 0.4
+    let e: u64 = tm_carnot_efficiency(0x407F400000000000, 0x4072C00000000000);
+    return f64_eq(e, 0x3FD999999999999A);
+}

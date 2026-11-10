@@ -20,7 +20,6 @@
 // 命名: 公开 sock_*, 内部 sockp_*。自检 test_sock_*。
 
 module sock
-choose runtime
 
 /// addr 家族。
 pub const SOCK_AF_INET: u64 = 2;

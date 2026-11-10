@@ -1,0 +1,224 @@
+// world/namefmt.lomt — 人名拆分与显示顺序
+//
+// 为什么现实世界需要它: 表单里"名/姓"两个框，而用户习惯写成一串
+// `Dr. Ada Lovelace` 或 `Ada Lovelace Jr.`。拆错就把姓存进了名。
+//
+// 规则（明确是启发式，不是语言学）:
+//   * 开头若命中称谓表（Mr/Mrs/Ms/Miss/Dr/Prof/Mx/Sir/Dame）则算 title；
+//   * 结尾若命中后缀表（Jr/Sr/II/III/IV/PhD/MD/Esq）则算 suffix；
+//   * 剩下部分：第一个 token 是 given，最后一个 token 是 family；
+//   * 只剩一个 token 时算 family（`Cher` 这种），flags 会说明。
+//
+// 约定: spans 写 4 对 (off,len)，都指向**原字符串**；flags: 1=title 2=given
+// 4=family 8=suffix。
+//
+// 命名: 公开 nmf_*, 内部 nn_*。自检 test_namefmt_*。
+
+module namefmt
+
+use mem
+
+fn nn_lower(c: u32) -> u32 {
+    if c >= 65 && c <= 90 {
+        return c + 32;
+    }
+    return c;
+}
+
+fn nn_eq(s: str, st: u32, ln: u32, w: str) -> bool {
+    let m: u32 = ln;
+    if m > 0 && str_byte(s, st + m - 1) == 46 { // 末尾 '.'
+        m = m - 1;
+    }
+    if m != str_len(w) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < m {
+        if nn_lower(str_byte(s, st + i)) != nn_lower(str_byte(w, i)) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn nn_is_title(s: str, st: u32, ln: u32) -> bool {
+    return nn_eq(s, st, ln, "mr") || nn_eq(s, st, ln, "mrs") || nn_eq(s, st, ln, "ms")
+        || nn_eq(s, st, ln, "miss") || nn_eq(s, st, ln, "dr") || nn_eq(s, st, ln, "prof")
+        || nn_eq(s, st, ln, "mx") || nn_eq(s, st, ln, "sir") || nn_eq(s, st, ln, "dame");
+}
+
+fn nn_is_suffix(s: str, st: u32, ln: u32) -> bool {
+    return nn_eq(s, st, ln, "jr") || nn_eq(s, st, ln, "sr") || nn_eq(s, st, ln, "ii")
+        || nn_eq(s, st, ln, "iii") || nn_eq(s, st, ln, "iv") || nn_eq(s, st, ln, "phd")
+        || nn_eq(s, st, ln, "md") || nn_eq(s, st, ln, "esq");
+}
+
+fn nn_span(out: ptr, i: u32, st: u32, ln: u32) {
+    mem_store32(out, i * 8, st);
+    mem_store32(out, i * 8 + 4, ln);
+}
+
+fn nn_space(c: u32) -> bool {
+    return c == 32 || c == 9;
+}
+
+/// 拆分。返回 flags（0 = 空输入）。
+pub fn nmf_parse(s: str, out: ptr) -> u32 {
+    let n: u32 = str_len(s);
+    let k: u32 = 0;
+    while k < 4 {
+        nn_span(out, k, 0, 0);
+        k = k + 1;
+    }
+    let starts: ptr = alloc(128);
+    let lens: ptr = alloc(128);
+    let count: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        while i < n && nn_space(str_byte(s, i)) {
+            i = i + 1;
+        }
+        if i < n {
+            let st: u32 = i;
+            while i < n && !nn_space(str_byte(s, i)) {
+                i = i + 1;
+            }
+            if count < 32 {
+                mem_store32(starts, count * 4, st);
+                mem_store32(lens, count * 4, i - st);
+            }
+            count = count + 1;
+        }
+    }
+    if count > 32 {
+        count = 32;
+    }
+    if count == 0 {
+        return 0;
+    }
+    let first: u32 = 0;
+    let last: u32 = count - 1;
+    let flags: u32 = 0;
+    let fs: u32 = mem_load32(starts, first * 4);
+    let fl: u32 = mem_load32(lens, first * 4);
+    if count > 1 && nn_is_title(s, fs, fl) {
+        nn_span(out, 0, fs, fl);
+        flags = flags | 1;
+        first = 1;
+    }
+    let ls: u32 = mem_load32(starts, last * 4);
+    let ll: u32 = mem_load32(lens, last * 4);
+    if last > first && nn_is_suffix(s, ls, ll) {
+        nn_span(out, 3, ls, ll);
+        flags = flags | 8;
+        last = last - 1;
+    }
+    if last == first {
+        nn_span(out, 2, mem_load32(starts, first * 4), mem_load32(lens, first * 4));
+        flags = flags | 4;
+    } else {
+        nn_span(out, 1, mem_load32(starts, first * 4), mem_load32(lens, first * 4));
+        nn_span(out, 2, mem_load32(starts, last * 4), mem_load32(lens, last * 4));
+        flags = flags | 2 | 4;
+    }
+    return flags;
+}
+
+fn nn_copy(out: ptr, cap: u32, pos: u32, s: str, st: u32, ln: u32) -> u32 {
+    let p: u32 = pos;
+    let i: u32 = 0;
+    while i < ln {
+        if p < cap {
+            store8(out, p, str_byte(s, st + i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+fn nn_lit(out: ptr, cap: u32, pos: u32, lit: str) -> u32 {
+    return nn_copy(out, cap, pos, lit, 0, str_len(lit));
+}
+
+/// `Lovelace, Ada`（有 suffix 时附加 `, Jr`）。返回完整长度。
+pub fn nmf_family_first(s: str, out: ptr, cap: u32) -> u32 {
+    let o: ptr = alloc(32);
+    let flags: u32 = nmf_parse(s, o);
+    if flags == 0 {
+        return 0;
+    }
+    let pos: u32 = 0;
+    if (flags & 4) != 0 {
+        pos = nn_copy(out, cap, pos, s, mem_load32(o, 16), mem_load32(o, 20));
+    }
+    if (flags & 2) != 0 {
+        pos = nn_lit(out, cap, pos, ", ");
+        pos = nn_copy(out, cap, pos, s, mem_load32(o, 8), mem_load32(o, 12));
+    }
+    if (flags & 8) != 0 {
+        pos = nn_lit(out, cap, pos, ", ");
+        pos = nn_copy(out, cap, pos, s, mem_load32(o, 24), mem_load32(o, 28));
+    }
+    return pos;
+}
+
+/// 首字母缩写：`A. L.`。返回完整长度。
+pub fn nmf_initials(s: str, out: ptr, cap: u32) -> u32 {
+    let o: ptr = alloc(32);
+    let flags: u32 = nmf_parse(s, o);
+    if flags == 0 {
+        return 0;
+    }
+    let pos: u32 = 0;
+    if (flags & 2) != 0 {
+        if pos < cap {
+            store8(out, pos, str_byte(s, mem_load32(o, 8)) as u8);
+        }
+        pos = pos + 1;
+        if pos < cap { store8(out, pos, 46 as u8); }
+        pos = pos + 1;
+        if pos < cap { store8(out, pos, 32 as u8); }
+        pos = pos + 1;
+    }
+    if (flags & 4) != 0 {
+        if pos < cap {
+            store8(out, pos, str_byte(s, mem_load32(o, 16)) as u8);
+        }
+        pos = pos + 1;
+        if pos < cap { store8(out, pos, 46 as u8); }
+        pos = pos + 1;
+    }
+    return pos;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_namefmt_parse() -> bool {
+    let o: ptr = alloc(32);
+    let f: u32 = nmf_parse("Dr. Ada Lovelace Jr.", o);
+    if f != 15 {
+        return false;
+    }
+    return mem_load32(o, 8) == 4 && mem_load32(o, 12) == 3
+        && mem_load32(o, 16) == 8 && mem_load32(o, 20) == 8;
+}
+
+fn test_namefmt_format() -> bool {
+    let o: ptr = alloc(64);
+    let n: u32 = nmf_family_first("Ada Lovelace", o, 64);
+    let want: str = "Lovelace, Ada";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}

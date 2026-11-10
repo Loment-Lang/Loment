@@ -1,0 +1,182 @@
+// system/ns.lomt — Linux namespace 的 clone 标志与名字
+//
+// 为什么标准库要有它: `clone(2)` 的标志是位掩码，而"给容器加一个 PID namespace"
+// 在代码里常常写成魔数（`0x20000000`）。写错一位会静默地加错 namespace，或者
+// 一个都没加 —— 后者往往表现为"容器跑起来了，但隔离没有生效"。
+//
+// 支持的标志（Linux 5.x 的公开集合）:
+//   mnt 0x00020000 · cgroup 0x02000000 · uts 0x04000000 · ipc 0x08000000
+//   user 0x10000000 · pid 0x20000000 · net 0x40000000 · time 0x00000080
+//
+// 不做的: 安装 namespace（`unshare`/`setns` 是 syscall）、user namespace 的映射
+// 规则、`CLONE_NEWPID` 的"子进程才生效"语义（那是调用方的事）。
+//
+// 命名: 公开 ns_*, 内部 ns_*。自检 test_ns_*。
+
+module ns
+
+use mem
+
+pub fn ns_flag(name: str) -> u64 {
+    if str_eq(name, "mnt") { return 131072; }            // 0x00020000
+    if str_eq(name, "cgroup") { return 33554432; }       // 0x02000000
+    if str_eq(name, "uts") { return 67108864; }          // 0x04000000
+    if str_eq(name, "ipc") { return 134217728; }         // 0x08000000
+    if str_eq(name, "user") { return 268435456; }        // 0x10000000
+    if str_eq(name, "pid") { return 536870912; }         // 0x20000000
+    if str_eq(name, "net") { return 1073741824; }        // 0x40000000
+    if str_eq(name, "time") { return 128; }              // 0x00000080
+    return 0 as u64;
+}
+
+fn ns_sep(c: u32) -> bool {
+    return c == 32 || c == 9 || c == 44;
+}
+
+/// 空格/逗号分隔的名字列表 -> 位掩码。未知名字忽略。
+pub fn ns_parse(names: str) -> u64 {
+    let n: u32 = str_len(names);
+    let i: u32 = 0;
+    let f: u64 = 0 as u64;
+    let going: u32 = 1;
+    while going == 1 {
+        let sep: u32 = 1;
+        while sep == 1 && i < n {
+            if ns_sep(str_byte(names, i)) {
+                i = i + 1;
+            } else {
+                sep = 0;
+            }
+        }
+        if i >= n {
+            going = 0;
+        } else {
+            let st: u32 = i;
+            let stop: u32 = 0;
+            while stop == 0 && i < n {
+                if ns_sep(str_byte(names, i)) {
+                    stop = 1;
+                } else {
+                    i = i + 1;
+                }
+            }
+            f = f | ns_flag_span(names, st, i - st);
+        }
+    }
+    return f;
+}
+
+fn ns_flag_span(name: str, st: u32, ln: u32) -> u64 {
+    let one: ptr = alloc(16);
+    store8(one, 0, 0 as u8);
+    // 片段最多 8 个字符；逐字拷进一个小缓冲再比（比手写 8 次比较清楚）。
+    let m: u32 = ln;
+    if m > 8 {
+        m = 8;
+    }
+    let i: u32 = 0;
+    while i < m {
+        store8(one, i, str_byte(name, st + i) as u8);
+        i = i + 1;
+    }
+    store8(one, m, 0 as u8);
+    if m == 3 && load8(one, 0) == 109 && load8(one, 1) == 110 && load8(one, 2) == 116 {
+        return 131072; // mnt
+    }
+    if m == 3 && load8(one, 0) == 117 && load8(one, 1) == 116 && load8(one, 2) == 115 {
+        return 67108864; // uts
+    }
+    if m == 3 && load8(one, 0) == 105 && load8(one, 1) == 112 && load8(one, 2) == 99 {
+        return 134217728; // ipc
+    }
+    if m == 3 && load8(one, 0) == 112 && load8(one, 1) == 105 && load8(one, 2) == 100 {
+        return 536870912; // pid
+    }
+    if m == 3 && load8(one, 0) == 110 && load8(one, 1) == 101 && load8(one, 2) == 116 {
+        return 1073741824; // net
+    }
+    if m == 4 && load8(one, 0) == 117 && load8(one, 1) == 115 && load8(one, 2) == 101 && load8(one, 3) == 114 {
+        return 268435456; // user
+    }
+    if m == 4 && load8(one, 0) == 116 && load8(one, 1) == 105 && load8(one, 2) == 109 && load8(one, 3) == 101 {
+        return 128; // time
+    }
+    if m == 6 && load8(one, 0) == 99 && load8(one, 1) == 103 && load8(one, 2) == 114
+        && load8(one, 3) == 111 && load8(one, 4) == 117 && load8(one, 5) == 112 {
+        return 33554432; // cgroup
+    }
+    return 0 as u64;
+}
+
+pub fn ns_has(flags: u64, name: str) -> bool {
+    let f: u64 = ns_flag(name);
+    if f == (0 as u64) {
+        return false;
+    }
+    return (flags & f) == f;
+}
+
+/// 恰好一个标志 -> 名字。写进 out，返回长度；不是单个标志返回 0。
+pub fn ns_name(flag: u64, out: ptr, cap: u32) -> u32 {
+    let names: str = "mnt cgroup uts ipc user pid net time";
+    let flags: ptr = alloc(64);
+    mem_store64(flags, 0, 131072);
+    mem_store64(flags, 8, 33554432);
+    mem_store64(flags, 16, 67108864);
+    mem_store64(flags, 24, 134217728);
+    mem_store64(flags, 32, 268435456);
+    mem_store64(flags, 40, 536870912);
+    mem_store64(flags, 48, 1073741824);
+    mem_store64(flags, 56, 128);
+    let i: u32 = 0;
+    while i < 8 {
+        if mem_load64(flags, i * 8) == flag {
+            // 第 i 个名字
+            let n: u32 = str_len(names);
+            let idx: u32 = 0;
+            let st: u32 = 0;
+            let j: u32 = 0;
+            while j <= n {
+                if j == n || str_byte(names, j) == 32 {
+                    if idx == i {
+                        let ln: u32 = j - st;
+                        let m: u32 = ln;
+                        if m > cap {
+                            m = cap;
+                        }
+                        let k: u32 = 0;
+                        while k < m {
+                            store8(out, k, str_byte(names, st + k) as u8);
+                            k = k + 1;
+                        }
+                        return ln;
+                    }
+                    idx = idx + 1;
+                    st = j + 1;
+                }
+                j = j + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_ns_flags() -> bool {
+    return ns_flag("pid") == 536870912 && ns_flag("net") == 1073741824
+        && ns_flag("time") == 128 && ns_flag("nope") == (0 as u64);
+}
+
+fn test_ns_parse() -> bool {
+    let f: u64 = ns_parse("pid, net user");
+    return ns_has(f, "pid") && ns_has(f, "net") && ns_has(f, "user")
+        && !ns_has(f, "mnt");
+}
+
+fn test_ns_name() -> bool {
+    let b: ptr = alloc(16);
+    let n: u32 = ns_name(536870912, b, 16);
+    return n == 3 && load8(b, 0) == 112 && load8(b, 1) == 105 && load8(b, 2) == 100;
+}

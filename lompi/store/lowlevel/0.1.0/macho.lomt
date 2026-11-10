@@ -1,0 +1,151 @@
+// lowlevel/macho.lomt — Mach-O 头（macOS / iOS 可执行文件）
+//
+// 为什么底层工具需要它: 交叉工具链里"这个文件是哪台机器、什么类型"的判断，
+// 在 Mach-O 上读 **7 个 u32** 就够了：magic、cputype、cpusubtype、filetype、
+// ncmds、sizeofcmds、flags。麻烦的是 magic 有四种写法（32/64 位 × 两种字节序），
+// 认错一种，后面的字段全是反的。
+//
+// 约定:
+//   * `mc_parse` 写 7 个 u32 到 out，字节序按 magic 自己判定；
+//   * 32 位头 28 字节、64 位头 32 字节；
+//   * 只做头部，不做 load command 遍历（那是另一个量级）。
+//
+// 命名: 公开 mc_*, 内部 mq_*。自检 test_macho_*。
+
+module macho
+
+use mem
+
+pub const MC_ERR: u32 = 4294967295;
+
+fn mq_le32(p: ptr, off: u32) -> u32 {
+    return (load8(p, off) as u32)
+        + ((load8(p, off + 1) as u32) * 256)
+        + ((load8(p, off + 2) as u32) * 65536)
+        + ((load8(p, off + 3) as u32) * 16777216);
+}
+
+fn mq_be32(p: ptr, off: u32) -> u32 {
+    return (load8(p, off + 3) as u32)
+        + ((load8(p, off + 2) as u32) * 256)
+        + ((load8(p, off + 1) as u32) * 65536)
+        + ((load8(p, off) as u32) * 16777216);
+}
+
+/// 头部长度（28 或 32）；不是 Mach-O 返回 0，太短返回 MC_ERR。
+pub fn mc_header_size(p: ptr, n: u32) -> u32 {
+    if n < 4 {
+        return MC_ERR;
+    }
+    let m: u32 = mq_be32(p, 0);
+    if m == 4277009102 || m == 4277009103 { // 0xFEEDFACE / 0xFEEDFACF
+        if m == 4277009102 {
+            return 28;
+        }
+        return 32;
+    }
+    let l: u32 = mq_le32(p, 0);
+    if l == 4277009102 || l == 4277009103 {
+        if l == 4277009102 {
+            return 28;
+        }
+        return 32;
+    }
+    return 0;
+}
+
+/// 解析头。out 写 [magic, cputype, cpusubtype, filetype, ncmds, sizeofcmds, flags]。
+/// 成功返回 1。
+pub fn mc_parse(p: ptr, n: u32, out: ptr) -> u32 {
+    let hs: u32 = mc_header_size(p, n);
+    if hs == 0 || hs == MC_ERR || hs > n {
+        return 0;
+    }
+    let big: u32 = 0;
+    let m: u32 = mq_be32(p, 0);
+    if m == 4277009102 || m == 4277009103 {
+        big = 1;
+    }
+    let k: u32 = 0;
+    while k < 7 {
+        let v: u32 = 0;
+        if big == 1 {
+            v = mq_be32(p, k * 4);
+        } else {
+            v = mq_le32(p, k * 4);
+        }
+        mem_store32(out, k * 4, v);
+        k = k + 1;
+    }
+    return 1;
+}
+
+fn mq_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+/// cputype -> 名字。未知返回 "unknown"。
+pub fn mc_cpu_name(cputype: u32, out: ptr, cap: u32) -> u32 {
+    let n: str = "unknown";
+    if cputype == 7 { n = "x86"; }
+    else if cputype == 16777223 { n = "x86_64"; }
+    else if cputype == 12 { n = "arm"; }
+    else if cputype == 16777228 { n = "arm64"; }
+    else if cputype == 18 { n = "ppc"; }
+    else if cputype == 16777234 { n = "ppc64"; }
+    return mq_put(out, cap, 0, n);
+}
+
+/// filetype -> 名字。未知返回 "unknown"。
+pub fn mc_filetype_name(ft: u32, out: ptr, cap: u32) -> u32 {
+    let n: str = "unknown";
+    if ft == 1 { n = "object"; }
+    else if ft == 2 { n = "execute"; }
+    else if ft == 3 { n = "fvmlib"; }
+    else if ft == 4 { n = "core"; }
+    else if ft == 5 { n = "preload"; }
+    else if ft == 6 { n = "dylib"; }
+    else if ft == 7 { n = "dylinker"; }
+    else if ft == 8 { n = "bundle"; }
+    else if ft == 9 { n = "dylib_stub"; }
+    else if ft == 10 { n = "dsym"; }
+    else if ft == 11 { n = "kext_bundle"; }
+    return mq_put(out, cap, 0, n);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_macho_parse() -> bool {
+    let b: ptr = alloc(64);
+    // 64 位小端头: magic CF FA ED FE (0xFEEDFACF 小端), cputype 0x01000007
+    store8(b, 0, 207 as u8); store8(b, 1, 250 as u8);
+    store8(b, 2, 237 as u8); store8(b, 3, 254 as u8);
+    store8(b, 4, 7 as u8); store8(b, 5, 0 as u8);
+    store8(b, 6, 0 as u8); store8(b, 7, 1 as u8);
+    store8(b, 12, 2 as u8); // filetype = execute
+    store8(b, 16, 3 as u8); // ncmds = 3
+    let o: ptr = alloc(32);
+    if mc_parse(b, 32, o) != 1 {
+        return false;
+    }
+    return mem_load32(o, 0) == 4277009103
+        && mem_load32(o, 4) == 16777223
+        && mem_load32(o, 12) == 2
+        && mem_load32(o, 16) == 3;
+}
+
+fn test_macho_names() -> bool {
+    let o: ptr = alloc(32);
+    let n: u32 = mc_cpu_name(16777228, o, 32);
+    return n == 5 && load8(o, 0) == 97; // "arm64"
+}

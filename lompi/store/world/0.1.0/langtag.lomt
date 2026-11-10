@@ -1,0 +1,228 @@
+// world/langtag.lomt — BCP 47 语言标签的解析与规范化
+//
+// 为什么现实世界需要它: `zh-hant-tw`、`en-US`、`sr-Latn-RS` 是同一套语法：
+// language[-script][-region][-variant]。大小写不是随意的 —— 语言小写、脚本首字母
+// 大写、地区大写。服务器按字符串比较时，`zh-hant-tw` 与 `zh-Hant-TW` 是两个键。
+//
+// 约定:
+//   * `lgt_parse` 写 4 个 (off,len) 对到 out（language/script/region/variant），
+//     返回**标志位**：1=有语言、2=有脚本、4=有地区、8=有变体；0 表示不合法；
+//   * `lgt_canonical` 按 BCP 47 的大小写规则重写，并用 `-` 连接；
+//   * 只认 ASCII（私用子标签 `x-` 与扩展单字母子标签留给以后）。
+//
+// 命名: 公开 lgt_*, 内部 lc_*。自检 test_langtag_*。
+
+module langtag
+
+use mem
+
+pub const LGT_ERR: u32 = 4294967295;
+
+fn lc_alpha(c: u32) -> bool {
+    return (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+}
+
+fn lc_digit(c: u32) -> bool {
+    return c >= 48 && c <= 57;
+}
+
+fn lc_lower(c: u32) -> u32 {
+    if c >= 65 && c <= 90 {
+        return c + 32;
+    }
+    return c;
+}
+
+fn lc_upper(c: u32) -> u32 {
+    if c >= 97 && c <= 122 {
+        return c - 32;
+    }
+    return c;
+}
+
+fn lc_all_alpha(t: str, st: u32, ln: u32) -> bool {
+    let i: u32 = 0;
+    while i < ln {
+        if !lc_alpha(str_byte(t, st + i)) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn lc_all_digit(t: str, st: u32, ln: u32) -> bool {
+    let i: u32 = 0;
+    while i < ln {
+        if !lc_digit(str_byte(t, st + i)) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn lc_all_alnum(t: str, st: u32, ln: u32) -> bool {
+    let i: u32 = 0;
+    while i < ln {
+        let c: u32 = str_byte(t, st + i);
+        if !lc_alpha(c) && !lc_digit(c) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn lc_put_span(out: ptr, idx: u32, st: u32, ln: u32) {
+    mem_store32(out, idx * 8, st);
+    mem_store32(out, idx * 8 + 4, ln);
+}
+
+/// 解析。返回标志位（0=不合法），spans 写 4 对 (off,len)。
+pub fn lgt_parse(tag: str, out: ptr) -> u32 {
+    let n: u32 = str_len(tag);
+    let i: u32 = 0;
+    let idx: u32 = 0;
+    let flags: u32 = 0;
+    let first: u32 = 1;
+    while idx < 4 {
+        lc_put_span(out, idx, 0, 0);
+        idx = idx + 1;
+    }
+    if n == 0 {
+        return 0;
+    }
+    idx = 0;
+    while i <= n {
+        let st: u32 = i;
+        while i < n && str_byte(tag, i) != 45 {
+            i = i + 1;
+        }
+        let ln: u32 = i - st;
+        if ln == 0 {
+            return 0;
+        }
+        if first == 1 {
+            if ln < 2 || ln > 3 || !lc_all_alpha(tag, st, ln) {
+                return 0;
+            }
+            lc_put_span(out, 0, st, ln);
+            flags = flags | 1;
+            first = 0;
+        } else if ln == 4 && lc_all_alpha(tag, st, ln) && (flags & 2) == 0 && (flags & 4) == 0 {
+            lc_put_span(out, 1, st, ln);
+            flags = flags | 2;
+        } else if ((ln == 2 && lc_all_alpha(tag, st, ln)) || (ln == 3 && lc_all_digit(tag, st, ln)))
+            && (flags & 4) == 0 {
+            lc_put_span(out, 2, st, ln);
+            flags = flags | 4;
+        } else if (ln >= 5 && ln <= 8 && lc_all_alnum(tag, st, ln))
+            || (ln == 4 && lc_digit(str_byte(tag, st)) && lc_all_alnum(tag, st, ln)) {
+            if (flags & 8) == 0 {
+                lc_put_span(out, 3, st, ln);
+            }
+            flags = flags | 8;
+        } else {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return flags;
+}
+
+/// 形式合法（不查注册表）。
+pub fn lgt_is_valid(tag: str) -> bool {
+    let o: ptr = alloc(32);
+    return lgt_parse(tag, o) != 0;
+}
+
+fn lc_copy(out: ptr, cap: u32, pos0: u32, t: str, st: u32, ln: u32, mode: u32) -> u32 {
+    let pos: u32 = pos0;
+    let i: u32 = 0;
+    while i < ln {
+        let c: u32 = str_byte(t, st + i);
+        let v: u32 = 0;
+        if mode == 0 {
+            v = lc_lower(c);
+        } else if mode == 2 {
+            v = lc_upper(c);
+        } else if i == 0 {
+            v = lc_upper(c);
+        } else {
+            v = lc_lower(c);
+        }
+        if pos < cap {
+            store8(out, pos, v as u8);
+        }
+        pos = pos + 1;
+        i = i + 1;
+    }
+    return pos;
+}
+
+/// 规范化大小写（zh-hant-tw -> zh-Hant-TW）。返回完整长度。
+pub fn lgt_canonical(tag: str, out: ptr, cap: u32) -> u32 {
+    let o: ptr = alloc(32);
+    let flags: u32 = lgt_parse(tag, o);
+    if flags == 0 {
+        return LGT_ERR;
+    }
+    let pos: u32 = 0;
+    let parts: u32 = 0;
+    let k: u32 = 0;
+    while k < 4 {
+        let ln: u32 = mem_load32(o, k * 8 + 4);
+        if ln > 0 {
+            if parts > 0 {
+                if pos < cap {
+                    store8(out, pos, 45 as u8);
+                }
+                pos = pos + 1;
+            }
+            let st: u32 = mem_load32(o, k * 8);
+            let mode: u32 = 0;
+            if k == 1 {
+                mode = 1;
+            } else if k == 2 {
+                mode = 2;
+            }
+            pos = lc_copy(out, cap, pos, tag, st, ln, mode);
+            parts = parts + 1;
+        }
+        k = k + 1;
+    }
+    return pos;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_langtag_canonical() -> bool {
+    let o: ptr = alloc(64);
+    let n: u32 = lgt_canonical("zh-hant-tw", o, 64);
+    let want: str = "zh-Hant-TW";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_langtag_rejects() -> bool {
+    if lgt_is_valid("en-") {
+        return false;
+    }
+    if lgt_is_valid("e") {
+        return false;
+    }
+    if lgt_is_valid("en-US-x") {
+        return false;
+    }
+    return lgt_is_valid("en-US");
+}

@@ -44,7 +44,6 @@
 // 命名: 公开 wrap_*, 内部 wr_*。自检 test_wrap_*。
 
 module wrap
-choose runtime
 
 use "mem.lomt"
 use "num.lomt"

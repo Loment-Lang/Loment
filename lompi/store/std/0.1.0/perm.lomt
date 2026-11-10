@@ -34,7 +34,6 @@
 // 命名: 公开 pm_*, 内部 pmf_*。自检 test_perm_*。
 
 module perm
-choose runtime
 
 use "mem.lomt"
 

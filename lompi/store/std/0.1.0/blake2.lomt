@@ -17,7 +17,6 @@
 // 命名: 公开 blake2b_* / blake2s_*，内部 b2b_* / b2s_*。自检 test_blake2_*。
 
 module blake2
-choose runtime
 
 use "mem.lomt"
 

@@ -38,7 +38,6 @@
 // 命名: 公开 sp_*, 内部 sp_* 里再细分 (ts_* 只给自检用)。自检 test_shortest_*。
 
 module shortest
-choose runtime
 
 use "mem.lomt"
 use "graph.lomt"

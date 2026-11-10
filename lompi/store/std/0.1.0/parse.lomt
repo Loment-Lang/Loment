@@ -20,7 +20,6 @@
 // 命名: 公开一律 parse_*, 内部一律 ps_*。自检 test_parse_*。
 
 module parse
-choose runtime
 
 /// 十进制数字前缀的长度 (0 = 开头就不是数字)。
 pub fn parse_dec_len(p: ptr, o: u32, n: u32) -> u32 {

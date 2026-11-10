@@ -25,7 +25,6 @@
 // 命名: 公开 tf_*, 内部 tf_*。自检 test_tmpf_*。
 
 module tmpf
-choose runtime
 
 use "mem.lomt"
 

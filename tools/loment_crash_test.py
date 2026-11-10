@@ -90,6 +90,14 @@ void *memmove(void *d, const void *s, unsigned long n) {
     else { for (unsigned long i = n; i > 0; i--) dd[i - 1] = ss[i - 1]; }
     return d;
 }
+// clang 会把按字节铺/搬的循环改写成这两个内建调用（`-ffreestanding` 下也照样合成），
+// 而这条链没有 libc；自举种子里的缓存路径就是这么长出来的。
+void *memcpy(void *d, const void *s, unsigned long n) { return memmove(d, s, n); }
+void *memset(void *d, int c, unsigned long n) {
+    unsigned char *dd = d;
+    for (unsigned long i = 0; i < n; i++) dd[i] = (unsigned char)c;
+    return d;
+}
 """
 
 

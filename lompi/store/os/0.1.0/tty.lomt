@@ -22,7 +22,6 @@
 // 命名: 公开 tty_*, 内部 ttyp_。
 
 module tty
-choose runtime
 
 /// `ioctl` 的号 (x86-64 Linux)。
 pub const TTY_TCGETS: u64 = 21505;

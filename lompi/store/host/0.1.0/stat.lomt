@@ -14,7 +14,6 @@
 // 命名: 公开一律 stat_*, 内部一律 st_*。自检 test_stat_*。
 
 module stat
-choose runtime
 
 use "io.lomt"
 use numfmt

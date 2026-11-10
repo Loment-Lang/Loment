@@ -1,0 +1,124 @@
+// world/ean.lomt — 商品条码（EAN/UPC/GTIN）的校验
+//
+// 为什么现实世界需要它: 货架上每一件商品背后都是一个 GTIN；扫描枪读错一位，
+// 校验位能当场拦下。规则简单但容易写反：**从右往左**权重 3,1,3,1…，
+// 也就是从左数的权重取决于总长度的奇偶。
+//
+// 覆盖: GTIN-8 / UPC-A (12) / EAN-13 / GTIN-14 都按同一规则校验；
+// UPC-A -> EAN-13 是前面补一个 0。
+//
+// 命名: 公开 ean_*, 内部 ec_*。自检 test_ean_*。
+
+module ean
+
+fn ec_digit(c: u32) -> bool {
+    return c >= 48 && c <= 57;
+}
+
+fn ec_count(s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    let k: u32 = 0;
+    while i < n {
+        if ec_digit(str_byte(s, i)) {
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    return k;
+}
+
+/// 给"不含校验位"的数字串算校验位。返回 0..9。
+pub fn ean_check_digit(digits: str) -> u32 {
+    let n: u32 = str_len(digits);
+    let total: u32 = ec_count(digits);
+    let i: u32 = 0;
+    let k: u32 = 0;
+    let sum: u32 = 0;
+    while i < n {
+        let c: u32 = str_byte(digits, i);
+        if ec_digit(c) {
+            let v: u32 = c - 48;
+            // 从右往左数：最右边那个数据位权重 3
+            if total > 0 && (total - 1 - k) % 2 == 0 {
+                sum = sum + v * 3;
+            } else {
+                sum = sum + v;
+            }
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    return (10 - (sum % 10)) % 10;
+}
+
+/// 完整条码是否合法（长度 8/12/13/14，最后一位是校验位）。
+pub fn ean_valid(s: str) -> bool {
+    let k: u32 = ec_count(s);
+    if k != 8 && k != 12 && k != 13 && k != 14 {
+        return false;
+    }
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    let seen: u32 = 0;
+    let sum: u32 = 0;
+    let last: u32 = 0;
+    while i < n {
+        let c: u32 = str_byte(s, i);
+        if ec_digit(c) {
+            if seen + 1 == k {
+                last = c - 48;
+            } else {
+                // 从右往左：校验位左边一位权重 3，再往左 1
+                let from_right: u32 = k - 1 - seen;
+                if from_right % 2 == 1 {
+                    sum = sum + (c - 48) * 3;
+                } else {
+                    sum = sum + (c - 48);
+                }
+            }
+            seen = seen + 1;
+        } else if c != 45 && c != 32 {
+            return false;
+        }
+        i = i + 1;
+    }
+    return (sum + last) % 10 == 0;
+}
+
+/// UPC-A (12 位) -> EAN-13：前面补 0。返回 13；输入不合法返回 0。
+pub fn ean_upca_to_ean13(s: str, out: ptr, cap: u32) -> u32 {
+    if ec_count(s) != 12 || !ean_valid(s) {
+        return 0;
+    }
+    if cap < 13 {
+        return 13;
+    }
+    store8(out, 0, 48 as u8);
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    let k: u32 = 1;
+    while i < n && k < 13 {
+        let c: u32 = str_byte(s, i);
+        if ec_digit(c) {
+            store8(out, k, c as u8);
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    return 13;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_ean_valid() -> bool {
+    return ean_valid("4006381333931")
+        && ean_valid("036000291452")
+        && ean_valid("96385074")
+        && !ean_valid("4006381333932");
+}
+
+fn test_ean_check_digit() -> bool {
+    return ean_check_digit("400638133393") == 1
+        && ean_check_digit("03600029145") == 2;
+}

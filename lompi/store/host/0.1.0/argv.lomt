@@ -22,7 +22,6 @@
 // (`test_argv_*`) —— 私有名同样占全局拼写, 不带前缀会按 E13 撞车 (docs/158 §2)。
 
 module argv
-choose runtime
 
 // 同目录兄弟模块用**裸名**: `use` 先试仓库根, 再试**引用文件自己所在的目录**
 // (lomentc.py resolve_deps)。所以这里写 "std/io.lomt" 会解析成 std/std/io.lomt。

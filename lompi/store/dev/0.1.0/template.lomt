@@ -1,0 +1,188 @@
+// dev/template.lomt — 极小的 `{{key}}` 文本替换
+//
+// 为什么开发者工具需要它: 生成配置、CI 模板、脚手架文件名，90% 的场合只需要
+// "把 `{{name}}` 换成值"。拉一个模板引擎进来会带来语法、转义、作用域一整套东西；
+// 而手写替换又容易在"未知键""`{{` 没闭合""值里有 `{{`"这三处出错。
+//
+// 规则:
+//   * 占位符是 `{{key}}`；`{{` 与 `}}` 之间的空格/Tab 会被去掉；
+//   * `keys` / `vals` 是两个 **`char**` 数组**（NUL 结尾），按序查第一个匹配；
+//   * **未知键原样保留**（含花括号）—— 静默替换成空会把拼错的键藏起来；
+//   * 不递归：值里的 `{{...}}` 不会再展开。
+//
+// 不做的: 条件/循环/过滤器/HTML 转义 —— 那是模板语言，不是替换。
+//
+// 命名: 公开 tpl_*, 内部 tp_*。自检 test_template_*。
+
+module template
+
+use mem
+
+pub const TPL_ERR: u32 = 4294967295;
+
+fn tp_put(out: ptr, cap: u32, pos: u32, c: u32) -> u32 {
+    if pos < cap {
+        store8(out, pos, c as u8);
+    }
+    return pos + 1;
+}
+
+fn tp_cstr_len(p: ptr) -> u32 {
+    let i: u32 = 0;
+    while load8(p, i) != 0 {
+        i = i + 1;
+    }
+    return i;
+}
+
+fn tp_at(arr: ptr, i: u32) -> ptr {
+    return mem_load64(arr, i * 8) as ptr;
+}
+
+fn tp_key_eq(name: ptr, st: u32, ln: u32, keyp: ptr) -> bool {
+    let klen: u32 = tp_cstr_len(keyp);
+    if klen != ln {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < ln {
+        if load8(name, st + i) != load8(keyp, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// 渲染。返回**完整输出长度**（可能大于 cap，表示被截断）。
+pub fn tpl_render(tpl: str, keys: ptr, vals: ptr, n: u32, out: ptr, cap: u32) -> u32 {
+    let text: ptr = str_ptr(tpl);
+    let tn: u32 = str_len(tpl);
+    let i: u32 = 0;
+    let pos: u32 = 0;
+    while i < tn {
+        if i + 1 < tn && load8(text, i) == 123 && load8(text, i + 1) == 123 { // {{
+            // 找 }}
+            let j: u32 = i + 2;
+            let close: u32 = 4294967295;
+            while j + 1 < tn {
+                if load8(text, j) == 125 && load8(text, j + 1) == 125 {
+                    close = j;
+                    j = tn;
+                } else {
+                    j = j + 1;
+                }
+            }
+            if close == 4294967295 {
+                // 没闭合：原样输出剩下的
+                while i < tn {
+                    pos = tp_put(out, cap, pos, load8(text, i));
+                    i = i + 1;
+                }
+            } else {
+                // 去两端空白
+                let st: u32 = i + 2;
+                let en: u32 = close;
+                let vs: u32 = st;
+                while vs < en && (load8(text, vs) == 32 || load8(text, vs) == 9) {
+                    vs = vs + 1;
+                }
+                let ve: u32 = en;
+                while ve > vs && (load8(text, ve - 1) == 32 || load8(text, ve - 1) == 9) {
+                    ve = ve - 1;
+                }
+                let found: u32 = 0;
+                let vp: ptr = 0 as ptr;
+                let k: u32 = 0;
+                while k < n {
+                    if tp_key_eq(text, vs, ve - vs, tp_at(keys, k)) {
+                        found = 1;
+                        vp = tp_at(vals, k);
+                        k = n;
+                    } else {
+                        k = k + 1;
+                    }
+                }
+                if found == 1 {
+                    let vl: u32 = tp_cstr_len(vp);
+                    let m: u32 = 0;
+                    while m < vl {
+                        pos = tp_put(out, cap, pos, load8(vp, m));
+                        m = m + 1;
+                    }
+                } else {
+                    // 原样保留 {{...}}
+                    let q: u32 = i;
+                    while q <= close + 1 {
+                        pos = tp_put(out, cap, pos, load8(text, q));
+                        q = q + 1;
+                    }
+                }
+                i = close + 2;
+            }
+        } else {
+            pos = tp_put(out, cap, pos, load8(text, i));
+            i = i + 1;
+        }
+    }
+    if cap > 0 {
+        let end: u32 = pos;
+        if end > cap - 1 {
+            end = cap - 1;
+        }
+        store8(out, end, 0 as u8);
+    }
+    return pos;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_template_basic() -> bool {
+    let keys: ptr = alloc(8);
+    let vals: ptr = alloc(8);
+    let k: str = "name";
+    let v: str = "world";
+    // 用 NUL 结尾的副本当 char*
+    let kb: ptr = alloc(8);
+    let vb: ptr = alloc(8);
+    mem_copy(kb, 0, str_ptr(k), 0, 4);
+    store8(kb, 4, 0 as u8);
+    mem_copy(vb, 0, str_ptr(v), 0, 5);
+    store8(vb, 5, 0 as u8);
+    mem_store64(keys, 0, kb as u64);
+    mem_store64(vals, 0, vb as u64);
+    let t: str = "hello {{ name }}!";
+    let out: ptr = alloc(32);
+    let n: u32 = tpl_render(t, keys, vals, 1, out, 32);
+    let want: str = "hello world!";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(out, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_template_unknown_kept() -> bool {
+    let keys: ptr = alloc(8);
+    let vals: ptr = alloc(8);
+    let out: ptr = alloc(32);
+    let n: u32 = tpl_render("x{{nope}}y", keys, vals, 0, out, 32);
+    let want: str = "x{{nope}}y";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(out, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}

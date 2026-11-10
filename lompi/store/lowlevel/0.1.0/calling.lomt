@@ -1,0 +1,137 @@
+// lowlevel/calling.lomt — 调用约定的寄存器表
+//
+// 为什么底层工具需要它: 写外部汇编、生成 trampoline、读栈回溯时，要回答
+// "第 3 个整数参数在哪个寄存器"。三套约定三种答案，而且**Windows x64 与
+// System V 不共用**（前者 rcx/rdx/r8/r9，后者 rdi/rsi/rdx/rcx/r8/r9）。
+//
+// 覆盖: 0 = System V x86-64，1 = Microsoft x64，2 = AArch64 AAPCS64。
+// 超出寄存器个数的参数按约定落在栈上，名字返回 0。
+//
+// 命名: 公开 reg_*, 内部 rg_*。自检 test_calling_*。
+
+module calling
+
+pub const REG_SYSV: u32 = 0;
+pub const REG_WIN64: u32 = 1;
+pub const REG_AAPCS64: u32 = 2;
+
+fn rg_put(out: ptr, cap: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if i < cap {
+            store8(out, i, str_byte(s, i) as u8);
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 第 i 个整数参数的寄存器；栈上参数返回 0。
+pub fn reg_int_arg(abi: u32, i: u32, out: ptr, cap: u32) -> u32 {
+    if abi == REG_WIN64 {
+        if i == 0 { return rg_put(out, cap, "rcx"); }
+        if i == 1 { return rg_put(out, cap, "rdx"); }
+        if i == 2 { return rg_put(out, cap, "r8"); }
+        if i == 3 { return rg_put(out, cap, "r9"); }
+        return 0;
+    }
+    if abi == REG_AAPCS64 {
+        if i == 0 { return rg_put(out, cap, "x0"); }
+        if i == 1 { return rg_put(out, cap, "x1"); }
+        if i == 2 { return rg_put(out, cap, "x2"); }
+        if i == 3 { return rg_put(out, cap, "x3"); }
+        if i == 4 { return rg_put(out, cap, "x4"); }
+        if i == 5 { return rg_put(out, cap, "x5"); }
+        if i == 6 { return rg_put(out, cap, "x6"); }
+        if i == 7 { return rg_put(out, cap, "x7"); }
+        return 0;
+    }
+    if i == 0 { return rg_put(out, cap, "rdi"); }
+    if i == 1 { return rg_put(out, cap, "rsi"); }
+    if i == 2 { return rg_put(out, cap, "rdx"); }
+    if i == 3 { return rg_put(out, cap, "rcx"); }
+    if i == 4 { return rg_put(out, cap, "r8"); }
+    if i == 5 { return rg_put(out, cap, "r9"); }
+    return 0;
+}
+
+/// 第 i 个浮点参数的寄存器；栈上参数返回 0。
+pub fn reg_float_arg(abi: u32, i: u32, out: ptr, cap: u32) -> u32 {
+    if abi == REG_WIN64 {
+        if i == 0 { return rg_put(out, cap, "xmm0"); }
+        if i == 1 { return rg_put(out, cap, "xmm1"); }
+        if i == 2 { return rg_put(out, cap, "xmm2"); }
+        if i == 3 { return rg_put(out, cap, "xmm3"); }
+        return 0;
+    }
+    if abi == REG_AAPCS64 {
+        if i == 0 { return rg_put(out, cap, "d0"); }
+        if i == 1 { return rg_put(out, cap, "d1"); }
+        if i == 2 { return rg_put(out, cap, "d2"); }
+        if i == 3 { return rg_put(out, cap, "d3"); }
+        if i == 4 { return rg_put(out, cap, "d4"); }
+        if i == 5 { return rg_put(out, cap, "d5"); }
+        if i == 6 { return rg_put(out, cap, "d6"); }
+        if i == 7 { return rg_put(out, cap, "d7"); }
+        return 0;
+    }
+    if i == 0 { return rg_put(out, cap, "xmm0"); }
+    if i == 1 { return rg_put(out, cap, "xmm1"); }
+    if i == 2 { return rg_put(out, cap, "xmm2"); }
+    if i == 3 { return rg_put(out, cap, "xmm3"); }
+    if i == 4 { return rg_put(out, cap, "xmm4"); }
+    if i == 5 { return rg_put(out, cap, "xmm5"); }
+    if i == 6 { return rg_put(out, cap, "xmm6"); }
+    if i == 7 { return rg_put(out, cap, "xmm7"); }
+    return 0;
+}
+
+/// 第 i 个整数返回值寄存器（0 或 1）；其余返回 0。
+pub fn reg_ret_int(abi: u32, i: u32, out: ptr, cap: u32) -> u32 {
+    if abi == REG_AAPCS64 {
+        if i == 0 { return rg_put(out, cap, "x0"); }
+        if i == 1 { return rg_put(out, cap, "x1"); }
+        return 0;
+    }
+    if i == 0 { return rg_put(out, cap, "rax"); }
+    if i == 1 && abi == REG_SYSV { return rg_put(out, cap, "rdx"); }
+    return 0;
+}
+
+/// 第 i 个浮点返回值寄存器（0 或 1）；其余返回 0。
+pub fn reg_ret_float(abi: u32, i: u32, out: ptr, cap: u32) -> u32 {
+    if abi == REG_AAPCS64 {
+        if i == 0 { return rg_put(out, cap, "d0"); }
+        if i == 1 { return rg_put(out, cap, "d1"); }
+        return 0;
+    }
+    if i == 0 { return rg_put(out, cap, "xmm0"); }
+    if i == 1 { return rg_put(out, cap, "xmm1"); }
+    return 0;
+}
+
+/// 整数参数寄存器个数（其余走栈）。
+pub fn reg_int_arg_count(abi: u32) -> u32 {
+    if abi == REG_WIN64 {
+        return 4;
+    }
+    if abi == REG_AAPCS64 {
+        return 8;
+    }
+    return 6;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_calling_sysv() -> bool {
+    let o: ptr = alloc(16);
+    let n: u32 = reg_int_arg(REG_SYSV, 3, o, 16);
+    return n == 3 && load8(o, 0) == 114 && load8(o, 1) == 99 && load8(o, 2) == 120;
+}
+
+fn test_calling_win64() -> bool {
+    let o: ptr = alloc(16);
+    let n: u32 = reg_float_arg(REG_WIN64, 1, o, 16);
+    return n == 4 && load8(o, 3) == 49; // "xmm1"
+}

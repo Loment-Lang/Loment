@@ -22,7 +22,6 @@
 // 命名: 公开 mx_*, 内部 ma_*。自检 test_mx_*。
 
 module matrix
-choose runtime
 
 use "mem.lomt"
 

@@ -31,7 +31,6 @@
 // 命名: 公开 lru_*, 内部 lr_*。自检 test_lru_*。
 
 module lru
-choose runtime
 
 use "mem.lomt"
 use "map.lomt"

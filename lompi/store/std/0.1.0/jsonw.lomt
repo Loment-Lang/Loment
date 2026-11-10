@@ -19,7 +19,6 @@
 // 命名: 公开 jw_*, 内部 jw_*。自检 test_jsonw_*。
 
 module jsonw
-choose runtime
 
 use "mem.lomt"
 use "numfmt.lomt"

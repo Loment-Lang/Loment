@@ -1,0 +1,158 @@
+// system/fcntl.lomt — 文件状态标志的位名
+//
+// 为什么系统工具需要它: `openat` 返回一个 fd，`fcntl(F_GETFL)` 拿回一个**位掩码**。
+// 排查"为什么写不进去"时，把 32769 翻成 `O_WRONLY|O_CLOEXEC` 是第一步。
+// 反过来拼标志时更不能把 `O_CREAT`(64) 与 `O_EXCL`(128) 记混。
+//
+// 覆盖: Linux x86-64 的常用 `O_*` / `F_*`。这些值在 Linux 各架构一致。
+//
+// 命名: 公开 fcnt_*, 内部 fq_*。自检 test_fcntl_*。
+
+module fcntl
+
+pub const FCNT_RDONLY: u32 = 0;
+pub const FCNT_WRONLY: u32 = 1;
+pub const FCNT_RDWR: u32 = 2;
+pub const FCNT_CREAT: u32 = 64;
+pub const FCNT_EXCL: u32 = 128;
+pub const FCNT_TRUNC: u32 = 512;
+pub const FCNT_APPEND: u32 = 1024;
+pub const FCNT_NONBLOCK: u32 = 2048;
+pub const FCNT_DSYNC: u32 = 4096;
+pub const FCNT_DIRECTORY: u32 = 65536;
+pub const FCNT_NOFOLLOW: u32 = 131072;
+pub const FCNT_CLOEXEC: u32 = 524288;
+
+fn fq_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+fn fq_sep(out: ptr, cap: u32, pos: u32) -> u32 {
+    if pos > 0 {
+        return fq_put(out, cap, pos, "|");
+    }
+    return pos;
+}
+
+/// 打开标志 -> 名字串（`O_WRONLY|O_CREAT`）。返回完整长度。
+pub fn fcnt_open_flags(mask: u32, out: ptr, cap: u32) -> u32 {
+    let pos: u32 = 0;
+    let acc: u32 = mask & 3;
+    if acc == 0 {
+        pos = fq_put(out, cap, pos, "O_RDONLY");
+    } else if acc == 1 {
+        pos = fq_put(out, cap, pos, "O_WRONLY");
+    } else if acc == 2 {
+        pos = fq_put(out, cap, pos, "O_RDWR");
+    } else {
+        pos = fq_put(out, cap, pos, "O_ACCMODE");
+    }
+    if (mask & FCNT_CREAT) != 0 {
+        pos = fq_sep(out, cap, pos);
+        pos = fq_put(out, cap, pos, "O_CREAT");
+    }
+    if (mask & FCNT_EXCL) != 0 {
+        pos = fq_sep(out, cap, pos);
+        pos = fq_put(out, cap, pos, "O_EXCL");
+    }
+    if (mask & FCNT_TRUNC) != 0 {
+        pos = fq_sep(out, cap, pos);
+        pos = fq_put(out, cap, pos, "O_TRUNC");
+    }
+    if (mask & FCNT_APPEND) != 0 {
+        pos = fq_sep(out, cap, pos);
+        pos = fq_put(out, cap, pos, "O_APPEND");
+    }
+    if (mask & FCNT_NONBLOCK) != 0 {
+        pos = fq_sep(out, cap, pos);
+        pos = fq_put(out, cap, pos, "O_NONBLOCK");
+    }
+    if (mask & FCNT_DSYNC) != 0 {
+        pos = fq_sep(out, cap, pos);
+        pos = fq_put(out, cap, pos, "O_DSYNC");
+    }
+    if (mask & FCNT_DIRECTORY) != 0 {
+        pos = fq_sep(out, cap, pos);
+        pos = fq_put(out, cap, pos, "O_DIRECTORY");
+    }
+    if (mask & FCNT_NOFOLLOW) != 0 {
+        pos = fq_sep(out, cap, pos);
+        pos = fq_put(out, cap, pos, "O_NOFOLLOW");
+    }
+    if (mask & FCNT_CLOEXEC) != 0 {
+        pos = fq_sep(out, cap, pos);
+        pos = fq_put(out, cap, pos, "O_CLOEXEC");
+    }
+    return pos;
+}
+
+fn fq_eq(s: str, w: str) -> bool {
+    if str_len(s) != str_len(w) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < str_len(s) {
+        if str_byte(s, i) != str_byte(w, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// 名字 -> 值（`O_*` 与常用 `F_*`）。未知返回 -1。
+pub fn fcnt_lookup(name: str) -> i64 {
+    if fq_eq(name, "O_RDONLY") { return 0 as i64; }
+    if fq_eq(name, "O_WRONLY") { return 1 as i64; }
+    if fq_eq(name, "O_RDWR") { return 2 as i64; }
+    if fq_eq(name, "O_CREAT") { return 64 as i64; }
+    if fq_eq(name, "O_EXCL") { return 128 as i64; }
+    if fq_eq(name, "O_TRUNC") { return 512 as i64; }
+    if fq_eq(name, "O_APPEND") { return 1024 as i64; }
+    if fq_eq(name, "O_NONBLOCK") { return 2048 as i64; }
+    if fq_eq(name, "O_DSYNC") { return 4096 as i64; }
+    if fq_eq(name, "O_DIRECTORY") { return 65536 as i64; }
+    if fq_eq(name, "O_NOFOLLOW") { return 131072 as i64; }
+    if fq_eq(name, "O_CLOEXEC") { return 524288 as i64; }
+    if fq_eq(name, "F_DUPFD") { return 0 as i64; }
+    if fq_eq(name, "F_GETFD") { return 1 as i64; }
+    if fq_eq(name, "F_SETFD") { return 2 as i64; }
+    if fq_eq(name, "F_GETFL") { return 3 as i64; }
+    if fq_eq(name, "F_SETFL") { return 4 as i64; }
+    return 0 as i64 - 1 as i64;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_fcntl_flags() -> bool {
+    let o: ptr = alloc(64);
+    let n: u32 = fcnt_open_flags(1 + 64 + 524288, o, 64);
+    let want: str = "O_WRONLY|O_CREAT|O_CLOEXEC";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_fcntl_lookup() -> bool {
+    return fcnt_lookup("O_CLOEXEC") == (524288 as i64)
+        && fcnt_lookup("F_GETFL") == (3 as i64)
+        && fcnt_lookup("nope") == (0 as i64 - 1 as i64);
+}

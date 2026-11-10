@@ -20,7 +20,6 @@
 // 命名: 公开 mall_*, 内部 ml_*。自检 test_mall_*。
 
 module mall
-choose runtime
 
 use "mem.lomt"
 

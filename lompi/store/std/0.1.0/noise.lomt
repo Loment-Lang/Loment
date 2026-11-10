@@ -25,7 +25,6 @@
 // 命名: 公开 nz_*, 内部 nz_*。自检 test_noise_*。
 
 module noise
-choose runtime
 
 use "interp.lomt"
 

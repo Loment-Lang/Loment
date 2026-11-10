@@ -29,7 +29,6 @@
 // 命名: 公开 re_*, 内部 rx_*。自检 test_regex_*。
 
 module regex
-choose runtime
 
 use "mem.lomt"
 

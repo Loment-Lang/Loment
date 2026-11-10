@@ -17,7 +17,6 @@
 // 命名: 公开 base85_*, 内部 b85_*。自检 test_base85_*。
 
 module base85
-choose runtime
 
 use "mem.lomt"
 

@@ -32,7 +32,6 @@
 // 命名: 公开 huffman_*, 内部 hf_*。自检 test_huffman_*。
 
 module huffman
-choose runtime
 
 use "mem.lomt"
 

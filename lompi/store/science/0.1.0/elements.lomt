@@ -1,0 +1,180 @@
+// std/elements.lomt — 元素周期表数据（118 项：符号 + 标准原子量）
+//
+// 为什么标准库要有它: 摩尔质量、化学计量、材料密度这些计算的第一块砖是"这个符号
+// 对应多少 u"。把 118 项写成两张**定宽字符串**而不是 118 个函数：定宽表可以按
+// 下标 O(1) 取，也不会给平名字空间添 118 个符号。
+//
+// 数据口径:
+//   * 原子量是 IUPAC/CIAAW 的常规原子量（u），缩放 1e6 存成 9 位十进制；
+//   * 没有稳定同位素的元素用**最长寿同位素的质量数**（与周期表方括号值同口径）；
+//   * 只收符号与原子量，**不收元素名**（名字是本地化文本，不属于计算层）。
+//
+// 类别（`el_category`）按 Z 的区块判定：1 碱金属、2 碱土、3 过渡、4 后过渡、
+// 5 准金属、6 非金属、7 卤素、8 稀有气体、9 镧系、10 锕系、11 未知。
+//
+// 命名: 公开 el_*, 内部 el_*。自检 test_elements_*。
+
+module elements
+
+
+pub const EL_COUNT: u32 = 118;
+pub const EL_ER: u32 = 4294967295;
+
+// 每个元素 2 字节符号（不足补空格）。
+fn el_symbols() -> str {
+    return "H HeLiBeB C N O F NeNaMgAlSiP S ClArK CaScTiV CrMnFeCoNiCuZnGaGeAsSeBrKrRbSrY ZrNbMoTcRuRhPdAgCdInSnSbTeI XeCsBaLaCePrNdPmSmEuGdTbDyHoErTmYbLuHfTaW ReOsIrPtAuHgTlPbBiPoAtRnFrRaAcThPaU NpPuAmCmBkCfEsFmMdNoLrRfDbSgBhHsMtDsRgCnNhFlMcLvTsOg";
+}
+
+// 每个元素 9 位十进制原子量（u × 1e6）。
+fn el_masses() -> str {
+    return "001008000004002602006940000009012183010810000012011000014007000015999000018998403020179700022989769024305000026981538028085000030973762032060000035450000039948000039098300040078000044955908047867000050941500051996100054938044055845000058933194058693400063546000065380000069723000072630000074921595078971000079904000083798000085467800087620000088905840091224000092906370095950000098000000101070000102905500106420000107868200112414000114818000118710000121760000127600000126904470131293000132905452137327000138905470140116000140907660144242000145000000150360000151964000157250000158925350162500000164930330167259000168934220173045000174966800178490000180947880183840000186207000190230000192217000195084000196966569200592000204380000207200000208980400209000000210000000222000000223000000226000000227000000232037700231035880238028910237000000244000000243000000247000000247000000251000000252000000257000000258000000259000000266000000267000000268000000269000000270000000277000000278000000281000000282000000285000000286000000289000000290000000293000000294000000294000000";
+}
+
+/// Z（1..118）的符号写进 `out`；返回长度（1 或 2）。越界返回 0。
+pub fn el_symbol(z: u32, out: ptr) -> u32 {
+    if z == 0 || z > EL_COUNT {
+        return 0;
+    }
+    let s: str = el_symbols();
+    let o: u32 = (z - 1) * 2;
+    let a: u32 = str_byte(s, o);
+    store8(out, 0, a as u8);
+    let b: u32 = str_byte(s, o + 1);
+    if b == 32 {
+        return 1;
+    }
+    store8(out, 1, b as u8);
+    return 2;
+}
+
+/// Z（1..118）的原子量，单位是 **u × 1e6**。越界返回 0。
+pub fn el_mass(z: u32) -> u64 {
+    if z == 0 || z > EL_COUNT {
+        return 0 as u64;
+    }
+    let s: str = el_masses();
+    let o: u32 = (z - 1) * 9;
+    let v: u64 = 0 as u64;
+    let i: u32 = 0;
+    while i < 9 {
+        v = v * (10 as u64) + ((str_byte(s, o + i) - 48) as u64);
+        i = i + 1;
+    }
+    return v;
+}
+
+/// 两个字节（`b == 0` 表示单字母符号）-> Z；找不到返回 0。
+pub fn el_z(a: u32, b: u32) -> u32 {
+    let s: str = el_symbols();
+    let z: u32 = 1;
+    while z <= EL_COUNT {
+        let o: u32 = (z - 1) * 2;
+        let sa: u32 = str_byte(s, o);
+        let sb: u32 = str_byte(s, o + 1);
+        if b == 0 {
+            if sb == 32 && sa == a {
+                return z;
+            }
+        } else {
+            if sa == a && sb == b {
+                return z;
+            }
+        }
+        z = z + 1;
+    }
+    return 0;
+}
+
+/// 符号 -> Z；找不到返回 0。只接受 1..2 个字符（大小写严格）。
+pub fn el_find(sym: str) -> u32 {
+    let n: u32 = str_len(sym);
+    if n == 0 || n > 2 {
+        return 0;
+    }
+    let s: str = el_symbols();
+    let z: u32 = 1;
+    while z <= EL_COUNT {
+        let o: u32 = (z - 1) * 2;
+        let a: u32 = str_byte(s, o);
+        let b: u32 = str_byte(s, o + 1);
+        let ok: u32 = 0;
+        if n == 1 {
+            if b == 32 && a == str_byte(sym, 0) {
+                ok = 1;
+            }
+        } else {
+            if a == str_byte(sym, 0) && b == str_byte(sym, 1) {
+                ok = 1;
+            }
+        }
+        if ok == 1 {
+            return z;
+        }
+        z = z + 1;
+    }
+    return 0;
+}
+
+/// 类别（见文件头）。越界返回 0。
+pub fn el_category(z: u32) -> u32 {
+    if z == 0 || z > EL_COUNT {
+        return 0;
+    }
+    if z >= 57 && z <= 71 {
+        return 9;
+    }
+    if z >= 89 && z <= 103 {
+        return 10;
+    }
+    if z == 2 || z == 10 || z == 18 || z == 36 || z == 54 || z == 86 || z == 118 {
+        return 8;
+    }
+    if z == 9 || z == 17 || z == 35 || z == 53 || z == 85 || z == 117 {
+        return 7;
+    }
+    if z == 1 || z == 6 || z == 7 || z == 8 || z == 15 || z == 16 || z == 34 {
+        return 6;
+    }
+    if z == 3 || z == 11 || z == 19 || z == 37 || z == 55 || z == 87 {
+        return 1;
+    }
+    if z == 4 || z == 12 || z == 20 || z == 38 || z == 56 || z == 88 {
+        return 2;
+    }
+    if z == 5 || z == 14 || z == 32 || z == 33 || z == 51 || z == 52 {
+        return 5;
+    }
+    if (z >= 21 && z <= 30) || (z >= 39 && z <= 48) || (z >= 72 && z <= 80)
+        || (z >= 104 && z <= 112) {
+        return 3;
+    }
+    if z == 13 || z == 31 || z == 49 || z == 50 || (z >= 81 && z <= 84)
+        || (z >= 113 && z <= 116) {
+        return 4;
+    }
+    return 11;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_elements_h() -> bool {
+    let b: ptr = alloc(2);
+    if el_symbol(1, b) != 1 {
+        return false;
+    }
+    return load8(b, 0) == 72 && el_mass(1) == 1008000 && el_find("H") == 1;
+}
+
+fn test_elements_fe() -> bool {
+    let b: ptr = alloc(2);
+    if el_symbol(26, b) != 2 {
+        return false;
+    }
+    return load8(b, 0) == 70 && load8(b, 1) == 101
+        && el_mass(26) == 55845000 && el_find("Fe") == 26;
+}
+
+fn test_elements_categories() -> bool {
+    return el_category(1) == 1 && el_category(8) == 6 && el_category(26) == 3
+        && el_category(57) == 9 && el_category(92) == 10 && el_category(118) == 8;
+}

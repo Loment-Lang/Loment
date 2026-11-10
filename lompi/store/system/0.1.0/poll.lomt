@@ -1,0 +1,162 @@
+// system/poll.lomt — poll / epoll 的事件位名
+//
+// 为什么系统工具需要它: 事件循环里 `revents` 是一个位掩码：`0x11` 同时意味着
+// "可读"与"对端关闭"。把它翻成 `POLLIN|POLLHUP` 才能看出"读到最后了"。
+// `epoll` 的位与 `poll` 的前几位相同，但 `EPOLLET` 在最高位，混用会静默丢事件。
+//
+// 覆盖: Linux 通用值（x86-64 / AArch64 一致）。
+//
+// 命名: 公开 pw_*, 内部 pq_*。自检 test_poll_*。
+
+module poll
+
+pub const PW_IN: u32 = 1;
+pub const PW_PRI: u32 = 2;
+pub const PW_OUT: u32 = 4;
+pub const PW_ERR: u32 = 8;
+pub const PW_HUP: u32 = 16;
+pub const PW_NVAL: u32 = 32;
+pub const PW_RDNORM: u32 = 64;
+pub const PW_RDBAND: u32 = 128;
+pub const PW_WRNORM: u32 = 256;
+pub const PW_WRBAND: u32 = 512;
+pub const PW_EPOLLET: u32 = 2147483648;
+
+fn pq_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+fn pq_sep(out: ptr, cap: u32, pos: u32) -> u32 {
+    if pos > 0 {
+        return pq_put(out, cap, pos, "|");
+    }
+    return pos;
+}
+
+/// poll 事件掩码 -> 名字串。
+pub fn pw_events_text(mask: u32, out: ptr, cap: u32) -> u32 {
+    let pos: u32 = 0;
+    if (mask & PW_IN) != 0 {
+        pos = pq_put(out, cap, pos, "POLLIN");
+    }
+    if (mask & PW_PRI) != 0 {
+        pos = pq_sep(out, cap, pos);
+        pos = pq_put(out, cap, pos, "POLLPRI");
+    }
+    if (mask & PW_OUT) != 0 {
+        pos = pq_sep(out, cap, pos);
+        pos = pq_put(out, cap, pos, "POLLOUT");
+    }
+    if (mask & PW_ERR) != 0 {
+        pos = pq_sep(out, cap, pos);
+        pos = pq_put(out, cap, pos, "POLLERR");
+    }
+    if (mask & PW_HUP) != 0 {
+        pos = pq_sep(out, cap, pos);
+        pos = pq_put(out, cap, pos, "POLLHUP");
+    }
+    if (mask & PW_NVAL) != 0 {
+        pos = pq_sep(out, cap, pos);
+        pos = pq_put(out, cap, pos, "POLLNVAL");
+    }
+    if (mask & PW_RDNORM) != 0 {
+        pos = pq_sep(out, cap, pos);
+        pos = pq_put(out, cap, pos, "POLLRDNORM");
+    }
+    if (mask & PW_RDBAND) != 0 {
+        pos = pq_sep(out, cap, pos);
+        pos = pq_put(out, cap, pos, "POLLRDBAND");
+    }
+    if (mask & PW_WRNORM) != 0 {
+        pos = pq_sep(out, cap, pos);
+        pos = pq_put(out, cap, pos, "POLLWRNORM");
+    }
+    if (mask & PW_WRBAND) != 0 {
+        pos = pq_sep(out, cap, pos);
+        pos = pq_put(out, cap, pos, "POLLWRBAND");
+    }
+    if pos == 0 {
+        pos = pq_put(out, cap, pos, "0");
+    }
+    return pos;
+}
+
+/// epoll 事件掩码 -> 名字串（低 5 位与 poll 同名）。
+pub fn pw_epoll_text(mask: u32, out: ptr, cap: u32) -> u32 {
+    let pos: u32 = 0;
+    if (mask & PW_IN) != 0 {
+        pos = pq_put(out, cap, pos, "EPOLLIN");
+    }
+    if (mask & PW_PRI) != 0 {
+        pos = pq_sep(out, cap, pos);
+        pos = pq_put(out, cap, pos, "EPOLLPRI");
+    }
+    if (mask & PW_OUT) != 0 {
+        pos = pq_sep(out, cap, pos);
+        pos = pq_put(out, cap, pos, "EPOLLOUT");
+    }
+    if (mask & PW_ERR) != 0 {
+        pos = pq_sep(out, cap, pos);
+        pos = pq_put(out, cap, pos, "EPOLLERR");
+    }
+    if (mask & PW_HUP) != 0 {
+        pos = pq_sep(out, cap, pos);
+        pos = pq_put(out, cap, pos, "EPOLLHUP");
+    }
+    if (mask & 8192) != 0 {
+        pos = pq_sep(out, cap, pos);
+        pos = pq_put(out, cap, pos, "EPOLLRDHUP");
+    }
+    if (mask & PW_EPOLLET) != 0 {
+        pos = pq_sep(out, cap, pos);
+        pos = pq_put(out, cap, pos, "EPOLLET");
+    }
+    if (mask & 1073741824) != 0 {
+        pos = pq_sep(out, cap, pos);
+        pos = pq_put(out, cap, pos, "EPOLLONESHOT");
+    }
+    if (mask & 536870912) != 0 {
+        pos = pq_sep(out, cap, pos);
+        pos = pq_put(out, cap, pos, "EPOLLEXCLUSIVE");
+    }
+    if pos == 0 {
+        pos = pq_put(out, cap, pos, "0");
+    }
+    return pos;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_poll_events() -> bool {
+    let o: ptr = alloc(64);
+    let n: u32 = pw_events_text(17, o, 64);
+    let want: str = "POLLIN|POLLHUP";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_poll_epoll() -> bool {
+    let o: ptr = alloc(64);
+    let n: u32 = pw_epoll_text(2147483652, o, 64);
+    let want: str = "EPOLLOUT|EPOLLET";
+    return n == str_len(want) && load8(o, 0) == 69;
+}

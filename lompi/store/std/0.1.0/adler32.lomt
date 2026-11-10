@@ -14,7 +14,6 @@
 // 命名: 公开 adler32_*, 内部 ad_*。自检 test_adler32_*。
 
 module adler32
-choose runtime
 
 use "mem.lomt"
 

@@ -13,7 +13,6 @@
 // 命名: 公开 heap_*, 内部 hp_* / hpa_*。自检 test_heap_*。
 
 module heap
-choose runtime
 
 use "mem.lomt"
 

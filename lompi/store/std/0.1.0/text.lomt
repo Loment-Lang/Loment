@@ -10,7 +10,6 @@
 // 命名: 公开一律 text_*, 内部一律 tx_*。自检 test_text_*。
 
 module text
-choose runtime
 
 use "char.lomt"
 use "mem.lomt"

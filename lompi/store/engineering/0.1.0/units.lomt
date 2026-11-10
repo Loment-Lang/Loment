@@ -1,0 +1,161 @@
+// std/units.lomt — 单位换算（长度/质量/时间/体积/能量/功率/压强/角度）
+//
+// 这样分组的理由: 每一组内部是**同一量纲**，换算就是一个比例；跨组不换算（长度换
+// 质量没有意义）。温度不在这里 —— 它是仿射变换（有偏移），在 `thermo`。
+//
+// 口径:
+//   * 长度米、质量千克、时间秒、体积立方米、能量焦耳、功率瓦、压强帕、角度弧度；
+//   * 英制用国际定义（inch = 0.0254 m 精确，lb = 0.45359237 kg 精确）；
+//   * 加仑用 **US liquid gallon**（3.785411784 L），不是英制加仑。
+//
+// 不做的: 量纲检查（那要类型系统）、货币（`money`）、温度（`thermo`）、
+// 以及"复合单位"（km/h、kg/m³）—— 复合换算请拆成两次调用。
+//
+// 命名: 公开 un_*, 内部 un_*。自检 test_units_*。
+
+module units
+
+use f64
+
+pub const UN_ERR: u64 = 4294967295;
+
+// 长度
+pub const UN_M: u32 = 1;
+pub const UN_KM: u32 = 2;
+pub const UN_CM: u32 = 3;
+pub const UN_MM: u32 = 4;
+pub const UN_INCH: u32 = 5;
+pub const UN_FT: u32 = 6;
+pub const UN_MILE: u32 = 7;
+// 质量
+pub const UN_KG: u32 = 11;
+pub const UN_G: u32 = 12;
+pub const UN_LB: u32 = 13;
+pub const UN_OZ: u32 = 14;
+// 时间
+pub const UN_S: u32 = 21;
+pub const UN_MIN: u32 = 22;
+pub const UN_HOUR: u32 = 23;
+pub const UN_DAY: u32 = 24;
+// 体积
+pub const UN_L: u32 = 31;
+pub const UN_ML: u32 = 32;
+pub const UN_GAL: u32 = 33;
+// 能量
+pub const UN_J: u32 = 41;
+pub const UN_KJ: u32 = 42;
+pub const UN_CAL: u32 = 43;
+pub const UN_KCAL: u32 = 44;
+pub const UN_KWH: u32 = 45;
+// 功率
+pub const UN_W: u32 = 51;
+pub const UN_KW: u32 = 52;
+pub const UN_HP: u32 = 53;
+// 压强
+pub const UN_PA: u32 = 61;
+pub const UN_KPA: u32 = 62;
+pub const UN_BAR: u32 = 63;
+pub const UN_ATM: u32 = 64;
+pub const UN_PSI: u32 = 65;
+// 角度
+pub const UN_RAD: u32 = 71;
+pub const UN_DEG: u32 = 72;
+pub const UN_GRAD: u32 = 73;
+pub const UN_TURN: u32 = 74;
+
+/// 单位 -> 换算到 SI 基本单位的比例（double 位）；未知单位返回 0。
+pub fn un_factor(code: u32) -> u64 {
+    if code == UN_M { return 0x3FF0000000000000; }
+    if code == UN_KM { return 0x408F400000000000; }
+    if code == UN_CM { return 0x3F847AE147AE147B; }
+    if code == UN_MM { return 0x3F50624DD2F1A9FC; }
+    if code == UN_INCH { return 0x3F9A027525460AA6; }
+    if code == UN_FT { return 0x3FD381D7DBF487FD; }
+    if code == UN_MILE { return 0x409925604189374C; }
+    if code == UN_KG { return 0x3FF0000000000000; }
+    if code == UN_G { return 0x3F50624DD2F1A9FC; }
+    if code == UN_LB { return 0x3FDD07A84AB75E51; }
+    if code == UN_OZ { return 0x3F9D07A84AB75E51; }
+    if code == UN_S { return 0x3FF0000000000000; }
+    if code == UN_MIN { return 0x404E000000000000; }
+    if code == UN_HOUR { return 0x40AC200000000000; }
+    if code == UN_DAY { return 0x40F5180000000000; }
+    if code == UN_L { return 0x3F50624DD2F1A9FC; }
+    if code == UN_ML { return 0x3EB0C6F7A0B5ED8D; }
+    if code == UN_GAL { return 0x3F6F02957A0DB492; }
+    if code == UN_J { return 0x3FF0000000000000; }
+    if code == UN_KJ { return 0x408F400000000000; }
+    if code == UN_CAL { return 0x4010BC6A7EF9DB23; }
+    if code == UN_KCAL { return 0x40B0580000000000; }
+    if code == UN_KWH { return 0x414B774000000000; }
+    if code == UN_W { return 0x3FF0000000000000; }
+    if code == UN_KW { return 0x408F400000000000; }
+    if code == UN_HP { return 0x40874D995645AA01; }
+    if code == UN_PA { return 0x3FF0000000000000; }
+    if code == UN_KPA { return 0x408F400000000000; }
+    if code == UN_BAR { return 0x40F86A0000000000; }
+    if code == UN_ATM { return 0x40F8BCD000000000; }
+    if code == UN_PSI { return 0x40BAEEC1DDF70E0B; }
+    if code == UN_RAD { return 0x3FF0000000000000; }
+    if code == UN_DEG { return 0x3F91DF46A2529D39; }
+    if code == UN_GRAD { return 0x3F9015BF9217271A; }
+    if code == UN_TURN { return 0x401921FB54442D18; }
+    return 0 as u64;
+}
+
+/// 同量纲换算：v 从 `from` 到 `to`。未知单位或比例 0 返回 NaN。
+pub fn un_convert(v: u64, from: u32, to: u32) -> u64 {
+    let a: u64 = un_factor(from);
+    let b: u64 = un_factor(to);
+    if f64_eq(b, F64_POS_ZERO) || f64_eq(a, F64_POS_ZERO) {
+        return 0x7FF8000000000000;
+    }
+    return f64_div(f64_mul(v, a), b);
+}
+
+// SI 前缀：1 n、2 u、3 m、4 c、5 d、6 k、7 M、8 G、9 T
+pub fn un_prefix_factor(code: u32) -> u64 {
+    if code == 1 { return 0x3E112E0BE826D695; } // 1e-9
+    if code == 2 { return 0x3EB0C6F7A0B5ED8D; } // 1e-6
+    if code == 3 { return 0x3F50624DD2F1A9FC; } // 1e-3
+    if code == 4 { return 0x3F847AE147AE147B; } // 1e-2
+    if code == 5 { return 0x3FB999999999999A; } // 1e-1
+    if code == 6 { return 0x408F400000000000; } // 1e3
+    if code == 7 { return 0x412E848000000000; } // 1e6
+    if code == 8 { return 0x41CDCD6500000000; } // 1e9
+    if code == 9 { return 0x426D1A94A2000000; } // 1e12
+    return 0 as u64;
+}
+
+/// 把值乘以一个 SI 前缀因子。
+pub fn un_apply_prefix(v: u64, code: u32) -> u64 {
+    let f: u64 = un_prefix_factor(code);
+    if f64_eq(f, F64_POS_ZERO) {
+        return 0x7FF8000000000000;
+    }
+    return f64_mul(v, f);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_units_length() -> bool {
+    // 1 mile = 1.609344 km
+    let km: u64 = un_convert(F64_ONE, UN_MILE, UN_KM);
+    return f64_eq(km, 0x3FF9BFDF7E8038A0); // 1.609344
+}
+
+fn test_units_mass() -> bool {
+    // 1 lb = 0.45359237 kg
+    return f64_eq(un_convert(F64_ONE, UN_LB, UN_KG), 0x3FDD07A84AB75E51);
+}
+
+fn test_units_angle() -> bool {
+    // 180 deg = pi rad
+    let r: u64 = un_convert(0x4066800000000000, UN_DEG, UN_RAD); // 180
+    return f64_eq(r, 0x400921FB54442D18);
+}
+
+fn test_units_prefix() -> bool {
+    // 1 km = 1000 m
+    return f64_eq(un_apply_prefix(F64_ONE, 6), 0x408F400000000000);
+}

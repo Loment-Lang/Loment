@@ -47,7 +47,6 @@
 // 命名: 公开 gr_*, 内部 gb_*。自检 test_graph_*。
 
 module graph
-choose runtime
 
 use "mem.lomt"
 

@@ -30,7 +30,6 @@
 // 自检 test_intmath_*。
 
 module intmath
-choose runtime
 
 use "mem.lomt"
 

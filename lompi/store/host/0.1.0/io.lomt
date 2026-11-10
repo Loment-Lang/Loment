@@ -31,7 +31,6 @@
 //      直写, 少一个隐式约定。
 
 module io
-choose runtime
 
 // 纯数字格式化 (原来的 io_dec_into / io_hex_into 与那两个 MAX 常量) 已移到 std 包里的
 // numfmt.lomt —— 它们一个 syscall 都不发, 留在 io 里会让**可移植层反过来依赖宿主层**

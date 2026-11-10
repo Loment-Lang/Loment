@@ -106,6 +106,10 @@ GLOBS = [
     # std 核的行为判据 (docs/180): lib/ 里那些函数算得对不对 —— 与
     # `loment_lib_test`(库系统) 是两件事, 原先只测了后者
     "tools/loment_std_test.py",
+    # 领域包的行为判据 (docs/317/318/319): 八个领域包逐个探针对 Python 对跑
+    "tools/loment_domains_test.py",
+    # IR 缓存 (docs/325): 实现 + 判据
+    "tools/loment_cache.py", "tools/loment_cache_test.py",
     # LibL 的 libc 面 (docs/232): 与真 glibc 逐字节对跑
     "tools/loment_libl_test.py",
     # LibL 家族第三个包 internet (docs/241): 对 CPython 标准库 + 真 http.server 对跑
@@ -129,7 +133,7 @@ GLOBS = [
     "tools/loment_err_test.py",
     # lompi (随包发行的独立命令, docs/170): 源码快照 + 它外面的正本与仓内副本的同步/校验
     "lompi/*.lomt",
-    # lompi 的标准库: 随 Loment 一起装 (std/host/internet/os 四个包, 共 168 个文件 ——
+    # lompi 的标准库: 随 Loment 一起装 (std/host/internet/os + 八个领域包, 共 217 个文件 ——
     # 数见 `loment_lompi_test.STORE_FILES`; 用户 2026-09-16 定的随包形状)。
     # **版本号是故意写死的**: 自举那边 (loment/tools/lomrel.lomt) 的 glob 只认"一段目录 +
     # 一个名字模式", `**` 在那边展开不出递归 (实测只给一层, 于是把 std/ host/ 两个**目录**
@@ -138,6 +142,14 @@ GLOBS = [
     # `loment_release --check` 会**看不见文件而照样绿**, 那条会红。
     "lompi/store/std/0.1.0/*", "lompi/store/host/0.1.0/*", "lompi/store/internet/0.1.0/*",
     "lompi/store/os/0.1.0/*",
+    "lompi/store/math/0.1.0/*",
+    "lompi/store/science/0.1.0/*",
+    "lompi/store/engineering/0.1.0/*",
+    "lompi/store/world/0.1.0/*",
+    "lompi/store/dev/0.1.0/*",
+    "lompi/store/lowlevel/0.1.0/*",
+    "lompi/store/system/0.1.0/*",
+    "lompi/store/baremetal/0.1.0/*",
     "tools/lompi_sync.py", "tools/loment_lompi_test.py",
     # 发布口 (docs/171): 把单仓里的 Loment / lompi 切出来推到各自的私有库
     "tools/loment_publish.py",

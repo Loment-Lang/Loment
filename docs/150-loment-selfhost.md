@@ -538,7 +538,7 @@ error: invalid redefinition of function 'tok_kind'
    `E016`（数组字面量）/`E017`（`as` 转换），并把 `无字段/缺字段/重复初始化` 从 E009
    挪到 E015 —— 码按**修法**分，不按消息措辞分。
 2. 参考实现能发出的消息模板**必须全部可分类**：分类表漏一条，那条规则在对照里就变成
-   "两边都成 E999 被丢掉"，**缺口会静默消失**。`loment_tools_test` 新增
+   "两边都成 E0999 被丢掉"，**缺口会静默消失**。`loment_tools_test` 新增
    `test_m64_all_reference_messages_are_classified`（ast 抽取 81 条模板逐条分类），
    以及 `test_m81_builtin_tables_match`（自举 `is_builtin` 的名字集合 == `lomentc.BUILTINS` ∪ `{slice_len}`）。
 

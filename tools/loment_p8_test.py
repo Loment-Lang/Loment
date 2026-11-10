@@ -585,7 +585,7 @@ def _classify_codes(errs: list[str]) -> list[int]:
     out: list[int] = []
     for e in errs:
         code, _title, _hint = loment_diag.classify(e)
-        if code != "E999":
+        if code != "E0999":
             out.append(int(code[1:]))
     return sorted(set(out))
 
@@ -3152,7 +3152,7 @@ def _ref_diag_pairs(src: Path) -> set[tuple[int, int]]:
     out: set[tuple[int, int]] = set()
     for m in msgs:
         code, _t, _h = loment_diag.classify(m)
-        if code == "E999":
+        if code == "E0999":
             continue
         g = re.match(r"^\s*(\d+):", m)
         out.add((int(code[1:]), int(g.group(1)) if g else -1))
@@ -3522,7 +3522,7 @@ def test_m85_a_parse_failure_reaches_diag_out():
     `comefor` / `byuse` 那九支失败原先只写 stderr —— 启动器（`--json` / `--short` 的读者）
     拿到的是一个**空文件**配一个非零退出码，而那正是差错系统存在要避免的组合。
     这里喂 `byuse` 写在函数体里的单元（自举侧的 `re == 5`），两面都钉：给人看的那一句
-    在 stderr，结构化那一份在 JSONL 里，且**码与参考实现一致**（`E999`，见
+    在 stderr，结构化那一份在 JSONL 里，且**码与参考实现一致**（`E0999`，见
     `tools/lomentc.py` 的 `Wdiag` 那一档 —— 没有专属码的构造归这里）。
 
     `line` 断言成 `0`：自举侧的 comefor 展开只回**种类**、不回 token 下标，所以这一格
@@ -3547,7 +3547,7 @@ def test_m85_a_parse_failure_reaches_diag_out():
         assert dj.exists(), "没有结构化诊断文件"
         recs = [json.loads(x) for x in dj.read_text(encoding="utf-8").splitlines() if x.strip()]
         assert recs, "结构化诊断是空的（启动器只能回吐裸行）—— 正是 #657 的症状"
-        assert recs[0]["code"] == "E999", f"码与参考实现不一致: {recs[0]}"
+        assert recs[0]["code"] == "E0999", f"码与参考实现不一致: {recs[0]}"
         assert "byuse must be written at the top level" in recs[0]["message"], recs[0]
         assert recs[0]["line"] == 0, (
             f"没有位置的失败这一格必须是 0（登记在案的缺口, 见 docstring）: {recs[0]}")

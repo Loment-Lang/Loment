@@ -76,7 +76,7 @@ loment_admit_test 8
 loment_zwframe_test 7
 loment_lib_test 15
 loment_cli_test 50
-loment_err_test 55
+loment_err_test 57
 loment_std_test 5
 loment_domains_test 7
 loment_cache_test 4

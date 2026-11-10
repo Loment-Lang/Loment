@@ -396,7 +396,7 @@ what you should do, not by wording**:
 | E37 | **LSPE policy lock** - reserved; the policy layer does not exist today, so it is never emitted |
 | E38 | **`lspe pass` without a reason** - the reason is mandatory; an anonymous bypass is an unlabelled floor |
 
-`E900` / `E999` are internal ("wrote no diagnostic record" / "unclassified - please report");
+`E0900` / `E0999` are internal ("wrote no diagnostic record" / "unclassified - please report");
 they are not source errors.
 
 **Every code has a full card** (what went wrong / why / at least three fixes / supported and not

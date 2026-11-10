@@ -1585,7 +1585,7 @@ fix a user must make**, not by wording.
 | E039 | `lgc` requires a collector, but the unit chose `no_gc`. |
 | E040 | An undeclared unit declares a name that a newer edition treats as syntax (§8.7). |
 
-`E900` (the tool died without writing a diagnostic) and `E999` (unclassified; please
+`E0900` (the tool died without writing a diagnostic) and `E0999` (unclassified; please
 report) are internal and MUST NOT be produced for a well-formed program.
 
 A diagnostic MUST include a source position (line, and column or token) except for the

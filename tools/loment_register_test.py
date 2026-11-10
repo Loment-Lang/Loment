@@ -50,7 +50,7 @@ def _codes(src: str) -> list[int]:
         f.write_text(src, encoding="utf-8", newline="\n")
         msgs = lomentc.check(lomentc.load(f))
     return sorted({int(loment_diag.classify(m)[0][1:]) for m in msgs
-                   if loment_diag.classify(m)[0] != "E999"})
+                   if loment_diag.classify(m)[0] != "E0999"})
 
 
 GOOD = ("module m\n\npub fn loment_command() -> str { return \"mcmd\"; }\n\n"

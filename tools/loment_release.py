@@ -87,7 +87,8 @@ RELEASE_NAME = "0.1.5.1"  # 人读显示名 (发行包/文档用同一个真源)
 #   0.1.0  编译期落地 —— 渲染器本身, 接进工具链与两个启动器
 #   0.1.1  说明卡 + 六语言方言卡 + 上色 + 语法声明优先
 #   0.1.2  双语 (默认英文) + 三个出口 (`--short`/`--json`) + 逐条建议
-LOMENTERR = "0.1.2"
+#   0.1.3  报错码细分: 27 个族码 -> 207 个码, 每条诊断一个码 + 一套自己的卡 (`docs/329`)
+LOMENTERR = "0.1.3"
 GLOBS = [
     "tools/lomc.py", "tools/lom_audit.py", "tools/lomc_test.py", "tools/lomentc.py",
     "tools/lomentc_test.py", "tools/lspe_test.py", "tools/lspe_ratchet.py",

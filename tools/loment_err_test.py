@@ -127,8 +127,8 @@ def test_render_carries_the_whole_card():
     f, d = _check(SEMANTIC)
     rc, out = _render(d, lang=ZH)
     assert rc == 1, (rc, out[:200])
-    assert "error[E002]:" in out, out[:200]
-    assert "符号未声明" in out, "没查 surface_data 的标题"
+    assert "error[E091]:" in out, out[:200]
+    assert "变量没有声明" in out, "没查 surface_data 的标题"
     assert "-->" in out, out[:200]
     assert ":4" in out, "位置里没有行号"
     assert "return z;" in out, "没有把源行印出来"
@@ -138,7 +138,7 @@ def test_render_carries_the_whole_card():
     # 修法编号成列, 且 >= 3 条 (门槛)
     for i in (1, 2, 3):
         assert f"  {i}. " in out, f"没有第 {i} 条修法: {out[-300:]!r}"
-    assert " 4. " in out, "这一条的卡有 4 条修法, 生成器把第 4 条丢了?"
+    assert " 3. " in out and " 4. " not in out, "这一条的卡有 3 条修法, 生成器没印全或印多了?"
     print("      渲染完整: 位置 + 插入符 + 四段说明卡 + 编号修法(>=3)")
 
 @test
@@ -270,11 +270,11 @@ def test_unknown_code_is_said_out_loud():
     with tempfile.TemporaryDirectory() as td:
         d = Path(td) / "d.jsonl"
         d.write_text(json.dumps({"file": "x.lomt", "line": 1, "col": 2,
-                                 "code": "E042", "message": "未来才有这个码"}) + "\n",
+                                 "code": "E0300", "message": "未来才有这个码"}) + "\n",
                      encoding="utf-8", newline="\n")
         rc, out = _render(d, lang=ZH)
     assert rc == 1, (rc, out)
-    assert "E042" in out, "码本身要原样印出来"
+    assert "E0300" in out, "码本身要原样印出来"
     assert "未知错误码" in out, f"没说不认识这个码: {out[:200]}"
     assert "没有说明卡" in out, f"没交代四段为什么缺席: {out[-300:]!r}"
     assert "不在表面数据表里" in out, f"没解释为什么没有建议: {out[:200]}"
@@ -408,7 +408,7 @@ def test_json_output_is_always_valid_utf8():
 
 @test
 def test_the_fallback_code_has_a_card():
-    """`#658`: E999 是**兜底码**，原先它是唯一一个没有卡片的码 —— 报错器于是用"工具链版本
+    """`#658`: E0999 是**兜底码**，原先它是唯一一个没有卡片的码 —— 报错器于是用"工具链版本
     不齐"去解释编译器自己的兜底，而那句话是错的：分类表与编译器是同一个仓、同一次构建。
 
     现在它有一张真卡片：说清"没归类"，并给出报告时要带的东西。
@@ -416,15 +416,15 @@ def test_the_fallback_code_has_a_card():
     with tempfile.TemporaryDirectory() as td:
         d = Path(td) / "d.jsonl"
         d.write_text(json.dumps({"file": "x.lomt", "line": 1, "col": 1,
-                                 "code": "E999", "message": "never seen this"}) + "\n",
+                                 "code": "E0999", "message": "never seen this"}) + "\n",
                      encoding="utf-8", newline="\n")
         rc, out = _render(d)
     assert rc == 1, (rc, out[:200])
-    assert "error[E999]: unclassified (please report)" in out, out[:200]
+    assert "error[E0999]: unclassified (please report)" in out, out[:200]
     assert "not in the classification table" in out, out[:300]
     assert "toolchain versions may not match" not in out, \
         f"还在拿版本不齐解释兜底码: {out[-300:]!r}"
-    print("      兜底码 E999 有卡片：说“没归类”，不再怪版本")
+    print("      兜底码 E0999 有卡片：说“没归类”，不再怪版本")
 
 
 @test
@@ -665,7 +665,7 @@ def test_foreign_words_in_a_comment_do_not_flag_a_loment_file():
                        errors="replace", shell=False, timeout=120)
     assert r.returncode == 1, (r.returncode, r.stderr[-200:])
     _, out = _render(d, lang=ZH)
-    assert "error[E002]" in out, out[:200]
+    assert "error[E091]" in out, out[:200]
     assert "不是 Loment" not in out, f"被注释带跑了: {out[-300:]!r}"
     print("      注释里的外源特征词不误报 (命中要在行首)")
 
@@ -919,7 +919,7 @@ def test_errconfig_switches_the_language_and_a_bad_one_falls_back():
             _errconfig(Path(td), body)
             rc, out = _run_in(Path(td), d)
         assert rc == 1, (body, rc, out[:120])
-        got_zh = "符号未声明" in out
+        got_zh = "变量没有声明" in out
         assert got_zh == want_zh, f"errconfig={body!r} 期望中文={want_zh} 得到 {got_zh}: {out[:200]!r}"
     print("      errconfig: zh/ZH/Chinese 切中文, en/乱值/注释里的伪标签都退回默认")
 
@@ -957,15 +957,15 @@ def test_the_toolchain_beside_errconfig_is_the_second_place_read():
             assert r.returncode == 1, (r.returncode, r.stderr[:120])
             return r.stdout + r.stderr
 
-        assert "符号未声明" in run(), "工具链旁边那份没被读到"
+        assert "变量没有声明" in run(), "工具链旁边那份没被读到"
         # 项目那份写了个认不出来的值 → **当作没配**，落到工具链那份（中文），而不是英文
         _errconfig(cwd, 'module errconfig\npub fn error_lang() -> str {\n'
                         '    return "klingon";\n}\n')
-        assert "符号未声明" in run(), "认不出来的值把系统级设置作废了 (该继续找下一份)"
+        assert "变量没有声明" in run(), "认不出来的值把系统级设置作废了 (该继续找下一份)"
         # 项目那份**有效**时必须压过工具链那份
         _errconfig(cwd, 'module errconfig\npub fn error_lang() -> str {\n'
                         '    return "en";\n}\n')
-        assert "undeclared name" in run(), "项目那份没有压过工具链那份"
+        assert "the variable is not declared" in run(), "项目那份没有压过工具链那份"
     print("      两份 errconfig: 项目优先、工具链兜底, 认不出来的值算'没配'")
 
 
@@ -1030,19 +1030,19 @@ def test_summary_is_singular_and_points_only_at_codes_that_exist():
     两件都在同一行汇总上：
       * **单数** —— `1 errors:` 是英文里最便宜的那种破绽，而它是用户读到的最后一句；
       * **不指空** —— 编译器可以吐出表面数据表里没有的码（旧报错器遇上新编译器，
-        或者别的工具写进来的 `E999`）。那种码点开是 `(unknown code)`，比不指更坏：
+        或者别的工具写进来的 `E0999`）。那种码点开是 `(unknown code)`，比不指更坏：
         用户会以为是自己抄错了码。
     """
     with tempfile.TemporaryDirectory(prefix="lomenterr-one-") as td:
         d = Path(td) / "one.jsonl"
         d.write_text(json.dumps({"file": "x.lomt", "line": 1, "col": 1,
-                                 "code": "E999", "message": "a"}) + "\n",
+                                 "code": "E0999", "message": "a"}) + "\n",
                      encoding="utf-8", newline="\n")
         rc, out = _render(d)
         assert rc == 1, (rc, out[:200])
-        assert "1 error: E999 x1" in out, f"单数没生效: {out[-200:]!r}"
-        # `#658` 之后 E999 有一张真卡片，`explain E999` 讲得出来 —— 指它是**对的**。
-        assert "more: loment explain E999" in out, \
+        assert "1 error: E0999 x1" in out, f"单数没生效: {out[-200:]!r}"
+        # `#658` 之后 E0999 有一张真卡片，`explain E0999` 讲得出来 —— 指它是**对的**。
+        assert "more: loment explain E0999" in out, \
             f"兜底码有卡片了就该指: {[l for l in out.splitlines() if 'more:' in l]!r}"
 
         # 一真一假：真那个要指，**表里没有的**不许带出来。E777 是用户码段里的空号。
@@ -1055,7 +1055,7 @@ def test_summary_is_singular_and_points_only_at_codes_that_exist():
         assert rc == 1, (rc, out[:200])
         more = [l for l in out.splitlines() if "more:" in l]
         assert more and "E001" in more[0] and "E777" not in more[0], f"more 行不对: {more!r}"
-    print("      汇总: 一条用单数；more 只指表里有的码 (E001 与 E999 指，E777 不指)")
+    print("      汇总: 一条用单数；more 只指表里有的码 (E001 与 E0999 指，E777 不指)")
 
 
 # ---------------------------------------------------------------- --short / --json (§15)
@@ -1141,7 +1141,7 @@ def test_json_mode_keeps_a_corrupt_line_inside_the_stream():
     原先那行是两行纯文本（`[lomenterr] this line …` + 原文），插在 JSONL 中间 ——
     下游解析器当场坏，而它正在处理的恰恰是"诊断文件里有坏数据"这件事。
     形状与诊断对象**不同**（`broken: true` + `text`）：那条记录唯一的事实就是
-    "这一行读不懂"，硬造一个 `E999` 会让它看起来像一条真诊断（而 explain 讲不出来，
+    "这一行读不懂"，硬造一个 `E0999` 会让它看起来像一条真诊断（而 explain 讲不出来，
     那正是 `#487` 刚清掉的东西）。
     """
     with tempfile.TemporaryDirectory(prefix="lomenterr-broken-") as td:
@@ -1407,7 +1407,7 @@ def test_json_omits_an_empty_suggestions_array():
     rc, out = _run_in(d.parent, d, "--json")
     assert rc == 1, (rc, out[:200])
     obj = json.loads([ln for ln in out.splitlines() if ln.strip()][0])
-    assert obj["code"] == "E015", obj
+    assert obj["code"] == "E0138", obj
     assert "suggestions" not in obj, (
         f"E015 没有候选，却写了一个空 suggestions: {obj.get('suggestions')!r}")
     print("      --json: 没有候选的码不写空 suggestions（字段缺席）")
@@ -1639,13 +1639,13 @@ def test_the_docs_show_the_version_the_binary_prints():
 def test_every_message_the_compiler_can_print_has_a_code():
     """**编译器能说的每一句，报错器都得认得出是哪一类** —— 这是「减少静默」的机械落点。
 
-    分类是一张正则表（`loment_diag.RULES`）；落在表外的消息渲染成 **E999「未分类，请报告」**。
+    分类是一张正则表（`loment_diag.RULES`）；落在表外的消息渲染成 **E0999「未分类，请报告」**。
     那是一条**响亮的**退路（不是静默），但它把"我们没覆盖到"推给用户，而且只在真有人撞上时
     才暴露 —— 加了新诊断而忘了补分类，中间那段时间**没有任何东西会红**。
 
     所以这条判据把**编译器的诊断模板**枚举出来（AST 扫 `tools/lomentc.py` 里
     `errs.append(...)` 与 `LomError(...)` 的调用点），逐条过 `classify()`，断言没有一条落到
-    E999。加了新消息却没补分类 —— 这里当场红，而不是等用户来报。
+    E0999。加了新消息却没补分类 —— 这里当场红，而不是等用户来报。
 
     **扫模板而不是跑语料**：模板是"编译器可能说什么"的**上界**，运行时的消息是它的实例化。
     上界覆盖了实例化一定覆盖，反过来不成立 —— 跑一遍语料只碰得到其中一部分，而**碰不到的那些
@@ -1682,13 +1682,83 @@ def test_every_message_the_compiler_can_print_has_a_code():
             if t in seen:
                 continue
             seen.add(t)
-            if loment_diag.classify(t)[0] == "E999":
+            if loment_diag.classify(t)[0] == "E0999":
                 bad.append(t)
     assert seen, "一条诊断都没扫到 —— 提取方式跟编译器脱节了（这条判据在空转）"
     assert not bad, (
-        f"这些编译器消息没有分类（会渲染成 E999「请报告」）: {bad[:6]}"
+        f"这些编译器消息没有分类（会渲染成 E0999「请报告」）: {bad[:6]}"
         f" —— 去 `loment_diag.RULES` 补一条，别让用户替我们兜")
-    print(f"      编译器 {len(seen)} 种诊断模板**全部**有分类（没有一条落到 E999）")
+    print(f"      编译器 {len(seen)} 种诊断模板**全部**有分类（没有一条落到 E0999）")
+
+
+@test
+def test_every_template_has_its_own_code():
+    """**每一条诊断模板都有自己的码** —— 不许退回族码（E001..E041）。
+
+    用户 2026-11-10：**「每个码全部拆分」**。这一条是它唯一的长期保证：族码是兜底
+    （新消息还没写细分规则时落到它），而模板是"编译器可能说什么"的**上界** ——
+    上界里任何一条退回族码，都说明细分漏了一种处境。
+
+    与上一条的分工：上一条钉"有码"（不落 E0999），这一条钉"是自己的码"。
+    """
+    import ast
+    import loment_diag  # noqa: E402
+    src = (ROOT / "tools" / "lomentc.py").read_text(encoding="utf-8")
+
+    def template(node):
+        if isinstance(node, ast.JoinedStr):
+            return "".join(v.value if isinstance(v, ast.Constant) else "1" for v in node.values)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        return None
+
+    def is_error_sink(call) -> bool:
+        f = call.func
+        if isinstance(f, ast.Attribute) and f.attr == "append" and isinstance(f.value, ast.Name):
+            return "err" in f.value.id.lower()
+        return isinstance(f, ast.Name) and "LomError" in f.id
+
+    seen: set[str] = set()
+    fam: list[str] = []
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Call) and node.args and is_error_sink(node):
+            t = template(node.args[0])
+            if not t:
+                continue
+            t = re.sub(r"^\{[^}]*\}:\s*", "", t)
+            if t in seen:
+                continue
+            seen.add(t)
+            code = loment_diag.classify(t)[0]
+            if 1 <= loment_diag.code_num(code) <= 41:
+                fam.append(f"{code} <- {t[:60]}")
+    assert seen, "一条诊断都没扫到（这条判据在空转）"
+    assert not fam, (
+        f"这些模板还停在族码上（没有细分）: {fam[:8]} —— 去 `loment_diag.FINE` 补一条规则")
+    print(f"      {len(seen)} 种诊断模板全部落到了细分码（没有一条退回族码）")
+
+
+@test
+def test_code_numbers_use_the_two_display_widths():
+    """码的显示形状：**< 100 是 `E0xx`（`E042`），>= 100 是 `E0xxx`（`E0100`）**。
+
+    用户 2026-11-10 定的形状。它同时是**读回来的**判据：`code_num` 两侧都要解得开
+    （渲染器那边收 1..4 位数字），否则 `loment explain E0100` 会认不出自己。
+    """
+    import loment_diag
+    assert loment_diag._code_str(1) == "E001"
+    assert loment_diag._code_str(42) == "E042"
+    assert loment_diag._code_str(99) == "E099"
+    assert loment_diag._code_str(100) == "E0100"
+    assert loment_diag._code_str(207) == "E0207"
+    for n in (1, 42, 100, 207, 900, 999):
+        assert loment_diag.code_num(loment_diag._code_str(n)) == n, n
+    # 表里的码字面量必须就是显示形状 —— 否则 `error[E042]` 与 `loment codes` 两处会不一样。
+    for code, _p, _t, _h in loment_diag.RULES:
+        n = loment_diag.code_num(code)
+        if n:
+            assert code == loment_diag._code_str(n), code
+    print("      码形状：<100 是 E0xx、>=100 是 E0xxx；表里与显示同一份")
 
 
 def _launcher_run(bash: str, pf: Path, args: list, *, cmd: str = "check",
@@ -1817,7 +1887,7 @@ def _launcher_crash_pkg(renderer: str | None) -> Path:
 
 @test
 def test_launcher_synthesizes_a_record_when_the_compiler_dies_silently():
-    """**#773**：编译器被信号打死、`--diag-out` 空着时，启动器要**合成一条 E900**。
+    """**#773**：编译器被信号打死、`--diag-out` 空着时，启动器要**合成一条 E0900**。
 
     修之前：`report_diags` 看到空文件就只把驱动的 stderr 原样回吐（而崩溃时它是空的），
     于是用户拿到一个退出码 1 与**零行**输出 —— 正好是"最需要解释"的那种失败。
@@ -1833,7 +1903,7 @@ def test_launcher_synthesizes_a_record_when_the_compiler_dies_silently():
         print("        (跳过: 没有 bash, 跑不了 POSIX 启动器)")
         return
 
-    # ① 有渲染器：它收到的是那份合成了 E900 的 JSONL。
+    # ① 有渲染器：它收到的是那份合成了 E0900 的 JSONL。
     # 退出码是驱动自己的 139（`#673`：不再压成 1 —— 1 的意思是"源码有错"，
     # 而这里编译器根本没跑完）。
     pf = _launcher_crash_pkg('#!/bin/sh\ncat "$1"\n')
@@ -1843,7 +1913,7 @@ def test_launcher_synthesizes_a_record_when_the_compiler_dies_silently():
     recs = [json.loads(ln) for ln in r.stdout.splitlines() if ln.strip().startswith("{")]
     assert recs, f"渲染器没拿到 JSONL（或一条都没合成）: {out[-400:]!r}"
     rec = recs[0]
-    assert rec["code"] == "E900", rec
+    assert rec["code"] == "E0900", rec
     assert rec["line"] == 0, rec           # 没有源码位置 —— 与 docs/256 同一口径
     assert rec["file"] == "loment-driver", rec
     assert "SIGSEGV" in rec["message"] and "signal 11" in rec["message"], rec
@@ -1854,7 +1924,7 @@ def test_launcher_synthesizes_a_record_when_the_compiler_dies_silently():
     r = _launcher_run(bash, pf, [])
     out = r.stdout + r.stderr
     assert r.returncode == 139, (r.returncode, out[-300:])
-    assert "E900" in out and "SIGSEGV" in out and "loment-driver" in out, (
+    assert "E0900" in out and "SIGSEGV" in out and "loment-driver" in out, (
         f"崩溃在无渲染器的包里又变成了零行: {out[-400:]!r}")
     assert "no lomenterr" in out, f"没有渲染器这件事本身也要说: {out[-300:]!r}"
 
@@ -1863,11 +1933,11 @@ def test_launcher_synthesizes_a_record_when_the_compiler_dies_silently():
     r = _launcher_run(bash, pf, [])
     out = r.stdout + r.stderr
     assert r.returncode == 139, (r.returncode, out[-300:])
-    assert "lomenterr died" in out and "E900" in out, (
+    assert "lomenterr died" in out and "E0900" in out, (
         f"报错器崩了而启动器装作没事: {out[-400:]!r}")
     assert "loment-driver was killed" in out, (
         f"报错器崩了以后把底层错误也丢了: {out[-400:]!r}")
-    print("      #773: 编译器崩溃合成 E900（有/无渲染器都说话）；渲染器崩溃也点名")
+    print("      #773: 编译器崩溃合成 E0900（有/无渲染器都说话）；渲染器崩溃也点名")
 
 
 @test
@@ -1988,7 +2058,7 @@ _JSONL = {
                         "message": "4: 使用未声明的变量 z"}],
     "parse.jsonl": [{"file": "{F}/par.lomt", "line": 6, "col": 1, "code": "E002",
                      "message": "6:1: 语法错"}],
-    # `#658` 之后 E999 **有卡片**了（兜底码也该解释自己），所以"表里没有的码"这条
+    # `#658` 之后 E0999 **有卡片**了（兜底码也该解释自己），所以"表里没有的码"这条
     # 换成一个真正的空号：用户码段是 1..N 连续的，E777 不在表里。
     "unknown.jsonl": [{"file": "{F}/bad.lomt", "line": 4, "col": 0, "code": "E777",
                        "message": "4: 无此码"}],

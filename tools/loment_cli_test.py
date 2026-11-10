@@ -638,9 +638,10 @@ def test_codes_lists_every_code_in_the_table():
     import loment_diag
     rc, out, _ = _run(["codes"] + _no_color())
     assert rc == 0
-    # 表里印的是**三位补零**的 `E001`（`#9`，与诊断正文的 `error[E001]` 同一种拼法），
-    # 所以这里也按那个拼法找 —— `E1 ` 在 `E001` 里不是前缀，旧写法会整片报缺。
-    missing = [c for c in sorted(loment_diag.ASCII_ONE_LINER) if f"E{c:03d} " not in out]
+    # 拼法是 `<100 是 E0xx、>=100 是 E0xxx`（`docs/329`，用户 2026-11-10 定）；
+    # 用生成器同一个 `_code_str` 拼，免得这里再抄一遍形状。
+    missing = [c for c in sorted(loment_diag.ASCII_ONE_LINER)
+               if f"{loment_diag._code_str(c)} " not in out]
     assert not missing, f"错误码表里没有 E{missing}"
     # 说明文字也要是表里那一份, 不是另写的
     for c, desc in loment_diag.ASCII_ONE_LINER.items():
@@ -670,7 +671,7 @@ def test_explain_accepts_three_spellings_and_rejects_junk():
         rc, out, _ = _run(["explain", f"E{c}"] + _no_color())
         # 标题是三位补零的（与 `error[E023]` 一致），所以这里也按那个拼法找。
         assert rc == 0 and f"E{c:03d}" in out, (c, rc, out[:120])
-    # 内部码段也要解释得出来（`#773` 那一条记录会渲染成 `error[E900]`）。
+    # 内部码段也要解释得出来（`#773` 那一条记录会渲染成 `error[E0900]`）。
     for c in sorted(c for c in loment_diag.ASCII_ONE_LINER
                     if loment_diag.is_internal_code(c)):
         rc, out, _ = _run(["explain", f"E{c}"] + _no_color())

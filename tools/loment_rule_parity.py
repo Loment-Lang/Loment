@@ -508,7 +508,7 @@ def _report(rid: str, src: str, exe: Path, td: str) -> tuple[str, str, list[int]
         st = "EXTRA"
     else:
         st = "DIFF"
-    unclass = [m for m in py_msgs if H.loment_diag.classify(m)[0] == "E999"]
+    unclass = [m for m in py_msgs if H.loment_diag.classify(m)[0] == "E0999"]
     det = f"py={sorted(sp)} loment={sorted(lo)}"
     if unclass:
         det += " | 未分类: " + unclass[0][:60]

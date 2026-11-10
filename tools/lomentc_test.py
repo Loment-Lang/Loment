@@ -524,7 +524,7 @@ def test_free_is_refused_on_the_rust_backend():
         raise AssertionError("Rust 后端给 `free` 发了码 —— 应当点名拒（issue #165）")
     except lomc.LomError as e:
         # 判的是 **`e.msg`（模板本身）**：`classify` 不剥 `行:列: ` 前缀，拿 `str(e)` 去
-        # 问会一律落 E999 —— `native` 那批也一样（既有行为，不是这条引入的）。
+        # 问会一律落 E0999 —— `native` 那批也一样（既有行为，不是这条引入的）。
         # "每句话都有码"那条判据扫的也正是**模板**。
         code, _title, _hint = loment_diag.classify(e.msg)
         assert code == "E023", f"拒了，但码不是 E023: {code} / {e.msg}"

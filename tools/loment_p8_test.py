@@ -3714,6 +3714,43 @@ def test_m98_struct_literal_shorthand_twin():
     print("      字段简写: 两实现逐字节一致；tur2026.2 两边都拒")
 
 
+@test
+def test_m99_for_index_twin():
+    """Tur 2026.3 `for i, x in xs`：两个实现产物逐字节同；旧版次两边都拒。
+
+    `docs/329` §5 第 2 项。反糖是 `let __tur2_i.N = 0` + `while` + 体首
+    `let i = __tur2_i.N` / `let x = xs[i]`，两套实现同序。用户写的下标在自举侧
+    必须记成无 token 的 u32 哨兵（`CG_TY_U64`）—— 用 `SYN_U32` 会与 UNIT 同值，
+    印成 `void`（本仓 2026-11-10 实测）。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    src = ("module m\n\n"
+           "fn f() -> u32 {\n"
+           "    let xs: [u32; 4] = [5, 6, 7, 8];\n"
+           "    let s: u32 = 0;\n"
+           "    for i, x in xs {\n"
+           "        s = s + i * 10 + x;\n"
+           "    }\n"
+           "    return s;\n"
+           "}\n")
+    old = "choose write grammar tur2026.2\n" + src
+    with tempfile.TemporaryDirectory() as td:
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_foridx")
+        p = Path(td) / "new.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        rc, out, err = _run_driver_raw(elf, _wsl_path(p), td, "new")
+        assert rc == 0, f"自举驱动编不过 for-index: {err[-400:]}"
+        assert out == _unit_ll(p), "for-index: 自举产物与参考不一致"
+        p = Path(td) / "old.lomt"
+        p.write_text(old, encoding="utf-8", newline="\n")
+        rc, out, err = _run_driver_raw(elf, _wsl_path(p), td, "old")
+        assert rc != 0 and out.strip() == "", (
+            f"tur2026.2 收下了 for-index (rc={rc}) {err[-300:]}")
+    print("      for-index: 两实现逐字节一致；tur2026.2 两边都拒")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_p8_test")
 

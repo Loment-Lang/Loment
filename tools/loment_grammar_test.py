@@ -1429,6 +1429,41 @@ def test_tur2026_3_struct_literal_shorthand():
 
 
 @test
+def test_tur2026_3_for_index():
+    """2026.3 `for i, x in xs`：下标 `i` 是 u32 拷贝，元素 `x` 也是拷贝；旧版次仍拒。
+
+    `docs/329` §5 第 2 项。反糖形状与参考实现一致（`__tur2_i.N` + `while` + 体首
+    两条 `let`），自举侧因此能逐字节对拍（`loment_p8_test` M99）。
+    """
+    body = ("module m\n\n"
+            "fn f() -> u32 {\n"
+            "    let xs: [u32; 4] = [5, 6, 7, 8];\n"
+            "    let s: u32 = 0;\n"
+            "    for i, x in xs {\n"
+            "        s = s + i * 10 + x;\n"
+            "    }\n"
+            "    return s;\n"
+            "}\n")
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        p = td / "new.lomt"
+        p.write_text(body, encoding="utf-8", newline="\n")
+        ll = lomentc.emit_llvm(lomentc.load(p), ROOT)
+        assert "%i.addr = alloca i32" in ll and "%x.addr = alloca i32" in ll, ll[:600]
+        assert "load i32, ptr %i.addr" in ll, "下标不是 i32 拷贝"
+        old = td / "old.lomt"
+        old.write_text("choose write grammar tur2026.2\n" + body,
+                       encoding="utf-8", newline="\n")
+        try:
+            lomentc.load(old)
+        except lomentc.LomError:
+            pass
+        else:
+            raise AssertionError("tur2026.2 收下了 `for i, x in xs` —— 封版版次被改了")
+    print("      2026.3 `for i, x in xs` 编得过且下标为 u32；tur2026.2 仍拒")
+
+
+@test
 def test_the_default_edition_is_the_newest_open_one():
     """**没声明 = 最新版次**（2026-11-06 用户裁定，`docs/312`）。
 

@@ -1,0 +1,270 @@
+// std/chacha20.lomt — ChaCha20 流密码 (RFC 8439)
+//
+// 为什么标准库需要它: 对称加密里最快也最不容易用错的一档。它没有查表 (AES 的
+// S 盒在缓存上会留下 timing 痕迹), 只做加法/异或/循环移位, 常数时间内跑完;
+// 而且它就是 TLS 1.3 的 ChaCha20-Poly1305 和 WireGuard 的底座。
+//
+// 形状 (RFC 8439 §2.3):
+//   状态 = 4 个常数词 || 8 个密钥词 || 计数器 || 3 个 nonce 词   (16 个 u32)
+//   20 轮 (10 次列轮 + 对角轮) 之后加回初始状态, 小端写成 64 字节。
+//   加密 = 明文异或密钥流; 解密 = 再异或一次 (同一个函数)。
+//
+// 布局 (调用方给 ctx, 128 字节):
+//   [0..64)   状态 16 个 u32 (第 12 个是 32 位块计数器)
+//   [64..128) 轮函数工作区 16 个 u32 (也是密钥流的字节来源)
+//
+// 边界:
+//   * 只做原始 ChaCha20 (RFC 8439 的 12 字节 nonce / 32 位计数器);
+//     不做 XChaCha20 (24 字节 nonce) 与 ChaCha8/ChaCha12 变体;
+//   * `cc_xor` 每次调用分配一次 ctx (128 字节) —— 一条消息一次, 不是每个字节一次;
+//   * 计数器回绕 (2^32 块 = 256 GiB) 不检测, 调用方自己保证消息长度。
+//
+// 命名: 公开 cc_*, 内部 cq_*。自检 test_chacha20_*。
+
+module chacha20
+
+use "mem.lomt"
+
+pub const CC_KEY: u32 = 32;
+pub const CC_NONCE: u32 = 12;
+pub const CC_BLOCK: u32 = 64;
+
+const CQ_STATE: u32 = 0;
+const CQ_WORK: u32 = 64;
+const CQ_CTX: u32 = 128;
+
+/// `cc_*` 需要的上下文字节数 (调用方 `alloc` 这么大一块)。
+pub fn cc_ctx_bytes() -> u32 {
+    return CQ_CTX;
+}
+
+fn cq_get(ctx: ptr, i: u32) -> u32 {
+    return mem_load32(ctx, CQ_STATE + 4 * i);
+}
+
+fn cq_set(ctx: ptr, i: u32, v: u32) {
+    mem_store32(ctx, CQ_STATE + 4 * i, v);
+}
+
+fn cq_wget(ctx: ptr, i: u32) -> u32 {
+    return mem_load32(ctx, CQ_WORK + 4 * i);
+}
+
+fn cq_wset(ctx: ptr, i: u32, v: u32) {
+    mem_store32(ctx, CQ_WORK + 4 * i, v);
+}
+
+fn cq_rotl(v: u32, n: u32) -> u32 {
+    return (v << n) | (v >> (32 - n));
+}
+
+/// ChaCha 四分之一轮, 作用于工作区的 a/b/c/d 四个词。
+fn cq_qr(ctx: ptr, a: u32, b: u32, c: u32, d: u32) {
+    let x0: u32 = cq_wget(ctx, a);
+    let x1: u32 = cq_wget(ctx, b);
+    let x2: u32 = cq_wget(ctx, c);
+    let x3: u32 = cq_wget(ctx, d);
+    x0 = x0 + x1;
+    x3 = x3 ^ x0;
+    x3 = cq_rotl(x3, 16);
+    x2 = x2 + x3;
+    x1 = x1 ^ x2;
+    x1 = cq_rotl(x1, 12);
+    x0 = x0 + x1;
+    x3 = x3 ^ x0;
+    x3 = cq_rotl(x3, 8);
+    x2 = x2 + x3;
+    x1 = x1 ^ x2;
+    x1 = cq_rotl(x1, 7);
+    cq_wset(ctx, a, x0);
+    cq_wset(ctx, b, x1);
+    cq_wset(ctx, c, x2);
+    cq_wset(ctx, d, x3);
+}
+
+/// 跑 20 轮并把密钥流留在工作区, 计数器加一。
+fn cq_rounds(ctx: ptr) {
+    let i: u32 = 0;
+    while i < 16 {
+        cq_wset(ctx, i, cq_get(ctx, i));
+        i = i + 1;
+    }
+    let r: u32 = 0;
+    while r < 10 {
+        cq_qr(ctx, 0, 4, 8, 12);
+        cq_qr(ctx, 1, 5, 9, 13);
+        cq_qr(ctx, 2, 6, 10, 14);
+        cq_qr(ctx, 3, 7, 11, 15);
+        cq_qr(ctx, 0, 5, 10, 15);
+        cq_qr(ctx, 1, 6, 11, 12);
+        cq_qr(ctx, 2, 7, 8, 13);
+        cq_qr(ctx, 3, 4, 9, 14);
+        r = r + 1;
+    }
+    i = 0;
+    while i < 16 {
+        cq_wset(ctx, i, cq_wget(ctx, i) + cq_get(ctx, i));
+        i = i + 1;
+    }
+    cq_set(ctx, 12, cq_get(ctx, 12) + 1);
+}
+
+/// 设初始状态: key 32 字节, nonce 12 字节, 32 位初始块计数器。返回 1。
+pub fn cc_setup(ctx: ptr, key: ptr, nonce: ptr, counter: u32) -> u32 {
+    cq_set(ctx, 0, 1634760805);
+    cq_set(ctx, 1, 857760878);
+    cq_set(ctx, 2, 2036477234);
+    cq_set(ctx, 3, 1797285236);
+    let i: u32 = 0;
+    while i < 8 {
+        cq_set(ctx, 4 + i, mem_load32(key, 4 * i));
+        i = i + 1;
+    }
+    cq_set(ctx, 12, counter);
+    i = 0;
+    while i < 3 {
+        cq_set(ctx, 13 + i, mem_load32(nonce, 4 * i));
+        i = i + 1;
+    }
+    return 1;
+}
+
+/// 当前计数器的 64 字节密钥流块, 然后计数器加一。返回 1。
+pub fn cc_block(ctx: ptr, out: ptr) -> u32 {
+    cq_rounds(ctx);
+    let i: u32 = 0;
+    while i < 16 {
+        mem_store32(out, 4 * i, cq_wget(ctx, i));
+        i = i + 1;
+    }
+    return 1;
+}
+
+/// 加密/解密: `out = src ^ keystream(counter...)`。src 与 out 不可重叠。
+/// 返回写出的字节数 (`n`)。
+pub fn cc_xor(key: ptr, nonce: ptr, counter: u32, src: ptr, n: u32, out: ptr) -> u32 {
+    let ctx: ptr = alloc(CQ_CTX);
+    let _s: u32 = cc_setup(ctx, key, nonce, counter);
+    let i: u32 = 0;
+    while i < n {
+        cq_rounds(ctx);
+        let j: u32 = 0;
+        while j < 64 && i + j < n {
+            store8(out, i + j, (load8(src, i + j) ^ load8(ctx, CQ_WORK + j)) as u8);
+            j = j + 1;
+        }
+        i = i + 64;
+    }
+    return n;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn cq_hv(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return c - 48;
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87;
+    }
+    return 0;
+}
+
+/// 前 `str_len(s)/2` 个字节是否等于十六进制串 `s`。
+fn cq_hexeq(p: ptr, s: str) -> bool {
+    let n: u32 = str_len(s) / 2;
+    let i: u32 = 0;
+    while i < n {
+        let hi: u32 = cq_hv(str_byte(s, 2 * i));
+        let lo: u32 = cq_hv(str_byte(s, 2 * i + 1));
+        if load8(p, i) != ((hi << 4) | lo) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn cq_fill_seq(p: ptr, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        store8(p, i, i as u8);
+        i = i + 1;
+    }
+}
+
+fn cq_zero(p: ptr, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        store8(p, i, 0 as u8);
+        i = i + 1;
+    }
+}
+
+fn cq_eq(a: ptr, b: ptr, n: u32) -> bool {
+    let i: u32 = 0;
+    while i < n {
+        if load8(a, i) != load8(b, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_chacha20_rfc8439_block() -> bool {
+    let key: ptr = alloc(32);
+    let nonce: ptr = alloc(12);
+    let ctx: ptr = alloc(CQ_CTX);
+    let out: ptr = alloc(64);
+    cq_fill_seq(key, 32);
+    cq_zero(nonce, 12);
+    store8(nonce, 3, 9 as u8);
+    store8(nonce, 7, 74 as u8);
+    let _s: u32 = cc_setup(ctx, key, nonce, 1);
+    let _b: u32 = cc_block(ctx, out);
+    return cq_hexeq(out, "10f1e7e4d13b5915500fdd1fa32071c4c7d1f4c733c068030422aa9ac3d46c4e");
+}
+
+fn test_chacha20_xor_roundtrip() -> bool {
+    let key: ptr = alloc(32);
+    let nonce: ptr = alloc(12);
+    let src: ptr = alloc(130);
+    let ct: ptr = alloc(130);
+    let back: ptr = alloc(130);
+    cq_fill_seq(key, 32);
+    cq_zero(nonce, 12);
+    store8(nonce, 0, 7 as u8);
+    let i: u32 = 0;
+    while i < 130 {
+        store8(src, i, (i * 7) as u8);
+        i = i + 1;
+    }
+    let _a: u32 = cc_xor(key, nonce, 0, src, 130, ct);
+    let _b: u32 = cc_xor(key, nonce, 0, ct, 130, back);
+    if cq_eq(src, back, 130) == false {
+        return false;
+    }
+    return cq_eq(src, ct, 130) == false;
+}
+
+fn test_chacha20_counter_advances() -> bool {
+    let key: ptr = alloc(32);
+    let nonce: ptr = alloc(12);
+    let c5: ptr = alloc(CQ_CTX);
+    let c6: ptr = alloc(CQ_CTX);
+    let b1: ptr = alloc(64);
+    let b2: ptr = alloc(64);
+    let b3: ptr = alloc(64);
+    cq_fill_seq(key, 32);
+    cq_zero(nonce, 12);
+    let _s1: u32 = cc_setup(c5, key, nonce, 5);
+    let _x1: u32 = cc_block(c5, b1);
+    let _x2: u32 = cc_block(c5, b2);
+    let _s2: u32 = cc_setup(c6, key, nonce, 6);
+    let _x3: u32 = cc_block(c6, b3);
+    if cq_eq(b2, b3, 64) == false {
+        return false;
+    }
+    return cq_eq(b1, b3, 64) == false;
+}

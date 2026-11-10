@@ -1,0 +1,697 @@
+# Loment store 模块索引（生成物）
+
+> 由 `tools/loment_store_index.py` 从 `lompi/store/**` 生成。**不要手改** ——
+> 判据 `loment_lompi_test::test_the_store_index_is_current` 逐字节比，
+> 改了模块忘了重生成就会红。
+
+合计 **332 个模块**、**2791 个公开函数**。每行末尾括号里是该模块的公开常量。
+
+## std（148 个模块）
+
+- **`adler32`** — Adler-32（`AD_MOD`·`AD_INIT`）
+  - `adler32_update`, `adler32`, `adler32_str`, `adler32_combine`, `adler32_parts`
+- **`aead`** — ChaCha20-Poly1305 AEAD (RFC 8439 §2.8)
+  - `aead_scratch`, `aead_seal`, `aead_open`
+- **`aes`** — AES 分组密码 + CTR + GCM (FIPS-197 / NIST SP 800-38A / 800-38D)（`AES_BLOCK`·`AES_KEY128`·`AES_KEY256`·`AES_RK_BYTES`·`AES_CTR_SCRATCH`）
+  - `aes_rounds`, `aes_expand`, `aes_encrypt`, `aes_decrypt`, `aes_ctr`, `aes_gcm_scratch`, `aes_gcm_seal`, `aes_gcm_open`
+- **`ansi`** — ANSI 转义序列 (SGR / 光标 / 屏幕) + 流解析（`AN_DEFAULT`·`AN_FG`·`AN_BG`·`AN_FLAGS`·`AN_SCRATCH`·`AN_STATE_BYTES`·`AN_BOLD`·`AN_DIM`·`AN_ITALIC`·`AN_UNDERLINE`·`AN_REVERSE`·`AN_HIDDEN`·`AN_RGB_BIT`）
+  - `an_reset`, `an_bold`, `an_dim`, `an_italic`, `an_underline`, `an_reverse`, `an_fg`, `an_bg`, `an_rgb_fg`, `an_rgb_bg`, `an_default_fg`, `an_default_bg`, `an_move`, `an_home`, `an_up`, `an_down`, `an_right`, `an_left`, `an_hide`, `an_show`, `an_clear`, `an_clear_line`, `an_attr_rgb`, `an_is_rgb`, `an_rgb_of`, `an_pal_of`, `an_scan_init`, `an_fg_of`, `an_bg_of`, `an_flags_of`, `an_scan`
+- **`arena`** — 基于调用方缓冲的 bump 分配器（`ARENA_OOM`）
+  - `arena_align`, `arena_can`, `arena_take`, `arena_off`, `arena_used`, `arena_ptr`, `arena_fits`
+- **`asn1`** — ASN.1 DER 读取 (游标式)（`DER_ERR`·`DER_NO`·`DER_BOOLEAN`·`DER_INTEGER`·`DER_BITSTRING`·`DER_OCTETSTRING`·`DER_NULL`·`DER_OID`·`DER_ENUMERATED`·`DER_UTF8STRING`·`DER_PRINTABLESTRING`·`DER_IA5STRING`·`DER_UTCTIME`·`DER_GENERALIZEDTIME`·`DER_SEQUENCE`·`DER_SET`·`DER_CLASS_UNIVERSAL`·`DER_CLASS_APPLICATION`·`DER_CLASS_CONTEXT`·`DER_CLASS_PRIVATE`·`DER_MAX_DEPTH`）
+  - `der_class`, `der_is_constructed`, `der_tag_num`, `der_is_universal`, `der_tag_at`, `der_value_len`, `der_header_len`, `der_element_len`, `der_value_at`, `der_skip`, `der_validate`, `der_bool`, `der_is_null`, `der_int_len`, `der_int_is_negative`, `der_int_u64`, `der_int_i64`, `der_bytes`, `der_bitstring_unused`, `der_oid_text`, `der_seq_first`, `der_seq_next`, `der_seq_len`, `der_seq_at`, `der_seq_find`
+- **`assert`** — 断言与定位（`ASSERT_NONE`）
+  - `assert_true`, `assert_false`, `assert_eq64`, `assert_eq32`, `assert_ne64`, `assert_lt64`, `assert_le64`, `assert_gt64`, `assert_bytes_eq`, `assert_code`, `assert_first_diff`, `assert_count_diff`
+- **`atomics`** — 原子操作: 有什么、缺什么、缺的怎么替（`AT_ERR`·`AT_NO`·`AT_MINUS1`·`AT_UNIT`）
+  - `at_add`, `at_inc`, `at_dec`, `at_get_atomic`, `at_fence`, `at_get_plain`, `at_set_plain`, `at_get64`, `at_set64`, `at_align_off`, `at_aligned`, `at_addr`, `at_ptr`
+- **`base32`** — Base32 (RFC 4648, 字母表 A-Z2-7)（`B32_PAD`）
+  - `base32_encode`, `base32_encode_str`, `base32_decode`, `base32_decoded_len`, `base32_encoded_len`
+- **`base58`** — Base58 (Bitcoin 字母表)
+  - `base58_encode`, `base58_encoded_max`, `base58_decoded_max`, `base58_scratch`, `base58_encode_str`, `base58_decode`, `base58_decode_str`
+- **`base64`** — Base64 (标准字母表, 带 '=' 填充)（`B64_NONE`）
+  - `b64_char`, `b64_val`, `b64_encoded_len`, `b64_encode`, `b64_decode`, `b64_written`, `b64_used`
+- **`base85`** — Base85 (Z85 字母表, 4 字节 -> 5 字符)
+  - `base85_encode`, `base85_encode_str`, `base85_decode`, `base85_decode_str`, `base85_encoded_len`, `base85_decoded_len`
+- **`bigdec`** — 十进制定点大数 (系数 + 标度)（`BDEC_HDR`）
+  - `bigdec_bytes`, `bigdec_scale`, `bigdec_sign`, `bigdec_zero`, `bigdec_is_zero`, `bigdec_from_u64`, `bigdec_from_i64`, `bigdec_from_int64`, `bigdec_copy`, `bigdec_cmp_abs`, `bigdec_cmp`, `bigdec_add`, `bigdec_sub`, `bigdec_mul`, `bigdec_div_small`, `bigdec_scale_up`, `bigdec_round_to`, `bigdec_trim`, `bigdec_to_dec`, `bigdec_from_dec`
+- **`bigint`** — 任意精度无符号整数（`BIG_BASE`·`BIG_MASK`·`BIG_DEC_GROUP`·`BIG_GROUP_BASE`·`BIG_DIV0`）
+  - `bigint_zero`, `bigint_from_u64`, `bigint_len`, `bigint_is_zero`, `bigint_limb_at`, `bigint_bitlen`, `bigint_cmp`, `bigint_add`, `bigint_sub`, `bigint_mul_small`, `bigint_add_small`, `bigint_divmod_small`, `bigint_mul`, `bigint_shl_bits`, `bigint_shr_bits`, `bigint_to_u64`, `bigint_is_one`, `bigint_to_dec`, `bigint_from_dec`, `bigint_from_str`, `bigint_mul_pow5`, `bigint_mul_pow10`, `bigint_copy`, `bigint_dec_tmp_bytes`
+- **`bit`** — 位操作
+  - `bit_popcount32`, `bit_popcount64`, `bit_clz32`, `bit_ctz32`, `bit_test`, `bit_set`, `bit_clr`, `bit_toggle`, `bit_rotl32`, `bit_rotr32`, `bit_ilog2`, `bit_next_pow2`
+- **`bitset`** — 位图 (调用方持有字节缓冲)（`BITSET_NONE`）
+  - `bitset_bytes`, `bitset_clear`, `bitset_set`, `bitset_clr`, `bitset_get`, `bitset_count`, `bitset_first`, `bitset_first_zero`, `bitset_set_range`, `bitset_clr_range`, `bitset_or`, `bitset_and`, `bitset_eq`
+- **`blake2`** — BLAKE2b 与 BLAKE2s（RFC 7693）（`BLAKE2B_CTX`·`BLAKE2S_CTX`·`BLAKE2B_BLOCK`·`BLAKE2S_BLOCK`）
+  - `blake2b_init`, `blake2b_init_key`, `blake2b_update`, `blake2b_final`, `blake2b`, `blake2b_512`, `blake2b_256`, `blake2s_init`, `blake2s_init_key`, `blake2s_update`, `blake2s_final`, `blake2s`, `blake2s_256`
+- **`blit`** — 位块传送: 拷贝 / alpha 混合 / 缩放 / 着色 / 颜色键（`BL_ERR`·`BL_NO`）
+  - `bl_rgba`, `bl_a`, `bl_r`, `bl_g`, `bl_b`, `bl_bytes`, `bl_copy`, `bl_blend`, `bl_scale_nn`, `bl_scale_bilinear`, `bl_tint`, `bl_mask`
+- **`bloom`** — 布隆过滤器 (位数组 + k 个哈希)（`BL_HDR`）
+  - `bm_bytes`, `bl_init`, `bl_nbits`, `bl_k`, `bl_add`, `bl_test`, `bl_add_data`, `bl_test_data`, `bl_count`, `bl_fill_ratio`, `bl_clear`
+- **`bmp`** — BMP 读写 (只做未压缩 24/32 位)（`BM_ERR`·`BM_NO`·`BM_MAX_DIM`）
+  - `bm_info_bytes`, `bm_parse`, `bm_pixel`, `bm_out_bytes`, `bm_write`, `bm_write24`
+- **`bsearch`** — 已排序 u32 数组上的二分（`BSEARCH_NONE`）
+  - `bsearch_lower`, `bsearch_upper`, `bsearch_count`, `bsearch_find`, `bsearch_contains`
+- **`bst`** — 二叉搜索树 (有序映射, 节点池在调用方的缓冲里)（`BST_NIL`·`BST_NOVAL`·`BST_HDR`·`BST_NODE`）
+  - `bst_bytes`, `bst_left`, `bst_right`, `bst_key`, `bst_val`, `bst_init`, `bst_len`, `bst_is_empty`, `bst_insert`, `bst_find_node`, `bst_find`, `bst_has`, `bst_min_node`, `bst_max_node`, `bst_next_gt`, `bst_prev_lt`, `bst_remove`, `bst_height_node`, `bst_height`, `bst_check`, `bst_inorder_into`
+- **`buf`** — 有容量检查的字节构建器
+  - `buf_left`, `buf_full`, `buf_put`, `buf_bytes`, `buf_str`, `buf_nl`, `buf_dec`, `buf_hex`, `buf_wrote`
+- **`bufio`** — 缓冲读: 行切分 + 环形缓冲（`BI_ERR`·`BI_NO`·`BI_RING_HDR`·`BI_SYS_READ`）
+  - `bi_line_next`, `bi_line_count`, `bi_line_at`, `bi_ring_scratch_bytes`, `bi_ring_init`, `bi_ring_cap`, `bi_ring_len`, `bi_ring_free`, `bi_ring_write`, `bi_ring_read`, `bi_fill_fd`
+- **`case`** — Unicode 简单大小写映射与不区分大小写比较（`CASE_NONE`）
+  - `case_upper_cp`, `case_lower_cp`, `case_is_upper_cp`, `case_is_lower_cp`, `case_upper_len`, `case_lower_len`, `case_upper`, `case_lower`, `case_upper_str`, `case_lower_str`, `case_eq_ignore_case`, `case_eq_ignore_case_str`
+- **`cbor`** — CBOR 读取 (RFC 8949, 游标式)（`CBOR_ERR`·`CBOR_NO`·`CBOR_UINT`·`CBOR_NINT`·`CBOR_BYTES`·`CBOR_TEXT`·`CBOR_ARR`·`CBOR_MAP`·`CBOR_TAG`·`CBOR_SIMPLE`·`CBOR_F16`·`CBOR_F32`·`CBOR_F64`·`CBOR_BREAK`·`CBOR_MAX_DEPTH`·`CBOR_INDEF`）
+  - `cbor_head_len`, `cbor_type_at`, `cbor_is_indefinite`, `cbor_skip`, `cbor_validate`, `cbor_is_null`, `cbor_is_undef`, `cbor_bool`, `cbor_u64`, `cbor_i64`, `cbor_str_len`, `cbor_str`, `cbor_f16bits`, `cbor_f32bits`, `cbor_f64bits`, `cbor_tag`, `cbor_arr_len`, `cbor_arr_first`, `cbor_arr_next`, `cbor_arr_at`, `cbor_map_len`, `cbor_map_first`, `cbor_map_next`, `cbor_map_get`, `cbor_map_get_ptr`
+- **`chacha20`** — ChaCha20 流密码 (RFC 8439)（`CC_KEY`·`CC_NONCE`·`CC_BLOCK`）
+  - `cc_ctx_bytes`, `cc_setup`, `cc_block`, `cc_xor`
+- **`channel`** — 有界 MPMC 字节消息通道（环形缓冲）（`CH_HEAD`·`CH_TAIL`·`CH_CAP`·`CH_CLOSED`·`CH_GEN`·`CH_LOCK`·`CH_USED`·`CH_DATA`·`CH_FRAME`·`CH_WRAP`·`CH_MIN_CAP`）
+  - `ch_bytes`, `ch_init`, `ch_send`, `ch_recv`, `ch_try_send`, `ch_try_recv`, `ch_close`, `ch_len`, `ch_is_empty`
+- **`char`** — 字节分类与大小写（`CH_NONE`）
+  - `char_is_digit`, `char_is_upper`, `char_is_lower`, `char_is_alpha`, `char_is_alnum`, `char_is_space`, `char_is_hex`, `char_to_upper`, `char_to_lower`, `char_digit_val`, `char_hex_val`
+- **`civil`** — 公历日期/时间的**纯整数**换算（`CV_ERR`·`CV_OK`·`CV_DAY_SECS`）
+  - `cv_is_leap`, `cv_days_in_month`, `cv_days_from`, `cv_from_days`, `cv_weekday`, `cv_secs_of_day`, `cv_hms_of_secs`, `cv_ymd_from_unix`
+- **`clock`** — 时间的**文本表示**与**时长算术**（`CK_ISO_SCRATCH`·`CK_SCALE`·`CK_ERR`）
+  - `ck_fmt_iso_sc`, `ck_fmt_iso`, `ck_scratch_bytes`, `ck_fmt_secs`, `ck_elapsed_us`, `ck_monotonic_ns`
+- **`comb`** — 组合数学 (阶乘 / 二项式 / 排列 / 卡特兰 / 斯特林)（`CB_OK`·`CB_ERR`）
+  - `cb_fact`, `cb_perm`, `cb_binom`, `cb_pascal_row`, `cb_catalan`, `cb_stirling_bytes`, `cb_stirling1`, `cb_stirling2`
+- **`coro`** — 可恢复的状态机 (**不是有独立栈的协程** —— 先说清楚)（`CO_DONE`·`CO_START`·`CO_STATE`·`CO_RESUMES`·`CO_STEPS`·`CO_NVARS`·`CO_HDR`）
+  - `co_bytes`, `co_var_off`, `co_init`, `co_state`, `co_resumes`, `co_steps`, `co_nvars`, `co_done`, `co_enter`, `co_goto`, `co_finish`, `co_reset`, `co_var`, `co_set_var`, `co_var_ok`
+- **`crc16`** — CRC-16 的几种常见参数（`CRC16_CCITT_POLY`·`CRC16_ARC_POLY_REF`·`CRC16_ARC_POLY`）
+  - `crc16_reflected`, `crc16_normal`, `crc16_ccitt`, `crc16_xmodem`, `crc16_arc`, `crc16_modbus`, `crc16_usb`, `crc16_ccitt_str`, `crc16_arc_str`, `crc16_modbus_str`, `crc16_usb_str`
+- **`crc32`** — CRC-32 (IEEE 802.3, 反射多项式 0xEDB88320)
+  - `crc32_init`, `crc32_finish`, `crc32_update`, `crc32`, `crc32_str`
+- **`crc32c`** — CRC-32 的几种参数（`CRC32C_POLY_REF`·`CRC32C_POLY`·`CRC32_POLY`·`CRC32_POLY_REF`）
+  - `crc32c_reflected`, `crc32c_normal`, `crc32c`, `crc32_bzip2`, `crc32_posix`, `crc32c_str`, `crc32_bzip2_str`, `crc32_posix_str`, `crc32c_rev32`
+- **`csv`** — CSV 字段的读写 (RFC 4180 的那套引号规则)
+  - `csv_needs_quote`, `csv_write_field`, `csv_consumed`, `csv_written`, `csv_read_field`, `csv_count_fields`
+- **`ctype`** — LibL 的 `<ctype.h>`：字节分类与大小写（C locale）
+  - `isdigit`, `isupper`, `islower`, `isalpha`, `isalnum`, `isspace`, `isxdigit`, `isblank`, `iscntrl`, `isprint`, `isgraph`, `ispunct`, `toupper`, `tolower`
+- **`deflate`** — DEFLATE 压缩 (RFC 1951)（`DF_ERR`·`DF_NONE`·`DF_WINDOW`·`DF_HASH`·`DF_CHAIN_MAX`·`DF_MIN_MATCH`·`DF_MAX_MATCH`·`DF_MAX_INPUT`）
+  - `df_scratch_bytes`, `df_max_out`, `df_len_code`, `df_dist_code`, `df_deflate_ws`, `df_deflate`
+- **`deque`** — 双端队列 (环形缓冲)（`DQ_HDR`·`DQ_NIL`）
+  - `deque_bytes`, `deque_init`, `deque_len`, `deque_capacity`, `deque_is_empty`, `deque_is_full`, `deque_clear`, `deque_push_back`, `deque_push_front`, `deque_pop_front`, `deque_pop_back`, `deque_peek_front`, `deque_peek_back`, `deque_get`, `deque_set`, `deque_check`
+- **`ed25519`** — Ed25519 签名（RFC 8032，PureEdDSA）（`ED_BYTES`·`ED_SIG_BYTES`）
+  - `ed_scratch`, `ed_public`, `ed_sign`, `ed_verify`
+- **`endian`** — 字节序读写与翻转
+  - `endian_is_le`, `endian_swap16`, `endian_swap32`, `endian_swap64`, `endian_load16le`, `endian_load16be`, `endian_load32le`, `endian_load32be`, `endian_load64le`, `endian_load64be`, `endian_store16le`, `endian_store16be`, `endian_store32le`, `endian_store32be`, `endian_store64le`, `endian_store64be`
+- **`env`** — 环境块 / argv 的解析 (\0 分隔的连续字节区)（`ENV_OK`·`ENV_ERR`·`ENV_NO`）
+  - `env_count`, `env_at`, `env_key_len`, `env_val_off`, `env_val_len`, `env_get`, `env_argc`, `env_arg`, `env_argv0_dir`
+- **`f64`** — 双精度浮点算术 (IEEE 754, 软实现)（`F64_CMP_LT`·`F64_CMP_EQ`·`F64_CMP_GT`·`F64_CMP_UN`）
+  - `f64_mant53`, `f64_exp_lsb`, `f64_neg`, `f64_abs`, `f64_finish_round`, `f64_add`, `f64_sub`, `f64_mul`, `f64_div`, `f64_cmp`, `f64_eq`, `f64_ne`, `f64_lt`, `f64_le`, `f64_gt`, `f64_ge`, `f64_is_nan`, `f64_min`, `f64_max`
+- **`f64bits`** — IEEE 754 双精度的位级视图（`F64_BIAS`·`F64_MANT_BITS`·`F64_EXP_OFFSET`·`F64_EXP_MAX`·`F64_SIGN_MASK`·`F64_EXP_MASK`·`F64_MANT_MASK`·`F64_IMPLICIT`·`F64_POS_ZERO`·`F64_NEG_ZERO`·`F64_ONE`·`F64_TWO`·`F64_HALF`·`F64_THREE`·`F64_POS_INF`·`F64_NEG_INF`·`F64_QNAN`·`F64_MAX`·`F64_MIN_NORMAL`·`F64_MIN_SUB`·`F64_MAX_SUB`·`F64_NEG_MIN_SUB`·`F64_C_ZERO`·`F64_C_SUB`·`F64_C_NORMAL`·`F64_C_INF`·`F64_C_NAN`）
+  - `f64bits_sign`, `f64bits_exp`, `f64bits_mant`, `f64bits_pack`, `f64bits_is_nan`, `f64bits_is_inf`, `f64bits_is_finite`, `f64bits_is_zero`, `f64bits_is_subnormal`, `f64bits_is_normal`, `f64bits_is_negative`, `f64bits_neg`, `f64bits_abs`, `f64bits_copysign`, `f64bits_classify`, `f64bits_next_up`, `f64bits_next_down`, `f64bits_ulp_diff`, `f64bits_is_integer`
+- **`f64conv`** — 整数 <-> 浮点, 以及单精度 <-> 双精度（`F32_QNAN`·`F32_POS_INF`·`F32_MANT_MASK`·`F32_IMPLICIT`）
+  - `f64conv_from_u64`, `f64conv_from_u32`, `f64conv_from_i64`, `f64conv_from_i32`, `f64conv_to_u64`, `f64conv_to_u32`, `f64conv_to_i64`, `f64conv_to_i32`, `f64conv_u64_is_exact`, `f64conv_to_f32`, `f64conv_from_f32`, `f64conv_f32_roundtrip_ok`
+- **`f64fmt`** — 浮点的十进制文本 (dtoa)（`F64FMT_LIMBS`·`F64FMT_SLOT`·`F64FMT_OFF_N`·`F64FMT_OFF_A`·`F64FMT_OFF_B`·`F64FMT_OFF_C`·`F64FMT_OFF_DIG`·`F64FMT_OFF_TMP`）
+  - `f64fmt_scratch_bytes`, `f64fmt_fixed`, `f64fmt_sci`, `f64fmt_shortest`, `f64fmt_parse`, `f64fmt_parse_n`
+- **`fenwick`** — 树状数组 / BIT (单点加 + 前缀和)（`FW_HDR`）
+  - `fw_bytes`, `fw_init`, `fw_size`, `fw_add`, `fw_sum`, `fw_range`, `fw_find_kth`
+- **`fixed`** — 定点小数 (i64, 六位小数)（`FIXED_SCALE`·`FIXED_ONE`·`FIXED_HALF`·`FIXED_BASE`）
+  - `fixed_from_i64`, `fixed_to_i64`, `fixed_frac`, `fixed_add`, `fixed_sub`, `fixed_neg`, `fixed_abs`, `fixed_from_ratio`, `fixed_mul`, `fixed_mul_trunc`, `fixed_div`, `fixed_mul_bp`, `fixed_floor`, `fixed_ceil`, `fixed_round`, `fixed_to_str`, `fixed_from_str`
+- **`flags`** — 位标志集合 (通用小位集工具)（`FL_ERR`·`FL_NO`·`FL_BITS`）
+  - `fl_set`, `fl_clr`, `fl_toggle`, `fl_test`, `fl_popcount`, `fl_lowest_bit`, `fl_next`, `fl_foreach`, `fl_table_count`, `fl_table_name`, `fl_names_to_mask`, `fl_mask_to_names`
+- **`fmt`** — 对齐与填充
+  - `fmt_fill`, `fmt_dec_pad`, `fmt_dec_zero`, `fmt_hex_prefixed`, `fmt_str_pad`, `fmt_i64`
+- **`font`** — 8×8 点阵字体与文字绘制（`FT_NO`·`FT_ERR`·`FT_W`·`FT_H`·`FT_FIRST`·`FT_LAST`·`FT_COUNT`·`FT_GLYPH`）
+  - `ft_row`, `ft_glyph`, `ft_ink`, `ft_draw`, `ft_text`, `ft_text_width`
+- **`fwalk`** — linux_dirent64 记录的解析与路径拼接（`FW_OK`·`FW_ERR`·`FW_NO`·`FW_NAME_OFF`）
+  - `fw_name_off`, `fw_rec_len`, `fw_d_type`, `fw_ino`, `fw_name_len`, `fw_skip`, `fw_skip_rec`, `fw_join`
+- **`glob`** — glob 通配匹配 (`*` `?` `[...]` `\`), 含路径语义（`GLOB_PATHNAME`·`GLOB_ICASE`）
+  - `glob_match_flags`, `glob_match`, `glob_match_path`, `glob_match_ci`, `glob_match_ci_path`, `glob_match_str`, `glob_match_path_str`
+- **`graph`** — 图的基础表示与遍历（`GR_NO`·`GR_NONE`·`GR_ERR`）
+  - `gr_edges_bytes`, `gr_edges_init`, `gr_len`, `gr_cap`, `gr_add_edge`, `gr_edge_u`, `gr_edge_v`, `gr_edge_w`, `gr_set_edge`, `gr_csr_bytes`, `gr_build`, `gr_build_undirected`, `gr_n`, `gr_m`, `gr_row_start`, `gr_degree`, `gr_to`, `gr_w`, `gr_has_edge`, `gr_bfs`, `gr_bfs_prev`, `gr_dfs`, `gr_components`, `gr_topo`
+- **`gzip`** — gzip 容器（RFC 1952）：头 + 裸 DEFLATE + CRC-32/ISIZE（`GZ_OK`·`GZ_ERR`）
+  - `gz_scratch_bytes`, `gz_deflate_scratch`, `gz_is_gzip`, `gz_header_len`, `gz_mtime`, `gz_inflate_full`, `gz_inflate`, `gz_deflate_full`, `gz_deflate`
+- **`hash`** — 非加密哈希（`HASH_FNV32_OFFSET`·`HASH_FNV32_PRIME`·`HASH_FNV64_OFFSET`·`HASH_FNV64_PRIME`）
+  - `hash_fnv32_byte`, `hash_fnv32`, `hash_fnv32_str`, `hash_fnv64`, `hash_djb2`, `hash_collides`
+- **`hashx`** — 非加密哈希 (FNV-1a / xxHash32) + 一致性哈希环（`HX_OK`·`HX_ERR`·`HX_NO`）
+  - `hx_fnv1a32`, `hx_fnv1a32_str`, `hx_fnv1a32_update`, `hx_fnv1a64`, `hx_fnv1a64_str`, `hx_xxh32`, `hx_xxh32_str`, `hx_ring_bytes`, `hx_ring_init`, `hx_ring_count`, `hx_ring_node_at`, `hx_ring_add`, `hx_ring_remove`, `hx_ring_lookup`
+- **`heap`** — 二叉最小堆 (优先队列)（`HP_HDR`·`HP_NIL`）
+  - `heap_bytes`, `heap_init`, `heap_len`, `heap_is_empty`, `heap_push`, `heap_peek`, `heap_pop`, `heap_build`, `heap_check`, `heap_drain_sorted`, `heap_sort_array`
+- **`hex`** — 十六进制编解码与转储（`HEX_NONE`）
+  - `hex_digit`, `hex_val`, `hex_encode`, `hex_encoded_len`, `hex_decode`, `hex_written`, `hex_used`, `hex_dump_line`
+- **`hexdump`** — 十六进制转储 (hexdump -C / xxd 风格)（`HXD_ERR`·`HXD_ROW`·`HXD_LINE_BASE`·`HXD_TRAILER`·`HXD_MAX_N`）
+  - `hxd_line`, `hxd_dump`, `hxd_rows`, `hxd_line_bytes`, `hxd_bytes_needed`, `hxd_ascii_needed`
+- **`hmac`** — HMAC (RFC 2104)（`HM_BLK64`·`HM_BLK128`·`HM_IPAD`·`HM_OPAD`）
+  - `hmac_sha256_scratch`, `hmac_sha1_scratch`, `hmac_sha512_scratch`, `hmac_sha256`, `hmac_sha256_str`, `hmac_sha1`, `hmac_sha1_str`, `hmac_sha512`, `hmac_sha512_str`, `hmac_hex`
+- **`huffman`** — 霍夫曼编码: 频率表 -> 码长 -> **规范码**（`HUFF_ERR`·`HUFF_NONE`·`HUFF_NONE64`·`HUFF_MAX_BITS`·`HUFF_NOPARENT`）
+  - `huffman_scratch_bytes`, `huffman_codes_scratch_bytes`, `huffman_lengths`, `huffman_codes`, `huffman_build`, `huffman_weighted_length`, `huffman_decode`
+- **`ilist`** — 侵入式双向链表 (节点池在调用方的缓冲里)（`IL_NIL`·`IL_HDR`·`IL_NODE`）
+  - `ilist_bytes`, `ilist_prev`, `ilist_next`, `ilist_value`, `ilist_set_value`, `ilist_init`, `ilist_len`, `ilist_is_empty`, `ilist_first`, `ilist_last`, `ilist_free_node`, `ilist_push_front`, `ilist_push_back`, `ilist_insert_after`, `ilist_unlink`, `ilist_remove`, `ilist_pop_front`, `ilist_pop_back`, `ilist_find`, `ilist_check`
+- **`inflate`** — DEFLATE 解压 (RFC 1951)（`INF_ERR`·`INF_NO`）
+  - `inf_scratch_bytes`, `inf_max_out`, `inf_len_base`, `inf_len_extra`, `inf_dist_base`, `inf_dist_extra`, `inf_fixed_lit_lens`, `inf_inflate_full`, `inf_inflate`, `inf_inflate_used`
+- **`ini`** — INI / 键值配置文件（`INI_NO`）
+  - `ini_get`, `ini_get_str`, `ini_has_section`, `ini_has_section_str`, `ini_count_sections`, `ini_count_keys`
+- **`intern`** — 字符串驻留 (string interning)（`IN_OK`·`IN_FULL`·`IN_NO`·`IN_NONE`）
+  - `in_bytes`, `in_count`, `in_capacity`, `in_pool_used`, `in_init`, `in_intern`, `in_lookup`, `in_ptr_of`
+- **`interp`** — 定点插值与缓动 (t 是千分比 0..1024)
+  - `ip_lerp`, `ip_smoothstep`, `ip_smootherstep`, `ip_cubic`, `ip_ease_in_quad`, `ip_ease_out_quad`, `ip_ease_in_out_quad`, `ip_ease_in_cubic`, `ip_ease_out_cubic`, `ip_ease_in_out_cubic`
+- **`intmath`** — 整数数论 (gcd / lcm / isqrt / powmod / invmod / 素性 / 试除分解)（`IM_OK`·`IM_ERR`）
+  - `im_gcd`, `im_lcm`, `im_isqrt`, `im_mulmod`, `im_powmod`, `im_invmod`, `im_is_prime`, `im_factor_small`
+- **`jsn`** — JSON 读取 (游标式, 不建 DOM)（`JSN_ERR`·`JSN_NO`·`JSN_NULL`·`JSN_BOOL`·`JSN_NUM`·`JSN_STR`·`JSN_ARR`·`JSN_OBJ`·`JSN_MAX_DEPTH`·`JSN_KEY_HDR`）
+  - `jsn_type_at`, `jsn_skip`, `jsn_validate`, `jsn_str`, `jsn_str_len`, `jsn_key_len`, `jsn_key_ptr`, `jsn_obj_first`, `jsn_obj_next`, `jsn_obj_len`, `jsn_obj_get`, `jsn_obj_get_str`, `jsn_arr_first`, `jsn_arr_next`, `jsn_arr_len`, `jsn_arr_at`, `jsn_is_null`, `jsn_bool`, `jsn_u64`, `jsn_i64`, `jsn_num_text`, `jsn_num_parts`, `jsn_num_parts_mant`, `jsn_path`
+- **`jsonw`** — JSON 写出（RFC 8259）（`JW_CTX`·`JW_MAX_DEPTH`·`JW_ERR_FULL`·`JW_ERR_STATE`）
+  - `jw_ctx_bytes`, `jw_init`, `jw_obj`, `jw_arr`, `jw_end`, `jw_key`, `jw_str`, `jw_u64`, `jw_i64`, `jw_bool`, `jw_null`, `jw_raw`, `jw_f64`, `jw_len`, `jw_err`
+- **`kdf`** — 密钥派生 (PBKDF2 与 HKDF, 都基于 HMAC-SHA256)
+  - `kdf_pbkdf2_scratch`, `kdf_hkdf_scratch`, `kdf_pbkdf2_sha256`, `kdf_hkdf_extract`, `kdf_hkdf_expand`, `kdf_hkdf_sha256`
+- **`libl`** — LibL 的入口（docs/232）
+- **`line`** — 按行遍历
+  - `line_next`, `line_end`, `line_next_start`, `line_has_more`, `line_count`
+- **`lru`** — LRU 缓存 (开放寻址哈希 + 双向链表, 节点用下标不用指针)（`LRU_HDR`·`LRU_SLOT`·`LRU_NODE`·`LRU_NIL`·`LRU_NOVAL`）
+  - `lru_bytes`, `lru_init`, `lru_capacity`, `lru_size`, `lru_is_empty`, `lru_mru_key`, `lru_lru_key`, `lru_get`, `lru_peek`, `lru_contains`, `lru_put`, `lru_clear`, `lru_check`
+- **`lzss`** — LZSS (滑动窗口 + 长度/距离对)（`LZ_ERR`·`LZ_WINDOW`·`LZ_MIN_MATCH`·`LZ_MAX_MATCH`·`LZ_GROUP`·`LZ_HASH`·`LZ_HEAD_BYTES`·`LZ_NONE`·`LZ_CHAIN_MAX`·`LZ_MAX_INPUT`）
+  - `lzss_scratch_bytes`, `lzss_max_encoded`, `lzss_encode`, `lzss_decode`, `lzss_decode_simple`
+- **`mall`** — 空闲块分配器 (在调用方给的 arena 上)（`MALL_NIL`·`MALL_HDR`·`MALL_ALIGN`·`MALL_FREE`·`MALL_USED`）
+  - `mall_init`, `mall_alloc`, `mall_free`, `mall_used`, `mall_free_bytes`, `mall_block_count`, `mall_free_block_count`, `mall_check`
+- **`map`** — 开放寻址哈希表 (u64 -> u64)（`MAP_HDR`·`MAP_SLOT`·`MAP_NIL`·`MAP_NONE`·`MAP_EMPTY`·`MAP_USED`·`MAP_TOMB`）
+  - `map_bytes`, `map_key_at`, `map_val_at`, `map_state_at`, `map_hash`, `map_init`, `map_len`, `map_capacity`, `map_is_empty`, `map_load_pct`, `map_put`, `map_get`, `map_has`, `map_del`, `map_clear`, `map_next_used`, `map_check`
+- **`mapstr`** — 字符串键哈希表 (字节串 -> u64)（`MS_HDR`·`MS_SLOT`·`MS_NIL`·`MS_NONE`·`MS_EMPTY`·`MS_USED`·`MS_TOMB`·`MS_KEYHDR`）
+  - `mapstr_table_bytes`, `mapstr_keys_bytes`, `mapstr_keys_used`, `mapstr_hash`, `mapstr_init`, `mapstr_len`, `mapstr_capacity`, `mapstr_key_at`, `mapstr_key_len_at`, `mapstr_val_at`, `mapstr_next_used`, `mapstr_put`, `mapstr_put_str`, `mapstr_get`, `mapstr_get_str`, `mapstr_has`, `mapstr_has_str`, `mapstr_del_str`, `mapstr_check`
+- **`math`** — 整数数学
+  - `math_gcd`, `math_lcm`, `math_isqrt`, `math_ipow`, `math_ilog10`, `math_ilog2`, `math_ceil_to`
+- **`mathf`** — 浮点超越函数 (sqrt / exp / log / 三角)（`MF_LN2`·`MF_LOG2E`·`MF_PI`·`MF_PI2`·`MF_PI4`·`MF_TWO_PI`·`MF_SQRT2`·`MF_INV_SQRT2`·`MF_LN10`·`MF_LOG10E`·`MF_EPS`·`MF_TOL`）
+  - `mathf_sqrt`, `mathf_cbrt`, `mathf_exp`, `mathf_exp2`, `mathf_log`, `mathf_log2`, `mathf_log10`, `mathf_pow`, `mathf_sin`, `mathf_cos`, `mathf_tan`, `mathf_atan`, `mathf_atan2`, `mathf_asin`, `mathf_acos`, `mathf_hypot`, `mathf_fmod`
+- **`matrix`** — 稠密矩阵 (i64, 行主序)（`MX_HDR`）
+  - `mx_bytes`, `mx_rows`, `mx_cols`, `mx_init`, `mx_get`, `mx_set`, `mx_fill`, `mx_identity`, `mx_copy`, `mx_eq`, `mx_mul_into`, `mx_mul`, `mx_transpose_into`, `mx_transpose`, `mx_trace`, `mx_det`, `mx_det_work`
+- **`md5`** — MD5 (RFC 1321)（`MD5_CTX`·`MD5_DIGEST`）
+  - `md5_init`, `md5_update`, `md5_final`, `md5`, `md5_str`, `md5_hex`
+- **`mem`** — 多字节读写与块操作（`MEM_NONE`）
+  - `mem_load16`, `mem_store16`, `mem_load32`, `mem_store32`, `mem_load64`, `mem_store64`, `mem_copy`, `mem_move`, `mem_fill`, `mem_eq`, `mem_find_byte`
+- **`memdbg`** — 分配记账与哨兵（`MEMDBG_MAGIC`·`MEMDBG_GUARD`·`MEMDBG_STATE`）
+  - `memdbg_init`, `memdbg_valid`, `memdbg_bytes`, `memdbg_note_alloc`, `memdbg_note_free`, `memdbg_allocs`, `memdbg_frees`, `memdbg_live`, `memdbg_leaked`, `memdbg_guard`, `memdbg_data`, `memdbg_guard_ok`, `memdbg_guard_broken`
+- **`mpk`** — MessagePack 读取 (游标式)（`MPK_ERR`·`MPK_NO`·`MPK_NIL`·`MPK_BOOL`·`MPK_UINT`·`MPK_INT`·`MPK_F32`·`MPK_F64`·`MPK_STR`·`MPK_BIN`·`MPK_ARR`·`MPK_MAP`·`MPK_EXT`·`MPK_MAX_DEPTH`）
+  - `mpk_type_at`, `mpk_head_len`, `mpk_payload_len`, `mpk_count`, `mpk_skip`, `mpk_validate`, `mpk_is_nil`, `mpk_bool`, `mpk_u64`, `mpk_i64`, `mpk_f64bits`, `mpk_f32bits`, `mpk_str_at`, `mpk_str_len`, `mpk_str`, `mpk_ext`, `mpk_arr_first`, `mpk_arr_next`, `mpk_arr_len`, `mpk_arr_at`, `mpk_map_first`, `mpk_map_next`, `mpk_map_get_str`, `mpk_map_get`
+- **`mst`** — 最小生成树: Kruskal 与 Prim（`MST_ERR`·`MST_NONE`）
+  - `mst_uf_bytes`, `mst_uf_init`, `mst_uf_find`, `mst_uf_union`, `mst_uf_same`, `mst_uf_components`, `mst_sort_edges`, `mst_kruskal`, `mst_prim`
+- **`noise`** — 定点值噪声 / Perlin 噪声 / 分形叠加 (fbm)
+  - `nz_value`, `nz_perlin`, `nz_fbm`
+- **`num`** — 整数打包、上下界与夹取（`NUM_SCALE`）
+  - `num_pack2`, `num_hi`, `num_lo`, `num_min`, `num_max`, `num_min32`, `num_max32`, `num_clamp32`, `num_abs_diff32`, `num_abs_diff64`
+- **`numfmt`** — 纯数字格式化 (整数 -> 文本)（`NUMFMT_DEC_MAX`·`NUMFMT_HEX_MAX`）
+  - `numfmt_dec_into`, `numfmt_hex_into`
+- **`once`** — 一次性初始化 (赢家选举 + 三态迁移)（`ON_ERR`·`ON_IDLE`·`ON_RUNNING`·`ON_DONE`·`ON_FAILED`·`ON_WON`·`ON_STATE`·`ON_CLAIM`·`ON_ATTEMPTS`·`ON_WAITERS`）
+  - `on_bytes`, `on_init`, `on_state`, `on_done`, `on_failed`, `on_attempts`, `on_waiters`, `on_claims`, `on_begin`, `on_finish`, `on_wait`, `on_claim`, `on_reset`
+- **`out`** — 游标式输出层 (可移植层)
+  - `out_byte`, `out_bytes`, `out_str`, `out_dec`, `out_hex`, `out_nl`, `out_end`
+- **`pack`** — 二进制打包/解包（格式串，照 Python `struct` 的形状）（`PK_ERR`）
+  - `pk_size`, `pk_pack`, `pk_unpack`
+- **`parse`** — 文本 -> 整数
+  - `parse_dec_len`, `parse_dec`, `parse_dec_ok`, `parse_hex_len`, `parse_hex`, `parse_hex_ok`, `parse_i64`, `parse_i64_ok`
+- **`path`** — 路径切分
+  - `path_basename`, `path_dirname`, `path_ext`, `path_is_abs`, `path_off`, `path_len`
+- **`perm`** — 权限位 <-> `rwxr-xr-x` 文本（`PM_ERR`·`PM_MODE_MASK`·`PM_R`·`PM_W`·`PM_X`·`PM_ANY_R`·`PM_ANY_W`·`PM_ANY_X`·`PM_SETUID`·`PM_SETGID`·`PM_STICKY`·`PM_SPECIALS`）
+  - `pm_to_text`, `pm_from_text`, `pm_user`, `pm_group`, `pm_other`, `pm_has`
+- **`png`** — PNG 容器: 签名 / 块遍历 / IHDR / 扫描线反滤波（`PN_ERR`·`PN_NO`·`PN_IHDR`·`PN_PLTE`·`PN_IDAT`·`PN_IEND`·`PN_SIG`·`PN_CHUNK_HDR`）
+  - `pn_chunk_info_bytes`, `pn_ihdr_bytes`, `pn_signature_ok`, `pn_chunk_next`, `pn_channels`, `pn_ihdr`, `pn_paeth`, `pn_unfilter`
+- **`poly1305`** — Poly1305 一次性认证器 (RFC 8439 §2.5)
+  - `poly_state_bytes`, `poly_setup`, `poly_update`, `poly_final`, `poly_tag`
+- **`pool`** — 定长对象池 (slab)（`POOL_NIL`·`POOL_HDR`·`POOL_ALIGN`）
+  - `pool_esize`, `pool_capacity`, `pool_init`, `pool_alloc`, `pool_free`, `pool_free_count`, `pool_in_use`, `pool_index`, `pool_check`
+- **`proc`** — `/proc/self/*` 的**解析**（`PR_ERR`·`PR_NO`）
+  - `pr_status_get`, `pr_status_get_b`, `pr_cmdline_argc`, `pr_cmdline_arg`, `pr_environ_get`, `pr_environ_get_b`, `pr_maps_line`, `pr_read`
+- **`qoi`** — QOI 图像格式 (Quite Ok Image, 规范 v1.0)（`QO_ERR`·`QO_NO`）
+  - `qo_index_bytes`, `qo_header_bytes`, `qo_max_out`, `qo_header`, `qo_decode_ws`, `qo_decode`, `qo_encode_ws`, `qo_encode`
+- **`quote`** — 转义与反转义
+  - `quote_one_len`, `quote_escaped_len`, `quote_escape`, `quote_unescape`, `quote_written`, `quote_used`
+- **`rand`** — 确定性伪随机 (xorshift)
+  - `rand_seed`, `rand_next`, `rand_below`, `rand_upto`, `rand_bit`, `rand_mix`
+- **`raster`** — 像素缓冲: 填充 / 矩形 / 直线 / 圆（`RASTER_ERR`·`RASTER_NO`）
+  - `ra_isqrt`, `ra_bytes`, `ra_inside`, `ra_pixel`, `ra_get`, `ra_get_safe`, `ra_clip`, `ra_fill`, `ra_hline`, `ra_vline`, `ra_rect`, `ra_rect_outline`, `ra_line`, `ra_circle`, `ra_circle_fill`
+- **`rational`** — 精确分数 (有理数) 算术（`RA_OK`·`RA_ERR`·`RA_NO`·`RA_CMP_EQ`·`RA_CMP_LT`·`RA_CMP_GT`）
+  - `ra_scratch_bytes`, `ra_num`, `ra_den`, `ra_mul_i64`, `ra_add_i64`, `ra_sub_i64`, `ra_reduce`, `ra_set`, `ra_add`, `ra_sub`, `ra_mul`, `ra_div`, `ra_cmp`, `ra_to_dec`
+- **`regex`** — 正则表达式（POSIX ERE 的公共子集，回溯实现）（`RX_MAX_REP`·`RX_BUDGET`）
+  - `re_no`, `re_ctx_bytes`, `re_match_at`, `re_match_at_budget`, `re_match`, `re_search_from`, `re_search`
+- **`ring`** — 环形缓冲 (FIFO, 调用方持有数组)（`RING_W`）
+  - `ring_head`, `ring_count`, `ring_full`, `ring_empty`, `ring_front`, `ring_push`, `ring_peek`, `ring_pop`, `ring_clear`
+- **`rle`** — 行程编码 (RLE) 的两种常见形态（`RLE_ERR`·`RLE_MAX_RUN`·`RLE_BMP_EOL`·`RLE_BMP_EOB`·`RLE_BMP_DELTA`）
+  - `rle_encode`, `rle_decode`, `rle_decoded_len`, `rle_max_encoded`, `rle_bmp_encode`, `rle_bmp_decode`, `rle_bmp_max_encoded`
+- **`rng`** — 确定性伪随机 (splitmix64 播种 + xoshiro256** 生成 + 无偏取模 + 洗牌)（`RG_ERR`·`RG_NO`）
+  - `rg_state_bytes`, `rg_splitmix64_next`, `rg_seed`, `rg_next_u64`, `rg_next_below`, `rg_shuffle`
+- **`round`** — 取整语义 (浮点四种模式 + 整数除法/倍数)
+  - `round_trunc`, `round_floor`, `round_ceil`, `round_half_away`, `round_half_even`, `round_divmod`, `round_div_floor`, `round_div_ceil`, `round_div_nearest`, `round_up_to`, `round_down_to`, `round_to_multiple`, `round_pow2_up`, `round_pow2_down`, `round_is_pow2`
+- **`sched`** — 数据驱动的合作式调度表 (**不是抢占式调度器** —— 先说清楚)（`SC_ERR`·`SC_NO`·`SC_FREE`·`SC_READY`·`SC_DONE`·`SC_RR`·`SC_EDF`·`SC_FIXED`·`SC_HDR`·`SC_STRIDE`·`SC_NTASKS`·`SC_POLICY`·`SC_NOW`·`SC_CURSOR`·`SC_T_STATE`·`SC_T_NEXT`·`SC_T_RUNS`·`SC_T_SKIPS`·`SC_T_PRIO`）
+  - `sc_bytes`, `sc_base`, `sc_init`, `sc_ntasks`, `sc_policy`, `sc_now`, `sc_set_now`, `sc_tick`, `sc_cursor`, `sc_task_state`, `sc_next_at`, `sc_runs`, `sc_skips`, `sc_prio`, `sc_set_task`, `sc_set_next_at`, `sc_set_state`, `sc_ready`, `sc_eligible_count`, `sc_no_runnable`, `sc_next`, `sc_skip`, `sc_note_skips`, `sc_pick`, `sc_total_runs`, `sc_total_skips`
+- **`search`** — 文本搜索: 朴素 / KMP / Boyer-Moore-Horspool（`SR_NONE`·`SR_ERR`）
+  - `sr_naive`, `sr_pi_build`, `sr_kmp`, `sr_bmh_build`, `sr_bmh`, `sr_all`, `sr_count`
+- **`set`** — 哈希集合 (u64)
+  - `set_bytes`, `set_init`, `set_len`, `set_capacity`, `set_is_empty`, `set_add`, `set_has`, `set_del`, `set_clear`, `set_check`, `set_next`, `set_at`, `set_union`, `set_intersect`, `set_difference`, `set_is_subset`, `set_intersects`
+- **`sha1`** — SHA-1 (FIPS 180-4)（`SHA1_CTX`·`SHA1_DIGEST`）
+  - `sha1_init`, `sha1_update`, `sha1_final`, `sha1`, `sha1_str`, `sha1_hex`
+- **`sha256`** — SHA-256 (FIPS 180-4)（`SHA256_CTX`·`SHA256_DIGEST`）
+  - `sha256_init`, `sha256_update`, `sha256_final`, `sha256`, `sha256_str`, `sha256_hex`
+- **`sha3`** — SHA-3（FIPS 202）：224 / 256 / 384 / 512（`SHA3_CTX`·`SHA3_224_DIGEST`·`SHA3_256_DIGEST`·`SHA3_384_DIGEST`·`SHA3_512_DIGEST`）
+  - `sha3_init`, `sha3_update`, `sha3_final`, `sha3_224`, `sha3_256`, `sha3_384`, `sha3_512`
+- **`sha512`** — SHA-512 (FIPS 180-4)（`SHA512_CTX`·`SHA512_DIGEST`）
+  - `sha512_init`, `sha512_update`, `sha512_final`, `sha512`, `sha512_str`, `sha512_hex`
+- **`shortest`** — 最短路: Dijkstra / Bellman-Ford / Floyd-Warshall（`SP_INF`·`SP_NONE`·`SP_OK`·`SP_NEGCYCLE`·`SP_NEGW`·`SP_BADSRC`）
+  - `sp_heap_bytes`, `sp_dijkstra`, `sp_bellman_ford`, `sp_floyd_bytes`, `sp_floyd_init`, `sp_floyd_fill`, `sp_floyd_build`, `sp_floyd_run`, `sp_floyd_get`, `sp_path`
+- **`sort`** — u32 数组排序 (原地)
+  - `sort_insert`, `sort_heap`, `sort_is_sorted`, `sort_has_dup`, `sort_ranks`
+- **`spin`** — ticket 锁 / 有界自旋等待 / 计数信号量 / latch（`SP_ERR`·`SP_NO`·`SP_LOCK_BYTES`·`SP_NEXT`·`SP_SERVING`·`SP_SEM_BYTES`·`SP_LATCH_BYTES`·`SP_ARRIVED`·`SP_TARGET`）
+  - `sp_wait_eq`, `sp_wait_ne`, `sp_wait_ge`, `sp_lock_init`, `sp_lock_next`, `sp_lock_serving`, `sp_lock_pending`, `sp_lock_ticket`, `sp_lock_mine`, `sp_lock_wait`, `sp_lock_acquire`, `sp_lock_release`, `sp_sem_init`, `sp_sem_value`, `sp_sem_try`, `sp_sem_release`, `sp_latch_init`, `sp_latch_count`, `sp_latch_target`, `sp_latch_arrive`, `sp_latch_reached`
+- **`split`** — 按分隔符切分
+  - `split_next`, `split_end`, `split_next_start`, `split_has_more`, `split_count`
+- **`stats`** — 基本统计量 (均值 / 方差 / 中位数 / 分位数 / 直方图 / 相关系数)（`ST_OK`·`ST_ERR`·`ST_NO`）
+  - `st_scratch_bytes`, `st_sum`, `st_mean`, `st_variance`, `st_median`, `st_percentile`, `st_histogram`, `st_corr_permille`
+- **`std`** — 包入口 (可移植层)。
+- **`stdio`** — LibL 的 `<stdio.h>`：格式化输出（`printf` 族）（`SF_LEFT`·`SF_ZERO`·`SF_UNBOUNDED`）
+  - `snprintf_ws_bytes`, `snprintf`, `snprintf_ws`, `sprintf`
+- **`stdlib`** — LibL 的 `<stdlib.h>`（能落下来的那一半）
+  - `strtol`, `strtoul`, `atoi`, `atol`, `strtod`, `atof`, `strtof`, `abs`, `labs`, `llabs`, `malloc`, `calloc`, `qsort`, `qsort_u32`, `bsearch`, `bsearch_u32`
+- **`string`** — LibL 的 `<string.h>`（含 POSIX 的 `strtok_r`）
+  - `cstr_of`, `strlen`, `strcpy`, `strncpy`, `strcat`, `strncat`, `strcmp`, `strncmp`, `strchr`, `strrchr`, `strstr`, `strspn`, `strcspn`, `strpbrk`, `strtok_r`, `memchr`, `memcmp`, `memcpy`, `memmove`, `memset`
+- **`sum`** — 加法族校验和 (Fletcher / 反码和 / 字节和 / 异或)（`SUM_MOD16`·`SUM_MOD32`）
+  - `sum_fletcher16`, `sum_fletcher32`, `sum_fletcher16_parts`, `sum_bytes`, `sum_xor`, `sum_words16`, `sum_ones_complement`, `sum_net_checksum`, `sum_net_verify`
+- **`table`** — 对齐表格渲染 (列宽 + 填充 + 分隔线)（`TBL_ERR`·`TBL_NO_MAX`·`TBL_LEFT`·`TBL_RIGHT`·`TBL_CENTER`）
+  - `tbl_bytes`, `tbl_begin`, `tbl_nrows`, `tbl_ncols`, `tbl_off`, `tbl_len`, `tbl_off_rc`, `tbl_len_rc`, `tbl_set`, `tbl_set_str`, `tbl_align`, `tbl_align_of`, `tbl_widths`, `tbl_widths_clamp`, `tbl_colw`, `tbl_ready`, `tbl_line_cols`, `tbl_out_bytes`, `tbl_render`
+- **`tar`** — ustar 归档头（POSIX.1-1988 / POSIX ustar）（`TAR_BLOCK`·`TAR_ERR`·`TAR_OK`·`TAR_REG`·`TAR_LINK`·`TAR_SYMLINK`·`TAR_DIR`）
+  - `tar_is_zero`, `tar_checksum`, `tar_checksum_ok`, `tar_size`, `tar_mtime`, `tar_mode`, `tar_type`, `tar_entry_len`, `tar_name`, `tar_write_header`, `tar_write_trailer`
+- **`text`** — 字节段的比较与查找（`TEXT_NONE`）
+  - `text_cmp`, `text_eq`, `text_eq_lit`, `text_find`, `text_starts_with`, `text_ends_with`, `text_count_byte`, `text_is_digits`
+- **`tmpf`** — 临时文件**名字**的生成 (没有 mkdir/unlink/getpid 时怎么不撞名)（`TF_ERR`·`TF_NO`）
+  - `tf_charset_size`, `tf_valid_name`, `tf_placeholder_count`, `tf_expand`, `tf_gen`
+- **`toml`** — TOML 读取 (游标式)（`TOML_ERR`·`TOML_NO`·`TOML_STR`·`TOML_INT`·`TOML_BOOL`·`TOML_FLOAT`·`TOML_DATETIME`·`TOML_ARR`·`TOML_TABLE`·`TOML_MAX_KEY`）
+  - `toml_skip_value`, `toml_type_at`, `toml_get`, `toml_get_ptr`, `toml_arr_len`, `toml_arr_at`, `toml_str`, `toml_bool`, `toml_int`, `toml_raw`, `toml_has`, `toml_scratch_bytes`
+- **`trie`** — 前缀树 (字节串键)（`TR_NIL`·`TR_NOVAL`·`TR_NHDR`·`TR_NODE`·`TR_EHDR`·`TR_EDGE`）
+  - `trie_nodes_bytes`, `trie_edges_bytes`, `trie_init`, `trie_node_count`, `trie_key_count`, `trie_put_b`, `trie_put`, `trie_has_b`, `trie_has`, `trie_get_b`, `trie_get`, `trie_has_prefix_b`, `trie_has_prefix`, `trie_del_b`, `trie_del`, `trie_longest_prefix_b`, `trie_longest_prefix`, `trie_check`
+- **`trim`** — 去空白
+  - `trim_span`, `trim_left`, `trim_right`, `trim_lo`, `trim_hi`, `trim_is_blank`
+- **`tui`** — 终端界面: 单元格网格 + 差异渲染 + 画框（`TU_ERR`·`TU_CONT`·`TU_SPACE`·`TU_ATTR_DEFAULT`）
+  - `tu_attr`, `tu_attr_fg`, `tu_attr_bg`, `tu_attr_flags`, `tu_bytes`, `tu_get`, `tu_get_attr`, `tu_init`, `tu_clear`, `tu_put`, `tu_row_width`, `tu_box`, `tu_diff`
+- **`udiff`** — 行级差异 (LCS + 统一 diff)（`UD_ERR`·`UD_EQUAL`·`UD_DELETE`·`UD_INSERT`·`UD_CTX`）
+  - `ud_scratch_bytes`, `ud_fits`, `ud_script_cap`, `ud_render_scratch`, `ud_script`, `ud_lcs_len`, `ud_similar_permille`, `ud_render`, `ud_render_bytes`
+- **`unionfind`** — 并查集 (不相交集合; 按秩合并 + 路径压缩)（`UF_HDR`·`UF_NIL`）
+  - `uf_bytes`, `uf_init`, `uf_size`, `uf_count`, `uf_find`, `uf_union`, `uf_same`, `uf_depth`, `uf_max_depth`
+- **`url`** — URL 百分号编码 / 解码 + 查询串取值（`URL_NO`）
+  - `url_is_unreserved`, `url_encode`, `url_encode_str`, `url_encoded_len`, `url_decode`, `url_decode_form`, `url_decode_str`, `url_decode_form_str`, `url_query_get`, `url_query_get_str`
+- **`utf8`** — UTF-8 编解码与码点计数（`UTF8_REPLACEMENT`）
+  - `utf8_len_of`, `utf8_put`, `utf8_get`, `utf8_cp`, `utf8_used`, `utf8_count`, `utf8_valid`
+- **`uuid`** — UUID（RFC 9562）的字节、文本与两个常用版本（`UUID_LEN`·`UUID_TEXT`·`UUID_ERR`）
+  - `uuid_v4`, `uuid_v7`, `uuid_nil`, `uuid_is_nil`, `uuid_version`, `uuid_variant`, `uuid_format`, `uuid_parse`, `uuid_cmp`, `uuid_eq`
+- **`varint`** — LEB128 变长整数 + zigzag
+  - `varint_size`, `varint_put`, `varint_get_len`, `varint_get`, `zigzag_enc`, `zigzag_dec`
+- **`vec`** — u32 动态数组 (调用方持有缓冲)（`VEC_NONE`·`VEC_W`）
+  - `vec_has_room`, `vec_push`, `vec_get`, `vec_set`, `vec_pop`, `vec_pop_len`, `vec_pop_val`, `vec_find`, `vec_reverse`, `vec_find_from`, `vec_max_run`
+- **`wide`** — 64 位之上的算术 (128 位积、128/64 除、跨字移位、位计数)（`WIDE_LO32`·`WIDE_ALL`）
+  - `wide_clz64`, `wide_ctz64`, `wide_bitlen64`, `wide_popcount64`, `wide_rotl64`, `wide_rotr64`, `wide_umul64`, `wide_udivmod128`, `wide_shr128`, `wide_shl128`, `wide_cmp128`, `wide_is_zero128`
+- **`width`** — 终端里的**显示宽度** (东亚宽度)（`WIDTH_ZERO`·`WIDTH_NARROW`·`WIDTH_WIDE`）
+  - `width_cp`, `width_is_wide`, `width_is_zero`, `width_utf8`, `width_str`, `width_fit`, `width_truncate`, `width_pad`
+- **`word`** — 排版语义上的"词" (word segmentation)（`WORD_NONE`）
+  - `word_is_word_at`, `word_at`, `word_next`, `word_first`, `word_start`, `word_end`, `word_has_more`, `word_len`, `word_count`, `word_is_boundary`, `word_wrap_break`
+- **`wrap`** — 按**显示宽度**折行 (word wrap)（`WRAP_NONE`）
+  - `wrap_used`, `wrap_len`, `wrap_break_at`, `wrap_next`, `wrap_line_count`, `wrap_out_bytes`
+- **`x25519`** — Curve25519 上的 X25519（RFC 7748）（`X25519_GF`·`X25519_BYTES`）
+  - `x25519_scratch`, `x25519`, `x25519_base`
+- **`zlibc`** — zlib (RFC 1950) 容器: 头 + DEFLATE 数据 + 大端 Adler-32（`ZC_OK`·`ZC_ERR`·`ZC_NO`）
+  - `zc_scratch_bytes`, `zc_inflate_full`, `zc_inflate`
+
+## host（8 个模块）
+
+- **`argv`** — 进程启动参数
+  - `argv_scan`, `argv_off`, `argv_len`, `argv_at`, `argv_eq`, `argv_write`
+- **`dir`** — 目录遍历 (getdents64)（`DIR_ERR`·`DIR_O_DIRECTORY`·`DIR_TYPE_DIR`·`DIR_TYPE_REG`·`DIR_NAME_OFF`·`DIR_MIN_RECLEN`）
+  - `dir_open`, `dir_open_lit`, `dir_read`, `dir_close`, `dir_reclen_at`, `dir_type_at`, `dir_name_len_at`, `dir_name_ptr_at`, `dir_next_at`, `dir_is_dot_at`, `dir_count`, `dir_count_type`
+- **`fs`** — 整文件读写 (在 io 之上)（`FS_ERR`）
+  - `fs_read`, `fs_read_lit`, `fs_write`, `fs_write_lit`, `fs_ok`, `fs_exists`, `fs_exists_lit`
+- **`host`** — 包入口 (宿主层)。
+- **`io`** — Loment 的第一个库: 宿主侧 IO 与字节原语（`IO_AT_FDCWD`·`IO_O_RDONLY`·`IO_O_WRONLY_CREAT_TRUNC`·`IO_MODE_RW`·`IO_STDIN`·`IO_STDOUT`·`IO_STDERR`）
+  - `io_exit`, `io_fail`, `io_brk_alloc`, `io_write_all`, `io_write_str`, `io_write_bytes`, `io_read_all`, `io_open_ro`, `io_open_wo`, `io_close`, `io_seek`, `io_open_ro_lit`, `io_open_wo_lit`, `io_strlen`, `io_copy`, `io_zeros`, `io_copy_cstr`, `io_bytes_eq`, `io_put_lit`, `io_strip_cr`, `io_write_dec`, `io_write_hex`
+- **`libl_host`** — LibL 的**宿主面**（世界那一半）
+  - `fopen`, `fclose`, `fread`, `fwrite`, `fseek`, `ftell`, `fflush`, `feof`, `fgets`, `fputs`, `puts`, `putchar`, `getchar`, `exit`, `abort`
+- **`log`** — 工具链那套诊断行的约定（`LOG_OK`·`LOG_DIFF`·`LOG_FAIL`）
+  - `log_line`, `log_line_len`, `log_kv_line`, `log_ok`, `log_err`, `log_diff`, `log_skip`, `log_kv`, `log_ok_exit`, `log_err_exit`, `log_diff_exit`
+- **`stat`** — 文件元信息 (newfstatat)（`STAT_SYS_NEWFSTATAT`·`STAT_IFMT`·`STAT_IFDIR`·`STAT_IFREG`）
+  - `stat_path`, `stat_mode`, `stat_exists`, `stat_mode_lit`, `stat_exists_lit`, `stat_is_dir`, `stat_is_reg`, `stat_size`
+
+## internet（11 个模块）
+
+- **`dns`** — DNS 报文的线格式 (RFC 1035 §4): 域名、报文头、查询与应答（`DNS_NO`·`DNS_A`·`DNS_CNAME`·`DNS_NS`·`DNS_AAAA`·`DNS_IN`）
+  - `dns_name_encode`, `dns_name_decode`, `dns_hdr_id`, `dns_hdr_rcode`, `dns_hdr_count`, `dns_is_response`, `dns_query_build`, `dns_resp_find`
+- **`http`** — HTTP/1.x 报文的**框架** (RFC 9110/9112): 状态行、头、体（`HTTP_NO`）
+  - `http_hdr_end`, `http_body_start`, `http_status_line`, `http_hdr_find`, `http_hdr_dec`, `http_req_build`, `http_chunked_decode`, `http_reason`
+- **`httpsrv`** — 最小 HTTP/1.1 服务端：监听、读请求、路由匹配、写响应（`HS_OK`·`HS_ERR_REQ`·`HS_ERR_IO`·`HS_MAX_REQ`）
+  - `hs_listen`, `hs_accept`, `hs_read_request`, `hs_body_len`, `hs_method`, `hs_target`, `hs_path`, `hs_query`, `hs_route`, `hs_route_scratch`, `hs_reply_head`, `hs_reply`, `hs_reply_text`
+- **`internet`** — 包入口 (互联网库)
+- **`ip`** — IP 地址 (RFC 791 IPv4 / RFC 4291 IPv6) 的文本 <-> 字节
+  - `ip_v4_parse`, `ip_v4_fmt`, `ip_v4_fmt_len`, `ip_v4_mask`, `ip_v4_in_net`, `ip_cidr_parse`, `ip_v6_parse`, `ip_v6_fmt`
+- **`sock`** — socket 的最小一层: 常量、地址结构、开关、关闭、超时（`SOCK_AF_INET`·`SOCK_AF_INET6`·`SOCK_STREAM`·`SOCK_DGRAM`·`SOCK_SOL`·`SOCK_SO_REUSEADDR`·`SOCK_SO_RCVTIMEO`·`SOCK_SO_SNDTIMEO`·`SOCK_MSG_NOSIGNAL`·`SOCK_SHUT_RDWR`·`SOCK_ERR`·`SOCK_EAGAIN`·`SOCK_EINTR`）
+  - `sock_addr_in`, `sock_new`, `sock_close`, `sock_shutdown`, `sock_set_recv_timeout`, `sock_reuseaddr`, `sock_retry`
+- **`tcp`** — TCP: 连接、收发、监听、接受
+  - `tcp_connect4`, `tcp_listen4`, `tcp_accept`, `tcp_send`, `tcp_recv`, `tcp_send_all`
+- **`tls`** — TLS 1.3 的客户端内核：记录层 + 握手数据结构（`TLS_REC_CCS`·`TLS_REC_ALERT`·`TLS_REC_HANDSHAKE`·`TLS_REC_APPDATA`·`TLS_HS_CLIENT_HELLO`·`TLS_HS_SERVER_HELLO`·`TLS_HS_ENCRYPTED_EXTENSIONS`·`TLS_HS_CERTIFICATE`·`TLS_HS_CERT_VERIFY`·`TLS_HS_FINISHED`·`TLS_SUITE`·`TLS_REC_HDR`·`TLS_GROUP_X25519`）
+  - `tls_rec_seal`, `tls_rec_open`, `tls_label_scratch`, `tls_expand_label`, `tls_derive_secret`, `tls_hs_msg`, `tls_hs_type`, `tls_hs_len`, `tls_hs_body`, `tls_client_hello`, `tls_parse_server_hello`, `tls_transcript_scratch`, `tls_transcript_init`, `tls_transcript_add`, `tls_transcript_hash`, `tls_cert_ed25519_spki`, `tls_cert_verify_ed25519`
+- **`udp`** — UDP: 数据报的收发 (带对端地址)
+  - `udp_socket`, `udp_send_to`, `udp_recv_from`
+- **`unixsock`** — AF_UNIX 域套接字：地址、连接、监听、收发、传 fd（`UX_AF_UNIX`·`UX_SOCK_STREAM`·`UX_SOCK_DGRAM`·`UX_MAX_PATH`·`UX_CLOEXEC`·`UX_MSG_NOSIGNAL`·`UX_SOL_SOCKET`·`UX_SCM_RIGHTS`·`UX_ADDR_BYTES`·`UX_SCRATCH`）
+  - `ux_addr`, `ux_socket_stream`, `ux_socket_dgram`, `ux_bind`, `ux_listen`, `ux_accept`, `ux_connect`, `ux_listen_path`, `ux_connect_path`, `ux_send`, `ux_recv`, `ux_send_fd`, `ux_recv_fd`, `ux_unlink`
+- **`uri`** — URI 拆解 (RFC 3986 §3) 与相对引用解析 (§5)（`URI_NO`·`URI_REC`·`URI_F_AUTH`·`URI_F_V6`）
+  - `uri_part`, `uri_port`, `uri_has_authority`, `uri_parse`, `uri_remove_dot`, `uri_resolve`
+
+## os（44 个模块）
+
+- **`alarm`** — 进程级定时器: `alarm` 与 `setitimer`（`AL_ITIMER_REAL`·`AL_ITIMER_VIRTUAL`·`AL_ITIMER_PROF`·`AL_IVAL_BYTES`）
+  - `al_ival_pack`, `al_ival_interval`, `al_ival_value`, `al_ival_sec`, `al_ival_usec`, `al_alarm`, `al_setitimer`, `al_pause`
+- **`boot`** — 开机事实: `/proc/uptime`、`/proc/cmdline`、`boot_id`
+  - `bo_uptime_ms`, `bo_cmdline_has`, `bo_cmdline_value`, `bo_uptime_text`, `bo_uptime`, `bo_cmdline`, `bo_boot_id`
+- **`civildate`** — 公历日期算术: 年月日 <-> 距 1970-01-01 的天数
+  - `cal_is_leap`, `cal_days_in_month`, `cal_days_from_civil`, `cal_civil_from_days`, `cal_weekday`, `cal_ymd_text`
+- **`cmdline`** — 命令行参数: 从内核给的 NUL 分隔块里取第几个、拼回一行
+  - `ar_count`, `ar_get`, `ar_join`
+- **`cwd`** — 工作目录: 读、改、把相对路径**算**成绝对路径
+  - `cw_get`, `cw_chdir`, `cw_join_relative`, `cw_same`
+- **`daemon`** — 把自己变成一个后台守护进程（那五步）（`DM_UMASK`）
+  - `dm_pid_text`, `dm_close_std`, `dm_daemonize`, `dm_write_pid`, `dm_signal_ready`
+- **`eventloop`** — 把 epoll / timerfd / eventfd / signalfd 拼成一个事件循环（`EL_READ`·`EL_WRITE`·`EL_ERR`·`EL_HUP`·`EL_EV_BYTES`·`EL_WAKE_TAG`）
+  - `el_to_ep`, `el_from_ep`, `el_mask_text`, `el_ev_mask`, `el_ev_tag`, `el_ev_fd`, `el_state_bytes`, `el_open`, `el_add_fd`, `el_mod_fd`, `el_del_fd`, `el_add_timer`, `el_take_timer`, `el_add_signals`, `el_take_signal`, `el_wake`, `el_wait`, `el_stop`, `el_close`
+- **`exec`** — 执行一个程序: argv 向量怎么拼、`execve`、按 PATH 找（`EX_OK`·`EX_ERR`·`EX_X_OK`）
+  - `ex_vec_init`, `ex_vec_push`, `ex_vec_terminate`, `ex_vec_at`, `ex_execve`, `ex_path_search`, `ex_has_slash`, `ex_execvp`, `ex_which`
+- **`fdio`** — 不比 libc 差的 fd 读写: EINTR 重试、短写补完、pread/pwrite、readv/writev（`IO2_EINTR`·`IO2_EAGAIN`·`IO2_IOV_BYTES`）
+  - `io2_iov_set`, `io2_iov_base`, `io2_iov_len`, `io2_short_write`, `io2_read`, `io2_write`, `io2_pread`, `io2_pwrite`, `io2_readv`, `io2_writev`
+- **`file`** — 文件 I/O 的三条正确循环: 读到底、写到底、算大小（`FO_ERR`·`FO_EINTR`·`FO_AT_FDCWD`·`FO_O_RDONLY`·`FO_O_WRONLY_CREAT_TRUNC`·`FO_O_WRONLY_CREAT_APPEND`·`FO_MODE_RW`）
+  - `fo_is_eintr`, `fo_open`, `fo_read_all`, `fo_write_all`, `fo_size`, `fo_close`, `fo_copy`
+- **`filestat`** — `statx` 的结构体解码与权限文本（`FS_STATX_BYTES`·`FS_STATX_BASIC_STATS`·`FS_AT_SYMLINK_NOFOLLOW`·`FS_AT_FDCWD`·`FS_OFF_BLKSIZE`·`FS_OFF_NLINK`·`FS_OFF_UID`·`FS_OFF_GID`·`FS_OFF_MODE`·`FS_OFF_INO`·`FS_OFF_SIZE`·`FS_OFF_BLOCKS`·`FS_OFF_ATIME`·`FS_OFF_MTIME`·`FS_OFF_CTIME`·`FS_OFF_BTIME`）
+  - `fs_blksize`, `fs_nlink`, `fs_uid`, `fs_gid`, `fs_mode`, `fs_ino`, `fs_size`, `fs_blocks`, `fs_atime_sec`, `fs_mtime_sec`, `fs_ctime_sec`, `fs_btime_sec`, `fs_statx`, `fs_mode_text`, `fs_is_dir`, `fs_is_link`
+- **`fsops`** — 文件树操作：整文件读写、原子写、复制文件/树、删除树、遍历（`FP_EMSGSIZE`·`FP_EINTR`·`FP_EXIST`·`FP_ELOOP`·`FP_MAX_DEPTH`·`FP_WALK_DEPTH`）
+  - `fp_read_all`, `fp_write_atomic`, `fp_copy_file`, `fp_remove_tree`, `fp_copy_tree`, `fp_rel_path`, `fp_is_dir_type`, `fp_should_descend`, `fp_depth_ok`, `fp_walk`
+- **`fsutil`** — 小工具：C 串、整文件读写、存在性、路径拼装、十进制（`FU_ERR`·`FU_EINTR`·`FU_AT_FDCWD`）
+  - `fu_cstr`, `fu_read_file`, `fu_write_file`, `fu_exists`, `fu_join`, `fu_dec`
+- **`group`** — `/etc/group` 的解析（gid ↔ 组名 ↔ 成员）
+  - `gr_count`, `gr_field`, `gr_gid_field`, `gr_by_name`, `gr_member_count`, `gr_member`
+- **`hostname`** — 主机名: 读、写、校验、拼 FQDN
+  - `hn_get`, `hn_set`, `hn_validate`, `hn_fqdn_join`, `hn_short`
+- **`interval`** — 周期定时器: timerfd（`IV_CLOEXEC`·`IV_NONBLOCK`·`IV_TIMER_ABSTIME`·`IV_CLOCK_MONOTONIC`·`IV_SPEC_BYTES`）
+  - `iv_create`, `iv_build`, `iv_arm`, `iv_disarm`, `iv_wait`, `iv_ms_split`, `iv_spec_sec`, `iv_spec_nsec`
+- **`jobqueue`** — 给用户自建工作者用的阻塞任务队列（u64 槽位）（`JQ_HEAD`·`JQ_TAIL`·`JQ_CAP`·`JQ_CLOSED`·`JQ_GEN`·`JQ_LOCK`·`JQ_USED`·`JQ_DATA`·`JQ_SLOT`）
+  - `jq_bytes`, `jq_init`, `jq_push`, `jq_pop`, `jq_close`, `jq_size`
+- **`lockfile`** — 跨进程互斥: 一把 flock 锁文件（`LK_SH`·`LK_EX`·`LK_NB`·`LK_UN`）
+  - `lk_lock`, `lk_open`, `lk_acquire`, `lk_release`, `lk_parse_u64`, `lk_pid_file`, `lk_stale`, `lk_op_text`
+- **`logfile`** — 追加写日志: 一条记录一次 write（`LG_O_APPEND`·`LG_MODE`·`LG_ROTATE_MAX`）
+  - `lg_open`, `lg_write`, `lg_write_str`, `lg_close`, `lg_rotate_name`, `lg_level_prefix`, `lg_should_rotate`
+- **`memory`** — 页算术与地址空间: brk / mremap / mprotect / munmap（`ME_PAGE_BYTES`·`ME_PROT_NONE`·`ME_PROT_READ`·`ME_PROT_WRITE`·`ME_PROT_EXEC`·`ME_MREMAP_MAYMOVE`·`ME_MREMAP_FIXED`）
+  - `me_page_up`, `me_page_down`, `me_page_count`, `me_align_up`, `me_align_down`, `me_is_page_aligned`, `me_brk`, `me_mprotect`, `me_munmap`, `me_mremap`, `me_prot_text`
+- **`mmapfile`** — 把一个文件映射进地址空间（open -> lseek -> mmap -> close）（`MF2_PROT_READ`·`MF2_PROT_WRITE`·`MF2_PROT_EXEC`·`MF2_MAP_SHARED`·`MF2_MAP_PRIVATE`·`MF2_MAP_POPULATE`·`MF2_MS_ASYNC`·`MF2_MS_INVALIDATE`·`MF2_MS_SYNC`·`MF2_MADV_NORMAL`·`MF2_MADV_RANDOM`·`MF2_MADV_SEQUENTIAL`·`MF2_MADV_WILLNEED`·`MF2_MADV_DONTNEED`）
+  - `mf2_prot_text`, `mf2_map_text`, `mf2_map`, `mf2_map_readonly`, `mf2_unmap`, `mf2_sync`, `mf2_advise`
+- **`os`** — 包入口 (操作系统面)
+- **`paths`** — 路径的纯文本运算: 取尾、取目录、取扩展名、拼接、归一化
+  - `pa_base`, `pa_dir`, `pa_ext`, `pa_join`, `pa_is_absolute`, `pa_depth`, `pa_normalize`
+- **`pgroup`** — 进程组与会话: 谁跟谁一组、谁发信号
+  - `pg_getpid`, `pg_getppid`, `pg_getpgrp`, `pg_gettid`, `pg_setpgid`, `pg_getsid`, `pg_setsid`, `pg_kill`, `pg_kill_group`, `pg_is_leader`, `pg_signal_name`
+- **`pidinfo`** — `/proc/<pid>/...` 的路径拼装与读取
+  - `po_decimal`, `po_pid_path`, `po_self_path`, `po_read`, `po_cmdline`, `po_env`, `po_exists`
+- **`pwd`** — `/etc/passwd` 的解析（uid ↔ 名字）
+  - `pw_count`, `pw_field`, `pw_uid_field`, `pw_by_name`, `pw_uid_of_name`, `pw_name_of_uid`
+- **`random`** — 随机字节: `getrandom` 与无偏取模（`RN_GRND_NONBLOCK`·`RN_GRND_RANDOM`·`RN_GRND_INSECURE`·`RN_U64_MAX`）
+  - `rn_limit`, `rn_reduce`, `rn_getrandom`, `rn_bytes`, `rn_u64`, `rn_below`, `rn_shuffle`, `rn_hex`
+- **`readdir`** — 读目录: `getdents64` 的字节块怎么解（`DI_DENT_BYTES`·`DI_DT_UNKNOWN`·`DI_DT_FIFO`·`DI_DT_CHR`·`DI_DT_DIR`·`DI_DT_BLK`·`DI_DT_REG`·`DI_DT_LNK`·`DI_DT_SOCK`）
+  - `di_read`, `di_next`, `di_type_name`, `di_skip_dots`
+- **`select`** — `select` 与 fd_set 的字节级读写（`SE_FDSET_BYTES`·`SE_MAX_FDS`·`SE_TIMEVAL_BYTES`）
+  - `se_zero`, `se_set`, `se_clr`, `se_isset`, `se_first`, `se_count`, `se_timeval`, `se_tv_sec`, `se_tv_usec`, `se_ms_split`, `se_select`
+- **`signal`** — 信号: 忽略 / 恢复默认 / 发给自己（`SIGNAL_HUP`·`SIGNAL_INT`·`SIGNAL_QUIT`·`SIGNAL_KILL`·`SIGNAL_USR1`·`SIGNAL_SEGV`·`SIGNAL_USR2`·`SIGNAL_PIPE`·`SIGNAL_ALRM`·`SIGNAL_TERM`·`SIGNAL_CHLD`·`SIGNAL_CONT`·`SIGNAL_STOP`·`SIGNAL_TSTP`·`SIGNAL_DFL`·`SIGNAL_IGN`·`SIGNAL_SA_BYTES`）
+  - `signal_set`, `signal_action`, `signal_ignore`, `signal_default`, `signal_ignore_pipe`, `signal_kill`, `signal_self`
+- **`sigwait`** — 同步收信号: 屏蔽 + signalfd + 读 siginfo（`SW_SIG_BLOCK`·`SW_SIG_UNBLOCK`·`SW_SIG_SETMASK`·`SW_SIGSET_BYTES`·`SW_SIGINFO_BYTES`·`SW_INFO_SIGNO`·`SW_INFO_ERRNO`·`SW_INFO_CODE`·`SW_SFD_CLOEXEC`·`SW_SFD_NONBLOCK`）
+  - `sw_mask_set`, `sw_mask_clear`, `sw_mask_has`, `sw_mask_zero`, `sw_procmask`, `sw_signalfd`, `sw_wait`, `sw_info_signo`, `sw_info_errno`, `sw_info_code`, `sw_signame`
+- **`spawn`** — 起一个子进程并等它: `fork` / `execve` / `wait4` 三条一套（`SP_ERR`·`SP_EXEC_FAILED`·`SP_WNOHANG`·`SP_WUNTRACED`）
+  - `sp_fork`, `sp_wait4`, `sp_exit_code`, `sp_signal_of`, `sp_exited`, `sp_signaled`, `sp_exec_wait`, `sp_system`
+- **`sys`** — 一进程对操作系统要的那些事: 目录、文件、链接、管道、fd（`SYS_ERR`·`SYS_F_OK`·`SYS_X_OK`·`SYS_W_OK`·`SYS_R_OK`·`SYS_UTS_LEN`·`SYS_UTS_SYSNAME`·`SYS_UTS_NODENAME`·`SYS_UTS_RELEASE`·`SYS_UTS_VERSION`·`SYS_UTS_MACHINE`·`SYS_UTS_DOMAIN`·`SYS_SEEK_SET`·`SYS_SEEK_CUR`·`SYS_SEEK_END`·`SYS_AT_FDCWD`·`SYS_O_RDONLY`·`SYS_O_WRONLY_CREAT_TRUNC`·`SYS_MODE_RW`）
+  - `sys_cstr`, `sys_cstr_len`, `sys_uname`, `sys_uts_field`, `sys_getcwd`, `sys_chdir`, `sys_mkdir`, `sys_rmdir`, `sys_unlink`, `sys_rename`, `sys_chmod`, `sys_symlink`, `sys_link`, `sys_readlink`, `sys_access`, `sys_openat`, `sys_close`, `sys_pipe2`, `sys_dup2`, `sys_lseek`, `sys_fsync`, `sys_ftruncate`, `sys_yield`
+- **`sysconf`** — 程序开机要问的那几个数: 页大小、CPU 数、时钟频率（`SC_PAGESIZE`·`SC_CLK_TCK`·`SC_OPEN_MAX`·`SC_NPROCESSORS_ONLN`·`SC_PHYS_PAGES`·`SC_PAGE_BYTES`·`SC_TICKS_PER_SEC`·`SC_OPEN_MAX_VALUE`·`SC_SYSINFO_PROCS_OFF`）
+  - `sc_name`, `sc_value`, `sc_page_size`, `sc_page_align`, `sc_cpu_count`, `sc_parse_online`
+- **`sysctl`** — 读 `/proc/sys` 里的内核开关（点号键 -> 文件路径）
+  - `sc2_path`, `sc2_trim`, `sc2_parse_u64`, `sc2_read`, `sc2_read_u64`, `sc2_kernel_ostype`, `sc2_kernel_osrelease`, `sc2_hostname`
+- **`tempdir`** — 临时目录: 名字生成、mkdir、清空一层（`TD_MODE_PRIVATE`·`TD_AT_REMOVEDIR`·`TD_DENT_NAME_OFF`·`TD_DENT_HDR`）
+  - `td_put_u32`, `td_join`, `td_suffix`, `td_mkdtemp`, `td_is_dot`, `td_rm_entries`, `td_unlink`, `td_rmdir`
+- **`thread`** — 一个程序要的多线程手脚: 栈、tid、futex、互斥量、条件变量、join（`THR_PROT_RW`·`THR_MAP_PRIV_ANON`·`THR_NO_FD`·`THR_MAP_ERR_LO`·`THR_FUTEX_WAIT`·`THR_FUTEX_WAKE`·`THR_M_NEXT`·`THR_M_SERVING`·`THR_MUTEX_BYTES`）
+  - `thread_stack_top`, `thread_stack`, `thread_stack_free`, `thread_self`, `thread_yield`, `thread_wait`, `thread_wake`, `thread_lock`, `thread_unlock`, `thread_cv_wait`, `thread_cv_signal`, `thread_cv_broadcast`, `thread_join`, `thread_join_all`
+- **`time`** — 时钟与睡眠: `clock_gettime` / `nanosleep`（`TIME_REALTIME`·`TIME_MONOTONIC`·`TIME_PROCESS_CPUTIME`·`TIME_MONOTONIC_RAW`·`TIME_BOOTTIME`·`TIME_TS_BYTES`）
+  - `time_ts_sec`, `time_ts_nsec`, `time_clock`, `time_now_ns`, `time_mono_ns`, `time_now_s`, `time_sleep`, `time_sleep_ms`
+- **`tmpfile`** — 临时文件: 生成不撞的名字并**独占创建**
+  - `tf_name`, `tf_create_excl`, `tf_make_temp`, `tf_unlink`
+- **`tty`** — 终端: 是不是 tty、多大、进原始模式（`TTY_TCGETS`·`TTY_TCSETS`·`TTY_TIOCGWINSZ`·`TTY_ISIG`·`TTY_ICANON`·`TTY_ECHO`·`TTY_TERMIOS_BYTES`·`TTY_WINSIZE_BYTES`）
+  - `tty_isatty`, `tty_winsize`, `tty_cols`, `tty_rows`, `tty_get_attr`, `tty_set_attr`, `tty_raw_into`
+- **`umask`** — 文件创建掩码: 读、设、与权限文本互转（`UM_R`·`UM_W`·`UM_X`）
+  - `um_get`, `um_set`, `um_mode_text`, `um_parse_text`, `um_apply`, `um_has_read`, `um_has_write`, `um_has_exec`, `um_triple`
+- **`user`** — 进程与用户的**身份** (我是谁)
+  - `user_getpid`, `user_getppid`, `user_getuid`, `user_geteuid`, `user_getgid`, `user_getegid`, `user_yield`
+- **`wait`** — 子进程的收尸与状态字解码 (`wait4`)（`WA_NOHANG`·`WA_UNTRACED`·`WA_CONTINUED`）
+  - `wa_exited`, `wa_signaled`, `wa_stopped`, `wa_exit_code`, `wa_term_signal`, `wa_text`, `wa_status_word`, `wa_wait4`, `wa_wait_exit`
+- **`watcher`** — 目录变更通知: inotify 的最小一圈（`WA2_MODIFY`·`WA2_ATTRIB`·`WA2_CLOSE_WRITE`·`WA2_MOVED_FROM`·`WA2_MOVED_TO`·`WA2_CREATE`·`WA2_DELETE`·`WA2_ISDIR`·`WA2_HDR_BYTES`）
+  - `wa2_init1`, `wa2_add`, `wa2_rm`, `wa2_read`, `wa2_ev_wd`, `wa2_ev_mask`, `wa2_ev_cookie`, `wa2_ev_len`, `wa2_ev_name`, `wa2_event_size`, `wa2_mask_text`
+
+## math（9 个模块）
+
+- **`bitstream`** — 位流读写（LSB-first 与 MSB-first）（`BT_LSB`·`BT_MSB`·`BT_STATE`）
+  - `bt_init`, `bt_pos`, `bt_err`, `bt_read`, `bt_write`, `bt_skip`, `bt_align`, `bt_bytes`
+- **`calc`** — 采样序列上的数值微积分
+  - `ca_trapezoid`, `ca_simpson`, `ca_diff_central`, `ca_diff_forward`, `ca_diff_backward`, `ca_second_diff`
+- **`complex`** — 复数（double 对：实部在 +0，虚部在 +8）
+  - `cx_set`, `cx_add`, `cx_sub`, `cx_mul`, `cx_div`, `cx_neg`, `cx_conj`, `cx_abs`, `cx_arg`, `cx_exp`, `cx_log`, `cx_sqrt`, `cx_pow`
+- **`geometry`** — 2D/3D 向量与几何判定（double）
+  - `gm_set2`, `gm_set3`, `gm_v2_add`, `gm_v2_sub`, `gm_v2_dot`, `gm_v2_cross`, `gm_v2_len`, `gm_v2_dist`, `gm_v2_norm`, `gm_v3_add`, `gm_v3_sub`, `gm_v3_dot`, `gm_v3_cross`, `gm_v3_len`, `gm_v3_norm`, `gm_tri_area`, `gm_seg_intersect`, `gm_point_in_poly`
+- **`linalg`** — 小矩阵线性代数（3×3 / 4×4，double）（`LA_OK`·`LA_ERR`）
+  - `la_mul3`, `la_transpose3`, `la_det3`, `la_inv3`, `la_solve3`, `la_mul4`, `la_transpose4`, `la_det4`, `la_inv4`
+- **`math`** — 包入口（门面）。
+- **`poly`** — 实系数多项式（double，系数低次在前）（`PO_ERR`）
+  - `po_eval`, `po_eval_deriv`, `po_deriv`, `po_integral`, `po_newton`, `po_bisect`
+- **`prob`** — 常用概率分布与描述统计（double）
+  - `pb_erf`, `pb_normal_pdf`, `pb_normal_cdf`, `pb_binom`, `pb_binom_pmf`, `pb_poisson_pmf`, `pb_mean`, `pb_var`
+- **`toposort`** — 有向图的拓扑序与环检测（CSR 表示）（`TP_ERR`）
+  - `tp_ws_bytes`, `tp_topo`, `tp_has_cycle`
+
+## science（6 个模块）
+
+- **`chem`** — 化学式解析、摩尔质量、理想气体与 pH
+  - `ch_mass`, `ch_atoms`, `ch_moles`, `ch_grams`, `ch_ideal_pressure`, `ch_ideal_volume`, `ch_ph`, `ch_poh`, `ch_dilution`
+- **`elements`** — 元素周期表数据（118 项：符号 + 标准原子量）（`EL_COUNT`·`EL_ER`）
+  - `el_symbol`, `el_mass`, `el_z`, `el_find`, `el_category`
+- **`optics`** — 几何光学与光子（double；角度用**弧度**）
+  - `op_deg_to_rad`, `op_rad_to_deg`, `op_snell`, `op_critical_angle`, `op_lens_image`, `op_magnification`, `op_diffraction`, `op_frequency`, `op_photon_energy`
+- **`physics`** — SI 物理常量与常见公式（double）（`PH_C`·`PH_G`·`PH_H`·`PH_HBAR`·`PH_KB`·`PH_QE`·`PH_NA`·`PH_R`·`PH_EPS0`·`PH_MU0`·`PH_SIGMA`·`PH_G0`·`PH_ME`·`PH_MP`·`PH_U`·`PH_ALPHA`·`PH_K`）
+  - `ph_kinetic`, `ph_momentum`, `ph_potential`, `ph_grav_force`, `ph_grav_potential`, `ph_photon_energy`, `ph_de_broglie`, `ph_lorentz`, `ph_coulomb`, `ph_escape_velocity`, `ph_orbital_velocity`, `ph_frequency`, `ph_wavelength`, `ph_thermal_energy`
+- **`science`** — 包入口（门面）。
+- **`thermo`** — 温度换算、量热、理想气体、卡诺效率（double）
+  - `tm_c_to_k`, `tm_k_to_c`, `tm_c_to_f`, `tm_f_to_c`, `tm_k_to_f`, `tm_f_to_k`, `tm_carnot_efficiency`, `tm_heat`, `tm_entropy`, `tm_ideal_pressure`, `tm_ideal_volume`, `tm_ideal_temp`
+
+## engineering（4 个模块）
+
+- **`control`** — PID、一阶低通、限幅、死区、速率限制（double）（`CTRL_STATE`）
+  - `ctrl_pid_init`, `ctrl_pid_step`, `ctrl_lowpass`, `ctrl_clamp`, `ctrl_deadband`, `ctrl_rate_limit`
+- **`electronics`** — 欧姆定律、分压、串并联、RC/RL、电阻色环（double）
+  - `ec_ohm_v`, `ec_ohm_i`, `ec_ohm_r`, `ec_divider`, `ec_series`, `ec_parallel`, `ec_rc_tau`, `ec_rl_tau`, `ec_resistor`
+- **`engineering`** — 包入口（门面）。
+- **`units`** — 单位换算（长度/质量/时间/体积/能量/功率/压强/角度）（`UN_ERR`·`UN_M`·`UN_KM`·`UN_CM`·`UN_MM`·`UN_INCH`·`UN_FT`·`UN_MILE`·`UN_KG`·`UN_G`·`UN_LB`·`UN_OZ`·`UN_S`·`UN_MIN`·`UN_HOUR`·`UN_DAY`·`UN_L`·`UN_ML`·`UN_GAL`·`UN_J`·`UN_KJ`·`UN_CAL`·`UN_KCAL`·`UN_KWH`·`UN_W`·`UN_KW`·`UN_HP`·`UN_PA`·`UN_KPA`·`UN_BAR`·`UN_ATM`·`UN_PSI`·`UN_RAD`·`UN_DEG`·`UN_GRAD`·`UN_TURN`）
+  - `un_factor`, `un_convert`, `un_prefix_factor`, `un_apply_prefix`
+
+## dev（15 个模块）
+
+- **`args`** — 命令行参数查询（argv 是 `char**`，NUL 结尾）
+  - `ag_find`, `ag_has`, `ag_count`, `ag_value`, `ag_positional`
+- **`changelog`** — 从 Conventional Commits 生成 Markdown 变更段
+  - `cl_generate`
+- **`commit`** — Conventional Commits 1.0.0 的解析（`CM_OK`·`CM_ERR`·`CM_TYPE_OFF`·`CM_TYPE_LEN`·`CM_SCOPE_OFF`·`CM_SCOPE_LEN`·`CM_BANG`·`CM_DESC_OFF`·`CM_DESC_LEN`·`CM_BODY_OFF`·`CM_BODY_LEN`·`CM_BREAKING`）
+  - `cm_parse_ptr`, `cm_parse`, `cm_span_eq`
+- **`dev`** — 包入口（门面）。
+- **`dotenv`** — `.env` 文件的读取（KEY=VALUE）（`DE_NO`）
+  - `de_get`, `de_count`, `de_key_at`
+- **`duration`** — 时长文本（Go 风格）与纳秒整数互转
+  - `du_parse`, `du_format`
+- **`gitignore`** — `.gitignore` 模式匹配（含 `!` 取反）
+  - `gi_match`
+- **`jsonptr`** — RFC 6901 JSON Pointer 的求值（`JP_NO`）
+  - `jp_resolve`, `jp_get_u64`, `jp_get_str`
+- **`patch`** — 应用统一 diff（unified diff）（`PA_ERR`）
+  - `pa_apply`
+- **`semrange`** — SemVer 范围匹配（`^` `~` `>=` `<=` `<` `>` `=` 与 x 通配）（`SR_OK`·`SR_ERR`）
+  - `sr_match`
+- **`semver`** — Semantic Versioning 2.0.0 的解析、比较与递增（`SV_OK`·`SV_ERR`·`SV_MAJOR`·`SV_MINOR`·`SV_PATCH`·`SV_PRE_OFF`·`SV_PRE_LEN`·`SV_BUILD_OFF`·`SV_BUILD_LEN`）
+  - `sv_parse`, `sv_valid`, `sv_compare`, `sv_bump_major`, `sv_bump_minor`, `sv_bump_patch`
+- **`shellwords`** — POSIX shell 风格的词法拆分、引用与拼回（`SW_ERR`）
+  - `sw_split`, `sw_needs_quote`, `sw_quote_span`, `sw_quote`, `sw_join`
+- **`spdx`** — SPDX 许可证标识符的校验与家族归类
+  - `spdx_count`, `spdx_valid`, `spdx_family`
+- **`target`** — 目标三元组（arch-vendor-os-env）的拆分（`TGT_ERR`）
+  - `tgt_parse`, `tgt_part`
+- **`template`** — 极小的 `{{key}}` 文本替换（`TPL_ERR`）
+  - `tpl_render`
+
+## world（22 个模块）
+
+- **`calendar`** — 公历日期换算（儒略日、星期、ISO 周、月份加减）
+  - `cd_is_leap`, `cd_days_in_month`, `cd_days_from_civil`, `cd_civil_from_days`, `cd_weekday`, `cd_iso_weekday`, `cd_day_of_year`, `cd_iso_week`, `cd_add_months`, `cd_format`
+- **`dateparse`** — ISO 8601 日期/时间的解析与格式化
+  - `dp_parse_date`, `dp_parse_time`, `dp_parse_iso`, `dp_format_iso`
+- **`ean`** — 商品条码（EAN/UPC/GTIN）的校验
+  - `ean_check_digit`, `ean_valid`, `ean_upca_to_ean13`
+- **`flag`** — ISO 3166-1 两位国家码 <-> 国旗 emoji（`FG_ERR`）
+  - `fg_from_code`, `fg_to_code`
+- **`geo`** — 经纬度：球面距离、方位角、度分秒、包围盒
+  - `geo_haversine`, `geo_bearing`, `geo_dms_parse`, `geo_dms_format`, `geo_bbox`
+- **`geohash`** — geohash 编码/解码（整数微度版）
+  - `gh_encode`, `gh_decode`
+- **`holiday`** — 现实日历里的"第几个星期几"与复活节
+  - `hd_nth_weekday`, `hd_last_weekday`, `hd_fixed`, `hd_easter`, `hd_good_friday`, `hd_weekday`
+- **`iban`** — IBAN 的结构校验（mod-97）（`IBAN_ERR`）
+  - `iban_country_len`, `iban_normalize`, `iban_valid`
+- **`isbn`** — ISBN-10 / ISBN-13 的校验与互转
+  - `isbn10_valid`, `isbn13_valid`, `isbn_valid`, `isbn10_to_13`
+- **`langtag`** — BCP 47 语言标签的解析与规范化（`LGT_ERR`）
+  - `lgt_parse`, `lgt_is_valid`, `lgt_canonical`
+- **`luhn`** — 支付卡号：Luhn 校验与品牌识别
+  - `luhn_ok`, `luhn_check_digit`, `luhn_brand`
+- **`money`** — 定点货币运算（i64 分）
+  - `mo_add`, `mo_sub`, `mo_mul_bp`, `mo_split`, `mo_compound`, `mo_format`, `mo_parse_ok`
+- **`namefmt`** — 人名拆分与显示顺序
+  - `nmf_parse`, `nmf_family_first`, `nmf_initials`
+- **`phone`** — E.164 电话号码的归一化与格式（`TEL_ERR`）
+  - `tel_parse`, `tel_is_e164`, `tel_pretty`
+- **`postal`** — 各国邮政编码的**形状**检查
+  - `zip_valid`
+- **`roman`** — 罗马数字 <-> 整数（`RM_ERR`）
+  - `rm_to_int`, `rm_from_int`
+- **`slug`** — 标题/文件名 -> URL slug
+  - `sl_make`, `sl_same`
+- **`timeago`** — 相对时间的人话（"3 hours ago" / "in 2 days"）
+  - `ta_format`
+- **`translit`** — 西里尔 / 希腊字母 -> 拉丁字母
+  - `tl_translit`
+- **`tzoff`** — 时区偏移：解析、格式化、把 epoch 变当地时间
+  - `tz_parse`, `tz_format`, `tz_civil`, `tz_epoch`
+- **`words`** — 整数 -> 英文单词（基数词与序数词）（`NW_ERR`）
+  - `nw_cardinal`, `nw_ordinal`
+- **`world`** — 包入口（门面）。
+
+## lowlevel（12 个模块）
+
+- **`abi`** — C ABI：类型大小/对齐、结构体布局、SysV x86-64 参数寄存器（`ABI_ERR`）
+  - `abi_size_of`, `abi_align_of`, `abi_align_up`, `abi_layout`, `abi_sysv_int_reg`, `abi_sysv_float_reg`, `abi_stack_arg_offset`
+- **`ar`** — Unix `ar` 归档（`.a` 静态库）的成员遍历
+  - `ar_is`, `ar_count`, `ar_member`, `ar_find`
+- **`bitpack`** — 任意位偏移的取位/置位
+  - `bp_get_le`, `bp_set_le`, `bp_get_be`, `bp_set_be`
+- **`calling`** — 调用约定的寄存器表（`REG_SYSV`·`REG_WIN64`·`REG_AAPCS64`）
+  - `reg_int_arg`, `reg_float_arg`, `reg_ret_int`, `reg_ret_float`, `reg_int_arg_count`
+- **`coff`** — COFF 目标文件（Windows `.obj` / MSVC 工具链）
+  - `coff_parse`, `coff_section`, `coff_machine_name`, `coff_section_name`
+- **`dwarf`** — DWARF 编译单元头与常用标签名
+  - `dw_unit_header`, `dw_unit_header_size`, `dw_tag_name`, `dw_attr_name`
+- **`elf`** — ELF64 头/程序头/节头读取（x86-64 小端）（`ELF_ERR`·`ELF_HEADER`·`ELF_PHDR`·`ELF_SHDR`）
+  - `elf_valid`, `elf_header`, `elf_phdr`, `elf_shdr`, `elf_section_name`
+- **`leb128`** — LEB128 变长整数（DWARF / wasm / WebAssembly 用）
+  - `lb_dec_u64`, `lb_dec_i64`, `lb_enc_u64`, `lb_enc_i64`
+- **`lowlevel`** — 包入口（门面）。
+- **`macho`** — Mach-O 头（macOS / iOS 可执行文件）（`MC_ERR`）
+  - `mc_header_size`, `mc_parse`, `mc_cpu_name`, `mc_filetype_name`
+- **`pe`** — PE/COFF 头与节表读取（Windows x86-64）（`PE_ERR`）
+  - `pe_valid`, `pe_coff`, `pe_opt`, `pe_section`
+- **`reloc`** — ELF 重定位类型的名字
+  - `rc_name`, `rc_machine_name`
+
+## system（41 个模块）
+
+- **`aio`** — Linux 原生异步 I/O: `iocb` 与 `io_event` 的字节布局（`AI_AIO_IOCB_BYTES`·`AI_AIO_EVENT_BYTES`·`AI_IOCB_CMD_PREAD`·`AI_IOCB_CMD_PWRITE`·`AI_IOCB_CMD_FSYNC`·`AI_IOCB_CMD_FDATASYNC`·`AI_IOCB_CMD_PREADX`·`AI_IOCB_CMD_POLL`·`AI_IOCB_CMD_NOOP`·`AI_IOCB_CMD_PREADV`·`AI_IOCB_CMD_PWRITEV`·`AI_IOCB_FLAG_RESFD`·`AI_IOCB_FLAG_IOPRIO`）
+  - `ai_iocb_pack`, `ai_iocb_data`, `ai_iocb_opcode`, `ai_iocb_fd`, `ai_iocb_buf`, `ai_iocb_nbytes`, `ai_iocb_offset`, `ai_iocb_flags`, `ai_event_data`, `ai_event_obj`, `ai_event_res`, `ai_event_res2`, `ai_opcode_name`, `ai_setup`, `ai_destroy`, `ai_submit`, `ai_cancel`, `ai_getevents`
+- **`bpf`** — eBPF: 系统调用命令、map/程序类型、指令编码（`BP_MAP_CREATE`·`BP_MAP_LOOKUP_ELEM`·`BP_MAP_UPDATE_ELEM`·`BP_MAP_DELETE_ELEM`·`BP_MAP_GET_NEXT_KEY`·`BP_PROG_LOAD`·`BP_OBJ_PIN`·`BP_OBJ_GET`·`BP_PROG_ATTACH`·`BP_PROG_DETACH`·`BP_PROG_TEST_RUN`·`BP_MAP_TYPE_HASH`·`BP_MAP_TYPE_ARRAY`·`BP_MAP_TYPE_PROG_ARRAY`·`BP_MAP_TYPE_PERF_EVENT_ARRAY`·`BP_MAP_TYPE_PERCPU_HASH`·`BP_MAP_TYPE_PERCPU_ARRAY`·`BP_MAP_TYPE_STACK_TRACE`·`BP_MAP_TYPE_LRU_HASH`·`BP_MAP_TYPE_LRU_PERCPU_HASH`·`BP_MAP_TYPE_LPM_TRIE`·`BP_MAP_TYPE_ARRAY_OF_MAPS`·`BP_PROG_TYPE_SOCKET_FILTER`·`BP_PROG_TYPE_KPROBE`·`BP_PROG_TYPE_SCHED_CLS`·`BP_PROG_TYPE_SCHED_ACT`·`BP_PROG_TYPE_TRACEPOINT`·`BP_PROG_TYPE_XDP`·`BP_PROG_TYPE_PERF_EVENT`·`BP_PROG_TYPE_CGROUP_SKB`·`BP_PROG_TYPE_CGROUP_SOCK`·`BP_CLASS_LD`·`BP_CLASS_LDX`·`BP_CLASS_ST`·`BP_CLASS_STX`·`BP_CLASS_ALU`·`BP_CLASS_JMP`·`BP_CLASS_JMP32`·`BP_CLASS_ALU64`·`BP_SRC_K`·`BP_SRC_X`·`BP_OP_ADD`·`BP_OP_SUB`·`BP_OP_MUL`·`BP_OP_DIV`·`BP_OP_OR`·`BP_OP_AND`·`BP_OP_LSH`·`BP_OP_RSH`·`BP_OP_NEG`·`BP_OP_MOD`·`BP_OP_XOR`·`BP_OP_MOV`·`BP_OP_ARSH`·`BP_INSN_BYTES`·`BP_LD_IMM64`）
+  - `bp_name`, `bp_code`, `bp_insn_pack`, `bp_insn_ld_imm64`, `bp_insn_code`, `bp_insn_dst`, `bp_insn_src`, `bp_insn_off`, `bp_insn_imm`, `bp_syscall`, `bp_command_name`, `bp_map_type_name`, `bp_prog_type_name`
+- **`caps`** — Linux capabilities：名字表与位集合（`CAP_NONE`）
+  - `cap_count`, `cap_name`, `cap_find_span`, `cap_find`, `cap_add`, `cap_has`, `cap_count_bits`, `cap_parse`, `cap_format`
+- **`cgroup`** — cgroup v2 的控制文件与它们的文本值（`CG_PROCS`·`CG_THREADS`·`CG_CPU_MAX`·`CG_CPU_WEIGHT`·`CG_MEMORY_MAX`·`CG_MEMORY_HIGH`·`CG_MEMORY_CURRENT`·`CG_MEMORY_SWAP_MAX`·`CG_IO_MAX`·`CG_PIDS_MAX`·`CG_FREEZE`·`CG_EVENTS`）
+  - `cg_file_count`, `cg_file_name`, `cg_parse_u64`, `cg_parse_max`, `cg_parse_cpu_max`, `cg_key_match`, `cg_mem_text`
+- **`cpusched`** — 调度策略、CPU 亲和性的位集合与三个系统调用（`SCH_OTHER`·`SCH_FIFO`·`SCH_RR`·`SCH_BATCH`·`SCH_IDLE`·`SCH_DEADLINE`·`SCH_RESET_ON_FORK`·`SCH_CPUSET_BYTES`·`SCH_CPUSET_MAX`）
+  - `sch_policy_name`, `sch_lookup`, `sch_yield`, `sch_setaffinity`, `sch_getaffinity`, `sch_getcpu`, `sch_cpuset_clear`, `sch_cpu_set`, `sch_cpu_has`, `sch_cpu_count`, `sch_cpu_first`
+- **`epoll`** — epoll 的事件位、控制字与 12 字节事件结构（`EP_IN`·`EP_PRI`·`EP_OUT`·`EP_ERR`·`EP_HUP`·`EP_RDNORM`·`EP_RDBAND`·`EP_WRNORM`·`EP_WRBAND`·`EP_MSG`·`EP_RDHUP`·`EP_EXCLUSIVE`·`EP_WAKEUP`·`EP_ONESHOT`·`EP_ET`·`EP_CTL_ADD`·`EP_CTL_DEL`·`EP_CTL_MOD`·`EP_CLOEXEC`·`EP_EV_BYTES`）
+  - `ep_mask_text`, `ep_op_name`, `ep_ev_set`, `ep_ev_events`, `ep_ev_data`, `ep_create1`, `ep_ctl`, `ep_wait`
+- **`errno`** — Linux errno 编号与名字
+  - `er_name`, `er_text`, `er_perror`
+- **`eventfd`** — eventfd: 一个 8 字节的计数器当作"有事发生了"的信号（`EF_SEMAPHORE`·`EF_CLOEXEC`·`EF_NONBLOCK`·`EF_BYTES`·`EF_MAX`）
+  - `ef_flags_text`, `ef_create`, `ef_pack`, `ef_unpack`, `ef_write`, `ef_read`, `ef_read_value`
+- **`fanotify`** — fanotify: 整个挂载点的文件事件（含权限裁决）（`FAN_CLOEXEC`·`FAN_NONBLOCK`·`FAN_CLASS_NOTIF`·`FAN_CLASS_CONTENT`·`FAN_CLASS_PRE_CONTENT`·`FAN_UNLIMITED_QUEUE`·`FAN_UNLIMITED_MARKS`·`FAN_ACCESS`·`FAN_MODIFY`·`FAN_ATTRIB`·`FAN_CLOSE_WRITE`·`FAN_CLOSE_NOWRITE`·`FAN_OPEN`·`FAN_OPEN_EXEC`·`FAN_OPEN_PERM`·`FAN_ACCESS_PERM`·`FAN_OPEN_EXEC_PERM`·`FAN_META_BYTES`）
+  - `fan_flags_text`, `fan_mask_text`, `fan_init`, `fan_mark`, `fan_ev_len`, `fan_ev_vers`, `fan_ev_metadata_len`, `fan_ev_mask`, `fan_ev_fd`, `fan_ev_pid`
+- **`fcntl`** — 文件状态标志的位名（`FCNT_RDONLY`·`FCNT_WRONLY`·`FCNT_RDWR`·`FCNT_CREAT`·`FCNT_EXCL`·`FCNT_TRUNC`·`FCNT_APPEND`·`FCNT_NONBLOCK`·`FCNT_DSYNC`·`FCNT_DIRECTORY`·`FCNT_NOFOLLOW`·`FCNT_CLOEXEC`）
+  - `fcnt_open_flags`, `fcnt_lookup`
+- **`futex`** — futex(2) 的操作表、等待/唤醒与 timespec 打包（`FX_WAIT`·`FX_WAKE`·`FX_FD`·`FX_REQUEUE`·`FX_CMP_REQUEUE`·`FX_WAKE_OP`·`FX_LOCK_PI`·`FX_UNLOCK_PI`·`FX_TRYLOCK_PI`·`FX_WAIT_BITSET`·`FX_WAKE_BITSET`·`FX_WAIT_REQUEUE_PI`·`FX_CMP_REQUEUE_PI`·`FX_PRIVATE_FLAG`·`FX_CLOCK_REALTIME`·`FX_TS_BYTES`）
+  - `fx_op_text`, `fx_is_blocking`, `fx_op_flags`, `fx_ts_set`, `fx_ts_sec`, `fx_ts_nsec`, `fx_futex`, `fx_wait`, `fx_wake`
+- **`inotify`** — inotify: 目录/文件的变动变成一串定长头 + 变长名字（`IN_ACCESS`·`IN_MODIFY`·`IN_ATTRIB`·`IN_CLOSE_WRITE`·`IN_CLOSE_NOWRITE`·`IN_OPEN`·`IN_MOVED_FROM`·`IN_MOVED_TO`·`IN_CREATE`·`IN_DELETE`·`IN_DELETE_SELF`·`IN_MOVE_SELF`·`IN_UNMOUNT`·`IN_Q_OVERFLOW`·`IN_IGNORED`·`IN_ONLYDIR`·`IN_DONT_FOLLOW`·`IN_EXCL_UNLINK`·`IN_MASK_ADD`·`IN_ISDIR`·`IN_ONESHOT`·`IN_EV_HEAD`）
+  - `in_mask_text`, `in_mask_watch`, `in_init1`, `in_add_watch`, `in_rm_watch`, `in_ev_wd`, `in_ev_mask`, `in_ev_cookie`, `in_ev_len`, `in_ev_step`, `in_ev_name`
+- **`ioctl`** — 终端 ioctl 的请求号与 `struct winsize`
+  - `iol_tiocgwinsz`, `iol_tiocswinsz`, `iol_fionread`, `iol_tcgets`, `iol_tcsets`, `iol_winsize`
+- **`iouring`** — Linux io_uring 的提交/完成两块结构（`IO_OP_NOP`·`IO_OP_READV`·`IO_OP_WRITEV`·`IO_OP_FSYNC`·`IO_OP_READ_FIXED`·`IO_OP_WRITE_FIXED`·`IO_OP_POLL_ADD`·`IO_OP_POLL_REMOVE`·`IO_OP_SYNC_FILE_RANGE`·`IO_OP_SENDMSG`·`IO_OP_RECVMSG`·`IO_OP_TIMEOUT`·`IO_OP_TIMEOUT_REMOVE`·`IO_OP_ACCEPT`·`IO_OP_ASYNC_CANCEL`·`IO_OP_LINK_TIMEOUT`·`IO_OP_CONNECT`·`IO_OP_FALLOCATE`·`IO_OP_OPENAT`·`IO_OP_CLOSE`·`IO_SQE_BYTES`·`IO_CQE_BYTES`·`IO_ENTER_GETEVENTS`·`IO_ENTER_SQ_WAKEUP`）
+  - `io_sqe_pack`, `io_cqe_user_data`, `io_cqe_res`, `io_cqe_flags`, `io_opcode_name`, `io_enter_flags_text`, `io_setup`, `io_enter`, `io_register`
+- **`ipc`** — System V IPC: 键、创建标志、控制命令（`IP_CREAT`·`IP_EXCL`·`IP_NOWAIT`·`IP_RMID`·`IP_SET`·`IP_STAT`·`IP_INFO`·`IP_SHM_LOCK`·`IP_SHM_UNLOCK`）
+  - `ip_ftok`, `ip_perm_pack`, `ip_perm_key`, `ip_perm_uid`, `ip_perm_gid`, `ip_perm_mode`, `ip_flag_text`, `ip_cmd_name`, `ip_shmget`, `ip_shmat`, `ip_shmdt`, `ip_shmctl`, `ip_semget`, `ip_semop`, `ip_msgget`, `ip_msgsnd`, `ip_msgrcv`
+- **`keyctl`** — 内核密钥环的入口与权限位（`KC_GET_KEYRING_ID`·`KC_JOIN_SESSION_KEYRING`·`KC_UPDATE`·`KC_REVOKE`·`KC_CHOWN`·`KC_SETPERM`·`KC_DESCRIBE`·`KC_CLEAR`·`KC_POS_VIEW`·`KC_POS_READ`·`KC_POS_WRITE`·`KC_POS_SEARCH`·`KC_USR_VIEW`·`KC_USR_READ`·`KC_USR_WRITE`·`KC_USR_SEARCH`·`KC_GRP_VIEW`·`KC_GRP_READ`·`KC_OTH_VIEW`·`KC_OTH_READ`·`KC_SYS_KEYCTL`）
+  - `kc_command_name`, `kc_keyctl`, `kc_perm_mask`, `kc_perm_text`, `kc_is_possessor`, `kc_owner_can_read`
+- **`memfd`** — 匿名内存文件与它的封印（`MF_CLOEXEC`·`MF_ALLOW_SEALING`·`MF_HUGETLB`·`MF_SEAL_SEAL`·`MF_SEAL_SHRINK`·`MF_SEAL_GROW`·`MF_SEAL_WRITE`·`MF_SEAL_FUTURE_WRITE`·`MF_F_ADD_SEALS`·`MF_F_GET_SEALS`·`MF_SYS_MEMFD_CREATE`·`MF_SYS_FCNTL`）
+  - `mf_cstr`, `mf_create`, `mf_add_seals`, `mf_get_seals`, `mf_flag_text`, `mf_seal_text`
+- **`mmap`** — 内存映射的 PROT_* / MAP_* 位名（`MM_PROT_READ`·`MM_PROT_WRITE`·`MM_PROT_EXEC`·`MM_MAP_SHARED`·`MM_MAP_PRIVATE`·`MM_MAP_FIXED`·`MM_MAP_ANONYMOUS`·`MM_MAP_GROWSDOWN`·`MM_MAP_POPULATE`·`MM_MAP_STACK`）
+  - `mm_prot_text`, `mm_map_text`, `mm_lookup`, `mm_anon_rw_mask`
+- **`mount`** — mount(2) 的 MS_* 位名、反查与两个系统调用（`MS_RDONLY`·`MS_NOSUID`·`MS_NODEV`·`MS_NOEXEC`·`MS_SYNCHRONOUS`·`MS_REMOUNT`·`MS_MANDLOCK`·`MS_DIRSYNC`·`MS_NOATIME`·`MS_NODIRATIME`·`MS_BIND`·`MS_MOVE`·`MS_REC`·`MS_SILENT`·`MS_POSIXACL`·`MS_UNBINDABLE`·`MS_PRIVATE`·`MS_SLAVE`·`MS_SHARED`·`MS_RELATIME`·`MS_KERNMOUNT`·`MS_I_VERSION`·`MS_STRICTATIME`·`MS_LAZYTIME`·`MNT_FORCE`·`MNT_DETACH`·`MNT_EXPIRE`·`UMOUNT_NOFOLLOW`）
+  - `mnt_flag_text`, `mnt_lookup`, `mnt_umount_flag_text`, `mnt_mount`, `mnt_umount2`
+- **`mountinfo`** — 解析 `/proc/self/mountinfo`
+  - `mi_unescape`, `mi_field`, `mi_field_count`, `mi_sep_index`, `mi_split_major_minor`, `mi_field_u32`
+- **`mqueue`** — POSIX 消息队列: 名字、打开标志、属性块、优先级（`MQ_O_RDONLY`·`MQ_O_WRONLY`·`MQ_O_RDWR`·`MQ_O_CREAT`·`MQ_O_EXCL`·`MQ_O_NONBLOCK`·`MQ_O_CLOEXEC`·`MQ_PRIO_MAX`·`MQ_ATTR_BYTES`）
+  - `mq_attr_set`, `mq_attr_flags`, `mq_attr_maxmsg`, `mq_attr_msgsize`, `mq_attr_curmsgs`, `mq_prio_valid`, `mq_open`, `mq_unlink`, `mq_timedsend`, `mq_timedreceive`, `mq_getsetattr`, `mq_notify`, `mq_flag_text`
+- **`netlink`** — netlink 的协议号、消息头与路由类消息名（`NL_ROUTE`·`NL_USERSOCK`·`NL_SOCK_DIAG`·`NL_AUDIT`·`NL_NFLOG`·`NL_KOBJECT_UEVENT`·`NL_GENERIC`·`NL_F_REQUEST`·`NL_F_MULTI`·`NL_F_ACK`·`NL_F_ECHO`·`NL_F_DUMP_INTR`·`NL_F_DUMP_FILTERED`·`NL_F_ROOT`·`NL_F_MATCH`·`NL_F_DUMP`·`NL_HDR_BYTES`·`NL_ADDR_BYTES`）
+  - `nl_hdr_pack`, `nl_len`, `nl_type`, `nl_flags`, `nl_seq`, `nl_pid`, `nl_align4`, `nl_type_name`, `nl_sockaddr_pack`, `nl_sockaddr_pid`, `nl_sockaddr_groups`
+- **`ns`** — Linux namespace 的 clone 标志与名字
+  - `ns_flag`, `ns_parse`, `ns_has`, `ns_name`
+- **`perf`** — perf_event_open: 属性块布局与常见事件（`PF_ATTR_BYTES`·`PF_TYPE_HARDWARE`·`PF_TYPE_SOFTWARE`·`PF_TYPE_TRACEPOINT`·`PF_TYPE_HW_CACHE`·`PF_TYPE_RAW`·`PF_TYPE_BREAKPOINT`·`PF_SW_CPU_CLOCK`·`PF_SW_TASK_CLOCK`·`PF_SW_PAGE_FAULTS`·`PF_SW_CONTEXT_SWITCHES`·`PF_SW_CPU_MIGRATIONS`·`PF_SW_PAGE_FAULTS_MIN`·`PF_SW_PAGE_FAULTS_MAJ`·`PF_SW_ALIGNMENT_FAULTS`·`PF_SW_EMULATION_FAULTS`·`PF_HW_CPU_CYCLES`·`PF_HW_INSTRUCTIONS`·`PF_HW_CACHE_REFERENCES`·`PF_HW_CACHE_MISSES`·`PF_HW_BRANCH_INSTRUCTIONS`·`PF_HW_BRANCH_MISSES`·`PF_HW_BUS_CYCLES`·`PF_FMT_TOTAL_TIME_ENABLED`·`PF_FMT_TOTAL_TIME_RUNNING`·`PF_FMT_ID`·`PF_FMT_GROUP`·`PF_FMT_LOST`·`PF_FLAG_DISABLED`·`PF_FLAG_INHERIT`·`PF_FLAG_PINNED`·`PF_FLAG_EXCLUSIVE`·`PF_FLAG_EXCLUDE_USER`·`PF_FLAG_EXCLUDE_KERNEL`·`PF_FLAG_EXCLUDE_HV`·`PF_FLAG_EXCLUDE_IDLE`·`PF_FLAG_MMAP`·`PF_FLAG_COMM`·`PF_FLAG_FREQ`）
+  - `pf_attr_begin`, `pf_attr_type`, `pf_attr_size`, `pf_attr_config`, `pf_attr_sample_period`, `pf_attr_sample_type`, `pf_attr_read_format`, `pf_attr_flags`, `pf_attr_wakeup_events`, `pf_attr_config1`, `pf_attr_config2`, `pf_attr_get_type`, `pf_attr_get_size`, `pf_attr_get_config`, `pf_attr_get_flags`, `pf_event_open`, `pf_read_count`, `pf_sw_name`, `pf_hw_name`
+- **`poll`** — poll / epoll 的事件位名（`PW_IN`·`PW_PRI`·`PW_OUT`·`PW_ERR`·`PW_HUP`·`PW_NVAL`·`PW_RDNORM`·`PW_RDBAND`·`PW_WRNORM`·`PW_WRBAND`·`PW_EPOLLET`）
+  - `pw_events_text`, `pw_epoll_text`
+- **`prctl`** — prctl(2) 的选项表、名字与进程名那对一进一出（`PRC_SET_PDEATHSIG`·`PRC_GET_PDEATHSIG`·`PRC_GET_DUMPABLE`·`PRC_SET_DUMPABLE`·`PRC_GET_KEEPCAPS`·`PRC_SET_KEEPCAPS`·`PRC_GET_FPEMU`·`PRC_SET_FPEMU`·`PRC_SET_NAME`·`PRC_GET_NAME`·`PRC_SET_SECCOMP`·`PRC_CAPBSET_READ`·`PRC_CAPBSET_DROP`·`PRC_GET_SECUREBITS`·`PRC_SET_TIMERSLACK`·`PRC_GET_TIMERSLACK`·`PRC_SET_MM`·`PRC_GET_MM`·`PRC_SET_CHILD_SUBREAPER`·`PRC_GET_CHILD_SUBREAPER`·`PRC_SET_NO_NEW_PRIVS`·`PRC_GET_NO_NEW_PRIVS`·`PRC_NAME_BYTES`·`PRC_NAME_MAX`）
+  - `prc_option_name`, `prc_lookup`, `prc_prctl`, `prc_set_name`, `prc_get_name`, `prc_set_pdeathsig`, `prc_no_new_privs`
+- **`procfs`** — `/proc` 里两种最常见的文本格式
+  - `pf_stat`, `pf_line_value`, `pf_meminfo_total`
+- **`procstatus`** — 解析 `/proc/<pid>/status`
+  - `ps_value`, `ps_value_u64`, `ps_state_code`, `ps_state_text`, `ps_count_lines`, `ps_value_is`
+- **`ptrace`** — ptrace(2) 的请求号、选项位与名字（`PT_TRACEME`·`PT_PEEKTEXT`·`PT_PEEKDATA`·`PT_PEEKUSER`·`PT_POKETEXT`·`PT_POKEDATA`·`PT_CONT`·`PT_KILL`·`PT_SINGLESTEP`·`PT_GETREGS`·`PT_SETREGS`·`PT_ATTACH`·`PT_DETACH`·`PT_SYSCALL`·`PT_SETOPTIONS`·`PT_GETEVENTMSG`·`PT_GETSIGINFO`·`PT_SETSIGINFO`·`PT_GETREGSET`·`PT_SETREGSET`·`PT_SEIZE`·`PT_INTERRUPT`·`PT_LISTEN`·`PT_PEEKSIGINFO`·`PT_O_TRACESYSGOOD`·`PT_O_TRACEFORK`·`PT_O_TRACEVFORK`·`PT_O_TRACECLONE`·`PT_O_TRACEEXEC`·`PT_O_TRACEEXIT`·`PT_O_TRACESECCOMP`·`PT_REG_R15`·`PT_REG_R14`·`PT_REG_R13`·`PT_REG_R12`·`PT_REG_RBP`·`PT_REG_RBX`·`PT_REG_R11`·`PT_REG_R10`·`PT_REG_R9`·`PT_REG_R8`·`PT_REG_RAX`·`PT_REG_RCX`·`PT_REG_RDX`·`PT_REG_RSI`·`PT_REG_RDI`·`PT_REG_ORIG_RAX`·`PT_REG_RIP`·`PT_REG_CS`·`PT_REG_EFLAGS`·`PT_REG_RSP`·`PT_REG_SS`·`PT_REGS_BYTES`）
+  - `pt_request_name`, `pt_options_text`, `pt_trace`, `pt_peek_is_error`, `pt_reg`
+- **`reboot`** — `reboot(2)` 的两个魔数与动作号（`RB_MAGIC1`·`RB_MAGIC2`·`RB_RESTART`·`RB_HALT`·`RB_POWER_OFF`·`RB_KEXEC`·`RB_SW_SUSPEND`·`RB_CAD_ON`·`RB_CAD_OFF`）
+  - `rb_magic_ok`, `rb_command_name`, `rb_reboot`, `rb_power_off`, `rb_restart`, `rb_halt`, `rb_suspend`
+- **`resource`** — getrlimit / setrlimit 的资源名与结构（`RLIM_INFINITY`）
+  - `rlim_name`, `rlim_read`, `rlim_is_inf`
+- **`seccomp`** — seccomp 的经典 BPF 过滤器构造器（`SEC_ERR`·`SEC_STATE`·`BPF_LD_ABS`·`BPF_LD_IMM`·`BPF_JEQ`·`BPF_JGE`·`BPF_JGT`·`BPF_RET_K`·`SEC_RET_KILL_PROCESS`·`SEC_RET_KILL_THREAD`·`SEC_RET_TRAP`·`SEC_RET_ERRNO`·`SEC_RET_USER_NOTIF`·`SEC_RET_TRACE`·`SEC_RET_LOG`·`SEC_RET_ALLOW`·`SEC_DATA_NR`·`SEC_DATA_ARCH`·`SEC_DATA_IP`·`SEC_DATA_ARGS`）
+  - `sec_init`, `sec_count`, `sec_err`, `sec_emit`, `sec_ld_abs`, `sec_ld_imm`, `sec_jeq`, `sec_jge`, `sec_jgt`, `sec_ret`, `sec_ret_allow`, `sec_ret_kill`, `sec_ret_errno`
+- **`signalfd`** — signalfd: 把信号变成一次可读的事件（`SFD_CLOEXEC`·`SFD_NONBLOCK`·`SFD_SET_BYTES`·`SFD_INFO_BYTES`）
+  - `sfd_name`, `sfd_flags_text`, `sfd_set_add`, `sfd_set_has`, `sfd_set_clear`, `sfd_create`, `sfd_read`, `sfd_info_signo`, `sfd_info_errno`, `sfd_info_code`
+- **`statfs`** — `statfs(2)` 的结构体布局与文件系统魔数名（`STATFS_BYTES`·`STATFS_F_TYPE`·`STATFS_F_BSIZE`·`STATFS_F_BLOCKS`·`STATFS_F_BFREE`·`STATFS_F_BAVAIL`·`STATFS_F_FILES`·`STATFS_F_FFREE`·`STATFS_F_FSID`·`STATFS_F_NAMELEN`·`STATFS_F_FRSIZE`·`STATFS_F_FLAGS`）
+  - `st_statfs`, `st_fstatfs`, `st_type`, `st_bsize`, `st_blocks`, `st_bfree`, `st_bavail`, `st_files`, `st_ffree`, `st_namelen`, `st_frsize`, `st_flags`, `st_used`, `st_magic_name`, `st_set_u64`
+- **`syscalls`** — x86-64 Linux 的系统调用号表
+  - `scn_name`, `scn_num`
+- **`sysinfo`** — `sysinfo(2)` 那一个结构体（`SI_SYS_SYSINFO`·`SI_BYTES`·`SI_OFF_UPTIME`·`SI_OFF_LOADS`·`SI_OFF_TOTALRAM`·`SI_OFF_FREERAM`·`SI_OFF_SHAREDRAM`·`SI_OFF_BUFFERRAM`·`SI_OFF_TOTALSWAP`·`SI_OFF_FREESWAP`·`SI_OFF_PROCS`·`SI_OFF_TOTALHIGH`·`SI_OFF_FREEHIGH`·`SI_OFF_MEM_UNIT`）
+  - `si_sysinfo`, `si_uptime`, `si_load`, `si_totalram`, `si_freeram`, `si_sharedram`, `si_bufferram`, `si_totalswap`, `si_freeswap`, `si_procs`, `si_mem_unit`, `si_mem_bytes`, `si_uptime_text`
+- **`syslogk`** — 内核环形日志 (dmesg) 的读取动作与 syslog 优先级编码（`SK_READ_ALL`·`SK_READ_CLEAR`·`SK_CLEAR`·`SK_SIZE_BUFFER`·`SK_SIZE_UNREAD`·`SK_FAC_KERN`·`SK_FAC_USER`·`SK_FAC_DAEMON`·`SK_FAC_AUTH`·`SK_FAC_SYSLOG`·`SK_FAC_LPR`·`SK_FAC_NEWS`·`SK_FAC_UUCP`·`SK_FAC_CRON`·`SK_FAC_AUTHPRIV`·`SK_FAC_FTP`·`SK_FAC_LOCAL0`·`SK_FAC_LOCAL7`·`SK_LVL_EMERG`·`SK_LVL_ALERT`·`SK_LVL_CRIT`·`SK_LVL_ERR`·`SK_LVL_WARNING`·`SK_LVL_NOTICE`·`SK_LVL_INFO`·`SK_LVL_DEBUG`）
+  - `sk_syslog`, `sk_buffer_size`, `sk_unread`, `sk_action_valid`, `sk_facility_name`, `sk_level_name`, `sk_priority`, `sk_priority_facility`, `sk_priority_level`, `sk_priority_text`
+- **`system`** — 包入口（门面）。
+- **`timeabi`** — 内核时间结构体的**唯一一份**打包/解码（`TA_TS_BYTES`·`TA_TV_BYTES`·`TA_ITS_BYTES`·`TA_IVAL_BYTES`）
+  - `ta_ts_pack`, `ta_ts_sec`, `ta_ts_nsec`, `ta_tv_pack`, `ta_tv_sec`, `ta_tv_usec`, `ta_its_pack`, `ta_its_interval_sec`, `ta_its_interval_nsec`, `ta_its_value_sec`, `ta_its_value_nsec`, `ta_ival_pack`, `ta_ival_interval_sec`, `ta_ival_interval_usec`, `ta_ival_value_sec`, `ta_ival_value_usec`
+- **`timerfd`** — timerfd: 把"到点"变成一次可 poll 的读（`TF_CLOEXEC`·`TF_NONBLOCK`·`TF_TIMER_ABSTIME`·`TF_TIMER_CANCEL_ON_SET`·`TF_SPEC_BYTES`）
+  - `tf_flags_text`, `tf_create`, `tf_spec_set`, `tf_spec_isec`, `tf_spec_insec`, `tf_spec_vsec`, `tf_spec_vnsec`, `tf_settime`, `tf_gettime`, `tf_read_expirations`, `tf_take_expirations`
+- **`utsname`** — `uname(2)` 的六个字段（`UN_FIELD_LEN`·`UN_SYSNAME`·`UN_NODENAME`·`UN_RELEASE`·`UN_VERSION`·`UN_MACHINE`·`UN_DOMAINNAME`·`UN_BYTES`·`UN_SYS_UNAME`）
+  - `un_uname`, `un_field`, `un_sysname`, `un_nodename`, `un_release`, `un_version`, `un_machine`, `un_domainname`, `un_kernel_tuple`
+
+## baremetal（6 个模块）
+
+- **`baremetal`** — 包入口（门面）。
+- **`gdt`** — x86-64 全局描述符表（GDT）条目编码
+  - `gd_null`, `gd_code`, `gd_data`, `gd_tss`, `gd_selector`
+- **`multiboot`** — Multiboot 1 头与信息结构（`MB_BOOT_MAGIC`·`MB_INFO_MAGIC`）
+  - `mb_header_write`, `mb_header_valid`, `mb_info_has_mem`, `mb_info`, `mb_mmap_entry`, `mb_mmap_next`
+- **`paging`** — x86-64 四级页表项与虚拟地址拆分（`PG_PRESENT`·`PG_RW`·`PG_USER`·`PG_PWT`·`PG_PCD`·`PG_ACCESSED`·`PG_DIRTY`·`PG_HUGE`·`PG_GLOBAL`·`PG_NX`·`PG_ADDR_MASK`）
+  - `pg_pte`, `pg_addr`, `pg_has`, `pg_set`, `pg_index`, `pg_split`
+- **`pci`** — PCI 配置空间字段与 BAR 解码
+  - `pci_vendor`, `pci_device`, `pci_header_type`, `pci_class`, `pci_bdf`, `pci_bar_raw`, `pci_bar_is_io`, `pci_bar_addr`, `pci_bar_slots`
+- **`vga`** — VGA 文本模式（0xB8000）的字符/属性编码
+  - `vga_attr`, `vga_cell`, `vga_index`, `vga_color`, `vga_fill`
+
+## windows（6 个模块）
+
+- **`console`** — 控制台：标准输入/输出/错误、写读、代码页（`CON_STD_IN`·`CON_STD_OUT`·`CON_STD_ERR`·`CON_CP_UTF8`·`CON_CP_DEFAULT`）
+  - `con_in`, `con_out`, `con_err`, `con_write`, `con_read`, `con_mode`, `con_output_cp`, `con_set_output_cp`, `con_enable_utf8`
+- **`environment`** — 环境变量、命令行、模块路径、当前目录（`WE_NOT_FOUND`·`WE_NAMELEN`）
+  - `we_cstr`, `we_get`, `we_set`, `we_cmdline`, `we_strlen`, `we_exe_path`, `we_cwd`, `we_get_u32`, `we_eq`
+- **`kernel32`** — Win32 的文件与句柄面（Kernel32）（`K32_INVALID`·`K32_GENERIC_READ`·`K32_GENERIC_WRITE`·`K32_SHARE_ALL`·`K32_CREATE_ALWAYS`·`K32_OPEN_EXISTING`·`K32_OPEN_ALWAYS`·`K32_ATTR_NORMAL`·`K32_MOVE_REPLACE`·`K32_SEEK_SET`·`K32_SEEK_CUR`·`K32_SEEK_END`）
+  - `k32_cstr`, `k32_ok`, `k32_invalid`, `k32_last_error`, `k32_open_read`, `k32_open_write`, `k32_read`, `k32_write`, `k32_flush`, `k32_size`, `k32_seek`, `k32_close`, `k32_mkdir`, `k32_unlink`, `k32_rename`
+- **`process`** — 进程：起一个、等它、取退出码、结束（`WP_SI_BYTES`·`WP_PI_BYTES`·`WP_WAIT_OBJECT_0`·`WP_WAIT_TIMEOUT`·`WP_WAIT_FAILED`·`WP_INFINITE`·`WP_CREATE_SUSPENDED`·`WP_CREATE_NEW_CONSOLE`）
+  - `wp_startup_init`, `wp_pi_init`, `wp_pi_process`, `wp_pi_thread`, `wp_pi_pid`, `wp_pi_tid`, `wp_spawn`, `wp_spawn_flags`, `wp_wait`, `wp_wait_exit`, `wp_terminate`, `wp_exit_now`, `wp_pid`
+- **`sync`** — 内核对象同步：事件、互斥量、等待（`WS_MANUAL_RESET`·`WS_INITIAL_SIGNALED`·`WS_WAIT_OBJECT_0`·`WS_WAIT_TIMEOUT`·`WS_WAIT_FAILED`·`WS_INFINITE`）
+  - `ws_event_manual`, `ws_event_auto`, `ws_set`, `ws_reset`, `ws_mutex`, `ws_release`, `ws_wait`, `ws_ok`, `ws_timed_out`
+- **`wtime`** — 时钟与睡眠：tick、高精度计数器、FILETIME、Sleep（`WT_EPOCH_100NS`·`WT_SEC_100NS`·`WT_MS_100NS`）
+  - `wt_tick_ms`, `wt_qpc`, `wt_qpf`, `wt_filetime_u64`, `wt_now_filetime`, `wt_unix_seconds`, `wt_to_ms`, `wt_counts_to_us`, `wt_sleep_ms`

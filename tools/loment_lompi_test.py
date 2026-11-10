@@ -1560,10 +1560,11 @@ def test_install_scripts_stay_pure_ascii():
 #: **2026-11-09 补 `system` / `os` 到 40**（`docs/327`）：system +28、os +33，
 #: 两包 12 / 7 -> 40 / 40，整棵树 262 -> **323**。
 STORE_DIR = ROOT / "lompi" / "store"
-STORE_MODULES = {"std": 141, "host": 8, "internet": 8, "os": 40,
+STORE_MODULES = {"std": 148, "host": 8, "internet": 11, "os": 44,
                  "math": 9, "science": 6, "engineering": 4,
-                 "dev": 15, "world": 22, "lowlevel": 12, "system": 40, "baremetal": 6}
-STORE_FILES = 323
+                 "dev": 15, "world": 22, "lowlevel": 12, "system": 41, "baremetal": 6,
+                 "windows": 6}
+STORE_FILES = 345
 
 
 def _store_line(out: str) -> str:
@@ -1597,6 +1598,20 @@ def test_package_carries_the_whole_store():
     fresh = d._fresh_sources("linux")
     missing = [f for f in files if f"share/lompi/store/{f}" not in fresh]
     assert not missing, f"这些 store 文件没被 _fresh_sources 盯住: {missing[:3]}"
+
+
+@test
+def test_the_store_index_is_current():
+    """`docs/store-index.md` 必须与 store 逐字节一致 —— 它是生成物（docs/328）。
+
+    **Why**：三百多个模块的索引手写必漂；生成物 + 逐字节判据是唯一不靠自觉的形状。
+    """
+    import loment_store_index
+    want = loment_store_index.render()
+    cur = (ROOT / "docs" / "store-index.md").read_text(encoding="utf-8")
+    assert cur == want, (
+        "docs/store-index.md 过期 —— 跑 python tools/loment_store_index.py")
+    print(f"      store 索引与 {len(want.splitlines())} 行生成物一致")
 
 
 @test

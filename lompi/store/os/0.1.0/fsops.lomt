@@ -1,0 +1,615 @@
+// os/fsops.lomt — 文件树操作：整文件读写、原子写、复制文件/树、删除树、遍历
+//
+// 为什么需要它: `os/file` 是"一个 fd 上的读写"，`os/fsutil` 是"按路径读一个小文件"，
+// 而一个真实工具要的是**一件事一次调用**：把整棵树复制过去、把一棵树删干净、
+// 往临时文件写完再改名、把一个目录下所有相对路径列出来。没有这一层，每个工具都要
+// 自己写 150–250 行，而且每一份的 EINTR / 短读 / 不跟随符号链接的处理都会略有不同。
+//
+// 覆盖:
+//   * `fp_read_all` —— 按路径读整个文件，先量大小，装不下返回 -28 而不是返回半截；
+//   * `fp_write_atomic` —— 写临时文件 + fsync + rename；失败删掉临时文件；
+//   * `fp_copy_file` —— 经由调用方给的缓冲复制，读完 fsync；
+//   * `fp_remove_tree` —— 深度优先删除，**不跟随符号链接**（unlinkat 删的是链接本身）；
+//   * `fp_copy_tree` —— 复制目录树：普通文件按内容、目录递归、符号链接**重建链接**
+//     （不复制目标内容）、其余特殊文件跳过；
+//   * `fp_walk` —— 输出 NUL 分隔的**相对**路径表，深度上限 `FP_WALK_DEPTH`。
+//
+// 边界（刻意划的）:
+//   * **没有回调**：本语言没有函数指针，所以遍历的契约是"调用方给缓冲，拿回名字表，
+//     自己 stat/处理"。`fp_walk` 不做过滤、不排序（顺序是内核给什么就是什么）。
+//   * **递归有硬上限**：删除/复制树 `FP_MAX_DEPTH` = 32 层、遍历 `FP_WALK_DEPTH` = 8 层，
+//     超出返回 -40（当作循环检测），不去猜"这只是很深"。
+//   * **不是 rsync**：不保留 mtime/属主/xattr，不去重，不做增量；这些都要用户态策略。
+//   * **符号链接的目标不复制**：复制树里链接按链接重建 —— 复制目标内容会让"指向
+//     外部的链接"变成一份静默的副本，那是错的。
+//   * 路径一律是 **C 串**（NUL 结尾）；号是 x86-64 Linux 的。
+//
+// 命名: 公开 fp_*, 内部 fpq_*。自检 test_fsops_*（纯逻辑：相对路径拼装、深度判定、
+// 目录项类型判定）—— I/O 那一半由 `tools/loment_os_test.py` / 行为判据那侧真跑。
+
+module fsops
+
+use fsutil
+use readdir
+
+/// 装不下（缓冲/输出表不够）。
+pub const FP_EMSGSIZE: i64 = -28;
+/// EINTR —— 被信号打断，重试即可。
+pub const FP_EINTR: i64 = -4;
+/// 已存在（mkdir 的 EEXIST）。
+pub const FP_EXIST: i64 = -17;
+/// 递归太深。
+pub const FP_ELOOP: i64 = -40;
+/// 删除/复制树的递归上限。
+pub const FP_MAX_DEPTH: u32 = 32;
+/// 遍历的递归上限。
+pub const FP_WALK_DEPTH: u32 = 8;
+
+const FPQ_AT_FDCWD: u64 = 18446744073709551516;
+const FPQ_SYS_READ: u64 = 0;
+const FPQ_SYS_WRITE: u64 = 1;
+const FPQ_SYS_CLOSE: u64 = 3;
+const FPQ_SYS_LSEEK: u64 = 8;
+const FPQ_SYS_FSYNC: u64 = 74;
+const FPQ_SYS_RENAME: u64 = 82;
+const FPQ_SYS_MKDIR: u64 = 83;
+const FPQ_SYS_SYMLINK: u64 = 88;
+const FPQ_SYS_READLINK: u64 = 89;
+const FPQ_SYS_OPENAT: u64 = 257;
+const FPQ_SYS_UNLINKAT: u64 = 263;
+const FPQ_O_RDONLY: u64 = 0;
+const FPQ_O_CREAT_TRUNC: u64 = 577;
+const FPQ_O_DIRECTORY: u64 = 65536;
+const FPQ_AT_REMOVEDIR: u64 = 512;
+
+fn fpq_ld32(p: ptr, off: u32) -> u32 {
+    return (load8(p, off) as u32)
+        | ((load8(p, off + 1) as u32) << 8)
+        | ((load8(p, off + 2) as u32) << 16)
+        | ((load8(p, off + 3) as u32) << 24);
+}
+
+fn fpq_st32(p: ptr, off: u32, v: u32) {
+    store8(p, off, (v & 255) as u8);
+    store8(p, off + 1, ((v >> 8) & 255) as u8);
+    store8(p, off + 2, ((v >> 16) & 255) as u8);
+    store8(p, off + 3, ((v >> 24) & 255) as u8);
+}
+
+fn fpq_ld64(p: ptr, off: u32) -> u64 {
+    let v: u64 = 0 as u64;
+    let i: u32 = 0;
+    while i < 8 {
+        v = v | ((load8(p, off + i) as u64) << (8 * i));
+        i = i + 1;
+    }
+    return v;
+}
+
+fn fpq_st64(p: ptr, off: u32, v: u64) {
+    let i: u32 = 0;
+    while i < 8 {
+        store8(p, off + i, ((v >> (8 * i)) & 255) as u8);
+        i = i + 1;
+    }
+}
+
+fn fpq_clen(p: ptr, cap: u32) -> u32 {
+    let i: u32 = 0;
+    while i < cap && load8(p, i) != 0 {
+        i = i + 1;
+    }
+    return i;
+}
+
+fn fpq_open(path: ptr, flags: u64, mode: u32) -> i64 {
+    return syscall6(FPQ_SYS_OPENAT, FPQ_AT_FDCWD, path as u64, flags, mode as u64, 0);
+}
+
+fn fpq_close(fd: i64) {
+    let _r: i64 = syscall4(FPQ_SYS_CLOSE, fd as u64, 0, 0);
+}
+
+fn fpq_unlink(path: ptr, flags: u64) -> i64 {
+    return syscall4(FPQ_SYS_UNLINKAT, FPQ_AT_FDCWD, path as u64, flags);
+}
+
+fn fpq_write_all(fd: i64, p: ptr, n: u32) -> i64 {
+    let total: u64 = 0;
+    let rc: i64 = 0;
+    let going: u32 = 1;
+    while going == 1 && total < (n as u64) {
+        rc = syscall4(FPQ_SYS_WRITE, fd as u64, ((p as u64) + total) as u64,
+                      (n as u64) - total);
+        if rc < 0 {
+            if rc != FP_EINTR {
+                return rc;
+            }
+        } else {
+            total = total + (rc as u64);
+        }
+    }
+    return total as i64;
+}
+
+/// 读整个文件。装不下返回 `FP_EMSGSIZE`；出错返回负的 errno。
+pub fn fp_read_all(path: ptr, buf: ptr, cap: u32) -> i64 {
+    let fd: i64 = fpq_open(path, FPQ_O_RDONLY, 0);
+    if fd < 0 {
+        return fd;
+    }
+    let sz: i64 = syscall4(FPQ_SYS_LSEEK, fd as u64, 0, 2);
+    if sz > (cap as i64) {
+        fpq_close(fd);
+        return FP_EMSGSIZE;
+    }
+    if sz > 0 {
+        let _b: i64 = syscall4(FPQ_SYS_LSEEK, fd as u64, 0, 0);
+    }
+    let total: u64 = 0;
+    let rc: i64 = 0;
+    let going: u32 = 1;
+    let limit: u64 = cap as u64;
+    while going == 1 && total < limit {
+        rc = syscall4(FPQ_SYS_READ, fd as u64, ((buf as u64) + total) as u64,
+                      limit - total);
+        if rc == 0 {
+            going = 0;
+        } else if rc < 0 {
+            if rc == FP_EINTR {
+                rc = 0;
+            } else {
+                fpq_close(fd);
+                return rc;
+            }
+        } else {
+            total = total + (rc as u64);
+        }
+    }
+    fpq_close(fd);
+    return total as i64;
+}
+
+/// 原子写：写 `tmp`、fsync、关、`rename(tmp, path)`。失败删掉临时文件。
+pub fn fp_write_atomic(path: ptr, tmp: ptr, data: ptr, n: u32, mode: u32) -> i64 {
+    let fd: i64 = fpq_open(tmp, FPQ_O_CREAT_TRUNC, mode);
+    if fd < 0 {
+        return fd;
+    }
+    let wr: i64 = fpq_write_all(fd, data, n);
+    if wr < 0 {
+        fpq_close(fd);
+        let _u: i64 = fpq_unlink(tmp, 0);
+        return wr;
+    }
+    let _f: i64 = syscall4(FPQ_SYS_FSYNC, fd as u64, 0, 0);
+    fpq_close(fd);
+    let rn: i64 = syscall4(FPQ_SYS_RENAME, tmp as u64, path as u64, 0);
+    if rn < 0 {
+        let _u: i64 = fpq_unlink(tmp, 0);
+        return rn;
+    }
+    return 0;
+}
+
+/// 复制一个文件（经由 `buf`/`cap`）。返回复制字节数或负的 errno。
+pub fn fp_copy_file(src: ptr, dst: ptr, buf: ptr, cap: u32, mode: u32) -> i64 {
+    let ifd: i64 = fpq_open(src, FPQ_O_RDONLY, 0);
+    if ifd < 0 {
+        return ifd;
+    }
+    let ofd: i64 = fpq_open(dst, FPQ_O_CREAT_TRUNC, mode);
+    if ofd < 0 {
+        fpq_close(ifd);
+        return ofd;
+    }
+    let total: u64 = 0;
+    let rc: i64 = 0;
+    let going: u32 = 1;
+    while going == 1 {
+        rc = syscall4(FPQ_SYS_READ, ifd as u64, buf as u64, cap as u64);
+        if rc == 0 {
+            going = 0;
+        } else if rc < 0 {
+            if rc != FP_EINTR {
+                fpq_close(ifd);
+                fpq_close(ofd);
+                return rc;
+            }
+        } else {
+            let w: i64 = fpq_write_all(ofd, buf, rc as u32);
+            if w < 0 {
+                fpq_close(ifd);
+                fpq_close(ofd);
+                return w;
+            }
+            total = total + (rc as u64);
+        }
+    }
+    let _f: i64 = syscall4(FPQ_SYS_FSYNC, ofd as u64, 0, 0);
+    fpq_close(ifd);
+    fpq_close(ofd);
+    return total as i64;
+}
+
+/// `dir` + `/` + `name` 拼进 `out`（C 串）。放不下返回 0。
+fn fpq_join(dir: ptr, name: ptr, nlen: u32, out: ptr, cap: u32) -> u32 {
+    let dl: u32 = fpq_clen(dir, cap);
+    let need: u32 = dl + 1 + nlen + 1;
+    if need > cap {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < dl {
+        store8(out, i, load8(dir, i) as u8);
+        i = i + 1;
+    }
+    store8(out, dl, 47 as u8);
+    i = 0;
+    while i < nlen {
+        store8(out, dl + 1 + i, load8(name, i) as u8);
+        i = i + 1;
+    }
+    store8(out, dl + 1 + nlen, 0 as u8);
+    return need;
+}
+
+/// 目录项类型字节（`getdents64` 记录里偏移 18 的那一字节）。
+fn fpq_dent_type(buf: ptr, pos: u32) -> u32 {
+    return load8(buf, pos + 18) as u32;
+}
+
+fn fpq_rm(dir: ptr, cap: u32, depth: u32, db: ptr) -> i64 {
+    if depth > FP_MAX_DEPTH {
+        return FP_ELOOP;
+    }
+    let fd: i64 = fpq_open(dir, FPQ_O_DIRECTORY | FPQ_O_RDONLY, 0);
+    if fd < 0 {
+        return fd;
+    }
+    let child: ptr = alloc(4096);
+    let name: ptr = alloc(512);
+    let poso: ptr = alloc(4);
+    let nread: u32 = 0;
+    let dpos: u32 = 0;
+    let more: u32 = 1;
+    let rc: i64 = 0;
+    while more == 1 {
+        if dpos >= nread {
+            let r: i64 = di_read(fd as u64, db, cap);
+            if r < 0 {
+                fpq_close(fd);
+                return r;
+            }
+            if r == 0 {
+                more = 0;
+            } else {
+                nread = r as u32;
+                dpos = 0;
+            }
+        }
+        if more == 1 {
+            let start: u32 = dpos;
+            let ln: u32 = di_next(db, nread, dpos, name, 400, poso);
+            if ln == 0 {
+                dpos = nread;
+            } else {
+                dpos = fpq_ld32(poso, 0);
+                if di_skip_dots(name, ln) == false {
+                    let t: u32 = fpq_dent_type(db, start);
+                    let ok: u32 = fpq_join(dir, name, ln, child, 4000);
+                    if ok == 0 {
+                        fpq_close(fd);
+                        return FP_EMSGSIZE;
+                    }
+                    if t == 4 {
+                        let sub: ptr = alloc(cap);
+                        rc = fpq_rm(child, cap, depth + 1, sub);
+                        if rc < 0 {
+                            fpq_close(fd);
+                            return rc;
+                        }
+                    } else {
+                        rc = fpq_unlink(child, 0);
+                        if rc < 0 {
+                            fpq_close(fd);
+                            return rc;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    fpq_close(fd);
+    return fpq_unlink(dir, FPQ_AT_REMOVEDIR);
+}
+
+/// 递归删除一棵树（**不跟随符号链接**：删的是链接本身）。返回 0 或负的 errno。
+pub fn fp_remove_tree(path: ptr, dent_buf: ptr, dent_cap: u32) -> i64 {
+    return fpq_rm(path, dent_cap, 0, dent_buf);
+}
+
+fn fpq_copy_dir(src: ptr, dst: ptr, buf: ptr, cap: u32, depth: u32) -> i64 {
+    if depth > FP_MAX_DEPTH {
+        return FP_ELOOP;
+    }
+    let fd: i64 = fpq_open(src, FPQ_O_DIRECTORY | FPQ_O_RDONLY, 0);
+    if fd < 0 {
+        return fd;
+    }
+    let db: ptr = alloc(4096);
+    let childs: ptr = alloc(4096);
+    let childd: ptr = alloc(4096);
+    let name: ptr = alloc(512);
+    let poso: ptr = alloc(4);
+    let nread: u32 = 0;
+    let dpos: u32 = 0;
+    let more: u32 = 1;
+    let rc: i64 = 0;
+    while more == 1 {
+        if dpos >= nread {
+            let r: i64 = di_read(fd as u64, db, 4096);
+            if r < 0 {
+                fpq_close(fd);
+                return r;
+            }
+            if r == 0 {
+                more = 0;
+            } else {
+                nread = r as u32;
+                dpos = 0;
+            }
+        }
+        if more == 1 {
+            let start: u32 = dpos;
+            let ln: u32 = di_next(db, nread, dpos, name, 400, poso);
+            if ln == 0 {
+                dpos = nread;
+            } else {
+                dpos = fpq_ld32(poso, 0);
+                if di_skip_dots(name, ln) == false {
+                    let t: u32 = fpq_dent_type(db, start);
+                    let ok1: u32 = fpq_join(src, name, ln, childs, 4000);
+                    let ok2: u32 = fpq_join(dst, name, ln, childd, 4000);
+                    if ok1 == 0 || ok2 == 0 {
+                        fpq_close(fd);
+                        return FP_EMSGSIZE;
+                    }
+                    if t == 4 {
+                        let mk: i64 = syscall4(FPQ_SYS_MKDIR, childd as u64, 493, 0);
+                        if mk < 0 && mk != FP_EXIST {
+                            fpq_close(fd);
+                            return mk;
+                        }
+                        rc = fpq_copy_dir(childs, childd, buf, cap, depth + 1);
+                        if rc < 0 {
+                            fpq_close(fd);
+                            return rc;
+                        }
+                    } else if t == 8 {
+                        rc = fp_copy_file(childs, childd, buf, cap, 420);
+                        if rc < 0 {
+                            fpq_close(fd);
+                            return rc;
+                        }
+                    } else if t == 10 {
+                        let target: ptr = alloc(1024);
+                        let tl: i64 = syscall4(FPQ_SYS_READLINK, childs as u64,
+                                               target as u64, 1023);
+                        if tl < 0 {
+                            fpq_close(fd);
+                            return tl;
+                        }
+                        store8(target, tl as u32, 0 as u8);
+                        let sl: i64 = syscall4(FPQ_SYS_SYMLINK, target as u64,
+                                               childd as u64, 0);
+                        if sl < 0 {
+                            fpq_close(fd);
+                            return sl;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    fpq_close(fd);
+    return 0;
+}
+
+/// 复制目录树：文件按内容、目录递归、符号链接重建（不复制目标）、其余跳过。
+pub fn fp_copy_tree(src: ptr, dst: ptr, buf: ptr, cap: u32) -> i64 {
+    let mk: i64 = syscall4(FPQ_SYS_MKDIR, dst as u64, 493, 0);
+    if mk < 0 && mk != FP_EXIST {
+        return mk;
+    }
+    return fpq_copy_dir(src, dst, buf, cap, 0);
+}
+
+fn fpq_walk(dir: ptr, depth: u32, dent_cap: u32, out: ptr, out_cap: u32,
+            prefix: ptr, pn: u32, tot: ptr, db: ptr) -> i64 {
+    let fd: i64 = fpq_open(dir, FPQ_O_DIRECTORY | FPQ_O_RDONLY, 0);
+    if fd < 0 {
+        return fd;
+    }
+    let rel: ptr = alloc(4096);
+    let child: ptr = alloc(4096);
+    let name: ptr = alloc(512);
+    let poso: ptr = alloc(4);
+    let nread: u32 = 0;
+    let dpos: u32 = 0;
+    let more: u32 = 1;
+    let rc: i64 = 0;
+    while more == 1 {
+        if dpos >= nread {
+            let r: i64 = di_read(fd as u64, db, dent_cap);
+            if r < 0 {
+                fpq_close(fd);
+                return r;
+            }
+            if r == 0 {
+                more = 0;
+            } else {
+                nread = r as u32;
+                dpos = 0;
+            }
+        }
+        if more == 1 {
+            let start: u32 = dpos;
+            let ln: u32 = di_next(db, nread, dpos, name, 400, poso);
+            if ln == 0 {
+                dpos = nread;
+            } else {
+                dpos = fpq_ld32(poso, 0);
+                if di_skip_dots(name, ln) == false {
+                    let t: u32 = fpq_dent_type(db, start);
+                    let rl: u32 = fp_rel_path(prefix, pn, name, ln, rel, 4000);
+                    if rl == 0 {
+                        fpq_close(fd);
+                        return FP_EMSGSIZE;
+                    }
+                    let used: u64 = fpq_ld64(tot, 0);
+                    if used + (rl as u64) + 1 > (out_cap as u64) {
+                        fpq_close(fd);
+                        return FP_EMSGSIZE;
+                    }
+                    let i: u32 = 0;
+                    while i < rl {
+                        store8(out, (used as u32) + i, load8(rel, i) as u8);
+                        i = i + 1;
+                    }
+                    store8(out, (used as u32) + rl, 0 as u8);
+                    fpq_st64(tot, 0, used + (rl as u64) + 1);
+                    if fp_should_descend(t, depth) == true {
+                        let ok: u32 = fpq_join(dir, name, ln, child, 4000);
+                        if ok == 0 {
+                            fpq_close(fd);
+                            return FP_EMSGSIZE;
+                        }
+                        let sub: ptr = alloc(dent_cap);
+                        rc = fpq_walk(child, depth + 1, dent_cap, out, out_cap,
+                                      rel, rl, tot, sub);
+                        if rc < 0 {
+                            fpq_close(fd);
+                            return rc;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    fpq_close(fd);
+    return 0;
+}
+
+/// 把 `prefix`（长度 `pn`，可为空）+ `/` + `name` 写进 `out`，返回长度（不含 NUL）。
+pub fn fp_rel_path(prefix: ptr, pn: u32, name: ptr, nn: u32, out: ptr, cap: u32) -> u32 {
+    let need: u32 = pn + nn;
+    let base: u32 = pn;
+    if pn > 0 {
+        need = need + 1;
+        base = pn + 1;
+    }
+    if need + 1 > cap {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < pn {
+        store8(out, i, load8(prefix, i) as u8);
+        i = i + 1;
+    }
+    if pn > 0 {
+        store8(out, pn, 47 as u8);
+    }
+    i = 0;
+    while i < nn {
+        store8(out, base + i, load8(name, i) as u8);
+        i = i + 1;
+    }
+    store8(out, need, 0 as u8);
+    return need;
+}
+
+/// 目录项类型是不是"要往里走"的目录。
+pub fn fp_is_dir_type(t: u32) -> bool {
+    return t == 4;
+}
+
+/// 当前深度下这个类型要不要递归（目录且没到上限）。
+pub fn fp_should_descend(t: u32, depth: u32) -> bool {
+    return t == 4 && depth < FP_WALK_DEPTH;
+}
+
+/// 删除/复制树的深度守卫。
+pub fn fp_depth_ok(depth: u32) -> bool {
+    return depth <= FP_MAX_DEPTH;
+}
+
+/// 列出目录树：NUL 分隔的相对路径表，返回总字节数；装不下返回 `FP_EMSGSIZE`。
+pub fn fp_walk(path: ptr, dent_buf: ptr, dent_cap: u32, out: ptr, out_cap: u32) -> i64 {
+    let tot: ptr = alloc(8);
+    fpq_st64(tot, 0, 0 as u64);
+    let pr: ptr = alloc(8);
+    store8(pr, 0, 0 as u8);
+    let rc: i64 = fpq_walk(path, 0, dent_cap, out, out_cap, pr, 0, tot, dent_buf);
+    if rc < 0 {
+        return rc;
+    }
+    return fpq_ld64(tot, 0) as i64;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_fsops_rel_path() -> bool {
+    let a: ptr = alloc(32);
+    let b: ptr = alloc(32);
+    let o: ptr = alloc(64);
+    store8(a, 0, 97 as u8);
+    store8(a, 1, 47 as u8);
+    store8(a, 2, 98 as u8);
+    store8(a, 3, 0 as u8);
+    store8(b, 0, 99 as u8);
+    store8(b, 1, 0 as u8);
+    let n: u32 = fp_rel_path(a, 3, b, 1, o, 64);
+    if n != 5 {
+        return false;
+    }
+    if load8(o, 0) != 97 || load8(o, 1) != 47 || load8(o, 2) != 98 {
+        return false;
+    }
+    if load8(o, 3) != 47 || load8(o, 4) != 99 || load8(o, 5) != 0 {
+        return false;
+    }
+    let m: u32 = fp_rel_path(a, 0, b, 1, o, 64);
+    return m == 1 && load8(o, 0) == 99;
+}
+
+fn test_fsops_depth_rules() -> bool {
+    if fp_is_dir_type(4) == false || fp_is_dir_type(8) == true {
+        return false;
+    }
+    if fp_should_descend(4, 0) == false || fp_should_descend(4, FP_WALK_DEPTH) == true {
+        return false;
+    }
+    if fp_should_descend(8, 0) == true {
+        return false;
+    }
+    if fp_depth_ok(FP_MAX_DEPTH) == false || fp_depth_ok(FP_MAX_DEPTH + 1) == true {
+        return false;
+    }
+    return true;
+}
+
+fn test_fsops_dent_type() -> bool {
+    let b: ptr = alloc(20);
+    let i: u32 = 0;
+    while i < 20 {
+        store8(b, i, 0 as u8);
+        i = i + 1;
+    }
+    store8(b, 18, 4 as u8);
+    if fpq_dent_type(b, 0) != 4 {
+        return false;
+    }
+    store8(b, 18, 8 as u8);
+    return fpq_dent_type(b, 0) == 8;
+}

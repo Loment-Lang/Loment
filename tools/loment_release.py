@@ -106,6 +106,8 @@ GLOBS = [
     # std 核的行为判据 (docs/180): lib/ 里那些函数算得对不对 —— 与
     # `loment_lib_test`(库系统) 是两件事, 原先只测了后者
     "tools/loment_std_test.py",
+    # 密码学原语的行为判据（docs/328）：Python 侧独立实现同一批算法对拍。
+    "tools/loment_crypto_test.py",
     # 领域包的行为判据 (docs/317/318/319): 八个领域包逐个探针对 Python 对跑
     "tools/loment_domains_test.py",
     # IR 缓存 (docs/325): 实现 + 判据
@@ -150,6 +152,8 @@ GLOBS = [
     "lompi/store/lowlevel/0.1.0/*",
     "lompi/store/system/0.1.0/*",
     "lompi/store/baremetal/0.1.0/*",
+    # Win32 的声明面（docs/328）：extern fn，PE 目标。
+    "lompi/store/windows/0.1.0/*",
     "tools/lompi_sync.py", "tools/loment_lompi_test.py",
     # 发布口 (docs/171): 把单仓里的 Loment / lompi 切出来推到各自的私有库
     "tools/loment_publish.py",
@@ -388,6 +392,8 @@ GLOBS = [
     # `docs/NNN-slug.md` 的**编号**：查重号 / 取空号 / 撞了改号（`docs/228` 那次撞号之后加的）。
     # 判据是"基线只许变短"那一条，见 `loment_docs_test` 的 docstring。
     "tools/loment_docs.py", "tools/loment_docs_test.py",
+    # store 模块索引（docs/328）：生成器与它产出的 docs/store-index.md。
+    "tools/loment_store_index.py",
     # `lom/` 那道禁区（`docs/239` §5）：把 `gate.yml` 里那段脚本抠出来真跑 ——
     # 门是 L0 契约唯一的守卫，改它等于改守卫，所以它自己也得有判据。
     "tools/loment_door_test.py",

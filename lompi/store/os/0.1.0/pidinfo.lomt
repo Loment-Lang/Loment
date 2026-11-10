@@ -19,10 +19,9 @@
 
 module pidinfo
 
-const POQ_SYS_READ: u64 = 0;
-const POQ_SYS_CLOSE: u64 = 3;
+use fsutil
+
 const POQ_SYS_ACCESS: u64 = 21;
-const POQ_SYS_OPENAT: u64 = 257;
 const POQ_AT_FDCWD: u64 = 18446744073709551516;
 
 fn poq_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
@@ -42,43 +41,7 @@ fn poq_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
 /// 十进制写进 out（不带符号、不带 NUL）。返回**数字位数**（超出 cap 时也返回真实位数，
 /// 这样调用方能判断是不是被截断了）。
 pub fn po_decimal(n: u64, out: ptr, cap: u32) -> u32 {
-    if n == 0 {
-        if cap > 0 {
-            store8(out, 0, 48 as u8);
-        }
-        return 1;
-    }
-    let tmp: ptr = alloc(24);
-    let i: u32 = 0;
-    let v: u64 = n;
-    while v > 0 {
-        store8(tmp, i, (48 + (v % 10) as u32) as u8);
-        v = v / 10;
-        i = i + 1;
-    }
-    let j: u32 = 0;
-    while j < i {
-        if j < cap {
-            store8(out, j, load8(tmp, i - 1 - j) as u8);
-        }
-        j = j + 1;
-    }
-    return i;
-}
-
-/// 把 str 拷成 C 串（尾部补 NUL）。放不下返回 0。
-fn poq_cstr(s: str, out: ptr, cap: u32) -> u32 {
-    let n: u32 = str_len(s);
-    if n + 1 > cap {
-        return 0;
-    }
-    let i: u32 = 0;
-    while i < n {
-        store8(out, i, str_byte(s, i) as u8);
-        i = i + 1;
-    }
-    store8(out, n, 0 as u8);
-    return n + 1;
+    return fu_dec(n, out, cap);
 }
 
 // ---------------------------------------------------------------- 路径（纯）
@@ -109,13 +72,7 @@ pub fn po_read(pid: u64, suffix: str, buf: ptr, cap: u64) -> i64 {
         return 0 - 36;
     }
     store8(path, plen, 0 as u8);
-    let fd: i64 = syscall6(POQ_SYS_OPENAT, POQ_AT_FDCWD, path as u64, 0, 0, 0);
-    if fd < 0 {
-        return fd;
-    }
-    let r: i64 = syscall4(POQ_SYS_READ, fd as u64, buf as u64, cap);
-    let _c: i64 = syscall4(POQ_SYS_CLOSE, fd as u64, 0, 0);
-    return r;
+    return fu_read_file(path, buf, cap as u32);
 }
 
 /// `/proc/<pid>/cmdline` —— NUL 分隔的参数块（末尾通常还多一个 NUL）。

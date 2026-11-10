@@ -1,0 +1,175 @@
+// os/memory.lomt — 页算术与地址空间: brk / mremap / mprotect / munmap
+//
+// 为什么需要它: 一个程序跟内核谈"内存"时，单位永远是**页**（x86-64 上是 4 KiB），
+// 而不是字节。申请 5000 字节，内核给的是 8192 字节；要算"这块映射了多少页"、
+// "把这段改成只读"、"换一块更大的接着用"，都要先把字节数换算成页。这一步算错
+// 不会报错 —— 少页了就是最后一段没被保护，多页了就是把隔壁的映射一起改了。
+//
+// 覆盖: 四个地址空间系统调用（brk 12 / mprotect 10 / munmap 11 / mremap 25），
+// 以及向上/向下取整、对齐、页计数这些纯算术。
+//
+// 边界（刻意划的）:
+//   * 不做**分配器** —— 那是 `alloc` 与运行时的事，这一层不知道空闲链表；
+//   * 不做 hugepage 策略（madvise 在 `os/mmapfile`）；
+//   * `me_brk` 返回的是**新的 program break**（不是是否成功），调用方要自己拿它比；
+//   * 号是 x86-64 Linux 的。自检只验纯算术，系统调用那一半由门禁里的运行时判据判。
+//
+// 命名: 公开 me_*, 内部 meq_*。自检 test_memory_*。
+
+module memory
+
+/// 一页的字节数（x86-64 与 AArch64 的通用页都是 4 KiB）。
+pub const ME_PAGE_BYTES: u64 = 4096;
+
+pub const ME_PROT_NONE: u32 = 0;
+pub const ME_PROT_READ: u32 = 1;
+pub const ME_PROT_WRITE: u32 = 2;
+pub const ME_PROT_EXEC: u32 = 4;
+
+pub const ME_MREMAP_MAYMOVE: u32 = 1;
+pub const ME_MREMAP_FIXED: u32 = 2;
+
+const MEQ_SYS_MPROTECT: u64 = 10;
+const MEQ_SYS_MUNMAP: u64 = 11;
+const MEQ_SYS_BRK: u64 = 12;
+const MEQ_SYS_MREMAP: u64 = 25;
+
+fn meq_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+// ---------------------------------------------------------------- 页算术
+
+/// 向上取整到整页。`0` 仍是 `0`（没有"零页"这种东西）。
+pub fn me_page_up(n: u64) -> u64 {
+    return ((n + 4095) / ME_PAGE_BYTES) * ME_PAGE_BYTES;
+}
+
+/// 向下取整到整页。
+pub fn me_page_down(n: u64) -> u64 {
+    return (n / ME_PAGE_BYTES) * ME_PAGE_BYTES;
+}
+
+/// `n` 字节占几页。非零时至少 1 页。
+pub fn me_page_count(n: u64) -> u64 {
+    return (n + 4095) / ME_PAGE_BYTES;
+}
+
+/// 对齐到 `align` 的整数倍。`align == 0` 原样返回（不猜调用方要什么）。
+pub fn me_align_up(n: u64, align: u64) -> u64 {
+    if align == 0 {
+        return n;
+    }
+    return ((n + align - 1) / align) * align;
+}
+
+/// 向下对齐。
+pub fn me_align_down(n: u64, align: u64) -> u64 {
+    if align == 0 {
+        return n;
+    }
+    return (n / align) * align;
+}
+
+/// 是不是整页对齐的地址/长度。
+pub fn me_is_page_aligned(n: u64) -> bool {
+    return n % ME_PAGE_BYTES == 0;
+}
+
+// ---------------------------------------------------------------- 系统调用
+
+/// `brk(addr)`。返回**新的 program break**；返回 `0` 表示这口子被禁用了。
+/// 传 `0` 是"问一下现在的 break 在哪"。成功与否要拿返回值跟 `addr` 比：
+/// 相等才是真的挪到了那儿 —— 内核空间不足时会给你一个更小的值，而不是 -1。
+pub fn me_brk(addr: u64) -> i64 {
+    return syscall4(MEQ_SYS_BRK, addr, 0, 0);
+}
+
+/// 改一段已映射内存的保护位。地址与长度都必须是整页的。
+pub fn me_mprotect(addr: u64, len: u64, prot: u32) -> i64 {
+    return syscall4(MEQ_SYS_MPROTECT, addr, len, prot as u64);
+}
+
+/// 解除映射。长度按页算；内核会把它取整到页边界。
+pub fn me_munmap(addr: u64, len: u64) -> i64 {
+    return syscall4(MEQ_SYS_MUNMAP, addr, len, 0);
+}
+
+/// 调整已映射区的长度，可能搬家。`new_addr` 只在 `ME_MREMAP_FIXED` 时有意义。
+/// 返回新的起始地址（不是 0 —— 0 不是合法的用户地址，失败返回负数）。
+pub fn me_mremap(old: u64, old_size: u64, new_size: u64, flags: u32, new_addr: u64) -> i64 {
+    return syscall6(MEQ_SYS_MREMAP, old, old_size, new_size, flags as u64, new_addr);
+}
+
+// ---------------------------------------------------------------- 文本
+
+/// 保护位 -> 名字串（`PROT_READ|PROT_WRITE`）。`0` 是 `PROT_NONE`。
+pub fn me_prot_text(mask: u32, out: ptr, cap: u32) -> u32 {
+    if mask == 0 {
+        return meq_put(out, cap, 0, "PROT_NONE");
+    }
+    let pos: u32 = 0;
+    let first: u32 = 0;
+    if (mask & ME_PROT_READ) != 0 {
+        pos = meq_put(out, cap, pos, "PROT_READ");
+        first = 1;
+    }
+    if (mask & ME_PROT_WRITE) != 0 {
+        if first == 1 {
+            pos = meq_put(out, cap, pos, "|");
+        }
+        pos = meq_put(out, cap, pos, "PROT_WRITE");
+        first = 1;
+    }
+    if (mask & ME_PROT_EXEC) != 0 {
+        if first == 1 {
+            pos = meq_put(out, cap, pos, "|");
+        }
+        pos = meq_put(out, cap, pos, "PROT_EXEC");
+    }
+    return pos;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_memory_page_rounding() -> bool {
+    return me_page_up(1) == 4096 && me_page_up(4096) == 4096
+        && me_page_up(4097) == 8192 && me_page_down(8191) == 4096;
+}
+
+fn test_memory_page_count() -> bool {
+    return me_page_count(0) == 0 && me_page_count(1) == 1
+        && me_page_count(4096) == 1 && me_page_count(4097) == 2;
+}
+
+fn test_memory_align() -> bool {
+    return me_align_up(100, 64) == 128 && me_align_up(128, 64) == 128
+        && me_align_down(129, 64) == 128 && me_align_up(7, 0) == 7;
+}
+
+fn test_memory_prot_text() -> bool {
+    let o: ptr = alloc(64);
+    let n: u32 = me_prot_text(3, o, 64);
+    let want: str = "PROT_READ|PROT_WRITE";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}

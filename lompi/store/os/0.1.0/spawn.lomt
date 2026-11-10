@@ -1,0 +1,136 @@
+// os/spawn.lomt — 起一个子进程并等它: `fork` / `execve` / `wait4` 三条一套
+//
+// 为什么需要它: "跑一个外部程序"在 POSIX 上不是一个调用，而是三件事拼起来 ——
+// `fork` 分出一个子进程，子进程 `execve` 换掉自己的映像，父进程 `wait4` 收尸。
+// 每一步都有自己的失败形状：fork 失败返回 -1（没有子进程）；execve 在子进程里失败，
+// **不报给父进程**，只能靠子进程自己退出一个约定的码；wait4 的 status **不是**退出码，
+// 它被打包过（低 7 位是信号，第 8 位起是退出码）。
+//
+// 覆盖: `fork`、`wait4`（含 WNOHANG / WUNTRACED）、status 的两种解码、fork+exec+wait
+// 的组合（失败时子进程以 127 退出 —— 这是 shell 也用的约定）、只取退出码的便利函数。
+//
+// 不做的: 不提供 shell（不解析引号 / 管道 / 重定向 —— 这层只 exec 一个程序）、
+// 不做进程组 / 会话（那是 `os/pgroup`）、不重定向 fd（调用方在 fork 与 exec 之间自己 dup2）。
+//
+// 一条硬边界: fork 之后、exec 之前，子进程与父进程**共用同一份地址空间副本** ——
+// 在那一小段里只能碰"能安全复制"的东西。这一层因此不给你"fork 后回调"的钩子：
+// 那会把调用方的任意代码放进危险窗口。
+//
+// 命名: 公开 sp_*, 内部 spq_*。自检 test_spawn_*（只验 status 解码的纯逻辑）。
+
+module spawn
+
+pub const SP_ERR: i64 = -1;
+/// 子进程 exec 失败时的约定退出码（shell 也用 127）。
+pub const SP_EXEC_FAILED: u32 = 127;
+/// `wait4` 的选项。
+pub const SP_WNOHANG: u32 = 1;
+pub const SP_WUNTRACED: u32 = 2;
+
+const SPQ_SYS_FORK: u64 = 57;
+const SPQ_SYS_EXECVE: u64 = 59;
+const SPQ_SYS_EXIT: u64 = 60;
+const SPQ_SYS_WAIT4: u64 = 61;
+
+fn spq_st32(p: ptr, off: u32, v: u32) -> u32 {
+    let i: u32 = 0;
+    while i < 4 {
+        store8(p, off + i, ((v >> (8 * i)) & 255) as u8);
+        i = i + 1;
+    }
+    return 4;
+}
+
+/// `fork()`：父进程拿到子进程 pid（> 0），子进程拿到 0，失败 -1。
+pub fn sp_fork() -> i64 {
+    return syscall4(SPQ_SYS_FORK, 0, 0, 0);
+}
+
+/// `wait4(pid, status, options, rusage)`。pid 传 -1 等任意子进程。
+/// status 写进 status_ptr（4 字节）。
+pub fn sp_wait4(pid: i64, status_ptr: ptr, options: u32, rusage: ptr) -> i64 {
+    return syscall6(SPQ_SYS_WAIT4, pid as u64, status_ptr as u64, options as u64,
+                    rusage as u64, 0);
+}
+
+/// status 里的退出码（`WEXITSTATUS`）。
+pub fn sp_exit_code(status: u32) -> u32 {
+    return (status >> 8) & 255;
+}
+
+/// status 里的终止信号（`WTERMSIG`）—— 只有"被信号杀掉"时才有意义。
+pub fn sp_signal_of(status: u32) -> u32 {
+    return status & 127;
+}
+
+/// 是否正常退出（`WIFEXITED`）。
+pub fn sp_exited(status: u32) -> bool {
+    return (status & 127) == 0;
+}
+
+/// 是否被信号终止（`WIFSIGNALED`）。
+pub fn sp_signaled(status: u32) -> bool {
+    let s: u32 = status & 127;
+    return s != 0 && s != 127;
+}
+
+/// fork + execve + wait4 三件套。**成功返回子进程的退出码**（>= 0）；
+/// fork 或 wait4 失败返回负的错误码。status 写进 status_ptr（4 字节）。
+///
+/// 子进程里 execve 失败时以 127 退出 —— 父进程因此能区分"程序不存在"与
+/// "程序自己退出了 127"吗？不能，这也是 shell 的现状；要区分就把 errno 通过管道传回。
+pub fn sp_exec_wait(path_cstr: ptr, argv: ptr, envp: ptr, status_ptr: ptr) -> i64 {
+    let pid: i64 = sp_fork();
+    let rc: i64 = 0;
+    let st: ptr = alloc(4);
+    let v: u32 = 0;
+    let nil: ptr = 0 as ptr;
+    if pid < 0 {
+        return pid;
+    }
+    if pid == 0 {
+        rc = syscall4(SPQ_SYS_EXECVE, path_cstr as u64, argv as u64, envp as u64);
+        syscall4(SPQ_SYS_EXIT, SP_EXEC_FAILED as u64, 0, 0);
+        return SP_ERR;
+    }
+    rc = sp_wait4(pid, st, 0, nil);
+    if rc < 0 {
+        return rc;
+    }
+    v = (load8(st, 0) as u32) | ((load8(st, 1) as u32) << 8)
+        | ((load8(st, 2) as u32) << 16) | ((load8(st, 3) as u32) << 24);
+    spq_st32(status_ptr, 0, v);
+    if sp_exited(v) {
+        return sp_exit_code(v) as i64;
+    }
+    return (0 - (sp_signal_of(v) as i64));
+}
+
+/// 只要退出码的便利版（不给 status 槽）。语义同 `sp_exec_wait`。
+pub fn sp_system(path_cstr: ptr, argv: ptr, envp: ptr) -> i64 {
+    let st: ptr = alloc(4);
+    return sp_exec_wait(path_cstr, argv, envp, st);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_spawn_exit_code() -> bool {
+    // 退出码 3：status = 3 << 8 = 768。
+    return sp_exit_code(768) == 3 && sp_exited(768) && !sp_signaled(768);
+}
+
+fn test_spawn_signal() -> bool {
+    // SIGKILL(9)：低 7 位是 9，没有退出码。
+    let st: u32 = 9;
+    return sp_signal_of(st) == 9 && !sp_exited(st) && sp_signaled(st);
+}
+
+fn test_spawn_zero_signal_is_exit() -> bool {
+    return sp_exit_code(0) == 0 && sp_exited(0) && !sp_signaled(0);
+}
+
+fn test_spawn_stopped_status() -> bool {
+    // 被停住（0x7f）不是"被信号杀死"，也不该当成正常退出。
+    let st: u32 = 127;
+    return !sp_exited(st) && !sp_signaled(st);
+}

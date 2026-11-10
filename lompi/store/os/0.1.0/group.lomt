@@ -1,0 +1,312 @@
+// os/group.lomt — `/etc/group` 的解析（gid ↔ 组名 ↔ 成员）
+//
+// 为什么需要它: 改一个文件的属组、判断"我在不在 docker 组里"、把 gid 显示成名字,
+// 读的都是 `/etc/group`。格式与 `/etc/passwd` 同一套冒号分隔, 但第 4 个字段是
+// **逗号分隔的成员名单**, 于是有两层切分 —— 这一层替调用方处理第二层。
+//
+// 记录形状: name:password:gid:member1,member2,member3
+//
+// 边界:
+//   * 只解析文本, 不读文件（调用方拿内容进来, 这样测试不需要 root）。
+//   * 第 4 字段里的成员是**冗余信息**: 内核只看 passwd 的 gid 与 `setgroups`,
+//     这里按文件里的写法原样给出。
+//   * 不认 NSS。
+//
+// 命名: 公开 gr_*, 内部 grq_*。自检 test_group_*。
+
+module group
+
+fn grq_rec_start(p: ptr, n: u32, rec: u32) -> u32 {
+    let i: u32 = 0;
+    let r: u32 = 0;
+    while i < n {
+        if r == rec {
+            return i;
+        }
+        if load8(p, i) == 10 {
+            r = r + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+fn grq_rec_end(p: ptr, n: u32, start: u32) -> u32 {
+    let i: u32 = start;
+    while i < n && load8(p, i) != 10 {
+        i = i + 1;
+    }
+    return i;
+}
+
+/// 记录条数（末尾没有换行也算一条）。
+pub fn gr_count(p: ptr, n: u32) -> u32 {
+    if n == 0 {
+        return 0;
+    }
+    let c: u32 = 1;
+    let i: u32 = 0;
+    while i < n {
+        if load8(p, i) == 10 {
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    if load8(p, n - 1) == 10 {
+        c = c - 1;
+    }
+    return c;
+}
+
+/// 第 rec 条记录的第 field 个字段（0 名字, 1 密码, 2 gid, 3 成员名单）。
+pub fn gr_field(p: ptr, n: u32, rec: u32, field: u32, out: ptr, cap: u32) -> u32 {
+    let s: u32 = grq_rec_start(p, n, rec);
+    if s >= n {
+        return 0;
+    }
+    let e: u32 = grq_rec_end(p, n, s);
+    let i: u32 = s;
+    let f: u32 = 0;
+    let fs: u32 = s;
+    while i <= e {
+        if i == e || load8(p, i) == 58 {
+            if f == field {
+                let len: u32 = i - fs;
+                let k: u32 = 0;
+                while k < len {
+                    if k < cap {
+                        store8(out, k, load8(p, fs + k) as u8);
+                    }
+                    k = k + 1;
+                }
+                return len;
+            }
+            f = f + 1;
+            fs = i + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn grq_parse_u32(p: ptr, off: u32, len: u32) -> u32 {
+    let v: u32 = 0;
+    let ok: u32 = 1;
+    let i: u32 = 0;
+    if len == 0 {
+        return 0;
+    }
+    while i < len {
+        let c: u32 = load8(p, off + i) as u32;
+        if c < 48 || c > 57 {
+            ok = 0;
+        }
+        if ok == 1 {
+            v = v * 10 + (c - 48);
+        }
+        i = i + 1;
+    }
+    if ok == 0 {
+        return 0;
+    }
+    return v;
+}
+
+fn grq_put_u32(out: ptr, cap: u32, pos: u32, v: u32) -> u32 {
+    let d: ptr = alloc(12);
+    let x: u32 = v;
+    let k: u32 = 0;
+    if x == 0 {
+        store8(d, 0, 48 as u8);
+        k = 1;
+    }
+    while x > 0 {
+        store8(d, k, ((x % 10) + 48) as u8);
+        x = x / 10;
+        k = k + 1;
+    }
+    let p: u32 = pos;
+    let r: u32 = k;
+    while r > 0 {
+        r = r - 1;
+        if p < cap {
+            store8(out, p, load8(d, r) as u8);
+        }
+        p = p + 1;
+    }
+    return p;
+}
+
+fn grq_eq(p: ptr, off: u32, len: u32, s: str) -> bool {
+    if len != str_len(s) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < len {
+        if load8(p, off + i) != str_byte(s, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// 第 rec 条的 gid：成功返回 1 并把 u32 小端写进 out（4 字节）。
+pub fn gr_gid_field(p: ptr, n: u32, rec: u32, out: ptr) -> u32 {
+    let b: ptr = alloc(16);
+    let len: u32 = gr_field(p, n, rec, 2, b, 16);
+    if len == 0 {
+        return 0;
+    }
+    let v: u32 = grq_parse_u32(b, 0, len);
+    store8(out, 0, (v & 255) as u8);
+    store8(out, 1, ((v >> 8) & 255) as u8);
+    store8(out, 2, ((v >> 16) & 255) as u8);
+    store8(out, 3, ((v >> 24) & 255) as u8);
+    return 1;
+}
+
+/// 组名 -> gid 文本。找不到返回 0。
+pub fn gr_by_name(p: ptr, n: u32, name: str, out: ptr, cap: u32) -> u32 {
+    let rec: u32 = 0;
+    let total: u32 = gr_count(p, n);
+    while rec < total {
+        let b: ptr = alloc(64);
+        let l0: u32 = gr_field(p, n, rec, 0, b, 64);
+        if grq_eq(b, 0, l0, name) {
+            let g: ptr = alloc(16);
+            let lg: u32 = gr_field(p, n, rec, 2, g, 16);
+            let v: u32 = grq_parse_u32(g, 0, lg);
+            return grq_put_u32(out, cap, 0, v);
+        }
+        rec = rec + 1;
+    }
+    return 0;
+}
+
+/// 第 rec 条的成员个数。空名单是 0 个成员（**不是** 1 个空名字）。
+pub fn gr_member_count(p: ptr, n: u32, rec: u32) -> u32 {
+    let s: u32 = grq_rec_start(p, n, rec);
+    if s >= n {
+        return 0;
+    }
+    let e: u32 = grq_rec_end(p, n, s);
+    let i: u32 = s;
+    let f: u32 = 0;
+    let ms: u32 = 0;
+    let me: u32 = 0;
+    while i <= e {
+        if i == e || load8(p, i) == 58 {
+            if f == 3 {
+                me = i;
+            }
+            if f == 2 && ms == 0 {
+                ms = i + 1;
+            }
+            f = f + 1;
+        }
+        i = i + 1;
+    }
+    if ms == 0 || ms >= me {
+        return 0;
+    }
+    let c: u32 = 1;
+    let k: u32 = ms;
+    while k < me {
+        if load8(p, k) == 44 {
+            c = c + 1;
+        }
+        k = k + 1;
+    }
+    return c;
+}
+
+/// 第 rec 条成员名单里的第 index 个成员（写进 out），返回长度；不存在返回 0。
+pub fn gr_member(p: ptr, n: u32, rec: u32, index: u32, out: ptr, cap: u32) -> u32 {
+    let s: u32 = grq_rec_start(p, n, rec);
+    if s >= n {
+        return 0;
+    }
+    let e: u32 = grq_rec_end(p, n, s);
+    let i: u32 = s;
+    let f: u32 = 0;
+    let ms: u32 = 0;
+    while i <= e {
+        if i == e || load8(p, i) == 58 {
+            if f == 2 && ms == 0 {
+                ms = i + 1;
+            }
+            f = f + 1;
+        }
+        i = i + 1;
+    }
+    if ms == 0 || ms >= e {
+        return 0;
+    }
+    let k: u32 = ms;
+    let cur: u32 = 0;
+    let fs: u32 = ms;
+    while k <= e {
+        if k == e || load8(p, k) == 44 {
+            if cur == index {
+                let len: u32 = k - fs;
+                let j: u32 = 0;
+                while j < len {
+                    if j < cap {
+                        store8(out, j, load8(p, fs + j) as u8);
+                    }
+                    j = j + 1;
+                }
+                return len;
+            }
+            cur = cur + 1;
+            fs = k + 1;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_group_fields() -> bool {
+    let t: ptr = alloc(64);
+    let s: str = "root:x:0:\nadm:x:4:alice,bob\ndocker:x:999:alice\n";
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        store8(t, i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    let g: ptr = alloc(16);
+    return gr_count(t, n) == 3 && gr_by_name(t, n, "adm", g, 16) == 1
+        && load8(g, 0) == 52 && gr_member_count(t, n, 1) == 2;
+}
+
+fn test_group_members() -> bool {
+    let t: ptr = alloc(64);
+    let s: str = "dev:x:50:ann,ben,cid\n";
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        store8(t, i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    let m: ptr = alloc(16);
+    let l: u32 = gr_member(t, n, 0, 2, m, 16);
+    return gr_member_count(t, n, 0) == 3 && l == 3
+        && load8(m, 0) == 99 && load8(m, 2) == 100
+        && gr_member(t, n, 0, 3, m, 16) == 0;
+}
+
+fn test_group_empty_members() -> bool {
+    let t: ptr = alloc(32);
+    let s: str = "nogroup:x:65534:\n";
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        store8(t, i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    return gr_member_count(t, n, 0) == 0 && gr_by_name(t, n, "missing", t, 16) == 0;
+}

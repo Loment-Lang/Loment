@@ -1,0 +1,161 @@
+// os/dir.lomt — 读目录: `getdents64` 的字节块怎么解
+//
+// 为什么需要它: POSIX 的 `readdir` 不是"一条系统调用读一个名字"，而是一条系统调用
+// 读**一块变长记录**，每条记录里有对齐填充。于是"读目录"= 一个循环：读一块、按
+// `d_reclen` 逐条走、走完再读。把这一圈封起来，调用方拿到的才是名字。
+//
+// 记录布局（x86-64 Linux，`struct linux_dirent64`，24 字节头 + 名字）:
+//   d_ino     u64  偏移 0    —— 文件号
+//   d_off     u64  偏移 8    —— 下一条在目录里的位置（本层不用）
+//   d_reclen  u16  偏移 16   —— 这一条占多少字节（**对 8 对齐**，名字后面是填充）
+//   d_type    u8   偏移 18   —— 见 DT_*
+//   d_name    ..   偏移 19   —— NUL 结尾，长度 = d_reclen - 19
+//
+// 不做的: 不递归、不排序、不跟符号链接、不拼完整路径（那是调用方的事：名字是相对的）。
+// `d_type` 在有些文件系统上恒为 `DT_UNKNOWN`，那时只能再去 `stat` —— 这一层不替你
+// 偷偷发那条调用，它把 `DT_UNKNOWN` 原样交出来。
+//
+// 命名: 公开 di_*, 内部 diq_*。自检 test_dir_*。
+
+module readdir
+
+/// 目录项固定头——`d_name` 从第 19 字节开始。
+pub const DI_DENT_BYTES: u32 = 19;
+
+pub const DI_DT_UNKNOWN: u32 = 0;
+pub const DI_DT_FIFO: u32 = 1;
+pub const DI_DT_CHR: u32 = 2;
+pub const DI_DT_DIR: u32 = 4;
+pub const DI_DT_BLK: u32 = 6;
+pub const DI_DT_REG: u32 = 8;
+pub const DI_DT_LNK: u32 = 10;
+pub const DI_DT_SOCK: u32 = 12;
+
+const DIQ_SYS_GETDENTS64: u64 = 217;
+
+fn diq_st32(p: ptr, off: u32, v: u32) -> u32 {
+    let i: u32 = 0;
+    while i < 4 {
+        store8(p, off + i, ((v >> (8 * i)) & 255) as u8);
+        i = i + 1;
+    }
+    return 4;
+}
+
+fn diq_ld16(p: ptr, off: u32) -> u32 {
+    return (load8(p, off) as u32) | ((load8(p, off + 1) as u32) << 8);
+}
+
+/// `getdents64(fd, buf, cap)` —— 返回这一块里的字节数，0 表示读完，负数出错。
+pub fn di_read(fd: u64, buf: ptr, cap: u32) -> i64 {
+    return syscall4(DIQ_SYS_GETDENTS64, fd, buf as u64, cap as u64);
+}
+
+/// 从块里 pos 处取下一条的名字写进 name_out（放不下截断），返回名字长度。
+/// 读完 / 记录不完整返回 0。**新的游标写进 pos_out（4 字节）** —— 调用方拿它接着走。
+pub fn di_next(buf: ptr, n: u32, pos: u32, name_out: ptr, name_cap: u32, pos_out: ptr) -> u32 {
+    let reclen: u32 = 0;
+    let len: u32 = 0;
+    let i: u32 = 0;
+    if pos + DI_DENT_BYTES > n {
+        diq_st32(pos_out, 0, n);
+        return 0;
+    }
+    reclen = diq_ld16(buf, pos + 16);
+    if reclen < DI_DENT_BYTES || pos + reclen > n {
+        diq_st32(pos_out, 0, n);
+        return 0;
+    }
+    len = reclen - DI_DENT_BYTES;
+    while i < len && load8(buf, pos + DI_DENT_BYTES + i) != 0 {
+        i = i + 1;
+    }
+    len = i;
+    i = 0;
+    while i < len {
+        if i < name_cap {
+            store8(name_out, i, load8(buf, pos + DI_DENT_BYTES + i) as u8);
+        }
+        i = i + 1;
+    }
+    diq_st32(pos_out, 0, pos + reclen);
+    return len;
+}
+
+/// 这一条的类型名（`DT_UNKNOWN` 照实返回 —— 别把它当成普通文件）。
+pub fn di_type_name(t: u32) -> str {
+    if t == DI_DT_DIR {
+        return "dir";
+    }
+    if t == DI_DT_REG {
+        return "file";
+    }
+    if t == DI_DT_LNK {
+        return "link";
+    }
+    if t == DI_DT_CHR {
+        return "char";
+    }
+    if t == DI_DT_BLK {
+        return "block";
+    }
+    if t == DI_DT_FIFO {
+        return "fifo";
+    }
+    if t == DI_DT_SOCK {
+        return "socket";
+    }
+    return "unknown";
+}
+
+/// 名字是不是 `.` 或 `..`（遍历时几乎总是要跳过这两个）。
+pub fn di_skip_dots(name: ptr, n: u32) -> bool {
+    if n == 1 && load8(name, 0) == 46 {
+        return true;
+    }
+    if n == 2 && load8(name, 0) == 46 && load8(name, 1) == 46 {
+        return true;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_dir_next_one_record() -> bool {
+    let b: ptr = alloc(32);
+    let o: ptr = alloc(8);
+    let p: ptr = alloc(4);
+    let i: u32 = 0;
+    while i < 32 {
+        store8(b, i, 0 as u8);
+        i = i + 1;
+    }
+    store8(b, 16, 24 as u8);
+    store8(b, 17, 0 as u8);
+    store8(b, 18, DI_DT_REG as u8);
+    store8(b, 19, 97 as u8);
+    store8(b, 20, 98 as u8);
+    let n: u32 = di_next(b, 32, 0, o, 8, p);
+    return n == 2 && load8(o, 0) == 97 && load8(o, 1) == 98
+        && load8(p, 0) == 24;
+}
+
+fn test_dir_next_stops_on_truncated_record() -> bool {
+    let b: ptr = alloc(32);
+    let o: ptr = alloc(8);
+    let p: ptr = alloc(4);
+    store8(b, 16, 24 as u8);
+    return di_next(b, 20, 0, o, 8, p) == 0;
+}
+
+fn test_dir_skip_dots() -> bool {
+    let a: ptr = alloc(4);
+    store8(a, 0, 46 as u8);
+    store8(a, 1, 46 as u8);
+    return di_skip_dots(a, 1) && di_skip_dots(a, 2) && !di_skip_dots(a, 0);
+}
+
+fn test_dir_type_names() -> bool {
+    return str_eq(di_type_name(DI_DT_DIR), "dir")
+        && str_eq(di_type_name(DI_DT_UNKNOWN), "unknown");
+}

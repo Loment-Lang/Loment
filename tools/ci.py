@@ -412,7 +412,7 @@ SHARD_COST = {
     # 它进的是分片均分，不是判据预算；CI 上量出来再改这一格。
     "loment_lms_test": 20.8,
     "loment_lomc_test": 9.5,
-    "loment_lompi_test": 61.5,
+    "loment_lompi_test": 220.0,
     "loment_lomtfrom_test": 6.8,
     "loment_lsp_test": 47.0,
     "loment_lumtui_test": 4.9,
@@ -472,7 +472,7 @@ SHARD_COST = {
     "loment_hotbuild_test": 1.5,
     "loment_std_test": 3.1,
     # 2026-11-09: 本机六组探针（每组一次 clang 链接 + 一次 WSL 真跑），约 12s。
-    "loment_domains_test": 12.0,
+    "loment_domains_test": 40.0,
     # 2026-11-09: 四次小规模 emit（命中/失效/关闭/坏条目），本机实测 1s 内。
     "loment_cache_test": 1.0,
     "loment_store_twin_test": 261.6,

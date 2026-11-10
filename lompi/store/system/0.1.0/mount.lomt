@@ -1,0 +1,225 @@
+// system/mount.lomt — mount(2) 的 MS_* 位名、反查与两个系统调用
+//
+// 为什么系统工具需要它: 容器、chroot、镜像挂载、只读根文件系统 —— 每一件都要
+// `mount(2)`，而它的第四个参数是**位掩码**（`MS_BIND|MS_REC` 写成 4096|16384 = 20480）。
+// 这些位里有两组很容易搞混：一组是"这次挂载怎么做"（BIND / MOVE / REMOUNT），
+// 一组是"挂上以后的行为"（NODEV / NOEXEC / NOSUID / RELATIME）。写错一位不会报错，
+// 只会安静地少一道隔离。把数字反查回名字，是排查挂载问题的第一步。
+//
+// 覆盖: Linux 通用值（x86-64 / AArch64 一致），Linux 5.x 的公开集合。
+//
+// 不做的: 挂载点的解析与遍历（那是 `/proc/self/mountinfo` 的活）、`fsopen`/
+// `fsmount` 那一套新 API（`docs/200` 记着它，但本层只包老的 `mount`/`umount2`）、
+// 文件系统专用的挂载数据串。
+//
+// 命名: 公开 mnt_*, 内部 mntp_。自检 test_mount_*。
+
+module mount
+
+pub const MS_RDONLY: u32 = 1;
+pub const MS_NOSUID: u32 = 2;
+pub const MS_NODEV: u32 = 4;
+pub const MS_NOEXEC: u32 = 8;
+pub const MS_SYNCHRONOUS: u32 = 16;
+pub const MS_REMOUNT: u32 = 32;
+pub const MS_MANDLOCK: u32 = 64;
+pub const MS_DIRSYNC: u32 = 128;
+pub const MS_NOATIME: u32 = 1024;
+pub const MS_NODIRATIME: u32 = 2048;
+pub const MS_BIND: u32 = 4096;
+pub const MS_MOVE: u32 = 8192;
+pub const MS_REC: u32 = 16384;
+pub const MS_SILENT: u32 = 32768;
+pub const MS_POSIXACL: u32 = 65536;
+pub const MS_UNBINDABLE: u32 = 131072;
+pub const MS_PRIVATE: u32 = 262144;
+pub const MS_SLAVE: u32 = 524288;
+pub const MS_SHARED: u32 = 1048576;
+pub const MS_RELATIME: u32 = 2097152;
+pub const MS_KERNMOUNT: u32 = 4194304;
+pub const MS_I_VERSION: u32 = 8388608;
+pub const MS_STRICTATIME: u32 = 16777216;
+pub const MS_LAZYTIME: u32 = 33554432;
+
+pub const MNT_FORCE: u32 = 1;
+pub const MNT_DETACH: u32 = 2;
+pub const MNT_EXPIRE: u32 = 4;
+pub const UMOUNT_NOFOLLOW: u32 = 8;
+
+const MNTP_SYS_MOUNT: u64 = 165;
+const MNTP_SYS_UMOUNT2: u64 = 166;
+
+fn mntp_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+fn mntp_sep(out: ptr, cap: u32, pos: u32) -> u32 {
+    if pos > 0 {
+        return mntp_put(out, cap, pos, "|");
+    }
+    return pos;
+}
+
+fn mntp_flag(out: ptr, cap: u32, pos: u32, name: str) -> u32 {
+    let p: u32 = mntp_sep(out, cap, pos);
+    return mntp_put(out, cap, p, name);
+}
+
+fn mntp_eq(s: str, w: str) -> bool {
+    if str_len(s) != str_len(w) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < str_len(s) {
+        if str_byte(s, i) != str_byte(w, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// 挂载标志 -> `|` 分隔的名字串（未置位的位不出现；0 返回 `"0"`）。
+pub fn mnt_flag_text(mask: u32, out: ptr, cap: u32) -> u32 {
+    if mask == 0 {
+        return mntp_put(out, cap, 0, "0");
+    }
+    let pos: u32 = 0;
+    if (mask & MS_RDONLY) != 0 { pos = mntp_flag(out, cap, pos, "MS_RDONLY"); }
+    if (mask & MS_NOSUID) != 0 { pos = mntp_flag(out, cap, pos, "MS_NOSUID"); }
+    if (mask & MS_NODEV) != 0 { pos = mntp_flag(out, cap, pos, "MS_NODEV"); }
+    if (mask & MS_NOEXEC) != 0 { pos = mntp_flag(out, cap, pos, "MS_NOEXEC"); }
+    if (mask & MS_SYNCHRONOUS) != 0 { pos = mntp_flag(out, cap, pos, "MS_SYNCHRONOUS"); }
+    if (mask & MS_REMOUNT) != 0 { pos = mntp_flag(out, cap, pos, "MS_REMOUNT"); }
+    if (mask & MS_MANDLOCK) != 0 { pos = mntp_flag(out, cap, pos, "MS_MANDLOCK"); }
+    if (mask & MS_DIRSYNC) != 0 { pos = mntp_flag(out, cap, pos, "MS_DIRSYNC"); }
+    if (mask & MS_NOATIME) != 0 { pos = mntp_flag(out, cap, pos, "MS_NOATIME"); }
+    if (mask & MS_NODIRATIME) != 0 { pos = mntp_flag(out, cap, pos, "MS_NODIRATIME"); }
+    if (mask & MS_BIND) != 0 { pos = mntp_flag(out, cap, pos, "MS_BIND"); }
+    if (mask & MS_MOVE) != 0 { pos = mntp_flag(out, cap, pos, "MS_MOVE"); }
+    if (mask & MS_REC) != 0 { pos = mntp_flag(out, cap, pos, "MS_REC"); }
+    if (mask & MS_SILENT) != 0 { pos = mntp_flag(out, cap, pos, "MS_SILENT"); }
+    if (mask & MS_POSIXACL) != 0 { pos = mntp_flag(out, cap, pos, "MS_POSIXACL"); }
+    if (mask & MS_UNBINDABLE) != 0 { pos = mntp_flag(out, cap, pos, "MS_UNBINDABLE"); }
+    if (mask & MS_PRIVATE) != 0 { pos = mntp_flag(out, cap, pos, "MS_PRIVATE"); }
+    if (mask & MS_SLAVE) != 0 { pos = mntp_flag(out, cap, pos, "MS_SLAVE"); }
+    if (mask & MS_SHARED) != 0 { pos = mntp_flag(out, cap, pos, "MS_SHARED"); }
+    if (mask & MS_RELATIME) != 0 { pos = mntp_flag(out, cap, pos, "MS_RELATIME"); }
+    if (mask & MS_KERNMOUNT) != 0 { pos = mntp_flag(out, cap, pos, "MS_KERNMOUNT"); }
+    if (mask & MS_I_VERSION) != 0 { pos = mntp_flag(out, cap, pos, "MS_I_VERSION"); }
+    if (mask & MS_STRICTATIME) != 0 { pos = mntp_flag(out, cap, pos, "MS_STRICTATIME"); }
+    if (mask & MS_LAZYTIME) != 0 { pos = mntp_flag(out, cap, pos, "MS_LAZYTIME"); }
+    return pos;
+}
+
+/// 单个挂载标志名 -> 值。未知返回 -1。
+pub fn mnt_lookup(name: str) -> i64 {
+    if mntp_eq(name, "MS_RDONLY") { return 1 as i64; }
+    if mntp_eq(name, "MS_NOSUID") { return 2 as i64; }
+    if mntp_eq(name, "MS_NODEV") { return 4 as i64; }
+    if mntp_eq(name, "MS_NOEXEC") { return 8 as i64; }
+    if mntp_eq(name, "MS_SYNCHRONOUS") { return 16 as i64; }
+    if mntp_eq(name, "MS_REMOUNT") { return 32 as i64; }
+    if mntp_eq(name, "MS_MANDLOCK") { return 64 as i64; }
+    if mntp_eq(name, "MS_DIRSYNC") { return 128 as i64; }
+    if mntp_eq(name, "MS_NOATIME") { return 1024 as i64; }
+    if mntp_eq(name, "MS_NODIRATIME") { return 2048 as i64; }
+    if mntp_eq(name, "MS_BIND") { return 4096 as i64; }
+    if mntp_eq(name, "MS_MOVE") { return 8192 as i64; }
+    if mntp_eq(name, "MS_REC") { return 16384 as i64; }
+    if mntp_eq(name, "MS_SILENT") { return 32768 as i64; }
+    if mntp_eq(name, "MS_POSIXACL") { return 65536 as i64; }
+    if mntp_eq(name, "MS_UNBINDABLE") { return 131072 as i64; }
+    if mntp_eq(name, "MS_PRIVATE") { return 262144 as i64; }
+    if mntp_eq(name, "MS_SLAVE") { return 524288 as i64; }
+    if mntp_eq(name, "MS_SHARED") { return 1048576 as i64; }
+    if mntp_eq(name, "MS_RELATIME") { return 2097152 as i64; }
+    if mntp_eq(name, "MS_KERNMOUNT") { return 4194304 as i64; }
+    if mntp_eq(name, "MS_I_VERSION") { return 8388608 as i64; }
+    if mntp_eq(name, "MS_STRICTATIME") { return 16777216 as i64; }
+    if mntp_eq(name, "MS_LAZYTIME") { return 33554432 as i64; }
+    return 0 as i64 - 1;
+}
+
+/// umount2 的 flags -> 名字串（0 返回 `"0"`）。
+pub fn mnt_umount_flag_text(mask: u32, out: ptr, cap: u32) -> u32 {
+    if mask == 0 {
+        return mntp_put(out, cap, 0, "0");
+    }
+    let pos: u32 = 0;
+    if (mask & MNT_FORCE) != 0 { pos = mntp_flag(out, cap, pos, "MNT_FORCE"); }
+    if (mask & MNT_DETACH) != 0 { pos = mntp_flag(out, cap, pos, "MNT_DETACH"); }
+    if (mask & MNT_EXPIRE) != 0 { pos = mntp_flag(out, cap, pos, "MNT_EXPIRE"); }
+    if (mask & UMOUNT_NOFOLLOW) != 0 { pos = mntp_flag(out, cap, pos, "UMOUNT_NOFOLLOW"); }
+    return pos;
+}
+
+/// `mount(source, target, fstype, flags, data)` —— 四个路径/种类参数都是 **C 串**。
+pub fn mnt_mount(source: ptr, target: ptr, fstype: ptr, flags: u64, data: ptr) -> i64 {
+    return syscall6(MNTP_SYS_MOUNT, source as u64, target as u64,
+                    fstype as u64, flags, data as u64);
+}
+
+/// `umount2(target, flags)` —— target 是 C 串。
+pub fn mnt_umount2(target: ptr, flags: u32) -> i64 {
+    return syscall4(MNTP_SYS_UMOUNT2, target as u64, flags as u64, 0);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_mount_flag_text_renders() -> bool {
+    let b: ptr = alloc(128);
+    let n: u32 = mnt_flag_text(MS_RDONLY | MS_BIND, b, 128);
+    if n != 18 {
+        return false;
+    }
+    let want: str = "MS_RDONLY|MS_BIND";
+    let i: u32 = 0;
+    while i < n {
+        if load8(b, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_mount_lookup_round_trips() -> bool {
+    if mnt_lookup("MS_BIND") != 4096 as i64 {
+        return false;
+    }
+    if mnt_lookup("MS_LAZYTIME") != 33554432 as i64 {
+        return false;
+    }
+    if mnt_lookup("NOT_A_FLAG") != 0 as i64 - 1 {
+        return false;
+    }
+    return true;
+}
+
+fn test_mount_umount_text() -> bool {
+    let b: ptr = alloc(64);
+    let n: u32 = mnt_umount_flag_text(MNT_DETACH | UMOUNT_NOFOLLOW, b, 64);
+    let want: str = "MNT_DETACH|UMOUNT_NOFOLLOW";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(b, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}

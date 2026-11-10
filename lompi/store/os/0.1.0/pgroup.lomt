@@ -1,0 +1,157 @@
+// os/pgroup.lomt — 进程组与会话: 谁跟谁一组、谁发信号
+//
+// 为什么需要它: 一个"作业"在 Unix 上不是单个进程，而是**进程组** —— 终端上的
+// Ctrl-C 发给整个前台组，仓库里的 `pipeline` 也是一组。要用对三件事：
+//   * **组长的身份**：`getpgrp()` 返回自己的组号，`getpid()` 返回自己的进程号；
+//     两者相等就是组长（`pg_is_leader`）。会话首进程另外由 `getsid(0)` 回答；
+//   * **组操作**：把子进程放进一个组要在 fork 之后、exec 之前做（`setpgid`）；
+//   * **按组发信号**：`kill(-pgid, sig)` —— 这个负号就是"发给整组"的意思，
+//     libc 的 `killpg` 只是它的一层壳；这里直接用负号，少一层看不见的转换。
+//
+// 号（x86-64 Linux）: getpid 39 · getppid 110 · getpgrp 111 · setpgid 109 ·
+//   getsid 124 · setsid 112 · gettid 186 · kill 62。
+//
+// 边界（刻意划的）:
+//   * `setsid` 在**进程组组长**身上会失败（EPERM）—— 这是内核规则，不是缺陷；
+//     正确做法是先 fork，让子进程（不是组长）去 setsid；
+//   * 不改终端的**前台组**（`tcsetpgrp` 要 ioctl，见 `system/ioctl` 那条线）；
+//   * 不做作业控制的状态机 —— 这一层只给号与一次调用。
+//
+// 命名: 公开 pg_*, 内部 pgq_*。自检 test_pgroup_*。
+
+module pgroup
+
+const PGQ_SYS_GETPID: u64 = 39;
+const PGQ_SYS_GETPPID: u64 = 110;
+const PGQ_SYS_GETPGRP: u64 = 111;
+const PGQ_SYS_GETTID: u64 = 186;
+const PGQ_SYS_SETPGID: u64 = 109;
+const PGQ_SYS_GETSID: u64 = 124;
+const PGQ_SYS_SETSID: u64 = 112;
+const PGQ_SYS_KILL: u64 = 62;
+
+fn pgq_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+// ---------------------------------------------------------------- 身份
+
+/// 本进程的 pid。
+pub fn pg_getpid() -> i64 {
+    return syscall4(PGQ_SYS_GETPID, 0, 0, 0);
+}
+
+/// 父进程的 pid（父进程可能已经退了 —— 1 是"被 init 收养"）。
+pub fn pg_getppid() -> i64 {
+    return syscall4(PGQ_SYS_GETPPID, 0, 0, 0);
+}
+
+/// 本进程的**进程组**号。
+pub fn pg_getpgrp() -> i64 {
+    return syscall4(PGQ_SYS_GETPGRP, 0, 0, 0);
+}
+
+/// 本线程的 tid（同一个进程里每个线程都不同；pid 是"线程组长"的那一个）。
+pub fn pg_gettid() -> i64 {
+    return syscall4(PGQ_SYS_GETTID, 0, 0, 0);
+}
+
+/// 把 `pid` 放进组 `pgrp`。`pgrp` 传 0 表示"用 pid 自己当组号"。
+/// 典型用法：fork 之后，父进程和子进程各调一次（两边都调就不会有竞态）。
+pub fn pg_setpgid(pid: u64, pgrp: u64) -> i64 {
+    return syscall4(PGQ_SYS_SETPGID, pid, pgrp, 0);
+}
+
+/// `pid` 所在会话的会话 id。
+pub fn pg_getsid(pid: u64) -> i64 {
+    return syscall4(PGQ_SYS_GETSID, pid, 0, 0);
+}
+
+/// 新建一个会话（自己当首进程）。**进程组组长调用会失败**（EPERM）—— 先 fork。
+pub fn pg_setsid() -> i64 {
+    return syscall4(PGQ_SYS_SETSID, 0, 0, 0);
+}
+
+// ---------------------------------------------------------------- 信号
+
+/// 给一个进程发信号。
+pub fn pg_kill(pid: u64, sig: u32) -> i64 {
+    return syscall4(PGQ_SYS_KILL, pid, sig as u64, 0);
+}
+
+/// 给一整个进程组发信号 —— 就是 `kill(-pgid, sig)`。`pgid == 0` 表示"我自己的组"。
+pub fn pg_kill_group(pgid: u64, sig: u32) -> i64 {
+    let neg: u64 = (0 as i64 - (pgid as i64)) as u64;
+    return syscall4(PGQ_SYS_KILL, neg, sig as u64, 0);
+}
+
+/// 这个 pid 是不是它自己进程组的组长（是的话 `setsid` 会失败）。
+pub fn pg_is_leader(pid: u64, pgid: u64) -> bool {
+    return pid == pgid && pid != 0;
+}
+
+/// 常见信号的短名（`SIGTERM` 这种带后缀的名字在 `os/signal` 那条线；这里是 `TERM`）。
+pub fn pg_signal_name(sig: u32, out: ptr, cap: u32) -> u32 {
+    if sig == 1 { return pgq_put(out, cap, 0, "HUP"); }
+    if sig == 2 { return pgq_put(out, cap, 0, "INT"); }
+    if sig == 3 { return pgq_put(out, cap, 0, "QUIT"); }
+    if sig == 4 { return pgq_put(out, cap, 0, "ILL"); }
+    if sig == 5 { return pgq_put(out, cap, 0, "TRAP"); }
+    if sig == 6 { return pgq_put(out, cap, 0, "ABRT"); }
+    if sig == 7 { return pgq_put(out, cap, 0, "BUS"); }
+    if sig == 8 { return pgq_put(out, cap, 0, "FPE"); }
+    if sig == 9 { return pgq_put(out, cap, 0, "KILL"); }
+    if sig == 10 { return pgq_put(out, cap, 0, "USR1"); }
+    if sig == 11 { return pgq_put(out, cap, 0, "SEGV"); }
+    if sig == 12 { return pgq_put(out, cap, 0, "USR2"); }
+    if sig == 13 { return pgq_put(out, cap, 0, "PIPE"); }
+    if sig == 14 { return pgq_put(out, cap, 0, "ALRM"); }
+    if sig == 15 { return pgq_put(out, cap, 0, "TERM"); }
+    if sig == 17 { return pgq_put(out, cap, 0, "CHLD"); }
+    if sig == 18 { return pgq_put(out, cap, 0, "CONT"); }
+    if sig == 19 { return pgq_put(out, cap, 0, "STOP"); }
+    if sig == 20 { return pgq_put(out, cap, 0, "TSTP"); }
+    if sig == 21 { return pgq_put(out, cap, 0, "TTIN"); }
+    if sig == 22 { return pgq_put(out, cap, 0, "TTOU"); }
+    if sig == 23 { return pgq_put(out, cap, 0, "URG"); }
+    return pgq_put(out, cap, 0, "?");
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_pgroup_signal_names() -> bool {
+    let o: ptr = alloc(16);
+    let n: u32 = pg_signal_name(9, o, 16);
+    let want: str = "KILL";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_pgroup_unknown_signal() -> bool {
+    let o: ptr = alloc(4);
+    let n: u32 = pg_signal_name(99, o, 4);
+    return n == 1 && load8(o, 0) == 63;
+}
+
+fn test_pgroup_is_leader() -> bool {
+    return pg_is_leader(5, 5) && !pg_is_leader(5, 6) && !pg_is_leader(0, 0);
+}

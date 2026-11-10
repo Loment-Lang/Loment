@@ -1,0 +1,167 @@
+// system/eventfd.lomt — eventfd: 一个 8 字节的计数器当作"有事发生了"的信号
+//
+// 为什么系统工具需要它: `pipe` 要两个 fd、一次 write 会占用管道缓冲；而"叫醒一个
+// 线程"只需要一个数。eventfd 就是那个数：`write` 加、`read` 取走（或者取走 1，
+// 见 `EFD_SEMAPHORE`）。它最常见的用法是 epoll 的唤醒端 —— 信号处理、另一个线程、
+// 或者一个 io_uring 完成队列都往同一个 fd 上写。
+//
+// 语义（写错会静默吃事件，所以写在头里）:
+//   * **read 返回 8 字节、小端 u64**；计数为 0 且非阻塞时返回 `EAGAIN`。
+//   * 不带 `EFD_SEMAPHORE`：read 把**整个计数**取走并清零；write 把值**加到**计数上。
+//   * 带 `EFD_SEMAPHORE`：read 每次只减 1；write 仍然加。
+//   * 计数到 `0xFFFFFFFFFFFFFFFE` 再 write 会阻塞（或 `EAGAIN`）—— 上界是
+//     `0xFFFFFFFFFFFFFFFE`，不是 `0xFFFFFFFFFFFFFFFF`。
+//
+// 不做的: `eventfd2` 的 `EFD_SEMAPHORE` 与其他位的组合语义、`eventfd` 的老系统调用
+// （284，没有 flags）。这一层只用带 flags 的 290。
+//
+// 命名: 公开 ef_*, 内部 ev_*。自检 test_eventfd_*。
+
+module eventfd
+
+/// 读时只减 1。
+pub const EF_SEMAPHORE: u32 = 1;
+/// 子进程不继承这个 fd。
+pub const EF_CLOEXEC: u32 = 524288;
+/// 非阻塞读。
+pub const EF_NONBLOCK: u32 = 2048;
+
+/// 计数的字节数。
+pub const EF_BYTES: u32 = 8;
+/// 能写进去的最大值（比 u64 上界小 1）。
+pub const EF_MAX: u64 = 18446744073709551614;
+
+const EV_SYS_READ: u64 = 0;
+const EV_SYS_WRITE: u64 = 1;
+const EV_SYS_EVENTFD2: u64 = 290;
+
+fn ev_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+fn ev_sep(out: ptr, cap: u32, pos: u32) -> u32 {
+    if pos > 0 {
+        return ev_put(out, cap, pos, "|");
+    }
+    return pos;
+}
+
+fn ev_st64(p: ptr, off: u32, v: u64) -> u32 {
+    let b: u32 = 0;
+    while b < 8 {
+        store8(p, off + b, ((v >> (8 * b)) & 255) as u8);
+        b = b + 1;
+    }
+    return off + 8;
+}
+
+fn ev_ld64(p: ptr, off: u32) -> u64 {
+    let v: u64 = 0;
+    let b: u32 = 0;
+    while b < 8 {
+        v = v | ((load8(p, off + b) as u64) << (8 * b));
+        b = b + 1;
+    }
+    return v;
+}
+
+/// 标志位 -> 名字串。0 返回 `"0"`。
+pub fn ef_flags_text(flags: u32, out: ptr, cap: u32) -> u32 {
+    if flags == 0 {
+        return ev_put(out, cap, 0, "0");
+    }
+    let pos: u32 = 0;
+    if (flags & EF_SEMAPHORE) != 0 {
+        pos = ev_put(out, cap, pos, "EFD_SEMAPHORE");
+    }
+    if (flags & EF_CLOEXEC) != 0 {
+        pos = ev_sep(out, cap, pos);
+        pos = ev_put(out, cap, pos, "EFD_CLOEXEC");
+    }
+    if (flags & EF_NONBLOCK) != 0 {
+        pos = ev_sep(out, cap, pos);
+        pos = ev_put(out, cap, pos, "EFD_NONBLOCK");
+    }
+    return pos;
+}
+
+/// `eventfd2(initval, flags)`。
+pub fn ef_create(initval: u32, flags: u32) -> i64 {
+    return syscall4(EV_SYS_EVENTFD2, initval as u64, flags as u64, 0);
+}
+
+/// 把计数写进调用方给的 8 字节。
+pub fn ef_pack(buf: ptr, v: u64) -> u32 {
+    return ev_st64(buf, 0, v);
+}
+
+/// 从 8 字节里读计数。
+pub fn ef_unpack(buf: ptr) -> u64 {
+    return ev_ld64(buf, 0);
+}
+
+/// `write(fd, &v, 8)` —— 值**加到**当前计数上。
+pub fn ef_write(fd: u64, v: u64) -> i64 {
+    let b: ptr = alloc(8);
+    let _p: u32 = ev_st64(b, 0, v);
+    return syscall4(EV_SYS_WRITE, fd, b as u64, 8);
+}
+
+/// `read(fd, out, 8)` —— out 是调用方给的 8 字节；返回读到的字节数。
+pub fn ef_read(fd: u64, out: ptr) -> i64 {
+    return syscall4(EV_SYS_READ, fd, out as u64, 8);
+}
+
+/// 读一次并解出计数值；读失败返回 0（调用方要看 `ef_read` 的返回值时才该用它）。
+pub fn ef_read_value(fd: u64) -> u64 {
+    let b: ptr = alloc(8);
+    let r: i64 = syscall4(EV_SYS_READ, fd, b as u64, 8);
+    if r != 8 {
+        return 0;
+    }
+    return ev_ld64(b, 0);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_eventfd_roundtrip() -> bool {
+    let b: ptr = alloc(8);
+    let _p: u32 = ef_pack(b, 4294967297 as u64);
+    return ef_unpack(b) == 4294967297 && load8(b, 0) == 1 && load8(b, 4) == 1
+        && EF_BYTES == 8;
+}
+
+fn test_eventfd_flags_text() -> bool {
+    let o: ptr = alloc(64);
+    let n: u32 = ef_flags_text(2049, o, 64);
+    let want: str = "EFD_SEMAPHORE|EFD_NONBLOCK";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_eventfd_max() -> bool {
+    // 上界比 u64 最大值小 1 —— 这一位写错就是"永远写不进去"。
+    let b: ptr = alloc(8);
+    let _p: u32 = ef_pack(b, EF_MAX);
+    return EF_MAX == 18446744073709551614 && ef_unpack(b) == EF_MAX
+        && EF_MAX < 18446744073709551615;
+}

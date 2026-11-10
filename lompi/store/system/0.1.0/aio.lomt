@@ -1,0 +1,251 @@
+// system/aio.lomt — Linux 原生异步 I/O: `iocb` 与 `io_event` 的字节布局
+//
+// 为什么系统工具需要它: 高吞吐的磁盘程序要用 `io_submit` 一次交一批请求，而不是一条
+// 一条地 `read`。做这件事的每个程序都要亲手拼那块 64 字节的 `struct iocb` —— 内核只认
+// 这个布局，字段错一个字节就是把 offset 当长度用，而且**不报错**（内核按自己的理解
+// 执行你的请求）。反查/拼装布局是排查这类问题的第一步。
+//
+// 覆盖: x86-64 Linux 的 UAPI（小端），照抄内核头 `linux/aio_abi.h`：
+//   iocb 64 字节: data u64(0) | key u32(8) | rw_flags u32(12) | opcode u16(16) |
+//                 reqprio i16(18) | fildes u32(20) | buf u64(24) | nbytes u64(32) |
+//                 offset i64(40) | reserved2 u64(48) | flags u32(56) | resfd u32(60)
+//   io_event 32 字节: data u64(0) | obj u64(8) | res i64(16) | res2 i64(24)
+//
+// 注意 `aio_fildes` 在 **20** 而不是 24 —— 它前面是两个 2 字节字段（opcode / reqprio），
+// 4 字节对齐在这里是假象。这一格错位会让整个请求落到错的 fd 上。
+//
+// 不做: 提交/回收的调度策略、`IOCB_FLAG_RESFD` 的 eventfd 通知（那是调用方把
+// `system/eventfd` 组合进来的决定）、`RWF_*` 的语义（只转存，不解释）。
+//
+// 命名: 公开 ai_*, 内部 aiq_*。自检 test_aio_*。
+
+module aio
+
+/// `struct iocb` 的字节数。
+pub const AI_AIO_IOCB_BYTES: u32 = 64;
+/// `struct io_event` 的字节数。
+pub const AI_AIO_EVENT_BYTES: u32 = 32;
+
+pub const AI_IOCB_CMD_PREAD: u32 = 0;
+pub const AI_IOCB_CMD_PWRITE: u32 = 1;
+pub const AI_IOCB_CMD_FSYNC: u32 = 2;
+pub const AI_IOCB_CMD_FDATASYNC: u32 = 3;
+pub const AI_IOCB_CMD_PREADX: u32 = 4;
+pub const AI_IOCB_CMD_POLL: u32 = 5;
+pub const AI_IOCB_CMD_NOOP: u32 = 6;
+pub const AI_IOCB_CMD_PREADV: u32 = 7;
+pub const AI_IOCB_CMD_PWRITEV: u32 = 8;
+
+/// `aio_flags` 里的位：`aio_resfd` 有效。
+pub const AI_IOCB_FLAG_RESFD: u32 = 1;
+/// `aio_flags` 里的位：`aio_reqprio` 有效。
+pub const AI_IOCB_FLAG_IOPRIO: u32 = 2;
+
+fn aiq_zero(p: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        store8(p, i, 0 as u8);
+        i = i + 1;
+    }
+    return n;
+}
+
+fn aiq_st16(p: ptr, off: u32, v: u32) -> u32 {
+    store8(p, off, (v & 255) as u8);
+    store8(p, off + 1, ((v >> 8) & 255) as u8);
+    return off + 2;
+}
+
+fn aiq_st32(p: ptr, off: u32, v: u32) -> u32 {
+    let b: u32 = 0;
+    while b < 4 {
+        store8(p, off + b, ((v >> (8 * b)) & 255) as u8);
+        b = b + 1;
+    }
+    return off + 4;
+}
+
+fn aiq_st64(p: ptr, off: u32, v: u64) -> u32 {
+    let b: u32 = 0;
+    while b < 8 {
+        store8(p, off + b, ((v >> (8 * b)) & 255) as u8);
+        b = b + 1;
+    }
+    return off + 8;
+}
+
+fn aiq_ld16(p: ptr, off: u32) -> u32 {
+    return (load8(p, off) as u32) | ((load8(p, off + 1) as u32) << 8);
+}
+
+fn aiq_ld32(p: ptr, off: u32) -> u32 {
+    let v: u32 = 0;
+    let b: u32 = 0;
+    while b < 4 {
+        v = v | ((load8(p, off + b) as u32) << (8 * b));
+        b = b + 1;
+    }
+    return v;
+}
+
+fn aiq_ld64(p: ptr, off: u32) -> u64 {
+    let v: u64 = 0;
+    let b: u32 = 0;
+    while b < 8 {
+        v = v | ((load8(p, off + b) as u64) << (8 * b));
+        b = b + 1;
+    }
+    return v;
+}
+
+fn aiq_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+/// 把一块 64 字节写成一条 `iocb`。字段偏移见文件头；整块先清零 ——
+/// `key` / `reqprio` / `reserved2` / `resfd` 内核也会读，留下上一次的垃圾就是另一个请求。
+pub fn ai_iocb_pack(buf: ptr, opcode: u32, fd: u32, bufaddr: u64, nbytes: u64,
+                   offset: i64, data: u64) -> u32 {
+    let _z: u32 = aiq_zero(buf, AI_AIO_IOCB_BYTES);
+    let _d: u32 = aiq_st64(buf, 0, data);
+    let _o: u32 = aiq_st16(buf, 16, opcode);
+    let _f: u32 = aiq_st32(buf, 20, fd);
+    let _b: u32 = aiq_st64(buf, 24, bufaddr);
+    let _n: u32 = aiq_st64(buf, 32, nbytes);
+    let _s: u32 = aiq_st64(buf, 40, offset as u64);
+    return AI_AIO_IOCB_BYTES;
+}
+
+pub fn ai_iocb_data(buf: ptr) -> u64 {
+    return aiq_ld64(buf, 0);
+}
+
+pub fn ai_iocb_opcode(buf: ptr) -> u32 {
+    return aiq_ld16(buf, 16);
+}
+
+pub fn ai_iocb_fd(buf: ptr) -> u32 {
+    return aiq_ld32(buf, 20);
+}
+
+pub fn ai_iocb_buf(buf: ptr) -> u64 {
+    return aiq_ld64(buf, 24);
+}
+
+pub fn ai_iocb_nbytes(buf: ptr) -> u64 {
+    return aiq_ld64(buf, 32);
+}
+
+pub fn ai_iocb_offset(buf: ptr) -> i64 {
+    return aiq_ld64(buf, 40) as i64;
+}
+
+pub fn ai_iocb_flags(buf: ptr) -> u32 {
+    return aiq_ld32(buf, 56);
+}
+
+pub fn ai_event_data(ev: ptr) -> u64 {
+    return aiq_ld64(ev, 0);
+}
+
+pub fn ai_event_obj(ev: ptr) -> u64 {
+    return aiq_ld64(ev, 8);
+}
+
+pub fn ai_event_res(ev: ptr) -> i64 {
+    return aiq_ld64(ev, 16) as i64;
+}
+
+pub fn ai_event_res2(ev: ptr) -> i64 {
+    return aiq_ld64(ev, 24) as i64;
+}
+
+/// opcode -> 名字。未知返回 `"unknown"`。
+pub fn ai_opcode_name(op: u32, out: ptr, cap: u32) -> u32 {
+    let s: str = "unknown";
+    if op == AI_IOCB_CMD_PREAD { s = "PREAD"; }
+    else if op == AI_IOCB_CMD_PWRITE { s = "PWRITE"; }
+    else if op == AI_IOCB_CMD_FSYNC { s = "FSYNC"; }
+    else if op == AI_IOCB_CMD_FDATASYNC { s = "FDATASYNC"; }
+    else if op == AI_IOCB_CMD_PREADX { s = "PREADX"; }
+    else if op == AI_IOCB_CMD_POLL { s = "POLL"; }
+    else if op == AI_IOCB_CMD_NOOP { s = "NOOP"; }
+    else if op == AI_IOCB_CMD_PREADV { s = "PREADV"; }
+    else if op == AI_IOCB_CMD_PWRITEV { s = "PWRITEV"; }
+    return aiq_put(out, cap, 0, s);
+}
+
+/// `io_setup(maxevents, &ctx)`。
+pub fn ai_setup(maxevents: u32, ctx: ptr) -> i64 {
+    return syscall4(206, maxevents as u64, ctx as u64, 0);
+}
+
+/// `io_destroy(ctx)`。
+pub fn ai_destroy(ctx: u64) -> i64 {
+    return syscall4(207, ctx, 0, 0);
+}
+
+/// `io_submit(ctx, nr, iocbpp)` —— `iocbpp` 是**指针数组**（`iocb*` 的数组），不是 iocb 数组。
+pub fn ai_submit(ctx: u64, nr: u32, iocbpp: ptr) -> i64 {
+    return syscall4(209, ctx, nr as u64, iocbpp as u64);
+}
+
+/// `io_cancel(ctx, iocb, &result)`。
+pub fn ai_cancel(ctx: u64, iocb: ptr, result: ptr) -> i64 {
+    return syscall4(210, ctx, iocb as u64, result as u64);
+}
+
+/// `io_getevents(ctx, min_nr, nr, events, timeout)`。
+pub fn ai_getevents(ctx: u64, min_nr: u32, nr: u32, events: ptr, timeout: ptr) -> i64 {
+    return syscall6(208, ctx, min_nr as u64, nr as u64, events as u64, timeout as u64);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_aio_iocb_offsets() -> bool {
+    // 字段偏移是内核 ABI —— 这里逐格钉住，尤其是 `fildes` 的 20。
+    let b: ptr = alloc(AI_AIO_IOCB_BYTES);
+    let _n: u32 = ai_iocb_pack(b, AI_IOCB_CMD_PWRITE, 7, 4096, 512, 8192 as i64, 99);
+    return ai_iocb_opcode(b) == AI_IOCB_CMD_PWRITE
+        && ai_iocb_fd(b) == 7
+        && ai_iocb_buf(b) == 4096
+        && ai_iocb_nbytes(b) == 512
+        && ai_iocb_offset(b) == (8192 as i64)
+        && ai_iocb_data(b) == 99
+        && load8(b, 18) == 0
+        && load8(b, 48) == 0;
+}
+
+fn test_aio_iocb_clears() -> bool {
+    let b: ptr = alloc(AI_AIO_IOCB_BYTES);
+    store8(b, 48, 255 as u8);
+    let _n: u32 = ai_iocb_pack(b, AI_IOCB_CMD_NOOP, 0, 0, 0, 0 as i64, 0);
+    return load8(b, 48) == 0 && load8(b, 56) == 0 && ai_iocb_flags(b) == 0;
+}
+
+fn test_aio_event() -> bool {
+    let e: ptr = alloc(AI_AIO_EVENT_BYTES);
+    let _a: u32 = aiq_st64(e, 0, 12345);
+    let _b: u32 = aiq_st64(e, 8, 67890);
+    let _c: u32 = aiq_st64(e, 16, 0 as u64 - 5 as u64);
+    let _d: u32 = aiq_st64(e, 24, 0);
+    return ai_event_data(e) == 12345 && ai_event_obj(e) == 67890
+        && ai_event_res(e) == (0 as i64 - 5 as i64) && ai_event_res2(e) == 0;
+}
+
+fn test_aio_name() -> bool {
+    let o: ptr = alloc(16);
+    let n: u32 = ai_opcode_name(AI_IOCB_CMD_PWRITEV, o, 16);
+    let want: str = "PWRITEV";
+    return n == str_len(want) && load8(o, 0) == 80 && load8(o, 6) == 86;
+}

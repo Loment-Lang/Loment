@@ -1,0 +1,251 @@
+// os/cwd.lomt — 工作目录: 读、改、把相对路径**算**成绝对路径
+//
+// 为什么需要它: 程序一启动, "我在哪"（`getcwd`）与"我要去哪"（`chdir`）就是两条
+// 系统调用; 而日志、错误信息、子进程的 cwd 又要求**绝对路径**。把 `../x` 拼到
+// 当前目录上看起来简单, 但三件事容易错:
+//   * `..` 到根就走不动了（`/..` 还是 `/`）;
+//   * 连续斜杠（`a//b`）与结尾斜杠不该留下;
+//   * 相对路径本身可以是绝对的（`/x` 应该**替换**而不是拼接）。
+//   这一层把 `cw_join_relative` 做成**纯函数** —— 不碰文件系统, 所以符号链接的
+//   语义不在里面（`getcwd` 给的是内核已经解析过的路径）。
+//
+// 边界: 号是 x86-64 Linux 的。路径参数是 C 串（内核要 NUL）, 其余收 str/buffer。
+// 自检只验纯逻辑（归一化与拼接）, 系统调用那一半由 `tools/loment_os_test.py` 判。
+//
+// 命名: 公开 cw_*, 内部 cwq_*。自检 test_cwd_*。
+
+module cwd
+
+const CWQ_SYS_GETCWD: u64 = 79;
+const CWQ_SYS_CHDIR: u64 = 80;
+const CWQ_TMP: u32 = 4096;
+
+fn cwq_norm_ptr(p: ptr, n: u32, out: ptr, cap: u32) -> u32 {
+    let pos: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = load8(p, i) as u32;
+        if c == 47 && pos > 0 && load8(out, pos - 1) == 47 {
+            i = i + 1;
+        } else {
+            if pos < cap {
+                store8(out, pos, c as u8);
+            }
+            pos = pos + 1;
+            i = i + 1;
+        }
+    }
+    if pos > 1 && load8(out, pos - 1) == 47 {
+        pos = pos - 1;
+    }
+    return pos;
+}
+
+fn cwq_norm_str(s: str, out: ptr, cap: u32) -> u32 {
+    let n: u32 = str_len(s);
+    let pos: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = str_byte(s, i) as u32;
+        if c == 47 && pos > 0 && load8(out, pos - 1) == 47 {
+            i = i + 1;
+        } else {
+            if pos < cap {
+                store8(out, pos, c as u8);
+            }
+            pos = pos + 1;
+            i = i + 1;
+        }
+    }
+    if pos > 1 && load8(out, pos - 1) == 47 {
+        pos = pos - 1;
+    }
+    return pos;
+}
+
+/// 去掉最后一节：`/a/b` -> `/a`（长度），根上的 `..` 停在根。
+fn cwq_trim(pos0: u32, out: ptr) -> u32 {
+    let rooted: u32 = 0;
+    if pos0 > 0 && load8(out, 0) == 47 {
+        rooted = 1;
+    }
+    let pos: u32 = pos0;
+    while pos > 0 && load8(out, pos - 1) != 47 {
+        pos = pos - 1;
+    }
+    if pos > 0 {
+        pos = pos - 1;
+    }
+    if pos == 0 && rooted == 1 {
+        return 1;
+    }
+    return pos;
+}
+
+/// 读当前工作目录（str 形式，不带 NUL），返回长度；失败返回 0。
+pub fn cw_get(buf: ptr, cap: u32) -> u32 {
+    let t: ptr = alloc(CWQ_TMP);
+    let r: i64 = syscall4(CWQ_SYS_GETCWD, t as u64, CWQ_TMP as u64, 0);
+    if r <= 0 {
+        return 0;
+    }
+    let n: u32 = 0;
+    while n < CWQ_TMP && load8(t, n) != 0 {
+        n = n + 1;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if i < cap {
+            store8(buf, i, load8(t, i) as u8);
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// `chdir(path)`。`path` 是 C 串。成功返回 0。
+pub fn cw_chdir(path: ptr) -> i64 {
+    return syscall4(CWQ_SYS_CHDIR, path as u64, 0, 0);
+}
+
+/// 把 rel 解析到 base 上（纯计算，不碰文件系统），写进 out，返回长度。
+/// rel 以 `/` 开头时**替换** base; `.` 跳过; `..` 退一节; 连续斜杠折叠。
+pub fn cw_join_relative(base: str, rel: str, out: ptr, cap: u32) -> u32 {
+    let pos: u32 = 0;
+    if str_len(rel) > 0 && str_byte(rel, 0) == 47 {
+        if cap > 0 {
+            store8(out, 0, 47 as u8);
+        }
+        pos = 1;
+    } else {
+        pos = cwq_norm_str(base, out, cap);
+    }
+    let n: u32 = str_len(rel);
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = str_byte(rel, i) as u32;
+        if c == 47 {
+            i = i + 1;
+        } else {
+            let s: u32 = i;
+            while i < n && str_byte(rel, i) != 47 {
+                i = i + 1;
+            }
+            let len: u32 = i - s;
+            if len == 1 && str_byte(rel, s) == 46 {
+                pos = pos;
+            } else if len == 2 && str_byte(rel, s) == 46
+                && str_byte(rel, s + 1) == 46 {
+                if pos > 0 {
+                    pos = cwq_trim(pos, out);
+                }
+            } else if len > 0 {
+                if pos > 0 && load8(out, pos - 1) != 47 {
+                    if pos < cap {
+                        store8(out, pos, 47 as u8);
+                    }
+                    pos = pos + 1;
+                }
+                let k: u32 = 0;
+                while k < len {
+                    if pos < cap {
+                        store8(out, pos, str_byte(rel, s + k) as u8);
+                    }
+                    pos = pos + 1;
+                    k = k + 1;
+                }
+            }
+        }
+    }
+    if pos == 0 {
+        if pos < cap {
+            store8(out, 0, 47 as u8);
+        }
+        pos = 1;
+    }
+    return pos;
+}
+
+/// 两条路径是否指向同一个位置（折叠重复斜杠与结尾斜杠后逐字节比）。
+pub fn cw_same(a: ptr, a_n: u32, b: ptr, b_n: u32) -> bool {
+    let na: ptr = alloc(1024);
+    let nb: ptr = alloc(1024);
+    let la: u32 = cwq_norm_ptr(a, a_n, na, 1024);
+    let lb: u32 = cwq_norm_ptr(b, b_n, nb, 1024);
+    if la != lb {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < la {
+        if load8(na, i) != load8(nb, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_cwd_join_plain() -> bool {
+    let o: ptr = alloc(128);
+    let n: u32 = cw_join_relative("/home/me", "src/lib", o, 128);
+    let want: str = "/home/me/src/lib";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_cwd_join_parents() -> bool {
+    let o: ptr = alloc(128);
+    let a: u32 = cw_join_relative("/home/me", "../b", o, 128);
+    let first: u32 = load8(o, 0) as u32;
+    let last: u32 = (a - 1) as u32;
+    let la: u32 = load8(o, 6) as u32;
+    let lb: u32 = cw_join_relative("/", "../../x", o, 128);
+    let lb0: u32 = load8(o, 0) as u32;
+    return a == 7 && first == 47 && la == 98 && lb == 2 && lb0 == 47;
+}
+
+fn test_cwd_join_absolute_rel() -> bool {
+    let o: ptr = alloc(64);
+    let n: u32 = cw_join_relative("/a/b", "/x//y/", o, 64);
+    let want: str = "/x/y";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_cwd_same() -> bool {
+    let a: ptr = alloc(16);
+    let b: ptr = alloc(16);
+    let s1: str = "/a//b/";
+    let s2: str = "/a/b";
+    let i: u32 = 0;
+    while i < str_len(s1) {
+        store8(a, i, str_byte(s1, i) as u8);
+        i = i + 1;
+    }
+    let k: u32 = 0;
+    while k < str_len(s2) {
+        store8(b, k, str_byte(s2, k) as u8);
+        k = k + 1;
+    }
+    return cw_same(a, 6, b, 4) && !cw_same(a, 6, b, 3);
+}

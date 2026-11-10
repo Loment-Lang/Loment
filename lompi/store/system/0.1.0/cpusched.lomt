@@ -1,0 +1,247 @@
+// system/sched.lomt — 调度策略、CPU 亲和性的位集合与三个系统调用
+//
+// 为什么系统工具需要它: "把这个进程钉到第 3 号 CPU"、"别让它在小核上跑"、
+// "让它让一下" —— 每一条都要调度接口，而它们的参数形状各不相同：
+// `sched_yield` 没有参数，`sched_setaffinity` 要一块**位图**（内核 ABI 是 1024 位 =
+// 128 字节），`sched_getcpu` 要两个指针。位图那一步最容易错：第 7 号 CPU 在
+// **第 0 个字节的第 7 位**（小端位图），写成"第 7 个字节"就钉到了 56 号 CPU 上，
+// 而那台机器可能根本没有 56 号 —— 系统调用会返回 `EINVAL`，也可能**静默成功**。
+//
+// 覆盖: Linux 的公开策略号、CPU 亲和性的 128 字节窗口（1024 个 CPU），x86-64。
+//
+// 不做的: `SCHED_DEADLINE` 的 `sched_attr` 结构（runtime/deadline/period 三个 u64
+// 的打包，本层只给策略号）、实时优先级（`sched_setscheduler` 需要 CAP_SYS_NICE，
+// 而且改它是**全局后果**，留给调用方自己决定）、cgroup 的 CPU 配额（见 `system/cgroup`）。
+//
+// 命名: 公开 sch_*, 内部 scq_*。自检 test_sched_*。
+
+module cpusched
+
+pub const SCH_OTHER: u32 = 0;
+pub const SCH_FIFO: u32 = 1;
+pub const SCH_RR: u32 = 2;
+pub const SCH_BATCH: u32 = 3;
+pub const SCH_IDLE: u32 = 5;
+pub const SCH_DEADLINE: u32 = 6;
+/// 与策略号按位或：`SCH_FIFO | SCH_RESET_ON_FORK`。
+pub const SCH_RESET_ON_FORK: u32 = 1073741824;
+
+/// CPU 亲和性位图的字节数（内核 ABI 的 1024 位，按字节给调用方）。
+pub const SCH_CPUSET_BYTES: u32 = 128;
+/// 位图能表示的 CPU 数上限。
+pub const SCH_CPUSET_MAX: u32 = 1024;
+
+const SCQ_SYS_SCHED_YIELD: u64 = 24;
+const SCQ_SYS_SCHED_SETAFFINITY: u64 = 203;
+const SCQ_SYS_SCHED_GETAFFINITY: u64 = 204;
+const SCQ_SYS_GETCPU: u64 = 309;
+
+fn scq_put(out: ptr, cap: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if i < cap {
+            store8(out, i, str_byte(s, i) as u8);
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 策略号（低 8 位）-> 名字。未知返回 `"SCHED_UNKNOWN"`。
+/// `SCHED_RESET_ON_FORK` 位会让结果带上 `|RESET_ON_FORK` 后缀。
+pub fn sch_policy_name(policy: u32, out: ptr, cap: u32) -> u32 {
+    let base: u32 = policy & 255;
+    let n: u32 = 0;
+    if base == SCH_OTHER { n = scq_put(out, cap, "SCHED_OTHER"); }
+    else if base == SCH_FIFO { n = scq_put(out, cap, "SCHED_FIFO"); }
+    else if base == SCH_RR { n = scq_put(out, cap, "SCHED_RR"); }
+    else if base == SCH_BATCH { n = scq_put(out, cap, "SCHED_BATCH"); }
+    else if base == SCH_IDLE { n = scq_put(out, cap, "SCHED_IDLE"); }
+    else if base == SCH_DEADLINE { n = scq_put(out, cap, "SCHED_DEADLINE"); }
+    else { n = scq_put(out, cap, "SCHED_UNKNOWN"); }
+    if (policy & SCH_RESET_ON_FORK) != 0 {
+        n = n + scq_suffix(out, cap, n, "|RESET_ON_FORK");
+    }
+    return n;
+}
+
+fn scq_suffix(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 名字 -> 策略号。未知返回 -1。
+pub fn sch_lookup(name: str) -> i64 {
+    if str_eq(name, "SCHED_OTHER") { return 0 as i64; }
+    if str_eq(name, "SCHED_FIFO") { return 1 as i64; }
+    if str_eq(name, "SCHED_RR") { return 2 as i64; }
+    if str_eq(name, "SCHED_BATCH") { return 3 as i64; }
+    if str_eq(name, "SCHED_IDLE") { return 5 as i64; }
+    if str_eq(name, "SCHED_DEADLINE") { return 6 as i64; }
+    return 0 as i64 - 1;
+}
+
+/// `sched_yield()` —— 让出 CPU 给同级或更高级的线程。
+pub fn sch_yield() -> i64 {
+    return syscall4(SCQ_SYS_SCHED_YIELD, 0, 0, 0);
+}
+
+/// `sched_setaffinity(pid, len, mask)` —— `pid` 0 表示"本线程"，mask 是位图指针。
+pub fn sch_setaffinity(pid: i64, len: u32, mask: ptr) -> i64 {
+    return syscall4(SCQ_SYS_SCHED_SETAFFINITY, pid as u64, len as u64, mask as u64);
+}
+
+/// `sched_getaffinity(pid, len, mask)` —— 内核只会写 `len` 字节。
+pub fn sch_getaffinity(pid: i64, len: u32, mask: ptr) -> i64 {
+    return syscall4(SCQ_SYS_SCHED_GETAFFINITY, pid as u64, len as u64, mask as u64);
+}
+
+/// `getcpu(cpu, node)` —— 两条指针任一可为 0（表示不要）。
+pub fn sch_getcpu(cpu: ptr, node: ptr) -> i64 {
+    return syscall4(SCQ_SYS_GETCPU, cpu as u64, node as u64, 0);
+}
+
+/// 把 128 字节的位图清零。
+pub fn sch_cpuset_clear(mask: ptr) -> u32 {
+    let i: u32 = 0;
+    while i < SCH_CPUSET_BYTES {
+        store8(mask, i, 0 as u8);
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 在位图里置上第 `cpu` 号。`cpu` 越界（>= 1024）返回 -1，不做任何写。
+pub fn sch_cpu_set(mask: ptr, cpu: u32) -> i64 {
+    if cpu >= SCH_CPUSET_MAX {
+        return 0 as i64 - 1;
+    }
+    let byte: u32 = cpu / 8;
+    let bit: u32 = cpu % 8;
+    let cur: u32 = load8(mask, byte);
+    store8(mask, byte, (cur | (1 << bit)) as u8);
+    return 0 as i64;
+}
+
+/// 第 `cpu` 号在不在位图里。
+pub fn sch_cpu_has(mask: ptr, cpu: u32) -> bool {
+    if cpu >= SCH_CPUSET_MAX {
+        return false;
+    }
+    let byte: u32 = cpu / 8;
+    let bit: u32 = cpu % 8;
+    return (load8(mask, byte) & (1 << bit)) != 0;
+}
+
+/// 位图里置位的个数（按 `bytes` 字节扫）。
+pub fn sch_cpu_count(mask: ptr, bytes: u32) -> u32 {
+    let n: u32 = 0;
+    let i: u32 = 0;
+    while i < bytes {
+        let b: u32 = load8(mask, i);
+        let k: u32 = 0;
+        while k < 8 {
+            if (b & (1 << k)) != 0 {
+                n = n + 1;
+            }
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 位图里**最小的**置位 CPU 号；一个都没有返回 -1。常用于"本进程被限到哪个核"。
+pub fn sch_cpu_first(mask: ptr, bytes: u32) -> i64 {
+    let i: u32 = 0;
+    while i < bytes {
+        let b: u32 = load8(mask, i);
+        if b != 0 {
+            let k: u32 = 0;
+            while k < 8 {
+                if (b & (1 << k)) != 0 {
+                    return (i * 8 + k) as i64;
+                }
+                k = k + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return 0 as i64 - 1;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_sched_policy_names() -> bool {
+    let b: ptr = alloc(32);
+    let n: u32 = sch_policy_name(SCH_OTHER, b, 32);
+    let want: str = "SCHED_OTHER";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(b, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_sched_cpu_bitmap() -> bool {
+    let m: ptr = alloc(SCH_CPUSET_BYTES);
+    let _c: u32 = sch_cpuset_clear(m);
+    let r0: i64 = sch_cpu_set(m, 7);
+    let r1: i64 = sch_cpu_set(m, 100);
+    if r0 != 0 as i64 {
+        return false;
+    }
+    if r1 != 0 as i64 {
+        return false;
+    }
+    if sch_cpu_set(m, 1024) != 0 as i64 - 1 {
+        return false;
+    }
+    if !sch_cpu_has(m, 7) {
+        return false;
+    }
+    if !sch_cpu_has(m, 100) {
+        return false;
+    }
+    if sch_cpu_has(m, 8) {
+        return false;
+    }
+    if sch_cpu_count(m, SCH_CPUSET_BYTES) != 2 {
+        return false;
+    }
+    if sch_cpu_first(m, SCH_CPUSET_BYTES) != 7 as i64 {
+        return false;
+    }
+    return true;
+}
+
+fn test_sched_empty_bitmap() -> bool {
+    let m: ptr = alloc(SCH_CPUSET_BYTES);
+    let _c: u32 = sch_cpuset_clear(m);
+    if sch_cpu_count(m, SCH_CPUSET_BYTES) != 0 {
+        return false;
+    }
+    if sch_cpu_first(m, SCH_CPUSET_BYTES) != 0 as i64 - 1 {
+        return false;
+    }
+    if sch_cpu_has(m, 0) {
+        return false;
+    }
+    return true;
+}

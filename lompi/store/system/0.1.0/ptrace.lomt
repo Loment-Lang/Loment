@@ -1,0 +1,238 @@
+// system/ptrace.lomt — ptrace(2) 的请求号、选项位与名字
+//
+// 为什么系统工具需要它: 调试器、`strace` 类工具、故障注入、崩溃现场抓寄存器 ——
+// 每一件都在调 `ptrace`，而它的第一个参数是一张**没有头文件就记不住**的请求号表
+// （`PTRACE_GETREGS` 是 12，`PTRACE_SEIZE` 是 0x4206 —— 一个在低区、一个在 0x42xx）。
+// 请求号写错不会报"未知请求"，而是**对进程做了另一件事**：把 `PTRACE_CONT` 写成
+// `PTRACE_DETACH`，被调试进程会安静地脱离；写成 `PTRACE_KILL`，它直接死了。
+//
+// 覆盖: x86-64 Linux，`ptrace` 的公开请求集合（Linux 6.x）。
+//
+// 不做的: `user_regs_struct` 的字段名（那是架构相关的 27 个 u64，本层只给偏移常量
+// 的入口，不给整套结构体）、`PTRACE_SEIZE` 之后的 `PTRACE_INTERRUPT` 状态机
+// （调用方的事）、core dump / ptrace 的 Yama 权限规则。
+//
+// 命名: 公开 pt_*, 内部 ptq_。自检 test_ptrace_*。
+
+module ptrace
+
+pub const PT_TRACEME: u32 = 0;
+pub const PT_PEEKTEXT: u32 = 1;
+pub const PT_PEEKDATA: u32 = 2;
+pub const PT_PEEKUSER: u32 = 3;
+pub const PT_POKETEXT: u32 = 4;
+pub const PT_POKEDATA: u32 = 5;
+pub const PT_CONT: u32 = 7;
+pub const PT_KILL: u32 = 8;
+pub const PT_SINGLESTEP: u32 = 9;
+pub const PT_GETREGS: u32 = 12;
+pub const PT_SETREGS: u32 = 13;
+pub const PT_ATTACH: u32 = 16;
+pub const PT_DETACH: u32 = 17;
+pub const PT_SYSCALL: u32 = 24;
+pub const PT_SETOPTIONS: u32 = 16896;
+pub const PT_GETEVENTMSG: u32 = 16897;
+pub const PT_GETSIGINFO: u32 = 16898;
+pub const PT_SETSIGINFO: u32 = 16899;
+pub const PT_GETREGSET: u32 = 16900;
+pub const PT_SETREGSET: u32 = 16901;
+pub const PT_SEIZE: u32 = 16902;
+pub const PT_INTERRUPT: u32 = 16903;
+pub const PT_LISTEN: u32 = 16904;
+pub const PT_PEEKSIGINFO: u32 = 16905;
+
+pub const PT_O_TRACESYSGOOD: u32 = 1;
+pub const PT_O_TRACEFORK: u32 = 2;
+pub const PT_O_TRACEVFORK: u32 = 4;
+pub const PT_O_TRACECLONE: u32 = 8;
+pub const PT_O_TRACEEXEC: u32 = 16;
+pub const PT_O_TRACEEXIT: u32 = 64;
+pub const PT_O_TRACESECCOMP: u32 = 128;
+
+const PTQ_SYS_PTRACE: u64 = 101;
+
+/// `user_regs_struct` 里各字段的字节偏移（x86-64，每个字段 8 字节，按内核顺序）。
+pub const PT_REG_R15: u32 = 0;
+pub const PT_REG_R14: u32 = 8;
+pub const PT_REG_R13: u32 = 16;
+pub const PT_REG_R12: u32 = 24;
+pub const PT_REG_RBP: u32 = 32;
+pub const PT_REG_RBX: u32 = 40;
+pub const PT_REG_R11: u32 = 48;
+pub const PT_REG_R10: u32 = 56;
+pub const PT_REG_R9: u32 = 64;
+pub const PT_REG_R8: u32 = 72;
+pub const PT_REG_RAX: u32 = 80;
+pub const PT_REG_RCX: u32 = 88;
+pub const PT_REG_RDX: u32 = 96;
+pub const PT_REG_RSI: u32 = 104;
+pub const PT_REG_RDI: u32 = 112;
+pub const PT_REG_ORIG_RAX: u32 = 120;
+pub const PT_REG_RIP: u32 = 128;
+pub const PT_REG_CS: u32 = 136;
+pub const PT_REG_EFLAGS: u32 = 144;
+pub const PT_REG_RSP: u32 = 152;
+pub const PT_REG_SS: u32 = 160;
+/// `user_regs_struct` 的总字节数（27 个 u64）。
+pub const PT_REGS_BYTES: u32 = 216;
+
+fn ptq_put(out: ptr, cap: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if i < cap {
+            store8(out, i, str_byte(s, i) as u8);
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+fn ptq_add(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    if p > 0 {
+        if p < cap {
+            store8(out, p, 124 as u8);
+        }
+        p = p + 1;
+    }
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+/// 请求号 -> 名字。未知返回 `"PTRACE_UNKNOWN"`。
+pub fn pt_request_name(req: u32, out: ptr, cap: u32) -> u32 {
+    if req == PT_TRACEME { return ptq_put(out, cap, "PTRACE_TRACEME"); }
+    if req == PT_PEEKTEXT { return ptq_put(out, cap, "PTRACE_PEEKTEXT"); }
+    if req == PT_PEEKDATA { return ptq_put(out, cap, "PTRACE_PEEKDATA"); }
+    if req == PT_PEEKUSER { return ptq_put(out, cap, "PTRACE_PEEKUSER"); }
+    if req == PT_POKETEXT { return ptq_put(out, cap, "PTRACE_POKETEXT"); }
+    if req == PT_POKEDATA { return ptq_put(out, cap, "PTRACE_POKEDATA"); }
+    if req == PT_CONT { return ptq_put(out, cap, "PTRACE_CONT"); }
+    if req == PT_KILL { return ptq_put(out, cap, "PTRACE_KILL"); }
+    if req == PT_SINGLESTEP { return ptq_put(out, cap, "PTRACE_SINGLESTEP"); }
+    if req == PT_GETREGS { return ptq_put(out, cap, "PTRACE_GETREGS"); }
+    if req == PT_SETREGS { return ptq_put(out, cap, "PTRACE_SETREGS"); }
+    if req == PT_ATTACH { return ptq_put(out, cap, "PTRACE_ATTACH"); }
+    if req == PT_DETACH { return ptq_put(out, cap, "PTRACE_DETACH"); }
+    if req == PT_SYSCALL { return ptq_put(out, cap, "PTRACE_SYSCALL"); }
+    if req == PT_SETOPTIONS { return ptq_put(out, cap, "PTRACE_SETOPTIONS"); }
+    if req == PT_GETEVENTMSG { return ptq_put(out, cap, "PTRACE_GETEVENTMSG"); }
+    if req == PT_GETSIGINFO { return ptq_put(out, cap, "PTRACE_GETSIGINFO"); }
+    if req == PT_SETSIGINFO { return ptq_put(out, cap, "PTRACE_SETSIGINFO"); }
+    if req == PT_GETREGSET { return ptq_put(out, cap, "PTRACE_GETREGSET"); }
+    if req == PT_SETREGSET { return ptq_put(out, cap, "PTRACE_SETREGSET"); }
+    if req == PT_SEIZE { return ptq_put(out, cap, "PTRACE_SEIZE"); }
+    if req == PT_INTERRUPT { return ptq_put(out, cap, "PTRACE_INTERRUPT"); }
+    if req == PT_LISTEN { return ptq_put(out, cap, "PTRACE_LISTEN"); }
+    if req == PT_PEEKSIGINFO { return ptq_put(out, cap, "PTRACE_PEEKSIGINFO"); }
+    return ptq_put(out, cap, "PTRACE_UNKNOWN");
+}
+
+/// `PTRACE_SETOPTIONS` 的选项位 -> `|` 分隔名字串（0 返回 `"0"`）。
+pub fn pt_options_text(mask: u32, out: ptr, cap: u32) -> u32 {
+    if mask == 0 {
+        return ptq_put(out, cap, "0");
+    }
+    let pos: u32 = 0;
+    if (mask & PT_O_TRACESYSGOOD) != 0 { pos = ptq_add(out, cap, pos, "PTRACE_O_TRACESYSGOOD"); }
+    if (mask & PT_O_TRACEFORK) != 0 { pos = ptq_add(out, cap, pos, "PTRACE_O_TRACEFORK"); }
+    if (mask & PT_O_TRACEVFORK) != 0 { pos = ptq_add(out, cap, pos, "PTRACE_O_TRACEVFORK"); }
+    if (mask & PT_O_TRACECLONE) != 0 { pos = ptq_add(out, cap, pos, "PTRACE_O_TRACECLONE"); }
+    if (mask & PT_O_TRACEEXEC) != 0 { pos = ptq_add(out, cap, pos, "PTRACE_O_TRACEEXEC"); }
+    if (mask & PT_O_TRACEEXIT) != 0 { pos = ptq_add(out, cap, pos, "PTRACE_O_TRACEEXIT"); }
+    if (mask & PT_O_TRACESECCOMP) != 0 { pos = ptq_add(out, cap, pos, "PTRACE_O_TRACESECCOMP"); }
+    return pos;
+}
+
+/// `ptrace(request, pid, addr, data)` —— 被调试进程的 `pid`，第三、四个参数按请求解释。
+pub fn pt_trace(req: u32, pid: i64, addr: u64, data: u64) -> i64 {
+    return syscall6(PTQ_SYS_PTRACE, req as u64, pid as u64, addr, data, 0);
+}
+
+/// `PTRACE_PEEK*` 的返回值约定：成功时数据在返回值里，出错时返回 -1 且必须
+/// **清 errno 才能区分**。本模块不做 errno 处理（见 `system/errno.lomt`），
+/// 这里只把"是否可能是合法数据"这一条写得明确：0..=0xffffffff 视为数据。
+pub fn pt_peek_is_error(r: i64) -> bool {
+    return r == 0 as i64 - 1;
+}
+
+/// 从 `user_regs_struct` 缓冲里读一个字段（按上面的 `PT_REG_*` 偏移）。
+pub fn pt_reg(regs: ptr, off: u32) -> u64 {
+    let v: u64 = 0;
+    let b: u32 = 0;
+    while b < 8 {
+        v = v | ((load8(regs, off + b) as u64) << (8 * b));
+        b = b + 1;
+    }
+    return v;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_ptrace_request_names() -> bool {
+    let b: ptr = alloc(32);
+    let n: u32 = pt_request_name(PT_GETREGS, b, 32);
+    let want: str = "PTRACE_GETREGS";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(b, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    let n2: u32 = pt_request_name(999, b, 32);
+    let w2: str = "PTRACE_UNKNOWN";
+    if n2 != str_len(w2) {
+        return false;
+    }
+    let j: u32 = 0;
+    while j < n2 {
+        if load8(b, j) != str_byte(w2, j) {
+            return false;
+        }
+        j = j + 1;
+    }
+    return true;
+}
+
+fn test_ptrace_options_text() -> bool {
+    let b: ptr = alloc(64);
+    let n: u32 = pt_options_text(PT_O_TRACEFORK | PT_O_TRACEEXEC, b, 64);
+    let want: str = "PTRACE_O_TRACEFORK|PTRACE_O_TRACEEXEC";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(b, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_ptrace_regs_offsets() -> bool {
+    if PT_REGS_BYTES != 216 {
+        return false;
+    }
+    if PT_REG_RIP != 128 {
+        return false;
+    }
+    if PT_REG_ORIG_RAX != 120 {
+        return false;
+    }
+    return true;
+}

@@ -1,0 +1,229 @@
+// system/futex.lomt — futex(2) 的操作表、等待/唤醒与 timespec 打包
+//
+// 为什么系统工具需要它: `futex` 是 Linux 上所有同步原语（互斥量、条件变量、信号量）
+// 底下那一条系统调用。想自己写一个锁、一个事件、一个"等值变了再走"的屏障，
+// 就得直接用它。而它的第二个参数是**操作号**，`FUTEX_WAIT` 是 0、`FUTEX_WAKE` 是 1，
+// 两个数挨着而语义相反 —— 写成 1 去等，进程会立刻返回（"没等到"），看上去像
+// 虚假唤醒；再叠上 `FUTEX_PRIVATE_FLAG`（128）与 `FUTEX_CLOCK_REALTIME`（256），
+// 数字就完全认不出了。
+//
+// 两条使用约束（写在这里，免得每个调用方各踩一次）:
+//   * 等待的地址必须是 **4 字节对齐**的 u32；值不相等时 `FUTEX_WAIT` 立刻返回
+//     `EAGAIN`，这是设计，不是错误 —— 调用方必须**在循环里**重新检查条件。
+//   * 进程私有的 futex（同一进程的线程之间）加 `FUTEX_PRIVATE_FLAG`：内核可以
+//     跳过 mm 查找，快得多，而且不会被别的进程误唤醒。
+//
+// 不做的: PI（优先级继承）futex 的完整语义、`FUTEX_WAKE_OP` 的原子操作编码、
+// 超时用的是**相对还是绝对**的判断（`FUTEX_CLOCK_REALTIME` 与 `WAIT_BITSET` 组合
+// 决定，本模块只打包 timespec，不替调用方选）。
+//
+// 命名: 公开 fx_*, 内部 fxq_*。自检 test_futex_*。
+
+module futex
+
+pub const FX_WAIT: u32 = 0;
+pub const FX_WAKE: u32 = 1;
+pub const FX_FD: u32 = 2;
+pub const FX_REQUEUE: u32 = 3;
+pub const FX_CMP_REQUEUE: u32 = 4;
+pub const FX_WAKE_OP: u32 = 5;
+pub const FX_LOCK_PI: u32 = 6;
+pub const FX_UNLOCK_PI: u32 = 7;
+pub const FX_TRYLOCK_PI: u32 = 8;
+pub const FX_WAIT_BITSET: u32 = 9;
+pub const FX_WAKE_BITSET: u32 = 10;
+pub const FX_WAIT_REQUEUE_PI: u32 = 11;
+pub const FX_CMP_REQUEUE_PI: u32 = 12;
+
+pub const FX_PRIVATE_FLAG: u32 = 128;
+pub const FX_CLOCK_REALTIME: u32 = 256;
+
+/// 一个 `timespec` 的字节数（秒 i64 + 纳秒 i64）。
+pub const FX_TS_BYTES: u32 = 16;
+
+const FXQ_SYS_FUTEX: u64 = 202;
+
+fn fxq_put(out: ptr, cap: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if i < cap {
+            store8(out, i, str_byte(s, i) as u8);
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 操作号（含标志位）-> 名字。未知返回 `"FUTEX_UNKNOWN"`。
+pub fn fx_op_text(op: u32, out: ptr, cap: u32) -> u32 {
+    let base: u32 = op & 127;
+    let n: u32 = 0;
+    if base == FX_WAIT { n = fxq_put(out, cap, "FUTEX_WAIT"); }
+    else if base == FX_WAKE { n = fxq_put(out, cap, "FUTEX_WAKE"); }
+    else if base == FX_FD { n = fxq_put(out, cap, "FUTEX_FD"); }
+    else if base == FX_REQUEUE { n = fxq_put(out, cap, "FUTEX_REQUEUE"); }
+    else if base == FX_CMP_REQUEUE { n = fxq_put(out, cap, "FUTEX_CMP_REQUEUE"); }
+    else if base == FX_WAKE_OP { n = fxq_put(out, cap, "FUTEX_WAKE_OP"); }
+    else if base == FX_LOCK_PI { n = fxq_put(out, cap, "FUTEX_LOCK_PI"); }
+    else if base == FX_UNLOCK_PI { n = fxq_put(out, cap, "FUTEX_UNLOCK_PI"); }
+    else if base == FX_TRYLOCK_PI { n = fxq_put(out, cap, "FUTEX_TRYLOCK_PI"); }
+    else if base == FX_WAIT_BITSET { n = fxq_put(out, cap, "FUTEX_WAIT_BITSET"); }
+    else if base == FX_WAKE_BITSET { n = fxq_put(out, cap, "FUTEX_WAKE_BITSET"); }
+    else if base == FX_WAIT_REQUEUE_PI { n = fxq_put(out, cap, "FUTEX_WAIT_REQUEUE_PI"); }
+    else if base == FX_CMP_REQUEUE_PI { n = fxq_put(out, cap, "FUTEX_CMP_REQUEUE_PI"); }
+    else { n = fxq_put(out, cap, "FUTEX_UNKNOWN"); }
+    if (op & FX_PRIVATE_FLAG) != 0 {
+        n = n + fxq_suffix(out, cap, n, "|FUTEX_PRIVATE_FLAG");
+    }
+    if (op & FX_CLOCK_REALTIME) != 0 {
+        n = n + fxq_suffix(out, cap, n, "|FUTEX_CLOCK_REALTIME");
+    }
+    return n;
+}
+
+fn fxq_suffix(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 见名字就知道是不是"等"：`FUTEX_WAIT*` 与 `FUTEX_FD` 会阻塞，其余不会。
+pub fn fx_is_blocking(op: u32) -> bool {
+    let base: u32 = op & 127;
+    if base == FX_WAIT { return true; }
+    if base == FX_WAIT_BITSET { return true; }
+    if base == FX_WAIT_REQUEUE_PI { return true; }
+    return false;
+}
+
+/// 给操作号加上"进程私有"与"实时时钟"标志。
+pub fn fx_op_flags(op: u32, private: bool, realtime: bool) -> u32 {
+    let r: u32 = op;
+    if private {
+        r = r | FX_PRIVATE_FLAG;
+    }
+    if realtime {
+        r = r | FX_CLOCK_REALTIME;
+    }
+    return r;
+}
+
+/// 把秒/纳秒写进 16 字节 timespec，返回写入字节数。
+pub fn fx_ts_set(ts: ptr, sec: u64, nsec: u64) -> u32 {
+    let b: u32 = 0;
+    while b < 8 {
+        store8(ts, b, ((sec >> (8 * b)) & 255) as u8);
+        store8(ts, 8 + b, ((nsec >> (8 * b)) & 255) as u8);
+        b = b + 1;
+    }
+    return FX_TS_BYTES;
+}
+
+/// 读 timespec 的秒。
+pub fn fx_ts_sec(ts: ptr) -> u64 {
+    let v: u64 = 0;
+    let b: u32 = 0;
+    while b < 8 {
+        v = v | ((load8(ts, b) as u64) << (8 * b));
+        b = b + 1;
+    }
+    return v;
+}
+
+/// 读 timespec 的纳秒。
+pub fn fx_ts_nsec(ts: ptr) -> u64 {
+    let v: u64 = 0;
+    let b: u32 = 0;
+    while b < 8 {
+        v = v | ((load8(ts, 8 + b) as u64) << (8 * b));
+        b = b + 1;
+    }
+    return v;
+}
+
+/// `futex(uaddr, op, val, timeout, uaddr2, val3)` —— 六个参数原样交给内核。
+pub fn fx_futex(uaddr: u64, op: u32, val: u64, timeout: u64, uaddr2: u64, val3: u64) -> i64 {
+    return syscall7(FXQ_SYS_FUTEX, uaddr, op as u64, val, timeout, uaddr2, val3);
+}
+
+/// `FUTEX_WAIT`（带私有标志）：`uaddr` 处的值仍等于 `expected` 时睡过去。
+/// 返回 0 = 被唤醒；`-EAGAIN`(=-11) = 值已经变了，**这不算错误**。
+pub fn fx_wait(uaddr: u64, expected: u32, ts: u64) -> i64 {
+    return fx_futex(uaddr, fx_op_flags(FX_WAIT, true, false),
+                    expected as u64, ts, 0, 0);
+}
+
+/// `FUTEX_WAKE`（带私有标志）：唤醒最多 `n` 个等待者，返回实际唤醒数。
+pub fn fx_wake(uaddr: u64, n: u32) -> i64 {
+    return fx_futex(uaddr, fx_op_flags(FX_WAKE, true, false), n as u64, 0, 0, 0);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_futex_op_text() -> bool {
+    let b: ptr = alloc(64);
+    let n: u32 = fx_op_text(FX_WAIT, b, 64);
+    let want: str = "FUTEX_WAIT";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(b, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_futex_op_text_with_flags() -> bool {
+    let b: ptr = alloc(64);
+    let n: u32 = fx_op_text(FX_WAKE | FX_PRIVATE_FLAG, b, 64);
+    let want: str = "FUTEX_WAKE|FUTEX_PRIVATE_FLAG";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(b, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_futex_blocking_classification() -> bool {
+    if !fx_is_blocking(FX_WAIT) {
+        return false;
+    }
+    if fx_is_blocking(FX_WAKE) {
+        return false;
+    }
+    if !fx_is_blocking(FX_WAIT_BITSET) {
+        return false;
+    }
+    return fx_op_flags(FX_WAKE, true, false) == 129 as u32;
+}
+
+fn test_futex_timespec_round_trip() -> bool {
+    let ts: ptr = alloc(FX_TS_BYTES);
+    let _n: u32 = fx_ts_set(ts, 12, 345);
+    if fx_ts_sec(ts) != 12 as u64 {
+        return false;
+    }
+    if fx_ts_nsec(ts) != 345 as u64 {
+        return false;
+    }
+    return true;
+}

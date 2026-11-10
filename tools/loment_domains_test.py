@@ -1155,6 +1155,249 @@ def _expected_low_sys() -> str:
     return out.getvalue()
 
 
+PROBE_SYSOS = _PROBE_HEAD + r"""
+use caps
+use cgroup
+use epoll
+use iouring
+use statfs
+use futex
+use procstatus
+use mountinfo
+use civildate
+use paths
+use umask
+use cmdline
+use pwd
+use readdir
+
+fn rl32(p: ptr, off: u32) -> u32 {
+    let v: u32 = 0;
+    let i: u32 = 0;
+    while i < 4 {
+        v = v | ((load8(p, off + i) as u32) << (8 * i));
+        i = i + 1;
+    }
+    return v;
+}
+
+fn rl64(p: ptr, off: u32) -> u64 {
+    let v: u64 = 0 as u64;
+    let i: u32 = 0;
+    while i < 8 {
+        v = v | ((load8(p, off + i) as u64) << (8 * i));
+        i = i + 1;
+    }
+    return v;
+}
+
+fn put(s: str, out: ptr, cap: u32) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if i < cap {
+            store8(out, i, str_byte(s, i) as u8);
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+fn put_at(s: str, out: ptr, base: u32, cap: u32) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if base + i < cap {
+            store8(out, base + i, str_byte(s, i) as u8);
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+fn _start() {
+    let o: ptr = alloc(256);
+    let b: ptr = alloc(256);
+    let q: ptr = alloc(8);
+    let pd: ptr = alloc(8);
+    let yp: ptr = alloc(8);
+    let mp: ptr = alloc(8);
+    let dp: ptr = alloc(8);
+
+    // cgroup v2 文本
+    let n1: u32 = put("4294967296", b, 256);
+    say("cg_len=", cg_parse_u64(b, n1, q) as u64);
+    let cgv: u64 = rl64(q, 0);
+    say("cg_val_hi=", cgv / (4294967296 as u64));
+    say("cg_val_lo=", cgv % (4294967296 as u64));
+    let n2: u32 = put("max", b, 256);
+    say("cg_max_n=", cg_parse_max(b, n2, q) as u64);
+    let cgm: u64 = rl64(q, 0);
+    say("cg_max_hi=", cgm / (4294967296 as u64));
+    say("cg_max_lo=", cgm % (4294967296 as u64));
+    let n3: u32 = put("200000 100000", b, 256);
+    say("cg_cpu=", cg_parse_cpu_max(b, n3, q, pd) as u64);
+    say("cg_q=", rl64(q, 0));
+    say("cg_p=", rl64(pd, 0));
+    let mt: u32 = cg_mem_text(536870912 as u64, o, 32);
+    say_cstr("cg_mem=", o, mt);
+    let n4: u32 = put("memory.max 1024", b, 256);
+    say("cg_key=", cg_key_match(b, n4, "memory.max") as u64);
+
+    // epoll 位名
+    let en: u32 = ep_mask_text(2147483649 as u32, o, 64);
+    say_cstr("ep=", o, en);
+
+    // io_uring 的 SQE 打包
+    let sq: u32 = io_sqe_pack(b, 18 as u32, 7 as i64, 4096 as u64, 512, 8192 as u64, 11259375 as u64);
+    say("sq_n=", sq as u64);
+    say("sq_op=", load8(b, 0) as u64);
+    say("sq_fd=", rl32(b, 4) as u64);
+    say("sq_off=", rl64(b, 8));
+    say("sq_addr=", rl64(b, 16));
+    say("sq_len=", rl32(b, 24) as u64);
+
+    // 文件系统魔数
+    let sm: u32 = st_magic_name(61267 as u64, o, 32);
+    say_cstr("st=", o, sm);
+
+    // futex 操作名
+    let fnt: u32 = fx_op_text(128 as u32, o, 64);
+    say_cstr("fx=", o, fnt);
+
+    // 公历
+    say("cal_d=", cal_days_from_civil(2024 as i64, 2 as i64, 29 as i64) as u64);
+    let cc: u32 = cal_civil_from_days(0 as i64, yp, mp, dp);
+    say("cal_y=", rl64(yp, 0));
+    say("cal_m=", rl64(mp, 0));
+    say("cal_dd=", rl64(dp, 0));
+    say("cal_wd=", cal_weekday(0 as i64) as u64);
+    let yt: u32 = cal_ymd_text(2024 as i64, 2 as i64, 29 as i64, o, 32);
+    say_cstr("cal_t=", o, yt);
+
+    // 路径
+    let n5: u32 = put("/a//b/../c/./d", b, 256);
+    let pn: u32 = pa_normalize(b, n5, o, 64);
+    say_cstr("pn=", o, pn);
+
+    // 权限位
+    let ut: u32 = um_mode_text(493 as u32, o, 32);
+    say_cstr("um_t=", o, ut);
+    say("um_p=", um_parse_text("rw-r--r--") as u64);
+    say("um_a=", um_apply(18 as u32, 511 as u32) as u64);
+
+    // /proc/<pid>/status
+    let n6: u32 = put("Name: probe\nState: R (running)\nPid: 42\nVmRSS: 1024 kB\n", b, 256);
+    say("ps_pid=", ps_value_u64(b, n6, "Pid", q) as u64);
+    say("ps_pidv=", rl64(q, 0));
+    say("ps_rss=", ps_value_u64(b, n6, "VmRSS", q) as u64);
+    say("ps_rssv=", rl64(q, 0));
+    say("ps_st=", ps_state_code(b, n6) as u64);
+    let sst: u32 = ps_state_text(ps_state_code(b, n6), o, 32);
+    say_cstr("ps_stt=", o, sst);
+
+    // mountinfo 字段
+    let n7: u32 = put("1 2 0:1 / /mnt rw - tmpfs tmpfs rw", b, 256);
+    say("mi_cnt=", mi_field_count(b, n7) as u64);
+    let f4: u32 = mi_field(b, n7, 4, o, 64);
+    say_cstr("mi_f4=", o, f4);
+
+    // argv NUL 块
+    let nn: u32 = put_at("a", b, 0, 256);
+    store8(b, 1, 0 as u8);
+    let nn2: u32 = put_at("b", b, 2, 256);
+    say("an_n=", (nn + nn2) as u64);
+    say("ar_n=", ar_count(b, 3) as u64);
+    let gotten: u32 = ar_get(b, 3, 1, o, 64);
+    say_cstr("ar_1=", o, gotten);
+
+    // /etc/passwd
+    let n8: u32 = put("root:x:0:0:root:/root:/bin/sh\n", b, 256);
+    say("pw_n=", pw_count(b, n8) as u64);
+    let home: u32 = pw_field(b, n8, 0, 5, o, 64);
+    say_cstr("pw_home=", o, home);
+    say("pw_uid=", pw_uid_of_name(b, n8, "root") as u64);
+
+    // 目录项类型名
+    let dd: u32 = put(di_type_name(4), o, 32);
+    say_cstr("di_dir=", o, dd);
+    let df: u32 = put(di_type_name(8), o, 32);
+    say_cstr("di_reg=", o, df);
+    let dn: u32 = put(".", o, 32);
+    say("di_dot=", di_skip_dots(o, dn) as u64);
+    syscall4(60, 0, 0, 0);
+}
+"""
+
+
+def _expected_sysos_survey() -> str:
+    """Python 独立算出的同一串结果（不复用被测实现里的表）。"""
+    umax = 2**64 - 1
+    lines = [
+        "cg_len=10",
+        f"cg_val_hi={4294967296 // 4294967296}",
+        f"cg_val_lo={4294967296 % 4294967296}",
+        "cg_max_n=3",
+        f"cg_max_hi={umax // 4294967296}",
+        f"cg_max_lo={umax % 4294967296}",
+        "cg_cpu=1",
+        "cg_q=200000",
+        "cg_p=100000",
+        "cg_mem=512M",
+        "cg_key=1",
+        "ep=EPOLLIN|EPOLLET",
+        "sq_n=64",
+        "sq_op=18",
+        "sq_fd=7",
+        "sq_off=8192",
+        "sq_addr=4096",
+        "sq_len=512",
+        "st=ext2/3/4",
+        "fx=FUTEX_WAIT|FUTEX_PRIVATE_FLAG",
+        "cal_d=19782",
+        "cal_y=1970",
+        "cal_m=1",
+        "cal_dd=1",
+        "cal_wd=4",
+        "cal_t=2024-02-29",
+        "pn=/a/c/d",
+        "um_t=rwxr-xr-x",
+        "um_p=420",
+        "um_a=493",
+        "ps_pid=1",
+        "ps_pidv=42",
+        "ps_rss=1",
+        "ps_rssv=1024",
+        "ps_st=82",
+        "ps_stt=running",
+        "mi_cnt=10",
+        "mi_f4=/mnt",
+        "an_n=2",
+        "ar_n=2",
+        "ar_1=b",
+        "pw_n=1",
+        "pw_home=/root",
+        "pw_uid=0",
+        "di_dir=dir",
+        "di_reg=file",
+        "di_dot=1",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+@test
+def test_system_and_os_survey_packages():
+    """system/os 补到 40 之后的抽样行为：纯逻辑与 Python 逐字节一致（docs/327）。"""
+    try:
+        got = _run_probe("sysos", PROBE_SYSOS)
+    except _Skip as e:
+        print(f"      SKIP: {e}")
+        return
+    want = _expected_sysos_survey()
+    _compare(got, want)
+    print(f"      system/os 抽样: {len(want.splitlines())} 项与 Python 逐字节一致")
+
+
 @test
 def test_lowlevel_and_system_packages():
     """lowlevel/system：二进制格式与内核常量，与 Python 标准库/常量逐字节一致。"""

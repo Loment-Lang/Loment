@@ -1,0 +1,167 @@
+// os/logfile.lomt — 追加写日志: 一条记录一次 write
+//
+// 为什么需要它: 服务的日志有两个硬要求与一个软要求。硬要求是**追加**（重启之后
+// 不是从文件头覆盖）与**一条记录落在一次 write 里**（多个进程追加到同一个文件时，
+// 内核保证单次 write 不交错；拼三次就等于让别的进程把半行插进来）。软要求是
+// 轮转命名要可预测（`app.log.1` 是上一个，别写成 `app.log.2026-...`）。
+//
+// 持久性的边界（写清楚，免得被当成 fsync）:
+//   * 一次 `write` 只保证**进入内核页缓存**。掉电时最后几条可能没了，这是
+//     "日志"能接受的损失；要"写到盘上"的调用方自己 `sys_fsync`。
+//   * 轮转**不在这里做**。`lg_should_rotate` 只回答"到点没有"，
+//     `lg_rotate_name` 只生成名字 —— 改名/建新文件是调用方的决定（它才知道
+//     要不要先 fsync、保留几份）。
+//
+// 边界: 号是 x86-64 Linux 的；路径是 C 串。自检只验纯逻辑（前缀、轮转名、判定）。
+//
+// 命名: 公开 lg_*, 内部 lgq_。自检 test_logfile_*。
+
+module logfile
+
+/// `O_WRONLY | O_CREAT | O_APPEND` —— 追加语义，重启不覆盖。
+pub const LG_O_APPEND: u64 = 1089;
+/// 0644。
+pub const LG_MODE: u32 = 420;
+/// 最多保留的轮转份数（`path.1` .. `path.9`）。
+pub const LG_ROTATE_MAX: u32 = 9;
+
+const LGQ_SYS_WRITE: u64 = 1;
+const LGQ_SYS_CLOSE: u64 = 3;
+const LGQ_SYS_OPENAT: u64 = 257;
+const LGQ_AT_FDCWD: u64 = 18446744073709551516;
+
+fn lgq_put(out: ptr, cap: u32, pos0: u32, s: str) -> u32 {
+    let pos: u32 = pos0;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if pos < cap {
+            store8(out, pos, str_byte(s, i) as u8);
+        }
+        pos = pos + 1;
+        i = i + 1;
+    }
+    return pos;
+}
+
+fn lgq_copy(dst: ptr, off0: u32, src: ptr, n: u32) -> u32 {
+    let off: u32 = off0;
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, off, load8(src, i) as u8);
+        off = off + 1;
+        i = i + 1;
+    }
+    return off;
+}
+
+/// 打开（不存在就建）一个追加写日志。成功返回 fd，失败 -1。
+pub fn lg_open(path: ptr) -> i64 {
+    return syscall6(LGQ_SYS_OPENAT, LGQ_AT_FDCWD, path as u64,
+                    LG_O_APPEND, LG_MODE as u64, 0);
+}
+
+/// 写一条 `tag: body\n`。
+///
+/// **一次 write**：tag 与 body 先在 `alloc` 出来的缓冲里拼好（长度 = tag_n + body_n + 3:
+/// 冒号、空格、换行），所以别的进程不会把半行插进这一条里。返回写入的字节数。
+pub fn lg_write(fd: i64, tag: ptr, tag_n: u32, body: ptr, body_n: u32) -> i64 {
+    let total: u32 = tag_n + body_n + 3;
+    let buf: ptr = alloc(total);
+    let p0: u32 = lgq_copy(buf, 0, tag, tag_n);
+    store8(buf, p0, 58 as u8);
+    store8(buf, p0 + 1, 32 as u8);
+    let p1: u32 = lgq_copy(buf, p0 + 2, body, body_n);
+    store8(buf, p1, 10 as u8);
+    return syscall4(LGQ_SYS_WRITE, fd as u64, buf as u64, total as u64);
+}
+
+/// 写一条 `tag: body\n`（tag 是 `str`，body 是缓冲区）。
+pub fn lg_write_str(fd: i64, tag: str, body: ptr, body_n: u32) -> i64 {
+    let t: ptr = alloc(str_len(tag));
+    let i: u32 = 0;
+    while i < str_len(tag) {
+        store8(t, i, str_byte(tag, i) as u8);
+        i = i + 1;
+    }
+    return lg_write(fd, t, str_len(tag), body, body_n);
+}
+
+/// 关闭（调用方一般想在轮转前后各调一次）。
+pub fn lg_close(fd: i64) -> i64 {
+    return syscall4(LGQ_SYS_CLOSE, fd as u64, 0, 0);
+}
+
+/// 第 index 份的轮转名：`path` 后接 `.index`。index 只接受 1..LG_ROTATE_MAX，
+/// 越界返回 0（不写半个名字）。`out` 至少要 path_n + 2 字节。
+pub fn lg_rotate_name(path: ptr, path_n: u32, index: u32, out: ptr, cap: u32) -> u32 {
+    if index < 1 || index > LG_ROTATE_MAX {
+        return 0;
+    }
+    if path_n + 2 > cap {
+        return 0;
+    }
+    let pos: u32 = lgq_copy(out, 0, path, path_n);
+    store8(out, pos, 46 as u8);
+    store8(out, pos + 1, (48 + index) as u8);
+    return pos + 2;
+}
+
+/// 级别前缀: 0 `"ERR "` / 1 `"WARN "` / 2 `"INFO "` / 3 `"DBG "`；其它写 `"? "`。
+/// 定宽前缀让 `tail` 出来的一列对得齐。
+pub fn lg_level_prefix(level: u32, out: ptr, cap: u32) -> u32 {
+    if level == 0 {
+        return lgq_put(out, cap, 0, "ERR ");
+    }
+    if level == 1 {
+        return lgq_put(out, cap, 0, "WARN ");
+    }
+    if level == 2 {
+        return lgq_put(out, cap, 0, "INFO ");
+    }
+    if level == 3 {
+        return lgq_put(out, cap, 0, "DBG ");
+    }
+    return lgq_put(out, cap, 0, "? ");
+}
+
+/// 到轮转点了吗：`size >= limit`。`limit == 0` 表示不轮转（关掉）。
+pub fn lg_should_rotate(size: u64, limit: u64) -> bool {
+    if limit == 0 {
+        return false;
+    }
+    return size >= limit;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_logfile_level_prefix() -> bool {
+    let b: ptr = alloc(8);
+    let n: u32 = lg_level_prefix(1, b, 8);
+    return n == 5 && load8(b, 0) == 87 && load8(b, 1) == 65
+        && load8(b, 2) == 82 && load8(b, 3) == 78 && load8(b, 4) == 32;
+}
+
+fn test_logfile_rotate_name() -> bool {
+    let path: ptr = alloc(8);
+    let out: ptr = alloc(16);
+    store8(path, 0, 97 as u8);
+    store8(path, 1, 46 as u8);
+    store8(path, 2, 108 as u8);
+    store8(path, 3, 111 as u8);
+    store8(path, 4, 103 as u8);
+    let n: u32 = lg_rotate_name(path, 5, 3, out, 16);
+    return n == 7 && load8(out, 5) == 46 && load8(out, 6) == 51;
+}
+
+fn test_logfile_rotate_rejects_bad_index() -> bool {
+    let path: ptr = alloc(4);
+    let out: ptr = alloc(16);
+    return lg_rotate_name(path, 4, 0, out, 16) == 0
+        && lg_rotate_name(path, 4, 10, out, 16) == 0;
+}
+
+fn test_logfile_should_rotate() -> bool {
+    return lg_should_rotate(100, 100) && !lg_should_rotate(99, 100)
+        && !lg_should_rotate(1000000, 0);
+}

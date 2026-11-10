@@ -1,0 +1,273 @@
+// os/tempdir.lomt — 临时目录: 名字生成、mkdir、清空一层
+//
+// 为什么需要它: 没有 libc 就没有 `mkdtemp`/`mkpath`. 而临时目录是**安全敏感**的东西:
+// 名字可预测 + 文件已存在 = 符号链接攻击; 所以名字必须带进程号和一串变化的后缀,
+// 创建必须走 `mkdir` 的**原子失败** (EEXIST 就换一个, 而不是先查再建)。
+//
+// 三个纯函数 + 两个系统调用:
+//   * `td_join` 拼路径, 不多不少一个 `/`;
+//   * `td_put_u32` 十进制输出 (没有 printf);
+//   * `td_suffix` 把计数器变成 6 位 base36 (`00000z`, `000010` …);
+//   * `td_mkdtemp` 拼 `dir/prefix-pid-suffix` 并 `mkdir` (83, 模式 448 = 0700);
+//   * `td_rm_entries` 按 **已经读到的 getdents64 缓冲** 逐条 `unlinkat`, 目录用
+//     `AT_REMOVEDIR` (512). 递归是调用方的事 —— 库不替你兜圈, 也就不会悄悄跟随符号
+//     链接 (`AT_SYMLINK_NOFOLLOW` 是 unlinkat 的默认行为, 删除本身不跟链接)。
+//
+// 边界: 号是 x86-64 Linux 的; 自检只验纯逻辑 (拼路径、十进制、base36、条目游标)。
+//
+// 命名: 公开 td_*, 内部 tdq_。
+
+module tempdir
+
+/// `mkdir` 的默认模式: 0700 (只有属主可进)。
+pub const TD_MODE_PRIVATE: u32 = 448;
+/// `unlinkat` 删除目录的标志。
+pub const TD_AT_REMOVEDIR: u32 = 512;
+
+/// getdents64 条目头: ino u64(0) | off u64(8) | reclen u16(16) | type u8(18) | name(19)。
+pub const TD_DENT_NAME_OFF: u32 = 19;
+/// 一条条目头的字节数 (名字为空时)。
+pub const TD_DENT_HDR: u32 = 19;
+
+const TDQ_SYS_MKDIR: u64 = 83;
+const TDQ_SYS_UNLINKAT: u64 = 263;
+
+fn tdq_put_byte(out: ptr, cap: u32, pos: u32, b: u32) -> u32 {
+    if pos < cap {
+        store8(out, pos, b as u8);
+    }
+    return pos + 1;
+}
+
+fn tdq_put_str(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    let p: u32 = pos;
+    while i < n {
+        p = tdq_put_byte(out, cap, p, str_byte(s, i) as u32);
+        i = i + 1;
+    }
+    return p;
+}
+
+fn tdq_u16(p: ptr, o: u32) -> u32 {
+    let v: u32 = load8(p, o) as u32;
+    v = v | ((load8(p, o + 1) as u32) << 8);
+    return v;
+}
+
+/// 十进制无符号输出。返回写入的末尾位置 (不写 NUL)。
+pub fn td_put_u32(out: ptr, cap: u32, pos: u32, v: u32) -> u32 {
+    let div: u32 = 1;
+    let probe: u32 = v;
+    while probe >= 10 {
+        probe = probe / 10;
+        div = div * 10;
+    }
+    let p: u32 = pos;
+    let cur: u32 = v;
+    let running: u32 = 1;
+    while running == 1 {
+        let digit: u32 = cur / div;
+        p = tdq_put_byte(out, cap, p, 48 + digit);
+        cur = cur % div;
+        if div == 1 {
+            running = 0;
+        } else {
+            div = div / 10;
+        }
+    }
+    return p;
+}
+
+/// 拼 `dir/name` —— 目录末尾已有 `/` 就不再加。返回长度 (不写 NUL)。
+pub fn td_join(dir: str, name: str, out: ptr, cap: u32) -> u32 {
+    let dn: u32 = str_len(dir);
+    let p: u32 = tdq_put_str(out, cap, 0, dir);
+    let last: u32 = 0;
+    if dn > 0 {
+        last = str_byte(dir, dn - 1) as u32;
+    }
+    let q: u32 = p;
+    let has: u32 = p;
+    if last != 47 && dn > 0 {
+        q = tdq_put_byte(out, cap, p, 47);
+    }
+    let r: u32 = tdq_put_str(out, cap, q, name);
+    return r;
+}
+
+/// 把 seed 变成 **6 位 base36** (先高位后低位): 0 -> `000000`, 36 -> `000010`。
+pub fn td_suffix(seed: u32, out: ptr) -> u32 {
+    let div: u32 = 60466176;
+    let cur0: u32 = seed % 2176782336;
+    let cur: u32 = cur0;
+    let i: u32 = 0;
+    while i < 6 {
+        let dgt: u32 = cur / div;
+        let ch0: u32 = 48 + dgt;
+        let ch: u32 = ch0;
+        if dgt >= 10 {
+            ch = 97 + (dgt - 10);
+        }
+        store8(out, i, ch as u8);
+        let rem: u32 = cur % div;
+        if div == 1 {
+            cur = rem;
+        } else {
+            cur = rem;
+            div = div / 36;
+        }
+        i = i + 1;
+    }
+    return 6;
+}
+
+/// 拼 `dir/prefix-pid-suffix` 并 `mkdir` (0700)。成功返回 0, 名字写进 out (含 NUL)。
+pub fn td_mkdtemp(dir: str, prefix: str, pid: u32, seed: u32, out: ptr, cap: u32) -> i64 {
+    let dn: u32 = str_len(dir);
+    let p: u32 = tdq_put_str(out, cap, 0, dir);
+    let last: u32 = 0;
+    if dn > 0 {
+        last = str_byte(dir, dn - 1) as u32;
+    }
+    let q: u32 = p;
+    if last != 47 && dn > 0 {
+        q = tdq_put_byte(out, cap, p, 47);
+    }
+    let r: u32 = tdq_put_str(out, cap, q, prefix);
+    let s: u32 = tdq_put_byte(out, cap, r, 45);
+    let t: u32 = td_put_u32(out, cap, s, pid);
+    let u: u32 = tdq_put_byte(out, cap, t, 45);
+    let v: u32 = td_suffix(seed, (out as u64 + (u as u64)) as ptr);
+    let w: u32 = u + v;
+    store8(out, w, 0 as u8);
+    return syscall4(TDQ_SYS_MKDIR, out as u64, TD_MODE_PRIVATE as u64, 0);
+}
+
+/// 条目是不是 `.` 或 `..`。
+pub fn td_is_dot(p: ptr) -> u32 {
+    if load8(p, 0) != 46 {
+        return 0;
+    }
+    if load8(p, 1) == 0 {
+        return 1;
+    }
+    if load8(p, 1) == 46 && load8(p, 2) == 0 {
+        return 1;
+    }
+    return 0;
+}
+
+/// 走一遍 getdents64 缓冲: 逐条 `unlinkat` (目录带 AT_REMOVEDIR)。返回处理的条目数。
+/// `list` 是内核写进来的原始缓冲, 名字已是 NUL 结尾, 可以直接交给系统调用。
+pub fn td_rm_entries(dirfd: i64, list: ptr, n: u32) -> u32 {
+    let pos: u32 = 0;
+    let done: u32 = 0;
+    let running: u32 = 1;
+    while running == 1 {
+        if pos + TD_DENT_HDR > n {
+            running = 0;
+        } else {
+            let reclen: u32 = tdq_u16(list, pos + 16);
+            if reclen < TD_DENT_HDR || pos + reclen > n {
+                running = 0;
+            } else {
+                let np: ptr = (list as u64 + (pos as u64) + (TD_DENT_NAME_OFF as u64)) as ptr;
+                let typ: u32 = load8(list, pos + 18) as u32;
+                let dot: u32 = td_is_dot(np);
+                if dot == 0 {
+                    let flags: u32 = 0;
+                    if typ == 4 {
+                        flags = TD_AT_REMOVEDIR;
+                    }
+                    syscall4(TDQ_SYS_UNLINKAT, dirfd as u64, np as u64, flags as u64);
+                    done = done + 1;
+                }
+                pos = pos + reclen;
+            }
+        }
+    }
+    return done;
+}
+
+/// `unlinkat(dirfd, path, 0)`。
+pub fn td_unlink(dirfd: i64, path: ptr) -> i64 {
+    return syscall4(TDQ_SYS_UNLINKAT, dirfd as u64, path as u64, 0);
+}
+
+/// `unlinkat(dirfd, path, AT_REMOVEDIR)`。
+pub fn td_rmdir(dirfd: i64, path: ptr) -> i64 {
+    return syscall4(TDQ_SYS_UNLINKAT, dirfd as u64, path as u64, TD_AT_REMOVEDIR as u64);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_tempdir_join() -> bool {
+    let b: ptr = alloc(64);
+    let n: u32 = td_join("/tmp", "abc", b, 64);
+    if n != 8 {
+        return false;
+    }
+    if load8(b, 4) != 47 || load8(b, 5) != 97 {
+        return false;
+    }
+    let m: u32 = td_join("/tmp/", "x", b, 64);
+    if m != 6 {
+        return false;
+    }
+    if load8(b, 4) != 47 || load8(b, 5) != 120 {
+        return false;
+    }
+    return true;
+}
+
+fn test_tempdir_u32() -> bool {
+    let b: ptr = alloc(32);
+    let n: u32 = td_put_u32(b, 32, 0, 0);
+    if n != 1 || load8(b, 0) != 48 {
+        return false;
+    }
+    let m: u32 = td_put_u32(b, 32, 0, 4095);
+    if m != 4 || load8(b, 0) != 52 || load8(b, 3) != 53 {
+        return false;
+    }
+    return true;
+}
+
+fn test_tempdir_suffix() -> bool {
+    let b: ptr = alloc(8);
+    td_suffix(0, b);
+    if load8(b, 0) != 48 || load8(b, 5) != 48 {
+        return false;
+    }
+    td_suffix(35, b);
+    if load8(b, 5) != 122 {
+        return false;
+    }
+    td_suffix(36, b);
+    if load8(b, 4) != 49 || load8(b, 5) != 48 {
+        return false;
+    }
+    return true;
+}
+
+fn test_tempdir_dot() -> bool {
+    let b: ptr = alloc(4);
+    store8(b, 0, 46 as u8);
+    store8(b, 1, 0 as u8);
+    if td_is_dot(b) != 1 {
+        return false;
+    }
+    store8(b, 0, 46 as u8);
+    store8(b, 1, 46 as u8);
+    store8(b, 2, 0 as u8);
+    if td_is_dot(b) != 1 {
+        return false;
+    }
+    store8(b, 0, 97 as u8);
+    if td_is_dot(b) != 0 {
+        return false;
+    }
+    return true;
+}

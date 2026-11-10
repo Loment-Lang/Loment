@@ -1,0 +1,189 @@
+// system/keyctl.lomt — 内核密钥环的入口与权限位
+//
+// 为什么系统工具需要它: Linux 内核里有一棵**密钥树**（进程会话钥匙环、用户
+// 钥匙环、持久钥匙环），用来托管 TLS 会话密钥、文件系统加密密钥、解密凭据 ——
+// 这些东西**不进用户态的 `.env` 也不进文件**，由内核按 uid 和权限位看守。
+// 操作它的唯一入口是 `keyctl(2)`，而它的命令号与权限位都是纯数字: 把
+// `KEY_USR_READ`（0x00020000）和 `KEY_POS_READ`（0x02000000）写混，现象是
+// "我自己读得到、别人读不到"变成"谁都读不到" —— 两种都不报错。
+//
+// 覆盖:
+//   * 常用命令号（GET_KEYRING_ID … CLEAR）与它们的名字;
+//   * 权限位的三个三元组（possessor / user / group / other）;
+//   * `keyctl` 一条包装（五个参数的本调用走 `syscall6`）;
+//   * 把 USR 三位渲染成 `view|read|write|search`，以及反向拼掩码。
+//
+// 不做: 请求与密钥类型的协商（`add_key` 的 payload 格式随类型变）、
+// 钥匙环的语义（哪一把是默认、加入/离开）、`KEYCTL_DH_COMPUTE` 这类大参数命令。
+//
+// 命名: 公开 kc_*, 内部 kq_*。自检 test_keyctl_*。
+
+module keyctl
+
+pub const KC_GET_KEYRING_ID: u32 = 0;
+pub const KC_JOIN_SESSION_KEYRING: u32 = 1;
+pub const KC_UPDATE: u32 = 2;
+pub const KC_REVOKE: u32 = 3;
+pub const KC_CHOWN: u32 = 5;
+pub const KC_SETPERM: u32 = 6;
+pub const KC_DESCRIBE: u32 = 7;
+pub const KC_CLEAR: u32 = 9;
+
+/// possessor 三元组 —— "持有者"（有那把钥匙的引用）能做的事。
+pub const KC_POS_VIEW: u32 = 16777216;
+pub const KC_POS_READ: u32 = 33554432;
+pub const KC_POS_WRITE: u32 = 67108864;
+pub const KC_POS_SEARCH: u32 = 134217728;
+/// user 三元组 —— 键主的 uid。
+pub const KC_USR_VIEW: u32 = 65536;
+pub const KC_USR_READ: u32 = 131072;
+pub const KC_USR_WRITE: u32 = 262144;
+pub const KC_USR_SEARCH: u32 = 524288;
+/// group 三元组 —— 键主的 gid。
+pub const KC_GRP_VIEW: u32 = 256;
+pub const KC_GRP_READ: u32 = 512;
+/// other 三元组 —— 其他所有人。
+pub const KC_OTH_VIEW: u32 = 1;
+pub const KC_OTH_READ: u32 = 2;
+
+pub const KC_SYS_KEYCTL: u64 = 250;
+
+fn kq_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+/// 命令号 -> 名字。未知返回 `"KEYCTL_UNKNOWN"`。
+pub fn kc_command_name(cmd: u32, out: ptr, cap: u32) -> u32 {
+    let s: str = "KEYCTL_UNKNOWN";
+    if cmd == KC_GET_KEYRING_ID { s = "KEYCTL_GET_KEYRING_ID"; }
+    else if cmd == KC_JOIN_SESSION_KEYRING { s = "KEYCTL_JOIN_SESSION_KEYRING"; }
+    else if cmd == KC_UPDATE { s = "KEYCTL_UPDATE"; }
+    else if cmd == KC_REVOKE { s = "KEYCTL_REVOKE"; }
+    else if cmd == KC_CHOWN { s = "KEYCTL_CHOWN"; }
+    else if cmd == KC_SETPERM { s = "KEYCTL_SETPERM"; }
+    else if cmd == KC_DESCRIBE { s = "KEYCTL_DESCRIBE"; }
+    else if cmd == KC_CLEAR { s = "KEYCTL_CLEAR"; }
+    return kq_put(out, cap, 0, s);
+}
+
+/// `keyctl(cmd, a2, a3, a4, a5)` —— 参数按命令不同解释，全部走寄存器。
+/// 返回负数即失败（-1 ENOSYS / -126 ENOKEY / -13 EACCES 是常见的三种）。
+pub fn kc_keyctl(cmd: u32, a2: u64, a3: u64, a4: u64, a5: u64) -> i64 {
+    return syscall6(KC_SYS_KEYCTL, cmd as u64, a2, a3, a4, a5);
+}
+
+/// USR 三元组拼成掩码。四个参数按 `view / read / write / search` 传 0 或非 0。
+pub fn kc_perm_mask(has_view: u32, has_read: u32, has_write: u32, has_search: u32) -> u32 {
+    let m: u32 = 0;
+    if has_view != 0 {
+        m = m | KC_USR_VIEW;
+    }
+    if has_read != 0 {
+        m = m | KC_USR_READ;
+    }
+    if has_write != 0 {
+        m = m | KC_USR_WRITE;
+    }
+    if has_search != 0 {
+        m = m | KC_USR_SEARCH;
+    }
+    return m;
+}
+
+/// USR 三元组渲染成 `view|read|write|search`；一位都没有返回 `"none"`。
+pub fn kc_perm_text(mask: u32, out: ptr, cap: u32) -> u32 {
+    if (mask & (KC_USR_VIEW | KC_USR_READ | KC_USR_WRITE | KC_USR_SEARCH)) == 0 {
+        return kq_put(out, cap, 0, "none");
+    }
+    let pos: u32 = 0;
+    if (mask & KC_USR_VIEW) != 0 {
+        pos = kq_put(out, cap, pos, "view");
+    }
+    if (mask & KC_USR_READ) != 0 {
+        if pos > 0 {
+            pos = kq_put(out, cap, pos, "|");
+        }
+        pos = kq_put(out, cap, pos, "read");
+    }
+    if (mask & KC_USR_WRITE) != 0 {
+        if pos > 0 {
+            pos = kq_put(out, cap, pos, "|");
+        }
+        pos = kq_put(out, cap, pos, "write");
+    }
+    if (mask & KC_USR_SEARCH) != 0 {
+        if pos > 0 {
+            pos = kq_put(out, cap, pos, "|");
+        }
+        pos = kq_put(out, cap, pos, "search");
+    }
+    return pos;
+}
+
+/// 是不是"持有者"权限（任意一位 POS 位）。
+pub fn kc_is_possessor(mask: u32) -> bool {
+    return (mask & (KC_POS_VIEW | KC_POS_READ | KC_POS_WRITE | KC_POS_SEARCH)) != 0;
+}
+
+/// 键主自己能不能读 —— 看 USR_READ（不是 POS_READ）。
+pub fn kc_owner_can_read(mask: u32) -> bool {
+    return (mask & KC_USR_READ) != 0;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_keyctl_command_name() -> bool {
+    let b: ptr = alloc(64);
+    let w: str = "KEYCTL_SETPERM";
+    let n: u32 = kc_command_name(KC_SETPERM, b, 64);
+    if n != str_len(w) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(b, i) != str_byte(w, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return kc_command_name(99, b, 64) == 15;
+}
+
+fn test_keyctl_perm_mask() -> bool {
+    let m: u32 = kc_perm_mask(1, 1, 0, 0);
+    return m == (KC_USR_VIEW | KC_USR_READ) && kc_owner_can_read(m);
+}
+
+fn test_keyctl_perm_text() -> bool {
+    let b: ptr = alloc(64);
+    let w: str = "view|read";
+    let n: u32 = kc_perm_text(KC_USR_VIEW | KC_USR_READ, b, 64);
+    if n != str_len(w) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(b, i) != str_byte(w, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return kc_perm_text(KC_GRP_VIEW, b, 64) == 4;
+}
+
+fn test_keyctl_possessor() -> bool {
+    if kc_is_possessor(KC_POS_READ) == false {
+        return false;
+    }
+    return kc_is_possessor(KC_USR_READ) == false;
+}

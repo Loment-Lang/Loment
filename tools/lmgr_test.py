@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import loment_suite  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-SRC = ROOT / "lmgr" / "main.lomt"
+SRC = ROOT / "loment" / "tools" / "lmgr.lomt"
 TESTS: list[tuple[str, object]] = []
 
 

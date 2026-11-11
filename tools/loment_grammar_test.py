@@ -1559,6 +1559,72 @@ def test_tur2026_3_if_expression():
 
 
 @test
+def test_tur2026_3_match_expression():
+    """2026.3 `let x: T = match e { P => a, _ => b };` —— 产物与显式 match 语句相同。
+
+    `docs/336`：v1 只收 `let` 的初值、被匹配值是一个名字、臂体各一个表达式。
+    """
+    expr_form = chr(10).join([
+        'module m',
+        '',
+        'enum D { N, E }',
+        '',
+        'fn f(d: D) -> u32 {',
+        '    let x: u32 = match d { D::N => 1, D::E => 2 };',
+        '    return x;',
+        '}',
+        '',
+    ])
+    stmt_form = chr(10).join([
+        'module m',
+        '',
+        'enum D { N, E }',
+        '',
+        'fn f(d: D) -> u32 {',
+        '    let x: u32;',
+        '    match d { D::N => { x = 1; } D::E => { x = 2; } }',
+        '    return x;',
+        '}',
+        '',
+    ])
+    bad_form = chr(10).join([
+        'module m',
+        '',
+        'enum D { N, E }',
+        '',
+        'fn f(d: D) -> u32 {',
+        '    return match d { D::N => 1, D::E => 2 };',
+        '}',
+        '',
+    ])
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        a = td / "expr.lomt"
+        a.write_text(expr_form, encoding="utf-8", newline=chr(10))
+        b = td / "stmt.lomt"
+        b.write_text(stmt_form, encoding="utf-8", newline=chr(10))
+        la = lomentc.emit_llvm(lomentc.load(a), ROOT)
+        lb = lomentc.emit_llvm(lomentc.load(b), ROOT)
+        assert la == lb, "match 表达式与显式 match 语句的 IR 不同"
+        old = td / "old.lomt"
+        old.write_text("choose write grammar tur2026.2" + chr(10) + expr_form,
+                       encoding="utf-8", newline=chr(10))
+        try:
+            lomentc.load(old)
+        except lomentc.LomError:
+            pass
+        else:
+            raise AssertionError("tur2026.2 收下了 match 表达式 —— 封版版次被改了")
+        bad = td / "bad.lomt"
+        bad.write_text(bad_form, encoding="utf-8", newline=chr(10))
+        try:
+            lomentc.load(bad)
+        except lomentc.LomError:
+            pass
+        else:
+            raise AssertionError("`return match …` 被收下了 —— v1 只该收 let 初值")
+    print("      2026.3 match 表达式与显式 match 同产物；非初值位置与 tur2026.2 都拒")
+@test
 def test_the_default_edition_is_the_newest_open_one():
     """**没声明 = 最新版次**（2026-11-06 用户裁定，`docs/312`）。
 

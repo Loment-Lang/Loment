@@ -1747,6 +1747,20 @@ class Match:
 
 
 @dataclass
+class MatchExpr:
+    """Tur 2026.3 的 `match e { P => a, _ => b }` 表达式（`docs/336`）。
+
+    **只存在于解析到反糖之间**：`_desugar_matchexpr` 把它降成一条普通 `Match`
+    语句，每一臂的表达式变成给目标赋值的块。v1 只收 `let` 的整个初值；
+    臂体各是一个表达式、用逗号分隔。
+    """
+
+    subject: object
+    arms: list  # list[tuple[Path | None, object]]
+    line: int
+
+
+@dataclass
 class For:
     var: str
     lo: object
@@ -2053,15 +2067,19 @@ class IfExpr:
     else_end: int = 0
 
 
-def _contains_ifexpr(o) -> bool:
-    """这棵 AST 里有没有 `IfExpr`（不论在哪个位置）—— 反糖只能处理初值位置。"""
-    if isinstance(o, IfExpr):
+def _contains_node(o, cls) -> bool:
+    """这棵 AST 里有没有 `cls` 的节点（不论在哪个位置）—— 反糖只能处理初值位置。"""
+    if isinstance(o, cls):
         return True
     if isinstance(o, (list, tuple)):
-        return any(_contains_ifexpr(x) for x in o)
+        return any(_contains_node(x, cls) for x in o)
     if is_dataclass(o):
-        return any(_contains_ifexpr(getattr(o, f.name)) for f in fields(o))
+        return any(_contains_node(getattr(o, f.name), cls) for f in fields(o))
     return False
+
+
+def _contains_ifexpr(o) -> bool:
+    return _contains_node(o, IfExpr)
 
 
 @dataclass
@@ -3800,6 +3818,8 @@ class Parser:
         self.no_struct = 0  # >0 时禁止结构体字面量 (if/while 条件位置的歧义)
         #: >0 时才允许 `if` 表达式（2026.3，`docs/335`）：只开在 `let` 的初值位置。
         self.allow_ifexpr = 0
+        #: >0 时才允许 `match` 表达式（2026.3，`docs/336`）：同样只开在 `let` 的初值位置。
+        self.allow_matchexpr = 0
         #: 当前嵌套深度（块 + 表达式共用一个计数）—— 见 `MAX_NEST`。
         self.depth = 0
         #: 循环嵌套层数（Tur 2 的 `break`/`continue` 只在循环里合法）。
@@ -4651,14 +4671,20 @@ class Parser:
             # 2026.3 的 `if` 表达式只在这一格开口（`docs/335`）；解析完再确认它
             # **就是**初值本身，而不是藏在别的表达式里 —— 藏在里面反糖不了。
             self.allow_ifexpr += 1
+            self.allow_matchexpr += 1
             try:
                 e = self._fallback_rhs(self.parse_expr(), t.line)
             finally:
                 self.allow_ifexpr -= 1
-            if not isinstance(e, IfExpr) and _contains_ifexpr(e):
+                self.allow_matchexpr -= 1
+            if not isinstance(e, (IfExpr, MatchExpr)) and _contains_ifexpr(e):
                 raise LomError(t.line, 1,
                                "`if` 表达式 v1 只能作 `let` 的整个初值，不能嵌在别的"
                                "表达式里（docs/335）")
+            if not isinstance(e, (IfExpr, MatchExpr)) and _contains_node(e, MatchExpr):
+                raise LomError(t.line, 1,
+                               "`match` 表达式 v1 只能作 `let` 的整个初值，不能嵌在别的"
+                               "表达式里（docs/336）")
             self.expect("punct", ";")
             return Let(name, ty, e, t.line, space)
         if t.val == "if":
@@ -4758,19 +4784,7 @@ class Parser:
             self.expect("punct", "{")
             arms = []
             while not self.at("punct", "}"):
-                if self.at("ident", "_"):
-                    self.next()
-                    pat = None
-                else:
-                    en = self.ident("枚举名")
-                    self.expect("punct", ":")
-                    self.expect("punct", ":")
-                    vn = self.ident("变体名")
-                    bind = None
-                    if self.accept("punct", "("):
-                        bind = self.ident("绑定名")
-                        self.expect("punct", ")")
-                    pat = EnumPath(en, vn, t.line, bind)
+                pat = self.parse_pattern(t.line)
                 self.expect("punct", "=")
                 self.expect("punct", ">")
                 arms.append((pat, self.parse_block()))
@@ -4940,6 +4954,12 @@ class Parser:
                 raise LomError(t.line, t.col,
                                "`if` 表达式 v1 只能作 `let` 的初值（docs/335）")
             return self.parse_postfix(self.parse_ifexpr(t.line))
+        if t.kind == "ident" and t.val == "match" and self.profile in TUR3_PLUS:
+            # 2026.3 的 `match` 表达式（`docs/336`）：同一条，只开在 `let` 初值位置。
+            if self.allow_matchexpr <= 0:
+                raise LomError(t.line, t.col,
+                               "`match` 表达式 v1 只能作 `let` 的初值（docs/336）")
+            return self.parse_postfix(self.parse_matchexpr(t.line))
         if t.kind == "number":
             return self.parse_postfix(IntLit(self.int_lit(), t.line))
         if t.kind == "string":
@@ -5020,6 +5040,46 @@ class Parser:
                 return StructLit(name, inits, t.line)
             return self.parse_postfix(Ident(name, t.line))
         raise LomError(t.line, t.col, f"期望表达式，得到 {t.val or '<eof>'!r}")
+
+    def parse_pattern(self, line):
+        """`match` 的臂图案：`_` 或 `Enum::Variant` / `Enum::Variant(bind)`。"""
+        if self.at("ident", "_"):
+            self.next()
+            return None
+        en = self.ident("枚举名")
+        self.expect("punct", ":")
+        self.expect("punct", ":")
+        vn = self.ident("变体名")
+        bind = None
+        if self.accept("punct", "("):
+            bind = self.ident("绑定名")
+            self.expect("punct", ")")
+        return EnumPath(en, vn, line, bind)
+
+    def parse_matchexpr(self, line):
+        """`match e { P => a, _ => b }` —— 臂体各**一个表达式**，逗号分隔（`docs/336`）。"""
+        self.next()                          # `match`
+        self.no_struct += 1
+        subj = self.parse_expr()
+        self.no_struct -= 1
+        self.expect("punct", "{")
+        arms: list[tuple[object, object]] = []
+        while not self.at("punct", "}"):
+            pat = self.parse_pattern(line)
+            self.expect("punct", "=")
+            self.expect("punct", ">")
+            e = self.parse_expr()
+            if _contains_ifexpr(e) or _contains_node(e, MatchExpr):
+                raise LomError(line, 1,
+                               "`match` 表达式的 v1 不支持在臂体里再嵌一个 `if` / "
+                               "`match` 表达式（docs/336）")
+            arms.append((pat, e))
+            if not self.accept("punct", ","):
+                break
+        self.expect("punct", "}")
+        if not arms:
+            raise LomError(line, 1, "`match` 表达式至少要有一条臂（docs/336）")
+        return MatchExpr(subj, arms, line)
 
     def parse_ifexpr(self, line):
         """`if c { a } else { b }` —— 两支各**一个表达式**（`docs/335`）。"""
@@ -14832,6 +14892,49 @@ def _desugar_ifexpr(mod: Module) -> None:
         f.body = walk(f.body)
 
 
+def _desugar_matchexpr(mod: Module) -> None:
+    """`let x: T = match e { P => a, _ => b };` -> `let x: T; match e { P => { x = a } _ => { x = b } }`。
+
+    2026.3（`docs/336`）。v1 只处理 `let` 的初值；降完的节点都是普通语句。
+    """
+    def walk(stmts: list) -> list:
+        out: list = []
+        for s in stmts:
+            if isinstance(s, Let) and isinstance(s.expr, MatchExpr):
+                if not isinstance(s.expr.subject, Ident):
+                    raise LomError(s.line, 1,
+                                   "`match` 表达式的 v1 只收**名字**作被匹配值（docs/336）")
+                out.append(Let(s.name, s.type, None, s.line, s.space))
+                arms = []
+                for pat, e in s.expr.arms:
+                    ln = getattr(e, "line", s.line)
+                    arms.append((pat, [Assign(Ident(s.name, ln), e, ln)]))
+                out.append(Match(s.expr.subject, arms, s.expr.line))
+            elif isinstance(s, If):
+                s.then = walk(s.then)
+                s.otherwise = walk(s.otherwise)
+                out.append(s)
+            elif isinstance(s, While):
+                s.body = walk(s.body)
+                out.append(s)
+            elif isinstance(s, For):
+                s.body = walk(s.body)
+                out.append(s)
+            elif isinstance(s, ForEach):
+                s.body = walk(s.body)
+                out.append(s)
+            elif isinstance(s, Match):
+                for _, b in s.arms:
+                    b[:] = walk(b)
+                out.append(s)
+            else:
+                out.append(s)
+        return out
+
+    for f in mod.funcs:
+        f.body = walk(f.body)
+
+
 def _desugar_foreach(mod: Module) -> None:
     """把 `ForEach` 反糖成 `let __tur2_i.N: u32 = 0; while __tur2_i.N < len { ... }`。
 
@@ -15029,6 +15132,7 @@ def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3,
         # Tur 2 的 `for x in xs`（`docs/296` §2.2）：反糖成普通 While，下游不必认识它。
         # 2026.3 继承（版次累积）。
         _desugar_ifexpr(mod)     # 先降 if 表达式（它可能出现在 for 体里）
+        _desugar_matchexpr(mod)
         _desugar_foreach(mod)
     mod.own_switches = own      # 本模块**自己**写的 —— 只有"库不许 choose"用它
     # **包清单的前置条件**（`docs/325`）：模块自己没写某一维时，取同包 `pkg.lomp`

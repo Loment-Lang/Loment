@@ -859,6 +859,7 @@ Tur 2026.3 adds:
 | for-index | `for i, x in xs { … }` | an index loop that also binds the position: `i` is a `u32` copy of the current index, `x` a copy of the element | 2026.3+ only; the source is still a named array or slice; `i` and `x` are copies, so assignments to either do not write back |
 | for-call | `for x in buf(&xs) { … }` | a for-in whose source is a call returning an array or slice; the call is evaluated once | 2026.3+ only; the source MUST be a call (array literals and other expressions are later editions); `x` is a copy |
 | if expression | `let x: u32 = if c { 10 } else { 20 };` | a `let` initialiser picks one of two expressions | 2026.3+ only; initialiser position only, one expression per arm, `else` required; no `else if` or nesting |
+| match expression | `let x: u32 = match d { D::N => 1, _ => 0 };` | a `let` initialiser picks one arm's expression | 2026.3+ only; initialiser position only, subject is a name, one expression per arm, arms comma-separated; no nesting or literal patterns |
 
 The lifetime dimension is **edition-gated**: writing `choose lifetime_*` in 2026.1 or
 2026.2 is refused; those editions keep the old default (`lifetime_no`) and the old
@@ -1289,9 +1290,20 @@ ARM := (PATTERN | "_") "=>" BLOCK
 ```
 
 The subject MUST be an enum (E008 otherwise). Patterns MUST belong to that enum, MUST NOT
-duplicate, and MUST be exhaustive or include `_`. An arm body is a **block**, not an
-expression; the `=> 0,` form is not in this grammar. A payload binding is in scope in its
-arm.
+duplicate, and MUST be exhaustive or include `_`. In statement position an arm body is a
+**block**; the `=> 0,` form belongs to the 2026.3 expression form below. A payload binding
+is in scope in its arm.
+
+From Tur 2026.3, a `match` may be the whole initialiser of a `let`:
+
+```
+let x: T = match NAME { PATTERN => EXPR, … };
+```
+
+The subject MUST be a **name**, every arm body is a **single expression**, and arms are
+separated by commas. It lowers to `let x: T;` followed by an ordinary `match` whose arms
+assign. Other positions, expression subjects, nested `if` / `match` expressions in an arm,
+and literal patterns are not accepted in this edition round (§8.10).
 
 ### 13.3 `if let`
 
@@ -2294,6 +2306,7 @@ An implementation that supports several editions MUST keep their surfaces separa
 | `for i, x in xs` | — | — | yes |
 | `for x in <call>` (array/slice return) | — | — | yes |
 | `if` expression (let initialiser) | — | — | yes |
+| `match` expression (let initialiser) | — | — | yes |
 | bare `return;` in unit functions | — | yes | yes |
 | `orelse`, `catch` | — | yes | yes |
 | `print_num` | — | yes | yes |
@@ -3154,6 +3167,7 @@ primary       := INT | STRING | "true" | "false"
                | IDENT "{" (IDENT (":" expr)?),* "}"           // shorthand: 2026.3+
                | "[" (expr),* "]" | "&" ("mut")? expr
                | "if" expr block "else" block                  // 2026.3+, let initialiser only
+               | "match" IDENT "{" (pattern "=>" expr),* "}"    // 2026.3+, let initialiser only
 cast          := expr "as" type
 fallback      := expr ("orelse" | "catch") expr
 

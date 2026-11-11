@@ -29,7 +29,7 @@ loment/examples/tour.lomt InBounds 6 7
 loment/examples/tour.lomt InDomain 1 2
 loment/lib/lumtui.lomt SummaryContract 22 22
 loment/lib/mem.lomt SummaryContract 5 5
-loment/tools/lomcli.lomt SummaryContract 246 723
+loment/tools/lomcli.lomt SummaryContract 245 721
 loment/tools/lomsyscalls.lomt InBounds 6 6
 loment/tools/lomsyscalls.lomt SummaryContract 28 28
 lompi/store/host/0.1.0/fs.lomt SummaryContract 3 9

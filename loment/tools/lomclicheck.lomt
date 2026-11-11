@@ -762,7 +762,7 @@ fn _start() -> u32 {
         }
     }
     let e_hi: u32 = 0;
-    if sect(o, dn, "ex99", st) == 1 && prc(st) == 2 {
+    if sect(o, dn, "ex300", st) == 1 && prc(st) == 2 {
         e_hi = 1;
     }
     let e_no: u32 = 0;

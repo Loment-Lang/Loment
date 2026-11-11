@@ -13,7 +13,7 @@ object, so a consumer that does not read the source can still answer what kind o
 | Runtime | `runtime` · `no_runtime` | `no_runtime` | whether the runtime block may be carried |
 | Port | `sealed` · `hosted` | `sealed` | whether the artifact may link host libraries |
 | Execution | `vm` · `no_vm` | `no_vm` | which execution model the program targets |
-| Memory safety | `lms_full` · `lms_forensic_admin` · `lms_daily_admin` · `lms_manage_only_admin` | `lms_full` | which LMS levels are on |
+| Memory safety | `lms_full` · `lms_forensic_admin` · `lms_daily_admin` · `lms_manage_only_admin` · `lms_close_admin` | `lms_full` | which LMS levels are on |
 | Audit ledger | `lspe_open_admin` · `lspe_close_admin` | `lspe_open_admin` | whether LSPE records the ledger |
 
 A dimension is a property of the program, not of a file. A library expresses what it needs through

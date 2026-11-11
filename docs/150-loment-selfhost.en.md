@@ -1,5 +1,5 @@
 <!-- translated-from: docs/150-loment-selfhost.md -->
-<!-- source-sha256: a6f9a3d47a7ad73cfb2bb2041fc41550ce09a17addba2ecd230259aaeffbed8e -->
+<!-- source-sha256: 62abb881192cc1315b359bcd83c1c93a54ec99e0c6ae19dc6a22f3f71242a893 -->
 
 # 150 · Loment self-hosting (P8, M79–M88)
 
@@ -69,7 +69,8 @@ corpus"):
 - the convention for string literals: the reference's `tok.val` is the content **after unescaping**, and the
   dump must re-escape by (backslash -> quote -> newline), with tab falling back per `_ESCAPES`;
   NOTE **since 2026-10-16 there is no "unknown escape takes the character itself" fallback** (`#33` / `#36`):
-  the table is `n t r 0 \ "`, and anything outside it is **E019**. The old fallback turned `""` into the
+  the table is `n t r 0 \ "`, and anything outside it is **E019**. The old fallback turned `"
+"` into the
   letter `r` and `"A"` into the three characters `x41`. The self-host lexer has no failure channel, so the
   refusal lands in `chk_syntax_prepass` (the same pass as "a parse error aborts");
 - a type name is a **normalised string** (`mut [u32]` / `[u32; 4]` / `Name<A, B>`); reading it token by token
@@ -624,7 +625,7 @@ consume only the token stream, no expression type inference needed):
    `无字段/缺字段/重复初始化` ("no field / missing field / duplicate initialisation") moved from E009 to E015 —
    the code is assigned by **the fix**, not by the wording of the message.
 2. **Every message template the reference can emit must be classifiable**: miss one in the classification table
-   and that rule becomes "both sides turn into E999 and are dropped" in the comparison, so **the gap silently
+   and that rule becomes "both sides turn into E0999 and are dropped" in the comparison, so **the gap silently
    disappears**. `loment_tools_test` gained `test_m64_all_reference_messages_are_classified` (ast-extract all 81
    templates and classify them one by one), plus `test_m81_builtin_tables_match` (the self-hosted `is_builtin`
    name set == `lomentc.BUILTINS` ∪ `{slice_len}`).

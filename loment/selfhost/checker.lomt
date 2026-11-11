@@ -47,9 +47,15 @@ const K_CONST: u32 = 4;
 const K_TPARAM: u32 = 5;   // 泛型形参 (`fn f<T>` 里的 T): 只当类型名用
 const K_METHOD: u32 = 6;   // impl 方法: 名字与接收者类型一起构成身份 (静态派发)
 
-// 错误码 = 项目统一口径 `loment_diag.RULES` (E001–E017) 的**数字部分**。
+// 错误码 = 项目统一口径 `loment_diag.RULES` 的**数字部分**。
 // 自举 checker 与参考实现的对照判据 = 两边**码集相等**, 所以码值必须取自同一张表 ——
 // 以前这里自定义 1..4, 与 loment_diag 的分类对不上 (E_DUP=1 vs E013=13 之类)。
+//
+// **2026-11-10 起码表细分**（`docs/338`）：绝大多数报错点直接写**细分码的数字**
+// （`chk_pub(..., 91, tok)` 这种），数字见 `loment_diag.FINE`，一一对应参考实现那一侧的
+// 消息。下面这些 `E_*` 常量是**族码**：只有"这一格没有更细的处境"的地方仍在用
+// （`E_CAP` 的时律参数、`E_PARSE` 的解析错、`E_LIFETIME` 的三条自举独有检查）。
+// 判据是 `loment_rule_parity`：它比**码集**，所以哪一处没跟上当场红。
 const E_DUP: u32 = 13;     // E013 重名
 const E_TYPE: u32 = 2;     // E002 符号未声明 (变量 / 函数)
 // E030 **类型位置上的未知名**（`#323`）。与 E_TYPE 分开的理由与参考实现同一条
@@ -415,7 +421,8 @@ fn chk_builtin_ret(src: ptr, t: ptr, i: u32) -> u32 {
     if chk_tok_is(src, t, i, "str_eq") {
         return (1 << TY_KIND_SHIFT) + 9;          // bool
     }
-    if chk_tok_is(src, t, i, "str_concat") || chk_tok_is(src, t, i, "tur_edition") {
+    if chk_tok_is(src, t, i, "str_concat") || chk_tok_is(src, t, i, "str_num")
+            || chk_tok_is(src, t, i, "tur_edition") {
         return (1 << TY_KIND_SHIFT) + 10;         // str
     }
     if chk_tok_is(src, t, i, "alloc") || chk_tok_is(src, t, i, "str_ptr")
@@ -586,9 +593,12 @@ fn chk_core_dim(src: ptr, t: ptr, k: u32) -> u32 {
     // 第六维（`docs/253`，用户 2026-10-15）：`lms`。与 `gc` **正交**。
     // 2026-10-18（0.1.5.1）：取值从"开/关"改成**档名**（`docs/253` §11.3）——
     // 默认 `lms_full`，写档是**降级**。非满档一律带 `_admin`（`docs/262` §10.1）。
+    // 用户 2026-11-10：`lms_close_admin` = **七级全关**（`docs/253` §11.3）。
+    // 「O FUCK WHAT A PUSSY, CLOSE THAT FUCKING LMS」
     if chk_tok_is(src, t, k, "lms_full") || chk_tok_is(src, t, k, "lms_forensic_admin")
             || chk_tok_is(src, t, k, "lms_daily_admin")
-            || chk_tok_is(src, t, k, "lms_manage_only_admin") {
+            || chk_tok_is(src, t, k, "lms_manage_only_admin")
+            || chk_tok_is(src, t, k, "lms_close_admin") {
         return 5;
     }
     // 第七维（`docs/262`，用户 2026-10-18）：`lspe`。与其它六维正交 ——
@@ -682,7 +692,8 @@ fn chk_rt_site(src: ptr, t: ptr, i: u32, prof: u32) -> u32 {
     // 注释写在 `if` **之前**，不夹进 `||` 链中间：两个格式化器对"表达式中间的
     // 行注释"归属不同行，夹在中间会让孪生判据分叉（`loment_fmt_test` 实测）。
     if chk_tok_is(src, t, i, "alloc") || chk_tok_is(src, t, i, "free")
-            || chk_tok_is(src, t, i, "str_concat") || chk_tok_is(src, t, i, "str_eq")
+            || chk_tok_is(src, t, i, "str_concat") || chk_tok_is(src, t, i, "str_num")
+            || chk_tok_is(src, t, i, "str_eq")
             || chk_tok_is(src, t, i, "panic")
             || chk_tok_is(src, t, i, "thread_spawn") {
         if chk_tok_is(src, t, i + 1, "(") {
@@ -763,6 +774,9 @@ fn chk_core_val(src: ptr, t: ptr, k: u32) -> u32 {
     if chk_tok_is(src, t, k, "lms_manage_only_admin") {
         return 4;
     }
+    if chk_tok_is(src, t, k, "lms_close_admin") {
+        return 5;
+    }
     // 第八维（`docs/299`）：`lifetime`。
     if chk_tok_is(src, t, k, "lifetime_no") {
         return 1;
@@ -809,7 +823,7 @@ fn is_base_type(src: ptr, t: ptr, i: u32) -> bool {
 
 fn is_builtin(src: ptr, t: ptr, i: u32) -> bool {
     let k: u32 = 0;
-    let names: str = "str_len str_eq str_concat str_byte slice_len panic alloc free load8 store8 atomic_add inb outb get_bits set_bits str_ptr print tur_edition ptr_add ptr_sub syscall4 syscall6 syscall7 thread_spawn";
+    let names: str = "str_len str_eq str_concat str_num str_byte slice_len panic alloc free load8 store8 atomic_add inb outb get_bits set_bits str_ptr print tur_edition ptr_add ptr_sub syscall4 syscall6 syscall7 thread_spawn";
     // 逐词比较 (内建名用空格分隔的常量表); 新增内建要同步这里, 否则调用点报假 E-UNKNOWN-FN
     let off: u32 = 0;
     while off < str_len(names) {
@@ -904,7 +918,21 @@ fn chk_lookup_lit_name(src: ptr, t: ptr, s: ptr, n: u32, lit_tok: u32) -> u32 {
 fn declare(src: ptr, t: ptr, s: ptr, n: u32, name_tok: u32, ka: u32,
            ret: u32, aux: u32, p: ptr, o: u32) -> u64 {
     if chk_lookup_slot(src, t, s, n, name_tok) != 0 {
-        return (n as u64) * 4294967296 + (sym_pub(src, t, p, o, E_DUP, name_tok) as u64);
+        // 细分码按**新声明的种类**走（与参考实现的五条消息一一对应）。
+        let dcode: u32 = 134;                 // 函数
+        let dk: u32 = ka / 256;
+        if dk == K_STRUCT {
+            dcode = 129;
+        } else {
+            if dk == K_ENUM {
+                dcode = 131;
+            } else {
+                if dk == K_CONST {
+                    dcode = 133;
+                }
+            }
+        }
+        return (n as u64) * 4294967296 + (sym_pub(src, t, p, o, dcode, name_tok) as u64);
     }
     store32(s, n * 20, name_tok);
     store32(s, n * 20 + 4, ka / 256);
@@ -940,7 +968,8 @@ fn chk_span_arg(src: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
     return 0;
 }
 
-fn check_type(src: ptr, t: ptr, s: ptr, n: u32, i: u32, p: ptr, o: u32) -> u64 {
+fn check_type(src: ptr, t: ptr, s: ptr, n: u32, i: u32, p: ptr, o: u32,
+               code: u32) -> u64 {
     // 借用类型（`docs/299`）：钻进去看被借类型 —— `&f64` 里的 `f64` 一样要查
     // （与参考实现 `_type_ok` 对借用递归同一条）。
     if chk_tok_is(src, t, i, "&") {
@@ -952,14 +981,14 @@ fn check_type(src: ptr, t: ptr, s: ptr, n: u32, i: u32, p: ptr, o: u32) -> u64 {
                 && (chk_tok_kind(t, j + 1) == 0 || chk_tok_is(src, t, j + 1, "[")) {
             j = j + 1;                    // 区域标记 `&a T`
         }
-        return check_type(src, t, s, n, j, p, o);
+        return check_type(src, t, s, n, j, p, o, code);
     }
     if chk_tok_is(src, t, i, "mut") {
-        return check_type(src, t, s, n, i + 1, p, o);
+        return check_type(src, t, s, n, i + 1, p, o, code);
     }
     if chk_tok_is(src, t, i, "[") {
         // `[T]` 与 `[T; N]` 同形: `[` 后面第一个 token 就是元素类型, 长度在 `;` 之后。
-        return check_type(src, t, s, n, i + 1, p, o);
+        return check_type(src, t, s, n, i + 1, p, o, code);
     }
     if is_base_type(src, t, i) {
         return (i as u64) * 4294967296 + (o as u64);
@@ -976,7 +1005,7 @@ fn check_type(src: ptr, t: ptr, s: ptr, n: u32, i: u32, p: ptr, o: u32) -> u64 {
             return (i as u64) * 4294967296 + (o as u64);
         }
     }
-    return (i as u64) * 4294967296 + (sym_pub(src, t, p, o, E_UTYPE, i) as u64);
+    return (i as u64) * 4294967296 + (sym_pub(src, t, p, o, code, i) as u64);
 }
 
 /// 从 i 起找下一个 '(' 的下标 (处理泛型 `<T>` 前缀)。
@@ -1163,7 +1192,7 @@ fn chk_struct_body(src: ptr, t: ptr, s: ptr, n: u32, lb: u32, name_tok: u32,
     while chk_tok_kind(t, j) != 4 && !chk_tok_is(src, t, j, "}") {
         if chk_tab_has(src, t, tab, c, j) == 1 {
             // 参考实现把"字段重复"报在**声明那一行**上（`s.line`），不是重复字段那一行。
-            o = sym_pub(src, t, p, o, E_DUP, name_tok);
+            o = sym_pub(src, t, p, o, 130, name_tok);
         }
         store32(tab, c * 4, j);
         c = c + 1;
@@ -1174,7 +1203,7 @@ fn chk_struct_body(src: ptr, t: ptr, s: ptr, n: u32, lb: u32, name_tok: u32,
             // 用的是 `s.line`）。`check_type` 按类型 token 报，这里把它这一段的 token
             // 统一改回声明名 —— 码不变，只有落点对齐。
             let before: u32 = o;
-            let r: u64 = check_type(src, t, s, n, j, p, o);
+            let r: u64 = check_type(src, t, s, n, j, p, o, 182);        // 结构体字段
             o = (r % 4294967296) as u32;
             j = chk_skip_type(src, t, j);
             let fix: u32 = before;
@@ -1188,7 +1217,7 @@ fn chk_struct_body(src: ptr, t: ptr, s: ptr, n: u32, lb: u32, name_tok: u32,
         }
     }
     if c == 0 {
-        o = sym_pub(src, t, p, o, E_DEF, name_tok);
+        o = sym_pub(src, t, p, o, 120, name_tok);
     }
     return ((j + 1) as u64) * 4294967296 + (o as u64);
 }
@@ -1202,14 +1231,14 @@ fn chk_enum_body(src: ptr, t: ptr, s: ptr, n: u32, lb: u32, name_tok: u32,
         if chk_tok_kind(t, j) == 0 {
             if chk_tab_has(src, t, tab, c, j) == 1 {
                 // 与结构体字段同一条：报在声明行（参考实现的 `e.line`）。
-                o = sym_pub(src, t, p, o, E_DUP, name_tok);
+                o = sym_pub(src, t, p, o, 132, name_tok);
             }
             store32(tab, c * 4, j);
             c = c + 1;
             j = j + 1;
             if chk_tok_is(src, t, j, "(") {
                 let before: u32 = o;
-                let r: u64 = check_type(src, t, s, n, j + 1, p, o);
+                let r: u64 = check_type(src, t, s, n, j + 1, p, o, 183);    // 枚举载荷
                 o = (r % 4294967296) as u32;
                 j = chk_skip_type(src, t, j + 1);
                 let fix: u32 = before;
@@ -1229,7 +1258,7 @@ fn chk_enum_body(src: ptr, t: ptr, s: ptr, n: u32, lb: u32, name_tok: u32,
         }
     }
     if c == 0 {
-        o = sym_pub(src, t, p, o, E_DEF, name_tok);
+        o = sym_pub(src, t, p, o, 122, name_tok);
     }
     return ((j + 1) as u64) * 4294967296 + (o as u64);
 }
@@ -1390,7 +1419,7 @@ fn chk_caps_verify(src: ptr, t: ptr, ctab: ptr, n0: u32, exs: ptr, nexs: u32, p:
         let hv: u32 = load32(ctab, k * 16 + 8);
         if (lv >> 31) == 0 && (hv >> 31) == 0
                 && (lv & 2147483647) > (hv & 2147483647) {
-            o = sym_pub(src, t, p, o, E_CAP, nt);
+            o = sym_pub(src, t, p, o, 70, nt);
         }
         // 时律的参数与容量（docs/306 §12、docs/307 §1–§5，参考实现同口径）。
         // adaptive(10) 与 flow(13) 不吃参数 —— 它们的参数位永远是 0。
@@ -1432,7 +1461,7 @@ fn chk_caps_verify(src: ptr, t: ptr, ctab: ptr, n0: u32, exs: ptr, nexs: u32, p:
         let k2: u32 = 0;
         while k2 < k {
             if same(src, t, load32(ctab, k2 * 16), nt) {
-                o = sym_pub(src, t, p, o, E_CAP, nt);
+                o = sym_pub(src, t, p, o, 69, nt);
             }
             k2 = k2 + 1;
         }
@@ -1460,7 +1489,7 @@ fn chk_caps_verify(src: ptr, t: ptr, ctab: ptr, n0: u32, exs: ptr, nexs: u32, p:
                     k4 = k4 + 1;
                 }
                 if ok == 1 {
-                    o = sym_pub(src, t, p, o, E_EXCL, nt);
+                    o = sym_pub(src, t, p, o, 104, nt);
                 }
             }
             e = e + 1;
@@ -1629,13 +1658,13 @@ fn chk_cap_top_law_is(src: ptr, t: ptr, ctab: ptr, nc: u32, i: u32, want: u32,
         if same(src, t, load32(ctab, k * 16), nt) {
             found = 1;
             if chk_cap_law(src, t, nt) != want {
-                o = sym_pub(src, t, p, o, E_CAP, nt);
+                o = sym_pub(src, t, p, o, 68, nt);
             }
         }
         k = k + 1;
     }
     if found == 0 {
-        o = sym_pub(src, t, p, o, E_CAP, nt);
+        o = sym_pub(src, t, p, o, 68, nt);
     }
     return o;
 }
@@ -1765,7 +1794,7 @@ fn chk_guard(src: ptr, t: ptr, ctab: ptr, nc: u32, i: u32, p: ptr, o: u32) -> u3
                 needaux = 1;
             }
             if needaux != hasaux {
-                o = sym_pub(src, t, p, o, E_CAP, nt);
+                o = sym_pub(src, t, p, o, 78, nt);
             }
             if chk_tok_kind(t, i + 3) == 1 && (law == 0 || law == 1 || law == 8) {
                 let lv: u32 = load32(ctab, k * 16 + 4);
@@ -1786,17 +1815,17 @@ fn chk_guard(src: ptr, t: ptr, ctab: ptr, nc: u32, i: u32, p: ptr, o: u32) -> u3
                     mut_inside = 0;
                 }
                 if (law == 0 || law == 8) && mut_inside == 0 {
-                    o = sym_pub(src, t, p, o, E_CAP, nt);
+                    o = sym_pub(src, t, p, o, 79, nt);
                 }
                 if law == 1 && mut_inside == 1 {
-                    o = sym_pub(src, t, p, o, E_CAP, nt);
+                    o = sym_pub(src, t, p, o, 80, nt);
                 }
             }
         }
         k = k + 1;
     }
     if found == 0 {
-        o = sym_pub(src, t, p, o, E_CAP, nt);
+        o = sym_pub(src, t, p, o, 81, nt);
     }
     return o;
 }
@@ -1810,7 +1839,8 @@ fn chk_builtin_arity(src: ptr, t: ptr, i: u32) -> u32 {
         return 0;
     }
     // slice_len 也是内建 (参考实现里它单列一条, 不在 BUILTINS 表里), 但 arity 同口径
-    if chk_tok_is(src, t, i, "str_len") || chk_tok_is(src, t, i, "panic")
+    if chk_tok_is(src, t, i, "str_len") || chk_tok_is(src, t, i, "str_num")
+            || chk_tok_is(src, t, i, "panic")
             || chk_tok_is(src, t, i, "alloc") || chk_tok_is(src, t, i, "free")
             || chk_tok_is(src, t, i, "inb") || chk_tok_is(src, t, i, "str_ptr")
             || chk_tok_is(src, t, i, "print")
@@ -1865,13 +1895,13 @@ fn scan_params(src: ptr, t: ptr, s: ptr, n: u32, i: u32, p: ptr, o: u32, tab: pt
         } else {
             // 形参重名 -> E-DUP (`fn f(a: u32, a: u32)`; 参考实现的口径是 E013)
             if chk_tab_has(src, t, tab, c, i) == 1 {
-                o = sym_pub(src, t, p, o, E_DUP, i);
+                o = sym_pub(src, t, p, o, 136, i);
             }
             store32(tab, c * 4, i);
             c = c + 1;
             i = i + 1;              // 参数名
             i = i + 1;              // ':'
-            let r: u64 = check_type(src, t, s, n, i, p, o);
+            let r: u64 = check_type(src, t, s, n, i, p, o, 185);        // 形参
             o = (r % 4294967296) as u32;
             i = chk_skip_type(src, t, i);
             if chk_tok_is(src, t, i, ",") {
@@ -2028,7 +2058,8 @@ fn chk_lms_on(src: ptr, t: ptr) -> u32 {
                 if chk_tok_is(src, t, i + 1, "close") && chk_tok_is(src, t, i + 2, "lms_check") {
                     ex_off = 1;
                 }
-                if chk_tok_is(src, t, i + 1, "lms_manage_only_admin") {
+                if chk_tok_is(src, t, i + 1, "lms_manage_only_admin")
+                        || chk_tok_is(src, t, i + 1, "lms_close_admin") {
                     tier_off = 1;
                 }
             }
@@ -2279,7 +2310,7 @@ fn chk_tex(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
     if hi > lo + 1 && chk_tok_is(src, t, hi - 1, "?") {
         let ok: u32 = chk_q_ok(src, t, syms, n, lo, hi - 1);
         if ok == 0 {
-            chk_pub(src, t, oc, p, E_Q, hi - 1);
+            chk_pub(src, t, oc, p, 123, hi - 1);
         }
         return chk_tex(src, t, syms, n, env, envc, chk_lh(lo, hi - 1), tyt, p, oc);
     }
@@ -2299,11 +2330,11 @@ fn chk_tex(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             }
             let pty: u32 = chk_fb_payload(src, t, syms, n, lt, tyt);
             if pty == 4294967295 {
-                chk_pub(src, t, oc, p, E_TMISMATCH, lo);   // 不是 Option/Result 形状
+                chk_pub(src, t, oc, p, 44, lo);   // 不是 Option/Result 形状
             } else if pty != 0 {
                 let rt: u32 = chk_tex(src, t, syms, n, env, envc, chk_lh(fbk + 1, hi), tyt, p, oc);
                 if rt != 0 && chk_ty_eq(tyt, rt, pty) == 0 {
-                    chk_pub(src, t, oc, p, E_TMISMATCH, fbk + 1);
+                    chk_pub(src, t, oc, p, 45, fbk + 1);
                 }
             }
             // `pty == 0` = 载荷是**泛型形参**（`Option<T>` 里的 `T`）—— 同上，当"未知"。
@@ -2331,7 +2362,7 @@ fn chk_tex(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                     && chk_lookup_slot(src, t, syms, n, lo) == 0
                     && chk_is_kw(src, t, lo) == 0
                     && !chk_tok_is(src, t, lo, "_") && !chk_tok_is(src, t, lo, "self") {
-                chk_pub(src, t, oc, p, E_TYPE, lo);
+                chk_pub(src, t, oc, p, 91, lo);
             }
             return v1;
         }
@@ -2419,7 +2450,7 @@ fn chk_tex(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             return ct;
         }
         if is_sh == 0 && chk_ty_is_int(lt) == 1 && chk_ty_is_int(rt) == 1 {
-            chk_pub(src, t, oc, p, E_TMISMATCH, bin_at);   // 没有公共类型 -> 要写 `as`
+            chk_pub(src, t, oc, p, 56, bin_at);   // 没有公共类型 -> 要写 `as`
         }
         if lt != 0 {
             return lt;
@@ -2432,7 +2463,7 @@ fn chk_tex(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
         let lt: u32 = chk_tex(src, t, syms, n, env, envc,
                               chk_lh(lo, as_at), tyt, p, oc);
         if chk_base_code(src, t, as_at + 1) == 0 {
-            chk_pub(src, t, oc, p, E_AS, as_at + 1);         // as 目标类型非法
+            chk_pub(src, t, oc, p, 151, as_at + 1);         // as 目标类型非法
             return 0;
         }
         // 两条**合法**的整数-指针互转 (参考实现 1810-1814, M67/M83): 少了这两条,
@@ -2458,7 +2489,7 @@ fn chk_tex(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             return tgt;
         }
         if lt != 0 && chk_ty_is_int(lt) == 0 && lt != TY_BOOL {
-            chk_pub(src, t, oc, p, E_AS, as_at);             // as 只能作用于整型/布尔
+            chk_pub(src, t, oc, p, 152, as_at);             // as 只能作用于整型/布尔
         }
         return tgt;
     }
@@ -2487,7 +2518,7 @@ fn chk_tex(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
         if chk_ty_kind(inner0) == 1 && inner0 % (1 << TY_KIND_SHIFT) == 11 {
             return (1 << TY_KIND_SHIFT) + 1;          // 裸 `ptr` 的 `*` 按字节读 (u8)
         }
-        chk_pub(src, t, oc, p, E_ACCESS, lo);         // `*` 只能解引用借用或 ptr
+        chk_pub(src, t, oc, p, 146, lo);         // `*` 只能解引用借用或 ptr
         return 0;
     }
     if chk_tok_is(src, t, lo, "&") {
@@ -2510,7 +2541,7 @@ fn chk_tex(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             if chk_life_mode(src, t, load32(oc, 8)) != 0 {
                 return chk_ty_slc(tyt, chk_ty_a(tyt, inner), mutf);
             }
-            chk_pub(src, t, oc, p, E_ACCESS, lo);
+            chk_pub(src, t, oc, p, 143, lo);
             return 0;
         }
         // 既不是数组也不是切片的借用（`docs/299`）：`lifetime_auto` / `lifetime_manual`
@@ -2521,7 +2552,7 @@ fn chk_tex(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             }
             return chk_ty_ref(tyt, inner, mutf);
         }
-        chk_pub(src, t, oc, p, E_ACCESS, lo);         // 只能作用于数组
+        chk_pub(src, t, oc, p, 143, lo);         // 只能作用于数组
         return 0;
     }
     if chk_tok_is(src, t, lo, "!") {
@@ -2552,12 +2583,12 @@ fn chk_tex(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
         if ot != 0 && chk_ty_is_arr(tyt, ot) == 0 && chk_ty_is_slc(tyt, ot) == 0 {
             // 参考实现在"类型未知"时也报这条; 这里**只在类型已知且确定不是数组/切片时**报
             // —— 否则任何算不出类型的数组都会变成假阳性 (docs/150 记过这条偏离)。
-            chk_pub(src, t, oc, p, E_ACCESS, idx_at);
+            chk_pub(src, t, oc, p, 142, idx_at);
         }
         let it: u32 = chk_tex(src, t, syms, n, env, envc,
                               chk_lh(idx_at + 1, br), tyt, p, oc);
         if it != 0 && chk_ty_is_int(it) == 0 {
-            chk_pub(src, t, oc, p, E_TMISMATCH, idx_at);   // 下标类型，应为整型
+            chk_pub(src, t, oc, p, 55, idx_at);   // 下标类型，应为整型
         }
         // **E028**：**字面量下标越过定长数组的界**当场拒。
         //
@@ -2578,7 +2609,7 @@ fn chk_tex(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
         if chk_ty_is_arr(tyt, ot) == 1 && chk_match_bracket(src, t, idx_at) == idx_at + 2
                 && chk_tok_kind(t, idx_at + 1) == 1 {
             if chk_tok_int(src, t, idx_at + 1) >= chk_ty_b(tyt, ot) {
-                chk_pub(src, t, oc, p, E_BOUND, idx_at);
+                chk_pub(src, t, oc, p, 180, idx_at);
             }
         }
         if chk_ty_is_arr(tyt, ot) == 1 || chk_ty_is_slc(tyt, ot) == 1 {
@@ -2663,12 +2694,13 @@ fn chk_tex_atom_arr(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
     let hi: u32 = chk_lhhi(lh);
     let cnt: u32 = chk_arr_count(src, t, lo);
     if cnt == 0 {
-        chk_pub(src, t, oc, p, E_ARR, lo);                // 数组字面量不能为空
+        chk_pub(src, t, oc, p, 147, lo);                // 数组字面量不能为空
         return 0;
     }
     // 逐元素遍历 + 收集: 首元素类型(非未知)、是否出现过未知元素、是否出现过非整型的实类型
     let i1: u32 = 0;
     let first: u32 = 0;
+    let first_i: u32 = 0;      // `first` 来自**哪一个**元素（第二趟要跳过它，别重复计数）
     let has_unk: u32 = 0;
     let all_int: u32 = 1;
     while i1 < cnt {
@@ -2676,13 +2708,22 @@ fn chk_tex_atom_arr(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
         let elo: u32 = (er / 4294967296) as u32;
         let ehi: u32 = (er % 4294967296) as u32;
         let et: u32 = chk_tex(src, t, syms, n, env, envc, er, tyt, p, oc);
-        if et == 0 {
+        // **裸整型字面量按"类型未知"算**：参考实现的 `expr_type(IntLit)` 是 None，
+        // 于是 `[1, true]` 落进"整型字面量混入 bool"（149），而不是"两种实类型"（148）。
+        let lit_int: u32 = 0;
+        if (er % 4294967296) as u32 == elo + 1 && chk_tok_kind(t, elo) == 1 {
+            lit_int = 1;
+        }
+        if et == 0 || lit_int == 1 {
             has_unk = 1;
         } else {
             if first == 0 {
                 first = et;
+                first_i = i1;
             }
-            if chk_ty_is_int(et) == 0 && et != TY_BOOL {
+            // 参考实现判的是 `all(t in INT_TYPES for t in concrete)` —— **bool 不在**
+            // 整型表里，所以它也要把 `all_int` 打掉（否则 `[1, true]` 会静默放过）。
+            if chk_ty_is_int(et) == 0 {
                 all_int = 0;
             }
         }
@@ -2699,15 +2740,32 @@ fn chk_tex_atom_arr(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
         nd = 1;
     }
     while i2 < cnt {
+        if i2 == first_i {
+            i2 = i2 + 1;                     // `first` 已经算过一次
+        }
+        if i2 >= cnt {
+            i2 = cnt;
+        } else {
         let er2: u64 = chk_arr_elem(src, t, lo, i2);
+        let elo2: u32 = (er2 / 4294967296) as u32;
+        let lit2: u32 = 0;
+        if (er2 % 4294967296) as u32 == elo2 + 1 && chk_tok_kind(t, elo2) == 1 {
+            lit2 = 1;
+        }
         let et2: u32 = chk_tex(src, t, syms, n, env, envc, er2, tyt, p, oc);
-        if et2 != 0 {
+        if et2 != 0 && lit2 == 0 {
             let dup: u32 = 0;
             let i3: u32 = 0;
             while i3 < i2 {
                 let er3: u64 = chk_arr_elem(src, t, lo, i3);
+                let elo3: u32 = (er3 / 4294967296) as u32;
+                let lit3: u32 = 0;
+                if (er3 % 4294967296) as u32 == elo3 + 1 && chk_tok_kind(t, elo3) == 1 {
+                    lit3 = 1;
+                }
                 let et3: u32 = chk_tex(src, t, syms, n, env, envc, er3, tyt, p, oc);
-                if chk_ty_eq(tyt, et3, et2) == 1 {
+                // 裸整型字面量算"未知"，不参与去重（否则 `[1, true]` 会被算成两种实类型）。
+                if lit3 == 0 && chk_ty_eq(tyt, et3, et2) == 1 {
                     dup = 1;
                 }
                 i3 = i3 + 1;
@@ -2716,12 +2774,13 @@ fn chk_tex_atom_arr(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 nd = nd + 1;
             }
         }
+        }
         i2 = i2 + 1;
     }
     if nd > 1 {
-        chk_pub(src, t, oc, p, E_ARR, lo);                // 元素类型不一致
+        chk_pub(src, t, oc, p, 148, lo);                // 元素类型不一致
     } else if nd == 1 && has_unk == 1 && all_int == 0 {
-        chk_pub(src, t, oc, p, E_ARR, lo);                // 整型字面量混入非整型
+        chk_pub(src, t, oc, p, 149, lo);                // 整型字面量混入非整型
     }
     if first == 0 {
         return 0;
@@ -2738,14 +2797,14 @@ fn chk_tex_atom_enum(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
     let vtok: u32 = lo + 3;
     let slot: u32 = chk_lookup_slot(src, t, syms, n, etok);
     if slot == 0 || load32(syms, (slot - 1) * 20 + 4) != K_ENUM {
-        chk_pub(src, t, oc, p, E_TYPE, etok);             // 未知枚举
+        chk_pub(src, t, oc, p, 93, etok);             // 未知枚举
         chk_tex_sub(src, t, syms, n, env, envc, chk_lh(lo + 4, hi), tyt, p, oc);
         return 0;
     }
     let brc: u32 = load32(syms, (slot - 1) * 20 + 16);
     let vi: u32 = chk_evariant_idx(src, t, brc, vtok);
     if vi == 0 {
-        chk_pub(src, t, oc, p, E_PATTERN, vtok);          // 枚举 E 无变体 V
+        chk_pub(src, t, oc, p, 111, vtok);          // 枚举 E 无变体 V
         chk_tex_sub(src, t, syms, n, env, envc, chk_lh(lo + 4, hi), tyt, p, oc);
         return (TY_K_NAMED << TY_KIND_SHIFT) + (slot - 1);
     }
@@ -2756,7 +2815,7 @@ fn chk_tex_atom_enum(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
     }
     if ctor == 1 {
         if pr == 0 {
-            chk_pub(src, t, oc, p, E_PATTERN, vtok);      // 无载荷，不能带参数
+            chk_pub(src, t, oc, p, 112, vtok);      // 无载荷，不能带参数
             chk_tex_sub(src, t, syms, n, env, envc, chk_lh(lo + 5, hi), tyt, p, oc);
             return (TY_K_NAMED << TY_KIND_SHIFT) + (slot - 1);
         }
@@ -2768,7 +2827,7 @@ fn chk_tex_atom_enum(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
         if at != 0 {
             let pt: u32 = chk_ty_range(src, t, syms, n, tyt, plo, phi);
             if pt != 0 && chk_ty_eq(tyt, at, pt) == 0 {
-                chk_pub(src, t, oc, p, E_TMISMATCH, vtok);   // 载荷类型，声明为
+                chk_pub(src, t, oc, p, 46, vtok);   // 载荷类型，声明为
             }
         }
     } else {
@@ -2793,14 +2852,14 @@ fn chk_tex_atom_dot(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             && chk_match_paren(src, t, ftok + 1) == hi - 1 {
         let mslot: u32 = chk_lookup_method(src, t, syms, n, ot, ftok);
         if mslot == 0 {
-            chk_pub(src, t, oc, p, E_TYPE, ftok);         // 类型 X 没有方法 m
+            chk_pub(src, t, oc, p, 95, ftok);         // 类型 X 没有方法 m
             chk_tex_sub(src, t, syms, n, env, envc, chk_lh(ftok + 2, hi - 1), tyt, p, oc);
             return 0;
         }
         let want: u32 = load32(syms, (mslot - 1) * 20 + 8);
         let got: u32 = chk_count_args(src, t, ftok + 1);
         if want != got {
-            chk_pub(src, t, oc, p, E_ARITY, ftok);
+            chk_pub(src, t, oc, p, 98, ftok);
         }
         chk_tex_sub(src, t, syms, n, env, envc, chk_lh(ftok + 2, hi - 1), tyt, p, oc);
         return load32(syms, (mslot - 1) * 20 + 12);
@@ -2808,17 +2867,17 @@ fn chk_tex_atom_dot(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
     // 字段访问: 对象类型已知时判"是不是结构体/有没有这个字段"
     if ot != 0 {
         if chk_ty_kind(ot) != TY_K_NAMED {
-            chk_pub(src, t, oc, p, E_ACCESS, dot_at);     // 对非结构体类型取字段
+            chk_pub(src, t, oc, p, 141, dot_at);     // 对非结构体类型取字段
             return 0;
         }
         let s0: u32 = ot % (1 << TY_KIND_SHIFT);
         if load32(syms, s0 * 20 + 4) != K_STRUCT {
-            chk_pub(src, t, oc, p, E_ACCESS, dot_at);     // 具名但不是结构体
+            chk_pub(src, t, oc, p, 141, dot_at);     // 具名但不是结构体
             return 0;
         }
         let brc: u32 = load32(syms, s0 * 20 + 16);
         if chk_sfield_exists(src, t, brc, ftok) == 0 {
-            chk_pub(src, t, oc, p, E_ACCESS, ftok);       // 结构体 X 无字段 f
+            chk_pub(src, t, oc, p, 138, ftok);       // 结构体 X 无字段 f
             return 0;
         }
         // 字段在, 但类型可能未知 (泛型形参字段) -> 返回 0 而不是报错
@@ -2865,7 +2924,17 @@ fn chk_tex_atom_call(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
     if bin != 999999 {
         // 内建: 元数 (参考实现另有一条 slice_len 的实参类型规则)
         if bin != got {
-            chk_pub(src, t, oc, p, E_ARITY, lo);
+            // 细分码按**哪个内建**走（参考实现三条消息各一个码）：`slice_len` 99、
+            // `print_num` 100、其余内建 101。
+            let bcode: u32 = 101;
+            if chk_tok_is(src, t, lo, "slice_len") {
+                bcode = 99;
+            } else {
+                if chk_tok_is(src, t, lo, "print_num") {
+                    bcode = 100;
+                }
+            }
+            chk_pub(src, t, oc, p, bcode, lo);
         }
         let k: u32 = 0;
         while k < got {
@@ -2876,20 +2945,20 @@ fn chk_tex_atom_call(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             let wt: u32 = chk_builtin_arg(src, t, lo, k);
             if chk_tok_is(src, t, lo, "slice_len") {
                 if at != 0 && chk_ty_is_arr(tyt, at) == 0 && chk_ty_is_slc(tyt, at) == 0 {
-                    chk_pub(src, t, oc, p, E_TMISMATCH, lo);   // 不是数组或切片
+                    chk_pub(src, t, oc, p, 47, lo);   // 不是数组或切片
                 }
             } else if chk_tok_is(src, t, lo, "print_num") {
                 // 任意整型（字面量也行）；发射时按符号扩到 i64（`docs/296` §2.7）。
                 if at != 0 && chk_ty_is_int(at) == 0 {
-                    chk_pub(src, t, oc, p, E_TMISMATCH, lo);
+                    chk_pub(src, t, oc, p, 48, lo);
                 }
             } else if wt != 0 {
                 if at == 0 {
                     if chk_ty_is_int(wt) == 0 {
-                        chk_pub(src, t, oc, p, E_TMISMATCH, lo);   // 期望 X, 得到整型字面量
+                        chk_pub(src, t, oc, p, 49, lo);   // 期望 X, 得到整型字面量
                     }
                 } else if chk_ty_eq(tyt, at, wt) == 0 {
-                    chk_pub(src, t, oc, p, E_TMISMATCH, lo);       // 实参类型 X, 期望 W
+                    chk_pub(src, t, oc, p, 50, lo);       // 实参类型 X, 期望 W
                 }
             }
             k = k + 1;
@@ -2905,13 +2974,13 @@ fn chk_tex_atom_call(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             let t0: u32 = (er0 / 4294967296) as u32;
             if er0 != 0 {
                 if chk_tok_kind(t, t0) != 2 {
-                    chk_pub(src, t, oc, p, E_TMISMATCH, lo);       // 不是字符串字面量
+                    chk_pub(src, t, oc, p, 51, lo);       // 不是字符串字面量
                 } else {
                     let sl0: u32 = chk_lookup_lit_name(src, t, syms, n, t0);
                     if sl0 == 0 {
-                        chk_pub(src, t, oc, p, E_FN, lo);          // 未定义的函数
+                        chk_pub(src, t, oc, p, 97, lo);          // 未定义的函数
                     } else if load32(syms, (sl0 - 1) * 20 + 8) != 1 {
-                        chk_pub(src, t, oc, p, E_ARITY, lo);       // 形参不是一个
+                        chk_pub(src, t, oc, p, 102, lo);       // 形参不是一个
                     }
                 }
             }
@@ -2920,7 +2989,7 @@ fn chk_tex_atom_call(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
     }
     let slot: u32 = chk_lookup_slot(src, t, syms, n, lo);
     if slot == 0 {
-        chk_pub(src, t, oc, p, E_FN, lo);                 // 未定义的函数
+        chk_pub(src, t, oc, p, 96, lo);                 // 未定义的函数
         chk_tex_sub(src, t, syms, n, env, envc, chk_lh(lo + 2, hi - 1), tyt, p, oc);
         return 0;
     }
@@ -2959,16 +3028,16 @@ fn chk_tex_atom_call(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                     j2 = j2 + 1;
                 }
                 if k1 == 2 && nmut >= 1 && nsha >= 1 {
-                    chk_pub(src, t, oc, p, E_BORROW, lo);      // 既被可变借用又被借用
+                    chk_pub(src, t, oc, p, 108, lo);      // 同一次调用里既被可变借用又被借用
                 } else if nmut > 1 {
-                    chk_pub(src, t, oc, p, E_BORROW, lo);      // 被可变借用两次
+                    chk_pub(src, t, oc, p, 109, lo);      // 被可变借用两次
                 }
             }
         }
         i1 = i1 + 1;
     }
     if want != got {
-        chk_pub(src, t, oc, p, E_ARITY, lo);
+        chk_pub(src, t, oc, p, 103, lo);
     } else {
         let k2: u32 = 0;
         while k2 < got {
@@ -2978,7 +3047,7 @@ fn chk_tex_atom_call(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             if pt != 0 {
                 if at2 == 0 {
                     if chk_ty_is_int(pt) == 0 && chk_ty_is_slc(tyt, pt) == 0 {
-                        chk_pub(src, t, oc, p, E_TMISMATCH, lo);   // 期望 X, 得到整型字面量
+                        chk_pub(src, t, oc, p, 53, lo);   // 期望 X, 得到整型字面量
                     }
                 } else if chk_ty_eq(tyt, at2, pt) == 1 {
                     // 相等
@@ -2988,10 +3057,10 @@ fn chk_tex_atom_call(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 } else if chk_ty_is_slc(tyt, pt) == 1 && chk_ty_is_slc(tyt, at2) == 1
                         && chk_ty_eq(tyt, chk_ty_a(tyt, pt), chk_ty_a(tyt, at2)) == 1 {
                     if chk_ty_b(tyt, pt) == 1 && chk_ty_b(tyt, at2) == 0 {
-                        chk_pub(src, t, oc, p, E_SLICE, lo);      // 形参要求可变切片
+                        chk_pub(src, t, oc, p, 124, lo);      // 形参要求可变切片
                     }
                 } else {
-                    chk_pub(src, t, oc, p, E_TMISMATCH, lo);      // 实参类型 X, 期望 P
+                    chk_pub(src, t, oc, p, 54, lo);      // 实参类型 X, 期望 P
                 }
             }
             k2 = k2 + 1;
@@ -3026,7 +3095,7 @@ fn chk_tex_atom_struct(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
     let hi: u32 = chk_lhhi(lh);
     let slot: u32 = chk_lookup_slot(src, t, syms, n, lo);
     if slot == 0 || load32(syms, (slot - 1) * 20 + 4) != K_STRUCT {
-        chk_pub(src, t, oc, p, E_TYPE, lo);               // 未知结构体
+        chk_pub(src, t, oc, p, 94, lo);               // 未知结构体
         return 0;
     }
     let s0: u32 = slot - 1;
@@ -3039,7 +3108,7 @@ fn chk_tex_atom_struct(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
         // 字段名)又被置 0, 于是第二个字段永远查不到 (structlit-dup-field 少报就是这么来的)。
         if chk_sfield_head(src, t, j, lo, load32(oc, 8)) == 1 {
             if chk_sfield_exists(src, t, brc, j) == 0 {
-                chk_pub(src, t, oc, p, E_ACCESS, j);      // 结构体 X 无字段 f
+                chk_pub(src, t, oc, p, 138, j);      // 结构体 X 无字段 f
             } else {
                 // 重复初始化: 前面出现过同名字段（显式或简写都算）。
                 // **按字段走，不按 token 走**：值表达式里的 `f(1, a, 2)` 也有"逗号 + 标识符"，
@@ -3061,7 +3130,7 @@ fn chk_tex_atom_struct(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                     }
                 }
                 if dup == 1 {
-                    chk_pub(src, t, oc, p, E_ACCESS, j);  // 字段 f 重复初始化
+                    chk_pub(src, t, oc, p, 139, j);  // 字段 f 重复初始化
                 }
             }
             if chk_tok_is(src, t, j + 1, ":") {
@@ -3110,7 +3179,7 @@ fn chk_tex_atom_struct(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             if hit == 0 {
                 // 参考实现把"缺字段"报在**字面量**那一行上（`结构体 S 缺字段 b`），
                 // 不是字段声明那一行 —— `lo` 就是字面量的结构体名 token。
-                chk_pub(src, t, oc, p, E_ACCESS, lo);
+                chk_pub(src, t, oc, p, 140, lo);
             }
             fnames = 0;
         }
@@ -3460,6 +3529,29 @@ fn chk_find_at(src: ptr, t: ptr, i: u32, hi: u32, what: str) -> u32 {
     return hi;
 }
 
+/// match 表达式臂体的结束位置：深度 0 的 `,` 或收尾 `}`（`docs/336`）。
+fn chk_arm_end(src: ptr, t: ptr, start: u32, hi: u32) -> u32 {
+    let d: u32 = 0;
+    let k: u32 = start;
+    while k < hi && chk_tok_kind(t, k) != 4 {
+        if chk_tok_is(src, t, k, "(") || chk_tok_is(src, t, k, "[")
+                || chk_tok_is(src, t, k, "{") {
+            d = d + 1;
+        } else if chk_tok_is(src, t, k, ")") || chk_tok_is(src, t, k, "]") {
+            d = d - 1;
+        } else if chk_tok_is(src, t, k, "}") {
+            if d == 0 {
+                return k;
+            }
+            d = d - 1;
+        } else if d == 0 && chk_tok_is(src, t, k, ",") {
+            return k;
+        }
+        k = k + 1;
+    }
+    return k;
+}
+
 /// 2026.3 `for x in <call> {` 的形状：`for IDENT in IDENT ( … ) {`（`docs/334`）。
 /// 必须看配对的 `)` —— 只看 `j + 4` 是 `(` 会把区间 for 的调用下界
 /// （`for i in lo() .. hi() {`）误判成调用源。
@@ -3742,10 +3834,10 @@ fn chk_use(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 borrowed = 1;
             }
             if borrowed == 0 && chk_mv_has(src, t, tyt, j) == 1 {
-                chk_pub(src, t, oc, p, E_MOVE, j);      // 变量 X 已被移动, 不能再用
+                chk_pub(src, t, oc, p, 106, j);      // 变量 X 已被移动, 不能再用
             } else if borrowed == 0 && chk_fr_has(src, t, tyt, j) == 1
                     && chk_lms_c(src, t, tyt) == 1 {
-                chk_pub(src, t, oc, p, E_BOUND_FREE, j);   // 指向的块已经被 `free`, 不能再用
+                chk_pub(src, t, oc, p, 181, j);   // 指向的块已经被 `free`, 不能再用
             }
         }
         j = j + 1;
@@ -3813,7 +3905,7 @@ fn chk_moves(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                     let ei: u32 = chk_env_idx(src, t, env, envc, o1);
                     // 形参占环境前 npar 个槽位: `下标+1 > npar` 才是**局部**变量
                     if ei > load32(tyt, 3528) {
-                        chk_pub(src, t, oc, p, E_DANGLE, o1);
+                        chk_pub(src, t, oc, p, 126, o1);
                     }
                 }
             }
@@ -3873,7 +3965,7 @@ fn chk_moves(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 chk_use(src, t, syms, n, env, envc, chk_lh(eq2 + 1, semi2), tyt, p, oc);
                 // 给已移动的变量赋值 -> E006
                 if eq2 == j + 1 && chk_mv_has(src, t, tyt, j) == 1 {
-                    chk_pub(src, t, oc, p, E_MOVE, j);
+                    chk_pub(src, t, oc, p, 107, j);
                 }
                 if semi2 == eq2 + 2 {
                     let rt2: u32 = chk_name_ty(src, t, syms, n, env, envc, eq2 + 1);
@@ -4244,7 +4336,7 @@ fn chk_life_scan(src: ptr, t: ptr, tyt: ptr, lo: u32, hi: u32, p: ptr, oc: ptr) 
                 && chk_tok_kind(t, k + 2) == 0 && chk_tok_is(src, t, k + 3, ")") {
             let br: u32 = chk_tab_get(src, t, tyt, CHK_LR, CHK_LR_N, k + 2);
             if br != 4294967295 && (br & 1) == 1 {
-                chk_pub(src, t, oc, p, E_LIFETIME, k + 2);
+                chk_pub(src, t, oc, p, 195, k + 2);
             }
         }
         k = k + 1;
@@ -4286,9 +4378,9 @@ fn chk_life(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             let mk: u32 = chk_marker_of(src, t, tm);
             if mk != 0 {
                 if mode != 2 {
-                    chk_pub(src, t, oc, p, E_LIFETIME, mk);   // auto 档不许写标记
+                    chk_pub(src, t, oc, p, 192, mk);   // auto 档不许写标记
                 } else if chk_tab_get(src, t, tyt, CHK_LP, CHK_LP_N, mk) == 4294967295 {
-                    chk_pub(src, t, oc, p, E_LIFETIME, mk);   // 指向不存在的/非引用形参
+                    chk_pub(src, t, oc, p, 193, mk);   // 指向不存在的/非引用形参
                 }
             }
             jm = chk_skip_type(src, t, tm);
@@ -4303,9 +4395,9 @@ fn chk_life(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             let mk2: u32 = chk_marker_of(src, t, rt);
             if mk2 != 0 {
                 if mode != 2 {
-                    chk_pub(src, t, oc, p, E_LIFETIME, mk2);
+                    chk_pub(src, t, oc, p, 192, mk2);
                 } else if chk_tab_get(src, t, tyt, CHK_LP, CHK_LP_N, mk2) == 4294967295 {
-                    chk_pub(src, t, oc, p, E_LIFETIME, mk2);
+                    chk_pub(src, t, oc, p, 193, mk2);
                 }
             }
             if chk_ty_borrowish(src, t, syms, n, rt) == 1 {
@@ -4347,14 +4439,20 @@ fn chk_life(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                             && chk_tok_kind(t, eq + 3) == 0 {
                         let sm3: u32 = chk_tab_get(src, t, tyt, CHK_LR, CHK_LR_N, eq + 3);
                         if sm3 != 4294967295 && (sm3 & 6) != 0 {
-                            chk_pub(src, t, oc, p, E_BORROW, eq + 1);
+                            // 细分码：已经可变借过（位 2）-> 109 两次可变借；
+                            // 只借过只读（位 4）-> 110 可变借与只读借撞上。
+                            let bcode: u32 = 110;
+                            if (sm3 & 2) == 2 {
+                                bcode = 109;
+                            }
+                            chk_pub(src, t, oc, p, bcode, eq + 1);
                         }
                         chk_tab_or(src, t, tyt, CHK_LR, CHK_LR_N, CHK_LR_CAP, eq + 3, 2);
                     } else if chk_tok_is(src, t, eq + 1, "&")
                             && chk_tok_kind(t, eq + 2) == 0 {
                         let sm2: u32 = chk_tab_get(src, t, tyt, CHK_LR, CHK_LR_N, eq + 2);
                         if sm2 != 4294967295 && (sm2 & 2) == 2 {
-                            chk_pub(src, t, oc, p, E_BORROW, eq + 1);
+                            chk_pub(src, t, oc, p, 110, eq + 1);
                         } else {
                             chk_tab_or(src, t, tyt, CHK_LR, CHK_LR_N, CHK_LR_CAP, eq + 2, 4);
                         }
@@ -4376,14 +4474,14 @@ fn chk_life(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 let pv2: u32 = chk_life_prov(src, t, syms, n, env, envc, tyt,
                                              j2 + 1, semi2);
                 if direct == 0 && pv2 == 2 {
-                    chk_pub(src, t, oc, p, E_DANGLE, j2);
+                    chk_pub(src, t, oc, p, 126, j2);
                 }
                 // **返回借用，但签名里没有引用形参**（E041）：局部来源由 E012 说清根因，
                 // 不再叠一遍；**外部来源**（例如一个返回借用的调用）没有别的诊断，在这里
                 // 点名。与参考实现 `_lifetime_fn_errs` 的 `ret_is_borrow and not has_ref
                 // and not any(kind == "l")` 同一条。
                 if retb == 1 && load32(tyt, CHK_LP_N) == 0 && pv2 != 2 {
-                    chk_pub(src, t, oc, p, E_LIFETIME, j2);
+                    chk_pub(src, t, oc, p, 196, j2);
                 }
                 // 借用登记 + 释放点
                 chk_life_scan(src, t, tyt, j2 + 1, semi2, p, oc);
@@ -4523,7 +4621,7 @@ fn chk_match(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
         lit = 1;
     }
     if eslot == 0 && (lit == 1 || (st != 0 && chk_ty_kind(st) != TY_K_NAMED)) {
-        chk_pub(src, t, oc, p, E_PATTERN, j);
+        chk_pub(src, t, oc, p, 113, j);
     }
     let brc: u32 = 0;
     if eslot != 0 {
@@ -4546,16 +4644,16 @@ fn chk_match(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             if eslot != 0 {
                 let pslot: u32 = chk_lookup_slot(src, t, syms, n, ptok);
                 if pslot != eslot {
-                    chk_pub(src, t, oc, p, E_PATTERN, j);         // 模式与主体枚举不符
+                    chk_pub(src, t, oc, p, 114, j);         // 模式与主体枚举不符
                 } else if chk_evariant_idx(src, t, brc, vtok) == 0 {
-                    chk_pub(src, t, oc, p, E_PATTERN, j);         // 无此变体
+                    chk_pub(src, t, oc, p, 111, j);         // 无此变体
                 } else {
                     let pr: u64 = chk_epayload_range(src, t, brc, vtok);
                     if pr != 0 && bnd == 0 {
-                        chk_pub(src, t, oc, p, E_PATTERN, j);     // 有载荷需绑定变量
+                        chk_pub(src, t, oc, p, 115, j);     // 有载荷需绑定变量
                     }
                     if pr == 0 && bnd != 0 {
-                        chk_pub(src, t, oc, p, E_PATTERN, j);     // 无载荷不能绑定
+                        chk_pub(src, t, oc, p, 116, j);     // 无载荷不能绑定
                     }
                     let cbind: u32 = envc;
                     if pr != 0 && bnd != 0 {
@@ -4580,7 +4678,7 @@ fn chk_match(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                         if chk_tok_kind(t, k3) == 0 && chk_tok_is(src, t, k3 + 1, ":")
                                 && chk_tok_is(src, t, k3 + 2, ":")
                                 && same(src, t, k3, ptok) && same(src, t, k3 + 3, vtok) {
-                            chk_pub(src, t, oc, p, E_PATTERN, j);
+                            chk_pub(src, t, oc, p, 117, j);
                         }
                         k3 = k3 + 1;
                     }
@@ -4610,7 +4708,7 @@ fn chk_match(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                     k4 = k4 + 1;
                 }
                 if hit == 0 {
-                    chk_pub(src, t, oc, p, E_PATTERN, j);         // match 不穷尽
+                    chk_pub(src, t, oc, p, 118, j);         // match 不穷尽
                 }
                 at_name = 0;
             }
@@ -4703,7 +4801,7 @@ fn chk_bdom_one(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             if m == 1 && same(src, t, j, st) && chk_tok_is(src, t, j + 1, "[") {
                 let cb: u32 = chk_match_bracket(src, t, j + 1);
                 if chk_tok_is(src, t, cb + 1, "=") {
-                    chk_pub(src, t, oc, out, E_LIFETIME, j);
+                    chk_pub(src, t, oc, out, 197, j);
                 }
             }
             // R2a：共享域不许写 —— `storeN(xs, …)`
@@ -4711,13 +4809,13 @@ fn chk_bdom_one(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                           || chk_tok_is(src, t, j, "store32")
                           || chk_tok_is(src, t, j, "store64")) {
                 if chk_tok_is(src, t, j + 1, "(") && same(src, t, j + 2, st) {
-                    chk_pub(src, t, oc, out, E_LIFETIME, j);
+                    chk_pub(src, t, oc, out, 197, j);
                 }
             }
             // R3：借用期间不能 free
             if chk_tok_is(src, t, j, "free") && chk_tok_is(src, t, j + 1, "(")
                     && same(src, t, j + 2, st) && chk_tok_is(src, t, j + 3, ")") {
-                chk_pub(src, t, oc, out, E_LIFETIME, j);
+                chk_pub(src, t, oc, out, 198, j);
             }
             // R2b：独占域里不许再借（`&` / `&mut`）
             if m == 2 && chk_tok_is(src, t, j, "&") {
@@ -4726,7 +4824,7 @@ fn chk_bdom_one(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                     q = q + 1;
                 }
                 if same(src, t, q, st) {
-                    chk_pub(src, t, oc, out, E_LIFETIME, j);
+                    chk_pub(src, t, oc, out, 199, j);
                 }
             }
             // 期 2 window / split：字面量下标越界
@@ -4746,13 +4844,13 @@ fn chk_bdom_one(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                         q2 = q2 + 1;
                     }
                     if same(src, t, q2, st) {
-                        chk_pub(src, t, oc, out, E_LIFETIME, j);
+                        chk_pub(src, t, oc, out, 201, j);
                     }
                 }
             }
             // 期 3 loan：块内不能用被借出的名字（块外恢复）
             if m == 6 && same(src, t, j, st) {
-                chk_pub(src, t, oc, out, E_LIFETIME, j);
+                chk_pub(src, t, oc, out, 202, j);
             }
             // 期 3 epoch：块里借出去的值不能 `return` 带出
             if m == 7 && chk_tok_is(src, t, j, "return") {
@@ -4761,7 +4859,7 @@ fn chk_bdom_one(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 while q7 < rb && d7 == 0 && !chk_tok_is(src, t, q7, ";")
                         && !chk_tok_is(src, t, q7, "}") {
                     if chk_tok_is(src, t, q7, "&") {
-                        chk_pub(src, t, oc, out, E_LIFETIME, q7);
+                        chk_pub(src, t, oc, out, 203, q7);
                         d7 = 1;
                     }
                     q7 = q7 + 1;
@@ -4771,7 +4869,7 @@ fn chk_bdom_one(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             if m == 8 && same(src, t, j, st) {
                 sess_n = sess_n + 1;
                 if sess_n == 2 {
-                    chk_pub(src, t, oc, out, E_LIFETIME, j);
+                    chk_pub(src, t, oc, out, 204, j);
                 }
             }
             // R3：`return … & [mut] xs` 不能带出域
@@ -4802,7 +4900,7 @@ fn chk_bdom_one(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
         let q8: u32 = rb + 1;
         while q8 < e && chk_tok_kind(t, q8) != 4 {
             if m == 8 && same(src, t, q8, st) {
-                chk_pub(src, t, oc, out, E_LIFETIME, q8);
+                chk_pub(src, t, oc, out, 205, q8);
             }
             // seal：块外把 buf 交给系统调用（`syscall*`）—— `extern fn` 那一支要符号
             // 表，自举侧今天没有，边界写在 `docs/318`。
@@ -4811,7 +4909,7 @@ fn chk_bdom_one(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 let d9: u32 = 0;
                 while q9 < e && d9 == 0 && !chk_tok_is(src, t, q9, ")") {
                     if same(src, t, q9, st) {
-                        chk_pub(src, t, oc, out, E_LIFETIME, q8);
+                        chk_pub(src, t, oc, out, 206, q8);
                         d9 = 1;
                     }
                     q9 = q9 + 1;
@@ -5091,7 +5189,7 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             // 上限（"a defer takes at most 4 arguments"）—— 方向完全错了。
             let semi: u32 = chk_find_at(src, t, j, e, ";");
             if chk_tok_kind(t, j + 1) != 0 || !chk_tok_is(src, t, j + 2, "(") {
-                chk_pub(src, t, oc, p, E_PARSE, j);
+                chk_pub(src, t, oc, p, 155, j);
             }
             if semi <= e {
                 j = semi + 1;
@@ -5205,7 +5303,7 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 let ct: u32 = chk_tex(src, t, syms, n, env, c,
                                       (nx as u64) * 4294967296 + (lb as u64), tyt, p, oc);
                 if ct != 0 && ct != TY_BOOL {
-                    chk_pub(src, t, oc, p, E_TMISMATCH, j);
+                    chk_pub(src, t, oc, p, 60, j);
                 }
                 j = lb;
             } else {
@@ -5249,20 +5347,62 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                         chk_tex(src, t, syms, n, env, c,
                                 ((eb3 + 1) as u64) * 4294967296 + (ee3 as u64), tyt, p, oc);
                     }
+                } else if chk_tok_is(src, t, eq + 1, "match") {
+                    // 2026.3 `let x: T = match e { P => a, _ => b };`（`docs/336`）。
+                    if load32(oc, 8) < 2 {
+                        chk_pub(src, t, oc, p, E_PARSE, eq + 1);
+                    } else {
+                        chk_tex(src, t, syms, n, env, c, chk_lh(eq + 2, eq + 3), tyt, p, oc);
+                        let mcl: u32 = chk_match_brace(src, t, eq + 3);
+                        let a: u32 = eq + 4;
+                        let stopa: u32 = mcl;
+                        while a < stopa && chk_tok_kind(t, a) != 4 {
+                            let bind: u32 = 0;
+                            if chk_tok_kind(t, a) == 0 && !chk_tok_is(src, t, a, "_") {
+                                if chk_tok_is(src, t, a + 4, "(") {
+                                    bind = a + 5;
+                                }
+                            }
+                            let pdot: u32 = chk_find_at(src, t, a, stopa, ">");
+                            let bend: u32 = stopa;
+                            if pdot < stopa {
+                                let bstart: u32 = pdot + 1;
+                                bend = chk_arm_end(src, t, bstart, stopa);
+                                if bind != 0 {
+                                    let c2: u32 = chk_env_add(t, env, c, bind, 0);
+                                    chk_tex(src, t, syms, n, env, c2,
+                                            ((bstart) as u64) * 4294967296 + (bend as u64), tyt, p, oc);
+                                } else {
+                                    chk_tex(src, t, syms, n, env, c,
+                                            ((bstart) as u64) * 4294967296 + (bend as u64), tyt, p, oc);
+                                }
+                            }
+                            a = bend;
+                            if chk_tok_is(src, t, a, ",") {
+                                a = a + 1;
+                            }
+                        }
+                    }
                 } else {
                     // `=` 后面必须能开始一个表达式 (`let v: u32 = @ 1;`，issue #395/#49 的表达式那半)
                     if !chk_expr_start(src, t, eq + 1, load32(oc, 8)) {
                         chk_pub(src, t, oc, p, E_PARSE, eq + 1);
                     }
+                    // **空数组字面量**（`= []`）在这里点名：参考实现是在 `_walk_expr` 的
+                    // ArrayLit 支上报的，自举侧的同一条在 `chk_tex_atom_arr` 里，而这条
+                    // 路径上它不一定走到 —— 两处报的是同一件事，所以码相同（147）。
+                    if chk_tok_is(src, t, eq + 1, "[") && chk_tok_is(src, t, eq + 2, "]") {
+                        chk_pub(src, t, oc, p, 147, eq + 1);
+                    }
                     let t2: u32 = chk_tex(src, t, syms, n, env, c,
                                           ((eq + 1) as u64) * 4294967296 + (semi as u64), tyt, p, oc);
                     if t2 != 0 && dty != 0 && chk_ty_eq(tyt, t2, dty) == 0 {
-                        chk_pub(src, t, oc, p, E_TMISMATCH, nm);
+                        chk_pub(src, t, oc, p, 58, nm);
                     }
                     // 数组长度 (参考实现只在"声明是数组 且 字面量是数组"时比)
                     if chk_ty_is_arr(tyt, dty) == 1 && chk_tok_is(src, t, eq + 1, "[") {
                         if chk_ty_b(tyt, dty) != chk_arr_count(src, t, eq + 1) {
-                            chk_pub(src, t, oc, p, E_ARR, nm);
+                            chk_pub(src, t, oc, p, 150, nm);
                         }
                     }
                 }
@@ -5278,15 +5418,18 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             let semi: u32 = chk_find_at(src, t, j + 1, e, ";");
             if semi == j + 1 {
                 // 裸 `return;`（`docs/296` §2.6）：只在 Tur 2 且函数**没有返回类型**时成立。
-                // Tur 1 / 有返回类型的函数里，参考实现是解析期就拒（E019）。
-                if load32(oc, 8) == 0 || ret != 0 {
-                    chk_pub(src, t, oc, p, E_PARSE, semi);
+                // Tur 1 里参考实现在**解析期**就拒（E019），所以这一格报 19（族），
+                // 153（"`return;` 不带值"）只留给 Tur 2 且声明了返回类型的情形。
+                if load32(oc, 8) == 0 {
+                    chk_pub(src, t, oc, p, 19, semi);
+                } else if ret != 0 {
+                    chk_pub(src, t, oc, p, 153, semi);
                 }
             } else {
                 let t3: u32 = chk_tex(src, t, syms, n, env, c,
                                       ((j + 1) as u64) * 4294967296 + (semi as u64), tyt, p, oc);
                 if t3 != 0 && ret != 0 && chk_ty_eq(tyt, t3, ret) == 0 {
-                    chk_pub(src, t, oc, p, E_TMISMATCH, j);
+                    chk_pub(src, t, oc, p, 67, j);
                 }
             }
             if semi <= e {
@@ -5326,7 +5469,12 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 let ct: u32 = chk_tex(src, t, syms, n, env, c,
                                       ((j + 1) as u64) * 4294967296 + (lb as u64), tyt, p, oc);
                 if ct != 0 && ct != TY_BOOL {
-                    chk_pub(src, t, oc, p, E_TMISMATCH, j);
+                    // 细分码：`if` 60 / `while` 61。
+                    let ccode: u32 = 60;
+                    if chk_tok_is(src, t, j, "while") {
+                        ccode = 61;
+                    }
+                    chk_pub(src, t, oc, p, ccode, j);
                 }
                 j = lb;
             } else {
@@ -5428,10 +5576,10 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                                ((d1 + 2) as u64) * 4294967296 + (lb2 as u64), tyt, p, oc);
             }
             if lo_t != 0 && chk_ty_is_int(lo_t) == 0 {
-                chk_pub(src, t, oc, p, E_TMISMATCH, j);
+                chk_pub(src, t, oc, p, 66, j);
             }
             if hi_t != 0 && chk_ty_is_int(hi_t) == 0 {
-                chk_pub(src, t, oc, p, E_TMISMATCH, j);
+                chk_pub(src, t, oc, p, 66, j);
             }
             let vt: u32 = lo_t;
             if vt == 0 {
@@ -5479,7 +5627,7 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                                           (j as u64) * 4294967296 + ((j + 1) as u64),
                                           tyt, p, oc);
                     if chk_ty_is_slc(tyt, ot) == 1 && chk_ty_b(tyt, ot) == 0 {
-                        chk_pub(src, t, oc, p, E_SLICE, j);
+                        chk_pub(src, t, oc, p, 125, j);
                     }
                 }
                 // 写穿（`docs/299` §3.4 / §3.8）：`x.f = v` 与 `*r = v` 在生命周期档
@@ -5496,19 +5644,19 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 }
                 if is_ident == 1 {
                     if chk_env_get(src, t, env, c, j) == 0 {
-                        chk_pub(src, t, oc, p, E_TYPE, j);        // 赋值未声明的变量
+                        chk_pub(src, t, oc, p, 92, j);        // 赋值未声明的变量
                     }
                 } else if is_index == 0 {
                     if is_field == 1 || is_deref == 1 {
                         if chk_life_mode(src, t, load32(oc, 8)) == 0 {
-                            chk_pub(src, t, oc, p, E_LVAL, j);
+                            chk_pub(src, t, oc, p, 137, j);
                         }
                     } else {
-                        chk_pub(src, t, oc, p, E_LVAL, j);        // 赋值目标不是左值
+                        chk_pub(src, t, oc, p, 137, j);        // 赋值目标不是左值
                     }
                 }
                 if tt != 0 && et != 0 && chk_ty_eq(tyt, tt, et) == 0 {
-                    chk_pub(src, t, oc, p, E_TMISMATCH, j);
+                    chk_pub(src, t, oc, p, 59, j);
                 }
             } else {
                 // 表达式语句: 遍历它 (调用里的实参/字段/下标错误都在里面)
@@ -5524,7 +5672,7 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 if semi2 == j + 1 && chk_tok_kind(t, j) == 0
                         && !chk_tok_is(src, t, j, "tick") {
                     if chk_env_get(src, t, env, c, j) == 0 {
-                        chk_pub(src, t, oc, p, E_TYPE, j);
+                        chk_pub(src, t, oc, p, 91, j);
                     }
                 }
             }
@@ -5965,7 +6113,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
             let r1: u64 = scan_params(src, t, syms, n, lp, out, o, scr);
             o = (r1 % 4294967296) as u32;
             if rtok != 0 {
-                let r2: u64 = check_type(src, t, syms, n, rtok, out, o);
+                let r2: u64 = check_type(src, t, syms, n, rtok, out, o, 184);   // 函数返回类型
                 o = (r2 % 4294967296) as u32;
             }
             // 复合类型表按**函数**清零 —— 与 impl 方法那条路 (2932) 同一件事。
@@ -5979,7 +6127,12 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
             // 声明体这一遍**真正解析** (字段/变体重名与类型、空类型), 不再整块跳过。
             let is_enum: bool = chk_tok_is(src, t, i, "enum");
             if is_base_type(src, t, i + 1) == 1 {
-                o = sym_pub(src, t, out, o, E_DEF, i + 1);   // 与基类型同名 (参考实现 E009)
+                // 细分码：结构体 119 / 枚举 121。
+                let bcode: u32 = 119;
+                if is_enum {
+                    bcode = 121;
+                }
+                o = sym_pub(src, t, out, o, bcode, i + 1);
             }
             let lb: u32 = chk_find_brace(src, t, i + 1);
             if is_enum {
@@ -6053,7 +6206,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                 // 常量**不做** check_type: 参考实现的常量只查"类型必须是整型"
                 // (`const C: Foo = 1;` 只报 E001, 不报"类型未声明") —— 多报就是假阳性。
                 if chk_is_int(src, t, i + 3) == 0 {
-                    o = sym_pub(src, t, out, o, E_TMISMATCH, i + 3);
+                    o = sym_pub(src, t, out, o, 57, i + 3);
                 }
             }
             i = i + 4;
@@ -6071,47 +6224,47 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                 if nch_mode > 1 {
                     // **按维**判重复: 参考实现也是逐维说的 —— 两维各一份是合法的。
                     // 锚在第二次出现的那一行上 (第一次的行号写进消息里)。
-                    o = sym_pub(src, t, out, o, E_MODE, i);
+                    o = sym_pub(src, t, out, o, 159, i);
                 }
             } else if dim == 1 {
                 nch_gc = nch_gc + 1;
                 v_gc = chk_core_val(src, t, i + 1);
                 ln_gc = i;
                 if nch_gc > 1 {
-                    o = sym_pub(src, t, out, o, E_MODE, i);
+                    o = sym_pub(src, t, out, o, 159, i);
                 }
             } else if dim == 2 {
                 nch_rt = nch_rt + 1;
                 v_rt = chk_core_val(src, t, i + 1);
                 ln_rt = i;
                 if nch_rt > 1 {
-                    o = sym_pub(src, t, out, o, E_MODE, i);
+                    o = sym_pub(src, t, out, o, 159, i);
                 }
             } else if dim == 3 {
                 nch_port = nch_port + 1;
                 v_port = chk_core_val(src, t, i + 1);
                 ln_port = i;
                 if nch_port > 1 {
-                    o = sym_pub(src, t, out, o, E_MODE, i);
+                    o = sym_pub(src, t, out, o, 159, i);
                 }
             } else if dim == 4 {
                 nch_vm = nch_vm + 1;
                 v_vm = chk_core_val(src, t, i + 1);
                 ln_vm = i;
                 if nch_vm > 1 {
-                    o = sym_pub(src, t, out, o, E_MODE, i);
+                    o = sym_pub(src, t, out, o, 159, i);
                 }
             } else if dim == 5 {
                 // 第六维（`docs/253`）：`lms`。**只有重复要判** —— 它没有冲突对。
                 nch_lms = nch_lms + 1;
                 if nch_lms > 1 {
-                    o = sym_pub(src, t, out, o, E_MODE, i);
+                    o = sym_pub(src, t, out, o, 159, i);
                 }
             } else if dim == 6 {
                 // 第七维（`docs/262`）：`lspe`。**只有重复要判** —— 它没有冲突对。
                 nch_lspe = nch_lspe + 1;
                 if nch_lspe > 1 {
-                    o = sym_pub(src, t, out, o, E_MODE, i);
+                    o = sym_pub(src, t, out, o, 159, i);
                 }
             } else if dim == 7 {
                 // 第八维（`docs/299`）：`lifetime`。**重复** + **版次闸**：
@@ -6121,16 +6274,16 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                 v_lifetime = chk_core_val(src, t, i + 1);
                 ln_lifetime = i;
                 if nch_lifetime > 1 {
-                    o = sym_pub(src, t, out, o, E_MODE, i);
+                    o = sym_pub(src, t, out, o, 159, i);
                 } else if prof < 2 {
-                    o = sym_pub(src, t, out, o, E_MODE, i);
+                    o = sym_pub(src, t, out, o, 158, i);
                 }
             } else if dim == 8 {
                 // 维度后的槽（`docs/262` §10.7）：与主取值**正交**，所以不和 `lspe`
                 // 共用一个计数；同一格写两次仍然没有答案。
                 nch_ai = nch_ai + 1;
                 if nch_ai > 1 {
-                    o = sym_pub(src, t, out, o, E_MODE, i);
+                    o = sym_pub(src, t, out, o, 159, i);
                 }
             } else {
                 // 不是核心模式的取值 —— 与改之前那条同形
@@ -6174,15 +6327,15 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     // **`no_gc` 不是第 4 个"更自动"的档** —— 判"自动档"必须按值 2/3 写死，
     // 不能写 `>= 2`（那会把 `no_gc`(4) 也算进去，与它自己"不带收集器"的声明相反）。
     if eff_mode == 2 && (eff_gc == 2 || eff_gc == 3) {
-        o = sym_pub(src, t, out, o, E_MODE, later_line(ln_mode, ln_gc));
+        o = sym_pub(src, t, out, o, 161, later_line(ln_mode, ln_gc));
     }
     // (mode, port)：`no_std` 说"底下没有东西"，`hosted` 说"往下链东西"（`docs/222` §4.2）。
     if eff_mode == 2 && eff_port == 2 {
-        o = sym_pub(src, t, out, o, E_MODE, later_line(ln_mode, ln_port));
+        o = sym_pub(src, t, out, o, 161, later_line(ln_mode, ln_port));
     }
     // (mode, runtime) 那一对今天没有冲突 —— 留个位置说明它被想过，不是漏了。
     if (eff_gc == 2 || eff_gc == 3) && eff_rt == 2 {
-        o = sym_pub(src, t, out, o, E_MODE, later_line(ln_gc, ln_rt));
+        o = sym_pub(src, t, out, o, 161, later_line(ln_gc, ln_rt));
     }
     // ---- **运行期维的强保证**（`docs/217`）：`no_runtime`（默认）说"产物里没有运行期"，
     // 所以凡是会把那段运行期拖进产物的构造，在**这一档下**编译期点名拒。
@@ -6210,12 +6363,14 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
         // 报文的"这一类构造本单元另有 N 处"用它（issue #321）。
         store32(tyt, RT_N_SITES, nsites);
         if nsites > 0 {
-            o = sym_pub(src, t, out, o, E_RT, hit);
+            // 2026-11-11：参考实现那一侧这条诊断细分成了 **208**（单元自己用了会拖
+            // 运行期的构造；依赖用了没声明需求是 188），所以这里直接写数。
+            o = sym_pub(src, t, out, o, 208, hit);
         }
     }
     // (gc, port)：混合档的 L2 是前沿回卷，C 库手里的指针在 Loment 的栈之外（`docs/219` §6.1）。
     if eff_gc == 3 && eff_port == 2 {
-        o = sym_pub(src, t, out, o, E_MODE, later_line(ln_gc, ln_port));
+        o = sym_pub(src, t, out, o, 161, later_line(ln_gc, ln_port));
     }
     // ---- **`lgc` 与 `no_gc` 冲突**（`docs/309`，E039）：`no_gc` 的定义是「产物里没有
     // 收集器」，而 `lgc` 的每一条语句都在控制那个收集器何时跑 —— 两句话不能同时为真。
@@ -6230,7 +6385,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                     && chk_tok_kind(t, gl + 1) == 0
                     && (chk_tok_is(src, t, gl + 1, "start")
                         || chk_tok_is(src, t, gl + 1, "end")) {
-                o = sym_pub(src, t, out, o, E_LGC, gl);
+                o = sym_pub(src, t, out, o, 189, gl);
                 ghit = 1;
             }
             gl = gl + 1;
@@ -6325,7 +6480,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
             // 后面跟的是 `::` 而不是 `:`) —— 不排掉就会把 `::` 里的第二个 `:` 当类型报 E-TYPE。
             if chk_tok_is(src, t, i, "let") && !(i > 0 && chk_tok_is(src, t, i - 1, "if")) {
                 // let NAME ':' TYPE —— TYPE 未声明 -> E-TYPE
-                let r6: u64 = check_type(src, t, syms, n, i + 3, out, o);
+                let r6: u64 = check_type(src, t, syms, n, i + 3, out, o, 186);  // let 的类型
                 o = (r6 % 4294967296) as u32;
             }
             // 调用检查: `ident (` 才算, 且要排掉四类**看起来像调用其实不是**的东西 ——
@@ -6354,7 +6509,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                     // 与 `docs/208` 那条**保密**读法（"我不会把数据送出去"，由 M41 那一族管）
                     // 不是一件事 —— 这里只判"开了没有"。
                     if chk_syscall_net(src, t, i) == 1 && chk_excl_net(src, t, exs, nexs) == 1 {
-                        o = sym_pub(src, t, out, o, E_EXCL, i);
+                        o = sym_pub(src, t, out, o, 105, i);
                     }
                     let want_b: u32 = chk_builtin_arity(src, t, i);
                     let wb2: u32 = want_b;
@@ -6365,19 +6520,29 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                         wb2 = 1;
                     }
                     if wb2 != 999999 {
-                        // 内建: 只查实参个数 (形参类型那一半属于表达式类型批次)
+                        // 内建: 只查实参个数 (形参类型那一半属于表达式类型批次)。
+                        // 细分码与表达式那一趟一致：`slice_len` 99 / `print_num` 100 /
+                        // 其余内建 101。
                         if wb2 != chk_count_args(src, t, i + 1) {
-                            o = sym_pub(src, t, out, o, E_ARITY, i);
+                            let bcode: u32 = 101;
+                            if chk_tok_is(src, t, i, "slice_len") {
+                                bcode = 99;
+                            } else {
+                                if chk_tok_is(src, t, i, "print_num") {
+                                    bcode = 100;
+                                }
+                            }
+                            o = sym_pub(src, t, out, o, bcode, i);
                         }
                     } else {
                         let slot: u32 = chk_lookup_slot(src, t, syms, n, i);
                         if slot == 0 {
-                            o = sym_pub(src, t, out, o, E_FN, i);
+                            o = sym_pub(src, t, out, o, 96, i);
                         } else {
                             let want: u32 = load32(syms, (slot - 1) * 20 + 8);
                             let got: u32 = chk_count_args(src, t, i + 1);
                             if want != got {
-                                o = sym_pub(src, t, out, o, E_ARITY, i);
+                                o = sym_pub(src, t, out, o, 103, i);
                             }
                         }
                     }
@@ -6459,7 +6624,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                 if chk_fn_has_body(src, t, i) == 1
                         && chk_ret_unit(src, t, lp2, fbra) == 0
                         && chk_falls(src, t, fbra, fend - 1) == 1 {
-                    o = sym_pub(src, t, out, o, E_FALL, i);
+                    o = sym_pub(src, t, out, o, 179, i);
                 }
                 i = fend;
             } else {
@@ -6611,28 +6776,33 @@ fn chk_command(src: ptr, t: ptr, out: ptr, o: u32, scr: ptr) -> u32 {
         // 名字已经抄进 `scr`（`lex_cmd_label` 剥了引号），所以这两条读的是**暂存**不是
         // 源文件 —— 读源文件等于拿文件开头那几十个字节当名字（实测：`module m` 被当成
         // 名字，于是"非法名字"漏报、合法名字反而报）。
-        if nl == 0 || !cmd_name_ok(scr, 0, nl) || cmd_reserved(scr, 0, nl) {
-            o = sym_pub(src, t, out, o, E_CMD_DECL, lt - 1);
+        // 细分码：**扫不到字面量** 172（形状不对）/ 名字不合法 174 / 官方命令名 173。
+        if nl == 0 {
+            o = sym_pub(src, t, out, o, 172, lt - 1);
+        } else if !cmd_name_ok(scr, 0, nl) {
+            o = sym_pub(src, t, out, o, 174, lt - 1);
+        } else if cmd_reserved(scr, 0, nl) {
+            o = sym_pub(src, t, out, o, 173, lt - 1);
         }
     }
     // 2) `command_main` 却没有声明 —— 死代码（静默失效）。
     if cm > 0 && lt == 0 {
-        o = sym_pub(src, t, out, o, E_CMD_BODY, cm - 1);
+        o = sym_pub(src, t, out, o, 177, cm - 1);
     }
     // 3) 两个入口 / 签名不对。**互斥**（与参考实现同顺序：有 `_start` 报入口冲突，
     //    没 `_start` 才轮到签名）。
     if cm > 0 {
         if st > 0 {
-            o = sym_pub(src, t, out, o, E_CMD_ENTRY, cm - 1);
+            o = sym_pub(src, t, out, o, 175, cm - 1);
         } else if !cmd_main_sig_ok(src, t, cm - 1) {
-            o = sym_pub(src, t, out, o, E_CMD_BODY, cm - 1);
+            o = sym_pub(src, t, out, o, 178, cm - 1);
         }
     }
     // 4) 反向那一半：**声明了**却没有 `command_main` —— 工具链生成的 `_start` 要调它，
     //    没有它就只能等到**链接**（未定义符号）才炸。码用同一个（两半少一半，修法都是
     //    把两半凑齐）—— 与参考实现那一条逐字对齐。
     if lt > 0 && cm == 0 {
-        o = sym_pub(src, t, out, o, E_CMD_BODY, lt - 1);
+        o = sym_pub(src, t, out, o, 176, lt - 1);
     }
     return o;
 }

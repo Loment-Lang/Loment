@@ -158,15 +158,6 @@ EXPLAINED: dict[tuple[str, str], str] = {
         "**检测点，不是写入点**（`#485`）：`if mlen >= MSG_CAP` 判的是「这条消息有没有"
         "被拷满」，判到了就印 `truncated` / 写 `\"truncated\": true`。越界在这里不是"
         "写穿，而是这条判据要回答的问题",
-    ("loment/tools/turegg.lomt", "EG_MAT_CAP"):
-        "机器材料缓冲上限（8 KiB）：三处写前都判 `n + X <= EG_MAT_CAP`，超了只是少收"
-        "一段、解不开锁（`return 1`），不写穿",
-    ("loment/tools/turegg.lomt", "EG_BIN_HEAD"):
-        "自二进制前 4 KiB 的读长度：落在 `EG_MAT_CAP` 之内；读不满只是少收一段",
-    ("loment/tools/turegg.lomt", "EG_UNAME_LEN"):
-        "`uname` 结构固定 390 字节：写前判 `n + 390 <= EG_MAT_CAP`",
-    ("loment/tools/turegg.lomt", "literal:520"):
-        "画布格数 13×40：`p < 520` 只读散表、不写缓冲；数据表本身就是 520 格",
     # ---- `#774`（2026-10-19）：自举编译器剩下的那些"越界由调用方报"或"步长不是容量"。
     # 每一条都指着**真实存在的失败消息**（行号会漂，所以引的是消息原文）——
     # 用来核对的是"那句话还在不在"，不是"这一行还是不是那个数"。

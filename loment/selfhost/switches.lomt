@@ -185,6 +185,11 @@ pub fn sw_is_core(unit: ptr, toks: ptr, k: u32) -> bool {
     if sw_tok_is(unit, toks, k, "lms_manage_only_admin") {
         return true;
     }
+    // `lms_close_admin`（七级全关，用户 2026-11-10）。
+    // 「O FUCK WHAT A PUSSY, CLOSE THAT FUCKING LMS」
+    if sw_tok_is(unit, toks, k, "lms_close_admin") {
+        return true;
+    }
     // 第七维（`docs/262`，用户 2026-10-18）：`lspe_open_admin` / `lspe_close_admin` ——
     // **要不要安全审计**。与其它六维正交：它不改变判决，只决定台账在不在。
     // ⚠ 同一处漏了会静默：`choose lspe_*` 会被当成**开关**去查开关表 ⇒ E022（码对、理由错），
@@ -336,11 +341,11 @@ pub fn err_max() -> u32 { return ERR_CAP * 8; }
 ///
 /// **满了就不写、偏移也不动**（`#663`）：丢掉的那条由 `chk_pub` 数进"丢了多少"那一格，
 /// 再由驱动器说出来。写穿比丢弃坏得多 —— 写穿改的是别人的活数据。
-pub fn sw_err(errs: ptr, o: u32, tok: u32) -> u32 {
+pub fn sw_err(errs: ptr, o: u32, tok: u32, code: u32) -> u32 {
     if o >= err_max() {
         return o;
     }
-    store32(errs, o, E022);
+    store32(errs, o, code);
     store32(errs, o + 4, tok);
     return o + 8;
 }
@@ -521,12 +526,12 @@ pub fn switch_rules(unit: ptr, toks: ptr, sw: ptr, errs: ptr, o: u32) -> u32 {
     let n: u32 = o;
     // 超上限（**绝不静默丢** —— 与 `use` 的 300 条同一条纪律）
     if ns > MAX_CHOOSE {
-        n = sw_err(errs, n, SW_PACK);          // 行号拿不到：报成文件级（行 0）
+        n = sw_err(errs, n, SW_PACK, 167);     // 行号拿不到：报成文件级（行 0）
     }
     // 嵌套声明（在 `apply_switches` 里、**摊开之前**判出来的，见那里的说明）
     let nd: u32 = load32(sw, SW_NEST);
     if nd != SW_NONE {
-        n = sw_err(errs, n, SW_PACK + nd);
+        n = sw_err(errs, n, SW_PACK + nd, E022);
     }
     // 同名两次（**同类**才算: 定义+取值是正常配对）
     let i: u32 = 0;
@@ -541,7 +546,7 @@ pub fn switch_rules(unit: ptr, toks: ptr, sw: ptr, errs: ptr, o: u32) -> u32 {
             let kj: u32 = 0;
             if load32(sw, j * SW_SIZE + 8) == 2 { kj = 1; }
             if ki == kj && sw_same(unit, sw, i, j) == 1 {
-                n = sw_err(errs, n, j);          // 表项下标：行号与名字都由它取
+                n = sw_err(errs, n, j, 168);     // 表项下标：行号与名字都由它取
                 j = ns;                          // 一条就够, 不重复报
             } else {
                 j = j + 1;
@@ -562,7 +567,7 @@ pub fn switch_rules(unit: ptr, toks: ptr, sw: ptr, errs: ptr, o: u32) -> u32 {
             // `domain_clock_explicit` 由**编译器定义**（`docs/315`），与 LMS 的七个细开关
             // 同一条理由：用户不必也不该再写一遍 `set choose`。
             if has == 0 && sw_named(unit, sw, a, "domain_clock_explicit") == 0 {
-                n = sw_err(errs, n, a);
+                n = sw_err(errs, n, a, 169);
             }
         }
         a = a + 1;

@@ -15,7 +15,7 @@ you are reading. The entry skill (`loment`) carries the map; this file carries i
 | Module | `module <name>` on the first line after the optional grammar declaration (no semicolon) |
 | Grammar | `choose write grammar <name>` **before `module`**, once per file; no declaration means the **newest Tur edition** (today `tur2026.3`) - see `loment-tur` 2.0.3 |
 | Entry point | `fn main()` (no parameters, no return type) is the normal entry; `fn _start()` is the freestanding entry and wins if both exist - see 2.0.12 |
-| Project mode | `choose` - **seven dimensions**, each written at most once and **only in the entry unit**; libraries may not write it (E22). `std` / `no_std` · `gc_manual` / `gc_auto` / `gc_auto_alpha` / `no_gc` · `runtime` / `no_runtime` · `sealed` / `hosted` · `vm` / `no_vm` · `lms_full` / `lms_forensic_admin` / `lms_daily_admin` / `lms_manage_only_admin` · `lspe_open_admin` / `lspe_close_admin` - see 2.1 |
+| Project mode | `choose` - **seven dimensions**, each written at most once and **only in the entry unit**; libraries may not write it (E22). `std` / `no_std` · `gc_manual` / `gc_auto` / `gc_auto_alpha` / `no_gc` · `runtime` / `no_runtime` · `sealed` / `hosted` · `vm` / `no_vm` · `lms_full` / `lms_forensic_admin` / `lms_daily_admin` / `lms_manage_only_admin` / `lms_close_admin` · `lspe_open_admin` / `lspe_close_admin` - see 2.1 |
 | Switch setting | `addin <name>` (**entry unit only**) - pulls in a "switch settings" unit, see 2.2 |
 | Custom syntax | `comefor let "word" to { … }` … `byuse "word" done` - **define a new syntax at compile time**. The block after `to` is **a Loment program** (`fn main` is its entry; **the return value is how many tokens it ate**) which reads and emits tokens with `ct_n` / `ct_tok` / `ct_out` / `ct_syn`. Definition and terminator are **top-level only** and cannot nest; expansion happens at the token layer **before parsing**, so errors and jumps still point at the line you wrote. See `docs/184` |
 | Import | **Two spellings, neither takes a semicolon**: `use name` resolves in this order - (1) `deps/<name>/<name><ext>` in the project; (2) **exactly one** module named `name` across the five built-in roots `loment/lib` → `examples` → `selfhost` → `tools` → `lspe` (several hits is E18 "ambiguous"); (3) **exactly one** module inside the packaged store `share/lompi/store/` (a module inside a package, e.g. `std/0.1.0/vec.lomt`; several hits is E18). An importer that lives **inside the store** flips (2) and (3). `use "path/to/other.lomt"` is relative to the file or the working directory - **use this form for a sibling file in your own directory**. `<ext>` defaults to `.lomt` and a project can change it (section 7). At most **300** `use` lines in one file. **Several name-form `use` lines are allowed in 0.1.5** (older packages stopped at one) - see 6.3 |
@@ -23,7 +23,7 @@ you are reading. The entry skill (`loment`) carries the map; this file carries i
 | Export | Add `pub` for cross-module visibility: `pub fn` / `pub struct` / `pub const` |
 | Constant | `const NAME: u32 = 3` - the initialiser is **one integer literal** (decimal or hex, optional `-`); it is not an expression, and there are no string constants - see 6.1.8 |
 | Variable | `let x: u32 = e;`, assignment `x = e;` - **the type annotation is required**; the language has no type inference |
-| Control flow | `if` / `else if` / `else`, `while`, `for i in lo..hi` (upper bound exclusive), `return <expr>;` (the value is **required**). **Tur 2 adds** `for x in xs`, `break` / `continue`, bare `return;` in unit functions, and `defer f(a, b);` - see 2.0.4. **Tur 2026.3 adds** `for i, x in xs` (index copy + element copy), `for x in <call>` (array/slice return, evaluated once), and `let x: T = if c { a } else { b };` (if-expression in the initialiser only) - see 2.0.5 |
+| Control flow | `if` / `else if` / `else`, `while`, `for i in lo..hi` (upper bound exclusive), `return <expr>;` (the value is **required**). **Tur 2 adds** `for x in xs`, `break` / `continue`, bare `return;` in unit functions, and `defer f(a, b);` - see 2.0.4. **Tur 2026.3 adds** `for i, x in xs` (index copy + element copy), `for x in <call>` (array/slice return, evaluated once), and `let x: T = if c { a } else { b };` / `let x: T = match e { E::A => a, _ => b };` (expression forms in the initialiser only) - see 2.0.5 |
 | Struct | `struct S { a: u32, b: u32 }`; literal `S { a: 1, b: 2 }` (2026.3: `S { a, b }` shorthand); field `s.a` |
 | Enum | `enum E { A, B(u32) }`; construction `E::B(3)`; no payload `E::A` |
 | `match` | `match x { E::A => { … } E::B(v) => { … } _ => { … } }` - **arm bodies are blocks**; exhaustive (or use `_`) |
@@ -61,7 +61,7 @@ choose no_std          // ← once for the whole program; the default is std
 | **Runtime** | `runtime` · `no_runtime` | `no_runtime` | whether the artifact may carry the runtime block. `alloc`, `guard`, `print_num` and the automatic GC tiers need it; `no_runtime` refuses them **by name** (E031) |
 | **Port** | `sealed` · `hosted` | `sealed` | whether the artifact may reach outside itself by linking host libraries |
 | **Execution model** | `vm` · `no_vm` | `no_vm` | which execution model the program is for - see below |
-| **Memory safety** | `lms_full` · `lms_forensic_admin` · `lms_daily_admin` · `lms_manage_only_admin` | `lms_full` | which of the seven LMS levels are on. **The direction is reversed**: the default is full, and a non-full value is a downgrade; every non-full value carries `_admin` |
+| **Memory safety** | `lms_full` · `lms_forensic_admin` · `lms_daily_admin` · `lms_manage_only_admin` · `lms_close_admin` | `lms_full` | which of the seven LMS levels are on. **The direction is reversed**: the default is full, and a non-full value is a downgrade; every non-full value carries `_admin` |
 | **Audit ledger** | `lspe_open_admin` · `lspe_close_admin` | `lspe_open_admin` | whether LSPE records the ledger (off changes the ledger, never a verdict); the Potato v16 ledger records the site, obligation and evidence |
 
 What holds for all seven:
@@ -271,6 +271,7 @@ each bring in one module, see 3.1 at the end of this section.
 | `str_byte(s: str, i: u32) -> u32` | The i-th byte |
 | `str_eq(a: str, b: str) -> bool` | Content comparison |
 | `str_concat(a: str, b: str) -> str` | Concatenation - **allocates from the same 64 KiB arena at run time**, so do not build big strings (or loop over it) |
+| `str_num(n: u32) -> str` | Unsigned decimal text (`4294967295` max) - **allocates from the same arena**, and it lives in the runtime block, so `no_runtime` refuses it by name (E31). `docs/337` |
 | `str_ptr(s: str) -> ptr` | The data pointer (for feeding syscalls) |
 | `print(s: str) -> u32` | Write the string's bytes to stdout (one `write` syscall) |
 | `tur_edition() -> str` | The Tur edition this program is compiled as, e.g. `tur2026.2` (docs/296). The compiler also prints it on stderr at every check/build/run |
@@ -396,7 +397,7 @@ what you should do, not by wording**:
 | E37 | **LSPE policy lock** - reserved; the policy layer does not exist today, so it is never emitted |
 | E38 | **`lspe pass` without a reason** - the reason is mandatory; an anonymous bypass is an unlabelled floor |
 
-`E900` / `E999` are internal ("wrote no diagnostic record" / "unclassified - please report");
+`E0900` / `E0999` are internal ("wrote no diagnostic record" / "unclassified - please report");
 they are not source errors.
 
 **Every code has a full card** (what went wrong / why / at least three fixes / supported and not

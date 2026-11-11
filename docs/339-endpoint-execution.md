@@ -1,9 +1,8 @@
-# 336 · 末点运行：把稳态做成一份可审计的产物
+# 339 · 末点运行：把稳态做成一份可审计的产物
 
 > 状态: **研究稿 + 设计草案**（2026-11-11）
-> 基准: `origin/main`（`2d9215b2`，2026-11-11）。本检出的 `docs/` 落后，编号与引用以
-> `origin/main` 为准；例如 `docs/309` 在那边是 `309-loment-gc-timing.md`，本检出里是同号的
-> `309-loment-studio.md`。本文一律写**全 slug**，避免同号歧义。
+> 基准: `origin/main`（合并前 `2d9215b2`，合并后 `11058472`，2026-11-11）。
+> 本文一律写**全 slug**，避免同号歧义。
 > 上游: `docs/210-loment-gc-design.md`（LGC 四层梯）· `docs/225-loment-runtime-gaps.md`（运行期空白）·
 > `docs/229-lvm-base-and-novelty.md`（LVM）· `docs/262-lspe-safety-police-espace.md`（LSPE）·
 > `docs/284-hot-update-remap.md`（安全点强制重映射）· `docs/306`/`308`/`315`（域时律与循环）·

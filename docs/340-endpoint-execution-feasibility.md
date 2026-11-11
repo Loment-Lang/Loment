@@ -1,11 +1,11 @@
-# 337 · 末点运行可行性：构建期预初始化能做到“无程序级冷启动”
+# 340 · 末点运行可行性：构建期预初始化能做到“无程序级冷启动”
 
 > 状态: **研究稿 + 实测**（2026-11-11）
-> 基准: `origin/main`（`2d9215b2`，2026-11-11）。探针在
-> `deliverables/endpoint-research/`；本检出的 `docs/` 落后，引用以 `origin/main` 为准。
+> 基准: `origin/main`（合并前 `2d9215b2`，合并后 `11058472`，2026-11-11）。
+> 探针在 `deliverables/endpoint-research/`。
 > 实测环境: WSL2 Ubuntu / Ryzen 9 7945HX / Loment 参考链
 > （`tools/loment.py ir` + `tools/lomelf.py`，默认 `tur2026.3`）。
-> 上游: `docs/336-endpoint-execution.md`（设计草案）· `docs/210-loment-gc-design.md` ·
+> 上游: `docs/339-endpoint-execution.md`（设计草案）· `docs/210-loment-gc-design.md` ·
 > `docs/225-loment-runtime-gaps.md` · `docs/229-lvm-base-and-novelty.md` ·
 > `docs/262-lspe-safety-police-espace.md` · `docs/284-hot-update-remap.md` ·
 > `docs/308-loment-domain-nesting-and-loops.md` · `docs/309-loment-gc-timing.md` ·
@@ -28,7 +28,7 @@
    要把它也摊掉，只有 zygote / 预 fork 或常驻进程，不是快照。
 3. **S-point 仍是另一条更难的线。** 整堆 49 KiB 哈希实测 **185 µs**
    （64 KiB 线性外推 ~245 µs），连续全堆监视对紧循环不划算；
-   而“商投影是否忠实”仍未解决。`docs/336` 的循环稳态设想是 S-point；
+   而“商投影是否忠实”仍未解决。`docs/339` 的循环稳态设想是 S-point；
    “让软件不再需要冷启动”是 I-point。本文把两者分开。
 
 ---
@@ -82,7 +82,7 @@ Loment 的剖面很特殊：它是**静态、非 PIE、无 libc、无 JIT** 的 
 | 拷贝什么 | **精确状态**：堆 + 分配器元数据 + 活动栈槽 + 继续点 | **商投影** `π(s)` + 一个代表状态 |
 | 正确性 | **由构造保证**：状态逐字节相同 | 需要 `π` 对可观察行为忠实（未解决） |
 | 适用 | 短命/初始化重/启动敏感的程序 | 长驻/循环形/需要稳态特化的程序 |
-| 状态 | **已端到端验证**（§5） | **设计 + 模型**（`docs/336`） |
+| 状态 | **已端到端验证**（§5） | **设计 + 模型**（`docs/339`） |
 
 ### 2.2 为什么先做 I-point
 

@@ -22,7 +22,7 @@
   （`test_m64_all_reference_messages_are_classified`）。
   **这句话原先说宽了**（2026-09-15 更正）：那 81 条是 ast 从 `errs.append` 抽出来的，
   覆盖的是 **checker 的语义诊断**；解析期的消息是 `raise LomError`，不在抽取范围里，
-  于是它们原先在 `loment diag` 里一律显示成 **E999「未分类」**。现在解析期归 **E019**
+  于是它们原先在 `loment diag` 里一律显示成 **E0999「未分类」**。现在解析期归 **E019**
   （语法错的修法只有一种，按「码按修法分」共用一码），并由
   `test_m64_diagnostics_have_codes_and_hints` 之外的两条最小负例钉住。
 

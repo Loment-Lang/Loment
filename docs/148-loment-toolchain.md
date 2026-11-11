@@ -211,7 +211,7 @@ powershell -File scripts/install-lsp.ps1      # 种子 + clang + stage1 编译�
 ## 10. M64 诊断分类
 
 `tools/loment_diag.py` 对编译器消息做模式分类，20 类错误各有稳定错误码（E001–E020）与
-可执行建议；测试用 13 个反例片段断言**每条都被分类**（无 E999）且带建议。
+可执行建议；测试用 13 个反例片段断言**每条都被分类**（无 E0999）且带建议。
 
 两条与"分类表可信"直接相关的纪律：
 
@@ -221,7 +221,7 @@ powershell -File scripts/install-lsp.ps1      # 种子 + clang + stage1 编译�
   `字段 a 重复$` 必须锚定结尾（否则吃掉 E015 的 `重复初始化`）。
 - `test_m64_all_reference_messages_are_classified` 用 ast 抽出 `lomentc.py` 里**全部**
   `errs.append` 消息模板（81 条）逐条分类 —— 分类表漏一条，那条规则在"自举 vs 参考"的码集
-  对照里就两边都成 E999 被丢掉，**缺口会静默消失**。
+  对照里就两边都成 E0999 被丢掉，**缺口会静默消失**。
 
 ## 10b. M85 规则等价性对照
 

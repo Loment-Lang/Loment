@@ -446,6 +446,7 @@ lms_full               all seven (default, no `_admin`)
 lms_forensic_admin     1 + 2 + 3 + 4
 lms_daily_admin        1 + 3 + 4
 lms_manage_only_admin  2
+lms_close_admin        0
 ```
 
 - **The direction is reversed**: the default is full, and writing a tier is a **downgrade**. Any

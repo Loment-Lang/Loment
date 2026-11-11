@@ -859,6 +859,7 @@ Tur 2026.3 adds:
 | for-index | `for i, x in xs { … }` | an index loop that also binds the position: `i` is a `u32` copy of the current index, `x` a copy of the element | 2026.3+ only; the source is still a named array or slice; `i` and `x` are copies, so assignments to either do not write back |
 | for-call | `for x in buf(&xs) { … }` | a for-in whose source is a call returning an array or slice; the call is evaluated once | 2026.3+ only; the source MUST be a call (array literals and other expressions are later editions); `x` is a copy |
 | if expression | `let x: u32 = if c { 10 } else { 20 };` | a `let` initialiser picks one of two expressions | 2026.3+ only; initialiser position only, one expression per arm, `else` required; no `else if` or nesting |
+| match expression | `let x: u32 = match d { D::N => 1, _ => 0 };` | a `let` initialiser picks one arm's expression | 2026.3+ only; initialiser position only, subject is a name, one expression per arm, arms comma-separated; no nesting or literal patterns |
 
 The lifetime dimension is **edition-gated**: writing `choose lifetime_*` in 2026.1 or
 2026.2 is refused; those editions keep the old default (`lifetime_no`) and the old
@@ -1289,9 +1290,20 @@ ARM := (PATTERN | "_") "=>" BLOCK
 ```
 
 The subject MUST be an enum (E008 otherwise). Patterns MUST belong to that enum, MUST NOT
-duplicate, and MUST be exhaustive or include `_`. An arm body is a **block**, not an
-expression; the `=> 0,` form is not in this grammar. A payload binding is in scope in its
-arm.
+duplicate, and MUST be exhaustive or include `_`. In statement position an arm body is a
+**block**; the `=> 0,` form belongs to the 2026.3 expression form below. A payload binding
+is in scope in its arm.
+
+From Tur 2026.3, a `match` may be the whole initialiser of a `let`:
+
+```
+let x: T = match NAME { PATTERN => EXPR, … };
+```
+
+The subject MUST be a **name**, every arm body is a **single expression**, and arms are
+separated by commas. It lowers to `let x: T;` followed by an ordinary `match` whose arms
+assign. Other positions, expression subjects, nested `if` / `match` expressions in an arm,
+and literal patterns are not accepted in this edition round (§8.10).
 
 ### 13.3 `if let`
 
@@ -1500,6 +1512,7 @@ the user's declarations is E002.
 | `str_byte(s: str, i: u32) -> u32` | the i-th byte |
 | `str_eq(a: str, b: str) -> bool` | content equality |
 | `str_concat(a: str, b: str) -> str` | concatenation; allocates from the runtime arena |
+| `str_num(n: u32) -> str` | unsigned decimal representation; allocates from the runtime arena, so `no_runtime` refuses it by name |
 | `str_ptr(s: str) -> ptr` | data pointer |
 | `print(s: str) -> u32` | write the bytes to stdout |
 | `tur_edition() -> str` | the resolved canonical edition |
@@ -1605,7 +1618,7 @@ fix a user must make**, not by wording.
 | E039 | `lgc` requires a collector, but the unit chose `no_gc`. |
 | E040 | An undeclared unit declares a name that a newer edition treats as syntax (§8.7). |
 
-`E900` (the tool died without writing a diagnostic) and `E999` (unclassified; please
+`E0900` (the tool died without writing a diagnostic) and `E0999` (unclassified; please
 report) are internal and MUST NOT be produced for a well-formed program.
 
 A diagnostic MUST include a source position (line, and column or token) except for the
@@ -2038,6 +2051,7 @@ lms_full               all seven (default)
 lms_forensic_admin     1 + 2 + 3 + 4
 lms_daily_admin        1 + 3 + 4
 lms_manage_only_admin  2
+lms_close_admin        0
 ```
 
 The direction is reversed: the default is full, and writing a tier is a **downgrade**.
@@ -2179,7 +2193,7 @@ Loment has **eight** dimensions. Each selects a property of the whole program.
 | `runtime` | `runtime`, `no_runtime` | `no_runtime` | whether the artifact may carry the runtime block |
 | `port` | `sealed`, `hosted` | `sealed` | whether the artifact may link host libraries |
 | `vm` | `vm`, `no_vm` | `no_vm` | the execution model |
-| `lms` | `lms_full`, `lms_forensic_admin`, `lms_daily_admin`, `lms_manage_only_admin` | `lms_full` | which memory-safety levels are on |
+| `lms` | `lms_full`, `lms_forensic_admin`, `lms_daily_admin`, `lms_manage_only_admin`, `lms_close_admin` | `lms_full` | which memory-safety levels are on |
 | `lspe` | `lspe_open_admin`, `lspe_close_admin` | `lspe_open_admin` | whether the audit ledger is recorded |
 | `lifetime` | `lifetime_no`, `lifetime_auto`, `lifetime_manual` | `lifetime_auto` from 2026.3; `lifetime_no` before | compile-time borrow regions |
 
@@ -2294,6 +2308,7 @@ An implementation that supports several editions MUST keep their surfaces separa
 | `for i, x in xs` | — | — | yes |
 | `for x in <call>` (array/slice return) | — | — | yes |
 | `if` expression (let initialiser) | — | — | yes |
+| `match` expression (let initialiser) | — | — | yes |
 | bare `return;` in unit functions | — | yes | yes |
 | `orelse`, `catch` | — | yes | yes |
 | `print_num` | — | yes | yes |
@@ -3154,6 +3169,7 @@ primary       := INT | STRING | "true" | "false"
                | IDENT "{" (IDENT (":" expr)?),* "}"           // shorthand: 2026.3+
                | "[" (expr),* "]" | "&" ("mut")? expr
                | "if" expr block "else" block                  // 2026.3+, let initialiser only
+               | "match" IDENT "{" (pattern "=>" expr),* "}"    // 2026.3+, let initialiser only
 cast          := expr "as" type
 fallback      := expr ("orelse" | "catch") expr
 
@@ -3209,7 +3225,8 @@ the full statement.
 
 | Built-in | Tur 1 | Tur 2026.2+ | Needs runtime | Target notes |
 |---|---|---|---|---|
-| `str_*`, `print`, `ptr_*`, `slice_len` | yes | yes | no | |
+| `str_len`, `str_eq`, `str_byte`, `str_ptr`, `print`, `ptr_*`, `slice_len` | yes | yes | no | |
+| `str_concat`, `str_num` | yes | yes | yes | allocate from the arena; E031 under `no_runtime` |
 | `alloc`, `free`, `load8`, `store8` | yes | yes | no (the allocator is in the artifact) | |
 | `atomic_add` | yes | yes | no | |
 | `inb`, `outb` | yes | yes | no | translation backend only |
@@ -3227,7 +3244,7 @@ the full statement.
 | `runtime` | `runtime`, `no_runtime` | `no_runtime` | |
 | `port` | `sealed`, `hosted` | `sealed` | |
 | `vm` | `vm`, `no_vm` | `no_vm` | artifact unchanged today |
-| `lms` | `lms_full`, `lms_forensic_admin`, `lms_daily_admin`, `lms_manage_only_admin` | `lms_full` | |
+| `lms` | `lms_full`, `lms_forensic_admin`, `lms_daily_admin`, `lms_manage_only_admin`, `lms_close_admin` | `lms_full` | |
 | `lspe` | `lspe_open_admin`, `lspe_close_admin` | `lspe_open_admin` | |
 | `lifetime` | `lifetime_no`, `lifetime_auto`, `lifetime_manual` | `lifetime_auto` from 2026.3; `lifetime_no` before | edition-gated |
 

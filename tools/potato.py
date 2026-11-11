@@ -217,7 +217,7 @@ LIFETIMES = ("lifetime_no", "lifetime_auto", "lifetime_manual")
 #: `lms_full`（默认，七级全开）/ `lms_forensic_admin` / `lms_daily_admin` /
 #: `lms_manage_only_admin`。非满档一律带 `_admin`（`docs/262` §10.1 的仓级规则）。
 LMSS = ("lms_full", "lms_forensic_admin", "lms_daily_admin",
-        "lms_manage_only_admin")
+        "lms_manage_only_admin", "lms_close_admin")
 #: `lms_levels` 的**七个键**，次序就是七级的次序（`docs/253` §11.4）——
 #: 校验器按它逐个判布尔，孪生侧同一张表。
 LMS_LEVEL_KEYS = ("lms_check", "lms_manage", "lms_guard", "lms_reject",

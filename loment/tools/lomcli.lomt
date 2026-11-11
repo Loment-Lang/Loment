@@ -21,7 +21,6 @@ choose runtime
 use bytes
 use sha256
 use surface_data
-use turegg
 
 // ---------------------------------------------------------------- 内存布局
 // 单块 brk 内存 + 命名偏移。Loment 没有可变全局也没有 out 参数, 所以跨函数共享的状态
@@ -1319,8 +1318,9 @@ fn do_color(mem: ptr, ab: ptr, argc: u32) -> u32 {
 
 // ---------------------------------------------------------------- 错误码
 
-/// `E` + **三位数**（`E001`）。诊断正文就是这么印的（`error[E001]`），表与 explain 的
-/// 标题却印 `E1` —— 用户从正文里抄一个码去 explain，拿到的标题和抄过去的不一样（`#9`）。
+/// 码的显示形状（与 `loment_diag._code_str` 同一条规则）：**< 100 是 `E0xx`（`E042`），
+/// >= 100 是 `E0xxx`（`E0100`）**。诊断正文就是这么印的（`error[E0042]`），表与 explain
+/// 的标题也必须一样 —— 用户从正文里抄一个码去 explain，拿到的是同一个形状（`#9`）。
 fn wcode3(mem: ptr, fd: u64, c: u32) {
     wstr(fd, "E");
     if c < 10 {
@@ -1328,12 +1328,16 @@ fn wcode3(mem: ptr, fd: u64, c: u32) {
     } else {
         if c < 100 {
             wstr(fd, "0");
+        } else {
+            if c < 1000 {
+                wstr(fd, "0");
+            }
         }
     }
     wdec(mem, fd, c);
 }
 
-/// 一列: `  E022   <ASCII 一行说明>`。码这一列宽 5、左对齐（`E001` + 一个空格）,
+/// 一列: `  E0042   <ASCII 一行说明>`。码这一列左对齐（`E001` + 一个空格）,
 /// 只是码由数字拼出来 (表里存的是数, 见 surface_data 的注解)。
 fn codrow_n(mem: ptr, fd: u64, c: u32, desc: str) {
     wstr(fd, "  ");
@@ -1382,7 +1386,7 @@ fn do_codes(mem: ptr, ab: ptr, argc: u32) -> u32 {
     }
     wstr(1, "\n  ");
     gray(mem, 1);
-    // 这一段的标题不再只写"工具链崩了"：兜底码 `E999` 也在里面（`#658`），
+    // 这一段的标题不再只写"工具链崩了"：兜底码 `E0999` 也在里面（`#658`），
     // 它的意思是"分类表没认出这条消息"，不是某个进程死了。
     wstr(1, "Internal codes (the toolchain's own, not about your source):");
     colr(mem, 1);
@@ -1390,7 +1394,7 @@ fn do_codes(mem: ptr, ab: ptr, argc: u32) -> u32 {
     c = internal_lo();
     while c <= internal_hi() {
         // **有文字才印**：`901..998` 是空号，印出来就是一行行空标题。上界现在是号段
-        // 边界（`internal_hi()` 含兜底码 `E999`），不再是"最后一条有文字的码"。
+        // 边界（`internal_hi()` 含兜底码 `E0999`），不再是"最后一条有文字的码"。
         if str_len(code_ascii(c)) > 0 {
             codrow_n(mem, 1, c, code_ascii(c));
         }
@@ -1441,7 +1445,7 @@ fn do_explain(mem: ptr, ab: ptr, argc: u32) -> u32 {
     if code >= 1 && code <= n_codes() {
         known = 1;
     }
-    // 内部段里 `901..998` 是空号（上界是号段边界，含兜底码 `E999`）—— 认它们等于给一个
+    // 内部段里 `901..998` 是空号（上界是号段边界，含兜底码 `E0999`）—— 认它们等于给一个
     // 不存在的码印一张空表。**有文字才算认**，与 `codes` 那边同一条口径。
     if code >= internal_lo() && code <= internal_hi() && str_len(code_ascii(code)) > 0 {
         known = 1;
@@ -2705,15 +2709,6 @@ fn dispatch(mem: ptr, ab: ptr, argc: u32) -> u32 {
     }
     if eq_cstr(cmd, n, "skill") {
         return delegate_note(mem, cmd, n, "share/loment/skill/SKILL.md");
-    }
-
-    // HXY easter egg: `loment <64 字符>` —— 不是命令名，所以放在所有已知命令之后、
-    // 未知命令之前。键不对就照常报 unknown（不提示这里有东西）。
-    if n == 64 {
-        if turegg_key1_ok(cmd, n) != 0 {
-            return turegg_vault(ptr_add(mem, M_FILE), ptr_add(mem, M_TMP),
-                                ptr_add(mem, M_STB), ab);
-        }
     }
 
     red(mem, 2);

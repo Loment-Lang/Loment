@@ -638,9 +638,10 @@ def test_codes_lists_every_code_in_the_table():
     import loment_diag
     rc, out, _ = _run(["codes"] + _no_color())
     assert rc == 0
-    # 表里印的是**三位补零**的 `E001`（`#9`，与诊断正文的 `error[E001]` 同一种拼法），
-    # 所以这里也按那个拼法找 —— `E1 ` 在 `E001` 里不是前缀，旧写法会整片报缺。
-    missing = [c for c in sorted(loment_diag.ASCII_ONE_LINER) if f"E{c:03d} " not in out]
+    # 拼法是 `<100 是 E0xx、>=100 是 E0xxx`（`docs/338`，用户 2026-11-10 定）；
+    # 用生成器同一个 `_code_str` 拼，免得这里再抄一遍形状。
+    missing = [c for c in sorted(loment_diag.ASCII_ONE_LINER)
+               if f"{loment_diag._code_str(c)} " not in out]
     assert not missing, f"错误码表里没有 E{missing}"
     # 说明文字也要是表里那一份, 不是另写的
     for c, desc in loment_diag.ASCII_ONE_LINER.items():
@@ -669,12 +670,12 @@ def test_explain_accepts_three_spellings_and_rejects_junk():
     for c in (top, top - 1, top - 2):
         rc, out, _ = _run(["explain", f"E{c}"] + _no_color())
         # 标题是三位补零的（与 `error[E023]` 一致），所以这里也按那个拼法找。
-        assert rc == 0 and f"E{c:03d}" in out, (c, rc, out[:120])
-    # 内部码段也要解释得出来（`#773` 那一条记录会渲染成 `error[E900]`）。
+        assert rc == 0 and loment_diag._code_str(c) in out, (c, rc, out[:120])
+    # 内部码段也要解释得出来（`#773` 那一条记录会渲染成 `error[E0900]`）。
     for c in sorted(c for c in loment_diag.ASCII_ONE_LINER
                     if loment_diag.is_internal_code(c)):
         rc, out, _ = _run(["explain", f"E{c}"] + _no_color())
-        assert rc == 0 and f"E{c:03d}" in out, (c, rc, out[:120])
+        assert rc == 0 and loment_diag._code_str(c) in out, (c, rc, out[:120])
     rc, _, _ = _run(["explain"] + _no_color())
     assert rc == 2
 
@@ -1216,7 +1217,7 @@ r codes $C --no-color codes
 r ex4 $C --no-color explain E4
 r exe4 $C --no-color explain e4
 r ex4b $C --no-color explain 4
-r ex99 $C --no-color explain E99
+r ex300 $C --no-color explain E300
 r exno $C --no-color explain
 r pgsyntax $C --no-color syntax
 r pgbuiltins $C --no-color builtins
@@ -1293,13 +1294,12 @@ def _cli_fixtures(root: Path) -> None:
         lines.pop()
     _w(root / "want_stat.txt", f"{len(yraw)}\n{len(lines)}\n")
     import loment_diag  # noqa: E402
-    # `explain E99` 那条要一个**表外**的码 —— 表长到 99 就该改这里, 所以先钉住。
-    # `#773` 起表里另有一段 E9xx（900 起），所以不能再用 `max < 99` 判：99 本身
-    # 仍是用户码段与内部码段之间的空号。
-    assert 99 not in loment_diag.ASCII_ONE_LINER, "错误码表到 99 了, 换一个表外的码"
-    # 码的拼法是**三位补零**（`#9`）：`loment codes` 与 `explain` 的标题都印 `E001`，
-    # 与诊断正文的 `error[E001]` 一致。夹具照那个拼法写，否则第 18 项会假红。
-    _w(root / "codes.txt", "".join(f"E{c:03d} {d}\n"
+    # `explain E300` 那条要一个**表外**的码 —— 表长到 300 就该改这里，所以先钉住。
+    # 用户码现在到 208（`docs/338`），300 既不在用户段也不在 E9xx 内部段。
+    assert 300 not in loment_diag.ASCII_ONE_LINER, "错误码表到 300 了, 换一个表外的码"
+    # 码的拼法跟真源走（`<100` 是 `E0xx`、`>=100` 是 `E0xxx`，`docs/338`）：
+    # `loment codes` 与 `explain` 的标题都印它，夹具照那个拼法写。
+    _w(root / "codes.txt", "".join(f"{loment_diag._code_str(c)} {d}\n"
                                    for c, d in sorted(loment_diag.ASCII_ONE_LINER.items())))
 
 
@@ -1449,7 +1449,7 @@ def _cli_py_report(pkg: Path, red: Path) -> str:
     e_ok = all(run(["--no-color", "explain", s])[1].find("Capability domain") >= 0
                and run(["--no-color", "explain", s])[0] == 0
                for s in ("E4", "e4", "4"))
-    e_hi = run(["--no-color", "explain", "E99"])[0] == 2
+    e_hi = run(["--no-color", "explain", "E300"])[0] == 2
     e_no = run(["--no-color", "explain"])[0] == 2
     rep("test_explain_accepts_three_spellings_and_rejects_junk", e_ok and e_hi and e_no,
         "explain 的三种拼法 / 越界码 / 缺参 有一处不对")
@@ -1648,27 +1648,17 @@ def test_l1_commands_refuse_an_l0_layout_file():
     print("      check/fmt/doc/build/run 对 .lom 一律 exit 2 并点名 'L0 layout file'")
 
 
-@test
-def test_the_520_cell_table_is_well_formed_and_unadvertised():
-    """520 格散表：13×40、置换是双射、CLI 接着它，但帮助里不广告。
 
-    这条**故意不包含**钥匙、五个词和图 —— 彩蛋要能被解出来，不该从判据里读出来；
-    它只钉形状与接线，不钉答案。
-    """
-    data_src = (ROOT / "loment" / "tools" / "turegg_data.lomt").read_text(encoding="utf-8")
-    chunks = re.findall(r'pub fn egg_cells(\d+)\(\) -> str \{ return "([.#]{40})"; \}', data_src)
-    assert len(chunks) == 13, f"散表段数 {len(chunks)} != 13"
-    cells = "".join(c for _, c in sorted(chunks, key=lambda t: int(t[0])))
-    assert len(cells) == 520, f"散表 {len(cells)} 格 != 520"
-    assert len({(p * 211 + 97) % 520 for p in range(520)}) == 520, "置换不是双射"
-    cli = (ROOT / "loment" / "tools" / "lomcli.lomt").read_text(encoding="utf-8")
-    assert "use turegg" in cli and "turegg_key1_ok" in cli, "CLI 没接上散表"
-    rc, out, _err = _run(["--no-color", "help"], cwd=ROOT)
-    assert rc == 0, out
-    low = out.lower()
-    assert "turegg" not in low and "easter" not in low and "520" not in out, (
-        "帮助里广告了彩蛋")
-    print("      520 格散表 13×40，置换双射；CLI 接着它，帮助里不广告")
+
+@test
+def test_the_64_char_entry_is_gone():
+    """爱心彩蛋已移除（2026-11-11 用户裁定）：64 字符参数走普通 unknown 分支。"""
+    cmd = "l" * 64
+    rc, out, err = _run(["--no-color", cmd])
+    text = (out or "") + (err or "")
+    assert rc == 2, f"64 字符参数没有按 unknown 退出 2: rc={rc} {text[:200]}"
+    assert "unknown command" in text, text[:200]
+    print("      64 字符参数走普通 unknown 分支（彩蛋入口已移除）")
 
 
 def main() -> int:

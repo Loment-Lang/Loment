@@ -300,7 +300,7 @@ One more number, and it is deliberately **not** the language's:
 
 ```
 $ lomenterr version
-lomenterr 0.1.2
+lomenterr 0.1.3
 ```
 
 The reporter changes on its own schedule — its wording, its exits, and what it offers to

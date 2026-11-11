@@ -84,7 +84,7 @@ def test_default_is_the_full_tier() -> None:
 
 
 def test_each_tier_seeds_exactly_its_levels() -> None:
-    """判 B（判据 9）：四个档各自**恰好**是表里那一组 —— 多一级少一级都红。"""
+    """判 B（判据 9）：五个档各自**恰好**是表里那一组 —— 多一级少一级都红。"""
     want = {
         "lms_full": {n: True for n in lomentc.LMS_TOGGLES},
         "lms_forensic_admin": {
@@ -101,12 +101,14 @@ def test_each_tier_seeds_exactly_its_levels() -> None:
             "lms_check": False, "lms_manage": True, "lms_guard": False,
             "lms_reject": False, "lms_crash": False, "lms_restart": False,
             "lms_seed": False},
+        # 用户 2026-11-10：**暴力彻底关掉** —— 七级一个不留。
+        "lms_close_admin": {n: False for n in lomentc.LMS_TOGGLES},
     }
     assert set(want) == set(lomentc.LMS_TIERS), (set(want), set(lomentc.LMS_TIERS))
     for tier, exp in want.items():
         got = _levels(f"choose {tier}")
         assert got == exp, (tier, got, exp)
-    print("      四个档各自恰好铺出表里那一组（含 daily = 1+3+4）")
+    print("      五个档各自恰好铺出表里那一组（含 daily = 1+3+4、close = 全关）")
 
 
 def test_explicit_switches_override_the_tier() -> None:

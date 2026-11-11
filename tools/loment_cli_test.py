@@ -638,7 +638,7 @@ def test_codes_lists_every_code_in_the_table():
     import loment_diag
     rc, out, _ = _run(["codes"] + _no_color())
     assert rc == 0
-    # 拼法是 `<100 是 E0xx、>=100 是 E0xxx`（`docs/336`，用户 2026-11-10 定）；
+    # 拼法是 `<100 是 E0xx、>=100 是 E0xxx`（`docs/338`，用户 2026-11-10 定）；
     # 用生成器同一个 `_code_str` 拼，免得这里再抄一遍形状。
     missing = [c for c in sorted(loment_diag.ASCII_ONE_LINER)
                if f"{loment_diag._code_str(c)} " not in out]
@@ -1295,9 +1295,9 @@ def _cli_fixtures(root: Path) -> None:
     _w(root / "want_stat.txt", f"{len(yraw)}\n{len(lines)}\n")
     import loment_diag  # noqa: E402
     # `explain E300` 那条要一个**表外**的码 —— 表长到 300 就该改这里，所以先钉住。
-    # 用户码现在到 207（`docs/336`），300 既不在用户段也不在 E9xx 内部段。
+    # 用户码现在到 208（`docs/338`），300 既不在用户段也不在 E9xx 内部段。
     assert 300 not in loment_diag.ASCII_ONE_LINER, "错误码表到 300 了, 换一个表外的码"
-    # 码的拼法跟真源走（`<100` 是 `E0xx`、`>=100` 是 `E0xxx`，`docs/336`）：
+    # 码的拼法跟真源走（`<100` 是 `E0xx`、`>=100` 是 `E0xxx`，`docs/338`）：
     # `loment codes` 与 `explain` 的标题都印它，夹具照那个拼法写。
     _w(root / "codes.txt", "".join(f"{loment_diag._code_str(c)} {d}\n"
                                    for c, d in sorted(loment_diag.ASCII_ONE_LINER.items())))

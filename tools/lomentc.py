@@ -43,6 +43,7 @@ BUILTINS = {
     "str_len": (("str",), "u32"),
     "str_eq": (("str", "str"), "bool"),
     "str_concat": (("str", "str"), "str"),   # M2
+    "str_num": (("u32",), "str"),            # 2026.3: 无符号十进制 -> str（插值的底）
     "str_byte": (("str", "u32"), "u32"),
     "panic": (("u32",), "u32"),  # M19: 不可返回 (类型仅占位)
     "alloc": (("u32",), "ptr"),  # M15
@@ -577,6 +578,37 @@ wr:
   %r = call i64 asm sideeffect "syscall", "={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}"(i64 1, i64 1, i64 %sp, i64 %ln)
   %t = trunc i64 %r to i32
   ret i32 %t
+}
+'''
+
+#: `str_num` 的十进制转换（`docs/337`）。与 `print_num` 同一段循环，但写进调用方给的
+#: 缓冲区、返回长度 —— 因此不带 `syscall`，只在真调用 `str_num` 时发。
+_IR_NUM_TO_DEC = '''define internal i32 @__loment_num_to_dec(ptr %out, i32 %v) {
+entry:
+  %buf = alloca [24 x i8]
+  %end0 = getelementptr inbounds [24 x i8], ptr %buf, i64 0, i64 24
+  %x0 = zext i32 %v to i64
+  br label %loop
+loop:
+  %p = phi ptr [ %end0, %entry ], [ %p2, %loop ]
+  %x = phi i64 [ %x0, %entry ], [ %q, %loop ]
+  %d = urem i64 %x, 10
+  %q = udiv i64 %x, 10
+  %c = trunc i64 %d to i8
+  %c2 = add i8 %c, 48
+  %pi = ptrtoint ptr %p to i64
+  %pj = sub i64 %pi, 1
+  %p2 = inttoptr i64 %pj to ptr
+  store i8 %c2, ptr %p2
+  %done = icmp eq i64 %q, 0
+  br i1 %done, label %after, label %loop
+after:
+  %sp = ptrtoint ptr %p2 to i64
+  %ep = ptrtoint ptr %end0 to i64
+  %ln = sub i64 %ep, %sp
+  %ln32 = trunc i64 %ln to i32
+  call void @__loment_memcpy(ptr %out, ptr %p2, i64 %ln)
+  ret i32 %ln32
 }
 '''
 
@@ -1747,6 +1779,20 @@ class Match:
 
 
 @dataclass
+class MatchExpr:
+    """Tur 2026.3 的 `match e { P => a, _ => b }` 表达式（`docs/336`）。
+
+    **只存在于解析到反糖之间**：`_desugar_matchexpr` 把它降成一条普通 `Match`
+    语句，每一臂的表达式变成给目标赋值的块。v1 只收 `let` 的整个初值；
+    臂体各是一个表达式、用逗号分隔。
+    """
+
+    subject: object
+    arms: list  # list[tuple[Path | None, object]]
+    line: int
+
+
+@dataclass
 class For:
     var: str
     lo: object
@@ -2053,15 +2099,19 @@ class IfExpr:
     else_end: int = 0
 
 
-def _contains_ifexpr(o) -> bool:
-    """这棵 AST 里有没有 `IfExpr`（不论在哪个位置）—— 反糖只能处理初值位置。"""
-    if isinstance(o, IfExpr):
+def _contains_node(o, cls) -> bool:
+    """这棵 AST 里有没有 `cls` 的节点（不论在哪个位置）—— 反糖只能处理初值位置。"""
+    if isinstance(o, cls):
         return True
     if isinstance(o, (list, tuple)):
-        return any(_contains_ifexpr(x) for x in o)
+        return any(_contains_node(x, cls) for x in o)
     if is_dataclass(o):
-        return any(_contains_ifexpr(getattr(o, f.name)) for f in fields(o))
+        return any(_contains_node(getattr(o, f.name), cls) for f in fields(o))
     return False
+
+
+def _contains_ifexpr(o) -> bool:
+    return _contains_node(o, IfExpr)
 
 
 @dataclass
@@ -3803,6 +3853,8 @@ class Parser:
         self.no_struct = 0  # >0 时禁止结构体字面量 (if/while 条件位置的歧义)
         #: >0 时才允许 `if` 表达式（2026.3，`docs/335`）：只开在 `let` 的初值位置。
         self.allow_ifexpr = 0
+        #: >0 时才允许 `match` 表达式（2026.3，`docs/336`）：同样只开在 `let` 的初值位置。
+        self.allow_matchexpr = 0
         #: 当前嵌套深度（块 + 表达式共用一个计数）—— 见 `MAX_NEST`。
         self.depth = 0
         #: 循环嵌套层数（Tur 2 的 `break`/`continue` 只在循环里合法）。
@@ -4654,14 +4706,20 @@ class Parser:
             # 2026.3 的 `if` 表达式只在这一格开口（`docs/335`）；解析完再确认它
             # **就是**初值本身，而不是藏在别的表达式里 —— 藏在里面反糖不了。
             self.allow_ifexpr += 1
+            self.allow_matchexpr += 1
             try:
                 e = self._fallback_rhs(self.parse_expr(), t.line)
             finally:
                 self.allow_ifexpr -= 1
-            if not isinstance(e, IfExpr) and _contains_ifexpr(e):
+                self.allow_matchexpr -= 1
+            if not isinstance(e, (IfExpr, MatchExpr)) and _contains_ifexpr(e):
                 raise LomError(t.line, 1,
                                "`if` 表达式 v1 只能作 `let` 的整个初值，不能嵌在别的"
                                "表达式里（docs/335）")
+            if not isinstance(e, (IfExpr, MatchExpr)) and _contains_node(e, MatchExpr):
+                raise LomError(t.line, 1,
+                               "`match` 表达式 v1 只能作 `let` 的整个初值，不能嵌在别的"
+                               "表达式里（docs/336）")
             self.expect("punct", ";")
             return Let(name, ty, e, t.line, space)
         if t.val == "if":
@@ -4761,19 +4819,7 @@ class Parser:
             self.expect("punct", "{")
             arms = []
             while not self.at("punct", "}"):
-                if self.at("ident", "_"):
-                    self.next()
-                    pat = None
-                else:
-                    en = self.ident("枚举名")
-                    self.expect("punct", ":")
-                    self.expect("punct", ":")
-                    vn = self.ident("变体名")
-                    bind = None
-                    if self.accept("punct", "("):
-                        bind = self.ident("绑定名")
-                        self.expect("punct", ")")
-                    pat = EnumPath(en, vn, t.line, bind)
+                pat = self.parse_pattern(t.line)
                 self.expect("punct", "=")
                 self.expect("punct", ">")
                 arms.append((pat, self.parse_block()))
@@ -4943,6 +4989,12 @@ class Parser:
                 raise LomError(t.line, t.col,
                                "`if` 表达式 v1 只能作 `let` 的初值（docs/335）")
             return self.parse_postfix(self.parse_ifexpr(t.line))
+        if t.kind == "ident" and t.val == "match" and self.profile in TUR3_PLUS:
+            # 2026.3 的 `match` 表达式（`docs/336`）：同一条，只开在 `let` 初值位置。
+            if self.allow_matchexpr <= 0:
+                raise LomError(t.line, t.col,
+                               "`match` 表达式 v1 只能作 `let` 的初值（docs/336）")
+            return self.parse_postfix(self.parse_matchexpr(t.line))
         if t.kind == "number":
             return self.parse_postfix(IntLit(self.int_lit(), t.line))
         if t.kind == "string":
@@ -5023,6 +5075,46 @@ class Parser:
                 return StructLit(name, inits, t.line)
             return self.parse_postfix(Ident(name, t.line))
         raise LomError(t.line, t.col, f"期望表达式，得到 {t.val or '<eof>'!r}")
+
+    def parse_pattern(self, line):
+        """`match` 的臂图案：`_` 或 `Enum::Variant` / `Enum::Variant(bind)`。"""
+        if self.at("ident", "_"):
+            self.next()
+            return None
+        en = self.ident("枚举名")
+        self.expect("punct", ":")
+        self.expect("punct", ":")
+        vn = self.ident("变体名")
+        bind = None
+        if self.accept("punct", "("):
+            bind = self.ident("绑定名")
+            self.expect("punct", ")")
+        return EnumPath(en, vn, line, bind)
+
+    def parse_matchexpr(self, line):
+        """`match e { P => a, _ => b }` —— 臂体各**一个表达式**，逗号分隔（`docs/336`）。"""
+        self.next()                          # `match`
+        self.no_struct += 1
+        subj = self.parse_expr()
+        self.no_struct -= 1
+        self.expect("punct", "{")
+        arms: list[tuple[object, object]] = []
+        while not self.at("punct", "}"):
+            pat = self.parse_pattern(line)
+            self.expect("punct", "=")
+            self.expect("punct", ">")
+            e = self.parse_expr()
+            if _contains_ifexpr(e) or _contains_node(e, MatchExpr):
+                raise LomError(line, 1,
+                               "`match` 表达式的 v1 不支持在臂体里再嵌一个 `if` / "
+                               "`match` 表达式（docs/336）")
+            arms.append((pat, e))
+            if not self.accept("punct", ","):
+                break
+        self.expect("punct", "}")
+        if not arms:
+            raise LomError(line, 1, "`match` 表达式至少要有一条臂（docs/336）")
+        return MatchExpr(subj, arms, line)
 
     def parse_ifexpr(self, line):
         """`if c { a } else { b }` —— 两支各**一个表达式**（`docs/335`）。"""
@@ -7056,6 +7148,7 @@ _RUNTIME_SITES: dict[str, str] = {
     "alloc": "`alloc`",
     "free": "`free`",
     "str_concat": "`str_concat`",
+    "str_num": "`str_num`",
     "str_eq": "`str_eq`",
     "panic": "`panic`",
     # `docs/296` §2.7：`print_num` 的十进制转换在运行期那一块里（24 字节栈缓冲、一次
@@ -7256,6 +7349,7 @@ _PKG_FEATURES: dict[str, str] = {
     "alloc": "alloc",
     "free": "free",
     "str_concat": "str_concat",
+    "str_num": "str_num",
     "str_eq": "str_eq",
     "panic": "panic",
     "print_num": "print_num",
@@ -9257,6 +9351,8 @@ def _expr_rs(e) -> str:
             return f"({a[0]}.len() as u32)"
         if e.name == "str_eq":
             return f"({a[0]} == {a[1]})"
+        if e.name == "str_num":  # docs/337: 无符号十进制 -> str
+            return f"(Box::leak(format!(\"{{}}\", {a[0]}).into_boxed_str()) as &'static str)"
         if e.name == "str_concat":  # M2: v0 的 str 是 &'static str -> 只能漏内存
             return (f"(Box::leak(format!(\"{{}}{{}}\", {a[0]}, {a[1]}).into_boxed_str()) "
                     f"as &'static str)")
@@ -11954,7 +12050,7 @@ def _l2_ok(toks: list, at: int, end: int, fend: int, l0: dict[str, int],
 
     nalloc = 0
     for k in range(at, end):
-        if word(k, "str_concat"):
+        if word(k, "str_concat") or word(k, "str_num"):
             return False
         if word(k, "free"):
             # 体内不许 `free`：**前沿在体内只增不减**，末尾那一条无条件写回才对。
@@ -12140,7 +12236,7 @@ def _alloc_site_map(body: list) -> dict[int, int]:
     m: dict[int, int] = {}
 
     def reap(v) -> None:
-        if isinstance(v, Call) and v.name in ("alloc", "str_concat"):
+        if isinstance(v, Call) and v.name in ("alloc", "str_concat", "str_num"):
             m[id(v)] = len(m)
         if _dc.is_dataclass(v) and not isinstance(v, type):
             for fd in _dc.fields(v):
@@ -13490,6 +13586,19 @@ class _Ir:
             v2 = self.t()
             self.w(f"{v2} = insertvalue {{ ptr, i64 }} {v1}, i64 {n}, 1")
             return "str", v2
+        # 2026.3: str_num —— 无符号十进制写进一块 12 字节的堆块，返回 str（`docs/337`）
+        if e.name == "str_num":
+            _, av = self.expr(e.args[0], "u32")
+            p = self.alloc_ir("12", e)
+            ln = self.t()
+            self.w(f"{ln} = call i32 @__loment_num_to_dec(ptr {p}, i32 {av})")
+            ln64 = self.t()
+            self.w(f"{ln64} = sext i32 {ln} to i64")
+            v1 = self.t()
+            self.w(f"{v1} = insertvalue {{ ptr, i64 }} undef, ptr {p}, 0")
+            v2 = self.t()
+            self.w(f"{v2} = insertvalue {{ ptr, i64 }} {v1}, i64 {ln64}, 1")
+            return "str", v2
         # str_byte
         _, sv = self.expr(e.args[0], "str")
         p = self.t()
@@ -14345,8 +14454,8 @@ def _heap_needed(mods: list, rt_on: bool = True) -> bool:
             # `thread_spawn`（`#778`）：线程要带上运行期锁与 `@__loment_rt_threads` ——
             # 它们和分配器同一段文本，所以起线程就发堆（即便这个程序自己一次 `alloc`
             # 都不写）。与自举侧 `heap_needed` 同一个集合。
-            if tk.kind != "ident" or tk.val not in ("alloc", "str_concat", "free",
-                                                    "thread_spawn"):
+            if tk.kind != "ident" or tk.val not in ("alloc", "str_concat", "str_num",
+                                                    "free", "thread_spawn"):
                 continue
             if tk.val == "alloc" and _alloc_promoted(toks, i, funcs):
                 continue
@@ -14624,6 +14733,8 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # 但只在真的调用了它时才出现 —— 它带一句 x86 的 `syscall` asm。
     if "@__loment_print_num" in text_all:
         out.append(_IR_PRINT_NUM)
+    if "@__loment_num_to_dec" in text_all:
+        out.append(_IR_NUM_TO_DEC)
     # 能力域运行时：`guard` 发 `@__loment_guard2`，`tick;` 发 `@__loment_tick`。
     # **两者都不用时一个字节不发** —— 旧程序的产物逐字节不变。
     _guard_rt = ("@__loment_guard2" in text_all or "@__loment_tick" in text_all
@@ -14810,6 +14921,49 @@ def _desugar_ifexpr(mod: Module) -> None:
             if isinstance(s, Let) and isinstance(s.expr, IfExpr):
                 out.append(Let(s.name, s.type, None, s.line, s.space))
                 out += _lower_ifexpr(s.name, s.expr)
+            elif isinstance(s, If):
+                s.then = walk(s.then)
+                s.otherwise = walk(s.otherwise)
+                out.append(s)
+            elif isinstance(s, While):
+                s.body = walk(s.body)
+                out.append(s)
+            elif isinstance(s, For):
+                s.body = walk(s.body)
+                out.append(s)
+            elif isinstance(s, ForEach):
+                s.body = walk(s.body)
+                out.append(s)
+            elif isinstance(s, Match):
+                for _, b in s.arms:
+                    b[:] = walk(b)
+                out.append(s)
+            else:
+                out.append(s)
+        return out
+
+    for f in mod.funcs:
+        f.body = walk(f.body)
+
+
+def _desugar_matchexpr(mod: Module) -> None:
+    """`let x: T = match e { P => a, _ => b };` -> `let x: T; match e { P => { x = a } _ => { x = b } }`。
+
+    2026.3（`docs/336`）。v1 只处理 `let` 的初值；降完的节点都是普通语句。
+    """
+    def walk(stmts: list) -> list:
+        out: list = []
+        for s in stmts:
+            if isinstance(s, Let) and isinstance(s.expr, MatchExpr):
+                if not isinstance(s.expr.subject, Ident):
+                    raise LomError(s.line, 1,
+                                   "`match` 表达式的 v1 只收**名字**作被匹配值（docs/336）")
+                out.append(Let(s.name, s.type, None, s.line, s.space))
+                arms = []
+                for pat, e in s.expr.arms:
+                    ln = getattr(e, "line", s.line)
+                    arms.append((pat, [Assign(Ident(s.name, ln), e, ln)]))
+                out.append(Match(s.expr.subject, arms, s.expr.line))
             elif isinstance(s, If):
                 s.then = walk(s.then)
                 s.otherwise = walk(s.otherwise)
@@ -15032,6 +15186,7 @@ def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3,
         # Tur 2 的 `for x in xs`（`docs/296` §2.2）：反糖成普通 While，下游不必认识它。
         # 2026.3 继承（版次累积）。
         _desugar_ifexpr(mod)     # 先降 if 表达式（它可能出现在 for 体里）
+        _desugar_matchexpr(mod)
         _desugar_foreach(mod)
     mod.own_switches = own      # 本模块**自己**写的 —— 只有"库不许 choose"用它
     # **包清单的前置条件**（`docs/325`）：模块自己没写某一维时，取同包 `pkg.lomp`

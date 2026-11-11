@@ -23,7 +23,7 @@ you are reading. The entry skill (`loment`) carries the map; this file carries i
 | Export | Add `pub` for cross-module visibility: `pub fn` / `pub struct` / `pub const` |
 | Constant | `const NAME: u32 = 3` - the initialiser is **one integer literal** (decimal or hex, optional `-`); it is not an expression, and there are no string constants - see 6.1.8 |
 | Variable | `let x: u32 = e;`, assignment `x = e;` - **the type annotation is required**; the language has no type inference |
-| Control flow | `if` / `else if` / `else`, `while`, `for i in lo..hi` (upper bound exclusive), `return <expr>;` (the value is **required**). **Tur 2 adds** `for x in xs`, `break` / `continue`, bare `return;` in unit functions, and `defer f(a, b);` - see 2.0.4. **Tur 2026.3 adds** `for i, x in xs` (index copy + element copy), `for x in <call>` (array/slice return, evaluated once), and `let x: T = if c { a } else { b };` (if-expression in the initialiser only) - see 2.0.5 |
+| Control flow | `if` / `else if` / `else`, `while`, `for i in lo..hi` (upper bound exclusive), `return <expr>;` (the value is **required**). **Tur 2 adds** `for x in xs`, `break` / `continue`, bare `return;` in unit functions, and `defer f(a, b);` - see 2.0.4. **Tur 2026.3 adds** `for i, x in xs` (index copy + element copy), `for x in <call>` (array/slice return, evaluated once), and `let x: T = if c { a } else { b };` / `let x: T = match e { E::A => a, _ => b };` (expression forms in the initialiser only) - see 2.0.5 |
 | Struct | `struct S { a: u32, b: u32 }`; literal `S { a: 1, b: 2 }` (2026.3: `S { a, b }` shorthand); field `s.a` |
 | Enum | `enum E { A, B(u32) }`; construction `E::B(3)`; no payload `E::A` |
 | `match` | `match x { E::A => { … } E::B(v) => { … } _ => { … } }` - **arm bodies are blocks**; exhaustive (or use `_`) |
@@ -271,6 +271,7 @@ each bring in one module, see 3.1 at the end of this section.
 | `str_byte(s: str, i: u32) -> u32` | The i-th byte |
 | `str_eq(a: str, b: str) -> bool` | Content comparison |
 | `str_concat(a: str, b: str) -> str` | Concatenation - **allocates from the same 64 KiB arena at run time**, so do not build big strings (or loop over it) |
+| `str_num(n: u32) -> str` | Unsigned decimal text (`4294967295` max) - **allocates from the same arena**, and it lives in the runtime block, so `no_runtime` refuses it by name (E31). `docs/337` |
 | `str_ptr(s: str) -> ptr` | The data pointer (for feeding syscalls) |
 | `print(s: str) -> u32` | Write the string's bytes to stdout (one `write` syscall) |
 | `tur_edition() -> str` | The Tur edition this program is compiled as, e.g. `tur2026.2` (docs/296). The compiler also prints it on stderr at every check/build/run |

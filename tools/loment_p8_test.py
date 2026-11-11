@@ -614,7 +614,7 @@ def test_m81_cross_module_dup_is_rejected():
     mod = lomentc.load(entry)
     deps = lomentc.resolve_deps(mod, ROOT, entry.parent, entry=entry)
     py = _classify_codes(lomentc.check(mod, deps=deps))
-    # 细分之后跨模块重名是 **E0128**（`docs/336`），不是族码 E013。
+    # 细分之后跨模块重名是 **E0128**（`docs/338`），不是族码 E013。
     assert py == [128], f"参考实现没按 E-DUP (E0128) 报跨模块重名: {py}"
     with tempfile.TemporaryDirectory() as td:
         exe = _build_checker(td)
@@ -672,7 +672,7 @@ def test_m81_falling_off_the_end_is_refused():
             f.write_text(src, encoding="utf-8", newline="\n")
             errs = lomentc.check(lomentc.load(f))
             codes = {loment_diag.classify(e)[0] for e in errs}
-            # 细分之后"可能从末尾掉出去"是 **E0179**（`docs/336`；码 179，显示四位）。
+            # 细分之后"可能从末尾掉出去"是 **E0179**（`docs/338`；码 179，显示四位）。
             assert "E0179" in codes, f"{tag}: 掉出末尾没按 E0179 拒: {errs}"
         for tag, src in good.items():
             f = d / (tag + ".lomt")
@@ -2267,7 +2267,7 @@ def test_m94_tur2_bare_return_and_print_num():
                       encoding="utf-8", newline="\n")
         rc3, out3, err3 = _run_driver_raw(elf, _wsl_path(p3), td, "typed")
         assert rc3 != 0 and out3.strip() == "", "有返回类型的 `return;` 被放过去了"
-        # 细分之后这一格是 **E0153**（"`return;` 不带值"，`docs/336`）。
+        # 细分之后这一格是 **E0153**（"`return;` 不带值"，`docs/338`）。
         assert "E0153" in err3, err3[-200:]
         # Tur 2：`no_runtime` 下 `print_num` 点名拒（运行期保证）
         p4 = Path(td) / "nort.lomt"
@@ -2275,9 +2275,10 @@ def test_m94_tur2_bare_return_and_print_num():
                       "fn main() {\n    print_num(7);\n}\n", encoding="utf-8", newline="\n")
         rc4, out4, err4 = _run_driver_raw(elf, _wsl_path(p4), td, "nort")
         assert rc4 != 0 and out4.strip() == "", "`no_runtime` 收下了 print_num"
-        assert "E031" in err4, err4[-200:]
+        # 细分之后 `no_runtime` 下用运行期构造是 **E0208**（`docs/338`）。
+        assert "E0208" in err4, err4[-200:]
         print("      裸 return / print_num: 产物逐字节相同、输出 0/1234/-98765/i64 上限；"
-              "Tur 1 拒 return 但保住用户 print_num；E019/E031 都对")
+              "Tur 1 拒 return 但保住用户 print_num；E019/E0208 都对")
 
 
 @test
@@ -3887,6 +3888,79 @@ def test_m101_if_expression_twin():
             f"tur2026.2 收下了 if-expression (rc={rc}) {err[-300:]}")
     print("      if-expression: 两实现逐字节一致；tur2026.2 两边都拒")
 
+
+@test
+def test_m102_match_expression_twin():
+    """Tur 2026.3 `let x: T = match e { P => a, _ => b };`：两实现逐字节同。
+
+    `docs/336`。参考实现降成 `let x: T;` + 普通 Match；自举侧把 match 发射器参数化
+    （表达式臂 = 单表达式 + 一条 store），标签/switch/载荷绑定的发法与原来一致。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    src = chr(10).join([
+        'module m',
+        '',
+        'enum D { N, E }',
+        '',
+        'fn g(d: D) -> u32 {',
+        '    let x: u32 = match d { D::N => 1, D::E => 2 };',
+        '    return x;',
+        '}',
+        '',
+        'fn h(o: Option<u32>) -> u32 {',
+        '    let y: u32 = match o { Option::Some(v) => v + 1, _ => 0 };',
+        '    return y;',
+        '}',
+        '',
+    ])
+    old = "choose write grammar tur2026.2" + chr(10) + src
+    with tempfile.TemporaryDirectory() as td:
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_matchexpr")
+        p = Path(td) / "new.lomt"
+        p.write_text(src, encoding="utf-8", newline=chr(10))
+        rc, out, err = _run_driver_raw(elf, _wsl_path(p), td, "new")
+        assert rc == 0, f"自举驱动编不过 match-expression: {err[-400:]}"
+        assert out == _unit_ll(p), "match-expression: 自举产物与参考不一致"
+        p = Path(td) / "old.lomt"
+        p.write_text(old, encoding="utf-8", newline=chr(10))
+        rc, out, err = _run_driver_raw(elf, _wsl_path(p), td, "old")
+        assert rc != 0 and out.strip() == "", (
+            f"tur2026.2 收下了 match-expression (rc={rc}) {err[-300:]}")
+    print("      match-expression: 两实现逐字节一致；tur2026.2 两边都拒")
+
+
+
+@test
+def test_m103_str_num_twin():
+    """`str_num(u32) -> str`：两实现逐字节同（`docs/337`）。
+
+    十进制转换是运行期里的一段（`__loment_num_to_dec`），只在真调用时随产后发；
+    两边的调用点、堆计数与 helper 文本必须完全一致。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    src = "".join([
+        "module m", chr(10),
+        "choose runtime", chr(10), chr(10),
+        "fn f(n: u32) -> str {", chr(10),
+        "    let s: str = str_num(n);", chr(10),
+        "    return s;", chr(10),
+        "}", chr(10), chr(10),
+        "fn g(n: u32) -> u32 {", chr(10),
+        "    let s: str = str_num(n);", chr(10),
+        "    return str_len(s);", chr(10),
+        "}", chr(10)])
+    with tempfile.TemporaryDirectory() as td:
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_strnum")
+        p = Path(td) / "new.lomt"
+        p.write_text(src, encoding="utf-8", newline=chr(10))
+        rc, out, err = _run_driver_raw(elf, _wsl_path(p), td, "new")
+        assert rc == 0, f"自举驱动编不过 str_num: {err[-400:]}"
+        assert out == _unit_ll(p), "str_num: 自举产物与参考不一致"
+    print("      str_num: 两实现逐字节一致")
 
 def main() -> int:
     return loment_suite.run(TESTS, "loment_p8_test")

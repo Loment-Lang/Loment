@@ -353,7 +353,7 @@ def test_lsp_diagnostics_match_selfhosted_checker():
                        for d in dg), (name, want_code, want_line, dg)
             assert len(dg) >= want_n, (name, want_n, dg)
         for d in dg:
-            # 码的形状（`docs/336`）：< 100 是 `E0xx`、>= 100 是 `E0xxx`，所以长度 4 或 5。
+            # 码的形状（`docs/338`）：< 100 是 `E0xx`、>= 100 是 `E0xxx`，所以长度 4 或 5。
             assert d["code"].startswith("E") and len(d["code"]) in (4, 5), d
     print(f"      {len(cases)} 个用例的码/行号正确 (重名 E0134 / 未声明 E096 / 干净 0 条)")
 
@@ -468,7 +468,7 @@ def test_lsp_check_honours_switches():
                 f"关着的开关体不该被检查, 实得 rc={off.returncode}: {off.stdout!r}"
             on = run(SW_ON_SRC)
             assert on.returncode == 1, f"打开后应当报错, 实得 rc={on.returncode}: {on.stdout!r}"
-            # 细分之后"调用未定义的函数"是 **E096**（`docs/336`），LSP 按同一个宽度印。
+            # 细分之后"调用未定义的函数"是 **E096**（`docs/338`），LSP 按同一个宽度印。
             assert "E096" in on.stdout, f"打开后应当报未定义函数 (E096): {on.stdout!r}"
     finally:
         probe.unlink(missing_ok=True)
@@ -1345,7 +1345,7 @@ def test_diag_titles_match_reference():
     """`diag_title` 必须**转发**到 `surface_data.code_title`，不许再有第二份标题表。
 
     原先这里钉的是"手抄表与 `loment_diag.RULES` 逐字同文"。2026-11-10 细分码表
-    （`docs/336`）之后，自举 checker 发的是 42..208 这一层细码，手抄到 38 的表整片
+    （`docs/338`）之后，自举 checker 发的是 42..208 这一层细码，手抄到 38 的表整片
     落到表外，用户看到的每一条都是「未分类」。于是标题改成从生成的 `surface_data`
     取（与 `lomcli` / `lomenterr` 同一份），这条判据改成钉**结构**：
 

@@ -93,10 +93,10 @@ old <<<
             if code == 22 && str_len(ph) > 0 {
 >>>
 new <<<
-            // `E031`（这一档是 `no_runtime`，而这个构造要运行期）：正文写成**那句话**，
-            // 不是那一格 token（issue #321）。码是**专属**的（不再与 `choose` 共用 E022），
-            // `str_len(ph) > 0` 只是"那格 token 在名单里"的兜底，照旧走 token 原文。
-            let ph: str = rt_phrase(unit, ctoks, tk);
-            let isrt: u32 = 0;
-            if code == 31 && str_len(ph) > 0 {
+                // `E031`（这一档是 `no_runtime`，而这个构造要运行期）：正文写成**那句话**，
+                // 不是那一格 token（issue #321）。码是**专属**的（不再与 `choose` 共用 E022），
+                // `str_len(ph) > 0` 只是"那格 token 在名单里"的兜底，照旧走 token 原文。
+                ph = rt_phrase(unit, ctoks, tk);
+                if code == 31 && str_len(ph) > 0 {
+                    isrt = 1;
 >>>

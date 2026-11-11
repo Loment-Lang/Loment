@@ -33,9 +33,12 @@ SEED = ROOT / "loment" / "build" / "selfhost_driver.ll"
 ADMIT_SRC = ROOT / "loment" / "tools" / "lomadmit.lomt"
 TESTS: list[tuple[str, object]] = []
 
-#: 诊断里必须出现的三种名字（与自举侧同一套码）。
-DEEP = "E23"                     # 嵌套超过 64 层
-UTYPE = "E30"                    # 类型位置上的未知名（嵌套泛型在自举侧就是这个）
+#: 诊断里必须出现的三种名字（与自举侧同一套码；显示宽度见 `docs/338`：< 100 补到三位）。
+DEEP = "E023"                    # 嵌套超过 64 层
+#: 自举侧不认识嵌套泛型实参 / 嵌套数组类型；它报的是**形参类型未知**那一格
+#: （细分后的 E0185，族 E030）。参考实现在这两种形状上**不报**，所以这里钉的是自举侧
+#: 自己的口径，不是对拍。
+UTYPE = "E0185"
 TOO_LARGE = "the unit is too large"
 
 _WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
@@ -256,9 +259,9 @@ def test_deep_unary_chain_is_diagnosed_not_signalled():
 def test_deep_generic_arguments_are_diagnosed_not_signalled():
     """`#871`：256 层 `G<G<...>>` 原先 SIGSEGV（128 层反而报得出）。
 
-    自举侧的检查器不认识嵌套泛型实参，报的是 E030「类型位置上的未知名」（参考实现
-    也报"未知类型 G<G<…>"）。这条只要求**每一档都有诊断、没有信号** —— 码可以是
-    E030，也可以是容量诊断。
+    自举侧的检查器不认识嵌套泛型实参，报的是 E0185「形参的类型未知」（参考实现在这类
+    形状上不报）。这条只要求**每一档都有诊断、没有信号** —— 码可以是 E0185，
+    也可以是容量诊断。
     """
     if _skip():
         return
@@ -267,7 +270,7 @@ def test_deep_generic_arguments_are_diagnosed_not_signalled():
         for n in (16, 64, 128, 256, 1000, 5000):
             rc, _out, err = _ladder("generic", n, td)
             _assert_diagnosed(rc, err, f"generic {n}", (UTYPE, DEEP, TOO_LARGE))
-    print("      泛型实参：16..5000 一律 E030 / E023 / 容量诊断")
+    print("      泛型实参：16..5000 一律 E0185 / E023 / 容量诊断")
 
 
 @test
@@ -275,7 +278,7 @@ def test_deep_array_types_are_diagnosed_not_signalled():
     """`#873`：256 层 `[[[...u32...]]]` 原先 SIGSEGV。
 
     自举侧的类型检查 `check_type` 对 `[` 是递归的 —— 括号深度那一趟必须先把它挡住。
-    **注意**：自举侧本来就不认识嵌套数组类型（`[[u32]]` 起就报 E030），所以这里不断言
+    **注意**：自举侧本来就不认识嵌套数组类型（`[[u32]]` 起就报 E0185），所以这里不断言
     "上限以内接受"：它要钉的只是"每一档都有诊断、没有信号"。
     """
     if _skip():
@@ -285,7 +288,7 @@ def test_deep_array_types_are_diagnosed_not_signalled():
         for n in (2, 4, 63, 64, 128, 256, 512, 1000):
             rc, _out, err = _ladder("array_type", n, td)
             _assert_diagnosed(rc, err, f"array_type {n}", (UTYPE, DEEP, TOO_LARGE))
-    print("      数组类型：2..1000 一律 E030 / E023 / 容量诊断")
+    print("      数组类型：2..1000 一律 E0185 / E023 / 容量诊断")
 
 
 @test

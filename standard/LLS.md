@@ -1618,7 +1618,7 @@ fix a user must make**, not by wording.
 | E039 | `lgc` requires a collector, but the unit chose `no_gc`. |
 | E040 | An undeclared unit declares a name that a newer edition treats as syntax (§8.7). |
 
-`E900` (the tool died without writing a diagnostic) and `E999` (unclassified; please
+`E0900` (the tool died without writing a diagnostic) and `E0999` (unclassified; please
 report) are internal and MUST NOT be produced for a well-formed program.
 
 A diagnostic MUST include a source position (line, and column or token) except for the
@@ -2051,6 +2051,7 @@ lms_full               all seven (default)
 lms_forensic_admin     1 + 2 + 3 + 4
 lms_daily_admin        1 + 3 + 4
 lms_manage_only_admin  2
+lms_close_admin        0
 ```
 
 The direction is reversed: the default is full, and writing a tier is a **downgrade**.
@@ -2192,7 +2193,7 @@ Loment has **eight** dimensions. Each selects a property of the whole program.
 | `runtime` | `runtime`, `no_runtime` | `no_runtime` | whether the artifact may carry the runtime block |
 | `port` | `sealed`, `hosted` | `sealed` | whether the artifact may link host libraries |
 | `vm` | `vm`, `no_vm` | `no_vm` | the execution model |
-| `lms` | `lms_full`, `lms_forensic_admin`, `lms_daily_admin`, `lms_manage_only_admin` | `lms_full` | which memory-safety levels are on |
+| `lms` | `lms_full`, `lms_forensic_admin`, `lms_daily_admin`, `lms_manage_only_admin`, `lms_close_admin` | `lms_full` | which memory-safety levels are on |
 | `lspe` | `lspe_open_admin`, `lspe_close_admin` | `lspe_open_admin` | whether the audit ledger is recorded |
 | `lifetime` | `lifetime_no`, `lifetime_auto`, `lifetime_manual` | `lifetime_auto` from 2026.3; `lifetime_no` before | compile-time borrow regions |
 
@@ -3243,7 +3244,7 @@ the full statement.
 | `runtime` | `runtime`, `no_runtime` | `no_runtime` | |
 | `port` | `sealed`, `hosted` | `sealed` | |
 | `vm` | `vm`, `no_vm` | `no_vm` | artifact unchanged today |
-| `lms` | `lms_full`, `lms_forensic_admin`, `lms_daily_admin`, `lms_manage_only_admin` | `lms_full` | |
+| `lms` | `lms_full`, `lms_forensic_admin`, `lms_daily_admin`, `lms_manage_only_admin`, `lms_close_admin` | `lms_full` | |
 | `lspe` | `lspe_open_admin`, `lspe_close_admin` | `lspe_open_admin` | |
 | `lifetime` | `lifetime_no`, `lifetime_auto`, `lifetime_manual` | `lifetime_auto` from 2026.3; `lifetime_no` before | edition-gated |
 

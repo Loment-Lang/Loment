@@ -13,6 +13,10 @@ about 的 `"code"` 跟着改。参考侧的 `loment_diag.RULES` / `CARDS` / `ASC
 about `TITLE_EN` 与 `lomentc.py` 那两条正则各自改动（那不是"同一段文本的多个副本"，
 about 按普通改动落，见 `docs/257` §4）。
 about
+about
+about 2026-11-11：这条诊断后来细分成 **E0208**（`docs/338`），下面那段 `new` 跟着
+about 换成数（`E_RT` 常量保留，另几处仍用它）；补丁与源照旧一一对上。
+about
 about 这一笔以修改件落的理由：**自举侧那几处是"同一段文本、两个实现各一份"** ——
 about 驱动器里 `code == 22` 那一处必须与检查器发的码同步改，改漏一处的症状是
 about "结构化诊断里写 E022、人看的那行写那句话"（半对半错，比全错更难查）。
@@ -54,7 +58,9 @@ old <<<
             o = sym_pub(src, t, out, o, E_MODE, hit);
 >>>
 new <<<
-            o = sym_pub(src, t, out, o, E_RT, hit);
+            // 2026-11-11：参考实现那一侧这条诊断细分成了 **208**（单元自己用了会拖
+            // 运行期的构造；依赖用了没声明需求是 188），所以这里直接写数。
+            o = sym_pub(src, t, out, o, 208, hit);
 >>>
 
 edit loment/selfhost/driver.lomt expect 1

@@ -40,7 +40,7 @@ Python, no clang and no WSL.
   checker while offering nearly the same safety: it audits the compiler's own decisions and
   records every allowance, so no permit is silent.
 
-Diagnostics come from a separate program: `lomenterr version` prints `lomenterr 0.1.2`, its own
+Diagnostics come from a separate program: `lomenterr version` prints `lomenterr 0.1.3`, its own
 number.
 
 ## A first program

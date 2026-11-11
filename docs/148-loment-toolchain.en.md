@@ -1,5 +1,5 @@
 <!-- translated-from: docs/148-loment-toolchain.md -->
-<!-- source-sha256: d6e09ea71b75b26fd29b2916b84a366b61bad65ece69dc205c1b3c636ee8495f -->
+<!-- source-sha256: 60a9bd5a78572511c68cc73870944203df82671e007b0e21b757d569e407f830 -->
 
 # 148 · The Loment toolchain (P6, M55–M66)
 
@@ -242,7 +242,7 @@ Sample (`toolchain.lomt`, N=2e6, local machine):
 
 `tools/loment_diag.py` pattern-classifies compiler messages; each of the 20 error classes has a stable error code
 (E001–E020) and an actionable suggestion; the test uses 13 counterexample snippets to assert that **every one is
-classified** (no E999) and carries a suggestion.
+classified** (no E0999) and carries a suggestion.
 
 Two disciplines directly tied to "the classification table is trustworthy":
 
@@ -254,7 +254,7 @@ Two disciplines directly tied to "the classification table is trustworthy":
   E015's `重复初始化` [duplicate initialisation]).
 - `test_m64_all_reference_messages_are_classified` uses `ast` to extract **all** the `errs.append` message
   templates in `lomentc.py` (81 of them) and classifies each one — if the classification table misses one, that
-  rule becomes E999 on both sides in the "self-hosted vs reference" code-set comparison and is dropped, and **the
+  rule becomes E0999 on both sides in the "self-hosted vs reference" code-set comparison and is dropped, and **the
   gap disappears silently**.
 
 ## 10b. M85 rule-parity comparison

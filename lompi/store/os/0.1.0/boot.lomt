@@ -20,24 +20,8 @@
 
 module boot
 
-const BOQ_SYS_READ: u64 = 0;
-const BOQ_SYS_CLOSE: u64 = 3;
-const BOQ_SYS_OPENAT: u64 = 257;
-const BOQ_AT_FDCWD: u64 = 18446744073709551516;
+use fsutil
 
-fn boq_cstr(s: str, out: ptr, cap: u32) -> u32 {
-    let n: u32 = str_len(s);
-    if n + 1 > cap {
-        return 0;
-    }
-    let i: u32 = 0;
-    while i < n {
-        store8(out, i, str_byte(s, i) as u8);
-        i = i + 1;
-    }
-    store8(out, n, 0 as u8);
-    return n + 1;
-}
 
 fn boq_st64(p: ptr, v: u64) -> u32 {
     let b: u32 = 0;
@@ -50,17 +34,11 @@ fn boq_st64(p: ptr, v: u64) -> u32 {
 
 fn boq_read(path: str, buf: ptr, cap: u64) -> i64 {
     let c: ptr = alloc(96);
-    let n: u32 = boq_cstr(path, c, 88);
+    let n: u32 = fu_cstr(path, c, 88);
     if n == 0 {
         return 0 - 36;
     }
-    let fd: i64 = syscall6(BOQ_SYS_OPENAT, BOQ_AT_FDCWD, c as u64, 0, 0, 0);
-    if fd < 0 {
-        return fd;
-    }
-    let r: i64 = syscall4(BOQ_SYS_READ, fd as u64, buf as u64, cap);
-    let _c: i64 = syscall4(BOQ_SYS_CLOSE, fd as u64, 0, 0);
-    return r;
+    return fu_read_file(c, buf, cap as u32);
 }
 
 // ---------------------------------------------------------------- 纯解析
@@ -113,7 +91,10 @@ pub fn bo_cmdline_has(buf: ptr, n: u64, key: str) -> bool {
             }
             let after: u64 = i + (kn as u64);
             if hit == 1 {
-                if after == n || load8(buf, after as u32) == 32 || load8(buf, after as u32) == 10 {
+                // `key=value` 也算"有这个键" —— 否则 `mitigations=off` 里的
+                // `mitigations` 查不到，而它恰恰是常见写法。
+                if after == n || load8(buf, after as u32) == 32
+                    || load8(buf, after as u32) == 10 || load8(buf, after as u32) == 61 {
                     return true;
                 }
             }

@@ -3385,6 +3385,12 @@ fn em_block(mem: ptr, start: u32, cnt: u32, depth: u32) -> u32 {
 fn raw_ex(mem: ptr, e: u32, buf: ptr, o: u32) -> u32 {
     let s: ptr = ptr_add(mem, M_SCR);
     let k: u32 = nd_get(mem, e, ND_KIND);
+    if k == NK_TERN {
+        // 本语言没有**表达式级**的 if —— 三元只在赋值/返回的右边收（见 `pye_bind`
+        // 与 return 那一支）。嵌进别的表达式里点名拒。
+        let _u: u32 = pye_uns(mem);
+        return o;
+    }
     if k == NK_STR {
         return str_lit(mem, nd_get(mem, e, ND_A), nd_get(mem, e, ND_B), buf, o);
     }
@@ -4570,6 +4576,9 @@ const NK_BOOL: u32 = 16;           // `and` / `or` —— **n 元**（`a and b a
 //: 字符串字面量。`ND_A` / `ND_B` 存它在**源里的**起点与长度（含两个引号）—— 原文
 //: 原样留着，发射时逐段翻转子集内的转义（与 `pytrans._str_lit` 同一口径）。
 const NK_STR: u32 = 17;
+//: 条件表达式 `a if c else b`。三个孩子：`ND_A` = 命中的那一支、`ND_B` = 条件、
+//: `ND_C` = 不命中的那一支。**只在赋值/返回的右边收** —— 本语言没有表达式级的 `if`。
+const NK_TERN: u32 = 18;
 
 const UN_SUB: u32 = 1;             // 一元 `-`
 const UN_NOT: u32 = 2;             // `not`
@@ -4671,6 +4680,10 @@ fn pp_type(mem: ptr, src: ptr) -> u32 {
     if l == 4 && eq(src, o, "None") == 1 {
         let _n: u32 = pp_next(mem);
         return 10;                                 // `()`
+    }
+    if l == 3 && eq(src, o, "str") == 1 {
+        let _n: u32 = pp_next(mem);
+        return TY_STR_ID;                          // 上游 `_TYPES["str"]`
     }
     let _u: u32 = pp_uns(mem);
     return 0;
@@ -4840,7 +4853,31 @@ fn pp_block(mem: ptr, src: ptr, outp: ptr) -> u32 {
 // ---- 表达式（优先级由低到高，与 Python 一致）
 
 fn pp_expr(mem: ptr, src: ptr) -> u32 {
-    return pp_or(mem, src);
+    let x: u32 = pp_or(mem, src);
+    if x == 0 {
+        return 0;
+    }
+    if pp_is(mem, src, "if") == 0 {
+        return x;
+    }
+    // `a if c else b` —— Python 的 expr 那一层，右结合。
+    let _n: u32 = pp_next(mem);
+    let c: u32 = pp_or(mem, src);
+    if c == 0 {
+        return 0;
+    }
+    if pp_want(mem, src, "else") == 0 {
+        return 0;
+    }
+    let b: u32 = pp_expr(mem, src);
+    if b == 0 {
+        return 0;
+    }
+    let t: u32 = node_new(mem, NK_TERN, 0);
+    let _a: u32 = nd_set(mem, t, ND_A, x);
+    let _b: u32 = nd_set(mem, t, ND_B, c);
+    let _c: u32 = nd_set(mem, t, ND_C, b);
+    return t;
 }
 
 fn pp_or(mem: ptr, src: ptr) -> u32 {
@@ -5850,6 +5887,18 @@ fn pye_ty_of(mem: ptr, e: u32) -> u32 {
         }
         return 7;
     }
+    if k == NK_TERN {
+        let a: u32 = pye_ty_of(mem, nd_get(mem, e, ND_A));
+        let b: u32 = pye_ty_of(mem, nd_get(mem, e, ND_C));
+        if a == 0 || b == 0 {
+            return 0;
+        }
+        if a != b {
+            let _u: u32 = pye_uns(mem);       // 两个分支类型不同：没有公共类型可写
+            return 0;
+        }
+        return a;
+    }
     if k == NK_BIN {
         if bin_isbool(nd_get(mem, e, ND_A)) == 1 {
             return 9;
@@ -5875,6 +5924,12 @@ fn pye_ty_of(mem: ptr, e: u32) -> u32 {
 fn pye_raw(mem: ptr, e: u32, buf: ptr, o: u32) -> u32 {
     let s: ptr = ptr_add(mem, M_SCR);
     let k: u32 = nd_get(mem, e, ND_KIND);
+    if k == NK_TERN {
+        // 本语言没有**表达式级**的 if —— 三元只在赋值/返回的右边收（见 `pye_bind`
+        // 与 return 那一支）。嵌进别的表达式里点名拒。
+        let _u: u32 = pye_uns(mem);
+        return o;
+    }
     if k == NK_STR {
         return str_lit(mem, nd_get(mem, e, ND_A), nd_get(mem, e, ND_B), buf, o);
     }
@@ -6053,6 +6108,101 @@ fn pye_loopvars(mem: ptr, start: u32, cnt: u32) -> u32 {
     return from;
 }
 
+/// `return a if c else b` -> 两条 return（顺序与 Python 一致：先算条件）。
+fn pye_return_ternary(mem: ptr, e: u32, depth: u32) -> u32 {
+    let py: ptr = ptr_add(mem, M_TMP);
+    let eb: ptr = ptr_add(mem, M_EB);
+    let o0: u32 = app(eb, 0, "if ");
+    let o1: u32 = pye_ex(mem, nd_get(mem, e, ND_B), 9, eb, o0);
+    let o2: u32 = app(eb, o1, " {");
+    let _l: u32 = line_put(mem, o2, depth, 1);
+    let r0: u32 = app(eb, 0, "return ");
+    let r1: u32 = pye_ex(mem, nd_get(mem, e, ND_A), ld32(py, E_RET), eb, r0);
+    let r2: u32 = app(eb, r1, ";");
+    let _r: u32 = line_put(mem, r2, depth + 1, 0);
+    let _z: u32 = line_lit(mem, "}", depth, 0);
+    let s0: u32 = app(eb, 0, "return ");
+    let s1: u32 = pye_ex(mem, nd_get(mem, e, ND_C), ld32(py, E_RET), eb, s0);
+    let s2: u32 = app(eb, s1, ";");
+    return line_put(mem, s2, depth, 0);
+}
+
+/// 声明用的零值（本语言的 `let` 要初值）。
+fn pye_zero(mem: ptr, ty: u32, buf: ptr, o: u32) -> u32 {
+    if ty == 9 {
+        return app(buf, o, "false");
+    }
+    if ty == TY_STR_ID {
+        return app(buf, o, "\"\"");
+    }
+    if ty == 7 {
+        return app(buf, o, "0");
+    }
+    if ty == 5 {
+        return app(buf, o, "0");
+    }
+    if ty == 6 {
+        return app(buf, o, "0");
+    }
+    if ty == 8 {
+        return app(buf, o, "0");
+    }
+    if ty == 1 {
+        return app(buf, o, "0");
+    }
+    if ty == 2 {
+        return app(buf, o, "0");
+    }
+    if ty == 3 {
+        return app(buf, o, "0");
+    }
+    if ty == 4 {
+        return app(buf, o, "0");
+    }
+    return app(buf, o, "0");
+}
+
+/// `x = a if c else b` -> 先给零值，再 `if`/`else` 两条赋值（**顺序不变**）。
+fn pye_bind_ternary(mem: ptr, s: u32, depth: u32, no: u32, nl: u32, e: u32) -> u32 {
+    let py: ptr = ptr_add(mem, M_TMP);
+    let eb: ptr = ptr_add(mem, M_EB);
+    let t: ptr = ptr_add(mem, M_TMP + 1200);
+    let tn: u32 = pye_safe(mem, no, nl, t);
+    let have: u32 = pye_var_find(mem, no, nl);
+    let ty: u32 = have;
+    if have == 0 {
+        ty = pye_ty_of(mem, e);
+        if ty == 0 {
+            return 0;
+        }
+        let _v: u32 = pye_var_set(mem, no, nl, ty);
+        let o0: u32 = app(eb, 0, "let ");
+        let o1: u32 = appn(eb, o0, t, 0, tn);
+        let o2: u32 = app(eb, o1, ": ");
+        let o3: u32 = app(eb, o2, ty_text(ty));
+        let o4: u32 = app(eb, o3, " = ");
+        let o5: u32 = pye_zero(mem, ty, eb, o4);
+        let o6: u32 = app(eb, o5, ";");
+        let _l0: u32 = line_put(mem, o6, depth, 0);
+    }
+    let c0: u32 = app(eb, 0, "if ");
+    let c1: u32 = pye_ex(mem, nd_get(mem, e, ND_B), 9, eb, c0);
+    let c2: u32 = app(eb, c1, " {");
+    let _l1: u32 = line_put(mem, c2, depth, 1);
+    let a0: u32 = appn(eb, 0, t, 0, tn);
+    let a1: u32 = app(eb, a0, " = ");
+    let a2: u32 = pye_ex(mem, nd_get(mem, e, ND_A), ty, eb, a1);
+    let a3: u32 = app(eb, a2, ";");
+    let _l2: u32 = line_put(mem, a3, depth + 1, 0);
+    let _z0: u32 = line_lit(mem, "} else {", depth, 1);
+    let b0: u32 = appn(eb, 0, t, 0, tn);
+    let b1: u32 = app(eb, b0, " = ");
+    let b2: u32 = pye_ex(mem, nd_get(mem, e, ND_C), ty, eb, b1);
+    let b3: u32 = app(eb, b2, ";");
+    let _l3: u32 = line_put(mem, b3, depth + 1, 0);
+    return line_lit(mem, "}", depth, 0);
+}
+
 fn pye_stmt(mem: ptr, s: u32, depth: u32) -> u32 {
     let py: ptr = ptr_add(mem, M_TMP);
     let eb: ptr = ptr_add(mem, M_EB);
@@ -6075,6 +6225,9 @@ fn pye_stmt(mem: ptr, s: u32, depth: u32) -> u32 {
             // 同上：不带值的 `return` 本语言没有对应写法
             let _u: u32 = pye_uns(mem);
             return 0;
+        }
+        if nd_get(mem, e, ND_KIND) == NK_TERN {
+            return pye_return_ternary(mem, e, depth);
         }
         let o: u32 = app(eb, 0, "return ");
         let o2: u32 = pye_ex(mem, e, ld32(py, E_RET), eb, o);
@@ -6190,6 +6343,10 @@ fn pye_bind(mem: ptr, s: u32, depth: u32, is_ann: u32) -> u32 {
     if pye_ft_has(mem, no, nl) == 1 {
         let _u: u32 = pye_uns(mem);
         return 0;
+    }
+    // `x = a if c else b` —— 摊成零值 + `if`/`else` 两条赋值（顺序与 Python 一致）
+    if nd_get(mem, e, ND_KIND) == NK_TERN {
+        return pye_bind_ternary(mem, s, depth, no, nl, e);
     }
     let tname: ptr = ptr_add(mem, M_TMP + 1200);
     let tn: u32 = pye_safe(mem, no, nl, tname);

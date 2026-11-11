@@ -1560,10 +1560,11 @@ def test_install_scripts_stay_pure_ascii():
 #: **2026-11-09 补 `system` / `os` 到 40**（`docs/327`）：system +28、os +33，
 #: 两包 12 / 7 -> 40 / 40，整棵树 262 -> **323**。
 STORE_DIR = ROOT / "lompi" / "store"
-STORE_MODULES = {"std": 141, "host": 8, "internet": 8, "os": 40,
+STORE_MODULES = {"std": 148, "host": 8, "internet": 11, "os": 44,
                  "math": 9, "science": 6, "engineering": 4,
-                 "dev": 15, "world": 22, "lowlevel": 12, "system": 40, "baremetal": 6}
-STORE_FILES = 323
+                 "dev": 15, "world": 22, "lowlevel": 12, "system": 41, "baremetal": 6,
+                 "windows": 6}
+STORE_FILES = 345
 
 
 def _store_line(out: str) -> str:
@@ -1600,6 +1601,20 @@ def test_package_carries_the_whole_store():
 
 
 @test
+def test_the_store_index_is_current():
+    """`docs/store-index.md` 必须与 store 逐字节一致 —— 它是生成物（docs/328）。
+
+    **Why**：三百多个模块的索引手写必漂；生成物 + 逐字节判据是唯一不靠自觉的形状。
+    """
+    import loment_store_index
+    want = loment_store_index.render()
+    cur = (ROOT / "docs" / "store-index.md").read_text(encoding="utf-8")
+    assert cur == want, (
+        "docs/store-index.md 过期 —— 跑 python tools/loment_store_index.py")
+    print(f"      store 索引与 {len(want.splitlines())} 行生成物一致")
+
+
+@test
 def test_every_store_module_compiles_on_its_own():
     """store 里**每个**模块各自都是合法的 L1 单元（编译到 IR 为止）。
 
@@ -1621,6 +1636,27 @@ def test_every_store_module_compiles_on_its_own():
                 bad.append(f"{p.relative_to(ROOT)}: {errs[:2]}")
     assert not bad, "store 模块自己编不过：\n  " + "\n  ".join(bad)
     print(f"      {n} 个 store 模块各自过检查（语法 + 类型 + 依赖 + 内建实参）")
+
+
+@test
+def test_every_builtin_package_carries_the_lomentitem_mark():
+    """每个随包发的 `pkg.lomp` 都必须带 `origin() == "LomentItem"`（docs/331）。
+
+    **Why**：编译器拿这个标记当闸 —— 没有它的包不进入内置库的解析面，社区包就不能
+    同名顶替标准库。标记是**声明**不是密码学签名；它的价值在于"少了就一定不对"，
+    而完整性仍由内容哈希与发行签名负责。
+    """
+    store = ROOT / "lompi" / "store"
+    bad: list[str] = []
+    n = 0
+    for mf in sorted(store.glob("*/*/pkg.lomp")):
+        n += 1
+        origin = lomentc._manifest_origin(mf.read_text(encoding="utf-8"))
+        if origin != lomentc.LOMENT_ITEM:
+            bad.append(f"{mf.relative_to(ROOT)}: origin()={origin!r}")
+    assert n >= 12, f"store 里只有 {n} 个包清单，扫错目录了"
+    assert not bad, "标准库包缺 LomentItem 标记：\n  " + "\n  ".join(bad)
+    print(f"      {n} 个标准库包都带 LomentItem 标记")
 
 
 @test
@@ -1845,6 +1881,11 @@ def _write_pkg(d: Path, name: str) -> None:
     d.mkdir(parents=True, exist_ok=True)
     (d / "area.lomt").write_bytes(PKG_AREA.encode())
     (d / f"{name}.lomt").write_bytes(PKG_ENTRY.format(n=name).encode())
+    # 这些夹具也用来摆"工具链自带的 store"，所以清单带 `LomentItem`（docs/331）。
+    (d / "pkg.lomp").write_text(
+        ("module pkg\n\npub fn name() -> str {\n    return \"" + name + "\";\n}\n\n"
+         "pub fn origin() -> str {\n    return \"LomentItem\";\n}\n"),
+        encoding="utf-8")
 
 
 @test
@@ -1914,6 +1955,11 @@ def test_selfhost_reaches_a_module_in_the_dev_checkout_store():
         pkg.mkdir(parents=True)
         (pkg / "area.lomt").write_bytes(PKG_AREA.encode())
         (pkg / "geom.lomt").write_bytes(PKG_ENTRY.format(n="geom").encode())
+        # 夹具模拟**工具链自带**的包：清单要带 `LomentItem`，否则解析闸会拒（docs/331）。
+        (pkg / "pkg.lomp").write_text(
+            "module pkg\n\npub fn name() -> str {\n    return \"geom\";\n}\n\n"
+            "pub fn origin() -> str {\n    return \"LomentItem\";\n}\n",
+            encoding="utf-8")
         hi = proj / "hi.lomt"
         hi.write_bytes(USE_AREA.encode())
         r = subprocess.run([str(s), str(hi)], cwd=str(proj), capture_output=True, timeout=300)

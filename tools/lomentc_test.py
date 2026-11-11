@@ -2310,6 +2310,10 @@ def _pkg(d: Path, name: str) -> None:
          f"    return ar(w, h);\n}}\n").encode())
     (d / "area.lomt").write_bytes(
         b"module area\n\npub fn ar(w: u32, h: u32) -> u32 {\n    return w * h;\n}\n")
+    # 夹具模拟**工具链自带的**包：清单里必须带 `LomentItem`（docs/331）。
+    (d / "pkg.lomp").write_bytes(
+        (f'module pkg\n\npub fn name() -> str {{\n    return "{name}";\n}}\n\n'
+         f'pub fn origin() -> str {{\n    return "LomentItem";\n}}\n').encode())
 
 
 def _entry(p: Path, name: str) -> Path:
@@ -2351,6 +2355,73 @@ def test_name_form_falls_through_to_the_toolchain_store():
         proj.mkdir()
         got = lomentc.resolve_name("geom", ROOT, proj, tool / "bin")
         assert got == tool / "share" / "lompi" / "store" / "geom" / "0.1.0" / "geom.lomt", got
+
+
+@test
+def test_store_package_without_the_lomentitem_mark_is_not_a_builtin():
+    """没有 `LomentItem` 标记的包**不进内置库的解析面**（docs/331）。
+
+    这道闸挡的是"把一份社区包塞进 store、当成标准库"那条路：名字一样、内容不同。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        tool = Path(td) / "tool"
+        (tool / "bin").mkdir(parents=True)
+        d = tool / "share" / "lompi" / "store" / "geom" / "0.1.0"
+        _pkg(d, "geom")
+        (d / "pkg.lomp").unlink()
+        proj = Path(td) / "proj"
+        proj.mkdir()
+        try:
+            lomentc.resolve_name("geom", ROOT, proj, tool / "bin")
+        except lomentc.LomError as e:
+            assert "LomentItem" in str(e), e
+        else:
+            raise AssertionError("没有标记的包不该被当成内置库")
+
+
+@test
+def test_the_store_can_be_bypassed_entirely():
+    """`LOMENT_NO_STORE=1` 让解析器**完全不看** store（docs/331）。
+
+    **Why**：Loment 要能编裸金属 —— 那条路上不该有任何"顺手拉一份标准库"的可能。
+    绕开之后 `use std` 找不到就是找不到，`deps/` 与内置四根照常工作。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td)
+        dep = proj / "deps" / "mine"
+        dep.mkdir(parents=True)
+        (dep / "mine.lomt").write_text("module mine\n", encoding="utf-8")
+        old = os.environ.get("LOMENT_NO_STORE")
+        os.environ["LOMENT_NO_STORE"] = "1"
+        try:
+            assert lomentc.store_roots(ROOT, None) == []
+            assert lomentc.resolve_name("mine", ROOT, proj) == dep / "mine.lomt"
+            try:
+                lomentc.resolve_name("vec", ROOT, proj)
+            except lomentc.LomError as e:
+                assert "找不到" in str(e), e
+            else:
+                raise AssertionError("绕开 store 之后 `use vec` 应当找不到")
+        finally:
+            if old is None:
+                os.environ.pop("LOMENT_NO_STORE", None)
+            else:
+                os.environ["LOMENT_NO_STORE"] = old
+
+
+@test
+def test_community_deps_cannot_take_a_builtin_package_name():
+    """`deps/math` 不能顶替 store 里的 `math` 包 —— 保留名是**store 里全部包名**。
+
+    #980 的保留名原先只有写死的那五个；`docs/331` 起，store 里每个包名都自动成为保留名。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td)
+        evil = proj / "deps" / "math"
+        evil.mkdir(parents=True)
+        (evil / "math.lomt").write_text("module math\n", encoding="utf-8")
+        got = lomentc.resolve_name("math", ROOT, proj)
+        assert got == ROOT / "lompi" / "store" / "math" / "0.1.0" / "math.lomt", got
 
 
 @test

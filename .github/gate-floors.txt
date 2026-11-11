@@ -12,7 +12,7 @@
 
 
 lomc_test 25
-lomentc_test 239
+lomentc_test 242
 lspe_test 54
 potato_test 19
 loment_ct_test 2
@@ -33,10 +33,10 @@ loment_lomtfrom_test 4
 loment_trans_test 8
 loment_potato_emit_test 9
 loment_lms_test 21
-loment_grammar_test 31
+loment_grammar_test 35
 loment_tools_test 66
 loment_p7_test 8
-loment_p8_test 50
+loment_p8_test 54
 loment_p9_test 2
 loment_crash_test 9
 loment_gc_surface_test 3
@@ -78,6 +78,7 @@ loment_lib_test 15
 loment_cli_test 50
 loment_err_test 57
 loment_std_test 5
+loment_crypto_test 1
 loment_domains_test 7
 loment_cache_test 4
 loment_libl_test 2
@@ -85,7 +86,7 @@ loment_internet_test 12
 loment_os_test 5
 loment_thread_test 11
 loment_lumtui_test 7
-loment_lompi_test 47
+loment_lompi_test 49
 lompicheck_test 7
 loment_register_test 9
 loment_multisyntax_test 73

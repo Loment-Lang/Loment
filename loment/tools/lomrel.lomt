@@ -194,6 +194,7 @@ tools/lompkg.py
 tools/lomlib.py
 tools/loment_lib_test.py
 tools/loment_std_test.py
+tools/loment_crypto_test.py
 tools/loment_domains_test.py
 tools/loment_cache.py
 tools/loment_cache_test.py
@@ -221,6 +222,7 @@ lompi/store/dev/0.1.0/*
 lompi/store/lowlevel/0.1.0/*
 lompi/store/system/0.1.0/*
 lompi/store/baremetal/0.1.0/*
+lompi/store/windows/0.1.0/*
 tools/lompi_sync.py
 tools/loment_lompi_test.py
 tools/loment_publish.py
@@ -407,6 +409,7 @@ tools/loment_hosted_test.py
 tools/loment_i18n_test.py
 tools/loment_docs.py
 tools/loment_docs_test.py
+tools/loment_store_index.py
 tools/loment_door_test.py
 tools/loment_admit.py
 tools/loment_admit_test.py

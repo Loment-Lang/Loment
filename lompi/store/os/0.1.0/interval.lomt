@@ -23,6 +23,8 @@
 
 module interval
 
+use timeabi
+
 /// 建 fd 时关闭 exec 继承。
 pub const IV_CLOEXEC: u32 = 524288;
 /// 非阻塞读。
@@ -36,7 +38,7 @@ pub const IV_SPEC_BYTES: u32 = 32;
 
 const IVQ_SYS_READ: u64 = 0;
 const IVQ_SYS_TIMERFD_SETTIME: u64 = 286;
-const IVQ_SYS_TIMERFD_CREATE: u64 = 290;
+const IVQ_SYS_TIMERFD_CREATE: u64 = 283;
 
 fn ivq_st64(p: ptr, off: u32, v: u64) -> u32 {
     let b: u32 = 0;
@@ -57,11 +59,6 @@ fn ivq_ld64(p: ptr, off: u32) -> u64 {
     return v;
 }
 
-fn ivq_st_ts(p: ptr, off: u32, ms: u64) -> u32 {
-    let a: u32 = ivq_st64(p, off, ms / 1000);
-    return ivq_st64(p, a, (ms % 1000) * 1000000);
-}
-
 /// 建一个 timerfd（固定单调时钟）。成功返回 fd。
 pub fn iv_create(flags: u32) -> i64 {
     return syscall4(IVQ_SYS_TIMERFD_CREATE, IV_CLOCK_MONOTONIC as u64, flags as u64, 0);
@@ -70,9 +67,11 @@ pub fn iv_create(flags: u32) -> i64 {
 /// 把"第一次 first_ms、之后每 period_ms"打进调用方给的 32 字节 spec。
 /// 纯函数：不调系统调用，自检直接验它。
 pub fn iv_build(spec: ptr, first_ms: u64, period_ms: u64) -> u32 {
-    let p: u32 = ivq_st_ts(spec, 0, period_ms);
-    let q: u32 = ivq_st_ts(spec, 16, first_ms);
-    return q;
+    let psec: u64 = period_ms / 1000;
+    let pns: u64 = (period_ms % 1000) * 1000000;
+    let fsec: u64 = first_ms / 1000;
+    let fns: u64 = (first_ms % 1000) * 1000000;
+    return ta_its_pack(spec, psec, pns, fsec, fns);
 }
 
 /// 装上定时器。`first_ms == 0 && period_ms == 0` 就是**撤掉**。
@@ -108,12 +107,18 @@ pub fn iv_ms_split(ms: u64, sec: ptr, nsec: ptr) -> u32 {
 
 /// spec 第 off 段的秒（off 取 0 = interval，16 = value）。
 pub fn iv_spec_sec(spec: ptr, off: u32) -> u64 {
-    return ivq_ld64(spec, off);
+    if off == 0 {
+        return ta_its_interval_sec(spec);
+    }
+    return ta_its_value_sec(spec);
 }
 
 /// spec 第 off 段的纳秒。
 pub fn iv_spec_nsec(spec: ptr, off: u32) -> u64 {
-    return ivq_ld64(spec, off + 8);
+    if off == 0 {
+        return ta_its_interval_nsec(spec);
+    }
+    return ta_its_value_nsec(spec);
 }
 
 // ---------------------------------------------------------------- 自检

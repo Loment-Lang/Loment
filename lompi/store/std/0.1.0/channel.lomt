@@ -1,0 +1,469 @@
+// std/channel.lomt — 有界 MPMC 字节消息通道（环形缓冲）
+//
+// 为什么需要它，以及为什么它不是"标准库里的那个 channel": 这门语言**没有函数指针**,
+// `thread_spawn` 的第一个实参是**编译期的函数名**（`docs/245`）。所以"线程池"写不出来 ——
+// 池子里那条循环只能属于调用方自己的入口函数。能写出来的、也真正有用的是**它们之间的
+// 通道**: 有界环形缓冲 + futex 等待/唤醒。用户用 `thread_spawn` 起若干入口，各自
+// `ch_send` / `ch_recv`，一个典型的工作队列就有了一半。另一半（任务槽位）在
+// `os/jobqueue.lomt`。
+//
+// 布局 (调用方给缓冲; 基址 4 字节对齐):
+//   +0   head     u32   下一条要读的字节偏移
+//   +4   tail     u32   下一条要写的字节偏移
+//   +8   cap      u32   数据区字节数 (已按 4 字节对齐, 最小 16)
+//   +12  closed   u32   0/1
+//   +16  gen      u32   "代"序号 —— 每次状态变化 +1, 等待者拿它当 futex 字
+//   +20  lock     u32   ticket 锁的 next
+//   +24  lock     u32   ticket 锁的 serving
+//   +28  used     u32   数据区里已用的字节数
+//   +32  data     cap 字节的环形区
+// 所以 `ch_bytes` 返回 32 + cap。
+//
+// 帧格式: [len u32 little-endian][payload, 补齐到 4 的倍数]。
+// 这样 tail 永远 4 字节对齐, "剩下的空间"要么是 0 要么 >= 4 —— 换行标记
+// (`len = 0xFFFFFFFF`) 永远放得下。读方看到标记就把 head 挪到 0。
+//
+// 三条使用约束:
+//   * 等待用 futex (`FUTEX_WAIT`/`FUTEX_WAKE`, 私有标志)。PE 目标没有 futex ——
+//     那一路退化成**有界自旋**, 拿不到就返回 `-11`, 不会挂死。
+//   * 超时是**一次有界等待**, 不是"截止时间": 被唤醒后条件仍不满足就返回 `-11`。
+//     没有单调时钟可以测量已经过了多久 (这个模块在 std 层, 不发 clock_gettime)。
+//   * 单条消息最大 `cap - 8` 字节 (至少能放下一个 4 字节头 + 4 字节标记的空间)。
+//
+// 为什么锁和原子读是**本地实现**: 这个模块只依赖语言内建 `atomic_add` 与 `syscall6`,
+// 不 `use` 任何别的库 —— 平名字导入在 store 与 `loment/lib` 之间存在同名候选
+// (`mem` 就有两份), 而一个基础模块不该把调用方拖进那种歧义。
+//
+// 不做: 无锁实现 (语言里没有 CAS, 见 `std/atomics.lomt` 第二节)、优先级、广播语义、
+// 零拷贝、跨进程 (futex 是私有的)。
+//
+// 命名: 公开 ch_*, 内部 cq_*。自检 test_channel_* (纯逻辑, 不发起系统调用)。
+
+module channel
+
+pub const CH_HEAD: u32 = 0;
+pub const CH_TAIL: u32 = 4;
+pub const CH_CAP: u32 = 8;
+pub const CH_CLOSED: u32 = 12;
+pub const CH_GEN: u32 = 16;
+pub const CH_LOCK: u32 = 20;
+pub const CH_USED: u32 = 28;
+pub const CH_DATA: u32 = 32;
+/// 帧头 4 字节。
+pub const CH_FRAME: u32 = 4;
+/// 换行标记（读到它就把 head 挪回 0）。
+pub const CH_WRAP: u32 = 4294967295;
+/// 数据区的最小字节数。
+pub const CH_MIN_CAP: u32 = 16;
+
+const CHQ_SYS_FUTEX: u64 = 202;
+const CHQ_SYS_EAGAIN: i64 = -11;
+const CHQ_SYS_EMSGSIZE: i64 = -7;
+const CHQ_SYS_EINVAL: i64 = -22;
+const CHQ_SYS_EPIPE: i64 = -32;
+const CHQ_SYS_EMSGSIZE_OUT: i64 = -28;
+const CHQ_FUTEX_WAIT_PRIV: u32 = 128;
+const CHQ_FUTEX_WAKE_PRIV: u32 = 129;
+const CHQ_SPIN_TRIES: u32 = 20000;
+const CHQ_NO_TICKET: u32 = 4294967294;
+
+fn cq_at(p: ptr, off: u32) -> ptr {
+    return ((p as u64) + (off as u64)) as ptr;
+}
+
+fn cq_ld32(p: ptr, off: u32) -> u32 {
+    let v: u32 = (load8(p, off) as u32)
+        | ((load8(p, off + 1) as u32) << 8)
+        | ((load8(p, off + 2) as u32) << 16)
+        | ((load8(p, off + 3) as u32) << 24);
+    return v;
+}
+
+fn cq_st32(p: ptr, off: u32, v: u32) {
+    store8(p, off, (v & 255) as u8);
+    store8(p, off + 1, ((v >> 8) & 255) as u8);
+    store8(p, off + 2, ((v >> 16) & 255) as u8);
+    store8(p, off + 3, ((v >> 24) & 255) as u8);
+}
+
+fn cq_st64(p: ptr, off: u32, v: u64) {
+    let i: u32 = 0;
+    while i < 8 {
+        store8(p, off + i, ((v >> (8 * i)) & 255) as u8);
+        i = i + 1;
+    }
+}
+
+fn cq_atomic(p: ptr, off: u32) -> u32 {
+    return atomic_add(cq_at(p, off), 0);
+}
+
+fn cq_r4(n: u32) -> u32 {
+    return (n + 3) & 4294967292;
+}
+
+/// `cap` 字节负载需要的数据区大小（4 字节对齐、至少 16）；基址是 32 字节。
+pub fn ch_bytes(cap: u32) -> u32 {
+    let c: u32 = cq_r4(cap);
+    if c < CH_MIN_CAP {
+        c = CH_MIN_CAP;
+    }
+    return CH_DATA + c;
+}
+
+/// 初始化。`cap` 是**负载字节数**，会被向上取到 4 的倍数（至少 16）。
+/// 返回实际数据区大小。
+pub fn ch_init(ch: ptr, cap: u32) -> u32 {
+    let c: u32 = cq_r4(cap);
+    if c < CH_MIN_CAP {
+        c = CH_MIN_CAP;
+    }
+    let i: u32 = 0;
+    while i < CH_DATA {
+        store8(ch, i, 0 as u8);
+        i = i + 1;
+    }
+    cq_st32(ch, CH_CAP, c);
+    return c;
+}
+
+fn cq_next(cap: u32, off: u32) -> u32 {
+    if off >= cap {
+        return off - cap;
+    }
+    return off;
+}
+
+fn cq_lock(ch: ptr) -> u32 {
+    let base: ptr = cq_at(ch, CH_LOCK);
+    let t: u32 = atomic_add(base, 1);
+    let n: u32 = 0;
+    while n < 1000000 {
+        if atomic_add(cq_at(base, 4), 0) == t {
+            return t;
+        }
+        n = n + 1;
+    }
+    return CHQ_NO_TICKET;
+}
+
+fn cq_unlock(ch: ptr, t: u32) {
+    let now: u32 = atomic_add(cq_at(ch, CH_LOCK + 4), 0);
+    if now == t {
+        let _o: u32 = atomic_add(cq_at(ch, CH_LOCK + 4), 1);
+    }
+}
+
+fn cq_futex(uaddr: u64, op: u32, val: u32, ts: u64) -> i64 {
+    return syscall7(CHQ_SYS_FUTEX, uaddr, op as u64, val as u64, ts, 0, 0);
+}
+
+fn cq_wake(ch: ptr) {
+    let _n: i64 = cq_futex(cq_at(ch, CH_GEN) as u64, CHQ_FUTEX_WAKE_PRIV, 2147483647, 0);
+}
+
+/// `timeout_ms < 0` 表示无限等；其它值是一次 futex 等待的上限。
+/// 返回 0 表示"被叫醒或退化了"，调用方要重新看条件；-1 表示等不到。
+fn cq_wait(ch: ptr, expect: u32, timeout_ms: i64) -> i64 {
+    let ts: ptr = alloc(16);
+    let tsu: u64 = 0;
+    if timeout_ms >= 0 {
+        let ms: u64 = timeout_ms as u64;
+        cq_st64(ts, 0, ms / (1000 as u64));
+        cq_st64(ts, 8, (ms % (1000 as u64)) * (1000000 as u64));
+        tsu = ts as u64;
+    }
+    let r: i64 = cq_futex(cq_at(ch, CH_GEN) as u64, CHQ_FUTEX_WAIT_PRIV, expect, tsu);
+    if r == CHQ_SYS_EAGAIN || r == (-4 as i64) {
+        return 0;
+    }
+    if r < 0 {
+        // 没有 futex（PE 目标）：退化成有界自旋。
+        let n: u32 = 0;
+        while n < CHQ_SPIN_TRIES {
+            if cq_atomic(ch, CH_GEN) != expect {
+                return 0;
+            }
+            n = n + 1;
+        }
+        return -1;
+    }
+    return 0;
+}
+
+fn cq_copy_in(ch: ptr, off: u32, src: ptr, n: u32, cap: u32) {
+    let i: u32 = 0;
+    while i < n {
+        store8(cq_at(ch, CH_DATA + cq_next(cap, off + i)), 0, load8(src, i) as u8);
+        i = i + 1;
+    }
+}
+
+fn cq_copy_out(ch: ptr, off: u32, dst: ptr, n: u32, cap: u32) {
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, i, load8(cq_at(ch, CH_DATA + cq_next(cap, off + i)), 0) as u8);
+        i = i + 1;
+    }
+}
+
+fn cq_write32_at(ch: ptr, off: u32, v: u32, cap: u32) {
+    let b: u32 = cq_next(cap, off);
+    let b1: u32 = cq_next(cap, b + 1);
+    let b2: u32 = cq_next(cap, b + 2);
+    let b3: u32 = cq_next(cap, b + 3);
+    store8(cq_at(ch, CH_DATA + b), 0, (v & 255) as u8);
+    store8(cq_at(ch, CH_DATA + b1), 0, ((v >> 8) & 255) as u8);
+    store8(cq_at(ch, CH_DATA + b2), 0, ((v >> 16) & 255) as u8);
+    store8(cq_at(ch, CH_DATA + b3), 0, ((v >> 24) & 255) as u8);
+}
+
+fn cq_read32_at(ch: ptr, off: u32, cap: u32) -> u32 {
+    let b: u32 = cq_next(cap, off);
+    let b1: u32 = cq_next(cap, b + 1);
+    let b2: u32 = cq_next(cap, b + 2);
+    let b3: u32 = cq_next(cap, b + 3);
+    let v: u32 = (load8(cq_at(ch, CH_DATA + b), 0) as u32)
+        | ((load8(cq_at(ch, CH_DATA + b1), 0) as u32) << 8)
+        | ((load8(cq_at(ch, CH_DATA + b2), 0) as u32) << 16)
+        | ((load8(cq_at(ch, CH_DATA + b3), 0) as u32) << 24);
+    return v;
+}
+
+/// 在锁里取"代"并把"要不要等"判断一次做完，避免丢掉唤醒。
+/// 返回 0 = 调用方重看条件；-1 = 等不到。
+fn cq_wait_change(ch: ptr, timeout_ms: i64, want_empty: bool) -> i64 {
+    let t: u32 = cq_lock(ch);
+    if t == CHQ_NO_TICKET {
+        return -1;
+    }
+    let used: u32 = cq_ld32(ch, CH_USED);
+    let word: u32 = cq_atomic(ch, CH_GEN);
+    cq_unlock(ch, t);
+    if want_empty {
+        if used != 0 {
+            return 0;
+        }
+    } else {
+        if used == 0 {
+            return 0;
+        }
+    }
+    return cq_wait(ch, word, timeout_ms);
+}
+
+/// 发一条消息。成功 0；满 `-11`；已关闭 `-32`；消息超过 `cap - 8` 是 `-7`。
+pub fn ch_send(ch: ptr, msg: ptr, n: u32, timeout_ms: i64) -> i64 {
+    let cap: u32 = cq_ld32(ch, CH_CAP);
+    let need: u32 = CH_FRAME + cq_r4(n);
+    if cap < need + 8 {
+        return CHQ_SYS_EMSGSIZE;
+    }
+    while 1 == 1 {
+        let t: u32 = cq_lock(ch);
+        if t == CHQ_NO_TICKET {
+            return CHQ_SYS_EAGAIN;
+        }
+        if cq_ld32(ch, CH_CLOSED) != 0 {
+            cq_unlock(ch, t);
+            return CHQ_SYS_EPIPE;
+        }
+        let used: u32 = cq_ld32(ch, CH_USED);
+        if cap - used >= need {
+            let tail: u32 = cq_ld32(ch, CH_TAIL);
+            cq_st32(ch, CH_USED, used + need);
+            cq_write32_at(ch, tail, n, cap);
+            cq_copy_in(ch, tail + CH_FRAME, msg, n, cap);
+            let pad: u32 = cq_r4(n) - n;
+            let k: u32 = 0;
+            let zero: u32 = tail + CH_FRAME + n;
+            while k < pad {
+                store8(cq_at(ch, CH_DATA + cq_next(cap, zero + k)), 0, 0 as u8);
+                k = k + 1;
+            }
+            cq_st32(ch, CH_TAIL, cq_next(cap, tail + need));
+            let _b: u32 = atomic_add(cq_at(ch, CH_GEN), 1);
+            cq_unlock(ch, t);
+            cq_wake(ch);
+            return 0;
+        }
+        cq_unlock(ch, t);
+        let w: i64 = cq_wait_change(ch, timeout_ms, false);
+        if w != 0 {
+            return CHQ_SYS_EAGAIN;
+        }
+        if timeout_ms >= 0 {
+            return CHQ_SYS_EAGAIN;
+        }
+    }
+    return CHQ_SYS_EAGAIN;
+}
+
+/// 收一条消息。返回长度；满 `-11`；关闭且空 `-32`；`out` 装不下 `-28`（**不消费**）。
+pub fn ch_recv(ch: ptr, out: ptr, cap_out: u32, timeout_ms: i64) -> i64 {
+    while 1 == 1 {
+        let r: i64 = ch_try_recv(ch, out, cap_out);
+        if r != CHQ_SYS_EAGAIN {
+            return r;
+        }
+        if timeout_ms >= 0 {
+            return CHQ_SYS_EAGAIN;
+        }
+        let w: i64 = cq_wait_change(ch, timeout_ms, true);
+        if w != 0 && w != -1 {
+            return CHQ_SYS_EAGAIN;
+        }
+    }
+    return CHQ_SYS_EAGAIN;
+}
+
+/// 不发不等：满就立刻 `-11`。
+pub fn ch_try_send(ch: ptr, msg: ptr, n: u32) -> i64 {
+    let cap: u32 = cq_ld32(ch, CH_CAP);
+    let need: u32 = CH_FRAME + cq_r4(n);
+    if cap < need + 8 {
+        return CHQ_SYS_EMSGSIZE;
+    }
+    let t: u32 = cq_lock(ch);
+    if t == CHQ_NO_TICKET {
+        return CHQ_SYS_EAGAIN;
+    }
+    if cq_ld32(ch, CH_CLOSED) != 0 {
+        cq_unlock(ch, t);
+        return CHQ_SYS_EPIPE;
+    }
+    let used: u32 = cq_ld32(ch, CH_USED);
+    if cap - used < need {
+        cq_unlock(ch, t);
+        return CHQ_SYS_EAGAIN;
+    }
+    let tail: u32 = cq_ld32(ch, CH_TAIL);
+    cq_st32(ch, CH_USED, used + need);
+    cq_write32_at(ch, tail, n, cap);
+    cq_copy_in(ch, tail + CH_FRAME, msg, n, cap);
+    cq_st32(ch, CH_TAIL, cq_next(cap, tail + need));
+    let _b: u32 = atomic_add(cq_at(ch, CH_GEN), 1);
+    cq_unlock(ch, t);
+    cq_wake(ch);
+    return 0;
+}
+
+/// 不收不等：空就立刻 `-11`。
+pub fn ch_try_recv(ch: ptr, out: ptr, cap_out: u32) -> i64 {
+    let cap: u32 = cq_ld32(ch, CH_CAP);
+    let t: u32 = cq_lock(ch);
+    if t == CHQ_NO_TICKET {
+        return CHQ_SYS_EAGAIN;
+    }
+    if cq_ld32(ch, CH_USED) == 0 {
+        let closed: bool = cq_ld32(ch, CH_CLOSED) != 0;
+        cq_unlock(ch, t);
+        if closed {
+            return CHQ_SYS_EPIPE;
+        }
+        return CHQ_SYS_EAGAIN;
+    }
+    let head: u32 = cq_ld32(ch, CH_HEAD);
+    let len: u32 = cq_read32_at(ch, head, cap);
+    if len == CH_WRAP {
+        cq_st32(ch, CH_HEAD, 0);
+        cq_unlock(ch, t);
+        return CHQ_SYS_EAGAIN;
+    }
+    if len > cap - CH_FRAME {
+        cq_unlock(ch, t);
+        return CHQ_SYS_EINVAL;
+    }
+    if len > cap_out {
+        cq_unlock(ch, t);
+        return CHQ_SYS_EMSGSIZE_OUT;
+    }
+    cq_copy_out(ch, head + CH_FRAME, out, len, cap);
+    cq_st32(ch, CH_USED, cq_ld32(ch, CH_USED) - (CH_FRAME + cq_r4(len)));
+    cq_st32(ch, CH_HEAD, cq_next(cap, head + CH_FRAME + cq_r4(len)));
+    let _b: u32 = atomic_add(cq_at(ch, CH_GEN), 1);
+    cq_unlock(ch, t);
+    cq_wake(ch);
+    return len as i64;
+}
+
+/// 关掉：之后的发送 `-32`，收完存量之后接收 `-32`。
+pub fn ch_close(ch: ptr) {
+    let t: u32 = cq_lock(ch);
+    if t != CHQ_NO_TICKET {
+        cq_st32(ch, CH_CLOSED, 1);
+        let _b: u32 = atomic_add(cq_at(ch, CH_GEN), 1);
+        cq_unlock(ch, t);
+        cq_wake(ch);
+    }
+}
+
+/// 数据区里已用的字节数（含帧头与补齐；**不是**消息条数）。
+pub fn ch_len(ch: ptr) -> u32 {
+    return cq_ld32(ch, CH_USED);
+}
+
+pub fn ch_is_empty(ch: ptr) -> bool {
+    return cq_ld32(ch, CH_USED) == 0;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_channel_bytes_rounding() -> bool {
+    if ch_bytes(16) != 48 {
+        return false;
+    }
+    if ch_bytes(1) != 48 {
+        return false;
+    }
+    if ch_bytes(40) != 72 {
+        return false;
+    }
+    return true;
+}
+
+fn test_channel_frame_header() -> bool {
+    let buf: ptr = alloc(128);
+    let _c: u32 = ch_init(buf, 64);
+    let cap: u32 = cq_ld32(buf, CH_CAP);
+    cq_write32_at(buf, 0, 1234, cap);
+    if cq_read32_at(buf, 0, cap) != 1234 {
+        return false;
+    }
+    cq_write32_at(buf, 60, 77, cap);
+    if cq_read32_at(buf, 60, cap) != 77 {
+        return false;
+    }
+    return true;
+}
+
+fn test_channel_wrap_index() -> bool {
+    if cq_next(64, 0) != 0 {
+        return false;
+    }
+    if cq_next(64, 63) != 63 {
+        return false;
+    }
+    if cq_next(64, 64) != 0 {
+        return false;
+    }
+    if cq_next(64, 70) != 6 {
+        return false;
+    }
+    return true;
+}
+
+fn test_channel_empty_state() -> bool {
+    let buf: ptr = alloc(128);
+    let _c: u32 = ch_init(buf, 48);
+    if ch_is_empty(buf) == false {
+        return false;
+    }
+    if ch_len(buf) != 0 {
+        return false;
+    }
+    if cq_ld32(buf, CH_CAP) != 48 {
+        return false;
+    }
+    return true;
+}

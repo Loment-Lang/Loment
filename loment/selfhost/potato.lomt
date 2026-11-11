@@ -1232,7 +1232,10 @@ fn pt_gl_l2ranges(unit: ptr, t: ptr, fat: u32, fend: u32, npar: u32, par: ptr, o
             isloop = 1;
         }
         if pt_tis(unit, t, i, "for") && pt_kind(t, i + 1) == 0
-                && pt_tis(unit, t, i + 2, "in") {
+                && (pt_tis(unit, t, i + 2, "in")
+                    || (pt_tis(unit, t, i + 2, ",") && pt_kind(t, i + 3) == 0
+                        && pt_tis(unit, t, i + 4, "in"))) {
+            // `for x in xs` 与 2026.3 的 `for i, x in xs`（`docs/329` §5）
             isloop = 1;
         }
         if isloop == 1 {

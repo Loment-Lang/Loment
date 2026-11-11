@@ -1456,6 +1456,11 @@ fn emit_syn(s: ptr, out: ptr, k: u32, line: u32) -> u32 {
         emit_str(s, out, "__tur2_i.");
         return emit_dec(s, out, line);
     }
+    if k == 4 {
+        // 2026.3 `for x in <call>` 的源临时（`docs/334`）：`__tur2_s.N`。
+        emit_str(s, out, "__tur2_s.");
+        return emit_dec(s, out, line);
+    }
     emit_str(s, out, "__");
     if k == 0 {
         emit_str(s, out, "t");
@@ -6223,6 +6228,19 @@ fn load_var(s: ptr, out: ptr, src: ptr, toks: ptr, name_tok: u32, lvl: u32) -> u
     return n;
 }
 
+/// 读一个合成局部（`__tur2_s.N`，`docs/334`）。类型不在 token 表里，由调用方给。
+fn load_syn_var(s: ptr, out: ptr, src: ptr, toks: ptr, ty: u32, fi: u32, lvl: u32) -> u32 {
+    emit_str(s, out, "  ");
+    let n: u32 = new_temp(s, out);
+    emit_str(s, out, " = load ");
+    emit_ty(s, out, src, toks, ty);
+    emit_str(s, out, ", ptr %__tur2_s.");
+    emit_dec(s, out, fi);
+    emit_str(s, out, ".addr\n");
+    set_temp_val(s, lvl, n);
+    return n;
+}
+
 /// `let x: T = e?;` 的发射 —— 等价于 lomentc._desugar_try 的反糖产物:
 ///   let __t{line}: <rt> = e;   let x: T;
 ///   match __t{line} { Ok(__v{line}) => { x = __v{line}; }  Err(__e{line}) => { return Err(__e{line}); } }
@@ -6518,9 +6536,19 @@ fn fi_ord(s: ptr, src: ptr, toks: ptr, at: u32) -> u32 {
     let i: u32 = load32(s, CG_BODY0);
     let n: u32 = 0;
     while i < at {
-        if tok_is(src, toks, i, "for") && tok_is(src, toks, i + 2, "in")
-                && load32(toks, (i + 3) * 20) == 0 && tok_is(src, toks, i + 4, "{") {
-            n = n + 1;
+        if tok_is(src, toks, i, "for") {
+            if (tok_is(src, toks, i + 2, "in") && load32(toks, (i + 3) * 20) == 0
+                    && tok_is(src, toks, i + 4, "{"))
+                    || (load32(s, CG_PROF) >= 2 && load32(toks, (i + 1) * 20) == 0
+                        && tok_is(src, toks, i + 2, ",") && load32(toks, (i + 3) * 20) == 0
+                        && tok_is(src, toks, i + 4, "in") && load32(toks, (i + 5) * 20) == 0
+                        && tok_is(src, toks, i + 6, "{"))
+                    || (load32(s, CG_PROF) >= 2 && load32(toks, (i + 1) * 20) == 0
+                        && tok_is(src, toks, i + 2, "in") && load32(toks, (i + 3) * 20) == 0
+                        && tok_is(src, toks, i + 4, "(")
+                        && tok_is(src, toks, skip_parens(src, toks, i + 4) + 1, "{")) {
+                n = n + 1;
+            }
         }
         i = i + 1;
     }
@@ -6552,6 +6580,48 @@ fn array_len_tok(src: ptr, toks: ptr, ty: u32) -> u32 {
 /// `if` / `else if` 链的发射。`cond` = **条件第一个 token**（不是 `if` 本身）——
 /// Tur 2 的隐式 elif（`else <条件> {`，`docs/296` §2.1）从 `else` 之后直接进来，
 /// 与 `else if` 走同一条路，标签编号因此与参考实现逐字节一致。
+/// `let x: T = if c { a } else { b };` 的发射（2026.3，`docs/335`）。
+/// 与参考实现反糖后的 `let x: T;` + `If` 同形：条件、L1_then / L2_else / L3_end
+/// 三个标签、两支各一条 `store <T> …, ptr %x.addr`。
+fn let_ifexpr(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, name: u32,
+              ty: u32, eq: u32) -> u32 {
+    let _e3: u32 = expr_bin(s, out, src, toks, eq + 2, 1, 0, 0);
+    let base_l: u32 = load32(s, 480) + 1;
+    store32(s, 480, base_l + 2);
+    emit_str(s, out, "  br i1 ");
+    emit_val(s, out, 0);
+    emit_str(s, out, ", label ");
+    lab_ref(s, out, base_l, "then");
+    emit_str(s, out, ", label ");
+    lab_ref(s, out, base_l + 1, "else");
+    emit_str(s, out, "\n");
+    store32(s, 476, 1);
+    lab_def(s, out, base_l, "then");
+    // `{` 在 _e3；then 的表达式是 _e3 + 1 那一段，结束于 `}`。
+    let _tv: u32 = expr_bin(s, out, src, toks, _e3 + 1, 1, 0, ty);
+    emit_str(s, out, "  store ");
+    emit_ty(s, out, src, toks, ty);
+    emit_str(s, out, " ");
+    emit_val(s, out, 0);
+    emit_str(s, out, ", ptr %");
+    emit_name_tok(s, out, src, toks, name);
+    emit_str(s, out, ".addr\n");
+    jump(s, out, base_l + 2, "end");
+    lab_def(s, out, base_l + 1, "else");
+    // `}` `else` `{` —— else 的表达式从 `_tv` 之后第 3 个 token 起。
+    let _ev: u32 = expr_bin(s, out, src, toks, _tv + 3, 1, 0, ty);
+    emit_str(s, out, "  store ");
+    emit_ty(s, out, src, toks, ty);
+    emit_str(s, out, " ");
+    emit_val(s, out, 0);
+    emit_str(s, out, ", ptr %");
+    emit_name_tok(s, out, src, toks, name);
+    emit_str(s, out, ".addr\n");
+    jump(s, out, base_l + 2, "end");
+    lab_def(s, out, base_l + 2, "end");
+    return _ev + 2;   // 跳过 `}` 与 `;`
+}
+
 fn emit_if_at(s: ptr, out: ptr, src: ptr, toks: ptr, cond: u32, ret: u32) -> u32 {
     // 先算条件再占标签: 条件里的 `&&`/除法会自己占标签 (与 lomentc 的 If 同序)
     let e3: u32 = expr_bin(s, out, src, toks, cond, 1, 0, 0);
@@ -7620,6 +7690,11 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         }
         let ty: u32 = j + 3;
         let eq: u32 = skip_type(src, toks, ty);   // '=' 的位置 (类型可能是 [T; N] / [T])
+        if load32(s, CG_PROF) >= 2 && tok_is(src, toks, eq + 1, "if") {
+            // 2026.3 `let x: T = if c { a } else { b };`（`docs/335`）：参考实现把它
+            // 降成 `let x: T;` + 一条 If，两支各 `x = …`。
+            return let_ifexpr(s, out, src, toks, j, name, ty, eq);
+        }
         // M9: `let x: T = e?;` -> 临时绑定 + match (Err 早退); 替换表由 emit_try_let 自己管
         let qp: u32 = find_try_q(src, toks, eq + 1);
         if qp != 0 {
@@ -7813,19 +7888,61 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
     if tok_is(src, toks, j, "if") {
         return emit_if_at(s, out, src, toks, j + 1, ret);
     }
+    let fi_new: u32 = 0;
+    let fi_st: u32 = j + 3;
+    let fi_vtok: u32 = j + 1;
+    let fi_body: u32 = j + 5;
+    if load32(s, CG_PROF) >= 2 && tok_is(src, toks, j, "for")
+            && load32(toks, (j + 1) * 20) == 0 && tok_is(src, toks, j + 2, ",")
+            && load32(toks, (j + 3) * 20) == 0 && tok_is(src, toks, j + 4, "in")
+            && load32(toks, (j + 5) * 20) == 0 && tok_is(src, toks, j + 6, "{") {
+        fi_new = 1;
+        fi_st = j + 5;
+        fi_vtok = j + 3;
+        fi_body = j + 7;
+    }
+    let fi_expr: u32 = 0;
+    if load32(s, CG_PROF) >= 2 && tok_is(src, toks, j, "for")
+            && load32(toks, (j + 1) * 20) == 0 && tok_is(src, toks, j + 2, "in")
+            && load32(toks, (j + 3) * 20) == 0 && tok_is(src, toks, j + 4, "(") {
+        let cp: u32 = skip_parens(src, toks, j + 4);
+        if tok_is(src, toks, cp + 1, "{") {
+            fi_expr = 1;
+            fi_st = j + 3;
+            fi_body = cp + 2;
+        }
+    }
     if load32(s, CG_PROF) != 0 && tok_is(src, toks, j, "for")
-            && tok_is(src, toks, j + 2, "in") && load32(toks, (j + 3) * 20) == 0
-            && tok_is(src, toks, j + 4, "{") {
-        // Tur 2 的 `for x in xs`（`docs/296` §2.2）。参考实现把它反糖成
-        // `let __tur2_i.N = 0; while __tur2_i.N < len { let x = xs[i]; 体; i = i+1 }`
+            && (fi_new == 1 || fi_expr == 1
+                || (tok_is(src, toks, j + 2, "in") && load32(toks, (j + 3) * 20) == 0
+                    && tok_is(src, toks, j + 4, "{"))) {
+        // Tur 2 的 `for x in xs` / Tur 2026.3 的 `for i, x in xs`（`docs/296` §2.2、
+        // `docs/332` §5）。参考实现把它反糖成
+        // `let __tur2_i.N = 0; while … { let i = __tur2_i.N; let x = xs[i]; 体; i = i+1 }`
         // —— 这里逐条照着发，指令顺序与临时编号才对得上。
-        let st: u32 = j + 3;
+        let st: u32 = fi_st;
         let sty: u32 = var_type(s, src, toks, st);
+        if fi_expr == 1 {
+            sty = expr_type(s, src, toks, j + 3);
+        }
         let et: u32 = elem_tok(src, toks, sty);
         let is_sl: u32 = is_slice_tok(src, toks, sty);
         let fi: u32 = fi_ord(s, src, toks, j);
         if et == 0 || (is_sl == 0 && is_array_tok(src, toks, sty) == 0) {
             return cg_fail(s, 2, j);
+        }
+        if fi_expr == 1 {
+            // `let __tur2_s.N: <ret> = <call>;` —— 调用只求值一次（`docs/334`）。
+            let ssub: u32 = push_ty_subst(s, src, toks, sty);
+            let _e0: u32 = expr_bin(s, out, src, toks, j + 3, 1, 0, sty);
+            pop_subst(s, ssub);
+            emit_str(s, out, "  store ");
+            emit_ty(s, out, src, toks, sty);
+            emit_str(s, out, " ");
+            emit_val(s, out, 0);
+            emit_str(s, out, ", ptr %__tur2_s.");
+            emit_dec(s, out, fi);
+            emit_str(s, out, ".addr\n");
         }
         // `let __tur2_i.N: u32 = 0;`
         emit_str(s, out, "  store i32 0, ptr %__tur2_i.");
@@ -7843,7 +7960,11 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         emit_str(s, out, ".addr\n");
         let cv: u32 = 0;
         if is_sl == 1 {
-            load_var(s, out, src, toks, st, 0);
+            if fi_expr == 1 {
+                load_syn_var(s, out, src, toks, sty, fi, 0);
+            } else {
+                load_var(s, out, src, toks, st, 0);
+            }
             emit_str(s, out, "  ");
             let lv: u32 = new_temp(s, out);
             emit_str(s, out, " = extractvalue { ptr, i64 } ");
@@ -7878,10 +7999,27 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         emit_str(s, out, "\n");
         store32(s, 476, 1);
         lab_def(s, out, w + 1, "wbody");
+        if fi_new == 1 {
+            // `let i: u32 = __tur2_i.N;` —— 下标副本，体内改它不影响循环推进。
+            // 与参考反糖的局部顺序一致：`i` 在 `x` 之前。
+            emit_str(s, out, "  ");
+            let itv: u32 = new_temp(s, out);
+            emit_str(s, out, " = load i32, ptr %__tur2_i.");
+            emit_dec(s, out, fi);
+            emit_str(s, out, ".addr\n  store i32 %t");
+            emit_dec(s, out, itv);
+            emit_str(s, out, ", ptr %");
+            emit_name_tok(s, out, src, toks, j + 1);
+            emit_str(s, out, ".addr\n");
+        }
         // `let x = xs[idx];`
         let ev: u32 = 0;
         if is_sl == 1 {
-            load_var(s, out, src, toks, st, 0);
+            if fi_expr == 1 {
+                load_syn_var(s, out, src, toks, sty, fi, 0);
+            } else {
+                load_var(s, out, src, toks, st, 0);
+            }
             emit_str(s, out, "  ");
             let sp: u32 = new_temp(s, out);
             emit_str(s, out, " = extractvalue { ptr, i64 } ");
@@ -7914,8 +8052,13 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
             let gp2: u32 = new_temp(s, out);
             emit_str(s, out, " = getelementptr inbounds ");
             emit_ty(s, out, src, toks, sty);
-            emit_str(s, out, ", ptr %");
-            emit_name_tok(s, out, src, toks, st);
+            if fi_expr == 1 {
+                emit_str(s, out, ", ptr %__tur2_s.");
+                emit_dec(s, out, fi);
+            } else {
+                emit_str(s, out, ", ptr %");
+                emit_name_tok(s, out, src, toks, st);
+            }
             emit_str(s, out, ".addr, i32 0, i32 %t");
             emit_dec(s, out, iv4);
             emit_str(s, out, "\n  ");
@@ -7931,7 +8074,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         emit_str(s, out, " %t");
         emit_dec(s, out, ev);
         emit_str(s, out, ", ptr %");
-        emit_name_tok(s, out, src, toks, j + 1);
+        emit_name_tok(s, out, src, toks, fi_vtok);
         emit_str(s, out, ".addr\n");
         // 体
         let ob: u32 = load32(s, CG_LBRK);
@@ -7944,7 +8087,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         store32(s, CG_LKIND, 1);
         store32(s, CG_LAUX, fi);
         let odep: u32 = load32(s, CG_LDEPTH);
-        let k: u32 = j + 5;
+        let k: u32 = fi_body;
         let fidf: u32 = dfr_push(s);   // 循环体是一层语句表（docs/296 §2.3）
         store32(s, CG_LDEPTH, fidf);
         let tv: u32 = epoch_open(s, out, src, toks, k, skip_block(src, toks, j + 4) - 1);
@@ -8825,6 +8968,28 @@ fn tok_eq(src: ptr, toks: ptr, a: u32, b: u32) -> bool {
 
 /// struct 字面量绑定: `let b: Blk = Blk { off: 3, len: 5 };` (M23)。
 /// 字段按**声明序**逐个 GEP + 求值 + store; 值按字段名在字面量里查。
+/// 结构体字面量里一个字段的结尾：深度 0 的 `,` 或 `}`（不含）。`be` 是 `}` 之后。
+/// 值表达式里的逗号（`f(1, a, 2)`）在括号里，深度不为 0，不当作字段分隔。
+fn struct_field_end(src: ptr, toks: ptr, j: u32, be: u32) -> u32 {
+    let d: u32 = 0;
+    let k: u32 = j;
+    while k < be && tok_kind(toks, k) != 4 {
+        if tok_is(src, toks, k, "(") || tok_is(src, toks, k, "[") || tok_is(src, toks, k, "{") {
+            d = d + 1;
+        } else if tok_is(src, toks, k, ")") || tok_is(src, toks, k, "]")
+                || tok_is(src, toks, k, "}") {
+            if d == 0 {
+                return k;
+            }
+            d = d - 1;
+        } else if d == 0 && tok_is(src, toks, k, ",") {
+            return k;
+        }
+        k = k + 1;
+    }
+    return k;
+}
+
 fn let_struct_lit(s: ptr, out: ptr, src: ptr, toks: ptr, name: u32, ty: u32, i: u32) -> u32 {
     let si: u32 = find_struct(s, src, toks, ty);
     let nf: u32 = load32(s, struct_base(si) + 4);
@@ -8835,11 +9000,28 @@ fn let_struct_lit(s: ptr, out: ptr, src: ptr, toks: ptr, name: u32, ty: u32, i: 
         let ftp: u32 = load32(s, struct_base(si) + 8 + k * 8 + 4);
         let p: u32 = i + 1;
         let vst: u32 = i + 2;
-        while p < be {
-            if tok_eq(src, toks, p, fnm) && tok_is(src, toks, p + 1, ":") {
-                vst = p + 2;
+        while p < be && tok_kind(toks, p) != 4 && !tok_is(src, toks, p, "}") {
+            // **按字段走，不按 token 走**：值表达式里的 `f(1, a, 2)` 也有"逗号 + 标识符"，
+            // 逐 token 找会把那个 `a` 当成字段名（显式字段只认 `:` 时不会）。
+            if tok_eq(src, toks, p, fnm) {
+                if tok_is(src, toks, p + 1, ":") {
+                    vst = p + 2;
+                    p = struct_field_end(src, toks, p + 2, be);
+                } else if load32(s, CG_PROF) >= 2
+                        && (tok_is(src, toks, p + 1, ",") || tok_is(src, toks, p + 1, "}")) {
+                    // 2026.3 字段简写（`docs/296` §5）：值就是同名的那个标识符。
+                    // 只在 2026.3+ 收；旧版次里它是语法错，检查器已经先拒了。
+                    vst = p;
+                    p = p + 1;
+                } else {
+                    p = struct_field_end(src, toks, p + 1, be);
+                }
+            } else {
+                p = struct_field_end(src, toks, p + 1, be);
             }
-            p = p + 1;
+            if tok_is(src, toks, p, ",") {
+                p = p + 1;
+            }
         }
         emit_str(s, out, "  ");
         let gp: u32 = new_temp(s, out);
@@ -8976,7 +9158,40 @@ fn collect_locals(s: ptr, src: ptr, toks: ptr, i: u32, end: u32) -> u32 {
                 }
             }
         }
-        if tok_is(src, toks, j, "for") && load32(toks, (j + 3) * 20) == 0
+        if load32(s, CG_PROF) >= 2 && tok_is(src, toks, j, "for")
+                && load32(toks, (j + 1) * 20) == 0 && tok_is(src, toks, j + 2, "in")
+                && load32(toks, (j + 3) * 20) == 0 && tok_is(src, toks, j + 4, "(")
+                && tok_is(src, toks, skip_parens(src, toks, j + 4) + 1, "{") {
+            // 2026.3 `for x in <call>`（`docs/334`）：局部顺序 = `__tur2_s.N`、
+            // `__tur2_i.N`、`x`。源临时后登记，先于循环；类型取调用返回类型 token。
+            let sty: u32 = expr_type(s, src, toks, j + 3);
+            let et: u32 = elem_tok(src, toks, sty);
+            fic = fic + 1;
+            n = add_local(s, src, toks, n, syn_name(4, fic), sty);
+            n = add_local(s, src, toks, n, syn_name(3, fic), SYN_U32);
+            if et != 0 {
+                n = add_local(s, src, toks, n, j + 1, et);
+            }
+            store32(s, 484, n);
+        } else if load32(s, CG_PROF) >= 2 && tok_is(src, toks, j, "for")
+                && load32(toks, (j + 1) * 20) == 0 && tok_is(src, toks, j + 2, ",")
+                && load32(toks, (j + 3) * 20) == 0 && tok_is(src, toks, j + 4, "in")
+                && load32(toks, (j + 5) * 20) == 0 && tok_is(src, toks, j + 6, "{") {
+            // 2026.3 `for i, x in xs`（`docs/332` §5）：局部顺序 = `__tur2_i.N`、`i`、`x`。
+            let st: u32 = j + 5;
+            store32(s, 484, n);
+            let sty: u32 = var_type(s, src, toks, st);
+            let et: u32 = elem_tok(src, toks, sty);
+            fic = fic + 1;
+            n = add_local(s, src, toks, n, syn_name(3, fic), SYN_U32);
+            // 用户下标用 `CG_TY_U64`（无 token 的 u32 哨兵）。`SYN_U32` 与 UNIT 同值，
+            // `emit_ty` 会把它印成 `void`，用户下标就成了 `load void`。
+            n = add_local(s, src, toks, n, j + 1, CG_TY_U64);
+            if et != 0 {
+                n = add_local(s, src, toks, n, j + 3, et);
+            }
+            store32(s, 484, n);
+        } else if tok_is(src, toks, j, "for") && load32(toks, (j + 3) * 20) == 0
                 && tok_is(src, toks, j + 2, "in") && tok_is(src, toks, j + 4, "{") {
             // Tur 2 的 for-in（`docs/296` §2.2）：**下标在前、循环变量在后** —— 与参考
             // 实现反糖后的局部顺序一致（`let __tur2_i.N` 在 while 之前，`let x` 在体开头）。

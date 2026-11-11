@@ -902,7 +902,7 @@ def test_no_std_with_hosted_is_refused_by_both_front_ends():
         src = td / "nostd_hosted.lomt"     # `_emit` 已经把同一份源写在那里
         rc2, _out, err = _selfhost_ir(td, src)
         assert rc2 != 0, "自举驱动收下了 `no_std` + `hosted`"
-        # 细分之后这条冲突是 **E161**（「两个模式取值不能同时选」，`docs/332`）；
+        # 细分之后这条冲突是 **E161**（「两个模式取值不能同时选」，`docs/336`）；
         # 参考实现那一侧同一条消息也归 161。
         assert "E0161" in err, f"自举驱动拒绝时没给 E0161：{err[-300:]!r}"
         assert "line 3" in err, (

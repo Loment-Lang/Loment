@@ -149,7 +149,7 @@ Everything here is **Tur 2 only**. Each entry says what it lowers to and what it
 | **`def`** | `def f(a: u32) -> u32 { … }` | `fn f(…)` | pure sugar, identical code |
 | **`elif`** | `elif cond { … }` | `else if cond { … }` | pure sugar |
 | **`and` / `or` / `not`** | `a and b`, `a or b`, `not a` | `a && b`, `a \|\| b`, `!a` | pure sugar, same short-circuit |
-| **`for x in xs`** | `for x in xs { … }` | index loop: `let i = 0; while i < len { let x = xs[i]; body; i = i + 1 }` | v1 accepts **only a named array or slice** (`let xs: [u32; 4]`, or a `[T]` parameter). `x` is a **copy**. Expressions, `mut` references, and `for i, x in xs` are Tur 2026.3 |
+| **`for x in xs`** | `for x in xs { … }` | index loop: `let i = 0; while i < len { let x = xs[i]; body; i = i + 1 }` | v1 accepts **only a named array or slice** (`let xs: [u32; 4]`, or a `[T]` parameter). `x` is a **copy**. Arbitrary source expressions and `mut` references are not accepted yet; `for i, x in xs` landed in Tur 2026.3 (§2.0.5) |
 | **`break` / `continue`** | inside `while` / `for i in lo..hi` / `for x in xs` | jump to the innermost loop's exit / update step | outside a loop is E19. The emitter closes the L2 epoch opened in the body **before** jumping (`docs/210`) - jumping out without closing is a leak |
 | **bare `return;`** | `fn f() { if bad { return; } … }` | early exit from a **unit** function (`fn f()`, no `-> T`) | only in Tur 2 **and** only when the function has no return type; `return;` in a `-> T` function is still E19 |
 | **`orelse` / `catch`** | `let a: u32 = maybe orelse 0;` / `let b: u32 = risky() catch 0;` | switch on the two-variant enum; success takes the payload, failure takes the fallback | v1 is **only the right-hand side of `let` / assignment**, and the enum must have **exactly two variants with the first carrying the payload** (`Option { Some(T), None }`, `Result { Ok(T), Err(E) }`). The fallback is **lazy** (evaluated only on the failing branch). `catch \|e\| { … }` and `catch return` are Tur 3 |
@@ -186,6 +186,21 @@ not change. Design and the standing boundary list: `docs/299`.
 
 With `lifetime_no` (the default before 2026.3, and still selectable) `&` in a type position is
 a parse error and struct fields hold scalars only - the pre-2026.3 shape, unchanged.
+
+2026.3 also adds four spelling-level constructs (no lifetimes involved; all are refused by
+the frozen editions):
+
+- **struct literal field shorthand** `S { a, b: 2 }` - a bare name means `a: a`
+  (`docs/332`);
+- **`for i, x in xs`** - the index loop also binds the position: `i` is a `u32` copy
+  (0, 1, 2, ...), `x` the element copy. Source is still a named array or slice; assigning
+  to `i` or `x` does not write back (`docs/333`);
+- **`for x in <call> { … }`** - the source may be a function call returning an array or
+  slice; the call is evaluated once into a temporary and the loop walks that. Array
+  literals and other expressions are not accepted yet (`docs/334`);
+- **`if` as an expression in a `let` initialiser** - `let x: u32 = if c { 10 } else { 20 };`.
+  One expression per arm, `else` required; `else if`, nesting, and other positions are not
+  accepted in this round (`docs/335`).
 
 ### 2.0.6 Lexical grammar
 
@@ -269,8 +284,8 @@ a parse error and struct fields hold scalars only - the pre-2026.3 shape, unchan
 
 Primary expressions: integer / string / `true` / `false` literals, identifiers, `E::Variant`,
 calls `f(a, b)`, method calls `obj.m(a)`, field access `e.f`, indexing `e[i]`, parenthesised
-`(e)`, struct literals `S { a: 1 }`, array literals `[1, 2, 3]`, and `&e` / `&mut e` in
-**call-argument position**.
+`(e)`, struct literals `S { a: 1 }` (2026.3 also accepts the shorthand `S { a }`, meaning
+`S { a: a }`), array literals `[1, 2, 3]`, and `&e` / `&mut e` in **call-argument position**.
 
 Postfix: call, field, index, `?` (propagation).
 
@@ -435,7 +450,7 @@ postfix     := primary ("(" args? ")" | "." IDENT | "[" expr "]" | "?")*
 primary     := INT | STRING | "true" | "false"
              | IDENT | IDENT "::" IDENT ("(" expr ")")?
              | "(" expr ")"
-             | IDENT "{" (IDENT ":" expr),* "}"            // struct literal
+             | IDENT "{" (IDENT (":" expr)?),* "}"         // bare name = 2026.3+ shorthand
              | "[" (expr),* "]" | "&" ("mut")? expr
 cast        := expr "as" type                              // binds tighter than any binop
 fallback    := expr ("orelse" | "catch") expr              // Tur 2, let/assignment RHS

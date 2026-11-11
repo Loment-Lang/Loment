@@ -25,3 +25,10 @@ pub fn choose() -> str {
 pub fn requires() -> str {
     return "alloc,free,panic,syscall";
 }
+
+/// 标准库来源标记（机器读，用户不可见）：解析器只把带 `LomentItem` 的包当作
+/// **内置标准库**；社区包里同名的模块不能顶替它（docs/331）。这不是密码学签名 ——
+/// 改这份文件的人也能把它加回去；真正的完整性是内容哈希 + 发行签名。
+pub fn origin() -> str {
+    return "LomentItem";
+}

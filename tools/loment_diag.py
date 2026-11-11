@@ -107,7 +107,7 @@ RULES = [
              r"实参(期望|类型)|实参 [^，]*不是数组或切片|内建 .* 实参|"
              # `docs/296` §2.4 的兜底（`orelse` / `catch`）：形状与兜底值类型
              r"只接 Option/Result 形状|要两变体的枚举|不是 Option/Result 形状|"
-             r"的兜底值类型|is not a named array or slice",
+             r"的兜底值类型|is not a named array or slice|is not an array or slice",
      "类型不匹配", "检查两侧类型；整型字面量按上下文定宽，必要时用 `as` 显式转换。"),
     ("E003", r"需要 \d+ 个实参",
      "实参数量不符", "对照函数签名补/删实参；方法调用的 self 不计入实参。"),
@@ -297,6 +297,8 @@ RULES = [
              r"can only be used inside a loop|不带值，函数|"
              # `docs/296` §2.3：`defer` 的形状（只收调用）与位置（只在函数体里）都是解析期
              r"defer 只收函数调用|defer 只在函数体里成立|"
+             # `docs/334` / `docs/335`：for-call 与 if 表达式的 v1 形状限制。
+             r"v1 takes a function call|`if` 表达式|"
              r"`set choose` 后面要跟一个块|的块没闭合",
      "语法错误（词法/解析期）",
      "按消息给的 `行:列` 改那一行的写法。常见三种: `match` 的臂体要**块**（`=> { … }`，"

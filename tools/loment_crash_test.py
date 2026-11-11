@@ -33,7 +33,7 @@ SEED = ROOT / "loment" / "build" / "selfhost_driver.ll"
 ADMIT_SRC = ROOT / "loment" / "tools" / "lomadmit.lomt"
 TESTS: list[tuple[str, object]] = []
 
-#: 诊断里必须出现的三种名字（与自举侧同一套码；显示宽度见 `docs/332`：< 100 补到三位）。
+#: 诊断里必须出现的三种名字（与自举侧同一套码；显示宽度见 `docs/336`：< 100 补到三位）。
 DEEP = "E023"                    # 嵌套超过 64 层
 #: 自举侧不认识嵌套泛型实参 / 嵌套数组类型；它报的是**形参类型未知**那一格
 #: （细分后的 E0185，族 E030）。参考实现在这两种形状上**不报**，所以这里钉的是自举侧

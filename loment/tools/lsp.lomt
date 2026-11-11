@@ -382,7 +382,7 @@ fn doc_remove(mem: ptr, uri: ptr, un: u32) -> u32 {
 /// **不手抄第二份**：真源是 `surface_data.code_title`（由 `tools/loment_diag.py
 /// --dump-surface` 从 `loment_diag.RULES` 生成）。这里原先有一条手抄到 38 的链式表，
 /// 表外的码一律显示成「未分类」（2026-11-04：`codegen.lomt` 的 E019 就是这么丢的）。
-/// 2026-11-10 细分码表（`docs/332`）之后，自举 checker 发的是 42..207 这一层细码，
+/// 2026-11-10 细分码表（`docs/336`）之后，自举 checker 发的是 42..207 这一层细码，
 /// 手抄表立刻整片落到表外 —— 于是改成转发。判据
 /// `test_diag_titles_match_reference` 钉住"这里只能转发，不许再长第二份"。
 fn diag_title(code: u32) -> str {
@@ -418,7 +418,7 @@ fn switchify(mem: ptr, text: ptr, toks: ptr, nt: u32) -> u32 {
 }
 
 fn emit_e0(b: ptr, o: u32, code: u32) -> u32 {
-    // 码的形状与 `loment_diag._code_str` 同一条规则（`docs/332`）：< 100 是 `E0xx`，
+    // 码的形状与 `loment_diag._code_str` 同一条规则（`docs/336`）：< 100 是 `E0xx`，
     // >= 100 是 `E0xxx`。服务端吐的 `code` 与诊断正文必须是同一种拼法 —— 否则编辑器
     // 里看到的一个码，复制去 `loment explain` 会被当成另一个。
     if code >= 100 && code < 1000 {

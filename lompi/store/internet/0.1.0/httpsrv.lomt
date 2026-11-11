@@ -1,0 +1,528 @@
+// internet/httpsrv.lomt — 最小 HTTP/1.1 服务端：监听、读请求、路由匹配、写响应
+//
+// 为什么需要它: `tcp` 只给流上的动作, `http` 只给报文框架 —— 把两者接成一个服务端
+// 还差几步: 读到「头结束」为止(而不是一次 read 当一整条请求)、把请求行拆成方法/目标/
+// 路径/查询串、把 `Content-Length` 解释成体长、按路由表选出处理器、按规范写出响应头。
+// 这几步每一步都有"看上去显然、错了不报错"的地方, 所以放进库里一次写对。
+//
+// **没有回调** (语言决定的, 不是没做完): 本语言没有函数指针, 所以服务端不能"接一个
+// 处理函数"。形状是: 解析 + `hs_route` 返回一个**处理器编号**, 调用方用 if 链分派,
+// 再用 `hs_reply*` 写响应。这样静态调用图不变 —— 与 `os/thread` 不包 `thread_spawn`
+// 是同一条理由。
+//
+// 边界 (刻意划的):
+//   * `hs_read_request` **不读体**: 它只保证头到齐, 体由调用方按 `hs_body_len` 再读。
+//     这样"头很小、体很大"的请求不会逼服务端一次分配一大块。
+//   * 不做 keep-alive / pipelining: 一条连接一条请求, 响应里写 `Connection: close`。
+//   * 不做 chunked 请求体的解码 (`http` 里有 `http_chunked_decode`, 由调用方决定用不用)。
+//   * 不做 TLS (不在这一层)、不做静态文件服务 (那是路由处理器的事)。
+//   * CR 一律写成 `13 as u8`: 本语言的字面量转义集只有 `\n \t \" \\`, `"\r"` 会静默
+//     变成字母 r (SKILL.md 6.2.13)。与 `internet/http` 头注同一条。
+//
+// 命名: 公开 hs_*, 内部 hqq_。自检 test_httpsrv_* (纯逻辑, 不建 socket)。
+
+module httpsrv
+
+use "tcp.lomt"
+use "http.lomt"
+use "sock.lomt"
+
+/// 成功。
+pub const HS_OK: i64 = 0;
+/// 请求本身不合法 (或头超过缓冲)。
+pub const HS_ERR_REQ: i64 = -1;
+/// 连接上的 I/O 失败 (对端关闭、超时、EAGAIN 之外的错误)。
+pub const HS_ERR_IO: i64 = -2;
+/// 一条请求头的建议上限 —— 超过就拒绝, 而不是无限读。
+pub const HS_MAX_REQ: u32 = 8192;
+
+const HQQ_CR: u32 = 13;
+const HQQ_LF: u32 = 10;
+const HQQ_SP: u32 = 32;
+const HQQ_QMARK: u32 = 63;
+const HQQ_NO: u32 = 4294967295;
+
+// ---------------------------------------------------------------- 字节小工具
+
+fn hqq_putc(out: ptr, cap: u32, o: u32, b: u32) -> u32 {
+    if o < cap {
+        store8(out, o, b as u8);
+    }
+    return o + 1;
+}
+
+fn hqq_puts(out: ptr, cap: u32, o: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let pos: u32 = o;
+    let i: u32 = 0;
+    while i < n {
+        pos = hqq_putc(out, cap, pos, str_byte(s, i));
+        i = i + 1;
+    }
+    return pos;
+}
+
+/// 无符号十进制; 返回值位置 (长度与写入长度分开: 越界时照样前进, 由调用方最后判)。
+fn hqq_dec(out: ptr, cap: u32, o: u32, v0: u32) -> u32 {
+    let tmp: ptr = alloc(16);
+    let v: u32 = v0;
+    let n: u32 = 0;
+    if v == 0 {
+        store8(tmp, 0, 48 as u8);
+        n = 1;
+    }
+    while v > 0 {
+        store8(tmp, n, (48 + (v % 10)) as u8);
+        n = n + 1;
+        v = v / 10;
+    }
+    let pos: u32 = o;
+    let i: u32 = 0;
+    while i < n {
+        pos = hqq_putc(out, cap, pos, load8(tmp, n - 1 - i));
+        i = i + 1;
+    }
+    return pos;
+}
+
+/// 定宽三位 (状态码): 99 -> "099"。小于 100 的值也照样补零。
+fn hqq_dec3(out: ptr, cap: u32, o: u32, v: u32) -> u32 {
+    let pos: u32 = o;
+    pos = hqq_putc(out, cap, pos, 48 + ((v / 100) % 10));
+    pos = hqq_putc(out, cap, pos, 48 + ((v / 10) % 10));
+    pos = hqq_putc(out, cap, pos, 48 + (v % 10));
+    return pos;
+}
+
+fn hqq_crlf(out: ptr, cap: u32, o: u32) -> u32 {
+    let pos: u32 = hqq_putc(out, cap, o, HQQ_CR);
+    return hqq_putc(out, cap, pos, HQQ_LF);
+}
+
+// ---------------------------------------------------------------- 监听 / 接受
+
+/// `tcp_listen4` 的薄包装 (SO_REUSEADDR 在 tcp 那层已经设了)。
+/// `sa` 16 字节、`on` 4 字节, 都是调用方的; 失败返回负 errno。
+pub fn hs_listen(ip: u32, port: u32, backlog: u64, sa: ptr, on: ptr) -> i64 {
+    return tcp_listen4(ip, port, backlog, sa, on);
+}
+
+pub fn hs_accept(fd: i64) -> i64 {
+    return tcp_accept(fd);
+}
+
+// ---------------------------------------------------------------- 读请求
+
+/// 读到**头结束**为止, 返回读到的字节数。体不在这里读 (见文件头)。
+///
+/// 返回: >=0 头已到齐的字节数; `HS_ERR_REQ` 头超过 `cap`; `HS_ERR_IO` 对端先关了或出错。
+/// EINTR / EAGAIN 会重试, 不会被当成失败。
+pub fn hs_read_request(fd: i64, buf: ptr, cap: u32) -> i64 {
+    let off: u32 = 0;
+    let state: u32 = 0;
+    let err: i64 = 0;
+    while state == 0 {
+        if off >= cap {
+            state = 2;
+        } else {
+            let r: i64 = tcp_recv(fd, ((buf as u64) + (off as u64)) as ptr, (cap - off) as u64);
+            if r > 0 {
+                off = off + (r as u32);
+                let e: u32 = http_hdr_end(buf, 0, off);
+                if e != HQQ_NO {
+                    state = 1;
+                }
+            } else if r == 0 {
+                state = 2;
+                err = HS_ERR_IO;
+            } else if sock_retry(r) == false {
+                state = 2;
+                err = HS_ERR_IO;
+            }
+        }
+    }
+    if err != 0 {
+        return err;
+    }
+    if state == 2 {
+        return HS_ERR_REQ;
+    }
+    return off as i64;
+}
+
+/// `Content-Length` 的值; 缺席是 0, 有但格式错是 -1 (不是 0 —— 混淆这两者会让
+/// "头写坏了"看起来像"没有体")。`n` 是 `hs_read_request` 返回的头字节数。
+pub fn hs_body_len(buf: ptr, n: u32) -> i64 {
+    let e: u32 = http_hdr_end(buf, 0, n);
+    if e == HQQ_NO {
+        return -1;
+    }
+    let oo: ptr = alloc(4);
+    let ll: ptr = alloc(4);
+    let found: u32 = http_hdr_find(buf, 0, e, "Content-Length", oo, ll);
+    if found == 0 {
+        return 0;
+    }
+    let v: u32 = http_hdr_dec(buf, 0, e, "Content-Length", oo, ll);
+    if v == HQQ_NO {
+        return -1;
+    }
+    return v as i64;
+}
+
+/// 请求行里的方法, 拷进 `out`; 返回**完整长度** (缓冲不够时只写前 `cap` 字节)。
+pub fn hs_method(buf: ptr, n: u32, out: ptr, cap: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n && load8(buf, i) != HQQ_SP {
+        if i < cap {
+            store8(out, i, load8(buf, i) as u8);
+        }
+        i = i + 1;
+    }
+    return i;
+}
+
+/// 请求行里的目标 (路径 + 查询串), 同一个拷贝约定。
+pub fn hs_target(buf: ptr, n: u32, out: ptr, cap: u32) -> u32 {
+    let s: u32 = 0;
+    while s < n && load8(buf, s) != HQQ_SP {
+        s = s + 1;
+    }
+    if s < n {
+        s = s + 1;
+    }
+    let i: u32 = s;
+    let w: u32 = 0;
+    while i < n && load8(buf, i) != HQQ_SP {
+        if w < cap {
+            store8(out, w, load8(buf, i) as u8);
+        }
+        w = w + 1;
+        i = i + 1;
+    }
+    return w;
+}
+
+/// 目标里的路径部分 (丢掉 `?` 之后), 同一个拷贝约定。
+pub fn hs_path(target: ptr, tn: u32, out: ptr, cap: u32) -> u32 {
+    let i: u32 = 0;
+    while i < tn && load8(target, i) != HQQ_QMARK {
+        if i < cap {
+            store8(out, i, load8(target, i) as u8);
+        }
+        i = i + 1;
+    }
+    return i;
+}
+
+/// 目标里的查询串 (不含 `?`); 没有 `?` 返回 0。
+pub fn hs_query(target: ptr, tn: u32, out: ptr, cap: u32) -> u32 {
+    let start: u32 = 0;
+    let k: u32 = 0;
+    while k < tn {
+        if load8(target, k) == HQQ_QMARK {
+            start = k + 1;
+            k = tn;
+        } else {
+            k = k + 1;
+        }
+    }
+    if start == 0 {
+        return 0;
+    }
+    let i: u32 = start;
+    let w: u32 = 0;
+    while i < tn {
+        if w < cap {
+            store8(out, w, load8(target, i) as u8);
+        }
+        w = w + 1;
+        i = i + 1;
+    }
+    return w;
+}
+
+// ---------------------------------------------------------------- 路由
+
+/// 路由表是**纯文本**, 一行一条: `METHOD PREFIX [id]`。
+/// `id` 缺省等于行号; `METHOD` 写 `*` 表示任意方法; 匹配是**最长前缀优先**,
+/// 同长取靠前那行。返回处理器编号, 没有匹配返回 -1。
+///
+/// 例:
+///     GET /api 7
+///     * /health 3
+///     POST /api/v2 9
+///
+/// 纯函数: 不分配、不发系统调用; `routes` 与 `path` 都只在读。
+pub fn hs_route(routes: ptr, routes_n: u32, method: str, path: ptr, pn: u32) -> i64 {
+    let cursor: u32 = 0;
+    let line_no: u32 = 0;
+    let best_len: u32 = 0;
+    let best_id: i64 = -1;
+    while cursor < routes_n {
+        let e: u32 = cursor;
+        while e < routes_n && load8(routes, e) != HQQ_LF {
+            e = e + 1;
+        }
+        let ms: u32 = cursor;
+        let me: u32 = ms;
+        while me < e && load8(routes, me) != HQQ_SP {
+            me = me + 1;
+        }
+        if me < e {
+            let ps: u32 = me + 1;
+            let pe: u32 = ps;
+            while pe < e && load8(routes, pe) != HQQ_SP {
+                pe = pe + 1;
+            }
+            let plen: u32 = pe - ps;
+            let idv: i64 = line_no as i64;
+            if pe + 1 < e {
+                let ok: ptr = alloc(1);
+                let parsed: u32 = hqq_dec_parse(((routes as u64) + ((pe + 1) as u64)) as ptr, e - (pe + 1), ok);
+                if load8(ok, 0) == 1 {
+                    idv = parsed as i64;
+                }
+            }
+            let m_ok: u32 = hqq_method_ok(routes, ms, me, method);
+            if m_ok == 1 && plen > best_len && plen <= pn {
+                if hqq_prefix_ok(routes, ps, plen, path) == 1 {
+                    best_len = plen;
+                    best_id = idv;
+                }
+            }
+        }
+        cursor = e + 1;
+        line_no = line_no + 1;
+    }
+    return best_id;
+}
+
+/// 匹配器今天**不分配**、也不需要暂存 —— 返回 0。留着这个函数是给调用方一个
+/// 显式的"我要为路由准备多少字节"的答案: 今天就是 0。
+pub fn hs_route_scratch(routes_n: u32) -> u32 {
+    return 0;
+}
+
+fn hqq_method_ok(routes: ptr, ms: u32, me: u32, method: str) -> u32 {
+    if me - ms == 1 && load8(routes, ms) == 42 {
+        return 1;
+    }
+    let n: u32 = str_len(method);
+    if n != me - ms {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if str_byte(method, i) != load8(routes, ms + i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn hqq_prefix_ok(routes: ptr, ps: u32, plen: u32, path: ptr) -> u32 {
+    let i: u32 = 0;
+    while i < plen {
+        if load8(routes, ps + i) != load8(path, i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn hqq_dec_parse(p: ptr, n: u32, ok: ptr) -> u32 {
+    let v: u32 = 0;
+    let i: u32 = 0;
+    store8(ok, 0, 0 as u8);
+    if n == 0 {
+        return 0;
+    }
+    while i < n {
+        let c: u32 = load8(p, i);
+        if c < 48 || c > 57 {
+            return 0;
+        }
+        if v > (4294967295 - (c - 48)) / 10 {
+            return 0;
+        }
+        v = v * 10 + (c - 48);
+        i = i + 1;
+    }
+    store8(ok, 0, 1 as u8);
+    return v;
+}
+
+// ---------------------------------------------------------------- 写响应
+
+/// 只写响应头 (不含体) —— 不碰 socket, 所以可以在自检里验字节。
+/// 返回写入长度; 0 表示状态码没有 reason 短语或 `cap` 不够。
+pub fn hs_reply_head(out: ptr, cap: u32, code: u32, ctype: str, bn: u32) -> u32 {
+    let tmp: ptr = alloc(128);
+    let rn: u32 = http_reason(code, tmp, 128);
+    if rn == HQQ_NO {
+        return 0;
+    }
+    let pos0: u32 = 0;
+    let pos1: u32 = hqq_puts(out, cap, pos0, "HTTP/1.1 ");
+    let pos2: u32 = hqq_dec3(out, cap, pos1, code);
+    let pos3: u32 = hqq_putc(out, cap, pos2, HQQ_SP);
+    let i: u32 = 0;
+    let w: u32 = pos3;
+    while i < rn {
+        w = hqq_putc(out, cap, w, load8(tmp, i));
+        i = i + 1;
+    }
+    let pos6: u32 = w;
+    let pos7: u32 = hqq_crlf(out, cap, pos6);
+    let pos8: u32 = hqq_puts(out, cap, pos7, "Content-Type: ");
+    let cn: u32 = str_len(ctype);
+    let pos9: u32 = hqq_puts(out, cap, pos8, ctype);
+    let pos10: u32 = hqq_crlf(out, cap, pos9);
+    let pos11: u32 = hqq_puts(out, cap, pos10, "Content-Length: ");
+    let pos12: u32 = hqq_dec(out, cap, pos11, bn);
+    let pos13: u32 = hqq_crlf(out, cap, pos12);
+    let pos14: u32 = hqq_puts(out, cap, pos13, "Connection: close");
+    let pos15: u32 = hqq_crlf(out, cap, pos14);
+    let total: u32 = hqq_crlf(out, cap, pos15);
+    if total > cap {
+        return 0;
+    }
+    return total;
+}
+
+/// 写完整响应: 头 + 体。返回 0 或负 errno。
+pub fn hs_reply(fd: i64, code: u32, ctype: str, body: ptr, bn: u32, hdr_buf: ptr, cap: u32) -> i64 {
+    let hn: u32 = hs_reply_head(hdr_buf, cap, code, ctype, bn);
+    if hn == 0 {
+        return HS_ERR_REQ;
+    }
+    let r1: i64 = tcp_send_all(fd, hdr_buf, hn as u64);
+    if r1 < 0 {
+        return r1;
+    }
+    if bn > 0 {
+        let r2: i64 = tcp_send_all(fd, body, bn as u64);
+        if r2 < 0 {
+            return r2;
+        }
+    }
+    return HS_OK;
+}
+
+/// `text/plain` 便利入口。字符串不是 `ptr`, 所以这里拷一份再发 (与整个库"缓冲由
+/// 调用方给"的约定不同的一处例外, 原因是 `str` 本来就不保证可寻址)。
+pub fn hs_reply_text(fd: i64, code: u32, body: str, hdr_buf: ptr, cap: u32) -> i64 {
+    let n: u32 = str_len(body);
+    let b: ptr = alloc(n + 1);
+    let i: u32 = 0;
+    while i < n {
+        store8(b, i, str_byte(body, i) as u8);
+        i = i + 1;
+    }
+    return hs_reply(fd, code, "text/plain", b, n, hdr_buf, cap);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_httpsrv_request_line() -> bool {
+    let b: ptr = alloc(128);
+    let o: ptr = alloc(64);
+    let pos: u32 = hqq_puts(b, 128, 0, "GET /a/b?x=1 HTTP/1.1");
+    let end: u32 = hqq_crlf(b, 128, pos);
+    let total: u32 = hqq_crlf(b, 128, end);
+    let mn: u32 = hs_method(b, total, o, 64);
+    if mn != 3 || load8(o, 0) != 71 || load8(o, 2) != 84 {
+        return false;
+    }
+    let tn: u32 = hs_target(b, total, o, 64);
+    if tn != 8 || load8(o, 0) != 47 || load8(o, 1) != 97 {
+        return false;
+    }
+    let pn: u32 = hs_path(o, tn, o, 64);
+    if pn != 4 || load8(o, 3) != 98 {
+        return false;
+    }
+    let qn: u32 = hs_query(o, 4, alloc(16), 16);
+    if qn != 0 {
+        return false;
+    }
+    let t2: u32 = hqq_puts(b, 128, 0, "/a?x=1");
+    let p2: u32 = hs_path(b, t2, o, 64);
+    let q2: u32 = hs_query(b, t2, o, 64);
+    return p2 == 2 && q2 == 3 && load8(o, 0) == 120;
+}
+
+fn test_httpsrv_body_len() -> bool {
+    let with: ptr = alloc(128);
+    let n1p: u32 = hqq_puts(with, 128, 0, "Content-Length: 5");
+    let n1e: u32 = hqq_crlf(with, 128, n1p);
+    let n1: u32 = hqq_crlf(with, 128, n1e);
+    let a: i64 = hs_body_len(with, n1);
+    let plain: ptr = alloc(64);
+    let pn: u32 = hqq_puts(plain, 64, 0, "Host: h");
+    let pe: u32 = hqq_crlf(plain, 64, pn);
+    let pt: u32 = hqq_crlf(plain, 64, pe);
+    let b: i64 = hs_body_len(plain, pt);
+    let bad: ptr = alloc(64);
+    let bn: u32 = hqq_puts(bad, 64, 0, "Content-Length: x");
+    let be: u32 = hqq_crlf(bad, 64, bn);
+    let bt: u32 = hqq_crlf(bad, 64, be);
+    let c: i64 = hs_body_len(bad, bt);
+    return a == 5 && b == 0 && c == -1;
+}
+
+fn test_httpsrv_route_table() -> bool {
+    let rt: ptr = alloc(128);
+    let rn: u32 = hqq_puts(rt, 128, 0, "GET /api 7\n* /health 3\nPOST /api/v2 9\n");
+    let p1: ptr = alloc(32);
+    let n1: u32 = hqq_puts(p1, 32, 0, "/api");
+    let p2: ptr = alloc(32);
+    let n2: u32 = hqq_puts(p2, 32, 0, "/health");
+    let p3: ptr = alloc(32);
+    let n3: u32 = hqq_puts(p3, 32, 0, "/api/v2/items");
+    let p4: ptr = alloc(32);
+    let n4: u32 = hqq_puts(p4, 32, 0, "/nope");
+    let a: i64 = hs_route(rt, rn, "GET", p1, n1);
+    let b: i64 = hs_route(rt, rn, "DELETE", p2, n2);
+    let c: i64 = hs_route(rt, rn, "POST", p3, n3);
+    let d: i64 = hs_route(rt, rn, "GET", p4, n4);
+    return a == 7 && b == 3 && c == 9 && d == -1;
+}
+
+fn test_httpsrv_reply_head() -> bool {
+    let b: ptr = alloc(256);
+    let n: u32 = hs_reply_head(b, 256, 200 as u32, "text/plain", 5 as u32);
+    if n == 0 {
+        return false;
+    }
+    if load8(b, 0) != 72 || load8(b, 4) != 47 || load8(b, 8) != 32 || load8(b, 9) != 50 {
+        return false;
+    }
+    if load8(b, n - 4) != 13 || load8(b, n - 3) != 10 {
+        return false;
+    }
+    if load8(b, n - 2) != 13 || load8(b, n - 1) != 10 {
+        return false;
+    }
+    let i: u32 = 0;
+    let hit: u32 = 0;
+    while i + 17 <= n {
+        if load8(b, i) == 67 && load8(b, i + 1) == 111 && load8(b, i + 2) == 110
+            && load8(b, i + 3) == 116 && load8(b, i + 4) == 101 && load8(b, i + 5) == 110
+            && load8(b, i + 6) == 116 && load8(b, i + 7) == 45 && load8(b, i + 8) == 76
+            && load8(b, i + 9) == 101 && load8(b, i + 10) == 110 && load8(b, i + 11) == 103
+            && load8(b, i + 12) == 116 && load8(b, i + 13) == 104 && load8(b, i + 14) == 58
+            && load8(b, i + 15) == 32 && load8(b, i + 16) == 53 {
+            hit = 1;
+        }
+        i = i + 1;
+    }
+    if hit != 1 {
+        return false;
+    }
+    let small: ptr = alloc(8);
+    return hs_reply_head(small, 8, 200 as u32, "t", 0 as u32) == 0;
+}

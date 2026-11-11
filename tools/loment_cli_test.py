@@ -1648,27 +1648,6 @@ def test_l1_commands_refuse_an_l0_layout_file():
     print("      check/fmt/doc/build/run 对 .lom 一律 exit 2 并点名 'L0 layout file'")
 
 
-@test
-def test_the_520_cell_table_is_well_formed_and_unadvertised():
-    """520 格散表：13×40、置换是双射、CLI 接着它，但帮助里不广告。
-
-    这条**故意不包含**钥匙、五个词和图 —— 彩蛋要能被解出来，不该从判据里读出来；
-    它只钉形状与接线，不钉答案。
-    """
-    data_src = (ROOT / "loment" / "tools" / "turegg_data.lomt").read_text(encoding="utf-8")
-    chunks = re.findall(r'pub fn egg_cells(\d+)\(\) -> str \{ return "([.#]{40})"; \}', data_src)
-    assert len(chunks) == 13, f"散表段数 {len(chunks)} != 13"
-    cells = "".join(c for _, c in sorted(chunks, key=lambda t: int(t[0])))
-    assert len(cells) == 520, f"散表 {len(cells)} 格 != 520"
-    assert len({(p * 211 + 97) % 520 for p in range(520)}) == 520, "置换不是双射"
-    cli = (ROOT / "loment" / "tools" / "lomcli.lomt").read_text(encoding="utf-8")
-    assert "use turegg" in cli and "turegg_key1_ok" in cli, "CLI 没接上散表"
-    rc, out, _err = _run(["--no-color", "help"], cwd=ROOT)
-    assert rc == 0, out
-    low = out.lower()
-    assert "turegg" not in low and "easter" not in low and "520" not in out, (
-        "帮助里广告了彩蛋")
-    print("      520 格散表 13×40，置换双射；CLI 接着它，帮助里不广告")
 
 
 def main() -> int:

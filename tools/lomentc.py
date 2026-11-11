@@ -15174,41 +15174,6 @@ def write_diags(out: str | None, records: list[dict]) -> None:
     print(f"[DIAG] {len(records)} 条 -> {out}", file=sys.stderr)
 
 
-# ---------------------------------------------------------------------------
-# `reboot(2)` 那一手：魔数必须**同时**传对，少一个都不认（`0x28121969` 是 Linus 的
-# 生日，见 `include/uapi/linux/reboot.h`）。这里四个键，散在一份源里：
-#
-#   0x29052010   29/05/2010   一个人的生日（与 `0x28121969` 同一种写法）
-#   0x28092026   28/09/2026   这门语言出生的那天
-#   0x687879     `hxy`        一个名字的缩写（三个 ASCII 字节）
-#   0x6A7978     `jyx`        另一个名字的缩写
-#
-# 四个都对上才开一次。**凑齐了也只做一件事：在 stderr 上留两行** —— 不进产物、不改
-# IR、不影响任何一条诊断，所以它不会让两个实现分叉，也不会让门禁多一条要维护的判据。
-# 正常写程序凑不齐它们；凑得齐的人不需要这段注释。
-_KEYS = (0x29052010, 0x28092026)
-_HER = 0x687879
-_HIM = 0x6A7978
-
-
-def _initials(word: int) -> str:
-    """三个 ASCII 字节拼回一个缩写：`0x687879` -> `hxy`。"""
-    return "".join(chr((word >> s) & 0xFF) for s in (16, 8, 0))
-
-
-def _if_you_know(mod: "Module") -> None:
-    """四个键都对上才开口；少一个就是普通编译，什么都多不出来。"""
-    if mod.name != _initials(_HIM):
-        return
-    vals = {c.value for c in mod.consts if isinstance(c.value, int)}
-    if any(k not in vals for k in _KEYS):
-        return
-    if _initials(_HER) not in {f.name for f in mod.funcs}:
-        return
-    print(f"\n  ♥  {_initials(_HIM)}  ·  {_initials(_HER)}"
-          f"\n     2010-05-29   ·   2026-09-28\n", file=sys.stderr)
-
-
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="lomentc", description="L1 Loment 编译器 v0")
     ap.add_argument("file", help=".lomt 源文件")
@@ -15272,7 +15237,6 @@ def main(argv: list[str] | None = None) -> int:
         write_diags(args.diag_out, [diag_record(path, 0, 0, msg)])
         return 1
 
-    _if_you_know(mod)
 
     try:
         errs = check(mod, deps=deps)

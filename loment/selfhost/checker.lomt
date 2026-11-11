@@ -5234,8 +5234,11 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             let semi: u32 = chk_find_at(src, t, j + 1, e, ";");
             if semi == j + 1 {
                 // 裸 `return;`（`docs/296` §2.6）：只在 Tur 2 且函数**没有返回类型**时成立。
-                // Tur 1 / 有返回类型的函数里，参考实现是解析期就拒（E019）。
-                if load32(oc, 8) == 0 || ret != 0 {
+                // Tur 1 里参考实现在**解析期**就拒（E019），所以这一格报 19（族），
+                // 153（"`return;` 不带值"）只留给 Tur 2 且声明了返回类型的情形。
+                if load32(oc, 8) == 0 {
+                    chk_pub(src, t, oc, p, 19, semi);
+                } else if ret != 0 {
                     chk_pub(src, t, oc, p, 153, semi);
                 }
             } else {

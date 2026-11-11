@@ -614,19 +614,23 @@ def test_m81_cross_module_dup_is_rejected():
     mod = lomentc.load(entry)
     deps = lomentc.resolve_deps(mod, ROOT, entry.parent, entry=entry)
     py = _classify_codes(lomentc.check(mod, deps=deps))
-    assert py == [E_DUP], f"参考实现没按 E-DUP (E013) 报跨模块重名: {py}"
+    # 细分之后跨模块重名是 **E0128**（`docs/332`），不是族码 E013。
+    assert py == [128], f"参考实现没按 E-DUP (E0128) 报跨模块重名: {py}"
     with tempfile.TemporaryDirectory() as td:
         exe = _build_checker(td)
         unit = Path(td) / "u.lomt"
         unit.write_text(_unit_text(entry), encoding="utf-8", newline="\n")
         got, det = _loment_codes(exe, unit)
-        assert sorted(set(got)) == [E_DUP], f"自举 checker 的码不对: {got} {det}"
-        print(f"      跨模块重名: 两边都报 E-DUP (参考消息 + 自举码 {sorted(set(got))})")
+        # 两边的细分码**不同**，而且这个不同是有信息的：参考实现认得出"两个单元"
+        # （E0128 会点名是哪两份文件），自举侧把整棵依赖树当一份单元、不分模块，
+        # 只能报"顶层名字重复定义"（E0134）。同族（E013），拒的效果一样。
+        assert sorted(set(got)) == [134], f"自举 checker 的码不对: {got} {det}"
+        print(f"      跨模块重名: 参考 E0128 / 自举 E0134（同族 E013，两边都拒）")
 
 
 @test
 def test_m81_falling_off_the_end_is_refused():
-    '''M81/控制流: **非 `()` 的函数不许从末尾掉出去**（`#22`, 码 E027）。
+    '''M81/控制流: **非 `()` 的函数不许从末尾掉出去**（`#22`, 码 E179）。
 
     "`check` 通过 = 这份程序不会 trap" 是这条命令给人的唯一保证, 而"掉出末尾"发射之后
     是一条**非法指令**（SIGILL）—— 只在**真走到那一支**时才发生, 所以多半是"上线很久、
@@ -668,8 +672,8 @@ def test_m81_falling_off_the_end_is_refused():
             f.write_text(src, encoding="utf-8", newline="\n")
             errs = lomentc.check(lomentc.load(f))
             codes = {loment_diag.classify(e)[0] for e in errs}
-            # 细分之后"可能从末尾掉出去"是 **E179**（`docs/332`）。
-            assert "E179" in codes, f"{tag}: 掉出末尾没按 E179 拒: {errs}"
+            # 细分之后"可能从末尾掉出去"是 **E0179**（`docs/332`；码 179，显示四位）。
+            assert "E0179" in codes, f"{tag}: 掉出末尾没按 E0179 拒: {errs}"
         for tag, src in good.items():
             f = d / (tag + ".lomt")
             f.write_text(src, encoding="utf-8", newline="\n")
@@ -683,11 +687,11 @@ def test_m81_falling_off_the_end_is_refused():
             exe = _build_checker(str(d))
             for tag in bad:
                 got, det = _loment_codes(exe, d / (tag + ".lomt"))
-                assert got == [27], f"[自举] {tag}: 期望码 [27]，得到 {got} {det}"
+                assert got == [179], f"[自举] {tag}: 期望码 [179]，得到 {got} {det}"
             for tag in good:
                 got, det = _loment_codes(exe, d / (tag + ".lomt"))
                 assert got == [], f"[自举] {tag}: 合法收尾被误拒 {got} {det}"
-        print(f"      掉出末尾: {len(bad)} 种非法形状都拒(E027), {len(good)} 种合法收尾都放行"
+        print(f"      掉出末尾: {len(bad)} 种非法形状都拒(E0179), {len(good)} 种合法收尾都放行"
               f"（参考实现 + 自举 checker 各一遍）")
 
 
@@ -2184,8 +2188,8 @@ def test_m91_tur2_for_in_and_loop_control():
                       "    break;\n}\n", encoding="utf-8", newline="\n")
         rc2, out2, err2 = _run_driver_raw(elf, _wsl_path(p2), td, "outside")
         assert rc2 != 0 and out2.strip() == "", "循环外的 `break;` 被放过去了"
-        assert "E19" in err2, f"循环外的 `break;` 该是解析错 (E19): {err2[-200:]}"
-        print("      for-in/break/continue: 两套实现逐字节相同、运行得 ok；Tur 1 拒、循环外 E19")
+        assert "E019" in err2, f"循环外的 `break;` 该是解析错 (E019): {err2[-200:]}"
+        print("      for-in/break/continue: 两套实现逐字节相同、运行得 ok；Tur 1 拒、循环外 E019")
 
 
 @test
@@ -2240,7 +2244,7 @@ def test_m94_tur2_bare_return_and_print_num():
         p1.write_text("choose write grammar tur\n" + src, encoding="utf-8", newline="\n")
         rc1, out1, err1 = _run_driver_raw(elf, _wsl_path(p1), td, "oldt2out")
         assert rc1 != 0 and out1.strip() == "", "Tur 1 收下了裸 `return;`"
-        assert "E19" in err1, err1[-200:]
+        assert "E019" in err1, err1[-200:]
         # Tur 1：用户自己的 `fn print_num` 不被内建顶掉（自己那行也编得过）
         p2 = Path(td) / "mine.lomt"
         p2.write_text(
@@ -2263,16 +2267,17 @@ def test_m94_tur2_bare_return_and_print_num():
                       encoding="utf-8", newline="\n")
         rc3, out3, err3 = _run_driver_raw(elf, _wsl_path(p3), td, "typed")
         assert rc3 != 0 and out3.strip() == "", "有返回类型的 `return;` 被放过去了"
-        assert "E19" in err3, err3[-200:]
+        # 细分之后这一格是 **E0153**（"`return;` 不带值"，`docs/332`）。
+        assert "E0153" in err3, err3[-200:]
         # Tur 2：`no_runtime` 下 `print_num` 点名拒（运行期保证）
         p4 = Path(td) / "nort.lomt"
         p4.write_text("choose write grammar tur2\nmodule nort\n\n"
                       "fn main() {\n    print_num(7);\n}\n", encoding="utf-8", newline="\n")
         rc4, out4, err4 = _run_driver_raw(elf, _wsl_path(p4), td, "nort")
         assert rc4 != 0 and out4.strip() == "", "`no_runtime` 收下了 print_num"
-        assert "E31" in err4, err4[-200:]
+        assert "E031" in err4, err4[-200:]
         print("      裸 return / print_num: 产物逐字节相同、输出 0/1234/-98765/i64 上限；"
-              "Tur 1 拒 return 但保住用户 print_num；E19/E31 都对")
+              "Tur 1 拒 return 但保住用户 print_num；E019/E031 都对")
 
 
 @test
@@ -2492,9 +2497,9 @@ fn main() {
                       "fn main() {\n    defer 1;\n}\n", encoding="utf-8", newline="\n")
         rc2, out2, err2 = _run_driver_raw(elf, _wsl_path(p2), td, "notcall")
         assert rc2 != 0 and out2.strip() == "", "`defer 1;` 被放过去了"
-        assert "E19" in err2, f"`defer 1;` 该是解析错 (E19): {err2[-200:]}"
+        assert "E0155" in err2, f"`defer 1;` 该被拒 (E0155): {err2[-200:]}"
         print("      defer: 产物逐字节相同、LIFO/块作用域/声明处捕获/return·?·break·continue "
-              "全跑对；Tur 1 保住用户 fn defer，`defer 1;` 是 E19")
+              "全跑对；Tur 1 保住用户 fn defer，`defer 1;` 是 E0155")
 
 
 @test

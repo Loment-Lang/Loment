@@ -20,6 +20,7 @@ use lexer
 use checker
 use switches
 use hotswap
+use surface_data
 
 // ---------------------------------------------------------------- 尺寸与布局
 
@@ -376,52 +377,20 @@ fn doc_remove(mem: ptr, uri: ptr, un: u32) -> u32 {
 
 // ---------------------------------------------------------------- 诊断
 
-/// 错误码 -> 标题 (与 tools/loment_diag.RULES **逐条同文**; 码按**修法**分)。
+/// 错误码 -> 标题。
 ///
-/// 这张表原先只到 17，而自举 checker 会发 18（名字导入）、19（语法/解析期）… ——
-/// 落到表外的码一律显示成「未分类」，用户看到的是一条没有类别的红错
-/// （2026-11-04：`codegen.lomt` 的 E019 就是这样）。判据
-/// `test_diag_titles_match_reference` 逐码对拍，防它再次漂。
+/// **不手抄第二份**：真源是 `surface_data.code_title`（由 `tools/loment_diag.py
+/// --dump-surface` 从 `loment_diag.RULES` 生成）。这里原先有一条手抄到 38 的链式表，
+/// 表外的码一律显示成「未分类」（2026-11-04：`codegen.lomt` 的 E019 就是这么丢的）。
+/// 2026-11-10 细分码表（`docs/332`）之后，自举 checker 发的是 42..207 这一层细码，
+/// 手抄表立刻整片落到表外 —— 于是改成转发。判据
+/// `test_diag_titles_match_reference` 钉住"这里只能转发，不许再长第二份"。
 fn diag_title(code: u32) -> str {
-    if code == 1 { return "类型不匹配"; }
-    if code == 2 { return "符号未声明"; }
-    if code == 3 { return "实参数量不符"; }
-    if code == 4 { return "能力域非法"; }
-    if code == 5 { return "与出界声明冲突"; }
-    if code == 6 { return "移动后使用"; }
-    if code == 7 { return "借用冲突"; }
-    if code == 8 { return "match/变体用法非法"; }
-    if code == 9 { return "类型名非法"; }
-    if code == 10 { return "`?` 误用"; }
-    if code == 11 { return "只读切片写入"; }
-    if code == 12 { return "悬垂借用"; }
-    if code == 13 { return "重名"; }
-    if code == 14 { return "赋值目标非法"; }
-    if code == 15 { return "字段/下标/取址非法"; }
-    if code == 16 { return "数组字面量非法"; }
-    if code == 17 { return "`as` 转换非法"; }
-    if code == 18 { return "名字导入无法唯一解析"; }
-    if code == 19 { return "语法错误（词法/解析期）"; }
-    if code == 20 { return "单个文件的 use 太多"; }
-    if code == 21 { return "外部函数的签名不支持"; }
-    if code == 22 { return "`choose` / `addin` 用法不对"; }
-    if code == 23 { return "这一版还没实现（编译器限制）"; }
-    if code == 24 { return "命令声明不合法"; }
-    if code == 25 { return "进程入口冲突"; }
-    if code == 26 { return "命令体与声明对不上"; }
-    if code == 27 { return "控制流：可能从末尾掉出去"; }
-    if code == 28 { return "越界：字面量下标越过定长数组的界"; }
-    if code == 29 { return "用完再放：这块内存已经被 `free`，不能再用"; }
-    if code == 30 { return "未知类型"; }
-    if code == 31 { return "这一档是 `no_runtime`，而这个构造要运行期"; }
-    if code == 32 { return "输出文件写不了"; }
-    if code == 33 { return "这个单元超出编译器装得下的量"; }
-    if code == 34 { return "这次放行没有来源"; }
-    if code == 35 { return "台账里有未登记的站点"; }
-    if code == 36 { return "LSPE 自检失败"; }
-    if code == 37 { return "LSPE 策略锁"; }
-    if code == 38 { return "`lspe pass` 缺少理由"; }
-    return "未分类";
+    let t: str = code_title(code, 1);
+    if str_len(t) == 0 {
+        return "未分类";
+    }
+    return t;
 }
 
 /// 跑自举 checker (toks 已由调用方 lex 好), 错误写进 errs (每条 8B), 返回条数。

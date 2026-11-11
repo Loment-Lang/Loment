@@ -1650,6 +1650,17 @@ def test_l1_commands_refuse_an_l0_layout_file():
 
 
 
+@test
+def test_the_64_char_entry_is_gone():
+    """爱心彩蛋已移除（2026-11-11 用户裁定）：64 字符参数走普通 unknown 分支。"""
+    cmd = "l" * 64
+    rc, out, err = _run(["--no-color", cmd])
+    text = (out or "") + (err or "")
+    assert rc == 2, f"64 字符参数没有按 unknown 退出 2: rc={rc} {text[:200]}"
+    assert "unknown command" in text, text[:200]
+    print("      64 字符参数走普通 unknown 分支（彩蛋入口已移除）")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_cli_test")
 

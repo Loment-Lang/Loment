@@ -548,14 +548,28 @@ int main(int argc, char **argv) {
                                  a + chk_arena_scr(), a + chk_arena_ctab(), a + chk_arena_nc(),
                                  a + chk_arena_exs(), a + chk_arena_env(), a + chk_arena_tyt(),
                                  prof);
-    m += switch_rules(buf, toks, sw, errs, m * 8);
+    unsigned int ne = m;
+    m += switch_rules(buf, toks, sw, errs, ne * 8);
     printf("%u", m);
     for (unsigned int i = 0; i < m; i++) {
         unsigned int code = *(unsigned int *)(errs + 8 * i);
-        unsigned int tk = *(unsigned int *)(errs + 8 * i + 4);
-        unsigned int st = *(unsigned int *)(toks + 20 * tk + 4);
-        unsigned int ln = *(unsigned int *)(toks + 20 * tk + 8);
-        unsigned int line = *(unsigned int *)(toks + 20 * tk + 12);
+        unsigned int v = *(unsigned int *)(errs + 8 * i + 4);
+        unsigned int st = 0, ln = 0, line = 0;
+        if (i >= ne) {
+            /* 开关规则：第二格不是 token 下标（`choose` 构造在压缩时被删掉了）。
+               < 2^31 = 表项下标；否则是 2^31 + 行号（嵌套 / 超限，没有表项）。 */
+            if (v >= 2147483648u) {
+                line = v - 2147483648u;
+            } else {
+                line = *(unsigned int *)(sw + 16 * v + 12);
+                st = *(unsigned int *)(sw + 16 * v);
+                ln = *(unsigned int *)(sw + 16 * v + 4);
+            }
+        } else {
+            st = *(unsigned int *)(toks + 20 * v + 4);
+            ln = *(unsigned int *)(toks + 20 * v + 8);
+            line = *(unsigned int *)(toks + 20 * v + 12);
+        }
         printf(" %u@%u:%.*s", code, line, (int)(ln > 24 ? 24 : ln), buf + st);
     }
     printf("\\n");
@@ -3114,33 +3128,10 @@ PARSE_LEVEL: set[str] = {
 
 #: 诊断**行号**两侧不一致的已知案例（棘轮：**只许变短**）。码集已经相同（`loment_rule_parity`
 #: 的预算管着那一半），这里管的是用户看得见的另一半：同一条错误指到了另一行，或者自举侧
-#: 多报/少报一条。键是规则名，值是差异的形状。修好一条就删一行 —— 判据会断言条目**仍然**
-#: 不一致，删晚了会红（与 `M85_KNOWN_GAPS` / `PARSE_KNOWN_GAPS` 同一个形状）。
-DIAG_LINE_GAPS: dict[str, str] = {
-    # 开关那五条：`sw_add` 记的是**压缩前**的 token 下标，而 `switch_rules` 跑在
-    # `apply_switches` 压缩之后的 token 流上；`choose` 构造本身被删掉了，于是下标落到
-    # 后面的 token 上（源码第 3 行的 `choose` 被报成第 5 行的 `fn`）。
-    "choose-bad-mode": "E22: 参考 3 行 / 自举 5 行（压缩前 token 下标）",
-    "choose-vm-bad-value": "E22: 参考 3 行 / 自举 5 行（同上）",
-    "switch-undef": "E22: 参考 3 行 / 自举 5 行（同上）",
-    "switch-dup": "E22: 参考 7 行 / 自举 10 行（同上）",
-    "lspe-unknown-value": "E22: 参考 3 行 / 自举 5 行（同上）",
-    # 结构体 / 枚举的声明级错误：参考报**声明起始**那一行，自举报**成员**那一行。
-    "struct-field-dup": "E13: 参考 3 行 / 自举 5 行",
-    "enum-variant-dup": "E13: 参考 3 行 / 自举 5 行",
-    "struct-field-type-unknown": "E30: 参考 3 行 / 自举 4 行",
-    "enum-payload-type-unknown": "E30: 参考 3 行 / 自举 4 行",
-    # match / 结构体字面量：自举多报一条（指向声明行），或把位置挪到模式/字段那一行。
-    "structlit-unknown-field": "E15: 自举多一条第 4 行；参考只有第 8 行",
-    "structlit-missing-field": "E15: 参考 9 行 / 自举 5 行",
-    "match-unknown-variant": "E8: 自举多一条第 4 行；参考只有第 8 行",
-    "match-dup-pattern": "E8: 参考 9 行 / 自举 5、11 两行",
-    "match-nonexhaustive": "E8: 参考 9 行 / 自举 5 行",
-    "match-payload-arity": "E8: 参考 8 行 / 自举 9 行（E2 那一条两边一致）",
-    # 其余两条。
-    "unclosed-brace": "E19: 参考 5 行（EOF）/ 自举 9 行",
-    "deep-nesting": "E23: 参考 67 行 / 自举 68 行（嵌套上限差一层）",
-}
+#: 多报/少报一条。**2026-11-11 清空**：17 条按根因分四组修完（开关压缩前下标 / 结构体与
+#: 枚举报声明行 / match 报 `match` 行 / 预置枚举把 EOF 推后、嵌套上限差一层）。谁再引入
+#: 一条新的，这条判据当场红 —— 修好或登记，登记的那条必须**仍然**不一致。
+DIAG_LINE_GAPS: dict[str, str] = {}
 
 
 def _ref_diag_pairs(src: Path) -> set[tuple[int, int]]:

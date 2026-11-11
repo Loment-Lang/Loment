@@ -26,9 +26,13 @@ use bytes
 
 /// 与参考实现同值 (`lomentc.MAX_CHOOSE`)。**至少 500**（用户 2026-09-17 定）。
 pub const MAX_CHOOSE: u32 = 500;
-/// 开关表每条: 名起点(u32) + 名长度(u32) + 标记(u32) + token 下标(u32)。
+/// 开关表每条: 名起点(u32) + 名长度(u32) + 标记(u32) + **行号**(u32)。
 /// 标记: **2 = 定义**(`set choose`), 1 = 取值"开", 0 = 取值"关"。
 /// **每个出现都记一条**（不去重）—— 重复由规则那一侧报出来, 不能在这里悄悄吃掉。
+///
+/// 第四格从前存的是**压缩前**的 token 下标。`apply_switches` 的第二遍会把 `choose`
+/// 构造整段删掉，而 `switch_rules` 跑在**压缩后**的 token 流上 —— 于是那个下标落到后面
+/// 的 token 上（源码第 3 行的 `choose` 被报成第 5 行）。表里存**行号**，判据就不会漂。
 pub const SW_SIZE: u32 = 16;
 /// 整张表的字节数, 调用方按它开缓冲。表尾多留一格放条数。
 pub const SW_BYTES: u32 = 8008;
@@ -37,10 +41,13 @@ pub const SW_BYTES: u32 = 8008;
 pub const E022: u32 = 22;
 /// 无符号里当"没有"用 —— token 下标从 0 起，这个值不可能撞上。
 pub const SW_NONE: u32 = 4294967295;
-/// 表尾那一格**空位**：存"第一个嵌套声明违规的 token 下标"（没有就是 `SW_NONE`）。
+/// 表尾那一格**空位**：存"第一个嵌套声明违规的**行号**"（没有就是 `SW_NONE`）。
 /// 表是 8008 字节 = 500*16 条 + 4 字节条数 + **4 字节富余** —— 就用这 4 个字节，
 /// 不必给 `apply_switches` 加一个 errs 形参（那会动到 lomdoc/lsp/p8 夹具的调用点）。
 pub const SW_NEST: u32 = 8004;
+/// `switch_rules` 的错误第二条：**没有表项的**那两种（嵌套 / 超限）用
+/// `SW_PACK + 行号`，其余用**表项下标**。区分点是高位：表项 < 500，行号 < 2^31。
+pub const SW_PACK: u32 = 2147483648;
 
 /// 开关声明**不许写在任何块内部**（`docs/182` §1.10）：返回**第一个**违规 token 的下标，
 /// 没有就是 `SW_NONE`。
@@ -291,7 +298,7 @@ fn sw_add(unit: ptr, toks: ptr, sw: ptr, ns: u32, idx: u32, mark: u32) -> u32 {
     store32(sw, ns * SW_SIZE, load32(toks, idx * 20 + 4));
     store32(sw, ns * SW_SIZE + 4, load32(toks, idx * 20 + 8));
     store32(sw, ns * SW_SIZE + 8, mark);
-    store32(sw, ns * SW_SIZE + 12, idx);      // 报错时要指到这里
+    store32(sw, ns * SW_SIZE + 12, load32(toks, idx * 20 + 12));   // 行号，报错时指这里
     return ns + 1;
 }
 
@@ -354,7 +361,13 @@ pub fn sw_err(errs: ptr, o: u32, tok: u32) -> u32 {
 /// 就消失了 —— 这正是"在装载器做"而不是"在解析器做"的理由。
 pub fn apply_switches(unit: ptr, toks: ptr, nt: u32, sw: ptr) -> u32 {
     // 嵌套声明**在这里判**（摊开之前）—— 结果先存进表尾空位，由 `switch_rules` 报成 E022。
-    store32(sw, SW_NEST, nested_decl_at(unit, toks, nt));
+    // 存的是**行号**：压缩之后那个 token 已经不在流里了（见 `SW_SIZE` 那条注释）。
+    let nx: u32 = nested_decl_at(unit, toks, nt);
+    let nl: u32 = SW_NONE;
+    if nx != SW_NONE {
+        nl = load32(toks, nx * 20 + 12);
+    }
+    store32(sw, SW_NEST, nl);
     // ---- 第一遍: 收定义与取值
     let ns: u32 = 0;
     let d: u32 = 0;
@@ -508,12 +521,12 @@ pub fn switch_rules(unit: ptr, toks: ptr, sw: ptr, errs: ptr, o: u32) -> u32 {
     let n: u32 = o;
     // 超上限（**绝不静默丢** —— 与 `use` 的 300 条同一条纪律）
     if ns > MAX_CHOOSE {
-        n = sw_err(errs, n, 0);
+        n = sw_err(errs, n, SW_PACK);          // 行号拿不到：报成文件级（行 0）
     }
     // 嵌套声明（在 `apply_switches` 里、**摊开之前**判出来的，见那里的说明）
     let nd: u32 = load32(sw, SW_NEST);
     if nd != SW_NONE {
-        n = sw_err(errs, n, nd);
+        n = sw_err(errs, n, SW_PACK + nd);
     }
     // 同名两次（**同类**才算: 定义+取值是正常配对）
     let i: u32 = 0;
@@ -528,7 +541,7 @@ pub fn switch_rules(unit: ptr, toks: ptr, sw: ptr, errs: ptr, o: u32) -> u32 {
             let kj: u32 = 0;
             if load32(sw, j * SW_SIZE + 8) == 2 { kj = 1; }
             if ki == kj && sw_same(unit, sw, i, j) == 1 {
-                n = sw_err(errs, n, load32(sw, j * SW_SIZE + 12));
+                n = sw_err(errs, n, j);          // 表项下标：行号与名字都由它取
                 j = ns;                          // 一条就够, 不重复报
             } else {
                 j = j + 1;
@@ -549,7 +562,7 @@ pub fn switch_rules(unit: ptr, toks: ptr, sw: ptr, errs: ptr, o: u32) -> u32 {
             // `domain_clock_explicit` 由**编译器定义**（`docs/315`），与 LMS 的七个细开关
             // 同一条理由：用户不必也不该再写一遍 `set choose`。
             if has == 0 && sw_named(unit, sw, a, "domain_clock_explicit") == 0 {
-                n = sw_err(errs, n, load32(sw, a * SW_SIZE + 12));
+                n = sw_err(errs, n, a);
             }
         }
         a = a + 1;

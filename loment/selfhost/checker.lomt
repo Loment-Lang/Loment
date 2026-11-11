@@ -1162,16 +1162,26 @@ fn chk_struct_body(src: ptr, t: ptr, s: ptr, n: u32, lb: u32, name_tok: u32,
     let c: u32 = 0;
     while chk_tok_kind(t, j) != 4 && !chk_tok_is(src, t, j, "}") {
         if chk_tab_has(src, t, tab, c, j) == 1 {
-            o = sym_pub(src, t, p, o, E_DUP, j);
+            // 参考实现把"字段重复"报在**声明那一行**上（`s.line`），不是重复字段那一行。
+            o = sym_pub(src, t, p, o, E_DUP, name_tok);
         }
         store32(tab, c * 4, j);
         c = c + 1;
         j = j + 1;
         if chk_tok_is(src, t, j, ":") {
             j = j + 1;
+            // 字段类型错误也落在声明行（参考实现的 `未知类型 …（结构体 S.f 的字段类型）`
+            // 用的是 `s.line`）。`check_type` 按类型 token 报，这里把它这一段的 token
+            // 统一改回声明名 —— 码不变，只有落点对齐。
+            let before: u32 = o;
             let r: u64 = check_type(src, t, s, n, j, p, o);
             o = (r % 4294967296) as u32;
             j = chk_skip_type(src, t, j);
+            let fix: u32 = before;
+            while fix < o {
+                store32(p, fix + 4, name_tok);
+                fix = fix + 8;
+            }
         }
         if chk_tok_is(src, t, j, ",") {
             j = j + 1;
@@ -1191,15 +1201,22 @@ fn chk_enum_body(src: ptr, t: ptr, s: ptr, n: u32, lb: u32, name_tok: u32,
     while chk_tok_kind(t, j) != 4 && !chk_tok_is(src, t, j, "}") {
         if chk_tok_kind(t, j) == 0 {
             if chk_tab_has(src, t, tab, c, j) == 1 {
-                o = sym_pub(src, t, p, o, E_DUP, j);
+                // 与结构体字段同一条：报在声明行（参考实现的 `e.line`）。
+                o = sym_pub(src, t, p, o, E_DUP, name_tok);
             }
             store32(tab, c * 4, j);
             c = c + 1;
             j = j + 1;
             if chk_tok_is(src, t, j, "(") {
+                let before: u32 = o;
                 let r: u64 = check_type(src, t, s, n, j + 1, p, o);
                 o = (r % 4294967296) as u32;
                 j = chk_skip_type(src, t, j + 1);
+                let fix: u32 = before;
+                while fix < o {
+                    store32(p, fix + 4, name_tok);
+                    fix = fix + 8;
+                }
                 if chk_tok_is(src, t, j, ")") {
                     j = j + 1;
                 }
@@ -3091,7 +3108,9 @@ fn chk_tex_atom_struct(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 }
             }
             if hit == 0 {
-                chk_pub(src, t, oc, p, E_ACCESS, fj);     // 缺字段 f
+                // 参考实现把"缺字段"报在**字面量**那一行上（`结构体 S 缺字段 b`），
+                // 不是字段声明那一行 —— `lo` 就是字面量的结构体名 token。
+                chk_pub(src, t, oc, p, E_ACCESS, lo);
             }
             fnames = 0;
         }
@@ -4472,6 +4491,10 @@ fn chk_fn_ret_is_result(src: ptr, t: ptr, s: ptr, slot0: u32) -> u32 {
 
 /// 绑定正确; 不给通配就必须穷尽。所有情形都归 E008。
 /// `lh` = (j << 32) | e —— j = `match` 下标, e = 函数体结束 (找边界用)。
+///
+/// **所有 match 级诊断都报在 `j`（`match` 那一行）**：参考实现的 `无变体` / `重复模式` /
+/// `不穷尽` 三条都用 `match` 的行号，而自举侧从前报在变体声明行或臂那一行。正文由
+/// driver 的 `err_phrase` 按"token 是 `match`"给一句通用说法。
 fn chk_match(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
              lh: u64, tyt: ptr, p: ptr, oc: ptr) -> u32 {
     let j: u32 = chk_lhlo(lh);
@@ -4523,16 +4546,16 @@ fn chk_match(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             if eslot != 0 {
                 let pslot: u32 = chk_lookup_slot(src, t, syms, n, ptok);
                 if pslot != eslot {
-                    chk_pub(src, t, oc, p, E_PATTERN, ptok);      // 模式与主体枚举不符
+                    chk_pub(src, t, oc, p, E_PATTERN, j);         // 模式与主体枚举不符
                 } else if chk_evariant_idx(src, t, brc, vtok) == 0 {
-                    chk_pub(src, t, oc, p, E_PATTERN, vtok);      // 无此变体
+                    chk_pub(src, t, oc, p, E_PATTERN, j);         // 无此变体
                 } else {
                     let pr: u64 = chk_epayload_range(src, t, brc, vtok);
                     if pr != 0 && bnd == 0 {
-                        chk_pub(src, t, oc, p, E_PATTERN, vtok);  // 有载荷需绑定变量
+                        chk_pub(src, t, oc, p, E_PATTERN, j);     // 有载荷需绑定变量
                     }
                     if pr == 0 && bnd != 0 {
-                        chk_pub(src, t, oc, p, E_PATTERN, vtok);  // 无载荷不能绑定
+                        chk_pub(src, t, oc, p, E_PATTERN, j);     // 无载荷不能绑定
                     }
                     let cbind: u32 = envc;
                     if pr != 0 && bnd != 0 {
@@ -4557,7 +4580,7 @@ fn chk_match(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                         if chk_tok_kind(t, k3) == 0 && chk_tok_is(src, t, k3 + 1, ":")
                                 && chk_tok_is(src, t, k3 + 2, ":")
                                 && same(src, t, k3, ptok) && same(src, t, k3 + 3, vtok) {
-                            chk_pub(src, t, oc, p, E_PATTERN, vtok);
+                            chk_pub(src, t, oc, p, E_PATTERN, j);
                         }
                         k3 = k3 + 1;
                     }
@@ -4587,7 +4610,7 @@ fn chk_match(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                     k4 = k4 + 1;
                 }
                 if hit == 0 {
-                    chk_pub(src, t, oc, p, E_PATTERN, vj);        // match 不穷尽
+                    chk_pub(src, t, oc, p, E_PATTERN, j);         // match 不穷尽
                 }
                 at_name = 0;
             }
@@ -5660,7 +5683,11 @@ fn chk_syntax_prepass(src: ptr, t: ptr, out: ptr, o: u32, tur2: u32) -> u32 {
                 && (chk_tok_is(src, t, i, "{") || chk_tok_is(src, t, i, "(")
                     || chk_tok_is(src, t, i, "[")) {
             nest = nest + 1;
-            if nest > 64 && deep_done == 0 && o == 0 {
+            // 参考实现 `deeper()` 是"先加再判 `> MAX_NEST`"，而它的计数比这里多起一格
+            // （函数体/表达式各占一层）—— 实测：63 层 `if` / 63 层括号它都拒，自举侧
+            // 从前放到 64 层才拒（`deep-nesting` 的行号差就是这么来的）。判 `>= 64`
+            // 与参考的**接受边界**和**报错行**都对齐。
+            if nest >= 64 && deep_done == 0 && o == 0 {
                 o = sym_pub(src, t, out, o, E_DEEP, i);
                 deep_done = 1;
             }

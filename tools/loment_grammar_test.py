@@ -1624,6 +1624,34 @@ def test_tur2026_3_match_expression():
         else:
             raise AssertionError("`return match …` 被收下了 —— v1 只该收 let 初值")
     print("      2026.3 match 表达式与显式 match 同产物；非初值位置与 tur2026.2 都拒")
+
+@test
+def test_str_num_builtin():
+    """`str_num(u32) -> str`：无符号十进制进堆（`docs/337`）；`no_runtime` 点名拒。"""
+    body = "".join([
+        "module m", chr(10),
+        "choose runtime", chr(10), chr(10),
+        "fn f(n: u32) -> str {", chr(10),
+        "    let s: str = str_num(n);", chr(10),
+        "    return s;", chr(10),
+        "}", chr(10)])
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        p = td / "ok.lomt"
+        p.write_text(body, encoding="utf-8", newline=chr(10))
+        mod = lomentc.load(p)
+        errs = lomentc.check(mod, deps=lomentc.resolve_deps(mod, ROOT, td, entry=p))
+        assert not errs, errs[:3]
+        ll = lomentc.emit_llvm(mod, ROOT)
+        assert "call i32 @__loment_num_to_dec" in ll, ll[-400:]
+        assert "define internal i32 @__loment_num_to_dec" in ll, "十进制转换没随 str_num 发出来"
+        p2 = td / "nort.lomt"
+        p2.write_text(body.replace("choose runtime", "choose no_runtime"),
+                      encoding="utf-8", newline=chr(10))
+        mod2 = lomentc.load(p2)
+        errs2 = lomentc.check(mod2, deps=lomentc.resolve_deps(mod2, ROOT, td, entry=p2))
+        assert any("no_runtime" in e and "str_num" in e for e in errs2), errs2[:3]
+    print("      str_num 进堆、随调用发十进制转换；no_runtime 点名拒")
 @test
 def test_the_default_edition_is_the_newest_open_one():
     """**没声明 = 最新版次**（2026-11-06 用户裁定，`docs/312`）。

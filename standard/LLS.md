@@ -1512,6 +1512,7 @@ the user's declarations is E002.
 | `str_byte(s: str, i: u32) -> u32` | the i-th byte |
 | `str_eq(a: str, b: str) -> bool` | content equality |
 | `str_concat(a: str, b: str) -> str` | concatenation; allocates from the runtime arena |
+| `str_num(n: u32) -> str` | unsigned decimal representation; allocates from the runtime arena, so `no_runtime` refuses it by name |
 | `str_ptr(s: str) -> ptr` | data pointer |
 | `print(s: str) -> u32` | write the bytes to stdout |
 | `tur_edition() -> str` | the resolved canonical edition |
@@ -3223,7 +3224,8 @@ the full statement.
 
 | Built-in | Tur 1 | Tur 2026.2+ | Needs runtime | Target notes |
 |---|---|---|---|---|
-| `str_*`, `print`, `ptr_*`, `slice_len` | yes | yes | no | |
+| `str_len`, `str_eq`, `str_byte`, `str_ptr`, `print`, `ptr_*`, `slice_len` | yes | yes | no | |
+| `str_concat`, `str_num` | yes | yes | yes | allocate from the arena; E031 under `no_runtime` |
 | `alloc`, `free`, `load8`, `store8` | yes | yes | no (the allocator is in the artifact) | |
 | `atomic_add` | yes | yes | no | |
 | `inb`, `outb` | yes | yes | no | translation backend only |

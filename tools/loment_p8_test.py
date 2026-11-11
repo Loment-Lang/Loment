@@ -3924,6 +3924,37 @@ def test_m102_match_expression_twin():
     print("      match-expression: 两实现逐字节一致；tur2026.2 两边都拒")
 
 
+
+@test
+def test_m103_str_num_twin():
+    """`str_num(u32) -> str`：两实现逐字节同（`docs/337`）。
+
+    十进制转换是运行期里的一段（`__loment_num_to_dec`），只在真调用时随产后发；
+    两边的调用点、堆计数与 helper 文本必须完全一致。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    src = "".join([
+        "module m", chr(10),
+        "choose runtime", chr(10), chr(10),
+        "fn f(n: u32) -> str {", chr(10),
+        "    let s: str = str_num(n);", chr(10),
+        "    return s;", chr(10),
+        "}", chr(10), chr(10),
+        "fn g(n: u32) -> u32 {", chr(10),
+        "    let s: str = str_num(n);", chr(10),
+        "    return str_len(s);", chr(10),
+        "}", chr(10)])
+    with tempfile.TemporaryDirectory() as td:
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_strnum")
+        p = Path(td) / "new.lomt"
+        p.write_text(src, encoding="utf-8", newline=chr(10))
+        rc, out, err = _run_driver_raw(elf, _wsl_path(p), td, "new")
+        assert rc == 0, f"自举驱动编不过 str_num: {err[-400:]}"
+        assert out == _unit_ll(p), "str_num: 自举产物与参考不一致"
+    print("      str_num: 两实现逐字节一致")
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_p8_test")
 

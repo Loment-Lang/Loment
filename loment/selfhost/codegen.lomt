@@ -2071,7 +2071,7 @@ pub fn l2_ok_at(src: ptr, toks: ptr, at: u32, end: u32, fat: u32, fend: u32,
     let nalloc: u32 = 0;
     let k: u32 = at;
     while k < end {
-        if tok_is(src, toks, k, "str_concat") {
+        if tok_is(src, toks, k, "str_concat") || tok_is(src, toks, k, "str_num") {
             return 0;
         }
         if tok_is(src, toks, k, "free") {
@@ -3983,6 +3983,52 @@ fn emit_alloc_seq(s: ptr, out: ptr, src: ptr, toks: ptr,
     return p;
 }
 
+/// `emit_alloc_seq` 的字面量尺寸版（`docs/337` 的 `str_num`：堆块固定 12 字节）。
+/// 文本与参考实现 `alloc_ir("12", …)` 同序 —— 只是尺寸位置直接印常量。
+fn emit_alloc_lit(s: ptr, out: ptr, src: ptr, toks: ptr,
+                  k: u32, lvl: u32, j: u32) -> u32 {
+    if load32(s, 556) == 1 {
+        emit_str(s, out, "  call void @__loment_rt_acquire()
+");
+    }
+    if load32(s, CG_LGC) == 1 {
+        emit_str(s, out, "  call void @__loment_maybe_collect_ctl(i32 ");
+        emit_dec(s, out, k);
+        emit_str(s, out, ")
+");
+    } else if gc_any(s) == 1 {
+        emit_str(s, out, "  call void @__loment_maybe_collect(i32 ");
+        emit_dec(s, out, k);
+        emit_str(s, out, ")
+");
+    }
+    emit_str(s, out, "  ");
+    let p: u32 = new_temp(s, out);
+    emit_str(s, out, " = call ptr @__loment_alloc(i32 ");
+    emit_dec(s, out, k);
+    emit_str(s, out, ")
+");
+    if gc_hook(s) == 1 {
+        let site: u32 = alloc_sites(src, toks, load32(s, 564), j);
+        emit_str(s, out, "  store ptr ");
+        emit_temp_ref(s, out, p);
+        emit_str(s, out, ", ptr %gc.sp.");
+        emit_dec(s, out, site);
+        emit_str(s, out, "
+");
+        let want: u32 = site + 1;
+        if want > load32(s, CG_GCDIRTY) {
+            store32(s, CG_GCDIRTY, want);
+        }
+    }
+    if load32(s, 556) == 1 {
+        emit_str(s, out, "  call void @__loment_rt_release()
+");
+    }
+    set_temp_val(s, lvl, p);
+    return p;
+}
+
 fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32) -> u32 {
     if tok_is(src, toks, j, "generation") && tok_kind(toks, j + 1) == 0
             && tok_is(src, toks, j + 2, "(") {   // docs/320 S1：读对象代
@@ -4677,6 +4723,41 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
                 return c2 + 3;
             }
             return c2 + 1;
+        }
+        if tok_is(src, toks, j, "str_num") {   // docs/337: u32 -> 十进制 str
+            let c15: u32 = arg1(s, out, src, toks, j + 2, lvl);
+            let cp: u32 = emit_alloc_lit(s, out, src, toks, 12, lvl + 1, j);
+            emit_str(s, out, "  ");
+            let ln: u32 = new_temp(s, out);
+            emit_str(s, out, " = call i32 @__loment_num_to_dec(ptr %t");
+            emit_dec(s, out, cp);
+            emit_str(s, out, ", i32 ");
+            emit_val(s, out, lvl);
+            emit_str(s, out, ")
+  ");
+            let l64: u32 = new_temp(s, out);
+            emit_str(s, out, " = sext i32 %t");
+            emit_dec(s, out, ln);
+            emit_str(s, out, " to i64
+  ");
+            let v1: u32 = new_temp(s, out);
+            emit_str(s, out, " = insertvalue { ptr, i64 } undef, ptr %t");
+            emit_dec(s, out, cp);
+            emit_str(s, out, ", 0
+  ");
+            let v2: u32 = new_temp(s, out);
+            emit_str(s, out, " = insertvalue { ptr, i64 } %t");
+            emit_dec(s, out, v1);
+            emit_str(s, out, ", i64 %t");
+            emit_dec(s, out, l64);
+            emit_str(s, out, ", 1
+");
+            set_temp_val(s, lvl, v2);
+            if tok_is(src, toks, c15 + 1, "as") {
+                apply_cast(s, out, src, toks, 0, c15 + 2, lvl);
+                return c15 + 3;
+            }
+            return c15 + 1;
         }
         if tok_is(src, toks, j, "str_eq") {   // 先比长度再 memcmp (bool + phi)
             let k15: u32 = arg1(s, out, src, toks, j + 2, lvl);
@@ -12254,6 +12335,25 @@ fn emit_print_num(s: ptr, out: ptr) -> u32 {
     return emit_str(s, out, "define internal i32 @__loment_print_num(i64 %v) {\nentry:\n  %buf = alloca [24 x i8]\n  %neg = icmp slt i64 %v, 0\n  br i1 %neg, label %negp, label %pos\nnegp:\n  %m0 = sub i64 0, %v\n  br label %conv\npos:\n  br label %conv\nconv:\n  %m = phi i64 [ %m0, %negp ], [ %v, %pos ]\n  %end0 = getelementptr inbounds [24 x i8], ptr %buf, i64 0, i64 24\n  br label %loop\nloop:\n  %p = phi ptr [ %end0, %conv ], [ %p2, %loop ]\n  %x = phi i64 [ %m, %conv ], [ %q, %loop ]\n  %d = urem i64 %x, 10\n  %q = udiv i64 %x, 10\n  %c = trunc i64 %d to i8\n  %c2 = add i8 %c, 48\n  %pi = ptrtoint ptr %p to i64\n  %pj = sub i64 %pi, 1\n  %p2 = inttoptr i64 %pj to ptr\n  store i8 %c2, ptr %p2\n  %done = icmp eq i64 %q, 0\n  br i1 %done, label %after, label %loop\nafter:\n  br i1 %neg, label %sign, label %wr\nsign:\n  %si = ptrtoint ptr %p2 to i64\n  %sj = sub i64 %si, 1\n  %p3 = inttoptr i64 %sj to ptr\n  store i8 45, ptr %p3\n  br label %wr\nwr:\n  %st = phi ptr [ %p2, %after ], [ %p3, %sign ]\n  %sp = ptrtoint ptr %st to i64\n  %ep = ptrtoint ptr %end0 to i64\n  %ln = sub i64 %ep, %sp\n  %r = call i64 asm sideeffect \"syscall\", \"={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}\"(i64 1, i64 1, i64 %sp, i64 %ln)\n  %t = trunc i64 %r to i32\n  ret i32 %t\n}\n\n");
 }
 
+/// 这份单元**调用**了 `str_num` 吗（`docs/337`）：只有真调用才发那段十进制转换。
+fn uses_str_num(s: ptr, src: ptr, toks: ptr) -> u32 {
+    let i: u32 = 0;
+    while tok_kind(toks, i) != 4 {
+        if tok_is(src, toks, i, "str_num") && tok_is(src, toks, i + 1, "(") {
+            if !(i > 0 && tok_is(src, toks, i - 1, "fn")) {
+                return 1;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// `str_num` 的实现：无符号十进制写进调用方给的 12 字节堆块（`docs/337`）。
+fn emit_num_to_dec(s: ptr, out: ptr) -> u32 {
+    return emit_str(s, out, "define internal i32 @__loment_num_to_dec(ptr %out, i32 %v) {\nentry:\n  %buf = alloca [24 x i8]\n  %end0 = getelementptr inbounds [24 x i8], ptr %buf, i64 0, i64 24\n  %x0 = zext i32 %v to i64\n  br label %loop\nloop:\n  %p = phi ptr [ %end0, %entry ], [ %p2, %loop ]\n  %x = phi i64 [ %x0, %entry ], [ %q, %loop ]\n  %d = urem i64 %x, 10\n  %q = udiv i64 %x, 10\n  %c = trunc i64 %d to i8\n  %c2 = add i8 %c, 48\n  %pi = ptrtoint ptr %p to i64\n  %pj = sub i64 %pi, 1\n  %p2 = inttoptr i64 %pj to ptr\n  store i8 %c2, ptr %p2\n  %done = icmp eq i64 %q, 0\n  br i1 %done, label %after, label %loop\nafter:\n  %sp = ptrtoint ptr %p2 to i64\n  %ep = ptrtoint ptr %end0 to i64\n  %ln = sub i64 %ep, %sp\n  %ln32 = trunc i64 %ln to i32\n  call void @__loment_memcpy(ptr %out, ptr %p2, i64 %ln)\n  ret i32 %ln32\n}\n\n");
+}
+
 /// 预扫描: 源码里出现过 `/` `%` 运算符 (kind=3 且文本为单字符), 或 `alloc` / `panic`
 /// (它们引用 `@__loment_*`) 时需运行时文本块。
 /// 输出是顺序写的, 而运行时块要落在横幅之后、函数之前, 所以必须先判定再写横幅。
@@ -12293,6 +12393,7 @@ fn runtime_needed(s: ptr, src: ptr, toks: ptr) -> u32 {
         let hit: u32 = 0;
         if tok_kind(toks, i) == 0 && (tok_is(src, toks, i, "alloc") || tok_is(src, toks, i, "panic")
                 || tok_is(src, toks, i, "str_eq") || tok_is(src, toks, i, "str_concat")
+                || tok_is(src, toks, i, "str_num")
                 || tok_is(src, toks, i, "free")
                 || tok_is(src, toks, i, "guard")
                 || tok_is(src, toks, i, "tick")) {
@@ -12355,6 +12456,7 @@ fn heap_needed(s: ptr, src: ptr, toks: ptr, rt_on: u32) -> u32 {
         // 它们与分配器同一段文本，所以起线程就发堆（见参考实现 `_heap_needed`）。
         if tok_kind(toks, i) == 0 && (tok_is(src, toks, i, "alloc")
                 || tok_is(src, toks, i, "str_concat")     // str_concat 也拼到堆上
+                || tok_is(src, toks, i, "str_num")        // 十进制也拼到堆上
                 || tok_is(src, toks, i, "free")           // 回收也要读那份状态
                 || tok_is(src, toks, i, "thread_spawn")) {
             hit = 1;
@@ -13042,6 +13144,9 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32, tickx: u32)
         // 不能进目标无关的运行期块（aarch64 交叉编译会当非法汇编拒掉）。
         if uses_print_num(s, src, toks) == 1 {
             emit_print_num(s, out);
+        }
+        if uses_str_num(s, src, toks) == 1 {
+            emit_num_to_dec(s, out);
         }
     }
     if guard_rt_needed(s, src, toks) == 1 {   // docs/306-308: 十种域的判决点

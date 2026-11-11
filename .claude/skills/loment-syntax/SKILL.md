@@ -271,6 +271,7 @@ each bring in one module, see 3.1 at the end of this section.
 | `str_byte(s: str, i: u32) -> u32` | The i-th byte |
 | `str_eq(a: str, b: str) -> bool` | Content comparison |
 | `str_concat(a: str, b: str) -> str` | Concatenation - **allocates from the same 64 KiB arena at run time**, so do not build big strings (or loop over it) |
+| `str_num(n: u32) -> str` | Unsigned decimal text (`4294967295` max) - **allocates from the same arena**, and it lives in the runtime block, so `no_runtime` refuses it by name (E31). `docs/337` |
 | `str_ptr(s: str) -> ptr` | The data pointer (for feeding syscalls) |
 | `print(s: str) -> u32` | Write the string's bytes to stdout (one `write` syscall) |
 | `tur_edition() -> str` | The Tur edition this program is compiled as, e.g. `tur2026.2` (docs/296). The compiler also prints it on stderr at every check/build/run |

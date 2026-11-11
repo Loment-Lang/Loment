@@ -43,6 +43,7 @@ BUILTINS = {
     "str_len": (("str",), "u32"),
     "str_eq": (("str", "str"), "bool"),
     "str_concat": (("str", "str"), "str"),   # M2
+    "str_num": (("u32",), "str"),            # 2026.3: 无符号十进制 -> str（插值的底）
     "str_byte": (("str", "u32"), "u32"),
     "panic": (("u32",), "u32"),  # M19: 不可返回 (类型仅占位)
     "alloc": (("u32",), "ptr"),  # M15
@@ -577,6 +578,37 @@ wr:
   %r = call i64 asm sideeffect "syscall", "={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}"(i64 1, i64 1, i64 %sp, i64 %ln)
   %t = trunc i64 %r to i32
   ret i32 %t
+}
+'''
+
+#: `str_num` 的十进制转换（`docs/337`）。与 `print_num` 同一段循环，但写进调用方给的
+#: 缓冲区、返回长度 —— 因此不带 `syscall`，只在真调用 `str_num` 时发。
+_IR_NUM_TO_DEC = '''define internal i32 @__loment_num_to_dec(ptr %out, i32 %v) {
+entry:
+  %buf = alloca [24 x i8]
+  %end0 = getelementptr inbounds [24 x i8], ptr %buf, i64 0, i64 24
+  %x0 = zext i32 %v to i64
+  br label %loop
+loop:
+  %p = phi ptr [ %end0, %entry ], [ %p2, %loop ]
+  %x = phi i64 [ %x0, %entry ], [ %q, %loop ]
+  %d = urem i64 %x, 10
+  %q = udiv i64 %x, 10
+  %c = trunc i64 %d to i8
+  %c2 = add i8 %c, 48
+  %pi = ptrtoint ptr %p to i64
+  %pj = sub i64 %pi, 1
+  %p2 = inttoptr i64 %pj to ptr
+  store i8 %c2, ptr %p2
+  %done = icmp eq i64 %q, 0
+  br i1 %done, label %after, label %loop
+after:
+  %sp = ptrtoint ptr %p2 to i64
+  %ep = ptrtoint ptr %end0 to i64
+  %ln = sub i64 %ep, %sp
+  %ln32 = trunc i64 %ln to i32
+  call void @__loment_memcpy(ptr %out, ptr %p2, i64 %ln)
+  ret i32 %ln32
 }
 '''
 
@@ -7113,6 +7145,7 @@ _RUNTIME_SITES: dict[str, str] = {
     "alloc": "`alloc`",
     "free": "`free`",
     "str_concat": "`str_concat`",
+    "str_num": "`str_num`",
     "str_eq": "`str_eq`",
     "panic": "`panic`",
     # `docs/296` §2.7：`print_num` 的十进制转换在运行期那一块里（24 字节栈缓冲、一次
@@ -7313,6 +7346,7 @@ _PKG_FEATURES: dict[str, str] = {
     "alloc": "alloc",
     "free": "free",
     "str_concat": "str_concat",
+    "str_num": "str_num",
     "str_eq": "str_eq",
     "panic": "panic",
     "print_num": "print_num",
@@ -9314,6 +9348,8 @@ def _expr_rs(e) -> str:
             return f"({a[0]}.len() as u32)"
         if e.name == "str_eq":
             return f"({a[0]} == {a[1]})"
+        if e.name == "str_num":  # docs/337: 无符号十进制 -> str
+            return f"(Box::leak(format!(\"{{}}\", {a[0]}).into_boxed_str()) as &'static str)"
         if e.name == "str_concat":  # M2: v0 的 str 是 &'static str -> 只能漏内存
             return (f"(Box::leak(format!(\"{{}}{{}}\", {a[0]}, {a[1]}).into_boxed_str()) "
                     f"as &'static str)")
@@ -12011,7 +12047,7 @@ def _l2_ok(toks: list, at: int, end: int, fend: int, l0: dict[str, int],
 
     nalloc = 0
     for k in range(at, end):
-        if word(k, "str_concat"):
+        if word(k, "str_concat") or word(k, "str_num"):
             return False
         if word(k, "free"):
             # 体内不许 `free`：**前沿在体内只增不减**，末尾那一条无条件写回才对。
@@ -12197,7 +12233,7 @@ def _alloc_site_map(body: list) -> dict[int, int]:
     m: dict[int, int] = {}
 
     def reap(v) -> None:
-        if isinstance(v, Call) and v.name in ("alloc", "str_concat"):
+        if isinstance(v, Call) and v.name in ("alloc", "str_concat", "str_num"):
             m[id(v)] = len(m)
         if _dc.is_dataclass(v) and not isinstance(v, type):
             for fd in _dc.fields(v):
@@ -13547,6 +13583,19 @@ class _Ir:
             v2 = self.t()
             self.w(f"{v2} = insertvalue {{ ptr, i64 }} {v1}, i64 {n}, 1")
             return "str", v2
+        # 2026.3: str_num —— 无符号十进制写进一块 12 字节的堆块，返回 str（`docs/337`）
+        if e.name == "str_num":
+            _, av = self.expr(e.args[0], "u32")
+            p = self.alloc_ir("12", e)
+            ln = self.t()
+            self.w(f"{ln} = call i32 @__loment_num_to_dec(ptr {p}, i32 {av})")
+            ln64 = self.t()
+            self.w(f"{ln64} = sext i32 {ln} to i64")
+            v1 = self.t()
+            self.w(f"{v1} = insertvalue {{ ptr, i64 }} undef, ptr {p}, 0")
+            v2 = self.t()
+            self.w(f"{v2} = insertvalue {{ ptr, i64 }} {v1}, i64 {ln64}, 1")
+            return "str", v2
         # str_byte
         _, sv = self.expr(e.args[0], "str")
         p = self.t()
@@ -14402,8 +14451,8 @@ def _heap_needed(mods: list, rt_on: bool = True) -> bool:
             # `thread_spawn`（`#778`）：线程要带上运行期锁与 `@__loment_rt_threads` ——
             # 它们和分配器同一段文本，所以起线程就发堆（即便这个程序自己一次 `alloc`
             # 都不写）。与自举侧 `heap_needed` 同一个集合。
-            if tk.kind != "ident" or tk.val not in ("alloc", "str_concat", "free",
-                                                    "thread_spawn"):
+            if tk.kind != "ident" or tk.val not in ("alloc", "str_concat", "str_num",
+                                                    "free", "thread_spawn"):
                 continue
             if tk.val == "alloc" and _alloc_promoted(toks, i, funcs):
                 continue
@@ -14681,6 +14730,8 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # 但只在真的调用了它时才出现 —— 它带一句 x86 的 `syscall` asm。
     if "@__loment_print_num" in text_all:
         out.append(_IR_PRINT_NUM)
+    if "@__loment_num_to_dec" in text_all:
+        out.append(_IR_NUM_TO_DEC)
     # 能力域运行时：`guard` 发 `@__loment_guard2`，`tick;` 发 `@__loment_tick`。
     # **两者都不用时一个字节不发** —— 旧程序的产物逐字节不变。
     _guard_rt = ("@__loment_guard2" in text_all or "@__loment_tick" in text_all

@@ -377,9 +377,47 @@ PYTHONUTF8=1 python "$HERE/patch_preinit.py" \
 
 ## 11. 前史与我不主张
 
-**前史**（先点名，再说）：CRIU / DMTCP（进程检查点恢复）；Firecracker snapshot/restore；
-V8 startup snapshot；GraalVM Native Image；Android/Chrome zygote；Unikraft 预初始化；
-JVM CDS/AppCDS；Erlang hot code loading；PGO/BOLT 的热体特化。
+**先给结论**：`endpoint execution` / `last-point execution` **不是**既有术语
+（检索不到标准用法）；但“末点运行”拆成七条线，每条都有几十年先例。
+
+| 线 | 先例 | 时间 | 它做了什么 | 对应本文的 |
+|---|---|---|---|---|
+| **保存活状态并恢复** | Smalltalk-80 image | 1980 / 1983 | 整个对象内存（含栈/进程）写回 image，启动时从断点继续 | I-point |
+| | Emacs `temacs` / `unexec` / `dump` | 1980s | 构建时跑 Lisp 初始化，把进程内存 dump 回可执行文件 | A（构建期预初始化） |
+| | Condor checkpoint | 1988 | 用户级检查点 + 迁移；`setjmp`/`longjmp` + core | I-point |
+| | DMTCP / CRIU / BLCR | ~2009–2013 | 用户态/内核态检查点恢复；容器 live migration | I-point（B） |
+| | 正交持久化：PS-algol / Napier88 | 1981 / 1983 | 持久堆跨进程存活；持久性与类型无关 | I-point / D |
+| **构建期预初始化** | Emacs dump | 1980s | 初始化一次，冻结进产物 | A |
+| | V8 startup snapshot | 2015 | JS 内建/上下文快照进二进制 | A |
+| | GraalVM Native Image | 2018 / 2019 | AOT + 堆快照；“Initialize Once, Start Fast” | A |
+| | JVM CDS / AppCDS | 2004 / 2018 | 类元数据共享归档；启动少做类加载 | A（部分） |
+| | Unikraft 预初始化快照 | 2019+ | 重 init 一次，恢复 <10 ms | A |
+| **复用热进程** | Apache prefork / Chrome zygote / Android zygote | 1990s / 2008 | 父进程预加载，`fork` 出子进程（COW） | C |
+| | AWS Lambda SnapStart | 2022 | Firecracker microVM 快照，恢复即热 | C / B |
+| **稳态执行 / 跳过序言** | 软件流水（Lam 1988；Rau 1994 modulo scheduling） | 1988 / 1994 | prologue → kernel（稳态）→ epilogue；直接进稳态 | S-point / S3 |
+| | 同步数据流稳态调度（Lee & Messerschmitt 1987） | 1987 | 静态周期调度；initial vs steady-state epoch | S-point |
+| **算循环闭包 / 极限** | 循环加速（Finkel & Leroux 2002；Bozga et al. 2016） | 2002 / 2016 | 仿射/Presburger 循环的传递闭包 | “折叠 T^n” |
+| | 抽象解释不动点（Cousot & Cousot 1977） | 1977 | 抽象域上的最小不动点 | 商投影 |
+| | 自稳定（Dijkstra 1974） | 1974 | 从任意状态回到合法状态 | 收敛 |
+| **复用/更新先前计算** | 自适应计算（Acar / Blelloch / Harper） | 2002–2013 | 依赖图 + 记忆化，只重算变化部分 | “运行时更新终点” |
+| **推测 + 守卫 + 回退** | JIT 去优化（V8 / Truffle） | 2008+ | 猜一个不变式，失败回退 | 证书 + 回退 |
+| | 翻译验证（Pnueli 1998）/ PCC（Necula & Lee 1996） | 1996 / 1998 | 证据随产物走，宿主验 | 证书是证据 |
+| | 超优化（Massalin 1987；STOKE 2013） | 1987 / 2013 | 搜索更短指令序列 | 稳态体特化 |
+
+**最接近的“完整先例”**（各覆盖一段，没有单一系统覆盖全部）：
+
+- **Smalltalk image**：最接近“在活状态上继续跑”，但它快照整个 image，
+  没有“稳态/循环”概念，也没有语言级证书。
+- **Emacs dump / GraalVM Native Image / Unikraft 预初始化**：最接近“构建期预初始化、
+  无程序级冷启动”，但它们预初始化的是整个运行时，不是本文的“小、固定布局、可审计”状态。
+- **软件流水 / SDF 稳态调度**：最接近“稳态执行”，但它是编译期调度变换，
+  不是运行期状态快照。
+- **循环加速**：最接近“算 T^n”，但只对受限仿射/Presburger 循环可判定；
+  一般堆/数组不可判定。
+- **Lambda SnapStart / CRIU**：最接近生产级“无冷启动”，但整进程/microVM，不是语言级。
+- **Sista（2017）**：把优化后的代码存进快照以跳过 JIT 预热；与 S-point 的
+  “稳态特化”最接近。
+
 **没有一块砖是新的。** 本文的贡献是**包装方式**：把“初始化后的精确状态”做成
 Loment 产物里一份**小、固定布局、可审计、可整体回退**的镜像，
 并用 64 KiB 有界堆 + 非 PIE + 栈机把它压到可实现。

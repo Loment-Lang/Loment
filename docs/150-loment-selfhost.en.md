@@ -1,5 +1,5 @@
 <!-- translated-from: docs/150-loment-selfhost.md -->
-<!-- source-sha256: a6f9a3d47a7ad73cfb2bb2041fc41550ce09a17addba2ecd230259aaeffbed8e -->
+<!-- source-sha256: 62abb881192cc1315b359bcd83c1c93a54ec99e0c6ae19dc6a22f3f71242a893 -->
 
 # 150 · Loment self-hosting (P8, M79–M88)
 

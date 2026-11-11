@@ -4457,12 +4457,45 @@ FINE: tuple[Fine, ...] = (
          "If it is not a halving, use two independent windows.",
          "Write both `[lo, hi)` ranges out first, then fill them in."),
     ),
+    # 2026-11-11：这一条原先停在族码 E031 上，而且**两条判据都扫不到它** ——
+    # `loment_err_test` 取模板时只认单条 f-string/字面量，而这一句是
+    # `f"…" f"…" + (f"…" if _rest else "") + "…"` 那种拼接（BinOp + IfExp）。
+    # 补这一条的同时也把那边取模板的那段教会拼接。
+    Fine(
+        208, 31, r"^声明了 `no_runtime`，但它会让产物带上运行期",
+        "声明了 `no_runtime`，但用了会拖运行期的构造",
+        "`no_runtime` declared, but the unit uses a runtime construct",
+        "这份程序声明了 `no_runtime`（产物里不许有运行期），却用了除法、`alloc` 这类"
+        "要靠运行期才成立的构造。",
+        "The unit declares `no_runtime` (no runtime in the artifact) but uses division, "
+        "`alloc` and friends, which only work with the runtime.",
+        ("要运行期就在根单元写一行 `choose runtime`。",
+         "不要运行期就把这个构造换掉（除法改移位、`alloc` 改静态缓冲）。",
+         "只有库用到它时：让库自己声明需求，而不是在根单元放开整段运行期。"),
+        ("Write `choose runtime` in the root unit.",
+         "Or replace the construct (shift instead of divide, a static buffer instead of `alloc`).",
+         "If only a library needs it, let the library declare the requirement."),
+    ),
 )
 
 
 def _code_str(n: int) -> str:
     """码的显示形状：< 100 是 `E0xx`，>= 100 是 `E0xxx`（用户 2026-11-10 定）。"""
     return f"E{n:03d}" if n < 100 else f"E{n:04d}"
+
+
+_FAMILY: dict[int, int] = {f.code: f.family for f in FINE}
+
+
+def family(code: str) -> str:
+    """细分码 -> 它所属的族码（`E0186` -> `E030`）；不是细分码就原样返回。
+
+    2026-11-10 之前码只有族码，判据与渲染器都按族办事。细分之后**判据想钉的往往还是
+    族这一层**（"未知类型不是符号未声明"），所以这里给一个不加第二张表的入口 ——
+    表就是 `FINE` 自己的 `family` 字段（与 `surface_data.code_family` 同一个真源）。
+    """
+    n = int(code[1:])
+    return _code_str(_FAMILY.get(n, n))
 
 
 def _install_fine() -> None:

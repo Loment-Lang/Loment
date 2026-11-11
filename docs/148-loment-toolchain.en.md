@@ -1,5 +1,5 @@
 <!-- translated-from: docs/148-loment-toolchain.md -->
-<!-- source-sha256: d6e09ea71b75b26fd29b2916b84a366b61bad65ece69dc205c1b3c636ee8495f -->
+<!-- source-sha256: 60a9bd5a78572511c68cc73870944203df82671e007b0e21b757d569e407f830 -->
 
 # 148 · The Loment toolchain (P6, M55–M66)
 

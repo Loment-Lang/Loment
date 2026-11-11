@@ -1345,7 +1345,7 @@ def test_diag_titles_match_reference():
     """`diag_title` 必须**转发**到 `surface_data.code_title`，不许再有第二份标题表。
 
     原先这里钉的是"手抄表与 `loment_diag.RULES` 逐字同文"。2026-11-10 细分码表
-    （`docs/336`）之后，自举 checker 发的是 42..207 这一层细码，手抄到 38 的表整片
+    （`docs/336`）之后，自举 checker 发的是 42..208 这一层细码，手抄到 38 的表整片
     落到表外，用户看到的每一条都是「未分类」。于是标题改成从生成的 `surface_data`
     取（与 `lomcli` / `lomenterr` 同一份），这条判据改成钉**结构**：
 

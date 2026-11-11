@@ -1635,6 +1635,27 @@ def test_the_docs_show_the_version_the_binary_prints():
     print(f"      README 与 QUICKSTART 都跟着真源 ({want!r})")
 
 
+def _msg_template(node):
+    """把一处 `errs.append(...)` 的实参摊成一条模板；摊不出来就 None。
+
+    2026-11-11 之前只认**单条** f-string / 字面量 —— 于是 `f"…" f"…" + (f"…" if c else "")
+    + "…"` 这种拼接整条被跳过（`no_runtime` 那条诊断就是这样逃过了两条判据，
+    它一直停在族码 E031 上）。现在按 `+` 拆到底、条件表达式取 `body` 那一支。
+    """
+    import ast  # noqa: PLC0415
+
+    if isinstance(node, ast.JoinedStr):
+        return "".join(v.value if isinstance(v, ast.Constant) else "1" for v in node.values)
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        a, b = _msg_template(node.left), _msg_template(node.right)
+        return None if a is None or b is None else a + b
+    if isinstance(node, ast.IfExp):
+        return _msg_template(node.body)
+    return None
+
+
 @test
 def test_every_message_the_compiler_can_print_has_a_code():
     """**编译器能说的每一句，报错器都得认得出是哪一类** —— 这是「减少静默」的机械落点。
@@ -1658,12 +1679,7 @@ def test_every_message_the_compiler_can_print_has_a_code():
     import loment_diag  # noqa: E402
     src = (ROOT / "tools" / "lomentc.py").read_text(encoding="utf-8")
 
-    def template(node):
-        if isinstance(node, ast.JoinedStr):
-            return "".join(v.value if isinstance(v, ast.Constant) else "1" for v in node.values)
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            return node.value
-        return None
+    template = _msg_template
 
     def is_error_sink(call) -> bool:
         f = call.func
@@ -1705,12 +1721,7 @@ def test_every_template_has_its_own_code():
     import loment_diag  # noqa: E402
     src = (ROOT / "tools" / "lomentc.py").read_text(encoding="utf-8")
 
-    def template(node):
-        if isinstance(node, ast.JoinedStr):
-            return "".join(v.value if isinstance(v, ast.Constant) else "1" for v in node.values)
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            return node.value
-        return None
+    template = _msg_template
 
     def is_error_sink(call) -> bool:
         f = call.func

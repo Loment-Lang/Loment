@@ -463,7 +463,7 @@ def test_an_unknown_type_is_not_reported_as_an_undeclared_name():
     """
     for name, src, role in _UNTYPED_SITES:
         e = errs(src)
-        codes = {loment_diag.classify(x)[0] for x in e}
+        codes = {loment_diag.family(loment_diag.classify(x)[0]) for x in e}
         assert codes == {"E030"}, (name, e)
         assert any("未知类型" in x and role in x for x in e), (name, e)
 
@@ -1804,10 +1804,10 @@ def test_e028_literal_index_over_a_fixed_array():
     off = "module m\n" + body
     # **码从分类器拿，不在消息正文里找**（`#486`）：正文不再自带 `E028:` 前缀 ——
     # 渲染器的头一行已经印了码，正文再写一次就是同一件事印两遍。
-    assert any(loment_diag.classify(x)[0] == "E028" for x in errs(off)), errs(off)
+    assert any(loment_diag.family(loment_diag.classify(x)[0]) == "E028" for x in errs(off)), errs(off)
     # `lms` 开着也一样拒，而且**只报一条** —— 两条路都在的时候不许数出两条诊断
     on = "module m\nchoose lms_full\n" + body
-    assert len([x for x in errs(on) if loment_diag.classify(x)[0] == "E028"]) == 1, errs(on)
+    assert len([x for x in errs(on) if loment_diag.family(loment_diag.classify(x)[0]) == "E028"]) == 1, errs(on)
     # **边界**：正好在界内的那个下标**不报** —— 否则这条会把"越界"读成"下标 >= 0 就报"
     edge = "module m\n" + body.replace("a[10]", "a[3]")
     assert errs(edge) == [], errs(edge)
@@ -1819,12 +1819,12 @@ def test_e028_literal_index_over_a_fixed_array():
     assert errs(var) == [], errs(var)
     # **写一侧也是同一个界**：`a[10] = 7;` 同判
     w = "module m\nfn k() -> u32 { let a: [u32; 4] = [1, 2, 3, 4]; a[10] = 7; return a[0]; }\n"
-    assert any(loment_diag.classify(x)[0] == "E028" for x in errs(w)), errs(w)
+    assert any(loment_diag.family(loment_diag.classify(x)[0]) == "E028" for x in errs(w)), errs(w)
 
 
 @test
 def test_e030_the_runtime_refusal_names_its_own_subsystem():
-    """默认档下用了会拖运行期的构造 ⇒ **自有码 E031**，四段正文齐，正文是那句话不是那个 token。
+    """默认档下用了会拖运行期的构造 ⇒ **自有码 E0208**（族 E031），四段正文齐，正文是那句话不是那个 token。
 
     **Why（issue #321）**：这条诊断原先**并进 E022**「`choose` / `addin` 用法不对」，
     理由是"码按修法分，修法同族（去写一行 `choose runtime`）"。那条理由**数错了读者**：
@@ -1833,24 +1833,25 @@ def test_e030_the_runtime_refusal_names_its_own_subsystem():
     `choose` 翻来覆去都是对的，还得读完 `why:` 里三条无关的才轮到适用的那一条。
     **码是用户最先读到的那个词，指错子系统就是误导，不是简短。**
 
-    **How to apply**：四件事一起钉 —— ① 码是 E031（不是 E022）；② 正文**是那句话**
+    **How to apply**：四件事一起钉 —— ① 码是 E0208（不是 E022）；② 正文**是那句话**
     （「除法 `/`」），不是那一格 token 原文；③ 说明卡四段齐、`fixes` 至少三条；④ 库那一侧
-    （"依赖用了却没声明"）走**同一个码**，因为对用户是同一件事。
+    （"依赖用了却没声明"）是**同一族（E031）的另一个细分码 E0188** —— 修法在库那一侧
+    （`choose runtime` 写在依赖里），位置不同就是不同的码。
     """
     import loment_diag
     src = "module m\n\nfn f() -> u32 {\n    panic(1);\n    return 0;\n}\n"
     got = errs(src)
     assert got, "默认档下 `panic` 应当被拒"
     codes = {loment_diag.classify(m)[0] for m in got}
-    assert codes == {"E031"}, f"码不是 E031：{codes} —— {got}"
+    assert codes == {"E0208"}, f"码不是 E0208：{codes} —— {got}"
     # ② 正文是那句话：里面有"`panic`"，而不是只有那一格 token
     assert "`panic`" in got[0], got
     # ③ 说明卡四段齐（两张表都写），fixes 至少三条
-    for tbl in (loment_diag.CARDS[30], loment_diag.CARDS_EN[30]):
+    for tbl in (loment_diag.CARDS[208], loment_diag.CARDS_EN[208]):
         assert tbl.what and tbl.why and tbl.yes and tbl.no, tbl
         assert len(tbl.fixes) >= 3, tbl
-    assert loment_diag.ASCII_ONE_LINER[30], "`loment codes` 那一行要有"
-    assert loment_diag.TITLE_EN[30], "英文标题要有"
+    assert loment_diag.ASCII_ONE_LINER[208], "`loment codes` 那一行要有"
+    assert loment_diag.TITLE_EN[208], "英文标题要有"
     # ④ 六个构造走同一个码（名单是 `_RUNTIME_SITES`），这里抽三个代表：两个内建 + 取模
     for one, want in (("fn f() -> u32 {\n    let p: ptr = alloc(8);\n    return 0;\n}\n",
                        "`alloc`"),
@@ -1858,7 +1859,7 @@ def test_e030_the_runtime_refusal_names_its_own_subsystem():
                       ("fn f(a: str, b: str) -> bool {\n    return str_eq(a, b);\n}\n",
                        "`str_eq`")):
         e = errs("module m\n\nchoose no_runtime\n\n" + one)
-        assert e and {loment_diag.classify(m)[0] for m in e} == {"E031"}, (want, e)
+        assert e and {loment_diag.classify(m)[0] for m in e} == {"E0208"}, (want, e)
         assert want in e[0], (want, e)
     # 库那一半：依赖用了却没声明 —— 同一件事，同一个码
     dep = ("module dep\n\npub fn dep_alloc() -> ptr {\n    return alloc(8);\n}\n")
@@ -1871,8 +1872,8 @@ def test_e030_the_runtime_refusal_names_its_own_subsystem():
         mod = lomentc.load(rp)
         deps = lomentc.resolve_deps(mod, ROOT, rp.parent, entry=rp)
         e = lomentc.check(mod, None, deps)
-    assert e and {loment_diag.classify(m)[0] for m in e} == {"E031"}, e
-    print("      E031 自有码：构造自己是它的位置，库那一半同码")
+    assert e and {loment_diag.classify(m)[0] for m in e} == {"E0188"}, e
+    print("      E031 这一族拆成两格：单元自己用 E0208 / 依赖用了没声明 E0188")
 
 
 @test
@@ -1952,13 +1953,13 @@ def test_e029_use_after_free():
 
     # **默认 = 满档 ⇒ 第 1 级开着**：use-after-free 编译期拒
     on = head % "" + body(True)
-    assert any(loment_diag.classify(x)[0] == "E029" for x in errs(on)), errs(on)
+    assert any(loment_diag.family(loment_diag.classify(x)[0]) == "E029" for x in errs(on)), errs(on)
     # 降到"只要管理器"那一档：第 1 级关着，use-after-free 一个字的检查都没有
     off = head % "choose lms_manage_only_admin" + body(True)
     assert errs(off) == [], errs(off)
     # 显式清单个开关**覆盖档**（`docs/253` §11.4 叠加规则）：降档了也照样开着第 1 级
     ov = head % "choose lms_manage_only_admin\nchoose lms_check" + body(True)
-    assert any(loment_diag.classify(x)[0] == "E029" for x in errs(ov)), errs(ov)
+    assert any(loment_diag.family(loment_diag.classify(x)[0]) == "E029" for x in errs(ov)), errs(ov)
     # **先读后 free** 合法 —— 这一半挡住"见过 free 就报"那种过头实现
     ok = head % "" + body(False)
     assert errs(ok) == [], errs(ok)
@@ -1984,7 +1985,7 @@ def test_pass_block_never_skips_a_hard_check():
             "    }\n"
             "    return x;\n}\n")
     got = errs(e028)
-    assert any(loment_diag.classify(x)[0] == "E028" for x in got), got
+    assert any(loment_diag.family(loment_diag.classify(x)[0]) == "E028" for x in got), got
     # 对照：同样的形状、下标在界内 ⇒ 不报（证明上面那条不是"见到 pass 就红"）。
     ok028 = e028.replace("a[10]", "a[3]")
     assert errs(ok028) == [], errs(ok028)
@@ -1997,7 +1998,7 @@ def test_pass_block_never_skips_a_hard_check():
             "    }\n"
             "    return x;\n}\n")
     got2 = errs(e029)
-    assert any(loment_diag.classify(x)[0] == "E029" for x in got2), got2
+    assert any(loment_diag.family(loment_diag.classify(x)[0]) == "E029" for x in got2), got2
     # 对照：先读后 free ⇒ 块里也不报。
     ok029 = e029.replace("        free(p);\n        let x: u32 = load8(p, 0);\n",
                          "        let x: u32 = load8(p, 0);\n        free(p);\n")
@@ -5912,7 +5913,7 @@ def test_lgc_is_refused_under_no_gc():
     assert any("no_gc" in e and "lgc" in e for e in errs), errs
     import loment_diag  # noqa: PLC0415
     code, _t, _h = loment_diag.classify(errs[0])
-    assert code == "E039", (code, errs[0])
+    assert loment_diag.family(code) == "E039", (code, errs[0])
 
 
 @test

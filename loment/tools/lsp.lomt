@@ -382,7 +382,7 @@ fn doc_remove(mem: ptr, uri: ptr, un: u32) -> u32 {
 /// **不手抄第二份**：真源是 `surface_data.code_title`（由 `tools/loment_diag.py
 /// --dump-surface` 从 `loment_diag.RULES` 生成）。这里原先有一条手抄到 38 的链式表，
 /// 表外的码一律显示成「未分类」（2026-11-04：`codegen.lomt` 的 E019 就是这么丢的）。
-/// 2026-11-10 细分码表（`docs/336`）之后，自举 checker 发的是 42..207 这一层细码，
+/// 2026-11-10 细分码表（`docs/336`）之后，自举 checker 发的是 42..208 这一层细码，
 /// 手抄表立刻整片落到表外 —— 于是改成转发。判据
 /// `test_diag_titles_match_reference` 钉住"这里只能转发，不许再长第二份"。
 fn diag_title(code: u32) -> str {

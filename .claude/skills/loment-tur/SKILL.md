@@ -187,7 +187,7 @@ not change. Design and the standing boundary list: `docs/299`.
 With `lifetime_no` (the default before 2026.3, and still selectable) `&` in a type position is
 a parse error and struct fields hold scalars only - the pre-2026.3 shape, unchanged.
 
-2026.3 also adds four spelling-level constructs (no lifetimes involved; all are refused by
+2026.3 also adds five spelling-level constructs (no lifetimes involved; all are refused by
 the frozen editions):
 
 - **struct literal field shorthand** `S { a, b: 2 }` - a bare name means `a: a`
@@ -201,6 +201,10 @@ the frozen editions):
 - **`if` as an expression in a `let` initialiser** - `let x: u32 = if c { 10 } else { 20 };`.
   One expression per arm, `else` required; `else if`, nesting, and other positions are not
   accepted in this round (`docs/335`).
+- **`match` as an expression in a `let` initialiser** - `let x: u32 = match d { D::N => 1,
+  _ => 0 };`. Subject must be a name, one expression per arm, arms comma-separated;
+  blocks, literal patterns, and other positions are not accepted in this round
+  (`docs/336`).
 
 ### 2.0.6 Lexical grammar
 

@@ -298,7 +298,7 @@ RULES = [
              # `docs/296` §2.3：`defer` 的形状（只收调用）与位置（只在函数体里）都是解析期
              r"defer 只收函数调用|defer 只在函数体里成立|"
              # `docs/334` / `docs/335`：for-call 与 if 表达式的 v1 形状限制。
-             r"v1 takes a function call|`if` 表达式|"
+             r"v1 takes a function call|`if` 表达式|`match` 表达式|"
              r"`set choose` 后面要跟一个块|的块没闭合",
      "语法错误（词法/解析期）",
      "按消息给的 `行:列` 改那一行的写法。常见三种: `match` 的臂体要**块**（`=> { … }`，"

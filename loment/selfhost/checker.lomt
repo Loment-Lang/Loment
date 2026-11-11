@@ -415,7 +415,8 @@ fn chk_builtin_ret(src: ptr, t: ptr, i: u32) -> u32 {
     if chk_tok_is(src, t, i, "str_eq") {
         return (1 << TY_KIND_SHIFT) + 9;          // bool
     }
-    if chk_tok_is(src, t, i, "str_concat") || chk_tok_is(src, t, i, "tur_edition") {
+    if chk_tok_is(src, t, i, "str_concat") || chk_tok_is(src, t, i, "str_num")
+            || chk_tok_is(src, t, i, "tur_edition") {
         return (1 << TY_KIND_SHIFT) + 10;         // str
     }
     if chk_tok_is(src, t, i, "alloc") || chk_tok_is(src, t, i, "str_ptr")
@@ -682,7 +683,8 @@ fn chk_rt_site(src: ptr, t: ptr, i: u32, prof: u32) -> u32 {
     // 注释写在 `if` **之前**，不夹进 `||` 链中间：两个格式化器对"表达式中间的
     // 行注释"归属不同行，夹在中间会让孪生判据分叉（`loment_fmt_test` 实测）。
     if chk_tok_is(src, t, i, "alloc") || chk_tok_is(src, t, i, "free")
-            || chk_tok_is(src, t, i, "str_concat") || chk_tok_is(src, t, i, "str_eq")
+            || chk_tok_is(src, t, i, "str_concat") || chk_tok_is(src, t, i, "str_num")
+            || chk_tok_is(src, t, i, "str_eq")
             || chk_tok_is(src, t, i, "panic")
             || chk_tok_is(src, t, i, "thread_spawn") {
         if chk_tok_is(src, t, i + 1, "(") {
@@ -809,7 +811,7 @@ fn is_base_type(src: ptr, t: ptr, i: u32) -> bool {
 
 fn is_builtin(src: ptr, t: ptr, i: u32) -> bool {
     let k: u32 = 0;
-    let names: str = "str_len str_eq str_concat str_byte slice_len panic alloc free load8 store8 atomic_add inb outb get_bits set_bits str_ptr print tur_edition ptr_add ptr_sub syscall4 syscall6 syscall7 thread_spawn";
+    let names: str = "str_len str_eq str_concat str_num str_byte slice_len panic alloc free load8 store8 atomic_add inb outb get_bits set_bits str_ptr print tur_edition ptr_add ptr_sub syscall4 syscall6 syscall7 thread_spawn";
     // 逐词比较 (内建名用空格分隔的常量表); 新增内建要同步这里, 否则调用点报假 E-UNKNOWN-FN
     let off: u32 = 0;
     while off < str_len(names) {
@@ -1793,7 +1795,8 @@ fn chk_builtin_arity(src: ptr, t: ptr, i: u32) -> u32 {
         return 0;
     }
     // slice_len 也是内建 (参考实现里它单列一条, 不在 BUILTINS 表里), 但 arity 同口径
-    if chk_tok_is(src, t, i, "str_len") || chk_tok_is(src, t, i, "panic")
+    if chk_tok_is(src, t, i, "str_len") || chk_tok_is(src, t, i, "str_num")
+            || chk_tok_is(src, t, i, "panic")
             || chk_tok_is(src, t, i, "alloc") || chk_tok_is(src, t, i, "free")
             || chk_tok_is(src, t, i, "inb") || chk_tok_is(src, t, i, "str_ptr")
             || chk_tok_is(src, t, i, "print")
@@ -3439,6 +3442,29 @@ fn chk_find_at(src: ptr, t: ptr, i: u32, hi: u32, what: str) -> u32 {
         j = j + 1;
     }
     return hi;
+}
+
+/// match 表达式臂体的结束位置：深度 0 的 `,` 或收尾 `}`（`docs/336`）。
+fn chk_arm_end(src: ptr, t: ptr, start: u32, hi: u32) -> u32 {
+    let d: u32 = 0;
+    let k: u32 = start;
+    while k < hi && chk_tok_kind(t, k) != 4 {
+        if chk_tok_is(src, t, k, "(") || chk_tok_is(src, t, k, "[")
+                || chk_tok_is(src, t, k, "{") {
+            d = d + 1;
+        } else if chk_tok_is(src, t, k, ")") || chk_tok_is(src, t, k, "]") {
+            d = d - 1;
+        } else if chk_tok_is(src, t, k, "}") {
+            if d == 0 {
+                return k;
+            }
+            d = d - 1;
+        } else if d == 0 && chk_tok_is(src, t, k, ",") {
+            return k;
+        }
+        k = k + 1;
+    }
+    return k;
 }
 
 /// 2026.3 `for x in <call> {` 的形状：`for IDENT in IDENT ( … ) {`（`docs/334`）。
@@ -5225,6 +5251,42 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                         let ee3: u32 = chk_match_brace(src, t, eb3);
                         chk_tex(src, t, syms, n, env, c,
                                 ((eb3 + 1) as u64) * 4294967296 + (ee3 as u64), tyt, p, oc);
+                    }
+                } else if chk_tok_is(src, t, eq + 1, "match") {
+                    // 2026.3 `let x: T = match e { P => a, _ => b };`（`docs/336`）。
+                    if load32(oc, 8) < 2 {
+                        chk_pub(src, t, oc, p, E_PARSE, eq + 1);
+                    } else {
+                        chk_tex(src, t, syms, n, env, c, chk_lh(eq + 2, eq + 3), tyt, p, oc);
+                        let mcl: u32 = chk_match_brace(src, t, eq + 3);
+                        let a: u32 = eq + 4;
+                        let stopa: u32 = mcl;
+                        while a < stopa && chk_tok_kind(t, a) != 4 {
+                            let bind: u32 = 0;
+                            if chk_tok_kind(t, a) == 0 && !chk_tok_is(src, t, a, "_") {
+                                if chk_tok_is(src, t, a + 4, "(") {
+                                    bind = a + 5;
+                                }
+                            }
+                            let pdot: u32 = chk_find_at(src, t, a, stopa, ">");
+                            let bend: u32 = stopa;
+                            if pdot < stopa {
+                                let bstart: u32 = pdot + 1;
+                                bend = chk_arm_end(src, t, bstart, stopa);
+                                if bind != 0 {
+                                    let c2: u32 = chk_env_add(t, env, c, bind, 0);
+                                    chk_tex(src, t, syms, n, env, c2,
+                                            ((bstart) as u64) * 4294967296 + (bend as u64), tyt, p, oc);
+                                } else {
+                                    chk_tex(src, t, syms, n, env, c,
+                                            ((bstart) as u64) * 4294967296 + (bend as u64), tyt, p, oc);
+                                }
+                            }
+                            a = bend;
+                            if chk_tok_is(src, t, a, ",") {
+                                a = a + 1;
+                            }
+                        }
                     }
                 } else {
                     // `=` 后面必须能开始一个表达式 (`let v: u32 = @ 1;`，issue #395/#49 的表达式那半)

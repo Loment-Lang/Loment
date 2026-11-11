@@ -3882,6 +3882,79 @@ def test_m101_if_expression_twin():
     print("      if-expression: 两实现逐字节一致；tur2026.2 两边都拒")
 
 
+@test
+def test_m102_match_expression_twin():
+    """Tur 2026.3 `let x: T = match e { P => a, _ => b };`：两实现逐字节同。
+
+    `docs/336`。参考实现降成 `let x: T;` + 普通 Match；自举侧把 match 发射器参数化
+    （表达式臂 = 单表达式 + 一条 store），标签/switch/载荷绑定的发法与原来一致。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    src = chr(10).join([
+        'module m',
+        '',
+        'enum D { N, E }',
+        '',
+        'fn g(d: D) -> u32 {',
+        '    let x: u32 = match d { D::N => 1, D::E => 2 };',
+        '    return x;',
+        '}',
+        '',
+        'fn h(o: Option<u32>) -> u32 {',
+        '    let y: u32 = match o { Option::Some(v) => v + 1, _ => 0 };',
+        '    return y;',
+        '}',
+        '',
+    ])
+    old = "choose write grammar tur2026.2" + chr(10) + src
+    with tempfile.TemporaryDirectory() as td:
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_matchexpr")
+        p = Path(td) / "new.lomt"
+        p.write_text(src, encoding="utf-8", newline=chr(10))
+        rc, out, err = _run_driver_raw(elf, _wsl_path(p), td, "new")
+        assert rc == 0, f"自举驱动编不过 match-expression: {err[-400:]}"
+        assert out == _unit_ll(p), "match-expression: 自举产物与参考不一致"
+        p = Path(td) / "old.lomt"
+        p.write_text(old, encoding="utf-8", newline=chr(10))
+        rc, out, err = _run_driver_raw(elf, _wsl_path(p), td, "old")
+        assert rc != 0 and out.strip() == "", (
+            f"tur2026.2 收下了 match-expression (rc={rc}) {err[-300:]}")
+    print("      match-expression: 两实现逐字节一致；tur2026.2 两边都拒")
+
+
+
+@test
+def test_m103_str_num_twin():
+    """`str_num(u32) -> str`：两实现逐字节同（`docs/337`）。
+
+    十进制转换是运行期里的一段（`__loment_num_to_dec`），只在真调用时随产后发；
+    两边的调用点、堆计数与 helper 文本必须完全一致。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    src = "".join([
+        "module m", chr(10),
+        "choose runtime", chr(10), chr(10),
+        "fn f(n: u32) -> str {", chr(10),
+        "    let s: str = str_num(n);", chr(10),
+        "    return s;", chr(10),
+        "}", chr(10), chr(10),
+        "fn g(n: u32) -> u32 {", chr(10),
+        "    let s: str = str_num(n);", chr(10),
+        "    return str_len(s);", chr(10),
+        "}", chr(10)])
+    with tempfile.TemporaryDirectory() as td:
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_strnum")
+        p = Path(td) / "new.lomt"
+        p.write_text(src, encoding="utf-8", newline=chr(10))
+        rc, out, err = _run_driver_raw(elf, _wsl_path(p), td, "new")
+        assert rc == 0, f"自举驱动编不过 str_num: {err[-400:]}"
+        assert out == _unit_ll(p), "str_num: 自举产物与参考不一致"
+    print("      str_num: 两实现逐字节一致")
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_p8_test")
 

@@ -208,19 +208,23 @@ def _assert_diagnosed(rc: int, err: str, what: str, marks: tuple[str, ...]) -> N
 def test_deep_parentheses_are_diagnosed_not_signalled():
     """`#868`：200 层括号原先在自举驱动上 SIGSEGV，而 300 层反而报得出。
 
-    两侧都钉：**上限以内照旧接受**（63 层），**到上限就报 E023**，之后每一档都只有
+    两侧都钉：**上限以内照旧接受**（62 层），**到上限就报 E023**，之后每一档都只有
     诊断 —— 不存在"更大的输入换一条路崩掉"。
+
+    **62 而不是 63**：参考实现的计数含函数体与表达式各一层，实测 `paren 63` 它自己就拒
+    （`嵌套超过 64 层`）。自举侧 2026-11-11 起判 `>= 64`（同一接受边界），此前放到 64
+    才拒 —— 这条判据原先写 63 是把**旧的宽松边界**当成了契约。
     """
     if _skip():
         return
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
-        rc, _out, err = _ladder("paren", 63, td)
-        assert rc == 0, f"63 层括号被误拒: rc={rc} {err[-200:]!r}"
-        for n in (64, 100, 200, 300, 400, 1000, 5000):
+        rc, _out, err = _ladder("paren", 62, td)
+        assert rc == 0, f"62 层括号被误拒: rc={rc} {err[-200:]!r}"
+        for n in (63, 64, 100, 200, 300, 400, 1000, 5000):
             rc, _out, err = _ladder("paren", n, td)
             _assert_diagnosed(rc, err, f"paren {n}", (DEEP, TOO_LARGE))
-    print("      括号：63 接受；64..5000 一律 E023 / 容量诊断")
+    print("      括号：62 接受；63..5000 一律 E023 / 容量诊断")
 
 
 @test
@@ -293,17 +297,20 @@ def test_deep_array_types_are_diagnosed_not_signalled():
 
 @test
 def test_deep_index_expressions_are_diagnosed_not_signalled():
-    """`#874`：256 层 `a[a[a[...]]]` 原先 SIGSEGV（128 层反而接受）。"""
+    """`#874`：256 层 `a[a[a[...]]]` 原先 SIGSEGV（128 层反而接受）。
+
+    62 而不是 63：与括号同一条（参考实现的计数多起一层，`index 63` 它自己就拒）。
+    """
     if _skip():
         return
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
-        rc, _out, err = _ladder("index", 63, td)
-        assert rc == 0, f"63 层下标被误拒: rc={rc} {err[-200:]!r}"
-        for n in (64, 128, 256, 512, 1000):
+        rc, _out, err = _ladder("index", 62, td)
+        assert rc == 0, f"62 层下标被误拒: rc={rc} {err[-200:]!r}"
+        for n in (63, 64, 128, 256, 512, 1000):
             rc, _out, err = _ladder("index", n, td)
             _assert_diagnosed(rc, err, f"index {n}", (DEEP, TOO_LARGE))
-    print("      下标：63 接受；64..1000 一律 E023 / 容量诊断")
+    print("      下标：62 接受；63..1000 一律 E023 / 容量诊断")
 
 
 @test

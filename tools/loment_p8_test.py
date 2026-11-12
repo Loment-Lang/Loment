@@ -628,7 +628,7 @@ def test_m81_cross_module_dup_is_rejected():
     mod = lomentc.load(entry)
     deps = lomentc.resolve_deps(mod, ROOT, entry.parent, entry=entry)
     py = _classify_codes(lomentc.check(mod, deps=deps))
-    # 细分之后跨模块重名是 **E0128**（`docs/338`），不是族码 E013。
+    # 细分之后跨模块重名是 **E0128**（`docs/341`），不是族码 E013。
     assert py == [128], f"参考实现没按 E-DUP (E0128) 报跨模块重名: {py}"
     with tempfile.TemporaryDirectory() as td:
         exe = _build_checker(td)
@@ -686,7 +686,7 @@ def test_m81_falling_off_the_end_is_refused():
             f.write_text(src, encoding="utf-8", newline="\n")
             errs = lomentc.check(lomentc.load(f))
             codes = {loment_diag.classify(e)[0] for e in errs}
-            # 细分之后"可能从末尾掉出去"是 **E0179**（`docs/338`；码 179，显示四位）。
+            # 细分之后"可能从末尾掉出去"是 **E0179**（`docs/341`；码 179，显示四位）。
             assert "E0179" in codes, f"{tag}: 掉出末尾没按 E0179 拒: {errs}"
         for tag, src in good.items():
             f = d / (tag + ".lomt")
@@ -2281,7 +2281,7 @@ def test_m94_tur2_bare_return_and_print_num():
                       encoding="utf-8", newline="\n")
         rc3, out3, err3 = _run_driver_raw(elf, _wsl_path(p3), td, "typed")
         assert rc3 != 0 and out3.strip() == "", "有返回类型的 `return;` 被放过去了"
-        # 细分之后这一格是 **E0153**（"`return;` 不带值"，`docs/338`）。
+        # 细分之后这一格是 **E0153**（"`return;` 不带值"，`docs/341`）。
         assert "E0153" in err3, err3[-200:]
         # Tur 2：`no_runtime` 下 `print_num` 点名拒（运行期保证）
         p4 = Path(td) / "nort.lomt"
@@ -2289,7 +2289,7 @@ def test_m94_tur2_bare_return_and_print_num():
                       "fn main() {\n    print_num(7);\n}\n", encoding="utf-8", newline="\n")
         rc4, out4, err4 = _run_driver_raw(elf, _wsl_path(p4), td, "nort")
         assert rc4 != 0 and out4.strip() == "", "`no_runtime` 收下了 print_num"
-        # 细分之后 `no_runtime` 下用运行期构造是 **E0208**（`docs/338`）。
+        # 细分之后 `no_runtime` 下用运行期构造是 **E0208**（`docs/341`）。
         assert "E0208" in err4, err4[-200:]
         print("      裸 return / print_num: 产物逐字节相同、输出 0/1234/-98765/i64 上限；"
               "Tur 1 拒 return 但保住用户 print_num；E019/E0208 都对")
@@ -3959,7 +3959,7 @@ def test_m103_str_num_twin():
 
 @test
 def test_m104_str_interpolation_twin():
-    """`f"…"` / `rf"…"`：两实现逐字节同（`docs/338`）。
+    """`f"…"` / `rf"…"`：两实现逐字节同（`docs/341`）。
 
     插值是**前端改写**：自举侧在装载器里按字节改，参考侧在 `lomentc.load` 里改。
     改写出来的文本必须一字不差，否则 `str_concat` 的折法、字符串常量的编号与

@@ -60,7 +60,7 @@ fn main() -> u32 {
 2. `for i, x in xs`（**已落**，`docs/333`）/ `for x in <call>`（**已落**，`docs/334`；
    数组字面量与其它表达式仍未做）；
 3. `if` / `match` 当表达式（**已落**：`if` 见 `docs/335`，`match` 见 `docs/336`）；
-4. 字符串插值（**已落**，`docs/338`；前置的 `str_num` 见 `docs/337`；
+4. 字符串插值（**已落**，`docs/341`；前置的 `str_num` 见 `docs/337`；
    格式化 `{x:>5}` / 补零仍待做）；
 5. `args()` 内建；
 6. `const NAME: str = "..."`；

@@ -1660,7 +1660,7 @@ def test_str_num_builtin():
 
 @test
 def test_str_interpolation():
-    """`f"…"` / `rf"…"`：前端改写成 `str_concat` 链（`docs/338`）。
+    """`f"…"` / `rf"…"`：前端改写成 `str_concat` 链（`docs/341`）。
 
     钉四件事：三个 helper 按需发、`no_runtime` 点名拒、`rf` 的反斜杠原样、
     以及改写之后的报错列号**映射回用户那一行**。

@@ -327,7 +327,7 @@ fn v_in(src: ptr, t: ptr, i: u32, mg: u32, tbl: str) -> bool {
     return v_find(src, t, i, mg, tbl) != 0;
 }
 
-/// 这个 token 的文本正好是 `w` 吗（`docs/338` 的插值前缀判据）。
+/// 这个 token 的文本正好是 `w` 吗（`docs/341` 的插值前缀判据）。
 fn tk_word(src: ptr, t: ptr, i: u32, w: str) -> bool {
     if tk_kind(t, i) != 0 {
         return false;
@@ -643,7 +643,7 @@ fn needs_space(src: ptr, t: ptr, pp: u32, prev: u32, i: u32, mg: u32) -> bool {
     // 值表只对**标点**有意义：字符串的值是内容（`#640`），`"}"` 的值就是 `}`，
     // 拿它去查"前不留空格"会把 `f(a, "}")` 排成 `f(a,"}")`。
     if tk_kind(t, i) == 2 {
-        // **插值前缀与字符串是粘着的**（`docs/338`）：`f"…"` / `rf"…"` 在源里紧挨着，
+        // **插值前缀与字符串是粘着的**（`docs/341`）：`f"…"` / `rf"…"` 在源里紧挨着，
         // 中间插一个空格就把一条读法拆成两个 token（格式化后的文件编不过）。
         let pk: u32 = tk_kind(t, pi);
         if pk == 0 && load32(t, pi * 20 + 4) + load32(t, pi * 20 + 8)

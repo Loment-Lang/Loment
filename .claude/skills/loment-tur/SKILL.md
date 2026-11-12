@@ -210,7 +210,7 @@ the frozen editions):
   `str`, `bool`, or an integer; `{{` / `}}` escape braces; `{expr=}` is the debug form and
   `!r` quotes and escapes a `str`. It is a **front-end rewrite** to `str_concat` /
   `str_show`, not a grammar production. Single line only; no format spec
-  (`{x:>5}`) and no nested interpolation yet (`docs/338`).
+  (`{x:>5}`) and no nested interpolation yet (`docs/341`).
 
 ### 2.0.6 Lexical grammar
 

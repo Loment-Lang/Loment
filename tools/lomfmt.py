@@ -82,7 +82,7 @@ def _needs_space(pp: lomc.Tok | None, prev: lomc.Tok | None, cur: lomc.Tok) -> b
     # 值表只对**标点**有意义：字符串的 `val` 是内容（`#640`），`"}"` 的 `val` 就是 `}`，
     # 拿它去查 `NO_SPACE_BEFORE` 会把 `f(a, "}")` 排成 `f(a,"}")`。
     if cur.kind == "string":
-        # **插值前缀与字符串是粘着的**（`docs/338`）：`f"…"` / `rf"…"` 在源里紧挨着，
+        # **插值前缀与字符串是粘着的**（`docs/341`）：`f"…"` / `rf"…"` 在源里紧挨着，
         # 中间插一个空格就把一条读法拆成两个 token（格式化后的文件编不过）。
         if (prev.kind == "ident" and pv in ("f", "rf")
                 and prev.off + prev.len == cur.off):

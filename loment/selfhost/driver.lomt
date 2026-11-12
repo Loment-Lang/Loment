@@ -1141,7 +1141,7 @@ fn tur2_sugar(src: ptr, toks: ptr, nt: u32) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
-// 字符串插值的前端改写（`docs/338`）
+// 字符串插值的前端改写（`docs/341`）
 //
 // `f"a{x}b"` 不是语法构造，是**读法**：把整段（前缀 + 字符串）改写成
 // `str_concat(str_concat("a", str_show(x)), "b")`，于是后面每一层一行都不动。
@@ -2865,7 +2865,7 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
         let _n0: u32 = lex(slot, nb, toks);
         let _ne: u32 = tur2_sugar(slot, toks, _n0);
     }
-    // **字符串插值**（`docs/338`）：也是"读法"，也**在 lex 之前**在字节上改
+    // **字符串插值**（`docs/341`）：也是"读法"，也**在 lex 之前**在字节上改
     // （`f"a{x}b"` 不是语法构造）。版次同样是**整程序**属性：根单元写 2026.3 就都改。
     if load32(scr, PROF_OFF) == 2 {
         nb = interp_rewrite(slot, nb, scr, path, n);

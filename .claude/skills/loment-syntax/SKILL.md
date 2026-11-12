@@ -272,9 +272,10 @@ each bring in one module, see 3.1 at the end of this section.
 | `str_eq(a: str, b: str) -> bool` | Content comparison |
 | `str_concat(a: str, b: str) -> str` | Concatenation - **allocates from the same 64 KiB arena at run time**, so do not build big strings (or loop over it) |
 | `str_num(n) -> str` | Decimal text of **any integer type** (signed prints `-`) - **allocates from the same arena**, and it lives in the runtime block, so `no_runtime` refuses it by name (E31). `docs/337` |
-| `str_show(v) -> str` | Interpolation value (docs/338): `str` is the identity, `bool` prints `true`/`false`, any integer is decimal. May allocate, so `no_runtime` refuses it by name (E31) - including for a plain `str` hole |
+| `str_show(v) -> str` | Interpolation value (docs/341): `str` is the identity, `bool` prints `true`/`false`, any integer is decimal. May allocate, so `no_runtime` refuses it by name (E31) - including for a plain `str` hole |
 | `str_repr(v) -> str` | Same inputs as `str_show`; a `str` comes back quoted and escaped (`\`, `\"`, `
-`, `	`, ``). The `!r` conversion |
+`, `	`, `
+`). The `!r` conversion |
 | `str_ptr(s: str) -> ptr` | The data pointer (for feeding syscalls) |
 | `print(s: str) -> u32` | Write the string's bytes to stdout (one `write` syscall) |
 | `tur_edition() -> str` | The Tur edition this program is compiled as, e.g. `tur2026.2` (docs/296). The compiler also prints it on stderr at every check/build/run |

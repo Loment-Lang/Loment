@@ -2962,7 +2962,7 @@ fn chk_tex_atom_call(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 }
             } else if chk_tok_is(src, t, lo, "str_show")
                     || chk_tok_is(src, t, lo, "str_repr") {
-                // `docs/338`：孔收 str / bool / 任意整型（字面量也行）。
+                // `docs/341`：孔收 str / bool / 任意整型（字面量也行）。
                 if at != 0 && chk_ty_is_int(at) == 0 {
                     if at != (1 << TY_KIND_SHIFT) + 10 && at != (1 << TY_KIND_SHIFT) + 9 {
                         chk_pub(src, t, oc, p, E_TMISMATCH, lo);

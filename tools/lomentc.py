@@ -44,7 +44,7 @@ BUILTINS = {
     "str_eq": (("str", "str"), "bool"),
     "str_concat": (("str", "str"), "str"),   # M2
     "str_num": (("u32",), "str"),            # 2026.3: 无符号十进制 -> str（插值的底）
-    # 2026.3: 插值的两种取值（`docs/338`）。签名的实参类型只是占位 —— 两者都收
+    # 2026.3: 插值的两种取值（`docs/341`）。签名的实参类型只是占位 —— 两者都收
     # `str` / `bool` / 任意整型，真正的检查在 `_walk_expr` 里各一条。
     "str_show": (("str",), "str"),
     "str_repr": (("str",), "str"),
@@ -635,7 +635,7 @@ copy:
 }
 '''
 
-#: `str_show(bool)` 的两个词（`docs/338`）：写进调用方的缓冲区、返回长度。
+#: `str_show(bool)` 的两个词（`docs/341`）：写进调用方的缓冲区、返回长度。
 #: 不发明珠常量 —— 参考侧与自举侧的 `.str.<fn>.<n>` 编号必须逐字节相同，而合成出来的
 #: 全局常量自举侧的前置扫描看不见。
 _IR_BOOL_TO_STR = '''define internal i32 @__loment_bool_to_str(ptr %out, i1 %v) {
@@ -667,7 +667,7 @@ e:
 }
 '''
 
-#: `str_repr(str)`（`docs/338`）：`"` + 转义后的字节 + `"`。转义表与词法器同一张
+#: `str_repr(str)`（`docs/341`）：`"` + 转义后的字节 + `"`。转义表与词法器同一张
 #: （`\\` `"` `\n` `\t` `\r`）；其它字节原样。最坏 2n+2 字节，由调用方分配。
 _IR_STR_REPR = '''define internal i64 @__loment_str_repr(ptr %out, ptr %p, i64 %n) {
 entry:
@@ -6344,7 +6344,7 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
                 _walk_expr(e.args[0], scope, funcs, structs, errs, enums, lifetime)
             return
         if e.name in ("str_show", "str_repr"):
-            # `docs/338`：插值孔收 `str` / `bool` / 任意整型。`str_repr` 与 `str_show`
+            # `docs/341`：插值孔收 `str` / `bool` / 任意整型。`str_repr` 与 `str_show`
             # 收同一组实参（整型与布尔的表示相同，`str` 的差别在发射时才分）。
             if len(e.args) != 1:
                 errs.append(f"{e.line}: 内建 {e.name} 需要 1 个实参，得到 {len(e.args)}")
@@ -7291,7 +7291,7 @@ _RUNTIME_SITES: dict[str, str] = {
     "free": "`free`",
     "str_concat": "`str_concat`",
     "str_num": "`str_num`",
-    # 插值的两个取值（`docs/338`）。**保守**：`str_show(str)` 其实是恒等、`str_show(bool)`
+    # 插值的两个取值（`docs/341`）。**保守**：`str_show(str)` 其实是恒等、`str_show(bool)`
     # 也不分配，但这一维的判据长在 token 上，看不见实参类型 —— 往"会拖运行期"那侧偏。
     "str_show": "`str_show`（插值）",
     "str_repr": "`str_repr`（插值 `!r`）",
@@ -7375,7 +7375,7 @@ def _calls_named(mods, names) -> bool:
     """这些单元里有没有**用**这几个名字（`名字 (` 且不是 `fn` 后面的声明）。
 
     与 `_runtime_sites` 同一条位置判据 —— 自举侧要在**函数体发射之前**决定发不发
-    某段 helper（`docs/338`），它只看得见 token，看不见实参类型。
+    某段 helper（`docs/341`），它只看得见 token，看不见实参类型。
     """
     for m in mods:
         toks = getattr(m, "toks", None) or []
@@ -9520,9 +9520,9 @@ def _expr_rs(e) -> str:
             return f"({a[0]} == {a[1]})"
         if e.name == "str_num":  # docs/337: 无符号十进制 -> str
             return f"(Box::leak(format!(\"{{}}\", {a[0]}).into_boxed_str()) as &'static str)"
-        if e.name == "str_show":  # docs/338: 插值的取值
+        if e.name == "str_show":  # docs/341: 插值的取值
             return f"(Box::leak(format!(\"{{}}\", {a[0]}).into_boxed_str()) as &'static str)"
-        if e.name == "str_repr":  # docs/338: 调试表示
+        if e.name == "str_repr":  # docs/341: 调试表示
             return f"(Box::leak(format!(\"{{:?}}\", {a[0]}).into_boxed_str()) as &'static str)"
         if e.name == "str_concat":  # M2: v0 的 str 是 &'static str -> 只能漏内存
             return (f"(Box::leak(format!(\"{{}}{{}}\", {a[0]}, {a[1]}).into_boxed_str()) "
@@ -13452,7 +13452,7 @@ class _Ir:
         return v2
 
     def _str_repr_ir(self, sv: str, e: Call) -> str:
-        """`str` 的调试表示：`"` + 转义 + `"`（`docs/338`）。"""
+        """`str` 的调试表示：`"` + 转义 + `"`（`docs/341`）。"""
         p, n = self.t(), self.t()
         self.w(f"{p} = extractvalue {{ ptr, i64 }} {sv}, 0")
         self.w(f"{n} = extractvalue {{ ptr, i64 }} {sv}, 1")
@@ -13807,7 +13807,7 @@ class _Ir:
         if e.name == "str_num":
             ty, av = self.expr(e.args[0])
             return "str", self._str_num_ir(av, ty, e)
-        # 2026.3: 插值的取值（`docs/338`）—— `str` 恒等、整型同 `str_num`、
+        # 2026.3: 插值的取值（`docs/341`）—— `str` 恒等、整型同 `str_num`、
         # `bool` 走一个 8 字节的堆块；`str_repr` 与非串实参的 `str_show` 相同。
         if e.name in ("str_show", "str_repr"):
             ty, av = self.expr(e.args[0])
@@ -14963,11 +14963,11 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     if "@__loment_print_num" in text_all:
         out.append(_IR_PRINT_NUM)
     # `str_num` 与插值里的整型取值（`str_show` / `str_repr` 的整型分支）共用同一段
-    # 十进制转换。判据同样是**源里的名字**（`docs/338`）—— 自举侧要在函数体之前
+    # 十进制转换。判据同样是**源里的名字**（`docs/341`）—— 自举侧要在函数体之前
     # 决定发不发，它那时不知道实参类型。多发的代价是一段没人调用的 internal 函数。
     if _calls_named(mods, ("str_num", "str_show", "str_repr")):
         out.append(_IR_NUM_TO_DEC)
-    # 插值的两个 helper（`docs/338`）。判据是**源里有没有这两个调用**，不是产物文本里
+    # 插值的两个 helper（`docs/341`）。判据是**源里有没有这两个调用**，不是产物文本里
     # 有没有那两条 call —— 自举侧的运行期块写在函数体**之前**，它那时还不知道实参类型；
     # 两边用同一条 token 判据（名字 + 紧跟 `(`、且不是 `fn` 后面的声明），产物才逐字节同。
     _show_used = _calls_named(mods, ("str_show", "str_repr"))
@@ -15346,7 +15346,7 @@ def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3,
         # 依赖自己没有 tur2 声明，但程序是 tur2：纯糖照样要抹（与自举侧同一个口径）。
         from potato_from import _tur2_sugar      # noqa: PLC0415
         text = _tur2_sugar(text)
-    # **字符串插值**（`docs/338`）：`f"…"` 也不是语法构造，是读法 —— 在 parse 之前
+    # **字符串插值**（`docs/341`）：`f"…"` 也不是语法构造，是读法 —— 在 parse 之前
     # 改写成 `str_concat` / `str_show` 链，于是 lexer / parser / checker / codegen
     # 一行都不动。与 `_tur2_sugar` 一样按**生效版次**算（整程序属性）。
     _cmap = None

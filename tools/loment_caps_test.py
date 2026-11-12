@@ -124,7 +124,7 @@ def test(fn):
 #: 捕获表的步长 `CG_DFR_STRIDE`（84 B/条，**不是**上界，来路写在 `EXPLAINED`）与三个
 #: 真上界 `CG_MAXDFR` / `CG_MAXDFRAMES` / `CG_MAXDFARGS`（都判了 `>=` 并 `cg_fail`）。
 #: 条数 251 → **255**、沉默 168 → **169**（多出来的那一处就是步长本身）。
-CAPACITY_SITES = 261
+CAPACITY_SITES = 262
 SILENT_SITES = 170
 
 #: 第二类：字面量上界（`#770`）。`[T; N]` 与 `literal:<N>` 各自钉住总数与沉默的那一份。
@@ -484,9 +484,16 @@ def test_literal_caps_and_static_arrays_are_visible():
     drv = (ROOT / "loment/selfhost/driver.lomt").read_text(encoding="utf-8").splitlines()
     drv_line = 1 + next(i for i, ln in enumerate(drv)
                         if "while j < 200 && load8(dent, nm + j)" in ln)
+    # `lomfmt.lomt` 与 `lomc.lomt` 同理（2026-11-11）：插值那一笔往 `lomfmt.lomt` 里
+    # 加了 `tk_word`，把这一行往下推了 20 行 —— 钉死 497 的话它红的原因与"这一处被
+    # 看见"无关。行号**从源里现数**。
+    fmt = (ROOT / "loment/tools/lomfmt.lomt").read_text(encoding="utf-8").splitlines()
+    fmt_line = 1 + next(i for i, ln in enumerate(fmt) if ln.strip() == "if n < 16 {")
+    lmc = (ROOT / "loment/tools/lomc.lomt").read_text(encoding="utf-8").splitlines()
+    lmc_line = 1 + next(i for i, ln in enumerate(lmc) if "o + i < 4000" in ln)
     for f, line, name in (("loment/selfhost/driver.lomt", drv_line, "literal:200"),
-                          ("loment/tools/lomfmt.lomt", 497, "literal:16"),
-                          ("loment/tools/lomc.lomt", 501, "literal:4000")):
+                          ("loment/tools/lomfmt.lomt", fmt_line, "literal:16"),
+                          ("loment/tools/lomc.lomt", lmc_line, "literal:4000")):
         assert (f, line, name) in lits, (
             f"{f}:{line} 的 {name} 没被看见 —— `#770` 的那一处又隐形了")
     arrs = {(r["file"], r["name"]) for r in loment_caps.scan_arrays()}

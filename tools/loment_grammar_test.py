@@ -1634,6 +1634,9 @@ def test_str_num_builtin():
         "fn f(n: u32) -> str {", chr(10),
         "    let s: str = str_num(n);", chr(10),
         "    return s;", chr(10),
+        "}", chr(10), chr(10),
+        "fn g(a: i32) -> str {", chr(10),
+        "    return str_num(a);", chr(10),
         "}", chr(10)])
     with tempfile.TemporaryDirectory() as t:
         td = Path(t)
@@ -1645,6 +1648,7 @@ def test_str_num_builtin():
         ll = lomentc.emit_llvm(mod, ROOT)
         assert "call i32 @__loment_num_to_dec" in ll, ll[-400:]
         assert "define internal i32 @__loment_num_to_dec" in ll, "十进制转换没随 str_num 发出来"
+        assert "sext i32" in ll, "有符号实参没有按符号扩到 i64"
         p2 = td / "nort.lomt"
         p2.write_text(body.replace("choose runtime", "choose no_runtime"),
                       encoding="utf-8", newline=chr(10))

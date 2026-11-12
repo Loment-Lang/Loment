@@ -2869,6 +2869,11 @@ fn chk_tex_atom_call(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 if at != 0 && chk_ty_is_int(at) == 0 {
                     chk_pub(src, t, oc, p, E_TMISMATCH, lo);
                 }
+            } else if chk_tok_is(src, t, lo, "str_num") {
+                // `docs/337`：任意整型（字面量也行），发射时按符号扩到 i64。
+                if at != 0 && chk_ty_is_int(at) == 0 {
+                    chk_pub(src, t, oc, p, E_TMISMATCH, lo);
+                }
             } else if wt != 0 {
                 if at == 0 {
                     if chk_ty_is_int(wt) == 0 {

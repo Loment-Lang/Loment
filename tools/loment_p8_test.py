@@ -3945,6 +3945,9 @@ def test_m103_str_num_twin():
         "fn g(n: u32) -> u32 {", chr(10),
         "    let s: str = str_num(n);", chr(10),
         "    return str_len(s);", chr(10),
+        "}", chr(10), chr(10),
+        "fn h(a: i32, b: u64, c: u8) -> u32 {", chr(10),
+        "    return str_len(str_num(a)) + str_len(str_num(b)) + str_len(str_num(c));", chr(10),
         "}", chr(10)])
     with tempfile.TemporaryDirectory() as td:
         elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_strnum")

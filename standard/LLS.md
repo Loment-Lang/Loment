@@ -1512,7 +1512,7 @@ the user's declarations is E002.
 | `str_byte(s: str, i: u32) -> u32` | the i-th byte |
 | `str_eq(a: str, b: str) -> bool` | content equality |
 | `str_concat(a: str, b: str) -> str` | concatenation; allocates from the runtime arena |
-| `str_num(n: u32) -> str` | unsigned decimal representation; allocates from the runtime arena, so `no_runtime` refuses it by name |
+| `str_num(n) -> str` | decimal representation of any integer type (signed prints `-`); allocates from the runtime arena, so `no_runtime` refuses it by name |
 | `str_ptr(s: str) -> ptr` | data pointer |
 | `print(s: str) -> u32` | write the bytes to stdout |
 | `tur_edition() -> str` | the resolved canonical edition |

@@ -4724,15 +4724,47 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
             }
             return c2 + 1;
         }
-        if tok_is(src, toks, j, "str_num") {   // docs/337: u32 -> 十进制 str
+        if tok_is(src, toks, j, "str_num") {   // docs/337: 任意整型 -> 十进制 str
             let c15: u32 = arg1(s, out, src, toks, j + 2, lvl);
-            let cp: u32 = emit_alloc_lit(s, out, src, toks, 12, lvl + 1, j);
+            let at: u32 = expr_type(s, src, toks, j + 2);
+            let sg: u32 = 0;
+            let bits: u32 = 32;
+            if at != 0 {
+                sg = is_signed(src, toks, at);
+                let b: u32 = ty_bits(src, toks, at);
+                if b != 0 {
+                    bits = b;
+                }
+            }
+            if bits != 64 {
+                emit_str(s, out, "  ");
+                let wv: u32 = new_temp(s, out);
+                emit_str(s, out, " = ");
+                if sg == 1 {
+                    emit_str(s, out, "sext ");
+                } else {
+                    emit_str(s, out, "zext ");
+                }
+                if at != 0 {
+                    emit_ty(s, out, src, toks, at);
+                } else {
+                    emit_str(s, out, "i32");
+                }
+                emit_str(s, out, " ");
+                emit_val(s, out, lvl);
+                emit_str(s, out, " to i64
+");
+                set_temp_val(s, lvl, wv);
+            }
+            let cp: u32 = emit_alloc_lit(s, out, src, toks, 24, lvl + 1, j);
             emit_str(s, out, "  ");
             let ln: u32 = new_temp(s, out);
             emit_str(s, out, " = call i32 @__loment_num_to_dec(ptr %t");
             emit_dec(s, out, cp);
-            emit_str(s, out, ", i32 ");
+            emit_str(s, out, ", i64 ");
             emit_val(s, out, lvl);
+            emit_str(s, out, ", i32 ");
+            emit_dec(s, out, sg);
             emit_str(s, out, ")
   ");
             let l64: u32 = new_temp(s, out);
@@ -12351,7 +12383,7 @@ fn uses_str_num(s: ptr, src: ptr, toks: ptr) -> u32 {
 
 /// `str_num` 的实现：无符号十进制写进调用方给的 12 字节堆块（`docs/337`）。
 fn emit_num_to_dec(s: ptr, out: ptr) -> u32 {
-    return emit_str(s, out, "define internal i32 @__loment_num_to_dec(ptr %out, i32 %v) {\nentry:\n  %buf = alloca [24 x i8]\n  %end0 = getelementptr inbounds [24 x i8], ptr %buf, i64 0, i64 24\n  %x0 = zext i32 %v to i64\n  br label %loop\nloop:\n  %p = phi ptr [ %end0, %entry ], [ %p2, %loop ]\n  %x = phi i64 [ %x0, %entry ], [ %q, %loop ]\n  %d = urem i64 %x, 10\n  %q = udiv i64 %x, 10\n  %c = trunc i64 %d to i8\n  %c2 = add i8 %c, 48\n  %pi = ptrtoint ptr %p to i64\n  %pj = sub i64 %pi, 1\n  %p2 = inttoptr i64 %pj to ptr\n  store i8 %c2, ptr %p2\n  %done = icmp eq i64 %q, 0\n  br i1 %done, label %after, label %loop\nafter:\n  %sp = ptrtoint ptr %p2 to i64\n  %ep = ptrtoint ptr %end0 to i64\n  %ln = sub i64 %ep, %sp\n  %ln32 = trunc i64 %ln to i32\n  call void @__loment_memcpy(ptr %out, ptr %p2, i64 %ln)\n  ret i32 %ln32\n}\n\n");
+    return emit_str(s, out, "define internal i32 @__loment_num_to_dec(ptr %out, i64 %v, i32 %sgn) {\nentry:\n  %buf = alloca [24 x i8]\n  %end0 = getelementptr inbounds [24 x i8], ptr %buf, i64 0, i64 24\n  %z1 = icmp slt i64 %v, 0\n  %z2 = icmp ne i32 %sgn, 0\n  %neg = and i1 %z1, %z2\n  %nv = sub i64 0, %v\n  br i1 %neg, label %negp, label %pos\nnegp:\n  br label %conv\npos:\n  br label %conv\nconv:\n  %x0 = phi i64 [ %nv, %negp ], [ %v, %pos ]\n  br label %loop\nloop:\n  %p = phi ptr [ %end0, %conv ], [ %p2, %loop ]\n  %x = phi i64 [ %x0, %conv ], [ %q, %loop ]\n  %d = urem i64 %x, 10\n  %q = udiv i64 %x, 10\n  %c = trunc i64 %d to i8\n  %c2 = add i8 %c, 48\n  %pi = ptrtoint ptr %p to i64\n  %pj = sub i64 %pi, 1\n  %p2 = inttoptr i64 %pj to ptr\n  store i8 %c2, ptr %p2\n  %done = icmp eq i64 %q, 0\n  br i1 %done, label %after, label %loop\nafter:\n  br i1 %neg, label %sign, label %copy\nsign:\n  %si = ptrtoint ptr %p2 to i64\n  %sj = sub i64 %si, 1\n  %p3 = inttoptr i64 %sj to ptr\n  store i8 45, ptr %p3\n  br label %copy\ncopy:\n  %st = phi ptr [ %p2, %after ], [ %p3, %sign ]\n  %sp = ptrtoint ptr %st to i64\n  %ep = ptrtoint ptr %end0 to i64\n  %ln = sub i64 %ep, %sp\n  %ln32 = trunc i64 %ln to i32\n  call void @__loment_memcpy(ptr %out, ptr %st, i64 %ln)\n  ret i32 %ln32\n}\n\n");
 }
 
 /// 预扫描: 源码里出现过 `/` `%` 运算符 (kind=3 且文本为单字符), 或 `alloc` / `panic`

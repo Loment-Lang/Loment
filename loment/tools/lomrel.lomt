@@ -264,6 +264,7 @@ tools/loment_channel.py
 tools/loment_channel_test.py
 tools/loment_seed.py
 tools/loment_seed_test.py
+tools/loment_fstr.py
 tools/loment_fmt_test.py
 tools/loment_audit.py
 tools/loment_doc_test.py

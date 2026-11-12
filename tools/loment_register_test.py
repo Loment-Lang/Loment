@@ -3,7 +3,7 @@
 #
 # 这条设计有三块，判据也按三块判：
 #
-#   1. **声明本身**（离线）—— 扫描的形状、三条诊断码（E024/E025/E026）、以及**那份
+#   1. **声明本身**（离线）—— 扫描的形状、三条族码的细分码（171..178，族 E024/E025/E026）、以及**那份
 #      官方命令名清单两份实现不许漂**（参考实现是一张元组，自举是一串 `cmd_span_is`；
 #      两边都得等于 `loment commands` 打出来的那批）。
 #   2. **产物名字**（离线）—— `--print-command` 两个实现答得一样；两个启动器模板都
@@ -50,7 +50,7 @@ def _codes(src: str) -> list[int]:
         f.write_text(src, encoding="utf-8", newline="\n")
         msgs = lomentc.check(lomentc.load(f))
     return sorted({int(loment_diag.classify(m)[0][1:]) for m in msgs
-                   if loment_diag.classify(m)[0] != "E999"})
+                   if loment_diag.classify(m)[0] != "E0999"})
 
 
 GOOD = ("module m\n\npub fn loment_command() -> str { return \"mcmd\"; }\n\n"
@@ -65,7 +65,7 @@ GOOD_A = ("module m\n\nregister mcmd {\n"
 
 @test
 def test_the_five_rules_report_the_three_codes():
-    """三条码各钉一边 —— 一个合法的、五个不合法的，码集逐个写死。
+    """每条细码各钉一边 —— 一个合法的、五个不合法的，码集逐个写死。
 
     合法的那个**必须是零码**：一个"看谁都想报"的规则比漏报更糟（它会把正常程序拦下来）。
     """
@@ -79,36 +79,36 @@ def test_the_five_rules_report_the_three_codes():
         # ---- 形态 A：与上面那几条同一批码，只是名字在语法里 --------------------
         "a-bad-name": ('module m\n\nregister "a/b" {\n'
                        "    pub fn command_main(argv: ptr, argc: u32) -> u32 {\n"
-                       "        return 0;\n    }\n}\n", [24]),
-        # 块里再套一个：块**只许一个函数**，所以这是形状不对（E024）—— 不是"最外层说了算"。
+                       "        return 0;\n    }\n}\n", [174]),
+        # 块里再套一个：块**只许一个函数**，所以这是形状不对（E172）—— 不是"最外层说了算"。
         "a-nested": ('module m\n\nregister outer {\n    register inner {\n'
                      "        pub fn command_main(argv: ptr, argc: u32) -> u32 {\n"
-                     "            return 0;\n        }\n    }\n}\n", [24]),
+                     "            return 0;\n        }\n    }\n}\n", [172]),
         "a-no-main": ("module m\n\nregister mcmd {\n"
-                      "    pub fn helper() -> u32 {\n        return 0;\n    }\n}\n", [26]),
+                      "    pub fn helper() -> u32 {\n        return 0;\n    }\n}\n", [176]),
         "decl-no-body": ('module m\n\npub fn loment_command() -> str { return "mcmd"; }\n\n'
-                         "fn helper() -> u32 {\n    return 0;\n}\n", [26]),
+                         "fn helper() -> u32 {\n    return 0;\n}\n", [176]),
         # (源码, 期望码)
         "bad-name": ("module m\n\npub fn loment_command() -> str { return \"a/b\"; }\n\n"
                      "pub fn command_main(argv: ptr, argc: u32) -> u32 {\n    return 0;\n}\n",
-                     [24]),
+                     [174]),
         "reserved-name": ("module m\n\npub fn loment_command() -> str { return \"version\"; }\n\n"
                           "pub fn command_main(argv: ptr, argc: u32) -> u32 {\n    return 0;\n}\n",
-                          [24]),
+                          [173]),
         "bad-shape": ("module m\n\npub fn loment_command() -> str {\n"
                       "    let s: str = \"x\";\n    return s;\n}\n\n"
                       "pub fn command_main(argv: ptr, argc: u32) -> u32 {\n    return 0;\n}\n",
-                      [24]),
+                      [172]),
         "two-entries": ("module m\n\npub fn loment_command() -> str { return \"mcmd\"; }\n\n"
                         "fn _start() {\n    syscall4(60, 0, 0, 0);\n}\n\n"
                         "pub fn command_main(argv: ptr, argc: u32) -> u32 {\n    return 0;\n}\n",
-                        [25]),
+                        [175]),
         "body-no-decl": ("module m\n\n"
                          "pub fn command_main(argv: ptr, argc: u32) -> u32 {\n    return 0;\n}\n",
-                         [26]),
+                         [177]),
         "bad-signature": ("module m\n\npub fn loment_command() -> str { return \"mcmd\"; }\n\n"
                           "pub fn command_main(a: u32, b: u32) -> u32 {\n    return 0;\n}\n",
-                          [26]),
+                          [178]),
     }
     for name, (src, want) in cases.items():
         got = _codes(src)

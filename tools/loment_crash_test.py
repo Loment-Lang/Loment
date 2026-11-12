@@ -33,9 +33,12 @@ SEED = ROOT / "loment" / "build" / "selfhost_driver.ll"
 ADMIT_SRC = ROOT / "loment" / "tools" / "lomadmit.lomt"
 TESTS: list[tuple[str, object]] = []
 
-#: 诊断里必须出现的三种名字（与自举侧同一套码）。
-DEEP = "E23"                     # 嵌套超过 64 层
-UTYPE = "E30"                    # 类型位置上的未知名（嵌套泛型在自举侧就是这个）
+#: 诊断里必须出现的三种名字（与自举侧同一套码；显示宽度见 `docs/338`：< 100 补到三位）。
+DEEP = "E023"                    # 嵌套超过 64 层
+#: 自举侧不认识嵌套泛型实参 / 嵌套数组类型；它报的是**形参类型未知**那一格
+#: （细分后的 E0185，族 E030）。参考实现在这两种形状上**不报**，所以这里钉的是自举侧
+#: 自己的口径，不是对拍。
+UTYPE = "E0185"
 TOO_LARGE = "the unit is too large"
 
 _WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
@@ -205,19 +208,23 @@ def _assert_diagnosed(rc: int, err: str, what: str, marks: tuple[str, ...]) -> N
 def test_deep_parentheses_are_diagnosed_not_signalled():
     """`#868`：200 层括号原先在自举驱动上 SIGSEGV，而 300 层反而报得出。
 
-    两侧都钉：**上限以内照旧接受**（63 层），**到上限就报 E023**，之后每一档都只有
+    两侧都钉：**上限以内照旧接受**（62 层），**到上限就报 E023**，之后每一档都只有
     诊断 —— 不存在"更大的输入换一条路崩掉"。
+
+    **62 而不是 63**：参考实现的计数含函数体与表达式各一层，实测 `paren 63` 它自己就拒
+    （`嵌套超过 64 层`）。自举侧 2026-11-11 起判 `>= 64`（同一接受边界），此前放到 64
+    才拒 —— 这条判据原先写 63 是把**旧的宽松边界**当成了契约。
     """
     if _skip():
         return
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
-        rc, _out, err = _ladder("paren", 63, td)
-        assert rc == 0, f"63 层括号被误拒: rc={rc} {err[-200:]!r}"
-        for n in (64, 100, 200, 300, 400, 1000, 5000):
+        rc, _out, err = _ladder("paren", 62, td)
+        assert rc == 0, f"62 层括号被误拒: rc={rc} {err[-200:]!r}"
+        for n in (63, 64, 100, 200, 300, 400, 1000, 5000):
             rc, _out, err = _ladder("paren", n, td)
             _assert_diagnosed(rc, err, f"paren {n}", (DEEP, TOO_LARGE))
-    print("      括号：63 接受；64..5000 一律 E023 / 容量诊断")
+    print("      括号：62 接受；63..5000 一律 E023 / 容量诊断")
 
 
 @test
@@ -256,9 +263,9 @@ def test_deep_unary_chain_is_diagnosed_not_signalled():
 def test_deep_generic_arguments_are_diagnosed_not_signalled():
     """`#871`：256 层 `G<G<...>>` 原先 SIGSEGV（128 层反而报得出）。
 
-    自举侧的检查器不认识嵌套泛型实参，报的是 E030「类型位置上的未知名」（参考实现
-    也报"未知类型 G<G<…>"）。这条只要求**每一档都有诊断、没有信号** —— 码可以是
-    E030，也可以是容量诊断。
+    自举侧的检查器不认识嵌套泛型实参，报的是 E0185「形参的类型未知」（参考实现在这类
+    形状上不报）。这条只要求**每一档都有诊断、没有信号** —— 码可以是 E0185，
+    也可以是容量诊断。
     """
     if _skip():
         return
@@ -267,7 +274,7 @@ def test_deep_generic_arguments_are_diagnosed_not_signalled():
         for n in (16, 64, 128, 256, 1000, 5000):
             rc, _out, err = _ladder("generic", n, td)
             _assert_diagnosed(rc, err, f"generic {n}", (UTYPE, DEEP, TOO_LARGE))
-    print("      泛型实参：16..5000 一律 E030 / E023 / 容量诊断")
+    print("      泛型实参：16..5000 一律 E0185 / E023 / 容量诊断")
 
 
 @test
@@ -275,7 +282,7 @@ def test_deep_array_types_are_diagnosed_not_signalled():
     """`#873`：256 层 `[[[...u32...]]]` 原先 SIGSEGV。
 
     自举侧的类型检查 `check_type` 对 `[` 是递归的 —— 括号深度那一趟必须先把它挡住。
-    **注意**：自举侧本来就不认识嵌套数组类型（`[[u32]]` 起就报 E030），所以这里不断言
+    **注意**：自举侧本来就不认识嵌套数组类型（`[[u32]]` 起就报 E0185），所以这里不断言
     "上限以内接受"：它要钉的只是"每一档都有诊断、没有信号"。
     """
     if _skip():
@@ -285,22 +292,25 @@ def test_deep_array_types_are_diagnosed_not_signalled():
         for n in (2, 4, 63, 64, 128, 256, 512, 1000):
             rc, _out, err = _ladder("array_type", n, td)
             _assert_diagnosed(rc, err, f"array_type {n}", (UTYPE, DEEP, TOO_LARGE))
-    print("      数组类型：2..1000 一律 E030 / E023 / 容量诊断")
+    print("      数组类型：2..1000 一律 E0185 / E023 / 容量诊断")
 
 
 @test
 def test_deep_index_expressions_are_diagnosed_not_signalled():
-    """`#874`：256 层 `a[a[a[...]]]` 原先 SIGSEGV（128 层反而接受）。"""
+    """`#874`：256 层 `a[a[a[...]]]` 原先 SIGSEGV（128 层反而接受）。
+
+    62 而不是 63：与括号同一条（参考实现的计数多起一层，`index 63` 它自己就拒）。
+    """
     if _skip():
         return
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
-        rc, _out, err = _ladder("index", 63, td)
-        assert rc == 0, f"63 层下标被误拒: rc={rc} {err[-200:]!r}"
-        for n in (64, 128, 256, 512, 1000):
+        rc, _out, err = _ladder("index", 62, td)
+        assert rc == 0, f"62 层下标被误拒: rc={rc} {err[-200:]!r}"
+        for n in (63, 64, 128, 256, 512, 1000):
             rc, _out, err = _ladder("index", n, td)
             _assert_diagnosed(rc, err, f"index {n}", (DEEP, TOO_LARGE))
-    print("      下标：63 接受；64..1000 一律 E023 / 容量诊断")
+    print("      下标：62 接受；63..1000 一律 E023 / 容量诊断")
 
 
 @test

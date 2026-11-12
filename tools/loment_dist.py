@@ -189,7 +189,7 @@ find_lomelf() {
 # A failure that is not written as a record before it happens is invisible to `lomenterr`
 # by construction. The launcher is the one layer that always survives: a shell reports a
 # signal as 128+N, so it can name what killed the tool and synthesize a record that the
-# renderer *can* read. The code is E900 (internal range, separate from every user-facing
+# renderer *can* read. The code is E0900 (internal range, separate from every user-facing
 # code) - "a tool died before it could report".
 signal_name() {
     case "$1" in
@@ -234,9 +234,9 @@ synthesize_diag() {
         _smsg="$_st exited with status $_src"
     fi
     _smsg="$_smsg and wrote no diagnostic record"
-    printf '{"file":"%s","line":0,"col":0,"code":"E900","message":"%s"}\n' \
+    printf '{"file":"%s","line":0,"col":0,"code":"E0900","message":"%s"}\n' \
         "$_st" "$_smsg" > "$_sf" 2>/dev/null
-    printf 'loment: %s [E900]\n' "$_smsg" >> "$_se" 2>/dev/null
+    printf 'loment: %s [E0900]\n' "$_smsg" >> "$_se" 2>/dev/null
 }
 
 # Diagnostics. The driver writes its own plain summary to stderr AND, with `--diag-out`,
@@ -266,9 +266,9 @@ report_diags() {
         _sn=$(signal_name "$drc")
         [ -n "$_sn" ] && _sn=" ($_sn)"
         _sm="$dwho was killed by signal $((drc - 128))$_sn after writing some diagnostics; what is shown below may be incomplete"
-        printf '{"file":"%s","line":0,"col":0,"code":"E900","message":"%s"}\n' \
+        printf '{"file":"%s","line":0,"col":0,"code":"E0900","message":"%s"}\n' \
             "$dwho" "$_sm" >> "$dfile" 2>/dev/null
-        printf 'loment: %s [E900]\n' "$_sm" >> "$derr" 2>/dev/null
+        printf 'loment: %s [E0900]\n' "$_sm" >> "$derr" 2>/dev/null
     fi
     if [ -s "$dfile" ] && tool lomenterr >/dev/null 2>&1; then
         # Word-splitting on $rflags is intentional: empty -> no argument at all, and two
@@ -283,9 +283,9 @@ report_diags() {
         if [ $rrc -gt 128 ]; then
             rsig=$(signal_name "$rrc")
             [ -n "$rsig" ] && rsig=" ($rsig)"
-            echo "loment: lomenterr died (status $rrc$rsig) while rendering $dfile [E900]" >&2
+            echo "loment: lomenterr died (status $rrc$rsig) while rendering $dfile [E0900]" >&2
         else
-            echo "loment: lomenterr failed (status $rrc) while rendering $dfile [E900]" >&2
+            echo "loment: lomenterr failed (status $rrc) while rendering $dfile [E0900]" >&2
         fi
         [ -s "$derr" ] && cat "$derr" >&2
         return 0
@@ -1296,7 +1296,7 @@ rem %1 = the --diag-out JSONL, %2 = the driver's captured stderr, %3 = renderer 
 rem %4 = the tool's exit status, %5 = the tool's name.
 rem
 rem #773: the channel that exists BEFORE the compiler has a diagnostics sink. A tool that
-rem failed and left no record is synthesized here as one E900 line (line 0 = no position,
+rem failed and left no record is synthesized here as one E0900 line (line 0 = no position,
 rem docs/256) so a crash cannot look like "nothing to report". Then, as before, the driver's
 rem plain summary is used only when the renderer is absent -- and we SAY so.
 rem
@@ -1332,12 +1332,12 @@ if "%rrc%"=="0" exit /b 0
 if "%rrc%"=="1" exit /b 0
 rem The renderer itself failed -- the same boundary one level down (#773). Say it, and
 rem still show the plain lines: never lose the underlying error.
-echo loment: lomenterr failed (status %rrc%) while rendering %~1 [E900] 1>&2
+echo loment: lomenterr failed (status %rrc%) while rendering %~1 [E0900] 1>&2
 if exist "%~2" type "%~2" 1>&2
 exit /b 0
 
 rem %1 = the --diag-out file, %2 = the tool's plain stderr file, %3 = tool name,
-rem %4 = the exit status cmd just saw. Writes one JSONL record (E900) and appends a plain
+rem %4 = the exit status cmd just saw. Writes one JSONL record (E0900) and appends a plain
 rem line for the no-renderer fallback. Every message is ASCII (docs/169 sec 3a).
 :synthesize_diag
 set "stool=%~3"
@@ -1351,14 +1351,14 @@ if "%sstat%"=="-1073741571" set "smsg=%stool% was killed by a stack overflow"
 if "%sstat%"=="-1073740791" set "smsg=%stool% was killed by a stack buffer overrun"
 if not defined smsg set "smsg=%stool% exited with status %sstat%"
 set "smsg=%smsg% and wrote no diagnostic record"
-echo {"file":"%stool%","line":0,"col":0,"code":"E900","message":"%smsg%"} > "%~1"
-echo loment: %smsg% [E900] >> "%~2"
+echo {"file":"%stool%","line":0,"col":0,"code":"E0900","message":"%smsg%"} > "%~1"
+echo loment: %smsg% [E0900] >> "%~2"
 exit /b 0
 
 rem %1 = the --diag-out file, %2 = the tool's plain stderr file, %3 = tool name, %4 = the
 rem status cmd just saw. #673: the tool was killed AFTER it had already written records.
 rem Rendering those alone reads as an ordinary compile error and hides that the compiler
-rem never finished -- so append one E900 record (line 0 = no position, docs/256) that says
+rem never finished -- so append one E0900 record (line 0 = no position, docs/256) that says
 rem so, in every output mode (full / --short / --json).
 :crash_note
 set "ctool=%~3"
@@ -1375,8 +1375,8 @@ if "%cst%"=="-1073741571" set "cwhy=was killed by a stack overflow"
 if "%cst%"=="-1073740791" set "cwhy=was killed by a stack buffer overrun"
 if not defined cwhy set "cwhy=failed (status %cst%)"
 set "cmsg=%ctool% %cwhy% after writing some diagnostics; what is shown below may be incomplete"
-echo {"file":"%ctool%","line":0,"col":0,"code":"E900","message":"%cmsg%"} >> "%~1"
-echo loment: %cmsg% [E900] >> "%~2"
+echo {"file":"%ctool%","line":0,"col":0,"code":"E0900","message":"%cmsg%"} >> "%~1"
+echo loment: %cmsg% [E0900] >> "%~2"
 exit /b 0
 
 rem %1 = one argument from the command line; sets csrc (the only non-command, non-flag

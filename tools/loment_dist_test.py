@@ -942,7 +942,7 @@ def test_windows_installer(zipf: Path) -> None:
     blob_max = (r_max.stderr or "") + (r_max.stdout or "")
     check("装完后 `loment check FILE --max 1` 是截断，不是用法错",
           r_max.returncode == 1 and "usage: lomenterr" not in blob_max
-          and "error[E002]" in blob_max,
+          and "error[E091]" in blob_max,     # 未声明的变量 = E091（`docs/338`）
           f"rc={r_max.returncode} err={blob_max[:120]}")
 
     # ★ 全链判据: `loment run` 在本机编出 PE 并跑起来 —— 这才是"去 WSL"的意义

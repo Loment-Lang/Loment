@@ -270,7 +270,7 @@ llvm-objdump -d -l --debug-vars=ascii x.o | sed -n '/<fib>:/,/^$/p'
 | M61 测试 | `RESULT: 4/4 PASS`，失败退出码 1 | ✅ |
 | M62 基准 | Rust vs IR 对照表（`bench_fib` 2.46x） | ✅ |
 | M63 覆盖率 | `COV 6/31 19.4%` 可复现 | ✅ |
-| M64 诊断 | 13 类错误各有码 + 建议（无 E999） | ✅ |
+| M64 诊断 | 13 类错误各有码 + 建议（无 E0999） | ✅ |
 | M65/M66 增量与缓存 | 冷 82.6ms → 热 9.0ms（9.2x），16/16 命中 | ✅ |
 
 门禁：`loment_tools_test` **11/11** · `ci.py --static-only` **7/7** · `potato_cross` 51/51

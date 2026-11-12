@@ -47,7 +47,7 @@ loment/lib/mem.lomt 0 5
 loment/lib/num.lomt 0 0
 loment/selfhost/ir_for.lomt 0 0
 loment/selfhost/ir_mem.lomt 0 0
-loment/tools/lomcli.lomt 0 723
+loment/tools/lomcli.lomt 0 721
 loment/tools/lomsyscalls.lomt 0 34
 lompi/store/host/0.1.0/fs.lomt 0 9
 lompi/store/std/0.1.0/f64bits.lomt 0 0

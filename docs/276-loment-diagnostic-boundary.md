@@ -34,7 +34,7 @@
 ### 1.2 记录的形状
 
 ```json
-{"file":"loment-driver","line":0,"col":0,"code":"E900","message":"loment-driver was killed by signal 11 (SIGSEGV) and wrote no diagnostic record"}
+{"file":"loment-driver","line":0,"col":0,"code":"E0900","message":"loment-driver was killed by signal 11 (SIGSEGV) and wrote no diagnostic record"}
 ```
 
 * `line: 0` = **没有源码位置**。这与 `docs/256` 那三条（E031..E033）同一个口径：
@@ -46,10 +46,10 @@
   cmd 侧拿到的是 NTSTATUS（`0xC0000005` 等），按字符串比较翻成 access violation /
   illegal instruction / divide by zero / stack overflow。
 
-### 1.3 为什么是 E900，而不是下一个 E0xx
+### 1.3 为什么是 E0900，而不是下一个 E0xx
 
 **码按修法分**（本仓老规矩）。E0xx 说的是"你的源码哪一处要改"（1..35 用户码）
-或"这一版还没实现"（E023）。E900 说的是"**实现自己崩了**"——用户能做的事完全不同
+或"这一版还没实现"（E023）。E0900 说的是"**实现自己崩了**"——用户能做的事完全不同
 （报缺陷，而不是改那一行）。而且用户码段有一条"从 1 起连续、`n_codes()` 是上界"的
 不变式：把 900 塞进去会让 `loment codes` 从 36 到 899 印出几百行空标题。
 
@@ -71,7 +71,7 @@ internal_hi()  -> 900
 
 * 0 / 1 = 正常（无诊断 / 有诊断）；
 * 其他 = 渲染器失败。打一行
-  `loment: lomenterr died (status 139 (SIGSEGV)) while rendering <file> [E900]`，
+  `loment: lomenterr died (status 139 (SIGSEGV)) while rendering <file> [E0900]`，
   **并把编译器的裸行照旧打出来** —— 渲染器坏了不能让底层错误跟着消失。
 
 这就是同一个边界往下一层：**替渲染器收尸的是启动器**。再往下一层（启动器自己崩）
@@ -83,7 +83,7 @@ internal_hi()  -> 900
 跑**真启动器 + 一个 `kill -SEGV $$` 的桩驱动**，三种组合：
 
 1. 有渲染器（桩渲染器 `cat` 出它收到的文件）：记录必须真的出现在 JSONL 里，
-   `code == "E900"`、`line == 0`、`file == "loment-driver"`、消息含 `SIGSEGV`；
+   `code == "E0900"`、`line == 0`、`file == "loment-driver"`、消息含 `SIGSEGV`；
 2. 没有渲染器：同一句话以裸行出现，并且明说"这个包里没有 lomenterr"；
 3. 渲染器自己崩：启动器说出它死了，**且**仍然打出底层的 `loment-driver was killed`。
 
@@ -175,9 +175,9 @@ E023 @<行>  the self-hosted emitter cannot lower a call with more than 20 argum
   通道 + 一个代表样本。全量枚举要先把发射器的拒绝点从"散落在 6k 行里的分支"变成
   一张**可数的表**——那是下一轮的结构性工作。
 * **OS 拒绝（ENOSPC / EACCES）本身没有记录**。`--diag-out PATH` 打不开时启动器
-  仍然只有一句 `exit 2`；它没死，所以不触发 E900。要给它一个码，得先定义"诊断文件
+  仍然只有一句 `exit 2`；它没死，所以不触发 E0900。要给它一个码，得先定义"诊断文件
   写不出去时诊断该写到哪里"——那是一个自指问题。
-* **启动器自己崩**没有收尸人。shell / OS 只给退出码。E900 覆盖的是"启动器还活着、
+* **启动器自己崩**没有收尸人。shell / OS 只给退出码。E0900 覆盖的是"启动器还活着、
   工具死了"这一层。
 * **报错器的渲染上限/截断**（`--max`、1 MiB、16,397 字节）不是这一条边界：记录存在，
   是渲染层丢的。`docs/182` §15 已经让那些情形**说出来**（"还剩 N 条"、"被截断"）。

@@ -30,6 +30,7 @@ choose lms_full               // all seven (default)
 choose lms_forensic_admin     // 1 + 2 + 3 + 4
 choose lms_daily_admin        // 1 + 3 + 4
 choose lms_manage_only_admin  // 2
+choose lms_close_admin         // 0（七级全关）
 ```
 
 The direction is reversed: the default is **full**, and writing any other tier is a downgrade.

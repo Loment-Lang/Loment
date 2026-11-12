@@ -698,7 +698,7 @@ def test_m64_diagnostics_have_codes_and_hints():
         assert errs, f"{name}: 应当报错"
         diags = loment_diag.diagnose(errs)
         for d in diags:
-            assert d["code"] != "E999", f"{name}: 未分类 {d['message']}"
+            assert d["code"] != "E0999", f"{name}: 未分类 {d['message']}"
             assert d["hint"], f"{name}: 缺建议"
             codes.add(d["code"])
     assert len(codes) >= 10, sorted(codes)
@@ -709,9 +709,9 @@ def test_m64_all_reference_messages_are_classified():
     """分类表**完整覆盖**参考实现能发出的每一条消息模板。
 
     为什么要这条: 自举 checker 与参考实现的对照判据是"码集相等", 而码是从消息**分类**
-    来的 —— 分类表漏一条, 那条规则在对照里就变成"两边都看不见"(都成了 E999 被丢掉),
+    来的 —— 分类表漏一条, 那条规则在对照里就变成"两边都看不见"(都成了 E0999 被丢掉),
     缺口会**静默消失**。这里用 ast 把 lomentc.py 里的消息模板抽出来, 逐个渲染成样例
-    消息再分类, 任何一条落到 E999 就算回归。
+    消息再分类, 任何一条落到 E0999 就算回归。
 
     **2026-09-17 补第二个通道**: 原先只抽 `errs.append(...)`（`check()` 的语义错误）,
     于是 `raise LomError(...)`（词法/解析/装载期）**一条都没被覆盖过** —— 实测 50 条里
@@ -762,7 +762,7 @@ def test_m64_all_reference_messages_are_classified():
             s = line.strip()
             if not s:
                 continue
-            if loment_diag.classify(s)[0] == "E999":
+            if loment_diag.classify(s)[0] == "E0999":
                 bad.append(s)
     assert not bad, "未分类的参考消息模板:\n  " + "\n  ".join(sorted(set(bad)))
     print(f"      参考消息模板 {len(tpls)} 条全部有错误码")
@@ -812,12 +812,12 @@ def test_code_tables_cover_the_same_codes():
     assert ruled == ascii_, (
         f"只在 RULES 里: {sorted(ruled - ascii_)}; 只在 ASCII 表里: {sorted(ascii_ - ruled)}")
     assert 0 not in ruled, "有码解不出数字"
-    # **两段各自从起点连续**（`#773`）：用户码 1..max 与内部码 E900..max 分开编号。
+    # **两段各自从起点连续**（`#773`）：用户码 1..max 与内部码 E0900..max 分开编号。
     # `surface_data.n_codes()` 只给**用户码**的上界，而 `lomcli` 的 `codes`/`explain`
     # 拿它当 `1..n_codes()` 的循环上界用 —— 那只有在用户码连续时才等价；40..899
     # 这种空号不许出现，否则 `codes` 会印出一行行空标题。内部码另起一段，同样连续。
     user = {c for c in ruled if not loment_diag.is_internal_code(c)}
-    # `E999` 是**兜底码**（没有任何规则命中时才落到它，见 `loment_diag` 里那条恒假的规则）。
+    # `E0999` 是**兜底码**（没有任何规则命中时才落到它，见 `loment_diag` 里那条恒假的规则）。
     # 它按设计钉在区间顶端，不属于"内部码从 900 起连续"那条不变式 —— 生成器那边同样
     # 排除它（`FALLBACK`）。不排除的话，加一条兜底规则就会把这条判据判红。
     fallback = 999
@@ -1021,7 +1021,7 @@ def test_m64_structured_diagnostics_are_jsonl():
     """
     cases = [
         # (源码, 期望的码) —— 一条走 check(), 一条走 LomError
-        ("module m\n\nchoose std\nchoose no_std\n\nfn f() -> u32 {\n    return 1;\n}\n", "E022"),
+        ("module m\n\nchoose std\nchoose no_std\n\nfn f() -> u32 {\n    return 1;\n}\n", "E0159"),
         ("module m\n\nfn f() -> u32 {\n    return 1;\n}\n@@@\n", "E019"),
     ]
     with tempfile.TemporaryDirectory() as t:
@@ -1040,7 +1040,7 @@ def test_m64_structured_diagnostics_are_jsonl():
             recs = [json.loads(x) for x in lines]   # 一行一条，每行都是完整 JSON
             for d in recs:
                 assert set(d) == set(lomentc.DIAG_FIELDS), (set(d), lomentc.DIAG_FIELDS)
-                assert d["code"] != "E999", d
+                assert d["code"] != "E0999", d
             assert recs[0]["code"] == want, (recs[0]["code"], want)
     print("      结构化诊断: 一行一条 JSON, 字段齐全, check/LomError 两条通道都覆盖")
 
@@ -1049,7 +1049,7 @@ def test_m64_structured_diagnostics_are_jsonl():
 def test_e019_parse_errors_are_classified():
     """解析期消息有自己的码 (E019), 而且**不抢** E001 的活。
 
-    原先解析期消息一条都不在分类表里 —— `loment diag` 把它们显示成 E999「未分类, 请报告」,
+    原先解析期消息一条都不在分类表里 —— `loment diag` 把它们显示成 E0999「未分类, 请报告」,
     可它恰恰是新手最常撞上的一类 (`match` 臂写成表达式、无值 `return`、漏分号)。
     这条同时钉住**顺序**: E001 的模式里有「期望」二字, E019 若排在它前面就会把类型错也吞掉。
     """
@@ -1057,8 +1057,8 @@ def test_e019_parse_errors_are_classified():
     assert loment_diag.classify("5:1: 期望 ;，得到 'capability'")[0] == "E019"
     assert loment_diag.classify("7:17: 期望 {，得到 '0'")[0] == "E019"
     assert loment_diag.classify("4:11: 期望表达式，得到 ';'")[0] == "E019"
-    assert loment_diag.classify("实参类型 u32，期望 bool")[0] == "E001"
-    assert loment_diag.classify("调用未定义的函数 pick")[0] == "E002"
+    assert loment_diag.classify("实参类型 u32，期望 bool")[0] == "E054"
+    assert loment_diag.classify("调用未定义的函数 pick")[0] == "E096"
 
 
 @test

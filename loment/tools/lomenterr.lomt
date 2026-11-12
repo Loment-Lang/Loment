@@ -1042,13 +1042,15 @@ fn after_visible(src: ptr, s: u32, n: u32) -> u32 {
 
 /// "E022" -> 22。取不出数字就是 0 (调用方据此走"未知码"那条,**不静默**)。
 fn code_num(ctx: ptr, off: u32, n: u32) -> u32 {
-    // 只认 `E` + 1..3 位数字（`E002`，大小写都收）。别的形状一律当"解不出"（返回 0）：
+    // 只认 `E` + 1..4 位数字（`E002` / `E0100`，大小写都收）。别的形状一律当"解不出"
+    // （返回 0）：
     //
     //   * `34`（没有 `E`）—— 原先会解成 34，**正好撞上真实的 E034**，于是渲染出一张
     //     跟这条诊断毫无关系的卡片（`#662`）；
     //   * `E4294967298` —— 数字在 u32 里回绕成 2，索到 E002 的卡片上（`#667`）。
     //
-    // 判据是**形状**而不是"今天码表到几"：渲染器不该知道码表的上界，多一个码不该改这里。
+    // **4 位是 2026-11-10 细分码带来的**：< 100 写 `E0xx`（`E042`），>= 100 写 `E0xxx`
+    // （`E0100`）。判据仍然是**形状**而不是"今天码表到几"：渲染器不该知道码表的上界。
     let v: u32 = 0;
     let nd: u32 = 0;
     let saw_e: u32 = 0;
@@ -1062,7 +1064,7 @@ fn code_num(ctx: ptr, off: u32, n: u32) -> u32 {
                 return 0;
             }
             nd = nd + 1;
-            if nd > 3 {
+            if nd > 4 {
                 return 0;
             }
             v = v * 10 + (c - 48);
@@ -2186,6 +2188,10 @@ fn em_code(ctx: ptr, o: u32, cnum: u32) -> u32 {
         o = em_byte(ctx, o, 48);
         return em_u32(ctx, o, cnum);
     }
+    if cnum < 1000 {
+        o = em_byte(ctx, o, 48);      // >= 100 也补一位 0（`E0100`，与 loment_diag 同形）
+        return em_u32(ctx, o, cnum);
+    }
     return em_u32(ctx, o, cnum);
 }
 
@@ -2921,7 +2927,7 @@ fn h_more(ctx: ptr) -> u32 {
         return 0;
     }
     // **只指路到真讲得出来的码**（`#487`）：编译器可以吐出表面数据表里没有的码
-    // （旧报错器遇上新编译器、或别的工具写进来的 E999），而 `loment explain` 对它只会
+    // （旧报错器遇上新编译器、或别的工具写进来的 E0999），而 `loment explain` 对它只会
     // 回一句 `(unknown code)` —— 那种指针比不说更坏。表里有卡片的判据是
     // `code_nfix > 0`，与 `h_card` 同一条。
     let known: u32 = 0;
@@ -3052,7 +3058,7 @@ fn _start() -> u32 {
                     // **`--json` 的流必须是合法 JSONL**（`#478`）：一行坏数据进去，
                     // 出来仍然是一个可解析的对象。形状与诊断对象**明显不同** —— 没有
                     // code / line / col，因为这条记录唯一的事实就是"这一行读不懂"；
-                    // 硬造一个 E999 会让下游把它当成一条真诊断（`loment explain` 也
+                    // 硬造一个 E0999 会让下游把它当成一条真诊断（`loment explain` 也
                     // 讲不出来，而那正是 `#487` 刚清掉的东西）。
                     let j: u32 = em(ctx, 0, "{\"broken\":true,\"text\":");
                     j = json_span(ctx, j, ptr_add(dg, s), e - s);
@@ -3113,7 +3119,7 @@ fn _start() -> u32 {
                     let hlen: u32 = (hint % 4294967296) as u32;
                     store32(ctx, C_TOKOFF, at);
                     store32(ctx, C_TOKLEN, hlen);
-                    if cnum == 2 {
+                    if code_family(cnum) == 2 {
                         sug_collect(ctx, sr, srl, ptr_add(sr, at), hlen);
                     }
                 }

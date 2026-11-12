@@ -1,5 +1,14 @@
 // loment/selfhost/driver.lomt — M83/M85: 独立的自举编译器 (docs/145/150)
 //
+// ---------------------------------------------------------------------------
+// HOLY SHIT, WHAT OF SHIT
+//
+// 这一份源码**就是**那门语言的编译器：它自己装载单元、自己解析、自己检查类型、自己
+// 发射 LLVM IR —— 全程不借任何别的语言。把它的产物交给 clang 得到的 stage1 还能再编
+// 它自己，一路到定点（docs/159）；而那个 IR 必须与参考实现**逐字节相同**（docs/158 §5）。
+// 编译器写自己、又被自己编译，两份实现的输出还要一个空格都不差。
+// ---------------------------------------------------------------------------
+//
 //   ./fujoc-s loment/examples/demo.lomt > demo.ll
 //
 // 它自己做**全部装载** —— 这是它不再是"被夹具喂单元的函数"的关键:
@@ -414,10 +423,14 @@ fn wdiag_tail(fd: u64, scr: ptr, file: ptr, fnam: u32,
     // `loment_diag.RULES`(唯一真源), 那里就是三位; CLI 显示成 `E22` 是**呈现层**的事。
     // 这条是判据**第一次跑就抓出来的**: 原先这里直接 wdec, 报
     // "自举 ['E22'] vs 参考 ['E022']" —— 同一件事两个实现给出不同的字符串。
+    // 2026-11-10 起码表细分（`docs/338`）：< 100 是 `E0xx`、>= 100 是 `E0xxx`，
+    // 所以 100..999 也要补一位。
     if code < 10 {
         let _p1: u64 = wstr(fd, "00");
-    } else if code < 100 {
-        let _p2: u64 = wstr(fd, "0");
+    } else {
+        if code < 1000 {
+            let _p2: u64 = wstr(fd, "0");
+        }
     }
     let _f: u64 = wdec(fd, scr, code);
     let _g: u64 = wstr(fd, "\",\"message\":");
@@ -508,6 +521,12 @@ fn rt_phrase(slot: ptr, toks: ptr, tk: u32) -> str {
 /// 其余的 `E19` 照旧退回 token 原文：那里分不出是哪一种语法错，编一句更具体的话
 /// 反而会**指错**（与"错要指在错的地方"同一条纪律）。
 fn err_phrase(slot: ptr, toks: ptr, tk: u32, code: u32) -> str {
+    // match 级诊断统一落在 `match` 那一行（`checker.chk_match`），token 就是 `match`：
+    // 具体是哪一种（无此变体 / 重复 / 不穷尽 / 载荷元数）在 token 上分不出来，正文给
+    // 一句通用说法，与参考实现那几条消息同一个意思。细分码 111–118 全属 E008。
+    if code >= 111 && code <= 118 && tok_is(slot, toks, tk, "match") {
+        return "match 的模式不合法，或漏了变体 —— 每个变体写一个臂，或用 `_` 通配";
+    }
     if code == 23 {
         return "嵌套超过 64 层 —— 编译器是递归下降的，再深就要把栈用穿了；把中间那几层提成函数，或把这段拆开";
     }
@@ -1898,7 +1917,8 @@ fn core_word_bit(p: ptr, n: u32) -> u32 {
     }
     if pkg_eq(p, n, "lms_full") == 1 || pkg_eq(p, n, "lms_forensic_admin") == 1
             || pkg_eq(p, n, "lms_daily_admin") == 1
-            || pkg_eq(p, n, "lms_manage_only_admin") == 1 {
+            || pkg_eq(p, n, "lms_manage_only_admin") == 1
+            || pkg_eq(p, n, "lms_close_admin") == 1 {
         return 32;
     }
     if pkg_eq(p, n, "lspe_open_admin") == 1 || pkg_eq(p, n, "lspe_close_admin") == 1 {
@@ -3004,6 +3024,13 @@ fn _start() -> u32 {
         wdiag_file(dfd, scr, ap, an, 33, str_ptr(dm), str_len(dm));
         return fail(dm);
     }
+    // **用户源最后一行的行号**：预置枚举是**追加**在后面的（`append_prelude`），它会把
+    // EOF 的行号推后好几行。诊断不许指到用户文件之外（与 `#1521` 同一类）—— 渲染时按
+    // 这一行夹住。`nt0` 至少为 1（词法必发 eof）。
+    let uline: u32 = 0;
+    if nt0 > 0 {
+        uline = load32(toks2, (nt0 - 1) * 20 + 12);
+    }
     // **文件必须以 `module` 开头，而且名字要写在同一行**（`#24`）。
     // 自举这一侧原先**没有这一条**：少了那一行的单元会一路走到 codegen —— 而 codegen
     // 假设"第一个记号就是 `module`、第二个就是它的名字"，于是**编译器自己段错误**
@@ -3194,56 +3221,130 @@ fn _start() -> u32 {
         while e < ne2 {
             let code: u32 = load32(errs, e * 8);
             let tk: u32 = load32(errs, e * 8 + 4);
+            // 开关规则那几条（`e >= ne`）的第二格**不是 token 下标**：压缩把 `choose`
+            // 构造整段删掉了，下标落在压缩后的流上没有意义。`< SW_PACK` 是表项下标
+            // （行号与名字都由它取）；`>= SW_PACK` 是 `SW_PACK + 行号`（嵌套 / 超限，
+            // 没有表项）。其余诊断照旧从 token 取行号。
+            let is_sw: u32 = 0;
+            if e >= ne {
+                is_sw = 1;
+            }
+            // **先分支再读 token**：开关那几条的第二格可能带 `SW_PACK` 高位，拿它去
+            // 索引 `ctoks`（乘 20）会越界读。
+            let line: u32 = 0;
+            let swent: u32 = SW_NONE;
+            if is_sw == 1 {
+                // 2147483648 = `switches.SW_PACK`（写字面量：`常量 == 字面量` 踩过 #224）。
+                if tk >= 2147483648 {
+                    line = tk - 2147483648;
+                } else {
+                    swent = tk;
+                    line = load32(sw, tk * 16 + 12);
+                }
+            } else {
+                line = load32(ctoks, tk * 20 + 12);
+            }
+            // 诊断不许指到**用户文件**之外：预置枚举追加在源尾，EOF 的行号被推后了
+            // （"块没闭合"于是报在 9 行而参考报 5 行）。夹在用户源的 EOF 行上。
+            if uline != 0 && line > uline {
+                line = uline;
+            }
             wstr(2, "  E");
+            // 与 JSONL 那一份同一种形状：< 100 补两位、>= 100 补一位（`docs/338`）。
+            if code < 10 {
+                let _q1: u64 = wstr(2, "00");
+            } else {
+                if code < 1000 {
+                    let _q2: u64 = wstr(2, "0");
+                }
+            }
             wdec(2, scr, code);
             wstr(2, " @");
             wdec(2, scr, tk);
             wstr(2, " line ");
-            wdec(2, scr, load32(ctoks, tk * 20 + 12));
+            wdec(2, scr, line);
             wstr(2, ": ");
-            let st: u32 = load32(ctoks, tk * 20 + 4);
-            let ln: u32 = load32(ctoks, tk * 20 + 8);
-            // `E031`（这一档是 `no_runtime`，而这个构造要运行期）：正文写成**那句话**，
-            // 不是那一格 token（issue #321）。码是**专属**的（不再与 `choose` 共用 E022），
-            // `str_len(ph) > 0` 只是"那格 token 在名单里"的兜底，照旧走 token 原文。
-            let ph: str = rt_phrase(unit, ctoks, tk);
+            let st: u32 = 0;
+            let ln: u32 = 0;
+            let ph: str = "";
+            let ph2: str = "";
             let isrt: u32 = 0;
-            if code == 31 && str_len(ph) > 0 {
-                isrt = 1;
+            if is_sw == 0 {
+                st = load32(ctoks, tk * 20 + 4);
+                ln = load32(ctoks, tk * 20 + 8);
+                // `E031`（这一档是 `no_runtime`，而这个构造要运行期）：正文写成**那句话**，
+                // 不是那一格 token（issue #321）。码是**专属**的（不再与 `choose` 共用 E022），
+                // `str_len(ph) > 0` 只是"那格 token 在名单里"的兜底，照旧走 token 原文。
+                ph = rt_phrase(unit, ctoks, tk);
+                if code == 31 && str_len(ph) > 0 {
+                    isrt = 1;
+                }
+                // `#702`: 解析类的那几条也要说得出**是什么构造**（裸 return / 嵌套上限 /
+                // 裸块），正文不是那一格 token 原文。与 E031 的 `rt_phrase` 同一处分岔。
+                ph2 = err_phrase(unit, ctoks, tk, code);
             }
-            // `#702`: 解析类的那几条也要说得出**是什么构造**（裸 return / 嵌套上限 /
-            // 裸块），正文不是那一格 token 原文。与 E031 的 `rt_phrase` 同一处分岔。
-            let ph2: str = err_phrase(unit, ctoks, tk, code);
             let take: u32 = 24;
             if ln < 24 {
                 take = ln;
             }
-            if isrt == 1 {
-                write_all(2, str_ptr(ph), str_len(ph) as u64);
-            } else {
-                if str_len(ph2) > 0 {
-                    write_all(2, str_ptr(ph2), str_len(ph2) as u64);
+            if is_sw == 1 {
+                // 表项还在：正文就是那个开关的名字（`unit` 是**未压缩**的源文本，
+                // 名字的起点/长度仍然有效）。没有表项的两种给一句固定说法。
+                if swent != SW_NONE {
+                    write_all(2, ptr_add(unit, load32(sw, swent * 16)),
+                              load32(sw, swent * 16 + 4) as u64);
                 } else {
-                    write_all(2, ptr_add(unit, st), take as u64);
+                    if line == 0 {
+                        let dm: str = "开关超过 500 条上限（`docs/182` §1.8）";
+                        write_all(2, str_ptr(dm), str_len(dm) as u64);
+                    } else {
+                        let dm: str = "开关声明不能写在任何块内部（`docs/182` §1.10）";
+                        write_all(2, str_ptr(dm), str_len(dm) as u64);
+                    }
+                }
+            } else {
+                if isrt == 1 {
+                    write_all(2, str_ptr(ph), str_len(ph) as u64);
+                } else {
+                    if str_len(ph2) > 0 {
+                        write_all(2, str_ptr(ph2), str_len(ph2) as u64);
+                    } else {
+                        write_all(2, ptr_add(unit, st), take as u64);
+                    }
                 }
             }
             wstr(2, "\n");
             // 同一条诊断, 结构化那一份 (docs/182 §5)。**同一份数据两个受众**:
             // 上面那份给人看 (stderr), 这份给报错器看 (一行 JSON)。
             if dfd >= 0 {
-                if isrt == 1 {
-                    let _k2: u64 = wdiag_rt(dfd as u64, scr, ap, an,
-                                            load32(ctoks, tk * 20 + 12), ph,
-                                            load32(tytp, RT_N_SITES));
-                } else {
-                    if str_len(ph2) > 0 {
-                        let _j2: u64 = wdiag(dfd as u64, scr, ap, an,
-                                             load32(ctoks, tk * 20 + 12), code,
-                                             str_ptr(ph2), str_len(ph2));
+                if is_sw == 1 {
+                    if swent != SW_NONE {
+                        let _j3: u64 = wdiag(dfd as u64, scr, ap, an, line, code,
+                                             ptr_add(unit, load32(sw, swent * 16)),
+                                             load32(sw, swent * 16 + 4));
                     } else {
-                        let _j: u64 = wdiag(dfd as u64, scr, ap, an,
-                                            load32(ctoks, tk * 20 + 12), code,
-                                            ptr_add(unit, st), take);
+                        if line == 0 {
+                            let dm: str = "开关超过 500 条上限（`docs/182` §1.8）";
+                            let _j4: u64 = wdiag(dfd as u64, scr, ap, an, line, code,
+                                                 str_ptr(dm), str_len(dm));
+                        } else {
+                            let dm: str = "开关声明不能写在任何块内部（`docs/182` §1.10）";
+                            let _j5: u64 = wdiag(dfd as u64, scr, ap, an, line, code,
+                                                 str_ptr(dm), str_len(dm));
+                        }
+                    }
+                } else {
+                    if isrt == 1 {
+                        let _k2: u64 = wdiag_rt(dfd as u64, scr, ap, an, line, ph,
+                                                load32(tytp, RT_N_SITES));
+                    } else {
+                        if str_len(ph2) > 0 {
+                            let _j2: u64 = wdiag(dfd as u64, scr, ap, an, line, code,
+                                                 str_ptr(ph2), str_len(ph2));
+                        } else {
+                            let _j: u64 = wdiag(dfd as u64, scr, ap, an, line, code,
+                                                ptr_add(unit, st), take);
+                        }
                     }
                 }
             }

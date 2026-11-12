@@ -4499,6 +4499,23 @@ FINE: tuple[Fine, ...] = (
          "For a `bool`, use interpolation `f\"{b}\"`; that goes through `str_show`.",
          "If it is already decimal text, use it directly."),
     ),
+    # 2026-11-11：插值的两个取值（`docs/341`）—— 孔收 `str` / `bool` / 整型，
+    # 别的类型在 `str_show` / `str_repr` 那一层报。模板上界里必须有自己的码。
+    Fine(
+        210, 1, r"^内建 .+ 实参期望 str / bool / 整型",
+        "插值只收 str / bool / 整型",
+        "interpolation takes str, bool or an integer",
+        "插值孔里的表达式是结构体、枚举、数组或指针 —— `str_show` / `str_repr` "
+        "没有这些形状的转换。",
+        "The hole expression is a struct, enum, array or pointer; `str_show` / "
+        "`str_repr` have no conversion for those shapes.",
+        ("先取出字段再插：`f\"{s.name}\"`。",
+         "指针用 `str_num(p as u64)` 印成数字。",
+         "想印自定义表示：写一个 `fn show(x: S) -> str`，孔里调它。"),
+        ("Pull the field out first: `f\"{s.name}\"`.",
+         "For a pointer, print the number: `str_num(p as u64)`.",
+         "For a custom form, write `fn show(x: S) -> str` and call it in the hole."),
+    ),
 )
 
 

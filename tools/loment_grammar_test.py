@@ -1656,6 +1656,72 @@ def test_str_num_builtin():
         errs2 = lomentc.check(mod2, deps=lomentc.resolve_deps(mod2, ROOT, td, entry=p2))
         assert any("no_runtime" in e and "str_num" in e for e in errs2), errs2[:3]
     print("      str_num 进堆、随调用发十进制转换；no_runtime 点名拒")
+
+
+@test
+def test_str_interpolation():
+    """`f"…"` / `rf"…"`：前端改写成 `str_concat` 链（`docs/338`）。
+
+    钉四件事：三个 helper 按需发、`no_runtime` 点名拒、`rf` 的反斜杠原样、
+    以及改写之后的报错列号**映射回用户那一行**。
+    """
+    body = "".join([
+        "module m", chr(10),
+        "choose runtime", chr(10), chr(10),
+        "fn f(n: u32, b: bool, s: str) -> str {", chr(10),
+        "    let a: str = f\"n={n} {s}\";", chr(10),
+        "    let c: str = f\"{b} {n=}\";", chr(10),
+        "    let d: str = f\"{s!r} {{lit}}\";", chr(10),
+        "    let e: str = rf\"raw\\\\n{n}\";", chr(10),
+        "    return a;", chr(10),
+        "}", chr(10)])
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        p = td / "ok.lomt"
+        p.write_text(body, encoding="utf-8", newline=chr(10))
+        mod = lomentc.load(p)
+        errs = lomentc.check(mod, deps=lomentc.resolve_deps(mod, ROOT, td, entry=p))
+        assert not errs, errs[:3]
+        ll = lomentc.emit_llvm(mod, ROOT)
+        for sym in ("call i32 @__loment_num_to_dec", "call i32 @__loment_bool_to_str",
+                    "call i64 @__loment_str_repr"):
+            assert sym in ll, (sym, ll[-400:])
+        # `str` 孔是**恒等**：不发 `str_show(` 调用（`str_show` 只出现在别的孔里）
+        assert "str_show(" not in ll, "str 孔不该生成 str_show 调用"
+
+        p2 = td / "nort.lomt"
+        p2.write_text(body.replace("choose runtime", "choose no_runtime"),
+                      encoding="utf-8", newline=chr(10))
+        mod2 = lomentc.load(p2)
+        errs2 = lomentc.check(mod2, deps=lomentc.resolve_deps(mod2, ROOT, td, entry=p2))
+        assert any("no_runtime" in e and "str_" in e for e in errs2), errs2[:3]
+
+        # 格式说明还没接上：**指到孔**，不是一句泛泛的语法错
+        p3 = td / "bad.lomt"
+        p3.write_text(body.replace('f"n={n} {s}"', 'f"n={n:>5}"'),
+                      encoding="utf-8", newline=chr(10))
+        try:
+            lomentc.load(p3)
+        except lomentc.LomError as e:
+            assert "格式说明" in e.msg, e.msg
+        else:
+            raise AssertionError("`{n:>5}` 没被拒")
+
+        # **列号映射**：改写之后解析器报的列要指回用户那一行的那一格
+        bad2 = body.replace('f"n={n} {s}"', 'f"n={n + }"')
+        line = [ln for ln in bad2.split(chr(10)) if "n + " in ln][0]
+        want_col = line.index("}") + 1
+        p4 = td / "bad2.lomt"
+        p4.write_text(bad2, encoding="utf-8", newline=chr(10))
+        try:
+            lomentc.load(p4)
+        except lomentc.LomError as e:
+            assert e.col == want_col, (e.col, want_col, e.msg)
+        else:
+            raise AssertionError("孔里的语法错没被拒")
+    print("      插值: 三个 helper 按需发; no_runtime 点名拒; rf 原样; 列号映射回原源")
+
+
 @test
 def test_the_default_edition_is_the_newest_open_one():
     """**没声明 = 最新版次**（2026-11-06 用户裁定，`docs/312`）。

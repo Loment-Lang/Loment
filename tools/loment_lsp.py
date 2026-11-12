@@ -46,6 +46,18 @@ def _parse(text: str):
     # 还会展开方言，这里不补的话，一份**编得过**的方言源在编辑器里会满屏假错 ——
     # 而"编得过但编辑器报错"比"两边都报错"更糟（同一处入口缺口，`docs/182` §1.9）。
     # 顺序与 `lomentc.load` 一致：先开关，再方言。
+    #
+    # **字符串插值同理**（`docs/338`）：编译器在 `load` 里把 `f"…"` 改写成
+    # `str_concat` 链；不补这一步，一份编得过的插值源在编辑器里报**假解析错**
+    # （实测 `6:12 期望 )，得到 'n={n}'`）。版次口径与 `load` 相同：生效版次
+    # 是 2026.3 才改；解析错的列号用改写表映射回用户那一行。
+    _cmap = None
+    import potato_from as _pf
+    _g, _gerr, _decl = _pf.read_grammar_decl(text)
+    _prof = _g if (not _gerr and _g in _pf.TUR_EDITIONS) else _pf.DEFAULT_EDITION
+    if _prof == "tur2026.3":
+        import loment_fstr
+        text, _cmap = loment_fstr.rewrite(text)
     tbl = lomentc.SwitchTable()
     tt = lomentc._apply_switches(lomc.lex(text), tbl)
     # **命令声明也是同一处入口缺口**（`docs/223`，`docs/182` §1.9）：编译器在 `load` 里
@@ -55,7 +67,12 @@ def _parse(text: str):
     # **同一条流水线**：先开关、再方言 —— 扫的也是**展开之后**那份 token 流
     # （`expand` 返回的是 token 表，`Parser` 与 `command_label_from_tokens` 吃的都是它）。
     toks = loment_comefor.expand(tt, text)[0]
-    mod = lomentc.Parser(toks, text).parse()
+    try:
+        mod = lomentc.Parser(toks, text).parse()
+    except lomc.LomError as _pe:
+        if _cmap is not None and _pe.line > 0:
+            raise lomc.LomError(_pe.line, _cmap.map(_pe.line, _pe.col), _pe.msg) from None
+        raise
     mod.switches = tbl
     mod.command_line, mod.command, mod.command_bad = \
         lomentc.command_label_from_tokens(toks)

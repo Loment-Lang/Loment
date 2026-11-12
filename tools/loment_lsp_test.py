@@ -427,6 +427,38 @@ CF_SRC = ('module t\n\n'
 
 
 @test
+def test_python_lsp_reads_interpolated_strings():
+    """开发口那份 LSP（`tools/loment_lsp.py`）也认插值（`docs/338`）。
+
+    它和编译器一样是"读 L1 源"的入口：不补 `loment_fstr` 的改写，一份**编得过**的
+    插值源在它这里会报假解析错（实测 `6:12 期望 )，得到 'n={n}'`）。判据钉两件事：
+    这份源解析得通、检查零错；孔里的语法错**列号映射回**用户写的那一行。
+
+    （**出厂的 `lsp.lomt` 不在此列**：它按 Tur 1 口径读（`#262`），Tur 2 的纯糖本来
+    也不认 —— 插值与那些糖同一档，`docs/338` §6 记着。）
+    """
+    NL = chr(10)
+    src = ("module demo" + NL + "choose runtime" + NL + NL +
+           "fn main() -> u32 {" + NL +
+           "    let n: u32 = 1;" + NL +
+           '    let s: str = f"n={n}";' + NL +
+           "    return 0;" + NL + "}" + NL)
+    mod = PY_LSP._parse(src)
+    errs = lomentc.check(mod)
+    assert not errs, errs[:3]
+    bad = src.replace('f"n={n}"', 'f"n={n + }"')
+    line = [ln for ln in bad.split(NL) if "n + " in ln][0]
+    want_col = line.index("}") + 1
+    try:
+        PY_LSP._parse(bad)
+    except Exception as e:                      # noqa: BLE001
+        assert getattr(e, "col", None) == want_col, (getattr(e, "col", None), want_col, e)
+    else:
+        raise AssertionError("孔里的语法错没被拒")
+    print("      开发口 LSP: 插值源解析通过；孔内报错的列映射回原行")
+
+
+@test
 def test_lsp_check_honours_switches():
     """语言服务是"读 L1 源的东西"之一 —— **开关没落定就等于关着的那段照样被检查**。
 

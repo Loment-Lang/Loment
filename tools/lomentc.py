@@ -44,6 +44,10 @@ BUILTINS = {
     "str_eq": (("str", "str"), "bool"),
     "str_concat": (("str", "str"), "str"),   # M2
     "str_num": (("u32",), "str"),            # 2026.3: 无符号十进制 -> str（插值的底）
+    # 2026.3: 插值的两种取值（`docs/338`）。签名的实参类型只是占位 —— 两者都收
+    # `str` / `bool` / 任意整型，真正的检查在 `_walk_expr` 里各一条。
+    "str_show": (("str",), "str"),
+    "str_repr": (("str",), "str"),
     "str_byte": (("str", "u32"), "u32"),
     "panic": (("u32",), "u32"),  # M19: 不可返回 (类型仅占位)
     "alloc": (("u32",), "ptr"),  # M15
@@ -628,6 +632,102 @@ copy:
   %ln32 = trunc i64 %ln to i32
   call void @__loment_memcpy(ptr %out, ptr %st, i64 %ln)
   ret i32 %ln32
+}
+'''
+
+#: `str_show(bool)` 的两个词（`docs/338`）：写进调用方的缓冲区、返回长度。
+#: 不发明珠常量 —— 参考侧与自举侧的 `.str.<fn>.<n>` 编号必须逐字节相同，而合成出来的
+#: 全局常量自举侧的前置扫描看不见。
+_IR_BOOL_TO_STR = '''define internal i32 @__loment_bool_to_str(ptr %out, i1 %v) {
+entry:
+  br i1 %v, label %t, label %f
+t:
+  store i8 116, ptr %out
+  %t1 = getelementptr i8, ptr %out, i64 1
+  store i8 114, ptr %t1
+  %t2 = getelementptr i8, ptr %out, i64 2
+  store i8 117, ptr %t2
+  %t3 = getelementptr i8, ptr %out, i64 3
+  store i8 101, ptr %t3
+  br label %e
+f:
+  store i8 102, ptr %out
+  %f1 = getelementptr i8, ptr %out, i64 1
+  store i8 97, ptr %f1
+  %f2 = getelementptr i8, ptr %out, i64 2
+  store i8 108, ptr %f2
+  %f3 = getelementptr i8, ptr %out, i64 3
+  store i8 115, ptr %f3
+  %f4 = getelementptr i8, ptr %out, i64 4
+  store i8 101, ptr %f4
+  br label %e
+e:
+  %n = phi i32 [ 4, %t ], [ 5, %f ]
+  ret i32 %n
+}
+'''
+
+#: `str_repr(str)`（`docs/338`）：`"` + 转义后的字节 + `"`。转义表与词法器同一张
+#: （`\\` `"` `\n` `\t` `\r`）；其它字节原样。最坏 2n+2 字节，由调用方分配。
+_IR_STR_REPR = '''define internal i64 @__loment_str_repr(ptr %out, ptr %p, i64 %n) {
+entry:
+  store i8 34, ptr %out
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %entry ], [ %i2, %step ]
+  %j = phi i64 [ 1, %entry ], [ %j2, %step ]
+  %ip = getelementptr i8, ptr %p, i64 %i
+  %c = load i8, ptr %ip
+  %q0 = icmp eq i8 %c, 34
+  br i1 %q0, label %esc0, label %ck1
+ck1:
+  %q1 = icmp eq i8 %c, 92
+  br i1 %q1, label %esc1, label %ck2
+ck2:
+  %q2 = icmp eq i8 %c, 10
+  br i1 %q2, label %esc2, label %ck3
+ck3:
+  %q3 = icmp eq i8 %c, 9
+  br i1 %q3, label %esc3, label %ck4
+ck4:
+  %q4 = icmp eq i8 %c, 13
+  br i1 %q4, label %esc4, label %plain
+esc0:
+  br label %bs
+esc1:
+  br label %bs
+esc2:
+  br label %bs
+esc3:
+  br label %bs
+esc4:
+  br label %bs
+bs:
+  %e = phi i8 [ 34, %esc0 ], [ 92, %esc1 ], [ 110, %esc2 ], [ 116, %esc3 ], [ 114, %esc4 ]
+  %bp = getelementptr i8, ptr %out, i64 %j
+  store i8 92, ptr %bp
+  %j1 = add i64 %j, 1
+  %bp1 = getelementptr i8, ptr %out, i64 %j1
+  store i8 %e, ptr %bp1
+  %js = add i64 %j, 2
+  br label %step2
+plain:
+  %pp = getelementptr i8, ptr %out, i64 %j
+  store i8 %c, ptr %pp
+  %jp = add i64 %j, 1
+  br label %step2
+step2:
+  %j2 = phi i64 [ %js, %bs ], [ %jp, %plain ]
+  br label %step
+step:
+  %i2 = add i64 %i, 1
+  %more = icmp ult i64 %i2, %n
+  br i1 %more, label %loop, label %done
+done:
+  %zp = getelementptr i8, ptr %out, i64 %j2
+  store i8 34, ptr %zp
+  %j3 = add i64 %j2, 1
+  ret i64 %j3
 }
 '''
 
@@ -5897,7 +5997,7 @@ def expr_type(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[st
     if isinstance(e, GenOf):
         return "u64"
     if isinstance(e, Call):
-        if e.name == "str_num":
+        if e.name in ("str_num", "str_show", "str_repr"):
             return "str"
         sig = _builtin_sig(e)
         if sig is not None:
@@ -6238,6 +6338,17 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
                 at = expr_type(e.args[0], scope, funcs, structs)
                 if at is not None and at not in INT_TYPES:
                     errs.append(f"{e.line}: 内建 str_num 实参期望整型，得到 {at}")
+                _walk_expr(e.args[0], scope, funcs, structs, errs, enums, lifetime)
+            return
+        if e.name in ("str_show", "str_repr"):
+            # `docs/338`：插值孔收 `str` / `bool` / 任意整型。`str_repr` 与 `str_show`
+            # 收同一组实参（整型与布尔的表示相同，`str` 的差别在发射时才分）。
+            if len(e.args) != 1:
+                errs.append(f"{e.line}: 内建 {e.name} 需要 1 个实参，得到 {len(e.args)}")
+            else:
+                at = expr_type(e.args[0], scope, funcs, structs)
+                if at is not None and at not in INT_TYPES and at not in ("str", "bool"):
+                    errs.append(f"{e.line}: 内建 {e.name} 实参期望 str / bool / 整型，得到 {at}")
                 _walk_expr(e.args[0], scope, funcs, structs, errs, enums, lifetime)
             return
         sig = _builtin_sig(e)
@@ -7177,6 +7288,10 @@ _RUNTIME_SITES: dict[str, str] = {
     "free": "`free`",
     "str_concat": "`str_concat`",
     "str_num": "`str_num`",
+    # 插值的两个取值（`docs/338`）。**保守**：`str_show(str)` 其实是恒等、`str_show(bool)`
+    # 也不分配，但这一维的判据长在 token 上，看不见实参类型 —— 往"会拖运行期"那侧偏。
+    "str_show": "`str_show`（插值）",
+    "str_repr": "`str_repr`（插值 `!r`）",
     "str_eq": "`str_eq`",
     "panic": "`panic`",
     # `docs/296` §2.7：`print_num` 的十进制转换在运行期那一块里（24 字节栈缓冲、一次
@@ -7252,6 +7367,25 @@ def _runtime_sites(toks: list,
         if hit:
             out.append((_RUNTIME_SITES[t.val], t.line))
     return out
+
+def _calls_named(mods, names) -> bool:
+    """这些单元里有没有**用**这几个名字（`名字 (` 且不是 `fn` 后面的声明）。
+
+    与 `_runtime_sites` 同一条位置判据 —— 自举侧要在**函数体发射之前**决定发不发
+    某段 helper（`docs/338`），它只看得见 token，看不见实参类型。
+    """
+    for m in mods:
+        toks = getattr(m, "toks", None) or []
+        for i, t in enumerate(toks):
+            if t.kind != "ident" or t.val not in names:
+                continue
+            if i > 0 and toks[i - 1].val == "fn":
+                continue
+            nxt = toks[i + 1] if i + 1 < len(toks) else None
+            if nxt is not None and nxt.kind == "punct" and nxt.val == "(":
+                return True
+    return False
+
 
 def _manifest_fields(text: str) -> tuple[str, list[str], str]:
     """从清单源码里读 `(name, choose 词表, requires 串)`。
@@ -7378,6 +7512,8 @@ _PKG_FEATURES: dict[str, str] = {
     "free": "free",
     "str_concat": "str_concat",
     "str_num": "str_num",
+    "str_show": "str_show",
+    "str_repr": "str_repr",
     "str_eq": "str_eq",
     "panic": "panic",
     "print_num": "print_num",
@@ -9381,6 +9517,10 @@ def _expr_rs(e) -> str:
             return f"({a[0]} == {a[1]})"
         if e.name == "str_num":  # docs/337: 无符号十进制 -> str
             return f"(Box::leak(format!(\"{{}}\", {a[0]}).into_boxed_str()) as &'static str)"
+        if e.name == "str_show":  # docs/338: 插值的取值
+            return f"(Box::leak(format!(\"{{}}\", {a[0]}).into_boxed_str()) as &'static str)"
+        if e.name == "str_repr":  # docs/338: 调试表示
+            return f"(Box::leak(format!(\"{{:?}}\", {a[0]}).into_boxed_str()) as &'static str)"
         if e.name == "str_concat":  # M2: v0 的 str 是 &'static str -> 只能漏内存
             return (f"(Box::leak(format!(\"{{}}{{}}\", {a[0]}, {a[1]}).into_boxed_str()) "
                     f"as &'static str)")
@@ -12078,7 +12218,8 @@ def _l2_ok(toks: list, at: int, end: int, fend: int, l0: dict[str, int],
 
     nalloc = 0
     for k in range(at, end):
-        if word(k, "str_concat") or word(k, "str_num"):
+        if word(k, "str_concat") or word(k, "str_num") or word(k, "str_show") \
+                or word(k, "str_repr"):
             return False
         if word(k, "free"):
             # 体内不许 `free`：**前沿在体内只增不减**，末尾那一条无条件写回才对。
@@ -12249,9 +12390,9 @@ def _collect_locals(f: Func, enums: dict | None = None,
 def _alloc_site_map(body: list) -> dict[int, int]:
     """本函数体里**分配站点** → 序号（**源码序**），入口块按它开 spill 槽（`#1465`）。
 
-    站点 = `alloc(…)` / `str_concat(…)` 的 `Call` —— 与 `alloc_ir` 的两个调用点一一
-    对应。自举侧的 `alloc_sites`（token 扫）数的是同一批：方法调用走 `MethodCall`，
-    不是 `Call`，所以 `p.alloc(x)` 两边都不算。
+    站点 = `alloc(…)` / `str_concat(…)` / `str_num(…)` / `str_show(…)` / `str_repr(…)`
+    的 `Call` —— 与 `alloc_ir` 的各调用点一一对应。自举侧的 `alloc_sites`（token 扫）
+    数的是同一批：方法调用走 `MethodCall`，不是 `Call`，所以 `p.alloc(x)` 两边都不算。
 
     **按源码序而不是发射序**：`defer` 会把同一个调用在每条退出路径上各发一次，按发射序
     编号会越界；按源码序则同一站点复用同一格 —— 两次发射的值本来也不会同时活着。
@@ -12264,7 +12405,8 @@ def _alloc_site_map(body: list) -> dict[int, int]:
     m: dict[int, int] = {}
 
     def reap(v) -> None:
-        if isinstance(v, Call) and v.name in ("alloc", "str_concat", "str_num"):
+        if isinstance(v, Call) and v.name in ("alloc", "str_concat", "str_num",
+                                              "str_show", "str_repr"):
             m[id(v)] = len(m)
         if _dc.is_dataclass(v) and not isinstance(v, type):
             for fd in _dc.fields(v):
@@ -13282,6 +13424,50 @@ class _Ir:
             return None
         return self.lms_size.get(a0.name)
 
+    def _str_num_ir(self, av: str, ty: str | None, e: Call) -> str:
+        """整型 → 十进制 `str`（`docs/337`）。`str_show` / `str_repr` 的整型分支共用它。"""
+        signed = 1 if ty is not None and ty.startswith("i") else 0
+        bits = {"u8": 8, "i8": 8, "u16": 16, "i16": 16,
+                "u32": 32, "i32": 32, "u64": 64, "i64": 64}.get(ty or "", 32)
+        if bits == 64:
+            wv = av
+        else:
+            wv = self.t()
+            irm = {"u8": "i8", "i8": "i8", "u16": "i16", "i16": "i16",
+                   "u32": "i32", "i32": "i32", "u64": "i64", "i64": "i64"}
+            self.w(f"{wv} = {'sext' if signed else 'zext'} "
+                   f"{irm.get(ty or '', 'i32')} {av} to i64")
+        p = self.alloc_ir("24", e)
+        ln = self.t()
+        self.w(f"{ln} = call i32 @__loment_num_to_dec(ptr {p}, i64 {wv}, i32 {signed})")
+        ln64 = self.t()
+        self.w(f"{ln64} = sext i32 {ln} to i64")
+        v1 = self.t()
+        self.w(f"{v1} = insertvalue {{ ptr, i64 }} undef, ptr {p}, 0")
+        v2 = self.t()
+        self.w(f"{v2} = insertvalue {{ ptr, i64 }} {v1}, i64 {ln64}, 1")
+        return v2
+
+    def _str_repr_ir(self, sv: str, e: Call) -> str:
+        """`str` 的调试表示：`"` + 转义 + `"`（`docs/338`）。"""
+        p, n = self.t(), self.t()
+        self.w(f"{p} = extractvalue {{ ptr, i64 }} {sv}, 0")
+        self.w(f"{n} = extractvalue {{ ptr, i64 }} {sv}, 1")
+        cap = self.t()
+        self.w(f"{cap} = shl i64 {n}, 1")
+        cap2 = self.t()
+        self.w(f"{cap2} = add i64 {cap}, 2")
+        cap32 = self.t()
+        self.w(f"{cap32} = trunc i64 {cap2} to i32")
+        b = self.alloc_ir(cap32, e)
+        ln = self.t()
+        self.w(f"{ln} = call i64 @__loment_str_repr(ptr {b}, ptr {p}, i64 {n})")
+        v1 = self.t()
+        self.w(f"{v1} = insertvalue {{ ptr, i64 }} undef, ptr {b}, 0")
+        v2 = self.t()
+        self.w(f"{v2} = insertvalue {{ ptr, i64 }} {v1}, i64 {ln}, 1")
+        return v2
+
     def builtin(self, e: Call) -> tuple[str, str]:
         """str_len / str_eq / str_concat / str_byte / slice_len 的 IR 降级。"""
         if e.name == "alloc":  # M15: bump 分配器
@@ -13614,30 +13800,30 @@ class _Ir:
             v2 = self.t()
             self.w(f"{v2} = insertvalue {{ ptr, i64 }} {v1}, i64 {n}, 1")
             return "str", v2
-        # 2026.3: str_num —— 无符号十进制写进一块 12 字节的堆块，返回 str（`docs/337`）
+        # 2026.3: str_num —— 十进制写进一块 24 字节的堆块，返回 str（`docs/337`）
         if e.name == "str_num":
             ty, av = self.expr(e.args[0])
-            signed = 1 if ty is not None and ty.startswith("i") else 0
-            bits = {"u8": 8, "i8": 8, "u16": 16, "i16": 16,
-                    "u32": 32, "i32": 32, "u64": 64, "i64": 64}.get(ty or "", 32)
-            if bits == 64:
-                wv = av
-            else:
-                wv = self.t()
-                irm = {"u8": "i8", "i8": "i8", "u16": "i16", "i16": "i16",
-                       "u32": "i32", "i32": "i32", "u64": "i64", "i64": "i64"}
-                self.w(f"{wv} = {'sext' if signed else 'zext'} "
-                       f"{irm.get(ty or '', 'i32')} {av} to i64")
-            p = self.alloc_ir("24", e)
-            ln = self.t()
-            self.w(f"{ln} = call i32 @__loment_num_to_dec(ptr {p}, i64 {wv}, i32 {signed})")
-            ln64 = self.t()
-            self.w(f"{ln64} = sext i32 {ln} to i64")
-            v1 = self.t()
-            self.w(f"{v1} = insertvalue {{ ptr, i64 }} undef, ptr {p}, 0")
-            v2 = self.t()
-            self.w(f"{v2} = insertvalue {{ ptr, i64 }} {v1}, i64 {ln64}, 1")
-            return "str", v2
+            return "str", self._str_num_ir(av, ty, e)
+        # 2026.3: 插值的取值（`docs/338`）—— `str` 恒等、整型同 `str_num`、
+        # `bool` 走一个 8 字节的堆块；`str_repr` 与非串实参的 `str_show` 相同。
+        if e.name in ("str_show", "str_repr"):
+            ty, av = self.expr(e.args[0])
+            if ty == "str":
+                if e.name == "str_show":
+                    return "str", av
+                return "str", self._str_repr_ir(av, e)
+            if ty == "bool":
+                p = self.alloc_ir("8", e)
+                ln = self.t()
+                self.w(f"{ln} = call i32 @__loment_bool_to_str(ptr {p}, i1 {av})")
+                ln64 = self.t()
+                self.w(f"{ln64} = sext i32 {ln} to i64")
+                v1 = self.t()
+                self.w(f"{v1} = insertvalue {{ ptr, i64 }} undef, ptr {p}, 0")
+                v2 = self.t()
+                self.w(f"{v2} = insertvalue {{ ptr, i64 }} {v1}, i64 {ln64}, 1")
+                return "str", v2
+            return "str", self._str_num_ir(av, ty, e)
         # str_byte
         _, sv = self.expr(e.args[0], "str")
         p = self.t()
@@ -14494,6 +14680,7 @@ def _heap_needed(mods: list, rt_on: bool = True) -> bool:
             # 它们和分配器同一段文本，所以起线程就发堆（即便这个程序自己一次 `alloc`
             # 都不写）。与自举侧 `heap_needed` 同一个集合。
             if tk.kind != "ident" or tk.val not in ("alloc", "str_concat", "str_num",
+                                                    "str_show", "str_repr",
                                                     "free", "thread_spawn"):
                 continue
             if tk.val == "alloc" and _alloc_promoted(toks, i, funcs):
@@ -14772,8 +14959,19 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # 但只在真的调用了它时才出现 —— 它带一句 x86 的 `syscall` asm。
     if "@__loment_print_num" in text_all:
         out.append(_IR_PRINT_NUM)
-    if "@__loment_num_to_dec" in text_all:
+    # `str_num` 与插值里的整型取值（`str_show` / `str_repr` 的整型分支）共用同一段
+    # 十进制转换。判据同样是**源里的名字**（`docs/338`）—— 自举侧要在函数体之前
+    # 决定发不发，它那时不知道实参类型。多发的代价是一段没人调用的 internal 函数。
+    if _calls_named(mods, ("str_num", "str_show", "str_repr")):
         out.append(_IR_NUM_TO_DEC)
+    # 插值的两个 helper（`docs/338`）。判据是**源里有没有这两个调用**，不是产物文本里
+    # 有没有那两条 call —— 自举侧的运行期块写在函数体**之前**，它那时还不知道实参类型；
+    # 两边用同一条 token 判据（名字 + 紧跟 `(`、且不是 `fn` 后面的声明），产物才逐字节同。
+    _show_used = _calls_named(mods, ("str_show", "str_repr"))
+    if _show_used:
+        out.append(_IR_BOOL_TO_STR)
+    if _calls_named(mods, ("str_repr",)):
+        out.append(_IR_STR_REPR)
     # 能力域运行时：`guard` 发 `@__loment_guard2`，`tick;` 发 `@__loment_tick`。
     # **两者都不用时一个字节不发** —— 旧程序的产物逐字节不变。
     _guard_rt = ("@__loment_guard2" in text_all or "@__loment_tick" in text_all
@@ -15145,6 +15343,13 @@ def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3,
         # 依赖自己没有 tur2 声明，但程序是 tur2：纯糖照样要抹（与自举侧同一个口径）。
         from potato_from import _tur2_sugar      # noqa: PLC0415
         text = _tur2_sugar(text)
+    # **字符串插值**（`docs/338`）：`f"…"` 也不是语法构造，是读法 —— 在 parse 之前
+    # 改写成 `str_concat` / `str_show` 链，于是 lexer / parser / checker / codegen
+    # 一行都不动。与 `_tur2_sugar` 一样按**生效版次**算（整程序属性）。
+    _cmap = None
+    if _eff == "tur2026.3":
+        import loment_fstr                        # noqa: PLC0415
+        text, _cmap = loment_fstr.rewrite(text)
     # 开关**在词法流上**落定（`docs/182` §2）：`set choose X {…}` 开着就把体摊到顶层、
     # 关着就整段抹掉, 那两行本身不进 AST。**这一步必须在 parse 之前** —— 顺序问题
     # （取值可能写在体的后面）在 token 流上就消失了。
@@ -15156,7 +15361,14 @@ def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3,
     #
     # 混成一张表的话，每个被 `use` 进来的库都会"因为全局表里有定义"而被误判成**库写了
     # choose** —— 那会把 E022 第三条变成对所有库开火。
-    toks = lomc.lex(text)
+    try:
+        toks = lomc.lex(text)
+    except LomError as _lexe:
+        # 改写之后的列号要**映射回用户写的那一行**（`loment_fstr.ColMap`）。
+        if _cmap is not None and _lexe.line > 0:
+            raise LomError(_lexe.line, _cmap.map(_lexe.line, _lexe.col),
+                           _lexe.msg) from None
+        raise
     # **版次不静默**（`potato_from.DEFAULT_EDITION` 的注）：无声明单元里**声明**了
     # 新版次的关键字（`break` / `continue` / `defer` / `print_num` / `lgc`）时，
     # 旧读法会把它当标识符、新读法会把它当语法 —— 同一份源**静默改义**。
@@ -15184,7 +15396,12 @@ def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3,
     import loment_comefor
 
     tt, _dias = loment_comefor.expand(tt, text)
-    mod = Parser(tt, text, profile=_eff).parse()
+    try:
+        mod = Parser(tt, text, profile=_eff).parse()
+    except LomError as _pe:
+        if _cmap is not None and _pe.line > 0:
+            raise LomError(_pe.line, _cmap.map(_pe.line, _pe.col), _pe.msg) from None
+        raise
     # **开关表先挂上**（原先在下面几条之后）：LSPE 的 `bounds` 普查要读 LMS 的档位，
     # 而档位既可能来自档名、也可能来自 `choose close lms_guard` 这种显式覆盖 ——
     # 后者只在表里。挂晚了，普查会退回档名，于是"关着 guard 却记了 g1 站点"（#1021）。

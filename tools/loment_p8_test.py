@@ -3958,6 +3958,60 @@ def test_m103_str_num_twin():
         assert out == _unit_ll(p), "str_num: 自举产物与参考不一致"
     print("      str_num: 两实现逐字节一致")
 
+
+@test
+def test_m104_str_interpolation_twin():
+    """`f"…"` / `rf"…"`：两实现逐字节同（`docs/338`）。
+
+    插值是**前端改写**：自举侧在装载器里按字节改，参考侧在 `lomentc.load` 里改。
+    改写出来的文本必须一字不差，否则 `str_concat` 的折法、字符串常量的编号与
+    helper 的取舍都会分叉。这里覆盖：文本段 + 多个孔、`{x=}`、`!r`、`rf`、
+    `{{ }}`，以及三种取值（str / int / bool）。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    src = "".join([
+        "module m", chr(10),
+        "choose runtime", chr(10), chr(10),
+        "fn f(n: u32, m: i32, b: bool, s: str) -> str {", chr(10),
+        '    let a: str = f"n={n} {s}";', chr(10),
+        '    let c: str = f"{b} {n=} {{lit}}";', chr(10),
+        '    let d: str = f"{s!r}";', chr(10),
+        '    let e: str = rf"raw\\\\n{n}";', chr(10),
+        '    let g: str = f"{m}{n}";', chr(10),
+        "    return a;", chr(10),
+        "}", chr(10), chr(10),
+        "fn h(n: u32) -> u32 {", chr(10),
+        '    return str_len(f"{n}");', chr(10),
+        "}", chr(10)])
+    # 第二份：**带 GC 档**。分配站点要开 spill 槽（`#1465`），而"哪些调用算站点"
+    # 两边必须数同一批 —— 插值的三个转换也在里面（`_alloc_site_map` / `alloc_sites`）。
+    src_gc = "".join([
+        "module m", chr(10),
+        "choose runtime", chr(10),
+        "choose gc_auto", chr(10), chr(10),
+        "fn f(n: u32) -> str {", chr(10),
+        '    let a: str = f"n={n}";', chr(10),
+        "    let p: ptr = alloc(8);", chr(10),
+        '    let b: str = f"{n}{str_len(a)}";', chr(10),
+        "    return b;", chr(10),
+        "}", chr(10)])
+    with tempfile.TemporaryDirectory() as td:
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_fstr")
+        p = Path(td) / "interp.lomt"
+        p.write_text(src, encoding="utf-8", newline=chr(10))
+        rc, out, err = _run_driver_raw(elf, _wsl_path(p), td, "interp")
+        assert rc == 0, f"自举驱动编不过插值: {err[-400:]}"
+        assert out == _unit_ll(p), "插值: 自举产物与参考不一致"
+        p2 = Path(td) / "interpgc.lomt"
+        p2.write_text(src_gc, encoding="utf-8", newline=chr(10))
+        rc2, out2, err2 = _run_driver_raw(elf, _wsl_path(p2), td, "interpgc")
+        assert rc2 == 0, f"自举驱动编不过带 GC 的插值: {err2[-400:]}"
+        assert out2 == _unit_ll(p2), "插值 + gc_auto: 分配站点编号两实现不一致"
+    print("      插值: 两实现逐字节一致（含 gc_auto 的分配站点）")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_p8_test")
 

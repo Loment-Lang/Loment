@@ -124,16 +124,16 @@ def test(fn):
 #: 捕获表的步长 `CG_DFR_STRIDE`（84 B/条，**不是**上界，来路写在 `EXPLAINED`）与三个
 #: 真上界 `CG_MAXDFR` / `CG_MAXDFRAMES` / `CG_MAXDFARGS`（都判了 `>=` 并 `cg_fail`）。
 #: 条数 251 → **255**、沉默 168 → **169**（多出来的那一处就是步长本身）。
-CAPACITY_SITES = 265
-SILENT_SITES = 173
+CAPACITY_SITES = 261
+SILENT_SITES = 170
 
 #: 第二类：字面量上界（`#770`）。`[T; N]` 与 `literal:<N>` 各自钉住总数与沉默的那一份。
-LITERAL_SITES = 67
-LITERAL_SILENT = 66
+LITERAL_SITES = 66
+LITERAL_SILENT = 65
 ARRAY_SITES = 20
 ARRAY_SILENT = 19
 
-#: 越界时**说不出话**的那些具名常量（`--silent` 去重、按字节序）。136 个。
+#: 越界时**说不出话**的那些具名常量（`--silent` 去重、按字节序）。133 个。
 #: ⚠ 这里按**筛子**的口径（`not speaks`），所以那些"来路已写明"的也在内 ——
 #: 判断"真缺口"用 `loment_caps.gaps()`（那条另有一条判据）。
 SILENT_NAMES = frozenset((
@@ -161,9 +161,6 @@ SILENT_NAMES = frozenset((
     "DIRQ",
     "DOC_CAP",
     "DOC_MAX",
-    "EG_BIN_HEAD",
-    "EG_MAT_CAP",
-    "EG_UNAME_LEN",
     "EMAX",
     "ENTS_CAP",
     "ENT_CAP",
@@ -292,7 +289,6 @@ SILENT_NAMES = frozenset((
 SILENT_LITERALS = {
     ("loment/selfhost/driver.lomt", "literal:16"): 1,
     ("loment/selfhost/driver.lomt", "literal:8"): 1,
-    ("loment/tools/turegg.lomt", "literal:520"): 1,
     ("loment/examples/fuc_node.lomt", "literal:64"): 1,
     ("loment/examples/gc_heap/main.lomt", "literal:8"): 1,
     ("loment/lib/lumtui_doc.lomt", "literal:64"): 1,

@@ -302,14 +302,14 @@ def test_lsp_protocol_roundtrip():
 
     d2 = frames[4]
     dg = d2["params"]["diagnostics"]
-    assert any(d["code"] == "E002" and d["range"]["start"]["line"] == bline for d in dg),         (bline, dg)
+    assert any(d["code"] == "E096" and d["range"]["start"]["line"] == bline for d in dg),         (bline, dg)
     assert all(d["severity"] == 1 and d["source"] == "loment" for d in dg), dg
     assert all(d["message"].startswith(d["code"]) for d in dg), dg
 
     assert frames[5]["result"] is None, frames[5]
     assert frames[6]["result"] is None, frames[6]
     print(f"      8 条消息 -> 7 帧全对 (干净 0 诊断 / 补全含 helper+main / 跳转引用->行 "
-          f"{hline} / didChange 后 E002 @{bline} / 未声明词->null / shutdown null)")
+          f"{hline} / didChange 后 E096 @{bline} / 未声明词->null / shutdown null)")
 
 
 @test
@@ -319,9 +319,9 @@ def test_lsp_diagnostics_match_selfhosted_checker():
         print("      SKIP: 无 clang/WSL")
         return
     cases = [
-        ("dup", DUP, "E013", [i for i, l in enumerate(DUP.splitlines())
+        ("dup", DUP, "E0134", [i for i, l in enumerate(DUP.splitlines())
                                  if l.startswith("fn a")][-1], 1),   # 报的是**重复**的那个
-        ("undeclared", BAD, "E002", BAD.splitlines().index("    return missing_fn();"), 1),
+        ("undeclared", BAD, "E096", BAD.splitlines().index("    return missing_fn();"), 1),
         ("clean", GOOD, None, 0, 0),
         # `register` 块是新语法：语言服务认不出它就会在这份**编得过**的源上报一条
         # "未知顶层关键字"，而那正是消费方轴要抓的那种假错。
@@ -353,8 +353,9 @@ def test_lsp_diagnostics_match_selfhosted_checker():
                        for d in dg), (name, want_code, want_line, dg)
             assert len(dg) >= want_n, (name, want_n, dg)
         for d in dg:
-            assert d["code"].startswith("E") and len(d["code"]) == 4, d
-    print(f"      {len(cases)} 个用例的码/行号正确 (重名 E013 / 未声明 E002 / 干净 0 条)")
+            # 码的形状（`docs/338`）：< 100 是 `E0xx`、>= 100 是 `E0xxx`，所以长度 4 或 5。
+            assert d["code"].startswith("E") and len(d["code"]) in (4, 5), d
+    print(f"      {len(cases)} 个用例的码/行号正确 (重名 E0134 / 未声明 E096 / 干净 0 条)")
 
 
 @test
@@ -385,8 +386,8 @@ def test_lsp_check_mode_is_python_free():
             out = r.stdout
             assert r.returncode == 1, f"有错文件应当 rc=1, 实得 {r.returncode}: {out!r} {r.stderr[-200:]!r}"
             lines = [ln for ln in out.splitlines() if ": E" in ln]
-            assert any("E013" in ln and ln.startswith(abs_probe) for ln in lines), out
-            assert any("E002" in ln for ln in lines), out
+            assert any("E0134" in ln and ln.startswith(abs_probe) for ln in lines), out
+            assert any("E096" in ln for ln in lines), out
             for ln in lines:
                 head = ln.split(": E")[0]
                 assert head.startswith(abs_probe + ":"), ln
@@ -401,7 +402,7 @@ def test_lsp_check_mode_is_python_free():
     print("      --check: 有错 -> rc=1 且逐行 `路径:行:列: E0NN 标题`; 干净 -> rc=0 无输出")
 
 
-#: 开关体里放一个**必然报错**的调用 (E002 未定义函数), 再加上一句 `choose` 就能打开它。
+#: 开关体里放一个**必然报错**的调用 (E096 未定义函数), 再加上一句 `choose` 就能打开它。
 SW_OFF_SRC = ("module t\n\n"
               "set choose verbose {\n    fn banner() -> u32 {\n"
               "        return missing_fn();\n    }\n}\n")
@@ -464,10 +465,10 @@ def test_lsp_check_honours_switches():
 
     本判据钉的是 `docs/182` §1.8 那条"裁减真生效", 但**换一个消费者测**: 同一份源,
     开关关着 -> `--check` 必须**一声不吭** (rc=0); 加一句 `choose verbose` 打开 ->
-    必须报出体里那个未定义函数 (rc=1 且含 E002)。
+    必须报出体里那个未定义函数 (rc=1 且含 E096)。
 
     **这条自带对照, 所以它是可证伪的**: 两个断言跑的是**同一个体**(只差一句 `choose`),
-    而"打开 -> E002"证明检查器**确实会**报那个调用。于是"关着 -> rc=0"只可能来自
+    而"打开 -> E096"证明检查器**确实会**报那个调用。于是"关着 -> rc=0"只可能来自
     **那段真被裁掉了** —— 裁减一旦失效, 两个断言里的第一个立刻红。
 
     为什么单列一条: `lsp.lomt` 原先拿 `lex` 的原始 token 直接喂 `run_check`/`scan_syms`,
@@ -499,10 +500,11 @@ def test_lsp_check_honours_switches():
                 f"关着的开关体不该被检查, 实得 rc={off.returncode}: {off.stdout!r}"
             on = run(SW_ON_SRC)
             assert on.returncode == 1, f"打开后应当报错, 实得 rc={on.returncode}: {on.stdout!r}"
-            assert "E002" in on.stdout, f"打开后应当报未定义函数 (E002): {on.stdout!r}"
+            # 细分之后"调用未定义的函数"是 **E096**（`docs/338`），LSP 按同一个宽度印。
+            assert "E096" in on.stdout, f"打开后应当报未定义函数 (E096): {on.stdout!r}"
     finally:
         probe.unlink(missing_ok=True)
-    print("      --check: 关着的开关体不报错; `choose` 打开后 E002 照报 (LSP 侧裁减真生效)")
+    print("      --check: 关着的开关体不报错; `choose` 打开后 E096 照报 (LSP 侧裁减真生效)")
 
 
 @test
@@ -1197,7 +1199,7 @@ def test_lsp_reports_a_truncated_analysis():
         pad = "// " + "x" * n + "\n"
         return pad + tail
 
-    fits = long_src(250000)      # < 262128：完整分析，末尾 E002 必须报出来
+    fits = long_src(250000)      # < 262128：完整分析，末尾 E096 必须报出来
     over = long_src(270000)      # > DOC_CAP：截断，必须报"没查全"
     assert 200000 < len(fits) < 262128 and len(over) > 262144, (len(fits), len(over))
     uri_f = "file:///fits.lomt"
@@ -1219,13 +1221,13 @@ def test_lsp_reports_a_truncated_analysis():
     diag = {f["params"]["uri"]: f["params"]["diagnostics"] for f in frames
             if f.get("method") == "textDocument/publishDiagnostics"}
     df = diag.get(uri_f, [])
-    assert any(d.get("code") == "E002" and d["range"]["start"]["line"] == eline for d in df), \
-        f"250KB 文档在旧的 200000 上限处被截断，末尾 E002 丢了: {df}"
+    assert any(d.get("code") == "E096" and d["range"]["start"]["line"] == eline for d in df), \
+        f"250KB 文档在旧的 200000 上限处被截断，末尾 E096 丢了: {df}"
     assert not any("上限" in d["message"] for d in df), df
     do = diag.get(uri_o, [])
     assert any("上限" in d["message"] and d["severity"] == 3 for d in do), \
         f"截断的分析不能装成干净文件, 实得 {do}"
-    print(f"      {len(fits)}B 完整分析（E002 @{eline}）；{len(over)}B 截断并报出 Info")
+    print(f"      {len(fits)}B 完整分析（E096 @{eline}）；{len(over)}B 截断并报出 Info")
 
 
 #: `#53` 的探针：同一份文档在 `didOpen` 与 `didChange` 里各报一次版本号。
@@ -1288,7 +1290,7 @@ def test_lsp_publish_diagnostics_carries_the_document_version():
     assert rc == 0, f"LSP 退出码 {rc}: {err[-300:]}"
     pubs = [f for f in frames if f.get("method") == "textDocument/publishDiagnostics"]
     assert [p["params"].get("version") for p in pubs] == [1, 2], pubs
-    assert any(d.get("code") == "E002" for d in pubs[0]["params"]["diagnostics"]), pubs[0]
+    assert any(d.get("code") == "E096" for d in pubs[0]["params"]["diagnostics"]), pubs[0]
     assert pubs[1]["params"]["diagnostics"] == [], pubs[1]
     print("      两个实现：didOpen v1 / didChange v2 原样回显；缺席时不编 version")
 
@@ -1372,30 +1374,25 @@ def test_lsp_names_the_limit_for_a_uri_that_does_not_fit():
 
 @test
 def test_diag_titles_match_reference():
-    """`diag_title` 的每个码与 `tools/loment_diag.RULES` **逐字同文**。
+    """`diag_title` 必须**转发**到 `surface_data.code_title`，不许再有第二份标题表。
 
-    原先这张表只到 17，而自举 checker 会发 18（名字导入）与 19（语法/解析期）——
-    落到表外的码显示成「未分类」，用户看到的是一条没有类别的红错（2026-11-04：
-    `codegen.lomt` 的 E019 就是这样）。这条不需要 WSL：直接读源码比对，永远跑得起来。
+    原先这里钉的是"手抄表与 `loment_diag.RULES` 逐字同文"。2026-11-10 细分码表
+    （`docs/338`）之后，自举 checker 发的是 42..208 这一层细码，手抄到 38 的表整片
+    落到表外，用户看到的每一条都是「未分类」。于是标题改成从生成的 `surface_data`
+    取（与 `lomcli` / `lomenterr` 同一份），这条判据改成钉**结构**：
+
+      * `diag_title` 里必须出现 `code_title(code, 1)`；
+      * 函数体里**不许**再出现 `if code == N { return "..." }` 那种手抄；
+      * 表本身（每个码都有中文标题）由 `surface_data` 的新鲜度判据管 —— 那条比较的是
+        生成器与盘上文件，管的是同一件事，不在两处各写一遍。
     """
-    import re  # noqa: PLC0415
-    import loment_diag  # noqa: PLC0415
-
     src = SRC.read_text(encoding="utf-8")
     block = src.split("fn diag_title(", 1)[1].split("\n}", 1)[0]
-    got = {int(m.group(1)): m.group(2)
-           for m in re.finditer(r'if code == (\d+) \{ return "([^"]*)"; \}', block)}
-    want = {}
-    for code, _pat, title, _fix in loment_diag.RULES:
-        n = int(code[1:])
-        if n <= 38:
-            want.setdefault(n, title)
-    missing = sorted(set(want) - set(got))
-    assert not missing, f"diag_title 缺码: {missing}"
-    diff = {k: (got[k], want[k]) for k in want if got.get(k) != want[k]}
-    assert not diff, f"标题与 loment_diag.RULES 不一致: {diff}"
-    assert "未分类" not in got.values()
-    print(f"      诊断标题：{len(want)} 个码与参考表逐字同文")
+    assert "code_title(code, 1)" in block, (
+        f"diag_title 不再转发 surface_data.code_title：{block[:200]!r}")
+    assert "if code ==" not in block, (
+        "diag_title 又长出一张手抄标题表了（真源是 surface_data）")
+    print("      诊断标题：转发 surface_data.code_title（单源，无第二份表）")
 
 
 if __name__ == "__main__":

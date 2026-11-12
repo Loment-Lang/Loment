@@ -2598,7 +2598,11 @@ def test_lomelf_rebuilds_the_compiler_without_clang():
             f"cd {_wsl_path(ROOT)} && {binn} loment/selfhost/driver.lomt "
             f"> {_wsl_path(outp)} 2> {_wsl_path(errp)}; echo -n $?"
         )
-        r = _sh(script, 900)
+        # 1800（2026-11-11）：这一句是"用重建出的编译器编一遍 `driver.lomt`"，而它
+        # 与种子同量级增长（6.33 MB）。CI 的 runner 比本机慢一倍多，900 秒在 6.2 MB
+        # 那一代就已经贴着边；1800 是**存活护栏**不是性能指标 —— 真挂死仍在半小时内报出。
+        # 同一条理由见 `tools/loment_seed.py::bootstrap`。
+        r = _sh(script, 1800)
         etxt = errp.read_text(encoding="utf-8", errors="replace")[-400:] if errp.exists() else ""
         assert r.stdout.decode().strip() == "0", \
             f"原生编译器退出非零: {r.stdout[:40]!r} stderr={etxt!r}"
@@ -2629,14 +2633,14 @@ def test_lomelf_selfhost_rebuilds_the_compiler():
         r3 = _sh(
             f"cp {_wsl_path(mir)} {_T}lomelf_rb2.bin && chmod +x {_T}lomelf_rb2.bin && "
             f"cd {_wsl_path(ROOT)} && {_T}lomelf_rb2.bin loment/build/selfhost_driver.ll "
-            f"{_wsl_path(seed_c)}", 900, text=True)
+            f"{_wsl_path(seed_c)}", 1800, text=True)
         assert r3.returncode == 0, f"镜像编种子失败: {r3.stderr[-300:]}"
         # 用它自编译 driver.lomt, 与种子比
         outp = td / "again.ll"
         r4 = _sh(
             f"cp {_wsl_path(seed_c)} {_T}lomelf_rb3.bin && chmod +x {_T}lomelf_rb3.bin && "
             f"cd {_wsl_path(ROOT)} && {_T}lomelf_rb3.bin loment/selfhost/driver.lomt "
-            f"> {_wsl_path(outp)} 2> {_wsl_path(td / 'err.txt')}; echo -n $?", 900,
+            f"> {_wsl_path(outp)} 2> {_wsl_path(td / 'err.txt')}; echo -n $?", 1800,
             text=True)
         errf = td / "err.txt"
         etxt = errf.read_text(encoding="utf-8", errors="replace")[-300:] if errf.exists() else ""

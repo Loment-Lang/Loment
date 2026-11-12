@@ -548,14 +548,28 @@ int main(int argc, char **argv) {
                                  a + chk_arena_scr(), a + chk_arena_ctab(), a + chk_arena_nc(),
                                  a + chk_arena_exs(), a + chk_arena_env(), a + chk_arena_tyt(),
                                  prof);
-    m += switch_rules(buf, toks, sw, errs, m * 8);
+    unsigned int ne = m;
+    m += switch_rules(buf, toks, sw, errs, ne * 8);
     printf("%u", m);
     for (unsigned int i = 0; i < m; i++) {
         unsigned int code = *(unsigned int *)(errs + 8 * i);
-        unsigned int tk = *(unsigned int *)(errs + 8 * i + 4);
-        unsigned int st = *(unsigned int *)(toks + 20 * tk + 4);
-        unsigned int ln = *(unsigned int *)(toks + 20 * tk + 8);
-        unsigned int line = *(unsigned int *)(toks + 20 * tk + 12);
+        unsigned int v = *(unsigned int *)(errs + 8 * i + 4);
+        unsigned int st = 0, ln = 0, line = 0;
+        if (i >= ne) {
+            /* 开关规则：第二格不是 token 下标（`choose` 构造在压缩时被删掉了）。
+               < 2^31 = 表项下标；否则是 2^31 + 行号（嵌套 / 超限，没有表项）。 */
+            if (v >= 2147483648u) {
+                line = v - 2147483648u;
+            } else {
+                line = *(unsigned int *)(sw + 16 * v + 12);
+                st = *(unsigned int *)(sw + 16 * v);
+                ln = *(unsigned int *)(sw + 16 * v + 4);
+            }
+        } else {
+            st = *(unsigned int *)(toks + 20 * v + 4);
+            ln = *(unsigned int *)(toks + 20 * v + 8);
+            line = *(unsigned int *)(toks + 20 * v + 12);
+        }
         printf(" %u@%u:%.*s", code, line, (int)(ln > 24 ? 24 : ln), buf + st);
     }
     printf("\\n");
@@ -585,7 +599,7 @@ def _classify_codes(errs: list[str]) -> list[int]:
     out: list[int] = []
     for e in errs:
         code, _title, _hint = loment_diag.classify(e)
-        if code != "E999":
+        if code != "E0999":
             out.append(int(code[1:]))
     return sorted(set(out))
 
@@ -614,19 +628,23 @@ def test_m81_cross_module_dup_is_rejected():
     mod = lomentc.load(entry)
     deps = lomentc.resolve_deps(mod, ROOT, entry.parent, entry=entry)
     py = _classify_codes(lomentc.check(mod, deps=deps))
-    assert py == [E_DUP], f"参考实现没按 E-DUP (E013) 报跨模块重名: {py}"
+    # 细分之后跨模块重名是 **E0128**（`docs/338`），不是族码 E013。
+    assert py == [128], f"参考实现没按 E-DUP (E0128) 报跨模块重名: {py}"
     with tempfile.TemporaryDirectory() as td:
         exe = _build_checker(td)
         unit = Path(td) / "u.lomt"
         unit.write_text(_unit_text(entry), encoding="utf-8", newline="\n")
         got, det = _loment_codes(exe, unit)
-        assert sorted(set(got)) == [E_DUP], f"自举 checker 的码不对: {got} {det}"
-        print(f"      跨模块重名: 两边都报 E-DUP (参考消息 + 自举码 {sorted(set(got))})")
+        # 两边的细分码**不同**，而且这个不同是有信息的：参考实现认得出"两个单元"
+        # （E0128 会点名是哪两份文件），自举侧把整棵依赖树当一份单元、不分模块，
+        # 只能报"顶层名字重复定义"（E0134）。同族（E013），拒的效果一样。
+        assert sorted(set(got)) == [134], f"自举 checker 的码不对: {got} {det}"
+        print(f"      跨模块重名: 参考 E0128 / 自举 E0134（同族 E013，两边都拒）")
 
 
 @test
 def test_m81_falling_off_the_end_is_refused():
-    '''M81/控制流: **非 `()` 的函数不许从末尾掉出去**（`#22`, 码 E027）。
+    '''M81/控制流: **非 `()` 的函数不许从末尾掉出去**（`#22`, 码 E179）。
 
     "`check` 通过 = 这份程序不会 trap" 是这条命令给人的唯一保证, 而"掉出末尾"发射之后
     是一条**非法指令**（SIGILL）—— 只在**真走到那一支**时才发生, 所以多半是"上线很久、
@@ -668,7 +686,8 @@ def test_m81_falling_off_the_end_is_refused():
             f.write_text(src, encoding="utf-8", newline="\n")
             errs = lomentc.check(lomentc.load(f))
             codes = {loment_diag.classify(e)[0] for e in errs}
-            assert "E027" in codes, f"{tag}: 掉出末尾没按 E027 拒: {errs}"
+            # 细分之后"可能从末尾掉出去"是 **E0179**（`docs/338`；码 179，显示四位）。
+            assert "E0179" in codes, f"{tag}: 掉出末尾没按 E0179 拒: {errs}"
         for tag, src in good.items():
             f = d / (tag + ".lomt")
             f.write_text(src, encoding="utf-8", newline="\n")
@@ -682,11 +701,11 @@ def test_m81_falling_off_the_end_is_refused():
             exe = _build_checker(str(d))
             for tag in bad:
                 got, det = _loment_codes(exe, d / (tag + ".lomt"))
-                assert got == [27], f"[自举] {tag}: 期望码 [27]，得到 {got} {det}"
+                assert got == [179], f"[自举] {tag}: 期望码 [179]，得到 {got} {det}"
             for tag in good:
                 got, det = _loment_codes(exe, d / (tag + ".lomt"))
                 assert got == [], f"[自举] {tag}: 合法收尾被误拒 {got} {det}"
-        print(f"      掉出末尾: {len(bad)} 种非法形状都拒(E027), {len(good)} 种合法收尾都放行"
+        print(f"      掉出末尾: {len(bad)} 种非法形状都拒(E0179), {len(good)} 种合法收尾都放行"
               f"（参考实现 + 自举 checker 各一遍）")
 
 
@@ -2183,8 +2202,8 @@ def test_m91_tur2_for_in_and_loop_control():
                       "    break;\n}\n", encoding="utf-8", newline="\n")
         rc2, out2, err2 = _run_driver_raw(elf, _wsl_path(p2), td, "outside")
         assert rc2 != 0 and out2.strip() == "", "循环外的 `break;` 被放过去了"
-        assert "E19" in err2, f"循环外的 `break;` 该是解析错 (E19): {err2[-200:]}"
-        print("      for-in/break/continue: 两套实现逐字节相同、运行得 ok；Tur 1 拒、循环外 E19")
+        assert "E019" in err2, f"循环外的 `break;` 该是解析错 (E019): {err2[-200:]}"
+        print("      for-in/break/continue: 两套实现逐字节相同、运行得 ok；Tur 1 拒、循环外 E019")
 
 
 @test
@@ -2239,7 +2258,7 @@ def test_m94_tur2_bare_return_and_print_num():
         p1.write_text("choose write grammar tur\n" + src, encoding="utf-8", newline="\n")
         rc1, out1, err1 = _run_driver_raw(elf, _wsl_path(p1), td, "oldt2out")
         assert rc1 != 0 and out1.strip() == "", "Tur 1 收下了裸 `return;`"
-        assert "E19" in err1, err1[-200:]
+        assert "E019" in err1, err1[-200:]
         # Tur 1：用户自己的 `fn print_num` 不被内建顶掉（自己那行也编得过）
         p2 = Path(td) / "mine.lomt"
         p2.write_text(
@@ -2262,16 +2281,18 @@ def test_m94_tur2_bare_return_and_print_num():
                       encoding="utf-8", newline="\n")
         rc3, out3, err3 = _run_driver_raw(elf, _wsl_path(p3), td, "typed")
         assert rc3 != 0 and out3.strip() == "", "有返回类型的 `return;` 被放过去了"
-        assert "E19" in err3, err3[-200:]
+        # 细分之后这一格是 **E0153**（"`return;` 不带值"，`docs/338`）。
+        assert "E0153" in err3, err3[-200:]
         # Tur 2：`no_runtime` 下 `print_num` 点名拒（运行期保证）
         p4 = Path(td) / "nort.lomt"
         p4.write_text("choose write grammar tur2\nmodule nort\n\n"
                       "fn main() {\n    print_num(7);\n}\n", encoding="utf-8", newline="\n")
         rc4, out4, err4 = _run_driver_raw(elf, _wsl_path(p4), td, "nort")
         assert rc4 != 0 and out4.strip() == "", "`no_runtime` 收下了 print_num"
-        assert "E31" in err4, err4[-200:]
+        # 细分之后 `no_runtime` 下用运行期构造是 **E0208**（`docs/338`）。
+        assert "E0208" in err4, err4[-200:]
         print("      裸 return / print_num: 产物逐字节相同、输出 0/1234/-98765/i64 上限；"
-              "Tur 1 拒 return 但保住用户 print_num；E19/E31 都对")
+              "Tur 1 拒 return 但保住用户 print_num；E019/E0208 都对")
 
 
 @test
@@ -2491,9 +2512,9 @@ fn main() {
                       "fn main() {\n    defer 1;\n}\n", encoding="utf-8", newline="\n")
         rc2, out2, err2 = _run_driver_raw(elf, _wsl_path(p2), td, "notcall")
         assert rc2 != 0 and out2.strip() == "", "`defer 1;` 被放过去了"
-        assert "E19" in err2, f"`defer 1;` 该是解析错 (E19): {err2[-200:]}"
+        assert "E0155" in err2, f"`defer 1;` 该被拒 (E0155): {err2[-200:]}"
         print("      defer: 产物逐字节相同、LIFO/块作用域/声明处捕获/return·?·break·continue "
-              "全跑对；Tur 1 保住用户 fn defer，`defer 1;` 是 E19")
+              "全跑对；Tur 1 保住用户 fn defer，`defer 1;` 是 E0155")
 
 
 @test
@@ -3114,33 +3135,10 @@ PARSE_LEVEL: set[str] = {
 
 #: 诊断**行号**两侧不一致的已知案例（棘轮：**只许变短**）。码集已经相同（`loment_rule_parity`
 #: 的预算管着那一半），这里管的是用户看得见的另一半：同一条错误指到了另一行，或者自举侧
-#: 多报/少报一条。键是规则名，值是差异的形状。修好一条就删一行 —— 判据会断言条目**仍然**
-#: 不一致，删晚了会红（与 `M85_KNOWN_GAPS` / `PARSE_KNOWN_GAPS` 同一个形状）。
-DIAG_LINE_GAPS: dict[str, str] = {
-    # 开关那五条：`sw_add` 记的是**压缩前**的 token 下标，而 `switch_rules` 跑在
-    # `apply_switches` 压缩之后的 token 流上；`choose` 构造本身被删掉了，于是下标落到
-    # 后面的 token 上（源码第 3 行的 `choose` 被报成第 5 行的 `fn`）。
-    "choose-bad-mode": "E22: 参考 3 行 / 自举 5 行（压缩前 token 下标）",
-    "choose-vm-bad-value": "E22: 参考 3 行 / 自举 5 行（同上）",
-    "switch-undef": "E22: 参考 3 行 / 自举 5 行（同上）",
-    "switch-dup": "E22: 参考 7 行 / 自举 10 行（同上）",
-    "lspe-unknown-value": "E22: 参考 3 行 / 自举 5 行（同上）",
-    # 结构体 / 枚举的声明级错误：参考报**声明起始**那一行，自举报**成员**那一行。
-    "struct-field-dup": "E13: 参考 3 行 / 自举 5 行",
-    "enum-variant-dup": "E13: 参考 3 行 / 自举 5 行",
-    "struct-field-type-unknown": "E30: 参考 3 行 / 自举 4 行",
-    "enum-payload-type-unknown": "E30: 参考 3 行 / 自举 4 行",
-    # match / 结构体字面量：自举多报一条（指向声明行），或把位置挪到模式/字段那一行。
-    "structlit-unknown-field": "E15: 自举多一条第 4 行；参考只有第 8 行",
-    "structlit-missing-field": "E15: 参考 9 行 / 自举 5 行",
-    "match-unknown-variant": "E8: 自举多一条第 4 行；参考只有第 8 行",
-    "match-dup-pattern": "E8: 参考 9 行 / 自举 5、11 两行",
-    "match-nonexhaustive": "E8: 参考 9 行 / 自举 5 行",
-    "match-payload-arity": "E8: 参考 8 行 / 自举 9 行（E2 那一条两边一致）",
-    # 其余两条。
-    "unclosed-brace": "E19: 参考 5 行（EOF）/ 自举 9 行",
-    "deep-nesting": "E23: 参考 67 行 / 自举 68 行（嵌套上限差一层）",
-}
+#: 多报/少报一条。**2026-11-11 清空**：17 条按根因分四组修完（开关压缩前下标 / 结构体与
+#: 枚举报声明行 / match 报 `match` 行 / 预置枚举把 EOF 推后、嵌套上限差一层）。谁再引入
+#: 一条新的，这条判据当场红 —— 修好或登记，登记的那条必须**仍然**不一致。
+DIAG_LINE_GAPS: dict[str, str] = {}
 
 
 def _ref_diag_pairs(src: Path) -> set[tuple[int, int]]:
@@ -3152,7 +3150,7 @@ def _ref_diag_pairs(src: Path) -> set[tuple[int, int]]:
     out: set[tuple[int, int]] = set()
     for m in msgs:
         code, _t, _h = loment_diag.classify(m)
-        if code == "E999":
+        if code == "E0999":
             continue
         g = re.match(r"^\s*(\d+):", m)
         out.add((int(code[1:]), int(g.group(1)) if g else -1))
@@ -3522,7 +3520,7 @@ def test_m85_a_parse_failure_reaches_diag_out():
     `comefor` / `byuse` 那九支失败原先只写 stderr —— 启动器（`--json` / `--short` 的读者）
     拿到的是一个**空文件**配一个非零退出码，而那正是差错系统存在要避免的组合。
     这里喂 `byuse` 写在函数体里的单元（自举侧的 `re == 5`），两面都钉：给人看的那一句
-    在 stderr，结构化那一份在 JSONL 里，且**码与参考实现一致**（`E999`，见
+    在 stderr，结构化那一份在 JSONL 里，且**码与参考实现一致**（`E0999`，见
     `tools/lomentc.py` 的 `Wdiag` 那一档 —— 没有专属码的构造归这里）。
 
     `line` 断言成 `0`：自举侧的 comefor 展开只回**种类**、不回 token 下标，所以这一格
@@ -3547,7 +3545,7 @@ def test_m85_a_parse_failure_reaches_diag_out():
         assert dj.exists(), "没有结构化诊断文件"
         recs = [json.loads(x) for x in dj.read_text(encoding="utf-8").splitlines() if x.strip()]
         assert recs, "结构化诊断是空的（启动器只能回吐裸行）—— 正是 #657 的症状"
-        assert recs[0]["code"] == "E999", f"码与参考实现不一致: {recs[0]}"
+        assert recs[0]["code"] == "E0999", f"码与参考实现不一致: {recs[0]}"
         assert "byuse must be written at the top level" in recs[0]["message"], recs[0]
         assert recs[0]["line"] == 0, (
             f"没有位置的失败这一格必须是 0（登记在案的缺口, 见 docstring）: {recs[0]}")

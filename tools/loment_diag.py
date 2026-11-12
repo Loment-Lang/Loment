@@ -4476,6 +4476,22 @@ FINE: tuple[Fine, ...] = (
          "Or replace the construct (shift instead of divide, a static buffer instead of `alloc`).",
          "If only a library needs it, let the library declare the requirement."),
     ),
+    # 2026-11-11：`str_num` 收全整型之后（`docs/337`）消息从"期望无符号整型"变成
+    # "期望整型"，细分码表没跟上 —— 模板停在族码 E001 上，`loment_err_test` 点名。
+    Fine(
+        209, 1, r"^内建 str_num 实参期望整型",
+        "`str_num` 只收整型",
+        "`str_num` takes an integer",
+        "`str_num` 的实参不是整型 —— 它没有字符串、布尔或指针的重载。",
+        "The argument to `str_num` is not an integer; there is no string, boolean or "
+        "pointer form.",
+        ("先转成整型：`str_num(n as u32)`。",
+         "`bool` 要变成文字就该用插值 `f\"{b}\"`，它走 `str_show`。",
+         "已经有十进制文本了就直接用它，别再转一遍。"),
+        ("Convert first: `str_num(n as u32)`.",
+         "For a `bool`, use interpolation `f\"{b}\"`; that goes through `str_show`.",
+         "If it is already decimal text, use it directly."),
+    ),
 )
 
 

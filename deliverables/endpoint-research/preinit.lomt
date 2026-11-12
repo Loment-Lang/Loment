@@ -1,0 +1,80 @@
+module initheavy
+choose runtime
+
+const BUF: u32 = 49152;
+const WARM: u32 = 2000000;
+const ROUNDS: u32 = 8;
+
+fn write_str(fd: u64, s: str) -> i64 {
+    return syscall4(1, fd, str_ptr(s) as u64, str_len(s) as u64);
+}
+
+fn write_dec(fd: u64, v: u32) {
+    let buf: ptr = alloc(12);
+    let n: u32 = 0;
+    let x: u32 = v;
+    if x == 0 {
+        store8(buf, 0, 48 as u8);
+        n = 1;
+    }
+    while x > 0 {
+        store8(buf, n, (48 + x % 10) as u8);
+        x = x / 10;
+        n = n + 1;
+    }
+    let i: u32 = 0;
+    while i < n / 2 {
+        let lo: u8 = load8(buf, i) as u8;
+        let hi: u8 = load8(buf, n - 1 - i) as u8;
+        store8(buf, i, hi);
+        store8(buf, n - 1 - i, lo);
+        i = i + 1;
+    }
+    syscall4(1, fd, buf as u64, n as u64);
+}
+
+fn load_u64(p: ptr, off: u32) -> u64 {
+    let v: u64 = 0;
+    v = v + (load8(p, off) as u64);
+    v = v + (load8(p, off + 1) as u64) * (256 as u64);
+    v = v + (load8(p, off + 2) as u64) * (65536 as u64);
+    v = v + (load8(p, off + 3) as u64) * (16777216 as u64);
+    v = v + (load8(p, off + 4) as u64) * (4294967296 as u64);
+    v = v + (load8(p, off + 5) as u64) * (1099511627776 as u64);
+    v = v + (load8(p, off + 6) as u64) * (281474976710656 as u64);
+    v = v + (load8(p, off + 7) as u64) * (72057594037927936 as u64);
+    return v;
+}
+
+fn now_ns(ts: ptr) -> u64 {
+    syscall4(228, 1, ts as u64, 0);
+    let s: u64 = load_u64(ts, 0);
+    let n: u64 = load_u64(ts, 8);
+    return s * (1000000000 as u64) + n;
+}
+
+fn _start() {
+    let ts: ptr = alloc(16);
+    let buf: ptr = alloc(BUF);
+    let t0: u64 = now_ns(ts);
+    let t1: u64 = now_ns(ts);
+    let acc: u64 = 0;
+    let r: u32 = 0;
+    while r < ROUNDS {
+        let j: u32 = 0;
+        while j < BUF {
+            acc = acc + (load8(buf, j) as u64);
+            j = j + 1;
+        }
+        r = r + 1;
+    }
+    let t2: u64 = now_ns(ts);
+    write_str(1, "init_ns=");
+    write_dec(1, (t1 - t0) as u32);
+    write_str(1, " steady_ns=");
+    write_dec(1, (t2 - t1) as u32);
+    write_str(1, " checksum=");
+    write_dec(1, (acc % (1000000 as u64)) as u32);
+    write_str(1, "\n");
+    syscall4(60, 0, 0, 0);
+}

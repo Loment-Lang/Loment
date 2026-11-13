@@ -4875,14 +4875,31 @@ class Parser:
         if t.val == "let":
             self.next()
             name = self.ident("变量名")
-            self.expect("punct", ":")
-            ty = self.type_name()
+            _c = self.peek()
+            # `let x := e;`（`docs/347`）：类型推断的另一种拼法，与 `let x: auto = e;`
+            # 同义。**要求 `:` 与 `=` 紧挨着**（相邻判定，中间夹空白不算）—— 否则
+            # `let x: = e` 会被悄悄读成推断，而它本该是"`: ` 后面缺类型"的错。
+            # 旧版次里 `:=` 不是一条读法：`:` 后面缺类型，解析错。
+            _shorthand = (
+                self.profile in TUR3_PLUS
+                and _c.kind == "punct" and _c.val == ":"
+                and self.peek(1).kind == "punct" and self.peek(1).val == "="
+                and self.peek(1).off == _c.off + _c.len
+            )
+            if _shorthand:
+                self.next()          # `:`
+                self.next()          # `=`
+                ty = "auto"
+            else:
+                self.expect("punct", ":")
+                ty = self.type_name()
             space = ""
             if self.accept("ident", "in"):  # docs/313 §2：值的空间标签
                 space = self.ident("空间名")
-            if self.accept("punct", ";"):  # M9: 未初始化声明
-                return Let(name, ty, None, t.line, space)
-            self.expect("punct", "=")
+            if not _shorthand:
+                if self.accept("punct", ";"):  # M9: 未初始化声明
+                    return Let(name, ty, None, t.line, space)
+                self.expect("punct", "=")
             # 2026.3 的 `if` 表达式只在这一格开口（`docs/335`）；解析完再确认它
             # **就是**初值本身，而不是藏在别的表达式里 —— 藏在里面反糖不了。
             self.allow_ifexpr += 1
@@ -4892,6 +4909,12 @@ class Parser:
             finally:
                 self.allow_ifexpr -= 1
                 self.allow_matchexpr -= 1
+            if ty == "auto" and isinstance(e, (IfExpr, MatchExpr)):
+                # `auto` 的推断在检查期做，而 `if` / `match` 表达式在**装载期**就被
+                # 反糖成"先声明、两支各自赋值" —— `let x: auto;` 反糖之后没有可赋的
+                # 类型。所以这一格在解析期就拒，不等到检查期（`docs/347`）。
+                raise LomError(t.line, 1,
+                               "`auto` 不能接 `if` / `match` 表达式 —— 初值先写显式类型")
             if not isinstance(e, (IfExpr, MatchExpr)) and _contains_ifexpr(e):
                 raise LomError(t.line, 1,
                                "`if` 表达式 v1 只能作 `let` 的整个初值，不能嵌在别的"
@@ -6059,6 +6082,37 @@ def _const_int(e) -> int | None:
         return e.value
     if isinstance(e, Un) and e.op == "-" and isinstance(e.expr, IntLit):
         return -e.expr.value
+    return None
+
+
+def _auto_type(e, scope: dict[str, str], funcs: dict[str, Func],
+               structs: dict[str, Struct], consts: dict[str, str]) -> str | None:
+    """`let x: auto = e` 的推断（`docs/347`）：**初值必须把类型写在源里**。
+
+    v1 只收三副形状 —— 局部/形参（含字段链）、整条初值是一个 `as T` 转换、
+    `true` / `false`。**调用与运算不收**：`expr_type` 对它们给得出答案，但那份答案
+    有几种来自**没有 token 的类型**（`alloc` 这类 `ptr` 返回的内建、`syscall*` 的
+    `i64`），自举侧的 `expr_type` 只能回"未知"。收进来的话，同一份源在两侧一个过、
+    一个不过 —— 那是最难查的一种分叉。所以 v1 的门槛是"类型出现在源里"，两边照
+    token 判，逐字一致。
+
+    模块级常量**不收**：检查期的 scope 里有它，而两套实现的发射期都看不见常量类型
+    （`st_kind` 那一格正是在补这个缺口），`let x := SOME_CONST` 会在自举侧落成
+    `u32`。这一条与"初值要写着类型"同一个判据面：**发射期也看得见的类型**。
+    """
+    if isinstance(e, Cast):
+        return e.type
+    if isinstance(e, BoolLit):
+        return "bool"
+    if isinstance(e, (Ident, FieldAccess)):
+        root = e
+        while isinstance(root, FieldAccess):
+            root = root.obj
+        if not isinstance(root, Ident) or root.name in consts:
+            return None
+        if root.name not in scope:
+            return None
+        return expr_type(e, scope, funcs, structs)
     return None
 
 
@@ -8664,6 +8718,20 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                             errs.append(
                                 f"{s.line}: `catch return` 要求函数 {f.name} 返回 {_stq}"
                                 f"（同一个枚举），声明的是 {f.ret}")
+                    _auto_bad = False
+                    if s.type == "auto":
+                        # `let x: auto = e;` / `let x := e;`（`docs/347`）：推断写回
+                        # `s.type`，下游（发射、局部收集、Rust 后端）照常读它。
+                        _it = (None if s.expr is None
+                               else _auto_type(s.expr, fscope, funcs, structs, const_scope))
+                        if _it is None:
+                            errs.append(
+                                f"{s.line}: `auto` 推断不出 {s.name} 的类型 —— 初值必须"
+                                f"把类型写在源里（变量、字段、`as T` 转换或 `true`/`false`）")
+                            s.type = "u32"     # 占位：别让同一句再报一次"未知类型 auto"
+                            _auto_bad = True
+                        else:
+                            s.type = _it
                     if not _type_ok(s.type, known):
                         errs.append(f"{s.line}: 未知类型 {s.type}（let {s.name} 的类型）")
                     if _is_array(s.type) and isinstance(s.expr, ArrayLit):
@@ -8673,10 +8741,10 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                                 f"{s.line}: 数组长度不符: 声明 {want}，字面量 {len(s.expr.items)}"
                             )
                     t = expr_type(s.expr, fscope, funcs, structs)
-                    if t is not None and not _type_compat(t, s.type):
+                    if t is not None and not _auto_bad and not _type_compat(t, s.type):
                         errs.append(f"{s.line}: let {s.name}: {s.type} = 表达式类型 {t}")
-                    if s.space and not (_is_array(s.type) or _is_slice(s.type)
-                                        or s.type == "ptr"):
+                    if s.space and not _auto_bad and not (
+                            _is_array(s.type) or _is_slice(s.type) or s.type == "ptr"):
                         errs.append(f"{s.line}: {s.name} 的类型 {s.type} 不能带空间 "
                                     f"（只有数组 / 切片 / ptr 可以）")
                     fscope[s.name] = s.type
@@ -12489,6 +12557,11 @@ def _collect_locals(f: Func, enums: dict | None = None,
         for s in stmts:
             if isinstance(s, (Let, Assign)):
                 if isinstance(s, Let):
+                    if s.type == "auto" and s.expr is not None:
+                        # `let x: auto = e;`（`docs/347`）：检查跑在 `prepare` 的**副本**
+                        # 上，这里拿到的是原件 —— 所以推断要在发射这一侧再做一遍。
+                        # 推断不出时落 `u32`：能走到这里的程序已经过了检查，那一步会先报。
+                        s.type = (_auto_type(s.expr, scope, funcs, structs, {}) or "u32")
                     if s.name not in seen:
                         out.append((s.name, s.type, s.line))
                         seen.add(s.name)
@@ -14352,6 +14425,11 @@ class _Ir:
         if isinstance(s, Let):
             if s.expr is None:  # M9: 未初始化 (alloca 已在入口块)
                 return
+            if s.type == "auto":
+                # 兜底：`_collect_locals` 那一趟已经把它定死了（`docs/347`），这里只为
+                # "万一"留一条路 —— 走到这句时类型必须是真的，否则 `ll("auto")` 抛。
+                s.type = _auto_type(s.expr, {n: t for n, (t, _) in self.vars.items()},
+                                    self.funcs, self.structs, {}) or "u32"
             if s.name in self.l05_static:
                 # **L0.5 静态段**（`docs/210` §2.10）：整函数一块栈区里的一个**编译期偏移**。
                 off, size = self.l05_static[s.name]

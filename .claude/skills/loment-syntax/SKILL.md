@@ -260,6 +260,12 @@ a criterion checks the two compile to **byte-identical** IR).
 
 ## 3. Builtins (all of them, there are no others)
 
+> **Inferred locals** (Tur 2026.3+, `docs/347`): `let n := p.a;` / `let k: auto = p.b;` -
+> the type comes from the initialiser, and the initialiser must **spell a type in the
+> source** (a local/parameter, a field chain, a whole `as T` cast, or `true`/`false`).
+> `let x := 5;`, `let x := f();`, `let x := a + 1;` and `let x := K;` are E0215;
+> `auto` with an `if`/`match` expression is E0216. `:=` must be written glued.
+>
 > **`catch` handlers** (Tur 2026.3+, `docs/343`): `r catch |e| { e + 100 }` binds the
 > error payload and evaluates one expression; `r catch return` returns the error as
 > `Err(…)` from the function (its return type must be the same enum). Both only on the

@@ -8437,8 +8437,21 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         if l0_store(s, out, src, toks, j) == 1 {
             return j + 10;
         }
-        let ty: u32 = j + 3;
-        let eq: u32 = skip_type(src, toks, ty);   // '=' 的位置 (类型可能是 [T; N] / [T])
+        let ty0: u32 = j + 3;
+        let eq: u32 = skip_type(src, toks, ty0);   // '=' 的位置 (类型可能是 [T; N] / [T])
+        // `let x: auto = e;` / `let x := e;`（`docs/347`）：类型 token 换成**初值推断出来
+        // 的那个**。`expr_type` 回的是源里某个类型 token 的下标（变量/形参/字段的声明处、
+        // `as T` 的 T），或是 `CG_WANT_U32` / `CG_TY_BOOL` 这类哨兵 —— `emit_ty` 全都认识。
+        // `:=` 的 `=` 就在 `:` 后面，`skip_type` 会把初值当类型跳过，所以先纠一次 eq。
+        let ty: u32 = ty0;
+        if load32(s, CG_PROF) >= 2 {
+            if tok_is(src, toks, ty0, "=") {
+                eq = ty0;
+            }
+            if tok_is(src, toks, ty0, "=") || tok_is(src, toks, ty0, "auto") {
+                ty = expr_type(s, src, toks, eq + 1);
+            }
+        }
         if load32(s, CG_PROF) >= 2 && tok_is(src, toks, eq + 1, "if") {
             // 2026.3 `let x: T = if c { a } else { b };`（`docs/335`）：参考实现把它
             // 降成 `let x: T;` + 一条 If，两支各 `x = …`。
@@ -9846,8 +9859,21 @@ fn collect_locals(s: ptr, src: ptr, toks: ptr, i: u32, end: u32) -> u32 {
         }
         if tok_is(src, toks, j, "let") && !tok_is(src, toks, j - 1, "if") {   // `if let` 走下一分支
             let name: u32 = j + 1;
-            let ty: u32 = j + 3;
-            let eq2: u32 = skip_type(src, toks, ty);
+            let ty0: u32 = j + 3;
+            let eq2: u32 = skip_type(src, toks, ty0);
+            // `let x: auto = e;` / `let x := e;`（`docs/347`）：局部表里存**推断出来的**
+            // 那个类型 token —— 后面 `var_type` 拿它当这个变量的类型（字段、借用、定宽
+            // 都靠它）。推断用 `expr_type`，与发射那一趟同一份规则。
+            let ty: u32 = ty0;
+            if load32(s, CG_PROF) >= 2 {
+                if tok_is(src, toks, ty0, "=") {
+                    eq2 = ty0;
+                }
+                if tok_is(src, toks, ty0, "=") || tok_is(src, toks, ty0, "auto") {
+                    store32(s, 484, n);      // 先让 `expr_type` 看得见前面那些局部
+                    ty = expr_type(s, src, toks, eq2 + 1);
+                }
+            }
             if tok_is(src, toks, eq2 - 2, "in") && tok_kind(toks, eq2 - 1) == 0 {
                 let _ds1: u32 = dsp_set(s, src, toks, name, eq2 - 1);   // docs/314
             }

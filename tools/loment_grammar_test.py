@@ -1958,6 +1958,117 @@ def test_tur2026_2_is_frozen():
     print("      tur2026.2 封版：特性面哈希一致，且没有未封版的新版次混进来")
 
 
+@test
+def test_auto_type_inference():
+    """`let x: auto = e;` / `let x := e;`（2026.3+，`docs/347`）。
+
+    四件事：
+    * **产物与显式写法逐字节相同** —— 推断只是省了那几个字，不是新的语义；
+    * 收的初值形状：变量、字段、整条 `as T`、`true`/`false`；
+    * **不收**：字面量、调用、运算、`if`/`match` 表达式、没有初值、模块常量 ——
+      这些都没有"写在源里的类型"，两套实现照同一条判据面拒；
+    * `:=` 要**粘着**（`let x: = e` 仍是缺类型的语法错），旧版次整条读法不存在。
+    """
+    explicit = "".join([
+        "module m", chr(10), "choose runtime", chr(10), chr(10),
+        "struct S { a: u32, b: i64 }", chr(10), chr(10),
+        "fn main() -> u32 {", chr(10),
+        "    let p: S = S { a: 3, b: 4 };", chr(10),
+        "    let n: u32 = p.a;", chr(10),
+        "    let k: i64 = p.b;", chr(10),
+        "    let j: i64 = k as i64;", chr(10),
+        "    let t: bool = true;", chr(10),
+        "    print_num(n);", chr(10),
+        "    print_num(j as u32);", chr(10),
+        "    if t { print_num(0); }", chr(10),
+        "    return 0;", chr(10),
+        "}", chr(10)])
+    inferred = "".join([
+        "module m", chr(10), "choose runtime", chr(10), chr(10),
+        "struct S { a: u32, b: i64 }", chr(10), chr(10),
+        "fn main() -> u32 {", chr(10),
+        "    let p: S = S { a: 3, b: 4 };", chr(10),
+        "    let n := p.a;", chr(10),
+        "    let k: auto = p.b;", chr(10),
+        "    let j := k as i64;", chr(10),
+        "    let t: auto = true;", chr(10),
+        "    print_num(n);", chr(10),
+        "    print_num(j as u32);", chr(10),
+        "    if t { print_num(0); }", chr(10),
+        "    return 0;", chr(10),
+        "}", chr(10)])
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+
+        def ll_of(text: str, name: str) -> str:
+            p = td / f"{name}.lomt"
+            p.write_text(text, encoding="utf-8", newline=chr(10))
+            mod = lomentc.load(p)
+            errs = lomentc.check(mod, deps=lomentc.resolve_deps(mod, ROOT, td, entry=p))
+            assert not errs, (name, errs[:3])
+            return lomentc.emit_llvm(mod, ROOT)
+
+        a = ll_of(explicit, "explicit")
+        b = ll_of(inferred, "inferred")
+        assert a == b, "推断写法与显式写法的产物不同"
+
+        bad = {
+            "intlit": "    let x := 5;",
+            "call": "    let x := f();",
+            "binop": "    let x := n + 1;",
+            "noinit": "    let x: auto;",
+            "const": "    let x := K;",
+        }
+        pre = "".join([
+            "module m", chr(10), "choose runtime", chr(10), chr(10),
+            "const K: u32 = 3;", chr(10), chr(10),
+            "fn f() -> u32 { return 1; }", chr(10), chr(10),
+            "fn main() -> u32 {", chr(10), "    let n: u32 = 1;", chr(10)])
+        for name, line in bad.items():
+            p = td / f"bad_{name}.lomt"
+            p.write_text(pre + line + chr(10) + "    return 0;" + chr(10) + "}" + chr(10),
+                         encoding="utf-8", newline=chr(10))
+            mod = lomentc.load(p)
+            errs = lomentc.check(mod, deps=lomentc.resolve_deps(mod, ROOT, td, entry=p))
+            assert any("推断不出" in e for e in errs), (name, errs[:3])
+
+        # `if` 表达式：装载期反糖、推断没有位置 —— 解析期就拒。
+        p = td / "ifexpr.lomt"
+        p.write_text(pre + "    let x: auto = if true { 1 } else { 2 };" + chr(10)
+                     + "    return 0;" + chr(10) + "}" + chr(10),
+                     encoding="utf-8", newline=chr(10))
+        try:
+            lomentc.load(p)
+        except lomentc.LomError as e:
+            assert "不能接" in e.msg, e.msg
+        else:
+            raise AssertionError("`auto` 接了 `if` 表达式")
+
+        # 粘着：`let x: = 1` 仍是"`: ` 后面缺类型"的语法错。
+        p = td / "spaced.lomt"
+        p.write_text("module m" + chr(10) + "fn main() -> u32 { let x: = 1; return 0; }" + chr(10),
+                     encoding="utf-8", newline=chr(10))
+        try:
+            lomentc.load(p)
+        except lomentc.LomError:
+            pass
+        else:
+            raise AssertionError("`let x: = 1` 被读成了推断（`:=` 要粘着）")
+
+        # 旧版次：整条读法不存在（`:` 后面缺类型）。
+        p = td / "old.lomt"
+        p.write_text("choose write grammar tur2026.2" + chr(10) + "module m" + chr(10)
+                     + "fn main() -> u32 { let x := 1; return 0; }" + chr(10),
+                     encoding="utf-8", newline=chr(10))
+        try:
+            lomentc.load(p)
+        except lomentc.LomError:
+            pass
+        else:
+            raise AssertionError("tur2026.2 收了 `:=`")
+    print("      `auto` / `:=`：产物与显式写法相同；六种初值与旧版次都拒")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_grammar_test")
 

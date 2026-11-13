@@ -300,6 +300,31 @@ def test_fmt_keeps_interpolated_strings_glued():
 
 
 @test
+def test_fmt_keeps_the_inference_shorthand_glued():
+    """`let x := e;` 格式化之后 `:` 与 `=` 仍是**粘着的**（`docs/347`）。
+
+    `:=` 是一条读法的两个字符：拆成 `: =` 就不是类型推断了（那是"`: ` 后面缺类型"
+    的语法错）。两个格式化器都要认它 —— 自举那侧由 `test_loment_fmt_matches_python`
+    逐字节对拍，这里钉住参考实现这一半，并把格式化结果**再编一遍**。
+    """
+    src = ('module x\nchoose runtime\n\nfn f(n: u32) -> u32 {\n'
+           '    let a := n;\n'
+           '    let b: auto = a;\n'
+           '    return b;\n}\n')
+    out = lomfmt.format_source(src)
+    assert "let a := n;" in out, out
+    assert ": =" not in out, out
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        p = td / "auto.lomt"
+        p.write_text(out, encoding="utf-8", newline="")
+        mod = lomentc.load(p)
+        errs = lomentc.check(mod, deps=lomentc.resolve_deps(mod, ROOT, td, entry=p))
+        assert not errs, errs[:3]
+    print("      `:=` 格式化后仍是一条读法（编得过）")
+
+
+@test
 def test_fmt_keeps_declaration_modifiers_on_one_line():
     """**修饰词不单独占一行**（`#46`）—— `pub fn f()` 要待在同一行。
 

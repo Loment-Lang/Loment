@@ -460,6 +460,27 @@ def test_python_lsp_reads_interpolated_strings():
 
 
 @test
+def test_python_lsp_reads_inferred_locals():
+    """开发口 LSP 认 `let x := e;` / `let x: auto = e;`（`docs/347`）。
+
+    LSP 走的是 `lomentc.Parser`（不经过 `load`），而 `:=` 是**解析期**才认出来的读法
+    —— parser 的版次缺省是最新版次，所以这里应当解析得通、检查零错。同一条入口缺口
+    的老形状：编得过、编辑器报假错，比两边都报错更糟（`docs/182` §1.9）。
+    """
+    NL = chr(10)
+    src = ("module demo" + NL + "choose runtime" + NL + NL +
+           "fn main() -> u32 {" + NL +
+           "    let n: u32 = 7;" + NL +
+           "    let a := n;" + NL +
+           "    let b: auto = a;" + NL +
+           "    return b;" + NL + "}" + NL)
+    mod = PY_LSP._parse(src)
+    errs = lomentc.check(mod)
+    assert not errs, errs[:3]
+    print("      开发口 LSP: `:=` / `auto` 源解析通过")
+
+
+@test
 def test_lsp_check_honours_switches():
     """语言服务是"读 L1 源的东西"之一 —— **开关没落定就等于关着的那段照样被检查**。
 

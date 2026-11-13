@@ -75,6 +75,20 @@ def _is_value_end(tok: lomc.Tok | None) -> bool:
 _CONTROL = {"if", "while", "match", "for", "in", "return", "guard", "as"}
 
 
+def _is_glued_def(toks: list, i: int) -> bool:
+    """`toks[i]` 是不是 `:=` 的**前半**（紧挨着 `=` 的 `:`，`docs/347`）。
+
+    这一格要 `:` 前面留一个空格 —— `x: u32` 的"冒号前不留空格"说的是类型标注；`:=`
+    在这里是**一个算子**，`x:= n` 会读成"冒号后面少了一层"，所以判据是它而不是
+    `NO_SPACE_BEFORE`。
+    """
+    if i < 0 or i + 1 >= len(toks):
+        return False
+    a, b = toks[i], toks[i + 1]
+    return (a.kind == "punct" and a.val == ":" and b.kind == "punct" and b.val == "="
+            and a.off + a.len == b.off)
+
+
 def _needs_space(pp: lomc.Tok | None, prev: lomc.Tok | None, cur: lomc.Tok) -> bool:
     if prev is None:
         return False
@@ -98,6 +112,11 @@ def _needs_space(pp: lomc.Tok | None, prev: lomc.Tok | None, cur: lomc.Tok) -> b
         if pv in (")", "]"):
             return False
     if cv == "!" or pv == "!":
+        return False
+    if pv == ":" and cv == "=" and prev.off + prev.len == cur.off:
+        # `let x := e;`（`docs/347`）：**粘着的** `:` `=` 是一条读法（类型推断的另一种
+        # 拼法）。拆成 `: =` 就不是了（那是"`: ` 后面缺类型"的语法错）—— 与上面
+        # `f"…"` 的插值前缀同一条理由：格式化器改不动一条读法的形状。
         return False
     if cv in BINARY or pv in BINARY:
         if cv in ("+", "-", "&") and not _is_value_end(prev):
@@ -284,7 +303,7 @@ def format_source(src: str) -> str:
         elif out:
             out[-1] = out[-1] + " " + text
 
-    for t in toks:
+    for _ti, t in enumerate(toks):
         emit_own_before(t.line)
         if prev is not None and t.line > prev.line:
             emit_trailing(prev.line)
@@ -354,7 +373,7 @@ def format_source(src: str) -> str:
                 flush()
             pp, prev = prev, t
             continue
-        if line and _needs_space(pp, prev, t):
+        if line and (_is_glued_def(toks, _ti) or _needs_space(pp, prev, t)):
             line.append(" ")
         line.append(_render(t))
         line_toks.append(t)

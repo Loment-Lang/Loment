@@ -29,7 +29,7 @@
 module surface_data
 choose runtime
 
-pub fn n_codes() -> u32 { return 214; }
+pub fn n_codes() -> u32 { return 216; }
 
 /// 内部码段的下界（`#773`）。`E900` 起是"工具链自己崩了"那一类。
 pub fn internal_lo() -> u32 { return 900; }
@@ -470,6 +470,10 @@ pub fn code_title(c: u32, lang: u32) -> str {
     if k == 427 { return "`catch return` 要求失败变体带载荷"; }
     if k == 428 { return "the function using `catch return` must return the same enum"; }
     if k == 429 { return "`catch return` 的函数要返回同一个枚举"; }
+    if k == 430 { return "`auto` cannot infer the type"; }
+    if k == 431 { return "`auto` 推断不出类型"; }
+    if k == 432 { return "`auto` cannot take an `if` / `match` expression"; }
+    if k == 433 { return "`auto` 不能接 `if` / `match` 表达式"; }
     if k == 1800 { return "the tool died without reporting (internal)"; }
     if k == 1801 { return "工具链进程死了，没留下诊断"; }
     if k == 1998 { return "unclassified (please report)"; }
@@ -907,6 +911,10 @@ pub fn code_what(c: u32, lang: u32) -> str {
     if k == 427 { return "`catch return` 把错误载荷**原样装回**同一个枚举再返回；失败变体不带载荷时没有东西可装。"; }
     if k == 428 { return "`catch return` leaves the whole function with that enum's failure variant, so the function's return type must be that very enum."; }
     if k == 429 { return "`catch return` 退出的是**整个函数**，装的就是这个枚举的失败变体 —— 所以函数的返回类型必须正是它。"; }
+    if k == 430 { return "`let x: auto = e` / `let x := e` takes its type from the initializer, and this initializer does not spell a type in the source - literals, calls and operators are all in that class."; }
+    if k == 431 { return "`let x: auto = e` / `let x := e` 的类型从**初值**来，而这条初值没有把类型写在源里 —— 字面量、调用与运算都属于这一类。"; }
+    if k == 432 { return "`if` / `match` expressions are desugared at load time into \"declare first, assign in each arm\", and that declaration needs a type up front - there is no place to infer."; }
+    if k == 433 { return "`if` / `match` 表达式在装载期被反糖成\"先声明、两支各自赋值\"，那份声明需要一个现成的类型 —— 推断在这里没有位置。"; }
     if k == 1800 { return "A process in the toolchain died **before it could write a structured diagnostic** - killed by a signal, or exited abnormally, with no record in `--diag-out`."; }
     if k == 1801 { return "工具链里的一个进程在**能写出结构化诊断之前**就死了 —— 被信号打死，或者以异常状态退出，而 `--diag-out` 一份记录都没写。"; }
     if k == 1998 { return "The compiler reported an error that is not in the classification table -- even the toolchain did not recognise which code this message belongs to."; }
@@ -1344,6 +1352,10 @@ pub fn code_why(c: u32, lang: u32) -> str {
     if k == 427 { return "Loment **没有隐式数值转换**，也没有类型推断：每个位置上的类型必须显式对得上。所以 `u32` 的值不会自动变成 `i64`，整数 `1` 也不是 `bool` 的 `true`。"; }
     if k == 428 { return "Loment has **no implicit numeric conversion** and no type inference: every position must match explicitly. A `u32` value never becomes an `i64` on its own, and the integer `1` is not the `bool` `true`."; }
     if k == 429 { return "Loment **没有隐式数值转换**，也没有类型推断：每个位置上的类型必须显式对得上。所以 `u32` 的值不会自动变成 `i64`，整数 `1` 也不是 `bool` 的 `true`。"; }
+    if k == 430 { return "Loment has **no implicit numeric conversion** and no type inference: every position must match explicitly. A `u32` value never becomes an `i64` on its own, and the integer `1` is not the `bool` `true`."; }
+    if k == 431 { return "Loment **没有隐式数值转换**，也没有类型推断：每个位置上的类型必须显式对得上。所以 `u32` 的值不会自动变成 `i64`，整数 `1` 也不是 `bool` 的 `true`。"; }
+    if k == 432 { return "Loment has **no implicit numeric conversion** and no type inference: every position must match explicitly. A `u32` value never becomes an `i64` on its own, and the integer `1` is not the `bool` `true`."; }
+    if k == 433 { return "Loment **没有隐式数值转换**，也没有类型推断：每个位置上的类型必须显式对得上。所以 `u32` 的值不会自动变成 `i64`，整数 `1` 也不是 `bool` 的 `true`。"; }
     if k == 1800 { return "The diagnostics channel can only describe failures that were **successfully serialized before the failure**. A compiler crash, a linker crash, or the renderer crashing on its own all go the same way: the JSONL is empty and there is nothing for the renderer to do. The launcher now closes that gap: it reads the exit status / signal name and synthesizes this record, so \"no record\" no longer means \"nothing happened\" (#773). This is not a semantic error in your source - it is the **implementation failing on itself**."; }
     if k == 1801 { return "诊断系统只能描述**在失败之前已经成功序列化**的失败。编译器崩溃、链接器崩溃、报错器自己崩溃，走的都是这条路：JSONL 是空的，渲染器无事可做。启动器现在替它收尸：拿到退出状态 / 信号名，合成这一条记录，于是「没有任何记录」不再等于「什么都没有发生」（`#773`）。这不是你源码的语义错 —— 它是**实现自己的失败**。"; }
     if k == 1998 { return "The table and the compiler come out of the same repository and the same build. A message landing here means it has not been classified yet, not that the toolchain versions disagree: fix by the message, then report it so a rule can be added."; }
@@ -1781,6 +1793,10 @@ pub fn code_yes(c: u32, lang: u32) -> str {
     if k == 427 { return "显式 `as`（整数⇄整数、整数⇄布尔、指针⇄整数）；标量/字符串/切片/数组/结构体/枚举作为类型"; }
     if k == 428 { return "explicit `as` (integer<->integer, integer<->bool, pointer<->integer); scalar / string / slice / array / struct / enum as types"; }
     if k == 429 { return "显式 `as`（整数⇄整数、整数⇄布尔、指针⇄整数）；标量/字符串/切片/数组/结构体/枚举作为类型"; }
+    if k == 430 { return "explicit `as` (integer<->integer, integer<->bool, pointer<->integer); scalar / string / slice / array / struct / enum as types"; }
+    if k == 431 { return "显式 `as`（整数⇄整数、整数⇄布尔、指针⇄整数）；标量/字符串/切片/数组/结构体/枚举作为类型"; }
+    if k == 432 { return "explicit `as` (integer<->integer, integer<->bool, pointer<->integer); scalar / string / slice / array / struct / enum as types"; }
+    if k == 433 { return "显式 `as`（整数⇄整数、整数⇄布尔、指针⇄整数）；标量/字符串/切片/数组/结构体/枚举作为类型"; }
     if k == 1800 { return "a tool exits 0 (no diagnostics) or 1 (diagnostics, and it left a record)"; }
     if k == 1801 { return "工具链以 0 退出（无诊断）或 1 退出（有诊断并留下了记录）"; }
     if k == 1998 { return "classified messages after a report lands"; }
@@ -2218,6 +2234,10 @@ pub fn code_no(c: u32, lang: u32) -> str {
     if k == 427 { return "隐式提升与隐式转换（`u32` → `i64` 也必须写 `as`）；整数与布尔互用"; }
     if k == 428 { return "implicit promotion and implicit conversion (`u32` -> `i64` also needs `as`); using an integer where a bool is expected"; }
     if k == 429 { return "隐式提升与隐式转换（`u32` → `i64` 也必须写 `as`）；整数与布尔互用"; }
+    if k == 430 { return "implicit promotion and implicit conversion (`u32` -> `i64` also needs `as`); using an integer where a bool is expected"; }
+    if k == 431 { return "隐式提升与隐式转换（`u32` → `i64` 也必须写 `as`）；整数与布尔互用"; }
+    if k == 432 { return "implicit promotion and implicit conversion (`u32` -> `i64` also needs `as`); using an integer where a bool is expected"; }
+    if k == 433 { return "隐式提升与隐式转换（`u32` → `i64` 也必须写 `as`）；整数与布尔互用"; }
     if k == 1800 { return "killed by a signal / exited abnormally without writing any structured diagnostic"; }
     if k == 1801 { return "被信号打死 / 异常退出，而且一份结构化诊断都没写"; }
     if k == 1998 { return "guessing a code"; }
@@ -2440,6 +2460,8 @@ pub fn code_ascii(c: u32) -> str {
     if c == 212 { return "the `catch |e|` fallback must have the success payload's type"; }
     if c == 213 { return "`catch return` needs the failure variant to carry a payload"; }
     if c == 214 { return "the function using `catch return` must return the same enum"; }
+    if c == 215 { return "`auto` cannot infer the type"; }
+    if c == 216 { return "`auto` cannot take an `if` / `match` expression"; }
     if c == 900 { return "a tool in the chain died before it could report (internal) - report it with the unit"; }
     if c == 999 { return "unclassified - please report it"; }
     return "";
@@ -2619,6 +2641,8 @@ pub fn code_family(c: u32) -> u32 {
     if c == 212 { return 1; }
     if c == 213 { return 1; }
     if c == 214 { return 1; }
+    if c == 215 { return 1; }
+    if c == 216 { return 1; }
     return c;
 }
 
@@ -3959,6 +3983,18 @@ pub fn code_fix(c: u32, i: u32, lang: u32) -> str {
     if k == 3425 { return "函数返回类型改成这个枚举：`fn f() -> Result<u32, u32>`。"; }
     if k == 3427 { return "函数本来就返回别的类型：改写 `v catch return` 为 `v catch 0`（或 `match`）。"; }
     if k == 3429 { return "这个错误不该由本函数处理：往上再传一层，让调用方决定。"; }
+    if k == 3440 { return "If the initializer is a variable or a field, use it directly; write a literal as `5 as u32`."; }
+    if k == 3442 { return "For a call or an operator, spell the type: `let n: u32 = str_len(s);`."; }
+    if k == 3444 { return "If you only want the default width, `let n := 0 as u32;` is the same road."; }
+    if k == 3441 { return "初值是变量或字段就直接用；字面量写成 `5 as u32`。"; }
+    if k == 3443 { return "调用与运算：把类型写出来 —— `let n: u32 = str_len(s);`。"; }
+    if k == 3445 { return "只想要个默认宽度：`let n := 0 as u32;` 也是同一条路。"; }
+    if k == 3456 { return "Spell the type: `let x: u32 = if c { a } else { b };`."; }
+    if k == 3458 { return "Or assign in each arm: `let x: u32; if c { x = a; } else { x = b; }`."; }
+    if k == 3460 { return "If both arms share a source, hoist it before the `let`."; }
+    if k == 3457 { return "把类型写出来：`let x: u32 = if c { a } else { b };`。"; }
+    if k == 3459 { return "两支各自赋值也行：`let x: u32; if c { x = a; } else { x = b; }`。"; }
+    if k == 3461 { return "值来自同一处：把那段提到 `let` 之前，让初值是变量。"; }
     if k == 14400 { return "Report the smallest source that reproduces it together with this record - a crash is a compiler defect, not something you can work around in your code."; }
     if k == 14402 { return "Include the exit status / signal name (already in this message) and the output of `loment version`."; }
     if k == 14404 { return "If the message names the **linker** (`loment-lomelf`), also include the `-o` path and the target platform."; }
@@ -4193,6 +4229,8 @@ pub fn code_nfix(c: u32) -> u32 {
     if c == 212 { return 3; }
     if c == 213 { return 3; }
     if c == 214 { return 3; }
+    if c == 215 { return 3; }
+    if c == 216 { return 3; }
     if c == 900 { return 4; }
     if c == 999 { return 3; }
     return 0;

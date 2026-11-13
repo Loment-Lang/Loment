@@ -252,6 +252,10 @@ def test_loment_fmt_edge_cases():
         "pub_extern": ("module x\n\npub extern fn sys_write(fd: u32, p: ptr, n: u32) -> u32;\n"
                        "\nfn f() -> u32 {\n    return 1;\n}\n"),
         "pub_const_pair": "module x\n\npub const A: u32 = 1;\npub const B: u32 = 2;\n",
+        # `docs/341`: 插值前缀与字符串**粘着** —— 中间加一个空格就把 `f"…"` 拆成两个
+        # token，格式化后的文件编不过。这一张两边都跑，孪生也被钉住。
+        "interp": ('module x\n\nfn f(n: u32) -> str {\n'
+                   '    return f"n={n} {{lit}}";\n}\n'),
     }
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
@@ -268,6 +272,56 @@ def test_loment_fmt_edge_cases():
         probe.unlink(missing_ok=True)
         assert not bad, "; ".join(bad)
         print(f"      {len(cases)} 个边界用例一致")
+
+
+@test
+def test_fmt_keeps_interpolated_strings_glued():
+    """`f"…"` / `rf"…"` 格式化之后仍是**一条读法**（`docs/341`）。
+
+    两个格式化器都按 token 排版，而插值在源里是 `ident f` + `string` 两个 token ——
+    中间补一个空格，编译器的改写就再也认不出它。判据把格式化结果**再编一遍**：
+    比"文本里还有 f 加引号"更硬。
+    """
+    src = ('module x\nchoose runtime\n\nfn f(n: u32) -> str {\n'
+           '    let a: str = f"n={n}";\n'
+           '    let b: str = rf"raw\\\\n{n}";\n'
+           '    return a;\n}\n')
+    out = lomfmt.format_source(src)
+    assert 'f"n={n}"' in out, out
+    assert 'rf "raw' not in out and 'f "n=' not in out, out
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        p = td / "interp.lomt"
+        p.write_text(out, encoding="utf-8", newline="")
+        mod = lomentc.load(p)
+        errs = lomentc.check(mod, deps=lomentc.resolve_deps(mod, ROOT, td, entry=p))
+        assert not errs, errs[:3]
+    print("      插值字符串格式化后仍是一条读法（编得过）")
+
+
+@test
+def test_fmt_keeps_the_inference_shorthand_glued():
+    """`let x := e;` 格式化之后 `:` 与 `=` 仍是**粘着的**（`docs/347`）。
+
+    `:=` 是一条读法的两个字符：拆成 `: =` 就不是类型推断了（那是"`: ` 后面缺类型"
+    的语法错）。两个格式化器都要认它 —— 自举那侧由 `test_loment_fmt_matches_python`
+    逐字节对拍，这里钉住参考实现这一半，并把格式化结果**再编一遍**。
+    """
+    src = ('module x\nchoose runtime\n\nfn f(n: u32) -> u32 {\n'
+           '    let a := n;\n'
+           '    let b: auto = a;\n'
+           '    return b;\n}\n')
+    out = lomfmt.format_source(src)
+    assert "let a := n;" in out, out
+    assert ": =" not in out, out
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        p = td / "auto.lomt"
+        p.write_text(out, encoding="utf-8", newline="")
+        mod = lomentc.load(p)
+        errs = lomentc.check(mod, deps=lomentc.resolve_deps(mod, ROOT, td, entry=p))
+        assert not errs, errs[:3]
+    print("      `:=` 格式化后仍是一条读法（编得过）")
 
 
 @test

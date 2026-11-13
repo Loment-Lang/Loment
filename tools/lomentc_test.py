@@ -7428,7 +7428,7 @@ def test_lifetime_verdicts_are_the_same_on_every_gc_tier():
 
 
 # ---------------------------------------------------------------- 效应语法面（A2）
-# `docs/346` §11 的 A2：**声明与行接受并擦除，perform/handle/resume 给 E023**。
+# `docs/341` §11 的 A2：**声明与行接受并擦除，perform/handle/resume 给 E023**。
 # 默认关（`lspe_effects_false`），所以旧源一个字节都不变。
 
 _EFF_BASE = "module m\nchoose lspe_effects_true\n\n"
@@ -7436,7 +7436,7 @@ _EFF_BASE = "module m\nchoose lspe_effects_true\n\n"
 
 @test
 def test_effects_slot_is_registered_and_defaults_off():
-    """`lspe_effects_true|false` 是一格构建旋钮，默认关（`docs/346` §11 A2）。"""
+    """`lspe_effects_true|false` 是一格构建旋钮，默认关（`docs/341` §11 A2）。"""
     assert "effects" in lomentc.CORE_SLOTS, lomentc.CORE_SLOTS
     assert lomentc.CORE_SLOT_DEFAULTS["effects"] == "false"
     assert lomentc.CORE_SLOT_OF["lspe_effects_true"] == ("effects", "true")
@@ -7482,7 +7482,7 @@ def test_effects_are_off_by_default():
 
 @test
 def test_effect_row_names_must_be_declared_and_unique():
-    """行里的未声明效应 ⇒ E002；重复声明 ⇒ E013（`docs/346` §6 R1）。"""
+    """行里的未声明效应 ⇒ E002；重复声明 ⇒ E013（`docs/341` §6 R1）。"""
     bad = _EFF_BASE + "fn f(x: u32) -> u32 effects Nope { return x; }\n"
     e = errs(bad)
     assert e and loment_diag.family(loment_diag.classify(e[0])[0]) == "E002", \
@@ -7512,7 +7512,7 @@ def test_perform_parses_then_refuses_as_e023():
 
 @test
 def test_handle_and_resume_parse_then_refuse_as_e023():
-    """`handle` / `resume` 同样：先有 AST，再由检查器点名拒（`docs/346` §11 A3）。"""
+    """`handle` / `resume` 同样：先有 AST，再由检查器点名拒（`docs/341` §11 A3）。"""
     src = _EFF_BASE + (
         "effect Log { fn write(v: u32) -> (); }\n\n"
         "fn run(x: u32) -> u32 {\n"
@@ -7536,7 +7536,7 @@ def test_handle_and_resume_parse_then_refuse_as_e023():
 
 @test
 def test_extern_cannot_declare_effects():
-    """`extern fn … effects E` 是边界错（`docs/346` §6 R7），A2 以 E023 点名。"""
+    """`extern fn … effects E` 是边界错（`docs/341` §6 R7），A2 以 E023 点名。"""
     src = _EFF_BASE + (
         "effect Log { fn write(v: u32) -> (); }\n\n"
         "extern fn puts(p: ptr) -> i32 effects Log;\n")

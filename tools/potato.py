@@ -1274,10 +1274,16 @@ def validate(doc: object) -> list[str]:
                 errs.append(f"{w}.name 重复: {name}")
             else:
                 seen_c.add(name)
-            if c.get("type") not in INT_TYPES:
-                errs.append(f"{w}.type 必须是整型: {c.get('type')!r}")
-            if not isinstance(c.get("value"), int):
-                errs.append(f"{w}.value 必须是整数")
+            # `docs/342`：2026.3 起 `const NAME: str = "…"` —— 值是**字符串**，
+            # 其余常量仍只收整数（整型 / bool）。
+            if c.get("type") == "str":
+                if not isinstance(c.get("value"), str):
+                    errs.append(f"{w}.value 必须是字符串")
+            else:
+                if c.get("type") not in INT_TYPES:
+                    errs.append(f"{w}.type 必须是整型: {c.get('type')!r}")
+                if not isinstance(c.get("value"), int):
+                    errs.append(f"{w}.value 必须是整数")
     elif consts is not None:
         errs.append("consts 必须是数组")
 

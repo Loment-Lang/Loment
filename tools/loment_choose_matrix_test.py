@@ -702,7 +702,7 @@ def test_aicheck_slot_changes_the_ledger_not_the_code():
 
 @test
 def test_effects_slot_changes_the_front_end_not_the_code():
-    """槽 `lspe_effects_true`（`docs/346` A2）：只开语法面，不含效应构造的源 IR 不动。"""
+    """槽 `lspe_effects_true`（`docs/341` A2）：只开语法面，不含效应构造的源 IR 不动。"""
     base = {"mode": "std", "gc": "gc_manual", "runtime": "runtime",
             "lspe": "lspe_open_admin"}
     with tempfile.TemporaryDirectory() as tds:

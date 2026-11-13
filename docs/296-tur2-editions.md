@@ -306,4 +306,8 @@ print_num(n);            // 十进制，负数带 '-'，不带换行
 > `for i, x in xs` 同日落地（`docs/333`）；`for x in <call>` 同日落地（`docs/334`，
 > 数组字面量与其它表达式仍在清单上）；`if` / `match` 表达式（`let` 初值位置）同日
 > 落地（`docs/335` / `docs/336`）；`str_num`（插值的前置）见 `docs/337`；
+> 字符串插值 `f"…"` / `rf"…"` 同日落地（`docs/341`，宽度 / 补零同篇）；
+> 命名字符串 `const NAME: str = "…"` 见 `docs/342`；
+> `catch |e| { … }` / `catch return` 见 `docs/343`；
+> 局部类型推断 `let x := e;` / `let x: auto = e;` 见 `docs/347`；
 > 其余语法优化项按 `docs/332` §5 的顺序推进，每项两套实现 + 判据。

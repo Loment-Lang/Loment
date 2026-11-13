@@ -51,20 +51,20 @@ LSPE_OBLIGATIONS: dict[str, dict[str, object]] = {
                    "accept": ("Syntactic", "Typed", "GlobalInvariant", "Assumed")},
     "SummaryContract": {"owner": "docs/210 §7",
                         "accept": ("Axiom", "Interproc", "Assumed")},
-    # E11 效应检查器（`docs/346`）。行是**声明出来的契约**：`Typed` 来自签名，
+    # E11 效应检查器（`docs/341`）。行是**声明出来的契约**：`Typed` 来自签名，
     # `Syntactic` 来自词法处理器栈，`Interproc` 来自被调函数的行。
-    "EffectAllowed": {"owner": "docs/346",
+    "EffectAllowed": {"owner": "docs/341",
                       "accept": ("Syntactic", "Typed", "Interproc", "Assumed")},
-    "HandlerExhaustive": {"owner": "docs/346",
+    "HandlerExhaustive": {"owner": "docs/341",
                           "accept": ("Syntactic", "Typed", "Assumed")},
     # `resume` 的 0/1 是**局部流**事实；尾续判定是语法事实。
-    "ResumeLinear": {"owner": "docs/346",
+    "ResumeLinear": {"owner": "docs/341",
                      "accept": ("LocalFlow", "Syntactic", "Assumed")},
     # 效应不穿越 C 边界：这是规范给的 `Axiom`，不是分析出来的。
-    "EffectBounded": {"owner": "docs/346",
+    "EffectBounded": {"owner": "docs/341",
                       "accept": ("Axiom", "Typed", "Assumed")},
     # 一般处理器的续延捕获要被回收（`no_gc` 下没有自动档，只能是假设）。
-    "CaptureReclaim": {"owner": "docs/346",
+    "CaptureReclaim": {"owner": "docs/341",
                        "accept": ("LocalFlow", "Interproc", "Assumed")},
 }
 
@@ -90,7 +90,7 @@ LSPE_CAPACITIES: dict[str, tuple[int, str]] = {
     "substitution_log": (65536, "WF 站点数受预算约束；越界 -> Q005"),
     # E9 域检查器（`docs/306`–`308`）。
     "domain_declarations": (64, "lspe_domain 回 1 -> pt_wfail（点名）"),
-    # E11 效应检查器（`docs/346`）。行是有限集合，容量越界必须点名，不许静默截断。
+    # E11 效应检查器（`docs/341`）。行是有限集合，容量越界必须点名，不许静默截断。
     "effect_declarations": (64, "lspe_effects 回 1 -> pt_wfail（点名）"),
     "ops_per_effect": (256, "lspe_effects 回 1 -> pt_wfail（点名）"),
     "handler_depth": (64, "词法处理器栈深度上限；越界 -> Q019，不静默"),
@@ -106,7 +106,7 @@ LSPE_SITE_KINDS = frozenset({
     "domain", "domain_access", "revoke",
     # E10 借用检查器（`docs/317`）：loan 是一等对象。站点先只进报告面。
     "loan", "loan_use", "loan_kill", "loan_conflict",
-    # E11 效应检查器（`docs/346`）：声明 / 行 / perform / 处理器 / resume /
+    # E11 效应检查器（`docs/341`）：声明 / 行 / perform / 处理器 / resume /
     # 调用行 / C 边界 / 续延捕获。
     "effect_decl", "row", "perform", "handle", "resume", "row_call",
     "effect_foreign", "handler_capture",
@@ -137,7 +137,7 @@ LSPE_QUESTIONS: dict[str, str] = {
     "Q015": "条件返回的借用来源不唯一",
     "Q016": "两阶段借用（保留 / 激活）无法证明",
     "Q017": "借用要跨迭代活着",
-    # E11 效应检查器（`docs/346` §8）：五种"证不出来"。
+    # E11 效应检查器（`docs/341` §8）：五种"证不出来"。
     "Q018": "效应行未声明或盖不住",
     "Q019": "处理器的穷尽性无法证明",
     "Q020": "`resume` 的线性（0/1）无法证明",

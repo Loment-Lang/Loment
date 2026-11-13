@@ -1,4 +1,4 @@
-# 346 · 代数效应与效应处理器：把"向谁求助"变成可检查的行
+# 341 · 代数效应与效应处理器：把"向谁求助"变成可检查的行
 
 > 状态: **A0/A1 报告面 + A2a 参考前端已落地**（2026-11-13）· 上游: `docs/262`（LSPE）·
 > `docs/306`–`308`（E9 域检查器）· `docs/317`（E10 借用检查器）· `docs/286`（六点一空间）·
@@ -492,11 +492,11 @@ effect MultiShot requires copy;   // 捕获集必须全部 Copy
 
 | 义务 | 语义所有者 | accept 集合 |
 |---|---|---|
-| `EffectAllowed` | `docs/346` §6 | `Syntactic` / `Typed` / `Interproc` / `Assumed` |
-| `HandlerExhaustive` | `docs/346` §6 R4 | `Syntactic` / `Typed` / `Assumed` |
-| `ResumeLinear` | `docs/346` §6 R5 | `LocalFlow` / `Syntactic` / `Assumed` |
-| `EffectBounded` | `docs/346` §6 R7 | `Axiom` / `Typed` / `Assumed` |
-| `CaptureReclaim` | `docs/346` §4.7 | `LocalFlow` / `Interproc` / `Assumed` |
+| `EffectAllowed` | `docs/341` §6 | `Syntactic` / `Typed` / `Interproc` / `Assumed` |
+| `HandlerExhaustive` | `docs/341` §6 R4 | `Syntactic` / `Typed` / `Assumed` |
+| `ResumeLinear` | `docs/341` §6 R5 | `LocalFlow` / `Syntactic` / `Assumed` |
+| `EffectBounded` | `docs/341` §6 R7 | `Axiom` / `Typed` / `Assumed` |
+| `CaptureReclaim` | `docs/341` §4.7 | `LocalFlow` / `Interproc` / `Assumed` |
 
 **`Differential` 不在任何 accept 里**（`docs/262` §5.3）：孪生只证一致，不证对。
 E11 的孪生判据只证明"两侧看同一份 token 得到同一组站点"，不销任何义务。

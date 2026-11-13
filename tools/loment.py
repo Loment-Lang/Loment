@@ -657,7 +657,7 @@ def cmd_lspe_loans(a) -> int:
 
 
 def cmd_lspe_effects(a) -> int:
-    """`loment lspe effects FILE` —— E11 效应检查器（`docs/346`）。
+    """`loment lspe effects FILE` —— E11 效应检查器（`docs/341`）。
 
     报告面：读源码的 token 流，**不经过解析器** —— 效应语法还没有进语言，
     但检查器要先能对形状说话。不改编译判决、不写台账、不改源码。

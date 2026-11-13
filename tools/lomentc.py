@@ -1460,6 +1460,50 @@ def _array_len(t: str) -> int:
     return int(t[t.rindex(";") + 1:-1].strip())
 
 
+def _fn_ty_split(t: str) -> tuple[list[str], str] | None:
+    """`(A,B)->C` -> `(["A", "B"], "C")`；不是函数类型返回 `None`。
+
+    类型在参考实现里是**字符串**，所以函数类型也编成字符串。**逗号后不留空格** ——
+    两个实现拼出来的那一串必须逐字符相同，否则同一个类型"看着一样却不相等"。
+    实参表里可以嵌 `(B)->C` / `[T; N]` / `Pair<u32>`，切逗号要按括号深度走。
+    """
+    if not t.startswith("("):
+        return None
+    depth = 0
+    i = 0
+    while i < len(t):
+        c = t[i]
+        if c in "(<[":
+            depth += 1
+        elif c in ")>]":
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    if depth != 0 or not t.startswith("->", i + 1) or i + 3 >= len(t):
+        return None
+    inner = t[1:i]
+    ret = t[i + 3:]
+    args: list[str] = []
+    if inner:
+        start, d = 0, 0
+        for k, c in enumerate(inner):
+            if c in "(<[":
+                d += 1
+            elif c in ")>]":
+                d -= 1
+            elif c == "," and d == 0:
+                args.append(inner[start:k])
+                start = k + 1
+        args.append(inner[start:])
+    return args, ret
+
+
+def _fn_ty_make(args: list[str], ret: str) -> str:
+    """`(["A", "B"], "C")` -> `"(A,B)->C"`（无空格，见 `_fn_ty_split`）。"""
+    return f"({','.join(args)})->{ret}"
+
+
 def _is_ref(t: str) -> bool:
     """`&T` / `&mut T` / `&a T` / `&mut a T`（`docs/299`）。"""
     return t.startswith("&")
@@ -1511,9 +1555,13 @@ def _type_compat(a: str | None, b: str | None) -> bool:
 
 
 def _type_ok(t: str, known: set[str]) -> bool:
-    """类型是否已声明: 基类型 / struct 名 / 由它们构成的数组、切片或借用。"""
+    """类型是否已声明: 基类型 / struct 名 / 由它们构成的数组、切片、借用或函数类型。"""
     if t in known:
         return True
+    fn = _fn_ty_split(t)
+    if fn is not None:
+        args, ret = fn
+        return _type_ok(ret, known) and all(_type_ok(a, known) for a in args)
     if _is_ref(t):
         return _type_ok(_ref_elem(t), known)
     if _is_array(t):
@@ -1756,6 +1804,20 @@ class Un:
     op: str
     expr: object
     line: int
+
+
+@dataclass
+class Lambda:
+    """`(x) => expr` / `(x: T, y) => expr` —— 闭包（`docs/341`）。
+
+    `params` 的类型可以缺省：从**期望类型**（`let` 的标注、实参位置、返回位置）推。
+    `captures` 由检查器填：`(名字, 类型, 是否按借)`。按借的捕获存**地址**，其余按值
+    存进闭包记录；两种都在调用时由被生成的函数体从 `%env` 取。
+    """
+    params: list = field(default_factory=list)
+    body: object = None
+    line: int = 0
+    captures: list = field(default_factory=list)
 
 
 @dataclass
@@ -3223,6 +3285,11 @@ CORE_DIMS: dict[str, tuple[str, ...]] = {
     # 仍默认 `lifetime_no`（`docs/305` 的封版承诺：旧版次一个字节都不变）。
     # 生效值由 `core_default("lifetime", profile)` 算，**不要**直接读 `CORE_DEFAULTS`。
     "lifetime": ("lifetime_no", "lifetime_auto", "lifetime_manual"),
+    # **间接分派**（用户 2026-11-12 定）。`no_fp`（默认）下函数值 / 闭包 / 间接调用是
+    # **编译错误并点名**；`fp` 才让这一整类进语言。理由与当年刻意排除它的那一条相同
+    # （`docs/232` §3.3）：默认产物保持**静态调用图**，`closed` 与可达性门禁的前提不动。
+    # 取值只说"有没有"，与 `runtime` / `vm` 同一条纪律。
+    "fp": ("fp", "no_fp"),
 }
 #: **维度之后的第二位置**（用户 2026-11-08）：`<维>_<槽>_<值>`。
 #:
@@ -3249,7 +3316,7 @@ CORE_SLOT_DEFAULTS = {"aicheck": "false"}
 #: `lms` / `lspe` / `lifetime` 排在最后：它们**没有冲突对**，追加在尾部不会改动
 #: 任何既有配对的先后。
 CORE_DIM_ORDER: tuple[str, ...] = ("mode", "gc", "runtime", "port", "vm", "lms", "lspe",
-                                   "lifetime")
+                                   "lifetime", "fp")
 #: 所有核心模式的取值 —— "这一个 `choose` 是核心模式还是开关"就看它在不在这里面。
 #: 槽取值也算核心写法（否则它会被当成**用户开关**吞掉，`choose lspe_aicheck_true`
 #: 就变成一次未定义的开关取值）。
@@ -3260,7 +3327,7 @@ CORE_DIM_OF = {w: d for d, ws in CORE_DIMS.items() for w in ws}
 #: 每一维**不写**时的取值 —— 默认档，且默认**不改变任何现有程序的行为**。
 CORE_DEFAULTS = {"mode": "std", "gc": "gc_manual", "runtime": "no_runtime",
                  "port": "sealed", "vm": "no_vm", "lms": "lms_full",
-                 "lspe": "lspe_open_admin", "lifetime": "lifetime_auto"}
+                 "lspe": "lspe_open_admin", "lifetime": "lifetime_auto", "fp": "no_fp"}
 #: 生命周期维在**旧版次**里的默认值（`docs/305`：封版的版次一个字节都不变）。
 #: 2026.3 起才翻到 `lifetime_auto`（用户 2026-11-08 裁）。
 LIFETIME_DEFAULT_EDITION = "tur2026.3"
@@ -3293,6 +3360,7 @@ CORE_DIM_ZH = {
            "`lms_daily_admin` / `lms_manage_only_admin`）",
     "lspe": "安全审计（`lspe_open_admin` / `lspe_close_admin`）",
     "lifetime": "生命周期（`lifetime_no` / `lifetime_auto` / `lifetime_manual`）",
+    "fp": "间接分派（`fp` / `no_fp`）",
 }
 
 #: **LMS 的七个细开关**（`docs/253` §11.4 ①），次序就是七级的次序 ——
@@ -3920,7 +3988,21 @@ class Parser:
 
     def type_name(self) -> str:
         """类型名: 基类型 / struct / 数组 [T; N] / 只读切片 [T] / 可变切片 mut [T] /
-        借用 `&T` / `&mut T`（后者只在 `choose lifetime_*` 非 `no` 时，`docs/299`）。"""
+        借用 `&T` / `&mut T`（后者只在 `choose lifetime_*` 非 `no` 时，`docs/299`）/
+        函数类型 `(A, B) -> C`（`docs/341`）。"""
+        if self.at("punct", "("):
+            # 函数类型。`()` 作**返回类型**（unit）由 `parse_fn` 在 `{` / `;` 那一格先接走，
+            # 走不到这里；所以类型位置上一见到 `(` 就只能是 `(A, …) -> R`。
+            self.next()
+            fargs: list[str] = []
+            while not self.at("punct", ")"):
+                fargs.append(self.type_name())
+                if not self.accept("punct", ","):
+                    break
+            self.expect("punct", ")")
+            self.expect("punct", "-")
+            self.expect("punct", ">")
+            return _fn_ty_make(fargs, self.type_name())
         if self.at("punct", "&") and self.lifetime != "lifetime_no":
             amp = self.next()
             mut = False
@@ -4999,6 +5081,47 @@ class Parser:
             return Un(t.val, self.parse_unary(), t.line)
         return self.parse_primary()
 
+    def _lambda_ahead(self) -> bool:
+        """当前位置是 `(`：它到配对的 `)` 之后是不是 `=>`（闭包，`docs/341`）。
+
+        只看形状，不看名字：`(x) =>` 是闭包，`(x + 1)` 不是。参数合法性由
+        `parse_lambda` 判 —— 挪进这里会让 `(a + b)` 被误判成坏闭包。
+        """
+        d = 0
+        i = self.i
+        while i < len(self.toks):
+            tv = self.toks[i]
+            if tv.kind == "punct":
+                if tv.val == "(":
+                    d += 1
+                elif tv.val == ")":
+                    d -= 1
+                    if d == 0:
+                        n1 = self.toks[i + 1] if i + 1 < len(self.toks) else None
+                        n2 = self.toks[i + 2] if i + 2 < len(self.toks) else None
+                        return (n1 is not None and n2 is not None
+                                and n1.kind == "punct" and n1.val == "="
+                                and n2.kind == "punct" and n2.val == ">")
+            i += 1
+        return False
+
+    def parse_lambda(self, line: int):
+        """`(x) => expr` / `(x: T, y) => expr` —— 闭包（`docs/341`）。"""
+        self.expect("punct", "(")
+        params: list[tuple[str, str | None]] = []
+        while not self.at("punct", ")"):
+            pn = self.ident("形参名")
+            pty: str | None = None
+            if self.accept("punct", ":"):
+                pty = self.type_name()
+            params.append((pn, pty))
+            if not self.accept("punct", ","):
+                break
+        self.expect("punct", ")")
+        self.expect("punct", "=")
+        self.expect("punct", ">")
+        return self.parse_postfix(Lambda(params, self.parse_expr(), line))
+
     def parse_primary(self):
         t = self.peek()
         if t.kind == "ident" and t.val == "if" and self.profile in TUR3_PLUS:
@@ -5019,6 +5142,8 @@ class Parser:
         if t.kind == "string":
             return self.parse_postfix(StrLit(self.next().val, t.line))
         if t.kind == "punct" and t.val == "(":
+            if self._lambda_ahead():
+                return self.parse_lambda(t.line)
             self.next()
             e = self.parse_expr()
             self.expect("punct", ")")
@@ -5896,10 +6021,22 @@ def expr_type(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[st
     if isinstance(e, StrLit):
         return "str"
     if isinstance(e, Ident):
-        return scope.get(e.name)
+        t = scope.get(e.name)
+        if t is not None:
+            return t
+        # 函数名在**值位置**就是函数值（`docs/341`）：类型取它的签名。
+        f = funcs.get(e.name)
+        if f is not None and not getattr(f, "extern", False):
+            return _fn_ty_make([p.type for p in f.params], f.ret)
+        return None
     if isinstance(e, GenOf):
         return "u64"
     if isinstance(e, Call):
+        # 间接调用 `f(a, b)`（`docs/341`）：callee 是 `(A)->B` 类型的**局部**。
+        _vt = scope.get(e.name)
+        _vtf = _fn_ty_split(_vt) if _vt is not None else None
+        if _vtf is not None:
+            return _vtf[1]
         if e.name == "str_num":
             return "str"
         sig = _builtin_sig(e)
@@ -5930,6 +6067,18 @@ def expr_type(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[st
         ot = expr_type(e.obj, scope, funcs, structs)
         fn = funcs.get(f"{ot}_{e.name}") if ot else None
         return fn.ret if fn else None
+    if isinstance(e, Lambda):
+        inner = dict(scope)
+        for n, ty in e.params:
+            if ty is None:
+                return None
+            inner[n] = ty
+        for n, ty, _ in getattr(e, "captures", []):
+            inner[n] = ty
+        rt = expr_type(e.body, inner, funcs, structs)
+        if rt is None:
+            return None
+        return _fn_ty_make([ty for _, ty in e.params], rt)
     if isinstance(e, (EnumPath, EnumCtor)):
         return e.enum
     if isinstance(e, StructLit):
@@ -5964,6 +6113,9 @@ def expr_type(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[st
         return None
     if isinstance(e, Un):
         inner = expr_type(e.expr, scope, funcs, structs)
+        if e.op in ("&", "&mut") and inner is not None and _fn_ty_split(inner) is not None:
+            # `&fn` 与裸名字是同一个函数值（`docs/341`），不是"借用的函数"。
+            return inner
         if e.op == "*":
             # `ptr` 的 `*` 是**逃生舱**：按字节读（`u8`）。借用类型的 `*` 解一层。
             if inner == "ptr":
@@ -6105,6 +6257,113 @@ def _is_int_const(e) -> bool:
     return False
 
 
+#: 当前单元允许函数值 / 闭包 / 间接调用吗 —— `check()` 按生效维设置。
+#: 参考实现**单线程编译**，所以用一个格子就够；不往下传参数是为了不让这个新概念
+#: 出现在 `_walk_expr` 的四十多个递归调用点上（那会让每个调用点都可能漏传）。
+_FP_ALLOWED: list[bool] = [False]
+
+
+def _fp_ok() -> bool:
+    return _FP_ALLOWED[0]
+
+
+def _fn_value_err(line: int, errs: list[str]) -> None:
+    """`choose fp` 没开时，用到函数值/闭包的那一处点名报（`docs/341`）。"""
+    errs.append(f"{line}: 使用函数值需要 `choose fp`（默认 `no_fp` 保持静态调用图）")
+
+
+def _free_idents(e, out: set[str]) -> None:
+    """表达式里出现的**名字**（闭包捕获分析用）；嵌套闭包的形参不算自由的。"""
+    if isinstance(e, Ident):
+        out.add(e.name)
+    elif isinstance(e, Lambda):
+        inner = {n for n, _ in e.params}
+        sub: set[str] = set()
+        _free_idents(e.body, sub)
+        out |= (sub - inner)
+    elif isinstance(e, Bin):
+        _free_idents(e.left, out)
+        _free_idents(e.right, out)
+    elif isinstance(e, Un):
+        _free_idents(e.expr, out)
+    elif isinstance(e, Cast):
+        _free_idents(e.expr, out)
+    elif isinstance(e, Call):
+        for a in e.args:
+            _free_idents(a, out)
+    elif isinstance(e, MethodCall):
+        _free_idents(e.obj, out)
+        for a in e.args:
+            _free_idents(a, out)
+    elif isinstance(e, Index):
+        _free_idents(e.obj, out)
+        _free_idents(e.idx, out)
+    elif isinstance(e, FieldAccess):
+        _free_idents(e.obj, out)
+    elif isinstance(e, ArrayLit):
+        for it in e.items:
+            _free_idents(it, out)
+    elif isinstance(e, StructLit):
+        for _, fe in e.inits:
+            _free_idents(fe, out)
+    elif isinstance(e, EnumCtor):
+        _free_idents(e.arg, out)
+    elif isinstance(e, Fallback):
+        _free_idents(e.value, out)
+        _free_idents(e.default, out)
+    elif isinstance(e, GenOf):
+        _free_idents(e.expr, out)
+
+
+def _ref_idents(e, out: set[str]) -> None:
+    """被 `&名字` 取过地址的名字（闭包里 = 按借捕获）。"""
+    if isinstance(e, Un):
+        if e.op in ("&", "&mut") and isinstance(e.expr, Ident):
+            out.add(e.expr.name)
+        _ref_idents(e.expr, out)
+    elif isinstance(e, Lambda):
+        _ref_idents(e.body, out)
+    elif isinstance(e, Bin):
+        _ref_idents(e.left, out)
+        _ref_idents(e.right, out)
+    elif isinstance(e, Cast):
+        _ref_idents(e.expr, out)
+    elif isinstance(e, Call):
+        for a in e.args:
+            _ref_idents(a, out)
+    elif isinstance(e, MethodCall):
+        _ref_idents(e.obj, out)
+        for a in e.args:
+            _ref_idents(a, out)
+    elif isinstance(e, Index):
+        _ref_idents(e.obj, out)
+        _ref_idents(e.idx, out)
+    elif isinstance(e, FieldAccess):
+        _ref_idents(e.obj, out)
+    elif isinstance(e, ArrayLit):
+        for it in e.items:
+            _ref_idents(it, out)
+    elif isinstance(e, StructLit):
+        for _, fe in e.inits:
+            _ref_idents(fe, out)
+    elif isinstance(e, EnumCtor):
+        _ref_idents(e.arg, out)
+    elif isinstance(e, Fallback):
+        _ref_idents(e.value, out)
+        _ref_idents(e.default, out)
+
+
+def _bind_lambda(e, want: str | None) -> None:
+    """把期望类型里的形参类型填进闭包（缺省的那些）。**不改已写了的标注**。"""
+    if not isinstance(e, Lambda) or want is None:
+        return
+    wf = _fn_ty_split(want)
+    if wf is None or len(wf[0]) != len(e.params):
+        return
+    e.params = [(n, t if t is not None else wf[0][k])
+                for k, (n, t) in enumerate(e.params)]
+
+
 def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[str, Struct],
                errs: list[str], enums: dict[str, EnumDecl] | None = None,
                lifetime: str = "lifetime_no") -> None:
@@ -6118,8 +6377,19 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
     if isinstance(e, (IntLit, BoolLit, StrLit)):
         return
     if isinstance(e, Ident):
-        if e.name not in scope:
-            errs.append(f"{e.line}: 使用未声明的变量 {e.name}")
+        if e.name in scope:
+            return
+        f = funcs.get(e.name)
+        if f is not None:
+            # 函数名在值位置（`docs/341`）。`extern fn` 走平台 ABI，与本语言的函数类型
+            # 不是一回事，**不能**取成函数值。
+            if getattr(f, "extern", False):
+                errs.append(f"{e.line}: extern fn {e.name} 不能当函数值 —— 它走平台 ABI，"
+                            f"与本语言的函数类型不是一回事")
+            elif not _fp_ok():
+                _fn_value_err(e.line, errs)
+            return
+        errs.append(f"{e.line}: 使用未声明的变量 {e.name}")
         return
     if isinstance(e, GenOf):
         _walk_expr(e.expr, scope, funcs, structs, errs, enums, lifetime)
@@ -6213,6 +6483,28 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
             _walk_expr(a, scope, funcs, structs, errs, enums, lifetime)
         return
     if isinstance(e, Call):
+        _vt = scope.get(e.name)
+        _vtf = _fn_ty_split(_vt) if _vt is not None else None
+        if _vtf is not None:
+            # 间接调用（`docs/341`）：callee 是 `(A)->B` 类型的**局部**。
+            if not _fp_ok():
+                _fn_value_err(e.line, errs)
+            _fargs, _fret = _vtf
+            if len(e.args) != len(_fargs):
+                errs.append(f"{e.line}: {e.name} 需要 {len(_fargs)} 个实参，"
+                            f"得到 {len(e.args)}")
+            else:
+                for a, wt in zip(e.args, _fargs):
+                    _bind_lambda(a, wt)
+                    at = expr_type(a, scope, funcs, structs)
+                    if at is None:
+                        if wt not in INT_TYPES and not _is_slice(wt):
+                            errs.append(f"{e.line}: {e.name} 实参期望 {wt}，得到整型字面量")
+                    elif not _type_compat(at, wt):
+                        errs.append(f"{e.line}: {e.name} 实参类型 {at}，期望 {wt}")
+            for a in e.args:
+                _walk_expr(a, scope, funcs, structs, errs, enums, lifetime)
+            return
         if e.name == "slice_len":  # M3: 切片长度
             if len(e.args) != 1:
                 errs.append(f"{e.line}: slice_len 需要 1 个实参，得到 {len(e.args)}")
@@ -6288,6 +6580,7 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
                 errs.append(f"{e.line}: {e.name} 需要 {len(params)} 个实参，得到 {len(e.args)}")
             else:
                 for a, p in zip(e.args, params):
+                    _bind_lambda(a, p.type)           # 实参位置的闭包从形参类型推
                     at = expr_type(a, scope, funcs, structs)
                     if at is None:
                         if p.type not in INT_TYPES and not _is_slice(p.type):
@@ -6304,6 +6597,46 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
                         errs.append(f"{e.line}: {e.name} 实参类型 {at}，期望 {p.type}")
         for a in e.args:
             _walk_expr(a, scope, funcs, structs, errs, enums, lifetime)
+        return
+    if isinstance(e, Lambda):
+        if not _fp_ok():
+            _fn_value_err(e.line, errs)
+        ptypes: list[str] = []
+        for n, ty in e.params:
+            if ty is None:
+                errs.append(f"{e.line}: 闭包形参类型推不出来 —— 写 (x: T) => …，"
+                            f"或把它用在有标注的位置")
+                return
+            if not _type_ok(ty, set(TYPES) | set(structs)):
+                errs.append(f"{e.line}: 未知类型 {ty}（闭包形参 {n} 的类型）")
+                return
+            ptypes.append(ty)
+        # 闭包里**只有**形参与捕获在作用域里 —— 不能拿外层的 scope 直接当起点，
+        # 否则每个外层变量都"已经在作用域里"，捕获集永远是空的。
+        inner: dict[str, str] = {}
+        for n, ty in e.params:
+            inner[n] = ty
+        # 捕获：自由名字里，外层作用域有的就是捕获。默认按值；被 `&名字` 取过的按借。
+        free: set[str] = set()
+        _free_idents(e.body, free)
+        refs: set[str] = set()
+        _ref_idents(e.body, refs)
+        caps: list[tuple[str, str, bool]] = []
+        for n in sorted(free):
+            if n in inner or n in funcs or n in structs or n in TYPES:
+                continue
+            ty = scope.get(n)
+            if ty is None:
+                continue                       # 交给 body 的走查报"未声明"
+            by_ref = n in refs
+            if ty not in INT_TYPES and ty not in ("bool", "ptr"):
+                errs.append(f"{e.line}: 闭包按值捕获的类型 {ty} 还不支持 —— "
+                            f"v1 只收整型 / bool / ptr")
+                continue
+            caps.append((n, ty, by_ref))
+            inner[n] = ty
+        e.captures = caps
+        _walk_expr(e.body, inner, funcs, structs, errs, enums, lifetime)
         return
     if isinstance(e, StructLit):
         st = structs.get(e.name)
@@ -6384,6 +6717,15 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
                             f"（{ot} 的长度是 {n}）")
         return
     if isinstance(e, Un):
+        if e.op in ("&", "&mut") and isinstance(e.expr, Ident) \
+                and e.expr.name not in scope and e.expr.name in funcs:
+            # `&fn` 与裸名字是**同一个值**（`docs/341`）；类型由 `expr_type` 给。
+            if getattr(funcs[e.expr.name], "extern", False):
+                errs.append(f"{e.line}: extern fn {e.expr.name} 不能当函数值 —— 它走平台 ABI，"
+                            f"与本语言的函数类型不是一回事")
+            elif not _fp_ok():
+                _fn_value_err(e.line, errs)
+            return
         _walk_expr(e.expr, scope, funcs, structs, errs, enums, lifetime)
         if e.op in ("&", "&mut"):
             inner = expr_type(e.expr, scope, funcs, structs)
@@ -7963,6 +8305,8 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     # 是哪两档"，不是"源码里写了哪两行"。报错要**点名为什么冲突**，泛泛的"非法组合"
     # 正是判据点名的反面（`docs/188` 的"宁拒勿猜"）。
     _eff = effective_dims(mod)
+    # 函数值 / 闭包 / 间接调用只在 `choose fp` 下成立（`docs/341`）。
+    _FP_ALLOWED[0] = _eff.get("fp") == "fp"
     # 槽的生效值（依赖要核"根满足了吗"，与 `_eff` 同一趟落定）。
     _slot_eff = dict(CORE_SLOT_DEFAULTS)
     _slot_eff.update(mod.slots)
@@ -8416,6 +8760,7 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
         def walk(stmts: list, fscope: dict[str, str]) -> None:
             for s in stmts:
                 if isinstance(s, Let):
+                    _bind_lambda(s.expr, s.type)      # 闭包形参类型从 let 的标注推
                     _walk_expr(s.expr, fscope, funcs, structs, errs, enums, lifetime)
                     if not _type_ok(s.type, known):
                         errs.append(f"{s.line}: 未知类型 {s.type}（let {s.name} 的类型）")
@@ -8654,6 +8999,11 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                             errs.append(f"{s.line}: `return;` 不带值，函数 {f.name} 声明 {f.ret}")
                     else:
                         _walk_expr(s.expr, fscope, funcs, structs, errs, enums, lifetime)
+                        # 带**按借捕获**的闭包不能返回（`docs/341`）：它借的东西活不过
+                        # 这个函数。按值捕获的可以逃逸（捕获的是一份拷贝）。
+                        if isinstance(s.expr, Lambda) and any(b for _, _, b in s.expr.captures):
+                            errs.append(f"{s.line}: 带按借捕获的闭包不能返回 —— "
+                                        f"它借的东西活不过这个函数")
                         t = expr_type(s.expr, fscope, funcs, structs)
                         if t is not None and not _type_compat(t, f.ret):
                             errs.append(f"{s.line}: return 类型 {t}，函数 {f.name} 声明 {f.ret}")
@@ -9425,6 +9775,11 @@ def _expr_rs(e) -> str:
     if isinstance(e, Index):
         # Rust 要求下标为 usize; Loment 允许任意整型, 转译时显式降级。
         return _rs_auto_guards(e, _expr_rs(e.obj), _expr_rs(e.idx))
+    if isinstance(e, Lambda):
+        # `docs/341`：闭包还没有 Rust 写法（捕获要运行期表示，而这一条链是"照抄语义"）。
+        # **点名拒**，别掉进最后那句 `AssertionError` —— 那是崩溃，不是诊断。
+        raise LomError(e.line, 1, "闭包（`(x) => …`）还不能翻译成 Rust（`docs/341`）："
+                                  "把它写成具名函数，或走原生后端（`loment build`）")
     raise AssertionError(f"未知表达式 {e!r}")
 
 
@@ -10230,7 +10585,7 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None,
         # v22 = v21 + **生命周期档** `lifetime`（`docs/299`）：`lifetime_no` /
         # `lifetime_auto` / `lifetime_manual`。与 `gc` / `lms` 同级同形、**必填**，
         # 于是"这份产物有没有静态借用证明"是**不读源码可判的**。
-        "potato": "v22",
+        "potato": "v23",
         "unit": mod.name,
         "language": "loment",
         # **表层语法**（`docs/188` §2）—— 与 `language` 分工不同, 别混:
@@ -10280,6 +10635,11 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None,
         # 是**不读源码可判的**。默认值随版次走（`core_default`）—— 2026.3 起
         # `lifetime_auto`，旧版次 `lifetime_no`。
         "lifetime": _dims["lifetime"],
+        # **间接分派**（v23，`docs/341`，用户 2026-11-12 定第九维）：`no_fp` / `fp`。
+        # 与 `gc` / `lifetime` 同级同形：**必填**，于是"这份产物里有没有间接调用边"
+        # 是**不读源码可判的** —— 而它正是 `docs/208` §4 那条静态调用图前提的边界：
+        # `no_fp` 只含直接调用边，`fp` 的图里有间接边，那一族主张在这一档不能用。
+        "fp": _dims["fp"],
         # **系统索引**（v20，`docs/147` §5.4 / #1022）。六个系统各一条，次序写死；
         # `state` 与顶层字段（`lspe` 取台账自己的 `state`）、`detail` 与明细字段名、
         # `cost` 与明细的总数**逐条相同** —— 校验器不读源码也判得了它们打架。
@@ -11271,6 +11631,9 @@ def _ll_type(t: str, structs: dict, enums: dict) -> str:
         return "ptr"
     if t == "()":  # M16: unit
         return "void"
+    if _fn_ty_split(t) is not None:
+        # 函数值 = 指向**闭包记录**的指针（`docs/341`）。
+        return "ptr"
     if _is_ref(t):
         # 借用值就是一个指针（`docs/299`）。切片借用已经在解析时规范化回 `[T]` /
         # `mut [T]`，所以走不到这里。
@@ -12318,7 +12681,7 @@ class _Ir:
                  lms_crash: bool = False,
                  tur_edition: str = potato_from.DEFAULT_EDITION,
                  gc_ctl: bool = False, tick_auto: bool = False,
-                 caps: list | None = None):
+                 caps: list | None = None, fn_clos: set | None = None):
         self.funcs, self.consts, self.f = funcs, consts, f
         #: 顶层能力表（撤销位的查找要用；块域的撤销位在 `dom_rev` 里）。
         self.caps = caps or []
@@ -12342,6 +12705,16 @@ class _Ir:
         #: 无状态的律不登记（守卫传 null）。
         self.dom_state: dict[int, str] = {}
         self.globals: list[str] = []                # 字符串常量等模块级声明
+        #: 闭包与函数值包装的**函数体**（`docs/341`）。**不放进 `globals`** —— 那是数据
+        #: 声明区；更要紧的是 `len(self.globals)` 决定 `@.str.<fn>.<n>` 的编号，把函数体
+        #: 混进去会让字符串常量的名字随闭包数量漂移。单独一列，最后统一追加在**全部函数体
+        #: 之后** —— 两个实现走同一条次序，逐字节判据才有一致的对照面。
+        self.fn_defs: list[str] = []
+        #: 本函数里生成过的闭包函数数（名字 `{f}.$lamN` 的唯一来源）。
+        self.lam_n = 0
+        #: 已经发过 `@__fp_<名字>` 包装的函数名（`docs/341`）。**按模块共享** —— 包装是
+        #: 一条 `define`，两个函数各取一次同一个函数值就会发两条同名定义（非法 IR）。
+        self.fn_clos: set[str] = fn_clos if fn_clos is not None else set()
         self.terminated = False
         self.coverage = coverage                    # M63: IR 级块覆盖
         self.cov_counter = cov_counter if cov_counter is not None else [0]
@@ -12600,7 +12973,8 @@ class _Ir:
         **`struct` 与枚举的字段在本后端只装标量**（`_ll_type` 拒绝别的），所以不必递归进聚合 ——
         那条限制在这里变成一条好处。
         """
-        return t == "ptr" or t == "str" or _is_slice(t)
+        return (t == "ptr" or t == "str" or _is_slice(t)
+                or _fn_ty_split(t) is not None)
 
     def roots_push(self, f: Func) -> None:
         """`gc_auto`：把本帧"持有指针的槽"登记进根表。
@@ -12869,6 +13243,9 @@ class _Ir:
         if isinstance(e, BoolLit):
             return "i1", ("1" if e.value else "0")
         if isinstance(e, Ident):
+            if e.name not in self.vars and e.name in self.funcs:
+                # 函数名在值位置（`docs/341`）：值 = 指向它的**闭包记录全局**的指针。
+                return self._fn_value(e.name, e.line)
             if e.name in self.consts:  # 常量在生成期内联
                 ty, val = self.consts[e.name]
                 if ty in INT_TYPES or ty == "bool":
@@ -12887,6 +13264,9 @@ class _Ir:
                 r = self.t()
                 self.w(f"{r} = load {self.ll(et)}, ptr {v}")
                 return et, r
+            if e.op in ("&", "&mut") and isinstance(e.expr, Ident) \
+                    and e.expr.name not in self.vars and e.expr.name in self.funcs:
+                return self._fn_value(e.expr.name, e.line)
             if e.op in ("&", "&mut"):  # M3/M4: 数组 -> 切片值；其余 -> 借用指针
                 # `docs/299`：非数组的借用是一个**指针**（指向那块地方）。切片的形状
                 # 不变（ptr + len），因为切片本来就是借用视图。
@@ -12960,6 +13340,8 @@ class _Ir:
             r = self.t()
             self.w(f"{r} = {op} {si} {v} to {di}")
             return e.type, r
+        if isinstance(e, Lambda):
+            return self._lambda_expr(e, want)
         if isinstance(e, MethodCall):  # M8: 静态派发
             fn = self.funcs.get(e.mangled)
             if fn is None:
@@ -12975,6 +13357,31 @@ class _Ir:
             r = self.t()
             self.w(f"{r} = call {self.ll(fn.ret)} @{fn.name}({', '.join(args)})")
             return fn.ret, r
+        if isinstance(e, Call) and e.name in self.vars:
+            _vt = self.vars[e.name][0]
+            _vtf = _fn_ty_split(_vt)
+            if _vtf is not None:
+                # 间接调用（`docs/341`）：值 = 指向闭包记录的指针；记录第 0 字是代码地址，
+                # 第 1 字起是捕获。被调函数的约定是 `(ptr env, 实参…)`。
+                _fargs, _fret = _vtf
+                _rec = self.t()
+                self.w(f"{_rec} = load ptr, ptr {self.vars[e.name][1]}")
+                _ci = self.t()
+                self.w(f"{_ci} = load i64, ptr {_rec}")
+                _code = self.t()
+                self.w(f"{_code} = inttoptr i64 {_ci} to ptr")
+                _env = self.t()
+                self.w(f"{_env} = getelementptr i8, ptr {_rec}, i64 8")
+                _as = [f"ptr {_env}"]
+                for a, wt in zip(e.args, _fargs):
+                    _, av = self.expr(a, wt)
+                    _as.append(f"{self.ll(wt)} {av}")
+                if _fret == "()":
+                    self.w(f"call void {_code}({', '.join(_as)})")
+                    return "()", ""
+                _r = self.t()
+                self.w(f"{_r} = call {self.ll(_fret)} {_code}({', '.join(_as)})")
+                return _fret, _r
         if isinstance(e, Call) and (_builtin_sig(e) is not None or e.name == "slice_len"):
             return self.builtin(e)
         if isinstance(e, Call):
@@ -13094,6 +13501,138 @@ class _Ir:
                 self.w(f"{b} = insertvalue {et} {a}, i64 {c}, 1")
             return e.enum, b
         raise LomError(getattr(e, "line", 1), 1, f"native 后端不支持该表达式: {type(e).__name__}")
+
+    def _fn_value(self, name: str, line: int) -> tuple[str, str]:
+        """函数名当值（`docs/341`）：全局闭包记录 `@{name}.clo` + 一个内部包装。
+
+        包装把统一的 `(ptr env, 实参…)` 约定接回直接调用 —— 这样**函数值与闭包在
+        运行期是同一种东西**，调用点只有一条路。
+        """
+        f = self.funcs[name]
+        fnty = _fn_ty_make([p.type for p in f.params], f.ret)
+        if name not in self.fn_clos:
+            self.fn_clos.add(name)
+            ps = "".join(f", {self.ll(p.type)} %a{i}"
+                         for i, p in enumerate(f.params))
+            aa = ", ".join(f"{self.ll(p.type)} %a{i}"
+                           for i, p in enumerate(f.params))
+            if f.ret == "()":
+                body = (f"define internal void @__fp_{name}(ptr %env{ps}) {{\n"
+                        f"entry:\n  call void @{name}({aa})\n  ret void\n}}")
+            else:
+                body = (f"define internal {self.ll(f.ret)} @__fp_{name}(ptr %env{ps}) {{\n"
+                        f"entry:\n  %r = call {self.ll(f.ret)} @{name}({aa})\n"
+                        f"  ret {self.ll(f.ret)} %r\n}}")
+            self.fn_defs.append(body)
+        # 值 = 一条 8 字节记录（只有代码地址）。用分配器而不是全局常量：全局常量要
+        # `ptrtoint` 初值，两只链接器都得为它加一条初值形式；分配器这条路运行期与
+        # 闭包**完全同形**，链接器一行都不用动。
+        rec = self.t()
+        self.w(f"{rec} = call ptr @__loment_alloc(i32 8)")
+        ci = self.t()
+        self.w(f"{ci} = ptrtoint ptr @__fp_{name} to i64")
+        self.w(f"store i64 {ci}, ptr {rec}")
+        return fnty, rec
+
+    def _lambda_fn(self, lam, args: list[str], ret: str) -> str:
+        """为一个闭包发一条 `(ptr env, 形参…)` 的内部函数；返回函数名。"""
+        self.lam_n += 1
+        name = f"__lam_{self.f.name}_{self.lam_n}"
+        # 形参与捕获都按**源里的名字**绑定（`%x.addr`），不用 `%p0` 这类序号名。
+        # 理由是同一条 IR 两个实现都要发得出来：自举侧的变量模型是**按名字的**
+        # （`load <T>, ptr %x.addr`），序号名要它在每个取值点做一次"这个名字的地址是哪个
+        # 临时值"的查表 —— 那是个到处都得改的耦合。按名字绑定之后，闭包体与普通函数体
+        # **同形**，两边各自用自己现成的那一套就够了。
+        ps = "".join(f", {self.ll(t)} %{n}" for n, t in lam.params)
+        fake = Func(name, [Param(n, t) for n, t in lam.params], ret, [], lam.line)
+        ir = _Ir(self.funcs, self.consts, fake, self.structs, self.enums,
+                 self.coverage, self.cov_counter, None, None, None, None,
+                 self.gc_alpha, self.gc_auto, self.gc_barrier, self.threads,
+                 self.lms_guard, self.lms_reject, self.lms_crash, self.tur_edition,
+                 self.gc_ctl, self.tick_auto, self.caps, self.fn_clos)
+        ir.out.append(f"; {name} -> {ret}")
+        ir.out.append(f"define internal {ir.ll(ret)} @{name}(ptr %__env{ps}) {{")
+        ir.out.append("entry:")
+        ir.cur_label = "entry"
+        for n, t in lam.params:
+            slot = f"%{n}.addr"
+            ir.w(f"{slot} = alloca {ir.ll(t)}")
+            ir.w(f"store {ir.ll(t)} %{n}, ptr {slot}")
+            ir.vars[n] = (t, slot)
+        for k, (n, t, by_ref) in enumerate(lam.captures):
+            cp = ir.t()
+            ir.w(f"{cp} = getelementptr i8, ptr %__env, i64 {8 * k}")
+            if by_ref:
+                # 按借捕获：那个名字的**地址**就是捕获值本身 —— 直接用同形的名字绑定。
+                ap = f"%{n}.addr"
+                ir.w(f"{ap} = load ptr, ptr {cp}")
+                ir.vars[n] = (t, ap)
+            else:
+                v = ir.t()
+                ir.w(f"{v} = load {ir.ll(t)}, ptr {cp}")
+                slot = f"%{n}.addr"
+                ir.w(f"{slot} = alloca {ir.ll(t)}")
+                ir.w(f"store {ir.ll(t)} {v}, ptr {slot}")
+                ir.vars[n] = (t, slot)
+        ir.roots_push(fake)
+        _, v = ir.expr(lam.body, ret)
+        if not ir.terminated:
+            ir.roots_pop()
+            ir.w("ret void" if ret == "()" else f"ret {ir.ll(ret)} {v}")
+        ir.out.append("}")
+        self.fn_defs.append("\n".join(ir.out))
+        self.fn_defs += ir.fn_defs          # 嵌套闭包: 内层先发射, 跟着外层一起走
+        return name
+
+    def _lambda_expr(self, lam, want: str | None = None) -> tuple[str, str]:
+        """闭包值（`docs/341`）：堆上一条 `{code, 捕获…}` 记录，值就是它的指针。
+
+        **捕获集在这里重算**：`check()` 走的是 `prepare()` 之后的**副本**，它写下的
+        `captures` 到不了发射器（同一条流水线上 `Fallback.ty` 这类字段也一样）。
+        发射器的 `self.vars` 才是"此刻真的有哪些变量"的事实来源。
+        """
+        # 形参类型也可能只在**期望类型**里（`apply((x) => …)`）：与检查器同一条规则，
+        # 但要在发射器里重做一遍 —— `check()` 写的是 `prepare()` 之后的副本。
+        if any(t is None for _, t in lam.params):
+            wf = _fn_ty_split(want) if want is not None else None
+            if wf is not None and len(wf[0]) == len(lam.params):
+                lam.params = [(n, t if t is not None else wf[0][k])
+                              for k, (n, t) in enumerate(lam.params)]
+        free: set[str] = set()
+        _free_idents(lam.body, free)
+        refs: set[str] = set()
+        _ref_idents(lam.body, refs)
+        pnames = {n for n, _ in lam.params}
+        lam.captures = [(n, self.vars[n][0], n in refs)
+                        for n in sorted(free)
+                        if n not in pnames and n in self.vars]
+        fnty = expr_type(lam, self.type_scope(), self.funcs, self.structs)
+        if fnty is None and want is not None:
+            # 体是**整数字面量**时 `expr_type` 给不出返回类型（字面量按上下文定宽）：
+            # 期望类型就是答案，前提是形参表对得上。
+            wf = _fn_ty_split(want)
+            if wf is not None and len(wf[0]) == len(lam.params):
+                fnty = want
+        if fnty is None:
+            raise LomError(lam.line, 1, "闭包的类型定不出来 —— 后端拿到的单元不完整")
+        args, ret = _fn_ty_split(fnty)
+        name = self._lambda_fn(lam, args, ret)
+        n = len(lam.captures) + 1
+        rec = self.t()
+        self.w(f"{rec} = call ptr @__loment_alloc(i32 {8 * n})")
+        code = self.t()
+        self.w(f"{code} = ptrtoint ptr @{name} to i64")
+        self.w(f"store i64 {code}, ptr {rec}")
+        for k, (nm, t, by_ref) in enumerate(lam.captures):
+            cp = self.t()
+            self.w(f"{cp} = getelementptr i8, ptr {rec}, i64 {8 * (k + 1)}")
+            if by_ref:
+                _, addr = self._addr_of(Ident(nm, lam.line), lam.line, False)
+                self.w(f"store ptr {addr}, ptr {cp}")
+            else:
+                _, val = self.expr(Ident(nm, lam.line), t)
+                self.w(f"store {self.ll(t)} {val}, ptr {cp}")
+        return fnty, rec
 
     def upcast(self, v: str, frm: str | None, to: str) -> str:
         """把 `v`（类型 `frm`）抬到公共类型 `to`；已经同型就原样返回。
@@ -14309,12 +14848,13 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
                   lms_guard: bool = False, lms_reject: bool = False,
                   lms_crash: bool = False,
                  tur_edition: str = potato_from.DEFAULT_EDITION,
-                  gc_ctl: bool = False, tick_auto: bool = False, caps: list | None = None
-                  ) -> tuple[list[str], str]:
+                  gc_ctl: bool = False, tick_auto: bool = False, caps: list | None = None,
+                  fn_clos: set | None = None
+                  ) -> tuple[list[str], list[str], str]:
     ir = _Ir(funcs, consts, f, structs, enums, coverage, cov_counter,
              dbg_scope, dbg_lines, dbg_meta, dbg_types, gc_alpha, gc_auto, gc_barrier,
              threads, lms_guard, lms_reject, lms_crash, tur_edition, gc_ctl, tick_auto,
-             caps)
+             caps, fn_clos)
     if f.interrupt:  # M33: x86_intrcc 需要中断帧指针
         ir.out.append(f"; {f.name} -> interrupt (x86_intrcc)")
         ir.out.append(f"define x86_intrcc void @{f.name}(ptr byval([8 x i8]) %__frame)"
@@ -14331,7 +14871,7 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
             ir.roots_pop()
             ir.w("ret void")
         ir.out.append("}")
-        return ir.globals, "\n".join(ir.out)
+        return ir.globals, ir.fn_defs, "\n".join(ir.out)
     args = ", ".join(f"{ir.ll(p.type)} %{p.name}" for p in f.params)
     ir.out.append(f"; {f.name} -> {f.ret}")
     ir.out.append(f"define {ir.ll(f.ret)} @{f.name}({args})"
@@ -14359,7 +14899,7 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
         else:
             ir.w("unreachable")  # ponytail: 语言不强制全路径 return (docs/144 §3)
     ir.out.append("}")
-    return ir.globals, "\n".join(ir.out)
+    return ir.globals, ir.fn_defs, "\n".join(ir.out)
 
 
 #: **命令入口**（`docs/223` §3.2）：单元声明了命令、又没写 `_start` 时，工具链替它生成进程
@@ -14633,6 +15173,11 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
         out.append("; loment-gc: no_gc")
     out.append("")
     globals_: list[str] = []
+    #: 闭包 / 函数值包装的函数体（`docs/341`）：**全部函数体之后**统一发，两个实现同序。
+    fn_defs_: list[str] = []
+    #: `@__fp_<名字>` 包装的**模块级**去重集（`docs/341`）：包装是一条 `define`，两个函数
+    #: 各取一次同一个函数值不能发两条同名定义。每条包装只发一次，位置取**首次使用**处。
+    _fn_clos: set[str] = set()
     body: list[str] = []
     # 外部函数声明: 每个外部符号**一条 `declare`**, 按名字去重 (两个模块声明同一个外部
     # 符号是同一件事)。LLVM 自己会按平台 C ABI 给 `declare` 的函数传参 —— 所以调用点
@@ -14739,14 +15284,15 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
                     f'!{scope} = distinct !DISubprogram(name: "{f.name}", scope: !1, '
                     f'file: !{fid}, line: {f.line}, type: !2, unit: !0, '
                     f'spFlags: DISPFlagDefinition, retainedNodes: !3)')
-            g, text = _emit_ir_func(f, funcs, consts, structs, enums, coverage,
-                                    cov_counter, scope, lines, meta if debug else None,
-                                    dbg_types if debug else None, gc_alpha, gc_auto,
-                                    gc_alpha and _has_heap_pre, _has_threads,
-                                    _lms_guard, _lms_reject, _lms_crash,
-                                    getattr(mod, "profile", potato_from.DEFAULT_EDITION),
-                                    _gc_ctl, _tick_auto, mod.caps)
+            g, fd, text = _emit_ir_func(f, funcs, consts, structs, enums, coverage,
+                                        cov_counter, scope, lines, meta if debug else None,
+                                        dbg_types if debug else None, gc_alpha, gc_auto,
+                                        gc_alpha and _has_heap_pre, _has_threads,
+                                        _lms_guard, _lms_reject, _lms_crash,
+                                        getattr(mod, "profile", potato_from.DEFAULT_EDITION),
+                                        _gc_ctl, _tick_auto, mod.caps, _fn_clos)
             globals_ += g
+            fn_defs_ += fd
             body.append(text)
     # **命令入口**（`docs/223`）：声明了命令、又没写 `_start` -> 工具链替它发一个。
     # 条件是三条一起看：有声明、名字取出来了、**没有** `_start`。三种"半截"状态
@@ -14903,6 +15449,11 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     if globals_:
         out.append("")
     out.append(text_all)
+    # 闭包 / 函数值包装的函数体（`docs/341`）：**在全部函数体之后**。次序 = 函数顺序，
+    # 同一函数内 = 发现顺序（嵌套闭包内层先发）。自举镜在 `emit_module` 末尾发同一批。
+    if fn_defs_:
+        out.append("")
+        out += fn_defs_
     if debug:
         out.append("")
         out += meta

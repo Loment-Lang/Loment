@@ -2184,7 +2184,7 @@ full derivation trees, the policy lock, and `--lspc` are not shipped.
 
 ### 25.1 The dimensions (normative)
 
-Loment has **eight** dimensions. Each selects a property of the whole program.
+Loment has **nine** dimensions. Each selects a property of the whole program.
 
 | Dimension | Values | Default | What it selects |
 |---|---|---|---|
@@ -2196,6 +2196,7 @@ Loment has **eight** dimensions. Each selects a property of the whole program.
 | `lms` | `lms_full`, `lms_forensic_admin`, `lms_daily_admin`, `lms_manage_only_admin`, `lms_close_admin` | `lms_full` | which memory-safety levels are on |
 | `lspe` | `lspe_open_admin`, `lspe_close_admin` | `lspe_open_admin` | whether the audit ledger is recorded |
 | `lifetime` | `lifetime_no`, `lifetime_auto`, `lifetime_manual` | `lifetime_auto` from 2026.3; `lifetime_no` before | compile-time borrow regions |
+| `fp` | `no_fp`, `fp` | `no_fp` | whether function values, closures and indirect calls are allowed |
 
 The `lifetime` default is **edition-dependent**: `core_default("lifetime", profile)` is
 `lifetime_auto` for `tur2026.3` and later, and `lifetime_no` for the frozen editions. An

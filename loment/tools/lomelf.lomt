@@ -1191,6 +1191,20 @@ fn lbl_find(tab: ptr, t: ptr, noff: u32, nlen: u32, boff: u32, blen: u32) -> u32
     return NO;
 }
 
+/// `@名字` 的地址。**函数**登记时不带 `@`（`emit_func` 剥过），全局量带 ——
+/// 两种写法都认，否则 `ptrtoint ptr @f to i64`（函数值，`docs/341`）在最终回填时
+/// 找不到函数标签。与参考实现 `Asm.label_addr` 同一条规则。
+fn lbl_addr(tab: ptr, t: ptr, noff: u32, nlen: u32, boff: u32, blen: u32) -> u32 {
+    let a: u32 = lbl_find(tab, t, noff, nlen, boff, blen);
+    if a != NO {
+        return a;
+    }
+    if nlen > 0 && load8(t, noff) == 64 {
+        return lbl_find(tab, t, noff + 1, nlen - 1, boff, blen);
+    }
+    return NO;
+}
+
 fn fix_add(tab: ptr, site: u32, kind: u32, noff: u32, nlen: u32, boff: u32, blen: u32) {
     let k: u32 = cell(tab, C_NFIX);
     if k >= TB_FIX_MAX {
@@ -2653,6 +2667,23 @@ fn do_call(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen:
     if ret_agg == 1 {
         d = em_lea(out, d, RAX, RBP, slot_find(tab, t, doff, dlen));
         d = em_push(out, d, RAX);
+    }
+    // ---- 间接调用（`docs/341`）：callee 是一个装着代码地址的 SSA 值。
+    // 约定与直接调用**同一套**栈传参（`_Ir` 已经把环境指针放在实参 0）。**先压完实参
+    // 再读寄存器**：`emit_get_ptr` 用 RAX 求值，先读进 RCX 会被后面的求值踩掉。
+    if load8(t, cs) == 37 {
+        // callee 是一个 SSA 名（含开头的 `%`）：槽名与 `emit_put` 存进去的那一段**同一形状**，
+        // 所以整段递进去（掐掉 `%` 就查不到槽，报出来是"名字是空的"）。
+        d = emit_get_ptr(tab, out, d, t, cs, ce - cs, RCX);
+        d = e1(out, d, 255);                     // call rcx
+        d = e1(out, d, 209);
+        if total != 0 {
+            d = em_alu_ri(out, d, ADD, RSP, total);
+        }
+        if has_ret == 1 && ret_agg == 0 {
+            d = emit_put(tab, out, d, t, doff, dlen, RAX);
+        }
+        return d;
     }
     if lit_at(t, cs, ce, "@llvm.trap") == 1 {
         d = e1(out, d, 15);
@@ -4908,7 +4939,7 @@ fn resolve_fixups(tab: ptr, t: ptr, txt: ptr) -> u32 {
         let kind: u32 = load32(tab, base + F_KIND);
         let no: u32 = load32(tab, base + F_NOFF);
         let nl: u32 = load32(tab, base + F_NLEN);
-        let addr: u32 = lbl_find(tab, t, no, nl, load32(tab, base + F_BOFF),
+        let addr: u32 = lbl_addr(tab, t, no, nl, load32(tab, base + F_BOFF),
                                  load32(tab, base + F_BLEN));
         if addr == NO {
             wstr(2, "loment: undefined label: ");

@@ -4492,6 +4492,97 @@ FINE: tuple[Fine, ...] = (
          "For a `bool`, use interpolation `f\"{b}\"`; that goes through `str_show`.",
          "If it is already decimal text, use it directly."),
     ),
+    Fine(
+        210, 22, r"^使用函数值需要 `choose fp`",
+        "使用函数值需要 `choose fp`",
+        "using a function value needs `choose fp`",
+        "函数值、闭包与间接调用会改变**静态调用图**这条前提（`docs/208`）：默认档"
+        "（`no_fp`）的产物仍然只含直接调用边。",
+        "Function values, closures and indirect calls change the static call-graph "
+        "premise (`docs/208`); the default `no_fp` products still contain only direct edges.",
+        ("在根单元写 `choose fp`（写在 `module` 之后）。",
+         "如果只是想按名字分支，用现有的 `if` / `match`，它们不引入间接分派。",
+         "库里需要函数值就让它声明 `choose fp`，由根单元满足。"),
+        ("Write `choose fp` in the root unit (after `module`).",
+         "If you only branch by name, use `if` / `match`; they introduce no indirect dispatch.",
+         "A library that needs function values declares `choose fp`; the root satisfies it."),
+    ),
+    Fine(
+        211, 1, r"^extern fn .+ 不能当函数值",
+        "`extern fn` 不能当函数值",
+        "an `extern fn` is not a function value",
+        "`extern fn` 走**平台 ABI**；本语言的函数类型是内部调用约定，两者不能互相顶替"
+        "（`docs/341`）。",
+        "`extern fn` uses the platform ABI; the language's function type is the internal "
+        "calling convention. They are not interchangeable (`docs/341`).",
+        ("要回调 C 的函数，写一个 Loment 包装函数，在它里面调 `extern fn`。",
+         "要把 Loment 函数交给 C，先把它写成 `extern fn` 能接受的形状（`ptr` 实参），"
+         "再用 `fn` 值在本语言里调用。",
+         "两边都要就各写一层，别让一个值同时承担两种约定。"),
+        ("For a callback into C, write a Loment wrapper that calls the `extern fn`.",
+         "To hand a Loment function to C, give it a `ptr`-shaped signature first.",
+         "Write one layer per convention; don't make one value carry both."),
+    ),
+    Fine(
+        212, 1, r"^闭包按值捕获的类型 .+ 还不支持",
+        "闭包按值捕获的类型还不支持",
+        "this closure capture type is not supported yet",
+        "闭包记录按 8 字节一格存捕获；v1 只收整型 / `bool` / `ptr` 这类能放进一格的类型。",
+        "A closure record stores each capture in one 8-byte word; v1 accepts only "
+        "word-sized captures (integers, `bool`, `ptr`).",
+        ("把要捕获的聚合成一个 `ptr` 传进去。",
+         "需要多格的捕获先用 `ptr` 或切片把它搬出闭包。",
+         "把闭包改成一个带显式形参的函数。"),
+        ("Pass the aggregate as a `ptr`.",
+         "Move multi-word captures out of the closure with a `ptr` or a slice.",
+         "Rewrite it as a function taking explicit parameters."),
+    ),
+    Fine(
+        213, 1, r"^闭包形参类型推不出来",
+        "闭包形参类型推不出来",
+        "the closure parameter types cannot be inferred",
+        "闭包只有两种途径得到形参类型：写在参数上（`(x: T) => …`），或从**期望类型**"
+        "（`let` 的标注、实参位置、返回位置）推。两处都没有就定不出来。",
+        "A closure learns its parameter types either from annotations (`(x: T) => …`) or "
+        "from the expected type (the `let` annotation, an argument position, a return). "
+        "With neither, the type is undetermined.",
+        ("给参数写类型：`(x: u64) => …`。",
+         "把它放在有标注的位置：`let f: (u64) -> u64 = (x) => …;`。",
+         "作为实参传给一个形参类型已知的函数。"),
+        ("Annotate the parameters: `(x: u64) => …`.",
+         "Put it where a type is expected: `let f: (u64) -> u64 = (x) => …;`.",
+         "Pass it as an argument to a function whose parameter type is known."),
+    ),
+
+    Fine(
+        214, 41, r"^带按借捕获的闭包不能返回",
+        "带按借捕获的闭包不能返回",
+        "a closure that borrows its captures cannot be returned",
+        "按借捕获存的是**地址**；那个地址指向调用者的栈帧，函数一返回就失效。"
+        "这正是一个悬垂借用（`docs/299` / `docs/341`）。",
+        "A by-reference capture stores an address; that address points into the "
+        "callee's frame and dies when the function returns -- a dangling borrow.",
+        ("改成按值捕获：把 `&n` 换成 `n`（捕获的是一份拷贝，可以逃逸）。",
+         "确实要共享可变状态，就把那份状态放进 `ptr` 指向的堆块，捕获 `ptr`。",
+         "把闭包用完在一次调用内，别让它逃出创建它的函数。"),
+        ("Capture by value: replace `&n` with `n` (the copy can escape).",
+         "If you really need shared mutable state, own it behind a `ptr` and capture that.",
+         "Use the closure within the creating call; keep it from escaping."),
+    ),
+    Fine(
+        215, 30, r"^未知类型 .+（闭包形参 .+ 的类型）",
+        "闭包形参的类型未知",
+        "the type annotation on a closure parameter is unknown",
+        "`(x: T) => …` 里的 `T` 不在类型表里 —— 与 `let` 的标注是同一条规则。",
+        "The `T` in `(x: T) => ...` is not in the type table, same rule as a `let` annotation.",
+        ("换成真有的类型。",
+         "先声明那个类型。",
+         "拼写错误：与声明对齐。"),
+        ("Use a type that exists.",
+         "Declare that type first.",
+         "If it is a typo, match the declaration."),
+    ),
+
 )
 
 

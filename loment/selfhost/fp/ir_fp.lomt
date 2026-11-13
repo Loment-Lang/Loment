@@ -1,7 +1,7 @@
 module ir_fp
 choose fp
 
-// 第九维 `fp`（`docs/341`）的孪生夹具：函数值（裸名字与 `&名字`）、闭包（按值捕获）、
+// 第九维 `fp`（`docs/346`）的孪生夹具：函数值（裸名字与 `&名字`）、闭包（按值捕获）、
 // 函数类型形参、返回闭包、间接调用 —— 一份覆盖整条链路的最小单元。
 // 两个实现（`tools/lomentc.py` 与 `loment/selfhost/codegen.lomt`）对这份源必须发出
 // **逐字节相同**的 IR，判据在 `tools/loment_p8_test.py` 的 m82 那一格。

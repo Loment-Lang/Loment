@@ -212,7 +212,7 @@ pub fn sw_is_core(unit: ptr, toks: ptr, k: u32) -> bool {
     if sw_tok_is(unit, toks, k, "lifetime_manual") {
         return true;
     }
-    // 第九维（`docs/341`，用户 2026-11-12）：`fp` / `no_fp`。默认 `no_fp`（静态调用图）。
+    // 第九维（`docs/346`，用户 2026-11-12）：`fp` / `no_fp`。默认 `no_fp`（静态调用图）。
     if sw_tok_is(unit, toks, k, "fp") {
         return true;
     }

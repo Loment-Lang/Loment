@@ -266,7 +266,7 @@ const TY_SLICE: u32 = 4;
 // 区域标记（`&a T`）**不进类型** —— 它只影响函数摘要，参考实现的 `_type_compat` 也是
 // "区域标记不参与比较"。切片借用 `&[T]` 在 `chk_ty_range` 里规范化成 TY_SLICE。
 const TY_REF: u32 = 5;
-// 函数类型 `(A,B)->C`（`docs/341`）：主条目 a = 形参链头, b = 返回类型。
+// 函数类型 `(A,B)->C`（`docs/346`）：主条目 a = 形参链头, b = 返回类型。
 // 形参链用 TY_FP 条目串起来：a = 该形参的类型, b = 下一条（0 = 链尾）。
 // 为什么拆成链而不是并排多格: 表是单调 bump 的定长条目, 变长片段只能靠"链"表达;
 // 判等按同一形状递归下去, 于是两个**分别写出来**的同签名是相等类型 —— 这正是
@@ -487,7 +487,7 @@ fn chk_ty_range(src: ptr, t: ptr, s: ptr, n: u32, tyt: ptr, lo: u32, hi: u32) ->
     if mut == 1 {
         return 0;   // `mut X` 且 X 不是切片: 形状非法, 记未知
     }
-    // 函数类型 `(A,B) -> C`（`docs/341`）。`(` 在类型位置上只有这一种含义 ——
+    // 函数类型 `(A,B) -> C`（`docs/346`）。`(` 在类型位置上只有这一种含义 ——
     // 参考实现的 `type_name` 在 `(` 分支里也是直接按函数类型解析的。
     if chk_tok_is(src, t, i, "(") {
         return chk_ty_fn_range(src, t, s, n, tyt, i, hi);
@@ -653,7 +653,7 @@ fn chk_bad_num_suffix(src: ptr, t: ptr, i: u32) -> bool {
 ///   0 = `mode`（`std` / `no_std`）；1 = `gc`（`gc_manual` / `gc_auto`）；
 ///   2 = `runtime`（`runtime` / `no_runtime`）；3 = `port`（`sealed` / `hosted`）；
 ///   4 = `vm`；5 = `lms`；6 = `lspe`；7 = `lifetime`（`docs/299`）；
-///   8 = `fp`（`docs/341`）；9 = 槽位；10 = **不是核心模式** —— 那是开关那一套
+///   8 = `fp`（`docs/346`）；9 = 槽位；10 = **不是核心模式** —— 那是开关那一套
 ///   （`docs/182` §1.3），这一层不管。
 ///
 /// 与参考实现的 `CORE_DIM_OF` 是同一张表；加一维两边一起动。
@@ -699,7 +699,7 @@ fn chk_core_dim(src: ptr, t: ptr, k: u32) -> u32 {
             || chk_tok_is(src, t, k, "lifetime_manual") {
         return 7;
     }
-    // 第九维（`docs/341`，用户 2026-11-12）：`fp` / `no_fp`。默认 `no_fp` ——
+    // 第九维（`docs/346`，用户 2026-11-12）：`fp` / `no_fp`。默认 `no_fp` ——
     // 默认产物保持静态调用图（`docs/208`）。
     if chk_tok_is(src, t, k, "fp") || chk_tok_is(src, t, k, "no_fp") {
         return 8;
@@ -878,7 +878,7 @@ fn chk_core_val(src: ptr, t: ptr, k: u32) -> u32 {
     if chk_tok_is(src, t, k, "lifetime_manual") {
         return 3;
     }
-    // 第九维（`docs/341`）：`fp` —— 1 = 默认档 `no_fp`，2 = `fp`。
+    // 第九维（`docs/346`）：`fp` —— 1 = 默认档 `no_fp`，2 = `fp`。
     if chk_tok_is(src, t, k, "no_fp") {
         return 1;
     }
@@ -1088,7 +1088,7 @@ fn check_type(src: ptr, t: ptr, s: ptr, n: u32, i: u32, p: ptr, o: u32,
         // `[T]` 与 `[T; N]` 同形: `[` 后面第一个 token 就是元素类型, 长度在 `;` 之后。
         return check_type(src, t, s, n, i + 1, p, o, code);
     }
-    // 函数类型 `(A, B) -> C`（`docs/341`）：形参与返回类型都要各自查一遍。
+    // 函数类型 `(A, B) -> C`（`docs/346`）：形参与返回类型都要各自查一遍。
     if chk_tok_is(src, t, i, "(") {
         let c: u32 = chk_match_paren(src, t, i);
         if !chk_tok_is(src, t, c + 1, "-") || !chk_tok_is(src, t, c + 2, ">") {
@@ -1169,7 +1169,7 @@ fn chk_skip_type0(src: ptr, t: ptr, i: u32) -> u32 {
     if chk_tok_is(src, t, j, "mut") {
         j = j + 1;
     }
-    // 函数类型 `(A,B) -> C`（`docs/341`）：整段跳过 `(...)` 与 `-> R`。
+    // 函数类型 `(A,B) -> C`（`docs/346`）：整段跳过 `(...)` 与 `-> R`。
     // 只认"右括号后面紧跟 `->`"的形状 —— 其余 `(` 不是类型，退回单 token。
     if chk_tok_is(src, t, j, "(") {
         let c: u32 = chk_match_paren(src, t, j);
@@ -2259,7 +2259,7 @@ fn chk_life_mode(src: ptr, t: ptr, prof: u32) -> u32 {
     return 0;
 }
 
-/// 函数符号 -> 函数类型 `(形参…)->返回`（`docs/341`）。返回类型为 unit 记 `TY_UNIT`。
+/// 函数符号 -> 函数类型 `(形参…)->返回`（`docs/346`）。返回类型为 unit 记 `TY_UNIT`。
 /// 任一分量未知（泛型形参 / 复合类型编码不出来）-> 0: 整个函数类型按未知处理。
 fn chk_fn_sig_ty(src: ptr, t: ptr, s: ptr, n: u32, tyt: ptr, slot0: u32) -> u32 {
     let argc: u32 = load32(s, slot0 * 20 + 8);
@@ -2287,7 +2287,7 @@ fn chk_fn_sig_ty(src: ptr, t: ptr, s: ptr, n: u32, tyt: ptr, slot0: u32) -> u32 
     return chk_ty_new(tyt, TY_FN, first, ret);
 }
 
-/// 函数符号的**返回类型**（`docs/341`）：函数类型按声明 token **现建**，其余读符号表。
+/// 函数符号的**返回类型**（`docs/346`）：函数类型按声明 token **现建**，其余读符号表。
 ///
 /// 为什么不把函数类型存进符号表：`ret` 那一格放的是**整单元有效**的类型码，而复合类型
 /// （`TY_FN`）的码是**类型表的索引** —— 那张表按函数清零（见 `chk_arena_tyt`），
@@ -2395,7 +2395,7 @@ fn chk_cap_ident(src: ptr, t: ptr, i: u32) -> u32 {
 }
 
 /// 单元里有没有 `let <这个名字>`。**只给单元级那一趟调用检查用**：那一趟没有作用域，
-/// 而 `f(...)` 的 `f` 可能是个函数类型的局部（间接调用，`docs/341`）。真正的作用域判定
+/// 而 `f(...)` 的 `f` 可能是个函数类型的局部（间接调用，`docs/346`）。真正的作用域判定
 /// 在 `chk_body -> chk_tex` 那条路上做（未定义的调用在那边照样报 96）—— 这里
 /// 只在"这个名字在文件里被 `let` 过"时收手，宁可少报一条，不误拒一个合法的间接调用。
 fn chk_let_named(src: ptr, t: ptr, name_tok: u32) -> u32 {
@@ -2409,7 +2409,7 @@ fn chk_let_named(src: ptr, t: ptr, name_tok: u32) -> u32 {
     return 0;
 }
 
-/// 单元里有没有哪个函数的**形参**叫这个名字（`docs/341` 的函数类型形参：
+/// 单元里有没有哪个函数的**形参**叫这个名字（`docs/346` 的函数类型形参：
 /// `fn apply(f: (u64) -> u64, v: u64)` 里 `f(v)` 是间接调用，不是"未定义的函数"）。
 fn chk_param_named_any(src: ptr, t: ptr, name_tok: u32) -> u32 {
     let i: u32 = 0;
@@ -2463,7 +2463,7 @@ fn chk_param_named(src: ptr, t: ptr, lo: u32, close: u32, name_tok: u32) -> u32 
 }
 
 /// 闭包体里有没有**按借捕获**（`&名字`，且那个名字是外层变量、不是形参）。
-/// `docs/341`：按借存的是地址，所以这样的闭包不能从函数里返回。
+/// `docs/346`：按借存的是地址，所以这样的闭包不能从函数里返回。
 fn chk_lam_ref_cap(src: ptr, t: ptr, env: ptr, envc: u32, lo: u32, hi: u32) -> u32 {
     let close: u32 = chk_match_paren(src, t, lo);
     let body_lo: u32 = close + 3;
@@ -2492,7 +2492,7 @@ fn chk_lambda_at(src: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
     return 0;
 }
 
-/// 函数声明里那个 `fn` 前面有没有 `extern`（`docs/341`：extern 走平台 ABI，
+/// 函数声明里那个 `fn` 前面有没有 `extern`（`docs/346`：extern 走平台 ABI，
 /// 不能当函数值）。从形参表的 `(` 往回找最近的 `fn`。
 fn chk_fn_is_extern(src: ptr, t: ptr, lp: u32) -> u32 {
     let j: u32 = lp;
@@ -2511,7 +2511,7 @@ fn chk_fn_is_extern(src: ptr, t: ptr, lp: u32) -> u32 {
     return 0;
 }
 
-/// 闭包 `(x: T, y) => 体`（`docs/341`）。`hint` = 期望类型（没有就 0）。
+/// 闭包 `(x: T, y) => 体`（`docs/346`）。`hint` = 期望类型（没有就 0）。
 ///
 /// 形参类型两条来源：写在参数上的标注，或期望类型里同位置的那个。两处都没有 -> 213。
 /// 捕获 = 体里出现的自由名字中**在外层环境里**的那些（按名字排序后进闭包记录）；
@@ -2523,7 +2523,7 @@ fn chk_lambda(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
     let lo: u32 = chk_lhlo(lh);
     let hi: u32 = chk_lhhi(lh);
     let oc: ptr = ptr_add(tyt, 4096);
-    // `choose fp` 门（`docs/341`）：默认档 `no_fp` 保持静态调用图。
+    // `choose fp` 门（`docs/346`）：默认档 `no_fp` 保持静态调用图。
     if load32(tyt, 4108) == 0 {
         chk_pub(src, t, oc, p, 210, lo);
     }
@@ -2573,7 +2573,7 @@ fn chk_lambda(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 && chk_env_idx_r(src, t, env, pbase, envc, ci) == 0 {
             let oi: u32 = chk_env_idx_r(src, t, env, 0, pbase, ci);
             if oi != 0 {
-                // v1 的闭包记录一格 8 字节：只有整型 / bool / ptr 放得下（`docs/341`）。
+                // v1 的闭包记录一格 8 字节：只有整型 / bool / ptr 放得下（`docs/346`）。
                 let cty: u32 = load32(env, (oi - 1) * 8 + 4);
                 let isptr: u32 = 0;
                 if chk_ty_kind(cty) == 1 && cty % (1 << TY_KIND_SHIFT) == 11 {
@@ -2779,7 +2779,7 @@ fn chk_tex(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
     if lo >= hi {
         return 0;
     }
-    // ---- 闭包 `(x: T) => 体`（`docs/341`）。不带期望类型（形参要写标注）。
+    // ---- 闭包 `(x: T) => 体`（`docs/346`）。不带期望类型（形参要写标注）。
     // 带标注的绑定位置（`let f: (u64)->u64 = …`、实参、`return`）由那几个站点直接调
     // `chk_lambda` 并把期望类型传进去 —— 与参考实现的 `_bind_lambda` 是同一条分工。
     if chk_lambda_at(src, t, lo, hi) == 1 {
@@ -2844,7 +2844,7 @@ fn chk_tex(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
         }
         if chk_tok_kind(t, lo) == 0 {
             let v1: u32 = chk_name_ty(src, t, syms, n, env, envc, lo);
-            // 函数名在**值位置**（`docs/341`）：类型是它的签名，值要在 `choose fp` 下。
+            // 函数名在**值位置**（`docs/346`）：类型是它的签名，值要在 `choose fp` 下。
             if v1 == 0 {
                 let s1: u32 = chk_lookup_slot(src, t, syms, n, lo);
                 if s1 != 0 && load32(syms, (s1 - 1) * 20 + 4) == K_FN {
@@ -3030,7 +3030,7 @@ fn chk_tex(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             mutf = 1;
             a0 = lo + 2;
         }
-        // `&fn` 与裸名字是**同一个值**（`docs/341`）：类型是函数签名，不是 `&(…)`。
+        // `&fn` 与裸名字是**同一个值**（`docs/346`）：类型是函数签名，不是 `&(…)`。
         if a0 + 1 == hi && chk_tok_kind(t, a0) == 0
                 && chk_env_get(src, t, env, envc, a0) == 0 {
             let s1: u32 = chk_lookup_slot(src, t, syms, n, a0);
@@ -3426,7 +3426,7 @@ fn chk_tex_atom_call(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
     let lo: u32 = chk_lhlo(lh);
     let hi: u32 = chk_lhhi(lh);
     let got: u32 = chk_count_args(src, t, lo + 1);
-    // ---- 间接调用（`docs/341`）：callee 是一个 `(A)->B` 类型的**局部**。
+    // ---- 间接调用（`docs/346`）：callee 是一个 `(A)->B` 类型的**局部**。
     // 排在“内建”之前：与参考实现同一条 —— `scope.get(name)` 先看局部，
     // 局部叫 `alloc` 且是函数值时走的是间接调用，不是内建。
     let vt: u32 = chk_env_get(src, t, env, envc, lo);
@@ -6016,7 +6016,7 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                     // 返回位置的闭包从函数的返回类型推形参（`_bind_lambda` 第三个站点）。
                     t3 = chk_lambda(src, t, syms, n, env, c,
                                     chk_lh(j + 1, semi), tyt, p, ret);
-                    // 带**按借捕获**的闭包不能返回（`docs/341`）：它借的东西活不过这个函数。
+                    // 带**按借捕获**的闭包不能返回（`docs/346`）：它借的东西活不过这个函数。
                     if chk_lam_ref_cap(src, t, env, c, j + 1, semi) == 1 {
                         chk_pub(src, t, oc, p, 214, j);
                     }
@@ -6878,7 +6878,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                     o = sym_pub(src, t, out, o, 158, i);
                 }
             } else if dim == 8 {
-                // 第九维（`docs/341`）：`fp`。只有重复要判 —— 它没有冲突对。
+                // 第九维（`docs/346`）：`fp`。只有重复要判 —— 它没有冲突对。
                 nch_fp = nch_fp + 1;
                 v_fp = chk_core_val(src, t, i + 1);
                 ln_fp = i;
@@ -7029,7 +7029,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     // `loment_channel_test` 的 `PROBE_LSPE` 期望**反转**，探针不删（`docs/262` §10.6）。
     // 至此渠道**已经没有闸读它**，这一行只剩"注入仍生效"一个用途（判据 F）。
     let rel: u32 = LOMENT_CHANNEL;
-    // ---- 第九维 `fp` 的**生效值**（`docs/341`）。放在 `oc + 12`（`tyt + 4108`，那格空着，
+    // ---- 第九维 `fp` 的**生效值**（`docs/346`）。放在 `oc + 12`（`tyt + 4108`，那格空着，
     // 见 `chk_arena_tyt` 的布局说明）—— `chk_tex` / `chk_lambda` 在深递归里读它，
     // 不值得为此给十几个函数各加一个形参（自举 codegen 的形参上限就是 10）。
     store32(oc, 12, 0);

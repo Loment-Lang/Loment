@@ -1808,7 +1808,7 @@ class Un:
 
 @dataclass
 class Lambda:
-    """`(x) => expr` / `(x: T, y) => expr` —— 闭包（`docs/341`）。
+    """`(x) => expr` / `(x: T, y) => expr` —— 闭包（`docs/346`）。
 
     `params` 的类型可以缺省：从**期望类型**（`let` 的标注、实参位置、返回位置）推。
     `captures` 由检查器填：`(名字, 类型, 是否按借)`。按借的捕获存**地址**，其余按值
@@ -3989,7 +3989,7 @@ class Parser:
     def type_name(self) -> str:
         """类型名: 基类型 / struct / 数组 [T; N] / 只读切片 [T] / 可变切片 mut [T] /
         借用 `&T` / `&mut T`（后者只在 `choose lifetime_*` 非 `no` 时，`docs/299`）/
-        函数类型 `(A, B) -> C`（`docs/341`）。"""
+        函数类型 `(A, B) -> C`（`docs/346`）。"""
         if self.at("punct", "("):
             # 函数类型。`()` 作**返回类型**（unit）由 `parse_fn` 在 `{` / `;` 那一格先接走，
             # 走不到这里；所以类型位置上一见到 `(` 就只能是 `(A, …) -> R`。
@@ -5082,7 +5082,7 @@ class Parser:
         return self.parse_primary()
 
     def _lambda_ahead(self) -> bool:
-        """当前位置是 `(`：它到配对的 `)` 之后是不是 `=>`（闭包，`docs/341`）。
+        """当前位置是 `(`：它到配对的 `)` 之后是不是 `=>`（闭包，`docs/346`）。
 
         只看形状，不看名字：`(x) =>` 是闭包，`(x + 1)` 不是。参数合法性由
         `parse_lambda` 判 —— 挪进这里会让 `(a + b)` 被误判成坏闭包。
@@ -5106,7 +5106,7 @@ class Parser:
         return False
 
     def parse_lambda(self, line: int):
-        """`(x) => expr` / `(x: T, y) => expr` —— 闭包（`docs/341`）。"""
+        """`(x) => expr` / `(x: T, y) => expr` —— 闭包（`docs/346`）。"""
         self.expect("punct", "(")
         params: list[tuple[str, str | None]] = []
         while not self.at("punct", ")"):
@@ -6024,7 +6024,7 @@ def expr_type(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[st
         t = scope.get(e.name)
         if t is not None:
             return t
-        # 函数名在**值位置**就是函数值（`docs/341`）：类型取它的签名。
+        # 函数名在**值位置**就是函数值（`docs/346`）：类型取它的签名。
         f = funcs.get(e.name)
         if f is not None and not getattr(f, "extern", False):
             return _fn_ty_make([p.type for p in f.params], f.ret)
@@ -6032,7 +6032,7 @@ def expr_type(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[st
     if isinstance(e, GenOf):
         return "u64"
     if isinstance(e, Call):
-        # 间接调用 `f(a, b)`（`docs/341`）：callee 是 `(A)->B` 类型的**局部**。
+        # 间接调用 `f(a, b)`（`docs/346`）：callee 是 `(A)->B` 类型的**局部**。
         _vt = scope.get(e.name)
         _vtf = _fn_ty_split(_vt) if _vt is not None else None
         if _vtf is not None:
@@ -6114,7 +6114,7 @@ def expr_type(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[st
     if isinstance(e, Un):
         inner = expr_type(e.expr, scope, funcs, structs)
         if e.op in ("&", "&mut") and inner is not None and _fn_ty_split(inner) is not None:
-            # `&fn` 与裸名字是同一个函数值（`docs/341`），不是"借用的函数"。
+            # `&fn` 与裸名字是同一个函数值（`docs/346`），不是"借用的函数"。
             return inner
         if e.op == "*":
             # `ptr` 的 `*` 是**逃生舱**：按字节读（`u8`）。借用类型的 `*` 解一层。
@@ -6268,7 +6268,7 @@ def _fp_ok() -> bool:
 
 
 def _fn_value_err(line: int, errs: list[str]) -> None:
-    """`choose fp` 没开时，用到函数值/闭包的那一处点名报（`docs/341`）。"""
+    """`choose fp` 没开时，用到函数值/闭包的那一处点名报（`docs/346`）。"""
     errs.append(f"{line}: 使用函数值需要 `choose fp`（默认 `no_fp` 保持静态调用图）")
 
 
@@ -6381,7 +6381,7 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
             return
         f = funcs.get(e.name)
         if f is not None:
-            # 函数名在值位置（`docs/341`）。`extern fn` 走平台 ABI，与本语言的函数类型
+            # 函数名在值位置（`docs/346`）。`extern fn` 走平台 ABI，与本语言的函数类型
             # 不是一回事，**不能**取成函数值。
             if getattr(f, "extern", False):
                 errs.append(f"{e.line}: extern fn {e.name} 不能当函数值 —— 它走平台 ABI，"
@@ -6486,7 +6486,7 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
         _vt = scope.get(e.name)
         _vtf = _fn_ty_split(_vt) if _vt is not None else None
         if _vtf is not None:
-            # 间接调用（`docs/341`）：callee 是 `(A)->B` 类型的**局部**。
+            # 间接调用（`docs/346`）：callee 是 `(A)->B` 类型的**局部**。
             if not _fp_ok():
                 _fn_value_err(e.line, errs)
             _fargs, _fret = _vtf
@@ -6719,7 +6719,7 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
     if isinstance(e, Un):
         if e.op in ("&", "&mut") and isinstance(e.expr, Ident) \
                 and e.expr.name not in scope and e.expr.name in funcs:
-            # `&fn` 与裸名字是**同一个值**（`docs/341`）；类型由 `expr_type` 给。
+            # `&fn` 与裸名字是**同一个值**（`docs/346`）；类型由 `expr_type` 给。
             if getattr(funcs[e.expr.name], "extern", False):
                 errs.append(f"{e.line}: extern fn {e.expr.name} 不能当函数值 —— 它走平台 ABI，"
                             f"与本语言的函数类型不是一回事")
@@ -8305,7 +8305,7 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     # 是哪两档"，不是"源码里写了哪两行"。报错要**点名为什么冲突**，泛泛的"非法组合"
     # 正是判据点名的反面（`docs/188` 的"宁拒勿猜"）。
     _eff = effective_dims(mod)
-    # 函数值 / 闭包 / 间接调用只在 `choose fp` 下成立（`docs/341`）。
+    # 函数值 / 闭包 / 间接调用只在 `choose fp` 下成立（`docs/346`）。
     _FP_ALLOWED[0] = _eff.get("fp") == "fp"
     # 槽的生效值（依赖要核"根满足了吗"，与 `_eff` 同一趟落定）。
     _slot_eff = dict(CORE_SLOT_DEFAULTS)
@@ -8999,7 +8999,7 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                             errs.append(f"{s.line}: `return;` 不带值，函数 {f.name} 声明 {f.ret}")
                     else:
                         _walk_expr(s.expr, fscope, funcs, structs, errs, enums, lifetime)
-                        # 带**按借捕获**的闭包不能返回（`docs/341`）：它借的东西活不过
+                        # 带**按借捕获**的闭包不能返回（`docs/346`）：它借的东西活不过
                         # 这个函数。按值捕获的可以逃逸（捕获的是一份拷贝）。
                         if isinstance(s.expr, Lambda) and any(b for _, _, b in s.expr.captures):
                             errs.append(f"{s.line}: 带按借捕获的闭包不能返回 —— "
@@ -9776,11 +9776,11 @@ def _expr_rs(e) -> str:
         # Rust 要求下标为 usize; Loment 允许任意整型, 转译时显式降级。
         return _rs_auto_guards(e, _expr_rs(e.obj), _expr_rs(e.idx))
     if isinstance(e, Lambda):
-        # `docs/341`：闭包还没有 Rust 写法（捕获要运行期表示，而这一条链是"照抄语义"）。
+        # `docs/346`：闭包还没有 Rust 写法（捕获要运行期表示，而这一条链是"照抄语义"）。
         # **点名拒**，别掉进最后那句 `AssertionError` —— 那是崩溃，不是诊断。
         raise LomError(e.line, 1,
                        "rust 后端不支持闭包（`(x) => …`）：那边没有捕获的运行期表示。"
-                       "把它写成具名函数，或走原生后端（`loment build`，`docs/341`）")
+                       "把它写成具名函数，或走原生后端（`loment build`，`docs/346`）")
     raise AssertionError(f"未知表达式 {e!r}")
 
 
@@ -10636,7 +10636,7 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None,
         # 是**不读源码可判的**。默认值随版次走（`core_default`）—— 2026.3 起
         # `lifetime_auto`，旧版次 `lifetime_no`。
         "lifetime": _dims["lifetime"],
-        # **间接分派**（v23，`docs/341`，用户 2026-11-12 定第九维）：`no_fp` / `fp`。
+        # **间接分派**（v23，`docs/346`，用户 2026-11-12 定第九维）：`no_fp` / `fp`。
         # 与 `gc` / `lifetime` 同级同形：**必填**，于是"这份产物里有没有间接调用边"
         # 是**不读源码可判的** —— 而它正是 `docs/208` §4 那条静态调用图前提的边界：
         # `no_fp` 只含直接调用边，`fp` 的图里有间接边，那一族主张在这一档不能用。
@@ -11633,7 +11633,7 @@ def _ll_type(t: str, structs: dict, enums: dict) -> str:
     if t == "()":  # M16: unit
         return "void"
     if _fn_ty_split(t) is not None:
-        # 函数值 = 指向**闭包记录**的指针（`docs/341`）。
+        # 函数值 = 指向**闭包记录**的指针（`docs/346`）。
         return "ptr"
     if _is_ref(t):
         # 借用值就是一个指针（`docs/299`）。切片借用已经在解析时规范化回 `[T]` /
@@ -12706,14 +12706,14 @@ class _Ir:
         #: 无状态的律不登记（守卫传 null）。
         self.dom_state: dict[int, str] = {}
         self.globals: list[str] = []                # 字符串常量等模块级声明
-        #: 闭包与函数值包装的**函数体**（`docs/341`）。**不放进 `globals`** —— 那是数据
+        #: 闭包与函数值包装的**函数体**（`docs/346`）。**不放进 `globals`** —— 那是数据
         #: 声明区；更要紧的是 `len(self.globals)` 决定 `@.str.<fn>.<n>` 的编号，把函数体
         #: 混进去会让字符串常量的名字随闭包数量漂移。单独一列，最后统一追加在**全部函数体
         #: 之后** —— 两个实现走同一条次序，逐字节判据才有一致的对照面。
         self.fn_defs: list[str] = []
         #: 本函数里生成过的闭包函数数（名字 `{f}.$lamN` 的唯一来源）。
         self.lam_n = 0
-        #: 已经发过 `@__fp_<名字>` 包装的函数名（`docs/341`）。**按模块共享** —— 包装是
+        #: 已经发过 `@__fp_<名字>` 包装的函数名（`docs/346`）。**按模块共享** —— 包装是
         #: 一条 `define`，两个函数各取一次同一个函数值就会发两条同名定义（非法 IR）。
         self.fn_clos: set[str] = fn_clos if fn_clos is not None else set()
         self.terminated = False
@@ -13245,7 +13245,7 @@ class _Ir:
             return "i1", ("1" if e.value else "0")
         if isinstance(e, Ident):
             if e.name not in self.vars and e.name in self.funcs:
-                # 函数名在值位置（`docs/341`）：值 = 指向它的**闭包记录全局**的指针。
+                # 函数名在值位置（`docs/346`）：值 = 指向它的**闭包记录全局**的指针。
                 return self._fn_value(e.name, e.line)
             if e.name in self.consts:  # 常量在生成期内联
                 ty, val = self.consts[e.name]
@@ -13362,7 +13362,7 @@ class _Ir:
             _vt = self.vars[e.name][0]
             _vtf = _fn_ty_split(_vt)
             if _vtf is not None:
-                # 间接调用（`docs/341`）：值 = 指向闭包记录的指针；记录第 0 字是代码地址，
+                # 间接调用（`docs/346`）：值 = 指向闭包记录的指针；记录第 0 字是代码地址，
                 # 第 1 字起是捕获。被调函数的约定是 `(ptr env, 实参…)`。
                 _fargs, _fret = _vtf
                 _rec = self.t()
@@ -13504,7 +13504,7 @@ class _Ir:
         raise LomError(getattr(e, "line", 1), 1, f"native 后端不支持该表达式: {type(e).__name__}")
 
     def _fn_value(self, name: str, line: int) -> tuple[str, str]:
-        """函数名当值（`docs/341`）：全局闭包记录 `@{name}.clo` + 一个内部包装。
+        """函数名当值（`docs/346`）：全局闭包记录 `@{name}.clo` + 一个内部包装。
 
         包装把统一的 `(ptr env, 实参…)` 约定接回直接调用 —— 这样**函数值与闭包在
         运行期是同一种东西**，调用点只有一条路。
@@ -13586,7 +13586,7 @@ class _Ir:
         return name
 
     def _lambda_expr(self, lam, want: str | None = None) -> tuple[str, str]:
-        """闭包值（`docs/341`）：堆上一条 `{code, 捕获…}` 记录，值就是它的指针。
+        """闭包值（`docs/346`）：堆上一条 `{code, 捕获…}` 记录，值就是它的指针。
 
         **捕获集在这里重算**：`check()` 走的是 `prepare()` 之后的**副本**，它写下的
         `captures` 到不了发射器（同一条流水线上 `Fallback.ty` 这类字段也一样）。
@@ -15174,9 +15174,9 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
         out.append("; loment-gc: no_gc")
     out.append("")
     globals_: list[str] = []
-    #: 闭包 / 函数值包装的函数体（`docs/341`）：**全部函数体之后**统一发，两个实现同序。
+    #: 闭包 / 函数值包装的函数体（`docs/346`）：**全部函数体之后**统一发，两个实现同序。
     fn_defs_: list[str] = []
-    #: `@__fp_<名字>` 包装的**模块级**去重集（`docs/341`）：包装是一条 `define`，两个函数
+    #: `@__fp_<名字>` 包装的**模块级**去重集（`docs/346`）：包装是一条 `define`，两个函数
     #: 各取一次同一个函数值不能发两条同名定义。每条包装只发一次，位置取**首次使用**处。
     _fn_clos: set[str] = set()
     body: list[str] = []
@@ -15450,7 +15450,7 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     if globals_:
         out.append("")
     out.append(text_all)
-    # 闭包 / 函数值包装的函数体（`docs/341`）：**在全部函数体之后**。次序 = 函数顺序，
+    # 闭包 / 函数值包装的函数体（`docs/346`）：**在全部函数体之后**。次序 = 函数顺序，
     # 同一函数内 = 发现顺序（嵌套闭包内层先发）。自举镜在 `emit_module` 末尾发同一批。
     if fn_defs_:
         out.append("")

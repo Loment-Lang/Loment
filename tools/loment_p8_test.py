@@ -1085,7 +1085,7 @@ def test_m82_loment_codegen_byte_identical():
 
 @test
 def test_m94_fp_twin_is_byte_identical():
-    """第九维 `fp`（`docs/341`）：函数值 / 闭包 / 间接调用的 IR **逐字节**相同。
+    """第九维 `fp`（`docs/346`）：函数值 / 闭包 / 间接调用的 IR **逐字节**相同。
 
     这一份覆盖整条链路：`&名字` 与裸名字当值、按值捕获的闭包、函数类型形参、
     返回闭包、闭包当实参。**包装函数与闭包体发在全部函数体之后**（`fn_defs`），

@@ -1275,9 +1275,6 @@ fn iw_hole_end(buf: ptr, j: u32, n: u32) -> u32 {
                 d = d - 1;
                 k = k + 1;
             }
-        } else if c == 58 && d == 0 {
-            // 顶层 `:` = 格式说明。切片 `a[1:2]` 的 `:` 在 `[` 里（d > 0）。
-            r = n + 3;
         } else {
             k = k + 1;
         }
@@ -1321,10 +1318,6 @@ fn iw_fs_end(buf: ptr, q: u32, n: u32, raw: u32, scr: ptr, file: ptr, fnam: u32)
                         return iw_die(buf, j, scr, file, fnam,
                                       "孔不能跨行（v1 只收单行的插值字符串）");
                     }
-                    if he == n + 3 {
-                        return iw_die(buf, j, scr, file, fnam,
-                                      "格式说明 `{expr:…}` 还没接上（宽 / 补零是下一阶段）");
-                    }
                     return iw_die(buf, j, scr, file, fnam,
                                   "未闭合的插值孔（少一个 `}`）");
                 }
@@ -1343,6 +1336,59 @@ fn iw_fs_end(buf: ptr, q: u32, n: u32, raw: u32, scr: ptr, file: ptr, fnam: u32)
     }
     if r == 0 {
         return iw_die(buf, q, scr, file, fnam, "未闭合的插值字符串（v1 只收单行）");
+    }
+    return r;
+}
+
+/// 孔体里**顶层** `:` 的下标（格式说明的起点）；没有就返回 `b`。
+/// 切片 `a[1:2]` 的 `:` 在 `[` 里，不算；字符串与注释里的也不算。
+fn iw_spec_colon(buf: ptr, a: u32, b: u32) -> u32 {
+    let k: u32 = a;
+    let d: u32 = 0;
+    let r: u32 = b;
+    while k < b && r == b {
+        let c: u32 = load8(buf, k) as u32;
+        if c == 34 {
+            let e: u32 = iw_str_end(buf, k, b);
+            if e == 0 {
+                k = b;
+            } else {
+                k = e;
+            }
+        } else if c == 47 && k + 1 < b && load8(buf, k + 1) as u32 == 47 {
+            let e: u32 = k;
+            while e < b && load8(buf, e) as u32 != 10 {
+                e = e + 1;
+            }
+            k = e;
+        } else if c == 47 && k + 1 < b && load8(buf, k + 1) as u32 == 42 {
+            let e: u32 = k + 2;
+            let done: u32 = 0;
+            while e + 1 < b && done == 0 {
+                if load8(buf, e) as u32 == 42 && load8(buf, e + 1) as u32 == 47 {
+                    done = 1;
+                } else {
+                    e = e + 1;
+                }
+            }
+            if done == 0 {
+                k = b;
+            } else {
+                k = e + 2;
+            }
+        } else if c == 123 || c == 40 || c == 91 {
+            d = d + 1;
+            k = k + 1;
+        } else if c == 125 || c == 41 || c == 93 {
+            if d > 0 {
+                d = d - 1;
+            }
+            k = k + 1;
+        } else if c == 58 && d == 0 {
+            r = k;
+        } else {
+            k = k + 1;
+        }
     }
     return r;
 }
@@ -1367,8 +1413,8 @@ fn iw_trim(buf: ptr, a: u32, b: u32) -> u32 {
 
 /// 孔的转换：0 = 没有，115 = `!s`，114 = `!r`。
 fn iw_conv(buf: ptr, a: u32, b: u32) -> u32 {
-    let s: u32 = iw_lead(buf, a, b);
-    let e: u32 = iw_trim(buf, s, b);
+    let s: u32 = iw_lead(buf, a, iw_spec_colon(buf, a, b));
+    let e: u32 = iw_trim(buf, s, iw_spec_colon(buf, a, b));
     if e >= s + 2 && load8(buf, e - 2) as u32 == 33 {
         let c: u32 = load8(buf, e - 1) as u32;
         if c == 115 || c == 114 {
@@ -1380,8 +1426,8 @@ fn iw_conv(buf: ptr, a: u32, b: u32) -> u32 {
 
 /// 去掉转换标记之后的终点。
 fn iw_no_conv(buf: ptr, a: u32, b: u32) -> u32 {
-    let s: u32 = iw_lead(buf, a, b);
-    let e: u32 = iw_trim(buf, s, b);
+    let s: u32 = iw_lead(buf, a, iw_spec_colon(buf, a, b));
+    let e: u32 = iw_trim(buf, s, iw_spec_colon(buf, a, b));
     if e >= s + 2 && load8(buf, e - 2) as u32 == 33 {
         let c: u32 = load8(buf, e - 1) as u32;
         if c == 115 || c == 114 {
@@ -1416,6 +1462,97 @@ fn iw_expr(buf: ptr, a: u32, b: u32) -> u64 {
     return eh * 4294967296 + (s as u64);
 }
 
+/// 格式说明的填充字符（缺省空格；前导 `0` 表示 48）。
+fn iw_spec_fill(buf: ptr, a: u32, b: u32) -> u32 {
+    let i: u32 = iw_lead(buf, a, b);
+    if i < b && load8(buf, i) as u32 == 48 {
+        return 48;
+    }
+    return 32;
+}
+
+/// 格式说明的对齐：0 = 左、1 = 右（缺省）、2 = 居中。
+fn iw_spec_align(buf: ptr, a: u32, b: u32) -> u32 {
+    let i: u32 = iw_lead(buf, a, b);
+    if i < b && load8(buf, i) as u32 == 48 {
+        i = i + 1;
+    }
+    if i < b {
+        let c: u32 = load8(buf, i) as u32;
+        if c == 60 {
+            return 0;
+        }
+        if c == 62 {
+            return 1;
+        }
+        if c == 94 {
+            return 2;
+        }
+    }
+    return 1;
+}
+
+/// 格式说明的宽度（十进制）。
+fn iw_spec_width(buf: ptr, a: u32, b: u32) -> u32 {
+    let i: u32 = iw_lead(buf, a, b);
+    if i < b && load8(buf, i) as u32 == 48 {
+        i = i + 1;
+    }
+    if i < b {
+        let c: u32 = load8(buf, i) as u32;
+        if c == 60 || c == 62 || c == 94 {
+            i = i + 1;
+        }
+    }
+    let w: u32 = 0;
+    while i < b {
+        let c: u32 = load8(buf, i) as u32;
+        if c < 48 || c > 57 {
+            i = b;
+        } else {
+            w = w * 10 + (c - 48);
+            i = i + 1;
+        }
+    }
+    return w;
+}
+
+/// 格式说明的形状校验：`[0]?[<>^]?数字`。不合格就报错退出。
+fn iw_spec_check(buf: ptr, a: u32, b: u32, scr: ptr, file: ptr, fnam: u32) -> u32 {
+    let i: u32 = iw_lead(buf, a, b);
+    let e: u32 = iw_trim(buf, i, b);
+    if i >= e {
+        return iw_die(buf, a, scr, file, fnam, "格式说明是空的");
+    }
+    if load8(buf, i) as u32 == 48 {
+        i = i + 1;
+    }
+    if i < e {
+        let c: u32 = load8(buf, i) as u32;
+        if c == 60 || c == 62 || c == 94 {
+            i = i + 1;
+        }
+    }
+    let d: u32 = 0;
+    while i < e {
+        let c: u32 = load8(buf, i) as u32;
+        if c < 48 || c > 57 {
+            return iw_die(buf, a, scr, file, fnam,
+                          "格式说明只认 `>W` / `<W` / `^W` / `0W`（可选前导 `0` 表示用 0 填充）");
+        }
+        d = d + 1;
+        i = i + 1;
+    }
+    if d == 0 {
+        return iw_die(buf, a, scr, file, fnam, "格式说明缺宽度");
+    }
+    let w: u32 = iw_spec_width(buf, a, b);
+    if w < 1 || w > 65535 {
+        return iw_die(buf, a, scr, file, fnam, "格式说明的宽度要在 1..65535 之间");
+    }
+    return 0;
+}
+
 /// 文本段（未改写）→ 普通字面量体里的长度。`{{` / `}}` 各收成一个；原始串里的 `\` 加倍。
 fn iw_seg_len(buf: ptr, a: u32, b: u32, raw: u32) -> u32 {
     let i: u32 = a;
@@ -1437,6 +1574,30 @@ fn iw_seg_len(buf: ptr, a: u32, b: u32, raw: u32) -> u32 {
         }
     }
     return n;
+}
+
+/// 写一个十进制整数（宽度 / 填充 / 对齐这些小常数）。
+fn iw_putd(dst: ptr, pos: u32, v: u32, w: u32) -> u32 {
+    let p: u32 = pos;
+    let d: u32 = 1;
+    let y: u32 = v / 10;
+    while y > 0 {
+        d = d + 1;
+        y = y / 10;
+    }
+    let dv: u32 = 1;
+    let k: u32 = 1;
+    while k < d {
+        dv = dv * 10;
+        k = k + 1;
+    }
+    k = 0;
+    while k < d {
+        p = iw_putb(dst, p, 48 + (v / dv) % 10, w);
+        dv = dv / 10;
+        k = k + 1;
+    }
+    return p;
 }
 
 /// 写一个字节；`w == 0` 只推进位置（量长度那一趟）。
@@ -1596,8 +1757,18 @@ fn iw_span(buf: ptr, q: u32, e: u32, raw: u32, dst: ptr, w: u32,
                     }
                     op = op + 1;
                 }
+                let sc: u32 = iw_spec_colon(buf, i + 1, he - 1);
+                let has_spec: u32 = 0;
+                if sc < he - 1 {
+                    has_spec = 1;
+                }
                 if op > 0 {
                     pos = iw_puts(dst, pos, ", ", w);
+                }
+                if has_spec == 1 {
+                    // `docs/341` §7：`str_pad(str_show(x), W, FILL, ALIGN)`
+                    let _chk: u32 = iw_spec_check(buf, sc + 1, he - 1, scr, file, fnam);
+                    pos = iw_puts(dst, pos, "str_pad(", w);
                 }
                 if iw_conv(buf, i + 1, he - 1) == 114 {
                     pos = iw_puts(dst, pos, "str_repr(", w);
@@ -1610,6 +1781,15 @@ fn iw_span(buf: ptr, q: u32, e: u32, raw: u32, dst: ptr, w: u32,
                     bi = bi + 1;
                 }
                 pos = iw_putb(dst, pos, 41, w);
+                if has_spec == 1 {
+                    pos = iw_puts(dst, pos, ", ", w);
+                    pos = iw_putd(dst, pos, iw_spec_width(buf, sc + 1, he - 1), w);
+                    pos = iw_puts(dst, pos, ", ", w);
+                    pos = iw_putd(dst, pos, iw_spec_fill(buf, sc + 1, he - 1), w);
+                    pos = iw_puts(dst, pos, ", ", w);
+                    pos = iw_putd(dst, pos, iw_spec_align(buf, sc + 1, he - 1), w);
+                    pos = iw_putb(dst, pos, 41, w);
+                }
                 if op > 0 {
                     pos = iw_puts(dst, pos, ")", w);
                 }

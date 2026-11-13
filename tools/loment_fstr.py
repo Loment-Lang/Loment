@@ -235,7 +235,7 @@ class _Scanner:
         line, col = _line_col(src, start)
         #: 片段：("lit"|"hole", 文本, 原起点, 原长, 转换, 调试前缀, 孔起, 孔止)
         #: 孔起/孔止 = `{` 与 `}` 的位置（合成括号的列号塌到它们上面）。
-        pieces: list[tuple[str, str, int, int, str, str, int, int]] = []
+        pieces: list[tuple[str, str, int, int, str, str, int, int, object]] = []
         buf: list[str] = []
         buf_start = q + 1
         j = q + 1
@@ -266,12 +266,13 @@ class _Scanner:
                     continue
                 if buf:
                     pieces.append(("lit", "".join(buf), buf_start, j - buf_start,
-                                   "", "", 0, 0))
+                                   "", "", 0, 0, None))
                     buf = []
                 end, body_start, body = self._hole(j, line, start)
-                expr, expr_off, conv, debug = self._hole_tail(body, body_start, line, j)
+                expr, expr_off, conv, debug, spec = self._hole_tail(
+                    body, body_start, line, j)
                 pieces.append(("hole", expr, expr_off, len(expr), conv,
-                               expr + "=" if debug else "", j, end))
+                               expr + "=" if debug else "", j, end, spec))
                 j = end + 1
                 buf_start = j
                 continue
@@ -285,7 +286,8 @@ class _Scanner:
             buf.append(c)
             j += 1
         if buf:
-            pieces.append(("lit", "".join(buf), buf_start, j - buf_start, "", "", 0, 0))
+            pieces.append(("lit", "".join(buf), buf_start, j - buf_start,
+                           "", "", 0, 0, None))
         self._emit_fstring(pieces, start, j + 1)
 
     def _hole(self, j: int, line: int, sstart: int) -> tuple[int, int, str]:
@@ -324,24 +326,8 @@ class _Scanner:
         raise lomc.LomError(line, _line_col(src, j)[1],
                             "未闭合的插值孔（少一个 `}`）")
 
-    def _hole_tail(self, body: str, body_start: int, line: int, at: int
-                   ) -> tuple[str, int, str, bool]:
-        """从孔体剥出 `!s` / `!r` 与 `=`；返回 `(表达式, 原起点, 转换, 调试)`。"""
-        col = _line_col(self.src, at)[1]
-        lead = len(body) - len(body.lstrip())
-        t = body.strip()
-        off = body_start + lead
-        conv = ""
-        if len(t) >= 2 and t[-2] == "!" and t[-1] in "sr":
-            conv = t[-1]
-            t = t[:-2].rstrip()
-        debug = False
-        if t.endswith("=") and len(t) >= 2 and t[-2] not in "=!<>+-*/%&|^":
-            debug = True
-            t = t[:-1].rstrip()
-        if not t:
-            raise lomc.LomError(line, col, "插值孔里没有表达式")
-        # 顶层 `:` = 格式说明（下一阶段）；`a[1:2]` 那样的切片在括号里，不算。
+    def _top_colon(self, t: str) -> int:
+        """孔体里**顶层**的 `:`（格式说明的起点）；`a[1:2]` 那种在括号里，不算。"""
         depth = 0
         k = 0
         while k < len(t):
@@ -360,10 +346,55 @@ class _Scanner:
             elif c in ")]}":
                 depth -= 1
             elif c == ":" and depth == 0:
-                raise lomc.LomError(line, col,
-                                    "格式说明 `{expr:…}` 还没接上（宽 / 补零是下一阶段）")
+                return k
             k += 1
-        return t, off, conv, debug
+        return -1
+
+    def _parse_spec(self, txt: str, line: int, col: int):
+        """格式说明 v1：`[0]?[<>=^]?W`。返回 `(fill, align, width)`。"""
+        s = txt.strip()
+        if not s:
+            raise lomc.LomError(line, col, "格式说明是空的")
+        fill = " "
+        align = 1                      # 缺省右对齐（数字的默认；文档写明）
+        if s[0] == "0":
+            fill = "0"
+            s = s[1:]
+        if s[:1] in ("<", ">", "^"):
+            align = {"<": 0, ">": 1, "^": 2}[s[0]]
+            s = s[1:]
+        if not s.isdigit():
+            raise lomc.LomError(
+                line, col,
+                "格式说明只认 `>W` / `<W` / `^W` / `0W`（可选前导 `0` 表示用 0 填充）")
+        w = int(s)
+        if w < 1 or w > 65535:
+            raise lomc.LomError(line, col, "格式说明的宽度要在 1..65535 之间")
+        return (fill, align, w)
+
+    def _hole_tail(self, body: str, body_start: int, line: int, at: int
+                   ) -> tuple[str, int, str, bool, object]:
+        """剥出格式说明、`!s` / `!r` 与 `=`；返回 `(表达式, 原起点, 转换, 调试, 说明)`。"""
+        col = _line_col(self.src, at)[1]
+        lead = len(body) - len(body.lstrip())
+        t = body.strip()
+        off = body_start + lead
+        spec = None
+        ci = self._top_colon(t)
+        if ci >= 0:
+            spec = self._parse_spec(t[ci + 1:], line, col)
+            t = t[:ci].rstrip()
+        conv = ""
+        if len(t) >= 2 and t[-2] == "!" and t[-1] in "sr":
+            conv = t[-1]
+            t = t[:-2].rstrip()
+        debug = False
+        if t.endswith("=") and len(t) >= 2 and t[-2] not in "=!<>+-*/%&|^":
+            debug = True
+            t = t[:-1].rstrip()
+        if not t:
+            raise lomc.LomError(line, col, "插值孔里没有表达式")
+        return t, off, conv, debug, spec
 
     def _emit_fstring(self, pieces, start: int, end: int) -> None:
         #: 操作数 = 一组列映射片段 (文本, 原起点, 原长, 锚点)；片段拼起来就是该操作数。
@@ -374,7 +405,7 @@ class _Scanner:
                     (body, o_start, o_len, o_start),
                     ('"', o_start, 0, o_start)]
 
-        for kind, text, o_start, o_len, conv, dbg, h_start, h_end in pieces:
+        for kind, text, o_start, o_len, conv, dbg, h_start, h_end, spec in pieces:
             if kind == "lit":
                 if dbg:
                     ops.append(lit_op(o_start, 0, _lit_body(dbg) + text))
@@ -386,9 +417,15 @@ class _Scanner:
             fn = "str_repr" if conv == "r" else "str_show"
             # 合成的括号塌到孔的边界上：`(` ← `{`，`)` ← `}` —— 孔里少写东西时
             # 解析器报在合成的 `)` 上，用户该看到的是自己写的那个 `}`。
-            ops.append([(fn + "(", h_start, 0, h_start),
-                        (text, o_start, o_len, o_start),
-                        (")", h_end, 0, h_end)])
+            op = [(fn + "(", h_start, 0, h_start),
+                  (text, o_start, o_len, o_start),
+                  (")", h_end, 0, h_end)]
+            if spec is not None:
+                fill, align, width = spec
+                # 填充字符写成整数字面量（`fill` 是字符，语言里 `u8` 参数收 32 / 48）
+                op = ([("str_pad(", h_start, 0, h_start)] + op +
+                      [(f", {width}, {ord(fill)}, {align})", h_end, 0, h_end)])
+            ops.append(op)
         if not ops:
             ops = [[('""', start, 0, start)]]
         op_texts = ["".join(c[0] for c in op) for op in ops]

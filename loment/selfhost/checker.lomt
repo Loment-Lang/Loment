@@ -423,6 +423,7 @@ fn chk_builtin_ret(src: ptr, t: ptr, i: u32) -> u32 {
     }
     if chk_tok_is(src, t, i, "str_concat") || chk_tok_is(src, t, i, "str_num")
             || chk_tok_is(src, t, i, "str_show") || chk_tok_is(src, t, i, "str_repr")
+            || chk_tok_is(src, t, i, "str_pad")
             || chk_tok_is(src, t, i, "tur_edition") {
         return (1 << TY_KIND_SHIFT) + 10;         // str
     }
@@ -695,6 +696,7 @@ fn chk_rt_site(src: ptr, t: ptr, i: u32, prof: u32) -> u32 {
     if chk_tok_is(src, t, i, "alloc") || chk_tok_is(src, t, i, "free")
             || chk_tok_is(src, t, i, "str_concat") || chk_tok_is(src, t, i, "str_num")
             || chk_tok_is(src, t, i, "str_show") || chk_tok_is(src, t, i, "str_repr")
+            || chk_tok_is(src, t, i, "str_pad")
             || chk_tok_is(src, t, i, "str_eq")
             || chk_tok_is(src, t, i, "panic")
             || chk_tok_is(src, t, i, "thread_spawn") {
@@ -825,7 +827,7 @@ fn is_base_type(src: ptr, t: ptr, i: u32) -> bool {
 
 fn is_builtin(src: ptr, t: ptr, i: u32) -> bool {
     let k: u32 = 0;
-    let names: str = "str_len str_eq str_concat str_num str_show str_repr str_byte slice_len panic alloc free load8 store8 atomic_add inb outb get_bits set_bits str_ptr print tur_edition ptr_add ptr_sub syscall4 syscall6 syscall7 thread_spawn";
+    let names: str = "str_len str_eq str_concat str_num str_show str_repr str_pad str_byte slice_len panic alloc free load8 store8 atomic_add inb outb get_bits set_bits str_ptr print tur_edition ptr_add ptr_sub syscall4 syscall6 syscall7 thread_spawn";
     // 逐词比较 (内建名用空格分隔的常量表); 新增内建要同步这里, 否则调用点报假 E-UNKNOWN-FN
     let off: u32 = 0;
     while off < str_len(names) {
@@ -1859,7 +1861,8 @@ fn chk_builtin_arity(src: ptr, t: ptr, i: u32) -> u32 {
     if chk_tok_is(src, t, i, "store8") || chk_tok_is(src, t, i, "get_bits") {
         return 3;
     }
-    if chk_tok_is(src, t, i, "set_bits") || chk_tok_is(src, t, i, "syscall4") {
+    if chk_tok_is(src, t, i, "set_bits") || chk_tok_is(src, t, i, "syscall4")
+            || chk_tok_is(src, t, i, "str_pad") {
         return 4;
     }
     if chk_tok_is(src, t, i, "syscall6") {
@@ -3429,6 +3432,7 @@ fn chk_builtin_arg(src: ptr, t: ptr, i: u32, k: u32) -> u32 {
         if chk_tok_is(src, t, i, "str_len") || chk_tok_is(src, t, i, "str_eq")
                 || chk_tok_is(src, t, i, "str_concat") || chk_tok_is(src, t, i, "str_byte")
                 || chk_tok_is(src, t, i, "str_ptr") || chk_tok_is(src, t, i, "print")
+                || chk_tok_is(src, t, i, "str_pad")
                 || chk_tok_is(src, t, i, "thread_spawn") {
             return (1 << TY_KIND_SHIFT) + 10;          // str
         }
@@ -3456,6 +3460,19 @@ fn chk_builtin_arg(src: ptr, t: ptr, i: u32, k: u32) -> u32 {
     }
     if chk_tok_is(src, t, i, "str_byte") && k == 1 {
         return (1 << TY_KIND_SHIFT) + 3;               // u32
+    }
+    // `docs/341` §7：`str_pad(s, width, fill, align)` —— 宽度 u32、填充字符 u8、
+    // 对齐 u32（0 左 / 1 右 / 2 居中）。
+    if chk_tok_is(src, t, i, "str_pad") {
+        if k == 1 {
+            return (1 << TY_KIND_SHIFT) + 3;           // u32
+        }
+        if k == 2 {
+            return (1 << TY_KIND_SHIFT) + 1;           // u8
+        }
+        if k == 3 {
+            return (1 << TY_KIND_SHIFT) + 3;           // u32
+        }
     }
     if (chk_tok_is(src, t, i, "load8") || chk_tok_is(src, t, i, "atomic_add")
             || chk_tok_is(src, t, i, "ptr_add") || chk_tok_is(src, t, i, "ptr_sub"))

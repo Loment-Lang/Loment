@@ -1656,6 +1656,187 @@ def test_str_num_builtin():
         errs2 = lomentc.check(mod2, deps=lomentc.resolve_deps(mod2, ROOT, td, entry=p2))
         assert any("no_runtime" in e and "str_num" in e for e in errs2), errs2[:3]
     print("      str_num 进堆、随调用发十进制转换；no_runtime 点名拒")
+
+
+@test
+def test_str_interpolation():
+    """`f"…"` / `rf"…"`：前端改写成 `str_concat` 链（`docs/341`）。
+
+    钉四件事：三个 helper 按需发、`no_runtime` 点名拒、`rf` 的反斜杠原样、
+    以及改写之后的报错列号**映射回用户那一行**。
+    """
+    body = "".join([
+        "module m", chr(10),
+        "choose runtime", chr(10), chr(10),
+        "fn f(n: u32, b: bool, s: str) -> str {", chr(10),
+        "    let a: str = f\"n={n} {s}\";", chr(10),
+        "    let c: str = f\"{b} {n=}\";", chr(10),
+        "    let d: str = f\"{s!r} {{lit}}\";", chr(10),
+        "    let e: str = rf\"raw\\\\n{n}\";", chr(10),
+        "    let g: str = f\"{n:>5}|{s:<4}|{n:05}|{n:^7}\";", chr(10),
+        "    return a;", chr(10),
+        "}", chr(10)])
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        p = td / "ok.lomt"
+        p.write_text(body, encoding="utf-8", newline=chr(10))
+        mod = lomentc.load(p)
+        errs = lomentc.check(mod, deps=lomentc.resolve_deps(mod, ROOT, td, entry=p))
+        assert not errs, errs[:3]
+        ll = lomentc.emit_llvm(mod, ROOT)
+        for sym in ("call i32 @__loment_num_to_dec", "call i32 @__loment_bool_to_str",
+                    "call i64 @__loment_str_repr", "call void @__loment_pad",
+                    "define internal void @__loment_pad"):
+            assert sym in ll, (sym, ll[-400:])
+        # `str` 孔是**恒等**：不发 `str_show(` 调用（`str_show` 只出现在别的孔里）
+        assert "str_show(" not in ll, "str 孔不该生成 str_show 调用"
+
+        p2 = td / "nort.lomt"
+        p2.write_text(body.replace("choose runtime", "choose no_runtime"),
+                      encoding="utf-8", newline=chr(10))
+        mod2 = lomentc.load(p2)
+        errs2 = lomentc.check(mod2, deps=lomentc.resolve_deps(mod2, ROOT, td, entry=p2))
+        assert any("no_runtime" in e and "str_" in e for e in errs2), errs2[:3]
+
+        # 格式说明**收** `>W` / `<W` / `^W` / `0W`（`docs/341` §7）；别的形状**指到孔**
+        p3 = td / "bad.lomt"
+        p3.write_text(body.replace('f"n={n} {s}"', 'f"n={n:W5}"'),
+                      encoding="utf-8", newline=chr(10))
+        try:
+            lomentc.load(p3)
+        except lomentc.LomError as e:
+            assert "格式说明" in e.msg, e.msg
+        else:
+            raise AssertionError("`{n:W5}` 没被拒")
+        p3b = td / "wide.lomt"
+        p3b.write_text(body.replace('f"n={n} {s}"', 'f"n={n:0}"'),
+                       encoding="utf-8", newline=chr(10))
+        try:
+            lomentc.load(p3b)
+        except lomentc.LomError as e:
+            assert "格式说明" in e.msg, e.msg
+        else:
+            raise AssertionError("`{n:0}`（缺宽度）没被拒")
+
+        # **列号映射**：改写之后解析器报的列要指回用户那一行的那一格
+        bad2 = body.replace('f"n={n} {s}"', 'f"n={n + }"')
+        line = [ln for ln in bad2.split(chr(10)) if "n + " in ln][0]
+        want_col = line.index("}") + 1
+        p4 = td / "bad2.lomt"
+        p4.write_text(bad2, encoding="utf-8", newline=chr(10))
+        try:
+            lomentc.load(p4)
+        except lomentc.LomError as e:
+            assert e.col == want_col, (e.col, want_col, e.msg)
+        else:
+            raise AssertionError("孔里的语法错没被拒")
+    print("      插值: 三个 helper 按需发; no_runtime 点名拒; rf 原样; 列号映射回原源")
+
+
+@test
+def test_catch_block_and_return():
+    """`catch |e| { … }` / `catch return`（2026.3+，`docs/343`）。
+
+    钉三件事：两条都能编过且产物形状对（绑定槽 / `ret`）、函数返回类型不符要点名、
+    旧版次不收。
+    """
+    body = "".join([
+        "module m", chr(10),
+        "choose runtime", chr(10), chr(10),
+        "fn may(n: u32) -> Result<u32, u32> {", chr(10),
+        "    if n > 3 {", chr(10),
+        "        return Result::Err(n);", chr(10),
+        "    }", chr(10),
+        "    return Result::Ok(n + 1);", chr(10),
+        "}", chr(10), chr(10),
+        "fn f(n: u32) -> Result<u32, u32> {", chr(10),
+        "    let a: u32 = may(n) catch |e| { e + 100 };", chr(10),
+        "    let b: u32 = may(a) catch return;", chr(10),
+        "    return Result::Ok(b);", chr(10),
+        "}", chr(10)])
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        p = td / "ok.lomt"
+        p.write_text(body, encoding="utf-8", newline=chr(10))
+        mod = lomentc.load(p)
+        errs = lomentc.check(mod, deps=lomentc.resolve_deps(mod, ROOT, td, entry=p))
+        assert not errs, errs[:3]
+        ll = lomentc.emit_llvm(mod, ROOT)
+        assert "%e.addr" in ll, "`catch |e|` 的绑定没有槽"
+        assert "ret { i32, i64 }" in ll, "`catch return` 没有把 Err 原样返回"
+
+        # 函数返回类型不是同一个枚举 -> 点名
+        bad = body.replace("fn f(n: u32) -> Result<u32, u32> {",
+                           "fn f(n: u32) -> u32 {")
+        p2 = td / "bad.lomt"
+        p2.write_text(bad, encoding="utf-8", newline=chr(10))
+        try:
+            lomentc.load(p2)
+        except lomentc.LomError as e:
+            assert "catch return" in e.msg, e.msg
+        else:
+            m2 = lomentc.load(p2)
+            e2 = lomentc.check(m2, deps=lomentc.resolve_deps(m2, ROOT, td, entry=p2))
+            assert any("catch return" in x for x in e2), e2[:3]
+
+        # 旧版次不收
+        p3 = td / "old.lomt"
+        p3.write_text("choose write grammar tur2026.2" + chr(10) + "module m" + chr(10)
+                      + "fn g() -> u32 { let a: u32 = h() catch |e| { e }; return a; }"
+                      + chr(10), encoding="utf-8", newline=chr(10))
+        try:
+            lomentc.load(p3)
+        except (lomentc.LomError, Exception):
+            pass
+        else:
+            raise AssertionError("tur2026.2 收了 `catch |e|`")
+    print("      `catch |e| { … }` / `catch return`：编得过、返回类型不符点名、旧版次拒")
+
+
+@test
+def test_const_str():
+    """`const NAME: str = "…"`（2026.3+，`docs/342`）。
+
+    两件事：好的那份编得过、产物里就是那个字面量（每个使用点一条 `.str`）；
+    旧版次（tur2026.2）拒它 —— 旧读法里 `const` 只吃整数字面量。
+    """
+    body = "".join([
+        "module m", chr(10),
+        "choose runtime", chr(10), chr(10),
+        "const GREETING: str = \"hello\";", chr(10),
+        "const N: u32 = 42;", chr(10), chr(10),
+        "fn f(n: u32) -> str {", chr(10),
+        "    let a: str = str_concat(GREETING, GREETING);", chr(10),
+        "    let b: str = f\"{GREETING}-{N}-{n}\";", chr(10),
+        "    return a;", chr(10),
+        "}", chr(10)])
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        p = td / "ok.lomt"
+        p.write_text(body, encoding="utf-8", newline=chr(10))
+        mod = lomentc.load(p)
+        errs = lomentc.check(mod, deps=lomentc.resolve_deps(mod, ROOT, td, entry=p))
+        assert not errs, errs[:3]
+        ll = lomentc.emit_llvm(mod, ROOT)
+        # 每个使用点一条 `.str` 常量：hello ×3 + "-" ×2
+        assert ll.count(r'c"\68\65\6C\6C\6F"') == 3, ll[-500:]
+        assert ll.count(r'c"\2D"') == 2, ll[-500:]
+        # 加号那一路是整数常量（`{N}` -> str_show(N) -> str_num(42)）
+        assert "zext i32 42 to i64" in ll, "整数常量没有按常量内联"
+
+        p2 = td / "old.lomt"
+        p2.write_text("choose write grammar tur2026.2" + chr(10) + "module m" + chr(10)
+                      + "const G: str = \"x\";" + chr(10),
+                      encoding="utf-8", newline=chr(10))
+        try:
+            lomentc.load(p2)
+        except lomentc.LomError:
+            pass
+        else:
+            raise AssertionError("tur2026.2 收了 `const NAME: str`")
+    print("      `const NAME: str`：内联成字面量；旧版次仍拒")
+
+
 @test
 def test_the_default_edition_is_the_newest_open_one():
     """**没声明 = 最新版次**（2026-11-06 用户裁定，`docs/312`）。
@@ -1775,6 +1956,117 @@ def test_tur2026_2_is_frozen():
         assert future not in potato_from.GRAMMAR_ALIASES, (
             f"{future} 还没开；开的时候要同时改锁表、NATIVE_GRAMMARS、docs/304 与这条判据")
     print("      tur2026.2 封版：特性面哈希一致，且没有未封版的新版次混进来")
+
+
+@test
+def test_auto_type_inference():
+    """`let x: auto = e;` / `let x := e;`（2026.3+，`docs/347`）。
+
+    四件事：
+    * **产物与显式写法逐字节相同** —— 推断只是省了那几个字，不是新的语义；
+    * 收的初值形状：变量、字段、整条 `as T`、`true`/`false`；
+    * **不收**：字面量、调用、运算、`if`/`match` 表达式、没有初值、模块常量 ——
+      这些都没有"写在源里的类型"，两套实现照同一条判据面拒；
+    * `:=` 要**粘着**（`let x: = e` 仍是缺类型的语法错），旧版次整条读法不存在。
+    """
+    explicit = "".join([
+        "module m", chr(10), "choose runtime", chr(10), chr(10),
+        "struct S { a: u32, b: i64 }", chr(10), chr(10),
+        "fn main() -> u32 {", chr(10),
+        "    let p: S = S { a: 3, b: 4 };", chr(10),
+        "    let n: u32 = p.a;", chr(10),
+        "    let k: i64 = p.b;", chr(10),
+        "    let j: i64 = k as i64;", chr(10),
+        "    let t: bool = true;", chr(10),
+        "    print_num(n);", chr(10),
+        "    print_num(j as u32);", chr(10),
+        "    if t { print_num(0); }", chr(10),
+        "    return 0;", chr(10),
+        "}", chr(10)])
+    inferred = "".join([
+        "module m", chr(10), "choose runtime", chr(10), chr(10),
+        "struct S { a: u32, b: i64 }", chr(10), chr(10),
+        "fn main() -> u32 {", chr(10),
+        "    let p: S = S { a: 3, b: 4 };", chr(10),
+        "    let n := p.a;", chr(10),
+        "    let k: auto = p.b;", chr(10),
+        "    let j := k as i64;", chr(10),
+        "    let t: auto = true;", chr(10),
+        "    print_num(n);", chr(10),
+        "    print_num(j as u32);", chr(10),
+        "    if t { print_num(0); }", chr(10),
+        "    return 0;", chr(10),
+        "}", chr(10)])
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+
+        def ll_of(text: str, name: str) -> str:
+            p = td / f"{name}.lomt"
+            p.write_text(text, encoding="utf-8", newline=chr(10))
+            mod = lomentc.load(p)
+            errs = lomentc.check(mod, deps=lomentc.resolve_deps(mod, ROOT, td, entry=p))
+            assert not errs, (name, errs[:3])
+            return lomentc.emit_llvm(mod, ROOT)
+
+        a = ll_of(explicit, "explicit")
+        b = ll_of(inferred, "inferred")
+        assert a == b, "推断写法与显式写法的产物不同"
+
+        bad = {
+            "intlit": "    let x := 5;",
+            "call": "    let x := f();",
+            "binop": "    let x := n + 1;",
+            "noinit": "    let x: auto;",
+            "const": "    let x := K;",
+        }
+        pre = "".join([
+            "module m", chr(10), "choose runtime", chr(10), chr(10),
+            "const K: u32 = 3;", chr(10), chr(10),
+            "fn f() -> u32 { return 1; }", chr(10), chr(10),
+            "fn main() -> u32 {", chr(10), "    let n: u32 = 1;", chr(10)])
+        for name, line in bad.items():
+            p = td / f"bad_{name}.lomt"
+            p.write_text(pre + line + chr(10) + "    return 0;" + chr(10) + "}" + chr(10),
+                         encoding="utf-8", newline=chr(10))
+            mod = lomentc.load(p)
+            errs = lomentc.check(mod, deps=lomentc.resolve_deps(mod, ROOT, td, entry=p))
+            assert any("推断不出" in e for e in errs), (name, errs[:3])
+
+        # `if` 表达式：装载期反糖、推断没有位置 —— 解析期就拒。
+        p = td / "ifexpr.lomt"
+        p.write_text(pre + "    let x: auto = if true { 1 } else { 2 };" + chr(10)
+                     + "    return 0;" + chr(10) + "}" + chr(10),
+                     encoding="utf-8", newline=chr(10))
+        try:
+            lomentc.load(p)
+        except lomentc.LomError as e:
+            assert "不能接" in e.msg, e.msg
+        else:
+            raise AssertionError("`auto` 接了 `if` 表达式")
+
+        # 粘着：`let x: = 1` 仍是"`: ` 后面缺类型"的语法错。
+        p = td / "spaced.lomt"
+        p.write_text("module m" + chr(10) + "fn main() -> u32 { let x: = 1; return 0; }" + chr(10),
+                     encoding="utf-8", newline=chr(10))
+        try:
+            lomentc.load(p)
+        except lomentc.LomError:
+            pass
+        else:
+            raise AssertionError("`let x: = 1` 被读成了推断（`:=` 要粘着）")
+
+        # 旧版次：整条读法不存在（`:` 后面缺类型）。
+        p = td / "old.lomt"
+        p.write_text("choose write grammar tur2026.2" + chr(10) + "module m" + chr(10)
+                     + "fn main() -> u32 { let x := 1; return 0; }" + chr(10),
+                     encoding="utf-8", newline=chr(10))
+        try:
+            lomentc.load(p)
+        except lomentc.LomError:
+            pass
+        else:
+            raise AssertionError("tur2026.2 收了 `:=`")
+    print("      `auto` / `:=`：产物与显式写法相同；六种初值与旧版次都拒")
 
 
 def main() -> int:

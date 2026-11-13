@@ -353,7 +353,7 @@ def test_lsp_diagnostics_match_selfhosted_checker():
                        for d in dg), (name, want_code, want_line, dg)
             assert len(dg) >= want_n, (name, want_n, dg)
         for d in dg:
-            # 码的形状（`docs/338`）：< 100 是 `E0xx`、>= 100 是 `E0xxx`，所以长度 4 或 5。
+            # 码的形状（`docs/341`）：< 100 是 `E0xx`、>= 100 是 `E0xxx`，所以长度 4 或 5。
             assert d["code"].startswith("E") and len(d["code"]) in (4, 5), d
     print(f"      {len(cases)} 个用例的码/行号正确 (重名 E0134 / 未声明 E096 / 干净 0 条)")
 
@@ -428,6 +428,59 @@ CF_SRC = ('module t\n\n'
 
 
 @test
+def test_python_lsp_reads_interpolated_strings():
+    """开发口那份 LSP（`tools/loment_lsp.py`）也认插值（`docs/341`）。
+
+    它和编译器一样是"读 L1 源"的入口：不补 `loment_fstr` 的改写，一份**编得过**的
+    插值源在它这里会报假解析错（实测 `6:12 期望 )，得到 'n={n}'`）。判据钉两件事：
+    这份源解析得通、检查零错；孔里的语法错**列号映射回**用户写的那一行。
+
+    （**出厂的 `lsp.lomt` 不在此列**：它按 Tur 1 口径读（`#262`），Tur 2 的纯糖本来
+    也不认 —— 插值与那些糖同一档，`docs/341` §6 记着。）
+    """
+    NL = chr(10)
+    src = ("module demo" + NL + "choose runtime" + NL + NL +
+           "fn main() -> u32 {" + NL +
+           "    let n: u32 = 1;" + NL +
+           '    let s: str = f"n={n}";' + NL +
+           "    return 0;" + NL + "}" + NL)
+    mod = PY_LSP._parse(src)
+    errs = lomentc.check(mod)
+    assert not errs, errs[:3]
+    bad = src.replace('f"n={n}"', 'f"n={n + }"')
+    line = [ln for ln in bad.split(NL) if "n + " in ln][0]
+    want_col = line.index("}") + 1
+    try:
+        PY_LSP._parse(bad)
+    except Exception as e:                      # noqa: BLE001
+        assert getattr(e, "col", None) == want_col, (getattr(e, "col", None), want_col, e)
+    else:
+        raise AssertionError("孔里的语法错没被拒")
+    print("      开发口 LSP: 插值源解析通过；孔内报错的列映射回原行")
+
+
+@test
+def test_python_lsp_reads_inferred_locals():
+    """开发口 LSP 认 `let x := e;` / `let x: auto = e;`（`docs/347`）。
+
+    LSP 走的是 `lomentc.Parser`（不经过 `load`），而 `:=` 是**解析期**才认出来的读法
+    —— parser 的版次缺省是最新版次，所以这里应当解析得通、检查零错。同一条入口缺口
+    的老形状：编得过、编辑器报假错，比两边都报错更糟（`docs/182` §1.9）。
+    """
+    NL = chr(10)
+    src = ("module demo" + NL + "choose runtime" + NL + NL +
+           "fn main() -> u32 {" + NL +
+           "    let n: u32 = 7;" + NL +
+           "    let a := n;" + NL +
+           "    let b: auto = a;" + NL +
+           "    return b;" + NL + "}" + NL)
+    mod = PY_LSP._parse(src)
+    errs = lomentc.check(mod)
+    assert not errs, errs[:3]
+    print("      开发口 LSP: `:=` / `auto` 源解析通过")
+
+
+@test
 def test_lsp_check_honours_switches():
     """语言服务是"读 L1 源的东西"之一 —— **开关没落定就等于关着的那段照样被检查**。
 
@@ -468,7 +521,7 @@ def test_lsp_check_honours_switches():
                 f"关着的开关体不该被检查, 实得 rc={off.returncode}: {off.stdout!r}"
             on = run(SW_ON_SRC)
             assert on.returncode == 1, f"打开后应当报错, 实得 rc={on.returncode}: {on.stdout!r}"
-            # 细分之后"调用未定义的函数"是 **E096**（`docs/338`），LSP 按同一个宽度印。
+            # 细分之后"调用未定义的函数"是 **E096**（`docs/341`），LSP 按同一个宽度印。
             assert "E096" in on.stdout, f"打开后应当报未定义函数 (E096): {on.stdout!r}"
     finally:
         probe.unlink(missing_ok=True)
@@ -1345,7 +1398,7 @@ def test_diag_titles_match_reference():
     """`diag_title` 必须**转发**到 `surface_data.code_title`，不许再有第二份标题表。
 
     原先这里钉的是"手抄表与 `loment_diag.RULES` 逐字同文"。2026-11-10 细分码表
-    （`docs/338`）之后，自举 checker 发的是 42..208 这一层细码，手抄到 38 的表整片
+    （`docs/341`）之后，自举 checker 发的是 42..208 这一层细码，手抄到 38 的表整片
     落到表外，用户看到的每一条都是「未分类」。于是标题改成从生成的 `surface_data`
     取（与 `lomcli` / `lomenterr` 同一份），这条判据改成钉**结构**：
 

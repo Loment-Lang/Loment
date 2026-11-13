@@ -1032,6 +1032,9 @@ fn chk_consts(mem: ptr, doc: u32) -> u32 {
             let _e: u32 = bad(mem);
         } else {
             let _n: u32 = name_field(mem, c, TB_CS);
+            // `docs/342`：2026.3 起 `const NAME: str = "…"` —— 类型可以是 `str`，
+            // 那时值是**字符串**；其余常量仍是整型 + JSON 数字。
+            let is_str: u32 = 0;
             let ty: u32 = jget(mem, c, "type");
             if ty == NOTFOUND {
                 let _t: u32 = bad(mem);
@@ -1039,13 +1042,21 @@ fn chk_consts(mem: ptr, doc: u32) -> u32 {
                 let _t2: u32 = bad(mem);
             } else {
                 let l: u32 = jstr(mem, ty, ptr_add(mem, M_SB2), 4096);
-                if is_int_type(ptr_add(mem, M_SB2), l) == 0 {
+                if eq_lit(ptr_add(mem, M_SB2), l, "str") == 1 {
+                    is_str = 1;
+                } else if is_int_type(ptr_add(mem, M_SB2), l) == 0 {
                     let _t3: u32 = bad(mem);
                 }
             }
             let vv: u32 = jget(mem, c, "value");
-            if vv == NOTFOUND || jkind(mem, vv) != 4 {
+            if vv == NOTFOUND {
                 let _v: u32 = bad(mem);
+            } else if is_str == 1 {
+                if jkind(mem, vv) != 3 {
+                    let _v2: u32 = bad(mem);
+                }
+            } else if jkind(mem, vv) != 4 {
+                let _v3: u32 = bad(mem);
             }
         }
         c = jsib(mem, c);

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from . import aicheck as _aicheck
 from . import aiask as _aiask
+from . import effects as _effects
 from . import loans as _loans
 from .cache import Cache
 from .census import census, census_e4
@@ -48,6 +49,9 @@ aicheck_prompt = _aiask.prompt
 #: E10 借用检查器（`docs/317`）：loan 图分析（报告面）。
 loans_analyze = _loans.analyze
 loans_text = _loans.text_lines
+#: E11 效应检查器（`docs/341`）：行、处理器与 `resume`（报告面）。
+effects_analyze = _effects.analyze
+effects_text = _effects.text_lines
 
 __all__ = [
     "Cache",
@@ -87,6 +91,8 @@ __all__ = [
     "lspc_text",
     "loans_analyze",
     "loans_text",
+    "effects_analyze",
+    "effects_text",
     "parse_acks",
     "parse_answers",
     "previous_items",

@@ -5675,8 +5675,8 @@ def _lspe_registry_errors() -> list[str]:
 
 @test
 def test_lspe_obligation_registry():
-    """14 条义务、8 种证据；每条都有 owner 与 accept；Differential 不在任何 accept 里。"""
-    assert len(lspe.LSPE_OBLIGATIONS) == 14
+    """19 条义务、8 种证据；每条都有 owner 与 accept；Differential 不在任何 accept 里。"""
+    assert len(lspe.LSPE_OBLIGATIONS) == 19
     assert len(lspe.LSPE_EVIDENCE_KINDS) == 8
     assert _lspe_registry_errors() == []
     assert all("Differential" not in v["accept"]

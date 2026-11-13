@@ -51,6 +51,21 @@ LSPE_OBLIGATIONS: dict[str, dict[str, object]] = {
                    "accept": ("Syntactic", "Typed", "GlobalInvariant", "Assumed")},
     "SummaryContract": {"owner": "docs/210 §7",
                         "accept": ("Axiom", "Interproc", "Assumed")},
+    # E11 效应检查器（`docs/341`）。行是**声明出来的契约**：`Typed` 来自签名，
+    # `Syntactic` 来自词法处理器栈，`Interproc` 来自被调函数的行。
+    "EffectAllowed": {"owner": "docs/341",
+                      "accept": ("Syntactic", "Typed", "Interproc", "Assumed")},
+    "HandlerExhaustive": {"owner": "docs/341",
+                          "accept": ("Syntactic", "Typed", "Assumed")},
+    # `resume` 的 0/1 是**局部流**事实；尾续判定是语法事实。
+    "ResumeLinear": {"owner": "docs/341",
+                     "accept": ("LocalFlow", "Syntactic", "Assumed")},
+    # 效应不穿越 C 边界：这是规范给的 `Axiom`，不是分析出来的。
+    "EffectBounded": {"owner": "docs/341",
+                      "accept": ("Axiom", "Typed", "Assumed")},
+    # 一般处理器的续延捕获要被回收（`no_gc` 下没有自动档，只能是假设）。
+    "CaptureReclaim": {"owner": "docs/341",
+                       "accept": ("LocalFlow", "Interproc", "Assumed")},
 }
 
 #: 有**配对反证探针**的义务（E8 / `#766`）。探针登记表由 `tools/lspe_probes.py`
@@ -75,6 +90,10 @@ LSPE_CAPACITIES: dict[str, tuple[int, str]] = {
     "substitution_log": (65536, "WF 站点数受预算约束；越界 -> Q005"),
     # E9 域检查器（`docs/306`–`308`）。
     "domain_declarations": (64, "lspe_domain 回 1 -> pt_wfail（点名）"),
+    # E11 效应检查器（`docs/341`）。行是有限集合，容量越界必须点名，不许静默截断。
+    "effect_declarations": (64, "lspe_effects 回 1 -> pt_wfail（点名）"),
+    "ops_per_effect": (256, "lspe_effects 回 1 -> pt_wfail（点名）"),
+    "handler_depth": (64, "词法处理器栈深度上限；越界 -> Q019，不静默"),
 }
 
 #: 普查里允许出现的站点种类（I1 的第一半）。加一种站点要同时登记在这里。
@@ -87,6 +106,10 @@ LSPE_SITE_KINDS = frozenset({
     "domain", "domain_access", "revoke",
     # E10 借用检查器（`docs/317`）：loan 是一等对象。站点先只进报告面。
     "loan", "loan_use", "loan_kill", "loan_conflict",
+    # E11 效应检查器（`docs/341`）：声明 / 行 / perform / 处理器 / resume /
+    # 调用行 / C 边界 / 续延捕获。
+    "effect_decl", "row", "perform", "handle", "resume", "row_call",
+    "effect_foreign", "handler_capture",
 })
 
 #: **问题码**（`docs/262` §5.10）。与 `E034–E038` 是两个命名空间：问题**永不阻断**
@@ -114,6 +137,12 @@ LSPE_QUESTIONS: dict[str, str] = {
     "Q015": "条件返回的借用来源不唯一",
     "Q016": "两阶段借用（保留 / 激活）无法证明",
     "Q017": "借用要跨迭代活着",
+    # E11 效应检查器（`docs/341` §8）：五种"证不出来"。
+    "Q018": "效应行未声明或盖不住",
+    "Q019": "处理器的穷尽性无法证明",
+    "Q020": "`resume` 的线性（0/1）无法证明",
+    "Q021": "效应要穿越 C 边界",
+    "Q022": "续延捕获的回收未证明",
 }
 
 #: 反问器转交前**必须**跑过的三问（`docs/262` §6 硬规则 5）。
@@ -354,7 +383,68 @@ LSPE_QUESTION_TEMPLATES: dict[str, dict[str, object]] = {
                     "C": "让 LSPE 拒绝"},
         "default": "C",
         "reversible": False,
-    },}
+    },
+    "Q018": {
+        "claim": "「{site}」的效应行没有覆盖这里要触发的效应",
+        "chain": ["EffectAllowed({kind})", "row:{effect}"],
+        "tried": {"provenance": "处理器栈与声明行都不能放行",
+                  "falsification": "去掉处理器后探针仍然红",
+                  "cross_exam": "两侧都算出同一条行"},
+        "options": {"A": "在签名里补 `effects {effect}` 或加处理器",
+                    "B": "接受这次放行并标注（成本：一条 Assumed 地板）",
+                    "C": "让 LSPE 拒绝（strict 下构建停止）"},
+        "default": "A",
+        "reversible": True,
+    },
+    "Q019": {
+        "claim": "「{site}」的处理器没有覆盖效应 `{effect}` 的每个操作",
+        "chain": ["HandlerExhaustive({effect})"],
+        "tried": {"provenance": "臂集合与声明集合逐条比过",
+                  "falsification": "少臂的 perform 是构造性反例",
+                  "cross_exam": "两侧看到同一组臂"},
+        "options": {"A": "补齐缺失的臂",
+                    "B": "把洞交给外层处理器（成本：一条 Assumed 地板）",
+                    "C": "让 LSPE 拒绝"},
+        "default": "A",
+        "reversible": True,
+    },
+    "Q020": {
+        "claim": "「{site}」的 `resume` 次数证不出 0 或 1",
+        "chain": ["ResumeLinear({kind})"],
+        "tried": {"provenance": "只认块尾这一种尾续形状",
+                  "falsification": "同一块里的两次 resume 是构造性反例",
+                  "cross_exam": "两侧都按块骨架判定"},
+        "options": {"A": "改成每条路径恰好一次（或明确 abort）",
+                    "B": "按假设收下并标注（成本：一条 Assumed 地板）",
+                    "C": "让 LSPE 拒绝"},
+        "default": "A",
+        "reversible": True,
+    },
+    "Q021": {
+        "claim": "「{site}」把效应带到了 `extern` 边界",
+        "chain": ["EffectBounded({function})"],
+        "tried": {"provenance": "C 侧没有证据记录，无法回答 perform",
+                  "falsification": "效应穿越是规范禁止的构造",
+                  "cross_exam": "两侧都看见 extern 声明"},
+        "options": {"A": "把效应留在 Loment 侧，C 调用保持无效应",
+                    "B": "接受并标注（成本：一条 Assumed 地板）",
+                    "C": "让 LSPE 拒绝"},
+        "default": "A",
+        "reversible": False,
+    },
+    "Q022": {
+        "claim": "「{site}」的续延捕获没有回收证明",
+        "chain": ["CaptureReclaim({effect})"],
+        "tried": {"provenance": "处理器有非尾续臂，需要捕获续延",
+                  "falsification": "no_gc 下没有自动回收档",
+                  "cross_exam": "两侧都识出非尾续"},
+        "options": {"A": "改写成尾续处理器（成本：一次源码改动）",
+                    "B": "接受捕获并标注（成本：一条 Assumed 地板）",
+                    "C": "让 LSPE 拒绝"},
+        "default": "B",
+        "reversible": True,
+    },
+}
 
 #: LSPC 的 **12 个风险族**（`docs/262` §7.2）。每族五列：
 #: `protects`（你现在靠什么）/ `if_fails`（如果不成立）/ `fix`（修法）/
@@ -433,6 +523,18 @@ LSPE_LSPC_FAMILIES: tuple[dict[str, object], ...] = (
      "protects": "库函数返回的 loan", "if_fails": "跨库假设错",
      "fix": "开 L4 / 读库源", "cost": "归你", "bearer": "归你",
      "risk": "high", "match": "loan_escape"},
+    {"id": "effect_unhandled", "family": "未处理的效应",
+     "protects": "处理器栈或 `effects` 行", "if_fails": "运行期找不到处理器",
+     "fix": "加 arm 或补 effects 行", "cost": "归你", "bearer": "归你",
+     "risk": "high", "match": "effect_unhandled"},
+    {"id": "effect_general_handler", "family": "非尾续处理器（续延捕获）",
+     "protects": "尾续判定与回收证明", "if_fails": "续延逃逸 / 泄漏",
+     "fix": "改写成尾续或标注回收", "cost": "归你", "bearer": "归你",
+     "risk": "medium", "match": "effect_general_handler"},
+    {"id": "effect_foreign", "family": "效应穿越 extern",
+     "protects": "C 边界无效应", "if_fails": "C 侧无法回答 perform",
+     "fix": "把效应留在 Loment 侧", "cost": "归你", "bearer": "归你",
+     "risk": "high", "match": "effect_foreign"},
     {"id": "audit_off", "family": "lspe_close_admin / --lspc=off 本身",
      "protects": "你选择了不审计",
      "if_fails": "上面全部看不见", "fix": "打开",

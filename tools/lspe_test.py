@@ -46,16 +46,17 @@ def test(fn):
 
 
 @test
-def test_registry_has_14_obligations_and_8_evidence_kinds():
-    assert len(lspe.LSPE_OBLIGATIONS) == 14
+def test_registry_has_19_obligations_and_8_evidence_kinds():
+    assert len(lspe.LSPE_OBLIGATIONS) == 19
     assert len(lspe.LSPE_EVIDENCE_KINDS) == 8
     for name, spec in lspe.LSPE_OBLIGATIONS.items():
         assert spec["owner"], name
         assert spec["accept"], name
         assert "Differential" not in spec["accept"], name
     # 问题码（`docs/262` §5.10）：Q013 是 `lspe pass` 的未审计块（#786）。
-    # 17 = Q001–Q014（LSPE v2）+ Q015–Q017（E10 借用检查器，`docs/317` §5.4）。
-    assert len(lspe.LSPE_QUESTIONS) == 17
+    # 22 = Q001–Q014（LSPE v2）+ Q015–Q017（E10 借用检查器，`docs/317` §5.4）
+    # + Q018–Q022（E11 效应检查器，`docs/341` §8）。
+    assert len(lspe.LSPE_QUESTIONS) == 22
     assert lspe.LSPE_QUESTIONS["Q013"]
     assert "未审计块" in lspe.LSPE_QUESTIONS["Q013"]
     assert "Q014" in lspe.LSPE_QUESTIONS and "不是证据" in lspe.LSPE_QUESTIONS["Q014"]
@@ -565,14 +566,14 @@ def test_budget_and_depth_floors_are_counted_separately():
 
 
 @test
-def test_lspc_sheet_has_sixteen_families_and_five_columns():
+def test_lspc_sheet_has_nineteen_families_and_five_columns():
     """16 族 × 五列；最后一行是递归的"审计自己被关掉"（`#757`）。
 
     12 族是 LSPE v2 的；另 4 族是 E10 借用检查器的（`docs/317` §5.5），
     在接上站点之前 `present` 恒为假 —— 但族与五列先登记齐。
     """
     sh = lspe.lspc_sheet([], {"state": "lspe_open_admin", "lspc": "full"})
-    assert sh["families"] == 16 and len(sh["rows"]) == 16, sh
+    assert sh["families"] == 19 and len(sh["rows"]) == 19, sh
     for r in sh["rows"]:
         for k in ("protects", "if_fails", "fix", "cost", "bearer"):
             assert r[k], (r["id"], k)
@@ -1234,6 +1235,307 @@ def test_loans_cli_is_a_report_and_respects_lifetime_no():
             cwd=str(ROOT), capture_output=True, text=True,
             encoding="utf-8", errors="replace", shell=False, timeout=120)
         assert r2.returncode == 0 and "lifetime_no" in r2.stderr, r2.stderr
+
+
+# ---------------------------------------------------------------- E11 效应检查器
+# `docs/341`：代数效应与处理器。A0/A1 是**报告面** —— 吃同一串 token，不改判决。
+
+_EFFECTS_DECL = (
+    "module m\n\n"
+    "effect Log {\n"
+    "    fn write(v: u32) -> ();\n"
+    "    fn flush() -> ();\n"
+    "}\n\n"
+)
+
+
+def _effects(src: str, unit: str = "m") -> dict:
+    return lspe.effects_analyze(lomc.lex(src), unit)
+
+
+@test
+def test_effect_registry_entries_are_complete():
+    """E11 登记：五条义务、八种站点、五问、三条 LSPC 族都要在册（`docs/341` §8）。"""
+    obs = {"EffectAllowed", "HandlerExhaustive", "ResumeLinear",
+           "EffectBounded", "CaptureReclaim"}
+    assert obs <= set(lspe.LSPE_OBLIGATIONS), sorted(lspe.LSPE_OBLIGATIONS)
+    assert len(lspe.LSPE_OBLIGATIONS) == 19
+    sites = {"effect_decl", "row", "perform", "handle", "resume", "row_call",
+             "effect_foreign", "handler_capture"}
+    assert sites <= set(lspe.LSPE_SITE_KINDS), sorted(lspe.LSPE_SITE_KINDS)
+    qs = {"Q018", "Q019", "Q020", "Q021", "Q022"}
+    assert qs <= set(lspe.LSPE_QUESTIONS), sorted(lspe.LSPE_QUESTIONS)
+    assert len(lspe.LSPE_QUESTIONS) == 22
+    assert qs <= set(lspe.LSPE_QUESTION_TEMPLATES)
+    fams = {f["id"] for f in lspe.LSPE_LSPC_FAMILIES}
+    assert {"effect_unhandled", "effect_general_handler",
+            "effect_foreign"} <= fams, fams
+
+
+@test
+def test_effect_declarations_rows_and_determinism():
+    """效应声明与 `effects` 行都读得出来；报告按固定序，可复现（`docs/341` §5）。"""
+    src = _EFFECTS_DECL + (
+        "fn run(x: u32) -> u32 effects Log {\n"
+        "    perform Log.write(x);\n"
+        "    return x;\n}\n")
+    a = _effects(src)
+    b = _effects(src)
+    assert set(a["effects"]["Log"]["ops"]) == {"write", "flush"}, a["effects"]
+    assert a["effects"]["Log"]["ops"]["write"]["arity"] == 1, a["effects"]
+    fn = a["functions"][0]
+    assert fn["name"] == "run" and fn["declared"] == ["Log"], fn
+    assert json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True), "必须确定性"
+
+
+@test
+def test_perform_without_handler_or_row_is_unhandled():
+    """`perform` 既没有处理器、也不在行里 ⇒ `missing_effect` + Q018。"""
+    src = _EFFECTS_DECL + (
+        "fn run(x: u32) -> u32 {\n"
+        "    perform Log.write(x);\n"
+        "    return x;\n}\n")
+    rep = _effects(src)
+    kinds = [f["kind"] for f in rep["findings"]]
+    assert "missing_effect" in kinds, rep["findings"]
+    assert any(q["code"] == "Q018" for q in rep["questions"]), rep["questions"]
+
+
+@test
+def test_handle_discharges_the_effect_from_the_row():
+    """`handle Log { … } with { … }` 把 `Log` 从函数行里销掉（深度处理器）。"""
+    src = _EFFECTS_DECL + (
+        "fn run(x: u32) -> u32 {\n"
+        "    let y: u32 = handle Log {\n"
+        "        let n: u32 = perform Log.write(x);\n"
+        "        n + 1\n"
+        "    } with {\n"
+        "        write(v) => { resume(v + 1); }\n"
+        "        flush() => { resume(0); }\n"
+        "    };\n"
+        "    return y;\n}\n")
+    rep = _effects(src)
+    assert rep["findings"] == [], rep["findings"]
+    assert rep["summary"]["handlers"] == 1 and rep["summary"]["performs"] == 1
+    assert rep["handlers"][0]["exhaustive"] is True, rep["handlers"]
+
+
+@test
+def test_handler_must_cover_every_operation():
+    """少一条臂 ⇒ `handler_incomplete` + Q019（§6 R4）。"""
+    src = _EFFECTS_DECL + (
+        "fn run(x: u32) -> u32 {\n"
+        "    let y: u32 = handle Log {\n"
+        "        perform Log.write(x)\n"
+        "    } with {\n"
+        "        write(v) => { resume(v); }\n"
+        "    };\n"
+        "    return y;\n}\n")
+    rep = _effects(src)
+    assert any(f["kind"] == "handler_incomplete" for f in rep["findings"]), rep
+    assert any(q["code"] == "Q019" for q in rep["questions"]), rep["questions"]
+
+
+@test
+def test_duplicate_arm_and_foreign_operation_are_reported():
+    """同一条臂写两次 ⇒ `duplicate_arm`；臂里的 op 不属于该效应 ⇒ `arm_op_not_in_effect`。"""
+    dup = _EFFECTS_DECL + (
+        "fn run(x: u32) -> u32 {\n"
+        "    let y: u32 = handle Log {\n"
+        "        perform Log.write(x)\n"
+        "    } with {\n"
+        "        write(v) => { resume(v); }\n"
+        "        write(v) => { resume(v); }\n"
+        "        flush() => { resume(0); }\n"
+        "    };\n"
+        "    return y;\n}\n")
+    kinds = [f["kind"] for f in _effects(dup)["findings"]]
+    assert "duplicate_arm" in kinds, kinds
+    extra = _EFFECTS_DECL + (
+        "fn run(x: u32) -> u32 {\n"
+        "    let y: u32 = handle Log {\n"
+        "        perform Log.write(x)\n"
+        "    } with {\n"
+        "        write(v) => { resume(v); }\n"
+        "        flush() => { resume(0); }\n"
+        "        read() => { resume(0); }\n"
+        "    };\n"
+        "    return y;\n}\n")
+    kinds = [f["kind"] for f in _effects(extra)["findings"]]
+    assert "arm_op_not_in_effect" in kinds, kinds
+
+
+@test
+def test_resume_twice_is_refuted_but_abort_is_allowed():
+    """同一臂里 `resume` 两次 ⇒ 反例；一次都不调 = abort，合法（§6 R5）。"""
+    twice = _EFFECTS_DECL + (
+        "fn run(x: u32) -> u32 {\n"
+        "    let y: u32 = handle Log {\n"
+        "        perform Log.write(x)\n"
+        "    } with {\n"
+        "        write(v) => { resume(v); resume(v); }\n"
+        "        flush() => { resume(0); }\n"
+        "    };\n"
+        "    return y;\n}\n")
+    rep = _effects(twice)
+    assert any(f["kind"] == "resume_twice" for f in rep["findings"]), rep["findings"]
+    assert any(q["code"] == "Q020" for q in rep["questions"]), rep["questions"]
+
+    abort = _EFFECTS_DECL + (
+        "fn run(x: u32) -> u32 {\n"
+        "    let y: u32 = handle Log {\n"
+        "        perform Log.write(x)\n"
+        "    } with {\n"
+        "        write(v) => { return 0; }\n"
+        "        flush() => { resume(0); }\n"
+        "    };\n"
+        "    return y;\n}\n")
+    rep = _effects(abort)
+    assert not any(f["kind"].startswith("resume") for f in rep["findings"]), rep
+
+
+@test
+def test_tail_resumptive_is_distinguished_from_general():
+    """尾续不需要续延对象；`let y = resume(v); y + 1` 是一般处理器（§4.4）。"""
+    tail = _EFFECTS_DECL + (
+        "fn run(x: u32) -> u32 {\n"
+        "    let y: u32 = handle Log {\n"
+        "        perform Log.write(x)\n"
+        "    } with {\n"
+        "        write(v) => { resume(v); }\n"
+        "        flush() => { resume(0); }\n"
+        "    };\n"
+        "    return y;\n}\n")
+    rep = _effects(tail)
+    assert rep["handlers"][0]["arms"][0]["tail_resumptive"] is True, rep["handlers"]
+    assert rep["summary"]["general_handlers"] == 0, rep["summary"]
+
+    general = _EFFECTS_DECL + (
+        "fn run(x: u32) -> u32 {\n"
+        "    let y: u32 = handle Log {\n"
+        "        perform Log.write(x)\n"
+        "    } with {\n"
+        "        write(v) => { let n: u32 = resume(v); n + 1; }\n"
+        "        flush() => { resume(0); }\n"
+        "    };\n"
+        "    return y;\n}\n")
+    rep = _effects(general)
+    assert rep["handlers"][0]["arms"][0]["tail_resumptive"] is False, rep["handlers"]
+    assert rep["summary"]["general_handlers"] == 1, rep["summary"]
+    assert any(q["code"] == "Q022" for q in rep["questions"]), rep["questions"]
+
+
+@test
+def test_call_rows_propagate_and_a_declared_contract_must_cover_them():
+    """被调函数的行向上传播；调用方写了 `effects` 却盖不住 ⇒ `unhandled_call`。"""
+    src = ("module m\n\n"
+           "effect Log { fn write(v: u32) -> (); }\n"
+           "effect Ping { fn ping() -> (); }\n\n"
+           "fn inner(x: u32) -> u32 effects Log {\n"
+           "    perform Log.write(x);\n"
+           "    return x;\n}\n\n"
+           "pub fn outer(x: u32) -> u32 effects Ping {\n"
+           "    let n: u32 = inner(x);\n"
+           "    return n;\n}\n")
+    rep = _effects(src)
+    kinds = [f["kind"] for f in rep["findings"]]
+    assert "unhandled_call" in kinds, rep["findings"]
+    outer = [f for f in rep["functions"] if f["name"] == "outer"][0]
+    assert "Log" in outer["inferred"], outer
+
+
+@test
+def test_extern_fn_cannot_declare_effects_and_resume_stays_inside_an_arm():
+    """效应不能穿越 C 边界（§6 R7）；`resume` 只能在臂里（§5）。"""
+    ext = ("module m\n\neffect Log { fn write(v: u32) -> (); }\n\n"
+           "extern fn puts(s: &str) -> i32 effects Log;\n")
+    assert any(f["kind"] == "extern_effects" for f in _effects(ext)["findings"]), ext
+    outside = _EFFECTS_DECL + (
+        "fn run(x: u32) -> u32 {\n    resume(x);\n    return x;\n}\n")
+    assert any(f["kind"] == "resume_outside_handler"
+               for f in _effects(outside)["findings"]), outside
+
+
+@test
+def test_general_handler_under_no_gc_is_an_assumed_capture():
+    """一般处理器要捕获续延；`no_gc` 下回收没有证明 ⇒ `capture_unproved`（§7）。"""
+    src = ("module m\n\nchoose gc no_gc\n\n" + _EFFECTS_DECL +
+           "fn run(x: u32) -> u32 {\n"
+           "    let y: u32 = handle Log {\n"
+           "        perform Log.write(x)\n"
+           "    } with {\n"
+           "        write(v) => { let n: u32 = resume(v); n + 1; }\n"
+           "        flush() => { resume(0); }\n"
+           "    };\n"
+           "    return y;\n}\n")
+    rep = _effects(src)
+    assert any(f["kind"] == "capture_unproved" for f in rep["findings"]), rep["findings"]
+
+
+@test
+def test_effect_sites_are_lspe_shaped():
+    """站点必须能被台账/反问器认：kind 在册、义务在册、问题有模板。"""
+    src = _EFFECTS_DECL + (
+        "fn run(x: u32) -> u32 {\n"
+        "    perform Log.write(x);\n"
+        "    return x;\n}\n")
+    rep = _effects(src)
+    assert rep["sites"], rep
+    for s in rep["sites"]:
+        assert s["kind"] in lspe.LSPE_SITE_KINDS, s
+        assert s["obligation"] in lspe.LSPE_OBLIGATIONS, s
+        assert s["evidence"] in set(lspe.LSPE_EVIDENCE_KINDS) | {"none"}, s
+        assert s["id"] and s["line"] >= 1, s
+    for q in rep["questions"]:
+        assert q["code"] in lspe.LSPE_QUESTIONS, q
+        assert q["code"] in lspe.LSPE_QUESTION_TEMPLATES, q
+
+
+@test
+def test_effects_cli_is_a_report_not_a_verdict():
+    """`lspe effects` 只报告：不改源码、不碰编译判决；`--strict` 才用退出码。"""
+    good = _EFFECTS_DECL + (
+        "fn run(x: u32) -> u32 {\n"
+        "    let y: u32 = handle Log {\n"
+        "        let n: u32 = perform Log.write(x);\n"
+        "        n + 1\n"
+        "    } with {\n"
+        "        write(v) => { resume(v + 1); }\n"
+        "        flush() => { resume(0); }\n"
+        "    };\n"
+        "    return y;\n}\n")
+    bad = _EFFECTS_DECL + (
+        "fn run(x: u32) -> u32 {\n"
+        "    perform Log.write(x);\n"
+        "    return x;\n}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "m.lomt"
+        p.write_text(good, encoding="utf-8", newline="\n")
+        before = p.read_bytes()
+        r = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "loment.py"),
+             "lspe", "effects", str(p), "--json"],
+            cwd=str(ROOT), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", shell=False, timeout=120)
+        assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+        rep = json.loads(r.stdout)
+        assert rep["summary"]["handlers"] == 1 and not rep["findings"], rep
+        assert p.read_bytes() == before, "报告不能改源码"
+
+        p.write_text(bad, encoding="utf-8", newline="\n")
+        r2 = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "loment.py"),
+             "lspe", "effects", str(p)],
+            cwd=str(ROOT), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", shell=False, timeout=120)
+        assert r2.returncode == 0, (r2.returncode, r2.stdout, r2.stderr)
+        assert "missing_effect" in r2.stdout, r2.stdout
+        r3 = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "loment.py"),
+             "lspe", "effects", str(p), "--strict"],
+            cwd=str(ROOT), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", shell=False, timeout=120)
+        assert r3.returncode == 1, (r3.returncode, r3.stdout, r3.stderr)
 
 
 def main() -> int:

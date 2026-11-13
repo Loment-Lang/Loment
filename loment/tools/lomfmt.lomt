@@ -327,6 +327,26 @@ fn v_in(src: ptr, t: ptr, i: u32, mg: u32, tbl: str) -> bool {
     return v_find(src, t, i, mg, tbl) != 0;
 }
 
+/// 这个 token 的文本正好是 `w` 吗（`docs/341` 的插值前缀判据）。
+fn tk_word(src: ptr, t: ptr, i: u32, w: str) -> bool {
+    if tk_kind(t, i) != 0 {
+        return false;
+    }
+    let n: u32 = load32(t, i * 20 + 8);
+    if n != str_len(w) {
+        return false;
+    }
+    let j: u32 = 0;
+    let ok: bool = true;
+    while j < n {
+        if load8(src, load32(t, i * 20 + 4) + j) != str_byte(w, j) {
+            ok = false;
+        }
+        j = j + 1;
+    }
+    return ok;
+}
+
 /// 多字符运算符合并 id (0 = 不合并)。Python 版只看**相邻 token** 的 val, 不看源码是否连着。
 fn merg_id(src: ptr, t: ptr, i: u32, n: u32) -> u32 {
     if i + 1 >= n {
@@ -623,6 +643,15 @@ fn needs_space(src: ptr, t: ptr, pp: u32, prev: u32, i: u32, mg: u32) -> bool {
     // 值表只对**标点**有意义：字符串的值是内容（`#640`），`"}"` 的值就是 `}`，
     // 拿它去查"前不留空格"会把 `f(a, "}")` 排成 `f(a,"}")`。
     if tk_kind(t, i) == 2 {
+        // **插值前缀与字符串是粘着的**（`docs/341`）：`f"…"` / `rf"…"` 在源里紧挨着，
+        // 中间插一个空格就把一条读法拆成两个 token（格式化后的文件编不过）。
+        let pk: u32 = tk_kind(t, pi);
+        if pk == 0 && load32(t, pi * 20 + 4) + load32(t, pi * 20 + 8)
+                == load32(t, i * 20 + 4) {
+            if tk_word(src, t, pi, "f") || tk_word(src, t, pi, "rf") {
+                return false;
+            }
+        }
         return true;
     }
     if tk_kind(t, pi) == 2 {

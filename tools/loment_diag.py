@@ -69,6 +69,11 @@ RULES = [
     # （那几层嵌套写法完全合法），是**这一版实现**扛不住；修法也一样，是"换个写法绕开"
     # （把中间那几层提成函数），而不是"按那一行改写法"。
     ("E023", r"嵌套超过", "源码太深", "把中间那几层提成函数，或把这段拆开。"),
+    # `docs/341`：插值的**格式说明**（`{x:>5}` / `{x:05}`）还没接上 —— 与上面同一处境
+    # （编译器还没做这块），不是用户写错了。
+    ("E023", r"格式说明 .*还没接上", "这一版还没实现（编译器限制）",
+     "插值目前只收 `{expr}` / `{expr=}` / `{expr!s}` / `{expr!r}`；宽度与补零是下一阶段。"
+     "先自己在孔里算出宽度，或报告。"),
     # **前门拒了这份源**（`#29`）：语法是另一门的、转写器又表示不出来。原先它落进
     # E0999「未分类，请报告」—— 对用户是**错的处境**（不是分类表漏了，是这一版的前端
     # 还不收那个构造）。与 E023 同码：修法一样，换个写法绕开，绕不开就报告。
@@ -291,6 +296,8 @@ RULES = [
              # `#33` / `#36`：字符串里的**未知转义**。它原先在词法期**不报**（兜底取原字符），
              # 现在报了 —— 新增的词法期消息必须并进这一码，否则会落到 E0999「请报告」。
              r"未知转义|"
+             # `docs/341`：插值字符串的词法期形状（未闭合 / 单个 `}` / 空孔 / 跨行）。
+             r"未闭合|单个 `}` 不是合法的插值|插值孔里没有表达式|孔不能跨行|"
              # Tur 2026.3 的 `lgc`（docs/309）：形状/单位/必带块这几条都是解析期错误。
              r"`lgc` (只认|后面要跟|的时长|的预算)|`lgc end` 不接受时长|带预算的 `lgc start|"
              # `docs/296` §2.5 / §2.6：循环控制与裸 `return` 的版次/形状错误
@@ -4491,6 +4498,23 @@ FINE: tuple[Fine, ...] = (
         ("Convert first: `str_num(n as u32)`.",
          "For a `bool`, use interpolation `f\"{b}\"`; that goes through `str_show`.",
          "If it is already decimal text, use it directly."),
+    ),
+    # 2026-11-11：插值的两个取值（`docs/341`）—— 孔收 `str` / `bool` / 整型，
+    # 别的类型在 `str_show` / `str_repr` 那一层报。模板上界里必须有自己的码。
+    Fine(
+        210, 1, r"^内建 .+ 实参期望 str / bool / 整型",
+        "插值只收 str / bool / 整型",
+        "interpolation takes str, bool or an integer",
+        "插值孔里的表达式是结构体、枚举、数组或指针 —— `str_show` / `str_repr` "
+        "没有这些形状的转换。",
+        "The hole expression is a struct, enum, array or pointer; `str_show` / "
+        "`str_repr` have no conversion for those shapes.",
+        ("先取出字段再插：`f\"{s.name}\"`。",
+         "指针用 `str_num(p as u64)` 印成数字。",
+         "想印自定义表示：写一个 `fn show(x: S) -> str`，孔里调它。"),
+        ("Pull the field out first: `f\"{s.name}\"`.",
+         "For a pointer, print the number: `str_num(p as u64)`.",
+         "For a custom form, write `fn show(x: S) -> str` and call it in the hole."),
     ),
 )
 

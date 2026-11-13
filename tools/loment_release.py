@@ -206,6 +206,9 @@ GLOBS = [
     # **两处清单插入同一位置** —— 次序就是发布清单的次序。
     "tools/loment_channel.py", "tools/loment_channel_test.py",
     "tools/loment_seed.py", "tools/loment_seed_test.py",
+    # 插值的前端改写（`docs/341`）：编译器装载器的第二个读者，判据跟着它走。
+    # **两处清单插入同一位置** —— 次序就是发布清单的次序。
+    "tools/loment_fstr.py",
     "tools/loment_fmt_test.py", "tools/loment_audit.py",
     "tools/loment_doc_test.py", "tools/loment_json_test.py",
     "tools/lomelf.py", "tools/loment_opt_obj.py", "tools/loment_elf_test.py", "tools/loment_pe_test.py",

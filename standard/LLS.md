@@ -860,6 +860,7 @@ Tur 2026.3 adds:
 | for-call | `for x in buf(&xs) { … }` | a for-in whose source is a call returning an array or slice; the call is evaluated once | 2026.3+ only; the source MUST be a call (array literals and other expressions are later editions); `x` is a copy |
 | if expression | `let x: u32 = if c { 10 } else { 20 };` | a `let` initialiser picks one of two expressions | 2026.3+ only; initialiser position only, one expression per arm, `else` required; no `else if` or nesting |
 | match expression | `let x: u32 = match d { D::N => 1, _ => 0 };` | a `let` initialiser picks one arm's expression | 2026.3+ only; initialiser position only, subject is a name, one expression per arm, arms comma-separated; no nesting or literal patterns |
+| interpolated string | `f"n={n}"`, `rf"raw\n{n}"`, `{x=}`, `{s!r}`, `{{` / `}}` | a string whose holes are any expression; `str` / `bool` / any integer are shown by `str_show`, `!r` quotes and escapes a `str`; the whole form is a front-end rewrite to `str_concat` | 2026.3+ only; single line, no format spec (`{x:>5}`), no nested interpolation; text segments are ordinary literals |
 
 The lifetime dimension is **edition-gated**: writing `choose lifetime_*` in 2026.1 or
 2026.2 is refused; those editions keep the old default (`lifetime_no`) and the old
@@ -1513,6 +1514,10 @@ the user's declarations is E002.
 | `str_eq(a: str, b: str) -> bool` | content equality |
 | `str_concat(a: str, b: str) -> str` | concatenation; allocates from the runtime arena |
 | `str_num(n) -> str` | decimal representation of any integer type (signed prints `-`); allocates from the runtime arena, so `no_runtime` refuses it by name |
+| `str_show(v) -> str` | interpolation value: `str` is the identity, `bool` prints `true`/`false`, any integer is decimal; may allocate, so `no_runtime` refuses it by name |
+| `str_repr(v) -> str` | same inputs as `str_show`; `str` is quoted and escaped (`\`, `\"`, `
+`, `	`, `
+`) |
 | `str_ptr(s: str) -> ptr` | data pointer |
 | `print(s: str) -> u32` | write the bytes to stdout |
 | `tur_edition() -> str` | the resolved canonical edition |
@@ -1535,6 +1540,28 @@ the user's declarations is E002.
 `inb` / `outb` are available only on the translation backend that maps them.
 
 The built-in table is frozen (§6.1). Adding a built-in follows §6.2.
+
+### 18.1.1 Interpolated strings
+
+`f"…"` and `rf"…"` are a **reading**, not a production: before parsing, the compiler
+rewrites the whole form into ordinary calls —
+
+```
+f"n={n}!"   →   str_concat(str_concat("n=", str_show(n)), "!")
+```
+
+Text segments become ordinary string literals, hole expressions are copied verbatim and
+wrapped in `str_show(` … `)` (or `str_repr(` for `!r`), and the pieces fold left into
+`str_concat`. Consequences worth knowing:
+
+* holes accept any expression of type `str`, `bool`, or an integer type; anything else is
+  E001 at the `str_show` / `str_repr` call;
+* `rf"…"` disables backslash escapes (`\` is a backslash); `{{` / `}}` still escape braces;
+* `{expr=}` prints `expr`'s source text, `=`, then the value;
+* every interpolation counts as a runtime construct (E031 under `no_runtime`), even
+  `f"{s}"`, which lowers to the identity — the check runs on tokens, not types;
+* `lomfmt` / `lomdoc` / LSP still see the original source and treat `f"…"` as a plain
+  string literal; they neither highlight nor check the holes.
 
 ### 18.2 The names a built-in does not shadow
 
@@ -3226,7 +3253,7 @@ the full statement.
 | Built-in | Tur 1 | Tur 2026.2+ | Needs runtime | Target notes |
 |---|---|---|---|---|
 | `str_len`, `str_eq`, `str_byte`, `str_ptr`, `print`, `ptr_*`, `slice_len` | yes | yes | no | |
-| `str_concat`, `str_num` | yes | yes | yes | allocate from the arena; E031 under `no_runtime` |
+| `str_concat`, `str_num`, `str_show`, `str_repr` | yes | yes | yes | allocate from the arena; E031 under `no_runtime` |
 | `alloc`, `free`, `load8`, `store8` | yes | yes | no (the allocator is in the artifact) | |
 | `atomic_add` | yes | yes | no | |
 | `inb`, `outb` | yes | yes | no | translation backend only |

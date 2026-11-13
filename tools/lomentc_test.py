@@ -7427,6 +7427,121 @@ def test_lifetime_verdicts_are_the_same_on_every_gc_tier():
         assert errs(good.format(gc=gc)) == [], (gc, errs(good.format(gc=gc)))
 
 
+# ---------------------------------------------------------------- 效应语法面（A2）
+# `docs/341` §11 的 A2：**声明与行接受并擦除，perform/handle/resume 给 E023**。
+# 默认关（`lspe_effects_false`），所以旧源一个字节都不变。
+
+_EFF_BASE = "module m\nchoose lspe_effects_true\n\n"
+
+
+@test
+def test_effects_slot_is_registered_and_defaults_off():
+    """`lspe_effects_true|false` 是一格构建旋钮，默认关（`docs/341` §11 A2）。"""
+    assert "effects" in lomentc.CORE_SLOTS, lomentc.CORE_SLOTS
+    assert lomentc.CORE_SLOT_DEFAULTS["effects"] == "false"
+    assert lomentc.CORE_SLOT_OF["lspe_effects_true"] == ("effects", "true")
+    assert lomentc.CORE_SLOT_OF["lspe_effects_false"] == ("effects", "false")
+
+
+@test
+def test_effect_declarations_and_rows_are_accepted_and_erased():
+    """开关打开：`effect` 与 `effects` 行解析成 AST；发射器不看它们 ⇒ IR 逐字节相同。"""
+    decl = _EFF_BASE + (
+        "effect Log {\n"
+        "    fn write(v: u32) -> ();\n"
+        "    fn flush() -> ();\n"
+        "}\n\n"
+        "fn f(x: u32) -> u32 effects Log { return x; }\n")
+    plain = _EFF_BASE + "fn f(x: u32) -> u32 { return x; }\n"
+    m = parse(decl)
+    assert [e.name for e in m.effects] == ["Log"], m.effects
+    assert [op.name for op in m.effects[0].ops] == ["write", "flush"]
+    assert m.effects[0].ops[0].params == [("v", "u32")]
+    assert m.effects[0].ops[0].ret == "()"
+    assert m.funcs[0].effects == ["Log"], m.funcs[0].effects
+    assert errs(decl) == [], errs(decl)
+    assert lomentc.emit_llvm(m, ROOT, []) == lomentc.emit_llvm(parse(plain), ROOT, [])
+
+
+@test
+def test_effects_are_off_by_default():
+    """开关关着：`effect` 仍是未知顶层关键字，`effects` 行也不被吃（旧行为）。"""
+    off = "module m\n\neffect Log { fn write(v: u32) -> (); }\n"
+    try:
+        parse(off)
+        assert False, "默认档不该认 `effect`"
+    except lomc.LomError as e:
+        assert "未知顶层关键字" in str(e), e
+    off_row = "module m\n\nfn f(x: u32) -> u32 effects Log { return x; }\n"
+    try:
+        parse(off_row)
+        assert False, "默认档不该认 `effects` 行"
+    except lomc.LomError as e:
+        assert "期望" in str(e), e
+
+
+@test
+def test_effect_row_names_must_be_declared_and_unique():
+    """行里的未声明效应 ⇒ E002；重复声明 ⇒ E013（`docs/341` §6 R1）。"""
+    bad = _EFF_BASE + "fn f(x: u32) -> u32 effects Nope { return x; }\n"
+    e = errs(bad)
+    assert e and loment_diag.classify(e[0])[0] == "E002", (e, loment_diag.classify(e[0]))
+    dup = _EFF_BASE + (
+        "effect Log { fn write(v: u32) -> (); }\n"
+        "effect Log { fn flush() -> (); }\n")
+    e = errs(dup)
+    assert e and loment_diag.classify(e[0])[0] == "E013", (e, loment_diag.classify(e[0]))
+
+
+@test
+def test_perform_parses_then_refuses_as_e023():
+    """`perform` 解析得到（AST 里有节点），检查器以 E023 点名拒 —— 不是 Python 栈。"""
+    src = _EFF_BASE + (
+        "effect Log { fn write(v: u32) -> (); }\n\n"
+        "fn run(x: u32) -> u32 effects Log {\n"
+        "    let y: u32 = perform Log.write(x);\n"
+        "    return y;\n}\n")
+    m = lomentc.Parser(lomc.lex(src), src).parse()
+    assert m.effect_runtime and m.effect_runtime[0][0] == "perform", m.effect_runtime
+    e = errs(src)
+    assert e and all(loment_diag.classify(x)[0] == "E023" for x in e), e
+    assert any("perform" in x for x in e), e
+
+
+@test
+def test_handle_and_resume_parse_then_refuse_as_e023():
+    """`handle` / `resume` 同样：先有 AST，再由检查器点名拒（`docs/341` §11 A3）。"""
+    src = _EFF_BASE + (
+        "effect Log { fn write(v: u32) -> (); }\n\n"
+        "fn run(x: u32) -> u32 {\n"
+        "    let n: u32 = handle Log {\n"
+        "        let a: u32 = perform Log.write(x);\n"
+        "        a + 1\n"
+        "    } with {\n"
+        "        write(v) => { resume(v + 1); }\n"
+        "    };\n"
+        "    return n;\n}\n")
+    m = lomentc.Parser(lomc.lex(src), src).parse()
+    kinds = {k for k, _l, _c in m.effect_runtime}
+    assert kinds == {"perform", "handle", "resume"}, m.effect_runtime
+    let = m.funcs[0].body[0]
+    assert isinstance(let.expr, lomentc.Handle), let
+    assert let.expr.arms[0].op == "write" and let.expr.arms[0].params == ["v"]
+    e = errs(src)
+    assert len(e) == 3 and all(loment_diag.classify(x)[0] == "E023" for x in e), e
+
+
+@test
+def test_extern_cannot_declare_effects():
+    """`extern fn … effects E` 是边界错（`docs/341` §6 R7），A2 以 E023 点名。"""
+    src = _EFF_BASE + (
+        "effect Log { fn write(v: u32) -> (); }\n\n"
+        "extern fn puts(p: ptr) -> i32 effects Log;\n")
+    e = errs(src)
+    assert e and all(loment_diag.classify(x)[0] == "E023" for x in e), e
+    assert any("extern" in x for x in e), e
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "lomentc_test")
 

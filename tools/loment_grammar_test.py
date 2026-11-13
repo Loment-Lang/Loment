@@ -1734,6 +1734,50 @@ def test_str_interpolation():
 
 
 @test
+def test_const_str():
+    """`const NAME: str = "…"`（2026.3+，`docs/342`）。
+
+    两件事：好的那份编得过、产物里就是那个字面量（每个使用点一条 `.str`）；
+    旧版次（tur2026.2）拒它 —— 旧读法里 `const` 只吃整数字面量。
+    """
+    body = "".join([
+        "module m", chr(10),
+        "choose runtime", chr(10), chr(10),
+        "const GREETING: str = \"hello\";", chr(10),
+        "const N: u32 = 42;", chr(10), chr(10),
+        "fn f(n: u32) -> str {", chr(10),
+        "    let a: str = str_concat(GREETING, GREETING);", chr(10),
+        "    let b: str = f\"{GREETING}-{N}-{n}\";", chr(10),
+        "    return a;", chr(10),
+        "}", chr(10)])
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        p = td / "ok.lomt"
+        p.write_text(body, encoding="utf-8", newline=chr(10))
+        mod = lomentc.load(p)
+        errs = lomentc.check(mod, deps=lomentc.resolve_deps(mod, ROOT, td, entry=p))
+        assert not errs, errs[:3]
+        ll = lomentc.emit_llvm(mod, ROOT)
+        # 每个使用点一条 `.str` 常量：hello ×3 + "-" ×2
+        assert ll.count(r'c"\68\65\6C\6C\6F"') == 3, ll[-500:]
+        assert ll.count(r'c"\2D"') == 2, ll[-500:]
+        # 加号那一路是整数常量（`{N}` -> str_show(N) -> str_num(42)）
+        assert "zext i32 42 to i64" in ll, "整数常量没有按常量内联"
+
+        p2 = td / "old.lomt"
+        p2.write_text("choose write grammar tur2026.2" + chr(10) + "module m" + chr(10)
+                      + "const G: str = \"x\";" + chr(10),
+                      encoding="utf-8", newline=chr(10))
+        try:
+            lomentc.load(p2)
+        except lomentc.LomError:
+            pass
+        else:
+            raise AssertionError("tur2026.2 收了 `const NAME: str`")
+    print("      `const NAME: str`：内联成字面量；旧版次仍拒")
+
+
+@test
 def test_the_default_edition_is_the_newest_open_one():
     """**没声明 = 最新版次**（2026-11-06 用户裁定，`docs/312`）。
 

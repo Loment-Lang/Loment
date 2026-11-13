@@ -860,6 +860,7 @@ Tur 2026.3 adds:
 | for-call | `for x in buf(&xs) { … }` | a for-in whose source is a call returning an array or slice; the call is evaluated once | 2026.3+ only; the source MUST be a call (array literals and other expressions are later editions); `x` is a copy |
 | if expression | `let x: u32 = if c { 10 } else { 20 };` | a `let` initialiser picks one of two expressions | 2026.3+ only; initialiser position only, one expression per arm, `else` required; no `else if` or nesting |
 | match expression | `let x: u32 = match d { D::N => 1, _ => 0 };` | a `let` initialiser picks one arm's expression | 2026.3+ only; initialiser position only, subject is a name, one expression per arm, arms comma-separated; no nesting or literal patterns |
+| string constant | `const GREETING: str = "hello";` | a compile-time named string; every use site becomes that literal (its own `.str.<fn>.<n>`) | 2026.3+ only; the value MUST be a string literal; older editions keep `const` integer-only |
 | interpolated string | `f"n={n}"`, `rf"raw\n{n}"`, `{x=}`, `{s!r}`, `{n:>5}` / `{n:05}`, `{{` / `}}` | a string whose holes are any expression; `str` / `bool` / any integer are shown by `str_show`, `!r` quotes and escapes a `str`, a format spec pads to a width (via `str_pad`); the whole form is a front-end rewrite to `str_concat` | 2026.3+ only; single line, no nested interpolation, no dynamic width; text segments are ordinary literals |
 
 The lifetime dimension is **edition-gated**: writing `choose lifetime_*` in 2026.1 or

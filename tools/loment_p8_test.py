@@ -4011,6 +4011,39 @@ def test_m104_str_interpolation_twin():
     print("      插值: 两实现逐字节一致（含 gc_auto 的分配站点）")
 
 
+@test
+def test_m105_const_str_twin():
+    """`const NAME: str = "…"`：两实现逐字节同（`docs/342`）。
+
+    字符串常量的每个**使用点**在两边各发一条 `.str.<fn>.<n>` —— 编号按文本序，
+    自举侧的全局段准备扫描与参考实现的发射期追加必须数到同一批（这条钉它）。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    src = "".join([
+        "module m", chr(10),
+        "choose runtime", chr(10), chr(10),
+        'const GREETING: str = "hello";', chr(10),
+        "const N: u32 = 42;", chr(10), chr(10),
+        "fn f(n: u32) -> str {", chr(10),
+        "    let a: str = str_concat(GREETING, GREETING);", chr(10),
+        '    let b: str = f"{GREETING}-{N}-{n}";', chr(10),
+        "    return a;", chr(10),
+        "}", chr(10), chr(10),
+        "fn h() -> u32 {", chr(10),
+        "    return str_len(GREETING);", chr(10),
+        "}", chr(10)])
+    with tempfile.TemporaryDirectory() as td:
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_const")
+        p = Path(td) / "const.lomt"
+        p.write_text(src, encoding="utf-8", newline=chr(10))
+        rc, out, err = _run_driver_raw(elf, _wsl_path(p), td, "const")
+        assert rc == 0, f"自举驱动编不过 `const NAME: str`: {err[-400:]}"
+        assert out == _unit_ll(p), "字符串常量: 自举产物与参考不一致"
+    print("      字符串常量: 两实现逐字节一致")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_p8_test")
 

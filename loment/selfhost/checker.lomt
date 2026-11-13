@@ -6238,7 +6238,14 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
             if chk_tok_is(src, t, i + 2, ":") {
                 // 常量**不做** check_type: 参考实现的常量只查"类型必须是整型"
                 // (`const C: Foo = 1;` 只报 E001, 不报"类型未声明") —— 多报就是假阳性。
-                if chk_is_int(src, t, i + 3) == 0 {
+                //
+                // `docs/342`：2026.3 起 `const NAME: str = "…"` 也收 —— 版次
+                // `prof >= 2`（`tur2026.3`）且类型正好是 `str`。
+                let cok: u32 = chk_is_int(src, t, i + 3);
+                if cok == 0 && load32(oc, 8) >= 2 && chk_tok_is(src, t, i + 3, "str") {
+                    cok = 1;
+                }
+                if cok == 0 {
                     o = sym_pub(src, t, out, o, 57, i + 3);
                 }
             }

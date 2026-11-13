@@ -93,11 +93,11 @@ const E_DEEP: u32 = 23;    // E023 源码太深 —— 嵌套超过 64 层 (issu
 const E_NOTIMPL: u32 = 23; // E023 同一码的另一条路：效应处理器的运行期（docs/346 A3）
 // 效应的五条细分码（`docs/346` A2b；与 `loment_diag.FINE` 210–214 同号）。
 // 细分之后规则对拍比的是**数字**，所以自举侧必须发同一组号，不能停在族码上。
-const E_EFF_RT: u32 = 210;   // 运行期未实现（perform / handle / resume）
-const E_EFF_EXT: u32 = 211;  // extern 上的效应行
-const E_EFF_DUP: u32 = 212;  // 效应重复定义
-const E_EFF_OPDUP: u32 = 213; // 同一效应里的操作重复定义
-const E_EFF_ROW: u32 = 214;  // effects 行里的未声明效应
+const E_EFF_RT: u32 = 217;   // 运行期未实现（perform / handle / resume）
+const E_EFF_EXT: u32 = 218;  // extern 上的效应行
+const E_EFF_DUP: u32 = 219;  // 效应重复定义
+const E_EFF_OPDUP: u32 = 220; // 同一效应里的操作重复定义
+const E_EFF_ROW: u32 = 221;  // effects 行里的未声明效应
 
 /// 拖运行期的构造**有几个** —— 检查器数好放这儿，驱动取来拼报文的"另有 N 处"那半句
 /// （与参考实现 `_runtime_sites` 的 `len(_sites) - 1` 同口径）。见 issue #321。
@@ -5920,7 +5920,7 @@ fn chk_effects_prepass(src: ptr, t: ptr, out: ptr, o0: u32) -> u32 {
                     }
                     b = b + 1;
                 }
-                // 同一效应体里的操作重名（E0213）：只看 `fn` 后面的名字。
+                // 同一效应体里的操作重名（E0220）：只看 `fn` 后面的名字。
                 let eb: u32 = chk_match_brace(src, t, i + 2);
                 let p: u32 = i + 3;
                 while p < eb {

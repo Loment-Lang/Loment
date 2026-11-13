@@ -637,7 +637,7 @@ Q005 的形状（后续再补）。
 | `perform` / `handle` / `resume` / `extern … effects` 点名 **E023** | `checker.lomt` 的 `chk_effects_prepass` | `loment_rule_parity` 的 `effects-runtime-perform` / `effects-extern-row` |
 | 默认关时 `effect` 是 E019 | `chk_syntax_prepass` 的新分支 | `loment_rule_parity` 的 `effects-off-keyword` |
 | 行里的未声明效应（E002）/ 重复声明（E013） | `checker.lomt` 的 `chk_effects_prepass` | `loment_rule_parity` 的 `effects-row-unknown` / `effects-duplicate-decl` |
-| 五条细分码 **E0210–E0214**（运行期 / extern / 重复 / 操作重复 / 行内未声明） | `checker.lomt` 的 `E_EFF_*`、`driver.lomt` 的 `err_phrase`；参考侧在 `loment_diag.FINE` | `loment_rule_parity` 比的是**数字**，所以两侧必须同号 |
+| 五条细分码 **E0217–E0221**（运行期 / extern / 重复 / 操作重复 / 行内未声明） | `checker.lomt` 的 `E_EFF_*`、`driver.lomt` 的 `err_phrase`；参考侧在 `loment_diag.FINE` | `loment_rule_parity` 比的是**数字**，所以两侧必须同号 |
 | 种子 | `loment/build/selfhost_driver.ll` 重生成 | `loment_seed_test` |
 
 **自举侧的口径**与参考实现同一条：**声明与行是契约，擦除；运行期构造是语义，点名拒**。

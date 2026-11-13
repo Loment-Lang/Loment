@@ -899,7 +899,7 @@ pub fn code_what(c: u32, lang: u32) -> str {
     if k == 419 { return "`str_num` 的实参不是整型 —— 它没有字符串、布尔或指针的重载。"; }
     if k == 420 { return "The hole expression is a struct, enum, array or pointer; `str_show` / `str_repr` have no conversion for those shapes."; }
     if k == 421 { return "插值孔里的表达式是结构体、枚举、数组或指针 —— `str_show` / `str_repr` 没有这些形状的转换。"; }
-    if k == 422 { return "`catch |e| { … }` binds the error payload to `e`; the failure variant of this enum carries no payload, so there is nothing to bind."; }
+    if k == 422 { return "`catch |e| { ... }` binds the error payload to `e`; the failure variant of this enum carries no payload, so there is nothing to bind."; }
     if k == 423 { return "`catch |e| { … }` 把错误载荷绑到 `e` 上；这个枚举的失败变体不带载荷，没有东西可绑。"; }
     if k == 424 { return "The expression in `catch |e| { EXPR }` is the fallback value; it lands in the same variable as the success payload, so the two types must match."; }
     if k == 425 { return "`catch |e| { EXPR }` 的那个表达式就是**兜底值**，它与成功那一支的载荷装进同一个变量，类型必须一样。"; }

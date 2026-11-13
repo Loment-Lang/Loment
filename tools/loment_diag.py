@@ -4521,7 +4521,7 @@ FINE: tuple[Fine, ...] = (
         "`catch |e|` needs the failure variant to carry a payload",
         "`catch |e| { … }` 把错误载荷绑到 `e` 上；这个枚举的失败变体不带载荷，"
         "没有东西可绑。",
-        "`catch |e| { … }` binds the error payload to `e`; the failure variant of this "
+        "`catch |e| { ... }` binds the error payload to `e`; the failure variant of this "
         "enum carries no payload, so there is nothing to bind.",
         ("失败变体改成带载荷：`enum E { Ok(u32), Bad(u32) }`。",
          "失败支不需要载荷就用老形状：`v catch 0`。",

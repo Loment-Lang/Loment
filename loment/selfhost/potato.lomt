@@ -3315,7 +3315,14 @@ fn pt_consts(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32, n: 
             o = pt_str(out, o, ",\n");
             o = pt_key(out, o, 3, "value");
             // 类型后面是 `=`, 值在它后面(`int_lit` 允许前面有 `-`)
-            o = pt_num(out, o, unit, t, (rc / 4294967296) as u32 + 1);
+            let vt: u32 = (rc / 4294967296) as u32 + 1;
+            if pt_kind(t, vt) == 2 {
+                // `docs/342`：字符串常量的值是**解码后的字符串**（与参考实现
+                // `json.dumps(c.value)` 同一份字节）。
+                o = pt_q_dec(out, o, unit, pt_off(t, vt), pt_tlen(t, vt));
+            } else {
+                o = pt_num(out, o, unit, t, vt);
+            }
             o = pt_str(out, o, "\n");
             o = pt_ind(out, o, 2);
             o = pt_str(out, o, "}");

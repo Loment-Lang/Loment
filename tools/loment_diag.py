@@ -291,6 +291,10 @@ RULES = [
              # `#33` / `#36`：字符串里的**未知转义**。它原先在词法期**不报**（兜底取原字符），
              # 现在报了 —— 新增的词法期消息必须并进这一码，否则会落到 E0999「请报告」。
              r"未知转义|"
+             # `docs/341`：插值字符串的词法期形状（未闭合 / 单个 `}` / 空孔 / 跨行）。
+             r"未闭合|单个 `}` 不是合法的插值|插值孔里没有表达式|孔不能跨行|"
+             # `docs/341` §7：格式说明的形状（只认 `>W` / `<W` / `^W` / `0W`，宽度 1..65535）。
+             r"格式说明(是空的|缺宽度|的宽度要在|只认)|"
              # Tur 2026.3 的 `lgc`（docs/309）：形状/单位/必带块这几条都是解析期错误。
              r"`lgc` (只认|后面要跟|的时长|的预算)|`lgc end` 不接受时长|带预算的 `lgc start|"
              # `docs/296` §2.5 / §2.6：循环控制与裸 `return` 的版次/形状错误
@@ -4491,6 +4495,122 @@ FINE: tuple[Fine, ...] = (
         ("Convert first: `str_num(n as u32)`.",
          "For a `bool`, use interpolation `f\"{b}\"`; that goes through `str_show`.",
          "If it is already decimal text, use it directly."),
+    ),
+    # 2026-11-11：插值的两个取值（`docs/341`）—— 孔收 `str` / `bool` / 整型，
+    # 别的类型在 `str_show` / `str_repr` 那一层报。模板上界里必须有自己的码。
+    Fine(
+        210, 1, r"^内建 .+ 实参期望 str / bool / 整型",
+        "插值只收 str / bool / 整型",
+        "interpolation takes str, bool or an integer",
+        "插值孔里的表达式是结构体、枚举、数组或指针 —— `str_show` / `str_repr` "
+        "没有这些形状的转换。",
+        "The hole expression is a struct, enum, array or pointer; `str_show` / "
+        "`str_repr` have no conversion for those shapes.",
+        ("先取出字段再插：`f\"{s.name}\"`。",
+         "指针用 `str_num(p as u64)` 印成数字。",
+         "想印自定义表示：写一个 `fn show(x: S) -> str`，孔里调它。"),
+        ("Pull the field out first: `f\"{s.name}\"`.",
+         "For a pointer, print the number: `str_num(p as u64)`.",
+         "For a custom form, write `fn show(x: S) -> str` and call it in the hole."),
+    ),
+    # 2026-11-13：`catch` 的两副新形状（`docs/343`）各有一条自己的诊断。四条都是
+    # "这个枚举的失败变体装不下/对不上"，所以都挂类型族。
+    Fine(
+        211, 1, r"^枚举 .+ 的失败变体 .+ 没有载荷，不能 `catch \|",
+        "`catch |e|` 要求失败变体带载荷",
+        "`catch |e|` needs the failure variant to carry a payload",
+        "`catch |e| { … }` 把错误载荷绑到 `e` 上；这个枚举的失败变体不带载荷，"
+        "没有东西可绑。",
+        "`catch |e| { ... }` binds the error payload to `e`; the failure variant of this "
+        "enum carries no payload, so there is nothing to bind.",
+        ("失败变体改成带载荷：`enum E { Ok(u32), Bad(u32) }`。",
+         "失败支不需要载荷就用老形状：`v catch 0`。",
+         "只想早退就写 `catch return`（不带绑定）。"),
+        ("Give the failure variant a payload: `enum E { Ok(u32), Bad(u32) }`.",
+         "If the failure arm needs no payload, use the older form: `v catch 0`.",
+         "To just leave the function, write `catch return` (no binding)."),
+    ),
+    Fine(
+        212, 1, r"^`catch \|[^`]*\|` 的值类型 .+，期望 .+",
+        "`catch |e|` 的兜底值与成功载荷同型",
+        "the `catch |e|` fallback must have the success payload's type",
+        "`catch |e| { EXPR }` 的那个表达式就是**兜底值**，它与成功那一支的载荷装进"
+        "同一个变量，类型必须一样。",
+        "The expression in `catch |e| { EXPR }` is the fallback value; it lands in the same "
+        "variable as the success payload, so the two types must match.",
+        ("把兜底表达式写成载荷那个类型（`u32` 载荷就给 `0`）。",
+         "兜底值是从别的类型来的，先 `as` 过去。",
+         "两条路本来就不同型：改用 `match`，两支各自处理。"),
+        ("Make the fallback the payload's type (a `u32` payload takes `0`).",
+         "If the fallback comes from another type, `as` it first.",
+         "When the two arms genuinely differ, use `match` and handle each arm."),
+    ),
+    Fine(
+        213, 1, r"^枚举 .+ 的失败变体 .+ 没有载荷，不能用 `catch return`",
+        "`catch return` 要求失败变体带载荷",
+        "`catch return` needs the failure variant to carry a payload",
+        "`catch return` 把错误载荷**原样装回**同一个枚举再返回；失败变体不带载荷时"
+        "没有东西可装。",
+        "`catch return` packs the error payload back into the same enum and returns it; a "
+        "failure variant with no payload has nothing to pack.",
+        ("失败变体加上载荷：`enum E { Ok(u32), Bad(u32) }`。",
+         "不需要载荷就换回 `v catch 0` 那种兜底值写法。",
+         "要在失败分支自己返回别的值：把这段提成一个函数，用 `return` 早退。"),
+        ("Add a payload to the failure variant: `enum E { Ok(u32), Bad(u32) }`.",
+         "If no payload is needed, go back to the `v catch 0` fallback form.",
+         "To return something else in the failure arm, lift the code into its own function."),
+    ),
+    Fine(
+        214, 1, r"^`catch return` 要求函数 .+ 返回 .+（同一个枚举），声明的是 .+",
+        "`catch return` 的函数要返回同一个枚举",
+        "the function using `catch return` must return the same enum",
+        "`catch return` 退出的是**整个函数**，装的就是这个枚举的失败变体 —— 所以函数的"
+        "返回类型必须正是它。",
+        "`catch return` leaves the whole function with that enum's failure variant, so the "
+        "function's return type must be that very enum.",
+        ("函数返回类型改成这个枚举：`fn f() -> Result<u32, u32>`。",
+         "函数本来就返回别的类型：改写 `v catch return` 为 `v catch 0`（或 `match`）。",
+         "这个错误不该由本函数处理：往上再传一层，让调用方决定。"),
+        ("Make the function return that enum: `fn f() -> Result<u32, u32>`.",
+         "If the function returns something else, replace `v catch return` with `v catch 0` "
+         "(or `match`).",
+         "If this failure is not the function's to handle, propagate it and let the caller decide."),
+    ),
+    # 2026-11-13：`auto` / `:=` 的局部类型推断（`docs/347`）。两条都是**推断不出**，
+    # 但处境不同：一条是初值没有把类型写在源里，一条是这个构造在装载期就被反糖、
+    # 推断无从谈起。所以两码。
+    Fine(
+        215, 1, r"^`auto` 推断不出 \S+ 的类型",
+        "`auto` 推断不出类型",
+        "`auto` cannot infer the type",
+        "`let x: auto = e` / `let x := e` 的类型从**初值**来，而这条初值没有把类型"
+        "写在源里 —— 字面量、调用与运算都属于这一类。",
+        "`let x: auto = e` / `let x := e` takes its type from the initializer, and this "
+        "initializer does not spell a type in the source - literals, calls and operators "
+        "are all in that class.",
+        ("初值是变量或字段就直接用；字面量写成 `5 as u32`。",
+         "调用与运算：把类型写出来 —— `let n: u32 = str_len(s);`。",
+         "只想要个默认宽度：`let n := 0 as u32;` 也是同一条路。"),
+        ("If the initializer is a variable or a field, use it directly; write a literal as `5 as u32`.",
+         "For a call or an operator, spell the type: `let n: u32 = str_len(s);`.",
+         "If you only want the default width, `let n := 0 as u32;` is the same road."),
+    ),
+    Fine(
+        # **不锚 `^`**：这条是解析错，消息前面带的是 `行:列: `（两个前缀），
+        # `_install_fine` 给锚点补的那一格只放得过一个"行: "。短语本身够独特。
+        216, 1, r"`auto` 不能接",
+        "`auto` 不能接 `if` / `match` 表达式",
+        "`auto` cannot take an `if` / `match` expression",
+        "`if` / `match` 表达式在装载期被反糖成\"先声明、两支各自赋值\"，那份声明需要"
+        "一个现成的类型 —— 推断在这里没有位置。",
+        "`if` / `match` expressions are desugared at load time into \"declare first, assign in "
+        "each arm\", and that declaration needs a type up front - there is no place to infer.",
+        ("把类型写出来：`let x: u32 = if c { a } else { b };`。",
+         "两支各自赋值也行：`let x: u32; if c { x = a; } else { x = b; }`。",
+         "值来自同一处：把那段提到 `let` 之前，让初值是变量。"),
+        ("Spell the type: `let x: u32 = if c { a } else { b };`.",
+         "Or assign in each arm: `let x: u32; if c { x = a; } else { x = b; }`.",
+         "If both arms share a source, hoist it before the `let`."),
     ),
 )
 

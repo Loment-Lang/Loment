@@ -260,6 +260,22 @@ a criterion checks the two compile to **byte-identical** IR).
 
 ## 3. Builtins (all of them, there are no others)
 
+> **Inferred locals** (Tur 2026.3+, `docs/347`): `let n := p.a;` / `let k: auto = p.b;` -
+> the type comes from the initialiser, and the initialiser must **spell a type in the
+> source** (a local/parameter, a field chain, a whole `as T` cast, or `true`/`false`).
+> `let x := 5;`, `let x := f();`, `let x := a + 1;` and `let x := K;` are E0215;
+> `auto` with an `if`/`match` expression is E0216. `:=` must be written glued.
+>
+> **`catch` handlers** (Tur 2026.3+, `docs/343`): `r catch |e| { e + 100 }` binds the
+> error payload and evaluates one expression; `r catch return` returns the error as
+> `Err(…)` from the function (its return type must be the same enum). Both only on the
+> right-hand side of `let`/assignment.
+>
+> **String constants** (Tur 2026.3+, `docs/342`): `const GREETING: str = "hello";` —
+> the value must be a string literal and every use site inlines it as that literal
+> (each use gets its own `.str.<fn>.<n>`). Older editions keep `const` integer-only.
+
+
 **These are the only builtins.** There are no built-in types like `String` / `Vec` / `HashMap`,
 no I/O wrappers, no string formatting. **But the toolchain ships a standard library**
 (`lompi/store/`, installed with the package, nothing to fetch) - `use vec` / `use map` / `use fs`
@@ -272,6 +288,11 @@ each bring in one module, see 3.1 at the end of this section.
 | `str_eq(a: str, b: str) -> bool` | Content comparison |
 | `str_concat(a: str, b: str) -> str` | Concatenation - **allocates from the same 64 KiB arena at run time**, so do not build big strings (or loop over it) |
 | `str_num(n) -> str` | Decimal text of **any integer type** (signed prints `-`) - **allocates from the same arena**, and it lives in the runtime block, so `no_runtime` refuses it by name (E31). `docs/337` |
+| `str_show(v) -> str` | Interpolation value (docs/341): `str` is the identity, `bool` prints `true`/`false`, any integer is decimal. May allocate, so `no_runtime` refuses it by name (E31) - including for a plain `str` hole |
+| `str_repr(v) -> str` | Same inputs as `str_show`; a `str` comes back quoted and escaped (`\`, `\"`, `
+`, `	`, `
+`). The `!r` conversion |
+| `str_pad(s, width, fill, align) -> str` | Interpolation width / zero-pad (docs/341): align 0 left, 1 right, 2 centre; returns the string unchanged when it is already wide enough, otherwise allocates. E31 under `no_runtime` |
 | `str_ptr(s: str) -> ptr` | The data pointer (for feeding syscalls) |
 | `print(s: str) -> u32` | Write the string's bytes to stdout (one `write` syscall) |
 | `tur_edition() -> str` | The Tur edition this program is compiled as, e.g. `tur2026.2` (docs/296). The compiler also prints it on stderr at every check/build/run |

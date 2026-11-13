@@ -905,7 +905,7 @@ pub fn code_what(c: u32, lang: u32) -> str {
     if k == 423 { return "`extern fn` 走**平台 ABI**；本语言的函数类型是内部调用约定，两者不能互相顶替（`docs/341`）。"; }
     if k == 424 { return "A closure record stores each capture in one 8-byte word; v1 accepts only word-sized captures (integers, `bool`, `ptr`)."; }
     if k == 425 { return "闭包记录按 8 字节一格存捕获；v1 只收整型 / `bool` / `ptr` 这类能放进一格的类型。"; }
-    if k == 426 { return "A closure learns its parameter types either from annotations (`(x: T) => …`) or from the expected type (the `let` annotation, an argument position, a return). With neither, the type is undetermined."; }
+    if k == 426 { return "A closure learns its parameter types either from annotations (`(x: T) => ...`) or from the expected type (the `let` annotation, an argument position, a return). With neither, the type is undetermined."; }
     if k == 427 { return "闭包只有两种途径得到形参类型：写在参数上（`(x: T) => …`），或从**期望类型**（`let` 的标注、实参位置、返回位置）推。两处都没有就定不出来。"; }
     if k == 428 { return "A by-reference capture stores an address; that address points into the callee's frame and dies when the function returns -- a dangling borrow."; }
     if k == 429 { return "按借捕获存的是**地址**；那个地址指向调用者的栈帧，函数一返回就失效。这正是一个悬垂借用（`docs/299` / `docs/341`）。"; }
@@ -3959,8 +3959,8 @@ pub fn code_fix(c: u32, i: u32, lang: u32) -> str {
     if k == 3393 { return "把要捕获的聚合成一个 `ptr` 传进去。"; }
     if k == 3395 { return "需要多格的捕获先用 `ptr` 或切片把它搬出闭包。"; }
     if k == 3397 { return "把闭包改成一个带显式形参的函数。"; }
-    if k == 3408 { return "Annotate the parameters: `(x: u64) => …`."; }
-    if k == 3410 { return "Put it where a type is expected: `let f: (u64) -> u64 = (x) => …;`."; }
+    if k == 3408 { return "Annotate the parameters: `(x: u64) => ...`."; }
+    if k == 3410 { return "Put it where a type is expected: `let f: (u64) -> u64 = (x) => ...;`."; }
     if k == 3412 { return "Pass it as an argument to a function whose parameter type is known."; }
     if k == 3409 { return "给参数写类型：`(x: u64) => …`。"; }
     if k == 3411 { return "把它放在有标注的位置：`let f: (u64) -> u64 = (x) => …;`。"; }

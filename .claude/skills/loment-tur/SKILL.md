@@ -205,12 +205,12 @@ the frozen editions):
   _ => 0 };`. Subject must be a name, one expression per arm, arms comma-separated;
   blocks, literal patterns, and other positions are not accepted in this round
   (`docs/336`);
-- **interpolated strings** `f"n={n}"` / `rf"raw
-{n}"` - a hole is any expression of type
-  `str`, `bool`, or an integer; `{{` / `}}` escape braces; `{expr=}` is the debug form and
-  `!r` quotes and escapes a `str`. It is a **front-end rewrite** to `str_concat` /
-  `str_show`, not a grammar production. Single line only; no format spec
-  (`{x:>5}`) and no nested interpolation yet (`docs/341`).
+- **interpolated strings** `f"n={n}"` / `rf"raw\n{n}"` - a hole is any expression of
+  type `str`, `bool`, or an integer; `{{` / `}}` escape braces; `{expr=}` is the debug
+  form, `!r` quotes and escapes a `str`, and `{x:>5}` / `{x:05}` pad to a width
+  (right / left / centre / zero-fill). It is a **front-end rewrite** to `str_concat` /
+  `str_show`, not a grammar production. Single line only; no dynamic width and no
+  nested interpolation yet (`docs/341`).
 
 ### 2.0.6 Lexical grammar
 

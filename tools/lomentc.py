@@ -48,6 +48,8 @@ BUILTINS = {
     # `str` / `bool` / 任意整型，真正的检查在 `_walk_expr` 里各一条。
     "str_show": (("str",), "str"),
     "str_repr": (("str",), "str"),
+    # 2026.3: 插值的宽度 / 补零（`docs/341` §7）。`align`：0 = 左、1 = 右、2 = 居中。
+    "str_pad": (("str", "u32", "u8", "u32"), "str"),
     "str_byte": (("str", "u32"), "u32"),
     "panic": (("u32",), "u32"),  # M19: 不可返回 (类型仅占位)
     "alloc": (("u32",), "ptr"),  # M15
@@ -730,6 +732,33 @@ done:
   ret i64 %j3
 }
 '''
+
+#: `str_pad`（`docs/341` §7）：先用 `fill` 填满 `w` 字节，再把 `n` 个字节按对齐位置
+#: 拷进去。对齐：0 = 左、1 = 右、2 = 居中（居中是 `(w-n)/2`，左边多一个，与 Python 一致）。
+_IR_PAD = '''define internal void @__loment_pad(ptr %out, ptr %p, i64 %n, i64 %w, i8 %fill, i32 %align) {
+entry:
+  %d = sub i64 %w, %n
+  %isc = icmp eq i32 %align, 2
+  br i1 %isc, label %c, label %ck
+c:
+  %half = lshr i64 %d, 1
+  br label %j
+ck:
+  %isr = icmp eq i32 %align, 1
+  br i1 %isr, label %r, label %l
+r:
+  br label %j
+l:
+  br label %j
+j:
+  %off = phi i64 [ %half, %c ], [ %d, %r ], [ 0, %l ]
+  call void @__loment_memset(ptr %out, i8 %fill, i64 %w)
+  %dp = getelementptr i8, ptr %out, i64 %off
+  call void @__loment_memcpy(ptr %dp, ptr %p, i64 %n)
+  ret void
+}
+'''
+
 
 #: **分配器**（`docs/175` §3.4 的 `gc_manual`）。
 #:
@@ -6000,7 +6029,7 @@ def expr_type(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[st
     if isinstance(e, GenOf):
         return "u64"
     if isinstance(e, Call):
-        if e.name in ("str_num", "str_show", "str_repr"):
+        if e.name in ("str_num", "str_show", "str_repr", "str_pad"):
             return "str"
         sig = _builtin_sig(e)
         if sig is not None:
@@ -7295,6 +7324,7 @@ _RUNTIME_SITES: dict[str, str] = {
     # 也不分配，但这一维的判据长在 token 上，看不见实参类型 —— 往"会拖运行期"那侧偏。
     "str_show": "`str_show`（插值）",
     "str_repr": "`str_repr`（插值 `!r`）",
+    "str_pad": "`str_pad`（插值的宽度 / 补零）",
     "str_eq": "`str_eq`",
     "panic": "`panic`",
     # `docs/296` §2.7：`print_num` 的十进制转换在运行期那一块里（24 字节栈缓冲、一次
@@ -7517,6 +7547,7 @@ _PKG_FEATURES: dict[str, str] = {
     "str_num": "str_num",
     "str_show": "str_show",
     "str_repr": "str_repr",
+    "str_pad": "str_pad",
     "str_eq": "str_eq",
     "panic": "panic",
     "print_num": "print_num",
@@ -9524,6 +9555,17 @@ def _expr_rs(e) -> str:
             return f"(Box::leak(format!(\"{{}}\", {a[0]}).into_boxed_str()) as &'static str)"
         if e.name == "str_repr":  # docs/341: 调试表示
             return f"(Box::leak(format!(\"{{:?}}\", {a[0]}).into_boxed_str()) as &'static str)"
+        if e.name == "str_pad":  # docs/341 §7: 宽度 / 补零
+            # 前端只发**字面量**的 fill / align（`str_pad(v, 5, 32, 1)`），所以这里能直接
+            # 拼出 Rust 的格式说明。别的形状在 Rust 后端里报一句，不静默丢掉对齐。
+            if not (isinstance(e.args[2], IntLit) and isinstance(e.args[3], IntLit)):
+                raise LomError(e.line, 1,
+                               "rust 后端: str_pad 的 fill / align 必须是整数字面量")
+            fill = chr(e.args[2].value & 0xFF)
+            al = {0: "<", 1: ">", 2: "^"}.get(e.args[3].value, ">")
+            spec = fill + al
+            return (f"(Box::leak(format!(\"{{{spec}width$}}\", {a[0]}, "
+                    f"width = ({a[1]}) as usize).into_boxed_str()) as &'static str)")
         if e.name == "str_concat":  # M2: v0 的 str 是 &'static str -> 只能漏内存
             return (f"(Box::leak(format!(\"{{}}{{}}\", {a[0]}, {a[1]}).into_boxed_str()) "
                     f"as &'static str)")
@@ -12222,7 +12264,7 @@ def _l2_ok(toks: list, at: int, end: int, fend: int, l0: dict[str, int],
     nalloc = 0
     for k in range(at, end):
         if word(k, "str_concat") or word(k, "str_num") or word(k, "str_show") \
-                or word(k, "str_repr"):
+                or word(k, "str_repr") or word(k, "str_pad"):
             return False
         if word(k, "free"):
             # 体内不许 `free`：**前沿在体内只增不减**，末尾那一条无条件写回才对。
@@ -12409,7 +12451,7 @@ def _alloc_site_map(body: list) -> dict[int, int]:
 
     def reap(v) -> None:
         if isinstance(v, Call) and v.name in ("alloc", "str_concat", "str_num",
-                                              "str_show", "str_repr"):
+                                              "str_show", "str_repr", "str_pad"):
             m[id(v)] = len(m)
         if _dc.is_dataclass(v) and not isinstance(v, type):
             for fd in _dc.fields(v):
@@ -13807,6 +13849,38 @@ class _Ir:
         if e.name == "str_num":
             ty, av = self.expr(e.args[0])
             return "str", self._str_num_ir(av, ty, e)
+        # 2026.3: 插值的宽度 / 补零（`docs/341` §7）：`n < w` 才分配 `w` 字节并填充，
+        # 否则原样返回 —— 与 Python 的 `{x:>5}` 同义（不截断）。
+        if e.name == "str_pad":
+            _, sv = self.expr(e.args[0], "str")
+            _, wv = self.expr(e.args[1], "u32")
+            _, fv = self.expr(e.args[2], "u8")
+            _, av = self.expr(e.args[3], "u32")
+            p, n = self.t(), self.t()
+            self.w(f"{p} = extractvalue {{ ptr, i64 }} {sv}, 0")
+            self.w(f"{n} = extractvalue {{ ptr, i64 }} {sv}, 1")
+            w64 = self.t()
+            self.w(f"{w64} = zext i32 {wv} to i64")
+            lt = self.t()
+            self.w(f"{lt} = icmp ult i64 {n}, {w64}")
+            pad, keep, join = self.l("spad"), self.l("spin"), self.l("spout")
+            self.w(f"br i1 {lt}, label %{pad}, label %{keep}")
+            self.terminated = True
+            self.label(pad)
+            b = self.alloc_ir(wv, e)
+            self.w(f"call void @__loment_pad(ptr {b}, ptr {p}, i64 {n}, i64 {w64}, "
+                   f"i8 {fv}, i32 {av})")
+            v1 = self.t()
+            self.w(f"{v1} = insertvalue {{ ptr, i64 }} undef, ptr {b}, 0")
+            v2 = self.t()
+            self.w(f"{v2} = insertvalue {{ ptr, i64 }} {v1}, i64 {w64}, 1")
+            self.jump(join)
+            self.label(keep)
+            self.jump(join)
+            self.label(join)
+            r = self.t()
+            self.w(f"{r} = phi {{ ptr, i64 }} [ {v2}, %{pad} ], [ {sv}, %{keep} ]")
+            return "str", r
         # 2026.3: 插值的取值（`docs/341`）—— `str` 恒等、整型同 `str_num`、
         # `bool` 走一个 8 字节的堆块；`str_repr` 与非串实参的 `str_show` 相同。
         if e.name in ("str_show", "str_repr"):
@@ -14683,7 +14757,7 @@ def _heap_needed(mods: list, rt_on: bool = True) -> bool:
             # 它们和分配器同一段文本，所以起线程就发堆（即便这个程序自己一次 `alloc`
             # 都不写）。与自举侧 `heap_needed` 同一个集合。
             if tk.kind != "ident" or tk.val not in ("alloc", "str_concat", "str_num",
-                                                    "str_show", "str_repr",
+                                                    "str_show", "str_repr", "str_pad",
                                                     "free", "thread_spawn"):
                 continue
             if tk.val == "alloc" and _alloc_promoted(toks, i, funcs):
@@ -14975,6 +15049,8 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
         out.append(_IR_BOOL_TO_STR)
     if _calls_named(mods, ("str_repr",)):
         out.append(_IR_STR_REPR)
+    if _calls_named(mods, ("str_pad",)):
+        out.append(_IR_PAD)
     # 能力域运行时：`guard` 发 `@__loment_guard2`，`tick;` 发 `@__loment_tick`。
     # **两者都不用时一个字节不发** —— 旧程序的产物逐字节不变。
     _guard_rt = ("@__loment_guard2" in text_all or "@__loment_tick" in text_all

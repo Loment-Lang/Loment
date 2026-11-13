@@ -1673,6 +1673,7 @@ def test_str_interpolation():
         "    let c: str = f\"{b} {n=}\";", chr(10),
         "    let d: str = f\"{s!r} {{lit}}\";", chr(10),
         "    let e: str = rf\"raw\\\\n{n}\";", chr(10),
+        "    let g: str = f\"{n:>5}|{s:<4}|{n:05}|{n:^7}\";", chr(10),
         "    return a;", chr(10),
         "}", chr(10)])
     with tempfile.TemporaryDirectory() as t:
@@ -1684,7 +1685,8 @@ def test_str_interpolation():
         assert not errs, errs[:3]
         ll = lomentc.emit_llvm(mod, ROOT)
         for sym in ("call i32 @__loment_num_to_dec", "call i32 @__loment_bool_to_str",
-                    "call i64 @__loment_str_repr"):
+                    "call i64 @__loment_str_repr", "call void @__loment_pad",
+                    "define internal void @__loment_pad"):
             assert sym in ll, (sym, ll[-400:])
         # `str` 孔是**恒等**：不发 `str_show(` 调用（`str_show` 只出现在别的孔里）
         assert "str_show(" not in ll, "str 孔不该生成 str_show 调用"
@@ -1696,16 +1698,25 @@ def test_str_interpolation():
         errs2 = lomentc.check(mod2, deps=lomentc.resolve_deps(mod2, ROOT, td, entry=p2))
         assert any("no_runtime" in e and "str_" in e for e in errs2), errs2[:3]
 
-        # 格式说明还没接上：**指到孔**，不是一句泛泛的语法错
+        # 格式说明**收** `>W` / `<W` / `^W` / `0W`（`docs/341` §7）；别的形状**指到孔**
         p3 = td / "bad.lomt"
-        p3.write_text(body.replace('f"n={n} {s}"', 'f"n={n:>5}"'),
+        p3.write_text(body.replace('f"n={n} {s}"', 'f"n={n:W5}"'),
                       encoding="utf-8", newline=chr(10))
         try:
             lomentc.load(p3)
         except lomentc.LomError as e:
             assert "格式说明" in e.msg, e.msg
         else:
-            raise AssertionError("`{n:>5}` 没被拒")
+            raise AssertionError("`{n:W5}` 没被拒")
+        p3b = td / "wide.lomt"
+        p3b.write_text(body.replace('f"n={n} {s}"', 'f"n={n:0}"'),
+                       encoding="utf-8", newline=chr(10))
+        try:
+            lomentc.load(p3b)
+        except lomentc.LomError as e:
+            assert "格式说明" in e.msg, e.msg
+        else:
+            raise AssertionError("`{n:0}`（缺宽度）没被拒")
 
         # **列号映射**：改写之后解析器报的列要指回用户那一行的那一格
         bad2 = body.replace('f"n={n} {s}"', 'f"n={n + }"')

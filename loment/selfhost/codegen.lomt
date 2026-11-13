@@ -2089,7 +2089,8 @@ pub fn l2_ok_at(src: ptr, toks: ptr, at: u32, end: u32, fat: u32, fend: u32,
     let k: u32 = at;
     while k < end {
         if tok_is(src, toks, k, "str_concat") || tok_is(src, toks, k, "str_num")
-                || tok_is(src, toks, k, "str_show") || tok_is(src, toks, k, "str_repr") {
+                || tok_is(src, toks, k, "str_show") || tok_is(src, toks, k, "str_repr")
+                || tok_is(src, toks, k, "str_pad") {
             return 0;
         }
         if tok_is(src, toks, k, "free") {
@@ -4907,6 +4908,92 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
                 return c17 + 3;
             }
             return c17 + 1;
+        }
+        if tok_is(src, toks, j, "str_pad") {   // docs/341 §7: 宽度 / 补零（分支 + phi）
+            let k17: u32 = arg1(s, out, src, toks, j + 2, lvl);
+            let k18: u32 = arg1(s, out, src, toks, k17, lvl + 1);
+            let k19: u32 = arg1(s, out, src, toks, k18, lvl + 2);
+            let k20: u32 = arg1(s, out, src, toks, k19, lvl + 3);
+            let ap: u32 = alloc_temp(s);
+            let al: u32 = alloc_temp(s);
+            emit_str(s, out, "  %t");
+            emit_dec(s, out, ap);
+            emit_str(s, out, " = extractvalue { ptr, i64 } ");
+            emit_val(s, out, lvl);
+            emit_str(s, out, ", 0\n  %t");
+            emit_dec(s, out, al);
+            emit_str(s, out, " = extractvalue { ptr, i64 } ");
+            emit_val(s, out, lvl);
+            emit_str(s, out, ", 1\n  ");
+            let w64: u32 = new_temp(s, out);
+            emit_str(s, out, " = zext i32 ");
+            emit_val(s, out, lvl + 1);
+            emit_str(s, out, " to i64\n  ");
+            let lt: u32 = new_temp(s, out);
+            emit_str(s, out, " = icmp ult i64 %t");
+            emit_dec(s, out, al);
+            emit_str(s, out, ", %t");
+            emit_dec(s, out, w64);
+            emit_str(s, out, "\n");
+            let wq: u32 = load32(s, 480) + 1;
+            store32(s, 480, wq + 2);
+            emit_str(s, out, "  br i1 %t");
+            emit_dec(s, out, lt);
+            emit_str(s, out, ", label ");
+            lab_ref(s, out, wq, "spad");
+            emit_str(s, out, ", label ");
+            lab_ref(s, out, wq + 1, "spin");
+            emit_str(s, out, "\n");
+            store32(s, 476, 1);
+            lab_def(s, out, wq, "spad");
+            // 分配会 `set_temp_val(lvl, p)` —— 而 `lvl` 上放着**原来的字符串**
+            // （phi 的 keep 那一支要用它），所以这里让分配把结果存在 lvl + 4。
+            let cp: u32 = emit_alloc_seq(s, out, src, toks, lvl + 1, lvl + 4, j);
+            emit_str(s, out, "  call void @__loment_pad(ptr %t");
+            emit_dec(s, out, cp);
+            emit_str(s, out, ", ptr %t");
+            emit_dec(s, out, ap);
+            emit_str(s, out, ", i64 %t");
+            emit_dec(s, out, al);
+            emit_str(s, out, ", i64 %t");
+            emit_dec(s, out, w64);
+            emit_str(s, out, ", i8 ");
+            emit_val(s, out, lvl + 2);
+            emit_str(s, out, ", i32 ");
+            emit_val(s, out, lvl + 3);
+            emit_str(s, out, ")\n  ");
+            let v1: u32 = new_temp(s, out);
+            emit_str(s, out, " = insertvalue { ptr, i64 } undef, ptr %t");
+            emit_dec(s, out, cp);
+            emit_str(s, out, ", 0\n  ");
+            let v2: u32 = new_temp(s, out);
+            emit_str(s, out, " = insertvalue { ptr, i64 } %t");
+            emit_dec(s, out, v1);
+            emit_str(s, out, ", i64 %t");
+            emit_dec(s, out, w64);
+            emit_str(s, out, ", 1\n");
+            jump(s, out, wq + 2, "spout");
+            lab_def(s, out, wq + 1, "spin");
+            jump(s, out, wq + 2, "spout");
+            lab_def(s, out, wq + 2, "spout");
+            let rq: u32 = alloc_temp(s);
+            emit_str(s, out, "  %t");
+            emit_dec(s, out, rq);
+            emit_str(s, out, " = phi { ptr, i64 } [ %t");
+            emit_dec(s, out, v2);
+            emit_str(s, out, ", ");
+            lab_ref(s, out, wq, "spad");
+            emit_str(s, out, " ], [ ");
+            emit_val(s, out, lvl);
+            emit_str(s, out, ", ");
+            lab_ref(s, out, wq + 1, "spin");
+            emit_str(s, out, " ]\n");
+            set_temp_val(s, lvl, rq);
+            if tok_is(src, toks, k20 + 1, "as") {
+                apply_cast(s, out, src, toks, 0, k20 + 2, lvl);
+                return k20 + 3;
+            }
+            return k20 + 1;
         }
         if tok_is(src, toks, j, "str_eq") {   // 先比长度再 memcmp (bool + phi)
             let k15: u32 = arg1(s, out, src, toks, j + 2, lvl);
@@ -12496,7 +12583,8 @@ fn uses_str_num(s: ptr, src: ptr, toks: ptr) -> u32 {
         // 插值的整型取值也走这段十进制转换（`docs/341`）：判据按**名字**取，与参考
         // 实现 `_calls_named` 同一条 —— 多发的是一段没人调用的 internal 函数。
         if (tok_is(src, toks, i, "str_num") || tok_is(src, toks, i, "str_show")
-                || tok_is(src, toks, i, "str_repr")) && tok_is(src, toks, i + 1, "(") {
+                || tok_is(src, toks, i, "str_repr") || tok_is(src, toks, i, "str_pad"))
+                && tok_is(src, toks, i + 1, "(") {
             if !(i > 0 && tok_is(src, toks, i - 1, "fn")) {
                 return 1;
             }
@@ -12536,6 +12624,25 @@ fn uses_show_helper(s: ptr, src: ptr, toks: ptr) -> u32 {
         i = i + 1;
     }
     return 0;
+}
+
+/// 这份单元**调用**了 `str_pad` 吗（`docs/341` §7）。
+fn uses_str_pad(s: ptr, src: ptr, toks: ptr) -> u32 {
+    let i: u32 = 0;
+    while tok_kind(toks, i) != 4 {
+        if tok_is(src, toks, i, "str_pad") && tok_is(src, toks, i + 1, "(") {
+            if !(i > 0 && tok_is(src, toks, i - 1, "fn")) {
+                return 1;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// `str_pad` 的实现：与参考实现 `lomentc._IR_PAD` **逐字节相同**（`docs/341` §7）。
+fn emit_pad(s: ptr, out: ptr) -> u32 {
+    return emit_str(s, out, "define internal void @__loment_pad(ptr %out, ptr %p, i64 %n, i64 %w, i8 %fill, i32 %align) {\nentry:\n  %d = sub i64 %w, %n\n  %isc = icmp eq i32 %align, 2\n  br i1 %isc, label %c, label %ck\nc:\n  %half = lshr i64 %d, 1\n  br label %j\nck:\n  %isr = icmp eq i32 %align, 1\n  br i1 %isr, label %r, label %l\nr:\n  br label %j\nl:\n  br label %j\nj:\n  %off = phi i64 [ %half, %c ], [ %d, %r ], [ 0, %l ]\n  call void @__loment_memset(ptr %out, i8 %fill, i64 %w)\n  %dp = getelementptr i8, ptr %out, i64 %off\n  call void @__loment_memcpy(ptr %dp, ptr %p, i64 %n)\n  ret void\n}\n\n");
 }
 
 /// 这份单元**调用**了 `str_repr` 吗（`docs/341`）。
@@ -12593,6 +12700,7 @@ fn runtime_needed(s: ptr, src: ptr, toks: ptr) -> u32 {
                 || tok_is(src, toks, i, "str_eq") || tok_is(src, toks, i, "str_concat")
                 || tok_is(src, toks, i, "str_num")
                 || tok_is(src, toks, i, "str_show") || tok_is(src, toks, i, "str_repr")
+                || tok_is(src, toks, i, "str_pad")
                 || tok_is(src, toks, i, "free")
                 || tok_is(src, toks, i, "guard")
                 || tok_is(src, toks, i, "tick")) {
@@ -12658,6 +12766,7 @@ fn heap_needed(s: ptr, src: ptr, toks: ptr, rt_on: u32) -> u32 {
                 || tok_is(src, toks, i, "str_num")        // 十进制也拼到堆上
                 || tok_is(src, toks, i, "str_show")       // 插值：int/bool 落在堆上
                 || tok_is(src, toks, i, "str_repr")
+                || tok_is(src, toks, i, "str_pad")        // 补零 / 宽度也落堆
                 || tok_is(src, toks, i, "free")           // 回收也要读那份状态
                 || tok_is(src, toks, i, "thread_spawn")) {
             hit = 1;
@@ -12804,7 +12913,7 @@ fn alloc_sites(src: ptr, toks: ptr, b: u32, e: u32) -> u32 {
             // 可能落堆的三个转换（整型 / bool / repr，`docs/337`/`docs/341`）。
             if tok_is(src, toks, i, "alloc") || tok_is(src, toks, i, "str_concat")
                     || tok_is(src, toks, i, "str_num") || tok_is(src, toks, i, "str_show")
-                    || tok_is(src, toks, i, "str_repr") {
+                    || tok_is(src, toks, i, "str_repr") || tok_is(src, toks, i, "str_pad") {
                 if tok_is(src, toks, i + 1, "(") {
                     hit = 1;
                 }
@@ -13358,6 +13467,9 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32, tickx: u32)
         }
         if uses_str_repr(s, src, toks) == 1 {
             emit_str_repr(s, out);
+        }
+        if uses_str_pad(s, src, toks) == 1 {
+            emit_pad(s, out);
         }
     }
     if guard_rt_needed(s, src, toks) == 1 {   // docs/306-308: 十种域的判决点

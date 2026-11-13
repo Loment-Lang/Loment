@@ -860,7 +860,7 @@ Tur 2026.3 adds:
 | for-call | `for x in buf(&xs) { … }` | a for-in whose source is a call returning an array or slice; the call is evaluated once | 2026.3+ only; the source MUST be a call (array literals and other expressions are later editions); `x` is a copy |
 | if expression | `let x: u32 = if c { 10 } else { 20 };` | a `let` initialiser picks one of two expressions | 2026.3+ only; initialiser position only, one expression per arm, `else` required; no `else if` or nesting |
 | match expression | `let x: u32 = match d { D::N => 1, _ => 0 };` | a `let` initialiser picks one arm's expression | 2026.3+ only; initialiser position only, subject is a name, one expression per arm, arms comma-separated; no nesting or literal patterns |
-| interpolated string | `f"n={n}"`, `rf"raw\n{n}"`, `{x=}`, `{s!r}`, `{{` / `}}` | a string whose holes are any expression; `str` / `bool` / any integer are shown by `str_show`, `!r` quotes and escapes a `str`; the whole form is a front-end rewrite to `str_concat` | 2026.3+ only; single line, no format spec (`{x:>5}`), no nested interpolation; text segments are ordinary literals |
+| interpolated string | `f"n={n}"`, `rf"raw\n{n}"`, `{x=}`, `{s!r}`, `{n:>5}` / `{n:05}`, `{{` / `}}` | a string whose holes are any expression; `str` / `bool` / any integer are shown by `str_show`, `!r` quotes and escapes a `str`, a format spec pads to a width (via `str_pad`); the whole form is a front-end rewrite to `str_concat` | 2026.3+ only; single line, no nested interpolation, no dynamic width; text segments are ordinary literals |
 
 The lifetime dimension is **edition-gated**: writing `choose lifetime_*` in 2026.1 or
 2026.2 is refused; those editions keep the old default (`lifetime_no`) and the old
@@ -1515,9 +1515,8 @@ the user's declarations is E002.
 | `str_concat(a: str, b: str) -> str` | concatenation; allocates from the runtime arena |
 | `str_num(n) -> str` | decimal representation of any integer type (signed prints `-`); allocates from the runtime arena, so `no_runtime` refuses it by name |
 | `str_show(v) -> str` | interpolation value: `str` is the identity, `bool` prints `true`/`false`, any integer is decimal; may allocate, so `no_runtime` refuses it by name |
-| `str_repr(v) -> str` | same inputs as `str_show`; `str` is quoted and escaped (`\`, `\"`, `
-`, `	`, `
-`) |
+| `str_repr(v) -> str` | same inputs as `str_show`; `str` is quoted and escaped (`\\`, `\"`, `\n`, `\t`, `\r`) |
+| `str_pad(s: str, width: u32, fill: u8, align: u32) -> str` | pad to `width` (0 left, 1 right, 2 centre); returns `s` unchanged when it is already wide enough, otherwise allocates |
 | `str_ptr(s: str) -> ptr` | data pointer |
 | `print(s: str) -> u32` | write the bytes to stdout |
 | `tur_edition() -> str` | the resolved canonical edition |
@@ -1558,6 +1557,8 @@ wrapped in `str_show(` … `)` (or `str_repr(` for `!r`), and the pieces fold le
   E001 at the `str_show` / `str_repr` call;
 * `rf"…"` disables backslash escapes (`\` is a backslash); `{{` / `}}` still escape braces;
 * `{expr=}` prints `expr`'s source text, `=`, then the value;
+* a format spec pads the value: `{x:>5}` right, `{x:<5}` left, `{x:^5}` centre,
+  `{x:05}` zero-filled; the width is a lower bound, the value is never truncated;
 * every interpolation counts as a runtime construct (E031 under `no_runtime`), even
   `f"{s}"`, which lowers to the identity — the check runs on tokens, not types;
 * `lomfmt` / `lomdoc` / LSP still see the original source and treat `f"…"` as a plain
@@ -3253,7 +3254,7 @@ the full statement.
 | Built-in | Tur 1 | Tur 2026.2+ | Needs runtime | Target notes |
 |---|---|---|---|---|
 | `str_len`, `str_eq`, `str_byte`, `str_ptr`, `print`, `ptr_*`, `slice_len` | yes | yes | no | |
-| `str_concat`, `str_num`, `str_show`, `str_repr` | yes | yes | yes | allocate from the arena; E031 under `no_runtime` |
+| `str_concat`, `str_num`, `str_show`, `str_repr`, `str_pad` | yes | yes | yes | allocate from the arena; E031 under `no_runtime` |
 | `alloc`, `free`, `load8`, `store8` | yes | yes | no (the allocator is in the artifact) | |
 | `atomic_add` | yes | yes | no | |
 | `inb`, `outb` | yes | yes | no | translation backend only |

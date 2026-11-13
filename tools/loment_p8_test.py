@@ -3978,6 +3978,7 @@ def test_m104_str_interpolation_twin():
         '    let d: str = f"{s!r}";', chr(10),
         '    let e: str = rf"raw\\\\n{n}";', chr(10),
         '    let g: str = f"{m}{n}";', chr(10),
+        '    let i: str = f"{n:>5}|{s:<4}|{n:05}|{n:^7}";', chr(10),
         "    return a;", chr(10),
         "}", chr(10), chr(10),
         "fn h(n: u32) -> u32 {", chr(10),
@@ -3992,7 +3993,7 @@ def test_m104_str_interpolation_twin():
         "fn f(n: u32) -> str {", chr(10),
         '    let a: str = f"n={n}";', chr(10),
         "    let p: ptr = alloc(8);", chr(10),
-        '    let b: str = f"{n}{str_len(a)}";', chr(10),
+        '    let b: str = f"{n:>4}{str_len(a):05}";', chr(10),
         "    return b;", chr(10),
         "}", chr(10)])
     with tempfile.TemporaryDirectory() as td:

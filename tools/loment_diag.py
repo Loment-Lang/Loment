@@ -4513,6 +4513,69 @@ FINE: tuple[Fine, ...] = (
          "For a pointer, print the number: `str_num(p as u64)`.",
          "For a custom form, write `fn show(x: S) -> str` and call it in the hole."),
     ),
+    # 2026-11-13：`catch` 的两副新形状（`docs/343`）各有一条自己的诊断。四条都是
+    # "这个枚举的失败变体装不下/对不上"，所以都挂类型族。
+    Fine(
+        211, 1, r"^枚举 .+ 的失败变体 .+ 没有载荷，不能 `catch \|",
+        "`catch |e|` 要求失败变体带载荷",
+        "`catch |e|` needs the failure variant to carry a payload",
+        "`catch |e| { … }` 把错误载荷绑到 `e` 上；这个枚举的失败变体不带载荷，"
+        "没有东西可绑。",
+        "`catch |e| { … }` binds the error payload to `e`; the failure variant of this "
+        "enum carries no payload, so there is nothing to bind.",
+        ("失败变体改成带载荷：`enum E { Ok(u32), Bad(u32) }`。",
+         "失败支不需要载荷就用老形状：`v catch 0`。",
+         "只想早退就写 `catch return`（不带绑定）。"),
+        ("Give the failure variant a payload: `enum E { Ok(u32), Bad(u32) }`.",
+         "If the failure arm needs no payload, use the older form: `v catch 0`.",
+         "To just leave the function, write `catch return` (no binding)."),
+    ),
+    Fine(
+        212, 1, r"^`catch \|[^`]*\|` 的值类型 .+，期望 .+",
+        "`catch |e|` 的兜底值与成功载荷同型",
+        "the `catch |e|` fallback must have the success payload's type",
+        "`catch |e| { EXPR }` 的那个表达式就是**兜底值**，它与成功那一支的载荷装进"
+        "同一个变量，类型必须一样。",
+        "The expression in `catch |e| { EXPR }` is the fallback value; it lands in the same "
+        "variable as the success payload, so the two types must match.",
+        ("把兜底表达式写成载荷那个类型（`u32` 载荷就给 `0`）。",
+         "兜底值是从别的类型来的，先 `as` 过去。",
+         "两条路本来就不同型：改用 `match`，两支各自处理。"),
+        ("Make the fallback the payload's type (a `u32` payload takes `0`).",
+         "If the fallback comes from another type, `as` it first.",
+         "When the two arms genuinely differ, use `match` and handle each arm."),
+    ),
+    Fine(
+        213, 1, r"^枚举 .+ 的失败变体 .+ 没有载荷，不能用 `catch return`",
+        "`catch return` 要求失败变体带载荷",
+        "`catch return` needs the failure variant to carry a payload",
+        "`catch return` 把错误载荷**原样装回**同一个枚举再返回；失败变体不带载荷时"
+        "没有东西可装。",
+        "`catch return` packs the error payload back into the same enum and returns it; a "
+        "failure variant with no payload has nothing to pack.",
+        ("失败变体加上载荷：`enum E { Ok(u32), Bad(u32) }`。",
+         "不需要载荷就换回 `v catch 0` 那种兜底值写法。",
+         "要在失败分支自己返回别的值：把这段提成一个函数，用 `return` 早退。"),
+        ("Add a payload to the failure variant: `enum E { Ok(u32), Bad(u32) }`.",
+         "If no payload is needed, go back to the `v catch 0` fallback form.",
+         "To return something else in the failure arm, lift the code into its own function."),
+    ),
+    Fine(
+        214, 1, r"^`catch return` 要求函数 .+ 返回 .+（同一个枚举），声明的是 .+",
+        "`catch return` 的函数要返回同一个枚举",
+        "the function using `catch return` must return the same enum",
+        "`catch return` 退出的是**整个函数**，装的就是这个枚举的失败变体 —— 所以函数的"
+        "返回类型必须正是它。",
+        "`catch return` leaves the whole function with that enum's failure variant, so the "
+        "function's return type must be that very enum.",
+        ("函数返回类型改成这个枚举：`fn f() -> Result<u32, u32>`。",
+         "函数本来就返回别的类型：改写 `v catch return` 为 `v catch 0`（或 `match`）。",
+         "这个错误不该由本函数处理：往上再传一层，让调用方决定。"),
+        ("Make the function return that enum: `fn f() -> Result<u32, u32>`.",
+         "If the function returns something else, replace `v catch return` with `v catch 0` "
+         "(or `match`).",
+         "If this failure is not the function's to handle, propagate it and let the caller decide."),
+    ),
 )
 
 

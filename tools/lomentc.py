@@ -1984,7 +1984,8 @@ class ForEach:
 class ConstDecl:
     name: str
     type: str
-    value: int
+    #: 整数常量是 `int`；`const NAME: str = "…"`（2026.3+，`docs/342`）是 `str`。
+    value: object
     line: int
     pub: bool = False
 
@@ -4378,7 +4379,12 @@ class Parser:
         self.expect("punct", ":")
         ty = self.type_name()
         self.expect("punct", "=")
-        val = self.int_lit()
+        # `const NAME: str = "…"`（2026.3+，`docs/342`）：字符串常量就是那个字面量。
+        # 旧版次照旧只吃整数字面量（沿用原来的解析错）。
+        if ty == "str" and self.profile in TUR3_PLUS and self.at("string"):
+            val = self.expect("string", None, "（常量值）").val
+        else:
+            val = self.int_lit()
         self.expect("punct", ";")
         return ConstDecl(name, ty, val, kw.line)
 
@@ -8472,7 +8478,10 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                 or c.name in dep_names:
             errs.append(f"{c.line}: 常量 {c.name} 与既有声明重名")
         seen_const.add(c.name)
-        if c.type not in INT_TYPES:
+        if c.type == "str":
+            if getattr(mod, "profile", "") not in TUR3_PLUS or not isinstance(c.value, str):
+                errs.append(f"{c.line}: 常量 {c.name} 类型必须是整型，得到 {c.type}")
+        elif c.type not in INT_TYPES:
             errs.append(f"{c.line}: 常量 {c.name} 类型必须是整型，得到 {c.type}")
         const_scope[c.name] = c.type
 
@@ -9802,7 +9811,12 @@ def _rust_body(mod: Module, lom_root: Path) -> list[str]:
         out.append("];")
         out.append("")
     for c in mod.consts:
-        out.append(f"pub const {c.name}: {c.type} = {c.value};")
+        if isinstance(c.value, str):
+            import json as _json
+            out.append(f"pub const {c.name}: &'static str = "
+                       f"{_json.dumps(c.value, ensure_ascii=False)};")
+        else:
+            out.append(f"pub const {c.name}: {c.type} = {c.value};")
     if mod.consts:
         out.append("")
     for e in mod.enums:
@@ -13055,6 +13069,10 @@ class _Ir:
         if isinstance(e, Ident):
             if e.name in self.consts:  # 常量在生成期内联
                 ty, val = self.consts[e.name]
+                if ty == "str":
+                    # 字符串常量（`docs/342`）：与字面量**同一段**发 —— 每个使用点一个
+                    # `.str.<fn>.<n>` 常量，编号按出现顺序，与自举侧的准备扫描对齐。
+                    return "str", self._str_lit_ir(val)
                 if ty in INT_TYPES or ty == "bool":
                     val = _wrap_int(val, ty)
                 return ty, str(val)
@@ -13099,19 +13117,7 @@ class _Ir:
         if isinstance(e, Bin):
             return self.binop(e, want)
         if isinstance(e, StrLit):
-            b = e.value.encode("utf-8")
-            name = f"@.str.{self.f.name}.{len(self.globals)}"
-            esc = "".join(f"\\{x:02X}" for x in b)
-            self.globals.append(
-                f'{name} = private unnamed_addr constant [{len(b)} x i8] c"{esc}"'
-            )
-            p = self.t()
-            self.w(f"{p} = getelementptr inbounds [{len(b)} x i8], ptr {name}, i64 0, i64 0")
-            v = self.t()
-            self.w(f"{v} = insertvalue {{ ptr, i64 }} undef, ptr {p}, 0")
-            v2 = self.t()
-            self.w(f"{v2} = insertvalue {{ ptr, i64 }} {v}, i64 {len(b)}, 1")
-            return "str", v2
+            return "str", self._str_lit_ir(e.value)
         if isinstance(e, Cast):  # 整数/布尔转换
             # **整数字面量 `as iN`：字面量的值就是值**（#694）。不能再走下面
             # `self.expr(e.expr, None)` 那条"无期望类型 ⇒ 按 i32 定宽"的路：
@@ -13468,6 +13474,26 @@ class _Ir:
         if not isinstance(a0, Ident):
             return None
         return self.lms_size.get(a0.name)
+
+    def _str_lit_ir(self, text: str) -> str:
+        """一个字符串常量的 IR：注册 `.str.<fn>.<n>` + 造 `{ ptr, i64 }` 值。
+
+        普通字面量与**字符串常量**（`docs/342`）共用它 —— 两边的 `.str` 编号因此
+        与出现顺序一一对应（自举侧的准备扫描数的是同一批）。
+        """
+        b = text.encode("utf-8")
+        name = f"@.str.{self.f.name}.{len(self.globals)}"
+        esc = "".join(f"\\{x:02X}" for x in b)
+        self.globals.append(
+            f'{name} = private unnamed_addr constant [{len(b)} x i8] c"{esc}"'
+        )
+        p = self.t()
+        self.w(f"{p} = getelementptr inbounds [{len(b)} x i8], ptr {name}, i64 0, i64 0")
+        v = self.t()
+        self.w(f"{v} = insertvalue {{ ptr, i64 }} undef, ptr {p}, 0")
+        v2 = self.t()
+        self.w(f"{v2} = insertvalue {{ ptr, i64 }} {v}, i64 {len(b)}, 1")
+        return v2
 
     def _str_num_ir(self, av: str, ty: str | None, e: Call) -> str:
         """整型 → 十进制 `str`（`docs/337`）。`str_show` / `str_repr` 的整型分支共用它。"""

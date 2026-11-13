@@ -187,7 +187,7 @@ not change. Design and the standing boundary list: `docs/299`.
 With `lifetime_no` (the default before 2026.3, and still selectable) `&` in a type position is
 a parse error and struct fields hold scalars only - the pre-2026.3 shape, unchanged.
 
-2026.3 also adds six spelling-level constructs (no lifetimes involved; all are refused by
+2026.3 also adds seven spelling-level constructs (no lifetimes involved; all are refused by
 the frozen editions):
 
 - **struct literal field shorthand** `S { a, b: 2 }` - a bare name means `a: a`
@@ -210,7 +210,10 @@ the frozen editions):
   form, `!r` quotes and escapes a `str`, and `{x:>5}` / `{x:05}` pad to a width
   (right / left / centre / zero-fill). It is a **front-end rewrite** to `str_concat` /
   `str_show`, not a grammar production. Single line only; no dynamic width and no
-  nested interpolation yet (`docs/341`).
+  nested interpolation yet (`docs/341`);
+- **string constants** `const GREETING: str = "hello";` - a compile-time named
+  string; the value must be a string literal and every use site inlines it as an
+  ordinary literal. Older editions keep `const` integer-only (`docs/342`).
 
 ### 2.0.6 Lexical grammar
 

@@ -541,7 +541,16 @@ fn ty_bits(src: ptr, toks: ptr, tt: u32) -> u32 {
 /// `str_show` / `str_repr` 的实参种类（`docs/341`）：1 = `str`，2 = `bool`，
 /// 0 = 其余（整型 / 未定型 / 整数字面量）。整型那一支与 `str_num` 走同一段发射。
 fn st_kind(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
-    let at: u32 = expr_type(s, src, toks, j);
+    let at0: u32 = expr_type(s, src, toks, j);
+    let at: u32 = at0;
+    if at == 0 {
+        // 模块级常量（`docs/342`）：参考实现的 `_Ir.expr(Ident)` 返回**声明类型**，
+        // 而静态 `expr_type` 看不见常量 —— 这里补这一格，`str_show(常量)` 才走 str。
+        let cvt0: u32 = find_const(s, src, toks, j);
+        if cvt0 != 0 {
+            at = cvt0 - 2;
+        }
+    }
     if at == 0 || at == CG_WANT_U32 || at == CG_TY_U64 {
         return 0;
     }
@@ -1224,6 +1233,9 @@ fn expr_type_atom(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
                 return elem_tok(src, toks, at);
             }
         }
+        // **常量不在这里定型**：参考实现的静态 `expr_type` 同样看不见常量
+        // （checker 的 scope 里有，codegen 的那份没有）—— 两边的 binop 定宽都
+        // 落到"未知类型"那条路。要常量类型的地方自己查（见 `st_kind`）。
         return var_type(s, src, toks, j);   // 参数或局部 (镜像 expr_type 的 scope)
     }
     if tok_is(src, toks, j, "(") {
@@ -2853,6 +2865,21 @@ fn emit_str_globals(s: ptr, out: ptr, src: ptr, toks: ptr) -> u32 {
                 if tok_is(src, toks, j, "}") {
                     d = d - 1;
                 }
+                if d > 0 && tok_kind(toks, j) == 0 {
+                    let cvt2: u32 = str_const_at(s, src, toks, j);
+                    if cvt2 != 0 {
+                        emit_str(s, out, "@.str.");
+                        emit_tok(s, out, src, toks, i + 1);
+                        emit_str(s, out, ".");
+                        emit_dec(s, out, s_gc(s, 0));
+                        emit_str(s, out, " = private unnamed_addr constant [");
+                        emit_dec(s, out, str_lit_len(src, toks, cvt2));
+                        emit_str(s, out, " x i8] c\"");
+                        emit_str_lit_bytes(s, out, src, toks, cvt2);
+                        emit_str(s, out, "\"\n");
+                        s_gc(s, 1);
+                    }
+                }
                 if d > 0 && tok_kind(toks, j) == 2 {
                     // `thread_spawn` 的第一个实参是**编译期的名字**，不是表达式
                     // （`docs/245`）：参考实现从不求值它，也就不给它发字符串全局。
@@ -2888,9 +2915,26 @@ fn emit_str_globals(s: ptr, out: ptr, src: ptr, toks: ptr) -> u32 {
     return st_o(s);
 }
 
+/// 这个 token 是不是**字符串常量的一次使用**（`docs/342`）？是就返回值 token，否则 0。
+/// 与参考实现 `Ident` 里 `ty == "str"` 那一支同一条规则。
+fn str_const_at(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
+    if tok_kind(toks, j) != 0 {
+        return 0;
+    }
+    let cvt: u32 = find_const(s, src, toks, j);
+    if cvt == 0 {
+        return 0;
+    }
+    if tok_kind(toks, cvt) != 2 {
+        return 0;
+    }
+    return cvt;
+}
+
 /// 函数体内是否存在字符串字面量 (决定要不要写全局段)。
 /// 注意只看**函数体内** —— `use "..."` 也是 kind=2, 但它不是字面量。
-fn strings_needed(src: ptr, toks: ptr) -> u32 {
+/// **字符串常量的使用也算**（`docs/342`）：参考实现把常量内联成字面量，全局照发。
+fn strings_needed(s: ptr, src: ptr, toks: ptr) -> u32 {
     let i: u32 = 0;
     while tok_kind(toks, i) != 4 {
         if tok_is(src, toks, i, "fn") {
@@ -2910,6 +2954,9 @@ fn strings_needed(src: ptr, toks: ptr) -> u32 {
                 }
                 if tok_is(src, toks, j, "}") {
                     d = d - 1;
+                }
+                if d > 0 && tok_kind(toks, j) == 0 && str_const_at(s, src, toks, j) != 0 {
+                    return 1;
                 }
                 if d > 0 && tok_kind(toks, j) == 2 {
                     // `thread_spawn` 的入口名不是表达式（同 `emit_str_globals`）。
@@ -5367,6 +5414,38 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
     }
     // 模块级常量: 生成期内联成十进制字面量 (优先于变量查找, 与 lomentc 同序)
     let cvt: u32 = find_const(s, src, toks, j);
+    if cvt != 0 && tok_kind(toks, cvt) == 2 {
+        // **字符串常量**（`docs/342`）：与普通字面量同一段发 —— 全局段里那一条由
+        // `emit_str_globals` 按同一文本序发出来，这里的 `s_gc(s, 0)` 与它同号。
+        let idx: u32 = s_gc(s, 0);
+        s_gc(s, 1);
+        emit_str(s, out, "  ");
+        let sp: u32 = new_temp(s, out);
+        emit_str(s, out, " = getelementptr inbounds [");
+        emit_dec(s, out, str_lit_len(src, toks, cvt));
+        emit_str(s, out, " x i8], ptr @.str.");
+        emit_tok(s, out, src, toks, load32(s, 528));
+        emit_str(s, out, ".");
+        emit_dec(s, out, idx);
+        emit_str(s, out, ", i64 0, i64 0\n  ");
+        let sv1: u32 = new_temp(s, out);
+        emit_str(s, out, " = insertvalue { ptr, i64 } undef, ptr %t");
+        emit_dec(s, out, sp);
+        emit_str(s, out, ", 0\n  ");
+        let sv2: u32 = new_temp(s, out);
+        emit_str(s, out, " = insertvalue { ptr, i64 } %t");
+        emit_dec(s, out, sv1);
+        emit_str(s, out, ", i64 ");
+        emit_dec(s, out, str_lit_len(src, toks, cvt));
+        emit_str(s, out, ", 1\n");
+        set_temp_val(s, lvl, sv2);
+        let cse: u32 = j + 1;
+        if tok_is(src, toks, cse, "as") {
+            apply_cast(s, out, src, toks, 0, cse + 1, lvl);
+            return cse + 2;
+        }
+        return cse;
+    }
     if cvt != 0 {
         // 常量按**它自己的声明类型**环绕 (find_const 返回值 token; `const N : T = V`
         // 的 token 次序是 const N : T = V, 所以 `cvt - 2` 是 T) —— 与参考实现
@@ -13149,7 +13228,25 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32, tickx: u32)
     // `#778`：这份产物起不起线程（合并后的 token 流里出现过 `thread_spawn`）。
     // 只在这一个地方定：它决定发不发运行期锁、以及 alloc/free/根表站点加不加锁。
     store32(s, 556, contains_ident(src, toks, "thread_spawn"));
-    store32(s, 532, strings_needed(src, toks));
+    // 常量表（`#719`）：一趟扫完，`find_const` 别再扫全单元。**放在 `strings_needed`
+    // 之前**（`docs/342`）：字符串常量的使用点也要算"这份函数里有字符串"，而那条扫描
+    // 要靠 `find_const` 才知道哪个标识符是字符串常量。
+    let kn: u32 = 0;
+    let ci: u32 = 0;
+    while tok_kind(toks, ci) != 4 {
+        if tok_is(src, toks, ci, "const") && tok_kind(toks, ci + 1) == 0
+                && tok_is(src, toks, ci + 2, ":") {
+            if kn >= CG_MAXCONST {
+                return 0;            // 与函数表同一个口径：超了**报错**，不写穿
+            }
+            store32(s, CG_CONST + kn * 8, ci + 1);
+            store32(s, CG_CONST + kn * 8 + 4, ci + 3);
+            kn = kn + 1;
+        }
+        ci = ci + 1;
+    }
+    store32(s, 644, kn);
+    store32(s, 532, strings_needed(s, src, toks));
     // 符号表: 登记函数。同时识别 trait 声明 (方法只声明不发射) 与 impl 块 (方法名 = <类型>_<方法>)
     let i: u32 = 0;
     let n: u32 = 0;
@@ -13247,22 +13344,6 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32, tickx: u32)
         i = i + 1;
     }
     store32(s, 640, n);
-    // 常量表（`#719`）：一趟扫完，`find_const` 别再扫全单元。
-    let kn: u32 = 0;
-    i = 0;
-    while tok_kind(toks, i) != 4 {
-        if tok_is(src, toks, i, "const") && tok_kind(toks, i + 1) == 0
-                && tok_is(src, toks, i + 2, ":") {
-            if kn >= CG_MAXCONST {
-                return 0;            // 与函数表同一个口径：超了**报错**，不写穿
-            }
-            store32(s, CG_CONST + kn * 8, i + 1);
-            store32(s, CG_CONST + kn * 8 + 4, i + 3);
-            kn = kn + 1;
-        }
-        i = i + 1;
-    }
-    store32(s, 644, kn);
     // **跨函数 deref-only 安全表**（`docs/210` §7）：函数表登记完就能算 —— 它只读 token 流。
     // 放在这里（不是发射前逐个）：`l0_safe_callee` 在发射**每个** `alloc` 候选时都要查它。
     let _sft: u32 = compute_safe(src, toks, ptr_add(s, CG_SAFE));

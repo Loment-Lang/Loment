@@ -260,6 +260,11 @@ a criterion checks the two compile to **byte-identical** IR).
 
 ## 3. Builtins (all of them, there are no others)
 
+> **String constants** (Tur 2026.3+, `docs/342`): `const GREETING: str = "hello";` —
+> the value must be a string literal and every use site inlines it as that literal
+> (each use gets its own `.str.<fn>.<n>`). Older editions keep `const` integer-only.
+
+
 **These are the only builtins.** There are no built-in types like `String` / `Vec` / `HashMap`,
 no I/O wrappers, no string formatting. **But the toolchain ships a standard library**
 (`lompi/store/`, installed with the package, nothing to fetch) - `use vec` / `use map` / `use fs`

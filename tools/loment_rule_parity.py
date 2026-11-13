@@ -79,9 +79,9 @@ import loment_p8_test as H  # noqa: E402  # 复用已验过的构建/运行夹�
 # 缺第二实参 ⇒ **135/135**。
 # 2026-11-13 代数效应（`docs/346` A2a/A2b）：五条 —— 默认关时 `effect` 是 E019；
 # 打开时 `perform` / `extern … effects` 是 E023、行里未声明效应是 E002、重复声明是
-# E013 ⇒ **140/140**。这一批是"自举侧真的认了 `lspe_effects_true`"的独立证词：
+# E013、重复操作 E0213 ⇒ **141/141**。这一批是"自举侧真的认了 `lspe_effects_true`"的独立证词：
 # 孪生判据只比产物，码集分叉只有这里看得见。
-BUDGET = 140
+BUDGET = 141
 
 # --------------------------------------------------------------------------- 案例表
 #
@@ -500,6 +500,9 @@ _CASES: list[tuple[str, str]] = [
      "module m\nchoose lspe_effects_true\n\n"
      "effect Log {\n    fn write(v: u32) -> ();\n}\n\n"
      "effect Log {\n    fn flush() -> ();\n}\n"),
+    ("effects-duplicate-op",
+     "module m\nchoose lspe_effects_true\n\n"
+     "effect Log {\n    fn write(v: u32) -> ();\n    fn write(v: u32) -> ();\n}\n"),
     ("effects-extern-row",
      "module m\nchoose lspe_effects_true\n\neffect Log {\n    fn write(v: u32) -> ();\n}\n\n"
      "extern fn c_puts(p: ptr) -> i32 effects Log;\n"),

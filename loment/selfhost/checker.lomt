@@ -91,6 +91,13 @@ const E_PASS: u32 = 38;    // E038 `lspe pass` 没有理由（docs/262 §5.16）
 const E_LGC: u32 = 39;
 const E_DEEP: u32 = 23;    // E023 源码太深 —— 嵌套超过 64 层 (issue #44)
 const E_NOTIMPL: u32 = 23; // E023 同一码的另一条路：效应处理器的运行期（docs/346 A3）
+// 效应的五条细分码（`docs/346` A2b；与 `loment_diag.FINE` 210–214 同号）。
+// 细分之后规则对拍比的是**数字**，所以自举侧必须发同一组号，不能停在族码上。
+const E_EFF_RT: u32 = 210;   // 运行期未实现（perform / handle / resume）
+const E_EFF_EXT: u32 = 211;  // extern 上的效应行
+const E_EFF_DUP: u32 = 212;  // 效应重复定义
+const E_EFF_OPDUP: u32 = 213; // 同一效应里的操作重复定义
+const E_EFF_ROW: u32 = 214;  // effects 行里的未声明效应
 
 /// 拖运行期的构造**有几个** —— 检查器数好放这儿，驱动取来拼报文的"另有 N 处"那半句
 /// （与参考实现 `_runtime_sites` 的 `len(_sites) - 1` 同口径）。见 issue #321。
@@ -5909,9 +5916,27 @@ fn chk_effects_prepass(src: ptr, t: ptr, out: ptr, o0: u32) -> u32 {
                     if chk_tok_kind(t, b) == 0 && chk_tok_is(src, t, b, "effect")
                             && chk_tok_kind(t, b + 1) == 0
                             && same(src, t, b + 1, i + 1) {
-                        o = sym_pub(src, t, out, o, E_DUP, i);
+                        o = sym_pub(src, t, out, o, E_EFF_DUP, i);
                     }
                     b = b + 1;
+                }
+                // 同一效应体里的操作重名（E0213）：只看 `fn` 后面的名字。
+                let eb: u32 = chk_match_brace(src, t, i + 2);
+                let p: u32 = i + 3;
+                while p < eb {
+                    if chk_tok_kind(t, p) == 0 && chk_tok_is(src, t, p, "fn")
+                            && chk_tok_kind(t, p + 1) == 0 {
+                        let q: u32 = i + 3;
+                        while q < p {
+                            if chk_tok_kind(t, q) == 0 && chk_tok_is(src, t, q, "fn")
+                                    && chk_tok_kind(t, q + 1) == 0
+                                    && same(src, t, q + 1, p + 1) {
+                                o = sym_pub(src, t, out, o, E_EFF_OPDUP, p);
+                            }
+                            q = q + 1;
+                        }
+                    }
+                    p = p + 1;
                 }
             }
             if d == 0 && chk_tok_is(src, t, i, "effects")
@@ -5925,7 +5950,7 @@ fn chk_effects_prepass(src: ptr, t: ptr, out: ptr, o0: u32) -> u32 {
                         if c2 == 123 || c2 == 59 { stop = 1; }
                     } else if chk_tok_kind(t, k) == 0 {
                         if chk_effect_named(src, t, k) == 0 {
-                            o = sym_pub(src, t, out, o, E_TYPE, k);
+                            o = sym_pub(src, t, out, o, E_EFF_ROW, k);
                         }
                     }
                     if stop == 0 { k = k + 1; }
@@ -5944,7 +5969,7 @@ fn chk_effects_prepass(src: ptr, t: ptr, out: ptr, o0: u32) -> u32 {
             }
         }
         if hit == 1 {
-            o = sym_pub(src, t, out, o, E_NOTIMPL, i);
+            o = sym_pub(src, t, out, o, E_EFF_RT, i);
         }
         i = i + 1;
     }
@@ -5955,7 +5980,7 @@ fn chk_effects_prepass(src: ptr, t: ptr, out: ptr, o0: u32) -> u32 {
             let k: u32 = j + 2;
             while chk_tok_kind(t, k) != 4 && !chk_tok_is(src, t, k, ";") {
                 if chk_tok_is(src, t, k, "effects") {
-                    o = sym_pub(src, t, out, o, E_NOTIMPL, k);
+                    o = sym_pub(src, t, out, o, E_EFF_EXT, k);
                 }
                 k = k + 1;
             }

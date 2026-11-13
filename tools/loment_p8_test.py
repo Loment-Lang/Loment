@@ -3361,7 +3361,7 @@ def test_m85_driver_gate_on_probe_cases():
                     f"效应声明/行的 IR 两个实现不一致 ({tag})"
             else:
                 assert rc9 != 0, f"应当拒绝却收了 ({tag}): err={err9[-300:]!r}"
-                want = "E023 @" if tag == "g_eff_bad" else "E019 @"
+                want = "E0210 @" if tag == "g_eff_bad" else "E019 @"
                 assert want in err9, f"码不对 ({tag})：要 {want}，得到 {err9[-200:]!r}"
         print("      效应：声明/行擦除后 IR 逐字节一致；perform 与关闭档各自点名拒")
 

@@ -530,12 +530,23 @@ fn err_phrase(slot: ptr, toks: ptr, tk: u32, code: u32) -> str {
         return "match 的模式不合法，或漏了变体 —— 每个变体写一个臂，或用 `_` 通配";
     }
     if code == 23 {
-        // 同一条码的另一条路（`docs/346` A2b）：效应语法面已经认得，运行期还没实现。
-        if tok_is(slot, toks, tk, "perform") || tok_is(slot, toks, tk, "handle")
-                || tok_is(slot, toks, tk, "resume") || tok_is(slot, toks, tk, "effects") {
-            return "效应处理器的运行期还没有实现（docs/346 的 A3）—— 先删掉 perform / handle / resume，或等 A3";
-        }
         return "嵌套超过 64 层 —— 编译器是递归下降的，再深就要把栈用穿了；把中间那几层提成函数，或把这段拆开";
+    }
+    // 效应五条细分码（`docs/346` A2b；与 `loment_diag.FINE` 210–214 同号）。
+    if code == 210 {
+        return "效应处理器的运行期还没有实现（docs/346 的 A3）—— 先删掉 perform / handle / resume，或等 A3";
+    }
+    if code == 211 {
+        return "效应行不能穿越 extern（docs/346 §6 R7）—— C 侧没有证据记录";
+    }
+    if code == 212 {
+        return "效应名重复定义 —— 同一个 effect 在一个单元里声明了两次";
+    }
+    if code == 213 {
+        return "同一效应里的操作重复定义 —— 一个 effect 体里有两个同名 fn";
+    }
+    if code == 214 {
+        return "effects 行引用了未声明的效应 —— 补一个 effect 声明，或改名字";
     }
     if code == 41 {
         return "借用的区域不成立 —— 返回的借用只能来自形参；借用生命周期域里还有三条：共享域只能读、独占域不能再借、域里的借用不能带出；窗口下标不能越界，两半不能重叠；另外，借用作泛型实参（`Box<&T>` / `Box<[T]>`）自举侧还不收（`docs/299` / `docs/318`）";

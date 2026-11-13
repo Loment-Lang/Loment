@@ -19,8 +19,8 @@
     },
     "seed": {
       "path": "loment/build/selfhost_driver.ll",
-      "sha256": "2671edead139925d7f3061b9d1181dc8f1acc0f68a37735c929cc1ef3d8719ca",
-      "size": 6463061
+      "sha256": "cd60c04258a13fe79ca9c3dd2e85c1128b20d94465d12ef61eb54ad898a1275a",
+      "size": 6468002
     }
   },
   "mirror_ir": {

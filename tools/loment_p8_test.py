@@ -4118,6 +4118,46 @@ def test_m107_auto_type_twin():
     print("       `auto` / `:=`: 两实现逐字节一致")
 
 
+@test
+def test_m108_args_builtin_twin():
+    """`args(i)`：两实现逐字节同，且**真的读到命令行**（`docs/348`）。
+
+    两侧都读 `/proc/self/cmdline`：ELF 上是 procfs，PE 上是 `lomelf` 垫片从
+    `GetCommandLineA` 合成的那一份 —— 所以同一段 helper 两边都成立。行为那半在这里跑
+    （驱动链的判据只看产物，看不见 argv）：带两个额外实参跑一次，看它印出来的就是那两个。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    src = "".join([
+        "module m", chr(10),
+        "choose runtime", chr(10), chr(10),
+        "fn _start() {", chr(10),
+        "    print(args(1));", chr(10),
+        "    print(\"|\");", chr(10),
+        "    print(args(2));", chr(10),
+        "    print(\"|\");", chr(10),
+        "    print(args(5));", chr(10),
+        "    syscall4(60, 0, 0, 0);", chr(10),
+        "}", chr(10)])
+    with tempfile.TemporaryDirectory() as td:
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_args")
+        p = Path(td) / "args.lomt"
+        p.write_text(src, encoding="utf-8", newline=chr(10))
+        rc, out, err = _run_driver_raw(elf, _wsl_path(p), td, "args")
+        assert rc == 0, f"自举驱动编不过 args: {err[-400:]}"
+        assert out == _unit_ll(p), "args: 自举产物与参考不一致"
+        # 行为：把参考那侧的 IR 链成一个程序跑一遍
+        prog = _build_linux_elf(_unit_ll(p), td, "argsprog")
+        got = Path(td) / "argsrun.txt"
+        rcc, rerr = _run_driver_shell(
+            prog, f"$DRV AA BB > {_wsl_path(got)}", td, "argsrun")
+        text = got.read_text(encoding="utf-8") if got.exists() else ""
+        assert rcc == 0, f"args 程序没跑通: {rerr[-300:]}"
+        assert text == "AA|BB|", (text, "越界那一路要回空串")
+    print("       `args(i)`: 两实现逐字节一致；实参真的读到了")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_p8_test")
 

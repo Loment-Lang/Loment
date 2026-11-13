@@ -310,4 +310,5 @@ print_num(n);            // 十进制，负数带 '-'，不带换行
 > 命名字符串 `const NAME: str = "…"` 见 `docs/342`；
 > `catch |e| { … }` / `catch return` 见 `docs/343`；
 > 局部类型推断 `let x := e;` / `let x: auto = e;` 见 `docs/347`；
+> 命令行参数 `args(i)`（带下标；裸 `args()` 要 `[str]`，还没这一档）见 `docs/348`；
 > 其余语法优化项按 `docs/332` §5 的顺序推进，每项两套实现 + 判据。

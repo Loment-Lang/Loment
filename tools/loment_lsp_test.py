@@ -763,7 +763,7 @@ def test_definition_clamps_the_character_to_the_line_end():
 
 @test
 def test_python_lsp_knows_the_effects_switch():
-    """消费方轴（`docs/341` A2）：语言服务与编译器读同一个开关，不在新语法上报假错。"""
+    """消费方轴（`docs/346` A2）：语言服务与编译器读同一个开关，不在新语法上报假错。"""
     on = ("module t\nchoose lspe_effects_true\n\n"
           "effect Log { fn write(v: u32) -> (); }\n\n"
           "fn f(x: u32) -> u32 effects Log { return x; }\n")

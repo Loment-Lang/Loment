@@ -1,4 +1,4 @@
-"""E11 代数效应与效应处理器（`docs/341`）：行、处理器、`resume` 的检查核心。
+"""E11 代数效应与效应处理器（`docs/346`）：行、处理器、`resume` 的检查核心。
 
 口径与 LSPE 其余引擎一致：吃**同一串 token**，规则逐条同形，输出确定。A0/A1 是
 **报告面** —— 它不改变任何编译判决，也不进 Potato 台账（那一步要与自举侧同步计数，
@@ -17,7 +17,7 @@
 * **尾续**：臂里每个 `resume` 都是所在块的最后一条语句。尾续处理器不需要续延对象，
   这是 `no_runtime` 默认档能跑效应的原因。
 
-## 明确不做（与 `docs/341` §0 一致）
+## 明确不做（与 `docs/346` §0 一致）
 
 * 不做多射续延的默认语义：`resume` 两次是反例（Q020）。
 * 不做跨 `extern` 的效应：C 侧没有证据记录（R7）。
@@ -705,7 +705,7 @@ def analyze(toks: list, unit: str = "m") -> dict:
                 "id": sid("handler_capture", f"{h['effect']}:{h['line']}"),
                 "kind": "handler_capture", "claim": "allow",
                 "obligation": "CaptureReclaim", "evidence": "Assumed",
-                "source": "docs/341 §7", "line": h["line"],
+                "source": "docs/346 §7", "line": h["line"],
                 "span": [h["line"], 0, h["line"], 0], "proved": False,
                 "effect": h["effect"]})
     for h in handlers:

@@ -40,7 +40,7 @@ TOP_KW = {"module", "use", "capability", "const", "struct", "enum", "trait", "im
           "comefor", "byuse",
           # `register`（docs/223 形态 A）是**顶层**声明，同理。
           "register",
-          # `effect`（docs/341 的 A2）是顶层声明；`perform` / `handle` / `resume` 是
+          # `effect`（docs/346 的 A2）是顶层声明；`perform` / `handle` / `resume` 是
           # 表达式，不在这张表里。
           "effect"}
 #: **声明行首的修饰词**（`#46`）：它们不单独占一行，要和后面那一项连在一起。

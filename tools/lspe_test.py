@@ -55,7 +55,7 @@ def test_registry_has_19_obligations_and_8_evidence_kinds():
         assert "Differential" not in spec["accept"], name
     # 问题码（`docs/262` §5.10）：Q013 是 `lspe pass` 的未审计块（#786）。
     # 22 = Q001–Q014（LSPE v2）+ Q015–Q017（E10 借用检查器，`docs/317` §5.4）
-    # + Q018–Q022（E11 效应检查器，`docs/341` §8）。
+    # + Q018–Q022（E11 效应检查器，`docs/346` §8）。
     assert len(lspe.LSPE_QUESTIONS) == 22
     assert lspe.LSPE_QUESTIONS["Q013"]
     assert "未审计块" in lspe.LSPE_QUESTIONS["Q013"]
@@ -1238,7 +1238,7 @@ def test_loans_cli_is_a_report_and_respects_lifetime_no():
 
 
 # ---------------------------------------------------------------- E11 效应检查器
-# `docs/341`：代数效应与处理器。A0/A1 是**报告面** —— 吃同一串 token，不改判决。
+# `docs/346`：代数效应与处理器。A0/A1 是**报告面** —— 吃同一串 token，不改判决。
 
 _EFFECTS_DECL = (
     "module m\n\n"
@@ -1255,7 +1255,7 @@ def _effects(src: str, unit: str = "m") -> dict:
 
 @test
 def test_effect_registry_entries_are_complete():
-    """E11 登记：五条义务、八种站点、五问、三条 LSPC 族都要在册（`docs/341` §8）。"""
+    """E11 登记：五条义务、八种站点、五问、三条 LSPC 族都要在册（`docs/346` §8）。"""
     obs = {"EffectAllowed", "HandlerExhaustive", "ResumeLinear",
            "EffectBounded", "CaptureReclaim"}
     assert obs <= set(lspe.LSPE_OBLIGATIONS), sorted(lspe.LSPE_OBLIGATIONS)
@@ -1274,7 +1274,7 @@ def test_effect_registry_entries_are_complete():
 
 @test
 def test_effect_declarations_rows_and_determinism():
-    """效应声明与 `effects` 行都读得出来；报告按固定序，可复现（`docs/341` §5）。"""
+    """效应声明与 `effects` 行都读得出来；报告按固定序，可复现（`docs/346` §5）。"""
     src = _EFFECTS_DECL + (
         "fn run(x: u32) -> u32 effects Log {\n"
         "    perform Log.write(x);\n"

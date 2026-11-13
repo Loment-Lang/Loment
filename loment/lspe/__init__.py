@@ -49,7 +49,7 @@ aicheck_prompt = _aiask.prompt
 #: E10 借用检查器（`docs/317`）：loan 图分析（报告面）。
 loans_analyze = _loans.analyze
 loans_text = _loans.text_lines
-#: E11 效应检查器（`docs/341`）：行、处理器与 `resume`（报告面）。
+#: E11 效应检查器（`docs/346`）：行、处理器与 `resume`（报告面）。
 effects_analyze = _effects.analyze
 effects_text = _effects.text_lines
 

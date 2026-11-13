@@ -143,7 +143,9 @@ MUTATORS = [
      "类型未声明"),
     ("载荷键非变体", lambda d: d["enums"][1]["payloads"].__setitem__("Nope", "u32"),
      "不是已声明变体"),
-    ("常量类型", lambda d: d["consts"][0].__setitem__("type", "str"), "必须是整型"),
+    ("常量类型", lambda d: d["consts"][0].__setitem__("type", "f64"), "必须是整型"),
+    # `docs/342`：`type: "str"` 现在是合法的 —— 但值必须是字符串（不再是整数）。
+    ("常量值形态", lambda d: d["consts"][0].__setitem__("type", "str"), "必须是字符串"),
     ("能力域区间", lambda d: d["capabilities"][0]["domain"].__setitem__("lo", 9), "区间非法"),
     ("布局重叠", lambda d: d["layouts"][0]["fields"][1].__setitem__("offset", 0), "重叠"),
     ("布局越界", lambda d: d["layouts"][0]["fields"][1].__setitem__("offset", 15), "越界"),

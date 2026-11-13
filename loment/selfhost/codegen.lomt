@@ -541,7 +541,16 @@ fn ty_bits(src: ptr, toks: ptr, tt: u32) -> u32 {
 /// `str_show` / `str_repr` 的实参种类（`docs/341`）：1 = `str`，2 = `bool`，
 /// 0 = 其余（整型 / 未定型 / 整数字面量）。整型那一支与 `str_num` 走同一段发射。
 fn st_kind(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
-    let at: u32 = expr_type(s, src, toks, j);
+    let at0: u32 = expr_type(s, src, toks, j);
+    let at: u32 = at0;
+    if at == 0 {
+        // 模块级常量（`docs/342`）：参考实现的 `_Ir.expr(Ident)` 返回**声明类型**，
+        // 而静态 `expr_type` 看不见常量 —— 这里补这一格，`str_show(常量)` 才走 str。
+        let cvt0: u32 = find_const(s, src, toks, j);
+        if cvt0 != 0 {
+            at = cvt0 - 2;
+        }
+    }
     if at == 0 || at == CG_WANT_U32 || at == CG_TY_U64 {
         return 0;
     }
@@ -1224,16 +1233,10 @@ fn expr_type_atom(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
                 return elem_tok(src, toks, at);
             }
         }
-        let vt: u32 = var_type(s, src, toks, j);   // 参数或局部 (镜像 expr_type 的 scope)
-        if vt == 0 {
-            // 模块级常量（`docs/342`）：参考实现的 `expr_type` 读的是 checker 的 scope，
-            // 那里常量与局部同表；自举侧的类型表只有局部，所以这里补一格。
-            let cvt: u32 = find_const(s, src, toks, j);
-            if cvt != 0 {
-                return cvt - 2;                        // 声明类型 token
-            }
-        }
-        return vt;
+        // **常量不在这里定型**：参考实现的静态 `expr_type` 同样看不见常量
+        // （checker 的 scope 里有，codegen 的那份没有）—— 两边的 binop 定宽都
+        // 落到"未知类型"那条路。要常量类型的地方自己查（见 `st_kind`）。
+        return var_type(s, src, toks, j);   // 参数或局部 (镜像 expr_type 的 scope)
     }
     if tok_is(src, toks, j, "(") {
         let rp2: u32 = skip_parens(src, toks, j);

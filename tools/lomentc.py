@@ -2248,6 +2248,29 @@ class IfExpr:
     else_end: int = 0
 
 
+def _find_node(o, cls):
+    """深度优先找出**第一个** `cls` 节点（`None` = 没有）。
+
+    `catch return` / `catch |e|` 的类型规则要拿到那个 `Fallback` 节点本身，而
+    `_contains_node` 只回答"有没有"。遍历面与它同一条（dataclass 字段 + list/tuple）。
+    """
+    if isinstance(o, cls):
+        return o
+    if is_dataclass(o) and not isinstance(o, type):
+        for fd in fields(o):
+            if fd.name in ("line", "col", "off", "len"):
+                continue
+            r = _find_node(getattr(o, fd.name), cls)
+            if r is not None:
+                return r
+    elif isinstance(o, (list, tuple)):
+        for y in o:
+            r = _find_node(y, cls)
+            if r is not None:
+                return r
+    return None
+
+
 def _contains_node(o, cls) -> bool:
     """这棵 AST 里有没有 `cls` 的节点（不论在哪个位置）—— 反糖只能处理初值位置。"""
     if isinstance(o, cls):
@@ -2293,9 +2316,12 @@ class Fallback:
     """
 
     value: object
-    default: object
-    kind: str          # "orelse" | "catch"
+    #: `catch_return` 没有兜底表达式（`default is None`）—— 失败支直接 `return`。
+    default: object | None
+    kind: str          # "orelse" | "catch" | "catch_block" | "catch_return"
     line: int
+    #: `catch |e| { … }`（`docs/343`）的错误载荷绑定名。
+    bind: str = ""
 
 
 @dataclass
@@ -5084,6 +5110,22 @@ class Parser:
         if kind not in ("orelse", "catch"):
             return e
         self.next()
+        if kind == "catch" and self.profile in TUR3_PLUS:
+            # `docs/343`：`x catch return`（把错误原样返回）与 `x catch |e| { 表达式 }`
+            # （看一眼错误载荷再给兜底值）。两条都只在 `let` / 赋值右侧成立（同上）。
+            if self.at("ident", "return"):
+                self.next()
+                return Fallback(e, None, "catch_return", line)
+            if self.at("punct", "|"):
+                self.next()
+                bind = self.ident("错误绑定名")
+                self.expect("punct", "|")
+                self.expect("punct", "{")
+                self.no_struct += 1
+                body = self.parse_expr()
+                self.no_struct -= 1
+                self.expect("punct", "}")
+                return Fallback(e, body, "catch_block", line, bind=bind)
         return Fallback(e, self.parse_expr(), kind, line)
 
     # -- 表达式 (优先级爬升)
@@ -6280,12 +6322,34 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
                         f"（要 `V(载荷), U` 两个变体）")
         else:
             pty = ed.payloads[ed.variants[0]]
-            dt = expr_type(e.default, scope, funcs, structs)
-            if dt is not None and dt != pty:
-                errs.append(f"{e.line}: `{e.kind}` 的兜底值类型 {dt}，期望 {pty}")
+            if e.kind == "catch_block":
+                # `catch |e| { 表达式 }`（`docs/343`）：错误载荷绑在 `e` 上，
+                # 块里那一个表达式要给出**与成功载荷同型**的兜底值。
+                evt = ed.payloads.get(ed.variants[1])
+                if evt is None:
+                    errs.append(f"{e.line}: 枚举 {st} 的失败变体 {ed.variants[1]} 没有载荷，"
+                                f"不能 `catch |e|`")
+                else:
+                    bscope = dict(scope)
+                    bscope[e.bind] = evt
+                    _walk_expr(e.default, bscope, funcs, structs, errs, enums, lifetime)
+                    dt = expr_type(e.default, bscope, funcs, structs)
+                    if dt is not None and dt != pty:
+                        errs.append(f"{e.line}: `catch |{e.bind}|` 的值类型 {dt}，期望 {pty}")
+            elif e.kind == "catch_return":
+                # `catch return` 要把**错误载荷**原样装回去，没有载荷就装不了。
+                if ed.payloads.get(ed.variants[1]) is None:
+                    errs.append(f"{e.line}: 枚举 {st} 的失败变体 {ed.variants[1]} 没有载荷，"
+                                f"不能用 `catch return`")
+            else:
+                dt = expr_type(e.default, scope, funcs, structs)
+                if dt is not None and dt != pty:
+                    errs.append(f"{e.line}: `{e.kind}` 的兜底值类型 {dt}，期望 {pty}")
         e.ty = pty
         _walk_expr(e.value, scope, funcs, structs, errs, enums, lifetime)
-        _walk_expr(e.default, scope, funcs, structs, errs, enums, lifetime)
+        # `catch_block` 的块体已经在**带绑定**的作用域里走过一遍了。
+        if e.default is not None and e.kind != "catch_block":
+            _walk_expr(e.default, scope, funcs, structs, errs, enums, lifetime)
         return
     if isinstance(e, EnumPath):
         if e.enum not in enums:
@@ -8593,6 +8657,13 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
             for s in stmts:
                 if isinstance(s, Let):
                     _walk_expr(s.expr, fscope, funcs, structs, errs, enums, lifetime)
+                    _fbq = _find_node(s.expr, Fallback)
+                    if _fbq is not None and _fbq.kind == "catch_return":
+                        _stq = expr_type(_fbq.value, fscope, funcs, structs)
+                        if _stq is not None and _stq != f.ret:
+                            errs.append(
+                                f"{s.line}: `catch return` 要求函数 {f.name} 返回 {_stq}"
+                                f"（同一个枚举），声明的是 {f.ret}")
                     if not _type_ok(s.type, known):
                         errs.append(f"{s.line}: 未知类型 {s.type}（let {s.name} 的类型）")
                     if _is_array(s.type) and isinstance(s.expr, ArrayLit):
@@ -9584,6 +9655,13 @@ def _expr_rs(e) -> str:
     if isinstance(e, Fallback):
         # Rust 侧只是一条 `match`：成功变体取载荷，其余取兜底值（`docs/296` §2.4）。
         pat = "Some" if e.kind == "orelse" else "Ok"
+        if e.kind == "catch_return":
+            # `docs/343`：错误支把错误原样返回。
+            return (f"match {_expr_rs(e.value)} {{ {pat}(__v) => __v, "
+                    f"Err(__e) => return Err(__e) }}")
+        if e.kind == "catch_block":
+            return (f"match {_expr_rs(e.value)} {{ {pat}(__v) => __v, "
+                    f"Err({e.bind}) => {{ {_expr_rs(e.default)} }} }}")
         return (f"match {_expr_rs(e.value)} {{ {pat}(__v) => __v, "
                 f"_ => {_expr_rs(e.default)} }}")
     if isinstance(e, Cast):
@@ -12409,11 +12487,24 @@ def _collect_locals(f: Func, enums: dict | None = None,
 
     def walk(stmts: list) -> None:
         for s in stmts:
-            if isinstance(s, Let):
-                if s.name not in seen:
-                    out.append((s.name, s.type, s.line))
-                    seen.add(s.name)
-                scope[s.name] = s.type
+            if isinstance(s, (Let, Assign)):
+                if isinstance(s, Let):
+                    if s.name not in seen:
+                        out.append((s.name, s.type, s.line))
+                        seen.add(s.name)
+                    scope[s.name] = s.type
+                # `docs/343`：`catch |e| { … }` 的错误绑定也要一格 alloca。
+                _fb = _find_node(getattr(s, "expr", None), Fallback)
+                if (_fb is not None and _fb.kind == "catch_block" and _fb.bind
+                        and _fb.bind not in seen):
+                    _st = expr_type(_fb.value, scope, funcs, structs)
+                    _ed = enums.get(_st) if _st else None
+                    _evt = (_ed.payloads.get(_ed.variants[1])
+                            if _ed is not None and len(_ed.variants) == 2 else None)
+                    if _evt:
+                        out.append((_fb.bind, _evt, _fb.line))
+                        seen.add(_fb.bind)
+                        scope[_fb.bind] = _evt
             elif isinstance(s, If):
                 walk(s.then)
                 walk(s.otherwise)
@@ -14073,8 +14164,38 @@ class _Ir:
             self.w(f"{v1} = trunc i64 {raw} to {self.ll(pty)}")
         self.jump(end_l)
         self.label(fail_l)
-        _, v2 = self.expr(e.default, pty)
-        self.jump(end_l)
+        if e.kind == "catch_return":
+            # `docs/343`：错误支把载荷原样装回 `Err(…)` 再从函数返回（返回类型由
+            # checker 钉住 —— 必须是同一个枚举）。
+            raw2 = self.t()
+            self.w(f"{raw2} = extractvalue {et} {sv}, 1")
+            e0 = self.t()
+            self.w(f"{e0} = insertvalue {et} undef, i32 1, 0")
+            e1 = self.t()
+            self.w(f"{e1} = insertvalue {et} {e0}, i64 {raw2}, 1")
+            self.w(f"ret {et} {e1}")
+            self.terminated = True
+            self.label(end_l)
+            r = self.t()
+            self.w(f"{r} = phi {self.ll(pty)} [ {v1}, %{succ_l} ]")
+            return pty, r
+        if e.kind == "catch_block":
+            # `catch |e| { 表达式 }`：载荷存进绑定变量的槽，再求块里那一个表达式。
+            errp = ed.payloads[ed.variants[1]]
+            raw2 = self.t()
+            self.w(f"{raw2} = extractvalue {et} {sv}, 1")
+            bptr = self.vars[e.bind][1]
+            if self.ll(errp) == "i64":
+                self.w(f"store i64 {raw2}, ptr {bptr}")
+            else:
+                c2 = self.t()
+                self.w(f"{c2} = trunc i64 {raw2} to {self.ll(errp)}")
+                self.w(f"store {self.ll(errp)} {c2}, ptr {bptr}")
+            _, v2 = self.expr(e.default, pty)
+            self.jump(end_l)
+        else:
+            _, v2 = self.expr(e.default, pty)
+            self.jump(end_l)
         self.label(end_l)
         r = self.t()
         self.w(f"{r} = phi {self.ll(pty)} [ {v1}, %{succ_l} ], [ {v2}, %{fail_l} ]")

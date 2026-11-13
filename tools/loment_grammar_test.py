@@ -1734,6 +1734,66 @@ def test_str_interpolation():
 
 
 @test
+def test_catch_block_and_return():
+    """`catch |e| { … }` / `catch return`（2026.3+，`docs/343`）。
+
+    钉三件事：两条都能编过且产物形状对（绑定槽 / `ret`）、函数返回类型不符要点名、
+    旧版次不收。
+    """
+    body = "".join([
+        "module m", chr(10),
+        "choose runtime", chr(10), chr(10),
+        "fn may(n: u32) -> Result<u32, u32> {", chr(10),
+        "    if n > 3 {", chr(10),
+        "        return Result::Err(n);", chr(10),
+        "    }", chr(10),
+        "    return Result::Ok(n + 1);", chr(10),
+        "}", chr(10), chr(10),
+        "fn f(n: u32) -> Result<u32, u32> {", chr(10),
+        "    let a: u32 = may(n) catch |e| { e + 100 };", chr(10),
+        "    let b: u32 = may(a) catch return;", chr(10),
+        "    return Result::Ok(b);", chr(10),
+        "}", chr(10)])
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        p = td / "ok.lomt"
+        p.write_text(body, encoding="utf-8", newline=chr(10))
+        mod = lomentc.load(p)
+        errs = lomentc.check(mod, deps=lomentc.resolve_deps(mod, ROOT, td, entry=p))
+        assert not errs, errs[:3]
+        ll = lomentc.emit_llvm(mod, ROOT)
+        assert "%e.addr" in ll, "`catch |e|` 的绑定没有槽"
+        assert "ret { i32, i64 }" in ll, "`catch return` 没有把 Err 原样返回"
+
+        # 函数返回类型不是同一个枚举 -> 点名
+        bad = body.replace("fn f(n: u32) -> Result<u32, u32> {",
+                           "fn f(n: u32) -> u32 {")
+        p2 = td / "bad.lomt"
+        p2.write_text(bad, encoding="utf-8", newline=chr(10))
+        try:
+            lomentc.load(p2)
+        except lomentc.LomError as e:
+            assert "catch return" in e.msg, e.msg
+        else:
+            m2 = lomentc.load(p2)
+            e2 = lomentc.check(m2, deps=lomentc.resolve_deps(m2, ROOT, td, entry=p2))
+            assert any("catch return" in x for x in e2), e2[:3]
+
+        # 旧版次不收
+        p3 = td / "old.lomt"
+        p3.write_text("choose write grammar tur2026.2" + chr(10) + "module m" + chr(10)
+                      + "fn g() -> u32 { let a: u32 = h() catch |e| { e }; return a; }"
+                      + chr(10), encoding="utf-8", newline=chr(10))
+        try:
+            lomentc.load(p3)
+        except (lomentc.LomError, Exception):
+            pass
+        else:
+            raise AssertionError("tur2026.2 收了 `catch |e|`")
+    print("      `catch |e| { … }` / `catch return`：编得过、返回类型不符点名、旧版次拒")
+
+
+@test
 def test_const_str():
     """`const NAME: str = "…"`（2026.3+，`docs/342`）。
 

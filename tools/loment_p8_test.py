@@ -4044,6 +4044,44 @@ def test_m105_const_str_twin():
     print("      字符串常量: 两实现逐字节一致")
 
 
+@test
+def test_m106_catch_block_twin():
+    """`catch |e| { … }` / `catch return`：两实现逐字节同（`docs/343`）。
+
+    两条都长在 `let`/赋值右侧的 `catch` 上：绑定槽的 alloca、错误载荷的截断、
+    `catch return` 那条 `ret { i32, i64 }` 的构造，两边必须同一套临时编号。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    src = "".join([
+        "module m", chr(10),
+        "choose runtime", chr(10), chr(10),
+        "fn may(n: u32) -> Result<u32, u32> {", chr(10),
+        "    if n > 3 {", chr(10),
+        "        return Result::Err(n);", chr(10),
+        "    }", chr(10),
+        "    return Result::Ok(n + 1);", chr(10),
+        "}", chr(10), chr(10),
+        "fn f(n: u32) -> Result<u32, u32> {", chr(10),
+        "    let a: u32 = may(n) catch |e| { e + 100 };", chr(10),
+        "    let b: u32 = may(a) catch return;", chr(10),
+        "    return Result::Ok(b);", chr(10),
+        "}", chr(10), chr(10),
+        "fn h(n: u32) -> u32 {", chr(10),
+        "    let c: u32 = may(n) catch 7;", chr(10),
+        "    return c;", chr(10),
+        "}", chr(10)])
+    with tempfile.TemporaryDirectory() as td:
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_catch")
+        p = Path(td) / "catch.lomt"
+        p.write_text(src, encoding="utf-8", newline=chr(10))
+        rc, out, err = _run_driver_raw(elf, _wsl_path(p), td, "catch")
+        assert rc == 0, f"自举驱动编不过 catch 两种新形状: {err[-400:]}"
+        assert out == _unit_ll(p), "catch 新形状: 自举产物与参考不一致"
+    print("       catch 新形状: 两实现逐字节一致")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_p8_test")
 

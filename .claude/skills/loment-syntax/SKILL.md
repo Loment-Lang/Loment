@@ -260,6 +260,11 @@ a criterion checks the two compile to **byte-identical** IR).
 
 ## 3. Builtins (all of them, there are no others)
 
+> **`catch` handlers** (Tur 2026.3+, `docs/343`): `r catch |e| { e + 100 }` binds the
+> error payload and evaluates one expression; `r catch return` returns the error as
+> `Err(…)` from the function (its return type must be the same enum). Both only on the
+> right-hand side of `let`/assignment.
+>
 > **String constants** (Tur 2026.3+, `docs/342`): `const GREETING: str = "hello";` —
 > the value must be a string literal and every use site inlines it as that literal
 > (each use gets its own `.str.<fn>.<n>`). Older editions keep `const` integer-only.

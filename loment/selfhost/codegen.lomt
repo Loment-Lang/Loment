@@ -6685,11 +6685,14 @@ fn emit_fallback(s: ptr, out: ptr, src: ptr, toks: ptr, name_tok: u32, val_at: u
         return fb_at + 1;
     }
     let lv: u32 = 0;
-    let _vend: u32 = expr_bin(s, out, src, toks, val_at, 1, lv, 0);
+    // 枚举值放 lv + 2：Ok 块会把 lv 换成载荷（下面 phi 与 `catch return` 都要
+    // 原来的枚举值，参考实现的 `sv` 就是这个）。
+    let vl: u32 = lv + 2;
+    let _vend: u32 = expr_bin(s, out, src, toks, val_at, 1, vl, 0);
     emit_str(s, out, "  ");
     let tag: u32 = new_temp(s, out);
     emit_str(s, out, " = extractvalue { i32, i64 } ");
-    emit_val(s, out, lv);
+    emit_val(s, out, vl);
     emit_str(s, out, ", 0\n");
     let su: u32 = load32(s, 480) + 1;
     store32(s, 480, su + 2);
@@ -6705,7 +6708,7 @@ fn emit_fallback(s: ptr, out: ptr, src: ptr, toks: ptr, name_tok: u32, val_at: u
     emit_str(s, out, "  ");
     let raw: u32 = new_temp(s, out);
     emit_str(s, out, " = extractvalue { i32, i64 } ");
-    emit_val(s, out, lv);
+    emit_val(s, out, vl);
     emit_str(s, out, ", 1\n");
     if ty_bits(src, toks, pty) >= 64 {
         set_temp_val(s, lv, raw);
@@ -6721,6 +6724,118 @@ fn emit_fallback(s: ptr, out: ptr, src: ptr, toks: ptr, name_tok: u32, val_at: u
     }
     jump(s, out, su + 2, "fbend");
     lab_def(s, out, su + 1, "fbbad");
+    let mode: u32 = 0;   // 0 = 兜底表达式，1 = `catch return`，2 = `catch |e| { … }`
+    if load32(s, CG_PROF) >= 2 && tok_is(src, toks, fb_at + 1, "return") {
+        mode = 1;
+    } else if load32(s, CG_PROF) >= 2 && tok_is(src, toks, fb_at + 1, "|")
+            && load32(toks, (fb_at + 2) * 20) == 0 && tok_is(src, toks, fb_at + 3, "|")
+            && tok_is(src, toks, fb_at + 4, "{") {
+        mode = 2;
+    }
+    if mode == 1 {
+        // `catch return`（`docs/343`）：把错误载荷原样装回 `Err(…)` 再从函数返回。
+        let eraw: u32 = alloc_temp(s);
+        emit_str(s, out, "  %t");
+        emit_dec(s, out, eraw);
+        emit_str(s, out, " = extractvalue { i32, i64 } ");
+        emit_val(s, out, vl);
+        emit_str(s, out, ", 1\n  ");
+        let ee0: u32 = new_temp(s, out);
+        emit_str(s, out, " = insertvalue ");
+        emit_ty(s, out, src, toks, sty);
+        emit_str(s, out, " undef, i32 1, 0\n  ");
+        let ee1: u32 = new_temp(s, out);
+        emit_str(s, out, " = insertvalue ");
+        emit_ty(s, out, src, toks, sty);
+        emit_str(s, out, " %t");
+        emit_dec(s, out, ee0);
+        emit_str(s, out, ", i64 %t");
+        emit_dec(s, out, eraw);
+        emit_str(s, out, ", 1\n");
+        emit_str(s, out, "  ret ");
+        emit_ty(s, out, src, toks, sty);
+        emit_str(s, out, " %t");
+        emit_dec(s, out, ee1);
+        emit_str(s, out, "\n");
+        store32(s, 476, 1);
+        lab_def(s, out, su + 2, "fbend");
+        emit_str(s, out, "  ");
+        let rr0: u32 = new_temp(s, out);
+        emit_str(s, out, " = phi ");
+        emit_ty(s, out, src, toks, pty);
+        emit_str(s, out, " [ ");
+        emit_val(s, out, lv);
+        emit_str(s, out, ", ");
+        lab_ref(s, out, su, "fbok");
+        emit_str(s, out, " ]\n");
+        emit_str(s, out, "  store ");
+        emit_ty(s, out, src, toks, pty);
+        emit_str(s, out, " %t");
+        emit_dec(s, out, rr0);
+        emit_str(s, out, ", ptr %");
+        emit_name_tok(s, out, src, toks, name_tok);
+        emit_str(s, out, ".addr\n");
+        return fb_at + 3;
+    }
+    if mode == 2 {
+        // `catch |e| { 表达式 }`：载荷存进绑定变量，再求块里那一个表达式。
+        let esub2: u32 = push_ty_subst(s, src, toks, sty);
+        let errp2: u32 = enum_payload_type(s, src, toks, ei, 1);
+        pop_subst(s, esub2);
+        let eraw2: u32 = alloc_temp(s);
+        emit_str(s, out, "  %t");
+        emit_dec(s, out, eraw2);
+        emit_str(s, out, " = extractvalue { i32, i64 } ");
+        emit_val(s, out, vl);
+        emit_str(s, out, ", 1\n");
+        if bit_width(errp2, src, toks) >= 64 {
+            emit_str(s, out, "  store i64 %t");
+            emit_dec(s, out, eraw2);
+            emit_str(s, out, ", ptr %");
+            emit_name_tok(s, out, src, toks, fb_at + 2);
+            emit_str(s, out, ".addr\n");
+        } else {
+            let ecv2: u32 = alloc_temp(s);
+            emit_str(s, out, "  %t");
+            emit_dec(s, out, ecv2);
+            emit_str(s, out, " = trunc i64 %t");
+            emit_dec(s, out, eraw2);
+            emit_str(s, out, " to ");
+            emit_ty(s, out, src, toks, errp2);
+            emit_str(s, out, "\n  store ");
+            emit_ty(s, out, src, toks, errp2);
+            emit_str(s, out, " %t");
+            emit_dec(s, out, ecv2);
+            emit_str(s, out, ", ptr %");
+            emit_name_tok(s, out, src, toks, fb_at + 2);
+            emit_str(s, out, ".addr\n");
+        }
+        let bend2: u32 = skip_block(src, toks, fb_at + 4);
+        let _dv2: u32 = expr_bin(s, out, src, toks, fb_at + 5, 1, lv + 1, pty);
+        jump(s, out, su + 2, "fbend");
+        lab_def(s, out, su + 2, "fbend");
+        emit_str(s, out, "  ");
+        let r2: u32 = new_temp(s, out);
+        emit_str(s, out, " = phi ");
+        emit_ty(s, out, src, toks, pty);
+        emit_str(s, out, " [ ");
+        emit_val(s, out, lv);
+        emit_str(s, out, ", ");
+        lab_ref(s, out, su, "fbok");
+        emit_str(s, out, " ], [ ");
+        emit_val(s, out, lv + 1);
+        emit_str(s, out, ", ");
+        lab_ref(s, out, su + 1, "fbbad");
+        emit_str(s, out, " ]\n");
+        emit_str(s, out, "  store ");
+        emit_ty(s, out, src, toks, pty);
+        emit_str(s, out, " %t");
+        emit_dec(s, out, r2);
+        emit_str(s, out, ", ptr %");
+        emit_name_tok(s, out, src, toks, name_tok);
+        emit_str(s, out, ".addr\n");
+        return bend2 + 1;
+    }
     let semi: u32 = operand_end(s, src, toks, fb_at + 1);
     let _dv: u32 = expr_bin(s, out, src, toks, fb_at + 1, 1, lv + 1, pty);
     jump(s, out, su + 2, "fbend");
@@ -9601,6 +9716,32 @@ fn collect_locals(s: ptr, src: ptr, toks: ptr, i: u32, end: u32) -> u32 {
                 vi = vi + 1;
             }
             j = j + 3;                       // 跳过 `domain : for`
+        }
+        if load32(s, CG_PROF) >= 2 && tok_is(src, toks, j, "catch")
+                && tok_is(src, toks, j + 1, "|") && load32(toks, (j + 2) * 20) == 0
+                && tok_is(src, toks, j + 3, "|") && tok_is(src, toks, j + 4, "{") {
+            // `docs/343`：`let NAME: T = v catch |e| { … }` 的错误绑定也要一格 alloca。
+            // 值的类型 = 这个 `catch` **前面最近那个 `=`** 之后那一段的类型。
+            let eqp: u32 = j;
+            let found: u32 = 0;
+            while eqp > 0 && found == 0 {
+                eqp = eqp - 1;
+                if tok_is(src, toks, eqp, "=") {
+                    found = 1;
+                }
+            }
+            if found == 1 {
+                let sty2: u32 = expr_type(s, src, toks, eqp + 1);
+                let ei2: u32 = find_enum(s, src, toks, sty2);
+                if ei2 != 4294967295 {
+                    let sub2: u32 = push_ty_subst(s, src, toks, sty2);
+                    let evt2: u32 = enum_payload_type(s, src, toks, ei2, 1);
+                    pop_subst(s, sub2);
+                    if evt2 != 0 {
+                        n = add_local(s, src, toks, n, j + 2, evt2);
+                    }
+                }
+            }
         }
         if tok_is(src, toks, j, "match") {   // M26: match 载荷绑定也要 alloca
             let st: u32 = expr_type(s, src, toks, j + 1);

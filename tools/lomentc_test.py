@@ -7485,12 +7485,14 @@ def test_effect_row_names_must_be_declared_and_unique():
     """行里的未声明效应 ⇒ E002；重复声明 ⇒ E013（`docs/346` §6 R1）。"""
     bad = _EFF_BASE + "fn f(x: u32) -> u32 effects Nope { return x; }\n"
     e = errs(bad)
-    assert e and loment_diag.classify(e[0])[0] == "E002", (e, loment_diag.classify(e[0]))
+    assert e and loment_diag.family(loment_diag.classify(e[0])[0]) == "E002", \
+        (e, loment_diag.classify(e[0]))
     dup = _EFF_BASE + (
         "effect Log { fn write(v: u32) -> (); }\n"
         "effect Log { fn flush() -> (); }\n")
     e = errs(dup)
-    assert e and loment_diag.classify(e[0])[0] == "E013", (e, loment_diag.classify(e[0]))
+    assert e and loment_diag.family(loment_diag.classify(e[0])[0]) == "E013", \
+        (e, loment_diag.classify(e[0]))
 
 
 @test
@@ -7504,7 +7506,7 @@ def test_perform_parses_then_refuses_as_e023():
     m = lomentc.Parser(lomc.lex(src), src).parse()
     assert m.effect_runtime and m.effect_runtime[0][0] == "perform", m.effect_runtime
     e = errs(src)
-    assert e and all(loment_diag.classify(x)[0] == "E023" for x in e), e
+    assert e and all(loment_diag.family(loment_diag.classify(x)[0]) == "E023" for x in e), e
     assert any("perform" in x for x in e), e
 
 
@@ -7528,7 +7530,8 @@ def test_handle_and_resume_parse_then_refuse_as_e023():
     assert isinstance(let.expr, lomentc.Handle), let
     assert let.expr.arms[0].op == "write" and let.expr.arms[0].params == ["v"]
     e = errs(src)
-    assert len(e) == 3 and all(loment_diag.classify(x)[0] == "E023" for x in e), e
+    assert len(e) == 3 and all(
+        loment_diag.family(loment_diag.classify(x)[0]) == "E023" for x in e), e
 
 
 @test
@@ -7538,7 +7541,7 @@ def test_extern_cannot_declare_effects():
         "effect Log { fn write(v: u32) -> (); }\n\n"
         "extern fn puts(p: ptr) -> i32 effects Log;\n")
     e = errs(src)
-    assert e and all(loment_diag.classify(x)[0] == "E023" for x in e), e
+    assert e and all(loment_diag.family(loment_diag.classify(x)[0]) == "E023" for x in e), e
     assert any("extern" in x for x in e), e
 
 

@@ -530,6 +530,11 @@ fn err_phrase(slot: ptr, toks: ptr, tk: u32, code: u32) -> str {
         return "match 的模式不合法，或漏了变体 —— 每个变体写一个臂，或用 `_` 通配";
     }
     if code == 23 {
+        // 同一条码的另一条路（`docs/346` A2b）：效应语法面已经认得，运行期还没实现。
+        if tok_is(slot, toks, tk, "perform") || tok_is(slot, toks, tk, "handle")
+                || tok_is(slot, toks, tk, "resume") || tok_is(slot, toks, tk, "effects") {
+            return "效应处理器的运行期还没有实现（docs/346 的 A3）—— 先删掉 perform / handle / resume，或等 A3";
+        }
         return "嵌套超过 64 层 —— 编译器是递归下降的，再深就要把栈用穿了；把中间那几层提成函数，或把这段拆开";
     }
     if code == 41 {

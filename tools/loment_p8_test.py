@@ -3337,6 +3337,33 @@ def test_m85_driver_gate_on_probe_cases():
         assert rc8 == 0, f'字符串字面量 "extern" 被误拒了: rc={rc8} err={err8[-300:]!r}'
         assert got8 == lomentc.emit_llvm(lomentc.load(lit_f), ROOT), "字面量 extern 的 IR 不一致"
         print('      字符串字面量 "extern": 不误判 (判的是 token kind, 不是文本)')
+        # ---- 代数效应（`docs/346` A2b）：声明与行擦除、运行期构造点名拒 -------------
+        eff_ok = ("module e\nchoose lspe_effects_true\n\n"
+                  "effect Log {\n    fn write(v: u32) -> ();\n}\n\n"
+                  "fn main() -> u32 effects Log {\n    return 0;\n}\n")
+        eff_bad = ("module e\nchoose lspe_effects_true\n\n"
+                   "effect Log {\n    fn write(v: u32) -> ();\n}\n\n"
+                   "fn main() -> u32 {\n    let y: u32 = perform Log.write(1);\n"
+                   "    return y;\n}\n")
+        eff_off = ("module e\n\neffect Log {\n    fn write(v: u32) -> ();\n}\n\n"
+                   "fn main() -> u32 {\n    return 0;\n}\n")
+        for tag, src, want_rc in (("g_eff_ok", eff_ok, 0),
+                                  ("g_eff_bad", eff_bad, 1),
+                                  ("g_eff_off", eff_off, 1)):
+            d = Path(td) / tag
+            d.mkdir()
+            f = d / f"{tag}.lomt"
+            f.write_text(src, encoding="utf-8", newline="\n")
+            rc9, got9, err9 = _run_driver_raw(elf, _wsl_path(f), td, tag)
+            if want_rc == 0:
+                assert rc9 == 0, f"效应声明/行编不过 ({tag}): rc={rc9} err={err9[-300:]!r}"
+                assert got9 == lomentc.emit_llvm(lomentc.load(f), ROOT), \
+                    f"效应声明/行的 IR 两个实现不一致 ({tag})"
+            else:
+                assert rc9 != 0, f"应当拒绝却收了 ({tag}): err={err9[-300:]!r}"
+                want = "E023 @" if tag == "g_eff_bad" else "E019 @"
+                assert want in err9, f"码不对 ({tag})：要 {want}，得到 {err9[-200:]!r}"
+        print("      效应：声明/行擦除后 IR 逐字节一致；perform 与关闭档各自点名拒")
 
 
 @test

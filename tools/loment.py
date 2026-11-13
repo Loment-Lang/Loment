@@ -656,6 +656,38 @@ def cmd_lspe_loans(a) -> int:
     return 0
 
 
+def cmd_lspe_effects(a) -> int:
+    """`loment lspe effects FILE` —— E11 效应检查器（`docs/341`）。
+
+    报告面：读源码的 token 流，**不经过解析器** —— 效应语法还没有进语言，
+    但检查器要先能对形状说话。不改编译判决、不写台账、不改源码。
+    """
+    import json
+    import lspe
+    path = Path(a.file)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        print(f"loment lspe effects: 读不了 {a.file}: {e}", file=sys.stderr)
+        return 1
+    toks = lomc.lex(text)
+    rep = lspe.effects_analyze(toks, path.stem)
+    if getattr(a, "json", False):
+        print(json.dumps(rep, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        for line in lspe.effects_text(rep):
+            print(line)
+        for q in rep["questions"]:
+            print(f"[LSPE] {q['code']} {q['site']}: {q['claim']}",
+                  file=sys.stderr)
+    if getattr(a, "strict", False):
+        hard = [f for f in rep["findings"]
+                if f["kind"] not in ("capture_unproved", "undeclared_row")]
+        if hard:
+            return 1
+    return 0
+
+
 def _lspc_mode(a, mod) -> str:
     import lspe
     if getattr(a, "lspc", None):
@@ -827,6 +859,12 @@ def main(argv: list[str] | None = None) -> int:
     lpl.add_argument("--answer", action="append", metavar="SITE=B")
     lpl.add_argument("--answers", default=None, metavar="FILE")
     lpl.set_defaults(fn=cmd_lspe_loans)
+    lpe = lsub.add_parser("effects")
+    lpe.add_argument("file")
+    lpe.add_argument("--json", action="store_true")
+    lpe.add_argument("--strict", action="store_true",
+                     help="有硬发现时退出码 1（报告面，不影响编译）")
+    lpe.set_defaults(fn=cmd_lspe_effects)
     lc = sub.add_parser("lspc")
     lcsub = lc.add_subparsers(dest="lspc_cmd", required=True)
     lcc = lcsub.add_parser("check")

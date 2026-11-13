@@ -59,6 +59,13 @@ def _present(fid: str, sites: list[dict], facts: dict, ledger: dict,
         out = [f"expired:{x}" for x in (previous or {}).get("expired", [])]
     elif fid == "cross_unit":
         out = [f"dep:{i}" for i in range(int(facts.get("cross_unit", 0)))]
+    elif fid == "effect_unhandled":
+        out = [s["id"] for s in sites
+               if s["kind"] == "perform" and not s.get("proved")]
+    elif fid == "effect_general_handler":
+        out = [s["id"] for s in sites if s["kind"] == "handler_capture"]
+    elif fid == "effect_foreign":
+        out = [s["id"] for s in sites if s["kind"] == "effect_foreign"]
     elif fid == "audit_off":
         if ledger.get("state") == "lspe_close_admin" or ledger.get("lspc") == "off":
             out = [f"audit-off:{ledger.get('state', '?')}"]

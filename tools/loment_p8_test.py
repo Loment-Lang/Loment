@@ -4082,6 +4082,42 @@ def test_m106_catch_block_twin():
     print("       catch 新形状: 两实现逐字节一致")
 
 
+@test
+def test_m107_auto_type_twin():
+    """`let x: auto = e;` / `let x := e;`：两实现逐字节同（`docs/347`）。
+
+    推断的落点两侧不一样：参考实现在 `_collect_locals` 那一趟把 `Let.type` 定死，
+    自举侧把 `ty` token 换成 `expr_type` 回的那个 —— 但**都在同一条 `store` 上用**，
+    所以产物必须一致到临时编号。四种初值各一份：字段、变量、整条 `as T`、`true`。
+    """
+    if not _clang() or not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    src = "".join([
+        "module m", chr(10),
+        "choose runtime", chr(10), chr(10),
+        "struct S { a: u32, b: i64 }", chr(10), chr(10),
+        "fn main() -> u32 {", chr(10),
+        "    let p: S = S { a: 3, b: 4 };", chr(10),
+        "    let n := p.a;", chr(10),
+        "    let k: auto = p.b;", chr(10),
+        "    let j := k as u32;", chr(10),
+        "    let t: auto = true;", chr(10),
+        "    print_num(n);", chr(10),
+        "    print_num(j);", chr(10),
+        "    if t { print_num(0); }", chr(10),
+        "    return 0;", chr(10),
+        "}", chr(10)])
+    with tempfile.TemporaryDirectory() as td:
+        elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_auto")
+        p = Path(td) / "auto.lomt"
+        p.write_text(src, encoding="utf-8", newline=chr(10))
+        rc, out, err = _run_driver_raw(elf, _wsl_path(p), td, "auto")
+        assert rc == 0, f"自举驱动编不过 auto/:=: {err[-400:]}"
+        assert out == _unit_ll(p), "auto/:= 推断: 自举产物与参考不一致"
+    print("       `auto` / `:=`: 两实现逐字节一致")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_p8_test")
 

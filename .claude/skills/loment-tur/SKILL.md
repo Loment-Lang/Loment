@@ -187,7 +187,7 @@ not change. Design and the standing boundary list: `docs/299`.
 With `lifetime_no` (the default before 2026.3, and still selectable) `&` in a type position is
 a parse error and struct fields hold scalars only - the pre-2026.3 shape, unchanged.
 
-2026.3 also adds eight spelling-level constructs (no lifetimes involved; all are refused by
+2026.3 also adds nine spelling-level constructs (no lifetimes involved; all are refused by
 the frozen editions):
 
 - **struct literal field shorthand** `S { a, b: 2 }` - a bare name means `a: a`
@@ -217,6 +217,11 @@ the frozen editions):
 - **`catch` with a handler** `v catch |e| { expr }` (bind the error payload, give a
   fallback value) and `v catch return` (return the error as `Err(…)`); both only on
   the right-hand side of a `let`/assignment, same slot as `catch d` (`docs/343`).
+- **inferred local** `let n := p.a;` / `let k: auto = p.b;` - the type comes from the
+  initialiser, which must **spell a type in the source**: a local or parameter, a field
+  chain, a whole `as T` cast, or `true`/`false`. Literals, calls, operators, module
+  constants and `if`/`match` expressions are refused (E0215/E0216). `:=` must be written
+  glued - `let x: = 1` is still a parse error (`docs/347`).
 
 ### 2.0.6 Lexical grammar
 

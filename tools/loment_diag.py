@@ -4576,6 +4576,42 @@ FINE: tuple[Fine, ...] = (
          "(or `match`).",
          "If this failure is not the function's to handle, propagate it and let the caller decide."),
     ),
+    # 2026-11-13：`auto` / `:=` 的局部类型推断（`docs/347`）。两条都是**推断不出**，
+    # 但处境不同：一条是初值没有把类型写在源里，一条是这个构造在装载期就被反糖、
+    # 推断无从谈起。所以两码。
+    Fine(
+        215, 1, r"^`auto` 推断不出 \S+ 的类型",
+        "`auto` 推断不出类型",
+        "`auto` cannot infer the type",
+        "`let x: auto = e` / `let x := e` 的类型从**初值**来，而这条初值没有把类型"
+        "写在源里 —— 字面量、调用与运算都属于这一类。",
+        "`let x: auto = e` / `let x := e` takes its type from the initializer, and this "
+        "initializer does not spell a type in the source - literals, calls and operators "
+        "are all in that class.",
+        ("初值是变量或字段就直接用；字面量写成 `5 as u32`。",
+         "调用与运算：把类型写出来 —— `let n: u32 = str_len(s);`。",
+         "只想要个默认宽度：`let n := 0 as u32;` 也是同一条路。"),
+        ("If the initializer is a variable or a field, use it directly; write a literal as `5 as u32`.",
+         "For a call or an operator, spell the type: `let n: u32 = str_len(s);`.",
+         "If you only want the default width, `let n := 0 as u32;` is the same road."),
+    ),
+    Fine(
+        # **不锚 `^`**：这条是解析错，消息前面带的是 `行:列: `（两个前缀），
+        # `_install_fine` 给锚点补的那一格只放得过一个"行: "。短语本身够独特。
+        216, 1, r"`auto` 不能接",
+        "`auto` 不能接 `if` / `match` 表达式",
+        "`auto` cannot take an `if` / `match` expression",
+        "`if` / `match` 表达式在装载期被反糖成\"先声明、两支各自赋值\"，那份声明需要"
+        "一个现成的类型 —— 推断在这里没有位置。",
+        "`if` / `match` expressions are desugared at load time into \"declare first, assign in "
+        "each arm\", and that declaration needs a type up front - there is no place to infer.",
+        ("把类型写出来：`let x: u32 = if c { a } else { b };`。",
+         "两支各自赋值也行：`let x: u32; if c { x = a; } else { x = b; }`。",
+         "值来自同一处：把那段提到 `let` 之前，让初值是变量。"),
+        ("Spell the type: `let x: u32 = if c { a } else { b };`.",
+         "Or assign in each arm: `let x: u32; if c { x = a; } else { x = b; }`.",
+         "If both arms share a source, hoist it before the `let`."),
+    ),
 )
 
 

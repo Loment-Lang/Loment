@@ -812,6 +812,66 @@ fn same(src: ptr, t: ptr, i: u32, j: u32) -> bool {
     return true;
 }
 
+/// 第 `i` 个 token 与第 `i+1` 个是否**紧挨着**（源里中间没有空白/注释）。
+/// `let x := e;`（`docs/347`）用它：`:` 与 `=` 贴在一起才是推断的拼法，
+/// `let x: = e` 仍是"`:` 后面缺类型"。
+fn chk_glued(src: ptr, t: ptr, i: u32) -> u32 {
+    if tok_start(t, i) + tok_len(t, i) == tok_start(t, i + 1) {
+        return 1;
+    }
+    return 0;
+}
+
+/// `let NAME: auto = e;` 的初值形状（`docs/347`，与参考实现 `_auto_type` 逐字对齐）。
+///
+/// 收三副：局部/形参的**字段链**（`x` / `x.f` / `x.f.g`）、**整条初值是一个 `as T`
+/// 转换**、`true` / `false`。调用与运算不收 —— `expr_type` 对它们给得出答案，但其中
+/// 几种来自**没有 token 的类型**（`alloc` 这类 `ptr` 返回的内建），自举侧只能回"未知"。
+/// 模块级常量也不收：两个实现的发射期都看不见常量类型。
+fn chk_auto_ok(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
+               lo: u32, hi: u32) -> u32 {
+    if lo >= hi {
+        return 0;
+    }
+    if (chk_tok_is(src, t, lo, "true") || chk_tok_is(src, t, lo, "false")) && hi == lo + 1 {
+        return 1;
+    }
+    // 整条初值是一个转换：深度 0 的 `as`，它后面那段类型正好到 `;`
+    let d: u32 = 0;
+    let i: u32 = lo;
+    while i < hi {
+        if chk_tok_is(src, t, i, "(") || chk_tok_is(src, t, i, "[") {
+            d = d + 1;
+        }
+        if chk_tok_is(src, t, i, ")") || chk_tok_is(src, t, i, "]") {
+            if d > 0 {
+                d = d - 1;
+            }
+        }
+        if d == 0 && chk_tok_is(src, t, i, "as")
+                && chk_skip_type(src, t, i + 1) == hi {
+            return 1;
+        }
+        i = i + 1;
+    }
+    // 字段链：根必须是**形参或局部**（不是常量、不是模块级别的名字）
+    if chk_tok_kind(t, lo) != 0 || chk_env_has(src, t, env, envc, lo) == 0 {
+        return 0;
+    }
+    let slot: u32 = chk_lookup_slot(src, t, syms, n, lo);
+    if slot != 0 && load32(syms, (slot - 1) * 20 + 4) == K_CONST {
+        return 0;
+    }
+    let k: u32 = lo;
+    while k + 2 < hi && chk_tok_is(src, t, k + 1, ".") && chk_tok_kind(t, k + 2) == 0 {
+        k = k + 2;
+    }
+    if k + 1 == hi {
+        return 1;
+    }
+    return 0;
+}
+
 fn is_base_type(src: ptr, t: ptr, i: u32) -> bool {
     if chk_tok_kind(t, i) != 0 {
         return false;
@@ -3894,15 +3954,23 @@ fn chk_moves(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
         } else if chk_tok_is(src, t, j, "let") {
             let k: u32 = j + 2;
             let dty: u32 = 0;
-            if chk_tok_is(src, t, k, ":") {
-                let tl: u32 = k + 1;
-                let te: u32 = chk_skip_type(src, t, tl);
-                // 跨度实参的点名拒**不在这里**: 单元级的扫描 (`check_type`) 已经覆盖
-                // 每一条 `let NAME: TYPE`，这一趟再报就是同一条诊断的两份。
-                dty = chk_ty_range(src, t, syms, n, tyt, tl, te);
-                k = te;
+            let eq: u32 = 0;
+            if chk_tok_is(src, t, k, ":") && chk_tok_is(src, t, k + 1, "=")
+                    && chk_glued(src, t, k) == 1 {
+                // `let x := e;`（`docs/347`）：`=` 就在 `:` 后面，初值从 `k + 2` 起。
+                eq = k + 1;
+                k = k + 2;
+            } else {
+                if chk_tok_is(src, t, k, ":") {
+                    let tl: u32 = k + 1;
+                    let te: u32 = chk_skip_type(src, t, tl);
+                    // 跨度实参的点名拒**不在这里**: 单元级的扫描 (`check_type`) 已经覆盖
+                    // 每一条 `let NAME: TYPE`，这一趟再报就是同一条诊断的两份。
+                    dty = chk_ty_range(src, t, syms, n, tyt, tl, te);
+                    k = te;
+                }
+                eq = chk_find_at(src, t, k, e, "=");
             }
-            let eq: u32 = chk_find_at(src, t, k, e, "=");
             let semi: u32 = chk_find_at(src, t, eq + 1, e, ";");
             if eq < e && semi <= e {
                 chk_use(src, t, syms, n, env, envc, chk_lh(eq + 1, semi), tyt, p, oc);
@@ -4447,12 +4515,21 @@ fn chk_life(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             } else if chk_tok_is(src, t, j2, "let") && chk_tok_kind(t, j2 + 1) == 0 {
                 let k: u32 = j2 + 2;
                 let kk: u32 = 0;
-                if chk_tok_is(src, t, k, ":") {
-                    kk = chk_skip_type(src, t, k + 1);
+                let eq: u32 = 0;
+                if chk_tok_is(src, t, k, ":") && chk_tok_is(src, t, k + 1, "=")
+                        && chk_glued(src, t, k) == 1 {
+                    // `let x := e;`（`docs/347`）：没有写类型，也就没有借用生命周期
+                    // 那一格可言 —— `=` 就在 `:` 后面，初值从 `k + 2` 起。
+                    eq = k + 1;
+                    kk = k + 2;
                 } else {
-                    kk = k;
+                    if chk_tok_is(src, t, k, ":") {
+                        kk = chk_skip_type(src, t, k + 1);
+                    } else {
+                        kk = k;
+                    }
+                    eq = chk_find_at(src, t, kk, e, "=");
                 }
-                let eq: u32 = chk_find_at(src, t, kk, e, "=");
                 let semi: u32 = chk_find_at(src, t, eq + 1, e, ";");
                 if eq < e && semi <= e {
                     let nm: u32 = j2 + 1;
@@ -5353,20 +5430,51 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             let dlo: u32 = 0;
             let dhi: u32 = 0;
             let k: u32 = j + 2;
-            if chk_tok_is(src, t, k, ":") {
-                k = k + 1;
+            // `let x := e;` / `let x: auto = e;`（`docs/347`，2026.3+）：类型从初值推。
+            // 简写要求 `:` 与 `=` **紧挨着** —— 中间夹空白就是"`: ` 后面缺类型"的错。
+            let aauto: u32 = 0;
+            let eq: u32 = 0;
+            if chk_tok_is(src, t, k, ":") && chk_tok_is(src, t, k + 1, "=")
+                    && load32(oc, 8) >= 2 && chk_glued(src, t, k) == 1 {
+                aauto = 1;
                 dlo = k;
-                k = chk_skip_type(src, t, k);
-                dhi = k;
-                // 跨度实参的点名拒在单元级扫描里（`check_type`），这里不重复报。
-                dty = chk_ty_range(src, t, syms, n, tyt, dlo, dhi);
+                dhi = k + 2;
+                eq = k + 1;
+                k = k + 2;
+            } else if chk_tok_is(src, t, k, ":") && chk_tok_is(src, t, k + 1, "=") {
+                // `let x: = e`（没粘）或旧版次的 `let x := e`：参考实现在 `:` 后面
+                // 要一个类型名，两者都是**解析错**（`docs/347`）。照它的码报。
+                chk_pub(src, t, oc, p, E_PARSE, k + 1);
+                eq = k + 1;
+                k = k + 2;
+            } else {
+                if chk_tok_is(src, t, k, ":") {
+                    k = k + 1;
+                    dlo = k;
+                    k = chk_skip_type(src, t, k);
+                    dhi = k;
+                    if load32(oc, 8) >= 2 && chk_tok_is(src, t, dlo, "auto") {
+                        aauto = 1;
+                    } else {
+                        // 跨度实参的点名拒在单元级扫描里（`check_type`），这里不重复报。
+                        dty = chk_ty_range(src, t, syms, n, tyt, dlo, dhi);
+                    }
+                }
+                eq = chk_find_at(src, t, k, e, "=");
             }
-            let eq: u32 = chk_find_at(src, t, k, e, "=");
             let semi: u32 = chk_find_at(src, t, eq + 1, e, ";");
+            if aauto == 1 && !(eq < e && semi <= e) {
+                // 没有初值的 `auto` 推断不了（`let x: auto;`）。
+                chk_pub(src, t, oc, p, 215, nm);
+            }
             if eq < e && semi <= e {
                 if chk_tok_is(src, t, eq + 1, "if") {
                     // 2026.3 `let x: T = if c { a } else { b };`（`docs/335`）。
-                    if load32(oc, 8) < 2 {
+                    if aauto == 1 {
+                        // `if` 表达式在装载期被反糖成"先声明、两支各自赋值"，`auto`
+                        // 那份声明没有可赋的类型（`docs/347`，参考实现解析期同样拒）。
+                        chk_pub(src, t, oc, p, 216, eq + 1);
+                    } else if load32(oc, 8) < 2 {
                         chk_pub(src, t, oc, p, E_PARSE, eq + 1);
                     } else {
                         // 三段各查一遍（名字解析）；类型比对交给参考实现的反糖形状。
@@ -5382,7 +5490,9 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                     }
                 } else if chk_tok_is(src, t, eq + 1, "match") {
                     // 2026.3 `let x: T = match e { P => a, _ => b };`（`docs/336`）。
-                    if load32(oc, 8) < 2 {
+                    if aauto == 1 {
+                        chk_pub(src, t, oc, p, 216, eq + 1);
+                    } else if load32(oc, 8) < 2 {
                         chk_pub(src, t, oc, p, E_PARSE, eq + 1);
                     } else {
                         chk_tex(src, t, syms, n, env, c, chk_lh(eq + 2, eq + 3), tyt, p, oc);
@@ -5429,6 +5539,16 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                     }
                     let t2: u32 = chk_tex(src, t, syms, n, env, c,
                                           ((eq + 1) as u64) * 4294967296 + (semi as u64), tyt, p, oc);
+                    if aauto == 1 {
+                        // `docs/347`：初值必须把类型写在源里（变量/字段、整条 `as T`、
+                        // `true`/`false`）。形状与类型各判一次 —— 形状这条是两套实现
+                        // **逐字对齐**的判据面（参考实现的 `_auto_type` 认的也是这三副）。
+                        if chk_auto_ok(src, t, syms, n, env, c, eq + 1, semi) == 0 || t2 == 0 {
+                            chk_pub(src, t, oc, p, 215, nm);
+                        } else {
+                            dty = t2;      // 推断出来的类型进环境（后面用这个名字要它）
+                        }
+                    }
                     if t2 != 0 && dty != 0 && chk_ty_eq(tyt, t2, dty) == 0 {
                         chk_pub(src, t, oc, p, 58, nm);
                     }
@@ -6519,9 +6639,22 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
             // `if let E::V(x) = e` 里的 `let` 是**模式**不是带类型的绑定 (它的 `Result`
             // 后面跟的是 `::` 而不是 `:`) —— 不排掉就会把 `::` 里的第二个 `:` 当类型报 E-TYPE。
             if chk_tok_is(src, t, i, "let") && !(i > 0 && chk_tok_is(src, t, i - 1, "if")) {
-                // let NAME ':' TYPE —— TYPE 未声明 -> E-TYPE
-                let r6: u64 = check_type(src, t, syms, n, i + 3, out, o, 186);  // let 的类型
-                o = (r6 % 4294967296) as u32;
+                // `auto` / `:=`（`docs/347`）**没有类型名可查** —— 不排掉的话 `auto` 与
+                // `:=` 后面那个初值 token 会被当成未声明的类型名报 E-TYPE。
+                let skip_ty: u32 = 0;
+                if prof >= 2 && chk_tok_is(src, t, i + 3, "auto") {
+                    skip_ty = 1;
+                }
+                if chk_tok_is(src, t, i + 2, ":") && chk_tok_is(src, t, i + 3, "=") {
+                    // `:=` 与 `: =` 都不该走到"查类型名"那一格：前者没有名字可查，
+                    // 后者根本不是类型（解析错，由 let 那一趟报 E019）。
+                    skip_ty = 1;
+                }
+                if skip_ty == 0 {
+                    // let NAME ':' TYPE —— TYPE 未声明 -> E-TYPE
+                    let r6: u64 = check_type(src, t, syms, n, i + 3, out, o, 186);  // let 的类型
+                    o = (r6 % 4294967296) as u32;
+                }
             }
             // 调用检查: `ident (` 才算, 且要排掉四类**看起来像调用其实不是**的东西 ——
             // 关键字 (`return (a)` / `if (b)`) / 枚举构造 (`E::V(x)`) / 域检查

@@ -633,6 +633,23 @@ fn value_end(src: ptr, t: ptr, v: u32) -> bool {
     return false;
 }
 
+/// `t[i]` 是不是 `:=` 的**前半**（紧挨着 `=` 的 `:`，`docs/347`）。
+///
+/// 这一格要 `:` 前面留一个空格 —— `x: u32` 的"冒号前不留空格"说的是类型标注；
+/// `:=` 在这里是**一个算子**，`x:= n` 会读成"冒号后面少了一层"。
+fn glued_def(src: ptr, t: ptr, i: u32) -> u32 {
+    if tk_kind(t, i) != 3 || !tk_word(src, t, i, ":") {
+        return 0;
+    }
+    if tk_kind(t, i + 1) != 3 || !tk_word(src, t, i + 1, "=") {
+        return 0;
+    }
+    if load32(t, i * 20 + 4) + load32(t, i * 20 + 8) != load32(t, (i + 1) * 20 + 4) {
+        return 0;
+    }
+    return 1;
+}
+
 /// Python 的 _needs_space(pp, prev, cur)。
 fn needs_space(src: ptr, t: ptr, pp: u32, prev: u32, i: u32, mg: u32) -> bool {
     if prev == 0 {
@@ -664,6 +681,13 @@ fn needs_space(src: ptr, t: ptr, pp: u32, prev: u32, i: u32, mg: u32) -> bool {
         return false;
     }
     if v_in(src, t, pi, pm, T_NSA()) {
+        return false;
+    }
+    if tk_word(src, t, pi, ":") && tk_word(src, t, i, "=")
+            && load32(t, pi * 20 + 4) + load32(t, pi * 20 + 8) == load32(t, i * 20 + 4) {
+        // `let x := e;`（`docs/347`）：**粘着的** `:` `=` 是一条读法（类型推断的另一种
+        // 拼法）。拆成 `: =` 就不是了（那是"`: ` 后面缺类型"的语法错）—— 与上面
+        // `f"…"` 的插值前缀同一条理由。
         return false;
     }
     if v_in(src, t, i, mg, T_LPAR_LBR()) {
@@ -1066,7 +1090,9 @@ pub fn format_src(src: ptr, t: ptr, n: u32, mem: ptr) -> u32 {
                         pp = prev;
                         prev = enc(i, mg);
                     } else {
-                        if load32(mem, S_LLEN) > 0 && needs_space(src, t, pp, prev, i, mg) {
+                        if load32(mem, S_LLEN) > 0
+                                && (glued_def(src, t, i) == 1
+                                    || needs_space(src, t, pp, prev, i, mg)) {
                             line_push_byte(mem, 32);
                         }
                         emit_tok(mem, src, t, i, mg);

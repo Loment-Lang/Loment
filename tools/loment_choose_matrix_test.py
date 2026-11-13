@@ -701,6 +701,22 @@ def test_aicheck_slot_changes_the_ledger_not_the_code():
 
 
 @test
+def test_effects_slot_changes_the_front_end_not_the_code():
+    """槽 `lspe_effects_true`（`docs/341` A2）：只开语法面，不含效应构造的源 IR 不动。"""
+    base = {"mode": "std", "gc": "gc_manual", "runtime": "runtime",
+            "lspe": "lspe_open_admin"}
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        rc0, d0, ir0, _p0 = _emit(td, "effoff", dict(base), ALLOC_BODY)
+        rc1, d1, ir1, _p1 = _emit(
+            td, "effon", dict(base, effects="lspe_effects_true"), ALLOC_BODY)
+        assert rc0 == 0, d0[-400:]
+        assert rc1 == 0, d1[-400:]
+        assert ir0 == ir1, "effects 槽只该改前端，不该改产物"
+    print("      effects 槽：开关只开语法面，IR 逐字节相同")
+
+
+@test
 def test_gc_vm_lspe_and_lvm_agree_on_every_tier():
     """GC × VM × LSPE × LVM：三档 GC 在 **VM 上**跑出的行为与原生相同，而 `vm` / `lspe`
     两维**不改 IR**、只进 Potato（`docs/231` §1.3、`docs/243` §4.5、`docs/262` §10.1）。

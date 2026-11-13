@@ -39,7 +39,10 @@ TOP_KW = {"module", "use", "capability", "const", "struct", "enum", "trait", "im
           # `byuse "x" done` 也一样 —— 与当初 `choose` 漏掉时同一个症状。
           "comefor", "byuse",
           # `register`（docs/223 形态 A）是**顶层**声明，同理。
-          "register"}
+          "register",
+          # `effect`（docs/341 的 A2）是顶层声明；`perform` / `handle` / `resume` 是
+          # 表达式，不在这张表里。
+          "effect"}
 #: **声明行首的修饰词**（`#46`）：它们不单独占一行，要和后面那一项连在一起。
 #: `pub` 在 `TOP_KW` 里（它确实起一条声明），`extern` 不在（它不触发换行）。
 _HEAD_MODS = {"pub", "extern"}

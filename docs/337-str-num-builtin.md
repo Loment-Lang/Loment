@@ -1,4 +1,4 @@
-# 337 · `str_num(n: u32) -> str`：无符号十进制转字符串
+# 337 · `str_num(n) -> str`：整型十进制转字符串
 
 > 状态：**已落地**（2026-11-11，两套实现）· 版次：全版次的内建（累积命名空间）
 > 上游：`docs/296` §5（字符串插值 / 格式化那一项的前置）· `standard/LLS.md` §16 内建表
@@ -19,7 +19,8 @@ fn f(n: u32) -> str {
 }
 ```
 
-- 只收 `u32`；输出是无符号十进制、没有前导零、没有正负号。
+- 实参是**任意整型**（`u8`…`u64`、`i8`…`i64`；整型字面量也可以）；
+  无符号按无符号十进制输出，有符号带 `-`；没有前导零。
 - 返回值是 `str`（`{ ptr, i64 }` 视图），**落在运行期的 arena 上**，与 `str_concat`
   同一条分配路径（`__loment_alloc` 的计数、`gc_auto` 的触发钩子都照旧）。
 - 它**把运行期拖进产物**：默认的 `no_runtime` 会在编译期点名拒
@@ -36,9 +37,9 @@ fn f(n: u32) -> str {
 
 | 侧 | 落点 |
 |---|---|
-| 参考实现 | `tools/lomentc.py`：`BUILTINS["str_num"]`；`builtin()` 里 `alloc_ir("12")` + `call i32 @__loment_num_to_dec` + 两次 `insertvalue`；`_IR_NUM_TO_DEC` 只在产物文本出现该符号时追加 |
+| 参考实现 | `tools/lomentc.py`：`str_num` 的任意整型检查；`builtin()` 里按符号 `zext`/`sext` 到 i64、`alloc_ir("24")` + 三实参 `call i32 @__loment_num_to_dec` + 两次 `insertvalue`；`_IR_NUM_TO_DEC` 只在产物文本出现该符号时追加 |
 | 自举 checker | `checker.lomt`：`is_builtin` 名字表、`chk_builtin_ret`（str）、arity 1、`chk_rt_site`（紧跟 `(` 才算运行期构造） |
-| 自举 codegen | `codegen.lomt`：`str_num` 的发射分支（`emit_alloc_lit` 固定 12 字节 + 同一串调用/插入）；`uses_str_num` 为真时 `emit_num_to_dec` 追加与参考逐字节相同的 helper |
+| 自举 codegen | `codegen.lomt`：`str_num` 的发射分支（按实参类型 `zext`/`sext` 到 i64、`emit_alloc_lit` 固定 24 字节 + 同一串调用/插入）；`uses_str_num` 为真时 `emit_num_to_dec` 追加与参考逐字节相同的 helper |
 | 别的层 | `_RUNTIME_SITES` / `_PKG_FEATURES` / 自举的 `runtime_needed` / `heap_needed` 都把它算作运行期构造；L2 的"体内不许 `str_concat`"规则同时收 `str_num`（它也落堆）；Rust 后端用 `format!("{}", …)` |
 
 ## 4. 判据
@@ -55,6 +56,7 @@ fn f(n: u32) -> str {
 
 ## 5. 明确不做
 
-* 有符号数（负数）—— v1 只收 `u32`；补 `i64` 要处理 `-` 与 `INT64_MIN`；
+* 有符号数的 `INT64_MIN` 边界（取负会回绕）—— 今天的十进制路径按位处理，不做饱和；
+
 * 宽度 / 进制 / 补零等格式化参数 —— 插值和格式化的设计一起做；
 * `hex` / 浮点 —— 语言没有浮点，十六进制已有 `num_to_hex` 库函数。

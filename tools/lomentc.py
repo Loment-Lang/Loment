@@ -583,15 +583,25 @@ wr:
 
 #: `str_num` 的十进制转换（`docs/337`）。与 `print_num` 同一段循环，但写进调用方给的
 #: 缓冲区、返回长度 —— 因此不带 `syscall`，只在真调用 `str_num` 时发。
-_IR_NUM_TO_DEC = '''define internal i32 @__loment_num_to_dec(ptr %out, i32 %v) {
+_IR_NUM_TO_DEC = '''define internal i32 @__loment_num_to_dec(ptr %out, i64 %v, i32 %sgn) {
 entry:
   %buf = alloca [24 x i8]
   %end0 = getelementptr inbounds [24 x i8], ptr %buf, i64 0, i64 24
-  %x0 = zext i32 %v to i64
+  %z1 = icmp slt i64 %v, 0
+  %z2 = icmp ne i32 %sgn, 0
+  %neg = and i1 %z1, %z2
+  %nv = sub i64 0, %v
+  br i1 %neg, label %negp, label %pos
+negp:
+  br label %conv
+pos:
+  br label %conv
+conv:
+  %x0 = phi i64 [ %nv, %negp ], [ %v, %pos ]
   br label %loop
 loop:
-  %p = phi ptr [ %end0, %entry ], [ %p2, %loop ]
-  %x = phi i64 [ %x0, %entry ], [ %q, %loop ]
+  %p = phi ptr [ %end0, %conv ], [ %p2, %loop ]
+  %x = phi i64 [ %x0, %conv ], [ %q, %loop ]
   %d = urem i64 %x, 10
   %q = udiv i64 %x, 10
   %c = trunc i64 %d to i8
@@ -603,11 +613,20 @@ loop:
   %done = icmp eq i64 %q, 0
   br i1 %done, label %after, label %loop
 after:
-  %sp = ptrtoint ptr %p2 to i64
+  br i1 %neg, label %sign, label %copy
+sign:
+  %si = ptrtoint ptr %p2 to i64
+  %sj = sub i64 %si, 1
+  %p3 = inttoptr i64 %sj to ptr
+  store i8 45, ptr %p3
+  br label %copy
+copy:
+  %st = phi ptr [ %p2, %after ], [ %p3, %sign ]
+  %sp = ptrtoint ptr %st to i64
   %ep = ptrtoint ptr %end0 to i64
   %ln = sub i64 %ep, %sp
   %ln32 = trunc i64 %ln to i32
-  call void @__loment_memcpy(ptr %out, ptr %p2, i64 %ln)
+  call void @__loment_memcpy(ptr %out, ptr %st, i64 %ln)
   ret i32 %ln32
 }
 '''
@@ -5881,6 +5900,8 @@ def expr_type(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[st
     if isinstance(e, GenOf):
         return "u64"
     if isinstance(e, Call):
+        if e.name == "str_num":
+            return "str"
         sig = _builtin_sig(e)
         if sig is not None:
             return sig[1]
@@ -6210,6 +6231,16 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
                 at = expr_type(e.args[0], scope, funcs, structs)
                 if at is not None and at not in INT_TYPES:
                     errs.append(f"{e.line}: 内建 print_num 实参期望整型，得到 {at}")
+                _walk_expr(e.args[0], scope, funcs, structs, errs, enums, lifetime)
+            return
+        if e.name == "str_num":
+            # `docs/337`：实参是**任意整型**（字面量也可以）；发射时按符号扩到 i64。
+            if len(e.args) != 1:
+                errs.append(f"{e.line}: 内建 str_num 需要 1 个实参，得到 {len(e.args)}")
+            else:
+                at = expr_type(e.args[0], scope, funcs, structs)
+                if at is not None and at not in INT_TYPES:
+                    errs.append(f"{e.line}: 内建 str_num 实参期望整型，得到 {at}")
                 _walk_expr(e.args[0], scope, funcs, structs, errs, enums, lifetime)
             return
         sig = _builtin_sig(e)
@@ -13588,10 +13619,21 @@ class _Ir:
             return "str", v2
         # 2026.3: str_num —— 无符号十进制写进一块 12 字节的堆块，返回 str（`docs/337`）
         if e.name == "str_num":
-            _, av = self.expr(e.args[0], "u32")
-            p = self.alloc_ir("12", e)
+            ty, av = self.expr(e.args[0])
+            signed = 1 if ty is not None and ty.startswith("i") else 0
+            bits = {"u8": 8, "i8": 8, "u16": 16, "i16": 16,
+                    "u32": 32, "i32": 32, "u64": 64, "i64": 64}.get(ty or "", 32)
+            if bits == 64:
+                wv = av
+            else:
+                wv = self.t()
+                irm = {"u8": "i8", "i8": "i8", "u16": "i16", "i16": "i16",
+                       "u32": "i32", "i32": "i32", "u64": "i64", "i64": "i64"}
+                self.w(f"{wv} = {'sext' if signed else 'zext'} "
+                       f"{irm.get(ty or '', 'i32')} {av} to i64")
+            p = self.alloc_ir("24", e)
             ln = self.t()
-            self.w(f"{ln} = call i32 @__loment_num_to_dec(ptr {p}, i32 {av})")
+            self.w(f"{ln} = call i32 @__loment_num_to_dec(ptr {p}, i64 {wv}, i32 {signed})")
             ln64 = self.t()
             self.w(f"{ln64} = sext i32 {ln} to i64")
             v1 = self.t()

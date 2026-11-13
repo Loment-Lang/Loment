@@ -1149,6 +1149,11 @@ class Emitter:
         callee, argstr = cm.group(1), cm.group(2)
         args = [parse_operand(x) for x in split_top(argstr)] if argstr.strip() else []
         if callee.startswith("%"):
+            if getattr(self, "pe_target", False):
+                # Windows 侧的函数值要另一套约定（`_Ir` 发的记录是 ELF 的那一套），
+                # 而现在两边都还没有 —— **响亮地拒绝**，不静默编一个假的出来。
+                raise Unsupported(
+                    "间接调用只在 ELF 目标可用 —— Windows 侧的闭包记录还没有约定 (docs/341)")
             # 间接调用（`docs/341`）：callee 是一个装着代码地址的 SSA 值。约定与直接调用
             # **同一套**栈传参（`_Ir` 已经把环境指针放在实参 0）。**先压完实参再读寄存器**：
             # `get` 用 RAX 求值，先把代码地址读进 RCX 会被后面的求值踩掉。
@@ -5486,6 +5491,9 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
 
 class PeEmitter(Emitter):
     """把 syscall 改成走 shim、把入口桩改成 Windows 形态，其余降级与 ELF 目标共用。"""
+
+    #: PE 目标标记 —— `_call` 用它把"只有 ELF 兑现得了的降级"点名拒（`docs/341`）。
+    pe_target = True
 
     def _emit_syscall(self) -> None:
         self.asm.call("__win_syscall")

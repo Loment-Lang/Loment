@@ -9778,8 +9778,9 @@ def _expr_rs(e) -> str:
     if isinstance(e, Lambda):
         # `docs/341`：闭包还没有 Rust 写法（捕获要运行期表示，而这一条链是"照抄语义"）。
         # **点名拒**，别掉进最后那句 `AssertionError` —— 那是崩溃，不是诊断。
-        raise LomError(e.line, 1, "闭包（`(x) => …`）还不能翻译成 Rust（`docs/341`）："
-                                  "把它写成具名函数，或走原生后端（`loment build`）")
+        raise LomError(e.line, 1,
+                       "rust 后端不支持闭包（`(x) => …`）：那边没有捕获的运行期表示。"
+                       "把它写成具名函数，或走原生后端（`loment build`，`docs/341`）")
     raise AssertionError(f"未知表达式 {e!r}")
 
 

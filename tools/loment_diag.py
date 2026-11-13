@@ -4543,14 +4543,14 @@ FINE: tuple[Fine, ...] = (
         "the closure parameter types cannot be inferred",
         "闭包只有两种途径得到形参类型：写在参数上（`(x: T) => …`），或从**期望类型**"
         "（`let` 的标注、实参位置、返回位置）推。两处都没有就定不出来。",
-        "A closure learns its parameter types either from annotations (`(x: T) => …`) or "
+        "A closure learns its parameter types either from annotations (`(x: T) => ...`) or "
         "from the expected type (the `let` annotation, an argument position, a return). "
         "With neither, the type is undetermined.",
         ("给参数写类型：`(x: u64) => …`。",
          "把它放在有标注的位置：`let f: (u64) -> u64 = (x) => …;`。",
          "作为实参传给一个形参类型已知的函数。"),
-        ("Annotate the parameters: `(x: u64) => …`.",
-         "Put it where a type is expected: `let f: (u64) -> u64 = (x) => …;`.",
+        ("Annotate the parameters: `(x: u64) => ...`.",
+         "Put it where a type is expected: `let f: (u64) -> u64 = (x) => ...;`.",
          "Pass it as an argument to a function whose parameter type is known."),
     ),
 

@@ -4117,7 +4117,7 @@ fn emit_indirect_call(s: ptr, out: ptr, src: ptr, toks: ptr, nm_tok: u32,
     let close: u32 = skip_parens(src, toks, lp);
     let k: u32 = lp + 1;
     let a: u32 = 0;
-    while k < close && tok_kind(toks, k) != 4 && a < 10 {
+    while k < close && tok_kind(toks, k) != 4 && a < 20 {
         let pt: u32 = fn_ty_param(src, toks, fty, a);
         let e: u32 = expr_bin(s, out, src, toks, k, 1, lvl + 1 + a, pt);
         store32(s, 720 + (lvl + 1 + a) * 4, pt);
@@ -4126,6 +4126,12 @@ fn emit_indirect_call(s: ptr, out: ptr, src: ptr, toks: ptr, nm_tok: u32,
             k = k + 1;
         }
         a = a + 1;
+    }
+    // 与直接调用那一支同一条纪律：上限到了而实参还没完 -> **响亮地失败**，
+    // 不静默丢实参（IR 少一个参数，参考实现照发，逐字节判据只会报"两个实现不一致"）。
+    if a == 20 && k < close && tok_kind(toks, k) != 4 {
+        let _cf: u32 = cg_fail(s, 1, nm_tok);
+        return close + 1;
     }
     let ret: u32 = fn_ty_ret(src, toks, fty);
     let unit: u32 = is_unit_tok(src, toks, ret);

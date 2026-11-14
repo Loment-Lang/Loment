@@ -228,7 +228,113 @@ pub fn sw_is_core(unit: ptr, toks: ptr, k: u32) -> bool {
     if sw_tok_is(unit, toks, k, "lspe_aicheck_false") {
         return true;
     }
+    // 效应语法面（`docs/346` 的 A2）：`lspe_effects_true|false`。与 `aicheck` 同一条
+    // 槽位规则 —— 漏了它会被当成开关 ⇒ E022（码对、理由错）。
+    if sw_tok_is(unit, toks, k, "lspe_effects_true") {
+        return true;
+    }
+    if sw_tok_is(unit, toks, k, "lspe_effects_false") {
+        return true;
+    }
     return false;
+}
+
+/// 效应语法面开没开（`docs/346` A2）：`choose lspe_effects_true` ⇒ 1。
+/// 与参考实现的 `_prescan_slot(toks, "effects")` 同一条扫描：只认**深度 0** 的
+/// `choose`，`set choose` 是定义不是取值。
+pub fn sw_effects_on(unit: ptr, toks: ptr) -> u32 {
+    let i: u32 = 0;
+    let d: u32 = 0;
+    while load32(toks, i * 20) != 4 {
+        if load32(toks, i * 20) == 3 {
+            let c: u32 = load8(unit, load32(toks, i * 20 + 4)) as u32;
+            if c == 123 || c == 40 || c == 91 { d = d + 1; }
+            if (c == 125 || c == 41 || c == 93) && d > 0 { d = d - 1; }
+        } else if d == 0 && load32(toks, i * 20) == 0 {
+            if sw_tok_is(unit, toks, i, "choose") {
+                if sw_tok_is(unit, toks, i + 1, "lspe_effects_true") {
+                    return 1;
+                }
+                if sw_tok_is(unit, toks, i + 1, "lspe_effects_false") {
+                    return 0;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// **效应声明与 `effects` 行在 token 层擦除**（`docs/346` A2）。
+///
+/// 与 `desugar_lspe_pass` 同一手法：只删不插，`out` 可以与 `toks` 同一块。
+/// 擦掉的是**契约**（声明 + 行），不是运行期构造 —— `perform` / `handle` / `resume`
+/// 由检查器报 E023，不许在这里静默消失。
+///
+/// 只认三种形状：
+///   * 深度 0 的 `effect NAME { … }`（整块删，包括关键字）；
+///   * 深度 0 的 `effects A, B`，后面紧跟 `{` 或 `;`（只删到终结符之前）；
+///   * 其余原样。
+/// `effects` 后面必须紧跟一个**标识符**才当行 —— `const effects: u32 = 1;` 的
+/// 下一个 token 是 `:`，不会被误删。
+pub fn desugar_effects(unit: ptr, toks: ptr, a: u32, b: u32, out: ptr, o: u32) -> u32 {
+    let j: u32 = a;
+    let d: u32 = 0;
+    while j < b {
+        let is_effect: u32 = 0;
+        if d == 0 && load32(toks, j * 20) == 0 && sw_tok_is(unit, toks, j, "effect")
+                && load32(toks, (j + 1) * 20) == 0
+                && load32(toks, (j + 2) * 20) == 3
+                && (load8(unit, load32(toks, (j + 2) * 20 + 4)) as u32) == 123 {
+            is_effect = 1;
+        }
+        if is_effect == 1 {
+            let e: u32 = block_end(unit, toks, j + 2, b);
+            j = e + 1;
+        } else {
+            let is_row: u32 = 0;
+            if d == 0 && load32(toks, j * 20) == 0 && sw_tok_is(unit, toks, j, "effects")
+                    && load32(toks, (j + 1) * 20) == 0 {
+                is_row = 1;
+            }
+            if is_row == 1 {
+                let k: u32 = j + 1;
+                let stop: u32 = 0;
+                while k < b && stop == 0 {
+                    if load32(toks, k * 20) == 3 {
+                        let c: u32 = load8(unit, load32(toks, k * 20 + 4)) as u32;
+                        if c == 123 || c == 59 { stop = 1; }
+                    }
+                    if stop == 0 { k = k + 1; }
+                }
+                j = k;
+            } else {
+                let q: u32 = 0;
+                while q < 5 {
+                    store32(out, o * 20 + q * 4, load32(toks, j * 20 + q * 4));
+                    q = q + 1;
+                }
+                o = o + 1;
+                if load32(toks, j * 20) == 3 {
+                    let c: u32 = load8(unit, load32(toks, j * 20 + 4)) as u32;
+                    if c == 123 { d = d + 1; }
+                    if c == 125 && d > 0 { d = d - 1; }
+                }
+                j = j + 1;
+            }
+        }
+    }
+    // **新的 EOF**：原地压紧时，`[o, b)` 还留着旧尾巴（向前搬不会覆盖源，
+    // 但搬运后的尾部是**旧 token 的副本**）。不在这里截断，读流的人会继续读到
+    // 那些副本 —— 症状是声明/类型被重复处理（实测：`Result` 报 E0131）。
+    // 与 `desugar_lspe_pass` 的差别就在这里：那一份的尾巴恰好是闭合括号，这里必须写。
+    let z: u32 = 0;
+    while z < 5 {
+        store32(out, o * 20 + z * 4, 0);
+        z = z + 1;
+    }
+    store32(out, o * 20, 4);
+    return o;
 }
 
 fn copy_tok(toks: ptr, o: u32, j: u32) {

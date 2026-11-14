@@ -77,7 +77,14 @@ import loment_p8_test as H  # noqa: E402  # 复用已验过的构建/运行夹�
 # `free` 时仍被借（E041）、存下来的 `&mut` 独家（E007）⇒ **133/133**。
 # 2026-11-09 对象代（`docs/320` S1）：两条 —— 非 revision 域上读代、revision 守卫
 # 缺第二实参 ⇒ **135/135**。
-BUDGET = 143
+# 2026-11-13 代数效应（`docs/346` A2a/A2b）：六条 —— 默认关时 `effect` 是 E019；
+# 打开时 `perform` 是 E0217、`extern … effects` 是 E0218、重复效应 E0219、重复操作
+# E0220、行里未声明效应 E0221 ⇒ **141/141**。这一批是"自举侧真的认了
+# `lspe_effects_true`"的独立证词：孪生判据只比产物，码集分叉只有这里看得见。
+#
+# 2026-11-12 第九维 `fp`（`docs/348`）：八条（函数值 / 闭包 / 间接调用那三组）。
+# 与效应那批合流后 **149/149**。
+BUDGET = 149
 
 # --------------------------------------------------------------------------- 案例表
 #
@@ -511,6 +518,29 @@ _CASES: list[tuple[str, str]] = [
     ("fp-return-by-ref-capture",
      "module m\nchoose fp\nchoose lifetime_manual\n\n"
      "fn mk(p: ptr) -> (u64) -> &ptr {\n    return (x: u64) => &p;\n}\n"),
+
+    # ---- 代数效应（`docs/346` A2/A2b）---------------------------------------
+    # 默认关：`effect` 是未知顶层关键字（E019）。打开：声明与行擦除，运行期构造 E0217 /
+    # E0218；行里的未声明效应 E0221；重复声明 E0219 / E0220。两侧必须给同一组**数字**。
+    ("effects-off-keyword",
+     "module m\n\neffect Log {\n    fn write(v: u32) -> ();\n}\n\n"
+     "fn f() -> u32 {\n    return 0;\n}\n"),
+    ("effects-runtime-perform",
+     "module m\nchoose lspe_effects_true\n\neffect Log {\n    fn write(v: u32) -> ();\n}\n\n"
+     "fn f(x: u32) -> u32 {\n    let y: u32 = perform Log.write(x);\n    return y;\n}\n"),
+    ("effects-row-unknown",
+     "module m\nchoose lspe_effects_true\n\n"
+     "fn f(x: u32) -> u32 effects Nope {\n    return x;\n}\n"),
+    ("effects-duplicate-decl",
+     "module m\nchoose lspe_effects_true\n\n"
+     "effect Log {\n    fn write(v: u32) -> ();\n}\n\n"
+     "effect Log {\n    fn flush() -> ();\n}\n"),
+    ("effects-duplicate-op",
+     "module m\nchoose lspe_effects_true\n\n"
+     "effect Log {\n    fn write(v: u32) -> ();\n    fn write(v: u32) -> ();\n}\n"),
+    ("effects-extern-row",
+     "module m\nchoose lspe_effects_true\n\neffect Log {\n    fn write(v: u32) -> ();\n}\n\n"
+     "extern fn c_puts(p: ptr) -> i32 effects Log;\n"),
 
 ]
 

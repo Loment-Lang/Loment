@@ -51,6 +51,11 @@ PASS_SRC = ("module t\n\nfn main() -> u32 {\n"
             "    lspe pass \"manual bound check\" {\n        let x: u32 = 3;\n    }\n"
             "    return x;\n}\n")
 PASS_BAD = PASS_SRC.replace('"manual bound check"', '"   "')
+#: 代数效应（`docs/346` A2b）：自举语言服务与编译器读同一个开关。声明与行是**编得过**的
+#: 源；不认就会在 `effect` 上报假 E019（消费方轴，与 `register` / `lspe pass` 同一格）。
+EFF_SRC = ("module t\nchoose lspe_effects_true\n\n"
+           "effect Log {\n    fn write(v: u32) -> ();\n}\n\n"
+           "fn main() -> u32 effects Log {\n    return 0;\n}\n")
 
 
 def test(fn):
@@ -326,6 +331,8 @@ def test_lsp_diagnostics_match_selfhosted_checker():
         # `register` 块是新语法：语言服务认不出它就会在这份**编得过**的源上报一条
         # "未知顶层关键字"，而那正是消费方轴要抓的那种假错。
         ("register", REG_SRC, None, 0, 0),
+        # 效应声明 / 行：同一份源只多一句开关就编得过 ⇒ 0 诊断。
+        ("effects", EFF_SRC, None, 0, 0),
         # `lspe pass`：块体照常检查（编得过 ⇒ 0 条）；理由空白 ⇒ 只有 E038。
         ("lspe-pass", PASS_SRC, None, 0, 0),
         ("lspe-pass-blank", PASS_BAD, "E038",

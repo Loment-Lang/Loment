@@ -814,6 +814,26 @@ def test_definition_clamps_the_character_to_the_line_end():
     print("      越界列夹到行长（两边都回 null），正常位置的对照仍然回那次声明")
 
 
+@test
+def test_python_lsp_knows_the_effects_switch():
+    """消费方轴（`docs/341` A2）：语言服务与编译器读同一个开关，不在新语法上报假错。"""
+    on = ("module t\nchoose lspe_effects_true\n\n"
+          "effect Log { fn write(v: u32) -> (); }\n\n"
+          "fn f(x: u32) -> u32 effects Log { return x; }\n")
+    off = ("module t\n\neffect Log { fn write(v: u32) -> (); }\n")
+    uri = "file:///e.lomt"
+    docs: dict[str, str] = {}
+    out = PY_LSP.handle({"method": "textDocument/didOpen",
+                         "params": {"textDocument": {"uri": uri, "text": on}}}, docs)
+    dg = out[0]["params"]["diagnostics"]
+    assert dg == [], dg
+    out = PY_LSP.handle({"method": "textDocument/didOpen",
+                         "params": {"textDocument": {"uri": uri, "text": off}}}, docs)
+    dg = out[0]["params"]["diagnostics"]
+    assert dg, "默认档不认 `effect`，语言服务必须报出来（不许静默 OK）"
+    print("      同一份源 + 只多一句开关 -> 语言服务从红翻转成 0 诊断")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_lsp_test")
 

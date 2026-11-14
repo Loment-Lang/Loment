@@ -2591,7 +2591,7 @@ fn chk_lambda(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
     let oc: ptr = ptr_add(tyt, 4096);
     // `choose fp` 门（`docs/348`）：默认档 `no_fp` 保持静态调用图。
     if load32(tyt, 4108) == 0 {
-        chk_pub(src, t, oc, p, 217, lo);
+        chk_pub(src, t, oc, p, 222, lo);
     }
     let close: u32 = chk_match_paren(src, t, lo);
     let body_lo: u32 = close + 3;
@@ -2614,7 +2614,7 @@ fn chk_lambda(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             // `_type_ok(ty, TYPES | structs)` 那条同判）。
             if chk_tok_kind(t, tl) == 0 && chk_base_code(src, t, tl) == 0
                     && chk_lookup_slot(src, t, syms, n, tl) == 0 {
-                chk_pub(src, t, oc, p, 222, tl);
+                chk_pub(src, t, oc, p, 227, tl);
             }
             i = te;
         } else if hchain != 0 {
@@ -2622,7 +2622,7 @@ fn chk_lambda(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             hchain = chk_ty_b(tyt, hchain);
         }
         if pty == 0 {
-            chk_pub(src, t, oc, p, 220, nm);      // 闭包形参类型推不出来
+            chk_pub(src, t, oc, p, 225, nm);      // 闭包形参类型推不出来
         }
         envc = chk_env_add(t, env, envc, nm, pty);
         pn = pn + 1;
@@ -2646,7 +2646,7 @@ fn chk_lambda(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                     isptr = 1;
                 }
                 if chk_ty_is_int(cty) == 0 && cty != TY_BOOL && isptr == 0 {
-                    chk_pub(src, t, oc, p, 219, ci);
+                    chk_pub(src, t, oc, p, 224, ci);
                 } else {
                     envc = chk_env_add(t, env, envc, ci, cty);
                 }
@@ -2915,9 +2915,9 @@ fn chk_tex(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 let s1: u32 = chk_lookup_slot(src, t, syms, n, lo);
                 if s1 != 0 && load32(syms, (s1 - 1) * 20 + 4) == K_FN {
                     if chk_fn_is_extern(src, t, load32(syms, (s1 - 1) * 20 + 16)) == 1 {
-                        chk_pub(src, t, oc, p, 218, lo);
+                        chk_pub(src, t, oc, p, 223, lo);
                     } else if load32(tyt, 4108) == 0 {
-                        chk_pub(src, t, oc, p, 217, lo);
+                        chk_pub(src, t, oc, p, 222, lo);
                     }
                     return chk_fn_sig_ty(src, t, syms, n, tyt, s1 - 1);
                 }
@@ -3498,7 +3498,7 @@ fn chk_tex_atom_call(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
     let vt: u32 = chk_env_get(src, t, env, envc, lo);
     if chk_ty_is_fn(vt) == 1 {
         if load32(tyt, 4108) == 0 {
-            chk_pub(src, t, oc, p, 217, lo);
+            chk_pub(src, t, oc, p, 222, lo);
         }
         let chain: u32 = chk_ty_a(tyt, vt);
         let np: u32 = 0;
@@ -6169,7 +6169,7 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                                     chk_lh(j + 1, semi), tyt, p, ret);
                     // 带**按借捕获**的闭包不能返回（`docs/348`）：它借的东西活不过这个函数。
                     if chk_lam_ref_cap(src, t, env, c, j + 1, semi) == 1 {
-                        chk_pub(src, t, oc, p, 221, j);
+                        chk_pub(src, t, oc, p, 226, j);
                     }
                 } else {
                     t3 = chk_tex(src, t, syms, n, env, c,

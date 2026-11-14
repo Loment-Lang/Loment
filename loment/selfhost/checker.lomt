@@ -90,6 +90,14 @@ const E_PASS: u32 = 38;    // E038 `lspe pass` 没有理由（docs/262 §5.16）
 // （`loment_diag.RULES` 的 E039）。
 const E_LGC: u32 = 39;
 const E_DEEP: u32 = 23;    // E023 源码太深 —— 嵌套超过 64 层 (issue #44)
+const E_NOTIMPL: u32 = 23; // E023 同一码的另一条路：效应处理器的运行期（docs/346 A3）
+// 效应的五条细分码（`docs/346` A2b；与 `loment_diag.FINE` 210–214 同号）。
+// 细分之后规则对拍比的是**数字**，所以自举侧必须发同一组号，不能停在族码上。
+const E_EFF_RT: u32 = 217;   // 运行期未实现（perform / handle / resume）
+const E_EFF_EXT: u32 = 218;  // extern 上的效应行
+const E_EFF_DUP: u32 = 219;  // 效应重复定义
+const E_EFF_OPDUP: u32 = 220; // 同一效应里的操作重复定义
+const E_EFF_ROW: u32 = 221;  // effects 行里的未声明效应
 
 /// 拖运行期的构造**有几个** —— 检查器数好放这儿，驱动取来拼报文的"另有 N 处"那半句
 /// （与参考实现 `_runtime_sites` 的 `len(_sites) - 1` 同口径）。见 issue #321。
@@ -618,7 +626,9 @@ fn chk_core_dim(src: ptr, t: ptr, k: u32) -> u32 {
     // 维度之后的**第二位置**（`docs/262` §10.7）：`<维>_<槽>_<值>`。
     // 8 = 槽位 —— 它有自己的"每格一次"，**不**算进 `lspe` 那一维的重复计数。
     if chk_tok_is(src, t, k, "lspe_aicheck_true")
-            || chk_tok_is(src, t, k, "lspe_aicheck_false") {
+            || chk_tok_is(src, t, k, "lspe_aicheck_false")
+            || chk_tok_is(src, t, k, "lspe_effects_true")
+            || chk_tok_is(src, t, k, "lspe_effects_false") {
         return 8;
     }
     // ⚠ **这一格是"不是核心词"的哨兵**。加一维就要把它往后挪一格 ——
@@ -5867,6 +5877,122 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
 ///   * `=`（不是 `==` / `=>`）后面接不上一个表达式
 ///   * 不支持的数值字面量形式（`0b1010` / `1_000` / `1.5`）
 /// 语句**起点**那一条要在走查里判（要边界），留在 `chk_body`，不在这儿重复。
+// ---------------------------------------------------------------- 效应前置趟
+/// 效应运行期构造的点名拒（`docs/346` A2）：`perform` / `handle` / `resume` 与
+/// `extern fn … effects E` 都是 **E023**（这一版后端还没实现）。参考实现在解析后由
+/// 检查器给同一条码，所以两侧码集相等。
+///
+/// 只认**形状**：`perform` 后面跟标识符、`resume` 后面跟 `(`、`handle` 后面跟
+/// `标识符 {`。普通同名变量不会被误报（效应语法面打开时它们是上下文关键字）。
+fn chk_effect_named(src: ptr, t: ptr, name: u32) -> u32 {
+    let i: u32 = 0;
+    while chk_tok_kind(t, i) != 4 {
+        if chk_tok_kind(t, i) == 0 && chk_tok_is(src, t, i, "effect")
+                && chk_tok_kind(t, i + 1) == 0 && same(src, t, i + 1, name) {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn chk_effects_prepass(src: ptr, t: ptr, out: ptr, o0: u32) -> u32 {
+    let o: u32 = o0;
+    let i: u32 = 0;
+    let d: u32 = 0;
+    while chk_tok_kind(t, i) != 4 {
+        let hit: u32 = 0;
+        if chk_tok_kind(t, i) == 3 {
+            let c: u32 = load8(src, load32(t, i * 20 + 4)) as u32;
+            if c == 123 { d = d + 1; }
+            if c == 125 && d > 0 { d = d - 1; }
+        } else if chk_tok_kind(t, i) == 0 {
+            if d == 0 && chk_tok_is(src, t, i, "effect")
+                    && chk_tok_kind(t, i + 1) == 0 && chk_tok_kind(t, i + 2) == 3
+                    && (load8(src, load32(t, (i + 2) * 20 + 4)) as u32) == 123 {
+                // 重名（E013）：只看**前面**的声明，第一条不算重复。
+                let b: u32 = 0;
+                while b < i {
+                    if chk_tok_kind(t, b) == 0 && chk_tok_is(src, t, b, "effect")
+                            && chk_tok_kind(t, b + 1) == 0
+                            && same(src, t, b + 1, i + 1) {
+                        o = sym_pub(src, t, out, o, E_EFF_DUP, i);
+                    }
+                    b = b + 1;
+                }
+                // 同一效应体里的操作重名（E0220）：只看 `fn` 后面的名字。
+                let eb: u32 = chk_match_brace(src, t, i + 2);
+                let p: u32 = i + 3;
+                while p < eb {
+                    if chk_tok_kind(t, p) == 0 && chk_tok_is(src, t, p, "fn")
+                            && chk_tok_kind(t, p + 1) == 0 {
+                        let q: u32 = i + 3;
+                        while q < p {
+                            if chk_tok_kind(t, q) == 0 && chk_tok_is(src, t, q, "fn")
+                                    && chk_tok_kind(t, q + 1) == 0
+                                    && same(src, t, q + 1, p + 1) {
+                                o = sym_pub(src, t, out, o, E_EFF_OPDUP, p);
+                            }
+                            q = q + 1;
+                        }
+                    }
+                    p = p + 1;
+                }
+            }
+            if d == 0 && chk_tok_is(src, t, i, "effects")
+                    && chk_tok_kind(t, i + 1) == 0 {
+                // 行里的每个名字都要有声明（E002）。只扫到 `{` / `;` 之前。
+                let k: u32 = i + 1;
+                let stop: u32 = 0;
+                while chk_tok_kind(t, k) != 4 && stop == 0 {
+                    if chk_tok_kind(t, k) == 3 {
+                        let c2: u32 = load8(src, load32(t, k * 20 + 4)) as u32;
+                        if c2 == 123 || c2 == 59 { stop = 1; }
+                    } else if chk_tok_kind(t, k) == 0 {
+                        if chk_effect_named(src, t, k) == 0 {
+                            o = sym_pub(src, t, out, o, E_EFF_ROW, k);
+                        }
+                    }
+                    if stop == 0 { k = k + 1; }
+                }
+            }
+            if chk_tok_is(src, t, i, "perform") && chk_tok_kind(t, i + 1) == 0 {
+                hit = 1;
+            }
+            if chk_tok_is(src, t, i, "resume") && chk_tok_kind(t, i + 1) == 3 {
+                hit = 1;
+            }
+            if chk_tok_is(src, t, i, "handle") && chk_tok_kind(t, i + 1) == 0
+                    && chk_tok_kind(t, i + 2) == 3
+                    && (load8(src, load32(t, (i + 2) * 20 + 4)) as u32) == 123 {
+                hit = 1;
+            }
+        }
+        if hit == 1 {
+            o = sym_pub(src, t, out, o, E_EFF_RT, i);
+        }
+        i = i + 1;
+    }
+    // `extern fn … effects E;` —— 效应行不能穿越 C 边界（`docs/346` §6 R7）。
+    let j: u32 = 0;
+    while chk_tok_kind(t, j) != 4 {
+        if chk_tok_is(src, t, j, "extern") && chk_tok_is(src, t, j + 1, "fn") {
+            let k: u32 = j + 2;
+            while chk_tok_kind(t, k) != 4 && !chk_tok_is(src, t, k, ";") {
+                if chk_tok_is(src, t, k, "effects") {
+                    o = sym_pub(src, t, out, o, E_EFF_EXT, k);
+                }
+                k = k + 1;
+            }
+            j = k;
+        } else {
+            j = j + 1;
+        }
+    }
+    return o;
+}
+
+/// **语法前置趟**（说明见本文件上方"语法前置趟"那一节；这里只补一个入口）。
 fn chk_syntax_prepass(src: ptr, t: ptr, out: ptr, o: u32, tur2: u32) -> u32 {
     let i: u32 = 0;
     let depth: u32 = 0;        // 花括号深度 (只管"块没闭合"那条旧判据)
@@ -5879,6 +6005,14 @@ fn chk_syntax_prepass(src: ptr, t: ptr, out: ptr, o: u32, tur2: u32) -> u32 {
     let lend: u32 = 0;
     let seg0: u32 = 0;         // 当前"段"的起点（上一个 `{` `}` `;` `=>` 之后）
     while chk_tok_kind(t, i) != 4 {
+        // 效应语法面关着时，`effect NAME { … }` 是**未知顶层关键字** —— 与参考实现
+        // 同一条 E019（打开时它已在 `check_arena` 里被擦除，走不到这里）。
+        if o == 0 && chk_tok_kind(t, i) == 0 && chk_tok_is(src, t, i, "effect")
+                && chk_tok_kind(t, i + 1) == 0 && chk_tok_kind(t, i + 2) == 3
+                && (load8(src, load32(t, (i + 2) * 20 + 4)) as u32) == 123
+                && sw_effects_on(src, t) == 0 {
+            o = sym_pub(src, t, out, o, E_PARSE, i);
+        }
         // **循环上下文**（Tur 2 的 `break` / `continue`，`docs/296` §2.5）：`while` / `for`
         // 起头的段一开 `{`，就把它的匹配 `}` 记成"还开着的循环"。`i` 越过去之后清掉。
         if tur2 != 0 {
@@ -6127,7 +6261,20 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     while chk_tok_kind(t, ntks) != 4 {
         ntks = ntks + 1;
     }
-    let _nt2: u32 = desugar_lspe_pass(src, t, 0, ntks, t, 0);
+    let nt2: u32 = desugar_lspe_pass(src, t, 0, ntks, t, 0);
+    // 效应语法面（`docs/346` A2）：打开时，声明与 `effects` 行在 token 层擦除（只删不插，
+    // 与 `desugar_lspe_pass` 同一手法）；`perform` / `handle` / `resume` 不擦，先由
+    // `chk_effects_prepass` 点名报 E023 —— 静默删掉它们等于改语义。
+    // 擦除发生在 `check_arena` 里（驱动器把同一块 token 交给发射器），所以发射器看到的
+    // 也是擦除后的流：声明与行对 IR 没有影响，与参考实现的"擦除"逐字节一致。
+    if sw_effects_on(src, t) == 1 {
+        let oe: u32 = chk_effects_prepass(src, t, out, 0);
+        if oe != 0 {
+            store32(oc, 0, oe);
+            return oe / 8;
+        }
+        let _nt3: u32 = desugar_effects(src, t, 0, nt2, t, 0);
+    }
     // **语法前置趟**：报出任何 E019 就直接收工 —— 参考实现是"解析错就中止"，一条业务检查
     // 都不跑；自举侧没有解析器，得把这条分界显式补上，否则下游会多报（issue #7 / #323）。
     o = chk_syntax_prepass(src, t, out, 0, prof);
@@ -6192,6 +6339,8 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     let nch_ai: u32 = 0;        // 维度后的槽（`docs/262` §10.7）：`lspe_aicheck_*`。
                                 // 它不改变任何判决，所以没有冲突对。（渠道闸 2026-10-20 已开，
                                 // 不再需要 `ln_lspe` 记行号。）
+    let nch_ef: u32 = 0;        // 第二格槽：`lspe_effects_true|false`（`docs/346` A2）。
+                                // 与 `aicheck` 同一格规则：每格只许一次。
     let nch_lifetime: u32 = 0;  // 第八维（`docs/299`）：生命周期 —— 只数重复；
                                 // 另加一条**版次闸**（旧版次不接受这三个词）。
     // 生效的取值（0 = 没写），用来判"两档不能同时选"（`docs/175` §3.4 ⚠）。
@@ -6441,9 +6590,17 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
             } else if dim == 8 {
                 // 维度后的槽（`docs/262` §10.7）：与主取值**正交**，所以不和 `lspe`
                 // 共用一个计数；同一格写两次仍然没有答案。
-                nch_ai = nch_ai + 1;
-                if nch_ai > 1 {
-                    o = sym_pub(src, t, out, o, 159, i);
+                if chk_tok_is(src, t, i + 1, "lspe_effects_true")
+                        || chk_tok_is(src, t, i + 1, "lspe_effects_false") {
+                    nch_ef = nch_ef + 1;
+                    if nch_ef > 1 {
+                        o = sym_pub(src, t, out, o, 159, i);
+                    }
+                } else {
+                    nch_ai = nch_ai + 1;
+                    if nch_ai > 1 {
+                        o = sym_pub(src, t, out, o, 159, i);
+                    }
                 }
             } else {
                 // 不是核心模式的取值 —— 与改之前那条同形

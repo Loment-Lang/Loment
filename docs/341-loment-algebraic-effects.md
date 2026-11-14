@@ -1,6 +1,6 @@
 # 341 · 代数效应与效应处理器：把"向谁求助"变成可检查的行
 
-> 状态: **A0/A1 参考侧已落地（报告面）**（2026-11-13）· 上游: `docs/262`（LSPE）·
+> 状态: **A0/A1 报告面 + A2a 参考前端已落地**（2026-11-13）· 上游: `docs/262`（LSPE）·
 > `docs/306`–`308`（E9 域检查器）· `docs/317`（E10 借用检查器）· `docs/286`（六点一空间）·
 > `docs/219`（链接边界）· `standard/LLS.md` §21–§25
 > 一句话: 在 LSPE 里加**第十一个引擎**，把"这段代码会向谁求助"变成函数签名上的
@@ -267,8 +267,10 @@ effect Net {
 
 ## 5. 语法草案（未实装）
 
-> 仅为形状；编译器的解析器**今天还不认识**这些拼写。展示用 `rust` 围栏（`CLAUDE.md`
-> 的显示约定）。真正的入口是 `loment lspe effects FILE`，它直接读 token 流。
+> 仅为形状。A2a 起，**参考解析器**在 `choose lspe_effects_true` 打开时认这些拼写
+> （默认关，旧源一个字节都不变）；`perform` / `handle` / `resume` 目前只解析到 AST，
+> 运行期要到 A3。展示用 `rust` 围栏（`CLAUDE.md` 的显示约定）。报告入口是
+> `loment lspe effects FILE`，它直接读 token 流。
 
 ### 5.1 声明
 
@@ -536,7 +538,7 @@ E11 的孪生判据只证明"两侧看同一份 token 得到同一组站点"，�
 
 * 本轮只落**分析核心 + 查看入口**；
 * 默认构建的产物与台账一个字节都不变；
-* 下一步（A2b）才是两侧同计数。
+* 下一步（A2c）才是两侧同计数。
 
 ---
 
@@ -613,6 +615,24 @@ Q005 的形状（A2 再补）。
 **已知边界**：见 §9.3；一般处理器只到 Q022/Assumed；`requires` 只记录不检查；
 自举侧还没有同形分析（A2b）。
 
+### 10.4 A2a 落地记录（2026-11-13，参考前端）
+
+| 内容 | 位置 | 判据 |
+|---|---|---|
+| 构建旋钮 `lspe_effects_true\|false`（默认 `false`） | `tools/lomentc.py` 的 `CORE_SLOTS` / `CORE_SLOT_DEFAULTS` | `test_effects_slot_is_registered_and_defaults_off` |
+| `effect` 声明、`effects` 行（AST + 擦除） | `EffectDecl` / `EffectOp` / `Func.effects` / `Module.effects` | `test_effect_declarations_and_rows_are_accepted_and_erased` |
+| `perform` / `handle` / `resume` 解析成 AST，检查器报 **E023**（A3 才落） | `Perform` / `Handle` / `HandlerArm` / `Resume`、`Module.effect_runtime` | `test_perform_parses_then_refuses_as_e023`、`test_handle_and_resume_parse_then_refuse_as_e023` |
+| 默认关 ⇒ 旧拼写仍是未知关键字 | `_prescan_slot` + `Parser.effects` | `test_effects_are_off_by_default` |
+| 行里的未声明效应 / 重名 | `_effect_front_errors` | `test_effect_row_names_must_be_declared_and_unique` |
+| `extern fn … effects` 的点名拒 | 同上 | `test_extern_cannot_declare_effects` |
+| 语言服务读同一个开关（消费方轴） | `tools/loment_lsp.py` 走 `lomentc.Parser` | `test_python_lsp_knows_the_effects_switch` |
+| 格式化器把 `effect` 当顶层声明 | `tools/lomfmt.py` 的 `TOP_KW` | `loment_fmt_test` |
+
+**自举侧的状态（明写）**：`loment/selfhost/*` 本轮**不动**。它不认识
+`lspe_effects_true`，所以同一份源在自举编译器上会停在 E022 / 未知顶层关键字 ——
+**是点名拒绝，不是静默改义**。A2b 才做镜像；在那之前，效应源只由参考编译器读。
+这与「两侧逐字节」不冲突：默认关时两侧的产物仍然逐字节相同。
+
 ---
 
 ## 11. 落地阶梯
@@ -621,16 +641,22 @@ Q005 的形状（A2 再补）。
 
 | 步 | 内容 | 先红的判据 | 出口 |
 |---|---|---|---|
-| **A0**（本轮） | 声明 / 行 / 处理器 / `perform` 的报告面 | 13 条新判据全红 | `lspe effects` 可看 |
-| **A1**（本轮） | 调用传播 + 尾续/一般分类 + Q018–Q022 | 调用行与尾续判据红 | 报告面完整 |
-| **A2** | 解析器接受 `effect` / `effects` / `handle` / `perform` / `resume`（两侧） | 语法判据在旧编译器上红 | `tur2026.4` 或独立开关 |
-| **A2b** | E11 站点进 Potato 台账（两侧同计数） | 台账计数判据 | `lspe state` 列得出 |
+| **A0**（已完成） | 声明 / 行 / 处理器 / `perform` 的报告面 | 13 条新判据全红 | `lspe effects` 可看 |
+| **A1**（已完成） | 调用传播 + 尾续/一般分类 + Q018–Q022 | 调用行与尾续判据红 | 报告面完整 |
+| **A2a**（本轮） | **参考前端**接受 `effect` / `effects` / `handle` / `perform` / `resume`，由构建旋钮 `choose lspe_effects_true` 打开（默认关）；声明与行擦除，运行期构造 E023 | 开关关时旧源逐字节不变；开时 AST 有节点、E023 点名 | 参考编译器可解析；IR 不变成 |
+| **A2b** | **自举侧镜像**（parser / checker / codegen + 种子），并与参考逐字节对拍 | 同一份源两侧同判 | 两侧同语法面 |
+| **A2c** | E11 站点进 Potato 台账（两侧同计数） | 台账计数判据 | `lspe state` 列得出 |
 | **A3** | 尾续处理器的代码生成（两侧链接器）+ 行进产物元数据 | 正例跑通、反例仍拒 | `no_runtime` 下可用；链接期可查 |
 | **A4** | 一般处理器的 CPS + 捕获回收 | `no_gc` 反例 / `gc_auto` 正例 | Q022 有答案 |
 | **A5** | `MultiShot` + `Copy` 捕获集 | 多射反例在 A4 下红、A5 下按规则收/拒 | 默认仍是 one-shot |
 
 **A0/A1 是纯报告步**：不改判决、不写台账、不动 `lom/*.lom`。这与 E9/E10 的落地顺序
 同形 —— 先把事实变成站点，再让事实改变判决。
+
+**A2 拆成三小步**（2026-11-13 的实测判断）：两侧同时接语法要动自举解析器与种子，
+而自举侧的容量/墙钟成本是独立的。A2a 先把**参考前端**与开关落地（本轮），A2b 再做
+自举镜像，A2c 才是台账。**A2a 之后，用 `lspe_effects_false`（默认）的旧源产物
+一个字节都不变** —— 这是能先合入的理由。
 
 ---
 
@@ -672,10 +698,10 @@ Q005 的形状（A2 再补）。
 
 1. **不主张比 Koka 更强**：它的行多态与推理比本设计完整；本设计换的是"链接边界 +
    默认无运行期 + 静态线性"。
-2. **不主张今天的语法会定稿**：§5 是草案，A2 之前编译器不认。
+2. **不主张今天的语法会定稿**：§5 是草案；A2a 之前参考编译器不认，自举侧要到 A2b。
 3. **不主张 A0/A1 是"已实现效应"**：它只把形状变成可检查的站点，运行期是 A3/A4。
 4. **不主张尾续判定完备**：它只认块尾；更复杂的形状会被判成一般处理器。
-5. **不主张 `requires` 已经接上 E9**：A0/A1 只记录，A2 才检查。
+5. **不主张 `requires` 已经接上 E9**：A0/A1 只记录，A3 之后才检查。
 
 ---
 

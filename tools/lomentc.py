@@ -2145,6 +2145,58 @@ class Revoke:
 
 
 @dataclass
+class EffectOp:
+    """`effect` 声明里的一个操作（`docs/341` §5.1）。A2 只收集，不发射。"""
+    name: str
+    params: list          # [(形参名, 类型)]
+    ret: str
+    requires: str         # 能力域要求；空串 = 不要求
+    line: int
+
+
+@dataclass
+class EffectDecl:
+    """`effect NAME { fn op(…) -> T; … }`（`docs/341` §5.1）。"""
+    name: str
+    ops: list             # [EffectOp]
+    line: int
+
+
+@dataclass
+class Perform:
+    """`perform E.op(…)` / `perform op(…)`（`docs/341` §5.2）。"""
+    effect: str           # 空串 = 未限定，按 op 名唯一归因
+    op: str
+    args: list
+    line: int
+
+
+@dataclass
+class HandlerArm:
+    """处理器的一条臂（`docs/341` §5.3）。"""
+    op: str
+    params: list          # [形参名]
+    body: list
+    line: int
+
+
+@dataclass
+class Handle:
+    """`handle E { BODY } with { ARMS }`（`docs/341` §5.3）。"""
+    effect: str
+    body: list
+    arms: list            # [HandlerArm]
+    line: int
+
+
+@dataclass
+class Resume:
+    """处理器臂里的 `resume(x)`（`docs/341` §5.3）。"""
+    arg: object
+    line: int
+
+
+@dataclass
 class Let:
     name: str
     type: str
@@ -2430,6 +2482,9 @@ class Func:
     #: 规则定义在 token 流上，与 L0/L1/L2 同一条纪律）。全局不动点见 `_gc_alpha_pass`。
     #: 存**小结**而不是 token 流：它小、随 `deepcopy` 走，且不必把整条词法流留在模块上。
     deref: object = None
+    #: **效应行**（`docs/341` §5.2）：`effects Log, Net` 的 `["Log", "Net"]`。
+    #: `None` = 没写（A0/A1 的检查器把它当"推断"）；A2 只收集，发射器不看它。
+    effects: object = None
 
 
 def _rename_self(stmts: list) -> None:
@@ -3265,6 +3320,12 @@ class Module:
     #: 由**解析器**在 `parse()` 末尾填（与 `Func.deref` 同一个位置、同一个理由：规则定义
     #: 在 token 流上，而解析器是唯一握着它的地方）。`no_runtime` 那条强保证读它。
     rt_sites: list = field(default_factory=list)
+    #: **效应声明**（`docs/341`，A2）。只在 `choose lspe_effects_true` 时非空。
+    effects: list = field(default_factory=list)
+    #: **解析到了但 A2 还不发射的效应构造**：`[(kind, 行, 列), …]`，`kind` 是
+    #: `perform` / `handle` / `resume`。`check()` 把它们报成 E023（编译器限制），
+    #: 而不是在发射器里炸出 Python 栈 —— A3 才落运行期。
+    effect_runtime: list = field(default_factory=list)
 
 
 # ---------------------------------------------------------------- 开关 (docs/182 §1)
@@ -3386,10 +3447,15 @@ CORE_DIMS: dict[str, tuple[str, ...]] = {
 #: 构建旋钮，所以它可以和主取值**同时写**，不触发"这一维写了两次"。
 #: 两个理由必须写在名字里：**属哪一维**（`lspe_` 前缀）与**哪一格**（`aicheck`）。
 #:
-#: 今天只有一格：`lspe_aicheck_true|false` —— AI 检查器是外部、非确定的，
-#: 默认关；打开它只让台账/CLI 多一类**问题**（Q014），不给任何义务添证据。
+#: 今天有两格：
+#:   * `lspe_aicheck_true|false` —— AI 检查器是外部、非确定的，默认关；打开它只让
+#:     台账/CLI 多一类**问题**（Q014），不给任何义务添证据；
+#:   * `lspe_effects_true|false` —— **效应语法面**（`docs/341` 的 A2）。默认关，所以
+#:     旧源一个字节都不变；打开它，参考解析器才认 `effect` / `effects` / `perform` /
+#:     `handle` / `resume`。它是**构建旋钮**，不是第九维（`docs/262` §7.6 的形状）。
 CORE_SLOTS: dict[str, tuple[str, tuple[str, ...]]] = {
     "aicheck": ("lspe", ("true", "false")),
+    "effects": ("lspe", ("true", "false")),
 }
 CORE_SLOT_WORDS = frozenset(f"{dim}_{slot}_{v}"
                             for slot, (dim, vs) in CORE_SLOTS.items() for v in vs)
@@ -3398,7 +3464,7 @@ CORE_SLOT_OF = {f"{dim}_{slot}_{v}": (slot, v)
                 for slot, (dim, vs) in CORE_SLOTS.items() for v in vs}
 #: 每一格**不写**时的取值 —— 与 `CORE_DEFAULTS` 同一条纪律（默认不改变行为）。
 #: 依赖要核"根满足了吗"，核的就是这张表补出来的**生效值**。
-CORE_SLOT_DEFAULTS = {"aicheck": "false"}
+CORE_SLOT_DEFAULTS = {"aicheck": "false", "effects": "false"}
 
 #: 冲突**两两查**时的维序。**写死的** —— 报错文本里两个取值的先后由它决定，
 #: 而两个实现比的是字节，所以它不能是集合迭代顺序。
@@ -3992,6 +4058,30 @@ def _apply_switches(toks: list, tbl: SwitchTable, collect: bool = True) -> list:
 MAX_NEST = 64
 
 
+def _prescan_slot(toks: list, slot: str) -> str:
+    """解析之前把某一格槽位的取值找出来（`docs/341` 的 A2 用法）。
+
+    与 `_prescan_lifetime` 同一条理由：语法决策发生在 `choose` 那一行**之前**是合法的，
+    所以不能在 `parse_items` 里边走边读。只认**深度 0**、`choose` 后面紧跟槽词。
+    """
+    depth = 0
+    i = 0
+    while i + 1 < len(toks):
+        t = toks[i]
+        if t.kind == "punct" and t.val in "{[(":
+            depth += 1
+        elif t.kind == "punct" and t.val in "}])":
+            depth -= 1
+        elif depth == 0 and t.kind == "ident" and t.val == "choose":
+            if not (i > 0 and toks[i - 1].kind == "ident" and toks[i - 1].val == "set"):
+                nxt = toks[i + 1]
+                if nxt.kind == "ident" and nxt.val in CORE_SLOT_OF:
+                    if CORE_SLOT_OF[nxt.val][0] == slot:
+                        return CORE_SLOT_OF[nxt.val][1]
+        i += 1
+    return CORE_SLOT_DEFAULTS[slot]
+
+
 def _prescan_lifetime(toks: list, profile: str) -> str:
     """解析之前把 `choose lifetime_*` 找出来（`docs/299`）。
 
@@ -4042,6 +4132,15 @@ class Parser:
         #: `choose lifetime_*` 那一行 —— 类型可能在那一行**之前**就被解析（顶层顺序自由），
         #: 所以在构造时**预扫一遍**，不依赖 `parse_items` 的先后。
         self.lifetime = _prescan_lifetime(toks, profile)
+        #: **效应语法面**（`docs/341` A2）。与 `lifetime` 同一条"构造时预扫"：
+        #: `choose` 可能写在用到它的声明之后，而语法决策是**边走边做**的。
+        self.effects = _prescan_slot(toks, "effects") == "true"
+        #: 解析到、但 A2 不发射的效应构造（`perform` / `handle` / `resume`）。
+        #: `parse()` 末尾抄进 `Module.effect_runtime`，`check()` 统一报 E023。
+        self.effect_runtime: list[tuple[str, int, int]] = []
+        #: >0 时块的最后一条表达式语句可以省掉 `;`（`handle` 的体是**值块**，
+        #: 与 `if`/`match` 表达式同一个形状；`docs/341` §5.3）。
+        self.allow_tail_expr = 0
 
     # -- 基础
     def peek(self, k: int = 0) -> Tok:
@@ -4164,6 +4263,8 @@ class Parser:
         # **拖运行期的构造**（`docs/227`）：与 `f.deref` 同一条理由 —— 规则定义在
         # token 流上，解析器是唯一能一次扫全模块的地方（`check()` 里再扫就要第二份实现）。
         mod.rt_sites = _runtime_sites(self.toks, self.profile)
+        # **A2 解析到但还不发射的效应构造**（`docs/341`）：`check()` 统一报 E023。
+        mod.effect_runtime = list(self.effect_runtime)
         return mod
 
     def parse_items(self, mod: Module, nested: bool = False) -> None:
@@ -4305,12 +4406,55 @@ class Parser:
                 f.interrupt = True
                 f.pub = is_pub
                 mod.funcs.append(f)
+            elif (t.val == "effect" and self.effects
+                    and self.peek(1).kind == "ident"
+                    and self.peek(2).kind == "punct" and self.peek(2).val == "{"):
+                # `effect NAME { fn op(…) -> T; … }`（`docs/341` 的 A2，语法面）。
+                mod.effects.append(self.parse_effect())
             elif t.val == "fn":
                 f = self.parse_fn()
                 f.pub = is_pub
                 mod.funcs.append(f)
             else:
                 raise LomError(t.line, t.col, f"未知顶层关键字 {t.val!r}")
+
+    def parse_effect(self) -> EffectDecl:
+        """`effect NAME { fn op(p: T, …) -> R [requires CAP]; … }`（`docs/341` §5.1）。
+
+        A2 只收集：声明本身不发射（与 `capability` 同一条路数），行也一样。
+        """
+        kw = self.expect("ident", "effect")
+        name = self.ident("效应名")
+        self.expect("punct", "{")
+        ops: list[EffectOp] = []
+        while not self.at("punct", "}"):
+            okw = self.expect("ident", "fn", "（效应体里只允许 fn 操作声明）")
+            opname = self.ident("操作名")
+            self.expect("punct", "(")
+            params: list[tuple[str, str]] = []
+            while not self.at("punct", ")"):
+                pn = self.ident("参数名")
+                self.expect("punct", ":")
+                params.append((pn, self.type_name()))
+                if not self.accept("punct", ","):
+                    break
+            self.expect("punct", ")")
+            self.expect("punct", "-")
+            self.expect("punct", ">")
+            if self.at("punct", "(") and self.peek(1).kind == "punct" \
+                    and self.peek(1).val == ")":
+                self.next()
+                self.next()
+                ret = "()"
+            else:
+                ret = self.type_name()
+            requires = ""
+            if self.accept("ident", "requires"):
+                requires = self.ident("能力域名")
+            self.expect("punct", ";")
+            ops.append(EffectOp(opname, params, ret, requires, okw.line))
+        self.expect("punct", "}")
+        return EffectDecl(name, ops, kw.line)
 
     def parse_struct(self) -> Struct:
         kw = self.expect("ident", "struct")
@@ -4709,6 +4853,21 @@ class Parser:
             self.expect("punct", "-")
             self.expect("punct", ">")
             ret = self.type_name()
+        # `effects A, B`（`docs/341` §5.2）：A2 只把它记在函数上，发射器不看它。
+        row = None
+        if self.effects and self.at("ident", "effects"):
+            self.next()
+            row = []
+            while self.peek().kind == "ident":
+                nm = self.ident("效应名")
+                if nm not in row:
+                    row.append(nm)
+                if not self.accept("punct", ","):
+                    break
+            if not row:
+                raise LomError(self.peek().line, self.peek().col,
+                               f"期望 效应名（`effects` 后面至少要写一个），"
+                               f"得到 {self.peek().val!r}")
         if extern:
             # 外部函数**没有函数体**, 末尾是分号 (docs/143 §3.1)。泛型参数对它也说不通 ——
             # 单态化要靠看得到源码, 而 extern 的定义根本不在手上。
@@ -4717,10 +4876,12 @@ class Parser:
             self.expect("punct", ";", "（外部函数声明末尾要分号）")
             f = Func(name, params, ret, [], kw.line, False, tparams)
             f.extern = True
+            f.effects = row
             return f
         body_at = self.i + 1          # '{' 之后 —— 与自举侧 find_body 同一个起点
         body = self.parse_block()
         f = Func(name, params, ret, body, kw.line, False, tparams)
+        f.effects = row
         f.tok_at, f.tok_end = body_at, self.i - 1   # '}' 的下标（不含）
         return f
 
@@ -5099,6 +5260,8 @@ class Parser:
             rhs = self._fallback_rhs(self.parse_expr(), t.line)
             self.expect("punct", ";")
             return Assign(e, rhs, t.line)
+        if self.allow_tail_expr > 0 and self.at("punct", "}"):
+            return ExprStmt(e, t.line)
         self.expect("punct", ";")
         return ExprStmt(e, t.line)
 
@@ -5199,8 +5362,72 @@ class Parser:
             return Un(t.val, self.parse_unary(), t.line)
         return self.parse_primary()
 
+    def parse_perform(self) -> Perform:
+        """`perform E.op(a, …)` / `perform op(a, …)`（`docs/341` §5.2）。"""
+        kw = self.next()
+        effect = ""
+        if (self.peek().kind == "ident" and self.peek(1).kind == "punct"
+                and self.peek(1).val == "." and self.peek(2).kind == "ident"):
+            effect = self.next().val
+            self.next()
+            op = self.ident("操作名")
+        else:
+            op = self.ident("操作名")
+        self.expect("punct", "(")
+        args = []
+        while not self.at("punct", ")"):
+            args.append(self.parse_expr())
+            if not self.accept("punct", ","):
+                break
+        self.expect("punct", ")")
+        self.effect_runtime.append(("perform", kw.line, kw.col))
+        return Perform(effect, op, args, kw.line)
+
+    def parse_handle(self) -> Handle:
+        """`handle E { BODY } with { op(p) => { … } … }`（`docs/341` §5.3）。"""
+        kw = self.next()
+        effect = self.ident("效应名")
+        self.allow_tail_expr += 1
+        try:
+            body = self.parse_block()
+        finally:
+            self.allow_tail_expr -= 1
+        self.expect("ident", "with", "（处理器臂要写成 `with { … }`）")
+        self.expect("punct", "{")
+        arms: list[HandlerArm] = []
+        while not self.at("punct", "}"):
+            okw = self.peek()
+            op = self.ident("操作名")
+            self.expect("punct", "(")
+            params: list[str] = []
+            while not self.at("punct", ")"):
+                params.append(self.ident("臂参数名"))
+                if not self.accept("punct", ","):
+                    break
+            self.expect("punct", ")")
+            self.expect("punct", "=")
+            self.expect("punct", ">")
+            arm_body = self.parse_block()
+            arms.append(HandlerArm(op, params, arm_body, okw.line))
+        self.expect("punct", "}")
+        self.effect_runtime.append(("handle", kw.line, kw.col))
+        return Handle(effect, body, arms, kw.line)
+
     def parse_primary(self):
         t = self.peek()
+        if self.effects and t.kind == "ident" and t.val == "perform":
+            return self.parse_postfix(self.parse_perform())
+        if self.effects and t.kind == "ident" and t.val == "handle" \
+                and self.peek(1).kind == "ident" and self.peek(2).val == "{":
+            return self.parse_postfix(self.parse_handle())
+        if self.effects and t.kind == "ident" and t.val == "resume" \
+                and self.peek(1).kind == "punct" and self.peek(1).val == "(":
+            kw = self.next()
+            self.next()
+            arg = self.parse_expr()
+            self.expect("punct", ")")
+            self.effect_runtime.append(("resume", kw.line, kw.col))
+            return self.parse_postfix(Resume(arg, kw.line))
         if t.kind == "ident" and t.val == "if" and self.profile in TUR3_PLUS:
             # 2026.3 的 `if` 表达式（`docs/335`）。语句位置的 `if` 在 `parse_stmt`
             # 就分走了；能走到这里说明它在表达式里 —— v1 只开在 `let` 初值位置。
@@ -8158,6 +8385,43 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
         raise LomError(0, 0, "嵌套超过编译器的递归上限 —— 把这段拆成几个函数，或把表达式拆开") from None
 
 
+def _effect_front_errors(mod: Module, deps: list[Module] | None = None) -> list[str]:
+    """效应语法面的前端判据（`docs/341` 的 A2）。
+
+    A2 的边界：**声明与行接受并擦除，运行期构造给 E023**。这里不重复 LSPE 的 E11
+    分析（行是否盖得住由 `lspe effects` 报），只做前端必须有的三件事：
+    重名、行里的未声明效应、以及"解析到了但这一版发射器还不实现"。
+    """
+    errs: list[str] = []
+    known: set[str] = set()
+    for m in [*(deps or []), mod]:
+        for e in getattr(m, "effects", []) or []:
+            if m is mod and e.name in known:
+                errs.append(f"{e.line}: 效应 `{e.name}` 重复定义")
+            known.add(e.name)
+    for e in getattr(mod, "effects", []) or []:
+        seen: set[str] = set()
+        for op in e.ops:
+            if op.name in seen:
+                errs.append(f"{op.line}: 效应 `{e.name}` 的操作 `{op.name}` 重复定义")
+            seen.add(op.name)
+    for f in [*mod.funcs, *mod.externs]:
+        row = getattr(f, "effects", None)
+        if not row:
+            continue
+        for nm in row:
+            if nm not in known:
+                errs.append(f"{f.line}: 函数 `{f.name}` 的 `effects` 行里，效应 `{nm}` 未声明")
+        if f.extern:
+            errs.append(f"{f.line}: 这个后端还没有实现 extern 上的效应行"
+                        f"（`extern fn {f.name}`，docs/341 §6 R7）")
+    for kind, line, _col in sorted(getattr(mod, "effect_runtime", []) or [],
+                                   key=lambda x: (x[1], x[0])):
+        errs.append(f"{line}: 这个后端还没有实现效应处理器的运行期"
+                    f"（`{kind}`，docs/341 的 A3）—— 先删掉它，或等 A3")
+    return errs
+
+
 def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
            deps: list[Module] | None = None, _dep_pass: bool = False,
            lspe_mode: str = "full") -> list[str]:
@@ -8166,8 +8430,14 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     # **当依赖时一路绿**, 只有当**入口**查才报。后果: 一个库可以带着正文类型错发布, 而每一个
     # 使用它的程序 check 都是绿的。做法见本函数末尾: 把每个依赖**当成入口**再查一遍
     # (`_dep_pass` 挡住递归)。
+    # **A2 的效应面**（`docs/341`）：`perform` / `handle` / `resume` 解析得到，但这一版
+    # 发射器没有它们的运行期。**在 `prepare` 之前返回** —— 那几个节点还没进单态化/发射
+    # 的遍历，让它们先过一遍没有意义，也容易在半路上炸出 Python 栈。
+    _eff_errs = _effect_front_errors(mod, deps)
+    if getattr(mod, "effect_runtime", None):
+        return _eff_errs
     mod, deps = prepare(mod, deps)  # M6 单态化
-    errs: list[str] = []
+    errs: list[str] = list(_eff_errs)
     # **LMS（`docs/253`）**：第 1 级检查器开不开。⚠ **只取根单元**的取值 —— 与 Potato 里
     # 那个 `lms` 字段、以及自举侧扫 token 的那一支 **同一个来源**。
     # 它管**合法性**（外向许可），与 `gc_*`（生命周期、内向可达）**正交**（`docs/210` §6.2）。
@@ -9605,6 +9875,9 @@ def _rs_auto_guards(e, obj: str, idx: str) -> str:
 
 
 def _expr_rs(e) -> str:
+    if isinstance(e, (Perform, Handle, Resume)):
+        raise LomError(getattr(e, "line", 1), 1,
+                       "这个后端还没有实现效应处理器的运行期（docs/341 的 A3）")
     if isinstance(e, GenOf):  # docs/320 S1
         st = _rs_state(CAP_KIND_ID["revision"], e.is_block, e.cap_id)
         return (f"__loment_gen_read({st}, ({_expr_rs(e.expr)}) as u64, "
@@ -13208,6 +13481,9 @@ class _Ir:
         raise LomError(line, 1, "借用的目标必须是变量、字段或 `*p`")
 
     def expr(self, e, want: str | None = None) -> tuple[str, str]:
+        if isinstance(e, (Perform, Handle, Resume)):
+            raise LomError(getattr(e, "line", 1), 1,
+                           "这个后端还没有实现效应处理器的运行期（docs/341 的 A3）")
         if isinstance(e, Raw):
             return e.ty, e.val
         if isinstance(e, Fallback):

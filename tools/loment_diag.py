@@ -69,6 +69,13 @@ RULES = [
     # （那几层嵌套写法完全合法），是**这一版实现**扛不住；修法也一样，是"换个写法绕开"
     # （把中间那几层提成函数），而不是"按那一行改写法"。
     ("E023", r"嵌套超过", "源码太深", "把中间那几层提成函数，或把这段拆开。"),
+    # **效应处理器**（`docs/341` 的 A2）：语法面已经认得，运行期到 A3 才落。
+    # 与上面几条同码：**不是源码的语义错**，是这一版实现还没接上；修法是等 A3 或
+    # 改用不含 `perform` / `handle` 的写法。
+    ("E023", r"效应处理器的运行期|extern 上的效应行",
+     "这一版还没实现（编译器限制）",
+     "`effect` 与 `effects` 行已经解析，但 `perform` / `handle` / `resume` 的运行期"
+     "要到 `docs/341` 的 A3 才落地。先删掉这三个构造，或等 A3。"),
     # **前门拒了这份源**（`#29`）：语法是另一门的、转写器又表示不出来。原先它落进
     # E0999「未分类，请报告」—— 对用户是**错的处境**（不是分类表漏了，是这一版的前端
     # 还不收那个构造）。与 E023 同码：修法一样，换个写法绕开，绕不开就报告。
@@ -4496,6 +4503,7 @@ FINE: tuple[Fine, ...] = (
          "For a `bool`, use interpolation `f\"{b}\"`; that goes through `str_show`.",
          "If it is already decimal text, use it directly."),
     ),
+
     # 2026-11-11：插值的两个取值（`docs/341`）—— 孔收 `str` / `bool` / 整型，
     # 别的类型在 `str_show` / `str_repr` 那一层报。模板上界里必须有自己的码。
     Fine(
@@ -4611,6 +4619,78 @@ FINE: tuple[Fine, ...] = (
         ("Spell the type: `let x: u32 = if c { a } else { b };`.",
          "Or assign in each arm: `let x: u32; if c { x = a; } else { x = b; }`.",
          "If both arms share a source, hoist it before the `let`."),
+    ),
+    # ---- 代数效应（`docs/341` A2a/A2b）----------------------------------------
+    # 五条模板原先都落在族码上（E023 / E013 / E002），`loment_err_test` 点名。
+    # 细分码从 217 起（210–216 已被其它批占用），数字仍连续（`n_codes()` 的不变式）。
+    Fine(
+        217, 23, r"^这个后端还没有实现效应处理器的运行期",
+        "效应处理器的运行期还没实现",
+        "the effect-handler runtime is not implemented yet",
+        "`perform` / `handle` / `resume` 的语法已经认得，但这一版后端还没有它们的运行期。",
+        "The syntax of `perform` / `handle` / `resume` is accepted, but this backend has no "
+        "runtime for them yet.",
+        ("先删掉这三个构造（声明与 `effects` 行可以保留）。",
+         "等 `docs/341` 的 A3 落地后再写处理器。",
+         "只是想先写形状：用 `loment lspe effects FILE` 看效应行，不进编译。"),
+        ("Remove the three constructs for now (declarations and `effects` rows may stay).",
+         "Wait for A3 in `docs/341` before writing handlers.",
+         "To explore the shape, run `loment lspe effects FILE`; it does not compile."),
+    ),
+    Fine(
+        218, 23, r"^这个后端还没有实现 extern 上的效应行",
+        "效应行不能穿越 `extern`",
+        "an `effects` row cannot cross `extern`",
+        "`extern fn … effects E` 要求 C 侧回答 `perform`，而 C 没有证据记录（`docs/341` §6 R7）。",
+        "`extern fn ... effects E` asks the C side to answer `perform`, but C has no evidence "
+        "record (`docs/341` section 6, R7).",
+        ("把效应留在 Loment 侧，C 调用保持无效应。",
+         "要跨边界就先在 Loment 侧写一个无效应的包装。",
+         "删掉 `extern` 声明上的 `effects` 行。"),
+        ("Keep the effect on the Loment side; the C call stays effect-free.",
+         "For a boundary crossing, write an effect-free wrapper on the Loment side.",
+         "Remove the `effects` row from the `extern` declaration."),
+    ),
+    Fine(
+        220, 13, r"^效应 .+ 的操作 .+ 重复定义$",
+        "同一效应里的操作重复定义",
+        "an operation is defined twice in one effect",
+        "一个 `effect` 体里出现了两个同名操作。",
+        "Two operations with the same name appear in one `effect` body.",
+        ("删掉重复的那一条。",
+         "两个操作确实不同：改其中一个的名字。",
+         "要表达重载就拆成两个效应。"),
+        ("Delete the duplicate.",
+         "If they really differ, rename one of them.",
+         "For overloading, use two effects."),
+    ),
+    Fine(
+        219, 13, r"^效应 [^ ]+ 重复定义$",
+        "效应声明重复",
+        "an effect is declared twice",
+        "同一个效应名在一个单元里声明了两次。",
+        "The same effect name is declared twice in one unit.",
+        ("删掉重复的 `effect` 块。",
+         "两份都要：把其中一份改名。",
+         "跨单元复用：用 `use` 引入，不要在本地再声明一份。"),
+        ("Delete the duplicate `effect` block.",
+         "If both are needed, rename one.",
+         "For reuse across units, `use` it instead of declaring it again."),
+    ),
+    Fine(
+        221, 2, r"^函数 .+ 的 `effects` 行里，效应 .+ 未声明$",
+        "`effects` 行引用了未声明的效应",
+        "an `effects` row names an undeclared effect",
+        "`effects A, B` 里的某个名字没有对应的 `effect` 声明（本单元与依赖里都没有）。",
+        "A name in `effects A, B` has no matching `effect` declaration (neither here nor in "
+        "the dependencies).",
+        ("补一个 `effect NAME { … }` 声明。",
+         "名字拼错了：改成声明里的那个。",
+         "效应在依赖里：确认 `use` 拉进来的那份也声明了它。"),
+        ("Add an `effect NAME { ... }` declaration.",
+         "Fix the spelling to match the declaration.",
+         "If it lives in a dependency, make sure that unit declares it too."),
+
     ),
 )
 

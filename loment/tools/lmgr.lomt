@@ -1,6 +1,6 @@
 // lmgr — LomentManager：开发者本位的实时资源管理器套件（docs/303）
 //
-// 第一版：38 个槽位的注册表、真实能力探测、list / doctor 两条命令。
+// 第一版：42 个槽位的注册表、真实能力探测、list / doctor 两条命令。
 // 槽位状态由**探针**决定，不由写死的表决定 —— 不知道就报 unavailable。
 
 module lmgr
@@ -31,7 +31,7 @@ const CAP_ETW: u32 = 262144;
 
 const AT_FDCWD: u64 = 18446744073709551516;
 
-const N_SLOTS: u32 = 38;
+const N_SLOTS: u32 = 42;
 
 // ---------------------------------------------------------------- 小工具
 fn w(p: ptr, off: u32, n: u32) {
@@ -141,7 +141,7 @@ fn probes() -> u32 {
 
 // 每条记录三个字段：name,requires,implemented; —— implemented=0 时能力再全也报 unavailable。
 fn registry() -> str {
-    return "cpu.freq,32,0;cpu.load,32,1;cpu.sched,48,0;gpu.util,1056,0;gpu.mem,1056,0;gpu.clock,1024,0;gpu.therm,1024,0;gpu.proc,1056,0;mem.phys,128,1;mem.proc,192,1;mem.page,128,0;mem.leak,192,0;storage.space,256,0;storage.io,288,0;storage.proc,320,0;storage.cache,288,0;storage.smart,8192,0;storage.watch,8192,0;net.link,512,0;net.sock,512,0;net.bw,544,0;net.lat,4,0;proc.tree,64,1;proc.fd,64,0;proc.thread,131136,0;proc.sys,262208,0;power.batt,2048,0;power.rapl,2080,0;power.therm,2080,0;power.budget,2080,0;build.cache,32769,0;build.time,65537,0;build.dep,1,0;build.artifact,3,0;env.tool,4097,0;env.port,512,0;env.svc,4,0;env.watch,8193,0;";
+    return "cpu.freq,32,0;cpu.load,32,1;cpu.sched,48,0;gpu.util,1056,0;gpu.mem,1056,0;gpu.clock,1024,0;gpu.therm,1024,0;gpu.proc,1056,0;mem.phys,128,1;mem.proc,192,1;mem.page,128,0;mem.leak,192,0;storage.space,256,0;storage.io,288,0;storage.proc,320,0;storage.cache,288,0;storage.smart,8192,0;storage.watch,8192,0;net.link,512,0;net.sock,512,0;net.bw,544,0;net.lat,4,0;proc.tree,64,1;proc.fd,64,0;proc.thread,131136,0;proc.sys,262208,0;power.batt,2048,0;power.rapl,2080,0;power.therm,2080,0;power.budget,2080,0;build.cache,32769,0;build.time,65537,0;build.dep,1,0;build.artifact,3,0;env.tool,4097,0;env.port,512,0;env.svc,4,0;env.watch,8193,0;effect.list,1,0;effect.row,1,0;effect.handler,1,0;effect.audit,1,0;";
 }
 
 fn caps_blob() -> str {
@@ -685,12 +685,16 @@ fn cmd_cpu_load(json: u32, ok: u32) {
 fn usage() {
     print("lmgr — LomentManager (docs/303)\n");
     print("\n");
-    print("  lmgr list [--json]      the 38-slot registry and per-slot state\n");
+    print("  lmgr list [--json]      the 42-slot registry and per-slot state\n");
     print("  lmgr doctor [--json]    one row per capability, with the probe result\n");
     print("  lmgr cpu load [--json]  overall CPU busy percentage (PDH)\n");
     print("  lmgr mem phys [--json]  physical memory: total, available, load\n");
     print("  lmgr mem proc [--json]  top processes by working set\n");
     print("  lmgr proc tree [--json] process tree: pid, ppid, threads, name\n");
+    print("  lmgr effect list        declared effects and operations (registered; docs/341)\n");
+    print("  lmgr effect row         function `effects` rows and unhandled performs\n");
+    print("  lmgr effect handler     handler arms, exhaustiveness, resume linearity\n");
+    print("  lmgr effect audit       the LSPE E11 report (sites / questions / floors)\n");
     print("\n");
 }
 
@@ -743,6 +747,21 @@ fn dispatch(buf: ptr, a1: u64, a2: u64, json: u32, ok: u32) -> u32 {
             }
         }
         print("lmgr: proc needs a slot (e.g. `lmgr proc tree`)\n");
+        syscall4(60, 64, 0, 0);
+    }
+    if argv_eq(buf, a1, "effect") {
+        // 效应管理器（`docs/341`）在 LMGR 里**先登记、后实现**：四个槽位都进注册表，
+        // 但今天没有一个能出数 —— 退 2（不可用），不输出伪行（`docs/303` §3.5）。
+        // 实现阶梯：`effect.list` / `effect.row` / `effect.handler` 在 A2c 有台账后，
+        // `effect.audit` 与 E11 的 questions 一起落；运行期处理器是 A3。
+        if a2 != 0 {
+            if argv_eq(buf, a2, "list") || argv_eq(buf, a2, "row")
+                    || argv_eq(buf, a2, "handler") || argv_eq(buf, a2, "audit") {
+                print("lmgr: effect slots are registered but not implemented yet (docs/341 A2c/A3)\n");
+                syscall4(60, 2, 0, 0);
+            }
+        }
+        print("lmgr: effect needs a slot (list / row / handler / audit)\n");
         syscall4(60, 64, 0, 0);
     }
     if argv_eq(buf, a1, "--json") {

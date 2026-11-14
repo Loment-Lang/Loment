@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """`lmgr/` 的判据（`docs/303`）。
 
-量三件事：注册表是 38 槽、能力表是 19 项、二进制能把两者如实说出去。
+量三件事：注册表是 42 槽、能力表是 19 项、二进制能把两者如实说出去。
 编译走参考实现（lomentc → lomelf），不经安装包 —— 装的包可能落后几十个提交。
 """
 
@@ -40,11 +40,11 @@ def _records(blob: str) -> list[str]:
 
 
 @test
-def test_registry_has_38_slots():
+def test_registry_has_42_slots():
     recs = _records(_blob("registry"))
-    assert len(recs) == 38, len(recs)
+    assert len(recs) == 42, len(recs)
     keys = [r.split(",")[0] for r in recs]
-    assert len(set(keys)) == 38, "duplicate slot keys"
+    assert len(set(keys)) == 42, "duplicate slot keys"
     implemented = []
     for r in recs:
         name, mask, done = r.split(",")
@@ -55,6 +55,21 @@ def test_registry_has_38_slots():
             implemented.append(name)
     # 只有真能出数的槽位才许写 1；能力齐了但没实现也是 0。
     assert implemented == ["cpu.load", "mem.phys", "mem.proc", "proc.tree"], implemented
+
+
+@test
+def test_effect_domain_is_registered_but_unimplemented():
+    """效应管理器（`docs/341`）隶属 LMGR：四个槽位在册，但今天一个都不出数。
+
+    “在册”与“实现”是两件事：登记让 `lmgr list` / 选择页看见它，`done=0` 让状态
+    如实报 unavailable（`docs/303` §3.5）。台账（A2c）与运行期（A3）之前不许写 1。
+    """
+    recs = _records(_blob("registry"))
+    eff = [r.split(",") for r in recs if r.split(",")[0].startswith("effect.")]
+    assert [e[0] for e in eff] == ["effect.list", "effect.row",
+                                  "effect.handler", "effect.audit"], eff
+    assert all(e[1] == "1" for e in eff), eff      # 只要求 fs.read
+    assert all(e[2] == "0" for e in eff), eff      # 一个都不许冒充已实现
 
 
 @test
@@ -97,9 +112,9 @@ def test_list_json_names_every_slot_once():
     assert doc["schema"] == "lmgr/v1"
     assert doc["manager"] == "list"
     keys = [r["key"] for r in doc["rows"]]
-    assert len(keys) == 38, len(keys)
-    assert len(set(keys)) == 38, "duplicate keys in the envelope"
-    assert doc["meta"]["slots"] == 38
+    assert len(keys) == 42, len(keys)
+    assert len(set(keys)) == 42, "duplicate keys in the envelope"
+    assert doc["meta"]["slots"] == 42
     for r in doc["rows"]:
         assert r["state"] in ("available", "degraded", "unavailable"), r
 

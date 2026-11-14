@@ -929,14 +929,14 @@ pub fn code_what(c: u32, lang: u32) -> str {
     if k == 433 { return "`if` / `match` 表达式在装载期被反糖成\"先声明、两支各自赋值\"，那份声明需要一个现成的类型 —— 推断在这里没有位置。"; }
     if k == 434 { return "Function values, closures and indirect calls change the static call-graph premise (`docs/208`); the default `no_fp` products still contain only direct edges."; }
     if k == 435 { return "函数值、闭包与间接调用会改变**静态调用图**这条前提（`docs/208`）：默认档（`no_fp`）的产物仍然只含直接调用边。"; }
-    if k == 436 { return "`extern fn` uses the platform ABI; the language's function type is the internal calling convention. They are not interchangeable (`docs/346`)."; }
-    if k == 437 { return "`extern fn` 走**平台 ABI**；本语言的函数类型是内部调用约定，两者不能互相顶替（`docs/346`）。"; }
+    if k == 436 { return "`extern fn` uses the platform ABI; the language's function type is the internal calling convention. They are not interchangeable (`docs/348`)."; }
+    if k == 437 { return "`extern fn` 走**平台 ABI**；本语言的函数类型是内部调用约定，两者不能互相顶替（`docs/348`）。"; }
     if k == 438 { return "A closure record stores each capture in one 8-byte word; v1 accepts only word-sized captures (integers, `bool`, `ptr`)."; }
     if k == 439 { return "闭包记录按 8 字节一格存捕获；v1 只收整型 / `bool` / `ptr` 这类能放进一格的类型。"; }
     if k == 440 { return "A closure learns its parameter types either from annotations (`(x: T) => ...`) or from the expected type (the `let` annotation, an argument position, a return). With neither, the type is undetermined."; }
     if k == 441 { return "闭包只有两种途径得到形参类型：写在参数上（`(x: T) => …`），或从**期望类型**（`let` 的标注、实参位置、返回位置）推。两处都没有就定不出来。"; }
     if k == 442 { return "A by-reference capture stores an address; that address points into the callee's frame and dies when the function returns -- a dangling borrow."; }
-    if k == 443 { return "按借捕获存的是**地址**；那个地址指向调用者的栈帧，函数一返回就失效。这正是一个悬垂借用（`docs/299` / `docs/346`）。"; }
+    if k == 443 { return "按借捕获存的是**地址**；那个地址指向调用者的栈帧，函数一返回就失效。这正是一个悬垂借用（`docs/299` / `docs/348`）。"; }
     if k == 444 { return "The `T` in `(x: T) => ...` is not in the type table, same rule as a `let` annotation."; }
     if k == 445 { return "`(x: T) => …` 里的 `T` 不在类型表里 —— 与 `let` 的标注是同一条规则。"; }
     if k == 1800 { return "A process in the toolchain died **before it could write a structured diagnostic** - killed by a signal, or exited abnormally, with no record in `--diag-out`."; }

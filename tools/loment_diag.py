@@ -4632,9 +4632,9 @@ FINE: tuple[Fine, ...] = (
         "`extern fn` 不能当函数值",
         "an `extern fn` is not a function value",
         "`extern fn` 走**平台 ABI**；本语言的函数类型是内部调用约定，两者不能互相顶替"
-        "（`docs/346`）。",
+        "（`docs/348`）。",
         "`extern fn` uses the platform ABI; the language's function type is the internal "
-        "calling convention. They are not interchangeable (`docs/346`).",
+        "calling convention. They are not interchangeable (`docs/348`).",
         ("要回调 C 的函数，写一个 Loment 包装函数，在它里面调 `extern fn`。",
          "要把 Loment 函数交给 C，先把它写成 `extern fn` 能接受的形状（`ptr` 实参），"
          "再用 `fn` 值在本语言里调用。",
@@ -4679,7 +4679,7 @@ FINE: tuple[Fine, ...] = (
         "带按借捕获的闭包不能返回",
         "a closure that borrows its captures cannot be returned",
         "按借捕获存的是**地址**；那个地址指向调用者的栈帧，函数一返回就失效。"
-        "这正是一个悬垂借用（`docs/299` / `docs/346`）。",
+        "这正是一个悬垂借用（`docs/299` / `docs/348`）。",
         "A by-reference capture stores an address; that address points into the "
         "callee's frame and dies when the function returns -- a dangling borrow.",
         ("改成按值捕获：把 `&n` 换成 `n`（捕获的是一份拷贝，可以逃逸）。",

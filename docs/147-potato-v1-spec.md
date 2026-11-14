@@ -141,7 +141,7 @@ Wrap<Outer<Inner<u32>>>  -> Wrap_Outer__Inner___u32
   | `v20` | **`systems`**（六个系统的索引；读者从这里开始读） | `docs/304` |
   | `v21` | **`gc_control`**（`lgc` 的暂停/恢复/窗口计数 + `manual_collector`） | `docs/309` |
   | `v22` | **`lifetime`**（`lifetime_no` / `lifetime_auto` / `lifetime_manual`） | `docs/299` §8 |
-  | `v23` | **`fp`**（`no_fp` / `fp`）—— 有没有间接调用边 | `docs/346` |
+  | `v23` | **`fp`**（`no_fp` / `fp`）—— 有没有间接调用边 | `docs/348` |
 
   台阶是**累积**的：`v23` 要求它下面每一版的字段都在。
 

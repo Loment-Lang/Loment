@@ -1192,7 +1192,7 @@ fn lbl_find(tab: ptr, t: ptr, noff: u32, nlen: u32, boff: u32, blen: u32) -> u32
 }
 
 /// `@名字` 的地址。**函数**登记时不带 `@`（`emit_func` 剥过），全局量带 ——
-/// 两种写法都认，否则 `ptrtoint ptr @f to i64`（函数值，`docs/346`）在最终回填时
+/// 两种写法都认，否则 `ptrtoint ptr @f to i64`（函数值，`docs/348`）在最终回填时
 /// 找不到函数标签。与参考实现 `Asm.label_addr` 同一条规则。
 fn lbl_addr(tab: ptr, t: ptr, noff: u32, nlen: u32, boff: u32, blen: u32) -> u32 {
     let a: u32 = lbl_find(tab, t, noff, nlen, boff, blen);
@@ -2668,12 +2668,12 @@ fn do_call(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen:
         d = em_lea(out, d, RAX, RBP, slot_find(tab, t, doff, dlen));
         d = em_push(out, d, RAX);
     }
-    // ---- 间接调用（`docs/346`）：callee 是一个装着代码地址的 SSA 值。
+    // ---- 间接调用（`docs/348`）：callee 是一个装着代码地址的 SSA 值。
     // 约定与直接调用**同一套**栈传参（`_Ir` 已经把环境指针放在实参 0）。**先压完实参
     // 再读寄存器**：`emit_get_ptr` 用 RAX 求值，先读进 RCX 会被后面的求值踩掉。
     if load8(t, cs) == 37 {
         // Windows 侧的函数值要另一套约定（发射器发的是 ELF 那一套记录），两边都还没有 ——
-        // 与参考实现同一条：**响亮地拒**（`docs/346`），不静默编一个假的出来。
+        // 与参考实现同一条：**响亮地拒**（`docs/348`），不静默编一个假的出来。
         if cell(tab, C_PE) == 1 {
             return fail("indirect calls are for ELF targets only -- Windows has no closure record convention yet");
         }

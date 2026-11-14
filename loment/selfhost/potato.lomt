@@ -1529,7 +1529,7 @@ fn pt_paren(src: ptr, t: ptr, i: u32) -> u32 {
 
 fn pt_ty(out: ptr, o: u32, src: ptr, t: ptr, i: u32) -> u64 {
     let j: u32 = i;
-    // 函数类型 `(A,B) -> C`（`docs/346`）：形态对象里类型就是**字符串**，参考实现拼出来的
+    // 函数类型 `(A,B) -> C`（`docs/348`）：形态对象里类型就是**字符串**，参考实现拼出来的
     // 那一串是 `(A,B)->C` —— 逗号后与 `->` 两侧**都没有空格**。`()` 后面没有 `->` 才是
     // unit，它照原来的路（单 token）走。
     if pt_tis(src, t, j, "(") {
@@ -1984,7 +1984,7 @@ fn pt_cnt_params(unit: ptr, t: ptr, lp: u32) -> u32 {
     let n: u32 = 1;
     let j: u32 = lp + 1;
     let d: u32 = 0;
-    // **`(` 也要计深**（`docs/346`）：形参类型可以是函数类型 `(u64) -> u64`，它自己带一对
+    // **`(` 也要计深**（`docs/348`）：形参类型可以是函数类型 `(u64) -> u64`，它自己带一对
     // 括号。不数它，第一对 `)` 就被当成形参表的结尾，参数个数直接少算。
     while pt_kind(t, j) != 4 && !(pt_tis(unit, t, j, ")") && d == 0) {
         if pt_tis(unit, t, j, "<") || pt_tis(unit, t, j, "[") || pt_tis(unit, t, j, "(") {
@@ -2268,7 +2268,7 @@ fn pt_vm(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
 /// 与 `pt_vm` **同形**，唯一的区别是**默认值随版次走**（与参考实现的
 /// `core_default("lifetime", profile)` 同一条）：`tur2026.1` / `tur2026.2`（prof < 2）
 /// 默认 `lifetime_no`，`tur2026.3` 起默认 `lifetime_auto`。
-/// `fp` 那一格（`docs/346`）：本单元写没写 `choose fp`。默认 `no_fp`。
+/// `fp` 那一格（`docs/348`）：本单元写没写 `choose fp`。默认 `no_fp`。
 fn pt_fp(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
     let d: u32 = 0;
     let i: u32 = lo;
@@ -4024,7 +4024,7 @@ fn pt_inst_find(sc: ptr, noff: u32, nlen: u32) -> u32 {
 fn pt_ty_sub(out: ptr, o: u32, unit: ptr, t: ptr, i: u32,
              lt: u32, ntp: u32, ags: ptr) -> u64 {
     let j: u32 = i;
-    // 函数类型 `(A,B) -> C`（`docs/346`）：与 `pt_ty` 同形，只是形参里也要做类型替换。
+    // 函数类型 `(A,B) -> C`（`docs/348`）：与 `pt_ty` 同形，只是形参里也要做类型替换。
     if pt_tis(unit, t, j, "(") {
         let pc: u32 = pt_paren(unit, t, j);
         if pt_tis(unit, t, pc + 1, "-") && pt_tis(unit, t, pc + 2, ">") {
@@ -4383,7 +4383,7 @@ fn pt_ty_end(unit: ptr, t: ptr, i: u32, hi: u32) -> u32 {
         }
         return j;
     }
-    // 函数类型 `(A,B) -> C`（`docs/346`）：`)` 后面的 `-> R` 也属于这个类型。
+    // 函数类型 `(A,B) -> C`（`docs/348`）：`)` 后面的 `-> R` 也属于这个类型。
     if pt_tis(unit, t, j, "(") {
         let pc: u32 = pt_paren(unit, t, j);
         if pt_tis(unit, t, pc + 1, "-") && pt_tis(unit, t, pc + 2, ">") {
@@ -6494,7 +6494,7 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr,
     o = pt_key(out, o, 1, "lifetime");
     o = pt_lifetime(out, o, unit, t, lo, hi, prof);
     o = pt_str(out, o, ",\n");
-    // v23（`docs/346`）：**间接分派**，紧跟在 `lifetime` 之后 ——
+    // v23（`docs/348`）：**间接分派**，紧跟在 `lifetime` 之后 ——
     // ⚠ **次序是判据**：参考实现那边 `"fp"` 紧跟在 `"lifetime"` 之后。
     o = pt_key(out, o, 1, "fp");
     o = pt_fp(out, o, unit, t, lo, hi);

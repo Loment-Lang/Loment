@@ -176,7 +176,7 @@ def _all_legal_cells() -> list[dict[str, str]]:
     #: `lifetime` 的三个取值对这份**不含借用**的探针不改变 IR，三个都扫是 3× 墙钟；
     #: "每个取值都进产物"由下面的 `test_lifetime_values_are_recorded...` 逐值钉住。
     #: 这不是抽样放水 —— 别的维照旧全参与。
-    #: `fp`（`docs/346`）同一条：这份探针里没有一个函数值/闭包，`no_fp` 与 `fp` 的产物
+    #: `fp`（`docs/348`）同一条：这份探针里没有一个函数值/闭包，`no_fp` 与 `fp` 的产物
     #: **逐字节相同**（这一维只在检查器上开门），扫两遍是白等一倍墙钟。
     #: "写了 `choose fp` 真的放行"由 `loment_rule_parity` 的七条 `fp-*` 与
     #: `loment_p8_test` 的 `ir_fp.lomt` 孪生各钉一处。

@@ -162,7 +162,7 @@ TOP_KEYS_V21 = TOP_KEYS_V20 | {"gc_control"}
 # 同级同形 —— 于是"这份产物有没有静态借用证明、要不要手写区域标记"是**不读源码可判的**。
 # 默认随版次走：2026.3 起 `lifetime_auto`，旧版次 `lifetime_no`（`docs/305`）。
 TOP_KEYS_V22 = TOP_KEYS_V21 | {"lifetime"}
-# v23 = v22 + **间接分派** `fp`（`docs/346`，用户 2026-11-12 定第九维）：
+# v23 = v22 + **间接分派** `fp`（`docs/348`，用户 2026-11-12 定第九维）：
 # `no_fp`（默认，静态调用图）/ `fp`。与 `gc` / `lifetime` 同级同形、**必填** ——
 # 于是"这份产物里有没有间接调用边"是**不读源码可判的**，而它正是 `docs/208` §4
 # 那条静态调用图前提的适用边界。
@@ -212,7 +212,7 @@ VMS = ("vm", "no_vm")
 #: `lifetime_manual` = 允许显式借用来源标记 `&a T`。
 #: 与 `RUNTIMES` / `PORTS` / `VMS` 同一条纪律：取值带维名前缀。
 LIFETIMES = ("lifetime_no", "lifetime_auto", "lifetime_manual")
-#: `fp` 的取值（`docs/346`，用户 2026-11-12 定第九维）：
+#: `fp` 的取值（`docs/348`，用户 2026-11-12 定第九维）：
 #: `no_fp` = 默认档，产物里**只有直接调用边**（`docs/208` §4 的前提成立）；
 #: `fp` = 函数值 / 闭包 / 间接调用放行，图里多出间接边。
 FPS = ("no_fp", "fp")
@@ -352,7 +352,7 @@ def _ref_elem_type(t: str) -> str | None:
 
 
 def _fn_ty_parts(t: str) -> tuple[list[str], str] | None:
-    """`(A,B)->C` -> `(["A", "B"], "C")`；不是函数类型返回 `None`（`docs/346`）。
+    """`(A,B)->C` -> `(["A", "B"], "C")`；不是函数类型返回 `None`（`docs/348`）。
 
     **本文件不 import 编译器**（M47 那条独立性断言），所以这里自带一份切分 ——
     规则与编译器那边那个同名切分相同：按括号深度找配对的 `)`，再认 `->`，
@@ -391,7 +391,7 @@ def _fn_ty_parts(t: str) -> tuple[list[str], str] | None:
 
 def _type_ok(t: object, known: set[str]) -> bool:
     """基类型 / 已声明 struct / 数组 [T; N] / 切片 [T] / 可变切片 mut [T] / 借用 &T /
-    函数类型 `(A,B)->C`（`docs/346`）。"""
+    函数类型 `(A,B)->C`（`docs/348`）。"""
     if not isinstance(t, str):
         return False
     if t in known:
@@ -491,7 +491,7 @@ def validate(doc: object) -> list[str]:
         if lt not in LIFETIMES:
             errs.append(f"{ver}: lifetime 必须是 {LIFETIMES} 之一，得到 {lt!r}")
     if ver == "v23":
-        # **间接分派**（`docs/346`）。与上面同一条纪律：**必填**，
+        # **间接分派**（`docs/348`）。与上面同一条纪律：**必填**，
         # 所以"这份产物里有没有间接调用边"是**不读源码可判的**。
         fv = doc.get("fp")
         if fv not in FPS:

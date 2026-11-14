@@ -128,7 +128,7 @@ CAPACITY_SITES = 262
 SILENT_SITES = 170
 
 #: 第二类：字面量上界（`#770`）。`[T; N]` 与 `literal:<N>` 各自钉住总数与沉默的那一份。
-#: 2026-11-12 `docs/346`：间接调用那一支也走同一张 20 格实参类型槽表 ⇒ 多一处 literal:20。
+#: 2026-11-12 `docs/348`：间接调用那一支也走同一张 20 格实参类型槽表 ⇒ 多一处 literal:20。
 LITERAL_SITES = 67
 LITERAL_SILENT = 66
 ARRAY_SITES = 20

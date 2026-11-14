@@ -1,5 +1,5 @@
 <!-- translated-from: docs/147-potato-v1-spec.md -->
-<!-- source-sha256: 89c0be46c3b9ac10b64779365eed47daf1b8c73d617c5a3f3ca6d6859a2541e5 -->
+<!-- source-sha256: 04c6ec7553ec7c32953466e204dbb5103cd6a85778d5eb1b892fa1c7890440b7 -->
 
 # 147 · Potato v1: formal-object specification and the wave C measurement protocol
 
@@ -162,7 +162,7 @@ formal object and reconciles byte for byte".
   | `v20` | **`systems`** (the six-system index; a reader starts here) | `docs/304` |
   | `v21` | **`gc_control`** (`lgc` pause/resume/window counts + `manual_collector`) | `docs/309` |
   | `v22` | **`lifetime`** (`lifetime_no` / `lifetime_auto` / `lifetime_manual`) | `docs/299` §8 |
-  | `v23` | **`fp`** (`no_fp` / `fp`) — whether the artifact has indirect call edges | `docs/346` |
+  | `v23` | **`fp`** (`no_fp` / `fp`) — whether the artifact has indirect call edges | `docs/348` |
 
   The ladder **accumulates**: `v23` requires the fields of every version below it.
 

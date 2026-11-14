@@ -138,7 +138,7 @@ const CG_CPN: u32 = 926544;           // = CG_CPP + 256
 const CG_ALS: u32 = 926548;
 const CG_ALS_MAX: u32 = 16;
 const CG_ALN: u32 = 926676;           // = CG_ALS + 128
-//: **函数值与闭包**（`docs/346`）：
+//: **函数值与闭包**（`docs/348`）：
 //:   `CG_FDN`  = 待发函数条数（包装 + 闭包，全部函数体之后统一发）
 //:   `CG_FDS`  = 待发表 128 × 16 = (kind, a, b, c)
 //:   `CG_LAMN` = 闭包条数
@@ -483,7 +483,7 @@ fn emit_ty(s: ptr, out: ptr, src: ptr, toks: ptr, tt: u32) -> u32 {
         return emit_str(s, out, "ptr");
     }
     if tok_is(src, toks, tt, "(") {
-        // 函数类型 `(A,B) -> C`（`docs/346`）：值是**闭包记录**的指针，产物里是 `ptr`。
+        // 函数类型 `(A,B) -> C`（`docs/348`）：值是**闭包记录**的指针，产物里是 `ptr`。
         // 空参数表 `()` 后面没有 `->`，那是 unit 类型 —— 仍是 `void`。
         let c: u32 = skip_parens(src, toks, tt);
         if tok_is(src, toks, c + 1, "-") && tok_is(src, toks, c + 2, ">") {
@@ -677,7 +677,7 @@ fn emitted_name(s: ptr, out: ptr, src: ptr, toks: ptr, tt: u32) -> u32 {
         return emit_str(s, out, "u32");
     }
     if tok_is(src, toks, tt, "(") {
-        // 函数类型 `(A,B) -> C`（`docs/346`）：注释里**没有空格、没有 `->` 两侧的空白**，
+        // 函数类型 `(A,B) -> C`（`docs/348`）：注释里**没有空格、没有 `->` 两侧的空白**，
         // 与参考实现 `_fn_ty_make` 拼出来的那一串逐字符相同。`()` 后面没有 `->` 才是 unit。
         let c: u32 = skip_parens(src, toks, tt);
         if tok_is(src, toks, c + 1, "-") && tok_is(src, toks, c + 2, ">") {
@@ -3122,7 +3122,7 @@ fn skip_type0(src: ptr, toks: ptr, i: u32) -> u32 {
             }
             j = j + 1;
         }
-        // 函数类型 `(A,B) -> C`（`docs/346`）：`)` 后面的 `-> R` 也是这个类型的一部分。
+        // 函数类型 `(A,B) -> C`（`docs/348`）：`)` 后面的 `-> R` 也是这个类型的一部分。
         // 不跳掉的话 `let f: (u64)->u64 = …` 的 R 会被当成下一个形参名/字段名。
         if tok_kind(toks, j) != 4 && tok_is(src, toks, j, "-") && tok_is(src, toks, j + 1, ">") {
             return skip_type0(src, toks, j + 2);
@@ -4158,7 +4158,7 @@ fn lam_at(src: ptr, toks: ptr, j: u32) -> u32 {
     return 0;
 }
 
-/// 间接调用 `f(…)`（`docs/346`）：`f` 是 `(A)->B` 类型的局部，值是一条闭包记录。
+/// 间接调用 `f(…)`（`docs/348`）：`f` 是 `(A)->B` 类型的局部，值是一条闭包记录。
 /// 次序照参考实现：**先读记录**（rec / 代码地址 / 环境指针），再逐个求实参。
 fn emit_indirect_call(s: ptr, out: ptr, src: ptr, toks: ptr, nm_tok: u32,
                       lvl: u32, fty: u32) -> u32 {
@@ -4318,7 +4318,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
         return e0;
     }
     if tok_is(src, toks, j, "(") {
-        // 闭包 `(x: T) => 体`（`docs/346`）：`(` … `)` 后面紧跟 `=>`。
+        // 闭包 `(x: T) => 体`（`docs/348`）：`(` … `)` 后面紧跟 `=>`。
         let lc: u32 = skip_parens(src, toks, j);
         if tok_is(src, toks, lc + 1, "=") && tok_is(src, toks, lc + 2, ">") {
             return emit_lambda(s, out, src, toks, j, lvl, want);
@@ -4343,7 +4343,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
         return e1;
     }
     if tok_kind(toks, j) == 0 && tok_is(src, toks, j + 1, "(") {
-        // 间接调用（`docs/346`）：callee 是 `(A)->B` 类型的**局部** —— 与参考实现同一条
+        // 间接调用（`docs/348`）：callee 是 `(A)->B` 类型的**局部** —— 与参考实现同一条
         // 判定次序（`scope.get(name)` 先于内建与全局函数表）。
         let ity: u32 = var_type(s, src, toks, j);
         if ity != 0 && tok_kind(toks, ity) == 3 && tok_is(src, toks, ity, "(")
@@ -5604,7 +5604,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
         }
         return ce;
     }
-    // 函数名当值（`docs/346`）：不在变量表里、又是本单元的函数 —— 值是一条闭包记录。
+    // 函数名当值（`docs/348`）：不在变量表里、又是本单元的函数 —— 值是一条闭包记录。
     if tok_kind(toks, j) == 0 && var_type(s, src, toks, j) == 0 {
         let fvi: u32 = find_fn(s, src, toks, j);
         if fvi != 4294967295 {
@@ -5838,7 +5838,7 @@ fn expr_unary(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32
         if tok_is(src, toks, nm, "mut") {
             nm = nm + 1;
         }
-        // `&fn` 与裸名字是**同一个值**（`docs/346`）：取的是闭包记录，不是那个名字的地址。
+        // `&fn` 与裸名字是**同一个值**（`docs/348`）：取的是闭包记录，不是那个名字的地址。
         if tok_kind(toks, nm) == 0 && var_type(s, src, toks, nm) == 0 {
             let fvi: u32 = find_fn(s, src, toks, nm);
             if fvi != 4294967295 {
@@ -5985,7 +5985,7 @@ fn expr_bin(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, minp: u32, lvl: u32, 
     if lam_at(src, toks, j) == 1 {
         aw = want;
     }
-    // 闭包 `(x) => …`（`docs/346`）：期望类型要原样递下去 —— 形参与返回类型都从它推。
+    // 闭包 `(x) => …`（`docs/348`）：期望类型要原样递下去 —— 形参与返回类型都从它推。
     // 参考实现那条路本来就是 `expr(e, want)`；自举侧只在**需要**的两处放行。
     if tok_is(src, toks, j, "(") {
         let lcw: u32 = skip_parens(src, toks, j);
@@ -6239,7 +6239,7 @@ fn is_unit_tok(src: ptr, toks: ptr, tt: u32) -> u32 {
     if tok_is(src, toks, tt, "(") == 0 {
         return 0;
     }
-    // `(` 既可能是 unit 类型 `()`，也可能是函数类型 `(A) -> B`（`docs/346`）——
+    // `(` 既可能是 unit 类型 `()`，也可能是函数类型 `(A) -> B`（`docs/348`）——
     // 后者是**值**（`ptr`），不是"没有返回值"。
     let c: u32 = skip_parens(src, toks, tt);
     if tok_is(src, toks, c + 1, "-") && tok_is(src, toks, c + 2, ">") {
@@ -7010,7 +7010,7 @@ fn load_var(s: ptr, out: ptr, src: ptr, toks: ptr, name_tok: u32, lvl: u32) -> u
     return n;
 }
 
-// ---------------------------------------------------------------- 函数值与闭包（`docs/346`）
+// ---------------------------------------------------------------- 函数值与闭包（`docs/348`）
 //
 // 与参考实现（`tools/lomentc.py` 的 `_fn_value` / `_lambda_expr` / `_lambda_fn`）的分工：
 //   * **值** = 堆上一条 `{code, 捕获…}` 记录；调用点只有一条路（读记录 -> 间接调用）。
@@ -7020,7 +7020,7 @@ fn load_var(s: ptr, out: ptr, src: ptr, toks: ptr, name_tok: u32, lvl: u32) -> u
 //   * 包装 `@__fp_<名字>` **按模块去重**：它是一条 `define`，两个函数各取一次同一个函数值
 //     不能发两条同名定义（参考实现那边 `fn_clos` 也按模块共享）。
 
-/// 这个单元里有没有**函数值 / 闭包**（`docs/346`）。只用来决定要不要把分配器带进产物：
+/// 这个单元里有没有**函数值 / 闭包**（`docs/348`）。只用来决定要不要把分配器带进产物：
 /// 闭包按 `( … ) =>` 的形状认；函数值按"已经登记的函数名出现在值位置"认。
 /// 误报只会多发一块堆（与参考实现不一致，孪生判据抓得到），漏报会让产物引用未定义的符号。
 /// 名字位置看起来像**值**（不是调用名 / 字段名 / 声明处的名字 / 变体名）。
@@ -7269,7 +7269,7 @@ fn emit_fn_value(s: ptr, out: ptr, src: ptr, toks: ptr, fi: u32, lvl: u32) -> u3
     return t;
 }
 
-/// 闭包字面量 `(x: T, y) => 体`（`docs/346`）。记录发在这里，**函数体记下来**稍后发。
+/// 闭包字面量 `(x: T, y) => 体`（`docs/348`）。记录发在这里，**函数体记下来**稍后发。
 fn emit_lambda(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32) -> u32 {
     let close: u32 = skip_parens(src, toks, j);
     let body_lo: u32 = close + 3;
@@ -14200,7 +14200,7 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32, tickx: u32)
     // 走出状态块，0xC0000005）。发射器自己的初始化不该依赖分配器给什么。
     store32(s, 16, 0);
     store32(s, 640, 0);   // 函数个数
-    // 函数值 / 闭包（`docs/346`）：三张表按**单元**清零（它们的条目跨函数攒着，
+    // 函数值 / 闭包（`docs/348`）：三张表按**单元**清零（它们的条目跨函数攒着，
     // 全部函数体之后才发）。
     store32(s, CG_FDN, 0);
     store32(s, CG_LAMN, 0);
@@ -14354,7 +14354,7 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32, tickx: u32)
         i = i + 1;
     }
     store32(s, 640, n);
-    // **函数值 / 闭包会把分配器拖进产物**（`docs/346`）：值是一条 `call @__loment_alloc`，
+    // **函数值 / 闭包会把分配器拖进产物**（`docs/348`）：值是一条 `call @__loment_alloc`，
     // 而源里并没有 `alloc` —— `heap_needed` 那一趟只认源码里的调用，于是这里补一条。
     // 运行时那一块也要跟着来：参考实现按**发出来的文本**判（`rt_on or
     // "@__loment_" in text_all`），而闭包记录的第一条就是 `@__loment_alloc`。
@@ -14792,7 +14792,7 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32, tickx: u32)
     if cmd_entry_needed(src, toks) == 1 {
         emit_cmd_entry(s, out);
     }
-    // 函数值与闭包体（`docs/346`）：参考实现把 `fn_defs` 追加在 `text_all` **之后**，
+    // 函数值与闭包体（`docs/348`）：参考实现把 `fn_defs` 追加在 `text_all` **之后**，
     // 这里同一个位置（命令入口也在 `text_all` 里）。
     let _fd: u32 = emit_fdefs(s, out, src, toks);
     // 发射器报过"降不下去"（`#775`）：整份输出作废。**与容量溢出同一个返回约定**

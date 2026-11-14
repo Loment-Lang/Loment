@@ -50,6 +50,9 @@ BUILTINS = {
     "str_repr": (("str",), "str"),
     # 2026.3: 插值的宽度 / 补零（`docs/341` §7）。`align`：0 = 左、1 = 右、2 = 居中。
     "str_pad": (("str", "u32", "u8", "u32"), "str"),
+    # 2026.3（`docs/348`）：进程命令行里的第 i 个参数（NUL 分隔，0 = 程序自己的路径）。
+    # 越界回空串 —— `str` 没有"可能没有"这一档，空串是最不吓人的那个。
+    "args": (("u32",), "str"),
     "str_byte": (("str", "u32"), "u32"),
     "panic": (("u32",), "u32"),  # M19: 不可返回 (类型仅占位)
     "alloc": (("u32",), "ptr"),  # M15
@@ -756,6 +759,78 @@ j:
   %dp = getelementptr i8, ptr %out, i64 %off
   call void @__loment_memcpy(ptr %dp, ptr %p, i64 %n)
   ret void
+}
+'''
+
+#: **`args(i)`**（`docs/348`）：进程命令行里的第 `i` 个参数（NUL 分隔，0 = 程序自己的
+#: 路径）。两侧的目标都提供 `/proc/self/cmdline` —— ELF 上是真的 procfs，PE 上是
+#: `lomelf` 垫片从 `GetCommandLineA` 合成的那一份（`tools/lomelf.py` 的 `__ws_open_cmd`），
+#: 所以同一个 helper 两边都能用。
+#:
+#: 三件必须一起说的：
+#: * **名字不带 `__loment_` 前缀**：那一串是"发不发整段运行期"的开关（`emit_llvm` 里
+#:   `"@__loment_" in text_all` 那一句）。带了它，一条只调 `args` 的程序会白发出整段
+#:   freestanding 运行时 —— 与 `tools/lomentc.py` 的命令入口桩（`@.lc.*`）同一条理由。
+#: * **不回聚合值**：`{ ptr, i64 }` 的返回要让链接器自己按寄存器对拆，而那不在它的指令子集里；
+#:   起点指针走一个静态槽（`@.args.out`），函数只回长度。
+#: * **静态缓冲、不分配**：`str` 指的是这块静态缓冲，没有堆、没有根表要登记。
+_IR_ARGS = '''@.args.buf = internal global [4096 x i8] zeroinitializer
+@.args.out = internal global i64 0
+@.args.path = private unnamed_addr constant [19 x i8] c"/proc/self/cmdline\\00"
+
+define internal i64 @.args.get(i32 %idx) {
+entry:
+  %buf = getelementptr inbounds [4096 x i8], ptr @.args.buf, i64 0, i64 0
+  %path = getelementptr inbounds [19 x i8], ptr @.args.path, i64 0, i64 0
+  %pi = ptrtoint ptr %path to i64
+  %fd = call i64 asm sideeffect "syscall", "={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}"(i64 257, i64 18446744073709551516, i64 %pi, i64 0)
+  %bad = icmp slt i64 %fd, 0
+  br i1 %bad, label %none, label %rd
+rd:
+  %bi = ptrtoint ptr %buf to i64
+  %n = call i64 asm sideeffect "syscall", "={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}"(i64 0, i64 %fd, i64 %bi, i64 4096)
+  %cl = call i64 asm sideeffect "syscall", "={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}"(i64 3, i64 %fd, i64 0, i64 0)
+  %neg = icmp sle i64 %n, 0
+  br i1 %neg, label %none, label %scan
+scan:
+  %zi = zext i32 %idx to i64
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %scan ], [ %i2, %step ]
+  %k = phi i64 [ 0, %scan ], [ %k2, %step ]
+  %st = phi i64 [ 0, %scan ], [ %st2, %step ]
+  %end = icmp uge i64 %k, %n
+  br i1 %end, label %none, label %chk
+chk:
+  %kp = getelementptr i8, ptr %buf, i64 %k
+  %ch = load i8, ptr %kp
+  %z = icmp eq i8 %ch, 0
+  br i1 %z, label %sep, label %plain
+sep:
+  %hit = icmp eq i64 %i, %zi
+  br i1 %hit, label %found, label %skip
+skip:
+  %k1 = add i64 %k, 1
+  %i1 = add i64 %i, 1
+  br label %step
+plain:
+  %kn = add i64 %k, 1
+  br label %step
+step:
+  %i2 = phi i64 [ %i1, %skip ], [ %i, %plain ]
+  %k2 = phi i64 [ %k1, %skip ], [ %kn, %plain ]
+  %st2 = phi i64 [ %k1, %skip ], [ %st, %plain ]
+  br label %loop
+found:
+  %len = sub i64 %k, %st
+  %sp = getelementptr i8, ptr %buf, i64 %st
+  %spi = ptrtoint ptr %sp to i64
+  store i64 %spi, ptr @.args.out
+  ret i64 %len
+none:
+  %bpi = ptrtoint ptr %buf to i64
+  store i64 %bpi, ptr @.args.out
+  ret i64 0
 }
 '''
 
@@ -7449,6 +7524,9 @@ _RUNTIME_SITES: dict[str, str] = {
     "str_show": "`str_show`（插值）",
     "str_repr": "`str_repr`（插值 `!r`）",
     "str_pad": "`str_pad`（插值的宽度 / 补零）",
+    # `args(i)` 走 openat + read 两个系统调用（`docs/348`）。与 `panic` 同一个口径：
+    # `no_runtime` 是"产物里不许有运行期"的保证，往保守那一侧偏。
+    "args": "`args`",
     "str_eq": "`str_eq`",
     "panic": "`panic`",
     # `docs/296` §2.7：`print_num` 的十进制转换在运行期那一块里（24 字节栈缓冲、一次
@@ -9714,6 +9792,10 @@ def _expr_rs(e) -> str:
             spec = fill + al
             return (f"(Box::leak(format!(\"{{{spec}width$}}\", {a[0]}, "
                     f"width = ({a[1]}) as usize).into_boxed_str()) as &'static str)")
+        if e.name == "args":  # `docs/348`: std::env::args_os 的头一项就是程序自己
+            return ("(match std::env::args_os().nth((" + a[0] + ") as usize) { "
+                    "Some(__s) => Box::leak(__s.to_string_lossy().into_owned()"
+                    ".into_boxed_str()) as &'static str, None => \"\" })")
         if e.name == "str_concat":  # M2: v0 的 str 是 &'static str -> 只能漏内存
             return (f"(Box::leak(format!(\"{{}}{{}}\", {a[0]}, {a[1]}).into_boxed_str()) "
                     f"as &'static str)")
@@ -14071,6 +14153,23 @@ class _Ir:
             r = self.t()
             self.w(f"{r} = phi {{ ptr, i64 }} [ {v2}, %{pad} ], [ {sv}, %{keep} ]")
             return "str", r
+        # 2026.3: `args(i)`（`docs/348`）—— 第 i 个命令行参数；helper 把起点写进
+        # `@.args.out`、只回长度（聚合返回值不在链接器的指令子集里）。
+        if e.name == "args":
+            _, iv = self.expr(e.args[0], "u32")
+            ln = self.t()
+            self.w(f"{ln} = call i64 @.args.get(i32 {iv})")
+            # 起点槽是 `i64` 而不是 `ptr`：包内 PE 链接器的**全局初值**解析不认
+            # `ptr null`（实测 `标量初值解析失败`），而 `i64 0` 两边都吃。
+            spi = self.t()
+            self.w(f"{spi} = load i64, ptr @.args.out")
+            sp = self.t()
+            self.w(f"{sp} = inttoptr i64 {spi} to ptr")
+            v1 = self.t()
+            self.w(f"{v1} = insertvalue {{ ptr, i64 }} undef, ptr {sp}, 0")
+            v2 = self.t()
+            self.w(f"{v2} = insertvalue {{ ptr, i64 }} {v1}, i64 {ln}, 1")
+            return "str", v2
         # 2026.3: 插值的取值（`docs/341`）—— `str` 恒等、整型同 `str_num`、
         # `bool` 走一个 8 字节的堆块；`str_repr` 与非串实参的 `str_show` 相同。
         if e.name in ("str_show", "str_repr"):
@@ -15276,6 +15375,9 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
         out.append(_IR_STR_REPR)
     if _calls_named(mods, ("str_pad",)):
         out.append(_IR_PAD)
+    # `args(i)`（`docs/348`）：自己的全局 + 自己一段读 `/proc/self/cmdline` 的 helper。
+    if _calls_named(mods, ("args",)):
+        out.append(_IR_ARGS)
     # 能力域运行时：`guard` 发 `@__loment_guard2`，`tick;` 发 `@__loment_tick`。
     # **两者都不用时一个字节不发** —— 旧程序的产物逐字节不变。
     _guard_rt = ("@__loment_guard2" in text_all or "@__loment_tick" in text_all

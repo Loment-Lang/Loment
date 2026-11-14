@@ -2069,6 +2069,52 @@ def test_auto_type_inference():
     print("      `auto` / `:=`：产物与显式写法相同；六种初值与旧版次都拒")
 
 
+@test
+def test_args_builtin():
+    """`args(i)`（`docs/348`）：进程命令行里的第 i 个参数。
+
+    * 收：`args(0)` 返回 `str`（`let s: str = args(0);` 编得过，产物里出现 helper）；
+    * 拒：实参不是整型、`no_runtime` 下用它（会拖 syscall）、把它当整数用。
+    """
+    NL = chr(10)
+    body = ("module m" + NL + "choose runtime" + NL + NL +
+            "fn _start() {" + NL +
+            "    let s: str = args(1);" + NL +
+            "    print(s);" + NL +
+            "}" + NL)
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        p = td / "ok.lomt"
+        p.write_text(body, encoding="utf-8", newline=NL)
+        mod = lomentc.load(p)
+        errs = lomentc.check(mod, deps=lomentc.resolve_deps(mod, ROOT, td, entry=p))
+        assert not errs, errs[:3]
+        ll = lomentc.emit_llvm(mod, ROOT)
+        assert "@.args.get" in ll and "@.args.buf" in ll, ll[-600:]
+
+        bad = {
+            "argtype": ("    let s: str = args(\"x\");", "实参"),
+            "asint": ("    let n: u32 = args(1);", "表达式类型"),
+        }
+        for name, (line, want) in bad.items():
+            q = td / f"bad_{name}.lomt"
+            q.write_text("module m" + NL + "choose runtime" + NL + NL +
+                         "fn _start() {" + NL + line + NL + "}" + NL,
+                         encoding="utf-8", newline=NL)
+            mod = lomentc.load(q)
+            e = lomentc.check(mod, deps=lomentc.resolve_deps(mod, ROOT, td, entry=q))
+            assert e and want in e[0], (name, e[:3])
+
+        q = td / "nr.lomt"
+        q.write_text("module m" + NL + "choose no_runtime" + NL + NL +
+                     "fn _start() {" + NL + "    print(args(0));" + NL + "}" + NL,
+                     encoding="utf-8", newline=NL)
+        mod = lomentc.load(q)
+        e = lomentc.check(mod, deps=lomentc.resolve_deps(mod, ROOT, td, entry=q))
+        assert e and "`args`" in e[0], e[:2]
+    print("      `args(i)`: 编得过、产物带 helper；实参类型 / 整数化 / `no_runtime` 都拒")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_grammar_test")
 

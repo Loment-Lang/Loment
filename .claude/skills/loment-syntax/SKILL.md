@@ -293,6 +293,7 @@ each bring in one module, see 3.1 at the end of this section.
 `, `	`, `
 `). The `!r` conversion |
 | `str_pad(s, width, fill, align) -> str` | Interpolation width / zero-pad (docs/341): align 0 left, 1 right, 2 centre; returns the string unchanged when it is already wide enough, otherwise allocates. E31 under `no_runtime` |
+| `args(i: u32) -> str` | (`docs/348`, added in 2026.3; builtins are not edition-gated): the i-th NUL-separated command-line field, `0` = the program path; out of range is the empty string. Reads `/proc/self/cmdline` on both targets (the PE shim synthesizes it), so E31 under `no_runtime` |
 | `str_ptr(s: str) -> ptr` | The data pointer (for feeding syscalls) |
 | `print(s: str) -> u32` | Write the string's bytes to stdout (one `write` syscall) |
 | `tur_edition() -> str` | The Tur edition this program is compiled as, e.g. `tur2026.2` (docs/296). The compiler also prints it on stderr at every check/build/run |

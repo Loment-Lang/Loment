@@ -863,8 +863,9 @@ Tur 2026.3 adds:
 | `catch` forms | `let x: u32 = r catch 0;`, `r catch \|e\| { e + 100 }`, `r catch return;` | fallback on a Result/Option: a default value, a block that sees the error payload, or an early `return Err(…)` | only on the right-hand side of `let`/assignment; the block holds one expression; `catch return` requires the function to return the same enum; 2026.3+ |
 | string constant | `const GREETING: str = "hello";` | a compile-time named string; every use site becomes that literal (its own `.str.<fn>.<n>`) | 2026.3+ only; the value MUST be a string literal; older editions keep `const` integer-only |
 | interpolated string | `f"n={n}"`, `rf"raw\n{n}"`, `{x=}`, `{s!r}`, `{n:>5}` / `{n:05}`, `{{` / `}}` | a string whose holes are any expression; `str` / `bool` / any integer are shown by `str_show`, `!r` quotes and escapes a `str`, a format spec pads to a width (via `str_pad`); the whole form is a front-end rewrite to `str_concat` | 2026.3+ only; single line, no nested interpolation, no dynamic width; text segments are ordinary literals |
-
 | inferred local | `let n := p.a;`, `let k: auto = p.b;`, `let j := k as u32;` | a local whose type comes from its initialiser | 2026.3+ only; the initialiser MUST spell a type in the source (a local/parameter, a field chain, a whole `as T` cast, or `true`/`false`) - literals, calls, operators, constants and `if`/`match` expressions are refused; `:=` must be written glued |
+| args | `args(1)` | the i-th NUL-separated command-line field (`0` is the program path) | takes a `u32` index and returns `str`; out of range is the empty string; reads `/proc/self/cmdline` on both targets (the PE shim synthesizes it from `GetCommandLineA`); counted as a runtime site, so `no_runtime` refuses it; a builtin, so it is not edition-gated (added in 2026.3) |
+
 The lifetime dimension is **edition-gated**: writing `choose lifetime_*` in 2026.1 or
 2026.2 is refused; those editions keep the old default (`lifetime_no`) and the old
 restriction that `&` is not a type.

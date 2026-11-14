@@ -6,7 +6,7 @@
 > 上游：`docs/167`（PE 后端）、`docs/173`（FFI 的四阶段）、`docs/210`（GC 与 arena）、`docs/245`（线程）
 > 本文的"今天"一律指 `origin/main @ edda7d4e`，不是本地检出。
 
-## 1. 为什么是"套件"，不是 38 个脚本
+## 1. 为什么是"套件"，不是 42 个脚本
 
 单个 `top` 回答"这台机器现在怎么样"。套件回答"**我的程序**现在卡在哪"。
 
@@ -19,11 +19,11 @@
 3. **可组合** —— 单一二进制、无守护进程、稳定 JSON。谁来读都行，不要求装一整套 agent。
 4. **同一契约跨平台** —— 键名、单位、退出码在 Windows / Linux 上一致；实现可以分后端。
 
-一个套件 = 共享一份 CLI 解析、一条采样循环、一套渲染、一套降级规则。38 个独立脚本做不到第 4 条。
+一个套件 = 共享一份 CLI 解析、一条采样循环、一套渲染、一套降级规则。42 个独立脚本做不到第 4 条。
 
-## 2. 九个域 × 38 个槽位
+## 2. 十个域 × 42 个槽位
 
-四个给定的域共 18 个槽位；新设计的五个域各 4 个，合计 20 个。总计 **38**。
+四个给定的域共 18 个槽位；后设的六个域各 4 个，合计 24 个。总计 **42**。
 
 槽位名 `<domain>.<slot>`，在 CLI 上就是两个位置参数：`lmgr cpu load`。
 
@@ -114,12 +114,29 @@
 | `env.svc` | 本地服务健康（dev server / DB） | TCP connect（socket 已有） | **是** |
 | `env.watch` | 工作区变更、热重载、脏状态 | `ReadDirectoryChangesW` | 否 |
 
+### 2.10 EFFECT（新，4）
+
+**效应管理器隶属 LMGR**：语义与站点定义在 `docs/341`（LSPE 的 E11），这里只回答
+“当前工程的效应面长什么样、哪些问号还没答”。它是**开发流程**的一部分 —— 与
+`build.*` 同一层，不碰运行期资源。
+
+| 槽位 | 回答的问题 | 数据源 | 今天可写 |
+|---|---|---|---|
+| `effect.list` | 声明了哪些效应、每个效应有哪些操作 | 读源文件 + `effect` / `fn` 扫描（A2a 语法） | 否（A2c） |
+| `effect.row` | 每个函数的 `effects` 行、未被处理器销掉的 `perform` | 源文件 + 调用图（E11 的 `EffectAllowed`） | 否（A2c） |
+| `effect.handler` | 处理器臂、穷尽性、`resume` 的 0/1 | 源文件（E11 的 `HandlerExhaustive` / `ResumeLinear`） | 否（A2c） |
+| `effect.audit` | 站点 / 问题 Q018–Q022 / 地板 | Potato v16 台账（A2c）或 `loment lspe effects --json` 的导入件 | 否（A2c） |
+
+**边界（明写）**：运行期处理器要到 `docs/341` 的 A3；在那之前 LMGR 只做**静态**面。
+四个槽位都只要求 `fs.read` 能力，`done=0` 让 `lmgr list` 如实报 `unavailable`
+（§3.5）—— 登记不等于实现。
+
 ## 3. 统一契约
 
 ### 3.1 命令行
 
 ```
-lmgr list [--json]                     # 38 个槽位的注册表，含平台可用性
+lmgr list [--json]                     # 42 个槽位的注册表，含平台可用性
 lmgr doctor [--json]                   # 逐能力探测，报告 ok/degraded/unavailable
 lmgr <domain> <slot> [options]
 ```
@@ -224,9 +241,9 @@ lmgr <domain> <slot> [options]
 | PDH 计数器 | ❌ | — |
 | `DeviceIoControl` | ❌ | — |
 
-**结论**：38 个槽位里，今天能完整写出来的只有 4 个
+**结论**：42 个槽位里，今天能完整写出来的只有 4 个
 （`build.dep`、`build.artifact`、`env.svc`、以及 `net.lat` 的 TCP 路径）。
-其余 34 个全部卡在 §7 的能力缺口上。这就是本设计要同时交付一份 issue 清单的原因。
+其余 38 个全部卡在 §7 的能力缺口上。这就是本设计要同时交付一份 issue 清单的原因。
 
 ## 5. 实现分层
 
@@ -338,6 +355,20 @@ GitHub 号在落地后回填到本节末尾的表里。
 
 **伞**：#1260 收录以上全部，并按本节的分组列出。
 
+### 7.8 效应管理器（EFFECT）
+
+效应管理器隶属 LMGR，但它的语义与站点定义在 `docs/341`；这一节只记 LMGR 侧的缺口。
+
+| # | 缺口 | 解锁 | Issue |
+|---|---|---|---|
+| X1 | E11 站点进 Potato 台账（`docs/341` A2c） | `effect.audit` | #1632 |
+| X2 | 纯 Loment 的源文件 token 扫描（`lexer` 进 lmgr） | `effect.list` / `effect.row` / `effect.handler` 的静态半 | #1633 |
+| X3 | 报告导入格式（`loment lspe effects --lines` 的稳定子集） | `effect.audit` 的无 Python 路径 | #1634 |
+| X4 | 运行期处理器栈（`docs/341` A3） | `effect.handler` 的运行期半 | #1635 |
+
+**今天一律 `done=0`**：登记让 `lmgr list` / 选择页看见这四个槽位，状态如实报
+`unavailable`；不输出伪行（§3.5）。
+
 ## 8. 入口：`choose lmgr_true` 与 `loment lmgr`
 
 > 本节是 2026-11-04 你口述的形状；三个决定同日按推荐值**定下**（`lmgr_true` / `lmgr_false`、
@@ -377,7 +408,7 @@ GitHub 号在落地后回填到本节末尾的表里。
 ### 8.2 三个入口
 
 ```
-loment lmgr                  # 选择页：9 个域、38 个槽位
+loment lmgr                  # 选择页：10 个域、42 个槽位
 loment lmgr_<slot> [options] # 直达一个槽位
 lmgr <domain> <slot> ...     # 子系统入口（§3.1 的完整选项）
 ```
@@ -385,8 +416,8 @@ lmgr <domain> <slot> ...     # 子系统入口（§3.1 的完整选项）
 - `<slot>` 是槽位名把 `.` 换成 `_`：`cpu.load` → `loment lmgr_cpu_load`，
   `mem.phys` → `loment lmgr_mem_phys`。域级形式 `loment lmgr_cpu` 列出该域全部槽位。
 - **分发**：`loment` 的顶层解析器加一条前缀规则 —— `argv[1]` 以 `lmgr_` 开头就交给
-  lmgr 模块，不生成 38 个 `loment-lmgr_*` 可执行文件。这条规则要排在"未知子命令"之前。
-- **选择页**：纯文本编号菜单，按 9 个域分组，每行带 `available` / `degraded` /
+  lmgr 模块，不生成 42 个 `loment-lmgr_*` 可执行文件。这条规则要排在"未知子命令"之前。
+- **选择页**：纯文本编号菜单，按 10 个域分组，每行带 `available` / `degraded` /
   `unavailable`。**不做 TUI**：`lumtui` 在 PE 上拿不到终端尺寸与 raw 模式（#1276），
   v1 只认数字键与 `q`，不依赖任何 ioctl。
 
@@ -414,7 +445,7 @@ lmgr <domain> <slot> ...     # 子系统入口（§3.1 的完整选项）
 
 | 里程碑 | 内容 |
 |---|---|
-| **M0** | 第八维登记（两套实现 + 种子）+ 门禁 + `loment lmgr` 选择页（空壳，列 38 槽与可用性）+ `loment lmgr_<slot>` 直达（不可用槽位退出 2） |
+| **M0** | 第八维登记（两套实现 + 种子）+ 门禁 + `loment lmgr` 选择页（空壳，列 42 槽与可用性）+ `loment lmgr_<slot>` 直达（不可用槽位退出 2） |
 | **M1** | 选择页接上采样循环；`lmgr_<slot>` 走真实探针 |
 
 ## 9. 不做什么

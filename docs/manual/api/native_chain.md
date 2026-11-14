@@ -28,4 +28,4 @@
 
 
 
-### `fn main() -> u32`
+### `fn chain_main() -> u32`

@@ -21,8 +21,9 @@ v0 的取舍（与 clang 路径不同的地方，逐条记账，别当成"等价
 
 子集（v0）：标量 i1/i8/i16/i32/i64 与 ptr、`{...}` 结构体、`[N x T]` 数组；
 alloca/load/store/getelementptr/extractvalue/insertvalue；算术/位运算/比较/转型；
-br/switch/phi；直接 call（<= 6 实参）；内联汇编 syscall；atomicrmw add；ret/unreachable。
-**没有**：浮点、bitcast、select、间接调用、闭包、聚合返回值、变参、结构体 GEP。
+br/switch/phi；直接 call（<= 6 实参）与间接 call（`call %reg`，`docs/348`）；
+内联汇编 syscall；atomicrmw add；ret/unreachable。
+**没有**：浮点、bitcast、select、闭包记录本身、聚合返回值、变参、结构体 GEP。
 """
 
 from __future__ import annotations

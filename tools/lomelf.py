@@ -359,7 +359,7 @@ def _parse_init(ty: str, init: str) -> bytes:
 def _parse_func(lines: list[str], start: int) -> tuple[Func, int]:
     head = lines[start].strip()
     m = re.match(
-        r"define\s+(?:(?:internal|private)\s+)?(.+?)\s+(@[-A-Za-z0-9_.]+)\s*\((.*?)\)"
+        r"define\s+(?:(?:internal|private)\s+)?(.+?)\s+(@[-A-Za-z0-9_.$]+)\s*\((.*?)\)"
         r"(?:\s+\S+)*\s*\{?\s*$", head)
     if not m:
         raise ElfError(f"函数头解析失败: {head!r}")
@@ -590,15 +590,28 @@ class Asm:
         self.emit(mov_ri(reg, 0))
         self.fixups.append((self.here() - 8, lbl, 8, "abs"))
 
+    def label_addr(self, lbl: str) -> int:
+        """`@名字` 的地址。**函数**登记时不带 `@`（`f.name` 已剥过），全局量带 ——
+        两种写法都认，否则 `ptrtoint ptr @f to i64` 在最终回填时找不到函数标签。"""
+        key = lbl
+        if key not in self.labels and key.startswith("@") and key[1:] in self.labels:
+            key = key[1:]
+        return self.labels[key]
+
     def finalize(self) -> bytes:
         for site, lbl, width, kind in self.fixups:
-            if lbl not in self.labels:
+            # 全局量登记时带 `@`（`@.str…`），**函数**登记时不带（`f.name` 已剥过 `@`）。
+            # `ptrtoint ptr @f to i64` 走的是后一条：试一下剥掉 `@` 的键。
+            key = lbl
+            if key not in self.labels and key.startswith("@") and key[1:] in self.labels:
+                key = key[1:]
+            if key not in self.labels:
                 raise ElfError(f"未定义的标签: {lbl}")
             if kind == "abs":
-                struct.pack_into("<Q", self.buf, site - self.base, self.labels[lbl])
+                struct.pack_into("<Q", self.buf, site - self.base, self.labels[key])
             else:
                 struct.pack_into("<i", self.buf, site - self.base,
-                                 self.labels[lbl] - (site + width))
+                                 self.labels[key] - (site + width))
         return bytes(self.buf)
 
 
@@ -1134,9 +1147,44 @@ class Emitter:
             rest = rest[i:].lstrip()
         cm = re.match(r"(@[-A-Za-z0-9_.]+|%[-A-Za-z0-9_.]+)\s*\((.*)\)\s*$", rest, re.S)
         callee, argstr = cm.group(1), cm.group(2)
-        if callee.startswith("%"):
-            raise Unsupported("v0 不支持间接调用")
         args = [parse_operand(x) for x in split_top(argstr)] if argstr.strip() else []
+        if callee.startswith("%"):
+            if getattr(self, "pe_target", False):
+                # Windows 侧的函数值要另一套约定（`_Ir` 发的记录是 ELF 的那一套），
+                # 而现在两边都还没有 —— **响亮地拒绝**，不静默编一个假的出来。
+                raise Unsupported(
+                    "间接调用只在 ELF 目标可用 —— Windows 侧的闭包记录还没有约定 (docs/348)")
+            # 间接调用（`docs/348`）：callee 是一个装着代码地址的 SSA 值。约定与直接调用
+            # **同一套**栈传参（`_Ir` 已经把环境指针放在实参 0）。**先压完实参再读寄存器**：
+            # `get` 用 RAX 求值，先把代码地址读进 RCX 会被后面的求值踩掉。
+            ret_agg = ret_ty is not None and is_agg(ret_ty)
+            if len(args) > 16:
+                raise Unsupported("v0 最多 16 个实参")
+            total = 0
+            for ty, _ in reversed(args):
+                total += (max(8, size_of(ty)) + 7) // 8 * 8
+            if ret_agg:
+                total += 8
+            for ty, val in reversed(args):
+                if is_agg(ty):
+                    sz = (size_of(ty) + 7) // 8 * 8
+                    self.asm.emit(alu_ri(SUB, RSP, sz))
+                    self.asm.emit(mov_rr(RDI, RSP))
+                    self.agg_addr(val, RSI)
+                    self.copy(RDI, RSI, size_of(ty))
+                else:
+                    self.get(ty, val, RAX)
+                    self.asm.emit(push_r(RAX))
+            if ret_agg:
+                self.asm.emit(lea(RAX, RBP, self.slots[d]))
+                self.asm.emit(push_r(RAX))
+            self.get("ptr", callee, RCX)
+            self.asm.emit(b"\xFF\xD1")          # call rcx
+            if total:
+                self.asm.emit(alu_ri(ADD, RSP, total))
+            if d is not None and not ret_agg:
+                self.put(d, RAX)
+            return
         # ---- 外部函数 (docs/173): 实参走**寄存器**, 不走我们自己的栈约定。
         # 求值顺序: **从右往左**逐个算进 RAX 再 push, 然后从左往右 pop 进目标寄存器 ——
         # 这样 push 完栈顶正好是第 0 个实参, pop 的先后与寄存器顺序自然对齐。不能直接
@@ -5444,6 +5492,9 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
 class PeEmitter(Emitter):
     """把 syscall 改成走 shim、把入口桩改成 Windows 形态，其余降级与 ELF 目标共用。"""
 
+    #: PE 目标标记 —— `_call` 用它把"只有 ELF 兑现得了的降级"点名拒（`docs/348`）。
+    pe_target = True
+
     def _emit_syscall(self) -> None:
         self.asm.call("__win_syscall")
 
@@ -6976,7 +7027,7 @@ def compile_ll(text: str, objects: list | None = None,
             em.hot_funcs,
             em.hot_header if hotswap else None,
             em.asm.base,
-            [(site - em.asm.base, em.asm.labels[lbl])
+            [(site - em.asm.base, em.asm.label_addr(lbl))
              for site, lbl, _w, kind in em.asm.fixups if kind == "abs"],
         ) if collect_hot else "",
     }

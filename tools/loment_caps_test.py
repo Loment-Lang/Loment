@@ -128,8 +128,9 @@ CAPACITY_SITES = 262
 SILENT_SITES = 170
 
 #: 第二类：字面量上界（`#770`）。`[T; N]` 与 `literal:<N>` 各自钉住总数与沉默的那一份。
-LITERAL_SITES = 66
-LITERAL_SILENT = 65
+#: 2026-11-12 `docs/348`：间接调用那一支也走同一张 20 格实参类型槽表 ⇒ 多一处 literal:20。
+LITERAL_SITES = 67
+LITERAL_SILENT = 66
 ARRAY_SITES = 20
 ARRAY_SILENT = 19
 
@@ -300,7 +301,7 @@ SILENT_LITERALS = {
     ("loment/lib/sha256.lomt", "literal:8"): 1,
     ("loment/selfhost/checker.lomt", "literal:63"): 1,
     ("loment/selfhost/codegen.lomt", "literal:16"): 1,
-    ("loment/selfhost/codegen.lomt", "literal:20"): 2,
+    ("loment/selfhost/codegen.lomt", "literal:20"): 3,
     ("loment/selfhost/codegen.lomt", "literal:64"): 2,
     ("loment/selfhost/codegen.lomt", "literal:8"): 2,
     ("loment/selfhost/codegen.lomt", "literal:9"): 1,

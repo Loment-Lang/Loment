@@ -118,6 +118,9 @@ EXTRA_COVERED = (
     # 自举侧自己的 IR 单元：`[u8; N]` / 切片 / 大段 const 都有
     "loment/selfhost/ir_mem.lomt",
     "loment/selfhost/ir_for.lomt",
+    # 第九维 `fp`（`docs/348`）：函数类型的**渲染**（`(A,B)->C` 无空格）与
+    # 闭包/包装函数在形态对象里的样子 —— 别的语料一份都没有函数类型。
+    "loment/selfhost/fp/ir_fp.lomt",
     "loment/tools/lomsyscalls.lomt",
     # ---- 带依赖的库与工具（`imports` 那一格在真实规模上的样子）
     "lompi/store/host/0.1.0/fs.lomt",       # 一个依赖

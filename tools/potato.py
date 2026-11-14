@@ -162,8 +162,14 @@ TOP_KEYS_V21 = TOP_KEYS_V20 | {"gc_control"}
 # 同级同形 —— 于是"这份产物有没有静态借用证明、要不要手写区域标记"是**不读源码可判的**。
 # 默认随版次走：2026.3 起 `lifetime_auto`，旧版次 `lifetime_no`（`docs/305`）。
 TOP_KEYS_V22 = TOP_KEYS_V21 | {"lifetime"}
+# v23 = v22 + **间接分派** `fp`（`docs/348`，用户 2026-11-12 定第九维）：
+# `no_fp`（默认，静态调用图）/ `fp`。与 `gc` / `lifetime` 同级同形、**必填** ——
+# 于是"这份产物里有没有间接调用边"是**不读源码可判的**，而它正是 `docs/208` §4
+# 那条静态调用图前提的适用边界。
+TOP_KEYS_V23 = TOP_KEYS_V22 | {"fp"}
 VERSIONS = ("v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11",
-            "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19", "v20", "v21", "v22")
+            "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19", "v20", "v21", "v22",
+            "v23")
 #: `boundary` 的四个**分量**键。**口径是词法的**（`docs/204` R5: "可 grep、可计数、
 #: 可审计"）: 只看"这个名字被调用了没有", 不判类型、不判危险 —— 那是编译器的事。
 BOUNDARY_KEYS = ("extern_declared", "extern_calls", "syscalls", "ptr_transforms")
@@ -206,6 +212,10 @@ VMS = ("vm", "no_vm")
 #: `lifetime_manual` = 允许显式借用来源标记 `&a T`。
 #: 与 `RUNTIMES` / `PORTS` / `VMS` 同一条纪律：取值带维名前缀。
 LIFETIMES = ("lifetime_no", "lifetime_auto", "lifetime_manual")
+#: `fp` 的取值（`docs/348`，用户 2026-11-12 定第九维）：
+#: `no_fp` = 默认档，产物里**只有直接调用边**（`docs/208` §4 的前提成立）；
+#: `fp` = 函数值 / 闭包 / 间接调用放行，图里多出间接边。
+FPS = ("no_fp", "fp")
 #: `lms` 的取值 = **要不要内存安全**（`docs/253`，用户 2026-10-15 定第六维）。
 #: `lms_close`（关，**默认**）= 今天的形状；`lms_open`（开）= 检查器发 E024–E026 +
 #: 保障器**按站点分配**发内联界检查。
@@ -341,12 +351,55 @@ def _ref_elem_type(t: str) -> str | None:
     return m.group(3) if m else None
 
 
+def _fn_ty_parts(t: str) -> tuple[list[str], str] | None:
+    """`(A,B)->C` -> `(["A", "B"], "C")`；不是函数类型返回 `None`（`docs/348`）。
+
+    **本文件不 import 编译器**（M47 那条独立性断言），所以这里自带一份切分 ——
+    规则与编译器那边那个同名切分相同：按括号深度找配对的 `)`，再认 `->`，
+    形参按深度 0 的逗号切。
+    """
+    if not t.startswith("("):
+        return None
+    depth = 0
+    i = 0
+    while i < len(t):
+        c = t[i]
+        if c in "(<[":
+            depth += 1
+        elif c in ")>]":
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    if depth != 0 or not t.startswith("->", i + 1) or i + 3 >= len(t):
+        return None
+    inner, ret = t[1:i], t[i + 3:]
+    args: list[str] = []
+    if inner:
+        start, d = 0, 0
+        for k, c in enumerate(inner):
+            if c in "(<[":
+                d += 1
+            elif c in ")>]":
+                d -= 1
+            elif c == "," and d == 0:
+                args.append(inner[start:k])
+                start = k + 1
+        args.append(inner[start:])
+    return args, ret
+
+
 def _type_ok(t: object, known: set[str]) -> bool:
-    """基类型 / 已声明 struct / 数组 [T; N] / 切片 [T] / 可变切片 mut [T] / 借用 &T。"""
+    """基类型 / 已声明 struct / 数组 [T; N] / 切片 [T] / 可变切片 mut [T] / 借用 &T /
+    函数类型 `(A,B)->C`（`docs/348`）。"""
     if not isinstance(t, str):
         return False
     if t in known:
         return True
+    fn = _fn_ty_parts(t)
+    if fn is not None:
+        args, ret = fn
+        return _type_ok(ret, known) and all(_type_ok(a, known) for a in args)
     if t.startswith("&"):
         elem = _ref_elem_type(t)
         return elem is not None and _type_ok(elem, known)
@@ -413,31 +466,37 @@ def validate(doc: object) -> list[str]:
            "v14": TOP_KEYS_V14, "v15": TOP_KEYS_V15, "v16": TOP_KEYS_V16,
            "v17": TOP_KEYS_V17, "v18": TOP_KEYS_V18,
            "v19": TOP_KEYS_V19, "v20": TOP_KEYS_V20,
-           "v21": TOP_KEYS_V21, "v22": TOP_KEYS_V22}[ver]
+           "v21": TOP_KEYS_V21, "v22": TOP_KEYS_V22, "v23": TOP_KEYS_V23}[ver]
     for k in doc:
         if k not in top:
             errs.append(f"未知顶层字段 {k!r}（{ver} 不允许扩展字段）")
-    if ver in ("v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19", "v20", "v21", "v22"):
+    if ver in ("v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19", "v20", "v21", "v22", "v23"):
         for k in ("traits", "impls", "generics", "instances"):
             if not isinstance(doc.get(k), list):
                 errs.append(f"{ver}: 缺字段 {k}（必须是数组，可为空）")
         g = doc.get("guards")
         if not isinstance(g, int) or isinstance(g, bool) or g < 0:
             errs.append(f"{ver}: guards 必须是非负整数，得到 {g!r}")
-    if ver in ("v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19", "v20", "v21", "v22"):
+    if ver in ("v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19", "v20", "v21", "v22", "v23"):
         # **必填** (docs/175 §8 的判据: 从对象里删掉该字段, 校验器必须红)。这就是
         # 必须升版本而不是往旧版里加字段的原因 —— 要求必填会让既有的旧版对象全变非法,
         # 而旧版是**承诺过能回放**的 (docs/147 §5, 冻结样本 demo.v0.json 一直在跑)。
         m = doc.get("mode")
         if m not in MODES:
             errs.append(f"{ver}: mode 必须是 {MODES} 之一，得到 {m!r}")
-    if ver == "v22":
+    if ver in ("v22", "v23"):
         # **生命周期档**（`docs/299`）。与 `gc` / `lms` 同一条纪律：**必填**，
         # 所以"这份产物有没有静态借用证明"是**不读源码可判的**。
         lt = doc.get("lifetime")
         if lt not in LIFETIMES:
             errs.append(f"{ver}: lifetime 必须是 {LIFETIMES} 之一，得到 {lt!r}")
-    if ver in ("v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19", "v20", "v21", "v22"):
+    if ver == "v23":
+        # **间接分派**（`docs/348`）。与上面同一条纪律：**必填**，
+        # 所以"这份产物里有没有间接调用边"是**不读源码可判的**。
+        fv = doc.get("fp")
+        if fv not in FPS:
+            errs.append(f"{ver}: fp 必须是 {FPS} 之一，得到 {fv!r}")
+    if ver in ("v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19", "v20", "v21", "v22", "v23"):
         # **必填, 可为空数组** (docs/182 §1)。与 `mode` 同一条纪律: 不存在"缺这项"的形态,
         # 所以"这份单元是在什么开关状态下编的"是**可回放**的。
         # 用户 2026-09-17: **"开关的取值是要进 Potato 的"**。
@@ -460,7 +519,7 @@ def validate(doc: object) -> list[str]:
                     seen_s.add(nm)
                 if not isinstance(s.get("on"), bool):
                     errs.append(f"{w}.on 必须是布尔（开关**只能**是开或关，没有第三态）")
-    if ver in ("v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19", "v20", "v21", "v22"):
+    if ver in ("v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19", "v20", "v21", "v22", "v23"):
         # **必填, 可为空数组**（`docs/184` §9 S4.3）。同 `mode`/`switches` 那条纪律：
         # 不存在"缺这项"的形态 —— 于是"这份产物用了哪些自定义语法"是**可回放**的。
         #
@@ -486,7 +545,7 @@ def validate(doc: object) -> list[str]:
                     seen_d.add(nm)
                 if not isinstance(d.get("body"), str):
                     errs.append(f"{w}.body 必须是字符串（定义处那段程序的源文本）")
-    if ver in ("v5", "v6", "v7", "v8", "v9", "v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19", "v20", "v21", "v22"):
+    if ver in ("v5", "v6", "v7", "v8", "v9", "v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19", "v20", "v21", "v22", "v23"):
         # **必填, 可为空数组** —— 同 `mode`/`switches`/`dialects` 那条纪律。
         #
         # **按源里的顺序, 不按名字排**: 与 `dialects` 不同 —— 方言是个**集合**（名字唯一），
@@ -505,7 +564,7 @@ def validate(doc: object) -> list[str]:
                     errs.append(f"{w}.lang 非法: {nm!r}")
                 if not isinstance(d.get("body"), str):
                     errs.append(f"{w}.body 必须是字符串（块里的原始正文）")
-    if ver in ("v6", "v7", "v8", "v9", "v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19", "v20", "v21", "v22"):
+    if ver in ("v6", "v7", "v8", "v9", "v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19", "v20", "v21", "v22", "v23"):
         # **必填**（`docs/188` §2）—— 与 `mode` 同一条纪律：不存在"缺这项"的形态。
         #
         # **为什么它必须必填**：`docs/179` §3.1 说**可选**的前提是"不认识它的消费者
@@ -518,7 +577,7 @@ def validate(doc: object) -> list[str]:
         if g not in GRAMMARS:
             errs.append(f"v6: grammar 必须是 {GRAMMARS} 之一，得到 {g!r}"
                         f"（**写法名**，不是语言名；见 docs/188）")
-    if ver in ("v7", "v8", "v9", "v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19", "v20", "v21", "v22"):
+    if ver in ("v7", "v8", "v9", "v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19", "v20", "v21", "v22", "v23"):
         # **必填**（`docs/205` R5）—— 与 `mode` / `guards` 同一条纪律：不存在"缺这项"的形态。
         #
         # **为什么不是可选的**：`boundary` 的全部价值在"可 grep、可计数、可审计"。
@@ -551,7 +610,7 @@ def validate(doc: object) -> list[str]:
             if extra:
                 errs.append(f"boundary 里有不认识的键: {extra}")
 
-    if ver in ("v8", "v9", "v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19", "v20", "v21", "v22"):
+    if ver in ("v8", "v9", "v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19", "v20", "v21", "v22", "v23"):
         # **必填**（`docs/175` §3.4）—— 与 `mode` 同一条纪律：不存在"缺这项"的形态。
         # 于是"这个产物是哪一档"（以及它有没有放弃确定性）是**可回放**的。
         # **台阶是累积的**：v9/v10 也要验 v8 的 `gc`（原先这里写的是 `== "v8"`，
@@ -567,7 +626,7 @@ def validate(doc: object) -> list[str]:
             errs.append("mode=no_std 与 gc=gc_auto 不能同时选 —— 自动回收要一个运行期，"
                         "而 no_std 的定义是「只能用核那一层」（docs/175 §3.4）")
 
-    if ver in ("v9", "v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19", "v20", "v21", "v22"):
+    if ver in ("v9", "v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19", "v20", "v21", "v22", "v23"):
         # **必填**（`docs/175` §3.6）—— 与 `mode` / `gc` 同一条纪律：不存在"缺这项"的形态。
         # 于是"这个产物里有没有运行期"是**不读源码可判**的。
         # 台阶累积：v10 也要验 v9 的 `runtime`（同 `gc` 那一条）。
@@ -582,7 +641,7 @@ def validate(doc: object) -> list[str]:
                         "那个运行期，两者定义上矛盾（docs/175 §3.6）")
 
     # 累积：v11/v12 也要验 v10 的 `gc_ladder`（与孪生侧 `ver >= 10` 对齐 —— 同 v8→v9 那次）
-    if ver in ("v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19", "v20", "v21", "v22"):
+    if ver in ("v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19", "v20", "v21", "v22", "v23"):
         # **必填**（`docs/210` §5 第一条）—— 与 `boundary` / `guards` 同一条纪律：
         # 不存在"缺这项"的形态。`gc_ladder` 的全部价值在"**GC 的组成**不读源码可判"，
         # 而一个**缺席**的组成会被读成"这份程序没有 GC"，那是误判。
@@ -592,7 +651,7 @@ def validate(doc: object) -> list[str]:
         # 所以判不了"这几个数数得对不对"，但判得了"它们自相矛盾"。
         gl = doc.get("gc_ladder")
         # v19 起多一格 `l0_5`；v10–v18 的对象**仍然只有四格**（台阶不回溯改写）。
-        keys = GC_LADDER_KEYS_V19 if ver in ("v19", "v20", "v21", "v22") else GC_LADDER_KEYS
+        keys = GC_LADDER_KEYS_V19 if ver in ("v19", "v20", "v21", "v22", "v23") else GC_LADDER_KEYS
         if not isinstance(gl, dict):
             errs.append(f"v10: gc_ladder 必须是对象（{len(keys)} 个分层计数 + total_sites），"
                         f"得到 {gl!r}")
@@ -617,7 +676,7 @@ def validate(doc: object) -> list[str]:
                 errs.append(f"gc_ladder 里有不认识的键: {extra}")
 
     # 累积：v12 也要验 v11 的 `port`（`docs/222` §4）—— 与孪生侧 `ver >= 11` 对齐。
-    if ver in ("v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19", "v20", "v21", "v22"):
+    if ver in ("v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19", "v20", "v21", "v22", "v23"):
         # **必填**（`docs/222` §4）—— 与 `mode` / `gc` / `runtime` 同一条纪律：
         # 不存在"缺这项"的形态。于是"这份产物通不通着世界"是**不读源码可判**的，
         # 而不是"看源码里写没写 `choose hosted`"（`docs/219` §7：测量强于声明）。
@@ -637,7 +696,7 @@ def validate(doc: object) -> list[str]:
                         "Loment 的栈之外；这是一条划窄（narrowing），开出的条件是"
                         "一个不回卷前沿的 L2（docs/219 §6.1 / docs/228 §7）")
 
-    if ver in ("v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19", "v20", "v21", "v22"):
+    if ver in ("v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19", "v20", "v21", "v22", "v23"):
         # **必填**（`docs/224`）—— 与 `boundary` / `gc_ladder` / `runtime` 同一条纪律。
         # `surfaces` 是**面名 → 站点数**（面名由用的人定：`net`/`file`/… 只是仓库自己的划法），
         # 外加一个保留键 `total_sites`。
@@ -672,7 +731,7 @@ def validate(doc: object) -> list[str]:
                         errs.append(f"surfaces.total_sites 是 {tot}, 但 boundary.syscalls 是"
                                     f" {bnd['syscalls']}（两者数的是同一批机调用站点）")
 
-    if ver in ("v14", "v15", "v16", "v17", "v18", "v19", "v20", "v21", "v22"):
+    if ver in ("v14", "v15", "v16", "v17", "v18", "v19", "v20", "v21", "v22", "v23"):
         # **必填**（`docs/237`）—— 与 `boundary` / `gc_ladder` / `surfaces` / `runtime` 同一条
         # 纪律。`net_ladder` 是**四档宽度 → 站点数** + 一个保留键 `total_net`；四档**恒在**
         # （哪怕为 0），键的集合固定，读者与校验器都不用猜。
@@ -710,7 +769,7 @@ def validate(doc: object) -> list[str]:
             if extra:
                 errs.append(f"net_ladder 里有不认识的键: {extra}")
 
-    if ver in ("v13", "v14", "v15", "v16", "v17", "v18", "v19", "v20", "v21", "v22"):
+    if ver in ("v13", "v14", "v15", "v16", "v17", "v18", "v19", "v20", "v21", "v22", "v23"):
         # **必填**（`docs/231`）—— 与 `mode` / `gc` / `runtime` / `port` 同一条纪律：
         # 不存在"缺这项"的形态。于是"这份产物是给 VM 的还是原生的"是**不读源码可判**的。
         # **这里没有冲突可判**：`vm` 与 `runtime` 今天确实合不来（VM 要用运行期），但那条
@@ -732,7 +791,7 @@ def validate(doc: object) -> list[str]:
         # **指令**（一条 `cmp` / 一个 `llvm.trap` / 一段内联桩），**不发运行期组件** ——
         # 所以 `lms_full` + `no_runtime` 不矛盾。这里多写一条反而会把那条结论说反。
 
-    if ver in ("v17", "v18", "v19", "v20", "v21", "v22"):
+    if ver in ("v17", "v18", "v19", "v20", "v21", "v22", "v23"):
         # **安全梯子的实际开关**（`docs/253` §11.4）。v17 的必填字段。
         # 判三件事：键一个不多一个不少 / 七个值都是布尔 / **档名与实际集合自洽**
         # （显式关掉某一级的档必须带 `_admin` —— 那是 `docs/262` §10.1 的规则，
@@ -749,7 +808,7 @@ def validate(doc: object) -> list[str]:
                 elif not isinstance(lv[k], bool):
                     errs.append(f"{ver}: lms_levels.{k} 必须是布尔，得到 {lv[k]!r}")
 
-    if ver in ("v18", "v19", "v20", "v21", "v22"):
+    if ver in ("v18", "v19", "v20", "v21", "v22", "v23"):
         # **七级的运行期预算**（`docs/253` §11.2.1，#1023）。v18 的必填字段：
         # 键一个不多一个不少，值是四个预算之一。判不了"某一级该是什么预算"（那是
         # 语言的决定），但判得了"产物自己说清楚没有"。
@@ -766,7 +825,7 @@ def validate(doc: object) -> list[str]:
                     errs.append(f"{ver}: lms_budgets.{k} 必须是 {LMS_BUDGETS} 之一，"
                                 f"得到 {lb[k]!r}")
 
-    if ver in ("v16", "v17", "v18", "v19", "v20", "v21", "v22"):
+    if ver in ("v16", "v17", "v18", "v19", "v20", "v21", "v22", "v23"):
         # **LSPE 台账**（`docs/262` §8）。v16 的**必填**字段 —— 与 `lms` 不同，
         # 这里显式拒绝缺失："没有台账"和"台账说没审计"是两件事。
         lp = doc.get("lspe")
@@ -935,7 +994,7 @@ def validate(doc: object) -> list[str]:
                     if any(four) or lp.get("floors"):
                         errs.append(f"{ver}: lspe_close_admin 下计数必须全零")
 
-    if ver in ("v20", "v21", "v22"):
+    if ver in ("v20", "v21", "v22", "v23"):
         # **系统索引**（`docs/147` §5 / #1022）。它是**一个开始读的地方**：
         # 六个系统各一条 `{state, detail, cost}`，三格都必须与它们指向的字段一致。
         # 校验器**不读源码**，但读得到对象里的两处 —— 所以它判得了"索引与字段打架"。

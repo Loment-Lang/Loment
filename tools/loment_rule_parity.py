@@ -81,7 +81,10 @@ import loment_p8_test as H  # noqa: E402  # 复用已验过的构建/运行夹�
 # 打开时 `perform` 是 E0217、`extern … effects` 是 E0218、重复效应 E0219、重复操作
 # E0220、行里未声明效应 E0221 ⇒ **141/141**。这一批是"自举侧真的认了
 # `lspe_effects_true`"的独立证词：孪生判据只比产物，码集分叉只有这里看得见。
-BUDGET = 141
+#
+# 2026-11-12 第九维 `fp`（`docs/348`）：八条（函数值 / 闭包 / 间接调用那三组）。
+# 与效应那批合流后 **149/149**。
+BUDGET = 149
 
 # --------------------------------------------------------------------------- 案例表
 #
@@ -483,6 +486,38 @@ _CASES: list[tuple[str, str]] = [
     ("lifetime-stored-mut-alias",
      "module m\n\nstruct V {\n    a: u32,\n}\n\nfn f(v: V) -> u32 {\n"
      "    let m: &mut V = &mut v;\n    let s: &V = &v;\n    return s.a;\n}\n"),
+
+    # 2026-11-12 第九维 `fp`（`docs/348`）：函数值 / 闭包 / 间接调用。七条 ——
+    # 默认档 `no_fp` 的三个入口（函数名当值、闭包字面量、间接调用）、`extern fn` 不能
+    # 当函数值、闭包形参推不出来、捕获类型不是一格宽、按借捕获的闭包不能返回。
+    # 前三条是"`choose` 从承诺变发明"的第二处：**没写 `fp` 这三个构造一个都进不去**，
+    # 写了才整条链路放行 —— 而这条分界两个实现各判一次才算等价。
+    ("fp-needs-choose-value",
+     "module m\n\nfn inc(x: u64) -> u64 {\n    return x + 1;\n}\n\n"
+     "fn main() -> u32 {\n    let f: (u64) -> u64 = inc;\n    return 0;\n}\n"),
+    ("fp-needs-choose-lambda",
+     "module m\n\nfn main() -> u32 {\n"
+     "    let f: (u64) -> u64 = (x: u64) => x;\n    return 0;\n}\n"),
+    ("fp-needs-choose-call",
+     "module m\n\nfn inc(x: u64) -> u64 {\n    return x + 1;\n}\n\n"
+     "fn main() -> u32 {\n    let f: (u64) -> u64 = inc;\n    return f(1) as u32;\n}\n"),
+    ("fp-extern-is-not-a-value",
+     "module m\nchoose fp\n\nextern fn puts(p: ptr) -> u32;\n\n"
+     "fn main() -> u32 {\n    let f: (ptr) -> u32 = puts;\n    return 0;\n}\n"),
+    ("fp-lambda-param-undetermined",
+     "module m\nchoose fp\n\nfn main() -> u32 {\n"
+     "    let a: [(u64) -> u64; 2] = [(x) => x, (y) => y];\n    return 0;\n}\n"),
+    ("fp-capture-not-word-sized",
+     "module m\nchoose fp\n\nfn main() -> u32 {\n    let s: str = \"x\";\n"
+     "    let f: () -> u32 = () => str_len(s);\n    return f();\n}\n"),
+    # 闭包形参的标注写了个不存在的类型：参考实现报"未知类型"（E030），并且因为
+    # 那个类型参与了签名，`let` 那一条也会跟着报（E001）。
+    ("fp-lambda-param-unknown-type",
+     "module m\nchoose fp\n\nfn main() -> u32 {\n"
+     "    let f: (u64) -> u64 = (x: Foo) => x;\n    return 0;\n}\n"),
+    ("fp-return-by-ref-capture",
+     "module m\nchoose fp\nchoose lifetime_manual\n\n"
+     "fn mk(p: ptr) -> (u64) -> &ptr {\n    return (x: u64) => &p;\n}\n"),
 
     # ---- 代数效应（`docs/346` A2/A2b）---------------------------------------
     # 默认关：`effect` 是未知顶层关键字（E019）。打开：声明与行擦除，运行期构造 E0217 /

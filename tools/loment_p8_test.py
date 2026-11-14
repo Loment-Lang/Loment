@@ -1084,6 +1084,31 @@ def test_m82_loment_codegen_byte_identical():
 
 
 @test
+def test_m94_fp_twin_is_byte_identical():
+    """第九维 `fp`（`docs/348`）：函数值 / 闭包 / 间接调用的 IR **逐字节**相同。
+
+    这一份覆盖整条链路：`&名字` 与裸名字当值、按值捕获的闭包、函数类型形参、
+    返回闭包、闭包当实参。**包装函数与闭包体发在全部函数体之后**（`fn_defs`），
+    两个实现同序 —— 那一条只有逐字节判据抓得到（顺序错了 LLVM 照样跑）。
+    """
+    if not _clang():
+        print("      SKIP: 无 clang")
+        return
+    target = ROOT / "loment" / "selfhost" / "fp" / "ir_fp.lomt"
+    with tempfile.TemporaryDirectory() as td:
+        exe = _build_codegen(td)
+        want = _unit_ll(target)
+        got = _run_codegen(exe, target, td)
+        if got != want:
+            i = next((k for k in range(min(len(got), len(want))) if got[k] != want[k]), None)
+            a = max(0, (i or 0) - 80)
+            raise AssertionError(
+                f"{target.name} 首个差异 @{i}:\n"
+                f" loment {got[a:(i or 0) + 80]!r}\n"
+                f" python {want[a:(i or 0) + 80]!r}")
+
+
+@test
 def test_m82_hosted_arena_is_byte_identical():
     """`docs/228` §5 的 **A4**：`choose hosted` 那一份产物，两个实现**逐字节**一致。
 

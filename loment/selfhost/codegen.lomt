@@ -138,7 +138,22 @@ const CG_CPN: u32 = 926544;           // = CG_CPP + 256
 const CG_ALS: u32 = 926548;
 const CG_ALS_MAX: u32 = 16;
 const CG_ALN: u32 = 926676;           // = CG_ALS + 128
-const CG_BYTES: u32 = 926680;         // = CG_ALN + 4
+//: **函数值与闭包**（`docs/348`）：
+//:   `CG_FDN`  = 待发函数条数（包装 + 闭包，全部函数体之后统一发）
+//:   `CG_FDS`  = 待发表 128 × 16 = (kind, a, b, c)
+//:   `CG_LAMN` = 闭包条数
+//:   `CG_LAMS` = 闭包表 64 × 32 = (body_lo, body_hi, ret_tok, nparam, ncap, id, fn_tok, 0)
+//:   `CG_LAMSL`= 槽表 64 × 16 × 12 = (name_tok, ty_tok, byref)：形参在前、捕获在后
+//:   `CG_LAMID`= 本函数里已发过几个闭包（`emit_fn` 入口清零；名字 `__lam_<fn>_<id>` 的序号）
+const CG_FDN: u32 = 926680;
+const CG_FDS: u32 = 926684;           // 926684 + 128*16 = 928732
+const CG_LAMN: u32 = 928732;
+const CG_LAMS: u32 = 928736;          // 928736 + 64*32 = 930784
+const CG_LAMSL: u32 = 930784;         // 930784 + 64*192 = 943072
+const CG_LAMID: u32 = 788;
+//: **正在发体内**的那个闭包（渲染嵌套名字要用）：父闭包的条目号，`NO` = 真函数。
+const CG_CURLAM: u32 = 792;
+const CG_BYTES: u32 = 943072;         // = CG_LAMSL + 64*192
 //: **分配站点的 spill 槽**（`#1465`）：根表只登记具名槽，表达式里的 SSA 临时值不是根。
 //: 每个站点一格 `%gc.sp.k`（k 按**源码序**），分配完立刻写进去、**语句边界清零**。
 //:   `CG_GCDIRTY` = 本语句写过的最大的站点号 + 1（0 = 本语句没分配过）
@@ -467,7 +482,13 @@ fn emit_ty(s: ptr, out: ptr, src: ptr, toks: ptr, tt: u32) -> u32 {
         }
         return emit_str(s, out, "ptr");
     }
-    if tok_is(src, toks, tt, "(") {   // unit 类型 `()`
+    if tok_is(src, toks, tt, "(") {
+        // 函数类型 `(A,B) -> C`（`docs/348`）：值是**闭包记录**的指针，产物里是 `ptr`。
+        // 空参数表 `()` 后面没有 `->`，那是 unit 类型 —— 仍是 `void`。
+        let c: u32 = skip_parens(src, toks, tt);
+        if tok_is(src, toks, c + 1, "-") && tok_is(src, toks, c + 2, ">") {
+            return emit_str(s, out, "ptr");
+        }
         return emit_str(s, out, "void");
     }
     if tok_is(src, toks, tt, "bool") || tok_is(src, toks, tt, "true")
@@ -655,7 +676,28 @@ fn emitted_name(s: ptr, out: ptr, src: ptr, toks: ptr, tt: u32) -> u32 {
     if tt == 0 {
         return emit_str(s, out, "u32");
     }
-    if tok_is(src, toks, tt, "(") {   // 注释里 unit 写作 `()`
+    if tok_is(src, toks, tt, "(") {
+        // 函数类型 `(A,B) -> C`（`docs/348`）：注释里**没有空格、没有 `->` 两侧的空白**，
+        // 与参考实现 `_fn_ty_make` 拼出来的那一串逐字符相同。`()` 后面没有 `->` 才是 unit。
+        let c: u32 = skip_parens(src, toks, tt);
+        if tok_is(src, toks, c + 1, "-") && tok_is(src, toks, c + 2, ">") {
+            emit_str(s, out, "(");
+            let a: u32 = tt + 1;
+            let first: u32 = 1;
+            while a < c {
+                if first == 0 {
+                    emit_str(s, out, ",");
+                }
+                first = 0;
+                emitted_name(s, out, src, toks, a);
+                a = skip_type(src, toks, a);
+                if tok_is(src, toks, a, ",") {
+                    a = a + 1;
+                }
+            }
+            emit_str(s, out, ")->");
+            return emitted_name(s, out, src, toks, c + 3);
+        }
         return emit_str(s, out, "()");
     }
     // 借用（`docs/299`）：注释里写 `&T` / `&mut T`（区域标记也照写）。
@@ -3080,6 +3122,11 @@ fn skip_type0(src: ptr, toks: ptr, i: u32) -> u32 {
             }
             j = j + 1;
         }
+        // 函数类型 `(A,B) -> C`（`docs/348`）：`)` 后面的 `-> R` 也是这个类型的一部分。
+        // 不跳掉的话 `let f: (u64)->u64 = …` 的 R 会被当成下一个形参名/字段名。
+        if tok_kind(toks, j) != 4 && tok_is(src, toks, j, "-") && tok_is(src, toks, j + 1, ">") {
+            return skip_type0(src, toks, j + 2);
+        }
         return j;
     }
     let nx: u32 = i + 1;
@@ -4095,6 +4142,92 @@ fn emit_alloc_lit(s: ptr, out: ptr, src: ptr, toks: ptr,
     return p;
 }
 
+/// `j` 起是不是**闭包起点**（允许外面套几层括号：`((x) => …)`）。
+fn lam_at(src: ptr, toks: ptr, j: u32) -> u32 {
+    let k: u32 = j;
+    while tok_is(src, toks, k, "(") {
+        let c: u32 = skip_parens(src, toks, k);
+        if tok_is(src, toks, c + 1, "=") && tok_is(src, toks, c + 2, ">") {
+            return 1;
+        }
+        if !tok_is(src, toks, k + 1, "(") {
+            return 0;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+/// 间接调用 `f(…)`（`docs/348`）：`f` 是 `(A)->B` 类型的局部，值是一条闭包记录。
+/// 次序照参考实现：**先读记录**（rec / 代码地址 / 环境指针），再逐个求实参。
+fn emit_indirect_call(s: ptr, out: ptr, src: ptr, toks: ptr, nm_tok: u32,
+                      lvl: u32, fty: u32) -> u32 {
+    emit_str(s, out, "  ");
+    let rec: u32 = new_temp(s, out);
+    emit_str(s, out, " = load ptr, ptr %");
+    emit_name_tok(s, out, src, toks, nm_tok);
+    emit_str(s, out, ".addr\n  ");
+    let ci: u32 = new_temp(s, out);
+    emit_str(s, out, " = load i64, ptr %t");
+    emit_dec(s, out, rec);
+    emit_str(s, out, "\n  ");
+    let code: u32 = new_temp(s, out);
+    emit_str(s, out, " = inttoptr i64 %t");
+    emit_dec(s, out, ci);
+    emit_str(s, out, " to ptr\n  ");
+    let env: u32 = new_temp(s, out);
+    emit_str(s, out, " = getelementptr i8, ptr %t");
+    emit_dec(s, out, rec);
+    emit_str(s, out, ", i64 8\n");
+    let lp: u32 = nm_tok + 1;
+    let close: u32 = skip_parens(src, toks, lp);
+    let k: u32 = lp + 1;
+    let a: u32 = 0;
+    while k < close && tok_kind(toks, k) != 4 && a < 20 {
+        let pt: u32 = fn_ty_param(src, toks, fty, a);
+        let e: u32 = expr_bin(s, out, src, toks, k, 1, lvl + 1 + a, pt);
+        store32(s, 720 + (lvl + 1 + a) * 4, pt);
+        k = e;
+        if tok_is(src, toks, k, ",") {
+            k = k + 1;
+        }
+        a = a + 1;
+    }
+    // 与直接调用那一支同一条纪律：上限到了而实参还没完 -> **响亮地失败**，
+    // 不静默丢实参（IR 少一个参数，参考实现照发，逐字节判据只会报"两个实现不一致"）。
+    if a == 20 && k < close && tok_kind(toks, k) != 4 {
+        let _cf: u32 = cg_fail(s, 1, nm_tok);
+        return close + 1;
+    }
+    let ret: u32 = fn_ty_ret(src, toks, fty);
+    let unit: u32 = is_unit_tok(src, toks, ret);
+    emit_str(s, out, "  ");
+    let n: u32 = 0;
+    if unit == 0 {
+        n = new_temp(s, out);
+        emit_str(s, out, " = ");
+    }
+    emit_str(s, out, "call ");
+    emit_ty(s, out, src, toks, ret);
+    emit_str(s, out, " %t");
+    emit_dec(s, out, code);
+    emit_str(s, out, "(ptr %t");
+    emit_dec(s, out, env);
+    let b: u32 = 0;
+    while b < a {
+        emit_str(s, out, ", ");
+        emit_ty(s, out, src, toks, load32(s, 720 + (lvl + 1 + b) * 4));
+        emit_str(s, out, " ");
+        emit_val(s, out, lvl + 1 + b);
+        b = b + 1;
+    }
+    emit_str(s, out, ")\n");
+    if unit == 0 {
+        set_temp_val(s, lvl, n);
+    }
+    return close + 1;
+}
+
 fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32) -> u32 {
     if tok_is(src, toks, j, "generation") && tok_kind(toks, j + 1) == 0
             && tok_is(src, toks, j + 2, "(") {   // docs/320 S1：读对象代
@@ -4185,6 +4318,11 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
         return e0;
     }
     if tok_is(src, toks, j, "(") {
+        // 闭包 `(x: T) => 体`（`docs/348`）：`(` … `)` 后面紧跟 `=>`。
+        let lc: u32 = skip_parens(src, toks, j);
+        if tok_is(src, toks, lc + 1, "=") && tok_is(src, toks, lc + 2, ">") {
+            return emit_lambda(s, out, src, toks, j, lvl, want);
+        }
         // 括号**紧跟 `as T`** 时它是转型的操作数 —— 参考实现 Cast 分支对内部一律传
         // `want=None` (`expr(e.expr, None)`), 于是括号里的二元式**不吃外层期望类型**。
         // 少了这一步, `((48 + b) / 2) as u8` 会把外层的 u8 灌进 `48 + b` 与那次除法,
@@ -4205,6 +4343,14 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
         return e1;
     }
     if tok_kind(toks, j) == 0 && tok_is(src, toks, j + 1, "(") {
+        // 间接调用（`docs/348`）：callee 是 `(A)->B` 类型的**局部** —— 与参考实现同一条
+        // 判定次序（`scope.get(name)` 先于内建与全局函数表）。
+        let ity: u32 = var_type(s, src, toks, j);
+        if ity != 0 && tok_kind(toks, ity) == 3 && tok_is(src, toks, ity, "(")
+                && tok_is(src, toks, skip_parens(src, toks, ity) + 1, "-")
+                && tok_is(src, toks, skip_parens(src, toks, ity) + 2, ">") {
+            return emit_indirect_call(s, out, src, toks, j, lvl, ity);
+        }
         // 内建降级: load8 / store8 (与 lomentc 的 _Ir.builtin 同形)
         if tok_is(src, toks, j, "load8") {
             let ap: u32 = expr_bin(s, out, src, toks, j + 2, 1, lvl, 0);
@@ -5458,6 +5604,19 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
         }
         return ce;
     }
+    // 函数名当值（`docs/348`）：不在变量表里、又是本单元的函数 —— 值是一条闭包记录。
+    if tok_kind(toks, j) == 0 && var_type(s, src, toks, j) == 0 {
+        let fvi: u32 = find_fn(s, src, toks, j);
+        if fvi != 4294967295 {
+            let _fv: u32 = emit_fn_value(s, out, src, toks, fvi, lvl);
+            let ev: u32 = j + 1;
+            if tok_is(src, toks, ev, "as") {
+                apply_cast(s, out, src, toks, 0, ev + 1, lvl);
+                return ev + 2;
+            }
+            return ev;
+        }
+    }
     // 变量 (参数或局部): load
     let ty: u32 = var_type(s, src, toks, j);
     // `r[i]` / `r.f` 的**形状**类型：借用自动解一层（`docs/299` §3.4）。声明类型 `ty`
@@ -5679,6 +5838,14 @@ fn expr_unary(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32
         if tok_is(src, toks, nm, "mut") {
             nm = nm + 1;
         }
+        // `&fn` 与裸名字是**同一个值**（`docs/348`）：取的是闭包记录，不是那个名字的地址。
+        if tok_kind(toks, nm) == 0 && var_type(s, src, toks, nm) == 0 {
+            let fvi: u32 = find_fn(s, src, toks, nm);
+            if fvi != 4294967295 {
+                let _fv: u32 = emit_fn_value(s, out, src, toks, fvi, lvl);
+                return nm + 1;
+            }
+        }
         let ty: u32 = var_type(s, src, toks, nm);
         // 非数组的借用（`docs/299`）：值就是那块地方的地址，不额外落临时。
         if is_array_tok(src, toks, ty) != 1 {
@@ -5812,6 +5979,19 @@ fn expr_bin(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, minp: u32, lvl: u32, 
     let aw: u32 = w;
     if tok_kind(toks, j) == 1 {
         aw = want;
+    }
+    // `((y) => …)`：闭包外面套了括号时，期望类型一样要递进去（否则里面那层的形参/返回
+    // 类型只能靠体自己推 —— 与参考实现的 `expr(e, want)` 分叉）。
+    if lam_at(src, toks, j) == 1 {
+        aw = want;
+    }
+    // 闭包 `(x) => …`（`docs/348`）：期望类型要原样递下去 —— 形参与返回类型都从它推。
+    // 参考实现那条路本来就是 `expr(e, want)`；自举侧只在**需要**的两处放行。
+    if tok_is(src, toks, j, "(") {
+        let lcw: u32 = skip_parens(src, toks, j);
+        if tok_is(src, toks, lcw + 1, "=") && tok_is(src, toks, lcw + 2, ">") {
+            aw = want;
+        }
     }
     let cur: u32 = sub_expr_type(s, src, toks, j);
     let e: u32 = expr_unary(s, out, src, toks, j, lvl, aw);
@@ -6056,7 +6236,16 @@ fn is_unit_tok(src: ptr, toks: ptr, tt: u32) -> u32 {
     if tt == 4294967295 {
         return 1;
     }
-    return tok_is(src, toks, tt, "(") as u32;
+    if tok_is(src, toks, tt, "(") == 0 {
+        return 0;
+    }
+    // `(` 既可能是 unit 类型 `()`，也可能是函数类型 `(A) -> B`（`docs/348`）——
+    // 后者是**值**（`ptr`），不是"没有返回值"。
+    let c: u32 = skip_parens(src, toks, tt);
+    if tok_is(src, toks, c + 1, "-") && tok_is(src, toks, c + 2, ">") {
+        return 0;
+    }
+    return 1;
 }
 
 fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
@@ -6295,6 +6484,203 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
         j = stmt(s, out, src, toks, j, ret);
     }
     return j;
+}
+
+// ---------------------------------------------------------------- 待发函数（包装 / 闭包）
+
+/// `@__fp_<名字>` 包装：把统一的 `(ptr env, 实参…)` 约定接回**直接调用**。
+/// 文本与参考实现的 `_fn_value` 逐字节相同。
+fn emit_wrapper(s: ptr, out: ptr, src: ptr, toks: ptr, fi: u32) -> u32 {
+    let nm: u32 = load32(s, CG_FN + fi * 12);
+    let ret: u32 = load32(s, CG_FN + fi * 12 + 4);
+    let na: u32 = load32(s, CG_FN + fi * 12 + 8);
+    let unit: u32 = is_unit_tok(src, toks, ret);
+    emit_str(s, out, "define internal ");
+    emit_ty(s, out, src, toks, ret);
+    emit_str(s, out, " @__fp_");
+    emit_tok(s, out, src, toks, nm);
+    emit_str(s, out, "(ptr %env");
+    let a: u32 = 0;
+    while a < na && a < 10 {
+        emit_str(s, out, ", ");
+        emit_ty(s, out, src, toks, load32(s, CG_PARAM + fi * 160 + a * 8 + 4));
+        emit_str(s, out, " %a");
+        emit_dec(s, out, a);
+        a = a + 1;
+    }
+    emit_str(s, out, ") {\nentry:\n");
+    if unit == 1 {
+        emit_str(s, out, "  call void @");
+    } else {
+        emit_str(s, out, "  %r = call ");
+        emit_ty(s, out, src, toks, ret);
+        emit_str(s, out, " @");
+    }
+    emit_tok(s, out, src, toks, nm);
+    emit_str(s, out, "(");
+    let b: u32 = 0;
+    while b < na && b < 10 {
+        if b > 0 {
+            emit_str(s, out, ", ");
+        }
+        emit_ty(s, out, src, toks, load32(s, CG_PARAM + fi * 160 + b * 8 + 4));
+        emit_str(s, out, " %a");
+        emit_dec(s, out, b);
+        b = b + 1;
+    }
+    emit_str(s, out, ")\n");
+    if unit == 1 {
+        return emit_str(s, out, "  ret void\n}\n");
+    }
+    emit_str(s, out, "  ret ");
+    emit_ty(s, out, src, toks, ret);
+    return emit_str(s, out, " %r\n}\n");
+}
+
+/// 闭包体的函数：`(ptr %__env, 形参按源里的名字…)`。
+/// 形参与捕获都按**名字**绑定（`%x.addr`），闭包体因此与普通函数体同形。
+fn emit_lam_def(s: ptr, out: ptr, src: ptr, toks: ptr, n: u32) -> u32 {
+    let b: u32 = CG_LAMS + n * 32;
+    let lo: u32 = load32(s, b);
+    let hi: u32 = load32(s, b + 4);
+    let ret: u32 = load32(s, b + 8);
+    let np: u32 = load32(s, b + 12);
+    let nc: u32 = load32(s, b + 16);
+    let id: u32 = load32(s, b + 20);
+    let fn_tok: u32 = load32(s, b + 24);
+    // 新函数：临时编号 / 标签 / 终止位 / 局部表 / 形参表都从头来（与 `_Ir(fake)` 同形）
+    store32(s, 4, 0);
+    store32(s, 480, 0);
+    store32(s, 476, 0);
+    store32(s, 484, 0);
+    store32(s, 12, np);
+    store32(s, 564, lo);
+    store32(s, 568, hi);
+    store32(s, 528, fn_tok);
+    let k: u32 = 0;
+    while k < np {
+        let sl: u32 = lam_slot(s, n, k);
+        store32(s, CG_CUR + k * 8, load32(s, sl));
+        store32(s, CG_CUR + k * 8 + 4, load32(s, sl + 4));
+        k = k + 1;
+    }
+    emit_str(s, out, "; ");
+    let _q2: u32 = emit_lam_qname(s, out, src, toks, n);
+    emit_str(s, out, " -> ");
+    emitted_name(s, out, src, toks, ret);
+    emit_str(s, out, "\ndefine internal ");
+    emit_ty(s, out, src, toks, ret);
+    emit_str(s, out, " @");
+    let _q3: u32 = emit_lam_qname(s, out, src, toks, n);
+    emit_str(s, out, "(ptr %__env");
+    k = 0;
+    while k < np {
+        emit_str(s, out, ", ");
+        emit_ty(s, out, src, toks, load32(s, lam_slot(s, n, k) + 4));
+        emit_str(s, out, " %");
+        emit_name_tok(s, out, src, toks, load32(s, lam_slot(s, n, k)));
+        k = k + 1;
+    }
+    emit_str(s, out, ") {\nentry:\n");
+    // ---- 形参：`%x.addr = alloca T` + `store T %x, ptr %x.addr`
+    k = 0;
+    while k < np {
+        let sl: u32 = lam_slot(s, n, k);
+        let nm: u32 = load32(s, sl);
+        let ty: u32 = load32(s, sl + 4);
+        emit_str(s, out, "  %");
+        emit_name_tok(s, out, src, toks, nm);
+        emit_str(s, out, ".addr = alloca ");
+        emit_ty(s, out, src, toks, ty);
+        emit_str(s, out, "\n  store ");
+        emit_ty(s, out, src, toks, ty);
+        emit_str(s, out, " %");
+        emit_name_tok(s, out, src, toks, nm);
+        emit_str(s, out, ", ptr %");
+        emit_name_tok(s, out, src, toks, nm);
+        emit_str(s, out, ".addr\n");
+        k = k + 1;
+    }
+    // ---- 捕获：从 `%__env` 一格一格取；按值落 alloca，按借直接就是那个地址
+    k = 0;
+    while k < nc {
+        let sl: u32 = lam_slot(s, n, np + k);
+        let nm: u32 = load32(s, sl);
+        let ty: u32 = load32(s, sl + 4);
+        emit_str(s, out, "  ");
+        let cp: u32 = new_temp(s, out);
+        emit_str(s, out, " = getelementptr i8, ptr %__env, i64 ");
+        emit_dec(s, out, 8 * k);
+        emit_str(s, out, "\n");
+        if load32(s, sl + 8) == 1 {
+            emit_str(s, out, "  %");
+            emit_name_tok(s, out, src, toks, nm);
+            emit_str(s, out, ".addr = load ptr, ptr %t");
+            emit_dec(s, out, cp);
+            emit_str(s, out, "\n");
+        } else {
+            emit_str(s, out, "  ");
+            let v: u32 = new_temp(s, out);
+            emit_str(s, out, " = load ");
+            emit_ty(s, out, src, toks, ty);
+            emit_str(s, out, ", ptr %t");
+            emit_dec(s, out, cp);
+            emit_str(s, out, "\n  %");
+            emit_name_tok(s, out, src, toks, nm);
+            emit_str(s, out, ".addr = alloca ");
+            emit_ty(s, out, src, toks, ty);
+            emit_str(s, out, "\n  store ");
+            emit_ty(s, out, src, toks, ty);
+            emit_str(s, out, " %t");
+            emit_dec(s, out, v);
+            emit_str(s, out, ", ptr %");
+            emit_name_tok(s, out, src, toks, nm);
+            emit_str(s, out, ".addr\n");
+        }
+        let nl2: u32 = add_local(s, src, toks, load32(s, 484), nm, ty);
+        store32(s, 484, nl2);
+        k = k + 1;
+    }
+    let save_lam: u32 = load32(s, CG_CURLAM);
+    store32(s, CG_CURLAM, n);
+    if gc_hook(s) == 1 {
+        let _rg: u32 = roots_push(s, out, src, toks, np, nc);
+    }
+    let v2: u32 = expr_bin(s, out, src, toks, lo, 1, 0, ret);
+    store32(s, CG_CURLAM, save_lam);
+    let _e: u32 = v2;
+    if gc_hook(s) == 1 {
+        let _rp: u32 = roots_pop(s, out);
+    }
+    if is_unit_tok(src, toks, ret) == 1 {
+        return emit_str(s, out, "  ret void\n}\n");
+    }
+    emit_str(s, out, "  ret ");
+    emit_ty(s, out, src, toks, ret);
+    emit_str(s, out, " ");
+    emit_val(s, out, 0);
+    return emit_str(s, out, "\n}\n");
+}
+
+/// 全部函数体之后统一发待发表（包装 + 闭包），次序 = 发现序。
+fn emit_fdefs(s: ptr, out: ptr, src: ptr, toks: ptr) -> u32 {
+    if load32(s, CG_FDN) == 0 {
+        return st_o(s);
+    }
+    emit_str(s, out, "\n");
+    let i: u32 = 0;
+    while i < load32(s, CG_FDN) {   // 体内可能又登记新的（嵌套闭包）
+        let b: u32 = CG_FDS + i * 16;
+        let kind: u32 = load32(s, b);
+        let a: u32 = load32(s, b + 4);
+        if kind == 1 {
+            let _w: u32 = emit_wrapper(s, out, src, toks, a);
+        } else {
+            let _l: u32 = emit_lam_def(s, out, src, toks, a);
+        }
+        i = i + 1;
+    }
+    return st_o(s);
 }
 
 // ---------------------------------------------------------------- 语句
@@ -6622,6 +7008,457 @@ fn load_var(s: ptr, out: ptr, src: ptr, toks: ptr, name_tok: u32, lvl: u32) -> u
     emit_str(s, out, ".addr\n");
     set_temp_val(s, lvl, n);
     return n;
+}
+
+// ---------------------------------------------------------------- 函数值与闭包（`docs/348`）
+//
+// 与参考实现（`tools/lomentc.py` 的 `_fn_value` / `_lambda_expr` / `_lambda_fn`）的分工：
+//   * **值** = 堆上一条 `{code, 捕获…}` 记录；调用点只有一条路（读记录 -> 间接调用）。
+//   * **闭包体与包装不在发现处发**：先登记进 `CG_FDS` / `CG_LAMS`，等**全部函数体**都发完
+//     再统一发一批 —— 参考实现也是把 `fn_defs` 追加在 `text_all` 之后。次序 = 发现序，
+//     嵌套闭包内层在后。
+//   * 包装 `@__fp_<名字>` **按模块去重**：它是一条 `define`，两个函数各取一次同一个函数值
+//     不能发两条同名定义（参考实现那边 `fn_clos` 也按模块共享）。
+
+/// 这个单元里有没有**函数值 / 闭包**（`docs/348`）。只用来决定要不要把分配器带进产物：
+/// 闭包按 `( … ) =>` 的形状认；函数值按"已经登记的函数名出现在值位置"认。
+/// 误报只会多发一块堆（与参考实现不一致，孪生判据抓得到），漏报会让产物引用未定义的符号。
+/// 名字位置看起来像**值**（不是调用名 / 字段名 / 声明处的名字 / 变体名）。
+/// 先做这条**廉价**判定再查函数表 —— 大单元里逐个 ident 查一遍函数表是 O(n×函数数)。
+fn fp_value_pos(src: ptr, toks: ptr, i: u32) -> u32 {
+    if tok_is(src, toks, i + 1, "(") {
+        return 0;
+    }
+    if i > 0 && (tok_is(src, toks, i - 1, ".") || tok_is(src, toks, i - 1, "fn")
+                 || tok_is(src, toks, i - 1, ":")) {
+        return 0;
+    }
+    return 1;
+}
+
+fn fp_uses(src: ptr, toks: ptr, s: ptr) -> u32 {
+    let i: u32 = 0;
+    while tok_kind(toks, i) != 4 {
+        if tok_is(src, toks, i, "(") {
+            let c: u32 = skip_parens(src, toks, i);
+            if tok_is(src, toks, c + 1, "=") && tok_is(src, toks, c + 2, ">") {
+                return 1;
+            }
+        }
+        if tok_kind(toks, i) == 0 && fp_value_pos(src, toks, i) == 1
+                && find_fn(s, src, toks, i) != 4294967295 {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 待发函数表：每条 16 B = (kind, a, b, c)。kind 1 = 包装（a = 函数表下标），2 = 闭包（a = 闭包表下标）。
+fn fdef_add(s: ptr, kind: u32, a: u32) -> u32 {
+    let n: u32 = load32(s, CG_FDN);
+    if n >= 128 {
+        return 4294967295;
+    }
+    let b: u32 = CG_FDS + n * 16;
+    store32(s, b, kind);
+    store32(s, b + 4, a);
+    store32(s, b + 8, 0);
+    store32(s, b + 12, 0);
+    store32(s, CG_FDN, n + 1);
+    return n;
+}
+
+fn fdef_has_wrap(s: ptr, fi: u32) -> u32 {
+    let i: u32 = 0;
+    while i < load32(s, CG_FDN) {
+        let b: u32 = CG_FDS + i * 16;
+        if load32(s, b) == 1 && load32(s, b + 4) == fi {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 闭包的**全名**（`@` 之后那一段）。嵌套时父闭包的名字就是前缀 —— 参考实现里
+/// 内层那个 `_Ir` 的 `f.name` 是**外层闭包的名字**，所以内层叫
+/// `__lam___lam_mk_1_1`（不是 `__lam_mk_2`）。名字进字节，必须逐字符同。
+fn emit_lam_qname(s: ptr, out: ptr, src: ptr, toks: ptr, n: u32) -> u32 {
+    let b: u32 = CG_LAMS + n * 32;
+    let p: u32 = load32(s, b + 28);
+    // **前缀永远在这里加一次**：参考实现是 `f"__lam_{f.name}_{n}"`，而内层闭包的
+    // `f.name` 本身就是外层闭包的**全名**（已含 `__lam_`）—— 于是内层是
+    // `__lam___lam_mk_1_1`（三个下划线是 `__lam_` + `__lam_mk_1` 接出来的）。
+    emit_str(s, out, "__lam_");
+    if p == 4294967295 {
+        emit_tok(s, out, src, toks, load32(s, b + 24));
+    } else {
+        let _q: u32 = emit_lam_qname(s, out, src, toks, p);
+    }
+    emit_str(s, out, "_");
+    return emit_dec(s, out, load32(s, b + 20));
+}
+
+/// 闭包表：每条 32 B = (body_lo, body_hi, ret_tok, nparam, ncap, id, fn_tok, 0)。
+/// 槽表紧跟在后面：每条闭包 16 槽 × 12 B = (name_tok, ty_tok, byref)。
+fn lam_slot(s: ptr, n: u32, k: u32) -> u32 {
+    return CG_LAMSL + n * 192 + k * 12;
+}
+
+fn lam_add(s: ptr, lo: u32, hi: u32, ret: u32, fn_tok: u32) -> u32 {
+    let n: u32 = load32(s, CG_LAMN);
+    if n >= 64 {
+        return 4294967295;
+    }
+    let id: u32 = load32(s, CG_LAMID) + 1;
+    store32(s, CG_LAMID, id);
+    let b: u32 = CG_LAMS + n * 32;
+    store32(s, b, lo);
+    store32(s, b + 4, hi);
+    store32(s, b + 8, ret);
+    store32(s, b + 12, 0);
+    store32(s, b + 16, 0);
+    store32(s, b + 20, id);
+    store32(s, b + 24, fn_tok);
+    store32(s, b + 28, load32(s, CG_CURLAM));
+    store32(s, CG_LAMN, n + 1);
+    return n;
+}
+
+/// token 原文的字典序 —— 捕获按名字排序（参考实现是 `sorted(free)`，顺序决定记录的槽位）。
+fn tok_lt(src: ptr, toks: ptr, a: u32, b: u32) -> u32 {
+    let sa: u32 = load32(toks, a * 20 + 4);
+    let sb: u32 = load32(toks, b * 20 + 4);
+    let na: u32 = load32(toks, a * 20 + 8);
+    let nb: u32 = load32(toks, b * 20 + 8);
+    let k: u32 = 0;
+    while k < na && k < nb {
+        let ca: u32 = load8(src, sa + k) as u32;
+        let cb: u32 = load8(src, sb + k) as u32;
+        if ca < cb {
+            return 1;
+        }
+        if ca > cb {
+            return 0;
+        }
+        k = k + 1;
+    }
+    if na < nb {
+        return 1;
+    }
+    return 0;
+}
+
+
+/// `i` 是不是**某个嵌套闭包的形参**（见 checker 的同名助手）：外层闭包**不捕**它。
+fn nested_param(src: ptr, toks: ptr, at: u32, i: u32) -> u32 {
+    let q: u32 = at;
+    while q < i && tok_kind(toks, q) != 4 {
+        if tok_is(src, toks, q, "(") {
+            let c: u32 = skip_parens(src, toks, q);
+            if c + 2 < i && tok_is(src, toks, c + 1, "=") && tok_is(src, toks, c + 2, ">") {
+                if i > q && i < c {
+                    return 1;
+                }
+            }
+        }
+        q = q + 1;
+    }
+    return 0;
+}
+
+/// 闭包体里的一个 token 算不算**自由名字**（与 checker 的 `chk_cap_ident` 同一条形状规则：
+/// 函数名 / 字段名 / `E::V` 两截 / `as` 后面的类型名 / 结构体字面量的名字都不是 `Ident`）。
+fn cap_ident(src: ptr, toks: ptr, i: u32) -> u32 {
+    if tok_kind(toks, i) != 0 {
+        return 0;
+    }
+    if tok_is(src, toks, i, "_") || tok_is(src, toks, i, "self")
+            || tok_is(src, toks, i, "true") || tok_is(src, toks, i, "false") {
+        return 0;
+    }
+    if i > 0 {
+        if tok_is(src, toks, i - 1, ".") || tok_is(src, toks, i - 1, ":")
+                || tok_is(src, toks, i - 1, "as") {
+            return 0;
+        }
+    }
+    if tok_is(src, toks, i + 1, ":") || tok_is(src, toks, i + 1, "(")
+            || tok_is(src, toks, i + 1, "{") {
+        return 0;
+    }
+    return 1;
+}
+
+/// 闭包体的结束位置：深度 0 的 `,` `)` `]` `}` `;` 或 EOF（体是一个**表达式**）。
+fn lam_body_end(src: ptr, toks: ptr, i: u32) -> u32 {
+    let d: u32 = 0;
+    let j: u32 = i;
+    while tok_kind(toks, j) != 4 {
+        if d == 0 && (tok_is(src, toks, j, ",") || tok_is(src, toks, j, ")")
+                      || tok_is(src, toks, j, "]") || tok_is(src, toks, j, "}")
+                      || tok_is(src, toks, j, ";")) {
+            return j;
+        }
+        if tok_is(src, toks, j, "(") || tok_is(src, toks, j, "[")
+                || tok_is(src, toks, j, "{") {
+            d = d + 1;
+        }
+        if tok_is(src, toks, j, ")") || tok_is(src, toks, j, "]")
+                || tok_is(src, toks, j, "}") {
+            if d > 0 {
+                d = d - 1;
+            }
+        }
+        j = j + 1;
+    }
+    return j;
+}
+
+/// `(A) -> B` 的第 k 个形参类型 token；越界 / 不是函数类型 -> 0。
+fn fn_ty_param(src: ptr, toks: ptr, tt: u32, k: u32) -> u32 {
+    if tok_kind(toks, tt) != 3 || !tok_is(src, toks, tt, "(") {
+        return 0;
+    }
+    let c: u32 = skip_parens(src, toks, tt);
+    let i: u32 = tt + 1;
+    let idx: u32 = 0;
+    while i < c {
+        let e: u32 = skip_type(src, toks, i);
+        if idx == k {
+            return i;
+        }
+        idx = idx + 1;
+        i = e;
+        if tok_is(src, toks, i, ",") {
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
+fn fn_ty_ret(src: ptr, toks: ptr, tt: u32) -> u32 {
+    if tok_kind(toks, tt) != 3 || !tok_is(src, toks, tt, "(") {
+        return 0;
+    }
+    let c: u32 = skip_parens(src, toks, tt);
+    if !tok_is(src, toks, c + 1, "-") || !tok_is(src, toks, c + 2, ">") {
+        return 0;
+    }
+    return c + 3;
+}
+
+/// 函数名当值：`%t = call ptr @__loment_alloc(i32 8)` + 存代码地址。
+fn emit_fn_value(s: ptr, out: ptr, src: ptr, toks: ptr, fi: u32, lvl: u32) -> u32 {
+    if fdef_has_wrap(s, fi) == 0 {
+        let _f: u32 = fdef_add(s, 1, fi);
+    }
+    emit_str(s, out, "  ");
+    let t: u32 = new_temp(s, out);
+    emit_str(s, out, " = call ptr @__loment_alloc(i32 8)\n  ");
+    let c: u32 = new_temp(s, out);
+    emit_str(s, out, " = ptrtoint ptr @__fp_");
+    emit_tok(s, out, src, toks, load32(s, CG_FN + fi * 12));
+    emit_str(s, out, " to i64\n  store i64 %t");
+    emit_dec(s, out, c);
+    emit_str(s, out, ", ptr %t");
+    emit_dec(s, out, t);
+    emit_str(s, out, "\n");
+    set_temp_val(s, lvl, t);
+    return t;
+}
+
+/// 闭包字面量 `(x: T, y) => 体`（`docs/348`）。记录发在这里，**函数体记下来**稍后发。
+fn emit_lambda(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32) -> u32 {
+    let close: u32 = skip_parens(src, toks, j);
+    let body_lo: u32 = close + 3;
+    let body_hi: u32 = lam_body_end(src, toks, body_lo);
+    let ret: u32 = fn_ty_ret(src, toks, want);
+    let fn_tok: u32 = load32(s, 528);          // 当前函数名 token（emit_fn 放好的）
+    // 没有期望类型时（`((y) => …)` 这种套在括号里的），返回类型从**体自己**的类型取 ——
+    // 参考实现的 `_lambda_expr` 是 `expr_type(lam) = (形参) -> 体的类型` 同一条。
+    if ret == 0 && body_lo < body_hi {
+        ret = expr_type(s, src, toks, body_lo);
+    }
+    let n: u32 = lam_add(s, body_lo, body_hi, ret, fn_tok);
+    if n == 4294967295 {
+        let _f: u32 = cg_fail(s, 1, j);
+        return j;
+    }
+    // ---- 形参：名字 + (标注 | 期望类型里同位置那个)
+    let np: u32 = 0;
+    let i: u32 = j + 1;
+    while i < close && tok_kind(toks, i) != 4 && np < 12 {
+        let nt: u32 = i;
+        i = i + 1;
+        let pt: u32 = 0;
+        if tok_is(src, toks, i, ":") {
+            pt = i + 1;
+            i = skip_type(src, toks, i + 1);
+        } else {
+            pt = fn_ty_param(src, toks, want, np);
+        }
+        let sl: u32 = lam_slot(s, n, np);
+        store32(s, sl, nt);
+        store32(s, sl + 4, pt);
+        store32(s, sl + 8, 0);
+        np = np + 1;
+        if tok_is(src, toks, i, ",") {
+            i = i + 1;
+        }
+    }
+    store32(s, CG_LAMS + n * 32 + 12, np);
+    // ---- 捕获：体里的自由名字里**当前函数有**的那些；按名字排序
+    let nc: u32 = 0;
+    let q: u32 = body_lo;
+    while q < body_hi && tok_kind(toks, q) != 4 && nc < 4 {
+        if cap_ident(src, toks, q) == 1 && lam_is_param(src, toks, s, n, np, q) == 0
+                && nested_param(src, toks, body_lo, q) == 0
+                && var_type(s, src, toks, q) != 0 {
+            if lam_is_slot(src, toks, s, n, np, nc, q) == 0 {
+                let sl: u32 = lam_slot(s, n, np + nc);
+                store32(s, sl, q);
+                store32(s, sl + 4, var_type(s, src, toks, q));
+                store32(s, sl + 8, lam_byref(src, toks, body_lo, body_hi, q));
+                nc = nc + 1;
+            }
+        }
+        q = q + 1;
+    }
+    lam_sort(src, toks, s, n, np, nc);
+    store32(s, CG_LAMS + n * 32 + 16, nc);
+    let _fl: u32 = fdef_add(s, 2, n);
+    // ---- 记录
+    emit_str(s, out, "  ");
+    let rec: u32 = new_temp(s, out);
+    emit_str(s, out, " = call ptr @__loment_alloc(i32 ");
+    emit_dec(s, out, 8 * (nc + 1));
+    emit_str(s, out, ")\n  ");
+    let code: u32 = new_temp(s, out);
+    emit_str(s, out, " = ptrtoint ptr @");
+    let _q1: u32 = emit_lam_qname(s, out, src, toks, n);
+    emit_str(s, out, " to i64\n  store i64 %t");
+    emit_dec(s, out, code);
+    emit_str(s, out, ", ptr %t");
+    emit_dec(s, out, rec);
+    emit_str(s, out, "\n");
+    let k: u32 = 0;
+    while k < nc {
+        let sl: u32 = lam_slot(s, n, np + k);
+        emit_str(s, out, "  ");
+        let cp: u32 = new_temp(s, out);
+        emit_str(s, out, " = getelementptr i8, ptr %t");
+        emit_dec(s, out, rec);
+        emit_str(s, out, ", i64 ");
+        emit_dec(s, out, 8 * (k + 1));
+        emit_str(s, out, "\n");
+        if load32(s, sl + 8) == 1 {
+            emit_str(s, out, "  store ptr %");
+            emit_name_tok(s, out, src, toks, load32(s, sl));
+            emit_str(s, out, ".addr, ptr %t");
+            emit_dec(s, out, cp);
+            emit_str(s, out, "\n");
+        } else {
+            let v: u32 = load_var(s, out, src, toks, load32(s, sl), lvl + 1);
+            emit_str(s, out, "  store ");
+            emit_ty(s, out, src, toks, load32(s, sl + 4));
+            emit_str(s, out, " %t");
+            emit_dec(s, out, v);
+            emit_str(s, out, ", ptr %t");
+            emit_dec(s, out, cp);
+            emit_str(s, out, "\n");
+        }
+        k = k + 1;
+    }
+    set_temp_val(s, lvl, rec);
+    return body_hi;
+}
+
+fn lam_is_param(src: ptr, toks: ptr, s: ptr, n: u32, np: u32, name_tok: u32) -> u32 {
+    let k: u32 = 0;
+    while k < np {
+        if same_tok_ptr(src, toks, name_tok, load32(s, lam_slot(s, n, k))) == 1 {
+            return 1;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+fn lam_is_slot(src: ptr, toks: ptr, s: ptr, n: u32, np: u32, nc: u32, name_tok: u32) -> u32 {
+    let k: u32 = 0;
+    while k < nc {
+        if same_tok_ptr(src, toks, name_tok,
+                        load32(s, lam_slot(s, n, np + k))) == 1 {
+            return 1;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+/// 体里 `&名字` 取过地址吗（= 按借捕获）。
+fn lam_byref(src: ptr, toks: ptr, lo: u32, hi: u32, name_tok: u32) -> u32 {
+    let k: u32 = lo;
+    while k < hi && tok_kind(toks, k) != 4 {
+        if tok_is(src, toks, k, "&") && !tok_is(src, toks, k + 1, "&")
+                && same_tok_ptr(src, toks, k + 1, name_tok) == 1 {
+            return 1;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+fn same_tok_ptr(src: ptr, toks: ptr, a: u32, b: u32) -> u32 {
+    if tok_kind(toks, a) != 0 || tok_kind(toks, b) != 0 {
+        return 0;
+    }
+    let na: u32 = load32(toks, a * 20 + 8);
+    if na != load32(toks, b * 20 + 8) {
+        return 0;
+    }
+    let oa: u32 = load32(toks, a * 20 + 4);
+    let ob: u32 = load32(toks, b * 20 + 4);
+    let k: u32 = 0;
+    while k < na {
+        if load8(src, oa + k) != load8(src, ob + k) {
+            return 0;
+        }
+        k = k + 1;
+    }
+    return 1;
+}
+
+/// 捕获区插入排序（按名字）。
+fn lam_sort(src: ptr, toks: ptr, s: ptr, n: u32, np: u32, nc: u32) {
+    let a: u32 = np;
+    let b: u32 = np + 1;
+    while b < np + nc {
+        let b0: u32 = lam_slot(s, n, b);
+        let nm: u32 = load32(s, b0);
+        let ty: u32 = load32(s, b0 + 4);
+        let rf: u32 = load32(s, b0 + 8);
+        let k: u32 = b;
+        while k > a {
+            let p0: u32 = lam_slot(s, n, k - 1);
+            if tok_lt(src, toks, nm, load32(s, p0)) == 0 {
+                k = a;
+            } else {
+                let t0: u32 = lam_slot(s, n, k);
+                store32(s, t0, load32(s, p0));
+                store32(s, t0 + 4, load32(s, p0 + 4));
+                store32(s, t0 + 8, load32(s, p0 + 8));
+                k = k - 1;
+            }
+        }
+        let t1: u32 = lam_slot(s, n, k);
+        store32(s, t1, nm);
+        store32(s, t1 + 4, ty);
+        store32(s, t1 + 8, rf);
+        b = b + 1;
+    }
 }
 
 /// 读一个合成局部（`__tur2_s.N`，`docs/334`）。类型不在 token 表里，由调用方给。
@@ -13363,6 +14200,12 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32, tickx: u32)
     // 走出状态块，0xC0000005）。发射器自己的初始化不该依赖分配器给什么。
     store32(s, 16, 0);
     store32(s, 640, 0);   // 函数个数
+    // 函数值 / 闭包（`docs/348`）：三张表按**单元**清零（它们的条目跨函数攒着，
+    // 全部函数体之后才发）。
+    store32(s, CG_FDN, 0);
+    store32(s, CG_LAMN, 0);
+    store32(s, CG_LAMID, 0);
+    store32(s, CG_CURLAM, 4294967295);
     store32(s, 476, 0);   // terminated
     store32(s, CG_LBRK, 0);   // 不在循环里
     store32(s, 480, 0);   // label 计数
@@ -13511,6 +14354,18 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32, tickx: u32)
         i = i + 1;
     }
     store32(s, 640, n);
+    // **函数值 / 闭包会把分配器拖进产物**（`docs/348`）：值是一条 `call @__loment_alloc`，
+    // 而源里并没有 `alloc` —— `heap_needed` 那一趟只认源码里的调用，于是这里补一条。
+    // 运行时那一块也要跟着来：参考实现按**发出来的文本**判（`rt_on or
+    // "@__loment_" in text_all`），而闭包记录的第一条就是 `@__loment_alloc`。
+    // `contains_ident("fp")` 是**廉价的**前置门：`fp` 这个 ident 只可能出现在
+    // `choose fp` 的值位置（别处写它就是未定义名字，检查器早就拒了）。
+    // ⚠ 常量表那一趟**不在这里**了 —— main 把它挪到了 `strings_needed` 之前（`docs/342`）。
+    if load32(s, 516) == 0 && contains_ident(src, toks, "fp") == 1
+            && fp_uses(src, toks, s) == 1 {
+        store32(s, 512, 1);
+        store32(s, 516, 1);
+    }
     // **跨函数 deref-only 安全表**（`docs/210` §7）：函数表登记完就能算 —— 它只读 token 流。
     // 放在这里（不是发射前逐个）：`l0_safe_callee` 在发射**每个** `alloc` 候选时都要查它。
     let _sft: u32 = compute_safe(src, toks, ptr_add(s, CG_SAFE));
@@ -13895,6 +14750,7 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32, tickx: u32)
                 store32(s, 480, 0);  // label 计数随函数重置
                 store32(s, 476, 0);  // terminated = false
                 store32(s, 472, fnix);   // 当前函数表下标 (impl 方法取名用)
+                store32(s, CG_LAMID, 0); // 闭包序号按函数从 1 起（`__lam_<fn>_<n>`）
                 i = emit_fn(s, out, src, toks, i);
             }
             fnix = fnix + 1;
@@ -13936,6 +14792,9 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32, tickx: u32)
     if cmd_entry_needed(src, toks) == 1 {
         emit_cmd_entry(s, out);
     }
+    // 函数值与闭包体（`docs/348`）：参考实现把 `fn_defs` 追加在 `text_all` **之后**，
+    // 这里同一个位置（命令入口也在 `text_all` 里）。
+    let _fd: u32 = emit_fdefs(s, out, src, toks);
     // 发射器报过"降不下去"（`#775`）：整份输出作废。**与容量溢出同一个返回约定**
     // （0 = 失败），但驱动器先看 `emit_error_code` —— 那一条有位置、有规则消息，
     // 不该被"表装不下"那句兜底吃掉。

@@ -361,10 +361,10 @@ GitHub 号在落地后回填到本节末尾的表里。
 
 | # | 缺口 | 解锁 | Issue |
 |---|---|---|---|
-| X1 | E11 站点进 Potato 台账（`docs/341` A2c） | `effect.audit` | 待开 |
-| X2 | 纯 Loment 的源文件 token 扫描（`lexer` 进 lmgr） | `effect.list` / `effect.row` / `effect.handler` 的静态半 | 待开 |
-| X3 | 报告导入格式（`loment lspe effects --json` 的稳定子集） | `effect.audit` 的无 Python 路径 | 待开 |
-| X4 | 运行期处理器栈（`docs/341` A3） | `effect.handler` 的运行期半 | 待开 |
+| X1 | E11 站点进 Potato 台账（`docs/341` A2c） | `effect.audit` | #1632 |
+| X2 | 纯 Loment 的源文件 token 扫描（`lexer` 进 lmgr） | `effect.list` / `effect.row` / `effect.handler` 的静态半 | #1633 |
+| X3 | 报告导入格式（`loment lspe effects --lines` 的稳定子集） | `effect.audit` 的无 Python 路径 | #1634 |
+| X4 | 运行期处理器栈（`docs/341` A3） | `effect.handler` 的运行期半 | #1635 |
 
 **今天一律 `done=0`**：登记让 `lmgr list` / 选择页看见这四个槽位，状态如实报
 `unavailable`；不输出伪行（§3.5）。

@@ -45,6 +45,7 @@ loment/examples/user_hello.lomt 0 0
 loment/lib/lumtui.lomt 0 22
 loment/lib/mem.lomt 0 5
 loment/lib/num.lomt 0 0
+loment/selfhost/fp/ir_fp.lomt 0 0
 loment/selfhost/ir_for.lomt 0 0
 loment/selfhost/ir_mem.lomt 0 0
 loment/tools/lomcli.lomt 0 721

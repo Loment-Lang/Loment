@@ -29,7 +29,7 @@
 module surface_data
 choose runtime
 
-pub fn n_codes() -> u32 { return 221; }
+pub fn n_codes() -> u32 { return 227; }
 
 /// 内部码段的下界（`#773`）。`E900` 起是"工具链自己崩了"那一类。
 pub fn internal_lo() -> u32 { return 900; }
@@ -484,6 +484,18 @@ pub fn code_title(c: u32, lang: u32) -> str {
     if k == 441 { return "同一效应里的操作重复定义"; }
     if k == 442 { return "an `effects` row names an undeclared effect"; }
     if k == 443 { return "`effects` 行引用了未声明的效应"; }
+    if k == 444 { return "using a function value needs `choose fp`"; }
+    if k == 445 { return "使用函数值需要 `choose fp`"; }
+    if k == 446 { return "an `extern fn` is not a function value"; }
+    if k == 447 { return "`extern fn` 不能当函数值"; }
+    if k == 448 { return "this closure capture type is not supported yet"; }
+    if k == 449 { return "闭包按值捕获的类型还不支持"; }
+    if k == 450 { return "the closure parameter types cannot be inferred"; }
+    if k == 451 { return "闭包形参类型推不出来"; }
+    if k == 452 { return "a closure that borrows its captures cannot be returned"; }
+    if k == 453 { return "带按借捕获的闭包不能返回"; }
+    if k == 454 { return "the type annotation on a closure parameter is unknown"; }
+    if k == 455 { return "闭包形参的类型未知"; }
     if k == 1800 { return "the tool died without reporting (internal)"; }
     if k == 1801 { return "工具链进程死了，没留下诊断"; }
     if k == 1998 { return "unclassified (please report)"; }
@@ -935,6 +947,18 @@ pub fn code_what(c: u32, lang: u32) -> str {
     if k == 441 { return "一个 `effect` 体里出现了两个同名操作。"; }
     if k == 442 { return "A name in `effects A, B` has no matching `effect` declaration (neither here nor in the dependencies)."; }
     if k == 443 { return "`effects A, B` 里的某个名字没有对应的 `effect` 声明（本单元与依赖里都没有）。"; }
+    if k == 444 { return "Function values, closures and indirect calls change the static call-graph premise (`docs/208`); the default `no_fp` products still contain only direct edges."; }
+    if k == 445 { return "函数值、闭包与间接调用会改变**静态调用图**这条前提（`docs/208`）：默认档（`no_fp`）的产物仍然只含直接调用边。"; }
+    if k == 446 { return "`extern fn` uses the platform ABI; the language's function type is the internal calling convention. They are not interchangeable (`docs/348`)."; }
+    if k == 447 { return "`extern fn` 走**平台 ABI**；本语言的函数类型是内部调用约定，两者不能互相顶替（`docs/348`）。"; }
+    if k == 448 { return "A closure record stores each capture in one 8-byte word; v1 accepts only word-sized captures (integers, `bool`, `ptr`)."; }
+    if k == 449 { return "闭包记录按 8 字节一格存捕获；v1 只收整型 / `bool` / `ptr` 这类能放进一格的类型。"; }
+    if k == 450 { return "A closure learns its parameter types either from annotations (`(x: T) => ...`) or from the expected type (the `let` annotation, an argument position, a return). With neither, the type is undetermined."; }
+    if k == 451 { return "闭包只有两种途径得到形参类型：写在参数上（`(x: T) => …`），或从**期望类型**（`let` 的标注、实参位置、返回位置）推。两处都没有就定不出来。"; }
+    if k == 452 { return "A by-reference capture stores an address; that address points into the callee's frame and dies when the function returns -- a dangling borrow."; }
+    if k == 453 { return "按借捕获存的是**地址**；那个地址指向调用者的栈帧，函数一返回就失效。这正是一个悬垂借用（`docs/299` / `docs/348`）。"; }
+    if k == 454 { return "The `T` in `(x: T) => ...` is not in the type table, same rule as a `let` annotation."; }
+    if k == 455 { return "`(x: T) => …` 里的 `T` 不在类型表里 —— 与 `let` 的标注是同一条规则。"; }
     if k == 1800 { return "A process in the toolchain died **before it could write a structured diagnostic** - killed by a signal, or exited abnormally, with no record in `--diag-out`."; }
     if k == 1801 { return "工具链里的一个进程在**能写出结构化诊断之前**就死了 —— 被信号打死，或者以异常状态退出，而 `--diag-out` 一份记录都没写。"; }
     if k == 1998 { return "The compiler reported an error that is not in the classification table -- even the toolchain did not recognise which code this message belongs to."; }
@@ -1386,6 +1410,18 @@ pub fn code_why(c: u32, lang: u32) -> str {
     if k == 441 { return "`use` 是**平名字空间**：一个单元里的顶层名字必须唯一，所以**两个库也不能有同名顶层项**。这也是为什么 std 里的公开名字都带前缀（`json_parse` / `sha256_hex`）——不带的迟早会撞。"; }
     if k == 442 { return "This is the one beginners hit most, and in Loment it is almost always the same thing: **there is no type inference** - `let x = 1;` is a syntax error and you must write `let x: u32 = 1;`. Next comes defining after use inside one module, and then a cross-module name that needs `pub` on the declaration and `use` at the call site."; }
     if k == 443 { return "这是**新手撞得最多**的一条，而它在 Loment 里几乎总是同一件事：**没有类型推断** —— `let x = 1;` 是语法错，必须 `let x: u32 = 1;`。其次是**先定义后使用**（同一模块内），以及跨模块要 `pub` 导出 + `use` 导入。"; }
+    if k == 444 { return "Two different things are managed here: (1) **the core mode** is a property of **the whole program**, and it has **five dimensions** - `mode` (`std` / `no_std`: which layer is available), `gc` (`gc_manual` / `gc_auto` / `gc_auto_alpha` / `no_gc`: who reclaims), `runtime` (`runtime` / `no_runtime`: whether the artifact carries one), `port` (`sealed` / `hosted`: whether it reaches outside itself), and `vm` (`vm` / `no_vm`: which execution model). **Each dimension may be declared once**, and only in the root unit (nothing outside `loment.conf` can change it); two dimensions contradicting each other (`gc_auto` with `no_runtime`) is reported here too. (2) **a switch** is \"code that is compiled in only when it is on\". There can be many switches, but **one name may be written once**, and a value may only be set after `set choose` declared it. A library may not `choose`: to express a need, a library declares a **capability requirement** and the project decides. (3) The `runtime` dimension is **not** managed here: a construct that would drag the runtime in (division, `alloc`, ...) is reported as **E030** (`docs/227`) - that code is about the construct, this one is about `choose` itself."; }
+    if k == 445 { return "这是**两个不同的东西**被放在一起管：① **核心模式**是**整个程序**的属性，而且它有**五维** —— `mode`（`std` / `no_std`：能用哪一层）、`gc`（`gc_manual` / `gc_auto` / `gc_auto_alpha` / `no_gc`：回收由谁做）、`runtime`（`runtime` / `no_runtime`：产物里有没有运行期）、`port`（`sealed` / `hosted`：通不通着世界）、`vm`（`vm` / `no_vm`：要哪种执行模型）。**每一维各自只能声明一次**，而且只能在根单元（`loment.conf` 之外没有第二个地方能改它）；两维取值互相矛盾（`gc_auto` 与 `no_runtime`）也在这里报。② **开关**是“打开才编进去的代码”，可以有很多条，但**同名只许写一次**、**取值前必须先 `set choose` 定义**。库不许 `choose` —— 库要表达需要就声明**能力需求**，由项目决定开不开。③ `runtime` 那一维**不在这里**：用了会拖运行期的构造（`alloc`、`panic` …）报的是 **E030**（`docs/227`）—— 那一码说的是那个构造，这一码说的是 `choose` 自己。"; }
+    if k == 446 { return "Loment has **no implicit numeric conversion** and no type inference: every position must match explicitly. A `u32` value never becomes an `i64` on its own, and the integer `1` is not the `bool` `true`."; }
+    if k == 447 { return "Loment **没有隐式数值转换**，也没有类型推断：每个位置上的类型必须显式对得上。所以 `u32` 的值不会自动变成 `i64`，整数 `1` 也不是 `bool` 的 `true`。"; }
+    if k == 448 { return "Loment has **no implicit numeric conversion** and no type inference: every position must match explicitly. A `u32` value never becomes an `i64` on its own, and the integer `1` is not the `bool` `true`."; }
+    if k == 449 { return "Loment **没有隐式数值转换**，也没有类型推断：每个位置上的类型必须显式对得上。所以 `u32` 的值不会自动变成 `i64`，整数 `1` 也不是 `bool` 的 `true`。"; }
+    if k == 450 { return "Loment has **no implicit numeric conversion** and no type inference: every position must match explicitly. A `u32` value never becomes an `i64` on its own, and the integer `1` is not the `bool` `true`."; }
+    if k == 451 { return "Loment **没有隐式数值转换**，也没有类型推断：每个位置上的类型必须显式对得上。所以 `u32` 的值不会自动变成 `i64`，整数 `1` 也不是 `bool` 的 `true`。"; }
+    if k == 452 { return "A borrow is a **static** promise: `&T` is valid only while the source is alive. Loment infers the source from regions - a returned borrow may only come from a **parameter** (a local dies with the call), and an explicit `&a T` marker may only name a reference parameter in the signature. `free(p)` also ends p's region, so no borrow may still point at it."; }
+    if k == 453 { return "借用是一条**静态**承诺：`&T` 只在来源还活着时有效。Loment 从区域推出来源 —— 返回值只能借自**形参**（局部变量出了函数就不存在），显式标记 `&a T` 只能指向签名里的一个引用形参。`free(p)` 也会结束 `p` 的区域，所以释放时不能再有指向它的借用。"; }
+    if k == 454 { return "Loment's type table is **fixed**: `u8`..`u64`, `i8`..`i64`, `bool`, `ptr`, `str`, `()`, plus the `struct` / `enum` you declare and arrays/slices of those - no generic containers, and **no floating point** (`loment types` prints the whole list). So this is not \"that name was not declared\"; it is \"**this language has no such type**\". That is also why it is separate from E002: E002 is fixed by declaring the name, this one by naming a type that exists."; }
+    if k == 455 { return "Loment 的类型表是**固定的**：`u8`..`u64`、`i8`..`i64`、`bool`、`ptr`、`str`、`()`，加上你声明的 `struct` / `enum` 与它们的数组/切片 —— 没有泛型容器，**也没有浮点**（`loment types` 打出来就是全部）。所以这一条说的不是\"这个名字没声明\"，而是\"**这门语言没有这种类型**\"。它与 E002 分开的理由也在这里：E002 的修法是声明那个名字，这一条的修法是换一个真有的类型。"; }
     if k == 1800 { return "The diagnostics channel can only describe failures that were **successfully serialized before the failure**. A compiler crash, a linker crash, or the renderer crashing on its own all go the same way: the JSONL is empty and there is nothing for the renderer to do. The launcher now closes that gap: it reads the exit status / signal name and synthesizes this record, so \"no record\" no longer means \"nothing happened\" (#773). This is not a semantic error in your source - it is the **implementation failing on itself**."; }
     if k == 1801 { return "诊断系统只能描述**在失败之前已经成功序列化**的失败。编译器崩溃、链接器崩溃、报错器自己崩溃，走的都是这条路：JSONL 是空的，渲染器无事可做。启动器现在替它收尸：拿到退出状态 / 信号名，合成这一条记录，于是「没有任何记录」不再等于「什么都没有发生」（`#773`）。这不是你源码的语义错 —— 它是**实现自己的失败**。"; }
     if k == 1998 { return "The table and the compiler come out of the same repository and the same build. A message landing here means it has not been classified yet, not that the toolchain versions disagree: fix by the message, then report it so a rule can be added."; }
@@ -1837,6 +1873,18 @@ pub fn code_yes(c: u32, lang: u32) -> str {
     if k == 441 { return "一个单元里任意多模块/函数/类型，只要名字不撞"; }
     if k == 442 { return "generics (when the call site determines T) / static trait dispatch / `pub` across modules / both `use` forms"; }
     if k == 443 { return "泛型（调用点能定出 T 时）／trait 静态派发／`pub` 跨模块／两种 `use`"; }
+    if k == 444 { return "the five core-mode dimensions (`mode` / `gc` / `runtime` / `port` / `vm`), values above; up to 500 switches per file; `addin` to carry switch settings across files (root unit only); empty switch bodies (purely to drive compiler behaviour); capability domains declared by a library; a library declaring a core mode (read as a requirement the root must satisfy)"; }
+    if k == 445 { return "五维核心模式（`mode` / `gc` / `runtime` / `port` / `vm`），每维取值见上；单文件最多 500 条开关；`addin` 跨文件带开关设定（只有根单元能写）；空体开关（只驱动编译器行为）；库声明能力域；库声明核心模式（视作需求，根须满足）"; }
+    if k == 446 { return "explicit `as` (integer<->integer, integer<->bool, pointer<->integer); scalar / string / slice / array / struct / enum as types"; }
+    if k == 447 { return "显式 `as`（整数⇄整数、整数⇄布尔、指针⇄整数）；标量/字符串/切片/数组/结构体/枚举作为类型"; }
+    if k == 448 { return "explicit `as` (integer<->integer, integer<->bool, pointer<->integer); scalar / string / slice / array / struct / enum as types"; }
+    if k == 449 { return "显式 `as`（整数⇄整数、整数⇄布尔、指针⇄整数）；标量/字符串/切片/数组/结构体/枚举作为类型"; }
+    if k == 450 { return "explicit `as` (integer<->integer, integer<->bool, pointer<->integer); scalar / string / slice / array / struct / enum as types"; }
+    if k == 451 { return "显式 `as`（整数⇄整数、整数⇄布尔、指针⇄整数）；标量/字符串/切片/数组/结构体/枚举作为类型"; }
+    if k == 452 { return "returning a borrow of a parameter; freeing after the borrow ends"; }
+    if k == 453 { return "返回借自形参的引用；在借用结束后再释放"; }
+    if k == 454 { return "`u32` / `i64` / `bool` / `ptr` / `str` / `()`; a `struct`/`enum` you declared; arrays and slices of those, `[T; N]` / `[T]`"; }
+    if k == 455 { return "`u32` / `i64` / `bool` / `ptr` / `str` / `()`；你声明的 `struct`/`enum` 名；它们的数组与切片 `[T; N]` / `[T]`"; }
     if k == 1800 { return "a tool exits 0 (no diagnostics) or 1 (diagnostics, and it left a record)"; }
     if k == 1801 { return "工具链以 0 退出（无诊断）或 1 退出（有诊断并留下了记录）"; }
     if k == 1998 { return "classified messages after a report lands"; }
@@ -2288,6 +2336,18 @@ pub fn code_no(c: u32, lang: u32) -> str {
     if k == 441 { return "同名顶层项共存；两个库同时导出同一个名字"; }
     if k == 442 { return "type inference / implicit globals / forward references inside one module / implicit numeric conversion"; }
     if k == 443 { return "类型推断／隐式全局／同一模块内的前向引用／隐式数值转换"; }
+    if k == 444 { return "one dimension written twice, or written outside the root unit; two dimensions whose values contradict (`gc_auto` with `no_runtime`); `choose vm`, or a path carrying an outward port, in a release build (the channel gate); setting a value before declaring it; two settings for one name; nested declarations; a library that uses a runtime-dragging construct without declaring it"; }
+    if k == 445 { return "同一维写两次、或写在根单元之外不一致；两维取值互相矛盾（`gc_auto` 与 `no_runtime`）；发行版里写 `choose vm`、或让路径带对外端口（渠道闸）；取值前没定义；同名两个取值；嵌套声明；库用了会拖运行期的构造却不声明"; }
+    if k == 446 { return "implicit promotion and implicit conversion (`u32` -> `i64` also needs `as`); using an integer where a bool is expected"; }
+    if k == 447 { return "隐式提升与隐式转换（`u32` → `i64` 也必须写 `as`）；整数与布尔互用"; }
+    if k == 448 { return "implicit promotion and implicit conversion (`u32` -> `i64` also needs `as`); using an integer where a bool is expected"; }
+    if k == 449 { return "隐式提升与隐式转换（`u32` → `i64` 也必须写 `as`）；整数与布尔互用"; }
+    if k == 450 { return "implicit promotion and implicit conversion (`u32` -> `i64` also needs `as`); using an integer where a bool is expected"; }
+    if k == 451 { return "隐式提升与隐式转换（`u32` → `i64` 也必须写 `as`）；整数与布尔互用"; }
+    if k == 452 { return "returning a local borrow; freeing a block that is still borrowed"; }
+    if k == 453 { return "返回局部变量的借用；`free` 一块仍被借用的内存"; }
+    if k == 454 { return "`f32` / `f64` (there is no floating point); a generic container name; an identifier that is not a type (a variable name, say)"; }
+    if k == 455 { return "`f32` / `f64`（没有浮点）；泛型容器名；不是类型的标识符（如变量名）"; }
     if k == 1800 { return "killed by a signal / exited abnormally without writing any structured diagnostic"; }
     if k == 1801 { return "被信号打死 / 异常退出，而且一份结构化诊断都没写"; }
     if k == 1998 { return "guessing a code"; }
@@ -2517,6 +2577,12 @@ pub fn code_ascii(c: u32) -> str {
     if c == 219 { return "an effect is declared twice"; }
     if c == 220 { return "an operation is defined twice in one effect"; }
     if c == 221 { return "an `effects` row names an undeclared effect"; }
+    if c == 222 { return "using a function value needs `choose fp`"; }
+    if c == 223 { return "an `extern fn` is not a function value"; }
+    if c == 224 { return "this closure capture type is not supported yet"; }
+    if c == 225 { return "the closure parameter types cannot be inferred"; }
+    if c == 226 { return "a closure that borrows its captures cannot be returned"; }
+    if c == 227 { return "the type annotation on a closure parameter is unknown"; }
     if c == 900 { return "a tool in the chain died before it could report (internal) - report it with the unit"; }
     if c == 999 { return "unclassified - please report it"; }
     return "";
@@ -2703,6 +2769,12 @@ pub fn code_family(c: u32) -> u32 {
     if c == 220 { return 13; }
     if c == 219 { return 13; }
     if c == 221 { return 2; }
+    if c == 222 { return 22; }
+    if c == 223 { return 1; }
+    if c == 224 { return 1; }
+    if c == 225 { return 1; }
+    if c == 226 { return 41; }
+    if c == 227 { return 30; }
     return c;
 }
 
@@ -4085,6 +4157,42 @@ pub fn code_fix(c: u32, i: u32, lang: u32) -> str {
     if k == 3537 { return "补一个 `effect NAME { … }` 声明。"; }
     if k == 3539 { return "名字拼错了：改成声明里的那个。"; }
     if k == 3541 { return "效应在依赖里：确认 `use` 拉进来的那份也声明了它。"; }
+    if k == 3552 { return "Write `choose fp` in the root unit (after `module`)."; }
+    if k == 3554 { return "If you only branch by name, use `if` / `match`; they introduce no indirect dispatch."; }
+    if k == 3556 { return "A library that needs function values declares `choose fp`; the root satisfies it."; }
+    if k == 3553 { return "在根单元写 `choose fp`（写在 `module` 之后）。"; }
+    if k == 3555 { return "如果只是想按名字分支，用现有的 `if` / `match`，它们不引入间接分派。"; }
+    if k == 3557 { return "库里需要函数值就让它声明 `choose fp`，由根单元满足。"; }
+    if k == 3568 { return "For a callback into C, write a Loment wrapper that calls the `extern fn`."; }
+    if k == 3570 { return "To hand a Loment function to C, give it a `ptr`-shaped signature first."; }
+    if k == 3572 { return "Write one layer per convention; don't make one value carry both."; }
+    if k == 3569 { return "要回调 C 的函数，写一个 Loment 包装函数，在它里面调 `extern fn`。"; }
+    if k == 3571 { return "要把 Loment 函数交给 C，先把它写成 `extern fn` 能接受的形状（`ptr` 实参），再用 `fn` 值在本语言里调用。"; }
+    if k == 3573 { return "两边都要就各写一层，别让一个值同时承担两种约定。"; }
+    if k == 3584 { return "Pass the aggregate as a `ptr`."; }
+    if k == 3586 { return "Move multi-word captures out of the closure with a `ptr` or a slice."; }
+    if k == 3588 { return "Rewrite it as a function taking explicit parameters."; }
+    if k == 3585 { return "把要捕获的聚合成一个 `ptr` 传进去。"; }
+    if k == 3587 { return "需要多格的捕获先用 `ptr` 或切片把它搬出闭包。"; }
+    if k == 3589 { return "把闭包改成一个带显式形参的函数。"; }
+    if k == 3600 { return "Annotate the parameters: `(x: u64) => ...`."; }
+    if k == 3602 { return "Put it where a type is expected: `let f: (u64) -> u64 = (x) => ...;`."; }
+    if k == 3604 { return "Pass it as an argument to a function whose parameter type is known."; }
+    if k == 3601 { return "给参数写类型：`(x: u64) => …`。"; }
+    if k == 3603 { return "把它放在有标注的位置：`let f: (u64) -> u64 = (x) => …;`。"; }
+    if k == 3605 { return "作为实参传给一个形参类型已知的函数。"; }
+    if k == 3616 { return "Capture by value: replace `&n` with `n` (the copy can escape)."; }
+    if k == 3618 { return "If you really need shared mutable state, own it behind a `ptr` and capture that."; }
+    if k == 3620 { return "Use the closure within the creating call; keep it from escaping."; }
+    if k == 3617 { return "改成按值捕获：把 `&n` 换成 `n`（捕获的是一份拷贝，可以逃逸）。"; }
+    if k == 3619 { return "确实要共享可变状态，就把那份状态放进 `ptr` 指向的堆块，捕获 `ptr`。"; }
+    if k == 3621 { return "把闭包用完在一次调用内，别让它逃出创建它的函数。"; }
+    if k == 3632 { return "Use a type that exists."; }
+    if k == 3634 { return "Declare that type first."; }
+    if k == 3636 { return "If it is a typo, match the declaration."; }
+    if k == 3633 { return "换成真有的类型。"; }
+    if k == 3635 { return "先声明那个类型。"; }
+    if k == 3637 { return "拼写错误：与声明对齐。"; }
     if k == 14400 { return "Report the smallest source that reproduces it together with this record - a crash is a compiler defect, not something you can work around in your code."; }
     if k == 14402 { return "Include the exit status / signal name (already in this message) and the output of `loment version`."; }
     if k == 14404 { return "If the message names the **linker** (`loment-lomelf`), also include the `-o` path and the target platform."; }
@@ -4326,6 +4434,12 @@ pub fn code_nfix(c: u32) -> u32 {
     if c == 219 { return 3; }
     if c == 220 { return 3; }
     if c == 221 { return 3; }
+    if c == 222 { return 3; }
+    if c == 223 { return 3; }
+    if c == 224 { return 3; }
+    if c == 225 { return 3; }
+    if c == 226 { return 3; }
+    if c == 227 { return 3; }
     if c == 900 { return 4; }
     if c == 999 { return 3; }
     return 0;

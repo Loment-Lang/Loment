@@ -748,6 +748,11 @@ fn is_top_key(ver: u32, kp: ptr, kl: u32) -> u32 {
     if ver >= 22 && eq_lit(kp, kl, "lifetime") == 1 {
         return 1;
     }
+    // v23 = v22 + **间接分派**（`docs/348`，第九维）：`no_fp` / `fp`。
+    // 必填 —— "这份产物里有没有间接调用边"是**不读源码可判的**（`docs/208` §4 的边界）。
+    if ver >= 23 && eq_lit(kp, kl, "fp") == 1 {
+        return 1;
+    }
     return 0;
 }
 
@@ -2113,6 +2118,9 @@ fn validate(mem: ptr, tot: u32) -> u32 {
         if eq_lit(t, l, "v22") == 1 {
             ver = 22;
         }
+        if eq_lit(t, l, "v23") == 1 {
+            ver = 23;
+        }
     }
     if ver == NOTFOUND {
         let _c: u32 = bad(mem);
@@ -2184,6 +2192,9 @@ fn validate(mem: ptr, tot: u32) -> u32 {
     }
     if ver >= 22 {
         chk_lifetime(mem, doc);
+    }
+    if ver >= 23 {
+        chk_fp(mem, doc);
     }
     return 0;
 }
@@ -2369,6 +2380,20 @@ fn chk_lifetime(mem: ptr, doc: u32) -> u32 {
     if jstr_field_is(mem, doc, "lifetime", "lifetime_no") == 1
             || jstr_field_is(mem, doc, "lifetime", "lifetime_auto") == 1
             || jstr_field_is(mem, doc, "lifetime", "lifetime_manual") == 1 {
+        ok = 1;
+    }
+    if ok == 0 {
+        let _b: u32 = bad(mem);
+    }
+    return 0;
+}
+
+/// `fp`（v23，`docs/348`）：两档。**必填** —— 与 `gc` / `lifetime` 同一条纪律，
+/// 所以"这份产物里有没有间接调用边"是**不读源码可判的**。
+fn chk_fp(mem: ptr, doc: u32) -> u32 {
+    let ok: u32 = 0;
+    if jstr_field_is(mem, doc, "fp", "no_fp") == 1
+            || jstr_field_is(mem, doc, "fp", "fp") == 1 {
         ok = 1;
     }
     if ok == 0 {

@@ -98,7 +98,7 @@
         },
         {
           "name": "meta.declaration.core.loment",
-          "match": "\\b(choose)[ \\t]+(std|no_std|gc_manual|gc_auto|gc_auto_alpha|runtime|no_runtime)\\b",
+          "match": "\\b(choose)[ \\t]+(std|no_std|gc_manual|gc_auto|gc_auto_alpha|runtime|no_runtime|fp|no_fp)\\b",
           "captures": {
             "1": { "name": "keyword.other.choose.loment" },
             "2": { "name": "constant.language.core.loment" }

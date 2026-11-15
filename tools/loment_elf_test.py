@@ -16,7 +16,8 @@
 #
 # 已知边界 (与 lomelf.py 头注同源, 逐条记账):
 #   * 调用约定是我们自己的 (实参走栈), **不是 System V** —— 原生产物 v0 不给 C 调;
-#   * 结构体动态下标 GEP / 间接调用 / 浮点 v0 不支持 (会报 [ERR] 而不是静默错编);
+#   * 结构体动态下标 GEP / 浮点 v0 不支持 (会报 [ERR] 而不是静默错编);
+#     间接调用 `call %reg` 从 `docs/348` 起支持（两只链接器同形状，见 `_MIRROR_SHAPE_IR`）;
 #   * 自举侧的镜像是 loment/tools/lomelf.lomt —— 自举那几条用例钉它与参考逐字节相同,
 #     其中一条专门钉 FFI (`--link` 外部目标文件, docs/173)。
 #
@@ -2208,12 +2209,18 @@ def test_not_run_reasons_hold():
 
 @test
 def test_lomelf_reports_unsupported_instead_of_miscompiling():
-    """不支持的东西必须**报错退出**, 不许静默编出一个错的 ELF。"""
+    """不支持的东西必须**报错退出**, 不许静默编出一个错的 ELF。
+
+    间接调用**不在**这张表里了：`docs/348` 起两只链接器都认 `call %reg`，正向的
+    字节比对在 `_MIRROR_SHAPE_IR["indirect_call"]` 那一格。
+    """
     bad = [
         ("结构体动态下标 GEP",
          "define void @_start() {\nentry:\n  %p = alloca { i32, i32 }\n  %i = load i32, ptr %p\n  %q = getelementptr { i32, i32 }, ptr %p, i32 %i\n  ret void\n}\n"),
-        ("间接调用",
-         "define void @_start() {\nentry:\n  %f = alloca ptr\n  %g = load ptr, ptr %f\n  call void %g()\n  ret void\n}\n"),
+        ("直接调用超过 16 个实参",
+         "define void @_start() {\nentry:\n  call void @f("
+         + ", ".join(f"i32 {i}" for i in range(17)) + ")\n  ret void\n}\n\n"
+         "define void @f(" + ", ".join(f"i32 %a{i}" for i in range(17)) + ") {\nentry:\n  ret void\n}\n"),
         ("没有 _start 或 main",
          "define void @helper() {\nentry:\n  ret void\n}\n"),
     ]
@@ -2399,8 +2406,30 @@ def test_lomelf_selfhost_matches_reference():
 
 #: 手写 IR 夹具: **两个各自独立把镜像打下来过**的形状（issue #1 的两个真成因）。
 #: 这是**形状**不是程序 —— 哪一条回退, 判据直接点名, 不用再把 `tour` 二分一遍。
-#: 参考实现两条都编得过, 所以期望值是 `lomelf.compile_ll` 现算的。
+#: 参考实现每条都编得过, 所以期望值是 `lomelf.compile_ll` 现算的。
 _MIRROR_SHAPE_IR: dict[str, tuple[str, str]] = {
+    "indirect_call": (
+        "间接调用 `call %reg`（`docs/348` 第九维 `fp`）。两只链接器各写一遍这条指令形状："
+        "参考侧在 `_call` 里发 `FF D1`，镜像侧在 `do_call` 里发同样两个字节 —— 漂一个字节"
+        "就是另一份产物，而别的判据只比 IR，看不见链接器这一层。",
+        """define void @target(i64 %x) {
+entry:
+  ret void
+}
+
+define void @_start() {
+entry:
+  %r = alloca { i64, i64 }
+  %fn = getelementptr { i64, i64 }, ptr %r, i32 0, i32 0
+  %code = ptrtoint ptr @target to i64
+  store i64 %code, ptr %fn
+  %p = load i64, ptr %fn
+  %q = inttoptr i64 %p to ptr
+  %arg = load i64, ptr %p
+  call void %q(i64 %arg)
+  ret void
+}
+"""),
     "i64_global": (
         "64 位全局 + 非零初值（含聚合）。旧 `one_global` 用 u32 的 `pow256` 做除法: "
         "b=4 时 `256^b` 回绕成 0, 除零当场 SIGILL。`@__loment_caps` 就是这形状, "

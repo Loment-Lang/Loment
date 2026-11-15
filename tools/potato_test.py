@@ -638,6 +638,27 @@ MUTATORS_V22 = [
 ]
 
 
+def fixture_v23() -> dict:
+    """一份合法的 **v23** 形式对象：v22 的再 + **间接分派** `fp`（`docs/348`）。
+
+    默认档是 `no_fp`（静态调用图，`docs/208` §4 的前提原样成立）。
+    """
+    d = fixture_v22()
+    d["potato"] = "v23"
+    d["fp"] = "no_fp"
+    return d
+
+
+#: v23 的 `fp` 那几条规则的反例（`docs/348`）。作用在 **v23** 的对象上。
+MUTATORS_V23 = [
+    ("fp 整个缺掉", lambda d: d.pop("fp"), "fp 必须是"),
+    ("fp 拼错", lambda d: d.__setitem__("fp", "fnptr"), "fp 必须是"),
+    ("fp 用了不存在的旧开关名",
+     lambda d: d.__setitem__("fp", "fp_true"), "fp 必须是"),
+    ("fp 不是字符串", lambda d: d.__setitem__("fp", 1), "fp 必须是"),
+]
+
+
 #: v20 的 `systems` 那几条规则的反例（#1022）。作用在 **v20** 的对象上。
 #: 三条验收点各至少一条：**错 state / 错 cost / 缺系统**；另外把"指针"那两格也钉住。
 MUTATORS_V20 = [
@@ -725,6 +746,24 @@ def test_v22_requires_the_lifetime_tier():
         mut(d)
         errs = potato.validate(d)
         assert any(needle in e for e in errs), (name, errs)
+
+
+@test
+def test_v23_requires_the_fp_tier():
+    """v23 的 `fp`（`docs/348`）：两档都过（含默认 `no_fp`），反例各钉一条规则。"""
+    for fv in potato.FPS:
+        d = fixture_v23()
+        d["fp"] = fv
+        assert potato.validate(d) == [], (fv, potato.validate(d))
+    for name, mut, needle in MUTATORS_V23:
+        d = fixture_v23()
+        mut(d)
+        errs = potato.validate(d)
+        assert any(needle in e for e in errs), (name, errs)
+    # v22 的对象**不许**带 `fp`（那一版没有这一格）
+    d = fixture_v22()
+    d["fp"] = "no_fp"
+    assert any("未知顶层字段" in e for e in potato.validate(d)), potato.validate(d)
 
 
 @test
@@ -1232,6 +1271,15 @@ def _cases() -> list[tuple[str, dict]]:
         d = fixture_v22()
         mut(d)
         out.append((f"v22-{name}", d))
+    # v23 那一组（`fp`，`docs/348`）：两档各来一份，再挂反例。
+    for fv in potato.FPS:
+        dv = fixture_v23()
+        dv["fp"] = fv
+        out.append((f"v23-{fv}", dv))
+    for name, mut, _ in MUTATORS_V23:
+        d = fixture_v23()
+        mut(d)
+        out.append((f"v23-{name}", d))
     d0 = fixture()
     for k in ("traits", "impls", "generics", "instances", "guards"):
         d0.pop(k)

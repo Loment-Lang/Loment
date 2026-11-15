@@ -1508,8 +1508,55 @@ fn pt_refuse_num(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
 /// 两个返回值打成一个 u64: 语言的函数没有元组, 而这是本文件里唯一需要"同时回传
 /// 游标与 token 位置"的地方(递归渲染必须知道吃到哪了)。参考实现里也有这个形状
 /// (`declare` 返回 `(n << 32) | o`)。
+/// `(` 的配对右括号下标（不配对 -> 走到 EOF）。
+fn pt_paren(src: ptr, t: ptr, i: u32) -> u32 {
+    let d: u32 = 0;
+    let j: u32 = i;
+    while pt_kind(t, j) != 4 {
+        if pt_tis(src, t, j, "(") {
+            d = d + 1;
+        }
+        if pt_tis(src, t, j, ")") {
+            d = d - 1;
+            if d == 0 {
+                return j;
+            }
+        }
+        j = j + 1;
+    }
+    return j;
+}
+
 fn pt_ty(out: ptr, o: u32, src: ptr, t: ptr, i: u32) -> u64 {
     let j: u32 = i;
+    // 函数类型 `(A,B) -> C`（`docs/348`）：形态对象里类型就是**字符串**，参考实现拼出来的
+    // 那一串是 `(A,B)->C` —— 逗号后与 `->` 两侧**都没有空格**。`()` 后面没有 `->` 才是
+    // unit，它照原来的路（单 token）走。
+    if pt_tis(src, t, j, "(") {
+        let pc: u32 = pt_paren(src, t, j);
+        if pt_tis(src, t, pc + 1, "-") && pt_tis(src, t, pc + 2, ">") {
+            o = pt_str(out, o, "(");
+            let fk: u32 = j + 1;
+            let ffirst: u32 = 1;
+            while fk < pc && pt_kind(t, fk) != 4 {
+                if ffirst == 0 {
+                    o = pt_str(out, o, ",");
+                }
+                ffirst = 0;
+                let rp: u64 = pt_ty(out, o, src, t, fk);
+                o = (rp % 4294967296) as u32;
+                fk = (rp / 4294967296) as u32;
+                if pt_tis(src, t, fk, ",") {
+                    fk = fk + 1;
+                }
+            }
+            o = pt_str(out, o, ")->");
+            let rr: u64 = pt_ty(out, o, src, t, pc + 3);
+            o = (rr % 4294967296) as u32;
+            fk = (rr / 4294967296) as u32;
+            return (fk as u64) * 4294967296 + (o as u64);
+        }
+    }
     if pt_tis(src, t, j, "mut") && pt_tis(src, t, j + 1, "[") {
         o = pt_str(out, o, "mut [");
         let r0: u64 = pt_ty(out, o, src, t, j + 2);
@@ -1937,11 +1984,14 @@ fn pt_cnt_params(unit: ptr, t: ptr, lp: u32) -> u32 {
     let n: u32 = 1;
     let j: u32 = lp + 1;
     let d: u32 = 0;
+    // **`(` 也要计深**（`docs/348`）：形参类型可以是函数类型 `(u64) -> u64`，它自己带一对
+    // 括号。不数它，第一对 `)` 就被当成形参表的结尾，参数个数直接少算。
     while pt_kind(t, j) != 4 && !(pt_tis(unit, t, j, ")") && d == 0) {
-        if pt_tis(unit, t, j, "<") || pt_tis(unit, t, j, "[") {
+        if pt_tis(unit, t, j, "<") || pt_tis(unit, t, j, "[") || pt_tis(unit, t, j, "(") {
             d = d + 1;
         }
-        if (pt_tis(unit, t, j, ">") || pt_tis(unit, t, j, "]")) && d > 0 {
+        if (pt_tis(unit, t, j, ">") || pt_tis(unit, t, j, "]") || pt_tis(unit, t, j, ")"))
+                && d > 0 {
             d = d - 1;
         }
         if d == 0 && pt_tis(unit, t, j, ",") {
@@ -2218,6 +2268,29 @@ fn pt_vm(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
 /// 与 `pt_vm` **同形**，唯一的区别是**默认值随版次走**（与参考实现的
 /// `core_default("lifetime", profile)` 同一条）：`tur2026.1` / `tur2026.2`（prof < 2）
 /// 默认 `lifetime_no`，`tur2026.3` 起默认 `lifetime_auto`。
+/// `fp` 那一格（`docs/348`）：本单元写没写 `choose fp`。默认 `no_fp`。
+fn pt_fp(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+    let d: u32 = 0;
+    let i: u32 = lo;
+    while i < hi && pt_kind(t, i) != 4 {
+        let k: u32 = pt_kind(t, i);
+        if k == 3 {
+            let c: u32 = load8(unit, pt_off(t, i)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                d = d + 1;
+            }
+            if (c == 125 || c == 41 || c == 93) && d > 0 {
+                d = d - 1;
+            }
+        } else if d == 0 && pt_tis(unit, t, i, "choose")
+                && (pt_tis(unit, t, i + 1, "fp") || pt_tis(unit, t, i + 1, "no_fp")) {
+            return pt_q(out, o, unit, pt_off(t, i + 1), pt_tlen(t, i + 1));
+        }
+        i = i + 1;
+    }
+    return pt_qs(out, o, "no_fp");
+}
+
 fn pt_lifetime(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32,
                prof: u32) -> u32 {
     let d: u32 = 0;
@@ -3951,6 +4024,32 @@ fn pt_inst_find(sc: ptr, noff: u32, nlen: u32) -> u32 {
 fn pt_ty_sub(out: ptr, o: u32, unit: ptr, t: ptr, i: u32,
              lt: u32, ntp: u32, ags: ptr) -> u64 {
     let j: u32 = i;
+    // 函数类型 `(A,B) -> C`（`docs/348`）：与 `pt_ty` 同形，只是形参里也要做类型替换。
+    if pt_tis(unit, t, j, "(") {
+        let pc: u32 = pt_paren(unit, t, j);
+        if pt_tis(unit, t, pc + 1, "-") && pt_tis(unit, t, pc + 2, ">") {
+            o = pt_str(out, o, "(");
+            let fk: u32 = j + 1;
+            let ffirst: u32 = 1;
+            while fk < pc && pt_kind(t, fk) != 4 {
+                if ffirst == 0 {
+                    o = pt_str(out, o, ",");
+                }
+                ffirst = 0;
+                let rp: u64 = pt_ty_sub(out, o, unit, t, fk, lt, ntp, ags);
+                o = (rp % 4294967296) as u32;
+                fk = (rp / 4294967296) as u32;
+                if pt_tis(unit, t, fk, ",") {
+                    fk = fk + 1;
+                }
+            }
+            o = pt_str(out, o, ")->");
+            let rr: u64 = pt_ty_sub(out, o, unit, t, pc + 3, lt, ntp, ags);
+            o = (rr % 4294967296) as u32;
+            fk = (rr / 4294967296) as u32;
+            return (fk as u64) * 4294967296 + (o as u64);
+        }
+    }
     // 钩子①: 名字位置上如果是类型形参 -> 换成实参的类型（形参在 lt+1, lt+3, …）
     if pt_kind(t, j) == 0 && !pt_tis(unit, t, j, "mut") {
         let k: u32 = 0;
@@ -4283,6 +4382,14 @@ fn pt_ty_end(unit: ptr, t: ptr, i: u32, hi: u32) -> u32 {
             j = j + 1;
         }
         return j;
+    }
+    // 函数类型 `(A,B) -> C`（`docs/348`）：`)` 后面的 `-> R` 也属于这个类型。
+    if pt_tis(unit, t, j, "(") {
+        let pc: u32 = pt_paren(unit, t, j);
+        if pt_tis(unit, t, pc + 1, "-") && pt_tis(unit, t, pc + 2, ">") {
+            return pt_ty_end(unit, t, pc + 3, hi);
+        }
+        return pc + 1;
     }
     j = j + 1;
     if pt_tis(unit, t, j, "<") {
@@ -6319,7 +6426,7 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr,
     // 它在**最后** —— 与前面几维同形，且"这份产物在哪一档上"是**不读源码可判**的。
     o = pt_key(out, o, 1, "potato");
     // v20 = v19 + **系统索引** `systems`（`docs/147` §5 / `#1022`）。
-    o = pt_qs(out, o, "v22");
+    o = pt_qs(out, o, "v23");
     o = pt_str(out, o, ",\n");
     // `unit` 是**根**那份源的 `module` 名 —— 依赖在前, 所以它是根那个标记后面的名字
     // (不是第 1 个 token: 那是第一个依赖的名字)。
@@ -6386,6 +6493,11 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr,
     // ⚠ **次序是判据**：参考实现那边 `"lifetime"` 紧跟在 `"lspe"` 之后。
     o = pt_key(out, o, 1, "lifetime");
     o = pt_lifetime(out, o, unit, t, lo, hi, prof);
+    o = pt_str(out, o, ",\n");
+    // v23（`docs/348`）：**间接分派**，紧跟在 `lifetime` 之后 ——
+    // ⚠ **次序是判据**：参考实现那边 `"fp"` 紧跟在 `"lifetime"` 之后。
+    o = pt_key(out, o, 1, "fp");
+    o = pt_fp(out, o, unit, t, lo, hi);
     o = pt_str(out, o, ",\n");
     // v20（`docs/147` §5 / `#1022`）：**系统索引**，紧跟在 `lspe` 之后 ——
     // ⚠ **次序是判据**：参考实现那边 `"systems"` 紧跟在 `"lspe"` 之后。

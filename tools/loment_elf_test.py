@@ -2514,6 +2514,126 @@ def test_mirror_links_the_shapes_that_used_to_take_it_down():
     print(f"      {len(done)} 个形状: 镜像与参考逐字节相同 ({', '.join(done)})")
 
 
+#: 第九维 `fp`（`docs/348`）的**运行**语料。两条链路同一份源：
+#: `values` 覆盖函数值 / 闭包 / 函数类型形参 / 返回闭包 / 闭包当实参；
+#: `gc_auto` 让捕获的 `ptr` 成为**唯一的活引用**（局部 `p` 在 `mk` 返回时就没了），
+#: 中间 20000 次 `alloc(64)` 逼收集器反复跑 —— 捕获没被当根就收到"别人"的 1。
+_CLOSURE_RUN_SRC: dict[str, tuple[str, bytes]] = {
+    "values": (
+        """choose write grammar tur2026.2
+
+module closures_run
+choose fp
+choose runtime
+
+fn inc(x: u64) -> u64 {
+    return x + 1;
+}
+
+fn apply(f: (u64) -> u64, v: u64) -> u64 {
+    return f(v);
+}
+
+fn mk(a: u64) -> (u64) -> u64 {
+    return (x: u64) => x + a;
+}
+
+fn _start() {
+    let g: (u64) -> u64 = &inc;
+    let k: u64 = 5;
+    let h: (u64) -> u64 = (x) => x + k;
+    let a: u64 = apply(g, 1);
+    let b: u64 = apply(h, 2);
+    let c: u64 = apply((x: u64) => x * 3, 4);
+    let d: (u64) -> u64 = mk(6);
+    let e: u64 = d(1);
+    print_num(a as i64);
+    print(" ");
+    print_num(b as i64);
+    print(" ");
+    print_num(c as i64);
+    print(" ");
+    print_num(e as i64);
+    print("\\n");
+    syscall4(60, 0, 0, 0);
+}
+""",
+        f"{1 + 1} {2 + 5} {4 * 3} {6 + 1}\n".encode()),
+    "gc_auto": (
+        """choose write grammar tur2026.2
+
+module closures_gc
+choose fp
+choose runtime
+choose gc_auto
+
+fn mk() -> () -> u32 {
+    let p: ptr = alloc(16);
+    store8(p, 0, 42);
+    return () => load8(p, 0);
+}
+
+fn _start() {
+    let g: () -> u32 = mk();
+    let i: u32 = 0;
+    while i < 20000 {
+        let q: ptr = alloc(64);
+        store8(q, 0, 1);
+        i = i + 1;
+    }
+    print_num(g() as i64);
+    print("\\n");
+    syscall4(60, 0, 0, 0);
+}
+""",
+        b"42\n"),
+}
+
+
+@test
+def test_a_closure_program_runs_through_both_linkers():
+    """第九维 `fp`（`docs/348`）的**运行**判据：闭包程序跑出来的字节要对。
+
+    **Why**：其余 fp 判据都停在"两个实现发出的字节相同"（`loment_p8_test` 的 m82 那一格、
+    `loment_potato_emit_test`）。两边**一起**错的时候它们照样全绿 —— 闭包记录的捕获槽
+    排错位、包装函数的调用约定排错，两边是同一个人写的两份代码，一样会犯。这一条不问
+    产物长得像什么，只问**跑出来的字节**；期望值由 Python 按程序语义独立算出，不取编译器
+    的任何输出。`gc_auto` 那一半再钉一层：捕获的 `ptr` 是块在堆上的**唯一**活引用，
+    收集器每轮都被 20000 次 `alloc(64)` 逼着跑 —— 捕获没登记成根，读回的就是别人的 1。
+
+    **镜像也跑一遍**：同一份 IR 过自举链接器，产物必须与参考**逐字节相同**（相同就只跑一次）。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    mir = _mirror()
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        for tag, (text, want) in sorted(_CLOSURE_RUN_SRC.items()):
+            src = td / f"{tag}.lomt"
+            src.write_text(text, encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"{tag}.native"
+            nat.write_bytes(blob)
+            rc, out = _run_bin(nat, f"fp_{tag}", td, timeout=60)
+            assert rc == 0, f"[{tag}] 编译产物没跑通：rc={rc}，输出 {out!r}"
+            assert out == want, f"[{tag}] 输出不对：期望 {want!r}，得到 {out!r}"
+            llrepo = ROOT / "loment" / "build" / f"_fp_{tag}.ll"
+            elfrepo = ROOT / "loment" / "build" / f"_fp_{tag}.elf"
+            try:
+                llrepo.write_bytes(ll.read_bytes())
+                rcm, err = _mirror_run(mir, f"loment/build/_fp_{tag}.ll",
+                                       f"loment/build/_fp_{tag}.elf")
+                assert rcm == 0, f"[{tag}] 镜像退出 {rcm}: {err[-200:]}"
+                got = elfrepo.read_bytes()
+            finally:
+                llrepo.unlink(missing_ok=True)
+                elfrepo.unlink(missing_ok=True)
+            assert got == blob, f"[{tag}] 镜像与参考不同 ({len(got)}B vs {len(blob)}B)"
+    print(f"      {len(_CLOSURE_RUN_SRC)} 个闭包程序：跑出来的字节对，两只链接器产物相同")
+
+
 @test
 def test_selfhost_mirror_matches_reference_on_thread_spawn():
     """自举镜像的 `thread_spawn` 定制序列与参考 `lomelf.py` **逐字节相同**。

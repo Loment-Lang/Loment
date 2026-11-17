@@ -671,7 +671,9 @@ def analyze(toks: list, unit: str = "m") -> dict:
             "id": sid("row", f"{f['name']}:{f['line']}"),
             "kind": "row", "claim": "allow" if proved else "deny",
             "obligation": "EffectAllowed",
-            "evidence": "Typed" if declared is not None else "Syntactic",
+            # 证据要跟着判决走：证不出来的站点不能带 Typed/Syntactic，
+            # 否则求解器会按证据把它**重新证成**（台账比报告面严）。
+            "evidence": ("Typed" if declared is not None else "Syntactic") if proved else "none",
             "source": f"row:{f['name']}", "line": f["line"],
             "span": [f["line"], 0, f["line"], 0], "proved": proved,
             "function": f["name"], "declared": declared,
@@ -696,7 +698,7 @@ def analyze(toks: list, unit: str = "m") -> dict:
         sites.append({
             "id": sid("handle", f"{h['effect']}:{h['line']}"),
             "kind": "handle", "claim": "allow" if ok else "deny",
-            "obligation": "HandlerExhaustive", "evidence": "Syntactic",
+            "obligation": "HandlerExhaustive", "evidence": "Syntactic" if ok else "none",
             "source": f"handle:{h['effect']}", "line": h["line"],
             "span": [h["line"], 0, h["line"], 0], "proved": ok,
             "effect": h["effect"]})
@@ -714,7 +716,7 @@ def analyze(toks: list, unit: str = "m") -> dict:
             sites.append({
                 "id": sid("resume", f"{h['effect']}:{a['op']}:{a['line']}"),
                 "kind": "resume", "claim": "allow" if linear else "deny",
-                "obligation": "ResumeLinear", "evidence": "LocalFlow",
+                "obligation": "ResumeLinear", "evidence": "LocalFlow" if linear else "none",
                 "source": f"arm:{a['op']}", "line": a["line"],
                 "span": [a["line"], 0, a["line"], 0], "proved": linear,
                 "effect": h["effect"], "op": a["op"], "count": a["resume"]})
@@ -722,7 +724,7 @@ def analyze(toks: list, unit: str = "m") -> dict:
         sites.append({
             "id": sid("row_call", f"{c['caller']}->{c['callee']}:{c['line']}"),
             "kind": "row_call", "claim": "allow" if c["proved"] else "deny",
-            "obligation": "EffectAllowed", "evidence": "Interproc",
+            "obligation": "EffectAllowed", "evidence": "Interproc" if c["proved"] else "none",
             "source": f"row:{c['callee']}", "line": c["line"],
             "span": [c["line"], 0, c["line"], 0], "proved": c["proved"],
             "caller": c["caller"], "callee": c["callee"],
@@ -731,7 +733,9 @@ def analyze(toks: list, unit: str = "m") -> dict:
         sites.append({
             "id": sid("effect_foreign", f"{f['name']}:{f['line']}"),
             "kind": "effect_foreign", "claim": "deny",
-            "obligation": "EffectBounded", "evidence": "Axiom",
+            # 这是**反例**不是 `Axiom`：`Axiom` 会销掉 `EffectBounded`（accept 里有它），
+            # 台账于是把"效应穿越 C 边界"记成证成 —— 反例的 evidence 必须是 none。
+            "obligation": "EffectBounded", "evidence": "none",
             "source": f"extern:{f['name']}", "line": f["line"],
             "span": [f["line"], 0, f["line"], 0], "proved": False,
             "function": f["name"]})

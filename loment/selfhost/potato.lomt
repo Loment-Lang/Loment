@@ -1652,12 +1652,23 @@ const PT_PASS: u32 = 155428;
 /// + 五个计数 `[域总数, 字面量 guard, 循环 guard, guard 总数, 撤销域数]`。
 const PT_DOMTAB: u32 = 156452;
 const PT_DOMCNT: u32 = 157476;
+/// E11 效应站点（`docs/341` A2c）：效应名表 `[name_tok, open, close, pad] × 64`、
+/// 函数表 `[name_tok, flags, decl_lo, decl_hi, inf_lo, inf_hi, body_open, body_close] × 512`、
+/// 调用边表 `[caller, callee] × 16384`，以及六个计数
+/// `[效应数, 函数数, 调用数, 有行且盖住的函数数, 无行函数数, 盖住的调用数]`。
+const PT_EFFTAB: u32 = 157496;
+const PT_EFFMAX: u32 = 64;
+const PT_FNTAB: u32 = 158520;
+const PT_FNMAX: u32 = 512;
+const PT_CALLTAB: u32 = 174904;
+const PT_CALLMAX: u32 = 16384;
+const PT_EFFCNT: u32 = 305976;
 const PT_TN: u32 = 46760;          // 收进池子的类型串条数（= 映射表条数）
 const PT_TCUR: u32 = 46764;        // 池子游标
 const PT_TMAX: u32 = 128;
 const PT_TSTRIDE: u32 = 64;
 const PT_TBUF_SZ: u32 = 256;
-const PT_SC_BYTES: u64 = 157496;    // 安全名表 + 首参表 + E3/E4/bounds 计数 + pass 块表 + E9 域表
+const PT_SC_BYTES: u64 = 306040;    // 安全名表 + … + E9 域表 + E11 效应表/函数表/调用边表
 
 /// 一个类型串在池子里的位置（`i` 是池子下标）。
 fn pt_tkey(sc: ptr, i: u32) -> u32 {
@@ -2547,6 +2558,385 @@ fn pt_lms_budgets(out: ptr, o: u32) -> u32 {
     return o;
 }
 
+// ---------------------------------------------------------------- E11 效应站点（`docs/341` A2c）
+//
+// 参考实现的站点来自 `loment/lspe/effects.py`。能**编译通过**的源里可达的只有三种：
+// `effect_decl`（每个 `effect`）、`row`（每个 `fn`）、`row_call`（每个本单元调用点）。
+// `perform` / `handle` / `resume` 在 A2 是 E023（拒编），到不了发射这一层。
+//
+// 证据与判决跟着级别走（`docs/341` §11）：有 `effects` 行且盖住推断 ⇒ `Typed`
+// （L1 起认）；没写行 ⇒ `Syntactic`（恒认）；调用点 ⇒ `Interproc`（L2 起认）。
+// 所以这里只存**事实**，级别截断留给 `pt_lspe` —— 与参考实现 `ledger.py` 同一条分界。
+
+fn pt_eff_p(unit: ptr, t: ptr, i: u32, ch: u32) -> bool {
+    if pt_kind(t, i) != 3 {
+        return false;
+    }
+    return (load8(unit, pt_off(t, i)) as u32) == ch;
+}
+
+/// 括号配对（只数同一种括号，与参考实现 `_match` 同形）。返回闭括号下标或 `PT_NONE`。
+fn pt_eff_match(unit: ptr, t: ptr, open: u32, hi: u32, oc: u32, cc: u32) -> u32 {
+    let d: u32 = 0;
+    let j: u32 = open;
+    while j < hi {
+        if pt_kind(t, j) == 3 {
+            let c: u32 = load8(unit, pt_off(t, j)) as u32;
+            if c == oc {
+                d = d + 1;
+            }
+            if c == cc {
+                if d > 0 {
+                    d = d - 1;
+                }
+                if d == 0 {
+                    return j;
+                }
+            }
+        }
+        j = j + 1;
+    }
+    return PT_NONE;
+}
+
+fn pt_eff_inspan(sc: ptr, i: u32, ne: u32) -> u32 {
+    let m: u32 = 0;
+    while m < ne {
+        let o: u32 = load32(sc, PT_EFFTAB + m * 16 + 4);
+        let c: u32 = load32(sc, PT_EFFTAB + m * 16 + 8);
+        if o <= i && i <= c {
+            return 1;
+        }
+        m = m + 1;
+    }
+    return 0;
+}
+
+/// `choose lspe_effects_true|false`：只认**深度 0**、`choose` 后面紧跟槽词，
+/// `set choose` 是定义不是取值（与参考实现 `_prescan_slot` 同一条）。
+fn pt_eff_on(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+    let d: u32 = 0;
+    let i: u32 = lo;
+    while i + 1 < hi {
+        if pt_kind(t, i) == 3 {
+            let c: u32 = load8(unit, pt_off(t, i)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                d = d + 1;
+            }
+            if c == 125 || c == 41 || c == 93 {
+                if d > 0 {
+                    d = d - 1;
+                }
+            }
+        } else if d == 0 && pt_kind(t, i) == 0 && pt_tis(unit, t, i, "choose") {
+            let skip: u32 = 0;
+            if i > lo && pt_kind(t, i - 1) == 0 && pt_tis(unit, t, i - 1, "set") {
+                skip = 1;
+            }
+            if skip == 0 {
+                if pt_tis(unit, t, i + 1, "lspe_effects_true") {
+                    return 1;
+                }
+                if pt_tis(unit, t, i + 1, "lspe_effects_false") {
+                    return 0;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// E11 的三张表与六个计数。**在写对象之前**跑完：超容量是点名的失败。
+/// 返回 0 = 成功；1/2/3 = 效应 / 函数 / 调用边超容量。
+fn pt_eff_census(unit: ptr, t: ptr, sc: ptr, lo: u32, hi: u32) -> u32 {
+    // brk 拿回来的那块不保证干净 —— 六个计数先归零（开关关着时也归零）。
+    let z: u32 = 0;
+    while z < 6 {
+        store32(sc, PT_EFFCNT + z * 4, 0);
+        z = z + 1;
+    }
+    if pt_eff_on(unit, t, lo, hi) == 0 {
+        return 0;
+    }
+    // ---- 1. 效应声明：名字 token + 块范围（参考实现 `_effects`）----
+    let ne: u32 = 0;
+    let i: u32 = lo;
+    while i < hi {
+        let hit: u32 = 0;
+        if i + 2 < hi && pt_kind(t, i) == 0 && pt_tis(unit, t, i, "effect")
+                && pt_kind(t, i + 1) == 0
+                && pt_eff_p(unit, t, i + 2, 123) {
+            let cl: u32 = pt_eff_match(unit, t, i + 2, hi, 123, 125);
+            if cl != PT_NONE {
+                if ne >= PT_EFFMAX {
+                    return 1;
+                }
+                store32(sc, PT_EFFTAB + ne * 16, i + 1);
+                store32(sc, PT_EFFTAB + ne * 16 + 4, i);
+                store32(sc, PT_EFFTAB + ne * 16 + 8, cl);
+                ne = ne + 1;
+                i = cl + 1;
+                hit = 1;
+            }
+        }
+        if hit == 0 {
+            i = i + 1;
+        }
+    }
+    // ---- 2. 函数：名字、声明行、体（参考实现 `_functions`）----
+    let nf: u32 = 0;
+    i = lo;
+    while i < hi {
+        let take: u32 = 0;
+        if pt_kind(t, i) == 0 && pt_tis(unit, t, i, "fn")
+                && pt_kind(t, i + 1) == 0 && pt_eff_inspan(sc, i, ne) == 0 {
+            let k: u32 = i + 2;
+            while k < hi && pt_eff_p(unit, t, k, 40) == false {
+                k = k + 1;
+            }
+            if k < hi {
+                let pc: u32 = pt_eff_match(unit, t, k, hi, 40, 41);
+                if pc != PT_NONE {
+                    let d: u32 = 0;
+                    let e: u32 = pc + 1;
+                    let end: u32 = PT_NONE;
+                    while e < hi && end == PT_NONE {
+                        if pt_kind(t, e) == 3 {
+                            let c: u32 = load8(unit, pt_off(t, e)) as u32;
+                            if c == 40 || c == 91 || c == 60 {
+                                d = d + 1;
+                            }
+                            if c == 41 || c == 93 || c == 62 {
+                                if d > 0 {
+                                    d = d - 1;
+                                }
+                            }
+                            if d == 0 && (c == 123 || c == 59) {
+                                end = e;
+                            }
+                        }
+                        if end == PT_NONE {
+                            e = e + 1;
+                        }
+                    }
+                    if end != PT_NONE {
+                        take = 1;
+                        // 行：从右括号之后到块的 `{` / 声明的 `;`，**最后一个** `effects`
+                        // （参考实现 `_row` 就地扫，不建类型视图）。
+                        let has: u32 = 0;
+                        let effi: u32 = 0;
+                        let dd: u32 = 0;
+                        let j: u32 = pc + 1;
+                        while j < end {
+                            if pt_kind(t, j) == 3 {
+                                let c: u32 = load8(unit, pt_off(t, j)) as u32;
+                                if c == 40 || c == 91 || c == 60 {
+                                    dd = dd + 1;
+                                }
+                                if c == 41 || c == 93 || c == 62 {
+                                    if dd > 0 {
+                                        dd = dd - 1;
+                                    }
+                                }
+                            } else if dd == 0 && pt_kind(t, j) == 0
+                                    && pt_tis(unit, t, j, "effects") {
+                                effi = j;
+                                has = 1;
+                            }
+                            j = j + 1;
+                        }
+                        let dl: u32 = 0;
+                        let dh: u32 = 0;
+                        if has == 1 {
+                            j = effi + 1;
+                            while j < end {
+                                if pt_kind(t, j) == 0 {
+                                    let m: u32 = 0;
+                                    while m < ne {
+                                        if lspe_teq(unit, t,
+                                                    load32(sc, PT_EFFTAB + m * 16),
+                                                    j) == 1 {
+                                            if m < 32 {
+                                                dl = dl | ((1 as u32) << m);
+                                            }
+                                            if m >= 32 {
+                                                dh = dh | ((1 as u32) << (m - 32));
+                                            }
+                                        }
+                                        m = m + 1;
+                                    }
+                                }
+                                j = j + 1;
+                            }
+                        }
+                        let bo: u32 = PT_NONE;
+                        let bc: u32 = PT_NONE;
+                        if pt_eff_p(unit, t, end, 123) {
+                            let bcl: u32 = pt_eff_match(unit, t, end, hi, 123, 125);
+                            if bcl != PT_NONE {
+                                bo = end;
+                                bc = bcl;
+                            } else {
+                                take = 0;
+                            }
+                        }
+                        if take == 1 {
+                            if nf >= PT_FNMAX {
+                                return 2;
+                            }
+                            let base: u32 = PT_FNTAB + nf * 32;
+                            store32(sc, base, i + 1);
+                            store32(sc, base + 4, has);
+                            store32(sc, base + 8, dl);
+                            store32(sc, base + 12, dh);
+                            // 推断掩码：先清掉（brk 回来的内存不保证干净）。
+                            store32(sc, base + 16, 0);
+                            store32(sc, base + 20, 0);
+                            store32(sc, base + 24, bo);
+                            store32(sc, base + 28, bc);
+                            nf = nf + 1;
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    // ---- 3. 调用边：本单元里声明过的函数（参考实现 `_calls`）----
+    let nc: u32 = 0;
+    let f: u32 = 0;
+    while f < nf {
+        let base: u32 = PT_FNTAB + f * 32;
+        let bo: u32 = load32(sc, base + 24);
+        let bc: u32 = load32(sc, base + 28);
+        if bo != PT_NONE {
+            let j: u32 = bo + 1;
+            while j < bc {
+                if pt_kind(t, j) == 0 && pt_eff_p(unit, t, j + 1, 40)
+                        && pt_eff_p(unit, t, j - 1, 46) == false {
+                    let g: u32 = 0;
+                    let hit: u32 = 0;
+                    while g < nf && hit == 0 {
+                        if lspe_teq(unit, t,
+                                    load32(sc, PT_FNTAB + g * 32), j) == 1 {
+                            if nc >= PT_CALLMAX {
+                                return 3;
+                            }
+                            store32(sc, PT_CALLTAB + nc * 8, f);
+                            store32(sc, PT_CALLTAB + nc * 8 + 4, g);
+                            nc = nc + 1;
+                            hit = 1;
+                        }
+                        g = g + 1;
+                    }
+                }
+                j = j + 1;
+            }
+        }
+        f = f + 1;
+    }
+    // ---- 4. 行推断的不动点（参考实现：`effective[caller] |= contract(callee)`）----
+    let round: u32 = 0;
+    let changed: u32 = 1;
+    while changed == 1 && round < nf + 2 {
+        changed = 0;
+        let e2: u32 = 0;
+        while e2 < nc {
+            let ci: u32 = load32(sc, PT_CALLTAB + e2 * 8);
+            let cj: u32 = load32(sc, PT_CALLTAB + e2 * 8 + 4);
+            let cb: u32 = PT_FNTAB + cj * 32;
+            let nl: u32 = load32(sc, cb + 8);
+            let nh: u32 = load32(sc, cb + 12);
+            if load32(sc, cb + 4) == 0 {
+                nl = load32(sc, cb + 16);
+                nh = load32(sc, cb + 20);
+            }
+            let ob: u32 = PT_FNTAB + ci * 32;
+            let ol: u32 = load32(sc, ob + 16);
+            let oh: u32 = load32(sc, ob + 20);
+            let al: u32 = ol | nl;
+            let ah: u32 = oh | nh;
+            if al != ol || ah != oh {
+                store32(sc, ob + 16, al);
+                store32(sc, ob + 20, ah);
+                changed = 1;
+            }
+            e2 = e2 + 1;
+        }
+        round = round + 1;
+    }
+    // ---- 5. 六个计数：总数 / 有行且盖住 / 无行 / 盖住的调用 ----
+    let rdo: u32 = 0;
+    let rnd: u32 = 0;
+    f = 0;
+    while f < nf {
+        let base: u32 = PT_FNTAB + f * 32;
+        if load32(sc, base + 4) == 0 {
+            rnd = rnd + 1;
+        } else {
+            let dl: u32 = load32(sc, base + 8);
+            let dh: u32 = load32(sc, base + 12);
+            let il: u32 = load32(sc, base + 16);
+            let ih: u32 = load32(sc, base + 20);
+            if (il & (4294967295 - dl)) == 0
+                    && (ih & (4294967295 - dh)) == 0 {
+                rdo = rdo + 1;
+            }
+        }
+        f = f + 1;
+    }
+    let cok: u32 = 0;
+    let e3: u32 = 0;
+    while e3 < nc {
+        let ci: u32 = load32(sc, PT_CALLTAB + e3 * 8);
+        let cj: u32 = load32(sc, PT_CALLTAB + e3 * 8 + 4);
+        let cb: u32 = PT_FNTAB + cj * 32;
+        let nl: u32 = load32(sc, cb + 8);
+        let nh: u32 = load32(sc, cb + 12);
+        if load32(sc, cb + 4) == 0 {
+            nl = load32(sc, cb + 16);
+            nh = load32(sc, cb + 20);
+        }
+        let ok: u32 = 1;
+        let ob: u32 = PT_FNTAB + ci * 32;
+        if load32(sc, ob + 4) == 1 {
+            let dl: u32 = load32(sc, ob + 8);
+            let dh: u32 = load32(sc, ob + 12);
+            if (nl & (4294967295 - dl)) != 0 || (nh & (4294967295 - dh)) != 0 {
+                ok = 0;
+            }
+        }
+        cok = cok + ok;
+        e3 = e3 + 1;
+    }
+    store32(sc, PT_EFFCNT + 0, ne);
+    store32(sc, PT_EFFCNT + 4, nf);
+    store32(sc, PT_EFFCNT + 8, nc);
+    store32(sc, PT_EFFCNT + 12, rdo);
+    store32(sc, PT_EFFCNT + 16, rnd);
+    store32(sc, PT_EFFCNT + 20, cok);
+    return 0;
+}
+
+/// 驱动器的 **检查之前** 预跑：`check_arena` 的 `desugar_effects` 会把声明与
+/// `effects` 行从**同一个 token 缓冲**里擦掉（`docs/346` A2），而台账要数的正是它们。
+/// 所以这一段必须在擦除之前、由驱动器用一块自己的缓冲跑完，结果再交给 `potato_emit`。
+pub fn eff_scratch_bytes() -> u64 {
+    return PT_SC_BYTES;
+}
+
+pub fn eff_precount(unit: ptr, t: ptr, nt: u32, sc: ptr) -> u32 {
+    let rr: u64 = pt_root_range(unit, t, nt);
+    if rr == PT_NONE as u64 {
+        // 没有 `module` —— `potato_emit` 会用同一条规则点名失败，这里不抢先报。
+        return 0;
+    }
+    let lo: u32 = (rr / 4294967296) as u32;
+    let hi: u32 = (rr % 4294967296) as u32;
+    return pt_eff_census(unit, t, sc, lo, hi);
+}
+
 /// v16（`docs/262`，用户 2026-10-18 定第七维）：LSPE 台账。**必填**，紧跟在 `lms` 之后 ——
 /// ⚠ **次序是判据**：参考实现那边 `"lspe"` 紧跟在 `"lms"` 之后，两串字节逐字节比。
 /// P0 的骨架里计数全 0、不变量 `not_run` —— 这是**明说的未运行**，不是假 `ok`。
@@ -2608,6 +2998,16 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
     let drev: u32 = 0;
     let ddom_prov: u32 = 0;
     let dloop_prov: u32 = 0;
+    // E11 效应站点（`docs/341` A2c）：事实由 `pt_eff_census` 放进 `PT_EFFCNT`，
+    // 级别截断在这里做（`Typed` 从 L1 起、`Interproc` 从 L2 起）。
+    let eff_t: u32 = 0;
+    let eff_p: u32 = 0;
+    let en: u32 = 0;
+    let ef: u32 = 0;
+    let ec: u32 = 0;
+    let erd: u32 = 0;
+    let ern: u32 = 0;
+    let eck: u32 = 0;
     let di: u32 = 0;
     let b3: u32 = 0;
     let fnd: u32 = 0;
@@ -2645,6 +3045,20 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
         drev = load32(sc, PT_DOMCNT + 16);
         bt = load32(sc, PT_L3CNT + 56);
         bcov = load32(sc, PT_L3CNT + 60);
+        en = load32(sc, PT_EFFCNT + 0);
+        ef = load32(sc, PT_EFFCNT + 4);
+        ec = load32(sc, PT_EFFCNT + 8);
+        erd = load32(sc, PT_EFFCNT + 12);
+        ern = load32(sc, PT_EFFCNT + 16);
+        eck = load32(sc, PT_EFFCNT + 20);
+        eff_t = en + ef + ec;
+        eff_p = en + ern;
+        if lvl >= 1 {
+            eff_p = eff_p + erd;
+        }
+        if lvl >= 2 {
+            eff_p = eff_p + eck;
+        }
         // ---- 析构器（`#747`）：`impl Drop for T { … fn drop` 一个一条 ----
         di = lo;
         while di < hi {
@@ -2707,7 +3121,7 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
         dloop_prov = dloop;
     }
     let nsite: u32 = gt + it + ft + alt + nt + et + ct + bt + drop_n + wf_n
-                     + dtot + dacc + drev;
+                     + dtot + dacc + drev + eff_t;
     store32(sp, 0, nsite);
     // WF 的证据是 `Typed`：L0 不认（`docs/262` §5.6）；DropHonest 是 `Assumed`，恒认。
     wf_prov = wf_n * g_ok;
@@ -2715,7 +3129,7 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
     let nproved: u32 = (gt - gcov) * g_ok + (ip - icovp)
                        + (fp + alp + np + ep) * g_ok + cp * c_ok
                        + (bt - bcov) + drop_n + wf_prov
-                       + ddom_prov + dlit + dloop_prov + drev;
+                       + ddom_prov + dlit + dloop_prov + drev + eff_p;
     let nund: u32 = nsite - nproved;
     // 默认档下每条没被 pass 覆盖的 UNDECIDED 都有一条 Assumed 地板（`docs/262` §6）；
     // `revocable` 域是**设计上**的假设（`docs/146` §3），也进这一格。
@@ -2827,6 +3241,18 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
             o = pt_dec(out, o, drop_n as u64);
             o = pt_str(out, o, "/");
             o = pt_dec(out, o, drop_n as u64);
+            o = pt_str(out, o, "\"");
+            first = 0;
+        }
+        if eff_t > 0 {
+            if first == 0 {
+                o = pt_str(out, o, ",\n");
+            }
+            o = pt_key(out, o, 3, "EffectAllowed");
+            o = pt_str(out, o, "\"");
+            o = pt_dec(out, o, eff_p as u64);
+            o = pt_str(out, o, "/");
+            o = pt_dec(out, o, eff_t as u64);
             o = pt_str(out, o, "\"");
             first = 0;
         }
@@ -2942,7 +3368,9 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
     o = pt_dec(out, o, nproved as u64);
     o = pt_str(out, o, ",\n");
     o = pt_key(out, o, 3, "falsification");
-    o = pt_dec(out, o, nsite as u64);
+    // `falsification` 只数**有配对反证探针**的义务（`registry.LSPE_PROBED_OBLIGATIONS`）。
+    // E11 的五种义务还不在其中，所以效应站点不能进这一格（`docs/341` §11）。
+    o = pt_dec(out, o, (nsite - eff_t) as u64);
     o = pt_str(out, o, ",\n");
     o = pt_key(out, o, 3, "cross_exam");
     o = pt_dec(out, o, nsite as u64);
@@ -6252,7 +6680,7 @@ fn pt_layouts(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32) ->
 /// 键的顺序与参考实现**逐字对齐**(`emit_potato` 那个字面量 dict 的顺序): 对象是拿
 /// 字节比的, 顺序也在比较面里。
 pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr,
-                   lvl: u32, prof: u32) -> u32 {
+                   lvl: u32, prof: u32, effc: ptr) -> u32 {
     let rr: u64 = pt_root_range(unit, t, nt);
     if rr == PT_NONE as u64 {
         return pt_wfail("--emit-potato: the unit declares no `module` at all (the reference implementation's front door has the same rule)");
@@ -6313,6 +6741,19 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr,
     if lspe_domain(unit, t, lo, hi, ptr_add(sc, PT_DOMTAB),
                    ptr_add(sc, PT_DOMCNT)) == 1 {
         return pt_wfail("--emit-potato: more domain declarations than this section takes (64)");
+    }
+    // E11 效应站点（`docs/341` A2c）：**计数是驱动器在检查之前预跑的**
+    // （`eff_precount`）—— `check_arena` 会把 `effect` 声明与 `effects` 行擦掉，
+    // 走到这里已经看不见它们了。把那段结果搬进本函数的工作区，`pt_lspe` 只读这里。
+    let eav: u64 = effc as u64;
+    let eq: u32 = 0;
+    while eq < 6 {
+        let ev: u32 = 0;
+        if eav != 0 {
+            ev = load32(effc, PT_EFFCNT + eq * 4);
+        }
+        store32(sc, PT_EFFCNT + eq * 4, ev);
+        eq = eq + 1;
     }
     store32(sc, PT_N, 0);
     store32(sc, PT_PC, 0);

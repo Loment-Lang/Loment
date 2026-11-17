@@ -16545,6 +16545,12 @@ def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3,
     _lms_on = frozenset(n for n in LMS_TOGGLES if _lms_level(mod, n))
     mod.lspe_sites, mod.lspe_unsourced_lines, mod.lspe_passes = lspe.census(
         tt, mod.name, lms=_lms_on)
+    # **A2c：E11 的效应站点进台账**（`docs/341` §11）。只在 `lspe_effects_true` 时
+    # 挂上；默认关时一行都不加，旧产物的 `lspe` 块逐字节不变。
+    # 站点形状与报告面同一个函数产出 —— 不另写一份分析（两份必然漂）。
+    if (getattr(mod, "slots", {}) or {}).get("effects") == "true":
+        mod.lspe_sites = list(mod.lspe_sites) + list(
+            lspe.effects_analyze(tt, mod.name)["sites"])
     mod.lspe_level = lspe_level
     mod.lspe_mode = lspe_mode
     # 回答通道（`docs/262` §6 / `#755`）：同目录的 `lspe.answers` 是团队共享、可评审、

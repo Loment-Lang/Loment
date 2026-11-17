@@ -3991,6 +3991,37 @@ fn _start() -> u32 {
         wdiag_file(dfd, scr, ap, an, 23, str_ptr(dm), str_len(dm));
         return fail(dm);
     }
+    // E11 效应站点（`docs/341` A2c）：`check_arena` 里的 `desugar_effects` 会把
+    // `effect` 声明与 `effects` 行从**这块 token 缓冲**里擦掉（`docs/346` A2），而台账
+    // 要数的正是它们。所以计数放在检查**之前**预跑，结果经 `effc` 交给 `potato_emit`。
+    // 只有 `--emit-potato` 会用到；普通编译不付这份扫描。
+    let effv: u64 = 0;
+    let effc: ptr = effv as ptr;
+    if pmode == 1 {
+        let eb: u64 = sys_alloc(eff_scratch_bytes());
+        if eb == 0 {
+            let dm: str = "out of memory: cannot allocate the effect-ledger workspace (brk failed)";
+            wdiag_file(dfd, scr, ap, an, 33, str_ptr(dm), str_len(dm));
+            return fail(dm);
+        }
+        effc = eb as ptr;
+        let erc: u32 = eff_precount(unit, toks2, nt, effc);
+        if erc == 1 {
+            let dm: str = "--emit-potato: more effect declarations than this section takes (64)";
+            wdiag_file(dfd, scr, ap, an, 23, str_ptr(dm), str_len(dm));
+            return fail(dm);
+        }
+        if erc == 2 {
+            let dm: str = "--emit-potato: more function declarations than the effect-row table takes (512)";
+            wdiag_file(dfd, scr, ap, an, 23, str_ptr(dm), str_len(dm));
+            return fail(dm);
+        }
+        if erc == 3 {
+            let dm: str = "--emit-potato: more call sites than the effect-row table takes (16384)";
+            wdiag_file(dfd, scr, ap, an, 23, str_ptr(dm), str_len(dm));
+            return fail(dm);
+        }
+    }
     // `lspe pass "reason" { 体 }`（`docs/262` §5.16 / `#786`）：参考实现在**解析**里把
     // 头与括号拆平（块体就是当前位置的语句）。自举侧没有 AST，于是在 token 层做同一件事
     // —— 检查与发射看**拆平后**的流；`--emit-potato` 看**原流**（LSPE 的块表要从头与
@@ -4229,7 +4260,7 @@ fn _start() -> u32 {
             return fail(dm);
         }
         let pn: u32 = potato_emit(unit, toks2, nt, sw, ir, lvl,
-                                  load32(scr, PROF_OFF));
+                                  load32(scr, PROF_OFF), effc);
         if pn == 0 {
             return die(1);
         }

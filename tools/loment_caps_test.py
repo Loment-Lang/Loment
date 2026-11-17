@@ -124,8 +124,8 @@ def test(fn):
 #: 捕获表的步长 `CG_DFR_STRIDE`（84 B/条，**不是**上界，来路写在 `EXPLAINED`）与三个
 #: 真上界 `CG_MAXDFR` / `CG_MAXDFRAMES` / `CG_MAXDFARGS`（都判了 `>=` 并 `cg_fail`）。
 #: 条数 251 → **255**、沉默 168 → **169**（多出来的那一处就是步长本身）。
-CAPACITY_SITES = 262
-SILENT_SITES = 170
+CAPACITY_SITES = 265
+SILENT_SITES = 173
 
 #: 第二类：字面量上界（`#770`）。`[T; N]` 与 `literal:<N>` 各自钉住总数与沉默的那一份。
 #: 2026-11-12 `docs/348`：间接调用那一支也走同一张 20 格实参类型槽表 ⇒ 多一处 literal:20。
@@ -234,8 +234,11 @@ SILENT_NAMES = frozenset((
     "POOL_CAP",
     "PROC_WS",
     "PT_AMAX",
+    "PT_CALLMAX",
+    "PT_EFFMAX",
     "PT_EMAX",
     "PT_FMAX",
+    "PT_FNMAX",
     "PT_GLRMX",
     "PT_GMAX",
     "PT_L0CAP",

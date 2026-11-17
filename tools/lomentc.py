@@ -1848,6 +1848,27 @@ class Struct:
 
 
 @dataclass
+class ClassMethod:
+    """C0 的类方法骨架（`docs/345` §1.1）：修饰符是数据，语义留给 C1/C2。"""
+    func: "Func"
+    virtual: bool = False
+    override: bool = False
+    abstract: bool = False
+
+
+@dataclass
+class ClassDecl:
+    """C0 的类骨架：只存名字/父类/字段/方法与修饰符；不发射、不进 vtable。"""
+    name: str
+    line: int
+    parent: str = ""
+    abstract: bool = False
+    pub: bool = False
+    fields: list = field(default_factory=list)  # list[tuple[str, str, int]]
+    methods: list = field(default_factory=list)  # list[ClassMethod]
+
+
+@dataclass
 class FieldAccess:
     obj: object
     name: str
@@ -1978,6 +1999,20 @@ class EnumCtor:
     enum: str
     variant: str
     arg: object
+    line: int
+
+
+@dataclass
+class AssocCall:
+    """`Type::name(args)` —— 类/枚举的关联调用（`docs/345` §1.1）。
+
+    解析器手里没有类型表，分不清 `Shape::new` 与 `Color::Rgb`；降级那一趟
+    （`_lower_classes`）拿到本模块的类/枚举之后把它落成 `Call` 或 `EnumCtor`。
+    单实参的 `Color::Rgb(x)` 仍按旧路直接出 `EnumCtor`，所以默认档的 AST 不变。
+    """
+    ty: str
+    name: str
+    args: list
     line: int
 
 
@@ -3151,6 +3186,19 @@ def _resolve_domains(mod, cap_base: int | None = None) -> None:
         attach(f.body, [], cf, mf, aliases.get(f.name, {}))
 
 
+def _method_fn(ot: str | None, name: str, funcs: dict):
+    """按接收者类型找方法；`&T` / `&mut T` 自动解一层（与字段访问同一条规则）。"""
+    if not ot:
+        return None
+    fn = funcs.get(f"{ot}_{name}")
+    if fn is not None:
+        return fn
+    base = _deref_type(ot)
+    if base and base != ot:
+        return funcs.get(f"{base}_{name}")
+    return None
+
+
 def _resolve_methods(mods, funcs_map: dict, structs: dict, enums: dict) -> None:
     """给 MethodCall 打上具体函数名 (静态派发): obj.m(...) -> Type_m(obj, ...)。"""
     def rx(e, scope) -> None:
@@ -3159,8 +3207,9 @@ def _resolve_methods(mods, funcs_map: dict, structs: dict, enums: dict) -> None:
             for a in e.args:
                 rx(a, scope)
             ot = expr_type(e.obj, scope, funcs_map, structs)
-            if ot:
-                e.mangled = f"{ot}_{e.name}"
+            fn = _method_fn(ot, e.name, funcs_map)
+            if fn is not None:
+                e.mangled = fn.name
             return
         if isinstance(e, Bin):
             rx(e.left, scope)
@@ -3274,6 +3323,11 @@ class Module:
     use_lines: list[tuple[str, int]] = field(default_factory=list)
     caps: list[Capability] = field(default_factory=list)
     structs: list[Struct] = field(default_factory=list)
+    #: **类声明**（`docs/345`；只在 `choose class_on` 时非空）。解析末尾就降成
+    #: 结构体 + 普通函数（C1），这里只保留到 `_lower_classes` 为止。
+    classes: list[ClassDecl] = field(default_factory=list)
+    #: 降级后是否带着类方法：`prepare()` 要因此跑一遍方法名解析（C1）。
+    has_class_methods: bool = False
     enums: list[EnumDecl] = field(default_factory=list)
     consts: list[ConstDecl] = field(default_factory=list)
     traits: list[Trait] = field(default_factory=list)
@@ -3507,6 +3561,10 @@ CORE_DIMS: dict[str, tuple[str, ...]] = {
     # （`docs/232` §3.3）：默认产物保持**静态调用图**，`closed` 与可达性门禁的前提不动。
     # 取值只说"有没有"，与 `runtime` / `vm` 同一条纪律。
     "fp": ("fp", "no_fp"),
+    # **类继承**（`docs/345` C0，`docs/344` 的地基）。`class_off` 是今天的语法；
+    # `class_on` 才收 `class`/`extends`/`virtual`/`override`/`abstract`。C0 只落语法
+    # 骨架，布局与派发在 C1/C2。默认关，现有程序逐字节不变。
+    "class": ("class_off", "class_on"),
 }
 #: **维度之后的第二位置**（用户 2026-11-08）：`<维>_<槽>_<值>`。
 #:
@@ -3538,7 +3596,7 @@ CORE_SLOT_DEFAULTS = {"aicheck": "false", "effects": "false"}
 #: `lms` / `lspe` / `lifetime` 排在最后：它们**没有冲突对**，追加在尾部不会改动
 #: 任何既有配对的先后。
 CORE_DIM_ORDER: tuple[str, ...] = ("mode", "gc", "runtime", "port", "vm", "lms", "lspe",
-                                   "lifetime", "fp")
+                                   "lifetime", "fp", "class")
 #: 所有核心模式的取值 —— "这一个 `choose` 是核心模式还是开关"就看它在不在这里面。
 #: 槽取值也算核心写法（否则它会被当成**用户开关**吞掉，`choose lspe_aicheck_true`
 #: 就变成一次未定义的开关取值）。
@@ -3549,7 +3607,8 @@ CORE_DIM_OF = {w: d for d, ws in CORE_DIMS.items() for w in ws}
 #: 每一维**不写**时的取值 —— 默认档，且默认**不改变任何现有程序的行为**。
 CORE_DEFAULTS = {"mode": "std", "gc": "gc_manual", "runtime": "no_runtime",
                  "port": "sealed", "vm": "no_vm", "lms": "lms_full",
-                 "lspe": "lspe_open_admin", "lifetime": "lifetime_auto", "fp": "no_fp"}
+                 "lspe": "lspe_open_admin", "lifetime": "lifetime_auto", "fp": "no_fp",
+                 "class": "class_off"}
 #: 生命周期维在**旧版次**里的默认值（`docs/305`：封版的版次一个字节都不变）。
 #: 2026.3 起才翻到 `lifetime_auto`（用户 2026-11-08 裁）。
 LIFETIME_DEFAULT_EDITION = "tur2026.3"
@@ -3583,6 +3642,7 @@ CORE_DIM_ZH = {
     "lspe": "安全审计（`lspe_open_admin` / `lspe_close_admin`）",
     "lifetime": "生命周期（`lifetime_no` / `lifetime_auto` / `lifetime_manual`）",
     "fp": "间接分派（`fp` / `no_fp`）",
+    "class": "类继承（`class_off` / `class_on`）",
 }
 
 #: **LMS 的七个细开关**（`docs/253` §11.4 ①），次序就是七级的次序 ——
@@ -4150,6 +4210,29 @@ def _prescan_slot(toks: list, slot: str) -> str:
     return CORE_SLOT_DEFAULTS[slot]
 
 
+def _prescan_dim(toks: list, dim: str) -> str:
+    """解析之前把某一维的 `choose <值>` 找出来（`docs/345` C0）。
+
+    只认**深度 0**、`choose` 后面紧跟该维取值的形状；`set choose` 是定义，不算取值。
+    默认直接读 `CORE_DEFAULTS`；`class` 当前只有这一个用户。
+    """
+    depth = 0
+    i = 0
+    while i + 1 < len(toks):
+        t = toks[i]
+        if t.kind == "punct" and t.val in "{[(":
+            depth += 1
+        elif t.kind == "punct" and t.val in "}])":
+            depth -= 1
+        elif depth == 0 and t.kind == "ident" and t.val == "choose":
+            if not (i > 0 and toks[i - 1].kind == "ident" and toks[i - 1].val == "set"):
+                nxt = toks[i + 1]
+                if nxt.kind == "ident" and nxt.val in CORE_DIMS[dim]:
+                    return nxt.val
+        i += 1
+    return CORE_DEFAULTS[dim]
+
+
 def _prescan_lifetime(toks: list, profile: str) -> str:
     """解析之前把 `choose lifetime_*` 找出来（`docs/299`）。
 
@@ -4203,6 +4286,9 @@ class Parser:
         #: **效应语法面**（`docs/341` A2）。与 `lifetime` 同一条"构造时预扫"：
         #: `choose` 可能写在用到它的声明之后，而语法决策是**边走边做**的。
         self.effects = _prescan_slot(toks, "effects") == "true"
+        #: **类语法骨架**（`docs/345` C0）。`choose class_on` 可能写在 `class` 之后；
+        #: 与 `lifetime` / `effects` 同一条构造时预扫。默认 `class_off` 时完全不认。
+        self.class_on = _prescan_dim(toks, "class") == "class_on"
         #: 解析到、但 A2 不发射的效应构造（`perform` / `handle` / `resume`）。
         #: `parse()` 末尾抄进 `Module.effect_runtime`，`check()` 统一报 E023。
         self.effect_runtime: list[tuple[str, int, int]] = []
@@ -4329,6 +4415,10 @@ class Parser:
         self.expect("ident", "module", "（文件必须以 module 开头）")
         mod = Module(self.ident("模块名"))
         self.parse_items(mod)
+        # `docs/345` C1：类在**读入时**就降成“结构体 + 普通函数”。放在这里而不是
+        # `prepare()`，是为了让 L0/L1/L2 与 deref 小结也能看到方法体 —— 它们按 token
+        # 跨度算，方法体是 `parse_fn` 收的，晚于这一步就没有跨度了。
+        _lower_classes(mod)
         # **deref-only 小结**（`docs/210` §7 那次放宽的原料）：每个函数算一次"首参流进
         # 哪些被调"。**规则定义在 token 流上**（同 L0/L1/L2），所以在这里算 —— 解析器是
         # 唯一同时握着 token 流与函数体跨度的地方。**与档位无关**：它只描述形状，"安全
@@ -4413,6 +4503,16 @@ class Parser:
                 c = self.parse_const()
                 c.pub = is_pub
                 mod.consts.append(c)
+            elif (t.val == "abstract" and self.class_on
+                  and self.peek(1).kind == "ident" and self.peek(1).val == "class"):
+                self.next()
+                c = self.parse_class(abstract=True)
+                c.pub = is_pub
+                mod.classes.append(c)
+            elif t.val == "class" and self.class_on:
+                c = self.parse_class()
+                c.pub = is_pub
+                mod.classes.append(c)
             elif t.val == "excluded":
                 self.next()
                 mod.excluded.append(self.expect("string", None, "（出界声明）").val)
@@ -4556,6 +4656,46 @@ class Parser:
                 self.accept("punct", ";")
         self.expect("punct", "}")
         return Struct(name, fields, kw.line, False, tparams, field_lines=field_lines)
+
+    def parse_class(self, abstract: bool = False) -> ClassDecl:
+        """C0 类骨架（`docs/345` §1.1）：字段 + 方法 + 修饰符；不发射。
+
+        `[abstract] class Name [extends Base] { field: T, [virtual|override] fn … {…}
+        abstract fn …; }`。布局、槽位、`override` 校验与 `super` 在 C1/C2。
+        """
+        kw = self.expect("ident", "class")
+        name = self.ident("类名")
+        parent = ""
+        if self.accept("ident", "extends"):
+            parent = self.ident("父类名")
+        self.expect("punct", "{")
+        fields: list[tuple[str, str, int]] = []
+        methods: list[ClassMethod] = []
+        while not self.at("punct", "}"):
+            modifier = ""
+            if (self.peek().kind == "ident"
+                    and self.peek().val in ("virtual", "override", "abstract")):
+                modifier = self.next().val
+                if not (self.peek().kind == "ident" and self.peek().val == "fn"):
+                    raise LomError(self.peek().line, self.peek().col,
+                                   f"类体里的 {modifier} 之后只允许 fn（`docs/345` §1.1）")
+            if self.at("ident", "fn"):
+                f = self.parse_fn(sig_only=(modifier == "abstract"))
+                methods.append(ClassMethod(f, virtual=(modifier == "virtual"),
+                                           override=(modifier == "override"),
+                                           abstract=(modifier == "abstract")))
+            else:
+                if modifier:
+                    raise LomError(self.peek().line, self.peek().col,
+                                   f"类体里的 {modifier} 之后只允许 fn（`docs/345` §1.1）")
+                line = self.peek().line
+                fn = self.ident("字段名")
+                self.expect("punct", ":")
+                fields.append((fn, self.type_name(), line))
+                if not self.accept("punct", ","):
+                    self.accept("punct", ";")
+        self.expect("punct", "}")
+        return ClassDecl(name, kw.line, parent, abstract, False, fields, methods)
 
     def parse_enum(self) -> EnumDecl:
         """L1 枚举: 变体可带单载荷 (v1)。"""
@@ -4900,7 +5040,7 @@ class Parser:
             self.dom_stack.pop()
         return blk
 
-    def parse_fn(self, extern: bool = False) -> Func:
+    def parse_fn(self, extern: bool = False, sig_only: bool = False) -> Func:
         kw = self.expect("ident", "fn")
         name = self.ident("函数名")
         tparams: list[str] = []
@@ -4950,14 +5090,14 @@ class Parser:
                 raise LomError(self.peek().line, self.peek().col,
                                f"期望 效应名（`effects` 后面至少要写一个），"
                                f"得到 {self.peek().val!r}")
-        if extern:
+        if extern or sig_only:
             # 外部函数**没有函数体**, 末尾是分号 (docs/143 §3.1)。泛型参数对它也说不通 ——
             # 单态化要靠看得到源码, 而 extern 的定义根本不在手上。
-            if tparams:
+            if extern and tparams:
                 raise LomError(kw.line, kw.col, f"外部函数 {name} 不能带类型参数")
-            self.expect("punct", ";", "（外部函数声明末尾要分号）")
+            self.expect("punct", ";", "（声明末尾要分号）")
             f = Func(name, params, ret, [], kw.line, False, tparams)
-            f.extern = True
+            f.extern = extern
             f.effects = row
             return f
         body_at = self.i + 1          # '{' 之后 —— 与自举侧 find_body 同一个起点
@@ -5608,9 +5748,16 @@ class Parser:
                 vn = self.ident("变体名")
                 if self.at("punct", "("):
                     self.next()
-                    arg = self.parse_expr()
+                    args = []
+                    while not self.at("punct", ")"):
+                        args.append(self.parse_expr())
+                        if not self.accept("punct", ","):
+                            break
                     self.expect("punct", ")")
-                    return EnumCtor(name, vn, arg, t.line)
+                    # 单实参保持旧路：枚举变体载荷只有一个，默认档的 AST/产物都不动。
+                    if len(args) == 1:
+                        return EnumCtor(name, vn, args[0], t.line)
+                    return AssocCall(name, vn, args, t.line)
                 return EnumPath(name, vn, t.line)
             if self.at("punct", "("):
                 self.next()
@@ -6329,6 +6476,7 @@ def prepare(mod: Module, deps: list[Module] | None = None) -> tuple[Module, list
             or any(s.tparams for m in allmods for s in m.structs)
             or any(e.tparams for m in allmods for e in m.enums)
             or any(m.impls for m in allmods)
+            or any(getattr(m, "has_class_methods", False) for m in allmods)
             or _has_try(allmods)
             or _has_guard(allmods)):
         return mod, deps
@@ -6401,7 +6549,7 @@ def prepare(mod: Module, deps: list[Module] | None = None) -> tuple[Module, list
             m.funcs = [f for f in m.funcs if not f.tparams]
 
     funcs_map = {f.name: f for m in allmods for f in m.funcs}
-    if any(m.impls for m in allmods):
+    if any(m.impls or getattr(m, "has_class_methods", False) for m in allmods):
         _resolve_methods(allmods, funcs_map, structs_map, enums_map)
     if _has_try(allmods):  # M9: ? 语法糖
         _desugar_try(allmods, funcs_map, structs_map)
@@ -6523,7 +6671,7 @@ def expr_type(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[st
         return None
     if isinstance(e, MethodCall):
         ot = expr_type(e.obj, scope, funcs, structs)
-        fn = funcs.get(f"{ot}_{e.name}") if ot else None
+        fn = _method_fn(ot, e.name, funcs)
         return fn.ret if fn else None
     if isinstance(e, Lambda):
         inner = dict(scope)
@@ -6954,9 +7102,9 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
     if isinstance(e, MethodCall):
         _walk_expr(e.obj, scope, funcs, structs, errs, enums, lifetime)
         ot = expr_type(e.obj, scope, funcs, structs)
-        fn = funcs.get(f"{ot}_{e.name}") if ot else None
+        fn = _method_fn(ot, e.name, funcs)
         if fn is None:
-            errs.append(f"{e.line}: 类型 {ot} 没有方法 {e.name}（需要 impl）")
+            errs.append(f"{e.line}: 类型 {ot} 没有方法 {e.name}（需要 impl 或类方法）")
         elif len(e.args) + 1 != len(fn.params):
             errs.append(f"{e.line}: 方法 {e.name} 需要 {len(fn.params) - 1} 个实参，得到 {len(e.args)}")
         for a in e.args:
@@ -8762,6 +8910,175 @@ def _effect_front_errors(mod: Module, deps: list[Module] | None = None) -> list[
         errs.append(f"{line}: 这个后端还没有实现效应处理器的运行期"
                     f"（`{kind}`，docs/341 的 A3）—— 先删掉它，或等 A3")
     return errs
+
+
+def _class_sig(f: Func) -> tuple:
+    """类方法的签名（不含接收者）：`override` 只比这一截。"""
+    return ([p.type for p in f.params[1:]], f.ret)
+
+
+def _assoc_replace(node, classes: set[str], enums: set[str]):
+    """把 `EnumCtor`（类名）与 `AssocCall` 落成 `Call`；枚举变体保持 `EnumCtor`。"""
+    if isinstance(node, list):
+        for k, x in enumerate(node):
+            node[k] = _assoc_replace(x, classes, enums)
+        return node
+    if isinstance(node, tuple):
+        return tuple(_assoc_replace(x, classes, enums) for x in node)
+    if not is_dataclass(node):
+        return node
+    if isinstance(node, EnumCtor) and node.enum in classes:
+        return _assoc_replace(Call(f"{node.enum}_{node.variant}", [node.arg], node.line),
+                              classes, enums)
+    if isinstance(node, AssocCall):
+        if node.ty in enums:
+            raise LomError(node.line, 1,
+                           f"枚举 {node.ty}::{node.name} 的载荷只能有一个实参"
+                           f"（`docs/143`；多个字段用结构体/类）")
+        if node.ty not in classes:
+            raise LomError(node.line, 1,
+                           f"未知类型 {node.ty}（`{node.ty}::{node.name}` 的关联调用）")
+        return _assoc_replace(Call(f"{node.ty}_{node.name}", node.args, node.line),
+                              classes, enums)
+    for f_ in fields(node):
+        setattr(node, f_.name, _assoc_replace(getattr(node, f_.name), classes, enums))
+    return node
+
+
+def _lower_classes(mod: Module) -> None:
+    """`docs/345` C1：单继承布局 + 非虚方法 + `self` + 构造（参考侧）。
+
+    **降级目标**：每个类 -> 一个结构体（父类字段前缀 + 自己的字段）与一组普通函数
+    `<类>_<方法>`。于是检查器/发射器不必认识“类”这个词 —— 静态派发、字段访问、
+    结构体字面量都走原来的路。
+
+    C1 只收静态派发：`virtual` / `abstract` 从 C2 起（vtable）；`override` 收，但仍是
+    静态解析（按接收者的静态类型选实现）。父类必须在**本模块** —— 跨模块的类层次
+    要等 C2/C4 一起补，先点名拒，别让 `prepare()` 静默丢掉父类。
+    """
+    import copy as _copy
+
+    if not mod.classes:
+        return
+    by_name: dict[str, ClassDecl] = {}
+    for c in mod.classes:
+        if c.name in by_name:
+            raise LomError(c.line, 1, f"类 {c.name} 重复定义")
+        if c.name in {s.name for s in mod.structs} or c.name in {e.name for e in mod.enums}:
+            raise LomError(c.line, 1, f"类 {c.name} 与同名的结构体/枚举冲突")
+        by_name[c.name] = c
+
+    # 拓扑序：父类先降，子类才能拿到组合后的字段表。
+    order: list[ClassDecl] = []
+    state: dict[str, int] = {}
+
+    def visit(c: ClassDecl, stack: list[str]) -> None:
+        st = state.get(c.name, 0)
+        if st == 1:
+            raise LomError(c.line, 1, "类的继承成环：" + " -> ".join(stack + [c.name]))
+        if st == 2:
+            return
+        state[c.name] = 1
+        if c.parent:
+            p = by_name.get(c.parent)
+            if p is None:
+                raise LomError(c.line, 1,
+                               f"父类 {c.parent} 不在本模块（C1 只收同模块的单继承；"
+                               f"跨模块类层次从 C2 起）")
+            visit(p, stack + [c.name])
+        state[c.name] = 2
+        order.append(c)
+
+    for c in mod.classes:
+        visit(c, [])
+
+    structs_by_name: dict[str, Struct] = {s.name: s for s in mod.structs}
+    effective: dict[str, dict[str, ClassMethod]] = {}
+    class_funcs: list[Func] = []
+    for c in order:
+        if c.abstract:
+            raise LomError(c.line, 1,
+                           f"抽象类 {c.name} 从 C2 起（`docs/345` C1 只有非虚方法）")
+        ps = structs_by_name.get(c.parent) if c.parent else None
+        fields = list(ps.fields) if ps else []
+        field_lines = list(ps.field_lines) if ps else []
+        seen_parent = {fn for fn, _ in fields}
+        seen_own: set[str] = set()
+        for fn, ft, ln in c.fields:
+            if fn in seen_own:
+                raise LomError(ln, 1, f"类 {c.name} 的字段 {fn} 重复定义")
+            if fn in seen_parent:
+                raise LomError(ln, 1, f"类 {c.name} 的字段 {fn} 与父类重复")
+            seen_own.add(fn)
+            fields.append((fn, ft))
+            field_lines.append(ln)
+        st = Struct(c.name, fields, c.line, c.pub, [], field_lines=field_lines)
+        mod.structs.append(st)
+        structs_by_name[c.name] = st
+
+        parent_eff = effective.get(c.parent, {}) if c.parent else {}
+        own_any: dict[str, ClassMethod] = {}
+        own_inst: dict[str, ClassMethod] = {}
+        for cm in c.methods:
+            f = cm.func
+            mname = f.name
+            if mname in own_any:
+                raise LomError(f.line, 1, f"类 {c.name} 的方法 {mname} 重复定义")
+            if cm.virtual or cm.abstract:
+                raise LomError(f.line, 1,
+                               f"方法 {c.name}.{mname} 用了 virtual/abstract —— "
+                               f"虚方法与 vtable 从 C2 起（`docs/345`）")
+            has_self = bool(f.params) and f.params[0].name == "self"
+            if any(p.name == "self" for p in f.params[1:]):
+                raise LomError(f.line, 1, f"类方法 {c.name}.{mname} 的 self 必须是第一个参数")
+            if has_self:
+                if not f.params[0].type:
+                    f.params[0].type = f"&{c.name}"
+                if not _is_ref(f.params[0].type) or _deref_type(f.params[0].type) != c.name:
+                    raise LomError(f.line, 1,
+                                   f"类方法 {c.name}.{mname} 的 self 必须是 "
+                                   f"&{c.name} / &mut {c.name}")
+                own_inst[mname] = cm
+            elif mname in parent_eff:
+                raise LomError(f.line, 1,
+                               f"{c.name}.{mname} 与父类实例方法同名，但第一个参数不是 self")
+            if cm.override:
+                pm = parent_eff.get(mname)
+                if pm is None:
+                    raise LomError(f.line, 1,
+                                   f"{c.name}.{mname} 标了 override，但父类 {c.parent} "
+                                   f"没有同名方法")
+                if _class_sig(pm.func) != _class_sig(f):
+                    raise LomError(f.line, 1,
+                                   f"{c.name}.{mname} 的 override 签名与父类不一致")
+            own_any[mname] = cm
+        eff = dict(parent_eff)
+        eff.update(own_inst)
+        effective[c.name] = eff
+        # 自己的方法（含关联函数 `Type::new`）挂到本类名下。
+        for mname, cm in own_any.items():
+            f = cm.func
+            f.name = f"{c.name}_{mname}"
+            f.pub = c.pub
+            class_funcs.append(f)
+        # 继承来的实例方法：按子类名复制一份。C1 是非虚的，按接收者静态类型选实现；
+        # 复制让 `Child_method` 在符号表里存在，而不需要别名表。
+        for mname, cm in eff.items():
+            if mname in own_inst:
+                continue
+            f = _copy.deepcopy(cm.func)
+            f.name = f"{c.name}_{mname}"
+            f.pub = c.pub
+            class_funcs.append(f)
+
+    mod.funcs.extend(class_funcs)
+    # 关联调用要在类/枚举都落定之后分派（单实参的 `EnumCtor` 也可能是类的构造器）。
+    classes = set(by_name)
+    enums = {e.name for e in mod.enums}
+    for f in mod.funcs:
+        f.body = _assoc_replace(f.body, classes, enums)
+    mod.classes = []
+    mod.has_class_methods = True
 
 
 def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
@@ -13977,8 +14294,20 @@ class _Ir:
             fn = self.funcs.get(e.mangled)
             if fn is None:
                 raise LomError(e.line, 1, f"native: 未解析的方法 {e.name}")
-            _, ov = self.expr(e.obj, fn.params[0].type)
-            args = [f"{self.ll(fn.params[0].type)} {ov}"]
+            rty = fn.params[0].type
+            oty = expr_type(e.obj, self.type_scope(), self.funcs, self.structs)
+            if _is_ref(rty) and not (oty and _is_ref(oty)):
+                # 类方法的接收者是 `self: &T`：调用点传的是一个**值**，取它的地址
+                # （`docs/345` §1.1 的 `self` 规则 —— 与字段访问的自动解引用同一条）。
+                _, ov = self._addr_of(e.obj, e.line, True)
+            elif not _is_ref(rty) and oty and _is_ref(oty) and _deref_type(oty) == rty:
+                # 反过来：值是 `&T`、方法按值收 `T`（impl 的旧约定）—— 解一层再传。
+                _, p = self.expr(e.obj, oty)
+                ov = self.t()
+                self.w(f"{ov} = load {self.ll(rty)}, ptr {p}")
+            else:
+                _, ov = self.expr(e.obj, rty)
+            args = [f"{self.ll(rty)} {ov}"]
             for a, p in zip(e.args, fn.params[1:]):
                 _, av = self.expr(a, p.type)
                 args.append(f"{self.ll(p.type)} {av}")
@@ -14031,6 +14360,24 @@ class _Ir:
             r = self.t()
             self.w(f"{r} = call {self.ll(fn.ret)} @{fn.name}({', '.join(args)})")
             return fn.ret, r
+        if isinstance(e, StructLit):
+            # 非 `let` 位置的结构体字面量（构造器里 `return S { … }`）：按**聚合值**
+            # 逐字段 `insertvalue`。`let` 那一支仍走内存（`stmt()` 里的特例），
+            # 因为它要地址来写字段/取借用。
+            st = self.structs.get(e.name)
+            if st is None:
+                raise LomError(e.line, 1, f"{_display_ty(e.name)} 不是结构体")
+            inits = dict(e.inits)
+            agg = "undef"
+            sty = self.ll(e.name)
+            for i, (fn, ft) in enumerate(st.fields):
+                if fn not in inits:
+                    raise LomError(e.line, 1, f"结构体 {e.name} 缺字段 {fn}")
+                _, fv = self.expr(inits[fn], ft)
+                r = self.t()
+                self.w(f"{r} = insertvalue {sty} {agg}, {self.ll(ft)} {fv}, {i}")
+                agg = r
+            return e.name, agg
         if isinstance(e, FieldAccess):
             # `r.field`：`r` 是 `&Foo` 时自动解一层（`docs/299` §3.4）。
             ft, gp = self._addr_of(e, e.line, True)

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -23,6 +24,7 @@ import loment_diag  # noqa: E402
 import loment_geometry  # noqa: E402
 import lomentc  # noqa: E402
 import lspe  # noqa: E402
+import lvm  # noqa: E402
 import potato  # noqa: E402
 import potato_from  # noqa: E402
 
@@ -7559,39 +7561,182 @@ def test_class_dimension_defaults_off():
 
 
 @test
-def test_class_skeleton_parses_only_under_class_on():
-    """C0 只收语法：单继承、字段、virtual/override/abstract 方法；`_off` 不认。"""
-    src = (
-        "module m\n\nchoose class_on\n\n"
-        "abstract class Base {\n"
-        "    x: u32,\n"
-        "    virtual fn area(self: &Base) -> u32 {\n"
-        "        return 0;\n"
-        "    }\n"
-        "    abstract fn name(self: &Base) -> u32;\n"
-        "}\n\n"
-        "class Square extends Base {\n"
-        "    side: u32,\n"
-        "    override fn area(self: &Square) -> u32 {\n"
-        "        return self.side;\n"
-        "    }\n"
-        "}\n")
+def test_class_c1_lays_out_parent_fields_first():
+    """C1：子类字段 = 父类前缀 + 自己的字段；继承来的非虚方法按子类名落地。"""
+    src = """module m
+
+choose class_on
+
+class Shape {
+    x: u32,
+    y: u32,
+    fn sum(self: &Shape) -> u32 {
+        return self.x + self.y;
+    }
+}
+
+class Square extends Shape {
+    side: u32,
+    fn area(self: &Square) -> u32 {
+        return self.side * self.side;
+    }
+    fn total(self: &Square) -> u32 {
+        return self.sum() + self.area();
+    }
+}
+
+fn _start() -> u32 {
+    let s: Square = Square { x: 1, y: 2, side: 3 };
+    let v: u32 = s.total();
+    syscall4(60, v as u64, 0, 0);
+    return 0;
+}
+"""
     m = parse(src)
-    assert [c.name for c in m.classes] == ["Base", "Square"], m.classes
-    base, square = m.classes
-    assert base.abstract and base.parent == ""
-    assert base.fields[0][:2] == ("x", "u32"), base.fields
-    assert base.methods[0].virtual and not base.methods[0].override
-    assert base.methods[1].abstract and not base.methods[1].virtual
-    assert square.parent == "Base"
-    assert square.fields[0][:2] == ("side", "u32"), square.fields
-    assert square.methods[0].override and not square.methods[0].virtual
-    e = errs(src)
-    assert any("C1" in x for x in e), e
+    assert m.classes == [], m.classes
+    got = [(s.name, [f for f, _ in s.fields]) for s in m.structs]
+    assert got == [("Shape", ["x", "y"]), ("Square", ["x", "y", "side"])], got
+    names = {f.name for f in m.funcs}
+    assert {"Shape_sum", "Square_area", "Square_total", "Square_sum"} <= names, sorted(names)
+    e = lomentc.check(m)
+    assert e == [], e
+    ir = lomentc.emit_llvm(m, ROOT, [])
+    assert "@Square_total" in ir and "@Square_sum" in ir, ir
+    assert "vtable" not in ir.lower() and "vcall" not in ir, "C1 不该有 vtable/vcall"
+    rc = lvm.run_ir(ir, io.BytesIO(), None, ["class-c1"])
+    assert rc == 12, f"x+y+side² = 1+2+9 = 12，实际 rc={rc}"
+
+
+@test
+def test_class_c1_constructors_and_static_dispatch():
+    """`Type::new` 是普通函数；`override` 在 C1 仍是静态派发（按接收者静态类型选）。"""
+    src = """module m
+
+choose class_on
+
+class Base {
+    x: u32,
+    fn new(x: u32) -> Base {
+        return Base { x: x };
+    }
+    fn tag(self: &Base) -> u32 {
+        return self.x;
+    }
+}
+
+class Child extends Base {
+    y: u32,
+    fn new(x: u32, y: u32) -> Child {
+        return Child { x: x, y: y };
+    }
+    override fn tag(self: &Child) -> u32 {
+        return self.x + self.y;
+    }
+}
+
+fn _start() -> u32 {
+    let b: Base = Base::new(4);
+    let c: Child = Child::new(5, 6);
+    let v: u32 = b.tag() + c.tag();
+    syscall4(60, v as u64, 0, 0);
+    return 0;
+}
+"""
+    m = parse(src)
+    e = lomentc.check(m)
+    assert e == [], e
+    ir = lomentc.emit_llvm(m, ROOT, [])
+    assert "call { i32 } @Base_new(" in ir, ir
+    assert "call { i32, i32 } @Child_new(" in ir, ir
+    assert "call i32 @Base_tag(" in ir, ir
+    assert "call i32 @Child_tag(" in ir, ir
+    rc = lvm.run_ir(ir, io.BytesIO(), None, ["class-c1-dispatch"])
+    assert rc == 15, f"4 + (5+6) = 15，实际 rc={rc}"
+
+
+@test
+def test_class_c1_mut_self_writes_fields():
+    """`self: &mut T` 的字段写穿：两次 `bump` 之后 `n == 2`。"""
+    src = """module m
+
+choose class_on
+
+class Counter {
+    n: u32,
+    fn bump(self: &mut Counter) {
+        self.n = self.n + 1;
+    }
+    fn get(self: &Counter) -> u32 {
+        return self.n;
+    }
+}
+
+fn _start() -> u32 {
+    let c: Counter = Counter { n: 0 };
+    c.bump();
+    c.bump();
+    let v: u32 = c.get();
+    syscall4(60, v as u64, 0, 0);
+    return 0;
+}
+"""
+    m = parse(src)
+    e = lomentc.check(m)
+    assert e == [], e
+    ir = lomentc.emit_llvm(m, ROOT, [])
+    rc = lvm.run_ir(ir, io.BytesIO(), None, ["class-c1-mut-self"])
+    assert rc == 2, f"两次 bump 之后 n=2，实际 rc={rc}"
+
+
+@test
+def test_class_c1_leaves_virtual_and_abstract_to_c2():
+    """C1 只收非虚方法；virtual/abstract/跨模块父类都点名拒，不静默丢。"""
+    virtual = (
+        "module m\nchoose class_on\n"
+        "class A {\n    x: u32,\n"
+        "    virtual fn f(self: &A) -> u32 { return 1; }\n}\n")
     try:
-        parse(src.replace("choose class_on", "choose class_off"))
+        parse(virtual)
     except lomentc.LomError as exc:
-        assert "未知顶层关键字" in exc.msg or "abstract" in exc.msg, exc.msg
+        assert "C2" in exc.msg, exc.msg
+    else:
+        raise AssertionError("C1 收下了 virtual 方法")
+
+    abstract = (
+        "module m\nchoose class_on\n"
+        "abstract class A {\n    abstract fn f(self: &A) -> u32;\n}\n")
+    try:
+        parse(abstract)
+    except lomentc.LomError as exc:
+        assert "C2" in exc.msg, exc.msg
+    else:
+        raise AssertionError("C1 收下了抽象类")
+
+    mismatch = (
+        "module m\nchoose class_on\n"
+        "class A {\n    fn f(self: &A) -> u32 { return 1; }\n}\n"
+        "class B extends A {\n    override fn f(self: &B) -> bool { return true; }\n}\n")
+    try:
+        parse(mismatch)
+    except lomentc.LomError as exc:
+        assert "签名" in exc.msg, exc.msg
+    else:
+        raise AssertionError("C1 收下了签名不一致的 override")
+
+    missing = (
+        "module m\nchoose class_on\n"
+        "class B extends Nope {\n    x: u32,\n}\n")
+    try:
+        parse(missing)
+    except lomentc.LomError as exc:
+        assert "父类" in exc.msg, exc.msg
+    else:
+        raise AssertionError("C1 收下了本模块没有的父类")
+
+    try:
+        parse(virtual.replace("choose class_on", "choose class_off"))
+    except lomentc.LomError as exc:
+        assert "class" in exc.msg or "未知顶层关键字" in exc.msg, exc.msg
     else:
         raise AssertionError("class_off 仍然解析了 class 语法")
 

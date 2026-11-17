@@ -1,0 +1,13 @@
+// 切片实参（LLS §10.7）+ slice_len（§18.1）。
+module slice
+choose runtime
+
+fn n(xs: [u32]) -> u32 {
+    return slice_len(xs);
+}
+
+fn main() {
+    let a: [u32; 3] = [7, 8, 9];
+    print_num(n(&a) as i64);
+    print("\n");
+}

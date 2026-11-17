@@ -1,0 +1,16 @@
+// `&mut` 与解引用（LLS §10.9 / §12.3）：写回的是调用方的格子。
+choose write grammar tur2026.3
+
+module refmut
+choose runtime
+
+fn bump(p: &mut u32) {
+    *p = *p + 1;
+}
+
+fn main() {
+    let x: u32 = 41;
+    bump(&mut x);
+    print_num(x as i64);
+    print("\n");
+}

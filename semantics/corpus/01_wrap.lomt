@@ -1,0 +1,10 @@
+// 整数回绕（LLS §10.2）：u8 的 255 + 1 是 0，不是 256，也不是 trap。
+module wrap
+choose runtime
+
+fn main() {
+    let a: u8 = 255;
+    let b: u8 = a + 1;
+    print_num(b as i64);
+    print("\n");
+}

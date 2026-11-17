@@ -7545,6 +7545,57 @@ def test_extern_cannot_declare_effects():
     assert any("extern" in x for x in e), e
 
 
+# ---------------------------------------------------------------- 类（docs/345 C0）
+
+@test
+def test_class_dimension_defaults_off():
+    """C0：`class` 默认关，显式写才进 chooses；显式默认档的 IR 与今天相同。"""
+    m = parse("module m\nfn main() -> i32 { return 7; }\n")
+    assert lomentc.effective_dims(m)["class"] == "class_off", lomentc.effective_dims(m)
+    on = parse("module m\nchoose class_on\nfn main() -> i32 { return 7; }\n")
+    assert on.chooses.get("class") == "class_on", on.chooses
+    off = parse("module m\nchoose class_off\nfn main() -> i32 { return 7; }\n")
+    assert lomentc.emit_llvm(m, ROOT, []) == lomentc.emit_llvm(off, ROOT, [])
+
+
+@test
+def test_class_skeleton_parses_only_under_class_on():
+    """C0 只收语法：单继承、字段、virtual/override/abstract 方法；`_off` 不认。"""
+    src = (
+        "module m\n\nchoose class_on\n\n"
+        "abstract class Base {\n"
+        "    x: u32,\n"
+        "    virtual fn area(self: &Base) -> u32 {\n"
+        "        return 0;\n"
+        "    }\n"
+        "    abstract fn name(self: &Base) -> u32;\n"
+        "}\n\n"
+        "class Square extends Base {\n"
+        "    side: u32,\n"
+        "    override fn area(self: &Square) -> u32 {\n"
+        "        return self.side;\n"
+        "    }\n"
+        "}\n")
+    m = parse(src)
+    assert [c.name for c in m.classes] == ["Base", "Square"], m.classes
+    base, square = m.classes
+    assert base.abstract and base.parent == ""
+    assert base.fields[0][:2] == ("x", "u32"), base.fields
+    assert base.methods[0].virtual and not base.methods[0].override
+    assert base.methods[1].abstract and not base.methods[1].virtual
+    assert square.parent == "Base"
+    assert square.fields[0][:2] == ("side", "u32"), square.fields
+    assert square.methods[0].override and not square.methods[0].virtual
+    e = errs(src)
+    assert any("C1" in x for x in e), e
+    try:
+        parse(src.replace("choose class_on", "choose class_off"))
+    except lomentc.LomError as exc:
+        assert "未知顶层关键字" in exc.msg or "abstract" in exc.msg, exc.msg
+    else:
+        raise AssertionError("class_off 仍然解析了 class 语法")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "lomentc_test")
 

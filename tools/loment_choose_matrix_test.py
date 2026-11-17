@@ -181,14 +181,19 @@ def _all_legal_cells() -> list[dict[str, str]]:
     #: "写了 `choose fp` 真的放行"由 `loment_rule_parity` 的七条 `fp-*` 与
     #: `loment_p8_test` 的 `ir_fp.lomt` 孪生各钉一处。
     sweep_value = {"lifetime": "lifetime_auto", "fp": "no_fp"}
+    #: `class` 是 C0 的 **reference-only** 维度（`docs/345`；自举在 C4）。把它塞进
+    #: 这张双子扫描会让自举驱动把 `choose class_off` 当用户开关拒掉。C0 的类骨架由
+    #: `lomentc_test` 的两条判据单独覆盖；C4 接上自举后删掉这个过滤。
+    reference_only = frozenset({"class"})
+    dim_keys = [d for d in lomentc.CORE_DIM_ORDER if d not in reference_only]
     dims = [(d, (sweep_value[d],) if d in sweep_value else lomentc.CORE_DIMS[d])
-            for d in lomentc.CORE_DIM_ORDER]
+            for d in dim_keys]
     cells = []
     for combo in itertools.product(*(vals for _, vals in dims)):
         values = set(combo)
         if any(pair <= values for pair in conflicts):
             continue
-        cells.append(dict(zip(lomentc.CORE_DIM_ORDER, combo)))
+        cells.append(dict(zip(dim_keys, combo)))
     return cells
 
 
@@ -827,10 +832,10 @@ def test_both_implementations_emit_the_same_ir_on_every_legal_cell():
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
         for cell in cells:
-            name = "-".join(cell[d] for d in lomentc.CORE_DIM_ORDER)
+            name = "-".join(cell[d] for d in cell)
             rc, diag, ref, pot = _emit(td, name, cell, _body(cell))
             assert rc == 0, f"{name}: 参考实现编不过\n{diag[-400:]}"
-            for dim in lomentc.CORE_DIM_ORDER:
+            for dim in cell:
                 assert pot.get(dim) == cell[dim] or dim in ("lms", "lspe"), (
                     f"{name}: Potato 记的是 {dim}={pot.get(dim)!r}, 请求的是 {cell[dim]!r}")
             src = td / f"{name}.lomt"

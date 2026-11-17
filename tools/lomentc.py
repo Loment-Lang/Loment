@@ -1848,6 +1848,27 @@ class Struct:
 
 
 @dataclass
+class ClassMethod:
+    """C0 的类方法骨架（`docs/345` §1.1）：修饰符是数据，语义留给 C1/C2。"""
+    func: "Func"
+    virtual: bool = False
+    override: bool = False
+    abstract: bool = False
+
+
+@dataclass
+class ClassDecl:
+    """C0 的类骨架：只存名字/父类/字段/方法与修饰符；不发射、不进 vtable。"""
+    name: str
+    line: int
+    parent: str = ""
+    abstract: bool = False
+    pub: bool = False
+    fields: list = field(default_factory=list)  # list[tuple[str, str, int]]
+    methods: list = field(default_factory=list)  # list[ClassMethod]
+
+
+@dataclass
 class FieldAccess:
     obj: object
     name: str
@@ -3274,6 +3295,8 @@ class Module:
     use_lines: list[tuple[str, int]] = field(default_factory=list)
     caps: list[Capability] = field(default_factory=list)
     structs: list[Struct] = field(default_factory=list)
+    #: **类骨架**（`docs/345` C0；只在 `choose class_on` 时非空）。C0 只解析、不发射。
+    classes: list[ClassDecl] = field(default_factory=list)
     enums: list[EnumDecl] = field(default_factory=list)
     consts: list[ConstDecl] = field(default_factory=list)
     traits: list[Trait] = field(default_factory=list)
@@ -3507,6 +3530,10 @@ CORE_DIMS: dict[str, tuple[str, ...]] = {
     # （`docs/232` §3.3）：默认产物保持**静态调用图**，`closed` 与可达性门禁的前提不动。
     # 取值只说"有没有"，与 `runtime` / `vm` 同一条纪律。
     "fp": ("fp", "no_fp"),
+    # **类继承**（`docs/345` C0，`docs/344` 的地基）。`class_off` 是今天的语法；
+    # `class_on` 才收 `class`/`extends`/`virtual`/`override`/`abstract`。C0 只落语法
+    # 骨架，布局与派发在 C1/C2。默认关，现有程序逐字节不变。
+    "class": ("class_off", "class_on"),
 }
 #: **维度之后的第二位置**（用户 2026-11-08）：`<维>_<槽>_<值>`。
 #:
@@ -3538,7 +3565,7 @@ CORE_SLOT_DEFAULTS = {"aicheck": "false", "effects": "false"}
 #: `lms` / `lspe` / `lifetime` 排在最后：它们**没有冲突对**，追加在尾部不会改动
 #: 任何既有配对的先后。
 CORE_DIM_ORDER: tuple[str, ...] = ("mode", "gc", "runtime", "port", "vm", "lms", "lspe",
-                                   "lifetime", "fp")
+                                   "lifetime", "fp", "class")
 #: 所有核心模式的取值 —— "这一个 `choose` 是核心模式还是开关"就看它在不在这里面。
 #: 槽取值也算核心写法（否则它会被当成**用户开关**吞掉，`choose lspe_aicheck_true`
 #: 就变成一次未定义的开关取值）。
@@ -3549,7 +3576,8 @@ CORE_DIM_OF = {w: d for d, ws in CORE_DIMS.items() for w in ws}
 #: 每一维**不写**时的取值 —— 默认档，且默认**不改变任何现有程序的行为**。
 CORE_DEFAULTS = {"mode": "std", "gc": "gc_manual", "runtime": "no_runtime",
                  "port": "sealed", "vm": "no_vm", "lms": "lms_full",
-                 "lspe": "lspe_open_admin", "lifetime": "lifetime_auto", "fp": "no_fp"}
+                 "lspe": "lspe_open_admin", "lifetime": "lifetime_auto", "fp": "no_fp",
+                 "class": "class_off"}
 #: 生命周期维在**旧版次**里的默认值（`docs/305`：封版的版次一个字节都不变）。
 #: 2026.3 起才翻到 `lifetime_auto`（用户 2026-11-08 裁）。
 LIFETIME_DEFAULT_EDITION = "tur2026.3"
@@ -3583,6 +3611,7 @@ CORE_DIM_ZH = {
     "lspe": "安全审计（`lspe_open_admin` / `lspe_close_admin`）",
     "lifetime": "生命周期（`lifetime_no` / `lifetime_auto` / `lifetime_manual`）",
     "fp": "间接分派（`fp` / `no_fp`）",
+    "class": "类继承（`class_off` / `class_on`）",
 }
 
 #: **LMS 的七个细开关**（`docs/253` §11.4 ①），次序就是七级的次序 ——
@@ -4150,6 +4179,29 @@ def _prescan_slot(toks: list, slot: str) -> str:
     return CORE_SLOT_DEFAULTS[slot]
 
 
+def _prescan_dim(toks: list, dim: str) -> str:
+    """解析之前把某一维的 `choose <值>` 找出来（`docs/345` C0）。
+
+    只认**深度 0**、`choose` 后面紧跟该维取值的形状；`set choose` 是定义，不算取值。
+    默认直接读 `CORE_DEFAULTS`；`class` 当前只有这一个用户。
+    """
+    depth = 0
+    i = 0
+    while i + 1 < len(toks):
+        t = toks[i]
+        if t.kind == "punct" and t.val in "{[(":
+            depth += 1
+        elif t.kind == "punct" and t.val in "}])":
+            depth -= 1
+        elif depth == 0 and t.kind == "ident" and t.val == "choose":
+            if not (i > 0 and toks[i - 1].kind == "ident" and toks[i - 1].val == "set"):
+                nxt = toks[i + 1]
+                if nxt.kind == "ident" and nxt.val in CORE_DIMS[dim]:
+                    return nxt.val
+        i += 1
+    return CORE_DEFAULTS[dim]
+
+
 def _prescan_lifetime(toks: list, profile: str) -> str:
     """解析之前把 `choose lifetime_*` 找出来（`docs/299`）。
 
@@ -4203,6 +4255,9 @@ class Parser:
         #: **效应语法面**（`docs/341` A2）。与 `lifetime` 同一条"构造时预扫"：
         #: `choose` 可能写在用到它的声明之后，而语法决策是**边走边做**的。
         self.effects = _prescan_slot(toks, "effects") == "true"
+        #: **类语法骨架**（`docs/345` C0）。`choose class_on` 可能写在 `class` 之后；
+        #: 与 `lifetime` / `effects` 同一条构造时预扫。默认 `class_off` 时完全不认。
+        self.class_on = _prescan_dim(toks, "class") == "class_on"
         #: 解析到、但 A2 不发射的效应构造（`perform` / `handle` / `resume`）。
         #: `parse()` 末尾抄进 `Module.effect_runtime`，`check()` 统一报 E023。
         self.effect_runtime: list[tuple[str, int, int]] = []
@@ -4413,6 +4468,16 @@ class Parser:
                 c = self.parse_const()
                 c.pub = is_pub
                 mod.consts.append(c)
+            elif (t.val == "abstract" and self.class_on
+                  and self.peek(1).kind == "ident" and self.peek(1).val == "class"):
+                self.next()
+                c = self.parse_class(abstract=True)
+                c.pub = is_pub
+                mod.classes.append(c)
+            elif t.val == "class" and self.class_on:
+                c = self.parse_class()
+                c.pub = is_pub
+                mod.classes.append(c)
             elif t.val == "excluded":
                 self.next()
                 mod.excluded.append(self.expect("string", None, "（出界声明）").val)
@@ -4556,6 +4621,46 @@ class Parser:
                 self.accept("punct", ";")
         self.expect("punct", "}")
         return Struct(name, fields, kw.line, False, tparams, field_lines=field_lines)
+
+    def parse_class(self, abstract: bool = False) -> ClassDecl:
+        """C0 类骨架（`docs/345` §1.1）：字段 + 方法 + 修饰符；不发射。
+
+        `[abstract] class Name [extends Base] { field: T, [virtual|override] fn … {…}
+        abstract fn …; }`。布局、槽位、`override` 校验与 `super` 在 C1/C2。
+        """
+        kw = self.expect("ident", "class")
+        name = self.ident("类名")
+        parent = ""
+        if self.accept("ident", "extends"):
+            parent = self.ident("父类名")
+        self.expect("punct", "{")
+        fields: list[tuple[str, str, int]] = []
+        methods: list[ClassMethod] = []
+        while not self.at("punct", "}"):
+            modifier = ""
+            if (self.peek().kind == "ident"
+                    and self.peek().val in ("virtual", "override", "abstract")):
+                modifier = self.next().val
+                if not (self.peek().kind == "ident" and self.peek().val == "fn"):
+                    raise LomError(self.peek().line, self.peek().col,
+                                   f"类体里的 {modifier} 之后只允许 fn（`docs/345` §1.1）")
+            if self.at("ident", "fn"):
+                f = self.parse_fn(sig_only=(modifier == "abstract"))
+                methods.append(ClassMethod(f, virtual=(modifier == "virtual"),
+                                           override=(modifier == "override"),
+                                           abstract=(modifier == "abstract")))
+            else:
+                if modifier:
+                    raise LomError(self.peek().line, self.peek().col,
+                                   f"类体里的 {modifier} 之后只允许 fn（`docs/345` §1.1）")
+                line = self.peek().line
+                fn = self.ident("字段名")
+                self.expect("punct", ":")
+                fields.append((fn, self.type_name(), line))
+                if not self.accept("punct", ","):
+                    self.accept("punct", ";")
+        self.expect("punct", "}")
+        return ClassDecl(name, kw.line, parent, abstract, False, fields, methods)
 
     def parse_enum(self) -> EnumDecl:
         """L1 枚举: 变体可带单载荷 (v1)。"""
@@ -4900,7 +5005,7 @@ class Parser:
             self.dom_stack.pop()
         return blk
 
-    def parse_fn(self, extern: bool = False) -> Func:
+    def parse_fn(self, extern: bool = False, sig_only: bool = False) -> Func:
         kw = self.expect("ident", "fn")
         name = self.ident("函数名")
         tparams: list[str] = []
@@ -4950,14 +5055,14 @@ class Parser:
                 raise LomError(self.peek().line, self.peek().col,
                                f"期望 效应名（`effects` 后面至少要写一个），"
                                f"得到 {self.peek().val!r}")
-        if extern:
+        if extern or sig_only:
             # 外部函数**没有函数体**, 末尾是分号 (docs/143 §3.1)。泛型参数对它也说不通 ——
             # 单态化要靠看得到源码, 而 extern 的定义根本不在手上。
-            if tparams:
+            if extern and tparams:
                 raise LomError(kw.line, kw.col, f"外部函数 {name} 不能带类型参数")
-            self.expect("punct", ";", "（外部函数声明末尾要分号）")
+            self.expect("punct", ";", "（声明末尾要分号）")
             f = Func(name, params, ret, [], kw.line, False, tparams)
-            f.extern = True
+            f.extern = extern
             f.effects = row
             return f
         body_at = self.i + 1          # '{' 之后 —— 与自举侧 find_body 同一个起点
@@ -8764,6 +8869,18 @@ def _effect_front_errors(mod: Module, deps: list[Module] | None = None) -> list[
     return errs
 
 
+def _class_front_errors(mod: Module) -> list[str]:
+    """C0 的类边界：语法骨架收下，布局与派发在 C1/C2。
+
+    没有这一条，`class_on` 的类会被 `prepare` / 发射器**静默忽略**，产物里什么都没有。
+    """
+    if getattr(mod, "classes", None):
+        c = mod.classes[0]
+        return [f"{c.line}: 类/继承的语法已经收下，但布局与派发尚未实现"
+                f"（`docs/345` C1；当前是 C0 骨架）"]
+    return []
+
+
 def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
            deps: list[Module] | None = None, _dep_pass: bool = False,
            lspe_mode: str = "full") -> list[str]:
@@ -8778,6 +8895,9 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     _eff_errs = _effect_front_errors(mod, deps)
     if getattr(mod, "effect_runtime", None):
         return _eff_errs
+    _class_errs = _class_front_errors(mod)
+    if _class_errs:
+        return list(_eff_errs) + _class_errs
     mod, deps = prepare(mod, deps)  # M6 单态化
     errs: list[str] = list(_eff_errs)
     # **LMS（`docs/253`）**：第 1 级检查器开不开。⚠ **只取根单元**的取值 —— 与 Potato 里

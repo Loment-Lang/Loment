@@ -322,8 +322,42 @@ Targets(T) = { f | f 的类型与 T 匹配，且 f 在程序里被取址 }
   `return T { … }` 走聚合值（`insertvalue`），`let` 位置仍走内存。
 - **边界**：`virtual` / `abstract` / `super` / 跨模块父类在 C1 里**点名拒**，留给 C2；
   子类值赋给父类引用（子类型）也还没有。
-- **判据**：`lomentc_test` 的四条 `test_class_c1_*`（布局/继承、构造与静态派发、
-  `&mut self` 写字段、C2 边界的拒绝），其中三条经 `lvm.run_ir` 跑出确定退出码。
+- **判据**：`lomentc_test` 的三条 `test_class_c1_*`（布局/继承、构造与静态派发、
+  `&mut self` 写字段），都经 `lvm.run_ir` 跑出确定退出码。
+
+### 10.2 C2 落地状态（参考侧）
+
+- **布局**：有虚方法/抽象方法的整条祖先链在偏移 0 放 `__vtable: ptr`；父类字段仍是
+  前缀，子类字段追加。没有虚方法的类保持 C1 的纯字段聚合。
+- **虚派发**：`virtual` 方法进 vtable；`override` 复用父类槽；新虚方法追加槽。
+  发射器从对象头取 vtable、按槽取代码地址，再走 `lomelf`/LVM 已有的间接调用。
+- **抽象类**：`abstract class` + `abstract fn` 只留签名桩，不发 `define`；具体子类
+  必须补齐每个空槽。抽象类字面量在检查器里拒。
+- **`super.m(...)`**：在降级时落成父类实现的直接调用；父类实现是抽象方法时拒。
+- **子类型**：`&Child` 可传给 `&Base`（引用级单继承子类型）；按值转换仍不做。
+- **运行期**：vtable 缓存由 `@Class__vt()` 在首次构造时用 `alloc` 填，因此
+  `class_on` + 虚方法要求 `choose runtime`。
+- **判据**：`test_class_c2_virtual_dispatch_super_and_lomelf`、
+  `test_class_c2_abstract_class_and_reference_subtyping`、
+  `test_class_c2_rejects_bad_abstract_override_and_no_runtime`；LVM 与 `lomelf`
+  都走同一份 IR。
+
+### 10.3 C3 落地状态（参考侧）
+
+- `choose fp` 下按**函数类型**收集取址集合（命名函数 + 闭包目标），记在
+  `mod.fp_targets`；间接调用点属于这个封闭集合。
+- 间接调用点没有任何同型取址目标时，编译期点名拒（“没有封闭目标集”）。
+- `ptr` → 函数指针强转仍由既有 `as` 规则拒；`extern fn` 不能当函数值（FFI 指针
+  不进目标集）。
+- **判据**：`test_class_c3_function_pointer_targets_are_closed_world`（两个目标、
+  LVM 跑出确定退出码）与 `test_class_c3_empty_target_set_is_rejected`。
+
+### 10.4 还没做的
+
+- **C4 自举侧类**：`loment/selfhost/` 还没有 class/vtable/super/abstract 的
+  解析、检查与发射；Potato 的 `class`/`vtables` 字段与种子/容量/双子判据也还没落。
+- **C5 用 Loment 类重写 LSPE 框架**：当前 `loment/lspe/framework.py` 已是 Python
+  类继承派发；按 `docs/344` 的字面要求（Loment 类 + 间接调用）仍依赖 C4。
 
 ---
 

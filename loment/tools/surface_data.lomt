@@ -29,7 +29,7 @@
 module surface_data
 choose runtime
 
-pub fn n_codes() -> u32 { return 231; }
+pub fn n_codes() -> u32 { return 235; }
 
 /// 内部码段的下界（`#773`）。`E900` 起是"工具链自己崩了"那一类。
 pub fn internal_lo() -> u32 { return 900; }
@@ -504,6 +504,14 @@ pub fn code_title(c: u32, lang: u32) -> str {
     if k == 461 { return "同一个操作有两条臂"; }
     if k == 462 { return "an effect operation's arguments or result do not match"; }
     if k == 463 { return "效应操作的实参 / 返回值不符"; }
+    if k == 464 { return "virtual dispatch needs the runtime"; }
+    if k == 465 { return "虚方法需要运行期"; }
+    if k == 466 { return "the function-pointer type has no closed target set"; }
+    if k == 467 { return "函数指针没有封闭目标集"; }
+    if k == 468 { return "an abstract class cannot be instantiated"; }
+    if k == 469 { return "抽象类不能实例化"; }
+    if k == 470 { return "a compiler-owned field was initialized"; }
+    if k == 471 { return "编译器保留字段"; }
     if k == 1800 { return "the tool died without reporting (internal)"; }
     if k == 1801 { return "工具链进程死了，没留下诊断"; }
     if k == 1998 { return "unclassified (please report)"; }
@@ -975,6 +983,14 @@ pub fn code_what(c: u32, lang: u32) -> str {
     if k == 461 { return "同一个效应操作在一个处理器里只能有一条臂。"; }
     if k == 462 { return "The arm's parameter count must match the `effect` declaration, and so must the `perform` argument count; a `perform` returning `()` has no value to bind."; }
     if k == 463 { return "臂的形参个数要与 `effect` 里的声明一致，`perform` 的实参个数也一样；返回 `()` 的 `perform` 没有值可以绑定。"; }
+    if k == 464 { return "The vtable cache is filled by the runtime allocator on first construction; `no_runtime` has no such path."; }
+    if k == 465 { return "vtable 的缓存表由运行期的分配器在首次构造时填；`no_runtime` 下没有这条路。"; }
+    if k == 466 { return "`choose fp` is a closed world: every indirect call needs at least one same-typed function whose address is taken."; }
+    if k == 467 { return "`choose fp` 只收封闭世界：每个间接调用点都要有至少一个同型函数被取址。"; }
+    if k == 468 { return "An abstract class only provides layout and slots; objects must come from a concrete subclass that implements every abstract method."; }
+    if k == 469 { return "抽象类只提供布局/槽位，具体对象必须来自实现了全部抽象方法的子类。"; }
+    if k == 470 { return "The class vtable header is written by the compiler; user literals cannot set it."; }
+    if k == 471 { return "类的 vtable 头由编译器写入，用户字面量里不能手写。"; }
     if k == 1800 { return "A process in the toolchain died **before it could write a structured diagnostic** - killed by a signal, or exited abnormally, with no record in `--diag-out`."; }
     if k == 1801 { return "工具链里的一个进程在**能写出结构化诊断之前**就死了 —— 被信号打死，或者以异常状态退出，而 `--diag-out` 一份记录都没写。"; }
     if k == 1998 { return "The compiler reported an error that is not in the classification table -- even the toolchain did not recognise which code this message belongs to."; }
@@ -1446,6 +1462,14 @@ pub fn code_why(c: u32, lang: u32) -> str {
     if k == 461 { return "`use` 是**平名字空间**：一个单元里的顶层名字必须唯一，所以**两个库也不能有同名顶层项**。这也是为什么 std 里的公开名字都带前缀（`json_parse` / `sha256_hex`）——不带的迟早会撞。"; }
     if k == 462 { return "Loment has **no implicit numeric conversion** and no type inference: every position must match explicitly. A `u32` value never becomes an `i64` on its own, and the integer `1` is not the `bool` `true`."; }
     if k == 463 { return "Loment **没有隐式数值转换**，也没有类型推断：每个位置上的类型必须显式对得上。所以 `u32` 的值不会自动变成 `i64`，整数 `1` 也不是 `bool` 的 `true`。"; }
+    if k == 464 { return "Two different things are managed here: (1) **the core mode** is a property of **the whole program**, and it has **five dimensions** - `mode` (`std` / `no_std`: which layer is available), `gc` (`gc_manual` / `gc_auto` / `gc_auto_alpha` / `no_gc`: who reclaims), `runtime` (`runtime` / `no_runtime`: whether the artifact carries one), `port` (`sealed` / `hosted`: whether it reaches outside itself), and `vm` (`vm` / `no_vm`: which execution model). **Each dimension may be declared once**, and only in the root unit (nothing outside `loment.conf` can change it); two dimensions contradicting each other (`gc_auto` with `no_runtime`) is reported here too. (2) **a switch** is \"code that is compiled in only when it is on\". There can be many switches, but **one name may be written once**, and a value may only be set after `set choose` declared it. A library may not `choose`: to express a need, a library declares a **capability requirement** and the project decides. (3) The `runtime` dimension is **not** managed here: a construct that would drag the runtime in (division, `alloc`, ...) is reported as **E030** (`docs/227`) - that code is about the construct, this one is about `choose` itself."; }
+    if k == 465 { return "这是**两个不同的东西**被放在一起管：① **核心模式**是**整个程序**的属性，而且它有**五维** —— `mode`（`std` / `no_std`：能用哪一层）、`gc`（`gc_manual` / `gc_auto` / `gc_auto_alpha` / `no_gc`：回收由谁做）、`runtime`（`runtime` / `no_runtime`：产物里有没有运行期）、`port`（`sealed` / `hosted`：通不通着世界）、`vm`（`vm` / `no_vm`：要哪种执行模型）。**每一维各自只能声明一次**，而且只能在根单元（`loment.conf` 之外没有第二个地方能改它）；两维取值互相矛盾（`gc_auto` 与 `no_runtime`）也在这里报。② **开关**是“打开才编进去的代码”，可以有很多条，但**同名只许写一次**、**取值前必须先 `set choose` 定义**。库不许 `choose` —— 库要表达需要就声明**能力需求**，由项目决定开不开。③ `runtime` 那一维**不在这里**：用了会拖运行期的构造（`alloc`、`panic` …）报的是 **E030**（`docs/227`）—— 那一码说的是那个构造，这一码说的是 `choose` 自己。"; }
+    if k == 466 { return "Two different things are managed here: (1) **the core mode** is a property of **the whole program**, and it has **five dimensions** - `mode` (`std` / `no_std`: which layer is available), `gc` (`gc_manual` / `gc_auto` / `gc_auto_alpha` / `no_gc`: who reclaims), `runtime` (`runtime` / `no_runtime`: whether the artifact carries one), `port` (`sealed` / `hosted`: whether it reaches outside itself), and `vm` (`vm` / `no_vm`: which execution model). **Each dimension may be declared once**, and only in the root unit (nothing outside `loment.conf` can change it); two dimensions contradicting each other (`gc_auto` with `no_runtime`) is reported here too. (2) **a switch** is \"code that is compiled in only when it is on\". There can be many switches, but **one name may be written once**, and a value may only be set after `set choose` declared it. A library may not `choose`: to express a need, a library declares a **capability requirement** and the project decides. (3) The `runtime` dimension is **not** managed here: a construct that would drag the runtime in (division, `alloc`, ...) is reported as **E030** (`docs/227`) - that code is about the construct, this one is about `choose` itself."; }
+    if k == 467 { return "这是**两个不同的东西**被放在一起管：① **核心模式**是**整个程序**的属性，而且它有**五维** —— `mode`（`std` / `no_std`：能用哪一层）、`gc`（`gc_manual` / `gc_auto` / `gc_auto_alpha` / `no_gc`：回收由谁做）、`runtime`（`runtime` / `no_runtime`：产物里有没有运行期）、`port`（`sealed` / `hosted`：通不通着世界）、`vm`（`vm` / `no_vm`：要哪种执行模型）。**每一维各自只能声明一次**，而且只能在根单元（`loment.conf` 之外没有第二个地方能改它）；两维取值互相矛盾（`gc_auto` 与 `no_runtime`）也在这里报。② **开关**是“打开才编进去的代码”，可以有很多条，但**同名只许写一次**、**取值前必须先 `set choose` 定义**。库不许 `choose` —— 库要表达需要就声明**能力需求**，由项目决定开不开。③ `runtime` 那一维**不在这里**：用了会拖运行期的构造（`alloc`、`panic` …）报的是 **E030**（`docs/227`）—— 那一码说的是那个构造，这一码说的是 `choose` 自己。"; }
+    if k == 468 { return "Loment's **own syntax is close to Rust but drops** a few things: single-quoted character literals, value-less `return;`, expression-style `match` arms, and `mut` as a binding modifier. Writing from Rust habits lands on these easily - they are not \"not supported yet\", the language simply does not have them. (That is the native syntax only: the same logic can also be written the C / C++ / Java / C# / Go / Python way, which is a different layer - see `docs/188`.)"; }
+    if k == 469 { return "Loment 的**原生语法与 Rust 很接近，但去掉了**几样东西：单引号字符字面量、无值 `return;`、表达式式的 `match` 臂、`mut` 作为绑定修饰词。照 Rust 的习惯写很容易踩到这几处 —— 它们不是“暂时不支持”，是这门语言没有。（说的只是**原生语法**：同一段逻辑也能用 C / C++ / Java / C# / Go / Python 的写法写，那是另一层，见 `docs/188`。）"; }
+    if k == 470 { return "Loment's **own syntax is close to Rust but drops** a few things: single-quoted character literals, value-less `return;`, expression-style `match` arms, and `mut` as a binding modifier. Writing from Rust habits lands on these easily - they are not \"not supported yet\", the language simply does not have them. (That is the native syntax only: the same logic can also be written the C / C++ / Java / C# / Go / Python way, which is a different layer - see `docs/188`.)"; }
+    if k == 471 { return "Loment 的**原生语法与 Rust 很接近，但去掉了**几样东西：单引号字符字面量、无值 `return;`、表达式式的 `match` 臂、`mut` 作为绑定修饰词。照 Rust 的习惯写很容易踩到这几处 —— 它们不是“暂时不支持”，是这门语言没有。（说的只是**原生语法**：同一段逻辑也能用 C / C++ / Java / C# / Go / Python 的写法写，那是另一层，见 `docs/188`。）"; }
     if k == 1800 { return "The diagnostics channel can only describe failures that were **successfully serialized before the failure**. A compiler crash, a linker crash, or the renderer crashing on its own all go the same way: the JSONL is empty and there is nothing for the renderer to do. The launcher now closes that gap: it reads the exit status / signal name and synthesizes this record, so \"no record\" no longer means \"nothing happened\" (#773). This is not a semantic error in your source - it is the **implementation failing on itself**."; }
     if k == 1801 { return "诊断系统只能描述**在失败之前已经成功序列化**的失败。编译器崩溃、链接器崩溃、报错器自己崩溃，走的都是这条路：JSONL 是空的，渲染器无事可做。启动器现在替它收尸：拿到退出状态 / 信号名，合成这一条记录，于是「没有任何记录」不再等于「什么都没有发生」（`#773`）。这不是你源码的语义错 —— 它是**实现自己的失败**。"; }
     if k == 1998 { return "The table and the compiler come out of the same repository and the same build. A message landing here means it has not been classified yet, not that the toolchain versions disagree: fix by the message, then report it so a rule can be added."; }
@@ -1917,6 +1941,14 @@ pub fn code_yes(c: u32, lang: u32) -> str {
     if k == 461 { return "一个单元里任意多模块/函数/类型，只要名字不撞"; }
     if k == 462 { return "explicit `as` (integer<->integer, integer<->bool, pointer<->integer); scalar / string / slice / array / struct / enum as types"; }
     if k == 463 { return "显式 `as`（整数⇄整数、整数⇄布尔、指针⇄整数）；标量/字符串/切片/数组/结构体/枚举作为类型"; }
+    if k == 464 { return "the five core-mode dimensions (`mode` / `gc` / `runtime` / `port` / `vm`), values above; up to 500 switches per file; `addin` to carry switch settings across files (root unit only); empty switch bodies (purely to drive compiler behaviour); capability domains declared by a library; a library declaring a core mode (read as a requirement the root must satisfy)"; }
+    if k == 465 { return "五维核心模式（`mode` / `gc` / `runtime` / `port` / `vm`），每维取值见上；单文件最多 500 条开关；`addin` 跨文件带开关设定（只有根单元能写）；空体开关（只驱动编译器行为）；库声明能力域；库声明核心模式（视作需求，根须满足）"; }
+    if k == 466 { return "the five core-mode dimensions (`mode` / `gc` / `runtime` / `port` / `vm`), values above; up to 500 switches per file; `addin` to carry switch settings across files (root unit only); empty switch bodies (purely to drive compiler behaviour); capability domains declared by a library; a library declaring a core mode (read as a requirement the root must satisfy)"; }
+    if k == 467 { return "五维核心模式（`mode` / `gc` / `runtime` / `port` / `vm`），每维取值见上；单文件最多 500 条开关；`addin` 跨文件带开关设定（只有根单元能写）；空体开关（只驱动编译器行为）；库声明能力域；库声明核心模式（视作需求，根须满足）"; }
+    if k == 468 { return "the Rust-subset syntax; `//` and `/* */` comments; `let x: T = e;`"; }
+    if k == 469 { return "Rust 风味那套语法；`//` `/* */` 注释；`let x: T = e;`"; }
+    if k == 470 { return "the Rust-subset syntax; `//` and `/* */` comments; `let x: T = e;`"; }
+    if k == 471 { return "Rust 风味那套语法；`//` `/* */` 注释；`let x: T = e;`"; }
     if k == 1800 { return "a tool exits 0 (no diagnostics) or 1 (diagnostics, and it left a record)"; }
     if k == 1801 { return "工具链以 0 退出（无诊断）或 1 退出（有诊断并留下了记录）"; }
     if k == 1998 { return "classified messages after a report lands"; }
@@ -2388,6 +2420,14 @@ pub fn code_no(c: u32, lang: u32) -> str {
     if k == 461 { return "同名顶层项共存；两个库同时导出同一个名字"; }
     if k == 462 { return "implicit promotion and implicit conversion (`u32` -> `i64` also needs `as`); using an integer where a bool is expected"; }
     if k == 463 { return "隐式提升与隐式转换（`u32` → `i64` 也必须写 `as`）；整数与布尔互用"; }
+    if k == 464 { return "one dimension written twice, or written outside the root unit; two dimensions whose values contradict (`gc_auto` with `no_runtime`); `choose vm`, or a path carrying an outward port, in a release build (the channel gate); setting a value before declaring it; two settings for one name; nested declarations; a library that uses a runtime-dragging construct without declaring it"; }
+    if k == 465 { return "同一维写两次、或写在根单元之外不一致；两维取值互相矛盾（`gc_auto` 与 `no_runtime`）；发行版里写 `choose vm`、或让路径带对外端口（渠道闸）；取值前没定义；同名两个取值；嵌套声明；库用了会拖运行期的构造却不声明"; }
+    if k == 466 { return "one dimension written twice, or written outside the root unit; two dimensions whose values contradict (`gc_auto` with `no_runtime`); `choose vm`, or a path carrying an outward port, in a release build (the channel gate); setting a value before declaring it; two settings for one name; nested declarations; a library that uses a runtime-dragging construct without declaring it"; }
+    if k == 467 { return "同一维写两次、或写在根单元之外不一致；两维取值互相矛盾（`gc_auto` 与 `no_runtime`）；发行版里写 `choose vm`、或让路径带对外端口（渠道闸）；取值前没定义；同名两个取值；嵌套声明；库用了会拖运行期的构造却不声明"; }
+    if k == 468 { return "single-quoted character literals; value-less `return;`; expression-style match arms; `let mut x: T` (`mut` is not a keyword)"; }
+    if k == 469 { return "单引号字符字面量；无值 `return;`；表达式式 match 臂；`let mut x: T`（`mut` 不是关键字）"; }
+    if k == 470 { return "single-quoted character literals; value-less `return;`; expression-style match arms; `let mut x: T` (`mut` is not a keyword)"; }
+    if k == 471 { return "单引号字符字面量；无值 `return;`；表达式式 match 臂；`let mut x: T`（`mut` 不是关键字）"; }
     if k == 1800 { return "killed by a signal / exited abnormally without writing any structured diagnostic"; }
     if k == 1801 { return "被信号打死 / 异常退出，而且一份结构化诊断都没写"; }
     if k == 1998 { return "guessing a code"; }
@@ -2627,6 +2667,10 @@ pub fn code_ascii(c: u32) -> str {
     if c == 229 { return "a handler or effect reference is missing a declaration"; }
     if c == 230 { return "one operation has two arms"; }
     if c == 231 { return "an effect operation's arguments or result do not match"; }
+    if c == 232 { return "virtual dispatch needs the runtime"; }
+    if c == 233 { return "the function-pointer type has no closed target set"; }
+    if c == 234 { return "an abstract class cannot be instantiated"; }
+    if c == 235 { return "a compiler-owned field was initialized"; }
     if c == 900 { return "a tool in the chain died before it could report (internal) - report it with the unit"; }
     if c == 999 { return "unclassified - please report it"; }
     return "";
@@ -2824,6 +2868,10 @@ pub fn code_family(c: u32) -> u32 {
     if c == 229 { return 2; }
     if c == 230 { return 13; }
     if c == 231 { return 1; }
+    if c == 232 { return 22; }
+    if c == 233 { return 22; }
+    if c == 234 { return 19; }
+    if c == 235 { return 19; }
     return c;
 }
 
@@ -4266,6 +4314,30 @@ pub fn code_fix(c: u32, i: u32, lang: u32) -> str {
     if k == 3697 { return "按声明补齐 / 删掉实参。"; }
     if k == 3699 { return "返回 `()` 的 `perform` 单独写成一条语句。"; }
     if k == 3701 { return "要那个值：把操作声明的返回类型改成实际类型。"; }
+    if k == 3712 { return "Write `choose runtime` in the root unit."; }
+    if k == 3714 { return "Drop `virtual` / `abstract` and use static dispatch."; }
+    if k == 3716 { return "Use a plain struct instead of a vtable class."; }
+    if k == 3713 { return "在根单元写 `choose runtime`。"; }
+    if k == 3715 { return "去掉 `virtual` / `abstract`，回到静态派发。"; }
+    if k == 3717 { return "把类实例改成不经过 vtable 的普通结构体。"; }
+    if k == 3728 { return "Take the address of a same-typed function (`let f: (T) -> R = inc;`)."; }
+    if k == 3730 { return "Replace the indirect call with a direct one."; }
+    if k == 3732 { return "Check the function-pointer type for a typo."; }
+    if k == 3729 { return "在程序里给同型函数取址（`let f: (T) -> R = inc;`）。"; }
+    if k == 3731 { return "把间接调用改成直接调用。"; }
+    if k == 3733 { return "检查函数指针的类型是否写错。"; }
+    if k == 3744 { return "Instantiate a concrete subclass."; }
+    if k == 3746 { return "Add the missing `override`s to the subclass."; }
+    if k == 3748 { return "Remove `abstract` if it can be constructed on its own."; }
+    if k == 3745 { return "实例化一个具体子类。"; }
+    if k == 3747 { return "给子类补上所有 `override`。"; }
+    if k == 3749 { return "去掉 `abstract`（如果它其实可以独立构造）。"; }
+    if k == 3760 { return "Remove `__vtable` from the literal."; }
+    if k == 3762 { return "Write only user fields."; }
+    if k == 3764 { return "Change methods/inheritance for dispatch, not the object header."; }
+    if k == 3761 { return "删掉字面量里的 `__vtable`。"; }
+    if k == 3763 { return "只写用户字段。"; }
+    if k == 3765 { return "要改派发行为就改方法/继承，不要碰对象头。"; }
     if k == 14400 { return "Report the smallest source that reproduces it together with this record - a crash is a compiler defect, not something you can work around in your code."; }
     if k == 14402 { return "Include the exit status / signal name (already in this message) and the output of `loment version`."; }
     if k == 14404 { return "If the message names the **linker** (`loment-lomelf`), also include the `-o` path and the target platform."; }
@@ -4517,6 +4589,10 @@ pub fn code_nfix(c: u32) -> u32 {
     if c == 229 { return 3; }
     if c == 230 { return 3; }
     if c == 231 { return 3; }
+    if c == 232 { return 3; }
+    if c == 233 { return 3; }
+    if c == 234 { return 3; }
+    if c == 235 { return 3; }
     if c == 900 { return 4; }
     if c == 999 { return 3; }
     return 0;

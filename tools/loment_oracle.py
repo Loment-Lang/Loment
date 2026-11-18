@@ -172,6 +172,7 @@ class Ty:
     elem: "Ty | None" = None
     length: int = 0
     mut: bool = False
+    sname: str = ""
 
 
 T_BOOL = Ty("bool")
@@ -216,12 +217,16 @@ class Program:
     consts: dict
     funcs: dict
     choices: list
+    structs: dict = field(default_factory=dict)
+    enums: dict = field(default_factory=dict)
 
 
 class Parser:
     def __init__(self, toks: list[Tok]):
         self.t = toks
         self.i = 0
+        self.structs: dict[str, list[tuple[str, Ty]]] = {}
+        self.enums: dict[str, list[tuple[str, "Ty | None"]]] = {}
 
     def peek(self) -> Tok:
         return self.t[self.i]
@@ -285,6 +290,10 @@ class Parser:
             return T_BOOL
         if name == "str":
             return T_STR
+        if name in self.structs:
+            return Ty("struct", sname=name)
+        if name in self.enums:
+            return Ty("enum", sname=name)
         raise SpecRefusal(f"{name}：第一版只认整数 / bool / str / 数组 / 引用（docs/349）")
 
     # ---- 顶层
@@ -319,6 +328,35 @@ class Parser:
                 consts[name] = (t, int(k.value))
                 continue
             self.accept("pub")
+            if self.accept("enum"):
+                ename = self.ident()
+                self.expect("{")
+                variants: list[tuple[str, "Ty | None"]] = []
+                while not self.at("}"):
+                    vname = self.ident()
+                    pty = None
+                    if self.accept("("):
+                        pty = self.ty()
+                        self.expect(")")
+                    variants.append((vname, pty))
+                    if not self.accept(","):
+                        break
+                self.expect("}")
+                self.enums[ename] = variants
+                continue
+            if self.accept("struct"):
+                sname = self.ident()
+                self.expect("{")
+                fields: list[tuple[str, Ty]] = []
+                while not self.at("}"):
+                    fname = self.ident()
+                    self.expect(":")
+                    fields.append((fname, self.ty()))
+                    if not self.accept(","):
+                        break
+                self.expect("}")
+                self.structs[sname] = fields
+                continue
             if self.accept("fn"):
                 funcs_here = self.func(module)
                 funcs[funcs_here.name] = funcs_here
@@ -326,7 +364,7 @@ class Parser:
             k = self.peek()
             raise SpecRefusal(f"第 {k.line} 行: 顶层只认 choose / module / const / fn，"
                               f"得到 {k.text!r}（第一版子集见 docs/349）")
-        return Program(module, consts, funcs, choices)
+        return Program(module, consts, funcs, choices, dict(self.structs), dict(self.enums))
 
     def func(self, module: str) -> Func:
         line = self.peek().line
@@ -386,6 +424,44 @@ class Parser:
             e = self.expr()
             self.expect(";")
             return Node("return", k.line, e)
+        if self.accept("break"):
+            self.expect(";")
+            return Node("break", k.line)
+        if self.accept("continue"):
+            self.expect(";")
+            return Node("continue", k.line)
+        if self.accept("match"):
+            subj = self.expr()
+            self.expect("{")
+            arms: list[tuple[str, str, Node]] = []
+            while not self.at("}"):
+                if self.accept("_"):
+                    vn, bind = "", ""
+                else:
+                    ename = self.ident()
+                    self.expect("::")
+                    vn = self.ident()
+                    bind = ""
+                    if self.accept("("):
+                        bind = self.ident()
+                        self.expect(")")
+                    if ename not in self.enums:
+                        raise SpecRefusal(f"第 {k.line} 行: 不认识的枚举 {ename!r}（E008）", "match")
+                self.expect("=>")
+                body = self.block()
+                arms.append((vn, bind, body))
+            self.expect("}")
+            return Node("match", k.line, subj, items=arms)
+        if self.accept("for"):
+            name = self.ident()
+            self.expect("in")
+            src = self.expr()
+            if self.accept(".."):
+                hi = self.expr()
+                body = self.block()
+                return Node("for_range", k.line, name, src, hi, items=[body])
+            body = self.block()
+            return Node("for_in", k.line, name, src, items=[body])
         e = self.expr()
         if self.accept("="):
             v = self.expr()
@@ -446,6 +522,9 @@ class Parser:
                 self.expect("]")
                 e = Node("index", e.line, e, idx)
                 continue
+            if self.accept("."):
+                e = Node("field", e.line, e, self.ident())
+                continue
             return e
 
     def primary(self) -> Node:
@@ -457,6 +536,30 @@ class Parser:
             self.next()
             return Node("str", k.line, bytes(k.value))
         if k.kind == "ident":
+            if self.i + 1 < len(self.t) and self.t[self.i + 1].kind == "punct" and self.t[self.i + 1].text == "::":
+                ename = k.text
+                self.next()
+                self.expect("::")
+                vname = self.ident()
+                payload = None
+                if self.accept("("):
+                    payload = self.expr()
+                    self.expect(")")
+                if ename not in self.enums:
+                    raise SpecRefusal(f"第 {k.line} 行: 不认识的枚举 {ename!r}（E008）", "enumval")
+                return Node("enumval", k.line, ename, vname, payload)
+            if k.text in self.structs and self.t[self.i + 1].kind == "punct"                     and self.t[self.i + 1].text == "{":
+                self.next()
+                self.expect("{")
+                inits: list[tuple[str, Node]] = []
+                while not self.at("}"):
+                    fname = self.ident()
+                    self.expect(":")
+                    inits.append((fname, self.expr()))
+                    if not self.accept(","):
+                        break
+                self.expect("}")
+                return Node("slit", k.line, k.text, items=inits)
             if k.text == "true":
                 self.next()
                 return Node("bool", k.line, True)
@@ -506,6 +609,14 @@ class Return(Exception):
         self.val = val
 
 
+class Break(Exception):
+    pass
+
+
+class Continue(Exception):
+    pass
+
+
 class Exit(Exception):
     def __init__(self, code: int):
         self.code = code & 0xFF
@@ -530,6 +641,8 @@ def _fit(v: int, t: Ty) -> bool:
 class Interp:
     def __init__(self, prog: Program):
         self.p = prog
+        self.structs = prog.structs
+        self.enums = prog.enums
         self.out = bytearray()
         self.consts = {n: Val(t, _wrap(v, t)) for n, (t, v) in prog.consts.items()}
 
@@ -610,6 +723,49 @@ class Interp:
                            "语言的界外行为不在可观察语义内（§12.10）", "index_read")
             s = slots[i.data]
             return Val(s.ty, s.value)
+        if k == "slit":
+            if want is None or want.kind != "struct":
+                raise SpecRefusal(f"第 {e.line} 行: 结构体字面量需要期望类型（§10.6）", "slit")
+            fields = self.structs.get(e.a)
+            if fields is None:
+                raise SpecRefusal(f"第 {e.line} 行: 没有这个结构体 {e.a!r}")
+            given = dict(e.items)
+            out: dict[str, Val] = {}
+            for fname, fty in fields:
+                if fname not in given:
+                    raise SpecRefusal(f"第 {e.line} 行: 结构体字面量少了字段 {fname!r}（E015）")
+                out[fname] = self.eval(given[fname], env, fty)
+            for fname, _ in e.items:
+                if fname not in dict(fields):
+                    raise SpecRefusal(f"第 {e.line} 行: 不认识的字段 {fname!r}（E015）")
+            return Val(want, out)
+        if k == "enumval":
+            variants = self.enums.get(e.a)
+            if variants is None:
+                raise SpecRefusal(f"第 {e.line} 行: 不认识的枚举 {e.a!r}（E008）", "enumval")
+            idx = None
+            for vi, (vn, pty) in enumerate(variants):
+                if vn == e.b:
+                    idx = vi
+                    break
+            if idx is None:
+                raise SpecRefusal(f"第 {e.line} 行: 枚举没有变体 {e.b!r}（E008）", "enumval")
+            _vn, pty = variants[idx]
+            if pty is None:
+                if e.c is not None:
+                    raise SpecRefusal(f"第 {e.line} 行: 这个变体不带载荷（§13.1）", "enumval")
+                return Val(Ty("enum", sname=e.a), (e.b, None))
+            if e.c is None:
+                raise SpecRefusal(f"第 {e.line} 行: 这个变体要一个载荷（§13.1）", "enumval")
+            return Val(Ty("enum", sname=e.a), (e.b, self.eval(e.c, env, pty)))
+        if k == "field":
+            base = self.eval(e.a, env)
+            if base.ty.kind != "struct":
+                raise SpecRefusal(f"第 {e.line} 行: `.` 前面不是结构体（§12.2）")
+            fv = base.data.get(e.b)
+            if fv is None:
+                raise SpecRefusal(f"第 {e.line} 行: 结构体没有字段 {e.b!r}（E015）")
+            return Val(fv.ty, fv.data)
         if k == "call":
             return self.call(e, env)
         if k == "bin":
@@ -690,11 +846,15 @@ class Interp:
         frame: dict = {}
         for (pname, pty), arg in zip(fn.params, e.c):
             frame[pname] = self.bind_arg(arg, pty, env)
+        old_ret = getattr(self, "cur_ret", None)
+        self.cur_ret = fn.ret
         try:
             self.run_block(fn.body, frame)
             rv = Val(T_UNIT, None)
         except Return as r:
             rv = r.val if r.val is not None else Val(T_UNIT, None)
+        finally:
+            self.cur_ret = old_ret
         if fn.ret is None:
             return Val(T_UNIT, None)
         if rv.ty != fn.ret:
@@ -713,6 +873,8 @@ class Interp:
             raise SpecRefusal(f"第 {arg.line} 行: `&` 实参对不上形参类型 {ty_name(pty)}",
                               "ref_make")
         v = self.eval(arg, env, pty)
+        if pty.kind == "struct":
+            return Slot(pty, dict(v.data))
         if pty.kind == "slice":
             raise SpecRefusal(f"第 {arg.line} 行: `[T]` 形参要 `&a` 实参（§10.7）", "slice_arg")
         if v.ty != pty:
@@ -733,6 +895,23 @@ class Interp:
             data = str(v.data).encode()
             self.out += data
             return Val(Ty("int", 32, False), len(data))
+        if name == "str_len":
+            v = self.eval(args[0], env, T_STR)
+            return Val(Ty("int", 32, False), len(v.data))
+        if name == "str_byte":
+            v = self.eval(args[0], env, T_STR)
+            i = self.eval(args[1], env, Ty("int", 32, False))
+            if not (0 <= i.data < len(v.data)):
+                raise Trap(f"第 {e.line} 行: str_byte 下标越界（§18.1）", "str_byte")
+            return Val(Ty("int", 32, False), v.data[i.data])
+        if name == "str_eq":
+            a = self.eval(args[0], env, T_STR)
+            b = self.eval(args[1], env, T_STR)
+            return Val(T_BOOL, a.data == b.data)
+        if name == "str_concat":
+            a = self.eval(args[0], env, T_STR)
+            b = self.eval(args[1], env, T_STR)
+            return Val(T_STR, a.data + b.data)
         if name == "slice_len":
             v = self.eval(args[0], env)
             if v.ty.kind != "slice":
@@ -780,9 +959,21 @@ class Interp:
     def exec_stmt(self, st: Node, env: dict):
         if st.kind == "let":
             v = self.eval(st.c, env, st.b)
-            env[st.a] = Slot(st.b, v.data)
+            env[st.a] = Slot(st.b, dict(v.data) if isinstance(v.data, dict) else v.data)
             return
         if st.kind == "assign":
+            if st.a.kind == "field":
+                base = st.a.a
+                if base.kind != "name" or base.a not in env:
+                    raise SpecRefusal(f"第 {st.line} 行: 字段赋值只支持具名结构体（第一版）",
+                                      "assign")
+                slot0 = env[base.a]
+                if slot0.ty.kind != "struct":
+                    raise SpecRefusal(f"第 {st.line} 行: `.` 前面不是结构体（§12.2）")
+                fty = dict(self.structs[slot0.ty.sname])[st.a.b]
+                v = self.eval(st.b, env, fty)
+                slot0.value[st.a.b] = v
+                return
             v = self.eval(st.b, env, None)
             slot = self.lvalue(st.a, env)
             if slot.ty != v.ty:
@@ -799,7 +990,7 @@ class Interp:
             elif isinstance(st.c, Node):
                 self.exec_stmt(st.c, env)
             elif st.c is not None:
-                self.run_block(st.c, env)
+                self.run_block(st.items[0], env)
             return
         if st.kind == "while":
             while True:
@@ -808,9 +999,68 @@ class Interp:
                     raise SpecRefusal(f"第 {st.line} 行: while 的条件要 bool（§11.5）", "eval_while")
                 if not c.data:
                     return
-                self.run_block(st.b, env)
+                try:
+                    self.run_block(st.b, env)
+                except Break:
+                    return
+                except Continue:
+                    continue
+        if st.kind == "match":
+            subj = self.eval(st.a, env)
+            if subj.ty.kind != "enum":
+                raise SpecRefusal(f"第 {st.line} 行: match 的主体要枚举（E008）", "match")
+            variant, payload = subj.data
+            for vn, bind, body in st.items:
+                if vn and vn != variant:
+                    continue
+                if bind and payload is not None:
+                    env[bind] = Slot(payload.ty, payload.data)
+                except_break = False
+                try:
+                    self.run_block(body, env)
+                except Break:
+                    except_break = True
+                if except_break:
+                    break
+                return
+            raise SpecRefusal(f"第 {st.line} 行: match 没有命中的分支（§13.2）", "match")
+        if st.kind == "for_range":
+            lo = self.eval(st.b, env)
+            if lo.ty.kind != "int":
+                raise SpecRefusal(f"第 {st.line} 行: for 的范围要整数（§11.6）", "eval_for")
+            hi = self.eval(st.c, env, lo.ty)
+            v = lo.data
+            while v < hi.data:
+                env[st.a] = Slot(lo.ty, v)
+                try:
+                    self.run_block(st.items[0], env)
+                except Break:
+                    break
+                except Continue:
+                    pass
+                v = _wrap(v + 1, lo.ty)
+            return
+        if st.kind == "for_in":
+            src = self.eval(st.b, env)
+            if src.ty.kind not in ("array", "slice"):
+                raise SpecRefusal(f"第 {st.line} 行: for-in 要数组/切片（§11.6）", "eval_for")
+            slots, _ = self._elems(src)
+            for cell in slots:
+                env[st.a] = Slot(cell.ty, cell.value)
+                try:
+                    self.run_block(st.items[0], env)
+                except Break:
+                    break
+                except Continue:
+                    pass
+            return
+        if st.kind == "break":
+            raise Break()
+        if st.kind == "continue":
+            raise Continue()
         if st.kind == "return":
-            raise Return(self.eval(st.a, env) if st.a is not None else None)
+            want = getattr(self, "cur_ret", None)
+            raise Return(self.eval(st.a, env, want) if st.a is not None else None)
         if st.kind == "expr":
             self.eval(st.a, env)
             return

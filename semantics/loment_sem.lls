@@ -50,8 +50,14 @@ const M_SLOT: u32 = 538624;
 const M_ARR: u32 = 587776;
 const M_OUT: u32 = 604160;
 const M_STR: u32 = 620544;        // 解码后的字符串字面量（转义在这里就处理掉）
-const M_STATE: u32 = 636928;
-const ARENA: u32 = 637056;
+const M_SBUF: u32 = 637056;       // `str_concat` 拼出来的字节（追加式）
+const M_STRUCT: u32 = 645248;     // 结构体声明表（64 × 48 B）
+const M_FIELD: u32 = 648320;      // 字段声明表（256 × 24 B）
+const M_STRU: u32 = 654464;       // 结构体值的字段存储（追加式，24 B 一格）
+const M_STATE: u32 = 670848;      // 256 B（v1.2 起：多了枚举/变体/匹配的游标）
+const M_ENUM: u32 = 671104;       // 枚举声明表（32 × 48 B）
+const M_VAR: u32 = 672640;        // 变体表（128 × 24 B）
+const ARENA: u32 = 679936;
 
 // 状态块（Loment 没有可变全局 —— 与 lomelf 同一条纪律）
 const ST_NOUT: u32 = 0;
@@ -71,6 +77,17 @@ const ST_ELEM: u32 = 68;
 const ST_ALEN: u32 = 72;
 const ST_NSTR: u32 = 76;
 const ST_SRC: u32 = 80;
+const ST_BRK: u32 = 92;           // `break;` 置位
+const ST_CONT: u32 = 96;          // `continue;` 置位
+const ST_SSTR: u32 = 100;         // `str_concat` 的字节游标
+const ST_NSTRUCT: u32 = 104;      // 已声明的结构体数
+const ST_NFIELD: u32 = 108;       // 字段声明表游标
+const ST_NSTRU: u32 = 112;        // 结构体值堆游标（字段格）
+const ST_CURRTY: u32 = 116;       // 当前函数的返回类型（`return` 拿它当期望类型）
+const ST_CUREL: u32 = 120;        // 返回数组/结构体的元素类型 / 结构体下标
+const ST_CURLEN: u32 = 124;
+const ST_NENUM: u32 = 128;
+const ST_NVAR: u32 = 132;
 
 // 类型编号（§10.1）
 const TY_UNIT: u32 = 0;
@@ -87,6 +104,8 @@ const TY_STR: u32 = 10;
 const TY_ARR: u32 = 11;
 const TY_SLICE: u32 = 12;
 const TY_REF: u32 = 13;
+const TY_STRUCT: u32 = 14;
+const TY_ENUM: u32 = 15;
 
 // token 种类
 const TK_IDENT: u32 = 1;
@@ -116,6 +135,14 @@ const N_IF: u32 = 17;
 const N_WHILE: u32 = 18;
 const N_RETURN: u32 = 19;
 const N_EXPR: u32 = 20;
+const N_FLD: u32 = 24;
+const N_ENUMVAL: u32 = 26;
+const N_MATCH: u32 = 27;
+const N_ARM: u32 = 28;
+const N_STRUCTLIT: u32 = 25;
+const N_FOR: u32 = 21;
+const N_BREAK: u32 = 22;
+const N_CONT: u32 = 23;
 
 // 节点字段（96 B）
 const N_K: u32 = 0;
@@ -145,6 +172,37 @@ const P_NLEN: u32 = 4;
 const P_TY: u32 = 8;
 const P_ELEM: u32 = 12;
 const P_ALEN: u32 = 16;
+
+// 结构体声明（48 B）
+const D_NOFF: u32 = 0;
+const D_NLEN: u32 = 4;
+const D_NF: u32 = 8;
+const D_F0: u32 = 12;
+
+// 字段声明（24 B）
+const FD_NOFF: u32 = 0;
+const FD_NLEN: u32 = 4;
+const FD_TY: u32 = 8;
+const FD_ELEM: u32 = 12;
+const FD_ALEN: u32 = 16;
+
+// 结构体值的一格（24 B）：[ty u32][len u32][data u64][aux u64]
+const VTY: u32 = 0;
+const VLEN: u32 = 4;
+const VDATA: u32 = 8;
+const VAUX: u32 = 16;
+
+// 枚举声明（48 B）与变体（24 B）
+const E_NOFF: u32 = 0;
+const E_NLEN: u32 = 4;
+const E_NV: u32 = 8;
+const E_V0: u32 = 12;
+
+const W_NOFF: u32 = 0;
+const W_NLEN: u32 = 4;
+const W_HAS: u32 = 8;
+const W_TY: u32 = 12;
+const W_ELEM: u32 = 16;
 
 // 变量格（48 B）
 const S_NOFF: u32 = 0;
@@ -344,6 +402,9 @@ fn punct_len(src: ptr, i: u32, n: u32) -> u32 {
         if a == 124 && b == 124 { return 2; }    // ||
         if a == 60 && b == 60 { return 2; }      // <<
         if a == 62 && b == 62 { return 2; }      // >>
+        if a == 46 && b == 46 { return 2; }      // ..
+        if a == 58 && b == 58 { return 2; }      // ::
+        if a == 61 && b == 62 { return 2; }      // =>
     }
     let c: u32 = load8(src, i) as u32;
     if c == 40 || c == 41 || c == 123 || c == 125 || c == 91 || c == 93 { return 1; }
@@ -465,6 +526,181 @@ fn list_add(mem: ptr, head: u32, tail: u32, n: u32, item: u32) -> u32 {
     return head;
 }
 
+// ---------------------------------------------------------------- 结构体声明
+
+fn struct_add(mem: ptr, noff: u32, nlen: u32) -> u32 {
+    let k: u32 = load32(mem, M_STATE + ST_NSTRUCT);
+    if k >= 64 {
+        let _f: u32 = fail("结构体太多了（64）");
+    }
+    let b: u32 = M_STRUCT + k * 48;
+    store32(mem, b + D_NOFF, noff);
+    store32(mem, b + D_NLEN, nlen);
+    store32(mem, b + D_NF, 0);
+    store32(mem, b + D_F0, load32(mem, M_STATE + ST_NFIELD));
+    store32(mem, M_STATE + ST_NSTRUCT, k + 1);
+    return k;
+}
+
+fn field_add(mem: ptr, noff: u32, nlen: u32, ty: u32, el: u32, al: u32) -> u32 {
+    let k: u32 = load32(mem, M_STATE + ST_NFIELD);
+    if k >= 256 {
+        let _f: u32 = fail("字段太多了（256）");
+    }
+    let b: u32 = M_FIELD + k * 24;
+    store32(mem, b + FD_NOFF, noff);
+    store32(mem, b + FD_NLEN, nlen);
+    store32(mem, b + FD_TY, ty);
+    store32(mem, b + FD_ELEM, el);
+    store32(mem, b + FD_ALEN, al);
+    store32(mem, M_STATE + ST_NFIELD, k + 1);
+    return k;
+}
+
+fn find_struct(mem: ptr, src: ptr, noff: u32, nlen: u32) -> u32 {
+    let n: u32 = load32(mem, M_STATE + ST_NSTRUCT);
+    let i: u32 = 0;
+    while i < n {
+        let b: u32 = M_STRUCT + i * 48;
+        if streq2(src, load32(mem, b + D_NOFF), load32(mem, b + D_NLEN),
+                  src, noff, nlen) == 1 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return NOSLOT;
+}
+
+// ---------------------------------------------------------------- 枚举（§13）
+
+fn enum_add(mem: ptr, noff: u32, nlen: u32) -> u32 {
+    let k: u32 = load32(mem, M_STATE + ST_NENUM);
+    if k >= 32 {
+        let _f: u32 = fail("枚举太多了（32）");
+    }
+    let b: u32 = M_ENUM + k * 48;
+    store32(mem, b + E_NOFF, noff);
+    store32(mem, b + E_NLEN, nlen);
+    store32(mem, b + E_NV, 0);
+    store32(mem, b + E_V0, load32(mem, M_STATE + ST_NVAR));
+    store32(mem, M_STATE + ST_NENUM, k + 1);
+    return k;
+}
+
+fn var_add(mem: ptr, noff: u32, nlen: u32, has: u32, ty: u32, el: u32) -> u32 {
+    let k: u32 = load32(mem, M_STATE + ST_NVAR);
+    if k >= 128 {
+        let _f: u32 = fail("变体太多了（128）");
+    }
+    let b: u32 = M_VAR + k * 24;
+    store32(mem, b + W_NOFF, noff);
+    store32(mem, b + W_NLEN, nlen);
+    store32(mem, b + W_HAS, has);
+    store32(mem, b + W_TY, ty);
+    store32(mem, b + W_ELEM, el);
+    store32(mem, M_STATE + ST_NVAR, k + 1);
+    return k;
+}
+
+fn find_enum(mem: ptr, src: ptr, noff: u32, nlen: u32) -> u32 {
+    let n: u32 = load32(mem, M_STATE + ST_NENUM);
+    let i: u32 = 0;
+    while i < n {
+        let b: u32 = M_ENUM + i * 48;
+        if streq2(src, load32(mem, b + E_NOFF), load32(mem, b + E_NLEN),
+                  src, noff, nlen) == 1 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return NOSLOT;
+}
+
+fn find_variant(mem: ptr, src: ptr, eidx: u32, noff: u32, nlen: u32) -> u32 {
+    if eidx == NOSLOT || eidx >= load32(mem, M_STATE + ST_NENUM) {
+        return NOSLOT;
+    }
+    let eb: u32 = M_ENUM + eidx * 48;
+    let n: u32 = load32(mem, eb + E_NV);
+    let v0: u32 = load32(mem, eb + E_V0);
+    let k: u32 = 0;
+    while k < n {
+        let vb: u32 = M_VAR + (v0 + k) * 24;
+        if streq2(src, load32(mem, vb + W_NOFF), load32(mem, vb + W_NLEN),
+                  src, noff, nlen) == 1 {
+            return k;
+        }
+        k = k + 1;
+    }
+    return NOSLOT;
+}
+
+fn parse_enum(mem: ptr, src: ptr) {
+    adv(mem);                                  // enum
+    let ni: u32 = tc(mem);
+    let noff: u32 = tstart(mem, ni);
+    let nlen: u32 = tlen(mem, ni);
+    adv(mem);
+    let e: u32 = enum_add(mem, noff, nlen);
+    let nv: u32 = 0;
+    expect_p(mem, src, "{");
+    while at_p(mem, src, "}") == 0 {
+        let vi: u32 = tc(mem);
+        let voff: u32 = tstart(mem, vi);
+        let vlen: u32 = tlen(mem, vi);
+        adv(mem);
+        let has: u32 = 0;
+        let pty: u32 = 0;
+        let pel: u32 = 0;
+        if at_p(mem, src, "(") == 1 {
+            adv(mem);
+            pty = parse_type(mem, src);
+            pel = load32(mem, M_STATE + ST_ELEM);
+            expect_p(mem, src, ")");
+            has = 1;
+            if pty == TY_STR || pty == TY_ARR || pty == TY_STRUCT || pty == TY_SLICE {
+                fail("载荷第一版只认标量（整数 / bool）");
+            }
+        }
+        let _v: u32 = var_add(mem, voff, vlen, has, pty, pel);
+        nv = nv + 1;
+        if at_p(mem, src, ",") == 1 {
+            adv(mem);
+        }
+    }
+    expect_p(mem, src, "}");
+    store32(mem, M_ENUM + e * 48 + E_NV, nv);
+}
+
+/// 结构体声明（§10.1 / §12.9）：字段名 + 类型，**声明先于使用**。
+fn parse_struct(mem: ptr, src: ptr) {
+    adv(mem);                                  // struct
+    let ni: u32 = tc(mem);
+    let noff: u32 = tstart(mem, ni);
+    let nlen: u32 = tlen(mem, ni);
+    adv(mem);
+    let k: u32 = struct_add(mem, noff, nlen);
+    let nf: u32 = 0;
+    expect_p(mem, src, "{");
+    while at_p(mem, src, "}") == 0 {
+        let fi: u32 = tc(mem);
+        let foff: u32 = tstart(mem, fi);
+        let flen: u32 = tlen(mem, fi);
+        adv(mem);
+        expect_p(mem, src, ":");
+        let ft: u32 = parse_type(mem, src);
+        let fel: u32 = load32(mem, M_STATE + ST_ELEM);
+        let fal: u32 = load32(mem, M_STATE + ST_ALEN);
+        let _f: u32 = field_add(mem, foff, flen, ft, fel, fal);
+        nf = nf + 1;
+        if at_p(mem, src, ",") == 1 {
+            adv(mem);
+        }
+    }
+    expect_p(mem, src, "}");
+    store32(mem, M_STRUCT + k * 48 + D_NF, nf);
+}
+
 // ---------------------------------------------------------------- 语法
 
 fn tc(mem: ptr) -> u32 {
@@ -554,7 +790,22 @@ fn parse_type(mem: ptr, src: ptr) -> u32 {
     }
     let t: u32 = ty_word(mem, src);
     if t == 0 {
-        let _f: u32 = fail("类型：第一版只认整数 / bool / str / 数组 / 引用");
+        let ti: u32 = tc(mem);
+        if tkind(mem, ti) == TK_IDENT {
+            let sidx: u32 = find_struct(mem, src, tstart(mem, ti), tlen(mem, ti));
+            if sidx != NOSLOT {
+                adv(mem);
+                store32(mem, M_STATE + ST_ELEM, sidx);
+                return TY_STRUCT;
+            }
+            let eidx: u32 = find_enum(mem, src, tstart(mem, ti), tlen(mem, ti));
+            if eidx != NOSLOT {
+                adv(mem);
+                store32(mem, M_STATE + ST_ELEM, eidx);
+                return TY_ENUM;
+            }
+        }
+        let _f: u32 = fail("类型：第一版只认整数 / bool / str / 数组 / 引用 / 已声明的结构体");
     }
     adv(mem);
     return t;
@@ -596,6 +847,7 @@ fn parse_block(mem: ptr, src: ptr) -> u32 {
 
 fn parse_stmt(mem: ptr, src: ptr) -> u32 {
     let line: u32 = tline(mem, tc(mem));
+    // 绑定（§11.3）；`let mut` 的 `mut` 被抹掉（§11.2，Tur 拼法）。
     if at_kw(mem, src, "let") == 1 {
         adv(mem);
         if at_kw(mem, src, "mut") == 1 {
@@ -618,6 +870,9 @@ fn parse_stmt(mem: ptr, src: ptr) -> u32 {
             set32(mem, init, N_LEN, al);
         } else {
             set32(mem, init, N_TY, ty);
+            if ty == TY_STRUCT {
+                set32(mem, init, N_AUX, el);
+            }
         }
         let st: u32 = nd_new(mem, N_LET, line);
         set32(mem, st, N_A, noff);
@@ -669,6 +924,113 @@ fn parse_stmt(mem: ptr, src: ptr) -> u32 {
         let st: u32 = nd_new(mem, N_RETURN, line);
         set32(mem, st, N_A, e);
         return st;
+    }
+    // `break;` / `continue;`（§11.7，2026.2+）
+    if at_kw(mem, src, "break") == 1 {
+        adv(mem);
+        expect_p(mem, src, ";");
+        let stb: u32 = nd_new(mem, N_BREAK, line);
+        return stb;
+    }
+    if at_kw(mem, src, "continue") == 1 {
+        adv(mem);
+        expect_p(mem, src, ";");
+        let stc: u32 = nd_new(mem, N_CONT, line);
+        return stc;
+    }
+    // `for i in lo..hi` / `for x in arr`（§11.6）。两种形状共用一个节点：
+    // `N_LEN = 0` 是 range（上界在 `N_TY`），`N_LEN = 1` 是数组（源在 `N_C`）。
+    // `match`（§13.2）：`match EXPR { E::V(b) => BLOCK … _ => BLOCK }`。
+    if at_kw(mem, src, "match") == 1 {
+        adv(mem);
+        let subj: u32 = parse_expr(mem, src, 1);
+        expect_p(mem, src, "{");
+        let head: u32 = 0;
+        let tail: u32 = 0;
+        let cnt: u32 = 0;
+        while at_p(mem, src, "}") == 0 {
+            let arm: u32 = nd_new(mem, N_ARM, tline(mem, tc(mem)));
+            if at_kw(mem, src, "_") == 1 {
+                adv(mem);
+                set32(mem, arm, N_A, NOSLOT);
+                set32(mem, arm, N_B, 0);
+                set32(mem, arm, N_C, 0);
+            } else {
+                let en: u32 = tc(mem);
+                let eno: u32 = tstart(mem, en);
+                let enl: u32 = tlen(mem, en);
+                adv(mem);
+                expect_p(mem, src, "::");
+                let vn: u32 = tc(mem);
+                let voff: u32 = tstart(mem, vn);
+                let vlen: u32 = tlen(mem, vn);
+                adv(mem);
+                let eidx: u32 = find_enum(mem, src, eno, enl);
+                let vidx: u32 = find_variant(mem, src, eidx, voff, vlen);
+                if vidx == NOSLOT {
+                    fail("match 的变体不在这枚举里（E008）");
+                }
+                let boff: u32 = 0;
+                let blen: u32 = 0;
+                if at_p(mem, src, "(") == 1 {
+                    adv(mem);
+                    let bi: u32 = tc(mem);
+                    boff = tstart(mem, bi);
+                    blen = tlen(mem, bi);
+                    adv(mem);
+                    expect_p(mem, src, ")");
+                }
+                set32(mem, arm, N_A, vidx);
+                set32(mem, arm, N_B, boff);
+                set32(mem, arm, N_C, blen);
+            }
+            expect_p(mem, src, "=>");
+            let body: u32 = parse_block(mem, src);
+            set32(mem, arm, N_AUX, body);
+            head = list_add(mem, head, tail, cnt, arm);
+            tail = arm;
+            cnt = cnt + 1;
+        }
+        expect_p(mem, src, "}");
+        let stm: u32 = nd_new(mem, N_MATCH, line);
+        set32(mem, stm, N_A, subj);
+        set32(mem, stm, N_B, head);
+        set32(mem, stm, N_C, cnt);
+        return stm;
+    }
+    if at_kw(mem, src, "for") == 1 {
+        adv(mem);
+        let fi: u32 = tc(mem);
+        let foff: u32 = tstart(mem, fi);
+        let flen: u32 = tlen(mem, fi);
+        adv(mem);
+        if at_kw(mem, src, "in") == 1 {
+            adv(mem);
+        } else {
+            let _f: u32 = fail_tok(mem, src, "for 后面要 in");
+        }
+        let fe: u32 = parse_expr(mem, src, 1);
+        if at_p(mem, src, "..") == 1 {
+            adv(mem);
+            let hi: u32 = parse_expr(mem, src, 1);
+            let body: u32 = parse_block(mem, src);
+            let fr: u32 = nd_new(mem, N_FOR, line);
+            set32(mem, fr, N_A, foff);
+            set32(mem, fr, N_B, flen);
+            set32(mem, fr, N_C, fe);
+            set32(mem, fr, N_TY, hi);
+            set32(mem, fr, N_AUX, body);
+            set32(mem, fr, N_LEN, 0);
+            return fr;
+        }
+        let body2: u32 = parse_block(mem, src);
+        let fi2: u32 = nd_new(mem, N_FOR, line);
+        set32(mem, fi2, N_A, foff);
+        set32(mem, fi2, N_B, flen);
+        set32(mem, fi2, N_C, fe);
+        set32(mem, fi2, N_AUX, body2);
+        set32(mem, fi2, N_LEN, 1);
+        return fi2;
     }
     let e: u32 = parse_expr(mem, src, 1);
     if at_p(mem, src, "=") == 1 {
@@ -831,6 +1193,18 @@ fn parse_postfix(mem: ptr, src: ptr, e0: u32) -> u32 {
                 set32(mem, n, N_C, cnt);
                 e = n;
             } else {
+                if at_p(mem, src, ".") == 1 {
+                    adv(mem);
+                    let fi: u32 = tc(mem);
+                    let foff: u32 = tstart(mem, fi);
+                    let flen: u32 = tlen(mem, fi);
+                    adv(mem);
+                    let n: u32 = nd_new(mem, N_FLD, nd32(mem, e, N_LINE));
+                    set32(mem, n, N_A, e);
+                    set32(mem, n, N_B, foff);
+                    set32(mem, n, N_C, flen);
+                    e = n;
+                } else {
                 if at_p(mem, src, "[") == 1 {
                     let line: u32 = tline(mem, tc(mem));
                     adv(mem);
@@ -842,6 +1216,7 @@ fn parse_postfix(mem: ptr, src: ptr, e0: u32) -> u32 {
                     e = n;
                 } else {
                     done = 1;
+                }
                 }
             }
         }
@@ -907,6 +1282,72 @@ fn parse_primary(mem: ptr, src: ptr) -> u32 {
         return n;
     }
     if tkind(mem, i) == TK_IDENT {
+        let n1: u32 = i + 1;
+        if tkind(mem, n1) == TK_PUNCT
+                && streq(src, tstart(mem, n1), tlen(mem, n1), "::") == 1 {
+            // `E::V` / `E::V(expr)`（§13.1）
+            let eno: u32 = tstart(mem, i);
+            let enl: u32 = tlen(mem, i);
+            adv(mem);                          // 枚举名
+            adv(mem);                          // ::
+            let vi: u32 = tc(mem);
+            let voff: u32 = tstart(mem, vi);
+            let vlen: u32 = tlen(mem, vi);
+            adv(mem);
+            let eidx: u32 = find_enum(mem, src, eno, enl);
+            if eidx == NOSLOT {
+                fail("不认识的枚举（E008）");
+            }
+            let vidx: u32 = find_variant(mem, src, eidx, voff, vlen);
+            if vidx == NOSLOT {
+                fail("枚举没有这个变体（E008）");
+            }
+            let payload: u32 = 0;
+            if at_p(mem, src, "(") == 1 {
+                adv(mem);
+                payload = parse_expr(mem, src, 1);
+                expect_p(mem, src, ")");
+            }
+            let ev: u32 = nd_new(mem, N_ENUMVAL, line);
+            set32(mem, ev, N_A, eidx);
+            set32(mem, ev, N_B, vidx);
+            set32(mem, ev, N_C, payload);
+            return ev;
+        }
+        let sidx: u32 = find_struct(mem, src, tstart(mem, i), tlen(mem, i));
+        let nx: u32 = i + 1;
+        if sidx != NOSLOT && tkind(mem, nx) == TK_PUNCT
+                && streq(src, tstart(mem, nx), tlen(mem, nx), "{") == 1 {
+            adv(mem);                          // 结构体名
+            adv(mem);                          // `{`
+            let head: u32 = 0;
+            let tail: u32 = 0;
+            let cnt: u32 = 0;
+            while at_p(mem, src, "}") == 0 {
+                let fi2: u32 = tc(mem);
+                let foff: u32 = tstart(mem, fi2);
+                let flen: u32 = tlen(mem, fi2);
+                adv(mem);
+                expect_p(mem, src, ":");
+                let val: u32 = parse_expr(mem, src, 1);
+                let init: u32 = nd_new(mem, N_EXPR, line);
+                set32(mem, init, N_A, foff);
+                set32(mem, init, N_B, flen);
+                set32(mem, init, N_C, val);
+                head = list_add(mem, head, tail, cnt, init);
+                tail = init;
+                cnt = cnt + 1;
+                if at_p(mem, src, ",") == 1 {
+                    adv(mem);
+                }
+            }
+            expect_p(mem, src, "}");
+            let lit: u32 = nd_new(mem, N_STRUCTLIT, line);
+            set32(mem, lit, N_A, sidx);
+            set32(mem, lit, N_B, head);
+            set32(mem, lit, N_C, cnt);
+            return lit;
+        }
         adv(mem);
         let n: u32 = nd_new(mem, N_NAME, line);
         set32(mem, n, N_A, tstart(mem, i));
@@ -1010,7 +1451,15 @@ fn parse_program(mem: ptr, src: ptr) -> u32 {
                 if at_kw(mem, src, "fn") == 1 {
                     parse_fn(mem, src);
                 } else {
-                    let _f: u32 = fail("顶层只认 choose / module / fn（第一版子集）");
+                    if at_kw(mem, src, "struct") == 1 {
+                        parse_struct(mem, src);
+                    } else {
+                    if at_kw(mem, src, "enum") == 1 {
+                        parse_enum(mem, src);
+                    } else {
+                    let _f: u32 = fail("顶层只认 choose / module / fn / struct / enum（第一版子集）");
+                    }
+                    }
                 }
             }
         }
@@ -1311,6 +1760,18 @@ fn ev(mem: ptr, src: ptr, ni: u32, fb: u32) -> u32 {
     if k == N_CALL {
         call_eval(mem, src, ni, fb);
     }
+    if k == N_FOR {
+        for_eval(mem, src, ni, fb);
+    }
+    if k == N_FLD {
+        fld_eval(mem, src, ni, fb);
+    }
+    if k == N_STRUCTLIT {
+        structlit_eval(mem, src, ni, fb);
+    }
+    if k == N_ENUMVAL {
+        enumval_eval(mem, src, ni, fb);
+    }
     return 0;
 }
 
@@ -1541,7 +2002,9 @@ fn exec_block(mem: ptr, src: ptr, b: u32, fb: u32) {
     let cur: u32 = nd32(mem, b, N_A);
     let cnt: u32 = nd32(mem, b, N_B);
     let i: u32 = 0;
-    while i < cnt && load32(mem, M_STATE + ST_RET) == 0 {
+    while i < cnt && load32(mem, M_STATE + ST_RET) == 0
+            && load32(mem, M_STATE + ST_BRK) == 0
+            && load32(mem, M_STATE + ST_CONT) == 0 {
         exec_stmt(mem, src, cur, fb);
         cur = nd32(mem, cur, N_NEXT);
         i = i + 1;
@@ -1550,6 +2013,13 @@ fn exec_block(mem: ptr, src: ptr, b: u32, fb: u32) {
 
 fn exec_stmt(mem: ptr, src: ptr, st: u32, fb: u32) {
     let k: u32 = nd32(mem, st, N_K);
+    if k == N_MATCH {
+        match_eval(mem, src, st, fb);
+    }
+    // `for`（§11.6）—— 它是**语句**，不是表达式：`exec_stmt` 这一层必须自己接。
+    if k == N_FOR {
+        for_eval(mem, src, st, fb);
+    }
     // 绑定（§11.3）：`let NAME: T = e;` —— T 必填，字面量的类型由它定（§10.6）。
     if k == N_LET {
         let init: u32 = nd32(mem, st, N_C);
@@ -1585,7 +2055,8 @@ fn exec_stmt(mem: ptr, src: ptr, st: u32, fb: u32) {
     if k == N_WHILE {
         let c: u32 = nd32(mem, st, N_A);
         let go: u32 = 1;
-        while go == 1 && load32(mem, M_STATE + ST_RET) == 0 {
+        while go == 1 && load32(mem, M_STATE + ST_RET) == 0
+                && load32(mem, M_STATE + ST_BRK) == 0 {
             set32(mem, c, N_TY, TY_BOOL);
             ev(mem, src, c, fb);
             if nd32(mem, c, N_TY) != TY_BOOL {
@@ -1594,8 +2065,16 @@ fn exec_stmt(mem: ptr, src: ptr, st: u32, fb: u32) {
             if nd64(mem, c, N_VAL) == 0 {
                 go = 0;
             } else {
+                let mark: u32 = frame_mark(mem, fb);
                 exec_block(mem, src, nd32(mem, st, N_B), fb);
+                frame_reset(mem, fb, mark);
+                if load32(mem, M_STATE + ST_CONT) == 1 {
+                    store32(mem, M_STATE + ST_CONT, 0);
+                }
             }
+        }
+        if load32(mem, M_STATE + ST_RET) == 0 && load32(mem, M_STATE + ST_BRK) == 1 {
+            store32(mem, M_STATE + ST_BRK, 0);
         }
     }
     if k == N_RETURN {
@@ -1606,6 +2085,14 @@ fn exec_stmt(mem: ptr, src: ptr, st: u32, fb: u32) {
             store64(mem, M_STATE + ST_RETAUX, 0);
             store32(mem, M_STATE + ST_RETLEN, 0);
         } else {
+            let want: u32 = load32(mem, M_STATE + ST_CURRTY);
+            if nd32(mem, e, N_TY) == 0 {
+                set32(mem, e, N_TY, want);
+                if want == TY_ARR || want == TY_STRUCT {
+                    set32(mem, e, N_AUX, load32(mem, M_STATE + ST_CUREL));
+                    set32(mem, e, N_LEN, load32(mem, M_STATE + ST_CURLEN));
+                }
+            }
             ev(mem, src, e, fb);
             store32(mem, M_STATE + ST_RETTY, nd32(mem, e, N_TY));
             store64(mem, M_STATE + ST_RETVAL, nd64(mem, e, N_VAL));
@@ -1613,6 +2100,12 @@ fn exec_stmt(mem: ptr, src: ptr, st: u32, fb: u32) {
             store32(mem, M_STATE + ST_RETLEN, nd32(mem, e, N_LEN));
         }
         store32(mem, M_STATE + ST_RET, 1);
+    }
+    if k == N_BREAK {
+        store32(mem, M_STATE + ST_BRK, 1);
+    }
+    if k == N_CONT {
+        store32(mem, M_STATE + ST_CONT, 1);
     }
     if k == N_EXPR {
         ev(mem, src, nd32(mem, st, N_A), fb);
@@ -1643,19 +2136,52 @@ fn assign(mem: ptr, src: ptr, st: u32, fb: u32) {
         let p: ptr = nd64(mem, base, N_AUX) as ptr;
         store32(p, i * 4, nd64(mem, v, N_VAL) as u32);
     } else {
-        let s: u32 = lvalue(mem, src, t, fb);
-        if s == NOSLOT {
-            fail("赋值目标不是左值（E014）");
+        if tk == N_FLD {
+            let base: u32 = nd32(mem, t, N_A);
+            ev(mem, src, base, fb);
+            if nd32(mem, base, N_TY) != TY_STRUCT {
+                fail("`.` 前面不是结构体（§12.2）");
+            }
+            let sidx: u32 = nd32(mem, base, N_VAL);
+            let p: ptr = nd64(mem, base, N_AUX) as ptr;
+            let k: u32 = field_index(mem, src, sidx, nd32(mem, t, N_B), nd32(mem, t, N_C));
+            if k == NOSLOT {
+                fail("结构体没有这个字段（E015）");
+            }
+            let c: ptr = cell_at(mem, p, k);
+            let fty: u32 = load32(c, VTY);
+            set32(mem, v, N_TY, fty);
+            ev(mem, src, v, fb);
+            if nd32(mem, v, N_TY) != fty {
+                fail("赋值两边类型不同（E001）");
+            }
+            store32(c, VTY, fty);
+            store32(c, VLEN, nd32(mem, v, N_LEN));
+            store64(c, VDATA, nd64(mem, v, N_VAL));
+            store64(c, VAUX, nd64(mem, v, N_AUX));
+        } else {
+            let s: u32 = lvalue(mem, src, t, fb);
+            if s == NOSLOT {
+                fail("赋值目标不是左值（E014）");
+            }
+            set32(mem, v, N_TY, slot_ty(mem, s));
+            ev(mem, src, v, fb);
+            if nd32(mem, v, N_TY) != slot_ty(mem, s) {
+                fail("赋值两边类型不同（E001）");
+            }
+            let b: u32 = slot_at(mem, s);
+            if slot_ty(mem, s) == TY_STRUCT {
+                let n: u32 = nd32(mem, v, N_LEN);
+                let cp: u64 = stru_copy(mem, nd64(mem, v, N_AUX) as ptr, n);
+                store64(mem, b + S_DATA, nd64(mem, v, N_VAL));
+                store64(mem, b + S_AUX, cp);
+                store32(mem, b + S_LEN, n);
+            } else {
+                store64(mem, b + S_DATA, nd64(mem, v, N_VAL));
+                store64(mem, b + S_AUX, nd64(mem, v, N_AUX));
+                store32(mem, b + S_LEN, nd32(mem, v, N_LEN));
+            }
         }
-        set32(mem, v, N_TY, slot_ty(mem, s));
-        ev(mem, src, v, fb);
-        if nd32(mem, v, N_TY) != slot_ty(mem, s) {
-            fail("赋值两边类型不同（E001）");
-        }
-        let b: u32 = slot_at(mem, s);
-        store64(mem, b + S_DATA, nd64(mem, v, N_VAL));
-        store64(mem, b + S_AUX, nd64(mem, v, N_AUX));
-        store32(mem, b + S_LEN, nd32(mem, v, N_LEN));
     }
 }
 
@@ -1714,8 +2240,15 @@ fn bind_arg(mem: ptr, src: ptr, arg: u32, fb: u32, dst: u32,
                 }
                 slot_put(mem, dst, poff, plen, TY_ARR, 0, p2 as u64, n);
             } else {
+            if pty == TY_STRUCT {
+                // 按值：拷一份字段格（§10.1）
+                let n: u32 = nd32(mem, arg, N_LEN);
+                let cp: u64 = stru_copy(mem, nd64(mem, arg, N_AUX) as ptr, n);
+                slot_put(mem, dst, poff, plen, TY_STRUCT, nd64(mem, arg, N_VAL), cp, n);
+            } else {
                 slot_put(mem, dst, poff, plen, pty, nd64(mem, arg, N_VAL),
                          nd64(mem, arg, N_AUX), nd32(mem, arg, N_LEN));
+            }
             }
         }
     }
@@ -1740,6 +2273,46 @@ fn builtin_call(mem: ptr, src: ptr, ni: u32, fb: u32, noff: u32, nlen: u32) {
             out_num(mem, nd64(mem, args, N_VAL) as i64);
             vset(mem, ni, TY_U32, 0, 0, 0);
         } else {
+            if streq(src, noff, nlen, "str_len") == 1 {
+                set32(mem, args, N_TY, TY_STR);
+                ev(mem, src, args, fb);
+                if nd32(mem, args, N_TY) != TY_STR {
+                    fail("str_len 要 str（§18.1）");
+                }
+                vset(mem, ni, TY_U32, nd32(mem, args, N_LEN) as i64, 0, 0);
+            } else {
+            if streq(src, noff, nlen, "str_byte") == 1 {
+                let a1: u32 = nd32(mem, args, N_NEXT);
+                set32(mem, args, N_TY, TY_STR);
+                ev(mem, src, args, fb);
+                set32(mem, a1, N_TY, TY_U32);
+                ev(mem, src, a1, fb);
+                let n: u32 = nd32(mem, args, N_LEN);
+                let i: u32 = nd64(mem, a1, N_VAL) as u32;
+                if i >= n {
+                    fail("str_byte 下标越界（§18.1）");
+                }
+                let p: ptr = nd64(mem, args, N_AUX) as ptr;
+                vset(mem, ni, TY_U32, load8(p, i) as i64, 0, 0);
+            } else {
+            if streq(src, noff, nlen, "str_eq") == 1 {
+                let b1: u32 = nd32(mem, args, N_NEXT);
+                set32(mem, args, N_TY, TY_STR);
+                ev(mem, src, args, fb);
+                set32(mem, b1, N_TY, TY_STR);
+                ev(mem, src, b1, fb);
+                let e: u32 = 0;
+                if nd32(mem, args, N_TY) == TY_STR && nd32(mem, b1, N_TY) == TY_STR {
+                    e = bytes_eq(nd64(mem, args, N_AUX) as ptr, nd32(mem, args, N_LEN),
+                                 nd64(mem, b1, N_AUX) as ptr, nd32(mem, b1, N_LEN));
+                } else {
+                    fail("str_eq 要两个 str（§18.1）");
+                }
+                vset(mem, ni, TY_BOOL, e as i64, 0, 0);
+            } else {
+            if streq(src, noff, nlen, "str_concat") == 1 {
+                str_concat_eval(mem, src, ni, fb, args);
+            } else {
             if streq(src, noff, nlen, "slice_len") == 1 {
                 ev(mem, src, args, fb);
                 if nd32(mem, args, N_TY) != TY_SLICE {
@@ -1768,6 +2341,10 @@ fn builtin_call(mem: ptr, src: ptr, ni: u32, fb: u32, noff: u32, nlen: u32) {
                 } else {
                     fail("第一版没有这个函数/内建（docs/349 §边界）");
                 }
+            }
+            }
+            }
+            }
             }
         }
     }
@@ -1801,7 +2378,16 @@ fn call_eval(mem: ptr, src: ptr, ni: u32, fb: u32) {
             arg = nd32(mem, arg, N_NEXT);
             k = k + 1;
         }
+        let old_rty: u32 = load32(mem, M_STATE + ST_CURRTY);
+        let old_rel: u32 = load32(mem, M_STATE + ST_CUREL);
+        let old_rln: u32 = load32(mem, M_STATE + ST_CURLEN);
+        store32(mem, M_STATE + ST_CURRTY, load32(mem, fent + F_RETTY));
+        store32(mem, M_STATE + ST_CUREL, load32(mem, fent + F_ELEM));
+        store32(mem, M_STATE + ST_CURLEN, load32(mem, fent + F_ALEN));
         exec_block(mem, src, load32(mem, fent + F_BODY), fb2);
+        store32(mem, M_STATE + ST_CURRTY, old_rty);
+        store32(mem, M_STATE + ST_CUREL, old_rel);
+        store32(mem, M_STATE + ST_CURLEN, old_rln);
         if load32(mem, M_STATE + ST_RET) == 1 {
             vset(mem, ni, load32(mem, M_STATE + ST_RETTY),
                  load64(mem, M_STATE + ST_RETVAL) as i64,
@@ -2012,4 +2598,342 @@ fn fail_tok(mem: ptr, src: ptr, msg: str) -> u32 {
     wstr(2, "'
 ");
     return die(2);
+}
+
+// ---------------------------------------------------------------- 循环（§11.6 / §11.7）
+
+/// 这一层调用下一个空名字格的**相对下标** —— 循环体每轮退回到它（体里的 `let` 不累积）。
+fn frame_mark(mem: ptr, fb: u32) -> u32 {
+    let k: u32 = 0;
+    while k < FRAME_SLOTS {
+        if load32(mem, slot_at(mem, fb + k) + S_TY) == 4294967295 {
+            return k;
+        }
+        k = k + 1;
+    }
+    return FRAME_SLOTS;
+}
+
+fn frame_reset(mem: ptr, fb: u32, mark: u32) {
+    let k: u32 = mark;
+    while k < FRAME_SLOTS {
+        store32(mem, slot_at(mem, fb + k) + S_TY, 4294967295);
+        k = k + 1;
+    }
+}
+
+fn mem_copy(dst: ptr, doff: u32, srcp: ptr, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, doff + i, load8(srcp, i) as u8);
+        i = i + 1;
+    }
+}
+
+fn bytes_eq(a: ptr, na: u32, b: ptr, nb: u32) -> u32 {
+    if na != nb {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < na {
+        if load8(a, i) != load8(b, i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+/// `for` 的两种形状（§11.6）：range 是 `lo..hi`（`N_LEN = 0`，上界在 `N_TY`），
+/// 数组是 `for x in a`（`N_LEN = 1`，源在 `N_C`，元素按**拷贝**绑定）。
+fn for_eval(mem: ptr, src: ptr, ni: u32, fb: u32) {
+    let body: u32 = nd32(mem, ni, N_AUX);
+    let voff: u32 = nd32(mem, ni, N_A);
+    let vlen: u32 = nd32(mem, ni, N_B);
+    let mode: u32 = nd32(mem, ni, N_LEN);
+    let vs: u32 = slot_next(mem, fb);
+    if mode == 0 {
+        let lo: u32 = nd32(mem, ni, N_C);
+        ev(mem, src, lo, fb);
+        let ty: u32 = nd32(mem, lo, N_TY);
+        if is_int(ty) == 0 {
+            fail("for 的范围要整数（§11.6）");
+        }
+        let hi: u32 = nd32(mem, ni, N_TY);
+        set32(mem, hi, N_TY, ty);
+        ev(mem, src, hi, fb);
+        slot_put(mem, vs, voff, vlen, ty, nd64(mem, lo, N_VAL), 0, 0);
+        let go: u32 = 1;
+        while go == 1 && load32(mem, M_STATE + ST_RET) == 0
+                && load32(mem, M_STATE + ST_BRK) == 0 {
+            let v: i64 = slot_data(mem, vs) as i64;
+            let h: i64 = nd64(mem, hi, N_VAL) as i64;
+            let stop: u32 = 0;
+            if is_signed(ty) == 1 {
+                if v >= h {
+                    stop = 1;
+                }
+            } else {
+                if cmp_unsigned(11, v as u64, h as u64) == 1 {
+                    stop = 1;
+                }
+            }
+            if stop == 1 {
+                go = 0;
+            } else {
+                let mark: u32 = frame_mark(mem, fb);
+                exec_block(mem, src, body, fb);
+                frame_reset(mem, fb, mark);
+                if load32(mem, M_STATE + ST_CONT) == 1 {
+                    store32(mem, M_STATE + ST_CONT, 0);
+                }
+                let b2: u32 = slot_at(mem, vs);
+                store64(mem, b2 + S_DATA, wrapv(v + 1, ty) as u64);
+            }
+        }
+    } else {
+        let srcn: u32 = nd32(mem, ni, N_C);
+        ev(mem, src, srcn, fb);
+        let st: u32 = nd32(mem, srcn, N_TY);
+        if st != TY_ARR && st != TY_SLICE {
+            fail("for-in 要数组/切片（§11.6）");
+        }
+        slot_put(mem, vs, voff, vlen, TY_U32, 0, 0, 0);
+        let n: u32 = nd32(mem, srcn, N_LEN);
+        let p: ptr = nd64(mem, srcn, N_AUX) as ptr;
+        let i: u32 = 0;
+        while i < n && load32(mem, M_STATE + ST_RET) == 0
+                && load32(mem, M_STATE + ST_BRK) == 0 {
+            // 元素是**拷贝**：改循环变量不写回数组（§11.6）。
+            store64(mem, slot_at(mem, vs) + S_DATA, load32(p, i * 4) as u64);
+            let mark2: u32 = frame_mark(mem, fb);
+            exec_block(mem, src, body, fb);
+            frame_reset(mem, fb, mark2);
+            if load32(mem, M_STATE + ST_CONT) == 1 {
+                store32(mem, M_STATE + ST_CONT, 0);
+            }
+            i = i + 1;
+        }
+    }
+    if load32(mem, M_STATE + ST_RET) == 0 && load32(mem, M_STATE + ST_BRK) == 1 {
+        store32(mem, M_STATE + ST_BRK, 0);
+    }
+}
+
+// ---------------------------------------------------------------- 字符串内建（§18.1）
+
+fn str_concat_eval(mem: ptr, src: ptr, ni: u32, fb: u32, args: u32) {
+    let a: u32 = args;
+    let b: u32 = nd32(mem, args, N_NEXT);
+    set32(mem, a, N_TY, TY_STR);
+    ev(mem, src, a, fb);
+    set32(mem, b, N_TY, TY_STR);
+    ev(mem, src, b, fb);
+    if nd32(mem, a, N_TY) != TY_STR || nd32(mem, b, N_TY) != TY_STR {
+        fail("str_concat 要两个 str（§18.1）");
+    }
+    let na: u32 = nd32(mem, a, N_LEN);
+    let nb: u32 = nd32(mem, b, N_LEN);
+    let off: u32 = load32(mem, M_STATE + ST_SSTR);
+    if off + na + nb > 8192 {
+        fail("字符串缓冲满了（M_SBUF）");
+    }
+    let p: ptr = ptr_add(mem, M_SBUF + off);
+    mem_copy(p, 0, nd64(mem, a, N_AUX) as ptr, na);
+    mem_copy(p, na, nd64(mem, b, N_AUX) as ptr, nb);
+    store32(mem, M_STATE + ST_SSTR, off + na + nb);
+    vset(mem, ni, TY_STR, 0, p as u64, na + nb);
+}
+
+// ---------------------------------------------------------------- 结构体（§10.1 / §12.9）
+
+fn field_index(mem: ptr, src: ptr, sidx: u32, noff: u32, nlen: u32) -> u32 {
+    if sidx == NOSLOT || sidx >= load32(mem, M_STATE + ST_NSTRUCT) {
+        return NOSLOT;
+    }
+    let stb: u32 = M_STRUCT + sidx * 48;
+    let n: u32 = load32(mem, stb + D_NF);
+    let f0: u32 = load32(mem, stb + D_F0);
+    let k: u32 = 0;
+    while k < n {
+        let fb: u32 = M_FIELD + (f0 + k) * 24;
+        if streq2(src, load32(mem, fb + FD_NOFF), load32(mem, fb + FD_NLEN),
+                  src, noff, nlen) == 1 {
+            return k;
+        }
+        k = k + 1;
+    }
+    return NOSLOT;
+}
+
+/// 把 `p` 起的 `n` 个字段格**拷一份**到堆上（结构体是按值的，§10.1）。
+fn stru_copy(mem: ptr, p: ptr, n: u32) -> u64 {
+    let off: u32 = load32(mem, M_STATE + ST_NSTRU);
+    if off + n > 682 {
+        fail("结构体值堆满了（M_STRU）");
+    }
+    store32(mem, M_STATE + ST_NSTRU, off + n);
+    let q: ptr = ptr_add(mem, M_STRU + off * 24);
+    let i: u32 = 0;
+    while i < n {
+        let sc: ptr = ptr_add(p, i * 24);
+        let dc: ptr = ptr_add(q, i * 24);
+        store32(dc, VTY, load32(sc, VTY));
+        store32(dc, VLEN, load32(sc, VLEN));
+        store64(dc, VDATA, load64(sc, VDATA));
+        store64(dc, VAUX, load64(sc, VAUX));
+        i = i + 1;
+    }
+    return q as u64;
+}
+
+fn cell_at(mem: ptr, p: ptr, k: u32) -> ptr {
+    return ptr_add(p, k * 24);
+}
+
+fn fld_eval(mem: ptr, src: ptr, ni: u32, fb: u32) {
+    let b: u32 = nd32(mem, ni, N_A);
+    ev(mem, src, b, fb);
+    if nd32(mem, b, N_TY) != TY_STRUCT {
+        fail("`.` 前面不是结构体（§12.2）");
+    }
+    let sidx: u32 = nd32(mem, b, N_VAL);
+    let p: ptr = nd64(mem, b, N_AUX) as ptr;
+    let k: u32 = field_index(mem, src, sidx, nd32(mem, ni, N_B), nd32(mem, ni, N_C));
+    if k == NOSLOT {
+        fail("结构体没有这个字段（E015）");
+    }
+    let c: ptr = cell_at(mem, p, k);
+    vset(mem, ni, load32(c, VTY), load64(c, VDATA) as i64,
+         load64(c, VAUX), load32(c, VLEN));
+}
+
+fn structlit_eval(mem: ptr, src: ptr, ni: u32, fb: u32) {
+    if nd32(mem, ni, N_TY) != TY_STRUCT {
+        fail("结构体字面量需要期望类型（§10.6）");
+    }
+    let sidx: u32 = nd32(mem, ni, N_A);
+    let stb: u32 = M_STRUCT + sidx * 48;
+    let nf: u32 = load32(mem, stb + D_NF);
+    let f0: u32 = load32(mem, stb + D_F0);
+    let off: u32 = load32(mem, M_STATE + ST_NSTRU);
+    if off + nf > 682 {
+        fail("结构体值堆满了（M_STRU）");
+    }
+    store32(mem, M_STATE + ST_NSTRU, off + nf);
+    let p: ptr = ptr_add(mem, M_STRU + off * 24);
+    let k: u32 = 0;
+    while k < nf {
+        let fb: u32 = M_FIELD + (f0 + k) * 24;
+        let foff: u32 = load32(mem, fb + FD_NOFF);
+        let flen: u32 = load32(mem, fb + FD_NLEN);
+        let fty: u32 = load32(mem, fb + FD_TY);
+        let fel: u32 = load32(mem, fb + FD_ELEM);
+        let fal: u32 = load32(mem, fb + FD_ALEN);
+        let it: u32 = nd32(mem, ni, N_B);
+        let found: u32 = NOSLOT;
+        while it != 0 {
+            if streq2(src, nd32(mem, it, N_A), nd32(mem, it, N_B),
+                      src, foff, flen) == 1 {
+                found = it;
+            }
+            it = nd32(mem, it, N_NEXT);
+        }
+        if found == NOSLOT {
+            fail("结构体字面量少了字段（E015）");
+        }
+        let v: u32 = nd32(mem, found, N_C);
+        set32(mem, v, N_TY, fty);
+        if fty == TY_ARR {
+            set32(mem, v, N_AUX, fel);
+            set32(mem, v, N_LEN, fal);
+        }
+        ev(mem, src, v, fb);
+        let c: ptr = cell_at(mem, p, k);
+        store32(c, VTY, fty);
+        store32(c, VLEN, nd32(mem, v, N_LEN));
+        store64(c, VDATA, nd64(mem, v, N_VAL));
+        store64(c, VAUX, nd64(mem, v, N_AUX));
+        k = k + 1;
+    }
+    let it2: u32 = nd32(mem, ni, N_B);
+    while it2 != 0 {
+        if field_index(mem, src, sidx, nd32(mem, it2, N_A), nd32(mem, it2, N_B)) == NOSLOT {
+            fail("结构体字面量里有不认识的字段（E015）");
+        }
+        it2 = nd32(mem, it2, N_NEXT);
+    }
+    vset(mem, ni, TY_STRUCT, sidx as i64, p as u64, nf);
+}
+
+// ---------------------------------------------------------------- 枚举与 match（§13.1 / §13.2）
+
+fn enumval_eval(mem: ptr, src: ptr, ni: u32, fb: u32) {
+    let eidx: u32 = nd32(mem, ni, N_A);
+    let vidx: u32 = nd32(mem, ni, N_B);
+    let eb: u32 = M_ENUM + eidx * 48;
+    let v0: u32 = load32(mem, eb + E_V0);
+    let vb: u32 = M_VAR + (v0 + vidx) * 24;
+    let has: u32 = load32(mem, vb + W_HAS);
+    let pty: u32 = load32(mem, vb + W_TY);
+    let pv: i64 = 0;
+    let pay: u32 = nd32(mem, ni, N_C);
+    if has == 1 {
+        if pay == 0 {
+            fail("这个变体要一个载荷（§13.1）");
+        }
+        set32(mem, pay, N_TY, pty);
+        ev(mem, src, pay, fb);
+        if nd32(mem, pay, N_TY) != pty {
+            fail("载荷类型对不上（E008）");
+        }
+        pv = nd64(mem, pay, N_VAL) as i64;
+    } else {
+        if pay != 0 {
+            fail("这个变体不带载荷（§13.1）");
+        }
+    }
+    vset(mem, ni, TY_ENUM, (((eidx as i64) << 16) + (vidx as i64)), pv as u64, pty);
+}
+
+fn match_eval(mem: ptr, src: ptr, st: u32, fb: u32) {
+    let subj: u32 = nd32(mem, st, N_A);
+    ev(mem, src, subj, fb);
+    if nd32(mem, subj, N_TY) != TY_ENUM {
+        fail("match 的主体要枚举（E008）");
+    }
+    let val: i64 = nd64(mem, subj, N_VAL) as i64;
+    let vidx: u32 = (val & 65535) as u32;
+    let pty: u32 = nd32(mem, subj, N_LEN);
+    let pv: u64 = nd64(mem, subj, N_AUX);
+    let arm: u32 = nd32(mem, st, N_B);
+    let done: u32 = 0;
+    while arm != 0 && done == 0 {
+        let av: u32 = nd32(mem, arm, N_A);
+        let hit: u32 = 0;
+        if av == NOSLOT {
+            hit = 1;
+        } else {
+            if av == vidx {
+                hit = 1;
+            }
+        }
+        if hit == 1 {
+            let boff: u32 = nd32(mem, arm, N_B);
+            let blen: u32 = nd32(mem, arm, N_C);
+            if blen > 0 {
+                let s: u32 = slot_next(mem, fb);
+                slot_put(mem, s, boff, blen, pty, pv, 0, 0);
+            }
+            let mark: u32 = frame_mark(mem, fb);
+            exec_block(mem, src, nd32(mem, arm, N_AUX), fb);
+            frame_reset(mem, fb, mark);
+            done = 1;
+        } else {
+            arm = nd32(mem, arm, N_NEXT);
+        }
+    }
+    if done == 0 {
+        fail("match 没有命中的分支（§13.2）");
+    }
 }

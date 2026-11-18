@@ -1,0 +1,29 @@
+// 枚举与 `match`（LLS §13）：变体构造、载荷绑定、两个分支各 return。
+choose write grammar tur2026.2
+
+module en
+choose runtime
+
+enum Shape {
+    Circle(u32),
+    Empty,
+}
+
+fn area(s: Shape) -> u32 {
+    match s {
+        Shape::Circle(r) => {
+            return r * r;
+        }
+        Shape::Empty => {
+            return 0;
+        }
+    }
+    return 99;
+}
+
+fn main() {
+    print_num(area(Shape::Circle(5)) as i64);
+    print(" ");
+    print_num(area(Shape::Empty) as i64);
+    print("\n");
+}

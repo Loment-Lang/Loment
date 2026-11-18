@@ -46,7 +46,9 @@ CORPUS = ROOT / "semantics" / "corpus"
 #: `semantics/loment_sem.lls` 必须引到的 LLS 小节 —— 每一格都被语料真的走到。
 CITED_SECTIONS = (
     "§10.2", "§10.3", "§10.6", "§10.7", "§11.3", "§11.4", "§11.5",
-    "§12.1", "§12.3", "§12.5", "§12.6", "§12.10", "§14.1", "§14.2",
+    "§11.2", "§11.6", "§11.7",
+    "§12.1", "§12.3", "§12.5", "§12.6", "§12.9", "§12.10",
+    "§13.1", "§13.2", "§14.1", "§14.2",
     "§18.1", "§18.3",
 )
 
@@ -74,6 +76,22 @@ CASES: dict[str, tuple[bytes, int]] = {
     # §10.2 / §12.4：i8 的 127+1 = -128；u16 的 0-1 = 65535；
     # u64 的最大值按**无符号**比 1 大（按有符号比会错）
     "10_wrap_signed": (b"-128\n65535\nbig\n", 0),
+    # §11.6 / §11.7：`for i in 1..5` 上界不含；`continue` 跳过 3 ⇒ 1+2+4 = 7
+    "11_for_range": (b"7\n", 0),
+    # §11.6：`for x in a` 的元素是**拷贝** —— 改 x 不写回 ⇒ 3×99 = 297，a[0] 仍是 1
+    "12_for_in": (b"297 1\n", 0),
+    # §18.1：str_len("abc")=3、str_byte("abc",1)=98('b')、str_eq 同串为真、str_concat("ab","cd")="abcd"
+    "13_str_builtins": (b"3 98 eq abcd\n", 0),
+    # §11.7：`break` 让 while 在 i == 3 停下
+    "14_break": (b"3\n", 0),
+    # §10.1 / §12.9 / §11.4：结构体字面量 + 形参里的字段写（按值）⇒ 99+2 = 101（退出码）
+    "15_struct": (b"", 101),
+    # §10.1 / §12.9：函数返回结构体，调用方按字段读 ⇒ 3*10+4 = 34
+    "16_struct_ret": (b"34\n", 0),
+    # §13.1 / §13.2：变体构造 + 载荷绑定 + 两个分支各 return ⇒ Circle(5)=25、Empty=0
+    "17_enum_match": (b"25 0\n", 0),
+    # §13.1 / §13.2：通配 `_` 兜底 ⇒ A(1)=2、B=7
+    "18_enum_wild": (b"2 7\n", 0),
 }
 
 #: 规范与实现对不上的地方。**值为 (规范说什么, 实现做什么)**。
@@ -83,6 +101,8 @@ CASES: dict[str, tuple[bytes, int]] = {
 #: 这条由 oracle 第一天跑出来的：oracle 按规范拒，实现收。
 KNOWN_DIVERGENCES: dict[str, str] = {
     "main-with-return-type": "§14.1 说拒，参考实现接受且静默丢弃返回值",
+    "field-assign-in-2026.2": "§11.4 说字段是左值；2026.2 的读法拒 `p.x = 99`（默认读法收）",
+    "let-mut-in-default": "§11.2 说 `let mut` 被收下并抹掉；默认读法把它当变量名（2026.2 收）",
 }
 
 TESTS: list[tuple[str, object]] = []
@@ -278,6 +298,44 @@ def test_known_divergences_are_still_there():
     got = second_reading.run_source(src)
     assert got.error, "第二读居然收了 `main() -> u32` —— 它没有照 §14.1 拒"
     print("      main-with-return-type：规范拒、实现收 —— 分歧仍在（已记档）")
+
+
+@test
+def test_edition_divergences_are_still_there():
+    """两处**版次不对称**（`#1642`）仍在：2026.2 拒字段赋值；默认读法拒 `let mut`。
+
+    规范两边都要（LLS §11.4 字段是左值；§11.2 `let mut` 收）。这条判据钉住"分歧仍存在"，
+    修好了就红 —— 那时把 `KNOWN_DIVERGENCES` 与 `docs/349` 的表一起删掉。
+    """
+    import lomentc  # noqa: PLC0415
+
+    field_src = ("module m\n\nstruct P {"
+                 "\n    x: u32,\n}\n\n"
+                 "fn bump(p: P) -> u32 {\n    p.x = 99;\n    return p.x;"
+                 "\n}\n")
+    mut_src = ("module m\n\nfn main() {\n    let mut x: u32 = 1;"
+               "\n    x = x + 1;\n}\n")
+    v2 = "choose write grammar tur2026.2\n\n"
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+
+        def check(src: str, name: str) -> list[str]:
+            f = td / name
+            f.write_text(src, encoding="utf-8", newline="\n")
+            mod = lomentc.load(f)
+            deps = lomentc.resolve_deps(mod, ROOT, td, entry=f)
+            return lomentc.check(mod, deps=deps)
+
+        assert check(v2 + field_src, "f2.lomt"), (
+            "2026.2 现在收了 `p.x = 99` —— #1642 的第一半修好了，更新分歧表")
+        assert not check(field_src, "f1.lomt"), "默认读法也拒了字段赋值 —— 分歧表要改写"
+        try:
+            check(mut_src, "m1.lomt")
+            raise AssertionError("默认读法现在收了 `let mut` —— #1642 的第二半修好了")
+        except lomentc.LomError:
+            pass
+        assert not check(v2 + mut_src, "m2.lomt"), "2026.2 反而不收 `let mut` 了 —— 表要改写"
+    print("      版次不对称仍在：2026.2 拒字段赋值 / 默认读法拒 `let mut`（#1642）")
 
 
 def main() -> int:

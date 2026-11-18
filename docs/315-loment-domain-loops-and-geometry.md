@@ -301,6 +301,8 @@ domain dma : disk[0..7] revocable {
 | 级联 | 撤父 + 判子 | 链上父那一层带父的撤销位对 |
 | 拒绝 | 撤不可撤的域 / 未声明名 / 体里有不可撤成员 | 解析期报错 |
 | 几何 | `revokes` 列表 + `revocable` 标记 | 目标集合与声明一致 |
+| 兄弟边 | `sibling A, B;` | 零指令；几何 `siblings`；跨层 / 混层 / 单名都拒 |
+| 空区间 | `domain:for` 过 `lo > hi` | 两个实现都在编译期拒（自举侧不再崩） |
 | 运行 | epoch 域 + 8 次迭代 | 第 3 轮 trap（`now = 3`）；显式档全过 |
 
 运行那些是**实测过的**（ELF 经 WSL）：epoch 那两条是 `rc=132`（SIGILL）与 `rc=7`；
@@ -364,7 +366,7 @@ domain dma : disk[0..7] revocable {
   几何报告多一条 `siblings` —— 两个实现都收下（自举侧按声明跳过）；
 - **空区间编译期拒**（§7）：`domain:for` 走过 `lo > hi` 的域两个实现都拒；自举侧为此
   把域语句的失败路径改成"前进到块尾"，诊断不再退化成崩溃；
-- 判据 13 条（见 §6），其中运行那些是实测；
+- 判据 14 条（见 §6），其中运行那些是实测；
 - **域几何的报告**：`tools/loment_geometry.py` 从 AST 导出竖链（`contains`）、
   兄弟（`sibling`）、先后（`flow`）、守卫（`guard`）、立体图的跨层边（`cross`）
   与 `domain:for` 的位置轴（`step` / `positions`）；输出是确定性的 JSON。

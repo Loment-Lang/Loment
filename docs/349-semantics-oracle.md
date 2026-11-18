@@ -79,10 +79,10 @@ Potato 对象两份校验器逐条判决相同（`potato_test`）。它们回答
 | 部件 | 内容 |
 |---|---|
 | 词法 | 注释、标识符、十进制整数、字符串（转义在词法期解码）、全部标点 |
-| 语法 | 递归下降：`choose` / `module` / `fn`、`let` / 赋值 / `if` / `while` / `return`、按 §12.4 的十级优先级 |
+| 语法 | 递归下降：`choose` / `module` / `fn`、`let` / 赋值 / `if` / `while` / `for`（range 与数组两种形状）/ `break` / `continue` / `return`、按 §12.4 的十级优先级 |
 | 类型 | 8 种整数（宽度 + 符号）、`bool`、`str`、`[T; N]`、`[T]`、`&T` / `&mut T` |
 | 求值 | 回绕按宽度算（§10.2）、除零 trap、短路（§12.5）、数组值语义与下标、引用与 `*` |
-| 内建 | `print`、`print_num`、`slice_len`、`syscall4`（只认 exit=60） |
+| 内建 | `print`、`print_num`、`slice_len`、`str_len`、`str_byte`、`str_eq`、`str_concat`、`syscall4`（只认 exit=60） |
 
 内存是 `brk` 一块 + 固定表（token 4096 / 节点 4096 / 变量格 1024 …），越界**点名拒**，
 与仓里其它 Loment 工具同一条纪律。
@@ -99,9 +99,10 @@ Potato 对象两份校验器逐条判决相同（`potato_test`）。它们回答
 | `test_the_oracle_is_not_vacuous` | 换一份源（254+3 ⇒ 1），输出跟着变 —— 防"查表冒充求值" |
 | `test_known_divergences_are_still_there` | 已登记的分歧**仍然存在**；修好了就红，逼人更新表 |
 
-语料（`semantics/corpus/`，10 份）：回绕（u8）、带符号除/余、短路副作用、数组下标读写、
+语料（`semantics/corpus/`，14 份）：回绕（u8）、带符号除/余、短路副作用、数组下标读写、
 数组按值移动、切片实参与 `slice_len`、`&mut` + 解引用、while + 退出码、`_start` 入口、
-有符号回绕 + 无符号比较。
+有符号回绕 + 无符号比较；**S2 第一增量**：`for i in lo..hi` + `continue`、`for x in a`
+（元素是拷贝）、四个字符串内建、`break`。
 
 ## 6. 首轮实测
 
@@ -131,7 +132,7 @@ Potato 对象两份校验器逐条判决相同（`potato_test`）。它们回答
 
 ## 7. 往后（S2 / S3）
 
-**S2：把语料变成覆盖面。**
+**S2：把语料变成覆盖面（进行中：第一增量覆盖 §11.6 / §11.7 / §18.1 的四个内建）。**
 
 * 覆盖字典：模板 / 泛型 / 能力域 / 闭包（`docs/348`）/ 标签联合——按"用户最常写的形状"
   排序，一次一类；

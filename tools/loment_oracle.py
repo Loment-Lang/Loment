@@ -386,6 +386,22 @@ class Parser:
             e = self.expr()
             self.expect(";")
             return Node("return", k.line, e)
+        if self.accept("break"):
+            self.expect(";")
+            return Node("break", k.line)
+        if self.accept("continue"):
+            self.expect(";")
+            return Node("continue", k.line)
+        if self.accept("for"):
+            name = self.ident()
+            self.expect("in")
+            src = self.expr()
+            if self.accept(".."):
+                hi = self.expr()
+                body = self.block()
+                return Node("for_range", k.line, name, src, hi, items=[body])
+            body = self.block()
+            return Node("for_in", k.line, name, src, items=[body])
         e = self.expr()
         if self.accept("="):
             v = self.expr()
@@ -504,6 +520,14 @@ class SliceView:
 class Return(Exception):
     def __init__(self, val):
         self.val = val
+
+
+class Break(Exception):
+    pass
+
+
+class Continue(Exception):
+    pass
 
 
 class Exit(Exception):
@@ -733,6 +757,23 @@ class Interp:
             data = str(v.data).encode()
             self.out += data
             return Val(Ty("int", 32, False), len(data))
+        if name == "str_len":
+            v = self.eval(args[0], env, T_STR)
+            return Val(Ty("int", 32, False), len(v.data))
+        if name == "str_byte":
+            v = self.eval(args[0], env, T_STR)
+            i = self.eval(args[1], env, Ty("int", 32, False))
+            if not (0 <= i.data < len(v.data)):
+                raise Trap(f"第 {e.line} 行: str_byte 下标越界（§18.1）", "str_byte")
+            return Val(Ty("int", 32, False), v.data[i.data])
+        if name == "str_eq":
+            a = self.eval(args[0], env, T_STR)
+            b = self.eval(args[1], env, T_STR)
+            return Val(T_BOOL, a.data == b.data)
+        if name == "str_concat":
+            a = self.eval(args[0], env, T_STR)
+            b = self.eval(args[1], env, T_STR)
+            return Val(T_STR, a.data + b.data)
         if name == "slice_len":
             v = self.eval(args[0], env)
             if v.ty.kind != "slice":
@@ -799,7 +840,7 @@ class Interp:
             elif isinstance(st.c, Node):
                 self.exec_stmt(st.c, env)
             elif st.c is not None:
-                self.run_block(st.c, env)
+                self.run_block(st.items[0], env)
             return
         if st.kind == "while":
             while True:
@@ -808,7 +849,46 @@ class Interp:
                     raise SpecRefusal(f"第 {st.line} 行: while 的条件要 bool（§11.5）", "eval_while")
                 if not c.data:
                     return
-                self.run_block(st.b, env)
+                try:
+                    self.run_block(st.b, env)
+                except Break:
+                    return
+                except Continue:
+                    continue
+        if st.kind == "for_range":
+            lo = self.eval(st.b, env)
+            if lo.ty.kind != "int":
+                raise SpecRefusal(f"第 {st.line} 行: for 的范围要整数（§11.6）", "eval_for")
+            hi = self.eval(st.c, env, lo.ty)
+            v = lo.data
+            while v < hi.data:
+                env[st.a] = Slot(lo.ty, v)
+                try:
+                    self.run_block(st.items[0], env)
+                except Break:
+                    break
+                except Continue:
+                    pass
+                v = _wrap(v + 1, lo.ty)
+            return
+        if st.kind == "for_in":
+            src = self.eval(st.b, env)
+            if src.ty.kind not in ("array", "slice"):
+                raise SpecRefusal(f"第 {st.line} 行: for-in 要数组/切片（§11.6）", "eval_for")
+            slots, _ = self._elems(src)
+            for cell in slots:
+                env[st.a] = Slot(cell.ty, cell.value)
+                try:
+                    self.run_block(st.items[0], env)
+                except Break:
+                    break
+                except Continue:
+                    pass
+            return
+        if st.kind == "break":
+            raise Break()
+        if st.kind == "continue":
+            raise Continue()
         if st.kind == "return":
             raise Return(self.eval(st.a, env) if st.a is not None else None)
         if st.kind == "expr":

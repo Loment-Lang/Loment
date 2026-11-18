@@ -6798,6 +6798,10 @@ def _is_place(e) -> bool:
         return _is_place(e.obj)
     if isinstance(e, Index):
         return _is_place(e.obj)
+    if isinstance(e, Un) and e.op == "*":
+        # `*r` 是借用指向的**地方**：它已经有地址，所以显式重借 `&*r` / `&mut *r`
+        # 合法（`docs/299` §3.4；`&mut` 局部的第二次使用就靠它）。
+        return _is_place(e.expr)
     return False
 
 
@@ -8688,8 +8692,14 @@ def _lifetime_expr_prov(e, scope: dict[str, str], prov: dict[str, frozenset],
             return frozenset({("p", root.name)}) if root.name in _param_names(scope) \
                 else frozenset({("l", root.name)})
         if e.op == "*":
-            return _lifetime_expr_prov(e.expr, scope, prov, funcs, structs,
-                                       structs_with_borrow, sums)
+            # `*r` 解出来的是**值**：只有当它本身还是借用（`*r` 的类型是 `&T`）时，
+            # 来源才跟着 r 走。`return *r;`（u32）不是"返回 a 的借用"—— 从前这一格
+            # 一律往下传，于是把"拷出一个值"误报成悬垂。
+            rt = expr_type(e, scope, funcs, structs)
+            if _is_borrowish(rt, structs):
+                return _lifetime_expr_prov(e.expr, scope, prov, funcs, structs,
+                                           structs_with_borrow, sums)
+            return frozenset()
         return frozenset()
     if isinstance(e, Call):
         t = expr_type(e, scope, funcs, structs)
@@ -8772,8 +8782,27 @@ def _lifetime_fn_errs(f: Func, funcs: dict, structs: dict, enums: dict,
     borrowed: set[str] = set()       # 被借过的根变量名（`free` 那条用）
     stored_mut: dict[str, int] = {}
     stored_shared: set[str] = set()
+    #: 已经**用掉**的 `&mut` 局部（`#1543`）：`&mut` 不是 Copy，一次只能用出去一次。
+    mut_used: dict[str, int] = {}
     swb = {n for n, s in structs.items()
            if any(_is_borrowish(ft, structs) for _, ft in s.fields)}
+
+    def use_mut_local(e, line: int, how: str) -> None:
+        """`&mut` 局部被当**值**用掉（传参 / 赋给别人 / 返回）。
+
+        解引用 `*r`、字段访问 `r.f`、显式重借 `&mut *r` 都不算 —— 它们用的是借用
+        指向的东西。形参不算：每用一次就是一次自动重借（Rust 同一条）。
+        """
+        if not isinstance(e, Ident):
+            return
+        t = scope.get(e.name, "")
+        if not (_is_ref(t) and _ref_mut(t)) or e.name in params:
+            return
+        if e.name in mut_used:
+            errs.append(f"{line}: 变量 {e.name} 的 `&mut` 已经用掉一次 —— {how}"
+                        f" 是第二把独占借用；要再用一次请显式重借 `&mut *{e.name}`")
+            return
+        mut_used[e.name] = line
 
     def err_local(origins: frozenset, line: int) -> None:
         loc = sorted(name for kind, name in origins if kind == "l")
@@ -8814,6 +8843,7 @@ def _lifetime_fn_errs(f: Func, funcs: dict, structs: dict, enums: dict,
                         f"{e.line}: 在 {e.args[0].name} 仍被借用时释放它 —— "
                         f"借用的区域必须包在释放点之内（`docs/299` §3.5）")
             for a in e.args:
+                use_mut_local(a, e.line, "把它当实参传走")
                 note_borrows(a)
             return
         for attr in ("expr", "obj", "left", "right", "value", "default", "idx"):
@@ -8837,21 +8867,40 @@ def _lifetime_fn_errs(f: Func, funcs: dict, structs: dict, enums: dict,
                 stored_mut[key] = line
             else:
                 stored_shared.add(key)
+        # **调用返回的借用**（`#1542`）：`let r = get(&mut a);` 存下来的是一把借自 a
+        # 的借用 —— 来源由函数摘要给出（出参借自哪些形参），实参的位置键就是被借的地方。
+        if isinstance(expr, Call) and _is_borrowish(ty, structs):
+            mut = _is_ref(ty) and _ref_mut(ty)
+            for i in sorted(sums.get(expr.name, frozenset())):
+                if i >= len(expr.args):
+                    continue
+                a = expr.args[i]
+                key = _borrow_key(a) if not (isinstance(a, Un) and a.op in ("&", "&mut")) \
+                    else _borrow_key(a.expr)
+                if key is None:
+                    continue
+                if mut:
+                    stored_mut[key] = line
+                else:
+                    stored_shared.add(key)
 
     def walk(stmts) -> None:
         for s in stmts:
             if isinstance(s, Let):
                 scope[s.name] = s.type
                 note_borrows(s.expr)
+                use_mut_local(s.expr, s.line, "赋给另一个绑定")   # `#1543`
                 bind(s.name, s.type, s.expr, s.line)
             elif isinstance(s, Assign):
                 note_borrows(s.expr)
+                use_mut_local(s.expr, s.line, "赋给另一个变量")
                 if isinstance(s.target, Ident):
                     bind(s.target.name, scope.get(s.target.name, ""), s.expr, s.line)
                 else:
                     note_borrows(s.target)
             elif isinstance(s, Return):
                 note_borrows(s.expr)
+                use_mut_local(s.expr, s.line, "作为返回值交出去")
                 # `return &x;` 那一格由 M17 报（`_move_check`，E012）；这里只补
                 # 别名/字段/经调用传回来那些它看不见的形状，免得同一处报两遍。
                 _prov = prov_of(s.expr)

@@ -45,7 +45,7 @@ loment_seed_test 5
 loment_fmt_test 10
 loment_doc_test 5
 loment_oracle_test 7
-loment_channel_test 8
+loment_channel_test 9
 loment_json_test 4
 loment_pkg_test 3
 loment_lomc_test 4

@@ -1678,18 +1678,18 @@ def test_registry_capacity_and_duplicate_ids_fail_loudly():
     r = lspe.CheckerRegistry()
     for i in range(r.MAX_CHECKERS):
         r.register(lspe.PluginChecker(
-            lspe.EngineDesc(f"X{i:02d}", 2, "Evidence"),
+            lspe.EngineDesc(f"X{i:02d}", 2, "Advisory"),
             lambda ctx: [], plugin_id="x", plugin_version=1))
     try:
         r.register(lspe.PluginChecker(
-            lspe.EngineDesc("X99", 2, "Evidence"),
+            lspe.EngineDesc("X99", 2, "Advisory"),
             lambda ctx: [], plugin_id="x", plugin_version=1))
     except ValueError as e:
         assert "超过" in str(e), e
     else:
         raise AssertionError("65 个检查器没有点名拒绝")
     r2 = lspe.CheckerRegistry()
-    dup = lspe.PluginChecker(lspe.EngineDesc("X00", 2, "Evidence"),
+    dup = lspe.PluginChecker(lspe.EngineDesc("X00", 2, "Advisory"),
                              lambda ctx: [], plugin_id="x", plugin_version=1)
     r2.register(dup)
     try:

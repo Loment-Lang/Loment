@@ -356,6 +356,10 @@ class PluginChecker(MacroChecker):
 
     def __init__(self, desc: EngineDesc, fn: Callable[[Ctx], list], *,
                  plugin_id: str, plugin_version: int, plugin_hash: str = "") -> None:
+        if not plugin_id or int(plugin_version) <= 0:
+            raise ValueError("插件必须有 plugin_id 与正版本号")
+        if desc.role == "Evidence" and not plugin_hash:
+            raise ValueError("Evidence 插件必须带 plugin_hash")
         self.desc = desc
         self._fn = fn
         self.plugin_id = plugin_id

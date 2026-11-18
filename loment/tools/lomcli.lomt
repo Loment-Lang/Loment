@@ -20,6 +20,7 @@ choose runtime
 
 use bytes
 use sha256
+use errdata
 use surface_data
 
 // ---------------------------------------------------------------- 内存布局

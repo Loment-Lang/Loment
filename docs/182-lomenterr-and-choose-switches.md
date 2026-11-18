@@ -1170,3 +1170,14 @@ AST 扫 `tools/lomentc.py` 里 `errs.append(...)` / `LomError(...)` 的调用点
 
 `loment_err_test` **35/35**（本轮 +1：上面的分类枚举）;
 `docs/244` 是"更多错误 / 更少静默 / 更详细"的**计划**，其中 §3#1 与 §1.4 是下一轮的两件。
+
+## 19. 2026-11-18：真源搬到自举侧（`errdata.lomt`）+ 完整正则引擎
+
+用户 2026-11-18 的三句指示把这条线翻了个面：码表 / 说明卡 / 语言卡 / 分类规则的
+**真源**从本仓的 `tools/loment_diag.py` 搬到 `loment/tools/errdata.lomt`（自举侧），
+`lomenterr` 改走**自举链**编译，分类用自举侧的完整正则引擎
+（`lompi/store/std/0.1.0/regex.lomt`），并新增 `lomenterr --classify FILE`。
+
+§5.2 / §11.4 里那条"`--dump-surface` 生成 surface_data"现在只覆盖**派生**部分
+（语法别名 / 词序 / 报错器版本）；卡与规则不再经过 Python。完整记录、边界与判据见
+`docs/351`。

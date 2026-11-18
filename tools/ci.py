@@ -278,6 +278,9 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "lspe_test", "potato_
                  "loment_caps_test",
                  # 报错器 (docs/182 §6/§8): 渲染的字段、两条报错通道、缺席时的兜底
                  "loment_err_test",
+                 # 自举侧完整正则引擎（docs/NNN）：UTF-8 / {n,m} / 惰性 / 前后瞻 / 捕获，
+                 # 与 CPython `re` 在 1.4 万条语料上逐字节对拍。
+                 "loment_regex_test",
                  # `#343` 那一类的**计数**（`#369`）：编译器不作声地死掉 —— 两条不变量
                  # （非零退出要带一条诊断、不许被信号打死）过一层语料，**两份实现都问**
                  # （参考实现是 Python，发不出信号；用户真正跑的是自举驱动）。缺口记成账，
@@ -393,7 +396,9 @@ SHARD_COST = {
     "loment_elf_test": 387.4,
     "loment_eol": 0.2,
     "loment_eol_test": 2.4,
-    "loment_err_test": 11.0,
+    # 2026-11-18 起 build_lomenterr 走自举链：冷构建 ~133s（种子 -> stage1 -> IR -> lomelf）。
+    "loment_err_test": 150.0,
+    "loment_regex_test": 30.0,
     "loment_extblock_test": 1.2,
     "loment_ffi_test": 1.9,
     "loment_filetype_test": 0.0,

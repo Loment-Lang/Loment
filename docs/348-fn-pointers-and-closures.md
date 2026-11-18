@@ -146,6 +146,17 @@ E0222 是这一维的"分界线"本身：**没写 `choose fp` 时，这三个入
 - **链接器**（`loment/tools/lomelf.lomt`）：`call %reg` 一条（`FF D1`），
   外加 `@名字` 的标签回填（函数登记时不带 `@`，全局量带）。
 
+### 5.3 判据
+
+- **逐字节**：`loment_p8_test` 的 m82 那一格（`loment/selfhost/fp/ir_fp.lomt` 一份覆盖
+  整条链路）、`loment_potato_emit_test`（形式对象）、`loment_choose_matrix_test`
+  （`choose fp` / `no_fp` 各自成立）。
+- **运行**：`loment_elf_test::test_a_closure_program_runs_through_both_linkers` ——
+  两个真程序（值语义；`gc_auto` 下捕获的 `ptr` 是那块堆内存**唯一**的活引用）各跑一次，
+  输出与 Python 按语义独立算出的期望**逐字节**比；同一份 IR 过自举链接器的产物还要与
+  参考逐字节相同。这一条补的是"两边**一起**错"的盲区 —— 其余判据只证明两个实现一致，
+  不证明产物对。
+
 ## 6. v1 的边界（都是**点名**的，不是漏）
 
 1. **捕获只能是一格宽**（整型 / `bool` / `ptr`）：闭包记录按 8 字节一格存捕获（E0224）。

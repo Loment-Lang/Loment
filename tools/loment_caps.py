@@ -198,6 +198,15 @@ EXPLAINED: dict[tuple[str, str], str] = {
     ("loment/selfhost/potato.lomt", "PT_GMAX"):
         "越界**由调用方报**：`pt_gfn_scan` 返回 1 → `potato_emit` 打印 "
         "`more generic function declarations than this section takes`",
+    ("loment/selfhost/potato.lomt", "PT_EFFMAX"):
+        "越界**由调用方报**：`pt_eff_census` 返回 1 → 驱动器的 `eff_precount` 调用点"
+        "打印 `more effect declarations than this section takes (64)`（`docs/341` A2c）",
+    ("loment/selfhost/potato.lomt", "PT_FNMAX"):
+        "越界**由调用方报**：`pt_eff_census` 返回 2 → 驱动器打印 "
+        "`more function declarations than the effect-row table takes (512)`",
+    ("loment/selfhost/potato.lomt", "PT_CALLMAX"):
+        "越界**由调用方报**：`pt_eff_census` 返回 3 → 驱动器打印 "
+        "`more call sites than the effect-row table takes (16384)`",
     ("loment/selfhost/lexer.lomt", "MAX_LANG"):
         "**有守卫**（`dn < MAX_LANG`，不写穿）：它静默**丢**的是第 17 条语言声明 —— "
         "那是 (a) 里「丢」那一半，**本笔没做**。留着的理由写在这里而不是抹掉：参考实现"

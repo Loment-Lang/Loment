@@ -448,6 +448,59 @@ def test_lspe_bounds_sites_match_on_both_implementations():
     assert lp["per_kind"].get("InBounds") == "2/2", lp
 
 
+@test
+def test_lspe_effect_sites_match_on_both_implementations():
+    """E11 的效应站点在两侧台账里逐字节相同（`docs/341` §11 / A2c）。
+
+    能**编译通过**的效应源里只有三种站点：`effect_decl`（每个 `effect`）、`row`
+    （每个 `fn`）、`row_call`（每个本单元调用点）。`perform` / `handle` / `resume`
+    在这一版是 E023（拒编），到不了发射这一层 —— 与参考实现同一条边界。
+
+    这份夹具把三种都放进去了：声明的行盖住了推断（`g`）、没写行（`h`）、
+    声明的行**盖不住**被调方的行（`f`：行写 `B`，而 `g` 要 `A`）。
+    最后一种让一个 `row` 与一个 `row_call` 同时落在 UNDECIDED 上。级别也一起验：
+    `Typed` 从 L1 起、`Interproc` 从 L2 起（`docs/262` §5.6）。
+    """
+    s1 = _stage1()
+    if s1 is None:
+        return
+    src = (
+        "module lspe_eff\n\n"
+        "choose lspe_effects_true\n\n"
+        "effect A {\n"
+        "    fn a() -> ();\n"
+        "}\n\n"
+        "effect B {\n"
+        "    fn b() -> ();\n"
+        "}\n\n"
+        "fn g(x: u32) -> u32 effects A {\n"
+        "    return x;\n"
+        "}\n\n"
+        "fn h(x: u32) -> u32 {\n"
+        "    let n: u32 = g(x);\n"
+        "    return n;\n"
+        "}\n\n"
+        "fn f(x: u32) -> u32 effects B {\n"
+        "    let n: u32 = g(x);\n"
+        "    return n;\n"
+        "}\n"
+    )
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "lspe_eff.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        for lvl, want_counts in ((3, "5/7"), (1, "4/7"), (0, "3/7")):
+            r = subprocess.run([str(s1), str(p), "--emit-potato",
+                                "--lspe-level", str(lvl)], cwd=str(ROOT),
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=300, shell=False)
+            assert r.returncode == 0, r.stderr[-400:]
+            mod, deps = lomentc.load_unit(p, ROOT, lspe_level=lvl)
+            want = lomentc.emit_potato(mod, ROOT, deps)
+            assert r.stdout == want, f"lvl {lvl}: 台账在两侧不一致"
+            got = json.loads(want)["lspe"]["per_kind"].get("EffectAllowed")
+            assert got == want_counts, f"lvl {lvl}: EffectAllowed {got} != {want_counts}"
+
+
 #: **从表的大小反推输入**（FujoJTOP/loment#774）。三处容量各配一份**刚好越过**
 #: 边界的最小源：1537 个局部变量（`PT_EMAX = 1536`）、33 个带 `alloc` 的循环
 #: （`PT_GLRMX = 32`）、17 个字段的 `record`（`PT_FMAX = 16`）。

@@ -1,6 +1,6 @@
 # 341 · 代数效应与效应处理器：把"向谁求助"变成可检查的行
 
-> 状态: **A0/A1 报告面 + A2a 参考前端 + A2b 自举镜像已落地**（2026-11-13）· 上游: `docs/262`（LSPE）·
+> 状态: **A0/A1 报告面 + A2a 参考前端 + A2b 自举镜像 + A2c Potato 台账已落地**（2026-11-17）· 上游: `docs/262`（LSPE）·
 > `docs/306`–`308`（E9 域检查器）· `docs/317`（E10 借用检查器）· `docs/286`（六点一空间）·
 > `docs/219`（链接边界）· `standard/LLS.md` §21–§25
 > 一句话: 在 LSPE 里加**第十一个引擎**，把"这段代码会向谁求助"变成函数签名上的
@@ -540,6 +540,9 @@ E11 的孪生判据只证明"两侧看同一份 token 得到同一组站点"，�
 * 默认构建的产物与台账一个字节都不变；
 * 下一步（A2c）才是两侧同计数。
 
+> **2026-11-17 更新**：A2c 已落地（§10.6）。开关**打开**时 E11 站点进台账；默认关时
+> 这一段仍然为真 —— 旧产物的 `lspe` 块逐字节不变。
+
 ---
 
 ## 9. 算法、预算与确定性
@@ -645,8 +648,26 @@ Q005 的形状（后续再补）。
 "没有效应声明"的流 —— 默认关时两侧产物逐字节相同，打开时声明/行也逐字节相同。
 
 **没做的**：`loment/selfhost/parser.lomt`（M80 的 AST dump 夹具）不认效应语法 ——
-它只服务 p8 的语料对照，而语料里没有效应源；等有效应语料时再补。Potato 台账（A2c）
-也还没接。
+它只服务 p8 的语料对照，而语料里没有效应源；等有效应语料时再补。Potato 台账已由
+A2c 接上（见 §10.6）。
+
+### 10.6 A2c 落地记录（2026-11-17，E11 站点进 Potato 台账）
+
+| 内容 | 位置 | 判据 |
+|---|---|---|
+| 参考侧：开关打开时，`effects_analyze` 的站点并进 `mod.lspe_sites` | `tools/lomentc.py` 的 `load()` | `loment_potato_emit_test` 的新判据（两侧逐字节） |
+| 证不出来的站点不带 `Typed` / `Syntactic` / `Interproc` 证据 | `loment/lspe/effects.py` | 同上（否则求解器会把它重新证成） |
+| 自举侧：效应表 / 函数行 / 调用边三张表 + 行推断不动点 | `loment/selfhost/potato.lomt` 的 `pt_eff_census` | 同上 |
+| **在检查之前预跑**：`check_arena` 的 `desugar_effects` 会把声明与行从同一块 token 缓冲里擦掉 | `potato.lomt` 的 `eff_precount` / `eff_scratch_bytes`，`driver.lomt` 的 `pmode == 1` 分支 | 两侧同计数；普通编译不付这份扫描 |
+| `EffectAllowed` 进 `per_kind`（字典序：`DropHonest` 与 `Exclusive` 之间） | `potato.lomt` 的 `pt_lspe` | 两侧逐字节 |
+| `interrogations.falsification` 只数有配对反证探针的义务 | 同上 | E11 的五种义务不在 `LSPE_PROBED_OBLIGATIONS` 里 |
+| 种子 | `loment/build/selfhost_driver.ll` 重生成 | `loment_seed_test` / `test_seed_is_not_stale` |
+
+**可达的站点只有三种**：能编译通过的效应源里没有 `perform` / `handle` / `resume`
+（A2 一律 E023），所以自举侧只需数 `effect_decl`、`row`、`row_call`。证据的级别截断
+（`Typed` 从 L1、`Interproc` 从 L2）留在写台账时做，普查只存事实 —— 与参考实现
+`ledger.py` 同一条分界。容量超限是**点名的失败**（效应 64 / 函数 512 / 调用点 16384），
+不是静默截断。
 
 ---
 
@@ -659,8 +680,8 @@ Q005 的形状（后续再补）。
 | **A0**（已完成） | 声明 / 行 / 处理器 / `perform` 的报告面 | 13 条新判据全红 | `lspe effects` 可看 |
 | **A1**（已完成） | 调用传播 + 尾续/一般分类 + Q018–Q022 | 调用行与尾续判据红 | 报告面完整 |
 | **A2a**（已完成） | **参考前端**接受 `effect` / `effects` / `handle` / `perform` / `resume`，由构建旋钮 `choose lspe_effects_true` 打开（默认关）；声明与行擦除，运行期构造 E023 | 开关关时旧源逐字节不变；开时 AST 有节点、E023 点名 | 参考编译器可解析；IR 不变成 |
-| **A2b**（本轮） | **自举侧镜像**（`switches` / `checker` + 种子），并与参考逐字节对拍 | 同一份源两侧同判 | 两侧同语法面 |
-| **A2c** | E11 站点进 Potato 台账（两侧同计数） | 台账计数判据 | `lspe state` 列得出 |
+| **A2b**（已完成） | **自举侧镜像**（`switches` / `checker` + 种子），并与参考逐字节对拍 | 同一份源两侧同判 | 两侧同语法面 |
+| **A2c**（已完成） | E11 站点进 Potato 台账（两侧同计数） | `test_lspe_effect_sites_match_on_both_implementations` | `lspe state` 列得出 |
 | **A3** | 尾续处理器的代码生成（两侧链接器）+ 行进产物元数据 | 正例跑通、反例仍拒 | `no_runtime` 下可用；链接期可查 |
 | **A4** | 一般处理器的 CPS + 捕获回收 | `no_gc` 反例 / `gc_auto` 正例 | Q022 有答案 |
 | **A5** | `MultiShot` + `Copy` 捕获集 | 多射反例在 A4 下红、A5 下按规则收/拒 | 默认仍是 one-shot |

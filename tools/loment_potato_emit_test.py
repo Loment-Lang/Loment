@@ -335,6 +335,45 @@ def test_non_scalar_generic_arg_refused_by_name():
 
 
 @test
+def test_flomtc_true_changes_nothing_but_the_path():
+    """`flomtc`（`docs/350`，第十维）：只换编译路径，**产物逐字节相同**，也不进 Potato。
+
+    两份同一源，只差一行 `choose flomtc_true`：
+
+    * 参考侧 Potato 相同；
+    * 自举 `--emit-potato` 相同，且都等于参考；
+    * Potato 里**没有** `flomtc` 这一格 —— 与 `mode`/`gc` 那种"必填"相反：
+      它说的是**这份产物是怎么被编出来的**，不是这份产物的性质。
+
+    语料带一个**声明了但没调用**的泛型函数：这正是快路径要跳过的形状
+    （跳过 `pt_mono_all` 与参考侧的 deepcopy 都只在这里发生）。
+    """
+    stage1 = _stage1()
+    if stage1 is None:
+        return
+    body = ("module flomtc_probe\n{ch}\n"
+            "fn pick<T>(a: T, b: T) -> T {{\n    return a;\n}}\n\n"
+            "fn _start() {{\n}}\n")
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        pots = {}
+        for tag, ch in (("off", ""), ("on", "choose flomtc_true")):
+            p = td / f"{tag}.lomt"
+            p.write_text(body.format(ch=ch), encoding="utf-8", newline="\n")
+            mod, deps = lomentc.load_unit(p, ROOT)
+            errs = lomentc.check(mod, deps=deps)
+            assert not errs, f"{tag}: 参考侧检查失败 {errs[:2]}"
+            pots[tag] = lomentc.emit_potato(mod, ROOT, deps)
+            r = _emit_potato_on(stage1, p)
+            assert r.returncode == 0, f"{tag}: 自举拒绝 {r.stderr[-300:]}"
+            assert r.stdout == pots[tag], f"{tag}: 自举与参考不同"
+            assert "flomtc" not in json.loads(pots[tag]), (
+                "flomtc 进了 Potato —— 它是编译路径开关，不是产物性质")
+        assert pots["off"] == pots["on"], "flomtc_true 改变了产物"
+    print("      flomtc_false / flomtc_true：参考与自举两侧逐字节相同")
+
+
+@test
 def test_every_example_is_decided():
     """`loment/examples` 下**每一份**都得有一个说法：覆盖 / 拒绝 / 跳过。
 

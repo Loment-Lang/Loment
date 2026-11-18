@@ -11354,11 +11354,24 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None,
                 diag_out: dict | None = None,
                 cache=None) -> str:
     """M45: 形式对象 v1 —— 覆盖泛型/切片/字符串, 并由独立校验器自检 (M46)。"""
-    import copy as _c
+    _gc_alpha_pass(mod, deps)       # L0/L1/L2 —— 必须在单态化之前
 
-    _gc_alpha_pass(mod, deps)       # L0/L1/L2 —— **在 deepcopy 之前**（`_count_gc_ladder`
-                                    # 读的就是 raw_mod 那几张表）
-    raw_mod, raw_deps = _c.deepcopy(mod), _c.deepcopy(list(deps or []))
+    # 单态化前的元数据：以前用整模块 deepcopy 保留 raw_mod，深拷贝是 emit_potato
+    # 的一半成本（docs/350 的 V0 剖面）。这些值在 prepare 之前直接取即可。
+    generics = [{"kind": "fn", "name": f.name, "params": list(f.tparams)}
+                for f in mod.funcs if f.tparams]
+    generics += [{"kind": "type", "name": s.name, "params": list(s.tparams)}
+                 for s in mod.structs if s.tparams]
+    generics += [{"kind": "type", "name": e.name, "params": list(e.tparams)}
+                 for e in mod.enums if e.tparams]
+    _raw_traits = [{"name": t.name, "methods": [m[0] for m in t.methods]}
+                   for t in mod.traits]
+    _raw_impls = [{"trait": i.trait, "for": i.type,
+                   "methods": [f.name[len(i.type) + 1:]
+                               if f.name.startswith(i.type + "_") else f.name
+                               for f in i.funcs]}
+                  for i in mod.impls]
+    _gc_ladder = _count_gc_ladder(mod)
     mod, deps = prepare(mod, deps)  # M6
     all_caps = [c for m in (deps or []) + [mod] for c in m.caps]
     layouts = []
@@ -11380,13 +11393,7 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None,
                     ],
                 }
             )
-    # M45: 泛型声明 (单态化前的本单元视图) + 单态化实例 (prepare 标记)
-    generics = [{"kind": "fn", "name": f.name, "params": list(f.tparams)}
-                for f in raw_mod.funcs if f.tparams]
-    generics += [{"kind": "type", "name": s.name, "params": list(s.tparams)}
-                 for s in raw_mod.structs if s.tparams]
-    generics += [{"kind": "type", "name": e.name, "params": list(e.tparams)}
-                 for e in raw_mod.enums if e.tparams]
+    # 单态化实例 (prepare 标记)
     instances = [{"kind": "fn", "name": f.name, "of": f.from_generic,
                   "args": list(f.generic_args)} for f in mod.funcs if f.from_generic]
     instances += [{"kind": "type", "name": s.name, "of": s.from_generic,
@@ -11414,7 +11421,6 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # **字面相同**，所以先算一次、两处引用 —— 索引不复制字节，只指过去。
     # 表的唯一真源是校验器那个模块（它不许反过来 import 编译器，所以方向只有这一边）。
     import potato as _potato
-    _gc_ladder = _count_gc_ladder(raw_mod)
     _lms_levels = {_n: _lms_level(mod, _n) for _n in LMS_TOGGLES}
     _dims = effective_dims(mod)
     _facts = _lspe_facts(mod, deps or [])
@@ -11637,13 +11643,8 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None,
             {"name": s.name, "fields": [{"name": fn, "type": ft} for fn, ft in s.fields]}
             for s in mod.structs
         ],
-        "traits": [{"name": t.name, "methods": [m[0] for m in t.methods]}
-                   for t in raw_mod.traits],
-        "impls": [{"trait": i.trait, "for": i.type,
-                   "methods": [f.name[len(i.type) + 1:]
-                               if f.name.startswith(i.type + "_") else f.name
-                               for f in i.funcs]}
-                  for i in raw_mod.impls],
+        "traits": _raw_traits,
+        "impls": _raw_impls,
         "generics": generics,
         "instances": instances,
         "guards": _count_guards(mod),

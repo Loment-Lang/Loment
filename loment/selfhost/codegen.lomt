@@ -8545,12 +8545,26 @@ fn df_ndoms(src: ptr, toks: ptr, j: u32) -> u32 {
     return n;
 }
 
+/// 域语句发射失败时**仍要往前走**：`stmt` 的循环拿返回值当下一条语句的起点，返回 0 会
+/// 从文件头重来（诊断变成崩溃）。跳到这条语句的块尾（没有块就跳到 `;`）。
+fn dom_fail(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
+    let _f: u32 = cg_fail(s, 6, j);
+    let k: u32 = j;
+    while tok_kind(toks, k) != 4 && !tok_is(src, toks, k, "{") && !tok_is(src, toks, k, ";") {
+        k = k + 1;
+    }
+    if tok_is(src, toks, k, "{") {
+        return skip_block(src, toks, k);
+    }
+    return k + 1;
+}
+
 fn dom_for(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
     let nv: u32 = df_nvars(src, toks, j);
     let ds: u32 = df_dstart(src, toks, j);
     let nd: u32 = df_ndoms(src, toks, j);
     if nd != nv {
-        return cg_fail(s, 2, j);
+        return dom_fail(s, src, toks, j);
     }
     let after: u32 = 0;
     if ds != 0 {
@@ -8578,17 +8592,24 @@ fn dom_for(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         dw0 = load32(s, CG_DOM_N);
     }
     if dw0 == 0 {
-        return cg_fail(s, 2, j);
+        return dom_fail(s, src, toks, j);
+    }
+    // 空区间（`docs/315` §7）：`lo > hi` 的循环一次都不跑 —— 在写得出来的地方拒。
+    if load32(s, dom_at(dw0 - 1, 2)) > load32(s, dom_at(dw0 - 1, 3)) {
+        return dom_fail(s, src, toks, j);
     }
     let span0: u32 = load32(s, dom_at(dw0 - 1, 3)) - load32(s, dom_at(dw0 - 1, 2));
     let i: u32 = 1;
     while i < nv {
         let dwi: u32 = dom_by_name(s, src, toks, ds + i * 2);
         if dwi == 0 {
-            return cg_fail(s, 2, j);
+            return dom_fail(s, src, toks, j);
+        }
+        if load32(s, dom_at(dwi - 1, 2)) > load32(s, dom_at(dwi - 1, 3)) {
+            return dom_fail(s, src, toks, j);
         }
         if load32(s, dom_at(dwi - 1, 3)) - load32(s, dom_at(dwi - 1, 2)) != span0 {
-            return cg_fail(s, 2, j);
+            return dom_fail(s, src, toks, j);
         }
         i = i + 1;
     }
@@ -8641,7 +8662,7 @@ fn dom_for(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
     // 循环头已证的位置入表（并行的每对都记），离开时按计数还原
     let opn: u32 = load32(s, CG_DPN);
     if opn + nv > CG_DPT_MAX {
-        return cg_fail(s, 2, j);
+        return dom_fail(s, src, toks, j);
     }
     i = 0;
     while i < nv {
@@ -8815,7 +8836,7 @@ fn dom_stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         }
         let d: u32 = load32(s, CG_DOM_N);
         if d >= CG_DOM_MAX {
-            return cg_fail(s, 2, j);
+            return dom_fail(s, src, toks, j);
         }
         let id: u32 = load32(s, CG_DOM_ID);
         store32(s, CG_DOM_ID, id + 1);
@@ -9728,10 +9749,11 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         }
         return sk + 1;
     }
-    if (tok_is(src, toks, j, "couple") || tok_is(src, toks, j, "mutex"))
+    if (tok_is(src, toks, j, "couple") || tok_is(src, toks, j, "mutex")
+            || tok_is(src, toks, j, "sibling"))
             && tok_kind(toks, j + 1) == 0
             && (tok_is(src, toks, j + 2, ",") || tok_is(src, toks, j + 2, ";")) {
-        // 图边（`docs/315` §5）：声明，不产生指令；判决点长在 guard 里。
+        // 图边（`docs/315` §5 / 兄弟边 §4.2）：声明，不产生指令；判决点长在 guard 里。
         let ck2: u32 = j + 3;
         while tok_kind(toks, ck2) != 4 && !tok_is(src, toks, ck2, ";") {
             ck2 = ck2 + 1;

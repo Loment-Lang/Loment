@@ -7024,6 +7024,84 @@ def test_domain_geometry_reads_trees_and_graphs():
 
 
 @test
+def test_sibling_declaration_and_empty_range():
+    """`docs/315` §4.2 / §7 的两条收尾：显式兄弟边，与空区间的编译期拒。
+
+    `sibling A, B;` 把横向树的一条边**说出来**：名字指本层的直接子域（与书写顺序
+    无关）或顶层能力，两者不能混（混了就不是同层）。它一条指令都不发。
+
+    `domain:for` 走过空区间时只是不跑；一个一次都不跑的循环几乎总是形状写反了 ——
+    在编译期拒，两个实现都要拒。
+    """
+    NL = chr(10)
+
+    def S(*lines):
+        return NL.join(lines)
+
+    def load(src):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "d.lomt"
+            p.write_text(src, encoding="utf-8", newline=NL)
+            m = lomentc.load(p)
+            return m, lomentc.check(m)
+
+    # 1) 合法的兄弟边：同层的两个块（写在声明之后即可）+ 两个顶层能力
+    src = S("module m", "choose runtime",
+            "capability c1 : disk[0..7]",
+            "capability c2 : disk[8..15]",
+            "fn f(a: [u32; 16] in disk) -> u32 {",
+            "    sibling c1, c2;",
+            "    domain p : disk[0..7] {",
+            "        domain x : disk[0..3] { a[0] = 1; }",
+            "        domain y : disk[4..7] { a[4] = 2; }",
+            "        sibling x, y;",
+            "    }",
+            "    return a[0];", "}", "")
+    m, e = load(src)
+    assert e == [], e
+    ir = lomentc.emit_llvm(m, ROOT)
+    assert "sibling" not in ir, "兄弟边不该产生任何指令"
+    g = json.loads(loment_geometry.geometry(m).to_json())
+    assert len(g["siblings"]) == 2, g["siblings"]
+    ids = {n["name"]: n["id"] for n in g["nodes"]}
+    assert sorted([ids["c1"], ids["c2"]]) in g["siblings"], g["siblings"]
+    assert sorted([ids["x"], ids["y"]]) in g["siblings"], g["siblings"]
+
+    # 2) 不同层 / 只有一个名字 / 名字不存在 —— 三条都拒
+    def rejects(src_bad, frag):
+        try:
+            load(src_bad)
+        except lomentc.LomError as ex:
+            assert frag in str(ex), (frag, str(ex))
+            return
+        raise AssertionError("没有拒：" + frag)
+
+    rejects(S("module m", "choose runtime",
+              "fn f(a: [u32; 8] in disk) -> u32 {",
+              "    domain p : disk[0..7] {",
+              "        domain x : disk[0..3] { a[0] = 1; }",
+              "        sibling p, x;",
+              "    }", "    return a[0];", "}", ""), "不在同一个父下")
+    rejects(S("module m", "choose runtime", "capability c : disk[0..7]",
+              "fn f() -> u32 { sibling c; return 0; }", ""), "至少要两个域")
+    rejects(S("module m", "choose runtime", "capability c : disk[0..7]",
+              "fn f() -> u32 { sibling c, nope; return 0; }", ""), "不在作用域里")
+
+    # 3) 空区间：`domain:for` 在编译期拒（`docs/315` §7）
+    rejects(S("module m", "choose runtime",
+              "fn f(a: [u32; 8] in disk) -> u32 {",
+              "    domain d : disk[5..2] { domain:for i { a[0] = 1; } }",
+              "    return a[0];", "}", ""), "空区间")
+    # 非空区间照旧
+    m3, e3 = load(S("module m", "choose runtime",
+                    "fn f(a: [u32; 8] in disk) -> u32 {",
+                    "    domain d : disk[0..3] { domain:for i { a[0] = 1; } }",
+                    "    return a[0];", "}", ""))
+    assert e3 == [], e3
+    print("      兄弟边：可声明 / 同层校验 / 零指令 / 几何 siblings；空区间在编译期拒")
+
+
+@test
 def test_domains_selfhost_twin():
     """十种域 + `tick;`：自举镜与参考实现的 IR **逐字节相同**。
 
@@ -7117,6 +7195,13 @@ def test_domains_selfhost_twin():
            "        domain leaf3 : disk[0..3] child_of outer3 { a[0] = 1; }\n"
            "    }\n"
            "    domain rv3 : disk[0..3] { domain:for i step -2 { a[i] = 3; } }\n"
+           "    return a[0];\n"
+           "}\n"
+           # docs/315 §4.2：显式兄弟边（声明，零指令 —— 两侧必须同样跳过）
+           "fn h_sib(a: [u32; 8] in disk) -> u32 {\n"
+           "    domain s1 : disk[0..3] { a[0] = 1; }\n"
+           "    domain s2 : disk[4..7] { a[4] = 2; }\n"
+           "    sibling s1, s2;\n"
            "    return a[0];\n"
            "}\n"
            # docs/315 §5.2：立体图的体（根 + 静默成员 / 质量整组 / 按函数隔离）

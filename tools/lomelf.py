@@ -327,6 +327,8 @@ def _parse_init(ty: str, init: str) -> bytes:
             raise ElfError(f"数组初值长度不符: {init!r}")
         return bytes(out)
     if ty in SCALAR_SIZE:
+        if init in ("null", "undef"):
+            return b"\0" * size_of(ty)
         if not re.match(r"^-?[0-9]+$", init):
             raise ElfError(f"标量初值解析失败: {init!r}")
         n = int(init)

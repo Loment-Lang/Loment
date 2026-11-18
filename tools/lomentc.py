@@ -4660,7 +4660,15 @@ class Parser:
             field_lines.append(self.peek().line)
             fn = self.ident("字段名")
             self.expect("punct", ":")
-            fields.append((fn, self.type_name()))
+            fty = self.type_name()
+            if self.last_region:
+                # 切片字段的标记在类型串里放不下（`Param.region` 是形参专用的），
+                # 而设计上字段本来就不带标记：区域由构造处的来源决定（`docs/299` §3.3）。
+                raise LomError(kw.line, kw.col,
+                               f"结构体 {name} 的字段 {fn} 不能带区域标记"
+                               f"（`&{self.last_region} …`）—— 字段的区域由构造处的"
+                               f"来源决定（`docs/299` §3.3）")
+            fields.append((fn, fty))
             if not self.accept("punct", ","):
                 self.accept("punct", ";")
         self.expect("punct", "}")

@@ -1,0 +1,18 @@
+// 数组按值传给函数是**移动**（实现口径；见 docs/349 §已知分歧）：被调方改的是自己那份。
+module arrmove
+choose runtime
+
+fn bump(a: [u32; 2]) -> u32 {
+    a[0] = 99;
+    return a[0];
+}
+
+fn main() {
+    let t: [u32; 2] = [1, 2];
+    let r: u32 = bump(t);
+    let b: [u32; 2] = [1, 2];
+    print_num(r as i64);
+    print(" ");
+    print_num(b[0] as i64);
+    print("\n");
+}

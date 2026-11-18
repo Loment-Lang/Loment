@@ -253,28 +253,31 @@ def test_release_driver_refuses_channel_gated_constructs():
     #: 文本由报错器渲染（`docs/182` §5.3），而剩下的两关肇事 token 都是 `choose` 这个
     #: 关键字、不是被闸关住的模式名 —— 它们报文的文本由 `loment_diag` 那张 E022 卡负责，
     #: 已由上面那条 Python 判据守着。原来那一栏只服务 `use libl` 那条点名闸，闸放开了。
-    probes = [("plain", PROBE_PLAIN, False),
-              ("vm", PROBE_VM, False),
-              ("libl", PROBE_LIBL, False),
-              ("hosted", PROBE_HOSTED, False),
+    #: 第 4 列是**文件后缀** —— `.lls` 那一格的闸认的是后缀，不是内容（`docs/349` §10）。
+    probes = [("plain", PROBE_PLAIN, False, ".lomt"),
+              ("vm", PROBE_VM, False, ".lomt"),
+              ("libl", PROBE_LIBL, False, ".lomt"),
+              ("hosted", PROBE_HOSTED, False, ".lomt"),
               # 2026-10-20：最后一道闸也打开 —— LSPE 第一部分已随 0.1.5 落地。
-              ("lspe", PROBE_LSPE, False)]
+              ("lspe", PROBE_LSPE, False, ".lomt"),
+              # 2026-11-17：**第一道永不打开的闸** —— `.lls` 只有开发通道能编（`docs/349` §10）。
+              ("lls", PROBE_PLAIN, True, ".lls")]
     made: list[Path] = []
     try:
-        for tag, src, _refuse in probes:
-            p = probe_dir / f"channel_probe_{tag}.lomt"
+        for tag, src, _refuse, ext in probes:
+            p = probe_dir / f"channel_probe_{tag}{ext}"
             p.write_text(src, encoding="utf-8", newline="\n")
             made.append(p)
-        rel = "loment/build/channel_probe_%s.lomt"
+        rel = "loment/build/channel_probe_%s"
         with tempfile.TemporaryDirectory() as td:
             # ELF 与产物都落在**这个** td 里 —— 上面的 `_build_linux_elf` 返回的是
             # td 里的路径，td 一销毁它就是悬空的（第一版踩过）。
             dev_elf = P8._build_linux_elf(SEED.read_text(encoding="utf-8"), td, "chan_dev")
             rel_elf = P8._build_linux_elf(loment_seed.reference_ir("release"), td, "chan_rel")
-            for tag, _src, refuse in probes:
+            for tag, _src, refuse, ext in probes:
                 # **dev 每一份都得过** —— 不然"发行版拒"可能只是因为它什么都拒。
-                P8._run_driver(dev_elf, rel % tag, td, f"cd_{tag}")
-                rc, _out, err = P8._run_driver_raw(rel_elf, rel % tag, td, f"cr_{tag}")
+                P8._run_driver(dev_elf, (rel % tag) + ext, td, f"cd_{tag}")
+                rc, _out, err = P8._run_driver_raw(rel_elf, (rel % tag) + ext, td, f"cr_{tag}")
                 if refuse:
                     assert rc != 0, (
                         f"发行版驱动器收下了 `{tag}` 那条闸 —— 渠道闸没生效"
@@ -374,6 +377,36 @@ def test_a_release_build_links_the_real_libc_end_to_end():
         finally:
             loment_channel.RELEASE = old
     print("      发行版 + 真 libc.so.6：链成动态产物、跑出 7；没人提供的名字仍然点名拒")
+
+
+@test
+def test_release_refuses_lls_sources():
+    """**发行版锁**（用户 2026-11-17，`docs/349` §10）：`.lls` 只在开发通道编译，且**永不打开**。
+
+    两端都测：**dev 必须收**（不然"发行版拒"可能只是因为它什么都拒），发行版必须拒。
+    与其余五道闸的区别写在一处：那五道的打开条件是"承诺兑现"，这一道的答案是"它不该兑现"。
+    """
+    import lomentc  # noqa: PLC0415
+    import loment_channel  # noqa: PLC0415
+
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "probe_lls.lls"
+        p.write_text(PROBE_PLAIN, encoding="utf-8", newline="\n")
+        old = loment_channel.RELEASE
+        try:
+            loment_channel.RELEASE = False
+            mod = lomentc.load(p)
+            assert mod.name == "probe_plain", mod.name
+            loment_channel.RELEASE = True
+            try:
+                lomentc.load(p)
+                raise AssertionError("发行版把 `.lls` 编过去了 —— 锁没生效（docs/349 §10）")
+            except lomentc.LomError as e:
+                msg = str(e)
+                assert "`.lls`" in msg and "发行版" in msg, msg
+        finally:
+            loment_channel.RELEASE = old
+    print("      Python：dev 收 `.lls` / 发行版点名拒（E0228）")
 
 
 def main() -> int:

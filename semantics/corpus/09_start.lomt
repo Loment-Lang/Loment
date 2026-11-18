@@ -1,0 +1,11 @@
+// `_start` 入口（LLS §14.2）：自己发 exit，退出码就是 syscall 的第一个实参。
+module startprobe
+choose runtime
+
+fn _start() {
+    let a: u32 = 6;
+    let b: u32 = 7;
+    print_num((a * b) as i64);
+    print("\n");
+    syscall4(60, 5, 0, 0);
+}

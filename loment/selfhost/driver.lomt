@@ -687,6 +687,23 @@ fn streq(p: ptr, n: u32, s: str) -> u32 {
     return 1;
 }
 
+
+/// `p[0..n]` 以字面量 `s` 结尾吗（发行版锁用它认 `.lls`）。
+fn has_suffix(p: ptr, n: u32, s: str) -> u32 {
+    let m: u32 = str_len(s);
+    if n < m {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < m {
+        if load8(p, n - m + i) != str_byte(s, i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
 /// 从 /proc/self/cmdline 取第 `idx` 个参数: 返回 (start << 32) | len, 0 = 没有。
 /// idx=0 是工具自己的路径 (用来推"工具目录"), idx=1 是入口文件。
 fn argv_at(buf: ptr, cap: u64, scr: ptr, idx: u32) -> u64 {
@@ -3740,6 +3757,18 @@ fn _start() -> u32 {
     // 这一路诊断 —— fd 放进 `scr` 的 `DIAGFD_OFF` 那一格（与 `snc` 同一种传法）。
     // **0 = 没给**，所以存 fd 加一；`diagfd` 负责还原。
     store32(scr, DIAGFD_OFF, (dfd + 1) as u32);
+    // **发行版锁**（用户 2026-11-17，`docs/349` §10）：`.lls` 是规范/语义源，
+    // **发行版工具链永不编译它**。锁与 `choose vm` 那把同源（同一个渠道常量），
+    // 但这一次**锁死** —— 不随版本解锁：`.lls` 里的执行规则是判据的尺子。
+    //
+    // ⚠ 渠道常量的**唯一读取点**就是这一行（从 `checker.lomt` 搬来的那一个）：
+    // `loment_channel_test` 钉"dev/release 两个种子只差一处"（`docs/231` §5 判据 F）。
+    let rel: u32 = LOMENT_CHANNEL;
+    if rel == 1 && has_suffix(ap, an, ".lls") == 1 {
+        let dm: str = "the release toolchain never compiles `.lls` sources (specification/semantics files) -- use the dev build (docs/349 section 10)";
+        wdiag_file(dfd, scr, ap, an, 999, str_ptr(dm), str_len(dm));
+        return fail(dm);
+    }
     // 项目根: 入口文件所在目录 (名字形式的 deps/ 层相对它)
     let _p: u32 = dir_of(ap, an, ptr_add(scr, PROJ_OFF), DIR_CAP);
     // 词法缓冲按"单个文件"的大小开 (单元只 lex 一次, 见下)

@@ -4776,6 +4776,26 @@ FINE: tuple[Fine, ...] = (
          "If you really need shared mutable state, own it behind a `ptr` and capture that.",
          "Use the closure within the creating call; keep it from escaping."),
     ),
+    # 228：**发行版锁**（用户 2026-11-17，`docs/349` §10）。`.lls` 是规范/语义源，
+    # 发行版工具链永不编译它 —— 与 `choose vm` 那把同源（渠道常量），但这次**锁死**，
+    # 不随版本解锁。族码挂在 E022（`choose`/渠道那一族）上：它是一条渠道策略拒绝。
+    Fine(
+        228, 22, r"^发行版不编译 `\.lls` 文件",
+        "发行版不编译 `.lls`（规范/语义源）",
+        "the release toolchain never compiles `.lls` sources",
+        "`.lls` 是**规范/语义源**（`docs/349` §10）：`semantics/loment_sem.lls` 这类"
+        "文件的执行规则是**判据的尺子**，不是用户程序。发行版把它**锁死** —— "
+        "不随版本解锁（与 `choose vm` 那把渠道锁同源，但那一把已经打开过，这一把不会）。",
+        "`.lls` files are specification/semantics sources (`docs/349` section 10): the rules "
+        "they carry are the yardstick for criteria, not user programs. The release "
+        "toolchain never compiles them, and that lock does not open with a version.",
+        ("用开发版工具链（仓里的 `tools/lomentc.py` + `tools/lomelf.py`）去编它。",
+         "要发布的那份逻辑写成 `.lomt`。",
+         "别把 `.lls` 放进发行流程。"),
+        ("Use the dev build of the toolchain (the in-repo lomentc + lomelf).",
+         "Write the shippable logic as .lomt.",
+         "Keep .lls files out of the release path."),
+    ),
     Fine(
         227, 30, r"^未知类型 .+（闭包形参 .+ 的类型）",
         "闭包形参的类型未知",

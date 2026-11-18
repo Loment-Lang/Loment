@@ -174,6 +174,12 @@ GLOBS = [
     "tools/loment_comefor.py", "tools/loment_comefor_test.py",
     # `choose` 的联动矩阵（`#940`）。**与 lomrel.lomt 同一位置**。
     "tools/loment_choose_matrix_test.py",
+    # 语义 oracle（`docs/349`）：Loment 写的源解释器 + 它的判据。
+    # **与 lomrel.lomt 同一位置** —— 两处的条目顺序就是清单的顺序。
+    "tools/loment_oracle.py", "tools/loment_oracle_test.py",
+    # 规范/语义源（`docs/349`）：`.lls` 引擎与 10 份语料。**在账上、但发行版不编译它**
+    # （渠道锁，`docs/231` §2.6）—— 清单是仓的账，不是发行包的打包清单。
+    "semantics/*.lls", "semantics/corpus/*.lomt",
     # 外部代码块的字节保真 (S1, docs/185)
     "tools/loment_extblock_test.py",
     "tools/loment_p7_test.py", "tools/loment_p8_test.py", "tools/loment_p9_test.py",

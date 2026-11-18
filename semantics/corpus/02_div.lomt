@@ -1,0 +1,12 @@
+// 带符号除法与取余（LLS §10.2）：向零截断，余数与被除数同号。
+module divrem
+choose runtime
+
+fn main() {
+    let a: i32 = -7;
+    let b: i32 = 2;
+    print_num((a / b) as i64);
+    print("\n");
+    print_num((a % b) as i64);
+    print("\n");
+}

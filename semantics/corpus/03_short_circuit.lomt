@@ -1,0 +1,20 @@
+// `&&` / `||` 短路（LLS §12.5）：右侧不该被求值，所以 side 一声不响。
+module sc
+choose runtime
+
+fn side(v: u32) -> bool {
+    print_num(v as i64);
+    return true;
+}
+
+fn main() {
+    let a: bool = false && side(1);
+    let b: bool = true || side(2);
+    if a {
+        print("x");
+    }
+    if b {
+        print("y");
+    }
+    print("\n");
+}

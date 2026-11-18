@@ -238,6 +238,10 @@ tools/loment_ct_test.py
 tools/loment_comefor.py
 tools/loment_comefor_test.py
 tools/loment_choose_matrix_test.py
+tools/loment_oracle.py
+tools/loment_oracle_test.py
+semantics/*.lls
+semantics/corpus/*.lomt
 tools/loment_extblock_test.py
 tools/loment_p7_test.py
 tools/loment_p8_test.py

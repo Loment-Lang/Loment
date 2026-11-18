@@ -1,0 +1,15 @@
+// while + syscall 退出码（LLS §11.5 / §18.3）。
+module loopexit
+choose runtime
+
+fn main() {
+    let i: u32 = 0;
+    let s: u32 = 0;
+    while i < 5 {
+        s = s + i;
+        i = i + 1;
+    }
+    print_num(s as i64);
+    print("\n");
+    syscall4(60, (s % 7) as u64, 0, 0);
+}

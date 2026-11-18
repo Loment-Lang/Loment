@@ -2818,6 +2818,7 @@ pub fn code_family(c: u32) -> u32 {
     if c == 224 { return 1; }
     if c == 225 { return 1; }
     if c == 226 { return 41; }
+    if c == 228 { return 22; }
     if c == 227 { return 30; }
     if c == 228 { return 23; }
     if c == 229 { return 2; }

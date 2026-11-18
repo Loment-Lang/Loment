@@ -17072,6 +17072,19 @@ def _desugar_foreach(mod: Module) -> None:
 def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3,
          profile: str | None = None, lspe_mode: str = "full",
          answers: dict[str, str] | None = None) -> Module:
+    # **发行版锁**（用户 2026-11-17，`docs/349` §10）：`.lls` 是**规范/语义源**，
+    # **发行版工具链永不编译它**。锁与 `choose vm` 那把同源（同一个渠道常量，
+    # `docs/231` §2），但这一次是**锁死** —— 不随版本解锁：`.lls` 里的"执行规则"是
+    # 判据的尺子（`semantics/loment_sem.lls`），不是用户程序。发行版打包时只翻
+    # `loment_channel.RELEASE` 那一行，于是这条闸在包里自动生效。
+    #
+    # 闸在**装载**这一层而不是 `check()`：自举侧的检查器只有 token 流、看不见文件名，
+    # 而两边的拒绝必须落在同一个位置概念上（"这份文件不被读"）。
+    import loment_channel                      # noqa: PLC0415
+    if loment_channel.RELEASE and path.suffix == ".lls":
+        raise LomError(0, 0,
+                       f"发行版不编译 `.lls` 文件（{path.name}）：它是规范/语义源，"
+                       "只随开发工具链使用（渠道锁，`docs/349` §10）")
     # **前门**（`docs/188` §7.2）：读法由**声明**决定，不由后缀或嗅探。
     # 一份 `choose write grammar python` 的 `.lomt` 按 `docs/188` §0 **仍然是 Loment**，
     # 只是拼法不同 —— 所以这里先把它**翻成 Loment 源码**再往下走。

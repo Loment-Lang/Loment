@@ -144,6 +144,9 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "lspe_test", "potato_
                  # 这份报告的四层直方图必须逐份等于 `_count_gc_ladder()`，漂了就红。
                  "loment_gc_why_test",
                  "loment_rule_parity", "loment_seed_test", "loment_fmt_test", "loment_doc_test",
+                 # 独立语义 oracle（`docs/349`）：Loment 写的源解释器与规范表对拍 ——
+                 # 这条是唯一一条**不靠"两个实现一致"**的判据。
+                 "loment_oracle_test",
                  # 渠道（`docs/231` §5 判据 D/F）：发行版种子可重算、且与 dev 只差一个字节；
                  # 发行版驱动器拒 `choose vm`、dev 收（后者要 clang + WSL，没有就 SKIP）。
                  "loment_channel_test",
@@ -437,6 +440,7 @@ SHARD_COST = {
     "loment_register_test": 0.8,
     "loment_rel_test": 268.7,
     "loment_rule_parity": 4.3,
+    "loment_oracle_test": 12.0,
     # 2026-11-08（#1505）：种子 5.71 MB 时本机实测 434s（7:14，WSL 走 genesis）。
     # 旧值 63.9 是种子 4 MB 时代的数 —— 实测差了一个数量级，与"没量过"一样误导。
     "loment_seed_test": 434.0,

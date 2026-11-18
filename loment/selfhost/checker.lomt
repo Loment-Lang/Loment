@@ -7343,7 +7343,10 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     // `choose lspe_*` —— 第一部分（维度 + 台账 + 站点普查）已随 0.1.5 落地。
     // `loment_channel_test` 的 `PROBE_LSPE` 期望**反转**，探针不删（`docs/262` §10.6）。
     // 至此渠道**已经没有闸读它**，这一行只剩"注入仍生效"一个用途（判据 F）。
-    let rel: u32 = LOMENT_CHANNEL;
+    //
+    // **2026-11-17：读取点搬到了 `driver.lomt`**（发行版锁：`.lls` 只在开发通道编译，
+    // `docs/349` §10）。检查器没有文件名，看不见后缀 —— 那条闸必须落在**驱动器**上。
+    // 读取点仍然**只有一处**（判据 F 钉的是"dev/release 两个种子只差一处"）。
     // ---- 第九维 `fp` 的**生效值**（`docs/348`）。放在 `oc + 12`（`tyt + 4108`，那格空着，
     // 见 `chk_arena_tyt` 的布局说明）—— `chk_tex` / `chk_lambda` 在深递归里读它，
     // 不值得为此给十几个函数各加一个形参（自举 codegen 的形参上限就是 10）。

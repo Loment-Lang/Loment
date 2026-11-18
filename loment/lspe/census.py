@@ -206,7 +206,8 @@ def _mark(site: dict, cover, i: int) -> dict:
 
 def census(toks: list, unit: str,
            lms=frozenset(),
-           instances: list[dict] | tuple = ()) -> tuple[list[dict], list[int], list[dict]]:
+           instances: list[dict] | tuple = (),
+           plan=None) -> tuple[list[dict], list[int], list[dict]]:
     """站点普查（`docs/262` §5.1）：E1/E2（guard + 下标）、E3、E4、E5、pass 块。
 
     口径是**词法的**，且两套实现用**同一条规则** —— 参考侧吃 `lomc.lex` 的 token，
@@ -217,8 +218,13 @@ def census(toks: list, unit: str,
 
     `instances` 是单态化实例（`of` + `args`）：每个实例是一个替换，`TypeWellFormed`
     按 `(type, substitution)` 键记账（`#745`）。
+
+    `plan`（`docs/344` V1）来自 `framework`。不传时按旧顺序跑全部阶段；编译器传计划，
+    于是跳过的阶段确实不跑。触发器是**过近似**的：跳过只在"这一阶段一定没有站点"时
+    发生，所以站点集合与顺序不变。
     """
     _ensure_compiler_facts()
+    _run = None if plan is None else set(plan.run)
     sites: list[dict] = []
     unsourced: list[int] = []
     seen: dict[str, int] = {}
@@ -235,13 +241,19 @@ def census(toks: list, unit: str,
     def cover(i: int) -> str | None:
         return _covered(spans, i)
 
-    census_e1e2(toks, sid, sites, unsourced, cover, _loops(toks), _array_lens(toks))
-    census_domain(toks, sid, sites, cover)
-    census_bounds(toks, sid, sites, cover, lms)
-    census_e3(toks, sid, sites, cover)
-    census_e4(toks, sid, sites, (), cover)
-    census_drop(toks, sid, sites)
-    census_wf(instances, sid, sites)
+    if _run is None or (_run & {"E1Constant", "E2Typed", "E5GlobalInvariant"}):
+        census_e1e2(toks, sid, sites, unsourced, cover, _loops(toks), _array_lens(toks))
+    if _run is None or "E9Domain" in _run:
+        census_domain(toks, sid, sites, cover)
+    if _run is None or "E2bBounds" in _run:
+        census_bounds(toks, sid, sites, cover, lms)
+    if _run is None or "E3LocalFlow" in _run:
+        census_e3(toks, sid, sites, cover)
+    if _run is None or "E4Interproc" in _run:
+        census_e4(toks, sid, sites, (), cover)
+    if _run is None or "E6Substitution" in _run:
+        census_drop(toks, sid, sites)
+        census_wf(instances, sid, sites)
     for s in sites:
         cid = s.get("covered_by")
         if cid:

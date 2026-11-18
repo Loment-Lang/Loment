@@ -1,6 +1,6 @@
 # 344 · LSPE 框架：宏观检查器、调度器与两档 SDK
 
-> 状态: **设计稿**（2026-11-13）
+> 状态: **V0–V3 已落地**（2026-11-18；Python 包），V4 等 SDK 冻结
 > 基准: `origin/main`（`663b93ff`，2026-11-13）
 > 上游: `docs/262-lspe-safety-police-espace.md`（LSPE）· `docs/317-lspe-borrow-checker.md`（E10）·
 > `docs/320-capability-temporal-safety.md` · `docs/328-authority-temporal-safety.md` ·
@@ -460,6 +460,25 @@ struct EvidenceNode {
 V0 依赖 `docs/345` 的 **C0**（`choose` 两维 + 语法骨架）；V1 依赖 **C2**（vtable +
 间接调用）；V2/V3 依赖 **C3**（封闭世界目标集）。每一步都走 `docs/158` §5：
 两侧同判决、判据先红、生成物单独提交、种子 `--emit` 不手合。
+
+### 9.1 V0–V3 落地状态（2026-11-18）
+
+- `loment/lspe/framework.py`：`MacroChecker` / `EngineDesc` / `CheckerRegistry` /
+  `Scheduler` / `LspeHost` / `Ctx` / `Claim` / `AdvisoryQuestion`；14 个内置检查器
+  （P0、E1–E11、A1）。登记表按 `(phase, id)` 固定排序，上限 64；调度器给每条
+  skip 一个原因，计划哈希对 `(run, skip, budgets, facts)` 内容寻址。
+- **SDK 两档**：`PluginChecker` 默认 Advisory；Evidence 插件必须带
+  `plugin_id` / `plugin_version`，且义务的 `accept` 集合要含 `External`/`Plugin`
+  （今天没有义务 opt-in，所以插件证据一律被拒）。`LSPE_SDK_VERSION =
+  "lspe-sdk/0"`，V4 公开 1.0 仍未启动。
+- **编译器接入**：`load()` 先算 `mod.lspe_plan`，再交给 `census()`；计划只跳过
+  “这一阶段一定没有站点”的阶段，站点集合/顺序与旧路径相同。计划放在台账的
+  `_plan` 内部字段，`public()` 剥掉，Potato 产物不变。`loment lspe state` 在
+  stderr 打 `[LSPE] plan / skip / budgets`。
+- **判据**：`lspe_test` 新增 10 条（V0–V3 的 A–J 里可包级验证的部分），
+  `lomentc_test`、`loment_potato_emit_test`、`loment_choose_matrix_test` 旧绿不变。
+- **边界**：`docs/345` 的 C2–C4（vtable / 自举侧类）仍是语言面梯子，不属于
+  这一层派发；本层用 Python 子类做同一条“基类 + 登记表 + 固定顺序”的派发。
 
 ---
 

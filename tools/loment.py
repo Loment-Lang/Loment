@@ -442,6 +442,10 @@ def cmd_lspe_state(a) -> int:
     import lspe
     for _ln in lspe.lspc_lines(lp):
         print(_ln, file=sys.stderr)
+    _plan = getattr(mod, "lspe_plan", None)
+    if _plan is not None:
+        for _ln in lspe.plan_lines(_plan):
+            print(_ln, file=sys.stderr)
     # AI 检查器的怀疑（Q014）：只在显式给 `--replies` 时出现，永不改判决。
     _rep = getattr(a, "replies", None)
     if _rep:

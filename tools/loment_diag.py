@@ -76,6 +76,8 @@ RULES = [
      "这一版还没实现（编译器限制）",
      "`effect` 与 `effects` 行已经解析，但 `perform` / `handle` / `resume` 的运行期"
      "要到 `docs/341` 的 A3 才落地。先删掉这三个构造，或等 A3。"),
+    # **A3a**（`docs/341` §7.3）的四条边界在 `FINE` 里（228–231），不在这里 ——
+    # 与其余细分码同一条路数：`loment_err_test` 要求每条模板都有自己的码。
     # **前门拒了这份源**（`#29`）：语法是另一门的、转写器又表示不出来。原先它落进
     # E0999「未分类，请报告」—— 对用户是**错的处境**（不是分类表漏了，是这一版的前端
     # 还不收那个构造）。与 E023 同码：修法一样，换个写法绕开，绕不开就报告。
@@ -4808,6 +4810,72 @@ FINE: tuple[Fine, ...] = (
         ("Use a type that exists.",
          "Declare that type first.",
          "If it is a typo, match the declaration."),
+    ),
+    # ---- 尾续处理器（`docs/341` A3a）----------------------------------------
+    # 这四张卡是 A3a 的边界：一小片能编，其余点名拒。码从 228 起（222–227 已占用）。
+    Fine(
+        228, 23, r"效应臂 |A3a |没有被同一函数里词法上的",
+        "尾续处理器只收一小片（A3a）",
+        "the tail-resumptive handler slice is narrow (A3a)",
+        "A3a 只收：`handle` 作 `let` 初值、`perform` 作整条语句或 `let` 初值、"
+        "臂里平铺且恰好一次尾 `resume`、臂只引用形参与模块级名字。"
+        "其余形状（捕获、abort、一般处理器、跨函数 perform）要等 A3b/A4。",
+        "A3a accepts `handle` only as a `let` initializer, `perform` only as a whole "
+        "statement or a `let` initializer, arms with exactly one tail `resume` and only "
+        "flat statements, and arms that reference their parameters and module-level names. "
+        "Captures, abort, general handlers and cross-function performs wait for A3b/A4.",
+        ("把臂压成\"平铺语句 + 最后一条 `resume(e);`\"。",
+         "把 `perform` / `handle` 挪成整条语句或 `let` 初值。",
+         "臂里只留形参与模块级常量；要读局部就先把它变成形参。"),
+        ("Reduce the arm to flat statements ending in `resume(e);`.",
+         "Move `perform` / `handle` to a whole statement or a `let` initializer.",
+         "Keep only parameters and module-level constants in the arm; pass locals as parameters."),
+    ),
+    Fine(
+        229, 2, r"效应 .+ 少臂|不属于效应|效应 .+ 没有操作|无法唯一归到某个效应"
+                r"|的效应没有声明|处理器处理的效应 .+ 没有声明",
+        "处理器 / 效应里缺了声明",
+        "a handler or effect reference is missing a declaration",
+        "处理器要覆盖效应声明的**每个**操作；臂的操作名要属于那个效应；"
+        "`perform` 的效应要先声明，未限定的 `perform op()` 还要求这个操作名**只属于**"
+        "一个效应。",
+        "A handler must cover every operation the effect declares; an arm's operation must "
+        "belong to that effect; a `perform` effect must be declared, and an unqualified "
+        "`perform op()` requires the operation name to belong to exactly one effect.",
+        ("补齐缺失的臂（每个操作一条）。",
+         "检查臂 / `perform` 里的操作名拼写与所属效应。",
+         "未限定的 `perform op()` 有歧义：写成 `perform E.op()`。"),
+        ("Add the missing arms (one per operation).",
+         "Check the operation name and its effect in the arm / `perform`.",
+         "If an unqualified `perform op()` is ambiguous, write `perform E.op()`."),
+    ),
+    Fine(
+        230, 13, r"有重复的臂",
+        "同一个操作有两条臂",
+        "one operation has two arms",
+        "同一个效应操作在一个处理器里只能有一条臂。",
+        "An effect operation may have only one arm in a handler.",
+        ("删掉重复的那条臂。",
+         "两条都要处理：在一个臂里合并逻辑。",
+         "确实要两套语义：改成两个效应。"),
+        ("Delete the duplicate arm.",
+         "If both are needed, merge the logic into one arm.",
+         "For two behaviors, use two effects."),
+    ),
+    Fine(
+        231, 1, r"个参数，声明是|要 \d+ 个实参|的值是 `\(\)`，不能绑给",
+        "效应操作的实参 / 返回值不符",
+        "an effect operation's arguments or result do not match",
+        "臂的形参个数要与 `effect` 里的声明一致，`perform` 的实参个数也一样；"
+        "返回 `()` 的 `perform` 没有值可以绑定。",
+        "The arm's parameter count must match the `effect` declaration, and so must the "
+        "`perform` argument count; a `perform` returning `()` has no value to bind.",
+        ("按声明补齐 / 删掉实参。",
+         "返回 `()` 的 `perform` 单独写成一条语句。",
+         "要那个值：把操作声明的返回类型改成实际类型。"),
+        ("Match the declared parameter count.",
+         "Write a unit-returning `perform` as a statement of its own.",
+         "If you need the value, change the operation's declared return type."),
     ),
 )
 

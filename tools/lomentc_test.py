@@ -7498,8 +7498,8 @@ def test_effect_row_names_must_be_declared_and_unique():
 
 
 @test
-def test_perform_parses_then_refuses_as_e023():
-    """`perform` 解析得到（AST 里有节点），检查器以 E023 点名拒 —— 不是 Python 栈。"""
+def test_perform_parses_and_needs_a_lexical_handler():
+    """`perform` 解析得到 AST；A3a 只认被**同一函数**里 `handle` 覆盖的那一片。"""
     src = _EFF_BASE + (
         "effect Log { fn write(v: u32) -> (); }\n\n"
         "fn run(x: u32) -> u32 effects Log {\n"
@@ -7508,32 +7508,72 @@ def test_perform_parses_then_refuses_as_e023():
     m = lomentc.Parser(lomc.lex(src), src).parse()
     assert m.effect_runtime and m.effect_runtime[0][0] == "perform", m.effect_runtime
     e = errs(src)
-    assert e and all(loment_diag.family(loment_diag.classify(x)[0]) == "E023" for x in e), e
-    assert any("perform" in x for x in e), e
+    assert e and any("没有被同一函数里词法上的" in x for x in e), e
 
 
 @test
-def test_handle_and_resume_parse_then_refuse_as_e023():
-    """`handle` / `resume` 同样：先有 AST，再由检查器点名拒（`docs/341` §11 A3）。"""
+def test_tail_resumptive_handle_lowers_to_plain_statements():
+    """A3a：尾续 `handle` 内联成普通语句，检查/发射都看不见效应节点（`docs/341` §7.3）。"""
     src = _EFF_BASE + (
-        "effect Log { fn write(v: u32) -> (); }\n\n"
-        "fn run(x: u32) -> u32 {\n"
+        "effect Log { fn get() -> u32; }\n\n"
+        "fn run() -> u32 {\n"
         "    let n: u32 = handle Log {\n"
-        "        let a: u32 = perform Log.write(x);\n"
+        "        let a: u32 = perform Log.get();\n"
         "        a + 1\n"
         "    } with {\n"
-        "        write(v) => { resume(v + 1); }\n"
+        "        get() => { resume(41); }\n"
         "    };\n"
         "    return n;\n}\n")
-    m = lomentc.Parser(lomc.lex(src), src).parse()
-    kinds = {k for k, _l, _c in m.effect_runtime}
-    assert kinds == {"perform", "handle", "resume"}, m.effect_runtime
-    let = m.funcs[0].body[0]
-    assert isinstance(let.expr, lomentc.Handle), let
-    assert let.expr.arms[0].op == "write" and let.expr.arms[0].params == ["v"]
-    e = errs(src)
-    assert len(e) == 3 and all(
-        loment_diag.family(loment_diag.classify(x)[0]) == "E023" for x in e), e
+    plain = _EFF_BASE + (
+        "fn run() -> u32 {\n"
+        "    let n: u32;\n"
+        "    let a: u32;\n"
+        "    let __eff_r1: u32 = 41;\n"
+        "    a = __eff_r1;\n"
+        "    n = a + 1;\n"
+        "    return n;\n}\n")
+    lomentc._EFF_TMP[0] = 0            # 临时名是确定的：这一条按名字比 IR
+    a, b = parse(src), parse(plain)
+    assert lomentc.check(a) == [], lomentc.check(a)
+    assert lomentc.check(b) == [], lomentc.check(b)
+    def has_eff(o):
+        return any(lomentc._contains_node(o, c)
+                   for c in (lomentc.Handle, lomentc.Perform, lomentc.Resume))
+    assert not has_eff(a.funcs[-1].body), a.funcs[-1].body
+    assert lomentc.emit_llvm(a, ROOT, []) == lomentc.emit_llvm(b, ROOT, [])
+
+
+@test
+def test_a3a_rejects_captures_and_non_tail_arms():
+    """A3a 的三条边界：闭臂、尾续、臂里平铺（`docs/341` §10.7）。"""
+    cap = _EFF_BASE + (
+        "effect Log { fn get() -> u32; }\n\n"
+        "fn run() -> u32 {\n"
+        "    let base: u32 = 7;\n"
+        "    let n: u32 = handle Log {\n"
+        "        let a: u32 = perform Log.get();\n"
+        "        a\n"
+        "    } with { get() => { resume(base); } };\n"
+        "    return n;\n}\n")
+    assert any("A3a 的臂是闭的" in x for x in errs(cap)), errs(cap)
+    two = _EFF_BASE + (
+        "effect Log { fn get() -> u32; }\n\n"
+        "fn run() -> u32 {\n"
+        "    let n: u32 = handle Log {\n"
+        "        perform Log.get();\n"
+        "        0\n"
+        "    } with { get() => { resume(1); resume(2); } };\n"
+        "    return n;\n}\n")
+    assert errs(two) and any("恰好一次" in x for x in errs(two)), errs(two)
+    missing = _EFF_BASE + (
+        "effect Log { fn get() -> u32; fn put() -> (); }\n\n"
+        "fn run() -> u32 {\n"
+        "    let n: u32 = handle Log {\n"
+        "        let a: u32 = perform Log.get();\n"
+        "        a\n"
+        "    } with { get() => { resume(1); } };\n"
+        "    return n;\n}\n")
+    assert any("少臂" in x for x in errs(missing)), errs(missing)
 
 
 @test

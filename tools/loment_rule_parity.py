@@ -84,7 +84,11 @@ import loment_p8_test as H  # noqa: E402  # 复用已验过的构建/运行夹�
 #
 # 2026-11-12 第九维 `fp`（`docs/348`）：八条（函数值 / 闭包 / 间接调用那三组）。
 # 与效应那批合流后 **149/149**。
-BUDGET = 149
+#
+# 2026-11-17 A3a：`effects-runtime-perform` 挪进 `_AHEAD`（参考侧领先自举侧），
+# 预算 149 -> 148。这一条**不是**被删掉：`_AHEAD` 里仍然逐条跑、逐条断言
+# （自举侧还是 E0217、参考侧不再是）。A3b 把它挪回来，预算跟着回去。
+BUDGET = 148
 
 # --------------------------------------------------------------------------- 案例表
 #
@@ -525,9 +529,6 @@ _CASES: list[tuple[str, str]] = [
     ("effects-off-keyword",
      "module m\n\neffect Log {\n    fn write(v: u32) -> ();\n}\n\n"
      "fn f() -> u32 {\n    return 0;\n}\n"),
-    ("effects-runtime-perform",
-     "module m\nchoose lspe_effects_true\n\neffect Log {\n    fn write(v: u32) -> ();\n}\n\n"
-     "fn f(x: u32) -> u32 {\n    let y: u32 = perform Log.write(x);\n    return y;\n}\n"),
     ("effects-row-unknown",
      "module m\nchoose lspe_effects_true\n\n"
      "fn f(x: u32) -> u32 effects Nope {\n    return x;\n}\n"),
@@ -542,6 +543,17 @@ _CASES: list[tuple[str, str]] = [
      "module m\nchoose lspe_effects_true\n\neffect Log {\n    fn write(v: u32) -> ();\n}\n\n"
      "extern fn c_puts(p: ptr) -> i32 effects Log;\n"),
 
+]
+
+#: **参考实现领先于自举侧**的那些规则。A3a（`docs/341` §7.3）把参考侧的有效 `perform`
+#: 从 E0217 换成了真正的语义（内联），自举侧要等 A3b 才跟上。这几条**仍然跑**：
+#: 自举侧必须还是 E0217，参考侧必须不再是 —— 一侧悄悄变了就红。
+#: 它们不计进 `EQUAL` 预算；A3b 把它们挪回 `_CASES`。
+_AHEAD: list[tuple[str, str, int]] = [
+    ("effects-runtime-perform",
+     "module m\nchoose lspe_effects_true\n\neffect Log {\n    fn write(v: u32) -> ();\n}\n\n"
+     "fn f(x: u32) -> u32 {\n    let y: u32 = perform Log.write(x);\n    return y;\n}\n",
+     217),
 ]
 
 
@@ -602,6 +614,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     counts: dict[str, int] = {}
     gaps: list[tuple[str, str]] = []
+    ahead_bad = 0
     with tempfile.TemporaryDirectory() as td:
         exe = H._build_checker(td)
         for rid, src in cases:
@@ -613,6 +626,14 @@ def main(argv: list[str] | None = None) -> int:
                 gaps.append((rid, det))
             if not gaps_only or st != "EQUAL":
                 print(f"  {st:8s} {rid:28s} {det}")
+        # 参考实现领先的那几条：两侧的形状必须各自**仍然**成立（见 `_AHEAD`）。
+        for rid, src, code in _AHEAD:
+            _st, det, py, lo = _report(rid, src, exe, td)
+            if set(lo) != {code} or code in set(py):
+                ahead_bad += 1
+                gaps.append((rid, f"AHEAD 关系变了（自举侧应只剩 {code}、参考侧不再有）: {det}"))
+            if not gaps_only:
+                print(f"  {'AHEAD':8s} {rid:28s} {det}")
     total = sum(counts.values())
     eq = counts.get("EQUAL", 0)
     extra = counts.get("EXTRA", 0)
@@ -629,8 +650,9 @@ def main(argv: list[str] | None = None) -> int:
     if only is not None:
         return 0 if eq == 1 else 1
     bad: list[str] = []
-    if extra or drift or nopy:
-        bad.append(f"假阳性 {extra} / 口径漂移 {drift} / 探针失效 {nopy} (必须为 0)")
+    if extra or drift or nopy or ahead_bad:
+        bad.append(f"假阳性 {extra} / 口径漂移 {drift} / 探针失效 {nopy} / "
+                   f"AHEAD 关系变了 {ahead_bad} (必须为 0)")
     if eq < BUDGET:
         bad.append(f"等价规则 {eq} < 预算 {BUDGET} (回退; 补完一批才把 BUDGET 往上调)")
     if bad:

@@ -26,7 +26,7 @@ def build(*, sites: list[dict], state: str, set_by: str, level: int,
           lspc_mode: str | None = None, previous: dict | None = None,
           sidecar: bool = False, twin: dict | None = None,
           side_sets: dict[str, set[str]] | None = None,
-          cache=None, aicheck: bool = False) -> dict:
+          cache=None, aicheck: bool = False, plan=None) -> dict:
     """返回 Potato v16 的 `lspe` 台账。
 
     * `sites` 是加载期算出的站点；`lspe_close_admin` 下**关审计** → 计数全零，
@@ -168,6 +168,10 @@ def build(*, sites: list[dict], state: str, set_by: str, level: int,
     for e in asked.get("errors", []):
         problems.append({"code": e.get("code", "E036"), "message": e.get("message", "")})
     ledger["_problems"] = problems
+    # 调度计划（`docs/344` V1）：`_` 开头，`public()` 会剥掉 —— 它给 CLI/LSPC
+    # 读，不改变 Potato 产物。
+    if plan is not None:
+        ledger["_plan"] = plan.to_dict() if hasattr(plan, "to_dict") else plan
     ledger["_questions"] = asked["questions"]
     ledger["_deferred"] = asked["deferred"]
     ledger["_refused"] = asked["refused"]

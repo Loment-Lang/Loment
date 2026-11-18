@@ -11436,6 +11436,7 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None,
         budget=getattr(mod, "lspe_budget", None),
         depth=getattr(mod, "lspe_depth", None),
         aicheck=(getattr(mod, "slots", {}) or {}).get("aicheck") == "true",
+        plan=getattr(mod, "lspe_plan", None),
         sidecar=sidecar,
         cache=cache,
     )
@@ -16903,8 +16904,14 @@ def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3,
     # LMS 的 g1 内联界检查也是站点（`#1021`）：档位从**开关表**读（预扫已按档铺过
     # 初值），与发射器同一个读法。
     _lms_on = frozenset(n for n in LMS_TOGGLES if _lms_level(mod, n))
+    # `docs/344` V0-V3：先给这一个单元算调度计划，再把计划交给普查。计划只决定
+    # 哪些**一定没有站点**的阶段不跑；站点集合与顺序不变。计划以 `_plan` 进台账
+    # 内部字段（`public()` 会剥掉），所以 Potato 产物逐字节不变。
+    mod.lspe_plan = lspe.plan_for_tokens(
+        tt, mod.name, dims=effective_dims(mod), level=lspe_level,
+        lms=_lms_on, slots=getattr(mod, "slots", {}))
     mod.lspe_sites, mod.lspe_unsourced_lines, mod.lspe_passes = lspe.census(
-        tt, mod.name, lms=_lms_on)
+        tt, mod.name, lms=_lms_on, plan=mod.lspe_plan)
     # **A2c：E11 的效应站点进台账**（`docs/341` §11）。只在 `lspe_effects_true` 时
     # 挂上；默认关时一行都不加，旧产物的 `lspe` 块逐字节不变。
     # 站点形状与报告面同一个函数产出 —— 不另写一份分析（两份必然漂）。

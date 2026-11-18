@@ -1538,6 +1538,182 @@ def test_effects_cli_is_a_report_not_a_verdict():
         assert r3.returncode == 1, (r3.returncode, r3.stdout, r3.stderr)
 
 
+@test
+def test_framework_registry_covers_every_engine_in_fixed_order():
+    """V0：描述符覆盖 E1–E11，登记顺序按 `(phase, id)`，不靠哈希序。"""
+    host = lspe.default_host()
+    ids = [c.desc.id for c in host.checker.checkers()]
+    need = {"P0Producer", "E1Constant", "E2Typed", "E2bBounds", "E3LocalFlow",
+            "E4Interproc", "E5GlobalInvariant", "E6Substitution", "E7Differential",
+            "E8Falsification", "E9Domain", "E10Loans", "E11Effects", "A1Advisory"}
+    assert set(ids) == need, sorted(ids)
+    assert ids == sorted(ids, key=lambda x: next(
+        (c.desc.phase, c.desc.id) for c in host.checker.checkers()
+        if c.desc.id == x))
+    for c in host.checker.checkers():
+        assert c.desc.role in lspe.ROLES, c.desc
+    assert lspe.LSPE_SDK_VERSION == "lspe-sdk/0"
+
+
+@test
+def test_plan_is_deterministic_and_hash_is_content_addressed():
+    toks = lomc.lex("module m\nfn f(a: [u32; 4], i: u32) -> u32 { "
+                    "guard blk(i); return a[i]; }\n")
+    a = lspe.plan_for_tokens(toks, "m", dims={"lifetime": "lifetime_auto"},
+                             lms={"lms_guard"})
+    b = lspe.plan_for_tokens(toks, "m", dims={"lifetime": "lifetime_auto"},
+                             lms={"lms_guard"})
+    assert a == b, (a, b)
+    assert a.plan_hash == b.plan_hash and a.facts_hash == b.facts_hash
+    c = lspe.plan_for_tokens(toks, "m", dims={"lifetime": "lifetime_no"},
+                             lms={"lms_guard"})
+    assert c.plan_hash != a.plan_hash, "维度不同，计划哈希却相同"
+
+
+@test
+def test_scheduler_skips_with_reasons_and_never_skips_mandatory():
+    """V1：跳过必须有原因；E6 与 InBounds 这类强制集永远在 run 里。"""
+    facts = lspe.UnitFacts()
+    plan = lspe.default_host().plan(facts)
+    assert "E1Constant" not in plan.run
+    assert plan.skip_reason("E1Constant") == "not_applicable"
+    assert plan.skip_reason("A1Advisory") == "profile"
+    assert plan.skip_reason("E8Falsification") == "no_probe"
+    assert "E6Substitution" in plan.run, "强制检查被跳过了"
+    assert plan.skip_reason("E6Substitution") is None
+    assert "E2bBounds" in plan.run, "InBounds 强制集被跳过了"
+    assert lspe.plan_lines(plan)[0].startswith("[LSPE] plan ")
+
+
+@test
+def test_differential_skips_when_the_twin_is_missing():
+    facts = lspe.UnitFacts(twin_available=False)
+    plan = lspe.default_host().plan(facts)
+    assert plan.skip_reason("E7Differential") == "twin_missing"
+    assert "E7Differential" not in plan.run
+
+
+@test
+def test_skipped_checker_is_not_called_and_cannot_contribute_a_claim():
+    called: list[str] = []
+
+    def never(ctx):
+        called.append("E1Constant")
+        return []
+
+    facts = lspe.UnitFacts()
+    host = lspe.default_host()
+    ctx = lspe.Ctx([], "m", facts, engines={"E1Constant": never})
+    result = host.run(ctx)
+    assert called == [], "被跳过的检查器仍然被调用了"
+    assert not result.claims
+    assert result.plan.skip_reason("E1Constant") == "not_applicable"
+
+
+@test
+def test_advisory_can_only_ask_and_its_claims_are_rejected():
+    good = lspe.PluginChecker(
+        lspe.EngineDesc("XA1", 2, "Advisory", triggers=("advisory",)),
+        lambda ctx: [lspe.AdvisoryQuestion("Q014", "怀疑")],
+        plugin_id="x", plugin_version=1)
+    bad = lspe.PluginChecker(
+        lspe.EngineDesc("XA2", 2, "Advisory", triggers=("advisory",)),
+        lambda ctx: [lspe.Claim("s1", "InBounds",
+                                (lspe.EvidenceNode("Syntactic", "x"),))],
+        plugin_id="x", plugin_version=1)
+    facts = lspe.UnitFacts(flags=frozenset({"advisory"}))
+    ctx = lspe.Ctx([], "m", facts)
+    ok = lspe.LspeHost((good,)).run(ctx)
+    assert len(ok.questions) == 1 and not ok.errors, ok
+    no = lspe.LspeHost((bad,)).run(ctx)
+    assert any(e["code"] == "E_FRAMEWORK_ADVISORY_CLAIM" for e in no.errors), no.errors
+
+
+@test
+def test_evidence_plugin_needs_an_opt_in_obligation():
+    """F：义务没接受 External/Plugin 时，插件证据被拒；求解器仍是裁决者。"""
+    assert not lspe.evidence_allowed("InBounds")
+    checker = lspe.PluginChecker(
+        lspe.EngineDesc("XE1", 2, "Evidence",
+                        obligations=("InBounds",), triggers=("calls",)),
+        lambda ctx: [lspe.Claim("s1", "InBounds",
+                                (lspe.EvidenceNode("Typed", "plugin"),))],
+        plugin_id="demo", plugin_version=1, plugin_hash="h")
+    facts = lspe.UnitFacts(flags=frozenset({"calls"}))
+    result = lspe.LspeHost((checker,)).run(lspe.Ctx([], "m", facts))
+    assert any(e["code"] == "E_FRAMEWORK_PLUGIN_NOT_OPT_IN"
+               for e in result.errors), result.errors
+
+
+@test
+def test_plan_reaches_the_ledger_as_an_internal_field_only():
+    p = lspe.plan_for_tokens(lomc.lex("module m\n"), "m")
+    lp = lspe.build_ledger(sites=[], state="lspe_open_admin", set_by="default",
+                           level=3, toks=[], unit="m", plan=p)
+    assert lp["_plan"]["plan_hash"] == p.plan_hash
+    assert "_plan" not in lspe.public(lp), "调度计划不能进 Potato 产物"
+
+
+@test
+def test_census_with_a_plan_runs_only_the_planned_stages():
+    src = ("module m\n"
+           "capability blk : disk[0..3]\n"
+           "fn f(a: [u32; 4], i: u32) -> u32 {\n"
+           "    guard blk(i);\n"
+           "    return a[i];\n"
+           "}\n")
+    toks = lomc.lex(src)
+    p = lspe.plan_for_tokens(toks, "m", dims={"lifetime": "lifetime_auto"},
+                             lms={"lms_guard"})
+    full, ufull, _ = lspe.census(toks, "m", lms={"lms_guard"})
+    planned, uplanned, _ = lspe.census(toks, "m", lms={"lms_guard"}, plan=p)
+    assert (planned, uplanned) == (full, ufull), "计划改变了站点集合"
+    empty = lspe.Plan((), (), (), 0, 0)
+    none, unone, _ = lspe.census(toks, "m", lms={"lms_guard"}, plan=empty)
+    assert none == [] and unone == [], "空计划仍然跑了阶段"
+
+
+@test
+def test_registry_capacity_and_duplicate_ids_fail_loudly():
+    r = lspe.CheckerRegistry()
+    for i in range(r.MAX_CHECKERS):
+        r.register(lspe.PluginChecker(
+            lspe.EngineDesc(f"X{i:02d}", 2, "Evidence"),
+            lambda ctx: [], plugin_id="x", plugin_version=1))
+    try:
+        r.register(lspe.PluginChecker(
+            lspe.EngineDesc("X99", 2, "Evidence"),
+            lambda ctx: [], plugin_id="x", plugin_version=1))
+    except ValueError as e:
+        assert "超过" in str(e), e
+    else:
+        raise AssertionError("65 个检查器没有点名拒绝")
+    r2 = lspe.CheckerRegistry()
+    dup = lspe.PluginChecker(lspe.EngineDesc("X00", 2, "Evidence"),
+                             lambda ctx: [], plugin_id="x", plugin_version=1)
+    r2.register(dup)
+    try:
+        r2.register(dup)
+    except ValueError as e:
+        assert "重复" in str(e), e
+    else:
+        raise AssertionError("重复 id 没有拒绝")
+
+
+@test
+def test_engine_budget_exhaustion_is_q005_and_never_silent():
+    def burn(ctx):
+        assert not ctx.spend(999999), "超预算的 spend 没有返回 False"
+        return []
+
+    checker = lspe.PluginChecker(
+        lspe.EngineDesc("XB1", 2, "Advisory", triggers=("calls",), budget=4),
+        burn, plugin_id="x", plugin_version=1)
+    facts = lspe.UnitFacts(flags=frozenset({"calls"}))
+    result = lspe.LspeHost((checker,)).run(lspe.Ctx([], "m", facts))
+    assert any(q.code == "Q005" for q in result.questions), result.questions
+
+
 def main() -> int:
     return loment_suite.run([fn for _name, fn in TESTS], "lspe_test")
 

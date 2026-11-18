@@ -218,6 +218,7 @@ class Program:
     funcs: dict
     choices: list
     structs: dict = field(default_factory=dict)
+    enums: dict = field(default_factory=dict)
 
 
 class Parser:
@@ -225,6 +226,7 @@ class Parser:
         self.t = toks
         self.i = 0
         self.structs: dict[str, list[tuple[str, Ty]]] = {}
+        self.enums: dict[str, list[tuple[str, "Ty | None"]]] = {}
 
     def peek(self) -> Tok:
         return self.t[self.i]
@@ -290,6 +292,8 @@ class Parser:
             return T_STR
         if name in self.structs:
             return Ty("struct", sname=name)
+        if name in self.enums:
+            return Ty("enum", sname=name)
         raise SpecRefusal(f"{name}：第一版只认整数 / bool / str / 数组 / 引用（docs/349）")
 
     # ---- 顶层
@@ -324,6 +328,22 @@ class Parser:
                 consts[name] = (t, int(k.value))
                 continue
             self.accept("pub")
+            if self.accept("enum"):
+                ename = self.ident()
+                self.expect("{")
+                variants: list[tuple[str, "Ty | None"]] = []
+                while not self.at("}"):
+                    vname = self.ident()
+                    pty = None
+                    if self.accept("("):
+                        pty = self.ty()
+                        self.expect(")")
+                    variants.append((vname, pty))
+                    if not self.accept(","):
+                        break
+                self.expect("}")
+                self.enums[ename] = variants
+                continue
             if self.accept("struct"):
                 sname = self.ident()
                 self.expect("{")
@@ -344,7 +364,7 @@ class Parser:
             k = self.peek()
             raise SpecRefusal(f"第 {k.line} 行: 顶层只认 choose / module / const / fn，"
                               f"得到 {k.text!r}（第一版子集见 docs/349）")
-        return Program(module, consts, funcs, choices, dict(self.structs))
+        return Program(module, consts, funcs, choices, dict(self.structs), dict(self.enums))
 
     def func(self, module: str) -> Func:
         line = self.peek().line
@@ -410,6 +430,28 @@ class Parser:
         if self.accept("continue"):
             self.expect(";")
             return Node("continue", k.line)
+        if self.accept("match"):
+            subj = self.expr()
+            self.expect("{")
+            arms: list[tuple[str, str, Node]] = []
+            while not self.at("}"):
+                if self.accept("_"):
+                    vn, bind = "", ""
+                else:
+                    ename = self.ident()
+                    self.expect("::")
+                    vn = self.ident()
+                    bind = ""
+                    if self.accept("("):
+                        bind = self.ident()
+                        self.expect(")")
+                    if ename not in self.enums:
+                        raise SpecRefusal(f"第 {k.line} 行: 不认识的枚举 {ename!r}（E008）", "match")
+                self.expect("=>")
+                body = self.block()
+                arms.append((vn, bind, body))
+            self.expect("}")
+            return Node("match", k.line, subj, items=arms)
         if self.accept("for"):
             name = self.ident()
             self.expect("in")
@@ -494,6 +536,18 @@ class Parser:
             self.next()
             return Node("str", k.line, bytes(k.value))
         if k.kind == "ident":
+            if self.i + 1 < len(self.t) and self.t[self.i + 1].kind == "punct" and self.t[self.i + 1].text == "::":
+                ename = k.text
+                self.next()
+                self.expect("::")
+                vname = self.ident()
+                payload = None
+                if self.accept("("):
+                    payload = self.expr()
+                    self.expect(")")
+                if ename not in self.enums:
+                    raise SpecRefusal(f"第 {k.line} 行: 不认识的枚举 {ename!r}（E008）", "enumval")
+                return Node("enumval", k.line, ename, vname, payload)
             if k.text in self.structs and self.t[self.i + 1].kind == "punct"                     and self.t[self.i + 1].text == "{":
                 self.next()
                 self.expect("{")
@@ -588,6 +642,7 @@ class Interp:
     def __init__(self, prog: Program):
         self.p = prog
         self.structs = prog.structs
+        self.enums = prog.enums
         self.out = bytearray()
         self.consts = {n: Val(t, _wrap(v, t)) for n, (t, v) in prog.consts.items()}
 
@@ -684,6 +739,25 @@ class Interp:
                 if fname not in dict(fields):
                     raise SpecRefusal(f"第 {e.line} 行: 不认识的字段 {fname!r}（E015）")
             return Val(want, out)
+        if k == "enumval":
+            variants = self.enums.get(e.a)
+            if variants is None:
+                raise SpecRefusal(f"第 {e.line} 行: 不认识的枚举 {e.a!r}（E008）", "enumval")
+            idx = None
+            for vi, (vn, pty) in enumerate(variants):
+                if vn == e.b:
+                    idx = vi
+                    break
+            if idx is None:
+                raise SpecRefusal(f"第 {e.line} 行: 枚举没有变体 {e.b!r}（E008）", "enumval")
+            _vn, pty = variants[idx]
+            if pty is None:
+                if e.c is not None:
+                    raise SpecRefusal(f"第 {e.line} 行: 这个变体不带载荷（§13.1）", "enumval")
+                return Val(Ty("enum", sname=e.a), (e.b, None))
+            if e.c is None:
+                raise SpecRefusal(f"第 {e.line} 行: 这个变体要一个载荷（§13.1）", "enumval")
+            return Val(Ty("enum", sname=e.a), (e.b, self.eval(e.c, env, pty)))
         if k == "field":
             base = self.eval(e.a, env)
             if base.ty.kind != "struct":
@@ -931,6 +1005,25 @@ class Interp:
                     return
                 except Continue:
                     continue
+        if st.kind == "match":
+            subj = self.eval(st.a, env)
+            if subj.ty.kind != "enum":
+                raise SpecRefusal(f"第 {st.line} 行: match 的主体要枚举（E008）", "match")
+            variant, payload = subj.data
+            for vn, bind, body in st.items:
+                if vn and vn != variant:
+                    continue
+                if bind and payload is not None:
+                    env[bind] = Slot(payload.ty, payload.data)
+                except_break = False
+                try:
+                    self.run_block(body, env)
+                except Break:
+                    except_break = True
+                if except_break:
+                    break
+                return
+            raise SpecRefusal(f"第 {st.line} 行: match 没有命中的分支（§13.2）", "match")
         if st.kind == "for_range":
             lo = self.eval(st.b, env)
             if lo.ty.kind != "int":

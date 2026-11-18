@@ -1,0 +1,29 @@
+// 通配分支 `_`（LLS §13.1 / §13.2）：载荷绑定 + 兜底。
+choose write grammar tur2026.2
+
+module ew
+choose runtime
+
+enum E {
+    A(u32),
+    B,
+}
+
+fn f(e: E) -> u32 {
+    match e {
+        E::A(v) => {
+            return v + 1;
+        }
+        _ => {
+            return 7;
+        }
+    }
+    return 0;
+}
+
+fn main() {
+    print_num(f(E::A(1)) as i64);
+    print(" ");
+    print_num(f(E::B) as i64);
+    print("\n");
+}

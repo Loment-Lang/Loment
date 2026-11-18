@@ -1,0 +1,20 @@
+// 结构体（LLS §10.1 / §12.9 / §11.4）：字面量、字段写（形参里）、按值传参。
+// 用退出码而不是 print：`p.x = 99` 在 2026.2 的读法里被拒（已知分歧，见 docs/349），
+// 所以这一份钉在默认版次上；可观察量是 syscall 的退出码（§18.3）。
+module st
+
+struct Point {
+    x: u32,
+    y: u32,
+}
+
+fn bump(p: Point) -> u32 {
+    p.x = 99;
+    return p.x + p.y;
+}
+
+fn main() {
+    let a: Point = Point { x: 1, y: 2 };
+    let s: u32 = bump(a);
+    syscall4(60, s as u64, 0, 0);
+}

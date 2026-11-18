@@ -172,6 +172,7 @@ class Ty:
     elem: "Ty | None" = None
     length: int = 0
     mut: bool = False
+    sname: str = ""
 
 
 T_BOOL = Ty("bool")
@@ -216,12 +217,14 @@ class Program:
     consts: dict
     funcs: dict
     choices: list
+    structs: dict = field(default_factory=dict)
 
 
 class Parser:
     def __init__(self, toks: list[Tok]):
         self.t = toks
         self.i = 0
+        self.structs: dict[str, list[tuple[str, Ty]]] = {}
 
     def peek(self) -> Tok:
         return self.t[self.i]
@@ -285,6 +288,8 @@ class Parser:
             return T_BOOL
         if name == "str":
             return T_STR
+        if name in self.structs:
+            return Ty("struct", sname=name)
         raise SpecRefusal(f"{name}：第一版只认整数 / bool / str / 数组 / 引用（docs/349）")
 
     # ---- 顶层
@@ -319,6 +324,19 @@ class Parser:
                 consts[name] = (t, int(k.value))
                 continue
             self.accept("pub")
+            if self.accept("struct"):
+                sname = self.ident()
+                self.expect("{")
+                fields: list[tuple[str, Ty]] = []
+                while not self.at("}"):
+                    fname = self.ident()
+                    self.expect(":")
+                    fields.append((fname, self.ty()))
+                    if not self.accept(","):
+                        break
+                self.expect("}")
+                self.structs[sname] = fields
+                continue
             if self.accept("fn"):
                 funcs_here = self.func(module)
                 funcs[funcs_here.name] = funcs_here
@@ -326,7 +344,7 @@ class Parser:
             k = self.peek()
             raise SpecRefusal(f"第 {k.line} 行: 顶层只认 choose / module / const / fn，"
                               f"得到 {k.text!r}（第一版子集见 docs/349）")
-        return Program(module, consts, funcs, choices)
+        return Program(module, consts, funcs, choices, dict(self.structs))
 
     def func(self, module: str) -> Func:
         line = self.peek().line
@@ -462,6 +480,9 @@ class Parser:
                 self.expect("]")
                 e = Node("index", e.line, e, idx)
                 continue
+            if self.accept("."):
+                e = Node("field", e.line, e, self.ident())
+                continue
             return e
 
     def primary(self) -> Node:
@@ -473,6 +494,18 @@ class Parser:
             self.next()
             return Node("str", k.line, bytes(k.value))
         if k.kind == "ident":
+            if k.text in self.structs and self.t[self.i + 1].kind == "punct"                     and self.t[self.i + 1].text == "{":
+                self.next()
+                self.expect("{")
+                inits: list[tuple[str, Node]] = []
+                while not self.at("}"):
+                    fname = self.ident()
+                    self.expect(":")
+                    inits.append((fname, self.expr()))
+                    if not self.accept(","):
+                        break
+                self.expect("}")
+                return Node("slit", k.line, k.text, items=inits)
             if k.text == "true":
                 self.next()
                 return Node("bool", k.line, True)
@@ -554,6 +587,7 @@ def _fit(v: int, t: Ty) -> bool:
 class Interp:
     def __init__(self, prog: Program):
         self.p = prog
+        self.structs = prog.structs
         self.out = bytearray()
         self.consts = {n: Val(t, _wrap(v, t)) for n, (t, v) in prog.consts.items()}
 
@@ -634,6 +668,30 @@ class Interp:
                            "语言的界外行为不在可观察语义内（§12.10）", "index_read")
             s = slots[i.data]
             return Val(s.ty, s.value)
+        if k == "slit":
+            if want is None or want.kind != "struct":
+                raise SpecRefusal(f"第 {e.line} 行: 结构体字面量需要期望类型（§10.6）", "slit")
+            fields = self.structs.get(e.a)
+            if fields is None:
+                raise SpecRefusal(f"第 {e.line} 行: 没有这个结构体 {e.a!r}")
+            given = dict(e.items)
+            out: dict[str, Val] = {}
+            for fname, fty in fields:
+                if fname not in given:
+                    raise SpecRefusal(f"第 {e.line} 行: 结构体字面量少了字段 {fname!r}（E015）")
+                out[fname] = self.eval(given[fname], env, fty)
+            for fname, _ in e.items:
+                if fname not in dict(fields):
+                    raise SpecRefusal(f"第 {e.line} 行: 不认识的字段 {fname!r}（E015）")
+            return Val(want, out)
+        if k == "field":
+            base = self.eval(e.a, env)
+            if base.ty.kind != "struct":
+                raise SpecRefusal(f"第 {e.line} 行: `.` 前面不是结构体（§12.2）")
+            fv = base.data.get(e.b)
+            if fv is None:
+                raise SpecRefusal(f"第 {e.line} 行: 结构体没有字段 {e.b!r}（E015）")
+            return Val(fv.ty, fv.data)
         if k == "call":
             return self.call(e, env)
         if k == "bin":
@@ -714,11 +772,15 @@ class Interp:
         frame: dict = {}
         for (pname, pty), arg in zip(fn.params, e.c):
             frame[pname] = self.bind_arg(arg, pty, env)
+        old_ret = getattr(self, "cur_ret", None)
+        self.cur_ret = fn.ret
         try:
             self.run_block(fn.body, frame)
             rv = Val(T_UNIT, None)
         except Return as r:
             rv = r.val if r.val is not None else Val(T_UNIT, None)
+        finally:
+            self.cur_ret = old_ret
         if fn.ret is None:
             return Val(T_UNIT, None)
         if rv.ty != fn.ret:
@@ -737,6 +799,8 @@ class Interp:
             raise SpecRefusal(f"第 {arg.line} 行: `&` 实参对不上形参类型 {ty_name(pty)}",
                               "ref_make")
         v = self.eval(arg, env, pty)
+        if pty.kind == "struct":
+            return Slot(pty, dict(v.data))
         if pty.kind == "slice":
             raise SpecRefusal(f"第 {arg.line} 行: `[T]` 形参要 `&a` 实参（§10.7）", "slice_arg")
         if v.ty != pty:
@@ -821,9 +885,21 @@ class Interp:
     def exec_stmt(self, st: Node, env: dict):
         if st.kind == "let":
             v = self.eval(st.c, env, st.b)
-            env[st.a] = Slot(st.b, v.data)
+            env[st.a] = Slot(st.b, dict(v.data) if isinstance(v.data, dict) else v.data)
             return
         if st.kind == "assign":
+            if st.a.kind == "field":
+                base = st.a.a
+                if base.kind != "name" or base.a not in env:
+                    raise SpecRefusal(f"第 {st.line} 行: 字段赋值只支持具名结构体（第一版）",
+                                      "assign")
+                slot0 = env[base.a]
+                if slot0.ty.kind != "struct":
+                    raise SpecRefusal(f"第 {st.line} 行: `.` 前面不是结构体（§12.2）")
+                fty = dict(self.structs[slot0.ty.sname])[st.a.b]
+                v = self.eval(st.b, env, fty)
+                slot0.value[st.a.b] = v
+                return
             v = self.eval(st.b, env, None)
             slot = self.lvalue(st.a, env)
             if slot.ty != v.ty:
@@ -890,7 +966,8 @@ class Interp:
         if st.kind == "continue":
             raise Continue()
         if st.kind == "return":
-            raise Return(self.eval(st.a, env) if st.a is not None else None)
+            want = getattr(self, "cur_ret", None)
+            raise Return(self.eval(st.a, env, want) if st.a is not None else None)
         if st.kind == "expr":
             self.eval(st.a, env)
             return

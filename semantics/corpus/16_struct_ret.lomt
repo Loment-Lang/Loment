@@ -1,0 +1,20 @@
+// 结构体作为返回值（LLS §10.1 / §12.9）：`mk()` 建一份、调用方按字段读。
+choose write grammar tur2026.2
+
+module str
+choose runtime
+
+struct Pair {
+    x: u32,
+    y: u32,
+}
+
+fn mk() -> Pair {
+    return Pair { x: 3, y: 4 };
+}
+
+fn main() {
+    let a: Pair = mk();
+    print_num((a.x * 10 + a.y) as i64);
+    print("\n");
+}

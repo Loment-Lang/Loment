@@ -1,6 +1,6 @@
 # 341 · 代数效应与效应处理器：把"向谁求助"变成可检查的行
 
-> 状态: **A0/A1 报告面 + A2a 参考前端 + A2b 自举镜像 + A2c Potato 台账已落地**（2026-11-17）· 上游: `docs/262`（LSPE）·
+> 状态: **A0/A1 报告面 + A2a 参考前端 + A2b 自举镜像 + A2c Potato 台账 + A3a 参考侧尾续处理器已落地**（2026-11-17）· 上游: `docs/262`（LSPE）·
 > `docs/306`–`308`（E9 域检查器）· `docs/317`（E10 借用检查器）· `docs/286`（六点一空间）·
 > `docs/219`（链接边界）· `standard/LLS.md` §21–§25
 > 一句话: 在 LSPE 里加**第十一个引擎**，把"这段代码会向谁求助"变成函数签名上的
@@ -268,9 +268,9 @@ effect Net {
 ## 5. 语法草案（未实装）
 
 > 仅为形状。A2a 起，**参考解析器**在 `choose lspe_effects_true` 打开时认这些拼写
-> （默认关，旧源一个字节都不变）；`perform` / `handle` / `resume` 目前只解析到 AST，
-> 运行期要到 A3。展示用 `rust` 围栏（`CLAUDE.md` 的显示约定）。报告入口是
-> `loment lspe effects FILE`，它直接读 token 流。
+> （默认关，旧源一个字节都不变）；A3a 起参考侧能编译 §7.7 那一小片（闭臂、尾续、
+> 语句位置），其余形状点名拒。自举侧仍拒到 A3b。展示用 `rust` 围栏（`CLAUDE.md`
+> 的显示约定）。报告入口是 `loment lspe effects FILE`，它直接读 token 流。
 
 ### 5.1 声明
 
@@ -471,6 +471,29 @@ effect MultiShot requires copy;   // 捕获集必须全部 Copy
 * 行写进产物元数据（Potato 的字段，A3 定名），链接期比较有限集合；
 * `lom/*.lom` 一个字节都不动 —— 这与 `docs/306` §10 的"第一阶段不需要动 L0"同形。
 
+### 7.7 A3a 的降级：内联，而不是运行期机制
+
+A3 的第一刀（2026-11-17）只做**参考侧**，语义取 §7.3 最窄的那一读法：
+
+| 维度 | A3a 的取值 |
+|---|---|
+| 处理器的作用域 | **词法**：`perform` 必须被同一函数里外层的 `handle` 覆盖 |
+| 续延 | **无**：每个臂恰好一次 `resume`，且在块尾（尾续） |
+| abort | 暂不支持（A3b） |
+| 捕获 | **闭臂**：臂只许引用形参与模块级名字，不捕获处理器外的局部（A3b） |
+| 位置 | `handle` 只作 `let` 初值；`perform` 只作整条语句或 `let` 初值 |
+| 臂的形状 | 平铺语句（`let` / 赋值 / 表达式），不钻进 if/while/match |
+
+降级就是**内联**：`perform E.op(a…)` 换成 `let p… = a…; <臂体>; let r = <resume
+的值>;`，`handle` 换成它的体。`resume(e)` 不是运行期对象，它就是"臂的值"。
+降级发生在 `check()` 里、`prepare()` **之前** —— 检查、单态化、两只发射器都看不见
+`Handle` / `Perform` / `Resume`。这与 `IfExpr` / `MatchExpr` 的反糖同一条路数。
+
+这条路径在 `no_runtime` + `gc_manual` 下可用：没有闭包、没有堆、没有证据记录。
+代价写在明面上：跨函数的 `perform`（需要证据向量）、abort 的非局部退出、臂对局部
+变量的捕获，都要 A3b/A4。**A3b 还要做自举侧的 token 级镜像**，在那之前自举编译器
+对任何 `perform` / `handle` / `resume` 仍报 E0217。
+
 ---
 
 ## 8. 接进 LSPE：E11
@@ -669,6 +692,20 @@ A2c 接上（见 §10.6）。
 `ledger.py` 同一条分界。容量超限是**点名的失败**（效应 64 / 函数 512 / 调用点 16384），
 不是静默截断。
 
+> **2026-11-17 更新（A3a）**：参考侧现在能编译尾续处理器，所以 `perform` / `handle` /
+> `resume` 三种站点也能进参考侧的台账；自举侧仍拒（E0217），A3b 之前两侧的效应源
+> 不可对拍。A2c 的孪生判据用的是不含运行期构造的夹具，不受影响。
+
+### 10.7 A3a 落地记录（2026-11-17，参考侧）
+
+| 内容 | 位置 | 判据 |
+|---|---|---|
+| 尾续处理器的降级（内联；无续延对象） | `tools/lomentc.py` 的 `_lower_effects` / `_eff_lower_stmts` | `test_tail_resumptive_handle_lowers_to_plain_statements` |
+| A3a 的边界逐条点名（闭臂 / 尾续 / 平铺 / 词法覆盖） | 同上；诊断落 `loment_diag.RULES`（E023 / E002 / E013 / E001） | `test_perform_parses_and_needs_a_lexical_handler`、`test_a3a_rejects_captures_and_non_tail_arms` |
+| **运行**判据：perform 的两种语句位置、参数绑定、resume 的值 | `loment_elf_test` 的 `test_a_tail_resumptive_handle_runs`（参考 IR + 两只链接器） | 程序算出 82 并打印；镜像产物逐字节相同 |
+| 规则对拍不再把 `perform` 当 E0217 | `loment_rule_parity` 的 `_AHEAD`（自举侧仍是 E0217，参考侧不再是） | 预算 149 -> 148，AHEAD 关系变了就红 |
+| **自举侧** | 未做（A3b）：仍报 E0217 | 对拍里那一条 AHEAD 就是它的提醒 |
+
 ---
 
 ## 11. 落地阶梯
@@ -682,7 +719,8 @@ A2c 接上（见 §10.6）。
 | **A2a**（已完成） | **参考前端**接受 `effect` / `effects` / `handle` / `perform` / `resume`，由构建旋钮 `choose lspe_effects_true` 打开（默认关）；声明与行擦除，运行期构造 E023 | 开关关时旧源逐字节不变；开时 AST 有节点、E023 点名 | 参考编译器可解析；IR 不变成 |
 | **A2b**（已完成） | **自举侧镜像**（`switches` / `checker` + 种子），并与参考逐字节对拍 | 同一份源两侧同判 | 两侧同语法面 |
 | **A2c**（已完成） | E11 站点进 Potato 台账（两侧同计数） | `test_lspe_effect_sites_match_on_both_implementations` | `lspe state` 列得出 |
-| **A3** | 尾续处理器的代码生成（两侧链接器）+ 行进产物元数据 | 正例跑通、反例仍拒 | `no_runtime` 下可用；链接期可查 |
+| **A3a**（已完成） | **参考侧**尾续处理器：闭臂、恰好一次尾 `resume`、词法处理器；内联降级（§7.7） | `test_a_tail_resumptive_handle_runs`（跑出 82）；反例点名拒 | `no_runtime` 下可用 |
+| **A3b** | 自举侧镜像 + 臂捕获 + abort + 行与产物元数据 | 同一份效应源两侧同产物 | 两侧同语义 |
 | **A4** | 一般处理器的 CPS + 捕获回收 | `no_gc` 反例 / `gc_auto` 正例 | Q022 有答案 |
 | **A5** | `MultiShot` + `Copy` 捕获集 | 多射反例在 A4 下红、A5 下按规则收/拒 | 默认仍是 one-shot |
 

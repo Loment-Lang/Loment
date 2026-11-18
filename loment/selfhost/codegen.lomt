@@ -5354,7 +5354,8 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
         }
         if tok_is(src, toks, j, "slice_len") {   // M3: 切片取长度 (数组用字面量长度)
             let k18: u32 = arg1(s, out, src, toks, j + 2, lvl);
-            let at: u32 = expr_type(s, src, toks, j + 2);
+            // `p: &[T; N]` 的解一层借用与下标访问同序（`docs/299` §3.4）。
+            let at: u32 = deref_tok(src, toks, expr_type(s, src, toks, j + 2));
             emit_str(s, out, "  ");
             if is_slice_tok(src, toks, at) == 1 {
                 let exs: u32 = new_temp(s, out);

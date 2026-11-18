@@ -3585,7 +3585,9 @@ fn chk_tex_atom_call(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             let at: u32 = chk_tex(src, t, syms, n, env, envc, er, tyt, p, oc);
             let wt: u32 = chk_builtin_arg(src, t, lo, k);
             if chk_tok_is(src, t, lo, "slice_len") {
-                if at != 0 && chk_ty_is_arr(tyt, at) == 0 && chk_ty_is_slc(tyt, at) == 0 {
+                // `p: &[T; N]` 与下标访问同一条：先自动解一层借用（`docs/299` §3.4）。
+                let seen: u32 = chk_ty_deref(tyt, at);
+                if seen != 0 && chk_ty_is_arr(tyt, seen) == 0 && chk_ty_is_slc(tyt, seen) == 0 {
                     chk_pub(src, t, oc, p, 47, lo);   // 不是数组或切片
                 }
             } else if chk_tok_is(src, t, lo, "print_num") {

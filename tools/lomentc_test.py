@@ -7781,6 +7781,64 @@ def test_class_c1_leaves_virtual_and_abstract_to_c2():
         raise AssertionError("class_off 仍然解析了 class 语法")
 
 
+@test
+def test_slice_len_takes_a_borrow_of_an_array():
+    """`p: &[u32; 2]` 的 `slice_len(p)` 是 2（#1555）。
+
+    `&[T; N]` 自从变成合法类型之后，下标 `p[0]` 已经自动解一层借用；`slice_len`
+    走同一条，否则同一个 `p` 能取元素、却量不了长度。
+    """
+    src = "module m\nfn n(p: &[u32; 2]) -> u32 { return slice_len(p); }\n"
+    assert errs(src) == [], errs(src)
+    ir = lomentc.emit_llvm(parse(src), ROOT, [])
+    assert "trunc i64 2 to i32" in ir, ir
+    # 解一层引用**不是**放宽类型检查：`&u32` 仍然不是数组/切片
+    bad = "module m\nfn n(p: &u32) -> u32 { return slice_len(p); }\n"
+    assert any("不是数组或切片" in x for x in errs(bad)), errs(bad)
+
+
+@test
+def test_slice_marker_binds_the_return_region():
+    """`-> &a [u32]` 在 `lifetime_manual` 里收，并且真的绑到 `a`（#1565）。
+
+    切片借用规范化成 `[u32]`，标记在类型串里放不下——它记在 `Func.ret_region`，
+    只喂函数摘要，不进布局（产物与不带标记的版本逐字节相同）。
+    """
+    head = "module m\nchoose lifetime_manual\n"
+    ok = head + ("fn pick(a: &[u32], b: &[u32]) -> &a [u32] { return a; }\n"
+                 "fn f(xs: &[u32], ys: &[u32]) -> [u32] { return pick(xs, ys); }\n")
+    assert errs(ok) == [], errs(ok)
+    # 绑定是真的：a 是局部时结果悬垂
+    dangling = head + (
+        "fn pick(a: &[u32], b: &[u32]) -> &a [u32] { return a; }\n"
+        "fn f() -> [u32] { let xs: [u32; 2] = [1, 2]; let ys: [u32; 2] = [3, 4];"
+        " return pick(&xs, &ys); }\n")
+    assert any("悬垂" in x for x in errs(dangling)), errs(dangling)
+    # auto 档仍拒：标记是 manual 的
+    auto = "module m\nfn pick(a: &[u32], b: &[u32]) -> &a [u32] { return a; }\n"
+    assert any("lifetime_auto" in x for x in errs(auto)), errs(auto)
+    # 指向非引用形参 -> E041
+    nonref = head + "fn pick(a: u32, b: &[u32]) -> &a [u32] { return b; }\n"
+    assert any("不是引用形参" in x for x in errs(nonref)), errs(nonref)
+    # 形参上的标记：`b: &a [u32]` 让 b 的来源跟着 a 走
+    param = head + (
+        "fn dup(a: &[u32], b: &a [u32]) -> [u32] { return b; }\n"
+        "fn f() -> [u32] { let xs: [u32; 2] = [1, 2]; return dup(&xs, &xs); }\n")
+    assert any("悬垂" in x for x in errs(param)), errs(param)
+    # 结构体字段不能带标记（切片也不行）：区域由构造处的来源决定
+    try:
+        parse(head + "struct S { f: &a [u32] }\n")
+    except lomentc.LomError as exc:
+        assert "字段" in exc.msg, exc.msg
+    else:
+        raise AssertionError("结构体字段上的切片标记被收下了")
+    # 标记不进产物：与不带标记的版本逐字节相同
+    plain = head + "fn pick(a: &[u32], b: &[u32]) -> [u32] { return a; }\n"
+    marked = head + "fn pick(a: &[u32], b: &[u32]) -> &a [u32] { return a; }\n"
+    assert (lomentc.emit_llvm(parse(plain), ROOT, [])
+            == lomentc.emit_llvm(parse(marked), ROOT, []))
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "lomentc_test")
 

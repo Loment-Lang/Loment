@@ -2590,6 +2590,106 @@ fn _start() {
 }
 
 
+_EFFECT_RUN_SRC: dict[str, tuple[str, bytes]] = {
+    "tail": (
+        """choose write grammar tur2026.2
+
+module effects_run
+choose lspe_effects_true
+choose runtime
+
+effect Log {
+    fn get() -> u32;
+    fn add(v: u32) -> u32;
+}
+
+fn _start() {
+    let n: u32 = handle Log {
+        let a: u32 = perform Log.get();
+        let b: u32 = perform Log.add(a);
+        a + b
+    } with {
+        get() => { resume(40); }
+        add(v) => { resume(v + 2); }
+    };
+    print_num(n as i64);
+    print("\\n");
+    syscall4(60, 0, 0, 0);
+}
+""",
+        f"{40 + (40 + 2)}\n".encode()),
+    # 同一个臂被**两个** perform 用，且臂的形参与调用方的局部**同名**：每个内联点
+    # 各自一份改名副本，实参不许被臂的改名表改掉。
+    "twice": (
+        """choose write grammar tur2026.2
+
+module effects_run_twice
+choose lspe_effects_true
+choose runtime
+
+effect Log {
+    fn add(v: u32) -> u32;
+}
+
+fn _start() {
+    let base: u32 = 5;
+    let n: u32 = handle Log {
+        let x: u32 = perform Log.add(base);
+        let y: u32 = perform Log.add(x);
+        x + y
+    } with {
+        add(base) => { resume(base + 1); }
+    };
+    print_num(n as i64);
+    print("\\n");
+    syscall4(60, 0, 0, 0);
+}
+""",
+        f"{(5 + 1) + ((5 + 1) + 1)}\n".encode()),
+}
+
+
+@test
+def test_a_tail_resumptive_handle_runs():
+    """A3a 的**运行**判据（`docs/341` §7.3）：尾续处理器跑出来的字节要对。
+
+    **Why**：降级是"把臂体内联到 perform 的位置"。两边一样的错（参数绑错、resume 的值
+    接错、语句次序错）时，编译判据照样全绿 —— 只有跑一遍能看见。期望值由 Python 按
+    程序语义独立算出（40 + (40 + 2)），不取编译器的任何输出。
+
+    **镜像也跑一遍**：降级之后就是普通 IR，过自举链接器的产物必须与参考逐字节相同。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    mir = _mirror()
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        for tag, (text, want) in sorted(_EFFECT_RUN_SRC.items()):
+            src = td / f"eff_{tag}.lomt"
+            src.write_text(text, encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"eff_{tag}.native"
+            nat.write_bytes(blob)
+            rc, out = _run_bin(nat, f"eff_{tag}", td, timeout=60)
+            assert rc == 0, f"[{tag}] 编译产物没跑通：rc={rc}，输出 {out!r}"
+            assert out == want, f"[{tag}] 输出不对：期望 {want!r}，得到 {out!r}"
+            llrepo = ROOT / "loment" / "build" / f"_eff_{tag}.ll"
+            elfrepo = ROOT / "loment" / "build" / f"_eff_{tag}.elf"
+            try:
+                llrepo.write_bytes(ll.read_bytes())
+                rcm, err = _mirror_run(mir, f"loment/build/_eff_{tag}.ll",
+                                       f"loment/build/_eff_{tag}.elf")
+                assert rcm == 0, f"[{tag}] 镜像退出 {rcm}: {err[-200:]}"
+                got = elfrepo.read_bytes()
+            finally:
+                llrepo.unlink(missing_ok=True)
+                elfrepo.unlink(missing_ok=True)
+            assert got == blob, f"[{tag}] 镜像与参考不同 ({len(got)}B vs {len(blob)}B)"
+    print(f"      {len(_EFFECT_RUN_SRC)} 个尾续处理器程序：跑出来的字节对，两只链接器产物相同")
+
+
 @test
 def test_a_closure_program_runs_through_both_linkers():
     """第九维 `fp`（`docs/348`）的**运行**判据：闭包程序跑出来的字节要对。

@@ -663,8 +663,8 @@ fn chk_bad_num_suffix(src: ptr, t: ptr, i: u32) -> bool {
 ///   0 = `mode`（`std` / `no_std`）；1 = `gc`（`gc_manual` / `gc_auto`）；
 ///   2 = `runtime`（`runtime` / `no_runtime`）；3 = `port`（`sealed` / `hosted`）；
 ///   4 = `vm`；5 = `lms`；6 = `lspe`；7 = `lifetime`（`docs/299`）；
-///   8 = `fp`（`docs/348`）；9 = 槽位；10 = **不是核心模式** —— 那是开关那一套
-///   （`docs/182` §1.3），这一层不管。
+///   8 = `fp`（`docs/348`）；9 = `flomtc`（`docs/350`）；10 = 槽位；
+///   11 = **不是核心模式** —— 那是开关那一套（`docs/182` §1.3），这一层不管。
 ///
 /// 与参考实现的 `CORE_DIM_OF` 是同一张表；加一维两边一起动。
 fn chk_core_dim(src: ptr, t: ptr, k: u32) -> u32 {
@@ -714,17 +714,23 @@ fn chk_core_dim(src: ptr, t: ptr, k: u32) -> u32 {
     if chk_tok_is(src, t, k, "fp") || chk_tok_is(src, t, k, "no_fp") {
         return 8;
     }
+    // 第十维（`docs/350`，用户 2026-11-18）：`flomtc`。**编译路径**开关 ——
+    // `flomtc_true` 选快路径，产物与 `flomtc_false` 逐字节相同，所以它不进 Potato
+    // 的顶层维度；这一层只认名字、判重复。
+    if chk_tok_is(src, t, k, "flomtc_false") || chk_tok_is(src, t, k, "flomtc_true") {
+        return 9;
+    }
     // 维度之后的**第二位置**（`docs/262` §10.7）：`<维>_<槽>_<值>`。
-    // 9 = 槽位 —— 它有自己的"每格一次"，**不**算进 `lspe` 那一维的重复计数。
+    // 10 = 槽位 —— 它有自己的"每格一次"，**不**算进 `lspe` 那一维的重复计数。
     if chk_tok_is(src, t, k, "lspe_aicheck_true")
             || chk_tok_is(src, t, k, "lspe_aicheck_false")
             || chk_tok_is(src, t, k, "lspe_effects_true")
             || chk_tok_is(src, t, k, "lspe_effects_false") {
-        return 9;
+        return 10;
     }
     // ⚠ **这一格是"不是核心词"的哨兵**。加一维就要把它往后挪一格 ——
     // `loment_rule_parity.py:70-72` 记着上一次忘挪（5→6）的症状。
-    return 9;
+    return 11;
 }
 
 /// `lgc` 的时长单位（`docs/309`）：`ns` / `us` / `ms` / `s` / `m`。与参考实现
@@ -897,6 +903,13 @@ fn chk_core_val(src: ptr, t: ptr, k: u32) -> u32 {
         return 1;
     }
     if chk_tok_is(src, t, k, "fp") {
+        return 2;
+    }
+    // 第十维（`docs/350`）：`flomtc` —— 1 = 默认 `flomtc_false`，2 = `flomtc_true`。
+    if chk_tok_is(src, t, k, "flomtc_false") {
+        return 1;
+    }
+    if chk_tok_is(src, t, k, "flomtc_true") {
         return 2;
     }
     return 0;
@@ -6959,6 +6972,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     let ln_vm: u32 = 0;
     let ln_lifetime: u32 = 0;
     let v_lifetime: u32 = 0;   // 0 = 没写；1 = no, 2 = auto, 3 = manual
+    let nch_flomtc: u32 = 0;    // 第十维（`docs/350`）：只数重复 —— 它没有冲突对。
     let nch_fp: u32 = 0;
     let ln_fp: u32 = 0;
     let v_fp: u32 = 0;         // 0 = 没写；1 = no_fp, 2 = fp
@@ -7197,6 +7211,12 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                     o = sym_pub(src, t, out, o, 159, i);
                 }
             } else if dim == 9 {
+                // 第十维（`docs/350`）：`flomtc`。只有重复要判 —— 它没有冲突对。
+                nch_flomtc = nch_flomtc + 1;
+                if nch_flomtc > 1 {
+                    o = sym_pub(src, t, out, o, 159, i);
+                }
+            } else if dim == 10 {
                 // 维度后的槽（`docs/262` §10.7）：与主取值**正交**，所以不和 `lspe`
                 // 共用一个计数；同一格写两次仍然没有答案。
                 if chk_tok_is(src, t, i + 1, "lspe_effects_true")

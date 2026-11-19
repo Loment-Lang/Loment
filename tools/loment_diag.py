@@ -131,7 +131,7 @@ RULES = [
              r"|generation 引用了未声明的能力|retire 引用了未声明的能力"
              r"|不能是 revision"
              r"|不能带空间|第二个实参|domain:for|child_of|couple|mutex|并行的几个域"
-             r"|revoke",
+             r"|revoke|sibling",
      "能力域非法", "在模块顶层声明 `capability name : space[lo..hi]`，并保证 lo ≤ hi。"),
     ("E005", r"使用了 excluded 的空间",
      "与出界声明冲突",
@@ -3156,6 +3156,22 @@ FINE: tuple[Fine, ...] = (
         ("Declare a new variable for the new value.",
          "Bring ownership back first (the value returned by value).",
          "If it should not have moved, borrow at that spot instead."),
+    ),
+    Fine(
+        236, 6, r"^变量 .+ 的 `&mut` 已经用掉一次",
+        "`&mut` 只能用掉一次",
+        "a stored `&mut` is used only once",
+        "这把 `&mut` 已经交给别处了（当实参传走、赋给别的绑定、或作为返回值）。"
+        "`&mut` 不是 Copy：再用一次就是同一处上的第二把独占借用。",
+        "This `&mut` already left (passed as an argument, assigned to another binding, or "
+        "returned). `&mut` is not Copy: a second use would be a second exclusive borrow of "
+        "the same place.",
+        ("要再用一次就显式重借：`g(&mut *r)`。",
+         "确实要用两次就取一份拷贝值，或改成共享借用 `&r`。",
+         "都不行就重排顺序：把两次使用错开成两段借用。"),
+        ("Reborrow explicitly when you need it again: `g(&mut *r)`.",
+         "If it really is used twice, take a copy at the first use, or borrow it shared: `&r`.",
+         "Otherwise reorder so the two uses do not overlap."),
     ),
     # ---------------------------------------------------------------- 借用族（E007）
     Fine(

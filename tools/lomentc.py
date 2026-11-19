@@ -2220,6 +2220,20 @@ class Mutex:
 
 
 @dataclass
+class Sibling:
+    """`sibling A, B;` —— 显式的兄弟边（`docs/315` §4.2 横向树）。
+
+    兄弟关系本来只由作用域隐含：同一个父下声明两个域，它们就是兄弟。写上这一句之后，
+    "这两个域**有意的**是同一层的兄弟"成了可读、可查的声明 —— 父必须是同一个（块域看
+    词法父，顶层能力看根），形状随各自声明。
+
+    运行期一条指令都不发：它只是把横向树的一条边说出来。
+    """
+    names: list
+    line: int
+
+
+@dataclass
 class Discharge:
     """`discharge cap(expr);` —— 结清一条 `reachable(k)` 义务（`docs/307` §5）。"""
     cap: str
@@ -3069,6 +3083,27 @@ def _resolve_domains(mod, cap_base: int | None = None) -> None:
                                     f"{names[j]}）—— 联动是同一位置上一起续期")
                     for d in ds[1:]:
                         uf_union(ds[0][0], d[0])
+                elif isinstance(s, Sibling):
+                    # 显式兄弟边（`docs/315` §4.2）：同一个父下的几个域。
+                    # 名字指向**本语句所在那一层的**直接子块（与声明顺序无关），或者
+                    # 顶层能力（它们的父都是根）。两者不能混 —— 混了就不同层。
+                    kids = {d.name for d in stmts
+                            if isinstance(d, DomainBlock) and d.name}
+                    caps = {c.name for c in mod.caps}
+                    as_kid = [n in kids for n in s.names]
+                    as_cap = [n in caps and n not in kids for n in s.names]
+                    if not (all(as_kid) or all(as_cap)):
+                        missing = [n for n, k, c in zip(s.names, as_kid, as_cap)
+                                   if not (k or c)]
+                        # 名字**在**作用域里、只是不在这一层（祖先 / 别处的兄弟）——
+                        # 那是"不同层"，不是"没声明"。
+                        if missing and find(stack, missing[0]) is None:
+                            raise LomError(s.line, 1,
+                                           f"`sibling` 引用了不在作用域里的域 {missing[0]}")
+                        raise LomError(
+                            s.line, 1,
+                            "`sibling` 的域不在同一个父下 —— 兄弟边只连同层的域"
+                            "（同一个 `domain` 块里的直接子域，或顶层能力）")
                 elif isinstance(s, Mutex):
                     ds = []
                     for n in s.names:
@@ -4963,6 +4998,12 @@ class Parser:
                 raise LomError(kw.line, 1,
                                f"`domain:for` 不能在 {CAP_KIND_NAME[CAP_KIND_ID[d.kind]]} 域上跑"
                                " —— 它的判决还要第二个实参")
+            if d.lo > d.hi:
+                # `docs/315` §7：空区间不跑，但"一次都不跑"几乎总是把形状写反了 ——
+                # 在写得出来的地方报，别留给运行期表现成"循环体没生效"。
+                raise LomError(kw.line, 1,
+                               f"`domain:for` 的域 {d.name or '形状'} 是空区间"
+                               f"（{d.lo} > {d.hi}）—— 它一次都不会跑")
         if len(doms) > 1:
             spans = {d.hi - d.lo for d in doms}
             if len(spans) != 1:
@@ -5252,14 +5293,19 @@ class Parser:
                 members.append(self.ident("域名"))
             self.expect("punct", ";")
             return Solid([name] + members, kw.line)
-        if t.val in ("couple", "mutex") and self.peek(1).kind == "ident"                 and self.peek(2).val in (",", ";"):
-            # 上下文关键字（`docs/315` §5）：`couple A, B;` / `mutex A, B;`。
-            # 单独一个叫 `couple` 的变量照旧是普通名字。
+        if t.val in ("couple", "mutex", "sibling") and self.peek(1).kind == "ident"                 and self.peek(2).val in (",", ";"):
+            # 上下文关键字（`docs/315` §5 / §4.2）：`couple A, B;` / `mutex A, B;` /
+            # `sibling A, B;`。单独一个同名变量照旧是普通名字。
             kw = self.next()
             names = [self.ident("域名")]
             while self.accept("punct", ","):
                 names.append(self.ident("域名"))
             self.expect("punct", ";")
+            if kw.val == "sibling":
+                if len(names) < 2:
+                    raise LomError(kw.line, 1,
+                                   "`sibling` 至少要两个域 —— 兄弟边是**两个**同层域之间的关系")
+                return Sibling(names, kw.line)
             return (Couple(names, kw.line) if kw.val == "couple"
                     else Mutex(names, kw.line))
         if t.val == "domain" and self._at_domain_loop():  # docs/315：域循环
@@ -11125,7 +11171,7 @@ def _stmts_rs(stmts: list, indent: int) -> list[str]:
                           f"{k | 128}, {param}, {flags}); ")
             out.append(f"{pad}{{ let __i: u64 = ({_expr_rs(s.expr)}) as u64; "
                        f"{calls}}}")
-        elif isinstance(s, (Couple, Mutex, Solid)):
+        elif isinstance(s, (Couple, Mutex, Solid, Sibling)):
             pass
         elif isinstance(s, Revoke):
             # Rust 后端是自检 / `loment.py test` 的路径，不是交付产物（与"不做回边
@@ -16240,7 +16286,7 @@ class _Ir:
                 else:
                     self.w(f"call void @__loment_revoke(ptr {rv}, i64 {v64}, i64 0)")
             return
-        if isinstance(s, (Couple, Mutex, Solid)):
+        if isinstance(s, (Couple, Mutex, Solid, Sibling)):
             # `docs/315` §5：联动 / 互斥 / 体都是**声明** —— 判决点已经长在 guard 里。
             return
         if isinstance(s, Tick):  # docs/308 §2.1: 回边/显式推进虚拟钟

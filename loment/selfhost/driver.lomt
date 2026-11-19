@@ -4342,6 +4342,9 @@ fn _start() -> u32 {
             if ec == 5 {
                 em = "defer nesting is too deep -- split the function";
             }
+            if ec == 6 {
+                em = "a `domain` statement cannot be lowered here -- an empty range (`lo > hi`), an unknown member, or a parallel span mismatch (the reference compiler names the exact one)";
+            }
             if dfd >= 0 {
                 wdiag(dfd as u64, scr, ap, an, load32(ctoks, et * 20 + 12), 23,
                       str_ptr(em), str_len(em));

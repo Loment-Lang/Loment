@@ -84,6 +84,7 @@ class Geometry:
     branches: list = field(default_factory=list)
     solids: list = field(default_factory=list)
     revokes: list = field(default_factory=list)
+    siblings: list = field(default_factory=list)
 
     def to_json(self) -> str:
         nodes = sorted((n.__dict__ for n in self.nodes), key=lambda d: d["id"])
@@ -95,9 +96,10 @@ class Geometry:
         solids = sorted((x.__dict__ for x in self.solids), key=lambda d: d["name"])
         revokes = sorted((r.__dict__ for r in self.revokes),
                          key=lambda d: (d["fn"], d["line"], d["targets"]))
+        siblings = sorted(self.siblings)
         return json.dumps({"nodes": nodes, "edges": edges, "loops": loops,
                            "branches": branches, "solids": solids,
-                           "revokes": revokes},
+                           "revokes": revokes, "siblings": siblings},
                           ensure_ascii=False, indent=1, sort_keys=True)
 
 
@@ -189,6 +191,23 @@ def geometry(mod: lomentc.Module) -> Geometry:
                             g.edges.append(Edge(a_, b_, "couple", s.line))
                     if ids:
                         g.solids.append(SolidBody(s.names[0], ids[0], ids))
+                elif isinstance(s, lomentc.Sibling):
+                    # 显式的兄弟边（`docs/315` §4.2）：作用域已经隐含了这条边，这里把
+                    # **声明过**的那几条单独记下来 —— 读几何的人因此分得清"有意的同层"
+                    # 与"碰巧相邻"。名字指本层的直接子块（声明顺序无关）或顶层能力。
+                    kids = {d.name: d for d in stmts
+                            if isinstance(d, lomentc.DomainBlock) and d.name}
+                    ids = []
+                    for nm in s.names:
+                        blk = kids.get(nm)
+                        if blk is not None:
+                            ids.append(f"{fn.name}#{blk.audit_id}")
+                        elif nm in cap_node:
+                            ids.append(cap_node[nm].id)
+                    for i in range(len(ids)):
+                        for j in range(i + 1, len(ids)):
+                            a_, b_ = sorted((ids[i], ids[j]))
+                            g.siblings.append([a_, b_])
                 elif isinstance(s, (lomentc.Couple, lomentc.Mutex)):
                     # 图的边（`docs/315` §5）：联动 `⇄` / 互斥 `⊥`。只记**块级**节点 ——
                     # 顶层 capability 不在几何的顶点集里。

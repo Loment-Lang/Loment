@@ -22,6 +22,7 @@ import loment_suite  # noqa: E402
 import lomc  # noqa: E402
 import loment_diag  # noqa: E402
 import loment_geometry  # noqa: E402
+import lomelf  # noqa: E402
 import lomentc  # noqa: E402
 import lspe  # noqa: E402
 import lvm  # noqa: E402
@@ -7729,52 +7730,142 @@ fn _start() -> u32 {
 
 
 @test
-def test_class_c1_leaves_virtual_and_abstract_to_c2():
-    """C1 只收非虚方法；virtual/abstract/跨模块父类都点名拒，不静默丢。"""
-    virtual = (
-        "module m\nchoose class_on\n"
-        "class A {\n    x: u32,\n"
-        "    virtual fn f(self: &A) -> u32 { return 1; }\n}\n")
-    try:
-        parse(virtual)
-    except lomentc.LomError as exc:
-        assert "C2" in exc.msg, exc.msg
-    else:
-        raise AssertionError("C1 收下了 virtual 方法")
+def test_class_c2_virtual_dispatch_super_and_lomelf():
+    """C2：vtable 头 + 虚派发 + `super`；LVM 与 lomelf 都认这条调用。"""
+    src = """module m
 
+choose class_on
+choose runtime
+
+class Base {
+    n: u32,
+    virtual fn area(self: &Base) -> u32 { return 1; }
+    fn describe(self: &Base) -> u32 { return self.area() + 10; }
+}
+
+class Child extends Base {
+    side: u32,
+    override fn area(self: &Child) -> u32 { return super.area() + self.side; }
+}
+
+fn _start() -> u32 {
+    let c: Child = Child { n: 1, side: 2 };
+    let b: &Base = &c;
+    let v: u32 = b.describe() + b.area();
+    syscall4(60, v as u64, 0, 0);
+    return 0;
+}
+"""
+    m = parse(src)
+    assert m.structs[0].fields[0][0] == "__vtable", m.structs[0].fields
+    assert m.structs[1].fields[:2] == [("__vtable", "ptr"), ("n", "u32")], \
+        m.structs[1].fields
+    e = lomentc.check(m)
+    assert e == [], e
+    ir = lomentc.emit_llvm(m, ROOT, [])
+    for needle in ("@Child__vt", "ptrtoint ptr @Child_area", "inttoptr", "call i32 %"):
+        assert needle in ir, needle
+    assert ir.count("call i32 @Base_area(") == 1, "虚调用退化成了直接调用（只该剩 super 那一条）"
+    assert lvm.run_ir(ir, io.BytesIO(), None, ["class-c2"]) == 16
+    blob, info = lomelf.compile_ll(ir, [])
+    assert blob and {"Child__vt", "Child_area"} <= set(info["funcs"]), info["funcs"]
+
+
+@test
+def test_class_c2_abstract_class_and_reference_subtyping():
+    """抽象方法不发 define；`&Child` 能传给 `&Base`，虚调用仍落到子类。"""
+    src = """module m
+
+choose class_on
+choose runtime
+
+abstract class Shape {
+    abstract fn area(self: &Shape) -> u32;
+    fn label(self: &Shape) -> u32 { return self.area() + 1; }
+}
+
+class Sq extends Shape {
+    side: u32,
+    override fn area(self: &Sq) -> u32 { return self.side; }
+}
+
+fn _start() -> u32 {
+    let s: Sq = Sq { side: 4 };
+    let b: &Shape = &s;
+    let v: u32 = b.label();
+    syscall4(60, v as u64, 0, 0);
+    return 0;
+}
+"""
+    m = parse(src)
+    e = lomentc.check(m)
+    assert e == [], e
+    ir = lomentc.emit_llvm(m, ROOT, [])
+    assert "define i32 @Shape_area" not in ir, "抽象方法发了定义"
+    assert "define i32 @Sq_area" in ir, "子类实现没有发出来"
+    assert lvm.run_ir(ir, io.BytesIO(), None, ["class-c2-abs"]) == 5
+
+
+@test
+def test_class_c2_rejects_bad_abstract_override_and_no_runtime():
+    """抽象类不能实例化；具体类必须补齐槽；override 签名要对；vtable 要 runtime。"""
     abstract = (
-        "module m\nchoose class_on\n"
-        "abstract class A {\n    abstract fn f(self: &A) -> u32;\n}\n")
+        "module m\nchoose class_on\nchoose runtime\n"
+        "abstract class A { abstract fn f(self: &A) -> u32; }\n"
+        "fn _start() -> u32 { let a: A = A {}; return 0; }\n")
+    e = errs(abstract)
+    assert any("抽象类 A 不能实例化" in x for x in e), e
+
+    missing = (
+        "module m\nchoose class_on\nchoose runtime\n"
+        "abstract class A { abstract fn f(self: &A) -> u32; }\n"
+        "class B extends A { x: u32, }\n")
     try:
-        parse(abstract)
+        parse(missing)
     except lomentc.LomError as exc:
-        assert "C2" in exc.msg, exc.msg
+        assert "没有实现抽象方法" in exc.msg, exc.msg
     else:
-        raise AssertionError("C1 收下了抽象类")
+        raise AssertionError("具体类漏了抽象方法仍然通过")
+
+    concrete_abstract = (
+        "module m\nchoose class_on\nchoose runtime\n"
+        "class A { abstract fn f(self: &A) -> u32; }\n")
+    try:
+        parse(concrete_abstract)
+    except lomentc.LomError as exc:
+        assert "类不是 abstract" in exc.msg, exc.msg
+    else:
+        raise AssertionError("非抽象类收下了抽象方法")
 
     mismatch = (
-        "module m\nchoose class_on\n"
-        "class A {\n    fn f(self: &A) -> u32 { return 1; }\n}\n"
-        "class B extends A {\n    override fn f(self: &B) -> bool { return true; }\n}\n")
+        "module m\nchoose class_on\nchoose runtime\n"
+        "class A { fn f(self: &A) -> u32 { return 1; } }\n"
+        "class B extends A { override fn f(self: &B) -> bool { return true; } }\n")
     try:
         parse(mismatch)
     except lomentc.LomError as exc:
         assert "签名" in exc.msg, exc.msg
     else:
-        raise AssertionError("C1 收下了签名不一致的 override")
+        raise AssertionError("C2 收下了签名不一致的 override")
 
-    missing = (
-        "module m\nchoose class_on\n"
-        "class B extends Nope {\n    x: u32,\n}\n")
+    missing_parent = (
+        "module m\nchoose class_on\nchoose runtime\n"
+        "class B extends Nope { x: u32, }\n")
     try:
-        parse(missing)
+        parse(missing_parent)
     except lomentc.LomError as exc:
         assert "父类" in exc.msg, exc.msg
     else:
-        raise AssertionError("C1 收下了本模块没有的父类")
+        raise AssertionError("C2 收下了本模块没有的父类")
+
+    no_runtime = (
+        "module m\nchoose class_on\n"
+        "class A { x: u32, virtual fn f(self: &A) -> u32 { return 1; } }\n")
+    e = errs(no_runtime)
+    assert any("choose runtime" in x for x in e), e
 
     try:
-        parse(virtual.replace("choose class_on", "choose class_off"))
+        parse(concrete_abstract.replace("choose class_on", "choose class_off"))
     except lomentc.LomError as exc:
         assert "class" in exc.msg or "未知顶层关键字" in exc.msg, exc.msg
     else:
@@ -7894,6 +7985,43 @@ def test_a_stored_mut_local_is_used_once():
     inline = head + ("fn f() -> u32 { let a: u32 = 1; let b: u32 = 2;"
                      " return g(&mut a) + g(&mut b); }\n")
     assert errs(inline) == [], errs(inline)
+
+
+@test
+def test_class_c3_function_pointer_targets_are_closed_world():
+    """C3：同型取址集合是两个目标；`apply` 的调用边就是这张集合。"""
+    src = """module m
+choose fp
+choose runtime
+fn inc(x: u32) -> u32 { return x + 1; }
+fn dbl(x: u32) -> u32 { return x * 2; }
+fn apply(f: (u32) -> u32, v: u32) -> u32 { return f(v); }
+fn _start() -> u32 {
+    let a: (u32) -> u32 = inc;
+    let b: (u32) -> u32 = dbl;
+    let v: u32 = apply(a, 1) + apply(b, 2);
+    syscall4(60, v as u64, 0, 0);
+    return 0;
+}
+"""
+    m = parse(src)
+    e = lomentc.check(m)
+    assert e == [], e
+    assert m.fp_targets == {"(u32)->u32": ["dbl", "inc"]}, m.fp_targets
+    ir = lomentc.emit_llvm(m, ROOT, [])
+    assert lvm.run_ir(ir, io.BytesIO(), None, ["class-c3"]) == 6
+
+
+@test
+def test_class_c3_empty_target_set_is_rejected():
+    """封闭世界：间接调用点没有任何同型取址目标时，编译期拒。"""
+    src = """module m
+choose fp
+choose runtime
+fn call(f: (u32) -> u32, x: u32) -> u32 { return f(x); }
+"""
+    e = errs(src)
+    assert any("没有封闭目标集" in x for x in e), e
 
 
 def main() -> int:

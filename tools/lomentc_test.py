@@ -7545,18 +7545,46 @@ def test_tail_resumptive_handle_lowers_to_plain_statements():
 
 
 @test
-def test_a3a_rejects_captures_and_non_tail_arms():
-    """A3a 的三条边界：闭臂、尾续、臂里平铺（`docs/341` §10.7）。"""
+def test_arm_capture_is_read_only_and_by_value_at_handle_entry():
+    """A3b：臂可以捕获处理器外的局部，**进入处理器时**按值拷一份，且只读。"""
     cap = _EFF_BASE + (
+        "effect Log { fn get() -> u32; }\n\n"
+        "fn run() -> u32 {\n"
+        "    let base: u32 = 7;\n"
+        "    let n: u32 = handle Log {\n"
+        "        let base: u32 = 9;\n"
+        "        let a: u32 = perform Log.get();\n"
+        "        a\n"
+        "    } with { get() => { resume(base); } };\n"
+        "    return n;\n}\n")
+    lomentc._EFF_TMP[0] = 0
+    lomentc._EFF_HANDLE[0] = 0
+    m = parse(cap)
+    assert lomentc.check(m) == [], lomentc.check(m)
+    # 捕获的 let 在 handle 体的 `let base = 9` **之前**：读到的必须是外层那个 7。
+    body = m.funcs[0].body
+    names = [getattr(s, "name", "") for s in body if isinstance(s, lomentc.Let)]
+    assert "__eff_c1_0" in names, names
+    ci = names.index("__eff_c1_0")
+    # 外层 `base` 在 handle 之前；要看的是 handle 体里那个同名局部 —— 取最后一个。
+    bi = max(i for i, nm in enumerate(names) if nm == "base")
+    assert ci < bi, (ci, bi, names)
+    # 写捕获是错的（只读）。
+    bad = _EFF_BASE + (
         "effect Log { fn get() -> u32; }\n\n"
         "fn run() -> u32 {\n"
         "    let base: u32 = 7;\n"
         "    let n: u32 = handle Log {\n"
         "        let a: u32 = perform Log.get();\n"
         "        a\n"
-        "    } with { get() => { resume(base); } };\n"
+        "    } with { get() => { base = base + 1; resume(base); } };\n"
         "    return n;\n}\n")
-    assert any("A3a 的臂是闭的" in x for x in errs(cap)), errs(cap)
+    assert any("捕获只读" in x for x in errs(bad)), errs(bad)
+
+
+@test
+def test_a3a_rejects_non_tail_and_incomplete_arms():
+    """A3a 的两条边界：尾续、臂里平铺（`docs/341` §10.7）。"""
     two = _EFF_BASE + (
         "effect Log { fn get() -> u32; }\n\n"
         "fn run() -> u32 {\n"

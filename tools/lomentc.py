@@ -17003,6 +17003,9 @@ def _desugar_matchexpr(mod: Module) -> None:
 # 检查器/发射器/L0/L1/L2 一行都不用认识效应节点 —— 与 `IfExpr` 同一条路数。
 
 _EFF_TMP = [0]
+#: 处理器编号（捕获名 `__eff_c<h>_<i>` 用）。与 `__eff_p/r/l` 的计数器分开 ——
+#: 这两个数进 IR，两侧实现必须按同一个次序发号。
+_EFF_HANDLE = [0]
 
 
 def _eff_fresh(prefix: str) -> str:
@@ -17068,8 +17071,16 @@ def _eff_flat_ok(stmts: list) -> bool:
     return all(isinstance(s, (Let, Assign, ExprStmt)) for s in stmts)
 
 
-def _eff_check_arm(f: Func, arm: HandlerArm, op: EffectOp, consts: set[str],
-                   errs: list[str]) -> None:
+def _eff_arm_free(arm: HandlerArm) -> list[str]:
+    """臂里**要捕获**的名字：不是形参、也不是臂内 `let` 绑定的标识符。排序给确定性。"""
+    local = set(arm.params)
+    for s in arm.body[:-1]:
+        if isinstance(s, Let):
+            local.add(s.name)
+    return sorted(_eff_idents(arm.body) - local)
+
+
+def _eff_check_arm(arm: HandlerArm, op: EffectOp, errs: list[str]) -> None:
     if not _eff_flat_ok(arm.body):
         errs.append(f"{arm.line}: 效应臂 `{arm.op}` 里只许平铺语句（A3a："
                     f"`let` / 赋值 / 表达式；不许 if/while/match/return）")
@@ -17085,16 +17096,22 @@ def _eff_check_arm(f: Func, arm: HandlerArm, op: EffectOp, consts: set[str],
             errs.append(f"{arm.line}: 效应臂 `{arm.op}` 里不许再嵌 `perform` / `handle` / "
                         f"`resume`（A3a）")
             return
-    allowed = {p for p in arm.params} | consts
-    free = _eff_idents(arm.body) - allowed
-    if free:
-        errs.append(f"{arm.line}: 效应臂 `{arm.op}` 引用了 "
-                    f"{', '.join(sorted(free))} —— A3a 的臂是闭的（只许形参与模块级名字；"
-                    f"捕获处理器外的局部变量留到 A3b）")
+    # 捕获是**只读**的（A3b）：臂在进入处理器时按值拷一份，写回原变量没有意义。
+    free = set(_eff_arm_free(arm))
+    for s in arm.body:
+        if isinstance(s, Assign):
+            t = s.target
+            if isinstance(t, Ident) and t.name in free:
+                errs.append(f"{s.line}: 效应臂 `{arm.op}` 给捕获的 `{t.name}` 赋值 —— "
+                            f"捕获只读（A3b）")
+            elif isinstance(t, Index) and isinstance(t.obj, Ident) \
+                    and t.obj.name in free:
+                errs.append(f"{s.line}: 效应臂 `{arm.op}` 写捕获的 `{t.obj.name}[…]` —— "
+                            f"捕获只读（A3b）")
 
 
-def _eff_arm_inline(f: Func, p: Perform, op: EffectOp, arm: HandlerArm,
-                    consts: set[str]) -> tuple[list, object]:
+def _eff_arm_inline(p: Perform, op: EffectOp, arm: HandlerArm,
+                    caps: dict[str, str]) -> tuple[list, object]:
     """把一次 `perform` 内联成语句：`let p… = 实参…; <臂体>; let r = resume 的值;`。"""
     tag = _EFF_TMP[0] + 1
     # 臂在**同一个处理器里可能被多个 perform 用**：每处内联都要一份自己的副本，
@@ -17106,6 +17123,8 @@ def _eff_arm_inline(f: Func, p: Perform, op: EffectOp, arm: HandlerArm,
     for k, s in enumerate(src_body[:-1]):
         if isinstance(s, Let) and s.name not in mapping:
             mapping[s.name] = f"__eff_l{tag}_{k}"
+    for nm, fresh in caps.items():
+        mapping.setdefault(nm, fresh)
     _EFF_TMP[0] = tag
     out: list = []
     for (_opn, pt), apn, arg in zip(op.params, arm.params, p.args):
@@ -17125,9 +17144,10 @@ def _eff_arm_inline(f: Func, p: Perform, op: EffectOp, arm: HandlerArm,
     return out, Ident(rname, p.line)
 
 
-def _eff_lower_handle(f: Func, name: str, ty: str, space: str, h: Handle,
-                      env: dict[str, dict[str, HandlerArm]], decls: dict[str, EffectDecl],
-                      owners: dict[str, list[str]], consts: set[str],
+def _eff_lower_handle(name: str, ty: str, space: str, h: Handle,
+                      env: dict[str, tuple[dict[str, HandlerArm], dict[str, str]]],
+                      decls: dict[str, EffectDecl],
+                      owners: dict[str, list[str]],
                       errs: list[str]) -> list:
     spec = decls.get(h.effect)
     if spec is None:
@@ -17147,7 +17167,7 @@ def _eff_lower_handle(f: Func, name: str, ty: str, space: str, h: Handle,
             errs.append(f"{a.line}: 臂 `{a.op}` 有 {len(a.params)} 个参数，"
                         f"声明是 {len(op.params)} 个")
             continue
-        _eff_check_arm(f, a, op, consts, errs)
+        _eff_check_arm(a, op, errs)
         arms[a.op] = a
     missing = [o for o in ops if o not in arms]
     if missing:
@@ -17160,18 +17180,34 @@ def _eff_lower_handle(f: Func, name: str, ty: str, space: str, h: Handle,
         errs.append(f"{h.line}: A3a 不支持把 `perform` 嵌在表达式中 —— "
                     f"把它拆成单独一条语句")
         return []
-    inner = dict(env)
-    inner[h.effect] = arms
+    # 捕获（A3b）在**进入处理器时**按值拷一份：词法语义的读值就是那一刻的外层值，
+    # 不会被 handle 体里同名的局部遮住。只读（`_eff_check_arm` 挡赋值）。
+    caps: list[str] = []
+    for a in h.arms:
+        if a.op not in arms:
+            continue
+        for nm in _eff_arm_free(a):
+            if nm not in caps:
+                caps.append(nm)
+    htag = _EFF_HANDLE[0] + 1
+    _EFF_HANDLE[0] = htag
+    capmap: dict[str, str] = {}
     out: list = [Let(name, ty, None, h.line, space)]
-    out += _eff_lower_stmts(f, h.body[:-1], inner, decls, owners, consts, errs)
+    for i, nm in enumerate(caps):
+        fresh = f"__eff_c{htag}_{i}"
+        capmap[nm] = fresh
+        out.append(Let(fresh, "auto", Ident(nm, h.line), h.line))
+    inner = dict(env)
+    inner[h.effect] = (arms, capmap)
+    out += _eff_lower_stmts(h.body[:-1], inner, decls, owners, errs)
     out.append(Assign(Ident(name, h.line), tail.expr, h.line))
     return out
 
 
-def _eff_lower_perform(f: Func, p: Perform,
-                       env: dict[str, dict[str, HandlerArm]],
+def _eff_lower_perform(p: Perform,
+                       env: dict[str, tuple[dict[str, HandlerArm], dict[str, str]]],
                        decls: dict[str, EffectDecl], owners: dict[str, list[str]],
-                       consts: set[str], errs: list[str],
+                       errs: list[str],
                        line: int) -> tuple[list, object | None]:
     eff = p.effect
     if not eff:
@@ -17196,28 +17232,29 @@ def _eff_lower_perform(f: Func, p: Perform,
     if any(_eff_contains_effect(a) for a in p.args):
         errs.append(f"{p.line}: A3a 不支持把 `perform` 放在实参里 —— 先拆成一条语句")
         return [], None
-    arm = env.get(eff, {}).get(p.op)
+    entry = env.get(eff)
+    arm = entry[0].get(p.op) if entry is not None else None
     if arm is None:
         errs.append(f"{p.line}: `perform {eff}.{p.op}` 没有被同一函数里词法上的 "
                     f"`handle {eff}` 覆盖（A3a 的处理器是词法的）")
         return [], None
-    return _eff_arm_inline(f, p, op, arm, consts)
+    return _eff_arm_inline(p, op, arm, entry[1])
 
 
-def _eff_lower_stmts(f: Func, stmts: list,
-                     env: dict[str, dict[str, HandlerArm]],
+def _eff_lower_stmts(stmts: list,
+                     env: dict[str, tuple[dict[str, HandlerArm], dict[str, str]]],
                      decls: dict[str, EffectDecl], owners: dict[str, list[str]],
-                     consts: set[str], errs: list[str]) -> list:
+                     errs: list[str]) -> list:
     out: list = []
     for s in stmts:
         if isinstance(s, Let) and isinstance(s.expr, Handle):
-            out += _eff_lower_handle(f, s.name, s.type, s.space, s.expr,
-                                     env, decls, owners, consts, errs)
+            out += _eff_lower_handle(s.name, s.type, s.space, s.expr,
+                                     env, decls, owners, errs)
             continue
         if isinstance(s, Let) and isinstance(s.expr, Perform):
             before = len(errs)
-            stmts, value = _eff_lower_perform(f, s.expr, env, decls, owners,
-                                              consts, errs, s.line)
+            stmts, value = _eff_lower_perform(s.expr, env, decls, owners,
+                                              errs, s.line)
             out.append(Let(s.name, s.type, None, s.line, s.space))
             out += stmts
             if value is not None:
@@ -17226,8 +17263,8 @@ def _eff_lower_stmts(f: Func, stmts: list,
                 errs.append(f"{s.line}: `perform` 的值是 `()`，不能绑给 `{s.name}`")
             continue
         if isinstance(s, ExprStmt) and isinstance(s.expr, Perform):
-            stmts, _value = _eff_lower_perform(f, s.expr, env, decls, owners,
-                                               consts, errs, s.line)
+            stmts, _value = _eff_lower_perform(s.expr, env, decls, owners,
+                                               errs, s.line)
             out += stmts
             continue
         if _eff_contains_effect(s):
@@ -17239,7 +17276,7 @@ def _eff_lower_stmts(f: Func, stmts: list,
 
 
 def _lower_effects(mod: Module, deps: list[Module] | None = None) -> list[str]:
-    """A3a：验证 + 降级（`docs/341` §7.3 / §10.7）。返回错误列表；有错时可能已半降。"""
+    """A3a/A3b：验证 + 降级（`docs/341` §7.3 / §10.7）。返回错误列表；有错时可能已半降。"""
     errs: list[str] = []
     mods = [*(deps or []), mod]
     decls: dict[str, EffectDecl] = {}
@@ -17251,9 +17288,8 @@ def _lower_effects(mod: Module, deps: list[Module] | None = None) -> list[str]:
         for op in e.ops:
             owners.setdefault(op.name, []).append(en)
     for m in mods:
-        consts = {c.name for c in getattr(m, "consts", []) or []}
         for f in m.funcs:
-            f.body = _eff_lower_stmts(f, f.body, {}, decls, owners, consts, errs)
+            f.body = _eff_lower_stmts(f.body, {}, decls, owners, errs)
         m.effect_runtime = []
     return errs
 

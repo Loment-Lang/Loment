@@ -2646,6 +2646,34 @@ fn _start() {
 }
 """,
         f"{(5 + 1) + ((5 + 1) + 1)}\n".encode()),
+    # 捕获（A3b）：臂读外层 `base`，而 handle 体里又声明了一个同名局部。
+    # 捕获在**进入处理器时**取值 —— 臂读到的必须是 40，不是体里的 7。
+    "capture": (
+        """choose write grammar tur2026.2
+
+module effects_run_capture
+choose lspe_effects_true
+choose runtime
+
+effect Log {
+    fn get() -> u32;
+}
+
+fn _start() {
+    let base: u32 = 40;
+    let n: u32 = handle Log {
+        let base: u32 = 7;
+        let a: u32 = perform Log.get();
+        a + 1
+    } with {
+        get() => { resume(base + 1); }
+    };
+    print_num(n as i64);
+    print("\\n");
+    syscall4(60, 0, 0, 0);
+}
+""",
+        f"{((40 + 1) + 1)}\n".encode()),
 }
 
 

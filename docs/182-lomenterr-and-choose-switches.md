@@ -1180,4 +1180,4 @@ AST 扫 `tools/lomentc.py` 里 `errs.append(...)` / `LomError(...)` 的调用点
 
 §5.2 / §11.4 里那条"`--dump-surface` 生成 surface_data"现在只覆盖**派生**部分
 （语法别名 / 词序 / 报错器版本）；卡与规则不再经过 Python。完整记录、边界与判据见
-`docs/351`。
+`docs/352`。

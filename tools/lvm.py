@@ -450,6 +450,11 @@ class Vm:
         self.mem = Mem()
         self.globals = {g.name: g for g in globals_}
         self.funcs = {f.name: f for f in funcs}
+        #: 代码地址（C2 虚表 / 函数值）：`ptrtoint @fn` 与 `call %fp` 要在同一张表上。
+        #: 取内存区之外的高地址，避免与堆/栈槽撞车。
+        self.fn_addr = {f.name: (1 << 40) + i * 16
+                        for i, f in enumerate(funcs)}
+        self.addr_fn = {a: n for n, a in self.fn_addr.items()}
         self.externs = set(externs)
         self.out = out
         self.depth = 0
@@ -488,6 +493,8 @@ class Vm:
                 raise LvmError(f"读未定义的值 {v}")
             return ty, got
         if v.startswith("@"):
+            if v[1:] in self.fn_addr:
+                return ty, self.fn_addr[v[1:]]
             g = self.globals.get(v)
             if g is None:
                 raise LvmError(f"未知全局 {v}")
@@ -638,10 +645,18 @@ class Executor(Vm):
         else:
             retty, i = lomelf.parse_type(body)
             body = body[i:].strip()
-        m2 = re.match(r"@([-A-Za-z0-9_.]+)\((.*)\)\s*$", body, re.S)
+        m2 = re.match(r"([@%][-A-Za-z0-9_.]+)\((.*)\)\s*$", body, re.S)
         if not m2:
             raise LvmError(f"解析不了调用: {text!r}")
-        name = m2.group(1)
+        callee = m2.group(1)
+        if callee.startswith("%"):
+            # 间接调用（C2 虚表）：值是 `ptrtoint @fn` 得到的代码地址。
+            _, addr = self.operand(fr, "ptr " + callee)
+            name = self.addr_fn.get(addr)
+            if name is None:
+                raise LvmError(f"间接调用的代码地址不在函数表里: {addr}")
+        else:
+            name = callee[1:]
         args = [s for s in lomelf.split_top(m2.group(2)) if s]
         if name == "llvm.trap":
             raise _Trap(self.site)

@@ -1670,17 +1670,38 @@ def _deref_type(t: str | None) -> str | None:
     return _ref_elem(t) if t and _is_ref(t) else t
 
 
+#: `docs/345` C2：本模块已降级的类层次。只用于**引用**的子类型检查
+#: （`&Child` -> `&Base`）；按值转换会改变布局，C2 不做。
+_CLASS_PARENTS: dict[str, str] = {}
+
+
+def _is_subclass(a: str, b: str) -> bool:
+    seen: set[str] = set()
+    cur = a
+    while cur and cur not in seen:
+        if cur == b:
+            return True
+        seen.add(cur)
+        cur = _CLASS_PARENTS.get(cur, "")
+    return False
+
+
 def _type_compat(a: str | None, b: str | None) -> bool:
     """两个类型**同形**吗（`docs/299`）：区域标记只是来源标注，不参与比较。
 
-    `&a u32` 与 `&u32` 是同一个类型；`&mut T` 与 `&T` 不是。
+    `&a u32` 与 `&u32` 是同一个类型；`&mut T` 与 `&T` 不是。C2 起，
+    `&Child` 可以传给 `&Base`（单继承的引用子类型）。
     """
     if a == b:
         return True
     if a is None or b is None:
         return False
     if _is_ref(a) and _is_ref(b):
-        return _ref_mut(a) == _ref_mut(b) and _type_compat(_ref_elem(a), _ref_elem(b))
+        ae, be = _ref_elem(a), _ref_elem(b)
+        return (_ref_mut(a) == _ref_mut(b)
+                and (_type_compat(ae, be)
+                     or (not _is_ref(ae) and not _is_ref(be)
+                         and _is_subclass(ae, be))))
     return False
 
 
@@ -3246,6 +3267,13 @@ def _resolve_methods(mods, funcs_map: dict, structs: dict, enums: dict) -> None:
             fn = _method_fn(ot, e.name, funcs_map)
             if fn is not None:
                 e.mangled = fn.name
+            base = _deref_type(ot) if ot else None
+            st = structs.get(base) if base else None
+            slot = (getattr(st, "class_virtual", {}) or {}).get(e.name) if st else None
+            if slot is not None:
+                e.virtual_slot = slot
+                e.virtual_class = base
+                e.mangled = f"{base}_{e.name}" if f"{base}_{e.name}" in funcs_map else e.mangled
             return
         if isinstance(e, Bin):
             rx(e.left, scope)
@@ -6915,6 +6943,12 @@ def _is_int_const(e) -> bool:
 #: 出现在 `_walk_expr` 的四十多个递归调用点上（那会让每个调用点都可能漏传）。
 _FP_ALLOWED: list[bool] = [False]
 
+#: `docs/345` C3：函数值类型 -> 被取址的函数名集合。封闭世界的目标集；
+#: 间接调用点按这个集合算调用边。
+_FP_TARGETS: dict[str, set[str]] = {}
+#: 一次检查里出现过的间接调用 `(类型, 行)`（用来判"目标集为空"）。
+_FP_CALLS: list[tuple[str, int]] = []
+
 
 def _fp_ok() -> bool:
     return _FP_ALLOWED[0]
@@ -7041,6 +7075,10 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
                             f"与本语言的函数类型不是一回事")
             elif not _fp_ok():
                 _fn_value_err(e.line, errs)
+            else:
+                _FP_TARGETS.setdefault(
+                    _fn_ty_make([p.type for p in f.params], f.ret),
+                    set()).add(f.name)
             return
         errs.append(f"{e.line}: 使用未声明的变量 {e.name}")
         return
@@ -7164,6 +7202,8 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
             # 间接调用（`docs/348`）：callee 是 `(A)->B` 类型的**局部**。
             if not _fp_ok():
                 _fn_value_err(e.line, errs)
+            else:
+                _FP_CALLS.append((_vt, e.line))
             _fargs, _fret = _vtf
             if len(e.args) != len(_fargs):
                 errs.append(f"{e.line}: {e.name} 需要 {len(_fargs)} 个实参，"
@@ -7323,16 +7363,25 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
             inner[n] = ty
         e.captures = caps
         _walk_expr(e.body, inner, funcs, structs, errs, enums, lifetime)
+        _lt = expr_type(e, inner, funcs, structs)
+        if _lt is not None:
+            # 闭包也是封闭世界里的一个目标（运行期名是 `__lam_*`，这里只记类型集）。
+            _FP_TARGETS.setdefault(_lt, set()).add(f"lambda:{e.line}")
         return
     if isinstance(e, StructLit):
         st = structs.get(e.name)
         if st is None:
             errs.append(f"{e.line}: 未知结构体 {e.name}")
             return
-        want = {n: t for n, t in st.fields}
+        if getattr(st, "is_class", False) and getattr(st, "class_abstract", False):
+            errs.append(f"{e.line}: 抽象类 {e.name} 不能实例化")
+            return
+        want = {n: t for n, t in _class_user_fields(st)}
         got: set[str] = set()
         for fn, fe in e.inits:
-            if fn not in want:
+            if getattr(st, "is_class", False) and fn == CLASS_VTABLE_FIELD:
+                errs.append(f"{e.line}: {e.name}.{CLASS_VTABLE_FIELD} 由编译器填")
+            elif fn not in want:
                 errs.append(f"{e.line}: 结构体 {e.name} 无字段 {fn}")
             elif fn in got:
                 errs.append(f"{e.line}: 结构体 {e.name} 字段 {fn} 重复初始化")
@@ -8955,9 +9004,105 @@ def _effect_front_errors(mod: Module, deps: list[Module] | None = None) -> list[
     return errs
 
 
+#: C2 的对象头：vtable 指针固定在偏移 0（`docs/345` §3.1）。
+CLASS_VTABLE_FIELD = "__vtable"
+
+
+def _class_user_fields(st: Struct) -> list[tuple[str, str]]:
+    """用户在类字面量里写的字段；vtable 头由编译器填。"""
+    if not getattr(st, "is_class", False):
+        return list(st.fields)
+    return [(n, t) for n, t in st.fields if n != CLASS_VTABLE_FIELD]
+
+
+def _class_vtable_sym(name: str) -> str:
+    return f"{name}__vtable"
+
+
+def _class_vtable_value(st: Struct) -> str:
+    if not getattr(st, "is_class", False) or not getattr(st, "class_vtable", []):
+        return "null"
+    return f"@{_class_vtable_sym(st.name)}"
+
+
+def _class_vt_sym(name: str) -> str:
+    return f"{name}__vt"
+
+
+def _class_vtable_globals(structs: dict) -> list[str]:
+    """vtable 的**缓存槽**。表本身在首次构造时由 `@Class__vt()` 填。
+
+    不放静态数组是因为两个链接器都要为 `ptr @fn` 初值加一条重定位；运行期填
+    `ptrtoint @fn` 与函数值/c 闭包记录走同一条既有路（`docs/348`）。
+    """
+    out: list[str] = []
+    for st in structs.values():
+        slots = getattr(st, "class_vtable", None)
+        if (not getattr(st, "is_class", False) or not slots
+                or getattr(st, "class_abstract", False)):
+            continue
+        out.append(f"@{_class_vt_sym(st.name)}_cache = internal global ptr null")
+    return out
+
+
+def _class_vtable_helpers(structs: dict) -> list[str]:
+    out: list[str] = []
+    for st in structs.values():
+        slots = getattr(st, "class_vtable", None)
+        if (not getattr(st, "is_class", False) or not slots
+                or getattr(st, "class_abstract", False)):
+            continue
+        sym = _class_vt_sym(st.name)
+        lines = [f"define internal ptr @{sym}() {{", "entry:",
+                 f"  %c = load ptr, ptr @{sym}_cache",
+                 "  %n = icmp eq ptr %c, null",
+                 "  br i1 %n, label %make, label %done", "make:",
+                 f"  %p = call ptr @__loment_alloc(i32 {8 * len(slots)})"]
+        for i, fn in enumerate(slots):
+            lines.append(f"  %f{i} = ptrtoint ptr @{fn} to i64")
+            lines.append(f"  %g{i} = getelementptr i64, ptr %p, i32 {i}")
+            lines.append(f"  store i64 %f{i}, ptr %g{i}")
+        lines += [f"  store ptr %p, ptr @{sym}_cache",
+                  "  br label %done", "done:",
+                  f"  %v = load ptr, ptr @{sym}_cache", "  ret ptr %v", "}"]
+        out.append("\n".join(lines))
+    return out
+
+
 def _class_sig(f: Func) -> tuple:
     """类方法的签名（不含接收者）：`override` 只比这一截。"""
     return ([p.type for p in f.params[1:]], f.ret)
+
+
+def _rewrite_super(node, cls: str, parent: str, has_self: bool,
+                   abstract_names=frozenset()):
+    """把 `super.m(...)` 落成父类实现的静态调用（`docs/345` §1.1）。"""
+    if isinstance(node, list):
+        for k, x in enumerate(node):
+            node[k] = _rewrite_super(x, cls, parent, has_self, abstract_names)
+        return node
+    if isinstance(node, tuple):
+        return tuple(_rewrite_super(x, cls, parent, has_self, abstract_names)
+                     for x in node)
+    if not is_dataclass(node):
+        return node
+    if (isinstance(node, MethodCall) and isinstance(node.obj, Ident)
+            and node.obj.name == "super"):
+        if not parent:
+            raise LomError(node.line, 1, f"{cls} 没有父类，不能用 super")
+        if not has_self:
+            raise LomError(node.line, 1, f"{cls} 的关联函数里不能用 super")
+        if node.name in abstract_names:
+            raise LomError(node.line, 1,
+                           f"super.{node.name} 指向抽象方法，没有实现可调")
+        args = [Ident("self", node.line)]
+        args += [_rewrite_super(a, cls, parent, has_self, abstract_names)
+                 for a in node.args]
+        return Call(f"{parent}_{node.name}", args, node.line)
+    for f_ in fields(node):
+        setattr(node, f_.name, _rewrite_super(
+            getattr(node, f_.name), cls, parent, has_self, abstract_names))
+    return node
 
 
 def _assoc_replace(node, classes: set[str], enums: set[str]):
@@ -8989,20 +9134,18 @@ def _assoc_replace(node, classes: set[str], enums: set[str]):
 
 
 def _lower_classes(mod: Module) -> None:
-    """`docs/345` C1：单继承布局 + 非虚方法 + `self` + 构造（参考侧）。
+    """`docs/345` C2：单继承布局、vtable、虚方法、`super`、抽象类（参考侧）。
 
-    **降级目标**：每个类 -> 一个结构体（父类字段前缀 + 自己的字段）与一组普通函数
-    `<类>_<方法>`。于是检查器/发射器不必认识“类”这个词 —— 静态派发、字段访问、
-    结构体字面量都走原来的路。
-
-    C1 只收静态派发：`virtual` / `abstract` 从 C2 起（vtable）；`override` 收，但仍是
-    静态解析（按接收者的静态类型选实现）。父类必须在**本模块** —— 跨模块的类层次
-    要等 C2/C4 一起补，先点名拒，别让 `prepare()` 静默丢掉父类。
+    类仍降成“结构体 + 普通函数”：有虚方法/抽象方法的类层次在偏移 0 放一个
+    `__vtable: ptr` 头，字段布局仍是父类前缀 + 自己的字段。非虚方法按子类名复制
+    （静态派发）；虚方法进 vtable，槽位按“父类槽 + 新槽”固定。`super.m()` 落成
+    父类实现的直接调用；抽象方法只保留签名桩，发射器不发定义。
     """
     import copy as _copy
 
     if not mod.classes:
         return
+    _CLASS_PARENTS.clear()
     by_name: dict[str, ClassDecl] = {}
     for c in mod.classes:
         if c.name in by_name:
@@ -9026,8 +9169,8 @@ def _lower_classes(mod: Module) -> None:
             p = by_name.get(c.parent)
             if p is None:
                 raise LomError(c.line, 1,
-                               f"父类 {c.parent} 不在本模块（C1 只收同模块的单继承；"
-                               f"跨模块类层次从 C2 起）")
+                               f"父类 {c.parent} 不在本模块（C2 仍只收同模块的单继承；"
+                               f"跨模块类层次留给 C4）")
             visit(p, stack + [c.name])
         state[c.name] = 2
         order.append(c)
@@ -9035,19 +9178,31 @@ def _lower_classes(mod: Module) -> None:
     for c in mod.classes:
         visit(c, [])
 
+    # 有虚方法/抽象方法的类层次，**整条祖先链**都要有 vtable 头；否则父类字段
+    # 偏移会在子类引入虚方法时整体平移。
+    raw_v = {c.name: any(cm.virtual or cm.abstract for cm in c.methods)
+             for c in mod.classes}
+    for c in reversed(order):
+        if raw_v[c.name] and c.parent:
+            raw_v[c.parent] = True
+
     structs_by_name: dict[str, Struct] = {s.name: s for s in mod.structs}
     effective: dict[str, dict[str, ClassMethod]] = {}
     class_funcs: list[Func] = []
     for c in order:
-        if c.abstract:
-            raise LomError(c.line, 1,
-                           f"抽象类 {c.name} 从 C2 起（`docs/345` C1 只有非虚方法）")
         ps = structs_by_name.get(c.parent) if c.parent else None
         fields = list(ps.fields) if ps else []
         field_lines = list(ps.field_lines) if ps else []
+        header = bool(raw_v[c.name] or (ps and any(n == CLASS_VTABLE_FIELD
+                                                    for n, _ in fields)))
+        if header and CLASS_VTABLE_FIELD not in {n for n, _ in fields}:
+            fields.insert(0, (CLASS_VTABLE_FIELD, "ptr"))
+            field_lines.insert(0, c.line)
         seen_parent = {fn for fn, _ in fields}
         seen_own: set[str] = set()
         for fn, ft, ln in c.fields:
+            if fn == CLASS_VTABLE_FIELD:
+                raise LomError(ln, 1, f"{CLASS_VTABLE_FIELD} 是编译器保留字段")
             if fn in seen_own:
                 raise LomError(ln, 1, f"类 {c.name} 的字段 {fn} 重复定义")
             if fn in seen_parent:
@@ -9056,21 +9211,31 @@ def _lower_classes(mod: Module) -> None:
             fields.append((fn, ft))
             field_lines.append(ln)
         st = Struct(c.name, fields, c.line, c.pub, [], field_lines=field_lines)
+        st.is_class = True
+        st.class_parent = c.parent
+        st.class_abstract = c.abstract
         mod.structs.append(st)
         structs_by_name[c.name] = st
+        _CLASS_PARENTS[c.name] = c.parent
 
         parent_eff = effective.get(c.parent, {}) if c.parent else {}
+        parent_slots = list(getattr(ps, "class_slots", [])) if ps else []
+        parent_virtual = dict(getattr(ps, "class_virtual", {})) if ps else {}
+        slots = list(parent_slots)
+        vtable: list[str | None] = [None] * len(slots)
+        st.class_slots = slots
+        st.class_virtual = {name: i for i, name in enumerate(slots)}
+        abstract_names = {m for m, cm in parent_eff.items()
+                          if getattr(cm.func, "abstract", False)}
+
         own_any: dict[str, ClassMethod] = {}
         own_inst: dict[str, ClassMethod] = {}
+        own_virtual: dict[str, tuple[int, ClassMethod]] = {}
         for cm in c.methods:
             f = cm.func
             mname = f.name
             if mname in own_any:
                 raise LomError(f.line, 1, f"类 {c.name} 的方法 {mname} 重复定义")
-            if cm.virtual or cm.abstract:
-                raise LomError(f.line, 1,
-                               f"方法 {c.name}.{mname} 用了 virtual/abstract —— "
-                               f"虚方法与 vtable 从 C2 起（`docs/345`）")
             has_self = bool(f.params) and f.params[0].name == "self"
             if any(p.name == "self" for p in f.params[1:]):
                 raise LomError(f.line, 1, f"类方法 {c.name}.{mname} 的 self 必须是第一个参数")
@@ -9094,27 +9259,73 @@ def _lower_classes(mod: Module) -> None:
                 if _class_sig(pm.func) != _class_sig(f):
                     raise LomError(f.line, 1,
                                    f"{c.name}.{mname} 的 override 签名与父类不一致")
+            parent_virtual_here = mname in parent_virtual
+            is_virtual = bool(cm.virtual or cm.abstract or parent_virtual_here)
+            if parent_virtual_here and not (cm.override or cm.virtual or cm.abstract):
+                raise LomError(f.line, 1,
+                               f"{c.name}.{mname} 覆盖父类虚方法要写 override/virtual")
+            if is_virtual:
+                if not has_self:
+                    raise LomError(f.line, 1,
+                                   f"{c.name}.{mname} 是虚方法/抽象方法，必须有 self")
+                slot = parent_virtual.get(mname)
+                if slot is None:
+                    slot = len(slots)
+                    slots.append(mname)
+                    vtable.append(None)
+                own_virtual[mname] = (slot, cm)
+                if cm.abstract and not c.abstract:
+                    raise LomError(f.line, 1,
+                                   f"{c.name}.{mname} 是抽象方法，但类不是 abstract")
             own_any[mname] = cm
+
+        st.class_slots = slots
+        st.class_virtual = {name: i for i, name in enumerate(slots)}
         eff = dict(parent_eff)
         eff.update(own_inst)
         effective[c.name] = eff
-        # 自己的方法（含关联函数 `Type::new`）挂到本类名下。
+
         for mname, cm in own_any.items():
             f = cm.func
+            if not cm.abstract and c.parent:
+                _rewrite_super(f.body, c.name, c.parent,
+                               bool(f.params) and f.params[0].name == "self",
+                               abstract_names)
             f.name = f"{c.name}_{mname}"
             f.pub = c.pub
+            if cm.abstract:
+                f.abstract = True
             class_funcs.append(f)
-        # 继承来的实例方法：按子类名复制一份。C1 是非虚的，按接收者静态类型选实现；
-        # 复制让 `Child_method` 在符号表里存在，而不需要别名表。
+            if mname in own_virtual:
+                slot, _ = own_virtual[mname]
+                vtable[slot] = None if cm.abstract else f.name
+
+        # 继承来的实例方法按子类名复制；虚槽位指向子类副本，非虚方法保持静态派发。
         for mname, cm in eff.items():
             if mname in own_inst:
                 continue
             f = _copy.deepcopy(cm.func)
             f.name = f"{c.name}_{mname}"
             f.pub = c.pub
+            if getattr(cm.func, "abstract", False):
+                f.abstract = True
             class_funcs.append(f)
+            if mname in st.class_virtual:
+                slot = st.class_virtual[mname]
+                vtable[slot] = None if getattr(f, "abstract", False) else f.name
+
+        if not c.abstract and any(x is None for x in vtable):
+            missing = [slots[i] for i, x in enumerate(vtable) if x is None]
+            raise LomError(c.line, 1,
+                           f"具体类 {c.name} 没有实现抽象方法："
+                           + ", ".join(missing))
+        st.class_vtable = vtable
 
     mod.funcs.extend(class_funcs)
+    _vt_cls = next((s for s in mod.structs if getattr(s, "class_vtable", None)), None)
+    mod.class_needs_runtime = _vt_cls is not None
+    if _vt_cls is not None:
+        mod.class_line = _vt_cls.line
     # 关联调用要在类/枚举都落定之后分派（单实参的 `EnumCtor` 也可能是类的构造器）。
     classes = set(by_name)
     enums = {e.name for e in mod.enums}
@@ -9135,6 +9346,9 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     # **A3a 的效应面**（`docs/341` §7.3 / §10.7）：`perform` / `handle` / `resume`
     # 在 `prepare` 之前降级成普通语句 —— 检查、单态化、发射都看不见它们。
     # 降级前的验证只收 A3a 那一小片（闭臂、尾续、语句位置）；其余点名报错。
+    if not _dep_pass:
+        _FP_TARGETS.clear()
+        _FP_CALLS.clear()
     _eff_errs = _effect_front_errors(mod, deps)
     if any(getattr(m, "effect_runtime", None) for m in [mod, *(deps or [])]):
         _eff_errs = _eff_errs + _lower_effects(mod, deps)
@@ -9228,6 +9442,9 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     # 是哪两档"，不是"源码里写了哪两行"。报错要**点名为什么冲突**，泛泛的"非法组合"
     # 正是判据点名的反面（`docs/188` 的"宁拒勿猜"）。
     _eff = effective_dims(mod)
+    if getattr(mod, "class_needs_runtime", False) and _eff.get("runtime") != "runtime":
+        errs.append(f"{mod.class_line if hasattr(mod, 'class_line') else 1}: "
+                    f"虚方法/vtable 需要 `choose runtime`（vtable 走运行期的分配器）")
     # 函数值 / 闭包 / 间接调用只在 `choose fp` 下成立（`docs/348`）。
     _FP_ALLOWED[0] = _eff.get("fp") == "fp"
     # 槽的生效值（依赖要核"根满足了吗"，与 `_eff` 同一趟落定）。
@@ -10052,6 +10269,15 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                 f"{_sites[0].line}: `lgc` 需要一个收集器，而这份单元选择了 `no_gc` —— "
                 f"`no_gc` 的定义就是「产物里没有收集器」（docs/272）；"
                 f"要控制 GC 请改用 `gc_manual` / `gc_auto` / `gc_auto_alpha`")
+    if not _dep_pass:
+        # `docs/345` C3：函数指针是封闭世界。每个间接调用点的目标集必须非空；
+        # 取址集合按**函数类型**分桶，调用图边就是这张表。
+        for _ty, _ln in _FP_CALLS:
+            if not _FP_TARGETS.get(_ty):
+                errs.append(
+                    f"{_ln}: 函数指针类型 {_ty} 没有封闭目标集 —— 在 `choose fp` 下，"
+                    f"每个间接调用点都要有至少一个被取址的同型函数")
+        mod.fp_targets = {k: sorted(v) for k, v in _FP_TARGETS.items()}
     return errs
 
 
@@ -12627,7 +12853,7 @@ def _ll_type(t: str, structs: dict, enums: dict) -> str:
         for _, ft in s.fields:
             # 借用字段是一个指针；**切片借用**（规范化后的 `[T]` / `mut [T]`）是
             # `{ptr, i64}` —— 零拷贝视图结构（`Cursor { data: &[u32] }`）靠这两格。
-            if ft not in IR_TYPES and not _is_ref(ft) and not _is_slice(ft):
+            if ft not in IR_TYPES and ft != "ptr" and not _is_ref(ft) and not _is_slice(ft):
                 raise LomError(s.line, 1, f"结构体 {_display_ty(t)} 的字段类型 {_display_ty(ft)} 目前只支持标量")
         return "{ " + ", ".join(
             (IR_TYPES[ft] if ft in IR_TYPES
@@ -14336,10 +14562,38 @@ class _Ir:
             return e.type, r
         if isinstance(e, Lambda):
             return self._lambda_expr(e, want)
-        if isinstance(e, MethodCall):  # M8: 静态派发
+        if isinstance(e, MethodCall):  # M8: 静态派发 / C2 虚派发
             fn = self.funcs.get(e.mangled)
             if fn is None:
                 raise LomError(e.line, 1, f"native: 未解析的方法 {e.name}")
+            slot = getattr(e, "virtual_slot", None)
+            if slot is not None:
+                oty = expr_type(e.obj, self.type_scope(), self.funcs, self.structs)
+                if oty and _is_ref(oty):
+                    _, ov = self.expr(e.obj, oty)
+                else:
+                    _, ov = self._addr_of(e.obj, e.line, True)
+                cls = e.virtual_class
+                vtp = self.t()
+                self.w(f"{vtp} = getelementptr inbounds {self.ll(cls)}, ptr {ov}, i32 0, i32 0")
+                vt = self.t()
+                self.w(f"{vt} = load ptr, ptr {vtp}")
+                fpp = self.t()
+                self.w(f"{fpp} = getelementptr i64, ptr {vt}, i32 {slot}")
+                raw = self.t()
+                self.w(f"{raw} = load i64, ptr {fpp}")
+                fp = self.t()
+                self.w(f"{fp} = inttoptr i64 {raw} to ptr")
+                args = [f"ptr {ov}"]
+                for a, p in zip(e.args, fn.params[1:]):
+                    _, av = self.expr(a, p.type)
+                    args.append(f"{self.ll(p.type)} {av}")
+                if fn.ret == "()":
+                    self.w(f"call void {fp}({', '.join(args)})")
+                    return "()", ""
+                r = self.t()
+                self.w(f"{r} = call {self.ll(fn.ret)} {fp}({', '.join(args)})")
+                return fn.ret, r
             rty = fn.params[0].type
             oty = expr_type(e.obj, self.type_scope(), self.funcs, self.structs)
             if _is_ref(rty) and not (oty and _is_ref(oty)):
@@ -14416,7 +14670,19 @@ class _Ir:
             inits = dict(e.inits)
             agg = "undef"
             sty = self.ll(e.name)
+            if getattr(st, "is_class", False) and st.fields and \
+                    st.fields[0][0] == CLASS_VTABLE_FIELD:
+                if getattr(st, "class_vtable", None) and not getattr(st, "class_abstract", False):
+                    vt = self.t()
+                    self.w(f"{vt} = call ptr @{_class_vt_sym(st.name)}()")
+                else:
+                    vt = "null"
+                r = self.t()
+                self.w(f"{r} = insertvalue {sty} {agg}, ptr {vt}, 0")
+                agg = r
             for i, (fn, ft) in enumerate(st.fields):
+                if getattr(st, "is_class", False) and fn == CLASS_VTABLE_FIELD:
+                    continue
                 if fn not in inits:
                     raise LomError(e.line, 1, f"结构体 {e.name} 缺字段 {fn}")
                 _, fv = self.expr(inits[fn], ft)
@@ -15508,7 +15774,19 @@ class _Ir:
                 raise LomError(s.line, 1, f"{_display_ty(s.type)} 不是结构体")
             ptr = self.vars[s.name][1]
             inits = dict(s.expr.inits)
+            if getattr(st, "is_class", False) and st.fields and \
+                    st.fields[0][0] == CLASS_VTABLE_FIELD:
+                gp = self.t()
+                self.w(f"{gp} = getelementptr inbounds {self.ll(s.type)}, ptr {ptr}, i32 0, i32 0")
+                if getattr(st, "class_vtable", None) and not getattr(st, "class_abstract", False):
+                    vt = self.t()
+                    self.w(f"{vt} = call ptr @{_class_vt_sym(st.name)}()")
+                    self.w(f"store ptr {vt}, ptr {gp}")
+                else:
+                    self.w(f"store ptr null, ptr {gp}")
             for i, (fn, ft) in enumerate(st.fields):
+                if getattr(st, "is_class", False) and fn == CLASS_VTABLE_FIELD:
+                    continue
                 gp = self.t()
                 self.w(f"{gp} = getelementptr inbounds {self.ll(s.type)}, ptr {ptr}, i32 0, i32 {i}")
                 _, v = self.expr(inits[fn], ft)
@@ -16426,8 +16704,12 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     #: `.lomt`，共用一个文件的话，跳进库里的函数会显示根文件，断点也就落错了地方。
     #: 根模块先占上 `!1`（编译单元那句已经引用它了），免得给它发第二份。
     dbg_file: dict = {mod.name: 1} if debug else {}
+    globals_ += _class_vtable_globals(structs)
+    body += _class_vtable_helpers(structs)
     for m in mods:
         for f in m.funcs:
+            if getattr(f, "abstract", False):
+                continue  # 抽象方法只有签名桩，给检查器看，不发 define
             scope, lines = None, {}
             if debug:
                 fid = dbg_file.get(m.name)

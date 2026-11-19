@@ -83,25 +83,29 @@ ERR_EXE = ROOT / "loment" / "build" / ("lomenterr.exe" if sys.platform == "win32
 
 
 def build_lomenterr(force: bool = False) -> Path:
-    """编 `loment/tools/lomenterr.lomt` 成本机能跑的可执行文件。**按源码内容哈希判新鲜**
-    —— 不用 mtime: Windows 上时间戳粒度粗, "改完立刻跑"会拿到旧产物, 而那正是最需要对的
-    一刻 (与 lompi「身份是内容哈希」同一条口径)。
+    """编 `loment/tools/lomenterr.lomt` 成本机能跑的可执行文件。
+
+    **走自举链**（种子 -> stage1 -> IR -> lomelf，`loment_dist.build_host_tool`）——
+    与包里那一份同一条路（`docs/158` §5）。参考实现（`lomentc.emit_llvm`）不再参与
+    产物：它只做开发期的 `--check`。
+
+    新鲜度按**内容哈希**（源码 + 种子 + 链接器）判 —— 不用 mtime：Windows 上时间戳粒度粗，
+    "改完立刻跑"会拿到旧产物，而那正是最需要对的一刻（与 lompi「身份是内容哈希」同一条）。
     """
     import hashlib
-    import lomelf
-    key = hashlib.sha256(ERR_SRC.read_bytes()).hexdigest()
+    import loment_dist
+    h = hashlib.sha256()
+    h.update(ERR_SRC.read_bytes())
+    h.update(loment_dist.SEED.read_bytes())
+    h.update((ROOT / "tools" / "lomelf.py").read_bytes())
+    key = h.hexdigest()
     # 新鲜度戳**平台无关的名字** —— 从可执行名派生的话, Windows 上是 lomenterr.exe.sha、
     # Linux 上是 lomenterr.elf.sha, `.gitignore` 就得跟着平台写两遍。
     stamp = ERR_EXE.parent / "lomenterr.src-sha"
     if not force and ERR_EXE.exists() and stamp.exists() \
             and stamp.read_text(encoding="utf-8").strip() == key:
         return ERR_EXE
-    mod, deps = lomentc.load_unit(ERR_SRC, ROOT)
-    errs = lomentc.check(mod, deps=deps)
-    if errs:
-        raise SystemExit(f"lomenterr.lomt 自己检查不过: {errs[:3]}")
-    ll = lomentc.emit_llvm(mod, ROOT, deps)
-    raw = (lomelf.compile_pe if sys.platform == "win32" else lomelf.compile_ll)(ll)[0]
+    raw = loment_dist.build_host_tool("loment/tools/lomenterr.lomt", ".")
     ERR_EXE.parent.mkdir(parents=True, exist_ok=True)
     # 临时名 + os.replace: 并行门禁里可能有另一个进程正**执行**着这份产物, 直接覆写会撞
     # PermissionError (loment_dist 的 `_write_shared` 记着同一件事)。

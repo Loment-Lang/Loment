@@ -209,6 +209,7 @@ tools/loment_dev_test.py
 tools/loment_caps.py
 tools/loment_caps_test.py
 tools/loment_err_test.py
+tools/loment_regex_test.py
 lompi/*.lomt
 lompi/store/std/0.1.0/*
 lompi/store/host/0.1.0/*

@@ -134,6 +134,7 @@ GLOBS = [
     # 报错器 (docs/182 §6/§8)。**位置与自举那份 `lomrel.lomt` 对齐** —— 两处的条目顺序
     # 就是清单的顺序, 插在不同位置会给出同集合不同顺序的两份清单 (见下面那段注解)。
     "tools/loment_err_test.py",
+    "tools/loment_regex_test.py",
     # lompi (随包发行的独立命令, docs/170): 源码快照 + 它外面的正本与仓内副本的同步/校验
     "lompi/*.lomt",
     # lompi 的标准库: 随 Loment 一起装 (std/host/internet/os + 八个领域包, 共 217 个文件 ——

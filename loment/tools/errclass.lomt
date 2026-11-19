@@ -1,0 +1,48 @@
+// errclass.lomt — 文本分类器：消息 -> 码号（自举侧那一半）
+//
+// **为什么它是独立模块**: 只有报错器需要"从纯文本认码"（旧诊断、别的工具吐的 JSONL）。
+// `lomcli` / `lsp` 只读码表与文字，不该把整个正则引擎拖进产物。
+//
+// 规则表在 `errdata.lomt`（数据真源）；这里只放**算法**：逐条 `re_search`，第一条命中
+// 者胜。顺序就是优先级（细分规则在前、族码兜底在后）—— 与参考实现
+// `tools/loment_diag.py::classify` 同一条口径。
+//
+// 调用方传一份 `regex.re_ctx_bytes()` 的上下文（分类一次会反复用同一个 ctx）。
+//
+// 命名: 公开 errc_*，内部 errc_*（避免与 errdata 的 `code_*` / `rule_*` 撞名）。
+
+module errclass
+choose runtime
+
+use regex
+use errdata
+
+/// 消息（缓冲区里的 ptr+len）-> 码号（`0` = 一条规则都没命中）。
+///
+/// **ptr+len 那套是主入口**：报错器手里的消息住在 `ctx` 暂存格里，构造不出 `str`。
+pub fn errc_code_mem(mp: ptr, mn: u32, ctx: ptr) -> u32 {
+    let n: u32 = rule_count();
+    let i: u32 = 0;
+    while i < n {
+        let pat: str = rule_pat(i);
+        if re_search_mem(str_ptr(pat), str_len(pat), mp, mn, 0, ctx) >= 0 {
+            return rule_code(i);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// `str` 入口（同一个算法）。
+pub fn errc_code(msg: str, ctx: ptr) -> u32 {
+    return errc_code_mem(str_ptr(msg), str_len(msg), ctx);
+}
+
+/// 消息 -> 码的显示形状（`"E042"` / `"E0100"`）；认不出来返回空串。
+pub fn errc_code_str(msg: str, ctx: ptr) -> str {
+    let c: u32 = errc_code(msg, ctx);
+    if c == 0 {
+        return "";
+    }
+    return code_str(c);
+}

@@ -362,7 +362,7 @@ fn probe() -> u32 {
 参考侧的判据是 `lomentc_test::test_e028_literal_index_over_a_fixed_array` 与
 `test_e029_use_after_free` —— 两条都是**一对程序**（同一份源，加不加 `choose lms_open`
 判决相反），且 E028 那条**已验"未修先红"**（把检查关掉 ⇒ `AssertionError: []`，144/145）。
-⚠ **自举侧的对拍不靠孪生判据** —— 靠上表那一列的两条 `loment_rule_parity` 探针。
+⚠ **自举侧的对拍不靠孪生判据** —— 靠上表那一列的三条 `loment_rule_parity` 探针。
 理由见下。
 
 ✅ **自举侧已落地（2026-10-15，issue #385）**：`loment/selfhost/checker.lomt` 实现 E028

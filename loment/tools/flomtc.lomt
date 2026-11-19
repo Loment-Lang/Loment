@@ -1,0 +1,19 @@
+// flomtc — Flomtc 的独立入口（`docs/350`）。
+//
+// **它是编译器实现本身，不是 `loment` 的子命令**：用户 2026-11-18 定，与 `lomenterr`
+// 同一种独立存在 —— 自己的 `flomtc.lomt`、自己的 exe、自己的版本号。
+//
+// 它跑的仍是**同一份自举编译器实现**（`loment/selfhost/driver.lomt` 的 `run`）：
+// 这里只提供 Flomtc 自己的身份与入口，不抄第二份驱动。
+//
+// 快路径由**输入单元**的 `choose flomtc_true` 选（第十维，`docs/350`）：同一份驱动，
+// `flomtc_true` 时 `--emit-potato` 跳过"只有泛型声明、没有泛型调用点"的单态化扫描；
+// 产物与 `flomtc_false` 逐字节相同 —— 所以这一维**不进 Potato** 的顶层维度。
+//
+//   flomtc <entry.lomt> [--emit-potato]
+module flomtc
+choose runtime
+
+// 入口 `_start` 来自驱动单元本身（`driver.lomt`）。这里**不能再写一个** ——
+// 单元的发射符号是平的（ABI）：两个 `_start` 会被检查器点名拒（2026-11-18 实测）。
+use "../selfhost/driver.lomt"

@@ -216,6 +216,9 @@ LIFETIMES = ("lifetime_no", "lifetime_auto", "lifetime_manual")
 #: `no_fp` = 默认档，产物里**只有直接调用边**（`docs/208` §4 的前提成立）；
 #: `fp` = 函数值 / 闭包 / 间接调用放行，图里多出间接边。
 FPS = ("no_fp", "fp")
+#: `flomtc` 的取值（`docs/350`，用户 2026-11-18 定第十维）：
+#: `flomtc_false` = 默认，编译器走原路径；`flomtc_true` = 启用 emit_potato 快路径。
+FLOMTCS = ("flomtc_false", "flomtc_true")
 #: `lms` 的取值 = **要不要内存安全**（`docs/253`，用户 2026-10-15 定第六维）。
 #: `lms_close`（关，**默认**）= 今天的形状；`lms_open`（开）= 检查器发 E024–E026 +
 #: 保障器**按站点分配**发内联界检查。
@@ -297,7 +300,8 @@ SYSTEM_COST_KEY = {"gc": "sites", "lms": "levels", "lspe": "sites"}
 #: 而漏掉是**静默**的（`choose lms` 会报成"未定义的开关"，码是 E022、码集不变）。
 CORE_WORDS = (frozenset(MODES) | frozenset(GCS) | frozenset(RUNTIMES)
               | frozenset(PORTS) | frozenset(VMS) | frozenset(LMSS)
-              | frozenset(LSPE_STATES) | frozenset(LIFETIMES))
+              | frozenset(LSPE_STATES) | frozenset(LIFETIMES)
+              | frozenset(FPS) | frozenset(FLOMTCS))
 #: 函数级的**可选** `abi` (docs/179 §2)。取值 = 源语言那一侧的调用约定:
 #:   `c`      = 平台 C ABI (System V / Win64) —— 可以发成 L1 的 `extern fn` (docs/173 §2)
 #:   其余     = 不是平台 C ABI, **不能**发 `extern fn`; 要调它得走别的路 (进程桥等)

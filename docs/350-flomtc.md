@@ -1,6 +1,6 @@
 # 350 · Flomtc：5000 行中等程序 1000 ms 编译的加速器设计
 
-> 状态: **设计稿 + 基线实测**（2026-11-18）
+> 状态: **设计稿 + 基线实测 + V0 落地**（2026-11-18）
 > 基准: `origin/main`（`b37ede78`，2026-11-18；初测在 `663b93ff`）
 > 实测环境: WSL2 Ubuntu / Ryzen 9 7945HX / Python 3.11.15 / Loment 参考链
 > 上游: `docs/226-loment-performance-ledger.md`（编译速度账）· `docs/298-lomentfaster.md`
@@ -281,7 +281,7 @@ LSPE 是 Loment 的卖点；1000 ms 不能靠“关掉检查”换。规则：
 
 | 步 | 内容 | 出口 |
 |---|---|---|
-| **V0** | 基线 harness + 语料 + `flomtc bench`；PyPy/Nuitka 冻结测量 | A / 5.1 结论 |
+| **V0** | 基线 harness + 语料 + `flomtc bench`；**第十维 `flomtc` + 参考/自举快路径 + 独立 `flomtc` exe**（§12） | A / 5.1 结论 |
 | **V1** | 原生 lexer/parser/前门/LSPE 普查；与参考对拍站点计数 | front 目标、差分的静态半 |
 | **V2** | 原生 check + LSPE 调度器 + 快速审计；对拍诊断/Potato | check 目标、D |
 | **V3** | 原生 IR + `lomelf`；对拍 IR/ELF 字节 | C / B |
@@ -301,3 +301,64 @@ LSPE 是 Loment 的卖点；1000 ms 不能靠“关掉检查”换。规则：
 5. **不主张墙钟比值门禁**。1000 ms 是产品目标；门禁用绝对天花板与确定性计数。
 6. **不主张本机冻结一定达标**。PyPy/Nuitka 未安装；5.1 是测量，不是承诺。
 7. **不主张跨机器绝对毫秒数**。按比例外推，不作保证。
+
+---
+
+## 12. V0 落地（2026-11-18，用户三刀）
+
+用户 2026-11-18 定下三条形状，这一节记它们**落成了什么**：
+
+1. **整个优化由 `choose flomtc_true` 启用**；
+2. **`flomtc` 与 `lomenterr` 一样是独立存在，有自己的 exe**；
+3. **有自己的 `flomtc.lomt`**（职责 = 编译器实现）。
+
+### 12.1 第十维：`flomtc_false` / `flomtc_true`
+
+- 登记在参考实现 `CORE_DIMS` / `CORE_DIM_ORDER` / `CORE_DEFAULTS` / `CORE_DIM_ZH`
+  （`tools/lomentc.py`）与 `tools/potato.py` 的 `FLOMTCS` / `CORE_WORDS`。
+- 自举侧：`checker.lomt` 的 `chk_core_dim`（第九格，槽位与哨兵各后移一格）、
+  `chk_core_val`、`switches.lomt` 的 `sw_is_core` 同步。
+- **不进 Potato 的顶层维度**：它说的是"这份产物怎么被编出来的"，
+  不是"这份产物是什么"。`flomtc_false` 是默认档，默认产物**逐字节不变**。
+
+### 12.2 快路径（两个实现）
+
+- **参考侧**（`emit_potato`）：去掉整模块 `deepcopy`；只有**泛型使用**（impls /
+  类方法 / try / guard / 泛型类型引用 / 泛型函数声明）才走完整 `prepare`，
+  否则只过滤预置的未用泛型声明（浅拷贝，不动调用者手里的模块 ——
+  `emit_potato` 在 `emit_llvm` 之前跑，2026-11-18 实测过这个次序）。
+- **自举侧**（`potato.lomt`）：`pt_flomtc` 读输入单元的 `choose flomtc_true`；
+  `pt_mono_used` 是 O(tokens × 泛型声明数) 的前置门 —— 没有泛型**调用点**时跳过
+  `pt_mono_all`（实例数为 0，产物与走一遍相同）。
+- **产物相同**：`loment_potato_emit_test` 新增一条，两份同源（只差这一行）
+  在参考与自举两侧逐字节相同，且 Potato 里没有 `flomtc` 这一格。
+
+### 12.3 实测（Windows 11 / 5045 行 / 360 函数 / best of 3）
+
+| 阶段 | `flomtc_false` | `flomtc_true` |
+|---|---:|---:|
+| front | 555 ms | 618 ms |
+| check | 410 ms | 429 ms |
+| **potato** | **940 ms** | **380 ms** |
+| IR | 10 ms | 12 ms |
+| lomelf | 108 ms | 134 ms |
+| **合计** | **2,022 ms** | **1,574 ms** |
+
+`front`/`check` 的差是同一台机器的噪声（同一源、只多一行）；**可归因的是
+Potato 940 → 380 ms（2.5×）**，产物三样（Potato / IR / ELF）SHA-256 相同。
+离 1000 ms 还差 **1.57×**；front + check 现在是主项，属于 §4.2/§4.3 的 V1/V2。
+本机同一轮的另一次实测 total 到过 1,223 ms —— 墙钟只作产品账，不作门禁
+（§8 第 6 条）。
+
+### 12.4 独立实体
+
+- `loment/tools/flomtc.lomt`：**自己的入口**，`use "../selfhost/driver.lomt"`，
+  跑的是**同一份编译器实现**（不抄第二份驱动）。
+- `loment_dist.TOOLS` 新增 `("flomtc", "loment/tools/flomtc.lomt", ".")`：
+  随包发一个独立 `flomtc` 可执行文件，与 `lomenterr` 同一种存在。
+- 实测（本机现场链）：`flomtc.exe` 4,222,976 B；在 `flomtc_false` / `flomtc_true`
+  两份语料上的 `--emit-potato` 与参考逐字节相同。
+- ⚠ 一条已踩的 ABI 规则：单元的发散符号是平的 —— `flomtc.lomt` **不能**再写一个
+  `_start`（会与驱动单元重名，检查器点名拒）。入口由被导入的驱动单元提供。
+- **还没做**（如实记）：原生 front/check/IR/链接器（V1–V3）、缓存/并行（V4）、
+  `flomtc audit` 的两种审计档（§6）、`flomtc` 自己的版本号与命令面。

@@ -3629,6 +3629,9 @@ CORE_DIMS: dict[str, tuple[str, ...]] = {
     # `class_on` 才收 `class`/`extends`/`virtual`/`override`/`abstract`。C0 只落语法
     # 骨架，布局与派发在 C1/C2。默认关，现有程序逐字节不变。
     "class": ("class_off", "class_on"),
+    # **编译加速**（`docs/350`，用户 2026-11-18 定）：`flomtc_false`（默认）走原路径；
+    # `flomtc_true` 才启用 emit_potato 的去深拷贝/按使用判定快路径。产物语义不变。
+    "flomtc": ("flomtc_false", "flomtc_true"),
 }
 #: **维度之后的第二位置**（用户 2026-11-08）：`<维>_<槽>_<值>`。
 #:
@@ -3660,7 +3663,7 @@ CORE_SLOT_DEFAULTS = {"aicheck": "false", "effects": "false"}
 #: `lms` / `lspe` / `lifetime` 排在最后：它们**没有冲突对**，追加在尾部不会改动
 #: 任何既有配对的先后。
 CORE_DIM_ORDER: tuple[str, ...] = ("mode", "gc", "runtime", "port", "vm", "lms", "lspe",
-                                   "lifetime", "fp", "class")
+                                   "lifetime", "fp", "class", "flomtc")
 #: 所有核心模式的取值 —— "这一个 `choose` 是核心模式还是开关"就看它在不在这里面。
 #: 槽取值也算核心写法（否则它会被当成**用户开关**吞掉，`choose lspe_aicheck_true`
 #: 就变成一次未定义的开关取值）。
@@ -3672,7 +3675,7 @@ CORE_DIM_OF = {w: d for d, ws in CORE_DIMS.items() for w in ws}
 CORE_DEFAULTS = {"mode": "std", "gc": "gc_manual", "runtime": "no_runtime",
                  "port": "sealed", "vm": "no_vm", "lms": "lms_full",
                  "lspe": "lspe_open_admin", "lifetime": "lifetime_auto", "fp": "no_fp",
-                 "class": "class_off"}
+                 "class": "class_off", "flomtc": "flomtc_false"}
 #: 生命周期维在**旧版次**里的默认值（`docs/305`：封版的版次一个字节都不变）。
 #: 2026.3 起才翻到 `lifetime_auto`（用户 2026-11-08 裁）。
 LIFETIME_DEFAULT_EDITION = "tur2026.3"
@@ -3707,6 +3710,7 @@ CORE_DIM_ZH = {
     "lifetime": "生命周期（`lifetime_no` / `lifetime_auto` / `lifetime_manual`）",
     "fp": "间接分派（`fp` / `no_fp`）",
     "class": "类继承（`class_off` / `class_on`）",
+    "flomtc": "编译加速（`flomtc_false` / `flomtc_true`）",
 }
 
 #: **LMS 的七个细开关**（`docs/253` §11.4 ①），次序就是七级的次序 ——
@@ -6539,6 +6543,23 @@ def _resolve_solid_aliases(mod: Module) -> None:
         al: dict = {}
         scan(f.body, al)
         apply(f.body, al)
+
+
+def _needs_full_prepare(allmods: list[Module]) -> bool:
+    """`prepare` 是否真的需要跑（泛型**使用** / impls / 类方法 / try / guard）。
+
+    只看泛型**声明**是不够的：预置里带着 `Option<T>` / `Result<T,E>`，一个完全
+    不用泛型的单元也会因此被整模块深拷贝。这里按使用判定；泛型函数声明暂时保守
+    地算作需要（还没有调用点扫描）。
+    """
+    if any(m.impls for m in allmods) or any(
+            getattr(m, "has_class_methods", False) for m in allmods):
+        return True
+    if _has_try(allmods) or _has_guard(allmods):
+        return True
+    if any(_is_generic_type(t) for t in _collect_types(allmods)):
+        return True
+    return any(f.tparams for m in allmods for f in m.funcs)
 
 
 def prepare(mod: Module, deps: list[Module] | None = None) -> tuple[Module, list[Module]]:
@@ -11626,12 +11647,58 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None,
                 diag_out: dict | None = None,
                 cache=None) -> str:
     """M45: 形式对象 v1 —— 覆盖泛型/切片/字符串, 并由独立校验器自检 (M46)。"""
-    import copy as _c
+    _flomtc = mod.chooses.get("flomtc", CORE_DEFAULTS["flomtc"]) == "flomtc_true"
+    _gc_alpha_pass(mod, deps)       # L0/L1/L2 —— 必须在单态化之前
 
-    _gc_alpha_pass(mod, deps)       # L0/L1/L2 —— **在 deepcopy 之前**（`_count_gc_ladder`
-                                    # 读的就是 raw_mod 那几张表）
-    raw_mod, raw_deps = _c.deepcopy(mod), _c.deepcopy(list(deps or []))
-    mod, deps = prepare(mod, deps)  # M6
+    if _flomtc:
+        # 快路径（`choose flomtc_true`）：不再整模块 deepcopy；只按使用调用 prepare。
+        generics = [{"kind": "fn", "name": f.name, "params": list(f.tparams)}
+                    for f in mod.funcs if f.tparams]
+        generics += [{"kind": "type", "name": s.name, "params": list(s.tparams)}
+                     for s in mod.structs if s.tparams]
+        generics += [{"kind": "type", "name": e.name, "params": list(e.tparams)}
+                     for e in mod.enums if e.tparams]
+        _raw_traits = [{"name": t.name, "methods": [m[0] for m in t.methods]}
+                       for t in mod.traits]
+        _raw_impls = [{"trait": i.trait, "for": i.type,
+                       "methods": [f.name[len(i.type) + 1:]
+                                   if f.name.startswith(i.type + "_") else f.name
+                                   for f in i.funcs]}
+                      for i in mod.impls]
+        _gc_ladder = _count_gc_ladder(mod)
+        _allmods = list(deps or []) + [mod]
+        if _needs_full_prepare(_allmods):
+            mod, deps = prepare(mod, deps)  # M6
+        else:
+            # 只有泛型声明、没有泛型使用：过滤声明即可，不深拷贝整个模块。
+            # emit_potato 在 emit_llvm 之前跑 —— 必须浅拷贝，别动调用者手里的列表。
+            import copy as _c
+            mod = _c.copy(mod)
+            mod.structs = [s for s in mod.structs if not s.tparams]
+            mod.enums = [e for e in mod.enums if not e.tparams]
+            deps = [_c.copy(m) for m in deps or []]
+            for _m in deps:
+                _m.structs = [s for s in _m.structs if not s.tparams]
+                _m.enums = [e for e in _m.enums if not e.tparams]
+    else:
+        # 默认路径（`flomtc_false`）：与 flomtc 之前逐字节相同。
+        import copy as _c
+        raw_mod, raw_deps = _c.deepcopy(mod), _c.deepcopy(list(deps or []))
+        mod, deps = prepare(mod, deps)  # M6
+        generics = [{"kind": "fn", "name": f.name, "params": list(f.tparams)}
+                    for f in raw_mod.funcs if f.tparams]
+        generics += [{"kind": "type", "name": s.name, "params": list(s.tparams)}
+                     for s in raw_mod.structs if s.tparams]
+        generics += [{"kind": "type", "name": e.name, "params": list(e.tparams)}
+                     for e in raw_mod.enums if e.tparams]
+        _raw_traits = [{"name": t.name, "methods": [m[0] for m in t.methods]}
+                       for t in raw_mod.traits]
+        _raw_impls = [{"trait": i.trait, "for": i.type,
+                       "methods": [f.name[len(i.type) + 1:]
+                                   if f.name.startswith(i.type + "_") else f.name
+                                   for f in i.funcs]}
+                      for i in raw_mod.impls]
+        _gc_ladder = _count_gc_ladder(raw_mod)
     all_caps = [c for m in (deps or []) + [mod] for c in m.caps]
     layouts = []
     for u in mod.uses:
@@ -11652,13 +11719,7 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None,
                     ],
                 }
             )
-    # M45: 泛型声明 (单态化前的本单元视图) + 单态化实例 (prepare 标记)
-    generics = [{"kind": "fn", "name": f.name, "params": list(f.tparams)}
-                for f in raw_mod.funcs if f.tparams]
-    generics += [{"kind": "type", "name": s.name, "params": list(s.tparams)}
-                 for s in raw_mod.structs if s.tparams]
-    generics += [{"kind": "type", "name": e.name, "params": list(e.tparams)}
-                 for e in raw_mod.enums if e.tparams]
+    # 单态化实例 (prepare 标记)
     instances = [{"kind": "fn", "name": f.name, "of": f.from_generic,
                   "args": list(f.generic_args)} for f in mod.funcs if f.from_generic]
     instances += [{"kind": "type", "name": s.name, "of": s.from_generic,
@@ -11686,7 +11747,6 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # **字面相同**，所以先算一次、两处引用 —— 索引不复制字节，只指过去。
     # 表的唯一真源是校验器那个模块（它不许反过来 import 编译器，所以方向只有这一边）。
     import potato as _potato
-    _gc_ladder = _count_gc_ladder(raw_mod)
     _lms_levels = {_n: _lms_level(mod, _n) for _n in LMS_TOGGLES}
     _dims = effective_dims(mod)
     _facts = _lspe_facts(mod, deps or [])
@@ -11909,13 +11969,8 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None,
             {"name": s.name, "fields": [{"name": fn, "type": ft} for fn, ft in s.fields]}
             for s in mod.structs
         ],
-        "traits": [{"name": t.name, "methods": [m[0] for m in t.methods]}
-                   for t in raw_mod.traits],
-        "impls": [{"trait": i.trait, "for": i.type,
-                   "methods": [f.name[len(i.type) + 1:]
-                               if f.name.startswith(i.type + "_") else f.name
-                               for f in i.funcs]}
-                  for i in raw_mod.impls],
+        "traits": _raw_traits,
+        "impls": _raw_impls,
         "generics": generics,
         "instances": instances,
         "guards": _count_guards(mod),

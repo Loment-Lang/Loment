@@ -476,7 +476,7 @@ pub fn rule_pat(i: u32) -> str {
     if i == 201 { return "未定义的函数|未声明的变量|未声明$|未知结构体|未知枚举|类型 .*未声明|没有方法|没有同名方法|父类 .* 不在本模块"; }
     if i == 202 { return "类型 .*应为|表达式类型|return 类型|类型必须是整型|载荷类型|实参(期望|类型)|实参 [^，]*不是数组或切片|内建 .* 实参|只接 Option/Result 形状|要两变体的枚举|不是 Option/Result 形状|的兜底值类型|is not a named array or slice|is not an array or slice|override 签名|self 必须是"; }
     if i == 203 { return "需要 \\d+ 个实参|载荷只能有一个实参"; }
-    if i == 204 { return "guard 引用了未声明的能力|quality 引用了未声明的能力|discharge 引用了未声明的能力|quality 只用于自适应域|discharge 只用于可达域|能力 .*域|能力 .*重复|能力 .*参数必须|能力 .* 的 cyclic 周期|^\\d+: 域 .*|generation 只用于 revision 域|retire 只用于 revision 域|generation 引用了未声明的能力|retire 引用了未声明的能力|不能是 revision|不能带空间|第二个实参|domain:for|child_of|couple|mutex|并行的几个域|revoke"; }
+    if i == 204 { return "guard 引用了未声明的能力|quality 引用了未声明的能力|discharge 引用了未声明的能力|quality 只用于自适应域|discharge 只用于可达域|能力 .*域|能力 .*重复|能力 .*参数必须|能力 .* 的 cyclic 周期|^\\d+: 域 .*|generation 只用于 revision 域|retire 只用于 revision 域|generation 引用了未声明的能力|retire 引用了未声明的能力|不能是 revision|不能带空间|第二个实参|domain:for|child_of|couple|mutex|并行的几个域|revoke|sibling"; }
     if i == 205 { return "使用了 excluded 的空间"; }
     if i == 206 { return "已被移动"; }
     if i == 207 { return "既被可变借用又被借用|被可变借用两次"; }

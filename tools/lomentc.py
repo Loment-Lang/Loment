@@ -12051,7 +12051,12 @@ _IR_HEAP_LMS_FFI_CTL = _heap_with_lms_rescue(_IR_HEAP_FFI, ctl=True)
 
 _IR_ROOTS = '''; ---- 自动回收（`choose gc_auto`）---------------------------------------------------
 @__loment_roots = internal global [1024 x i64] zeroinitializer
-@__loment_rootn = internal global i32 0'''
+@__loment_rootn = internal global i32 0
+; **栈区表**：L0 提升的缓冲（和 L0.5 的栈区）整块登记成「起点 + 字数」一条，而不是每个
+; 8 字节字占一格根表 —— 后者让一块 8 KiB 的缓冲就把 1024 格根表占满（#1655）。
+@__loment_regions = internal global [256 x i64] zeroinitializer
+@__loment_regionl = internal global [256 x i64] zeroinitializer
+@__loment_regionn = internal global i32 0'''
 
 _IR_GC_SHARED = '''@__loment_gcbytes = internal global i32 0
 @__loment_mark = internal global [1024 x i8] zeroinitializer
@@ -12127,6 +12132,44 @@ rlc:
   %rk2 = add i32 %rk, 1
   br label %rl
 done:
+  br label %gl
+; **栈区那一趟**：一块 L0 缓冲（L0.5 的栈区同理）在根表里只占**一条**（起点 + 字数），
+; 扫的时候逐字读、口径与根表那一趟完全相同 —— 一个字看着像堆内地址就去标记它。
+gl:
+  %gi = phi i32 [ 0, %done ], [ %gi2, %glc ]
+  %gn = load i32, ptr @__loment_regionn
+  %gd = icmp uge i32 %gi, %gn
+  br i1 %gd, label %wend, label %gb
+gb:
+  %gs = getelementptr [256 x i64], ptr @__loment_regions, i32 0, i32 %gi
+  %gsv = load i64, ptr %gs
+  %glp = getelementptr [256 x i64], ptr @__loment_regionl, i32 0, i32 %gi
+  %gln = load i64, ptr %glp
+  br label %wl
+wl:
+  %wi = phi i64 [ 0, %gb ], [ %wi2, %wlc ]
+  %wd = icmp uge i64 %wi, %gln
+  br i1 %wd, label %glc, label %wb
+wb:
+  %wo = shl i64 %wi, 3
+  %wa = add i64 %gsv, %wo
+  %wp = inttoptr i64 %wa to ptr
+  %wv = load i64, ptr %wp
+  %wbase = ptrtoint ptr @__loment_heap to i64
+  %wdo = sub i64 %wv, %wbase
+  %win = icmp ult i64 %wdo, 65536
+  br i1 %win, label %wmk, label %wlc
+wmk:
+  %wd32 = trunc i64 %wdo to i32
+  %wr = call i32 @__loment_markp(i32 %wd32)
+  br label %wlc
+wlc:
+  %wi2 = add i64 %wi, 1
+  br label %wl
+glc:
+  %gi2 = add i32 %gi, 1
+  br label %gl
+wend:
   ret void
 }
 
@@ -14009,6 +14052,7 @@ class _Ir:
         #: 比"对派生指针乱发"安全（后者会把块里的数据当成块长读，后果比不检查更坏）。
         self.lms_size: dict[str, int] = {}
         self.rootk = 0
+        self.regk = 0
         self.dbg_types = dbg_types if dbg_types is not None else {}  # M59: 类型 -> DIBasicType
         self.dbg_loc: int | None = None             # 当前语句的 DILocation
         self.cur_label: str | None = None           # 当前基本块标签 (phi 前驱用)
@@ -14210,102 +14254,125 @@ class _Ir:
         if not self.gc_hook:
             return
 
-        def slots(name: str) -> int:
-            """这个名字占几格根表：L0 提升过的缓冲按它的**字数**算，其余各占一格。"""
-            n = self.l0.get(name)
-            return (n + 7) // 8 if n else 1
-
-        #: L0.5 的栈区也要扫：它和 L0 的缓冲一样**可以装堆指针**（`wr64` 那种安全被调）。
-        #: 整块按字登记，口径与 L0 那条一致。
-        self.rootk = (sum(slots(nm) for nm, (ty, _) in self.vars.items() if self._root_ty(ty))
-                      + (self.l05_cap // 8 if self.l05_cap else 0)
+        #: **栈区表**（`#1655`）：L0 提升的缓冲与 L0.5 的栈区整块登记成一条
+        #: **(起点, 字数)**，不再逐字占根表格 —— 后者让一块 8 KiB 的缓冲（1024 个字）
+        #: 就把 1024 格根表占满：`alloc(8192)` 在 alpha 下静默 SIGILL，16 KiB 更糟，
+        #: 写穿表之后 SIGSEGV；而且每进一次函数就要写 `字数` 条根，调用热点上
+        #: 是 O(缓冲大小) 的开销（`#1655` 的实测表）。
+        #:
+        #: 块里的字**仍然要逐字扫**（`wr64` 那种安全被调可以把任意 u64 写进去），
+        #: 只是扫描点从"每次进函数"挪到"每次收集" —— 那才是该付这笔钱的地方。
+        self.regk = (sum(1 for nm, (ty, _) in self.vars.items()
+                         if self._root_ty(ty) and self.l0.get(nm))
+                     + (1 if self.l05_cap else 0))
+        #: 根表只收**具名槽**（L0 缓冲的槽里是栈地址，扫了也没用）与分配站点的 spill 槽。
+        self.rootk = (sum(1 for nm, (ty, _) in self.vars.items()
+                          if self._root_ty(ty) and not self.l0.get(nm))
                       + self.gc_sites)
-        if self.rootk == 0:
+        if self.rootk == 0 and self.regk == 0:
             return
         # `#778`：根表的游标与槽是**线程间共享**的。push/pop 各自是一段很短的
         # 临界区（不是整个调用帧）—— 线程体之间因此不会互相等，收集器也不会
         # 在两个 push 之间看到半张表。
         if self.threads:
             self.w("call void @__loment_rt_acquire()")
-        n0 = self.t()
-        self.w(f"{n0} = load i32, ptr @__loment_rootn")
-        #: L0.5 的栈区：**整块的每个 8 字节字各占一格**，与 L0 缓冲同口径（#362）。
-        #: 少了这一段，`rootn` 会跨过一批**从未初始化**的槽 —— 根扫读到的就是上一次
-        #: 递归留在同一段栈上的旧值，于是"区域里装着堆指针"这件事从来没被扫到。
-        i = 0
-        for name, (ty, slot) in self.vars.items():
-            if not self._root_ty(ty):
-                continue
-            sz = self.l0.get(name)
-            if sz:
-                # **L0 提升的缓冲：它的每一个 8 字节字各占一格**（`FujoJTOP/loment#362`）。
-                # 那个槽里存的是**栈**地址（`%NAME.buf`），而根扫拿槽里的值去减堆基址，
-                # 得到一个巨大的无符号数、`ult 65536` 为假 —— 于是整块缓冲**从来没人扫**。
-                # 而 L0 的规则**不禁止**缓冲里装堆指针：`_ptr_only_uses` 会把"只解引用"
-                # 的函数（如 `wr64`）吸收进安全集，于是那种函数可以把任意 u64 写进缓冲。
-                # 只登记**字**的地址就够了 —— 根扫本来就是"读那一格、看它像不像堆内地址"，
-                # 收集器一侧一个字都不用改。
-                k = (sz + 7) // 8
-                for j in range(k):
-                    idx = self.t()
-                    self.w(f"{idx} = add i32 {n0}, {i}")
-                    gp = self.t()
-                    self.w(f"{gp} = getelementptr [1024 x i64], ptr @__loment_roots,"
-                           f" i32 0, i32 {idx}")
-                    bp = self.t()
-                    self.w(f"{bp} = getelementptr [{k} x i64], ptr %{name}.buf, i32 0, i32 {j}")
-                    v = self.t()
-                    self.w(f"{v} = ptrtoint ptr {bp} to i64")
-                    self.w(f"store i64 {v}, ptr {gp}")
-                    i += 1
-                continue
-            idx = self.t()
-            self.w(f"{idx} = add i32 {n0}, {i}")
-            gp = self.t()
-            self.w(f"{gp} = getelementptr [1024 x i64], ptr @__loment_roots, i32 0, i32 {idx}")
-            v = self.t()
-            self.w(f"{v} = ptrtoint ptr {slot} to i64")
-            self.w(f"store i64 {v}, ptr {gp}")
-            i += 1
-        if self.l05_cap:
-            k = self.l05_cap // 8
-            for j in range(k):
+        if self.rootk:
+            n0 = self.t()
+            self.w(f"{n0} = load i32, ptr @__loment_rootn")
+            i = 0
+            for name, (ty, slot) in self.vars.items():
+                if not self._root_ty(ty) or self.l0.get(name):
+                    continue
+                idx = self.t()
+                self.w(f"{idx} = add i32 {n0}, {i}")
+                gp = self.t()
+                self.w(f"{gp} = getelementptr [1024 x i64], ptr @__loment_roots, i32 0, i32 {idx}")
+                v = self.t()
+                self.w(f"{v} = ptrtoint ptr {slot} to i64")
+                self.w(f"store i64 {v}, ptr {gp}")
+                i += 1
+            # **分配站点的 spill 槽**（`#1465`）：一格一个槽的地址，与具名槽同口径 ——
+            # 收集器读那一格、看它像不像堆内地址。放在最后，两边的次序才一致。
+            for j in range(self.gc_sites):
                 idx = self.t()
                 self.w(f"{idx} = add i32 {n0}, {i}")
                 gp = self.t()
                 self.w(f"{gp} = getelementptr [1024 x i64], ptr @__loment_roots,"
                        f" i32 0, i32 {idx}")
+                v = self.t()
+                self.w(f"{v} = ptrtoint ptr %gc.sp.{j} to i64")
+                self.w(f"store i64 {v}, ptr {gp}")
+                i += 1
+            n1 = self.t()
+            self.w(f"{n1} = add i32 {n0}, {self.rootk}")
+            self.w(f"store i32 {n1}, ptr @__loment_rootn")
+            ov = self.t()
+            self.w(f"{ov} = icmp ugt i32 {n1}, 1024")
+            ok, bad = self.l("rok"), self.l("rovf")
+            self.w(f"br i1 {ov}, label %{bad}, label %{ok}")
+            self.terminated = True
+            self.label(bad)
+            self.w("call void @__loment_abort()")
+            self.w("unreachable")
+            self.terminated = True
+            self.label(ok)
+        if self.regk:
+            # 越界检查**写在存之前**：`#1433` 那条"先写后查"在这里不能重演 ——
+            # 一条区落在表外，写的就是隔壁的全局变量。
+            g0 = self.t()
+            self.w(f"{g0} = load i32, ptr @__loment_regionn")
+            g1 = self.t()
+            self.w(f"{g1} = add i32 {g0}, {self.regk}")
+            gov = self.t()
+            self.w(f"{gov} = icmp ugt i32 {g1}, 256")
+            gok, gbad = self.l("gok"), self.l("gtrap")
+            self.w(f"br i1 {gov}, label %{gbad}, label %{gok}")
+            self.terminated = True
+            self.label(gbad)
+            self.w("call void @__loment_abort()")
+            self.w("unreachable")
+            self.terminated = True
+            self.label(gok)
+            r = 0
+            for name, (ty, _slot) in self.vars.items():
+                if not self._root_ty(ty):
+                    continue
+                sz = self.l0.get(name)
+                if not sz:
+                    continue
+                k = (sz + 7) // 8
+                idx = self.t()
+                self.w(f"{idx} = add i32 {g0}, {r}")
+                gp = self.t()
+                self.w(f"{gp} = getelementptr [256 x i64], ptr @__loment_regions,"
+                       f" i32 0, i32 {idx}")
                 bp = self.t()
-                self.w(f"{bp} = getelementptr [{k} x i64], ptr %l05.buf, i32 0, i32 {j}")
+                self.w(f"{bp} = getelementptr [{k} x i64], ptr %{name}.buf, i32 0, i32 0")
                 v = self.t()
                 self.w(f"{v} = ptrtoint ptr {bp} to i64")
                 self.w(f"store i64 {v}, ptr {gp}")
-                i += 1
-        # **分配站点的 spill 槽**（`#1465`）：一格一个槽的地址，与具名槽同口径 ——
-        # 收集器读那一格、看它像不像堆内地址。放在最后，两边的次序才一致。
-        for j in range(self.gc_sites):
-            idx = self.t()
-            self.w(f"{idx} = add i32 {n0}, {i}")
-            gp = self.t()
-            self.w(f"{gp} = getelementptr [1024 x i64], ptr @__loment_roots,"
-                   f" i32 0, i32 {idx}")
-            v = self.t()
-            self.w(f"{v} = ptrtoint ptr %gc.sp.{j} to i64")
-            self.w(f"store i64 {v}, ptr {gp}")
-            i += 1
-        n1 = self.t()
-        self.w(f"{n1} = add i32 {n0}, {self.rootk}")
-        self.w(f"store i32 {n1}, ptr @__loment_rootn")
-        ov = self.t()
-        self.w(f"{ov} = icmp ugt i32 {n1}, 1024")
-        ok, bad = self.l("rok"), self.l("rovf")
-        self.w(f"br i1 {ov}, label %{bad}, label %{ok}")
-        self.terminated = True
-        self.label(bad)
-        self.w("call void @__loment_abort()")
-        self.w("unreachable")
-        self.terminated = True
-        self.label(ok)
+                lp = self.t()
+                self.w(f"{lp} = getelementptr [256 x i64], ptr @__loment_regionl,"
+                       f" i32 0, i32 {idx}")
+                self.w(f"store i64 {k}, ptr {lp}")
+                r += 1
+            if self.l05_cap:
+                k = self.l05_cap // 8
+                idx = self.t()
+                self.w(f"{idx} = add i32 {g0}, {r}")
+                gp = self.t()
+                self.w(f"{gp} = getelementptr [256 x i64], ptr @__loment_regions,"
+                       f" i32 0, i32 {idx}")
+                bp = self.t()
+                self.w(f"{bp} = getelementptr [{k} x i64], ptr %l05.buf, i32 0, i32 0")
+                v = self.t()
+                self.w(f"{v} = ptrtoint ptr {bp} to i64")
+                self.w(f"store i64 {v}, ptr {gp}")
+                lp = self.t()
+                self.w(f"{lp} = getelementptr [256 x i64], ptr @__loment_regionl,"
+                       f" i32 0, i32 {idx}")
+                self.w(f"store i64 {k}, ptr {lp}")
+            self.w(f"store i32 {g1}, ptr @__loment_regionn")
         if self.threads:
             self.w("call void @__loment_rt_release()")
 
@@ -14395,16 +14462,23 @@ class _Ir:
                 self.w("call void @__loment_rt_release()")
 
     def roots_pop(self) -> None:
-        """离开本帧：把根表的游标退回去（与 `roots_push` 成对）。"""
-        if not self.gc_hook or self.rootk == 0:
+        """离开本帧：把根表与栈区表的游标都退回去（与 `roots_push` 成对）。"""
+        if not self.gc_hook or (self.rootk == 0 and self.regk == 0):
             return
         if self.threads:
             self.w("call void @__loment_rt_acquire()")
-        n = self.t()
-        self.w(f"{n} = load i32, ptr @__loment_rootn")
-        m = self.t()
-        self.w(f"{m} = sub i32 {n}, {self.rootk}")
-        self.w(f"store i32 {m}, ptr @__loment_rootn")
+        if self.rootk:
+            n = self.t()
+            self.w(f"{n} = load i32, ptr @__loment_rootn")
+            m = self.t()
+            self.w(f"{m} = sub i32 {n}, {self.rootk}")
+            self.w(f"store i32 {m}, ptr @__loment_rootn")
+        if self.regk:
+            gn = self.t()
+            self.w(f"{gn} = load i32, ptr @__loment_regionn")
+            gm = self.t()
+            self.w(f"{gm} = sub i32 {gn}, {self.regk}")
+            self.w(f"store i32 {gm}, ptr @__loment_regionn")
         if self.threads:
             self.w("call void @__loment_rt_release()")
 

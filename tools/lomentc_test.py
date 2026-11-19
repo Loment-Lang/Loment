@@ -2910,17 +2910,17 @@ def test_l0_rule_pair():
     assert a_calls == L0_ALPHA_ALLOC_LEFT, f"alpha 的分配点应为 {L0_ALPHA_ALLOC_LEFT}，得到 {a_calls}"
     # 两个数都非平凡：不然"全都提升"与"一个都不提升"都能让上面两条同时成立
     assert 0 < L0_ALPHA_ALLOC_LEFT < L0_ALLOC_SITES, "这一对里两种走向都要有"
-    # 缓冲的 `[... x i64]` 计数钉住"尺寸取整"没被改坏。每格现在有 **2 + 字数** 处：
-    # `alloca`、那条 `store ptr %N.buf`，以及**根登记的每一个字**
-    # （`FujoJTOP/loment#362`：提升缓冲的每个 8 字节字各占一格根表）。
+    # 缓冲的 `[... x i64]` 计数钉住"尺寸取整"没被改坏。每格现在有 **固定 3 处**：
+    # `alloca`、那条 `store ptr %N.buf`，以及栈区表那一条的起点 `getelementptr`
+    # （`#1655`：整块按 (起点, 字数) 登记一条，不再每个 8 字节字占一格根表 ——
+    # 后者让 `alloc(8192)` 就把 1024 格根表占满）。
     #
     # **`f_partial` 是 L0.5 那一格**（`docs/210` §2.10）：它有两处静态站点，于是不各发
     # 一条缓冲，而是共用 `%l05.buf`（64 + 32 = 96 B = 12 字）。参照数 = `alloca` 一条 +
-    # 静态站点两条（`getelementptr ... %l05.buf`）+ 根登记 12 字 —— 15 处；对应地，
-    # 那两格的 L0 参照（`2 + 8` 与 `2 + 4`）不再出现。
-    want_buf = sum(2 + (sz + 7) // 8
-                   for per in L0_WANT.values() for sz in per.values())
-    want_buf += 15 - (2 + 8) - (2 + 4)
+    # 静态站点两条（`getelementptr ... %l05.buf`）+ 栈区表一条的起点 —— 4 处；对应地，
+    # 那两格的 L0 参照（各 3 处）不再出现。
+    want_buf = 3 * sum(len(per) for per in L0_WANT.values())
+    want_buf += 4 - 3 - 3
     assert alpha_ll.count(".buf") == want_buf, alpha_ll.count(".buf")
     assert alpha_ll.count("%l05.buf = alloca [12 x i64]") == 1, alpha_ll.count("%l05.buf")
     assert ".buf" not in manual_ll

@@ -1312,7 +1312,7 @@ fn chk_is_kw(src: ptr, t: ptr, i: u32) -> u32 {
             || chk_tok_is(src, t, i, "match") || chk_tok_is(src, t, i, "guard")
             || chk_tok_is(src, t, i, "tick")
             || chk_tok_is(src, t, i, "quality") || chk_tok_is(src, t, i, "discharge")
-            || chk_tok_is(src, t, i, "revoke")
+            || chk_tok_is(src, t, i, "revoke") || chk_tok_is(src, t, i, "sibling")
             || chk_tok_is(src, t, i, "let") || chk_tok_is(src, t, i, "fn")
             || chk_tok_is(src, t, i, "struct") || chk_tok_is(src, t, i, "enum")
             || chk_tok_is(src, t, i, "const") || chk_tok_is(src, t, i, "use")
@@ -4620,7 +4620,8 @@ fn chk_moves(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             } else {
                 j = e;
             }
-        } else if (chk_tok_is(src, t, j, "couple") || chk_tok_is(src, t, j, "mutex"))
+        } else if (chk_tok_is(src, t, j, "couple") || chk_tok_is(src, t, j, "mutex")
+                || chk_tok_is(src, t, j, "sibling"))
                 && chk_tok_kind(t, j + 1) == 0
                 && (chk_tok_is(src, t, j + 2, ",") || chk_tok_is(src, t, j + 2, ";")) {
             let semi: u32 = chk_find_at(src, t, j, e, ";");
@@ -5933,7 +5934,8 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             } else {
                 j = e;
             }
-        } else if (chk_tok_is(src, t, j, "couple") || chk_tok_is(src, t, j, "mutex"))
+        } else if (chk_tok_is(src, t, j, "couple") || chk_tok_is(src, t, j, "mutex")
+                || chk_tok_is(src, t, j, "sibling"))
                 && chk_tok_kind(t, j + 1) == 0
                 && (chk_tok_is(src, t, j + 2, ",") || chk_tok_is(src, t, j + 2, ";")) {
             // `docs/315` §5：图边是**声明**，语句本身没有可查的表达式 —— 跳到 `;`。

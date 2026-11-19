@@ -4936,6 +4936,39 @@ FINE: tuple[Fine, ...] = (
          "Write only user fields.",
          "Change methods/inheritance for dispatch, not the object header."),
     ),
+    # `#866`：前门翻不动的那一类 —— 语法是另一门的，而 Stage A 的子集里没有这个构造。
+    # 原先落进 `E0999 未分类`，用户看到的是"请报告此消息"，像是编译器出了 bug；实际是
+    # **这一门的翻译子集只收一部分写法**，改写成该语言里更普通的形状就能过。与 E023
+    # 同一族（都是"这一版还不收"，不是源码语义错），但细分码要把"改写哪一边"说清。
+    Fine(
+        236, 23, r"里有子集外的写法",
+        "这写法在该门语法的翻译子集之外",
+        "the construct is outside the translated subset for that language",
+        "前门把这份源翻成 Loment 时，`Stage A` 的子集里没有这个构造 —— "
+        "那一门整份是全有或全无，丢了的部分不会悄悄跳过。",
+        "The front door translates this source into Loment, and `Stage A` has no rule for "
+        "this construct. That language is all-or-nothing: nothing is silently dropped.",
+        ("改写成该语言里更普通的写法（报错消息末尾点名了是哪一种，例如 `+=` 写成 "
+         "`x = x + 1;`）。",
+         "要保留原样：先在源语言侧写完整实现，再用 `extern fn` / C ABI 接进来。",
+         "绕不开就把这条消息贴到 issue 上 —— 它是翻译子集的缺口，不是你的语法错。"),
+        ("Rewrite it in a plainer form of that language (the message names the construct, "
+         "e.g. write `+=` as `x = x + 1;`).",
+         "If it must stay as written, implement it on the source-language side and link "
+         "it through `extern fn` / the C ABI.",
+         "If there is no workaround, report the message: it is a gap in the translated "
+         "subset, not an error in your syntax."),
+        why="前门把别的语法翻成 Loment，是为了让那份源真能编、能跑（`docs/186`）。"
+            "`Stage A` 只收一块语义明确的子集，收不全时**整份拒掉** —— 半翻出来的程序"
+            "会悄悄改变行为，那比报错糟得多。所以这不是分类表漏了一条，也不是你写错了；"
+            "它单独一个码，是因为「改写这一处」和「照编译器建议改那一行」是两件事。",
+        why_en="The front door translates another language into Loment so that source really "
+               "compiles and runs (`docs/186`). `Stage A` takes only a small subset with clear "
+               "semantics and rejects the whole unit when it cannot cover it - a half-translated "
+               "program would silently change behaviour. So this is neither a missing rule in "
+               "the table nor a mistake of yours; it has its own code because \"rewrite this "
+               "construct\" and \"fix that line as the compiler suggests\" are different jobs.",
+    ),
 )
 
 

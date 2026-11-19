@@ -1606,6 +1606,7 @@ fn do_builtins(mem: ptr, ab: ptr, argc: u32) -> u32 {
     termrow(mem, 1, "inb/outb", "port I/O - only the Rust transpile path supports it, not the native one");
     termrow(mem, 1, "syscall4", "syscall4(nr: u64, a0, a1, a2) -> i64   raw syscall (rax/rdi/rsi/rdx)");
     termrow(mem, 1, "syscall6", "syscall6(nr: u64, a0..a4) -> i64");
+    termrow(mem, 1, "syscall7", "syscall7(nr: u64, a0..a5) -> i64   six argument registers (rdi/rsi/rdx/r10/r8/r9)");
     termrow(mem, 1, "thread_spawn", "thread_spawn(\"worker\", stack_top, arg, done) -> i64   a real thread (ELF only)");
     wstr(1, "\n  ");
     gray(mem, 1);

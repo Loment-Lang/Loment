@@ -1,0 +1,24 @@
+module ir_class_inherit
+
+choose class_on
+
+class Base {
+    x: u32,
+    fn sum(self: &Base) -> u32 {
+        return self.x;
+    }
+}
+
+class Child extends Base {
+    y: u32,
+    fn total(self: &Child) -> u32 {
+        return self.sum() + self.y;
+    }
+}
+
+fn _start() -> u32 {
+    let c: Child = Child { x: 3, y: 4 };
+    let v: u32 = c.total();
+    syscall4(60, v as u64, 0, 0);
+    return 0;
+}

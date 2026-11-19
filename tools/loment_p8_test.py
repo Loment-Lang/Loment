@@ -1023,11 +1023,7 @@ def test_m85_checker_accepts_corpus_units():
     if not _clang():
         print("      SKIP: 无 clang")
         return
-    gaps = {
-        # 非目标: 参考实现的 IR 后端自己也发不出来 (native: inb 未实现), 它本就不是单元的
-        # 合法形状 —— 所以这条不是"checker 的缺口", 而是"这份文件不进单元语料"。
-        "native_raii.lomt",
-    }
+    gaps = set()
     with tempfile.TemporaryDirectory() as td:
         exe = _build_checker(td)
         ok = []
@@ -1083,6 +1079,40 @@ def test_m82_loment_codegen_byte_identical():
                 raise AssertionError(
                     f"{target.name} 首个差异 @{i}:\n"
                     f" loment {got[a:(i or 0) + 80]!r}\n python {want[a:(i or 0) + 80]!r}")
+
+
+@test
+def test_class_c4a_selfhost_nonvirtual_twin():
+    """C4a：自举侧的非虚类（字段布局 + 静态方法）与参考实现**逐字节**同。
+
+    这一条只覆盖 `class` 的 C1 子集：类体字段、`fn m(self: &C)`、类字面量、
+    方法调用。vtable / `super` / abstract（C2）留给 C4b；两者的分界与
+    `docs/345` §10.4 一致。参考实现把类方法追加在普通函数之后，自举侧也照同一
+    发射序（函数表仍按源码序）。
+    """
+    if not _clang():
+        print("      SKIP: 无 clang")
+        return
+    targets = (ROOT / "loment" / "selfhost" / "class" / "ir_class.lomt",
+               ROOT / "loment" / "selfhost" / "class" / "ir_class_parent.lomt",
+               ROOT / "loment" / "selfhost" / "class" / "ir_class_inherit.lomt")
+    with tempfile.TemporaryDirectory() as td:
+        exe = _build_codegen(td)
+        chk = _build_checker(td)
+        for target in targets:
+            want = _unit_ll(target)
+            got = _run_codegen(exe, target, td)
+            if got != want:
+                i = next((k for k in range(min(len(got), len(want))) if got[k] != want[k]), None)
+                a = max(0, (i or 0) - 80)
+                raise AssertionError(
+                    f"{target.name} 首个差异 @{i}:\n"
+                    f" loment {got[a:(i or 0) + 100]!r}\n python {want[a:(i or 0) + 100]!r}")
+            unit = Path(td) / f"u_{target.stem}.lomt"
+            unit.write_text(_unit_text(target), encoding="utf-8", newline="\n")
+            codes, det = _loment_codes(
+                chk, unit, _prof_of_text(target.read_text(encoding="utf-8")))
+            assert not codes, f"{target.name}: 自举 checker 假报 {codes} {det[:120]}"
 
 
 @test

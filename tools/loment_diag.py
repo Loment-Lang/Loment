@@ -139,7 +139,7 @@ RULES = [
      "要么删掉 `excluded \"<space>: ...\"`，要么换一个能力空间；"
      "② **行为**用了那个空间（声明 `excluded \"network\"`、代码里在调联网号，`docs/227` §3）—— "
      "要么删掉那条声明，要么把那个机调用换成不联网的。"),
-    ("E006", r"已被移动",
+    ("E006", r"已被移动|`&mut` 已经用掉一次",
      "移动后使用", "移动后改用引用（`&`/`&mut`）传参，或让类型实现 `Copy` 语义（全字段为整型）。"),
     ("E007", r"既被可变借用又被借用|被可变借用两次",
      "借用冲突", "同一次调用里对同一变量只保留一种借用；先复制到临时变量再传。"),
@@ -232,7 +232,7 @@ RULES = [
              r"开关 .* 写了两次|`choose` 有 .* 条, 超过上限|`addin` 有 .* 条, 超过上限|"
              r"不许写在另一个开关体里|库不许 `addin`|`addin` 单元不许声明核心模式|"
              r"`addin` 嵌套超过|`addin` 拉进来的单元里只能写 choose 相关代码|"
-             r"依赖嵌套超过|生命周期控制从",
+             r"依赖嵌套超过|生命周期控制从|虚方法/vtable 需要|没有封闭目标集",
      "`choose` / `addin` 用法不对",
      "**核心模式**（`std`/`no_std`、`gc_manual`/`gc_auto`/`gc_auto_alpha`/`no_gc`、"
      "`runtime`/`no_runtime`、`sealed`/`hosted`、`vm`/`no_vm`）声明的是**整个程序**的取值，"
@@ -305,6 +305,10 @@ RULES = [
              # 与 C2 才有的构造，都在解析末尾点名拒。
              r"类体里的 .* 之后只允许 fn|类方法 .* 的 self 必须是第一个参数|"
              r"抽象类 .* 从 C2 起|用了 virtual/abstract|类的继承成环|"
+             r"由编译器填|抽象类 .* 不能实例化|是编译器保留字段|"
+             r"没有父类，不能用 super|的关联函数里不能用 super|"
+             r"是抽象方法，但类不是 abstract|是虚方法/抽象方法，必须有 self|"
+             r"覆盖父类虚方法要写|指向抽象方法，没有实现可调|"
              # `#33` / `#36`：字符串里的**未知转义**。它原先在词法期**不报**（兜底取原字符），
              # 现在报了 —— 新增的词法期消息必须并进这一码，否则会落到 E0999「请报告」。
              r"未知转义|"
@@ -4876,6 +4880,61 @@ FINE: tuple[Fine, ...] = (
         ("Match the declared parameter count.",
          "Write a unit-returning `perform` as a statement of its own.",
          "If you need the value, change the operation's declared return type."),
+    ),
+    Fine(
+        232, 22, r"虚方法/vtable 需要 `choose runtime`",
+        "虚方法需要运行期",
+        "virtual dispatch needs the runtime",
+        "vtable 的缓存表由运行期的分配器在首次构造时填；`no_runtime` 下没有这条路。",
+        "The vtable cache is filled by the runtime allocator on first construction; "
+        "`no_runtime` has no such path.",
+        ("在根单元写 `choose runtime`。",
+         "去掉 `virtual` / `abstract`，回到静态派发。",
+         "把类实例改成不经过 vtable 的普通结构体。"),
+        ("Write `choose runtime` in the root unit.",
+         "Drop `virtual` / `abstract` and use static dispatch.",
+         "Use a plain struct instead of a vtable class."),
+    ),
+    Fine(
+        233, 22, r"函数指针类型 .* 没有封闭目标集",
+        "函数指针没有封闭目标集",
+        "the function-pointer type has no closed target set",
+        "`choose fp` 只收封闭世界：每个间接调用点都要有至少一个同型函数被取址。",
+        "`choose fp` is a closed world: every indirect call needs at least one "
+        "same-typed function whose address is taken.",
+        ("在程序里给同型函数取址（`let f: (T) -> R = inc;`）。",
+         "把间接调用改成直接调用。",
+         "检查函数指针的类型是否写错。"),
+        ("Take the address of a same-typed function (`let f: (T) -> R = inc;`).",
+         "Replace the indirect call with a direct one.",
+         "Check the function-pointer type for a typo."),
+    ),
+    Fine(
+        234, 19, r"抽象类 .* 不能实例化",
+        "抽象类不能实例化",
+        "an abstract class cannot be instantiated",
+        "抽象类只提供布局/槽位，具体对象必须来自实现了全部抽象方法的子类。",
+        "An abstract class only provides layout and slots; objects must come from a "
+        "concrete subclass that implements every abstract method.",
+        ("实例化一个具体子类。",
+         "给子类补上所有 `override`。",
+         "去掉 `abstract`（如果它其实可以独立构造）。"),
+        ("Instantiate a concrete subclass.",
+         "Add the missing `override`s to the subclass.",
+         "Remove `abstract` if it can be constructed on its own."),
+    ),
+    Fine(
+        235, 19, r".* 由编译器填",
+        "编译器保留字段",
+        "a compiler-owned field was initialized",
+        "类的 vtable 头由编译器写入，用户字面量里不能手写。",
+        "The class vtable header is written by the compiler; user literals cannot set it.",
+        ("删掉字面量里的 `__vtable`。",
+         "只写用户字段。",
+         "要改派发行为就改方法/继承，不要碰对象头。"),
+        ("Remove `__vtable` from the literal.",
+         "Write only user fields.",
+         "Change methods/inheritance for dispatch, not the object header."),
     ),
 )
 

@@ -29,7 +29,7 @@
 module surface_data
 choose runtime
 
-pub fn n_codes() -> u32 { return 235; }
+pub fn n_codes() -> u32 { return 236; }
 
 /// 内部码段的下界（`#773`）。`E900` 起是"工具链自己崩了"那一类。
 pub fn internal_lo() -> u32 { return 900; }
@@ -512,6 +512,8 @@ pub fn code_title(c: u32, lang: u32) -> str {
     if k == 469 { return "抽象类不能实例化"; }
     if k == 470 { return "a compiler-owned field was initialized"; }
     if k == 471 { return "编译器保留字段"; }
+    if k == 472 { return "the construct is outside the translated subset for that language"; }
+    if k == 473 { return "这写法在该门语法的翻译子集之外"; }
     if k == 1800 { return "the tool died without reporting (internal)"; }
     if k == 1801 { return "工具链进程死了，没留下诊断"; }
     if k == 1998 { return "unclassified (please report)"; }
@@ -991,6 +993,8 @@ pub fn code_what(c: u32, lang: u32) -> str {
     if k == 469 { return "抽象类只提供布局/槽位，具体对象必须来自实现了全部抽象方法的子类。"; }
     if k == 470 { return "The class vtable header is written by the compiler; user literals cannot set it."; }
     if k == 471 { return "类的 vtable 头由编译器写入，用户字面量里不能手写。"; }
+    if k == 472 { return "The front door translates this source into Loment, and `Stage A` has no rule for this construct. That language is all-or-nothing: nothing is silently dropped."; }
+    if k == 473 { return "前门把这份源翻成 Loment 时，`Stage A` 的子集里没有这个构造 —— 那一门整份是全有或全无，丢了的部分不会悄悄跳过。"; }
     if k == 1800 { return "A process in the toolchain died **before it could write a structured diagnostic** - killed by a signal, or exited abnormally, with no record in `--diag-out`."; }
     if k == 1801 { return "工具链里的一个进程在**能写出结构化诊断之前**就死了 —— 被信号打死，或者以异常状态退出，而 `--diag-out` 一份记录都没写。"; }
     if k == 1998 { return "The compiler reported an error that is not in the classification table -- even the toolchain did not recognise which code this message belongs to."; }
@@ -1470,6 +1474,8 @@ pub fn code_why(c: u32, lang: u32) -> str {
     if k == 469 { return "Loment 的**原生语法与 Rust 很接近，但去掉了**几样东西：单引号字符字面量、无值 `return;`、表达式式的 `match` 臂、`mut` 作为绑定修饰词。照 Rust 的习惯写很容易踩到这几处 —— 它们不是“暂时不支持”，是这门语言没有。（说的只是**原生语法**：同一段逻辑也能用 C / C++ / Java / C# / Go / Python 的写法写，那是另一层，见 `docs/188`。）"; }
     if k == 470 { return "Loment's **own syntax is close to Rust but drops** a few things: single-quoted character literals, value-less `return;`, expression-style `match` arms, and `mut` as a binding modifier. Writing from Rust habits lands on these easily - they are not \"not supported yet\", the language simply does not have them. (That is the native syntax only: the same logic can also be written the C / C++ / Java / C# / Go / Python way, which is a different layer - see `docs/188`.)"; }
     if k == 471 { return "Loment 的**原生语法与 Rust 很接近，但去掉了**几样东西：单引号字符字面量、无值 `return;`、表达式式的 `match` 臂、`mut` 作为绑定修饰词。照 Rust 的习惯写很容易踩到这几处 —— 它们不是“暂时不支持”，是这门语言没有。（说的只是**原生语法**：同一段逻辑也能用 C / C++ / Java / C# / Go / Python 的写法写，那是另一层，见 `docs/188`。）"; }
+    if k == 472 { return "The front door translates another language into Loment so that source really compiles and runs (`docs/186`). `Stage A` takes only a small subset with clear semantics and rejects the whole unit when it cannot cover it - a half-translated program would silently change behaviour. So this is neither a missing rule in the table nor a mistake of yours; it has its own code because \"rewrite this construct\" and \"fix that line as the compiler suggests\" are different jobs."; }
+    if k == 473 { return "前门把别的语法翻成 Loment，是为了让那份源真能编、能跑（`docs/186`）。`Stage A` 只收一块语义明确的子集，收不全时**整份拒掉** —— 半翻出来的程序会悄悄改变行为，那比报错糟得多。所以这不是分类表漏了一条，也不是你写错了；它单独一个码，是因为「改写这一处」和「照编译器建议改那一行」是两件事。"; }
     if k == 1800 { return "The diagnostics channel can only describe failures that were **successfully serialized before the failure**. A compiler crash, a linker crash, or the renderer crashing on its own all go the same way: the JSONL is empty and there is nothing for the renderer to do. The launcher now closes that gap: it reads the exit status / signal name and synthesizes this record, so \"no record\" no longer means \"nothing happened\" (#773). This is not a semantic error in your source - it is the **implementation failing on itself**."; }
     if k == 1801 { return "诊断系统只能描述**在失败之前已经成功序列化**的失败。编译器崩溃、链接器崩溃、报错器自己崩溃，走的都是这条路：JSONL 是空的，渲染器无事可做。启动器现在替它收尸：拿到退出状态 / 信号名，合成这一条记录，于是「没有任何记录」不再等于「什么都没有发生」（`#773`）。这不是你源码的语义错 —— 它是**实现自己的失败**。"; }
     if k == 1998 { return "The table and the compiler come out of the same repository and the same build. A message landing here means it has not been classified yet, not that the toolchain versions disagree: fix by the message, then report it so a rule can be added."; }
@@ -1949,6 +1955,8 @@ pub fn code_yes(c: u32, lang: u32) -> str {
     if k == 469 { return "Rust 风味那套语法；`//` `/* */` 注释；`let x: T = e;`"; }
     if k == 470 { return "the Rust-subset syntax; `//` and `/* */` comments; `let x: T = e;`"; }
     if k == 471 { return "Rust 风味那套语法；`//` `/* */` 注释；`let x: T = e;`"; }
+    if k == 472 { return "scalar arithmetic, control flow, strings, arrays, slices, structs, enums (`match`) - passing aggregates by value depends on the backend"; }
+    if k == 473 { return "标量运算、控制流、字符串、数组、切片、结构体、枚举（`match`）—— 按值传聚合看目标后端"; }
     if k == 1800 { return "a tool exits 0 (no diagnostics) or 1 (diagnostics, and it left a record)"; }
     if k == 1801 { return "工具链以 0 退出（无诊断）或 1 退出（有诊断并留下了记录）"; }
     if k == 1998 { return "classified messages after a report lands"; }
@@ -2428,6 +2436,8 @@ pub fn code_no(c: u32, lang: u32) -> str {
     if k == 469 { return "单引号字符字面量；无值 `return;`；表达式式 match 臂；`let mut x: T`（`mut` 不是关键字）"; }
     if k == 470 { return "single-quoted character literals; value-less `return;`; expression-style match arms; `let mut x: T` (`mut` is not a keyword)"; }
     if k == 471 { return "单引号字符字面量；无值 `return;`；表达式式 match 臂；`let mut x: T`（`mut` 不是关键字）"; }
+    if k == 472 { return "**this message itself is the \"not supported\"** - the exact scope is the milestone table in `docs/145`, not anything on your side of the source"; }
+    if k == 473 { return "**这条消息本身就是“不支持”** —— 具体范围以 `docs/145` 的里程碑表为准，不在源码那一侧"; }
     if k == 1800 { return "killed by a signal / exited abnormally without writing any structured diagnostic"; }
     if k == 1801 { return "被信号打死 / 异常退出，而且一份结构化诊断都没写"; }
     if k == 1998 { return "guessing a code"; }
@@ -2671,6 +2681,7 @@ pub fn code_ascii(c: u32) -> str {
     if c == 233 { return "the function-pointer type has no closed target set"; }
     if c == 234 { return "an abstract class cannot be instantiated"; }
     if c == 235 { return "a compiler-owned field was initialized"; }
+    if c == 236 { return "the construct is outside the translated subset for that language"; }
     if c == 900 { return "a tool in the chain died before it could report (internal) - report it with the unit"; }
     if c == 999 { return "unclassified - please report it"; }
     return "";
@@ -2872,6 +2883,7 @@ pub fn code_family(c: u32) -> u32 {
     if c == 233 { return 22; }
     if c == 234 { return 19; }
     if c == 235 { return 19; }
+    if c == 236 { return 23; }
     return c;
 }
 
@@ -4338,6 +4350,12 @@ pub fn code_fix(c: u32, i: u32, lang: u32) -> str {
     if k == 3761 { return "删掉字面量里的 `__vtable`。"; }
     if k == 3763 { return "只写用户字段。"; }
     if k == 3765 { return "要改派发行为就改方法/继承，不要碰对象头。"; }
+    if k == 3776 { return "Rewrite it in a plainer form of that language (the message names the construct, e.g. write `+=` as `x = x + 1;`)."; }
+    if k == 3778 { return "If it must stay as written, implement it on the source-language side and link it through `extern fn` / the C ABI."; }
+    if k == 3780 { return "If there is no workaround, report the message: it is a gap in the translated subset, not an error in your syntax."; }
+    if k == 3777 { return "改写成该语言里更普通的写法（报错消息末尾点名了是哪一种，例如 `+=` 写成 `x = x + 1;`）。"; }
+    if k == 3779 { return "要保留原样：先在源语言侧写完整实现，再用 `extern fn` / C ABI 接进来。"; }
+    if k == 3781 { return "绕不开就把这条消息贴到 issue 上 —— 它是翻译子集的缺口，不是你的语法错。"; }
     if k == 14400 { return "Report the smallest source that reproduces it together with this record - a crash is a compiler defect, not something you can work around in your code."; }
     if k == 14402 { return "Include the exit status / signal name (already in this message) and the output of `loment version`."; }
     if k == 14404 { return "If the message names the **linker** (`loment-lomelf`), also include the `-o` path and the target platform."; }
@@ -4593,6 +4611,7 @@ pub fn code_nfix(c: u32) -> u32 {
     if c == 233 { return 3; }
     if c == 234 { return 3; }
     if c == 235 { return 3; }
+    if c == 236 { return 3; }
     if c == 900 { return 4; }
     if c == 999 { return 3; }
     return 0;

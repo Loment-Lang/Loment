@@ -17045,18 +17045,9 @@ def _desugar_matchexpr(mod: Module) -> None:
 #   * 处理器是**词法**的：`perform` 必须被同一个函数里外层的 `handle` 覆盖。
 #
 # 降级就是内联（§7.3 的"零续延对象"）：`perform E.op(a…)` 变成
-# `let p… = a…; <臂体>; let r = <resume 的值>;`，`handle` 变成它的体。降完
+# `let <臂形参> = 实参…; <臂体>`（resume 的值直接落到目标上），`handle` 变成它的体。
+# **不造合成名**（§7.8）：自举侧是 token 驱动的，只能用源里已有的标识符。降完
 # 检查器/发射器/L0/L1/L2 一行都不用认识效应节点 —— 与 `IfExpr` 同一条路数。
-
-_EFF_TMP = [0]
-#: 处理器编号（捕获名 `__eff_c<h>_<i>` 用）。与 `__eff_p/r/l` 的计数器分开 ——
-#: 这两个数进 IR，两侧实现必须按同一个次序发号。
-_EFF_HANDLE = [0]
-
-
-def _eff_fresh(prefix: str) -> str:
-    _EFF_TMP[0] += 1
-    return f"__eff_{prefix}{_EFF_TMP[0]}"
 
 
 def _eff_contains_effect(o) -> bool:
@@ -17080,39 +17071,6 @@ def _eff_idents(o, out: set[str] | None = None) -> set[str]:
     return out
 
 
-def _eff_subst(o, mapping: dict[str, str]):
-    """臂内改名：只认**局部绑定与引用**（`Ident` / `Call.name` / `Let.name`）。"""
-    if isinstance(o, list):
-        return [_eff_subst(x, mapping) for x in o]
-    if isinstance(o, tuple):
-        return tuple(_eff_subst(x, mapping) for x in o)
-    if isinstance(o, Ident):
-        if o.name in mapping:
-            o.name = mapping[o.name]
-        return o
-    if isinstance(o, Call):
-        if o.name in mapping:
-            o.name = mapping[o.name]
-        o.args = [_eff_subst(a, mapping) for a in o.args]
-        return o
-    if isinstance(o, Let):
-        if o.name in mapping:
-            o.name = mapping[o.name]
-        if o.expr is not None:
-            o.expr = _eff_subst(o.expr, mapping)
-        return o
-    if isinstance(o, Assign):
-        o.target = _eff_subst(o.target, mapping)
-        o.expr = _eff_subst(o.expr, mapping)
-        return o
-    if is_dataclass(o) and not isinstance(o, type):
-        for fd in fields(o):
-            if fd.name in ("line", "col", "off", "len"):
-                continue
-            setattr(o, fd.name, _eff_subst(getattr(o, fd.name), mapping))
-    return o
-
-
 def _eff_flat_ok(stmts: list) -> bool:
     return all(isinstance(s, (Let, Assign, ExprStmt, Return)) for s in stmts)
 
@@ -17126,7 +17084,40 @@ def _eff_arm_free(arm: HandlerArm) -> list[str]:
     return sorted(_eff_idents(arm.body) - local)
 
 
-def _eff_check_arm(arm: HandlerArm, op: EffectOp, errs: list[str]) -> str | None:
+def _eff_declared(stmts, out: set[str] | None = None) -> set[str]:
+    """函数 / handle 体里声明过的局部名（含循环与模式绑定）——新鲜性约束用。"""
+    out = set() if out is None else out
+
+    def walk(o):
+        if isinstance(o, list):
+            for x in o:
+                walk(x)
+        elif is_dataclass(o) and not isinstance(o, type):
+            if isinstance(o, Let):
+                out.add(o.name)
+            elif isinstance(o, For):
+                out.add(o.var)
+            elif isinstance(o, ForEach):
+                out.add(o.var)
+                if o.idx:
+                    out.add(o.idx)
+            b = getattr(o, "bind", None)
+            if isinstance(b, str) and b:
+                out.add(b)
+            for fd in fields(o):
+                if fd.name in ("line", "col", "off", "len", "name", "var", "idx"):
+                    continue
+                if isinstance(o, Handle) and fd.name == "arms":
+                    # 臂的形参 / 局部属于**内联点**，不是外层函数的局部。
+                    continue
+                walk(getattr(o, fd.name))
+
+    walk(list(stmts))
+    return out
+
+
+def _eff_check_arm(arm: HandlerArm, op: EffectOp, errs: list[str],
+                   outer: set[str], body_locals: set[str]) -> str | None:
     """校验一条臂；返回 `"resume"` / `"abort"`（出错返回 None）。"""
     if not _eff_flat_ok(arm.body):
         errs.append(f"{arm.line}: 效应臂 `{arm.op}` 里只许平铺语句（A3a："
@@ -17163,56 +17154,57 @@ def _eff_check_arm(arm: HandlerArm, op: EffectOp, errs: list[str]) -> str | None
                     and t.obj.name in free:
                 errs.append(f"{s.line}: 效应臂 `{arm.op}` 写捕获的 `{t.obj.name}[…]` —— "
                             f"捕获只读（A3b）")
+    # 新鲜性（§7.8）：内联不造合成名，所以臂引入的名字不能与函数里的局部撞，
+    # 臂引用的外层局部也不能被 handle 体里的同名局部遮住。
+    names = list(arm.params)
+    for s in arm.body[:-1]:
+        if isinstance(s, Let):
+            if s.name in names:
+                errs.append(f"{s.line}: 效应臂 `{arm.op}` 的局部 `{s.name}` 重复声明")
+                continue
+            names.append(s.name)
+    for nm in names:
+        if nm in outer:
+            errs.append(f"{s.line}: 效应臂 `{arm.op}` 的形参/局部 `{nm}` 与函数里的"
+                        f"局部同名 —— 降级不造合成名（docs/341 §7.8）")
+    for nm in sorted(free):
+        if nm in body_locals:
+            errs.append(f"{s.line}: 效应臂 `{arm.op}` 引用的 `{nm}` 被 handle 体里"
+                        f"的同名局部遮住 —— 降级不造合成名（docs/341 §7.8）")
     return kind
 
 
 def _eff_arm_inline(p: Perform, op: EffectOp, arm: HandlerArm,
-                    caps: dict[str, str], nname: str | None
-                    ) -> tuple[list, object, str]:
-    """把一次 `perform` 内联成语句：`let p… = 实参…; <臂体>; let r = resume 的值;`。"""
-    tag = _EFF_TMP[0] + 1
-    # 臂在**同一个处理器里可能被多个 perform 用**：每处内联都要一份自己的副本，
-    # 否则 `_eff_subst` 会就地改掉上一条内联已经发出去的节点。
+                    nname: str | None) -> tuple[list, object, str]:
+    """把一次 `perform` 内联成语句：`let <形参> = 实参…; <臂体>`（无合成名，§7.8）。"""
+    # 臂可能被同一个处理器里的多个 perform 用：每处内联一份副本，免得共享节点。
     src_body = copy.deepcopy(arm.body)
-    mapping: dict[str, str] = {}
-    for i, pn in enumerate(arm.params):
-        mapping[pn] = f"__eff_p{tag}_{i}"
-    for k, s in enumerate(src_body[:-1]):
-        if isinstance(s, Let) and s.name not in mapping:
-            mapping[s.name] = f"__eff_l{tag}_{k}"
-    for nm, fresh in caps.items():
-        mapping.setdefault(nm, fresh)
-    _EFF_TMP[0] = tag
     out: list = []
     for (_opn, pt), apn, arg in zip(op.params, arm.params, p.args):
-        # 实参是**调用方**的表达式：不能过臂的改名表（同名的形参会把它改掉）。
-        out.append(Let(mapping[apn], pt, arg, p.line))
-    body = _eff_subst(src_body[:-1], mapping)
-    out += body
+        out.append(Let(apn, pt, arg, p.line))
+    out += src_body[:-1]
     tail = src_body[-1]
     if isinstance(tail, ExprStmt) and isinstance(tail.expr, Resume):
-        value = _eff_subst(tail.expr.arg, mapping)
+        value = tail.expr.arg
         if op.ret == "()":
             # 单位返回：`resume(())` 求值后丢弃，没有值可交。
             out.append(ExprStmt(value, p.line))
             return out, None, "resume"
-        rname = f"__eff_r{tag}"
-        out.append(Let(rname, op.ret, value, p.line))
-        return out, Ident(rname, p.line), "resume"
+        return out, value, "resume"
     # abort（A3b）：臂给出整个 `handle` 的值，然后跳出包装它的 `while true`。
     assert isinstance(tail, Return) and tail.expr is not None
     assert nname is not None
-    out.append(Assign(Ident(nname, p.line), _eff_subst(tail.expr, mapping), p.line))
+    out.append(Assign(Ident(nname, p.line), tail.expr, p.line))
     out.append(Break(p.line))
     return out, None, "abort"
 
 
 def _eff_lower_handle(name: str, ty: str, space: str, h: Handle,
-                      env: dict[str, tuple[dict[str, HandlerArm], dict[str, str],
+                      env: dict[str, tuple[dict[str, HandlerArm],
                                           frozenset[str], str]],
                       decls: dict[str, EffectDecl],
                       owners: dict[str, list[str]],
-                      errs: list[str]) -> list:
+                      outer: set[str], errs: list[str]) -> list:
     spec = decls.get(h.effect)
     if spec is None:
         errs.append(f"{h.line}: 处理器处理的效应 `{h.effect}` 没有声明")
@@ -17220,6 +17212,7 @@ def _eff_lower_handle(name: str, ty: str, space: str, h: Handle,
     ops = {o.name: o for o in spec.ops}
     arms: dict[str, HandlerArm] = {}
     abort_ops: set[str] = set()
+    body_locals = _eff_declared(h.body[:-1])
     bad = 0
     for a in h.arms:
         if a.op in arms:
@@ -17236,7 +17229,7 @@ def _eff_lower_handle(name: str, ty: str, space: str, h: Handle,
                         f"声明是 {len(op.params)} 个")
             bad = 1
             continue
-        kind = _eff_check_arm(a, op, errs)
+        kind = _eff_check_arm(a, op, errs, outer, body_locals)
         if kind is None:
             bad = 1
             continue
@@ -17257,26 +17250,10 @@ def _eff_lower_handle(name: str, ty: str, space: str, h: Handle,
         errs.append(f"{h.line}: A3a 不支持把 `perform` 嵌在表达式中 —— "
                     f"把它拆成单独一条语句")
         return []
-    # 捕获（A3b）在**进入处理器时**按值拷一份：词法语义的读值就是那一刻的外层值，
-    # 不会被 handle 体里同名的局部遮住。只读（`_eff_check_arm` 挡赋值）。
-    caps: list[str] = []
-    for a in h.arms:
-        if a.op not in arms:
-            continue
-        for nm in _eff_arm_free(a):
-            if nm not in caps:
-                caps.append(nm)
-    htag = _EFF_HANDLE[0] + 1
-    _EFF_HANDLE[0] = htag
-    capmap: dict[str, str] = {}
     out: list = [Let(name, ty, None, h.line, space)]
-    for i, nm in enumerate(caps):
-        fresh = f"__eff_c{htag}_{i}"
-        capmap[nm] = fresh
-        out.append(Let(fresh, "auto", Ident(nm, h.line), h.line))
     inner = dict(env)
-    inner[h.effect] = (arms, capmap, frozenset(abort_ops), name)
-    body = _eff_lower_stmts(h.body[:-1], inner, decls, owners, errs)
+    inner[h.effect] = (arms, frozenset(abort_ops), name)
+    body = _eff_lower_stmts(h.body[:-1], inner, decls, owners, outer, errs)
     if abort_ops:
         # abort 的非局部退出：整个 handle 体包一层 `while true`，abort 臂
         # 写完 `n` 就 `break` —— 体里剩下的语句被跳过。体是平铺的（嵌套的
@@ -17291,7 +17268,7 @@ def _eff_lower_handle(name: str, ty: str, space: str, h: Handle,
 
 
 def _eff_lower_perform(p: Perform,
-                       env: dict[str, tuple[dict[str, HandlerArm], dict[str, str],
+                       env: dict[str, tuple[dict[str, HandlerArm],
                                            frozenset[str], str]],
                        decls: dict[str, EffectDecl], owners: dict[str, list[str]],
                        errs: list[str],
@@ -17325,19 +17302,19 @@ def _eff_lower_perform(p: Perform,
         errs.append(f"{p.line}: `perform {eff}.{p.op}` 没有被同一函数里词法上的 "
                     f"`handle {eff}` 覆盖（A3a 的处理器是词法的）")
         return [], None, None
-    return _eff_arm_inline(p, op, arm, entry[1], entry[3])
+    return _eff_arm_inline(p, op, arm, entry[2])
 
 
 def _eff_lower_stmts(stmts: list,
-                     env: dict[str, tuple[dict[str, HandlerArm], dict[str, str],
+                     env: dict[str, tuple[dict[str, HandlerArm],
                                           frozenset[str], str]],
                      decls: dict[str, EffectDecl], owners: dict[str, list[str]],
-                     errs: list[str]) -> list:
+                     outer: set[str], errs: list[str]) -> list:
     out: list = []
     for s in stmts:
         if isinstance(s, Let) and isinstance(s.expr, Handle):
             out += _eff_lower_handle(s.name, s.type, s.space, s.expr,
-                                     env, decls, owners, errs)
+                                     env, decls, owners, outer, errs)
             continue
         if isinstance(s, Let) and isinstance(s.expr, Perform):
             before = len(errs)
@@ -17351,9 +17328,12 @@ def _eff_lower_stmts(stmts: list,
                 errs.append(f"{s.line}: `perform` 的值是 `()`，不能绑给 `{s.name}`")
             continue
         if isinstance(s, ExprStmt) and isinstance(s.expr, Perform):
-            stmts, _value, _kind = _eff_lower_perform(s.expr, env, decls, owners,
-                                                      errs, s.line)
+            stmts, value, _kind = _eff_lower_perform(s.expr, env, decls, owners,
+                                                     errs, s.line)
             out += stmts
+            if value is not None:
+                # 语句位置的 perform：resume 的值要求值后丢弃（可能有副作用）。
+                out.append(ExprStmt(value, s.line))
             continue
         if _eff_contains_effect(s):
             errs.append(f"{getattr(s, 'line', 1)}: A3a 只支持**语句位置**的 "
@@ -17377,7 +17357,8 @@ def _lower_effects(mod: Module, deps: list[Module] | None = None) -> list[str]:
             owners.setdefault(op.name, []).append(en)
     for m in mods:
         for f in m.funcs:
-            f.body = _eff_lower_stmts(f.body, {}, decls, owners, errs)
+            outer = {p.name for p in f.params} | _eff_declared(f.body)
+            f.body = _eff_lower_stmts(f.body, {}, decls, owners, outer, errs)
         m.effect_runtime = []
     return errs
 

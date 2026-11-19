@@ -2638,7 +2638,7 @@ fn _start() {
         let y: u32 = perform Log.add(x);
         x + y
     } with {
-        add(base) => { resume(base + 1); }
+        add(arg) => { resume(arg + 1); }
     };
     print_num(n as i64);
     print("\\n");
@@ -2662,7 +2662,6 @@ effect Log {
 fn _start() {
     let base: u32 = 40;
     let n: u32 = handle Log {
-        let base: u32 = 7;
         let a: u32 = perform Log.get();
         a + 1
     } with {

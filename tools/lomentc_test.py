@@ -7614,11 +7614,9 @@ def test_tail_resumptive_handle_lowers_to_plain_statements():
         "fn run() -> u32 {\n"
         "    let n: u32;\n"
         "    let a: u32;\n"
-        "    let __eff_r1: u32 = 41;\n"
-        "    a = __eff_r1;\n"
+        "    a = 41;\n"
         "    n = a + 1;\n"
         "    return n;\n}\n")
-    lomentc._EFF_TMP[0] = 0            # 临时名是确定的：这一条按名字比 IR
     a, b = parse(src), parse(plain)
     assert lomentc.check(a) == [], lomentc.check(a)
     assert lomentc.check(b) == [], lomentc.check(b)
@@ -7630,9 +7628,24 @@ def test_tail_resumptive_handle_lowers_to_plain_statements():
 
 
 @test
-def test_arm_capture_is_read_only_and_by_value_at_handle_entry():
-    """A3b：臂可以捕获处理器外的局部，**进入处理器时**按值拷一份，且只读。"""
-    cap = _EFF_BASE + (
+def test_arm_capture_is_direct_and_shadowing_is_rejected():
+    """A3b：臂直接引用外层局部（不造合成名）；写捕获与同名遮蔽都点名拒（§7.8）。"""
+    ok = _EFF_BASE + (
+        "effect Log { fn get() -> u32; }\n\n"
+        "fn run() -> u32 {\n"
+        "    let base: u32 = 7;\n"
+        "    let n: u32 = handle Log {\n"
+        "        let a: u32 = perform Log.get();\n"
+        "        a\n"
+        "    } with { get() => { resume(base); } };\n"
+        "    return n;\n}\n")
+    m = parse(ok)
+    assert lomentc.check(m) == [], lomentc.check(m)
+    names = [getattr(s, "name", "") for s in m.funcs[0].body
+             if isinstance(s, lomentc.Let)]
+    assert not any(nm.startswith("__eff_") for nm in names), names
+    # handle 体里同名局部的遮蔽：直接引用会改绑，所以点名拒。
+    shadow = _EFF_BASE + (
         "effect Log { fn get() -> u32; }\n\n"
         "fn run() -> u32 {\n"
         "    let base: u32 = 7;\n"
@@ -7642,18 +7655,7 @@ def test_arm_capture_is_read_only_and_by_value_at_handle_entry():
         "        a\n"
         "    } with { get() => { resume(base); } };\n"
         "    return n;\n}\n")
-    lomentc._EFF_TMP[0] = 0
-    lomentc._EFF_HANDLE[0] = 0
-    m = parse(cap)
-    assert lomentc.check(m) == [], lomentc.check(m)
-    # 捕获的 let 在 handle 体的 `let base = 9` **之前**：读到的必须是外层那个 7。
-    body = m.funcs[0].body
-    names = [getattr(s, "name", "") for s in body if isinstance(s, lomentc.Let)]
-    assert "__eff_c1_0" in names, names
-    ci = names.index("__eff_c1_0")
-    # 外层 `base` 在 handle 之前；要看的是 handle 体里那个同名局部 —— 取最后一个。
-    bi = max(i for i, nm in enumerate(names) if nm == "base")
-    assert ci < bi, (ci, bi, names)
+    assert any("被 handle 体里的同名局部遮住" in x for x in errs(shadow)), errs(shadow)
     # 写捕获是错的（只读）。
     bad = _EFF_BASE + (
         "effect Log { fn get() -> u32; }\n\n"
@@ -7683,8 +7685,6 @@ def test_abort_arm_skips_the_rest_of_the_handle_body():
         "        stop() => { return k; }\n"
         "    };\n"
         "    return n;\n}\n")
-    lomentc._EFF_TMP[0] = 0
-    lomentc._EFF_HANDLE[0] = 0
     m = parse(src)
     assert lomentc.check(m) == [], lomentc.check(m)
     body = m.funcs[0].body

@@ -481,17 +481,18 @@ A3 的第一刀（2026-11-17）只做**参考侧**，语义取 §7.3 最窄的�
 | 处理器的作用域 | **词法**：`perform` 必须被同一函数里外层的 `handle` 覆盖 |
 | 续延 | **无**：`resume` 臂恰好一次、在块尾（尾续） |
 | abort | 臂以 `return e;` 收尾：整个 `handle` 取 `e`，体里剩下的语句跳过 |
-| 捕获 | **只读、按值、在进入处理器时**：臂引用的外层局部在 `handle` 入口拷一份 |
+| 捕获 | **只读、直接引用**：臂引用的外层局部按名字直接用；新鲜性约束挡住遮蔽 |
 | 位置 | `handle` 只作 `let` 初值；`perform` 只作整条语句或 `let` 初值 |
 | 臂的形状 | 平铺语句（`let` / 赋值 / 表达式），不钻进 if/while/match |
 
-降级就是**内联**：`perform E.op(a…)` 换成 `let p… = a…; <臂体>; let r = <resume
-的值>;`，`handle` 换成它的体。`resume(e)` 不是运行期对象，它就是"臂的值"。
-捕获在 `handle` 入口落成 `let __eff_c<h>_<i>: auto = <名>;`，臂里的引用改到那份
-副本上 —— 于是 handle 体里同名局部的遮蔽影响不到臂（词法读值就是入口那一刻的）。
-有 abort 臂时，整个 handle 体包一层 `while true { … n = 尾值; break; }`：abort 臂
-在 perform 处写 `n = 返回值` 再 `break`，体里剩下的语句被跳过。降级发生在
-`check()` 里、`prepare()` **之前** —— 检查、单态化、两只发射器都看不见
+降级就是**内联**：`perform E.op(a…)` 换成 `let <臂形参> = 实参…; <臂体>`，resume
+的值直接落到绑定目标上，`handle` 换成它的体。`resume(e)` 不是运行期对象，它就是
+"臂的值"。**不造合成名**（§7.8）：臂用自己的形参名，捕获就是直接引用外层局部；
+代价是**新鲜性约束** —— 臂的形参 / 局部不能与函数里的局部同名，臂引用的外层局部
+也不能被 handle 体里的同名局部遮住，违反就点名拒。有 abort 臂时，整个 handle 体
+包一层 `while true { … n = 尾值; break; }`：abort 臂在 perform 处写
+`n = 返回值` 再 `break`，体里剩下的语句被跳过。降级发生在 `check()` 里、
+`prepare()` **之前** —— 检查、单态化、两只发射器都看不见
 `Handle` / `Perform` / `Resume`。这与 `IfExpr` / `MatchExpr` 的反糖同一条路数。
 
 这条路径在 `no_runtime` + `gc_manual` 下可用：没有闭包、没有堆、没有证据记录。
@@ -517,9 +518,10 @@ A3 的第一刀（2026-11-17）只做**参考侧**，语义取 §7.3 最窄的�
 生成器、不需要把合成名写进单元缓冲；两侧仍能逐字节同产物。代价是捕获从"按值副本"
 退成"新鲜性约束下的直接引用"——语义更窄，但不再有遮蔽歧义。
 
-这一步要先在参考侧落地并重算 A3a/A3b 的判据（IR 里的临时名会整片消失），再做
-自举侧的重写器与种子。**在它完成之前，自举编译器对 `perform` / `handle` /
-`resume` 仍报 E0217。**
+**参考侧的这一刀已经落地**（2026-11-19）：IR 里的 `__eff_*` 临时名整片消失，
+A3a/A3b 的判据改成"与手写的无临时量版本逐字节相同"。剩下的是自举侧的重写器与
+种子（issue #1691）。**在它完成之前，自举编译器对 `perform` / `handle` / `resume`
+仍报 E0217。**
 
 ---
 
@@ -737,9 +739,9 @@ A2c 接上（见 §10.6）。
 
 | 内容 | 位置 | 判据 |
 |---|---|---|
-| 臂捕获外层局部：**只读、按值、在 handle 入口** | `tools/lomentc.py` 的 `_eff_arm_free` / `_eff_lower_handle`（`__eff_c<h>_<i>`） | `test_arm_capture_is_read_only_and_by_value_at_handle_entry` |
-| 写捕获点名拒（含 `a[i] = …` 经捕获） | `_eff_check_arm` | 同上 |
-| **运行**判据：外层 `base` 被 handle 体里同名局部遮蔽，臂仍读外层的值 | `loment_elf_test` 的 `test_a_tail_resumptive_handle_runs` 的 `capture` 例 | 程序打印 42；镜像产物逐字节相同 |
+| 臂捕获外层局部：**只读、直接引用**（2026-11-19 起无合成名，§7.8） | `tools/lomentc.py` 的 `_eff_arm_free` / `_eff_check_arm` | `test_arm_capture_is_direct_and_shadowing_is_rejected` |
+| 写捕获点名拒（含 `a[i] = …` 经捕获）；同名遮蔽与新鲜性冲突点名拒 | `_eff_check_arm` | 同上 |
+| **运行**判据：臂直接读外层 `base` | `loment_elf_test` 的 `test_a_tail_resumptive_handle_runs` 的 `capture` 例 | 程序打印 42；镜像产物逐字节相同 |
 | abort / 自举镜像 / 行元数据 | 未做 | 见 §11 的 A3b 余项 |
 
 ### 10.9 A3b-2 abort 落地记录（2026-11-19，参考侧）
@@ -766,7 +768,7 @@ A2c 接上（见 §10.6）。
 | **A2b**（已完成） | **自举侧镜像**（`switches` / `checker` + 种子），并与参考逐字节对拍 | 同一份源两侧同判 | 两侧同语法面 |
 | **A2c**（已完成） | E11 站点进 Potato 台账（两侧同计数） | `test_lspe_effect_sites_match_on_both_implementations` | `lspe state` 列得出 |
 | **A3a**（已完成） | **参考侧**尾续处理器：闭臂、恰好一次尾 `resume`、词法处理器；内联降级（§7.7） | `test_a_tail_resumptive_handle_runs`（跑出 82）；反例点名拒 | `no_runtime` 下可用 |
-| **A3b-1**（已完成） | 臂捕获（只读、按值、handle 入口） | `test_arm_capture_is_read_only_and_by_value_at_handle_entry` + 运行例 | 真实处理器可读外层状态 |
+| **A3b-1**（已完成） | 臂捕获（只读、按值、handle 入口） | `test_arm_capture_is_direct_and_shadowing_is_rejected` + 运行例 | 真实处理器可读外层状态 |
 | **A3b-2**（已完成） | abort（不 resume 的臂）：`return e;` + `while true`/`break` | `test_abort_arm_skips_the_rest_of_the_handle_body` + 运行例 | 非局部退出可用 |
 | **A3b-3** | 自举侧镜像 + 行与产物元数据 | 同一份效应源两侧同产物 | 两侧同语义 |
 | **A4** | 一般处理器的 CPS + 捕获回收 | `no_gc` 反例 / `gc_auto` 正例 | Q022 有答案 |

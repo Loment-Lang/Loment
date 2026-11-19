@@ -31,6 +31,9 @@ module lomenterr
 choose runtime
 
 use json
+use errclass
+use errdata
+use regex
 use surface_data
 
 // ---------------------------------------------------------------- 内存布局
@@ -762,6 +765,9 @@ fn parse_args(ctx: ptr, ab: ptr, sc: ptr) -> u64 {
                 if arg_is(p, n, "version") == 1 || arg_is(p, n, "--version") == 1 || arg_is(p, n, "-V") == 1 {
                     store32(ctx, C_WANTVER, 1);
                 } else {
+                if arg_is(p, n, "--classify") == 1 {
+                    store32(ctx, C_MODE, 3);
+                } else {
                 // `--short` / `--json` **顺带关色**：它们存在的意义就是给管道与编辑器读
                 // （`docs/182` §15），一条带 ANSI 转义的"机器可读行"没人能 grep。
                 if arg_is(p, n, "--short") == 1 {
@@ -794,6 +800,7 @@ fn parse_args(ctx: ptr, ab: ptr, sc: ptr) -> u64 {
                             }
                         }
                     }
+                }
                 }
                 }
             }
@@ -3007,6 +3014,55 @@ fn _start() -> u32 {
         // 脚本要 `v=$(lomenterr version)` 拿它，而 fd 2 抓不到 —— 报错器把唯一一条
         // "给程序读"的输出放 stdout，这是一个**有意的例外**，不是漏改。
         write_all(1, ctx, em_byte(ctx, o2, NL) as u64);
+        return die(0);
+    }
+    // `lomenterr --classify FILE` —— 从**消息原文**认码（自举侧的文本分类）。
+    //
+    // **吃文件而不是命令行文本**: Windows 的 PE 垫片合成 argv 时按空格切，带空格的
+    // 中文消息根本到不了这里（实测 `--classify "is not an array or slice"` 只收到 `is`）。
+    // 文件路径是一个 token，且与诊断文件同一条读法。
+    //
+    // 认出来打码（stdout，一行）退 0；认不出**什么都不打**退 1（脚本据此判"没认出来"）。
+    if load32(ctx, C_MODE) == 3 {
+        if av == 0 {
+            return fail(ui(ctx, S_USAGE));
+        }
+        let zcap: ptr = ptr_add(sc, (av >> 32) as u32);
+        let zcan: u32 = (av % 4294967296) as u32;
+        let zcfd: i64 = open_ro(zcap, zcan, sc);
+        if zcfd < 0 {
+            return fail(ui(ctx, S_NOOPEN));
+        }
+        let zcrn: u32 = read_all(zcfd as u64, ptr_add(ctx, C_MSG), MSG_CAP as u64) as u32;
+        syscall4(3, zcfd as u64, 0, 0);
+        let zcrc: u32 = strip_cr(ptr_add(ctx, C_MSG), zcrn);
+        // 去掉尾部空白（文件里通常带一个换行）—— 分类看的是消息本身。
+        let zcrl: u32 = zcrc;
+        let zctr: u32 = 1;
+        while zctr == 1 && zcrl > 0 {
+            let zch: u32 = load8(ctx, C_MSG + zcrl - 1);
+            if zch == NL || zch == CR || zch == SP || zch == TAB {
+                zcrl = zcrl - 1;
+            } else {
+                zctr = 0;
+            }
+        }
+        if zcrl == 0 {
+            return die(1);
+        }
+        let zrcv: u64 = sys_alloc(re_ctx_bytes() as u64);
+        if zrcv == 0 {
+            return fail("lomenterr: brk failed
+");
+        }
+        let zcc: u32 = errc_code_mem(ptr_add(ctx, C_MSG), zcrl, zrcv as ptr);
+        if zcc == 0 {
+            return die(1);
+        }
+        let zcs: str = code_str(zcc);
+        let _w: u64 = write_all(1, str_ptr(zcs), str_len(zcs) as u64);
+        let _n: u64 = write_all(1, str_ptr("
+"), 1);
         return die(0);
     }
     // 语言在**用法报错之前**定下来：否则 `lomenterr` 自己用法写错时那句提示是一种语言、

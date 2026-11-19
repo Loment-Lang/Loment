@@ -277,7 +277,8 @@ for _f in ("loment/selfhost/driver.lomt", "loment/tools/lomadmit.lomt",
            "loment/tools/lomdoc.lomt", "loment/tools/lomenterr.lomt",
            "loment/tools/lomextblock.lomt", "loment/tools/lomfmt.lomt",
            "loment/tools/lompkg.lomt", "loment/tools/lomsyscalls.lomt",
-           "loment/tools/lomvimgrammar.lomt", "loment/tools/lomzwframe.lomt",
+           "loment/tools/lomvimgrammar.lomt", "loment/tools/lomrxcheck.lomt",
+           "loment/tools/lomzwframe.lomt",
            "loment/tools/lsp.lomt"):
     _LITERAL_EXPLAINED[(_f, "literal:4000")] = _LIT_SCRATCH_4000
 
@@ -365,6 +366,17 @@ _add("array", _ARRAY_EXPLAINED,
 
 EXPLAINED.update(_LITERAL_EXPLAINED)
 EXPLAINED.update(_ARRAY_EXPLAINED)
+
+# 2026-11-18：正则引擎 / errdata / 对拍驱动器带来的三处"不是缺口"的容量。
+# 逐条写清来路（`docs/258` §2：排除必须可核对）。
+EXPLAINED[("loment/tools/lomrxcheck.lomt", "FILE_CAP")] = (
+    "读**判据自己生成**的 JSONL 语料；`read_all` 到界即停，语料规模由判据封顶（远小于它）。")
+EXPLAINED[("loment/tools/lomrxcheck.lomt", "PAT_CAP")] = (
+    "单条正则模式的缓冲；分类规则里最长的一条 < 300 B，判据语料来自同一张表。")
+EXPLAINED[("loment/tools/lomrxcheck.lomt", "TXT_CAP")] = (
+    "单条消息的缓冲；判据喂的是编译器诊断模板（上界几 KB）。")
+EXPLAINED[("loment/tools/errdata.lomt", "FIX_STRIDE")] = (
+    "修法表的平键步长（每码 8 格），**不是上界**；`loment_diag._validate` 钉着每码 <= 8 条。")
 
 #: **编译器前端** —— "用户一份源文件能推动的那些容量"。`#345` 采纳的 (a) 就是先把这一档
 #: 做成 0 静默：它正好是 `#343` 那一类崩溃（嵌套块 / 括号 / 形参表 / 缺逗号）住的地方。

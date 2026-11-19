@@ -3173,6 +3173,48 @@ FINE: tuple[Fine, ...] = (
          "If it really is used twice, take a copy at the first use, or borrow it shared: `&r`.",
          "Otherwise reorder so the two uses do not overlap."),
     ),
+    Fine(
+        237, 6, r"^字段 .+ 已被移动, 不能再用",
+        "字段已经被移走，不能再用",
+        "the field was moved out and cannot be used",
+        "这个非 Copy 字段的所有权已经交给了别处（`let a = o.i;` 或按值传参）。"
+        "再读它就是读一个已经空了的格子。",
+        "Ownership of this non-Copy field already left (`let a = o.i;` or passed by value). "
+        "Reading it again reads an emptied slot.",
+        ("后面还要用就借：`&o.i`。",
+         "要留一份就先复制（字段是 Copy 时本来就不会移走）。",
+         "顺序反了：把还要用的那段挪到移走之前。"),
+        ("If you need it later, borrow: `&o.i`.",
+         "To keep a copy, copy it first (a Copy field never moves).",
+         "Or reorder so the use comes before the move."),
+    ),
+    Fine(
+        238, 6, r"^字段 .+ 已被移动，不能再借它",
+        "字段已经被移走，不能再借",
+        "the moved field cannot be borrowed",
+        "借一个已经被移走的位置等于借一块空槽 —— 所有权已经不在这个字段上了。",
+        "Borrowing a moved-out place borrows an empty slot: the field no longer owns anything.",
+        ("先把字段拿回来（让接收方按值还回来）。",
+         "改成借原始来源：那一处本来就该用 `&` 而不是移动。",
+         "要长期访问就给字段换成引用类型（`&T` 字段）。"),
+        ("Get the field back first (have the receiver return it by value).",
+         "Borrow the source instead: that spot should have used `&`, not a move.",
+         "For long-lived access, store a reference in the field (`&T`)."),
+    ),
+    Fine(
+        239, 6, r"^变量 .+ 的部分字段已被移动",
+        "变量的一部分字段已经被移走",
+        "part of the variable was moved out",
+        "这个变量仍有兄弟字段可用，但把它当**整体**用（传参、返回、赋值）已经没有完整的内容了。",
+        "The value still has usable sibling fields, but using it as a **whole** (passing it, "
+        "returning it, assigning it) no longer has complete contents.",
+        ("只使用没被移走的那些字段（`o.j` / `o.n`）。",
+         "确实要整体用：先把移走的字段填回去。",
+         "改成借用：`&o` 不要求整块完整。"),
+        ("Use only the fields that were not moved (`o.j` / `o.n`).",
+         "If you need the whole value, put the moved field back first.",
+         "Or borrow it: `&o` does not require complete contents."),
+    ),
     # ---------------------------------------------------------------- 借用族（E007）
     Fine(
         108, 7, r"^变量 .+ 在同一次调用里既被可变借用又被借用",

@@ -29,7 +29,7 @@
 module surface_data
 choose runtime
 
-pub fn n_codes() -> u32 { return 236; }
+pub fn n_codes() -> u32 { return 239; }
 
 /// 内部码段的下界（`#773`）。`E900` 起是"工具链自己崩了"那一类。
 pub fn internal_lo() -> u32 { return 900; }
@@ -514,6 +514,12 @@ pub fn code_title(c: u32, lang: u32) -> str {
     if k == 471 { return "编译器保留字段"; }
     if k == 472 { return "a stored `&mut` is used only once"; }
     if k == 473 { return "`&mut` 只能用掉一次"; }
+    if k == 474 { return "the field was moved out and cannot be used"; }
+    if k == 475 { return "字段已经被移走，不能再用"; }
+    if k == 476 { return "the moved field cannot be borrowed"; }
+    if k == 477 { return "字段已经被移走，不能再借"; }
+    if k == 478 { return "part of the variable was moved out"; }
+    if k == 479 { return "变量的一部分字段已经被移走"; }
     if k == 1800 { return "the tool died without reporting (internal)"; }
     if k == 1801 { return "工具链进程死了，没留下诊断"; }
     if k == 1998 { return "unclassified (please report)"; }
@@ -995,6 +1001,12 @@ pub fn code_what(c: u32, lang: u32) -> str {
     if k == 471 { return "类的 vtable 头由编译器写入，用户字面量里不能手写。"; }
     if k == 472 { return "This `&mut` already left (passed as an argument, assigned to another binding, or returned). `&mut` is not Copy: a second use would be a second exclusive borrow of the same place."; }
     if k == 473 { return "这把 `&mut` 已经交给别处了（当实参传走、赋给别的绑定、或作为返回值）。`&mut` 不是 Copy：再用一次就是同一处上的第二把独占借用。"; }
+    if k == 474 { return "Ownership of this non-Copy field already left (`let a = o.i;` or passed by value). Reading it again reads an emptied slot."; }
+    if k == 475 { return "这个非 Copy 字段的所有权已经交给了别处（`let a = o.i;` 或按值传参）。再读它就是读一个已经空了的格子。"; }
+    if k == 476 { return "Borrowing a moved-out place borrows an empty slot: the field no longer owns anything."; }
+    if k == 477 { return "借一个已经被移走的位置等于借一块空槽 —— 所有权已经不在这个字段上了。"; }
+    if k == 478 { return "The value still has usable sibling fields, but using it as a **whole** (passing it, returning it, assigning it) no longer has complete contents."; }
+    if k == 479 { return "这个变量仍有兄弟字段可用，但把它当**整体**用（传参、返回、赋值）已经没有完整的内容了。"; }
     if k == 1800 { return "A process in the toolchain died **before it could write a structured diagnostic** - killed by a signal, or exited abnormally, with no record in `--diag-out`."; }
     if k == 1801 { return "工具链里的一个进程在**能写出结构化诊断之前**就死了 —— 被信号打死，或者以异常状态退出，而 `--diag-out` 一份记录都没写。"; }
     if k == 1998 { return "The compiler reported an error that is not in the classification table -- even the toolchain did not recognise which code this message belongs to."; }
@@ -1476,6 +1488,12 @@ pub fn code_why(c: u32, lang: u32) -> str {
     if k == 471 { return "Loment 的**原生语法与 Rust 很接近，但去掉了**几样东西：单引号字符字面量、无值 `return;`、表达式式的 `match` 臂、`mut` 作为绑定修饰词。照 Rust 的习惯写很容易踩到这几处 —— 它们不是“暂时不支持”，是这门语言没有。（说的只是**原生语法**：同一段逻辑也能用 C / C++ / Java / C# / Go / Python 的写法写，那是另一层，见 `docs/188`。）"; }
     if k == 472 { return "Loment's aggregate types (`struct` / `enum`) are **move** by default: passing one by value to a function, or assigning one to another variable, hands over ownership. Types whose fields are **all integers** are `Copy` automatically and never report this."; }
     if k == 473 { return "Loment 的聚合类型（`struct` / `enum`）默认是**移动**语义：按值传进函数、按值赋给另一个变量，都相当于把所有权交出去。**全字段是整型**的类型自动按 `Copy` 处理，不会报这条。"; }
+    if k == 474 { return "Loment's aggregate types (`struct` / `enum`) are **move** by default: passing one by value to a function, or assigning one to another variable, hands over ownership. Types whose fields are **all integers** are `Copy` automatically and never report this."; }
+    if k == 475 { return "Loment 的聚合类型（`struct` / `enum`）默认是**移动**语义：按值传进函数、按值赋给另一个变量，都相当于把所有权交出去。**全字段是整型**的类型自动按 `Copy` 处理，不会报这条。"; }
+    if k == 476 { return "Loment's aggregate types (`struct` / `enum`) are **move** by default: passing one by value to a function, or assigning one to another variable, hands over ownership. Types whose fields are **all integers** are `Copy` automatically and never report this."; }
+    if k == 477 { return "Loment 的聚合类型（`struct` / `enum`）默认是**移动**语义：按值传进函数、按值赋给另一个变量，都相当于把所有权交出去。**全字段是整型**的类型自动按 `Copy` 处理，不会报这条。"; }
+    if k == 478 { return "Loment's aggregate types (`struct` / `enum`) are **move** by default: passing one by value to a function, or assigning one to another variable, hands over ownership. Types whose fields are **all integers** are `Copy` automatically and never report this."; }
+    if k == 479 { return "Loment 的聚合类型（`struct` / `enum`）默认是**移动**语义：按值传进函数、按值赋给另一个变量，都相当于把所有权交出去。**全字段是整型**的类型自动按 `Copy` 处理，不会报这条。"; }
     if k == 1800 { return "The diagnostics channel can only describe failures that were **successfully serialized before the failure**. A compiler crash, a linker crash, or the renderer crashing on its own all go the same way: the JSONL is empty and there is nothing for the renderer to do. The launcher now closes that gap: it reads the exit status / signal name and synthesizes this record, so \"no record\" no longer means \"nothing happened\" (#773). This is not a semantic error in your source - it is the **implementation failing on itself**."; }
     if k == 1801 { return "诊断系统只能描述**在失败之前已经成功序列化**的失败。编译器崩溃、链接器崩溃、报错器自己崩溃，走的都是这条路：JSONL 是空的，渲染器无事可做。启动器现在替它收尸：拿到退出状态 / 信号名，合成这一条记录，于是「没有任何记录」不再等于「什么都没有发生」（`#773`）。这不是你源码的语义错 —— 它是**实现自己的失败**。"; }
     if k == 1998 { return "The table and the compiler come out of the same repository and the same build. A message landing here means it has not been classified yet, not that the toolchain versions disagree: fix by the message, then report it so a rule can be added."; }
@@ -1957,6 +1975,12 @@ pub fn code_yes(c: u32, lang: u32) -> str {
     if k == 471 { return "Rust 风味那套语法；`//` `/* */` 注释；`let x: T = e;`"; }
     if k == 472 { return "explicit `&` / `&mut`; an aggregate whose fields are all integers is `Copy` automatically"; }
     if k == 473 { return "显式 `&` / `&mut`；全字段整型的聚合自动 `Copy`"; }
+    if k == 474 { return "explicit `&` / `&mut`; an aggregate whose fields are all integers is `Copy` automatically"; }
+    if k == 475 { return "显式 `&` / `&mut`；全字段整型的聚合自动 `Copy`"; }
+    if k == 476 { return "explicit `&` / `&mut`; an aggregate whose fields are all integers is `Copy` automatically"; }
+    if k == 477 { return "显式 `&` / `&mut`；全字段整型的聚合自动 `Copy`"; }
+    if k == 478 { return "explicit `&` / `&mut`; an aggregate whose fields are all integers is `Copy` automatically"; }
+    if k == 479 { return "显式 `&` / `&mut`；全字段整型的聚合自动 `Copy`"; }
     if k == 1800 { return "a tool exits 0 (no diagnostics) or 1 (diagnostics, and it left a record)"; }
     if k == 1801 { return "工具链以 0 退出（无诊断）或 1 退出（有诊断并留下了记录）"; }
     if k == 1998 { return "classified messages after a report lands"; }
@@ -2438,6 +2462,12 @@ pub fn code_no(c: u32, lang: u32) -> str {
     if k == 471 { return "单引号字符字面量；无值 `return;`；表达式式 match 臂；`let mut x: T`（`mut` 不是关键字）"; }
     if k == 472 { return "implicitly copying aggregates; using a value after it has been moved"; }
     if k == 473 { return "隐式复制聚合；移动后再使用同一个值"; }
+    if k == 474 { return "implicitly copying aggregates; using a value after it has been moved"; }
+    if k == 475 { return "隐式复制聚合；移动后再使用同一个值"; }
+    if k == 476 { return "implicitly copying aggregates; using a value after it has been moved"; }
+    if k == 477 { return "隐式复制聚合；移动后再使用同一个值"; }
+    if k == 478 { return "implicitly copying aggregates; using a value after it has been moved"; }
+    if k == 479 { return "隐式复制聚合；移动后再使用同一个值"; }
     if k == 1800 { return "killed by a signal / exited abnormally without writing any structured diagnostic"; }
     if k == 1801 { return "被信号打死 / 异常退出，而且一份结构化诊断都没写"; }
     if k == 1998 { return "guessing a code"; }
@@ -2682,6 +2712,9 @@ pub fn code_ascii(c: u32) -> str {
     if c == 234 { return "an abstract class cannot be instantiated"; }
     if c == 235 { return "a compiler-owned field was initialized"; }
     if c == 236 { return "a stored `&mut` is used only once"; }
+    if c == 237 { return "the field was moved out and cannot be used"; }
+    if c == 238 { return "the moved field cannot be borrowed"; }
+    if c == 239 { return "part of the variable was moved out"; }
     if c == 900 { return "a tool in the chain died before it could report (internal) - report it with the unit"; }
     if c == 999 { return "unclassified - please report it"; }
     return "";
@@ -2755,6 +2788,9 @@ pub fn code_family(c: u32) -> u32 {
     if c == 106 { return 6; }
     if c == 107 { return 6; }
     if c == 236 { return 6; }
+    if c == 237 { return 6; }
+    if c == 238 { return 6; }
+    if c == 239 { return 6; }
     if c == 108 { return 7; }
     if c == 109 { return 7; }
     if c == 110 { return 7; }
@@ -4356,6 +4392,24 @@ pub fn code_fix(c: u32, i: u32, lang: u32) -> str {
     if k == 3777 { return "要再用一次就显式重借：`g(&mut *r)`。"; }
     if k == 3779 { return "确实要用两次就取一份拷贝值，或改成共享借用 `&r`。"; }
     if k == 3781 { return "都不行就重排顺序：把两次使用错开成两段借用。"; }
+    if k == 3792 { return "If you need it later, borrow: `&o.i`."; }
+    if k == 3794 { return "To keep a copy, copy it first (a Copy field never moves)."; }
+    if k == 3796 { return "Or reorder so the use comes before the move."; }
+    if k == 3793 { return "后面还要用就借：`&o.i`。"; }
+    if k == 3795 { return "要留一份就先复制（字段是 Copy 时本来就不会移走）。"; }
+    if k == 3797 { return "顺序反了：把还要用的那段挪到移走之前。"; }
+    if k == 3808 { return "Get the field back first (have the receiver return it by value)."; }
+    if k == 3810 { return "Borrow the source instead: that spot should have used `&`, not a move."; }
+    if k == 3812 { return "For long-lived access, store a reference in the field (`&T`)."; }
+    if k == 3809 { return "先把字段拿回来（让接收方按值还回来）。"; }
+    if k == 3811 { return "改成借原始来源：那一处本来就该用 `&` 而不是移动。"; }
+    if k == 3813 { return "要长期访问就给字段换成引用类型（`&T` 字段）。"; }
+    if k == 3824 { return "Use only the fields that were not moved (`o.j` / `o.n`)."; }
+    if k == 3826 { return "If you need the whole value, put the moved field back first."; }
+    if k == 3828 { return "Or borrow it: `&o` does not require complete contents."; }
+    if k == 3825 { return "只使用没被移走的那些字段（`o.j` / `o.n`）。"; }
+    if k == 3827 { return "确实要整体用：先把移走的字段填回去。"; }
+    if k == 3829 { return "改成借用：`&o` 不要求整块完整。"; }
     if k == 14400 { return "Report the smallest source that reproduces it together with this record - a crash is a compiler defect, not something you can work around in your code."; }
     if k == 14402 { return "Include the exit status / signal name (already in this message) and the output of `loment version`."; }
     if k == 14404 { return "If the message names the **linker** (`loment-lomelf`), also include the `-o` path and the target platform."; }
@@ -4612,6 +4666,9 @@ pub fn code_nfix(c: u32) -> u32 {
     if c == 234 { return 3; }
     if c == 235 { return 3; }
     if c == 236 { return 3; }
+    if c == 237 { return 3; }
+    if c == 238 { return 3; }
+    if c == 239 { return 3; }
     if c == 900 { return 4; }
     if c == 999 { return 3; }
     return 0;

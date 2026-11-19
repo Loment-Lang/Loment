@@ -20,6 +20,7 @@ use lexer
 use checker
 use switches
 use hotswap
+use errdata
 use surface_data
 
 // ---------------------------------------------------------------- 尺寸与布局

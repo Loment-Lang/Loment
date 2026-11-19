@@ -3432,6 +3432,18 @@ def build_tools(only: set[str] | None, opt: bool = False) -> dict[str, tuple[byt
     return out
 
 
+def build_host_tool(entry: str, cwd: str = ".", profile: str = "") -> bytes:
+    """一个入口 -> **本机格式**的可执行字节（种子 -> stage1 -> IR -> lomelf 链接）。
+
+    与 `build_tools` 的分工：只出本机那一份（不链另一个平台），也不打印任何东西 ——
+    仓库侧的开发入口（`tools/loment.py::build_lomenterr`）与判据都用它。**没有缓存**：
+    缓存按内容哈希判新鲜的活由调用方做（`build_lomenterr` 有自己的戳）。
+    """
+    stage1 = build_stage1()
+    ir = emit_ir(stage1, entry, cwd)
+    return _lomelf_link(ir.read_text(encoding="utf-8"), _host_target(), profile)
+
+
 # ------------------------------------------------------------------ payload
 
 def _read(p: str) -> bytes:

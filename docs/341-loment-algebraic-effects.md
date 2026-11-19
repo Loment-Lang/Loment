@@ -1,6 +1,6 @@
 # 341 · 代数效应与效应处理器：把"向谁求助"变成可检查的行
 
-> 状态: **A0/A1 报告面 + A2a 参考前端 + A2b 自举镜像 + A2c Potato 台账 + A3a 参考侧尾续处理器 + A3b-1 臂捕获已落地**（2026-11-19）· 上游: `docs/262`（LSPE）·
+> 状态: **A0/A1 报告面 + A2a 参考前端 + A2b 自举镜像 + A2c Potato 台账 + A3a 参考侧尾续处理器 + A3b-1 臂捕获 + A3b-2 abort 已落地**（2026-11-19）· 上游: `docs/262`（LSPE）·
 > `docs/306`–`308`（E9 域检查器）· `docs/317`（E10 借用检查器）· `docs/286`（六点一空间）·
 > `docs/219`（链接边界）· `standard/LLS.md` §21–§25
 > 一句话: 在 LSPE 里加**第十一个引擎**，把"这段代码会向谁求助"变成函数签名上的
@@ -479,8 +479,8 @@ A3 的第一刀（2026-11-17）只做**参考侧**，语义取 §7.3 最窄的�
 | 维度 | 取值 |
 |---|---|
 | 处理器的作用域 | **词法**：`perform` 必须被同一函数里外层的 `handle` 覆盖 |
-| 续延 | **无**：每个臂恰好一次 `resume`，且在块尾（尾续） |
-| abort | 暂不支持（A3b 余下的那一半） |
+| 续延 | **无**：`resume` 臂恰好一次、在块尾（尾续） |
+| abort | 臂以 `return e;` 收尾：整个 `handle` 取 `e`，体里剩下的语句跳过 |
 | 捕获 | **只读、按值、在进入处理器时**：臂引用的外层局部在 `handle` 入口拷一份 |
 | 位置 | `handle` 只作 `let` 初值；`perform` 只作整条语句或 `let` 初值 |
 | 臂的形状 | 平铺语句（`let` / 赋值 / 表达式），不钻进 if/while/match |
@@ -489,14 +489,15 @@ A3 的第一刀（2026-11-17）只做**参考侧**，语义取 §7.3 最窄的�
 的值>;`，`handle` 换成它的体。`resume(e)` 不是运行期对象，它就是"臂的值"。
 捕获在 `handle` 入口落成 `let __eff_c<h>_<i>: auto = <名>;`，臂里的引用改到那份
 副本上 —— 于是 handle 体里同名局部的遮蔽影响不到臂（词法读值就是入口那一刻的）。
-降级发生在 `check()` 里、`prepare()` **之前** —— 检查、单态化、两只发射器都看不见
+有 abort 臂时，整个 handle 体包一层 `while true { … n = 尾值; break; }`：abort 臂
+在 perform 处写 `n = 返回值` 再 `break`，体里剩下的语句被跳过。降级发生在
+`check()` 里、`prepare()` **之前** —— 检查、单态化、两只发射器都看不见
 `Handle` / `Perform` / `Resume`。这与 `IfExpr` / `MatchExpr` 的反糖同一条路数。
 
 这条路径在 `no_runtime` + `gc_manual` 下可用：没有闭包、没有堆、没有证据记录。
-代价写在明面上：跨函数的 `perform`（需要证据向量）与 abort 的非局部退出留给
-A3b/A4；捕获是**只读**的（写回原变量没有意义），写捕获会点名拒。**A3b 还要做自举侧
-的 token 级镜像**，在那之前自举编译器对任何 `perform` / `handle` / `resume` 仍报
-E0217。
+代价写在明面上：跨函数的 `perform`（需要证据向量）留给 A4；捕获是**只读**的
+（写回原变量没有意义），写捕获会点名拒。**A3b 还要做自举侧的 token 级镜像**，
+在那之前自举编译器对任何 `perform` / `handle` / `resume` 仍报 E0217。
 
 ---
 
@@ -719,6 +720,16 @@ A2c 接上（见 §10.6）。
 | **运行**判据：外层 `base` 被 handle 体里同名局部遮蔽，臂仍读外层的值 | `loment_elf_test` 的 `test_a_tail_resumptive_handle_runs` 的 `capture` 例 | 程序打印 42；镜像产物逐字节相同 |
 | abort / 自举镜像 / 行元数据 | 未做 | 见 §11 的 A3b 余项 |
 
+### 10.9 A3b-2 abort 落地记录（2026-11-19，参考侧）
+
+| 内容 | 位置 | 判据 |
+|---|---|---|
+| 不 `resume` 的臂：以 `return e;` 收尾，整个 `handle` 取 `e` | `_eff_check_arm`（返回 `"abort"`）、`_eff_arm_inline` | `test_abort_arm_skips_the_rest_of_the_handle_body` |
+| 非局部退出：handle 体包 `while true`，abort 写 `n` 后 `break` | `_eff_lower_handle` | 同上（结构断言） |
+| **运行**判据：`get` resume、`stop` abort、abort 臂读捕获的 `k` | `loment_elf_test` 的 `abort` 例 | 打印 9；两只链接器产物相同 |
+| 裸 `return;` 不能当 abort | `_eff_check_arm` | 同上 |
+| 自举镜像 / 行元数据 | 未做（A3b-3） | — |
+
 ---
 
 ## 11. 落地阶梯
@@ -734,7 +745,7 @@ A2c 接上（见 §10.6）。
 | **A2c**（已完成） | E11 站点进 Potato 台账（两侧同计数） | `test_lspe_effect_sites_match_on_both_implementations` | `lspe state` 列得出 |
 | **A3a**（已完成） | **参考侧**尾续处理器：闭臂、恰好一次尾 `resume`、词法处理器；内联降级（§7.7） | `test_a_tail_resumptive_handle_runs`（跑出 82）；反例点名拒 | `no_runtime` 下可用 |
 | **A3b-1**（已完成） | 臂捕获（只读、按值、handle 入口） | `test_arm_capture_is_read_only_and_by_value_at_handle_entry` + 运行例 | 真实处理器可读外层状态 |
-| **A3b-2** | abort（不 resume 的臂） | 正例跑通、`ResumeLinear` 仍对 | 非局部退出可用 |
+| **A3b-2**（已完成） | abort（不 resume 的臂）：`return e;` + `while true`/`break` | `test_abort_arm_skips_the_rest_of_the_handle_body` + 运行例 | 非局部退出可用 |
 | **A3b-3** | 自举侧镜像 + 行与产物元数据 | 同一份效应源两侧同产物 | 两侧同语义 |
 | **A4** | 一般处理器的 CPS + 捕获回收 | `no_gc` 反例 / `gc_auto` 正例 | Q022 有答案 |
 | **A5** | `MultiShot` + `Copy` 捕获集 | 多射反例在 A4 下红、A5 下按规则收/拒 | 默认仍是 one-shot |

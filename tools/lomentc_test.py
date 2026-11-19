@@ -7583,6 +7583,45 @@ def test_arm_capture_is_read_only_and_by_value_at_handle_entry():
 
 
 @test
+def test_abort_arm_skips_the_rest_of_the_handle_body():
+    """A3b：不 `resume` 的臂 = abort；降级成 `while true { … n = v; break; }`。"""
+    src = _EFF_BASE + (
+        "effect Log { fn get() -> u32; fn stop() -> u32; }\n\n"
+        "fn run() -> u32 {\n"
+        "    let k: u32 = 9;\n"
+        "    let n: u32 = handle Log {\n"
+        "        let a: u32 = perform Log.get();\n"
+        "        let b: u32 = perform Log.stop();\n"
+        "        a + b\n"
+        "    } with {\n"
+        "        get() => { resume(40); }\n"
+        "        stop() => { return k; }\n"
+        "    };\n"
+        "    return n;\n}\n")
+    lomentc._EFF_TMP[0] = 0
+    lomentc._EFF_HANDLE[0] = 0
+    m = parse(src)
+    assert lomentc.check(m) == [], lomentc.check(m)
+    body = m.funcs[0].body
+    loops = [s for s in body if isinstance(s, lomentc.While)]
+    assert len(loops) == 1, body
+    assert isinstance(loops[0].body[-1], lomentc.Break), loops[0].body[-1]
+    assert any(isinstance(s, lomentc.Assign)
+               and isinstance(s.target, lomentc.Ident) and s.target.name == "n"
+               for s in loops[0].body), loops[0].body
+    # 裸 `return;` 不能当 abort（没有值）。
+    bad = _EFF_BASE + (
+        "effect Log { fn get() -> u32; }\n\n"
+        "fn run() -> u32 {\n"
+        "    let n: u32 = handle Log {\n"
+        "        perform Log.get();\n"
+        "        0\n"
+        "    } with { get() => { return; } };\n"
+        "    return n;\n}\n")
+    assert errs(bad), errs(bad)
+
+
+@test
 def test_a3a_rejects_non_tail_and_incomplete_arms():
     """A3a 的两条边界：尾续、臂里平铺（`docs/341` §10.7）。"""
     two = _EFF_BASE + (

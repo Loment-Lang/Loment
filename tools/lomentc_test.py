@@ -7896,6 +7896,33 @@ def test_a_stored_mut_local_is_used_once():
     assert errs(inline) == [], errs(inline)
 
 
+@test
+def test_moves_out_of_a_struct_field_are_tracked():
+    """把非 Copy 的字段移出来之后：同一字段不能移两次、整体不能再用、兄弟字段照常（#1552）。
+
+    整变量的移动（M13）由名字表管；字段级移动要用**路径键**，否则 `let a = o.i;`
+    之后 `o.i`、`o` 都以为还能用。
+    """
+    h = "module m\nstruct I { v: u32 }\nstruct O { i: I, j: I, n: u32 }\n"
+    twice = h + ("fn f() -> u32 { let o: O = O { i: I { v: 1 }, j: I { v: 2 }, n: 3 };"
+                 " let a: I = o.i; let b: I = o.i; return b.v; }\n")
+    assert any("字段 o.i 已被移动" in x for x in errs(twice)), errs(twice)
+    whole = h + ("fn g(x: O) -> u32 { return x.n; }\n"
+                 "fn f() -> u32 { let o: O = O { i: I { v: 1 }, j: I { v: 2 }, n: 3 };"
+                 " let a: I = o.i; return g(o); }\n")
+    assert any("部分字段已被移动" in x for x in errs(whole)), errs(whole)
+    borrow = h + ("fn f() -> u32 { let o: O = O { i: I { v: 1 }, j: I { v: 2 }, n: 3 };"
+                  " let a: I = o.i; let r: &I = &o.i; return r.v; }\n")
+    assert any("不能再借它" in x for x in errs(borrow)), errs(borrow)
+    # 兄弟字段与 Copy 字段都不受影响
+    sibling = h + ("fn f() -> u32 { let o: O = O { i: I { v: 1 }, j: I { v: 2 }, n: 3 };"
+                   " let a: I = o.i; let b: I = o.j; return b.v + o.n; }\n")
+    assert errs(sibling) == [], errs(sibling)
+    copy_field = h + ("fn f() -> u32 { let o: O = O { i: I { v: 1 }, j: I { v: 2 }, n: 3 };"
+                      " let a: u32 = o.n; let b: u32 = o.n; return a + b; }\n")
+    assert errs(copy_field) == [], errs(copy_field)
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "lomentc_test")
 

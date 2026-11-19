@@ -10162,11 +10162,45 @@ def _move_check(f: Func, funcs: dict, structs: dict, enums: dict,
     #: **`free` 自己那一端**（这块是不是真块、有没有重复释放），管不了"**之后再用**"——
     #: 那正是 use-after-free 的经典形状。
     freed: set[str] = set()
+    #: **字段级移动**（`#1552`）：路径键（`v.a`）-> 行。整变量的 `moved` 管不到
+    #: "把一个非 Copy 字段移出来"：同一个字段能移两次，整体也照样能用。
+    moved_places: dict[str, int] = {}
+
+    def gone_at(key: str) -> str | None:
+        """`key` 这个位置（或它的祖先）是不是已经被移走；返回那个被移走的键。"""
+        for k in moved_places:
+            if key == k or key.startswith(k + ".") or key.startswith(k + "["):
+                return k
+        return None
+
+    def partial_of(name: str) -> str | None:
+        """整变量 `name` 有字段被移走过没有（那几个字段之外还能用）。"""
+        for k in moved_places:
+            if k.startswith(name + ".") or k.startswith(name + "["):
+                return k
+        return None
+
+    def use_place_base(e) -> None:
+        """字段/下标访问的**基址**不是一次"取用整个值"。
+
+        `v.a` 被移走之后 `v.b` 仍然合法，所以"部分字段已移动"这一条在基址上跳过；
+        **整变量**被移走（或释放）时，`v[0]` / `v.a` 照样不合法。"""
+        if isinstance(e, Ident):
+            if e.name in moved:
+                errs.append(f"{e.line}: 变量 {e.name} 已被移动, 不能再用")
+            elif lms and e.name in freed:
+                errs.append(f"{e.line}: 变量 {e.name} 指向的块已经被 `free`，不能再用")
+            return
+        use(e)
 
     def use(e) -> None:
         if isinstance(e, Ident):
             if e.name in moved:
                 errs.append(f"{e.line}: 变量 {e.name} 已被移动, 不能再用")
+            elif partial_of(e.name) is not None:
+                errs.append(
+                    f"{e.line}: 变量 {e.name} 的部分字段已被移动（{partial_of(e.name)}），"
+                    f"不能把它当整体用")
             elif lms and e.name in freed:
                 # 同上（`#486`）：码在头一行，正文不再重复。
                 errs.append(f"{e.line}: 变量 {e.name} 指向的块已经被 `free`，不能再用")
@@ -10176,6 +10210,11 @@ def _move_check(f: Func, funcs: dict, structs: dict, enums: dict,
         elif isinstance(e, Un):
             if e.op not in ("&", "&mut"):
                 use(e.expr)
+            else:
+                # 借一个已经被移走的位置同样是 E006（`#1552`）
+                k = _place_key(e.expr)
+                if k is not None and gone_at(k) is not None:
+                    errs.append(f"{e.line}: 字段 {gone_at(k)} 已被移动，不能再借它")
         elif isinstance(e, Cast):
             use(e.expr)
         elif isinstance(e, MethodCall):
@@ -10194,16 +10233,31 @@ def _move_check(f: Func, funcs: dict, structs: dict, enums: dict,
                     moved.add(a.name)  # 非 Copy 传参 = 移动
                 else:
                     use(a)
+                    # 非 Copy 的**字段**当实参传走 = 把它移出来（`#1552`）
+                    if isinstance(a, (FieldAccess, Index)):
+                        ak = _place_key(a)
+                        at = expr_type(a, scope, funcs, structs)
+                        if ak is not None and at is not None \
+                                and not _is_copy_type(at, structs, enums):
+                            moved_places[ak] = a.line
             # **E029**：`free(p)` 之后 `p` 指向的块没了 —— 记下来，之后再用到 `p` 就报。
             # ⚠ **登记放在循环之后**：`use(a)` 在上面已经把 `free` 自己那个实参走过一遍了，
             # 而**那一次是合法的**（清掉再报就成了"`free` 自己都不能调"）。
             if lms and e.name == "free" and e.args and isinstance(e.args[0], Ident):
                 freed.add(e.args[0].name)
         elif isinstance(e, Index):
-            use(e.obj)
+            k = _place_key(e)
+            if k is not None and gone_at(k) is not None:
+                errs.append(f"{e.line}: 字段 {gone_at(k)} 已被移动, 不能再用")
+                return
+            use_place_base(e.obj)
             use(e.idx)
         elif isinstance(e, FieldAccess):
-            use(e.obj)
+            k = _place_key(e)
+            if k is not None and gone_at(k) is not None:
+                errs.append(f"{e.line}: 字段 {gone_at(k)} 已被移动, 不能再用")
+                return
+            use_place_base(e.obj)
         elif isinstance(e, ArrayLit):
             for it in e.items:
                 use(it)
@@ -10224,6 +10278,13 @@ def _move_check(f: Func, funcs: dict, structs: dict, enums: dict,
                 if isinstance(s.expr, Ident) and s.expr.name in sc \
                         and not _is_copy_type(sc[s.expr.name], structs, enums):
                     moved.add(s.expr.name)
+                elif isinstance(s.expr, (FieldAccess, Index)):
+                    # 把非 Copy 的**字段**移进一个新绑定（`#1552`）
+                    fk = _place_key(s.expr)
+                    ft = expr_type(s.expr, sc, funcs, structs)
+                    if fk is not None and ft is not None \
+                            and not _is_copy_type(ft, structs, enums):
+                        moved_places[fk] = s.line
                 sc[s.name] = s.type
                 freed.discard(s.name)      # 重新绑定 = 这个名字不再指那块死掉的块
             elif isinstance(s, Assign):

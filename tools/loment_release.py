@@ -99,7 +99,7 @@ GLOBS = [
     "tools/potato.py", "tools/potato_test.py",
     "tools/potato_cross.py", "tools/potato_from.py", "tools/potato_measure.py",
     "tools/potato_llm_arm.py",
-    "tools/potato_assert.py", "tools/loment.py", "tools/lomfmt.py",
+    "tools/potato_assert.py", "tools/loment.py", "tools/flomtc.py", "tools/lomfmt.py",
     # 修改件 (`.lomf`, docs/257): 套用器 + 树里那些补丁。**补丁本身也进清单** ——
     # 它是"这一笔改了什么"的记录, 丢了就等于那一笔无从复核 (docs/179 §7.3 那条)。
     "tools/lomf.py", "loment/patches/*.lomf", "tools/lomdoc.py",
@@ -134,6 +134,7 @@ GLOBS = [
     # 报错器 (docs/182 §6/§8)。**位置与自举那份 `lomrel.lomt` 对齐** —— 两处的条目顺序
     # 就是清单的顺序, 插在不同位置会给出同集合不同顺序的两份清单 (见下面那段注解)。
     "tools/loment_err_test.py",
+    "tools/loment_regex_test.py",
     # lompi (随包发行的独立命令, docs/170): 源码快照 + 它外面的正本与仓内副本的同步/校验
     "lompi/*.lomt",
     # lompi 的标准库: 随 Loment 一起装 (std/host/internet/os + 八个领域包, 共 217 个文件 ——

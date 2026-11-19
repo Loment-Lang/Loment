@@ -1750,6 +1750,69 @@ def test_every_template_has_its_own_code():
 
 
 @test
+def test_classify_matches_the_reference_classifier():
+    """`lomenterr --classify FILE` 与参考实现的 `classify()` **逐条同码**。
+
+    2026-11-18 起文本分类在自举侧（`lompi/store/std/0.1.0/regex.lomt` +
+    `loment/tools/errdata.lomt` + `errclass.lomt`）。参考侧的 `loment_diag.classify`
+    仍在（`diag` / `--json` 要用），所以两边必须给出同一个码 —— 这是"两份实现同一条
+    口径"的判据（`docs/158` §5）。**吃文件而不是命令行文本**：Windows 的 PE 垫片合成
+    argv 时按空格切，带空格的消息根本到不了程序里。
+    """
+    import ast
+    import loment_diag
+    src = (ROOT / "tools" / "lomentc.py").read_text(encoding="utf-8")
+
+    def is_sink(call) -> bool:
+        f = call.func
+        if isinstance(f, ast.Attribute) and f.attr == "append" and isinstance(f.value, ast.Name):
+            return "err" in f.value.id.lower()
+        return isinstance(f, ast.Name) and "LomError" in f.id
+
+    msgs: list[str] = []
+    seen: set[str] = set()
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Call) and node.args and is_sink(node):
+            t = _msg_template(node.args[0])
+            if not t:
+                continue
+            t = re.sub(r"^\{[^}]*\}:\s*", "", t)
+            if t not in seen:
+                seen.add(t)
+                msgs.append(t)
+    msgs += [
+        "使用未声明的变量 leftover",
+        "12: 类型 u32 与 i64 不匹配",
+        "is not an array or slice",
+        "完全认不出来的消息（这条不是编译器说的）",
+    ]
+    assert len(msgs) > 100, f"只抽到 {len(msgs)} 条消息 —— 模板提取跟编译器脱节了"
+
+    td = Path(tempfile.mkdtemp(prefix="lomenterr-classify-"))
+    bad: list[str] = []
+    for i, msg in enumerate(msgs):
+        f = td / f"m{i}.txt"
+        f.write_text(msg + chr(10), encoding="utf-8", newline=chr(10))
+        r = subprocess.run([str(_bin()), "--classify", str(f)],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", shell=False, timeout=120)
+        want = loment_diag.classify(msg)[0]
+        if want == "E0999":
+            ok = r.returncode == 1 and r.stdout == ""
+        else:
+            ok = r.returncode == 0 and r.stdout.strip() == want
+        if not ok:
+            bad.append(f"{msg[:50]!r}: lomenterr={r.stdout.strip()!r}/rc={r.returncode} "
+                       f"python={want}")
+            if len(bad) >= 6:
+                break
+    assert not bad, "自举侧分类器与参考实现有分歧:" + chr(10) + "  " + (chr(10) + "  ").join(bad)
+    n_known = sum(1 for m in msgs if loment_diag.classify(m)[0] != "E0999")
+    assert n_known > 100, f"只认出 {n_known} 条 —— 分类器退化了"
+    print(f"      {len(msgs)} 条消息逐条同码（{n_known} 条认得出 / {len(msgs) - n_known} 条 E0999）")
+
+
+@test
 def test_code_numbers_use_the_two_display_widths():
     """码的显示形状：**< 100 是 `E0xx`（`E042`），>= 100 是 `E0xxx`（`E0100`）**。
 

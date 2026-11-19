@@ -124,13 +124,13 @@ def test(fn):
 #: 捕获表的步长 `CG_DFR_STRIDE`（84 B/条，**不是**上界，来路写在 `EXPLAINED`）与三个
 #: 真上界 `CG_MAXDFR` / `CG_MAXDFRAMES` / `CG_MAXDFARGS`（都判了 `>=` 并 `cg_fail`）。
 #: 条数 251 → **255**、沉默 168 → **169**（多出来的那一处就是步长本身）。
-CAPACITY_SITES = 265
-SILENT_SITES = 173
+CAPACITY_SITES = 270
+SILENT_SITES = 178
 
 #: 第二类：字面量上界（`#770`）。`[T; N]` 与 `literal:<N>` 各自钉住总数与沉默的那一份。
 #: 2026-11-12 `docs/348`：间接调用那一支也走同一张 20 格实参类型槽表 ⇒ 多一处 literal:20。
-LITERAL_SITES = 67
-LITERAL_SILENT = 66
+LITERAL_SITES = 68
+LITERAL_SILENT = 67
 ARRAY_SITES = 20
 ARRAY_SILENT = 19
 
@@ -139,6 +139,10 @@ ARRAY_SILENT = 19
 #: 判断"真缺口"用 `loment_caps.gaps()`（那条另有一条判据）。
 SILENT_NAMES = frozenset((
     "ARENA_CAP",
+    "FILE_CAP",
+    "FIX_STRIDE",
+    "PAT_CAP",
+    "TXT_CAP",
     "CHK_ENV_MAX",
     "CASES_CAP",
     "CG_DFR_STRIDE",
@@ -318,6 +322,7 @@ SILENT_LITERALS = {
     ("loment/tools/lomc.lomt", "literal:4000"): 1,
     ("loment/tools/lomcapasserts.lomt", "literal:4000"): 2,
     ("loment/tools/lomclicheck.lomt", "literal:400"): 1,
+    ("loment/tools/lomrxcheck.lomt", "literal:4000"): 1,
     ("loment/tools/lomdoc.lomt", "literal:4000"): 1,
     ("loment/tools/lomelf.lomt", "literal:16"): 2,
     ("loment/tools/lomelf.lomt", "literal:8"): 2,

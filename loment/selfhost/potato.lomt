@@ -4874,6 +4874,51 @@ fn pt_gfn_scan(sc: ptr, unit: ptr, t: ptr, nt: u32) -> u32 {
     return 0;
 }
 
+/// `flomtc`（`docs/350`）：本单元写没写 `choose flomtc_true`。与 `pt_fp` 同形，
+/// 只回答"开没开"，不往产物里写任何东西（它不进 Potato 的顶层维度）。
+fn pt_flomtc(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+    let d: u32 = 0;
+    let i: u32 = lo;
+    while i < hi && pt_kind(t, i) != 4 {
+        if pt_kind(t, i) == 3 {
+            let c: u32 = load8(unit, pt_off(t, i)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                d = d + 1;
+            }
+            if (c == 125 || c == 41 || c == 93) && d > 0 {
+                d = d - 1;
+            }
+        } else if d == 0 && pt_tis(unit, t, i, "choose")
+                && pt_tis(unit, t, i + 1, "flomtc_true") {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 有没有**调用**泛型函数（声明名后紧跟 `(`，且不是声明本身）。
+/// 只是 `flomtc_true` 的**前置门**：1 = 照旧走 `pt_mono_all`（多走不误）；
+/// 0 = 没有调用点，造不出实例，跳过与走一遍产物相同。NG 是个位数，扫一遍 token 就够。
+fn pt_mono_used(sc: ptr, unit: ptr, t: ptr, nt: u32) -> u32 {
+    let n: u32 = load32(sc, PT_NG);
+    let i: u32 = 0;
+    while i < nt && pt_kind(t, i) != 4 {
+        if pt_kind(t, i) == 0 && pt_tis(unit, t, i + 1, "(") {
+            let k: u32 = 0;
+            while k < n {
+                let d: u32 = load32(sc, PT_GFN + k * 4);
+                if d != i && pt_same(unit, t, d, i) == 1 {
+                    return 1;
+                }
+                k = k + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 /// 这个 token 是哪个泛型函数的**声明名**？返回声明处的名字 token（`PT_NONE` = 不是）。
 fn pt_gfn_find(sc: ptr, unit: ptr, t: ptr, name_tok: u32) -> u32 {
     let n: u32 = load32(sc, PT_NG);
@@ -6769,7 +6814,14 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr,
         return pt_wfail("--emit-potato: more generic function declarations than this section takes (generic methods inside an `impl` block, or more than 16)");
     }
     if load32(sc, PT_NG) > 0 {
-        let mrc: u32 = pt_mono_all(sc, unit, t, nt);
+        // `flomtc_true` 的快路径（`docs/350`）：没有泛型**调用点**时，`pt_mono_all`
+        // 只是白走一遍所有函数体；跳过它，产物逐字节相同（实例数是 0）。
+        let mrc: u32 = 0;
+        if pt_flomtc(unit, t, lo, hi) == 1 && pt_mono_used(sc, unit, t, nt) == 0 {
+            mrc = 0;
+        } else {
+            mrc = pt_mono_all(sc, unit, t, nt);
+        }
         if mrc == 3 {
             // 局部变量表满（`PT_EMAX`，`FujoJTOP/loment#774`）。原先第 1537 个局部变量
             // 起就被静默丢掉，产物看起来正常、其实少了一半的名字。

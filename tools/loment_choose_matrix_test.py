@@ -180,7 +180,10 @@ def _all_legal_cells() -> list[dict[str, str]]:
     #: **逐字节相同**（这一维只在检查器上开门），扫两遍是白等一倍墙钟。
     #: "写了 `choose fp` 真的放行"由 `loment_rule_parity` 的七条 `fp-*` 与
     #: `loment_p8_test` 的 `ir_fp.lomt` 孪生各钉一处。
-    sweep_value = {"lifetime": "lifetime_auto", "fp": "no_fp"}
+    #: `flomtc`（`docs/350`）同一条：它是**编译路径**开关，产物与 `flomtc_false`
+    #: 逐字节相同（由 `loment_potato_emit_test` 的 flomtc 一条钉住），扫两遍只是双倍墙钟。
+    sweep_value = {"lifetime": "lifetime_auto", "fp": "no_fp",
+                   "flomtc": "flomtc_false"}
     #: `class` 是 C0 的 **reference-only** 维度（`docs/345`；自举在 C4）。把它塞进
     #: 这张双子扫描会让自举驱动把 `choose class_off` 当用户开关拒掉。C0 的类骨架由
     #: `lomentc_test` 的两条判据单独覆盖；C4 接上自举后删掉这个过滤。
@@ -824,6 +827,8 @@ def test_both_implementations_emit_the_same_ir_on_every_legal_cell():
     没被抽到的那一格。（唯一的例外是 `lifetime`：它的三个取值对这份**不含借用**的
     探针不改变 IR，大扫描只取一个代表值；"每个取值都被产物记下"由
     `test_lifetime_values_are_recorded_and_ir_identical` 逐值钉住。）
+    `flomtc`（`docs/350`）是**编译路径**开关：产物里**不该**有它，
+    所以这一条反过来钉 —— 每个格子的 Potato 都必须没有 `flomtc`。
     自举驱动是种子现链的那一只，与用户拿到的 dev 通道同一份实现。
     """
     cells = _all_legal_cells()
@@ -835,7 +840,13 @@ def test_both_implementations_emit_the_same_ir_on_every_legal_cell():
             name = "-".join(cell[d] for d in cell)
             rc, diag, ref, pot = _emit(td, name, cell, _body(cell))
             assert rc == 0, f"{name}: 参考实现编不过\n{diag[-400:]}"
+            # `flomtc`（`docs/350`）**不进 Potato**：它是编译路径开关，不是产物的性质。
+            # 这一条与"每一维都必须记下来"同一条纪律的另一半 —— 记不该记的也是错。
+            assert pot.get("flomtc") is None, (
+                f"{name}: Potato 里出现了 flomtc —— 它是编译路径开关，不该进产物")
             for dim in cell:
+                if dim == "flomtc":
+                    continue
                 assert pot.get(dim) == cell[dim] or dim in ("lms", "lspe"), (
                     f"{name}: Potato 记的是 {dim}={pot.get(dim)!r}, 请求的是 {cell[dim]!r}")
             src = td / f"{name}.lomt"

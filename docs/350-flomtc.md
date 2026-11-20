@@ -362,3 +362,38 @@ Potato 940 → 380 ms（2.5×）**，产物三样（Potato / IR / ELF）SHA-256 
   `_start`（会与驱动单元重名，检查器点名拒）。入口由被导入的驱动单元提供。
 - **还没做**（如实记）：原生 front/check/IR/链接器（V1–V3）、缓存/并行（V4）、
   `flomtc audit` 的两种审计档（§6）、`flomtc` 自己的版本号与命令面。
+
+### 12.5 V1 第一刀：冷路径 2122 → 991 ms
+
+> 2026-11-19。口径修正：§12.3 的"best of 3"里 IR 命中了缓存（第二遍起 ~10 ms），
+> 那不是冷启动。`tools/flomtc.py` 现在默认 `LOMENT_CACHE=off`（`bench --cache` 才量热构建）。
+
+三处改动，全部只由 `choose flomtc_true` 开门：
+
+1. **`prepare` 的快路径**（`tools/lomentc.py`）：只有泛型**声明**、没有使用时，
+   不深拷贝整模块 —— 浅拷贝后过滤声明，再跑与泛型无关的三道解析
+   （`_resolve_solid_aliases` / `_resolve_guards` / `_resolve_domains`）。
+   `check()` 与 `emit_llvm()` 都走 `prepare`，所以 check 344 → 154 ms、IR 411 → 149 ms。
+2. **AST 事实一趟走完**（`emit_potato`）：`boundary` / `surfaces` / `net_ladder` /
+   `gc_control` / `gc_ladder` 原先各走一遍全树（每结点还要 `dataclasses.fields()`）；
+   快路径用 `_call_facts` 并成一遍，字段表按类型缓存。Potato 842 → 143 ms。
+3. **`loment_fstr.rewrite` 的恒等快路径**：没有 `f"` / `command` / `foruse` / `/*`
+   时这一趟只是原样抄一遍源码，直接返回（输出相同；块注释仍走全扫，因为未闭合
+   块注释由它在报错）。front 423 → 444 的噪声内，实测约省 80 ms。
+
+冷启动实测（5045 行 / 360 函数 / best of 3 / Windows 11 / `LOMENT_CACHE=off`）：
+
+| 阶段 | `flomtc_false` | `flomtc_true` |
+|---|---:|---:|
+| front | 423 ms | 444 ms |
+| check | 344 ms | **154 ms** |
+| potato | 842 ms | **143 ms** |
+| IR | 411 ms | **149 ms** |
+| lomelf | 102 ms | 101 ms |
+| **合计** | **2,122 ms** | **991 ms** |
+
+**2.14×**，首次进入 1000 ms 以内。产物（Potato / IR / ELF）SHA-256 相同。
+覆盖判据：`COVERED` 的 **33 份单文件示例**在两种档上的 Potato 与 IR 逐字节相同
+（`loment_potato_emit_test` 新增一条；开关写在 `module` 那一行，避免临时名随行号位移）。
+
+余下的大项：front 444、check 154、IR 149 —— 原生前端（§4.2）与并行（§4.5）仍是下一档。

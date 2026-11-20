@@ -6583,12 +6583,45 @@ def _needs_full_prepare(allmods: list[Module]) -> bool:
     return any(f.tparams for m in allmods for f in m.funcs)
 
 
+def _strip_unused_generic_decls(mod: Module, deps: list[Module]) -> tuple[Module, list[Module]]:
+    """去掉**没有使用**的泛型声明（预置的 `Option<T>` / `Result<T,E>` 那一类）。
+
+    只在 `choose flomtc_true` 且 `_needs_full_prepare` 为假时走：没有泛型使用就没有
+    实例要造，过滤声明与慢路径的产物相同 —— 省掉的是整模块 `deepcopy`。
+    **浅拷贝**：调用者手里的模块（`emit_potato` 在 `emit_llvm` 之前跑）不能被动到。
+    """
+    import copy as _c
+    mod = _c.copy(mod)
+    mod.structs = [s for s in mod.structs if not s.tparams]
+    mod.enums = [e for e in mod.enums if not e.tparams]
+    deps = [_c.copy(m) for m in deps]
+    for m in deps:
+        m.structs = [s for s in m.structs if not s.tparams]
+        m.enums = [e for e in m.enums if not e.tparams]
+    return mod, deps
+
+
 def prepare(mod: Module, deps: list[Module] | None = None) -> tuple[Module, list[Module]]:
     """M6/M7: 单态化 —— 泛型函数与泛型类型展开为具体副本 (幂等)。"""
     import copy as _c
 
     deps = list(deps or [])
     allmods = deps + [mod]
+    # `flomtc_true` 的快路径（`docs/350` §12.5）：只有泛型**声明**、没有使用时，
+    # 不深拷贝，过滤声明后直接跑那三道与泛型无关的解析。后续三道对已解析的结点
+    # 是幂等的（`check` / `emit_llvm` / `emit_potato` 会各跑一遍）。
+    if (mod.chooses.get("flomtc", CORE_DEFAULTS["flomtc"]) == "flomtc_true"
+            and not _needs_full_prepare(allmods)):
+        mod, deps = _strip_unused_generic_decls(mod, deps)
+        allmods = deps + [mod]
+        _resolve_solid_aliases(mod)
+        all_caps = [c for m in allmods for c in m.caps]
+        _resolve_guards(allmods, {
+            c.name: (i, c.lo, c.hi, CAP_KIND_ID[c.kind], c.param,
+                     (1 if c.lo_inf else 0) | (2 if c.hi_inf else 0))
+            for i, c in enumerate(all_caps)})
+        _resolve_domains(mod, len(all_caps))
+        return mod, deps
     if not (any(f.tparams for m in allmods for f in m.funcs)
             or any(s.tparams for m in allmods for s in m.structs)
             or any(e.tparams for m in allmods for e in m.enums)
@@ -10338,19 +10371,77 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     return errs
 
 
+#: `dataclasses.fields()` 的**类型级**缓存。通用 AST 遍历在每个结点上都问一次"这个
+#: 类型有哪些字段"，而字段表只随类型变 —— 五趟全树遍历里这一笔占大头（`docs/350` §12.5）。
+#: 输出无关：与逐次 `fields()` 的结果完全相同。
+_AST_FIELDS: dict[type, tuple[str, ...]] = {}
+
+
+def _ast_children(x) -> tuple:
+    """通用 AST 遍历的子结点（跳过 `line` / `col` / `off` / `len` 这类位置字段）。"""
+    import dataclasses as _dc
+    t = type(x)
+    names = _AST_FIELDS.get(t)
+    if names is None:
+        if not _dc.is_dataclass(t):
+            names = ()
+        else:
+            names = tuple(fd.name for fd in _dc.fields(t)
+                          if fd.name not in ("line", "col", "off", "len"))
+        _AST_FIELDS[t] = names
+    return tuple(getattr(x, n) for n in names)
+
+
+def _call_facts(mod) -> tuple[list, list, int, list]:
+    """**一趟**走完整棵树，收齐 `boundary` / `surfaces` / `net_ladder` / `gc_control` /
+    `gc_ladder` 要的五样东西：`(被调用的名字, 机调用站点, alloc 数, lgc 语句)`。
+
+    这五处原先各走一遍（`docs/350` §12.5 把它们并成一遍）；口径与各自的旧遍历
+    逐条相同 —— `print` 的号是 1，`syscall4/6/7` 只在首参是字面量时给号。
+    """
+    names: list[str] = []
+    sites: list[tuple[int, int | None]] = []
+    lgc: list = []
+    allocs = 0
+
+    def walk(x) -> None:
+        nonlocal allocs
+        if isinstance(x, (Call, MethodCall)):
+            names.append(x.name)
+            if x.name == "print":
+                sites.append((getattr(x, "line", 0), 1))
+            elif x.name in SYSCALL_BUILTINS:
+                args = getattr(x, "args", [])
+                first = args[0] if args else None
+                sites.append((getattr(x, "line", 0),
+                              first.value if isinstance(first, IntLit) else None))
+        if isinstance(x, Call) and x.name == "alloc":
+            allocs += 1
+        if isinstance(x, Lgc):
+            lgc.append(x)
+        kids = _ast_children(x)
+        if kids:
+            for y in kids:
+                walk(y)
+        elif isinstance(x, (list, tuple)):
+            for y in x:
+                walk(y)
+
+    walk(mod)
+    return names, sites, allocs, lgc
+
+
 def _lgc_sites(x) -> list:
     """这份单元里所有 `lgc` 语句（按源码序）。`no_gc` 拒绝与 Potato 计数共用。"""
-    import dataclasses as _dc
     out: list = []
 
     def reap(v) -> None:
         if isinstance(v, Lgc):
             out.append(v)
-        if _dc.is_dataclass(v) and not isinstance(v, type):
-            for fd in _dc.fields(v):
-                if fd.name in ("line", "col", "off", "len"):
-                    continue
-                reap(getattr(v, fd.name))
+        kids = _ast_children(v)
+        if kids:
+            for y in kids:
+                reap(y)
         elif isinstance(v, (list, tuple)):
             for y in v:
                 reap(y)
@@ -11329,7 +11420,7 @@ def _count_guards(mod: Module) -> int:
     return sum(walk(f.body) for f in mod.funcs)
 
 
-def _count_boundary(mod: Module) -> dict:
+def _count_boundary(mod: Module, names: list[str] | None = None) -> dict:
     """`docs/205` R5: 一份单元里的**边界操作**有几个 —— 形式对象自描述, 不读源码就能答。
 
     数的是"越过语言保证的每一步": 机调用 (`syscall4`/`syscall6`)、裸指针变换
@@ -11346,27 +11437,13 @@ def _count_boundary(mod: Module) -> dict:
     它和 `loment stat` 报的是**同一组数**（`loment_cli_test` 拿 `lomc.lex` 独立对过）,
     所以那份清单 `potato.BOUNDARY_BUILTINS` 是两边的**单一真源**。
     """
-    import dataclasses as _dc
-
     import potato as _potato
 
     #: 走过的每一个"被调用的名字"。用**通用** dataclass 遍历, 而不是手写一张节点表 ——
     #: 手写的那种漏一个节点类型就少算几个, 而要等自举侧逐字节比对才看得出来。
-    names: list[str] = []
-
-    def walk(x) -> None:
-        if isinstance(x, (Call, MethodCall)):
-            names.append(x.name)
-        if _dc.is_dataclass(x) and not isinstance(x, type):
-            for fd in _dc.fields(x):
-                if fd.name in ("line", "col", "off", "len"):
-                    continue
-                walk(getattr(x, fd.name))
-        elif isinstance(x, (list, tuple)):
-            for y in x:
-                walk(y)
-
-    walk(mod)
+    #: 快路径会把这趟与另外四趟并成一遍（`_call_facts`），把名单直接递进来。
+    if names is None:
+        names = _call_facts(mod)[0]
     ext = [f.name for f in mod.externs]
     n_extc = sum(names.count(nm) for nm in ext)
     # **按显式的两张表分，不按名字前缀猜**：`print` 是机调用但不以 `syscall` 开头，
@@ -11436,8 +11513,6 @@ def _machine_call_sites(mod: Module) -> list[tuple[int, int | None]]:
     三处共用这一遍（`_count_surfaces` 与 `excluded` 的行为轴那一条）—— 走两遍就会漂：
     一处按 `IntLit` 认、另一处顺手也认了常量名，两份口径差一个号，判据各自绿着。
     """
-    import dataclasses as _dc
-
     out: list[tuple[int, int | None]] = []
 
     def walk(x) -> None:
@@ -11449,11 +11524,10 @@ def _machine_call_sites(mod: Module) -> list[tuple[int, int | None]]:
             first = args[0] if args else None
             out.append((getattr(x, "line", 0),
                         first.value if isinstance(first, IntLit) else None))
-        if _dc.is_dataclass(x) and not isinstance(x, type):
-            for fd in _dc.fields(x):
-                if fd.name in ("line", "col", "off", "len"):
-                    continue
-                walk(getattr(x, fd.name))
+        kids = _ast_children(x)
+        if kids:
+            for y in kids:
+                walk(y)
         elif isinstance(x, (list, tuple)):
             for y in x:
                 walk(y)
@@ -11469,7 +11543,7 @@ def _machine_call_sites(mod: Module) -> list[tuple[int, int | None]]:
 EXCLUDED_NET_SPACES = ("net", "network")
 
 
-def _count_surfaces(mod: Module) -> dict:
+def _count_surfaces(mod: Module, sites: list | None = None) -> dict:
     """`docs/222`：把**机调用站点**按"面"分一分 —— 与 `boundary` / `gc_ladder` 同形的一份自描述。
 
     口径与 `_count_boundary` 一样是**词法的**：只看 `syscall4/6/7` 的**第一个实参**写没写成
@@ -11485,7 +11559,9 @@ def _count_surfaces(mod: Module) -> dict:
     那是词法口径的诚实边界，不是漏数。
     """
     counts: dict = {}
-    for _line, num in _machine_call_sites(mod):
+    if sites is None:
+        sites = _machine_call_sites(mod)
+    for _line, num in sites:
         key = SURFACE_NUMBERS.get(num, SURFACE_OTHER)
         counts[key] = counts.get(key, 0) + 1
     out = {k: counts[k] for k in sorted(counts)}   # 键**按名字排序**：确定性是判据
@@ -11493,7 +11569,7 @@ def _count_surfaces(mod: Module) -> dict:
     return out
 
 
-def _count_net_ladder(mod: Module) -> dict:
+def _count_net_ladder(mod: Module, sites: list | None = None) -> dict:
     """`docs/237`：把**联网站点的宽度组成**写进产物 —— 四档各领走几个站点。
 
     形状照 `gc_ladder`（四个非负整数 + `total_net`，各档之和必须等于总数），**多一条交叉**：
@@ -11508,7 +11584,9 @@ def _count_net_ladder(mod: Module) -> dict:
     **四档恒在**（哪怕为 0），与 `gc_ladder` 同 —— 键的集合固定，校验器与读者都不用猜。
     """
     counts: dict = {}
-    for _line, num in _machine_call_sites(mod):
+    if sites is None:
+        sites = _machine_call_sites(mod)
+    for _line, num in sites:
         rung = NET_WIDTH_RUNGS.get(num)
         if rung is None:
             continue
@@ -11518,7 +11596,7 @@ def _count_net_ladder(mod: Module) -> dict:
     return out
 
 
-def _count_gc_ladder(mod: Module) -> dict:
+def _count_gc_ladder(mod: Module, total: int | None = None) -> dict:
     """`docs/210` §5 第一条：把 **GC 的组成**写进产物 —— 每一层各领走几个 `alloc` 站点。
 
     形状**照 `boundary`**（§5 R5 那条自洽规则的同形）：五个非负整数 + `total_sites`
@@ -11544,28 +11622,11 @@ def _count_gc_ladder(mod: Module) -> dict:
     在 **`raw_mod`（单态化之前）** 上数：自举侧看到的是**源 token**，也只有单态化前的
     那份视图与它对齐（单态化会造出实例的副本，那些副本两边都不数）。
     """
-    import dataclasses as _dc
-
     #: 全部 `alloc` 调用点（**不看形状**）：凡是一个 `alloc` 就是一处站点，形状不合的
-    #: （落不到 `let NAME: ptr = ...` 那种）自然落在 L3。用**通用** dataclass 遍历，
-    #: 不手写节点表 —— 理由同 `_count_boundary`：漏一个节点类型就少算几个，要等自举侧
-    #: 逐字节比对才看得出来。
-    total = 0
-
-    def reap(x) -> None:
-        nonlocal total
-        if isinstance(x, Call) and x.name == "alloc":
-            total += 1
-        if _dc.is_dataclass(x) and not isinstance(x, type):
-            for fd in _dc.fields(x):
-                if fd.name in ("line", "col", "off", "len"):
-                    continue
-                reap(getattr(x, fd.name))
-        elif isinstance(x, (list, tuple)):
-            for y in x:
-                reap(y)
-
-    reap(mod)
+    #: （落不到 `let NAME: ptr = ...` 那种）自然落在 L3。快路径由 `_call_facts`
+    #: 一遍走完把数递进来（`total`），别的调用者走同一张通用遍历。
+    if total is None:
+        total = _call_facts(mod)[2]
 
     l0 = l0_5 = l1 = l2 = 0
 
@@ -11622,7 +11683,7 @@ def _count_gc_ladder(mod: Module) -> dict:
             "l3": total - l0 - l0_5 - l1 - l2, "total_sites": total}
 
 
-def _count_gc_control(mod: Module) -> dict:
+def _count_gc_control(mod: Module, lgc: list | None = None) -> dict:
     """`lgc` 的站点统计（`docs/309`，Potato v21）。
 
     只数**根单元**的语句（与 `guards` / `boundary` 同一个视图）。`manual_collector`
@@ -11630,7 +11691,9 @@ def _count_gc_control(mod: Module) -> dict:
     这是 `gc_manual` 的旧承诺之外唯一被允许的例外，必须能不看源码读出来。
     """
     n = {"pauses": 0, "resumes": 0, "windows": 0, "timed_windows": 0}
-    for s in _lgc_sites(mod):
+    if lgc is None:
+        lgc = _lgc_sites(mod)
+    for s in lgc:
         if s.action == "pause":
             n["pauses"] += 1
         elif s.action == "resume":
@@ -11701,21 +11764,13 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None,
                                    if f.name.startswith(i.type + "_") else f.name
                                    for f in i.funcs]}
                       for i in mod.impls]
-        _gc_ladder = _count_gc_ladder(mod)
+        _gc_ladder = _count_gc_ladder(mod, total=_call_facts(mod)[2])
         _allmods = list(deps or []) + [mod]
         if _needs_full_prepare(_allmods):
             mod, deps = prepare(mod, deps)  # M6
         else:
             # 只有泛型声明、没有泛型使用：过滤声明即可，不深拷贝整个模块。
-            # emit_potato 在 emit_llvm 之前跑 —— 必须浅拷贝，别动调用者手里的列表。
-            import copy as _c
-            mod = _c.copy(mod)
-            mod.structs = [s for s in mod.structs if not s.tparams]
-            mod.enums = [e for e in mod.enums if not e.tparams]
-            deps = [_c.copy(m) for m in deps or []]
-            for _m in deps:
-                _m.structs = [s for s in _m.structs if not s.tparams]
-                _m.enums = [e for e in _m.enums if not e.tparams]
+            mod, deps = _strip_unused_generic_decls(mod, deps or [])
     else:
         # 默认路径（`flomtc_false`）：与 flomtc 之前逐字节相同。
         import copy as _c
@@ -11735,6 +11790,10 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None,
                                    for f in i.funcs]}
                       for i in raw_mod.impls]
         _gc_ladder = _count_gc_ladder(raw_mod)
+    # 快路径：五处计数并成**一趟**全树遍历（`docs/350` §12.5）；默认路径各自现走。
+    _names = _sites = _lgc = None
+    if _flomtc:
+        _names, _sites, _allocs, _lgc = _call_facts(mod)
     all_caps = [c for m in (deps or []) + [mod] for c in m.caps]
     layouts = []
     for u in mod.uses:
@@ -12010,19 +12069,19 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None,
         "generics": generics,
         "instances": instances,
         "guards": _count_guards(mod),
-        "boundary": _count_boundary(mod),
+        "boundary": _count_boundary(mod, names=_names),
         # **GC 的组成**（`docs/210` §3/§5, v10）—— 在 `raw_mod`（单态化之前）上数，理由
         # 见 `_count_gc_ladder`：自举侧看到的是**源 token**，只有单态化前那份视图与它对齐。
         "gc_ladder": _gc_ladder,
         # **GC 的时间控制**（v21，`docs/309`）：`lgc` 的暂停/恢复/窗口计数，外加
         # `manual_collector` —— 手动档下用了 `lgc` 就会带收集器，这条让例外可判。
-        "gc_control": _count_gc_control(mod),
+        "gc_control": _count_gc_control(mod, lgc=_lgc),
         # **面的组成**（`docs/222`, v11）—— 与 `boundary` **同一个视图**（`mod`），
         # 因为那条交叉不变量（`total_sites == boundary.syscalls`）要求两处数的是同一批站点。
-        "surfaces": _count_surfaces(mod),
+        "surfaces": _count_surfaces(mod, sites=_sites),
         # **联网站点的宽度组成**（`docs/237`, v14）—— 与 `surfaces` 同一个视图、**同一遍
         # 遍历**：那条交叉不变量（`total_net == surfaces.net`）要求两处数的是同一批站点。
-        "net_ladder": _count_net_ladder(mod),
+        "net_ladder": _count_net_ladder(mod, sites=_sites),
         "excluded": list(mod.excluded),
     }
     text = json.dumps(doc, ensure_ascii=False, indent=2) + "\n"

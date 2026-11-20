@@ -20,7 +20,7 @@ module errdata
 // 细分规则在前、族码兜底在后 —— 与参考实现 `loment_diag.RULES` 的次序逐条相同：
 // `^(?:\d+: )?` 那个可选前缀是「语义错带行号、解析错不带」的同一口径。
 
-pub fn rule_count() -> u32 { return 243; }
+pub fn rule_count() -> u32 { return 244; }
 
 /// 第 `i` 条规则的码号（十进制；显示成 `E0xx` / `E0xxx` 是 `code_str` 的事）。
 pub fn rule_code(i: u32) -> u32 {
@@ -219,54 +219,55 @@ pub fn rule_code(i: u32) -> u32 {
     if i == 192 { return 233; }
     if i == 193 { return 234; }
     if i == 194 { return 235; }
-    if i == 195 { return 23; }
+    if i == 195 { return 236; }
     if i == 196 { return 23; }
     if i == 197 { return 23; }
     if i == 198 { return 23; }
     if i == 199 { return 23; }
-    if i == 200 { return 30; }
-    if i == 201 { return 2; }
-    if i == 202 { return 1; }
-    if i == 203 { return 3; }
-    if i == 204 { return 4; }
-    if i == 205 { return 5; }
-    if i == 206 { return 6; }
-    if i == 207 { return 7; }
-    if i == 208 { return 8; }
-    if i == 209 { return 9; }
-    if i == 210 { return 10; }
-    if i == 211 { return 11; }
-    if i == 212 { return 12; }
-    if i == 213 { return 13; }
-    if i == 214 { return 14; }
-    if i == 215 { return 15; }
-    if i == 216 { return 16; }
-    if i == 217 { return 17; }
-    if i == 218 { return 18; }
-    if i == 219 { return 20; }
-    if i == 220 { return 21; }
-    if i == 221 { return 31; }
-    if i == 222 { return 22; }
-    if i == 223 { return 27; }
-    if i == 224 { return 28; }
-    if i == 225 { return 29; }
-    if i == 226 { return 19; }
-    if i == 227 { return 24; }
-    if i == 228 { return 25; }
-    if i == 229 { return 26; }
-    if i == 230 { return 31; }
-    if i == 231 { return 32; }
-    if i == 232 { return 33; }
-    if i == 233 { return 34; }
-    if i == 234 { return 35; }
-    if i == 235 { return 36; }
-    if i == 236 { return 37; }
-    if i == 237 { return 38; }
-    if i == 238 { return 39; }
-    if i == 239 { return 40; }
-    if i == 240 { return 41; }
-    if i == 241 { return 900; }
-    if i == 242 { return 999; }
+    if i == 200 { return 23; }
+    if i == 201 { return 30; }
+    if i == 202 { return 2; }
+    if i == 203 { return 1; }
+    if i == 204 { return 3; }
+    if i == 205 { return 4; }
+    if i == 206 { return 5; }
+    if i == 207 { return 6; }
+    if i == 208 { return 7; }
+    if i == 209 { return 8; }
+    if i == 210 { return 9; }
+    if i == 211 { return 10; }
+    if i == 212 { return 11; }
+    if i == 213 { return 12; }
+    if i == 214 { return 13; }
+    if i == 215 { return 14; }
+    if i == 216 { return 15; }
+    if i == 217 { return 16; }
+    if i == 218 { return 17; }
+    if i == 219 { return 18; }
+    if i == 220 { return 20; }
+    if i == 221 { return 21; }
+    if i == 222 { return 31; }
+    if i == 223 { return 22; }
+    if i == 224 { return 27; }
+    if i == 225 { return 28; }
+    if i == 226 { return 29; }
+    if i == 227 { return 19; }
+    if i == 228 { return 24; }
+    if i == 229 { return 25; }
+    if i == 230 { return 26; }
+    if i == 231 { return 31; }
+    if i == 232 { return 32; }
+    if i == 233 { return 33; }
+    if i == 234 { return 34; }
+    if i == 235 { return 35; }
+    if i == 236 { return 36; }
+    if i == 237 { return 37; }
+    if i == 238 { return 38; }
+    if i == 239 { return 39; }
+    if i == 240 { return 40; }
+    if i == 241 { return 41; }
+    if i == 242 { return 900; }
+    if i == 243 { return 999; }
     return 0;
 }
 
@@ -467,60 +468,61 @@ pub fn rule_pat(i: u32) -> str {
     if i == 192 { return "函数指针类型 .* 没有封闭目标集"; }
     if i == 193 { return "抽象类 .* 不能实例化"; }
     if i == 194 { return ".* 由编译器填"; }
-    if i == 195 { return "^native[ :]|^rust[ :]|^这个后端|目前只支持标量|后端拿到的单元不完整|的实参个数不符|^\\S+ 不是结构体$|^\\S+ 不是数组$|^match 的主体 \\S+ 不是枚举$|未知枚举变体|没有载荷$|没有字段 \\S+|是只读切片，不能写|不支持这条语句"; }
-    if i == 196 { return "嵌套超过"; }
-    if i == 197 { return "效应处理器的运行期|extern 上的效应行"; }
-    if i == 198 { return "写法写的单元里有 .* 处(转写不了|发不出来)|这份源读不通|^定不出源语法"; }
-    if i == 199 { return "^泛型实参的形状这一格不收"; }
-    if i == 200 { return "未知类型 "; }
-    if i == 201 { return "未定义的函数|未声明的变量|未声明$|未知结构体|未知枚举|类型 .*未声明|没有方法|没有同名方法|父类 .* 不在本模块"; }
-    if i == 202 { return "类型 .*应为|表达式类型|return 类型|类型必须是整型|载荷类型|实参(期望|类型)|实参 [^，]*不是数组或切片|内建 .* 实参|只接 Option/Result 形状|要两变体的枚举|不是 Option/Result 形状|的兜底值类型|is not a named array or slice|is not an array or slice|override 签名|self 必须是"; }
-    if i == 203 { return "需要 \\d+ 个实参|载荷只能有一个实参"; }
-    if i == 204 { return "guard 引用了未声明的能力|quality 引用了未声明的能力|discharge 引用了未声明的能力|quality 只用于自适应域|discharge 只用于可达域|能力 .*域|能力 .*重复|能力 .*参数必须|能力 .* 的 cyclic 周期|^\\d+: 域 .*|generation 只用于 revision 域|retire 只用于 revision 域|generation 引用了未声明的能力|retire 引用了未声明的能力|不能是 revision|不能带空间|第二个实参|domain:for|child_of|couple|mutex|并行的几个域|revoke|sibling"; }
-    if i == 205 { return "使用了 excluded 的空间"; }
-    if i == 206 { return "已被移动"; }
-    if i == 207 { return "既被可变借用又被借用|被可变借用两次"; }
-    if i == 208 { return "无变体|重复模式|不是枚举|match 主体|不穷尽|不能带参数|不能绑定|模式需绑定变量|与主体枚举"; }
-    if i == 209 { return "与基类型同名|结构体 .* 为空|枚举 .* 为空"; }
-    if i == 210 { return "\\? 只能用于"; }
-    if i == 211 { return "只读切片不能写|形参需声明 mut|形参要求|实参是只读切片"; }
-    if i == 212 { return "悬垂"; }
-    if i == 213 { return "重复定义|重名|参数 .*重复|字段 .* 重复$|变体 .* 重复$|与同名的结构体/枚举冲突|与父类重复|与父类实例方法同名"; }
-    if i == 214 { return "赋值目标不是左值"; }
-    if i == 215 { return "无字段|缺字段|重复初始化|对非结构体类型取字段|对非数组/切片类型取下标|只能作用于数组|`\\*` 只能解引用借用|借用的目标类型未知|只能作用于变量、字段或下标|借用的目标必须是变量、字段或"; }
-    if i == 216 { return "数组字面量|数组长度不符"; }
-    if i == 217 { return "as 目标类型非法|as 只能作用于"; }
-    if i == 218 { return "名字导入找不到模块|名字导入有歧义|依赖 .* 里没有同名模块|自带的库里 .*|use 的 .* 不存在|导入的 .* 不存在|循环导入|有语义错误|`addin .*` 找不到"; }
-    if i == 219 { return "的 use 有 .* 条, 超过上限|覆盖计数块数超过"; }
-    if i == 220 { return "外部函数 .* (的参数 .* 类型|的返回类型) .* 不支持|外部函数 .* 不能带类型参数"; }
-    if i == 221 { return "声明了 `no_runtime`|用了会把运行期拖进产物的构造"; }
-    if i == 222 { return "核心模式只能声明一次|核心模式这一维只能声明一次|这一格只能声明一次|模式只能是|不能同时选|库不许 `choose`|未定义的开关|发行版不含 VM|发行版不含对外端口|依赖 `.*` 要求 |开关 .* 写了两次|`choose` 有 .* 条, 超过上限|`addin` 有 .* 条, 超过上限|不许写在另一个开关体里|库不许 `addin`|`addin` 单元不许声明核心模式|`addin` 嵌套超过|`addin` 拉进来的单元里只能写 choose 相关代码|依赖嵌套超过|生命周期控制从|虚方法/vtable 需要|没有封闭目标集"; }
-    if i == 223 { return "可能从末尾掉出去"; }
-    if i == 224 { return "越过定长数组的界"; }
-    if i == 225 { return "指向的块已经被 `free`"; }
-    if i == 226 { return "期望 .*得到|期望表达式|非法字符|顶层只允许|未知顶层关键字|pub 之后需要一项声明|数组长度必须为正|第一个参数必须是 self|类体里的 .* 之后只允许 fn|类方法 .* 的 self 必须是第一个参数|抽象类 .* 从 C2 起|用了 virtual/abstract|类的继承成环|由编译器填|抽象类 .* 不能实例化|是编译器保留字段|没有父类，不能用 super|的关联函数里不能用 super|是抽象方法，但类不是 abstract|是虚方法/抽象方法，必须有 self|覆盖父类虚方法要写|指向抽象方法，没有实现可调|未知转义|未闭合|单个 `}` 不是合法的插值|插值孔里没有表达式|孔不能跨行|格式说明(是空的|缺宽度|的宽度要在|只认)|`lgc` (只认|后面要跟|的时长|的预算)|`lgc end` 不接受时长|带预算的 `lgc start|can only be used inside a loop|不带值，函数|defer 只收函数调用|defer 只在函数体里成立|v1 takes a function call|`if` 表达式|`match` 表达式|`set choose` 后面要跟一个块|的块没闭合"; }
-    if i == 227 { return "命令声明的形状不对|是 loment 的官方命令|命令名 .* 不合法|库不许声明命令|名字后面要跟"; }
-    if i == 228 { return "`_start` 与 `command_main` 同时存在"; }
-    if i == 229 { return "写了 `command_main` 却没有命令声明|`command_main` 的签名不对|声明了命令却没有 `command_main`"; }
-    if i == 230 { return "cannot read |cannot open |打不开输入文件|读不了输入文件|是目录, 不是源文件|入口是空文件"; }
-    if i == 231 { return "cannot write the output file|写不了输出文件|写不了输出"; }
-    if i == 232 { return "unit is too large|out of memory|单元太大|表容量|does not fit in the input buffer|超过 4 MiB 上限"; }
-    if i == 233 { return "LSPE 未能为这次放行给出来源|未标注的放行"; }
-    if i == 234 { return "LSPE 台账里有未登记的站点种类|LSPE 台账矛盾"; }
-    if i == 235 { return "LSPE 自检失败"; }
-    if i == 236 { return "LSPE 策略锁"; }
-    if i == 237 { return "`lspe pass` 必须写明理由"; }
-    if i == 238 { return "`lgc` 需要一个收集器"; }
-    if i == 239 { return "在新版次里是语法关键字|does not pin its reading to the current edition"; }
-    if i == 240 { return "返回借用，但签名里没有引用形参|区域标记|仍被借用时释放|不写区域标记|borrow 域|共享域|独占域|里的借用不能带出|还在域 .* 里被借用|要借用的 .* 不在作用域里|越窗|两半必须互斥|游标域|宽度必须是正的编译期整数|块内不能再用|已经移交过|所有权已经随|交给外部|epoch 域"; }
-    if i == 241 { return "wrote no diagnostic record|没有写出诊断记录|died before it could report"; }
-    if i == 242 { return "(?!)"; }
+    if i == 195 { return "里有子集外的写法"; }
+    if i == 196 { return "^native[ :]|^rust[ :]|^这个后端|目前只支持标量|后端拿到的单元不完整|的实参个数不符|^\\S+ 不是结构体$|^\\S+ 不是数组$|^match 的主体 \\S+ 不是枚举$|未知枚举变体|没有载荷$|没有字段 \\S+|是只读切片，不能写|不支持这条语句"; }
+    if i == 197 { return "嵌套超过"; }
+    if i == 198 { return "效应处理器的运行期|extern 上的效应行"; }
+    if i == 199 { return "写法写的单元里有 .* 处(转写不了|发不出来)|这份源读不通|^定不出源语法"; }
+    if i == 200 { return "^泛型实参的形状这一格不收"; }
+    if i == 201 { return "未知类型 "; }
+    if i == 202 { return "未定义的函数|未声明的变量|未声明$|未知结构体|未知枚举|类型 .*未声明|没有方法|没有同名方法|父类 .* 不在本模块"; }
+    if i == 203 { return "类型 .*应为|表达式类型|return 类型|类型必须是整型|载荷类型|实参(期望|类型)|实参 [^，]*不是数组或切片|内建 .* 实参|只接 Option/Result 形状|要两变体的枚举|不是 Option/Result 形状|的兜底值类型|is not a named array or slice|is not an array or slice|override 签名|self 必须是"; }
+    if i == 204 { return "需要 \\d+ 个实参|载荷只能有一个实参"; }
+    if i == 205 { return "guard 引用了未声明的能力|quality 引用了未声明的能力|discharge 引用了未声明的能力|quality 只用于自适应域|discharge 只用于可达域|能力 .*域|能力 .*重复|能力 .*参数必须|能力 .* 的 cyclic 周期|^\\d+: 域 .*|generation 只用于 revision 域|retire 只用于 revision 域|generation 引用了未声明的能力|retire 引用了未声明的能力|不能是 revision|不能带空间|第二个实参|domain:for|child_of|couple|mutex|并行的几个域|revoke|sibling"; }
+    if i == 206 { return "使用了 excluded 的空间"; }
+    if i == 207 { return "已被移动"; }
+    if i == 208 { return "既被可变借用又被借用|被可变借用两次"; }
+    if i == 209 { return "无变体|重复模式|不是枚举|match 主体|不穷尽|不能带参数|不能绑定|模式需绑定变量|与主体枚举"; }
+    if i == 210 { return "与基类型同名|结构体 .* 为空|枚举 .* 为空"; }
+    if i == 211 { return "\\? 只能用于"; }
+    if i == 212 { return "只读切片不能写|形参需声明 mut|形参要求|实参是只读切片"; }
+    if i == 213 { return "悬垂"; }
+    if i == 214 { return "重复定义|重名|参数 .*重复|字段 .* 重复$|变体 .* 重复$|与同名的结构体/枚举冲突|与父类重复|与父类实例方法同名"; }
+    if i == 215 { return "赋值目标不是左值"; }
+    if i == 216 { return "无字段|缺字段|重复初始化|对非结构体类型取字段|对非数组/切片类型取下标|只能作用于数组|`\\*` 只能解引用借用|借用的目标类型未知|只能作用于变量、字段或下标|借用的目标必须是变量、字段或"; }
+    if i == 217 { return "数组字面量|数组长度不符"; }
+    if i == 218 { return "as 目标类型非法|as 只能作用于"; }
+    if i == 219 { return "名字导入找不到模块|名字导入有歧义|依赖 .* 里没有同名模块|自带的库里 .*|use 的 .* 不存在|导入的 .* 不存在|循环导入|有语义错误|`addin .*` 找不到"; }
+    if i == 220 { return "的 use 有 .* 条, 超过上限|覆盖计数块数超过"; }
+    if i == 221 { return "外部函数 .* (的参数 .* 类型|的返回类型) .* 不支持|外部函数 .* 不能带类型参数"; }
+    if i == 222 { return "声明了 `no_runtime`|用了会把运行期拖进产物的构造"; }
+    if i == 223 { return "核心模式只能声明一次|核心模式这一维只能声明一次|这一格只能声明一次|模式只能是|不能同时选|库不许 `choose`|未定义的开关|发行版不含 VM|发行版不含对外端口|依赖 `.*` 要求 |开关 .* 写了两次|`choose` 有 .* 条, 超过上限|`addin` 有 .* 条, 超过上限|不许写在另一个开关体里|库不许 `addin`|`addin` 单元不许声明核心模式|`addin` 嵌套超过|`addin` 拉进来的单元里只能写 choose 相关代码|依赖嵌套超过|生命周期控制从|虚方法/vtable 需要|没有封闭目标集"; }
+    if i == 224 { return "可能从末尾掉出去"; }
+    if i == 225 { return "越过定长数组的界"; }
+    if i == 226 { return "指向的块已经被 `free`"; }
+    if i == 227 { return "期望 .*得到|期望表达式|非法字符|顶层只允许|未知顶层关键字|pub 之后需要一项声明|数组长度必须为正|第一个参数必须是 self|类体里的 .* 之后只允许 fn|类方法 .* 的 self 必须是第一个参数|抽象类 .* 从 C2 起|用了 virtual/abstract|类的继承成环|由编译器填|抽象类 .* 不能实例化|是编译器保留字段|没有父类，不能用 super|的关联函数里不能用 super|是抽象方法，但类不是 abstract|是虚方法/抽象方法，必须有 self|覆盖父类虚方法要写|指向抽象方法，没有实现可调|未知转义|未闭合|单个 `}` 不是合法的插值|插值孔里没有表达式|孔不能跨行|格式说明(是空的|缺宽度|的宽度要在|只认)|`lgc` (只认|后面要跟|的时长|的预算)|`lgc end` 不接受时长|带预算的 `lgc start|can only be used inside a loop|不带值，函数|defer 只收函数调用|defer 只在函数体里成立|v1 takes a function call|`if` 表达式|`match` 表达式|`set choose` 后面要跟一个块|的块没闭合"; }
+    if i == 228 { return "命令声明的形状不对|是 loment 的官方命令|命令名 .* 不合法|库不许声明命令|名字后面要跟"; }
+    if i == 229 { return "`_start` 与 `command_main` 同时存在"; }
+    if i == 230 { return "写了 `command_main` 却没有命令声明|`command_main` 的签名不对|声明了命令却没有 `command_main`"; }
+    if i == 231 { return "cannot read |cannot open |打不开输入文件|读不了输入文件|是目录, 不是源文件|入口是空文件"; }
+    if i == 232 { return "cannot write the output file|写不了输出文件|写不了输出"; }
+    if i == 233 { return "unit is too large|out of memory|单元太大|表容量|does not fit in the input buffer|超过 4 MiB 上限"; }
+    if i == 234 { return "LSPE 未能为这次放行给出来源|未标注的放行"; }
+    if i == 235 { return "LSPE 台账里有未登记的站点种类|LSPE 台账矛盾"; }
+    if i == 236 { return "LSPE 自检失败"; }
+    if i == 237 { return "LSPE 策略锁"; }
+    if i == 238 { return "`lspe pass` 必须写明理由"; }
+    if i == 239 { return "`lgc` 需要一个收集器"; }
+    if i == 240 { return "在新版次里是语法关键字|does not pin its reading to the current edition"; }
+    if i == 241 { return "返回借用，但签名里没有引用形参|区域标记|仍被借用时释放|不写区域标记|borrow 域|共享域|独占域|里的借用不能带出|还在域 .* 里被借用|要借用的 .* 不在作用域里|越窗|两半必须互斥|游标域|宽度必须是正的编译期整数|块内不能再用|已经移交过|所有权已经随|交给外部|epoch 域"; }
+    if i == 242 { return "wrote no diagnostic record|没有写出诊断记录|died before it could report"; }
+    if i == 243 { return "(?!)"; }
     return "";
 }
 
 // ---------------------------------------------------------------- 码表
 
-pub fn n_codes() -> u32 { return 235; }
+pub fn n_codes() -> u32 { return 236; }
 pub fn internal_lo() -> u32 { return 900; }
 pub fn internal_hi() -> u32 { return 999; }
 
@@ -761,6 +763,7 @@ pub fn code_str(c: u32) -> str {
     if c == 233 { return "E0233"; }
     if c == 234 { return "E0234"; }
     if c == 235 { return "E0235"; }
+    if c == 236 { return "E0236"; }
     if c == 900 { return "E0900"; }
     if c == 999 { return "E0999"; }
     return "";
@@ -962,6 +965,7 @@ pub fn code_family(c: u32) -> u32 {
     if c == 233 { return 22; }
     if c == 234 { return 19; }
     if c == 235 { return 19; }
+    if c == 236 { return 23; }
     return c;
 }
 
@@ -1439,6 +1443,8 @@ pub fn code_title(c: u32, lang: u32) -> str {
     if k == 469 { return "抽象类不能实例化"; }
     if k == 470 { return "a compiler-owned field was initialized"; }
     if k == 471 { return "编译器保留字段"; }
+    if k == 472 { return "the construct is outside the translated subset for that language"; }
+    if k == 473 { return "这写法在该门语法的翻译子集之外"; }
     if k == 1800 { return "the tool died without reporting (internal)"; }
     if k == 1801 { return "工具链进程死了，没留下诊断"; }
     if k == 1998 { return "unclassified (please report)"; }
@@ -1684,6 +1690,7 @@ pub fn code_hint(c: u32, lang: u32) -> str {
     if k == 467 { return "在程序里给同型函数取址（`let f: (T) -> R = inc;`）。"; }
     if k == 469 { return "实例化一个具体子类。"; }
     if k == 471 { return "删掉字面量里的 `__vtable`。"; }
+    if k == 473 { return "改写成该语言里更普通的写法（报错消息末尾点名了是哪一种）。"; }
     if k == 1801 { return "编译器 / 链接器 / 报错器之一在能写出结构化诊断之前就死了（信号或异常退出）。这不是你源码的语义错 —— 它是**实现自己的失败**，修法与改你那一行无关。"; }
     if k == 1999 { return "报错器没有认出这条消息属于哪一类。把消息原文、源码与命令报告上来，分类表会补一条。"; }
     return "";
@@ -2161,6 +2168,8 @@ pub fn code_what(c: u32, lang: u32) -> str {
     if k == 469 { return "抽象类只提供布局/槽位，具体对象必须来自实现了全部抽象方法的子类。"; }
     if k == 470 { return "The class vtable header is written by the compiler; user literals cannot set it."; }
     if k == 471 { return "类的 vtable 头由编译器写入，用户字面量里不能手写。"; }
+    if k == 472 { return "The front door translates this source into Loment, and `Stage A` has no rule for this construct. That language is all-or-nothing: nothing is silently dropped."; }
+    if k == 473 { return "前门把这份源翻成 Loment 时，`Stage A` 的子集里没有这个构造 —— 那一门整份是全有或全无，丢了的部分不会悄悄跳过。"; }
     if k == 1800 { return "A process in the toolchain died **before it could write a structured diagnostic** - killed by a signal, or exited abnormally, with no record in `--diag-out`."; }
     if k == 1801 { return "工具链里的一个进程在**能写出结构化诊断之前**就死了 —— 被信号打死，或者以异常状态退出，而 `--diag-out` 一份记录都没写。"; }
     if k == 1998 { return "The compiler reported an error that is not in the classification table -- even the toolchain did not recognise which code this message belongs to."; }
@@ -2640,6 +2649,8 @@ pub fn code_why(c: u32, lang: u32) -> str {
     if k == 469 { return "Loment 的**原生语法与 Rust 很接近，但去掉了**几样东西：单引号字符字面量、无值 `return;`、表达式式的 `match` 臂、`mut` 作为绑定修饰词。照 Rust 的习惯写很容易踩到这几处 —— 它们不是“暂时不支持”，是这门语言没有。（说的只是**原生语法**：同一段逻辑也能用 C / C++ / Java / C# / Go / Python 的写法写，那是另一层，见 `docs/188`。）"; }
     if k == 470 { return "Loment's **own syntax is close to Rust but drops** a few things: single-quoted character literals, value-less `return;`, expression-style `match` arms, and `mut` as a binding modifier. Writing from Rust habits lands on these easily - they are not \"not supported yet\", the language simply does not have them. (That is the native syntax only: the same logic can also be written the C / C++ / Java / C# / Go / Python way, which is a different layer - see `docs/188`.)"; }
     if k == 471 { return "Loment 的**原生语法与 Rust 很接近，但去掉了**几样东西：单引号字符字面量、无值 `return;`、表达式式的 `match` 臂、`mut` 作为绑定修饰词。照 Rust 的习惯写很容易踩到这几处 —— 它们不是“暂时不支持”，是这门语言没有。（说的只是**原生语法**：同一段逻辑也能用 C / C++ / Java / C# / Go / Python 的写法写，那是另一层，见 `docs/188`。）"; }
+    if k == 472 { return "The front door translates another language into Loment so that source really compiles and runs (`docs/186`). `Stage A` takes only a small subset with clear semantics and rejects the whole unit when it cannot cover it - a half-translated program would silently change behaviour. So this is neither a missing rule in the table nor a mistake of yours; it has its own code because \"rewrite this construct\" and \"fix that line as the compiler suggests\" are different jobs."; }
+    if k == 473 { return "前门把别的语法翻成 Loment，是为了让那份源真能编、能跑（`docs/186`）。`Stage A` 只收一块语义明确的子集，收不全时**整份拒掉** —— 半翻出来的程序会悄悄改变行为，那比报错糟得多。所以这不是分类表漏了一条，也不是你写错了；它单独一个码，是因为「改写这一处」和「照编译器建议改那一行」是两件事。"; }
     if k == 1800 { return "The diagnostics channel can only describe failures that were **successfully serialized before the failure**. A compiler crash, a linker crash, or the renderer crashing on its own all go the same way: the JSONL is empty and there is nothing for the renderer to do. The launcher now closes that gap: it reads the exit status / signal name and synthesizes this record, so \"no record\" no longer means \"nothing happened\" (#773). This is not a semantic error in your source - it is the **implementation failing on itself**."; }
     if k == 1801 { return "诊断系统只能描述**在失败之前已经成功序列化**的失败。编译器崩溃、链接器崩溃、报错器自己崩溃，走的都是这条路：JSONL 是空的，渲染器无事可做。启动器现在替它收尸：拿到退出状态 / 信号名，合成这一条记录，于是「没有任何记录」不再等于「什么都没有发生」（`#773`）。这不是你源码的语义错 —— 它是**实现自己的失败**。"; }
     if k == 1998 { return "The table and the compiler come out of the same repository and the same build. A message landing here means it has not been classified yet, not that the toolchain versions disagree: fix by the message, then report it so a rule can be added."; }
@@ -3119,6 +3130,8 @@ pub fn code_yes(c: u32, lang: u32) -> str {
     if k == 469 { return "Rust 风味那套语法；`//` `/* */` 注释；`let x: T = e;`"; }
     if k == 470 { return "the Rust-subset syntax; `//` and `/* */` comments; `let x: T = e;`"; }
     if k == 471 { return "Rust 风味那套语法；`//` `/* */` 注释；`let x: T = e;`"; }
+    if k == 472 { return "the plainer forms of that language - `for` / `if` / scalar arithmetic / `return` - are the shapes `Stage A` takes"; }
+    if k == 473 { return "该语言里更普通的写法 —— `for` / `if` / 标量算术 / `return` 这些 Stage A 收的形状"; }
     if k == 1800 { return "a tool exits 0 (no diagnostics) or 1 (diagnostics, and it left a record)"; }
     if k == 1801 { return "工具链以 0 退出（无诊断）或 1 退出（有诊断并留下了记录）"; }
     if k == 1998 { return "classified messages after a report lands"; }
@@ -3598,6 +3611,8 @@ pub fn code_no(c: u32, lang: u32) -> str {
     if k == 469 { return "单引号字符字面量；无值 `return;`；表达式式 match 臂；`let mut x: T`（`mut` 不是关键字）"; }
     if k == 470 { return "single-quoted character literals; value-less `return;`; expression-style match arms; `let mut x: T` (`mut` is not a keyword)"; }
     if k == 471 { return "单引号字符字面量；无值 `return;`；表达式式 match 臂；`let mut x: T`（`mut` 不是关键字）"; }
+    if k == 472 { return "`+=`, `switch`, exceptions, class inheritance, string methods - the message names the one you hit"; }
+    if k == 473 { return "`+=`、`switch`、异常、类继承、字符串方法 —— 报错消息末尾点名的是哪一种"; }
     if k == 1800 { return "killed by a signal / exited abnormally without writing any structured diagnostic"; }
     if k == 1801 { return "被信号打死 / 异常退出，而且一份结构化诊断都没写"; }
     if k == 1998 { return "guessing a code"; }
@@ -5068,6 +5083,12 @@ pub fn code_fix(c: u32, i: u32, lang: u32) -> str {
     if k == 3761 { return "删掉字面量里的 `__vtable`。"; }
     if k == 3763 { return "只写用户字段。"; }
     if k == 3765 { return "要改派发行为就改方法/继承，不要碰对象头。"; }
+    if k == 3776 { return "Rewrite it in a plainer form of that language (the message names the construct, e.g. write `+=` as `x = x + 1;`)."; }
+    if k == 3778 { return "If it must stay as written, implement it on the source-language side and link it through `extern fn` / the C ABI."; }
+    if k == 3780 { return "If there is no workaround, report the message: it is a gap in the translated subset, not an error in your syntax."; }
+    if k == 3777 { return "改写成该语言里更普通的写法（报错消息末尾点名了是哪一种，例如 `+=` 写成 `x = x + 1;`）。"; }
+    if k == 3779 { return "要保留原样：先在源语言侧写完整实现，再用 `extern fn` / C ABI 接进来。"; }
+    if k == 3781 { return "绕不开就把这条消息贴到 issue 上 —— 它是翻译子集的缺口，不是你的语法错。"; }
     if k == 14400 { return "Report the smallest source that reproduces it together with this record - a crash is a compiler defect, not something you can work around in your code."; }
     if k == 14402 { return "Include the exit status / signal name (already in this message) and the output of `loment version`."; }
     if k == 14404 { return "If the message names the **linker** (`loment-lomelf`), also include the `-o` path and the target platform."; }
@@ -5322,6 +5343,7 @@ pub fn code_nfix(c: u32) -> u32 {
     if c == 233 { return 3; }
     if c == 234 { return 3; }
     if c == 235 { return 3; }
+    if c == 236 { return 3; }
     if c == 900 { return 4; }
     if c == 999 { return 3; }
     return 0;
@@ -5564,6 +5586,7 @@ pub fn code_ascii(c: u32) -> str {
     if c == 233 { return "the function-pointer type has no closed target set"; }
     if c == 234 { return "an abstract class cannot be instantiated"; }
     if c == 235 { return "a compiler-owned field was initialized"; }
+    if c == 236 { return "the construct is outside the translated subset for that language"; }
     if c == 900 { return "a tool in the chain died before it could report (internal) - report it with the unit"; }
     if c == 999 { return "unclassified - please report it"; }
     return "";

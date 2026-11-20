@@ -159,7 +159,8 @@ knowing costs half a day. The text says which ones 0.1.5 already fixed.
 22. **A `.lomt` file with no `module` declaration is a clear diagnostic now** ("期望 module").
     Older packages crashed with SIGSEGV; 0.1.5 does not.
 23. **`use std` is no longer an 18-minute SIGILL.** 0.1.4.6 fixed it; measured in 0.1.5 it
-    reaches IR in about 16 seconds. It is still a 133-module facade - prefer per-module imports.
+    reaches IR in about 16 seconds. It is still a facade over every module in the package -
+    prefer per-module imports.
 
 ### 6.4 Tur 2 traps (the ones that are new, not inherited from Rust)
 

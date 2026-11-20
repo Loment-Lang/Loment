@@ -1199,12 +1199,17 @@ fn check_type(src: ptr, t: ptr, s: ptr, n: u32, i: u32, p: ptr, o: u32,
     }
     if chk_tok_kind(t, i) == 0 {
         if chk_lookup_slot(src, t, s, n, i) != 0 {
-            // 具名类型 / 泛型实例：实参里出现**跨度**（`&T` / `[T]`）→ 自举侧点名拒。
-            let te: u32 = chk_skip_type(src, t, i);
-            let bad: u32 = chk_span_arg(src, t, i, te);
-            if bad != 0 {
-                return (bad as u64) * 4294967296
-                    + (sym_pub(src, t, p, o, E_LIFETIME, bad) as u64);
+            // **泛型实例**的实参里出现跨度（`&T` / `[T]`）→ 自举侧点名拒。
+            // 先看 `i + 1` 是不是 `<`：非泛型的具名类型是绝大多数，逐个跑
+            // `chk_skip_type` + `chk_span_arg` 会把大单元拖慢一个量级
+            // （2026-11-19：lomcli 在 CI 上撞 300s 超时）。
+            if chk_tok_is(src, t, i + 1, "<") {
+                let te: u32 = chk_skip_type(src, t, i);
+                let bad: u32 = chk_span_arg(src, t, i, te);
+                if bad != 0 {
+                    return (bad as u64) * 4294967296
+                        + (sym_pub(src, t, p, o, E_LIFETIME, bad) as u64);
+                }
             }
             return (i as u64) * 4294967296 + (o as u64);
         }
@@ -3598,7 +3603,9 @@ fn chk_tex_atom_call(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             let at: u32 = chk_tex(src, t, syms, n, env, envc, er, tyt, p, oc);
             let wt: u32 = chk_builtin_arg(src, t, lo, k);
             if chk_tok_is(src, t, lo, "slice_len") {
-                if at != 0 && chk_ty_is_arr(tyt, at) == 0 && chk_ty_is_slc(tyt, at) == 0 {
+                // `p: &[T; N]` 与下标访问同一条：先自动解一层借用（`docs/299` §3.4）。
+                let seen: u32 = chk_ty_deref(tyt, at);
+                if seen != 0 && chk_ty_is_arr(tyt, seen) == 0 && chk_ty_is_slc(tyt, seen) == 0 {
                     chk_pub(src, t, oc, p, 47, lo);   // 不是数组或切片
                 }
             } else if chk_tok_is(src, t, lo, "print_num") {

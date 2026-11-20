@@ -362,14 +362,18 @@ fn probe() -> u32 {
 参考侧的判据是 `lomentc_test::test_e028_literal_index_over_a_fixed_array` 与
 `test_e029_use_after_free` —— 两条都是**一对程序**（同一份源，加不加 `choose lms_open`
 判决相反），且 E028 那条**已验"未修先红"**（把检查关掉 ⇒ `AssertionError: []`，144/145）。
-⚠ **自举侧的对拍不靠孪生判据** —— 靠上表那一列的两条 `loment_rule_parity` 探针。
+⚠ **自举侧的对拍不靠孪生判据** —— 靠上表那一列的三条 `loment_rule_parity` 探针。
 理由见下。
 
-⚠ **"自举侧未落地"不是可以和稀泥的事** —— **孪生判据看不见它**：
-`loment_p8_test` / `loment_potato_emit_test` 的语料里**没有一个用 `lms_open`**，
-所以"参考侧拒、自举侧不拒"这种分歧，那两条判据**照样绿**。
-这正是那条教训的又一实例：**孪生只证"一致"，不证"对"**。
-⇒ 补自举侧时要**同时**补一条**故意的对拍判据**（同一份 `lms_open` 源，两边都必须拒）。
+✅ **自举侧已落地（2026-10-15，issue #385）**：`loment/selfhost/checker.lomt` 实现 E028
+（`:3180`，字面量下标越过定长数组的界）与 E029（`:4392` 起的已释放表），档名默认
+`lms_full`。对拍**不靠孪生判据** —— 靠 `tools/loment_rule_parity.py` 里三条故意的探针：
+`lms-e028-literal-index-over-a-fixed-array` / `lms-e029-use-after-free` /
+`lspe-pass-does-not-swallow-lms-e029`，两边都必须报同一个码。
+
+那条教训仍然成立：**孪生只证"一致"，不证"对"**。`loment_p8_test` / `loment_potato_emit_test`
+的语料里**没有一个用 `lms` 档** —— 所以哪天自举侧把它漏掉，那两条判据**照样绿**；
+上面那三条探针才是这一层真正的判据。
 
 **一处结构性的收获（写下来，下次别再踩）**：
 E028 初稿是放在**发射器**里的（`_Ir.expr` 的 `Index` 那一支）—— 那是**错的落点**，

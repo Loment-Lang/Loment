@@ -99,10 +99,19 @@ def stage(src: Path, tree: Path, release: str, *, current: str | None = None,
     base = hf.read_release(tree)
     bdir = baseline_dir(base)
     # 幂等：同一个 tag 再来一次就是**同一份**候选 —— 还在等着的、或已经换过的。
-    # 只认**带准入记号**的那一份：没有记号的是别人直接写进来的，重新走一遍检查。
+    # 只认**带准入记号**的那一份。没有记号的是旧版本留下的、或别人直接写进来的：
+    # 对前者重走一遍准入（不写 state、不算重放），过了就补上记号 —— 升级不该丢掉
+    # 一个已经躺在 `incoming/` 里的候选；过不了就当它不存在，按 `src` 重走。
     for sub in ("incoming", "applied"):
         seen = bdir / sub / release
         if admitted(seen):
+            return seen
+        if (seen / "hotfix.json").is_file():
+            try:
+                lu.check(seen, tree)
+            except lu.Reject:
+                continue
+            _admit(seen)
             return seen
     try:
         lu.check(src, tree, state=bdir / "state.json",

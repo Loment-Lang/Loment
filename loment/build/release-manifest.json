@@ -1938,6 +1938,22 @@
    "sha256": "8c2bb42daeaa5b7315cd5afe52fc6f211d72001388a4323b826546ef00bf4953"
   },
   {
+   "path": "docs/298-lomentfaster.md",
+   "sha256": "620b42e9cf7c03cedf76aeb81271c6ba67d64e9cb9fddcc427ed5c1270abdb2d"
+  },
+  {
+   "path": "docs/336-endpoint-execution.md",
+   "sha256": "9644bc21ebab1f097cfcfd6a173403fa9181232b0c11c6578b5cd7c6d179d655"
+  },
+  {
+   "path": "docs/337-endpoint-execution-feasibility.md",
+   "sha256": "05feb4f0ca78f3bc6651fcb95289ecd668db43fa5edeb8a99f82a40555bae046"
+  },
+  {
+   "path": "docs/353-dissigsegv.md",
+   "sha256": "b58a49e60d4e73e6cd3eb73ea3862ec0056b56b58a433b95042570a72cbffe67"
+  },
+  {
    "path": "docs/manual/index.md",
    "sha256": "4b77d53d397fe8a5843650c12c4df7a50d78fe6ac7fb3e465f91fec6749b944e"
   },

@@ -1910,6 +1910,9 @@ class Param:
     type: str
     #: 值的空间标签（`docs/313` §2）：`a: [u32; 64] in disk` 的 `disk`。空 = 没有。
     space: str = ""
+    #: 切片借用上的区域标记（`b: &a [u32]`，`docs/299` §3.3）：规范化之后类型串是 `[u32]`，
+    #: 标记放这里。非切片借用的标记仍编码在 `type` 里（`&a u32`）。
+    region: str = ""
 
 
 @dataclass
@@ -2592,6 +2595,9 @@ class Func:
     from_generic: str = ""       # M45: 由哪个泛型声明单态化而来
     generic_args: list = field(default_factory=list)  # M45: 单态化实参
     extern: bool = False         # docs/173: 外部函数声明 (只有签名, 由链接进来的目标文件提供)
+    #: 切片返回类型上的区域标记（`-> &a [u32]`，`docs/299` §3.3）：类型串是 `[u32]`，
+    #: 标记单独记。空 = 没有标记（省略规则照旧）。
+    ret_region: str = ""
     #: **L0 静态提升**（`docs/210` §2 / `gc_auto_alpha`）：`{局部名: 提升到栈的字节数}`。
     #: 由**解析器**在 `parse()` 末尾填（见 `_l0_promotable`：规则定义在 token 流上，
     #: 而解析器是唯一同时握着 token 流与函数体跨度的地方）。其它档一律为空 dict。
@@ -4351,6 +4357,10 @@ class Parser:
         #: `choose lifetime_*` 那一行 —— 类型可能在那一行**之前**就被解析（顶层顺序自由），
         #: 所以在构造时**预扫一遍**，不依赖 `parse_items` 的先后。
         self.lifetime = _prescan_lifetime(toks, profile)
+        #: 刚解析完的类型上的**区域标记**（`docs/299` §3.3）。非切片借用把它编码在类型串
+        #: 里（`&a u32`）；切片借用规范化成 `[T]` 之后类型串装不下标记，于是放在这里，
+        #: 由 `parse_fn` 取走（形参与返回类型各一格）。每次 `type_name()` 入口清零。
+        self.last_region = ""
         #: **效应语法面**（`docs/341` A2）。与 `lifetime` 同一条"构造时预扫"：
         #: `choose` 可能写在用到它的声明之后，而语法决策是**边走边做**的。
         self.effects = _prescan_slot(toks, "effects") == "true"
@@ -4399,6 +4409,7 @@ class Parser:
         """类型名: 基类型 / struct / 数组 [T; N] / 只读切片 [T] / 可变切片 mut [T] /
         借用 `&T` / `&mut T`（后者只在 `choose lifetime_*` 非 `no` 时，`docs/299`）/
         函数类型 `(A, B) -> C`（`docs/348`）。"""
+        self.last_region = ""
         if self.at("punct", "("):
             # 函数类型。`()` 作**返回类型**（unit）由 `parse_fn` 在 `{` / `;` 那一格先接走，
             # 走不到这里；所以类型位置上一见到 `(` 就只能是 `(A, …) -> R`。
@@ -4427,14 +4438,11 @@ class Parser:
                     region = self.next().val
             inner = self.type_name()
             # 切片借用**规范化**到已有的切片类型（它们本来就是 ptr+len 的借用视图）：
-            # `&[T]` → `[T]`，`&mut [T]` → `mut [T]`。区域标记在切片上 v1 不收 ——
-            # 切片自带区域推断，标记是给非切片借用（`&a u32`）用的。
+            # `&[T]` → `[T]`，`&mut [T]` → `mut [T]`。区域标记在类型串里放不下
+            # （`_is_slice` 要求以 `]` 结尾），于是记在 `last_region`，由 `parse_fn`
+            # 取到形参/返回类型上 —— 它只影响函数摘要，不影响布局（`docs/351`）。
             if _is_slice(inner):
-                if region:
-                    raise LomError(amp.line, amp.col,
-                                   "区域标记不能写在切片借用上 —— `[T]` / `mut [T]` 自带"
-                                   "区域推断；显式标记（`&a T`）只用于非切片借用"
-                                   "（`docs/299` §3.3）")
+                self.last_region = region
                 elem = _slice_elem(inner)
                 return f"mut [{elem}]" if mut else f"[{elem}]"
             return ("&mut " if mut else "&") + (f"{region} " if region else "") + inner
@@ -4719,7 +4727,15 @@ class Parser:
             field_lines.append(self.peek().line)
             fn = self.ident("字段名")
             self.expect("punct", ":")
-            fields.append((fn, self.type_name()))
+            fty = self.type_name()
+            if self.last_region:
+                # 切片字段的标记在类型串里放不下（`Param.region` 是形参专用的），
+                # 而设计上字段本来就不带标记：区域由构造处的来源决定（`docs/299` §3.3）。
+                raise LomError(kw.line, kw.col,
+                               f"结构体 {name} 的字段 {fn} 不能带区域标记"
+                               f"（`&{self.last_region} …`）—— 字段的区域由构造处的"
+                               f"来源决定（`docs/299` §3.3）")
+            fields.append((fn, fty))
             if not self.accept("punct", ","):
                 self.accept("punct", ";")
         self.expect("punct", "}")
@@ -5134,21 +5150,24 @@ class Parser:
             else:
                 self.expect("punct", ":")
                 pty = self.type_name()
+                pregion = self.last_region      # 切片借用上的 `&a [T]`（`docs/299` §3.3）
                 pspace = ""
                 if self.accept("ident", "in"):
                     pspace = self.ident("空间名")
-                params.append(Param(pn, pty, pspace))
+                params.append(Param(pn, pty, pspace, pregion))
             if not self.accept("punct", ","):
                 break
         self.expect("punct", ")")
         # M16: 无返回类型 = ()。**外部函数没有函数体**, 所以"后面是 `;`"同样表示无返回 ——
         # 只认 `{` 的话 `extern fn f(p: ptr);` 会被当成"缺了 `->`"而报错。
+        ret_region = ""
         if self.at("punct", "{") or (extern and self.at("punct", ";")):
             ret = "()"
         else:
             self.expect("punct", "-")
             self.expect("punct", ">")
             ret = self.type_name()
+            ret_region = self.last_region   # `-> &a [u32]` 的标记（类型串里放不下）
         # `effects A, B`（`docs/341` §5.2）：A2 只把它记在函数上，发射器不看它。
         row = None
         if self.effects and self.at("ident", "effects"):
@@ -5173,11 +5192,13 @@ class Parser:
             f = Func(name, params, ret, [], kw.line, False, tparams)
             f.extern = extern
             f.effects = row
+            f.ret_region = ret_region
             return f
         body_at = self.i + 1          # '{' 之后 —— 与自举侧 find_body 同一个起点
         body = self.parse_block()
         f = Func(name, params, ret, body, kw.line, False, tparams)
         f.effects = row
+        f.ret_region = ret_region
         f.tok_at, f.tok_end = body_at, self.i - 1   # '}' 的下标（不含）
         return f
 
@@ -7246,7 +7267,9 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
                 errs.append(f"{e.line}: slice_len 需要 1 个实参，得到 {len(e.args)}")
             else:
                 at = expr_type(e.args[0], scope, funcs, structs)
-                if at is not None and not (_is_slice(at) or _is_array(at)):
+                # `p: &[T; N]` 与别的下标访问同一条：自动解一层借用（`docs/299` §3.4）。
+                seen = _deref_type(at)
+                if seen is not None and not (_is_slice(seen) or _is_array(seen)):
                     errs.append(f"{e.line}: slice_len 实参 {at} 不是数组或切片")
             for a in e.args:
                 _walk_expr(a, scope, funcs, structs, errs, enums, lifetime)
@@ -8697,17 +8720,21 @@ def _stored_borrows(e) -> list[tuple[str, str]]:
 
 
 def _lifetime_marker_errs(t: str | None, params: list[tuple[str, str]], lifetime: str,
-                          line: int, errs: list[str], where: str) -> None:
-    """显式区域标记 `&a T` 的检查（`docs/299` §3.3）。"""
+                          line: int, errs: list[str], where: str,
+                          region: str = "") -> None:
+    """显式区域标记 `&a T` 的检查（`docs/299` §3.3）。
+
+    `region` 是切片借用上的标记（`&a [T]` 规范化之后类型串里放不下，见 `Param.region`）。
+    """
     if t is None:
         return
-    if _is_ref(t):
-        reg = _ref_region(t)
+    if _is_ref(t) or region:
+        reg = _ref_region(t) if _is_ref(t) else region
         if reg:
             ptypes = dict(params)
             if lifetime != "lifetime_manual":
                 errs.append(
-                    f"{line}: `lifetime_auto` 下不写区域标记（`&{reg} {_ref_elem(t)}`）—— "
+                    f"{line}: `lifetime_auto` 下不写区域标记（`&{reg} {_ref_elem(t) if _is_ref(t) else t}`）—— "
                     f"自动档要求零标注；要显式绑定请 `choose lifetime_manual`")
             elif reg not in ptypes:
                 errs.append(
@@ -8731,6 +8758,11 @@ def _lifetime_summary(f: Func, structs: dict, lifetime: str,
     if not leaves:
         return frozenset()
     pnames = [p.name for p in f.params]
+    # 切片返回上的标记（`-> &a [u32]`）：类型串是 `[u32]`，标记在 `ret_region` 里。
+    # 它直接给出摘要，不再走省略规则。
+    if f.ret_region and _is_slice(f.ret):
+        return frozenset({pnames.index(f.ret_region)}) if f.ret_region in pnames \
+            else frozenset()
     refs = [i for i, p in enumerate(f.params) if _is_borrowish(p.type, structs)]
     src: set[int] = set()
     for leaf in leaves:
@@ -8847,6 +8879,10 @@ def _lifetime_fn_errs(f: Func, funcs: dict, structs: dict, enums: dict,
     scope: dict[str, str] = {p.name: p.type for p in f.params}
     _LIFETIME_PARAM_NAMES[id(scope)] = params
     prov: dict[str, frozenset] = {p.name: frozenset({("p", p.name)}) for p in f.params}
+    # 切片形参上的标记（`b: &a [u32]`）：b 的来源就是 a 的来源。
+    for _p in f.params:
+        if _p.region and _p.region in params:
+            prov[_p.name] = prov[_p.region]
     ret_is_borrow = bool(_borrow_leaf_types(f.ret, structs))
     has_ref = any(_is_borrowish(p.type, structs) for p in f.params)
     borrowed: set[str] = set()       # 被借过的根变量名（`free` 那条用）
@@ -10214,9 +10250,9 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
             _pn = [(p.name, p.type) for p in f.params]
             for _p in f.params:
                 _lifetime_marker_errs(_p.type, _pn, lifetime, f.line, errs,
-                                      f"形参 {_p.name}")
+                                      f"形参 {_p.name}", region=_p.region)
             _lifetime_marker_errs(f.ret, _pn, lifetime, f.line, errs,
-                                  f"函数 {f.name} 的返回类型")
+                                  f"函数 {f.name} 的返回类型", region=f.ret_region)
             errs.extend(_lifetime_fn_errs(f, funcs, structs, enums, _lt_sums, lifetime))
         # **非 `()` 的函数不许从末尾掉出去**（`#22`）。`check` 通过 = "这份程序不会 trap"
         # 是这条命令给人的唯一保证，而"掉出末尾"在发射之后是一条**非法指令**
@@ -12106,7 +12142,12 @@ _IR_HEAP_LMS_FFI_CTL = _heap_with_lms_rescue(_IR_HEAP_FFI, ctl=True)
 
 _IR_ROOTS = '''; ---- 自动回收（`choose gc_auto`）---------------------------------------------------
 @__loment_roots = internal global [1024 x i64] zeroinitializer
-@__loment_rootn = internal global i32 0'''
+@__loment_rootn = internal global i32 0
+; **栈区表**：L0 提升的缓冲（和 L0.5 的栈区）整块登记成「起点 + 字数」一条，而不是每个
+; 8 字节字占一格根表 —— 后者让一块 8 KiB 的缓冲就把 1024 格根表占满（#1655）。
+@__loment_regions = internal global [256 x i64] zeroinitializer
+@__loment_regionl = internal global [256 x i64] zeroinitializer
+@__loment_regionn = internal global i32 0'''
 
 _IR_GC_SHARED = '''@__loment_gcbytes = internal global i32 0
 @__loment_mark = internal global [1024 x i8] zeroinitializer
@@ -12182,6 +12223,44 @@ rlc:
   %rk2 = add i32 %rk, 1
   br label %rl
 done:
+  br label %gl
+; **栈区那一趟**：一块 L0 缓冲（L0.5 的栈区同理）在根表里只占**一条**（起点 + 字数），
+; 扫的时候逐字读、口径与根表那一趟完全相同 —— 一个字看着像堆内地址就去标记它。
+gl:
+  %gi = phi i32 [ 0, %done ], [ %gi2, %glc ]
+  %gn = load i32, ptr @__loment_regionn
+  %gd = icmp uge i32 %gi, %gn
+  br i1 %gd, label %wend, label %gb
+gb:
+  %gs = getelementptr [256 x i64], ptr @__loment_regions, i32 0, i32 %gi
+  %gsv = load i64, ptr %gs
+  %glp = getelementptr [256 x i64], ptr @__loment_regionl, i32 0, i32 %gi
+  %gln = load i64, ptr %glp
+  br label %wl
+wl:
+  %wi = phi i64 [ 0, %gb ], [ %wi2, %wlc ]
+  %wd = icmp uge i64 %wi, %gln
+  br i1 %wd, label %glc, label %wb
+wb:
+  %wo = shl i64 %wi, 3
+  %wa = add i64 %gsv, %wo
+  %wp = inttoptr i64 %wa to ptr
+  %wv = load i64, ptr %wp
+  %wbase = ptrtoint ptr @__loment_heap to i64
+  %wdo = sub i64 %wv, %wbase
+  %win = icmp ult i64 %wdo, 65536
+  br i1 %win, label %wmk, label %wlc
+wmk:
+  %wd32 = trunc i64 %wdo to i32
+  %wr = call i32 @__loment_markp(i32 %wd32)
+  br label %wlc
+wlc:
+  %wi2 = add i64 %wi, 1
+  br label %wl
+glc:
+  %gi2 = add i32 %gi, 1
+  br label %gl
+wend:
   ret void
 }
 
@@ -14064,6 +14143,7 @@ class _Ir:
         #: 比"对派生指针乱发"安全（后者会把块里的数据当成块长读，后果比不检查更坏）。
         self.lms_size: dict[str, int] = {}
         self.rootk = 0
+        self.regk = 0
         self.dbg_types = dbg_types if dbg_types is not None else {}  # M59: 类型 -> DIBasicType
         self.dbg_loc: int | None = None             # 当前语句的 DILocation
         self.cur_label: str | None = None           # 当前基本块标签 (phi 前驱用)
@@ -14265,102 +14345,125 @@ class _Ir:
         if not self.gc_hook:
             return
 
-        def slots(name: str) -> int:
-            """这个名字占几格根表：L0 提升过的缓冲按它的**字数**算，其余各占一格。"""
-            n = self.l0.get(name)
-            return (n + 7) // 8 if n else 1
-
-        #: L0.5 的栈区也要扫：它和 L0 的缓冲一样**可以装堆指针**（`wr64` 那种安全被调）。
-        #: 整块按字登记，口径与 L0 那条一致。
-        self.rootk = (sum(slots(nm) for nm, (ty, _) in self.vars.items() if self._root_ty(ty))
-                      + (self.l05_cap // 8 if self.l05_cap else 0)
+        #: **栈区表**（`#1655`）：L0 提升的缓冲与 L0.5 的栈区整块登记成一条
+        #: **(起点, 字数)**，不再逐字占根表格 —— 后者让一块 8 KiB 的缓冲（1024 个字）
+        #: 就把 1024 格根表占满：`alloc(8192)` 在 alpha 下静默 SIGILL，16 KiB 更糟，
+        #: 写穿表之后 SIGSEGV；而且每进一次函数就要写 `字数` 条根，调用热点上
+        #: 是 O(缓冲大小) 的开销（`#1655` 的实测表）。
+        #:
+        #: 块里的字**仍然要逐字扫**（`wr64` 那种安全被调可以把任意 u64 写进去），
+        #: 只是扫描点从"每次进函数"挪到"每次收集" —— 那才是该付这笔钱的地方。
+        self.regk = (sum(1 for nm, (ty, _) in self.vars.items()
+                         if self._root_ty(ty) and self.l0.get(nm))
+                     + (1 if self.l05_cap else 0))
+        #: 根表只收**具名槽**（L0 缓冲的槽里是栈地址，扫了也没用）与分配站点的 spill 槽。
+        self.rootk = (sum(1 for nm, (ty, _) in self.vars.items()
+                          if self._root_ty(ty) and not self.l0.get(nm))
                       + self.gc_sites)
-        if self.rootk == 0:
+        if self.rootk == 0 and self.regk == 0:
             return
         # `#778`：根表的游标与槽是**线程间共享**的。push/pop 各自是一段很短的
         # 临界区（不是整个调用帧）—— 线程体之间因此不会互相等，收集器也不会
         # 在两个 push 之间看到半张表。
         if self.threads:
             self.w("call void @__loment_rt_acquire()")
-        n0 = self.t()
-        self.w(f"{n0} = load i32, ptr @__loment_rootn")
-        #: L0.5 的栈区：**整块的每个 8 字节字各占一格**，与 L0 缓冲同口径（#362）。
-        #: 少了这一段，`rootn` 会跨过一批**从未初始化**的槽 —— 根扫读到的就是上一次
-        #: 递归留在同一段栈上的旧值，于是"区域里装着堆指针"这件事从来没被扫到。
-        i = 0
-        for name, (ty, slot) in self.vars.items():
-            if not self._root_ty(ty):
-                continue
-            sz = self.l0.get(name)
-            if sz:
-                # **L0 提升的缓冲：它的每一个 8 字节字各占一格**（`FujoJTOP/loment#362`）。
-                # 那个槽里存的是**栈**地址（`%NAME.buf`），而根扫拿槽里的值去减堆基址，
-                # 得到一个巨大的无符号数、`ult 65536` 为假 —— 于是整块缓冲**从来没人扫**。
-                # 而 L0 的规则**不禁止**缓冲里装堆指针：`_ptr_only_uses` 会把"只解引用"
-                # 的函数（如 `wr64`）吸收进安全集，于是那种函数可以把任意 u64 写进缓冲。
-                # 只登记**字**的地址就够了 —— 根扫本来就是"读那一格、看它像不像堆内地址"，
-                # 收集器一侧一个字都不用改。
-                k = (sz + 7) // 8
-                for j in range(k):
-                    idx = self.t()
-                    self.w(f"{idx} = add i32 {n0}, {i}")
-                    gp = self.t()
-                    self.w(f"{gp} = getelementptr [1024 x i64], ptr @__loment_roots,"
-                           f" i32 0, i32 {idx}")
-                    bp = self.t()
-                    self.w(f"{bp} = getelementptr [{k} x i64], ptr %{name}.buf, i32 0, i32 {j}")
-                    v = self.t()
-                    self.w(f"{v} = ptrtoint ptr {bp} to i64")
-                    self.w(f"store i64 {v}, ptr {gp}")
-                    i += 1
-                continue
-            idx = self.t()
-            self.w(f"{idx} = add i32 {n0}, {i}")
-            gp = self.t()
-            self.w(f"{gp} = getelementptr [1024 x i64], ptr @__loment_roots, i32 0, i32 {idx}")
-            v = self.t()
-            self.w(f"{v} = ptrtoint ptr {slot} to i64")
-            self.w(f"store i64 {v}, ptr {gp}")
-            i += 1
-        if self.l05_cap:
-            k = self.l05_cap // 8
-            for j in range(k):
+        if self.rootk:
+            n0 = self.t()
+            self.w(f"{n0} = load i32, ptr @__loment_rootn")
+            i = 0
+            for name, (ty, slot) in self.vars.items():
+                if not self._root_ty(ty) or self.l0.get(name):
+                    continue
+                idx = self.t()
+                self.w(f"{idx} = add i32 {n0}, {i}")
+                gp = self.t()
+                self.w(f"{gp} = getelementptr [1024 x i64], ptr @__loment_roots, i32 0, i32 {idx}")
+                v = self.t()
+                self.w(f"{v} = ptrtoint ptr {slot} to i64")
+                self.w(f"store i64 {v}, ptr {gp}")
+                i += 1
+            # **分配站点的 spill 槽**（`#1465`）：一格一个槽的地址，与具名槽同口径 ——
+            # 收集器读那一格、看它像不像堆内地址。放在最后，两边的次序才一致。
+            for j in range(self.gc_sites):
                 idx = self.t()
                 self.w(f"{idx} = add i32 {n0}, {i}")
                 gp = self.t()
                 self.w(f"{gp} = getelementptr [1024 x i64], ptr @__loment_roots,"
                        f" i32 0, i32 {idx}")
+                v = self.t()
+                self.w(f"{v} = ptrtoint ptr %gc.sp.{j} to i64")
+                self.w(f"store i64 {v}, ptr {gp}")
+                i += 1
+            n1 = self.t()
+            self.w(f"{n1} = add i32 {n0}, {self.rootk}")
+            self.w(f"store i32 {n1}, ptr @__loment_rootn")
+            ov = self.t()
+            self.w(f"{ov} = icmp ugt i32 {n1}, 1024")
+            ok, bad = self.l("rok"), self.l("rovf")
+            self.w(f"br i1 {ov}, label %{bad}, label %{ok}")
+            self.terminated = True
+            self.label(bad)
+            self.w("call void @__loment_abort()")
+            self.w("unreachable")
+            self.terminated = True
+            self.label(ok)
+        if self.regk:
+            # 越界检查**写在存之前**：`#1433` 那条"先写后查"在这里不能重演 ——
+            # 一条区落在表外，写的就是隔壁的全局变量。
+            g0 = self.t()
+            self.w(f"{g0} = load i32, ptr @__loment_regionn")
+            g1 = self.t()
+            self.w(f"{g1} = add i32 {g0}, {self.regk}")
+            gov = self.t()
+            self.w(f"{gov} = icmp ugt i32 {g1}, 256")
+            gok, gbad = self.l("gok"), self.l("gtrap")
+            self.w(f"br i1 {gov}, label %{gbad}, label %{gok}")
+            self.terminated = True
+            self.label(gbad)
+            self.w("call void @__loment_abort()")
+            self.w("unreachable")
+            self.terminated = True
+            self.label(gok)
+            r = 0
+            for name, (ty, _slot) in self.vars.items():
+                if not self._root_ty(ty):
+                    continue
+                sz = self.l0.get(name)
+                if not sz:
+                    continue
+                k = (sz + 7) // 8
+                idx = self.t()
+                self.w(f"{idx} = add i32 {g0}, {r}")
+                gp = self.t()
+                self.w(f"{gp} = getelementptr [256 x i64], ptr @__loment_regions,"
+                       f" i32 0, i32 {idx}")
                 bp = self.t()
-                self.w(f"{bp} = getelementptr [{k} x i64], ptr %l05.buf, i32 0, i32 {j}")
+                self.w(f"{bp} = getelementptr [{k} x i64], ptr %{name}.buf, i32 0, i32 0")
                 v = self.t()
                 self.w(f"{v} = ptrtoint ptr {bp} to i64")
                 self.w(f"store i64 {v}, ptr {gp}")
-                i += 1
-        # **分配站点的 spill 槽**（`#1465`）：一格一个槽的地址，与具名槽同口径 ——
-        # 收集器读那一格、看它像不像堆内地址。放在最后，两边的次序才一致。
-        for j in range(self.gc_sites):
-            idx = self.t()
-            self.w(f"{idx} = add i32 {n0}, {i}")
-            gp = self.t()
-            self.w(f"{gp} = getelementptr [1024 x i64], ptr @__loment_roots,"
-                   f" i32 0, i32 {idx}")
-            v = self.t()
-            self.w(f"{v} = ptrtoint ptr %gc.sp.{j} to i64")
-            self.w(f"store i64 {v}, ptr {gp}")
-            i += 1
-        n1 = self.t()
-        self.w(f"{n1} = add i32 {n0}, {self.rootk}")
-        self.w(f"store i32 {n1}, ptr @__loment_rootn")
-        ov = self.t()
-        self.w(f"{ov} = icmp ugt i32 {n1}, 1024")
-        ok, bad = self.l("rok"), self.l("rovf")
-        self.w(f"br i1 {ov}, label %{bad}, label %{ok}")
-        self.terminated = True
-        self.label(bad)
-        self.w("call void @__loment_abort()")
-        self.w("unreachable")
-        self.terminated = True
-        self.label(ok)
+                lp = self.t()
+                self.w(f"{lp} = getelementptr [256 x i64], ptr @__loment_regionl,"
+                       f" i32 0, i32 {idx}")
+                self.w(f"store i64 {k}, ptr {lp}")
+                r += 1
+            if self.l05_cap:
+                k = self.l05_cap // 8
+                idx = self.t()
+                self.w(f"{idx} = add i32 {g0}, {r}")
+                gp = self.t()
+                self.w(f"{gp} = getelementptr [256 x i64], ptr @__loment_regions,"
+                       f" i32 0, i32 {idx}")
+                bp = self.t()
+                self.w(f"{bp} = getelementptr [{k} x i64], ptr %l05.buf, i32 0, i32 0")
+                v = self.t()
+                self.w(f"{v} = ptrtoint ptr {bp} to i64")
+                self.w(f"store i64 {v}, ptr {gp}")
+                lp = self.t()
+                self.w(f"{lp} = getelementptr [256 x i64], ptr @__loment_regionl,"
+                       f" i32 0, i32 {idx}")
+                self.w(f"store i64 {k}, ptr {lp}")
+            self.w(f"store i32 {g1}, ptr @__loment_regionn")
         if self.threads:
             self.w("call void @__loment_rt_release()")
 
@@ -14450,16 +14553,23 @@ class _Ir:
                 self.w("call void @__loment_rt_release()")
 
     def roots_pop(self) -> None:
-        """离开本帧：把根表的游标退回去（与 `roots_push` 成对）。"""
-        if not self.gc_hook or self.rootk == 0:
+        """离开本帧：把根表与栈区表的游标都退回去（与 `roots_push` 成对）。"""
+        if not self.gc_hook or (self.rootk == 0 and self.regk == 0):
             return
         if self.threads:
             self.w("call void @__loment_rt_acquire()")
-        n = self.t()
-        self.w(f"{n} = load i32, ptr @__loment_rootn")
-        m = self.t()
-        self.w(f"{m} = sub i32 {n}, {self.rootk}")
-        self.w(f"store i32 {m}, ptr @__loment_rootn")
+        if self.rootk:
+            n = self.t()
+            self.w(f"{n} = load i32, ptr @__loment_rootn")
+            m = self.t()
+            self.w(f"{m} = sub i32 {n}, {self.rootk}")
+            self.w(f"store i32 {m}, ptr @__loment_rootn")
+        if self.regk:
+            gn = self.t()
+            self.w(f"{gn} = load i32, ptr @__loment_regionn")
+            gm = self.t()
+            self.w(f"{gm} = sub i32 {gn}, {self.regk}")
+            self.w(f"store i32 {gm}, ptr @__loment_regionn")
         if self.threads:
             self.w("call void @__loment_rt_release()")
 
@@ -15499,6 +15609,8 @@ class _Ir:
             # 传空表会把它当成"不知道"并发出一个常量 0（2026-11-09 实测：游标程序
             # 的 `slice_len(c.data) + c.data[0]` 跑出 1 而不是 3）。
             at = expr_type(e.args[0], self.type_scope(), self.funcs, self.structs)
+            # `p: &[T; N]` 的长度就是 N：解一层借用后按数组取常量（`docs/299` §3.4）。
+            at = _deref_type(at)
             if at and _is_slice(at):
                 _, sv = self.expr(e.args[0], at)
                 p = self.t()
